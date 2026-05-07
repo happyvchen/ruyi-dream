@@ -22,8 +22,8 @@ backend/app/db.py:init_db()
 | `garment_images` | `GarmentImage` | 货号下的单张素材图 |
 | `model_profiles` | `ModelProfile` | 数字模特档案 |
 | `shot_plans` | `ShotPlan` | 组图方案 / Gemini 策划结果 |
-| `generation_runs` | `GenerationRun` | 一次组图生成或重生批次 |
-| `generation_images` | `GenerationImage` | 单张生成结果 |
+| `generation_runs` | `GenerationRun` | 一次组图生成批次 |
+| `generation_images` | `GenerationImage` | 单张生成任务记录；重生通过 attempts 追加 |
 | `event_logs` | `EventLog` | 事件日志 |
 
 ## 2. 表结构
@@ -89,7 +89,13 @@ CREATE TABLE garment_images (
 外键：
 
 - `sku_id -> garment_skus.id`
-- `ON DELETE CASCADE`：删除 SKU 时图片元数据级联删除。当前没有删除接口。
+- `ON DELETE CASCADE`：删除 SKU 时图片元数据级联删除。当前已有删除 SKU / 删除单图接口，但为了保留生产历史，已有生成记录的 SKU 禁止删除。
+
+实现备注：
+
+- 当前 UI 不展示也不编辑 `role`。第一张图按 `sort_order, id` 作为封面和主要参考图。
+- API 序列化时会动态计算图片 `fileSize`，该字段不落库。
+- 图片尺寸由前端加载图片后读取，不落库。
 
 ### 2.3 `model_profiles`
 
@@ -114,7 +120,7 @@ CREATE TABLE model_profiles (
 | `model_id` | TEXT | 业务 ID，例如 `Face-01` |
 | `name` | TEXT | 展示名 |
 | `asset_dir` | TEXT | 模特头部素材目录 |
-| `profile_json` | TEXT | 身体参数、头部角度、禁止项等 |
+| `profile_json` | TEXT | 身体参数、头像映射、排序和元信息等 |
 | `is_default` | INTEGER | 是否默认模特，0/1 |
 | `created_at` | TEXT | 创建时间 |
 | `updated_at` | TEXT | 更新时间 |
@@ -123,6 +129,13 @@ CREATE TABLE model_profiles (
 
 - `model_id` 唯一。
 - 启动时自动写入默认 `Face-01`，如果已存在则不重复写入。
+
+实现备注：
+
+- 当前基础字段使用 `profile_json` 保存：`height`、`weight`、`bodyShape`、`bust`、`waist`、`hips`、`notes`。
+- `headReferences` 中的 key 不一定总是角度。未分配角度的头像会使用 `__unassigned__...` 形式的内部 ID。
+- `headReferenceOrder` 也保存在 `profile_json` 中，用于拖拽排序。
+- `headReferenceMeta`、`headReferenceUrls`、`headReferenceEntries` 为运行时序列化补充信息，不是独立表字段。
 
 ### 2.4 `shot_plans`
 
@@ -150,7 +163,7 @@ CREATE TABLE shot_plans (
 | `status` | TEXT | 当前为 `DRAFT`，预留 `CONFIRMED` |
 | `plan_json` | TEXT | 结构化组图方案 JSON |
 | `planner_provider` | TEXT | `gemini` / `fallback` / `gemini-error-fallback` / `gemini-json-parse-fallback` |
-| `raw_response` | TEXT | Gemini 原始响应或 fallback 原因 |
+| `raw_response` | TEXT | Gemini/fallback 的完整调用快照，包含中文 prompt、输入图片路径和响应 |
 | `created_at` | TEXT | 创建时间 |
 | `updated_at` | TEXT | 更新时间 |
 
@@ -158,6 +171,13 @@ CREATE TABLE shot_plans (
 
 - `sku_id -> garment_skus.id`
 - `model_profile_id -> model_profiles.id`
+
+默认方案规则：
+
+- 当前没有单独 `is_default` 字段。
+- 一个货号可保留多条历史 `shot_plans`。
+- 业务上的“默认组图方案”由查询规则决定：`WHERE sku_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1`。
+- 上传新货号后，前端会立即创建一条默认方案；用户在“服装素材”页点击“更新默认方案”会再生成一条新方案，旧方案保留以便追溯。
 
 ### 2.5 `generation_runs`
 
@@ -183,8 +203,8 @@ CREATE TABLE generation_runs (
 | `sku_id` | INTEGER | 关联货号 |
 | `shot_plan_id` | INTEGER | 本次生成使用的组图方案 |
 | `model_profile_id` | INTEGER | 本次生成使用的模特 |
-| `kind` | TEXT | `group` / `regeneration` |
-| `status` | TEXT | `CREATED` / `RUNNING` / `SUCCEEDED` / `FAILED` |
+| `kind` | TEXT | 当前主要为 `group`；单张重生不再新建 run |
+| `status` | TEXT | `CREATED` / `RUNNING` / `PARTIAL_SUCCEEDED` / `SUCCEEDED` / `FAILED` / `CANCELLED` |
 | `output_dir` | TEXT | 本次输出目录 |
 | `created_at` | TEXT | 创建时间 |
 | `updated_at` | TEXT | 更新时间 |
@@ -210,6 +230,25 @@ CREATE TABLE generation_images (
 );
 ```
 
+启动迁移会通过 `ALTER TABLE` 补充以下列：
+
+```sql
+ALTER TABLE generation_images ADD COLUMN prompt_text TEXT;
+ALTER TABLE generation_images ADD COLUMN image_inputs_json TEXT;
+ALTER TABLE generation_images ADD COLUMN template_snapshot_json TEXT;
+ALTER TABLE generation_images ADD COLUMN model_snapshot_json TEXT;
+ALTER TABLE generation_images ADD COLUMN garment_snapshot_json TEXT;
+ALTER TABLE generation_images ADD COLUMN attempts_json TEXT;
+ALTER TABLE generation_images ADD COLUMN current_attempt_index INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE generation_images ADD COLUMN provider_request_id TEXT;
+ALTER TABLE generation_images ADD COLUMN provider_status TEXT;
+ALTER TABLE generation_images ADD COLUMN provider_urls_json TEXT;
+ALTER TABLE generation_images ADD COLUMN provider_status_json TEXT;
+ALTER TABLE generation_images ADD COLUMN submitted_at TEXT;
+ALTER TABLE generation_images ADD COLUMN completed_at TEXT;
+ALTER TABLE generation_images ADD COLUMN last_status_checked_at TEXT;
+```
+
 字段说明：
 
 | 字段 | 类型 | 说明 |
@@ -218,21 +257,66 @@ CREATE TABLE generation_images (
 | `run_id` | INTEGER | 所属生成批次 |
 | `shot_index` | INTEGER | 图位序号 |
 | `title` | TEXT | 图位标题 |
-| `status` | TEXT | `QUEUED` / `RUNNING` / `SUCCEEDED` / `FAILED` |
+| `status` | TEXT | `QUEUED` / `SUBMITTED` / `IN_QUEUE` / `IN_PROGRESS` / `SUCCEEDED` / `FAILED` / `CANCELLED` |
 | `output_path` | TEXT | 生成图片路径 |
-| `task_package_json` | TEXT | 单张生成任务包 |
-| `provider_request_json` | TEXT | Provider 请求快照 |
-| `provider_response_json` | TEXT | Provider 响应快照 |
+| `task_package_json` | TEXT | 单张生成任务包；包含 SKU、服装、模特、shot、输入图、生成约束 |
+| `provider_request_json` | TEXT | 最终发给 provider 的请求快照，例如 fal 的 `prompt + image_urls + quality` |
+| `provider_response_json` | TEXT | provider 最终响应快照；fal 完成后保存 response_url 返回内容 |
 | `regenerate_from_image_id` | INTEGER | 重生来源图片 |
-| `regenerate_reason` | TEXT | 重生原因 |
+| `regenerate_reason` | TEXT | 最近一次重生原因 |
 | `is_final` | INTEGER | 是否最终图，0/1 |
+| `prompt_text` | TEXT | 本次当前 attempt 的中文 Image 2 prompt |
+| `image_inputs_json` | TEXT | 输入图片映射，包含本地路径、角色、fal URL |
+| `template_snapshot_json` | TEXT | 本次生成使用的品牌模板、shot plan 等快照 |
+| `model_snapshot_json` | TEXT | 本次生成使用的数字模特快照 |
+| `garment_snapshot_json` | TEXT | 本次生成使用的服装事实快照 |
+| `attempts_json` | TEXT | 初次生成和每次重生的历史 attempt 数组 |
+| `current_attempt_index` | INTEGER | 当前生效 attempt 序号 |
+| `provider_request_id` | TEXT | fal queue `request_id` |
+| `provider_status` | TEXT | fal 原始状态，例如 `IN_QUEUE` / `IN_PROGRESS` / `COMPLETED` |
+| `provider_urls_json` | TEXT | fal `status_url` / `response_url` / `cancel_url` |
+| `provider_status_json` | TEXT | 最近一次 fal status 响应 |
+| `submitted_at` | TEXT | 提交 provider 的时间 |
+| `completed_at` | TEXT | 完成、失败或取消时间 |
+| `last_status_checked_at` | TEXT | 最近一次状态查询时间 |
 | `created_at` | TEXT | 创建时间 |
 | `updated_at` | TEXT | 更新时间 |
 
 外键：
 
 - `run_id -> generation_runs.id`
-- `regenerate_from_image_id -> generation_images.id`
+- `regenerate_from_image_id -> generation_images.id` 为历史兼容字段。当前重生默认不新增新的 `generation_images`，而是在同一记录的 `attempts_json` 中追加。
+
+`attempts_json` 示例：
+
+```json
+[
+  {
+    "attemptIndex": 1,
+    "kind": "initial",
+    "prompt": "中文 Image 2 prompt",
+    "imageInputs": [],
+    "providerRequest": {},
+    "providerResponse": {},
+    "providerRequestId": "fal request id",
+    "providerStatus": "SUBMITTED",
+    "outputPath": ".../01-首图.png",
+    "createdAt": "2026-05-07T16:00:00"
+  },
+  {
+    "attemptIndex": 2,
+    "kind": "regeneration",
+    "reason": "姿势不合适",
+    "note": "更自然一点",
+    "prompt": "追加重生要求后的中文 prompt",
+    "providerRequest": {},
+    "providerRequestId": "fal request id",
+    "providerStatus": "IN_PROGRESS",
+    "outputPath": ".../01-首图-regen-160500.png",
+    "createdAt": "2026-05-07T16:05:00"
+  }
+]
+```
 
 ### 2.7 `event_logs`
 
@@ -330,6 +414,20 @@ erDiagram
     text task_package_json
     text provider_request_json
     text provider_response_json
+    text prompt_text
+    text image_inputs_json
+    text template_snapshot_json
+    text model_snapshot_json
+    text garment_snapshot_json
+    text attempts_json
+    integer current_attempt_index
+    text provider_request_id
+    text provider_status
+    text provider_urls_json
+    text provider_status_json
+    text submitted_at
+    text completed_at
+    text last_status_checked_at
     integer regenerate_from_image_id FK
     text regenerate_reason
     integer is_final
@@ -368,4 +466,3 @@ erDiagram
 | `image_providers` | 写在代码 adapter 和请求快照中 | 多平台 A/B、成本、失败率统计 |
 | `garment_image_roles` | `garment_images.role` 字段 | 图片角色需要人工精修和历史追踪 |
 | `measurement_profiles` | 尚未实现 | 尺寸增强进入 MVP 主流程 |
-

@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Check,
   Clock,
+  Edit3,
+  Plus,
+  Save,
+  FolderOpen,
+  Trash2,
   Download,
   FileImage,
   Images,
@@ -12,12 +18,59 @@ import {
   RefreshCw,
   Sparkles,
   Upload,
+  X,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
-import type { EventLog, GarmentSku, GenerationImage, GenerationRun, ModelProfile, ShotPlan } from './types'
+import type { GarmentSku, GenerationImage, GenerationRun, ModelProfile, ShotPlan } from './types'
 
 type BusyState = 'idle' | 'uploading' | 'planning' | 'generating' | 'regenerating'
 type Page = 'generate' | 'garments' | 'models' | 'history'
+type ImportStatus = 'draft' | 'uploading' | 'uploaded' | 'failed'
+type ImportImage = {
+  id: string
+  file: File
+  previewUrl: string
+  relativePath: string
+}
+type ImportPackage = {
+  id: string
+  sourceName: string
+  sku: string
+  title: string
+  images: ImportImage[]
+  status: ImportStatus
+  error?: string
+  createdSkuId?: number
+}
+type ModelForm = {
+  modelId: string
+  name: string
+  isDefault: boolean
+  height: string
+  weight: string
+  bodyShape: string
+  bust: string
+  waist: string
+  hips: string
+  notes: string
+}
+type ImageDimensions = {
+  width: number
+  height: number
+}
+type ModelHeadDraft = {
+  id: string
+  file: File
+  previewUrl: string
+  angle: string
+}
+type ModelHeadEntry = {
+  id: string
+  angle: string
+  filename: string
+  url: string
+  fileSize?: number | null
+}
 
 export function App() {
   const [skus, setSkus] = useState<GarmentSku[]>([])
@@ -26,56 +79,210 @@ export function App() {
   const [selectedModelId, setSelectedModelId] = useState<number | undefined>()
   const [shotPlan, setShotPlan] = useState<ShotPlan | null>(null)
   const [generationRun, setGenerationRun] = useState<GenerationRun | null>(null)
-  const [logs, setLogs] = useState<EventLog[]>([])
+  const [historyRuns, setHistoryRuns] = useState<GenerationRun[]>([])
+  const [selectedHistoryRun, setSelectedHistoryRun] = useState<GenerationRun | null>(null)
+  const [historyFilter, setHistoryFilter] = useState('')
   const [busy, setBusy] = useState<BusyState>('idle')
   const [error, setError] = useState<string | null>(null)
-  const [skuInput, setSkuInput] = useState('')
-  const [files, setFiles] = useState<File[]>([])
   const [page, setPage] = useState<Page>('generate')
+  const [editSkuForm, setEditSkuForm] = useState({ sku: '', title: '', status: 'NEW' })
+  const [extraFiles, setExtraFiles] = useState<File[]>([])
+  const [importPackages, setImportPackages] = useState<ImportPackage[]>([])
+  const [looseSkuInput, setLooseSkuInput] = useState('')
+  const [editingModelId, setEditingModelId] = useState<number | undefined>()
+  const [modelForm, setModelForm] = useState<ModelForm>(() => createBlankModelForm())
+  const [modelHeadDrafts, setModelHeadDrafts] = useState<ModelHeadDraft[]>([])
+  const [nowMs, setNowMs] = useState(() => Date.now())
 
   const defaultModel = useMemo(() => models.find((model) => model.isDefault) ?? models[0], [models])
   const selectedModel = models.find((model) => model.id === selectedModelId) ?? defaultModel
+  const planModel = models.find((model) => model.id === shotPlan?.modelProfileId) ?? selectedModel
 
   useEffect(() => {
     void refreshBaseData()
   }, [])
 
+  useEffect(() => {
+    const storedRunId = window.localStorage.getItem('lily:lastGenerationRunId')
+    if (!storedRunId) return
+    const runId = Number(storedRunId)
+    if (!Number.isFinite(runId)) return
+    void api.getRun(runId)
+      .then((result) => setGenerationRun(result.item))
+      .catch(() => window.localStorage.removeItem('lily:lastGenerationRunId'))
+  }, [])
+
+  useEffect(() => {
+    if (!generationRun) return
+    window.localStorage.setItem('lily:lastGenerationRunId', String(generationRun.id))
+  }, [generationRun?.id])
+
+  useEffect(() => {
+    if (!generationRun || !isRunActive(generationRun)) return
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [generationRun?.id, generationRun?.status])
+
+  useEffect(() => {
+    if (!generationRun || !isRunActive(generationRun)) return
+    const poll = async () => {
+      try {
+        const result = await api.getRun(generationRun.id)
+        setGenerationRun(result.item)
+        if (!isRunActive(result.item)) await refreshHistoryRuns()
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '刷新生成状态失败')
+      }
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 3000)
+    return () => window.clearInterval(timer)
+  }, [generationRun?.id, generationRun?.status])
+
+  useEffect(() => {
+    const editingModel = models.find((model) => model.id === editingModelId)
+    if (editingModel) {
+      setModelForm(modelToForm(editingModel))
+      setModelHeadDrafts([])
+    }
+  }, [editingModelId, models])
+
   async function refreshBaseData() {
     setError(null)
-    const [skuResult, modelResult, logResult] = await Promise.all([api.listSkus(), api.listModels(), api.logs()])
+    const [skuResult, modelResult, runResult] = await Promise.all([api.listSkus(), api.listModels(), api.listRuns()])
     setSkus(skuResult.items)
     setModels(modelResult.items)
-    setLogs(logResult.items)
+    setHistoryRuns(runResult.items)
     if (!selectedModelId && modelResult.items[0]) setSelectedModelId(modelResult.items[0].id)
+    if (!editingModelId && modelResult.items[0]) setEditingModelId(modelResult.items[0].id)
+  }
+
+  async function refreshHistoryRuns() {
+    const result = await api.listRuns()
+    setHistoryRuns(result.items)
   }
 
   async function chooseSku(sku: GarmentSku) {
     setError(null)
     const detail = await api.getSku(sku.id)
+    const planResult = await api.getDefaultPlan(sku.id)
     setSelectedSku(detail.item)
-    setShotPlan(null)
+    setEditSkuForm({
+      sku: detail.item.sku,
+      title: detail.item.title ?? detail.item.sku,
+      status: detail.item.status,
+    })
+    setExtraFiles([])
+    setShotPlan(planResult.item)
     setGenerationRun(null)
   }
 
-  async function uploadSku() {
-    if (!skuInput.trim() || files.length === 0) {
-      setError('请填写货号并上传至少一张服装图片')
+  function stageLooseImages(selectedFiles: File[]) {
+    if (selectedFiles.length === 0) return
+    const defaultSku = looseSkuInput.trim() || `未命名货号-${importPackages.length + 1}`
+    setImportPackages((current) => [
+      ...current,
+      createImportPackage(defaultSku, selectedFiles, '散图上传'),
+    ])
+    setLooseSkuInput('')
+  }
+
+  function stageFolderImages(selectedFiles: File[]) {
+    if (selectedFiles.length === 0) return
+    const groups = groupFilesByTopFolder(selectedFiles)
+    setImportPackages((current) => [
+      ...current,
+      ...Object.entries(groups).map(([folderName, folderFiles]) => createImportPackage(folderName, folderFiles, folderName)),
+    ])
+  }
+
+  function updateImportPackage(packageId: string, patch: Partial<Pick<ImportPackage, 'sku' | 'title'>>) {
+    setImportPackages((current) =>
+      current.map((item) => (item.id === packageId ? { ...item, ...patch } : item)),
+    )
+  }
+
+  function removeImportImage(packageId: string, imageId: string) {
+    setImportPackages((current) =>
+      current
+        .map((item) =>
+          item.id === packageId
+            ? { ...item, images: item.images.filter((image) => image.id !== imageId) }
+            : item,
+        )
+        .filter((item) => item.images.length > 0),
+    )
+  }
+
+  function removeImportPackage(packageId: string) {
+    setImportPackages((current) => current.filter((item) => item.id !== packageId))
+  }
+
+  async function uploadImportPackage(packageId: string) {
+    const target = importPackages.find((item) => item.id === packageId)
+    if (!target) return
+    if (!target.sku.trim()) {
+      setImportPackages((current) =>
+        current.map((item) => (item.id === packageId ? { ...item, status: 'failed', error: '请填写货号' } : item)),
+      )
+      return
+    }
+    if (target.images.length === 0) {
+      setImportPackages((current) =>
+        current.map((item) => (item.id === packageId ? { ...item, status: 'failed', error: '至少保留一张图片' } : item)),
+      )
       return
     }
     setBusy('uploading')
     setError(null)
+    setImportPackages((current) =>
+      current.map((item) => (item.id === packageId ? { ...item, status: 'uploading', error: undefined } : item)),
+    )
     try {
-      const result = await api.uploadSku(skuInput.trim(), files)
-      setSelectedSku(result.item)
-      setShotPlan(null)
-      setGenerationRun(null)
-      setSkuInput('')
-      setFiles([])
+      const result = await api.uploadSku(target.sku.trim(), target.images.map((image) => image.file), target.title.trim())
+      const detail = await api.getSku(result.item.id)
+      setSelectedSku(detail.item)
+      setEditSkuForm({
+        sku: detail.item.sku,
+        title: detail.item.title ?? detail.item.sku,
+        status: detail.item.status,
+      })
+      setImportPackages((current) => current.filter((item) => item.id !== packageId))
       await refreshBaseData()
+
+      try {
+        const planResult = await api.createPlan(result.item.id, selectedModel?.id)
+        const plannedDetail = await api.getSku(result.item.id)
+        setSelectedSku(plannedDetail.item)
+        setShotPlan(planResult.item)
+        setEditSkuForm({
+          sku: plannedDetail.item.sku,
+          title: plannedDetail.item.title ?? plannedDetail.item.sku,
+          status: plannedDetail.item.status,
+        })
+        await refreshBaseData()
+      } catch (planErr) {
+        setShotPlan(null)
+        setError(planErr instanceof Error ? `图包已上传成功，但默认方案生成失败：${planErr.message}` : '图包已上传成功，但默认方案生成失败')
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '上传失败')
+      setImportPackages((current) =>
+        current.map((item) =>
+          item.id === packageId
+            ? { ...item, status: 'failed', error: err instanceof Error ? err.message : '上传失败' }
+            : item,
+        ),
+      )
     } finally {
       setBusy('idle')
+    }
+  }
+
+  async function uploadAllDraftPackages() {
+    for (const item of importPackages) {
+      if (item.status === 'draft' || item.status === 'failed') {
+        await uploadImportPackage(item.id)
+      }
     }
   }
 
@@ -89,7 +296,6 @@ export function App() {
       setShotPlan(result.item)
       setSelectedSku((await api.getSku(targetSku.id)).item)
       setGenerationRun(null)
-      setLogs((await api.logs()).items)
     } catch (err) {
       setError(err instanceof Error ? err.message : '生成方案失败')
     } finally {
@@ -104,7 +310,7 @@ export function App() {
     try {
       const result = await api.generateGroup(shotPlan.id)
       setGenerationRun(result.item)
-      setLogs((await api.logs()).items)
+      await refreshHistoryRuns()
     } catch (err) {
       setError(err instanceof Error ? err.message : '生成失败')
     } finally {
@@ -118,7 +324,7 @@ export function App() {
     try {
       const result = await api.regenerate(image.id, reason)
       setGenerationRun((current) => mergeRun(current, result.item))
-      setLogs((await api.logs()).items)
+      await refreshHistoryRuns()
     } catch (err) {
       setError(err instanceof Error ? err.message : '重生失败')
     } finally {
@@ -135,6 +341,266 @@ export function App() {
         images: current.images.map((item) => (item.id === image.id ? result.item : item)),
       }
     })
+    await refreshHistoryRuns()
+  }
+
+  async function openHistoryRun(runId: number) {
+    setError(null)
+    try {
+      const result = await api.getRun(runId)
+      setSelectedHistoryRun(result.item)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '读取生成记录失败')
+    }
+  }
+
+  async function restoreHistoryRun(run: GenerationRun) {
+    setError(null)
+    try {
+      const [skuResult, planResult, runResult] = await Promise.all([
+        api.getSku(run.skuId),
+        api.getPlan(run.shotPlanId),
+        api.getRun(run.id),
+      ])
+      setSelectedSku(skuResult.item)
+      setEditSkuForm({
+        sku: skuResult.item.sku,
+        title: skuResult.item.title ?? skuResult.item.sku,
+        status: skuResult.item.status,
+      })
+      setShotPlan(planResult.item)
+      setGenerationRun(runResult.item)
+      setPage('generate')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '恢复历史入参失败')
+    }
+  }
+
+  async function updateSelectedSku() {
+    if (!selectedSku) return
+    setBusy('uploading')
+    setError(null)
+    try {
+      const result = await api.updateSku(selectedSku.id, editSkuForm)
+      setSelectedSku(result.item)
+      await refreshBaseData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存失败')
+    } finally {
+      setBusy('idle')
+    }
+  }
+
+  async function deleteSelectedSku() {
+    if (!selectedSku) return
+    const confirmed = window.confirm(`确认删除素材库中的货号 ${selectedSku.sku}？\n如果该货号已有生成记录，系统会阻止删除以保留历史。`)
+    if (!confirmed) return
+    setBusy('uploading')
+    setError(null)
+    try {
+      await api.deleteSku(selectedSku.id)
+      setSelectedSku(null)
+      setShotPlan(null)
+      setGenerationRun(null)
+      await refreshBaseData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '删除失败')
+    } finally {
+      setBusy('idle')
+    }
+  }
+
+  async function addImagesToSelectedSku() {
+    if (!selectedSku || extraFiles.length === 0) return
+    setBusy('uploading')
+    setError(null)
+    try {
+      const result = await api.addSkuImages(selectedSku.id, extraFiles)
+      setSelectedSku(result.item)
+      setExtraFiles([])
+      await refreshBaseData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '追加图片失败')
+    } finally {
+      setBusy('idle')
+    }
+  }
+
+  async function deleteImage(imageId: number) {
+    if (!selectedSku) return
+    const confirmed = window.confirm('确认删除这张素材图？这只会删除应用内上传副本。')
+    if (!confirmed) return
+    setError(null)
+    try {
+      await api.deleteGarmentImage(imageId)
+      setSelectedSku((await api.getSku(selectedSku.id)).item)
+      await refreshBaseData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '删除图片失败')
+    }
+  }
+
+  function beginNewModel() {
+    setEditingModelId(undefined)
+    setModelForm(createBlankModelForm(models.length + 1))
+    setModelHeadDrafts([])
+  }
+
+  async function saveModel() {
+    setBusy('uploading')
+    setError(null)
+    try {
+      const payload = {
+        modelId: modelForm.modelId,
+        name: modelForm.name,
+        isDefault: modelForm.isDefault,
+        profile: modelFormToProfile(modelForm, models.find((model) => model.id === editingModelId)),
+      }
+      const result = editingModelId
+        ? await api.updateModel(editingModelId, payload)
+        : await api.createModel(payload)
+      if (!editingModelId && modelHeadDrafts.length > 0) {
+        let latest = result.item
+        for (const draft of modelHeadDrafts) {
+          latest = (await api.addModelHeadReferences(latest.id, [draft.file], draft.angle)).item
+        }
+        result.item = latest
+      }
+      setEditingModelId(result.item.id)
+      if (result.item.isDefault || !selectedModelId) setSelectedModelId(result.item.id)
+      setModelHeadDrafts([])
+      await refreshBaseData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存数字模特失败')
+    } finally {
+      setBusy('idle')
+    }
+  }
+
+  async function deleteEditingModel() {
+    const editingModel = models.find((model) => model.id === editingModelId)
+    if (!editingModel) return
+    const confirmed = window.confirm(`确认删除数字模特 ${editingModel.name}？\n如果它已有生成记录，系统会阻止删除以保留历史。`)
+    if (!confirmed) return
+    setBusy('uploading')
+    setError(null)
+    try {
+      await api.deleteModel(editingModel.id)
+      const nextModels = (await api.listModels()).items
+      setModels(nextModels)
+      const nextModel = nextModels[0]
+      setEditingModelId(nextModel?.id)
+      if (selectedModelId === editingModel.id) setSelectedModelId(nextModel?.id)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '删除数字模特失败')
+    } finally {
+      setBusy('idle')
+    }
+  }
+
+  async function uploadModelHeadReferences(files: File[]) {
+    if (files.length === 0) return
+    if (!editingModelId) {
+      setModelHeadDrafts((current) => {
+        const next = [...current]
+        for (const file of files) {
+          next.push({
+            id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            file,
+            previewUrl: URL.createObjectURL(file),
+            angle: '',
+          })
+        }
+        return next
+      })
+      return
+    }
+    setBusy('uploading')
+    setError(null)
+    try {
+      const result = await api.addModelHeadReferences(editingModelId, files)
+      setModels((current) => current.map((model) => (model.id === result.item.id ? result.item : model)))
+      setModelForm(modelToForm(result.item))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '上传头像失败')
+    } finally {
+      setBusy('idle')
+    }
+  }
+
+  async function replaceModelHeadReference(angle: string, file: File) {
+    if (!editingModelId) {
+      setModelHeadDrafts((current) =>
+        current.map((item) =>
+          item.id === angle
+            ? { ...item, file, previewUrl: URL.createObjectURL(file) }
+            : item,
+        ),
+      )
+      return
+    }
+    setBusy('uploading')
+    setError(null)
+    try {
+      const result = await api.replaceModelHeadReference(editingModelId, angle, file)
+      setModels((current) => current.map((model) => (model.id === result.item.id ? result.item : model)))
+      setModelForm(modelToForm(result.item))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '替换头像失败')
+    } finally {
+      setBusy('idle')
+    }
+  }
+
+  async function updateModelHeadReference(angle: string, payload: { angle?: string; orderIndex?: number }) {
+    if (!editingModelId) {
+      setModelHeadDrafts((current) => {
+        const target = current.find((item) => item.id === angle)
+        if (!target) return current
+        if (payload.angle && current.some((item) => item.angle === payload.angle && item.id !== angle)) {
+          setError('该角度已经有头像')
+          return current
+        }
+        const updated = current.map((item) =>
+          item.id === angle
+            ? { ...item, angle: payload.angle ?? item.angle }
+            : item,
+        )
+        if (payload.orderIndex === undefined) return updated
+        const list = updated.filter((item) => item.id !== angle)
+        const moving = updated.find((item) => item.id === angle)
+        if (!moving) return updated
+        const orderIndex = Math.max(0, Math.min(payload.orderIndex, list.length))
+        list.splice(orderIndex, 0, moving)
+        return list
+      })
+      return
+    }
+    setError(null)
+    try {
+      const result = await api.updateModelHeadReference(editingModelId, angle, payload)
+      setModels((current) => current.map((model) => (model.id === result.item.id ? result.item : model)))
+      setModelForm(modelToForm(result.item))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '更新头像失败')
+    }
+  }
+
+  async function deleteModelHeadReference(angle: string) {
+    if (!editingModelId) {
+      setModelHeadDrafts((current) => current.filter((item) => item.id !== angle))
+      return
+    }
+    const confirmed = window.confirm(`确认删除 ${headReferenceLabel(angle)} 头像？`)
+    if (!confirmed) return
+    setError(null)
+    try {
+      const result = await api.deleteModelHeadReference(editingModelId, angle)
+      setModels((current) => current.map((model) => (model.id === result.item.id ? result.item : model)))
+      setModelForm(modelToForm(result.item))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '删除头像失败')
+    }
   }
 
   return (
@@ -158,23 +624,9 @@ export function App() {
       {page === 'generate' && <main className="workspace">
         <section className="left-rail">
           <Panel title="上传服装" icon={<Upload size={18} />}>
-            <label className="field">
-              <span>货号</span>
-              <input value={skuInput} onChange={(event) => setSkuInput(event.target.value)} placeholder="例如 125309C7948510" />
-            </label>
-            <label className="dropzone">
-              <ImagePlus size={24} />
-              <span>{files.length ? `已选择 ${files.length} 张图片` : '选择服装图片'}</span>
-              <input
-                type="file"
-                accept="image/*"
-                multiple
-                onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
-              />
-            </label>
-            <button className="primary full" onClick={uploadSku} disabled={busy !== 'idle'}>
-              {busy === 'uploading' ? <Loader2 className="spin" size={17} /> : <Upload size={17} />}
-              上传并使用
+            <p className="small-muted">请到“服装素材”页完成预览与编辑后保存上传。</p>
+            <button className="primary full" onClick={() => setPage('garments')}>
+              <Upload size={17} />导入新图包
             </button>
           </Panel>
 
@@ -187,7 +639,14 @@ export function App() {
                   className={`sku-item ${selectedSku?.id === sku.id ? 'selected' : ''}`}
                   onClick={() => void chooseSku(sku)}
                 >
-                  {sku.coverUrl ? <img src={mediaUrl(sku.coverUrl)} alt={sku.sku} /> : <div className="thumb-fallback" />}
+                  {sku.coverUrl ? (
+                    <ImagePreviewThumb
+                      src={mediaUrl(sku.coverUrl)}
+                      name={sku.sku}
+                      fileSize={sku.coverFileSize}
+                      compact
+                    />
+                  ) : <div className="thumb-fallback" />}
                   <span>
                     <strong>{sku.sku}</strong>
                     <small>{sku.imageCount ?? 0} 张图片 · {statusText(sku.status)}</small>
@@ -205,62 +664,60 @@ export function App() {
                 <div className="selected-garment">
                   <div className="image-strip">
                     {(selectedSku.images ?? []).slice(0, 5).map((image) => (
-                      <img key={image.id} src={mediaUrl(image.url)} alt={image.filename} />
+                      <ImagePreviewThumb
+                        key={image.id}
+                        src={mediaUrl(image.url)}
+                        name={image.filename}
+                        fileSize={image.fileSize}
+                        compact
+                      />
                     ))}
                   </div>
                   <h3>{selectedSku.sku}</h3>
-                  <p>{selectedSku.analysis?.summary ?? '等待生成组图方案后显示服装摘要'}</p>
-                  <Tag>{selectedSku.analysis?.category ?? statusText(selectedSku.status)}</Tag>
+                  <p>{selectedSku.analysis?.summary ?? '请先在“服装素材”页保存默认组图方案。'}</p>
+                  <Tag>{shotPlan ? '已保存默认方案' : '缺少默认方案'}</Tag>
                 </div>
               ) : (
                 <EmptyText text="选择或上传一个货号开始" />
               )}
             </StepCard>
 
-            <StepCard number="2" title="选择模特">
-              {selectedModel ? (
-                <div className="model-summary">
-                  <div className="model-avatar">F01</div>
-                  <h3>{selectedModel.name}</h3>
-                  <p>默认模特 / 短发 / 适合棚拍</p>
-                  <select value={selectedModel.id} onChange={(event) => setSelectedModelId(Number(event.target.value))}>
-                    {models.map((model) => (
-                      <option key={model.id} value={model.id}>{model.name}</option>
-                    ))}
-                  </select>
+            <StepCard number="2" title="使用默认方案">
+              {planModel ? (
+                  <div className="model-summary">
+                  <div className="model-avatar">
+                    {planModel.previewUrl ? (
+                      <ImagePreviewThumb
+                        src={mediaUrl(planModel.previewUrl)}
+                        name={planModel.name}
+                        fileSize={modelPreviewFileSize(planModel)}
+                        compact
+                        round
+                      />
+                    ) : modelInitials(planModel)}
+                  </div>
+                  <h3>{shotPlan?.plan.brandStyle?.name ?? '暂无默认组图方案'}</h3>
+                  <p>{shotPlan ? `将使用 ${planModel.name} 和服装素材页保存的 ${shotPlan.plan.shots.length} 张图位方案。` : '回到服装素材页生成默认组图方案后，这里会直接用于生成。'}</p>
+                  {shotPlan ? <Tag>{planModel.name}</Tag> : <button className="secondary" onClick={() => setPage('garments')}>去保存方案</button>}
                 </div>
               ) : (
                 <EmptyText text="暂无数字模特" />
               )}
             </StepCard>
-
-            <StepCard number="3" title="确认组图方案" wide>
-              {shotPlan ? (
-                <ShotPlanBoard shotPlan={shotPlan} />
-              ) : (
-                <div className="plan-empty">
-                  <p>Lily 默认棚拍风格</p>
-                  <span>白/浅灰背景 · 自然姿态 · 简洁搭配</span>
-                  <button className="secondary" onClick={() => void createPlan()} disabled={!selectedSku || busy !== 'idle'}>
-                    {busy === 'planning' ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}
-                    预览方案
-                  </button>
-                </div>
-              )}
-            </StepCard>
           </div>
 
           <div className="action-row">
-            <button className="primary" onClick={shotPlan ? generateGroup : () => void createPlan()} disabled={!selectedSku || busy !== 'idle'}>
-              {busy === 'generating' || busy === 'planning' ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
-              {shotPlan ? '生成组图' : '预览方案'}
+            <button className="primary" onClick={generateGroup} disabled={!selectedSku || !shotPlan || busy !== 'idle' || Boolean(generationRun && isRunActive(generationRun))}>
+              {busy === 'generating' ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
+              生成组图
             </button>
-            <span>预计生成 5 张，可单张重生；生成与重生记录会保留。</span>
+            <span>{shotPlan ? `将直接使用默认方案 #${shotPlan.id}，可单张重生；生成与重生记录会保留。` : '该货号还没有默认组图方案，请先到服装素材页保存方案。'}</span>
           </div>
 
           <ResultGallery
             run={generationRun}
-            loading={busy === 'generating' || busy === 'regenerating'}
+            loading={busy === 'generating' || busy === 'regenerating' || Boolean(generationRun && isRunActive(generationRun))}
+            nowMs={nowMs}
             onRegenerate={(image, reason) => void regenerate(image, reason)}
             onToggleFinal={(image) => void toggleFinal(image)}
             onExport={(runId) => void api.exportRun(runId)}
@@ -269,17 +726,11 @@ export function App() {
 
         <aside className="right-rail">
           <Panel title="生成记录" icon={<History size={18} />}>
-            <div className="log-list">
-              {logs.map((log) => (
-                <div className="log-item" key={log.id}>
-                  <Clock size={14} />
-                  <span>
-                    <strong>{log.eventType}</strong>
-                    <small>{log.entityType} #{log.entityId ?? '-'} · {log.createdAt}</small>
-                  </span>
-                </div>
-              ))}
-            </div>
+            <GenerationHistoryOverview
+              runs={historyRuns}
+              currentSkuId={selectedSku?.id}
+              onOpenRun={(run) => void restoreHistoryRun(run)}
+            />
           </Panel>
         </aside>
       </main>}
@@ -288,12 +739,26 @@ export function App() {
         <GarmentLibraryPage
           skus={skus}
           selectedSku={selectedSku}
-          skuInput={skuInput}
-          files={files}
+          shotPlan={shotPlan}
           busy={busy}
-          onSkuInputChange={setSkuInput}
-          onFilesChange={setFiles}
-          onUpload={() => void uploadSku()}
+          editSkuForm={editSkuForm}
+          extraFiles={extraFiles}
+          importPackages={importPackages}
+          looseSkuInput={looseSkuInput}
+          onLooseSkuInputChange={setLooseSkuInput}
+          onStageLooseImages={stageLooseImages}
+          onStageFolderImages={stageFolderImages}
+          onUpdateImportPackage={updateImportPackage}
+          onRemoveImportImage={removeImportImage}
+          onRemoveImportPackage={removeImportPackage}
+          onUploadImportPackage={(packageId) => void uploadImportPackage(packageId)}
+          onUploadAllDraftPackages={() => void uploadAllDraftPackages()}
+          onEditSkuFormChange={setEditSkuForm}
+          onExtraFilesChange={setExtraFiles}
+          onUpdateSelectedSku={() => void updateSelectedSku()}
+          onDeleteSelectedSku={() => void deleteSelectedSku()}
+          onAddImages={() => void addImagesToSelectedSku()}
+          onDeleteImage={(imageId) => void deleteImage(imageId)}
           onSelectSku={(sku) => void chooseSku(sku)}
           onUseInGenerate={(sku) => {
             void chooseSku(sku)
@@ -301,20 +766,38 @@ export function App() {
           }}
           onCreatePlan={(sku) => {
             void createPlan(sku)
-            setPage('generate')
           }}
         />
       )}
 
       {page === 'models' && (
-        <PlaceholderPage
-          title="数字模特"
-          text="当前已维护 Face-01 默认模特。下一步可在这里补充多角度头图、身体参数和默认身份约束。"
+        <ModelProfilesPage
+          models={models}
+          editingModelId={editingModelId}
+          form={modelForm}
+          busy={busy}
+          headDrafts={modelHeadDrafts}
+          onSelectModel={setEditingModelId}
+          onNewModel={beginNewModel}
+          onFormChange={setModelForm}
+          onSaveModel={() => void saveModel()}
+          onDeleteModel={() => void deleteEditingModel()}
+          onUploadHeadReferences={(files) => void uploadModelHeadReferences(files)}
+          onReplaceHeadReference={(angle, file) => void replaceModelHeadReference(angle, file)}
+          onUpdateHeadReference={(angle, payload) => void updateModelHeadReference(angle, payload)}
+          onDeleteHeadReference={(angle) => void deleteModelHeadReference(angle)}
         />
       )}
 
       {page === 'history' && (
-        <HistoryPage logs={logs} />
+        <HistoryPage
+          runs={historyRuns}
+          selectedRun={selectedHistoryRun}
+          filter={historyFilter}
+          onFilterChange={setHistoryFilter}
+          onOpenRun={(runId) => void openHistoryRun(runId)}
+          onRestoreRun={(run) => void restoreHistoryRun(run)}
+        />
       )}
     </div>
   )
@@ -323,29 +806,58 @@ export function App() {
 function GarmentLibraryPage({
   skus,
   selectedSku,
-  skuInput,
-  files,
+  shotPlan,
   busy,
-  onSkuInputChange,
-  onFilesChange,
-  onUpload,
+  editSkuForm,
+  extraFiles,
+  importPackages,
+  looseSkuInput,
+  onLooseSkuInputChange,
+  onStageLooseImages,
+  onStageFolderImages,
+  onUpdateImportPackage,
+  onRemoveImportImage,
+  onRemoveImportPackage,
+  onUploadImportPackage,
+  onUploadAllDraftPackages,
+  onEditSkuFormChange,
+  onExtraFilesChange,
+  onUpdateSelectedSku,
+  onDeleteSelectedSku,
+  onAddImages,
+  onDeleteImage,
   onSelectSku,
   onUseInGenerate,
   onCreatePlan,
 }: {
   skus: GarmentSku[]
   selectedSku: GarmentSku | null
-  skuInput: string
-  files: File[]
+  shotPlan: ShotPlan | null
   busy: BusyState
-  onSkuInputChange: (value: string) => void
-  onFilesChange: (files: File[]) => void
-  onUpload: () => void
+  editSkuForm: { sku: string; title: string; status: string }
+  extraFiles: File[]
+  importPackages: ImportPackage[]
+  looseSkuInput: string
+  onLooseSkuInputChange: (value: string) => void
+  onStageLooseImages: (files: File[]) => void
+  onStageFolderImages: (files: File[]) => void
+  onUpdateImportPackage: (packageId: string, patch: Partial<Pick<ImportPackage, 'sku' | 'title'>>) => void
+  onRemoveImportImage: (packageId: string, imageId: string) => void
+  onRemoveImportPackage: (packageId: string) => void
+  onUploadImportPackage: (packageId: string) => void
+  onUploadAllDraftPackages: () => void
+  onEditSkuFormChange: (value: { sku: string; title: string; status: string }) => void
+  onExtraFilesChange: (files: File[]) => void
+  onUpdateSelectedSku: () => void
+  onDeleteSelectedSku: () => void
+  onAddImages: () => void
+  onDeleteImage: (imageId: number) => void
   onSelectSku: (sku: GarmentSku) => void
   onUseInGenerate: (sku: GarmentSku) => void
   onCreatePlan: (sku: GarmentSku) => void
 }) {
   const analyzed = skus.filter((sku) => sku.status === 'ANALYZED' || sku.analysis).length
+  const pendingImportPackages = importPackages.filter((item) => item.status !== 'uploaded')
   return (
     <main className="garment-page">
       <section className="library-toolbar">
@@ -362,24 +874,53 @@ function GarmentLibraryPage({
 
       <section className="garment-layout">
         <aside className="garment-sidebar">
-          <Panel title="上传新货号" icon={<Upload size={18} />}>
+          <Panel title="导入新图包" icon={<Upload size={18} />}>
             <label className="field">
-              <span>货号</span>
-              <input value={skuInput} onChange={(event) => onSkuInputChange(event.target.value)} placeholder="例如 125309C7948510" />
+              <span>散图货号</span>
+              <input value={looseSkuInput} onChange={(event) => onLooseSkuInputChange(event.target.value)} placeholder="上传散图时填写" />
             </label>
             <label className="dropzone compact">
               <ImagePlus size={22} />
-              <span>{files.length ? `已选择 ${files.length} 张图片` : '选择一组服装图'}</span>
+              <span>上传 N 张图片</span>
               <input
                 type="file"
                 accept="image/*"
                 multiple
-                onChange={(event) => onFilesChange(Array.from(event.target.files ?? []))}
+                onChange={(event) => {
+                  onStageLooseImages(Array.from(event.target.files ?? []))
+                  event.currentTarget.value = ''
+                }}
               />
             </label>
-            <button className="primary full" onClick={onUpload} disabled={busy !== 'idle'}>
+            <label className="dropzone compact folder-drop">
+              <FolderOpen size={22} />
+              <span>上传一个或多个文件夹</span>
+              <input
+                type="file"
+                multiple
+                // @ts-expect-error webkitdirectory is supported by Chromium/WebKit for folder uploads.
+                webkitdirectory=""
+                onChange={(event) => {
+                  onStageFolderImages(Array.from(event.target.files ?? []))
+                  event.currentTarget.value = ''
+                }}
+              />
+            </label>
+            <p className="helper-text">先生成本地预览，可改货号、删图片，再保存上传。第一张图片默认作为封面。</p>
+          </Panel>
+
+          <Panel title="待保存图包" icon={<Clock size={18} />}>
+            <div className="import-summary">
+              <strong>{pendingImportPackages.length}</strong>
+              <span>个待处理图包</span>
+            </div>
+            <button
+              className="primary full"
+              onClick={onUploadAllDraftPackages}
+              disabled={busy !== 'idle' || pendingImportPackages.length === 0}
+            >
               {busy === 'uploading' ? <Loader2 className="spin" size={17} /> : <Upload size={17} />}
-              上传到素材库
+              保存并上传全部
             </button>
           </Panel>
 
@@ -392,7 +933,14 @@ function GarmentLibraryPage({
                   className={`library-list-item ${selectedSku?.id === sku.id ? 'selected' : ''}`}
                   onClick={() => onSelectSku(sku)}
                 >
-                  {sku.coverUrl ? <img src={mediaUrl(sku.coverUrl)} alt={sku.sku} /> : <div className="thumb-fallback" />}
+                  {sku.coverUrl ? (
+                    <ImagePreviewThumb
+                      src={mediaUrl(sku.coverUrl)}
+                      name={sku.sku}
+                      fileSize={sku.coverFileSize}
+                      compact
+                    />
+                  ) : <div className="thumb-fallback" />}
                   <span>
                     <strong>{sku.sku}</strong>
                     <small>{sku.imageCount ?? 0} 张图片 · {statusText(sku.status)}</small>
@@ -404,7 +952,16 @@ function GarmentLibraryPage({
         </aside>
 
         <section className="garment-detail">
-          {selectedSku ? (
+          {pendingImportPackages.length > 0 ? (
+            <ImportPreviewBoard
+              packages={pendingImportPackages}
+              busy={busy}
+              onUpdatePackage={onUpdateImportPackage}
+              onRemoveImage={onRemoveImportImage}
+              onRemovePackage={onRemoveImportPackage}
+              onUploadPackage={onUploadImportPackage}
+            />
+          ) : selectedSku ? (
             <>
               <div className="detail-header">
                 <div>
@@ -416,27 +973,73 @@ function GarmentLibraryPage({
                   <button className="secondary" onClick={() => onUseInGenerate(selectedSku)}>
                     <FileImage size={16} />用于生成
                   </button>
-                  <button className="primary" onClick={() => onCreatePlan(selectedSku)}>
-                    <Sparkles size={16} />预览方案
+                  <button className="primary" onClick={() => onCreatePlan(selectedSku)} disabled={busy !== 'idle'}>
+                    {busy === 'planning' ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
+                    {shotPlan ? '更新默认方案' : '生成默认方案'}
                   </button>
                 </div>
               </div>
 
               <div className="detail-grid">
-                <section className="material-board">
+                <section className="material-board shot-plan-panel">
+                  <div className="section-heading tight">
+                    <h2>默认组图方案</h2>
+                    <span>{shotPlan ? `#${shotPlan.id}` : '未保存'}</span>
+                  </div>
+                  {shotPlan ? (
+                    <ShotPlanBoard shotPlan={shotPlan} />
+                  ) : (
+                    <div className="plan-empty">
+                      <p>还没有默认组图方案</p>
+                      <span>点击右上角“生成默认方案”，Gemini 会根据服装主图识别品类、构图和模特姿势；生成组图时将直接使用这里保存的方案。</span>
+                    </div>
+                  )}
+                </section>
+
+                <section className="material-board asset-panel">
                   <div className="section-heading tight">
                     <h2>素材图片</h2>
                     <span>{selectedSku.images?.length ?? 0} 张</span>
                   </div>
+                  <div className="append-images">
+                    <label className="mini-upload">
+                      <Plus size={16} />
+                      <span>{extraFiles.length ? `已选择 ${extraFiles.length} 张` : '追加图片'}</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        onChange={(event) => onExtraFilesChange(Array.from(event.target.files ?? []))}
+                      />
+                    </label>
+                    <button className="secondary" onClick={onAddImages} disabled={busy !== 'idle' || extraFiles.length === 0}>
+                      <Upload size={15} />保存图片
+                    </button>
+                  </div>
                   <div className="asset-grid">
-                    {(selectedSku.images ?? []).map((image, index) => (
+                    {(selectedSku.images ?? []).map((image) => (
                       <article className="asset-card" key={image.id}>
                         <div className="asset-thumb">
-                          {image.url ? <img src={mediaUrl(image.url)} alt={image.filename} /> : <span>无预览</span>}
+                          {image.url ? (
+                            <ImagePreviewThumb
+                              src={mediaUrl(image.url)}
+                              name={image.filename}
+                              fileSize={image.fileSize}
+                            />
+                          ) : <span>无预览</span>}
                         </div>
                         <div className="asset-meta">
-                          <strong>{image.filename}</strong>
-                          <small>{index === 0 ? '主参考图' : roleText(image.role)}</small>
+                          <strong title={image.filename}>{middleEllipsis(image.filename)}</strong>
+                          <small>
+                            {image.url ? (
+                              <ImageInfoLine src={mediaUrl(image.url)} fileSize={image.fileSize} />
+                            ) : '图片信息读取中'}
+                          </small>
+                          <div className="asset-actions single">
+                            <button onClick={() => onDeleteImage(image.id)} title="删除图片">
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
                         </div>
                       </article>
                     ))}
@@ -444,6 +1047,46 @@ function GarmentLibraryPage({
                 </section>
 
                 <aside className="fact-panel">
+                  <div className="section-heading tight">
+                    <h2>编辑信息</h2>
+                    <Edit3 size={16} />
+                  </div>
+                  <div className="edit-form">
+                    <label className="field">
+                      <span>货号</span>
+                      <input
+                        value={editSkuForm.sku}
+                        onChange={(event) => onEditSkuFormChange({ ...editSkuForm, sku: event.target.value })}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>标题</span>
+                      <input
+                        value={editSkuForm.title}
+                        onChange={(event) => onEditSkuFormChange({ ...editSkuForm, title: event.target.value })}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>状态</span>
+                      <select
+                        value={editSkuForm.status}
+                        onChange={(event) => onEditSkuFormChange({ ...editSkuForm, status: event.target.value })}
+                      >
+                        <option value="NEW">待策划</option>
+                        <option value="ANALYZED">已策划</option>
+                        <option value="CONFIRMED">已确认</option>
+                      </select>
+                    </label>
+                    <div className="crud-actions">
+                      <button className="primary" onClick={onUpdateSelectedSku} disabled={busy !== 'idle'}>
+                        <Save size={15} />保存
+                      </button>
+                      <button className="danger" onClick={onDeleteSelectedSku} disabled={busy !== 'idle'}>
+                        <Trash2 size={15} />删除货号
+                      </button>
+                    </div>
+                  </div>
+
                   <div className="section-heading tight">
                     <h2>识别摘要</h2>
                     <span>{statusText(selectedSku.status)}</span>
@@ -469,12 +1112,396 @@ function GarmentLibraryPage({
   )
 }
 
+function ModelProfilesPage({
+  models,
+  editingModelId,
+  form,
+  busy,
+  headDrafts,
+  onSelectModel,
+  onNewModel,
+  onFormChange,
+  onSaveModel,
+  onDeleteModel,
+  onUploadHeadReferences,
+  onReplaceHeadReference,
+  onUpdateHeadReference,
+  onDeleteHeadReference,
+}: {
+  models: ModelProfile[]
+  editingModelId?: number
+  form: ModelForm
+  busy: BusyState
+  headDrafts: ModelHeadDraft[]
+  onSelectModel: (id: number) => void
+  onNewModel: () => void
+  onFormChange: (value: ModelForm) => void
+  onSaveModel: () => void
+  onDeleteModel: () => void
+  onUploadHeadReferences: (files: File[]) => void
+  onReplaceHeadReference: (angle: string, file: File) => void
+  onUpdateHeadReference: (angle: string, payload: { angle?: string; orderIndex?: number }) => void
+  onDeleteHeadReference: (angle: string) => void
+}) {
+  const editingModel = models.find((model) => model.id === editingModelId)
+  const isNew = !editingModel
+  const headEntries = isNew ? getDraftHeadEntries(headDrafts) : getSavedHeadEntries(editingModel)
+  const [draggingId, setDraggingId] = useState<string | null>(null)
+  const [dragOverId, setDragOverId] = useState<string | null>(null)
+
+  return (
+    <main className="model-page">
+      <section className="library-toolbar">
+        <div>
+          <h2>数字模特</h2>
+          <p>维护模特身份图、身体参数和生成约束。每次组图只选择一个模特作为主体。</p>
+        </div>
+        <div className="library-stats">
+          <Stat label="模特" value={models.length} />
+          <Stat label="头像" value={headEntries.length} />
+          <Stat label="默认" value={models.some((model) => model.isDefault) ? 1 : 0} />
+        </div>
+      </section>
+
+      <section className="model-layout">
+        <aside className="model-sidebar">
+          <Panel title="模特列表" icon={<Images size={18} />}>
+            <div className="library-list">
+              {models.length === 0 && <EmptyText text="还没有数字模特" />}
+              {models.map((model) => (
+                <button
+                  key={model.id}
+                  className={`library-list-item ${editingModelId === model.id ? 'selected' : ''}`}
+                  onClick={() => onSelectModel(model.id)}
+                >
+                  {model.previewUrl ? (
+                    <ImagePreviewThumb
+                      src={mediaUrl(model.previewUrl)}
+                      name={model.name}
+                      fileSize={modelPreviewFileSize(model)}
+                      compact
+                    />
+                  ) : <div className="thumb-fallback" />}
+                  <span>
+                    <strong>{model.name}</strong>
+                    <small>{model.modelId} · {model.isDefault ? '默认模特' : '备用模特'}</small>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </Panel>
+
+          <Panel title="新建模特" icon={<Plus size={18} />}>
+            <p className="small-muted">基础档案和头像可以一起编辑，最后统一保存。</p>
+            <button className="primary full" onClick={onNewModel}>
+              <Plus size={17} />新建数字模特
+            </button>
+          </Panel>
+        </aside>
+
+        <section className="model-detail">
+          <div className="detail-header">
+            <div>
+              <span className="eyebrow">{isNew ? '新建档案' : editingModel?.modelId}</span>
+              <h2>{isNew ? '新增数字模特' : editingModel?.name}</h2>
+              <p>{isNew ? '基础档案和头像可以一起编辑，最后统一保存。' : modelSummary(editingModel)}</p>
+            </div>
+            <div className="detail-actions">
+              <button className="primary" onClick={onSaveModel} disabled={busy !== 'idle'}>
+                {busy === 'uploading' ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+                保存档案
+              </button>
+              {!isNew && (
+                <button className="danger" onClick={onDeleteModel} disabled={busy !== 'idle'}>
+                  <Trash2 size={16} />删除模特
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="model-editor-grid">
+            <section className="model-form-board">
+              <div className="section-heading tight">
+                <h2>基础档案</h2>
+                <Edit3 size={16} />
+              </div>
+              <div className="model-form-grid">
+                <label className="field">
+                  <span>模特 ID</span>
+                  <input value={form.modelId} onChange={(event) => onFormChange({ ...form, modelId: event.target.value })} />
+                </label>
+                <label className="field">
+                  <span>名称</span>
+                  <input value={form.name} onChange={(event) => onFormChange({ ...form, name: event.target.value })} />
+                </label>
+                <label className="field">
+                  <span>身高</span>
+                  <input value={form.height} onChange={(event) => onFormChange({ ...form, height: event.target.value })} placeholder="170cm" />
+                </label>
+                <label className="field">
+                  <span>体重</span>
+                  <input value={form.weight} onChange={(event) => onFormChange({ ...form, weight: event.target.value })} placeholder="可选，如 50kg" />
+                </label>
+                <label className="field">
+                  <span>身型</span>
+                  <input value={form.bodyShape} onChange={(event) => onFormChange({ ...form, bodyShape: event.target.value })} placeholder="H型 / 梨型 / 苹果型" />
+                </label>
+                <label className="field">
+                  <span>胸围</span>
+                  <input value={form.bust} onChange={(event) => onFormChange({ ...form, bust: event.target.value })} placeholder="80cm" />
+                </label>
+                <label className="field">
+                  <span>腰围</span>
+                  <input value={form.waist} onChange={(event) => onFormChange({ ...form, waist: event.target.value })} placeholder="59cm" />
+                </label>
+                <label className="field">
+                  <span>臀围</span>
+                  <input value={form.hips} onChange={(event) => onFormChange({ ...form, hips: event.target.value })} placeholder="89cm" />
+                </label>
+                <label className="field">
+                  <span>其它信息</span>
+                  <input value={form.notes} onChange={(event) => onFormChange({ ...form, notes: event.target.value })} placeholder="都市、通勤、轻熟、自然、克制" />
+                </label>
+                <label className="field toggle-field">
+                  <span>默认模特</span>
+                  <input type="checkbox" checked={form.isDefault} onChange={(event) => onFormChange({ ...form, isDefault: event.target.checked })} />
+                </label>
+              </div>
+            </section>
+
+            <aside className="head-reference-panel">
+              <div className="section-heading tight">
+                <h2>头像角度</h2>
+                <span>{headEntries.length} 张</span>
+              </div>
+
+              {!headEntries.some((item) => item.angle === 'front') && (
+                <div className="inline-warning">当前没有“正脸”头像，建议补一张，后续生成会更稳定。</div>
+              )}
+
+              <div className="head-grid">
+                <label className="head-upload-card">
+                  <ImagePlus size={16} />
+                  <strong>上传头像</strong>
+                  <small>支持单张或多张，上传后再逐张设置角度</small>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={(event) => {
+                      const files = Array.from(event.target.files ?? [])
+                      onUploadHeadReferences(files)
+                      event.currentTarget.value = ''
+                    }}
+                  />
+                </label>
+
+                {headEntries.map((entry, index) => (
+                  <article
+                    className={`head-card ${draggingId === entry.id ? 'dragging' : ''} ${dragOverId === entry.id ? 'drag-over' : ''}`}
+                    key={entry.id}
+                    draggable
+                    onDragStart={() => {
+                      setDraggingId(entry.id)
+                      setDragOverId(null)
+                    }}
+                    onDragEnd={() => {
+                      setDraggingId(null)
+                      setDragOverId(null)
+                    }}
+                    onDragOver={(event) => {
+                      event.preventDefault()
+                      if (draggingId && draggingId !== entry.id) setDragOverId(entry.id)
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault()
+                      if (!draggingId || draggingId === entry.id) return
+                      void onUpdateHeadReference(draggingId, { orderIndex: index })
+                      setDraggingId(null)
+                      setDragOverId(null)
+                    }}
+                  >
+                    <div className="head-thumb">
+                      {entry.url ? (
+                        <ImagePreviewThumb
+                          src={entry.url}
+                          name={entry.filename}
+                          fileSize={entry.fileSize}
+                        />
+                      ) : <span>无预览</span>}
+                    </div>
+                    <div className="head-card-row">
+                      <select
+                        value={entry.angle}
+                        disabled={busy !== 'idle'}
+                        onChange={(event) => void onUpdateHeadReference(entry.id, { angle: event.target.value })}
+                      >
+                        <option value="">未设置</option>
+                        {HEAD_REFERENCE_OPTIONS.map((option) => {
+                          const usedByOther = headEntries.some((item) => item.angle === option.value && item.id !== entry.id)
+                          return (
+                            <option key={option.value} value={option.value} disabled={usedByOther}>
+                              {option.label}
+                            </option>
+                          )
+                        })}
+                      </select>
+                      <span className="drag-hint">拖动排序</span>
+                    </div>
+                    <small title={entry.filename}>{middleEllipsis(entry.filename)}</small>
+                    <div className="head-card-actions">
+                      <label className="mini-upload">
+                        <Upload size={14} />
+                        <span>更换</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          disabled={busy !== 'idle'}
+                          onChange={(event) => {
+                            const file = event.target.files?.[0]
+                            if (file) void onReplaceHeadReference(entry.id, file)
+                            event.currentTarget.value = ''
+                          }}
+                        />
+                      </label>
+                      <button
+                        className="danger icon-only"
+                        onClick={() => onDeleteHeadReference(entry.id)}
+                        title="删除头像"
+                        disabled={busy !== 'idle'}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+
+              {editingModel && (
+                <div className="storage-box">
+                  <strong>素材目录</strong>
+                  <small>{editingModel.assetDir}</small>
+                </div>
+              )}
+            </aside>
+          </div>
+        </section>
+      </section>
+    </main>
+  )
+}
+
+function ImportPreviewBoard({
+  packages,
+  busy,
+  onUpdatePackage,
+  onRemoveImage,
+  onRemovePackage,
+  onUploadPackage,
+}: {
+  packages: ImportPackage[]
+  busy: BusyState
+  onUpdatePackage: (packageId: string, patch: Partial<Pick<ImportPackage, 'sku' | 'title'>>) => void
+  onRemoveImage: (packageId: string, imageId: string) => void
+  onRemovePackage: (packageId: string) => void
+  onUploadPackage: (packageId: string) => void
+}) {
+  const duplicateSkus = findDuplicateSkus(packages)
+  return (
+    <div className="import-preview">
+      <div className="detail-header">
+        <div>
+          <span className="eyebrow">上传新货号</span>
+          <h2>预览与编辑</h2>
+          <p>图片还在浏览器本地暂存。确认每个图包的货号和图片后，再逐个保存上传；第一张图片默认作为封面。</p>
+        </div>
+      </div>
+
+      <div className="import-package-list">
+        {packages.map((item) => {
+          const hasDuplicate = duplicateSkus.has(item.sku.trim()) && item.sku.trim()
+          return (
+            <article className={`import-package ${item.status}`} key={item.id}>
+              <div className="import-package-header">
+                <div>
+                  <strong>{item.sourceName}</strong>
+                  <small>{item.images.length} 张图片 · {importStatusText(item.status)}</small>
+                </div>
+                <div className="import-actions">
+                  <button className="secondary" onClick={() => onUploadPackage(item.id)} disabled={busy !== 'idle' || item.status === 'uploaded'}>
+                    {item.status === 'uploading' ? <Loader2 className="spin" size={15} /> : <Upload size={15} />}
+                    {item.status === 'failed' ? '重试' : '保存上传'}
+                  </button>
+                  <button className="danger icon-only" onClick={() => onRemovePackage(item.id)} disabled={item.status === 'uploading'}>
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="import-fields">
+                <label className="field">
+                  <span>货号</span>
+                  <input
+                    value={item.sku}
+                    onChange={(event) => onUpdatePackage(item.id, { sku: event.target.value })}
+                  />
+                </label>
+                <label className="field">
+                  <span>标题</span>
+                  <input
+                    value={item.title}
+                    onChange={(event) => onUpdatePackage(item.id, { title: event.target.value })}
+                  />
+                </label>
+              </div>
+
+              {hasDuplicate && <div className="inline-warning">当前待上传列表中存在重复货号，保存前建议修改。</div>}
+              {item.error && <div className="inline-error">{item.error}</div>}
+
+              <div className="import-image-section">
+                <div className="section-heading tight">
+                  <h2>素材图片</h2>
+                  <span>{item.images.length} 张</span>
+                </div>
+                <div className="asset-grid import-image-grid">
+                {item.images.map((image) => (
+                  <article className="asset-card" key={image.id}>
+                    <div className="asset-thumb">
+                      <ImagePreviewThumb
+                        src={image.previewUrl}
+                        name={image.file.name}
+                        fileSize={image.file.size}
+                      />
+                    </div>
+                    <div className="asset-meta">
+                      <strong title={image.file.name}>{middleEllipsis(image.file.name)}</strong>
+                      <small title={image.relativePath}>
+                        <ImageInfoLine src={image.previewUrl} fileSize={image.file.size} />
+                      </small>
+                      <div className="asset-actions single">
+                        <button onClick={() => onRemoveImage(item.id, image.id)} title="移除图片">
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+                </div>
+              </div>
+            </article>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function FactRows({ analysis }: { analysis?: GarmentSku['analysis'] }) {
   if (!analysis) {
     return (
       <div className="fact-empty">
         <p>待策划</p>
-        <span>点击“预览方案”后，Gemini 会根据服装主图生成品类、结构和组图建议。</span>
+        <span>点击“生成默认方案”后，Gemini 会根据服装主图生成品类、结构和组图建议。</span>
       </div>
     )
   }
@@ -516,22 +1543,215 @@ function PlaceholderPage({ title, text }: { title: string; text: string }) {
   )
 }
 
-function HistoryPage({ logs }: { logs: EventLog[] }) {
+function GenerationHistoryOverview({
+  runs,
+  currentSkuId,
+  onOpenRun,
+}: {
+  runs: GenerationRun[]
+  currentSkuId?: number
+  onOpenRun: (run: GenerationRun) => void
+}) {
+  const relevantRuns = [...runs]
+    .sort((a, b) => {
+      const aSelected = currentSkuId && a.skuId === currentSkuId ? 1 : 0
+      const bSelected = currentSkuId && b.skuId === currentSkuId ? 1 : 0
+      if (aSelected !== bSelected) return bSelected - aSelected
+      return Date.parse(b.createdAt) - Date.parse(a.createdAt)
+    })
+    .slice(0, 5)
+
+  if (relevantRuns.length === 0) {
+    return <EmptyText text="还没有生成任务" />
+  }
+
+  return (
+    <div className="generation-history-overview">
+      {relevantRuns.map((run) => (
+        <button className="generation-history-card" key={run.id} onClick={() => onOpenRun(run)}>
+          <div className="mini-preview-strip">
+            {(run.summary?.previews ?? []).slice(0, 3).map((preview) => (
+              preview.url ? <img key={preview.id} src={mediaUrl(preview.url)} alt={preview.title} /> : <span key={preview.id} />
+            ))}
+            {(run.summary?.previews ?? []).length === 0 && <span>无图</span>}
+          </div>
+          <span>
+            <strong>{run.sku ?? `记录 #${run.id}`}</strong>
+            <small>{statusText(run.status)} · {run.summary?.succeededCount ?? 0}/{run.summary?.imageCount ?? 0} 张</small>
+            <small>
+              记录 #{run.id}
+              {run.summary?.regenerationCount ? ` · 重生 ${run.summary.regenerationCount}` : ''}
+            </small>
+          </span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function HistoryPage({
+  runs,
+  selectedRun,
+  filter,
+  onFilterChange,
+  onOpenRun,
+  onRestoreRun,
+}: {
+  runs: GenerationRun[]
+  selectedRun: GenerationRun | null
+  filter: string
+  onFilterChange: (value: string) => void
+  onOpenRun: (runId: number) => void
+  onRestoreRun: (run: GenerationRun) => void
+}) {
+  const keyword = filter.trim().toLowerCase()
+  const visibleRuns = keyword
+    ? runs.filter((run) =>
+        [run.sku, run.skuTitle, run.status, String(run.id), String(run.shotPlanId)]
+          .filter(Boolean)
+          .some((value) => String(value).toLowerCase().includes(keyword)),
+      )
+    : runs
+
   return (
     <main className="history-page">
-      <section className="panel">
-        <div className="panel-title"><History size={18} /><span>生成记录</span></div>
-        <div className="history-table">
-          {logs.map((log) => (
-            <div className="history-row" key={log.id}>
-              <span>{log.createdAt}</span>
-              <strong>{log.eventType}</strong>
-              <small>{log.entityType} #{log.entityId ?? '-'}</small>
-            </div>
+      <section className="panel history-list-panel">
+        <div className="panel-title"><History size={18} /><span>历史任务</span></div>
+        <div className="history-toolbar">
+          <input
+            value={filter}
+            onChange={(event) => onFilterChange(event.target.value)}
+            placeholder="搜索货号、记录号、状态"
+          />
+          <span>{visibleRuns.length} 条任务</span>
+        </div>
+        <div className="history-run-list">
+          {visibleRuns.length === 0 && <EmptyText text="还没有匹配的生成任务" />}
+          {visibleRuns.map((run) => (
+            <article className={`history-run-card ${selectedRun?.id === run.id ? 'selected' : ''}`} key={run.id}>
+              <button className="history-run-main" onClick={() => onOpenRun(run.id)}>
+                <div className="history-preview-strip">
+                  {(run.summary?.previews ?? []).slice(0, 4).map((preview) => (
+                    preview.url ? <img key={preview.id} src={mediaUrl(preview.url)} alt={preview.title} /> : <div key={preview.id} />
+                  ))}
+                  {(run.summary?.previews ?? []).length === 0 && <div className="history-preview-empty">无图</div>}
+                </div>
+                <span className="history-run-copy">
+                  <strong>{run.sku ?? `记录 #${run.id}`}</strong>
+                  <small>{run.skuTitle || `方案 #${run.shotPlanId}`} · {run.createdAt}</small>
+                  <small>
+                    {statusText(run.status)} · {run.summary?.succeededCount ?? 0}/{run.summary?.imageCount ?? 0} 张完成
+                    {run.summary?.finalCount ? ` · ${run.summary.finalCount} 张最终图` : ''}
+                    {run.summary?.regenerationCount ? ` · 重生 ${run.summary.regenerationCount} 次` : ''}
+                  </small>
+                </span>
+              </button>
+              <button className="secondary" onClick={() => onRestoreRun(run)}>恢复</button>
+            </article>
           ))}
         </div>
       </section>
+
+      <section className="panel history-detail-panel">
+        <div className="panel-title"><FileImage size={18} /><span>任务详情</span></div>
+        {!selectedRun ? (
+          <EmptyText text="选择一条历史任务查看入参、输出和重生过程" />
+        ) : (
+          <HistoryRunDetail run={selectedRun} onRestoreRun={onRestoreRun} />
+        )}
+      </section>
     </main>
+  )
+}
+
+function HistoryRunDetail({ run, onRestoreRun }: { run: GenerationRun; onRestoreRun: (run: GenerationRun) => void }) {
+  const firstImage = run.images?.[0]
+  const firstTaskPackage = firstImage?.taskPackage ?? {}
+  const garment = firstImage?.garmentSnapshot ?? (firstTaskPackage.garment as Record<string, unknown> | undefined)
+  const model = firstImage?.modelSnapshot ?? (firstTaskPackage.model as Record<string, unknown> | undefined)
+  const brandStyle = (firstTaskPackage.brandStyle as Record<string, unknown> | undefined) ?? {}
+  const totalAttempts = run.images?.reduce((sum, image) => sum + Math.max(image.currentAttemptIndex || image.attempts?.length || 1, 1), 0) ?? 0
+
+  return (
+    <div className="history-detail">
+      <div className="history-detail-head">
+        <div>
+          <h2>{run.sku ?? `生成任务 #${run.id}`}</h2>
+          <p>记录 #{run.id} · {statusText(run.status)} · {run.createdAt}</p>
+        </div>
+        <button className="primary" onClick={() => onRestoreRun(run)}>
+          <RefreshCw size={16} />恢复到生成页
+        </button>
+      </div>
+
+      <div className="history-stats">
+        <span><strong>{run.images?.length ?? 0}</strong><small>图位</small></span>
+        <span><strong>{totalAttempts}</strong><small>调用/尝试</small></span>
+        <span><strong>{run.images?.filter((image) => image.isFinal).length ?? 0}</strong><small>最终图</small></span>
+        <span><strong>{run.shotPlanId}</strong><small>方案</small></span>
+      </div>
+
+      <div className="history-section">
+        <h3>本次入参快照</h3>
+        <div className="snapshot-grid">
+          <SnapshotItem label="货号" value={run.sku ?? '-'} />
+          <SnapshotItem label="模特" value={snapshotText(model, ['modelId'])} />
+          <SnapshotItem label="品牌模板" value={snapshotText(brandStyle, ['name', 'summary'])} />
+          <SnapshotItem label="商品摘要" value={snapshotText(garment, ['summary', 'category', 'color', 'fabric'])} />
+        </div>
+      </div>
+
+      <div className="history-section">
+        <h3>输出与重生过程</h3>
+        <div className="history-shot-list">
+          {(run.images ?? []).map((image) => (
+            <article className="history-shot-card" key={image.id}>
+              <div className="history-shot-image">
+                {image.url ? <img src={mediaUrl(image.url)} alt={image.title} /> : <span>{statusText(image.status)}</span>}
+                {image.isFinal && <b>最终图</b>}
+              </div>
+              <div className="history-shot-body">
+                <strong>{String(image.shotIndex).padStart(2, '0')} {image.title}</strong>
+                <small>{statusText(image.status)} · 图片记录 #{image.id}</small>
+                <p>{image.prompt || '暂无提示词快照'}</p>
+                <details>
+                  <summary>查看 {Math.max(image.attempts?.length || image.currentAttemptIndex || 1, 1)} 次调用</summary>
+                  <div className="attempt-list">
+                    {(image.attempts?.length ? image.attempts : [{ attemptIndex: 1, kind: 'initial', prompt: image.prompt }]).map((attempt) => (
+                      <div className="attempt-row" key={String(attempt['attemptIndex'] ?? attempt['createdAt'] ?? image.id)}>
+                        <span>#{String(attempt['attemptIndex'] ?? 1)} · {attempt['kind'] === 'regeneration' ? '重生' : '初次生成'}</span>
+                        <small>{String(attempt['reason'] || image.regenerateReason || '无原因备注')} · {String(attempt['providerStatus'] || image.providerStatus || '-')}</small>
+                        {attempt['prompt'] ? <p>{String(attempt['prompt'])}</p> : null}
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              </div>
+            </article>
+          ))}
+        </div>
+      </div>
+
+      {firstImage && (
+        <details className="debug-json">
+          <summary>高级调试 JSON</summary>
+          <pre>{JSON.stringify({
+            taskPackage: firstImage.taskPackage,
+            providerRequest: firstImage.providerRequest,
+            providerResponse: firstImage.providerResponse,
+          }, null, 2)}</pre>
+        </details>
+      )}
+    </div>
+  )
+}
+
+function SnapshotItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="snapshot-item">
+      <small>{label}</small>
+      <strong>{value || '-'}</strong>
+    </div>
   )
 }
 
@@ -588,45 +1808,73 @@ function ShotPlanBoard({ shotPlan }: { shotPlan: ShotPlan }) {
 function ResultGallery({
   run,
   loading,
+  nowMs,
   onRegenerate,
   onToggleFinal,
   onExport,
 }: {
   run: GenerationRun | null
   loading: boolean
+  nowMs: number
   onRegenerate: (image: GenerationImage, reason: string) => void
   onToggleFinal: (image: GenerationImage) => void
   onExport: (runId: number) => void
 }) {
   const placeholders = Array.from({ length: 5 }, (_, index) => index + 1)
+  const runStartedAt = run?.images?.[0]?.submittedAt ?? run?.createdAt
   return (
     <section className="results">
       <div className="section-heading">
         <h2>生成结果</h2>
-        {run && <span>{run.kind === 'regeneration' ? '重生记录' : '组图记录'} #{run.id} · {statusText(run.status)}</span>}
+        {run && (
+          <span>
+            {run.kind === 'regeneration' ? '重生记录' : '组图记录'} #{run.id} · {statusText(run.status)}
+            {runStartedAt ? ` · 已运行 ${elapsedText(runStartedAt, nowMs, run.updatedAt, !isRunActive(run))}` : ''}
+          </span>
+        )}
       </div>
       <div className="result-grid">
         {run?.images?.length
-          ? run.images.map((image) => (
+          ? run.images.map((image) => {
+              const imageActive = isImageActive(image)
+              const imageElapsed = elapsedText(image.submittedAt ?? image.createdAt, nowMs, image.completedAt ?? image.updatedAt, !imageActive)
+              return (
               <article className="result-card" key={image.id}>
                 <div className="result-image">
-                  {image.url ? <img src={mediaUrl(image.url)} alt={image.title} /> : <span>{statusText(image.status)}</span>}
-                  {image.isFinal && <div className="final-badge"><Check size={14} />最终图</div>}
+                  {image.url ? (
+                    <ImagePreviewThumb
+                      src={mediaUrl(image.url)}
+                      name={`${String(image.shotIndex).padStart(2, '0')} ${image.title}`}
+                      fileSize={image.fileSize}
+                    >
+                      {image.isFinal && <div className="final-badge"><Check size={14} />最终图</div>}
+                    </ImagePreviewThumb>
+                  ) : (
+                    <div className="result-pending">
+                      {imageActive && <Loader2 className="spin" size={22} />}
+                      <strong>{statusText(image.status)}</strong>
+                      <small>{providerStatusText(image.providerStatus)}</small>
+                    </div>
+                  )}
                 </div>
                 <div className="result-meta">
-                  <strong>{String(image.shotIndex).padStart(2, '0')} {image.title}</strong>
-                  <small>{statusText(image.status)} · 记录 #{image.id}</small>
+                  <strong title={`${String(image.shotIndex).padStart(2, '0')} ${image.title}`}>
+                    {middleEllipsis(`${String(image.shotIndex).padStart(2, '0')} ${image.title}`)}
+                  </strong>
+                  <small>{statusText(image.status)} · {imageElapsed} · 记录 #{image.id}</small>
+                  {image.providerRequestId && <small>fal #{shortId(image.providerRequestId)} · {providerStatusText(image.providerStatus)}</small>}
                 </div>
                 <div className="result-actions">
-                  <button onClick={() => onRegenerate(image, '姿势不合适')} disabled={loading}>
+                  <button onClick={() => onRegenerate(image, '姿势不合适')} disabled={loading || imageActive}>
                     <RefreshCw size={15} />重生
                   </button>
-                  <button onClick={() => onToggleFinal(image)}>
+                  <button onClick={() => onToggleFinal(image)} disabled={image.status !== 'SUCCEEDED'}>
                     <Check size={15} />{image.isFinal ? '取消最终' : '设为最终'}
                   </button>
                 </div>
               </article>
-            ))
+              )
+            })
           : placeholders.map((index) => (
               <article className="result-card empty" key={index}>
                 <div className="result-image"><span>待生成</span></div>
@@ -656,6 +1904,114 @@ function Tag({ children }: { children: ReactNode }) {
   return <span className="tag">{children}</span>
 }
 
+function ImagePreviewThumb({
+  src,
+  name,
+  fileSize,
+  compact,
+  round,
+  children,
+}: {
+  src: string
+  name: string
+  fileSize?: number | null
+  compact?: boolean
+  round?: boolean
+  children?: ReactNode
+}) {
+  const [open, setOpen] = useState(false)
+  const [dimensions, setDimensions] = useState<ImageDimensions | null>(null)
+
+  useEffect(() => {
+    if (!open) return undefined
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [open])
+
+  useEffect(() => {
+    setDimensions(null)
+  }, [src])
+
+  const summary = imageSummary(dimensions, fileSize)
+
+  return (
+    <>
+      <div
+        className={`image-preview-thumb ${compact ? 'compact' : ''} ${round ? 'round' : ''}`}
+        role="button"
+        tabIndex={0}
+        title={`${name}${summary ? ` · ${summary}` : ''}`}
+        onClick={(event) => {
+          event.stopPropagation()
+          setOpen(true)
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            event.stopPropagation()
+            setOpen(true)
+          }
+        }}
+      >
+        <img
+          src={src}
+          alt={name}
+          onLoad={(event) => {
+            const target = event.currentTarget
+            setDimensions({ width: target.naturalWidth, height: target.naturalHeight })
+          }}
+        />
+        {children}
+      </div>
+
+      {open && createPortal(
+        <div
+          className="preview-backdrop"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setOpen(false)}
+        >
+          <div className="preview-dialog" onClick={(event) => event.stopPropagation()}>
+            <button className="preview-close" onClick={() => setOpen(false)} title="关闭预览">
+              <X size={18} />
+            </button>
+            <div className="preview-image-frame">
+              <img src={src} alt={name} />
+            </div>
+            <div className="preview-info">
+              <strong title={name}>{middleEllipsis(name, 42)}</strong>
+              <span>{imageSummary(dimensions, fileSize) || '图片信息读取中'}</span>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
+  )
+}
+
+function ImageInfoLine({ src, fileSize }: { src: string; fileSize?: number | null }) {
+  const [dimensions, setDimensions] = useState<ImageDimensions | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setDimensions(null)
+    const image = new Image()
+    image.onload = () => {
+      if (!cancelled) setDimensions({ width: image.naturalWidth, height: image.naturalHeight })
+    }
+    image.src = src
+    return () => {
+      cancelled = true
+    }
+  }, [src])
+
+  return <>{imageSummary(dimensions, fileSize) || '图片信息读取中'}</>
+}
+
 function statusText(status: string) {
   const map: Record<string, string> = {
     NEW: '待策划',
@@ -663,19 +2019,277 @@ function statusText(status: string) {
     CONFIRMED: '已确认',
     DRAFT: '待确认',
     RUNNING: '生成中',
+    QUEUED: '待提交',
+    SUBMITTED: '已提交',
+    IN_QUEUE: 'fal 排队中',
+    IN_PROGRESS: 'fal 生成中',
     SUCCEEDED: '已生成',
+    PARTIAL_SUCCEEDED: '部分完成',
     FAILED: '失败',
+    CANCELLED: '已取消',
     CREATED: '已创建',
   }
   return map[status] ?? status
 }
 
-function roleText(role: string) {
+function providerStatusText(status?: string | null) {
+  if (!status) return '等待 fal 状态'
   const map: Record<string, string> = {
-    main: '主参考图',
-    reference: '参考图',
+    SUBMITTED: '已提交 fal',
+    IN_QUEUE: 'fal 队列中',
+    IN_PROGRESS: 'fal 生成中',
+    COMPLETED: 'fal 已完成',
+    FAILED: 'fal 失败',
+    ERROR: 'fal 错误',
+    CANCELED: 'fal 已取消',
+    CANCELLED: 'fal 已取消',
+    STATUS_CHECK_FAILED: '状态查询失败',
   }
-  return map[role] ?? role
+  return map[status] ?? status
+}
+
+function snapshotText(snapshot: Record<string, unknown> | null | undefined, keys: string[]) {
+  if (!snapshot) return '-'
+  const values = keys
+    .map((key) => snapshot[key])
+    .filter((value) => value !== undefined && value !== null && String(value).trim())
+    .map((value) => Array.isArray(value) ? value.join('、') : String(value))
+  return values.length ? values.join(' · ') : '-'
+}
+
+function isRunActive(run: GenerationRun) {
+  return run.status === 'RUNNING' || run.images?.some(isImageActive)
+}
+
+function isImageActive(image: GenerationImage) {
+  return ['QUEUED', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS', 'RUNNING'].includes(image.status)
+}
+
+function elapsedText(startIso?: string | null, nowMs = Date.now(), endIso?: string | null, useEnd = false) {
+  if (!startIso) return '00:00'
+  const start = Date.parse(startIso)
+  if (!Number.isFinite(start)) return '00:00'
+  const end = useEnd && endIso ? Date.parse(endIso) : nowMs
+  const seconds = Math.max(0, Math.floor(((Number.isFinite(end) ? end : nowMs) - start) / 1000))
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const remainSeconds = seconds % 60
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${String(remainSeconds).padStart(2, '0')}`
+  return `${String(minutes).padStart(2, '0')}:${String(remainSeconds).padStart(2, '0')}`
+}
+
+function shortId(value: string) {
+  return value.length <= 12 ? value : `${value.slice(0, 6)}…${value.slice(-4)}`
+}
+
+function importStatusText(status: ImportStatus) {
+  const map: Record<ImportStatus, string> = {
+    draft: '待上传',
+    uploading: '上传中',
+    uploaded: '已上传',
+    failed: '上传失败',
+  }
+  return map[status]
+}
+
+function createImportPackage(sku: string, sourceFiles: File[], sourceName: string): ImportPackage {
+  const images = sourceFiles
+    .filter((file) => file.type.startsWith('image/'))
+    .map((file) => {
+      const relativePath = getRelativePath(file)
+      return {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        file,
+        previewUrl: URL.createObjectURL(file),
+        relativePath,
+      }
+    })
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    sourceName,
+    sku: sanitizeClientSku(sku),
+    title: sanitizeClientSku(sku),
+    images,
+    status: 'draft',
+  }
+}
+
+function groupFilesByTopFolder(files: File[]) {
+  return files.reduce<Record<string, File[]>>((groups, file) => {
+    const relativePath = getRelativePath(file)
+    const folderName = relativePath.includes('/') ? relativePath.split('/')[0] : '未命名文件夹'
+    groups[folderName] = groups[folderName] ?? []
+    groups[folderName].push(file)
+    return groups
+  }, {})
+}
+
+function getRelativePath(file: File) {
+  return ((file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name)
+}
+
+function sanitizeClientSku(value: string) {
+  return value.trim().replace(/\.[^.]+$/, '').replace(/[^\p{L}\p{N}_-]/gu, '-').replace(/^-+|-+$/g, '') || '未命名货号'
+}
+
+function findDuplicateSkus(packages: ImportPackage[]) {
+  const counts = packages.reduce<Record<string, number>>((acc, item) => {
+    const sku = item.sku.trim()
+    if (sku) acc[sku] = (acc[sku] ?? 0) + 1
+    return acc
+  }, {})
+  return new Set(Object.entries(counts).filter(([, count]) => count > 1).map(([sku]) => sku))
+}
+
+const HEAD_REFERENCE_OPTIONS = [
+  { value: 'front', label: '正脸' },
+  { value: 'left45', label: '左 45 度' },
+  { value: 'right45', label: '右 45 度' },
+  { value: 'right90', label: '右侧 90 度' },
+  { value: 'left90', label: '左侧 90 度' },
+  { value: 'up45', label: '抬头' },
+  { value: 'down45', label: '低头' },
+  { value: 'back', label: '背面' },
+  { value: 'backTurnLeft45', label: '背面回头左 45 度' },
+  { value: 'backTurnRight45', label: '背面回头右 45 度' },
+]
+
+function createBlankModelForm(index = 1): ModelForm {
+  const suffix = String(index).padStart(2, '0')
+  return {
+    modelId: `Face-${suffix}`,
+    name: `Face-${suffix} 数字模特`,
+    isDefault: false,
+    height: '170cm',
+    weight: '',
+    bodyShape: 'H型',
+    bust: '80cm',
+    waist: '59cm',
+    hips: '89cm',
+    notes: '都市、通勤、轻熟、自然、克制',
+  }
+}
+
+function modelToForm(model: ModelProfile): ModelForm {
+  const profile = model.profile
+  return {
+    modelId: model.modelId,
+    name: model.name,
+    isDefault: model.isDefault,
+    height: profileString(profile, 'height'),
+    weight: profileString(profile, 'weight'),
+    bodyShape: profileString(profile, 'bodyShape'),
+    bust: profileString(profile, 'bust'),
+    waist: profileString(profile, 'waist'),
+    hips: profileString(profile, 'hips'),
+    notes: profileString(profile, 'notes') || [profileString(profile, 'temperament'), profileString(profile, 'expression')].filter(Boolean).join('、'),
+  }
+}
+
+function modelFormToProfile(form: ModelForm, existing?: ModelProfile): Record<string, unknown> {
+  const {
+    bodyType,
+    shoulder,
+    legRatio,
+    skinTone,
+    hair,
+    expression,
+    temperament,
+    ...existingProfile
+  } = existing?.profile ?? {}
+  return {
+    ...existingProfile,
+    height: form.height.trim(),
+    weight: form.weight.trim(),
+    bodyShape: form.bodyShape.trim(),
+    bust: form.bust.trim(),
+    waist: form.waist.trim(),
+    hips: form.hips.trim(),
+    notes: form.notes.trim(),
+  }
+}
+
+function profileString(profile: Record<string, unknown>, key: string) {
+  const value = profile[key]
+  return typeof value === 'string' ? value : ''
+}
+
+function getSavedHeadEntries(model?: ModelProfile): ModelHeadEntry[] {
+  const entries = model?.profile.headReferenceEntries
+  if (!entries || !Array.isArray(entries)) return []
+  return entries
+    .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null && !Array.isArray(item))
+    .map((item) => ({
+      id: typeof item.id === 'string' ? item.id : '',
+      angle: typeof item.angle === 'string' ? item.angle : '',
+      filename: typeof item.filename === 'string' ? item.filename : '',
+      url: typeof item.url === 'string' ? mediaUrl(item.url) : '',
+      fileSize: typeof item.fileSize === 'number' ? item.fileSize : undefined,
+    }))
+    .filter((item) => item.id)
+}
+
+function getDraftHeadEntries(drafts: ModelHeadDraft[]): ModelHeadEntry[] {
+  return drafts.map((item) => ({
+    id: item.id,
+    angle: item.angle,
+    filename: item.file.name,
+    url: item.previewUrl,
+    fileSize: item.file.size,
+  }))
+}
+
+function headReferenceLabel(angle: string) {
+  return HEAD_REFERENCE_OPTIONS.find((option) => option.value === angle)?.label ?? angle
+}
+
+function modelInitials(model: ModelProfile) {
+  return model.modelId.replace(/[^A-Za-z0-9]/g, '').slice(0, 3).toUpperCase() || 'MOD'
+}
+
+function modelSummary(model?: ModelProfile) {
+  if (!model) return ''
+  const profile = model.profile
+  return [
+    model.isDefault ? '默认模特' : '备用模特',
+    profileString(profile, 'height'),
+    profileString(profile, 'weight'),
+    profileString(profile, 'bodyShape'),
+    profileString(profile, 'notes') || profileString(profile, 'temperament'),
+  ].filter(Boolean).join(' / ')
+}
+
+function modelPreviewFileSize(model: ModelProfile) {
+  const entries = getSavedHeadEntries(model)
+  return entries.find((item) => item.angle === 'front')?.fileSize ?? entries[0]?.fileSize
+}
+
+function imageSummary(dimensions: ImageDimensions | null, fileSize?: number | null) {
+  const parts = [
+    dimensions ? `${dimensions.width}x${dimensions.height}` : undefined,
+    formatFileSize(fileSize),
+  ].filter(Boolean)
+  return parts.join(' · ')
+}
+
+function formatFileSize(bytes?: number | null) {
+  if (!bytes && bytes !== 0) return ''
+  if (bytes < 1024) return `${bytes} B`
+  const kb = bytes / 1024
+  if (kb < 1024) return `${kb >= 100 ? Math.round(kb) : kb.toFixed(1)} KB`
+  const mb = kb / 1024
+  return `${mb >= 100 ? Math.round(mb) : mb.toFixed(1)} MB`
+}
+
+function middleEllipsis(value: string, maxLength = 28) {
+  if (value.length <= maxLength) return value
+  const extensionMatch = value.match(/(\.[^.]{1,8})$/)
+  const extension = extensionMatch?.[1] ?? ''
+  const text = extension ? value.slice(0, -extension.length) : value
+  const available = Math.max(maxLength - extension.length - 3, 8)
+  const head = Math.ceil(available * 0.58)
+  const tail = Math.floor(available * 0.42)
+  return `${text.slice(0, head)}...${text.slice(Math.max(text.length - tail, head))}${extension}`
 }
 
 function pageTitle(page: Page) {
@@ -690,7 +2304,7 @@ function pageTitle(page: Page) {
 
 function pageSubtitle(page: Page) {
   const map: Record<Page, string> = {
-    generate: '选择服装和模特，确认组图后即可生成电商主图',
+    generate: '选择服装货号，直接使用默认组图方案生成电商主图',
     garments: '上传、管理和使用服装货号图包',
     models: '维护数字模特身份、角度和身体参数',
     history: '查看生成、重生、导出和系统事件',
@@ -700,9 +2314,5 @@ function pageSubtitle(page: Page) {
 
 function mergeRun(current: GenerationRun | null, next: GenerationRun): GenerationRun {
   if (!current?.images) return next
-  return {
-    ...current,
-    images: [...current.images, ...(next.images ?? [])],
-    updatedAt: next.updatedAt,
-  }
+  return next
 }

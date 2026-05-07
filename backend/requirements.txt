@@ -2,4 +2,5 @@ fastapi==0.124.0
 uvicorn[standard]==0.38.0
 python-multipart==0.0.20
 google-genai==1.55.0
-
+fal-client>=0.7.0
+python-dotenv==1.2.1

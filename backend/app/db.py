@@ -127,7 +127,27 @@ def init_db() -> None:
             );
             """
         )
+        ensure_column(db, "generation_images", "prompt_text", "TEXT")
+        ensure_column(db, "generation_images", "image_inputs_json", "TEXT")
+        ensure_column(db, "generation_images", "template_snapshot_json", "TEXT")
+        ensure_column(db, "generation_images", "model_snapshot_json", "TEXT")
+        ensure_column(db, "generation_images", "garment_snapshot_json", "TEXT")
+        ensure_column(db, "generation_images", "attempts_json", "TEXT")
+        ensure_column(db, "generation_images", "current_attempt_index", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(db, "generation_images", "provider_request_id", "TEXT")
+        ensure_column(db, "generation_images", "provider_status", "TEXT")
+        ensure_column(db, "generation_images", "provider_urls_json", "TEXT")
+        ensure_column(db, "generation_images", "provider_status_json", "TEXT")
+        ensure_column(db, "generation_images", "submitted_at", "TEXT")
+        ensure_column(db, "generation_images", "completed_at", "TEXT")
+        ensure_column(db, "generation_images", "last_status_checked_at", "TEXT")
         seed_default_model(db)
+
+
+def ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def seed_default_model(db: sqlite3.Connection) -> None:
@@ -140,16 +160,14 @@ def seed_default_model(db: sqlite3.Connection) -> None:
     settings = get_settings()
     profile = {
         "height": "170cm",
-        "bodyType": "标准偏瘦",
-        "shoulder": "标准",
-        "legRatio": "标准偏长",
-        "skinTone": "自然白皙",
-        "hair": "短棕色 bob，轻薄刘海",
-        "expression": "自然、克制",
-        "temperament": "都市、通勤、轻熟",
+        "weight": "",
+        "bodyShape": "H型",
+        "bust": "80cm",
+        "waist": "59cm",
+        "hips": "89cm",
+        "notes": "都市、通勤、轻熟、自然、克制；短棕色 bob，轻薄刘海",
         "headReferences": {
             "front": "front.png",
-            "frontAlt": "front_2.png",
             "left45": "left45.png",
             "right90": "right90.png",
             "back": "back.png",
@@ -225,4 +243,3 @@ def log_event(
             )
             + "\n"
         )
-

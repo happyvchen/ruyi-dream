@@ -67,10 +67,10 @@ Image 2 是最终视觉合成器，不是整条链路的大脑。品牌调性、
 
 | 要素 | 技术路线 | 运行时机 | 生产操作 | Image 2 的角色 |
 | --- | --- | --- | --- | --- |
-| 商品事实 | VLM 识别 + 商品图角色分类 + 人工确认 | 每个货号首次生成 | 上传/选择货号图包，系统生成商品事实卡，用户确认关键字段 | 参考服装图还原 |
+| 商品事实 | VLM 识别 + 人工确认 | 每个货号首次生成 | 上传/选择货号图包，系统生成商品事实卡，用户确认关键字段；当前不做图片角色分类 | 参考服装图还原 |
 | 商品比例 | 商品图视觉判断 + 可选尺寸表映射 | 每个货号首次生成；尺寸变化时更新 | 用户可填衣长/裙长/裤长/下摆宽/穿着尺码，不填也可生成 | 按比例约束生成，不能单独推理尺寸 |
-| 模特身份 | 数字模特多角度头部档案 | 模特维护时；每次生成调用 | 在数字模特中维护正脸/侧脸/回头等头像 | 保持脸和发型一致 |
-| 模特身体 | 模特身体参数档案 | 模特维护时；每次生成调用 | 维护身高、体型、肩宽、腿长比例、可选三围 | 按固定身体比例生成 |
+| 模特身份 | 数字模特多角度头部档案 | 模特维护时；每次生成调用 | 在数字模特中维护正脸/侧脸/回头等头像；允许头像先处于未设置状态再分配角度 | 保持脸和发型一致 |
+| 模特身体 | 模特身体参数档案 | 模特维护时；每次生成调用 | 当前维护身高、体重、身型、胸围、腰围、臀围、其它信息 | 按固定身体比例生成 |
 | 品牌调性 | 历史真实图分析 + 模板库 + 标签检索 | 品牌初始化或模板修改时 | 分析 Lily 历史图，沉淀品类模板和参考图索引 | 按参考图和短边界执行 |
 | 鞋包搭配 | 品牌模板 + 同品类参考图 + 策划器选择 | 每次生成策划时 | 系统按品类/季节/图位选择搭配边界 | 在边界内生成具体鞋包 |
 | Pose | Pose 模板库 + 图位规则 | 每次生成策划时 | 系统为每张图绑定 pose 参考图 | 按 pose 参考图生成身体动作 |
@@ -137,7 +137,7 @@ flowchart LR
 产品实现：
 
 1. 用户上传或选择货号图包。
-2. 系统自动分类图片角色。
+2. 当前不自动分类图片角色，默认按上传顺序使用。
 3. 系统生成商品识别卡。
 4. 用户只确认或修正关键字段。
 
@@ -182,9 +182,9 @@ black sleeveless A-line dress with blue striped ruffle...
 产品实现：
 
 1. 数字模特中心维护多模特。
-2. 每个模特保存多角度头部图。
-3. 每张镜头自动匹配头部角度。
-4. 生成时绑定当前镜头所需头部图，而不是只丢一个合集。
+2. 每个模特保存多张头像，允许部分头像暂未设置角度。
+3. 用户在数字模特页逐张为头像分配角度、替换、删除和排序。
+4. 生成时优先使用当前镜头所需角度；`front` 作为封面与主要预览来源。
 
 生产例子：
 
@@ -224,14 +224,17 @@ black sleeveless A-line dress with blue striped ruffle...
 
 生产例子：
 
-当前 Face-01 可以先维护：
+当前 Face-01 实际维护字段为：
 
 ```json
 {
   "height": "170cm",
-  "bodyType": "标准偏瘦",
-  "shoulder": "标准",
-  "legRatio": "标准偏长"
+  "weight": "",
+  "bodyShape": "H型",
+  "bust": "80cm",
+  "waist": "59cm",
+  "hips": "89cm",
+  "notes": "都市、通勤、轻熟、自然、克制；短棕色 bob，轻薄刘海"
 }
 ```
 
@@ -536,19 +539,20 @@ Shot 02 侧身图：
 文本输入：
 
 ```text
-Task: Generate one Lily e-commerce model photo for shot 02: side full-body.
+任务：
+生成一张 Lily 电商模特图，当前图位为 02：侧身全身。
 
-Image roles:
-Garment images are the source of truth for garment facts.
-Model head image is the source of truth for identity.
-Pose reference defines body posture.
-Lily references define brand-style boundary.
+图片角色：
+- 服装参考图是商品事实来源。
+- 模特头部图是身份事实来源。
+- Pose 参考图定义身体动作。
+- Lily 真实成片参考图定义品牌调性边界。
 
-Shot:
-Side walking-feel full-body image, show side silhouette and hem layer.
+当前图要求：
+侧身走动感全身图，展示侧面廓形和下摆层次。
 
-Do not:
-Change model identity, garment design, garment proportions, or styling outside Lily references.
+禁止：
+不要改变模特身份、服装设计、服装比例，不要生成超出 Lily 参考图边界的造型。
 ```
 
 ### 5.3 预期效果

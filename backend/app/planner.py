@@ -150,18 +150,41 @@ def build_planner_prompt(sku: str) -> str:
 
 async def plan_with_gemini(sku: str, image_paths: list[Path]) -> tuple[dict[str, Any], str, str]:
     settings = get_settings()
+    prompt = build_planner_prompt(sku)
+    request_snapshot = {
+        "model": settings.gemini_model,
+        "prompt": prompt,
+        "inputs": {
+            "sku": sku,
+            "imagePaths": [str(path) for path in image_paths[:6]],
+        },
+        "responseMimeType": "application/json",
+    }
     if not settings.gemini_api_key:
         plan = fallback_plan(sku, "Face-01")
-        return plan, "fallback", "GEMINI_API_KEY is not configured; used fallback plan."
+        return plan, "fallback", json.dumps(
+            {
+                "providerRequest": request_snapshot,
+                "providerResponse": None,
+                "note": "GEMINI_API_KEY 未配置，使用 fallback 默认方案。",
+            },
+            ensure_ascii=False,
+        )
 
     try:
         from google import genai
         from google.genai import types
     except Exception as exc:  # pragma: no cover - dependency issue branch
         plan = fallback_plan(sku, "Face-01")
-        return plan, "fallback", f"google-genai import failed: {exc}"
+        return plan, "fallback", json.dumps(
+            {
+                "providerRequest": request_snapshot,
+                "providerResponse": None,
+                "note": f"google-genai 导入失败，使用 fallback 默认方案: {exc}",
+            },
+            ensure_ascii=False,
+        )
 
-    prompt = build_planner_prompt(sku)
     contents: list[Any] = [prompt]
     for path in image_paths[:6]:
         contents.append(
@@ -177,15 +200,35 @@ async def plan_with_gemini(sku: str, image_paths: list[Path]) -> tuple[dict[str,
         )
     except Exception as exc:
         plan = fallback_plan(sku, "Face-01")
-        return plan, "gemini-error-fallback", f"Gemini request failed: {exc}"
+        return plan, "gemini-error-fallback", json.dumps(
+            {
+                "providerRequest": request_snapshot,
+                "providerResponse": None,
+                "note": f"Gemini 请求失败，使用 fallback 默认方案: {exc}",
+            },
+            ensure_ascii=False,
+        )
     raw = response.text or "{}"
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
         parsed = fallback_plan(sku, "Face-01")
-        raw = f"Failed to parse Gemini JSON. Raw response: {raw}"
-        return parsed, "gemini-json-parse-fallback", raw
-    return normalize_plan(parsed, sku), "gemini", raw
+        return parsed, "gemini-json-parse-fallback", json.dumps(
+            {
+                "providerRequest": request_snapshot,
+                "providerResponse": raw,
+                "note": "Gemini 返回内容不是合法 JSON，使用 fallback 默认方案。",
+            },
+            ensure_ascii=False,
+        )
+    return normalize_plan(parsed, sku), "gemini", json.dumps(
+        {
+            "providerRequest": request_snapshot,
+            "providerResponse": parsed,
+            "rawText": raw,
+        },
+        ensure_ascii=False,
+    )
 
 
 def normalize_plan(plan: dict[str, Any], sku: str) -> dict[str, Any]:

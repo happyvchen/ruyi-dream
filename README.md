@@ -2,7 +2,7 @@
 
 本项目是为 Lily 当前业务阶段设计的内部生产工具，不是标准 SaaS，也不面向多客户、多租户、计费、权限、模板市场等通用商业化场景。
 
-项目目标是：基于 `数字模特` 和 `1 个服装货号图包`，自动生成一组可用于淘宝、天猫等电商场景的 Lily 风格模特服装展示图。
+项目目标是：基于 `1 个服装货号图包` 及其默认组图方案，自动生成一组可用于淘宝、天猫等电商场景的 Lily 风格模特服装展示图。
 
 ## Agent 入口
 
@@ -22,11 +22,67 @@
 
 - 服务对象：仅 Lily 一家客户
 - 产品阶段：MVP
-- 主入口：生成组图
+- 主生产入口：生成组图
+- 素材准备入口：服装素材
 - 数字模特：产品支持多数字模特，当前阶段先维护 1 个默认数字模特
 - 风格方向：Lily 白/浅灰棚拍主图风格
 - 输出目标：每个货号生成一套主图
-- 暂不包含：自动质量检测、多客户 SaaS、复杂权限、外景大片、视频生成
+- 暂不包含：自动质量检测、多客户 SaaS、复杂权限、外景大片、视频生成、ZIP 上传、素材图片角色识别
+
+## 当前 MVP 流程
+
+```text
+服装素材页上传图包
+-> 浏览器本地预览与编辑
+-> 保存上传
+-> 生成/更新该货号默认组图方案
+-> 生成组图页选择货号
+-> 直接使用默认方案创建生成任务
+-> 提交 GPT Image-2 / fal queue
+-> 后台轮询状态并下载结果
+-> 单张重生 / 设为最终图 / 导出
+```
+
+上传支持：
+
+- 上传 N 张图片，并填写货号，对应一个图包。
+- 上传一个文件夹，货号默认使用文件夹名并可修改。
+- 上传 N 个文件夹，对应 N 个图包。
+- 保存前可编辑货号/标题、删除图片。
+- 第一张图片默认作为封面。
+
+## 本地配置
+
+后端会自动读取 `backend/.env`。首次配置可复制示例文件：
+
+```bash
+cd backend
+cp .env.example .env
+```
+
+关键环境变量：
+
+```env
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-3-flash-preview
+
+GPT_IMAGE2_PROVIDER=placeholder
+GPT_IMAGE2_MODEL_ID=openai/gpt-image-2/edit
+GPT_IMAGE2_QUEUE_URL=https://queue.fal.run/openai/gpt-image-2/edit
+FAL_KEY=
+GPT_IMAGE2_QUALITY=high
+GPT_IMAGE2_OUTPUT_FORMAT=png
+GENERATION_POLL_INTERVAL_SECONDS=5
+```
+
+`GPT_IMAGE2_PROVIDER=placeholder` 会写入本地占位 SVG，不调用真实生图服务。真实调用 fal 时设置：
+
+```env
+GPT_IMAGE2_PROVIDER=fal
+FAL_KEY=你的_fal_key
+```
+
+真实生图走 fal queue。点击生成后后端立即返回任务记录，后台持续查询 fal 状态，前端显示运行计时和每张图状态。
 
 ## 项目结构
 
@@ -92,3 +148,4 @@
 6. Image 2 是最终视觉生成器，不承担品牌策略、搭配判断、Pose 策划和镜头规划。
 7. 品牌调性、品类规则、Pose、搭配和镜头方案应由前置推理/策划层生成，再交给 Image 2 执行。
 8. 前台 UI 面向普通业务用户，默认只展示服装、模特、组图方案、生成结果；AI 任务包、prompt、策划器等复杂细节默认隐藏。
+9. 真实生图是持久化异步任务，不在前端 HTTP 请求内长时间等待。

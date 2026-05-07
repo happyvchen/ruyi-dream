@@ -59,7 +59,7 @@ Image 2 不应承担以下职责：
 
 文本不要重复写成一大段服装描述，只在必要时写：
 
-`Use the garment reference images as the source of truth for garment shape, color, material, proportion, and construction.`
+`服装参考图是商品事实来源，必须保持服装设计、颜色、面料、结构、长度和比例。`
 
 ### 2.2 模特头部图负责身份
 
@@ -96,7 +96,7 @@ Image 2 不应承担以下职责：
 
 文本只需要说明：
 
-`Use the Lily real e-commerce references as the brand-style boundary for pose, styling, composition, and mood. Do not copy a specific outfit unless it is provided as the garment reference.`
+`Lily 真实成片参考图定义姿态、鞋包、配饰、光线、背景和构图边界。不要复制某一套非本货号服装。`
 
 ### 2.4 Pose 参考图负责身体动作
 
@@ -150,32 +150,32 @@ Pose 参考图决定：
 
 ## 5. 文本结构模板
 
-正式 prompt 应尽量短，结构如下：
+正式 prompt 统一使用中文，并尽量短，结构如下：
 
 ```text
-Task:
-Generate one Lily e-commerce model photo for shot {shot_id}: {shot_role}.
+任务：
+生成一张 Lily 电商模特图，当前图位为 {shot_id}：{shot_role}。
 
-Image roles:
-- Garment images are the source of truth for the exact clothing design, color, fabric, construction, length, and proportions.
-- Model head image is the source of truth for identity, hairstyle, and face.
-- Lily real-photo references define brand mood, pose language, styling boundary, lighting, and composition.
-- Pose reference defines body posture only.
+图片角色：
+- 服装参考图是商品事实来源，必须保持服装设计、颜色、面料、结构、长度和比例。
+- 模特头部图是身份事实来源，必须保持同一张脸、发型、刘海和克制表情。
+- Lily 真实成片参考图定义姿态、鞋包、配饰、光线、背景和构图边界。
+- Pose 参考图只定义身体动作，不定义服装款式。
 
-Priorities:
-1. Preserve model identity from the head reference.
-2. Preserve garment facts from garment references.
-3. Follow Lily brand-style references for pose, styling, shoes, accessories, background, and composition.
-4. Follow this shot's framing requirement.
+优先级：
+1. 保持 {model_id} 模特身份一致。
+2. 保持货号 {sku} 的服装事实。
+3. 遵守 Lily 白/浅灰棚拍调性。
+4. 遵守当前图位的镜头范围、角度和展示重点。
 
-Shot:
+当前图要求：
 {framing / angle / product focus}
 
-Optional numeric constraints:
+可选比例约束：
 {model measurements / garment measurements / target wearing length if provided}
 
-Do not:
-Create a different face, change garment design, change garment length/proportion, add unreferenced decorative items, generate styling outside Lily brand references, add text or watermark.
+禁止：
+不要换脸、不要改变发型、不要改变服装结构、不要改变服装长度和比例、不要生成文字、水印或 logo。
 ```
 
 ## 6. 反例：不推荐的冗余文本
@@ -196,14 +196,49 @@ black sleeveless A-line dress, round neckline, blue striped ruffle, short skirt,
 推荐：
 
 ```text
-Use the garment references as the exact source of truth. Preserve the garment's actual length, hem width, ruffle exposure, fabric, and construction.
+服装参考图是商品事实来源。保持服装真实长度、下摆宽度、荷叶边露出比例、面料和结构。
 ```
 
 如果有尺寸，再补：
 
 ```text
-The garment length on the selected model should match: black body ends at {x} cm above knee; striped ruffle exposure is {y} cm.
+穿着长度约束：黑色主体下摆位于膝上 {x} cm；条纹荷叶边露出高度为 {y} cm。
 ```
+
+## 6.1 fal API 入参映射
+
+Image 2 的产品任务包会转换为 fal GPT Image-2 edit queue 入参。
+
+```json
+{
+  "prompt": "中文 Image 2 prompt",
+  "image_urls": ["上传到 fal 后的参考图 URL"],
+  "image_size": "auto",
+  "quality": "high",
+  "num_images": 1,
+  "output_format": "png",
+  "sync_mode": false
+}
+```
+
+`image_urls` 的来源：
+
+- `task_package.imageInputs[].localPath`：本地参考图路径。
+- `task_package.imageInputs[].providerUrl`：上传到 fal 后的 URL。
+
+提交前，系统会把本地参考图上传到 fal storage，再将 URL 写入 `image_urls`。每个生成任务会保存本地路径、图片角色和 fal URL 的映射。
+
+当前配置：
+
+```env
+GPT_IMAGE2_PROVIDER=fal
+FAL_KEY=...
+GPT_IMAGE2_QUEUE_URL=https://queue.fal.run/openai/gpt-image-2/edit
+GPT_IMAGE2_QUALITY=high
+GPT_IMAGE2_OUTPUT_FORMAT=png
+```
+
+正式生成使用 fal queue，不使用长时间同步 HTTP 等待。点击生成后，后端提交 queue 并保存 `request_id`、`status_url`、`response_url`、`cancel_url`，再由后台 poller 查询状态。
 
 ## 7. 产品功能映射
 
@@ -249,11 +284,11 @@ Image 2 只接收策划器组装好的 `单张生成任务包`：
     "pose_dress_side_walk_01"
   ],
   "constraints": {
-    "identity": "preserve Face-01",
-    "garment": "preserve exact garment facts from references",
-    "styling": "within Lily dress template",
-    "proportion": "use measurement constraints if provided"
+    "identity": "以 Face-01 头部图为身份事实",
+    "garment": "以服装参考图为商品事实",
+    "styling": "以 Lily 连衣裙模板为鞋包和姿态边界",
+    "proportion": "如有尺寸参数，以尺寸参数控制裙长和下摆"
   },
-  "prompt": "Generate one Lily e-commerce side full-body photo. Use images as source of truth. Keep styling within Lily references. Do not change face, garment design, garment proportions, or add text."
+  "prompt": "任务：生成一张 Lily 电商模特图，当前图位为 02：侧身全身。图片角色：服装参考图是商品事实来源；模特头部图是身份事实来源；Lily 真实成片参考图定义姿态、鞋包、配饰、光线、背景和构图边界。禁止换脸、改变服装结构、改变服装比例、生成文字、水印或 logo。"
 }
 ```

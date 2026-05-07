@@ -8,8 +8,8 @@
 
 ```text
 上传服装货号图包
--> 选择数字模特
--> Gemini 生成组图方案
+-> 本地预览与编辑
+-> 保存上传并生成默认组图方案
 -> GPT Image-2 Provider 逐张生成
 -> 单张重生 / 设为最终图
 -> 导出和留痕
@@ -40,6 +40,10 @@ MVP 不做多租户、权限、计费、模板市场，也不做复杂素材资�
 - 记录当前状态：`NEW` / `ANALYZED` / `CONFIRMED`。
 - 缓存 Gemini 输出的服装识别摘要 `analysis_json`。
 - 作为后续 `ShotPlan` 和 `GenerationRun` 的上游对象。
+- 支持编辑货号、标题、状态。
+- 支持删除未产生生成记录的应用内素材副本。
+- 上传入口支持散图、单文件夹、多文件夹；保存前会先在浏览器本地形成待上传图包，用户可编辑货号/标题、删除图片，再保存上传。
+- 保存上传后会为该货号创建一条默认 `ShotPlan`。后续“生成组图”页不再临时策划，而是直接使用货号默认组图方案。
 
 当前状态含义：
 
@@ -51,13 +55,15 @@ MVP 不做多租户、权限、计费、模板市场，也不做复杂素材资�
 
 ### 3.2 GarmentImage
 
-单张服装素材图，属于某个 `GarmentSku`。
+单张服装素材图，属于某个 `GarmentSku`。MVP 的产品规则是：排序第一张图片默认作为封面和主要参考图。
 
 当前职责：
 
 - 记录上传后的文件名、本地路径、MIME 类型和排序。
-- 用 `role` 标记图片角色。
-- 当前 MVP 只自动标记第一张为 `main`，其余为 `reference`。
+- 数据库仍保留 `role` 字段以兼容后续扩展；当前 UI 不展示也不允许用户编辑图片角色。
+- 当前 MVP 只由后端自动标记第一张为 `main`，其余为 `reference`。
+- 支持追加图片、删除单图。
+- API 响应会返回文件大小；前端通过图片加载读取尺寸，用于素材卡片和上传预览卡片展示。
 
 后续可扩展角色：
 
@@ -68,7 +74,7 @@ MVP 不做多租户、权限、计费、模板市场，也不做复杂素材资�
 - `color`
 - `3d`
 
-当前暂不做图片角色精修，避免在 MVP 阶段过度设计。
+当前暂不做图片角色精修，也不做“素材解析与服装图片类型识别”，避免在 MVP 阶段过度设计。图片角色字段是工程兼容字段，不是当前用户可操作字段。
 
 ### 3.3 ModelProfile
 
@@ -78,28 +84,50 @@ MVP 不做多租户、权限、计费、模板市场，也不做复杂素材资�
 
 - 保存模特业务 ID，例如 `Face-01`。
 - 记录头部素材目录 `asset_dir`。
-- 在 `profile_json` 中保存身体参数、发型、气质、头部角度映射和禁止项。
+- 在 `profile_json` 中保存基础身体参数、头部参考图映射、排序和图片元信息。
 - 当前启动时自动种子化 1 个默认模特 `Face-01`。
+- 支持完整 CRUD。
+- 新建模特时，基础档案和头像素材可以一起编辑，最后一次保存。
+- 头像上传后默认不分配角度，需要人工逐张指定。
+- 每张头像支持删除、替换、改角度和拖拽排序；上传占位卡固定排第一。
+- `front` 仍然是预览封面优先来源，但当前只做缺失提醒，不做强制锁定。
 
 当前 `profile_json` 结构示例：
 
 ```json
 {
   "height": "170cm",
-  "bodyType": "标准偏瘦",
-  "shoulder": "标准",
-  "legRatio": "标准偏长",
-  "hair": "短棕色 bob，轻薄刘海",
-  "temperament": "都市、通勤、轻熟",
+  "weight": "48kg",
+  "bodyShape": "H型",
+  "bust": "80cm",
+  "waist": "59cm",
+  "hips": "89cm",
+  "notes": "都市、通勤、轻熟、自然、克制",
   "headReferences": {
     "front": "front.png",
     "left45": "left45.png",
-    "right90": "right90.png",
-    "back": "back.png"
+    "__unassigned__a1b2c3d4e5": "draft-side.png"
   },
-  "forbidden": ["不改变发型长度", "不改变刘海形态"]
+  "headReferenceOrder": [
+    "front",
+    "__unassigned__a1b2c3d4e5",
+    "left45"
+  ],
+  "headReferenceMeta": {
+    "front": { "fileSize": 6476302 },
+    "__unassigned__a1b2c3d4e5": { "fileSize": 6123456 }
+  }
 }
 ```
+
+说明：
+
+- 当前基础参数字段为：`height`、`weight`、`bodyShape`、`bust`、`waist`、`hips`、`notes`。
+- `headReferences` 仍以对象形式存储，但 key 不再总是角度；未分配角度的图片会使用 `__unassigned__...` 伪 ID。
+- 当前支持的角度集合为：`front`、`left45`、`right45`、`right90`、`left90`、`up45`、`down45`、`back`、`backTurnLeft45`、`backTurnRight45`。
+- 同一个具体角度只能绑定一张图；未分配角度的图片可以存在多张。
+- 文件保存时优先保留上传文件名，仅在重名时追加去重后缀。
+- API 序列化时会额外返回 `headReferenceEntries`，供前端按“逐张图片”而不是“角度字典”来管理。
 
 ### 3.4 ShotPlan
 
@@ -111,6 +139,9 @@ MVP 不做多租户、权限、计费、模板市场，也不做复杂素材资�
 - 保存 Gemini 或 fallback planner 输出的完整 `plan_json`。
 - 保存 `planner_provider` 和原始响应 `raw_response`，用于调试和复盘。
 - 作为生成批次 `GenerationRun` 的输入。
+- 一个货号可以有多条历史 `ShotPlan`。当前默认方案规则为：取该货号 `updated_at DESC, id DESC` 最新的一条。
+- “服装素材”页负责生成/更新默认组图方案；“生成组图”页只读取并使用默认方案。
+- 上传新图包保存成功后，前端会立即调用策划接口创建默认方案。Gemini 不可用时会使用 fallback 默认方案，因此上传流程仍可跑通。
 
 当前 `plan_json` 约定：
 
@@ -212,7 +243,7 @@ MVP 不做多租户、权限、计费、模板市场，也不做复杂素材资�
     },
     "constraints": [
       "服装参考图是商品事实源",
-      "保持同一模特脸、发型、气质",
+      "保持同一模特身份和身体比例",
       "保持 Lily 白/浅灰棚拍风格",
       "不生成无关文字、水印、logo"
     ]
@@ -300,5 +331,5 @@ backend/storage/outputs/{sku}/{YYYYMMDD-HHMMSS}/
 - 关键可查询关系用独立表和外键表达，例如 SKU、模特、方案、生成批次、生成单图。
 - 当前没有独立 `exports` 表。导出作为事件写入 `event_logs`，ZIP 文件保存在 `backend/storage/exports/`。
 - 当前没有独立 `brand_templates` 表。Lily 品牌默认模板暂时内嵌在 planner 输出和 task package 中。
-- 当前没有删除接口。破坏性操作需要后续单独设计确认流程。
-
+- 当前已有服装素材删除接口，但带业务保护：已有生成记录的 SKU 不允许删除；每个 SKU 至少保留一张图片。
+- 删除操作只删除应用内上传副本，不删除 Lily 原始素材目录。

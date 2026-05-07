@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -49,9 +51,61 @@ class FinalImageRequest(BaseModel):
     isFinal: bool = True
 
 
+class GarmentSkuUpdateRequest(BaseModel):
+    sku: str | None = None
+    title: str | None = None
+    status: str | None = None
+
+
+class GarmentImageUpdateRequest(BaseModel):
+    role: str | None = None
+    sortOrder: int | None = None
+
+
+class ModelProfileUpsertRequest(BaseModel):
+    modelId: str | None = None
+    name: str | None = None
+    isDefault: bool | None = None
+    profile: dict[str, Any] | None = None
+
+
+class HeadReferenceUpdateRequest(BaseModel):
+    angle: str | None = None
+    orderIndex: int | None = None
+
+
+HEAD_REFERENCE_ANGLES = [
+    "front",
+    "left45",
+    "right45",
+    "right90",
+    "left90",
+    "up45",
+    "down45",
+    "back",
+    "backTurnLeft45",
+    "backTurnRight45",
+]
+UNASSIGNED_HEAD_REFERENCE_PREFIX = "__unassigned__"
+
+
+ACTIVE_IMAGE_STATUSES = {"QUEUED", "SUBMITTED", "IN_QUEUE", "IN_PROGRESS", "RUNNING"}
+TERMINAL_IMAGE_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
+
+
 @app.on_event("startup")
-def startup() -> None:
+async def startup() -> None:
     init_db()
+    app.state.generation_poller = asyncio.create_task(generation_poller_loop())
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    task = getattr(app.state, "generation_poller", None)
+    if task:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 @app.get("/api/health")
@@ -61,7 +115,7 @@ def health() -> dict[str, Any]:
         "storageDir": str(settings.storage_dir),
         "databasePath": str(settings.database_path),
         "geminiConfigured": bool(settings.gemini_api_key),
-        "imageProviderConfigured": bool(settings.gpt_image2_api_base_url and settings.gpt_image2_api_key),
+        "imageProviderConfigured": bool(settings.gpt_image2_api_base_url and settings.fal_key),
     }
 
 
@@ -149,11 +203,477 @@ def get_garment_sku(sku_id: int) -> dict[str, Any]:
     return {"item": get_sku_detail_by_id(sku_id)}
 
 
+@app.patch("/api/garment-skus/{sku_id}")
+def update_garment_sku(sku_id: int, payload: GarmentSkuUpdateRequest) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    if payload.sku is not None:
+        clean_sku = sanitize_name(payload.sku)
+        if not clean_sku:
+            raise HTTPException(status_code=400, detail="SKU 不能为空")
+        updates["sku"] = clean_sku
+    if payload.title is not None:
+        updates["title"] = payload.title.strip() or None
+    if payload.status is not None:
+        if payload.status not in {"NEW", "ANALYZED", "CONFIRMED"}:
+            raise HTTPException(status_code=400, detail="状态不合法")
+        updates["status"] = payload.status
+    if not updates:
+        return {"item": get_sku_detail_by_id(sku_id)}
+
+    with get_db() as db:
+        row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="货号不存在")
+        updates["updated_at"] = now_iso()
+        set_clause = ", ".join(f"{key} = ?" for key in updates)
+        db.execute(
+            f"UPDATE garment_skus SET {set_clause} WHERE id = ?",
+            (*updates.values(), sku_id),
+        )
+        log_event(db, "garment_sku", sku_id, "updated", updates)
+    return {"item": get_sku_detail_by_id(sku_id)}
+
+
+@app.delete("/api/garment-skus/{sku_id}")
+def delete_garment_sku(sku_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="货号不存在")
+        run_count = db.execute(
+            "SELECT COUNT(*) AS count FROM generation_runs WHERE sku_id = ?",
+            (sku_id,),
+        ).fetchone()["count"]
+        if run_count:
+            raise HTTPException(status_code=409, detail="该货号已有生成记录，为保留生产历史暂不允许删除")
+        storage_path = Path(row["storage_path"])
+        db.execute("DELETE FROM garment_skus WHERE id = ?", (sku_id,))
+        log_event(
+            db,
+            "garment_sku",
+            sku_id,
+            "deleted",
+            {"sku": row["sku"], "storagePath": str(storage_path)},
+        )
+
+    remove_storage_path(storage_path)
+    return {"ok": True}
+
+
+@app.post("/api/garment-skus/{sku_id}/images")
+async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    if not files:
+        raise HTTPException(status_code=400, detail="至少上传一张图片")
+    timestamp = now_iso()
+    saved: list[tuple[UploadFile, Path, int]] = []
+
+    with get_db() as db:
+        sku_row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
+        if not sku_row:
+            raise HTTPException(status_code=404, detail="货号不存在")
+        target_dir = Path(sku_row["storage_path"])
+        target_dir.mkdir(parents=True, exist_ok=True)
+        current_max = db.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) AS max_sort FROM garment_images WHERE sku_id = ?",
+            (sku_id,),
+        ).fetchone()["max_sort"]
+
+        for offset, upload in enumerate(files, start=1):
+            if not upload.content_type or not upload.content_type.startswith("image/"):
+                raise HTTPException(status_code=400, detail=f"{upload.filename} 不是图片文件")
+            sort_order = int(current_max) + offset
+            safe_name = f"{sort_order + 1:03d}-{sanitize_filename(upload.filename or 'image')}"
+            destination = unique_path(target_dir / safe_name)
+            with destination.open("wb") as handle:
+                shutil.copyfileobj(upload.file, handle)
+            saved.append((upload, destination, sort_order))
+
+        for upload, path, sort_order in saved:
+            db.execute(
+                """
+                INSERT INTO garment_images
+                  (sku_id, filename, storage_path, mime_type, role, sort_order, created_at)
+                VALUES (?, ?, ?, ?, 'reference', ?, ?)
+                """,
+                (
+                    sku_id,
+                    path.name,
+                    str(path),
+                    upload.content_type or "application/octet-stream",
+                    sort_order,
+                    timestamp,
+                ),
+            )
+        db.execute(
+            "UPDATE garment_skus SET updated_at = ? WHERE id = ?",
+            (timestamp, sku_id),
+        )
+        log_event(
+            db,
+            "garment_sku",
+            sku_id,
+            "images_added",
+            {"fileCount": len(saved), "files": [path.name for _, path, _ in saved]},
+        )
+    return {"item": get_sku_detail_by_id(sku_id)}
+
+
+@app.patch("/api/garment-images/{image_id}")
+def update_garment_image(image_id: int, payload: GarmentImageUpdateRequest) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    if payload.role is not None:
+        allowed_roles = {"main", "reference", "front", "back", "detail", "fabric", "color", "3d"}
+        if payload.role not in allowed_roles:
+            raise HTTPException(status_code=400, detail="图片角色不合法")
+        updates["role"] = payload.role
+    if payload.sortOrder is not None:
+        if payload.sortOrder < 0:
+            raise HTTPException(status_code=400, detail="排序不能小于 0")
+        updates["sort_order"] = payload.sortOrder
+    if not updates:
+        with get_db() as db:
+            row = db.execute("SELECT * FROM garment_images WHERE id = ?", (image_id,)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="图片不存在")
+            return {"item": serialize_image(row)}
+
+    with get_db() as db:
+        row = db.execute("SELECT * FROM garment_images WHERE id = ?", (image_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="图片不存在")
+        set_clause = ", ".join(f"{key} = ?" for key in updates)
+        db.execute(
+            f"UPDATE garment_images SET {set_clause} WHERE id = ?",
+            (*updates.values(), image_id),
+        )
+        db.execute(
+            "UPDATE garment_skus SET updated_at = ? WHERE id = ?",
+            (now_iso(), row["sku_id"]),
+        )
+        log_event(db, "garment_image", image_id, "updated", updates)
+        updated = db.execute("SELECT * FROM garment_images WHERE id = ?", (image_id,)).fetchone()
+    return {"item": serialize_image(updated)}
+
+
+@app.delete("/api/garment-images/{image_id}")
+def delete_garment_image(image_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM garment_images WHERE id = ?", (image_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="图片不存在")
+        count = db.execute(
+            "SELECT COUNT(*) AS count FROM garment_images WHERE sku_id = ?",
+            (row["sku_id"],),
+        ).fetchone()["count"]
+        if count <= 1:
+            raise HTTPException(status_code=409, detail="每个货号至少保留一张图片")
+        storage_path = Path(row["storage_path"])
+        db.execute("DELETE FROM garment_images WHERE id = ?", (image_id,))
+        db.execute(
+            "UPDATE garment_skus SET updated_at = ? WHERE id = ?",
+            (now_iso(), row["sku_id"]),
+        )
+        log_event(
+            db,
+            "garment_image",
+            image_id,
+            "deleted",
+            {"skuId": row["sku_id"], "filename": row["filename"], "storagePath": str(storage_path)},
+        )
+
+    remove_storage_path(storage_path)
+    return {"ok": True}
+
+
 @app.get("/api/model-profiles")
 def list_model_profiles() -> dict[str, Any]:
     with get_db() as db:
         rows = db.execute("SELECT * FROM model_profiles ORDER BY is_default DESC, id").fetchall()
         return {"items": [serialize_model(row) for row in rows]}
+
+
+@app.post("/api/model-profiles")
+def create_model_profile(payload: ModelProfileUpsertRequest) -> dict[str, Any]:
+    clean_model_id = sanitize_name(payload.modelId or "")
+    if not clean_model_id:
+        raise HTTPException(status_code=400, detail="模特 ID 不能为空")
+    name = (payload.name or clean_model_id).strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="模特名称不能为空")
+
+    timestamp = now_iso()
+    asset_dir = settings.storage_dir / "model-profiles" / clean_model_id
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    profile = normalize_model_profile(payload.profile or {})
+
+    with get_db() as db:
+        existing = db.execute("SELECT id FROM model_profiles WHERE model_id = ?", (clean_model_id,)).fetchone()
+        if existing:
+            raise HTTPException(status_code=409, detail="模特 ID 已存在")
+        if payload.isDefault:
+            db.execute("UPDATE model_profiles SET is_default = 0")
+        cursor = db.execute(
+            """
+            INSERT INTO model_profiles
+              (model_id, name, asset_dir, profile_json, is_default, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                clean_model_id,
+                name,
+                str(asset_dir),
+                dumps(profile),
+                1 if payload.isDefault else 0,
+                timestamp,
+                timestamp,
+            ),
+        )
+        model_id = int(cursor.lastrowid)
+        log_event(db, "model_profile", model_id, "created", {"modelId": clean_model_id, "name": name})
+    return {"item": get_model_profile_by_id(model_id)}
+
+
+@app.patch("/api/model-profiles/{model_profile_id}")
+def update_model_profile(model_profile_id: int, payload: ModelProfileUpsertRequest) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    with get_db() as db:
+        row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (model_profile_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="数字模特不存在")
+
+        current_profile = loads(row["profile_json"], {})
+        if payload.modelId is not None:
+            clean_model_id = sanitize_name(payload.modelId)
+            if not clean_model_id:
+                raise HTTPException(status_code=400, detail="模特 ID 不能为空")
+            duplicate = db.execute(
+                "SELECT id FROM model_profiles WHERE model_id = ? AND id <> ?",
+                (clean_model_id, model_profile_id),
+            ).fetchone()
+            if duplicate:
+                raise HTTPException(status_code=409, detail="模特 ID 已存在")
+            updates["model_id"] = clean_model_id
+        if payload.name is not None:
+            name = payload.name.strip()
+            if not name:
+                raise HTTPException(status_code=400, detail="模特名称不能为空")
+            updates["name"] = name
+        if payload.profile is not None:
+            updates["profile_json"] = dumps(normalize_model_profile({**current_profile, **payload.profile}))
+        if payload.isDefault is not None:
+            if payload.isDefault:
+                db.execute("UPDATE model_profiles SET is_default = 0 WHERE id <> ?", (model_profile_id,))
+            updates["is_default"] = 1 if payload.isDefault else 0
+
+        if updates:
+            updates["updated_at"] = now_iso()
+            set_clause = ", ".join(f"{key} = ?" for key in updates)
+            db.execute(
+                f"UPDATE model_profiles SET {set_clause} WHERE id = ?",
+                (*updates.values(), model_profile_id),
+            )
+            log_event(db, "model_profile", model_profile_id, "updated", updates)
+    return {"item": get_model_profile_by_id(model_profile_id)}
+
+
+@app.delete("/api/model-profiles/{model_profile_id}")
+def delete_model_profile(model_profile_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (model_profile_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="数字模特不存在")
+        model_count = db.execute("SELECT COUNT(*) AS count FROM model_profiles").fetchone()["count"]
+        if model_count <= 1:
+            raise HTTPException(status_code=409, detail="至少保留一个数字模特")
+        usage_count = db.execute(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM shot_plans WHERE model_profile_id = ?) +
+              (SELECT COUNT(*) FROM generation_runs WHERE model_profile_id = ?) AS count
+            """,
+            (model_profile_id, model_profile_id),
+        ).fetchone()["count"]
+        if usage_count:
+            raise HTTPException(status_code=409, detail="该模特已有组图或生成记录，为保留生产历史暂不允许删除")
+        asset_dir = Path(row["asset_dir"])
+        was_default = bool(row["is_default"])
+        db.execute("DELETE FROM model_profiles WHERE id = ?", (model_profile_id,))
+        if was_default:
+            fallback = db.execute("SELECT id FROM model_profiles ORDER BY id LIMIT 1").fetchone()
+            if fallback:
+                db.execute("UPDATE model_profiles SET is_default = 1 WHERE id = ?", (fallback["id"],))
+        log_event(db, "model_profile", model_profile_id, "deleted", {"modelId": row["model_id"], "assetDir": str(asset_dir)})
+
+    remove_storage_path(asset_dir)
+    return {"ok": True}
+
+
+@app.post("/api/model-profiles/{model_profile_id}/head-references")
+async def add_model_head_reference(
+    model_profile_id: int,
+    angle: str | None = Form(None),
+    files: list[UploadFile] = File(default=[]),
+    file: UploadFile | None = File(None),
+) -> dict[str, Any]:
+    uploads = files or ([file] if file else [])
+    if not uploads:
+        raise HTTPException(status_code=400, detail="至少上传一张头像")
+    clean_angle = sanitize_reference_key(angle or "") if angle else None
+    if clean_angle and clean_angle not in HEAD_REFERENCE_ANGLES:
+        raise HTTPException(status_code=400, detail="头像角度不合法")
+    if clean_angle and len(uploads) > 1:
+        raise HTTPException(status_code=400, detail="指定角度时只能上传一张头像")
+    for upload in uploads:
+        if not upload.content_type or not upload.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail=f"{upload.filename} 不是图片文件")
+
+    with get_db() as db:
+        row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (model_profile_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="数字模特不存在")
+        asset_dir = Path(row["asset_dir"])
+        ensure_writable_asset_dir(asset_dir)
+
+        profile = loads(row["profile_json"], {})
+        references = dict(profile.get("headReferences") or {})
+        order = normalize_head_reference_order(profile, references)
+        assigned_keys = [clean_angle] if clean_angle else [new_unassigned_head_reference_key(references) for _ in uploads]
+        old_files: list[str] = []
+        saved: list[dict[str, str]] = []
+        for upload, assigned_key in zip(uploads, assigned_keys):
+            if assigned_key is None:
+                raise HTTPException(status_code=400, detail="头像角度不合法")
+            safe_name = sanitize_filename(upload.filename or "head-reference")
+            destination = unique_path(asset_dir / safe_name)
+            with destination.open("wb") as handle:
+                shutil.copyfileobj(upload.file, handle)
+            old_filename = references.get(assigned_key)
+            if old_filename:
+                old_files.append(old_filename)
+            references[assigned_key] = destination.name
+            if assigned_key not in order:
+                order.append(assigned_key)
+            saved.append({"id": assigned_key, "filename": destination.name})
+
+        profile["headReferences"] = references
+        profile["headReferenceOrder"] = order
+        db.execute(
+            "UPDATE model_profiles SET profile_json = ?, updated_at = ? WHERE id = ?",
+            (dumps(normalize_model_profile(profile)), now_iso(), model_profile_id),
+        )
+        log_event(
+            db,
+            "model_profile",
+            model_profile_id,
+            "head_reference_added",
+            {"items": saved},
+        )
+
+    for old_filename in old_files:
+        remove_model_asset_file(asset_dir, old_filename)
+    return {"item": get_model_profile_by_id(model_profile_id)}
+
+
+@app.patch("/api/model-profiles/{model_profile_id}/head-references/{reference_id}")
+def update_model_head_reference(model_profile_id: int, reference_id: str, payload: HeadReferenceUpdateRequest) -> dict[str, Any]:
+    clean_reference_id = sanitize_reference_id(reference_id)
+    new_angle = sanitize_reference_key(payload.angle or "") if payload.angle is not None and payload.angle != "" else ""
+    if new_angle and new_angle not in HEAD_REFERENCE_ANGLES:
+        raise HTTPException(status_code=400, detail="头像角度不合法")
+
+    with get_db() as db:
+        row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (model_profile_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="数字模特不存在")
+        profile = loads(row["profile_json"], {})
+        references = dict(profile.get("headReferences") or {})
+        if clean_reference_id not in references:
+            raise HTTPException(status_code=404, detail="头像角度不存在")
+        order = normalize_head_reference_order(profile, references)
+
+        next_reference_id = clean_reference_id
+        if payload.angle is not None:
+            if new_angle and new_angle != clean_reference_id:
+                if new_angle in references:
+                    raise HTTPException(status_code=409, detail="该角度已经有头像")
+                references[new_angle] = references.pop(clean_reference_id)
+                order = [new_angle if item == clean_reference_id else item for item in order]
+                next_reference_id = new_angle
+            elif new_angle == "" and not is_unassigned_head_reference_id(clean_reference_id):
+                pending_id = new_unassigned_head_reference_key(references)
+                references[pending_id] = references.pop(clean_reference_id)
+                order = [pending_id if item == clean_reference_id else item for item in order]
+                next_reference_id = pending_id
+            elif new_angle == "" and is_unassigned_head_reference_id(clean_reference_id):
+                next_reference_id = clean_reference_id
+            elif new_angle == clean_reference_id:
+                next_reference_id = clean_reference_id
+            else:
+                raise HTTPException(status_code=409, detail="该角度已经有头像")
+
+        if payload.orderIndex is not None:
+            order = [item for item in order if item in references and item != next_reference_id]
+            order_index = max(0, min(payload.orderIndex, len(order)))
+            order.insert(order_index, next_reference_id)
+
+        profile["headReferences"] = references
+        profile["headReferenceOrder"] = order
+        db.execute(
+            "UPDATE model_profiles SET profile_json = ?, updated_at = ? WHERE id = ?",
+            (dumps(normalize_model_profile(profile)), now_iso(), model_profile_id),
+        )
+        log_event(
+            db,
+            "model_profile",
+            model_profile_id,
+            "head_reference_updated",
+            {"referenceId": next_reference_id, "order": order},
+        )
+    return {"item": get_model_profile_by_id(model_profile_id)}
+
+
+@app.delete("/api/model-profiles/{model_profile_id}/head-references/{reference_id}")
+def delete_model_head_reference(model_profile_id: int, reference_id: str) -> dict[str, Any]:
+    clean_reference_id = sanitize_reference_id(reference_id)
+    if not clean_reference_id:
+        raise HTTPException(status_code=400, detail="头像角度不能为空")
+    with get_db() as db:
+        row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (model_profile_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="数字模特不存在")
+        profile = loads(row["profile_json"], {})
+        references = dict(profile.get("headReferences") or {})
+        filename = references.pop(clean_reference_id, None)
+        if filename is None:
+            raise HTTPException(status_code=404, detail="头像角度不存在")
+        order = [item for item in normalize_head_reference_order(profile, references) if item != clean_reference_id]
+        profile["headReferences"] = references
+        profile["headReferenceOrder"] = order
+        db.execute(
+            "UPDATE model_profiles SET profile_json = ?, updated_at = ? WHERE id = ?",
+            (dumps(normalize_model_profile(profile)), now_iso(), model_profile_id),
+        )
+        log_event(db, "model_profile", model_profile_id, "head_reference_deleted", {"referenceId": clean_reference_id, "filename": filename})
+
+    remove_model_asset_file(Path(row["asset_dir"]), filename)
+    return {"item": get_model_profile_by_id(model_profile_id)}
+
+
+@app.get("/api/model-profiles/{model_profile_id}/assets/{filename}")
+def get_model_asset(model_profile_id: int, filename: str) -> FileResponse:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (model_profile_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="数字模特不存在")
+    asset_dir = Path(row["asset_dir"])
+    file_path = (asset_dir / sanitize_filename(filename)).resolve()
+    try:
+        file_path.relative_to(asset_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="文件路径不合法") from None
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="头像文件不存在")
+    return FileResponse(file_path)
 
 
 @app.post("/api/shot-plans")
@@ -205,6 +725,25 @@ def get_shot_plan(shot_plan_id: int) -> dict[str, Any]:
         return {"item": serialize_shot_plan(row)}
 
 
+@app.get("/api/garment-skus/{sku_id}/default-shot-plan")
+def get_default_shot_plan(sku_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        sku_row = db.execute("SELECT id FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
+        if not sku_row:
+            raise HTTPException(status_code=404, detail="货号不存在")
+        row = db.execute(
+            """
+            SELECT *
+            FROM shot_plans
+            WHERE sku_id = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """,
+            (sku_id,),
+        ).fetchone()
+        return {"item": serialize_shot_plan(row) if row else None}
+
+
 @app.post("/api/generation-runs")
 async def generate_group(payload: GenerateGroupRequest) -> dict[str, Any]:
     with get_db() as db:
@@ -215,6 +754,10 @@ async def generate_group(payload: GenerateGroupRequest) -> dict[str, Any]:
         model_row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (plan_row["model_profile_id"],)).fetchone()
 
     plan = loads(plan_row["plan_json"], {})
+    plan["_planner"] = {
+        "provider": plan_row["planner_provider"],
+        "rawResponse": plan_row["raw_response"],
+    }
     output_dir = (
         settings.storage_dir
         / "outputs"
@@ -238,32 +781,20 @@ async def generate_group(payload: GenerateGroupRequest) -> dict[str, Any]:
         log_event(db, "generation_run", run_id, "started", {"shotPlanId": plan_row["id"], "outputDir": str(output_dir)})
 
     generated_ids: list[int] = []
-    try:
-        for shot in plan.get("shots", []):
-            image_id = await generate_single_image(
-                run_id=run_id,
-                sku_row=sku_row,
-                model_row=model_row,
-                plan=plan,
-                shot=shot,
-                provider=provider,
-                output_dir=output_dir,
-            )
-            generated_ids.append(image_id)
-        with get_db() as db:
-            db.execute(
-                "UPDATE generation_runs SET status = 'SUCCEEDED', updated_at = ? WHERE id = ?",
-                (now_iso(), run_id),
-            )
-            log_event(db, "generation_run", run_id, "succeeded", {"imageIds": generated_ids})
-    except Exception as exc:
-        with get_db() as db:
-            db.execute(
-                "UPDATE generation_runs SET status = 'FAILED', updated_at = ? WHERE id = ?",
-                (now_iso(), run_id),
-            )
-            log_event(db, "generation_run", run_id, "failed", {"error": str(exc)})
-        raise
+    for shot in plan.get("shots", []):
+        image_id = await submit_single_image(
+            run_id=run_id,
+            sku_row=sku_row,
+            model_row=model_row,
+            plan=plan,
+            shot=shot,
+            provider=provider,
+            output_dir=output_dir,
+        )
+        generated_ids.append(image_id)
+    update_generation_run_status(run_id)
+    with get_db() as db:
+        log_event(db, "generation_run", run_id, "submitted", {"imageIds": generated_ids})
 
     return {"item": get_generation_run_by_id(run_id)}
 
@@ -273,13 +804,18 @@ def list_generation_runs() -> dict[str, Any]:
     with get_db() as db:
         rows = db.execute(
             """
-            SELECT gr.*, gs.sku
+            SELECT gr.*, gs.sku, gs.title AS sku_title,
+              (SELECT COUNT(*) FROM generation_images gi WHERE gi.run_id = gr.id) AS image_count,
+              (SELECT COUNT(*) FROM generation_images gi WHERE gi.run_id = gr.id AND gi.status = 'SUCCEEDED') AS succeeded_count,
+              (SELECT COUNT(*) FROM generation_images gi WHERE gi.run_id = gr.id AND gi.is_final = 1) AS final_count,
+              (SELECT COALESCE(SUM(CASE WHEN gi.current_attempt_index > 1 THEN gi.current_attempt_index - 1 ELSE 0 END), 0)
+                 FROM generation_images gi WHERE gi.run_id = gr.id) AS regeneration_count
             FROM generation_runs gr
             JOIN garment_skus gs ON gs.id = gr.sku_id
             ORDER BY gr.created_at DESC
             """
         ).fetchall()
-        return {"items": [serialize_generation_run(row, include_images=False) for row in rows]}
+        return {"items": [serialize_generation_run(row, include_images=False, include_summary=True) for row in rows]}
 
 
 @app.get("/api/generation-runs/{run_id}")
@@ -296,49 +832,101 @@ async def regenerate_image(image_id: int, payload: RegenerateRequest) -> dict[st
         run_row = db.execute("SELECT * FROM generation_runs WHERE id = ?", (image_row["run_id"],)).fetchone()
         sku_row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (run_row["sku_id"],)).fetchone()
         model_row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (run_row["model_profile_id"],)).fetchone()
-        plan_row = db.execute("SELECT * FROM shot_plans WHERE id = ?", (run_row["shot_plan_id"],)).fetchone()
+        db.execute("UPDATE generation_images SET status = 'QUEUED', updated_at = ? WHERE id = ?", (now_iso(), image_id))
 
-    plan = loads(plan_row["plan_json"], {})
     task_package = loads(image_row["task_package_json"], {})
     task_package["regeneration"] = {"fromImageId": image_id, "reason": payload.reason, "note": payload.note}
     output_dir = Path(run_row["output_dir"])
-    timestamp = now_iso()
+    shot = task_package.get("shot", {})
+    shot_index = int(shot.get("shotIndex", image_row["shot_index"]))
+    title = str(shot.get("title", image_row["title"]))
+    suffix = f"{shot_index:02d}-{sanitize_filename(title)}-regen-{datetime.now().strftime('%H%M%S')}"
+    provider = get_image_provider()
+    output_path = output_dir / f"{suffix}{provider.output_suffix()}"
 
     with get_db() as db:
-        run_cursor = db.execute(
-            """
-            INSERT INTO generation_runs
-              (sku_id, shot_plan_id, model_profile_id, kind, status, output_dir, created_at, updated_at)
-            VALUES (?, ?, ?, 'regeneration', 'RUNNING', ?, ?, ?)
-            """,
-            (sku_row["id"], plan_row["id"], model_row["id"], str(output_dir), timestamp, timestamp),
-        )
-        regen_run_id = int(run_cursor.lastrowid)
         log_event(
             db,
             "generation_image",
             image_id,
             "regenerate_requested",
-            {"reason": payload.reason, "note": payload.note, "newRunId": regen_run_id},
+            {"reason": payload.reason, "note": payload.note},
         )
 
-    shot = task_package.get("shot", {})
-    new_image_id = await generate_single_image(
-        run_id=regen_run_id,
-        sku_row=sku_row,
-        model_row=model_row,
-        plan=plan,
-        shot=shot,
-        provider=get_image_provider(),
-        output_dir=output_dir,
-        regenerate_from_image_id=image_id,
-        regenerate_reason=payload.reason,
-        task_package_override=task_package,
-    )
+    try:
+        provider_response = await provider.submit(task_package, output_path)
+    except Exception as exc:
+        with get_db() as db:
+            db.execute(
+                "UPDATE generation_images SET status = 'FAILED', updated_at = ? WHERE id = ?",
+                (now_iso(), image_id),
+            )
+            log_event(db, "generation_image", image_id, "failed", {"error": str(exc)})
+        update_generation_run_status(run_row["id"])
+        return {"item": get_generation_run_by_id(run_row["id"])}
+    provider_request = provider_response.get("providerRequest") or {"taskPackage": task_package, "outputPath": str(output_path)}
+    prompt_text = provider_request.get("prompt") if isinstance(provider_request, dict) else None
+    next_status = provider_response.get("status", "SUBMITTED")
+    provider_status = provider_response.get("providerStatus")
+    provider_request_id = provider_response.get("providerRequestId")
+    provider_urls = provider_response.get("providerUrls", {})
+    provider_status_response = provider_response.get("providerStatusResponse")
+    completed_at = now_iso() if next_status in TERMINAL_IMAGE_STATUSES else None
+    old_attempts = loads(image_row["attempts_json"], []) or []
+    next_attempt_index = len(old_attempts) + 1
+    attempt = {
+        "attemptIndex": next_attempt_index,
+        "kind": "regeneration",
+        "reason": payload.reason,
+        "note": payload.note,
+        "prompt": prompt_text,
+        "imageInputs": provider_response.get("imageInputs", task_package.get("imageInputs", [])),
+        "providerRequest": provider_request,
+        "providerResponse": provider_response.get("providerResponse", provider_response),
+        "providerStatusResponse": provider_status_response,
+        "providerRequestId": provider_request_id,
+        "providerStatus": provider_status,
+        "outputPath": str(output_path),
+        "createdAt": now_iso(),
+    }
+    attempts = [*old_attempts, attempt]
     with get_db() as db:
-        db.execute("UPDATE generation_runs SET status = 'SUCCEEDED', updated_at = ? WHERE id = ?", (now_iso(), regen_run_id))
-        log_event(db, "generation_run", regen_run_id, "succeeded", {"imageIds": [new_image_id]})
-    return {"item": get_generation_run_by_id(regen_run_id)}
+        db.execute(
+            """
+            UPDATE generation_images
+            SET status = ?, output_path = ?, task_package_json = ?,
+                provider_request_json = ?, provider_response_json = ?, prompt_text = ?,
+                image_inputs_json = ?, attempts_json = ?, current_attempt_index = ?,
+                provider_request_id = ?, provider_status = ?, provider_urls_json = ?,
+                provider_status_json = ?, submitted_at = ?, completed_at = ?,
+                last_status_checked_at = ?, regenerate_reason = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                next_status,
+                str(output_path),
+                dumps(task_package),
+                dumps(provider_request),
+                dumps(provider_response.get("providerResponse", provider_response)),
+                prompt_text,
+                dumps(provider_response.get("imageInputs", task_package.get("imageInputs", []))),
+                dumps(attempts),
+                next_attempt_index,
+                provider_request_id,
+                provider_status,
+                dumps(provider_urls),
+                dumps(provider_status_response),
+                now_iso(),
+                completed_at,
+                now_iso(),
+                payload.reason,
+                now_iso(),
+                image_id,
+            ),
+        )
+        log_event(db, "generation_image", image_id, "regeneration_submitted", {"attemptIndex": next_attempt_index, "outputPath": str(output_path)})
+    update_generation_run_status(run_row["id"])
+    return {"item": get_generation_run_by_id(run_row["id"])}
 
 
 @app.patch("/api/generation-images/{image_id}/final")
@@ -398,7 +986,7 @@ def export_run(run_id: int) -> FileResponse:
     return FileResponse(zip_path, filename=zip_path.name, media_type="application/zip")
 
 
-async def generate_single_image(
+async def submit_single_image(
     run_id: int,
     sku_row: Any,
     model_row: Any,
@@ -415,7 +1003,7 @@ async def generate_single_image(
     suffix = f"{shot_index:02d}-{sanitize_filename(title)}"
     if regenerate_from_image_id:
         suffix = f"{suffix}-regen-{datetime.now().strftime('%H%M%S')}"
-    output_path = output_dir / f"{suffix}.svg"
+    output_path = output_dir / f"{suffix}{provider.output_suffix()}"
     task_package = task_package_override or build_task_package(sku_row, model_row, plan, shot)
     timestamp = now_iso()
 
@@ -424,8 +1012,9 @@ async def generate_single_image(
             """
             INSERT INTO generation_images
               (run_id, shot_index, title, status, task_package_json, regenerate_from_image_id,
-               regenerate_reason, created_at, updated_at)
-            VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?)
+               regenerate_reason, image_inputs_json, template_snapshot_json, model_snapshot_json,
+               garment_snapshot_json, created_at, updated_at)
+            VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -434,6 +1023,10 @@ async def generate_single_image(
                 dumps(task_package),
                 regenerate_from_image_id,
                 regenerate_reason,
+                dumps(task_package.get("imageInputs", [])),
+                dumps({"brandStyle": plan.get("brandStyle", {}), "shot": shot, "plan": plan}),
+                dumps(task_package.get("model", {})),
+                dumps(task_package.get("garment", {})),
                 timestamp,
                 timestamp,
             ),
@@ -441,36 +1034,212 @@ async def generate_single_image(
         image_id = int(cursor.lastrowid)
         log_event(db, "generation_image", image_id, "started", {"runId": run_id, "shot": shot})
 
-    provider_request = {"taskPackage": task_package, "outputPath": str(output_path)}
-    provider_response = await provider.generate(task_package, output_path)
+    try:
+        provider_response = await provider.submit(task_package, output_path)
+    except Exception as exc:
+        with get_db() as db:
+            db.execute(
+                "UPDATE generation_images SET status = 'FAILED', updated_at = ? WHERE id = ?",
+                (now_iso(), image_id),
+            )
+            log_event(db, "generation_image", image_id, "failed", {"error": str(exc)})
+        return image_id
+    provider_request = provider_response.get("providerRequest") or {"taskPackage": task_package, "outputPath": str(output_path)}
+    prompt_text = provider_request.get("prompt") if isinstance(provider_request, dict) else None
+    next_status = provider_response.get("status", "SUBMITTED")
+    provider_status = provider_response.get("providerStatus")
+    provider_request_id = provider_response.get("providerRequestId")
+    provider_urls = provider_response.get("providerUrls", {})
+    provider_status_response = provider_response.get("providerStatusResponse")
+    completed_at = now_iso() if next_status in TERMINAL_IMAGE_STATUSES else None
+    attempt = {
+        "attemptIndex": 1,
+        "kind": "initial" if not regenerate_from_image_id else "regeneration",
+        "reason": regenerate_reason,
+        "prompt": prompt_text,
+        "imageInputs": provider_response.get("imageInputs", task_package.get("imageInputs", [])),
+        "providerRequest": provider_request,
+        "providerResponse": provider_response.get("providerResponse", provider_response),
+        "providerStatusResponse": provider_status_response,
+        "providerRequestId": provider_request_id,
+        "providerStatus": provider_status,
+        "outputPath": str(output_path),
+        "createdAt": now_iso(),
+    }
     with get_db() as db:
         db.execute(
             """
             UPDATE generation_images
-            SET status = 'SUCCEEDED', output_path = ?, provider_request_json = ?,
-                provider_response_json = ?, updated_at = ?
+            SET status = ?, output_path = ?, provider_request_json = ?,
+                provider_response_json = ?, prompt_text = ?, image_inputs_json = ?,
+                attempts_json = ?, current_attempt_index = 1, provider_request_id = ?,
+                provider_status = ?, provider_urls_json = ?, provider_status_json = ?,
+                submitted_at = ?, completed_at = ?, last_status_checked_at = ?, updated_at = ?
             WHERE id = ?
             """,
-            (str(output_path), dumps(provider_request), dumps(provider_response), now_iso(), image_id),
+            (
+                next_status,
+                str(output_path),
+                dumps(provider_request),
+                dumps(provider_response.get("providerResponse", provider_response)),
+                prompt_text,
+                dumps(provider_response.get("imageInputs", task_package.get("imageInputs", []))),
+                dumps([attempt]),
+                provider_request_id,
+                provider_status,
+                dumps(provider_urls),
+                dumps(provider_status_response),
+                now_iso(),
+                completed_at,
+                now_iso(),
+                now_iso(),
+                image_id,
+            ),
         )
-        log_event(db, "generation_image", image_id, "succeeded", {"outputPath": str(output_path), "provider": provider_response})
+        log_event(db, "generation_image", image_id, "submitted", {"outputPath": str(output_path), "provider": provider_response})
     return image_id
 
 
+async def generation_poller_loop() -> None:
+    while True:
+        await asyncio.sleep(settings.generation_poll_interval_seconds)
+        try:
+            await asyncio.to_thread(refresh_pending_generation_images)
+        except Exception as exc:  # pragma: no cover - background safety net
+            with get_db() as db:
+                log_event(db, "generation_poller", None, "failed", {"error": str(exc)})
+
+
+def refresh_pending_generation_images() -> None:
+    provider = get_image_provider()
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT *
+            FROM generation_images
+            WHERE status IN ('SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS', 'RUNNING')
+              AND provider_request_id IS NOT NULL
+            ORDER BY updated_at
+            LIMIT 10
+            """
+        ).fetchall()
+
+    for row in rows:
+        refresh_generation_image_status(provider, row)
+
+
+def refresh_generation_image_status(provider: Any, image_row: Any) -> None:
+    try:
+        result = asyncio.run(provider.refresh(image_row))
+    except Exception as exc:
+        with get_db() as db:
+            db.execute(
+                """
+                UPDATE generation_images
+                SET provider_status = ?, provider_status_json = ?, last_status_checked_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                ("STATUS_CHECK_FAILED", dumps({"error": str(exc)}), now_iso(), now_iso(), image_row["id"]),
+            )
+            log_event(db, "generation_image", image_row["id"], "status_check_failed", {"error": str(exc)})
+        return
+
+    next_status = result.get("status", image_row["status"])
+    provider_status = result.get("providerStatus")
+    status_response = result.get("providerStatusResponse")
+    provider_response = result.get("providerResponse")
+    completed_at = now_iso() if next_status in TERMINAL_IMAGE_STATUSES else None
+    attempts = loads(image_row["attempts_json"], []) or []
+    if attempts:
+        attempts[-1] = {
+            **attempts[-1],
+            "providerStatus": provider_status,
+            "providerStatusResponse": status_response,
+            **({"providerResponse": provider_response} if provider_response is not None else {}),
+            **({"completedAt": completed_at} if completed_at else {}),
+        }
+
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE generation_images
+            SET status = ?, provider_status = ?, provider_status_json = ?,
+                provider_response_json = COALESCE(?, provider_response_json),
+                attempts_json = ?, completed_at = COALESCE(?, completed_at),
+                last_status_checked_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                next_status,
+                provider_status,
+                dumps(status_response),
+                dumps(provider_response) if provider_response is not None else None,
+                dumps(attempts),
+                completed_at,
+                now_iso(),
+                now_iso(),
+                image_row["id"],
+            ),
+        )
+        log_event(
+            db,
+            "generation_image",
+            image_row["id"],
+            "status_updated",
+            {"status": next_status, "providerStatus": provider_status},
+        )
+    update_generation_run_status(image_row["run_id"])
+
+
+def update_generation_run_status(run_id: int) -> None:
+    with get_db() as db:
+        rows = db.execute("SELECT status FROM generation_images WHERE run_id = ?", (run_id,)).fetchall()
+        statuses = [row["status"] for row in rows]
+        if not statuses:
+            next_status = "CREATED"
+        elif any(status in ACTIVE_IMAGE_STATUSES for status in statuses):
+            next_status = "RUNNING"
+        elif all(status == "SUCCEEDED" for status in statuses):
+            next_status = "SUCCEEDED"
+        elif any(status == "SUCCEEDED" for status in statuses):
+            next_status = "PARTIAL_SUCCEEDED"
+        elif any(status == "CANCELLED" for status in statuses):
+            next_status = "CANCELLED"
+        else:
+            next_status = "FAILED"
+        db.execute(
+            "UPDATE generation_runs SET status = ?, updated_at = ? WHERE id = ?",
+            (next_status, now_iso(), run_id),
+        )
+
+
 def build_task_package(sku_row: Any, model_row: Any, plan: dict[str, Any], shot: dict[str, Any]) -> dict[str, Any]:
+    garment = plan.get("garment", {})
+    model_profile = loads(model_row["profile_json"], {})
+    image_inputs = build_image_inputs(sku_row, model_row, model_profile, shot)
+    if sku_row["sku"] == "125309C7948510":
+        garment = {
+            **garment,
+            "proportionConstraints": (
+                "裙长保持膝上中段；裙摆为克制轻 A 字，不要变成大伞摆；"
+                "蓝白条纹只作为袖窿和下摆窄装饰层，不要扩大成大面积裙片。"
+            ),
+        }
     return {
         "sku": sku_row["sku"],
-        "garment": plan.get("garment", {}),
+        "garment": garment,
         "model": {
             "modelId": model_row["model_id"],
-            "profile": loads(model_row["profile_json"], {}),
+            "profile": model_profile,
             "identityLock": "high",
         },
         "brandStyle": plan.get("brandStyle", {}),
+        "planner": plan.get("_planner", {}),
         "shot": shot,
+        "imageInputs": image_inputs,
         "generation": {
             "targetModel": "GPT Image-2",
-            "provider": "third-party-placeholder",
+            "provider": "fal",
             "output": {"aspectRatio": "1:1", "size": "1200x1200"},
             "constraints": [
                 "服装参考图是商品事实源",
@@ -480,6 +1249,59 @@ def build_task_package(sku_row: Any, model_row: Any, plan: dict[str, Any], shot:
             ],
         },
     }
+
+
+def build_image_inputs(sku_row: Any, model_row: Any, model_profile: dict[str, Any], shot: dict[str, Any]) -> list[dict[str, Any]]:
+    inputs: list[dict[str, Any]] = []
+    sku = str(sku_row["sku"])
+    simulation_asset_dir = Path(__file__).resolve().parents[2] / "simulations" / f"{sku}-v4" / "assets"
+    product_sheet = simulation_asset_dir / "product-core-reference-sheet.jpg"
+    brand_sheet = simulation_asset_dir / "brand-non-sku-reference-sheet.jpg"
+    if product_sheet.exists():
+        inputs.append({"role": "garment_reference_sheet", "localPath": str(product_sheet)})
+    else:
+        with get_db() as db:
+            image_rows = db.execute(
+                "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY role = 'main' DESC, sort_order, id LIMIT 4",
+                (sku_row["id"],),
+            ).fetchall()
+        for row in image_rows:
+            inputs.append(
+                {
+                    "role": f"garment_{row['role']}",
+                    "filename": row["filename"],
+                    "localPath": row["storage_path"],
+                }
+            )
+
+    head_reference = normalize_head_reference_filename(str(shot.get("headReference", "front.png")))
+    head_references = model_profile.get("headReferences", {}) if isinstance(model_profile.get("headReferences"), dict) else {}
+    head_filename = head_references.get(Path(head_reference).stem) or head_reference
+    head_path = Path(model_row["asset_dir"]) / str(head_filename)
+    if head_path.exists():
+        inputs.append(
+            {
+                "role": "model_head",
+                "angle": Path(str(head_filename)).stem,
+                "localPath": str(head_path),
+            }
+        )
+
+    if brand_sheet.exists():
+        inputs.append({"role": "brand_style_reference_sheet", "localPath": str(brand_sheet)})
+    else:
+        fallback_brand = Path(__file__).resolve().parents[2] / "brand-analysis" / "lily-real-sample-contact-sheet.jpg"
+        if fallback_brand.exists():
+            inputs.append({"role": "brand_style_reference_sheet", "localPath": str(fallback_brand)})
+    return inputs
+
+
+def normalize_head_reference_filename(value: str) -> str:
+    mapping = {
+        "back-turn-left45.png": "backTurnLeft45.png",
+        "back-turn-right45.png": "backTurnRight45.png",
+    }
+    return mapping.get(value, value)
 
 
 def get_sku_detail_by_id(sku_id: int) -> dict[str, Any]:
@@ -494,6 +1316,14 @@ def get_sku_detail_by_id(sku_id: int) -> dict[str, Any]:
         item = serialize_sku(row)
         item["images"] = [serialize_image(image) for image in images]
         return item
+
+
+def get_model_profile_by_id(model_profile_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (model_profile_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="数字模特不存在")
+        return serialize_model(row)
 
 
 def get_generation_run_by_id(run_id: int) -> dict[str, Any]:
@@ -541,6 +1371,7 @@ def serialize_sku(row: Any) -> dict[str, Any]:
         "analysis": loads(row["analysis_json"], None),
         "storagePath": row["storage_path"],
         "coverUrl": media_url(cover_path),
+        "coverFileSize": file_size(cover_path),
         "imageCount": row["image_count"] if "image_count" in row.keys() else None,
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
@@ -554,22 +1385,54 @@ def serialize_image(row: Any) -> dict[str, Any]:
         "role": row["role"],
         "mimeType": row["mime_type"],
         "url": media_url(row["storage_path"]),
+        "fileSize": file_size(row["storage_path"]),
         "createdAt": row["created_at"],
     }
 
 
 def serialize_model(row: Any) -> dict[str, Any]:
     profile = loads(row["profile_json"], {})
-    head = profile.get("headReferences", {}).get("front") or profile.get("headReferences", {}).get("frontAlt")
+    raw_references = profile.get("headReferences", {}) or {}
+    references = ordered_head_references(profile, raw_references)
+    assigned_references = {key: value for key, value in references.items() if not is_unassigned_head_reference_id(key)}
+    head = assigned_references.get("front")
     preview_path = Path(row["asset_dir"]) / head if head else None
+    reference_urls = {
+        angle: model_asset_url(row["id"], row["asset_dir"], filename)
+        for angle, filename in references.items()
+        if filename
+    }
+    reference_meta = {
+        angle: {"fileSize": file_size(Path(row["asset_dir"]) / str(filename))}
+        for angle, filename in references.items()
+        if filename
+    }
+    reference_entries = [
+        {
+            "id": reference_id,
+            "angle": None if is_unassigned_head_reference_id(reference_id) else reference_id,
+            "filename": str(filename),
+            "url": reference_urls.get(reference_id),
+            "fileSize": reference_meta.get(reference_id, {}).get("fileSize"),
+        }
+        for reference_id, filename in references.items()
+    ]
     return {
         "id": row["id"],
         "modelId": row["model_id"],
         "name": row["name"],
         "assetDir": row["asset_dir"],
-        "profile": profile,
+        "profile": {
+            **profile,
+            "headReferences": assigned_references,
+            "headReferenceOrder": list(references.keys()),
+            "headReferenceUrls": reference_urls,
+            "headReferenceMeta": reference_meta,
+            "headReferenceEntries": reference_entries,
+        },
         "isDefault": bool(row["is_default"]),
         "previewPath": str(preview_path) if preview_path else None,
+        "previewUrl": model_asset_url(row["id"], row["asset_dir"], head) if head else None,
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
@@ -589,11 +1452,12 @@ def serialize_shot_plan(row: Any) -> dict[str, Any]:
     }
 
 
-def serialize_generation_run(row: Any, include_images: bool) -> dict[str, Any]:
+def serialize_generation_run(row: Any, include_images: bool, include_summary: bool = False) -> dict[str, Any]:
     item = {
         "id": row["id"],
         "skuId": row["sku_id"],
         "sku": row["sku"] if "sku" in row.keys() else None,
+        "skuTitle": row["sku_title"] if "sku_title" in row.keys() else None,
         "shotPlanId": row["shot_plan_id"],
         "modelProfileId": row["model_profile_id"],
         "kind": row["kind"],
@@ -602,6 +1466,36 @@ def serialize_generation_run(row: Any, include_images: bool) -> dict[str, Any]:
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
+    if include_summary:
+        with get_db() as db:
+            previews = db.execute(
+                """
+                SELECT id, shot_index, title, output_path, status, is_final, current_attempt_index
+                FROM generation_images
+                WHERE run_id = ? AND output_path IS NOT NULL
+                ORDER BY is_final DESC, shot_index, id
+                LIMIT 5
+                """,
+                (row["id"],),
+            ).fetchall()
+            item["summary"] = {
+                "imageCount": row["image_count"] if "image_count" in row.keys() else 0,
+                "succeededCount": row["succeeded_count"] if "succeeded_count" in row.keys() else 0,
+                "finalCount": row["final_count"] if "final_count" in row.keys() else 0,
+                "regenerationCount": row["regeneration_count"] if "regeneration_count" in row.keys() else 0,
+                "previews": [
+                    {
+                        "id": preview["id"],
+                        "shotIndex": preview["shot_index"],
+                        "title": preview["title"],
+                        "url": media_url(preview["output_path"]),
+                        "status": preview["status"],
+                        "isFinal": bool(preview["is_final"]),
+                        "attemptCount": preview["current_attempt_index"] or 1,
+                    }
+                    for preview in previews
+                ],
+            }
     if include_images:
         with get_db() as db:
             images = db.execute(
@@ -620,9 +1514,24 @@ def serialize_generation_image(row: Any) -> dict[str, Any]:
         "title": row["title"],
         "status": row["status"],
         "url": media_url(row["output_path"]),
+        "fileSize": file_size(row["output_path"]),
         "taskPackage": loads(row["task_package_json"], {}),
         "providerRequest": loads(row["provider_request_json"], None),
         "providerResponse": loads(row["provider_response_json"], None),
+        "prompt": row["prompt_text"] if "prompt_text" in row.keys() else None,
+        "imageInputs": loads(row["image_inputs_json"], []) if "image_inputs_json" in row.keys() else [],
+        "templateSnapshot": loads(row["template_snapshot_json"], None) if "template_snapshot_json" in row.keys() else None,
+        "modelSnapshot": loads(row["model_snapshot_json"], None) if "model_snapshot_json" in row.keys() else None,
+        "garmentSnapshot": loads(row["garment_snapshot_json"], None) if "garment_snapshot_json" in row.keys() else None,
+        "attempts": loads(row["attempts_json"], []) if "attempts_json" in row.keys() else [],
+        "currentAttemptIndex": row["current_attempt_index"] if "current_attempt_index" in row.keys() else 0,
+        "providerRequestId": row["provider_request_id"] if "provider_request_id" in row.keys() else None,
+        "providerStatus": row["provider_status"] if "provider_status" in row.keys() else None,
+        "providerUrls": loads(row["provider_urls_json"], {}) if "provider_urls_json" in row.keys() else {},
+        "providerStatusResponse": loads(row["provider_status_json"], None) if "provider_status_json" in row.keys() else None,
+        "submittedAt": row["submitted_at"] if "submitted_at" in row.keys() else None,
+        "completedAt": row["completed_at"] if "completed_at" in row.keys() else None,
+        "lastStatusCheckedAt": row["last_status_checked_at"] if "last_status_checked_at" in row.keys() else None,
         "regenerateFromImageId": row["regenerate_from_image_id"],
         "regenerateReason": row["regenerate_reason"],
         "isFinal": bool(row["is_final"]),
@@ -653,3 +1562,117 @@ def sanitize_filename(value: str) -> str:
     if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".svg"}:
         suffix = ""
     return f"{clean or 'image'}{suffix}"
+
+
+def sanitize_reference_key(value: str) -> str:
+    return "".join(ch for ch in value.strip() if ch.isalnum() or ch in {"-", "_"}).strip("-_")
+
+
+def sanitize_reference_id(value: str) -> str:
+    return "".join(ch for ch in value.strip() if ch.isalnum() or ch in {"-", "_"})
+
+
+def normalize_model_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(profile)
+    normalized["headReferences"] = dict(normalized.get("headReferences") or {})
+    normalized["headReferenceOrder"] = normalize_head_reference_order(normalized, normalized["headReferences"])
+    forbidden = normalized.get("forbidden")
+    if isinstance(forbidden, str):
+        normalized["forbidden"] = [item.strip() for item in forbidden.split("\n") if item.strip()]
+    elif not isinstance(forbidden, list):
+        normalized["forbidden"] = []
+    return normalized
+
+
+def normalize_head_reference_order(profile: dict[str, Any], references: dict[str, Any]) -> list[str]:
+    existing_order = profile.get("headReferenceOrder")
+    ordered: list[str] = []
+    if isinstance(existing_order, list):
+        ordered.extend(str(item) for item in existing_order if str(item) in references)
+    for angle in references:
+        if angle not in ordered:
+            ordered.append(angle)
+    return ordered
+
+
+def ordered_head_references(profile: dict[str, Any], references: dict[str, Any]) -> dict[str, Any]:
+    order = normalize_head_reference_order(profile, references)
+    return {angle: references[angle] for angle in order if angle in references}
+
+
+def is_unassigned_head_reference_id(reference_id: str) -> bool:
+    return reference_id.startswith(UNASSIGNED_HEAD_REFERENCE_PREFIX)
+
+
+def new_unassigned_head_reference_key(references: dict[str, Any]) -> str:
+    while True:
+        candidate = f"{UNASSIGNED_HEAD_REFERENCE_PREFIX}{uuid4().hex[:10]}"
+        if candidate not in references:
+            return candidate
+
+
+def model_asset_url(model_profile_id: int, asset_dir: str, filename: str | None) -> str | None:
+    if not filename:
+        return None
+    candidate = Path(asset_dir) / filename
+    if not candidate.exists():
+        return None
+    return f"/api/model-profiles/{model_profile_id}/assets/{sanitize_filename(filename)}"
+
+
+def file_size(path: str | Path | None) -> int | None:
+    if not path:
+        return None
+    try:
+        candidate = Path(path)
+        if candidate.exists() and candidate.is_file():
+            return candidate.stat().st_size
+    except OSError:
+        return None
+    return None
+
+
+def ensure_writable_asset_dir(asset_dir: Path) -> None:
+    asset_dir.mkdir(parents=True, exist_ok=True)
+
+
+def remove_model_asset_file(asset_dir: Path, filename: str | None) -> None:
+    if not filename:
+        return
+    try:
+        asset_dir.resolve().relative_to(settings.storage_dir.resolve())
+    except ValueError:
+        return
+    file_path = (asset_dir / filename).resolve()
+    try:
+        file_path.relative_to(asset_dir.resolve())
+    except ValueError:
+        return
+    if file_path.exists() and file_path.is_file():
+        file_path.unlink()
+
+
+def remove_storage_path(path: Path) -> None:
+    settings = get_settings()
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(settings.storage_dir.resolve())
+    except ValueError:
+        return
+    if resolved.is_dir():
+        shutil.rmtree(resolved, ignore_errors=True)
+    elif resolved.exists():
+        resolved.unlink()
+
+
+def unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    parent = path.parent
+    for index in range(1, 1000):
+        candidate = parent / f"{stem}-{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    return parent / f"{stem}-{uuid4().hex[:8]}{suffix}"

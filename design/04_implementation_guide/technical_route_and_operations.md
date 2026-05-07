@@ -12,9 +12,10 @@
 
 ```text
 素材上传/选择
--> 预处理层生成结构化资产
--> 策划层生成拍摄方案
--> Image 2 逐张生成
+-> 浏览器本地预览与编辑
+-> 保存上传并生成默认拍摄方案
+-> 提交 Image 2 / fal queue 逐张生成
+-> 后台轮询状态并下载结果
 -> 人工确认/重生/导出
 ```
 
@@ -27,7 +28,8 @@ flowchart TD
   A["历史真实摄影图"] --> B["品牌初始化分析"]
   B --> C["Lily 品牌模板库"]
 
-  D["服装图包"] --> E["服装事实识别"]
+  D["服装图包"] --> D1["本地预览与编辑"]
+  D1 --> E["服装事实识别 / 默认方案生成"]
   F["数字模特图包"] --> G["数字模特档案"]
   H["可选尺寸参数"] --> I["比例约束"]
 
@@ -36,9 +38,12 @@ flowchart TD
   G --> J
   I --> J
 
-  J --> K["单张生成任务包"]
-  K --> L["Image 2 逐张生成"]
-  L --> M["人工确认/单张重生"]
+  J --> J1["保存为货号默认 ShotPlan"]
+  J1 --> K["单张生成任务包"]
+  K --> L0["创建生成任务记录"]
+  L0 --> L1["提交 fal queue"]
+  L1 --> L2["后台 poller 查询状态"]
+  L2 --> M["人工确认/单张重生"]
   M --> N["导出组图"]
   M --> O["已确认图"]
   O --> K
@@ -88,21 +93,34 @@ flowchart TD
 }
 ```
 
-## 5. 单个货号生成流程
+## 5. 单个货号生产流程
 
-### 5.1 服装事实识别
+### 5.1 服装素材上传与预览
 
-输入：货号图包。
+输入：用户选择的散图或文件夹。
 
-技术路线：
+当前 MVP 支持：
 
-- 图片角色分类：正面、背面、细节、面料、颜色、3D。
-- VLM 生成商品事实卡。
-- 用户确认关键字段。
+- 上传 N 张图片并填写货号。
+- 上传一个文件夹，默认货号为文件夹名。
+- 上传 N 个文件夹，生成 N 个待保存图包。
+- 上传 ZIP 暂不做。
+- 上传前先在浏览器本地预览，支持编辑货号/标题、删除图片，再保存上传。
+- 第一张图片默认作为封面；不做正面/背面/细节/3D 等图片角色识别。
+
+工程要点：
+
+- 前端预览卡片和已保存素材卡片保持同一结构和样式。
+- 卡片展示文件名、图片尺寸、文件大小。
+- 后端保存原始上传副本到本地文件系统，不覆盖用户原始素材。
+
+### 5.2 服装事实识别与默认方案
 
 生产操作：
 
-用户选择货号后，系统自动展示：
+保存上传后，系统调用 Gemini API 生成 `garment + brandStyle + shots`。如果 Gemini 不可用，则使用 fallback 默认方案。
+
+用户选择货号后，系统展示：
 
 ```text
 品类：无袖连衣裙
@@ -111,7 +129,7 @@ flowchart TD
 风险点：裙长容易变长，裙摆容易被放大
 ```
 
-### 5.2 数字模特绑定
+### 5.3 数字模特绑定
 
 输入：数字模特档案。
 
@@ -125,7 +143,7 @@ flowchart TD
 
 当前默认选择 `Face-01`。未来可以支持多个数字模特，但每次任务只选择一个模特作为组图主体。
 
-### 5.3 组图策划
+### 5.4 组图策划
 
 输入：
 
@@ -154,6 +172,13 @@ flowchart TD
 05 下摆/面料局部
 ```
 
+默认方案保存规则：
+
+- `POST /api/shot-plans` 会创建新的 `shot_plans` 记录。
+- 一个货号可有多条方案历史。
+- `GET /api/garment-skus/{sku_id}/default-shot-plan` 取最新一条作为默认方案。
+- 生成组图页不再临时创建方案，只使用默认方案。
+
 ## 6. 单张生成任务包
 
 Image 2 不直接接收一段长 prompt，而是接收系统组装后的任务包。
@@ -177,36 +202,121 @@ Image 2 不直接接收一段长 prompt，而是接收系统组装后的任务�
     "styling": "以 Lily 连衣裙模板为鞋包和姿态边界",
     "proportion": "如有尺寸参数，以尺寸参数控制裙长和下摆"
   },
-  "prompt": "Generate one Lily e-commerce side full-body photo. Use the provided images as source of truth. Keep styling within Lily references. Do not change face, garment design, garment proportions, or add text."
+  "prompt": "任务：生成一张 Lily 电商模特图，当前图位为 02：侧身走动全身。图片角色：服装参考图是商品事实来源；模特头部图是身份事实来源；Lily 真实成片参考图定义姿态、鞋包、配饰、光线、背景和构图边界。禁止换脸、改变服装结构、生成文字、水印或 logo。"
 }
 ```
+
+所有模型调用提示词统一使用中文，包括 Gemini 组图策划、Image 2 生成、重生补充要求和禁止项。前端用户不直接维护 prompt，系统从结构化任务包中合成短中文任务文本。
+
+## 6.1 Image 2 / fal queue 接入
+
+当前生产接入使用 fal 的 GPT Image-2 edit queue：
+
+```text
+模型 ID：openai/gpt-image-2/edit
+提交 URL：https://queue.fal.run/openai/gpt-image-2/edit
+同步 URL：https://fal.run/openai/gpt-image-2/edit
+```
+
+MVP 正式生成走 queue，不走同步等待。同步 URL 只保留为接口文档和备用兼容。
+
+fal 提交入参：
+
+```json
+{
+  "prompt": "中文 Image 2 生成提示词",
+  "image_urls": [
+    "https://v3b.fal.media/files/.../product-reference.jpg",
+    "https://v3b.fal.media/files/.../Face-01-left45.png",
+    "https://v3b.fal.media/files/.../lily-brand-reference.jpg"
+  ],
+  "image_size": "auto",
+  "quality": "high",
+  "num_images": 1,
+  "output_format": "png",
+  "sync_mode": false
+}
+```
+
+本地图片必须先上传到 fal storage，生成 `image_urls` 后再提交。每个生成任务需要保存：
+
+- 原始 `task_package`
+- 中文 `prompt`
+- 本地输入图与 fal URL 映射
+- fal 提交请求和响应
+- `request_id`
+- `status_url` / `response_url` / `cancel_url`
+- fal 状态响应
+- 最终图片下载后的本地 `output_path`
+
+## 6.2 后台生成与状态恢复
+
+点击“生成组图”后，后端不等待图片生成完成。
+
+后端流程：
+
+1. 创建 `generation_runs`。
+2. 为每张 shot 创建一条 `generation_images` 任务记录。
+3. 组装单张 `task_package` 和中文 prompt。
+4. 上传参考图到 fal storage。
+5. 提交 fal queue，保存 `request_id` 和 queue URLs。
+6. API 立即返回 `GenerationRun`。
+7. 后台 poller 周期性扫描未完成任务。
+8. poller 调用 fal `status_url`，将 fal 状态映射为本地状态。
+9. 完成后调用 `response_url`，下载结果图到本地输出目录。
+10. 更新单张任务状态，并聚合更新 run 状态。
+
+前端流程：
+
+1. 点击生成后进入结果区。
+2. 保存最近一次 `runId` 到本地。
+3. 每 3 秒轮询 `GET /api/generation-runs/{run_id}`。
+4. 根据 `submittedAt` / `completedAt` 动态显示整组和单图计时。
+5. 刷新页面后恢复最近一次生成记录并继续显示状态。
+
+当前不做 webhook。后续生产环境可以升级为 webhook 为主、poller 兜底。
+
+本地状态枚举：
+
+```text
+GenerationImage:
+QUEUED / SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED / CANCELLED
+
+GenerationRun:
+CREATED / RUNNING / PARTIAL_SUCCEEDED / SUCCEEDED / FAILED / CANCELLED
+```
+
+fal 状态保存到 `provider_status` 和 `provider_status_json`，不覆盖本地业务状态。
 
 ## 7. 每个要素的生产落点
 
 | 要素 | 产品位置 | 技术实现 | 用户是否需要操作 |
 | --- | --- | --- | --- |
-| 服装事实 | 服装素材/生成组图 | VLM 识别 + 图片角色分类 | 只确认关键字段 |
-| 模特身份 | 数字模特 | 多角度头图档案 | 选择模特 |
+| 服装事实 | 服装素材 | Gemini/fallback 识别摘要；当前不做图片角色分类 | 查看关键字段 |
+| 模特身份 | 数字模特 | 多角度头图档案 | 维护默认模特；生成使用默认方案绑定的模特 |
 | 模特身体 | 数字模特 | 身体参数档案 | 默认不填，可维护 |
 | 尺寸比例 | 服装事实卡折叠区 | 尺寸表映射为视觉约束 | 可选填写 |
 | 品牌调性 | 品牌调性模板 | 历史图分析 + 模板库 | 默认使用 Lily 模板 |
 | 鞋包搭配 | 组图策划器 | 模板检索 + 推理选择 | 默认自动，必要时人工改 |
 | Pose | Pose 模板 | 真实图抽取/标签化 | 默认自动，必要时换模板 |
-| 镜头取景 | 组图方案 | 品类规则 + 平台规则 | 默认自动，必要时删改图位 |
+| 镜头取景 | 默认组图方案 | 品类规则 + 平台规则 | 默认自动，必要时更新默认方案 |
 | 背景光线 | 品牌模板 | 真实参考图 + 短边界 | 默认自动 |
 | 组图一致性 | 生成结果页 | 已确认图作为后续参考 | 人工确认首图 |
+| 生成状态 | 生成结果页 | fal queue request id + 后台 poller + 前端轮询 | 自动 |
+| 重生历史 | 生成任务记录 | 同一 `generation_images` 下追加 attempts | 点击重生 |
 | 导出 | 导出模块 | 命名/尺寸/格式规则 | 点击导出 |
 
 ## 8. 对当前 MVP 的建议
 
 MVP 不需要一次做成完整 SaaS，但要先把骨架搭对：
 
-1. 主入口只保留 `生成组图`。
-2. 保留 `服装素材`、`数字模特`、`品牌调性模板` 作为必要配置入口。
+1. 生产入口保留 `生成组图`，素材准备入口为 `服装素材`。
+2. `服装素材` 承担上传预览、素材管理和默认组图方案生成/更新。
 3. 品牌模板库先只做 Lily 默认模板和连衣裙/上衣/裤装/半裙/外套几个子模板。
 4. 尺寸模块先做可选字段，不作为必填。
 5. 暂不做自动质检，但保留单张重生和人工确认。
 6. 每张图单独生成，不做一张大图一次性出全组。
+7. 真实 Image 2 生成必须走持久化异步任务，不在前端请求内同步等待十几分钟。
 
 ## 9. 预期效果与边界
 
