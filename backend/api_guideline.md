@@ -31,7 +31,7 @@
 | `/api/shot-plans/{shot_plan_id}` | GET | 查看组图方案 |
 | `/api/garment-skus/{sku_id}/default-shot-plan` | GET | 获取货号默认组图方案，当前取最新一条 `shot_plans` |
 | `/api/generation-runs` | POST | 根据组图方案创建生成批次，并提交每张图到后台生成队列 |
-| `/api/generation-runs` | GET | 生成批次列表 |
+| `/api/generation-runs` | GET | 生成批次列表；返回前台历史任务摘要、缩略图和重生次数 |
 | `/api/generation-runs/{run_id}` | GET | 生成批次详情和单张结果 |
 | `/api/generation-images/{image_id}/regenerate` | POST | 单张重生；不新增生成任务记录，在同一记录追加 attempt |
 | `/api/generation-images/{image_id}/final` | PATCH | 设置/取消最终图 |
@@ -39,6 +39,8 @@
 | `/api/exports/runs/{run_id}` | POST | 打包导出该 run 的最终图或全部图 |
 
 当前没有独立 `/api/brand-templates`，Lily 品牌模板暂时内嵌在 planner 输出和 task package 中。
+
+前台“生成记录”列表使用 `/api/generation-runs`，不是直接展示 `/api/logs`。`event_logs` 仍用于排查和审计。
 
 ## 服装素材 CRUD 契约
 
@@ -179,6 +181,26 @@ SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED
 其中 placeholder provider 会直接返回 `SUCCEEDED` 并写入占位 SVG；fal provider 会进入 queue 状态。
 
 ### 查询生成批次
+
+`GET /api/generation-runs`
+
+返回前台历史任务列表。列表项包含任务基础字段和 `summary`：
+
+```json
+{
+  "id": 7,
+  "sku": "125329C0908714",
+  "skuTitle": "125329C0908714",
+  "status": "SUCCEEDED",
+  "summary": {
+    "imageCount": 5,
+    "succeededCount": 5,
+    "finalCount": 1,
+    "regenerationCount": 2,
+    "previews": []
+  }
+}
+```
 
 `GET /api/generation-runs/{run_id}`
 

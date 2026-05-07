@@ -41,6 +41,7 @@
 -> 提交 GPT Image-2 / fal queue
 -> 后台轮询状态并下载结果
 -> 单张重生 / 设为最终图 / 导出
+-> 生成记录中复盘任务，必要时恢复到生成组图页继续操作
 ```
 
 上传支持：
@@ -83,6 +84,31 @@ FAL_KEY=你的_fal_key
 ```
 
 真实生图走 fal queue。点击生成后后端立即返回任务记录，后台持续查询 fal 状态，前端显示运行计时和每张图状态。
+
+## 前端路由
+
+前端支持可恢复 URL：
+
+```text
+/generate
+/generate?sku=125329C0908714
+/generate?run=7
+/garment-skus
+/garment-skus/125329C0908714
+/model-profiles
+/model-profiles/Face-01
+/generation-runs
+/generation-runs/7
+```
+
+其中：
+
+- `/generate?run={runId}` 会在生成组图页恢复指定历史任务。
+- `/garment-skus/{sku}` 会打开指定货号图包。
+- `/model-profiles/{modelId}` 会打开指定数字模特。
+- `/generation-runs/{runId}` 会打开指定生成记录详情。
+
+前台“生成记录”以任务为主粒度：每次整组生成一条记录；单张重生收纳在该任务内对应图位的 attempts 中，不额外新增一条任务记录。
 
 ## 项目结构
 

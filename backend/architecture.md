@@ -79,13 +79,19 @@ POST /api/generation-runs
   -> 聚合更新 generation_run.status
 ```
 
-前端不直接等待 fal，也不直接查询 fal。前端轮询 `GET /api/generation-runs/{run_id}`，并根据 `submitted_at` / `completed_at` 动态显示计时器。刷新页面后通过最近一次 `runId` 恢复显示。
+前端不直接等待 fal，也不直接查询 fal。前端轮询 `GET /api/generation-runs/{run_id}`，并根据 `submitted_at` / `completed_at` 动态显示计时器。
+
+状态恢复方式：
+
+- `/generate?run={run_id}`：在生成组图页恢复指定历史任务。
+- `/generation-runs/{run_id}`：在生成记录页打开指定任务详情。
+- 本地最近一次 `runId` 只作为无 URL 指定时的便利恢复，不是生成记录的唯一入口。
 
 ## MVP 约束
 
 - 单客户 Lily，不做 tenant。
 - 本地文件系统优先，不要求上传平台化。
-- 任务状态、生成记录、重生记录和事件日志要可恢复、可复查。
+- 任务状态、生成记录、重生 attempts 和事件日志要可恢复、可复查。
 - AI provider 通过 adapter 包装，避免业务代码绑定单一模型 SDK。
 - 真实生成必须走持久化异步任务；当前使用 FastAPI 后台 poller，后续可升级独立 worker / webhook。
 - 当前不做素材解析与服装图片类型识别，默认第一张图片作为封面。

@@ -184,11 +184,13 @@ MVP 不做多租户、权限、计费、模板市场，也不做复杂素材资�
 
 ### 3.5 GenerationRun
 
-一次生成批次。
+一次生成任务批次，也是前台“生成记录”的主记录粒度。
 
 当前职责：
 
-- 记录一次整组生成或一次单图重生。
+- 记录一次用户触发的整组生成。
+- 同一个素材包重复生成一次，会产生新的 `GenerationRun`。
+- 单张重生不再新建 `GenerationRun`，而是追加到对应 `GenerationImage.attempts_json`。
 - 绑定 `GarmentSku`、`ShotPlan` 和 `ModelProfile`。
 - 记录输出目录 `output_dir`。
 - 聚合多个 `GenerationImage`。
@@ -197,8 +199,8 @@ MVP 不做多租户、权限、计费、模板市场，也不做复杂素材资�
 
 | kind | 含义 |
 |---|---|
-| `group` | 由一个 `ShotPlan` 生成整组图 |
-| `regeneration` | 针对某张图发起的一次重生 |
+| `group` | 由一个 `ShotPlan` 生成整组图；当前主要使用值 |
+| `regeneration` | 历史兼容值；当前单张重生默认不再新建 run |
 
 当前状态：
 
@@ -211,14 +213,15 @@ MVP 不做多租户、权限、计费、模板市场，也不做复杂素材资�
 
 ### 3.6 GenerationImage
 
-一次生成产出的单张图记录。
+一次图位生成任务记录。
 
 当前职责：
 
 - 保存图位序号、图位标题、生成状态和输出路径。
 - 保存完整 `task_package_json`，这是后续接真实 GPT Image-2 三方平台的核心契约。
 - 保存 provider 请求和响应，保证可复盘。
-- 保存重生来源 `regenerate_from_image_id` 和重生原因 `regenerate_reason`。
+- 保存最近一次重生原因 `regenerate_reason`。
+- 通过 `attempts_json` 保存初次生成和每次重生的调用记录，包括 prompt、输入图、provider request/response、fal request id、输出路径和时间戳。
 - 支持标记为最终图 `is_final`。
 
 当前 `task_package_json` 结构：
@@ -271,7 +274,8 @@ MVP 不做多租户、权限、计费、模板市场，也不做复杂素材资�
 
 - 记录重要业务动作和系统动作。
 - 同步写入 SQLite 的 `event_logs` 表和 `backend/storage/logs/YYYY-MM-DD.jsonl`。
-- 用于前端“生成记录”以及后续排查。
+- 用于调试、审计和后续排查。
+- 前台“生成记录”的主视图不直接展示 `event_logs`，而是展示 `GenerationRun` 任务列表；事件日志只作为详情页或调试信息的补充来源。
 
 当前事件示例：
 

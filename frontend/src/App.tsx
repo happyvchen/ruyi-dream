@@ -25,6 +25,14 @@ import type { GarmentSku, GenerationImage, GenerationRun, ModelProfile, ShotPlan
 
 type BusyState = 'idle' | 'uploading' | 'planning' | 'generating' | 'regenerating'
 type Page = 'generate' | 'garments' | 'models' | 'history'
+type AppRoute = {
+  page: Page
+  sku?: string
+  modelId?: string
+  runId?: number
+  generateSku?: string
+  generateRunId?: number
+}
 type ImportStatus = 'draft' | 'uploading' | 'uploaded' | 'failed'
 type ImportImage = {
   id: string
@@ -84,7 +92,9 @@ export function App() {
   const [historyFilter, setHistoryFilter] = useState('')
   const [busy, setBusy] = useState<BusyState>('idle')
   const [error, setError] = useState<string | null>(null)
-  const [page, setPage] = useState<Page>('generate')
+  const [page, setPage] = useState<Page>(() => parseRoute().page)
+  const [route, setRoute] = useState<AppRoute>(() => parseRoute())
+  const [hydratedRouteKey, setHydratedRouteKey] = useState('')
   const [editSkuForm, setEditSkuForm] = useState({ sku: '', title: '', status: 'NEW' })
   const [extraFiles, setExtraFiles] = useState<File[]>([])
   const [importPackages, setImportPackages] = useState<ImportPackage[]>([])
@@ -98,8 +108,26 @@ export function App() {
   const selectedModel = models.find((model) => model.id === selectedModelId) ?? defaultModel
   const planModel = models.find((model) => model.id === shotPlan?.modelProfileId) ?? selectedModel
 
+  function navigate(routeInput: AppRoute, replace = false) {
+    const url = routeToUrl(routeInput)
+    if (replace) window.history.replaceState(null, '', url)
+    else window.history.pushState(null, '', url)
+    setRoute(routeInput)
+    setPage(routeInput.page)
+  }
+
   useEffect(() => {
     void refreshBaseData()
+  }, [])
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const nextRoute = parseRoute()
+      setRoute(nextRoute)
+      setPage(nextRoute.page)
+    }
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
   }, [])
 
   useEffect(() => {
@@ -147,6 +175,46 @@ export function App() {
     }
   }, [editingModelId, models])
 
+  useEffect(() => {
+    if (routeKey(route) === hydratedRouteKey) return
+    if (route.page === 'garments' && route.sku) {
+      const targetSku = skus.find((sku) => sku.sku === route.sku)
+      if (targetSku) {
+        setHydratedRouteKey(routeKey(route))
+        void chooseSku(targetSku, { syncUrl: false })
+      }
+      return
+    }
+    if (route.page === 'history' && route.runId) {
+      setHydratedRouteKey(routeKey(route))
+      void openHistoryRun(route.runId)
+      return
+    }
+    if (route.page === 'generate' && route.generateRunId) {
+      const targetRun = historyRuns.find((run) => run.id === route.generateRunId)
+      if (targetRun) {
+        setHydratedRouteKey(routeKey(route))
+        void restoreHistoryRun(targetRun, { syncUrl: false })
+      }
+      return
+    }
+    if (route.page === 'generate' && route.generateSku) {
+      const targetSku = skus.find((sku) => sku.sku === route.generateSku)
+      if (targetSku) {
+        setHydratedRouteKey(routeKey(route))
+        void chooseSku(targetSku, { syncUrl: false })
+      }
+      return
+    }
+    if (route.page === 'models' && route.modelId && models.length) {
+      const targetModel = models.find((model) => model.modelId === route.modelId)
+      if (targetModel) {
+        setHydratedRouteKey(routeKey(route))
+        setEditingModelId(targetModel.id)
+      }
+    }
+  }, [route, skus, models, historyRuns, hydratedRouteKey])
+
   async function refreshBaseData() {
     setError(null)
     const [skuResult, modelResult, runResult] = await Promise.all([api.listSkus(), api.listModels(), api.listRuns()])
@@ -162,7 +230,7 @@ export function App() {
     setHistoryRuns(result.items)
   }
 
-  async function chooseSku(sku: GarmentSku) {
+  async function chooseSku(sku: GarmentSku, options: { syncUrl?: boolean; targetPage?: Page } = {}) {
     setError(null)
     const detail = await api.getSku(sku.id)
     const planResult = await api.getDefaultPlan(sku.id)
@@ -175,6 +243,11 @@ export function App() {
     setExtraFiles([])
     setShotPlan(planResult.item)
     setGenerationRun(null)
+    if (options.syncUrl !== false) {
+      const targetPage = options.targetPage ?? page
+      if (targetPage === 'garments') navigate({ page: 'garments', sku: detail.item.sku })
+      if (targetPage === 'generate') navigate({ page: 'generate', generateSku: detail.item.sku })
+    }
   }
 
   function stageLooseImages(selectedFiles: File[]) {
@@ -256,10 +329,11 @@ export function App() {
         setSelectedSku(plannedDetail.item)
         setShotPlan(planResult.item)
         setEditSkuForm({
-          sku: plannedDetail.item.sku,
+        sku: plannedDetail.item.sku,
           title: plannedDetail.item.title ?? plannedDetail.item.sku,
           status: plannedDetail.item.status,
         })
+        navigate({ page: 'garments', sku: plannedDetail.item.sku })
         await refreshBaseData()
       } catch (planErr) {
         setShotPlan(null)
@@ -294,8 +368,10 @@ export function App() {
     try {
       const result = await api.createPlan(targetSku.id, selectedModel?.id)
       setShotPlan(result.item)
-      setSelectedSku((await api.getSku(targetSku.id)).item)
+      const detail = (await api.getSku(targetSku.id)).item
+      setSelectedSku(detail)
       setGenerationRun(null)
+      if (page === 'garments') navigate({ page: 'garments', sku: detail.sku }, true)
     } catch (err) {
       setError(err instanceof Error ? err.message : '生成方案失败')
     } finally {
@@ -310,6 +386,7 @@ export function App() {
     try {
       const result = await api.generateGroup(shotPlan.id)
       setGenerationRun(result.item)
+      navigate({ page: 'generate', generateRunId: result.item.id }, true)
       await refreshHistoryRuns()
     } catch (err) {
       setError(err instanceof Error ? err.message : '生成失败')
@@ -349,12 +426,13 @@ export function App() {
     try {
       const result = await api.getRun(runId)
       setSelectedHistoryRun(result.item)
+      navigate({ page: 'history', runId: result.item.id })
     } catch (err) {
       setError(err instanceof Error ? err.message : '读取生成记录失败')
     }
   }
 
-  async function restoreHistoryRun(run: GenerationRun) {
+  async function restoreHistoryRun(run: GenerationRun, options: { syncUrl?: boolean } = {}) {
     setError(null)
     try {
       const [skuResult, planResult, runResult] = await Promise.all([
@@ -370,7 +448,8 @@ export function App() {
       })
       setShotPlan(planResult.item)
       setGenerationRun(runResult.item)
-      setPage('generate')
+      if (options.syncUrl === false) setPage('generate')
+      else navigate({ page: 'generate', generateRunId: runResult.item.id })
     } catch (err) {
       setError(err instanceof Error ? err.message : '恢复历史入参失败')
     }
@@ -384,6 +463,7 @@ export function App() {
       const result = await api.updateSku(selectedSku.id, editSkuForm)
       setSelectedSku(result.item)
       await refreshBaseData()
+      if (page === 'garments') navigate({ page: 'garments', sku: result.item.sku }, true)
     } catch (err) {
       setError(err instanceof Error ? err.message : '保存失败')
     } finally {
@@ -402,6 +482,7 @@ export function App() {
       setSelectedSku(null)
       setShotPlan(null)
       setGenerationRun(null)
+      navigate({ page: 'garments' }, true)
       await refreshBaseData()
     } catch (err) {
       setError(err instanceof Error ? err.message : '删除失败')
@@ -418,6 +499,7 @@ export function App() {
       const result = await api.addSkuImages(selectedSku.id, extraFiles)
       setSelectedSku(result.item)
       setExtraFiles([])
+      if (page === 'garments') navigate({ page: 'garments', sku: result.item.sku }, true)
       await refreshBaseData()
     } catch (err) {
       setError(err instanceof Error ? err.message : '追加图片失败')
@@ -444,6 +526,7 @@ export function App() {
     setEditingModelId(undefined)
     setModelForm(createBlankModelForm(models.length + 1))
     setModelHeadDrafts([])
+    navigate({ page: 'models' })
   }
 
   async function saveModel() {
@@ -469,6 +552,7 @@ export function App() {
       setEditingModelId(result.item.id)
       if (result.item.isDefault || !selectedModelId) setSelectedModelId(result.item.id)
       setModelHeadDrafts([])
+      navigate({ page: 'models', modelId: result.item.modelId }, true)
       await refreshBaseData()
     } catch (err) {
       setError(err instanceof Error ? err.message : '保存数字模特失败')
@@ -491,6 +575,7 @@ export function App() {
       const nextModel = nextModels[0]
       setEditingModelId(nextModel?.id)
       if (selectedModelId === editingModel.id) setSelectedModelId(nextModel?.id)
+      navigate(nextModel ? { page: 'models', modelId: nextModel.modelId } : { page: 'models' }, true)
     } catch (err) {
       setError(err instanceof Error ? err.message : '删除数字模特失败')
     } finally {
@@ -521,6 +606,7 @@ export function App() {
       const result = await api.addModelHeadReferences(editingModelId, files)
       setModels((current) => current.map((model) => (model.id === result.item.id ? result.item : model)))
       setModelForm(modelToForm(result.item))
+      navigate({ page: 'models', modelId: result.item.modelId }, true)
     } catch (err) {
       setError(err instanceof Error ? err.message : '上传头像失败')
     } finally {
@@ -545,6 +631,7 @@ export function App() {
       const result = await api.replaceModelHeadReference(editingModelId, angle, file)
       setModels((current) => current.map((model) => (model.id === result.item.id ? result.item : model)))
       setModelForm(modelToForm(result.item))
+      navigate({ page: 'models', modelId: result.item.modelId }, true)
     } catch (err) {
       setError(err instanceof Error ? err.message : '替换头像失败')
     } finally {
@@ -581,6 +668,7 @@ export function App() {
       const result = await api.updateModelHeadReference(editingModelId, angle, payload)
       setModels((current) => current.map((model) => (model.id === result.item.id ? result.item : model)))
       setModelForm(modelToForm(result.item))
+      navigate({ page: 'models', modelId: result.item.modelId }, true)
     } catch (err) {
       setError(err instanceof Error ? err.message : '更新头像失败')
     }
@@ -598,6 +686,7 @@ export function App() {
       const result = await api.deleteModelHeadReference(editingModelId, angle)
       setModels((current) => current.map((model) => (model.id === result.item.id ? result.item : model)))
       setModelForm(modelToForm(result.item))
+      navigate({ page: 'models', modelId: result.item.modelId }, true)
     } catch (err) {
       setError(err instanceof Error ? err.message : '删除头像失败')
     }
@@ -612,10 +701,13 @@ export function App() {
           <p>{pageSubtitle(page)}</p>
         </div>
         <nav>
-          <button className={page === 'generate' ? 'active' : ''} onClick={() => setPage('generate')}>生成组图</button>
-          <button className={page === 'garments' ? 'active' : ''} onClick={() => setPage('garments')}>服装素材</button>
-          <button className={page === 'models' ? 'active' : ''} onClick={() => setPage('models')}>数字模特</button>
-          <button className={page === 'history' ? 'active' : ''} onClick={() => setPage('history')}>生成记录</button>
+          <button className={page === 'generate' ? 'active' : ''} onClick={() => navigate({ page: 'generate' })}>生成组图</button>
+          <button className={page === 'garments' ? 'active' : ''} onClick={() => navigate(selectedSku ? { page: 'garments', sku: selectedSku.sku } : { page: 'garments' })}>服装素材</button>
+          <button className={page === 'models' ? 'active' : ''} onClick={() => {
+            const editingModel = models.find((model) => model.id === editingModelId)
+            navigate(editingModel ? { page: 'models', modelId: editingModel.modelId } : { page: 'models' })
+          }}>数字模特</button>
+          <button className={page === 'history' ? 'active' : ''} onClick={() => navigate(selectedHistoryRun ? { page: 'history', runId: selectedHistoryRun.id } : { page: 'history' })}>生成记录</button>
         </nav>
       </header>
 
@@ -625,7 +717,7 @@ export function App() {
         <section className="left-rail">
           <Panel title="上传服装" icon={<Upload size={18} />}>
             <p className="small-muted">请到“服装素材”页完成预览与编辑后保存上传。</p>
-            <button className="primary full" onClick={() => setPage('garments')}>
+            <button className="primary full" onClick={() => navigate({ page: 'garments' })}>
               <Upload size={17} />导入新图包
             </button>
           </Panel>
@@ -637,7 +729,7 @@ export function App() {
                 <button
                   key={sku.id}
                   className={`sku-item ${selectedSku?.id === sku.id ? 'selected' : ''}`}
-                  onClick={() => void chooseSku(sku)}
+                  onClick={() => void chooseSku(sku, { targetPage: 'generate' })}
                 >
                   {sku.coverUrl ? (
                     <ImagePreviewThumb
@@ -698,7 +790,7 @@ export function App() {
                   </div>
                   <h3>{shotPlan?.plan.brandStyle?.name ?? '暂无默认组图方案'}</h3>
                   <p>{shotPlan ? `将使用 ${planModel.name} 和服装素材页保存的 ${shotPlan.plan.shots.length} 张图位方案。` : '回到服装素材页生成默认组图方案后，这里会直接用于生成。'}</p>
-                  {shotPlan ? <Tag>{planModel.name}</Tag> : <button className="secondary" onClick={() => setPage('garments')}>去保存方案</button>}
+                  {shotPlan ? <Tag>{planModel.name}</Tag> : <button className="secondary" onClick={() => navigate(selectedSku ? { page: 'garments', sku: selectedSku.sku } : { page: 'garments' })}>去保存方案</button>}
                 </div>
               ) : (
                 <EmptyText text="暂无数字模特" />
@@ -759,10 +851,9 @@ export function App() {
           onDeleteSelectedSku={() => void deleteSelectedSku()}
           onAddImages={() => void addImagesToSelectedSku()}
           onDeleteImage={(imageId) => void deleteImage(imageId)}
-          onSelectSku={(sku) => void chooseSku(sku)}
+          onSelectSku={(sku) => void chooseSku(sku, { targetPage: 'garments' })}
           onUseInGenerate={(sku) => {
-            void chooseSku(sku)
-            setPage('generate')
+            void chooseSku(sku, { targetPage: 'generate' })
           }}
           onCreatePlan={(sku) => {
             void createPlan(sku)
@@ -777,7 +868,11 @@ export function App() {
           form={modelForm}
           busy={busy}
           headDrafts={modelHeadDrafts}
-          onSelectModel={setEditingModelId}
+          onSelectModel={(modelId) => {
+            setEditingModelId(modelId)
+            const model = models.find((item) => item.id === modelId)
+            navigate(model ? { page: 'models', modelId: model.modelId } : { page: 'models' })
+          }}
           onNewModel={beginNewModel}
           onFormChange={setModelForm}
           onSaveModel={() => void saveModel()}
@@ -2290,6 +2385,45 @@ function middleEllipsis(value: string, maxLength = 28) {
   const head = Math.ceil(available * 0.58)
   const tail = Math.floor(available * 0.42)
   return `${text.slice(0, head)}...${text.slice(Math.max(text.length - tail, head))}${extension}`
+}
+
+function parseRoute(): AppRoute {
+  const path = window.location.pathname.replace(/\/+$/, '') || '/'
+  const parts = path.split('/').filter(Boolean).map(decodeURIComponent)
+  const params = new URLSearchParams(window.location.search)
+  if (parts[0] === 'garment-skus') return { page: 'garments', sku: parts[1] }
+  if (parts[0] === 'model-profiles') return { page: 'models', modelId: parts[1] }
+  if (parts[0] === 'generation-runs') {
+    const runId = Number(parts[1])
+    return { page: 'history', runId: Number.isFinite(runId) ? runId : undefined }
+  }
+  if (parts[0] === 'generate') {
+    const runId = Number(params.get('run'))
+    return {
+      page: 'generate',
+      generateSku: params.get('sku') || undefined,
+      generateRunId: Number.isFinite(runId) ? runId : undefined,
+    }
+  }
+  return { page: 'generate' }
+}
+
+function routeToUrl(route: AppRoute) {
+  if (route.page === 'garments') return route.sku ? `/garment-skus/${encodeURIComponent(route.sku)}` : '/garment-skus'
+  if (route.page === 'models') return route.modelId ? `/model-profiles/${encodeURIComponent(route.modelId)}` : '/model-profiles'
+  if (route.page === 'history') return route.runId ? `/generation-runs/${route.runId}` : '/generation-runs'
+  if (route.page === 'generate') {
+    const params = new URLSearchParams()
+    if (route.generateRunId) params.set('run', String(route.generateRunId))
+    else if (route.generateSku) params.set('sku', route.generateSku)
+    const query = params.toString()
+    return query ? `/generate?${query}` : '/generate'
+  }
+  return '/generate'
+}
+
+function routeKey(route: AppRoute) {
+  return routeToUrl(route)
 }
 
 function pageTitle(page: Page) {
