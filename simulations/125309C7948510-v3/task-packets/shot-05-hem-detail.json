@@ -1,0 +1,10 @@
+{
+  "shotId": "05",
+  "shotRole": "下摆局部",
+  "garmentInputs": ["tmt.png", "k(2).JPG"],
+  "modelInputs": [],
+  "brandRefs": ["real/002.webp", "real/004.webp"],
+  "poseStrategy": "中近景，重点展示裙摆和蓝白条纹荷叶边，不强调脸",
+  "framing": "vertical lower-body detail crop",
+  "prompt": "Generate one Lily e-commerce lower-body hem detail photo. Use garment references as exact source of truth for black dress body, narrow blue-white striped ruffle exposure, and real hem width. Follow same-SKU real references for short dress length, footwear mood, light, and background. Focus on the hem and lower silhouette. Do not make the skirt longer, do not widen the hem into a large A-line, do not change the striped ruffle, do not add text or watermark."
+}

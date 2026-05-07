@@ -1,0 +1,10 @@
+{
+  "shotId": "03",
+  "shotRole": "上半身细节",
+  "garmentInputs": ["tmt.png", "k(1).JPG", "k(2).JPG"],
+  "modelInputs": ["Face-01/front.png"],
+  "brandRefs": ["real/001.webp"],
+  "poseStrategy": "半身微侧，肩颈放松，画面重点在领口和袖窿",
+  "framing": "3:4 vertical upper-body crop",
+  "prompt": "Generate one Lily e-commerce upper-body detail photo. Use garment references as exact clothing facts. Use Face-01 front image as identity source. Follow same-SKU real upper-body reference for crop, light, background, and calm Lily styling. Focus on round neckline, black body fabric, and blue-white striped ruffle at the armholes. Do not alter face, neckline, ruffle structure, add text, watermark, or unrelated accessories."
+}

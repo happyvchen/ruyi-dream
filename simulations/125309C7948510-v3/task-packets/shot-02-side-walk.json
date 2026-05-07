@@ -1,0 +1,10 @@
+{
+  "shotId": "02",
+  "shotRole": "侧身走动全身",
+  "garmentInputs": ["tmt.png", "125309C7948510_3d_00.jpg", "k(2).JPG"],
+  "modelInputs": ["Face-01/left45.png"],
+  "brandRefs": ["real/002.webp"],
+  "poseStrategy": "侧身走动感，一腿前伸，手臂自然下垂",
+  "framing": "3:4 vertical side full-body e-commerce image",
+  "prompt": "Generate one Lily e-commerce side walking full-body model photo. Use the garment images as the source of truth. Use Face-01 left45 image as the identity source. Follow the same-SKU side real reference for pose, footwear mood, dress length, hem width, light, and composition. Keep the dress short above the knee, not long, not puffy, not wide hem. Do not create a different face, do not use pointed office heels or heavy platform shoes, do not add text or watermark."
+}
