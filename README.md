@@ -49,6 +49,8 @@
 └── brand-analysis/
 ```
 
+当前 `frontend/` 已初始化为 React + Vite + TypeScript 单页 MVP；`backend/` 已初始化为 FastAPI + SQLite + 本地文件系统 MVP。
+
 ## 文档目录
 
 - [设计总索引](design/CLAUDE.md)
@@ -63,6 +65,8 @@
 - [尺寸可选增强模块](design/02_brand_and_assets/optional_measurement_enhancement.md)
 - [普通用户视角 UI/UX 设计](design/03_ux_guide/user_uiux.md)
 - [技术路线与生产实操](design/04_implementation_guide/technical_route_and_operations.md)
+- [后端领域模型](backend/domain_model.md)
+- [后端数据库结构](backend/database_schema.md)
 - [历史复盘与草稿](design/99_drafts/CLAUDE.md)
 - [实验记录索引](simulations/CLAUDE.md)
 - [品牌分析素材说明](brand-analysis/CLAUDE.md)

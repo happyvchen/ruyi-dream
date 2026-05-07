@@ -12,7 +12,7 @@
 
 body {
   margin: 0;
-  min-width: 1180px;
+  min-width: 1040px;
 }
 
 button,
@@ -70,15 +70,17 @@ p {
   gap: 6px;
 }
 
-.topbar a {
+.topbar button {
   padding: 9px 12px;
+  border: 0;
   border-radius: 6px;
+  background: transparent;
   color: #5f5f58;
   font-size: 14px;
   text-decoration: none;
 }
 
-.topbar a.active {
+.topbar button.active {
   background: #22221f;
   color: #fff;
 }
@@ -94,9 +96,9 @@ p {
 
 .workspace {
   display: grid;
-  grid-template-columns: 280px minmax(620px, 1fr) 280px;
-  gap: 18px;
-  padding: 18px 32px 32px;
+  grid-template-columns: 240px minmax(480px, 1fr) 240px;
+  gap: 14px;
+  padding: 18px 24px 32px;
 }
 
 .left-rail,
@@ -164,6 +166,10 @@ select {
 
 .dropzone input {
   display: none;
+}
+
+.dropzone.compact {
+  min-height: 92px;
 }
 
 .primary,
@@ -570,7 +576,333 @@ summary {
   font-size: 14px;
 }
 
-@media (max-width: 1240px) {
+.garment-page,
+.placeholder-page,
+.history-page {
+  padding: 18px 24px 32px;
+}
+
+.library-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 18px;
+  padding: 18px;
+  border: 1px solid #deded8;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.library-toolbar h2 {
+  font-size: 22px;
+}
+
+.library-toolbar p {
+  margin-top: 6px;
+  color: #686861;
+  font-size: 14px;
+}
+
+.library-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 86px);
+  gap: 10px;
+}
+
+.stat {
+  display: grid;
+  gap: 4px;
+  min-height: 62px;
+  padding: 10px;
+  border: 1px solid #e1e1db;
+  border-radius: 8px;
+  background: #fafaf8;
+}
+
+.stat strong {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.stat span {
+  color: #6d6d66;
+  font-size: 12px;
+}
+
+.garment-layout {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 18px;
+}
+
+.garment-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.library-list {
+  display: grid;
+  gap: 10px;
+  max-height: 650px;
+  overflow: auto;
+}
+
+.library-list-item {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 12px;
+  width: 100%;
+  padding: 9px;
+  border: 1px solid #e3e3de;
+  border-radius: 8px;
+  background: #fff;
+  color: inherit;
+  text-align: left;
+}
+
+.library-list-item.selected {
+  border-color: #22221f;
+  box-shadow: 0 0 0 1px #22221f inset;
+}
+
+.library-list-item img,
+.library-list-item .thumb-fallback {
+  width: 64px;
+  height: 64px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.library-list-item strong,
+.library-list-item small {
+  display: block;
+}
+
+.library-list-item small {
+  margin-top: 5px;
+  color: #74746d;
+  font-size: 12px;
+}
+
+.garment-detail {
+  min-height: 720px;
+  border: 1px solid #deded8;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 20px;
+  border-bottom: 1px solid #e7e7e1;
+}
+
+.eyebrow {
+  display: block;
+  margin-bottom: 6px;
+  color: #77776f;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.detail-header h2 {
+  font-size: 24px;
+}
+
+.detail-header p {
+  max-width: 680px;
+  margin-top: 8px;
+  color: #66665f;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.detail-actions {
+  display: flex;
+  gap: 10px;
+  white-space: nowrap;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 18px;
+  padding: 18px;
+}
+
+.material-board,
+.fact-panel {
+  min-width: 0;
+}
+
+.section-heading.tight {
+  margin-bottom: 12px;
+}
+
+.asset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 12px;
+}
+
+.asset-card {
+  min-width: 0;
+  border: 1px solid #e2e2dc;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.asset-thumb {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1;
+  background: #f0f0ec;
+  color: #8a8a82;
+}
+
+.asset-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.asset-meta {
+  padding: 10px;
+}
+
+.asset-meta strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.asset-meta small {
+  display: block;
+  margin-top: 5px;
+  color: #74746d;
+  font-size: 12px;
+}
+
+.fact-panel {
+  padding: 14px;
+  border: 1px solid #e4e4de;
+  border-radius: 8px;
+  background: #fafaf8;
+}
+
+.fact-rows {
+  display: grid;
+  gap: 10px;
+}
+
+.fact-row {
+  display: grid;
+  gap: 5px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #e3e3dd;
+}
+
+.fact-row span {
+  color: #77776f;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.fact-row strong {
+  color: #2f2f2b;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.fact-empty {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.fact-empty p {
+  font-weight: 850;
+}
+
+.fact-empty span {
+  color: #6d6d66;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.storage-box {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  padding: 12px;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.storage-box small {
+  word-break: break-all;
+  color: #77776f;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.library-empty,
+.placeholder-page {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  min-height: 560px;
+  color: #6f6f68;
+  text-align: center;
+}
+
+.library-empty h2,
+.placeholder-page h2 {
+  color: #292925;
+}
+
+.library-empty p,
+.placeholder-page p {
+  max-width: 460px;
+  line-height: 1.5;
+}
+
+.history-page .panel {
+  max-width: 980px;
+}
+
+.history-table {
+  display: grid;
+  gap: 0;
+}
+
+.history-row {
+  display: grid;
+  grid-template-columns: 210px 1fr 180px;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid #eeeeea;
+  align-items: center;
+}
+
+.history-row span,
+.history-row small {
+  color: #707069;
+  font-size: 13px;
+}
+
+@media (max-width: 900px) {
   body {
     min-width: 0;
   }
@@ -590,5 +922,16 @@ summary {
 
   .shot-list {
     grid-template-columns: 1fr;
+  }
+
+  .garment-layout,
+  .detail-grid,
+  .library-toolbar {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
+
+  .library-stats {
+    grid-template-columns: repeat(3, 1fr);
   }
 }
