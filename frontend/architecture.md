@@ -29,7 +29,7 @@
 | `models` | 数字模特档案、头图上传、角度维护、参数维护 |
 | `history` | 任务级生成记录、任务详情、入参快照、图位 attempts、高级调试 JSON |
 
-`BrandTemplates` 当前没有独立页面，Lily 默认品牌规则由后端 planner 和设计文档承载。
+`BrandTemplates` 当前没有独立页面，默认品牌规则由后端 planner 和设计文档承载。
 
 ## 前端路由
 

@@ -15,7 +15,7 @@
 -> 浏览器本地预览与编辑
 -> 保存上传并生成默认拍摄方案
 -> 提交 Image 2 / fal queue 逐张生成
--> 后台轮询状态并下载结果
+-> 后台轮询状态并写入对象存储
 -> 人工确认/重生/导出
 ```
 
@@ -26,7 +26,7 @@ Image 2 是最终视觉生成器，不是品牌策略、搭配、Pose 和镜头�
 ```mermaid
 flowchart TD
   A["历史真实摄影图"] --> B["品牌初始化分析"]
-  B --> C["Lily 品牌模板库"]
+  B --> C["品牌模板库"]
 
   D["服装图包"] --> D1["本地预览与编辑"]
   D1 --> E["服装事实识别 / 默认方案生成"]
@@ -63,7 +63,7 @@ flowchart TD
 
 ### 4.1 输入
 
-- Lily 历史真实摄影图
+- 品牌历史真实摄影图
 - 已有货号/品类信息，如果能拿到更好
 - 人工确认的品牌关键词和禁区
 
@@ -72,18 +72,18 @@ flowchart TD
 1. 用视觉推理模型批量分析真实图。
 2. 抽取背景、光线、Pose、鞋履、包、配饰、构图、人物占比。
 3. 按品类、图位、季节感、搭配方向打标签。
-4. 生成 Lily 品牌总模板和品类子模板。
+4. 生成 目标品牌总模板和品类子模板。
 5. 人工审核和修正。
 
 ### 4.3 生产操作
 
-品牌初始化时运行一次。后续只有在 Lily 风格变化、新增系列、新增季节模板时才重新分析。
+品牌初始化时运行一次。后续只有在 品牌风格变化、新增系列、新增季节模板时才重新分析。
 
 产物示例：
 
 ```json
 {
-  "templateId": "lily-dress-summer-commute",
+  "templateId": "dress-summer-commute",
   "category": "连衣裙",
   "background": ["白色棚拍", "浅灰棚拍", "简洁室内"],
   "lighting": ["柔和", "干净阴影", "自然肤色"],
@@ -112,7 +112,9 @@ flowchart TD
 
 - 前端预览卡片和已保存素材卡片保持同一结构和样式。
 - 卡片展示文件名、图片尺寸、文件大小。
-- 后端保存原始上传副本到本地文件系统，不覆盖用户原始素材。
+- 后端将应用内素材副本写入 S3 兼容对象存储，不覆盖用户原始素材。
+- 私有化部署默认使用 RustFS；云部署时同一套 S3 配置可指向 OSS、COS、AWS S3、GCS 兼容接口等对象存储。
+- 图片读取默认通过后端生成短期预签名 URL，当前私有图片场景不引入 CDN。
 
 ### 5.2 服装事实识别与默认方案
 
@@ -148,7 +150,7 @@ flowchart TD
 输入：
 
 - 商品事实卡
-- Lily 品牌模板
+- 目标品牌模板
 - 数字模特档案
 - 可选尺寸参数
 - 品类组图规则
@@ -192,17 +194,17 @@ Image 2 不直接接收一段长 prompt，而是接收系统组装后的任务�
   "inputs": {
     "garment": ["front", "back", "hem_detail"],
     "modelHead": "Face-01-left45",
-    "brandRefs": ["lily-dress-side-001", "lily-dress-fullbody-003"],
+    "brandRefs": ["dress-side-001", "dress-fullbody-003"],
     "poseRef": "dress-side-walk-01",
     "previousApproved": "01-front-fullbody"
   },
   "constraints": {
     "identity": "以模特头部图为身份事实",
     "garment": "以服装图为商品事实",
-    "styling": "以 Lily 连衣裙模板为鞋包和姿态边界",
+    "styling": "以 连衣裙模板为鞋包和姿态边界",
     "proportion": "如有尺寸参数，以尺寸参数控制裙长和下摆"
   },
-  "prompt": "任务：生成一张 Lily 电商模特图，当前图位为 02：侧身走动全身。图片角色：服装参考图是商品事实来源；模特头部图是身份事实来源；Lily 真实成片参考图定义姿态、鞋包、配饰、光线、背景和构图边界。禁止换脸、改变服装结构、生成文字、水印或 logo。"
+  "prompt": "任务：生成一张 电商 AI 模特图，当前图位为 02：侧身走动全身。图片角色：服装参考图是商品事实来源；模特头部图是身份事实来源；品牌真实成片参考图定义姿态、鞋包、配饰、光线、背景和构图边界。禁止换脸、改变服装结构、生成文字、水印或 logo。"
 }
 ```
 
@@ -228,7 +230,7 @@ fal 提交入参：
   "image_urls": [
     "https://v3b.fal.media/files/.../product-reference.jpg",
     "https://v3b.fal.media/files/.../Face-01-left45.png",
-    "https://v3b.fal.media/files/.../lily-brand-reference.jpg"
+    "https://v3b.fal.media/files/.../brand-reference.jpg"
   ],
   "image_size": "auto",
   "quality": "high",
@@ -238,16 +240,16 @@ fal 提交入参：
 }
 ```
 
-本地图片必须先上传到 fal storage，生成 `image_urls` 后再提交。每个生成任务需要保存：
+对象存储图片通过预签名 URL 生成 `image_urls` 后再提交。每个生成任务需要保存：
 
 - 原始 `task_package`
 - 中文 `prompt`
-- 本地输入图与 fal URL 映射
+- 对象 key、预签名 URL 与 fal URL 映射
 - fal 提交请求和响应
 - `request_id`
 - `status_url` / `response_url` / `cancel_url`
 - fal 状态响应
-- 最终图片下载后的本地 `output_path`
+- 最终图片写入对象存储后的 `output_path` 对象 key
 
 ## 6.2 后台生成与状态恢复
 
@@ -258,12 +260,12 @@ fal 提交入参：
 1. 创建 `generation_runs`。
 2. 为每张 shot 创建一条 `generation_images` 任务记录。
 3. 组装单张 `task_package` 和中文 prompt。
-4. 上传参考图到 fal storage。
+4. 使用对象存储预签名 URL 组装 fal `image_urls`。
 5. 提交 fal queue，保存 `request_id` 和 queue URLs。
 6. API 立即返回 `GenerationRun`。
 7. 后台 poller 周期性扫描未完成任务。
-8. poller 调用 fal `status_url`，将 fal 状态映射为本地状态。
-9. 完成后调用 `response_url`，下载结果图到本地输出目录。
+8. poller 调用 fal `status_url`，将 fal 状态映射为应用内状态。
+9. 完成后调用 `response_url`，下载结果图并写入对象存储输出前缀。
 10. 更新单张任务状态，并聚合更新 run 状态。
 
 前端流程：
@@ -276,7 +278,7 @@ fal 提交入参：
 
 当前不做 webhook。后续生产环境可以升级为 webhook 为主、poller 兜底。
 
-本地状态枚举：
+应用内状态枚举：
 
 ```text
 GenerationImage:
@@ -286,7 +288,7 @@ GenerationRun:
 CREATED / RUNNING / PARTIAL_SUCCEEDED / SUCCEEDED / FAILED / CANCELLED
 ```
 
-fal 状态保存到 `provider_status` 和 `provider_status_json`，不覆盖本地业务状态。
+fal 状态保存到 `provider_status` 和 `provider_status_json`，不覆盖应用内业务状态。
 
 ## 7. 每个要素的生产落点
 
@@ -296,7 +298,7 @@ fal 状态保存到 `provider_status` 和 `provider_status_json`，不覆盖本�
 | 模特身份 | 数字模特 | 多角度头图档案 | 维护默认模特；生成使用默认方案绑定的模特 |
 | 模特身体 | 数字模特 | 身体参数档案 | 默认不填，可维护 |
 | 尺寸比例 | 服装事实卡折叠区 | 尺寸表映射为视觉约束 | 可选填写 |
-| 品牌调性 | 品牌调性模板 | 历史图分析 + 模板库 | 默认使用 Lily 模板 |
+| 品牌调性 | 品牌调性模板 | 历史图分析 + 模板库 | 默认使用 品牌模板 |
 | 鞋包搭配 | 组图策划器 | 模板检索 + 推理选择 | 默认自动，必要时人工改 |
 | Pose | Pose 模板 | 真实图抽取/标签化 | 默认自动，必要时换模板 |
 | 镜头取景 | 默认组图方案 | 品类规则 + 平台规则 | 默认自动，必要时更新默认方案 |
@@ -312,7 +314,7 @@ MVP 不需要一次做成完整 SaaS，但要先把骨架搭对：
 
 1. 生产入口保留 `生成组图`，素材准备入口为 `服装素材`。
 2. `服装素材` 承担上传预览、素材管理和默认组图方案生成/更新。
-3. 品牌模板库先只做 Lily 默认模板和连衣裙/上衣/裤装/半裙/外套几个子模板。
+3. 品牌模板库先只做 默认模板和连衣裙/上衣/裤装/半裙/外套几个子模板。
 4. 尺寸模块先做可选字段，不作为必填。
 5. 暂不做自动质检，但保留单张重生和人工确认。
 6. 每张图单独生成，不做一张大图一次性出全组。

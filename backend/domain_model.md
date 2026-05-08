@@ -15,7 +15,7 @@
 -> 导出和留痕
 ```
 
-MVP 不做多租户、权限、计费、模板市场，也不做复杂素材资产管理。所有对象都默认属于 Lily 内部单一工作空间。
+MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂素材资产管理。所有对象暂时默认属于单一工作空间，但领域模型应保留后续 SaaS 化扩展空间。
 
 ## 2. Domain 总览
 
@@ -36,7 +36,7 @@ MVP 不做多租户、权限、计费、模板市场，也不做复杂素材资�
 
 当前职责：
 
-- 记录货号、标题、素材来源和本地存储目录。
+- 记录货号、标题、素材来源和对象存储前缀。
 - 记录当前状态：`NEW` / `ANALYZED` / `CONFIRMED`。
 - 缓存 Gemini 输出的服装识别摘要 `analysis_json`。
 - 作为后续 `ShotPlan` 和 `GenerationRun` 的上游对象。
@@ -59,7 +59,7 @@ MVP 不做多租户、权限、计费、模板市场，也不做复杂素材资�
 
 当前职责：
 
-- 记录上传后的文件名、本地路径、MIME 类型和排序。
+- 记录上传后的文件名、对象 key、MIME 类型和排序。
 - 数据库仍保留 `role` 字段以兼容后续扩展；当前 UI 不展示也不允许用户编辑图片角色。
 - 当前 MVP 只由后端自动标记第一张为 `main`，其余为 `reference`。
 - 支持追加图片、删除单图。
@@ -158,7 +158,7 @@ MVP 不做多租户、权限、计费、模板市场，也不做复杂素材资�
     "preserveStrictly": ["必须保真的点"]
   },
   "brandStyle": {
-    "name": "Lily 默认棚拍风格",
+    "name": "默认棚拍风格",
     "summary": "白/浅灰背景，自然姿态，简洁搭配，商品优先"
   },
   "shots": [
@@ -247,7 +247,7 @@ MVP 不做多租户、权限、计费、模板市场，也不做复杂素材资�
     "constraints": [
       "服装参考图是商品事实源",
       "保持同一模特身份和身体比例",
-      "保持 Lily 白/浅灰棚拍风格",
+      "保持白/浅灰棚拍风格",
       "不生成无关文字、水印、logo"
     ]
   }
@@ -273,7 +273,7 @@ MVP 不做多租户、权限、计费、模板市场，也不做复杂素材资�
 当前职责：
 
 - 记录重要业务动作和系统动作。
-- 同步写入 SQLite 的 `event_logs` 表和 `backend/storage/logs/YYYY-MM-DD.jsonl`。
+- 同步写入 SQLite 的 `event_logs` 表和 `backend/data/logs/YYYY-MM-DD.jsonl`。
 - 用于调试、审计和后续排查。
 - 前台“生成记录”的主视图不直接展示 `event_logs`，而是展示 `GenerationRun` 任务列表；事件日志只作为详情页或调试信息的补充来源。
 
@@ -306,34 +306,34 @@ erDiagram
   generation_images ||--o{ generation_images : regenerates
 ```
 
-## 5. 文件系统对象
+## 5. 对象存储布局
 
-SQLite 只保存路径和元数据，真实图片和导出文件在本地文件系统中。
+SQLite 只保存对象 key 和元数据，真实图片和导出文件在 S3 兼容对象存储中。
 
 | 目录 | 用途 |
 |---|---|
-| `backend/storage/uploads/` | 上传后的服装素材副本 |
-| `backend/storage/outputs/` | 生成图输出目录 |
-| `backend/storage/exports/` | ZIP 导出文件 |
-| `backend/storage/logs/` | JSONL 事件日志 |
+| `uploads/` | 上传后的服装素材副本 |
+| `outputs/` | 生成图输出目录 |
+| `exports/` | ZIP 导出文件 |
+| `backend/data/logs/` | JSONL 事件日志 |
 
 上传路径格式：
 
 ```text
-backend/storage/uploads/{sku}-{YYYYMMDD-HHMMSS}-{shortId}/
+uploads/{sku}-{YYYYMMDD-HHMMSS}-{shortId}/
 ```
 
 输出路径格式：
 
 ```text
-backend/storage/outputs/{sku}/{YYYYMMDD-HHMMSS}/
+outputs/{sku}/{YYYYMMDD-HHMMSS}/
 ```
 
 ## 6. 当前实现取舍
 
 - JSON 字段用于保存变化快、尚未完全稳定的结构，例如 `analysis_json`、`profile_json`、`plan_json`、`task_package_json`。
 - 关键可查询关系用独立表和外键表达，例如 SKU、模特、方案、生成批次、生成单图。
-- 当前没有独立 `exports` 表。导出作为事件写入 `event_logs`，ZIP 文件保存在 `backend/storage/exports/`。
-- 当前没有独立 `brand_templates` 表。Lily 品牌默认模板暂时内嵌在 planner 输出和 task package 中。
+- 当前没有独立 `exports` 表。导出作为事件写入 `event_logs`，ZIP 文件写入 `exports/`。
+- 当前没有独立 `brand_templates` 表。品牌默认模板暂时内嵌在 planner 输出和 task package 中。
 - 当前已有服装素材删除接口，但带业务保护：已有生成记录的 SKU 不允许删除；每个 SKU 至少保留一张图片。
-- 删除操作只删除应用内上传副本，不删除 Lily 原始素材目录。
+- 删除操作只删除对象存储中的应用内上传副本，不删除客户原始素材目录。

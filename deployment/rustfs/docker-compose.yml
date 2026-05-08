@@ -1,0 +1,29 @@
+services:
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: rustfs
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?set RUSTFS_ACCESS_KEY in .env}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?set RUSTFS_SECRET_KEY in .env}
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_SERVER_DOMAINS: ${RUSTFS_SERVER_DOMAINS:-localhost}
+      RUSTFS_OBS_LOG_DIRECTORY: /var/log/rustfs
+    command:
+      - --address
+      - :9000
+      - --console-enable
+      - /data
+    ports:
+      - "${RUSTFS_API_PORT:-9000}:9000"
+      - "${RUSTFS_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - ./data:/data
+      - ./config:/etc/rustfs
+      - ./certs:/certs:ro
+      - ./logs:/var/log/rustfs
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "10"

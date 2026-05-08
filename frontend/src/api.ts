@@ -14,7 +14,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
-export const mediaUrl = (url?: string | null) => (url ? `${API_BASE}${url}` : '')
+export const mediaUrl = (url?: string | null) => {
+  if (!url) return ''
+  return /^https?:\/\//i.test(url) ? url : `${API_BASE}${url}`
+}
 
 export const api = {
   health: () => request<Record<string, unknown>>('/api/health'),
@@ -118,7 +121,7 @@ export const api = {
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `lily-run-${runId}.zip`
+    anchor.download = `generation-run-${runId}.zip`
     anchor.click()
     URL.revokeObjectURL(url)
   },

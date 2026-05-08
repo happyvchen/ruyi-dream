@@ -131,18 +131,18 @@ export function App() {
   }, [])
 
   useEffect(() => {
-    const storedRunId = window.localStorage.getItem('lily:lastGenerationRunId')
+    const storedRunId = window.localStorage.getItem('app:lastGenerationRunId')
     if (!storedRunId) return
     const runId = Number(storedRunId)
     if (!Number.isFinite(runId)) return
     void api.getRun(runId)
       .then((result) => setGenerationRun(result.item))
-      .catch(() => window.localStorage.removeItem('lily:lastGenerationRunId'))
+      .catch(() => window.localStorage.removeItem('app:lastGenerationRunId'))
   }, [])
 
   useEffect(() => {
     if (!generationRun) return
-    window.localStorage.setItem('lily:lastGenerationRunId', String(generationRun.id))
+    window.localStorage.setItem('app:lastGenerationRunId', String(generationRun.id))
   }, [generationRun?.id])
 
   useEffect(() => {
@@ -696,7 +696,7 @@ export function App() {
     <div className="app-shell">
       <header className="topbar">
         <div>
-          <div className="brand">Lily AI 模特图</div>
+          <div className="brand">AI 模特组图</div>
           <h1>{pageTitle(page)}</h1>
           <p>{pageSubtitle(page)}</p>
         </div>
@@ -1188,7 +1188,7 @@ function GarmentLibraryPage({
                   </div>
                   <FactRows analysis={selectedSku.analysis} />
                   <div className="storage-box">
-                    <strong>本地存储</strong>
+                    <strong>对象存储</strong>
                     <small>{selectedSku.storagePath}</small>
                   </div>
                 </aside>
@@ -1872,7 +1872,7 @@ function ShotPlanBoard({ shotPlan }: { shotPlan: ShotPlan }) {
   return (
     <div className="shot-plan">
       <div className="style-summary">
-        <strong>{shotPlan.plan.brandStyle?.name ?? 'Lily 默认棚拍风格'}</strong>
+        <strong>{shotPlan.plan.brandStyle?.name ?? '默认棚拍风格'}</strong>
         <span>{shotPlan.plan.brandStyle?.summary}</span>
       </div>
       <div className="shot-list">

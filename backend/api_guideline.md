@@ -26,7 +26,7 @@
 | `/api/model-profiles/{model_profile_id}/head-references` | POST | 上传头像；可单张替换指定角度，也可多张作为未设置头像上传 |
 | `/api/model-profiles/{model_profile_id}/head-references/{reference_id}` | PATCH | 修改头像角度或排序 |
 | `/api/model-profiles/{model_profile_id}/head-references/{reference_id}` | DELETE | 删除单张头像 |
-| `/api/model-profiles/{model_profile_id}/assets/{filename}` | GET | 访问模特头像素材文件 |
+| `/api/model-profiles/{model_profile_id}/assets/{filename}` | GET | 跳转到模特头像素材的预签名访问 URL |
 | `/api/shot-plans` | POST | 根据货号和模特生成组图方案 |
 | `/api/shot-plans/{shot_plan_id}` | GET | 查看组图方案 |
 | `/api/garment-skus/{sku_id}/default-shot-plan` | GET | 获取货号默认组图方案，当前取最新一条 `shot_plans` |
@@ -38,7 +38,7 @@
 | `/api/logs` | GET | 事件日志 |
 | `/api/exports/runs/{run_id}` | POST | 打包导出该 run 的最终图或全部图 |
 
-当前没有独立 `/api/brand-templates`，Lily 品牌模板暂时内嵌在 planner 输出和 task package 中。
+当前没有独立 `/api/brand-templates`，品牌模板暂时内嵌在 planner 输出和 task package 中。
 
 前台“生成记录”列表使用 `/api/generation-runs`，不是直接展示 `/api/logs`。`event_logs` 仍用于排查和审计。
 
@@ -58,7 +58,7 @@
 
 后端职责：
 
-- 将图片复制到 `backend/storage/uploads/{sku}-{timestamp}-{id}/`。
+- 将图片写入对象存储 `uploads/{sku}-{timestamp}-{id}/`。
 - 写入 `garment_skus` 和 `garment_images`。
 - 第一张图片写入 `role = main`，其余图片写入 `role = reference`。
 - 返回货号详情和封面 URL / 图片数量 / 文件大小等信息。
@@ -109,7 +109,7 @@
 
 `DELETE /api/garment-skus/{sku_id}`
 
-删除的是应用内上传副本和对应元数据，不会删除 Lily 原始素材目录。为了保留生产历史，如果该货号已经存在 `generation_runs`，接口返回 `409`，不允许删除。
+删除的是应用内上传副本和对应元数据，不会删除客户原始素材目录。为了保留生产历史，如果该货号已经存在 `generation_runs`，接口返回 `409`，不允许删除。
 
 ### 追加素材图
 
@@ -167,7 +167,7 @@
 - 根据 `shot_plans.plan_json.shots` 创建多条 `generation_images`，每个图位一条任务记录。
 - 组装单张 `task_package`，包括服装、模特、品牌模板、shot、输入图和约束快照。
 - 合成中文 Image 2 prompt。
-- 上传本地参考图到 fal storage。
+- 通过对象存储预签名 URL 将参考图交给 fal。
 - 通过 fal queue 提交每张图。
 - 保存 fal `request_id`、`status_url`、`response_url`、`cancel_url`。
 - 立即返回 `GenerationRun`，不等待图片生成完成。
@@ -247,7 +247,7 @@ fal 状态映射：
 | `FAILED` / `ERROR` | `FAILED` |
 | `CANCELED` / `CANCELLED` | `CANCELLED` |
 
-完成后，后端使用 fal `response_url` 获取结果，并下载第一张图片到 `output_path`。
+完成后，后端使用 fal `response_url` 获取结果，并下载第一张图片并写入 `output_path` 对象 key。
 
 ### 单张重生
 
@@ -352,7 +352,7 @@ multipart form-data：
 - `404`：货号、模特、任务不存在
 - `409`：状态不允许当前操作，例如删除已有生成记录的货号、删除货号下最后一张图
 - `422`：素材可读但无法识别或不满足生成条件
-- `500`：模型调用、文件系统或未知错误
+- `500`：模型调用、对象存储或未知错误
 
 ## 数据契约
 

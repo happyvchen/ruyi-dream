@@ -1,7 +1,16 @@
 backend/.venv/
-backend/storage/
+backend/data/
 backend/app/__pycache__/
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
+deployment/rustfs/.env
+deployment/rustfs/data/*
+!deployment/rustfs/data/.gitkeep
+deployment/rustfs/logs/*
+!deployment/rustfs/logs/.gitkeep
+deployment/rustfs/config/*
+!deployment/rustfs/config/.gitkeep
+deployment/rustfs/certs/*
+!deployment/rustfs/certs/.gitkeep
 .DS_Store

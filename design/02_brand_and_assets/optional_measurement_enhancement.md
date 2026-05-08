@@ -164,7 +164,7 @@ Use the provided measurements to keep the wearing length and hem width accurate.
 
 1. 服装图像事实
 2. 尺寸增强参数
-3. Lily 品牌调性参考
+3. 品牌调性参考
 4. 单张镜头任务
 5. 文本补充要求
 

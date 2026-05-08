@@ -3,21 +3,34 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import uuid4
-import shutil
 import zipfile
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .config import get_settings
 from .db import dumps, get_db, init_db, loads, log_event, media_url, now_iso
 from .image_provider import get_image_provider
+from .object_storage import (
+    clean_key,
+    delete_object,
+    delete_prefix,
+    ensure_bucket,
+    get_bytes,
+    join_key,
+    object_exists,
+    object_size,
+    presigned_get_url,
+    put_fileobj,
+    unique_key,
+)
 from .planner import plan_with_gemini
 
 
@@ -30,7 +43,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.mount(settings.media_url_prefix, StaticFiles(directory=settings.storage_dir), name="media")
 
 
 class PlanCreateRequest(BaseModel):
@@ -95,6 +107,7 @@ TERMINAL_IMAGE_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
 
 @app.on_event("startup")
 async def startup() -> None:
+    ensure_bucket()
     init_db()
     app.state.generation_poller = asyncio.create_task(generation_poller_loop())
 
@@ -112,8 +125,9 @@ async def shutdown() -> None:
 def health() -> dict[str, Any]:
     return {
         "ok": True,
-        "storageDir": str(settings.storage_dir),
         "databasePath": str(settings.database_path),
+        "s3Endpoint": settings.s3_endpoint_url,
+        "s3Bucket": settings.s3_bucket,
         "geminiConfigured": bool(settings.gemini_api_key),
         "imageProviderConfigured": bool(settings.gpt_image2_api_base_url and settings.fal_key),
     }
@@ -147,19 +161,17 @@ async def upload_garment_sku(
         raise HTTPException(status_code=400, detail="至少上传一张图片")
 
     upload_id = f"{clean_sku}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
-    target_dir = settings.storage_dir / "uploads" / upload_id
-    target_dir.mkdir(parents=True, exist_ok=True)
+    target_prefix = join_key("uploads", upload_id)
 
     timestamp = now_iso()
-    saved_files: list[tuple[UploadFile, Path]] = []
+    saved_files: list[tuple[UploadFile, str, str]] = []
     for index, upload in enumerate(files):
         if not upload.content_type or not upload.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail=f"{upload.filename} 不是图片文件")
         safe_name = f"{index + 1:03d}-{sanitize_filename(upload.filename or 'image')}"
-        destination = target_dir / safe_name
-        with destination.open("wb") as handle:
-            shutil.copyfileobj(upload.file, handle)
-        saved_files.append((upload, destination))
+        key = join_key(target_prefix, safe_name)
+        put_fileobj(key, upload.file, upload.content_type or "application/octet-stream")
+        saved_files.append((upload, safe_name, key))
 
     with get_db() as db:
         cursor = db.execute(
@@ -167,10 +179,10 @@ async def upload_garment_sku(
             INSERT INTO garment_skus (sku, title, source, storage_path, status, created_at, updated_at)
             VALUES (?, ?, 'upload', ?, 'NEW', ?, ?)
             """,
-            (clean_sku, title or clean_sku, str(target_dir), timestamp, timestamp),
+            (clean_sku, title or clean_sku, target_prefix, timestamp, timestamp),
         )
         sku_id = int(cursor.lastrowid)
-        for index, (upload, path) in enumerate(saved_files):
+        for index, (upload, filename, key) in enumerate(saved_files):
             db.execute(
                 """
                 INSERT INTO garment_images
@@ -179,8 +191,8 @@ async def upload_garment_sku(
                 """,
                 (
                     sku_id,
-                    path.name,
-                    str(path),
+                    filename,
+                    key,
                     upload.content_type or "application/octet-stream",
                     "main" if index == 0 else "reference",
                     index,
@@ -192,7 +204,7 @@ async def upload_garment_sku(
             "garment_sku",
             sku_id,
             "uploaded",
-            {"sku": clean_sku, "fileCount": len(saved_files), "storagePath": str(target_dir)},
+            {"sku": clean_sku, "fileCount": len(saved_files), "storagePath": target_prefix},
         )
         row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
     return {"item": get_sku_detail_by_id(sku_id), "summary": serialize_sku(row)}
@@ -246,17 +258,17 @@ def delete_garment_sku(sku_id: int) -> dict[str, Any]:
         ).fetchone()["count"]
         if run_count:
             raise HTTPException(status_code=409, detail="该货号已有生成记录，为保留生产历史暂不允许删除")
-        storage_path = Path(row["storage_path"])
+        storage_path = row["storage_path"]
         db.execute("DELETE FROM garment_skus WHERE id = ?", (sku_id,))
         log_event(
             db,
             "garment_sku",
             sku_id,
             "deleted",
-            {"sku": row["sku"], "storagePath": str(storage_path)},
+            {"sku": row["sku"], "storagePath": storage_path},
         )
 
-    remove_storage_path(storage_path)
+    delete_prefix(storage_path)
     return {"ok": True}
 
 
@@ -265,14 +277,13 @@ async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -
     if not files:
         raise HTTPException(status_code=400, detail="至少上传一张图片")
     timestamp = now_iso()
-    saved: list[tuple[UploadFile, Path, int]] = []
+    saved: list[tuple[UploadFile, str, str, int]] = []
 
     with get_db() as db:
         sku_row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
         if not sku_row:
             raise HTTPException(status_code=404, detail="货号不存在")
-        target_dir = Path(sku_row["storage_path"])
-        target_dir.mkdir(parents=True, exist_ok=True)
+        target_prefix = clean_key(sku_row["storage_path"])
         current_max = db.execute(
             "SELECT COALESCE(MAX(sort_order), -1) AS max_sort FROM garment_images WHERE sku_id = ?",
             (sku_id,),
@@ -283,12 +294,11 @@ async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -
                 raise HTTPException(status_code=400, detail=f"{upload.filename} 不是图片文件")
             sort_order = int(current_max) + offset
             safe_name = f"{sort_order + 1:03d}-{sanitize_filename(upload.filename or 'image')}"
-            destination = unique_path(target_dir / safe_name)
-            with destination.open("wb") as handle:
-                shutil.copyfileobj(upload.file, handle)
-            saved.append((upload, destination, sort_order))
+            key = unique_key(join_key(target_prefix, safe_name))
+            put_fileobj(key, upload.file, upload.content_type or "application/octet-stream")
+            saved.append((upload, Path(key).name, key, sort_order))
 
-        for upload, path, sort_order in saved:
+        for upload, filename, key, sort_order in saved:
             db.execute(
                 """
                 INSERT INTO garment_images
@@ -297,8 +307,8 @@ async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -
                 """,
                 (
                     sku_id,
-                    path.name,
-                    str(path),
+                    filename,
+                    key,
                     upload.content_type or "application/octet-stream",
                     sort_order,
                     timestamp,
@@ -313,7 +323,7 @@ async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -
             "garment_sku",
             sku_id,
             "images_added",
-            {"fileCount": len(saved), "files": [path.name for _, path, _ in saved]},
+            {"fileCount": len(saved), "files": [filename for _, filename, _, _ in saved]},
         )
     return {"item": get_sku_detail_by_id(sku_id)}
 
@@ -367,7 +377,7 @@ def delete_garment_image(image_id: int) -> dict[str, Any]:
         ).fetchone()["count"]
         if count <= 1:
             raise HTTPException(status_code=409, detail="每个货号至少保留一张图片")
-        storage_path = Path(row["storage_path"])
+        storage_path = row["storage_path"]
         db.execute("DELETE FROM garment_images WHERE id = ?", (image_id,))
         db.execute(
             "UPDATE garment_skus SET updated_at = ? WHERE id = ?",
@@ -378,10 +388,10 @@ def delete_garment_image(image_id: int) -> dict[str, Any]:
             "garment_image",
             image_id,
             "deleted",
-            {"skuId": row["sku_id"], "filename": row["filename"], "storagePath": str(storage_path)},
+            {"skuId": row["sku_id"], "filename": row["filename"], "storagePath": storage_path},
         )
 
-    remove_storage_path(storage_path)
+    delete_object(storage_path)
     return {"ok": True}
 
 
@@ -402,8 +412,7 @@ def create_model_profile(payload: ModelProfileUpsertRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="模特名称不能为空")
 
     timestamp = now_iso()
-    asset_dir = settings.storage_dir / "model-profiles" / clean_model_id
-    asset_dir.mkdir(parents=True, exist_ok=True)
+    asset_dir = join_key("model-profiles", clean_model_id)
     profile = normalize_model_profile(payload.profile or {})
 
     with get_db() as db:
@@ -421,7 +430,7 @@ def create_model_profile(payload: ModelProfileUpsertRequest) -> dict[str, Any]:
             (
                 clean_model_id,
                 name,
-                str(asset_dir),
+                asset_dir,
                 dumps(profile),
                 1 if payload.isDefault else 0,
                 timestamp,
@@ -495,16 +504,16 @@ def delete_model_profile(model_profile_id: int) -> dict[str, Any]:
         ).fetchone()["count"]
         if usage_count:
             raise HTTPException(status_code=409, detail="该模特已有组图或生成记录，为保留生产历史暂不允许删除")
-        asset_dir = Path(row["asset_dir"])
+        asset_dir = row["asset_dir"]
         was_default = bool(row["is_default"])
         db.execute("DELETE FROM model_profiles WHERE id = ?", (model_profile_id,))
         if was_default:
             fallback = db.execute("SELECT id FROM model_profiles ORDER BY id LIMIT 1").fetchone()
             if fallback:
                 db.execute("UPDATE model_profiles SET is_default = 1 WHERE id = ?", (fallback["id"],))
-        log_event(db, "model_profile", model_profile_id, "deleted", {"modelId": row["model_id"], "assetDir": str(asset_dir)})
+        log_event(db, "model_profile", model_profile_id, "deleted", {"modelId": row["model_id"], "assetDir": asset_dir})
 
-    remove_storage_path(asset_dir)
+    delete_prefix(asset_dir)
     return {"ok": True}
 
 
@@ -531,8 +540,7 @@ async def add_model_head_reference(
         row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (model_profile_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="数字模特不存在")
-        asset_dir = Path(row["asset_dir"])
-        ensure_writable_asset_dir(asset_dir)
+        asset_dir = clean_key(row["asset_dir"])
 
         profile = loads(row["profile_json"], {})
         references = dict(profile.get("headReferences") or {})
@@ -544,16 +552,16 @@ async def add_model_head_reference(
             if assigned_key is None:
                 raise HTTPException(status_code=400, detail="头像角度不合法")
             safe_name = sanitize_filename(upload.filename or "head-reference")
-            destination = unique_path(asset_dir / safe_name)
-            with destination.open("wb") as handle:
-                shutil.copyfileobj(upload.file, handle)
+            key = unique_key(join_key(asset_dir, safe_name))
+            put_fileobj(key, upload.file, upload.content_type or "application/octet-stream")
             old_filename = references.get(assigned_key)
             if old_filename:
                 old_files.append(old_filename)
-            references[assigned_key] = destination.name
+            filename = Path(key).name
+            references[assigned_key] = filename
             if assigned_key not in order:
                 order.append(assigned_key)
-            saved.append({"id": assigned_key, "filename": destination.name})
+            saved.append({"id": assigned_key, "filename": filename})
 
         profile["headReferences"] = references
         profile["headReferenceOrder"] = order
@@ -655,25 +663,21 @@ def delete_model_head_reference(model_profile_id: int, reference_id: str) -> dic
         )
         log_event(db, "model_profile", model_profile_id, "head_reference_deleted", {"referenceId": clean_reference_id, "filename": filename})
 
-    remove_model_asset_file(Path(row["asset_dir"]), filename)
+    remove_model_asset_file(row["asset_dir"], filename)
     return {"item": get_model_profile_by_id(model_profile_id)}
 
 
 @app.get("/api/model-profiles/{model_profile_id}/assets/{filename}")
-def get_model_asset(model_profile_id: int, filename: str) -> FileResponse:
+def get_model_asset(model_profile_id: int, filename: str) -> RedirectResponse:
     with get_db() as db:
         row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (model_profile_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="数字模特不存在")
-    asset_dir = Path(row["asset_dir"])
-    file_path = (asset_dir / sanitize_filename(filename)).resolve()
-    try:
-        file_path.relative_to(asset_dir.resolve())
-    except ValueError:
-        raise HTTPException(status_code=400, detail="文件路径不合法") from None
-    if not file_path.exists() or not file_path.is_file():
+    key = join_key(row["asset_dir"], sanitize_filename(filename))
+    url = presigned_get_url(key) if object_exists(key) else None
+    if not url:
         raise HTTPException(status_code=404, detail="头像文件不存在")
-    return FileResponse(file_path)
+    return RedirectResponse(url)
 
 
 @app.post("/api/shot-plans")
@@ -687,9 +691,18 @@ async def create_shot_plan(payload: PlanCreateRequest) -> dict[str, Any]:
             "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY role = 'main' DESC, sort_order, id",
             (payload.skuId,),
         ).fetchall()
-        image_paths = [Path(row["storage_path"]) for row in image_rows]
+        image_keys = [row["storage_path"] for row in image_rows]
 
-    plan, provider, raw = await plan_with_gemini(sku_row["sku"], image_paths)
+    with TemporaryDirectory(prefix="planner-inputs-") as temp_dir:
+        image_paths: list[Path] = []
+        for index, key in enumerate(image_keys[:6], start=1):
+            try:
+                path = Path(temp_dir) / f"{index:02d}-{Path(key).name}"
+                path.write_bytes(get_bytes(key))
+                image_paths.append(path)
+            except Exception:
+                continue
+        plan, provider, raw = await plan_with_gemini(sku_row["sku"], image_paths)
     timestamp = now_iso()
     with get_db() as db:
         cursor = db.execute(
@@ -758,13 +771,7 @@ async def generate_group(payload: GenerateGroupRequest) -> dict[str, Any]:
         "provider": plan_row["planner_provider"],
         "rawResponse": plan_row["raw_response"],
     }
-    output_dir = (
-        settings.storage_dir
-        / "outputs"
-        / sku_row["sku"]
-        / datetime.now().strftime("%Y%m%d-%H%M%S")
-    )
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = join_key("outputs", sku_row["sku"], datetime.now().strftime("%Y%m%d-%H%M%S"))
     timestamp = now_iso()
     provider = get_image_provider()
 
@@ -836,13 +843,13 @@ async def regenerate_image(image_id: int, payload: RegenerateRequest) -> dict[st
 
     task_package = loads(image_row["task_package_json"], {})
     task_package["regeneration"] = {"fromImageId": image_id, "reason": payload.reason, "note": payload.note}
-    output_dir = Path(run_row["output_dir"])
+    output_dir = clean_key(run_row["output_dir"])
     shot = task_package.get("shot", {})
     shot_index = int(shot.get("shotIndex", image_row["shot_index"]))
     title = str(shot.get("title", image_row["title"]))
     suffix = f"{shot_index:02d}-{sanitize_filename(title)}-regen-{datetime.now().strftime('%H%M%S')}"
     provider = get_image_provider()
-    output_path = output_dir / f"{suffix}{provider.output_suffix()}"
+    output_path = join_key(output_dir, f"{suffix}{provider.output_suffix()}")
 
     with get_db() as db:
         log_event(
@@ -954,7 +961,7 @@ def list_logs(limit: int = 100) -> dict[str, Any]:
 
 
 @app.post("/api/exports/runs/{run_id}")
-def export_run(run_id: int) -> FileResponse:
+def export_run(run_id: int) -> StreamingResponse:
     run = get_generation_run_by_id(run_id)
     images = run.get("images", [])
     final_images = [image for image in images if image.get("isFinal")]
@@ -962,18 +969,23 @@ def export_run(run_id: int) -> FileResponse:
     if not selected:
         raise HTTPException(status_code=422, detail="没有可导出的生成图")
 
-    export_dir = settings.storage_dir / "exports" / str(run["sku"] or run["skuId"])
-    export_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = export_dir / f"run-{run_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    zip_name = f"run-{run_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+    zip_buffer = BytesIO()
+    written = 0
+    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for image in selected:
-            output_url = image.get("url")
-            if not output_url:
+            object_key = image.get("objectKey")
+            if not object_key:
                 continue
-            relative = output_url.replace(f"{settings.media_url_prefix}/", "", 1)
-            source_path = settings.storage_dir / relative
-            if source_path.exists():
-                archive.write(source_path, arcname=source_path.name)
+            try:
+                archive.writestr(Path(object_key).name, get_bytes(object_key))
+                written += 1
+            except Exception:
+                continue
+    zip_buffer.seek(0)
+    export_key = join_key("exports", str(run["sku"] or run["skuId"]), zip_name)
+    put_fileobj(export_key, zip_buffer, "application/zip")
+    zip_buffer.seek(0)
 
     with get_db() as db:
         log_event(
@@ -981,9 +993,13 @@ def export_run(run_id: int) -> FileResponse:
             "generation_run",
             run_id,
             "exported",
-            {"zipPath": str(zip_path), "imageCount": len(selected), "finalOnly": bool(final_images)},
+            {"objectKey": export_key, "imageCount": written, "finalOnly": bool(final_images)},
         )
-    return FileResponse(zip_path, filename=zip_path.name, media_type="application/zip")
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
+    )
 
 
 async def submit_single_image(
@@ -993,7 +1009,7 @@ async def submit_single_image(
     plan: dict[str, Any],
     shot: dict[str, Any],
     provider: Any,
-    output_dir: Path,
+    output_dir: str,
     regenerate_from_image_id: int | None = None,
     regenerate_reason: str | None = None,
     task_package_override: dict[str, Any] | None = None,
@@ -1003,7 +1019,7 @@ async def submit_single_image(
     suffix = f"{shot_index:02d}-{sanitize_filename(title)}"
     if regenerate_from_image_id:
         suffix = f"{suffix}-regen-{datetime.now().strftime('%H%M%S')}"
-    output_path = output_dir / f"{suffix}{provider.output_suffix()}"
+    output_path = join_key(output_dir, f"{suffix}{provider.output_suffix()}")
     task_package = task_package_override or build_task_package(sku_row, model_row, plan, shot)
     timestamp = now_iso()
 
@@ -1244,7 +1260,7 @@ def build_task_package(sku_row: Any, model_row: Any, plan: dict[str, Any], shot:
             "constraints": [
                 "服装参考图是商品事实源",
                 "保持同一模特脸、发型、气质",
-                "保持 Lily 白/浅灰棚拍风格",
+                "保持白/浅灰棚拍风格",
                 "不生成无关文字、水印、logo",
             ],
         },
@@ -1253,46 +1269,35 @@ def build_task_package(sku_row: Any, model_row: Any, plan: dict[str, Any], shot:
 
 def build_image_inputs(sku_row: Any, model_row: Any, model_profile: dict[str, Any], shot: dict[str, Any]) -> list[dict[str, Any]]:
     inputs: list[dict[str, Any]] = []
-    sku = str(sku_row["sku"])
-    simulation_asset_dir = Path(__file__).resolve().parents[2] / "simulations" / f"{sku}-v4" / "assets"
-    product_sheet = simulation_asset_dir / "product-core-reference-sheet.jpg"
-    brand_sheet = simulation_asset_dir / "brand-non-sku-reference-sheet.jpg"
-    if product_sheet.exists():
-        inputs.append({"role": "garment_reference_sheet", "localPath": str(product_sheet)})
-    else:
-        with get_db() as db:
-            image_rows = db.execute(
-                "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY role = 'main' DESC, sort_order, id LIMIT 4",
-                (sku_row["id"],),
-            ).fetchall()
-        for row in image_rows:
-            inputs.append(
-                {
-                    "role": f"garment_{row['role']}",
-                    "filename": row["filename"],
-                    "localPath": row["storage_path"],
-                }
-            )
+    with get_db() as db:
+        image_rows = db.execute(
+            "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY role = 'main' DESC, sort_order, id LIMIT 4",
+            (sku_row["id"],),
+        ).fetchall()
+    for row in image_rows:
+        object_key = row["storage_path"]
+        inputs.append(
+            {
+                "role": f"garment_{row['role']}",
+                "filename": row["filename"],
+                "objectKey": object_key,
+                "url": presigned_get_url(object_key),
+            }
+        )
 
     head_reference = normalize_head_reference_filename(str(shot.get("headReference", "front.png")))
     head_references = model_profile.get("headReferences", {}) if isinstance(model_profile.get("headReferences"), dict) else {}
     head_filename = head_references.get(Path(head_reference).stem) or head_reference
-    head_path = Path(model_row["asset_dir"]) / str(head_filename)
-    if head_path.exists():
+    head_key = join_key(model_row["asset_dir"], str(head_filename))
+    if object_exists(head_key):
         inputs.append(
             {
                 "role": "model_head",
                 "angle": Path(str(head_filename)).stem,
-                "localPath": str(head_path),
+                "objectKey": head_key,
+                "url": presigned_get_url(head_key),
             }
         )
-
-    if brand_sheet.exists():
-        inputs.append({"role": "brand_style_reference_sheet", "localPath": str(brand_sheet)})
-    else:
-        fallback_brand = Path(__file__).resolve().parents[2] / "brand-analysis" / "lily-real-sample-contact-sheet.jpg"
-        if fallback_brand.exists():
-            inputs.append({"role": "brand_style_reference_sheet", "localPath": str(fallback_brand)})
     return inputs
 
 
@@ -1396,14 +1401,14 @@ def serialize_model(row: Any) -> dict[str, Any]:
     references = ordered_head_references(profile, raw_references)
     assigned_references = {key: value for key, value in references.items() if not is_unassigned_head_reference_id(key)}
     head = assigned_references.get("front")
-    preview_path = Path(row["asset_dir"]) / head if head else None
+    preview_path = join_key(row["asset_dir"], head) if head else None
     reference_urls = {
         angle: model_asset_url(row["id"], row["asset_dir"], filename)
         for angle, filename in references.items()
         if filename
     }
     reference_meta = {
-        angle: {"fileSize": file_size(Path(row["asset_dir"]) / str(filename))}
+        angle: {"fileSize": file_size(join_key(row["asset_dir"], str(filename)))}
         for angle, filename in references.items()
         if filename
     }
@@ -1513,6 +1518,7 @@ def serialize_generation_image(row: Any) -> dict[str, Any]:
         "shotIndex": row["shot_index"],
         "title": row["title"],
         "status": row["status"],
+        "objectKey": row["output_path"],
         "url": media_url(row["output_path"]),
         "fileSize": file_size(row["output_path"]),
         "taskPackage": loads(row["task_package_json"], {}),
@@ -1614,65 +1620,17 @@ def new_unassigned_head_reference_key(references: dict[str, Any]) -> str:
 def model_asset_url(model_profile_id: int, asset_dir: str, filename: str | None) -> str | None:
     if not filename:
         return None
-    candidate = Path(asset_dir) / filename
-    if not candidate.exists():
+    key = join_key(asset_dir, sanitize_filename(filename))
+    if not object_exists(key):
         return None
-    return f"/api/model-profiles/{model_profile_id}/assets/{sanitize_filename(filename)}"
+    return presigned_get_url(key)
 
 
 def file_size(path: str | Path | None) -> int | None:
-    if not path:
-        return None
-    try:
-        candidate = Path(path)
-        if candidate.exists() and candidate.is_file():
-            return candidate.stat().st_size
-    except OSError:
-        return None
-    return None
+    return object_size(path)
 
 
-def ensure_writable_asset_dir(asset_dir: Path) -> None:
-    asset_dir.mkdir(parents=True, exist_ok=True)
-
-
-def remove_model_asset_file(asset_dir: Path, filename: str | None) -> None:
+def remove_model_asset_file(asset_dir: str, filename: str | None) -> None:
     if not filename:
         return
-    try:
-        asset_dir.resolve().relative_to(settings.storage_dir.resolve())
-    except ValueError:
-        return
-    file_path = (asset_dir / filename).resolve()
-    try:
-        file_path.relative_to(asset_dir.resolve())
-    except ValueError:
-        return
-    if file_path.exists() and file_path.is_file():
-        file_path.unlink()
-
-
-def remove_storage_path(path: Path) -> None:
-    settings = get_settings()
-    try:
-        resolved = path.resolve()
-        resolved.relative_to(settings.storage_dir.resolve())
-    except ValueError:
-        return
-    if resolved.is_dir():
-        shutil.rmtree(resolved, ignore_errors=True)
-    elif resolved.exists():
-        resolved.unlink()
-
-
-def unique_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    stem = path.stem
-    suffix = path.suffix
-    parent = path.parent
-    for index in range(1, 1000):
-        candidate = parent / f"{stem}-{index}{suffix}"
-        if not candidate.exists():
-            return candidate
-    return parent / f"{stem}-{uuid4().hex[:8]}{suffix}"
+    delete_object(join_key(asset_dir, sanitize_filename(filename)))

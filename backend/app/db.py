@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime
-from pathlib import Path
 import json
 import sqlite3
 from typing import Any, Iterator
 
 from .config import get_settings
+from .object_storage import presigned_get_url
 
 
 def now_iso() -> str:
@@ -157,7 +157,6 @@ def seed_default_model(db: sqlite3.Connection) -> None:
     if existing:
         return
 
-    settings = get_settings()
     profile = {
         "height": "170cm",
         "weight": "",
@@ -192,7 +191,7 @@ def seed_default_model(db: sqlite3.Connection) -> None:
         (
             "Face-01",
             "Face-01 默认模特",
-            str(settings.default_model_asset_dir),
+            "model-profiles/Face-01",
             dumps(profile),
             timestamp,
             timestamp,
@@ -200,16 +199,8 @@ def seed_default_model(db: sqlite3.Connection) -> None:
     )
 
 
-def media_url(path: str | Path | None) -> str | None:
-    if not path:
-        return None
-    settings = get_settings()
-    resolved = Path(path).resolve()
-    try:
-        relative = resolved.relative_to(settings.storage_dir.resolve())
-        return f"{settings.media_url_prefix}/{relative.as_posix()}"
-    except ValueError:
-        return None
+def media_url(key: str | None) -> str | None:
+    return presigned_get_url(key)
 
 
 def log_event(
@@ -229,7 +220,7 @@ def log_event(
     )
 
     settings = get_settings()
-    log_path = settings.storage_dir / "logs" / f"{timestamp[:10]}.jsonl"
+    log_path = settings.log_dir / f"{timestamp[:10]}.jsonl"
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(
             dumps(

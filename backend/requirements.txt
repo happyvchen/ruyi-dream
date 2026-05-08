@@ -4,3 +4,4 @@ python-multipart==0.0.20
 google-genai==1.55.0
 fal-client>=0.7.0
 python-dotenv==1.2.1
+boto3>=1.35.0

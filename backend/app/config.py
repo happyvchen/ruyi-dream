@@ -10,11 +10,18 @@ load_dotenv(BASE_DIR / ".env")
 
 
 class Settings:
-    app_name = "Lily AI Model Image MVP"
-    storage_dir = Path(os.getenv("LILY_STORAGE_DIR", BASE_DIR / "storage"))
-    database_path = Path(os.getenv("LILY_DATABASE_PATH", storage_dir / "lily_mvp.sqlite3"))
-    media_url_prefix = "/media"
-    default_model_asset_dir = Path("/Users/fushuai/Desktop/项目/Lily/Face-01")
+    app_name = os.getenv("APP_NAME", "AI Model Image MVP")
+    data_dir = Path(os.getenv("APP_DATA_DIR", BASE_DIR / "data"))
+    database_path = Path(os.getenv("APP_DATABASE_PATH", data_dir / "app.sqlite3"))
+    log_dir = Path(os.getenv("APP_LOG_DIR", data_dir / "logs"))
+    s3_endpoint_url = os.getenv("APP_S3_ENDPOINT_URL", "http://127.0.0.1:9000")
+    s3_public_endpoint_url = os.getenv("APP_S3_PUBLIC_ENDPOINT_URL", s3_endpoint_url)
+    s3_bucket = os.getenv("APP_S3_BUCKET", os.getenv("APP_STORAGE_BUCKET", "app-media"))
+    s3_region = os.getenv("APP_S3_REGION", "auto")
+    s3_access_key_id = os.getenv("APP_S3_ACCESS_KEY_ID", os.getenv("RUSTFS_ACCESS_KEY", "admin"))
+    s3_secret_access_key = os.getenv("APP_S3_SECRET_ACCESS_KEY", os.getenv("RUSTFS_SECRET_KEY", "DQugmV9crHkkYYjG"))
+    s3_force_path_style = os.getenv("APP_S3_FORCE_PATH_STYLE", "true").lower() in {"1", "true", "yes", "on"}
+    s3_presign_expires_seconds = int(os.getenv("APP_S3_PRESIGN_EXPIRES_SECONDS", "900"))
     gemini_api_key = os.getenv("GEMINI_API_KEY", "")
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
     image_provider = os.getenv("GPT_IMAGE2_PROVIDER", "placeholder").lower()
@@ -38,8 +45,6 @@ class Settings:
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()
-    settings.storage_dir.mkdir(parents=True, exist_ok=True)
-    (settings.storage_dir / "uploads").mkdir(parents=True, exist_ok=True)
-    (settings.storage_dir / "outputs").mkdir(parents=True, exist_ok=True)
-    (settings.storage_dir / "logs").mkdir(parents=True, exist_ok=True)
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    settings.log_dir.mkdir(parents=True, exist_ok=True)
     return settings

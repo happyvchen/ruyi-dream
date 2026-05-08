@@ -8,7 +8,7 @@
 
 | 文件 | 内容 | 使用方式 |
 |---|---|---|
-| `sku_125309C7948510_review.md` | 基于 `125309C7948510` 的真实样片对比、问题归因和产品优化建议 | 理解身份锁定、Pose 模板、Styling 边界、尺寸约束的来源 |
+| `GPT Image 2 API（fal）.md` | fal GPT Image-2 接口观察和接入备注 | 调整 provider adapter 或排查 fal 请求时 |
 
 ## 本地规则 (Local Rules)
 
@@ -19,5 +19,3 @@
 ## 相关 (See Also)
 
 - 父级：`../CLAUDE.md`
-- 实验记录：`../../simulations/CLAUDE.md`
-

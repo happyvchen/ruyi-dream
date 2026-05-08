@@ -1,8 +1,8 @@
-# Lily AI 模特组图生成 MVP
+# AI 模特组图生成 MVP
 
-本项目是为 Lily 当前业务阶段设计的内部生产工具，不是标准 SaaS，也不面向多客户、多租户、计费、权限、模板市场等通用商业化场景。
+本项目是标准化 AI 模特组图生成工具的 MVP。当前阶段先服务单一试点客户和单一工作空间，但产品设计应保留后续 SaaS 化、多客户、多租户、权限和计费扩展空间。
 
-项目目标是：基于 `1 个服装货号图包` 及其默认组图方案，自动生成一组可用于淘宝、天猫等电商场景的 Lily 风格模特服装展示图。
+项目目标是：基于 `1 个服装货号图包` 及其默认组图方案，自动生成一组可用于淘宝、天猫等电商场景的品牌风格模特服装展示图。
 
 ## Agent 入口
 
@@ -13,19 +13,15 @@
 - [design/CLAUDE.md](design/CLAUDE.md)：产品设计索引与权威边界
 - [frontend/CLAUDE.md](frontend/CLAUDE.md)：前端工程入口
 - [backend/CLAUDE.md](backend/CLAUDE.md)：后端工程入口
-- [simulations/CLAUDE.md](simulations/CLAUDE.md)：实验记录索引与使用规则
-- [brand-analysis/CLAUDE.md](brand-analysis/CLAUDE.md)：品牌分析素材说明
-
-`simulations/` 下的内容是实验记录，不是权威设计。实现产品功能或整理正式方案时，应以 `design/` 下的设计源头文档为准。
 
 ## 当前范围
 
-- 服务对象：仅 Lily 一家客户
+- 服务对象：当前为单一试点客户，产品定位为标准化工具
 - 产品阶段：MVP
 - 主生产入口：生成组图
 - 素材准备入口：服装素材
 - 数字模特：产品支持多数字模特，当前阶段先维护 1 个默认数字模特
-- 风格方向：Lily 白/浅灰棚拍主图风格
+- 风格方向：品牌白/浅灰棚拍主图风格
 - 输出目标：每个货号生成一套主图
 - 暂不包含：自动质量检测、多客户 SaaS、复杂权限、外景大片、视频生成、ZIP 上传、素材图片角色识别
 
@@ -39,7 +35,7 @@
 -> 生成组图页选择货号
 -> 直接使用默认方案创建生成任务
 -> 提交 GPT Image-2 / fal queue
--> 后台轮询状态并下载结果
+-> 后台轮询状态并将结果写入对象存储
 -> 单张重生 / 设为最终图 / 导出
 -> 生成记录中复盘任务，必要时恢复到生成组图页继续操作
 ```
@@ -67,6 +63,15 @@ cp .env.example .env
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-3-flash-preview
 
+APP_S3_ENDPOINT_URL=http://127.0.0.1:9000
+APP_S3_PUBLIC_ENDPOINT_URL=http://127.0.0.1:9000
+APP_STORAGE_BUCKET=app-media
+APP_S3_REGION=auto
+APP_S3_FORCE_PATH_STYLE=true
+APP_S3_PRESIGN_EXPIRES_SECONDS=900
+RUSTFS_ACCESS_KEY=admin
+RUSTFS_SECRET_KEY=change-me
+
 GPT_IMAGE2_PROVIDER=placeholder
 GPT_IMAGE2_MODEL_ID=openai/gpt-image-2/edit
 GPT_IMAGE2_QUEUE_URL=https://queue.fal.run/openai/gpt-image-2/edit
@@ -76,7 +81,9 @@ GPT_IMAGE2_OUTPUT_FORMAT=png
 GENERATION_POLL_INTERVAL_SECONDS=5
 ```
 
-`GPT_IMAGE2_PROVIDER=placeholder` 会写入本地占位 SVG，不调用真实生图服务。真实调用 fal 时设置：
+图片素材、生成结果和导出 ZIP 统一写入 S3 兼容对象存储。私有化部署默认使用 RustFS，生产部署方式见 [RustFS 对象存储部署](deployment/rustfs/README.md)。
+
+`GPT_IMAGE2_PROVIDER=placeholder` 会写入对象存储占位 SVG，不调用真实生图服务。真实调用 fal 时设置：
 
 ```env
 GPT_IMAGE2_PROVIDER=fal
@@ -127,11 +134,10 @@ FAL_KEY=你的_fal_key
 │   └── 99_drafts/
 ├── frontend/
 ├── backend/
-├── simulations/
-└── brand-analysis/
+└── deployment/
 ```
 
-当前 `frontend/` 已初始化为 React + Vite + TypeScript 单页 MVP；`backend/` 已初始化为 FastAPI + SQLite + 本地文件系统 MVP。
+当前 `frontend/` 已初始化为 React + Vite + TypeScript 单页 MVP；`backend/` 已初始化为 FastAPI + SQLite + S3 兼容对象存储 MVP。
 
 ## 文档目录
 
@@ -143,32 +149,20 @@ FAL_KEY=你的_fal_key
 - [生成要素职责拆分总表](design/01_generation_flow/generation_responsibility_matrix.md)
 - [品类组图规则](design/02_brand_and_assets/category_shot_rules.md)
 - [素材与参数规范](design/02_brand_and_assets/assets_and_parameters.md)
-- [Lily 品牌调性模板库](design/02_brand_and_assets/lily_brand_style_templates.md)
+- [品牌调性模板库](design/02_brand_and_assets/brand_style_templates.md)
 - [尺寸可选增强模块](design/02_brand_and_assets/optional_measurement_enhancement.md)
 - [普通用户视角 UI/UX 设计](design/03_ux_guide/user_uiux.md)
 - [技术路线与生产实操](design/04_implementation_guide/technical_route_and_operations.md)
 - [后端领域模型](backend/domain_model.md)
 - [后端数据库结构](backend/database_schema.md)
+- [RustFS 对象存储部署](deployment/rustfs/README.md)
 - [历史复盘与草稿](design/99_drafts/CLAUDE.md)
-- [实验记录索引](simulations/CLAUDE.md)
-- [品牌分析素材说明](brand-analysis/CLAUDE.md)
-
-## 本地素材路径
-
-- 模特头部图包：`/Users/fushuai/Desktop/项目/Lily/Face-01`
-- 服装图包：`/Users/fushuai/Desktop/项目/Lily/AI单品测试对接`
-- 历史真实成片：
-  - `/Users/fushuai/Desktop/项目/Lily/2D专供-17款-0410`
-  - `/Users/fushuai/Desktop/项目/Lily/3A专供-18款-0410`
-  - `/Users/fushuai/Desktop/项目/Lily/3C专供-36款-0417`
-  - `/Users/fushuai/Desktop/项目/Lily/3C专供单色款-91款-0420`
-  - `/Users/fushuai/Desktop/项目/Lily/3D专供剩余-16款-0427`
 
 ## 核心原则
 
 1. 用户不写 prompt，用户确认拍摄信息。
 2. 系统不是生成单张图，而是生成一组电商主图。
-3. 产品优先复刻 Lily 既有棚拍语言，而不是扩展创意场景。
+3. 产品优先复刻客户既有棚拍语言，而不是扩展创意场景。
 4. MVP 只保留必要功能，避免 SaaS 化过度设计。
 5. 服装保真优先于画面炫技。
 6. Image 2 是最终视觉生成器，不承担品牌策略、搭配判断、Pose 策划和镜头规划。

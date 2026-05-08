@@ -2,23 +2,22 @@ from __future__ import annotations
 
 from html import escape
 import json
-import os
-from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from .config import get_settings
+from .object_storage import object_exists, presigned_get_url, put_bytes
 
 
 class ImageGenerationProvider:
     def output_suffix(self) -> str:
         return ".png"
 
-    async def generate(self, task_package: dict[str, Any], output_path: Path) -> dict[str, Any]:
+    async def generate(self, task_package: dict[str, Any], output_path: str) -> dict[str, Any]:
         raise NotImplementedError
 
-    async def submit(self, task_package: dict[str, Any], output_path: Path) -> dict[str, Any]:
+    async def submit(self, task_package: dict[str, Any], output_path: str) -> dict[str, Any]:
         response = await self.generate(task_package, output_path)
         return {
             **response,
@@ -38,21 +37,21 @@ class GPTImage2PlaceholderProvider(ImageGenerationProvider):
     def output_suffix(self) -> str:
         return ".svg"
 
-    async def generate(self, task_package: dict[str, Any], output_path: Path) -> dict[str, Any]:
+    async def generate(self, task_package: dict[str, Any], output_path: str) -> dict[str, Any]:
         settings = get_settings()
         if settings.gpt_image2_api_base_url and settings.fal_key:
             # The third-party GPT Image-2 API is intentionally not bound yet.
             # Keep the request shape stable so a real adapter can replace this class.
             provider_mode = "third-party-configured-placeholder"
         else:
-            provider_mode = "local-placeholder"
+            provider_mode = "placeholder"
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(render_placeholder_svg(task_package), encoding="utf-8")
+        output_key = str(output_path)
+        put_bytes(output_key, render_placeholder_svg(task_package).encode("utf-8"), "image/svg+xml")
         return {
             "provider": "gpt-image-2-placeholder",
             "mode": provider_mode,
-            "outputPath": str(output_path),
+            "outputPath": output_key,
             "providerRequest": build_fal_request_snapshot(task_package, []),
             "providerResponse": None,
             "note": "真实三方平台未确定，当前写入占位图并完整保留任务包与日志。",
@@ -63,7 +62,7 @@ class GPTImage2FalProvider(ImageGenerationProvider):
     def output_suffix(self) -> str:
         return f".{get_settings().gpt_image2_output_format}"
 
-    async def generate(self, task_package: dict[str, Any], output_path: Path) -> dict[str, Any]:
+    async def generate(self, task_package: dict[str, Any], output_path: str) -> dict[str, Any]:
         settings = get_settings()
         if not settings.fal_key:
             raise RuntimeError("FAL_KEY 未配置，无法调用 GPT Image-2 fal 接口")
@@ -83,18 +82,19 @@ class GPTImage2FalProvider(ImageGenerationProvider):
         if not output_url:
             raise RuntimeError(f"GPT Image-2 fal 响应缺少图片 URL: {raw_response}")
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        download_file(output_url, output_path)
+        output_key = str(output_path)
+        content, content_type = download_bytes(output_url)
+        put_bytes(output_key, content, content_type or f"image/{settings.gpt_image2_output_format}")
         return {
             "provider": "fal",
             "model": settings.gpt_image2_model_id,
-            "outputPath": str(output_path),
+            "outputPath": output_key,
             "imageInputs": uploaded_inputs,
             "providerRequest": provider_request,
             "providerResponse": raw_response,
         }
 
-    async def submit(self, task_package: dict[str, Any], output_path: Path) -> dict[str, Any]:
+    async def submit(self, task_package: dict[str, Any], output_path: str) -> dict[str, Any]:
         settings = get_settings()
         if not settings.fal_key:
             raise RuntimeError("FAL_KEY 未配置，无法调用 GPT Image-2 fal 接口")
@@ -153,10 +153,10 @@ class GPTImage2FalProvider(ImageGenerationProvider):
             if not output_url:
                 result.update({"status": "FAILED", "error": f"fal response 缺少图片 URL: {response}", "providerResponse": response})
                 return result
-            output_path = Path(str(image_row["output_path"]))
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            download_file(output_url, output_path)
-            result.update({"providerResponse": response, "outputPath": str(output_path)})
+            output_key = str(image_row["output_path"])
+            content, content_type = download_bytes(output_url)
+            put_bytes(output_key, content, content_type or f"image/{settings.gpt_image2_output_format}")
+            result.update({"providerResponse": response, "outputPath": output_key})
         elif next_status == "FAILED":
             result["error"] = status_response.get("error") or status_response.get("message") or "fal 生成失败"
         return result
@@ -176,29 +176,19 @@ def build_fal_request_snapshot(task_package: dict[str, Any], image_urls: list[st
 
 
 def upload_image_inputs(image_inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    try:
-        import fal_client
-    except Exception as exc:  # pragma: no cover - environment dependent
-        raise RuntimeError(f"fal-client 未安装，无法上传本地图片: {exc}") from exc
-
-    settings = get_settings()
-    os.environ.setdefault("FAL_KEY", settings.fal_key)
     uploaded: list[dict[str, Any]] = []
     for item in image_inputs:
-        local_path = item.get("localPath")
+        object_key = item.get("objectKey")
         source_url = item.get("providerUrl") or item.get("url")
         next_item = dict(item)
         if source_url and str(source_url).startswith(("http://", "https://")):
             next_item["providerUrl"] = source_url
             uploaded.append(next_item)
             continue
-        if not local_path:
+        if object_key and object_exists(str(object_key)):
+            next_item["providerUrl"] = presigned_get_url(str(object_key))
             uploaded.append(next_item)
             continue
-        path = Path(str(local_path))
-        if not path.exists():
-            raise RuntimeError(f"图片输入不存在: {path}")
-        next_item["providerUrl"] = fal_client.upload_file(str(path))
         uploaded.append(next_item)
     return uploaded
 
@@ -236,10 +226,10 @@ def get_json(url: str, api_key: str, timeout: int | None = 60) -> dict[str, Any]
         raise RuntimeError(f"GPT Image-2 fal 状态查询失败: HTTP {exc.code} {body}") from exc
 
 
-def download_file(url: str, output_path: Path) -> None:
+def download_bytes(url: str) -> tuple[bytes, str | None]:
     request = Request(url, method="GET")
     with urlopen(request, timeout=300) as response:
-        output_path.write_bytes(response.read())
+        return response.read(), response.headers.get_content_type()
 
 
 def add_query_param(url: str, key: str, value: str) -> str:
@@ -278,21 +268,21 @@ def build_chinese_prompt(task_package: dict[str, Any]) -> str:
 
     lines = [
         "任务：",
-        f"生成一张 Lily 电商模特图，当前图位为 {shot.get('shotIndex', '')}：{shot.get('title', '生成图')}。",
+        f"生成一张电商 AI 模特图，当前图位为 {shot.get('shotIndex', '')}：{shot.get('title', '生成图')}。",
         "",
         "图片角色：",
         "- 服装参考图是商品事实来源，必须保持服装设计、颜色、面料、结构、长度和比例。",
         "- 模特头部图是身份事实来源，必须保持同一张脸、发型、刘海和克制表情。",
-        "- Lily 真实成片参考图定义姿态、鞋包、配饰、光线、背景和构图边界。",
+        "- 品牌真实成片参考图定义姿态、鞋包、配饰、光线、背景和构图边界。",
         "",
         "优先级：",
         f"1. 保持 {model.get('modelId', '当前模特')} 模特身份一致。",
         f"2. 保持货号 {task_package.get('sku', '')} 的服装事实：{garment.get('summary', '')}",
-        f"3. 遵守品牌风格：{brand_style.get('summary', 'Lily 白/浅灰棚拍，商品优先。')}",
+        f"3. 遵守品牌风格：{brand_style.get('summary', '白/浅灰棚拍，商品优先。')}",
         f"4. 当前图要求：{shot.get('frame', '')}，{shot.get('angle', '')}，重点展示{shot.get('focus', '服装')}。",
         "",
         "姿态与造型：",
-        f"- 姿态：{shot.get('pose', '自然、克制、符合 Lily 电商棚拍。')}",
+        f"- 姿态：{shot.get('pose', '自然、克制、符合电商棚拍。')}",
         f"- 背景：{shot.get('background', '白/浅灰棚拍')}",
         f"- 鞋包配饰：{styling.get('shoes', '')}；{styling.get('bag', '')}；{styling.get('jewelry', '')}",
     ]
@@ -328,7 +318,7 @@ def render_placeholder_svg(task_package: dict[str, Any]) -> str:
     frame = escape(str(shot.get("frame", "")))
     focus = escape(str(shot.get("focus", "")))
     category = escape(str(garment.get("category", "待识别品类")))
-    summary = escape(str(garment.get("summary", "Lily 白/浅灰棚拍风格")))
+    summary = escape(str(garment.get("summary", "白/浅灰棚拍风格")))
     return f"""<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
   <rect width="1200" height="1200" fill="#f7f7f5"/>
   <rect x="96" y="96" width="1008" height="1008" rx="8" fill="#ffffff" stroke="#d8d8d2" stroke-width="2"/>

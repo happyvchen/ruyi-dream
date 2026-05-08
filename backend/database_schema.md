@@ -3,7 +3,7 @@
 当前数据库为 SQLite，路径默认：
 
 ```text
-backend/storage/lily_mvp.sqlite3
+backend/data/app.sqlite3
 ```
 
 数据库初始化入口：
@@ -52,7 +52,7 @@ CREATE TABLE garment_skus (
 | `sku` | TEXT | 货号，来自用户输入 |
 | `title` | TEXT | 展示名，当前默认等于货号 |
 | `source` | TEXT | 来源，当前为 `upload` |
-| `storage_path` | TEXT | 上传素材所在本地目录 |
+| `storage_path` | TEXT | 上传素材对象前缀 |
 | `status` | TEXT | `NEW` / `ANALYZED` / `CONFIRMED` |
 | `analysis_json` | TEXT | Gemini 输出的服装摘要 JSON |
 | `created_at` | TEXT | 创建时间 |
@@ -80,7 +80,7 @@ CREATE TABLE garment_images (
 | `id` | INTEGER | 主键 |
 | `sku_id` | INTEGER | 所属 `garment_skus.id` |
 | `filename` | TEXT | 上传后规范化文件名 |
-| `storage_path` | TEXT | 图片本地路径 |
+| `storage_path` | TEXT | 图片对象 key |
 | `mime_type` | TEXT | 文件 MIME 类型 |
 | `role` | TEXT | 图片角色，当前为 `main` / `reference` |
 | `sort_order` | INTEGER | 上传顺序 |
@@ -163,7 +163,7 @@ CREATE TABLE shot_plans (
 | `status` | TEXT | 当前为 `DRAFT`，预留 `CONFIRMED` |
 | `plan_json` | TEXT | 结构化组图方案 JSON |
 | `planner_provider` | TEXT | `gemini` / `fallback` / `gemini-error-fallback` / `gemini-json-parse-fallback` |
-| `raw_response` | TEXT | Gemini/fallback 的完整调用快照，包含中文 prompt、输入图片路径和响应 |
+| `raw_response` | TEXT | Gemini/fallback 的完整调用快照，包含中文 prompt、输入图片对象 key 和预签名 URL和响应 |
 | `created_at` | TEXT | 创建时间 |
 | `updated_at` | TEXT | 更新时间 |
 
@@ -258,7 +258,7 @@ ALTER TABLE generation_images ADD COLUMN last_status_checked_at TEXT;
 | `shot_index` | INTEGER | 图位序号 |
 | `title` | TEXT | 图位标题 |
 | `status` | TEXT | `QUEUED` / `SUBMITTED` / `IN_QUEUE` / `IN_PROGRESS` / `SUCCEEDED` / `FAILED` / `CANCELLED` |
-| `output_path` | TEXT | 生成图片路径 |
+| `output_path` | TEXT | 生成图片对象 key |
 | `task_package_json` | TEXT | 单张生成任务包；包含 SKU、服装、模特、shot、输入图、生成约束 |
 | `provider_request_json` | TEXT | 最终发给 provider 的请求快照，例如 fal 的 `prompt + image_urls + quality` |
 | `provider_response_json` | TEXT | provider 最终响应快照；fal 完成后保存 response_url 返回内容 |
@@ -266,7 +266,7 @@ ALTER TABLE generation_images ADD COLUMN last_status_checked_at TEXT;
 | `regenerate_reason` | TEXT | 最近一次重生原因 |
 | `is_final` | INTEGER | 是否最终图，0/1 |
 | `prompt_text` | TEXT | 本次当前 attempt 的中文 Image 2 prompt |
-| `image_inputs_json` | TEXT | 输入图片映射，包含本地路径、角色、fal URL |
+| `image_inputs_json` | TEXT | 输入图片映射，包含对象 key、预签名 URL、角色、fal URL |
 | `template_snapshot_json` | TEXT | 本次生成使用的品牌模板、shot plan 等快照 |
 | `model_snapshot_json` | TEXT | 本次生成使用的数字模特快照 |
 | `garment_snapshot_json` | TEXT | 本次生成使用的服装事实快照 |
@@ -462,7 +462,7 @@ erDiagram
 |---|---|---|
 | `brand_templates` | 写在 planner prompt / `plan_json.brandStyle` 中 | 品牌模板需要可视化维护、多模板切换 |
 | `pose_templates` | 写在 Gemini 输出的 shot 中 | Pose 需要沉淀、复用、人工维护 |
-| `exports` | 写入 `event_logs`，ZIP 存本地 | 需要导出列表、下载历史、过期清理 |
+| `exports` | 写入 `event_logs`，ZIP 写入对象存储 | 需要导出列表、下载历史、过期清理 |
 | `image_providers` | 写在代码 adapter 和请求快照中 | 多平台 A/B、成本、失败率统计 |
 | `garment_image_roles` | `garment_images.role` 字段 | 图片角色需要人工精修和历史追踪 |
 | `measurement_profiles` | 尚未实现 | 尺寸增强进入 MVP 主流程 |

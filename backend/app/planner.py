@@ -66,14 +66,14 @@ def fallback_plan(sku: str, model_id: str, category: str = "连衣裙") -> dict[
         "modelId": model_id,
         "garment": {
             "category": normalized,
-            "summary": f"系统将按 {normalized} 的 Lily 默认棚拍规则生成组图。",
+            "summary": f"系统将按 {normalized} 的默认棚拍规则生成组图。",
             "color": "待从主图确认",
             "fabric": "待从主图确认",
             "keyStructures": [],
             "preserveStrictly": ["以服装参考图为商品事实源，不改变品类、颜色、结构和比例"],
         },
         "brandStyle": {
-            "name": "Lily 默认棚拍风格",
+            "name": "默认棚拍风格",
             "summary": "白/浅灰背景，自然姿态，简洁搭配，商品优先。",
         },
         "shots": shots,
@@ -100,11 +100,11 @@ def default_head_reference(angle: str) -> str:
 
 def build_planner_prompt(sku: str) -> str:
     return f"""
-你是 Lily 电商棚拍组图策划器。请根据用户上传的服装主图和参考图，识别服装品类，并决定默认 5 张组图的构图、模特姿势和服饰搭配。
+你是电商棚拍组图策划器。请根据用户上传的服装主图和参考图，识别服装品类，并决定默认 5 张组图的构图、模特姿势和服饰搭配。
 
 要求：
 - 用户不写 prompt，所以输出必须是结构化拍摄方案。
-- 只支持 Lily 白/浅灰棚拍、电商主图风格。
+- 只支持白/浅灰棚拍、电商主图风格。
 - 优先服装保真：不改变颜色、结构、领型、袖长、裤长、裙长、口袋、纽扣等。
 - 模特使用 Face-01，短发、自然淡妆、克制通勤气质。
 - 根据品牌调性选择鞋履/包/配饰，避免老气尖头职业鞋、夸张高跟鞋、运动鞋、厚底鞋。
@@ -123,7 +123,7 @@ def build_planner_prompt(sku: str) -> str:
     "preserveStrictly": ["必须保真的点"]
   }},
   "brandStyle": {{
-    "name": "Lily 默认棚拍风格",
+    "name": "默认棚拍风格",
     "summary": "白/浅灰背景，自然姿态，简洁搭配，商品优先"
   }},
   "shots": [
@@ -236,7 +236,7 @@ def normalize_plan(plan: dict[str, Any], sku: str) -> dict[str, Any]:
         return fallback_plan(sku, "Face-01", plan.get("garment", {}).get("category", "连衣裙"))
     plan.setdefault("sku", sku)
     plan.setdefault("modelId", "Face-01")
-    plan.setdefault("brandStyle", {"name": "Lily 默认棚拍风格", "summary": "白/浅灰背景，自然姿态，简洁搭配，商品优先。"})
+    plan.setdefault("brandStyle", {"name": "默认棚拍风格", "summary": "白/浅灰背景，自然姿态，简洁搭配，商品优先。"})
     for index, shot in enumerate(plan["shots"][:5], start=1):
         shot.setdefault("shotIndex", index)
         shot.setdefault("title", f"图 {index}")
