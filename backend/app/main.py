@@ -108,6 +108,7 @@ UNASSIGNED_HEAD_REFERENCE_PREFIX = "__unassigned__"
 
 ACTIVE_IMAGE_STATUSES = {"QUEUED", "SUBMITTED", "IN_QUEUE", "IN_PROGRESS", "RUNNING"}
 TERMINAL_IMAGE_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
+PLANNING_STATUSES = {"PLANNING"}
 
 
 @app.on_event("startup")
@@ -116,6 +117,7 @@ async def startup() -> None:
     init_db()
     backfill_shot_plan_script_data()
     app.state.generation_poller = asyncio.create_task(generation_poller_loop())
+    app.state.planner_poller = asyncio.create_task(planner_poller_loop())
 
 
 @app.on_event("shutdown")
@@ -123,6 +125,9 @@ async def shutdown() -> None:
     task = getattr(app.state, "generation_poller", None)
     if task:
         task.cancel()
+    planner_task = getattr(app.state, "planner_poller", None)
+    if planner_task:
+        planner_task.cancel()
         with suppress(asyncio.CancelledError):
             await task
 
@@ -693,76 +698,36 @@ async def create_shot_plan(payload: PlanCreateRequest) -> dict[str, Any]:
         if not sku_row:
             raise HTTPException(status_code=404, detail="货号不存在")
         model_row = resolve_model_profile(db, payload.modelProfileId)
-        image_rows = db.execute(
-            "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY role = 'main' DESC, sort_order, id",
-            (payload.skuId,),
-        ).fetchall()
-        image_keys = [row["storage_path"] for row in image_rows]
-
-    with TemporaryDirectory(prefix="planner-inputs-") as temp_dir:
-        image_paths: list[Path] = []
-        for index, key in enumerate(image_keys[:6], start=1):
-            try:
-                path = Path(temp_dir) / f"{index:02d}-{Path(key).name}"
-                path.write_bytes(get_bytes(key))
-                image_paths.append(path)
-            except Exception:
-                continue
-        try:
-            plan, provider, raw = await plan_with_gemini(sku_row["sku"], image_paths)
-        except PlannerError as exc:
-            with get_db() as db:
-                log_event(
-                    db,
-                    "shot_plan",
-                    None,
-                    "planner_failed",
-                    {
-                        "skuId": payload.skuId,
-                        "sku": sku_row["sku"],
-                        "modelProfileId": model_row["id"],
-                        "error": str(exc),
-                        "providerRequest": exc.provider_request,
-                        "providerResponse": exc.provider_response,
-                    },
-                )
-            raise HTTPException(status_code=502, detail=f"Gemini 组图方案生成失败：{exc}") from exc
-    timestamp = now_iso()
-    with get_db() as db:
+        timestamp = now_iso()
+        plan = build_pending_shot_plan(sku_row["sku"], model_row["model_id"])
         cursor = db.execute(
             """
             INSERT INTO shot_plans
               (sku_id, model_profile_id, status, plan_json, category, sales_info,
                lily_tone, styling, background, planner_provider, raw_response, created_at, updated_at)
-            VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, 'PLANNING', ?, ?, ?, ?, ?, ?, 'gemini', NULL, ?, ?)
             """,
             (
                 payload.skuId,
                 model_row["id"],
                 dumps(plan),
-                plan.get("category") or plan.get("garment", {}).get("category"),
+                plan.get("category"),
                 plan_generation(plan).get("salesInfo"),
                 plan_generation(plan).get("lilyTone"),
                 plan_generation(plan).get("styling"),
                 plan_generation(plan).get("background"),
-                provider,
-                raw,
                 timestamp,
                 timestamp,
             ),
         )
         plan_id = int(cursor.lastrowid)
         sync_shot_plan_shots(db, plan_id, plan, timestamp)
-        db.execute(
-            "UPDATE garment_skus SET status = 'ANALYZED', analysis_json = ?, updated_at = ? WHERE id = ?",
-            (dumps(plan.get("garment", {})), timestamp, payload.skuId),
-        )
         log_event(
             db,
             "shot_plan",
             plan_id,
-            "created",
-            {"skuId": payload.skuId, "modelProfileId": model_row["id"], "plannerProvider": provider, "plan": plan},
+            "planner_queued",
+            {"skuId": payload.skuId, "modelProfileId": model_row["id"], "plannerProvider": "gemini"},
         )
         row = db.execute("SELECT * FROM shot_plans WHERE id = ?", (plan_id,)).fetchone()
     return {"item": serialize_shot_plan(row)}
@@ -851,17 +816,7 @@ async def generate_preview_grid(payload: GenerateGroupRequest) -> dict[str, Any]
     output_dir = join_key("outputs", sku_row["sku"], f"preview-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
     timestamp = now_iso()
     provider = get_image_provider()
-    preview_shot = {
-        "shotIndex": 0,
-        "title": "九宫格姿势预览",
-        "frame": "3x3 九宫格",
-        "crop": "每格全身或近全身，头脚完整优先",
-        "angle": "多姿势预览",
-        "focus": "在服装、配饰、人物一致的前提下比较姿势和身位",
-        "pose": "九个不同但符合 Lily 品牌调性的姿势，覆盖正面、轻斜正、3/4 斜正、侧身、轻走动和细节展示姿态",
-        "bodyPosition": "多身位",
-        "styling": {},
-    }
+    preview_shot = build_preview_shot()
     task_package = build_preview_task_package(sku_row, model_row, plan, preview_shot)
 
     with get_db() as db:
@@ -876,10 +831,8 @@ async def generate_preview_grid(payload: GenerateGroupRequest) -> dict[str, Any]
         run_id = int(run_cursor.lastrowid)
         log_event(db, "generation_run", run_id, "preview_started", {"shotPlanId": plan_row["id"], "outputDir": str(output_dir)})
 
-    image_id = await submit_single_image(
+    image_id = create_generation_image(
         run_id=run_id,
-        sku_row=sku_row,
-        model_row=model_row,
         plan=plan,
         shot=preview_shot,
         provider=provider,
@@ -926,10 +879,8 @@ async def generate_group(payload: GenerateGroupRequest) -> dict[str, Any]:
     generated_ids: list[int] = []
     for shot in plan.get("shots", []):
         task_package = build_task_package(sku_row, model_row, plan, shot, preview_inputs=preview_inputs)
-        image_id = await submit_single_image(
+        image_id = create_generation_image(
             run_id=run_id,
-            sku_row=sku_row,
-            model_row=model_row,
             plan=plan,
             shot=shot,
             provider=provider,
@@ -979,7 +930,29 @@ async def regenerate_image(image_id: int, payload: RegenerateRequest) -> dict[st
         model_row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (run_row["model_profile_id"],)).fetchone()
         db.execute("UPDATE generation_images SET status = 'QUEUED', updated_at = ? WHERE id = ?", (now_iso(), image_id))
 
-    task_package = loads(image_row["task_package_json"], {})
+    if run_row["kind"] == "preview_grid":
+        with get_db() as db:
+            plan_row = get_latest_usable_shot_plan_row(db, sku_row["id"]) or db.execute(
+                "SELECT * FROM shot_plans WHERE id = ?",
+                (run_row["shot_plan_id"],),
+            ).fetchone()
+        if not plan_row:
+            raise HTTPException(status_code=404, detail="组图方案不存在")
+        plan = loads(plan_row["plan_json"], {})
+        plan["_planner"] = {
+            "provider": plan_row["planner_provider"],
+            "rawResponse": plan_row["raw_response"],
+        }
+        task_package = build_preview_task_package(sku_row, model_row, plan, build_preview_shot())
+        if plan_row["id"] != run_row["shot_plan_id"]:
+            with get_db() as db:
+                db.execute(
+                    "UPDATE generation_runs SET shot_plan_id = ?, updated_at = ? WHERE id = ?",
+                    (plan_row["id"], now_iso(), run_row["id"]),
+                )
+            run_row = {**dict(run_row), "shot_plan_id": plan_row["id"]}
+    else:
+        task_package = loads(image_row["task_package_json"], {})
     task_package["regeneration"] = {"fromImageId": image_id, "reason": payload.reason, "note": payload.note}
     output_dir = clean_key(run_row["output_dir"])
     shot = task_package.get("shot", {})
@@ -997,79 +970,26 @@ async def regenerate_image(image_id: int, payload: RegenerateRequest) -> dict[st
             "regenerate_requested",
             {"reason": payload.reason, "note": payload.note},
         )
-
-    try:
-        provider_response = await provider.submit(task_package, output_path)
-    except Exception as exc:
-        with get_db() as db:
-            db.execute(
-                "UPDATE generation_images SET status = 'FAILED', updated_at = ? WHERE id = ?",
-                (now_iso(), image_id),
-            )
-            log_event(db, "generation_image", image_id, "failed", {"error": str(exc)})
-        update_generation_run_status(run_row["id"])
-        return {"item": get_generation_run_by_id(run_row["id"])}
-    provider_request = provider_response.get("providerRequest") or {"taskPackage": task_package, "outputPath": str(output_path)}
-    prompt_text = provider_request.get("prompt") if isinstance(provider_request, dict) else None
-    next_status = provider_response.get("status", "SUBMITTED")
-    provider_status = provider_response.get("providerStatus")
-    provider_request_id = provider_response.get("providerRequestId")
-    provider_urls = provider_response.get("providerUrls", {})
-    provider_status_response = provider_response.get("providerStatusResponse")
-    completed_at = now_iso() if next_status in TERMINAL_IMAGE_STATUSES else None
-    old_attempts = loads(image_row["attempts_json"], []) or []
-    next_attempt_index = len(old_attempts) + 1
-    attempt = {
-        "attemptIndex": next_attempt_index,
-        "kind": "regeneration",
-        "reason": payload.reason,
-        "note": payload.note,
-        "prompt": prompt_text,
-        "imageInputs": provider_response.get("imageInputs", task_package.get("imageInputs", [])),
-        "providerRequest": provider_request,
-        "providerResponse": provider_response.get("providerResponse", provider_response),
-        "providerStatusResponse": provider_status_response,
-        "providerRequestId": provider_request_id,
-        "providerStatus": provider_status,
-        "outputPath": str(output_path),
-        "createdAt": now_iso(),
-    }
-    attempts = [*old_attempts, attempt]
-    with get_db() as db:
         db.execute(
             """
             UPDATE generation_images
-            SET status = ?, output_path = ?, task_package_json = ?,
-                provider_request_json = ?, provider_response_json = ?, prompt_text = ?,
-                image_inputs_json = ?, attempts_json = ?, current_attempt_index = ?,
-                provider_request_id = ?, provider_status = ?, provider_urls_json = ?,
-                provider_status_json = ?, submitted_at = ?, completed_at = ?,
-                last_status_checked_at = ?, regenerate_reason = ?, updated_at = ?
+            SET status = 'QUEUED', output_path = ?, task_package_json = ?,
+                provider_request_json = NULL, provider_response_json = NULL, prompt_text = NULL,
+                image_inputs_json = ?, current_attempt_index = current_attempt_index + 1,
+                provider_request_id = NULL, provider_status = NULL, provider_urls_json = NULL,
+                provider_status_json = NULL, submitted_at = NULL, completed_at = NULL,
+                last_status_checked_at = NULL, regenerate_reason = ?, updated_at = ?
             WHERE id = ?
             """,
             (
-                next_status,
                 str(output_path),
                 dumps(task_package),
-                dumps(provider_request),
-                dumps(provider_response.get("providerResponse", provider_response)),
-                prompt_text,
-                dumps(provider_response.get("imageInputs", task_package.get("imageInputs", []))),
-                dumps(attempts),
-                next_attempt_index,
-                provider_request_id,
-                provider_status,
-                dumps(provider_urls),
-                dumps(provider_status_response),
-                now_iso(),
-                completed_at,
-                now_iso(),
+                dumps(task_package.get("imageInputs", [])),
                 payload.reason,
                 now_iso(),
                 image_id,
             ),
         )
-        log_event(db, "generation_image", image_id, "regeneration_submitted", {"attemptIndex": next_attempt_index, "outputPath": str(output_path)})
     update_generation_run_status(run_row["id"])
     return {"item": get_generation_run_by_id(run_row["id"])}
 
@@ -1140,10 +1060,8 @@ def export_run(run_id: int) -> StreamingResponse:
     )
 
 
-async def submit_single_image(
+def create_generation_image(
     run_id: int,
-    sku_row: Any,
-    model_row: Any,
     plan: dict[str, Any],
     shot: dict[str, Any],
     provider: Any,
@@ -1158,22 +1076,25 @@ async def submit_single_image(
     if regenerate_from_image_id:
         suffix = f"{suffix}-regen-{datetime.now().strftime('%H%M%S')}"
     output_path = join_key(output_dir, f"{suffix}{provider.output_suffix()}")
-    task_package = task_package_override or build_task_package(sku_row, model_row, plan, shot)
+    if task_package_override is None:
+        raise ValueError("create_generation_image requires task_package_override")
+    task_package = task_package_override
     timestamp = now_iso()
 
     with get_db() as db:
         cursor = db.execute(
             """
             INSERT INTO generation_images
-              (run_id, shot_index, title, status, task_package_json, regenerate_from_image_id,
+              (run_id, shot_index, title, status, output_path, task_package_json, regenerate_from_image_id,
                regenerate_reason, image_inputs_json, template_snapshot_json, model_snapshot_json,
                garment_snapshot_json, created_at, updated_at)
-            VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
                 shot_index,
                 title,
+                str(output_path),
                 dumps(task_package),
                 regenerate_from_image_id,
                 regenerate_reason,
@@ -1186,10 +1107,22 @@ async def submit_single_image(
             ),
         )
         image_id = int(cursor.lastrowid)
-        log_event(db, "generation_image", image_id, "started", {"runId": run_id, "shot": shot})
+        log_event(db, "generation_image", image_id, "queued", {"runId": run_id, "shot": shot, "outputPath": str(output_path)})
+    return image_id
 
+
+def submit_generation_image(provider: Any, image_row: Any) -> None:
+    image_id = int(image_row["id"])
+    task_package = loads(image_row["task_package_json"], {})
+    output_path = image_row["output_path"]
+    if not output_path:
+        with get_db() as db:
+            db.execute("UPDATE generation_images SET status = 'FAILED', updated_at = ? WHERE id = ?", (now_iso(), image_id))
+            log_event(db, "generation_image", image_id, "failed", {"error": "缺少输出路径，无法提交生成任务"})
+        update_generation_run_status(image_row["run_id"])
+        return
     try:
-        provider_response = await provider.submit(task_package, output_path)
+        provider_response = asyncio.run(provider.submit(task_package, output_path))
     except Exception as exc:
         with get_db() as db:
             db.execute(
@@ -1197,7 +1130,8 @@ async def submit_single_image(
                 (now_iso(), image_id),
             )
             log_event(db, "generation_image", image_id, "failed", {"error": str(exc)})
-        return image_id
+        update_generation_run_status(image_row["run_id"])
+        return
     provider_request = provider_response.get("providerRequest") or {"taskPackage": task_package, "outputPath": str(output_path)}
     prompt_text = provider_request.get("prompt") if isinstance(provider_request, dict) else None
     next_status = provider_response.get("status", "SUBMITTED")
@@ -1207,9 +1141,10 @@ async def submit_single_image(
     provider_status_response = provider_response.get("providerStatusResponse")
     completed_at = now_iso() if next_status in TERMINAL_IMAGE_STATUSES else None
     attempt = {
-        "attemptIndex": 1,
-        "kind": "initial" if not regenerate_from_image_id else "regeneration",
-        "reason": regenerate_reason,
+        "attemptIndex": max(1, int(image_row["current_attempt_index"] or 0)),
+        "kind": "regeneration" if task_package.get("regeneration") else "initial",
+        "reason": task_package.get("regeneration", {}).get("reason") if isinstance(task_package.get("regeneration"), dict) else image_row["regenerate_reason"],
+        "note": task_package.get("regeneration", {}).get("note") if isinstance(task_package.get("regeneration"), dict) else None,
         "prompt": prompt_text,
         "imageInputs": provider_response.get("imageInputs", task_package.get("imageInputs", [])),
         "providerRequest": provider_request,
@@ -1220,13 +1155,15 @@ async def submit_single_image(
         "outputPath": str(output_path),
         "createdAt": now_iso(),
     }
+    old_attempts = loads(image_row["attempts_json"], []) or []
+    attempts = [*old_attempts, attempt]
     with get_db() as db:
         db.execute(
             """
             UPDATE generation_images
             SET status = ?, output_path = ?, provider_request_json = ?,
                 provider_response_json = ?, prompt_text = ?, image_inputs_json = ?,
-                attempts_json = ?, current_attempt_index = 1, provider_request_id = ?,
+                attempts_json = ?, current_attempt_index = ?, provider_request_id = ?,
                 provider_status = ?, provider_urls_json = ?, provider_status_json = ?,
                 submitted_at = ?, completed_at = ?, last_status_checked_at = ?, updated_at = ?
             WHERE id = ?
@@ -1238,7 +1175,8 @@ async def submit_single_image(
                 dumps(provider_response.get("providerResponse", provider_response)),
                 prompt_text,
                 dumps(provider_response.get("imageInputs", task_package.get("imageInputs", []))),
-                dumps([attempt]),
+                dumps(attempts),
+                attempt["attemptIndex"],
                 provider_request_id,
                 provider_status,
                 dumps(provider_urls),
@@ -1251,7 +1189,7 @@ async def submit_single_image(
             ),
         )
         log_event(db, "generation_image", image_id, "submitted", {"outputPath": str(output_path), "provider": provider_response})
-    return image_id
+    update_generation_run_status(image_row["run_id"])
 
 
 async def generation_poller_loop() -> None:
@@ -1264,9 +1202,126 @@ async def generation_poller_loop() -> None:
                 log_event(db, "generation_poller", None, "failed", {"error": str(exc)})
 
 
+async def planner_poller_loop() -> None:
+    while True:
+        await asyncio.sleep(settings.generation_poll_interval_seconds)
+        try:
+            await asyncio.to_thread(refresh_pending_shot_plans)
+        except Exception as exc:  # pragma: no cover - background safety net
+            with get_db() as db:
+                log_event(db, "planner_poller", None, "failed", {"error": str(exc)})
+
+
+def refresh_pending_shot_plans() -> None:
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT sp.*, gs.sku
+            FROM shot_plans sp
+            JOIN garment_skus gs ON gs.id = sp.sku_id
+            WHERE sp.status = 'PLANNING'
+            ORDER BY sp.created_at, sp.id
+            LIMIT 2
+            """
+        ).fetchall()
+    for row in rows:
+        run_planner_for_shot_plan(row)
+
+
+def run_planner_for_shot_plan(plan_row: Any) -> None:
+    with get_db() as db:
+        image_rows = db.execute(
+            "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY role = 'main' DESC, sort_order, id",
+            (plan_row["sku_id"],),
+        ).fetchall()
+        image_keys = [row["storage_path"] for row in image_rows]
+
+    with TemporaryDirectory(prefix="planner-inputs-") as temp_dir:
+        image_paths: list[Path] = []
+        for index, key in enumerate(image_keys[:6], start=1):
+            try:
+                path = Path(temp_dir) / f"{index:02d}-{Path(key).name}"
+                path.write_bytes(get_bytes(key))
+                image_paths.append(path)
+            except Exception:
+                continue
+        try:
+            plan, provider, raw = asyncio.run(plan_with_gemini(plan_row["sku"], image_paths))
+        except PlannerError as exc:
+            timestamp = now_iso()
+            with get_db() as db:
+                db.execute(
+                    "UPDATE shot_plans SET status = 'FAILED', raw_response = ?, updated_at = ? WHERE id = ?",
+                    (dumps({"error": str(exc), "providerRequest": exc.provider_request, "providerResponse": exc.provider_response}), timestamp, plan_row["id"]),
+                )
+                log_event(
+                    db,
+                    "shot_plan",
+                    plan_row["id"],
+                    "planner_failed",
+                    {
+                        "skuId": plan_row["sku_id"],
+                        "sku": plan_row["sku"],
+                        "modelProfileId": plan_row["model_profile_id"],
+                        "error": str(exc),
+                        "providerRequest": exc.provider_request,
+                        "providerResponse": exc.provider_response,
+                    },
+                )
+            return
+
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE shot_plans
+            SET status = 'DRAFT', plan_json = ?, category = ?, sales_info = ?,
+                lily_tone = ?, styling = ?, background = ?, planner_provider = ?,
+                raw_response = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                dumps(plan),
+                plan.get("category") or plan.get("garment", {}).get("category"),
+                plan_generation(plan).get("salesInfo"),
+                plan_generation(plan).get("lilyTone"),
+                plan_generation(plan).get("styling"),
+                plan_generation(plan).get("background"),
+                provider,
+                raw,
+                timestamp,
+                plan_row["id"],
+            ),
+        )
+        sync_shot_plan_shots(db, plan_row["id"], plan, timestamp)
+        db.execute(
+            "UPDATE garment_skus SET status = 'ANALYZED', analysis_json = ?, updated_at = ? WHERE id = ?",
+            (dumps(plan.get("garment", {})), timestamp, plan_row["sku_id"]),
+        )
+        log_event(
+            db,
+            "shot_plan",
+            plan_row["id"],
+            "created",
+            {"skuId": plan_row["sku_id"], "modelProfileId": plan_row["model_profile_id"], "plannerProvider": provider, "plan": plan},
+        )
+
+
 def refresh_pending_generation_images() -> None:
     provider = get_image_provider()
     with get_db() as db:
+        queued_rows = db.execute(
+            """
+            SELECT gi.*
+            FROM generation_images gi
+            JOIN generation_runs gr ON gr.id = gi.run_id
+            WHERE gi.status = 'QUEUED'
+              AND gi.provider_request_id IS NULL
+              AND gr.status <> 'CANCELLED'
+            ORDER BY gi.updated_at, gi.id
+            LIMIT 5
+            """
+        ).fetchall()
         rows = db.execute(
             """
             SELECT *
@@ -1278,6 +1333,8 @@ def refresh_pending_generation_images() -> None:
             """
         ).fetchall()
 
+    for row in queued_rows:
+        submit_generation_image(provider, row)
     for row in rows:
         refresh_generation_image_status(provider, row)
 
@@ -1389,22 +1446,75 @@ def update_generation_run_status(run_id: int) -> None:
 
 def build_preview_task_package(sku_row: Any, model_row: Any, plan: dict[str, Any], shot: dict[str, Any]) -> dict[str, Any]:
     package = build_task_package(sku_row, model_row, plan, shot)
+    base_constraints = [
+        item
+        for item in package["generation"]["constraints"]
+        if "分镜预览图" not in item and "预览图" not in item and "九宫格" not in item and "3x3" not in item
+    ]
     package["generation"] = {
         **package["generation"],
         "stage": "preview_grid",
-        "output": {"aspectRatio": "1:1", "size": "1200x1200", "layout": "3x3 grid"},
+        "output": {"aspectRatio": "1:1", "size": "1200x1200", "layout": "2x3 contact sheet"},
         "constraints": [
-            *package["generation"]["constraints"],
-            "生成一张九宫格预览图，每格是同一模特、同一服装、同一搭配，只改变姿势和身位",
-            "九宫格用于用户选择方向，不要输出最终 5 张成片",
+            *base_constraints,
+            "生成一张 2x3 分镜预览图，前 5 格对应最终组图分镜，第 6 格为备用候选姿势",
+            "分镜预览用于用户确认方向，不要输出单张最终成片",
             "每格保持服装和配饰一致，不能改变商品结构、颜色、长度和比例",
         ],
     }
     package["previewPlan"] = {
-        "goal": "给用户预览 9 个 Lily 品牌调性的可选姿势与身位",
+        "goal": "给用户预览 5 个最终分镜和 1 个备用候选姿势",
         "shots": plan.get("shots", []),
     }
+    package["imageInputs"] = build_preview_image_inputs(sku_row, model_row, package["model"]["profile"])
     return package
+
+
+def build_preview_shot() -> dict[str, Any]:
+    return {
+        "shotIndex": 0,
+        "title": "2x3 分镜预览",
+        "scene": "2x3 Contact Sheet",
+        "cropRange": "前 5 格对应分镜剧本，第 6 格为备用候选姿势",
+        "imagePurpose": "在服装、配饰、人物一致的前提下确认最终组图的分镜方向",
+        "poseTone": "6 个商业棚拍候选画面，覆盖正面、轻斜正、3/4 斜正、侧身、轻走动和备用候选姿势",
+        "bodyPosition": "多身位",
+        "styling": {},
+    }
+
+
+def build_pending_shot_plan(sku: str, model_id: str) -> dict[str, Any]:
+    shots = []
+    for slot in SHOT_SLOTS:
+        shots.append(
+            {
+                "shotIndex": slot["shotIndex"],
+                "englishName": slot.get("englishName"),
+                "title": slot.get("title", f"图 {slot['shotIndex']}"),
+                "task": "Gemini 正在生成分镜任务",
+                "scene": "",
+                "cropRange": "",
+                "modelScale": "",
+                "headTreatment": "",
+                "bodyPosition": "",
+                "poseTone": "",
+                "imagePurpose": "",
+            }
+        )
+    return {
+        "sku": sku,
+        "modelId": model_id,
+        "category": "策划中",
+        "garment": {"category": "策划中", "summary": "Gemini 正在识别服装品类并生成组图方案。"},
+        "brandStyle": {"name": "Lily 默认棚拍风格", "summary": "方案生成中。"},
+        "generationPlan": {
+            "salesInfo": "",
+            "lilyTone": "",
+            "styling": "",
+            "background": "",
+        },
+        "shots": shots,
+    }
 
 
 def build_task_package(
@@ -1453,7 +1563,7 @@ def build_task_package(
                 "保持同一模特脸、发型、气质",
                 "保持白/浅灰棚拍风格",
                 "不生成无关文字、水印、logo",
-                "如果提供了九宫格预览图，把它作为姿势、身位和整体一致性的参考",
+                "如果提供了分镜预览图，把它作为姿势、身位和整体一致性的参考",
             ],
         },
     }
@@ -1468,7 +1578,7 @@ def get_preview_grid_inputs(preview_run_id: int | None, shot_plan_id: int) -> li
             (preview_run_id, shot_plan_id),
         ).fetchone()
         if not run_row:
-            raise HTTPException(status_code=400, detail="九宫格预览记录不存在或不属于当前方案")
+            raise HTTPException(status_code=400, detail="分镜预览记录不存在或不属于当前方案")
         image_rows = db.execute(
             """
             SELECT *
@@ -1491,7 +1601,7 @@ def get_preview_grid_inputs(preview_run_id: int | None, shot_plan_id: int) -> li
             }
         )
     if not inputs:
-        raise HTTPException(status_code=422, detail="九宫格预览尚未生成成功，不能用于最终生成")
+        raise HTTPException(status_code=422, detail="分镜预览尚未生成成功，不能用于最终生成")
     return inputs
 
 
@@ -1509,12 +1619,34 @@ def normalize_editable_plan(plan: dict[str, Any], sku: str) -> dict[str, Any]:
 
 def plan_generation(plan: dict[str, Any]) -> dict[str, Any]:
     generation_plan = plan.get("generationPlan") if isinstance(plan.get("generationPlan"), dict) else {}
+    styling = generation_plan.get("styling")
+    if not styling:
+        legacy_parts = [
+            plan.get("styling"),
+            plan.get("stylingPlan"),
+            plan.get("colorPalette"),
+            plan.get("accessories"),
+        ]
+        styling = "；".join(str(part).strip() for part in legacy_parts if str(part or "").strip())
     return {
-        "salesInfo": generation_plan.get("salesInfo"),
-        "lilyTone": generation_plan.get("lilyTone"),
-        "styling": generation_plan.get("styling"),
-        "background": generation_plan.get("background"),
+        "salesInfo": generation_plan.get("salesInfo") or plan.get("salesInfo"),
+        "lilyTone": generation_plan.get("lilyTone") or plan.get("lilyTone"),
+        "styling": styling,
+        "background": generation_plan.get("background") or plan.get("background"),
     }
+
+
+def get_latest_usable_shot_plan_row(db: Any, sku_id: int) -> Any:
+    return db.execute(
+        """
+        SELECT *
+        FROM shot_plans
+        WHERE sku_id = ? AND planner_provider = 'gemini' AND status NOT IN ('FAILED', 'PLANNING')
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+        """,
+        (sku_id,),
+    ).fetchone()
 
 
 def sync_shot_plan_shots(db: Any, shot_plan_id: int, plan: dict[str, Any], timestamp: str) -> None:
@@ -1618,6 +1750,75 @@ def build_image_inputs(sku_row: Any, model_row: Any, model_profile: dict[str, An
             }
         )
     return inputs
+
+
+MAX_PREVIEW_REFERENCE_IMAGES = 10
+MAX_PREVIEW_MODEL_IMAGES = 4
+
+
+def build_preview_image_inputs(sku_row: Any, model_row: Any, model_profile: dict[str, Any]) -> list[dict[str, Any]]:
+    inputs: list[dict[str, Any]] = []
+    head_references = model_profile.get("headReferences", {}) if isinstance(model_profile.get("headReferences"), dict) else {}
+    ordered_keys = get_ordered_head_reference_keys(model_profile, head_references)
+    for key in ordered_keys[:MAX_PREVIEW_MODEL_IMAGES]:
+        if len(inputs) >= MAX_PREVIEW_MODEL_IMAGES:
+            break
+        filename = str(head_references.get(key) or "")
+        if not filename:
+            continue
+        object_key = join_key(model_row["asset_dir"], filename)
+        if object_exists(object_key):
+            inputs.append(
+                {
+                    "role": "model_identity",
+                    "angle": key,
+                    "filename": filename,
+                    "objectKey": object_key,
+                    "url": presigned_get_url(object_key),
+                }
+            )
+
+    garment_limit = max(MAX_PREVIEW_REFERENCE_IMAGES - len(inputs), 0)
+    if garment_limit <= 0:
+        return inputs
+
+    with get_db() as db:
+        image_rows = db.execute(
+            "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY sort_order, id LIMIT ?",
+            (sku_row["id"], garment_limit),
+        ).fetchall()
+    for row in image_rows:
+        object_key = row["storage_path"]
+        inputs.append(
+            {
+                "role": "garment_reference",
+                "filename": row["filename"],
+                "objectKey": object_key,
+                "url": presigned_get_url(object_key),
+            }
+        )
+    return inputs
+
+
+def get_ordered_head_reference_keys(model_profile: dict[str, Any], head_references: dict[str, Any]) -> list[str]:
+    ordered_keys: list[str] = []
+    entries = model_profile.get("headReferenceEntries")
+    if isinstance(entries, list):
+        for entry in entries:
+            if isinstance(entry, dict):
+                key = str(entry.get("id") or entry.get("angle") or "").strip()
+                if key and key in head_references and key not in ordered_keys:
+                    ordered_keys.append(key)
+    order = model_profile.get("headReferenceOrder")
+    if isinstance(order, list):
+        for key in order:
+            key = str(key).strip()
+            if key and key in head_references and key not in ordered_keys:
+                ordered_keys.append(key)
+    for key in head_references:
+        if key not in ordered_keys:
+            ordered_keys.append(key)
+    return ordered_keys
 
 
 def infer_head_reference_key(body_position: str) -> str:

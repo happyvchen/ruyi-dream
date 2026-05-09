@@ -65,14 +65,15 @@ FastAPI Route (app/main.py)
 ```text
 POST /api/generation-runs
   -> 创建 generation_run
-  -> 创建每张图的 generation_image
+  -> 创建每张图的 generation_image(status=QUEUED)
   -> 组装 task_package 和中文 prompt
-  -> 通过对象存储预签名 URL 交给 fal
-  -> 提交 fal queue
-  -> 保存 request_id/status_url/response_url/cancel_url
   -> 立即返回 run
 
 后台 poller
+  -> 扫描 QUEUED generation_images
+  -> 先上传参考图到 fal，拿到 fal Image URLs
+  -> 提交 fal queue
+  -> 保存 request_id/status_url/response_url/cancel_url
   -> 扫描未完成 generation_images
   -> 查询 fal status_url
   -> 更新 provider_status 和应用内 status
@@ -81,6 +82,8 @@ POST /api/generation-runs
   -> 聚合更新 generation_run.status
 ```
 
+Gemini 组图策划同样采用持久化异步任务：`POST /api/shot-plans` 先创建 `shot_plans.status = PLANNING` 并返回，后台 planner poller 调用 Gemini，成功后更新为 `DRAFT`，失败后更新为 `FAILED`。页面刷新只恢复状态，不承载第三方调用生命周期。
+
 前端不直接等待 fal，也不直接查询 fal。前端轮询 `GET /api/generation-runs/{run_id}`，并根据 `submitted_at` / `completed_at` 动态显示计时器。
 
 状态恢复方式：
@@ -88,6 +91,16 @@ POST /api/generation-runs
 - `/generate?run={run_id}`：在生成组图页恢复指定历史任务。
 - `/generation-runs/{run_id}`：在生成记录页打开指定任务详情。
 - 浏览器最近一次 `runId` 只作为无 URL 指定时的便利恢复，不是生成记录的唯一入口。
+
+预览任务使用同一套持久化异步机制，但 `generation_runs.kind = preview_grid`，只提交一张 `2x3 Contact Sheet`：
+
+- 前 5 格对应最终组图 5 条分镜，第 6 格为备用候选姿势。
+- 模特身份参考图按数字模特 UI 当前显示顺序最多取 4 张，并置于输入图序列最前。
+- 当前货号服装素材图紧随其后，按素材 UI 当前显示顺序使用剩余额度；总参考图数量最多 10 张。
+- prompt 里的“图1~N”编号必须与 provider request 的 `image_urls` 顺序完全一致。
+- prompt 中的服饰搭配、统一背景和分镜剧本来自当前货号最新可用 Gemini 方案；关键字段缺失时任务失败并显示错误，不使用兜底生成内容。
+- provider request 使用 fal 支持的 `image_size = square_hd` 方图枚举和 `quality = high`，不使用自定义尺寸字符串。
+- 预览图“重生”与首次“预览”共用同一个 task package 构建路径；重生只额外追加用户的 `reason/note`，不得复用历史记录中的旧预览规则，并在历史记录绑定旧方案时自动改用最新可用方案。
 
 ## MVP 约束
 

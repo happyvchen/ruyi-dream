@@ -139,9 +139,9 @@ MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂�
 - 保存 Gemini planner 输出的完整 `plan_json`。
 - 保存 `planner_provider` 和原始响应 `raw_response`，用于调试和复盘。
 - 作为生成批次 `GenerationRun` 的输入。
-- 一个货号可以有多条历史 `ShotPlan`。当前默认方案规则为：取该货号最新的真实 Gemini 成功方案。
+- 一个货号可以有多条历史 `ShotPlan`。当前默认方案规则为：取该货号最新的未失败 Gemini 方案；`PLANNING` 方案表示已持久化、等待后台 Gemini 策划完成。
 - “服装素材”页负责生成/更新默认组图方案；“生成组图”页只读取并使用默认方案。
-- 上传新图包保存成功后，前端会立即调用策划接口创建默认方案。Gemini 不可用、SDK 缺失、引用文档缺失或返回格式异常时，接口直接返回错误并写入事件日志，不创建假方案。
+- 上传新图包保存成功或点击“更新默认方案”后，后端先创建 `ShotPlan.status = PLANNING` 并立即返回；后台 planner poller 再调用 Gemini。Gemini 不可用、SDK 缺失、引用文档缺失或返回格式异常时，该方案更新为 `FAILED` 并写入事件日志，不创建假方案。
 
 当前 `plan_json` 约定：
 
@@ -259,6 +259,19 @@ MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂�
   }
 }
 ```
+
+预览任务 `generation.stage = preview_grid` 时，实际语义为 `2x3 分镜预览 / Contact Sheet`：
+
+- 输出一张 2x3 视觉预览图，前 5 格对应 `ShotPlan.shots` 的 5 条分镜，第 6 格为备用候选姿势。
+- 画面中禁止出现文字、编号、标签、水印、logo、脚本说明或边框说明。
+- 图片入参固定为“模特身份参考图在前、服装素材参考图在后”，且总数最多 10 张，遵守 fal `image_urls <= 10` 的限制。
+- 模特图按数字模特 UI 当前显示顺序取前 4 张；若不足 4 张，以实际数量为准。
+- 服装图按当前货号素材 UI 当前显示顺序补齐剩余额度；通常为 6 张，但如果模特图少于 4 张则服装图可超过 6 张，总数仍不超过 10；如果服装图不足则以实际数量为准。不要求维护 `main/front/back/detail` 等角色。
+- prompt 的“生图方案/分镜剧本/服饰搭配/统一背景/商品硬事实”必须来自当前货号最新可用 Gemini 方案；如果缺少服饰搭配等关键策划信息，应让任务失败并在 UI 暴露错误，不允许静默使用兜底文案。
+- 发给 Image-2 之前，所有图片都必须先上传 fal，最终 `provider_request_json.image_urls` 只允许 fal 返回的 Image URLs。
+- `image_inputs_json` / `attempts_json.imageInputs` 必须保留每张输入图的 `role`、`filename`、`sourceObjectKey`、`providerUrl`，用于审计图片编号与 prompt 中“图片角色”的对应关系。
+- 对预览图点击“重生”时，不复用历史 `task_package_json` 中可能过期的预览规则；必须按当前货号最新可用 `ShotPlan` 和上述预览规则重新构建 task package，再追加 `regeneration` 要求。若历史预览记录绑定了旧方案，重生时要自动切到最新可用方案。
+- 预览类 Image-2 请求使用 fal 合法枚举 `image_size = square_hd` 和 `quality = high`，避免 `auto` 尺寸导致 Contact Sheet 比例漂移。
 
 重生时会在 task package 中追加：
 

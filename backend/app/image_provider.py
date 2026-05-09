@@ -162,11 +162,13 @@ class GPTImage2FalProvider(ImageGenerationProvider):
 
 def build_fal_request_snapshot(task_package: dict[str, Any], image_urls: list[str]) -> dict[str, Any]:
     settings = get_settings()
+    generation = task_package.get("generation", {}) if isinstance(task_package.get("generation"), dict) else {}
+    stage = generation.get("stage")
     return {
         "prompt": task_package.get("prompt") or build_chinese_prompt(task_package),
         "image_urls": image_urls,
-        "image_size": "auto",
-        "quality": settings.gpt_image2_quality,
+        "image_size": "square_hd" if stage == "preview_grid" else "auto",
+        "quality": "high" if stage == "preview_grid" else settings.gpt_image2_quality,
         "num_images": 1,
         "output_format": settings.gpt_image2_output_format,
         "sync_mode": False,
@@ -332,28 +334,7 @@ def build_chinese_prompt(task_package: dict[str, Any]) -> str:
         forbidden.append(str(item))
 
     if stage == "preview_grid":
-        lines = [
-            "任务：",
-            "生成一张 Lily AI 模特九宫格姿势预览图。画面为 3x3 九宫格，一张图内包含 9 个小格。",
-            "",
-            "九宫格要求：",
-            "- 9 个小格必须是同一位模特、同一件服装、同一套鞋包配饰、同一浅灰白棚拍背景。",
-            "- 只改变姿势、身位、轻微动态和取景，不改变服装品类、颜色、结构、长度和比例。",
-            "- 姿势需覆盖正面、轻斜正、3/4 斜正、侧身、轻走动、扶腰/插袋/自然垂手等 Lily 品牌常用方向。",
-            "- 每格看起来像可用于最终成片的候选姿态，不要生成夸张写真、街拍大片或复杂布景。",
-            "- 不要在图片中添加文字、编号、水印、logo 或说明。",
-            "",
-            "图片角色：",
-            "- 服装参考图是商品事实来源，必须保持服装设计、颜色、面料、结构、长度和比例。",
-            "- 模特头部图是身份事实来源，必须保持同一张脸、发型、刘海和克制表情。",
-            "- 品牌调性定义姿态、鞋包、配饰、光线、背景和构图边界。",
-            "",
-            "服装与品牌：",
-            f"- 货号 {task_package.get('sku', '')}：{garment.get('summary', '')}",
-            f"- Lily 调性：{planning_script.get('lilyTone') or brand_style.get('summary', '浅灰白棚拍、干净通勤、轻熟克制、商品优先。')}",
-            f"- 服饰搭配：{planning_script.get('styling', '')}",
-            f"- 背景：{planning_script.get('background', '白/浅灰棚拍，轻微落地阴影')}",
-        ]
+        lines = build_preview_prompt_lines(task_package, garment, brand_style, planning_script)
     else:
         lines = [
         "任务：",
@@ -386,9 +367,9 @@ def build_chinese_prompt(task_package: dict[str, Any]) -> str:
             lines.extend(
                 [
                     "",
-                    "九宫格预览参考：",
-                    "- 已提供一张九宫格预览图，请参考其中的姿势、身位、服装一致性和整体气质。",
-                    "- 最终输出仍然只生成当前单张图位，不要输出九宫格。",
+                    "分镜预览参考：",
+                    "- 已提供一张 2x3 分镜预览图，请参考其中的姿势、身位、服装一致性和整体气质。",
+                    "- 最终输出仍然只生成当前单张图位，不要输出 Contact Sheet。",
                 ]
             )
     if constraints:
@@ -414,6 +395,123 @@ def build_chinese_prompt(task_package: dict[str, Any]) -> str:
     if forbidden:
         lines.append(f"- 不要出现：{'、'.join(dict.fromkeys(forbidden))}。")
     return "\n".join(str(line) for line in lines if line is not None)
+
+
+def build_preview_prompt_lines(
+    task_package: dict[str, Any],
+    garment: dict[str, Any],
+    brand_style: dict[str, Any],
+    planning_script: dict[str, Any],
+) -> list[str]:
+    image_inputs = task_package.get("imageInputs", [])
+    model_count = sum(1 for item in image_inputs if item.get("role") == "model_identity")
+    garment_count = sum(1 for item in image_inputs if item.get("role") == "garment_reference")
+    styling_text = str(planning_script.get("styling") or "").strip()
+    if not styling_text:
+        raise RuntimeError("分镜预览缺少服饰搭配：请先在服装素材页生成或保存完整的生图方案")
+    return [
+        "【任务】：",
+        "根据给定的模特身份参考图和服装素材参考图，生成一张 2x3 商业摄影分镜预览图（Contact Sheet）。",
+        "",
+        "这是一张视觉预览图，不是文字脚本。画面共 6 个格子：前 5 格严格对应最终组图的 5 个分镜，第 6 格为备用候选姿势。每个格子都应像真实电商棚拍成片候选画面。",
+        "",
+        "必须严格还原服装素材中的商品事实，包括服装品类、颜色、版型、结构、面料纹理、扣位、口袋、刺绣、领型、袖长、衣长、裤长/裙长、比例和细节质感。",
+        "必须严格保持模特身份一致，包括面部特征、头型、发型、刘海、气质、自然表情和身体比例。",
+        "",
+        "不要在画面中生成任何文字、编号、标签、水印、logo、脚本说明或边框说明。",
+        "",
+        "【图片角色】：",
+        build_image_role_line(model_count, garment_count),
+        "如果模特参考图少于 4 张，以实际提供数量为准；服装素材图数量以实际提供数量为准。无论参考图数量如何，最终必须保持同一位模特和同一件服装。",
+        "",
+        "【灯光背景】：",
+        f"{planning_script.get('background', '浅灰白棚拍背景、轻微落地阴影')}。整体呈现{planning_script.get('lilyTone') or brand_style.get('summary', '干净、理性、通勤、轻熟、克制的都市通勤风格')}。光线柔和均匀，商品结构清楚，背景不抢夺服装主体。",
+        "",
+        "【商品硬事实】：",
+        *build_garment_fact_lines(garment, planning_script),
+        "",
+        "【服饰搭配】：",
+        styling_text,
+        "",
+        "【分镜要求】：",
+        *build_storyboard_lines(task_package.get("previewPlan", {}).get("shots", [])),
+        "",
+        "【一致性要求】：",
+        "6 个格子必须是同一位模特、同一发型、同一服装、同一服饰搭配、同一背景灯光。",
+        "只允许改变镜头构图、取景范围、身位和姿势。",
+        "不得改变服装颜色、面料纹理、结构、扣位、口袋、刺绣、长度和比例。",
+        "不得生成夸张写真、街拍大片、复杂布景、过度妆容、夸张表情或不符合电商棚拍的姿势。",
+        "",
+        "【技术参数】：",
+        "商业级电商棚拍质感，哈苏中画幅相机效果，85mm 镜头，f/8 光圈。超清画质，皮肤纹理自然清晰，面料质感真实，商品边缘清楚，商业精修效果。",
+    ]
+
+
+def build_image_role_line(model_count: int, garment_count: int) -> str:
+    if model_count > 0 and garment_count > 0:
+        garment_start = model_count + 1
+        garment_end = model_count + garment_count
+        return f"图1~{model_count}是模特身份参考图，用于锁定同一位模特的脸型、五官、头型、发型、刘海、气质和自然表情。图{garment_start}~{garment_end}是同一服装货号的素材参考图，是商品事实来源，用于锁定服装原貌、颜色、面料、结构、比例和细节。"
+    if model_count > 0:
+        return f"图1~{model_count}是模特身份参考图，用于锁定同一位模特的脸型、五官、头型、发型、刘海、气质和自然表情。"
+    if garment_count > 0:
+        return f"图1~{garment_count}是同一服装货号的素材参考图，是商品事实来源，用于锁定服装原貌、颜色、面料、结构、比例和细节。"
+    return "未提供参考图。"
+
+
+def build_garment_fact_lines(garment: dict[str, Any], planning_script: dict[str, Any]) -> list[str]:
+    lines = [
+        f"- 品类：{garment.get('category') or planning_script.get('category') or ''}",
+        f"- 摘要：{garment.get('summary', '')}",
+        f"- 颜色：{garment.get('color', '')}",
+        f"- 面料：{garment.get('fabric', '')}",
+    ]
+    key_structures = garment.get("keyStructures")
+    if isinstance(key_structures, list) and key_structures:
+        lines.append(f"- 关键结构：{'、'.join(str(item) for item in key_structures)}")
+    preserve = garment.get("preserveStrictly")
+    if isinstance(preserve, list) and preserve:
+        lines.append(f"- 必须严格保留：{'、'.join(str(item) for item in preserve)}")
+    sales_info = planning_script.get("salesInfo")
+    if sales_info:
+        lines.append(f"- 主销售信息：{sales_info}")
+    lines.append("- 特别注意：扣子数量、扣位、扣眼、门襟开合、口袋/袋盖、绣标位置和形状、领型、肩线、后中开衩、衣长比例必须与服装素材图一致。")
+    return [line for line in lines if line.strip() and not line.endswith("：")]
+
+
+def build_storyboard_lines(shots: list[dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for index, shot in enumerate(shots[:5], start=1):
+        lines.extend(
+            [
+                f"镜头{chinese_ordinal(index)}：",
+                f"任务：{shot.get('task', '')}",
+                f"画面目的：{shot.get('imagePurpose', '')}",
+                f"景别：{shot.get('scene', '')}",
+                f"取景范围：{shot.get('cropRange', '')}",
+                f"模特占画幅：{shot.get('modelScale', '')}",
+                f"头部处理：{shot.get('headTreatment', '')}",
+                f"姿势身位：{shot.get('poseTone', '')}，身位为{shot.get('bodyPosition', '')}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "镜头六：",
+            "任务：备用候选姿势",
+            "画面目的：在不改变服装、搭配、背景和模特身份的前提下，提供一个可替代的商业棚拍姿势",
+            "景别：全身或近全身图",
+            "取景范围：头顶到脚尖或小腿下方，商品主体完整",
+            "模特占画幅：78%-88%",
+            "头部处理：完整露头",
+            "姿势身位：自然轻走动或轻斜正站姿，动作比前 5 个镜头略有变化，但仍保持 Lily 克制通勤调性",
+        ]
+    )
+    return lines
+
+
+def chinese_ordinal(value: int) -> str:
+    return {1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六"}.get(value, str(value))
 
 
 def render_placeholder_svg(task_package: dict[str, Any]) -> str:

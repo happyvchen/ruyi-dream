@@ -227,7 +227,7 @@ Image 2 的产品任务包会转换为 fal GPT Image-2 edit queue 入参。
 - `task_package.imageInputs[].url`：后端生成的短期预签名 GET URL。
 - `task_package.imageInputs[].providerUrl`：已经可被 fal 读取的 URL。
 
-提交前，系统优先使用对象存储预签名 URL 作为 `image_urls`，避免把后端带宽变成图片中转瓶颈。每个生成任务会保存对象 key、图片角色、预签名 URL 和 provider URL 的映射。
+提交前，系统会先把参考图上传到 fal，再把 fal 返回的 Image URLs 作为 `image_urls` 传给 Image-2。预览任务遵守 fal `image_urls <= 10` 限制：先按数字模特 UI 当前显示顺序取最多 4 张模特图，再按服装素材 UI 当前显示顺序使用剩余额度补服装图，总数最多 10 张。每个生成任务会保存对象 key、图片角色、预签名 URL 和 provider URL 的映射。
 
 当前配置：
 

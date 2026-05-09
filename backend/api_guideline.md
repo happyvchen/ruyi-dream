@@ -141,13 +141,42 @@
 | 对象 | 状态 |
 |---|---|
 | `GarmentSku` | `NEW` / `ANALYZED` / `CONFIRMED` |
-| `ShotPlan` | `DRAFT` / `CONFIRMED` |
+| `ShotPlan` | `PLANNING` / `DRAFT` / `CONFIRMED` / `FAILED` |
 | `GenerationRun` | `CREATED` / `RUNNING` / `PARTIAL_SUCCEEDED` / `SUCCEEDED` / `FAILED` / `CANCELLED` |
 | `GenerationImage` | `QUEUED` / `SUBMITTED` / `IN_QUEUE` / `IN_PROGRESS` / `SUCCEEDED` / `FAILED` / `CANCELLED` |
 
 单张重生不再创建新的 `GenerationRun` 或 `GenerationImage`。它会在原 `GenerationImage.attempts_json` 中追加一次 attempt，并更新当前输出图、provider 请求、provider 响应和状态。`regenerate_from_image_id` 为兼容历史记录保留。
 
 ## 生成与异步状态契约
+
+### 创建分镜预览
+
+`POST /api/preview-runs`
+
+请求：
+
+```json
+{
+  "shotPlanId": 4
+}
+```
+
+后端职责：
+
+- 创建一条 `generation_runs.kind = preview_grid` 的预览批次，并立即返回。
+- 只创建一条 `generation_images.status = QUEUED`，由后台 poller 提交 Image-2，输出一张 `2x3 分镜预览 / Contact Sheet`。
+- 前 5 格严格对应当前方案的 5 条分镜，第 6 格为备用候选姿势。
+- 图片入参顺序为：数字模特身份参考图在前，当前货号服装素材图在后，总数最多 10 张。
+- 数字模特图按 UI 当前显示顺序取前 4 张；服装图按 UI 当前显示顺序使用剩余额度，通常取 6 张，但当模特图少于 4 张时可超过 6 张，总数仍不超过 10。
+- prompt 中的图片编号必须与最终传给 Image-2 的 `image_urls` 顺序一致。
+- prompt 必须直接引用当前货号已保存的生图方案、服饰搭配、统一背景和 5 条分镜剧本，并补充商品硬事实约束；缺少关键方案字段时任务应失败，不允许使用通用兜底搭配文案。
+- 所有输入图先上传 fal，最终只把 fal Image URLs 传给 Image-2。
+- 预览任务的 Image-2 请求使用 `image_size = square_hd`、`quality = high`；不得传 `1024x1024` 这类 fal schema 不接受的尺寸字符串。
+- `provider_request_json`、`image_inputs_json` 和 `attempts_json` 保留图片角色、源对象 key、文件名、fal URL 与最终 prompt。
+
+预览图用于确认姿势、身位、构图、搭配和整体调性，不作为最终交付成片。
+
+对预览图点击“重生”时，后端仍使用同一套预览构建规则重新生成 task package：最多 4 张模特图在前、服装图按剩余额度补齐到最多 10 张、2x3 Contact Sheet prompt、全部输入图先上传 fal。历史图片记录里的旧 `task_package_json` 只作为审计记录，不作为预览重生的规则来源；若历史预览属于旧方案，后端应使用当前货号最新可用方案重建任务。
 
 ### 创建生成批次
 
@@ -167,9 +196,9 @@
 - 根据 `shot_plans.plan_json.shots` 创建多条 `generation_images`，每个图位一条任务记录。
 - 组装单张 `task_package`，包括服装、模特、品牌模板、shot、输入图和约束快照。
 - 合成中文 Image 2 prompt。
-- 通过对象存储预签名 URL 将参考图交给 fal。
-- 通过 fal queue 提交每张图。
-- 保存 fal `request_id`、`status_url`、`response_url`、`cancel_url`。
+- 每张图先以 `QUEUED` 状态持久化，并立即返回 `GenerationRun`。
+- 后台 poller 捡起 `QUEUED` 图片后，先将参考图上传到 fal，再把 fal Image URLs 交给 Image-2。
+- 通过 fal queue 提交每张图，保存 fal `request_id`、`status_url`、`response_url`、`cancel_url`。
 - 立即返回 `GenerationRun`，不等待图片生成完成。
 
 响应中的每张 `GenerationImage` 可能处于：
@@ -235,7 +264,7 @@ SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED
 GENERATION_POLL_INTERVAL_SECONDS=5
 ```
 
-控制。poller 会扫描状态为 `SUBMITTED`、`IN_QUEUE`、`IN_PROGRESS`、`RUNNING` 且有 `provider_request_id` 的任务，调用 fal `status_url` 获取真实状态。
+控制。poller 会先扫描 `QUEUED` 且尚无 `provider_request_id` 的图片并提交 fal/Image-2；随后扫描状态为 `SUBMITTED`、`IN_QUEUE`、`IN_PROGRESS`、`RUNNING` 且有 `provider_request_id` 的任务，调用 fal `status_url` 获取真实状态。页面刷新不影响后台提交和状态推进。
 
 fal 状态映射：
 

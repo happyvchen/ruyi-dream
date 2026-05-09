@@ -109,6 +109,17 @@ export function App() {
   const defaultModel = useMemo(() => models.find((model) => model.isDefault) ?? models[0], [models])
   const selectedModel = models.find((model) => model.id === selectedModelId) ?? defaultModel
   const planModel = models.find((model) => model.id === shotPlan?.modelProfileId) ?? selectedModel
+  const shotPlanPlanning = shotPlan?.status === 'PLANNING'
+  const canGenerateGroup = Boolean(
+    selectedSku
+      && shotPlan
+      && !shotPlanPlanning
+      && previewRun
+      && previewRun.kind === 'preview_grid'
+      && previewRun.status === 'SUCCEEDED'
+      && previewRun.skuId === selectedSku.id
+      && previewRun.shotPlanId === shotPlan.id,
+  )
 
   function navigate(routeInput: AppRoute, replace = false) {
     const url = routeToUrl(routeInput)
@@ -116,6 +127,13 @@ export function App() {
     else window.history.pushState(null, '', url)
     setRoute(routeInput)
     setPage(routeInput.page)
+  }
+
+  function currentGenerateRoute(): AppRoute {
+    if (generationRun?.kind && generationRun.kind !== 'preview_grid') return { page: 'generate', generateRunId: generationRun.id }
+    if (selectedSku) return { page: 'generate', generateSku: selectedSku.sku, generatePreviewRunId: previewRun?.id }
+    if (previewRun?.kind === 'preview_grid') return { page: 'generate', generatePreviewRunId: previewRun.id }
+    return { page: 'generate' }
   }
 
   useEffect(() => {
@@ -137,15 +155,53 @@ export function App() {
     if (!storedRunId) return
     const runId = Number(storedRunId)
     if (!Number.isFinite(runId)) return
+    const currentRoute = parseRoute()
+    if (currentRoute.page === 'generate' && !currentRoute.generateSku && !currentRoute.generateRunId && window.localStorage.getItem('app:lastPreviewRunId')) {
+      return
+    }
     void api.getRun(runId)
-      .then((result) => setGenerationRun(result.item))
+      .then((result) => {
+        if (result.item.kind === 'preview_grid') {
+          window.localStorage.removeItem('app:lastGenerationRunId')
+          window.localStorage.setItem('app:lastPreviewRunId', String(result.item.id))
+          if (currentRoute.page === 'generate' && !currentRoute.generateSku && !currentRoute.generateRunId) {
+            void restorePreviewRun(result.item, { syncUrl: false })
+          }
+          return
+        }
+        if (currentRoute.page === 'generate' && !currentRoute.generateSku && !currentRoute.generateRunId) {
+          void restoreHistoryRun(result.item, { syncUrl: false })
+          return
+        }
+        setGenerationRun(result.item)
+      })
       .catch(() => window.localStorage.removeItem('app:lastGenerationRunId'))
   }, [])
 
   useEffect(() => {
+    const currentRoute = parseRoute()
+    if (currentRoute.page !== 'generate' || currentRoute.generateSku || currentRoute.generateRunId) return
+    const storedPreviewRunId = window.localStorage.getItem('app:lastPreviewRunId')
+    if (!storedPreviewRunId) return
+    const runId = Number(storedPreviewRunId)
+    if (!Number.isFinite(runId)) return
+    void api.getRun(runId)
+      .then((result) => {
+        if (result.item.kind === 'preview_grid') void restorePreviewRun(result.item, { syncUrl: false })
+      })
+      .catch(() => window.localStorage.removeItem('app:lastPreviewRunId'))
+  }, [])
+
+  useEffect(() => {
     if (!generationRun) return
+    if (generationRun.kind === 'preview_grid') return
     window.localStorage.setItem('app:lastGenerationRunId', String(generationRun.id))
   }, [generationRun?.id])
+
+  useEffect(() => {
+    if (!previewRun || previewRun.kind !== 'preview_grid') return
+    window.localStorage.setItem('app:lastPreviewRunId', String(previewRun.id))
+  }, [previewRun?.id])
 
   useEffect(() => {
     if (!(generationRun && isRunActive(generationRun)) && !(previewRun && isRunActive(previewRun))) return
@@ -183,6 +239,23 @@ export function App() {
     const timer = window.setInterval(() => void poll(), 3000)
     return () => window.clearInterval(timer)
   }, [generationRun?.id, generationRun?.status])
+
+  useEffect(() => {
+    if (!shotPlan || shotPlan.status !== 'PLANNING') return
+    const poll = async () => {
+      try {
+        const result = await api.getPlan(shotPlan.id)
+        setShotPlan(result.item)
+        if (selectedSku) setSelectedSku((await api.getSku(selectedSku.id)).item)
+        if (result.item.status !== 'PLANNING') await refreshBaseData()
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '刷新方案状态失败')
+      }
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 3000)
+    return () => window.clearInterval(timer)
+  }, [shotPlan?.id, shotPlan?.status, selectedSku?.id])
 
   useEffect(() => {
     const editingModel = models.find((model) => model.id === editingModelId)
@@ -251,6 +324,11 @@ export function App() {
     setError(null)
     const detail = await api.getSku(sku.id)
     const planResult = await api.getDefaultPlan(sku.id)
+    const rawPreferredPreview = await resolvePreviewRun(detail.item.id, undefined, options.previewRunId)
+    const preferredPreview = rawPreferredPreview && (!planResult.item || rawPreferredPreview.shotPlanId === planResult.item.id)
+      ? rawPreferredPreview
+      : null
+    const activePlan = planResult.item
     setSelectedSku(detail.item)
     setEditSkuForm({
       sku: detail.item.sku,
@@ -258,8 +336,8 @@ export function App() {
       status: detail.item.status,
     })
     setExtraFiles([])
-    setShotPlan(planResult.item)
-    const restoredPreview = await resolvePreviewRun(detail.item.id, planResult.item?.id, options.previewRunId)
+    setShotPlan(activePlan)
+    const restoredPreview = preferredPreview ?? await resolvePreviewRun(detail.item.id, activePlan?.id)
     setPreviewRun(restoredPreview)
     setGenerationRun(null)
     if (options.syncUrl !== false) {
@@ -449,7 +527,7 @@ export function App() {
       if (selectedSku) navigate({ page: 'generate', generateSku: selectedSku.sku, generatePreviewRunId: result.item.id }, true)
       await refreshHistoryRuns()
     } catch (err) {
-      setError(err instanceof Error ? err.message : '生成九宫格预览失败')
+      setError(err instanceof Error ? err.message : '生成分镜预览失败')
     } finally {
       setBusy('idle')
     }
@@ -525,6 +603,10 @@ export function App() {
   }
 
   async function restoreHistoryRun(run: GenerationRun, options: { syncUrl?: boolean } = {}) {
+    if (run.kind === 'preview_grid') {
+      await restorePreviewRun(run, options)
+      return
+    }
     setError(null)
     try {
       const [skuResult, planResult, runResult] = await Promise.all([
@@ -545,6 +627,30 @@ export function App() {
       else navigate({ page: 'generate', generateRunId: runResult.item.id })
     } catch (err) {
       setError(err instanceof Error ? err.message : '恢复历史入参失败')
+    }
+  }
+
+  async function restorePreviewRun(run: GenerationRun, options: { syncUrl?: boolean } = {}) {
+    setError(null)
+    try {
+      const [skuResult, planResult, runResult] = await Promise.all([
+        api.getSku(run.skuId),
+        api.getPlan(run.shotPlanId),
+        api.getRun(run.id),
+      ])
+      setSelectedSku(skuResult.item)
+      setEditSkuForm({
+        sku: skuResult.item.sku,
+        title: skuResult.item.title ?? skuResult.item.sku,
+        status: skuResult.item.status,
+      })
+      setShotPlan(planResult.item)
+      setPreviewRun(runResult.item)
+      setGenerationRun(null)
+      if (options.syncUrl === false) setPage('generate')
+      else navigate({ page: 'generate', generateSku: skuResult.item.sku, generatePreviewRunId: runResult.item.id })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '恢复预览记录失败')
     }
   }
 
@@ -795,7 +901,7 @@ export function App() {
           <p>{pageSubtitle(page)}</p>
         </div>
         <nav>
-          <button className={page === 'generate' ? 'active' : ''} onClick={() => navigate({ page: 'generate' })}>生成组图</button>
+          <button className={page === 'generate' ? 'active' : ''} onClick={() => navigate(currentGenerateRoute())}>生成组图</button>
           <button className={page === 'garments' ? 'active' : ''} onClick={() => navigate(selectedSku ? { page: 'garments', sku: selectedSku.sku } : { page: 'garments' })}>服装素材</button>
           <button className={page === 'models' ? 'active' : ''} onClick={() => {
             const editingModel = models.find((model) => model.id === editingModelId)
@@ -883,15 +989,15 @@ export function App() {
                     ) : modelInitials(planModel)}
                   </div>
                   <h3>{shotPlan?.plan.brandStyle?.name ?? '暂无默认组图方案'}</h3>
-                  <p>{shotPlan ? `将使用 ${planModel.name} 和服装素材页保存的 ${shotPlan.plan.shots.length} 张图位方案。` : '回到服装素材页生成默认组图方案后，这里会直接用于生成。'}</p>
-                  {shotPlan ? <Tag>{planModel.name}</Tag> : <button className="secondary" onClick={() => navigate(selectedSku ? { page: 'garments', sku: selectedSku.sku } : { page: 'garments' })}>去保存方案</button>}
+                  <p>{shotPlan ? shotPlanPlanning ? 'Gemini 正在识别服装品类并生成生图方案和分镜剧本。' : `将使用 ${planModel.name} 和服装素材页保存的 ${shotPlan.plan.shots.length} 张图位方案。` : '回到服装素材页生成默认组图方案后，这里会直接用于生成。'}</p>
+                  {shotPlan ? <Tag>{shotPlanPlanning ? '策划中' : planModel.name}</Tag> : <button className="secondary" onClick={() => navigate(selectedSku ? { page: 'garments', sku: selectedSku.sku } : { page: 'garments' })}>去保存方案</button>}
                 </div>
               ) : (
                 <EmptyText text="暂无数字模特" />
               )}
             </StepCard>
 
-            <StepCard number="3" title="九宫格预览">
+            <StepCard number="3" title="分镜预览">
               <div className="model-summary">
                 <h3>{previewRun ? `预览 #${previewRun.id}` : '先看姿势方向'}</h3>
                 <p>
@@ -899,9 +1005,9 @@ export function App() {
                     ? previewRun.status === 'SUCCEEDED'
                       ? '状态：已生成。满意后再生成最终 5 张成片。'
                       : isRunActive(previewRun)
-                        ? `状态：${statusText(previewRun.status)}。九宫格完成后即可生成最终成片。`
+                        ? `状态：${statusText(previewRun.status)}。分镜预览完成后即可生成最终成片。`
                         : `状态：${statusText(previewRun.status)}。请重新预览后再生成最终成片。`
-                    : '点击预览会先生成一张九宫格，服装、配饰和人物保持一致，只变化姿势与身位。'}
+                    : '点击预览会先生成一张 2x3 分镜预览，前 5 格对应最终组图，第 6 格为备用候选姿势。'}
                 </p>
                 {previewRun ? <Tag>{previewRun.status === 'SUCCEEDED' ? '可用于生成' : isRunActive(previewRun) ? '生成中' : '不可生成'}</Tag> : <Tag>未预览</Tag>}
               </div>
@@ -909,28 +1015,32 @@ export function App() {
           </div>
 
           <div className="action-row">
-            <button className="secondary" onClick={previewGrid} disabled={!selectedSku || !shotPlan || busy !== 'idle' || Boolean(previewRun && isRunActive(previewRun))}>
+            <button className="secondary" onClick={previewGrid} disabled={!selectedSku || !shotPlan || shotPlanPlanning || busy !== 'idle' || Boolean(previewRun && isRunActive(previewRun))}>
               {busy === 'previewing' ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
               预览
             </button>
-            <button className="primary" onClick={generateGroup} disabled={!selectedSku || !shotPlan || !previewRun || previewRun.status !== 'SUCCEEDED' || isRunActive(previewRun) || busy !== 'idle' || Boolean(generationRun && isRunActive(generationRun))}>
+            <button className="primary" onClick={generateGroup} disabled={!canGenerateGroup || Boolean(previewRun && isRunActive(previewRun)) || busy !== 'idle' || Boolean(generationRun && isRunActive(generationRun))}>
               {busy === 'generating' ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
               生成
             </button>
             <span>
               {shotPlan
-                ? previewRun?.status === 'SUCCEEDED'
-                  ? `将使用方案 #${shotPlan.id} 和九宫格预览 #${previewRun.id} 生成最终组图。`
+                ? shotPlanPlanning
+                  ? 'Gemini 正在生成默认组图方案，完成后可继续预览。'
+                  : canGenerateGroup
+                  ? `将使用方案 #${shotPlan.id} 和分镜预览 #${previewRun?.id} 生成最终组图。`
                   : previewRun
-                    ? '当前九宫格预览未完成或已失败，请重新预览后再生成最终组图。'
-                    : '请先生成九宫格预览，确认姿势方向后再生成最终组图。'
+                    ? previewRun.status === 'SUCCEEDED'
+                      ? '当前分镜预览不属于这个货号或方案，请重新预览后再生成最终组图。'
+                      : '当前分镜预览未完成或已失败，请重新预览后再生成最终组图。'
+                    : '请先生成分镜预览，确认姿势方向后再生成最终组图。'
                 : '该货号还没有默认组图方案，请先到服装素材页保存方案。'}
             </span>
           </div>
 
           {previewRun && (
             <ResultGallery
-              title="九宫格预览"
+              title="分镜预览"
               run={previewRun}
               loading={busy === 'previewing' || isRunActive(previewRun)}
               nowMs={nowMs}
@@ -2180,13 +2290,15 @@ function ResultGallery({
               const imageActive = isImageActive(image)
               const imageElapsed = elapsedText(image.submittedAt ?? image.createdAt, nowMs, image.completedAt ?? image.updatedAt, !imageActive)
               const canShowImage = image.status === 'SUCCEEDED' && Boolean(image.url)
+              const displayTitle = isPreviewRun ? '分镜预览' : image.title
+              const displayLabel = `${String(image.shotIndex).padStart(2, '0')} ${displayTitle}`
               return (
               <article className="result-card" key={image.id}>
                 <div className="result-image">
                   {canShowImage ? (
                     <ImagePreviewThumb
                       src={mediaUrl(image.url)}
-                      name={`${String(image.shotIndex).padStart(2, '0')} ${image.title}`}
+                      name={displayLabel}
                       fileSize={image.fileSize}
                     >
                       {image.isFinal && <div className="final-badge"><Check size={14} />最终图</div>}
@@ -2203,8 +2315,8 @@ function ResultGallery({
                   )}
                 </div>
                 <div className="result-meta">
-                  <strong title={`${String(image.shotIndex).padStart(2, '0')} ${image.title}`}>
-                    {middleEllipsis(`${String(image.shotIndex).padStart(2, '0')} ${image.title}`)}
+                  <strong title={displayLabel}>
+                    {middleEllipsis(displayLabel)}
                   </strong>
                   <small>{statusText(image.status)} · {imageElapsed} · 记录 #{image.id}</small>
                   {image.providerRequestId && <small>fal #{shortId(image.providerRequestId)} · {providerStatusText(image.providerStatus)}</small>}
@@ -2378,6 +2490,7 @@ function statusText(status: string) {
     ANALYZED: '已策划',
     CONFIRMED: '已确认',
     DRAFT: '待确认',
+    PLANNING: '策划中',
     RUNNING: '生成中',
     QUEUED: '待提交',
     SUBMITTED: '已提交',
