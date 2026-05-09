@@ -733,21 +733,18 @@ async def create_shot_plan(payload: PlanCreateRequest) -> dict[str, Any]:
             """
             INSERT INTO shot_plans
               (sku_id, model_profile_id, status, plan_json, category, sales_info,
-               evidence_level, lily_tone, styling_plan, color_palette, accessories,
-               planner_provider, raw_response, created_at, updated_at)
-            VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               lily_tone, styling, background, planner_provider, raw_response, created_at, updated_at)
+            VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payload.skuId,
                 model_row["id"],
                 dumps(plan),
                 plan.get("category") or plan.get("garment", {}).get("category"),
-                plan.get("salesInfo"),
-                plan.get("evidenceLevel"),
-                plan.get("lilyTone"),
-                plan.get("stylingPlan"),
-                plan.get("colorPalette"),
-                plan.get("accessories"),
+                plan_generation(plan).get("salesInfo"),
+                plan_generation(plan).get("lilyTone"),
+                plan_generation(plan).get("styling"),
+                plan_generation(plan).get("background"),
                 provider,
                 raw,
                 timestamp,
@@ -792,20 +789,18 @@ def update_shot_plan(shot_plan_id: int, payload: ShotPlanUpdateRequest) -> dict[
         db.execute(
             """
             UPDATE shot_plans
-            SET plan_json = ?, category = ?, sales_info = ?, evidence_level = ?,
-                lily_tone = ?, styling_plan = ?, color_palette = ?, accessories = ?,
+            SET plan_json = ?, category = ?, sales_info = ?,
+                lily_tone = ?, styling = ?, background = ?,
                 status = 'DRAFT', updated_at = ?
             WHERE id = ?
             """,
             (
                 dumps(plan),
                 plan.get("category") or plan.get("garment", {}).get("category"),
-                plan.get("salesInfo"),
-                plan.get("evidenceLevel"),
-                plan.get("lilyTone"),
-                plan.get("stylingPlan"),
-                plan.get("colorPalette"),
-                plan.get("accessories"),
+                plan_generation(plan).get("salesInfo"),
+                plan_generation(plan).get("lilyTone"),
+                plan_generation(plan).get("styling"),
+                plan_generation(plan).get("background"),
                 timestamp,
                 shot_plan_id,
             ),
@@ -865,8 +860,6 @@ async def generate_preview_grid(payload: GenerateGroupRequest) -> dict[str, Any]
         "focus": "在服装、配饰、人物一致的前提下比较姿势和身位",
         "pose": "九个不同但符合 Lily 品牌调性的姿势，覆盖正面、轻斜正、3/4 斜正、侧身、轻走动和细节展示姿态",
         "bodyPosition": "多身位",
-        "headReference": "front.png",
-        "background": "白/浅灰棚拍",
         "styling": {},
     }
     task_package = build_preview_task_package(sku_row, model_row, plan, preview_shot)
@@ -1445,12 +1438,7 @@ def build_task_package(
         "brandStyle": plan.get("brandStyle", {}),
         "planningScript": {
             "category": plan.get("category") or garment.get("category"),
-            "salesInfo": plan.get("salesInfo"),
-            "evidenceLevel": plan.get("evidenceLevel"),
-            "lilyTone": plan.get("lilyTone"),
-            "stylingPlan": plan.get("stylingPlan"),
-            "colorPalette": plan.get("colorPalette"),
-            "accessories": plan.get("accessories"),
+            **plan_generation(plan),
         },
         "planner": plan.get("_planner", {}),
         "shot": shot,
@@ -1519,6 +1507,16 @@ def normalize_editable_plan(plan: dict[str, Any], sku: str) -> dict[str, Any]:
     return normalized
 
 
+def plan_generation(plan: dict[str, Any]) -> dict[str, Any]:
+    generation_plan = plan.get("generationPlan") if isinstance(plan.get("generationPlan"), dict) else {}
+    return {
+        "salesInfo": generation_plan.get("salesInfo"),
+        "lilyTone": generation_plan.get("lilyTone"),
+        "styling": generation_plan.get("styling"),
+        "background": generation_plan.get("background"),
+    }
+
+
 def sync_shot_plan_shots(db: Any, shot_plan_id: int, plan: dict[str, Any], timestamp: str) -> None:
     db.execute("DELETE FROM shot_plan_shots WHERE shot_plan_id = ?", (shot_plan_id,))
     for raw_shot in plan.get("shots", []):
@@ -1528,29 +1526,24 @@ def sync_shot_plan_shots(db: Any, shot_plan_id: int, plan: dict[str, Any], times
         db.execute(
             """
             INSERT INTO shot_plan_shots
-              (shot_plan_id, shot_index, slot_name, english_name, title, task,
-               unified_requirement, scene, crop_range, model_scale, head_treatment,
-               body_position, pose_tone, image_purpose, head_reference, background,
+              (shot_plan_id, shot_index, english_name, title, task, scene, crop_range,
+               model_scale, head_treatment, body_position, pose_tone, image_purpose,
                shot_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 shot_plan_id,
                 shot_index,
-                str(shot.get("slotName") or slot["slotName"]),
                 str(shot.get("englishName") or slot["englishName"]),
-                str(shot.get("title") or f"图 {shot_index} {slot['slotName']}"),
+                str(shot.get("title") or slot["title"]),
                 str(shot.get("task") or slot["task"]),
-                str(shot.get("unifiedRequirement") or slot["unifiedRequirement"]),
-                str(shot.get("scene") or shot.get("frame") or ""),
-                str(shot.get("cropRange") or shot.get("crop") or ""),
+                str(shot.get("scene") or ""),
+                str(shot.get("cropRange") or ""),
                 str(shot.get("modelScale") or ""),
                 str(shot.get("headTreatment") or ""),
-                str(shot.get("bodyPosition") or shot.get("angle") or ""),
-                str(shot.get("poseTone") or shot.get("pose") or ""),
-                str(shot.get("imagePurpose") or shot.get("focus") or ""),
-                str(shot.get("headReference") or "front.png"),
-                str(shot.get("background") or "白/浅灰棚拍"),
+                str(shot.get("bodyPosition") or ""),
+                str(shot.get("poseTone") or ""),
+                str(shot.get("imagePurpose") or ""),
                 dumps(shot),
                 timestamp,
                 timestamp,
@@ -1570,31 +1563,22 @@ def backfill_shot_plan_script_data() -> None:
             """
         ).fetchall()
         for row in rows:
-            shot_count = db.execute(
-                "SELECT COUNT(*) AS count FROM shot_plan_shots WHERE shot_plan_id = ?",
-                (row["id"],),
-            ).fetchone()["count"]
-            needs_top = not row["category"] if "category" in row.keys() else True
-            if shot_count and not needs_top:
-                continue
             plan = normalize_planner_plan(loads(row["plan_json"], {}), row["sku"])
+            generation_plan = plan_generation(plan)
             db.execute(
                 """
                 UPDATE shot_plans
-                SET plan_json = ?, category = ?, sales_info = ?, evidence_level = ?,
-                    lily_tone = ?, styling_plan = ?, color_palette = ?, accessories = ?,
-                    updated_at = ?
+                SET plan_json = ?, category = ?, sales_info = ?,
+                    lily_tone = ?, styling = ?, background = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
                     dumps(plan),
                     plan.get("category") or plan.get("garment", {}).get("category"),
-                    plan.get("salesInfo"),
-                    plan.get("evidenceLevel"),
-                    plan.get("lilyTone"),
-                    plan.get("stylingPlan"),
-                    plan.get("colorPalette"),
-                    plan.get("accessories"),
+                    generation_plan.get("salesInfo"),
+                    generation_plan.get("lilyTone"),
+                    generation_plan.get("styling"),
+                    generation_plan.get("background"),
                     row["updated_at"] or timestamp,
                     row["id"],
                 ),
@@ -1620,15 +1604,15 @@ def build_image_inputs(sku_row: Any, model_row: Any, model_profile: dict[str, An
             }
         )
 
-    head_reference = normalize_head_reference_filename(str(shot.get("headReference", "front.png")))
+    head_reference = infer_head_reference_key(str(shot.get("bodyPosition") or "正面"))
     head_references = model_profile.get("headReferences", {}) if isinstance(model_profile.get("headReferences"), dict) else {}
-    head_filename = head_references.get(Path(head_reference).stem) or head_reference
+    head_filename = head_references.get(head_reference) or f"{head_reference}.png"
     head_key = join_key(model_row["asset_dir"], str(head_filename))
     if object_exists(head_key):
         inputs.append(
             {
                 "role": "model_head",
-                "angle": Path(str(head_filename)).stem,
+                "angle": head_reference,
                 "objectKey": head_key,
                 "url": presigned_get_url(head_key),
             }
@@ -1636,12 +1620,14 @@ def build_image_inputs(sku_row: Any, model_row: Any, model_profile: dict[str, An
     return inputs
 
 
-def normalize_head_reference_filename(value: str) -> str:
-    mapping = {
-        "back-turn-left45.png": "backTurnLeft45.png",
-        "back-turn-right45.png": "backTurnRight45.png",
-    }
-    return mapping.get(value, value)
+def infer_head_reference_key(body_position: str) -> str:
+    if "背" in body_position:
+        return "back"
+    if "右" in body_position:
+        return "right90"
+    if "侧" in body_position or "3/4" in body_position or "斜" in body_position:
+        return "left45"
+    return "front"
 
 
 def get_sku_detail_by_id(sku_id: int) -> dict[str, Any]:
@@ -1788,12 +1774,13 @@ def serialize_shot_plan(row: Any) -> dict[str, Any]:
     if shot_rows:
         plan["shots"] = [loads(shot["shot_json"], {}) for shot in shot_rows]
     plan.setdefault("category", row["category"] if "category" in row.keys() else plan.get("garment", {}).get("category"))
-    plan.setdefault("salesInfo", row["sales_info"] if "sales_info" in row.keys() else None)
-    plan.setdefault("evidenceLevel", row["evidence_level"] if "evidence_level" in row.keys() else None)
-    plan.setdefault("lilyTone", row["lily_tone"] if "lily_tone" in row.keys() else None)
-    plan.setdefault("stylingPlan", row["styling_plan"] if "styling_plan" in row.keys() else None)
-    plan.setdefault("colorPalette", row["color_palette"] if "color_palette" in row.keys() else None)
-    plan.setdefault("accessories", row["accessories"] if "accessories" in row.keys() else None)
+    generation_plan = plan.get("generationPlan") if isinstance(plan.get("generationPlan"), dict) else {}
+    plan["generationPlan"] = {
+        "salesInfo": generation_plan.get("salesInfo") or (row["sales_info"] if "sales_info" in row.keys() else None),
+        "lilyTone": generation_plan.get("lilyTone") or (row["lily_tone"] if "lily_tone" in row.keys() else None),
+        "styling": generation_plan.get("styling") or (row["styling"] if "styling" in row.keys() else None),
+        "background": generation_plan.get("background") or (row["background"] if "background" in row.keys() else None),
+    }
     return {
         "id": row["id"],
         "skuId": row["sku_id"],

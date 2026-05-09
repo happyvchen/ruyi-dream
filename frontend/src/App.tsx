@@ -968,7 +968,6 @@ export function App() {
           selectedSku={selectedSku}
           shotPlan={shotPlan}
           busy={busy}
-          editSkuForm={editSkuForm}
           extraFiles={extraFiles}
           importPackages={importPackages}
           looseSkuInput={looseSkuInput}
@@ -980,9 +979,7 @@ export function App() {
           onRemoveImportPackage={removeImportPackage}
           onUploadImportPackage={(packageId) => void uploadImportPackage(packageId)}
           onUploadAllDraftPackages={() => void uploadAllDraftPackages()}
-          onEditSkuFormChange={setEditSkuForm}
           onExtraFilesChange={setExtraFiles}
-          onUpdateSelectedSku={() => void updateSelectedSku()}
           onDeleteSelectedSku={() => void deleteSelectedSku()}
           onAddImages={() => void addImagesToSelectedSku()}
           onDeleteImage={(imageId) => void deleteImage(imageId)}
@@ -1038,11 +1035,10 @@ export function App() {
 
 function GarmentLibraryPage({
   skus,
-  selectedSku,
-  shotPlan,
-  busy,
-  editSkuForm,
-  extraFiles,
+	  selectedSku,
+	  shotPlan,
+	  busy,
+	  extraFiles,
   importPackages,
   looseSkuInput,
   onLooseSkuInputChange,
@@ -1051,12 +1047,10 @@ function GarmentLibraryPage({
   onUpdateImportPackage,
   onRemoveImportImage,
   onRemoveImportPackage,
-  onUploadImportPackage,
-  onUploadAllDraftPackages,
-  onEditSkuFormChange,
-  onExtraFilesChange,
-  onUpdateSelectedSku,
-  onDeleteSelectedSku,
+	  onUploadImportPackage,
+	  onUploadAllDraftPackages,
+	  onExtraFilesChange,
+	  onDeleteSelectedSku,
   onAddImages,
   onDeleteImage,
   onSelectSku,
@@ -1066,10 +1060,9 @@ function GarmentLibraryPage({
 }: {
   skus: GarmentSku[]
   selectedSku: GarmentSku | null
-  shotPlan: ShotPlan | null
-  busy: BusyState
-  editSkuForm: { sku: string; title: string; status: string }
-  extraFiles: File[]
+	  shotPlan: ShotPlan | null
+	  busy: BusyState
+	  extraFiles: File[]
   importPackages: ImportPackage[]
   looseSkuInput: string
   onLooseSkuInputChange: (value: string) => void
@@ -1078,12 +1071,10 @@ function GarmentLibraryPage({
   onUpdateImportPackage: (packageId: string, patch: Partial<Pick<ImportPackage, 'sku' | 'title'>>) => void
   onRemoveImportImage: (packageId: string, imageId: string) => void
   onRemoveImportPackage: (packageId: string) => void
-  onUploadImportPackage: (packageId: string) => void
-  onUploadAllDraftPackages: () => void
-  onEditSkuFormChange: (value: { sku: string; title: string; status: string }) => void
-  onExtraFilesChange: (files: File[]) => void
-  onUpdateSelectedSku: () => void
-  onDeleteSelectedSku: () => void
+	  onUploadImportPackage: (packageId: string) => void
+	  onUploadAllDraftPackages: () => void
+	  onExtraFilesChange: (files: File[]) => void
+	  onDeleteSelectedSku: () => void
   onAddImages: () => void
   onDeleteImage: (imageId: number) => void
   onSelectSku: (sku: GarmentSku) => void
@@ -1208,34 +1199,22 @@ function GarmentLibraryPage({
                   <button className="secondary" onClick={() => onUseInGenerate(selectedSku)}>
                     <FileImage size={16} />用于生成
                   </button>
-                  <button className="primary" onClick={() => onCreatePlan(selectedSku)} disabled={busy !== 'idle'}>
-                    {busy === 'planning' ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
-                    {shotPlan ? '更新默认方案' : '生成默认方案'}
-                  </button>
-                </div>
-              </div>
+	                  <button className="primary" onClick={() => onCreatePlan(selectedSku)} disabled={busy !== 'idle'}>
+	                    {busy === 'planning' ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
+	                    {shotPlan ? '更新默认方案' : '生成默认方案'}
+	                  </button>
+	                  <button className="danger ghost" onClick={onDeleteSelectedSku} disabled={busy !== 'idle'} title="删除货号">
+	                    <Trash2 size={16} />删除
+	                  </button>
+	                </div>
+	              </div>
 
-              <div className="detail-grid">
-                <section className="material-board shot-plan-panel">
-                  <div className="section-heading tight">
-                    <h2>默认组图方案</h2>
-                    <span>{shotPlan ? `#${shotPlan.id}` : '未保存'}</span>
-                  </div>
-                  {shotPlan ? (
-                    <ShotPlanBoard shotPlan={shotPlan} editable={busy === 'idle'} onSave={onSavePlan} saving={busy === 'saving-plan'} />
-                  ) : (
-                    <div className="plan-empty">
-                      <p>还没有默认组图方案</p>
-                      <span>点击右上角“生成默认方案”，Gemini 会根据服装主图识别品类、构图和模特姿势；生成组图时将直接使用这里保存的方案。</span>
-                    </div>
-                  )}
-                </section>
-
-                <section className="material-board asset-panel">
-                  <div className="section-heading tight">
-                    <h2>素材图片</h2>
-                    <span>{selectedSku.images?.length ?? 0} 张</span>
-                  </div>
+	              <div className="detail-grid">
+	                <section className="material-board asset-panel">
+	                  <div className="section-heading tight">
+	                    <h2>素材图片</h2>
+	                    <span>{selectedSku.images?.length ?? 0} 张</span>
+	                  </div>
                   <div className="append-images">
                     <label className="mini-upload">
                       <Plus size={16} />
@@ -1277,68 +1256,31 @@ function GarmentLibraryPage({
                           </div>
                         </div>
                       </article>
-                    ))}
-                  </div>
-                </section>
+	                    ))}
+	                  </div>
+	                </section>
 
-                <aside className="fact-panel">
-                  <div className="section-heading tight">
-                    <h2>编辑信息</h2>
-                    <Edit3 size={16} />
-                  </div>
-                  <div className="edit-form">
-                    <label className="field">
-                      <span>货号</span>
-                      <input
-                        value={editSkuForm.sku}
-                        onChange={(event) => onEditSkuFormChange({ ...editSkuForm, sku: event.target.value })}
-                      />
-                    </label>
-                    <label className="field">
-                      <span>标题</span>
-                      <input
-                        value={editSkuForm.title}
-                        onChange={(event) => onEditSkuFormChange({ ...editSkuForm, title: event.target.value })}
-                      />
-                    </label>
-                    <label className="field">
-                      <span>状态</span>
-                      <select
-                        value={editSkuForm.status}
-                        onChange={(event) => onEditSkuFormChange({ ...editSkuForm, status: event.target.value })}
-                      >
-                        <option value="NEW">待策划</option>
-                        <option value="ANALYZED">已策划</option>
-                        <option value="CONFIRMED">已确认</option>
-                      </select>
-                    </label>
-                    <div className="crud-actions">
-                      <button className="primary" onClick={onUpdateSelectedSku} disabled={busy !== 'idle'}>
-                        <Save size={15} />保存
-                      </button>
-                      <button className="danger" onClick={onDeleteSelectedSku} disabled={busy !== 'idle'}>
-                        <Trash2 size={15} />删除货号
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="section-heading tight">
-                    <h2>识别摘要</h2>
-                    <span>{statusText(selectedSku.status)}</span>
-                  </div>
-                  <FactRows analysis={selectedSku.analysis} />
-                  <div className="storage-box">
-                    <strong>对象存储</strong>
-                    <small>{selectedSku.storagePath}</small>
-                  </div>
-                </aside>
-              </div>
+	                <section className="material-board shot-plan-panel">
+	                  <div className="section-heading tight">
+	                    <h2>生图方案</h2>
+	                    <span>{shotPlan ? `#${shotPlan.id}` : '未保存'}</span>
+	                  </div>
+	                  {shotPlan ? (
+	                    <ShotPlanBoard shotPlan={shotPlan} editable={busy === 'idle'} onSave={onSavePlan} saving={busy === 'saving-plan'} />
+	                  ) : (
+	                    <div className="plan-empty">
+	                      <p>还没有生图方案</p>
+	                      <span>点击右上角“生成默认方案”，Gemini 会根据服装主图识别品类、服饰搭配和分镜剧本；生成组图时将直接使用这里保存的方案。</span>
+	                    </div>
+	                  )}
+	                </section>
+	              </div>
             </>
           ) : (
             <div className="library-empty">
               <FileImage size={38} />
               <h2>选择一个货号查看素材</h2>
-              <p>上传或点击左侧货号后，这里会展示完整图片、识别摘要和使用入口。</p>
+              <p>上传或点击左侧货号后，这里会展示完整图片、生图方案和使用入口。</p>
             </div>
           )}
         </section>
@@ -2020,9 +1962,11 @@ function ShotPlanBoard({
   onSave?: (plan: ShotPlan['plan']) => void
 }) {
   const [draft, setDraft] = useState<ShotPlan['plan']>(shotPlan.plan)
+  const [isEditing, setIsEditing] = useState(false)
 
   useEffect(() => {
     setDraft(shotPlan.plan)
+    setIsEditing(false)
   }, [shotPlan.id, shotPlan.updatedAt])
 
   const updateShot = (index: number, patch: Partial<Shot>) => {
@@ -2032,117 +1976,122 @@ function ShotPlanBoard({
     }))
   }
 
-  const updatePlanField = (patch: Partial<ShotPlan['plan']>) => {
-    setDraft((current) => ({ ...current, ...patch }))
+  const updateGenerationPlan = (patch: NonNullable<ShotPlan['plan']['generationPlan']>) => {
+    setDraft((current) => ({
+      ...current,
+      generationPlan: { ...(current.generationPlan ?? {}), ...patch },
+    }))
   }
   const plannerLog = parsePlannerLog(shotPlan.rawResponse)
+  const generationPlan = draft.generationPlan ?? {}
+  const canEdit = editable && isEditing
 
   return (
     <div className="shot-plan">
+      <div className="plan-section-heading">
+        <div>
+          <h3>生图方案</h3>
+          <span>服装识别、品牌调性、搭配与统一背景</span>
+        </div>
+        {!isEditing && editable && (
+          <button className="secondary" onClick={() => setIsEditing(true)}>
+            <Edit3 size={15} />编辑
+          </button>
+        )}
+      </div>
       <div className="shooting-script">
-        <label className="script-field">
-          <span>货号</span>
-          <strong>{draft.sku}</strong>
-        </label>
-        <label className="script-field">
-          <span>商品品类</span>
-          <input value={draft.category ?? draft.garment?.category ?? ''} disabled={!editable} onChange={(event) => updatePlanField({ category: event.target.value })} />
-        </label>
-        <label className="script-field">
-          <span>证据等级</span>
-          <select value={draft.evidenceLevel ?? '高频成片规律'} disabled={!editable} onChange={(event) => updatePlanField({ evidenceLevel: event.target.value })}>
-            <option>高频成片规律</option>
-            <option>低频成片规律</option>
-            <option>品类必要补充</option>
-          </select>
-        </label>
-        <label className="script-field wide">
-          <span>主销售信息</span>
-          <textarea value={draft.salesInfo ?? draft.garment?.summary ?? ''} disabled={!editable} onChange={(event) => updatePlanField({ salesInfo: event.target.value })} />
-        </label>
-        <label className="script-field wide">
-          <span>Lily 调性提炼</span>
-          <textarea value={draft.lilyTone ?? draft.brandStyle?.summary ?? ''} disabled={!editable} onChange={(event) => updatePlanField({ lilyTone: event.target.value })} />
-        </label>
-        <label className="script-field wide">
-          <span>组图搭配方案</span>
-          <textarea value={draft.stylingPlan ?? ''} disabled={!editable} onChange={(event) => updatePlanField({ stylingPlan: event.target.value })} />
-        </label>
-        <label className="script-field">
-          <span>颜色基调</span>
-          <textarea value={draft.colorPalette ?? ''} disabled={!editable} onChange={(event) => updatePlanField({ colorPalette: event.target.value })} />
-        </label>
-        <label className="script-field">
-          <span>鞋包首饰</span>
-          <textarea value={draft.accessories ?? ''} disabled={!editable} onChange={(event) => updatePlanField({ accessories: event.target.value })} />
-        </label>
+        <PlanField label="货号" value={draft.sku} />
+        <PlanField label="商品品类" value={draft.category ?? draft.garment?.category ?? ''} editing={canEdit} onChange={(value) => setDraft((current) => ({ ...current, category: value }))} />
+        <PlanField label="服装摘要" value={draft.garment?.summary ?? ''} wide />
+        <PlanField label="颜色" value={draft.garment?.color ?? ''} />
+        <PlanField label="面料" value={draft.garment?.fabric ?? ''} />
+        <PlanField label="关键结构" value={(draft.garment?.keyStructures ?? []).join('、')} />
+        <PlanField label="主销售信息" value={generationPlan.salesInfo ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ salesInfo: value })} wide multiline />
+        <PlanField label="Lily 调性" value={generationPlan.lilyTone ?? draft.brandStyle?.summary ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ lilyTone: value })} wide multiline />
+        <PlanField label="服饰搭配" value={generationPlan.styling ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ styling: value })} wide multiline />
+        <PlanField label="统一背景" value={generationPlan.background ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ background: value })} wide multiline />
       </div>
-      <div className="shot-list">
-        {draft.shots.map((shot) => (
-          <div className="shot-row" key={shot.shotIndex}>
-            <b>{String(shot.shotIndex).padStart(2, '0')}</b>
-            <span>{shot.slotName ?? shot.title}</span>
-            <small>{shot.scene ?? shot.frame} · {shot.bodyPosition ?? shot.angle}</small>
-          </div>
-        ))}
+
+      <div className="plan-section-heading">
+        <div>
+          <h3>分镜剧本</h3>
+          <span>固定 5 张图位，逐张控制景别、身位和姿势</span>
+        </div>
       </div>
-      <details>
-        <summary>{editable ? '编辑 5 张拍摄剧本' : '5 张拍摄剧本'}</summary>
-        <div className="script-shot-list">
-          {draft.shots.map((shot, index) => (
-            <div key={shot.shotIndex} className="shot-editor">
+      <div className="script-shot-list">
+        {draft.shots.map((shot, index) => (
+          <div key={shot.shotIndex} className="shot-editor">
+            {canEdit ? (
+              <>
               <div className="shot-editor-title">
-                <strong>图 {shot.shotIndex} {shot.slotName ?? shot.title}</strong>
+                <strong>图 {shot.shotIndex} {shot.title}</strong>
                 <small>{shot.englishName}</small>
               </div>
-              <label className="field wide">
-                <span>任务</span>
-                <textarea value={shot.task ?? ''} disabled={!editable} onChange={(event) => updateShot(index, { task: event.target.value })} />
+              <label className="field">
+                <span>标题</span>
+                <input value={shot.title ?? ''} onChange={(event) => updateShot(index, { title: event.target.value })} />
               </label>
               <label className="field wide">
-                <span>统一要求</span>
-                <textarea value={shot.unifiedRequirement ?? ''} disabled={!editable} onChange={(event) => updateShot(index, { unifiedRequirement: event.target.value })} />
+                <span>任务</span>
+                <textarea value={shot.task ?? ''} onChange={(event) => updateShot(index, { task: event.target.value })} />
               </label>
               <label className="field">
                 <span>景别</span>
-                <input value={shot.scene ?? shot.frame} disabled={!editable} onChange={(event) => updateShot(index, { scene: event.target.value, frame: event.target.value })} />
+                <input value={shot.scene ?? ''} onChange={(event) => updateShot(index, { scene: event.target.value })} />
               </label>
               <label className="field">
                 <span>取景范围</span>
-                <input value={shot.cropRange ?? shot.crop ?? ''} disabled={!editable} onChange={(event) => updateShot(index, { cropRange: event.target.value, crop: event.target.value })} />
+                <input value={shot.cropRange ?? ''} onChange={(event) => updateShot(index, { cropRange: event.target.value })} />
               </label>
               <label className="field">
                 <span>模特占画幅</span>
-                <input value={shot.modelScale ?? ''} disabled={!editable} onChange={(event) => updateShot(index, { modelScale: event.target.value })} />
+                <input value={shot.modelScale ?? ''} onChange={(event) => updateShot(index, { modelScale: event.target.value })} />
               </label>
               <label className="field">
                 <span>头部处理</span>
-                <input value={shot.headTreatment ?? ''} disabled={!editable} onChange={(event) => updateShot(index, { headTreatment: event.target.value })} />
+                <input value={shot.headTreatment ?? ''} onChange={(event) => updateShot(index, { headTreatment: event.target.value })} />
               </label>
               <label className="field">
                 <span>身位</span>
-                <input value={shot.bodyPosition ?? shot.angle} disabled={!editable} onChange={(event) => updateShot(index, { bodyPosition: event.target.value, angle: event.target.value })} />
+                <input value={shot.bodyPosition ?? ''} onChange={(event) => updateShot(index, { bodyPosition: event.target.value })} />
               </label>
               <label className="field wide">
                 <span>姿势调性</span>
-                <textarea value={shot.poseTone ?? shot.pose} disabled={!editable} onChange={(event) => updateShot(index, { poseTone: event.target.value, pose: event.target.value })} />
+                <textarea value={shot.poseTone ?? ''} onChange={(event) => updateShot(index, { poseTone: event.target.value })} />
               </label>
               <label className="field wide">
                 <span>画面目的</span>
-                <textarea value={shot.imagePurpose ?? shot.focus} disabled={!editable} onChange={(event) => updateShot(index, { imagePurpose: event.target.value, focus: event.target.value })} />
+                <textarea value={shot.imagePurpose ?? ''} onChange={(event) => updateShot(index, { imagePurpose: event.target.value })} />
               </label>
-            </div>
-          ))}
-        </div>
-        {editable && (
-          <div className="plan-save-row">
-            <button className="primary" onClick={() => onSave?.(draft)} disabled={saving}>
-              {saving ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
-              保存方案
-            </button>
+              </>
+            ) : (
+              <>
+                <div className="shot-editor-title">
+                  <strong>图 {shot.shotIndex} {shot.title}</strong>
+                  <small>{shot.englishName}</small>
+                </div>
+                <PlanField label="任务" value={shot.task ?? ''} wide />
+                <PlanField label="景别" value={shot.scene ?? ''} />
+                <PlanField label="取景范围" value={shot.cropRange ?? ''} />
+                <PlanField label="模特占画幅" value={shot.modelScale ?? ''} />
+                <PlanField label="头部处理" value={shot.headTreatment ?? ''} />
+                <PlanField label="身位" value={shot.bodyPosition ?? ''} />
+                <PlanField label="姿势调性" value={shot.poseTone ?? ''} wide />
+                <PlanField label="画面目的" value={shot.imagePurpose ?? ''} wide />
+              </>
+            )}
           </div>
-        )}
-      </details>
+        ))}
+      </div>
+      {isEditing && (
+        <div className="plan-save-row">
+          <button className="secondary" onClick={() => { setDraft(shotPlan.plan); setIsEditing(false) }} disabled={saving}>取消</button>
+          <button className="primary" onClick={() => { onSave?.(draft); setIsEditing(false) }} disabled={saving}>
+            {saving ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+            保存方案
+          </button>
+        </div>
+      )}
       <details>
         <summary>Gemini 调用记录</summary>
         <div className="planner-log">
@@ -2160,6 +2109,37 @@ function ShotPlanBoard({
         </div>
       </details>
     </div>
+  )
+}
+
+function PlanField({
+  label,
+  value,
+  wide = false,
+  multiline = false,
+  editing = false,
+  onChange,
+}: {
+  label: string
+  value?: string
+  wide?: boolean
+  multiline?: boolean
+  editing?: boolean
+  onChange?: (value: string) => void
+}) {
+  return (
+    <label className={`script-field ${wide ? 'wide' : ''}`}>
+      <span>{label}</span>
+      {editing && onChange ? (
+        multiline ? (
+          <textarea value={value ?? ''} onChange={(event) => onChange(event.target.value)} />
+        ) : (
+          <input value={value ?? ''} onChange={(event) => onChange(event.target.value)} />
+        )
+      ) : (
+        <strong>{value || '-'}</strong>
+      )}
+    </label>
   )
 }
 

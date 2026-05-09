@@ -150,12 +150,6 @@ MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂�
   "sku": "125309C7948510",
   "modelId": "Face-01",
   "category": "连衣裙",
-  "salesInfo": "主销售信息",
-  "evidenceLevel": "高频成片规律",
-  "lilyTone": "Lily 调性提炼",
-  "stylingPlan": "组图搭配方案",
-  "colorPalette": "颜色基调",
-  "accessories": "鞋包首饰",
   "garment": {
     "category": "连衣裙",
     "summary": "一句话服装摘要",
@@ -168,29 +162,31 @@ MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂�
     "name": "默认棚拍风格",
     "summary": "白/浅灰背景，自然姿态，简洁搭配，商品优先"
   },
+  "generationPlan": {
+    "salesInfo": "主销售信息",
+    "lilyTone": "Lily 调性提炼",
+    "styling": "服饰搭配，合并整组搭配、颜色基调、鞋包首饰",
+    "background": "浅灰白棚拍背景、轻微落地阴影"
+  },
   "shots": [
     {
       "shotIndex": 1,
-      "slotName": "全身主视觉",
       "englishName": "Full-length hero shot",
-      "title": "图 1 全身主视觉",
-      "task": "先给完整穿着比例",
-      "unifiedRequirement": "全身或近全身，头脚完整，商品无遮挡",
+      "title": "全身主视觉",
+      "task": "先给完整穿着比例；全身或近全身，头脚完整，商品无遮挡",
       "scene": "全身图",
       "cropRange": "头顶到脚尖完整入画，包含鞋",
       "modelScale": "75%-86%",
       "headTreatment": "完整露头",
       "bodyPosition": "正面或轻斜正",
       "poseTone": "稳定站姿，肩颈打开",
-      "imagePurpose": "先给完整穿着比例",
-      "headReference": "front.png",
-      "background": "浅灰白棚拍背景、轻微落地阴影"
+      "imagePurpose": "先给完整穿着比例"
     }
   ]
 }
 ```
 
-实现上，`shot_plans` 会冗余保存品类、主销售信息、证据等级、Lily 调性、搭配、颜色和鞋包首饰；`shot_plan_shots` 保存 5 个固定图位的可编辑明细。`plan_json` 仍保留完整快照，方便历史复盘和任务包生成。
+实现上，`shot_plans` 会冗余保存品类、主销售信息、Lily 调性、服饰搭配和整组背景；`shot_plan_shots` 保存 5 个固定分镜的可编辑明细。`plan_json` 仍保留完整快照，方便历史复盘和任务包生成。Gemini 不再输出 `evidenceLevel`、`stylingPlan`、`colorPalette`、`accessories`、`slotName`、`unifiedRequirement`、`headReference` 或单张 `background`；旧数据不做兼容承诺，启动迁移会重写为新版结构。
 
 ### 3.5 GenerationRun
 

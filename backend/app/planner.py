@@ -11,38 +11,33 @@ BRAND_TONE_PATH = Path(__file__).resolve().parents[1] / "ref" / "Lily拍摄与AI
 SHOT_SLOTS = [
     {
         "shotIndex": 1,
-        "slotName": "全身主视觉",
+        "title": "全身主视觉",
         "englishName": "Full-length hero shot",
-        "task": "先给完整穿着比例",
-        "unifiedRequirement": "全身或近全身，头脚完整，商品无遮挡",
+        "task": "先给完整穿着比例；全身或近全身，头脚完整，商品无遮挡",
     },
     {
         "shotIndex": 2,
-        "slotName": "品类核心展示",
+        "title": "品类核心展示",
         "englishName": "Category key view",
-        "task": "按品类突出销售主体",
-        "unifiedRequirement": "上衣看上身，裤裙看腰腿，外套看肩线门襟",
+        "task": "按品类突出销售主体；上衣看上身，裤裙看腰腿，外套看肩线门襟",
     },
     {
         "shotIndex": 3,
-        "slotName": "设计细节近景",
+        "title": "设计细节近景",
         "englishName": "Detail close-up",
-        "task": "解释面料、结构、工艺、设计点",
-        "unifiedRequirement": "可切头/不露脸，但设计点必须完整",
+        "task": "解释面料、结构、工艺、设计点；可切头/不露脸，但设计点必须完整",
     },
     {
         "shotIndex": 4,
-        "slotName": "身位/动态补充",
+        "title": "身位/动态补充",
         "englishName": "Angle or movement view",
-        "task": "用斜正、侧身、轻走动、背面补充版型",
-        "unifiedRequirement": "必须补充商品信息，不只是换动作",
+        "task": "用斜正、侧身、轻走动、背面补充版型；必须补充商品信息，不只是换动作",
     },
     {
         "shotIndex": 5,
-        "slotName": "标准正面颜色图",
+        "title": "标准正面颜色图",
         "englishName": "Standard front color view",
-        "task": "稳定、清楚、平台友好",
-        "unifiedRequirement": "正面或轻斜正，颜色和版型准确",
+        "task": "稳定、清楚、平台友好；正面或轻斜正，颜色和版型准确",
     },
 ]
 
@@ -68,18 +63,10 @@ def default_pose(angle: str, category: str) -> str:
     return "正面自然站姿，重心不僵硬，手臂放松，克制商业表情"
 
 
-def default_head_reference(angle: str) -> str:
-    if "背面" in angle:
-        return "back.png"
-    if "侧" in angle or "3/4" in angle:
-        return "left45.png"
-    return "front.png"
-
-
 def build_planner_prompt(sku: str) -> str:
     brand_tone = load_brand_tone()
     return f"""
-你是 Lily 电商棚拍导演。请根据用户上传的服装主图和参考图，严格以《Lily 服装模特棚拍导演规范》为唯一规则来源，输出一份可执行的“AI 拍摄剧本”。
+你是 Lily 电商棚拍导演。请根据用户上传的服装主图和参考图，严格以《Lily 服装模特棚拍导演规范》为唯一规则来源，输出一份可执行的“生图方案”和“分镜剧本”。
 
 【品牌调性】
 {brand_tone}
@@ -89,7 +76,9 @@ def build_planner_prompt(sku: str) -> str:
 - 必须严格使用规范中的第 3 节固定 5 图顺序、第 4 节景别/取景/头部/身位、第 5 节品类导演规则、第 6 节搭配规范、第 8 节输出格式。
 - 不允许自行新增不在规范中的图位、字段、风格方向或创意场景。
 - 先判断品类，再确定“组图级搭配方案”，最后按 5 个固定图位分配景别、取景范围、占比、头部处理、身位、姿势调性和画面目的。
-- 搭配是整组统一方案，5 张图不能每张换完全不同风格。
+- 搭配是整组统一方案，5 张图不能每张换完全不同风格；将原“组图搭配方案、颜色基调、鞋包首饰”合并写入 generationPlan.styling。
+- background 是整组统一生图方案，不要放入 shot。
+- 不输出 evidenceLevel、slotName、unifiedRequirement、headReference、frame、crop、angle、pose、focus 等兼容或冗余字段。
 - 优先服装保真：不改变颜色、结构、领型、袖长、裤长、裙长、口袋、纽扣等。
 - 模特使用 Face-01，短发、自然淡妆、克制通勤气质。
 - 根据品牌调性选择鞋履/包/配饰，避免老气尖头职业鞋、夸张高跟鞋、运动鞋、厚底鞋。
@@ -100,12 +89,6 @@ def build_planner_prompt(sku: str) -> str:
   "sku": "{sku}",
   "modelId": "Face-01",
   "category": "上衣 | 裤装 | 半裙 | 短裤 | 连衣裙 | 外套 | 套装",
-  "salesInfo": "主销售信息，说明该品类要卖什么",
-  "evidenceLevel": "高频成片规律 | 低频成片规律 | 品类必要补充",
-  "lilyTone": "Lily 调性提炼",
-  "stylingPlan": "组图搭配方案，必须是整组统一方案",
-  "colorPalette": "颜色基调",
-  "accessories": "鞋包首饰",
   "garment": {{
     "category": "上衣 | 裤装 | 半裙 | 短裤 | 连衣裙 | 外套 | 套装",
     "summary": "一句话服装摘要",
@@ -118,28 +101,25 @@ def build_planner_prompt(sku: str) -> str:
     "name": "默认棚拍风格",
     "summary": "白/浅灰背景，自然姿态，简洁搭配，商品优先"
   }},
+  "generationPlan": {{
+    "salesInfo": "主销售信息，说明该品类要卖什么",
+    "lilyTone": "Lily 调性提炼",
+    "styling": "服饰搭配。必须合并整组搭配、颜色基调、鞋履、包、首饰和禁忌，且 5 张统一",
+    "background": "浅灰白棚拍背景、轻微落地阴影"
+  }},
   "shots": [
     {{
       "shotIndex": 1,
-      "slotName": "全身主视觉",
       "englishName": "Full-length hero shot",
-      "title": "图 1 全身主视觉",
-      "task": "先给完整穿着比例",
-      "unifiedRequirement": "全身或近全身，头脚完整，商品无遮挡",
+      "title": "全身主视觉",
+      "task": "先给完整穿着比例；全身或近全身，头脚完整，商品无遮挡",
       "scene": "景别，必须来自规范第 4 节和对应品类原则",
-      "frame": "兼容字段，同 scene",
       "cropRange": "取景范围，例如头顶到脚尖完整入画",
-      "crop": "兼容字段，同 cropRange",
       "modelScale": "模特占画幅，例如 75%-86%",
       "headTreatment": "完整露头 | 切额头/半头 | 下巴以下裁切 | 不露脸裁切",
       "bodyPosition": "正面 | 轻斜正 | 3/4 斜正 | 侧身 | 背面",
-      "angle": "兼容字段，同 bodyPosition",
       "poseTone": "姿势调性，必须符合对应品类姿势示例池",
-      "pose": "兼容字段，同 poseTone",
-      "imagePurpose": "画面目的，说明这一张补充什么商品信息",
-      "focus": "兼容字段，同 imagePurpose",
-      "headReference": "front.png | left45.png | right90.png | back.png | back-turn-left45.png | back-turn-right45.png",
-      "background": "浅灰白棚拍背景、轻微落地阴影"
+      "imagePurpose": "画面目的，说明这一张补充什么商品信息"
     }}
   ]
 }}
@@ -214,37 +194,66 @@ def normalize_plan(plan: dict[str, Any], sku: str) -> dict[str, Any]:
     plan["category"] = category
     garment["category"] = category
     plan["garment"] = garment
-    plan.setdefault("salesInfo", garment.get("summary", "主销售信息待确认"))
-    plan.setdefault("evidenceLevel", "高频成片规律")
-    plan.setdefault("lilyTone", "浅灰白棚拍、干净通勤、轻熟克制、商品清楚。")
-    plan.setdefault("stylingPlan", "整组统一搭配，鞋包首饰低调通勤，不遮挡主商品。")
-    plan.setdefault("colorPalette", garment.get("color", "低饱和 Lily 常用色"))
-    plan.setdefault("accessories", "低调通勤鞋包与小体量首饰")
-    plan.setdefault("brandStyle", {"name": "Lily 服装模特棚拍导演规范", "summary": plan.get("lilyTone", "")})
+    generation_plan = plan.get("generationPlan") if isinstance(plan.get("generationPlan"), dict) else {}
+    sales_info = generation_plan.get("salesInfo") or plan.get("salesInfo") or garment.get("summary", "主销售信息待确认")
+    lily_tone = generation_plan.get("lilyTone") or plan.get("lilyTone") or "浅灰白棚拍、干净通勤、轻熟克制、商品清楚。"
+    styling = generation_plan.get("styling") or combine_text(
+        plan.get("styling"),
+        plan.get("stylingPlan"),
+        plan.get("colorPalette"),
+        plan.get("accessories"),
+    ) or "整组统一搭配，低饱和 Lily 常用色，鞋包首饰低调通勤，不遮挡主商品。"
+    background = generation_plan.get("background") or plan.get("background") or "白/浅灰棚拍，轻微落地阴影"
+    plan["generationPlan"] = {
+        "salesInfo": sales_info,
+        "lilyTone": lily_tone,
+        "styling": styling,
+        "background": background,
+    }
+    for legacy_key in ["salesInfo", "evidenceLevel", "lilyTone", "styling", "stylingPlan", "colorPalette", "accessories", "background"]:
+        plan.pop(legacy_key, None)
+    plan.setdefault("brandStyle", {"name": "Lily 服装模特棚拍导演规范", "summary": lily_tone})
     normalized_shots: list[dict[str, Any]] = []
     for slot, raw_shot in zip(SHOT_SLOTS, plan["shots"][:5]):
         shot = raw_shot if isinstance(raw_shot, dict) else {}
         shot["shotIndex"] = slot["shotIndex"]
-        shot.setdefault("slotName", slot["slotName"])
         shot.setdefault("englishName", slot["englishName"])
-        shot.setdefault("title", f"图 {slot['shotIndex']} {slot['slotName']}")
-        shot.setdefault("task", slot["task"])
-        shot.setdefault("unifiedRequirement", slot["unifiedRequirement"])
+        raw_title = str(shot.get("title") or "").strip()
+        raw_slot_name = str(shot.get("slotName") or "").strip()
+        if raw_slot_name and (not raw_title or raw_title.startswith(f"图 {slot['shotIndex']}")):
+            shot["title"] = raw_slot_name
+        else:
+            for prefix in (f"图 {slot['shotIndex']} ", f"图 {slot['shotIndex']:02d} "):
+                if raw_title.startswith(prefix):
+                    raw_title = raw_title[len(prefix):].strip()
+            shot["title"] = raw_title or slot["title"]
+        task = str(shot.get("task") or slot["task"])
+        unified_requirement = str(shot.get("unifiedRequirement") or "")
+        if unified_requirement and unified_requirement not in task:
+            task = f"{task}；{unified_requirement}"
+        shot["task"] = task
         shot.setdefault("scene", shot.get("frame", "全身图"))
-        shot.setdefault("frame", shot.get("scene", "全身图"))
         shot.setdefault("cropRange", shot.get("crop", shot.get("scene", "头顶到脚尖完整入画")))
-        shot.setdefault("crop", shot.get("cropRange", "头顶到脚尖完整入画"))
         shot.setdefault("modelScale", "75%-88%")
         shot.setdefault("headTreatment", "完整露头" if slot["shotIndex"] in {1, 5} else "按设计点可切头/不露脸")
         shot.setdefault("bodyPosition", shot.get("angle", "正面"))
-        shot.setdefault("angle", shot.get("bodyPosition", "正面"))
         shot.setdefault("poseTone", shot.get("pose", default_pose(shot["bodyPosition"], category)))
-        shot.setdefault("pose", shot.get("poseTone", default_pose(shot["bodyPosition"], category)))
         shot.setdefault("imagePurpose", shot.get("focus", slot["task"]))
-        shot.setdefault("focus", shot.get("imagePurpose", slot["task"]))
-        shot.setdefault("headReference", default_head_reference(shot["bodyPosition"]))
-        shot.setdefault("background", "白/浅灰棚拍")
-        normalized_shots.append(shot)
+        normalized_shots.append(
+            {
+                "shotIndex": shot["shotIndex"],
+                "englishName": shot.get("englishName"),
+                "title": shot.get("title"),
+                "task": shot.get("task"),
+                "scene": shot.get("scene"),
+                "cropRange": shot.get("cropRange"),
+                "modelScale": shot.get("modelScale"),
+                "headTreatment": shot.get("headTreatment"),
+                "bodyPosition": shot.get("bodyPosition"),
+                "poseTone": shot.get("poseTone"),
+                "imagePurpose": shot.get("imagePurpose"),
+            }
+        )
     if len(normalized_shots) < 5:
         raise PlannerError("Gemini 返回的方案不足 5 个固定图位。")
     plan["shots"] = normalized_shots[:5]
@@ -265,6 +274,15 @@ def normalize_category_name(value: str) -> str:
     if any(token in value for token in ["上衣", "T 恤", "T恤", "针织", "衬衫", "背心", "马甲", "短袖", "无袖"]):
         return "上衣"
     return value if value in {"上衣", "裤装", "半裙", "短裤", "连衣裙", "外套", "套装"} else "连衣裙"
+
+
+def combine_text(*values: Any) -> str:
+    parts: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in parts:
+            parts.append(text)
+    return "；".join(parts)
 
 
 def guess_mime_type(path: Path) -> str:

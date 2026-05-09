@@ -148,11 +148,9 @@ CREATE TABLE shot_plans (
   plan_json TEXT NOT NULL,
   category TEXT,
   sales_info TEXT,
-  evidence_level TEXT,
   lily_tone TEXT,
-  styling_plan TEXT,
-  color_palette TEXT,
-  accessories TEXT,
+  styling TEXT,
+  background TEXT,
   planner_provider TEXT NOT NULL,
   raw_response TEXT,
   created_at TEXT NOT NULL,
@@ -168,14 +166,12 @@ CREATE TABLE shot_plans (
 | `sku_id` | INTEGER | 关联货号 |
 | `model_profile_id` | INTEGER | 关联数字模特 |
 | `status` | TEXT | 当前为 `DRAFT`，预留 `CONFIRMED` |
-| `plan_json` | TEXT | 完整拍摄剧本 JSON 快照，字段以《Lily 拍摄与 AI 生图统一规则》第 8 节为准 |
+| `plan_json` | TEXT | 完整生图方案 JSON 快照，包含 `generationPlan` 和 5 条 `shots` |
 | `category` | TEXT | 商品品类 |
 | `sales_info` | TEXT | 主销售信息 |
-| `evidence_level` | TEXT | `高频成片规律` / `低频成片规律` / `品类必要补充` |
 | `lily_tone` | TEXT | Lily 调性提炼 |
-| `styling_plan` | TEXT | 组图级搭配方案 |
-| `color_palette` | TEXT | 颜色基调 |
-| `accessories` | TEXT | 鞋包首饰 |
+| `styling` | TEXT | 服饰搭配，合并原组图搭配、颜色基调、鞋包首饰 |
+| `background` | TEXT | 整组统一背景与光线要求 |
 | `planner_provider` | TEXT | 当前只接受真实成功的 `gemini` |
 | `raw_response` | TEXT | Gemini 的完整调用快照，包含中文 prompt、输入图片对象 key 和响应 |
 | `created_at` | TEXT | 创建时间 |
@@ -200,11 +196,9 @@ CREATE TABLE shot_plan_shots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   shot_plan_id INTEGER NOT NULL REFERENCES shot_plans(id) ON DELETE CASCADE,
   shot_index INTEGER NOT NULL,
-  slot_name TEXT NOT NULL,
   english_name TEXT,
   title TEXT NOT NULL,
   task TEXT,
-  unified_requirement TEXT,
   scene TEXT,
   crop_range TEXT,
   model_scale TEXT,
@@ -212,8 +206,6 @@ CREATE TABLE shot_plan_shots (
   body_position TEXT,
   pose_tone TEXT,
   image_purpose TEXT,
-  head_reference TEXT,
-  background TEXT,
   shot_json TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -221,7 +213,7 @@ CREATE TABLE shot_plan_shots (
 );
 ```
 
-图位字段对应《Lily 拍摄与 AI 生图统一规则》第 8 节“AI 拍摄剧本输出格式”。5 条记录固定为：全身主视觉、品类核心展示、设计细节近景、身位/动态补充、标准正面颜色图。
+图位字段对应产品内的“分镜剧本”。5 条记录固定顺序为：全身主视觉、品类核心展示、设计细节近景、身位/动态补充、标准正面颜色图。`background` 属于整组共用生图方案，不在单张分镜内重复保存；模特头图参考由后端根据身位和可用头像自动选择，不由 Gemini 输出。
 
 ### 2.6 `generation_runs`
 

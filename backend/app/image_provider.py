@@ -351,9 +351,8 @@ def build_chinese_prompt(task_package: dict[str, Any]) -> str:
             "服装与品牌：",
             f"- 货号 {task_package.get('sku', '')}：{garment.get('summary', '')}",
             f"- Lily 调性：{planning_script.get('lilyTone') or brand_style.get('summary', '浅灰白棚拍、干净通勤、轻熟克制、商品优先。')}",
-            f"- 组图级搭配方案：{planning_script.get('stylingPlan', '')}",
-            f"- 颜色基调：{planning_script.get('colorPalette', '')}",
-            f"- 鞋包首饰：{planning_script.get('accessories', '')}",
+            f"- 服饰搭配：{planning_script.get('styling', '')}",
+            f"- 背景：{planning_script.get('background', '白/浅灰棚拍，轻微落地阴影')}",
         ]
     else:
         lines = [
@@ -369,10 +368,10 @@ def build_chinese_prompt(task_package: dict[str, Any]) -> str:
         f"1. 保持 {model.get('modelId', '当前模特')} 模特身份一致。",
         f"2. 保持货号 {task_package.get('sku', '')} 的服装事实：{garment.get('summary', '')}",
         f"3. 遵守 Lily 调性：{planning_script.get('lilyTone') or brand_style.get('summary', '白/浅灰棚拍，商品优先。')}",
-        f"4. 服从组图级搭配方案：{planning_script.get('stylingPlan', '')}",
-        f"5. 当前图位任务：{shot.get('slotName', shot.get('title', ''))}，{shot.get('task', '')}；统一要求：{shot.get('unifiedRequirement', '')}。",
+        f"4. 服从服饰搭配方案：{planning_script.get('styling', '')}",
+        f"5. 当前图位任务：{shot.get('title', '')}，{shot.get('task', '')}。",
         "",
-        "拍摄剧本：",
+        "分镜剧本：",
         f"- 景别：{shot.get('scene') or shot.get('frame', '')}",
         f"- 取景范围：{shot.get('cropRange') or shot.get('crop', '')}",
         f"- 模特占画幅：{shot.get('modelScale', '')}",
@@ -380,9 +379,8 @@ def build_chinese_prompt(task_package: dict[str, Any]) -> str:
         f"- 身位：{shot.get('bodyPosition') or shot.get('angle', '')}",
         f"- 姿势调性：{shot.get('poseTone') or shot.get('pose', '自然、克制、符合电商棚拍。')}",
         f"- 画面目的：{shot.get('imagePurpose') or shot.get('focus', '')}",
-        f"- 背景：{shot.get('background', '白/浅灰棚拍')}",
-        f"- 颜色基调：{planning_script.get('colorPalette', '')}",
-        f"- 鞋包首饰：{planning_script.get('accessories', '')}",
+        f"- 背景：{planning_script.get('background', '白/浅灰棚拍，轻微落地阴影')}",
+        f"- 服饰搭配：{planning_script.get('styling', '')}",
         ]
         if any(item.get("role") == "preview_grid" for item in task_package.get("imageInputs", [])):
             lines.extend(
