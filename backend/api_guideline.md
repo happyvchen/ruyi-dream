@@ -84,12 +84,12 @@
     "modelProfileId": 6,
     "status": "DRAFT",
     "plan": {},
-    "plannerProvider": "gemini | fallback | gemini-error-fallback | gemini-json-parse-fallback"
+    "plannerProvider": "gemini"
   }
 }
 ```
 
-如果该货号还没有方案，`item` 返回 `null`。当前默认方案规则为：取该货号最新一条 `shot_plans`，即 `ORDER BY updated_at DESC, id DESC LIMIT 1`。
+如果该货号还没有真实 Gemini 成功方案，`item` 返回 `null`。当前默认方案规则为：取该货号最新一条 `planner_provider = 'gemini'` 且未失败的 `shot_plans`。
 
 ### 编辑货号
 

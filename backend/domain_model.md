@@ -136,12 +136,12 @@ MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂�
 当前职责：
 
 - 绑定一个 `GarmentSku` 和一个 `ModelProfile`。
-- 保存 Gemini 或 fallback planner 输出的完整 `plan_json`。
+- 保存 Gemini planner 输出的完整 `plan_json`。
 - 保存 `planner_provider` 和原始响应 `raw_response`，用于调试和复盘。
 - 作为生成批次 `GenerationRun` 的输入。
-- 一个货号可以有多条历史 `ShotPlan`。当前默认方案规则为：取该货号 `updated_at DESC, id DESC` 最新的一条。
+- 一个货号可以有多条历史 `ShotPlan`。当前默认方案规则为：取该货号最新的真实 Gemini 成功方案。
 - “服装素材”页负责生成/更新默认组图方案；“生成组图”页只读取并使用默认方案。
-- 上传新图包保存成功后，前端会立即调用策划接口创建默认方案。Gemini 不可用时会使用 fallback 默认方案，因此上传流程仍可跑通。
+- 上传新图包保存成功后，前端会立即调用策划接口创建默认方案。Gemini 不可用、SDK 缺失、引用文档缺失或返回格式异常时，接口直接返回错误并写入事件日志，不创建假方案。
 
 当前 `plan_json` 约定：
 
@@ -149,6 +149,13 @@ MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂�
 {
   "sku": "125309C7948510",
   "modelId": "Face-01",
+  "category": "连衣裙",
+  "salesInfo": "主销售信息",
+  "evidenceLevel": "高频成片规律",
+  "lilyTone": "Lily 调性提炼",
+  "stylingPlan": "组图搭配方案",
+  "colorPalette": "颜色基调",
+  "accessories": "鞋包首饰",
   "garment": {
     "category": "连衣裙",
     "summary": "一句话服装摘要",
@@ -164,23 +171,26 @@ MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂�
   "shots": [
     {
       "shotIndex": 1,
-      "title": "首图",
-      "frame": "正面全身",
-      "angle": "正面",
-      "focus": "商品展示重点",
-      "pose": "模特姿势",
+      "slotName": "全身主视觉",
+      "englishName": "Full-length hero shot",
+      "title": "图 1 全身主视觉",
+      "task": "先给完整穿着比例",
+      "unifiedRequirement": "全身或近全身，头脚完整，商品无遮挡",
+      "scene": "全身图",
+      "cropRange": "头顶到脚尖完整入画，包含鞋",
+      "modelScale": "75%-86%",
+      "headTreatment": "完整露头",
+      "bodyPosition": "正面或轻斜正",
+      "poseTone": "稳定站姿，肩颈打开",
+      "imagePurpose": "先给完整穿着比例",
       "headReference": "front.png",
-      "background": "白/浅灰棚拍",
-      "styling": {
-        "shoes": "鞋履建议",
-        "bag": "包建议",
-        "jewelry": "配饰建议",
-        "forbidden": ["禁用搭配"]
-      }
+      "background": "浅灰白棚拍背景、轻微落地阴影"
     }
   ]
 }
 ```
+
+实现上，`shot_plans` 会冗余保存品类、主销售信息、证据等级、Lily 调性、搭配、颜色和鞋包首饰；`shot_plan_shots` 保存 5 个固定图位的可编辑明细。`plan_json` 仍保留完整快照，方便历史复盘和任务包生成。
 
 ### 3.5 GenerationRun
 

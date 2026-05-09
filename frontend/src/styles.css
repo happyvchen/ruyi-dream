@@ -153,6 +153,11 @@ textarea {
   color: #222;
 }
 
+.field textarea {
+  min-height: 74px;
+  resize: vertical;
+}
+
 textarea {
   min-height: 116px;
   resize: vertical;
@@ -509,6 +514,39 @@ button:disabled {
   font-size: 13px;
 }
 
+.shooting-script {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #e1e1db;
+  border-radius: 8px;
+  background: #f7f7f4;
+}
+
+.script-field {
+  display: grid;
+  gap: 6px;
+  color: #606058;
+  font-size: 12px;
+}
+
+.script-field.wide {
+  grid-column: span 3;
+}
+
+.script-field strong {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  color: #22221f;
+  font-size: 14px;
+}
+
+.script-field textarea {
+  min-height: 66px;
+}
+
 .shot-list {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
@@ -548,17 +586,74 @@ summary {
   font-weight: 750;
 }
 
-.advanced-grid {
+.advanced-grid,
+.script-shot-list {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
   gap: 10px;
   margin-top: 10px;
 }
 
-.advanced-grid div {
+.advanced-grid {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.script-shot-list {
+  grid-template-columns: 1fr;
+}
+
+.advanced-grid > div,
+.script-shot-list > div {
   padding: 10px;
   border-radius: 6px;
   background: #fafaf8;
+}
+
+.shot-editor {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 10px;
+}
+
+.shot-editor .field {
+  margin-bottom: 0;
+}
+
+.shot-editor .field.wide {
+  grid-column: 1 / -1;
+}
+
+.shot-editor-title {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #e3e3dd;
+}
+
+.shot-editor-title small {
+  color: #77776f;
+}
+
+.plan-save-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.planner-log {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 6px;
+  background: #fafaf8;
+}
+
+.planner-log textarea {
+  min-height: 140px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
 }
 
 .advanced-grid p,

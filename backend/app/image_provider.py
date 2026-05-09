@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from html import escape
 import json
+import mimetypes
+import os
+import tempfile
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from urllib.parse import urlparse
 
 from .config import get_settings
-from .object_storage import object_exists, presigned_get_url, put_bytes
+from .object_storage import get_bytes, object_exists, put_bytes
 
 
 class ImageGenerationProvider:
@@ -67,10 +71,7 @@ class GPTImage2FalProvider(ImageGenerationProvider):
         if not settings.fal_key:
             raise RuntimeError("FAL_KEY 未配置，无法调用 GPT Image-2 fal 接口")
 
-        uploaded_inputs = upload_image_inputs(task_package.get("imageInputs", []))
-        image_urls = [item["providerUrl"] for item in uploaded_inputs if item.get("providerUrl")]
-        if not image_urls:
-            raise RuntimeError("没有可传给 GPT Image-2 的 image_urls")
+        uploaded_inputs, image_urls = prepare_fal_image_inputs(task_package.get("imageInputs", []))
 
         provider_request = build_fal_request_snapshot(task_package, image_urls)
         raw_response = post_json(settings.gpt_image2_api_base_url, provider_request, settings.fal_key)
@@ -99,10 +100,7 @@ class GPTImage2FalProvider(ImageGenerationProvider):
         if not settings.fal_key:
             raise RuntimeError("FAL_KEY 未配置，无法调用 GPT Image-2 fal 接口")
 
-        uploaded_inputs = upload_image_inputs(task_package.get("imageInputs", []))
-        image_urls = [item["providerUrl"] for item in uploaded_inputs if item.get("providerUrl")]
-        if not image_urls:
-            raise RuntimeError("没有可传给 GPT Image-2 的 image_urls")
+        uploaded_inputs, image_urls = prepare_fal_image_inputs(task_package.get("imageInputs", []))
 
         provider_request = build_fal_request_snapshot(task_package, image_urls)
         submit_response = post_json(settings.gpt_image2_queue_url, provider_request, settings.fal_key, timeout=60)
@@ -181,16 +179,81 @@ def upload_image_inputs(image_inputs: list[dict[str, Any]]) -> list[dict[str, An
         object_key = item.get("objectKey")
         source_url = item.get("providerUrl") or item.get("url")
         next_item = dict(item)
-        if source_url and str(source_url).startswith(("http://", "https://")):
+        if source_url and is_fal_cdn_url(str(source_url)):
             next_item["providerUrl"] = source_url
             uploaded.append(next_item)
             continue
         if object_key and object_exists(str(object_key)):
-            next_item["providerUrl"] = presigned_get_url(str(object_key))
+            next_item["sourceObjectKey"] = str(object_key)
+            next_item["providerUrl"] = upload_object_to_fal(str(object_key), str(item.get("filename") or object_key))
+            uploaded.append(next_item)
+            continue
+        if source_url and str(source_url).startswith(("http://", "https://")):
+            next_item["sourceUrl"] = source_url
+            next_item["providerUrl"] = upload_url_to_fal(str(source_url), str(item.get("filename") or "reference-image"))
             uploaded.append(next_item)
             continue
         uploaded.append(next_item)
     return uploaded
+
+
+def prepare_fal_image_inputs(image_inputs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    uploaded_inputs = upload_image_inputs(image_inputs)
+    missing_roles = [
+        str(item.get("role") or item.get("filename") or index)
+        for index, item in enumerate(uploaded_inputs, start=1)
+        if not item.get("providerUrl")
+    ]
+    if missing_roles:
+        raise RuntimeError(f"参考图上传到 fal 失败，以下输入没有 fal Image URL：{', '.join(missing_roles)}")
+
+    image_urls = [str(item["providerUrl"]) for item in uploaded_inputs]
+    non_fal_urls = [url for url in image_urls if not is_fal_cdn_url(url)]
+    if non_fal_urls:
+        raise RuntimeError(f"拒绝将非 fal Image URL 传给 GPT Image-2：{', '.join(non_fal_urls)}")
+    if not image_urls:
+        raise RuntimeError("没有可传给 GPT Image-2 的 fal image_urls")
+    return uploaded_inputs, image_urls
+
+
+def is_fal_cdn_url(url: str) -> bool:
+    host = urlparse(url).netloc.lower()
+    return host in {"fal.media", "v3.fal.media"} or host.endswith(".fal.media")
+
+
+def upload_object_to_fal(object_key: str, filename: str) -> str:
+    content = get_bytes(object_key)
+    return upload_bytes_to_fal(content, filename)
+
+
+def upload_url_to_fal(url: str, filename: str) -> str:
+    content, content_type = download_bytes(url)
+    return upload_bytes_to_fal(content, filename, content_type)
+
+
+def upload_bytes_to_fal(content: bytes, filename: str, content_type: str | None = None) -> str:
+    settings = get_settings()
+    if not settings.fal_key:
+        raise RuntimeError("FAL_KEY 未配置，无法上传参考图到 fal")
+    try:
+        import fal_client
+    except ImportError as exc:
+        raise RuntimeError("fal-client 导入失败，无法上传参考图到 fal：请安装 fal-client") from exc
+
+    os.environ["FAL_KEY"] = settings.fal_key
+    suffix = filename_suffix(filename, content_type)
+    with tempfile.NamedTemporaryFile(prefix="lily-fal-input-", suffix=suffix) as handle:
+        handle.write(content)
+        handle.flush()
+        return fal_client.upload_file(handle.name)
+
+
+def filename_suffix(filename: str, content_type: str | None = None) -> str:
+    suffix = os.path.splitext(filename)[1]
+    if suffix:
+        return suffix
+    guessed = mimetypes.guess_extension(content_type or "") if content_type else None
+    return guessed or ".png"
 
 
 def post_json(url: str, payload: dict[str, Any], api_key: str, timeout: int | None = 300) -> dict[str, Any]:
@@ -254,7 +317,9 @@ def build_chinese_prompt(task_package: dict[str, Any]) -> str:
     garment = task_package.get("garment", {})
     model = task_package.get("model", {})
     brand_style = task_package.get("brandStyle", {})
+    planning_script = task_package.get("planningScript", {}) if isinstance(task_package.get("planningScript"), dict) else {}
     generation = task_package.get("generation", {})
+    stage = generation.get("stage", "final_group")
     constraints = generation.get("constraints", [])
     regeneration = task_package.get("regeneration")
 
@@ -266,7 +331,32 @@ def build_chinese_prompt(task_package: dict[str, Any]) -> str:
     for item in model_profile.get("forbidden", []):
         forbidden.append(str(item))
 
-    lines = [
+    if stage == "preview_grid":
+        lines = [
+            "任务：",
+            "生成一张 Lily AI 模特九宫格姿势预览图。画面为 3x3 九宫格，一张图内包含 9 个小格。",
+            "",
+            "九宫格要求：",
+            "- 9 个小格必须是同一位模特、同一件服装、同一套鞋包配饰、同一浅灰白棚拍背景。",
+            "- 只改变姿势、身位、轻微动态和取景，不改变服装品类、颜色、结构、长度和比例。",
+            "- 姿势需覆盖正面、轻斜正、3/4 斜正、侧身、轻走动、扶腰/插袋/自然垂手等 Lily 品牌常用方向。",
+            "- 每格看起来像可用于最终成片的候选姿态，不要生成夸张写真、街拍大片或复杂布景。",
+            "- 不要在图片中添加文字、编号、水印、logo 或说明。",
+            "",
+            "图片角色：",
+            "- 服装参考图是商品事实来源，必须保持服装设计、颜色、面料、结构、长度和比例。",
+            "- 模特头部图是身份事实来源，必须保持同一张脸、发型、刘海和克制表情。",
+            "- 品牌调性定义姿态、鞋包、配饰、光线、背景和构图边界。",
+            "",
+            "服装与品牌：",
+            f"- 货号 {task_package.get('sku', '')}：{garment.get('summary', '')}",
+            f"- Lily 调性：{planning_script.get('lilyTone') or brand_style.get('summary', '浅灰白棚拍、干净通勤、轻熟克制、商品优先。')}",
+            f"- 组图级搭配方案：{planning_script.get('stylingPlan', '')}",
+            f"- 颜色基调：{planning_script.get('colorPalette', '')}",
+            f"- 鞋包首饰：{planning_script.get('accessories', '')}",
+        ]
+    else:
+        lines = [
         "任务：",
         f"生成一张电商 AI 模特图，当前图位为 {shot.get('shotIndex', '')}：{shot.get('title', '生成图')}。",
         "",
@@ -278,14 +368,31 @@ def build_chinese_prompt(task_package: dict[str, Any]) -> str:
         "优先级：",
         f"1. 保持 {model.get('modelId', '当前模特')} 模特身份一致。",
         f"2. 保持货号 {task_package.get('sku', '')} 的服装事实：{garment.get('summary', '')}",
-        f"3. 遵守品牌风格：{brand_style.get('summary', '白/浅灰棚拍，商品优先。')}",
-        f"4. 当前图要求：{shot.get('frame', '')}，{shot.get('angle', '')}，重点展示{shot.get('focus', '服装')}。",
+        f"3. 遵守 Lily 调性：{planning_script.get('lilyTone') or brand_style.get('summary', '白/浅灰棚拍，商品优先。')}",
+        f"4. 服从组图级搭配方案：{planning_script.get('stylingPlan', '')}",
+        f"5. 当前图位任务：{shot.get('slotName', shot.get('title', ''))}，{shot.get('task', '')}；统一要求：{shot.get('unifiedRequirement', '')}。",
         "",
-        "姿态与造型：",
-        f"- 姿态：{shot.get('pose', '自然、克制、符合电商棚拍。')}",
+        "拍摄剧本：",
+        f"- 景别：{shot.get('scene') or shot.get('frame', '')}",
+        f"- 取景范围：{shot.get('cropRange') or shot.get('crop', '')}",
+        f"- 模特占画幅：{shot.get('modelScale', '')}",
+        f"- 头部处理：{shot.get('headTreatment', '')}",
+        f"- 身位：{shot.get('bodyPosition') or shot.get('angle', '')}",
+        f"- 姿势调性：{shot.get('poseTone') or shot.get('pose', '自然、克制、符合电商棚拍。')}",
+        f"- 画面目的：{shot.get('imagePurpose') or shot.get('focus', '')}",
         f"- 背景：{shot.get('background', '白/浅灰棚拍')}",
-        f"- 鞋包配饰：{styling.get('shoes', '')}；{styling.get('bag', '')}；{styling.get('jewelry', '')}",
-    ]
+        f"- 颜色基调：{planning_script.get('colorPalette', '')}",
+        f"- 鞋包首饰：{planning_script.get('accessories', '')}",
+        ]
+        if any(item.get("role") == "preview_grid" for item in task_package.get("imageInputs", [])):
+            lines.extend(
+                [
+                    "",
+                    "九宫格预览参考：",
+                    "- 已提供一张九宫格预览图，请参考其中的姿势、身位、服装一致性和整体气质。",
+                    "- 最终输出仍然只生成当前单张图位，不要输出九宫格。",
+                ]
+            )
     if constraints:
         lines.extend(["", "约束：", *[f"- {item}" for item in constraints]])
     if garment.get("proportionConstraints"):

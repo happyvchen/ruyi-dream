@@ -16,7 +16,7 @@ AI 模特组图生成 MVP 的后端实现目录。当前后端已经初始化为
 | API | FastAPI + Uvicorn |
 | Storage | S3 兼容对象存储，私有化默认 RustFS |
 | Metadata | SQLite：`backend/data/app.sqlite3` |
-| Planner | Gemini API，失败时 fallback 本地默认方案 |
+| Planner | Gemini API；失败直接返回错误并记录事件日志 |
 | Image Provider | `app/image_provider.py`，当前 GPT Image-2 三方平台占位输出 SVG |
 
 依赖清单见 `requirements.txt`。不要预先引入复杂 SaaS 权限、多租户、计费、队列集群。

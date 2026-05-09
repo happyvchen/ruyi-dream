@@ -12,7 +12,7 @@
 |---|---|
 | `app/main.py` | FastAPI app、API 路由、生成/重生/导出编排、后台生成状态 poller |
 | `app/db.py` | SQLite 初始化、默认模特 seed、事件日志写入 |
-| `app/planner.py` | Gemini 组图策划、fallback 默认方案 |
+| `app/planner.py` | Gemini 组图策划；读取 `backend/ref/` 下的客户实施引用文档 |
 | `app/image_provider.py` | GPT Image-2 Provider adapter，占位 SVG 输出、fal queue 提交和状态查询 |
 | `app/config.py` | 环境变量、对象存储、数据库、模型配置 |
 | `app/object_storage.py` | S3 兼容对象存储访问、预签名 URL、对象删除和读取 |
@@ -25,7 +25,7 @@
 |---|---|
 | `assets` | 服装图包、模特图包对象索引 |
 | `model-profile` | 数字模特档案、头部角度、身体参数 |
-| `garment-facts` | 商品事实卡、Gemini/fallback 识别摘要；当前不做素材角色解析 |
+| `garment-facts` | 商品事实卡、Gemini 识别摘要；当前不做素材角色解析 |
 | `brand-template` | 品牌模板、品类/图位参考图检索；当前内嵌在 planner 输出和 task package |
 | `planner` | 根据服装主图、品牌调性和品类规则生成默认 shot plan 和单张任务包 |
 | `generation` | 提交 Image 2 / fal queue，管理生成状态、单张重生和结果下载 |

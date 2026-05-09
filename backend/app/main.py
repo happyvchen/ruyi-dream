@@ -31,7 +31,7 @@ from .object_storage import (
     put_fileobj,
     unique_key,
 )
-from .planner import plan_with_gemini
+from .planner import PlannerError, SHOT_SLOTS, normalize_plan as normalize_planner_plan, plan_with_gemini
 
 
 settings = get_settings()
@@ -52,6 +52,11 @@ class PlanCreateRequest(BaseModel):
 
 class GenerateGroupRequest(BaseModel):
     shotPlanId: int
+    previewRunId: int | None = None
+
+
+class ShotPlanUpdateRequest(BaseModel):
+    plan: dict[str, Any]
 
 
 class RegenerateRequest(BaseModel):
@@ -109,6 +114,7 @@ TERMINAL_IMAGE_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
 async def startup() -> None:
     ensure_bucket()
     init_db()
+    backfill_shot_plan_script_data()
     app.state.generation_poller = asyncio.create_task(generation_poller_loop())
 
 
@@ -702,18 +708,54 @@ async def create_shot_plan(payload: PlanCreateRequest) -> dict[str, Any]:
                 image_paths.append(path)
             except Exception:
                 continue
-        plan, provider, raw = await plan_with_gemini(sku_row["sku"], image_paths)
+        try:
+            plan, provider, raw = await plan_with_gemini(sku_row["sku"], image_paths)
+        except PlannerError as exc:
+            with get_db() as db:
+                log_event(
+                    db,
+                    "shot_plan",
+                    None,
+                    "planner_failed",
+                    {
+                        "skuId": payload.skuId,
+                        "sku": sku_row["sku"],
+                        "modelProfileId": model_row["id"],
+                        "error": str(exc),
+                        "providerRequest": exc.provider_request,
+                        "providerResponse": exc.provider_response,
+                    },
+                )
+            raise HTTPException(status_code=502, detail=f"Gemini 组图方案生成失败：{exc}") from exc
     timestamp = now_iso()
     with get_db() as db:
         cursor = db.execute(
             """
             INSERT INTO shot_plans
-              (sku_id, model_profile_id, status, plan_json, planner_provider, raw_response, created_at, updated_at)
-            VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?)
+              (sku_id, model_profile_id, status, plan_json, category, sales_info,
+               evidence_level, lily_tone, styling_plan, color_palette, accessories,
+               planner_provider, raw_response, created_at, updated_at)
+            VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (payload.skuId, model_row["id"], dumps(plan), provider, raw, timestamp, timestamp),
+            (
+                payload.skuId,
+                model_row["id"],
+                dumps(plan),
+                plan.get("category") or plan.get("garment", {}).get("category"),
+                plan.get("salesInfo"),
+                plan.get("evidenceLevel"),
+                plan.get("lilyTone"),
+                plan.get("stylingPlan"),
+                plan.get("colorPalette"),
+                plan.get("accessories"),
+                provider,
+                raw,
+                timestamp,
+                timestamp,
+            ),
         )
         plan_id = int(cursor.lastrowid)
+        sync_shot_plan_shots(db, plan_id, plan, timestamp)
         db.execute(
             "UPDATE garment_skus SET status = 'ANALYZED', analysis_json = ?, updated_at = ? WHERE id = ?",
             (dumps(plan.get("garment", {})), timestamp, payload.skuId),
@@ -738,6 +780,46 @@ def get_shot_plan(shot_plan_id: int) -> dict[str, Any]:
         return {"item": serialize_shot_plan(row)}
 
 
+@app.patch("/api/shot-plans/{shot_plan_id}")
+def update_shot_plan(shot_plan_id: int, payload: ShotPlanUpdateRequest) -> dict[str, Any]:
+    timestamp = now_iso()
+    with get_db() as db:
+        row = db.execute("SELECT * FROM shot_plans WHERE id = ?", (shot_plan_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="组图方案不存在")
+        sku_row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (row["sku_id"],)).fetchone()
+        plan = normalize_editable_plan(payload.plan, sku_row["sku"])
+        db.execute(
+            """
+            UPDATE shot_plans
+            SET plan_json = ?, category = ?, sales_info = ?, evidence_level = ?,
+                lily_tone = ?, styling_plan = ?, color_palette = ?, accessories = ?,
+                status = 'DRAFT', updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                dumps(plan),
+                plan.get("category") or plan.get("garment", {}).get("category"),
+                plan.get("salesInfo"),
+                plan.get("evidenceLevel"),
+                plan.get("lilyTone"),
+                plan.get("stylingPlan"),
+                plan.get("colorPalette"),
+                plan.get("accessories"),
+                timestamp,
+                shot_plan_id,
+            ),
+        )
+        sync_shot_plan_shots(db, shot_plan_id, plan, timestamp)
+        db.execute(
+            "UPDATE garment_skus SET analysis_json = ?, status = 'ANALYZED', updated_at = ? WHERE id = ?",
+            (dumps(plan.get("garment", {})), timestamp, row["sku_id"]),
+        )
+        log_event(db, "shot_plan", shot_plan_id, "updated", {"plan": plan})
+        updated = db.execute("SELECT * FROM shot_plans WHERE id = ?", (shot_plan_id,)).fetchone()
+    return {"item": serialize_shot_plan(updated)}
+
+
 @app.get("/api/garment-skus/{sku_id}/default-shot-plan")
 def get_default_shot_plan(sku_id: int) -> dict[str, Any]:
     with get_db() as db:
@@ -748,13 +830,73 @@ def get_default_shot_plan(sku_id: int) -> dict[str, Any]:
             """
             SELECT *
             FROM shot_plans
-            WHERE sku_id = ?
+            WHERE sku_id = ? AND planner_provider = 'gemini' AND status <> 'FAILED'
             ORDER BY updated_at DESC, id DESC
             LIMIT 1
             """,
             (sku_id,),
         ).fetchone()
         return {"item": serialize_shot_plan(row) if row else None}
+
+
+@app.post("/api/preview-runs")
+async def generate_preview_grid(payload: GenerateGroupRequest) -> dict[str, Any]:
+    with get_db() as db:
+        plan_row = db.execute("SELECT * FROM shot_plans WHERE id = ?", (payload.shotPlanId,)).fetchone()
+        if not plan_row:
+            raise HTTPException(status_code=404, detail="组图方案不存在")
+        sku_row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (plan_row["sku_id"],)).fetchone()
+        model_row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (plan_row["model_profile_id"],)).fetchone()
+
+    plan = loads(plan_row["plan_json"], {})
+    plan["_planner"] = {
+        "provider": plan_row["planner_provider"],
+        "rawResponse": plan_row["raw_response"],
+    }
+    output_dir = join_key("outputs", sku_row["sku"], f"preview-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+    timestamp = now_iso()
+    provider = get_image_provider()
+    preview_shot = {
+        "shotIndex": 0,
+        "title": "九宫格姿势预览",
+        "frame": "3x3 九宫格",
+        "crop": "每格全身或近全身，头脚完整优先",
+        "angle": "多姿势预览",
+        "focus": "在服装、配饰、人物一致的前提下比较姿势和身位",
+        "pose": "九个不同但符合 Lily 品牌调性的姿势，覆盖正面、轻斜正、3/4 斜正、侧身、轻走动和细节展示姿态",
+        "bodyPosition": "多身位",
+        "headReference": "front.png",
+        "background": "白/浅灰棚拍",
+        "styling": {},
+    }
+    task_package = build_preview_task_package(sku_row, model_row, plan, preview_shot)
+
+    with get_db() as db:
+        run_cursor = db.execute(
+            """
+            INSERT INTO generation_runs
+              (sku_id, shot_plan_id, model_profile_id, kind, status, output_dir, created_at, updated_at)
+            VALUES (?, ?, ?, 'preview_grid', 'RUNNING', ?, ?, ?)
+            """,
+            (sku_row["id"], plan_row["id"], model_row["id"], str(output_dir), timestamp, timestamp),
+        )
+        run_id = int(run_cursor.lastrowid)
+        log_event(db, "generation_run", run_id, "preview_started", {"shotPlanId": plan_row["id"], "outputDir": str(output_dir)})
+
+    image_id = await submit_single_image(
+        run_id=run_id,
+        sku_row=sku_row,
+        model_row=model_row,
+        plan=plan,
+        shot=preview_shot,
+        provider=provider,
+        output_dir=output_dir,
+        task_package_override=task_package,
+    )
+    update_generation_run_status(run_id)
+    with get_db() as db:
+        log_event(db, "generation_run", run_id, "preview_submitted", {"imageIds": [image_id]})
+    return {"item": get_generation_run_by_id(run_id)}
 
 
 @app.post("/api/generation-runs")
@@ -787,8 +929,10 @@ async def generate_group(payload: GenerateGroupRequest) -> dict[str, Any]:
         run_id = int(run_cursor.lastrowid)
         log_event(db, "generation_run", run_id, "started", {"shotPlanId": plan_row["id"], "outputDir": str(output_dir)})
 
+    preview_inputs = get_preview_grid_inputs(payload.previewRunId, plan_row["id"]) if payload.previewRunId else []
     generated_ids: list[int] = []
     for shot in plan.get("shots", []):
+        task_package = build_task_package(sku_row, model_row, plan, shot, preview_inputs=preview_inputs)
         image_id = await submit_single_image(
             run_id=run_id,
             sku_row=sku_row,
@@ -797,6 +941,7 @@ async def generate_group(payload: GenerateGroupRequest) -> dict[str, Any]:
             shot=shot,
             provider=provider,
             output_dir=output_dir,
+            task_package_override=task_package,
         )
         generated_ids.append(image_id)
     update_generation_run_status(run_id)
@@ -1148,16 +1293,36 @@ def refresh_generation_image_status(provider: Any, image_row: Any) -> None:
     try:
         result = asyncio.run(provider.refresh(image_row))
     except Exception as exc:
+        failed_at = now_iso()
+        attempts = loads(image_row["attempts_json"], []) or []
+        if attempts:
+            attempts[-1] = {
+                **attempts[-1],
+                "providerStatus": "STATUS_CHECK_FAILED",
+                "providerStatusResponse": {"error": str(exc)},
+                "completedAt": failed_at,
+            }
         with get_db() as db:
             db.execute(
                 """
                 UPDATE generation_images
-                SET provider_status = ?, provider_status_json = ?, last_status_checked_at = ?, updated_at = ?
+                SET status = 'FAILED', provider_status = ?, provider_status_json = ?,
+                    attempts_json = ?, completed_at = COALESCE(completed_at, ?),
+                    last_status_checked_at = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                ("STATUS_CHECK_FAILED", dumps({"error": str(exc)}), now_iso(), now_iso(), image_row["id"]),
+                (
+                    "STATUS_CHECK_FAILED",
+                    dumps({"error": str(exc)}),
+                    dumps(attempts),
+                    failed_at,
+                    failed_at,
+                    failed_at,
+                    image_row["id"],
+                ),
             )
             log_event(db, "generation_image", image_row["id"], "status_check_failed", {"error": str(exc)})
+        update_generation_run_status(image_row["run_id"])
         return
 
     next_status = result.get("status", image_row["status"])
@@ -1229,10 +1394,38 @@ def update_generation_run_status(run_id: int) -> None:
         )
 
 
-def build_task_package(sku_row: Any, model_row: Any, plan: dict[str, Any], shot: dict[str, Any]) -> dict[str, Any]:
+def build_preview_task_package(sku_row: Any, model_row: Any, plan: dict[str, Any], shot: dict[str, Any]) -> dict[str, Any]:
+    package = build_task_package(sku_row, model_row, plan, shot)
+    package["generation"] = {
+        **package["generation"],
+        "stage": "preview_grid",
+        "output": {"aspectRatio": "1:1", "size": "1200x1200", "layout": "3x3 grid"},
+        "constraints": [
+            *package["generation"]["constraints"],
+            "生成一张九宫格预览图，每格是同一模特、同一服装、同一搭配，只改变姿势和身位",
+            "九宫格用于用户选择方向，不要输出最终 5 张成片",
+            "每格保持服装和配饰一致，不能改变商品结构、颜色、长度和比例",
+        ],
+    }
+    package["previewPlan"] = {
+        "goal": "给用户预览 9 个 Lily 品牌调性的可选姿势与身位",
+        "shots": plan.get("shots", []),
+    }
+    return package
+
+
+def build_task_package(
+    sku_row: Any,
+    model_row: Any,
+    plan: dict[str, Any],
+    shot: dict[str, Any],
+    preview_inputs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     garment = plan.get("garment", {})
     model_profile = loads(model_row["profile_json"], {})
     image_inputs = build_image_inputs(sku_row, model_row, model_profile, shot)
+    if preview_inputs:
+        image_inputs.extend(preview_inputs)
     if sku_row["sku"] == "125309C7948510":
         garment = {
             **garment,
@@ -1250,21 +1443,163 @@ def build_task_package(sku_row: Any, model_row: Any, plan: dict[str, Any], shot:
             "identityLock": "high",
         },
         "brandStyle": plan.get("brandStyle", {}),
+        "planningScript": {
+            "category": plan.get("category") or garment.get("category"),
+            "salesInfo": plan.get("salesInfo"),
+            "evidenceLevel": plan.get("evidenceLevel"),
+            "lilyTone": plan.get("lilyTone"),
+            "stylingPlan": plan.get("stylingPlan"),
+            "colorPalette": plan.get("colorPalette"),
+            "accessories": plan.get("accessories"),
+        },
         "planner": plan.get("_planner", {}),
         "shot": shot,
         "imageInputs": image_inputs,
         "generation": {
             "targetModel": "GPT Image-2",
             "provider": "fal",
+            "stage": "final_group",
             "output": {"aspectRatio": "1:1", "size": "1200x1200"},
             "constraints": [
                 "服装参考图是商品事实源",
                 "保持同一模特脸、发型、气质",
                 "保持白/浅灰棚拍风格",
                 "不生成无关文字、水印、logo",
+                "如果提供了九宫格预览图，把它作为姿势、身位和整体一致性的参考",
             ],
         },
     }
+
+
+def get_preview_grid_inputs(preview_run_id: int | None, shot_plan_id: int) -> list[dict[str, Any]]:
+    if not preview_run_id:
+        return []
+    with get_db() as db:
+        run_row = db.execute(
+            "SELECT * FROM generation_runs WHERE id = ? AND shot_plan_id = ?",
+            (preview_run_id, shot_plan_id),
+        ).fetchone()
+        if not run_row:
+            raise HTTPException(status_code=400, detail="九宫格预览记录不存在或不属于当前方案")
+        image_rows = db.execute(
+            """
+            SELECT *
+            FROM generation_images
+            WHERE run_id = ? AND status = 'SUCCEEDED' AND output_path IS NOT NULL
+            ORDER BY shot_index, id
+            LIMIT 1
+            """,
+            (preview_run_id,),
+        ).fetchall()
+    inputs: list[dict[str, Any]] = []
+    for row in image_rows:
+        object_key = row["output_path"]
+        inputs.append(
+            {
+                "role": "preview_grid",
+                "filename": Path(object_key).name,
+                "objectKey": object_key,
+                "url": presigned_get_url(object_key),
+            }
+        )
+    if not inputs:
+        raise HTTPException(status_code=422, detail="九宫格预览尚未生成成功，不能用于最终生成")
+    return inputs
+
+
+def normalize_editable_plan(plan: dict[str, Any], sku: str) -> dict[str, Any]:
+    if not isinstance(plan, dict):
+        raise HTTPException(status_code=400, detail="方案格式不合法")
+    shots = plan.get("shots")
+    if not isinstance(shots, list) or not shots:
+        raise HTTPException(status_code=400, detail="方案至少需要一个图位")
+    normalized = normalize_planner_plan(dict(plan), sku)
+    if len(normalized.get("shots", [])) != 5:
+        raise HTTPException(status_code=400, detail="方案必须包含 5 个固定图位")
+    return normalized
+
+
+def sync_shot_plan_shots(db: Any, shot_plan_id: int, plan: dict[str, Any], timestamp: str) -> None:
+    db.execute("DELETE FROM shot_plan_shots WHERE shot_plan_id = ?", (shot_plan_id,))
+    for raw_shot in plan.get("shots", []):
+        shot = dict(raw_shot)
+        shot_index = int(shot.get("shotIndex", 1))
+        slot = next((item for item in SHOT_SLOTS if item["shotIndex"] == shot_index), SHOT_SLOTS[0])
+        db.execute(
+            """
+            INSERT INTO shot_plan_shots
+              (shot_plan_id, shot_index, slot_name, english_name, title, task,
+               unified_requirement, scene, crop_range, model_scale, head_treatment,
+               body_position, pose_tone, image_purpose, head_reference, background,
+               shot_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                shot_plan_id,
+                shot_index,
+                str(shot.get("slotName") or slot["slotName"]),
+                str(shot.get("englishName") or slot["englishName"]),
+                str(shot.get("title") or f"图 {shot_index} {slot['slotName']}"),
+                str(shot.get("task") or slot["task"]),
+                str(shot.get("unifiedRequirement") or slot["unifiedRequirement"]),
+                str(shot.get("scene") or shot.get("frame") or ""),
+                str(shot.get("cropRange") or shot.get("crop") or ""),
+                str(shot.get("modelScale") or ""),
+                str(shot.get("headTreatment") or ""),
+                str(shot.get("bodyPosition") or shot.get("angle") or ""),
+                str(shot.get("poseTone") or shot.get("pose") or ""),
+                str(shot.get("imagePurpose") or shot.get("focus") or ""),
+                str(shot.get("headReference") or "front.png"),
+                str(shot.get("background") or "白/浅灰棚拍"),
+                dumps(shot),
+                timestamp,
+                timestamp,
+            ),
+        )
+
+
+def backfill_shot_plan_script_data() -> None:
+    timestamp = now_iso()
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT sp.*, gs.sku
+            FROM shot_plans sp
+            JOIN garment_skus gs ON gs.id = sp.sku_id
+            ORDER BY sp.id
+            """
+        ).fetchall()
+        for row in rows:
+            shot_count = db.execute(
+                "SELECT COUNT(*) AS count FROM shot_plan_shots WHERE shot_plan_id = ?",
+                (row["id"],),
+            ).fetchone()["count"]
+            needs_top = not row["category"] if "category" in row.keys() else True
+            if shot_count and not needs_top:
+                continue
+            plan = normalize_planner_plan(loads(row["plan_json"], {}), row["sku"])
+            db.execute(
+                """
+                UPDATE shot_plans
+                SET plan_json = ?, category = ?, sales_info = ?, evidence_level = ?,
+                    lily_tone = ?, styling_plan = ?, color_palette = ?, accessories = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    dumps(plan),
+                    plan.get("category") or plan.get("garment", {}).get("category"),
+                    plan.get("salesInfo"),
+                    plan.get("evidenceLevel"),
+                    plan.get("lilyTone"),
+                    plan.get("stylingPlan"),
+                    plan.get("colorPalette"),
+                    plan.get("accessories"),
+                    row["updated_at"] or timestamp,
+                    row["id"],
+                ),
+            )
+            sync_shot_plan_shots(db, row["id"], plan, row["updated_at"] or timestamp)
 
 
 def build_image_inputs(sku_row: Any, model_row: Any, model_profile: dict[str, Any], shot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1444,12 +1779,27 @@ def serialize_model(row: Any) -> dict[str, Any]:
 
 
 def serialize_shot_plan(row: Any) -> dict[str, Any]:
+    plan = loads(row["plan_json"], {})
+    with get_db() as db:
+        shot_rows = db.execute(
+            "SELECT * FROM shot_plan_shots WHERE shot_plan_id = ? ORDER BY shot_index",
+            (row["id"],),
+        ).fetchall()
+    if shot_rows:
+        plan["shots"] = [loads(shot["shot_json"], {}) for shot in shot_rows]
+    plan.setdefault("category", row["category"] if "category" in row.keys() else plan.get("garment", {}).get("category"))
+    plan.setdefault("salesInfo", row["sales_info"] if "sales_info" in row.keys() else None)
+    plan.setdefault("evidenceLevel", row["evidence_level"] if "evidence_level" in row.keys() else None)
+    plan.setdefault("lilyTone", row["lily_tone"] if "lily_tone" in row.keys() else None)
+    plan.setdefault("stylingPlan", row["styling_plan"] if "styling_plan" in row.keys() else None)
+    plan.setdefault("colorPalette", row["color_palette"] if "color_palette" in row.keys() else None)
+    plan.setdefault("accessories", row["accessories"] if "accessories" in row.keys() else None)
     return {
         "id": row["id"],
         "skuId": row["sku_id"],
         "modelProfileId": row["model_profile_id"],
         "status": row["status"],
-        "plan": loads(row["plan_json"], {}),
+        "plan": plan,
         "plannerProvider": row["planner_provider"],
         "rawResponse": row["raw_response"],
         "createdAt": row["created_at"],

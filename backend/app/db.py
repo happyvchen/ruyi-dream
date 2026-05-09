@@ -82,10 +82,41 @@ def init_db() -> None:
               model_profile_id INTEGER NOT NULL REFERENCES model_profiles(id),
               status TEXT NOT NULL DEFAULT 'DRAFT',
               plan_json TEXT NOT NULL,
+              category TEXT,
+              sales_info TEXT,
+              evidence_level TEXT,
+              lily_tone TEXT,
+              styling_plan TEXT,
+              color_palette TEXT,
+              accessories TEXT,
               planner_provider TEXT NOT NULL,
               raw_response TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS shot_plan_shots (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              shot_plan_id INTEGER NOT NULL REFERENCES shot_plans(id) ON DELETE CASCADE,
+              shot_index INTEGER NOT NULL,
+              slot_name TEXT NOT NULL,
+              english_name TEXT,
+              title TEXT NOT NULL,
+              task TEXT,
+              unified_requirement TEXT,
+              scene TEXT,
+              crop_range TEXT,
+              model_scale TEXT,
+              head_treatment TEXT,
+              body_position TEXT,
+              pose_tone TEXT,
+              image_purpose TEXT,
+              head_reference TEXT,
+              background TEXT,
+              shot_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(shot_plan_id, shot_index)
             );
 
             CREATE TABLE IF NOT EXISTS generation_runs (
@@ -141,6 +172,13 @@ def init_db() -> None:
         ensure_column(db, "generation_images", "submitted_at", "TEXT")
         ensure_column(db, "generation_images", "completed_at", "TEXT")
         ensure_column(db, "generation_images", "last_status_checked_at", "TEXT")
+        ensure_column(db, "shot_plans", "category", "TEXT")
+        ensure_column(db, "shot_plans", "sales_info", "TEXT")
+        ensure_column(db, "shot_plans", "evidence_level", "TEXT")
+        ensure_column(db, "shot_plans", "lily_tone", "TEXT")
+        ensure_column(db, "shot_plans", "styling_plan", "TEXT")
+        ensure_column(db, "shot_plans", "color_palette", "TEXT")
+        ensure_column(db, "shot_plans", "accessories", "TEXT")
         seed_default_model(db)
 
 

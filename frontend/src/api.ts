@@ -97,10 +97,20 @@ export const api = {
   getDefaultPlan: (skuId: number) =>
     request<{ item: ShotPlan | null }>(`/api/garment-skus/${skuId}/default-shot-plan`),
   getPlan: (shotPlanId: number) => request<{ item: ShotPlan }>(`/api/shot-plans/${shotPlanId}`),
-  generateGroup: (shotPlanId: number) =>
-    request<{ item: GenerationRun }>('/api/generation-runs', {
+  updatePlan: (shotPlanId: number, plan: ShotPlan['plan']) =>
+    request<{ item: ShotPlan }>(`/api/shot-plans/${shotPlanId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ plan }),
+    }),
+  previewGrid: (shotPlanId: number) =>
+    request<{ item: GenerationRun }>('/api/preview-runs', {
       method: 'POST',
       body: JSON.stringify({ shotPlanId }),
+    }),
+  generateGroup: (shotPlanId: number, previewRunId?: number) =>
+    request<{ item: GenerationRun }>('/api/generation-runs', {
+      method: 'POST',
+      body: JSON.stringify({ shotPlanId, previewRunId }),
     }),
   listRuns: () => request<{ items: GenerationRun[] }>('/api/generation-runs'),
   getRun: (runId: number) => request<{ item: GenerationRun }>(`/api/generation-runs/${runId}`),

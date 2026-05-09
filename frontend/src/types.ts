@@ -48,11 +48,23 @@ export type ModelProfile = {
 
 export type Shot = {
   shotIndex: number
+  slotName?: string
+  englishName?: string
   title: string
+  task?: string
+  unifiedRequirement?: string
+  scene?: string
   frame: string
+  cropRange?: string
+  crop?: string
+  modelScale?: string
+  headTreatment?: string
   angle: string
   focus: string
+  imagePurpose?: string
   pose: string
+  poseTone?: string
+  bodyPosition?: string
   headReference: string
   background: string
   styling: {
@@ -73,6 +85,13 @@ export type ShotPlan = {
   plan: {
     sku: string
     modelId: string
+    category?: string
+    salesInfo?: string
+    evidenceLevel?: string
+    lilyTone?: string
+    stylingPlan?: string
+    colorPalette?: string
+    accessories?: string
     garment: GarmentAnalysis
     brandStyle: {
       name: string

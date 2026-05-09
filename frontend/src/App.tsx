@@ -21,9 +21,9 @@ import {
   X,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
-import type { GarmentSku, GenerationImage, GenerationRun, ModelProfile, ShotPlan } from './types'
+import type { GarmentSku, GenerationImage, GenerationRun, ModelProfile, Shot, ShotPlan } from './types'
 
-type BusyState = 'idle' | 'uploading' | 'planning' | 'generating' | 'regenerating'
+type BusyState = 'idle' | 'uploading' | 'planning' | 'saving-plan' | 'previewing' | 'generating' | 'regenerating'
 type Page = 'generate' | 'garments' | 'models' | 'history'
 type AppRoute = {
   page: Page
@@ -32,6 +32,7 @@ type AppRoute = {
   runId?: number
   generateSku?: string
   generateRunId?: number
+  generatePreviewRunId?: number
 }
 type ImportStatus = 'draft' | 'uploading' | 'uploaded' | 'failed'
 type ImportImage = {
@@ -86,6 +87,7 @@ export function App() {
   const [selectedSku, setSelectedSku] = useState<GarmentSku | null>(null)
   const [selectedModelId, setSelectedModelId] = useState<number | undefined>()
   const [shotPlan, setShotPlan] = useState<ShotPlan | null>(null)
+  const [previewRun, setPreviewRun] = useState<GenerationRun | null>(null)
   const [generationRun, setGenerationRun] = useState<GenerationRun | null>(null)
   const [historyRuns, setHistoryRuns] = useState<GenerationRun[]>([])
   const [selectedHistoryRun, setSelectedHistoryRun] = useState<GenerationRun | null>(null)
@@ -146,10 +148,25 @@ export function App() {
   }, [generationRun?.id])
 
   useEffect(() => {
-    if (!generationRun || !isRunActive(generationRun)) return
+    if (!(generationRun && isRunActive(generationRun)) && !(previewRun && isRunActive(previewRun))) return
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000)
     return () => window.clearInterval(timer)
-  }, [generationRun?.id, generationRun?.status])
+  }, [generationRun?.id, generationRun?.status, previewRun?.id, previewRun?.status])
+
+  useEffect(() => {
+    if (!previewRun || !isRunActive(previewRun)) return
+    const poll = async () => {
+      try {
+        const result = await api.getRun(previewRun.id)
+        setPreviewRun(result.item)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '刷新预览状态失败')
+      }
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 3000)
+    return () => window.clearInterval(timer)
+  }, [previewRun?.id, previewRun?.status])
 
   useEffect(() => {
     if (!generationRun || !isRunActive(generationRun)) return
@@ -202,7 +219,7 @@ export function App() {
       const targetSku = skus.find((sku) => sku.sku === route.generateSku)
       if (targetSku) {
         setHydratedRouteKey(routeKey(route))
-        void chooseSku(targetSku, { syncUrl: false })
+        void chooseSku(targetSku, { syncUrl: false, previewRunId: route.generatePreviewRunId })
       }
       return
     }
@@ -230,7 +247,7 @@ export function App() {
     setHistoryRuns(result.items)
   }
 
-  async function chooseSku(sku: GarmentSku, options: { syncUrl?: boolean; targetPage?: Page } = {}) {
+  async function chooseSku(sku: GarmentSku, options: { syncUrl?: boolean; targetPage?: Page; previewRunId?: number } = {}) {
     setError(null)
     const detail = await api.getSku(sku.id)
     const planResult = await api.getDefaultPlan(sku.id)
@@ -242,11 +259,35 @@ export function App() {
     })
     setExtraFiles([])
     setShotPlan(planResult.item)
+    const restoredPreview = await resolvePreviewRun(detail.item.id, planResult.item?.id, options.previewRunId)
+    setPreviewRun(restoredPreview)
     setGenerationRun(null)
     if (options.syncUrl !== false) {
       const targetPage = options.targetPage ?? page
       if (targetPage === 'garments') navigate({ page: 'garments', sku: detail.item.sku })
-      if (targetPage === 'generate') navigate({ page: 'generate', generateSku: detail.item.sku })
+      if (targetPage === 'generate') navigate({ page: 'generate', generateSku: detail.item.sku, generatePreviewRunId: restoredPreview?.id })
+    }
+  }
+
+  async function resolvePreviewRun(skuId: number, shotPlanId?: number, preferredRunId?: number) {
+    if (preferredRunId) {
+      try {
+        const result = await api.getRun(preferredRunId)
+        if (result.item.kind === 'preview_grid' && result.item.skuId === skuId && (!shotPlanId || result.item.shotPlanId === shotPlanId)) {
+          return result.item
+        }
+      } catch {
+        return null
+      }
+    }
+    if (!shotPlanId) return null
+    const runs = (await api.listRuns()).items
+    const preview = runs.find((run) => run.kind === 'preview_grid' && run.skuId === skuId && run.shotPlanId === shotPlanId)
+    if (!preview) return null
+    try {
+      return (await api.getRun(preview.id)).item
+    } catch {
+      return null
     }
   }
 
@@ -328,6 +369,7 @@ export function App() {
         const plannedDetail = await api.getSku(result.item.id)
         setSelectedSku(plannedDetail.item)
         setShotPlan(planResult.item)
+        setPreviewRun(null)
         setEditSkuForm({
         sku: plannedDetail.item.sku,
           title: plannedDetail.item.title ?? plannedDetail.item.sku,
@@ -368,6 +410,7 @@ export function App() {
     try {
       const result = await api.createPlan(targetSku.id, selectedModel?.id)
       setShotPlan(result.item)
+      setPreviewRun(null)
       const detail = (await api.getSku(targetSku.id)).item
       setSelectedSku(detail)
       setGenerationRun(null)
@@ -384,7 +427,7 @@ export function App() {
     setBusy('generating')
     setError(null)
     try {
-      const result = await api.generateGroup(shotPlan.id)
+      const result = await api.generateGroup(shotPlan.id, previewRun?.id)
       setGenerationRun(result.item)
       navigate({ page: 'generate', generateRunId: result.item.id }, true)
       await refreshHistoryRuns()
@@ -395,12 +438,50 @@ export function App() {
     }
   }
 
+  async function previewGrid() {
+    if (!shotPlan) return
+    setBusy('previewing')
+    setError(null)
+    try {
+      const result = await api.previewGrid(shotPlan.id)
+      setPreviewRun(result.item)
+      setGenerationRun(null)
+      if (selectedSku) navigate({ page: 'generate', generateSku: selectedSku.sku, generatePreviewRunId: result.item.id }, true)
+      await refreshHistoryRuns()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '生成九宫格预览失败')
+    } finally {
+      setBusy('idle')
+    }
+  }
+
+  async function saveShotPlan(plan: ShotPlan['plan']) {
+    if (!shotPlan) return
+    setBusy('saving-plan')
+    setError(null)
+    try {
+      const result = await api.updatePlan(shotPlan.id, plan)
+      setShotPlan(result.item)
+      setPreviewRun(null)
+      if (selectedSku) setSelectedSku((await api.getSku(selectedSku.id)).item)
+      await refreshBaseData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存组图方案失败')
+    } finally {
+      setBusy('idle')
+    }
+  }
+
   async function regenerate(image: GenerationImage, reason: string) {
     setBusy('regenerating')
     setError(null)
     try {
       const result = await api.regenerate(image.id, reason)
-      setGenerationRun((current) => mergeRun(current, result.item))
+      if (previewRun?.id === result.item.id) {
+        setPreviewRun(result.item)
+      } else {
+        setGenerationRun((current) => mergeRun(current, result.item))
+      }
       await refreshHistoryRuns()
     } catch (err) {
       setError(err instanceof Error ? err.message : '重生失败')
@@ -411,6 +492,17 @@ export function App() {
 
   async function toggleFinal(image: GenerationImage) {
     const result = await api.setFinal(image.id, !image.isFinal)
+    if (previewRun?.id === image.runId) {
+      setPreviewRun((current) => {
+        if (!current?.images) return current
+        return {
+          ...current,
+          images: current.images.map((item) => (item.id === image.id ? result.item : item)),
+        }
+      })
+      await refreshHistoryRuns()
+      return
+    }
     setGenerationRun((current) => {
       if (!current?.images) return current
       return {
@@ -448,6 +540,7 @@ export function App() {
       })
       setShotPlan(planResult.item)
       setGenerationRun(runResult.item)
+      setPreviewRun(null)
       if (options.syncUrl === false) setPage('generate')
       else navigate({ page: 'generate', generateRunId: runResult.item.id })
     } catch (err) {
@@ -481,6 +574,7 @@ export function App() {
       await api.deleteSku(selectedSku.id)
       setSelectedSku(null)
       setShotPlan(null)
+      setPreviewRun(null)
       setGenerationRun(null)
       navigate({ page: 'garments' }, true)
       await refreshBaseData()
@@ -796,17 +890,58 @@ export function App() {
                 <EmptyText text="暂无数字模特" />
               )}
             </StepCard>
+
+            <StepCard number="3" title="九宫格预览">
+              <div className="model-summary">
+                <h3>{previewRun ? `预览 #${previewRun.id}` : '先看姿势方向'}</h3>
+                <p>
+                  {previewRun
+                    ? previewRun.status === 'SUCCEEDED'
+                      ? '状态：已生成。满意后再生成最终 5 张成片。'
+                      : isRunActive(previewRun)
+                        ? `状态：${statusText(previewRun.status)}。九宫格完成后即可生成最终成片。`
+                        : `状态：${statusText(previewRun.status)}。请重新预览后再生成最终成片。`
+                    : '点击预览会先生成一张九宫格，服装、配饰和人物保持一致，只变化姿势与身位。'}
+                </p>
+                {previewRun ? <Tag>{previewRun.status === 'SUCCEEDED' ? '可用于生成' : isRunActive(previewRun) ? '生成中' : '不可生成'}</Tag> : <Tag>未预览</Tag>}
+              </div>
+            </StepCard>
           </div>
 
           <div className="action-row">
-            <button className="primary" onClick={generateGroup} disabled={!selectedSku || !shotPlan || busy !== 'idle' || Boolean(generationRun && isRunActive(generationRun))}>
-              {busy === 'generating' ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
-              生成组图
+            <button className="secondary" onClick={previewGrid} disabled={!selectedSku || !shotPlan || busy !== 'idle' || Boolean(previewRun && isRunActive(previewRun))}>
+              {busy === 'previewing' ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
+              预览
             </button>
-            <span>{shotPlan ? `将直接使用默认方案 #${shotPlan.id}，可单张重生；生成与重生记录会保留。` : '该货号还没有默认组图方案，请先到服装素材页保存方案。'}</span>
+            <button className="primary" onClick={generateGroup} disabled={!selectedSku || !shotPlan || !previewRun || previewRun.status !== 'SUCCEEDED' || isRunActive(previewRun) || busy !== 'idle' || Boolean(generationRun && isRunActive(generationRun))}>
+              {busy === 'generating' ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
+              生成
+            </button>
+            <span>
+              {shotPlan
+                ? previewRun?.status === 'SUCCEEDED'
+                  ? `将使用方案 #${shotPlan.id} 和九宫格预览 #${previewRun.id} 生成最终组图。`
+                  : previewRun
+                    ? '当前九宫格预览未完成或已失败，请重新预览后再生成最终组图。'
+                    : '请先生成九宫格预览，确认姿势方向后再生成最终组图。'
+                : '该货号还没有默认组图方案，请先到服装素材页保存方案。'}
+            </span>
           </div>
 
+          {previewRun && (
+            <ResultGallery
+              title="九宫格预览"
+              run={previewRun}
+              loading={busy === 'previewing' || isRunActive(previewRun)}
+              nowMs={nowMs}
+              onRegenerate={(image, reason) => void regenerate(image, reason)}
+              onToggleFinal={(image) => void toggleFinal(image)}
+              onExport={(runId) => void api.exportRun(runId)}
+            />
+          )}
+
           <ResultGallery
+            title="最终组图"
             run={generationRun}
             loading={busy === 'generating' || busy === 'regenerating' || Boolean(generationRun && isRunActive(generationRun))}
             nowMs={nowMs}
@@ -857,6 +992,9 @@ export function App() {
           }}
           onCreatePlan={(sku) => {
             void createPlan(sku)
+          }}
+          onSavePlan={(plan) => {
+            void saveShotPlan(plan)
           }}
         />
       )}
@@ -924,6 +1062,7 @@ function GarmentLibraryPage({
   onSelectSku,
   onUseInGenerate,
   onCreatePlan,
+  onSavePlan,
 }: {
   skus: GarmentSku[]
   selectedSku: GarmentSku | null
@@ -950,6 +1089,7 @@ function GarmentLibraryPage({
   onSelectSku: (sku: GarmentSku) => void
   onUseInGenerate: (sku: GarmentSku) => void
   onCreatePlan: (sku: GarmentSku) => void
+  onSavePlan: (plan: ShotPlan['plan']) => void
 }) {
   const analyzed = skus.filter((sku) => sku.status === 'ANALYZED' || sku.analysis).length
   const pendingImportPackages = importPackages.filter((item) => item.status !== 'uploaded')
@@ -1082,7 +1222,7 @@ function GarmentLibraryPage({
                     <span>{shotPlan ? `#${shotPlan.id}` : '未保存'}</span>
                   </div>
                   {shotPlan ? (
-                    <ShotPlanBoard shotPlan={shotPlan} />
+                    <ShotPlanBoard shotPlan={shotPlan} editable={busy === 'idle'} onSave={onSavePlan} saving={busy === 'saving-plan'} />
                   ) : (
                     <div className="plan-empty">
                       <p>还没有默认组图方案</p>
@@ -1868,32 +2008,155 @@ function StepCard({ number, title, wide, children }: { number: string; title: st
   )
 }
 
-function ShotPlanBoard({ shotPlan }: { shotPlan: ShotPlan }) {
+function ShotPlanBoard({
+  shotPlan,
+  editable = false,
+  saving = false,
+  onSave,
+}: {
+  shotPlan: ShotPlan
+  editable?: boolean
+  saving?: boolean
+  onSave?: (plan: ShotPlan['plan']) => void
+}) {
+  const [draft, setDraft] = useState<ShotPlan['plan']>(shotPlan.plan)
+
+  useEffect(() => {
+    setDraft(shotPlan.plan)
+  }, [shotPlan.id, shotPlan.updatedAt])
+
+  const updateShot = (index: number, patch: Partial<Shot>) => {
+    setDraft((current) => ({
+      ...current,
+      shots: current.shots.map((shot, shotIndex) => (shotIndex === index ? { ...shot, ...patch } : shot)),
+    }))
+  }
+
+  const updatePlanField = (patch: Partial<ShotPlan['plan']>) => {
+    setDraft((current) => ({ ...current, ...patch }))
+  }
+  const plannerLog = parsePlannerLog(shotPlan.rawResponse)
+
   return (
     <div className="shot-plan">
-      <div className="style-summary">
-        <strong>{shotPlan.plan.brandStyle?.name ?? '默认棚拍风格'}</strong>
-        <span>{shotPlan.plan.brandStyle?.summary}</span>
+      <div className="shooting-script">
+        <label className="script-field">
+          <span>货号</span>
+          <strong>{draft.sku}</strong>
+        </label>
+        <label className="script-field">
+          <span>商品品类</span>
+          <input value={draft.category ?? draft.garment?.category ?? ''} disabled={!editable} onChange={(event) => updatePlanField({ category: event.target.value })} />
+        </label>
+        <label className="script-field">
+          <span>证据等级</span>
+          <select value={draft.evidenceLevel ?? '高频成片规律'} disabled={!editable} onChange={(event) => updatePlanField({ evidenceLevel: event.target.value })}>
+            <option>高频成片规律</option>
+            <option>低频成片规律</option>
+            <option>品类必要补充</option>
+          </select>
+        </label>
+        <label className="script-field wide">
+          <span>主销售信息</span>
+          <textarea value={draft.salesInfo ?? draft.garment?.summary ?? ''} disabled={!editable} onChange={(event) => updatePlanField({ salesInfo: event.target.value })} />
+        </label>
+        <label className="script-field wide">
+          <span>Lily 调性提炼</span>
+          <textarea value={draft.lilyTone ?? draft.brandStyle?.summary ?? ''} disabled={!editable} onChange={(event) => updatePlanField({ lilyTone: event.target.value })} />
+        </label>
+        <label className="script-field wide">
+          <span>组图搭配方案</span>
+          <textarea value={draft.stylingPlan ?? ''} disabled={!editable} onChange={(event) => updatePlanField({ stylingPlan: event.target.value })} />
+        </label>
+        <label className="script-field">
+          <span>颜色基调</span>
+          <textarea value={draft.colorPalette ?? ''} disabled={!editable} onChange={(event) => updatePlanField({ colorPalette: event.target.value })} />
+        </label>
+        <label className="script-field">
+          <span>鞋包首饰</span>
+          <textarea value={draft.accessories ?? ''} disabled={!editable} onChange={(event) => updatePlanField({ accessories: event.target.value })} />
+        </label>
       </div>
       <div className="shot-list">
-        {shotPlan.plan.shots.map((shot) => (
+        {draft.shots.map((shot) => (
           <div className="shot-row" key={shot.shotIndex}>
             <b>{String(shot.shotIndex).padStart(2, '0')}</b>
-            <span>{shot.title}</span>
-            <small>{shot.frame} · {shot.angle}</small>
+            <span>{shot.slotName ?? shot.title}</span>
+            <small>{shot.scene ?? shot.frame} · {shot.bodyPosition ?? shot.angle}</small>
           </div>
         ))}
       </div>
       <details>
-        <summary>高级设置</summary>
-        <div className="advanced-grid">
-          {shotPlan.plan.shots.map((shot) => (
-            <div key={shot.shotIndex}>
-              <strong>{shot.title}</strong>
-              <p>{shot.pose}</p>
-              <small>{shot.styling?.shoes}</small>
+        <summary>{editable ? '编辑 5 张拍摄剧本' : '5 张拍摄剧本'}</summary>
+        <div className="script-shot-list">
+          {draft.shots.map((shot, index) => (
+            <div key={shot.shotIndex} className="shot-editor">
+              <div className="shot-editor-title">
+                <strong>图 {shot.shotIndex} {shot.slotName ?? shot.title}</strong>
+                <small>{shot.englishName}</small>
+              </div>
+              <label className="field wide">
+                <span>任务</span>
+                <textarea value={shot.task ?? ''} disabled={!editable} onChange={(event) => updateShot(index, { task: event.target.value })} />
+              </label>
+              <label className="field wide">
+                <span>统一要求</span>
+                <textarea value={shot.unifiedRequirement ?? ''} disabled={!editable} onChange={(event) => updateShot(index, { unifiedRequirement: event.target.value })} />
+              </label>
+              <label className="field">
+                <span>景别</span>
+                <input value={shot.scene ?? shot.frame} disabled={!editable} onChange={(event) => updateShot(index, { scene: event.target.value, frame: event.target.value })} />
+              </label>
+              <label className="field">
+                <span>取景范围</span>
+                <input value={shot.cropRange ?? shot.crop ?? ''} disabled={!editable} onChange={(event) => updateShot(index, { cropRange: event.target.value, crop: event.target.value })} />
+              </label>
+              <label className="field">
+                <span>模特占画幅</span>
+                <input value={shot.modelScale ?? ''} disabled={!editable} onChange={(event) => updateShot(index, { modelScale: event.target.value })} />
+              </label>
+              <label className="field">
+                <span>头部处理</span>
+                <input value={shot.headTreatment ?? ''} disabled={!editable} onChange={(event) => updateShot(index, { headTreatment: event.target.value })} />
+              </label>
+              <label className="field">
+                <span>身位</span>
+                <input value={shot.bodyPosition ?? shot.angle} disabled={!editable} onChange={(event) => updateShot(index, { bodyPosition: event.target.value, angle: event.target.value })} />
+              </label>
+              <label className="field wide">
+                <span>姿势调性</span>
+                <textarea value={shot.poseTone ?? shot.pose} disabled={!editable} onChange={(event) => updateShot(index, { poseTone: event.target.value, pose: event.target.value })} />
+              </label>
+              <label className="field wide">
+                <span>画面目的</span>
+                <textarea value={shot.imagePurpose ?? shot.focus} disabled={!editable} onChange={(event) => updateShot(index, { imagePurpose: event.target.value, focus: event.target.value })} />
+              </label>
             </div>
           ))}
+        </div>
+        {editable && (
+          <div className="plan-save-row">
+            <button className="primary" onClick={() => onSave?.(draft)} disabled={saving}>
+              {saving ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+              保存方案
+            </button>
+          </div>
+        )}
+      </details>
+      <details>
+        <summary>Gemini 调用记录</summary>
+        <div className="planner-log">
+          <FactRow label="Planner" value={shotPlan.plannerProvider} />
+          <FactRow label="调用模型" value={plannerLog?.providerRequest?.model} />
+          <FactRow label="调用说明" value={plannerLog?.note} />
+          <label className="field">
+            <span>调用提示词</span>
+            <textarea readOnly value={plannerLog?.providerRequest?.prompt ?? ''} />
+          </label>
+          <label className="field">
+            <span>完整 raw_response</span>
+            <textarea readOnly value={shotPlan.rawResponse ?? ''} />
+          </label>
         </div>
       </details>
     </div>
@@ -1901,6 +2164,7 @@ function ShotPlanBoard({ shotPlan }: { shotPlan: ShotPlan }) {
 }
 
 function ResultGallery({
+  title = '生成结果',
   run,
   loading,
   nowMs,
@@ -1908,6 +2172,7 @@ function ResultGallery({
   onToggleFinal,
   onExport,
 }: {
+  title?: string
   run: GenerationRun | null
   loading: boolean
   nowMs: number
@@ -1915,15 +2180,16 @@ function ResultGallery({
   onToggleFinal: (image: GenerationImage) => void
   onExport: (runId: number) => void
 }) {
-  const placeholders = Array.from({ length: 5 }, (_, index) => index + 1)
+  const isPreviewRun = run?.kind === 'preview_grid'
+  const placeholders = Array.from({ length: isPreviewRun ? 1 : 5 }, (_, index) => index + 1)
   const runStartedAt = run?.images?.[0]?.submittedAt ?? run?.createdAt
   return (
     <section className="results">
       <div className="section-heading">
-        <h2>生成结果</h2>
+        <h2>{title}</h2>
         {run && (
           <span>
-            {run.kind === 'regeneration' ? '重生记录' : '组图记录'} #{run.id} · {statusText(run.status)}
+            {isPreviewRun ? '预览记录' : run.kind === 'regeneration' ? '重生记录' : '组图记录'} #{run.id} · {statusText(run.status)}
             {runStartedAt ? ` · 已运行 ${elapsedText(runStartedAt, nowMs, run.updatedAt, !isRunActive(run))}` : ''}
           </span>
         )}
@@ -1933,10 +2199,11 @@ function ResultGallery({
           ? run.images.map((image) => {
               const imageActive = isImageActive(image)
               const imageElapsed = elapsedText(image.submittedAt ?? image.createdAt, nowMs, image.completedAt ?? image.updatedAt, !imageActive)
+              const canShowImage = image.status === 'SUCCEEDED' && Boolean(image.url)
               return (
               <article className="result-card" key={image.id}>
                 <div className="result-image">
-                  {image.url ? (
+                  {canShowImage ? (
                     <ImagePreviewThumb
                       src={mediaUrl(image.url)}
                       name={`${String(image.shotIndex).padStart(2, '0')} ${image.title}`}
@@ -1949,6 +2216,9 @@ function ResultGallery({
                       {imageActive && <Loader2 className="spin" size={22} />}
                       <strong>{statusText(image.status)}</strong>
                       <small>{providerStatusText(image.providerStatus)}</small>
+                      {image.status === 'FAILED' && image.providerStatusResponse && (
+                        <small>{providerErrorText(image.providerStatusResponse)}</small>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1975,7 +2245,7 @@ function ResultGallery({
                 <div className="result-image"><span>待生成</span></div>
                 <div className="result-meta">
                   <strong>{String(index).padStart(2, '0')} 图位</strong>
-                  <small>生成后可单张重生</small>
+                  <small>{isPreviewRun ? '预览后用于最终生成' : '生成后可单张重生'}</small>
                 </div>
               </article>
             ))}
@@ -1989,6 +2259,21 @@ function ResultGallery({
       )}
     </section>
   )
+}
+
+function parsePlannerLog(raw?: string) {
+  if (!raw) return null
+  try {
+    return JSON.parse(raw) as {
+      note?: string
+      providerRequest?: {
+        model?: string
+        prompt?: string
+      }
+    }
+  } catch {
+    return null
+  }
 }
 
 function EmptyText({ text }: { text: string }) {
@@ -2143,6 +2428,13 @@ function providerStatusText(status?: string | null) {
   return map[status] ?? status
 }
 
+function providerErrorText(value?: Record<string, unknown> | null) {
+  const error = value?.['error']
+  if (!error) return ''
+  const text = typeof error === 'string' ? error : JSON.stringify(error)
+  return text.length > 120 ? `${text.slice(0, 120)}...` : text
+}
+
 function snapshotText(snapshot: Record<string, unknown> | null | undefined, keys: string[]) {
   if (!snapshot) return '-'
   const values = keys
@@ -2153,7 +2445,7 @@ function snapshotText(snapshot: Record<string, unknown> | null | undefined, keys
 }
 
 function isRunActive(run: GenerationRun) {
-  return run.status === 'RUNNING' || run.images?.some(isImageActive)
+  return run.status === 'RUNNING' || Boolean(run.images?.some(isImageActive))
 }
 
 function isImageActive(image: GenerationImage) {
@@ -2399,10 +2691,12 @@ function parseRoute(): AppRoute {
   }
   if (parts[0] === 'generate') {
     const runId = Number(params.get('run'))
+    const previewRunId = Number(params.get('preview'))
     return {
       page: 'generate',
       generateSku: params.get('sku') || undefined,
       generateRunId: Number.isFinite(runId) ? runId : undefined,
+      generatePreviewRunId: Number.isFinite(previewRunId) ? previewRunId : undefined,
     }
   }
   return { page: 'generate' }
@@ -2415,7 +2709,10 @@ function routeToUrl(route: AppRoute) {
   if (route.page === 'generate') {
     const params = new URLSearchParams()
     if (route.generateRunId) params.set('run', String(route.generateRunId))
-    else if (route.generateSku) params.set('sku', route.generateSku)
+    else {
+      if (route.generateSku) params.set('sku', route.generateSku)
+      if (route.generatePreviewRunId) params.set('preview', String(route.generatePreviewRunId))
+    }
     const query = params.toString()
     return query ? `/generate?${query}` : '/generate'
   }
