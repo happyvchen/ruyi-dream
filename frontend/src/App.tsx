@@ -101,6 +101,9 @@ export function App() {
   const [models, setModels] = useState<ModelProfile[]>([])
   const [skuNextOffset, setSkuNextOffset] = useState<number | null>(null)
   const [skuHasMore, setSkuHasMore] = useState(false)
+  const [generateSearchSkus, setGenerateSearchSkus] = useState<GarmentSku[]>([])
+  const [generateSearchNextOffset, setGenerateSearchNextOffset] = useState<number | null>(null)
+  const [generateSearchHasMore, setGenerateSearchHasMore] = useState(false)
   const [modelNextOffset, setModelNextOffset] = useState<number | null>(null)
   const [modelHasMore, setModelHasMore] = useState(false)
   const [selectedSku, setSelectedSku] = useState<GarmentSku | null>(null)
@@ -111,6 +114,9 @@ export function App() {
   const [historyRuns, setHistoryRuns] = useState<GenerationRun[]>([])
   const [runNextOffset, setRunNextOffset] = useState<number | null>(null)
   const [runHasMore, setRunHasMore] = useState(false)
+  const [historySearchRuns, setHistorySearchRuns] = useState<GenerationRun[]>([])
+  const [historySearchNextOffset, setHistorySearchNextOffset] = useState<number | null>(null)
+  const [historySearchHasMore, setHistorySearchHasMore] = useState(false)
   const [selectedHistoryRun, setSelectedHistoryRun] = useState<GenerationRun | null>(null)
   const [historyFilter, setHistoryFilter] = useState('')
   const [generateSkuFilter, setGenerateSkuFilter] = useState('')
@@ -149,15 +155,11 @@ export function App() {
     return runs.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
   }, [historyRuns, selectedSku?.id])
   const taskStage = getGenerateTaskStage(selectedSku, shotPlan, previewRun, generationRun)
-  const filteredGenerateSkus = useMemo(() => {
-    const keyword = generateSkuFilter.trim().toLowerCase()
-    if (!keyword) return skus
-    return skus.filter((sku) =>
-      [sku.sku, sku.title, sku.status]
-        .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(keyword)),
-    )
-  }, [generateSkuFilter, skus])
+  const generateSkuKeyword = generateSkuFilter.trim()
+  const filteredGenerateSkus = generateSkuKeyword ? generateSearchSkus : skus
+  const generateSkuHasMore = generateSkuKeyword ? generateSearchHasMore : skuHasMore
+  const displayedHistoryRuns = historyFilter.trim() ? historySearchRuns : historyRuns
+  const displayedHistoryHasMore = historyFilter.trim() ? historySearchHasMore : runHasMore
 
   function navigate(routeInput: AppRoute, replace = false) {
     const url = routeToUrl(routeInput)
@@ -182,6 +184,62 @@ export function App() {
     if (!appReady) return
     void refreshBaseData()
   }, [appReady, showArchivedSkus, showArchivedRuns])
+
+  useEffect(() => {
+    if (!appReady) return
+    const keyword = generateSkuFilter.trim()
+    if (!keyword) {
+      setGenerateSearchSkus([])
+      setGenerateSearchNextOffset(null)
+      setGenerateSearchHasMore(false)
+      return
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      void api.listSkus({ includeArchived: showArchivedSkus, limit: SKU_PAGE_SIZE, keyword })
+        .then((result) => {
+          if (cancelled) return
+          setGenerateSearchSkus(result.items)
+          setGenerateSearchNextOffset(result.nextOffset)
+          setGenerateSearchHasMore(result.hasMore)
+        })
+        .catch((err) => {
+          if (!cancelled) setError(err instanceof Error ? err.message : '搜索货号失败')
+        })
+    }, 250)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [appReady, generateSkuFilter, showArchivedSkus])
+
+  useEffect(() => {
+    if (!appReady) return
+    const keyword = historyFilter.trim()
+    if (!keyword) {
+      setHistorySearchRuns([])
+      setHistorySearchNextOffset(null)
+      setHistorySearchHasMore(false)
+      return
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      void api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE, keyword })
+        .then((result) => {
+          if (cancelled) return
+          setHistorySearchRuns(result.items)
+          setHistorySearchNextOffset(result.nextOffset)
+          setHistorySearchHasMore(result.hasMore)
+        })
+        .catch((err) => {
+          if (!cancelled) setError(err instanceof Error ? err.message : '搜索生成记录失败')
+        })
+    }, 250)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [appReady, historyFilter, showArchivedRuns])
 
   useEffect(() => {
     const handlePopState = () => {
@@ -388,12 +446,18 @@ export function App() {
     await api.logout()
     setAuth({ checked: true, authRequired: true, authenticated: false })
     setSkus([])
+    setGenerateSearchSkus([])
+    setGenerateSearchNextOffset(null)
+    setGenerateSearchHasMore(false)
     setModels([])
     setSkuNextOffset(null)
     setSkuHasMore(false)
     setModelNextOffset(null)
     setModelHasMore(false)
     setHistoryRuns([])
+    setHistorySearchRuns([])
+    setHistorySearchNextOffset(null)
+    setHistorySearchHasMore(false)
     setRunNextOffset(null)
     setRunHasMore(false)
     setSelectedSku(null)
@@ -443,6 +507,24 @@ export function App() {
     setSkuHasMore(result.hasMore)
   }
 
+  async function loadMoreGenerateSkus() {
+    const keyword = generateSkuFilter.trim()
+    if (!keyword) {
+      await loadMoreSkus()
+      return
+    }
+    if (generateSearchNextOffset === null) return
+    const result = await api.listSkus({
+      includeArchived: showArchivedSkus,
+      limit: SKU_PAGE_SIZE,
+      offset: generateSearchNextOffset,
+      keyword,
+    })
+    setGenerateSearchSkus((current) => mergeById(current, result.items))
+    setGenerateSearchNextOffset(result.nextOffset)
+    setGenerateSearchHasMore(result.hasMore)
+  }
+
   async function loadMoreModels() {
     if (modelNextOffset === null) return
     const result = await api.listModels({ limit: MODEL_PAGE_SIZE, offset: modelNextOffset })
@@ -457,6 +539,24 @@ export function App() {
     setHistoryRuns((current) => mergeById(current, result.items))
     setRunNextOffset(result.nextOffset)
     setRunHasMore(result.hasMore)
+  }
+
+  async function loadMoreDisplayedRuns() {
+    const keyword = historyFilter.trim()
+    if (!keyword) {
+      await loadMoreRuns()
+      return
+    }
+    if (historySearchNextOffset === null) return
+    const result = await api.listRuns({
+      includeArchived: showArchivedRuns,
+      limit: RUN_PAGE_SIZE,
+      offset: historySearchNextOffset,
+      keyword,
+    })
+    setHistorySearchRuns((current) => mergeById(current, result.items))
+    setHistorySearchNextOffset(result.nextOffset)
+    setHistorySearchHasMore(result.hasMore)
   }
 
   async function loadMoreSelectedSkuImages() {
@@ -1249,7 +1349,7 @@ export function App() {
                 />
               </label>
               <div className="sku-list task-sku-list">
-                {filteredGenerateSkus.length === 0 && <EmptyText text={skus.length === 0 ? '还没有上传货号' : '没有匹配的货号'} />}
+                {filteredGenerateSkus.length === 0 && <EmptyText text={skus.length === 0 && !generateSkuKeyword ? '还没有上传货号' : '没有匹配的货号'} />}
                 {filteredGenerateSkus.map((sku) => (
                   <button
                     key={sku.id}
@@ -1271,8 +1371,8 @@ export function App() {
                     </span>
                   </button>
                 ))}
-                {skuHasMore && (
-                  <button className="secondary full" onClick={() => void loadMoreSkus()}>
+                {generateSkuHasMore && (
+                  <button className="secondary full" onClick={() => void loadMoreGenerateSkus()}>
                     加载更多货号
                   </button>
                 )}
@@ -1451,8 +1551,8 @@ export function App() {
 
       {page === 'history' && (
         <HistoryPage
-          runs={historyRuns}
-          runHasMore={runHasMore}
+          runs={displayedHistoryRuns}
+          runHasMore={displayedHistoryHasMore}
           selectedRun={selectedHistoryRun}
           filter={historyFilter}
           showArchivedRuns={showArchivedRuns}
@@ -1462,7 +1562,7 @@ export function App() {
           onRestoreRun={(run) => void restoreHistoryRun(run)}
           onDeleteRun={(run) => void deleteGenerationRun(run)}
           onCancelRun={(run) => void cancelGenerationRun(run)}
-          onLoadMoreRuns={() => void loadMoreRuns()}
+          onLoadMoreRuns={() => void loadMoreDisplayedRuns()}
         />
       )}
 
@@ -2617,14 +2717,7 @@ function HistoryPage({
   onCancelRun: (run: GenerationRun) => void
   onLoadMoreRuns: () => void
 }) {
-  const keyword = filter.trim().toLowerCase()
-  const visibleRuns = keyword
-    ? runs.filter((run) =>
-        [run.sku, run.skuTitle, run.status, String(run.id), String(run.shotPlanId)]
-          .filter(Boolean)
-          .some((value) => String(value).toLowerCase().includes(keyword)),
-      )
-    : runs
+  const visibleRuns = runs
 
   return (
     <main className="history-page">
@@ -2674,7 +2767,7 @@ function HistoryPage({
               </button>
             </article>
           ))}
-          {runHasMore && !keyword && (
+          {runHasMore && (
             <button className="secondary full" onClick={onLoadMoreRuns}>
               加载更多生成记录
             </button>

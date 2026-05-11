@@ -106,6 +106,8 @@ Authorization: Bearer <token>
 | `GET /api/model-profiles` | `limit`、`offset`、`keyword` |
 | `GET /api/generation-runs` | `includeArchived`、`limit`、`offset`、`skuId`、`keyword` |
 
+搜索框只要表现为全局搜索，就必须调用对应列表接口的 `keyword` 参数；不能只过滤前端已加载的首屏数据。
+
 ### 三档图片 URL
 
 后端为上传素材、数字模特头像和生成结果维护三档图片访问 URL：
