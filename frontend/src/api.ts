@@ -35,7 +35,8 @@ export const api = {
       body: JSON.stringify({ password }),
     }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
-  listSkus: () => request<{ items: GarmentSku[] }>('/api/garment-skus'),
+  listSkus: (options?: { includeArchived?: boolean }) =>
+    request<{ items: GarmentSku[] }>(`/api/garment-skus${options?.includeArchived ? '?includeArchived=true' : ''}`),
   getSku: (id: number) => request<{ item: GarmentSku }>(`/api/garment-skus/${id}`),
   uploadSku: (sku: string, files: File[], title?: string) => {
     const form = new FormData()
@@ -49,10 +50,15 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
-  deleteSku: (id: number) =>
-    request<{ ok: boolean }>(`/api/garment-skus/${id}`, {
+  deleteSku: (id: number, options?: { purge?: boolean; confirmSku?: string }) => {
+    const params = new URLSearchParams()
+    if (options?.purge) params.set('purge', 'true')
+    if (options?.confirmSku) params.set('confirmSku', options.confirmSku)
+    const suffix = params.size ? `?${params.toString()}` : ''
+    return request<{ ok: boolean; archived?: boolean; purged?: boolean; objectCleanupErrors?: { prefix: string; error: string }[] }>(`/api/garment-skus/${id}${suffix}`, {
       method: 'DELETE',
-    }),
+    })
+  },
   addSkuImages: (id: number, files: File[]) => {
     const form = new FormData()
     files.forEach((file) => form.append('files', file))
@@ -126,7 +132,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ shotPlanId, previewRunId }),
     }),
-  listRuns: () => request<{ items: GenerationRun[] }>('/api/generation-runs'),
+  listRuns: (options?: { includeArchived?: boolean }) =>
+    request<{ items: GenerationRun[] }>(`/api/generation-runs${options?.includeArchived ? '?includeArchived=true' : ''}`),
   getRun: (runId: number) => request<{ item: GenerationRun }>(`/api/generation-runs/${runId}`),
   deleteRun: (runId: number) =>
     request<{ ok: boolean }>(`/api/generation-runs/${runId}`, {

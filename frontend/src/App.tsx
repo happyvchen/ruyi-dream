@@ -79,6 +79,11 @@ type AuthState = {
   authRequired: boolean
   authenticated: boolean
 }
+type DeleteSkuDialogState = {
+  sku: GarmentSku
+  confirmSku: string
+  deleteRelated: boolean
+}
 
 export function App() {
   const [auth, setAuth] = useState<AuthState>({ checked: false, authRequired: false, authenticated: false })
@@ -105,6 +110,9 @@ export function App() {
   const [editingModelId, setEditingModelId] = useState<number | undefined>()
   const [modelForm, setModelForm] = useState<ModelForm>(() => createBlankModelForm())
   const [modelHeadDrafts, setModelHeadDrafts] = useState<ModelHeadDraft[]>([])
+  const [deleteSkuDialog, setDeleteSkuDialog] = useState<DeleteSkuDialogState | null>(null)
+  const [showArchivedSkus, setShowArchivedSkus] = useState(false)
+  const [showArchivedRuns, setShowArchivedRuns] = useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
 
   const defaultModel = useMemo(() => models.find((model) => model.isDefault) ?? models[0], [models])
@@ -143,7 +151,7 @@ export function App() {
   useEffect(() => {
     if (!appReady) return
     void refreshBaseData()
-  }, [appReady])
+  }, [appReady, showArchivedSkus, showArchivedRuns])
 
   useEffect(() => {
     const handlePopState = () => {
@@ -343,7 +351,11 @@ export function App() {
 
   async function refreshBaseData() {
     setError(null)
-    const [skuResult, modelResult, runResult] = await Promise.all([api.listSkus(), api.listModels(), api.listRuns()])
+    const [skuResult, modelResult, runResult] = await Promise.all([
+      api.listSkus({ includeArchived: showArchivedSkus }),
+      api.listModels(),
+      api.listRuns({ includeArchived: showArchivedRuns }),
+    ])
     setSkus(skuResult.items)
     setModels(modelResult.items)
     setHistoryRuns(runResult.items)
@@ -352,7 +364,7 @@ export function App() {
   }
 
   async function refreshHistoryRuns() {
-    const result = await api.listRuns()
+    const result = await api.listRuns({ includeArchived: showArchivedRuns })
     setHistoryRuns(result.items)
   }
 
@@ -747,20 +759,28 @@ export function App() {
     }
   }
 
-  async function deleteSelectedSku() {
+  function requestDeleteSelectedSku() {
     if (!selectedSku) return
-    const confirmed = window.confirm(`确认删除素材库中的货号 ${selectedSku.sku}？\n如果该货号已有生成记录，系统会阻止删除以保留历史。`)
-    if (!confirmed) return
+    setDeleteSkuDialog({ sku: selectedSku, confirmSku: '', deleteRelated: false })
+  }
+
+  async function deleteSelectedSku(deleteRelated: boolean, confirmSku?: string) {
+    const targetSku = deleteSkuDialog?.sku ?? selectedSku
+    if (!targetSku) return
     setBusy('uploading')
     setError(null)
     try {
-      await api.deleteSku(selectedSku.id)
+      const result = await api.deleteSku(targetSku.id, { purge: deleteRelated, confirmSku })
       setSelectedSku(null)
       setShotPlan(null)
       setPreviewRun(null)
-      setGenerationRun(null)
+      if (deleteRelated) setGenerationRun(null)
+      setDeleteSkuDialog(null)
       navigate({ page: 'garments' }, true)
       await refreshBaseData()
+      if (result.objectCleanupErrors?.length) {
+        setError('货号已清理，但部分对象存储文件删除失败，请稍后重试或联系管理员。')
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '删除失败')
     } finally {
@@ -1092,7 +1112,7 @@ export function App() {
                   ) : <div className="thumb-fallback" />}
                   <span>
                     <strong>{sku.sku}</strong>
-                    <small>{sku.imageCount ?? 0} 张图片 · {statusText(sku.status)}</small>
+                    <small>{sku.imageCount ?? 0} 张图片 · {sku.archivedAt ? '已归档' : statusText(sku.status)}</small>
                   </span>
                 </button>
               ))}
@@ -1238,7 +1258,9 @@ export function App() {
           busy={busy}
           extraFiles={extraFiles}
           importPackages={importPackages}
+          showArchivedSkus={showArchivedSkus}
           looseSkuInput={looseSkuInput}
+          onShowArchivedSkusChange={setShowArchivedSkus}
           onLooseSkuInputChange={setLooseSkuInput}
           onStageLooseImages={stageLooseImages}
           onStageFolderImages={stageFolderImages}
@@ -1251,7 +1273,7 @@ export function App() {
           editSkuForm={editSkuForm}
           onEditSkuFormChange={setEditSkuForm}
           onSaveSku={() => void updateSelectedSku()}
-          onDeleteSelectedSku={() => void deleteSelectedSku()}
+          onDeleteSelectedSku={requestDeleteSelectedSku}
           onAddImages={() => void addImagesToSelectedSku()}
           onReorderImage={(imageId, orderIndex) => void reorderSelectedSkuImage(imageId, orderIndex)}
           onDeleteImage={(imageId) => void deleteImage(imageId)}
@@ -1296,11 +1318,26 @@ export function App() {
           runs={historyRuns}
           selectedRun={selectedHistoryRun}
           filter={historyFilter}
+          showArchivedRuns={showArchivedRuns}
           onFilterChange={setHistoryFilter}
+          onShowArchivedRunsChange={setShowArchivedRuns}
           onOpenRun={(runId) => void openHistoryRun(runId)}
           onRestoreRun={(run) => void restoreHistoryRun(run)}
           onDeleteRun={(run) => void deleteGenerationRun(run)}
           onCancelRun={(run) => void cancelGenerationRun(run)}
+        />
+      )}
+
+      {deleteSkuDialog && (
+        <DeleteSkuDialog
+          sku={deleteSkuDialog.sku}
+          confirmSku={deleteSkuDialog.confirmSku}
+          deleteRelated={deleteSkuDialog.deleteRelated}
+          busy={busy}
+          onConfirmSkuChange={(confirmSku) => setDeleteSkuDialog((current) => current ? { ...current, confirmSku } : current)}
+          onDeleteRelatedChange={(deleteRelated) => setDeleteSkuDialog((current) => current ? { ...current, deleteRelated } : current)}
+          onClose={() => setDeleteSkuDialog(null)}
+          onDelete={() => void deleteSelectedSku(deleteSkuDialog.deleteRelated, deleteSkuDialog.confirmSku)}
         />
       )}
     </div>
@@ -1361,14 +1398,94 @@ function LoginPage({ onLogin }: { onLogin: (password: string) => Promise<void> }
   )
 }
 
+function DeleteSkuDialog({
+  sku,
+  confirmSku,
+  deleteRelated,
+  busy,
+  onConfirmSkuChange,
+  onDeleteRelatedChange,
+  onClose,
+  onDelete,
+}: {
+  sku: GarmentSku
+  confirmSku: string
+  deleteRelated: boolean
+  busy: BusyState
+  onConfirmSkuChange: (value: string) => void
+  onDeleteRelatedChange: (value: boolean) => void
+  onClose: () => void
+  onDelete: () => void
+}) {
+  const hasHistory = skuHasLinkedHistory(sku)
+  const impact = sku.deleteImpact
+  const canDelete = !deleteRelated || confirmSku === sku.sku
+  return createPortal(
+    <div className="preview-backdrop" role="dialog" aria-modal="true" onClick={onClose}>
+      <div className="danger-dialog" onClick={(event) => event.stopPropagation()}>
+        <div className="danger-dialog-header">
+          <div>
+            <span className="eyebrow">删除货号</span>
+            <h2>{sku.sku}</h2>
+          </div>
+          <button className="icon-only secondary" onClick={onClose} disabled={busy !== 'idle'} title="关闭">
+            <X size={18} />
+          </button>
+        </div>
+        <p>
+          {hasHistory
+            ? '这个货号仍有关联的方案和生成记录。默认操作会归档货号并从日常列表隐藏；勾选后会同时删除关联记录和文件。'
+            : '默认操作会归档货号并从日常列表隐藏。勾选后会同时删除素材副本和文件。'}
+        </p>
+        <div className="delete-impact-grid">
+          <Stat label="素材图" value={sku.imageCount ?? 0} />
+          <Stat label="拍摄方案" value={impact?.shotPlanCount ?? 0} />
+          <Stat label="生成记录" value={impact?.generationRunCount ?? 0} />
+          <Stat label="已归档" value={impact?.archivedGenerationRunCount ?? 0} />
+        </div>
+        <label className="checkbox-row danger-option">
+          <input
+            type="checkbox"
+            checked={deleteRelated}
+            onChange={(event) => onDeleteRelatedChange(event.target.checked)}
+            disabled={busy !== 'idle'}
+          />
+          <span>同时删除关联记录和文件</span>
+        </label>
+        {deleteRelated && (
+          <label className="field">
+            <span>输入货号确认删除</span>
+            <input
+              value={confirmSku}
+              onChange={(event) => onConfirmSkuChange(event.target.value)}
+              placeholder={sku.sku}
+              autoFocus
+            />
+          </label>
+        )}
+        <div className="danger-dialog-actions">
+          <button className="secondary" onClick={onClose} disabled={busy !== 'idle'}>取消</button>
+          <button className="danger" onClick={onDelete} disabled={busy !== 'idle' || !canDelete}>
+            {busy === 'uploading' ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
+            {deleteRelated ? '删除货号及关联记录' : '归档货号'}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
 function GarmentLibraryPage({
   skus,
 	  selectedSku,
 	  shotPlan,
 	  busy,
-	  extraFiles,
+  extraFiles,
   importPackages,
+  showArchivedSkus,
   looseSkuInput,
+  onShowArchivedSkusChange,
   onLooseSkuInputChange,
   onStageLooseImages,
   onStageFolderImages,
@@ -1396,7 +1513,9 @@ function GarmentLibraryPage({
 	  busy: BusyState
 	  extraFiles: File[]
   importPackages: ImportPackage[]
+  showArchivedSkus: boolean
   looseSkuInput: string
+  onShowArchivedSkusChange: (value: boolean) => void
   onLooseSkuInputChange: (value: string) => void
   onStageLooseImages: (files: File[]) => void
   onStageFolderImages: (files: File[]) => void
@@ -1438,6 +1557,14 @@ function GarmentLibraryPage({
           <p>上传、查看和使用货号图包。MVP 会保留原始上传记录，不覆盖素材。</p>
         </div>
         <div className="library-stats">
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={showArchivedSkus}
+              onChange={(event) => onShowArchivedSkusChange(event.target.checked)}
+            />
+            <span>显示已归档</span>
+          </label>
           <Stat label="货号" value={skus.length} />
           <Stat label="已策划" value={analyzed} />
           <Stat label="待策划" value={Math.max(skus.length - analyzed, 0)} />
@@ -1539,7 +1666,7 @@ function GarmentLibraryPage({
                 <div>
                   <span className="eyebrow">当前货号</span>
                   <h2>{selectedSku.sku}</h2>
-                  <p>{selectedSku.analysis?.summary ?? '还没有生成组图方案，暂未形成服装摘要。'}</p>
+                  <p>{selectedSku.archivedAt ? '该货号已归档，可在显示已归档时查看。' : selectedSku.analysis?.summary ?? '还没有生成组图方案，暂未形成服装摘要。'}</p>
                 </div>
                 <div className="detail-actions">
                   <button className="secondary" onClick={() => onUseInGenerate(selectedSku)}>
@@ -2147,7 +2274,7 @@ function GenerationHistoryOverview({
           <button className="generation-history-main" onClick={() => onOpenRun(run)}>
             <div className="mini-preview-strip">
               {(run.summary?.previews ?? []).slice(0, 3).map((preview) => (
-                preview.url ? <img key={preview.id} src={mediaUrl(preview.url)} alt={preview.title} /> : <span key={preview.id} />
+                <HistoryPreviewImage key={preview.id} url={preview.url} title={preview.title} />
               ))}
               {(run.summary?.previews ?? []).length === 0 && <span>无图</span>}
             </div>
@@ -2174,11 +2301,25 @@ function GenerationHistoryOverview({
   )
 }
 
+function HistoryPreviewImage({ url, title }: { url: string | null; title: string }) {
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    setFailed(false)
+  }, [url])
+
+  if (!url || failed) return <span className="history-preview-fallback">{failed ? '加载失败' : '无图'}</span>
+
+  return <img src={mediaUrl(url)} alt={title} onError={() => setFailed(true)} />
+}
+
 function HistoryPage({
   runs,
   selectedRun,
   filter,
+  showArchivedRuns,
   onFilterChange,
+  onShowArchivedRunsChange,
   onOpenRun,
   onRestoreRun,
   onDeleteRun,
@@ -2187,7 +2328,9 @@ function HistoryPage({
   runs: GenerationRun[]
   selectedRun: GenerationRun | null
   filter: string
+  showArchivedRuns: boolean
   onFilterChange: (value: string) => void
+  onShowArchivedRunsChange: (value: boolean) => void
   onOpenRun: (runId: number) => void
   onRestoreRun: (run: GenerationRun) => void
   onDeleteRun: (run: GenerationRun) => void
@@ -2212,6 +2355,14 @@ function HistoryPage({
             onChange={(event) => onFilterChange(event.target.value)}
             placeholder="搜索货号、记录号、状态"
           />
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={showArchivedRuns}
+              onChange={(event) => onShowArchivedRunsChange(event.target.checked)}
+            />
+            <span>显示已归档</span>
+          </label>
           <span>{visibleRuns.length} 条任务</span>
         </div>
         <div className="history-run-list">
@@ -2221,13 +2372,13 @@ function HistoryPage({
               <button className="history-run-main" onClick={() => onOpenRun(run.id)}>
                 <div className="history-preview-strip">
                   {(run.summary?.previews ?? []).slice(0, 4).map((preview) => (
-                    preview.url ? <img key={preview.id} src={mediaUrl(preview.url)} alt={preview.title} /> : <div key={preview.id} />
+                    <HistoryPreviewImage key={preview.id} url={preview.url} title={preview.title} />
                   ))}
                   {(run.summary?.previews ?? []).length === 0 && <div className="history-preview-empty">无图</div>}
                 </div>
                 <span className="history-run-copy">
                   <strong>{run.sku ?? `记录 #${run.id}`}</strong>
-                  <small>{run.skuTitle || `方案 #${run.shotPlanId}`} · {run.createdAt}</small>
+                  <small>{run.skuTitle || `方案 #${run.shotPlanId}`} · {run.archivedAt ? '已归档' : run.createdAt}</small>
                   <small>
                     {statusText(run.status)} · {run.summary?.succeededCount ?? 0}/{run.summary?.imageCount ?? 0} 张完成
                     {run.summary?.finalCount ? ` · ${run.summary.finalCount} 张最终图` : ''}
@@ -2747,6 +2898,7 @@ function ImagePreviewThumb({
 }) {
   const [open, setOpen] = useState(false)
   const [dimensions, setDimensions] = useState<ImageDimensions | null>(null)
+  const [failed, setFailed] = useState(false)
 
   useEffect(() => {
     if (!open) return undefined
@@ -2759,41 +2911,52 @@ function ImagePreviewThumb({
 
   useEffect(() => {
     setDimensions(null)
+    setFailed(false)
   }, [src])
 
   const summary = imageSummary(dimensions, fileSize)
+  const canOpen = !failed
 
   return (
     <>
       <div
-        className={`image-preview-thumb ${compact ? 'compact' : ''} ${round ? 'round' : ''}`}
+        className={`image-preview-thumb ${compact ? 'compact' : ''} ${round ? 'round' : ''} ${failed ? 'failed' : ''}`}
         role="button"
-        tabIndex={0}
-        title={`${name}${summary ? ` · ${summary}` : ''}`}
+        tabIndex={canOpen ? 0 : -1}
+        title={failed ? `${name} · 图片加载失败` : `${name}${summary ? ` · ${summary}` : ''}`}
         onClick={(event) => {
           event.stopPropagation()
+          if (!canOpen) return
           setOpen(true)
         }}
         onKeyDown={(event) => {
-          if (event.key === 'Enter' || event.key === ' ') {
+          if (canOpen && (event.key === 'Enter' || event.key === ' ')) {
             event.preventDefault()
             event.stopPropagation()
             setOpen(true)
           }
         }}
       >
-        <img
-          src={src}
-          alt={name}
-          onLoad={(event) => {
-            const target = event.currentTarget
-            setDimensions({ width: target.naturalWidth, height: target.naturalHeight })
-          }}
-        />
+        {failed ? (
+          <span className="image-preview-fallback">图片加载失败</span>
+        ) : (
+          <img
+            src={src}
+            alt={name}
+            onLoad={(event) => {
+              const target = event.currentTarget
+              setDimensions({ width: target.naturalWidth, height: target.naturalHeight })
+            }}
+            onError={() => {
+              setOpen(false)
+              setFailed(true)
+            }}
+          />
+        )}
         {children}
       </div>
 
-      {open && createPortal(
+      {open && !failed && createPortal(
         <div
           className="preview-backdrop"
           role="dialog"
@@ -2904,6 +3067,11 @@ function snapshotText(snapshot: Record<string, unknown> | null | undefined, keys
 
 function isRunActive(run: GenerationRun) {
   return run.status === 'RUNNING' || Boolean(run.images?.some(isImageActive))
+}
+
+function skuHasLinkedHistory(sku: GarmentSku) {
+  const impact = sku.deleteImpact
+  return Boolean((impact?.generationRunCount ?? 0) > 0 || (impact?.shotPlanCount ?? 0) > 0)
 }
 
 function isImageActive(image: GenerationImage) {

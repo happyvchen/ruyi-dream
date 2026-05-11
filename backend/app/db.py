@@ -17,6 +17,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("004", "add_generation_task_control_columns", "migration_add_generation_task_control_columns"),
     ("005", "add_generation_review_delivery_columns", "migration_add_generation_review_delivery_columns"),
     ("006", "add_brand_template_versions", "migration_add_brand_template_versions"),
+    ("007", "add_garment_sku_archive_columns", "migration_add_garment_sku_archive_columns"),
 )
 
 
@@ -192,6 +193,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_generation_task_control_columns": migration_add_generation_task_control_columns,
         "migration_add_generation_review_delivery_columns": migration_add_generation_review_delivery_columns,
         "migration_add_brand_template_versions": migration_add_brand_template_versions,
+        "migration_add_garment_sku_archive_columns": migration_add_garment_sku_archive_columns,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -265,6 +267,11 @@ def migration_add_brand_template_versions(db: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def migration_add_garment_sku_archive_columns(db: sqlite3.Connection) -> None:
+    ensure_column(db, "garment_skus", "archived_at", "TEXT")
+    ensure_column(db, "garment_skus", "archive_reason", "TEXT")
 
 
 def ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:

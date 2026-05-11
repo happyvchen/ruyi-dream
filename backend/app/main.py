@@ -14,7 +14,7 @@ from uuid import uuid4
 import zipfile
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from PIL import Image, UnidentifiedImageError
@@ -351,17 +351,32 @@ def cleanup_objects(keys: list[str]) -> None:
             delete_object(key)
 
 
+def cleanup_prefixes(prefixes: list[str]) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    for prefix in dict.fromkeys(prefix for prefix in prefixes if prefix):
+        try:
+            delete_prefix(prefix)
+        except Exception as exc:
+            errors.append({"prefix": prefix, "error": str(exc)})
+    return errors
+
+
 @app.get("/api/garment-skus")
-def list_garment_skus() -> dict[str, Any]:
+def list_garment_skus(include_archived: bool = Query(False, alias="includeArchived")) -> dict[str, Any]:
     with get_db() as db:
         rows = db.execute(
             """
             SELECT gs.*,
               (SELECT storage_path FROM garment_images gi WHERE gi.sku_id = gs.id ORDER BY sort_order, id LIMIT 1) AS cover_path,
-              (SELECT COUNT(*) FROM garment_images gi WHERE gi.sku_id = gs.id) AS image_count
+              (SELECT COUNT(*) FROM garment_images gi WHERE gi.sku_id = gs.id) AS image_count,
+              (SELECT COUNT(*) FROM shot_plans sp WHERE sp.sku_id = gs.id) AS shot_plan_count,
+              (SELECT COUNT(*) FROM generation_runs gr WHERE gr.sku_id = gs.id) AS generation_run_count,
+              (SELECT COUNT(*) FROM generation_runs gr WHERE gr.sku_id = gs.id AND gr.archived_at IS NOT NULL) AS archived_generation_run_count
             FROM garment_skus gs
+            WHERE (? OR gs.archived_at IS NULL)
             ORDER BY gs.created_at DESC
-            """
+            """,
+            (include_archived,),
         ).fetchall()
         return {"items": [serialize_sku(row) for row in rows]}
 
@@ -478,29 +493,54 @@ def update_garment_sku(sku_id: int, payload: GarmentSkuUpdateRequest) -> dict[st
 
 
 @app.delete("/api/garment-skus/{sku_id}")
-def delete_garment_sku(sku_id: int) -> dict[str, Any]:
+def delete_garment_sku(
+    sku_id: int,
+    purge: bool = Query(False),
+    confirm_sku: str | None = Query(None, alias="confirmSku"),
+) -> dict[str, Any]:
     with get_db() as db:
         row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="货号不存在")
-        run_count = db.execute(
-            "SELECT COUNT(*) AS count FROM generation_runs WHERE sku_id = ?",
-            (sku_id,),
-        ).fetchone()["count"]
-        if run_count:
-            raise HTTPException(status_code=409, detail="该货号已有生成记录，为保留生产历史暂不允许删除")
+        impact = sku_delete_impact(db, sku_id)
+        if purge and confirm_sku != row["sku"]:
+            raise HTTPException(status_code=400, detail="请输入完整货号以确认删除关联记录和文件")
+        timestamp = now_iso()
+        if not purge:
+            if "archived_at" in row.keys() and row["archived_at"]:
+                return {"ok": True, "archived": True, "objectCleanupErrors": []}
+            db.execute(
+                "UPDATE garment_skus SET archived_at = ?, archive_reason = ?, updated_at = ? WHERE id = ?",
+                (timestamp, "user_archived", timestamp, sku_id),
+            )
+            log_event(
+                db,
+                "garment_sku",
+                sku_id,
+                "archived",
+                {"sku": row["sku"], "storagePath": row["storage_path"], "impact": impact},
+            )
+            return {"ok": True, "archived": True, "objectCleanupErrors": []}
         storage_path = row["storage_path"]
+        output_dirs = [
+            row["output_dir"]
+            for row in db.execute(
+                "SELECT DISTINCT output_dir FROM generation_runs WHERE sku_id = ? AND output_dir IS NOT NULL",
+                (sku_id,),
+            ).fetchall()
+            if row["output_dir"]
+        ]
         db.execute("DELETE FROM garment_skus WHERE id = ?", (sku_id,))
         log_event(
             db,
             "garment_sku",
             sku_id,
-            "deleted",
-            {"sku": row["sku"], "storagePath": storage_path},
+            "deleted_with_related_records",
+            {"sku": row["sku"], "storagePath": storage_path, "impact": impact},
         )
 
-    delete_prefix(storage_path)
-    return {"ok": True}
+    cleanup_errors = cleanup_prefixes([storage_path, *output_dirs])
+    return {"ok": True, "purged": True, "objectCleanupErrors": cleanup_errors}
 
 
 @app.post("/api/garment-skus/{sku_id}/images")
@@ -1193,7 +1233,7 @@ async def generate_group(payload: GenerateGroupRequest) -> dict[str, Any]:
 
 
 @app.get("/api/generation-runs")
-def list_generation_runs() -> dict[str, Any]:
+def list_generation_runs(include_archived: bool = Query(False, alias="includeArchived")) -> dict[str, Any]:
     with get_db() as db:
         rows = db.execute(
             """
@@ -1205,9 +1245,10 @@ def list_generation_runs() -> dict[str, Any]:
                  FROM generation_images gi WHERE gi.run_id = gr.id) AS regeneration_count
             FROM generation_runs gr
             JOIN garment_skus gs ON gs.id = gr.sku_id
-            WHERE gr.archived_at IS NULL
+            WHERE (? OR gr.archived_at IS NULL)
             ORDER BY gr.created_at DESC
-            """
+            """,
+            (include_archived,),
         ).fetchall()
         return {"items": [serialize_generation_run(row, include_images=False, include_summary=True) for row in rows]}
 
@@ -2265,11 +2306,23 @@ def backfill_shot_plan_script_data() -> None:
             SELECT sp.*, gs.sku
             FROM shot_plans sp
             JOIN garment_skus gs ON gs.id = sp.sku_id
+            WHERE sp.planner_provider = 'gemini'
+              AND sp.status NOT IN ('FAILED', 'PLANNING')
+              AND (
+                sp.category IS NULL OR sp.sales_info IS NULL OR sp.lily_tone IS NULL
+                OR sp.styling IS NULL OR sp.background IS NULL
+                OR NOT EXISTS (
+                  SELECT 1 FROM shot_plan_shots s WHERE s.shot_plan_id = sp.id
+                )
+              )
             ORDER BY sp.id
             """
         ).fetchall()
         for row in rows:
-            plan = normalize_planner_plan(loads(row["plan_json"], {}), row["sku"])
+            raw_plan = loads(row["plan_json"], {})
+            if not is_backfillable_shot_plan(raw_plan):
+                continue
+            plan = normalize_planner_plan(raw_plan, row["sku"])
             generation_plan = plan_generation(plan)
             db.execute(
                 """
@@ -2290,6 +2343,11 @@ def backfill_shot_plan_script_data() -> None:
                 ),
             )
             sync_shot_plan_shots(db, row["id"], plan, row["updated_at"] or timestamp)
+
+
+def is_backfillable_shot_plan(plan: Any) -> bool:
+    shots = plan.get("shots") if isinstance(plan, dict) else None
+    return isinstance(shots, list) and len(shots) > 0 and all(isinstance(shot, dict) for shot in shots)
 
 
 def build_image_inputs(sku_row: Any, model_row: Any, model_profile: dict[str, Any], shot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2445,7 +2503,17 @@ def infer_head_reference_key(body_position: str) -> str:
 
 def get_sku_detail_by_id(sku_id: int) -> dict[str, Any]:
     with get_db() as db:
-        row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
+        row = db.execute(
+            """
+            SELECT gs.*,
+              (SELECT COUNT(*) FROM shot_plans sp WHERE sp.sku_id = gs.id) AS shot_plan_count,
+              (SELECT COUNT(*) FROM generation_runs gr WHERE gr.sku_id = gs.id) AS generation_run_count,
+              (SELECT COUNT(*) FROM generation_runs gr WHERE gr.sku_id = gs.id AND gr.archived_at IS NOT NULL) AS archived_generation_run_count
+            FROM garment_skus gs
+            WHERE gs.id = ?
+            """,
+            (sku_id,),
+        ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="货号不存在")
         images = db.execute(
@@ -2455,6 +2523,30 @@ def get_sku_detail_by_id(sku_id: int) -> dict[str, Any]:
         item = serialize_sku(row)
         item["images"] = [serialize_image(image) for image in images]
         return item
+
+
+def sku_delete_impact(db: Any, sku_id: int) -> dict[str, int]:
+    row = db.execute(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM garment_images WHERE sku_id = ?) AS image_count,
+          (SELECT COUNT(*) FROM shot_plans WHERE sku_id = ?) AS shot_plan_count,
+          (SELECT COUNT(*) FROM generation_runs WHERE sku_id = ?) AS generation_run_count,
+          (SELECT COUNT(*) FROM generation_runs WHERE sku_id = ? AND archived_at IS NOT NULL) AS archived_generation_run_count,
+          (SELECT COUNT(*)
+             FROM generation_images gi
+             JOIN generation_runs gr ON gr.id = gi.run_id
+            WHERE gr.sku_id = ?) AS generation_image_count
+        """,
+        (sku_id, sku_id, sku_id, sku_id, sku_id),
+    ).fetchone()
+    return {
+        "imageCount": int(row["image_count"] or 0),
+        "shotPlanCount": int(row["shot_plan_count"] or 0),
+        "generationRunCount": int(row["generation_run_count"] or 0),
+        "archivedGenerationRunCount": int(row["archived_generation_run_count"] or 0),
+        "generationImageCount": int(row["generation_image_count"] or 0),
+    }
 
 
 def get_model_profile_by_id(model_profile_id: int) -> dict[str, Any]:
@@ -2501,6 +2593,9 @@ def resolve_model_profile(db: Any, model_profile_id: int | None) -> Any:
 
 def serialize_sku(row: Any) -> dict[str, Any]:
     cover_path = row.keys() and row["cover_path"] if "cover_path" in row.keys() else None
+    generation_run_count = row["generation_run_count"] if "generation_run_count" in row.keys() else 0
+    archived_generation_run_count = row["archived_generation_run_count"] if "archived_generation_run_count" in row.keys() else 0
+    shot_plan_count = row["shot_plan_count"] if "shot_plan_count" in row.keys() else 0
     return {
         "id": row["id"],
         "sku": row["sku"],
@@ -2512,6 +2607,13 @@ def serialize_sku(row: Any) -> dict[str, Any]:
         "coverUrl": media_url(cover_path),
         "coverFileSize": file_size(cover_path),
         "imageCount": row["image_count"] if "image_count" in row.keys() else None,
+        "deleteImpact": {
+            "generationRunCount": int(generation_run_count or 0),
+            "archivedGenerationRunCount": int(archived_generation_run_count or 0),
+            "shotPlanCount": int(shot_plan_count or 0),
+        },
+        "archivedAt": row["archived_at"] if "archived_at" in row.keys() else None,
+        "archiveReason": row["archive_reason"] if "archive_reason" in row.keys() else None,
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
@@ -2628,16 +2730,17 @@ def serialize_generation_run(row: Any, include_images: bool, include_summary: bo
     }
     if include_summary:
         with get_db() as db:
-            previews = db.execute(
+            preview_rows = db.execute(
                 """
                 SELECT id, shot_index, title, output_path, status, is_final, current_attempt_index
                 FROM generation_images
-                WHERE run_id = ? AND output_path IS NOT NULL
+                WHERE run_id = ? AND status = 'SUCCEEDED' AND output_path IS NOT NULL
                 ORDER BY is_final DESC, shot_index, id
-                LIMIT 5
+                LIMIT 10
                 """,
                 (row["id"],),
             ).fetchall()
+            previews = [preview for preview in preview_rows if has_displayable_generation_output(preview)][:5]
             item["summary"] = {
                 "imageCount": row["image_count"] if "image_count" in row.keys() else 0,
                 "succeededCount": row["succeeded_count"] if "succeeded_count" in row.keys() else 0,
@@ -2667,6 +2770,7 @@ def serialize_generation_run(row: Any, include_images: bool, include_summary: bo
 
 
 def serialize_generation_image(row: Any) -> dict[str, Any]:
+    displayable = has_displayable_generation_output(row)
     return {
         "id": row["id"],
         "runId": row["run_id"],
@@ -2674,8 +2778,8 @@ def serialize_generation_image(row: Any) -> dict[str, Any]:
         "title": row["title"],
         "status": row["status"],
         "objectKey": row["output_path"],
-        "url": media_url(row["output_path"]),
-        "fileSize": file_size(row["output_path"]),
+        "url": media_url(row["output_path"]) if displayable else None,
+        "fileSize": file_size(row["output_path"]) if displayable else None,
         "taskPackage": loads(row["task_package_json"], {}),
         "providerRequest": loads(row["provider_request_json"], None),
         "providerResponse": loads(row["provider_response_json"], None),
@@ -2709,6 +2813,11 @@ def serialize_generation_image(row: Any) -> dict[str, Any]:
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
+
+
+def has_displayable_generation_output(row: Any) -> bool:
+    output_path = row["output_path"] if "output_path" in row.keys() else None
+    return row["status"] == "SUCCEEDED" and bool(output_path) and object_exists(output_path)
 
 
 def serialize_log(row: Any) -> dict[str, Any]:

@@ -322,6 +322,21 @@ button:disabled {
   object-fit: cover;
 }
 
+.image-preview-thumb.failed {
+  cursor: default;
+}
+
+.image-preview-fallback {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  padding: 8px;
+  color: #8b8780;
+  font-size: 12px;
+  text-align: center;
+}
+
 .image-preview-thumb.compact {
   min-height: 52px;
 }
@@ -354,6 +369,64 @@ button:disabled {
   border-radius: 8px;
   background: #fff;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
+}
+
+.danger-dialog {
+  display: grid;
+  gap: 18px;
+  width: min(560px, 94vw);
+  padding: 22px;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
+}
+
+.danger-dialog-header,
+.danger-dialog-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.danger-dialog h2 {
+  margin: 2px 0 0;
+  font-size: 24px;
+}
+
+.danger-dialog p {
+  margin: 0;
+  color: #5f5c55;
+  line-height: 1.6;
+}
+
+.delete-impact-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #5f5c55;
+  font-size: 13px;
+}
+
+.checkbox-row input {
+  width: 16px;
+  height: 16px;
+}
+
+.danger-option {
+  justify-self: start;
+  color: #8b332d;
+}
+
+.danger-dialog-actions {
+  align-items: center;
+  justify-content: flex-end;
 }
 
 .preview-close {
@@ -951,6 +1024,13 @@ summary {
   background: #f1f0eb;
   color: #8b8780;
   font-size: 10px;
+  text-align: center;
+}
+
+.history-preview-fallback {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
 }
 
 .empty-text {
@@ -1243,6 +1323,8 @@ summary {
 
 .detail-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 10px;
   white-space: nowrap;
 }
@@ -1796,12 +1878,16 @@ summary {
 }
 
 .history-preview-strip img,
+.history-preview-strip span,
 .history-preview-strip > div {
   width: 48px;
   height: 48px;
   object-fit: cover;
   border-radius: 6px;
   background: #f1f0eb;
+  color: #8b8780;
+  font-size: 11px;
+  text-align: center;
 }
 
 .history-preview-empty {

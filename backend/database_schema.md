@@ -41,6 +41,8 @@ CREATE TABLE garment_skus (
   storage_path TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'NEW',
   analysis_json TEXT,
+  archived_at TEXT,
+  archive_reason TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -57,6 +59,8 @@ CREATE TABLE garment_skus (
 | `storage_path` | TEXT | 上传素材对象前缀 |
 | `status` | TEXT | `NEW` / `ANALYZED` / `CONFIRMED` |
 | `analysis_json` | TEXT | Gemini 输出的服装摘要 JSON |
+| `archived_at` | TEXT | 归档时间；归档后默认素材列表不展示，但保留素材、方案、生成记录和审计 |
+| `archive_reason` | TEXT | 归档原因 |
 | `created_at` | TEXT | 创建时间 |
 | `updated_at` | TEXT | 更新时间 |
 
@@ -467,6 +471,7 @@ CREATE TABLE schema_migrations (
 | `004` | `add_generation_task_control_columns` | 增加任务锁、重试、取消、超时字段 |
 | `005` | `add_generation_review_delivery_columns` | 增加审核/交付状态字段 |
 | `006` | `add_brand_template_versions` | 增加品牌模板版本表 |
+| `007` | `add_garment_sku_archive_columns` | 增加货号归档字段 |
 
 ## 3. 关系图
 
@@ -480,6 +485,8 @@ erDiagram
     text storage_path
     text status
     text analysis_json
+    text archived_at
+    text archive_reason
     text created_at
     text updated_at
   }
