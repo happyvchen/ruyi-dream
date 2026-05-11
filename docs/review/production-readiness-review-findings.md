@@ -4,7 +4,7 @@
 
 - Branch: `codex/production-readiness-review`
 - Review started: 2026-05-11
-- Current phase: first production-readiness repair batch committed; review follow-up fixes applied
+- Current phase: first production-readiness repair batch committed; review follow-up auth fixes applied
 
 ## Repair Progress
 
@@ -15,7 +15,7 @@
 - F-R07-002: shutdown 分别 cancel/await generation poller 与 planner poller。
 - F-R09-001: 上传增加文件大小、数量、真实图片解码、像素和格式校验；对象写入或后续 DB 写入失败都会清理本批新增对象。
 - F-R11-001: 移除代码内默认对象存储密钥，并在启动时校验必填配置；生产模式拒绝默认、占位、过短和带首尾空白的密钥。
-- F-R13-001: 增加 `docs/runbook.md`，覆盖故障分级、排查命令、常见 provider/storage/SQLite/API token 问题和升级包信息。
+- F-R13-001: 增加 `docs/runbook.md`，覆盖故障分级、排查命令、常见 provider/storage/SQLite/auth 问题和升级包信息。
 - F-R10-002: 后端容器创建非 root 用户并仅让 `/app/data` 可写；前端切换到 unprivileged Nginx 镜像并监听 8080。
 
 ### Follow-up fixes from post-commit review 2026-05-11
@@ -23,21 +23,21 @@
 - 生产模式拒绝 `.env.example` 的 `replace-with-*` 占位密钥、`change-me`、`admin`、空白/过短等弱值。
 - 新建 SKU、追加图片、头像上传在 DB 写入失败时会删除本次已写入对象，降低孤儿对象风险。
 - 多头像批量上传逐个保留临时 reference id，避免多个未设置头像拿到同一个 `__unassigned__...` key。
-- 增加 MVP 部署级 API token：生产环境必须配置 `APP_API_ACCESS_TOKEN`，或显式声明由反向代理/企业网关鉴权。
+- 增加 MVP single-password app gate：后端校验 `APP_GATE_PASSWORD` / `APP_GATE_PASSWORD_HASH` 后签发 `HttpOnly` session cookie；`APP_API_ACCESS_TOKEN` 仅保留为脚本/运维 fallback。
 - 增加 PR template 与 CODEOWNERS，配合现有 CI workflow 补齐仓库内协作基线。
 
 ### Partially addressed in repair batch 2026-05-11
 
 - F-R10-001: RustFS 镜像改为固定 tag，后端直接依赖改为 pin；仍需进一步引入完整 lock/constraints 或 digest 固定。
-- F-R05-001: 已加入部署级 API token / 反向代理鉴权边界；完整用户、角色、workspace 仍是后续 SaaS 化工作。
-- F-R11-002: CORS method/header 已收紧；API token 已加入，CSRF/CORS 与正式用户鉴权联动仍待后续权限设计。
+- F-R05-001: 已加入 single-password app gate / 反向代理鉴权边界；完整用户、角色、workspace 仍是后续 SaaS 化工作。
+- F-R11-002: CORS method/header 已收紧；浏览器 API 改为 session cookie 访问，CSRF/CORS 与正式用户鉴权联动仍待后续权限设计。
 - F-R12-001: 已加入最小 CI（backend compile/import、frontend build、compose config）；核心业务测试仍待补齐。
 - F-R14-001: 已加入 CI workflow、PR template、CODEOWNERS；branch protection 和 automatically delete head branches 仍需仓库管理员开启。
 
 ### Product/security decisions added 2026-05-11
 
 - D03: MVP 阶段增加前端应用门禁。用户进入 ruyi-dream 前必须输入部署级访问密码；暂不引入用户、角色、workspace、审计身份和多租户隔离。
-- D04: 当前把 `APP_API_ACCESS_TOKEN` 打进前端静态包的方式只能作为临时本地/内网过渡，不能作为生产级门禁。PR-002 需要调整为“服务端校验密码并签发会话”，前端只保存短期会话，不保存部署密钥。
+- D04: 不再把 `APP_API_ACCESS_TOKEN` 打进前端静态包作为生产门禁；PR-002 调整为“服务端校验密码并签发会话”，前端只保存短期会话，不保存部署密钥。
 
 ## Priority Legend
 
@@ -209,7 +209,7 @@ Recommendation:
 
 #### F-R05-001 [P1] API 没有鉴权和用户上下文，无法作为生产系统暴露
 
-Status: Partially addressed in repair batch 2026-05-11. MVP deployment-level token was added, but post-review decision D03 requires replacing frontend-embedded token with a password gate and server-side session before this can be considered acceptable for private production delivery.
+Status: Fixed for MVP private production baseline 2026-05-11. A single-password app gate now protects browser API access with a server-signed session cookie; `APP_API_ACCESS_TOKEN` remains only as an optional ops/script fallback. Formal users, roles, workspaces, and per-user audit identity remain future SaaS work.
 
 Evidence:
 
@@ -242,10 +242,12 @@ Migration note:
 
 #### F-R05-003 [P1] 当前前端门禁设计缺失，静态 API token 不能替代登录门禁
 
+Status: Fixed for MVP private production baseline 2026-05-11. The Compose/Docker frontend build no longer injects `APP_API_ACCESS_TOKEN`; browser access uses `/api/auth/login`, `/api/auth/session`, `/api/auth/logout`, and the `ruyi_session` `HttpOnly` cookie.
+
 Evidence:
 
-- `frontend/src/api.ts` 通过 `VITE_API_ACCESS_TOKEN` 把 token 加到请求头。
-- `docker-compose.yml` 和 `frontend/Dockerfile` 会在构建前端时注入 `VITE_API_ACCESS_TOKEN`。
+- 修复前 `frontend/src/api.ts` 通过 `VITE_API_ACCESS_TOKEN` 把 token 加到请求头。
+- 修复前 `docker-compose.yml` 和 `frontend/Dockerfile` 会在构建前端时注入 `VITE_API_ACCESS_TOKEN`。
 - 浏览器前端是公开静态资源，任何能访问应用的人都可以从构建产物或 DevTools 中获得该 token。
 
 Risk:
@@ -444,7 +446,7 @@ Recommendation:
 
 #### F-R11-002 [P1] CORS 允许 credentials + 全方法全 header，但没有鉴权边界
 
-Status: Partially addressed in repair batch 2026-05-11. CORS methods/headers are narrowed and MVP API token support exists; full CSRF/CORS strategy should be revisited with formal user auth.
+Status: Partially addressed in repair batch 2026-05-11. CORS methods/headers are narrowed and browser API access now uses a signed session cookie; full CSRF/CORS strategy should be revisited with formal user auth.
 
 Evidence:
 
@@ -525,7 +527,7 @@ Recommendation:
 | Priority | Item | Suggested PR | Status |
 | --- | --- | --- | --- |
 | P0 | 移除代码内默认对象存储密钥，启动时校验生产必填配置 | PR-001 | Fixed 2026-05-11 |
-| P1 | 增加部署级鉴权或明确由反向代理保护，并收紧 `/api/health` | PR-002 | Needs revision: replace frontend-embedded token with password gate + server-side session |
+| P1 | 增加部署级鉴权或明确由反向代理保护，并收紧 `/api/health` | PR-002 | Fixed MVP baseline 2026-05-11: single-password app gate + server-side session; formal user auth pending |
 | P1 | 上传文件增加大小、数量、真实图片解码、像素和格式校验 | PR-003 | Fixed 2026-05-11 |
 | P1 | 生成任务增加 claim/lock、超时、取消、重试上限 | PR-004 | Open |
 | P1 | 建立最小 CI：backend compile/import、frontend build/typecheck、compose config | PR-005 | Fixed minimal baseline; business tests pending |

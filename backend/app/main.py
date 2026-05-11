@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 from contextlib import suppress
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+import secrets
 from tempfile import TemporaryDirectory
+import time
 from uuid import uuid4
 import zipfile
 from typing import Any
@@ -48,16 +52,92 @@ app.add_middleware(
 
 
 @app.middleware("http")
-async def require_api_access_token(request: Request, call_next: Any) -> Any:
-    if not settings.api_access_token or request.method == "OPTIONS" or request.url.path == "/api/health":
+async def require_api_session(request: Request, call_next: Any) -> Any:
+    public_paths = {"/api/health", "/api/auth/login", "/api/auth/logout", "/api/auth/session"}
+    if request.method == "OPTIONS" or request.url.path in public_paths:
         return await call_next(request)
-    if request.url.path.startswith("/api/"):
-        header_token = request.headers.get("x-ruyi-access-token", "")
-        auth_header = request.headers.get("authorization", "")
-        bearer_token = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
-        if header_token != settings.api_access_token and bearer_token != settings.api_access_token:
-            return JSONResponse(status_code=401, content={"detail": "缺少或无效的访问令牌"})
+    if request.url.path.startswith("/api/") and not is_request_authenticated(request):
+        return JSONResponse(status_code=401, content={"detail": "请先登录"})
     return await call_next(request)
+
+
+def is_request_authenticated(request: Request) -> bool:
+    if settings.trust_reverse_proxy_auth:
+        return True
+    if is_api_token_valid(request):
+        return True
+    if not settings.is_gate_enabled():
+        return True
+    return is_session_cookie_valid(request.cookies.get("ruyi_session", ""))
+
+
+def is_api_token_valid(request: Request) -> bool:
+    if not settings.api_access_token:
+        return False
+    header_token = request.headers.get("x-ruyi-access-token", "")
+    auth_header = request.headers.get("authorization", "")
+    bearer_token = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
+    return secrets.compare_digest(header_token, settings.api_access_token) or secrets.compare_digest(
+        bearer_token,
+        settings.api_access_token,
+    )
+
+
+def is_gate_password_valid(password: str) -> bool:
+    if settings.gate_password and secrets.compare_digest(password, settings.gate_password):
+        return True
+    if settings.gate_password_hash:
+        digest = hashlib.sha256(password.encode("utf-8")).hexdigest()
+        return secrets.compare_digest(digest, settings.gate_password_hash)
+    return False
+
+
+def sign_session_payload(payload: str) -> str:
+    return hmac.new(settings.effective_session_secret().encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def create_session_cookie() -> str:
+    expires_at = int(time.time() + settings.session_ttl_seconds)
+    payload = f"{expires_at}.{secrets.token_urlsafe(18)}"
+    return f"{payload}.{sign_session_payload(payload)}"
+
+
+def is_session_cookie_valid(cookie: str) -> bool:
+    parts = cookie.split(".")
+    if len(parts) != 3:
+        return False
+    expires_at, nonce, signature = parts
+    if not expires_at.isdigit() or not nonce:
+        return False
+    payload = f"{expires_at}.{nonce}"
+    if not secrets.compare_digest(signature, sign_session_payload(payload)):
+        return False
+    return int(expires_at) > int(time.time())
+
+
+def auth_client_key(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def is_login_rate_limited(request: Request) -> bool:
+    now = time.time()
+    cutoff = now - LOGIN_FAILURE_WINDOW_SECONDS
+    client_key = auth_client_key(request)
+    recent_failures = [timestamp for timestamp in login_failures_by_client.get(client_key, []) if timestamp >= cutoff]
+    login_failures_by_client[client_key] = recent_failures
+    return len(recent_failures) >= LOGIN_FAILURE_LIMIT
+
+
+def record_login_failure(request: Request) -> None:
+    client_key = auth_client_key(request)
+    login_failures_by_client.setdefault(client_key, []).append(time.time())
+
+
+def clear_login_failures(request: Request) -> None:
+    login_failures_by_client.pop(auth_client_key(request), None)
 
 
 class PlanCreateRequest(BaseModel):
@@ -81,6 +161,10 @@ class RegenerateRequest(BaseModel):
 
 class FinalImageRequest(BaseModel):
     isFinal: bool = True
+
+
+class LoginRequest(BaseModel):
+    password: str
 
 
 class GarmentSkuUpdateRequest(BaseModel):
@@ -124,6 +208,9 @@ UNASSIGNED_HEAD_REFERENCE_PREFIX = "__unassigned__"
 ACTIVE_IMAGE_STATUSES = {"QUEUED", "SUBMITTED", "IN_QUEUE", "IN_PROGRESS", "RUNNING"}
 TERMINAL_IMAGE_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
 PLANNING_STATUSES = {"PLANNING"}
+LOGIN_FAILURE_WINDOW_SECONDS = 300
+LOGIN_FAILURE_LIMIT = 8
+login_failures_by_client: dict[str, list[float]] = {}
 ALLOWED_UPLOAD_MIME_TYPES = {
     "image/jpeg": "JPEG",
     "image/png": "PNG",
@@ -163,6 +250,44 @@ def health() -> dict[str, Any]:
         "geminiConfigured": bool(settings.gemini_api_key),
         "imageProviderConfigured": bool(settings.gpt_image2_queue_url and settings.fal_key),
     }
+
+
+@app.get("/api/auth/session")
+def get_auth_session(request: Request) -> dict[str, bool]:
+    return {
+        "authRequired": settings.is_gate_enabled() and not settings.trust_reverse_proxy_auth,
+        "authenticated": is_request_authenticated(request),
+    }
+
+
+@app.post("/api/auth/login")
+def login(payload: LoginRequest, request: Request) -> JSONResponse:
+    if not settings.is_gate_enabled():
+        return JSONResponse({"authRequired": False, "authenticated": True})
+    if is_login_rate_limited(request):
+        return JSONResponse(status_code=429, content={"detail": "登录尝试过多，请稍后再试"})
+    if not is_gate_password_valid(payload.password):
+        record_login_failure(request)
+        return JSONResponse(status_code=401, content={"detail": "访问密码不正确"})
+    clear_login_failures(request)
+    response = JSONResponse({"authRequired": True, "authenticated": True})
+    response.set_cookie(
+        "ruyi_session",
+        create_session_cookie(),
+        max_age=settings.session_ttl_seconds,
+        httponly=True,
+        samesite="lax",
+        secure=settings.session_cookie_secure,
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+def logout() -> JSONResponse:
+    response = JSONResponse({"ok": True})
+    response.delete_cookie("ruyi_session", path="/")
+    return response
 
 
 async def validate_upload_image(upload: UploadFile) -> tuple[bytes, str]:

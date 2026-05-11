@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+import hashlib
 import os
 
 from dotenv import load_dotenv
@@ -46,6 +47,11 @@ class Settings:
     max_garment_images_per_sku = int(os.getenv("APP_MAX_GARMENT_IMAGES_PER_SKU", "20"))
     max_head_references_per_profile = int(os.getenv("APP_MAX_HEAD_REFERENCES_PER_PROFILE", "20"))
     api_access_token = os.getenv("APP_API_ACCESS_TOKEN", os.getenv("APP_ACCESS_TOKEN", ""))
+    gate_password = os.getenv("APP_GATE_PASSWORD", "")
+    gate_password_hash = os.getenv("APP_GATE_PASSWORD_HASH", "")
+    session_secret = os.getenv("APP_SESSION_SECRET", "")
+    session_ttl_seconds = int(os.getenv("APP_SESSION_TTL_SECONDS", str(12 * 60 * 60)))
+    session_cookie_secure = os.getenv("APP_SESSION_COOKIE_SECURE", "false").lower() in {"1", "true", "yes", "on"}
     trust_reverse_proxy_auth = os.getenv("APP_TRUST_REVERSE_PROXY_AUTH", "false").lower() in {"1", "true", "yes", "on"}
     gemini_api_key = os.getenv("GEMINI_API_KEY", "")
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
@@ -75,17 +81,27 @@ class Settings:
         if missing:
             joined = ", ".join(missing)
             raise RuntimeError(f"Missing required object storage credential(s): {joined}")
+        if self.session_ttl_seconds <= 0:
+            raise RuntimeError("APP_SESSION_TTL_SECONDS must be greater than 0.")
 
         if self.app_env in {"prod", "production"}:
             self._validate_production_credential("access key", self.s3_access_key_id)
             self._validate_production_credential("secret key", self.s3_secret_access_key)
             if self.api_access_token:
                 self._validate_production_credential("API access token", self.api_access_token)
-            elif not self.trust_reverse_proxy_auth:
+            if self.gate_password:
+                self._validate_production_credential("gate password", self.gate_password)
+            if self.gate_password_hash:
+                self._validate_gate_password_hash(self.gate_password_hash)
+            if self.session_secret:
+                self._validate_production_credential("session secret", self.session_secret)
+            if not self.trust_reverse_proxy_auth and not self.gate_password and not self.gate_password_hash:
                 raise RuntimeError(
-                    "Production must set APP_API_ACCESS_TOKEN or explicitly set "
-                    "APP_TRUST_REVERSE_PROXY_AUTH=true."
+                    "Production must set APP_GATE_PASSWORD or APP_GATE_PASSWORD_HASH, "
+                    "or explicitly set APP_TRUST_REVERSE_PROXY_AUTH=true."
                 )
+            if (self.gate_password or self.gate_password_hash) and not self.session_secret:
+                raise RuntimeError("Production app gate requires APP_SESSION_SECRET.")
 
     def _validate_production_credential(self, label: str, value: str) -> None:
         normalized = value.strip().lower()
@@ -98,6 +114,21 @@ class Settings:
             )
         if normalized in PLACEHOLDER_SECRET_VALUES or normalized.startswith("replace-with-"):
             raise RuntimeError(f"Production object storage {label} must not use a placeholder or default value.")
+
+    def _validate_gate_password_hash(self, value: str) -> None:
+        if len(value) != 64:
+            raise RuntimeError("APP_GATE_PASSWORD_HASH must be a SHA-256 hex digest.")
+        try:
+            int(value, 16)
+        except ValueError as exc:
+            raise RuntimeError("APP_GATE_PASSWORD_HASH must be a SHA-256 hex digest.") from exc
+
+    def is_gate_enabled(self) -> bool:
+        return bool(self.gate_password or self.gate_password_hash)
+
+    def effective_session_secret(self) -> str:
+        seed = self.session_secret or self.gate_password or self.gate_password_hash or "dev-session"
+        return hashlib.sha256(f"{seed}:ruyi-session".encode("utf-8")).hexdigest()
 
 
 @lru_cache

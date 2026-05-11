@@ -46,6 +46,8 @@ APP_S3_PUBLIC_ENDPOINT_URL=http://127.0.0.1:9000
 APP_STORAGE_BUCKET=ruyi-dream
 RUSTFS_ACCESS_KEY=admin
 RUSTFS_SECRET_KEY=change-me
+APP_GATE_PASSWORD=
+APP_SESSION_SECRET=
 APP_API_ACCESS_TOKEN=
 APP_TRUST_REVERSE_PROXY_AUTH=false
 BACKEND_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
@@ -81,7 +83,7 @@ npm install
 npm run dev
 ```
 
-前端本地 dev server 会读取项目根目录 `.env`，并自动把 `PUBLIC_BACKEND_URL` 映射为 `VITE_API_BASE_URL`、把 `APP_API_ACCESS_TOKEN` 映射为 `VITE_API_ACCESS_TOKEN`。因此启用 API token 后，不需要再维护一份 `frontend/.env.local`。
+前端本地 dev server 会读取项目根目录 `.env`，并自动把 `PUBLIC_BACKEND_URL` 映射为 `VITE_API_BASE_URL`。本地如需模拟生产门禁，设置 `APP_GATE_PASSWORD` 后通过登录页进入；`APP_API_ACCESS_TOKEN` 不会自动注入前端静态包。
 
 默认访问：
 

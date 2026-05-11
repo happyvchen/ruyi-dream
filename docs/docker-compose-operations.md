@@ -13,7 +13,9 @@ cp .env.example .env
 RUSTFS_ACCESS_KEY=<random-access-key>
 RUSTFS_SECRET_KEY=<random-secret-key>
 APP_ENV=production
-APP_API_ACCESS_TOKEN=<random-api-access-token>
+APP_GATE_PASSWORD=<random-app-password>
+APP_SESSION_SECRET=<random-session-signing-secret>
+APP_API_ACCESS_TOKEN=<optional-ops-script-token>
 PUBLIC_BACKEND_URL=http://<server-ip-or-domain>:8000
 PUBLIC_S3_URL=http://<server-ip-or-domain>:9000
 BACKEND_CORS_ORIGINS=http://<server-ip-or-domain>:5173
@@ -23,7 +25,7 @@ FAL_KEY=<required-for-real-image-generation>
 
 根目录 `.env` 是 Compose、后端裸跑和本地联调共同使用的主配置源。不要再维护一份 `backend/.env`；如需后端本机临时覆盖，使用不提交 Git 的 `backend/.env.local`。
 
-如果已经由 HTTPS 反向代理或企业网关完成访问控制，可不设置 `APP_API_ACCESS_TOKEN`，但生产环境必须显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。
+如果已经由 HTTPS 反向代理或企业网关完成访问控制，可不设置内置门禁密码，但生产环境必须显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。`APP_API_ACCESS_TOKEN` 只用于脚本/运维调用，不作为浏览器前端门禁。
 
 启动：
 
@@ -169,7 +171,8 @@ docker compose logs --tail=200 rustfs
 - `PUBLIC_S3_URL` 不是浏览器可访问地址，导致图片预览失败。
 - `FAL_KEY` 未配置，真实生图任务会失败。
 - `GEMINI_API_KEY` 未配置，默认方案策划会失败。
-- `APP_ENV=production` 但没有设置 `APP_API_ACCESS_TOKEN`，且没有显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。
+- `APP_ENV=production` 但没有设置 `APP_GATE_PASSWORD` / `APP_GATE_PASSWORD_HASH`，且没有显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。
+- 启用内置门禁但没有设置 `APP_SESSION_SECRET`。
 
 前端能打开但 API 失败：
 
@@ -182,12 +185,12 @@ curl http://127.0.0.1:8000/api/health
 
 - `PUBLIC_BACKEND_URL` 是否是浏览器可访问地址。
 - `BACKEND_CORS_ORIGINS` 是否包含前端访问地址。
-- 后端若配置了 `APP_API_ACCESS_TOKEN`，前端是否用同一个 token 重新构建。
+- 启用内置门禁时，是否已经通过登录页拿到 session；脚本调用是否使用了可选的 `APP_API_ACCESS_TOKEN`。
 - 修改 `PUBLIC_BACKEND_URL` 后是否重新构建了 frontend 镜像。
 
 ## 安全和暴露面
 
-- 内网试点可以直接暴露 `5173/8000/9000/9001`，但生产环境至少启用 `APP_API_ACCESS_TOKEN` 或由反向代理完成访问控制。
+- 内网试点可以直接暴露 `5173/8000/9000/9001`，但生产环境至少启用 single-password app gate 或由反向代理完成访问控制。
 - 对公网开放时，应放到 HTTPS 反向代理后面，并限制 RustFS Console 访问。
 - 不要公开 RustFS bucket。
 - 不要把 `.env`、数据库、对象数据目录提交到 Git。

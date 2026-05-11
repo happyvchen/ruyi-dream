@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { FormEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Check,
@@ -80,8 +80,15 @@ type ModelHeadEntry = {
   url: string
   fileSize?: number | null
 }
+type AuthState = {
+  checked: boolean
+  authRequired: boolean
+  authenticated: boolean
+}
 
 export function App() {
+  const [auth, setAuth] = useState<AuthState>({ checked: false, authRequired: false, authenticated: false })
+  const appReady = auth.checked && auth.authenticated
   const [skus, setSkus] = useState<GarmentSku[]>([])
   const [models, setModels] = useState<ModelProfile[]>([])
   const [selectedSku, setSelectedSku] = useState<GarmentSku | null>(null)
@@ -136,8 +143,13 @@ export function App() {
   }
 
   useEffect(() => {
-    void refreshBaseData()
+    void refreshAuth()
   }, [])
+
+  useEffect(() => {
+    if (!appReady) return
+    void refreshBaseData()
+  }, [appReady])
 
   useEffect(() => {
     const handlePopState = () => {
@@ -150,6 +162,7 @@ export function App() {
   }, [])
 
   useEffect(() => {
+    if (!appReady) return
     const storedRunId = window.localStorage.getItem('app:lastGenerationRunId')
     if (!storedRunId) return
     const runId = Number(storedRunId)
@@ -175,9 +188,10 @@ export function App() {
         setGenerationRun(result.item)
       })
       .catch(() => window.localStorage.removeItem('app:lastGenerationRunId'))
-  }, [])
+  }, [appReady])
 
   useEffect(() => {
+    if (!appReady) return
     const currentRoute = parseRoute()
     if (currentRoute.page !== 'generate' || currentRoute.generateSku || currentRoute.generateRunId) return
     const storedPreviewRunId = window.localStorage.getItem('app:lastPreviewRunId')
@@ -189,7 +203,7 @@ export function App() {
         if (result.item.kind === 'preview_grid') void restorePreviewRun(result.item, { syncUrl: false })
       })
       .catch(() => window.localStorage.removeItem('app:lastPreviewRunId'))
-  }, [])
+  }, [appReady])
 
   useEffect(() => {
     if (!generationRun) return
@@ -265,6 +279,7 @@ export function App() {
   }, [editingModelId, models])
 
   useEffect(() => {
+    if (!appReady) return
     if (routeKey(route) === hydratedRouteKey) return
     if (route.page === 'garments' && route.sku) {
       const targetSku = skus.find((sku) => sku.sku === route.sku)
@@ -302,7 +317,35 @@ export function App() {
         setEditingModelId(targetModel.id)
       }
     }
-  }, [route, skus, models, historyRuns, hydratedRouteKey])
+  }, [appReady, route, skus, models, historyRuns, hydratedRouteKey])
+
+  async function refreshAuth() {
+    try {
+      const result = await api.session()
+      setAuth({ checked: true, authRequired: result.authRequired, authenticated: result.authenticated })
+    } catch {
+      setAuth({ checked: true, authRequired: true, authenticated: false })
+    }
+  }
+
+  async function handleLogin(password: string) {
+    const result = await api.login(password)
+    setAuth({ checked: true, authRequired: result.authRequired, authenticated: result.authenticated })
+    await refreshBaseData()
+  }
+
+  async function handleLogout() {
+    await api.logout()
+    setAuth({ checked: true, authRequired: true, authenticated: false })
+    setSkus([])
+    setModels([])
+    setHistoryRuns([])
+    setSelectedSku(null)
+    setShotPlan(null)
+    setPreviewRun(null)
+    setGenerationRun(null)
+    setSelectedHistoryRun(null)
+  }
 
   async function refreshBaseData() {
     setError(null)
@@ -950,6 +993,14 @@ export function App() {
     }
   }
 
+  if (!auth.checked) {
+    return <AuthLoading />
+  }
+
+  if (auth.authRequired && !auth.authenticated) {
+    return <LoginPage onLogin={handleLogin} />
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -966,6 +1017,7 @@ export function App() {
             navigate(editingModel ? { page: 'models', modelId: editingModel.modelId } : { page: 'models' })
           }}>数字模特</button>
           <button className={page === 'history' ? 'active' : ''} onClick={() => navigate(selectedHistoryRun ? { page: 'history', runId: selectedHistoryRun.id } : { page: 'history' })}>生成记录</button>
+          {auth.authRequired && <button onClick={() => void handleLogout()}>退出</button>}
         </nav>
       </header>
 
@@ -1204,6 +1256,60 @@ export function App() {
           onDeleteRun={(run) => void deleteGenerationRun(run)}
         />
       )}
+    </div>
+  )
+}
+
+function AuthLoading() {
+  return (
+    <div className="auth-shell">
+      <div className="auth-panel">
+        <div className="brand">ruyi-dream</div>
+        <h1>正在进入工作台</h1>
+      </div>
+    </div>
+  )
+}
+
+function LoginPage({ onLogin }: { onLogin: (password: string) => Promise<void> }) {
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setSubmitting(true)
+    setError(null)
+    try {
+      await onLogin(password)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '登录失败')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="auth-shell">
+      <form className="auth-panel" onSubmit={(event) => void submit(event)}>
+        <div className="brand">ruyi-dream</div>
+        <h1>访问工作台</h1>
+        <label className="field">
+          <span>访问密码</span>
+          <input
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            autoFocus
+            required
+          />
+        </label>
+        {error && <div className="inline-error">{error}</div>}
+        <button className="primary full" disabled={submitting || !password.trim()}>
+          {submitting ? <Loader2 size={16} className="spin" /> : null}
+          进入
+        </button>
+      </form>
     </div>
   )
 }

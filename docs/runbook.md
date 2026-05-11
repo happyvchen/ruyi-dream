@@ -47,7 +47,8 @@ Common causes:
 
 - Missing `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY`.
 - `APP_ENV=production` with placeholder or weak RustFS credentials.
-- `APP_ENV=production` without `APP_API_ACCESS_TOKEN` and without `APP_TRUST_REVERSE_PROXY_AUTH=true`.
+- `APP_ENV=production` without `APP_GATE_PASSWORD` / `APP_GATE_PASSWORD_HASH` and without `APP_TRUST_REVERSE_PROXY_AUTH=true`.
+- Built-in app gate configured without `APP_SESSION_SECRET`.
 - RustFS not ready yet; Compose should restart backend automatically.
 - SQLite path is not writable under `deployment/app-data/backend`.
 
@@ -57,26 +58,35 @@ Recovery:
 2. Run `docker compose up -d backend`.
 3. Confirm `curl http://127.0.0.1:8000/api/health`.
 
-## API Returns 401
+## Login or API Returns 401
 
-If `APP_API_ACCESS_TOKEN` is configured, all `/api/*` routes except `/api/health` require one of:
+The browser app uses the built-in password gate when `APP_GATE_PASSWORD` or `APP_GATE_PASSWORD_HASH` is configured. Login writes a signed `HttpOnly` session cookie; all business `/api/*` routes require that cookie.
+
+Check:
+
+```bash
+curl http://127.0.0.1:8000/api/auth/session
+```
+
+For scripts or ops calls, `APP_API_ACCESS_TOKEN` is an optional fallback. If configured, requests can use one of:
 
 ```text
 X-Ruyi-Access-Token: <token>
 Authorization: Bearer <token>
 ```
 
-For Docker Compose frontend builds, `APP_API_ACCESS_TOKEN` is passed into the static bundle at build time. If the token changes:
+Changing `APP_GATE_PASSWORD`, `APP_GATE_PASSWORD_HASH`, `APP_SESSION_SECRET`, or `APP_API_ACCESS_TOKEN` only requires restarting the backend:
 
 ```bash
-docker compose up -d --build frontend backend
+docker compose up -d backend
 ```
 
 If an external reverse proxy handles authentication instead, production `.env` must explicitly set:
 
 ```env
 APP_TRUST_REVERSE_PROXY_AUTH=true
-APP_API_ACCESS_TOKEN=
+APP_GATE_PASSWORD=
+APP_GATE_PASSWORD_HASH=
 ```
 
 ## Upload Fails

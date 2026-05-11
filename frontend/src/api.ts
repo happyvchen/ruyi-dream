@@ -1,18 +1,17 @@
 import type { EventLog, GarmentImage, GarmentSku, GenerationImage, GenerationRun, ModelProfile, ShotPlan } from './types'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'
-const API_ACCESS_TOKEN = import.meta.env.VITE_API_ACCESS_TOKEN ?? ''
 
 function apiHeaders(init?: RequestInit): HeadersInit {
   const headers = new Headers(init?.headers)
   if (!(init?.body instanceof FormData) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
-  if (API_ACCESS_TOKEN) headers.set('X-Ruyi-Access-Token', API_ACCESS_TOKEN)
   return headers
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
+    credentials: 'include',
     headers: apiHeaders(init),
   })
   if (!response.ok) {
@@ -29,6 +28,13 @@ export const mediaUrl = (url?: string | null) => {
 
 export const api = {
   health: () => request<Record<string, unknown>>('/api/health'),
+  session: () => request<{ authRequired: boolean; authenticated: boolean }>('/api/auth/session'),
+  login: (password: string) =>
+    request<{ authRequired: boolean; authenticated: boolean }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+  logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
   listSkus: () => request<{ items: GarmentSku[] }>('/api/garment-skus'),
   getSku: (id: number) => request<{ item: GarmentSku }>(`/api/garment-skus/${id}`),
   uploadSku: (sku: string, files: File[], title?: string) => {
@@ -137,7 +143,7 @@ export const api = {
       body: JSON.stringify({ isFinal }),
     }),
   exportRun: async (runId: number) => {
-    const response = await fetch(`${API_BASE}/api/exports/runs/${runId}`, { method: 'POST', headers: apiHeaders() })
+    const response = await fetch(`${API_BASE}/api/exports/runs/${runId}`, { method: 'POST', credentials: 'include', headers: apiHeaders() })
     if (!response.ok) throw new Error('导出失败')
     const blob = await response.blob()
     const url = URL.createObjectURL(blob)

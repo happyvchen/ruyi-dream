@@ -84,7 +84,9 @@ APP_S3_FORCE_PATH_STYLE=true
 APP_S3_PRESIGN_EXPIRES_SECONDS=900
 RUSTFS_ACCESS_KEY=<local-or-production-access-key>
 RUSTFS_SECRET_KEY=<local-or-production-secret-key>
-APP_API_ACCESS_TOKEN=<production-api-access-token>
+APP_GATE_PASSWORD=<production-app-password>
+APP_SESSION_SECRET=<production-session-signing-secret>
+APP_API_ACCESS_TOKEN=<optional-ops-script-token>
 APP_TRUST_REVERSE_PROXY_AUTH=false
 
 GPT_IMAGE2_PROVIDER=fal

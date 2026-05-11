@@ -8,14 +8,28 @@
 
 ## 访问控制
 
-`/api/health` 保持匿名访问，用于容器和反向代理健康检查。其它 `/api/*` 路由在配置 `APP_API_ACCESS_TOKEN` 后需要携带任一请求头：
+`/api/health` 保持匿名访问，用于容器和反向代理健康检查。生产环境默认使用 single-password app gate：
+
+- 后端通过 `APP_GATE_PASSWORD` 或 `APP_GATE_PASSWORD_HASH` 校验访问密码。
+- 登录成功后签发 `HttpOnly`、`SameSite=Lax` 的 `ruyi_session` cookie。
+- 前端只保存短期 session cookie，不把部署密码或长期 token 编译进静态资源。
+
+认证接口：
+
+| Resource | Method | 说明 |
+|---|---|---|
+| `/api/auth/session` | GET | 查询是否需要门禁和当前是否已登录 |
+| `/api/auth/login` | POST | 提交 `{ "password": "..." }` 并写入 session cookie |
+| `/api/auth/logout` | POST | 清理 session cookie |
+
+`APP_API_ACCESS_TOKEN` 只作为脚本/运维调用的可选 fallback。配置后可携带任一请求头：
 
 ```text
 X-Ruyi-Access-Token: <token>
 Authorization: Bearer <token>
 ```
 
-生产环境必须配置 `APP_API_ACCESS_TOKEN`，或在外部反向代理/企业网关已经完成访问控制时显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。
+生产环境必须配置 `APP_GATE_PASSWORD` 或 `APP_GATE_PASSWORD_HASH`，并配置 `APP_SESSION_SECRET`；如果外部反向代理/企业网关已经完成访问控制，可显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true` 跳过内置门禁。
 
 ## 当前资源
 
