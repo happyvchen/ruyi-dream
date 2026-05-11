@@ -1,4 +1,4 @@
-import type { EventLog, GarmentImage, GarmentSku, GenerationImage, GenerationRun, ModelProfile, ShotPlan } from './types'
+import type { EventLog, GarmentImage, GarmentSku, GenerationImage, GenerationRun, ModelProfile, PaginatedResponse, ShotPlan } from './types'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'
 
@@ -34,6 +34,16 @@ export const mediaUrl = (url?: string | null) => {
   return /^https?:\/\//i.test(url) ? url : `${API_BASE}${url}`
 }
 
+function withParams(path: string, params: Record<string, string | number | boolean | null | undefined>) {
+  const search = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === false || value === '') return
+    search.set(key, String(value))
+  })
+  const query = search.toString()
+  return query ? `${path}?${query}` : path
+}
+
 export const api = {
   health: () => request<Record<string, unknown>>('/api/health'),
   session: () => request<{ authRequired: boolean; authenticated: boolean }>('/api/auth/session'),
@@ -43,9 +53,23 @@ export const api = {
       body: JSON.stringify({ password }),
     }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
-  listSkus: (options?: { includeArchived?: boolean }) =>
-    request<{ items: GarmentSku[] }>(`/api/garment-skus${options?.includeArchived ? '?includeArchived=true' : ''}`),
-  getSku: (id: number) => request<{ item: GarmentSku }>(`/api/garment-skus/${id}`),
+  listSkus: (options?: { includeArchived?: boolean; limit?: number; offset?: number; keyword?: string }) =>
+    request<PaginatedResponse<GarmentSku>>(withParams('/api/garment-skus', {
+      includeArchived: options?.includeArchived,
+      limit: options?.limit,
+      offset: options?.offset,
+      keyword: options?.keyword,
+    })),
+  getSku: (id: number, options?: { imageLimit?: number; imageOffset?: number }) =>
+    request<{ item: GarmentSku }>(withParams(`/api/garment-skus/${id}`, {
+      imageLimit: options?.imageLimit,
+      imageOffset: options?.imageOffset,
+    })),
+  listSkuImages: (id: number, options?: { limit?: number; offset?: number }) =>
+    request<PaginatedResponse<GarmentImage>>(withParams(`/api/garment-skus/${id}/images`, {
+      limit: options?.limit,
+      offset: options?.offset,
+    })),
   uploadSku: (sku: string, files: File[], title?: string) => {
     const form = new FormData()
     form.append('sku', sku)
@@ -81,7 +105,12 @@ export const api = {
     request<{ ok: boolean }>(`/api/garment-images/${id}`, {
       method: 'DELETE',
     }),
-  listModels: () => request<{ items: ModelProfile[] }>('/api/model-profiles'),
+  listModels: (options?: { limit?: number; offset?: number; keyword?: string }) =>
+    request<PaginatedResponse<ModelProfile>>(withParams('/api/model-profiles', {
+      limit: options?.limit,
+      offset: options?.offset,
+      keyword: options?.keyword,
+    })),
   createModel: (payload: { modelId: string; name: string; isDefault?: boolean; profile?: Record<string, unknown> }) =>
     request<{ item: ModelProfile }>('/api/model-profiles', {
       method: 'POST',
@@ -140,8 +169,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ shotPlanId, previewRunId }),
     }),
-  listRuns: (options?: { includeArchived?: boolean }) =>
-    request<{ items: GenerationRun[] }>(`/api/generation-runs${options?.includeArchived ? '?includeArchived=true' : ''}`),
+  listRuns: (options?: { includeArchived?: boolean; limit?: number; offset?: number; skuId?: number; keyword?: string }) =>
+    request<PaginatedResponse<GenerationRun>>(withParams('/api/generation-runs', {
+      includeArchived: options?.includeArchived,
+      limit: options?.limit,
+      offset: options?.offset,
+      skuId: options?.skuId,
+      keyword: options?.keyword,
+    })),
   getRun: (runId: number) => request<{ item: GenerationRun }>(`/api/generation-runs/${runId}`),
   deleteRun: (runId: number) =>
     request<{ ok: boolean }>(`/api/generation-runs/${runId}`, {

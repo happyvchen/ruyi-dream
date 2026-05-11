@@ -28,6 +28,10 @@ import type { AppRoute, Page } from './routes'
 import type { GarmentSku, GenerationImage, GenerationRun, ModelProfile, Shot, ShotPlan } from './types'
 
 const SHOW_DEBUG_INFO = import.meta.env.VITE_SHOW_DEBUG_INFO === 'true'
+const SKU_PAGE_SIZE = 30
+const MODEL_PAGE_SIZE = 30
+const RUN_PAGE_SIZE = 20
+const SKU_IMAGE_PAGE_SIZE = 24
 
 type BusyState = 'idle' | 'uploading' | 'planning' | 'saving-plan' | 'previewing' | 'generating' | 'regenerating'
 type ImportStatus = 'draft' | 'uploading' | 'uploaded' | 'failed'
@@ -92,12 +96,18 @@ export function App() {
   const appReady = auth.checked && auth.authenticated
   const [skus, setSkus] = useState<GarmentSku[]>([])
   const [models, setModels] = useState<ModelProfile[]>([])
+  const [skuNextOffset, setSkuNextOffset] = useState<number | null>(null)
+  const [skuHasMore, setSkuHasMore] = useState(false)
+  const [modelNextOffset, setModelNextOffset] = useState<number | null>(null)
+  const [modelHasMore, setModelHasMore] = useState(false)
   const [selectedSku, setSelectedSku] = useState<GarmentSku | null>(null)
   const [selectedModelId, setSelectedModelId] = useState<number | undefined>()
   const [shotPlan, setShotPlan] = useState<ShotPlan | null>(null)
   const [previewRun, setPreviewRun] = useState<GenerationRun | null>(null)
   const [generationRun, setGenerationRun] = useState<GenerationRun | null>(null)
   const [historyRuns, setHistoryRuns] = useState<GenerationRun[]>([])
+  const [runNextOffset, setRunNextOffset] = useState<number | null>(null)
+  const [runHasMore, setRunHasMore] = useState(false)
   const [selectedHistoryRun, setSelectedHistoryRun] = useState<GenerationRun | null>(null)
   const [historyFilter, setHistoryFilter] = useState('')
   const [generateSkuFilter, setGenerateSkuFilter] = useState('')
@@ -293,7 +303,10 @@ export function App() {
     const editingModel = models.find((model) => model.id === editingModelId)
     if (editingModel) {
       setModelForm(modelToForm(editingModel))
-      setModelHeadDrafts([])
+      setModelHeadDrafts((current) => {
+        revokeModelHeadDraftPreviews(current)
+        return []
+      })
     }
   }, [editingModelId, models])
 
@@ -305,6 +318,11 @@ export function App() {
       if (targetSku) {
         setHydratedRouteKey(routeKey(route))
         void chooseSku(targetSku, { syncUrl: false })
+      } else {
+        setHydratedRouteKey(routeKey(route))
+        void resolveSkuByCode(route.sku).then((resolved) => {
+          if (resolved) void chooseSku(resolved, { syncUrl: false })
+        })
       }
       return
     }
@@ -318,6 +336,11 @@ export function App() {
       if (targetRun) {
         setHydratedRouteKey(routeKey(route))
         void restoreHistoryRun(targetRun, { syncUrl: false })
+      } else {
+        setHydratedRouteKey(routeKey(route))
+        void api.getRun(route.generateRunId).then((result) => restoreHistoryRun(result.item, { syncUrl: false })).catch((err) => {
+          setError(err instanceof Error ? err.message : '读取生成记录失败')
+        })
       }
       return
     }
@@ -326,6 +349,11 @@ export function App() {
       if (targetSku) {
         setHydratedRouteKey(routeKey(route))
         void chooseSku(targetSku, { syncUrl: false, previewRunId: route.generatePreviewRunId })
+      } else {
+        setHydratedRouteKey(routeKey(route))
+        void resolveSkuByCode(route.generateSku).then((resolved) => {
+          if (resolved) void chooseSku(resolved, { syncUrl: false, previewRunId: route.generatePreviewRunId })
+        })
       }
       return
     }
@@ -358,7 +386,13 @@ export function App() {
     setAuth({ checked: true, authRequired: true, authenticated: false })
     setSkus([])
     setModels([])
+    setSkuNextOffset(null)
+    setSkuHasMore(false)
+    setModelNextOffset(null)
+    setModelHasMore(false)
     setHistoryRuns([])
+    setRunNextOffset(null)
+    setRunHasMore(false)
     setSelectedSku(null)
     setShotPlan(null)
     setPreviewRun(null)
@@ -369,25 +403,83 @@ export function App() {
   async function refreshBaseData() {
     setError(null)
     const [skuResult, modelResult, runResult] = await Promise.all([
-      api.listSkus({ includeArchived: showArchivedSkus }),
-      api.listModels(),
-      api.listRuns({ includeArchived: showArchivedRuns }),
+      api.listSkus({ includeArchived: showArchivedSkus, limit: SKU_PAGE_SIZE }),
+      api.listModels({ limit: MODEL_PAGE_SIZE }),
+      api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE }),
     ])
     setSkus(skuResult.items)
+    setSkuNextOffset(skuResult.nextOffset)
+    setSkuHasMore(skuResult.hasMore)
     setModels(modelResult.items)
+    setModelNextOffset(modelResult.nextOffset)
+    setModelHasMore(modelResult.hasMore)
     setHistoryRuns(runResult.items)
+    setRunNextOffset(runResult.nextOffset)
+    setRunHasMore(runResult.hasMore)
     if (!selectedModelId && modelResult.items[0]) setSelectedModelId(modelResult.items[0].id)
     if (!editingModelId && modelResult.items[0]) setEditingModelId(modelResult.items[0].id)
   }
 
   async function refreshHistoryRuns() {
-    const result = await api.listRuns({ includeArchived: showArchivedRuns })
+    const result = await api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE })
     setHistoryRuns(result.items)
+    setRunNextOffset(result.nextOffset)
+    setRunHasMore(result.hasMore)
+  }
+
+  async function resolveSkuByCode(skuCode: string) {
+    const result = await api.listSkus({ includeArchived: true, limit: 5, keyword: skuCode })
+    return result.items.find((sku) => sku.sku === skuCode) ?? result.items[0] ?? null
+  }
+
+  async function loadMoreSkus() {
+    if (skuNextOffset === null) return
+    const result = await api.listSkus({ includeArchived: showArchivedSkus, limit: SKU_PAGE_SIZE, offset: skuNextOffset })
+    setSkus((current) => mergeById(current, result.items))
+    setSkuNextOffset(result.nextOffset)
+    setSkuHasMore(result.hasMore)
+  }
+
+  async function loadMoreModels() {
+    if (modelNextOffset === null) return
+    const result = await api.listModels({ limit: MODEL_PAGE_SIZE, offset: modelNextOffset })
+    setModels((current) => mergeById(current, result.items))
+    setModelNextOffset(result.nextOffset)
+    setModelHasMore(result.hasMore)
+  }
+
+  async function loadMoreRuns() {
+    if (runNextOffset === null) return
+    const result = await api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE, offset: runNextOffset })
+    setHistoryRuns((current) => mergeById(current, result.items))
+    setRunNextOffset(result.nextOffset)
+    setRunHasMore(result.hasMore)
+  }
+
+  async function loadMoreSelectedSkuImages() {
+    if (!selectedSku?.imagePage?.hasMore || selectedSku.imagePage.nextOffset === null) return
+    const result = await api.listSkuImages(selectedSku.id, {
+      limit: SKU_IMAGE_PAGE_SIZE,
+      offset: selectedSku.imagePage.nextOffset,
+    })
+    setSelectedSku((current) => {
+      if (!current || current.id !== selectedSku.id) return current
+      return {
+        ...current,
+        images: mergeById(current.images ?? [], result.items),
+        imagePage: {
+          limit: result.limit,
+          offset: result.offset,
+          nextOffset: result.nextOffset,
+          hasMore: result.hasMore,
+        },
+      }
+    })
   }
 
   async function chooseSku(sku: GarmentSku, options: { syncUrl?: boolean; targetPage?: Page; previewRunId?: number } = {}) {
     setError(null)
-    const detail = await api.getSku(sku.id)
+    const detail = await api.getSku(sku.id, { imageLimit: SKU_IMAGE_PAGE_SIZE })
     const planResult = await api.getDefaultPlan(sku.id)
     const rawPreferredPreview = await resolvePreviewRun(detail.item.id, undefined, options.previewRunId)
     const preferredPreview = rawPreferredPreview && (!planResult.item || rawPreferredPreview.shotPlanId === planResult.item.id)
@@ -405,6 +497,9 @@ export function App() {
     const restoredPreview = preferredPreview ?? await resolvePreviewRun(detail.item.id, activePlan?.id)
     setPreviewRun(restoredPreview)
     setGenerationRun(null)
+    void api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE, skuId: detail.item.id }).then((result) => {
+      setHistoryRuns((current) => mergeById(current, result.items))
+    })
     if (options.syncUrl !== false) {
       const targetPage = options.targetPage ?? page
       if (targetPage === 'garments') navigate({ page: 'garments', sku: detail.item.sku })
@@ -424,7 +519,7 @@ export function App() {
       }
     }
     if (!shotPlanId) return null
-    const runs = (await api.listRuns()).items
+    const runs = (await api.listRuns({ skuId, limit: 100 })).items
     const preview = runs.find((run) => run.kind === 'preview_grid' && run.skuId === skuId && run.shotPlanId === shotPlanId)
     if (!preview) return null
     try {
@@ -460,6 +555,9 @@ export function App() {
   }
 
   function removeImportImage(packageId: string, imageId: string) {
+    const targetPackage = importPackages.find((item) => item.id === packageId)
+    const targetImage = targetPackage?.images.find((image) => image.id === imageId)
+    if (targetImage) URL.revokeObjectURL(targetImage.previewUrl)
     setImportPackages((current) =>
       current
         .map((item) =>
@@ -472,6 +570,8 @@ export function App() {
   }
 
   function removeImportPackage(packageId: string) {
+    const target = importPackages.find((item) => item.id === packageId)
+    if (target) revokeImportPackagePreviews([target])
     setImportPackages((current) => current.filter((item) => item.id !== packageId))
   }
 
@@ -504,6 +604,7 @@ export function App() {
         title: detail.item.title ?? detail.item.sku,
         status: detail.item.status,
       })
+      revokeImportPackagePreviews([target])
       setImportPackages((current) => current.filter((item) => item.id !== packageId))
       await refreshBaseData()
 
@@ -867,7 +968,10 @@ export function App() {
   function beginNewModel() {
     setEditingModelId(undefined)
     setModelForm(createBlankModelForm(models.length + 1))
-    setModelHeadDrafts([])
+    setModelHeadDrafts((current) => {
+      revokeModelHeadDraftPreviews(current)
+      return []
+    })
     navigate({ page: 'models' })
   }
 
@@ -893,7 +997,10 @@ export function App() {
       }
       setEditingModelId(result.item.id)
       if (result.item.isDefault || !selectedModelId) setSelectedModelId(result.item.id)
-      setModelHeadDrafts([])
+      setModelHeadDrafts((current) => {
+        revokeModelHeadDraftPreviews(current)
+        return []
+      })
       navigate({ page: 'models', modelId: result.item.modelId }, true)
       await refreshBaseData()
     } catch (err) {
@@ -912,8 +1019,11 @@ export function App() {
     setError(null)
     try {
       await api.deleteModel(editingModel.id)
-      const nextModels = (await api.listModels()).items
+      const modelResult = await api.listModels({ limit: MODEL_PAGE_SIZE })
+      const nextModels = modelResult.items
       setModels(nextModels)
+      setModelNextOffset(modelResult.nextOffset)
+      setModelHasMore(modelResult.hasMore)
       const nextModel = nextModels[0]
       setEditingModelId(nextModel?.id)
       if (selectedModelId === editingModel.id) setSelectedModelId(nextModel?.id)
@@ -932,8 +1042,7 @@ export function App() {
     setError(null)
     try {
       await api.deleteRun(run.id)
-      const nextRuns = (await api.listRuns()).items
-      setHistoryRuns(nextRuns)
+      await refreshHistoryRuns()
       if (selectedHistoryRun?.id === run.id) {
         setSelectedHistoryRun(null)
         if (page === 'history') navigate({ page: 'history' }, true)
@@ -999,13 +1108,11 @@ export function App() {
 
   async function replaceModelHeadReference(angle: string, file: File) {
     if (!editingModelId) {
-      setModelHeadDrafts((current) =>
-        current.map((item) =>
-          item.id === angle
-            ? { ...item, file, previewUrl: URL.createObjectURL(file) }
-            : item,
-        ),
-      )
+      setModelHeadDrafts((current) => current.map((item) => {
+        if (item.id !== angle) return item
+        URL.revokeObjectURL(item.previewUrl)
+        return { ...item, file, previewUrl: URL.createObjectURL(file) }
+      }))
       return
     }
     setBusy('uploading')
@@ -1059,7 +1166,11 @@ export function App() {
 
   async function deleteModelHeadReference(angle: string) {
     if (!editingModelId) {
-      setModelHeadDrafts((current) => current.filter((item) => item.id !== angle))
+      setModelHeadDrafts((current) => {
+        const target = current.find((item) => item.id === angle)
+        if (target) URL.revokeObjectURL(target.previewUrl)
+        return current.filter((item) => item.id !== angle)
+      })
       return
     }
     const confirmed = window.confirm(`确认删除 ${headReferenceLabel(angle)} 头像？`)
@@ -1156,6 +1267,11 @@ export function App() {
                     </span>
                   </button>
                 ))}
+                {skuHasMore && (
+                  <button className="secondary full" onClick={() => void loadMoreSkus()}>
+                    加载更多货号
+                  </button>
+                )}
               </div>
             </Panel>
           </aside>
@@ -1264,6 +1380,7 @@ export function App() {
       {page === 'garments' && (
         <GarmentLibraryPage
           skus={skus}
+          skuHasMore={skuHasMore}
           selectedSku={selectedSku}
           shotPlan={shotPlan}
           busy={busy}
@@ -1298,12 +1415,15 @@ export function App() {
           onSavePlan={(plan) => {
             void saveShotPlan(plan)
           }}
+          onLoadMoreSkus={() => void loadMoreSkus()}
+          onLoadMoreSkuImages={() => void loadMoreSelectedSkuImages()}
         />
       )}
 
       {page === 'models' && (
         <ModelProfilesPage
           models={models}
+          modelHasMore={modelHasMore}
           editingModelId={editingModelId}
           form={modelForm}
           busy={busy}
@@ -1321,12 +1441,14 @@ export function App() {
           onReplaceHeadReference={(angle, file) => void replaceModelHeadReference(angle, file)}
           onUpdateHeadReference={(angle, payload) => void updateModelHeadReference(angle, payload)}
           onDeleteHeadReference={(angle) => void deleteModelHeadReference(angle)}
+          onLoadMoreModels={() => void loadMoreModels()}
         />
       )}
 
       {page === 'history' && (
         <HistoryPage
           runs={historyRuns}
+          runHasMore={runHasMore}
           selectedRun={selectedHistoryRun}
           filter={historyFilter}
           showArchivedRuns={showArchivedRuns}
@@ -1336,6 +1458,7 @@ export function App() {
           onRestoreRun={(run) => void restoreHistoryRun(run)}
           onDeleteRun={(run) => void deleteGenerationRun(run)}
           onCancelRun={(run) => void cancelGenerationRun(run)}
+          onLoadMoreRuns={() => void loadMoreRuns()}
         />
       )}
 
@@ -1489,6 +1612,7 @@ function DeleteSkuDialog({
 
 function GarmentLibraryPage({
   skus,
+  skuHasMore,
 	  selectedSku,
 	  shotPlan,
 	  busy,
@@ -1517,8 +1641,11 @@ function GarmentLibraryPage({
   onUseInGenerate,
   onCreatePlan,
   onSavePlan,
+  onLoadMoreSkus,
+  onLoadMoreSkuImages,
 }: {
   skus: GarmentSku[]
+  skuHasMore: boolean
   selectedSku: GarmentSku | null
 	  shotPlan: ShotPlan | null
 	  busy: BusyState
@@ -1547,6 +1674,8 @@ function GarmentLibraryPage({
   onUseInGenerate: (sku: GarmentSku) => void
   onCreatePlan: (sku: GarmentSku) => void
   onSavePlan: (plan: ShotPlan['plan']) => void
+  onLoadMoreSkus: () => void
+  onLoadMoreSkuImages: () => void
 }) {
   const analyzed = skus.filter((sku) => sku.status === 'ANALYZED' || sku.analysis).length
   const pendingImportPackages = importPackages.filter((item) => item.status !== 'uploaded')
@@ -1656,6 +1785,11 @@ function GarmentLibraryPage({
                   </span>
                 </button>
               ))}
+              {skuHasMore && (
+                <button className="secondary full" onClick={onLoadMoreSkus}>
+                  加载更多货号
+                </button>
+              )}
             </div>
           </Panel>
         </aside>
@@ -1721,7 +1855,7 @@ function GarmentLibraryPage({
 	                <section className="material-board asset-panel">
 	                  <div className="section-heading tight">
 	                    <h2>素材图片</h2>
-	                    <span>{selectedSku.images?.length ?? 0} 张</span>
+	                    <span>{selectedSku.images?.length ?? 0}/{selectedSku.imageCount ?? selectedSku.images?.length ?? 0} 张</span>
 	                  </div>
                   <div className="append-images">
                     <label className="mini-upload">
@@ -1800,6 +1934,11 @@ function GarmentLibraryPage({
                       </article>
 	                    ))}
 	                  </div>
+                    {selectedSku.imagePage?.hasMore && (
+                      <button className="secondary full load-more-button" onClick={onLoadMoreSkuImages}>
+                        加载更多素材图
+                      </button>
+                    )}
 	                </section>
 
 	                <section className="material-board shot-plan-panel">
@@ -1833,6 +1972,7 @@ function GarmentLibraryPage({
 
 function ModelProfilesPage({
   models,
+  modelHasMore,
   editingModelId,
   form,
   busy,
@@ -1846,8 +1986,10 @@ function ModelProfilesPage({
   onReplaceHeadReference,
   onUpdateHeadReference,
   onDeleteHeadReference,
+  onLoadMoreModels,
 }: {
   models: ModelProfile[]
+  modelHasMore: boolean
   editingModelId?: number
   form: ModelForm
   busy: BusyState
@@ -1861,6 +2003,7 @@ function ModelProfilesPage({
   onReplaceHeadReference: (angle: string, file: File) => void
   onUpdateHeadReference: (angle: string, payload: { angle?: string; orderIndex?: number }) => void
   onDeleteHeadReference: (angle: string) => void
+  onLoadMoreModels: () => void
 }) {
   const editingModel = models.find((model) => model.id === editingModelId)
   const isNew = !editingModel
@@ -1907,6 +2050,11 @@ function ModelProfilesPage({
                   </span>
                 </button>
               ))}
+              {modelHasMore && (
+                <button className="secondary full" onClick={onLoadMoreModels}>
+                  加载更多模特
+                </button>
+              )}
             </div>
           </Panel>
 
@@ -2424,11 +2572,12 @@ function HistoryPreviewImage({ url, title }: { url: string | null; title: string
 
   if (!url || failed) return <span className="history-preview-fallback">{failed ? '加载失败' : '无图'}</span>
 
-  return <img src={mediaUrl(url)} alt={title} onError={() => setFailed(true)} />
+  return <img src={mediaUrl(url)} alt={title} loading="lazy" decoding="async" onError={() => setFailed(true)} />
 }
 
 function HistoryPage({
   runs,
+  runHasMore,
   selectedRun,
   filter,
   showArchivedRuns,
@@ -2438,8 +2587,10 @@ function HistoryPage({
   onRestoreRun,
   onDeleteRun,
   onCancelRun,
+  onLoadMoreRuns,
 }: {
   runs: GenerationRun[]
+  runHasMore: boolean
   selectedRun: GenerationRun | null
   filter: string
   showArchivedRuns: boolean
@@ -2449,6 +2600,7 @@ function HistoryPage({
   onRestoreRun: (run: GenerationRun) => void
   onDeleteRun: (run: GenerationRun) => void
   onCancelRun: (run: GenerationRun) => void
+  onLoadMoreRuns: () => void
 }) {
   const keyword = filter.trim().toLowerCase()
   const visibleRuns = keyword
@@ -2507,6 +2659,11 @@ function HistoryPage({
               </button>
             </article>
           ))}
+          {runHasMore && !keyword && (
+            <button className="secondary full" onClick={onLoadMoreRuns}>
+              加载更多生成记录
+            </button>
+          )}
         </div>
       </section>
 
@@ -2585,7 +2742,7 @@ function HistoryRunDetail({
           {(run.images ?? []).map((image) => (
             <article className="history-shot-card" key={image.id}>
               <div className="history-shot-image">
-                {image.url ? <img src={mediaUrl(image.url)} alt={image.title} /> : <span>{statusText(image.status)}</span>}
+                {image.url ? <img src={mediaUrl(image.url)} alt={image.title} loading="lazy" decoding="async" /> : <span>{statusText(image.status)}</span>}
                 {image.isFinal && <b>最终图</b>}
               </div>
 	              <div className="history-shot-body">
@@ -3103,6 +3260,8 @@ function ImagePreviewThumb({
           <img
             src={src}
             alt={name}
+            loading="lazy"
+            decoding="async"
             onLoad={(event) => {
               const target = event.currentTarget
               setDimensions({ width: target.naturalWidth, height: target.naturalHeight })
@@ -3128,7 +3287,7 @@ function ImagePreviewThumb({
               <X size={18} />
             </button>
             <div className="preview-image-frame">
-              <img src={src} alt={name} />
+              <img src={src} alt={name} decoding="async" />
             </div>
             <div className="preview-info">
               <strong title={name}>{middleEllipsis(name, 42)}</strong>
@@ -3398,6 +3557,14 @@ function createImportPackage(sku: string, sourceFiles: File[], sourceName: strin
   }
 }
 
+function revokeImportPackagePreviews(packages: ImportPackage[]) {
+  packages.forEach((item) => item.images.forEach((image) => URL.revokeObjectURL(image.previewUrl)))
+}
+
+function revokeModelHeadDraftPreviews(drafts: ModelHeadDraft[]) {
+  drafts.forEach((draft) => URL.revokeObjectURL(draft.previewUrl))
+}
+
 function groupFilesByTopFolder(files: File[]) {
   return files.reduce<Record<string, File[]>>((groups, file) => {
     const relativePath = getRelativePath(file)
@@ -3612,4 +3779,11 @@ function pageSubtitle(page: Page) {
 function mergeRun(current: GenerationRun | null, next: GenerationRun): GenerationRun {
   if (!current?.images) return next
   return next
+}
+
+function mergeById<T extends { id: number }>(current: T[], incoming: T[]) {
+  const map = new Map<number, T>()
+  current.forEach((item) => map.set(item.id, item))
+  incoming.forEach((item) => map.set(item.id, item))
+  return Array.from(map.values())
 }

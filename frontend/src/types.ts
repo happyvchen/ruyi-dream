@@ -21,6 +21,12 @@ export type GarmentSku = {
   coverFileSize?: number | null
   imageCount?: number | null
   images?: GarmentImage[]
+  imagePage?: {
+    limit: number
+    offset: number
+    nextOffset: number | null
+    hasMore: boolean
+  }
   deleteImpact?: {
     generationRunCount: number
     archivedGenerationRunCount: number
@@ -177,4 +183,12 @@ export type EventLog = {
   eventType: string
   payload: Record<string, unknown>
   createdAt: string
+}
+
+export type PaginatedResponse<T> = {
+  items: T[]
+  limit: number
+  offset: number
+  nextOffset: number | null
+  hasMore: boolean
 }

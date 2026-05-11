@@ -362,7 +362,13 @@ def cleanup_prefixes(prefixes: list[str]) -> list[dict[str, str]]:
 
 
 @app.get("/api/garment-skus")
-def list_garment_skus(include_archived: bool = Query(False, alias="includeArchived")) -> dict[str, Any]:
+def list_garment_skus(
+    include_archived: bool = Query(False, alias="includeArchived"),
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    keyword: str | None = Query(None),
+) -> dict[str, Any]:
+    search = f"%{keyword.strip()}%" if keyword and keyword.strip() else None
     with get_db() as db:
         rows = db.execute(
             """
@@ -374,11 +380,20 @@ def list_garment_skus(include_archived: bool = Query(False, alias="includeArchiv
               (SELECT COUNT(*) FROM generation_runs gr WHERE gr.sku_id = gs.id AND gr.archived_at IS NOT NULL) AS archived_generation_run_count
             FROM garment_skus gs
             WHERE (? OR gs.archived_at IS NULL)
-            ORDER BY gs.created_at DESC
+              AND (? IS NULL OR gs.sku LIKE ? OR gs.title LIKE ? OR gs.status LIKE ?)
+            ORDER BY gs.created_at DESC, gs.id DESC
+            LIMIT ? OFFSET ?
             """,
-            (include_archived,),
+            (include_archived, search, search, search, search, limit + 1, offset),
         ).fetchall()
-        return {"items": [serialize_sku(row) for row in rows]}
+        items = rows[:limit]
+        return {
+            "items": [serialize_sku(row) for row in items],
+            "limit": limit,
+            "offset": offset,
+            "nextOffset": offset + limit if len(rows) > limit else None,
+            "hasMore": len(rows) > limit,
+        }
 
 
 @app.post("/api/garment-skus")
@@ -457,8 +472,36 @@ async def upload_garment_sku(
 
 
 @app.get("/api/garment-skus/{sku_id}")
-def get_garment_sku(sku_id: int) -> dict[str, Any]:
-    return {"item": get_sku_detail_by_id(sku_id)}
+def get_garment_sku(
+    sku_id: int,
+    image_limit: int = Query(24, alias="imageLimit", ge=1, le=120),
+    image_offset: int = Query(0, alias="imageOffset", ge=0),
+) -> dict[str, Any]:
+    return {"item": get_sku_detail_by_id(sku_id, image_limit=image_limit, image_offset=image_offset)}
+
+
+@app.get("/api/garment-skus/{sku_id}/images")
+def list_garment_sku_images(
+    sku_id: int,
+    limit: int = Query(24, ge=1, le=120),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    with get_db() as db:
+        sku_row = db.execute("SELECT id FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
+        if not sku_row:
+            raise HTTPException(status_code=404, detail="货号不存在")
+        rows = db.execute(
+            "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY sort_order, id LIMIT ? OFFSET ?",
+            (sku_id, limit + 1, offset),
+        ).fetchall()
+        items = rows[:limit]
+        return {
+            "items": [serialize_image(image) for image in items],
+            "limit": limit,
+            "offset": offset,
+            "nextOffset": offset + limit if len(rows) > limit else None,
+            "hasMore": len(rows) > limit,
+        }
 
 
 @app.patch("/api/garment-skus/{sku_id}")
@@ -683,10 +726,30 @@ def delete_garment_image(image_id: int) -> dict[str, Any]:
 
 
 @app.get("/api/model-profiles")
-def list_model_profiles() -> dict[str, Any]:
+def list_model_profiles(
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    keyword: str | None = Query(None),
+) -> dict[str, Any]:
+    search = f"%{keyword.strip()}%" if keyword and keyword.strip() else None
     with get_db() as db:
-        rows = db.execute("SELECT * FROM model_profiles ORDER BY is_default DESC, id").fetchall()
-        return {"items": [serialize_model(row) for row in rows]}
+        rows = db.execute(
+            """
+            SELECT * FROM model_profiles
+            WHERE (? IS NULL OR model_id LIKE ? OR name LIKE ?)
+            ORDER BY is_default DESC, id
+            LIMIT ? OFFSET ?
+            """,
+            (search, search, search, limit + 1, offset),
+        ).fetchall()
+        items = rows[:limit]
+        return {
+            "items": [serialize_model(row) for row in items],
+            "limit": limit,
+            "offset": offset,
+            "nextOffset": offset + limit if len(rows) > limit else None,
+            "hasMore": len(rows) > limit,
+        }
 
 
 @app.post("/api/model-profiles")
@@ -1233,7 +1296,14 @@ async def generate_group(payload: GenerateGroupRequest) -> dict[str, Any]:
 
 
 @app.get("/api/generation-runs")
-def list_generation_runs(include_archived: bool = Query(False, alias="includeArchived")) -> dict[str, Any]:
+def list_generation_runs(
+    include_archived: bool = Query(False, alias="includeArchived"),
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    sku_id: int | None = Query(None, alias="skuId"),
+    keyword: str | None = Query(None),
+) -> dict[str, Any]:
+    search = f"%{keyword.strip()}%" if keyword and keyword.strip() else None
     with get_db() as db:
         rows = db.execute(
             """
@@ -1246,11 +1316,21 @@ def list_generation_runs(include_archived: bool = Query(False, alias="includeArc
             FROM generation_runs gr
             JOIN garment_skus gs ON gs.id = gr.sku_id
             WHERE (? OR gr.archived_at IS NULL)
-            ORDER BY gr.created_at DESC
+              AND (? IS NULL OR gr.sku_id = ?)
+              AND (? IS NULL OR gs.sku LIKE ? OR gs.title LIKE ? OR gr.status LIKE ? OR CAST(gr.id AS TEXT) LIKE ?)
+            ORDER BY gr.created_at DESC, gr.id DESC
+            LIMIT ? OFFSET ?
             """,
-            (include_archived,),
+            (include_archived, sku_id, sku_id, search, search, search, search, search, limit + 1, offset),
         ).fetchall()
-        return {"items": [serialize_generation_run(row, include_images=False, include_summary=True) for row in rows]}
+        items = rows[:limit]
+        return {
+            "items": [serialize_generation_run(row, include_images=False, include_summary=True) for row in items],
+            "limit": limit,
+            "offset": offset,
+            "nextOffset": offset + limit if len(rows) > limit else None,
+            "hasMore": len(rows) > limit,
+        }
 
 
 @app.get("/api/generation-runs/{run_id}")
@@ -2501,11 +2581,12 @@ def infer_head_reference_key(body_position: str) -> str:
     return "front"
 
 
-def get_sku_detail_by_id(sku_id: int) -> dict[str, Any]:
+def get_sku_detail_by_id(sku_id: int, image_limit: int = 24, image_offset: int = 0) -> dict[str, Any]:
     with get_db() as db:
         row = db.execute(
             """
             SELECT gs.*,
+              (SELECT COUNT(*) FROM garment_images gi WHERE gi.sku_id = gs.id) AS image_count,
               (SELECT COUNT(*) FROM shot_plans sp WHERE sp.sku_id = gs.id) AS shot_plan_count,
               (SELECT COUNT(*) FROM generation_runs gr WHERE gr.sku_id = gs.id) AS generation_run_count,
               (SELECT COUNT(*) FROM generation_runs gr WHERE gr.sku_id = gs.id AND gr.archived_at IS NOT NULL) AS archived_generation_run_count
@@ -2517,11 +2598,18 @@ def get_sku_detail_by_id(sku_id: int) -> dict[str, Any]:
         if not row:
             raise HTTPException(status_code=404, detail="货号不存在")
         images = db.execute(
-            "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY sort_order, id",
-            (sku_id,),
+            "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY sort_order, id LIMIT ? OFFSET ?",
+            (sku_id, image_limit + 1, image_offset),
         ).fetchall()
+        visible_images = images[:image_limit]
         item = serialize_sku(row)
-        item["images"] = [serialize_image(image) for image in images]
+        item["images"] = [serialize_image(image) for image in visible_images]
+        item["imagePage"] = {
+            "limit": image_limit,
+            "offset": image_offset,
+            "nextOffset": image_offset + image_limit if len(images) > image_limit else None,
+            "hasMore": len(images) > image_limit,
+        }
         return item
 
 
