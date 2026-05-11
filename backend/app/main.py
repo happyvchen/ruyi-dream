@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from .config import get_settings
 from .db import dumps, get_db, init_db, loads, log_event, media_url, now_iso
+from .image_derivatives import derivative_key, existing_derivative_or_original, generate_image_derivatives
 from .image_provider import get_image_provider
 from .object_storage import (
     clean_key,
@@ -351,6 +352,15 @@ def cleanup_objects(keys: list[str]) -> None:
             delete_object(key)
 
 
+def image_object_keys(original_key: str | Path | None) -> list[str]:
+    if not original_key:
+        return []
+    return [
+        clean_key(original_key),
+        *(key for key in [derivative_key(original_key, "thumb"), derivative_key(original_key, "preview")] if key),
+    ]
+
+
 def cleanup_prefixes(prefixes: list[str]) -> list[dict[str, str]]:
     errors: list[dict[str, str]] = []
     for prefix in dict.fromkeys(prefix for prefix in prefixes if prefix):
@@ -425,9 +435,10 @@ async def upload_garment_sku(
             safe_name = f"{index + 1:03d}-{sanitize_filename(upload.filename or 'image')}"
             key = join_key(target_prefix, safe_name)
             put_fileobj(key, BytesIO(content), content_type)
+            generate_image_derivatives(key, content)
             saved_files.append((safe_name, key, content_type))
     except Exception:
-        cleanup_objects([key for _, key, _ in saved_files])
+        cleanup_objects([key for _, original_key, _ in saved_files for key in image_object_keys(original_key)])
         raise
 
     try:
@@ -466,7 +477,7 @@ async def upload_garment_sku(
             )
             row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
     except Exception:
-        cleanup_objects([key for _, key, _ in saved_files])
+        cleanup_objects([key for _, original_key, _ in saved_files for key in image_object_keys(original_key)])
         raise
     return {"item": get_sku_detail_by_id(sku_id), "summary": serialize_sku(row)}
 
@@ -619,9 +630,10 @@ async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -
                 safe_name = f"{sort_order + 1:03d}-{sanitize_filename(upload.filename or 'image')}"
                 key = unique_key(join_key(target_prefix, safe_name))
                 put_fileobj(key, BytesIO(content), content_type)
+                generate_image_derivatives(key, content)
                 saved.append((Path(key).name, key, content_type, sort_order))
         except Exception:
-            cleanup_objects([key for _, key, _, _ in saved])
+            cleanup_objects([key for _, original_key, _, _ in saved for key in image_object_keys(original_key)])
             raise
 
         try:
@@ -653,7 +665,7 @@ async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -
                 {"fileCount": len(saved), "files": [filename for filename, _, _, _ in saved]},
             )
         except Exception:
-            cleanup_objects([key for _, key, _, _ in saved])
+            cleanup_objects([key for _, original_key, _, _ in saved for key in image_object_keys(original_key)])
             raise
     return {"item": get_sku_detail_by_id(sku_id)}
 
@@ -721,7 +733,7 @@ def delete_garment_image(image_id: int) -> dict[str, Any]:
             {"skuId": row["sku_id"], "filename": row["filename"], "storagePath": storage_path},
         )
 
-    delete_object(storage_path)
+    cleanup_objects(image_object_keys(storage_path))
     return {"ok": True}
 
 
@@ -918,6 +930,7 @@ async def add_model_head_reference(
                 safe_name = sanitize_filename(upload.filename or "head-reference")
                 key = unique_key(join_key(asset_dir, safe_name))
                 put_fileobj(key, BytesIO(content), content_type)
+                generate_image_derivatives(key, content)
                 saved_keys.append(key)
                 old_filename = references.get(assigned_key)
                 if old_filename:
@@ -928,7 +941,7 @@ async def add_model_head_reference(
                     order.append(assigned_key)
                 saved.append({"id": assigned_key, "filename": filename})
         except Exception:
-            cleanup_objects(saved_keys)
+            cleanup_objects([key for saved_key in saved_keys for key in image_object_keys(saved_key)])
             raise
 
         try:
@@ -946,7 +959,7 @@ async def add_model_head_reference(
                 {"items": saved},
             )
         except Exception:
-            cleanup_objects(saved_keys)
+            cleanup_objects([key for saved_key in saved_keys for key in image_object_keys(saved_key)])
             raise
 
     for old_filename in old_files:
@@ -2681,6 +2694,8 @@ def resolve_model_profile(db: Any, model_profile_id: int | None) -> Any:
 
 def serialize_sku(row: Any) -> dict[str, Any]:
     cover_path = row.keys() and row["cover_path"] if "cover_path" in row.keys() else None
+    cover_thumb_path = existing_derivative_or_original(cover_path, "thumb")
+    cover_preview_path = existing_derivative_or_original(cover_path, "preview")
     generation_run_count = row["generation_run_count"] if "generation_run_count" in row.keys() else 0
     archived_generation_run_count = row["archived_generation_run_count"] if "archived_generation_run_count" in row.keys() else 0
     shot_plan_count = row["shot_plan_count"] if "shot_plan_count" in row.keys() else 0
@@ -2692,7 +2707,10 @@ def serialize_sku(row: Any) -> dict[str, Any]:
         "status": row["status"],
         "analysis": loads(row["analysis_json"], None),
         "storagePath": row["storage_path"],
-        "coverUrl": media_url(cover_path),
+        "coverUrl": media_url(cover_thumb_path),
+        "coverThumbUrl": media_url(cover_thumb_path),
+        "coverPreviewUrl": media_url(cover_preview_path),
+        "coverOriginalUrl": media_url(cover_path),
         "coverFileSize": file_size(cover_path),
         "imageCount": row["image_count"] if "image_count" in row.keys() else None,
         "deleteImpact": {
@@ -2708,14 +2726,22 @@ def serialize_sku(row: Any) -> dict[str, Any]:
 
 
 def serialize_image(row: Any) -> dict[str, Any]:
+    original_path = row["storage_path"]
+    thumb_path = existing_derivative_or_original(original_path, "thumb")
+    preview_path = existing_derivative_or_original(original_path, "preview")
     return {
         "id": row["id"],
         "filename": row["filename"],
         "role": row["role"],
         "sortOrder": row["sort_order"],
         "mimeType": row["mime_type"],
-        "url": media_url(row["storage_path"]),
-        "fileSize": file_size(row["storage_path"]),
+        "url": media_url(preview_path),
+        "thumbUrl": media_url(thumb_path),
+        "previewUrl": media_url(preview_path),
+        "originalUrl": media_url(original_path),
+        "fileSize": file_size(original_path),
+        "thumbFileSize": file_size(thumb_path) if thumb_path != original_path else None,
+        "previewFileSize": file_size(preview_path) if preview_path != original_path else None,
         "createdAt": row["created_at"],
     }
 
@@ -2728,7 +2754,17 @@ def serialize_model(row: Any) -> dict[str, Any]:
     head = assigned_references.get("front")
     preview_path = join_key(row["asset_dir"], head) if head else None
     reference_urls = {
-        angle: model_asset_url(row["id"], row["asset_dir"], filename)
+        angle: model_asset_url(row["id"], row["asset_dir"], filename, "preview")
+        for angle, filename in references.items()
+        if filename
+    }
+    reference_thumb_urls = {
+        angle: model_asset_url(row["id"], row["asset_dir"], filename, "thumb")
+        for angle, filename in references.items()
+        if filename
+    }
+    reference_original_urls = {
+        angle: model_asset_url(row["id"], row["asset_dir"], filename, "original")
         for angle, filename in references.items()
         if filename
     }
@@ -2743,6 +2779,9 @@ def serialize_model(row: Any) -> dict[str, Any]:
             "angle": None if is_unassigned_head_reference_id(reference_id) else reference_id,
             "filename": str(filename),
             "url": reference_urls.get(reference_id),
+            "thumbUrl": reference_thumb_urls.get(reference_id),
+            "previewUrl": reference_urls.get(reference_id),
+            "originalUrl": reference_original_urls.get(reference_id),
             "fileSize": reference_meta.get(reference_id, {}).get("fileSize"),
         }
         for reference_id, filename in references.items()
@@ -2762,7 +2801,9 @@ def serialize_model(row: Any) -> dict[str, Any]:
         },
         "isDefault": bool(row["is_default"]),
         "previewPath": str(preview_path) if preview_path else None,
-        "previewUrl": model_asset_url(row["id"], row["asset_dir"], head) if head else None,
+        "thumbUrl": model_asset_url(row["id"], row["asset_dir"], head, "thumb") if head else None,
+        "previewUrl": model_asset_url(row["id"], row["asset_dir"], head, "preview") if head else None,
+        "originalUrl": model_asset_url(row["id"], row["asset_dir"], head, "original") if head else None,
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
@@ -2839,7 +2880,10 @@ def serialize_generation_run(row: Any, include_images: bool, include_summary: bo
                         "id": preview["id"],
                         "shotIndex": preview["shot_index"],
                         "title": preview["title"],
-                        "url": media_url(preview["output_path"]),
+                        "url": media_url(existing_derivative_or_original(preview["output_path"], "thumb")),
+                        "thumbUrl": media_url(existing_derivative_or_original(preview["output_path"], "thumb")),
+                        "previewUrl": media_url(existing_derivative_or_original(preview["output_path"], "preview")),
+                        "originalUrl": media_url(preview["output_path"]),
                         "status": preview["status"],
                         "isFinal": bool(preview["is_final"]),
                         "attemptCount": preview["current_attempt_index"] or 1,
@@ -2859,6 +2903,9 @@ def serialize_generation_run(row: Any, include_images: bool, include_summary: bo
 
 def serialize_generation_image(row: Any) -> dict[str, Any]:
     displayable = has_displayable_generation_output(row)
+    original_path = row["output_path"] if displayable else None
+    thumb_path = existing_derivative_or_original(original_path, "thumb") if original_path else None
+    preview_path = existing_derivative_or_original(original_path, "preview") if original_path else None
     return {
         "id": row["id"],
         "runId": row["run_id"],
@@ -2866,8 +2913,13 @@ def serialize_generation_image(row: Any) -> dict[str, Any]:
         "title": row["title"],
         "status": row["status"],
         "objectKey": row["output_path"],
-        "url": media_url(row["output_path"]) if displayable else None,
-        "fileSize": file_size(row["output_path"]) if displayable else None,
+        "url": media_url(preview_path) if displayable else None,
+        "thumbUrl": media_url(thumb_path) if displayable else None,
+        "previewUrl": media_url(preview_path) if displayable else None,
+        "originalUrl": media_url(original_path) if displayable else None,
+        "fileSize": file_size(original_path) if displayable else None,
+        "thumbFileSize": file_size(thumb_path) if displayable and thumb_path != original_path else None,
+        "previewFileSize": file_size(preview_path) if displayable and preview_path != original_path else None,
         "taskPackage": loads(row["task_package_json"], {}),
         "providerRequest": loads(row["provider_request_json"], None),
         "providerResponse": loads(row["provider_response_json"], None),
@@ -2979,10 +3031,12 @@ def new_unassigned_head_reference_key(references: dict[str, Any]) -> str:
             return candidate
 
 
-def model_asset_url(model_profile_id: int, asset_dir: str, filename: str | None) -> str | None:
+def model_asset_url(model_profile_id: int, asset_dir: str, filename: str | None, variant: str = "preview") -> str | None:
     if not filename:
         return None
     key = join_key(asset_dir, sanitize_filename(filename))
+    if variant in {"thumb", "preview"}:
+        key = existing_derivative_or_original(key, variant) or key
     if not object_exists(key):
         return None
     return presigned_get_url(key)
@@ -2995,4 +3049,4 @@ def file_size(path: str | Path | None) -> int | None:
 def remove_model_asset_file(asset_dir: str, filename: str | None) -> None:
     if not filename:
         return
-    delete_object(join_key(asset_dir, sanitize_filename(filename)))
+    cleanup_objects(image_object_keys(join_key(asset_dir, sanitize_filename(filename))))

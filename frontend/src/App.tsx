@@ -78,6 +78,9 @@ type ModelHeadEntry = {
   angle: string
   filename: string
   url: string
+  thumbUrl?: string
+  previewUrl?: string
+  originalUrl?: string
   fileSize?: number | null
 }
 type AuthState = {
@@ -1255,7 +1258,8 @@ export function App() {
                   >
                     {sku.coverUrl ? (
                       <ImagePreviewThumb
-                        src={mediaUrl(sku.coverUrl)}
+                        src={mediaUrl(sku.coverThumbUrl ?? sku.coverUrl)}
+                        fullSrc={mediaUrl(sku.coverPreviewUrl ?? sku.coverOriginalUrl ?? sku.coverUrl)}
                         name={sku.sku}
                         fileSize={sku.coverFileSize}
                         compact
@@ -1773,7 +1777,8 @@ function GarmentLibraryPage({
                 >
                   {sku.coverUrl ? (
                     <ImagePreviewThumb
-                      src={mediaUrl(sku.coverUrl)}
+                      src={mediaUrl(sku.coverThumbUrl ?? sku.coverUrl)}
+                      fullSrc={mediaUrl(sku.coverPreviewUrl ?? sku.coverOriginalUrl ?? sku.coverUrl)}
                       name={sku.sku}
                       fileSize={sku.coverFileSize}
                       compact
@@ -1901,7 +1906,8 @@ function GarmentLibraryPage({
                         <div className="asset-thumb">
                           {image.url ? (
                             <ImagePreviewThumb
-                              src={mediaUrl(image.url)}
+                              src={imageUrlFor(image, 'preview')}
+                              fullSrc={imageUrlFor(image, 'original')}
                               name={image.filename}
                               fileSize={image.fileSize}
                             />
@@ -1911,7 +1917,7 @@ function GarmentLibraryPage({
                           <strong title={image.filename}>{middleEllipsis(image.filename)}</strong>
                           <small>
                             {image.url ? (
-                              <ImageInfoLine src={mediaUrl(image.url)} fileSize={image.fileSize} />
+                              <ImageInfoLine src={imageUrlFor(image, 'preview')} fileSize={image.previewFileSize ?? image.fileSize} />
                             ) : '图片信息读取中'}
                           </small>
                           <div className="asset-order-row">
@@ -2038,7 +2044,8 @@ function ModelProfilesPage({
                 >
                   {model.previewUrl ? (
                     <ImagePreviewThumb
-                      src={mediaUrl(model.previewUrl)}
+                      src={mediaUrl(model.thumbUrl ?? model.previewUrl)}
+                      fullSrc={mediaUrl(model.previewUrl ?? model.originalUrl)}
                       name={model.name}
                       fileSize={modelPreviewFileSize(model)}
                       compact
@@ -2191,7 +2198,8 @@ function ModelProfilesPage({
                     <div className="head-thumb">
                       {entry.url ? (
                         <ImagePreviewThumb
-                          src={entry.url}
+                          src={entry.thumbUrl ?? entry.url}
+                          fullSrc={entry.previewUrl ?? entry.originalUrl ?? entry.url}
                           name={entry.filename}
                           fileSize={entry.fileSize}
                         />
@@ -2536,7 +2544,7 @@ function GenerationHistoryOverview({
           <button className="generation-history-main" onClick={() => onOpenRun(run)}>
             <div className="mini-preview-strip">
               {(run.summary?.previews ?? []).slice(0, 3).map((preview) => (
-                <HistoryPreviewImage key={preview.id} url={preview.url} title={preview.title} />
+                <HistoryPreviewImage key={preview.id} image={preview} title={preview.title} />
               ))}
               {(run.summary?.previews ?? []).length === 0 && <span>无图</span>}
             </div>
@@ -2563,16 +2571,23 @@ function GenerationHistoryOverview({
   )
 }
 
-function HistoryPreviewImage({ url, title }: { url: string | null; title: string }) {
+function HistoryPreviewImage({
+  image,
+  title,
+}: {
+  image: { thumbUrl?: string | null; previewUrl?: string | null; originalUrl?: string | null; url?: string | null }
+  title: string
+}) {
   const [failed, setFailed] = useState(false)
+  const src = imageUrlFor(image, 'thumb')
 
   useEffect(() => {
     setFailed(false)
-  }, [url])
+  }, [src])
 
-  if (!url || failed) return <span className="history-preview-fallback">{failed ? '加载失败' : '无图'}</span>
+  if (!src || failed) return <span className="history-preview-fallback">{failed ? '加载失败' : '无图'}</span>
 
-  return <img src={mediaUrl(url)} alt={title} loading="lazy" decoding="async" onError={() => setFailed(true)} />
+  return <img src={src} alt={title} loading="lazy" decoding="async" onError={() => setFailed(true)} />
 }
 
 function HistoryPage({
@@ -2638,7 +2653,7 @@ function HistoryPage({
               <button className="history-run-main" onClick={() => onOpenRun(run.id)}>
                 <div className="history-preview-strip">
                   {(run.summary?.previews ?? []).slice(0, 4).map((preview) => (
-                    <HistoryPreviewImage key={preview.id} url={preview.url} title={preview.title} />
+                    <HistoryPreviewImage key={preview.id} image={preview} title={preview.title} />
                   ))}
                   {(run.summary?.previews ?? []).length === 0 && <div className="history-preview-empty">无图</div>}
                 </div>
@@ -2742,7 +2757,9 @@ function HistoryRunDetail({
           {(run.images ?? []).map((image) => (
             <article className="history-shot-card" key={image.id}>
               <div className="history-shot-image">
-                {image.url ? <img src={mediaUrl(image.url)} alt={image.title} loading="lazy" decoding="async" /> : <span>{statusText(image.status)}</span>}
+                {(image.url || image.previewUrl || image.originalUrl) ? (
+                  <img src={imageUrlFor(image, 'preview')} alt={image.title} loading="lazy" decoding="async" />
+                ) : <span>{statusText(image.status)}</span>}
                 {image.isFinal && <b>最终图</b>}
               </div>
 	              <div className="history-shot-body">
@@ -3078,7 +3095,7 @@ function ResultGallery({
           ? visibleImages.map((image) => {
               const imageActive = isImageActive(image)
               const imageElapsed = elapsedText(image.submittedAt ?? image.createdAt, nowMs, image.completedAt ?? image.updatedAt, !imageActive)
-              const canShowImage = image.status === 'SUCCEEDED' && Boolean(image.url)
+              const canShowImage = image.status === 'SUCCEEDED' && Boolean(image.url || image.previewUrl || image.originalUrl)
               const displayTitle = image.shotIndex === 0 ? '分镜预览' : image.title
               const displayLabel = `${String(image.shotIndex).padStart(2, '0')} ${displayTitle}`
               return (
@@ -3086,7 +3103,8 @@ function ResultGallery({
                 <div className="result-image">
                   {canShowImage ? (
                     <ImagePreviewThumb
-                      src={mediaUrl(image.url)}
+                      src={imageUrlFor(image, 'preview')}
+                      fullSrc={imageUrlFor(image, 'original')}
                       name={displayLabel}
                       fileSize={image.fileSize}
                     >
@@ -3198,8 +3216,18 @@ function Tag({ children }: { children: ReactNode }) {
   return <span className="tag">{children}</span>
 }
 
+function imageUrlFor(image: { thumbUrl?: string | null; previewUrl?: string | null; originalUrl?: string | null; url?: string | null }, variant: 'thumb' | 'preview' | 'original') {
+  const value = variant === 'thumb'
+    ? image.thumbUrl ?? image.previewUrl ?? image.url ?? image.originalUrl
+    : variant === 'preview'
+      ? image.previewUrl ?? image.url ?? image.thumbUrl ?? image.originalUrl
+      : image.originalUrl ?? image.previewUrl ?? image.url ?? image.thumbUrl
+  return mediaUrl(value)
+}
+
 function ImagePreviewThumb({
   src,
+  fullSrc,
   name,
   fileSize,
   compact,
@@ -3207,6 +3235,7 @@ function ImagePreviewThumb({
   children,
 }: {
   src: string
+  fullSrc?: string
   name: string
   fileSize?: number | null
   compact?: boolean
@@ -3287,7 +3316,7 @@ function ImagePreviewThumb({
               <X size={18} />
             </button>
             <div className="preview-image-frame">
-              <img src={src} alt={name} decoding="async" />
+              <img src={fullSrc ?? src} alt={name} decoding="async" />
             </div>
             <div className="preview-info">
               <strong title={name}>{middleEllipsis(name, 42)}</strong>
@@ -3683,7 +3712,10 @@ function getSavedHeadEntries(model?: ModelProfile): ModelHeadEntry[] {
       id: typeof item.id === 'string' ? item.id : '',
       angle: typeof item.angle === 'string' ? item.angle : '',
       filename: typeof item.filename === 'string' ? item.filename : '',
-      url: typeof item.url === 'string' ? mediaUrl(item.url) : '',
+      url: typeof item.previewUrl === 'string' ? mediaUrl(item.previewUrl) : typeof item.url === 'string' ? mediaUrl(item.url) : '',
+      thumbUrl: typeof item.thumbUrl === 'string' ? mediaUrl(item.thumbUrl) : undefined,
+      previewUrl: typeof item.previewUrl === 'string' ? mediaUrl(item.previewUrl) : undefined,
+      originalUrl: typeof item.originalUrl === 'string' ? mediaUrl(item.originalUrl) : undefined,
       fileSize: typeof item.fileSize === 'number' ? item.fileSize : undefined,
     }))
     .filter((item) => item.id)
@@ -3695,6 +3727,8 @@ function getDraftHeadEntries(drafts: ModelHeadDraft[]): ModelHeadEntry[] {
     angle: item.angle,
     filename: item.file.name,
     url: item.previewUrl,
+    previewUrl: item.previewUrl,
+    originalUrl: item.previewUrl,
     fileSize: item.file.size,
   }))
 }
