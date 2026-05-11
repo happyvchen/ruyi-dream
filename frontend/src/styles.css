@@ -124,6 +124,226 @@ p {
   padding: 18px 24px 32px;
 }
 
+.generate-workbench {
+  display: grid;
+  gap: 18px;
+  padding: 18px 24px 32px;
+}
+
+.task-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(420px, 0.86fr);
+  gap: 20px;
+  align-items: stretch;
+  padding: 20px;
+  border: 1px solid #deded8;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.task-hero-copy {
+  display: grid;
+  align-content: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.task-hero-copy h2 {
+  font-size: 28px;
+  line-height: 1.1;
+}
+
+.task-hero-copy p {
+  max-width: 760px;
+  color: #66665f;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.task-status-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.task-status,
+.task-summary-item {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #e3e3dd;
+  border-radius: 8px;
+  background: #fafaf8;
+}
+
+.task-status span,
+.task-summary-item span {
+  color: #77776f;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.task-status strong,
+.task-summary-item strong {
+  min-width: 0;
+  color: #2f2f2b;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-status.ready {
+  border-color: #b9d0be;
+  background: #f3f8f2;
+}
+
+.task-status.running {
+  border-color: #d7c78d;
+  background: #fff9e6;
+}
+
+.task-layout {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr) 300px;
+  gap: 18px;
+  align-items: start;
+}
+
+.task-sidebar,
+.task-control-panel,
+.production-stage {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.task-sku-list {
+  margin-top: 12px;
+  max-height: 680px;
+  overflow: auto;
+}
+
+.stage-board,
+.visual-workspace {
+  border: 1px solid #deded8;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.stage-board {
+  padding: 18px;
+}
+
+.stage-board-head,
+.visual-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.stage-board-head h2,
+.visual-head h2 {
+  margin-top: 4px;
+  font-size: 22px;
+}
+
+.stage-board-head p,
+.visual-head p {
+  margin-top: 7px;
+  color: #66665f;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.stage-steps {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.stage-steps span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 38px;
+  padding: 8px;
+  border: 1px solid #e3e3dd;
+  border-radius: 8px;
+  background: #fafaf8;
+  color: #6f6f68;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.stage-steps span.active {
+  border-color: #22221f;
+  background: #22221f;
+  color: #fff;
+}
+
+.stage-steps b {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+  font-size: 12px;
+}
+
+.stage-steps span:not(.active) b {
+  background: #e8e8e2;
+  color: #55554f;
+}
+
+.visual-workspace {
+  display: grid;
+  gap: 0;
+  overflow: hidden;
+}
+
+.visual-head {
+  padding: 18px 18px 0;
+}
+
+.visual-head > span {
+  color: #707069;
+  font-size: 13px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.visual-workspace .results {
+  border: 0;
+  border-radius: 0;
+}
+
+.visual-workspace .results + .results {
+  border-top: 1px solid #eeeeea;
+}
+
+.next-action-card,
+.task-summary-list {
+  display: grid;
+  gap: 10px;
+}
+
+.next-action-card strong {
+  font-size: 16px;
+}
+
+.next-action-card p {
+  color: #66665f;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .left-rail,
 .right-rail,
 .main-flow {
@@ -714,6 +934,60 @@ summary {
 
 .script-shot-list {
   grid-template-columns: 1fr;
+}
+
+.plan-business-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.plan-shot-cards {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.plan-shot-card {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 156px;
+  padding: 12px;
+  border: 1px solid #e4e4de;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.plan-shot-card b {
+  width: fit-content;
+  padding: 4px 7px;
+  border-radius: 5px;
+  background: #22221f;
+  color: #fff;
+  font-size: 12px;
+}
+
+.plan-shot-card strong {
+  color: #242421;
+  font-size: 15px;
+}
+
+.plan-shot-card span,
+.plan-shot-card small {
+  color: #66665f;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.plan-advanced-details {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #e4e4de;
+  border-radius: 8px;
+  background: #fafaf8;
 }
 
 .advanced-grid > div,
@@ -2127,6 +2401,39 @@ summary {
 
   .workspace {
     grid-template-columns: 1fr;
+  }
+
+  .generate-workbench {
+    padding: 16px;
+  }
+
+  .task-hero,
+  .task-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .production-stage {
+    order: 1;
+  }
+
+  .task-control-panel {
+    order: 2;
+  }
+
+  .task-sidebar {
+    order: 3;
+  }
+
+  .task-status-strip,
+  .stage-steps,
+  .plan-business-summary,
+  .plan-shot-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .stage-board-head,
+  .visual-head {
+    flex-direction: column;
   }
 
   .history-page {

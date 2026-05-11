@@ -128,6 +128,11 @@ export function App() {
       && previewRun.skuId === selectedSku.id
       && previewRun.shotPlanId === shotPlan.id,
   )
+  const relevantHistoryRuns = useMemo(() => {
+    const runs = selectedSku ? historyRuns.filter((run) => run.skuId === selectedSku.id) : [...historyRuns]
+    return runs.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+  }, [historyRuns, selectedSku?.id])
+  const taskStage = getGenerateTaskStage(selectedSku, shotPlan, previewRun, generationRun)
 
   function navigate(routeInput: AppRoute, replace = false) {
     const url = routeToUrl(routeInput)
@@ -1084,170 +1089,151 @@ export function App() {
 
       {error && <div className="alert">{error}</div>}
 
-      {page === 'generate' && <main className="workspace">
-        <section className="left-rail">
-          <Panel title="上传服装" icon={<Upload size={18} />}>
-            <p className="small-muted">请到“服装素材”页完成预览与编辑后保存上传。</p>
-            <button className="primary full" onClick={() => navigate({ page: 'garments' })}>
-              <Upload size={17} />导入新图包
-            </button>
-          </Panel>
-
-          <Panel title="服装素材" icon={<FileImage size={18} />}>
-            <div className="sku-list">
-              {skus.length === 0 && <EmptyText text="还没有上传货号" />}
-              {skus.map((sku) => (
-                <button
-                  key={sku.id}
-                  className={`sku-item ${selectedSku?.id === sku.id ? 'selected' : ''}`}
-                  onClick={() => void chooseSku(sku, { targetPage: 'generate' })}
-                >
-                  {sku.coverUrl ? (
-                    <ImagePreviewThumb
-                      src={mediaUrl(sku.coverUrl)}
-                      name={sku.sku}
-                      fileSize={sku.coverFileSize}
-                      compact
-                    />
-                  ) : <div className="thumb-fallback" />}
-                  <span>
-                    <strong>{sku.sku}</strong>
-                    <small>{sku.imageCount ?? 0} 张图片 · {sku.archivedAt ? '已归档' : statusText(sku.status)}</small>
-                  </span>
-                </button>
-              ))}
-            </div>
-          </Panel>
+      {page === 'generate' && <main className="generate-workbench">
+        <section className="task-hero">
+          <div className="task-hero-copy">
+            <span className="eyebrow">当前拍摄任务</span>
+            <h2>{selectedSku ? selectedSku.sku : '选择一个服装货号'}</h2>
+            <p>{selectedSku?.analysis?.summary ?? '从左侧选择已保存货号，或先导入图包并生成默认拍摄方案。'}</p>
+          </div>
+          <div className="task-status-strip">
+            <TaskStatus label="服装" value={selectedSku ? `${selectedSku.imageCount ?? selectedSku.images?.length ?? 0} 张素材` : '未选择'} state={selectedSku ? 'ready' : 'idle'} />
+            <TaskStatus label="默认方案" value={shotPlan ? `${shotPlan.plan.shots.length} 张图位` : '未保存'} state={shotPlanPlanning ? 'running' : shotPlan ? 'ready' : 'idle'} />
+            <TaskStatus label="分镜" value={previewRun ? statusText(previewRun.status) : '未预览'} state={previewRun?.status === 'SUCCEEDED' ? 'ready' : previewRun && isRunActive(previewRun) ? 'running' : 'idle'} />
+            <TaskStatus label="最终图" value={generationRun ? statusText(generationRun.status) : '未生成'} state={generationRun?.status === 'SUCCEEDED' ? 'ready' : generationRun && isRunActive(generationRun) ? 'running' : 'idle'} />
+          </div>
         </section>
 
-        <section className="main-flow">
-          <div className="step-grid">
-            <StepCard number="1" title="选择服装">
-              {selectedSku ? (
-                <div className="selected-garment">
-                  <div className="image-strip">
-                    {(selectedSku.images ?? []).slice(0, 5).map((image) => (
+        <section className="task-layout">
+          <aside className="task-sidebar">
+            <Panel title="服装货号" icon={<FileImage size={18} />}>
+              <button className="primary full" onClick={() => navigate({ page: 'garments' })}>
+                <Upload size={17} />导入新图包
+              </button>
+              <div className="sku-list task-sku-list">
+                {skus.length === 0 && <EmptyText text="还没有上传货号" />}
+                {skus.map((sku) => (
+                  <button
+                    key={sku.id}
+                    className={`sku-item ${selectedSku?.id === sku.id ? 'selected' : ''}`}
+                    onClick={() => void chooseSku(sku, { targetPage: 'generate' })}
+                  >
+                    {sku.coverUrl ? (
                       <ImagePreviewThumb
-                        key={image.id}
-                        src={mediaUrl(image.url)}
-                        name={image.filename}
-                        fileSize={image.fileSize}
+                        src={mediaUrl(sku.coverUrl)}
+                        name={sku.sku}
+                        fileSize={sku.coverFileSize}
                         compact
                       />
-                    ))}
-                  </div>
-                  <h3>{selectedSku.sku}</h3>
-                  <p>{selectedSku.analysis?.summary ?? '请先在“服装素材”页保存默认组图方案。'}</p>
-                  <Tag>{shotPlan ? '已保存默认方案' : '缺少默认方案'}</Tag>
-                </div>
-              ) : (
-                <EmptyText text="选择或上传一个货号开始" />
-              )}
-            </StepCard>
-
-            <StepCard number="2" title="使用默认方案">
-              {planModel ? (
-                  <div className="model-summary">
-                  <div className="model-avatar">
-                    {planModel.previewUrl ? (
-                      <ImagePreviewThumb
-                        src={mediaUrl(planModel.previewUrl)}
-                        name={planModel.name}
-                        fileSize={modelPreviewFileSize(planModel)}
-                        compact
-                        round
-                      />
-                    ) : modelInitials(planModel)}
-                  </div>
-                  <h3>{shotPlan?.plan.brandStyle?.name ?? '暂无默认组图方案'}</h3>
-                  <p>{shotPlan ? shotPlanPlanning ? '正在识别服装品类并生成拍摄方案和分镜脚本。' : `将使用 ${planModel.name} 和服装素材页保存的 ${shotPlan.plan.shots.length} 张图位方案。` : '回到服装素材页生成默认组图方案后，这里会直接用于生成。'}</p>
-                  {shotPlan ? <Tag>{shotPlanPlanning ? '策划中' : planModel.name}</Tag> : <button className="secondary" onClick={() => navigate(selectedSku ? { page: 'garments', sku: selectedSku.sku } : { page: 'garments' })}>去保存方案</button>}
-                </div>
-              ) : (
-                <EmptyText text="暂无数字模特" />
-              )}
-            </StepCard>
-
-            <StepCard number="3" title="分镜预览">
-              <div className="model-summary">
-                <h3>{previewRun ? `预览 #${previewRun.id}` : '先看姿势方向'}</h3>
-                <p>
-                  {previewRun
-                    ? previewRun.status === 'SUCCEEDED'
-                      ? '状态：已生成。满意后再生成最终 5 张成片。'
-                      : isRunActive(previewRun)
-                        ? `状态：${statusText(previewRun.status)}。分镜预览完成后即可生成最终成片。`
-                        : `状态：${statusText(previewRun.status)}。请重新预览后再生成最终成片。`
-                    : '点击预览会先生成一张 2x3 分镜预览，前 5 格对应最终组图，第 6 格为备用候选姿势。'}
-                </p>
-                {previewRun ? <Tag>{previewRun.status === 'SUCCEEDED' ? '可用于生成' : isRunActive(previewRun) ? '生成中' : '不可生成'}</Tag> : <Tag>未预览</Tag>}
+                    ) : <div className="thumb-fallback" />}
+                    <span>
+                      <strong>{sku.sku}</strong>
+                      <small>{sku.imageCount ?? 0} 张图片 · {sku.archivedAt ? '已归档' : statusText(sku.status)}</small>
+                    </span>
+                  </button>
+                ))}
               </div>
-            </StepCard>
-          </div>
+            </Panel>
+          </aside>
 
-          <div className="action-row">
-            <button className="secondary" onClick={previewGrid} disabled={!selectedSku || !shotPlan || shotPlanPlanning || busy !== 'idle' || Boolean(previewRun && isRunActive(previewRun))}>
-              {busy === 'previewing' ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
-              预览
-            </button>
-            <button className="primary" onClick={generateGroup} disabled={!canGenerateGroup || Boolean(previewRun && isRunActive(previewRun)) || busy !== 'idle' || Boolean(generationRun && isRunActive(generationRun))}>
-              {busy === 'generating' ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
-              生成
-            </button>
-            <span>
-              {shotPlan
-                ? shotPlanPlanning
-                  ? '正在生成默认组图方案，完成后可继续预览。'
-                  : canGenerateGroup
-                  ? `将使用方案 #${shotPlan.id} 和分镜预览 #${previewRun?.id} 生成最终组图。`
-                  : previewRun
-                    ? previewRun.status === 'SUCCEEDED'
-                      ? '当前分镜预览不属于这个货号或方案，请重新预览后再生成最终组图。'
-                      : '当前分镜预览未完成或已失败，请重新预览后再生成最终组图。'
-                    : '请先生成分镜预览，确认姿势方向后再生成最终组图。'
-                : '该货号还没有默认组图方案，请先到服装素材页保存方案。'}
-            </span>
-          </div>
+          <section className="production-stage">
+            <div className="stage-board">
+              <div className="stage-board-head">
+                <div>
+                  <span className="eyebrow">生产进度</span>
+                  <h2>{taskStage.title}</h2>
+                  <p>{taskStage.description}</p>
+                </div>
+                <Tag>{taskStage.tag}</Tag>
+              </div>
+              <div className="stage-steps">
+                {['选择服装', '确认方案', '分镜预览', '最终组图', '交付导出'].map((label, index) => (
+                  <span className={index <= taskStage.index ? 'active' : ''} key={label}>
+                    <b>{index + 1}</b>{label}
+                  </span>
+                ))}
+              </div>
+            </div>
 
-          {previewRun && (
-            <ResultGallery
-              title="分镜预览"
-              run={previewRun}
-              imageFilter={(image) => image.shotIndex === 0}
-              loading={busy === 'previewing' || isRunActive(previewRun)}
-              nowMs={nowMs}
-              onRegenerate={(image, reason) => void regenerate(image, reason)}
-              onToggleFinal={(image) => void toggleFinal(image)}
-              onReviewStatus={(image, status) => void updateReviewStatus(image, status)}
-              onCancelImage={(image) => void cancelImage(image)}
-              onExport={(runId) => void api.exportRun(runId)}
-            />
-          )}
+            <div className="visual-workspace">
+              <div className="visual-head">
+                <div>
+                  <h2>{previewRun && !generationRun ? '分镜预览' : '最终组图'}</h2>
+                  <p>{previewRun && !generationRun ? '先确认 2x3 分镜方向，再进入最终 5 张成片。' : '确认可用图，必要时单张重生，最后导出交付。'}</p>
+                </div>
+                {shotPlan && <span>方案 #{shotPlan.id}</span>}
+              </div>
 
-          <ResultGallery
-            title="最终组图"
-            run={generationRun}
-            imageFilter={(image) => image.shotIndex > 0}
-            loading={busy === 'generating' || busy === 'regenerating' || Boolean(generationRun && isRunActive(generationRun))}
-            nowMs={nowMs}
-            onRegenerate={(image, reason) => void regenerate(image, reason)}
-            onToggleFinal={(image) => void toggleFinal(image)}
-            onReviewStatus={(image, status) => void updateReviewStatus(image, status)}
-            onCancelImage={(image) => void cancelImage(image)}
-            onExport={(runId) => void api.exportRun(runId)}
-          />
+              {previewRun && (
+                <ResultGallery
+                  title="分镜预览"
+                  run={previewRun}
+                  imageFilter={(image) => image.shotIndex === 0}
+                  loading={busy === 'previewing' || isRunActive(previewRun)}
+                  nowMs={nowMs}
+                  onRegenerate={(image, reason) => void regenerate(image, reason)}
+                  onToggleFinal={(image) => void toggleFinal(image)}
+                  onReviewStatus={(image, status) => void updateReviewStatus(image, status)}
+                  onCancelImage={(image) => void cancelImage(image)}
+                  onExport={(runId) => void api.exportRun(runId)}
+                />
+              )}
+
+              <ResultGallery
+                title="最终组图"
+                run={generationRun}
+                imageFilter={(image) => image.shotIndex > 0}
+                loading={busy === 'generating' || busy === 'regenerating' || Boolean(generationRun && isRunActive(generationRun))}
+                nowMs={nowMs}
+                onRegenerate={(image, reason) => void regenerate(image, reason)}
+                onToggleFinal={(image) => void toggleFinal(image)}
+                onReviewStatus={(image, status) => void updateReviewStatus(image, status)}
+                onCancelImage={(image) => void cancelImage(image)}
+                onExport={(runId) => void api.exportRun(runId)}
+              />
+            </div>
+          </section>
+
+          <aside className="task-control-panel">
+            <Panel title="下一步" icon={<Sparkles size={18} />}>
+              <div className="next-action-card">
+                <strong>{taskStage.actionTitle}</strong>
+                <p>{taskStage.actionText}</p>
+                {!shotPlan && selectedSku && (
+                  <button className="secondary full" onClick={() => navigate({ page: 'garments', sku: selectedSku.sku })}>
+                    去保存方案
+                  </button>
+                )}
+                <button className="secondary full" onClick={previewGrid} disabled={!selectedSku || !shotPlan || shotPlanPlanning || busy !== 'idle' || Boolean(previewRun && isRunActive(previewRun))}>
+                  {busy === 'previewing' ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
+                  生成分镜预览
+                </button>
+                <button className="primary full" onClick={generateGroup} disabled={!canGenerateGroup || Boolean(previewRun && isRunActive(previewRun)) || busy !== 'idle' || Boolean(generationRun && isRunActive(generationRun))}>
+                  {busy === 'generating' ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
+                  生成最终组图
+                </button>
+              </div>
+            </Panel>
+
+            <Panel title="任务摘要" icon={<Images size={18} />}>
+              <div className="task-summary-list">
+                <TaskSummary label="货号" value={selectedSku?.sku ?? '未选择'} />
+                <TaskSummary label="数字模特" value={planModel?.name ?? '未设置'} />
+                <TaskSummary label="品牌风格" value={shotPlan?.plan.brandStyle?.summary ?? '默认白/浅灰棚拍'} />
+                <TaskSummary label="最近记录" value={`${relevantHistoryRuns.length} 条`} />
+              </div>
+            </Panel>
+
+            <Panel title={selectedSku ? '当前货号记录' : '最近生成记录'} icon={<History size={18} />}>
+              <GenerationHistoryOverview
+                runs={relevantHistoryRuns.slice(0, 8)}
+                onOpenRun={(run) => void restoreHistoryRun(run)}
+                onDeleteRun={(run) => void deleteGenerationRun(run)}
+                onCancelRun={(run) => void cancelGenerationRun(run)}
+              />
+            </Panel>
+          </aside>
         </section>
-
-        <aside className="right-rail">
-          <Panel title="生成记录" icon={<History size={18} />}>
-            <GenerationHistoryOverview
-              runs={historyRuns}
-              onOpenRun={(run) => void restoreHistoryRun(run)}
-              onDeleteRun={(run) => void deleteGenerationRun(run)}
-              onCancelRun={(run) => void cancelGenerationRun(run)}
-            />
-          </Panel>
-        </aside>
       </main>}
 
       {page === 'garments' && (
@@ -2240,6 +2226,24 @@ function Stat({ label, value }: { label: string; value: number }) {
   )
 }
 
+function TaskStatus({ label, value, state }: { label: string; value: string; state: 'idle' | 'ready' | 'running' }) {
+  return (
+    <div className={`task-status ${state}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  )
+}
+
+function TaskSummary({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="task-summary-item">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  )
+}
+
 function PlaceholderPage({ title, text }: { title: string; text: string }) {
   return (
     <main className="placeholder-page">
@@ -2590,18 +2594,27 @@ function ShotPlanBoard({
           </button>
         )}
       </div>
-      <div className="shooting-script">
-        <PlanField label="货号" value={draft.sku} />
-        <PlanField label="商品品类" value={draft.category ?? draft.garment?.category ?? ''} editing={canEdit} onChange={(value) => setDraft((current) => ({ ...current, category: value }))} />
-        <PlanField label="服装摘要" value={draft.garment?.summary ?? ''} wide />
-        <PlanField label="颜色" value={draft.garment?.color ?? ''} />
-        <PlanField label="面料" value={draft.garment?.fabric ?? ''} />
-        <PlanField label="关键结构" value={(draft.garment?.keyStructures ?? []).join('、')} />
-        <PlanField label="主销售信息" value={generationPlan.salesInfo ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ salesInfo: value })} wide multiline />
-        <PlanField label="Lily 调性" value={generationPlan.lilyTone ?? draft.brandStyle?.summary ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ lilyTone: value })} wide multiline />
-        <PlanField label="服饰搭配" value={generationPlan.styling ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ styling: value })} wide multiline />
-        <PlanField label="统一背景" value={generationPlan.background ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ background: value })} wide multiline />
-      </div>
+      {canEdit ? (
+        <div className="shooting-script">
+          <PlanField label="货号" value={draft.sku} />
+          <PlanField label="商品品类" value={draft.category ?? draft.garment?.category ?? ''} editing={canEdit} onChange={(value) => setDraft((current) => ({ ...current, category: value }))} />
+          <PlanField label="服装摘要" value={draft.garment?.summary ?? ''} wide />
+          <PlanField label="颜色" value={draft.garment?.color ?? ''} />
+          <PlanField label="面料" value={draft.garment?.fabric ?? ''} />
+          <PlanField label="关键结构" value={(draft.garment?.keyStructures ?? []).join('、')} />
+          <PlanField label="主销售信息" value={generationPlan.salesInfo ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ salesInfo: value })} wide multiline />
+          <PlanField label="Lily 调性" value={generationPlan.lilyTone ?? draft.brandStyle?.summary ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ lilyTone: value })} wide multiline />
+          <PlanField label="服饰搭配" value={generationPlan.styling ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ styling: value })} wide multiline />
+          <PlanField label="统一背景" value={generationPlan.background ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ background: value })} wide multiline />
+        </div>
+      ) : (
+        <div className="plan-business-summary">
+          <TaskSummary label="品类" value={draft.category ?? draft.garment?.category ?? '待确认'} />
+          <TaskSummary label="服装" value={draft.garment?.summary ?? '待确认'} />
+          <TaskSummary label="棚拍风格" value={generationPlan.background ?? draft.brandStyle?.summary ?? '白/浅灰棚拍'} />
+          <TaskSummary label="搭配边界" value={generationPlan.styling ?? '简洁搭配，商品优先'} />
+        </div>
+      )}
 
       <div className="plan-section-heading">
         <div>
@@ -2609,9 +2622,9 @@ function ShotPlanBoard({
           <span>固定 5 张图位，逐张控制景别、身位和姿势</span>
         </div>
       </div>
-      <div className="script-shot-list">
+      <div className={canEdit ? 'script-shot-list' : 'plan-shot-cards'}>
         {draft.shots.map((shot, index) => (
-          <div key={shot.shotIndex} className="shot-editor">
+          <div key={shot.shotIndex} className={canEdit ? 'shot-editor' : 'plan-shot-card'}>
             {canEdit ? (
               <>
               <div className="shot-editor-title">
@@ -2657,6 +2670,21 @@ function ShotPlanBoard({
               </>
             ) : (
               <>
+                <b>{String(shot.shotIndex).padStart(2, '0')}</b>
+                <strong>{shot.title}</strong>
+                <span>{[shot.scene, shot.cropRange].filter(Boolean).join(' · ') || '默认棚拍图位'}</span>
+                <small>{shot.imagePurpose || shot.task || '展示服装重点与品牌棚拍质感'}</small>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+      {!canEdit && (
+        <details className="plan-advanced-details">
+          <summary>查看图位详情</summary>
+          <div className="script-shot-list">
+            {draft.shots.map((shot) => (
+              <div key={shot.shotIndex} className="shot-editor">
                 <div className="shot-editor-title">
                   <strong>图 {shot.shotIndex} {shot.title}</strong>
                   <small>{shot.englishName}</small>
@@ -2669,11 +2697,11 @@ function ShotPlanBoard({
                 <PlanField label="身位" value={shot.bodyPosition ?? ''} />
                 <PlanField label="姿势调性" value={shot.poseTone ?? ''} wide />
                 <PlanField label="画面目的" value={shot.imagePurpose ?? ''} wide />
-              </>
-            )}
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+        </details>
+      )}
       {isEditing && (
         <div className="plan-save-row">
           <button className="secondary" onClick={() => { setDraft(shotPlan.plan); setIsEditing(false) }} disabled={saving}>取消</button>
@@ -3076,6 +3104,102 @@ function skuHasLinkedHistory(sku: GarmentSku) {
 
 function isImageActive(image: GenerationImage) {
   return ['QUEUED', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS', 'RUNNING'].includes(image.status)
+}
+
+function getGenerateTaskStage(
+  selectedSku: GarmentSku | null,
+  shotPlan: ShotPlan | null,
+  previewRun: GenerationRun | null,
+  generationRun: GenerationRun | null,
+) {
+  if (!selectedSku) {
+    return {
+      index: 0,
+      title: '先选择本次要拍摄的服装',
+      description: '选择已保存货号，或进入服装素材页导入图包。系统会围绕这个货号组织整套拍摄任务。',
+      tag: '待开始',
+      actionTitle: '选择服装',
+      actionText: '左侧选择货号后，这里会显示默认方案、分镜和最终生成动作。',
+    }
+  }
+  if (!shotPlan) {
+    return {
+      index: 1,
+      title: '缺少默认拍摄方案',
+      description: '生成组图页只执行已保存方案。请回到服装素材页，让系统为这个货号生成默认 5 张图位方案。',
+      tag: '需保存方案',
+      actionTitle: '保存默认方案',
+      actionText: '进入服装素材页生成默认方案后，再回到这里预览分镜。',
+    }
+  }
+  if (shotPlan.status === 'PLANNING') {
+    return {
+      index: 1,
+      title: '正在整理默认拍摄方案',
+      description: '系统正在识别服装品类、整理品牌棚拍风格和 5 张图位。完成后即可生成分镜预览。',
+      tag: '策划中',
+      actionTitle: '等待方案完成',
+      actionText: '方案完成后，“生成分镜预览”会自动可用。',
+    }
+  }
+  if (!previewRun) {
+    return {
+      index: 2,
+      title: '先生成 2x3 分镜预览',
+      description: '分镜用于确认姿势方向、图位结构和整体棚拍语言，满意后再生成最终大图。',
+      tag: '待预览',
+      actionTitle: '生成分镜预览',
+      actionText: '先看一张 2x3 contact sheet，避免直接生成整组后才发现方向不对。',
+    }
+  }
+  if (isRunActive(previewRun)) {
+    return {
+      index: 2,
+      title: '分镜预览生成中',
+      description: '后台会持续刷新 fal 状态。完成后即可进入最终 5 张成片生成。',
+      tag: '预览中',
+      actionTitle: '等待分镜完成',
+      actionText: '分镜完成前不需要离开页面，刷新后也可以恢复任务。',
+    }
+  }
+  if (previewRun.status !== 'SUCCEEDED') {
+    return {
+      index: 2,
+      title: '分镜预览不可用',
+      description: '当前分镜未完成或已经失败。请重新生成分镜预览，再进入最终组图。',
+      tag: statusText(previewRun.status),
+      actionTitle: '重新预览',
+      actionText: '重新生成分镜后，系统会把它绑定到当前货号和默认方案。',
+    }
+  }
+  if (!generationRun) {
+    return {
+      index: 3,
+      title: '分镜已就绪，可以生成最终图',
+      description: '最终生成会在同一任务下追加 5 张大图，之后可单张保留、重生和导出。',
+      tag: '可生成',
+      actionTitle: '生成最终组图',
+      actionText: '确认分镜方向后，开始生成最终 5 张电商主图。',
+    }
+  }
+  if (isRunActive(generationRun)) {
+    return {
+      index: 3,
+      title: '最终组图生成中',
+      description: '5 张图会逐张回传状态。失败或不满意的图位后续可单张重生。',
+      tag: '生成中',
+      actionTitle: '等待最终图',
+      actionText: '生成完成后，在结果卡上标记最终图或单张重生。',
+    }
+  }
+  return {
+    index: 4,
+    title: generationRun.status === 'SUCCEEDED' ? '最终组图已生成' : '最终组图需要处理',
+    description: '检查每张图的商品保真、姿势和构图。可用图设为最终图，不满意的图位直接重生。',
+    tag: statusText(generationRun.status),
+    actionTitle: '确认并导出',
+    actionText: '标记最终图后即可导出 ZIP，未达标图位可以保留在同一任务里重生。',
+  }
 }
 
 function elapsedText(startIso?: string | null, nowMs = Date.now(), endIso?: string | null, useEnd = false) {
