@@ -10,6 +10,16 @@ from .config import get_settings
 from .object_storage import presigned_get_url
 
 
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("001", "add_generation_image_attempt_columns", "migration_add_generation_image_attempt_columns"),
+    ("002", "add_generation_run_archive_columns", "migration_add_generation_run_archive_columns"),
+    ("003", "normalize_planning_schema", "migration_normalize_planning_schema"),
+    ("004", "add_generation_task_control_columns", "migration_add_generation_task_control_columns"),
+    ("005", "add_generation_review_delivery_columns", "migration_add_generation_review_delivery_columns"),
+    ("006", "add_brand_template_versions", "migration_add_brand_template_versions"),
+)
+
+
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -152,22 +162,109 @@ def init_db() -> None:
             );
             """
         )
-        ensure_column(db, "generation_images", "prompt_text", "TEXT")
-        ensure_column(db, "generation_images", "image_inputs_json", "TEXT")
-        ensure_column(db, "generation_images", "template_snapshot_json", "TEXT")
-        ensure_column(db, "generation_images", "model_snapshot_json", "TEXT")
-        ensure_column(db, "generation_images", "garment_snapshot_json", "TEXT")
-        ensure_column(db, "generation_images", "attempts_json", "TEXT")
-        ensure_column(db, "generation_images", "current_attempt_index", "INTEGER NOT NULL DEFAULT 0")
-        ensure_column(db, "generation_images", "provider_request_id", "TEXT")
-        ensure_column(db, "generation_images", "provider_status", "TEXT")
-        ensure_column(db, "generation_images", "provider_urls_json", "TEXT")
-        ensure_column(db, "generation_images", "provider_status_json", "TEXT")
-        ensure_column(db, "generation_images", "submitted_at", "TEXT")
-        ensure_column(db, "generation_images", "completed_at", "TEXT")
-        ensure_column(db, "generation_images", "last_status_checked_at", "TEXT")
-        rebuild_planning_schema(db)
+        ensure_migration_table(db)
+        run_migrations(db)
+        seed_default_brand_template(db)
         seed_default_model(db)
+
+
+def ensure_migration_table(db: sqlite3.Connection) -> None:
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          applied_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def run_migrations(db: sqlite3.Connection) -> None:
+    applied_versions = {
+        row["version"]
+        for row in db.execute("SELECT version FROM schema_migrations").fetchall()
+    }
+    migration_functions = {
+        "migration_add_generation_image_attempt_columns": migration_add_generation_image_attempt_columns,
+        "migration_add_generation_run_archive_columns": migration_add_generation_run_archive_columns,
+        "migration_normalize_planning_schema": migration_normalize_planning_schema,
+        "migration_add_generation_task_control_columns": migration_add_generation_task_control_columns,
+        "migration_add_generation_review_delivery_columns": migration_add_generation_review_delivery_columns,
+        "migration_add_brand_template_versions": migration_add_brand_template_versions,
+    }
+    for version, name, function_name in MIGRATIONS:
+        if version in applied_versions:
+            continue
+        migration_functions[function_name](db)
+        db.execute(
+            """
+            INSERT INTO schema_migrations (version, name, applied_at)
+            VALUES (?, ?, ?)
+            """,
+            (version, name, now_iso()),
+        )
+
+
+def migration_add_generation_image_attempt_columns(db: sqlite3.Connection) -> None:
+    ensure_column(db, "generation_images", "prompt_text", "TEXT")
+    ensure_column(db, "generation_images", "image_inputs_json", "TEXT")
+    ensure_column(db, "generation_images", "template_snapshot_json", "TEXT")
+    ensure_column(db, "generation_images", "model_snapshot_json", "TEXT")
+    ensure_column(db, "generation_images", "garment_snapshot_json", "TEXT")
+    ensure_column(db, "generation_images", "attempts_json", "TEXT")
+    ensure_column(db, "generation_images", "current_attempt_index", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(db, "generation_images", "provider_request_id", "TEXT")
+    ensure_column(db, "generation_images", "provider_status", "TEXT")
+    ensure_column(db, "generation_images", "provider_urls_json", "TEXT")
+    ensure_column(db, "generation_images", "provider_status_json", "TEXT")
+    ensure_column(db, "generation_images", "submitted_at", "TEXT")
+    ensure_column(db, "generation_images", "completed_at", "TEXT")
+    ensure_column(db, "generation_images", "last_status_checked_at", "TEXT")
+
+
+def migration_add_generation_run_archive_columns(db: sqlite3.Connection) -> None:
+    ensure_column(db, "generation_runs", "archived_at", "TEXT")
+    ensure_column(db, "generation_runs", "archive_reason", "TEXT")
+
+
+def migration_normalize_planning_schema(db: sqlite3.Connection) -> None:
+    rebuild_planning_schema(db)
+
+
+def migration_add_generation_task_control_columns(db: sqlite3.Connection) -> None:
+    ensure_column(db, "generation_images", "locked_by", "TEXT")
+    ensure_column(db, "generation_images", "locked_until", "TEXT")
+    ensure_column(db, "generation_images", "submit_attempts", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(db, "generation_images", "status_check_attempts", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(db, "generation_images", "status_error_attempts", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(db, "generation_images", "cancel_requested_at", "TEXT")
+    ensure_column(db, "generation_images", "timeout_at", "TEXT")
+
+
+def migration_add_generation_review_delivery_columns(db: sqlite3.Connection) -> None:
+    ensure_column(db, "generation_runs", "delivery_status", "TEXT NOT NULL DEFAULT 'draft'")
+    ensure_column(db, "generation_runs", "delivered_at", "TEXT")
+    ensure_column(db, "generation_images", "review_status", "TEXT NOT NULL DEFAULT 'candidate'")
+    ensure_column(db, "generation_images", "review_note", "TEXT")
+    ensure_column(db, "generation_images", "reviewed_at", "TEXT")
+
+
+def migration_add_brand_template_versions(db: sqlite3.Connection) -> None:
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS brand_template_versions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          template_id TEXT NOT NULL,
+          version TEXT NOT NULL,
+          name TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          is_active INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          UNIQUE(template_id, version)
+        )
+        """
+    )
 
 
 def ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -411,6 +508,35 @@ def seed_default_model(db: sqlite3.Connection) -> None:
             timestamp,
             timestamp,
         ),
+    )
+
+
+def seed_default_brand_template(db: sqlite3.Connection) -> None:
+    existing = db.execute(
+        "SELECT id FROM brand_template_versions WHERE template_id = ? AND version = ?",
+        ("lily-studio", "2026-05-11"),
+    ).fetchone()
+    if existing:
+        return
+
+    timestamp = now_iso()
+    snapshot = {
+        "templateId": "lily-studio",
+        "version": "2026-05-11",
+        "name": "Lily 默认白/浅灰棚拍模板",
+        "summary": "白/浅灰棚拍，柔和光线，克制通勤电商主图语言。",
+        "background": "白色或浅灰棚拍背景",
+        "lighting": "柔和均匀，保留服装材质和结构",
+        "stylingBoundary": "简洁通勤配饰，避免外景大片和夸张造型",
+    }
+    db.execute("UPDATE brand_template_versions SET is_active = 0 WHERE template_id = ?", ("lily-studio",))
+    db.execute(
+        """
+        INSERT INTO brand_template_versions
+          (template_id, version, name, snapshot_json, is_active, created_at)
+        VALUES (?, ?, ?, ?, 1, ?)
+        """,
+        ("lily-studio", "2026-05-11", snapshot["name"], dumps(snapshot), timestamp),
     )
 
 

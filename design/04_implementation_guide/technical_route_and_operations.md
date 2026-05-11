@@ -49,6 +49,19 @@ flowchart TD
   O --> K
 ```
 
+### 2.1 媒体任务扩展边界
+
+当前实现仍以图片 MVP 为主，运行时实体是 `generation_runs` 和 `generation_images`。为了避免后续 Seedance 2.0 视频能力硬塞进图片模型，架构上按以下概念预留边界：
+
+| 概念 | 当前 MVP 映射 | 后续视频扩展 |
+|---|---|---|
+| `MediaRun` | `generation_runs` | 一次图片组图或主视频生产任务 |
+| `MediaAsset` | S3 对象 key + 输入/输出快照 | 图片、首帧、参考视频、生成视频、导出包 |
+| `ImageGenerationTask` | `generation_images` | Image 2 单图位任务 |
+| `VideoGenerationTask` | 暂不落库 | Seedance 2.0 任务，包含时长、首帧、参考视频、音画要求 |
+
+视频能力落地前必须先做 media task 设计，不复用 `generation_images` 的图片字段表达视频状态。
+
 ## 3. 三类模型/能力分工
 
 | 能力 | 角色 | 适合做什么 | 不适合做什么 |
@@ -178,6 +191,7 @@ flowchart TD
 
 - `POST /api/shot-plans` 会创建新的 `shot_plans` 记录。
 - 一个货号可有多条方案历史。
+- 当前默认品牌模板以 `brand_template_versions` 记录版本，生成任务包和 `template_snapshot_json` 都保存模板 id/version。
 - `GET /api/garment-skus/{sku_id}/default-shot-plan` 取最新一条作为默认方案。
 - 生成组图页不再临时创建方案，只使用默认方案。
 

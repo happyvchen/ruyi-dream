@@ -29,6 +29,7 @@ UX 源头在 `../design/03_ux_guide/user_uiux.md`，本目录只管“前端怎�
 | `architecture.md` | 当前前端架构：页面结构、状态分工、API 分层、文件位置 | 修改前端代码前 |
 | `ui-guideline.md` | UI 规则：工作台布局、用户可见信息、隐藏复杂性、结果状态 | 设计页面和组件时 |
 | `src/App.tsx` | 当前单页 MVP 主实现 | 修改页面和交互时 |
+| `src/routes.ts` | 轻量路由解析和 URL 序列化 | 修改深链接或页面路由时 |
 | `src/api.ts` | 后端 API 调用封装 | 修改接口联调时 |
 | `src/types.ts` | 前端领域类型 | 修改 API 响应或状态结构时 |
 

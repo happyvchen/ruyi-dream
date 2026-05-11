@@ -27,7 +27,7 @@ Browser
 
 | Compose service | 容器名 | 镜像来源 | 职责 | 对外端口 |
 |---|---|---|---|---|
-| `frontend` | `ruyi-dream-frontend` | `frontend/Dockerfile` | 构建 React/Vite 静态资源，用 Nginx 提供 SPA fallback | `5173 -> 80` |
+| `frontend` | `ruyi-dream-frontend` | `frontend/Dockerfile` | 构建 React/Vite 静态资源，用非 root Nginx 提供 SPA fallback | `5173 -> 8080` |
 | `backend` | `ruyi-dream-backend` | `backend/Dockerfile` | FastAPI API、SQLite、后台 planner/generation poller | `8000 -> 8000` |
 | `rustfs` | `ruyi-dream-rustfs` | `rustfs/rustfs` | S3 兼容对象存储，保存素材、生成结果和导出 ZIP | `9000 -> 9000`, `9001 -> 9001` |
 
@@ -87,7 +87,14 @@ BACKEND_CORS_ORIGINS=http://<server-ip-or-domain>:5173
 
 ## 生产边界
 
+- 根目录 `.env.example` 是唯一提交到 Git 的配置模板；根目录 `.env` 是本地/Compose 主配置源，不提交 Git。
+- 后端裸跑同样读取根目录 `.env`；`backend/.env.local` 仅允许作为本机临时覆盖文件，不作为共享配置源。
 - `.env` 不提交 Git，生产必须使用强随机 `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY`。
+- 生产环境设置 `APP_ENV=production`；后端启动时会拒绝缺失或默认对象存储密钥。
+- 生产环境必须设置 `APP_GATE_PASSWORD` 或 `APP_GATE_PASSWORD_HASH`，并设置 `APP_SESSION_SECRET` 作为 MVP single-password app gate；如果访问控制由 HTTPS 反向代理或企业网关完成，则必须显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。
+- `APP_SESSION_COOKIE_SECURE` 在 HTTPS 部署中应设置为 `true`；本地或 HTTP 测试环境才允许为 `false`。
+- 轮换访问密码时，如果需要立即踢出所有已登录浏览器，必须同步轮换 `APP_SESSION_SECRET`。
+- `APP_API_ACCESS_TOKEN` 只作为脚本/运维调用的可选 fallback，不作为浏览器前端门禁，也不注入前端静态包。
 - `FAL_KEY` 和 `GEMINI_API_KEY` 只放在部署环境，不写入文档或镜像。
 - RustFS bucket 保持私有，浏览器只通过后端生成的短期预签名 URL 访问对象。
 - 对公网开放时必须接入 HTTPS 反向代理，并把 public URL 改为 HTTPS。
