@@ -51,7 +51,12 @@
 
 ## 本地配置
 
-后端会自动读取 `backend/.env`。首次配置可复制示例文件：
+本项目支持两种本地运行方式：
+
+- 日常开发：RustFS 用 Docker Compose 启动，前端和后端本机裸跑，见 [本地开发说明](docs/local-development.md)。
+- 完整部署模拟：前端、后端、RustFS 全部由 Docker Compose 管理，见 [Docker Compose 部署与管理](docs/docker-compose-operations.md)。
+
+后端裸跑时会自动读取 `backend/.env`。首次配置可复制示例文件：
 
 ```bash
 cd backend
@@ -86,6 +91,30 @@ GENERATION_POLL_INTERVAL_SECONDS=5
 图片素材、生成结果和导出 ZIP 统一写入 S3 兼容对象存储。私有化部署默认使用 RustFS，生产部署方式见 [RustFS 对象存储部署](deployment/rustfs/README.md)。
 
 真实生图只支持 fal queue。点击生成后后端立即返回任务记录，后台会先把参考图上传到 fal，再提交 Image-2 queue 并持续查询状态。`FAL_KEY` 未配置时，预览/生成任务会失败并在 UI 中显示错误，不再使用占位图或本地 fallback。
+
+## Docker Compose 部署
+
+项目根目录提供完整 `docker-compose.yml`：
+
+```bash
+cp .env.example .env
+# 编辑 .env，设置 RustFS 密钥、PUBLIC_BACKEND_URL、PUBLIC_S3_URL、GEMINI_API_KEY、FAL_KEY
+docker compose up -d --build
+docker compose ps
+```
+
+默认端口：
+
+- 前端：`http://127.0.0.1:5173`
+- 后端：`http://127.0.0.1:8000`
+- RustFS S3 API：`http://127.0.0.1:9000`
+- RustFS Console：`http://127.0.0.1:9001`
+
+部署设计、日常运维、备份恢复见：
+
+- [Docker Compose 部署设计](docs/deployment-architecture.md)
+- [Docker Compose 部署与管理](docs/docker-compose-operations.md)
+- [本地开发说明](docs/local-development.md)
 
 ## 前端路由
 
@@ -128,7 +157,9 @@ GENERATION_POLL_INTERVAL_SECONDS=5
 │   └── 04_implementation_guide/
 ├── frontend/
 ├── backend/
-└── deployment/
+├── deployment/
+├── docs/
+└── docker-compose.yml
 ```
 
 当前 `frontend/` 已初始化为 React + Vite + TypeScript 单页 MVP；`backend/` 已初始化为 FastAPI + SQLite + S3 兼容对象存储 MVP。
@@ -147,6 +178,9 @@ GENERATION_POLL_INTERVAL_SECONDS=5
 - [尺寸可选增强模块](design/02_brand_and_assets/optional_measurement_enhancement.md)
 - [普通用户视角 UI/UX 设计](design/03_ux_guide/user_uiux.md)
 - [技术路线与生产实操](design/04_implementation_guide/technical_route_and_operations.md)
+- [Docker Compose 部署设计](docs/deployment-architecture.md)
+- [本地开发说明](docs/local-development.md)
+- [Docker Compose 部署与管理](docs/docker-compose-operations.md)
 - [后端领域模型](backend/domain_model.md)
 - [后端数据库结构](backend/database_schema.md)
 - [RustFS 对象存储部署](deployment/rustfs/README.md)

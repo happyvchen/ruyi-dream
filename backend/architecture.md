@@ -4,7 +4,7 @@
 
 后端负责把客户素材、数字模特、品牌模板和生成任务组织成可追踪的生产链路。MVP 阶段优先保证流程清晰、可调试、可复跑，同时保留后续 SaaS 化演进空间。
 
-当前实现为 FastAPI 单体应用，代码集中在 `backend/app/`，元数据使用 SQLite，媒体文件统一使用 S3 兼容对象存储。私有化默认采用 RustFS Docker 部署，见 `../deployment/rustfs/README.md`。
+当前实现为 FastAPI 单体应用，代码集中在 `backend/app/`，元数据使用 SQLite，媒体文件统一使用 S3 兼容对象存储。私有化默认采用项目根目录 Docker Compose 统一编排前端、后端和 RustFS，部署设计见 `../docs/deployment-architecture.md`，对象存储单独说明见 `../deployment/rustfs/README.md`。
 
 ## 当前代码结构
 
@@ -17,7 +17,9 @@
 | `app/config.py` | 环境变量、对象存储、数据库、模型配置 |
 | `app/object_storage.py` | S3 兼容对象存储访问、预签名 URL、对象删除和读取 |
 | `data/` | SQLite 和 JSONL 日志 |
+| `Dockerfile` | 后端容器镜像定义，生产入口为 `uvicorn app.main:app` |
 | `../deployment/rustfs/` | RustFS 私有化对象存储 Docker 部署示例 |
+| `../docker-compose.yml` | MVP 单机部署编排：frontend/backend/rustfs |
 
 ## 业务模块
 
@@ -57,6 +59,13 @@ FastAPI Route (app/main.py)
   -> SQLite repository helpers (app/db.py + SQL in app/main.py)
   -> S3 兼容对象存储 (RustFS / OSS / S3 / COS / GCS 等)
 ```
+
+Docker Compose 中后端使用：
+
+- `/app/data` 挂载到宿主机 `deployment/app-data/backend`，保存 SQLite 和应用日志。
+- `APP_S3_ENDPOINT_URL=http://rustfs:9000`，供容器内部访问 RustFS。
+- `APP_S3_PUBLIC_ENDPOINT_URL`，供浏览器访问预签名图片 URL。
+- `BACKEND_CORS_ORIGINS`，允许前端静态站点访问 API。
 
 ## 生成任务架构
 

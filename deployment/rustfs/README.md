@@ -2,6 +2,8 @@
 
 本产品统一使用一种存储契约：S3 兼容对象存储。私有化部署默认使用 Docker 运行 RustFS。后续云部署时，同一套应用 S3 配置也可以指向阿里云 OSS、腾讯云 COS、AWS S3、GCS 兼容接口或其他 S3 兼容服务。
 
+项目根目录的 `docker-compose.yml` 已经把 `frontend`、`backend` 和 `rustfs` 编排在一起，是当前推荐的完整部署入口。本文档保留 RustFS 单服务部署说明，用于只启动对象存储、本地开发或独立运维 RustFS。
+
 本部署方案将运行状态保存在容器外：
 
 | 宿主机路径 | 容器路径 | 用途 |
@@ -43,10 +45,18 @@ sudo chmod 750 data config certs logs
 
 ## 启动
 
+只启动对象存储时，在本目录执行：
+
 ```bash
 docker compose up -d
 docker compose ps
 docker compose logs -f rustfs
+```
+
+完整应用部署请回到项目根目录执行：
+
+```bash
+docker compose up -d --build
 ```
 
 RustFS 默认暴露：

@@ -19,6 +19,8 @@
 | `src/types.ts` | 前端类型定义 |
 | `src/styles.css` | 全局样式 |
 | `src/main.tsx` | React 入口 |
+| `Dockerfile` | 多阶段构建：Node 构建静态资源，Nginx 提供 SPA |
+| `nginx.conf` | SPA fallback 与前端健康检查 |
 
 ## 当前页面
 
@@ -89,3 +91,11 @@
 ## API 分层
 
 前端只通过 `src/api.ts` 调用后端，不在组件中散落裸 `fetch`。API 契约以 `../backend/api_guideline.md` 为准，领域字段以 `../backend/domain_model.md` 和 `src/types.ts` 对齐。
+
+Docker Compose 部署时，前端镜像构建阶段会把 `PUBLIC_BACKEND_URL` 写入 `VITE_API_BASE_URL`。如果部署域名、端口或反向代理路径变化，需要重新构建前端镜像：
+
+```bash
+docker compose up -d --build frontend
+```
+
+前端容器只提供静态资源，不代理 API；浏览器直接访问 `PUBLIC_BACKEND_URL`。
