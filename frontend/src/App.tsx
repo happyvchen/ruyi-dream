@@ -21,19 +21,13 @@ import {
   X,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
+import { parseRoute, routeToUrl } from './routes'
+import type { AppRoute, Page } from './routes'
 import type { GarmentSku, GenerationImage, GenerationRun, ModelProfile, Shot, ShotPlan } from './types'
 
+const SHOW_DEBUG_INFO = import.meta.env.VITE_SHOW_DEBUG_INFO === 'true'
+
 type BusyState = 'idle' | 'uploading' | 'planning' | 'saving-plan' | 'previewing' | 'generating' | 'regenerating'
-type Page = 'generate' | 'garments' | 'models' | 'history'
-type AppRoute = {
-  page: Page
-  sku?: string
-  modelId?: string
-  runId?: number
-  generateSku?: string
-  generateRunId?: number
-  generatePreviewRunId?: number
-}
 type ImportStatus = 'draft' | 'uploading' | 'uploaded' | 'failed'
 type ImportImage = {
   id: string
@@ -614,32 +608,64 @@ export function App() {
 
   async function toggleFinal(image: GenerationImage) {
     const result = await api.setFinal(image.id, !image.isFinal)
+    updateImageInState(result.item)
+    await refreshHistoryRuns()
+  }
+
+  function updateImageInState(image: GenerationImage) {
     if (previewRun?.id === image.runId) {
       setPreviewRun((current) => {
         if (!current?.images) return current
         return {
           ...current,
-          images: current.images.map((item) => (item.id === image.id ? result.item : item)),
+          images: current.images.map((item) => (item.id === image.id ? image : item)),
         }
       })
       setGenerationRun((current) => {
         if (!current?.images || current.id !== image.runId) return current
         return {
           ...current,
-          images: current.images.map((item) => (item.id === image.id ? result.item : item)),
+          images: current.images.map((item) => (item.id === image.id ? image : item)),
         }
       })
-      await refreshHistoryRuns()
       return
     }
     setGenerationRun((current) => {
       if (!current?.images) return current
       return {
         ...current,
-        images: current.images.map((item) => (item.id === image.id ? result.item : item)),
+        images: current.images.map((item) => (item.id === image.id ? image : item)),
       }
     })
-    await refreshHistoryRuns()
+    setSelectedHistoryRun((current) => {
+      if (!current?.images || current.id !== image.runId) return current
+      return {
+        ...current,
+        images: current.images.map((item) => (item.id === image.id ? image : item)),
+      }
+    })
+  }
+
+  async function updateReviewStatus(image: GenerationImage, status: string) {
+    try {
+      const result = await api.setReviewStatus(image.id, status)
+      updateImageInState(result.item)
+      await refreshHistoryRuns()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '更新交付状态失败')
+    }
+  }
+
+  async function cancelImage(image: GenerationImage) {
+    const confirmed = window.confirm(`确认取消图片记录 #${image.id}？`)
+    if (!confirmed) return
+    try {
+      const result = await api.cancelImage(image.id)
+      updateImageInState(result.item)
+      await refreshHistoryRuns()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '取消生成图片失败')
+    }
   }
 
   async function openHistoryRun(runId: number) {
@@ -884,6 +910,21 @@ export function App() {
     }
   }
 
+  async function cancelGenerationRun(run: GenerationRun) {
+    const confirmed = window.confirm(`确认取消生成记录 #${run.id}？正在队列中或生成中的图片会标记为已取消。`)
+    if (!confirmed) return
+    setError(null)
+    try {
+      const result = await api.cancelRun(run.id)
+      if (previewRun?.id === run.id) setPreviewRun(result.item)
+      if (generationRun?.id === run.id) setGenerationRun(result.item)
+      if (selectedHistoryRun?.id === run.id) setSelectedHistoryRun(result.item)
+      await refreshHistoryRuns()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '取消生成记录失败')
+    }
+  }
+
   async function uploadModelHeadReferences(files: File[]) {
     if (files.length === 0) return
     if (!editingModelId) {
@@ -1099,7 +1140,7 @@ export function App() {
                     ) : modelInitials(planModel)}
                   </div>
                   <h3>{shotPlan?.plan.brandStyle?.name ?? '暂无默认组图方案'}</h3>
-                  <p>{shotPlan ? shotPlanPlanning ? 'Gemini 正在识别服装品类并生成生图方案和分镜剧本。' : `将使用 ${planModel.name} 和服装素材页保存的 ${shotPlan.plan.shots.length} 张图位方案。` : '回到服装素材页生成默认组图方案后，这里会直接用于生成。'}</p>
+                  <p>{shotPlan ? shotPlanPlanning ? '正在识别服装品类并生成拍摄方案和分镜脚本。' : `将使用 ${planModel.name} 和服装素材页保存的 ${shotPlan.plan.shots.length} 张图位方案。` : '回到服装素材页生成默认组图方案后，这里会直接用于生成。'}</p>
                   {shotPlan ? <Tag>{shotPlanPlanning ? '策划中' : planModel.name}</Tag> : <button className="secondary" onClick={() => navigate(selectedSku ? { page: 'garments', sku: selectedSku.sku } : { page: 'garments' })}>去保存方案</button>}
                 </div>
               ) : (
@@ -1136,7 +1177,7 @@ export function App() {
             <span>
               {shotPlan
                 ? shotPlanPlanning
-                  ? 'Gemini 正在生成默认组图方案，完成后可继续预览。'
+                  ? '正在生成默认组图方案，完成后可继续预览。'
                   : canGenerateGroup
                   ? `将使用方案 #${shotPlan.id} 和分镜预览 #${previewRun?.id} 生成最终组图。`
                   : previewRun
@@ -1157,6 +1198,8 @@ export function App() {
               nowMs={nowMs}
               onRegenerate={(image, reason) => void regenerate(image, reason)}
               onToggleFinal={(image) => void toggleFinal(image)}
+              onReviewStatus={(image, status) => void updateReviewStatus(image, status)}
+              onCancelImage={(image) => void cancelImage(image)}
               onExport={(runId) => void api.exportRun(runId)}
             />
           )}
@@ -1169,6 +1212,8 @@ export function App() {
             nowMs={nowMs}
             onRegenerate={(image, reason) => void regenerate(image, reason)}
             onToggleFinal={(image) => void toggleFinal(image)}
+            onReviewStatus={(image, status) => void updateReviewStatus(image, status)}
+            onCancelImage={(image) => void cancelImage(image)}
             onExport={(runId) => void api.exportRun(runId)}
           />
         </section>
@@ -1179,6 +1224,7 @@ export function App() {
               runs={historyRuns}
               onOpenRun={(run) => void restoreHistoryRun(run)}
               onDeleteRun={(run) => void deleteGenerationRun(run)}
+              onCancelRun={(run) => void cancelGenerationRun(run)}
             />
           </Panel>
         </aside>
@@ -1254,6 +1300,7 @@ export function App() {
           onOpenRun={(runId) => void openHistoryRun(runId)}
           onRestoreRun={(run) => void restoreHistoryRun(run)}
           onDeleteRun={(run) => void deleteGenerationRun(run)}
+          onCancelRun={(run) => void cancelGenerationRun(run)}
         />
       )}
     </div>
@@ -1617,15 +1664,15 @@ function GarmentLibraryPage({
 
 	                <section className="material-board shot-plan-panel">
 	                  <div className="section-heading tight">
-	                    <h2>生图方案</h2>
+	                    <h2>拍摄方案</h2>
 	                    <span>{shotPlan ? `#${shotPlan.id}` : '未保存'}</span>
 	                  </div>
 	                  {shotPlan ? (
 	                    <ShotPlanBoard shotPlan={shotPlan} editable={busy === 'idle'} onSave={onSavePlan} saving={busy === 'saving-plan'} />
 	                  ) : (
 	                    <div className="plan-empty">
-	                      <p>还没有生图方案</p>
-	                      <span>点击右上角“生成默认方案”，Gemini 会根据服装主图识别品类、服饰搭配和分镜剧本；生成组图时将直接使用这里保存的方案。</span>
+	                      <p>还没有拍摄方案</p>
+	                      <span>点击右上角“生成默认方案”，系统会根据服装素材整理品类、服饰搭配和分镜剧本；生成组图时将直接使用这里保存的方案。</span>
 	                    </div>
 	                  )}
 	                </section>
@@ -1635,7 +1682,7 @@ function GarmentLibraryPage({
             <div className="library-empty">
               <FileImage size={38} />
               <h2>选择一个货号查看素材</h2>
-              <p>上传或点击左侧货号后，这里会展示完整图片、生图方案和使用入口。</p>
+              <p>上传或点击左侧货号后，这里会展示完整图片、拍摄方案和使用入口。</p>
             </div>
           )}
         </section>
@@ -2033,7 +2080,7 @@ function FactRows({ analysis }: { analysis?: GarmentSku['analysis'] }) {
     return (
       <div className="fact-empty">
         <p>待策划</p>
-        <span>点击“生成默认方案”后，Gemini 会根据服装主图生成品类、结构和组图建议。</span>
+        <span>点击“生成默认方案”后，系统会根据服装素材生成品类、结构和组图建议。</span>
       </div>
     )
   }
@@ -2079,10 +2126,12 @@ function GenerationHistoryOverview({
   runs,
   onOpenRun,
   onDeleteRun,
+  onCancelRun,
 }: {
   runs: GenerationRun[]
   onOpenRun: (run: GenerationRun) => void
   onDeleteRun: (run: GenerationRun) => void
+  onCancelRun: (run: GenerationRun) => void
 }) {
   const relevantRuns = [...runs]
     .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
@@ -2114,6 +2163,11 @@ function GenerationHistoryOverview({
           <button className="danger icon-only history-delete-button" onClick={() => onDeleteRun(run)} title="归档记录">
             <Trash2 size={14} />
           </button>
+          {isRunActive(run) && (
+            <button className="secondary icon-only history-delete-button" onClick={() => onCancelRun(run)} title="取消任务">
+              <X size={14} />
+            </button>
+          )}
         </article>
       ))}
     </div>
@@ -2128,6 +2182,7 @@ function HistoryPage({
   onOpenRun,
   onRestoreRun,
   onDeleteRun,
+  onCancelRun,
 }: {
   runs: GenerationRun[]
   selectedRun: GenerationRun | null
@@ -2136,6 +2191,7 @@ function HistoryPage({
   onOpenRun: (runId: number) => void
   onRestoreRun: (run: GenerationRun) => void
   onDeleteRun: (run: GenerationRun) => void
+  onCancelRun: (run: GenerationRun) => void
 }) {
   const keyword = filter.trim().toLowerCase()
   const visibleRuns = keyword
@@ -2180,6 +2236,7 @@ function HistoryPage({
                 </span>
               </button>
               <button className="secondary" onClick={() => onRestoreRun(run)}>恢复</button>
+              {isRunActive(run) && <button className="secondary" onClick={() => onCancelRun(run)}>取消</button>}
               <button className="danger icon-only" onClick={() => onDeleteRun(run)} title="归档记录">
                 <Trash2 size={15} />
               </button>
@@ -2193,7 +2250,7 @@ function HistoryPage({
         {!selectedRun ? (
           <EmptyText text="选择一条历史任务查看入参、输出和重生过程" />
         ) : (
-          <HistoryRunDetail run={selectedRun} onRestoreRun={onRestoreRun} onDeleteRun={onDeleteRun} />
+          <HistoryRunDetail run={selectedRun} onRestoreRun={onRestoreRun} onDeleteRun={onDeleteRun} onCancelRun={onCancelRun} />
         )}
       </section>
     </main>
@@ -2204,10 +2261,12 @@ function HistoryRunDetail({
   run,
   onRestoreRun,
   onDeleteRun,
+  onCancelRun,
 }: {
   run: GenerationRun
   onRestoreRun: (run: GenerationRun) => void
   onDeleteRun: (run: GenerationRun) => void
+  onCancelRun: (run: GenerationRun) => void
 }) {
   const firstImage = run.images?.[0]
   const firstTaskPackage = firstImage?.taskPackage ?? {}
@@ -2227,6 +2286,11 @@ function HistoryRunDetail({
           <button className="primary" onClick={() => onRestoreRun(run)}>
             <RefreshCw size={16} />恢复到生成页
           </button>
+          {isRunActive(run) && (
+            <button className="secondary" onClick={() => onCancelRun(run)}>
+              <X size={16} />取消任务
+            </button>
+          )}
           <button className="danger" onClick={() => onDeleteRun(run)}>
             <Trash2 size={16} />归档记录
           </button>
@@ -2259,29 +2323,33 @@ function HistoryRunDetail({
                 {image.url ? <img src={mediaUrl(image.url)} alt={image.title} /> : <span>{statusText(image.status)}</span>}
                 {image.isFinal && <b>最终图</b>}
               </div>
-              <div className="history-shot-body">
-                <strong>{String(image.shotIndex).padStart(2, '0')} {image.title}</strong>
-                <small>{statusText(image.status)} · 图片记录 #{image.id}</small>
-                <p>{image.prompt || '暂无提示词快照'}</p>
-                <details>
-                  <summary>查看 {Math.max(image.attempts?.length || image.currentAttemptIndex || 1, 1)} 次调用</summary>
-                  <div className="attempt-list">
-                    {(image.attempts?.length ? image.attempts : [{ attemptIndex: 1, kind: 'initial', prompt: image.prompt }]).map((attempt) => (
-                      <div className="attempt-row" key={String(attempt['attemptIndex'] ?? attempt['createdAt'] ?? image.id)}>
-                        <span>#{String(attempt['attemptIndex'] ?? 1)} · {attempt['kind'] === 'regeneration' ? '重生' : '初次生成'}</span>
-                        <small>{String(attempt['reason'] || image.regenerateReason || '无原因备注')} · {String(attempt['providerStatus'] || image.providerStatus || '-')}</small>
-                        {attempt['prompt'] ? <p>{String(attempt['prompt'])}</p> : null}
-                      </div>
-                    ))}
-                  </div>
-                </details>
-              </div>
+	              <div className="history-shot-body">
+	                <strong>{String(image.shotIndex).padStart(2, '0')} {image.title}</strong>
+	                <small>{statusText(image.status)} · {reviewStatusText(image.reviewStatus)} · 图片记录 #{image.id}</small>
+	                {SHOW_DEBUG_INFO && (
+	                  <>
+	                    <p>{image.prompt || '暂无提示词快照'}</p>
+	                    <details>
+	                      <summary>查看 {Math.max(image.attempts?.length || image.currentAttemptIndex || 1, 1)} 次调用</summary>
+	                      <div className="attempt-list">
+	                        {(image.attempts?.length ? image.attempts : [{ attemptIndex: 1, kind: 'initial', prompt: image.prompt }]).map((attempt) => (
+	                          <div className="attempt-row" key={String(attempt['attemptIndex'] ?? attempt['createdAt'] ?? image.id)}>
+	                            <span>#{String(attempt['attemptIndex'] ?? 1)} · {attempt['kind'] === 'regeneration' ? '重生' : '初次生成'}</span>
+	                            <small>{String(attempt['reason'] || image.regenerateReason || '无原因备注')} · {String(attempt['providerStatus'] || image.providerStatus || '-')}</small>
+	                            {attempt['prompt'] ? <p>{String(attempt['prompt'])}</p> : null}
+	                          </div>
+	                        ))}
+	                      </div>
+	                    </details>
+	                  </>
+	                )}
+	              </div>
             </article>
           ))}
         </div>
       </div>
 
-      {firstImage && (
+	      {SHOW_DEBUG_INFO && firstImage && (
         <details className="debug-json">
           <summary>高级调试 JSON</summary>
           <pre>{JSON.stringify({
@@ -2362,7 +2430,7 @@ function ShotPlanBoard({
     <div className="shot-plan">
       <div className="plan-section-heading">
         <div>
-          <h3>生图方案</h3>
+          <h3>拍摄方案</h3>
           <span>服装识别、品牌调性、搭配与统一背景</span>
         </div>
         {!isEditing && editable && (
@@ -2464,22 +2532,24 @@ function ShotPlanBoard({
           </button>
         </div>
       )}
-      <details>
-        <summary>Gemini 调用记录</summary>
-        <div className="planner-log">
-          <FactRow label="Planner" value={shotPlan.plannerProvider} />
-          <FactRow label="调用模型" value={plannerLog?.providerRequest?.model} />
-          <FactRow label="调用说明" value={plannerLog?.note} />
-          <label className="field">
-            <span>调用提示词</span>
-            <textarea readOnly value={plannerLog?.providerRequest?.prompt ?? ''} />
-          </label>
-          <label className="field">
-            <span>完整 raw_response</span>
-            <textarea readOnly value={shotPlan.rawResponse ?? ''} />
-          </label>
-        </div>
-      </details>
+	      {SHOW_DEBUG_INFO && (
+	        <details>
+	          <summary>策划器调用记录</summary>
+	          <div className="planner-log">
+	            <FactRow label="Planner" value={shotPlan.plannerProvider} />
+	            <FactRow label="调用模型" value={plannerLog?.providerRequest?.model} />
+	            <FactRow label="调用说明" value={plannerLog?.note} />
+	            <label className="field">
+	              <span>调用提示词</span>
+	              <textarea readOnly value={plannerLog?.providerRequest?.prompt ?? ''} />
+	            </label>
+	            <label className="field">
+	              <span>完整 raw_response</span>
+	              <textarea readOnly value={shotPlan.rawResponse ?? ''} />
+	            </label>
+	          </div>
+	        </details>
+	      )}
     </div>
   )
 }
@@ -2523,6 +2593,8 @@ function ResultGallery({
   imageFilter,
   onRegenerate,
   onToggleFinal,
+  onReviewStatus,
+  onCancelImage,
   onExport,
 }: {
   title?: string
@@ -2532,6 +2604,8 @@ function ResultGallery({
   imageFilter?: (image: GenerationImage) => boolean
   onRegenerate: (image: GenerationImage, reason: string) => void
   onToggleFinal: (image: GenerationImage) => void
+  onReviewStatus: (image: GenerationImage, status: string) => void
+  onCancelImage: (image: GenerationImage) => void
   onExport: (runId: number) => void
 }) {
   const isPreviewGallery = title?.includes('预览') ?? false
@@ -2583,17 +2657,32 @@ function ResultGallery({
                   <strong title={displayLabel}>
                     {middleEllipsis(displayLabel)}
                   </strong>
-                  <small>{statusText(image.status)} · {imageElapsed} · 记录 #{image.id}</small>
-                  {image.providerRequestId && <small>fal #{shortId(image.providerRequestId)} · {providerStatusText(image.providerStatus)}</small>}
-                </div>
-                <div className="result-actions">
-                  <button onClick={() => onRegenerate(image, '姿势不合适')} disabled={loading || imageActive}>
-                    <RefreshCw size={15} />重生
-                  </button>
-                  <button onClick={() => onToggleFinal(image)} disabled={image.status !== 'SUCCEEDED'}>
-                    <Check size={15} />{image.isFinal ? '取消最终' : '设为最终'}
-                  </button>
-                </div>
+	                  <small>{statusText(image.status)} · {imageElapsed} · 记录 #{image.id}</small>
+	                  {SHOW_DEBUG_INFO && image.providerRequestId && <small>任务 #{shortId(image.providerRequestId)} · {providerStatusText(image.providerStatus)}</small>}
+	                  <small>交付状态：{reviewStatusText(image.reviewStatus)}</small>
+	                </div>
+	                <div className="result-actions">
+	                  <button onClick={() => onRegenerate(image, '姿势不合适')} disabled={loading || imageActive}>
+	                    <RefreshCw size={15} />重生
+	                  </button>
+	                  <button onClick={() => onToggleFinal(image)} disabled={image.status !== 'SUCCEEDED'}>
+	                    <Check size={15} />{image.isFinal ? '取消最终' : '设为最终'}
+	                  </button>
+	                  {imageActive && (
+	                    <button onClick={() => onCancelImage(image)}>
+	                      <X size={15} />取消
+	                    </button>
+	                  )}
+	                  {image.status === 'SUCCEEDED' && (
+	                    <select value={image.reviewStatus ?? 'candidate'} onChange={(event) => onReviewStatus(image, event.target.value)}>
+	                      <option value="candidate">候选</option>
+	                      <option value="approved">可用</option>
+	                      <option value="needs_regen">需重生</option>
+	                      <option value="needs_retouch">需精修</option>
+	                      <option value="delivered">已交付</option>
+	                    </select>
+	                  )}
+	                </div>
               </article>
               )
             })
@@ -2768,6 +2857,17 @@ function statusText(status: string) {
     CREATED: '已创建',
   }
   return map[status] ?? status
+}
+
+function reviewStatusText(status?: string | null) {
+  const map: Record<string, string> = {
+    candidate: '候选',
+    approved: '可用',
+    needs_regen: '需重生',
+    needs_retouch: '需精修',
+    delivered: '已交付',
+  }
+  return map[status || 'candidate'] ?? status ?? '候选'
 }
 
 function providerStatusText(status?: string | null) {
@@ -3035,46 +3135,6 @@ function middleEllipsis(value: string, maxLength = 28) {
   const head = Math.ceil(available * 0.58)
   const tail = Math.floor(available * 0.42)
   return `${text.slice(0, head)}...${text.slice(Math.max(text.length - tail, head))}${extension}`
-}
-
-function parseRoute(): AppRoute {
-  const path = window.location.pathname.replace(/\/+$/, '') || '/'
-  const parts = path.split('/').filter(Boolean).map(decodeURIComponent)
-  const params = new URLSearchParams(window.location.search)
-  if (parts[0] === 'garment-skus') return { page: 'garments', sku: parts[1] }
-  if (parts[0] === 'model-profiles') return { page: 'models', modelId: parts[1] }
-  if (parts[0] === 'generation-runs') {
-    const runId = Number(parts[1])
-    return { page: 'history', runId: Number.isFinite(runId) ? runId : undefined }
-  }
-  if (parts[0] === 'generate') {
-    const runId = Number(params.get('run'))
-    const previewRunId = Number(params.get('preview'))
-    return {
-      page: 'generate',
-      generateSku: params.get('sku') || undefined,
-      generateRunId: Number.isFinite(runId) ? runId : undefined,
-      generatePreviewRunId: Number.isFinite(previewRunId) ? previewRunId : undefined,
-    }
-  }
-  return { page: 'generate' }
-}
-
-function routeToUrl(route: AppRoute) {
-  if (route.page === 'garments') return route.sku ? `/garment-skus/${encodeURIComponent(route.sku)}` : '/garment-skus'
-  if (route.page === 'models') return route.modelId ? `/model-profiles/${encodeURIComponent(route.modelId)}` : '/model-profiles'
-  if (route.page === 'history') return route.runId ? `/generation-runs/${route.runId}` : '/generation-runs'
-  if (route.page === 'generate') {
-    const params = new URLSearchParams()
-    if (route.generateRunId) params.set('run', String(route.generateRunId))
-    else {
-      if (route.generateSku) params.set('sku', route.generateSku)
-      if (route.generatePreviewRunId) params.set('preview', String(route.generatePreviewRunId))
-    }
-    const query = params.toString()
-    return query ? `/generate?${query}` : '/generate'
-  }
-  return '/generate'
 }
 
 function routeKey(route: AppRoute) {

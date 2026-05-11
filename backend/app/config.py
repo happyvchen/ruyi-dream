@@ -63,6 +63,10 @@ class Settings:
     gpt_image2_quality = os.getenv("GPT_IMAGE2_QUALITY", "high")
     gpt_image2_output_format = os.getenv("GPT_IMAGE2_OUTPUT_FORMAT", "png")
     generation_poll_interval_seconds = float(os.getenv("GENERATION_POLL_INTERVAL_SECONDS", "5"))
+    generation_lock_ttl_seconds = int(os.getenv("GENERATION_LOCK_TTL_SECONDS", "120"))
+    generation_image_timeout_seconds = int(os.getenv("GENERATION_IMAGE_TIMEOUT_SECONDS", str(30 * 60)))
+    generation_submit_retry_limit = int(os.getenv("GENERATION_SUBMIT_RETRY_LIMIT", "3"))
+    generation_status_retry_limit = int(os.getenv("GENERATION_STATUS_RETRY_LIMIT", "6"))
     cors_origins = [
         origin.strip()
         for origin in os.getenv(
@@ -83,6 +87,14 @@ class Settings:
             raise RuntimeError(f"Missing required object storage credential(s): {joined}")
         if self.session_ttl_seconds <= 0:
             raise RuntimeError("APP_SESSION_TTL_SECONDS must be greater than 0.")
+        if self.generation_lock_ttl_seconds <= 0:
+            raise RuntimeError("GENERATION_LOCK_TTL_SECONDS must be greater than 0.")
+        if self.generation_image_timeout_seconds <= 0:
+            raise RuntimeError("GENERATION_IMAGE_TIMEOUT_SECONDS must be greater than 0.")
+        if self.generation_submit_retry_limit <= 0:
+            raise RuntimeError("GENERATION_SUBMIT_RETRY_LIMIT must be greater than 0.")
+        if self.generation_status_retry_limit <= 0:
+            raise RuntimeError("GENERATION_STATUS_RETRY_LIMIT must be greater than 0.")
 
         if self.app_env in {"prod", "production"}:
             self._validate_production_credential("access key", self.s3_access_key_id)

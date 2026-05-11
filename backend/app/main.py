@@ -56,6 +56,8 @@ async def require_api_session(request: Request, call_next: Any) -> Any:
     public_paths = {"/api/health", "/api/auth/login", "/api/auth/logout", "/api/auth/session"}
     if request.method == "OPTIONS" or request.url.path in public_paths:
         return await call_next(request)
+    if request.url.path.startswith("/api/") and request.method in {"POST", "PATCH", "DELETE"} and not is_write_origin_allowed(request):
+        return JSONResponse(status_code=403, content={"detail": "请求来源不被允许"})
     if request.url.path.startswith("/api/") and not is_request_authenticated(request):
         return JSONResponse(status_code=401, content={"detail": "请先登录"})
     return await call_next(request)
@@ -81,6 +83,17 @@ def is_api_token_valid(request: Request) -> bool:
         bearer_token,
         settings.api_access_token,
     )
+
+
+def is_write_origin_allowed(request: Request) -> bool:
+    if settings.trust_reverse_proxy_auth or is_api_token_valid(request):
+        return True
+    origin = request.headers.get("origin")
+    referer = request.headers.get("referer")
+    source = origin or referer
+    if not source:
+        return True
+    return any(source == allowed or source.startswith(f"{allowed}/") for allowed in settings.cors_origins)
 
 
 def is_gate_password_valid(password: str) -> bool:
@@ -163,6 +176,11 @@ class FinalImageRequest(BaseModel):
     isFinal: bool = True
 
 
+class ReviewStatusRequest(BaseModel):
+    status: str
+    note: str | None = None
+
+
 class LoginRequest(BaseModel):
     password: str
 
@@ -208,6 +226,7 @@ UNASSIGNED_HEAD_REFERENCE_PREFIX = "__unassigned__"
 ACTIVE_IMAGE_STATUSES = {"QUEUED", "SUBMITTED", "IN_QUEUE", "IN_PROGRESS", "RUNNING"}
 TERMINAL_IMAGE_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
 PLANNING_STATUSES = {"PLANNING"}
+REVIEW_STATUSES = {"candidate", "approved", "needs_regen", "needs_retouch", "delivered"}
 LOGIN_FAILURE_WINDOW_SECONDS = 300
 LOGIN_FAILURE_LIMIT = 8
 login_failures_by_client: dict[str, list[float]] = {}
@@ -1221,6 +1240,31 @@ def delete_generation_run(run_id: int) -> dict[str, bool]:
     return {"ok": True}
 
 
+@app.post("/api/generation-runs/{run_id}/cancel")
+def cancel_generation_run(run_id: int) -> dict[str, Any]:
+    timestamp = now_iso()
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_runs WHERE id = ?", (run_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="生成记录不存在")
+        db.execute(
+            """
+            UPDATE generation_images
+            SET status = 'CANCELLED', cancel_requested_at = COALESCE(cancel_requested_at, ?),
+                completed_at = COALESCE(completed_at, ?), locked_by = NULL, locked_until = NULL,
+                updated_at = ?
+            WHERE run_id = ? AND status IN ('QUEUED', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS', 'RUNNING')
+            """,
+            (timestamp, timestamp, timestamp, run_id),
+        )
+        db.execute(
+            "UPDATE generation_runs SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
+            (timestamp, run_id),
+        )
+        log_event(db, "generation_run", run_id, "cancelled", {"cancelledAt": timestamp})
+    return {"item": get_generation_run_by_id(run_id)}
+
+
 @app.post("/api/generation-images/{image_id}/regenerate")
 async def regenerate_image(image_id: int, payload: RegenerateRequest) -> dict[str, Any]:
     with get_db() as db:
@@ -1282,13 +1326,18 @@ async def regenerate_image(image_id: int, payload: RegenerateRequest) -> dict[st
                 image_inputs_json = ?, current_attempt_index = current_attempt_index + 1,
                 provider_request_id = NULL, provider_status = NULL, provider_urls_json = NULL,
                 provider_status_json = NULL, submitted_at = NULL, completed_at = NULL,
-                last_status_checked_at = NULL, regenerate_reason = ?, updated_at = ?
+                last_status_checked_at = NULL, locked_by = NULL, locked_until = NULL,
+                submit_attempts = 0, status_check_attempts = 0, status_error_attempts = 0,
+                cancel_requested_at = NULL,
+                timeout_at = ?, regenerate_reason = ?, review_status = 'candidate',
+                review_note = NULL, reviewed_at = NULL, updated_at = ?
             WHERE id = ?
             """,
             (
                 str(output_path),
                 dumps(task_package),
                 dumps(task_package.get("imageInputs", [])),
+                future_iso(settings.generation_image_timeout_seconds),
                 payload.reason,
                 now_iso(),
                 image_id,
@@ -1296,6 +1345,31 @@ async def regenerate_image(image_id: int, payload: RegenerateRequest) -> dict[st
         )
     update_generation_run_status(run_row["id"])
     return {"item": get_generation_run_by_id(run_row["id"])}
+
+
+@app.post("/api/generation-images/{image_id}/cancel")
+def cancel_generation_image(image_id: int) -> dict[str, Any]:
+    timestamp = now_iso()
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_images WHERE id = ?", (image_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="生成图片不存在")
+        if row["status"] not in ACTIVE_IMAGE_STATUSES:
+            return {"item": serialize_generation_image(row)}
+        db.execute(
+            """
+            UPDATE generation_images
+            SET status = 'CANCELLED', cancel_requested_at = COALESCE(cancel_requested_at, ?),
+                completed_at = COALESCE(completed_at, ?), locked_by = NULL, locked_until = NULL,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp, timestamp, timestamp, image_id),
+        )
+        log_event(db, "generation_image", image_id, "cancelled", {"cancelledAt": timestamp})
+        updated = db.execute("SELECT * FROM generation_images WHERE id = ?", (image_id,)).fetchone()
+    update_generation_run_status(row["run_id"])
+    return {"item": serialize_generation_image(updated)}
 
 
 @app.patch("/api/generation-images/{image_id}/final")
@@ -1310,6 +1384,34 @@ def set_final_image(image_id: int, payload: FinalImageRequest) -> dict[str, Any]
         )
         log_event(db, "generation_image", image_id, "final_updated", {"isFinal": payload.isFinal})
     return {"item": get_generation_image_by_id(image_id)}
+
+
+@app.patch("/api/generation-images/{image_id}/review")
+def set_generation_image_review_status(image_id: int, payload: ReviewStatusRequest) -> dict[str, Any]:
+    normalized_status = payload.status.strip().lower()
+    if normalized_status not in REVIEW_STATUSES:
+        raise HTTPException(status_code=400, detail="图片审核状态不合法")
+    timestamp = now_iso()
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_images WHERE id = ?", (image_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="生成图片不存在")
+        db.execute(
+            """
+            UPDATE generation_images
+            SET review_status = ?, review_note = ?, reviewed_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (normalized_status, payload.note, timestamp, timestamp, image_id),
+        )
+        if normalized_status == "delivered":
+            db.execute(
+                "UPDATE generation_runs SET delivery_status = 'delivered', delivered_at = COALESCE(delivered_at, ?), updated_at = ? WHERE id = ?",
+                (timestamp, timestamp, row["run_id"]),
+            )
+        log_event(db, "generation_image", image_id, "review_updated", {"status": normalized_status, "note": payload.note})
+        updated = db.execute("SELECT * FROM generation_images WHERE id = ?", (image_id,)).fetchone()
+    return {"item": serialize_generation_image(updated)}
 
 
 @app.get("/api/logs")
@@ -1384,6 +1486,7 @@ def create_generation_image(
         raise ValueError("create_generation_image requires task_package_override")
     task_package = task_package_override
     timestamp = now_iso()
+    timeout_at = future_iso(settings.generation_image_timeout_seconds)
 
     with get_db() as db:
         cursor = db.execute(
@@ -1391,8 +1494,8 @@ def create_generation_image(
             INSERT INTO generation_images
               (run_id, shot_index, title, status, output_path, task_package_json, regenerate_from_image_id,
                regenerate_reason, image_inputs_json, template_snapshot_json, model_snapshot_json,
-               garment_snapshot_json, created_at, updated_at)
-            VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               garment_snapshot_json, timeout_at, created_at, updated_at)
+            VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -1403,9 +1506,15 @@ def create_generation_image(
                 regenerate_from_image_id,
                 regenerate_reason,
                 dumps(task_package.get("imageInputs", [])),
-                dumps({"brandStyle": plan.get("brandStyle", {}), "shot": shot, "plan": plan}),
+                dumps({
+                    "brandStyle": task_package.get("brandStyle", plan.get("brandStyle", {})),
+                    "brandTemplate": task_package.get("brandTemplate", {}),
+                    "shot": shot,
+                    "plan": plan,
+                }),
                 dumps(task_package.get("model", {})),
                 dumps(task_package.get("garment", {})),
+                timeout_at,
                 timestamp,
                 timestamp,
             ),
@@ -1415,25 +1524,74 @@ def create_generation_image(
     return image_id
 
 
+def future_iso(seconds: int) -> str:
+    return datetime.fromtimestamp(time.time() + seconds).isoformat(timespec="seconds")
+
+
+def lock_until_iso() -> str:
+    return future_iso(settings.generation_lock_ttl_seconds)
+
+
+def release_generation_image_lock(db: Any, image_id: int) -> None:
+    db.execute("UPDATE generation_images SET locked_by = NULL, locked_until = NULL WHERE id = ?", (image_id,))
+
+
+def claim_generation_image(image_id: int, worker_id: str, status: str) -> Any | None:
+    timestamp = now_iso()
+    lock_until = lock_until_iso()
+    attempt_column = "submit_attempts" if status == "QUEUED" else "status_check_attempts"
+    with get_db() as db:
+        cursor = db.execute(
+            f"""
+            UPDATE generation_images
+            SET locked_by = ?, locked_until = ?, {attempt_column} = {attempt_column} + 1, updated_at = ?
+            WHERE id = ?
+              AND status = ?
+              AND (locked_until IS NULL OR locked_until < ?)
+              AND cancel_requested_at IS NULL
+            """,
+            (worker_id, lock_until, timestamp, image_id, status, timestamp),
+        )
+        if cursor.rowcount != 1:
+            return None
+        return db.execute("SELECT * FROM generation_images WHERE id = ?", (image_id,)).fetchone()
+
+
+def fail_generation_image(db: Any, image_id: int, status: str, payload: dict[str, Any]) -> None:
+    timestamp = now_iso()
+    db.execute(
+        """
+        UPDATE generation_images
+        SET status = 'FAILED', provider_status = ?, provider_status_json = ?,
+            completed_at = COALESCE(completed_at, ?), last_status_checked_at = ?,
+            locked_by = NULL, locked_until = NULL, updated_at = ?
+        WHERE id = ?
+        """,
+        (status, dumps(payload), timestamp, timestamp, timestamp, image_id),
+    )
+
+
 def submit_generation_image(provider: Any, image_row: Any) -> None:
     image_id = int(image_row["id"])
     task_package = loads(image_row["task_package_json"], {})
     output_path = image_row["output_path"]
     if not output_path:
         with get_db() as db:
-            db.execute("UPDATE generation_images SET status = 'FAILED', updated_at = ? WHERE id = ?", (now_iso(), image_id))
+            fail_generation_image(db, image_id, "MISSING_OUTPUT_PATH", {"error": "缺少输出路径，无法提交生成任务"})
             log_event(db, "generation_image", image_id, "failed", {"error": "缺少输出路径，无法提交生成任务"})
         update_generation_run_status(image_row["run_id"])
         return
     try:
         provider_response = asyncio.run(provider.submit(task_package, output_path))
     except Exception as exc:
+        submit_attempts = int(row_value(image_row, "submit_attempts") or 0)
         with get_db() as db:
-            db.execute(
-                "UPDATE generation_images SET status = 'FAILED', updated_at = ? WHERE id = ?",
-                (now_iso(), image_id),
-            )
-            log_event(db, "generation_image", image_id, "failed", {"error": str(exc)})
+            if submit_attempts >= settings.generation_submit_retry_limit:
+                fail_generation_image(db, image_id, "SUBMIT_FAILED", {"error": str(exc), "attempts": submit_attempts})
+                log_event(db, "generation_image", image_id, "failed", {"error": str(exc), "attempts": submit_attempts})
+            else:
+                release_generation_image_lock(db, image_id)
+                log_event(db, "generation_image", image_id, "submit_retry_scheduled", {"error": str(exc), "attempts": submit_attempts})
         update_generation_run_status(image_row["run_id"])
         return
     provider_request = provider_response.get("providerRequest") or {"taskPackage": task_package, "outputPath": str(output_path)}
@@ -1492,6 +1650,7 @@ def submit_generation_image(provider: Any, image_row: Any) -> None:
                 image_id,
             ),
         )
+        release_generation_image_lock(db, image_id)
         log_event(db, "generation_image", image_id, "submitted", {"outputPath": str(output_path), "provider": provider_response})
     update_generation_run_status(image_row["run_id"])
 
@@ -1613,6 +1772,9 @@ def run_planner_for_shot_plan(plan_row: Any) -> None:
 
 def refresh_pending_generation_images() -> None:
     provider = get_image_provider()
+    expire_stale_generation_images()
+    worker_id = f"poller-{uuid4()}"
+    timestamp = now_iso()
     with get_db() as db:
         queued_rows = db.execute(
             """
@@ -1622,9 +1784,14 @@ def refresh_pending_generation_images() -> None:
             WHERE gi.status = 'QUEUED'
               AND gi.provider_request_id IS NULL
               AND gr.status <> 'CANCELLED'
+              AND gi.cancel_requested_at IS NULL
+              AND (gi.locked_until IS NULL OR gi.locked_until < ?)
+              AND gi.submit_attempts < ?
             ORDER BY gi.updated_at, gi.id
             LIMIT 5
             """
+            ,
+            (timestamp, settings.generation_submit_retry_limit),
         ).fetchall()
         rows = db.execute(
             """
@@ -1632,15 +1799,43 @@ def refresh_pending_generation_images() -> None:
             FROM generation_images
             WHERE status IN ('SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS', 'RUNNING')
               AND provider_request_id IS NOT NULL
+              AND cancel_requested_at IS NULL
+              AND (locked_until IS NULL OR locked_until < ?)
             ORDER BY updated_at
             LIMIT 10
             """
+            ,
+            (timestamp,),
         ).fetchall()
 
     for row in queued_rows:
-        submit_generation_image(provider, row)
+        claimed = claim_generation_image(int(row["id"]), worker_id, "QUEUED")
+        if claimed:
+            submit_generation_image(provider, claimed)
     for row in rows:
-        refresh_generation_image_status(provider, row)
+        claimed = claim_generation_image(int(row["id"]), worker_id, row["status"])
+        if claimed:
+            refresh_generation_image_status(provider, claimed)
+
+
+def expire_stale_generation_images() -> None:
+    timestamp = now_iso()
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT id, run_id
+            FROM generation_images
+            WHERE status IN ('QUEUED', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS', 'RUNNING')
+              AND timeout_at IS NOT NULL
+              AND timeout_at < ?
+            """,
+            (timestamp,),
+        ).fetchall()
+        for row in rows:
+            fail_generation_image(db, int(row["id"]), "TIMEOUT", {"error": "生成任务超时", "timeoutAt": timestamp})
+            log_event(db, "generation_image", row["id"], "timed_out", {"timeoutAt": timestamp})
+    for run_id in {int(row["run_id"]) for row in rows}:
+        update_generation_run_status(run_id)
 
 
 def refresh_generation_image_status(provider: Any, image_row: Any) -> None:
@@ -1649,33 +1844,55 @@ def refresh_generation_image_status(provider: Any, image_row: Any) -> None:
     except Exception as exc:
         failed_at = now_iso()
         attempts = loads(image_row["attempts_json"], []) or []
+        status_error_attempts = int(row_value(image_row, "status_error_attempts") or 0) + 1
         if attempts:
             attempts[-1] = {
                 **attempts[-1],
                 "providerStatus": "STATUS_CHECK_FAILED",
                 "providerStatusResponse": {"error": str(exc)},
-                "completedAt": failed_at,
+                **({"completedAt": failed_at} if status_error_attempts >= settings.generation_status_retry_limit else {}),
             }
         with get_db() as db:
-            db.execute(
-                """
-                UPDATE generation_images
-                SET status = 'FAILED', provider_status = ?, provider_status_json = ?,
-                    attempts_json = ?, completed_at = COALESCE(completed_at, ?),
-                    last_status_checked_at = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    "STATUS_CHECK_FAILED",
-                    dumps({"error": str(exc)}),
-                    dumps(attempts),
-                    failed_at,
-                    failed_at,
-                    failed_at,
-                    image_row["id"],
-                ),
-            )
-            log_event(db, "generation_image", image_row["id"], "status_check_failed", {"error": str(exc)})
+            if status_error_attempts >= settings.generation_status_retry_limit:
+                db.execute(
+                    """
+                    UPDATE generation_images
+                    SET status = 'FAILED', provider_status = ?, provider_status_json = ?,
+                        attempts_json = ?, completed_at = COALESCE(completed_at, ?),
+                        last_status_checked_at = ?, locked_by = NULL, locked_until = NULL, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        "STATUS_CHECK_FAILED",
+                        dumps({"error": str(exc), "attempts": status_error_attempts}),
+                        dumps(attempts),
+                        failed_at,
+                        failed_at,
+                        failed_at,
+                        image_row["id"],
+                    ),
+                )
+                log_event(db, "generation_image", image_row["id"], "status_check_failed", {"error": str(exc), "attempts": status_error_attempts})
+            else:
+                db.execute(
+                    """
+                    UPDATE generation_images
+                    SET provider_status = ?, provider_status_json = ?, attempts_json = ?,
+                        status_error_attempts = ?,
+                        last_status_checked_at = ?, locked_by = NULL, locked_until = NULL, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        "STATUS_CHECK_RETRY",
+                        dumps({"error": str(exc), "attempts": status_error_attempts}),
+                        dumps(attempts),
+                        status_error_attempts,
+                        failed_at,
+                        failed_at,
+                        image_row["id"],
+                    ),
+                )
+                log_event(db, "generation_image", image_row["id"], "status_check_retry_scheduled", {"error": str(exc), "attempts": status_error_attempts})
         update_generation_run_status(image_row["run_id"])
         return
 
@@ -1701,7 +1918,7 @@ def refresh_generation_image_status(provider: Any, image_row: Any) -> None:
             SET status = ?, provider_status = ?, provider_status_json = ?,
                 provider_response_json = COALESCE(?, provider_response_json),
                 attempts_json = ?, completed_at = COALESCE(?, completed_at),
-                last_status_checked_at = ?, updated_at = ?
+                status_error_attempts = 0, last_status_checked_at = ?, updated_at = ?
             WHERE id = ?
             """,
             (
@@ -1716,6 +1933,7 @@ def refresh_generation_image_status(provider: Any, image_row: Any) -> None:
                 image_row["id"],
             ),
         )
+        release_generation_image_lock(db, int(image_row["id"]))
         log_event(
             db,
             "generation_image",
@@ -1834,6 +2052,13 @@ def build_task_package(
         image_inputs = build_final_image_inputs(sku_row, model_row, model_profile, preview_inputs)
     else:
         image_inputs = build_image_inputs(sku_row, model_row, model_profile, shot)
+    brand_template = get_active_brand_template()
+    brand_style = {
+        **brand_template.get("snapshot", {}),
+        **(plan.get("brandStyle", {}) if isinstance(plan.get("brandStyle"), dict) else {}),
+        "templateId": brand_template.get("templateId"),
+        "templateVersion": brand_template.get("version"),
+    }
     if sku_row["sku"] == "125309C7948510":
         garment = {
             **garment,
@@ -1850,7 +2075,8 @@ def build_task_package(
             "profile": model_profile,
             "identityLock": "high",
         },
-        "brandStyle": plan.get("brandStyle", {}),
+        "brandStyle": brand_style,
+        "brandTemplate": brand_template,
         "planningScript": {
             "category": plan.get("category") or garment.get("category"),
             **plan_generation(plan),
@@ -1938,6 +2164,33 @@ def plan_generation(plan: dict[str, Any]) -> dict[str, Any]:
         "lilyTone": generation_plan.get("lilyTone") or plan.get("lilyTone"),
         "styling": styling,
         "background": generation_plan.get("background") or plan.get("background"),
+    }
+
+
+def get_active_brand_template() -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute(
+            """
+            SELECT *
+            FROM brand_template_versions
+            WHERE is_active = 1
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if not row:
+        return {
+            "templateId": "inline-default",
+            "version": "unversioned",
+            "name": "默认棚拍模板",
+            "snapshot": {},
+        }
+    return {
+        "id": row["id"],
+        "templateId": row["template_id"],
+        "version": row["version"],
+        "name": row["name"],
+        "snapshot": loads(row["snapshot_json"], {}),
     }
 
 
@@ -2200,7 +2453,7 @@ def get_generation_run_by_id(run_id: int) -> dict[str, Any]:
     with get_db() as db:
         row = db.execute(
             """
-            SELECT gr.*, gs.sku
+            SELECT gr.*, gs.sku, gs.title AS sku_title
             FROM generation_runs gr
             JOIN garment_skus gs ON gs.id = gr.sku_id
             WHERE gr.id = ?
@@ -2350,6 +2603,8 @@ def serialize_generation_run(row: Any, include_images: bool, include_summary: bo
         "kind": row["kind"],
         "status": row["status"],
         "outputDir": row["output_dir"],
+        "deliveryStatus": row["delivery_status"] if "delivery_status" in row.keys() else "draft",
+        "deliveredAt": row["delivered_at"] if "delivered_at" in row.keys() else None,
         "archivedAt": row["archived_at"] if "archived_at" in row.keys() else None,
         "archiveReason": row["archive_reason"] if "archive_reason" in row.keys() else None,
         "createdAt": row["created_at"],
@@ -2422,9 +2677,19 @@ def serialize_generation_image(row: Any) -> dict[str, Any]:
         "submittedAt": row["submitted_at"] if "submitted_at" in row.keys() else None,
         "completedAt": row["completed_at"] if "completed_at" in row.keys() else None,
         "lastStatusCheckedAt": row["last_status_checked_at"] if "last_status_checked_at" in row.keys() else None,
+        "lockedBy": row["locked_by"] if "locked_by" in row.keys() else None,
+        "lockedUntil": row["locked_until"] if "locked_until" in row.keys() else None,
+        "submitAttempts": row["submit_attempts"] if "submit_attempts" in row.keys() else 0,
+        "statusCheckAttempts": row["status_check_attempts"] if "status_check_attempts" in row.keys() else 0,
+        "statusErrorAttempts": row["status_error_attempts"] if "status_error_attempts" in row.keys() else 0,
+        "cancelRequestedAt": row["cancel_requested_at"] if "cancel_requested_at" in row.keys() else None,
+        "timeoutAt": row["timeout_at"] if "timeout_at" in row.keys() else None,
         "regenerateFromImageId": row["regenerate_from_image_id"],
         "regenerateReason": row["regenerate_reason"],
         "isFinal": bool(row["is_final"]),
+        "reviewStatus": row["review_status"] if "review_status" in row.keys() else "candidate",
+        "reviewNote": row["review_note"] if "review_note" in row.keys() else None,
+        "reviewedAt": row["reviewed_at"] if "reviewed_at" in row.keys() else None,
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }

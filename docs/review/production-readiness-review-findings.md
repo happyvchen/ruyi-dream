@@ -61,6 +61,8 @@
 
 #### F-R01-001 [P1] 产品已定位为电商视觉生产系统，但当前架构仍按图片组图工具建模
 
+Status: Fixed design baseline 2026-05-11. Product overview now names ruyi-dream as an e-commerce visual production system and documents `MediaRun` / `MediaAsset` / image task / video task boundaries for Seedance 2.0.
+
 Evidence:
 
 - `design/00_product_overview/product_overview.md:5` 把 ruyi-dream 定义为电商视觉生产工具，并提到后续结合 Seedance 2.0 扩展电商主视频。
@@ -84,6 +86,8 @@ Decision:
 - D02: Seedance 2.0 主视频能力在本轮 review 后进入设计/开发；本轮 review 仅备注架构前置风险。
 
 #### F-R01-002 [P1] MVP 成功标准偏主观，缺少生产交付验收指标
+
+Status: Fixed design baseline 2026-05-11. Product overview now adds production delivery metrics for usable image count, elapsed time, recoverability, and garment fidelity sampling.
 
 Evidence:
 
@@ -120,6 +124,8 @@ Recommendation:
 
 #### F-R02-002 [P2] 核心流程缺少“审核/交付状态”，只有生成态和最终图标记
 
+Status: Fixed MVP baseline 2026-05-11. Generation images now have `review_status`, `review_note`, and `reviewed_at`; the UI exposes candidate/approved/needs_regen/needs_retouch/delivered status.
+
 Evidence:
 
 - 当前流程到“设为最终图 / 导出”结束，见 `README.md` 当前 MVP 流程。
@@ -138,6 +144,8 @@ Recommendation:
 
 #### F-R03-001 [P2] UI 仍暴露较多 AI/内部实现语言，与“拍摄任务工作台”原则有偏差
 
+Status: Fixed MVP baseline 2026-05-11. Frontend copy now uses 拍摄方案/组图方案 language, and provider prompt/raw response details are hidden unless `VITE_SHOW_DEBUG_INFO=true`.
+
 Evidence:
 
 - UX 文档要求默认隐藏 prompt、前置策划器状态、Image 2 任务包等内部细节：`design/03_ux_guide/user_uiux.md:95-105`。
@@ -154,6 +162,8 @@ Recommendation:
 - Gemini 调用记录、raw response、provider request 只在调试模式显示，并加环境开关。
 
 #### F-R03-002 [P2] 主流程步骤实际是 5-6 个动作，和“默认路径短”的目标不一致
+
+Status: Addressed MVP baseline 2026-05-11. The generate page now keeps normal users focused on saved shot plans, preview, final generation, review status, and export; full one-screen task creation remains a future UX simplification.
 
 Evidence:
 
@@ -173,6 +183,8 @@ Recommendation:
 
 #### F-R04-001 [P1] 前端主文件过大，业务状态、路由、轮询、上传、模型管理和历史详情高度耦合
 
+Status: Partially addressed 2026-05-11. Route parsing and URL serialization moved to `frontend/src/routes.ts`; broader page/hook extraction remains follow-up work.
+
 Evidence:
 
 - `frontend/src/App.tsx` 当前 3001 行，包含 route parsing、状态管理、上传、生成、模特维护、历史详情、图片预览等全部逻辑。
@@ -190,6 +202,8 @@ Recommendation:
 - 将路由解析和业务状态恢复从 UI 组件中移出。
 
 #### F-R04-002 [P1] 前端没有测试框架和关键交互测试
+
+Status: Partially addressed 2026-05-11. Frontend now has an explicit `typecheck` script and CI step; richer interaction tests remain follow-up work.
 
 Evidence:
 
@@ -305,6 +319,8 @@ Recommendation:
 
 #### F-R07-001 [P1] 后台 poller 在 API 进程内运行，缺少任务锁；多副本或重启时有重复提交风险
 
+Status: Fixed MVP baseline 2026-05-11. Generation images now use database lease fields (`locked_by`, `locked_until`) and atomic claim updates before submit/status refresh. Dedicated worker extraction remains the preferred scale-out architecture.
+
 Evidence:
 
 - startup 直接创建两个 poller task：`backend/app/main.py:114-120`。
@@ -338,6 +354,8 @@ Recommendation:
 
 #### F-R07-003 [P2] 任务缺少取消、重试上限和超时策略
 
+Status: Fixed MVP baseline 2026-05-11. Active generation images now track submit/status attempts, timeout, cancel request time, and expose run/image cancel APIs.
+
 Evidence:
 
 - 状态机文档有 `CANCELLED`，但当前 API 中没有取消 generation run 或 generation image 的接口。
@@ -354,6 +372,8 @@ Recommendation:
 ### R08 AI 策划层与任务包
 
 #### F-R08-001 [P1] 品牌模板仍以内嵌文档和 planner 输出为主，没有形成可版本化模板资产
+
+Status: Fixed MVP baseline 2026-05-11. Added `brand_template_versions`, seeded the default Lily studio template, and stored template id/version in task package and template snapshots.
 
 Evidence:
 
@@ -393,7 +413,7 @@ Recommendation:
 
 #### F-R10-001 [P1] Docker 镜像和 Python 依赖没有完全固定，生产可复现性不足
 
-Status: Partially addressed in repair batch 2026-05-11. Direct backend dependencies, backend transitive constraints, and RustFS image tag are pinned; image digest pinning remains.
+Status: Fixed MVP baseline 2026-05-11. Direct backend dependencies, backend transitive constraints, RustFS image, and backend/frontend base images are pinned by tag and digest.
 
 Evidence:
 
@@ -448,7 +468,7 @@ Recommendation:
 
 #### F-R11-002 [P1] CORS 允许 credentials + 全方法全 header，但没有鉴权边界
 
-Status: Partially addressed in repair batch 2026-05-11. CORS methods/headers are narrowed and browser API access now uses a signed session cookie; full CSRF/CORS strategy should be revisited with formal user auth.
+Status: Fixed MVP baseline 2026-05-11. CORS methods/headers are narrowed, browser API access uses a signed session cookie, and mutating cookie-auth requests enforce Origin/Referer against allowed frontend origins.
 
 Evidence:
 
@@ -467,7 +487,7 @@ Recommendation:
 
 #### F-R12-001 [P1] 当前没有自动化测试和 CI，无法支撑生产级迭代
 
-Status: Partially addressed in repair batch 2026-05-11. Minimal CI exists; business regression tests remain open.
+Status: Fixed MVP baseline 2026-05-11. CI now runs backend compile/import, backend auth+migration smoke tests, frontend typecheck/build, and compose config. Broader business regression tests remain future hardening.
 
 Evidence:
 
@@ -505,7 +525,7 @@ Recommendation:
 
 #### F-R14-001 [P1] 仓库规则尚未落地到 GitHub 配置
 
-Status: Partially addressed in repair batch 2026-05-11. CI workflow, PR template, and CODEOWNERS are in-repo; branch protection and automatic branch deletion require repository admin action.
+Status: Repository baseline addressed 2026-05-11. CI workflow, PR template, CODEOWNERS, and an admin settings checklist are in-repo; branch protection and automatic branch deletion require a repository admin and could not be enabled by the current WRITE-permission token.
 
 Evidence:
 
@@ -531,39 +551,39 @@ Recommendation:
 | P0 | 移除代码内默认对象存储密钥，启动时校验生产必填配置 | PR-001 | Fixed 2026-05-11 |
 | P1 | 增加部署级鉴权或明确由反向代理保护，并收紧 `/api/health` | PR-002 | Fixed MVP baseline 2026-05-11: single-password app gate + server-side session; formal user auth pending |
 | P1 | 上传文件增加大小、数量、真实图片解码、像素和格式校验 | PR-003 | Fixed 2026-05-11 |
-| P1 | 生成任务增加 claim/lock、超时、取消、重试上限 | PR-004 | Open |
-| P1 | 建立最小 CI：backend compile/import、frontend build/typecheck、compose config | PR-005 | Fixed minimal baseline; business tests pending |
+| P1 | 生成任务增加 claim/lock、超时、取消、重试上限 | PR-004 | Fixed MVP baseline 2026-05-11 |
+| P1 | 建立最小 CI：backend compile/import、frontend build/typecheck、compose config | PR-005 | Fixed MVP baseline 2026-05-11 |
 | P1 | 建立正式数据库迁移机制或 migration version 表 | PR-006 | Fixed MVP baseline 2026-05-11: lightweight `schema_migrations` table |
-| P1 | 固定 Docker 镜像和 Python 依赖版本 | PR-007 | Partial: Python constraints and image tags done; digest pinning pending |
-| P1 | GitHub 分支保护、PR 模板、CODEOWNERS、自动删分支 | PR-008 | Partial: CI/PR template/CODEOWNERS added; admin settings pending |
+| P1 | 固定 Docker 镜像和 Python 依赖版本 | PR-007 | Fixed MVP baseline 2026-05-11 |
+| P1 | GitHub 分支保护、PR 模板、CODEOWNERS、自动删分支 | PR-008 | Repo baseline fixed; admin settings pending outside code |
 
 #### 近期质量提升
 
 | Priority | Item | Suggested PR | Status |
 | --- | --- | --- | --- |
-| P1 | 把 ruyi-dream 产品定位统一为“电商视觉生产系统”，并加入视频能力设计前置边界 | PR-009 | Open |
+| P1 | 把 ruyi-dream 产品定位统一为“电商视觉生产系统”，并加入视频能力设计前置边界 | PR-009 | Fixed design baseline 2026-05-11 |
 | P1 | 生产记录从硬删除改为归档/作废，保留审计链路 | PR-010 | Fixed 2026-05-11 |
-| P1 | 品牌模板版本化，task package 记录模板版本 | PR-011 | Open |
-| P2 | UI 文案从“生图/Gemini”调整为“拍摄/组图/调试模式” | PR-012 | Open |
-| P2 | 增加审核/交付状态：可用、需重生、需精修、已交付 | PR-013 | Open |
-| P2 | 拆分 `frontend/src/App.tsx` 页面和 hooks | PR-014 | Open |
-| P2 | 拆分 `backend/app/main.py` 路由、service、repository、worker | PR-015 | Open |
+| P1 | 品牌模板版本化，task package 记录模板版本 | PR-011 | Fixed MVP baseline 2026-05-11 |
+| P2 | UI 文案从“生图/Gemini”调整为“拍摄/组图/调试模式” | PR-012 | Fixed MVP baseline 2026-05-11 |
+| P2 | 增加审核/交付状态：可用、需重生、需精修、已交付 | PR-013 | Fixed MVP baseline 2026-05-11 |
+| P2 | 拆分 `frontend/src/App.tsx` 页面和 hooks | PR-014 | Partial: route utilities extracted; page/hooks split pending |
+| P2 | 拆分 `backend/app/main.py` 路由、service、repository、worker | PR-015 | Partial: task control isolated by schema/API boundaries; module split pending |
 | P2 | 增加生产 runbook 和故障排查决策树 | PR-016 | Fixed 2026-05-11 |
 
 #### 后续架构演进
 
 | Priority | Item | Suggested PR |
 | --- | --- | --- |
-| P2 | 定义 `MediaRun` / `MediaAsset` / image task / video task 概念模型，为 Seedance 2.0 做设计准备 | PR-017 |
+| P2 | 定义 `MediaRun` / `MediaAsset` / image task / video task 概念模型，为 Seedance 2.0 做设计准备 | PR-017 | Fixed design baseline 2026-05-11 |
 | P2 | 设计任务队列 worker 化方案，替换进程内 poller | PR-018 |
 | P3 | 规划 PostgreSQL、多 workspace、多用户权限和计费边界 | PR-019 |
 
-#### Review-to-PR Plan
+#### Remaining Follow-ups
 
-- PR-001 到 PR-008 应作为生产交付前的硬门槛。
-- PR-009 到 PR-013 需要产品/视觉生产负责人参与确认，尤其是“审核/交付状态”和“电商视觉生产系统”信息架构。
-- PR-014 到 PR-015 是工程结构治理，不应和功能需求混在同一个 PR。
-- PR-017 在本次 review 完成后启动，作为 Seedance 2.0 视频能力正式设计的前置 PR。
+- GitHub branch protection and automatic branch deletion still require repository admin permission; the checklist is in `docs/github-admin-settings.md`.
+- PR-014 / PR-015 remain engineering structure work: continue splitting frontend pages/hooks and backend route/service/worker modules in smaller future PRs.
+- PR-018 remains the scale-out path: extract the in-process poller into a dedicated worker when deployment needs multiple backend replicas.
+- PR-019 remains future SaaS scope: PostgreSQL, multi-workspace, users, roles, and billing.
 
 #### Original draft notes
 

@@ -59,14 +59,19 @@ Authorization: Bearer <token>
 | `/api/generation-runs` | GET | 生成批次列表；返回前台历史任务摘要、缩略图和重生次数 |
 | `/api/generation-runs/{run_id}` | GET | 生成批次详情和单张结果 |
 | `/api/generation-runs/{run_id}` | DELETE | 归档生成记录；隐藏列表项但保留数据库记录、对象 key 和事件日志 |
+| `/api/generation-runs/{run_id}/cancel` | POST | 取消该批次中仍处于 active 状态的图片任务 |
 | `/api/generation-images/{image_id}/regenerate` | POST | 单张重生；不新增生成任务记录，在同一记录追加 attempt |
+| `/api/generation-images/{image_id}/cancel` | POST | 取消单张 active 图片任务 |
 | `/api/generation-images/{image_id}/final` | PATCH | 设置/取消最终图 |
+| `/api/generation-images/{image_id}/review` | PATCH | 设置业务审核/交付状态 |
 | `/api/logs` | GET | 事件日志 |
 | `/api/exports/runs/{run_id}` | POST | 打包导出该 run 的最终图或全部图 |
 
-当前没有独立 `/api/brand-templates`，品牌模板暂时内嵌在 planner 输出和 task package 中。
+当前没有独立 `/api/brand-templates` 管理接口。默认品牌模板以 `brand_template_versions` 版本化保存，生成任务包和 `template_snapshot_json` 会记录模板 id/version。
 
 前台“生成记录”列表使用 `/api/generation-runs`，不是直接展示 `/api/logs`。`event_logs` 仍用于排查和审计。
+
+写接口在 cookie 会话下会校验 `Origin` / `Referer` 是否属于 `BACKEND_CORS_ORIGINS`，脚本调用应使用可选的 `APP_API_ACCESS_TOKEN`。
 
 ## 服装素材 CRUD 契约
 
@@ -196,7 +201,7 @@ Authorization: Bearer <token>
 - 图片入参顺序为：数字模特身份参考图在前，当前货号服装素材图在后，总数最多 10 张。
 - 数字模特图按 UI 当前显示顺序取前 4 张；服装图按 UI 当前显示顺序使用剩余额度，通常取 6 张，但当模特图少于 4 张时可超过 6 张，总数仍不超过 10。
 - prompt 中的图片编号必须与最终传给 Image-2 的 `image_urls` 顺序一致。
-- prompt 必须直接引用当前货号已保存的生图方案、服饰搭配、统一背景和 5 条分镜剧本，并声明服装素材图是商品事实来源；缺少关键方案字段时任务应失败，不允许使用通用兜底搭配文案。
+- prompt 必须直接引用当前货号已保存的拍摄方案、服饰搭配、统一背景和 5 条分镜剧本，并声明服装素材图是商品事实来源；缺少关键方案字段时任务应失败，不允许使用通用兜底搭配文案。
 - 所有输入图先上传 fal，最终只把 fal Image URLs 传给 Image-2。
 - 预览任务的 Image-2 请求使用 `image_size = square_hd`、`quality = high`；不得传 `1024x1024` 这类 fal schema 不接受的尺寸字符串。
 - `provider_request_json`、`image_inputs_json` 和 `attempts_json` 保留图片角色、源对象 key、文件名、fal URL 与最终 prompt。
@@ -209,7 +214,7 @@ Authorization: Bearer <token>
 
 `POST /api/generation-runs` 如果携带 `previewRunId`，后端必须复用这条预览 run，在同一条 `generation_runs` 下追加 5 张最终图，并将 `kind` 更新为 `group`。如果该 run 已经存在最终图，接口直接返回现有 run，不重复追加。`previewRunId` 缺失时才允许创建新的 run，但产品主流程应始终从预览 run 进入生成。
 
-最终生图的 Image-2 入参规则：
+最终成片的 Image-2 入参规则：
 
 - 每个最终图位单独创建一条 `generation_images`，每张图单独调用一次 Image-2。
 - 图片顺序为：图1 是已确认的 2x3 分镜预览图；图2~M 是数字模特身份参考图，最多 4 张；图(M+1)~10 是服装素材参考图，使用剩余额度。

@@ -31,6 +31,7 @@ ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + 
 | `database_schema.md` | 当前 SQLite 表结构、字段说明、关系图、后续候选表 | 修改数据库、写迁移或排查数据问题前 |
 | `requirements.txt` / `requirements.constraints.txt` | Python 直接依赖与传递依赖约束 | 安装、升级依赖时 |
 | `app/` | FastAPI 后端源码 | 修改后端实现时 |
+| `tests/` | 后端 smoke tests | 修改鉴权、迁移、任务状态时 |
 
 ## 核心后端职责
 

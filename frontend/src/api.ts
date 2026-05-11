@@ -132,15 +132,28 @@ export const api = {
     request<{ ok: boolean }>(`/api/generation-runs/${runId}`, {
       method: 'DELETE',
     }),
+  cancelRun: (runId: number) =>
+    request<{ item: GenerationRun }>(`/api/generation-runs/${runId}/cancel`, {
+      method: 'POST',
+    }),
   regenerate: (imageId: number, reason: string, note?: string) =>
     request<{ item: GenerationRun }>(`/api/generation-images/${imageId}/regenerate`, {
       method: 'POST',
       body: JSON.stringify({ reason, note }),
     }),
+  cancelImage: (imageId: number) =>
+    request<{ item: GenerationImage }>(`/api/generation-images/${imageId}/cancel`, {
+      method: 'POST',
+    }),
   setFinal: (imageId: number, isFinal: boolean) =>
     request<{ item: GenerationImage }>(`/api/generation-images/${imageId}/final`, {
       method: 'PATCH',
       body: JSON.stringify({ isFinal }),
+    }),
+  setReviewStatus: (imageId: number, status: string, note?: string) =>
+    request<{ item: GenerationImage }>(`/api/generation-images/${imageId}/review`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status, note }),
     }),
   exportRun: async (runId: number) => {
     const response = await fetch(`${API_BASE}/api/exports/runs/${runId}`, { method: 'POST', credentials: 'include', headers: apiHeaders() })

@@ -114,9 +114,17 @@ export type GenerationImage = {
   submittedAt?: string | null
   completedAt?: string | null
   lastStatusCheckedAt?: string | null
+  submitAttempts?: number
+  statusCheckAttempts?: number
+  statusErrorAttempts?: number
+  cancelRequestedAt?: string | null
+  timeoutAt?: string | null
   regenerateFromImageId?: number | null
   regenerateReason?: string | null
   isFinal: boolean
+  reviewStatus?: string
+  reviewNote?: string | null
+  reviewedAt?: string | null
   createdAt: string
   updatedAt: string
 }
@@ -131,6 +139,8 @@ export type GenerationRun = {
   kind: string
   status: string
   outputDir: string
+  deliveryStatus?: string
+  deliveredAt?: string | null
   archivedAt?: string | null
   archiveReason?: string | null
   summary?: {

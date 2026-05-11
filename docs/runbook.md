@@ -164,9 +164,17 @@ Recovery:
 3. Retry individual failed images from the UI.
 4. If a run is stuck, record `generation_run.id` and affected `generation_images.id`.
 
-Known limitation:
+Task control:
 
-- Claim/lock, cancellation, timeout, and retry ceilings are still open production-readiness work. Do not run multiple backend replicas until that is fixed.
+- Each active image gets a database lease via `locked_by` / `locked_until`, so a second poller does not submit the same image while the lease is valid.
+- `GENERATION_SUBMIT_RETRY_LIMIT` controls submit retries before an image is failed.
+- `GENERATION_STATUS_RETRY_LIMIT` controls status-check retries before an image is failed.
+- `GENERATION_IMAGE_TIMEOUT_SECONDS` marks long-running queued/submitted images as failed.
+- Operators can cancel an active run in the UI, or call `POST /api/generation-runs/<run_id>/cancel`.
+
+Current limitation:
+
+- The built-in poller is still inside the backend process. The lease makes accidental duplicate submission less likely, but a dedicated worker process is still the preferred scale-out design.
 
 ## RustFS Or Presigned URLs Fail
 

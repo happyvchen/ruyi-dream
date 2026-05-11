@@ -14,7 +14,7 @@ backend/app/db.py:init_db()
 
 ## 1. 表总览
 
-当前一共 7 张业务表，另有 1 张 schema 版本表：
+当前一共 8 张业务表，另有 1 张 schema 版本表：
 
 | 表名 | 业务对象 | 说明 |
 |---|---|---|
@@ -22,6 +22,7 @@ backend/app/db.py:init_db()
 | `garment_images` | `GarmentImage` | 货号下的单张素材图 |
 | `model_profiles` | `ModelProfile` | 数字模特档案 |
 | `shot_plans` | `ShotPlan` | 组图方案 / Gemini 策划结果 |
+| `brand_template_versions` | `BrandTemplateVersion` | 品牌调性模板版本 |
 | `generation_runs` | `GenerationRun` | 一次组图生成批次 |
 | `generation_images` | `GenerationImage` | 单张生成任务记录；重生通过 attempts 追加 |
 | `event_logs` | `EventLog` | 事件日志 |
@@ -227,6 +228,8 @@ CREATE TABLE generation_runs (
   kind TEXT NOT NULL DEFAULT 'group',
   status TEXT NOT NULL DEFAULT 'CREATED',
   output_dir TEXT NOT NULL,
+  delivery_status TEXT NOT NULL DEFAULT 'draft',
+  delivered_at TEXT,
   archived_at TEXT,
   archive_reason TEXT,
   created_at TEXT NOT NULL,
@@ -245,6 +248,8 @@ CREATE TABLE generation_runs (
 | `kind` | TEXT | 当前主要为 `group`；单张重生不再新建 run |
 | `status` | TEXT | `CREATED` / `RUNNING` / `PARTIAL_SUCCEEDED` / `SUCCEEDED` / `FAILED` / `CANCELLED` |
 | `output_dir` | TEXT | 本次输出目录 |
+| `delivery_status` | TEXT | 交付状态，当前为 `draft` / `delivered` |
+| `delivered_at` | TEXT | 首次标记交付时间 |
 | `archived_at` | TEXT | 归档时间；归档后默认历史列表不展示，但保留记录和对象 key |
 | `archive_reason` | TEXT | 归档原因 |
 | `created_at` | TEXT | 创建时间 |
@@ -280,6 +285,16 @@ CREATE TABLE generation_images (
   submitted_at TEXT,
   completed_at TEXT,
   last_status_checked_at TEXT,
+  locked_by TEXT,
+  locked_until TEXT,
+  submit_attempts INTEGER NOT NULL DEFAULT 0,
+  status_check_attempts INTEGER NOT NULL DEFAULT 0,
+  status_error_attempts INTEGER NOT NULL DEFAULT 0,
+  cancel_requested_at TEXT,
+  timeout_at TEXT,
+  review_status TEXT NOT NULL DEFAULT 'candidate',
+  review_note TEXT,
+  reviewed_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -334,6 +349,16 @@ ALTER TABLE generation_images ADD COLUMN last_status_checked_at TEXT;
 | `submitted_at` | TEXT | 提交 provider 的时间 |
 | `completed_at` | TEXT | 完成、失败或取消时间 |
 | `last_status_checked_at` | TEXT | 最近一次状态查询时间 |
+| `locked_by` | TEXT | 后台 poller 抢占任务的 worker id |
+| `locked_until` | TEXT | 任务 lease 过期时间，过期后可被再次抢占 |
+| `submit_attempts` | INTEGER | 提交 provider 的尝试次数 |
+| `status_check_attempts` | INTEGER | 查询 provider 状态的总次数 |
+| `status_error_attempts` | INTEGER | 连续状态查询失败次数 |
+| `cancel_requested_at` | TEXT | 用户请求取消时间 |
+| `timeout_at` | TEXT | 任务超时截止时间 |
+| `review_status` | TEXT | 业务审核/交付状态：`candidate` / `approved` / `needs_regen` / `needs_retouch` / `delivered` |
+| `review_note` | TEXT | 审核备注 |
+| `reviewed_at` | TEXT | 最近一次审核状态更新时间 |
 | `created_at` | TEXT | 创建时间 |
 | `updated_at` | TEXT | 更新时间 |
 
@@ -397,7 +422,32 @@ CREATE TABLE event_logs (
 | `payload_json` | TEXT | 事件负载 |
 | `created_at` | TEXT | 创建时间 |
 
-### 2.8 `schema_migrations`
+### 2.8 `brand_template_versions`
+
+```sql
+CREATE TABLE brand_template_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_id TEXT NOT NULL,
+  version TEXT NOT NULL,
+  name TEXT NOT NULL,
+  snapshot_json TEXT NOT NULL,
+  is_active INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  UNIQUE(template_id, version)
+);
+```
+
+字段说明：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `template_id` | TEXT | 模板稳定 ID |
+| `version` | TEXT | 模板版本 |
+| `name` | TEXT | 模板名称 |
+| `snapshot_json` | TEXT | 品牌调性、背景、光线、搭配边界等模板快照 |
+| `is_active` | INTEGER | 是否当前默认模板 |
+
+### 2.9 `schema_migrations`
 
 ```sql
 CREATE TABLE schema_migrations (
@@ -414,6 +464,9 @@ CREATE TABLE schema_migrations (
 | `001` | `add_generation_image_attempt_columns` | 补齐生成图片 attempt、provider queue、快照字段 |
 | `002` | `add_generation_run_archive_columns` | 补齐生成批次归档字段 |
 | `003` | `normalize_planning_schema` | 规范化 `shot_plans` / `shot_plan_shots` schema |
+| `004` | `add_generation_task_control_columns` | 增加任务锁、重试、取消、超时字段 |
+| `005` | `add_generation_review_delivery_columns` | 增加审核/交付状态字段 |
+| `006` | `add_brand_template_versions` | 增加品牌模板版本表 |
 
 ## 3. 关系图
 
