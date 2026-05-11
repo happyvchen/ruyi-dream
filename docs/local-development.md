@@ -5,7 +5,9 @@
 日常开发推荐前后端裸跑，只用 Docker Compose 启动 RustFS。这样前端热更新、后端 reload 和调试都更轻。
 
 ```bash
-cd /Users/fushuai/Desktop/项目/Lily/ruyi-dream
+cd /Users/fushuai/GitRepository/ruyi-dream
+cp .env.example .env
+# 编辑 .env，至少设置 RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY
 docker compose up -d rustfs
 ```
 
@@ -17,15 +19,24 @@ RustFS 默认地址：
 ## 后端本地启动
 
 ```bash
-cd backend
+cd /Users/fushuai/GitRepository/ruyi-dream/backend
 cp .env.example .env
+# 编辑 backend/.env；真实策划/生图需要 GEMINI_API_KEY 和 FAL_KEY
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-本地 `backend/.env` 常用配置：
+如果已经创建过虚拟环境，后续启动只需要：
+
+```bash
+cd /Users/fushuai/GitRepository/ruyi-dream/backend
+source .venv/bin/activate
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+后端裸跑时会自动读取 `backend/.env`。本地 `backend/.env` 常用配置：
 
 ```env
 APP_S3_ENDPOINT_URL=http://127.0.0.1:9000
@@ -51,8 +62,10 @@ curl http://127.0.0.1:8000/api/health
 
 ## 前端本地启动
 
+另开一个终端：
+
 ```bash
-cd frontend
+cd /Users/fushuai/GitRepository/ruyi-dream/frontend
 npm install
 npm run dev
 ```
@@ -69,13 +82,42 @@ http://127.0.0.1:5173
 VITE_API_BASE_URL=http://127.0.0.1:8000
 ```
 
+## 一次性完整启动命令
+
+第一次本地开发可以按这个顺序跑：
+
+```bash
+cd /Users/fushuai/GitRepository/ruyi-dream
+cp .env.example .env
+
+# 1. 启动对象存储
+docker compose up -d rustfs
+
+# 2. 启动后端
+cd backend
+cp .env.example .env
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+再开一个终端：
+
+```bash
+cd /Users/fushuai/GitRepository/ruyi-dream/frontend
+npm install
+npm run dev
+```
+
 ## 本地完整 Compose 启动
 
 如果要模拟交付环境，可以直接跑完整 Compose：
 
 ```bash
+cd /Users/fushuai/GitRepository/ruyi-dream
 cp .env.example .env
-# 编辑 .env，至少设置 RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY
+# 编辑 .env，设置 RustFS 密钥、PUBLIC_BACKEND_URL、PUBLIC_S3_URL、GEMINI_API_KEY、FAL_KEY
 docker compose up -d --build
 docker compose ps
 ```
@@ -95,9 +137,12 @@ docker compose up -d --build frontend
 ## 常用检查
 
 ```bash
+curl http://127.0.0.1:8000/api/health
+docker compose ps
+docker compose logs -f rustfs
+docker compose config
 npm --prefix frontend run build
 python3 -m compileall backend/app
-docker compose config
 ```
 
 ## 清理本地数据
