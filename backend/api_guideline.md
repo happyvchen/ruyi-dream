@@ -141,7 +141,18 @@ Authorization: Bearer <token>
 
 `DELETE /api/garment-skus/{sku_id}`
 
-删除的是应用内上传副本和对应元数据，不会删除客户原始素材目录。为了保留生产历史，如果该货号已经存在 `generation_runs`，接口返回 `409`，不允许删除。
+默认操作为归档货号：从日常素材列表隐藏该货号，但保留素材、方案、生成记录、对象 key 和事件日志。归档后的货号可通过 `GET /api/garment-skus?includeArchived=true` 查看。
+
+`DELETE /api/garment-skus/{sku_id}?purge=true&confirmSku={sku}`
+
+当用户在二次确认中勾选“同时删除关联记录和文件”时使用。接口要求 `confirmSku` 与货号完全一致，会级联删除：
+
+- 货号元数据与上传素材记录。
+- 该货号的拍摄方案和分镜明细。
+- 该货号的生成记录、生成图片记录和已归档记录。
+- 对象存储中的应用上传副本和该货号生成输出目录。
+
+该操作不生成 fallback/mock 数据，不保留可恢复业务记录；只保留事件日志中的清理摘要用于审计。
 
 ### 追加素材图
 

@@ -21,6 +21,13 @@ export type GarmentSku = {
   coverFileSize?: number | null
   imageCount?: number | null
   images?: GarmentImage[]
+  deleteImpact?: {
+    generationRunCount: number
+    archivedGenerationRunCount: number
+    shotPlanCount: number
+  }
+  archivedAt?: string | null
+  archiveReason?: string | null
   createdAt: string
   updatedAt: string
 }
