@@ -163,7 +163,7 @@
 
 后端职责：
 
-- 创建一条 `generation_runs.kind = preview_grid` 的预览批次，并立即返回。
+- 创建一条 `generation_runs.kind = preview_grid` 的任务记录，并立即返回；这条记录后续会继续承载最终组图，不应再为同一次用户任务创建第二条记录。
 - 只创建一条 `generation_images.status = QUEUED`，由后台 poller 提交 Image-2，输出一张 `2x3 分镜预览 / Contact Sheet`。
 - 前 5 格严格对应当前方案的 5 条分镜，第 6 格为备用候选姿势。
 - 图片入参顺序为：数字模特身份参考图在前，当前货号服装素材图在后，总数最多 10 张。
@@ -179,6 +179,8 @@
 对预览图点击“重生”时，后端仍使用同一套预览构建规则重新生成 task package：最多 4 张模特图在前、服装图按剩余额度补齐到最多 10 张、2x3 Contact Sheet prompt、全部输入图先上传 fal。历史图片记录里的旧 `task_package_json` 只作为审计记录，不作为预览重生的规则来源；若历史预览属于旧方案，后端应使用当前货号最新可用方案重建任务。
 
 ### 创建生成批次
+
+`POST /api/generation-runs` 如果携带 `previewRunId`，后端必须复用这条预览 run，在同一条 `generation_runs` 下追加 5 张最终图，并将 `kind` 更新为 `group`。如果该 run 已经存在最终图，接口直接返回现有 run，不重复追加。`previewRunId` 缺失时才允许创建新的 run，但产品主流程应始终从预览 run 进入生成。
 
 `POST /api/generation-runs`
 

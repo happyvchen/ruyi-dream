@@ -115,7 +115,6 @@ export function App() {
       && shotPlan
       && !shotPlanPlanning
       && previewRun
-      && previewRun.kind === 'preview_grid'
       && previewRun.status === 'SUCCEEDED'
       && previewRun.skuId === selectedSku.id
       && previewRun.shotPlanId === shotPlan.id,
@@ -507,6 +506,7 @@ export function App() {
     try {
       const result = await api.generateGroup(shotPlan.id, previewRun?.id)
       setGenerationRun(result.item)
+      setPreviewRun(result.item)
       navigate({ page: 'generate', generateRunId: result.item.id }, true)
       await refreshHistoryRuns()
     } catch (err) {
@@ -557,6 +557,7 @@ export function App() {
       const result = await api.regenerate(image.id, reason)
       if (previewRun?.id === result.item.id) {
         setPreviewRun(result.item)
+        setGenerationRun((current) => current?.id === result.item.id ? result.item : current)
       } else {
         setGenerationRun((current) => mergeRun(current, result.item))
       }
@@ -573,6 +574,13 @@ export function App() {
     if (previewRun?.id === image.runId) {
       setPreviewRun((current) => {
         if (!current?.images) return current
+        return {
+          ...current,
+          images: current.images.map((item) => (item.id === image.id ? result.item : item)),
+        }
+      })
+      setGenerationRun((current) => {
+        if (!current?.images || current.id !== image.runId) return current
         return {
           ...current,
           images: current.images.map((item) => (item.id === image.id ? result.item : item)),
@@ -622,7 +630,7 @@ export function App() {
       })
       setShotPlan(planResult.item)
       setGenerationRun(runResult.item)
-      setPreviewRun(null)
+      setPreviewRun(runResult.item)
       if (options.syncUrl === false) setPage('generate')
       else navigate({ page: 'generate', generateRunId: runResult.item.id })
     } catch (err) {
@@ -1042,6 +1050,7 @@ export function App() {
             <ResultGallery
               title="分镜预览"
               run={previewRun}
+              imageFilter={(image) => image.shotIndex === 0}
               loading={busy === 'previewing' || isRunActive(previewRun)}
               nowMs={nowMs}
               onRegenerate={(image, reason) => void regenerate(image, reason)}
@@ -1053,6 +1062,7 @@ export function App() {
           <ResultGallery
             title="最终组图"
             run={generationRun}
+            imageFilter={(image) => image.shotIndex > 0}
             loading={busy === 'generating' || busy === 'regenerating' || Boolean(generationRun && isRunActive(generationRun))}
             nowMs={nowMs}
             onRegenerate={(image, reason) => void regenerate(image, reason)}
@@ -2258,6 +2268,7 @@ function ResultGallery({
   run,
   loading,
   nowMs,
+  imageFilter,
   onRegenerate,
   onToggleFinal,
   onExport,
@@ -2266,31 +2277,33 @@ function ResultGallery({
   run: GenerationRun | null
   loading: boolean
   nowMs: number
+  imageFilter?: (image: GenerationImage) => boolean
   onRegenerate: (image: GenerationImage, reason: string) => void
   onToggleFinal: (image: GenerationImage) => void
   onExport: (runId: number) => void
 }) {
-  const isPreviewRun = run?.kind === 'preview_grid'
-  const placeholders = Array.from({ length: isPreviewRun ? 1 : 5 }, (_, index) => index + 1)
-  const runStartedAt = run?.images?.[0]?.submittedAt ?? run?.createdAt
+  const isPreviewGallery = title?.includes('预览') ?? false
+  const visibleImages = run?.images?.filter((image) => imageFilter ? imageFilter(image) : true) ?? []
+  const placeholders = Array.from({ length: isPreviewGallery ? 1 : 5 }, (_, index) => index + 1)
+  const runStartedAt = visibleImages[0]?.submittedAt ?? run?.createdAt
   return (
     <section className="results">
       <div className="section-heading">
         <h2>{title}</h2>
         {run && (
           <span>
-            {isPreviewRun ? '预览记录' : run.kind === 'regeneration' ? '重生记录' : '组图记录'} #{run.id} · {statusText(run.status)}
+            {isPreviewGallery ? '预览记录' : run.kind === 'regeneration' ? '重生记录' : '组图记录'} #{run.id} · {statusText(run.status)}
             {runStartedAt ? ` · 已运行 ${elapsedText(runStartedAt, nowMs, run.updatedAt, !isRunActive(run))}` : ''}
           </span>
         )}
       </div>
       <div className="result-grid">
-        {run?.images?.length
-          ? run.images.map((image) => {
+        {visibleImages.length
+          ? visibleImages.map((image) => {
               const imageActive = isImageActive(image)
               const imageElapsed = elapsedText(image.submittedAt ?? image.createdAt, nowMs, image.completedAt ?? image.updatedAt, !imageActive)
               const canShowImage = image.status === 'SUCCEEDED' && Boolean(image.url)
-              const displayTitle = isPreviewRun ? '分镜预览' : image.title
+              const displayTitle = image.shotIndex === 0 ? '分镜预览' : image.title
               const displayLabel = `${String(image.shotIndex).padStart(2, '0')} ${displayTitle}`
               return (
               <article className="result-card" key={image.id}>
@@ -2337,7 +2350,7 @@ function ResultGallery({
                 <div className="result-image"><span>待生成</span></div>
                 <div className="result-meta">
                   <strong>{String(index).padStart(2, '0')} 图位</strong>
-                  <small>{isPreviewRun ? '预览后用于最终生成' : '生成后可单张重生'}</small>
+                  <small>{isPreviewGallery ? '预览后用于最终生成' : '生成后可单张重生'}</small>
                 </div>
               </article>
             ))}

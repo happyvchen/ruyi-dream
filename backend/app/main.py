@@ -853,27 +853,66 @@ async def generate_group(payload: GenerateGroupRequest) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail="组图方案不存在")
         sku_row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (plan_row["sku_id"],)).fetchone()
         model_row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (plan_row["model_profile_id"],)).fetchone()
+        preview_run_row = None
+        if payload.previewRunId:
+            preview_run_row = db.execute(
+                """
+                SELECT *
+                FROM generation_runs
+                WHERE id = ? AND sku_id = ? AND shot_plan_id = ?
+                """,
+                (payload.previewRunId, sku_row["id"], plan_row["id"]),
+            ).fetchone()
+            if not preview_run_row:
+                raise HTTPException(status_code=400, detail="分镜预览记录不存在或不属于当前方案")
+            preview_image_row = db.execute(
+                """
+                SELECT *
+                FROM generation_images
+                WHERE run_id = ? AND shot_index = 0 AND status = 'SUCCEEDED' AND output_path IS NOT NULL
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (payload.previewRunId,),
+            ).fetchone()
+            if not preview_image_row:
+                raise HTTPException(status_code=422, detail="分镜预览尚未生成成功，不能用于最终生成")
+            existing_final_count = db.execute(
+                "SELECT COUNT(*) AS count FROM generation_images WHERE run_id = ? AND shot_index > 0",
+                (payload.previewRunId,),
+            ).fetchone()["count"]
+            if int(existing_final_count or 0) > 0:
+                return {"item": get_generation_run_by_id(int(payload.previewRunId))}
 
     plan = loads(plan_row["plan_json"], {})
     plan["_planner"] = {
         "provider": plan_row["planner_provider"],
         "rawResponse": plan_row["raw_response"],
     }
-    output_dir = join_key("outputs", sku_row["sku"], datetime.now().strftime("%Y%m%d-%H%M%S"))
+    output_dir = clean_key(preview_run_row["output_dir"]) if preview_run_row else join_key("outputs", sku_row["sku"], datetime.now().strftime("%Y%m%d-%H%M%S"))
     timestamp = now_iso()
     provider = get_image_provider()
 
-    with get_db() as db:
-        run_cursor = db.execute(
-            """
-            INSERT INTO generation_runs
-              (sku_id, shot_plan_id, model_profile_id, kind, status, output_dir, created_at, updated_at)
-            VALUES (?, ?, ?, 'group', 'RUNNING', ?, ?, ?)
-            """,
-            (sku_row["id"], plan_row["id"], model_row["id"], str(output_dir), timestamp, timestamp),
-        )
-        run_id = int(run_cursor.lastrowid)
-        log_event(db, "generation_run", run_id, "started", {"shotPlanId": plan_row["id"], "outputDir": str(output_dir)})
+    if preview_run_row:
+        run_id = int(preview_run_row["id"])
+        with get_db() as db:
+            db.execute(
+                "UPDATE generation_runs SET kind = 'group', status = 'RUNNING', updated_at = ? WHERE id = ?",
+                (timestamp, run_id),
+            )
+            log_event(db, "generation_run", run_id, "final_generation_started", {"shotPlanId": plan_row["id"], "outputDir": str(output_dir)})
+    else:
+        with get_db() as db:
+            run_cursor = db.execute(
+                """
+                INSERT INTO generation_runs
+                  (sku_id, shot_plan_id, model_profile_id, kind, status, output_dir, created_at, updated_at)
+                VALUES (?, ?, ?, 'group', 'RUNNING', ?, ?, ?)
+                """,
+                (sku_row["id"], plan_row["id"], model_row["id"], str(output_dir), timestamp, timestamp),
+            )
+            run_id = int(run_cursor.lastrowid)
+            log_event(db, "generation_run", run_id, "started", {"shotPlanId": plan_row["id"], "outputDir": str(output_dir)})
 
     preview_inputs = get_preview_grid_inputs(payload.previewRunId, plan_row["id"]) if payload.previewRunId else []
     generated_ids: list[int] = []
@@ -890,7 +929,7 @@ async def generate_group(payload: GenerateGroupRequest) -> dict[str, Any]:
         generated_ids.append(image_id)
     update_generation_run_status(run_id)
     with get_db() as db:
-        log_event(db, "generation_run", run_id, "submitted", {"imageIds": generated_ids})
+        log_event(db, "generation_run", run_id, "submitted", {"imageIds": generated_ids, "previewRunId": payload.previewRunId})
 
     return {"item": get_generation_run_by_id(run_id)}
 
@@ -930,7 +969,9 @@ async def regenerate_image(image_id: int, payload: RegenerateRequest) -> dict[st
         model_row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (run_row["model_profile_id"],)).fetchone()
         db.execute("UPDATE generation_images SET status = 'QUEUED', updated_at = ? WHERE id = ?", (now_iso(), image_id))
 
-    if run_row["kind"] == "preview_grid":
+    image_task_package = loads(image_row["task_package_json"], {})
+    image_stage = image_task_package.get("generation", {}).get("stage") if isinstance(image_task_package.get("generation"), dict) else None
+    if int(image_row["shot_index"]) == 0 or image_stage == "preview_grid":
         with get_db() as db:
             plan_row = get_latest_usable_shot_plan_row(db, sku_row["id"]) or db.execute(
                 "SELECT * FROM shot_plans WHERE id = ?",
@@ -952,7 +993,7 @@ async def regenerate_image(image_id: int, payload: RegenerateRequest) -> dict[st
                 )
             run_row = {**dict(run_row), "shot_plan_id": plan_row["id"]}
     else:
-        task_package = loads(image_row["task_package_json"], {})
+        task_package = image_task_package
     task_package["regeneration"] = {"fromImageId": image_id, "reason": payload.reason, "note": payload.note}
     output_dir = clean_key(run_row["output_dir"])
     shot = task_package.get("shot", {})
@@ -1583,7 +1624,7 @@ def get_preview_grid_inputs(preview_run_id: int | None, shot_plan_id: int) -> li
             """
             SELECT *
             FROM generation_images
-            WHERE run_id = ? AND status = 'SUCCEEDED' AND output_path IS NOT NULL
+            WHERE run_id = ? AND shot_index = 0 AND status = 'SUCCEEDED' AND output_path IS NOT NULL
             ORDER BY shot_index, id
             LIMIT 1
             """,

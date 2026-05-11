@@ -260,6 +260,8 @@ MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂�
 }
 ```
 
+生成任务以 `generation_runs` 作为一次用户任务的容器：预览、最终 5 张图、重生预览图、重生结果图都归属于同一条生成记录。预览图在 `generation_images` 中使用 `shot_index = 0`；最终组图使用 `shot_index = 1..5`。点击“生成”时如果已经有预览 run，后端必须在该 run 下追加最终图，并把 run 升级为完整组图任务，不得新建第二条生成记录。
+
 预览任务 `generation.stage = preview_grid` 时，实际语义为 `2x3 分镜预览 / Contact Sheet`：
 
 - 输出一张 2x3 视觉预览图，前 5 格对应 `ShotPlan.shots` 的 5 条分镜，第 6 格为备用候选姿势。

@@ -92,7 +92,7 @@ Gemini 组图策划同样采用持久化异步任务：`POST /api/shot-plans` �
 - `/generation-runs/{run_id}`：在生成记录页打开指定任务详情。
 - 浏览器最近一次 `runId` 只作为无 URL 指定时的便利恢复，不是生成记录的唯一入口。
 
-预览任务使用同一套持久化异步机制，但 `generation_runs.kind = preview_grid`，只提交一张 `2x3 Contact Sheet`：
+预览任务使用同一套持久化异步机制。一次用户任务只对应一条 `generation_runs`：先以 `kind = preview_grid` 创建，提交一张 `shot_index = 0` 的 `2x3 Contact Sheet`；用户点击“生成”后在同一条 run 下追加 `shot_index = 1..5` 的最终图，并将 run 升级为 `kind = group`：
 
 - 前 5 格对应最终组图 5 条分镜，第 6 格为备用候选姿势。
 - 模特身份参考图按数字模特 UI 当前显示顺序最多取 4 张，并置于输入图序列最前。
