@@ -14,7 +14,10 @@ RUSTFS_ACCESS_KEY=<random-access-key>
 RUSTFS_SECRET_KEY=<random-secret-key>
 APP_ENV=production
 APP_GATE_PASSWORD=<random-app-password>
+APP_GATE_PASSWORD_HASH=
 APP_SESSION_SECRET=<random-session-signing-secret>
+APP_SESSION_TTL_SECONDS=43200
+APP_SESSION_COOKIE_SECURE=true
 APP_API_ACCESS_TOKEN=<optional-ops-script-token>
 PUBLIC_BACKEND_URL=http://<server-ip-or-domain>:8000
 PUBLIC_S3_URL=http://<server-ip-or-domain>:9000
@@ -26,6 +29,15 @@ FAL_KEY=<required-for-real-image-generation>
 根目录 `.env` 是 Compose、后端裸跑和本地联调共同使用的主配置源。不要再维护一份 `backend/.env`；如需后端本机临时覆盖，使用不提交 Git 的 `backend/.env.local`。
 
 如果已经由 HTTPS 反向代理或企业网关完成访问控制，可不设置内置门禁密码，但生产环境必须显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。`APP_API_ACCESS_TOKEN` 只用于脚本/运维调用，不作为浏览器前端门禁。
+
+门禁配置说明：
+
+- `APP_GATE_PASSWORD` 是浏览器进入工作台时输入的访问密码，生产环境必须使用强随机密码。
+- `APP_GATE_PASSWORD_HASH` 可替代明文密码，当前格式为 SHA-256 hex digest；即便使用 hash，也要保证原始密码足够强。
+- `APP_SESSION_SECRET` 用于签名登录 session，必须是另一段强随机密钥。
+- `APP_SESSION_COOKIE_SECURE=true` 只适用于 HTTPS。如果测试环境仍是 HTTP，应暂时设为 `false`。
+- 如果要轮换访问密码并强制所有已登录浏览器重新登录，需要同时轮换 `APP_SESSION_SECRET` 并重启后端。
+- `APP_API_ACCESS_TOKEN` 是可选脚本/运维 token，不会注入前端静态包，也不作为浏览器门禁。
 
 启动：
 

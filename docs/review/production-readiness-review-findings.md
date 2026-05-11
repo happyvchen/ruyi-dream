@@ -284,10 +284,12 @@ Recommendation:
 
 #### F-R06-001 [P1] 数据库迁移依赖运行时 schema patch/rebuild，缺少可审计迁移版本
 
+Status: Fixed MVP baseline 2026-05-11. `schema_migrations` now records applied migrations, and existing schema patch/rebuild steps are versioned as `001`-`003`.
+
 Evidence:
 
-- `backend/app/db.py:41-170` 在启动时 `CREATE TABLE IF NOT EXISTS` 并 `ensure_column`。
-- `backend/app/db.py:171-348` 会重建 planning schema。
+- 修复前 `backend/app/db.py:41-170` 在启动时 `CREATE TABLE IF NOT EXISTS` 并直接 `ensure_column`。
+- 修复前 `backend/app/db.py:171-348` 会直接重建 planning schema。
 
 Risk:
 
@@ -391,12 +393,12 @@ Recommendation:
 
 #### F-R10-001 [P1] Docker 镜像和 Python 依赖没有完全固定，生产可复现性不足
 
-Status: Partially addressed in repair batch 2026-05-11. Direct backend dependencies and RustFS image tag are pinned; full dependency lock/constraints and digest pinning remain.
+Status: Partially addressed in repair batch 2026-05-11. Direct backend dependencies, backend transitive constraints, and RustFS image tag are pinned; image digest pinning remains.
 
 Evidence:
 
 - RustFS 使用 `rustfs/rustfs:latest`：`docker-compose.yml:3`。
-- 后端 requirements 使用 `fal-client>=0.7.0`、`boto3>=1.35.0`，不是完全 pin。
+- 修复前后端 requirements 使用 `fal-client>=0.7.0`、`boto3>=1.35.0`，不是完全 pin。
 
 Risk:
 
@@ -531,8 +533,8 @@ Recommendation:
 | P1 | 上传文件增加大小、数量、真实图片解码、像素和格式校验 | PR-003 | Fixed 2026-05-11 |
 | P1 | 生成任务增加 claim/lock、超时、取消、重试上限 | PR-004 | Open |
 | P1 | 建立最小 CI：backend compile/import、frontend build/typecheck、compose config | PR-005 | Fixed minimal baseline; business tests pending |
-| P1 | 建立正式数据库迁移机制或 migration version 表 | PR-006 | Open |
-| P1 | 固定 Docker 镜像和 Python 依赖版本 | PR-007 | Partial: direct pins/tag done; lock/digest pending |
+| P1 | 建立正式数据库迁移机制或 migration version 表 | PR-006 | Fixed MVP baseline 2026-05-11: lightweight `schema_migrations` table |
+| P1 | 固定 Docker 镜像和 Python 依赖版本 | PR-007 | Partial: Python constraints and image tags done; digest pinning pending |
 | P1 | GitHub 分支保护、PR 模板、CODEOWNERS、自动删分支 | PR-008 | Partial: CI/PR template/CODEOWNERS added; admin settings pending |
 
 #### 近期质量提升

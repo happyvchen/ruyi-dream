@@ -24,7 +24,7 @@ RustFS 默认地址：
 cd /Users/fushuai/GitRepository/ruyi-dream/backend
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -c requirements.constraints.txt
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
@@ -46,12 +46,21 @@ APP_S3_PUBLIC_ENDPOINT_URL=http://127.0.0.1:9000
 APP_STORAGE_BUCKET=ruyi-dream
 RUSTFS_ACCESS_KEY=admin
 RUSTFS_SECRET_KEY=change-me
-APP_GATE_PASSWORD=
-APP_SESSION_SECRET=
+APP_GATE_PASSWORD=local-dev-password
+APP_GATE_PASSWORD_HASH=
+APP_SESSION_SECRET=local-dev-session-secret-change-me
+APP_SESSION_TTL_SECONDS=43200
+APP_SESSION_COOKIE_SECURE=false
 APP_API_ACCESS_TOKEN=
 APP_TRUST_REVERSE_PROXY_AUTH=false
 BACKEND_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 ```
+
+`APP_GATE_PASSWORD` 是打开前端工作台时输入的访问密码。本地如果不想启用登录页，可以留空 `APP_GATE_PASSWORD` 和 `APP_GATE_PASSWORD_HASH`；如果要模拟生产门禁，就设置 `APP_GATE_PASSWORD`，同时设置一段较长的 `APP_SESSION_SECRET`。
+
+`APP_SESSION_COOKIE_SECURE=false` 适用于本地 HTTP。只有当前端通过 HTTPS 访问时，才应设置为 `true`。
+
+历史 RustFS 数据要求 `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` 与创建数据目录时一致，否则旧素材和生成图可能无法访问。
 
 需要真实策划和生图时再补：
 
@@ -112,7 +121,7 @@ docker compose up -d rustfs
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -c requirements.constraints.txt
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 

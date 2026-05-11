@@ -92,6 +92,8 @@ BACKEND_CORS_ORIGINS=http://<server-ip-or-domain>:5173
 - `.env` 不提交 Git，生产必须使用强随机 `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY`。
 - 生产环境设置 `APP_ENV=production`；后端启动时会拒绝缺失或默认对象存储密钥。
 - 生产环境必须设置 `APP_GATE_PASSWORD` 或 `APP_GATE_PASSWORD_HASH`，并设置 `APP_SESSION_SECRET` 作为 MVP single-password app gate；如果访问控制由 HTTPS 反向代理或企业网关完成，则必须显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。
+- `APP_SESSION_COOKIE_SECURE` 在 HTTPS 部署中应设置为 `true`；本地或 HTTP 测试环境才允许为 `false`。
+- 轮换访问密码时，如果需要立即踢出所有已登录浏览器，必须同步轮换 `APP_SESSION_SECRET`。
 - `APP_API_ACCESS_TOKEN` 只作为脚本/运维调用的可选 fallback，不作为浏览器前端门禁，也不注入前端静态包。
 - `FAL_KEY` 和 `GEMINI_API_KEY` 只放在部署环境，不写入文档或镜像。
 - RustFS bucket 保持私有，浏览器只通过后端生成的短期预签名 URL 访问对象。

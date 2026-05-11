@@ -81,6 +81,12 @@ Changing `APP_GATE_PASSWORD`, `APP_GATE_PASSWORD_HASH`, `APP_SESSION_SECRET`, or
 docker compose up -d backend
 ```
 
+Important:
+
+- If only `APP_GATE_PASSWORD` changes, existing browser sessions remain valid until their cookie expires.
+- To force all browsers to log in again immediately, rotate `APP_SESSION_SECRET` at the same time.
+- `APP_SESSION_COOKIE_SECURE=true` requires HTTPS. Use `false` only for local HTTP or temporary HTTP test environments.
+
 If an external reverse proxy handles authentication instead, production `.env` must explicitly set:
 
 ```env

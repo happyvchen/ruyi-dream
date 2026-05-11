@@ -19,7 +19,7 @@ ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + 
 | Planner | Gemini API；失败直接返回错误并记录事件日志 |
 | Image Provider | `app/image_provider.py`，fal GPT Image-2 queue 提交、状态查询、结果下载 |
 
-依赖清单见 `requirements.txt`。不要预先引入复杂 SaaS 权限、多租户、计费、队列集群。
+直接依赖见 `requirements.txt`，传递依赖约束见 `requirements.constraints.txt`。不要预先引入复杂 SaaS 权限、多租户、计费、队列集群。
 
 ## 文档索引 (Index)
 
@@ -29,7 +29,7 @@ ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + 
 | `api_guideline.md` | 当前 API 契约：路由、资源、任务状态、错误处理 | 设计接口或前后端联调前 |
 | `domain_model.md` | 当前 MVP 实际业务对象、Domain 边界、对象关系、对象存储布局 | 理解业务建模或新增后端模块前 |
 | `database_schema.md` | 当前 SQLite 表结构、字段说明、关系图、后续候选表 | 修改数据库、写迁移或排查数据问题前 |
-| `requirements.txt` | Python 依赖清单 | 安装、升级依赖时 |
+| `requirements.txt` / `requirements.constraints.txt` | Python 直接依赖与传递依赖约束 | 安装、升级依赖时 |
 | `app/` | FastAPI 后端源码 | 修改后端实现时 |
 
 ## 核心后端职责

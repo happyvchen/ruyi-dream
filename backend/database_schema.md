@@ -14,7 +14,7 @@ backend/app/db.py:init_db()
 
 ## 1. 表总览
 
-当前一共 7 张业务表：
+当前一共 7 张业务表，另有 1 张 schema 版本表：
 
 | 表名 | 业务对象 | 说明 |
 |---|---|---|
@@ -25,6 +25,7 @@ backend/app/db.py:init_db()
 | `generation_runs` | `GenerationRun` | 一次组图生成批次 |
 | `generation_images` | `GenerationImage` | 单张生成任务记录；重生通过 attempts 追加 |
 | `event_logs` | `EventLog` | 事件日志 |
+| `schema_migrations` | Schema version | 已执行数据库迁移版本 |
 
 ## 2. 表结构
 
@@ -265,12 +266,26 @@ CREATE TABLE generation_images (
   regenerate_from_image_id INTEGER REFERENCES generation_images(id),
   regenerate_reason TEXT,
   is_final INTEGER NOT NULL DEFAULT 0,
+  prompt_text TEXT,
+  image_inputs_json TEXT,
+  template_snapshot_json TEXT,
+  model_snapshot_json TEXT,
+  garment_snapshot_json TEXT,
+  attempts_json TEXT,
+  current_attempt_index INTEGER NOT NULL DEFAULT 0,
+  provider_request_id TEXT,
+  provider_status TEXT,
+  provider_urls_json TEXT,
+  provider_status_json TEXT,
+  submitted_at TEXT,
+  completed_at TEXT,
+  last_status_checked_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 ```
 
-启动迁移会通过 `ALTER TABLE` 补充以下列：
+历史库升级由 `schema_migrations` 记录并执行。当前与 `generation_images` 相关的迁移为 `001 add_generation_image_attempt_columns`，会补齐以下列：
 
 ```sql
 ALTER TABLE generation_images ADD COLUMN prompt_text TEXT;
@@ -381,6 +396,24 @@ CREATE TABLE event_logs (
 | `event_type` | TEXT | 事件动作，例如 `started`、`succeeded` |
 | `payload_json` | TEXT | 事件负载 |
 | `created_at` | TEXT | 创建时间 |
+
+### 2.8 `schema_migrations`
+
+```sql
+CREATE TABLE schema_migrations (
+  version TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  applied_at TEXT NOT NULL
+);
+```
+
+当前迁移版本：
+
+| Version | Name | 说明 |
+|---|---|---|
+| `001` | `add_generation_image_attempt_columns` | 补齐生成图片 attempt、provider queue、快照字段 |
+| `002` | `add_generation_run_archive_columns` | 补齐生成批次归档字段 |
+| `003` | `normalize_planning_schema` | 规范化 `shot_plans` / `shot_plan_shots` schema |
 
 ## 3. 关系图
 
