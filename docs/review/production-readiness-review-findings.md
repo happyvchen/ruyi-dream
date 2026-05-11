@@ -4,7 +4,7 @@
 
 - Branch: `codex/production-readiness-review`
 - Review started: 2026-05-11
-- Current phase: first production-readiness repair batch committed; continuing P1 remediation
+- Current phase: first production-readiness repair batch committed; review follow-up fixes applied
 
 ## Repair Progress
 
@@ -13,8 +13,14 @@
 - F-R02-001: 生成记录从物理删除改为归档隐藏，保留数据库记录、对象 key 和事件日志。
 - F-R05-002: `/api/health` 不再返回数据库路径、S3 endpoint、bucket 等内部部署信息。
 - F-R07-002: shutdown 分别 cancel/await generation poller 与 planner poller。
-- F-R09-001: 上传增加文件大小、数量、真实图片解码、像素和格式校验，并在对象写入失败时回滚已写入对象。
-- F-R11-001: 移除代码内默认对象存储密钥，并在启动时校验必填配置；生产模式拒绝默认密钥。
+- F-R09-001: 上传增加文件大小、数量、真实图片解码、像素和格式校验；对象写入或后续 DB 写入失败都会清理本批新增对象。
+- F-R11-001: 移除代码内默认对象存储密钥，并在启动时校验必填配置；生产模式拒绝默认、占位、过短和带首尾空白的密钥。
+
+### Follow-up fixes from post-commit review 2026-05-11
+
+- 生产模式拒绝 `.env.example` 的 `replace-with-*` 占位密钥、`change-me`、`admin`、空白/过短等弱值。
+- 新建 SKU、追加图片、头像上传在 DB 写入失败时会删除本次已写入对象，降低孤儿对象风险。
+- 多头像批量上传逐个保留临时 reference id，避免多个未设置头像拿到同一个 `__unassigned__...` key。
 
 ### Partially addressed in repair batch 2026-05-11
 

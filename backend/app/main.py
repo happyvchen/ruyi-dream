@@ -187,6 +187,12 @@ async def validate_upload_image(upload: UploadFile) -> tuple[bytes, str]:
     return content, declared_type
 
 
+def cleanup_objects(keys: list[str]) -> None:
+    for key in keys:
+        with suppress(Exception):
+            delete_object(key)
+
+
 @app.get("/api/garment-skus")
 def list_garment_skus() -> dict[str, Any]:
     with get_db() as db:
@@ -233,45 +239,47 @@ async def upload_garment_sku(
             put_fileobj(key, BytesIO(content), content_type)
             saved_files.append((safe_name, key, content_type))
     except Exception:
-        for _, key, _ in saved_files:
-            with suppress(Exception):
-                delete_object(key)
+        cleanup_objects([key for _, key, _ in saved_files])
         raise
 
-    with get_db() as db:
-        cursor = db.execute(
-            """
-            INSERT INTO garment_skus (sku, title, source, storage_path, status, created_at, updated_at)
-            VALUES (?, ?, 'upload', ?, 'NEW', ?, ?)
-            """,
-            (clean_sku, title or clean_sku, target_prefix, timestamp, timestamp),
-        )
-        sku_id = int(cursor.lastrowid)
-        for index, (filename, key, content_type) in enumerate(saved_files):
-            db.execute(
+    try:
+        with get_db() as db:
+            cursor = db.execute(
                 """
-                INSERT INTO garment_images
-                  (sku_id, filename, storage_path, mime_type, role, sort_order, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO garment_skus (sku, title, source, storage_path, status, created_at, updated_at)
+                VALUES (?, ?, 'upload', ?, 'NEW', ?, ?)
                 """,
-                (
-                    sku_id,
-                    filename,
-                    key,
-                    content_type,
-                    "main" if index == 0 else "reference",
-                    index,
-                    timestamp,
-                ),
+                (clean_sku, title or clean_sku, target_prefix, timestamp, timestamp),
             )
-        log_event(
-            db,
-            "garment_sku",
-            sku_id,
-            "uploaded",
-            {"sku": clean_sku, "fileCount": len(saved_files), "storagePath": target_prefix},
-        )
-        row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
+            sku_id = int(cursor.lastrowid)
+            for index, (filename, key, content_type) in enumerate(saved_files):
+                db.execute(
+                    """
+                    INSERT INTO garment_images
+                      (sku_id, filename, storage_path, mime_type, role, sort_order, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sku_id,
+                        filename,
+                        key,
+                        content_type,
+                        "main" if index == 0 else "reference",
+                        index,
+                        timestamp,
+                    ),
+                )
+            log_event(
+                db,
+                "garment_sku",
+                sku_id,
+                "uploaded",
+                {"sku": clean_sku, "fileCount": len(saved_files), "storagePath": target_prefix},
+            )
+            row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
+    except Exception:
+        cleanup_objects([key for _, key, _ in saved_files])
+        raise
     return {"item": get_sku_detail_by_id(sku_id), "summary": serialize_sku(row)}
 
 
@@ -372,38 +380,40 @@ async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -
                 put_fileobj(key, BytesIO(content), content_type)
                 saved.append((Path(key).name, key, content_type, sort_order))
         except Exception:
-            for _, key, _, _ in saved:
-                with suppress(Exception):
-                    delete_object(key)
+            cleanup_objects([key for _, key, _, _ in saved])
             raise
 
-        for filename, key, content_type, sort_order in saved:
+        try:
+            for filename, key, content_type, sort_order in saved:
+                db.execute(
+                    """
+                    INSERT INTO garment_images
+                      (sku_id, filename, storage_path, mime_type, role, sort_order, created_at)
+                    VALUES (?, ?, ?, ?, 'reference', ?, ?)
+                    """,
+                    (
+                        sku_id,
+                        filename,
+                        key,
+                        content_type,
+                        sort_order,
+                        timestamp,
+                    ),
+                )
             db.execute(
-                """
-                INSERT INTO garment_images
-                  (sku_id, filename, storage_path, mime_type, role, sort_order, created_at)
-                VALUES (?, ?, ?, ?, 'reference', ?, ?)
-                """,
-                (
-                    sku_id,
-                    filename,
-                    key,
-                    content_type,
-                    sort_order,
-                    timestamp,
-                ),
+                "UPDATE garment_skus SET updated_at = ? WHERE id = ?",
+                (timestamp, sku_id),
             )
-        db.execute(
-            "UPDATE garment_skus SET updated_at = ? WHERE id = ?",
-            (timestamp, sku_id),
-        )
-        log_event(
-            db,
-            "garment_sku",
-            sku_id,
-            "images_added",
-            {"fileCount": len(saved), "files": [filename for filename, _, _, _ in saved]},
-        )
+            log_event(
+                db,
+                "garment_sku",
+                sku_id,
+                "images_added",
+                {"fileCount": len(saved), "files": [filename for filename, _, _, _ in saved]},
+            )
+        except Exception:
+            cleanup_objects([key for _, key, _, _ in saved])
+            raise
     return {"item": get_sku_detail_by_id(sku_id)}
 
 
@@ -631,7 +641,12 @@ async def add_model_head_reference(
                 status_code=400,
                 detail=f"单个数字模特最多保留 {settings.max_head_references_per_profile} 张头像",
             )
-        assigned_keys = [clean_angle] if clean_angle else [new_unassigned_head_reference_key(references) for _ in uploads]
+        assigned_keys: list[str | None] = [clean_angle] if clean_angle else []
+        reserved_references = dict(references)
+        while len(assigned_keys) < len(validated_uploads):
+            assigned_key = new_unassigned_head_reference_key(reserved_references)
+            reserved_references[assigned_key] = ""
+            assigned_keys.append(assigned_key)
         old_files: list[str] = []
         saved: list[dict[str, str]] = []
         saved_keys: list[str] = []
@@ -652,24 +667,26 @@ async def add_model_head_reference(
                     order.append(assigned_key)
                 saved.append({"id": assigned_key, "filename": filename})
         except Exception:
-            for key in saved_keys:
-                with suppress(Exception):
-                    delete_object(key)
+            cleanup_objects(saved_keys)
             raise
 
-        profile["headReferences"] = references
-        profile["headReferenceOrder"] = order
-        db.execute(
-            "UPDATE model_profiles SET profile_json = ?, updated_at = ? WHERE id = ?",
-            (dumps(normalize_model_profile(profile)), now_iso(), model_profile_id),
-        )
-        log_event(
-            db,
-            "model_profile",
-            model_profile_id,
-            "head_reference_added",
-            {"items": saved},
-        )
+        try:
+            profile["headReferences"] = references
+            profile["headReferenceOrder"] = order
+            db.execute(
+                "UPDATE model_profiles SET profile_json = ?, updated_at = ? WHERE id = ?",
+                (dumps(normalize_model_profile(profile)), now_iso(), model_profile_id),
+            )
+            log_event(
+                db,
+                "model_profile",
+                model_profile_id,
+                "head_reference_added",
+                {"items": saved},
+            )
+        except Exception:
+            cleanup_objects(saved_keys)
+            raise
 
     for old_filename in old_files:
         remove_model_asset_file(asset_dir, old_filename)

@@ -7,6 +7,22 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
+PLACEHOLDER_SECRET_VALUES = {
+    "admin",
+    "change-me",
+    "changeme",
+    "replace-me",
+    "replace-with-access-key",
+    "replace-with-secret-key",
+    "password",
+    "secret",
+    "test",
+    "example",
+    "your-access-key",
+    "your-secret-key",
+    "DQugmV9crHkkYYjG",
+}
+MIN_PRODUCTION_CREDENTIAL_LENGTH = 12
 
 
 class Settings:
@@ -57,16 +73,20 @@ class Settings:
             raise RuntimeError(f"Missing required object storage credential(s): {joined}")
 
         if self.app_env in {"prod", "production"}:
-            insecure_pairs = {
-                ("admin", "admin"),
-                ("admin", "change-me"),
-                ("admin", "DQugmV9crHkkYYjG"),
-            }
-            if (self.s3_access_key_id, self.s3_secret_access_key) in insecure_pairs:
-                raise RuntimeError(
-                    "Production object storage credentials must be explicitly configured "
-                    "with non-default values."
-                )
+            self._validate_production_credential("access key", self.s3_access_key_id)
+            self._validate_production_credential("secret key", self.s3_secret_access_key)
+
+    def _validate_production_credential(self, label: str, value: str) -> None:
+        normalized = value.strip().lower()
+        if value != value.strip():
+            raise RuntimeError(f"Production object storage {label} must not contain leading or trailing whitespace.")
+        if len(value) < MIN_PRODUCTION_CREDENTIAL_LENGTH:
+            raise RuntimeError(
+                f"Production object storage {label} must be at least "
+                f"{MIN_PRODUCTION_CREDENTIAL_LENGTH} characters."
+            )
+        if normalized in PLACEHOLDER_SECRET_VALUES or normalized.startswith("replace-with-"):
+            raise RuntimeError(f"Production object storage {label} must not use a placeholder or default value.")
 
 
 @lru_cache
