@@ -205,6 +205,16 @@ p {
   background: #fff9e6;
 }
 
+.task-status.warning {
+  border-color: #e1c779;
+  background: #fff8df;
+}
+
+.task-status.error {
+  border-color: #e0b4ae;
+  background: #fff4f2;
+}
+
 .task-layout {
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr) 300px;
@@ -306,10 +316,16 @@ p {
   font-weight: 750;
 }
 
-.stage-steps span.active {
+.stage-steps span.current {
   border-color: #22221f;
   background: #22221f;
   color: #fff;
+}
+
+.stage-steps span.completed {
+  border-color: #b9d0be;
+  background: #f3f8f2;
+  color: #2e5d36;
 }
 
 .stage-steps b {
@@ -322,9 +338,14 @@ p {
   font-size: 12px;
 }
 
-.stage-steps span:not(.active) b {
+.stage-steps span:not(.current) b {
   background: #e8e8e2;
   color: #55554f;
+}
+
+.stage-steps span.completed b {
+  background: #2e5d36;
+  color: #fff;
 }
 
 .visual-workspace {
@@ -423,6 +444,27 @@ textarea {
 .field textarea {
   min-height: 74px;
   resize: vertical;
+}
+
+.readonly-field {
+  display: grid;
+  gap: 7px;
+  min-height: 40px;
+  margin-bottom: 0;
+  color: #606058;
+  font-size: 13px;
+}
+
+.readonly-field strong {
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid #e0e0da;
+  border-radius: 6px;
+  background: #f6f6f3;
+  color: #30302c;
+  font-size: 14px;
 }
 
 textarea {
@@ -1846,6 +1888,27 @@ summary {
   color: #74746d;
   font-size: 12px;
   white-space: nowrap;
+}
+
+.order-controls {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.order-controls button {
+  min-height: 30px;
+  padding: 0 7px;
+  border: 1px solid #d2d2cb;
+  border-radius: 6px;
+  background: #fff;
+  color: #3f3f39;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.order-controls.compact button {
+  min-height: 34px;
 }
 
 .head-card-actions {

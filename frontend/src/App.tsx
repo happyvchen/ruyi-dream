@@ -548,6 +548,10 @@ export function App() {
   async function createPlan(skuOverride?: GarmentSku) {
     const targetSku = skuOverride ?? selectedSku
     if (!targetSku) return
+    if (shotPlan && shotPlan.skuId === targetSku.id) {
+      const confirmed = window.confirm('重新生成默认方案会替换当前货号正在使用的默认拍摄方案。确认继续？')
+      if (!confirmed) return
+    }
     setBusy('planning')
     setError(null)
     try {
@@ -765,7 +769,7 @@ export function App() {
     setBusy('uploading')
     setError(null)
     try {
-      const result = await api.updateSku(selectedSku.id, editSkuForm)
+      const result = await api.updateSku(selectedSku.id, { sku: editSkuForm.sku, title: editSkuForm.title })
       setSelectedSku(result.item)
       await refreshBaseData()
       if (page === 'garments') navigate({ page: 'garments', sku: result.item.sku }, true)
@@ -1111,8 +1115,8 @@ export function App() {
           <div className="task-status-strip">
             <TaskStatus label="服装" value={selectedSku ? `${selectedSku.imageCount ?? selectedSku.images?.length ?? 0} 张素材` : '未选择'} state={selectedSku ? 'ready' : 'idle'} />
             <TaskStatus label="默认方案" value={shotPlan ? `${shotPlan.plan.shots.length} 张图位` : '未保存'} state={shotPlanPlanning ? 'running' : shotPlan ? 'ready' : 'idle'} />
-            <TaskStatus label="分镜" value={previewRun ? statusText(previewRun.status) : '未预览'} state={previewRun?.status === 'SUCCEEDED' ? 'ready' : previewRun && isRunActive(previewRun) ? 'running' : 'idle'} />
-            <TaskStatus label="最终图" value={generationRun ? statusText(generationRun.status) : '未生成'} state={generationRun?.status === 'SUCCEEDED' ? 'ready' : generationRun && isRunActive(generationRun) ? 'running' : 'idle'} />
+            <TaskStatus label="分镜" value={previewRun ? statusText(previewRun.status) : '未预览'} state={runTaskStatusState(previewRun)} />
+            <TaskStatus label="最终图" value={generationRun ? statusText(generationRun.status) : '未生成'} state={runTaskStatusState(generationRun)} />
           </div>
         </section>
 
@@ -1168,7 +1172,7 @@ export function App() {
               </div>
               <div className="stage-steps">
                 {['选择服装', '确认方案', '分镜预览', '最终组图', '交付导出'].map((label, index) => (
-                  <span className={index <= taskStage.index ? 'active' : ''} key={label}>
+                  <span className={stageStepState(index, taskStage.index)} key={label}>
                     <b>{index + 1}</b>{label}
                   </span>
                 ))}
@@ -1553,7 +1557,6 @@ function GarmentLibraryPage({
       && (
         editSkuForm.sku !== selectedSku.sku
         || editSkuForm.title !== (selectedSku.title ?? selectedSku.sku)
-        || editSkuForm.status !== selectedSku.status
       ),
   )
   return (
@@ -1681,7 +1684,7 @@ function GarmentLibraryPage({
                   </button>
 	                  <button className="primary" onClick={() => onCreatePlan(selectedSku)} disabled={busy !== 'idle'}>
 	                    {busy === 'planning' ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
-	                    {shotPlan ? '更新默认方案' : '生成默认方案'}
+	                    {shotPlan ? '重新生成默认方案' : '生成默认方案'}
 	                  </button>
 	                  <button className="danger ghost" onClick={onDeleteSelectedSku} disabled={busy !== 'idle'} title="删除货号">
 	                    <Trash2 size={16} />删除
@@ -1704,14 +1707,10 @@ function GarmentLibraryPage({
                         <span>标题</span>
                         <input value={editSkuForm.title} onChange={(event) => onEditSkuFormChange({ ...editSkuForm, title: event.target.value })} />
                       </label>
-                      <label className="field">
+                      <div className="readonly-field">
                         <span>状态</span>
-                        <select value={editSkuForm.status} onChange={(event) => onEditSkuFormChange({ ...editSkuForm, status: event.target.value })}>
-                          <option value="NEW">新建</option>
-                          <option value="ANALYZED">已策划</option>
-                          <option value="CONFIRMED">已确认</option>
-                        </select>
-                      </label>
+                        <strong>{statusText(selectedSku.status)}</strong>
+                      </div>
                       <button className="primary" onClick={onSaveSku} disabled={busy !== 'idle' || !skuFormChanged}>
                         {busy === 'uploading' ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
                         保存货号
@@ -1782,7 +1781,14 @@ function GarmentLibraryPage({
                             ) : '图片信息读取中'}
                           </small>
                           <div className="asset-order-row">
-                            <span className="drag-hint">拖动排序</span>
+                            <div className="order-controls">
+                              <button onClick={() => onReorderImage(image.id, index - 1)} disabled={busy !== 'idle' || index === 0} title="上移">
+                                上移
+                              </button>
+                              <button onClick={() => onReorderImage(image.id, index + 1)} disabled={busy !== 'idle' || index === (selectedSku.images?.length ?? 0) - 1} title="下移">
+                                下移
+                              </button>
+                            </div>
                             <b>#{index + 1}</b>
                           </div>
                           <div className="asset-actions single">
@@ -2059,7 +2065,14 @@ function ModelProfilesPage({
                           )
                         })}
                       </select>
-                      <span className="drag-hint">拖动排序</span>
+                      <div className="order-controls compact">
+                        <button onClick={() => void onUpdateHeadReference(entry.id, { orderIndex: index - 1 })} disabled={busy !== 'idle' || index === 0} title="上移">
+                          上移
+                        </button>
+                        <button onClick={() => void onUpdateHeadReference(entry.id, { orderIndex: index + 1 })} disabled={busy !== 'idle' || index === headEntries.length - 1} title="下移">
+                          下移
+                        </button>
+                      </div>
                     </div>
                     <small title={entry.filename}>{middleEllipsis(entry.filename)}</small>
                     <div className="head-card-actions">
@@ -2321,7 +2334,9 @@ function GeneratePrimaryAction({
   )
 }
 
-function TaskStatus({ label, value, state }: { label: string; value: string; state: 'idle' | 'ready' | 'running' }) {
+type TaskStatusState = 'idle' | 'ready' | 'running' | 'warning' | 'error'
+
+function TaskStatus({ label, value, state }: { label: string; value: string; state: TaskStatusState }) {
   return (
     <div className={`task-status ${state}`}>
       <span>{label}</span>
@@ -3212,6 +3227,21 @@ function snapshotText(snapshot: Record<string, unknown> | null | undefined, keys
 
 function isRunActive(run: GenerationRun) {
   return run.status === 'RUNNING' || Boolean(run.images?.some(isImageActive))
+}
+
+function runTaskStatusState(run: GenerationRun | null): TaskStatusState {
+  if (!run) return 'idle'
+  if (isRunActive(run)) return 'running'
+  if (run.status === 'SUCCEEDED') return 'ready'
+  if (run.status === 'PARTIAL_SUCCEEDED') return 'warning'
+  if (run.status === 'FAILED' || run.status === 'CANCELLED') return 'error'
+  return 'idle'
+}
+
+function stageStepState(index: number, currentIndex: number) {
+  if (index < currentIndex) return 'completed'
+  if (index === currentIndex) return 'current'
+  return 'pending'
 }
 
 function skuHasLinkedHistory(sku: GarmentSku) {

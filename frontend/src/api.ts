@@ -9,11 +9,19 @@ function apiHeaders(init?: RequestInit): HeadersInit {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    credentials: 'include',
-    headers: apiHeaders(init),
-  })
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      credentials: 'include',
+      headers: apiHeaders(init),
+    })
+  } catch (err) {
+    if (err instanceof TypeError) {
+      throw new Error('无法连接后端服务，请检查后端是否已启动。')
+    }
+    throw err
+  }
   if (!response.ok) {
     const detail = await response.json().catch(() => ({ detail: response.statusText }))
     throw new Error(typeof detail.detail === 'string' ? detail.detail : '请求失败')
