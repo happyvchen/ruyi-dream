@@ -1,0 +1,10 @@
+# Repository ownership
+* @fushuai
+
+# Product and generation rules
+/design/ @fushuai
+/docs/review/ @fushuai
+
+# Application implementation
+/backend/ @fushuai
+/frontend/ @fushuai

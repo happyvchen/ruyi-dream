@@ -84,6 +84,8 @@ APP_S3_FORCE_PATH_STYLE=true
 APP_S3_PRESIGN_EXPIRES_SECONDS=900
 RUSTFS_ACCESS_KEY=<local-or-production-access-key>
 RUSTFS_SECRET_KEY=<local-or-production-secret-key>
+APP_API_ACCESS_TOKEN=<production-api-access-token>
+APP_TRUST_REVERSE_PROXY_AUTH=false
 
 GPT_IMAGE2_PROVIDER=fal
 GPT_IMAGE2_MODEL_ID=openai/gpt-image-2/edit
@@ -121,6 +123,7 @@ docker compose ps
 
 - [Docker Compose 部署设计](docs/deployment-architecture.md)
 - [Docker Compose 部署与管理](docs/docker-compose-operations.md)
+- [生产故障 Runbook](docs/runbook.md)
 - [本地开发说明](docs/local-development.md)
 
 ## 前端路由
@@ -188,6 +191,7 @@ docker compose ps
 - [Docker Compose 部署设计](docs/deployment-architecture.md)
 - [本地开发说明](docs/local-development.md)
 - [Docker Compose 部署与管理](docs/docker-compose-operations.md)
+- [生产故障 Runbook](docs/runbook.md)
 - [后端领域模型](backend/domain_model.md)
 - [后端数据库结构](backend/database_schema.md)
 - [RustFS 对象存储部署](deployment/rustfs/README.md)

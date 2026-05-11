@@ -10,9 +10,9 @@ from uuid import uuid4
 import zipfile
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 
@@ -45,6 +45,19 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+@app.middleware("http")
+async def require_api_access_token(request: Request, call_next: Any) -> Any:
+    if not settings.api_access_token or request.method == "OPTIONS" or request.url.path == "/api/health":
+        return await call_next(request)
+    if request.url.path.startswith("/api/"):
+        header_token = request.headers.get("x-ruyi-access-token", "")
+        auth_header = request.headers.get("authorization", "")
+        bearer_token = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
+        if header_token != settings.api_access_token and bearer_token != settings.api_access_token:
+            return JSONResponse(status_code=401, content={"detail": "缺少或无效的访问令牌"})
+    return await call_next(request)
 
 
 class PlanCreateRequest(BaseModel):

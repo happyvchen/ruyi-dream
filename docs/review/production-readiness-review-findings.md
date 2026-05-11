@@ -15,18 +15,24 @@
 - F-R07-002: shutdown 分别 cancel/await generation poller 与 planner poller。
 - F-R09-001: 上传增加文件大小、数量、真实图片解码、像素和格式校验；对象写入或后续 DB 写入失败都会清理本批新增对象。
 - F-R11-001: 移除代码内默认对象存储密钥，并在启动时校验必填配置；生产模式拒绝默认、占位、过短和带首尾空白的密钥。
+- F-R13-001: 增加 `docs/runbook.md`，覆盖故障分级、排查命令、常见 provider/storage/SQLite/API token 问题和升级包信息。
+- F-R10-002: 后端容器创建非 root 用户并仅让 `/app/data` 可写；前端切换到 unprivileged Nginx 镜像并监听 8080。
 
 ### Follow-up fixes from post-commit review 2026-05-11
 
 - 生产模式拒绝 `.env.example` 的 `replace-with-*` 占位密钥、`change-me`、`admin`、空白/过短等弱值。
 - 新建 SKU、追加图片、头像上传在 DB 写入失败时会删除本次已写入对象，降低孤儿对象风险。
 - 多头像批量上传逐个保留临时 reference id，避免多个未设置头像拿到同一个 `__unassigned__...` key。
+- 增加 MVP 部署级 API token：生产环境必须配置 `APP_API_ACCESS_TOKEN`，或显式声明由反向代理/企业网关鉴权。
+- 增加 PR template 与 CODEOWNERS，配合现有 CI workflow 补齐仓库内协作基线。
 
 ### Partially addressed in repair batch 2026-05-11
 
 - F-R10-001: RustFS 镜像改为固定 tag，后端直接依赖改为 pin；仍需进一步引入完整 lock/constraints 或 digest 固定。
-- F-R11-002: CORS method/header 已收紧；鉴权和 CSRF/CORS 联动设计仍待 PR-002。
+- F-R05-001: 已加入部署级 API token / 反向代理鉴权边界；完整用户、角色、workspace 仍是后续 SaaS 化工作。
+- F-R11-002: CORS method/header 已收紧；API token 已加入，CSRF/CORS 与正式用户鉴权联动仍待后续权限设计。
 - F-R12-001: 已加入最小 CI（backend compile/import、frontend build、compose config）；核心业务测试仍待补齐。
+- F-R14-001: 已加入 CI workflow、PR template、CODEOWNERS；branch protection 和 automatically delete head branches 仍需仓库管理员开启。
 
 ## Priority Legend
 
@@ -198,6 +204,8 @@ Recommendation:
 
 #### F-R05-001 [P1] API 没有鉴权和用户上下文，无法作为生产系统暴露
 
+Status: Partially addressed in repair batch 2026-05-11. MVP deployment-level token or explicit reverse-proxy auth boundary exists; full user/workspace/role context remains future work.
+
 Evidence:
 
 - FastAPI app 全局只配置 CORS：`backend/app/main.py:37-45`，所有 `/api/*` 路由没有 auth dependency。
@@ -358,6 +366,8 @@ Recommendation:
 
 #### F-R10-002 [P2] 容器默认 root 运行，缺少生产安全基线
 
+Status: Fixed in repair batch 2026-05-11.
+
 Evidence:
 
 - `backend/Dockerfile:1-22` 未创建非 root 用户。
@@ -393,7 +403,7 @@ Recommendation:
 
 #### F-R11-002 [P1] CORS 允许 credentials + 全方法全 header，但没有鉴权边界
 
-Status: Partially addressed in repair batch 2026-05-11. CORS methods/headers are narrowed; production auth boundary remains open.
+Status: Partially addressed in repair batch 2026-05-11. CORS methods/headers are narrowed and MVP API token support exists; full CSRF/CORS strategy should be revisited with formal user auth.
 
 Evidence:
 
@@ -432,6 +442,8 @@ Recommendation:
 
 #### F-R13-001 [P2] 文档比较完整，但缺少生产操作 runbook 和故障分级
 
+Status: Fixed in repair batch 2026-05-11.
+
 Evidence:
 
 - 已有部署、开发、架构文档，但没有故障处理决策树：fal 失败、Gemini 失败、RustFS 不可用、预签名 URL 不可访问、SQLite 损坏等。
@@ -447,6 +459,8 @@ Recommendation:
 ### R14 GitHub 协作规范
 
 #### F-R14-001 [P1] 仓库规则尚未落地到 GitHub 配置
+
+Status: Partially addressed in repair batch 2026-05-11. CI workflow, PR template, and CODEOWNERS are in-repo; branch protection and automatic branch deletion require repository admin action.
 
 Evidence:
 
@@ -470,13 +484,13 @@ Recommendation:
 | Priority | Item | Suggested PR | Status |
 | --- | --- | --- | --- |
 | P0 | 移除代码内默认对象存储密钥，启动时校验生产必填配置 | PR-001 | Fixed 2026-05-11 |
-| P1 | 增加部署级鉴权或明确由反向代理保护，并收紧 `/api/health` | PR-002 | Partial: health fixed; auth pending |
+| P1 | 增加部署级鉴权或明确由反向代理保护，并收紧 `/api/health` | PR-002 | Fixed MVP baseline; full user auth future |
 | P1 | 上传文件增加大小、数量、真实图片解码、像素和格式校验 | PR-003 | Fixed 2026-05-11 |
 | P1 | 生成任务增加 claim/lock、超时、取消、重试上限 | PR-004 | Open |
 | P1 | 建立最小 CI：backend compile/import、frontend build/typecheck、compose config | PR-005 | Fixed minimal baseline; business tests pending |
 | P1 | 建立正式数据库迁移机制或 migration version 表 | PR-006 | Open |
 | P1 | 固定 Docker 镜像和 Python 依赖版本 | PR-007 | Partial: direct pins/tag done; lock/digest pending |
-| P1 | GitHub 分支保护、PR 模板、CODEOWNERS、自动删分支 | PR-008 | Partial: CI workflow added; admin settings/PR template/CODEOWNERS pending |
+| P1 | GitHub 分支保护、PR 模板、CODEOWNERS、自动删分支 | PR-008 | Partial: CI/PR template/CODEOWNERS added; admin settings pending |
 
 #### 近期质量提升
 
@@ -489,7 +503,7 @@ Recommendation:
 | P2 | 增加审核/交付状态：可用、需重生、需精修、已交付 | PR-013 | Open |
 | P2 | 拆分 `frontend/src/App.tsx` 页面和 hooks | PR-014 | Open |
 | P2 | 拆分 `backend/app/main.py` 路由、service、repository、worker | PR-015 | Open |
-| P2 | 增加生产 runbook 和故障排查决策树 | PR-016 | Open |
+| P2 | 增加生产 runbook 和故障排查决策树 | PR-016 | Fixed 2026-05-11 |
 
 #### 后续架构演进
 

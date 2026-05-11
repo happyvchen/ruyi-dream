@@ -15,8 +15,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY ref ./ref
 
-RUN mkdir -p /app/data/logs
+RUN groupadd --system app \
+  && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app \
+  && mkdir -p /app/data/logs \
+  && chown -R app:app /app/data
 
 EXPOSE 8000
+
+USER app
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

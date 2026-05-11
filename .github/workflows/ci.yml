@@ -21,11 +21,13 @@ jobs:
         env:
           APP_S3_ACCESS_KEY_ID: ci-access-key
           APP_S3_SECRET_ACCESS_KEY: ci-secret-key
+          APP_TRUST_REVERSE_PROXY_AUTH: "true"
         run: python -m compileall backend/app
       - name: Import backend app
         env:
           APP_S3_ACCESS_KEY_ID: ci-access-key
           APP_S3_SECRET_ACCESS_KEY: ci-secret-key
+          APP_TRUST_REVERSE_PROXY_AUTH: "true"
         working-directory: backend
         run: python -c "from app.main import health; assert health()['ok'] is True"
 
@@ -56,4 +58,5 @@ jobs:
           APP_ENV: production
           RUSTFS_ACCESS_KEY: ci-access-key
           RUSTFS_SECRET_KEY: ci-secret-key
+          APP_TRUST_REVERSE_PROXY_AUTH: "true"
         run: docker compose config --quiet

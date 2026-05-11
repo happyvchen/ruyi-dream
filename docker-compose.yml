@@ -50,6 +50,8 @@ services:
       APP_MAX_UPLOAD_IMAGE_PIXELS: ${APP_MAX_UPLOAD_IMAGE_PIXELS:-25000000}
       APP_MAX_GARMENT_IMAGES_PER_SKU: ${APP_MAX_GARMENT_IMAGES_PER_SKU:-20}
       APP_MAX_HEAD_REFERENCES_PER_PROFILE: ${APP_MAX_HEAD_REFERENCES_PER_PROFILE:-20}
+      APP_API_ACCESS_TOKEN: ${APP_API_ACCESS_TOKEN:-}
+      APP_TRUST_REVERSE_PROXY_AUTH: ${APP_TRUST_REVERSE_PROXY_AUTH:-false}
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?set RUSTFS_ACCESS_KEY in .env}
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?set RUSTFS_SECRET_KEY in .env}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
@@ -85,11 +87,12 @@ services:
       context: ./frontend
       args:
         VITE_API_BASE_URL: ${PUBLIC_BACKEND_URL:-http://127.0.0.1:8000}
+        VITE_API_ACCESS_TOKEN: ${APP_API_ACCESS_TOKEN:-}
     restart: unless-stopped
     depends_on:
       - backend
     ports:
-      - "${FRONTEND_PORT:-5173}:80"
+      - "${FRONTEND_PORT:-5173}:8080"
     logging:
       driver: json-file
       options:

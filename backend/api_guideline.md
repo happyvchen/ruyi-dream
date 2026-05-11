@@ -6,6 +6,17 @@
 - task package 可以作为调试字段存在，但默认不展示给普通用户。
 - 所有会覆盖素材、结果或实验记录的操作必须显式确认。
 
+## 访问控制
+
+`/api/health` 保持匿名访问，用于容器和反向代理健康检查。其它 `/api/*` 路由在配置 `APP_API_ACCESS_TOKEN` 后需要携带任一请求头：
+
+```text
+X-Ruyi-Access-Token: <token>
+Authorization: Bearer <token>
+```
+
+生产环境必须配置 `APP_API_ACCESS_TOKEN`，或在外部反向代理/企业网关已经完成访问控制时显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。
+
 ## 当前资源
 
 | Resource | Method | 说明 |
