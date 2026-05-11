@@ -131,6 +131,8 @@ export type GenerationRun = {
   kind: string
   status: string
   outputDir: string
+  archivedAt?: string | null
+  archiveReason?: string | null
   summary?: {
     imageCount: number
     succeededCount: number

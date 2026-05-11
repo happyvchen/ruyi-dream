@@ -166,6 +166,8 @@ def init_db() -> None:
         ensure_column(db, "generation_images", "submitted_at", "TEXT")
         ensure_column(db, "generation_images", "completed_at", "TEXT")
         ensure_column(db, "generation_images", "last_status_checked_at", "TEXT")
+        ensure_column(db, "generation_runs", "archived_at", "TEXT")
+        ensure_column(db, "generation_runs", "archive_reason", "TEXT")
         rebuild_planning_schema(db)
         seed_default_model(db)
 

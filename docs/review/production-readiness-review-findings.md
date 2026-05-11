@@ -4,7 +4,23 @@
 
 - Branch: `codex/production-readiness-review`
 - Review started: 2026-05-11
-- Current phase: initial full-scope findings logged; refining production delivery roadmap
+- Current phase: first production-readiness repair batch committed; continuing P1 remediation
+
+## Repair Progress
+
+### Fixed in repair batch 2026-05-11
+
+- F-R02-001: 生成记录从物理删除改为归档隐藏，保留数据库记录、对象 key 和事件日志。
+- F-R05-002: `/api/health` 不再返回数据库路径、S3 endpoint、bucket 等内部部署信息。
+- F-R07-002: shutdown 分别 cancel/await generation poller 与 planner poller。
+- F-R09-001: 上传增加文件大小、数量、真实图片解码、像素和格式校验，并在对象写入失败时回滚已写入对象。
+- F-R11-001: 移除代码内默认对象存储密钥，并在启动时校验必填配置；生产模式拒绝默认密钥。
+
+### Partially addressed in repair batch 2026-05-11
+
+- F-R10-001: RustFS 镜像改为固定 tag，后端直接依赖改为 pin；仍需进一步引入完整 lock/constraints 或 digest 固定。
+- F-R11-002: CORS method/header 已收紧；鉴权和 CSRF/CORS 联动设计仍待 PR-002。
+- F-R12-001: 已加入最小 CI（backend compile/import、frontend build、compose config）；核心业务测试仍待补齐。
 
 ## Priority Legend
 
@@ -67,6 +83,8 @@ Recommendation:
 ### R02 核心业务流程
 
 #### F-R02-001 [P1] 生产记录允许删除，与“可复盘/可追溯”的生产原则冲突
+
+Status: Fixed in repair batch 2026-05-11.
 
 Evidence:
 
@@ -190,6 +208,8 @@ Recommendation:
 
 #### F-R05-002 [P2] 健康检查接口泄露内部路径和存储配置
 
+Status: Fixed in repair batch 2026-05-11.
+
 Evidence:
 
 - `/api/health` 返回数据库路径、S3 endpoint、bucket、provider 配置状态：`backend/app/main.py:135-144`。
@@ -243,6 +263,8 @@ Recommendation:
 
 #### F-R07-002 [P2] shutdown 里取消 planner task 后等待了错误变量
 
+Status: Fixed in repair batch 2026-05-11.
+
 Evidence:
 
 - `backend/app/main.py:123-132` 取消 `planner_task` 后 `await task`，而不是 `await planner_task`。
@@ -291,6 +313,8 @@ Recommendation:
 
 #### F-R09-001 [P1] 上传校验只依赖 content-type，缺少文件大小、像素、解码和恶意文件检查
 
+Status: Fixed in repair batch 2026-05-11.
+
 Evidence:
 
 - 服装上传只检查 `content_type.startswith("image/")`：`backend/app/main.py:179-184`。
@@ -309,6 +333,8 @@ Recommendation:
 ### R10 部署与运维
 
 #### F-R10-001 [P1] Docker 镜像和 Python 依赖没有完全固定，生产可复现性不足
+
+Status: Partially addressed in repair batch 2026-05-11. Direct backend dependencies and RustFS image tag are pinned; full dependency lock/constraints and digest pinning remain.
 
 Evidence:
 
@@ -344,6 +370,8 @@ Recommendation:
 
 #### F-R11-001 [P0] 默认对象存储密钥写在代码配置中
 
+Status: Fixed in repair batch 2026-05-11.
+
 Evidence:
 
 - `backend/app/config.py:21-22` 默认 access key 为 `admin`，secret 为固定字符串 `DQugmV9crHkkYYjG`。
@@ -358,6 +386,8 @@ Recommendation:
 - 代码默认值改为空或开发专用，并在启动时根据环境校验。
 
 #### F-R11-002 [P1] CORS 允许 credentials + 全方法全 header，但没有鉴权边界
+
+Status: Partially addressed in repair batch 2026-05-11. CORS methods/headers are narrowed; production auth boundary remains open.
 
 Evidence:
 
@@ -375,6 +405,8 @@ Recommendation:
 ### R12 测试策略
 
 #### F-R12-001 [P1] 当前没有自动化测试和 CI，无法支撑生产级迭代
+
+Status: Partially addressed in repair batch 2026-05-11. Minimal CI exists; business regression tests remain open.
 
 Evidence:
 
@@ -429,29 +461,29 @@ Recommendation:
 
 #### 上线前必须完成
 
-| Priority | Item | Suggested PR |
-| --- | --- | --- |
-| P0 | 移除代码内默认对象存储密钥，启动时校验生产必填配置 | PR-001 |
-| P1 | 增加部署级鉴权或明确由反向代理保护，并收紧 `/api/health` | PR-002 |
-| P1 | 上传文件增加大小、数量、真实图片解码、像素和格式校验 | PR-003 |
-| P1 | 生成任务增加 claim/lock、超时、取消、重试上限 | PR-004 |
-| P1 | 建立最小 CI：backend compile/import、frontend build/typecheck、compose config | PR-005 |
-| P1 | 建立正式数据库迁移机制或 migration version 表 | PR-006 |
-| P1 | 固定 Docker 镜像和 Python 依赖版本 | PR-007 |
-| P1 | GitHub 分支保护、PR 模板、CODEOWNERS、自动删分支 | PR-008 |
+| Priority | Item | Suggested PR | Status |
+| --- | --- | --- | --- |
+| P0 | 移除代码内默认对象存储密钥，启动时校验生产必填配置 | PR-001 | Fixed 2026-05-11 |
+| P1 | 增加部署级鉴权或明确由反向代理保护，并收紧 `/api/health` | PR-002 | Partial: health fixed; auth pending |
+| P1 | 上传文件增加大小、数量、真实图片解码、像素和格式校验 | PR-003 | Fixed 2026-05-11 |
+| P1 | 生成任务增加 claim/lock、超时、取消、重试上限 | PR-004 | Open |
+| P1 | 建立最小 CI：backend compile/import、frontend build/typecheck、compose config | PR-005 | Fixed minimal baseline; business tests pending |
+| P1 | 建立正式数据库迁移机制或 migration version 表 | PR-006 | Open |
+| P1 | 固定 Docker 镜像和 Python 依赖版本 | PR-007 | Partial: direct pins/tag done; lock/digest pending |
+| P1 | GitHub 分支保护、PR 模板、CODEOWNERS、自动删分支 | PR-008 | Partial: CI workflow added; admin settings/PR template/CODEOWNERS pending |
 
 #### 近期质量提升
 
-| Priority | Item | Suggested PR |
-| --- | --- | --- |
-| P1 | 把 ruyi-dream 产品定位统一为“电商视觉生产系统”，并加入视频能力设计前置边界 | PR-009 |
-| P1 | 生产记录从硬删除改为归档/作废，保留审计链路 | PR-010 |
-| P1 | 品牌模板版本化，task package 记录模板版本 | PR-011 |
-| P2 | UI 文案从“生图/Gemini”调整为“拍摄/组图/调试模式” | PR-012 |
-| P2 | 增加审核/交付状态：可用、需重生、需精修、已交付 | PR-013 |
-| P2 | 拆分 `frontend/src/App.tsx` 页面和 hooks | PR-014 |
-| P2 | 拆分 `backend/app/main.py` 路由、service、repository、worker | PR-015 |
-| P2 | 增加生产 runbook 和故障排查决策树 | PR-016 |
+| Priority | Item | Suggested PR | Status |
+| --- | --- | --- | --- |
+| P1 | 把 ruyi-dream 产品定位统一为“电商视觉生产系统”，并加入视频能力设计前置边界 | PR-009 | Open |
+| P1 | 生产记录从硬删除改为归档/作废，保留审计链路 | PR-010 | Fixed 2026-05-11 |
+| P1 | 品牌模板版本化，task package 记录模板版本 | PR-011 | Open |
+| P2 | UI 文案从“生图/Gemini”调整为“拍摄/组图/调试模式” | PR-012 | Open |
+| P2 | 增加审核/交付状态：可用、需重生、需精修、已交付 | PR-013 | Open |
+| P2 | 拆分 `frontend/src/App.tsx` 页面和 hooks | PR-014 | Open |
+| P2 | 拆分 `backend/app/main.py` 路由、service、repository、worker | PR-015 | Open |
+| P2 | 增加生产 runbook 和故障排查决策树 | PR-016 | Open |
 
 #### 后续架构演进
 

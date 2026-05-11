@@ -226,6 +226,8 @@ CREATE TABLE generation_runs (
   kind TEXT NOT NULL DEFAULT 'group',
   status TEXT NOT NULL DEFAULT 'CREATED',
   output_dir TEXT NOT NULL,
+  archived_at TEXT,
+  archive_reason TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -242,6 +244,8 @@ CREATE TABLE generation_runs (
 | `kind` | TEXT | 当前主要为 `group`；单张重生不再新建 run |
 | `status` | TEXT | `CREATED` / `RUNNING` / `PARTIAL_SUCCEEDED` / `SUCCEEDED` / `FAILED` / `CANCELLED` |
 | `output_dir` | TEXT | 本次输出目录 |
+| `archived_at` | TEXT | 归档时间；归档后默认历史列表不展示，但保留记录和对象 key |
+| `archive_reason` | TEXT | 归档原因 |
 | `created_at` | TEXT | 创建时间 |
 | `updated_at` | TEXT | 更新时间 |
 

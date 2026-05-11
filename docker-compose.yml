@@ -1,6 +1,6 @@
 services:
   rustfs:
-    image: rustfs/rustfs:latest
+    image: rustfs/rustfs:1.0.0-beta.1
     container_name: ruyi-dream-rustfs
     restart: unless-stopped
     environment:
@@ -36,6 +36,7 @@ services:
     depends_on:
       - rustfs
     environment:
+      APP_ENV: ${APP_ENV:-development}
       APP_DATA_DIR: /app/data
       APP_DATABASE_PATH: /app/data/app.sqlite3
       APP_LOG_DIR: /app/data/logs
@@ -45,6 +46,10 @@ services:
       APP_S3_REGION: auto
       APP_S3_FORCE_PATH_STYLE: "true"
       APP_S3_PRESIGN_EXPIRES_SECONDS: 900
+      APP_MAX_UPLOAD_IMAGE_BYTES: ${APP_MAX_UPLOAD_IMAGE_BYTES:-15728640}
+      APP_MAX_UPLOAD_IMAGE_PIXELS: ${APP_MAX_UPLOAD_IMAGE_PIXELS:-25000000}
+      APP_MAX_GARMENT_IMAGES_PER_SKU: ${APP_MAX_GARMENT_IMAGES_PER_SKU:-20}
+      APP_MAX_HEAD_REFERENCES_PER_PROFILE: ${APP_MAX_HEAD_REFERENCES_PER_PROFILE:-20}
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?set RUSTFS_ACCESS_KEY in .env}
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?set RUSTFS_SECRET_KEY in .env}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}

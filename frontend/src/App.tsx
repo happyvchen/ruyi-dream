@@ -816,8 +816,8 @@ export function App() {
   }
 
   async function deleteGenerationRun(run: GenerationRun) {
-    const activeNote = isRunActive(run) ? '\n该任务仍在生成中，删除后页面将不再追踪它。' : ''
-    const confirmed = window.confirm(`确认删除生成记录 #${run.id}（${run.sku ?? '未知货号'}）？\n这会删除该记录下的生成图片和输出文件。${activeNote}`)
+    const activeNote = isRunActive(run) ? '\n该任务仍在生成中，归档后历史列表将不再展示，但后台状态和审计记录仍会保留。' : ''
+    const confirmed = window.confirm(`确认归档生成记录 #${run.id}（${run.sku ?? '未知货号'}）？\n归档只会从历史列表隐藏记录，不会删除生成图片、输出文件或审计信息。${activeNote}`)
     if (!confirmed) return
     setError(null)
     try {
@@ -837,7 +837,7 @@ export function App() {
         window.localStorage.removeItem('app:lastGenerationRunId')
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '删除生成记录失败')
+      setError(err instanceof Error ? err.message : '归档生成记录失败')
     }
   }
 
@@ -2005,7 +2005,7 @@ function GenerationHistoryOverview({
               </small>
             </span>
           </button>
-          <button className="danger icon-only history-delete-button" onClick={() => onDeleteRun(run)} title="删除记录">
+          <button className="danger icon-only history-delete-button" onClick={() => onDeleteRun(run)} title="归档记录">
             <Trash2 size={14} />
           </button>
         </article>
@@ -2074,7 +2074,7 @@ function HistoryPage({
                 </span>
               </button>
               <button className="secondary" onClick={() => onRestoreRun(run)}>恢复</button>
-              <button className="danger icon-only" onClick={() => onDeleteRun(run)} title="删除记录">
+              <button className="danger icon-only" onClick={() => onDeleteRun(run)} title="归档记录">
                 <Trash2 size={15} />
               </button>
             </article>
@@ -2122,7 +2122,7 @@ function HistoryRunDetail({
             <RefreshCw size={16} />恢复到生成页
           </button>
           <button className="danger" onClick={() => onDeleteRun(run)}>
-            <Trash2 size={16} />删除记录
+            <Trash2 size={16} />归档记录
           </button>
         </div>
       </div>

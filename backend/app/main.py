@@ -13,6 +13,7 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, StreamingResponse
+from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 
 from .config import get_settings
@@ -35,13 +36,14 @@ from .planner import PlannerError, SHOT_SLOTS, normalize_plan as normalize_plann
 
 
 settings = get_settings()
+Image.MAX_IMAGE_PIXELS = settings.max_upload_image_pixels
 app = FastAPI(title=settings.app_name)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
@@ -109,6 +111,12 @@ UNASSIGNED_HEAD_REFERENCE_PREFIX = "__unassigned__"
 ACTIVE_IMAGE_STATUSES = {"QUEUED", "SUBMITTED", "IN_QUEUE", "IN_PROGRESS", "RUNNING"}
 TERMINAL_IMAGE_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
 PLANNING_STATUSES = {"PLANNING"}
+ALLOWED_UPLOAD_MIME_TYPES = {
+    "image/jpeg": "JPEG",
+    "image/png": "PNG",
+    "image/webp": "WEBP",
+}
+ALLOWED_UPLOAD_FORMATS = set(ALLOWED_UPLOAD_MIME_TYPES.values())
 
 
 @app.on_event("startup")
@@ -125,23 +133,58 @@ async def shutdown() -> None:
     task = getattr(app.state, "generation_poller", None)
     if task:
         task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
     planner_task = getattr(app.state, "planner_poller", None)
     if planner_task:
         planner_task.cancel()
         with suppress(asyncio.CancelledError):
-            await task
+            await planner_task
 
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     return {
         "ok": True,
-        "databasePath": str(settings.database_path),
-        "s3Endpoint": settings.s3_endpoint_url,
-        "s3Bucket": settings.s3_bucket,
+        "storage": "configured" if settings.s3_access_key_id and settings.s3_secret_access_key else "missing_credentials",
         "geminiConfigured": bool(settings.gemini_api_key),
-        "imageProviderConfigured": bool(settings.gpt_image2_api_base_url and settings.fal_key),
+        "imageProviderConfigured": bool(settings.gpt_image2_queue_url and settings.fal_key),
     }
+
+
+async def validate_upload_image(upload: UploadFile) -> tuple[bytes, str]:
+    filename = upload.filename or "image"
+    declared_type = (upload.content_type or "").lower()
+    if declared_type not in ALLOWED_UPLOAD_MIME_TYPES:
+        raise HTTPException(status_code=400, detail=f"{filename} 仅支持 JPG、PNG 或 WebP 图片")
+
+    content = await upload.read(settings.max_upload_image_bytes + 1)
+    await upload.seek(0)
+    if not content:
+        raise HTTPException(status_code=400, detail=f"{filename} 是空文件")
+    if len(content) > settings.max_upload_image_bytes:
+        max_mb = settings.max_upload_image_bytes / (1024 * 1024)
+        raise HTTPException(status_code=400, detail=f"{filename} 超过 {max_mb:.0f}MB 大小限制")
+
+    try:
+        with Image.open(BytesIO(content)) as image:
+            image.verify()
+        with Image.open(BytesIO(content)) as image:
+            image_format = (image.format or "").upper()
+            width, height = image.size
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
+        raise HTTPException(status_code=400, detail=f"{filename} 无法解码为有效图片") from exc
+
+    if image_format not in ALLOWED_UPLOAD_FORMATS:
+        raise HTTPException(status_code=400, detail=f"{filename} 仅支持 JPG、PNG 或 WebP 图片")
+    expected_format = ALLOWED_UPLOAD_MIME_TYPES[declared_type]
+    if image_format != expected_format:
+        raise HTTPException(status_code=400, detail=f"{filename} 的文件类型与 Content-Type 不一致")
+    if width <= 0 or height <= 0 or width * height > settings.max_upload_image_pixels:
+        max_mp = settings.max_upload_image_pixels / 1_000_000
+        raise HTTPException(status_code=400, detail=f"{filename} 超过 {max_mp:.0f}MP 像素限制")
+
+    return content, declared_type
 
 
 @app.get("/api/garment-skus")
@@ -170,19 +213,30 @@ async def upload_garment_sku(
         raise HTTPException(status_code=400, detail="SKU 不能为空")
     if not files:
         raise HTTPException(status_code=400, detail="至少上传一张图片")
+    if len(files) > settings.max_garment_images_per_sku:
+        raise HTTPException(status_code=400, detail=f"单个货号最多上传 {settings.max_garment_images_per_sku} 张图片")
 
     upload_id = f"{clean_sku}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
     target_prefix = join_key("uploads", upload_id)
 
     timestamp = now_iso()
-    saved_files: list[tuple[UploadFile, str, str]] = []
-    for index, upload in enumerate(files):
-        if not upload.content_type or not upload.content_type.startswith("image/"):
-            raise HTTPException(status_code=400, detail=f"{upload.filename} 不是图片文件")
-        safe_name = f"{index + 1:03d}-{sanitize_filename(upload.filename or 'image')}"
-        key = join_key(target_prefix, safe_name)
-        put_fileobj(key, upload.file, upload.content_type or "application/octet-stream")
-        saved_files.append((upload, safe_name, key))
+    validated_files: list[tuple[UploadFile, bytes, str]] = []
+    for upload in files:
+        content, content_type = await validate_upload_image(upload)
+        validated_files.append((upload, content, content_type))
+
+    saved_files: list[tuple[str, str, str]] = []
+    try:
+        for index, (upload, content, content_type) in enumerate(validated_files):
+            safe_name = f"{index + 1:03d}-{sanitize_filename(upload.filename or 'image')}"
+            key = join_key(target_prefix, safe_name)
+            put_fileobj(key, BytesIO(content), content_type)
+            saved_files.append((safe_name, key, content_type))
+    except Exception:
+        for _, key, _ in saved_files:
+            with suppress(Exception):
+                delete_object(key)
+        raise
 
     with get_db() as db:
         cursor = db.execute(
@@ -193,7 +247,7 @@ async def upload_garment_sku(
             (clean_sku, title or clean_sku, target_prefix, timestamp, timestamp),
         )
         sku_id = int(cursor.lastrowid)
-        for index, (upload, filename, key) in enumerate(saved_files):
+        for index, (filename, key, content_type) in enumerate(saved_files):
             db.execute(
                 """
                 INSERT INTO garment_images
@@ -204,7 +258,7 @@ async def upload_garment_sku(
                     sku_id,
                     filename,
                     key,
-                    upload.content_type or "application/octet-stream",
+                    content_type,
                     "main" if index == 0 else "reference",
                     index,
                     timestamp,
@@ -288,7 +342,11 @@ async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -
     if not files:
         raise HTTPException(status_code=400, detail="至少上传一张图片")
     timestamp = now_iso()
-    saved: list[tuple[UploadFile, str, str, int]] = []
+    validated_files: list[tuple[UploadFile, bytes, str]] = []
+    for upload in files:
+        content, content_type = await validate_upload_image(upload)
+        validated_files.append((upload, content, content_type))
+    saved: list[tuple[str, str, str, int]] = []
 
     with get_db() as db:
         sku_row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
@@ -299,17 +357,27 @@ async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -
             "SELECT COALESCE(MAX(sort_order), -1) AS max_sort FROM garment_images WHERE sku_id = ?",
             (sku_id,),
         ).fetchone()["max_sort"]
+        current_count = db.execute(
+            "SELECT COUNT(*) AS count FROM garment_images WHERE sku_id = ?",
+            (sku_id,),
+        ).fetchone()["count"]
+        if int(current_count) + len(files) > settings.max_garment_images_per_sku:
+            raise HTTPException(status_code=400, detail=f"单个货号最多保留 {settings.max_garment_images_per_sku} 张图片")
 
-        for offset, upload in enumerate(files, start=1):
-            if not upload.content_type or not upload.content_type.startswith("image/"):
-                raise HTTPException(status_code=400, detail=f"{upload.filename} 不是图片文件")
-            sort_order = int(current_max) + offset
-            safe_name = f"{sort_order + 1:03d}-{sanitize_filename(upload.filename or 'image')}"
-            key = unique_key(join_key(target_prefix, safe_name))
-            put_fileobj(key, upload.file, upload.content_type or "application/octet-stream")
-            saved.append((upload, Path(key).name, key, sort_order))
+        try:
+            for offset, (upload, content, content_type) in enumerate(validated_files, start=1):
+                sort_order = int(current_max) + offset
+                safe_name = f"{sort_order + 1:03d}-{sanitize_filename(upload.filename or 'image')}"
+                key = unique_key(join_key(target_prefix, safe_name))
+                put_fileobj(key, BytesIO(content), content_type)
+                saved.append((Path(key).name, key, content_type, sort_order))
+        except Exception:
+            for _, key, _, _ in saved:
+                with suppress(Exception):
+                    delete_object(key)
+            raise
 
-        for upload, filename, key, sort_order in saved:
+        for filename, key, content_type, sort_order in saved:
             db.execute(
                 """
                 INSERT INTO garment_images
@@ -320,7 +388,7 @@ async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -
                     sku_id,
                     filename,
                     key,
-                    upload.content_type or "application/octet-stream",
+                    content_type,
                     sort_order,
                     timestamp,
                 ),
@@ -334,7 +402,7 @@ async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -
             "garment_sku",
             sku_id,
             "images_added",
-            {"fileCount": len(saved), "files": [filename for _, filename, _, _ in saved]},
+            {"fileCount": len(saved), "files": [filename for filename, _, _, _ in saved]},
         )
     return {"item": get_sku_detail_by_id(sku_id)}
 
@@ -543,9 +611,10 @@ async def add_model_head_reference(
         raise HTTPException(status_code=400, detail="头像角度不合法")
     if clean_angle and len(uploads) > 1:
         raise HTTPException(status_code=400, detail="指定角度时只能上传一张头像")
+    validated_uploads: list[tuple[UploadFile, bytes, str]] = []
     for upload in uploads:
-        if not upload.content_type or not upload.content_type.startswith("image/"):
-            raise HTTPException(status_code=400, detail=f"{upload.filename} 不是图片文件")
+        content, content_type = await validate_upload_image(upload)
+        validated_uploads.append((upload, content, content_type))
 
     with get_db() as db:
         row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (model_profile_id,)).fetchone()
@@ -556,23 +625,37 @@ async def add_model_head_reference(
         profile = loads(row["profile_json"], {})
         references = dict(profile.get("headReferences") or {})
         order = normalize_head_reference_order(profile, references)
+        new_reference_count = 0 if clean_angle and clean_angle in references else len(validated_uploads)
+        if len(order) + new_reference_count > settings.max_head_references_per_profile:
+            raise HTTPException(
+                status_code=400,
+                detail=f"单个数字模特最多保留 {settings.max_head_references_per_profile} 张头像",
+            )
         assigned_keys = [clean_angle] if clean_angle else [new_unassigned_head_reference_key(references) for _ in uploads]
         old_files: list[str] = []
         saved: list[dict[str, str]] = []
-        for upload, assigned_key in zip(uploads, assigned_keys):
-            if assigned_key is None:
-                raise HTTPException(status_code=400, detail="头像角度不合法")
-            safe_name = sanitize_filename(upload.filename or "head-reference")
-            key = unique_key(join_key(asset_dir, safe_name))
-            put_fileobj(key, upload.file, upload.content_type or "application/octet-stream")
-            old_filename = references.get(assigned_key)
-            if old_filename:
-                old_files.append(old_filename)
-            filename = Path(key).name
-            references[assigned_key] = filename
-            if assigned_key not in order:
-                order.append(assigned_key)
-            saved.append({"id": assigned_key, "filename": filename})
+        saved_keys: list[str] = []
+        try:
+            for (upload, content, content_type), assigned_key in zip(validated_uploads, assigned_keys):
+                if assigned_key is None:
+                    raise HTTPException(status_code=400, detail="头像角度不合法")
+                safe_name = sanitize_filename(upload.filename or "head-reference")
+                key = unique_key(join_key(asset_dir, safe_name))
+                put_fileobj(key, BytesIO(content), content_type)
+                saved_keys.append(key)
+                old_filename = references.get(assigned_key)
+                if old_filename:
+                    old_files.append(old_filename)
+                filename = Path(key).name
+                references[assigned_key] = filename
+                if assigned_key not in order:
+                    order.append(assigned_key)
+                saved.append({"id": assigned_key, "filename": filename})
+        except Exception:
+            for key in saved_keys:
+                with suppress(Exception):
+                    delete_object(key)
+            raise
 
         profile["headReferences"] = references
         profile["headReferenceOrder"] = order
@@ -947,6 +1030,7 @@ def list_generation_runs() -> dict[str, Any]:
                  FROM generation_images gi WHERE gi.run_id = gr.id) AS regeneration_count
             FROM generation_runs gr
             JOIN garment_skus gs ON gs.id = gr.sku_id
+            WHERE gr.archived_at IS NULL
             ORDER BY gr.created_at DESC
             """
         ).fetchall()
@@ -964,27 +1048,21 @@ def delete_generation_run(run_id: int) -> dict[str, bool]:
         row = db.execute("SELECT * FROM generation_runs WHERE id = ?", (run_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="生成记录不存在")
-        output_dir = row["output_dir"]
-        db.execute("DELETE FROM generation_runs WHERE id = ?", (run_id,))
+        if "archived_at" in row.keys() and row["archived_at"]:
+            return {"ok": True}
+        timestamp = now_iso()
+        db.execute(
+            "UPDATE generation_runs SET archived_at = ?, archive_reason = ?, updated_at = ? WHERE id = ?",
+            (timestamp, "user_archived", timestamp, run_id),
+        )
         log_event(
             db,
             "generation_run",
             run_id,
-            "deleted",
-            {"skuId": row["sku_id"], "shotPlanId": row["shot_plan_id"], "outputDir": output_dir},
+            "archived",
+            {"skuId": row["sku_id"], "shotPlanId": row["shot_plan_id"], "outputDir": row["output_dir"]},
         )
 
-    try:
-        delete_prefix(output_dir)
-    except Exception as exc:
-        with get_db() as db:
-            log_event(
-                db,
-                "generation_run",
-                run_id,
-                "output_delete_failed",
-                {"outputDir": output_dir, "error": str(exc)},
-            )
     return {"ok": True}
 
 
@@ -2117,6 +2195,8 @@ def serialize_generation_run(row: Any, include_images: bool, include_summary: bo
         "kind": row["kind"],
         "status": row["status"],
         "outputDir": row["output_dir"],
+        "archivedAt": row["archived_at"] if "archived_at" in row.keys() else None,
+        "archiveReason": row["archive_reason"] if "archive_reason" in row.keys() else None,
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }

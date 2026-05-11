@@ -10,7 +10,7 @@
 
 | Resource | Method | 说明 |
 |---|---|
-| `/api/health` | GET | 健康检查 |
+| `/api/health` | GET | 健康检查；只返回非敏感 readiness 状态 |
 | `/api/garment-skus` | GET | 货号图包列表 |
 | `/api/garment-skus` | POST | 上传一个货号图包和多张素材图 |
 | `/api/garment-skus/{sku_id}` | GET | 货号详情、素材图片、识别摘要 |
@@ -33,6 +33,7 @@
 | `/api/generation-runs` | POST | 根据组图方案创建生成批次，并提交每张图到后台生成队列 |
 | `/api/generation-runs` | GET | 生成批次列表；返回前台历史任务摘要、缩略图和重生次数 |
 | `/api/generation-runs/{run_id}` | GET | 生成批次详情和单张结果 |
+| `/api/generation-runs/{run_id}` | DELETE | 归档生成记录；隐藏列表项但保留数据库记录、对象 key 和事件日志 |
 | `/api/generation-images/{image_id}/regenerate` | POST | 单张重生；不新增生成任务记录，在同一记录追加 attempt |
 | `/api/generation-images/{image_id}/final` | PATCH | 设置/取消最终图 |
 | `/api/logs` | GET | 事件日志 |
@@ -58,6 +59,7 @@
 
 后端职责：
 
+- 写入对象存储前先校验所有上传图片：仅支持 JPG / PNG / WebP，默认单张不超过 15MB、不超过 25MP，单个货号最多 20 张。
 - 将图片写入对象存储 `uploads/{sku}-{timestamp}-{id}/`。
 - 写入 `garment_skus` 和 `garment_images`。
 - 第一张图片写入 `role = main`，其余图片写入 `role = reference`。
@@ -356,6 +358,8 @@ multipart form-data：
 | `files` | 多张头像 |
 | `file` | 单张头像，兼容替换场景 |
 | `angle` | 可选；指定时只能上传一张 |
+
+头像上传复用素材图片安全校验：仅支持 JPG / PNG / WebP，默认单张不超过 15MB、不超过 25MP，单个数字模特最多 20 张头像。
 
 规则：
 

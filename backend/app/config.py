@@ -11,6 +11,7 @@ load_dotenv(BASE_DIR / ".env")
 
 class Settings:
     app_name = os.getenv("APP_NAME", "AI Model Image MVP")
+    app_env = os.getenv("APP_ENV", "development").lower()
     data_dir = Path(os.getenv("APP_DATA_DIR", BASE_DIR / "data"))
     database_path = Path(os.getenv("APP_DATABASE_PATH", data_dir / "app.sqlite3"))
     log_dir = Path(os.getenv("APP_LOG_DIR", data_dir / "logs"))
@@ -18,10 +19,14 @@ class Settings:
     s3_public_endpoint_url = os.getenv("APP_S3_PUBLIC_ENDPOINT_URL", s3_endpoint_url)
     s3_bucket = os.getenv("APP_S3_BUCKET", os.getenv("APP_STORAGE_BUCKET", "ruyi-dream"))
     s3_region = os.getenv("APP_S3_REGION", "auto")
-    s3_access_key_id = os.getenv("APP_S3_ACCESS_KEY_ID", os.getenv("RUSTFS_ACCESS_KEY", "admin"))
-    s3_secret_access_key = os.getenv("APP_S3_SECRET_ACCESS_KEY", os.getenv("RUSTFS_SECRET_KEY", "DQugmV9crHkkYYjG"))
+    s3_access_key_id = os.getenv("APP_S3_ACCESS_KEY_ID", os.getenv("RUSTFS_ACCESS_KEY", ""))
+    s3_secret_access_key = os.getenv("APP_S3_SECRET_ACCESS_KEY", os.getenv("RUSTFS_SECRET_KEY", ""))
     s3_force_path_style = os.getenv("APP_S3_FORCE_PATH_STYLE", "true").lower() in {"1", "true", "yes", "on"}
     s3_presign_expires_seconds = int(os.getenv("APP_S3_PRESIGN_EXPIRES_SECONDS", "900"))
+    max_upload_image_bytes = int(os.getenv("APP_MAX_UPLOAD_IMAGE_BYTES", str(15 * 1024 * 1024)))
+    max_upload_image_pixels = int(os.getenv("APP_MAX_UPLOAD_IMAGE_PIXELS", str(25_000_000)))
+    max_garment_images_per_sku = int(os.getenv("APP_MAX_GARMENT_IMAGES_PER_SKU", "20"))
+    max_head_references_per_profile = int(os.getenv("APP_MAX_HEAD_REFERENCES_PER_PROFILE", "20"))
     gemini_api_key = os.getenv("GEMINI_API_KEY", "")
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
     image_provider = os.getenv("GPT_IMAGE2_PROVIDER", "fal").lower()
@@ -41,10 +46,33 @@ class Settings:
         if origin.strip()
     ]
 
+    def validate(self) -> None:
+        missing = []
+        if not self.s3_access_key_id:
+            missing.append("APP_S3_ACCESS_KEY_ID or RUSTFS_ACCESS_KEY")
+        if not self.s3_secret_access_key:
+            missing.append("APP_S3_SECRET_ACCESS_KEY or RUSTFS_SECRET_KEY")
+        if missing:
+            joined = ", ".join(missing)
+            raise RuntimeError(f"Missing required object storage credential(s): {joined}")
+
+        if self.app_env in {"prod", "production"}:
+            insecure_pairs = {
+                ("admin", "admin"),
+                ("admin", "change-me"),
+                ("admin", "DQugmV9crHkkYYjG"),
+            }
+            if (self.s3_access_key_id, self.s3_secret_access_key) in insecure_pairs:
+                raise RuntimeError(
+                    "Production object storage credentials must be explicitly configured "
+                    "with non-default values."
+                )
+
 
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()
+    settings.validate()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.log_dir.mkdir(parents=True, exist_ok=True)
     return settings

@@ -88,6 +88,7 @@ BACKEND_CORS_ORIGINS=http://<server-ip-or-domain>:5173
 ## 生产边界
 
 - `.env` 不提交 Git，生产必须使用强随机 `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY`。
+- 生产环境设置 `APP_ENV=production`；后端启动时会拒绝缺失或默认对象存储密钥。
 - `FAL_KEY` 和 `GEMINI_API_KEY` 只放在部署环境，不写入文档或镜像。
 - RustFS bucket 保持私有，浏览器只通过后端生成的短期预签名 URL 访问对象。
 - 对公网开放时必须接入 HTTPS 反向代理，并把 public URL 改为 HTTPS。
