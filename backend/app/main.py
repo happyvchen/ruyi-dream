@@ -1990,6 +1990,7 @@ def serialize_image(row: Any) -> dict[str, Any]:
         "id": row["id"],
         "filename": row["filename"],
         "role": row["role"],
+        "sortOrder": row["sort_order"],
         "mimeType": row["mime_type"],
         "url": media_url(row["storage_path"]),
         "fileSize": file_size(row["storage_path"]),

@@ -716,6 +716,30 @@ export function App() {
     }
   }
 
+  async function reorderSelectedSkuImage(imageId: number, orderIndex: number) {
+    if (!selectedSku?.images) return
+    const moving = selectedSku.images.find((image) => image.id === imageId)
+    if (!moving) return
+    const list = selectedSku.images.filter((image) => image.id !== imageId)
+    const nextIndex = Math.max(0, Math.min(orderIndex, list.length))
+    list.splice(nextIndex, 0, moving)
+    const reordered = list.map((image, index) => ({ ...image, sortOrder: index }))
+    setSelectedSku({ ...selectedSku, images: reordered, coverUrl: reordered[0]?.url ?? selectedSku.coverUrl })
+    setBusy('uploading')
+    setError(null)
+    try {
+      await Promise.all(reordered.map((image, index) => api.updateGarmentImage(image.id, { sortOrder: index })))
+      const refreshed = (await api.getSku(selectedSku.id)).item
+      setSelectedSku(refreshed)
+      await refreshBaseData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '更新图片顺序失败')
+      setSelectedSku((await api.getSku(selectedSku.id)).item)
+    } finally {
+      setBusy('idle')
+    }
+  }
+
   async function deleteImage(imageId: number) {
     if (!selectedSku) return
     const confirmed = window.confirm('确认删除这张素材图？这只会删除应用内上传副本。')
@@ -1100,8 +1124,12 @@ export function App() {
           onUploadImportPackage={(packageId) => void uploadImportPackage(packageId)}
           onUploadAllDraftPackages={() => void uploadAllDraftPackages()}
           onExtraFilesChange={setExtraFiles}
+          editSkuForm={editSkuForm}
+          onEditSkuFormChange={setEditSkuForm}
+          onSaveSku={() => void updateSelectedSku()}
           onDeleteSelectedSku={() => void deleteSelectedSku()}
           onAddImages={() => void addImagesToSelectedSku()}
+          onReorderImage={(imageId, orderIndex) => void reorderSelectedSkuImage(imageId, orderIndex)}
           onDeleteImage={(imageId) => void deleteImage(imageId)}
           onSelectSku={(sku) => void chooseSku(sku, { targetPage: 'garments' })}
           onUseInGenerate={(sku) => {
@@ -1170,8 +1198,12 @@ function GarmentLibraryPage({
 	  onUploadImportPackage,
 	  onUploadAllDraftPackages,
 	  onExtraFilesChange,
+  editSkuForm,
+  onEditSkuFormChange,
+  onSaveSku,
 	  onDeleteSelectedSku,
   onAddImages,
+  onReorderImage,
   onDeleteImage,
   onSelectSku,
   onUseInGenerate,
@@ -1194,8 +1226,12 @@ function GarmentLibraryPage({
 	  onUploadImportPackage: (packageId: string) => void
 	  onUploadAllDraftPackages: () => void
 	  onExtraFilesChange: (files: File[]) => void
+  editSkuForm: { sku: string; title: string; status: string }
+  onEditSkuFormChange: (value: { sku: string; title: string; status: string }) => void
+  onSaveSku: () => void
 	  onDeleteSelectedSku: () => void
   onAddImages: () => void
+  onReorderImage: (imageId: number, orderIndex: number) => void
   onDeleteImage: (imageId: number) => void
   onSelectSku: (sku: GarmentSku) => void
   onUseInGenerate: (sku: GarmentSku) => void
@@ -1204,6 +1240,16 @@ function GarmentLibraryPage({
 }) {
   const analyzed = skus.filter((sku) => sku.status === 'ANALYZED' || sku.analysis).length
   const pendingImportPackages = importPackages.filter((item) => item.status !== 'uploaded')
+  const [draggingImageId, setDraggingImageId] = useState<number | null>(null)
+  const [dragOverImageId, setDragOverImageId] = useState<number | null>(null)
+  const skuFormChanged = Boolean(
+    selectedSku
+      && (
+        editSkuForm.sku !== selectedSku.sku
+        || editSkuForm.title !== (selectedSku.title ?? selectedSku.sku)
+        || editSkuForm.status !== selectedSku.status
+      ),
+  )
   return (
     <main className="garment-page">
       <section className="library-toolbar">
@@ -1330,6 +1376,35 @@ function GarmentLibraryPage({
 	              </div>
 
 	              <div className="detail-grid">
+                  <section className="material-board sku-edit-panel">
+                    <div className="section-heading tight">
+                      <h2>货号信息</h2>
+                      <Edit3 size={16} />
+                    </div>
+                    <div className="sku-edit-grid">
+                      <label className="field">
+                        <span>货号</span>
+                        <input value={editSkuForm.sku} onChange={(event) => onEditSkuFormChange({ ...editSkuForm, sku: event.target.value })} />
+                      </label>
+                      <label className="field">
+                        <span>标题</span>
+                        <input value={editSkuForm.title} onChange={(event) => onEditSkuFormChange({ ...editSkuForm, title: event.target.value })} />
+                      </label>
+                      <label className="field">
+                        <span>状态</span>
+                        <select value={editSkuForm.status} onChange={(event) => onEditSkuFormChange({ ...editSkuForm, status: event.target.value })}>
+                          <option value="NEW">新建</option>
+                          <option value="ANALYZED">已策划</option>
+                          <option value="CONFIRMED">已确认</option>
+                        </select>
+                      </label>
+                      <button className="primary" onClick={onSaveSku} disabled={busy !== 'idle' || !skuFormChanged}>
+                        {busy === 'uploading' ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+                        保存货号
+                      </button>
+                    </div>
+                  </section>
+
 	                <section className="material-board asset-panel">
 	                  <div className="section-heading tight">
 	                    <h2>素材图片</h2>
@@ -1351,8 +1426,31 @@ function GarmentLibraryPage({
                     </button>
                   </div>
                   <div className="asset-grid">
-                    {(selectedSku.images ?? []).map((image) => (
-                      <article className="asset-card" key={image.id}>
+                    {(selectedSku.images ?? []).map((image, index) => (
+                      <article
+                        className={`asset-card ${draggingImageId === image.id ? 'dragging' : ''} ${dragOverImageId === image.id ? 'drag-over' : ''}`}
+                        key={image.id}
+                        draggable={busy === 'idle'}
+                        onDragStart={() => {
+                          setDraggingImageId(image.id)
+                          setDragOverImageId(null)
+                        }}
+                        onDragEnd={() => {
+                          setDraggingImageId(null)
+                          setDragOverImageId(null)
+                        }}
+                        onDragOver={(event) => {
+                          event.preventDefault()
+                          if (draggingImageId && draggingImageId !== image.id) setDragOverImageId(image.id)
+                        }}
+                        onDrop={(event) => {
+                          event.preventDefault()
+                          if (!draggingImageId || draggingImageId === image.id) return
+                          onReorderImage(draggingImageId, index)
+                          setDraggingImageId(null)
+                          setDragOverImageId(null)
+                        }}
+                      >
                         <div className="asset-thumb">
                           {image.url ? (
                             <ImagePreviewThumb
@@ -1369,6 +1467,10 @@ function GarmentLibraryPage({
                               <ImageInfoLine src={mediaUrl(image.url)} fileSize={image.fileSize} />
                             ) : '图片信息读取中'}
                           </small>
+                          <div className="asset-order-row">
+                            <span className="drag-hint">拖动排序</span>
+                            <b>#{index + 1}</b>
+                          </div>
                           <div className="asset-actions single">
                             <button onClick={() => onDeleteImage(image.id)} title="删除图片">
                               <Trash2 size={14} />

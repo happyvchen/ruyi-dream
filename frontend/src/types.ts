@@ -2,6 +2,7 @@ export type GarmentImage = {
   id: number
   filename: string
   role: string
+  sortOrder: number
   mimeType: string
   url: string | null
   fileSize?: number | null

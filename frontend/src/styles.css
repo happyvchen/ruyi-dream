@@ -1231,9 +1231,31 @@ summary {
   grid-column: 1;
 }
 
+.sku-edit-panel {
+  grid-column: 1;
+  padding: 14px;
+  border: 1px solid #e4e4de;
+  border-radius: 8px;
+  background: #fafaf8;
+}
+
+.sku-edit-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) 140px auto;
+  gap: 10px 12px;
+  align-items: end;
+}
+
+.sku-edit-grid .field {
+  margin-bottom: 0;
+}
+
+.sku-edit-grid button {
+  min-height: 40px;
+}
+
 .asset-panel {
   grid-column: 1;
-  grid-row: 1;
 }
 
 .model-form-board {
@@ -1462,7 +1484,18 @@ summary {
   border-radius: 8px;
   overflow: hidden;
   background: #fff;
+  cursor: grab;
   scroll-snap-align: start;
+  transition: border-color 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
+}
+
+.asset-card.dragging {
+  opacity: 0.56;
+}
+
+.asset-card.drag-over {
+  border-color: #22221f;
+  box-shadow: 0 0 0 1px #22221f inset;
 }
 
 .asset-thumb {
@@ -1500,6 +1533,24 @@ summary {
   display: block;
   margin-top: 5px;
   color: #74746d;
+  font-size: 12px;
+}
+
+.asset-order-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.asset-order-row .drag-hint {
+  min-height: 30px;
+  padding: 0 7px;
+}
+
+.asset-order-row b {
+  color: #61615a;
   font-size: 12px;
 }
 
@@ -1996,6 +2047,7 @@ summary {
 
   .garment-layout,
   .detail-grid,
+  .sku-edit-grid,
   .model-layout,
   .model-editor-grid,
   .library-toolbar,
@@ -2006,6 +2058,7 @@ summary {
 
   .shot-plan-panel,
   .asset-panel,
+  .sku-edit-panel,
   .fact-panel {
     grid-column: auto;
     grid-row: auto;
