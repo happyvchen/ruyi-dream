@@ -336,42 +336,7 @@ def build_chinese_prompt(task_package: dict[str, Any]) -> str:
     if stage == "preview_grid":
         lines = build_preview_prompt_lines(task_package, garment, brand_style, planning_script)
     else:
-        lines = [
-        "任务：",
-        f"生成一张电商 AI 模特图，当前图位为 {shot.get('shotIndex', '')}：{shot.get('title', '生成图')}。",
-        "",
-        "图片角色：",
-        "- 服装参考图是商品事实来源，必须保持服装设计、颜色、面料、结构、长度和比例。",
-        "- 模特头部图是身份事实来源，必须保持同一张脸、发型、刘海和克制表情。",
-        "- 品牌真实成片参考图定义姿态、鞋包、配饰、光线、背景和构图边界。",
-        "",
-        "优先级：",
-        f"1. 保持 {model.get('modelId', '当前模特')} 模特身份一致。",
-        f"2. 保持货号 {task_package.get('sku', '')} 的服装事实：{garment.get('summary', '')}",
-        f"3. 遵守 Lily 调性：{planning_script.get('lilyTone') or brand_style.get('summary', '白/浅灰棚拍，商品优先。')}",
-        f"4. 服从服饰搭配方案：{planning_script.get('styling', '')}",
-        f"5. 当前图位任务：{shot.get('title', '')}，{shot.get('task', '')}。",
-        "",
-        "分镜剧本：",
-        f"- 景别：{shot.get('scene') or shot.get('frame', '')}",
-        f"- 取景范围：{shot.get('cropRange') or shot.get('crop', '')}",
-        f"- 模特占画幅：{shot.get('modelScale', '')}",
-        f"- 头部处理：{shot.get('headTreatment', '')}",
-        f"- 身位：{shot.get('bodyPosition') or shot.get('angle', '')}",
-        f"- 姿势调性：{shot.get('poseTone') or shot.get('pose', '自然、克制、符合电商棚拍。')}",
-        f"- 画面目的：{shot.get('imagePurpose') or shot.get('focus', '')}",
-        f"- 背景：{planning_script.get('background', '白/浅灰棚拍，轻微落地阴影')}",
-        f"- 服饰搭配：{planning_script.get('styling', '')}",
-        ]
-        if any(item.get("role") == "preview_grid" for item in task_package.get("imageInputs", [])):
-            lines.extend(
-                [
-                    "",
-                    "分镜预览参考：",
-                    "- 已提供一张 2x3 分镜预览图，请参考其中的姿势、身位、服装一致性和整体气质。",
-                    "- 最终输出仍然只生成当前单张图位，不要输出 Contact Sheet。",
-                ]
-            )
+        lines = build_final_prompt_lines(task_package, shot, model, brand_style, planning_script)
     if constraints:
         lines.extend(["", "约束：", *[f"- {item}" for item in constraints]])
     if garment.get("proportionConstraints"):
@@ -415,7 +380,7 @@ def build_preview_prompt_lines(
         "",
         "这是一张视觉预览图，不是文字脚本。画面共 6 个格子：前 5 格严格对应最终组图的 5 个分镜，第 6 格为备用候选姿势。每个格子都应像真实电商棚拍成片候选画面。",
         "",
-        "必须严格还原服装素材中的商品事实，包括服装品类、颜色、版型、结构、面料纹理、扣位、口袋、刺绣、领型、袖长、衣长、裤长/裙长、比例和细节质感。",
+        "服装素材参考图是唯一商品事实来源。请直接依据服装素材图还原服装，不要根据文字自行改造、补全或简化服装。",
         "必须严格保持模特身份一致，包括面部特征、头型、发型、刘海、气质、自然表情和身体比例。",
         "",
         "不要在画面中生成任何文字、编号、标签、水印、logo、脚本说明或边框说明。",
@@ -427,9 +392,6 @@ def build_preview_prompt_lines(
         "【灯光背景】：",
         f"{planning_script.get('background', '浅灰白棚拍背景、轻微落地阴影')}。整体呈现{planning_script.get('lilyTone') or brand_style.get('summary', '干净、理性、通勤、轻熟、克制的都市通勤风格')}。光线柔和均匀，商品结构清楚，背景不抢夺服装主体。",
         "",
-        "【商品硬事实】：",
-        *build_garment_fact_lines(garment, planning_script),
-        "",
         "【服饰搭配】：",
         styling_text,
         "",
@@ -439,12 +401,85 @@ def build_preview_prompt_lines(
         "【一致性要求】：",
         "6 个格子必须是同一位模特、同一发型、同一服装、同一服饰搭配、同一背景灯光。",
         "只允许改变镜头构图、取景范围、身位和姿势。",
-        "不得改变服装颜色、面料纹理、结构、扣位、口袋、刺绣、长度和比例。",
+        "不得改变服装结构、长度、比例和细节质感；服装具体事实以服装素材图为准。",
         "不得生成夸张写真、街拍大片、复杂布景、过度妆容、夸张表情或不符合电商棚拍的姿势。",
         "",
         "【技术参数】：",
         "商业级电商棚拍质感，哈苏中画幅相机效果，85mm 镜头，f/8 光圈。超清画质，皮肤纹理自然清晰，面料质感真实，商品边缘清楚，商业精修效果。",
     ]
+
+
+def build_final_prompt_lines(
+    task_package: dict[str, Any],
+    shot: dict[str, Any],
+    model: dict[str, Any],
+    brand_style: dict[str, Any],
+    planning_script: dict[str, Any],
+) -> list[str]:
+    image_inputs = task_package.get("imageInputs", [])
+    role_lines = build_final_image_role_lines(image_inputs, int(shot.get("shotIndex") or 1))
+    return [
+        "任务：",
+        f"生成一张商业级电商棚拍单图，当前图位为 {shot.get('shotIndex', '')}：{shot.get('title', '生成图')}。",
+        "本次只生成这一张单图，不要生成九宫格、拼图、文字说明、水印、logo 或边框。",
+        "",
+        "图片角色：",
+        *role_lines,
+        "",
+        "优先级：",
+        "1. 服装素材参考图是最高优先级商品事实来源。",
+        "2. 模特身份参考图是最高优先级人物身份来源。",
+        "3. 九宫格预览图只决定导演分镜，不覆盖服装事实。",
+        "4. 当前图位脚本决定景别、取景范围、姿势和身位。",
+        "",
+        "品牌与搭配：",
+        f"- 背景光线：{planning_script.get('background', '白/浅灰棚拍，轻微落地阴影')}",
+        f"- Lily 调性：{planning_script.get('lilyTone') or brand_style.get('summary', '干净、理性、通勤、轻熟、克制的都市通勤风格')}",
+        f"- 服饰搭配：{planning_script.get('styling', '')}",
+        "",
+        "当前图要求：",
+        f"- 任务：{shot.get('task', '')}",
+        f"- 画面目的：{shot.get('imagePurpose') or shot.get('focus', '')}",
+        f"- 景别：{shot.get('scene') or shot.get('frame', '')}",
+        f"- 取景范围：{shot.get('cropRange') or shot.get('crop', '')}",
+        f"- 模特占画幅：{shot.get('modelScale', '')}",
+        f"- 头部处理：{shot.get('headTreatment', '')}",
+        f"- 姿势身位：{shot.get('poseTone') or shot.get('pose', '自然、克制、符合电商棚拍。')}，身位为{shot.get('bodyPosition') or shot.get('angle', '')}",
+        "",
+        "服装保真：",
+        "请直接依据服装素材参考图还原服装的品类、颜色、面料、版型、结构、比例、长度、门襟、扣位、口袋、刺绣、领型、袖口和细节质感。不要根据文字自行改造、补全或简化服装。",
+        "",
+        "技术参数：",
+        "商业级电商棚拍质感，超清画质，皮肤纹理自然清晰，面料质感真实，商品边缘清楚，商业精修效果。",
+    ]
+
+
+def build_final_image_role_lines(image_inputs: list[dict[str, Any]], shot_index: int) -> list[str]:
+    lines: list[str] = []
+    preview_indexes = [index for index, item in enumerate(image_inputs, start=1) if item.get("role") == "preview_grid"]
+    model_indexes = [index for index, item in enumerate(image_inputs, start=1) if item.get("role") == "model_identity"]
+    garment_indexes = [index for index, item in enumerate(image_inputs, start=1) if item.get("role") == "garment_reference"]
+    if preview_indexes:
+        lines.append(
+            f"- 图{format_index_range(preview_indexes)}是已确认的 2x3 分镜预览图，只用于参考第 {shot_index} 格的姿势、身位、景别、构图、背景光线和搭配方向；它不是服装商品事实来源。"
+        )
+    if model_indexes:
+        lines.append(
+            f"- 图{format_index_range(model_indexes)}是同一位数字模特身份参考图，用于锁定脸型、五官、头型、发型、刘海、气质和身体比例。"
+        )
+    if garment_indexes:
+        lines.append(
+            f"- 图{format_index_range(garment_indexes)}是同一服装货号的素材参考图，是唯一商品事实来源。"
+        )
+    return lines or ["- 未提供参考图。"]
+
+
+def format_index_range(indexes: list[int]) -> str:
+    if not indexes:
+        return ""
+    if len(indexes) == 1:
+        return str(indexes[0])
+    return f"{indexes[0]}~{indexes[-1]}"
 
 
 def build_image_role_line(model_count: int, garment_count: int) -> str:

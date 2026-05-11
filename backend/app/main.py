@@ -1567,9 +1567,10 @@ def build_task_package(
 ) -> dict[str, Any]:
     garment = plan.get("garment", {})
     model_profile = loads(model_row["profile_json"], {})
-    image_inputs = build_image_inputs(sku_row, model_row, model_profile, shot)
     if preview_inputs:
-        image_inputs.extend(preview_inputs)
+        image_inputs = build_final_image_inputs(sku_row, model_row, model_profile, preview_inputs)
+    else:
+        image_inputs = build_image_inputs(sku_row, model_row, model_profile, shot)
     if sku_row["sku"] == "125309C7948510":
         garment = {
             **garment,
@@ -1600,11 +1601,11 @@ def build_task_package(
             "stage": "final_group",
             "output": {"aspectRatio": "1:1", "size": "1200x1200"},
             "constraints": [
-                "服装参考图是商品事实源",
+                "服装素材参考图是唯一商品事实源",
                 "保持同一模特脸、发型、气质",
                 "保持白/浅灰棚拍风格",
                 "不生成无关文字、水印、logo",
-                "如果提供了分镜预览图，把它作为姿势、身位和整体一致性的参考",
+                "如果提供了分镜预览图，只把它作为姿势、身位、景别、构图、背景光线和搭配方向的参考",
             ],
         },
     }
@@ -1795,14 +1796,52 @@ def build_image_inputs(sku_row: Any, model_row: Any, model_profile: dict[str, An
 
 MAX_PREVIEW_REFERENCE_IMAGES = 10
 MAX_PREVIEW_MODEL_IMAGES = 4
+MAX_FINAL_REFERENCE_IMAGES = 10
+MAX_FINAL_MODEL_IMAGES = 4
+
+
+def build_final_image_inputs(
+    sku_row: Any,
+    model_row: Any,
+    model_profile: dict[str, Any],
+    preview_inputs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    inputs: list[dict[str, Any]] = []
+    for item in preview_inputs[:1]:
+        inputs.append({**item, "role": "preview_grid"})
+
+    remaining = MAX_FINAL_REFERENCE_IMAGES - len(inputs)
+    if remaining <= 0:
+        return inputs
+
+    model_limit = min(MAX_FINAL_MODEL_IMAGES, remaining)
+    model_inputs = build_model_identity_inputs(model_row, model_profile, model_limit)
+    inputs.extend(model_inputs)
+
+    remaining = MAX_FINAL_REFERENCE_IMAGES - len(inputs)
+    if remaining <= 0:
+        return inputs
+    inputs.extend(build_garment_reference_inputs(sku_row, remaining))
+    return inputs
 
 
 def build_preview_image_inputs(sku_row: Any, model_row: Any, model_profile: dict[str, Any]) -> list[dict[str, Any]]:
     inputs: list[dict[str, Any]] = []
+    inputs.extend(build_model_identity_inputs(model_row, model_profile, MAX_PREVIEW_MODEL_IMAGES))
+
+    garment_limit = max(MAX_PREVIEW_REFERENCE_IMAGES - len(inputs), 0)
+    if garment_limit <= 0:
+        return inputs
+    inputs.extend(build_garment_reference_inputs(sku_row, garment_limit))
+    return inputs
+
+
+def build_model_identity_inputs(model_row: Any, model_profile: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    inputs: list[dict[str, Any]] = []
     head_references = model_profile.get("headReferences", {}) if isinstance(model_profile.get("headReferences"), dict) else {}
     ordered_keys = get_ordered_head_reference_keys(model_profile, head_references)
-    for key in ordered_keys[:MAX_PREVIEW_MODEL_IMAGES]:
-        if len(inputs) >= MAX_PREVIEW_MODEL_IMAGES:
+    for key in ordered_keys:
+        if len(inputs) >= limit:
             break
         filename = str(head_references.get(key) or "")
         if not filename:
@@ -1818,15 +1857,15 @@ def build_preview_image_inputs(sku_row: Any, model_row: Any, model_profile: dict
                     "url": presigned_get_url(object_key),
                 }
             )
+    return inputs
 
-    garment_limit = max(MAX_PREVIEW_REFERENCE_IMAGES - len(inputs), 0)
-    if garment_limit <= 0:
-        return inputs
 
+def build_garment_reference_inputs(sku_row: Any, limit: int) -> list[dict[str, Any]]:
+    inputs: list[dict[str, Any]] = []
     with get_db() as db:
         image_rows = db.execute(
             "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY sort_order, id LIMIT ?",
-            (sku_row["id"], garment_limit),
+            (sku_row["id"], limit),
         ).fetchall()
     for row in image_rows:
         object_key = row["storage_path"]
