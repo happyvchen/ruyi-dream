@@ -226,6 +226,31 @@ p {
   overflow: auto;
 }
 
+.search-field {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 40px;
+  margin-top: 10px;
+  padding: 0 10px;
+  border: 1px solid #d3d3cc;
+  border-radius: 6px;
+  background: #fff;
+  color: #6b6b64;
+}
+
+.search-field input {
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #222;
+}
+
 .stage-board,
 .visual-workspace {
   border: 1px solid #deded8;
@@ -1280,6 +1305,10 @@ summary {
   width: 32px;
   min-height: 32px;
   padding: 0;
+}
+
+.archive-button {
+  color: #4f4f48;
 }
 
 .mini-preview-strip {

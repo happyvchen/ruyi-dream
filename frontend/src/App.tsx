@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
+  Archive,
   Check,
   Clock,
   Edit3,
@@ -16,6 +17,7 @@ import {
   ImagePlus,
   Loader2,
   RefreshCw,
+  Search,
   Sparkles,
   Upload,
   X,
@@ -98,6 +100,7 @@ export function App() {
   const [historyRuns, setHistoryRuns] = useState<GenerationRun[]>([])
   const [selectedHistoryRun, setSelectedHistoryRun] = useState<GenerationRun | null>(null)
   const [historyFilter, setHistoryFilter] = useState('')
+  const [generateSkuFilter, setGenerateSkuFilter] = useState('')
   const [busy, setBusy] = useState<BusyState>('idle')
   const [error, setError] = useState<string | null>(null)
   const [page, setPage] = useState<Page>(() => parseRoute().page)
@@ -133,6 +136,15 @@ export function App() {
     return runs.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
   }, [historyRuns, selectedSku?.id])
   const taskStage = getGenerateTaskStage(selectedSku, shotPlan, previewRun, generationRun)
+  const filteredGenerateSkus = useMemo(() => {
+    const keyword = generateSkuFilter.trim().toLowerCase()
+    if (!keyword) return skus
+    return skus.filter((sku) =>
+      [sku.sku, sku.title, sku.status]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(keyword)),
+    )
+  }, [generateSkuFilter, skus])
 
   function navigate(routeInput: AppRoute, replace = false) {
     const url = routeToUrl(routeInput)
@@ -1110,9 +1122,17 @@ export function App() {
               <button className="primary full" onClick={() => navigate({ page: 'garments' })}>
                 <Upload size={17} />导入新图包
               </button>
+              <label className="search-field">
+                <Search size={16} />
+                <input
+                  value={generateSkuFilter}
+                  onChange={(event) => setGenerateSkuFilter(event.target.value)}
+                  placeholder="搜索货号或标题"
+                />
+              </label>
               <div className="sku-list task-sku-list">
-                {skus.length === 0 && <EmptyText text="还没有上传货号" />}
-                {skus.map((sku) => (
+                {filteredGenerateSkus.length === 0 && <EmptyText text={skus.length === 0 ? '还没有上传货号' : '没有匹配的货号'} />}
+                {filteredGenerateSkus.map((sku) => (
                   <button
                     key={sku.id}
                     className={`sku-item ${selectedSku?.id === sku.id ? 'selected' : ''}`}
@@ -1158,8 +1178,8 @@ export function App() {
             <div className="visual-workspace">
               <div className="visual-head">
                 <div>
-                  <h2>{previewRun && !generationRun ? '分镜预览' : '最终组图'}</h2>
-                  <p>{previewRun && !generationRun ? '先确认 2x3 分镜方向，再进入最终 5 张成片。' : '确认可用图，必要时单张重生，最后导出交付。'}</p>
+                  <h2>{generationRun ? '最终组图' : '分镜预览'}</h2>
+                  <p>{generationRun ? '确认可用图，必要时单张重生，最后导出交付。' : '先确认 2x3 分镜方向，再进入最终 5 张成片。'}</p>
                 </div>
                 {shotPlan && <span>方案 #{shotPlan.id}</span>}
               </div>
@@ -1176,6 +1196,7 @@ export function App() {
                   onReviewStatus={(image, status) => void updateReviewStatus(image, status)}
                   onCancelImage={(image) => void cancelImage(image)}
                   onExport={(runId) => void api.exportRun(runId)}
+                  previewOnly
                 />
               )}
 
@@ -1199,19 +1220,19 @@ export function App() {
               <div className="next-action-card">
                 <strong>{taskStage.actionTitle}</strong>
                 <p>{taskStage.actionText}</p>
-                {!shotPlan && selectedSku && (
-                  <button className="secondary full" onClick={() => navigate({ page: 'garments', sku: selectedSku.sku })}>
-                    去保存方案
-                  </button>
-                )}
-                <button className="secondary full" onClick={previewGrid} disabled={!selectedSku || !shotPlan || shotPlanPlanning || busy !== 'idle' || Boolean(previewRun && isRunActive(previewRun))}>
-                  {busy === 'previewing' ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
-                  生成分镜预览
-                </button>
-                <button className="primary full" onClick={generateGroup} disabled={!canGenerateGroup || Boolean(previewRun && isRunActive(previewRun)) || busy !== 'idle' || Boolean(generationRun && isRunActive(generationRun))}>
-                  {busy === 'generating' ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
-                  生成最终组图
-                </button>
+                <GeneratePrimaryAction
+                  selectedSku={selectedSku}
+                  shotPlan={shotPlan}
+                  shotPlanPlanning={shotPlanPlanning}
+                  previewRun={previewRun}
+                  generationRun={generationRun}
+                  busy={busy}
+                  canGenerateGroup={canGenerateGroup}
+                  onImport={() => navigate({ page: 'garments' })}
+                  onPlan={() => selectedSku && navigate({ page: 'garments', sku: selectedSku.sku })}
+                  onPreview={() => void previewGrid()}
+                  onGenerate={() => void generateGroup()}
+                />
               </div>
             </Panel>
 
@@ -2226,6 +2247,80 @@ function Stat({ label, value }: { label: string; value: number }) {
   )
 }
 
+function GeneratePrimaryAction({
+  selectedSku,
+  shotPlan,
+  shotPlanPlanning,
+  previewRun,
+  generationRun,
+  busy,
+  canGenerateGroup,
+  onImport,
+  onPlan,
+  onPreview,
+  onGenerate,
+}: {
+  selectedSku: GarmentSku | null
+  shotPlan: ShotPlan | null
+  shotPlanPlanning: boolean
+  previewRun: GenerationRun | null
+  generationRun: GenerationRun | null
+  busy: BusyState
+  canGenerateGroup: boolean
+  onImport: () => void
+  onPlan: () => void
+  onPreview: () => void
+  onGenerate: () => void
+}) {
+  if (!selectedSku) {
+    return (
+      <button className="primary full" onClick={onImport}>
+        <Upload size={18} />导入或选择服装
+      </button>
+    )
+  }
+
+  if (!shotPlan) {
+    return (
+      <button className="primary full" onClick={onPlan}>
+        <Sparkles size={18} />去保存默认方案
+      </button>
+    )
+  }
+
+  if (shotPlanPlanning) {
+    return (
+      <button className="primary full" disabled>
+        <Loader2 className="spin" size={18} />默认方案生成中
+      </button>
+    )
+  }
+
+  if (!previewRun || previewRun.status !== 'SUCCEEDED') {
+    return (
+      <button className="primary full" onClick={onPreview} disabled={busy !== 'idle' || Boolean(previewRun && isRunActive(previewRun))}>
+        {busy === 'previewing' || (previewRun && isRunActive(previewRun)) ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
+        生成分镜预览
+      </button>
+    )
+  }
+
+  if (!generationRun || generationRun.status !== 'SUCCEEDED') {
+    return (
+      <button className="primary full" onClick={onGenerate} disabled={!canGenerateGroup || busy !== 'idle' || Boolean(generationRun && isRunActive(generationRun))}>
+        {busy === 'generating' || (generationRun && isRunActive(generationRun)) ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
+        生成最终组图
+      </button>
+    )
+  }
+
+  return (
+    <button className="secondary full" onClick={onPreview} disabled={busy !== 'idle'}>
+      <RefreshCw size={18} />重新生成分镜
+    </button>
+  )
+}
+
 function TaskStatus({ label, value, state }: { label: string; value: string; state: 'idle' | 'ready' | 'running' }) {
   return (
     <div className={`task-status ${state}`}>
@@ -2291,8 +2386,8 @@ function GenerationHistoryOverview({
               </small>
             </span>
           </button>
-          <button className="danger icon-only history-delete-button" onClick={() => onDeleteRun(run)} title="归档记录">
-            <Trash2 size={14} />
+          <button className="secondary icon-only history-delete-button archive-button" onClick={() => onDeleteRun(run)} title="归档记录">
+            <Archive size={14} />
           </button>
           {isRunActive(run) && (
             <button className="secondary icon-only history-delete-button" onClick={() => onCancelRun(run)} title="取消任务">
@@ -2392,8 +2487,8 @@ function HistoryPage({
               </button>
               <button className="secondary" onClick={() => onRestoreRun(run)}>恢复</button>
               {isRunActive(run) && <button className="secondary" onClick={() => onCancelRun(run)}>取消</button>}
-              <button className="danger icon-only" onClick={() => onDeleteRun(run)} title="归档记录">
-                <Trash2 size={15} />
+              <button className="secondary icon-only archive-button" onClick={() => onDeleteRun(run)} title="归档记录">
+                <Archive size={15} />
               </button>
             </article>
           ))}
@@ -2770,6 +2865,7 @@ function ResultGallery({
   loading,
   nowMs,
   imageFilter,
+  previewOnly = false,
   onRegenerate,
   onToggleFinal,
   onReviewStatus,
@@ -2781,6 +2877,7 @@ function ResultGallery({
   loading: boolean
   nowMs: number
   imageFilter?: (image: GenerationImage) => boolean
+  previewOnly?: boolean
   onRegenerate: (image: GenerationImage, reason: string) => void
   onToggleFinal: (image: GenerationImage) => void
   onReviewStatus: (image: GenerationImage, status: string) => void
@@ -2791,6 +2888,8 @@ function ResultGallery({
   const visibleImages = run?.images?.filter((image) => imageFilter ? imageFilter(image) : true) ?? []
   const placeholders = Array.from({ length: isPreviewGallery ? 1 : 5 }, (_, index) => index + 1)
   const runStartedAt = visibleImages[0]?.submittedAt ?? run?.createdAt
+  const [regenerateReasons, setRegenerateReasons] = useState<Record<number, string>>({})
+  const selectedReason = (image: GenerationImage) => regenerateReasons[image.id] ?? REGENERATION_REASONS[0].value
   return (
     <section className="results">
       <div className="section-heading">
@@ -2838,21 +2937,39 @@ function ResultGallery({
                   </strong>
 	                  <small>{statusText(image.status)} · {imageElapsed} · 记录 #{image.id}</small>
 	                  {SHOW_DEBUG_INFO && image.providerRequestId && <small>任务 #{shortId(image.providerRequestId)} · {providerStatusText(image.providerStatus)}</small>}
-	                  <small>交付状态：{reviewStatusText(image.reviewStatus)}</small>
+	                  {!previewOnly && <small>交付状态：{reviewStatusText(image.reviewStatus)}</small>}
 	                </div>
 	                <div className="result-actions">
-	                  <button onClick={() => onRegenerate(image, '姿势不合适')} disabled={loading || imageActive}>
-	                    <RefreshCw size={15} />重生
-	                  </button>
-	                  <button onClick={() => onToggleFinal(image)} disabled={image.status !== 'SUCCEEDED'}>
-	                    <Check size={15} />{image.isFinal ? '取消最终' : '设为最终'}
-	                  </button>
+                    {previewOnly ? (
+                      <button onClick={() => onRegenerate(image, '重新生成分镜预览')} disabled={loading || imageActive}>
+                        <RefreshCw size={15} />重新预览
+                      </button>
+                    ) : (
+                      <>
+                        {image.status === 'SUCCEEDED' && (
+                          <select
+                            value={selectedReason(image)}
+                            onChange={(event) => setRegenerateReasons((current) => ({ ...current, [image.id]: event.target.value }))}
+                          >
+                            {REGENERATION_REASONS.map((reason) => (
+                              <option key={reason.value} value={reason.value}>{reason.label}</option>
+                            ))}
+                          </select>
+                        )}
+                        <button onClick={() => onRegenerate(image, selectedReason(image))} disabled={loading || imageActive}>
+                          <RefreshCw size={15} />重生
+                        </button>
+                        <button onClick={() => onToggleFinal(image)} disabled={image.status !== 'SUCCEEDED'}>
+                          <Check size={15} />{image.isFinal ? '取消最终' : '设为最终'}
+                        </button>
+                      </>
+                    )}
 	                  {imageActive && (
 	                    <button onClick={() => onCancelImage(image)}>
 	                      <X size={15} />取消
 	                    </button>
 	                  )}
-	                  {image.status === 'SUCCEEDED' && (
+	                  {!previewOnly && image.status === 'SUCCEEDED' && (
 	                    <select value={image.reviewStatus ?? 'candidate'} onChange={(event) => onReviewStatus(image, event.target.value)}>
 	                      <option value="candidate">候选</option>
 	                      <option value="approved">可用</option>
@@ -3289,6 +3406,15 @@ const HEAD_REFERENCE_OPTIONS = [
   { value: 'back', label: '背面' },
   { value: 'backTurnLeft45', label: '背面回头左 45 度' },
   { value: 'backTurnRight45', label: '背面回头右 45 度' },
+]
+
+const REGENERATION_REASONS = [
+  { value: '服装不准确', label: '服装不准确' },
+  { value: '姿势不合适', label: '姿势不合适' },
+  { value: '模特不像', label: '模特不像' },
+  { value: '构图不合适', label: '构图不合适' },
+  { value: '搭配不合适', label: '搭配不合适' },
+  { value: '其他补充', label: '其他补充' },
 ]
 
 function createBlankModelForm(index = 1): ModelForm {
