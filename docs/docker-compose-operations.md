@@ -19,6 +19,8 @@ GEMINI_API_KEY=<optional-but-required-for-planning>
 FAL_KEY=<required-for-real-image-generation>
 ```
 
+根目录 `.env` 是 Compose、后端裸跑和本地联调共同使用的主配置源。不要再维护一份 `backend/.env`；如需后端本机临时覆盖，使用不提交 Git 的 `backend/.env.local`。
+
 启动：
 
 ```bash

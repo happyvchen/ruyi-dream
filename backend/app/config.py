@@ -6,7 +6,9 @@ from dotenv import load_dotenv
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-load_dotenv(BASE_DIR / ".env")
+PROJECT_ROOT = BASE_DIR.parent
+load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(BASE_DIR / ".env.local", override=True)
 PLACEHOLDER_SECRET_VALUES = {
     "admin",
     "change-me",
@@ -43,6 +45,8 @@ class Settings:
     max_upload_image_pixels = int(os.getenv("APP_MAX_UPLOAD_IMAGE_PIXELS", str(25_000_000)))
     max_garment_images_per_sku = int(os.getenv("APP_MAX_GARMENT_IMAGES_PER_SKU", "20"))
     max_head_references_per_profile = int(os.getenv("APP_MAX_HEAD_REFERENCES_PER_PROFILE", "20"))
+    api_access_token = os.getenv("APP_API_ACCESS_TOKEN", os.getenv("APP_ACCESS_TOKEN", ""))
+    trust_reverse_proxy_auth = os.getenv("APP_TRUST_REVERSE_PROXY_AUTH", "false").lower() in {"1", "true", "yes", "on"}
     gemini_api_key = os.getenv("GEMINI_API_KEY", "")
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
     image_provider = os.getenv("GPT_IMAGE2_PROVIDER", "fal").lower()
@@ -75,6 +79,13 @@ class Settings:
         if self.app_env in {"prod", "production"}:
             self._validate_production_credential("access key", self.s3_access_key_id)
             self._validate_production_credential("secret key", self.s3_secret_access_key)
+            if self.api_access_token:
+                self._validate_production_credential("API access token", self.api_access_token)
+            elif not self.trust_reverse_proxy_auth:
+                raise RuntimeError(
+                    "Production must set APP_API_ACCESS_TOKEN or explicitly set "
+                    "APP_TRUST_REVERSE_PROXY_AUTH=true."
+                )
 
     def _validate_production_credential(self, label: str, value: str) -> None:
         normalized = value.strip().lower()

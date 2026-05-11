@@ -7,7 +7,7 @@
 ```bash
 cd /Users/fushuai/GitRepository/ruyi-dream
 cp .env.example .env
-# 编辑 .env，至少设置 RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY
+# 编辑根目录 .env，至少设置 RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY
 docker compose up -d rustfs
 ```
 
@@ -18,10 +18,10 @@ RustFS 默认地址：
 
 ## 后端本地启动
 
+先确保项目根目录已经有 `.env`。后端裸跑会读取这份主配置，不再维护单独的 `backend/.env`。
+
 ```bash
 cd /Users/fushuai/GitRepository/ruyi-dream/backend
-cp .env.example .env
-# 编辑 backend/.env；真实策划/生图需要 GEMINI_API_KEY 和 FAL_KEY
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -36,7 +36,9 @@ source .venv/bin/activate
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-后端裸跑时会自动读取 `backend/.env`。本地 `backend/.env` 常用配置：
+后端裸跑时会先读取项目根目录 `.env`，再读取可选的 `backend/.env.local`。根目录 `.env` 是本地开发、Compose 和后端裸跑共同使用的主配置源。
+
+根目录 `.env` 常用配置：
 
 ```env
 APP_S3_ENDPOINT_URL=http://127.0.0.1:9000
@@ -52,6 +54,13 @@ BACKEND_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 ```env
 GEMINI_API_KEY=
 FAL_KEY=
+```
+
+如确实需要只对后端裸跑做临时覆盖，可以创建 `backend/.env.local`。它不应存放共享密钥，常见用途是覆盖本地数据库或日志路径：
+
+```env
+APP_DATABASE_PATH=/tmp/ruyi-dream-dev.sqlite3
+APP_LOG_DIR=/tmp/ruyi-dream-logs
 ```
 
 健康检查：
@@ -95,7 +104,6 @@ docker compose up -d rustfs
 
 # 2. 启动后端
 cd backend
-cp .env.example .env
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt

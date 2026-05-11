@@ -87,6 +87,8 @@ BACKEND_CORS_ORIGINS=http://<server-ip-or-domain>:5173
 
 ## 生产边界
 
+- 根目录 `.env.example` 是唯一提交到 Git 的配置模板；根目录 `.env` 是本地/Compose 主配置源，不提交 Git。
+- 后端裸跑同样读取根目录 `.env`；`backend/.env.local` 仅允许作为本机临时覆盖文件，不作为共享配置源。
 - `.env` 不提交 Git，生产必须使用强随机 `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY`。
 - 生产环境设置 `APP_ENV=production`；后端启动时会拒绝缺失或默认对象存储密钥。
 - `FAL_KEY` 和 `GEMINI_API_KEY` 只放在部署环境，不写入文档或镜像。

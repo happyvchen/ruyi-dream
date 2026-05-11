@@ -49,17 +49,24 @@
 - 保存前可编辑货号/标题、删除图片。
 - 第一张图片默认作为封面。
 
-## 本地配置
+## 配置管理
 
 本项目支持两种本地运行方式：
 
 - 日常开发：RustFS 用 Docker Compose 启动，前端和后端本机裸跑，见 [本地开发说明](docs/local-development.md)。
 - 完整部署模拟：前端、后端、RustFS 全部由 Docker Compose 管理，见 [Docker Compose 部署与管理](docs/docker-compose-operations.md)。
 
-后端裸跑时会自动读取 `backend/.env`。首次配置可复制示例文件：
+配置采用单一主配置源：
+
+- 根目录 `.env.example` 是唯一提交到 Git 的环境变量模板。
+- 根目录 `.env` 是本地开发、Docker Compose 和后端裸跑共同读取的主配置文件，不提交 Git。
+- `backend/.env.local` 是可选的后端本地覆盖文件，只用于临时覆盖少量后端变量，不放共享密钥，不提交 Git。
+- 生产环境应由部署平台、CI/CD 或 Secret Manager 注入环境变量，不依赖仓库中的真实 `.env`。
+
+首次配置：
 
 ```bash
-cd backend
+cd /path/to/ruyi-dream
 cp .env.example .env
 ```
 
@@ -75,8 +82,8 @@ APP_STORAGE_BUCKET=ruyi-dream
 APP_S3_REGION=auto
 APP_S3_FORCE_PATH_STYLE=true
 APP_S3_PRESIGN_EXPIRES_SECONDS=900
-RUSTFS_ACCESS_KEY=admin
-RUSTFS_SECRET_KEY=change-me
+RUSTFS_ACCESS_KEY=<local-or-production-access-key>
+RUSTFS_SECRET_KEY=<local-or-production-secret-key>
 
 GPT_IMAGE2_PROVIDER=fal
 GPT_IMAGE2_MODEL_ID=openai/gpt-image-2/edit

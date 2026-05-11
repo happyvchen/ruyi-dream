@@ -6,6 +6,8 @@ frontend/dist/
 frontend/*.tsbuildinfo
 .env
 .env.local
+backend/.env
+backend/.env.local
 deployment/rustfs/.env
 deployment/app-data/*
 !deployment/app-data/.gitkeep
