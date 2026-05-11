@@ -2,7 +2,7 @@
 
 ## 职责 (Scope)
 
-AI 模特组图生成 MVP 的后端实现目录。当前后端已经初始化为 FastAPI + SQLite + S3 兼容对象存储的 MVP，实现服装图包上传、默认组图方案、Gemini 组图策划、fal GPT Image-2 真实生成、单张重生、最终图标记、ZIP 导出和事件留痕。
+ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + SQLite + S3 兼容对象存储的 MVP，实现服装图包上传、默认组图方案、Gemini 组图策划、fal GPT Image-2 真实生成、单张重生、最终图标记、ZIP 导出和事件留痕。
 
 设计层面的产品范围、生成职责和技术路线在 `../design/`，本目录只管“代码怎么写”和“后端契约怎么落地”。
 

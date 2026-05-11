@@ -5,7 +5,7 @@
 日常开发推荐前后端裸跑，只用 Docker Compose 启动 RustFS。这样前端热更新、后端 reload 和调试都更轻。
 
 ```bash
-cd /Users/fushuai/Desktop/项目/Lily/Lily-AI模特组图生成-MVP
+cd /Users/fushuai/Desktop/项目/Lily/ruyi-dream
 docker compose up -d rustfs
 ```
 
@@ -30,7 +30,7 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```env
 APP_S3_ENDPOINT_URL=http://127.0.0.1:9000
 APP_S3_PUBLIC_ENDPOINT_URL=http://127.0.0.1:9000
-APP_STORAGE_BUCKET=lily
+APP_STORAGE_BUCKET=ruyi-dream
 RUSTFS_ACCESS_KEY=admin
 RUSTFS_SECRET_KEY=change-me
 BACKEND_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173

@@ -218,7 +218,7 @@ def upload_bytes_to_fal(content: bytes, filename: str, content_type: str | None 
 
     os.environ["FAL_KEY"] = settings.fal_key
     suffix = filename_suffix(filename, content_type)
-    with tempfile.NamedTemporaryFile(prefix="lily-fal-input-", suffix=suffix) as handle:
+    with tempfile.NamedTemporaryFile(prefix="ruyi-dream-fal-input-", suffix=suffix) as handle:
         handle.write(content)
         handle.flush()
         return fal_client.upload_file(handle.name)

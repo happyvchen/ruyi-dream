@@ -1,7 +1,7 @@
 services:
   rustfs:
     image: rustfs/rustfs:latest
-    container_name: rustfs
+    container_name: ruyi-dream-rustfs
     restart: unless-stopped
     environment:
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?set RUSTFS_ACCESS_KEY in .env}

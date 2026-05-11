@@ -1,6 +1,7 @@
 services:
   rustfs:
     image: rustfs/rustfs:latest
+    container_name: ruyi-dream-rustfs
     restart: unless-stopped
     environment:
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?set RUSTFS_ACCESS_KEY in .env}
@@ -28,6 +29,7 @@ services:
         max-file: "10"
 
   backend:
+    container_name: ruyi-dream-backend
     build:
       context: ./backend
     restart: unless-stopped
@@ -39,7 +41,7 @@ services:
       APP_LOG_DIR: /app/data/logs
       APP_S3_ENDPOINT_URL: http://rustfs:9000
       APP_S3_PUBLIC_ENDPOINT_URL: ${PUBLIC_S3_URL:-http://127.0.0.1:9000}
-      APP_STORAGE_BUCKET: ${APP_STORAGE_BUCKET:-lily}
+      APP_STORAGE_BUCKET: ${APP_STORAGE_BUCKET:-ruyi-dream}
       APP_S3_REGION: auto
       APP_S3_FORCE_PATH_STYLE: "true"
       APP_S3_PRESIGN_EXPIRES_SECONDS: 900
@@ -73,6 +75,7 @@ services:
         max-file: "10"
 
   frontend:
+    container_name: ruyi-dream-frontend
     build:
       context: ./frontend
       args:

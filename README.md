@@ -1,8 +1,8 @@
-# AI 模特组图生成 MVP
+# ruyi-dream MVP
 
-本项目是标准化 AI 模特组图生成工具的 MVP。当前阶段先服务单一试点客户和单一工作空间，但产品设计应保留后续 SaaS 化、多客户、多租户、权限和计费扩展空间。
+本项目是 ruyi-dream 的标准化 MVP。当前阶段先服务单一试点客户和单一工作空间，但产品设计应保留后续 SaaS 化、多客户、多租户、权限、计费和主视频生成扩展空间。
 
-项目目标是：基于 `1 个服装货号图包` 及其默认组图方案，自动生成一组可用于淘宝、天猫等电商场景的品牌风格模特服装展示图。
+项目目标是：基于 `1 个服装货号图包` 及其默认组图方案，自动生成一组可用于淘宝、天猫等电商场景的品牌风格模特服装展示图；后续可结合 Seedance 2.0 扩展电商主视频生成。
 
 ## Agent 入口
 
@@ -71,7 +71,7 @@ GEMINI_MODEL=gemini-3-flash-preview
 
 APP_S3_ENDPOINT_URL=http://127.0.0.1:9000
 APP_S3_PUBLIC_ENDPOINT_URL=http://127.0.0.1:9000
-APP_STORAGE_BUCKET=app-media
+APP_STORAGE_BUCKET=ruyi-dream
 APP_S3_REGION=auto
 APP_S3_FORCE_PATH_STYLE=true
 APP_S3_PRESIGN_EXPIRES_SECONDS=900

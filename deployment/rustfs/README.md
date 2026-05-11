@@ -4,6 +4,8 @@
 
 项目根目录的 `docker-compose.yml` 已经把 `frontend`、`backend` 和 `rustfs` 编排在一起，是当前推荐的完整部署入口。本文档保留 RustFS 单服务部署说明，用于只启动对象存储、本地开发或独立运维 RustFS。
 
+单服务部署的容器名固定为 `ruyi-dream-rustfs`，避免和同机其它 RustFS / S3 兼容服务混淆。
+
 本部署方案将运行状态保存在容器外：
 
 | 宿主机路径 | 容器路径 | 用途 |
@@ -94,7 +96,7 @@ mc ls app-rustfs
 ```env
 APP_S3_ENDPOINT_URL=http://127.0.0.1:9000
 APP_S3_PUBLIC_ENDPOINT_URL=http://127.0.0.1:9000
-APP_STORAGE_BUCKET=app-media
+APP_STORAGE_BUCKET=ruyi-dream
 APP_S3_REGION=auto
 APP_S3_FORCE_PATH_STYLE=true
 APP_S3_PRESIGN_EXPIRES_SECONDS=900

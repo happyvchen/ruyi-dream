@@ -25,11 +25,11 @@ Browser
   -> RustFS public presigned URL, port 9000
 ```
 
-| Compose service | 镜像来源 | 职责 | 对外端口 |
-|---|---|---|---|
-| `frontend` | `frontend/Dockerfile` | 构建 React/Vite 静态资源，用 Nginx 提供 SPA fallback | `5173 -> 80` |
-| `backend` | `backend/Dockerfile` | FastAPI API、SQLite、后台 planner/generation poller | `8000 -> 8000` |
-| `rustfs` | `rustfs/rustfs` | S3 兼容对象存储，保存素材、生成结果和导出 ZIP | `9000 -> 9000`, `9001 -> 9001` |
+| Compose service | 容器名 | 镜像来源 | 职责 | 对外端口 |
+|---|---|---|---|---|
+| `frontend` | `ruyi-dream-frontend` | `frontend/Dockerfile` | 构建 React/Vite 静态资源，用 Nginx 提供 SPA fallback | `5173 -> 80` |
+| `backend` | `ruyi-dream-backend` | `backend/Dockerfile` | FastAPI API、SQLite、后台 planner/generation poller | `8000 -> 8000` |
+| `rustfs` | `ruyi-dream-rustfs` | `rustfs/rustfs` | S3 兼容对象存储，保存素材、生成结果和导出 ZIP | `9000 -> 9000`, `9001 -> 9001` |
 
 ## 数据持久化
 

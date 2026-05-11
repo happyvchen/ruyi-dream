@@ -954,7 +954,7 @@ export function App() {
     <div className="app-shell">
       <header className="topbar">
         <div>
-          <div className="brand">AI 模特组图</div>
+          <div className="brand">ruyi-dream</div>
           <h1>{pageTitle(page)}</h1>
           <p>{pageSubtitle(page)}</p>
         </div>

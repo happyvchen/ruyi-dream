@@ -16,7 +16,7 @@ class Settings:
     log_dir = Path(os.getenv("APP_LOG_DIR", data_dir / "logs"))
     s3_endpoint_url = os.getenv("APP_S3_ENDPOINT_URL", "http://127.0.0.1:9000")
     s3_public_endpoint_url = os.getenv("APP_S3_PUBLIC_ENDPOINT_URL", s3_endpoint_url)
-    s3_bucket = os.getenv("APP_S3_BUCKET", os.getenv("APP_STORAGE_BUCKET", "app-media"))
+    s3_bucket = os.getenv("APP_S3_BUCKET", os.getenv("APP_STORAGE_BUCKET", "ruyi-dream"))
     s3_region = os.getenv("APP_S3_REGION", "auto")
     s3_access_key_id = os.getenv("APP_S3_ACCESS_KEY_ID", os.getenv("RUSTFS_ACCESS_KEY", "admin"))
     s3_secret_access_key = os.getenv("APP_S3_SECRET_ACCESS_KEY", os.getenv("RUSTFS_SECRET_KEY", "DQugmV9crHkkYYjG"))

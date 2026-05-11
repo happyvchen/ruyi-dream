@@ -1,4 +1,4 @@
-# AI 模特组图生成 MVP — Project Tasks
+# ruyi-dream MVP — Project Tasks
 
 > 项目级任务跟踪。设计源头见 `design/CLAUDE.md`；前后端实现规范见 `frontend/CLAUDE.md` 和 `backend/CLAUDE.md`。
 

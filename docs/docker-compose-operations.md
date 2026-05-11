@@ -3,7 +3,7 @@
 ## 首次部署
 
 ```bash
-cd /path/to/Lily-AI模特组图生成-MVP
+cd /path/to/ruyi-dream
 cp .env.example .env
 ```
 
@@ -25,6 +25,8 @@ FAL_KEY=<required-for-real-image-generation>
 docker compose up -d --build
 docker compose ps
 ```
+
+Compose 会使用固定容器名：`ruyi-dream-frontend`、`ruyi-dream-backend`、`ruyi-dream-rustfs`，用于和同机其它服务区分。日常命令仍使用 service 名 `frontend`、`backend`、`rustfs`。
 
 验收：
 
