@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
+  Archive,
   Check,
   Clock,
   Edit3,
@@ -16,6 +17,7 @@ import {
   ImagePlus,
   Loader2,
   RefreshCw,
+  Search,
   Sparkles,
   Upload,
   X,
@@ -26,6 +28,10 @@ import type { AppRoute, Page } from './routes'
 import type { GarmentSku, GenerationImage, GenerationRun, ModelProfile, Shot, ShotPlan } from './types'
 
 const SHOW_DEBUG_INFO = import.meta.env.VITE_SHOW_DEBUG_INFO === 'true'
+const SKU_PAGE_SIZE = 30
+const MODEL_PAGE_SIZE = 30
+const RUN_PAGE_SIZE = 20
+const SKU_IMAGE_PAGE_SIZE = 24
 
 type BusyState = 'idle' | 'uploading' | 'planning' | 'saving-plan' | 'previewing' | 'generating' | 'regenerating'
 type ImportStatus = 'draft' | 'uploading' | 'uploaded' | 'failed'
@@ -72,6 +78,9 @@ type ModelHeadEntry = {
   angle: string
   filename: string
   url: string
+  thumbUrl?: string
+  previewUrl?: string
+  originalUrl?: string
   fileSize?: number | null
 }
 type AuthState = {
@@ -90,14 +99,27 @@ export function App() {
   const appReady = auth.checked && auth.authenticated
   const [skus, setSkus] = useState<GarmentSku[]>([])
   const [models, setModels] = useState<ModelProfile[]>([])
+  const [skuNextOffset, setSkuNextOffset] = useState<number | null>(null)
+  const [skuHasMore, setSkuHasMore] = useState(false)
+  const [generateSearchSkus, setGenerateSearchSkus] = useState<GarmentSku[]>([])
+  const [generateSearchNextOffset, setGenerateSearchNextOffset] = useState<number | null>(null)
+  const [generateSearchHasMore, setGenerateSearchHasMore] = useState(false)
+  const [modelNextOffset, setModelNextOffset] = useState<number | null>(null)
+  const [modelHasMore, setModelHasMore] = useState(false)
   const [selectedSku, setSelectedSku] = useState<GarmentSku | null>(null)
   const [selectedModelId, setSelectedModelId] = useState<number | undefined>()
   const [shotPlan, setShotPlan] = useState<ShotPlan | null>(null)
   const [previewRun, setPreviewRun] = useState<GenerationRun | null>(null)
   const [generationRun, setGenerationRun] = useState<GenerationRun | null>(null)
   const [historyRuns, setHistoryRuns] = useState<GenerationRun[]>([])
+  const [runNextOffset, setRunNextOffset] = useState<number | null>(null)
+  const [runHasMore, setRunHasMore] = useState(false)
+  const [historySearchRuns, setHistorySearchRuns] = useState<GenerationRun[]>([])
+  const [historySearchNextOffset, setHistorySearchNextOffset] = useState<number | null>(null)
+  const [historySearchHasMore, setHistorySearchHasMore] = useState(false)
   const [selectedHistoryRun, setSelectedHistoryRun] = useState<GenerationRun | null>(null)
   const [historyFilter, setHistoryFilter] = useState('')
+  const [generateSkuFilter, setGenerateSkuFilter] = useState('')
   const [busy, setBusy] = useState<BusyState>('idle')
   const [error, setError] = useState<string | null>(null)
   const [page, setPage] = useState<Page>(() => parseRoute().page)
@@ -128,6 +150,16 @@ export function App() {
       && previewRun.skuId === selectedSku.id
       && previewRun.shotPlanId === shotPlan.id,
   )
+  const relevantHistoryRuns = useMemo(() => {
+    const runs = selectedSku ? historyRuns.filter((run) => run.skuId === selectedSku.id) : [...historyRuns]
+    return runs.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+  }, [historyRuns, selectedSku?.id])
+  const taskStage = getGenerateTaskStage(selectedSku, shotPlan, previewRun, generationRun)
+  const generateSkuKeyword = generateSkuFilter.trim()
+  const filteredGenerateSkus = generateSkuKeyword ? generateSearchSkus : skus
+  const generateSkuHasMore = generateSkuKeyword ? generateSearchHasMore : skuHasMore
+  const displayedHistoryRuns = historyFilter.trim() ? historySearchRuns : historyRuns
+  const displayedHistoryHasMore = historyFilter.trim() ? historySearchHasMore : runHasMore
 
   function navigate(routeInput: AppRoute, replace = false) {
     const url = routeToUrl(routeInput)
@@ -152,6 +184,62 @@ export function App() {
     if (!appReady) return
     void refreshBaseData()
   }, [appReady, showArchivedSkus, showArchivedRuns])
+
+  useEffect(() => {
+    if (!appReady) return
+    const keyword = generateSkuFilter.trim()
+    if (!keyword) {
+      setGenerateSearchSkus([])
+      setGenerateSearchNextOffset(null)
+      setGenerateSearchHasMore(false)
+      return
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      void api.listSkus({ includeArchived: showArchivedSkus, limit: SKU_PAGE_SIZE, keyword })
+        .then((result) => {
+          if (cancelled) return
+          setGenerateSearchSkus(result.items)
+          setGenerateSearchNextOffset(result.nextOffset)
+          setGenerateSearchHasMore(result.hasMore)
+        })
+        .catch((err) => {
+          if (!cancelled) setError(err instanceof Error ? err.message : '搜索货号失败')
+        })
+    }, 250)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [appReady, generateSkuFilter, showArchivedSkus])
+
+  useEffect(() => {
+    if (!appReady) return
+    const keyword = historyFilter.trim()
+    if (!keyword) {
+      setHistorySearchRuns([])
+      setHistorySearchNextOffset(null)
+      setHistorySearchHasMore(false)
+      return
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      void api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE, keyword })
+        .then((result) => {
+          if (cancelled) return
+          setHistorySearchRuns(result.items)
+          setHistorySearchNextOffset(result.nextOffset)
+          setHistorySearchHasMore(result.hasMore)
+        })
+        .catch((err) => {
+          if (!cancelled) setError(err instanceof Error ? err.message : '搜索生成记录失败')
+        })
+    }, 250)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [appReady, historyFilter, showArchivedRuns])
 
   useEffect(() => {
     const handlePopState = () => {
@@ -276,7 +364,10 @@ export function App() {
     const editingModel = models.find((model) => model.id === editingModelId)
     if (editingModel) {
       setModelForm(modelToForm(editingModel))
-      setModelHeadDrafts([])
+      setModelHeadDrafts((current) => {
+        revokeModelHeadDraftPreviews(current)
+        return []
+      })
     }
   }, [editingModelId, models])
 
@@ -288,6 +379,11 @@ export function App() {
       if (targetSku) {
         setHydratedRouteKey(routeKey(route))
         void chooseSku(targetSku, { syncUrl: false })
+      } else {
+        setHydratedRouteKey(routeKey(route))
+        void resolveSkuByCode(route.sku).then((resolved) => {
+          if (resolved) void chooseSku(resolved, { syncUrl: false })
+        })
       }
       return
     }
@@ -301,6 +397,11 @@ export function App() {
       if (targetRun) {
         setHydratedRouteKey(routeKey(route))
         void restoreHistoryRun(targetRun, { syncUrl: false })
+      } else {
+        setHydratedRouteKey(routeKey(route))
+        void api.getRun(route.generateRunId).then((result) => restoreHistoryRun(result.item, { syncUrl: false })).catch((err) => {
+          setError(err instanceof Error ? err.message : '读取生成记录失败')
+        })
       }
       return
     }
@@ -309,6 +410,11 @@ export function App() {
       if (targetSku) {
         setHydratedRouteKey(routeKey(route))
         void chooseSku(targetSku, { syncUrl: false, previewRunId: route.generatePreviewRunId })
+      } else {
+        setHydratedRouteKey(routeKey(route))
+        void resolveSkuByCode(route.generateSku).then((resolved) => {
+          if (resolved) void chooseSku(resolved, { syncUrl: false, previewRunId: route.generatePreviewRunId })
+        })
       }
       return
     }
@@ -340,8 +446,20 @@ export function App() {
     await api.logout()
     setAuth({ checked: true, authRequired: true, authenticated: false })
     setSkus([])
+    setGenerateSearchSkus([])
+    setGenerateSearchNextOffset(null)
+    setGenerateSearchHasMore(false)
     setModels([])
+    setSkuNextOffset(null)
+    setSkuHasMore(false)
+    setModelNextOffset(null)
+    setModelHasMore(false)
     setHistoryRuns([])
+    setHistorySearchRuns([])
+    setHistorySearchNextOffset(null)
+    setHistorySearchHasMore(false)
+    setRunNextOffset(null)
+    setRunHasMore(false)
     setSelectedSku(null)
     setShotPlan(null)
     setPreviewRun(null)
@@ -352,25 +470,119 @@ export function App() {
   async function refreshBaseData() {
     setError(null)
     const [skuResult, modelResult, runResult] = await Promise.all([
-      api.listSkus({ includeArchived: showArchivedSkus }),
-      api.listModels(),
-      api.listRuns({ includeArchived: showArchivedRuns }),
+      api.listSkus({ includeArchived: showArchivedSkus, limit: SKU_PAGE_SIZE }),
+      api.listModels({ limit: MODEL_PAGE_SIZE }),
+      api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE }),
     ])
     setSkus(skuResult.items)
+    setSkuNextOffset(skuResult.nextOffset)
+    setSkuHasMore(skuResult.hasMore)
     setModels(modelResult.items)
+    setModelNextOffset(modelResult.nextOffset)
+    setModelHasMore(modelResult.hasMore)
     setHistoryRuns(runResult.items)
+    setRunNextOffset(runResult.nextOffset)
+    setRunHasMore(runResult.hasMore)
     if (!selectedModelId && modelResult.items[0]) setSelectedModelId(modelResult.items[0].id)
     if (!editingModelId && modelResult.items[0]) setEditingModelId(modelResult.items[0].id)
   }
 
   async function refreshHistoryRuns() {
-    const result = await api.listRuns({ includeArchived: showArchivedRuns })
+    const result = await api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE })
     setHistoryRuns(result.items)
+    setRunNextOffset(result.nextOffset)
+    setRunHasMore(result.hasMore)
+  }
+
+  async function resolveSkuByCode(skuCode: string) {
+    const result = await api.listSkus({ includeArchived: true, limit: 5, keyword: skuCode })
+    return result.items.find((sku) => sku.sku === skuCode) ?? result.items[0] ?? null
+  }
+
+  async function loadMoreSkus() {
+    if (skuNextOffset === null) return
+    const result = await api.listSkus({ includeArchived: showArchivedSkus, limit: SKU_PAGE_SIZE, offset: skuNextOffset })
+    setSkus((current) => mergeById(current, result.items))
+    setSkuNextOffset(result.nextOffset)
+    setSkuHasMore(result.hasMore)
+  }
+
+  async function loadMoreGenerateSkus() {
+    const keyword = generateSkuFilter.trim()
+    if (!keyword) {
+      await loadMoreSkus()
+      return
+    }
+    if (generateSearchNextOffset === null) return
+    const result = await api.listSkus({
+      includeArchived: showArchivedSkus,
+      limit: SKU_PAGE_SIZE,
+      offset: generateSearchNextOffset,
+      keyword,
+    })
+    setGenerateSearchSkus((current) => mergeById(current, result.items))
+    setGenerateSearchNextOffset(result.nextOffset)
+    setGenerateSearchHasMore(result.hasMore)
+  }
+
+  async function loadMoreModels() {
+    if (modelNextOffset === null) return
+    const result = await api.listModels({ limit: MODEL_PAGE_SIZE, offset: modelNextOffset })
+    setModels((current) => mergeById(current, result.items))
+    setModelNextOffset(result.nextOffset)
+    setModelHasMore(result.hasMore)
+  }
+
+  async function loadMoreRuns() {
+    if (runNextOffset === null) return
+    const result = await api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE, offset: runNextOffset })
+    setHistoryRuns((current) => mergeById(current, result.items))
+    setRunNextOffset(result.nextOffset)
+    setRunHasMore(result.hasMore)
+  }
+
+  async function loadMoreDisplayedRuns() {
+    const keyword = historyFilter.trim()
+    if (!keyword) {
+      await loadMoreRuns()
+      return
+    }
+    if (historySearchNextOffset === null) return
+    const result = await api.listRuns({
+      includeArchived: showArchivedRuns,
+      limit: RUN_PAGE_SIZE,
+      offset: historySearchNextOffset,
+      keyword,
+    })
+    setHistorySearchRuns((current) => mergeById(current, result.items))
+    setHistorySearchNextOffset(result.nextOffset)
+    setHistorySearchHasMore(result.hasMore)
+  }
+
+  async function loadMoreSelectedSkuImages() {
+    if (!selectedSku?.imagePage?.hasMore || selectedSku.imagePage.nextOffset === null) return
+    const result = await api.listSkuImages(selectedSku.id, {
+      limit: SKU_IMAGE_PAGE_SIZE,
+      offset: selectedSku.imagePage.nextOffset,
+    })
+    setSelectedSku((current) => {
+      if (!current || current.id !== selectedSku.id) return current
+      return {
+        ...current,
+        images: mergeById(current.images ?? [], result.items),
+        imagePage: {
+          limit: result.limit,
+          offset: result.offset,
+          nextOffset: result.nextOffset,
+          hasMore: result.hasMore,
+        },
+      }
+    })
   }
 
   async function chooseSku(sku: GarmentSku, options: { syncUrl?: boolean; targetPage?: Page; previewRunId?: number } = {}) {
     setError(null)
-    const detail = await api.getSku(sku.id)
+    const detail = await api.getSku(sku.id, { imageLimit: SKU_IMAGE_PAGE_SIZE })
     const planResult = await api.getDefaultPlan(sku.id)
     const rawPreferredPreview = await resolvePreviewRun(detail.item.id, undefined, options.previewRunId)
     const preferredPreview = rawPreferredPreview && (!planResult.item || rawPreferredPreview.shotPlanId === planResult.item.id)
@@ -388,6 +600,9 @@ export function App() {
     const restoredPreview = preferredPreview ?? await resolvePreviewRun(detail.item.id, activePlan?.id)
     setPreviewRun(restoredPreview)
     setGenerationRun(null)
+    void api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE, skuId: detail.item.id }).then((result) => {
+      setHistoryRuns((current) => mergeById(current, result.items))
+    })
     if (options.syncUrl !== false) {
       const targetPage = options.targetPage ?? page
       if (targetPage === 'garments') navigate({ page: 'garments', sku: detail.item.sku })
@@ -407,7 +622,7 @@ export function App() {
       }
     }
     if (!shotPlanId) return null
-    const runs = (await api.listRuns()).items
+    const runs = (await api.listRuns({ skuId, limit: 100 })).items
     const preview = runs.find((run) => run.kind === 'preview_grid' && run.skuId === skuId && run.shotPlanId === shotPlanId)
     if (!preview) return null
     try {
@@ -443,6 +658,9 @@ export function App() {
   }
 
   function removeImportImage(packageId: string, imageId: string) {
+    const targetPackage = importPackages.find((item) => item.id === packageId)
+    const targetImage = targetPackage?.images.find((image) => image.id === imageId)
+    if (targetImage) URL.revokeObjectURL(targetImage.previewUrl)
     setImportPackages((current) =>
       current
         .map((item) =>
@@ -455,6 +673,8 @@ export function App() {
   }
 
   function removeImportPackage(packageId: string) {
+    const target = importPackages.find((item) => item.id === packageId)
+    if (target) revokeImportPackagePreviews([target])
     setImportPackages((current) => current.filter((item) => item.id !== packageId))
   }
 
@@ -487,6 +707,7 @@ export function App() {
         title: detail.item.title ?? detail.item.sku,
         status: detail.item.status,
       })
+      revokeImportPackagePreviews([target])
       setImportPackages((current) => current.filter((item) => item.id !== packageId))
       await refreshBaseData()
 
@@ -531,6 +752,10 @@ export function App() {
   async function createPlan(skuOverride?: GarmentSku) {
     const targetSku = skuOverride ?? selectedSku
     if (!targetSku) return
+    if (shotPlan && shotPlan.skuId === targetSku.id) {
+      const confirmed = window.confirm('重新生成默认方案会替换当前货号正在使用的默认拍摄方案。确认继续？')
+      if (!confirmed) return
+    }
     setBusy('planning')
     setError(null)
     try {
@@ -748,7 +973,7 @@ export function App() {
     setBusy('uploading')
     setError(null)
     try {
-      const result = await api.updateSku(selectedSku.id, editSkuForm)
+      const result = await api.updateSku(selectedSku.id, { sku: editSkuForm.sku, title: editSkuForm.title })
       setSelectedSku(result.item)
       await refreshBaseData()
       if (page === 'garments') navigate({ page: 'garments', sku: result.item.sku }, true)
@@ -846,7 +1071,10 @@ export function App() {
   function beginNewModel() {
     setEditingModelId(undefined)
     setModelForm(createBlankModelForm(models.length + 1))
-    setModelHeadDrafts([])
+    setModelHeadDrafts((current) => {
+      revokeModelHeadDraftPreviews(current)
+      return []
+    })
     navigate({ page: 'models' })
   }
 
@@ -872,7 +1100,10 @@ export function App() {
       }
       setEditingModelId(result.item.id)
       if (result.item.isDefault || !selectedModelId) setSelectedModelId(result.item.id)
-      setModelHeadDrafts([])
+      setModelHeadDrafts((current) => {
+        revokeModelHeadDraftPreviews(current)
+        return []
+      })
       navigate({ page: 'models', modelId: result.item.modelId }, true)
       await refreshBaseData()
     } catch (err) {
@@ -891,8 +1122,11 @@ export function App() {
     setError(null)
     try {
       await api.deleteModel(editingModel.id)
-      const nextModels = (await api.listModels()).items
+      const modelResult = await api.listModels({ limit: MODEL_PAGE_SIZE })
+      const nextModels = modelResult.items
       setModels(nextModels)
+      setModelNextOffset(modelResult.nextOffset)
+      setModelHasMore(modelResult.hasMore)
       const nextModel = nextModels[0]
       setEditingModelId(nextModel?.id)
       if (selectedModelId === editingModel.id) setSelectedModelId(nextModel?.id)
@@ -911,8 +1145,7 @@ export function App() {
     setError(null)
     try {
       await api.deleteRun(run.id)
-      const nextRuns = (await api.listRuns()).items
-      setHistoryRuns(nextRuns)
+      await refreshHistoryRuns()
       if (selectedHistoryRun?.id === run.id) {
         setSelectedHistoryRun(null)
         if (page === 'history') navigate({ page: 'history' }, true)
@@ -978,13 +1211,11 @@ export function App() {
 
   async function replaceModelHeadReference(angle: string, file: File) {
     if (!editingModelId) {
-      setModelHeadDrafts((current) =>
-        current.map((item) =>
-          item.id === angle
-            ? { ...item, file, previewUrl: URL.createObjectURL(file) }
-            : item,
-        ),
-      )
+      setModelHeadDrafts((current) => current.map((item) => {
+        if (item.id !== angle) return item
+        URL.revokeObjectURL(item.previewUrl)
+        return { ...item, file, previewUrl: URL.createObjectURL(file) }
+      }))
       return
     }
     setBusy('uploading')
@@ -1038,7 +1269,11 @@ export function App() {
 
   async function deleteModelHeadReference(angle: string) {
     if (!editingModelId) {
-      setModelHeadDrafts((current) => current.filter((item) => item.id !== angle))
+      setModelHeadDrafts((current) => {
+        const target = current.find((item) => item.id === angle)
+        if (target) URL.revokeObjectURL(target.previewUrl)
+        return current.filter((item) => item.id !== angle)
+      })
       return
     }
     const confirmed = window.confirm(`确认删除 ${headReferenceLabel(angle)} 头像？`)
@@ -1084,175 +1319,172 @@ export function App() {
 
       {error && <div className="alert">{error}</div>}
 
-      {page === 'generate' && <main className="workspace">
-        <section className="left-rail">
-          <Panel title="上传服装" icon={<Upload size={18} />}>
-            <p className="small-muted">请到“服装素材”页完成预览与编辑后保存上传。</p>
-            <button className="primary full" onClick={() => navigate({ page: 'garments' })}>
-              <Upload size={17} />导入新图包
-            </button>
-          </Panel>
-
-          <Panel title="服装素材" icon={<FileImage size={18} />}>
-            <div className="sku-list">
-              {skus.length === 0 && <EmptyText text="还没有上传货号" />}
-              {skus.map((sku) => (
-                <button
-                  key={sku.id}
-                  className={`sku-item ${selectedSku?.id === sku.id ? 'selected' : ''}`}
-                  onClick={() => void chooseSku(sku, { targetPage: 'generate' })}
-                >
-                  {sku.coverUrl ? (
-                    <ImagePreviewThumb
-                      src={mediaUrl(sku.coverUrl)}
-                      name={sku.sku}
-                      fileSize={sku.coverFileSize}
-                      compact
-                    />
-                  ) : <div className="thumb-fallback" />}
-                  <span>
-                    <strong>{sku.sku}</strong>
-                    <small>{sku.imageCount ?? 0} 张图片 · {sku.archivedAt ? '已归档' : statusText(sku.status)}</small>
-                  </span>
-                </button>
-              ))}
-            </div>
-          </Panel>
+      {page === 'generate' && <main className="generate-workbench">
+        <section className="task-hero">
+          <div className="task-hero-copy">
+            <span className="eyebrow">当前拍摄任务</span>
+            <h2>{selectedSku ? selectedSku.sku : '选择一个服装货号'}</h2>
+            <p>{selectedSku?.analysis?.summary ?? '从左侧选择已保存货号，或先导入图包并生成默认拍摄方案。'}</p>
+          </div>
+          <div className="task-status-strip">
+            <TaskStatus label="服装" value={selectedSku ? `${selectedSku.imageCount ?? selectedSku.images?.length ?? 0} 张素材` : '未选择'} state={selectedSku ? 'ready' : 'idle'} />
+            <TaskStatus label="默认方案" value={shotPlan ? `${shotPlan.plan.shots.length} 张图位` : '未保存'} state={shotPlanPlanning ? 'running' : shotPlan ? 'ready' : 'idle'} />
+            <TaskStatus label="分镜" value={previewRun ? statusText(previewRun.status) : '未预览'} state={runTaskStatusState(previewRun)} />
+            <TaskStatus label="最终图" value={generationRun ? statusText(generationRun.status) : '未生成'} state={runTaskStatusState(generationRun)} />
+          </div>
         </section>
 
-        <section className="main-flow">
-          <div className="step-grid">
-            <StepCard number="1" title="选择服装">
-              {selectedSku ? (
-                <div className="selected-garment">
-                  <div className="image-strip">
-                    {(selectedSku.images ?? []).slice(0, 5).map((image) => (
+        <section className="task-layout">
+          <aside className="task-sidebar">
+            <Panel title="服装货号" icon={<FileImage size={18} />}>
+              <button className="primary full" onClick={() => navigate({ page: 'garments' })}>
+                <Upload size={17} />导入新图包
+              </button>
+              <label className="search-field">
+                <Search size={16} />
+                <input
+                  value={generateSkuFilter}
+                  onChange={(event) => setGenerateSkuFilter(event.target.value)}
+                  placeholder="搜索货号或标题"
+                />
+              </label>
+              <div className="sku-list task-sku-list">
+                {filteredGenerateSkus.length === 0 && <EmptyText text={skus.length === 0 && !generateSkuKeyword ? '还没有上传货号' : '没有匹配的货号'} />}
+                {filteredGenerateSkus.map((sku) => (
+                  <button
+                    key={sku.id}
+                    className={`sku-item ${selectedSku?.id === sku.id ? 'selected' : ''}`}
+                    onClick={() => void chooseSku(sku, { targetPage: 'generate' })}
+                  >
+                    {sku.coverUrl ? (
                       <ImagePreviewThumb
-                        key={image.id}
-                        src={mediaUrl(image.url)}
-                        name={image.filename}
-                        fileSize={image.fileSize}
+                        src={mediaUrl(sku.coverThumbUrl ?? sku.coverUrl)}
+                        fullSrc={mediaUrl(sku.coverPreviewUrl ?? sku.coverOriginalUrl ?? sku.coverUrl)}
+                        name={sku.sku}
+                        fileSize={sku.coverFileSize}
                         compact
                       />
-                    ))}
-                  </div>
-                  <h3>{selectedSku.sku}</h3>
-                  <p>{selectedSku.analysis?.summary ?? '请先在“服装素材”页保存默认组图方案。'}</p>
-                  <Tag>{shotPlan ? '已保存默认方案' : '缺少默认方案'}</Tag>
-                </div>
-              ) : (
-                <EmptyText text="选择或上传一个货号开始" />
-              )}
-            </StepCard>
-
-            <StepCard number="2" title="使用默认方案">
-              {planModel ? (
-                  <div className="model-summary">
-                  <div className="model-avatar">
-                    {planModel.previewUrl ? (
-                      <ImagePreviewThumb
-                        src={mediaUrl(planModel.previewUrl)}
-                        name={planModel.name}
-                        fileSize={modelPreviewFileSize(planModel)}
-                        compact
-                        round
-                      />
-                    ) : modelInitials(planModel)}
-                  </div>
-                  <h3>{shotPlan?.plan.brandStyle?.name ?? '暂无默认组图方案'}</h3>
-                  <p>{shotPlan ? shotPlanPlanning ? '正在识别服装品类并生成拍摄方案和分镜脚本。' : `将使用 ${planModel.name} 和服装素材页保存的 ${shotPlan.plan.shots.length} 张图位方案。` : '回到服装素材页生成默认组图方案后，这里会直接用于生成。'}</p>
-                  {shotPlan ? <Tag>{shotPlanPlanning ? '策划中' : planModel.name}</Tag> : <button className="secondary" onClick={() => navigate(selectedSku ? { page: 'garments', sku: selectedSku.sku } : { page: 'garments' })}>去保存方案</button>}
-                </div>
-              ) : (
-                <EmptyText text="暂无数字模特" />
-              )}
-            </StepCard>
-
-            <StepCard number="3" title="分镜预览">
-              <div className="model-summary">
-                <h3>{previewRun ? `预览 #${previewRun.id}` : '先看姿势方向'}</h3>
-                <p>
-                  {previewRun
-                    ? previewRun.status === 'SUCCEEDED'
-                      ? '状态：已生成。满意后再生成最终 5 张成片。'
-                      : isRunActive(previewRun)
-                        ? `状态：${statusText(previewRun.status)}。分镜预览完成后即可生成最终成片。`
-                        : `状态：${statusText(previewRun.status)}。请重新预览后再生成最终成片。`
-                    : '点击预览会先生成一张 2x3 分镜预览，前 5 格对应最终组图，第 6 格为备用候选姿势。'}
-                </p>
-                {previewRun ? <Tag>{previewRun.status === 'SUCCEEDED' ? '可用于生成' : isRunActive(previewRun) ? '生成中' : '不可生成'}</Tag> : <Tag>未预览</Tag>}
+                    ) : <div className="thumb-fallback" />}
+                    <span>
+                      <strong>{sku.sku}</strong>
+                      <small>{sku.imageCount ?? 0} 张图片 · {sku.archivedAt ? '已归档' : statusText(sku.status)}</small>
+                    </span>
+                  </button>
+                ))}
+                {generateSkuHasMore && (
+                  <button className="secondary full" onClick={() => void loadMoreGenerateSkus()}>
+                    加载更多货号
+                  </button>
+                )}
               </div>
-            </StepCard>
-          </div>
+            </Panel>
+          </aside>
 
-          <div className="action-row">
-            <button className="secondary" onClick={previewGrid} disabled={!selectedSku || !shotPlan || shotPlanPlanning || busy !== 'idle' || Boolean(previewRun && isRunActive(previewRun))}>
-              {busy === 'previewing' ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
-              预览
-            </button>
-            <button className="primary" onClick={generateGroup} disabled={!canGenerateGroup || Boolean(previewRun && isRunActive(previewRun)) || busy !== 'idle' || Boolean(generationRun && isRunActive(generationRun))}>
-              {busy === 'generating' ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
-              生成
-            </button>
-            <span>
-              {shotPlan
-                ? shotPlanPlanning
-                  ? '正在生成默认组图方案，完成后可继续预览。'
-                  : canGenerateGroup
-                  ? `将使用方案 #${shotPlan.id} 和分镜预览 #${previewRun?.id} 生成最终组图。`
-                  : previewRun
-                    ? previewRun.status === 'SUCCEEDED'
-                      ? '当前分镜预览不属于这个货号或方案，请重新预览后再生成最终组图。'
-                      : '当前分镜预览未完成或已失败，请重新预览后再生成最终组图。'
-                    : '请先生成分镜预览，确认姿势方向后再生成最终组图。'
-                : '该货号还没有默认组图方案，请先到服装素材页保存方案。'}
-            </span>
-          </div>
+          <section className="production-stage">
+            <div className="stage-board">
+              <div className="stage-board-head">
+                <div>
+                  <span className="eyebrow">生产进度</span>
+                  <h2>{taskStage.title}</h2>
+                  <p>{taskStage.description}</p>
+                </div>
+                <Tag>{taskStage.tag}</Tag>
+              </div>
+              <div className="stage-steps">
+                {['选择服装', '确认方案', '分镜预览', '最终组图', '交付导出'].map((label, index) => (
+                  <span className={stageStepState(index, taskStage.index)} key={label}>
+                    <b>{index + 1}</b>{label}
+                  </span>
+                ))}
+              </div>
+            </div>
 
-          {previewRun && (
-            <ResultGallery
-              title="分镜预览"
-              run={previewRun}
-              imageFilter={(image) => image.shotIndex === 0}
-              loading={busy === 'previewing' || isRunActive(previewRun)}
-              nowMs={nowMs}
-              onRegenerate={(image, reason) => void regenerate(image, reason)}
-              onToggleFinal={(image) => void toggleFinal(image)}
-              onReviewStatus={(image, status) => void updateReviewStatus(image, status)}
-              onCancelImage={(image) => void cancelImage(image)}
-              onExport={(runId) => void api.exportRun(runId)}
-            />
-          )}
+            <div className="visual-workspace">
+              <div className="visual-head">
+                <div>
+                  <h2>{generationRun ? '最终组图' : '分镜预览'}</h2>
+                  <p>{generationRun ? '确认可用图，必要时单张重生，最后导出交付。' : '先确认 2x3 分镜方向，再进入最终 5 张成片。'}</p>
+                </div>
+                {shotPlan && <span>方案 #{shotPlan.id}</span>}
+              </div>
 
-          <ResultGallery
-            title="最终组图"
-            run={generationRun}
-            imageFilter={(image) => image.shotIndex > 0}
-            loading={busy === 'generating' || busy === 'regenerating' || Boolean(generationRun && isRunActive(generationRun))}
-            nowMs={nowMs}
-            onRegenerate={(image, reason) => void regenerate(image, reason)}
-            onToggleFinal={(image) => void toggleFinal(image)}
-            onReviewStatus={(image, status) => void updateReviewStatus(image, status)}
-            onCancelImage={(image) => void cancelImage(image)}
-            onExport={(runId) => void api.exportRun(runId)}
-          />
+              {previewRun && (
+                <ResultGallery
+                  title="分镜预览"
+                  run={previewRun}
+                  imageFilter={(image) => image.shotIndex === 0}
+                  loading={busy === 'previewing' || isRunActive(previewRun)}
+                  nowMs={nowMs}
+                  onRegenerate={(image, reason) => void regenerate(image, reason)}
+                  onToggleFinal={(image) => void toggleFinal(image)}
+                  onReviewStatus={(image, status) => void updateReviewStatus(image, status)}
+                  onCancelImage={(image) => void cancelImage(image)}
+                  onExport={(runId) => void api.exportRun(runId)}
+                  previewOnly
+                />
+              )}
+
+              <ResultGallery
+                title="最终组图"
+                run={generationRun}
+                imageFilter={(image) => image.shotIndex > 0}
+                loading={busy === 'generating' || busy === 'regenerating' || Boolean(generationRun && isRunActive(generationRun))}
+                nowMs={nowMs}
+                onRegenerate={(image, reason) => void regenerate(image, reason)}
+                onToggleFinal={(image) => void toggleFinal(image)}
+                onReviewStatus={(image, status) => void updateReviewStatus(image, status)}
+                onCancelImage={(image) => void cancelImage(image)}
+                onExport={(runId) => void api.exportRun(runId)}
+              />
+            </div>
+          </section>
+
+          <aside className="task-control-panel">
+            <Panel title="下一步" icon={<Sparkles size={18} />}>
+              <div className="next-action-card">
+                <strong>{taskStage.actionTitle}</strong>
+                <p>{taskStage.actionText}</p>
+                <GeneratePrimaryAction
+                  selectedSku={selectedSku}
+                  shotPlan={shotPlan}
+                  shotPlanPlanning={shotPlanPlanning}
+                  previewRun={previewRun}
+                  generationRun={generationRun}
+                  busy={busy}
+                  canGenerateGroup={canGenerateGroup}
+                  onImport={() => navigate({ page: 'garments' })}
+                  onPlan={() => selectedSku && navigate({ page: 'garments', sku: selectedSku.sku })}
+                  onPreview={() => void previewGrid()}
+                  onGenerate={() => void generateGroup()}
+                />
+              </div>
+            </Panel>
+
+            <Panel title="任务摘要" icon={<Images size={18} />}>
+              <div className="task-summary-list">
+                <TaskSummary label="货号" value={selectedSku?.sku ?? '未选择'} />
+                <TaskSummary label="数字模特" value={planModel?.name ?? '未设置'} />
+                <TaskSummary label="品牌风格" value={shotPlan?.plan.brandStyle?.summary ?? '默认白/浅灰棚拍'} />
+                <TaskSummary label="最近记录" value={`${relevantHistoryRuns.length} 条`} />
+              </div>
+            </Panel>
+
+            <Panel title={selectedSku ? '当前货号记录' : '最近生成记录'} icon={<History size={18} />}>
+              <GenerationHistoryOverview
+                runs={relevantHistoryRuns.slice(0, 8)}
+                onOpenRun={(run) => void restoreHistoryRun(run)}
+                onDeleteRun={(run) => void deleteGenerationRun(run)}
+                onCancelRun={(run) => void cancelGenerationRun(run)}
+              />
+            </Panel>
+          </aside>
         </section>
-
-        <aside className="right-rail">
-          <Panel title="生成记录" icon={<History size={18} />}>
-            <GenerationHistoryOverview
-              runs={historyRuns}
-              onOpenRun={(run) => void restoreHistoryRun(run)}
-              onDeleteRun={(run) => void deleteGenerationRun(run)}
-              onCancelRun={(run) => void cancelGenerationRun(run)}
-            />
-          </Panel>
-        </aside>
       </main>}
 
       {page === 'garments' && (
         <GarmentLibraryPage
           skus={skus}
+          skuHasMore={skuHasMore}
           selectedSku={selectedSku}
           shotPlan={shotPlan}
           busy={busy}
@@ -1287,12 +1519,15 @@ export function App() {
           onSavePlan={(plan) => {
             void saveShotPlan(plan)
           }}
+          onLoadMoreSkus={() => void loadMoreSkus()}
+          onLoadMoreSkuImages={() => void loadMoreSelectedSkuImages()}
         />
       )}
 
       {page === 'models' && (
         <ModelProfilesPage
           models={models}
+          modelHasMore={modelHasMore}
           editingModelId={editingModelId}
           form={modelForm}
           busy={busy}
@@ -1310,12 +1545,14 @@ export function App() {
           onReplaceHeadReference={(angle, file) => void replaceModelHeadReference(angle, file)}
           onUpdateHeadReference={(angle, payload) => void updateModelHeadReference(angle, payload)}
           onDeleteHeadReference={(angle) => void deleteModelHeadReference(angle)}
+          onLoadMoreModels={() => void loadMoreModels()}
         />
       )}
 
       {page === 'history' && (
         <HistoryPage
-          runs={historyRuns}
+          runs={displayedHistoryRuns}
+          runHasMore={displayedHistoryHasMore}
           selectedRun={selectedHistoryRun}
           filter={historyFilter}
           showArchivedRuns={showArchivedRuns}
@@ -1325,6 +1562,7 @@ export function App() {
           onRestoreRun={(run) => void restoreHistoryRun(run)}
           onDeleteRun={(run) => void deleteGenerationRun(run)}
           onCancelRun={(run) => void cancelGenerationRun(run)}
+          onLoadMoreRuns={() => void loadMoreDisplayedRuns()}
         />
       )}
 
@@ -1478,6 +1716,7 @@ function DeleteSkuDialog({
 
 function GarmentLibraryPage({
   skus,
+  skuHasMore,
 	  selectedSku,
 	  shotPlan,
 	  busy,
@@ -1506,8 +1745,11 @@ function GarmentLibraryPage({
   onUseInGenerate,
   onCreatePlan,
   onSavePlan,
+  onLoadMoreSkus,
+  onLoadMoreSkuImages,
 }: {
   skus: GarmentSku[]
+  skuHasMore: boolean
   selectedSku: GarmentSku | null
 	  shotPlan: ShotPlan | null
 	  busy: BusyState
@@ -1536,6 +1778,8 @@ function GarmentLibraryPage({
   onUseInGenerate: (sku: GarmentSku) => void
   onCreatePlan: (sku: GarmentSku) => void
   onSavePlan: (plan: ShotPlan['plan']) => void
+  onLoadMoreSkus: () => void
+  onLoadMoreSkuImages: () => void
 }) {
   const analyzed = skus.filter((sku) => sku.status === 'ANALYZED' || sku.analysis).length
   const pendingImportPackages = importPackages.filter((item) => item.status !== 'uploaded')
@@ -1546,7 +1790,6 @@ function GarmentLibraryPage({
       && (
         editSkuForm.sku !== selectedSku.sku
         || editSkuForm.title !== (selectedSku.title ?? selectedSku.sku)
-        || editSkuForm.status !== selectedSku.status
       ),
   )
   return (
@@ -1634,7 +1877,8 @@ function GarmentLibraryPage({
                 >
                   {sku.coverUrl ? (
                     <ImagePreviewThumb
-                      src={mediaUrl(sku.coverUrl)}
+                      src={mediaUrl(sku.coverThumbUrl ?? sku.coverUrl)}
+                      fullSrc={mediaUrl(sku.coverPreviewUrl ?? sku.coverOriginalUrl ?? sku.coverUrl)}
                       name={sku.sku}
                       fileSize={sku.coverFileSize}
                       compact
@@ -1646,6 +1890,11 @@ function GarmentLibraryPage({
                   </span>
                 </button>
               ))}
+              {skuHasMore && (
+                <button className="secondary full" onClick={onLoadMoreSkus}>
+                  加载更多货号
+                </button>
+              )}
             </div>
           </Panel>
         </aside>
@@ -1674,7 +1923,7 @@ function GarmentLibraryPage({
                   </button>
 	                  <button className="primary" onClick={() => onCreatePlan(selectedSku)} disabled={busy !== 'idle'}>
 	                    {busy === 'planning' ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
-	                    {shotPlan ? '更新默认方案' : '生成默认方案'}
+	                    {shotPlan ? '重新生成默认方案' : '生成默认方案'}
 	                  </button>
 	                  <button className="danger ghost" onClick={onDeleteSelectedSku} disabled={busy !== 'idle'} title="删除货号">
 	                    <Trash2 size={16} />删除
@@ -1697,14 +1946,10 @@ function GarmentLibraryPage({
                         <span>标题</span>
                         <input value={editSkuForm.title} onChange={(event) => onEditSkuFormChange({ ...editSkuForm, title: event.target.value })} />
                       </label>
-                      <label className="field">
+                      <div className="readonly-field">
                         <span>状态</span>
-                        <select value={editSkuForm.status} onChange={(event) => onEditSkuFormChange({ ...editSkuForm, status: event.target.value })}>
-                          <option value="NEW">新建</option>
-                          <option value="ANALYZED">已策划</option>
-                          <option value="CONFIRMED">已确认</option>
-                        </select>
-                      </label>
+                        <strong>{statusText(selectedSku.status)}</strong>
+                      </div>
                       <button className="primary" onClick={onSaveSku} disabled={busy !== 'idle' || !skuFormChanged}>
                         {busy === 'uploading' ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
                         保存货号
@@ -1715,7 +1960,7 @@ function GarmentLibraryPage({
 	                <section className="material-board asset-panel">
 	                  <div className="section-heading tight">
 	                    <h2>素材图片</h2>
-	                    <span>{selectedSku.images?.length ?? 0} 张</span>
+	                    <span>{selectedSku.images?.length ?? 0}/{selectedSku.imageCount ?? selectedSku.images?.length ?? 0} 张</span>
 	                  </div>
                   <div className="append-images">
                     <label className="mini-upload">
@@ -1761,7 +2006,8 @@ function GarmentLibraryPage({
                         <div className="asset-thumb">
                           {image.url ? (
                             <ImagePreviewThumb
-                              src={mediaUrl(image.url)}
+                              src={imageUrlFor(image, 'preview')}
+                              fullSrc={imageUrlFor(image, 'original')}
                               name={image.filename}
                               fileSize={image.fileSize}
                             />
@@ -1771,11 +2017,18 @@ function GarmentLibraryPage({
                           <strong title={image.filename}>{middleEllipsis(image.filename)}</strong>
                           <small>
                             {image.url ? (
-                              <ImageInfoLine src={mediaUrl(image.url)} fileSize={image.fileSize} />
+                              <ImageInfoLine src={imageUrlFor(image, 'preview')} fileSize={image.previewFileSize ?? image.fileSize} />
                             ) : '图片信息读取中'}
                           </small>
                           <div className="asset-order-row">
-                            <span className="drag-hint">拖动排序</span>
+                            <div className="order-controls">
+                              <button onClick={() => onReorderImage(image.id, index - 1)} disabled={busy !== 'idle' || index === 0} title="上移">
+                                上移
+                              </button>
+                              <button onClick={() => onReorderImage(image.id, index + 1)} disabled={busy !== 'idle' || index === (selectedSku.images?.length ?? 0) - 1} title="下移">
+                                下移
+                              </button>
+                            </div>
                             <b>#{index + 1}</b>
                           </div>
                           <div className="asset-actions single">
@@ -1787,6 +2040,11 @@ function GarmentLibraryPage({
                       </article>
 	                    ))}
 	                  </div>
+                    {selectedSku.imagePage?.hasMore && (
+                      <button className="secondary full load-more-button" onClick={onLoadMoreSkuImages}>
+                        加载更多素材图
+                      </button>
+                    )}
 	                </section>
 
 	                <section className="material-board shot-plan-panel">
@@ -1820,6 +2078,7 @@ function GarmentLibraryPage({
 
 function ModelProfilesPage({
   models,
+  modelHasMore,
   editingModelId,
   form,
   busy,
@@ -1833,8 +2092,10 @@ function ModelProfilesPage({
   onReplaceHeadReference,
   onUpdateHeadReference,
   onDeleteHeadReference,
+  onLoadMoreModels,
 }: {
   models: ModelProfile[]
+  modelHasMore: boolean
   editingModelId?: number
   form: ModelForm
   busy: BusyState
@@ -1848,6 +2109,7 @@ function ModelProfilesPage({
   onReplaceHeadReference: (angle: string, file: File) => void
   onUpdateHeadReference: (angle: string, payload: { angle?: string; orderIndex?: number }) => void
   onDeleteHeadReference: (angle: string) => void
+  onLoadMoreModels: () => void
 }) {
   const editingModel = models.find((model) => model.id === editingModelId)
   const isNew = !editingModel
@@ -1882,7 +2144,8 @@ function ModelProfilesPage({
                 >
                   {model.previewUrl ? (
                     <ImagePreviewThumb
-                      src={mediaUrl(model.previewUrl)}
+                      src={mediaUrl(model.thumbUrl ?? model.previewUrl)}
+                      fullSrc={mediaUrl(model.previewUrl ?? model.originalUrl)}
                       name={model.name}
                       fileSize={modelPreviewFileSize(model)}
                       compact
@@ -1894,6 +2157,11 @@ function ModelProfilesPage({
                   </span>
                 </button>
               ))}
+              {modelHasMore && (
+                <button className="secondary full" onClick={onLoadMoreModels}>
+                  加载更多模特
+                </button>
+              )}
             </div>
           </Panel>
 
@@ -2030,7 +2298,8 @@ function ModelProfilesPage({
                     <div className="head-thumb">
                       {entry.url ? (
                         <ImagePreviewThumb
-                          src={entry.url}
+                          src={entry.thumbUrl ?? entry.url}
+                          fullSrc={entry.previewUrl ?? entry.originalUrl ?? entry.url}
                           name={entry.filename}
                           fileSize={entry.fileSize}
                         />
@@ -2052,7 +2321,14 @@ function ModelProfilesPage({
                           )
                         })}
                       </select>
-                      <span className="drag-hint">拖动排序</span>
+                      <div className="order-controls compact">
+                        <button onClick={() => void onUpdateHeadReference(entry.id, { orderIndex: index - 1 })} disabled={busy !== 'idle' || index === 0} title="上移">
+                          上移
+                        </button>
+                        <button onClick={() => void onUpdateHeadReference(entry.id, { orderIndex: index + 1 })} disabled={busy !== 'idle' || index === headEntries.length - 1} title="下移">
+                          下移
+                        </button>
+                      </div>
                     </div>
                     <small title={entry.filename}>{middleEllipsis(entry.filename)}</small>
                     <div className="head-card-actions">
@@ -2240,6 +2516,100 @@ function Stat({ label, value }: { label: string; value: number }) {
   )
 }
 
+function GeneratePrimaryAction({
+  selectedSku,
+  shotPlan,
+  shotPlanPlanning,
+  previewRun,
+  generationRun,
+  busy,
+  canGenerateGroup,
+  onImport,
+  onPlan,
+  onPreview,
+  onGenerate,
+}: {
+  selectedSku: GarmentSku | null
+  shotPlan: ShotPlan | null
+  shotPlanPlanning: boolean
+  previewRun: GenerationRun | null
+  generationRun: GenerationRun | null
+  busy: BusyState
+  canGenerateGroup: boolean
+  onImport: () => void
+  onPlan: () => void
+  onPreview: () => void
+  onGenerate: () => void
+}) {
+  if (!selectedSku) {
+    return (
+      <button className="primary full" onClick={onImport}>
+        <Upload size={18} />导入或选择服装
+      </button>
+    )
+  }
+
+  if (!shotPlan) {
+    return (
+      <button className="primary full" onClick={onPlan}>
+        <Sparkles size={18} />去保存默认方案
+      </button>
+    )
+  }
+
+  if (shotPlanPlanning) {
+    return (
+      <button className="primary full" disabled>
+        <Loader2 className="spin" size={18} />默认方案生成中
+      </button>
+    )
+  }
+
+  if (!previewRun || previewRun.status !== 'SUCCEEDED') {
+    return (
+      <button className="primary full" onClick={onPreview} disabled={busy !== 'idle' || Boolean(previewRun && isRunActive(previewRun))}>
+        {busy === 'previewing' || (previewRun && isRunActive(previewRun)) ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
+        生成分镜预览
+      </button>
+    )
+  }
+
+  if (!generationRun || generationRun.status !== 'SUCCEEDED') {
+    return (
+      <button className="primary full" onClick={onGenerate} disabled={!canGenerateGroup || busy !== 'idle' || Boolean(generationRun && isRunActive(generationRun))}>
+        {busy === 'generating' || (generationRun && isRunActive(generationRun)) ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
+        生成最终组图
+      </button>
+    )
+  }
+
+  return (
+    <button className="secondary full" onClick={onPreview} disabled={busy !== 'idle'}>
+      <RefreshCw size={18} />重新生成分镜
+    </button>
+  )
+}
+
+type TaskStatusState = 'idle' | 'ready' | 'running' | 'warning' | 'error'
+
+function TaskStatus({ label, value, state }: { label: string; value: string; state: TaskStatusState }) {
+  return (
+    <div className={`task-status ${state}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  )
+}
+
+function TaskSummary({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="task-summary-item">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  )
+}
+
 function PlaceholderPage({ title, text }: { title: string; text: string }) {
   return (
     <main className="placeholder-page">
@@ -2274,7 +2644,7 @@ function GenerationHistoryOverview({
           <button className="generation-history-main" onClick={() => onOpenRun(run)}>
             <div className="mini-preview-strip">
               {(run.summary?.previews ?? []).slice(0, 3).map((preview) => (
-                <HistoryPreviewImage key={preview.id} url={preview.url} title={preview.title} />
+                <HistoryPreviewImage key={preview.id} image={preview} title={preview.title} />
               ))}
               {(run.summary?.previews ?? []).length === 0 && <span>无图</span>}
             </div>
@@ -2287,8 +2657,8 @@ function GenerationHistoryOverview({
               </small>
             </span>
           </button>
-          <button className="danger icon-only history-delete-button" onClick={() => onDeleteRun(run)} title="归档记录">
-            <Trash2 size={14} />
+          <button className="secondary icon-only history-delete-button archive-button" onClick={() => onDeleteRun(run)} title="归档记录">
+            <Archive size={14} />
           </button>
           {isRunActive(run) && (
             <button className="secondary icon-only history-delete-button" onClick={() => onCancelRun(run)} title="取消任务">
@@ -2301,20 +2671,28 @@ function GenerationHistoryOverview({
   )
 }
 
-function HistoryPreviewImage({ url, title }: { url: string | null; title: string }) {
+function HistoryPreviewImage({
+  image,
+  title,
+}: {
+  image: { thumbUrl?: string | null; previewUrl?: string | null; originalUrl?: string | null; url?: string | null }
+  title: string
+}) {
   const [failed, setFailed] = useState(false)
+  const src = imageUrlFor(image, 'thumb')
 
   useEffect(() => {
     setFailed(false)
-  }, [url])
+  }, [src])
 
-  if (!url || failed) return <span className="history-preview-fallback">{failed ? '加载失败' : '无图'}</span>
+  if (!src || failed) return <span className="history-preview-fallback">{failed ? '加载失败' : '无图'}</span>
 
-  return <img src={mediaUrl(url)} alt={title} onError={() => setFailed(true)} />
+  return <img src={src} alt={title} loading="lazy" decoding="async" onError={() => setFailed(true)} />
 }
 
 function HistoryPage({
   runs,
+  runHasMore,
   selectedRun,
   filter,
   showArchivedRuns,
@@ -2324,8 +2702,10 @@ function HistoryPage({
   onRestoreRun,
   onDeleteRun,
   onCancelRun,
+  onLoadMoreRuns,
 }: {
   runs: GenerationRun[]
+  runHasMore: boolean
   selectedRun: GenerationRun | null
   filter: string
   showArchivedRuns: boolean
@@ -2335,15 +2715,9 @@ function HistoryPage({
   onRestoreRun: (run: GenerationRun) => void
   onDeleteRun: (run: GenerationRun) => void
   onCancelRun: (run: GenerationRun) => void
+  onLoadMoreRuns: () => void
 }) {
-  const keyword = filter.trim().toLowerCase()
-  const visibleRuns = keyword
-    ? runs.filter((run) =>
-        [run.sku, run.skuTitle, run.status, String(run.id), String(run.shotPlanId)]
-          .filter(Boolean)
-          .some((value) => String(value).toLowerCase().includes(keyword)),
-      )
-    : runs
+  const visibleRuns = runs
 
   return (
     <main className="history-page">
@@ -2372,7 +2746,7 @@ function HistoryPage({
               <button className="history-run-main" onClick={() => onOpenRun(run.id)}>
                 <div className="history-preview-strip">
                   {(run.summary?.previews ?? []).slice(0, 4).map((preview) => (
-                    <HistoryPreviewImage key={preview.id} url={preview.url} title={preview.title} />
+                    <HistoryPreviewImage key={preview.id} image={preview} title={preview.title} />
                   ))}
                   {(run.summary?.previews ?? []).length === 0 && <div className="history-preview-empty">无图</div>}
                 </div>
@@ -2388,11 +2762,16 @@ function HistoryPage({
               </button>
               <button className="secondary" onClick={() => onRestoreRun(run)}>恢复</button>
               {isRunActive(run) && <button className="secondary" onClick={() => onCancelRun(run)}>取消</button>}
-              <button className="danger icon-only" onClick={() => onDeleteRun(run)} title="归档记录">
-                <Trash2 size={15} />
+              <button className="secondary icon-only archive-button" onClick={() => onDeleteRun(run)} title="归档记录">
+                <Archive size={15} />
               </button>
             </article>
           ))}
+          {runHasMore && (
+            <button className="secondary full" onClick={onLoadMoreRuns}>
+              加载更多生成记录
+            </button>
+          )}
         </div>
       </section>
 
@@ -2471,7 +2850,9 @@ function HistoryRunDetail({
           {(run.images ?? []).map((image) => (
             <article className="history-shot-card" key={image.id}>
               <div className="history-shot-image">
-                {image.url ? <img src={mediaUrl(image.url)} alt={image.title} /> : <span>{statusText(image.status)}</span>}
+                {(image.url || image.previewUrl || image.originalUrl) ? (
+                  <img src={imageUrlFor(image, 'preview')} alt={image.title} loading="lazy" decoding="async" />
+                ) : <span>{statusText(image.status)}</span>}
                 {image.isFinal && <b>最终图</b>}
               </div>
 	              <div className="history-shot-body">
@@ -2590,18 +2971,27 @@ function ShotPlanBoard({
           </button>
         )}
       </div>
-      <div className="shooting-script">
-        <PlanField label="货号" value={draft.sku} />
-        <PlanField label="商品品类" value={draft.category ?? draft.garment?.category ?? ''} editing={canEdit} onChange={(value) => setDraft((current) => ({ ...current, category: value }))} />
-        <PlanField label="服装摘要" value={draft.garment?.summary ?? ''} wide />
-        <PlanField label="颜色" value={draft.garment?.color ?? ''} />
-        <PlanField label="面料" value={draft.garment?.fabric ?? ''} />
-        <PlanField label="关键结构" value={(draft.garment?.keyStructures ?? []).join('、')} />
-        <PlanField label="主销售信息" value={generationPlan.salesInfo ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ salesInfo: value })} wide multiline />
-        <PlanField label="Lily 调性" value={generationPlan.lilyTone ?? draft.brandStyle?.summary ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ lilyTone: value })} wide multiline />
-        <PlanField label="服饰搭配" value={generationPlan.styling ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ styling: value })} wide multiline />
-        <PlanField label="统一背景" value={generationPlan.background ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ background: value })} wide multiline />
-      </div>
+      {canEdit ? (
+        <div className="shooting-script">
+          <PlanField label="货号" value={draft.sku} />
+          <PlanField label="商品品类" value={draft.category ?? draft.garment?.category ?? ''} editing={canEdit} onChange={(value) => setDraft((current) => ({ ...current, category: value }))} />
+          <PlanField label="服装摘要" value={draft.garment?.summary ?? ''} wide />
+          <PlanField label="颜色" value={draft.garment?.color ?? ''} />
+          <PlanField label="面料" value={draft.garment?.fabric ?? ''} />
+          <PlanField label="关键结构" value={(draft.garment?.keyStructures ?? []).join('、')} />
+          <PlanField label="主销售信息" value={generationPlan.salesInfo ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ salesInfo: value })} wide multiline />
+          <PlanField label="Lily 调性" value={generationPlan.lilyTone ?? draft.brandStyle?.summary ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ lilyTone: value })} wide multiline />
+          <PlanField label="服饰搭配" value={generationPlan.styling ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ styling: value })} wide multiline />
+          <PlanField label="统一背景" value={generationPlan.background ?? ''} editing={canEdit} onChange={(value) => updateGenerationPlan({ background: value })} wide multiline />
+        </div>
+      ) : (
+        <div className="plan-business-summary">
+          <TaskSummary label="品类" value={draft.category ?? draft.garment?.category ?? '待确认'} />
+          <TaskSummary label="服装" value={draft.garment?.summary ?? '待确认'} />
+          <TaskSummary label="棚拍风格" value={generationPlan.background ?? draft.brandStyle?.summary ?? '白/浅灰棚拍'} />
+          <TaskSummary label="搭配边界" value={generationPlan.styling ?? '简洁搭配，商品优先'} />
+        </div>
+      )}
 
       <div className="plan-section-heading">
         <div>
@@ -2609,9 +2999,9 @@ function ShotPlanBoard({
           <span>固定 5 张图位，逐张控制景别、身位和姿势</span>
         </div>
       </div>
-      <div className="script-shot-list">
+      <div className={canEdit ? 'script-shot-list' : 'plan-shot-cards'}>
         {draft.shots.map((shot, index) => (
-          <div key={shot.shotIndex} className="shot-editor">
+          <div key={shot.shotIndex} className={canEdit ? 'shot-editor' : 'plan-shot-card'}>
             {canEdit ? (
               <>
               <div className="shot-editor-title">
@@ -2657,6 +3047,21 @@ function ShotPlanBoard({
               </>
             ) : (
               <>
+                <b>{String(shot.shotIndex).padStart(2, '0')}</b>
+                <strong>{shot.title}</strong>
+                <span>{[shot.scene, shot.cropRange].filter(Boolean).join(' · ') || '默认棚拍图位'}</span>
+                <small>{shot.imagePurpose || shot.task || '展示服装重点与品牌棚拍质感'}</small>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+      {!canEdit && (
+        <details className="plan-advanced-details">
+          <summary>查看图位详情</summary>
+          <div className="script-shot-list">
+            {draft.shots.map((shot) => (
+              <div key={shot.shotIndex} className="shot-editor">
                 <div className="shot-editor-title">
                   <strong>图 {shot.shotIndex} {shot.title}</strong>
                   <small>{shot.englishName}</small>
@@ -2669,11 +3074,11 @@ function ShotPlanBoard({
                 <PlanField label="身位" value={shot.bodyPosition ?? ''} />
                 <PlanField label="姿势调性" value={shot.poseTone ?? ''} wide />
                 <PlanField label="画面目的" value={shot.imagePurpose ?? ''} wide />
-              </>
-            )}
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+        </details>
+      )}
       {isEditing && (
         <div className="plan-save-row">
           <button className="secondary" onClick={() => { setDraft(shotPlan.plan); setIsEditing(false) }} disabled={saving}>取消</button>
@@ -2742,6 +3147,7 @@ function ResultGallery({
   loading,
   nowMs,
   imageFilter,
+  previewOnly = false,
   onRegenerate,
   onToggleFinal,
   onReviewStatus,
@@ -2753,6 +3159,7 @@ function ResultGallery({
   loading: boolean
   nowMs: number
   imageFilter?: (image: GenerationImage) => boolean
+  previewOnly?: boolean
   onRegenerate: (image: GenerationImage, reason: string) => void
   onToggleFinal: (image: GenerationImage) => void
   onReviewStatus: (image: GenerationImage, status: string) => void
@@ -2763,6 +3170,8 @@ function ResultGallery({
   const visibleImages = run?.images?.filter((image) => imageFilter ? imageFilter(image) : true) ?? []
   const placeholders = Array.from({ length: isPreviewGallery ? 1 : 5 }, (_, index) => index + 1)
   const runStartedAt = visibleImages[0]?.submittedAt ?? run?.createdAt
+  const [regenerateReasons, setRegenerateReasons] = useState<Record<number, string>>({})
+  const selectedReason = (image: GenerationImage) => regenerateReasons[image.id] ?? REGENERATION_REASONS[0].value
   return (
     <section className="results">
       <div className="section-heading">
@@ -2779,7 +3188,7 @@ function ResultGallery({
           ? visibleImages.map((image) => {
               const imageActive = isImageActive(image)
               const imageElapsed = elapsedText(image.submittedAt ?? image.createdAt, nowMs, image.completedAt ?? image.updatedAt, !imageActive)
-              const canShowImage = image.status === 'SUCCEEDED' && Boolean(image.url)
+              const canShowImage = image.status === 'SUCCEEDED' && Boolean(image.url || image.previewUrl || image.originalUrl)
               const displayTitle = image.shotIndex === 0 ? '分镜预览' : image.title
               const displayLabel = `${String(image.shotIndex).padStart(2, '0')} ${displayTitle}`
               return (
@@ -2787,7 +3196,8 @@ function ResultGallery({
                 <div className="result-image">
                   {canShowImage ? (
                     <ImagePreviewThumb
-                      src={mediaUrl(image.url)}
+                      src={imageUrlFor(image, 'preview')}
+                      fullSrc={imageUrlFor(image, 'original')}
                       name={displayLabel}
                       fileSize={image.fileSize}
                     >
@@ -2810,21 +3220,39 @@ function ResultGallery({
                   </strong>
 	                  <small>{statusText(image.status)} · {imageElapsed} · 记录 #{image.id}</small>
 	                  {SHOW_DEBUG_INFO && image.providerRequestId && <small>任务 #{shortId(image.providerRequestId)} · {providerStatusText(image.providerStatus)}</small>}
-	                  <small>交付状态：{reviewStatusText(image.reviewStatus)}</small>
+	                  {!previewOnly && <small>交付状态：{reviewStatusText(image.reviewStatus)}</small>}
 	                </div>
 	                <div className="result-actions">
-	                  <button onClick={() => onRegenerate(image, '姿势不合适')} disabled={loading || imageActive}>
-	                    <RefreshCw size={15} />重生
-	                  </button>
-	                  <button onClick={() => onToggleFinal(image)} disabled={image.status !== 'SUCCEEDED'}>
-	                    <Check size={15} />{image.isFinal ? '取消最终' : '设为最终'}
-	                  </button>
+                    {previewOnly ? (
+                      <button onClick={() => onRegenerate(image, '重新生成分镜预览')} disabled={loading || imageActive}>
+                        <RefreshCw size={15} />重新预览
+                      </button>
+                    ) : (
+                      <>
+                        {image.status === 'SUCCEEDED' && (
+                          <select
+                            value={selectedReason(image)}
+                            onChange={(event) => setRegenerateReasons((current) => ({ ...current, [image.id]: event.target.value }))}
+                          >
+                            {REGENERATION_REASONS.map((reason) => (
+                              <option key={reason.value} value={reason.value}>{reason.label}</option>
+                            ))}
+                          </select>
+                        )}
+                        <button onClick={() => onRegenerate(image, selectedReason(image))} disabled={loading || imageActive}>
+                          <RefreshCw size={15} />重生
+                        </button>
+                        <button onClick={() => onToggleFinal(image)} disabled={image.status !== 'SUCCEEDED'}>
+                          <Check size={15} />{image.isFinal ? '取消最终' : '设为最终'}
+                        </button>
+                      </>
+                    )}
 	                  {imageActive && (
 	                    <button onClick={() => onCancelImage(image)}>
 	                      <X size={15} />取消
 	                    </button>
 	                  )}
-	                  {image.status === 'SUCCEEDED' && (
+	                  {!previewOnly && image.status === 'SUCCEEDED' && (
 	                    <select value={image.reviewStatus ?? 'candidate'} onChange={(event) => onReviewStatus(image, event.target.value)}>
 	                      <option value="candidate">候选</option>
 	                      <option value="approved">可用</option>
@@ -2881,8 +3309,18 @@ function Tag({ children }: { children: ReactNode }) {
   return <span className="tag">{children}</span>
 }
 
+function imageUrlFor(image: { thumbUrl?: string | null; previewUrl?: string | null; originalUrl?: string | null; url?: string | null }, variant: 'thumb' | 'preview' | 'original') {
+  const value = variant === 'thumb'
+    ? image.thumbUrl ?? image.previewUrl ?? image.url ?? image.originalUrl
+    : variant === 'preview'
+      ? image.previewUrl ?? image.url ?? image.thumbUrl ?? image.originalUrl
+      : image.originalUrl ?? image.previewUrl ?? image.url ?? image.thumbUrl
+  return mediaUrl(value)
+}
+
 function ImagePreviewThumb({
   src,
+  fullSrc,
   name,
   fileSize,
   compact,
@@ -2890,6 +3328,7 @@ function ImagePreviewThumb({
   children,
 }: {
   src: string
+  fullSrc?: string
   name: string
   fileSize?: number | null
   compact?: boolean
@@ -2943,6 +3382,8 @@ function ImagePreviewThumb({
           <img
             src={src}
             alt={name}
+            loading="lazy"
+            decoding="async"
             onLoad={(event) => {
               const target = event.currentTarget
               setDimensions({ width: target.naturalWidth, height: target.naturalHeight })
@@ -2968,7 +3409,7 @@ function ImagePreviewThumb({
               <X size={18} />
             </button>
             <div className="preview-image-frame">
-              <img src={src} alt={name} />
+              <img src={fullSrc ?? src} alt={name} decoding="async" />
             </div>
             <div className="preview-info">
               <strong title={name}>{middleEllipsis(name, 42)}</strong>
@@ -3069,6 +3510,21 @@ function isRunActive(run: GenerationRun) {
   return run.status === 'RUNNING' || Boolean(run.images?.some(isImageActive))
 }
 
+function runTaskStatusState(run: GenerationRun | null): TaskStatusState {
+  if (!run) return 'idle'
+  if (isRunActive(run)) return 'running'
+  if (run.status === 'SUCCEEDED') return 'ready'
+  if (run.status === 'PARTIAL_SUCCEEDED') return 'warning'
+  if (run.status === 'FAILED' || run.status === 'CANCELLED') return 'error'
+  return 'idle'
+}
+
+function stageStepState(index: number, currentIndex: number) {
+  if (index < currentIndex) return 'completed'
+  if (index === currentIndex) return 'current'
+  return 'pending'
+}
+
 function skuHasLinkedHistory(sku: GarmentSku) {
   const impact = sku.deleteImpact
   return Boolean((impact?.generationRunCount ?? 0) > 0 || (impact?.shotPlanCount ?? 0) > 0)
@@ -3076,6 +3532,102 @@ function skuHasLinkedHistory(sku: GarmentSku) {
 
 function isImageActive(image: GenerationImage) {
   return ['QUEUED', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS', 'RUNNING'].includes(image.status)
+}
+
+function getGenerateTaskStage(
+  selectedSku: GarmentSku | null,
+  shotPlan: ShotPlan | null,
+  previewRun: GenerationRun | null,
+  generationRun: GenerationRun | null,
+) {
+  if (!selectedSku) {
+    return {
+      index: 0,
+      title: '先选择本次要拍摄的服装',
+      description: '选择已保存货号，或进入服装素材页导入图包。系统会围绕这个货号组织整套拍摄任务。',
+      tag: '待开始',
+      actionTitle: '选择服装',
+      actionText: '左侧选择货号后，这里会显示默认方案、分镜和最终生成动作。',
+    }
+  }
+  if (!shotPlan) {
+    return {
+      index: 1,
+      title: '缺少默认拍摄方案',
+      description: '生成组图页只执行已保存方案。请回到服装素材页，让系统为这个货号生成默认 5 张图位方案。',
+      tag: '需保存方案',
+      actionTitle: '保存默认方案',
+      actionText: '进入服装素材页生成默认方案后，再回到这里预览分镜。',
+    }
+  }
+  if (shotPlan.status === 'PLANNING') {
+    return {
+      index: 1,
+      title: '正在整理默认拍摄方案',
+      description: '系统正在识别服装品类、整理品牌棚拍风格和 5 张图位。完成后即可生成分镜预览。',
+      tag: '策划中',
+      actionTitle: '等待方案完成',
+      actionText: '方案完成后，“生成分镜预览”会自动可用。',
+    }
+  }
+  if (!previewRun) {
+    return {
+      index: 2,
+      title: '先生成 2x3 分镜预览',
+      description: '分镜用于确认姿势方向、图位结构和整体棚拍语言，满意后再生成最终大图。',
+      tag: '待预览',
+      actionTitle: '生成分镜预览',
+      actionText: '先看一张 2x3 contact sheet，避免直接生成整组后才发现方向不对。',
+    }
+  }
+  if (isRunActive(previewRun)) {
+    return {
+      index: 2,
+      title: '分镜预览生成中',
+      description: '后台会持续刷新 fal 状态。完成后即可进入最终 5 张成片生成。',
+      tag: '预览中',
+      actionTitle: '等待分镜完成',
+      actionText: '分镜完成前不需要离开页面，刷新后也可以恢复任务。',
+    }
+  }
+  if (previewRun.status !== 'SUCCEEDED') {
+    return {
+      index: 2,
+      title: '分镜预览不可用',
+      description: '当前分镜未完成或已经失败。请重新生成分镜预览，再进入最终组图。',
+      tag: statusText(previewRun.status),
+      actionTitle: '重新预览',
+      actionText: '重新生成分镜后，系统会把它绑定到当前货号和默认方案。',
+    }
+  }
+  if (!generationRun) {
+    return {
+      index: 3,
+      title: '分镜已就绪，可以生成最终图',
+      description: '最终生成会在同一任务下追加 5 张大图，之后可单张保留、重生和导出。',
+      tag: '可生成',
+      actionTitle: '生成最终组图',
+      actionText: '确认分镜方向后，开始生成最终 5 张电商主图。',
+    }
+  }
+  if (isRunActive(generationRun)) {
+    return {
+      index: 3,
+      title: '最终组图生成中',
+      description: '5 张图会逐张回传状态。失败或不满意的图位后续可单张重生。',
+      tag: '生成中',
+      actionTitle: '等待最终图',
+      actionText: '生成完成后，在结果卡上标记最终图或单张重生。',
+    }
+  }
+  return {
+    index: 4,
+    title: generationRun.status === 'SUCCEEDED' ? '最终组图已生成' : '最终组图需要处理',
+    description: '检查每张图的商品保真、姿势和构图。可用图设为最终图，不满意的图位直接重生。',
+    tag: statusText(generationRun.status),
+    actionTitle: '确认并导出',
+    actionText: '标记最终图后即可导出 ZIP，未达标图位可以保留在同一任务里重生。',
+  }
 }
 
 function elapsedText(startIso?: string | null, nowMs = Date.now(), endIso?: string | null, useEnd = false) {
@@ -3127,6 +3679,14 @@ function createImportPackage(sku: string, sourceFiles: File[], sourceName: strin
   }
 }
 
+function revokeImportPackagePreviews(packages: ImportPackage[]) {
+  packages.forEach((item) => item.images.forEach((image) => URL.revokeObjectURL(image.previewUrl)))
+}
+
+function revokeModelHeadDraftPreviews(drafts: ModelHeadDraft[]) {
+  drafts.forEach((draft) => URL.revokeObjectURL(draft.previewUrl))
+}
+
 function groupFilesByTopFolder(files: File[]) {
   return files.reduce<Record<string, File[]>>((groups, file) => {
     const relativePath = getRelativePath(file)
@@ -3165,6 +3725,15 @@ const HEAD_REFERENCE_OPTIONS = [
   { value: 'back', label: '背面' },
   { value: 'backTurnLeft45', label: '背面回头左 45 度' },
   { value: 'backTurnRight45', label: '背面回头右 45 度' },
+]
+
+const REGENERATION_REASONS = [
+  { value: '服装不准确', label: '服装不准确' },
+  { value: '姿势不合适', label: '姿势不合适' },
+  { value: '模特不像', label: '模特不像' },
+  { value: '构图不合适', label: '构图不合适' },
+  { value: '搭配不合适', label: '搭配不合适' },
+  { value: '其他补充', label: '其他补充' },
 ]
 
 function createBlankModelForm(index = 1): ModelForm {
@@ -3236,7 +3805,10 @@ function getSavedHeadEntries(model?: ModelProfile): ModelHeadEntry[] {
       id: typeof item.id === 'string' ? item.id : '',
       angle: typeof item.angle === 'string' ? item.angle : '',
       filename: typeof item.filename === 'string' ? item.filename : '',
-      url: typeof item.url === 'string' ? mediaUrl(item.url) : '',
+      url: typeof item.previewUrl === 'string' ? mediaUrl(item.previewUrl) : typeof item.url === 'string' ? mediaUrl(item.url) : '',
+      thumbUrl: typeof item.thumbUrl === 'string' ? mediaUrl(item.thumbUrl) : undefined,
+      previewUrl: typeof item.previewUrl === 'string' ? mediaUrl(item.previewUrl) : undefined,
+      originalUrl: typeof item.originalUrl === 'string' ? mediaUrl(item.originalUrl) : undefined,
       fileSize: typeof item.fileSize === 'number' ? item.fileSize : undefined,
     }))
     .filter((item) => item.id)
@@ -3248,6 +3820,8 @@ function getDraftHeadEntries(drafts: ModelHeadDraft[]): ModelHeadEntry[] {
     angle: item.angle,
     filename: item.file.name,
     url: item.previewUrl,
+    previewUrl: item.previewUrl,
+    originalUrl: item.previewUrl,
     fileSize: item.file.size,
   }))
 }
@@ -3332,4 +3906,11 @@ function pageSubtitle(page: Page) {
 function mergeRun(current: GenerationRun | null, next: GenerationRun): GenerationRun {
   if (!current?.images) return next
   return next
+}
+
+function mergeById<T extends { id: number }>(current: T[], incoming: T[]) {
+  const map = new Map<number, T>()
+  current.forEach((item) => map.set(item.id, item))
+  incoming.forEach((item) => map.set(item.id, item))
+  return Array.from(map.values())
 }

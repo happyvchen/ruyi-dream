@@ -5,7 +5,12 @@ export type GarmentImage = {
   sortOrder: number
   mimeType: string
   url: string | null
+  thumbUrl?: string | null
+  previewUrl?: string | null
+  originalUrl?: string | null
   fileSize?: number | null
+  thumbFileSize?: number | null
+  previewFileSize?: number | null
   createdAt: string
 }
 
@@ -18,9 +23,18 @@ export type GarmentSku = {
   analysis?: GarmentAnalysis | null
   storagePath: string
   coverUrl: string | null
+  coverThumbUrl?: string | null
+  coverPreviewUrl?: string | null
+  coverOriginalUrl?: string | null
   coverFileSize?: number | null
   imageCount?: number | null
   images?: GarmentImage[]
+  imagePage?: {
+    limit: number
+    offset: number
+    nextOffset: number | null
+    hasMore: boolean
+  }
   deleteImpact?: {
     generationRunCount: number
     archivedGenerationRunCount: number
@@ -48,8 +62,10 @@ export type ModelProfile = {
   assetDir: string
   profile: Record<string, unknown>
   isDefault: boolean
+  thumbUrl?: string | null
   previewPath?: string | null
   previewUrl?: string | null
+  originalUrl?: string | null
   createdAt: string
   updatedAt: string
 }
@@ -103,7 +119,12 @@ export type GenerationImage = {
   title: string
   status: string
   url: string | null
+  thumbUrl?: string | null
+  previewUrl?: string | null
+  originalUrl?: string | null
   fileSize?: number | null
+  thumbFileSize?: number | null
+  previewFileSize?: number | null
   taskPackage: Record<string, unknown>
   providerRequest?: Record<string, unknown> | null
   providerResponse?: Record<string, unknown> | null
@@ -160,6 +181,9 @@ export type GenerationRun = {
       shotIndex: number
       title: string
       url: string | null
+      thumbUrl?: string | null
+      previewUrl?: string | null
+      originalUrl?: string | null
       status: string
       isFinal: boolean
       attemptCount: number
@@ -177,4 +201,12 @@ export type EventLog = {
   eventType: string
   payload: Record<string, unknown>
   createdAt: string
+}
+
+export type PaginatedResponse<T> = {
+  items: T[]
+  limit: number
+  offset: number
+  nextOffset: number | null
+  hasMore: boolean
 }

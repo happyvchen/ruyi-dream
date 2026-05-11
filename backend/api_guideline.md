@@ -41,6 +41,7 @@ Authorization: Bearer <token>
 | `/api/garment-skus/{sku_id}` | GET | 货号详情、素材图片、识别摘要 |
 | `/api/garment-skus/{sku_id}` | PATCH | 编辑货号、标题、状态 |
 | `/api/garment-skus/{sku_id}` | DELETE | 删除应用内素材副本；已有生成记录时禁止删除 |
+| `/api/garment-skus/{sku_id}/images` | GET | 分页读取该货号素材图片 |
 | `/api/garment-skus/{sku_id}/images` | POST | 给已有货号追加素材图 |
 | `/api/garment-images/{image_id}` | PATCH | 编辑单张图片角色和排序；当前 UI 不开放角色编辑 |
 | `/api/garment-images/{image_id}` | DELETE | 删除应用内图片副本；每个货号至少保留一张 |
@@ -73,6 +74,64 @@ Authorization: Bearer <token>
 
 写接口在 cookie 会话下会校验 `Origin` / `Referer` 是否属于 `BACKEND_CORS_ORIGINS`，脚本调用应使用可选的 `APP_API_ACCESS_TOKEN`。
 
+## 通用列表与媒体 URL 契约
+
+### 分页响应
+
+列表接口默认不再一次性返回全量数据。当前使用 offset 分页，响应保留 `items`，并附带下一页信息：
+
+```json
+{
+  "items": [],
+  "limit": 30,
+  "offset": 0,
+  "nextOffset": 30,
+  "hasMore": true
+}
+```
+
+约定：
+
+- `limit` 有服务端上限；前端应按接口默认值或业务页设置传入。
+- `offset` 从 `0` 开始。
+- `hasMore = true` 时，前端可用 `nextOffset` 请求下一页。
+- `hasMore = false` 时，`nextOffset = null`。
+
+当前支持分页的接口：
+
+| Resource | 查询参数 |
+|---|---|
+| `GET /api/garment-skus` | `includeArchived`、`limit`、`offset`、`keyword` |
+| `GET /api/garment-skus/{sku_id}/images` | `limit`、`offset` |
+| `GET /api/model-profiles` | `limit`、`offset`、`keyword` |
+| `GET /api/generation-runs` | `includeArchived`、`limit`、`offset`、`skuId`、`keyword` |
+
+搜索框只要表现为全局搜索，就必须调用对应列表接口的 `keyword` 参数；不能只过滤前端已加载的首屏数据。
+
+### 三档图片 URL
+
+后端为上传素材、数字模特头像和生成结果维护三档图片访问 URL：
+
+| 字段 | 用途 | 前端场景 |
+|---|---|---|
+| `thumbUrl` | 小缩略图，WebP，长边约 360px | 列表卡片、历史记录缩略图 |
+| `previewUrl` | 中等预览图，WebP，长边约 1600px | 详情网格、结果网格、普通预览 |
+| `originalUrl` | 原始上传或生成图 | 放大查看、导出、AI 输入和质检 |
+
+兼容字段：
+
+- `url` 仍保留给旧前端使用；对素材和生成图通常等价于 `previewUrl`。
+- `coverUrl` 仍保留给旧前端使用；当前等价于 `coverThumbUrl`。
+- `ModelProfile.previewUrl` 仍保留；当前是真正的预览衍生图，不再表示原图。
+
+对象存储约定：
+
+- 原图仍保存在原有对象 key，不改动历史路径。
+- 衍生图保存在同目录 `_derived/thumb/*.webp` 和 `_derived/preview/*.webp`。
+- 新上传、新生成图片会同步生成衍生图。
+- 旧数据若缺少衍生图，API 读取时会尽量补生成；补生成失败时回退到原图 URL，保证旧记录仍可显示。
+- 删除单张素材或替换/删除头像时，会同步清理对应衍生图。删除整个货号或模特目录时，会通过对象前缀清理。
+
 ## 服装素材 CRUD 契约
 
 ### 上传与默认方案
@@ -91,9 +150,10 @@ Authorization: Bearer <token>
 
 - 写入对象存储前先校验所有上传图片：仅支持 JPG / PNG / WebP，默认单张不超过 15MB、不超过 25MP，单个货号最多 20 张。
 - 将图片写入对象存储 `uploads/{sku}-{timestamp}-{id}/`。
+- 为每张图片生成 `thumb` / `preview` WebP 衍生图。
 - 写入 `garment_skus` 和 `garment_images`。
 - 第一张图片写入 `role = main`，其余图片写入 `role = reference`。
-- 返回货号详情和封面 URL / 图片数量 / 文件大小等信息。
+- 返回货号详情、封面三档 URL、图片数量、文件大小等信息。
 
 前端职责：
 
@@ -102,7 +162,106 @@ Authorization: Bearer <token>
 - 保存上传成功后立即调用 `POST /api/shot-plans` 创建默认组图方案。
 - 上传图包的卡片样式与已保存素材卡片一致：展示文件名、尺寸、大小和删除入口。
 
-### 获取默认组图方案
+### 货号列表与详情
+
+`GET /api/garment-skus`
+
+查询参数：
+
+| 参数 | 说明 |
+|---|---|
+| `includeArchived` | 是否包含已归档货号，默认 `false` |
+| `limit` | 每页数量，默认 30，最大 100 |
+| `offset` | 起始偏移，默认 0 |
+| `keyword` | 按货号、标题或状态模糊搜索 |
+
+列表项包含封面三档 URL：
+
+```json
+{
+  "items": [
+    {
+      "id": 3,
+      "sku": "125329C0908714",
+      "title": "125329C0908714",
+      "status": "ANALYZED",
+      "coverUrl": "https://...",
+      "coverThumbUrl": "https://...",
+      "coverPreviewUrl": "https://...",
+      "coverOriginalUrl": "https://...",
+      "coverFileSize": 123456,
+      "imageCount": 8,
+      "archivedAt": null
+    }
+  ],
+  "limit": 30,
+  "offset": 0,
+  "nextOffset": null,
+  "hasMore": false
+}
+```
+
+`GET /api/garment-skus/{sku_id}`
+
+查询参数：
+
+| 参数 | 说明 |
+|---|---|
+| `imageLimit` | 详情首屏返回的素材图数量，默认 24，最大 120 |
+| `imageOffset` | 素材图起始偏移，默认 0 |
+
+响应中的 `item.images` 只包含当前图片页，`item.imagePage` 描述下一页：
+
+```json
+{
+  "item": {
+    "id": 3,
+    "sku": "125329C0908714",
+    "images": [
+      {
+        "id": 10,
+        "filename": "001-main.jpg",
+        "url": "https://...",
+        "thumbUrl": "https://...",
+        "previewUrl": "https://...",
+        "originalUrl": "https://...",
+        "fileSize": 123456,
+        "thumbFileSize": 12345,
+        "previewFileSize": 67890
+      }
+    ],
+    "imagePage": {
+      "limit": 24,
+      "offset": 0,
+      "nextOffset": 24,
+      "hasMore": true
+    }
+  }
+}
+```
+
+`GET /api/garment-skus/{sku_id}/images`
+
+分页读取某个货号的素材图：
+
+```json
+{
+  "items": [
+    {
+      "id": 10,
+      "filename": "001-main.jpg",
+      "url": "https://...",
+      "thumbUrl": "https://...",
+      "previewUrl": "https://...",
+      "originalUrl": "https://..."
+    }
+  ],
+  "limit": 24,
+  "offset": 24,
+  "nextOffset": null,
+  "hasMore": false
+}
+```
 
 `GET /api/garment-skus/{sku_id}/default-shot-plan`
 
@@ -160,6 +319,8 @@ Authorization: Bearer <token>
 
 使用 multipart form-data，字段名为 `files`，可一次追加多张图片。新图片默认 `role = reference`，排序追加到末尾。
 
+追加图片会同步生成 `thumbUrl` / `previewUrl` 对应的 WebP 衍生图；如果写数据库失败，后端会清理已写入的原图和衍生图。
+
 ### 编辑单张图片
 
 `PATCH /api/garment-images/{image_id}`
@@ -178,6 +339,8 @@ Authorization: Bearer <token>
 `DELETE /api/garment-images/{image_id}`
 
 删除应用内上传副本。每个货号至少需要保留一张图片，否则返回 `409`。
+
+删除单张图片时会同步清理该图片的 `thumb` / `preview` 衍生图。
 
 ## 状态
 
@@ -267,21 +430,48 @@ SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED
 
 `GET /api/generation-runs`
 
+查询参数：
+
+| 参数 | 说明 |
+|---|---|
+| `includeArchived` | 是否包含已归档记录，默认 `false` |
+| `limit` | 每页数量，默认 30，最大 100 |
+| `offset` | 起始偏移，默认 0 |
+| `skuId` | 只返回指定货号的生成记录 |
+| `keyword` | 按货号、标题、状态或记录 ID 模糊搜索 |
+
 返回前台历史任务列表。列表项包含任务基础字段和 `summary`：
 
 ```json
 {
-  "id": 7,
-  "sku": "125329C0908714",
-  "skuTitle": "125329C0908714",
-  "status": "SUCCEEDED",
-  "summary": {
-    "imageCount": 5,
-    "succeededCount": 5,
-    "finalCount": 1,
-    "regenerationCount": 2,
-    "previews": []
-  }
+  "items": [
+    {
+      "id": 7,
+      "sku": "125329C0908714",
+      "skuTitle": "125329C0908714",
+      "status": "SUCCEEDED",
+      "summary": {
+        "imageCount": 5,
+        "succeededCount": 5,
+        "finalCount": 1,
+        "regenerationCount": 2,
+        "previews": [
+          {
+            "id": 31,
+            "title": "全身主视觉",
+            "url": "https://...",
+            "thumbUrl": "https://...",
+            "previewUrl": "https://...",
+            "originalUrl": "https://..."
+          }
+        ]
+      }
+    }
+  ],
+  "limit": 30,
+  "offset": 0,
+  "nextOffset": null,
+  "hasMore": false
 }
 ```
 
@@ -302,6 +492,10 @@ SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED
   "submittedAt": "2026-05-07T16:00:00",
   "completedAt": null,
   "lastStatusCheckedAt": "2026-05-07T16:01:30",
+  "url": "https://...",
+  "thumbUrl": "https://...",
+  "previewUrl": "https://...",
+  "originalUrl": "https://...",
   "prompt": "中文 Image 2 prompt",
   "imageInputs": [],
   "attempts": []
@@ -330,7 +524,7 @@ fal 状态映射：
 | `FAILED` / `ERROR` | `FAILED` |
 | `CANCELED` / `CANCELLED` | `CANCELLED` |
 
-完成后，后端使用 fal `response_url` 获取结果，并下载第一张图片并写入 `output_path` 对象 key。
+完成后，后端使用 fal `response_url` 获取结果，并下载第一张图片写入 `output_path` 对象 key，同时生成 `thumb` / `preview` 衍生图。
 
 ### 单张重生
 
@@ -360,6 +554,23 @@ fal 状态映射：
 ## 数字模特 CRUD 契约
 
 ### 新建 / 编辑模特
+
+`GET /api/model-profiles`
+
+查询参数：
+
+| 参数 | 说明 |
+|---|---|
+| `limit` | 每页数量，默认 30，最大 100 |
+| `offset` | 起始偏移，默认 0 |
+| `keyword` | 按模特 ID 或名称模糊搜索 |
+
+响应为通用分页结构。每个 `ModelProfile` 会返回：
+
+- `thumbUrl`：模特列表头像缩略图。
+- `previewUrl`：头像角度面板和普通预览使用。
+- `originalUrl`：原始正脸头像。
+- `profile.headReferenceEntries[]`：每张头像条目，包含 `url`、`thumbUrl`、`previewUrl`、`originalUrl`。
 
 `POST /api/model-profiles`
 
@@ -406,6 +617,7 @@ multipart form-data：
 
 - 不传 `angle` 时，新头像会以内部 `reference_id` 写入，并在 UI 中显示为 `未设置`。
 - 传 `angle` 时，头像直接绑定该角度。
+- 头像上传或替换时会同步生成 `thumbUrl` / `previewUrl` 衍生图。
 - 当前支持角度：`front`、`left45`、`right45`、`right90`、`left90`、`up45`、`down45`、`back`、`backTurnLeft45`、`backTurnRight45`。
 
 ### 更新头像角度 / 排序
@@ -429,7 +641,7 @@ multipart form-data：
 
 `DELETE /api/model-profiles/{model_profile_id}/head-references/{reference_id}`
 
-删除头像元数据与素材文件，并更新 `headReferenceOrder`。
+删除头像元数据、原始素材、`thumb` / `preview` 衍生图，并更新 `headReferenceOrder`。
 
 ## 错误处理
 

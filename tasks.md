@@ -27,8 +27,9 @@
 ## 当前实现说明
 
 - 上传：浏览器本地预览与编辑，保存后后端写入对象存储 `uploads/{sku}-{timestamp}-{id}/`。
-- 读取：后端返回对象存储短期预签名 URL，前端可直接显示私有图片。
-- 生成：生成任务的输出写入 `outputs/{sku}/{timestamp}/`。
+- 读取：后端返回对象存储短期预签名 URL，前端可直接显示私有图片；列表和详情按需分页加载。
+- 媒体衍生图：上传素材、数字模特头像和生成结果保留原图，并生成 `thumb` / `preview` WebP 衍生图。
+- 生成：生成任务的输出写入 `outputs/{sku}/{timestamp}/`，完成后生成对应缩略图和预览图。
 - 导出：ZIP 写入 `exports/{sku}/`，同时通过接口流式返回给前端。
 - 日志：业务事件写入 SQLite，并双写 `backend/data/logs/*.jsonl`。
 - 部署：客户本地化部署默认使用 RustFS Docker；未来 SaaS 可把同一套 S3 配置切到 OSS、COS、AWS S3、GCS 兼容接口等。

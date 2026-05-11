@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from .config import get_settings
 from .db import dumps, get_db, init_db, loads, log_event, media_url, now_iso
+from .image_derivatives import derivative_key, existing_derivative_or_original, generate_image_derivatives
 from .image_provider import get_image_provider
 from .object_storage import (
     clean_key,
@@ -351,6 +352,15 @@ def cleanup_objects(keys: list[str]) -> None:
             delete_object(key)
 
 
+def image_object_keys(original_key: str | Path | None) -> list[str]:
+    if not original_key:
+        return []
+    return [
+        clean_key(original_key),
+        *(key for key in [derivative_key(original_key, "thumb"), derivative_key(original_key, "preview")] if key),
+    ]
+
+
 def cleanup_prefixes(prefixes: list[str]) -> list[dict[str, str]]:
     errors: list[dict[str, str]] = []
     for prefix in dict.fromkeys(prefix for prefix in prefixes if prefix):
@@ -362,7 +372,13 @@ def cleanup_prefixes(prefixes: list[str]) -> list[dict[str, str]]:
 
 
 @app.get("/api/garment-skus")
-def list_garment_skus(include_archived: bool = Query(False, alias="includeArchived")) -> dict[str, Any]:
+def list_garment_skus(
+    include_archived: bool = Query(False, alias="includeArchived"),
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    keyword: str | None = Query(None),
+) -> dict[str, Any]:
+    search = f"%{keyword.strip()}%" if keyword and keyword.strip() else None
     with get_db() as db:
         rows = db.execute(
             """
@@ -374,11 +390,20 @@ def list_garment_skus(include_archived: bool = Query(False, alias="includeArchiv
               (SELECT COUNT(*) FROM generation_runs gr WHERE gr.sku_id = gs.id AND gr.archived_at IS NOT NULL) AS archived_generation_run_count
             FROM garment_skus gs
             WHERE (? OR gs.archived_at IS NULL)
-            ORDER BY gs.created_at DESC
+              AND (? IS NULL OR gs.sku LIKE ? OR gs.title LIKE ? OR gs.status LIKE ?)
+            ORDER BY gs.created_at DESC, gs.id DESC
+            LIMIT ? OFFSET ?
             """,
-            (include_archived,),
+            (include_archived, search, search, search, search, limit + 1, offset),
         ).fetchall()
-        return {"items": [serialize_sku(row) for row in rows]}
+        items = rows[:limit]
+        return {
+            "items": [serialize_sku(row) for row in items],
+            "limit": limit,
+            "offset": offset,
+            "nextOffset": offset + limit if len(rows) > limit else None,
+            "hasMore": len(rows) > limit,
+        }
 
 
 @app.post("/api/garment-skus")
@@ -410,9 +435,10 @@ async def upload_garment_sku(
             safe_name = f"{index + 1:03d}-{sanitize_filename(upload.filename or 'image')}"
             key = join_key(target_prefix, safe_name)
             put_fileobj(key, BytesIO(content), content_type)
+            generate_image_derivatives(key, content)
             saved_files.append((safe_name, key, content_type))
     except Exception:
-        cleanup_objects([key for _, key, _ in saved_files])
+        cleanup_objects([key for _, original_key, _ in saved_files for key in image_object_keys(original_key)])
         raise
 
     try:
@@ -451,14 +477,42 @@ async def upload_garment_sku(
             )
             row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
     except Exception:
-        cleanup_objects([key for _, key, _ in saved_files])
+        cleanup_objects([key for _, original_key, _ in saved_files for key in image_object_keys(original_key)])
         raise
     return {"item": get_sku_detail_by_id(sku_id), "summary": serialize_sku(row)}
 
 
 @app.get("/api/garment-skus/{sku_id}")
-def get_garment_sku(sku_id: int) -> dict[str, Any]:
-    return {"item": get_sku_detail_by_id(sku_id)}
+def get_garment_sku(
+    sku_id: int,
+    image_limit: int = Query(24, alias="imageLimit", ge=1, le=120),
+    image_offset: int = Query(0, alias="imageOffset", ge=0),
+) -> dict[str, Any]:
+    return {"item": get_sku_detail_by_id(sku_id, image_limit=image_limit, image_offset=image_offset)}
+
+
+@app.get("/api/garment-skus/{sku_id}/images")
+def list_garment_sku_images(
+    sku_id: int,
+    limit: int = Query(24, ge=1, le=120),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    with get_db() as db:
+        sku_row = db.execute("SELECT id FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
+        if not sku_row:
+            raise HTTPException(status_code=404, detail="货号不存在")
+        rows = db.execute(
+            "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY sort_order, id LIMIT ? OFFSET ?",
+            (sku_id, limit + 1, offset),
+        ).fetchall()
+        items = rows[:limit]
+        return {
+            "items": [serialize_image(image) for image in items],
+            "limit": limit,
+            "offset": offset,
+            "nextOffset": offset + limit if len(rows) > limit else None,
+            "hasMore": len(rows) > limit,
+        }
 
 
 @app.patch("/api/garment-skus/{sku_id}")
@@ -576,9 +630,10 @@ async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -
                 safe_name = f"{sort_order + 1:03d}-{sanitize_filename(upload.filename or 'image')}"
                 key = unique_key(join_key(target_prefix, safe_name))
                 put_fileobj(key, BytesIO(content), content_type)
+                generate_image_derivatives(key, content)
                 saved.append((Path(key).name, key, content_type, sort_order))
         except Exception:
-            cleanup_objects([key for _, key, _, _ in saved])
+            cleanup_objects([key for _, original_key, _, _ in saved for key in image_object_keys(original_key)])
             raise
 
         try:
@@ -610,7 +665,7 @@ async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -
                 {"fileCount": len(saved), "files": [filename for filename, _, _, _ in saved]},
             )
         except Exception:
-            cleanup_objects([key for _, key, _, _ in saved])
+            cleanup_objects([key for _, original_key, _, _ in saved for key in image_object_keys(original_key)])
             raise
     return {"item": get_sku_detail_by_id(sku_id)}
 
@@ -678,15 +733,35 @@ def delete_garment_image(image_id: int) -> dict[str, Any]:
             {"skuId": row["sku_id"], "filename": row["filename"], "storagePath": storage_path},
         )
 
-    delete_object(storage_path)
+    cleanup_objects(image_object_keys(storage_path))
     return {"ok": True}
 
 
 @app.get("/api/model-profiles")
-def list_model_profiles() -> dict[str, Any]:
+def list_model_profiles(
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    keyword: str | None = Query(None),
+) -> dict[str, Any]:
+    search = f"%{keyword.strip()}%" if keyword and keyword.strip() else None
     with get_db() as db:
-        rows = db.execute("SELECT * FROM model_profiles ORDER BY is_default DESC, id").fetchall()
-        return {"items": [serialize_model(row) for row in rows]}
+        rows = db.execute(
+            """
+            SELECT * FROM model_profiles
+            WHERE (? IS NULL OR model_id LIKE ? OR name LIKE ?)
+            ORDER BY is_default DESC, id
+            LIMIT ? OFFSET ?
+            """,
+            (search, search, search, limit + 1, offset),
+        ).fetchall()
+        items = rows[:limit]
+        return {
+            "items": [serialize_model(row) for row in items],
+            "limit": limit,
+            "offset": offset,
+            "nextOffset": offset + limit if len(rows) > limit else None,
+            "hasMore": len(rows) > limit,
+        }
 
 
 @app.post("/api/model-profiles")
@@ -855,6 +930,7 @@ async def add_model_head_reference(
                 safe_name = sanitize_filename(upload.filename or "head-reference")
                 key = unique_key(join_key(asset_dir, safe_name))
                 put_fileobj(key, BytesIO(content), content_type)
+                generate_image_derivatives(key, content)
                 saved_keys.append(key)
                 old_filename = references.get(assigned_key)
                 if old_filename:
@@ -865,7 +941,7 @@ async def add_model_head_reference(
                     order.append(assigned_key)
                 saved.append({"id": assigned_key, "filename": filename})
         except Exception:
-            cleanup_objects(saved_keys)
+            cleanup_objects([key for saved_key in saved_keys for key in image_object_keys(saved_key)])
             raise
 
         try:
@@ -883,7 +959,7 @@ async def add_model_head_reference(
                 {"items": saved},
             )
         except Exception:
-            cleanup_objects(saved_keys)
+            cleanup_objects([key for saved_key in saved_keys for key in image_object_keys(saved_key)])
             raise
 
     for old_filename in old_files:
@@ -1233,7 +1309,14 @@ async def generate_group(payload: GenerateGroupRequest) -> dict[str, Any]:
 
 
 @app.get("/api/generation-runs")
-def list_generation_runs(include_archived: bool = Query(False, alias="includeArchived")) -> dict[str, Any]:
+def list_generation_runs(
+    include_archived: bool = Query(False, alias="includeArchived"),
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    sku_id: int | None = Query(None, alias="skuId"),
+    keyword: str | None = Query(None),
+) -> dict[str, Any]:
+    search = f"%{keyword.strip()}%" if keyword and keyword.strip() else None
     with get_db() as db:
         rows = db.execute(
             """
@@ -1246,11 +1329,21 @@ def list_generation_runs(include_archived: bool = Query(False, alias="includeArc
             FROM generation_runs gr
             JOIN garment_skus gs ON gs.id = gr.sku_id
             WHERE (? OR gr.archived_at IS NULL)
-            ORDER BY gr.created_at DESC
+              AND (? IS NULL OR gr.sku_id = ?)
+              AND (? IS NULL OR gs.sku LIKE ? OR gs.title LIKE ? OR gr.status LIKE ? OR CAST(gr.id AS TEXT) LIKE ?)
+            ORDER BY gr.created_at DESC, gr.id DESC
+            LIMIT ? OFFSET ?
             """,
-            (include_archived,),
+            (include_archived, sku_id, sku_id, search, search, search, search, search, limit + 1, offset),
         ).fetchall()
-        return {"items": [serialize_generation_run(row, include_images=False, include_summary=True) for row in rows]}
+        items = rows[:limit]
+        return {
+            "items": [serialize_generation_run(row, include_images=False, include_summary=True) for row in items],
+            "limit": limit,
+            "offset": offset,
+            "nextOffset": offset + limit if len(rows) > limit else None,
+            "hasMore": len(rows) > limit,
+        }
 
 
 @app.get("/api/generation-runs/{run_id}")
@@ -2501,11 +2594,12 @@ def infer_head_reference_key(body_position: str) -> str:
     return "front"
 
 
-def get_sku_detail_by_id(sku_id: int) -> dict[str, Any]:
+def get_sku_detail_by_id(sku_id: int, image_limit: int = 24, image_offset: int = 0) -> dict[str, Any]:
     with get_db() as db:
         row = db.execute(
             """
             SELECT gs.*,
+              (SELECT COUNT(*) FROM garment_images gi WHERE gi.sku_id = gs.id) AS image_count,
               (SELECT COUNT(*) FROM shot_plans sp WHERE sp.sku_id = gs.id) AS shot_plan_count,
               (SELECT COUNT(*) FROM generation_runs gr WHERE gr.sku_id = gs.id) AS generation_run_count,
               (SELECT COUNT(*) FROM generation_runs gr WHERE gr.sku_id = gs.id AND gr.archived_at IS NOT NULL) AS archived_generation_run_count
@@ -2517,11 +2611,18 @@ def get_sku_detail_by_id(sku_id: int) -> dict[str, Any]:
         if not row:
             raise HTTPException(status_code=404, detail="货号不存在")
         images = db.execute(
-            "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY sort_order, id",
-            (sku_id,),
+            "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY sort_order, id LIMIT ? OFFSET ?",
+            (sku_id, image_limit + 1, image_offset),
         ).fetchall()
+        visible_images = images[:image_limit]
         item = serialize_sku(row)
-        item["images"] = [serialize_image(image) for image in images]
+        item["images"] = [serialize_image(image) for image in visible_images]
+        item["imagePage"] = {
+            "limit": image_limit,
+            "offset": image_offset,
+            "nextOffset": image_offset + image_limit if len(images) > image_limit else None,
+            "hasMore": len(images) > image_limit,
+        }
         return item
 
 
@@ -2593,6 +2694,8 @@ def resolve_model_profile(db: Any, model_profile_id: int | None) -> Any:
 
 def serialize_sku(row: Any) -> dict[str, Any]:
     cover_path = row.keys() and row["cover_path"] if "cover_path" in row.keys() else None
+    cover_thumb_path = existing_derivative_or_original(cover_path, "thumb")
+    cover_preview_path = existing_derivative_or_original(cover_path, "preview")
     generation_run_count = row["generation_run_count"] if "generation_run_count" in row.keys() else 0
     archived_generation_run_count = row["archived_generation_run_count"] if "archived_generation_run_count" in row.keys() else 0
     shot_plan_count = row["shot_plan_count"] if "shot_plan_count" in row.keys() else 0
@@ -2604,7 +2707,10 @@ def serialize_sku(row: Any) -> dict[str, Any]:
         "status": row["status"],
         "analysis": loads(row["analysis_json"], None),
         "storagePath": row["storage_path"],
-        "coverUrl": media_url(cover_path),
+        "coverUrl": media_url(cover_thumb_path),
+        "coverThumbUrl": media_url(cover_thumb_path),
+        "coverPreviewUrl": media_url(cover_preview_path),
+        "coverOriginalUrl": media_url(cover_path),
         "coverFileSize": file_size(cover_path),
         "imageCount": row["image_count"] if "image_count" in row.keys() else None,
         "deleteImpact": {
@@ -2620,14 +2726,22 @@ def serialize_sku(row: Any) -> dict[str, Any]:
 
 
 def serialize_image(row: Any) -> dict[str, Any]:
+    original_path = row["storage_path"]
+    thumb_path = existing_derivative_or_original(original_path, "thumb")
+    preview_path = existing_derivative_or_original(original_path, "preview")
     return {
         "id": row["id"],
         "filename": row["filename"],
         "role": row["role"],
         "sortOrder": row["sort_order"],
         "mimeType": row["mime_type"],
-        "url": media_url(row["storage_path"]),
-        "fileSize": file_size(row["storage_path"]),
+        "url": media_url(preview_path),
+        "thumbUrl": media_url(thumb_path),
+        "previewUrl": media_url(preview_path),
+        "originalUrl": media_url(original_path),
+        "fileSize": file_size(original_path),
+        "thumbFileSize": file_size(thumb_path) if thumb_path != original_path else None,
+        "previewFileSize": file_size(preview_path) if preview_path != original_path else None,
         "createdAt": row["created_at"],
     }
 
@@ -2640,7 +2754,17 @@ def serialize_model(row: Any) -> dict[str, Any]:
     head = assigned_references.get("front")
     preview_path = join_key(row["asset_dir"], head) if head else None
     reference_urls = {
-        angle: model_asset_url(row["id"], row["asset_dir"], filename)
+        angle: model_asset_url(row["id"], row["asset_dir"], filename, "preview")
+        for angle, filename in references.items()
+        if filename
+    }
+    reference_thumb_urls = {
+        angle: model_asset_url(row["id"], row["asset_dir"], filename, "thumb")
+        for angle, filename in references.items()
+        if filename
+    }
+    reference_original_urls = {
+        angle: model_asset_url(row["id"], row["asset_dir"], filename, "original")
         for angle, filename in references.items()
         if filename
     }
@@ -2655,6 +2779,9 @@ def serialize_model(row: Any) -> dict[str, Any]:
             "angle": None if is_unassigned_head_reference_id(reference_id) else reference_id,
             "filename": str(filename),
             "url": reference_urls.get(reference_id),
+            "thumbUrl": reference_thumb_urls.get(reference_id),
+            "previewUrl": reference_urls.get(reference_id),
+            "originalUrl": reference_original_urls.get(reference_id),
             "fileSize": reference_meta.get(reference_id, {}).get("fileSize"),
         }
         for reference_id, filename in references.items()
@@ -2674,7 +2801,9 @@ def serialize_model(row: Any) -> dict[str, Any]:
         },
         "isDefault": bool(row["is_default"]),
         "previewPath": str(preview_path) if preview_path else None,
-        "previewUrl": model_asset_url(row["id"], row["asset_dir"], head) if head else None,
+        "thumbUrl": model_asset_url(row["id"], row["asset_dir"], head, "thumb") if head else None,
+        "previewUrl": model_asset_url(row["id"], row["asset_dir"], head, "preview") if head else None,
+        "originalUrl": model_asset_url(row["id"], row["asset_dir"], head, "original") if head else None,
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
@@ -2751,7 +2880,10 @@ def serialize_generation_run(row: Any, include_images: bool, include_summary: bo
                         "id": preview["id"],
                         "shotIndex": preview["shot_index"],
                         "title": preview["title"],
-                        "url": media_url(preview["output_path"]),
+                        "url": media_url(existing_derivative_or_original(preview["output_path"], "thumb")),
+                        "thumbUrl": media_url(existing_derivative_or_original(preview["output_path"], "thumb")),
+                        "previewUrl": media_url(existing_derivative_or_original(preview["output_path"], "preview")),
+                        "originalUrl": media_url(preview["output_path"]),
                         "status": preview["status"],
                         "isFinal": bool(preview["is_final"]),
                         "attemptCount": preview["current_attempt_index"] or 1,
@@ -2771,6 +2903,9 @@ def serialize_generation_run(row: Any, include_images: bool, include_summary: bo
 
 def serialize_generation_image(row: Any) -> dict[str, Any]:
     displayable = has_displayable_generation_output(row)
+    original_path = row["output_path"] if displayable else None
+    thumb_path = existing_derivative_or_original(original_path, "thumb") if original_path else None
+    preview_path = existing_derivative_or_original(original_path, "preview") if original_path else None
     return {
         "id": row["id"],
         "runId": row["run_id"],
@@ -2778,8 +2913,13 @@ def serialize_generation_image(row: Any) -> dict[str, Any]:
         "title": row["title"],
         "status": row["status"],
         "objectKey": row["output_path"],
-        "url": media_url(row["output_path"]) if displayable else None,
-        "fileSize": file_size(row["output_path"]) if displayable else None,
+        "url": media_url(preview_path) if displayable else None,
+        "thumbUrl": media_url(thumb_path) if displayable else None,
+        "previewUrl": media_url(preview_path) if displayable else None,
+        "originalUrl": media_url(original_path) if displayable else None,
+        "fileSize": file_size(original_path) if displayable else None,
+        "thumbFileSize": file_size(thumb_path) if displayable and thumb_path != original_path else None,
+        "previewFileSize": file_size(preview_path) if displayable and preview_path != original_path else None,
         "taskPackage": loads(row["task_package_json"], {}),
         "providerRequest": loads(row["provider_request_json"], None),
         "providerResponse": loads(row["provider_response_json"], None),
@@ -2891,10 +3031,12 @@ def new_unassigned_head_reference_key(references: dict[str, Any]) -> str:
             return candidate
 
 
-def model_asset_url(model_profile_id: int, asset_dir: str, filename: str | None) -> str | None:
+def model_asset_url(model_profile_id: int, asset_dir: str, filename: str | None, variant: str = "preview") -> str | None:
     if not filename:
         return None
     key = join_key(asset_dir, sanitize_filename(filename))
+    if variant in {"thumb", "preview"}:
+        key = existing_derivative_or_original(key, variant) or key
     if not object_exists(key):
         return None
     return presigned_get_url(key)
@@ -2907,4 +3049,4 @@ def file_size(path: str | Path | None) -> int | None:
 def remove_model_asset_file(asset_dir: str, filename: str | None) -> None:
     if not filename:
         return
-    delete_object(join_key(asset_dir, sanitize_filename(filename)))
+    cleanup_objects(image_object_keys(join_key(asset_dir, sanitize_filename(filename))))
