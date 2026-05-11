@@ -1,10 +1,10 @@
 # Repository ownership
-* @fushuai
+* @happyvchen
 
 # Product and generation rules
-/design/ @fushuai
-/docs/review/ @fushuai
+/design/ @happyvchen
+/docs/review/ @happyvchen
 
 # Application implementation
-/backend/ @fushuai
-/frontend/ @fushuai
+/backend/ @happyvchen
+/frontend/ @happyvchen

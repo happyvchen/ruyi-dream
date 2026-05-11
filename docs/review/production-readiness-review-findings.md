@@ -34,6 +34,11 @@
 - F-R12-001: 已加入最小 CI（backend compile/import、frontend build、compose config）；核心业务测试仍待补齐。
 - F-R14-001: 已加入 CI workflow、PR template、CODEOWNERS；branch protection 和 automatically delete head branches 仍需仓库管理员开启。
 
+### Product/security decisions added 2026-05-11
+
+- D03: MVP 阶段增加前端应用门禁。用户进入 ruyi-dream 前必须输入部署级访问密码；暂不引入用户、角色、workspace、审计身份和多租户隔离。
+- D04: 当前把 `APP_API_ACCESS_TOKEN` 打进前端静态包的方式只能作为临时本地/内网过渡，不能作为生产级门禁。PR-002 需要调整为“服务端校验密码并签发会话”，前端只保存短期会话，不保存部署密钥。
+
 ## Priority Legend
 
 - P0: 上线阻断，必须先解决。
@@ -204,7 +209,7 @@ Recommendation:
 
 #### F-R05-001 [P1] API 没有鉴权和用户上下文，无法作为生产系统暴露
 
-Status: Partially addressed in repair batch 2026-05-11. MVP deployment-level token or explicit reverse-proxy auth boundary exists; full user/workspace/role context remains future work.
+Status: Partially addressed in repair batch 2026-05-11. MVP deployment-level token was added, but post-review decision D03 requires replacing frontend-embedded token with a password gate and server-side session before this can be considered acceptable for private production delivery.
 
 Evidence:
 
@@ -217,8 +222,44 @@ Risk:
 
 Recommendation:
 
-- 即使 MVP 私有化，也应至少支持部署级访问令牌或反向代理鉴权。
+- 即使 MVP 私有化，也应至少支持部署级访问密码门禁或反向代理鉴权。
+- 推荐方案：增加 `/api/auth/login`、`/api/auth/logout`、`/api/auth/session`。登录时后端校验 `APP_GATE_PASSWORD` 或其哈希，成功后设置 `HttpOnly`、`SameSite=Lax`、短期有效的 session cookie；后续 `/api/*` 只接受有效 session。前端只负责展示登录页和会话状态，不把部署密钥写进静态 bundle。
 - 生产版应引入用户、角色、workspace，或明确要求只能部署在受控内网并由网关保护。
+
+MVP 门禁边界:
+
+- 只解决“进入应用前需要知道访问密码”的问题，不区分用户身份。
+- 不提供注册、找回密码、用户管理、角色权限、工作空间隔离。
+- 不把密码或 API token 编译进前端 JS。
+- 失败登录需要统一错误提示，并增加基础速率限制或冷却时间，避免简单爆破。
+- 登录态建议默认 8-24 小时有效；退出登录必须清理服务端 session 或使签名 cookie 失效。
+- `/api/health` 继续匿名，用于容器和反向代理健康检查。
+
+Migration note:
+
+- `APP_API_ACCESS_TOKEN` 可短期保留为脚本/运维 API token，但不再作为浏览器前端的主要访问方式。
+- 如果部署在企业网关后，可继续用 `APP_TRUST_REVERSE_PROXY_AUTH=true` 跳过内置门禁，但文档必须明确外部鉴权责任。
+
+#### F-R05-003 [P1] 当前前端门禁设计缺失，静态 API token 不能替代登录门禁
+
+Evidence:
+
+- `frontend/src/api.ts` 通过 `VITE_API_ACCESS_TOKEN` 把 token 加到请求头。
+- `docker-compose.yml` 和 `frontend/Dockerfile` 会在构建前端时注入 `VITE_API_ACCESS_TOKEN`。
+- 浏览器前端是公开静态资源，任何能访问应用的人都可以从构建产物或 DevTools 中获得该 token。
+
+Risk:
+
+- 该方案阻挡不了已经能打开前端页面的人直接调用 API，只能减少无 token 的脚本误扫。
+- 对客户交付时容易产生“已有鉴权”的误解，但实际没有登录门禁、会话过期、退出登录和密码轮换体验。
+
+Recommendation:
+
+- 新增“应用门禁”作为 PR-002 的修正目标：用户进入任何业务页面前必须先通过密码验证。
+- 后端用服务端环境变量保存门禁密码或密码哈希，前端永不接触明文密码以外的长期密钥。
+- 前端提供独立登录页；未登录访问业务路由时停留在登录页，登录成功后恢复原目标路径。
+- API 统一通过 session cookie 校验；导出、上传、生成、日志等接口同样受保护。
+- 文档中把此能力命名为“single-password app gate”，避免和正式 user auth 混淆。
 
 #### F-R05-002 [P2] 健康检查接口泄露内部路径和存储配置
 
@@ -484,7 +525,7 @@ Recommendation:
 | Priority | Item | Suggested PR | Status |
 | --- | --- | --- | --- |
 | P0 | 移除代码内默认对象存储密钥，启动时校验生产必填配置 | PR-001 | Fixed 2026-05-11 |
-| P1 | 增加部署级鉴权或明确由反向代理保护，并收紧 `/api/health` | PR-002 | Fixed MVP baseline; full user auth future |
+| P1 | 增加部署级鉴权或明确由反向代理保护，并收紧 `/api/health` | PR-002 | Needs revision: replace frontend-embedded token with password gate + server-side session |
 | P1 | 上传文件增加大小、数量、真实图片解码、像素和格式校验 | PR-003 | Fixed 2026-05-11 |
 | P1 | 生成任务增加 claim/lock、超时、取消、重试上限 | PR-004 | Open |
 | P1 | 建立最小 CI：backend compile/import、frontend build/typecheck、compose config | PR-005 | Fixed minimal baseline; business tests pending |

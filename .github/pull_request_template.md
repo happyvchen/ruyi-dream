@@ -1,6 +1,6 @@
 ## Summary
 
-- 
+-
 
 ## Review Checklist
 
@@ -12,8 +12,8 @@
 
 ## Verification
 
-- 
+-
 
 ## Risk Notes
 
-- 
+-

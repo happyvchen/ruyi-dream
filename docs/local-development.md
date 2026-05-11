@@ -81,6 +81,8 @@ npm install
 npm run dev
 ```
 
+前端本地 dev server 会读取项目根目录 `.env`，并自动把 `PUBLIC_BACKEND_URL` 映射为 `VITE_API_BASE_URL`、把 `APP_API_ACCESS_TOKEN` 映射为 `VITE_API_ACCESS_TOKEN`。因此启用 API token 后，不需要再维护一份 `frontend/.env.local`。
+
 默认访问：
 
 ```text
