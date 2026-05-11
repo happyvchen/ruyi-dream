@@ -14,7 +14,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version: "3.12"
       - name: Install backend dependencies
         run: python -m pip install -r backend/requirements.txt -c backend/requirements.constraints.txt
       - name: Compile backend
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
@@ -66,3 +66,25 @@ jobs:
           RUSTFS_SECRET_KEY: ci-secret-key
           APP_TRUST_REVERSE_PROXY_AUTH: "true"
         run: docker compose config --quiet
+
+  docker-images:
+    name: Docker image smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -t ruyi-dream-backend-ci ./backend
+      - name: Smoke backend image
+        env:
+          APP_S3_ACCESS_KEY_ID: ci-access-key
+          APP_S3_SECRET_ACCESS_KEY: ci-secret-key
+          APP_TRUST_REVERSE_PROXY_AUTH: "true"
+        run: |
+          docker run --rm \
+            -e APP_S3_ACCESS_KEY_ID \
+            -e APP_S3_SECRET_ACCESS_KEY \
+            -e APP_TRUST_REVERSE_PROXY_AUTH \
+            ruyi-dream-backend-ci \
+            python -c "from app.main import health; assert health()['ok'] is True"
+      - name: Build frontend image
+        run: docker build -t ruyi-dream-frontend-ci ./frontend

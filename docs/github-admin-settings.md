@@ -21,6 +21,7 @@ Protect `main` with these rules:
   - `Backend smoke`
   - `Frontend build`
   - `Compose config`
+  - `Docker image smoke`
 - Do not allow force pushes.
 - Do not allow branch deletion.
 

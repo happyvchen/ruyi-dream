@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -41,26 +41,6 @@ from .planner import PlannerError, SHOT_SLOTS, normalize_plan as normalize_plann
 
 settings = get_settings()
 Image.MAX_IMAGE_PIXELS = settings.max_upload_image_pixels
-app = FastAPI(title=settings.app_name)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Ruyi-Access-Token"],
-)
-
-
-@app.middleware("http")
-async def require_api_session(request: Request, call_next: Any) -> Any:
-    public_paths = {"/api/health", "/api/auth/login", "/api/auth/logout", "/api/auth/session"}
-    if request.method == "OPTIONS" or request.url.path in public_paths:
-        return await call_next(request)
-    if request.url.path.startswith("/api/") and request.method in {"POST", "PATCH", "DELETE"} and not is_write_origin_allowed(request):
-        return JSONResponse(status_code=403, content={"detail": "请求来源不被允许"})
-    if request.url.path.startswith("/api/") and not is_request_authenticated(request):
-        return JSONResponse(status_code=401, content={"detail": "请先登录"})
-    return await call_next(request)
 
 
 def is_request_authenticated(request: Request) -> bool:
@@ -238,27 +218,48 @@ ALLOWED_UPLOAD_MIME_TYPES = {
 ALLOWED_UPLOAD_FORMATS = set(ALLOWED_UPLOAD_MIME_TYPES.values())
 
 
-@app.on_event("startup")
-async def startup() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> Any:
     ensure_bucket()
     init_db()
     backfill_shot_plan_script_data()
     app.state.generation_poller = asyncio.create_task(generation_poller_loop())
     app.state.planner_poller = asyncio.create_task(planner_poller_loop())
+    try:
+        yield
+    finally:
+        task = getattr(app.state, "generation_poller", None)
+        if task:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        planner_task = getattr(app.state, "planner_poller", None)
+        if planner_task:
+            planner_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await planner_task
 
 
-@app.on_event("shutdown")
-async def shutdown() -> None:
-    task = getattr(app.state, "generation_poller", None)
-    if task:
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
-    planner_task = getattr(app.state, "planner_poller", None)
-    if planner_task:
-        planner_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await planner_task
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Ruyi-Access-Token"],
+)
+
+
+@app.middleware("http")
+async def require_api_session(request: Request, call_next: Any) -> Any:
+    public_paths = {"/api/health", "/api/auth/login", "/api/auth/logout", "/api/auth/session"}
+    if request.method == "OPTIONS" or request.url.path in public_paths:
+        return await call_next(request)
+    if request.url.path.startswith("/api/") and request.method in {"POST", "PATCH", "DELETE"} and not is_write_origin_allowed(request):
+        return JSONResponse(status_code=403, content={"detail": "请求来源不被允许"})
+    if request.url.path.startswith("/api/") and not is_request_authenticated(request):
+        return JSONResponse(status_code=401, content={"detail": "请先登录"})
+    return await call_next(request)
 
 
 @app.get("/api/health")
@@ -1247,7 +1248,17 @@ def cancel_generation_run(run_id: int) -> dict[str, Any]:
         row = db.execute("SELECT * FROM generation_runs WHERE id = ?", (run_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="生成记录不存在")
-        db.execute(
+        active_count = db.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM generation_images
+            WHERE run_id = ? AND status IN ('QUEUED', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS', 'RUNNING')
+            """,
+            (run_id,),
+        ).fetchone()["count"]
+        if not active_count:
+            raise HTTPException(status_code=409, detail="生成记录已结束，不能取消")
+        cursor = db.execute(
             """
             UPDATE generation_images
             SET status = 'CANCELLED', cancel_requested_at = COALESCE(cancel_requested_at, ?),
@@ -1257,11 +1268,16 @@ def cancel_generation_run(run_id: int) -> dict[str, Any]:
             """,
             (timestamp, timestamp, timestamp, run_id),
         )
-        db.execute(
-            "UPDATE generation_runs SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
-            (timestamp, run_id),
+        if cursor.rowcount <= 0:
+            raise HTTPException(status_code=409, detail="生成记录已结束，不能取消")
+        log_event(
+            db,
+            "generation_run",
+            run_id,
+            "cancelled",
+            {"cancelledAt": timestamp, "cancelledImageCount": cursor.rowcount},
         )
-        log_event(db, "generation_run", run_id, "cancelled", {"cancelledAt": timestamp})
+    update_generation_run_status(run_id)
     return {"item": get_generation_run_by_id(run_id)}
 
 

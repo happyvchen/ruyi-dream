@@ -61,6 +61,62 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("locked_by", image_columns)
         self.assertGreaterEqual(template_count, 1)
 
+    def test_terminal_generation_run_cancel_returns_conflict(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            with db_module.get_db() as db:
+                model_id = db.execute("SELECT id FROM model_profiles ORDER BY id LIMIT 1").fetchone()["id"]
+                sku_id = db.execute(
+                    """
+                    INSERT INTO garment_skus (sku, title, storage_path, created_at, updated_at)
+                    VALUES ('SKU-TEST', 'Test SKU', 'garments/sku-test', ?, ?)
+                    """,
+                    (timestamp, timestamp),
+                ).lastrowid
+                shot_plan_id = db.execute(
+                    """
+                    INSERT INTO shot_plans
+                      (sku_id, model_profile_id, status, plan_json, planner_provider, created_at, updated_at)
+                    VALUES (?, ?, 'CONFIRMED', '{}', 'test', ?, ?)
+                    """,
+                    (sku_id, model_id, timestamp, timestamp),
+                ).lastrowid
+                run_id = db.execute(
+                    """
+                    INSERT INTO generation_runs
+                      (sku_id, shot_plan_id, model_profile_id, kind, status, output_dir, created_at, updated_at)
+                    VALUES (?, ?, ?, 'group', 'SUCCEEDED', 'outputs/test-run', ?, ?)
+                    """,
+                    (sku_id, shot_plan_id, model_id, timestamp, timestamp),
+                ).lastrowid
+                db.execute(
+                    """
+                    INSERT INTO generation_images
+                      (run_id, shot_index, title, status, output_path, task_package_json, is_final, created_at, updated_at)
+                    VALUES (?, 1, 'Front', 'SUCCEEDED', 'outputs/test-run/front.png', '{}', 1, ?, ?)
+                    """,
+                    (run_id, timestamp, timestamp),
+                )
+
+            client = TestClient(main.app)
+            login = client.post("/api/auth/login", json={"password": "letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            response = client.post(f"/api/generation-runs/{run_id}/cancel")
+            self.assertEqual(response.status_code, 409)
+            with db_module.get_db() as db:
+                status = db.execute("SELECT status FROM generation_runs WHERE id = ?", (run_id,)).fetchone()["status"]
+
+        self.assertEqual(status, "SUCCEEDED")
+
 
 if __name__ == "__main__":
     unittest.main()
