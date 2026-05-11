@@ -958,6 +958,36 @@ def get_generation_run(run_id: int) -> dict[str, Any]:
     return {"item": get_generation_run_by_id(run_id)}
 
 
+@app.delete("/api/generation-runs/{run_id}")
+def delete_generation_run(run_id: int) -> dict[str, bool]:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_runs WHERE id = ?", (run_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="生成记录不存在")
+        output_dir = row["output_dir"]
+        db.execute("DELETE FROM generation_runs WHERE id = ?", (run_id,))
+        log_event(
+            db,
+            "generation_run",
+            run_id,
+            "deleted",
+            {"skuId": row["sku_id"], "shotPlanId": row["shot_plan_id"], "outputDir": output_dir},
+        )
+
+    try:
+        delete_prefix(output_dir)
+    except Exception as exc:
+        with get_db() as db:
+            log_event(
+                db,
+                "generation_run",
+                run_id,
+                "output_delete_failed",
+                {"outputDir": output_dir, "error": str(exc)},
+            )
+    return {"ok": True}
+
+
 @app.post("/api/generation-images/{image_id}/regenerate")
 async def regenerate_image(image_id: int, payload: RegenerateRequest) -> dict[str, Any]:
     with get_db() as db:

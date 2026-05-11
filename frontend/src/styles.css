@@ -860,8 +860,8 @@ summary {
 
 .generation-history-card {
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  gap: 8px;
   align-items: center;
   width: 100%;
   padding: 9px;
@@ -876,22 +876,41 @@ summary {
   border-color: #222;
 }
 
-.generation-history-card > span {
+.generation-history-main {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.generation-history-main > span {
   display: grid;
   gap: 3px;
   min-width: 0;
 }
 
-.generation-history-card strong,
-.generation-history-card small {
+.generation-history-main strong,
+.generation-history-main small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.generation-history-card small {
+.generation-history-main small {
   color: #707069;
   font-size: 12px;
+}
+
+.history-delete-button {
+  width: 32px;
+  min-height: 32px;
+  padding: 0;
 }
 
 .mini-preview-strip {
@@ -1721,7 +1740,7 @@ summary {
 
 .history-run-card {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto 36px;
   gap: 12px;
   align-items: center;
   padding: 10px;
@@ -1802,6 +1821,12 @@ summary {
   gap: 16px;
   justify-content: space-between;
   align-items: flex-start;
+}
+
+.history-detail-actions {
+  display: flex;
+  gap: 8px;
+  white-space: nowrap;
 }
 
 .history-detail-head h2 {

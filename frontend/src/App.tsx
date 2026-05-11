@@ -815,6 +815,32 @@ export function App() {
     }
   }
 
+  async function deleteGenerationRun(run: GenerationRun) {
+    const activeNote = isRunActive(run) ? '\n该任务仍在生成中，删除后页面将不再追踪它。' : ''
+    const confirmed = window.confirm(`确认删除生成记录 #${run.id}（${run.sku ?? '未知货号'}）？\n这会删除该记录下的生成图片和输出文件。${activeNote}`)
+    if (!confirmed) return
+    setError(null)
+    try {
+      await api.deleteRun(run.id)
+      const nextRuns = (await api.listRuns()).items
+      setHistoryRuns(nextRuns)
+      if (selectedHistoryRun?.id === run.id) {
+        setSelectedHistoryRun(null)
+        if (page === 'history') navigate({ page: 'history' }, true)
+      }
+      if (previewRun?.id === run.id) {
+        setPreviewRun(null)
+        window.localStorage.removeItem('app:lastPreviewRunId')
+      }
+      if (generationRun?.id === run.id) {
+        setGenerationRun(null)
+        window.localStorage.removeItem('app:lastGenerationRunId')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '删除生成记录失败')
+    }
+  }
+
   async function uploadModelHeadReferences(files: File[]) {
     if (files.length === 0) return
     if (!editingModelId) {
@@ -1099,8 +1125,8 @@ export function App() {
           <Panel title="生成记录" icon={<History size={18} />}>
             <GenerationHistoryOverview
               runs={historyRuns}
-              currentSkuId={selectedSku?.id}
               onOpenRun={(run) => void restoreHistoryRun(run)}
+              onDeleteRun={(run) => void deleteGenerationRun(run)}
             />
           </Panel>
         </aside>
@@ -1175,6 +1201,7 @@ export function App() {
           onFilterChange={setHistoryFilter}
           onOpenRun={(runId) => void openHistoryRun(runId)}
           onRestoreRun={(run) => void restoreHistoryRun(run)}
+          onDeleteRun={(run) => void deleteGenerationRun(run)}
         />
       )}
     </div>
@@ -1944,21 +1971,15 @@ function PlaceholderPage({ title, text }: { title: string; text: string }) {
 
 function GenerationHistoryOverview({
   runs,
-  currentSkuId,
   onOpenRun,
+  onDeleteRun,
 }: {
   runs: GenerationRun[]
-  currentSkuId?: number
   onOpenRun: (run: GenerationRun) => void
+  onDeleteRun: (run: GenerationRun) => void
 }) {
   const relevantRuns = [...runs]
-    .sort((a, b) => {
-      const aSelected = currentSkuId && a.skuId === currentSkuId ? 1 : 0
-      const bSelected = currentSkuId && b.skuId === currentSkuId ? 1 : 0
-      if (aSelected !== bSelected) return bSelected - aSelected
-      return Date.parse(b.createdAt) - Date.parse(a.createdAt)
-    })
-    .slice(0, 5)
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
 
   if (relevantRuns.length === 0) {
     return <EmptyText text="还没有生成任务" />
@@ -1967,22 +1988,27 @@ function GenerationHistoryOverview({
   return (
     <div className="generation-history-overview">
       {relevantRuns.map((run) => (
-        <button className="generation-history-card" key={run.id} onClick={() => onOpenRun(run)}>
-          <div className="mini-preview-strip">
-            {(run.summary?.previews ?? []).slice(0, 3).map((preview) => (
-              preview.url ? <img key={preview.id} src={mediaUrl(preview.url)} alt={preview.title} /> : <span key={preview.id} />
-            ))}
-            {(run.summary?.previews ?? []).length === 0 && <span>无图</span>}
-          </div>
-          <span>
-            <strong>{run.sku ?? `记录 #${run.id}`}</strong>
-            <small>{statusText(run.status)} · {run.summary?.succeededCount ?? 0}/{run.summary?.imageCount ?? 0} 张</small>
-            <small>
-              记录 #{run.id}
-              {run.summary?.regenerationCount ? ` · 重生 ${run.summary.regenerationCount}` : ''}
-            </small>
-          </span>
-        </button>
+        <article className="generation-history-card" key={run.id}>
+          <button className="generation-history-main" onClick={() => onOpenRun(run)}>
+            <div className="mini-preview-strip">
+              {(run.summary?.previews ?? []).slice(0, 3).map((preview) => (
+                preview.url ? <img key={preview.id} src={mediaUrl(preview.url)} alt={preview.title} /> : <span key={preview.id} />
+              ))}
+              {(run.summary?.previews ?? []).length === 0 && <span>无图</span>}
+            </div>
+            <span>
+              <strong>{run.sku ?? `记录 #${run.id}`}</strong>
+              <small>{statusText(run.status)} · {run.summary?.succeededCount ?? 0}/{run.summary?.imageCount ?? 0} 张</small>
+              <small>
+                记录 #{run.id}
+                {run.summary?.regenerationCount ? ` · 重生 ${run.summary.regenerationCount}` : ''}
+              </small>
+            </span>
+          </button>
+          <button className="danger icon-only history-delete-button" onClick={() => onDeleteRun(run)} title="删除记录">
+            <Trash2 size={14} />
+          </button>
+        </article>
       ))}
     </div>
   )
@@ -1995,6 +2021,7 @@ function HistoryPage({
   onFilterChange,
   onOpenRun,
   onRestoreRun,
+  onDeleteRun,
 }: {
   runs: GenerationRun[]
   selectedRun: GenerationRun | null
@@ -2002,6 +2029,7 @@ function HistoryPage({
   onFilterChange: (value: string) => void
   onOpenRun: (runId: number) => void
   onRestoreRun: (run: GenerationRun) => void
+  onDeleteRun: (run: GenerationRun) => void
 }) {
   const keyword = filter.trim().toLowerCase()
   const visibleRuns = keyword
@@ -2046,6 +2074,9 @@ function HistoryPage({
                 </span>
               </button>
               <button className="secondary" onClick={() => onRestoreRun(run)}>恢复</button>
+              <button className="danger icon-only" onClick={() => onDeleteRun(run)} title="删除记录">
+                <Trash2 size={15} />
+              </button>
             </article>
           ))}
         </div>
@@ -2056,14 +2087,22 @@ function HistoryPage({
         {!selectedRun ? (
           <EmptyText text="选择一条历史任务查看入参、输出和重生过程" />
         ) : (
-          <HistoryRunDetail run={selectedRun} onRestoreRun={onRestoreRun} />
+          <HistoryRunDetail run={selectedRun} onRestoreRun={onRestoreRun} onDeleteRun={onDeleteRun} />
         )}
       </section>
     </main>
   )
 }
 
-function HistoryRunDetail({ run, onRestoreRun }: { run: GenerationRun; onRestoreRun: (run: GenerationRun) => void }) {
+function HistoryRunDetail({
+  run,
+  onRestoreRun,
+  onDeleteRun,
+}: {
+  run: GenerationRun
+  onRestoreRun: (run: GenerationRun) => void
+  onDeleteRun: (run: GenerationRun) => void
+}) {
   const firstImage = run.images?.[0]
   const firstTaskPackage = firstImage?.taskPackage ?? {}
   const garment = firstImage?.garmentSnapshot ?? (firstTaskPackage.garment as Record<string, unknown> | undefined)
@@ -2078,9 +2117,14 @@ function HistoryRunDetail({ run, onRestoreRun }: { run: GenerationRun; onRestore
           <h2>{run.sku ?? `生成任务 #${run.id}`}</h2>
           <p>记录 #{run.id} · {statusText(run.status)} · {run.createdAt}</p>
         </div>
-        <button className="primary" onClick={() => onRestoreRun(run)}>
-          <RefreshCw size={16} />恢复到生成页
-        </button>
+        <div className="history-detail-actions">
+          <button className="primary" onClick={() => onRestoreRun(run)}>
+            <RefreshCw size={16} />恢复到生成页
+          </button>
+          <button className="danger" onClick={() => onDeleteRun(run)}>
+            <Trash2 size={16} />删除记录
+          </button>
+        </div>
       </div>
 
       <div className="history-stats">

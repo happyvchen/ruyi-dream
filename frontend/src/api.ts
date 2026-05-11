@@ -114,6 +114,10 @@ export const api = {
     }),
   listRuns: () => request<{ items: GenerationRun[] }>('/api/generation-runs'),
   getRun: (runId: number) => request<{ item: GenerationRun }>(`/api/generation-runs/${runId}`),
+  deleteRun: (runId: number) =>
+    request<{ ok: boolean }>(`/api/generation-runs/${runId}`, {
+      method: 'DELETE',
+    }),
   regenerate: (imageId: number, reason: string, note?: string) =>
     request<{ item: GenerationRun }>(`/api/generation-images/${imageId}/regenerate`, {
       method: 'POST',
