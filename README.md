@@ -33,7 +33,8 @@
 -> 保存上传
 -> 生成/更新该货号默认组图方案
 -> 生成组图页选择货号
--> 直接使用默认方案创建生成任务
+-> 点击“预览”创建生成任务并生成 2x3 分镜预览
+-> 满意后点击“生成”，在同一任务下追加 5 张最终大图
 -> 提交 GPT Image-2 / fal queue
 -> 后台轮询状态并将结果写入对象存储
 -> 单张重生 / 设为最终图 / 导出
@@ -72,8 +73,9 @@ APP_S3_PRESIGN_EXPIRES_SECONDS=900
 RUSTFS_ACCESS_KEY=admin
 RUSTFS_SECRET_KEY=change-me
 
-GPT_IMAGE2_PROVIDER=placeholder
+GPT_IMAGE2_PROVIDER=fal
 GPT_IMAGE2_MODEL_ID=openai/gpt-image-2/edit
+GPT_IMAGE2_API_BASE_URL=https://fal.run/openai/gpt-image-2/edit
 GPT_IMAGE2_QUEUE_URL=https://queue.fal.run/openai/gpt-image-2/edit
 FAL_KEY=
 GPT_IMAGE2_QUALITY=high
@@ -83,14 +85,7 @@ GENERATION_POLL_INTERVAL_SECONDS=5
 
 图片素材、生成结果和导出 ZIP 统一写入 S3 兼容对象存储。私有化部署默认使用 RustFS，生产部署方式见 [RustFS 对象存储部署](deployment/rustfs/README.md)。
 
-`GPT_IMAGE2_PROVIDER=placeholder` 会写入对象存储占位 SVG，不调用真实生图服务。真实调用 fal 时设置：
-
-```env
-GPT_IMAGE2_PROVIDER=fal
-FAL_KEY=你的_fal_key
-```
-
-真实生图走 fal queue。点击生成后后端立即返回任务记录，后台持续查询 fal 状态，前端显示运行计时和每张图状态。
+真实生图只支持 fal queue。点击生成后后端立即返回任务记录，后台会先把参考图上传到 fal，再提交 Image-2 queue 并持续查询状态。`FAL_KEY` 未配置时，预览/生成任务会失败并在 UI 中显示错误，不再使用占位图或本地 fallback。
 
 ## 前端路由
 
@@ -115,7 +110,7 @@ FAL_KEY=你的_fal_key
 - `/model-profiles/{modelId}` 会打开指定数字模特。
 - `/generation-runs/{runId}` 会打开指定生成记录详情。
 
-前台“生成记录”以任务为主粒度：每次整组生成一条记录；单张重生收纳在该任务内对应图位的 attempts 中，不额外新增一条任务记录。
+前台“生成记录”以任务为主粒度：一次“预览 -> 生成”的完整链路只对应一条记录；预览图、最终 5 张图以及单张重生都收纳在该任务内对应图位的 attempts 中，不额外新增任务记录。
 
 ## 项目结构
 
@@ -130,8 +125,7 @@ FAL_KEY=你的_fal_key
 │   ├── 01_generation_flow/
 │   ├── 02_brand_and_assets/
 │   ├── 03_ux_guide/
-│   ├── 04_implementation_guide/
-│   └── 99_drafts/
+│   └── 04_implementation_guide/
 ├── frontend/
 ├── backend/
 └── deployment/
@@ -156,7 +150,6 @@ FAL_KEY=你的_fal_key
 - [后端领域模型](backend/domain_model.md)
 - [后端数据库结构](backend/database_schema.md)
 - [RustFS 对象存储部署](deployment/rustfs/README.md)
-- [历史复盘与草稿](design/99_drafts/CLAUDE.md)
 
 ## 核心原则
 

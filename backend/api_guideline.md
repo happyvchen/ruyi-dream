@@ -218,7 +218,7 @@
 SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED
 ```
 
-其中 placeholder provider 会直接返回 `SUCCEEDED` 并写入占位 SVG；fal provider 会进入 queue 状态。
+生产实现只支持 fal provider。任务会进入 queue 状态，并通过后台 poller 更新为 `IN_QUEUE` / `IN_PROGRESS` / `SUCCEEDED` / `FAILED` 等应用内状态。
 
 ### 查询生成批次
 

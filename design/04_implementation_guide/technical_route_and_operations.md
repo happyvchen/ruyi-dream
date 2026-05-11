@@ -120,7 +120,7 @@ flowchart TD
 
 生产操作：
 
-保存上传后，系统调用 Gemini API 生成 `garment + brandStyle + shots`。如果 Gemini 不可用，则使用 fallback 默认方案。
+保存上传后，系统调用 Gemini API 生成 `garment + brandStyle + shots`。如果 Gemini 不可用，方案状态更新为 `FAILED` 并在 UI 显示错误；不再使用 fallback 默认方案或复用历史真实方案兜底。
 
 用户选择货号后，系统展示：
 
@@ -220,7 +220,7 @@ Image 2 不直接接收一段长 prompt，而是接收系统组装后的任务�
 同步 URL：https://fal.run/openai/gpt-image-2/edit
 ```
 
-MVP 正式生成走 queue，不走同步等待。同步 URL 只保留为接口文档和备用兼容。
+MVP 正式生成走 queue，不走同步等待。同步 URL 只作为 fal 官方接口信息保留，不作为产品主流程。
 
 fal 提交入参：
 
@@ -253,14 +253,14 @@ fal 提交入参：
 
 ## 6.2 后台生成与状态恢复
 
-点击“生成组图”后，后端不等待图片生成完成。
+点击“预览”或“生成”后，后端不等待 Image-2 完成。
 
 后端流程：
 
-1. 创建 `generation_runs`。
-2. 为每张 shot 创建一条 `generation_images` 任务记录。
+1. 点击“预览”时创建 `generation_runs`，并创建一条 `shot_index = 0` 的 2x3 分镜预览任务。
+2. 点击“生成”时复用同一条 run，追加 `shot_index = 1..5` 的最终单图任务。
 3. 组装单张 `task_package` 和中文 prompt。
-4. 使用对象存储预签名 URL 组装 fal `image_urls`。
+4. 使用对象存储预签名 URL 读取参考图，先上传到 fal，再用 fal Image URLs 组装 `image_urls`。
 5. 提交 fal queue，保存 `request_id` 和 queue URLs。
 6. API 立即返回 `GenerationRun`。
 7. 后台 poller 周期性扫描未完成任务。
@@ -270,7 +270,7 @@ fal 提交入参：
 
 前端流程：
 
-1. 点击生成后进入结果区。
+1. 点击“预览”后进入分镜预览结果区；预览成功后点击“生成”进入最终组图结果区。
 2. 保存最近一次 `runId` 到本地。
 3. 每 3 秒轮询 `GET /api/generation-runs/{run_id}`。
 4. 根据 `submittedAt` / `completedAt` 动态显示整组和单图计时。
@@ -294,7 +294,7 @@ fal 状态保存到 `provider_status` 和 `provider_status_json`，不覆盖应�
 
 | 要素 | 产品位置 | 技术实现 | 用户是否需要操作 |
 | --- | --- | --- | --- |
-| 服装事实 | 服装素材 | Gemini/fallback 识别摘要；当前不做图片角色分类 | 查看关键字段 |
+| 服装事实 | 服装素材 | Gemini 识别摘要；当前不做图片角色分类；Image-2 prompt 不复述具体服装事实 | 查看关键字段 |
 | 模特身份 | 数字模特 | 多角度头图档案 | 维护默认模特；生成使用默认方案绑定的模特 |
 | 模特身体 | 数字模特 | 身体参数档案 | 默认不填，可维护 |
 | 尺寸比例 | 服装事实卡折叠区 | 尺寸表映射为视觉约束 | 可选填写 |

@@ -13,7 +13,7 @@
 | `app/main.py` | FastAPI app、API 路由、生成/重生/导出编排、后台生成状态 poller |
 | `app/db.py` | SQLite 初始化、默认模特 seed、事件日志写入 |
 | `app/planner.py` | Gemini 组图策划；读取 `backend/ref/` 下的客户实施引用文档 |
-| `app/image_provider.py` | GPT Image-2 Provider adapter，占位 SVG 输出、fal queue 提交和状态查询 |
+| `app/image_provider.py` | fal GPT Image-2 Provider adapter、参考图上传、queue 提交、状态查询和结果下载 |
 | `app/config.py` | 环境变量、对象存储、数据库、模型配置 |
 | `app/object_storage.py` | S3 兼容对象存储访问、预签名 URL、对象删除和读取 |
 | `data/` | SQLite 和 JSONL 日志 |

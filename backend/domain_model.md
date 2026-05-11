@@ -245,7 +245,7 @@ MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂�
   "shot": {},
   "generation": {
     "targetModel": "GPT Image-2",
-    "provider": "third-party-placeholder",
+    "provider": "fal",
     "output": {
       "aspectRatio": "1:1",
       "size": "1200x1200"

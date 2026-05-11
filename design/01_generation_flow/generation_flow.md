@@ -23,9 +23,9 @@ flowchart TD
   H --> I["导出最终图片"]
 ```
 
-这里要明确：Image 2 只在 `逐张生成预览图` 环节工作。服装识别、品牌调性抽象、搭配选择、Pose 选择、镜头取景和组图脚本生成，都属于前置预处理/策划层。
+这里要明确：Image 2 只在 `分镜预览` 和 `最终单张生成` 环节工作。服装识别、品牌调性抽象、搭配选择、Pose 选择、镜头取景和组图脚本生成，都属于前置预处理/策划层。
 
-当前实现中，Image 2 不在前端 HTTP 请求内同步等待生成完成。点击“生成组图”后，后端会立即创建生成批次和每张图的任务记录，将每张图提交到 fal queue，然后返回 `GenerationRun`。后续由后端后台 poller 查询 fal 的真实状态，前端定时读取后端状态并显示运行计时、排队中、生成中、已完成或失败。
+当前实现中，Image 2 不在前端 HTTP 请求内同步等待生成完成。点击“预览”后，后端创建一条 `GenerationRun` 和一张 `shot_index = 0` 的 2x3 分镜预览任务；点击“生成”后，在同一条 run 下追加 `shot_index = 1..5` 的最终单图任务。所有任务提交到 fal queue 后立即返回，后续由后端后台 poller 查询 fal 的真实状态，前端定时读取后端状态并显示运行计时、排队中、生成中、已完成或失败。
 
 ## 1.1 三层架构
 
@@ -208,7 +208,7 @@ Image 2 的输入原则：
 
 所有 Gemini 和 Image 2 调用提示词统一使用中文。Image 2 prompt 由系统根据 `task_package` 自动合成，用户不直接编写长 prompt。
 
-参考图通过对象存储短期预签名 URL 进入 `image_urls`。每个生成任务会保存对象 key、预签名 URL、provider URL 和图片角色，方便追溯。
+参考图先通过对象存储短期预签名 URL 读取，再上传到 fal，最终传给 Image-2 的 `image_urls` 只使用 fal 返回的 Image URLs。每个生成任务会保存对象 key、预签名 URL、provider URL 和图片角色，方便追溯。
 
 ### 6.2 生成状态与刷新恢复
 
@@ -253,7 +253,7 @@ MVP 阶段不做自动质检，但必须支持人工重生。
 - 背景白/浅灰
 - 补充要求
 
-当前实现中，重生不再额外新增一条 `GenerationImage` 记录。每个图位生成任务保持一条记录，重生会在同一条记录的 `attempts_json` 中追加一次 attempt，并更新当前输出图、provider request、provider response、fal request id 和状态。这样“生成记录”的粒度保持为“每个生成任务一条”，历史尝试通过 attempts 追溯。
+当前实现中，重生不再额外新增一条 `GenerationImage` 记录。预览图和每个最终图位都保持一条记录，重生会在同一条记录的 `attempts_json` 中追加一次 attempt，并更新当前输出图、provider request、provider response、fal request id 和状态。这样“生成记录”的粒度保持为“一次拍摄任务一条”，历史尝试通过 attempts 追溯。
 
 ## 8. 导出
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from html import escape
 import json
 import mimetypes
 import os
@@ -35,31 +34,6 @@ class ImageGenerationProvider:
 
     async def refresh(self, image_row: Any) -> dict[str, Any]:
         return {"status": image_row["status"], "providerStatus": image_row["provider_status"] if "provider_status" in image_row.keys() else None}
-
-
-class GPTImage2PlaceholderProvider(ImageGenerationProvider):
-    def output_suffix(self) -> str:
-        return ".svg"
-
-    async def generate(self, task_package: dict[str, Any], output_path: str) -> dict[str, Any]:
-        settings = get_settings()
-        if settings.gpt_image2_api_base_url and settings.fal_key:
-            # The third-party GPT Image-2 API is intentionally not bound yet.
-            # Keep the request shape stable so a real adapter can replace this class.
-            provider_mode = "third-party-configured-placeholder"
-        else:
-            provider_mode = "placeholder"
-
-        output_key = str(output_path)
-        put_bytes(output_key, render_placeholder_svg(task_package).encode("utf-8"), "image/svg+xml")
-        return {
-            "provider": "gpt-image-2-placeholder",
-            "mode": provider_mode,
-            "outputPath": output_key,
-            "providerRequest": build_fal_request_snapshot(task_package, []),
-            "providerResponse": None,
-            "note": "真实三方平台未确定，当前写入占位图并完整保留任务包与日志。",
-        }
 
 
 class GPTImage2FalProvider(ImageGenerationProvider):
@@ -549,30 +523,8 @@ def chinese_ordinal(value: int) -> str:
     return {1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六"}.get(value, str(value))
 
 
-def render_placeholder_svg(task_package: dict[str, Any]) -> str:
-    shot = task_package.get("shot", {})
-    garment = task_package.get("garment", {})
-    title = escape(str(shot.get("title", "生成图")))
-    frame = escape(str(shot.get("frame", "")))
-    focus = escape(str(shot.get("focus", "")))
-    category = escape(str(garment.get("category", "待识别品类")))
-    summary = escape(str(garment.get("summary", "白/浅灰棚拍风格")))
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
-  <rect width="1200" height="1200" fill="#f7f7f5"/>
-  <rect x="96" y="96" width="1008" height="1008" rx="8" fill="#ffffff" stroke="#d8d8d2" stroke-width="2"/>
-  <rect x="300" y="180" width="600" height="760" rx="300" fill="#eeeeea"/>
-  <path d="M600 250 C520 250 470 310 470 390 L470 850 C470 920 530 970 600 970 C670 970 730 920 730 850 L730 390 C730 310 680 250 600 250Z" fill="#d9d9d2"/>
-  <circle cx="600" cy="240" r="82" fill="#cfcfc8"/>
-  <text x="600" y="1020" text-anchor="middle" font-family="Arial, sans-serif" font-size="42" fill="#2c2c2c">{title}</text>
-  <text x="600" y="1074" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" fill="#666">{category} · {frame}</text>
-  <text x="600" y="1120" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" fill="#777">{focus}</text>
-  <text x="600" y="1160" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" fill="#999">{summary}</text>
-</svg>
-"""
-
-
 def get_image_provider() -> ImageGenerationProvider:
     settings = get_settings()
-    if settings.image_provider == "fal":
-        return GPTImage2FalProvider()
-    return GPTImage2PlaceholderProvider()
+    if settings.image_provider != "fal":
+        raise RuntimeError(f"不支持的 Image-2 provider：{settings.image_provider}。生产实现只支持 fal。")
+    return GPTImage2FalProvider()

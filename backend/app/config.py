@@ -24,7 +24,7 @@ class Settings:
     s3_presign_expires_seconds = int(os.getenv("APP_S3_PRESIGN_EXPIRES_SECONDS", "900"))
     gemini_api_key = os.getenv("GEMINI_API_KEY", "")
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
-    image_provider = os.getenv("GPT_IMAGE2_PROVIDER", "placeholder").lower()
+    image_provider = os.getenv("GPT_IMAGE2_PROVIDER", "fal").lower()
     gpt_image2_model_id = os.getenv("GPT_IMAGE2_MODEL_ID", "openai/gpt-image-2/edit")
     gpt_image2_api_base_url = os.getenv("GPT_IMAGE2_API_BASE_URL", "https://fal.run/openai/gpt-image-2/edit")
     gpt_image2_queue_url = os.getenv("GPT_IMAGE2_QUEUE_URL", "https://queue.fal.run/openai/gpt-image-2/edit")
