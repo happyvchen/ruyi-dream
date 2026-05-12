@@ -34,7 +34,7 @@ const MODEL_PAGE_SIZE = 30
 const RUN_PAGE_SIZE = 20
 const SKU_IMAGE_PAGE_SIZE = 24
 
-type BusyState = 'idle' | 'uploading' | 'planning' | 'saving-plan' | 'previewing' | 'generating' | 'regenerating'
+type BusyState = 'idle' | 'uploading' | 'planning' | 'saving-plan' | 'previewing' | 'generating' | 'regenerating' | 'exporting'
 type ImportStatus = 'draft' | 'uploading' | 'uploaded' | 'failed'
 type ImportImage = {
   id: string
@@ -124,6 +124,7 @@ export function App() {
   const [generateSkuFilter, setGenerateSkuFilter] = useState('')
   const [busy, setBusy] = useState<BusyState>('idle')
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [page, setPage] = useState<Page>(() => parseRoute().page)
   const [route, setRoute] = useState<AppRoute>(() => parseRoute())
   const [hydratedRouteKey, setHydratedRouteKey] = useState('')
@@ -840,6 +841,20 @@ export function App() {
     }
   }
 
+  async function exportRun(runId: number) {
+    setBusy('exporting')
+    setError(null)
+    setNotice(null)
+    try {
+      const result = await api.exportRun(runId)
+      setNotice(`已开始下载 ${result.filename}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '导出 ZIP 失败')
+    } finally {
+      setBusy('idle')
+    }
+  }
+
   async function previewGrid() {
     if (!shotPlan) return
     setBusy('previewing')
@@ -1358,6 +1373,7 @@ export function App() {
       </header>
 
       {error && <div className="alert">{error}</div>}
+      {notice && <div className="notice">{notice}</div>}
 
       {page === 'generate' && <main className="generate-workbench">
         <section className="task-hero">
@@ -1458,7 +1474,7 @@ export function App() {
                   onRegenerate={(image, reason) => void regenerate(image, reason)}
                   onToggleFinal={(image) => void toggleFinal(image)}
                   onCancelImage={(image) => void cancelImage(image)}
-                  onExport={(runId) => void api.exportRun(runId)}
+                  onExport={(runId) => void exportRun(runId)}
                   previewOnly
                 />
               )}
@@ -1472,7 +1488,8 @@ export function App() {
                 onRegenerate={(image, reason) => void regenerate(image, reason)}
                 onToggleFinal={(image) => void toggleFinal(image)}
                 onCancelImage={(image) => void cancelImage(image)}
-                onExport={(runId) => void api.exportRun(runId)}
+                exportLoading={busy === 'exporting'}
+                onExport={(runId) => void exportRun(runId)}
               />
             </div>
           </section>
@@ -3220,6 +3237,7 @@ function ResultGallery({
   nowMs,
   imageFilter,
   previewOnly = false,
+  exportLoading = false,
   onRegenerate,
   onToggleFinal,
   onCancelImage,
@@ -3231,6 +3249,7 @@ function ResultGallery({
   nowMs: number
   imageFilter?: (image: GenerationImage) => boolean
   previewOnly?: boolean
+  exportLoading?: boolean
   onRegenerate: (image: GenerationImage, reason: string) => void
   onToggleFinal: (image: GenerationImage) => void
   onCancelImage: (image: GenerationImage) => void
@@ -3329,7 +3348,9 @@ function ResultGallery({
         <div className="export-note">
           <Download size={16} />
           {canExport ? '最终组图已全部生成成功；导出时优先打包最终图。' : '所有图位生成完成并成功后，才可以导出 ZIP。'}
-          <button className="link-button" onClick={() => onExport(run.id)} disabled={!canExport}>导出 ZIP</button>
+          <button className="link-button" onClick={() => onExport(run.id)} disabled={!canExport || exportLoading}>
+            {exportLoading ? '导出中...' : '导出 ZIP'}
+          </button>
         </div>
       )}
     </section>

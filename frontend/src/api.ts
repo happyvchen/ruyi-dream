@@ -44,6 +44,24 @@ function withParams(path: string, params: Record<string, string | number | boole
   return query ? `${path}?${query}` : path
 }
 
+async function responseErrorMessage(response: Response, fallback: string) {
+  const contentType = response.headers.get('content-type') ?? ''
+  if (contentType.includes('application/json')) {
+    const detail = await response.json().catch(() => null)
+    if (typeof detail?.detail === 'string') return detail.detail
+  }
+  const text = await response.text().catch(() => '')
+  return text.trim() || fallback
+}
+
+function filenameFromContentDisposition(header: string | null, fallback: string) {
+  if (!header) return fallback
+  const utf8Match = header.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match?.[1]) return decodeURIComponent(utf8Match[1])
+  const match = header.match(/filename="?([^";]+)"?/i)
+  return match?.[1] ?? fallback
+}
+
 export const api = {
   health: () => request<Record<string, unknown>>('/api/health'),
   session: () => request<{ authRequired: boolean; authenticated: boolean }>('/api/auth/session'),
@@ -215,14 +233,18 @@ export const api = {
     }),
   exportRun: async (runId: number) => {
     const response = await fetch(`${API_BASE}/api/exports/runs/${runId}`, { method: 'POST', credentials: 'include', headers: apiHeaders() })
-    if (!response.ok) throw new Error('导出失败')
+    if (!response.ok) throw new Error(await responseErrorMessage(response, '导出失败'))
     const blob = await response.blob()
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `generation-run-${runId}.zip`
+    anchor.download = filenameFromContentDisposition(response.headers.get('content-disposition'), `generation-run-${runId}.zip`)
+    anchor.style.display = 'none'
+    document.body.appendChild(anchor)
     anchor.click()
-    URL.revokeObjectURL(url)
+    anchor.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    return { filename: anchor.download }
   },
   logs: () => request<{ items: EventLog[] }>('/api/logs?limit=30'),
 }

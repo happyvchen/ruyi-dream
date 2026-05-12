@@ -117,6 +117,15 @@ p {
   color: #9b2f2f;
 }
 
+.notice {
+  margin: 16px 32px 0;
+  padding: 12px 14px;
+  border: 1px solid #a9d7b5;
+  border-radius: 6px;
+  background: #f4fbf6;
+  color: #246b37;
+}
+
 .workspace {
   display: grid;
   grid-template-columns: 240px minmax(480px, 1fr) 240px;

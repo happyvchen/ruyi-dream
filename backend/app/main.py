@@ -34,6 +34,7 @@ from .object_storage import (
     join_key,
     object_exists,
     presigned_get_url,
+    put_bytes,
     put_fileobj,
     unique_key,
 )
@@ -1681,10 +1682,9 @@ def export_run(run_id: int) -> StreamingResponse:
                 continue
     if written == 0:
         raise HTTPException(status_code=422, detail="没有可导出的生成图")
-    zip_buffer.seek(0)
+    zip_bytes = zip_buffer.getvalue()
     export_key = join_key("exports", str(run["sku"] or run["sku_id"]), zip_name)
-    put_fileobj(export_key, zip_buffer, "application/zip")
-    zip_buffer.seek(0)
+    put_bytes(export_key, zip_bytes, "application/zip")
 
     with get_db() as db:
         log_event(
@@ -1695,7 +1695,7 @@ def export_run(run_id: int) -> StreamingResponse:
             {"objectKey": export_key, "imageCount": written, "finalOnly": bool(final_images)},
         )
     return StreamingResponse(
-        zip_buffer,
+        BytesIO(zip_bytes),
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
     )

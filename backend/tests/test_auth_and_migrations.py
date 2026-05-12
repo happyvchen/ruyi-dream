@@ -499,7 +499,7 @@ class BackendSmokeTests(unittest.TestCase):
 
             with (
                 patch.object(main, "get_bytes", side_effect=lambda key: key.encode("utf-8")),
-                patch.object(main, "put_fileobj", return_value=None),
+                patch.object(main, "put_bytes", return_value=None),
             ):
                 response = client.post(f"/api/exports/runs/{run_id}")
             self.assertEqual(response.status_code, 200)
