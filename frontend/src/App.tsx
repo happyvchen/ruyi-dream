@@ -1682,10 +1682,10 @@ function DeleteSkuDialog({
             : '默认操作会归档货号并从日常列表隐藏。勾选后会同时删除素材副本和文件。'}
         </p>
         <div className="delete-impact-grid">
-          <Stat label="素材图" value={sku.imageCount ?? 0} />
-          <Stat label="拍摄方案" value={impact?.shotPlanCount ?? 0} />
-          <Stat label="生成记录" value={impact?.generationRunCount ?? 0} />
-          <Stat label="已归档" value={impact?.archivedGenerationRunCount ?? 0} />
+          <Stat label="素材图" value={sku.imageCount ?? 0} compact />
+          <Stat label="拍摄方案" value={impact?.shotPlanCount ?? 0} compact />
+          <Stat label="生成记录" value={impact?.generationRunCount ?? 0} compact />
+          <Stat label="已归档" value={impact?.archivedGenerationRunCount ?? 0} compact />
         </div>
         <label className="checkbox-row danger-option">
           <input
@@ -1709,8 +1709,8 @@ function DeleteSkuDialog({
         )}
         <div className="danger-dialog-actions">
           <button className="secondary" onClick={onClose} disabled={busy !== 'idle'}>取消</button>
-          <button className="danger" onClick={onDelete} disabled={busy !== 'idle' || !canDelete}>
-            {busy === 'uploading' ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
+          <button className={deleteRelated ? 'danger' : 'primary'} onClick={onDelete} disabled={busy !== 'idle' || !canDelete}>
+            {busy === 'uploading' ? <Loader2 className="spin" size={16} /> : deleteRelated ? <Trash2 size={16} /> : <Archive size={16} />}
             {deleteRelated ? '删除货号及关联记录' : '归档货号'}
           </button>
         </div>
@@ -1807,8 +1807,8 @@ function GarmentLibraryPage({
           <h2>服装素材</h2>
           <p>上传、查看和使用货号图包。MVP 会保留原始上传记录，不覆盖素材。</p>
         </div>
-        <div className="library-stats">
-          <label className="checkbox-row">
+        <div className="library-summary">
+          <label className="filter-toggle">
             <input
               type="checkbox"
               checked={showArchivedSkus}
@@ -1816,9 +1816,11 @@ function GarmentLibraryPage({
             />
             <span>显示已归档</span>
           </label>
-          <Stat label="货号" value={skus.length} />
-          <Stat label="已策划" value={analyzed} />
-          <Stat label="待策划" value={Math.max(skus.length - analyzed, 0)} />
+          <div className="metric-strip">
+            <Stat label="货号" value={skus.length} />
+            <Stat label="已策划" value={analyzed} />
+            <Stat label="待策划" value={Math.max(skus.length - analyzed, 0)} />
+          </div>
         </div>
       </section>
 
@@ -2123,10 +2125,12 @@ function ModelProfilesPage({
           <h2>数字模特</h2>
           <p>维护模特身份图、身体参数和生成约束。每次组图只选择一个模特作为主体。</p>
         </div>
-        <div className="library-stats">
-          <Stat label="模特" value={models.length} />
-          <Stat label="头像" value={headEntries.length} />
-          <Stat label="默认" value={models.some((model) => model.isDefault) ? 1 : 0} />
+        <div className="library-summary">
+          <div className="metric-strip">
+            <Stat label="模特" value={models.length} />
+            <Stat label="头像" value={headEntries.length} />
+            <Stat label="默认" value={models.some((model) => model.isDefault) ? 1 : 0} />
+          </div>
         </div>
       </section>
 
@@ -2537,9 +2541,9 @@ function FactRow({ label, value }: { label: string; value?: string }) {
   )
 }
 
-function Stat({ label, value }: { label: string; value: number }) {
+function Stat({ label, value, compact = false }: { label: string; value: number; compact?: boolean }) {
   return (
-    <div className="stat">
+    <div className={`stat${compact ? ' compact' : ''}`}>
       <strong>{value}</strong>
       <span>{label}</span>
     </div>
@@ -2754,20 +2758,25 @@ function HistoryPage({
       <section className="panel history-list-panel">
         <div className="panel-title"><History size={18} /><span>历史任务</span></div>
         <div className="history-toolbar">
-          <input
-            value={filter}
-            onChange={(event) => onFilterChange(event.target.value)}
-            placeholder="搜索货号、记录号、状态"
-          />
-          <label className="checkbox-row">
+          <label className="toolbar-search">
+            <Search size={16} />
             <input
-              type="checkbox"
-              checked={showArchivedRuns}
-              onChange={(event) => onShowArchivedRunsChange(event.target.checked)}
+              value={filter}
+              onChange={(event) => onFilterChange(event.target.value)}
+              placeholder="搜索货号、记录号、状态"
             />
-            <span>显示已归档</span>
           </label>
-          <span>{visibleRuns.length} 条任务</span>
+          <div className="toolbar-meta">
+            <label className="filter-toggle">
+              <input
+                type="checkbox"
+                checked={showArchivedRuns}
+                onChange={(event) => onShowArchivedRunsChange(event.target.checked)}
+              />
+              <span>显示已归档</span>
+            </label>
+            <span className="count-pill">{visibleRuns.length} 条任务</span>
+          </div>
         </div>
         <div className="history-run-list">
           {visibleRuns.length === 0 && <EmptyText text="还没有匹配的生成任务" />}
@@ -2792,7 +2801,7 @@ function HistoryPage({
               </button>
               <button className="secondary" onClick={() => onRestoreRun(run)}>恢复</button>
               {isRunActive(run) && <button className="secondary" onClick={() => onCancelRun(run)}>取消</button>}
-              <button className="secondary icon-only archive-button" onClick={() => onDeleteRun(run)} title="归档记录">
+              <button className="secondary icon-only archive-button" onClick={() => onDeleteRun(run)} title="归档记录" aria-label="归档记录">
                 <Archive size={15} />
               </button>
             </article>
@@ -2851,8 +2860,8 @@ function HistoryRunDetail({
               <X size={16} />取消任务
             </button>
           )}
-          <button className="danger" onClick={() => onDeleteRun(run)}>
-            <Trash2 size={16} />归档记录
+          <button className="secondary archive-action" onClick={() => onDeleteRun(run)}>
+            <Archive size={16} />归档记录
           </button>
         </div>
       </div>
