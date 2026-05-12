@@ -672,6 +672,20 @@ export function App() {
     )
   }
 
+  function reorderImportImage(packageId: string, imageId: string, orderIndex: number) {
+    setImportPackages((current) =>
+      current.map((item) => {
+        if (item.id !== packageId) return item
+        const moving = item.images.find((image) => image.id === imageId)
+        if (!moving) return item
+        const images = item.images.filter((image) => image.id !== imageId)
+        const nextIndex = Math.max(0, Math.min(orderIndex, images.length))
+        images.splice(nextIndex, 0, moving)
+        return { ...item, images }
+      }),
+    )
+  }
+
   function removeImportPackage(packageId: string) {
     const target = importPackages.find((item) => item.id === packageId)
     if (target) revokeImportPackagePreviews([target])
@@ -1498,6 +1512,7 @@ export function App() {
           onStageFolderImages={stageFolderImages}
           onUpdateImportPackage={updateImportPackage}
           onRemoveImportImage={removeImportImage}
+          onReorderImportImage={reorderImportImage}
           onRemoveImportPackage={removeImportPackage}
           onUploadImportPackage={(packageId) => void uploadImportPackage(packageId)}
           onUploadAllDraftPackages={() => void uploadAllDraftPackages()}
@@ -1730,6 +1745,7 @@ function GarmentLibraryPage({
   onStageFolderImages,
   onUpdateImportPackage,
   onRemoveImportImage,
+  onReorderImportImage,
   onRemoveImportPackage,
 	  onUploadImportPackage,
 	  onUploadAllDraftPackages,
@@ -1763,6 +1779,7 @@ function GarmentLibraryPage({
   onStageFolderImages: (files: File[]) => void
   onUpdateImportPackage: (packageId: string, patch: Partial<Pick<ImportPackage, 'sku' | 'title'>>) => void
   onRemoveImportImage: (packageId: string, imageId: string) => void
+  onReorderImportImage: (packageId: string, imageId: string, orderIndex: number) => void
   onRemoveImportPackage: (packageId: string) => void
 	  onUploadImportPackage: (packageId: string) => void
 	  onUploadAllDraftPackages: () => void
@@ -1906,6 +1923,7 @@ function GarmentLibraryPage({
               busy={busy}
               onUpdatePackage={onUpdateImportPackage}
               onRemoveImage={onRemoveImportImage}
+              onReorderImage={onReorderImportImage}
               onRemovePackage={onRemoveImportPackage}
               onUploadPackage={onUploadImportPackage}
             />
@@ -2378,6 +2396,7 @@ function ImportPreviewBoard({
   busy,
   onUpdatePackage,
   onRemoveImage,
+  onReorderImage,
   onRemovePackage,
   onUploadPackage,
 }: {
@@ -2385,10 +2404,14 @@ function ImportPreviewBoard({
   busy: BusyState
   onUpdatePackage: (packageId: string, patch: Partial<Pick<ImportPackage, 'sku' | 'title'>>) => void
   onRemoveImage: (packageId: string, imageId: string) => void
+  onReorderImage: (packageId: string, imageId: string, orderIndex: number) => void
   onRemovePackage: (packageId: string) => void
   onUploadPackage: (packageId: string) => void
 }) {
   const duplicateSkus = findDuplicateSkus(packages)
+  const [draggingImage, setDraggingImage] = useState<{ packageId: string; imageId: string } | null>(null)
+  const [dragOverImage, setDragOverImage] = useState<{ packageId: string; imageId: string } | null>(null)
+
   return (
     <div className="import-preview">
       <div className="detail-header">
@@ -2446,8 +2469,36 @@ function ImportPreviewBoard({
                   <span>{item.images.length} 张</span>
                 </div>
                 <div className="asset-grid import-image-grid">
-                {item.images.map((image) => (
-                  <article className="asset-card" key={image.id}>
+                {item.images.map((image, index) => {
+                  const isDragging = draggingImage?.packageId === item.id && draggingImage.imageId === image.id
+                  const isDragOver = dragOverImage?.packageId === item.id && dragOverImage.imageId === image.id
+                  return (
+                  <article
+                    className={`asset-card ${isDragging ? 'dragging' : ''} ${isDragOver ? 'drag-over' : ''}`}
+                    key={image.id}
+                    draggable={busy === 'idle'}
+                    onDragStart={() => {
+                      setDraggingImage({ packageId: item.id, imageId: image.id })
+                      setDragOverImage(null)
+                    }}
+                    onDragEnd={() => {
+                      setDraggingImage(null)
+                      setDragOverImage(null)
+                    }}
+                    onDragOver={(event) => {
+                      event.preventDefault()
+                      if (draggingImage?.packageId === item.id && draggingImage.imageId !== image.id) {
+                        setDragOverImage({ packageId: item.id, imageId: image.id })
+                      }
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault()
+                      if (!draggingImage || draggingImage.packageId !== item.id || draggingImage.imageId === image.id) return
+                      onReorderImage(item.id, draggingImage.imageId, index)
+                      setDraggingImage(null)
+                      setDragOverImage(null)
+                    }}
+                  >
                     <div className="asset-thumb">
                       <ImagePreviewThumb
                         src={image.previewUrl}
@@ -2468,7 +2519,8 @@ function ImportPreviewBoard({
                       </div>
                     </div>
                   </article>
-                ))}
+                  )
+                })}
                 </div>
               </div>
             </article>
