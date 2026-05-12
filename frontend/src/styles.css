@@ -507,6 +507,7 @@ textarea {
 
 .primary,
 .secondary,
+.danger,
 .result-actions button {
   display: inline-flex;
   align-items: center;
@@ -533,6 +534,10 @@ textarea {
   border: 1px solid #d8b4af;
   background: #fff8f7;
   color: #9b3025;
+}
+
+.danger.ghost {
+  background: #fff;
 }
 
 .secondary:hover,
@@ -2138,7 +2143,7 @@ summary {
   font-size: 12px;
 }
 
-.asset-actions button {
+.asset-actions button:not(.primary):not(.secondary):not(.danger) {
   display: grid;
   place-items: center;
   min-height: 34px;
