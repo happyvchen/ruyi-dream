@@ -23,3 +23,4 @@ deployment/rustfs/config/*
 deployment/rustfs/certs/*
 !deployment/rustfs/certs/.gitkeep
 .DS_Store
+.env.prod

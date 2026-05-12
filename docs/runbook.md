@@ -50,13 +50,23 @@ Common causes:
 - `APP_ENV=production` without `APP_GATE_PASSWORD` / `APP_GATE_PASSWORD_HASH` and without `APP_TRUST_REVERSE_PROXY_AUTH=true`.
 - Built-in app gate configured without `APP_SESSION_SECRET`.
 - RustFS not ready yet; Compose should restart backend automatically.
-- SQLite path is not writable under `deployment/app-data/backend`.
+- `deployment/app-data/backend` is not writable by the backend container `app` user.
+- RustFS path-style deployment has `RUSTFS_SERVER_DOMAINS` set, causing bucket creation to fail with `InvalidBucketName`.
 
 Recovery:
 
 1. Fix `.env`.
-2. Run `docker compose up -d backend`.
-3. Confirm `curl http://127.0.0.1:8000/api/health`.
+2. Fix bind mount ownership when logs show permission errors:
+
+```bash
+BACKEND_UID_GID=$(docker compose run --rm --no-deps --entrypoint sh backend -c 'printf "%s:%s" "$(id -u)" "$(id -g)"')
+mkdir -p deployment/app-data/backend/logs
+chown -R "$BACKEND_UID_GID" deployment/app-data/backend
+chmod -R 750 deployment/app-data/backend
+```
+
+3. Run `docker compose up -d backend`.
+4. Confirm `curl http://127.0.0.1:8000/api/health` or the configured `BACKEND_PORT`.
 
 ## Login or API Returns 401
 
@@ -198,12 +208,20 @@ Common causes:
 - Server clock skew causes S3 signing errors.
 - RustFS credentials changed without matching existing data/config.
 - Bucket data missing from `deployment/rustfs/data`.
+- RustFS bind mount directories are owned by the wrong host UID/GID.
+- `RUSTFS_SERVER_DOMAINS` is set in a path-style deployment; leave it unset unless virtual-host style DNS and reverse proxy are configured.
 
 Recovery:
 
 1. Fix `PUBLIC_S3_URL` to the browser-reachable address.
 2. Restart backend after credential changes.
 3. Restore RustFS data and SQLite from the same backup point if objects are missing.
+4. For RustFS permission errors, run:
+
+```bash
+chown -R 10001:10001 deployment/rustfs/data deployment/rustfs/config deployment/rustfs/certs deployment/rustfs/logs
+chmod -R 750 deployment/rustfs/data deployment/rustfs/config deployment/rustfs/certs deployment/rustfs/logs
+```
 
 ## SQLite Problems
 

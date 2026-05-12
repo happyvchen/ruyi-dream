@@ -23,6 +23,8 @@ MinIO CE 已不适合作为新私有化部署的默认选项，因为公开的 `
 官方参考：
 
 - RustFS Docker 安装：<https://docs.rustfs.com/installation/docker/>
+- RustFS 单节点单盘安装：<https://docs.rustfs.com/installation/linux/single-node-single-disk.html>
+- RustFS Virtual Host Style：<https://docs.rustfs.com/integration/virtual.html>
 - RustFS S3 兼容性：<https://docs.rustfs.com/features/s3-compatibility>
 
 ## 宿主机准备
@@ -34,7 +36,9 @@ cd deployment/rustfs
 cp .env.example .env
 ```
 
-编辑 `.env`，将 `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` 替换为足够长的随机值。局域网部署时，将 `RUSTFS_SERVER_DOMAINS` 设置为浏览器可以访问到的服务器 IP 或内部域名。
+编辑 `.env`，将 `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` 替换为足够长的随机值。`APP_ENV=production` 时，应用会拒绝少于 12 个字符或明显占位符的密钥。
+
+当前应用使用 path-style S3 地址，即 `http://rustfs:9000/<bucket>` 和 `http://<public-s3-url>/<bucket>`。不要为默认部署设置 `RUSTFS_SERVER_DOMAINS`；该变量只适用于 virtual-host style，例如 `http://bucket.s3.example.com`，并要求 DNS、反向代理和 RustFS Host 配置完全匹配。
 
 RustFS 官方 Docker 指南说明，挂载目录必须能被容器运行用户写入。如果宿主机出现权限错误，可将目录所有者调整为 UID `10001`：
 
@@ -43,7 +47,7 @@ sudo chown -R 10001:10001 data config certs logs
 sudo chmod 750 data config certs logs
 ```
 
-生产环境建议使用本地 SSD/NVMe。对象数据目录 `/data` 不建议挂载在 NFS 上。
+生产环境建议使用本地 SSD/NVMe。更正式的生产部署应使用独立 EBS/NVMe 数据盘，按 RustFS 官方建议格式化为 XFS 后挂载到 `/data/rustfs0`，再把 Compose volume 指向该路径。对象数据目录 `/data` 不建议挂载在 NFS 上。
 
 ## 启动
 
@@ -105,6 +109,8 @@ RUSTFS_SECRET_KEY=replace-with-secret-key
 ```
 
 后端服务访问对象存储时使用内部 Docker/网络访问地址；生成浏览器访问的预签名 URL 时使用公网或局域网可访问地址。
+
+bucket 名必须符合 S3 命名规则。推荐使用全小写字母、数字和短横线，例如 `ruyi-dream`；不要使用中文、大写、下划线或带空格的值。如果确认 bucket 名合法但后端仍报 `InvalidBucketName`，优先检查是否误设置了 `RUSTFS_SERVER_DOMAINS`。
 
 ## 生产注意事项
 
