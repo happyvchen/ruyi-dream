@@ -777,7 +777,7 @@ export function App() {
         await refreshBaseData()
       } catch (planErr) {
         setShotPlan(null)
-        setError(planErr instanceof Error ? `图包已上传成功，但拍摄方案生成失败：${planErr.message}` : '图包已上传成功，但拍摄方案生成失败')
+        setError(planErr instanceof Error ? `货号图片已上传成功，但拍摄方案生成失败：${planErr.message}` : '货号图片已上传成功，但拍摄方案生成失败')
       }
     } catch (err) {
       setImportPackages((current) =>
@@ -1380,10 +1380,10 @@ export function App() {
           <div className="task-hero-copy">
             <span className="eyebrow">当前拍摄任务</span>
             <h2>{selectedSku ? selectedSku.sku : '选择一个服装货号'}</h2>
-            <p>{selectedSku?.analysis?.summary ?? '从左侧选择已保存货号，或先导入图包并生成拍摄方案。'}</p>
+            <p>{selectedSku?.analysis?.summary ?? '从左侧选择已保存货号，或先导入货号图片并生成拍摄方案。'}</p>
           </div>
           <div className="task-status-strip">
-            <TaskStatus label="服装" value={selectedSku ? `${selectedSku.imageCount ?? selectedSku.images?.length ?? 0} 张素材` : '未选择'} state={selectedSku ? 'ready' : 'idle'} />
+            <TaskStatus label="服装" value={selectedSku ? `${selectedSku.imageCount ?? selectedSku.images?.length ?? 0} 张素材图` : '未选择'} state={selectedSku ? 'ready' : 'idle'} />
             <TaskStatus label="拍摄方案" value={shotPlan ? `${shotPlan.plan.shots.length} 张图位` : '未生成'} state={shotPlanPlanning ? 'running' : shotPlan ? 'ready' : 'idle'} />
             <TaskStatus label="分镜预览" value={previewRun ? statusText(previewRun.status) : '未生成'} state={runTaskStatusState(previewRun)} />
             <TaskStatus label="最终图" value={generationRun ? statusText(generationRun.status) : '未生成'} state={runTaskStatusState(generationRun)} />
@@ -1394,7 +1394,7 @@ export function App() {
           <aside className="task-sidebar">
             <Panel title="服装货号" icon={<FileImage size={18} />}>
               <button className="primary full" onClick={() => navigate({ page: 'garments' })}>
-                <Upload size={17} />导入新图包
+                <Upload size={17} />导入货号图片
               </button>
               <label className="search-field">
                 <Search size={16} />
@@ -1855,7 +1855,7 @@ function GarmentLibraryPage({
       <section className="library-toolbar">
         <div>
           <h2>服装素材</h2>
-          <p>上传、查看和使用货号图包。MVP 会保留原始上传记录，不覆盖素材。</p>
+          <p>导入、查看和使用服装货号图片。MVP 会保留原始上传记录，不覆盖客户原图。</p>
         </div>
         <div className="library-summary">
           <label className="filter-toggle">
@@ -1876,7 +1876,7 @@ function GarmentLibraryPage({
 
       <section className="garment-layout">
         <aside className="garment-sidebar">
-          <Panel title="导入新图包" icon={<Upload size={18} />}>
+          <Panel title="导入货号图片" icon={<Upload size={18} />}>
             <label className="field">
               <span>散图货号</span>
               <input value={looseSkuInput} onChange={(event) => onLooseSkuInputChange(event.target.value)} placeholder="上传散图时填写" />
@@ -1911,10 +1911,10 @@ function GarmentLibraryPage({
             <p className="helper-text">先生成本地预览，可改货号、删图片，再保存上传。第一张图片默认作为封面。</p>
           </Panel>
 
-          <Panel title="待保存图包" icon={<Clock size={18} />}>
+          <Panel title="待保存货号" icon={<Clock size={18} />}>
             <div className="import-summary">
               <strong>{pendingImportPackages.length}</strong>
-              <span>个待处理图包</span>
+              <span>个待保存货号</span>
             </div>
             <button
               className="primary full"
@@ -2020,7 +2020,7 @@ function GarmentLibraryPage({
 
 	                <section className="material-board asset-panel">
 	                  <div className="section-heading tight">
-	                    <h2>素材图片</h2>
+	                    <h2>素材图</h2>
 	                    <span>{selectedSku.images?.length ?? 0}/{selectedSku.imageCount ?? selectedSku.images?.length ?? 0} 张</span>
 	                  </div>
                   <div className="append-images">
@@ -2448,7 +2448,7 @@ function ImportPreviewBoard({
         <div>
           <span className="eyebrow">上传新货号</span>
           <h2>预览与编辑</h2>
-          <p>图片还在浏览器本地暂存。确认每个图包的货号和图片后，再逐个保存上传；第一张图片默认作为封面。</p>
+          <p>图片还在浏览器本地暂存。确认每个货号和素材图后，再逐个保存上传；第一张图片默认作为封面。</p>
         </div>
       </div>
 
@@ -2495,7 +2495,7 @@ function ImportPreviewBoard({
 
               <div className="import-image-section">
                 <div className="section-heading tight">
-                  <h2>素材图片</h2>
+                  <h2>素材图</h2>
                   <span>{item.images.length} 张</span>
                 </div>
                 <div className="asset-grid import-image-grid">
@@ -3623,7 +3623,7 @@ function getGenerateTaskStage(
     return {
       index: 0,
       title: '先选择本次要拍摄的服装',
-      description: '选择已保存货号，或进入服装素材页导入图包。系统会围绕这个货号组织整套拍摄任务。',
+      description: '选择已保存货号，或进入服装素材页导入货号图片。系统会围绕这个货号组织整套拍摄任务。',
       tag: '待开始',
       actionTitle: '选择服装',
       actionText: '左侧选择货号后，这里会显示拍摄方案、分镜预览和最终生成动作。',
@@ -3966,7 +3966,7 @@ function pageTitle(page: Page) {
 function pageSubtitle(page: Page) {
   const map: Record<Page, string> = {
     generate: '选择服装货号，直接使用拍摄方案生成电商主图',
-    garments: '上传、管理和使用服装货号图包',
+    garments: '导入、管理和使用服装货号图片',
     models: '维护数字模特身份、角度和身体参数',
     history: '查看生成、重新生成、导出和系统事件',
   }
