@@ -50,8 +50,36 @@ def ensure_bucket() -> None:
     client = s3_client()
     try:
         client.head_bucket(Bucket=settings.s3_bucket)
-    except ClientError:
-        client.create_bucket(Bucket=settings.s3_bucket)
+    except ClientError as exc:
+        if _is_missing_bucket_error(exc):
+            try:
+                client.create_bucket(Bucket=settings.s3_bucket)
+            except ClientError as create_exc:
+                raise RuntimeError(_bucket_error_message("create", create_exc)) from create_exc
+            return
+        raise RuntimeError(_bucket_error_message("check", exc)) from exc
+
+
+def _is_missing_bucket_error(error: ClientError) -> bool:
+    response = error.response or {}
+    error_code = str(response.get("Error", {}).get("Code", ""))
+    status_code = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return status_code == 404 or error_code in {"404", "NoSuchBucket", "NotFound"}
+
+
+def _bucket_error_message(action: str, error: ClientError) -> str:
+    settings = get_settings()
+    response = error.response or {}
+    error_info = response.get("Error", {})
+    error_code = error_info.get("Code") or "unknown"
+    status_code = response.get("ResponseMetadata", {}).get("HTTPStatusCode") or "unknown"
+    return (
+        f"Object storage bucket {action} failed for bucket '{settings.s3_bucket}' "
+        f"at '{settings.s3_endpoint_url}' (status={status_code}, code={error_code}). "
+        "Verify APP_S3_ENDPOINT_URL, APP_S3_BUCKET/APP_STORAGE_BUCKET, "
+        "APP_S3_ACCESS_KEY_ID/RUSTFS_ACCESS_KEY, and "
+        "APP_S3_SECRET_ACCESS_KEY/RUSTFS_SECRET_KEY match the running S3/RustFS service."
+    )
 
 
 def put_fileobj(key: str | Path, fileobj: BinaryIO, content_type: str | None = None) -> str:
