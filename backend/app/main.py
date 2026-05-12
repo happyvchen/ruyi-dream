@@ -1576,10 +1576,40 @@ def list_logs(limit: int = 100) -> dict[str, Any]:
 
 @app.post("/api/exports/runs/{run_id}")
 def export_run(run_id: int) -> StreamingResponse:
-    run = get_generation_run_by_id(run_id)
-    images = run.get("images", [])
-    final_images = [image for image in images if image.get("isFinal")]
-    selected = final_images or images
+    with get_db() as db:
+        run = db.execute(
+            """
+            SELECT gr.*, gs.sku
+            FROM generation_runs gr
+            JOIN garment_skus gs ON gs.id = gr.sku_id
+            WHERE gr.id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if not run:
+            raise HTTPException(status_code=404, detail="生成任务不存在")
+        images = db.execute(
+            """
+            SELECT id, shot_index, status, output_path, is_final
+            FROM generation_images
+            WHERE run_id = ?
+            ORDER BY shot_index, id
+            """,
+            (run_id,),
+        ).fetchall()
+
+    group_images = [image for image in images if int(image["shot_index"] or 0) > 0]
+    if not group_images:
+        raise HTTPException(status_code=422, detail="没有可导出的最终组图")
+    incomplete_images = [
+        image
+        for image in group_images
+        if image["status"] != "SUCCEEDED" or not image["output_path"]
+    ]
+    if incomplete_images or run["status"] != "SUCCEEDED":
+        raise HTTPException(status_code=409, detail="最终组图尚未全部生成成功，不能导出 ZIP")
+    final_images = [image for image in group_images if image["is_final"]]
+    selected = final_images or group_images
     if not selected:
         raise HTTPException(status_code=422, detail="没有可导出的生成图")
 
@@ -1588,7 +1618,7 @@ def export_run(run_id: int) -> StreamingResponse:
     written = 0
     with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for image in selected:
-            object_key = image.get("objectKey")
+            object_key = image["output_path"]
             if not object_key:
                 continue
             try:
@@ -1596,8 +1626,10 @@ def export_run(run_id: int) -> StreamingResponse:
                 written += 1
             except Exception:
                 continue
+    if written == 0:
+        raise HTTPException(status_code=422, detail="没有可导出的生成图")
     zip_buffer.seek(0)
-    export_key = join_key("exports", str(run["sku"] or run["skuId"]), zip_name)
+    export_key = join_key("exports", str(run["sku"] or run["sku_id"]), zip_name)
     put_fileobj(export_key, zip_buffer, "application/zip")
     zip_buffer.seek(0)
 
@@ -1644,8 +1676,8 @@ def create_generation_image(
             INSERT INTO generation_images
               (run_id, shot_index, title, status, output_path, task_package_json, regenerate_from_image_id,
                regenerate_reason, image_inputs_json, template_snapshot_json, model_snapshot_json,
-               garment_snapshot_json, timeout_at, created_at, updated_at)
-            VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               garment_snapshot_json, timeout_at, is_final, created_at, updated_at)
+            VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -1665,6 +1697,7 @@ def create_generation_image(
                 dumps(task_package.get("model", {})),
                 dumps(task_package.get("garment", {})),
                 timeout_at,
+                1 if shot_index > 0 else 0,
                 timestamp,
                 timestamp,
             ),

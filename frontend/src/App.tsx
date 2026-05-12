@@ -743,7 +743,7 @@ export function App() {
         await refreshBaseData()
       } catch (planErr) {
         setShotPlan(null)
-        setError(planErr instanceof Error ? `图包已上传成功，但默认方案生成失败：${planErr.message}` : '图包已上传成功，但默认方案生成失败')
+        setError(planErr instanceof Error ? `图包已上传成功，但拍摄方案生成失败：${planErr.message}` : '图包已上传成功，但拍摄方案生成失败')
       }
     } catch (err) {
       setImportPackages((current) =>
@@ -770,7 +770,7 @@ export function App() {
     const targetSku = skuOverride ?? selectedSku
     if (!targetSku) return
     if (shotPlan && shotPlan.skuId === targetSku.id) {
-      const confirmed = window.confirm('重新生成默认方案会替换当前货号正在使用的默认拍摄方案。确认继续？')
+      const confirmed = window.confirm('重新生成拍摄方案会替换当前货号正在使用的拍摄方案。确认继续？')
       if (!confirmed) return
     }
     setBusy('planning')
@@ -854,7 +854,7 @@ export function App() {
       }
       await refreshHistoryRuns()
     } catch (err) {
-      setError(err instanceof Error ? err.message : '重生失败')
+      setError(err instanceof Error ? err.message : '重新生成失败')
     } finally {
       setBusy('idle')
     }
@@ -898,16 +898,6 @@ export function App() {
         images: current.images.map((item) => (item.id === image.id ? image : item)),
       }
     })
-  }
-
-  async function updateReviewStatus(image: GenerationImage, status: string) {
-    try {
-      const result = await api.setReviewStatus(image.id, status)
-      updateImageInState(result.item)
-      await refreshHistoryRuns()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '更新交付状态失败')
-    }
   }
 
   async function cancelImage(image: GenerationImage) {
@@ -1341,12 +1331,12 @@ export function App() {
           <div className="task-hero-copy">
             <span className="eyebrow">当前拍摄任务</span>
             <h2>{selectedSku ? selectedSku.sku : '选择一个服装货号'}</h2>
-            <p>{selectedSku?.analysis?.summary ?? '从左侧选择已保存货号，或先导入图包并生成默认拍摄方案。'}</p>
+            <p>{selectedSku?.analysis?.summary ?? '从左侧选择已保存货号，或先导入图包并生成拍摄方案。'}</p>
           </div>
           <div className="task-status-strip">
             <TaskStatus label="服装" value={selectedSku ? `${selectedSku.imageCount ?? selectedSku.images?.length ?? 0} 张素材` : '未选择'} state={selectedSku ? 'ready' : 'idle'} />
-            <TaskStatus label="默认方案" value={shotPlan ? `${shotPlan.plan.shots.length} 张图位` : '未保存'} state={shotPlanPlanning ? 'running' : shotPlan ? 'ready' : 'idle'} />
-            <TaskStatus label="分镜" value={previewRun ? statusText(previewRun.status) : '未预览'} state={runTaskStatusState(previewRun)} />
+            <TaskStatus label="拍摄方案" value={shotPlan ? `${shotPlan.plan.shots.length} 张图位` : '未生成'} state={shotPlanPlanning ? 'running' : shotPlan ? 'ready' : 'idle'} />
+            <TaskStatus label="分镜预览" value={previewRun ? statusText(previewRun.status) : '未生成'} state={runTaskStatusState(previewRun)} />
             <TaskStatus label="最终图" value={generationRun ? statusText(generationRun.status) : '未生成'} state={runTaskStatusState(generationRun)} />
           </div>
         </section>
@@ -1408,7 +1398,7 @@ export function App() {
                 <Tag>{taskStage.tag}</Tag>
               </div>
               <div className="stage-steps">
-                {['选择服装', '确认方案', '分镜预览', '最终组图', '交付导出'].map((label, index) => (
+                {['选择服装', '拍摄方案', '分镜预览', '最终组图', '导出组图'].map((label, index) => (
                   <span className={stageStepState(index, taskStage.index)} key={label}>
                     <b>{index + 1}</b>{label}
                   </span>
@@ -1420,9 +1410,9 @@ export function App() {
               <div className="visual-head">
                 <div>
                   <h2>{generationRun ? '最终组图' : '分镜预览'}</h2>
-                  <p>{generationRun ? '确认可用图，必要时单张重生，最后导出交付。' : '先确认 2x3 分镜方向，再进入最终 5 张成片。'}</p>
+                  <p>{generationRun ? '确认最终图，必要时单张重新生成，最后导出组图。' : '先确认 2x3 分镜方向，再进入最终 5 张成片。'}</p>
                 </div>
-                {shotPlan && <span>方案 #{shotPlan.id}</span>}
+                {shotPlan && <span>拍摄方案 #{shotPlan.id}</span>}
               </div>
 
               {previewRun && (
@@ -1434,7 +1424,6 @@ export function App() {
                   nowMs={nowMs}
                   onRegenerate={(image, reason) => void regenerate(image, reason)}
                   onToggleFinal={(image) => void toggleFinal(image)}
-                  onReviewStatus={(image, status) => void updateReviewStatus(image, status)}
                   onCancelImage={(image) => void cancelImage(image)}
                   onExport={(runId) => void api.exportRun(runId)}
                   previewOnly
@@ -1449,7 +1438,6 @@ export function App() {
                 nowMs={nowMs}
                 onRegenerate={(image, reason) => void regenerate(image, reason)}
                 onToggleFinal={(image) => void toggleFinal(image)}
-                onReviewStatus={(image, status) => void updateReviewStatus(image, status)}
                 onCancelImage={(image) => void cancelImage(image)}
                 onExport={(runId) => void api.exportRun(runId)}
               />
@@ -1694,10 +1682,10 @@ function DeleteSkuDialog({
             : '默认操作会归档货号并从日常列表隐藏。勾选后会同时删除素材副本和文件。'}
         </p>
         <div className="delete-impact-grid">
-          <Stat label="素材图" value={sku.imageCount ?? 0} />
-          <Stat label="拍摄方案" value={impact?.shotPlanCount ?? 0} />
-          <Stat label="生成记录" value={impact?.generationRunCount ?? 0} />
-          <Stat label="已归档" value={impact?.archivedGenerationRunCount ?? 0} />
+          <Stat label="素材图" value={sku.imageCount ?? 0} compact />
+          <Stat label="拍摄方案" value={impact?.shotPlanCount ?? 0} compact />
+          <Stat label="生成记录" value={impact?.generationRunCount ?? 0} compact />
+          <Stat label="已归档" value={impact?.archivedGenerationRunCount ?? 0} compact />
         </div>
         <label className="checkbox-row danger-option">
           <input
@@ -1721,8 +1709,8 @@ function DeleteSkuDialog({
         )}
         <div className="danger-dialog-actions">
           <button className="secondary" onClick={onClose} disabled={busy !== 'idle'}>取消</button>
-          <button className="danger" onClick={onDelete} disabled={busy !== 'idle' || !canDelete}>
-            {busy === 'uploading' ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
+          <button className={deleteRelated ? 'danger' : 'primary'} onClick={onDelete} disabled={busy !== 'idle' || !canDelete}>
+            {busy === 'uploading' ? <Loader2 className="spin" size={16} /> : deleteRelated ? <Trash2 size={16} /> : <Archive size={16} />}
             {deleteRelated ? '删除货号及关联记录' : '归档货号'}
           </button>
         </div>
@@ -1819,8 +1807,8 @@ function GarmentLibraryPage({
           <h2>服装素材</h2>
           <p>上传、查看和使用货号图包。MVP 会保留原始上传记录，不覆盖素材。</p>
         </div>
-        <div className="library-stats">
-          <label className="checkbox-row">
+        <div className="library-summary">
+          <label className="filter-toggle">
             <input
               type="checkbox"
               checked={showArchivedSkus}
@@ -1828,9 +1816,11 @@ function GarmentLibraryPage({
             />
             <span>显示已归档</span>
           </label>
-          <Stat label="货号" value={skus.length} />
-          <Stat label="已策划" value={analyzed} />
-          <Stat label="待策划" value={Math.max(skus.length - analyzed, 0)} />
+          <div className="metric-strip">
+            <Stat label="货号" value={skus.length} />
+            <Stat label="已策划" value={analyzed} />
+            <Stat label="待策划" value={Math.max(skus.length - analyzed, 0)} />
+          </div>
         </div>
       </section>
 
@@ -1944,7 +1934,7 @@ function GarmentLibraryPage({
                   </button>
 	                  <button className="primary" onClick={() => onCreatePlan(selectedSku)} disabled={busy !== 'idle'}>
 	                    {busy === 'planning' ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
-	                    {shotPlan ? '重新生成默认方案' : '生成默认方案'}
+	                    {shotPlan ? '重新生成拍摄方案' : '生成拍摄方案'}
 	                  </button>
 	                  <button className="danger ghost" onClick={onDeleteSelectedSku} disabled={busy !== 'idle'} title="删除货号">
 	                    <Trash2 size={16} />删除
@@ -2068,7 +2058,7 @@ function GarmentLibraryPage({
 	                  ) : (
 	                    <div className="plan-empty">
 	                      <p>还没有拍摄方案</p>
-	                      <span>点击右上角“生成默认方案”，系统会根据服装素材整理品类、服饰搭配和分镜剧本；生成组图时将直接使用这里保存的方案。</span>
+	                      <span>点击右上角“生成拍摄方案”，系统会根据服装素材整理品类、服饰搭配和分镜剧本；生成组图时将直接使用这里保存的方案。</span>
 	                    </div>
 	                  )}
 	                </section>
@@ -2135,10 +2125,12 @@ function ModelProfilesPage({
           <h2>数字模特</h2>
           <p>维护模特身份图、身体参数和生成约束。每次组图只选择一个模特作为主体。</p>
         </div>
-        <div className="library-stats">
-          <Stat label="模特" value={models.length} />
-          <Stat label="头像" value={headEntries.length} />
-          <Stat label="默认" value={models.some((model) => model.isDefault) ? 1 : 0} />
+        <div className="library-summary">
+          <div className="metric-strip">
+            <Stat label="模特" value={models.length} />
+            <Stat label="头像" value={headEntries.length} />
+            <Stat label="默认" value={models.some((model) => model.isDefault) ? 1 : 0} />
+          </div>
         </div>
       </section>
 
@@ -2525,7 +2517,7 @@ function FactRows({ analysis }: { analysis?: GarmentSku['analysis'] }) {
     return (
       <div className="fact-empty">
         <p>待策划</p>
-        <span>点击“生成默认方案”后，系统会根据服装素材生成品类、结构和组图建议。</span>
+        <span>点击“生成拍摄方案”后，系统会根据服装素材生成品类、结构和组图建议。</span>
       </div>
     )
   }
@@ -2549,9 +2541,9 @@ function FactRow({ label, value }: { label: string; value?: string }) {
   )
 }
 
-function Stat({ label, value }: { label: string; value: number }) {
+function Stat({ label, value, compact = false }: { label: string; value: number; compact?: boolean }) {
   return (
-    <div className="stat">
+    <div className={`stat${compact ? ' compact' : ''}`}>
       <strong>{value}</strong>
       <span>{label}</span>
     </div>
@@ -2594,7 +2586,7 @@ function GeneratePrimaryAction({
   if (!shotPlan) {
     return (
       <button className="primary full" onClick={onPlan}>
-        <Sparkles size={18} />去保存默认方案
+        <Sparkles size={18} />生成拍摄方案
       </button>
     )
   }
@@ -2602,7 +2594,7 @@ function GeneratePrimaryAction({
   if (shotPlanPlanning) {
     return (
       <button className="primary full" disabled>
-        <Loader2 className="spin" size={18} />默认方案生成中
+        <Loader2 className="spin" size={18} />拍摄方案生成中
       </button>
     )
   }
@@ -2627,7 +2619,7 @@ function GeneratePrimaryAction({
 
   return (
     <button className="secondary full" onClick={onPreview} disabled={busy !== 'idle'}>
-      <RefreshCw size={18} />重新生成分镜
+      <RefreshCw size={18} />重新生成分镜预览
     </button>
   )
 }
@@ -2695,7 +2687,7 @@ function GenerationHistoryOverview({
               <small>{statusText(run.status)} · {run.summary?.succeededCount ?? 0}/{run.summary?.imageCount ?? 0} 张</small>
               <small>
                 记录 #{run.id}
-                {run.summary?.regenerationCount ? ` · 重生 ${run.summary.regenerationCount}` : ''}
+                {run.summary?.regenerationCount ? ` · 重新生成 ${run.summary.regenerationCount}` : ''}
               </small>
             </span>
           </button>
@@ -2766,20 +2758,25 @@ function HistoryPage({
       <section className="panel history-list-panel">
         <div className="panel-title"><History size={18} /><span>历史任务</span></div>
         <div className="history-toolbar">
-          <input
-            value={filter}
-            onChange={(event) => onFilterChange(event.target.value)}
-            placeholder="搜索货号、记录号、状态"
-          />
-          <label className="checkbox-row">
+          <label className="toolbar-search">
+            <Search size={16} />
             <input
-              type="checkbox"
-              checked={showArchivedRuns}
-              onChange={(event) => onShowArchivedRunsChange(event.target.checked)}
+              value={filter}
+              onChange={(event) => onFilterChange(event.target.value)}
+              placeholder="搜索货号、记录号、状态"
             />
-            <span>显示已归档</span>
           </label>
-          <span>{visibleRuns.length} 条任务</span>
+          <div className="toolbar-meta">
+            <label className="filter-toggle">
+              <input
+                type="checkbox"
+                checked={showArchivedRuns}
+                onChange={(event) => onShowArchivedRunsChange(event.target.checked)}
+              />
+              <span>显示已归档</span>
+            </label>
+            <span className="count-pill">{visibleRuns.length} 条任务</span>
+          </div>
         </div>
         <div className="history-run-list">
           {visibleRuns.length === 0 && <EmptyText text="还没有匹配的生成任务" />}
@@ -2798,13 +2795,13 @@ function HistoryPage({
                   <small>
                     {statusText(run.status)} · {run.summary?.succeededCount ?? 0}/{run.summary?.imageCount ?? 0} 张完成
                     {run.summary?.finalCount ? ` · ${run.summary.finalCount} 张最终图` : ''}
-                    {run.summary?.regenerationCount ? ` · 重生 ${run.summary.regenerationCount} 次` : ''}
+                    {run.summary?.regenerationCount ? ` · 重新生成 ${run.summary.regenerationCount} 次` : ''}
                   </small>
                 </span>
               </button>
               <button className="secondary" onClick={() => onRestoreRun(run)}>恢复</button>
               {isRunActive(run) && <button className="secondary" onClick={() => onCancelRun(run)}>取消</button>}
-              <button className="secondary icon-only archive-button" onClick={() => onDeleteRun(run)} title="归档记录">
+              <button className="secondary icon-only archive-button" onClick={() => onDeleteRun(run)} title="归档记录" aria-label="归档记录">
                 <Archive size={15} />
               </button>
             </article>
@@ -2820,7 +2817,7 @@ function HistoryPage({
       <section className="panel history-detail-panel">
         <div className="panel-title"><FileImage size={18} /><span>任务详情</span></div>
         {!selectedRun ? (
-          <EmptyText text="选择一条历史任务查看入参、输出和重生过程" />
+          <EmptyText text="选择一条历史任务查看入参、输出和重新生成记录" />
         ) : (
           <HistoryRunDetail run={selectedRun} onRestoreRun={onRestoreRun} onDeleteRun={onDeleteRun} onCancelRun={onCancelRun} />
         )}
@@ -2863,8 +2860,8 @@ function HistoryRunDetail({
               <X size={16} />取消任务
             </button>
           )}
-          <button className="danger" onClick={() => onDeleteRun(run)}>
-            <Trash2 size={16} />归档记录
+          <button className="secondary archive-action" onClick={() => onDeleteRun(run)}>
+            <Archive size={16} />归档记录
           </button>
         </div>
       </div>
@@ -2887,7 +2884,7 @@ function HistoryRunDetail({
       </div>
 
       <div className="history-section">
-        <h3>输出与重生过程</h3>
+        <h3>输出与重新生成记录</h3>
         <div className="history-shot-list">
           {(run.images ?? []).map((image) => (
             <article className="history-shot-card" key={image.id}>
@@ -2899,7 +2896,7 @@ function HistoryRunDetail({
               </div>
 	              <div className="history-shot-body">
 	                <strong>{String(image.shotIndex).padStart(2, '0')} {image.title}</strong>
-	                <small>{statusText(image.status)} · {reviewStatusText(image.reviewStatus)} · 图片记录 #{image.id}</small>
+	                <small>{statusText(image.status)} · 图片记录 #{image.id}</small>
 	                {SHOW_DEBUG_INFO && (
 	                  <>
 	                    <p>{image.prompt || '暂无提示词快照'}</p>
@@ -2908,7 +2905,7 @@ function HistoryRunDetail({
 	                      <div className="attempt-list">
 	                        {(image.attempts?.length ? image.attempts : [{ attemptIndex: 1, kind: 'initial', prompt: image.prompt }]).map((attempt) => (
 	                          <div className="attempt-row" key={String(attempt['attemptIndex'] ?? attempt['createdAt'] ?? image.id)}>
-	                            <span>#{String(attempt['attemptIndex'] ?? 1)} · {attempt['kind'] === 'regeneration' ? '重生' : '初次生成'}</span>
+	                            <span>#{String(attempt['attemptIndex'] ?? 1)} · {attempt['kind'] === 'regeneration' ? '重新生成' : '初次生成'}</span>
 	                            <small>{String(attempt['reason'] || image.regenerateReason || '无原因备注')} · {String(attempt['providerStatus'] || image.providerStatus || '-')}</small>
 	                            {attempt['prompt'] ? <p>{String(attempt['prompt'])}</p> : null}
 	                          </div>
@@ -3192,7 +3189,6 @@ function ResultGallery({
   previewOnly = false,
   onRegenerate,
   onToggleFinal,
-  onReviewStatus,
   onCancelImage,
   onExport,
 }: {
@@ -3204,23 +3200,22 @@ function ResultGallery({
   previewOnly?: boolean
   onRegenerate: (image: GenerationImage, reason: string) => void
   onToggleFinal: (image: GenerationImage) => void
-  onReviewStatus: (image: GenerationImage, status: string) => void
   onCancelImage: (image: GenerationImage) => void
   onExport: (runId: number) => void
 }) {
   const isPreviewGallery = title?.includes('预览') ?? false
   const visibleImages = run?.images?.filter((image) => imageFilter ? imageFilter(image) : true) ?? []
+  const allVisibleImagesSucceeded = visibleImages.length > 0 && visibleImages.every((image) => image.status === 'SUCCEEDED')
+  const canExport = Boolean(run && !previewOnly && run.status === 'SUCCEEDED' && allVisibleImagesSucceeded)
   const placeholders = Array.from({ length: isPreviewGallery ? 1 : 5 }, (_, index) => index + 1)
   const runStartedAt = visibleImages[0]?.submittedAt ?? run?.createdAt
-  const [regenerateReasons, setRegenerateReasons] = useState<Record<number, string>>({})
-  const selectedReason = (image: GenerationImage) => regenerateReasons[image.id] ?? REGENERATION_REASONS[0].value
   return (
     <section className="results">
       <div className="section-heading">
         <h2>{title}</h2>
         {run && (
           <span>
-            {isPreviewGallery ? '预览记录' : run.kind === 'regeneration' ? '重生记录' : '组图记录'} #{run.id} · {statusText(run.status)}
+            {isPreviewGallery ? '分镜预览记录' : run.kind === 'regeneration' ? '重新生成记录' : '组图记录'} #{run.id} · {statusText(run.status)}
             {runStartedAt ? ` · 已运行 ${elapsedText(runStartedAt, nowMs, run.updatedAt, !isRunActive(run))}` : ''}
           </span>
         )}
@@ -3262,27 +3257,16 @@ function ResultGallery({
                   </strong>
 	                  <small>{statusText(image.status)} · {imageElapsed} · 记录 #{image.id}</small>
 	                  {SHOW_DEBUG_INFO && image.providerRequestId && <small>任务 #{shortId(image.providerRequestId)} · {providerStatusText(image.providerStatus)}</small>}
-	                  {!previewOnly && <small>交付状态：{reviewStatusText(image.reviewStatus)}</small>}
 	                </div>
 	                <div className="result-actions">
                     {previewOnly ? (
                       <button onClick={() => onRegenerate(image, '重新生成分镜预览')} disabled={loading || imageActive}>
-                        <RefreshCw size={15} />重新预览
+                        <RefreshCw size={15} />重新生成分镜预览
                       </button>
                     ) : (
                       <>
-                        {image.status === 'SUCCEEDED' && (
-                          <select
-                            value={selectedReason(image)}
-                            onChange={(event) => setRegenerateReasons((current) => ({ ...current, [image.id]: event.target.value }))}
-                          >
-                            {REGENERATION_REASONS.map((reason) => (
-                              <option key={reason.value} value={reason.value}>{reason.label}</option>
-                            ))}
-                          </select>
-                        )}
-                        <button onClick={() => onRegenerate(image, selectedReason(image))} disabled={loading || imageActive}>
-                          <RefreshCw size={15} />重生
+                        <button onClick={() => onRegenerate(image, '重新生成')} disabled={loading || imageActive}>
+                          <RefreshCw size={15} />重新生成
                         </button>
                         <button onClick={() => onToggleFinal(image)} disabled={image.status !== 'SUCCEEDED'}>
                           <Check size={15} />{image.isFinal ? '取消最终' : '设为最终'}
@@ -3294,15 +3278,6 @@ function ResultGallery({
 	                      <X size={15} />取消
 	                    </button>
 	                  )}
-	                  {!previewOnly && image.status === 'SUCCEEDED' && (
-	                    <select value={image.reviewStatus ?? 'candidate'} onChange={(event) => onReviewStatus(image, event.target.value)}>
-	                      <option value="candidate">候选</option>
-	                      <option value="approved">可用</option>
-	                      <option value="needs_regen">需重生</option>
-	                      <option value="needs_retouch">需精修</option>
-	                      <option value="delivered">已交付</option>
-	                    </select>
-	                  )}
 	                </div>
               </article>
               )
@@ -3312,16 +3287,16 @@ function ResultGallery({
                 <div className="result-image"><span>待生成</span></div>
                 <div className="result-meta">
                   <strong>{String(index).padStart(2, '0')} 图位</strong>
-                  <small>{isPreviewGallery ? '预览后用于最终生成' : '生成后可单张重生'}</small>
+                  <small>{isPreviewGallery ? '预览后用于最终生成' : '生成后可单张重新生成'}</small>
                 </div>
               </article>
             ))}
       </div>
-      {run?.images?.some((image) => image.isFinal) && (
+      {!previewOnly && run && visibleImages.length > 0 && (
         <div className="export-note">
           <Download size={16} />
-          最终图已标记；导出时优先打包最终图。
-          <button className="link-button" onClick={() => onExport(run.id)}>导出 ZIP</button>
+          {canExport ? '最终组图已全部生成成功；导出时优先打包最终图。' : '所有图位生成完成并成功后，才可以导出 ZIP。'}
+          <button className="link-button" onClick={() => onExport(run.id)} disabled={!canExport}>导出 ZIP</button>
         </div>
       )}
     </section>
@@ -3516,17 +3491,6 @@ function statusText(status: string) {
   return map[status] ?? status
 }
 
-function reviewStatusText(status?: string | null) {
-  const map: Record<string, string> = {
-    candidate: '候选',
-    approved: '可用',
-    needs_regen: '需重生',
-    needs_retouch: '需精修',
-    delivered: '已交付',
-  }
-  return map[status || 'candidate'] ?? status ?? '候选'
-}
-
 function providerStatusText(status?: string | null) {
   if (!status) return '等待 fal 状态'
   const map: Record<string, string> = {
@@ -3600,23 +3564,23 @@ function getGenerateTaskStage(
       description: '选择已保存货号，或进入服装素材页导入图包。系统会围绕这个货号组织整套拍摄任务。',
       tag: '待开始',
       actionTitle: '选择服装',
-      actionText: '左侧选择货号后，这里会显示默认方案、分镜和最终生成动作。',
+      actionText: '左侧选择货号后，这里会显示拍摄方案、分镜预览和最终生成动作。',
     }
   }
   if (!shotPlan) {
     return {
       index: 1,
-      title: '缺少默认拍摄方案',
-      description: '生成组图页只执行已保存方案。请回到服装素材页，让系统为这个货号生成默认 5 张图位方案。',
-      tag: '需保存方案',
-      actionTitle: '保存默认方案',
-      actionText: '进入服装素材页生成默认方案后，再回到这里预览分镜。',
+      title: '缺少拍摄方案',
+      description: '生成组图页只执行已保存方案。请回到服装素材页，让系统为这个货号生成 5 张图位的拍摄方案。',
+      tag: '需生成方案',
+      actionTitle: '生成拍摄方案',
+      actionText: '进入服装素材页生成拍摄方案后，再回到这里生成分镜预览。',
     }
   }
   if (shotPlan.status === 'PLANNING') {
     return {
       index: 1,
-      title: '正在整理默认拍摄方案',
+      title: '正在整理拍摄方案',
       description: '系统正在识别服装品类、整理品牌棚拍风格和 5 张图位。完成后即可生成分镜预览。',
       tag: '策划中',
       actionTitle: '等待方案完成',
@@ -3649,15 +3613,15 @@ function getGenerateTaskStage(
       title: '分镜预览不可用',
       description: '当前分镜未完成或已经失败。请重新生成分镜预览，再进入最终组图。',
       tag: statusText(previewRun.status),
-      actionTitle: '重新预览',
-      actionText: '重新生成分镜后，系统会把它绑定到当前货号和默认方案。',
+      actionTitle: '重新生成分镜预览',
+      actionText: '重新生成分镜预览后，系统会把它绑定到当前货号和拍摄方案。',
     }
   }
   if (!generationRun) {
     return {
       index: 3,
       title: '分镜已就绪，可以生成最终图',
-      description: '最终生成会在同一任务下追加 5 张大图，之后可单张保留、重生和导出。',
+      description: '最终生成会在同一任务下追加 5 张大图，之后可设为最终图、重新生成和导出。',
       tag: '可生成',
       actionTitle: '生成最终组图',
       actionText: '确认分镜方向后，开始生成最终 5 张电商主图。',
@@ -3667,19 +3631,19 @@ function getGenerateTaskStage(
     return {
       index: 3,
       title: '最终组图生成中',
-      description: '5 张图会逐张回传状态。失败或不满意的图位后续可单张重生。',
+      description: '5 张图会逐张回传状态。失败或不满意的图位后续可单张重新生成。',
       tag: '生成中',
       actionTitle: '等待最终图',
-      actionText: '生成完成后，在结果卡上标记最终图或单张重生。',
+      actionText: '生成完成后，在结果卡上确认最终图或单张重新生成。',
     }
   }
   return {
     index: 4,
     title: generationRun.status === 'SUCCEEDED' ? '最终组图已生成' : '最终组图需要处理',
-    description: '检查每张图的商品保真、姿势和构图。可用图设为最终图，不满意的图位直接重生。',
+    description: '检查每张图的商品保真、姿势和构图。满意的图设为最终图，不满意的图位直接重新生成。',
     tag: statusText(generationRun.status),
-    actionTitle: '确认并导出',
-    actionText: '标记最终图后即可导出 ZIP，未达标图位可以保留在同一任务里重生。',
+    actionTitle: '导出组图',
+    actionText: '确认最终图后即可导出 ZIP，未达标图位可以保留在同一任务里重新生成。',
   }
 }
 
@@ -3778,15 +3742,6 @@ const HEAD_REFERENCE_OPTIONS = [
   { value: 'back', label: '背面' },
   { value: 'backTurnLeft45', label: '背面回头左 45 度' },
   { value: 'backTurnRight45', label: '背面回头右 45 度' },
-]
-
-const REGENERATION_REASONS = [
-  { value: '服装不准确', label: '服装不准确' },
-  { value: '姿势不合适', label: '姿势不合适' },
-  { value: '模特不像', label: '模特不像' },
-  { value: '构图不合适', label: '构图不合适' },
-  { value: '搭配不合适', label: '搭配不合适' },
-  { value: '其他补充', label: '其他补充' },
 ]
 
 function createBlankModelForm(index = 1): ModelForm {
@@ -3948,10 +3903,10 @@ function pageTitle(page: Page) {
 
 function pageSubtitle(page: Page) {
   const map: Record<Page, string> = {
-    generate: '选择服装货号，直接使用默认组图方案生成电商主图',
+    generate: '选择服装货号，直接使用拍摄方案生成电商主图',
     garments: '上传、管理和使用服装货号图包',
     models: '维护数字模特身份、角度和身体参数',
-    history: '查看生成、重生、导出和系统事件',
+    history: '查看生成、重新生成、导出和系统事件',
   }
   return map[page]
 }

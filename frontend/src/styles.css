@@ -507,6 +507,7 @@ textarea {
 
 .primary,
 .secondary,
+.danger,
 .result-actions button {
   display: inline-flex;
   align-items: center;
@@ -531,7 +532,31 @@ textarea {
 
 .danger {
   border: 1px solid #d8b4af;
+  background: #fff8f7;
   color: #9b3025;
+}
+
+.danger.ghost {
+  background: #fff;
+}
+
+.secondary:hover,
+.result-actions button:hover {
+  border-color: #bfbfb7;
+  background: #f7f7f3;
+}
+
+.danger:hover {
+  border-color: #c98d85;
+  background: #fff1ef;
+}
+
+.primary:focus-visible,
+.secondary:focus-visible,
+.danger:focus-visible,
+.result-actions button:focus-visible {
+  outline: 2px solid #22221f;
+  outline-offset: 2px;
 }
 
 .icon-only {
@@ -691,6 +716,10 @@ button:disabled {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
+  padding: 10px;
+  border: 1px solid #ece9e2;
+  border-radius: 8px;
+  background: #fafaf8;
 }
 
 .checkbox-row {
@@ -708,12 +737,18 @@ button:disabled {
 
 .danger-option {
   justify-self: start;
+  padding: 10px 12px;
+  border: 1px solid #ead8d5;
+  border-radius: 8px;
+  background: #fffaf9;
   color: #8b332d;
 }
 
 .danger-dialog-actions {
   align-items: center;
   justify-content: flex-end;
+  padding-top: 4px;
+  border-top: 1px solid #eeeeea;
 }
 
 .preview-close {
@@ -1353,6 +1388,13 @@ summary {
   color: #4f4f48;
 }
 
+.archive-button:hover,
+.archive-action:hover {
+  border-color: #bebeb6;
+  background: #f6f6f2;
+  color: #242420;
+}
+
 .mini-preview-strip {
   display: grid;
   grid-template-columns: repeat(2, 26px);
@@ -1417,10 +1459,19 @@ summary {
   font-size: 14px;
 }
 
-.library-stats {
+.library-summary {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  min-width: 0;
+}
+
+.metric-strip {
   display: grid;
-  grid-template-columns: repeat(3, 86px);
+  grid-template-columns: repeat(3, minmax(86px, 1fr));
   gap: 10px;
+  min-width: min(318px, 100%);
 }
 
 .stat {
@@ -1441,6 +1492,49 @@ summary {
 .stat span {
   color: #6d6d66;
   font-size: 12px;
+}
+
+.stat.compact {
+  min-height: 58px;
+  border-color: transparent;
+  background: #fff;
+}
+
+.stat.compact strong {
+  font-size: 20px;
+}
+
+.filter-toggle {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid #deded8;
+  border-radius: 999px;
+  background: #fff;
+  color: #4f4f48;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.filter-toggle input {
+  width: 15px;
+  height: 15px;
+  accent-color: #22221f;
+}
+
+.count-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid #e1e1db;
+  border-radius: 999px;
+  background: #fafaf8;
+  color: #55554f;
+  font-size: 13px;
+  white-space: nowrap;
 }
 
 .garment-layout {
@@ -2049,7 +2143,7 @@ summary {
   font-size: 12px;
 }
 
-.asset-actions button {
+.asset-actions button:not(.primary):not(.secondary):not(.danger) {
   display: grid;
   place-items: center;
   min-height: 34px;
@@ -2175,20 +2269,46 @@ summary {
 }
 
 .history-toolbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
   gap: 12px;
   align-items: center;
-  justify-content: space-between;
   margin-bottom: 16px;
 }
 
-.history-toolbar input {
-  width: min(360px, 100%);
+.toolbar-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid #d8d8d1;
+  border-radius: 8px;
+  background: #fff;
+  color: #77736d;
 }
 
-.history-toolbar span {
-  color: #77736d;
-  font-size: 13px;
+.toolbar-search input {
+  width: 100%;
+  min-height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.toolbar-search input:focus {
+  outline: none;
+}
+
+.toolbar-search:focus-within {
+  border-color: #22221f;
+  box-shadow: 0 0 0 1px #22221f inset;
+}
+
+.toolbar-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .history-run-list {
@@ -2287,8 +2407,13 @@ summary {
 
 .history-detail-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
-  white-space: nowrap;
+}
+
+.archive-action {
+  color: #3f3f39;
 }
 
 .history-detail-head h2 {
@@ -2539,6 +2664,16 @@ summary {
     flex-direction: column;
   }
 
+  .history-detail-actions,
+  .toolbar-meta,
+  .library-summary {
+    justify-content: flex-start;
+  }
+
+  .toolbar-meta {
+    flex-wrap: wrap;
+  }
+
   .history-preview-strip {
     grid-template-columns: repeat(4, 48px);
   }
@@ -2589,7 +2724,7 @@ summary {
     grid-template-columns: 1fr;
   }
 
-  .library-stats {
+  .metric-strip {
     grid-template-columns: repeat(3, 1fr);
   }
 }
