@@ -4,6 +4,8 @@ import importlib
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 
 class BackendSmokeTests(unittest.TestCase):
@@ -37,6 +39,39 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(login.status_code, 200)
         self.assertIn("set-cookie", login.headers)
         self.assertEqual(client.get("/api/auth/session").json(), {"authRequired": True, "authenticated": True})
+
+    def test_presigned_urls_are_signed_with_public_s3_endpoint(self) -> None:
+        object_storage = importlib.import_module("app.object_storage")
+        object_storage.s3_client.cache_clear()
+        object_storage.presign_s3_client.cache_clear()
+        self.addCleanup(object_storage.s3_client.cache_clear)
+        self.addCleanup(object_storage.presign_s3_client.cache_clear)
+
+        class FakeSettings:
+            s3_endpoint_url = "http://rustfs:9000"
+            s3_public_endpoint_url = "http://203.0.113.10:9000"
+            s3_region = "auto"
+            s3_access_key_id = "test-access-key"
+            s3_secret_access_key = "test-secret-key"
+            s3_force_path_style = True
+            s3_bucket = "ruyi-dream"
+            s3_presign_expires_seconds = 900
+
+        with patch.object(object_storage, "get_settings", return_value=FakeSettings):
+            internal_url = object_storage.s3_client().generate_presigned_url(
+                "get_object",
+                Params={"Bucket": "ruyi-dream", "Key": "uploads/sample.jpg"},
+                ExpiresIn=900,
+            )
+            public_url = object_storage.presigned_get_url("uploads/sample.jpg")
+
+        self.assertIsNotNone(public_url)
+        self.assertEqual(urlsplit(public_url).netloc, "203.0.113.10:9000")
+        self.assertEqual(urlsplit(internal_url).netloc, "rustfs:9000")
+        self.assertNotEqual(
+            parse_qs(urlsplit(public_url).query)["X-Amz-Signature"],
+            parse_qs(urlsplit(internal_url).query)["X-Amz-Signature"],
+        )
 
     def test_schema_migrations_are_recorded(self) -> None:
         config = importlib.import_module("app.config")
