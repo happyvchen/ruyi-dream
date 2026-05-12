@@ -252,61 +252,6 @@ export function App() {
   }, [])
 
   useEffect(() => {
-    if (!appReady) return
-    const storedRunId = window.localStorage.getItem('app:lastGenerationRunId')
-    if (!storedRunId) return
-    const runId = Number(storedRunId)
-    if (!Number.isFinite(runId)) return
-    const currentRoute = parseRoute()
-    if (currentRoute.page === 'generate' && !currentRoute.generateSku && !currentRoute.generateRunId && window.localStorage.getItem('app:lastPreviewRunId')) {
-      return
-    }
-    void api.getRun(runId)
-      .then((result) => {
-        if (result.item.kind === 'preview_grid') {
-          window.localStorage.removeItem('app:lastGenerationRunId')
-          window.localStorage.setItem('app:lastPreviewRunId', String(result.item.id))
-          if (currentRoute.page === 'generate' && !currentRoute.generateSku && !currentRoute.generateRunId) {
-            void restorePreviewRun(result.item, { syncUrl: false })
-          }
-          return
-        }
-        if (currentRoute.page === 'generate' && !currentRoute.generateSku && !currentRoute.generateRunId) {
-          void restoreHistoryRun(result.item, { syncUrl: false })
-          return
-        }
-        setGenerationRun(result.item)
-      })
-      .catch(() => window.localStorage.removeItem('app:lastGenerationRunId'))
-  }, [appReady])
-
-  useEffect(() => {
-    if (!appReady) return
-    const currentRoute = parseRoute()
-    if (currentRoute.page !== 'generate' || currentRoute.generateSku || currentRoute.generateRunId) return
-    const storedPreviewRunId = window.localStorage.getItem('app:lastPreviewRunId')
-    if (!storedPreviewRunId) return
-    const runId = Number(storedPreviewRunId)
-    if (!Number.isFinite(runId)) return
-    void api.getRun(runId)
-      .then((result) => {
-        if (result.item.kind === 'preview_grid') void restorePreviewRun(result.item, { syncUrl: false })
-      })
-      .catch(() => window.localStorage.removeItem('app:lastPreviewRunId'))
-  }, [appReady])
-
-  useEffect(() => {
-    if (!generationRun) return
-    if (generationRun.kind === 'preview_grid') return
-    window.localStorage.setItem('app:lastGenerationRunId', String(generationRun.id))
-  }, [generationRun?.id])
-
-  useEffect(() => {
-    if (!previewRun || previewRun.kind !== 'preview_grid') return
-    window.localStorage.setItem('app:lastPreviewRunId', String(previewRun.id))
-  }, [previewRun?.id])
-
-  useEffect(() => {
     if (!(generationRun && isRunActive(generationRun)) && !(previewRun && isRunActive(previewRun))) return
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000)
     return () => window.clearInterval(timer)
@@ -1152,11 +1097,9 @@ export function App() {
       }
       if (previewRun?.id === run.id) {
         setPreviewRun(null)
-        window.localStorage.removeItem('app:lastPreviewRunId')
       }
       if (generationRun?.id === run.id) {
         setGenerationRun(null)
-        window.localStorage.removeItem('app:lastGenerationRunId')
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : '归档生成记录失败')
