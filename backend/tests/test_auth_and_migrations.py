@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import os
 import tempfile
@@ -99,6 +100,51 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("no-store", response.headers["cache-control"])
         self.assertNotIn("max-age=3600", response.headers["cache-control"])
         self.assertEqual(response.headers["pragma"], "no-cache")
+
+    def test_upload_validation_accepts_decodable_images_despite_content_type_mismatch(self) -> None:
+        from fastapi import UploadFile
+        from PIL import Image
+        from starlette.datastructures import Headers
+
+        main = importlib.import_module("app.main")
+        image_bytes = BytesIO()
+        Image.new("RGB", (12, 12), "white").save(image_bytes, format="JPEG")
+
+        mismatched_upload = UploadFile(
+            BytesIO(image_bytes.getvalue()),
+            filename="sample.jpg",
+            headers=Headers({"content-type": "image/png"}),
+        )
+        _, content_type = asyncio.run(main.validate_upload_image(mismatched_upload))
+        self.assertEqual(content_type, "image/jpeg")
+
+        generic_upload = UploadFile(
+            BytesIO(image_bytes.getvalue()),
+            filename="sample.bin",
+            headers=Headers({"content-type": "application/octet-stream"}),
+        )
+        _, generic_content_type = asyncio.run(main.validate_upload_image(generic_upload))
+        self.assertEqual(generic_content_type, "image/jpeg")
+
+    def test_upload_validation_rejects_decodable_but_unsupported_image_formats(self) -> None:
+        from fastapi import HTTPException, UploadFile
+        from PIL import Image
+        from starlette.datastructures import Headers
+
+        main = importlib.import_module("app.main")
+        image_bytes = BytesIO()
+        Image.new("RGB", (12, 12), "white").save(image_bytes, format="GIF")
+        gif_upload = UploadFile(
+            BytesIO(image_bytes.getvalue()),
+            filename="sample.gif",
+            headers=Headers({"content-type": "image/gif"}),
+        )
+
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(main.validate_upload_image(gif_upload))
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertIn("仅支持 JPG、PNG 或 WebP 图片", raised.exception.detail)
 
     def test_bucket_permission_error_is_not_treated_as_missing_bucket(self) -> None:
         from botocore.exceptions import ClientError

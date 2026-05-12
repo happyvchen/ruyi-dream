@@ -211,13 +211,7 @@ REVIEW_STATUSES = {"candidate", "approved", "needs_regen", "needs_retouch", "del
 LOGIN_FAILURE_WINDOW_SECONDS = 300
 LOGIN_FAILURE_LIMIT = 8
 login_failures_by_client: dict[str, list[float]] = {}
-ALLOWED_UPLOAD_MIME_TYPES = {
-    "image/jpeg": "JPEG",
-    "image/png": "PNG",
-    "image/webp": "WEBP",
-}
-ALLOWED_UPLOAD_FORMATS = set(ALLOWED_UPLOAD_MIME_TYPES.values())
-
+ALLOWED_UPLOAD_FORMATS = {"JPEG", "PNG", "WEBP"}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> Any:
@@ -313,9 +307,6 @@ def logout() -> JSONResponse:
 
 async def validate_upload_image(upload: UploadFile) -> tuple[bytes, str]:
     filename = upload.filename or "image"
-    declared_type = (upload.content_type or "").lower()
-    if declared_type not in ALLOWED_UPLOAD_MIME_TYPES:
-        raise HTTPException(status_code=400, detail=f"{filename} 仅支持 JPG、PNG 或 WebP 图片")
 
     content = await upload.read(settings.max_upload_image_bytes + 1)
     await upload.seek(0)
@@ -336,14 +327,18 @@ async def validate_upload_image(upload: UploadFile) -> tuple[bytes, str]:
 
     if image_format not in ALLOWED_UPLOAD_FORMATS:
         raise HTTPException(status_code=400, detail=f"{filename} 仅支持 JPG、PNG 或 WebP 图片")
-    expected_format = ALLOWED_UPLOAD_MIME_TYPES[declared_type]
-    if image_format != expected_format:
-        raise HTTPException(status_code=400, detail=f"{filename} 的文件类型与 Content-Type 不一致")
     if width <= 0 or height <= 0 or width * height > settings.max_upload_image_pixels:
         max_mp = settings.max_upload_image_pixels / 1_000_000
         raise HTTPException(status_code=400, detail=f"{filename} 超过 {max_mp:.0f}MP 像素限制")
 
-    return content, declared_type
+    return content, detected_image_content_type(image_format, upload.content_type)
+
+
+def detected_image_content_type(image_format: str, declared_type: str | None) -> str:
+    canonical_type = Image.MIME.get(image_format.upper())
+    if canonical_type:
+        return canonical_type
+    return f"image/{image_format.lower() or 'unknown'}"
 
 
 def cleanup_objects(keys: list[str]) -> None:
