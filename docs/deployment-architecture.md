@@ -43,6 +43,12 @@ Browser
 
 应用元数据和对象数据必须一起备份。同一个时间点的 `app.sqlite3` 和 RustFS 数据目录应保持一致，否则可能出现数据库记录存在但对象丢失，或对象存在但 UI 不可见。
 
+Bind mount 目录权限按容器运行用户授权：
+
+- RustFS 官方 Docker 镜像使用 UID `10001`，`deployment/rustfs/data`、`config`、`certs`、`logs` 需要允许 `10001:10001` 访问。
+- 后端镜像使用非 root `app` 用户，`deployment/app-data/backend` 需要授权给该镜像内 `app` 用户的 UID/GID。可用 `docker compose run --rm --no-deps --entrypoint sh backend -c 'id -u; id -g'` 查询。
+- 不使用 `chmod 777` 兜底；生产目录建议 `750`。
+
 ## 网络与 URL
 
 后端访问对象存储使用 Compose 内部地址：
@@ -73,6 +79,15 @@ BACKEND_CORS_ORIGINS=http://<server-ip-or-domain>:5173
 
 如果前端、后端、RustFS 通过反向代理统一到一个域名，仍然保持这三个 public URL 与浏览器实际访问地址一致。
 
+当前应用的 S3 客户端使用 path-style 请求：
+
+```env
+APP_S3_FORCE_PATH_STYLE=true
+APP_S3_ENDPOINT_URL=http://rustfs:9000
+```
+
+因此 RustFS 不需要 `RUSTFS_SERVER_DOMAINS`。该变量只用于 virtual-host style S3 域名模式；误配为公网 IP 或与容器内 Host 不一致时，RustFS 可能把 bucket 解析错并返回 `InvalidBucketName`。
+
 ## 启动生命周期
 
 `backend` 启动时会：
@@ -97,6 +112,7 @@ BACKEND_CORS_ORIGINS=http://<server-ip-or-domain>:5173
 - `APP_API_ACCESS_TOKEN` 只作为脚本/运维调用的可选 fallback，不作为浏览器前端门禁，也不注入前端静态包。
 - `FAL_KEY` 和 `GEMINI_API_KEY` 只放在部署环境，不写入文档或镜像。
 - RustFS bucket 保持私有，浏览器只通过后端生成的短期预签名 URL 访问对象。
+- `APP_STORAGE_BUCKET` 必须符合 S3 bucket 命名规则：3-63 个字符，只用小写字母、数字、短横线和点号；推荐 `ruyi-dream` 这类小写短横线命名。
 - 对公网开放时必须接入 HTTPS 反向代理，并把 public URL 改为 HTTPS。
 - 当前 SQLite 适合 MVP 单机部署；多人高并发或多副本后端需要迁移到外部数据库。
 - 当前 planner/generation poller 运行在后端进程内；多后端副本会造成重复扫描风险，扩展前应拆成单独 worker 或加分布式锁。
