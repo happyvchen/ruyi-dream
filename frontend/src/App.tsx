@@ -2453,6 +2453,7 @@ function ImportPreviewBoard({
                         src={image.previewUrl}
                         name={image.file.name}
                         fileSize={image.file.size}
+                        loading="eager"
                       />
                     </div>
                     <div className="asset-meta">
@@ -3323,6 +3324,7 @@ function ImagePreviewThumb({
   fullSrc,
   name,
   fileSize,
+  loading = 'lazy',
   compact,
   round,
   children,
@@ -3331,6 +3333,7 @@ function ImagePreviewThumb({
   fullSrc?: string
   name: string
   fileSize?: number | null
+  loading?: 'lazy' | 'eager'
   compact?: boolean
   round?: boolean
   children?: ReactNode
@@ -3382,7 +3385,7 @@ function ImagePreviewThumb({
           <img
             src={src}
             alt={name}
-            loading="lazy"
+            loading={loading}
             decoding="async"
             onLoad={(event) => {
               const target = event.currentTarget
