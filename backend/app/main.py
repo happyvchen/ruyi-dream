@@ -1578,8 +1578,18 @@ def list_logs(limit: int = 100) -> dict[str, Any]:
 def export_run(run_id: int) -> StreamingResponse:
     run = get_generation_run_by_id(run_id)
     images = run.get("images", [])
-    final_images = [image for image in images if image.get("isFinal")]
-    selected = final_images or images
+    group_images = [image for image in images if int(image.get("shotIndex") or 0) > 0]
+    if not group_images:
+        raise HTTPException(status_code=422, detail="没有可导出的最终组图")
+    incomplete_images = [
+        image
+        for image in group_images
+        if image.get("status") != "SUCCEEDED" or not image.get("objectKey")
+    ]
+    if incomplete_images or run.get("status") != "SUCCEEDED":
+        raise HTTPException(status_code=409, detail="最终组图尚未全部生成成功，不能导出 ZIP")
+    final_images = [image for image in group_images if image.get("isFinal")]
+    selected = final_images or group_images
     if not selected:
         raise HTTPException(status_code=422, detail="没有可导出的生成图")
 
@@ -1596,6 +1606,8 @@ def export_run(run_id: int) -> StreamingResponse:
                 written += 1
             except Exception:
                 continue
+    if written == 0:
+        raise HTTPException(status_code=422, detail="没有可导出的生成图")
     zip_buffer.seek(0)
     export_key = join_key("exports", str(run["sku"] or run["skuId"]), zip_name)
     put_fileobj(export_key, zip_buffer, "application/zip")

@@ -4,6 +4,8 @@ import importlib
 import os
 import tempfile
 import unittest
+import zipfile
+from io import BytesIO
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
@@ -341,6 +343,84 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertEqual(preview_final, 0)
         self.assertEqual(final_final, 1)
+
+    def test_export_requires_all_final_group_images_to_succeed(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            with db_module.get_db() as db:
+                model_id = db.execute("SELECT id FROM model_profiles ORDER BY id LIMIT 1").fetchone()["id"]
+                sku_id = db.execute(
+                    """
+                    INSERT INTO garment_skus (sku, title, storage_path, created_at, updated_at)
+                    VALUES ('SKU-EXPORT', 'Export SKU', 'uploads/sku-export', ?, ?)
+                    """,
+                    (timestamp, timestamp),
+                ).lastrowid
+                shot_plan_id = db.execute(
+                    """
+                    INSERT INTO shot_plans
+                      (sku_id, model_profile_id, status, plan_json, planner_provider, created_at, updated_at)
+                    VALUES (?, ?, 'CONFIRMED', '{}', 'test', ?, ?)
+                    """,
+                    (sku_id, model_id, timestamp, timestamp),
+                ).lastrowid
+                run_id = db.execute(
+                    """
+                    INSERT INTO generation_runs
+                      (sku_id, shot_plan_id, model_profile_id, kind, status, output_dir, created_at, updated_at)
+                    VALUES (?, ?, ?, 'group', 'RUNNING', 'outputs/export', ?, ?)
+                    """,
+                    (sku_id, shot_plan_id, model_id, timestamp, timestamp),
+                ).lastrowid
+                db.execute(
+                    """
+                    INSERT INTO generation_images
+                      (run_id, shot_index, title, status, output_path, task_package_json, is_final, created_at, updated_at)
+                    VALUES
+                      (?, 0, '分镜预览', 'SUCCEEDED', 'outputs/export/preview.png', '{}', 0, ?, ?),
+                      (?, 1, '全身主视觉', 'SUCCEEDED', 'outputs/export/front.png', '{}', 1, ?, ?),
+                      (?, 2, '品类核心展示', 'QUEUED', 'outputs/export/category.png', '{}', 1, ?, ?)
+                    """,
+                    (run_id, timestamp, timestamp, run_id, timestamp, timestamp, run_id, timestamp, timestamp),
+                )
+
+            client = TestClient(main.app)
+            login = client.post("/api/auth/login", json={"password": "letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+
+            with patch.object(main, "object_exists", return_value=True):
+                response = client.post(f"/api/exports/runs/{run_id}")
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json()["detail"], "最终组图尚未全部生成成功，不能导出 ZIP")
+
+            with db_module.get_db() as db:
+                db.execute(
+                    "UPDATE generation_runs SET status = 'SUCCEEDED', updated_at = ? WHERE id = ?",
+                    (timestamp, run_id),
+                )
+                db.execute(
+                    "UPDATE generation_images SET status = 'SUCCEEDED', updated_at = ? WHERE run_id = ? AND shot_index = 2",
+                    (timestamp, run_id),
+                )
+
+            with (
+                patch.object(main, "object_exists", return_value=True),
+                patch.object(main, "get_bytes", side_effect=lambda key: key.encode("utf-8")),
+                patch.object(main, "put_fileobj", return_value=None),
+            ):
+                response = client.post(f"/api/exports/runs/{run_id}")
+            self.assertEqual(response.status_code, 200)
+            with zipfile.ZipFile(BytesIO(response.content)) as archive:
+                self.assertEqual(sorted(archive.namelist()), ["category.png", "front.png"])
 
 def planner_fixture_json() -> str:
     return """

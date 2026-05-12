@@ -3205,6 +3205,8 @@ function ResultGallery({
 }) {
   const isPreviewGallery = title?.includes('预览') ?? false
   const visibleImages = run?.images?.filter((image) => imageFilter ? imageFilter(image) : true) ?? []
+  const allVisibleImagesSucceeded = visibleImages.length > 0 && visibleImages.every((image) => image.status === 'SUCCEEDED')
+  const canExport = Boolean(run && !previewOnly && run.status === 'SUCCEEDED' && allVisibleImagesSucceeded)
   const placeholders = Array.from({ length: isPreviewGallery ? 1 : 5 }, (_, index) => index + 1)
   const runStartedAt = visibleImages[0]?.submittedAt ?? run?.createdAt
   return (
@@ -3290,11 +3292,11 @@ function ResultGallery({
               </article>
             ))}
       </div>
-      {!previewOnly && run && visibleImages.some((image) => image.isFinal) && (
+      {!previewOnly && run && visibleImages.length > 0 && (
         <div className="export-note">
           <Download size={16} />
-          最终图已标记；导出时优先打包最终图。
-          <button className="link-button" onClick={() => onExport(run.id)}>导出 ZIP</button>
+          {canExport ? '最终组图已全部生成成功；导出时优先打包最终图。' : '所有图位生成完成并成功后，才可以导出 ZIP。'}
+          <button className="link-button" onClick={() => onExport(run.id)} disabled={!canExport}>导出 ZIP</button>
         </div>
       )}
     </section>
