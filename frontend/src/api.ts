@@ -153,6 +153,10 @@ export const api = {
     }),
   getDefaultPlan: (skuId: number) =>
     request<{ item: ShotPlan | null }>(`/api/garment-skus/${skuId}/default-shot-plan`),
+  getLatestPreviewRun: (skuId: number, options?: { shotPlanId?: number }) =>
+    request<{ item: GenerationRun | null }>(withParams(`/api/garment-skus/${skuId}/latest-preview-run`, {
+      shotPlanId: options?.shotPlanId,
+    })),
   getPlan: (shotPlanId: number) => request<{ item: ShotPlan }>(`/api/shot-plans/${shotPlanId}`),
   updatePlan: (shotPlanId: number, plan: ShotPlan['plan']) =>
     request<{ item: ShotPlan }>(`/api/shot-plans/${shotPlanId}`, {
@@ -177,7 +181,11 @@ export const api = {
       skuId: options?.skuId,
       keyword: options?.keyword,
     })),
-  getRun: (runId: number) => request<{ item: GenerationRun }>(`/api/generation-runs/${runId}`),
+  getRun: (runId: number, options?: { includeDebug?: boolean }) =>
+    request<{ item: GenerationRun }>(withParams(`/api/generation-runs/${runId}`, {
+      includeDebug: options?.includeDebug,
+    })),
+  getRunStatus: (runId: number) => request<{ item: GenerationRun }>(`/api/generation-runs/${runId}/status`),
   deleteRun: (runId: number) =>
     request<{ ok: boolean }>(`/api/generation-runs/${runId}`, {
       method: 'DELETE',

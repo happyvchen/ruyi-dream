@@ -72,6 +72,11 @@ CREATE TABLE garment_images (
   sku_id INTEGER NOT NULL REFERENCES garment_skus(id) ON DELETE CASCADE,
   filename TEXT NOT NULL,
   storage_path TEXT NOT NULL,
+  thumb_path TEXT,
+  preview_path TEXT,
+  file_size INTEGER,
+  thumb_file_size INTEGER,
+  preview_file_size INTEGER,
   mime_type TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'reference',
   sort_order INTEGER NOT NULL DEFAULT 0,
@@ -87,6 +92,11 @@ CREATE TABLE garment_images (
 | `sku_id` | INTEGER | 所属 `garment_skus.id` |
 | `filename` | TEXT | 上传后规范化文件名 |
 | `storage_path` | TEXT | 图片对象 key |
+| `thumb_path` | TEXT | 缩略图衍生对象 key |
+| `preview_path` | TEXT | 预览图衍生对象 key |
+| `file_size` | INTEGER | 原图字节数 |
+| `thumb_file_size` | INTEGER | 缩略图字节数 |
+| `preview_file_size` | INTEGER | 预览图字节数 |
 | `mime_type` | TEXT | 文件 MIME 类型 |
 | `role` | TEXT | 图片角色，当前为 `main` / `reference` |
 | `sort_order` | INTEGER | 上传顺序 |
@@ -100,7 +110,7 @@ CREATE TABLE garment_images (
 实现备注：
 
 - 当前 UI 不展示也不编辑 `role`。第一张图按 `sort_order, id` 作为封面和主要参考图。
-- API 序列化时会动态计算图片 `fileSize`，该字段不落库。
+- 上传时会生成 `thumb_path` / `preview_path` 并落库文件大小；历史数据可通过 `backend/scripts/repair_media_metadata.py` 补齐。
 - 图片尺寸由前端加载图片后读取，不落库。
 
 ### 2.3 `model_profiles`
@@ -269,6 +279,11 @@ CREATE TABLE generation_images (
   title TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'QUEUED',
   output_path TEXT,
+  thumb_path TEXT,
+  preview_path TEXT,
+  file_size INTEGER,
+  thumb_file_size INTEGER,
+  preview_file_size INTEGER,
   task_package_json TEXT NOT NULL,
   provider_request_json TEXT,
   provider_response_json TEXT,
@@ -304,7 +319,9 @@ CREATE TABLE generation_images (
 );
 ```
 
-历史库升级由 `schema_migrations` 记录并执行。当前与 `generation_images` 相关的迁移为 `001 add_generation_image_attempt_columns`，会补齐以下列：
+历史库升级由 `schema_migrations` 记录并执行。与 `generation_images` 相关的主要迁移包括：
+
+`001 add_generation_image_attempt_columns` 补齐生成图片 attempt、provider queue 和快照字段：
 
 ```sql
 ALTER TABLE generation_images ADD COLUMN prompt_text TEXT;
@@ -323,6 +340,22 @@ ALTER TABLE generation_images ADD COLUMN completed_at TEXT;
 ALTER TABLE generation_images ADD COLUMN last_status_checked_at TEXT;
 ```
 
+`008 add_media_derivative_metadata` 补齐素材图和生成图的三档媒体元数据：
+
+```sql
+ALTER TABLE garment_images ADD COLUMN thumb_path TEXT;
+ALTER TABLE garment_images ADD COLUMN preview_path TEXT;
+ALTER TABLE garment_images ADD COLUMN file_size INTEGER;
+ALTER TABLE garment_images ADD COLUMN thumb_file_size INTEGER;
+ALTER TABLE garment_images ADD COLUMN preview_file_size INTEGER;
+
+ALTER TABLE generation_images ADD COLUMN thumb_path TEXT;
+ALTER TABLE generation_images ADD COLUMN preview_path TEXT;
+ALTER TABLE generation_images ADD COLUMN file_size INTEGER;
+ALTER TABLE generation_images ADD COLUMN thumb_file_size INTEGER;
+ALTER TABLE generation_images ADD COLUMN preview_file_size INTEGER;
+```
+
 字段说明：
 
 | 字段 | 类型 | 说明 |
@@ -333,6 +366,11 @@ ALTER TABLE generation_images ADD COLUMN last_status_checked_at TEXT;
 | `title` | TEXT | 图位标题 |
 | `status` | TEXT | `QUEUED` / `SUBMITTED` / `IN_QUEUE` / `IN_PROGRESS` / `SUCCEEDED` / `FAILED` / `CANCELLED` |
 | `output_path` | TEXT | 生成图片对象 key |
+| `thumb_path` | TEXT | 缩略图衍生对象 key |
+| `preview_path` | TEXT | 预览图衍生对象 key |
+| `file_size` | INTEGER | 原图字节数 |
+| `thumb_file_size` | INTEGER | 缩略图字节数 |
+| `preview_file_size` | INTEGER | 预览图字节数 |
 | `task_package_json` | TEXT | 单张生成任务包；包含 SKU、服装、模特、shot、输入图、生成约束 |
 | `provider_request_json` | TEXT | 最终发给 provider 的请求快照，例如 fal 的 `prompt + image_urls + quality` |
 | `provider_response_json` | TEXT | provider 最终响应快照；fal 完成后保存 response_url 返回内容 |
@@ -472,6 +510,7 @@ CREATE TABLE schema_migrations (
 | `005` | `add_generation_review_delivery_columns` | 增加审核/交付状态字段 |
 | `006` | `add_brand_template_versions` | 增加品牌模板版本表 |
 | `007` | `add_garment_sku_archive_columns` | 增加货号归档字段 |
+| `008` | `add_media_derivative_metadata` | 增加素材图和生成图的 `thumb` / `preview` 路径与三档文件大小字段 |
 
 ## 3. 关系图
 
@@ -496,6 +535,11 @@ erDiagram
     integer sku_id FK
     text filename
     text storage_path
+    text thumb_path
+    text preview_path
+    integer file_size
+    integer thumb_file_size
+    integer preview_file_size
     text mime_type
     text role
     integer sort_order
@@ -544,6 +588,11 @@ erDiagram
     text title
     text status
     text output_path
+    text thumb_path
+    text preview_path
+    integer file_size
+    integer thumb_file_size
+    integer preview_file_size
     text task_package_json
     text provider_request_json
     text provider_response_json

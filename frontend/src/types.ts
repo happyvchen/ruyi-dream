@@ -125,7 +125,7 @@ export type GenerationImage = {
   fileSize?: number | null
   thumbFileSize?: number | null
   previewFileSize?: number | null
-  taskPackage: Record<string, unknown>
+  taskPackage?: Record<string, unknown>
   providerRequest?: Record<string, unknown> | null
   providerResponse?: Record<string, unknown> | null
   prompt?: string | null

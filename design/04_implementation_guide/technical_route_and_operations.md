@@ -127,8 +127,8 @@ flowchart TD
 - 卡片展示文件名、图片尺寸、文件大小。
 - 后端将应用内素材副本写入 S3 兼容对象存储，不覆盖用户原始素材。
 - 私有化部署默认使用 RustFS；云部署时同一套 S3 配置可指向 OSS、COS、AWS S3、GCS 兼容接口等对象存储。
-- 图片读取默认通过后端生成短期预签名 URL，当前私有图片场景不引入 CDN。
-- 上传成功后同步生成 `thumb` / `preview` 两档 WebP 衍生图，前端列表和详情优先读取衍生图。
+- 图片读取默认通过稳定 `/api/media?key=...&variant=...` 路径，由后端跳转到对象存储短期预签名 URL；当前私有图片场景不要求 CDN。
+- 上传成功后同步生成 `thumb` / `preview` 两档 WebP 衍生图，前端按展示尺寸优先读取衍生图。
 
 ### 5.1.1 媒体对象与分页加载
 
@@ -136,15 +136,16 @@ flowchart TD
 
 | 档位 | 存储 | 用途 |
 |---|---|---|
-| `originalUrl` | 原始上传或生成对象 | AI 输入、导出、质检、放大查看 |
-| `previewUrl` | `_derived/preview/*.webp` | 素材详情、结果网格、普通预览 |
-| `thumbUrl` | `_derived/thumb/*.webp` | 货号列表、模特列表、历史记录缩略图 |
+| `thumbUrl` | `_derived/thumb/*.webp`，长边约 240px | 货号列表、模特列表、历史记录缩略图、结果网格小卡片 |
+| `previewUrl` | `_derived/preview/*.webp`，长边约 1280px | 弹窗预览、详情查看 |
+| `originalUrl` | 原始上传或生成对象 | AI 输入、导出、质检、下载 |
 
 实现规则：
 
 - 原图对象 key 不迁移、不改名，避免破坏历史记录。
 - 衍生图与原图同目录，保存在 `_derived/thumb/` 和 `_derived/preview/`。
 - 新上传素材、数字模特头像和新生成结果都同步生成衍生图。
+- 上传和生成完成时，将 `thumb_path`、`preview_path` 和三档文件大小写入数据库；列表和详情接口不在热路径同步 `HEAD` 对象存储。
 - 旧数据缺少衍生图时，读取 API 可尝试即时补生成；失败时回退到原图 URL。
 - 删除单张素材、删除/替换头像时必须同步清理衍生图；删除整个货号或模特时通过对象前缀清理。
 
@@ -279,7 +280,7 @@ fal 提交入参：
 }
 ```
 
-对象存储图片通过预签名 URL 生成 `image_urls` 后再提交。每个生成任务需要保存：
+对象存储图片通过后端生成的短期预签名 URL 读取后上传到 fal，再使用 fal 返回的 Image URLs 提交。每个生成任务需要保存：
 
 - 原始 `task_package`
 - 中文 `prompt`
@@ -289,7 +290,7 @@ fal 提交入参：
 - `status_url` / `response_url` / `cancel_url`
 - fal 状态响应
 - 最终图片写入对象存储后的 `output_path` 对象 key
-- 最终图片对应的 `thumb` / `preview` 衍生图 key
+- 最终图片对应的 `thumb` / `preview` 衍生图 key 和三档文件大小
 
 ## 6.2 后台生成与状态恢复
 
@@ -312,9 +313,9 @@ fal 提交入参：
 
 1. 点击“预览”后进入分镜预览结果区；预览成功后点击“生成”进入最终组图结果区。
 2. 保存最近一次 `runId` 到本地。
-3. 每 3 秒轮询 `GET /api/generation-runs/{run_id}`。
+3. 每 3 秒轮询 `GET /api/generation-runs/{run_id}/status`；页面不可见时暂停轮询，恢复可见后刷新一次。
 4. 根据 `submittedAt` / `completedAt` 动态显示整组和单图计时。
-5. 刷新页面后恢复最近一次生成记录并继续显示状态。
+5. 刷新页面后通过 URL 或最近一次 `runId` 恢复生成记录；详情和排查时再读取 `GET /api/generation-runs/{run_id}`。
 
 当前不做 webhook。后续生产环境可以升级为 webhook 为主、poller 兜底。
 

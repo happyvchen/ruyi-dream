@@ -43,8 +43,10 @@ Authorization: Bearer <token>
 | `/api/garment-skus/{sku_id}` | DELETE | 删除应用内素材副本；已有生成记录时禁止删除 |
 | `/api/garment-skus/{sku_id}/images` | GET | 分页读取该货号素材图片 |
 | `/api/garment-skus/{sku_id}/images` | POST | 给已有货号追加素材图 |
+| `/api/garment-skus/{sku_id}/latest-preview-run` | GET | 获取货号最新可用分镜预览任务，供切换货号时恢复预览 |
 | `/api/garment-images/{image_id}` | PATCH | 编辑单张图片角色和排序；当前 UI 不开放角色编辑 |
 | `/api/garment-images/{image_id}` | DELETE | 删除应用内图片副本；每个货号至少保留一张 |
+| `/api/media` | GET | 稳定媒体入口，按 `key` 和 `variant` 跳转到对象存储短期预签名 URL |
 | `/api/model-profiles` | GET | 数字模特档案列表 |
 | `/api/model-profiles` | POST | 新建数字模特档案 |
 | `/api/model-profiles/{model_profile_id}` | PATCH | 编辑数字模特基础档案 |
@@ -59,6 +61,7 @@ Authorization: Bearer <token>
 | `/api/generation-runs` | POST | 根据组图方案创建生成批次，并提交每张图到后台生成队列 |
 | `/api/generation-runs` | GET | 生成批次列表；返回前台历史任务摘要、缩略图和重生次数 |
 | `/api/generation-runs/{run_id}` | GET | 生成批次详情和单张结果 |
+| `/api/generation-runs/{run_id}/status` | GET | 生成中轮询使用的轻量状态接口 |
 | `/api/generation-runs/{run_id}` | DELETE | 归档生成记录；隐藏列表项但保留数据库记录、对象 key 和事件日志 |
 | `/api/generation-runs/{run_id}/cancel` | POST | 取消该批次中仍处于 active 状态的图片任务 |
 | `/api/generation-images/{image_id}/regenerate` | POST | 单张重生；不新增生成任务记录，在同一记录追加 attempt |
@@ -97,6 +100,10 @@ Authorization: Bearer <token>
 - `hasMore = true` 时，前端可用 `nextOffset` 请求下一页。
 - `hasMore = false` 时，`nextOffset = null`。
 
+### 轻量状态接口
+
+生成中页面轮询 `GET /api/generation-runs/{run_id}/status`。该接口只返回任务基础字段和每张图的状态、展示 URL、审核/最终图等前台必要字段，不返回任务包、provider 原始响应或 attempt 明细。
+
 当前支持分页的接口：
 
 | Resource | 查询参数 |
@@ -114,9 +121,9 @@ Authorization: Bearer <token>
 
 | 字段 | 用途 | 前端场景 |
 |---|---|---|
-| `thumbUrl` | 小缩略图，WebP，长边约 360px | 列表卡片、历史记录缩略图 |
-| `previewUrl` | 中等预览图，WebP，长边约 1600px | 详情网格、结果网格、普通预览 |
-| `originalUrl` | 原始上传或生成图 | 放大查看、导出、AI 输入和质检 |
+| `thumbUrl` | 小缩略图，WebP，长边约 240px | 列表卡片、历史记录缩略图、素材卡片、结果网格 |
+| `previewUrl` | 中等预览图，WebP，长边约 1280px | 弹窗普通预览、详情查看 |
+| `originalUrl` | 原始上传或生成图 | 下载、导出、AI 输入和质检 |
 
 兼容字段：
 
@@ -129,7 +136,9 @@ Authorization: Bearer <token>
 - 原图仍保存在原有对象 key，不改动历史路径。
 - 衍生图保存在同目录 `_derived/thumb/*.webp` 和 `_derived/preview/*.webp`。
 - 新上传、新生成图片会同步生成衍生图。
-- 旧数据若缺少衍生图，API 读取时会尽量补生成；补生成失败时回退到原图 URL，保证旧记录仍可显示。
+- 前台 API 返回稳定的 `/api/media?key=...&variant=...` 路径，避免轮询时预签名 URL 变化导致图片 `src` 抖动。
+- 上传/生成完成时会把 `thumb_path`、`preview_path` 和三档文件大小落库；历史数据可用 `backend/scripts/repair_media_metadata.py` 补齐。
+- 旧数据若缺少衍生图，媒体访问层会尽量补生成；补生成失败时回退到原图，保证旧记录仍可显示。
 - 删除单张素材或替换/删除头像时，会同步清理对应衍生图。删除整个货号或模特目录时，会通过对象前缀清理。
 
 ## 服装素材 CRUD 契约
@@ -440,7 +449,7 @@ SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED
 | `skuId` | 只返回指定货号的生成记录 |
 | `keyword` | 按货号、标题、状态或记录 ID 模糊搜索 |
 
-返回前台历史任务列表。列表项包含任务基础字段和 `summary`：
+返回前台历史任务列表。列表项包含任务基础字段和轻量 `summary`；列表接口不应现场访问对象存储做 HEAD、文件大小查询或缩略图生成。
 
 ```json
 {
@@ -477,18 +486,13 @@ SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED
 
 `GET /api/generation-runs/{run_id}`
 
-前端应定时轮询该接口，而不是直接轮询 fal。接口会返回每张图的：
+详情页、恢复历史任务和排查场景使用该接口，而不是直接轮询 fal。默认响应为轻量业务字段；内部调试字段仅在 `includeDebug=true` 时返回。生成中高频刷新应使用 `GET /api/generation-runs/{run_id}/status`。
 
 ```json
 {
   "status": "IN_PROGRESS",
   "providerRequestId": "fal request id",
   "providerStatus": "IN_PROGRESS",
-  "providerUrls": {
-    "statusUrl": "https://queue.fal.run/...",
-    "responseUrl": "https://queue.fal.run/...",
-    "cancelUrl": "https://queue.fal.run/..."
-  },
   "submittedAt": "2026-05-07T16:00:00",
   "completedAt": null,
   "lastStatusCheckedAt": "2026-05-07T16:01:30",
@@ -496,13 +500,27 @@ SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED
   "thumbUrl": "https://...",
   "previewUrl": "https://...",
   "originalUrl": "https://...",
-  "prompt": "中文 Image 2 prompt",
-  "imageInputs": [],
-  "attempts": []
+  "prompt": "中文 Image 2 prompt"
 }
 ```
 
-计时器由前端根据 `submittedAt` / `completedAt` 动态计算，不需要后端每秒更新。
+当请求 `GET /api/generation-runs/{run_id}?includeDebug=true` 时，图片记录额外返回 `taskPackage`、`providerRequest`、`providerResponse`、`providerUrls`、`providerStatusResponse`、`imageInputs`、`templateSnapshot`、`modelSnapshot`、`garmentSnapshot`、`attempts` 等内部排查字段。
+
+计时器由前端根据 `submittedAt` / `completedAt` 动态计算，不需要后端每秒更新。页面不可见时前端应暂停轮询，恢复可见后再刷新。
+
+`GET /api/generation-runs/{run_id}/status`
+
+生成中页面的高频轮询接口。该接口只返回任务状态、时间戳、每张图状态、展示 URL、最终图/审核状态等前台必要字段，不返回 `taskPackage`、provider 原始响应、`attempts` 或调试快照。
+
+`GET /api/garment-skus/{sku_id}/latest-preview-run`
+
+切换货号时用于恢复最新可用分镜预览。可选查询参数：
+
+| 参数 | 说明 |
+|---|---|
+| `shotPlanId` | 指定拍摄方案时，只查该方案对应的最新预览 |
+
+没有可用预览时返回 `null` 语义的响应体，前端不应通过拉取大量 `listRuns` 来查找最新预览。
 
 ### 后台状态更新
 

@@ -75,6 +75,31 @@ class BackendSmokeTests(unittest.TestCase):
             parse_qs(urlsplit(internal_url).query)["X-Amz-Signature"],
         )
 
+    def test_media_redirect_is_not_cached_past_presigned_url_ttl(self) -> None:
+        from fastapi.testclient import TestClient
+
+        main = importlib.import_module("app.main")
+        client = TestClient(main.app)
+        login = client.post("/api/auth/login", json={"password": "letmein-123456"})
+        self.assertEqual(login.status_code, 200)
+
+        signed_url = "http://203.0.113.10:9000/ruyi-dream/uploads/sample.webp?X-Amz-Expires=900&X-Amz-Signature=test"
+        with (
+            patch.object(main, "existing_derivative_or_original", return_value="uploads/_derived/thumb/sample.webp"),
+            patch.object(main, "object_exists", return_value=True),
+            patch.object(main, "presigned_get_url", return_value=signed_url),
+        ):
+            response = client.get(
+                "/api/media?key=uploads/sample.jpg&variant=thumb",
+                follow_redirects=False,
+            )
+
+        self.assertEqual(response.status_code, 307)
+        self.assertEqual(response.headers["location"], signed_url)
+        self.assertIn("no-store", response.headers["cache-control"])
+        self.assertNotIn("max-age=3600", response.headers["cache-control"])
+        self.assertEqual(response.headers["pragma"], "no-cache")
+
     def test_bucket_permission_error_is_not_treated_as_missing_bucket(self) -> None:
         from botocore.exceptions import ClientError
 
@@ -127,12 +152,15 @@ class BackendSmokeTests(unittest.TestCase):
                     for row in db.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
                 ]
                 image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_images)").fetchall()}
+                garment_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_images)").fetchall()}
                 sku_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_skus)").fetchall()}
                 template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
+        self.assertIn("thumb_path", image_columns)
+        self.assertIn("preview_path", garment_image_columns)
         self.assertIn("archived_at", sku_columns)
         self.assertGreaterEqual(template_count, 1)
 

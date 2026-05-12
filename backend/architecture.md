@@ -14,8 +14,10 @@
 | `app/db.py` | SQLite 初始化、默认模特 seed、事件日志写入 |
 | `app/planner.py` | Gemini 组图策划；读取 `backend/ref/` 下的客户实施引用文档 |
 | `app/image_provider.py` | fal GPT Image-2 Provider adapter、参考图上传、queue 提交、状态查询和结果下载 |
+| `app/image_derivatives.py` | `thumb` / `preview` WebP 衍生图生成、历史缺失衍生图按需补齐 |
 | `app/config.py` | 环境变量、对象存储、数据库、模型配置 |
 | `app/object_storage.py` | S3 兼容对象存储访问、预签名 URL、对象删除和读取 |
+| `scripts/repair_media_metadata.py` | 历史素材和生成结果的衍生图路径、文件大小元数据补齐脚本 |
 | `data/` | SQLite 和 JSONL 日志 |
 | `Dockerfile` | 后端容器镜像定义，生产入口为 `uvicorn app.main:app` |
 | `../deployment/rustfs/` | RustFS 私有化对象存储 Docker 部署示例 |
@@ -64,8 +66,20 @@ Docker Compose 中后端使用：
 
 - `/app/data` 挂载到宿主机 `deployment/app-data/backend`，保存 SQLite 和应用日志。
 - `APP_S3_ENDPOINT_URL=http://rustfs:9000`，供容器内部访问 RustFS。
-- `APP_S3_PUBLIC_ENDPOINT_URL`，供浏览器访问预签名图片 URL。
+- `APP_S3_PUBLIC_ENDPOINT_URL`，供后端生成对象存储短期预签名 URL；前台默认访问稳定的 `/api/media?...` 路径。
 - `BACKEND_CORS_ORIGINS`，允许前端静态站点访问 API。
+
+## 媒体访问与缓存边界
+
+对象存储仍保存原图，应用层为上传素材、数字模特头像和生成结果生成两档 WebP 衍生图：
+
+- `thumb`：长边约 240px，用于列表、卡片、历史记录缩略图和结果网格。
+- `preview`：长边约 1280px，用于弹窗预览和详情查看。
+- `original`：原始上传或生成图，仅用于下载、导出、AI 输入和必要质检。
+
+前台 API 返回稳定的 `/api/media?key=...&variant=thumb|preview|original`，浏览器不会因为轮询拿到新的预签名 URL 而反复重下同一张图。`/api/media` 由后端校验对象 key 后跳转到对象存储短期预签名 URL；如果历史数据缺少衍生图，媒体访问层会尽量按需补生成，失败时回退原图保证可显示。
+
+上传和生成完成时，后端会把 `thumb_path`、`preview_path`、`file_size`、`thumb_file_size`、`preview_file_size` 写入数据库。列表和详情序列化应优先读取数据库元数据，不在热路径里同步 `HEAD` 对象存储或现场生成缩略图。历史数据通过 `backend/scripts/repair_media_metadata.py` 批量补齐。
 
 ## 生成任务架构
 
@@ -93,7 +107,7 @@ POST /api/generation-runs
 
 Gemini 组图策划同样采用持久化异步任务：`POST /api/shot-plans` 先创建 `shot_plans.status = PLANNING` 并返回，后台 planner poller 调用 Gemini，成功后更新为 `DRAFT`，失败后更新为 `FAILED`。页面刷新只恢复状态，不承载第三方调用生命周期。
 
-前端不直接等待 fal，也不直接查询 fal。前端轮询 `GET /api/generation-runs/{run_id}`，并根据 `submitted_at` / `completed_at` 动态显示计时器。
+前端不直接等待 fal，也不直接查询 fal。生成中页面轮询 `GET /api/generation-runs/{run_id}/status`，只拿状态和展示所需轻量字段；详情页和恢复历史任务使用 `GET /api/generation-runs/{run_id}`。内部任务包、provider 响应、attempt 明细等调试字段默认不返回，仅在 `includeDebug=true` 时返回。计时器由前端根据 `submitted_at` / `completed_at` 动态显示。
 
 状态恢复方式：
 

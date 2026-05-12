@@ -18,6 +18,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("005", "add_generation_review_delivery_columns", "migration_add_generation_review_delivery_columns"),
     ("006", "add_brand_template_versions", "migration_add_brand_template_versions"),
     ("007", "add_garment_sku_archive_columns", "migration_add_garment_sku_archive_columns"),
+    ("008", "add_media_derivative_metadata", "migration_add_media_derivative_metadata"),
 )
 
 
@@ -69,8 +70,13 @@ def init_db() -> None:
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               sku_id INTEGER NOT NULL REFERENCES garment_skus(id) ON DELETE CASCADE,
               filename TEXT NOT NULL,
-              storage_path TEXT NOT NULL,
-              mime_type TEXT NOT NULL,
+	              storage_path TEXT NOT NULL,
+	              thumb_path TEXT,
+	              preview_path TEXT,
+	              file_size INTEGER,
+	              thumb_file_size INTEGER,
+	              preview_file_size INTEGER,
+	              mime_type TEXT NOT NULL,
               role TEXT NOT NULL DEFAULT 'reference',
               sort_order INTEGER NOT NULL DEFAULT 0,
               created_at TEXT NOT NULL
@@ -141,9 +147,14 @@ def init_db() -> None:
               run_id INTEGER NOT NULL REFERENCES generation_runs(id) ON DELETE CASCADE,
               shot_index INTEGER NOT NULL,
               title TEXT NOT NULL,
-              status TEXT NOT NULL DEFAULT 'QUEUED',
-              output_path TEXT,
-              task_package_json TEXT NOT NULL,
+	              status TEXT NOT NULL DEFAULT 'QUEUED',
+	              output_path TEXT,
+	              thumb_path TEXT,
+	              preview_path TEXT,
+	              file_size INTEGER,
+	              thumb_file_size INTEGER,
+	              preview_file_size INTEGER,
+	              task_package_json TEXT NOT NULL,
               provider_request_json TEXT,
               provider_response_json TEXT,
               regenerate_from_image_id INTEGER REFERENCES generation_images(id),
@@ -194,6 +205,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_generation_review_delivery_columns": migration_add_generation_review_delivery_columns,
         "migration_add_brand_template_versions": migration_add_brand_template_versions,
         "migration_add_garment_sku_archive_columns": migration_add_garment_sku_archive_columns,
+        "migration_add_media_derivative_metadata": migration_add_media_derivative_metadata,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -272,6 +284,15 @@ def migration_add_brand_template_versions(db: sqlite3.Connection) -> None:
 def migration_add_garment_sku_archive_columns(db: sqlite3.Connection) -> None:
     ensure_column(db, "garment_skus", "archived_at", "TEXT")
     ensure_column(db, "garment_skus", "archive_reason", "TEXT")
+
+
+def migration_add_media_derivative_metadata(db: sqlite3.Connection) -> None:
+    for table in ("garment_images", "generation_images"):
+        ensure_column(db, table, "thumb_path", "TEXT")
+        ensure_column(db, table, "preview_path", "TEXT")
+        ensure_column(db, table, "file_size", "INTEGER")
+        ensure_column(db, table, "thumb_file_size", "INTEGER")
+        ensure_column(db, table, "preview_file_size", "INTEGER")
 
 
 def ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:

@@ -118,6 +118,7 @@ export function App() {
   const [historySearchRuns, setHistorySearchRuns] = useState<GenerationRun[]>([])
   const [historySearchNextOffset, setHistorySearchNextOffset] = useState<number | null>(null)
   const [historySearchHasMore, setHistorySearchHasMore] = useState(false)
+  const [selectedSkuRuns, setSelectedSkuRuns] = useState<GenerationRun[]>([])
   const [selectedHistoryRun, setSelectedHistoryRun] = useState<GenerationRun | null>(null)
   const [historyFilter, setHistoryFilter] = useState('')
   const [generateSkuFilter, setGenerateSkuFilter] = useState('')
@@ -137,6 +138,7 @@ export function App() {
   const [showArchivedSkus, setShowArchivedSkus] = useState(false)
   const [showArchivedRuns, setShowArchivedRuns] = useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
+  const [pageVisible, setPageVisible] = useState(() => typeof document === 'undefined' ? true : !document.hidden)
 
   const defaultModel = useMemo(() => models.find((model) => model.isDefault) ?? models[0], [models])
   const selectedModel = models.find((model) => model.id === selectedModelId) ?? defaultModel
@@ -152,9 +154,9 @@ export function App() {
       && previewRun.shotPlanId === shotPlan.id,
   )
   const relevantHistoryRuns = useMemo(() => {
-    const runs = selectedSku ? historyRuns.filter((run) => run.skuId === selectedSku.id) : [...historyRuns]
+    const runs = selectedSku ? [...selectedSkuRuns] : [...historyRuns]
     return runs.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-  }, [historyRuns, selectedSku?.id])
+  }, [historyRuns, selectedSku?.id, selectedSkuRuns])
   const taskStage = getGenerateTaskStage(selectedSku, shotPlan, previewRun, generationRun)
   const generateSkuKeyword = generateSkuFilter.trim()
   const filteredGenerateSkus = generateSkuKeyword ? generateSearchSkus : skus
@@ -243,6 +245,26 @@ export function App() {
   }, [appReady, historyFilter, showArchivedRuns])
 
   useEffect(() => {
+    if (!appReady) return
+    if (!selectedSku) {
+      setSelectedSkuRuns([])
+      return
+    }
+    const skuId = selectedSku.id
+    let cancelled = false
+    void api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE, skuId })
+      .then((result) => {
+        if (!cancelled) setSelectedSkuRuns(result.items)
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : '读取当前货号记录失败')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [appReady, selectedSku?.id, showArchivedRuns])
+
+  useEffect(() => {
     const handlePopState = () => {
       const nextRoute = parseRoute()
       setRoute(nextRoute)
@@ -250,6 +272,12 @@ export function App() {
     }
     window.addEventListener('popstate', handlePopState)
     return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
+
+  useEffect(() => {
+    const handleVisibilityChange = () => setPageVisible(!document.hidden)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
   }, [])
 
   useEffect(() => {
@@ -308,16 +336,16 @@ export function App() {
   }, [previewRun?.id])
 
   useEffect(() => {
-    if (!(generationRun && isRunActive(generationRun)) && !(previewRun && isRunActive(previewRun))) return
+    if (!pageVisible || (!(generationRun && isRunActive(generationRun)) && !(previewRun && isRunActive(previewRun)))) return
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000)
     return () => window.clearInterval(timer)
-  }, [generationRun?.id, generationRun?.status, previewRun?.id, previewRun?.status])
+  }, [pageVisible, generationRun?.id, generationRun?.status, previewRun?.id, previewRun?.status])
 
   useEffect(() => {
-    if (!previewRun || !isRunActive(previewRun)) return
+    if (!pageVisible || !previewRun || !isRunActive(previewRun)) return
     const poll = async () => {
       try {
-        const result = await api.getRun(previewRun.id)
+        const result = await api.getRunStatus(previewRun.id)
         setPreviewRun(result.item)
       } catch (err) {
         setError(err instanceof Error ? err.message : '刷新预览状态失败')
@@ -326,13 +354,13 @@ export function App() {
     void poll()
     const timer = window.setInterval(() => void poll(), 3000)
     return () => window.clearInterval(timer)
-  }, [previewRun?.id, previewRun?.status])
+  }, [pageVisible, previewRun?.id, previewRun?.status])
 
   useEffect(() => {
-    if (!generationRun || !isRunActive(generationRun)) return
+    if (!pageVisible || !generationRun || !isRunActive(generationRun)) return
     const poll = async () => {
       try {
-        const result = await api.getRun(generationRun.id)
+        const result = await api.getRunStatus(generationRun.id)
         setGenerationRun(result.item)
         if (!isRunActive(result.item)) await refreshHistoryRuns()
       } catch (err) {
@@ -342,10 +370,10 @@ export function App() {
     void poll()
     const timer = window.setInterval(() => void poll(), 3000)
     return () => window.clearInterval(timer)
-  }, [generationRun?.id, generationRun?.status])
+  }, [pageVisible, generationRun?.id, generationRun?.status])
 
   useEffect(() => {
-    if (!shotPlan || shotPlan.status !== 'PLANNING') return
+    if (!pageVisible || !shotPlan || shotPlan.status !== 'PLANNING') return
     const poll = async () => {
       try {
         const result = await api.getPlan(shotPlan.id)
@@ -361,7 +389,7 @@ export function App() {
     void poll()
     const timer = window.setInterval(() => void poll(), 3000)
     return () => window.clearInterval(timer)
-  }, [shotPlan?.id, shotPlan?.status, selectedSku?.id])
+  }, [pageVisible, shotPlan?.id, shotPlan?.status, selectedSku?.id])
 
   useEffect(() => {
     const editingModel = models.find((model) => model.id === editingModelId)
@@ -464,6 +492,7 @@ export function App() {
     setRunNextOffset(null)
     setRunHasMore(false)
     setSelectedSku(null)
+    setSelectedSkuRuns([])
     setShotPlan(null)
     setPreviewRun(null)
     setGenerationRun(null)
@@ -490,11 +519,21 @@ export function App() {
     if (!editingModelId && modelResult.items[0]) setEditingModelId(modelResult.items[0].id)
   }
 
+  async function refreshSelectedSkuRuns(skuId = selectedSku?.id) {
+    if (!skuId) {
+      setSelectedSkuRuns([])
+      return
+    }
+    const result = await api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE, skuId })
+    setSelectedSkuRuns(result.items)
+  }
+
   async function refreshHistoryRuns() {
     const result = await api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE })
     setHistoryRuns(result.items)
     setRunNextOffset(result.nextOffset)
     setRunHasMore(result.hasMore)
+    await refreshSelectedSkuRuns()
   }
 
   async function resolveSkuByCode(skuCode: string) {
@@ -585,8 +624,11 @@ export function App() {
 
   async function chooseSku(sku: GarmentSku, options: { syncUrl?: boolean; targetPage?: Page; previewRunId?: number } = {}) {
     setError(null)
-    const detail = await api.getSku(sku.id, { imageLimit: SKU_IMAGE_PAGE_SIZE })
-    const planResult = await api.getDefaultPlan(sku.id)
+    const [detail, planResult, runResult] = await Promise.all([
+      api.getSku(sku.id, { imageLimit: SKU_IMAGE_PAGE_SIZE }),
+      api.getDefaultPlan(sku.id),
+      api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE, skuId: sku.id }),
+    ])
     const rawPreferredPreview = await resolvePreviewRun(detail.item.id, undefined, options.previewRunId)
     const preferredPreview = rawPreferredPreview && (!planResult.item || rawPreferredPreview.shotPlanId === planResult.item.id)
       ? rawPreferredPreview
@@ -599,13 +641,11 @@ export function App() {
       status: detail.item.status,
     })
     setExtraFiles([])
+    setSelectedSkuRuns(runResult.items)
     setShotPlan(activePlan)
     const restoredPreview = preferredPreview ?? await resolvePreviewRun(detail.item.id, activePlan?.id)
     setPreviewRun(restoredPreview)
     setGenerationRun(null)
-    void api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE, skuId: detail.item.id }).then((result) => {
-      setHistoryRuns((current) => mergeById(current, result.items))
-    })
     if (options.syncUrl !== false) {
       const targetPage = options.targetPage ?? page
       if (targetPage === 'garments') navigate({ page: 'garments', sku: detail.item.sku })
@@ -625,14 +665,7 @@ export function App() {
       }
     }
     if (!shotPlanId) return null
-    const runs = (await api.listRuns({ skuId, limit: 100 })).items
-    const preview = runs.find((run) => run.kind === 'preview_grid' && run.skuId === skuId && run.shotPlanId === shotPlanId)
-    if (!preview) return null
-    try {
-      return (await api.getRun(preview.id)).item
-    } catch {
-      return null
-    }
+    return (await api.getLatestPreviewRun(skuId, { shotPlanId })).item
   }
 
   function stageLooseImages(selectedFiles: File[]) {
@@ -915,7 +948,7 @@ export function App() {
   async function openHistoryRun(runId: number) {
     setError(null)
     try {
-      const result = await api.getRun(runId)
+      const result = await api.getRun(runId, { includeDebug: SHOW_DEBUG_INFO })
       setSelectedHistoryRun(result.item)
       navigate({ page: 'history', runId: result.item.id })
     } catch (err) {
@@ -2017,10 +2050,10 @@ function GarmentLibraryPage({
                         <div className="asset-thumb">
                           {image.url ? (
                             <ImagePreviewThumb
-                              src={imageUrlFor(image, 'preview')}
-                              fullSrc={imageUrlFor(image, 'original')}
+                              src={imageUrlFor(image, 'thumb')}
+                              fullSrc={imageUrlFor(image, 'preview')}
                               name={image.filename}
-                              fileSize={image.fileSize}
+                              fileSize={image.thumbFileSize ?? image.previewFileSize ?? image.fileSize}
                             />
                           ) : <span>无预览</span>}
                         </div>
@@ -2028,7 +2061,7 @@ function GarmentLibraryPage({
                           <strong title={image.filename}>{middleEllipsis(image.filename)}</strong>
                           <small>
                             {image.url ? (
-                              <ImageInfoLine src={imageUrlFor(image, 'preview')} fileSize={image.previewFileSize ?? image.fileSize} />
+                              <ImageInfoLine src={imageUrlFor(image, 'thumb')} fileSize={image.thumbFileSize ?? image.previewFileSize ?? image.fileSize} />
                             ) : '图片信息读取中'}
                           </small>
                           <div className="asset-actions card-tools">
@@ -2890,7 +2923,7 @@ function HistoryRunDetail({
             <article className="history-shot-card" key={image.id}>
               <div className="history-shot-image">
                 {(image.url || image.previewUrl || image.originalUrl) ? (
-                  <img src={imageUrlFor(image, 'preview')} alt={image.title} loading="lazy" decoding="async" />
+                  <img src={imageUrlFor(image, 'thumb')} alt={image.title} loading="lazy" decoding="async" />
                 ) : <span>{statusText(image.status)}</span>}
                 {image.isFinal && <b>最终图</b>}
               </div>
@@ -3233,10 +3266,10 @@ function ResultGallery({
                 <div className="result-image">
                   {canShowImage ? (
                     <ImagePreviewThumb
-                      src={imageUrlFor(image, 'preview')}
-                      fullSrc={imageUrlFor(image, 'original')}
+                      src={imageUrlFor(image, 'thumb')}
+                      fullSrc={imageUrlFor(image, 'preview')}
                       name={displayLabel}
-                      fileSize={image.fileSize}
+                      fileSize={image.thumbFileSize ?? image.previewFileSize ?? image.fileSize}
                     >
                       {image.isFinal && <div className="final-badge"><Check size={14} />最终图</div>}
                     </ImagePreviewThumb>
@@ -3437,7 +3470,15 @@ function ImagePreviewThumb({
               <X size={18} />
             </button>
             <div className="preview-image-frame">
-              <img src={fullSrc ?? src} alt={name} decoding="async" />
+              <img
+                src={fullSrc ?? src}
+                alt={name}
+                decoding="async"
+                onLoad={(event) => {
+                  const target = event.currentTarget
+                  setDimensions({ width: target.naturalWidth, height: target.naturalHeight })
+                }}
+              />
             </div>
             <div className="preview-info">
               <strong title={name}>{middleEllipsis(name, 42)}</strong>
