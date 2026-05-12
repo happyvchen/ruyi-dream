@@ -1644,8 +1644,8 @@ def create_generation_image(
             INSERT INTO generation_images
               (run_id, shot_index, title, status, output_path, task_package_json, regenerate_from_image_id,
                regenerate_reason, image_inputs_json, template_snapshot_json, model_snapshot_json,
-               garment_snapshot_json, timeout_at, created_at, updated_at)
-            VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               garment_snapshot_json, timeout_at, is_final, created_at, updated_at)
+            VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -1665,6 +1665,7 @@ def create_generation_image(
                 dumps(task_package.get("model", {})),
                 dumps(task_package.get("garment", {})),
                 timeout_at,
+                1 if shot_index > 0 else 0,
                 timestamp,
                 timestamp,
             ),

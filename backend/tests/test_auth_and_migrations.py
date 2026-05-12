@@ -279,6 +279,69 @@ class BackendSmokeTests(unittest.TestCase):
         with self.assertRaisesRegex(planner.PlannerError, "不足 5 个固定图位"):
             planner.validate_planner_response(parsed, {"model": "test"}, '{"sku":"SKU","shots":[]}')
 
+    def test_final_generation_images_are_final_by_default(self) -> None:
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        class FakeProvider:
+            def output_suffix(self) -> str:
+                return ".png"
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            with db_module.get_db() as db:
+                model_id = db.execute("SELECT id FROM model_profiles ORDER BY id LIMIT 1").fetchone()["id"]
+                sku_id = db.execute(
+                    """
+                    INSERT INTO garment_skus (sku, title, storage_path, created_at, updated_at)
+                    VALUES ('SKU-FINAL', 'Final SKU', 'uploads/sku-final', ?, ?)
+                    """,
+                    (timestamp, timestamp),
+                ).lastrowid
+                shot_plan_id = db.execute(
+                    """
+                    INSERT INTO shot_plans
+                      (sku_id, model_profile_id, status, plan_json, planner_provider, created_at, updated_at)
+                    VALUES (?, ?, 'CONFIRMED', '{}', 'test', ?, ?)
+                    """,
+                    (sku_id, model_id, timestamp, timestamp),
+                ).lastrowid
+                run_id = db.execute(
+                    """
+                    INSERT INTO generation_runs
+                      (sku_id, shot_plan_id, model_profile_id, kind, status, output_dir, created_at, updated_at)
+                    VALUES (?, ?, ?, 'group', 'RUNNING', 'outputs/final', ?, ?)
+                    """,
+                    (sku_id, shot_plan_id, model_id, timestamp, timestamp),
+                ).lastrowid
+
+            preview_id = main.create_generation_image(
+                run_id,
+                {},
+                {"shotIndex": 0, "title": "分镜预览"},
+                FakeProvider(),
+                "outputs/final",
+                task_package_override={"imageInputs": []},
+            )
+            final_id = main.create_generation_image(
+                run_id,
+                {},
+                {"shotIndex": 1, "title": "全身主视觉"},
+                FakeProvider(),
+                "outputs/final",
+                task_package_override={"imageInputs": []},
+            )
+            with db_module.get_db() as db:
+                preview_final = db.execute("SELECT is_final FROM generation_images WHERE id = ?", (preview_id,)).fetchone()["is_final"]
+                final_final = db.execute("SELECT is_final FROM generation_images WHERE id = ?", (final_id,)).fetchone()["is_final"]
+
+        self.assertEqual(preview_final, 0)
+        self.assertEqual(final_final, 1)
+
 def planner_fixture_json() -> str:
     return """
 {
