@@ -73,6 +73,42 @@ class BackendSmokeTests(unittest.TestCase):
             parse_qs(urlsplit(internal_url).query)["X-Amz-Signature"],
         )
 
+    def test_bucket_permission_error_is_not_treated_as_missing_bucket(self) -> None:
+        from botocore.exceptions import ClientError
+
+        object_storage = importlib.import_module("app.object_storage")
+        object_storage.s3_client.cache_clear()
+        self.addCleanup(object_storage.s3_client.cache_clear)
+
+        class FakeSettings:
+            s3_endpoint_url = "http://127.0.0.1:9000"
+            s3_bucket = "ruyi-dream"
+
+        class FakeClient:
+            create_called = False
+
+            def head_bucket(self, Bucket: str) -> None:
+                raise ClientError(
+                    {
+                        "Error": {"Code": "403", "Message": "Forbidden"},
+                        "ResponseMetadata": {"HTTPStatusCode": 403},
+                    },
+                    "HeadBucket",
+                )
+
+            def create_bucket(self, Bucket: str) -> None:
+                self.create_called = True
+
+        fake_client = FakeClient()
+        with (
+            patch.object(object_storage, "get_settings", return_value=FakeSettings),
+            patch.object(object_storage, "s3_client", return_value=fake_client),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Object storage bucket check failed"):
+                object_storage.ensure_bucket()
+
+        self.assertFalse(fake_client.create_called)
+
     def test_schema_migrations_are_recorded(self) -> None:
         config = importlib.import_module("app.config")
         config.get_settings.cache_clear()
