@@ -3,7 +3,6 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import BinaryIO
-from urllib.parse import urlsplit, urlunsplit
 import mimetypes
 
 import boto3
@@ -24,10 +23,21 @@ def join_key(*parts: str | Path | None) -> str:
 @lru_cache
 def s3_client():
     settings = get_settings()
+    return create_s3_client(settings.s3_endpoint_url)
+
+
+@lru_cache
+def presign_s3_client():
+    settings = get_settings()
+    return create_s3_client(settings.s3_public_endpoint_url)
+
+
+def create_s3_client(endpoint_url: str):
+    settings = get_settings()
     addressing_style = "path" if settings.s3_force_path_style else "virtual"
     return boto3.client(
         "s3",
-        endpoint_url=settings.s3_endpoint_url,
+        endpoint_url=endpoint_url,
         region_name=settings.s3_region,
         aws_access_key_id=settings.s3_access_key_id,
         aws_secret_access_key=settings.s3_secret_access_key,
@@ -124,20 +134,11 @@ def presigned_get_url(key: str | Path | None) -> str | None:
     if not key:
         return None
     settings = get_settings()
-    url = s3_client().generate_presigned_url(
+    return presign_s3_client().generate_presigned_url(
         "get_object",
         Params={"Bucket": settings.s3_bucket, "Key": clean_key(key)},
         ExpiresIn=settings.s3_presign_expires_seconds,
     )
-    return rewrite_endpoint(url, settings.s3_public_endpoint_url)
-
-
-def rewrite_endpoint(url: str, endpoint_url: str) -> str:
-    if not endpoint_url:
-        return url
-    source = urlsplit(url)
-    target = urlsplit(endpoint_url)
-    return urlunsplit((target.scheme or source.scheme, target.netloc or source.netloc, source.path, source.query, source.fragment))
 
 
 def unique_key(key: str | Path) -> str:
