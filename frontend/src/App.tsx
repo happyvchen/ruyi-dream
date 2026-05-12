@@ -118,6 +118,7 @@ export function App() {
   const [historySearchRuns, setHistorySearchRuns] = useState<GenerationRun[]>([])
   const [historySearchNextOffset, setHistorySearchNextOffset] = useState<number | null>(null)
   const [historySearchHasMore, setHistorySearchHasMore] = useState(false)
+  const [selectedSkuRuns, setSelectedSkuRuns] = useState<GenerationRun[]>([])
   const [selectedHistoryRun, setSelectedHistoryRun] = useState<GenerationRun | null>(null)
   const [historyFilter, setHistoryFilter] = useState('')
   const [generateSkuFilter, setGenerateSkuFilter] = useState('')
@@ -153,9 +154,9 @@ export function App() {
       && previewRun.shotPlanId === shotPlan.id,
   )
   const relevantHistoryRuns = useMemo(() => {
-    const runs = selectedSku ? historyRuns.filter((run) => run.skuId === selectedSku.id) : [...historyRuns]
+    const runs = selectedSku ? [...selectedSkuRuns] : [...historyRuns]
     return runs.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-  }, [historyRuns, selectedSku?.id])
+  }, [historyRuns, selectedSku?.id, selectedSkuRuns])
   const taskStage = getGenerateTaskStage(selectedSku, shotPlan, previewRun, generationRun)
   const generateSkuKeyword = generateSkuFilter.trim()
   const filteredGenerateSkus = generateSkuKeyword ? generateSearchSkus : skus
@@ -242,6 +243,26 @@ export function App() {
       window.clearTimeout(timer)
     }
   }, [appReady, historyFilter, showArchivedRuns])
+
+  useEffect(() => {
+    if (!appReady) return
+    if (!selectedSku) {
+      setSelectedSkuRuns([])
+      return
+    }
+    const skuId = selectedSku.id
+    let cancelled = false
+    void api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE, skuId })
+      .then((result) => {
+        if (!cancelled) setSelectedSkuRuns(result.items)
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : '读取当前货号记录失败')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [appReady, selectedSku?.id, showArchivedRuns])
 
   useEffect(() => {
     const handlePopState = () => {
@@ -471,6 +492,7 @@ export function App() {
     setRunNextOffset(null)
     setRunHasMore(false)
     setSelectedSku(null)
+    setSelectedSkuRuns([])
     setShotPlan(null)
     setPreviewRun(null)
     setGenerationRun(null)
@@ -497,11 +519,21 @@ export function App() {
     if (!editingModelId && modelResult.items[0]) setEditingModelId(modelResult.items[0].id)
   }
 
+  async function refreshSelectedSkuRuns(skuId = selectedSku?.id) {
+    if (!skuId) {
+      setSelectedSkuRuns([])
+      return
+    }
+    const result = await api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE, skuId })
+    setSelectedSkuRuns(result.items)
+  }
+
   async function refreshHistoryRuns() {
     const result = await api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE })
     setHistoryRuns(result.items)
     setRunNextOffset(result.nextOffset)
     setRunHasMore(result.hasMore)
+    await refreshSelectedSkuRuns()
   }
 
   async function resolveSkuByCode(skuCode: string) {
@@ -592,9 +624,10 @@ export function App() {
 
   async function chooseSku(sku: GarmentSku, options: { syncUrl?: boolean; targetPage?: Page; previewRunId?: number } = {}) {
     setError(null)
-    const [detail, planResult] = await Promise.all([
+    const [detail, planResult, runResult] = await Promise.all([
       api.getSku(sku.id, { imageLimit: SKU_IMAGE_PAGE_SIZE }),
       api.getDefaultPlan(sku.id),
+      api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE, skuId: sku.id }),
     ])
     const rawPreferredPreview = await resolvePreviewRun(detail.item.id, undefined, options.previewRunId)
     const preferredPreview = rawPreferredPreview && (!planResult.item || rawPreferredPreview.shotPlanId === planResult.item.id)
@@ -608,6 +641,7 @@ export function App() {
       status: detail.item.status,
     })
     setExtraFiles([])
+    setSelectedSkuRuns(runResult.items)
     setShotPlan(activePlan)
     const restoredPreview = preferredPreview ?? await resolvePreviewRun(detail.item.id, activePlan?.id)
     setPreviewRun(restoredPreview)
