@@ -43,8 +43,10 @@ Authorization: Bearer <token>
 | `/api/garment-skus/{sku_id}` | DELETE | 删除应用内素材副本；已有生成记录时禁止删除 |
 | `/api/garment-skus/{sku_id}/images` | GET | 分页读取该货号素材图片 |
 | `/api/garment-skus/{sku_id}/images` | POST | 给已有货号追加素材图 |
+| `/api/garment-skus/{sku_id}/latest-preview-run` | GET | 获取货号最新可用分镜预览任务，供切换货号时恢复预览 |
 | `/api/garment-images/{image_id}` | PATCH | 编辑单张图片角色和排序；当前 UI 不开放角色编辑 |
 | `/api/garment-images/{image_id}` | DELETE | 删除应用内图片副本；每个货号至少保留一张 |
+| `/api/media` | GET | 稳定媒体入口，按 `key` 和 `variant` 跳转到对象存储短期预签名 URL |
 | `/api/model-profiles` | GET | 数字模特档案列表 |
 | `/api/model-profiles` | POST | 新建数字模特档案 |
 | `/api/model-profiles/{model_profile_id}` | PATCH | 编辑数字模特基础档案 |
@@ -59,6 +61,7 @@ Authorization: Bearer <token>
 | `/api/generation-runs` | POST | 根据组图方案创建生成批次，并提交每张图到后台生成队列 |
 | `/api/generation-runs` | GET | 生成批次列表；返回前台历史任务摘要、缩略图和重生次数 |
 | `/api/generation-runs/{run_id}` | GET | 生成批次详情和单张结果 |
+| `/api/generation-runs/{run_id}/status` | GET | 生成中轮询使用的轻量状态接口 |
 | `/api/generation-runs/{run_id}` | DELETE | 归档生成记录；隐藏列表项但保留数据库记录、对象 key 和事件日志 |
 | `/api/generation-runs/{run_id}/cancel` | POST | 取消该批次中仍处于 active 状态的图片任务 |
 | `/api/generation-images/{image_id}/regenerate` | POST | 单张重生；不新增生成任务记录，在同一记录追加 attempt |
@@ -483,7 +486,7 @@ SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED
 
 `GET /api/generation-runs/{run_id}`
 
-前端应定时轮询该接口，而不是直接轮询 fal。默认响应为轻量业务字段；内部调试字段仅在 `includeDebug=true` 时返回。
+详情页、恢复历史任务和排查场景使用该接口，而不是直接轮询 fal。默认响应为轻量业务字段；内部调试字段仅在 `includeDebug=true` 时返回。生成中高频刷新应使用 `GET /api/generation-runs/{run_id}/status`。
 
 ```json
 {
@@ -504,6 +507,20 @@ SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED
 当请求 `GET /api/generation-runs/{run_id}?includeDebug=true` 时，图片记录额外返回 `taskPackage`、`providerRequest`、`providerResponse`、`providerUrls`、`providerStatusResponse`、`imageInputs`、`templateSnapshot`、`modelSnapshot`、`garmentSnapshot`、`attempts` 等内部排查字段。
 
 计时器由前端根据 `submittedAt` / `completedAt` 动态计算，不需要后端每秒更新。页面不可见时前端应暂停轮询，恢复可见后再刷新。
+
+`GET /api/generation-runs/{run_id}/status`
+
+生成中页面的高频轮询接口。该接口只返回任务状态、时间戳、每张图状态、展示 URL、最终图/审核状态等前台必要字段，不返回 `taskPackage`、provider 原始响应、`attempts` 或调试快照。
+
+`GET /api/garment-skus/{sku_id}/latest-preview-run`
+
+切换货号时用于恢复最新可用分镜预览。可选查询参数：
+
+| 参数 | 说明 |
+|---|---|
+| `shotPlanId` | 指定拍摄方案时，只查该方案对应的最新预览 |
+
+没有可用预览时返回 `null` 语义的响应体，前端不应通过拉取大量 `listRuns` 来查找最新预览。
 
 ### 后台状态更新
 

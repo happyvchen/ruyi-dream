@@ -208,11 +208,11 @@ Image 2 的输入原则：
 
 所有 Gemini 和 Image 2 调用提示词统一使用中文。Image 2 prompt 由系统根据 `task_package` 自动合成，用户不直接编写长 prompt。
 
-参考图先通过对象存储短期预签名 URL 读取，再上传到 fal，最终传给 Image-2 的 `image_urls` 只使用 fal 返回的 Image URLs。每个生成任务会保存对象 key、预签名 URL、provider URL 和图片角色，方便追溯。
+参考图先通过后端生成的对象存储短期预签名 URL 读取，再上传到 fal，最终传给 Image-2 的 `image_urls` 只使用 fal 返回的 Image URLs。每个生成任务会保存对象 key、预签名 URL、provider URL 和图片角色，方便追溯；前台展示图片使用稳定 `/api/media` 路径，不直接依赖每次变化的预签名 URL。
 
 ### 6.2 生成状态与刷新恢复
 
-生成状态以数据库为准，前端只轮询后端，不直接轮询 fal。
+生成状态以数据库为准，前端只轮询后端，不直接轮询 fal。生成中高频刷新使用轻量 `GET /api/generation-runs/{run_id}/status`；任务详情和排查再读取 `GET /api/generation-runs/{run_id}`，并按需加 `includeDebug=true`。
 
 单张图状态：
 

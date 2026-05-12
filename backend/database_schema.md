@@ -319,7 +319,9 @@ CREATE TABLE generation_images (
 );
 ```
 
-历史库升级由 `schema_migrations` 记录并执行。当前与 `generation_images` 相关的迁移为 `001 add_generation_image_attempt_columns`，会补齐以下列：
+历史库升级由 `schema_migrations` 记录并执行。与 `generation_images` 相关的主要迁移包括：
+
+`001 add_generation_image_attempt_columns` 补齐生成图片 attempt、provider queue 和快照字段：
 
 ```sql
 ALTER TABLE generation_images ADD COLUMN prompt_text TEXT;
@@ -336,6 +338,22 @@ ALTER TABLE generation_images ADD COLUMN provider_status_json TEXT;
 ALTER TABLE generation_images ADD COLUMN submitted_at TEXT;
 ALTER TABLE generation_images ADD COLUMN completed_at TEXT;
 ALTER TABLE generation_images ADD COLUMN last_status_checked_at TEXT;
+```
+
+`008 add_media_derivative_metadata` 补齐素材图和生成图的三档媒体元数据：
+
+```sql
+ALTER TABLE garment_images ADD COLUMN thumb_path TEXT;
+ALTER TABLE garment_images ADD COLUMN preview_path TEXT;
+ALTER TABLE garment_images ADD COLUMN file_size INTEGER;
+ALTER TABLE garment_images ADD COLUMN thumb_file_size INTEGER;
+ALTER TABLE garment_images ADD COLUMN preview_file_size INTEGER;
+
+ALTER TABLE generation_images ADD COLUMN thumb_path TEXT;
+ALTER TABLE generation_images ADD COLUMN preview_path TEXT;
+ALTER TABLE generation_images ADD COLUMN file_size INTEGER;
+ALTER TABLE generation_images ADD COLUMN thumb_file_size INTEGER;
+ALTER TABLE generation_images ADD COLUMN preview_file_size INTEGER;
 ```
 
 字段说明：
@@ -492,6 +510,7 @@ CREATE TABLE schema_migrations (
 | `005` | `add_generation_review_delivery_columns` | 增加审核/交付状态字段 |
 | `006` | `add_brand_template_versions` | 增加品牌模板版本表 |
 | `007` | `add_garment_sku_archive_columns` | 增加货号归档字段 |
+| `008` | `add_media_derivative_metadata` | 增加素材图和生成图的 `thumb` / `preview` 路径与三档文件大小字段 |
 
 ## 3. 关系图
 
@@ -516,6 +535,11 @@ erDiagram
     integer sku_id FK
     text filename
     text storage_path
+    text thumb_path
+    text preview_path
+    integer file_size
+    integer thumb_file_size
+    integer preview_file_size
     text mime_type
     text role
     integer sort_order
@@ -564,6 +588,11 @@ erDiagram
     text title
     text status
     text output_path
+    text thumb_path
+    text preview_path
+    integer file_size
+    integer thumb_file_size
+    integer preview_file_size
     text task_package_json
     text provider_request_json
     text provider_response_json

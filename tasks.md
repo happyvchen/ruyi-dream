@@ -11,7 +11,7 @@
 | Brand & Assets | 已整理 | 默认模特与品类规则已接入 | 页面摘要展示 | 已跑通 |
 | User Workspace UX | 已整理 | N/A | 上传预览编辑/默认方案/生成/重生 | 已跑通 |
 | Export / History | 已整理 | 事件日志 + ZIP 导出 | 记录区 + 导出入口 | 已跑通 |
-| Object Storage | 已确定 | S3 兼容对象存储已接入，默认 RustFS | 预签名 URL 展示已支持 | 已验证 |
+| Object Storage | 已确定 | S3 兼容对象存储已接入，默认 RustFS | 稳定媒体 URL 与三档图片展示已支持 | 已验证 |
 
 ## 已完成
 
@@ -22,14 +22,19 @@
 - [x] 旧数据迁移：旧 SQLite 与旧图片已迁移到新数据库和 RustFS bucket。
 - [x] 旧目录清理：已删除旧实验资产目录、品牌分析目录和旧媒体目录。
 - [x] 文档清理：已移除旧媒体存储方案、实验资产主路径和品牌样本目录说明。
+- [x] 媒体缓存优化：前台使用稳定 `/api/media` 路径，不再直接暴露每次变化的预签名 URL。
+- [x] 三档图片策略：`thumb` 长边约 240px、`preview` 长边约 1280px、`original` 仅用于下载/导出/AI 输入。
+- [x] 媒体元数据落库：上传素材和生成结果记录衍生图路径与三档文件大小，历史数据可用修复脚本补齐。
+- [x] 生成轮询减重：新增轻量状态接口，普通详情默认不返回任务包、provider 响应和 attempts 调试数据。
 - [x] 构建验证：后端 compileall、前端 `npm run build`、API smoke test 已通过。
 
 ## 当前实现说明
 
 - 上传：浏览器本地预览与编辑，保存后后端写入对象存储 `uploads/{sku}-{timestamp}-{id}/`。
-- 读取：后端返回对象存储短期预签名 URL，前端可直接显示私有图片；列表和详情按需分页加载。
-- 媒体衍生图：上传素材、数字模特头像和生成结果保留原图，并生成 `thumb` / `preview` WebP 衍生图。
-- 生成：生成任务的输出写入 `outputs/{sku}/{timestamp}/`，完成后生成对应缩略图和预览图。
+- 读取：后端返回稳定 `/api/media?key=...&variant=...` 路径，由媒体接口跳转到对象存储短期预签名 URL；列表和详情按需分页加载。
+- 媒体衍生图：上传素材、数字模特头像和生成结果保留原图，并生成 `thumb` / `preview` WebP 衍生图；路径和文件大小落库。
+- 历史媒体修复：`backend/scripts/repair_media_metadata.py` 可补齐旧素材和旧生成结果的衍生图与文件大小。
+- 生成：生成任务的输出写入 `outputs/{sku}/{timestamp}/`，完成后生成对应缩略图和预览图；生成中轮询走轻量状态接口。
 - 导出：ZIP 写入 `exports/{sku}/`，同时通过接口流式返回给前端。
 - 日志：业务事件写入 SQLite，并双写 `backend/data/logs/*.jsonl`。
 - 部署：客户本地化部署默认使用 RustFS Docker；未来 SaaS 可把同一套 S3 配置切到 OSS、COS、AWS S3、GCS 兼容接口等。

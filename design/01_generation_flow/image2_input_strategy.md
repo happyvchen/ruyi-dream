@@ -297,14 +297,14 @@ Image 2 的产品任务包会转换为 fal GPT Image-2 edit queue 入参。
 `image_urls` 的来源：
 
 - `task_package.imageInputs[].objectKey`：对象存储中的参考图 key。
-- `task_package.imageInputs[].url`：后端生成的短期预签名 GET URL。
+- `task_package.imageInputs[].url`：后端为 provider 上传链路生成的短期预签名 GET URL；它用于服务端上传到 fal，不用于前台展示。
 - `task_package.imageInputs[].providerUrl`：已经可被 fal 读取的 URL。
 
 提交前，系统会先把参考图上传到 fal，再把 fal 返回的 Image URLs 作为 `image_urls` 传给 Image-2。
 
 预览任务遵守 fal `image_urls <= 10` 限制：先按数字模特 UI 当前显示顺序取最多 4 张模特图，再按服装素材 UI 当前显示顺序使用剩余额度补服装图，总数最多 10 张。
 
-最终生图任务也遵守 fal `image_urls <= 10` 限制：图1 固定为已确认九宫格预览图，随后传入最多 4 张模特图，再用剩余额度传入服装素材图。每个生成任务会保存对象 key、图片角色、预签名 URL 和 provider URL 的映射。
+最终生图任务也遵守 fal `image_urls <= 10` 限制：图1 固定为已确认九宫格预览图，随后传入最多 4 张模特图，再用剩余额度传入服装素材图。每个生成任务会保存对象 key、图片角色、预签名 URL 和 provider URL 的映射；前台展示图片使用稳定 `/api/media` 路径。
 
 当前配置：
 
