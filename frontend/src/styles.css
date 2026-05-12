@@ -1878,39 +1878,6 @@ summary {
   min-height: 34px;
 }
 
-.drag-hint {
-  display: inline-flex;
-  align-items: center;
-  min-height: 34px;
-  padding: 0 8px;
-  border: 1px dashed #d2d2cb;
-  border-radius: 6px;
-  color: #74746d;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.order-controls {
-  display: inline-flex;
-  gap: 4px;
-  align-items: center;
-}
-
-.order-controls button {
-  min-height: 30px;
-  padding: 0 7px;
-  border: 1px solid #d2d2cb;
-  border-radius: 6px;
-  background: #fff;
-  color: #3f3f39;
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.order-controls.compact button {
-  min-height: 34px;
-}
-
 .head-card-actions {
   margin-top: 10px;
   align-items: center;
@@ -1921,6 +1888,12 @@ summary {
   min-height: 34px;
   padding: 0 8px;
   font-size: 12px;
+}
+
+.head-card-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .section-heading.tight {
@@ -2025,24 +1998,6 @@ summary {
   font-size: 12px;
 }
 
-.asset-order-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.asset-order-row .drag-hint {
-  min-height: 30px;
-  padding: 0 7px;
-}
-
-.asset-order-row b {
-  color: #61615a;
-  font-size: 12px;
-}
-
 .asset-actions {
   display: grid;
   grid-template-columns: 1fr 34px;
@@ -2053,6 +2008,39 @@ summary {
 .asset-actions.single {
   grid-template-columns: 34px;
   justify-content: end;
+}
+
+.asset-actions.card-tools {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 50px;
+  min-height: 34px;
+  padding: 0 7px;
+  border: 1px dashed #bdbdb5;
+  border-radius: 6px;
+  background: #fafaf8;
+  color: #5f5f58;
+  font-size: 12px;
+  font-weight: 850;
+  cursor: grab;
+  user-select: none;
+}
+
+.drag-handle.disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.drag-handle b {
+  font-size: 12px;
 }
 
 .asset-actions select {
