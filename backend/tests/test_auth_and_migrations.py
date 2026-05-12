@@ -397,8 +397,7 @@ class BackendSmokeTests(unittest.TestCase):
             login = client.post("/api/auth/login", json={"password": "letmein-123456"})
             self.assertEqual(login.status_code, 200)
 
-            with patch.object(main, "object_exists", return_value=True):
-                response = client.post(f"/api/exports/runs/{run_id}")
+            response = client.post(f"/api/exports/runs/{run_id}")
             self.assertEqual(response.status_code, 409)
             self.assertEqual(response.json()["detail"], "最终组图尚未全部生成成功，不能导出 ZIP")
 
@@ -413,7 +412,6 @@ class BackendSmokeTests(unittest.TestCase):
                 )
 
             with (
-                patch.object(main, "object_exists", return_value=True),
                 patch.object(main, "get_bytes", side_effect=lambda key: key.encode("utf-8")),
                 patch.object(main, "put_fileobj", return_value=None),
             ):
