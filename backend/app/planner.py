@@ -4,9 +4,12 @@ from pathlib import Path
 import json
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
 from .config import get_settings
 
 BRAND_TONE_PATH = Path(__file__).resolve().parents[1] / "ref" / "Lily拍摄与AI生图统一规则.md"
+CATEGORIES = {"上衣", "裤装", "半裙", "短裤", "连衣裙", "外套", "套装"}
 
 SHOT_SLOTS = [
     {
@@ -51,6 +54,61 @@ class PlannerError(RuntimeError):
         super().__init__(message)
         self.provider_request = provider_request
         self.provider_response = provider_response
+
+
+class GarmentDraft(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    category: str = ""
+    summary: str = ""
+    color: str = ""
+    fabric: str = ""
+    keyStructures: list[str] = Field(default_factory=list)
+    preserveStrictly: list[str] = Field(default_factory=list)
+
+
+class BrandStyleDraft(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    name: str = "默认棚拍风格"
+    summary: str = "白/浅灰背景，自然姿态，简洁搭配，商品优先"
+
+
+class GenerationPlanDraft(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    salesInfo: str = ""
+    lilyTone: str = ""
+    styling: str = ""
+    background: str = ""
+
+
+class ShotDraft(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    shotIndex: int | None = None
+    englishName: str | None = None
+    title: str | None = None
+    task: str | None = None
+    scene: str | None = None
+    cropRange: str | None = None
+    modelScale: str | None = None
+    headTreatment: str | None = None
+    bodyPosition: str | None = None
+    poseTone: str | None = None
+    imagePurpose: str | None = None
+
+
+class ShotPlanDraft(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    sku: str = ""
+    modelId: str = "Face-01"
+    category: str = ""
+    garment: GarmentDraft = Field(default_factory=GarmentDraft)
+    brandStyle: BrandStyleDraft = Field(default_factory=BrandStyleDraft)
+    generationPlan: GenerationPlanDraft = Field(default_factory=GenerationPlanDraft)
+    shots: list[ShotDraft] = Field(default_factory=list)
 
 
 def default_pose(angle: str, category: str) -> str:
@@ -144,6 +202,7 @@ async def plan_with_gemini(sku: str, image_paths: list[Path]) -> tuple[dict[str,
             "imagePaths": [str(path) for path in image_paths[:6]],
         },
         "responseMimeType": "application/json",
+        "responseSchema": "ShotPlanDraft",
     }
     if not settings.gemini_api_key:
         raise PlannerError("GEMINI_API_KEY 未配置，无法生成组图方案。", request_snapshot)
@@ -162,26 +221,138 @@ async def plan_with_gemini(sku: str, image_paths: list[Path]) -> tuple[dict[str,
 
     client = genai.Client(api_key=settings.gemini_api_key)
     try:
+        config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=ShotPlanDraft,
+        )
         response = await client.aio.models.generate_content(
             model=settings.gemini_model,
             contents=contents,
-            config=types.GenerateContentConfig(response_mime_type="application/json"),
+            config=config,
         )
+    except TypeError:
+        request_snapshot["responseSchemaFallback"] = "response_schema unsupported by installed google-genai"
+        try:
+            response = await client.aio.models.generate_content(
+                model=settings.gemini_model,
+                contents=contents,
+                config=types.GenerateContentConfig(response_mime_type="application/json"),
+            )
+        except Exception as exc:
+            raise PlannerError(f"Gemini 请求失败：{exc}", request_snapshot) from exc
     except Exception as exc:
         raise PlannerError(f"Gemini 请求失败：{exc}", request_snapshot) from exc
     raw = response.text or "{}"
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        raise PlannerError("Gemini 返回内容不是合法 JSON。", request_snapshot, raw) from None
-    return normalize_plan(parsed, sku), "gemini", json.dumps(
+    sdk_parsed = parsed_planner_response_from_sdk(response)
+    if sdk_parsed is None:
+        parsed, parse_meta = parse_planner_response(raw, request_snapshot)
+    else:
+        parsed = sdk_parsed
+        parse_meta = {"mode": "sdk_parsed"}
+    validated = validate_planner_response(parsed, request_snapshot, raw)
+    plan = normalize_plan(validated, sku)
+    return plan, "gemini", json.dumps(
         {
             "providerRequest": request_snapshot,
-            "providerResponse": parsed,
+            "providerResponse": validated,
+            "parseMeta": parse_meta,
             "rawText": raw,
         },
         ensure_ascii=False,
     )
+
+
+def parsed_planner_response_from_sdk(response: Any) -> dict[str, Any] | None:
+    parsed = getattr(response, "parsed", None)
+    if parsed is None:
+        return None
+    if isinstance(parsed, BaseModel):
+        value = parsed.model_dump(mode="json")
+    elif isinstance(parsed, dict):
+        value = parsed
+    else:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def parse_planner_response(raw: str, provider_request: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    text = strip_json_fence(raw)
+    try:
+        parsed = json.loads(text)
+        if not isinstance(parsed, dict):
+            raise PlannerError("Gemini 返回 JSON 顶层不是对象。", provider_request, raw)
+        return parsed, {"mode": "strict"}
+    except json.JSONDecodeError as strict_error:
+        decoder = json.JSONDecoder()
+        try:
+            parsed, end_index = decoder.raw_decode(text)
+        except json.JSONDecodeError:
+            raise PlannerError(
+                "Gemini 返回内容不是合法 JSON。",
+                provider_request,
+                {
+                    "rawText": raw,
+                    "parseError": str(strict_error),
+                },
+            ) from None
+        trailing = text[end_index:].strip()
+        if not isinstance(parsed, dict) or not is_recoverable_json_trailing_noise(trailing):
+            raise PlannerError(
+                "Gemini 返回内容不是可恢复的拍摄方案 JSON。",
+                provider_request,
+                {
+                    "rawText": raw,
+                    "parseError": str(strict_error),
+                    "trailingText": trailing[:500],
+                },
+            ) from None
+        return parsed, {
+            "mode": "recovered_trailing_noise",
+            "parseError": str(strict_error),
+            "trailingText": trailing,
+        }
+
+
+def strip_json_fence(raw: str) -> str:
+    text = raw.strip()
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    if len(lines) >= 2 and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return text
+
+
+def is_recoverable_json_trailing_noise(value: str) -> bool:
+    if not value:
+        return True
+    return set(value) <= {"}"}
+
+
+def validate_planner_response(parsed: dict[str, Any], provider_request: dict[str, Any] | None = None, raw: str | None = None) -> dict[str, Any]:
+    try:
+        draft = ShotPlanDraft.model_validate(parsed)
+    except ValidationError as exc:
+        raise PlannerError(
+            "Gemini 返回的拍摄方案结构校验失败。",
+            provider_request,
+            {
+                "rawText": raw,
+                "validationErrors": exc.errors(),
+                "providerResponse": parsed,
+            },
+        ) from None
+    if len(draft.shots) < 5:
+        raise PlannerError(
+            "Gemini 返回的方案不足 5 个固定图位。",
+            provider_request,
+            {
+                "rawText": raw,
+                "providerResponse": parsed,
+                "shotCount": len(draft.shots),
+            },
+        )
+    return draft.model_dump(mode="json")
 
 
 def normalize_plan(plan: dict[str, Any], sku: str) -> dict[str, Any]:
@@ -273,7 +444,7 @@ def normalize_category_name(value: str) -> str:
         return "连衣裙"
     if any(token in value for token in ["上衣", "T 恤", "T恤", "针织", "衬衫", "背心", "马甲", "短袖", "无袖"]):
         return "上衣"
-    return value if value in {"上衣", "裤装", "半裙", "短裤", "连衣裙", "外套", "套装"} else "连衣裙"
+    return value if value in CATEGORIES else "连衣裙"
 
 
 def combine_text(*values: Any) -> str:
