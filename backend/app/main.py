@@ -1090,7 +1090,13 @@ def get_media(key: str = Query(...), variant: str = Query("original")) -> Redire
     url = presigned_get_url(target_key)
     if not url:
         raise HTTPException(status_code=404, detail="图片不存在")
-    return RedirectResponse(url, headers={"Cache-Control": "private, max-age=3600"})
+    return RedirectResponse(
+        url,
+        headers={
+            "Cache-Control": "private, no-store, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 @app.post("/api/shot-plans")
