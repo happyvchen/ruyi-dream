@@ -61,11 +61,16 @@ class GPTImage2FalProvider(ImageGenerationProvider):
         output_key = str(output_path)
         content, content_type = download_bytes(output_url)
         put_bytes(output_key, content, content_type or f"image/{settings.gpt_image2_output_format}")
-        generate_image_derivatives(output_key, content)
+        derivative = generate_image_derivatives(output_key, content)
         return {
             "provider": "fal",
             "model": settings.gpt_image2_model_id,
             "outputPath": output_key,
+            "fileSize": len(content),
+            "thumbPath": derivative.get("thumb"),
+            "previewPath": derivative.get("preview"),
+            "thumbFileSize": derivative.get("thumbSize"),
+            "previewFileSize": derivative.get("previewSize"),
             "imageInputs": uploaded_inputs,
             "providerRequest": provider_request,
             "providerResponse": raw_response,
@@ -130,8 +135,16 @@ class GPTImage2FalProvider(ImageGenerationProvider):
             output_key = str(image_row["output_path"])
             content, content_type = download_bytes(output_url)
             put_bytes(output_key, content, content_type or f"image/{settings.gpt_image2_output_format}")
-            generate_image_derivatives(output_key, content)
-            result.update({"providerResponse": response, "outputPath": output_key})
+            derivative = generate_image_derivatives(output_key, content)
+            result.update({
+                "providerResponse": response,
+                "outputPath": output_key,
+                "fileSize": len(content),
+                "thumbPath": derivative.get("thumb"),
+                "previewPath": derivative.get("preview"),
+                "thumbFileSize": derivative.get("thumbSize"),
+                "previewFileSize": derivative.get("previewSize"),
+            })
         elif next_status == "FAILED":
             result["error"] = status_response.get("error") or status_response.get("message") or "fal 生成失败"
         return result

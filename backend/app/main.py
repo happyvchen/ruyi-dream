@@ -429,16 +429,16 @@ async def upload_garment_sku(
         content, content_type = await validate_upload_image(upload)
         validated_files.append((upload, content, content_type))
 
-    saved_files: list[tuple[str, str, str]] = []
+    saved_files: list[tuple[str, str, str, dict[str, Any]]] = []
     try:
         for index, (upload, content, content_type) in enumerate(validated_files):
             safe_name = f"{index + 1:03d}-{sanitize_filename(upload.filename or 'image')}"
             key = join_key(target_prefix, safe_name)
             put_fileobj(key, BytesIO(content), content_type)
-            generate_image_derivatives(key, content)
-            saved_files.append((safe_name, key, content_type))
+            derivative = generate_image_derivatives(key, content)
+            saved_files.append((safe_name, key, content_type, upload_media_metadata(key, content, derivative)))
     except Exception:
-        cleanup_objects([key for _, original_key, _ in saved_files for key in image_object_keys(original_key)])
+        cleanup_objects([key for _, original_key, _, _ in saved_files for key in image_object_keys(original_key)])
         raise
 
     try:
@@ -451,17 +451,23 @@ async def upload_garment_sku(
                 (clean_sku, title or clean_sku, target_prefix, timestamp, timestamp),
             )
             sku_id = int(cursor.lastrowid)
-            for index, (filename, key, content_type) in enumerate(saved_files):
+            for index, (filename, key, content_type, media) in enumerate(saved_files):
                 db.execute(
                     """
                     INSERT INTO garment_images
-                      (sku_id, filename, storage_path, mime_type, role, sort_order, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                      (sku_id, filename, storage_path, thumb_path, preview_path, file_size,
+                       thumb_file_size, preview_file_size, mime_type, role, sort_order, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         sku_id,
                         filename,
                         key,
+                        media.get("thumbPath"),
+                        media.get("previewPath"),
+                        media.get("fileSize"),
+                        media.get("thumbFileSize"),
+                        media.get("previewFileSize"),
                         content_type,
                         "main" if index == 0 else "reference",
                         index,
@@ -477,7 +483,7 @@ async def upload_garment_sku(
             )
             row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
     except Exception:
-        cleanup_objects([key for _, original_key, _ in saved_files for key in image_object_keys(original_key)])
+        cleanup_objects([key for _, original_key, _, _ in saved_files for key in image_object_keys(original_key)])
         raise
     return {"item": get_sku_detail_by_id(sku_id), "summary": serialize_sku(row)}
 
@@ -606,7 +612,7 @@ async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -
     for upload in files:
         content, content_type = await validate_upload_image(upload)
         validated_files.append((upload, content, content_type))
-    saved: list[tuple[str, str, str, int]] = []
+    saved: list[tuple[str, str, str, int, dict[str, Any]]] = []
 
     with get_db() as db:
         sku_row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
@@ -630,24 +636,30 @@ async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -
                 safe_name = f"{sort_order + 1:03d}-{sanitize_filename(upload.filename or 'image')}"
                 key = unique_key(join_key(target_prefix, safe_name))
                 put_fileobj(key, BytesIO(content), content_type)
-                generate_image_derivatives(key, content)
-                saved.append((Path(key).name, key, content_type, sort_order))
+                derivative = generate_image_derivatives(key, content)
+                saved.append((Path(key).name, key, content_type, sort_order, upload_media_metadata(key, content, derivative)))
         except Exception:
-            cleanup_objects([key for _, original_key, _, _ in saved for key in image_object_keys(original_key)])
+            cleanup_objects([key for _, original_key, _, _, _ in saved for key in image_object_keys(original_key)])
             raise
 
         try:
-            for filename, key, content_type, sort_order in saved:
+            for filename, key, content_type, sort_order, media in saved:
                 db.execute(
                     """
                     INSERT INTO garment_images
-                      (sku_id, filename, storage_path, mime_type, role, sort_order, created_at)
-                    VALUES (?, ?, ?, ?, 'reference', ?, ?)
+                      (sku_id, filename, storage_path, thumb_path, preview_path, file_size,
+                       thumb_file_size, preview_file_size, mime_type, role, sort_order, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reference', ?, ?)
                     """,
                     (
                         sku_id,
                         filename,
                         key,
+                        media.get("thumbPath"),
+                        media.get("previewPath"),
+                        media.get("fileSize"),
+                        media.get("thumbFileSize"),
+                        media.get("previewFileSize"),
                         content_type,
                         sort_order,
                         timestamp,
@@ -662,10 +674,10 @@ async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -
                 "garment_sku",
                 sku_id,
                 "images_added",
-                {"fileCount": len(saved), "files": [filename for filename, _, _, _ in saved]},
+                {"fileCount": len(saved), "files": [filename for filename, _, _, _, _ in saved]},
             )
         except Exception:
-            cleanup_objects([key for _, original_key, _, _ in saved for key in image_object_keys(original_key)])
+            cleanup_objects([key for _, original_key, _, _, _ in saved for key in image_object_keys(original_key)])
             raise
     return {"item": get_sku_detail_by_id(sku_id)}
 
@@ -1362,9 +1374,33 @@ def list_generation_runs(
         }
 
 
+@app.get("/api/garment-skus/{sku_id}/latest-preview-run")
+def get_latest_preview_run(sku_id: int, shot_plan_id: int | None = Query(None, alias="shotPlanId")) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute(
+            """
+            SELECT id
+            FROM generation_runs
+            WHERE sku_id = ?
+              AND kind = 'preview_grid'
+              AND archived_at IS NULL
+              AND (? IS NULL OR shot_plan_id = ?)
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (sku_id, shot_plan_id, shot_plan_id),
+        ).fetchone()
+    return {"item": get_generation_run_by_id(int(row["id"])) if row else None}
+
+
 @app.get("/api/generation-runs/{run_id}")
 def get_generation_run(run_id: int, include_debug: bool = Query(False, alias="includeDebug")) -> dict[str, Any]:
     return {"item": get_generation_run_by_id(run_id, include_debug=include_debug)}
+
+
+@app.get("/api/generation-runs/{run_id}/status")
+def get_generation_run_status(run_id: int) -> dict[str, Any]:
+    return {"item": get_generation_run_by_id(run_id, status_only=True)}
 
 
 @app.delete("/api/generation-runs/{run_id}")
@@ -1800,6 +1836,7 @@ def submit_generation_image(provider: Any, image_row: Any) -> None:
     provider_request_id = provider_response.get("providerRequestId")
     provider_urls = provider_response.get("providerUrls", {})
     provider_status_response = provider_response.get("providerStatusResponse")
+    media = provider_media_metadata(provider_response, output_path)
     completed_at = now_iso() if next_status in TERMINAL_IMAGE_STATUSES else None
     attempt = {
         "attemptIndex": max(1, int(image_row["current_attempt_index"] or 0)),
@@ -1822,7 +1859,11 @@ def submit_generation_image(provider: Any, image_row: Any) -> None:
         db.execute(
             """
             UPDATE generation_images
-            SET status = ?, output_path = ?, provider_request_json = ?,
+            SET status = ?, output_path = ?, thumb_path = ?, preview_path = ?,
+                file_size = COALESCE(?, file_size),
+                thumb_file_size = COALESCE(?, thumb_file_size),
+                preview_file_size = COALESCE(?, preview_file_size),
+                provider_request_json = ?,
                 provider_response_json = ?, prompt_text = ?, image_inputs_json = ?,
                 attempts_json = ?, current_attempt_index = ?, provider_request_id = ?,
                 provider_status = ?, provider_urls_json = ?, provider_status_json = ?,
@@ -1831,7 +1872,12 @@ def submit_generation_image(provider: Any, image_row: Any) -> None:
             """,
             (
                 next_status,
-                str(output_path),
+                media.get("outputPath") or str(output_path),
+                media.get("thumbPath"),
+                media.get("previewPath"),
+                media.get("fileSize"),
+                media.get("thumbFileSize"),
+                media.get("previewFileSize"),
                 dumps(provider_request),
                 dumps(provider_response.get("providerResponse", provider_response)),
                 prompt_text,
@@ -2116,6 +2162,7 @@ def refresh_generation_image_status(provider: Any, image_row: Any) -> None:
     provider_status = result.get("providerStatus")
     status_response = result.get("providerStatusResponse")
     provider_response = result.get("providerResponse")
+    media = provider_media_metadata(result, image_row["output_path"])
     completed_at = now_iso() if next_status in TERMINAL_IMAGE_STATUSES else None
     attempts = loads(image_row["attempts_json"], []) or []
     if attempts:
@@ -2131,7 +2178,13 @@ def refresh_generation_image_status(provider: Any, image_row: Any) -> None:
         db.execute(
             """
             UPDATE generation_images
-            SET status = ?, provider_status = ?, provider_status_json = ?,
+            SET status = ?, output_path = COALESCE(?, output_path),
+                thumb_path = COALESCE(?, thumb_path),
+                preview_path = COALESCE(?, preview_path),
+                file_size = COALESCE(?, file_size),
+                thumb_file_size = COALESCE(?, thumb_file_size),
+                preview_file_size = COALESCE(?, preview_file_size),
+                provider_status = ?, provider_status_json = ?,
                 provider_response_json = COALESCE(?, provider_response_json),
                 attempts_json = ?, completed_at = COALESCE(?, completed_at),
                 status_error_attempts = 0, last_status_checked_at = ?, updated_at = ?
@@ -2139,6 +2192,12 @@ def refresh_generation_image_status(provider: Any, image_row: Any) -> None:
             """,
             (
                 next_status,
+                media.get("outputPath"),
+                media.get("thumbPath"),
+                media.get("previewPath"),
+                media.get("fileSize"),
+                media.get("thumbFileSize"),
+                media.get("previewFileSize"),
                 provider_status,
                 dumps(status_response),
                 dumps(provider_response) if provider_response is not None else None,
@@ -2724,7 +2783,7 @@ def get_model_profile_by_id(model_profile_id: int) -> dict[str, Any]:
         return serialize_model(row)
 
 
-def get_generation_run_by_id(run_id: int, include_debug: bool = False) -> dict[str, Any]:
+def get_generation_run_by_id(run_id: int, include_debug: bool = False, status_only: bool = False) -> dict[str, Any]:
     with get_db() as db:
         row = db.execute(
             """
@@ -2737,7 +2796,7 @@ def get_generation_run_by_id(run_id: int, include_debug: bool = False) -> dict[s
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="生成记录不存在")
-        return serialize_generation_run(row, include_images=True, include_debug=include_debug)
+        return serialize_generation_run(row, include_images=True, include_debug=include_debug, status_only=status_only)
 
 
 def get_generation_image_by_id(image_id: int) -> dict[str, Any]:
@@ -2762,6 +2821,28 @@ def stable_media_url(key: str | Path | None, variant: str = "original") -> str |
     if not key:
         return None
     return f"/api/media?{urlencode({'key': clean_key(key), 'variant': variant})}"
+
+
+def upload_media_metadata(key: str | Path, content: bytes, derivative: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "fileSize": len(content),
+        "thumbPath": derivative.get("thumb"),
+        "previewPath": derivative.get("preview"),
+        "thumbFileSize": derivative.get("thumbSize"),
+        "previewFileSize": derivative.get("previewSize"),
+    }
+
+
+def provider_media_metadata(payload: dict[str, Any], fallback_key: str | Path | None) -> dict[str, Any]:
+    output_path = payload.get("outputPath") or fallback_key
+    return {
+        "outputPath": clean_key(output_path) if output_path else None,
+        "thumbPath": payload.get("thumbPath"),
+        "previewPath": payload.get("previewPath"),
+        "fileSize": payload.get("fileSize"),
+        "thumbFileSize": payload.get("thumbFileSize"),
+        "previewFileSize": payload.get("previewFileSize"),
+    }
 
 
 def serialize_sku(row: Any) -> dict[str, Any]:
@@ -2807,9 +2888,9 @@ def serialize_image(row: Any) -> dict[str, Any]:
         "thumbUrl": stable_media_url(original_path, "thumb"),
         "previewUrl": stable_media_url(original_path, "preview"),
         "originalUrl": stable_media_url(original_path, "original"),
-        "fileSize": None,
-        "thumbFileSize": None,
-        "previewFileSize": None,
+        "fileSize": row["file_size"] if "file_size" in row.keys() else None,
+        "thumbFileSize": row["thumb_file_size"] if "thumb_file_size" in row.keys() else None,
+        "previewFileSize": row["preview_file_size"] if "preview_file_size" in row.keys() else None,
         "createdAt": row["created_at"],
     }
 
@@ -2903,7 +2984,13 @@ def serialize_shot_plan(row: Any) -> dict[str, Any]:
     }
 
 
-def serialize_generation_run(row: Any, include_images: bool, include_summary: bool = False, include_debug: bool = False) -> dict[str, Any]:
+def serialize_generation_run(
+    row: Any,
+    include_images: bool,
+    include_summary: bool = False,
+    include_debug: bool = False,
+    status_only: bool = False,
+) -> dict[str, Any]:
     item = {
         "id": row["id"],
         "skuId": row["sku_id"],
@@ -2961,8 +3048,44 @@ def serialize_generation_run(row: Any, include_images: bool, include_summary: bo
                 "SELECT * FROM generation_images WHERE run_id = ? ORDER BY shot_index, id",
                 (row["id"],),
             ).fetchall()
-            item["images"] = [serialize_generation_image(image, include_debug=include_debug) for image in images]
+            serializer = serialize_generation_image_status if status_only else serialize_generation_image
+            item["images"] = [serializer(image) if status_only else serializer(image, include_debug=include_debug) for image in images]
     return item
+
+
+def serialize_generation_image_status(row: Any) -> dict[str, Any]:
+    displayable = has_displayable_generation_output(row)
+    original_path = row["output_path"] if displayable else None
+    return {
+        "id": row["id"],
+        "runId": row["run_id"],
+        "shotIndex": row["shot_index"],
+        "title": row["title"],
+        "status": row["status"],
+        "objectKey": row["output_path"],
+        "url": stable_media_url(original_path, "preview") if displayable else None,
+        "thumbUrl": stable_media_url(original_path, "thumb") if displayable else None,
+        "previewUrl": stable_media_url(original_path, "preview") if displayable else None,
+        "originalUrl": stable_media_url(original_path, "original") if displayable else None,
+        "fileSize": row["file_size"] if "file_size" in row.keys() else None,
+        "thumbFileSize": row["thumb_file_size"] if "thumb_file_size" in row.keys() else None,
+        "previewFileSize": row["preview_file_size"] if "preview_file_size" in row.keys() else None,
+        "currentAttemptIndex": row["current_attempt_index"] if "current_attempt_index" in row.keys() else 0,
+        "providerStatus": row["provider_status"] if "provider_status" in row.keys() else None,
+        "submittedAt": row["submitted_at"] if "submitted_at" in row.keys() else None,
+        "completedAt": row["completed_at"] if "completed_at" in row.keys() else None,
+        "lastStatusCheckedAt": row["last_status_checked_at"] if "last_status_checked_at" in row.keys() else None,
+        "cancelRequestedAt": row["cancel_requested_at"] if "cancel_requested_at" in row.keys() else None,
+        "timeoutAt": row["timeout_at"] if "timeout_at" in row.keys() else None,
+        "regenerateFromImageId": row["regenerate_from_image_id"],
+        "regenerateReason": row["regenerate_reason"],
+        "isFinal": bool(row["is_final"]),
+        "reviewStatus": row["review_status"] if "review_status" in row.keys() else "candidate",
+        "reviewNote": row["review_note"] if "review_note" in row.keys() else None,
+        "reviewedAt": row["reviewed_at"] if "reviewed_at" in row.keys() else None,
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
 
 
 def serialize_generation_image(row: Any, include_debug: bool = False) -> dict[str, Any]:
@@ -2979,9 +3102,9 @@ def serialize_generation_image(row: Any, include_debug: bool = False) -> dict[st
         "thumbUrl": stable_media_url(original_path, "thumb") if displayable else None,
         "previewUrl": stable_media_url(original_path, "preview") if displayable else None,
         "originalUrl": stable_media_url(original_path, "original") if displayable else None,
-        "fileSize": None,
-        "thumbFileSize": None,
-        "previewFileSize": None,
+        "fileSize": row["file_size"] if "file_size" in row.keys() else None,
+        "thumbFileSize": row["thumb_file_size"] if "thumb_file_size" in row.keys() else None,
+        "previewFileSize": row["preview_file_size"] if "preview_file_size" in row.keys() else None,
         "prompt": row["prompt_text"] if "prompt_text" in row.keys() else None,
         "currentAttemptIndex": row["current_attempt_index"] if "current_attempt_index" in row.keys() else 0,
         "providerRequestId": row["provider_request_id"] if "provider_request_id" in row.keys() else None,

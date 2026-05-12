@@ -97,6 +97,10 @@ Authorization: Bearer <token>
 - `hasMore = true` 时，前端可用 `nextOffset` 请求下一页。
 - `hasMore = false` 时，`nextOffset = null`。
 
+### 轻量状态接口
+
+生成中页面轮询 `GET /api/generation-runs/{run_id}/status`。该接口只返回任务基础字段和每张图的状态、展示 URL、审核/最终图等前台必要字段，不返回任务包、provider 原始响应或 attempt 明细。
+
 当前支持分页的接口：
 
 | Resource | 查询参数 |
@@ -130,6 +134,7 @@ Authorization: Bearer <token>
 - 衍生图保存在同目录 `_derived/thumb/*.webp` 和 `_derived/preview/*.webp`。
 - 新上传、新生成图片会同步生成衍生图。
 - 前台 API 返回稳定的 `/api/media?key=...&variant=...` 路径，避免轮询时预签名 URL 变化导致图片 `src` 抖动。
+- 上传/生成完成时会把 `thumb_path`、`preview_path` 和三档文件大小落库；历史数据可用 `backend/scripts/repair_media_metadata.py` 补齐。
 - 旧数据若缺少衍生图，媒体访问层会尽量补生成；补生成失败时回退到原图，保证旧记录仍可显示。
 - 删除单张素材或替换/删除头像时，会同步清理对应衍生图。删除整个货号或模特目录时，会通过对象前缀清理。
 
@@ -498,7 +503,7 @@ SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED
 
 当请求 `GET /api/generation-runs/{run_id}?includeDebug=true` 时，图片记录额外返回 `taskPackage`、`providerRequest`、`providerResponse`、`providerUrls`、`providerStatusResponse`、`imageInputs`、`templateSnapshot`、`modelSnapshot`、`garmentSnapshot`、`attempts` 等内部排查字段。
 
-计时器由前端根据 `submittedAt` / `completedAt` 动态计算，不需要后端每秒更新。
+计时器由前端根据 `submittedAt` / `completedAt` 动态计算，不需要后端每秒更新。页面不可见时前端应暂停轮询，恢复可见后再刷新。
 
 ### 后台状态更新
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
@@ -34,7 +35,7 @@ def existing_derivative_or_original(original_key: str | Path | None, kind: str) 
     return clean_key(original_key)
 
 
-def ensure_image_derivatives(original_key: str | Path | None) -> dict[str, str]:
+def ensure_image_derivatives(original_key: str | Path | None) -> dict[str, Any]:
     if not original_key:
         return {}
     thumb_key = derivative_key(original_key, "thumb")
@@ -48,7 +49,7 @@ def ensure_image_derivatives(original_key: str | Path | None) -> dict[str, str]:
         return {}
 
 
-def generate_image_derivatives(original_key: str | Path, content: bytes) -> dict[str, str]:
+def generate_image_derivatives(original_key: str | Path, content: bytes) -> dict[str, Any]:
     thumb_key = derivative_key(original_key, "thumb")
     preview_key = derivative_key(original_key, "preview")
     if not thumb_key or not preview_key:
@@ -58,7 +59,12 @@ def generate_image_derivatives(original_key: str | Path, content: bytes) -> dict
     preview = resize_to_webp(content, PREVIEW_MAX_EDGE)
     put_bytes(thumb_key, thumb, DERIVATIVE_CONTENT_TYPE)
     put_bytes(preview_key, preview, DERIVATIVE_CONTENT_TYPE)
-    return {"thumb": thumb_key, "preview": preview_key}
+    return {
+        "thumb": thumb_key,
+        "preview": preview_key,
+        "thumbSize": len(thumb),
+        "previewSize": len(preview),
+    }
 
 
 def resize_to_webp(content: bytes, max_edge: int) -> bytes:

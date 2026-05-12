@@ -137,6 +137,7 @@ export function App() {
   const [showArchivedSkus, setShowArchivedSkus] = useState(false)
   const [showArchivedRuns, setShowArchivedRuns] = useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
+  const [pageVisible, setPageVisible] = useState(() => typeof document === 'undefined' ? true : !document.hidden)
 
   const defaultModel = useMemo(() => models.find((model) => model.isDefault) ?? models[0], [models])
   const selectedModel = models.find((model) => model.id === selectedModelId) ?? defaultModel
@@ -253,6 +254,12 @@ export function App() {
   }, [])
 
   useEffect(() => {
+    const handleVisibilityChange = () => setPageVisible(!document.hidden)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }, [])
+
+  useEffect(() => {
     if (!appReady) return
     const storedRunId = window.localStorage.getItem('app:lastGenerationRunId')
     if (!storedRunId) return
@@ -308,16 +315,16 @@ export function App() {
   }, [previewRun?.id])
 
   useEffect(() => {
-    if (!(generationRun && isRunActive(generationRun)) && !(previewRun && isRunActive(previewRun))) return
+    if (!pageVisible || (!(generationRun && isRunActive(generationRun)) && !(previewRun && isRunActive(previewRun)))) return
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000)
     return () => window.clearInterval(timer)
-  }, [generationRun?.id, generationRun?.status, previewRun?.id, previewRun?.status])
+  }, [pageVisible, generationRun?.id, generationRun?.status, previewRun?.id, previewRun?.status])
 
   useEffect(() => {
-    if (!previewRun || !isRunActive(previewRun)) return
+    if (!pageVisible || !previewRun || !isRunActive(previewRun)) return
     const poll = async () => {
       try {
-        const result = await api.getRun(previewRun.id)
+        const result = await api.getRunStatus(previewRun.id)
         setPreviewRun(result.item)
       } catch (err) {
         setError(err instanceof Error ? err.message : '刷新预览状态失败')
@@ -326,13 +333,13 @@ export function App() {
     void poll()
     const timer = window.setInterval(() => void poll(), 3000)
     return () => window.clearInterval(timer)
-  }, [previewRun?.id, previewRun?.status])
+  }, [pageVisible, previewRun?.id, previewRun?.status])
 
   useEffect(() => {
-    if (!generationRun || !isRunActive(generationRun)) return
+    if (!pageVisible || !generationRun || !isRunActive(generationRun)) return
     const poll = async () => {
       try {
-        const result = await api.getRun(generationRun.id)
+        const result = await api.getRunStatus(generationRun.id)
         setGenerationRun(result.item)
         if (!isRunActive(result.item)) await refreshHistoryRuns()
       } catch (err) {
@@ -342,10 +349,10 @@ export function App() {
     void poll()
     const timer = window.setInterval(() => void poll(), 3000)
     return () => window.clearInterval(timer)
-  }, [generationRun?.id, generationRun?.status])
+  }, [pageVisible, generationRun?.id, generationRun?.status])
 
   useEffect(() => {
-    if (!shotPlan || shotPlan.status !== 'PLANNING') return
+    if (!pageVisible || !shotPlan || shotPlan.status !== 'PLANNING') return
     const poll = async () => {
       try {
         const result = await api.getPlan(shotPlan.id)
@@ -361,7 +368,7 @@ export function App() {
     void poll()
     const timer = window.setInterval(() => void poll(), 3000)
     return () => window.clearInterval(timer)
-  }, [shotPlan?.id, shotPlan?.status, selectedSku?.id])
+  }, [pageVisible, shotPlan?.id, shotPlan?.status, selectedSku?.id])
 
   useEffect(() => {
     const editingModel = models.find((model) => model.id === editingModelId)
@@ -624,14 +631,7 @@ export function App() {
       }
     }
     if (!shotPlanId) return null
-    const runs = (await api.listRuns({ skuId, limit: RUN_PAGE_SIZE })).items
-    const preview = runs.find((run) => run.kind === 'preview_grid' && run.skuId === skuId && run.shotPlanId === shotPlanId)
-    if (!preview) return null
-    try {
-      return (await api.getRun(preview.id)).item
-    } catch {
-      return null
-    }
+    return (await api.getLatestPreviewRun(skuId, { shotPlanId })).item
   }
 
   function stageLooseImages(selectedFiles: File[]) {
