@@ -281,6 +281,18 @@ class BackendSmokeTests(unittest.TestCase):
         with self.assertRaisesRegex(planner.PlannerError, "不足 5 个固定图位"):
             planner.validate_planner_response(parsed, {"model": "test"}, '{"sku":"SKU","shots":[]}')
 
+    def test_planner_response_schema_omits_gemini_unsupported_additional_properties(self) -> None:
+        planner = importlib.import_module("app.planner")
+
+        def has_additional_properties(value: object) -> bool:
+            if isinstance(value, dict):
+                return "additionalProperties" in value or any(has_additional_properties(item) for item in value.values())
+            if isinstance(value, list):
+                return any(has_additional_properties(item) for item in value)
+            return False
+
+        self.assertFalse(has_additional_properties(planner.ShotPlanDraft.model_json_schema()))
+
     def test_final_generation_images_are_final_by_default(self) -> None:
         config = importlib.import_module("app.config")
         db_module = importlib.import_module("app.db")

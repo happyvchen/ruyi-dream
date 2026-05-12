@@ -4,7 +4,7 @@ from pathlib import Path
 import json
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from .config import get_settings
 
@@ -57,8 +57,6 @@ class PlannerError(RuntimeError):
 
 
 class GarmentDraft(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
     category: str = ""
     summary: str = ""
     color: str = ""
@@ -68,15 +66,11 @@ class GarmentDraft(BaseModel):
 
 
 class BrandStyleDraft(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
     name: str = "默认棚拍风格"
     summary: str = "白/浅灰背景，自然姿态，简洁搭配，商品优先"
 
 
 class GenerationPlanDraft(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
     salesInfo: str = ""
     lilyTone: str = ""
     styling: str = ""
@@ -84,8 +78,6 @@ class GenerationPlanDraft(BaseModel):
 
 
 class ShotDraft(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
     shotIndex: int | None = None
     englishName: str | None = None
     title: str | None = None
@@ -100,8 +92,6 @@ class ShotDraft(BaseModel):
 
 
 class ShotPlanDraft(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
     sku: str = ""
     modelId: str = "Face-01"
     category: str = ""
