@@ -350,8 +350,10 @@ export function App() {
       try {
         const result = await api.getPlan(shotPlan.id)
         setShotPlan(result.item)
-        if (selectedSku) setSelectedSku((await api.getSku(selectedSku.id)).item)
-        if (result.item.status !== 'PLANNING') await refreshBaseData()
+        if (result.item.status !== 'PLANNING') {
+          if (selectedSku) setSelectedSku((await api.getSku(selectedSku.id)).item)
+          await refreshBaseData()
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : '刷新方案状态失败')
       }

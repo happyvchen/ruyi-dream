@@ -256,6 +256,123 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(run_count, 0)
         self.assertEqual(plan_count, 0)
 
+    def test_planner_parser_recovers_only_complete_json_with_trailing_noise(self) -> None:
+        planner = importlib.import_module("app.planner")
+
+        raw = planner_fixture_json() + "}"
+        parsed, meta = planner.parse_planner_response(raw, {"model": "test"})
+        validated = planner.validate_planner_response(parsed, {"model": "test"}, raw)
+        normalized = planner.normalize_plan(validated, "SKU-PLAN")
+
+        self.assertEqual(meta["mode"], "recovered_trailing_noise")
+        self.assertEqual(normalized["sku"], "SKU-PLAN")
+        self.assertEqual(normalized["category"], "上衣")
+        self.assertEqual(len(normalized["shots"]), 5)
+
+    def test_planner_parser_rejects_non_contract_output(self) -> None:
+        planner = importlib.import_module("app.planner")
+
+        with self.assertRaisesRegex(planner.PlannerError, "不是可恢复"):
+            planner.parse_planner_response(planner_fixture_json() + "not-json", {"model": "test"})
+
+        parsed, _ = planner.parse_planner_response('{"sku":"SKU","shots":[]}', {"model": "test"})
+        with self.assertRaisesRegex(planner.PlannerError, "不足 5 个固定图位"):
+            planner.validate_planner_response(parsed, {"model": "test"}, '{"sku":"SKU","shots":[]}')
+
+def planner_fixture_json() -> str:
+    return """
+{
+  "sku": "SKU-PLAN",
+  "modelId": "Face-01",
+  "category": "上衣",
+  "garment": {
+    "category": "上衣",
+    "summary": "灰色人字纹马甲",
+    "color": "灰色",
+    "fabric": "人字纹梭织面料",
+    "keyStructures": ["V领", "纽扣门襟"],
+    "preserveStrictly": ["人字纹", "纽扣"]
+  },
+  "brandStyle": {
+    "name": "默认棚拍风格",
+    "summary": "白/浅灰背景，自然姿态，简洁搭配，商品优先"
+  },
+  "generationPlan": {
+    "salesInfo": "展示马甲结构",
+    "lilyTone": "干净通勤",
+    "styling": "白裤黑鞋，低调配饰",
+    "background": "浅灰白棚拍背景、轻微落地阴影"
+  },
+  "shots": [
+    {
+      "shotIndex": 1,
+      "englishName": "Full-length hero shot",
+      "title": "全身主视觉",
+      "task": "先给完整穿着比例",
+      "scene": "全身图",
+      "cropRange": "头顶到脚尖完整入画",
+      "modelScale": "75%-86%",
+      "headTreatment": "完整露头",
+      "bodyPosition": "正面",
+      "poseTone": "稳定站姿",
+      "imagePurpose": "展示整体比例"
+    },
+    {
+      "shotIndex": 2,
+      "englishName": "Category key view",
+      "title": "品类核心展示",
+      "task": "突出销售主体",
+      "scene": "大腿中部图",
+      "cropRange": "头部到大腿中部",
+      "modelScale": "80%-90%",
+      "headTreatment": "完整露头",
+      "bodyPosition": "3/4 斜正",
+      "poseTone": "轻扶门襟",
+      "imagePurpose": "展示剪裁结构"
+    },
+    {
+      "shotIndex": 3,
+      "englishName": "Detail close-up",
+      "title": "设计细节近景",
+      "task": "解释面料结构",
+      "scene": "胸腰近景",
+      "cropRange": "下巴以下到腰部",
+      "modelScale": "85%-95%",
+      "headTreatment": "下巴以下裁切",
+      "bodyPosition": "正面",
+      "poseTone": "手臂自然入画",
+      "imagePurpose": "展示面料和扣子"
+    },
+    {
+      "shotIndex": 4,
+      "englishName": "Angle or movement view",
+      "title": "身位/动态补充",
+      "task": "补充版型",
+      "scene": "七分身",
+      "cropRange": "头部到膝盖",
+      "modelScale": "78%-88%",
+      "headTreatment": "完整露头",
+      "bodyPosition": "侧身",
+      "poseTone": "轻走动",
+      "imagePurpose": "展示侧面厚度"
+    },
+    {
+      "shotIndex": 5,
+      "englishName": "Standard front color view",
+      "title": "标准正面颜色图",
+      "task": "稳定清楚平台友好",
+      "scene": "臀上图",
+      "cropRange": "头部到臀部下方",
+      "modelScale": "80%-90%",
+      "headTreatment": "完整露头",
+      "bodyPosition": "正面",
+      "poseTone": "双手自然下垂",
+      "imagePurpose": "提供标准正面样貌"
+    }
+  ]
+}
+""".strip()
+
 
 if __name__ == "__main__":
     unittest.main()

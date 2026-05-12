@@ -1884,6 +1884,7 @@ def run_planner_for_shot_plan(plan_row: Any) -> None:
             return
 
     timestamp = now_iso()
+    raw_snapshot = loads(raw, {})
     with get_db() as db:
         db.execute(
             """
@@ -1911,6 +1912,22 @@ def run_planner_for_shot_plan(plan_row: Any) -> None:
             "UPDATE garment_skus SET status = 'ANALYZED', analysis_json = ?, updated_at = ? WHERE id = ?",
             (dumps(plan.get("garment", {})), timestamp, plan_row["sku_id"]),
         )
+        parse_meta = raw_snapshot.get("parseMeta") if isinstance(raw_snapshot, dict) else None
+        if isinstance(parse_meta, dict) and str(parse_meta.get("mode", "")).startswith("recovered"):
+            log_event(
+                db,
+                "shot_plan",
+                plan_row["id"],
+                "planner_response_recovered",
+                {
+                    "skuId": plan_row["sku_id"],
+                    "sku": plan_row["sku"],
+                    "modelProfileId": plan_row["model_profile_id"],
+                    "mode": parse_meta.get("mode"),
+                    "parseError": parse_meta.get("parseError"),
+                    "trailingText": parse_meta.get("trailingText"),
+                },
+            )
         log_event(
             db,
             "shot_plan",
