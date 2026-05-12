@@ -6,6 +6,7 @@ import {
   Check,
   Clock,
   Edit3,
+  GripVertical,
   Plus,
   Save,
   FolderOpen,
@@ -669,6 +670,20 @@ export function App() {
             : item,
         )
         .filter((item) => item.images.length > 0),
+    )
+  }
+
+  function reorderImportImage(packageId: string, imageId: string, orderIndex: number) {
+    setImportPackages((current) =>
+      current.map((item) => {
+        if (item.id !== packageId) return item
+        const moving = item.images.find((image) => image.id === imageId)
+        if (!moving) return item
+        const images = item.images.filter((image) => image.id !== imageId)
+        const nextIndex = Math.max(0, Math.min(orderIndex, images.length))
+        images.splice(nextIndex, 0, moving)
+        return { ...item, images }
+      }),
     )
   }
 
@@ -1498,6 +1513,7 @@ export function App() {
           onStageFolderImages={stageFolderImages}
           onUpdateImportPackage={updateImportPackage}
           onRemoveImportImage={removeImportImage}
+          onReorderImportImage={reorderImportImage}
           onRemoveImportPackage={removeImportPackage}
           onUploadImportPackage={(packageId) => void uploadImportPackage(packageId)}
           onUploadAllDraftPackages={() => void uploadAllDraftPackages()}
@@ -1730,6 +1746,7 @@ function GarmentLibraryPage({
   onStageFolderImages,
   onUpdateImportPackage,
   onRemoveImportImage,
+  onReorderImportImage,
   onRemoveImportPackage,
 	  onUploadImportPackage,
 	  onUploadAllDraftPackages,
@@ -1763,6 +1780,7 @@ function GarmentLibraryPage({
   onStageFolderImages: (files: File[]) => void
   onUpdateImportPackage: (packageId: string, patch: Partial<Pick<ImportPackage, 'sku' | 'title'>>) => void
   onRemoveImportImage: (packageId: string, imageId: string) => void
+  onReorderImportImage: (packageId: string, imageId: string, orderIndex: number) => void
   onRemoveImportPackage: (packageId: string) => void
 	  onUploadImportPackage: (packageId: string) => void
 	  onUploadAllDraftPackages: () => void
@@ -1906,6 +1924,7 @@ function GarmentLibraryPage({
               busy={busy}
               onUpdatePackage={onUpdateImportPackage}
               onRemoveImage={onRemoveImportImage}
+              onReorderImage={onReorderImportImage}
               onRemovePackage={onRemoveImportPackage}
               onUploadPackage={onUploadImportPackage}
             />
@@ -2020,18 +2039,8 @@ function GarmentLibraryPage({
                               <ImageInfoLine src={imageUrlFor(image, 'preview')} fileSize={image.previewFileSize ?? image.fileSize} />
                             ) : '图片信息读取中'}
                           </small>
-                          <div className="asset-order-row">
-                            <div className="order-controls">
-                              <button onClick={() => onReorderImage(image.id, index - 1)} disabled={busy !== 'idle' || index === 0} title="上移">
-                                上移
-                              </button>
-                              <button onClick={() => onReorderImage(image.id, index + 1)} disabled={busy !== 'idle' || index === (selectedSku.images?.length ?? 0) - 1} title="下移">
-                                下移
-                              </button>
-                            </div>
-                            <b>#{index + 1}</b>
-                          </div>
-                          <div className="asset-actions single">
+                          <div className="asset-actions card-tools">
+                            <DragHandle index={index} disabled={busy !== 'idle'} />
                             <button onClick={() => onDeleteImage(image.id)} title="删除图片">
                               <Trash2 size={14} />
                             </button>
@@ -2321,14 +2330,6 @@ function ModelProfilesPage({
                           )
                         })}
                       </select>
-                      <div className="order-controls compact">
-                        <button onClick={() => void onUpdateHeadReference(entry.id, { orderIndex: index - 1 })} disabled={busy !== 'idle' || index === 0} title="上移">
-                          上移
-                        </button>
-                        <button onClick={() => void onUpdateHeadReference(entry.id, { orderIndex: index + 1 })} disabled={busy !== 'idle' || index === headEntries.length - 1} title="下移">
-                          下移
-                        </button>
-                      </div>
                     </div>
                     <small title={entry.filename}>{middleEllipsis(entry.filename)}</small>
                     <div className="head-card-actions">
@@ -2346,14 +2347,17 @@ function ModelProfilesPage({
                           }}
                         />
                       </label>
-                      <button
-                        className="danger icon-only"
-                        onClick={() => onDeleteHeadReference(entry.id)}
-                        title="删除头像"
-                        disabled={busy !== 'idle'}
-                      >
-                        <Trash2 size={14} />
-                      </button>
+                      <span className="head-card-tools">
+                        <DragHandle index={index} disabled={busy !== 'idle'} />
+                        <button
+                          className="danger icon-only"
+                          onClick={() => onDeleteHeadReference(entry.id)}
+                          title="删除头像"
+                          disabled={busy !== 'idle'}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </span>
                     </div>
                   </article>
                 ))}
@@ -2378,6 +2382,7 @@ function ImportPreviewBoard({
   busy,
   onUpdatePackage,
   onRemoveImage,
+  onReorderImage,
   onRemovePackage,
   onUploadPackage,
 }: {
@@ -2385,10 +2390,14 @@ function ImportPreviewBoard({
   busy: BusyState
   onUpdatePackage: (packageId: string, patch: Partial<Pick<ImportPackage, 'sku' | 'title'>>) => void
   onRemoveImage: (packageId: string, imageId: string) => void
+  onReorderImage: (packageId: string, imageId: string, orderIndex: number) => void
   onRemovePackage: (packageId: string) => void
   onUploadPackage: (packageId: string) => void
 }) {
   const duplicateSkus = findDuplicateSkus(packages)
+  const [draggingImage, setDraggingImage] = useState<{ packageId: string; imageId: string } | null>(null)
+  const [dragOverImage, setDragOverImage] = useState<{ packageId: string; imageId: string } | null>(null)
+
   return (
     <div className="import-preview">
       <div className="detail-header">
@@ -2446,13 +2455,42 @@ function ImportPreviewBoard({
                   <span>{item.images.length} 张</span>
                 </div>
                 <div className="asset-grid import-image-grid">
-                {item.images.map((image) => (
-                  <article className="asset-card" key={image.id}>
+                {item.images.map((image, index) => {
+                  const isDragging = draggingImage?.packageId === item.id && draggingImage.imageId === image.id
+                  const isDragOver = dragOverImage?.packageId === item.id && dragOverImage.imageId === image.id
+                  return (
+                  <article
+                    className={`asset-card ${isDragging ? 'dragging' : ''} ${isDragOver ? 'drag-over' : ''}`}
+                    key={image.id}
+                    draggable={busy === 'idle'}
+                    onDragStart={() => {
+                      setDraggingImage({ packageId: item.id, imageId: image.id })
+                      setDragOverImage(null)
+                    }}
+                    onDragEnd={() => {
+                      setDraggingImage(null)
+                      setDragOverImage(null)
+                    }}
+                    onDragOver={(event) => {
+                      event.preventDefault()
+                      if (draggingImage?.packageId === item.id && draggingImage.imageId !== image.id) {
+                        setDragOverImage({ packageId: item.id, imageId: image.id })
+                      }
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault()
+                      if (!draggingImage || draggingImage.packageId !== item.id || draggingImage.imageId === image.id) return
+                      onReorderImage(item.id, draggingImage.imageId, index)
+                      setDraggingImage(null)
+                      setDragOverImage(null)
+                    }}
+                  >
                     <div className="asset-thumb">
                       <ImagePreviewThumb
                         src={image.previewUrl}
                         name={image.file.name}
                         fileSize={image.file.size}
+                        loading="eager"
                       />
                     </div>
                     <div className="asset-meta">
@@ -2460,14 +2498,16 @@ function ImportPreviewBoard({
                       <small title={image.relativePath}>
                         <ImageInfoLine src={image.previewUrl} fileSize={image.file.size} />
                       </small>
-                      <div className="asset-actions single">
+                      <div className="asset-actions card-tools">
+                        <DragHandle index={index} disabled={busy !== 'idle'} />
                         <button onClick={() => onRemoveImage(item.id, image.id)} title="移除图片">
                           <Trash2 size={14} />
                         </button>
                       </div>
                     </div>
                   </article>
-                ))}
+                  )
+                })}
                 </div>
               </div>
             </article>
@@ -3309,6 +3349,15 @@ function Tag({ children }: { children: ReactNode }) {
   return <span className="tag">{children}</span>
 }
 
+function DragHandle({ index, disabled }: { index: number; disabled?: boolean }) {
+  return (
+    <span className={`drag-handle ${disabled ? 'disabled' : ''}`} title="拖动调整顺序" aria-label={`拖动调整顺序，第 ${index + 1} 张`}>
+      <GripVertical size={14} />
+      <b>#{index + 1}</b>
+    </span>
+  )
+}
+
 function imageUrlFor(image: { thumbUrl?: string | null; previewUrl?: string | null; originalUrl?: string | null; url?: string | null }, variant: 'thumb' | 'preview' | 'original') {
   const value = variant === 'thumb'
     ? image.thumbUrl ?? image.previewUrl ?? image.url ?? image.originalUrl
@@ -3323,6 +3372,7 @@ function ImagePreviewThumb({
   fullSrc,
   name,
   fileSize,
+  loading = 'lazy',
   compact,
   round,
   children,
@@ -3331,6 +3381,7 @@ function ImagePreviewThumb({
   fullSrc?: string
   name: string
   fileSize?: number | null
+  loading?: 'lazy' | 'eager'
   compact?: boolean
   round?: boolean
   children?: ReactNode
@@ -3382,7 +3433,7 @@ function ImagePreviewThumb({
           <img
             src={src}
             alt={name}
-            loading="lazy"
+            loading={loading}
             decoding="async"
             onLoad={(event) => {
               const target = event.currentTarget
