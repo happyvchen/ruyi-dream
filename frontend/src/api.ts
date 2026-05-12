@@ -177,7 +177,10 @@ export const api = {
       skuId: options?.skuId,
       keyword: options?.keyword,
     })),
-  getRun: (runId: number) => request<{ item: GenerationRun }>(`/api/generation-runs/${runId}`),
+  getRun: (runId: number, options?: { includeDebug?: boolean }) =>
+    request<{ item: GenerationRun }>(withParams(`/api/generation-runs/${runId}`, {
+      includeDebug: options?.includeDebug,
+    })),
   deleteRun: (runId: number) =>
     request<{ ok: boolean }>(`/api/generation-runs/${runId}`, {
       method: 'DELETE',

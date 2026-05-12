@@ -114,9 +114,9 @@ Authorization: Bearer <token>
 
 | 字段 | 用途 | 前端场景 |
 |---|---|---|
-| `thumbUrl` | 小缩略图，WebP，长边约 360px | 列表卡片、历史记录缩略图 |
-| `previewUrl` | 中等预览图，WebP，长边约 1600px | 详情网格、结果网格、普通预览 |
-| `originalUrl` | 原始上传或生成图 | 放大查看、导出、AI 输入和质检 |
+| `thumbUrl` | 小缩略图，WebP，长边约 240px | 列表卡片、历史记录缩略图、素材卡片、结果网格 |
+| `previewUrl` | 中等预览图，WebP，长边约 1280px | 弹窗普通预览、详情查看 |
+| `originalUrl` | 原始上传或生成图 | 下载、导出、AI 输入和质检 |
 
 兼容字段：
 
@@ -129,7 +129,8 @@ Authorization: Bearer <token>
 - 原图仍保存在原有对象 key，不改动历史路径。
 - 衍生图保存在同目录 `_derived/thumb/*.webp` 和 `_derived/preview/*.webp`。
 - 新上传、新生成图片会同步生成衍生图。
-- 旧数据若缺少衍生图，API 读取时会尽量补生成；补生成失败时回退到原图 URL，保证旧记录仍可显示。
+- 前台 API 返回稳定的 `/api/media?key=...&variant=...` 路径，避免轮询时预签名 URL 变化导致图片 `src` 抖动。
+- 旧数据若缺少衍生图，媒体访问层会尽量补生成；补生成失败时回退到原图，保证旧记录仍可显示。
 - 删除单张素材或替换/删除头像时，会同步清理对应衍生图。删除整个货号或模特目录时，会通过对象前缀清理。
 
 ## 服装素材 CRUD 契约
@@ -440,7 +441,7 @@ SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED
 | `skuId` | 只返回指定货号的生成记录 |
 | `keyword` | 按货号、标题、状态或记录 ID 模糊搜索 |
 
-返回前台历史任务列表。列表项包含任务基础字段和 `summary`：
+返回前台历史任务列表。列表项包含任务基础字段和轻量 `summary`；列表接口不应现场访问对象存储做 HEAD、文件大小查询或缩略图生成。
 
 ```json
 {
@@ -477,18 +478,13 @@ SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED
 
 `GET /api/generation-runs/{run_id}`
 
-前端应定时轮询该接口，而不是直接轮询 fal。接口会返回每张图的：
+前端应定时轮询该接口，而不是直接轮询 fal。默认响应为轻量业务字段；内部调试字段仅在 `includeDebug=true` 时返回。
 
 ```json
 {
   "status": "IN_PROGRESS",
   "providerRequestId": "fal request id",
   "providerStatus": "IN_PROGRESS",
-  "providerUrls": {
-    "statusUrl": "https://queue.fal.run/...",
-    "responseUrl": "https://queue.fal.run/...",
-    "cancelUrl": "https://queue.fal.run/..."
-  },
   "submittedAt": "2026-05-07T16:00:00",
   "completedAt": null,
   "lastStatusCheckedAt": "2026-05-07T16:01:30",
@@ -496,11 +492,11 @@ SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED
   "thumbUrl": "https://...",
   "previewUrl": "https://...",
   "originalUrl": "https://...",
-  "prompt": "中文 Image 2 prompt",
-  "imageInputs": [],
-  "attempts": []
+  "prompt": "中文 Image 2 prompt"
 }
 ```
+
+当请求 `GET /api/generation-runs/{run_id}?includeDebug=true` 时，图片记录额外返回 `taskPackage`、`providerRequest`、`providerResponse`、`providerUrls`、`providerStatusResponse`、`imageInputs`、`templateSnapshot`、`modelSnapshot`、`garmentSnapshot`、`attempts` 等内部排查字段。
 
 计时器由前端根据 `submittedAt` / `completedAt` 动态计算，不需要后端每秒更新。
 

@@ -585,8 +585,10 @@ export function App() {
 
   async function chooseSku(sku: GarmentSku, options: { syncUrl?: boolean; targetPage?: Page; previewRunId?: number } = {}) {
     setError(null)
-    const detail = await api.getSku(sku.id, { imageLimit: SKU_IMAGE_PAGE_SIZE })
-    const planResult = await api.getDefaultPlan(sku.id)
+    const [detail, planResult] = await Promise.all([
+      api.getSku(sku.id, { imageLimit: SKU_IMAGE_PAGE_SIZE }),
+      api.getDefaultPlan(sku.id),
+    ])
     const rawPreferredPreview = await resolvePreviewRun(detail.item.id, undefined, options.previewRunId)
     const preferredPreview = rawPreferredPreview && (!planResult.item || rawPreferredPreview.shotPlanId === planResult.item.id)
       ? rawPreferredPreview
@@ -603,9 +605,6 @@ export function App() {
     const restoredPreview = preferredPreview ?? await resolvePreviewRun(detail.item.id, activePlan?.id)
     setPreviewRun(restoredPreview)
     setGenerationRun(null)
-    void api.listRuns({ includeArchived: showArchivedRuns, limit: RUN_PAGE_SIZE, skuId: detail.item.id }).then((result) => {
-      setHistoryRuns((current) => mergeById(current, result.items))
-    })
     if (options.syncUrl !== false) {
       const targetPage = options.targetPage ?? page
       if (targetPage === 'garments') navigate({ page: 'garments', sku: detail.item.sku })
@@ -625,7 +624,7 @@ export function App() {
       }
     }
     if (!shotPlanId) return null
-    const runs = (await api.listRuns({ skuId, limit: 100 })).items
+    const runs = (await api.listRuns({ skuId, limit: RUN_PAGE_SIZE })).items
     const preview = runs.find((run) => run.kind === 'preview_grid' && run.skuId === skuId && run.shotPlanId === shotPlanId)
     if (!preview) return null
     try {
@@ -915,7 +914,7 @@ export function App() {
   async function openHistoryRun(runId: number) {
     setError(null)
     try {
-      const result = await api.getRun(runId)
+      const result = await api.getRun(runId, { includeDebug: SHOW_DEBUG_INFO })
       setSelectedHistoryRun(result.item)
       navigate({ page: 'history', runId: result.item.id })
     } catch (err) {
@@ -2017,10 +2016,10 @@ function GarmentLibraryPage({
                         <div className="asset-thumb">
                           {image.url ? (
                             <ImagePreviewThumb
-                              src={imageUrlFor(image, 'preview')}
-                              fullSrc={imageUrlFor(image, 'original')}
+                              src={imageUrlFor(image, 'thumb')}
+                              fullSrc={imageUrlFor(image, 'preview')}
                               name={image.filename}
-                              fileSize={image.fileSize}
+                              fileSize={image.thumbFileSize ?? image.previewFileSize ?? image.fileSize}
                             />
                           ) : <span>无预览</span>}
                         </div>
@@ -2028,7 +2027,7 @@ function GarmentLibraryPage({
                           <strong title={image.filename}>{middleEllipsis(image.filename)}</strong>
                           <small>
                             {image.url ? (
-                              <ImageInfoLine src={imageUrlFor(image, 'preview')} fileSize={image.previewFileSize ?? image.fileSize} />
+                              <ImageInfoLine src={imageUrlFor(image, 'thumb')} fileSize={image.thumbFileSize ?? image.previewFileSize ?? image.fileSize} />
                             ) : '图片信息读取中'}
                           </small>
                           <div className="asset-actions card-tools">
@@ -2890,7 +2889,7 @@ function HistoryRunDetail({
             <article className="history-shot-card" key={image.id}>
               <div className="history-shot-image">
                 {(image.url || image.previewUrl || image.originalUrl) ? (
-                  <img src={imageUrlFor(image, 'preview')} alt={image.title} loading="lazy" decoding="async" />
+                  <img src={imageUrlFor(image, 'thumb')} alt={image.title} loading="lazy" decoding="async" />
                 ) : <span>{statusText(image.status)}</span>}
                 {image.isFinal && <b>最终图</b>}
               </div>
@@ -3233,10 +3232,10 @@ function ResultGallery({
                 <div className="result-image">
                   {canShowImage ? (
                     <ImagePreviewThumb
-                      src={imageUrlFor(image, 'preview')}
-                      fullSrc={imageUrlFor(image, 'original')}
+                      src={imageUrlFor(image, 'thumb')}
+                      fullSrc={imageUrlFor(image, 'preview')}
                       name={displayLabel}
-                      fileSize={image.fileSize}
+                      fileSize={image.thumbFileSize ?? image.previewFileSize ?? image.fileSize}
                     >
                       {image.isFinal && <div className="final-badge"><Check size={14} />最终图</div>}
                     </ImagePreviewThumb>
@@ -3437,7 +3436,15 @@ function ImagePreviewThumb({
               <X size={18} />
             </button>
             <div className="preview-image-frame">
-              <img src={fullSrc ?? src} alt={name} decoding="async" />
+              <img
+                src={fullSrc ?? src}
+                alt={name}
+                decoding="async"
+                onLoad={(event) => {
+                  const target = event.currentTarget
+                  setDimensions({ width: target.naturalWidth, height: target.naturalHeight })
+                }}
+              />
             </div>
             <div className="preview-info">
               <strong title={name}>{middleEllipsis(name, 42)}</strong>

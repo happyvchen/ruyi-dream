@@ -8,8 +8,8 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from .object_storage import clean_key, get_bytes, join_key, object_exists, put_bytes
 
 
-THUMB_MAX_EDGE = 360
-PREVIEW_MAX_EDGE = 1600
+THUMB_MAX_EDGE = 240
+PREVIEW_MAX_EDGE = 1280
 DERIVATIVE_FORMAT = "WEBP"
 DERIVATIVE_CONTENT_TYPE = "image/webp"
 

@@ -13,6 +13,7 @@ import time
 from uuid import uuid4
 import zipfile
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,7 +22,7 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 
 from .config import get_settings
-from .db import dumps, get_db, init_db, loads, log_event, media_url, now_iso
+from .db import dumps, get_db, init_db, loads, log_event, now_iso
 from .image_derivatives import derivative_key, existing_derivative_or_original, generate_image_derivatives
 from .image_provider import get_image_provider
 from .object_storage import (
@@ -32,7 +33,6 @@ from .object_storage import (
     get_bytes,
     join_key,
     object_exists,
-    object_size,
     presigned_get_url,
     put_fileobj,
     unique_key,
@@ -1065,6 +1065,22 @@ def get_model_asset(model_profile_id: int, filename: str) -> RedirectResponse:
     return RedirectResponse(url)
 
 
+@app.get("/api/media")
+def get_media(key: str = Query(...), variant: str = Query("original")) -> RedirectResponse:
+    object_key = clean_key(key)
+    if variant not in {"thumb", "preview", "original"}:
+        raise HTTPException(status_code=400, detail="图片规格不合法")
+    target_key = object_key
+    if variant in {"thumb", "preview"}:
+        target_key = existing_derivative_or_original(object_key, variant) or object_key
+    if not object_exists(target_key):
+        raise HTTPException(status_code=404, detail="图片不存在")
+    url = presigned_get_url(target_key)
+    if not url:
+        raise HTTPException(status_code=404, detail="图片不存在")
+    return RedirectResponse(url, headers={"Cache-Control": "private, max-age=3600"})
+
+
 @app.post("/api/shot-plans")
 async def create_shot_plan(payload: PlanCreateRequest) -> dict[str, Any]:
     with get_db() as db:
@@ -1347,8 +1363,8 @@ def list_generation_runs(
 
 
 @app.get("/api/generation-runs/{run_id}")
-def get_generation_run(run_id: int) -> dict[str, Any]:
-    return {"item": get_generation_run_by_id(run_id)}
+def get_generation_run(run_id: int, include_debug: bool = Query(False, alias="includeDebug")) -> dict[str, Any]:
+    return {"item": get_generation_run_by_id(run_id, include_debug=include_debug)}
 
 
 @app.delete("/api/generation-runs/{run_id}")
@@ -2708,7 +2724,7 @@ def get_model_profile_by_id(model_profile_id: int) -> dict[str, Any]:
         return serialize_model(row)
 
 
-def get_generation_run_by_id(run_id: int) -> dict[str, Any]:
+def get_generation_run_by_id(run_id: int, include_debug: bool = False) -> dict[str, Any]:
     with get_db() as db:
         row = db.execute(
             """
@@ -2721,7 +2737,7 @@ def get_generation_run_by_id(run_id: int) -> dict[str, Any]:
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="生成记录不存在")
-        return serialize_generation_run(row, include_images=True)
+        return serialize_generation_run(row, include_images=True, include_debug=include_debug)
 
 
 def get_generation_image_by_id(image_id: int) -> dict[str, Any]:
@@ -2742,10 +2758,14 @@ def resolve_model_profile(db: Any, model_profile_id: int | None) -> Any:
     return row
 
 
+def stable_media_url(key: str | Path | None, variant: str = "original") -> str | None:
+    if not key:
+        return None
+    return f"/api/media?{urlencode({'key': clean_key(key), 'variant': variant})}"
+
+
 def serialize_sku(row: Any) -> dict[str, Any]:
     cover_path = row.keys() and row["cover_path"] if "cover_path" in row.keys() else None
-    cover_thumb_path = existing_derivative_or_original(cover_path, "thumb")
-    cover_preview_path = existing_derivative_or_original(cover_path, "preview")
     generation_run_count = row["generation_run_count"] if "generation_run_count" in row.keys() else 0
     archived_generation_run_count = row["archived_generation_run_count"] if "archived_generation_run_count" in row.keys() else 0
     shot_plan_count = row["shot_plan_count"] if "shot_plan_count" in row.keys() else 0
@@ -2757,11 +2777,11 @@ def serialize_sku(row: Any) -> dict[str, Any]:
         "status": row["status"],
         "analysis": loads(row["analysis_json"], None),
         "storagePath": row["storage_path"],
-        "coverUrl": media_url(cover_thumb_path),
-        "coverThumbUrl": media_url(cover_thumb_path),
-        "coverPreviewUrl": media_url(cover_preview_path),
-        "coverOriginalUrl": media_url(cover_path),
-        "coverFileSize": file_size(cover_path),
+        "coverUrl": stable_media_url(cover_path, "thumb"),
+        "coverThumbUrl": stable_media_url(cover_path, "thumb"),
+        "coverPreviewUrl": stable_media_url(cover_path, "preview"),
+        "coverOriginalUrl": stable_media_url(cover_path, "original"),
+        "coverFileSize": None,
         "imageCount": row["image_count"] if "image_count" in row.keys() else None,
         "deleteImpact": {
             "generationRunCount": int(generation_run_count or 0),
@@ -2777,21 +2797,19 @@ def serialize_sku(row: Any) -> dict[str, Any]:
 
 def serialize_image(row: Any) -> dict[str, Any]:
     original_path = row["storage_path"]
-    thumb_path = existing_derivative_or_original(original_path, "thumb")
-    preview_path = existing_derivative_or_original(original_path, "preview")
     return {
         "id": row["id"],
         "filename": row["filename"],
         "role": row["role"],
         "sortOrder": row["sort_order"],
         "mimeType": row["mime_type"],
-        "url": media_url(preview_path),
-        "thumbUrl": media_url(thumb_path),
-        "previewUrl": media_url(preview_path),
-        "originalUrl": media_url(original_path),
-        "fileSize": file_size(original_path),
-        "thumbFileSize": file_size(thumb_path) if thumb_path != original_path else None,
-        "previewFileSize": file_size(preview_path) if preview_path != original_path else None,
+        "url": stable_media_url(original_path, "preview"),
+        "thumbUrl": stable_media_url(original_path, "thumb"),
+        "previewUrl": stable_media_url(original_path, "preview"),
+        "originalUrl": stable_media_url(original_path, "original"),
+        "fileSize": None,
+        "thumbFileSize": None,
+        "previewFileSize": None,
         "createdAt": row["created_at"],
     }
 
@@ -2818,11 +2836,7 @@ def serialize_model(row: Any) -> dict[str, Any]:
         for angle, filename in references.items()
         if filename
     }
-    reference_meta = {
-        angle: {"fileSize": file_size(join_key(row["asset_dir"], str(filename)))}
-        for angle, filename in references.items()
-        if filename
-    }
+    reference_meta = {angle: {"fileSize": None} for angle, filename in references.items() if filename}
     reference_entries = [
         {
             "id": reference_id,
@@ -2889,7 +2903,7 @@ def serialize_shot_plan(row: Any) -> dict[str, Any]:
     }
 
 
-def serialize_generation_run(row: Any, include_images: bool, include_summary: bool = False) -> dict[str, Any]:
+def serialize_generation_run(row: Any, include_images: bool, include_summary: bool = False, include_debug: bool = False) -> dict[str, Any]:
     item = {
         "id": row["id"],
         "skuId": row["sku_id"],
@@ -2930,10 +2944,10 @@ def serialize_generation_run(row: Any, include_images: bool, include_summary: bo
                         "id": preview["id"],
                         "shotIndex": preview["shot_index"],
                         "title": preview["title"],
-                        "url": media_url(existing_derivative_or_original(preview["output_path"], "thumb")),
-                        "thumbUrl": media_url(existing_derivative_or_original(preview["output_path"], "thumb")),
-                        "previewUrl": media_url(existing_derivative_or_original(preview["output_path"], "preview")),
-                        "originalUrl": media_url(preview["output_path"]),
+                        "url": stable_media_url(preview["output_path"], "thumb"),
+                        "thumbUrl": stable_media_url(preview["output_path"], "thumb"),
+                        "previewUrl": stable_media_url(preview["output_path"], "preview"),
+                        "originalUrl": stable_media_url(preview["output_path"], "original"),
                         "status": preview["status"],
                         "isFinal": bool(preview["is_final"]),
                         "attemptCount": preview["current_attempt_index"] or 1,
@@ -2947,43 +2961,31 @@ def serialize_generation_run(row: Any, include_images: bool, include_summary: bo
                 "SELECT * FROM generation_images WHERE run_id = ? ORDER BY shot_index, id",
                 (row["id"],),
             ).fetchall()
-            item["images"] = [serialize_generation_image(image) for image in images]
+            item["images"] = [serialize_generation_image(image, include_debug=include_debug) for image in images]
     return item
 
 
-def serialize_generation_image(row: Any) -> dict[str, Any]:
+def serialize_generation_image(row: Any, include_debug: bool = False) -> dict[str, Any]:
     displayable = has_displayable_generation_output(row)
     original_path = row["output_path"] if displayable else None
-    thumb_path = existing_derivative_or_original(original_path, "thumb") if original_path else None
-    preview_path = existing_derivative_or_original(original_path, "preview") if original_path else None
-    return {
+    item = {
         "id": row["id"],
         "runId": row["run_id"],
         "shotIndex": row["shot_index"],
         "title": row["title"],
         "status": row["status"],
         "objectKey": row["output_path"],
-        "url": media_url(preview_path) if displayable else None,
-        "thumbUrl": media_url(thumb_path) if displayable else None,
-        "previewUrl": media_url(preview_path) if displayable else None,
-        "originalUrl": media_url(original_path) if displayable else None,
-        "fileSize": file_size(original_path) if displayable else None,
-        "thumbFileSize": file_size(thumb_path) if displayable and thumb_path != original_path else None,
-        "previewFileSize": file_size(preview_path) if displayable and preview_path != original_path else None,
-        "taskPackage": loads(row["task_package_json"], {}),
-        "providerRequest": loads(row["provider_request_json"], None),
-        "providerResponse": loads(row["provider_response_json"], None),
+        "url": stable_media_url(original_path, "preview") if displayable else None,
+        "thumbUrl": stable_media_url(original_path, "thumb") if displayable else None,
+        "previewUrl": stable_media_url(original_path, "preview") if displayable else None,
+        "originalUrl": stable_media_url(original_path, "original") if displayable else None,
+        "fileSize": None,
+        "thumbFileSize": None,
+        "previewFileSize": None,
         "prompt": row["prompt_text"] if "prompt_text" in row.keys() else None,
-        "imageInputs": loads(row["image_inputs_json"], []) if "image_inputs_json" in row.keys() else [],
-        "templateSnapshot": loads(row["template_snapshot_json"], None) if "template_snapshot_json" in row.keys() else None,
-        "modelSnapshot": loads(row["model_snapshot_json"], None) if "model_snapshot_json" in row.keys() else None,
-        "garmentSnapshot": loads(row["garment_snapshot_json"], None) if "garment_snapshot_json" in row.keys() else None,
-        "attempts": loads(row["attempts_json"], []) if "attempts_json" in row.keys() else [],
         "currentAttemptIndex": row["current_attempt_index"] if "current_attempt_index" in row.keys() else 0,
         "providerRequestId": row["provider_request_id"] if "provider_request_id" in row.keys() else None,
         "providerStatus": row["provider_status"] if "provider_status" in row.keys() else None,
-        "providerUrls": loads(row["provider_urls_json"], {}) if "provider_urls_json" in row.keys() else {},
-        "providerStatusResponse": loads(row["provider_status_json"], None) if "provider_status_json" in row.keys() else None,
         "submittedAt": row["submitted_at"] if "submitted_at" in row.keys() else None,
         "completedAt": row["completed_at"] if "completed_at" in row.keys() else None,
         "lastStatusCheckedAt": row["last_status_checked_at"] if "last_status_checked_at" in row.keys() else None,
@@ -3003,11 +3005,25 @@ def serialize_generation_image(row: Any) -> dict[str, Any]:
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
+    if include_debug:
+        item.update({
+            "taskPackage": loads(row["task_package_json"], {}),
+            "providerRequest": loads(row["provider_request_json"], None),
+            "providerResponse": loads(row["provider_response_json"], None),
+            "imageInputs": loads(row["image_inputs_json"], []) if "image_inputs_json" in row.keys() else [],
+            "templateSnapshot": loads(row["template_snapshot_json"], None) if "template_snapshot_json" in row.keys() else None,
+            "modelSnapshot": loads(row["model_snapshot_json"], None) if "model_snapshot_json" in row.keys() else None,
+            "garmentSnapshot": loads(row["garment_snapshot_json"], None) if "garment_snapshot_json" in row.keys() else None,
+            "attempts": loads(row["attempts_json"], []) if "attempts_json" in row.keys() else [],
+            "providerUrls": loads(row["provider_urls_json"], {}) if "provider_urls_json" in row.keys() else {},
+            "providerStatusResponse": loads(row["provider_status_json"], None) if "provider_status_json" in row.keys() else None,
+        })
+    return item
 
 
 def has_displayable_generation_output(row: Any) -> bool:
     output_path = row["output_path"] if "output_path" in row.keys() else None
-    return row["status"] == "SUCCEEDED" and bool(output_path) and object_exists(output_path)
+    return row["status"] == "SUCCEEDED" and bool(output_path)
 
 
 def serialize_log(row: Any) -> dict[str, Any]:
@@ -3085,15 +3101,7 @@ def model_asset_url(model_profile_id: int, asset_dir: str, filename: str | None,
     if not filename:
         return None
     key = join_key(asset_dir, sanitize_filename(filename))
-    if variant in {"thumb", "preview"}:
-        key = existing_derivative_or_original(key, variant) or key
-    if not object_exists(key):
-        return None
-    return presigned_get_url(key)
-
-
-def file_size(path: str | Path | None) -> int | None:
-    return object_size(path)
+    return stable_media_url(key, variant)
 
 
 def remove_model_asset_file(asset_dir: str, filename: str | None) -> None:
