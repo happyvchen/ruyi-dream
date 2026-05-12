@@ -127,12 +127,15 @@ class BackendSmokeTests(unittest.TestCase):
                     for row in db.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
                 ]
                 image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_images)").fetchall()}
+                garment_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_images)").fetchall()}
                 sku_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_skus)").fetchall()}
                 template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
+        self.assertIn("thumb_path", image_columns)
+        self.assertIn("preview_path", garment_image_columns)
         self.assertIn("archived_at", sku_columns)
         self.assertGreaterEqual(template_count, 1)
 
