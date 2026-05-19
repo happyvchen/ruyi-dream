@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react'
 import type { DragEvent, FormEvent, ReactNode } from 'react'
 import {
   Bot,
+  ArrowDown,
+  ArrowUp,
   ChevronLeft,
   ChevronRight,
   Clock3,
@@ -23,9 +25,11 @@ import {
   Search,
   Shield,
   Sparkles,
+  Trash2,
   Upload,
   User,
   UserRound,
+  X,
   WandSparkles,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
@@ -367,10 +371,14 @@ function FinalStep({ task, setTask, run }: { task: GenerationTask | null; setTas
 
 function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }) {
   const [query, setQuery] = useState('')
+  const [detail, setDetail] = useState<StylingGarment | null>(null)
   const visible = garments.filter((item) => {
     const haystack = `${item.code} ${JSON.stringify(item.effectiveTags ?? item.aiTags ?? {})}`.toLowerCase()
     return !query || haystack.includes(query.toLowerCase())
   })
+  async function openDetail(item: StylingGarment) {
+    await run('读取搭配服饰详情中...', () => api.getStylingGarment(item.id), (result: { item: StylingGarment }) => setDetail(result.item))
+  }
   return (
     <section className="page">
       <PageTitle title="搭配服饰库" subtitle="真实会出现在最终图里的配角服装。当前不支持鞋、包、饰品入库。" />
@@ -381,9 +389,19 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
           <span className="muted-count">{visible.length} / {garments.length} 套</span>
         </div>
         {visible.length ? (
-          <div className="garment-grid">{visible.map((item) => <GarmentCard key={item.id} item={item} run={run} onTag={() => void run('AI 打标中...', () => api.tagStylingGarment(item.id))} />)}</div>
+          <div className="garment-grid">{visible.map((item) => (
+            <GarmentCard
+              key={item.id}
+              item={item}
+              run={run}
+              onOpen={() => void openDetail(item)}
+              onArchive={() => void run('归档搭配服饰中...', () => api.deleteStylingGarment(item.id))}
+              onTag={() => void run('AI 打标中...', () => api.tagStylingGarment(item.id))}
+            />
+          ))}</div>
         ) : <EmptyState title="暂无搭配服饰" text="上传散图、一个文件夹，或拖入多个一级文件夹创建搭配服饰草稿。" />}
       </div>
+      {detail && <GarmentDetailDrawer item={detail} run={run} onClose={() => setDetail(null)} onChange={setDetail} />}
     </section>
   )
 }
@@ -428,6 +446,10 @@ function BatchImportPanel({ run }: { run: any }) {
     setBatches((items) => items.map((item) => item.id === id ? { ...item, code } : item))
   }
 
+  function updateFiles(id: string, files: File[]) {
+    setBatches((items) => items.map((item) => item.id === id ? { ...item, files } : item))
+  }
+
   function removeBatch(id: string) {
     setBatches((items) => items.filter((item) => item.id !== id))
   }
@@ -438,9 +460,15 @@ function BatchImportPanel({ run }: { run: any }) {
       setLocalError('每套搭配服饰都需要一个有效 code')
       return
     }
+    const oversized = batches.find((batch) => batch.files.length > 6)
+    if (oversized) {
+      setLocalError(`${oversized.code} 已选择 ${oversized.files.length} 张图片，单套最多保存 6 张`)
+      return
+    }
     await run(`导入 ${batches.length} 套搭配服饰中...`, async () => {
       for (const batch of batches) {
-        await api.createStylingGarment(batch.code, batch.files)
+        const created = await api.createStylingGarment(batch.code, batch.files)
+        await api.tagStylingGarment(created.item.id)
       }
       return true
     }, () => setBatches([]))
@@ -451,9 +479,9 @@ function BatchImportPanel({ run }: { run: any }) {
       <div className="import-head">
         <div>
           <h3>导入搭配服饰</h3>
-          <p>散图会合并为一套；单文件夹是一套；拖入多个一级文件夹会拆成多套。单套最多 6 张，推荐 1-3 张。</p>
+          <p>散图会合并为一套；单文件夹是一套；拖入多个一级文件夹会拆成多套。可先批量选择，保存时单套最多 6 张，推荐 1-3 张。</p>
         </div>
-        <button className="primary" disabled={!batches.length} onClick={() => void saveDrafts()}>导入草稿</button>
+        <button className="primary" disabled={!batches.length} onClick={() => void saveDrafts()}>导入</button>
       </div>
       <div className="import-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
         <Images size={22} />
@@ -474,17 +502,84 @@ function BatchImportPanel({ run }: { run: any }) {
       {batches.length > 0 && (
         <div className="batch-list">
           {batches.map((batch) => (
-            <div className="batch-row" key={batch.id}>
-              <div className="batch-icon"><Layers3 size={18} /></div>
-              <div>
-                <input value={batch.code} onChange={(event) => updateCode(batch.id, event.target.value)} aria-label="搭配服饰 code" />
-                <span>{batch.files.length} 张 · {batch.files.slice(0, 3).map((file) => file.name).join(' / ')}{batch.files.length > 3 ? ' ...' : ''}</span>
-              </div>
-              <button className="secondary" onClick={() => removeBatch(batch.id)}>移除</button>
-            </div>
+            <ImportBatchCard
+              key={batch.id}
+              batch={batch}
+              onCode={(code) => updateCode(batch.id, code)}
+              onFiles={(files) => updateFiles(batch.id, files)}
+              onRemove={() => removeBatch(batch.id)}
+            />
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
+  batch: ImportBatch
+  onCode: (code: string) => void
+  onFiles: (files: File[]) => void
+  onRemove: () => void
+}) {
+  return (
+    <div className={`batch-card ${batch.files.length > 6 ? 'has-error' : ''}`}>
+      <div className="batch-card-head">
+        <div className="batch-icon"><Layers3 size={18} /></div>
+        <input value={batch.code} onChange={(event) => onCode(event.target.value)} aria-label="搭配服饰 code" />
+        <button className="secondary icon-button" onClick={onRemove} title="移除整套"><Trash2 size={16} /></button>
+      </div>
+      <div className="batch-note">
+        <span>{batch.files.length} 张图片</span>
+        {batch.files.length > 6 && <strong>超过 6 张，需删除后才能导入</strong>}
+      </div>
+      <FileThumbList files={batch.files} onChange={onFiles} />
+    </div>
+  )
+}
+
+function FileThumbList({ files, onChange }: { files: File[]; onChange: (files: File[]) => void }) {
+  const [dragIndex, setDragIndex] = useState<number | null>(null)
+  function move(from: number, to: number) {
+    if (to < 0 || to >= files.length) return
+    const next = [...files]
+    const [item] = next.splice(from, 1)
+    next.splice(to, 0, item)
+    onChange(next)
+  }
+  return (
+    <div className="file-thumb-grid">
+      {files.map((file, index) => (
+        <div
+          className="file-thumb"
+          key={`${file.name}-${file.size}-${index}`}
+          draggable
+          onDragStart={() => setDragIndex(index)}
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={() => {
+            if (dragIndex !== null) move(dragIndex, index)
+            setDragIndex(null)
+          }}
+        >
+          <img src={URL.createObjectURL(file)} alt={file.name} />
+          <span>{file.name}</span>
+          <div className="thumb-actions">
+            <button onClick={() => move(index, index - 1)} title="前移"><ArrowUp size={14} /></button>
+            <button onClick={() => move(index, index + 1)} title="后移"><ArrowDown size={14} /></button>
+            <label title="替换图片">
+              <ImagePlus size={14} />
+              <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
+                const replacement = event.target.files?.[0]
+                if (!replacement) return
+                const next = [...files]
+                next[index] = replacement
+                onChange(next)
+              }} />
+            </label>
+            <button onClick={() => onChange(files.filter((_, itemIndex) => itemIndex !== index))} title="删除图片"><X size={14} /></button>
+          </div>
+        </div>
+      ))}
     </div>
   )
 }
@@ -562,7 +657,13 @@ function UploadBox({ files, setFiles, max, compact = false }: { files: File[]; s
   )
 }
 
-function GarmentCard({ item, onTag, run }: { item: StylingGarment; onTag?: () => void; run?: any }) {
+function GarmentCard({ item, onTag, onOpen, onArchive, run }: {
+  item: StylingGarment
+  onTag?: () => void
+  onOpen?: () => void
+  onArchive?: () => void
+  run?: any
+}) {
   const tags = item.aiTags ?? {}
   const effective = item.effectiveTags ?? {}
   const meta = item.tagMeta ?? {}
@@ -589,7 +690,146 @@ function GarmentCard({ item, onTag, run }: { item: StylingGarment; onTag?: () =>
         {run && <CodeEditor item={item} run={run} />}
         {run && <ManualTagsEditor item={item} run={run} />}
       </details>
-      {onTag && <button className="secondary" onClick={onTag}>{item.status === 'READY' ? '重新打标' : '保存并打标'}</button>}
+      <div className="card-actions">
+        {onOpen && <button className="secondary" onClick={onOpen}><Eye size={16} /> 详情</button>}
+        {onTag && <button className="secondary" onClick={onTag}>{item.status === 'READY' ? '重新打标' : '保存并打标'}</button>}
+        {onArchive && <button className="secondary" onClick={onArchive}><Trash2 size={16} /> 归档</button>}
+      </div>
+    </div>
+  )
+}
+
+function GarmentDetailDrawer({ item, run, onClose, onChange }: {
+  item: StylingGarment
+  run: any
+  onClose: () => void
+  onChange: (item: StylingGarment | null) => void
+}) {
+  const [working, setWorking] = useState(item.images ?? [])
+  const [pendingFiles, setPendingFiles] = useState<File[]>([])
+  const [removedIds, setRemovedIds] = useState<number[]>([])
+  const [dirty, setDirty] = useState(false)
+  const [dragIndex, setDragIndex] = useState<number | null>(null)
+  const [confirmPurge, setConfirmPurge] = useState(false)
+  const [confirmCode, setConfirmCode] = useState('')
+
+  useEffect(() => {
+    setWorking(item.images ?? [])
+    setPendingFiles([])
+    setRemovedIds([])
+    setDirty(false)
+  }, [item.id])
+
+  function move(from: number, to: number) {
+    if (to < 0 || to >= working.length) return
+    const next = [...working]
+    const [image] = next.splice(from, 1)
+    next.splice(to, 0, image)
+    setWorking(next)
+    setDirty(true)
+  }
+
+  async function save(retag: boolean) {
+    const visibleCount = working.length + pendingFiles.length
+    if (visibleCount > 6) throw new Error('单套搭配服饰最多保存 6 张图片')
+    await run(retag ? '保存并重新打标中...' : '保存搭配服饰中...', async () => {
+      for (const id of removedIds) await api.deleteStylingGarmentImage(id)
+      for (const [index, image] of working.entries()) await api.updateStylingGarmentImage(image.id, { sortOrder: index })
+      let latest = item
+      if (pendingFiles.length) latest = (await api.addStylingGarmentImages(item.id, pendingFiles)).item
+      if (retag) latest = (await api.tagStylingGarment(item.id)).item
+      return latest
+    }, (latest: StylingGarment) => onChange(latest))
+  }
+
+  return (
+    <div className="drawer-backdrop">
+      <aside className="detail-drawer">
+        <div className="drawer-head">
+          <div>
+            <h2>{item.code}</h2>
+            <span className={`status ${item.status.toLowerCase()}`}>{garmentStatus(item.status)}</span>
+          </div>
+          <button className="secondary icon-button" onClick={onClose} title="关闭"><X size={16} /></button>
+        </div>
+        <div className="drawer-section">
+          <Meta label="更新时间" value={dateText(item.updatedAt)} />
+          <Meta label="图片" value={`${working.length + pendingFiles.length}/6 张`} />
+        </div>
+        <div className="drawer-section">
+          <div className="section-head">
+            <strong>图片</strong>
+            <label className="secondary">
+              <ImagePlus size={16} /> 追加
+              <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => {
+                setPendingFiles((current) => [...current, ...Array.from(event.target.files ?? [])])
+                setDirty(true)
+              }} />
+            </label>
+          </div>
+          <p className="edit-hint">此次修改会影响打标。排序第一张会作为封面和主要参考图。</p>
+          <div className="saved-image-grid">
+            {working.map((image, index) => (
+              <div
+                className="saved-image-card"
+                key={image.id}
+                draggable
+                onDragStart={() => setDragIndex(index)}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={() => {
+                  if (dragIndex !== null) move(dragIndex, index)
+                  setDragIndex(null)
+                }}
+              >
+                <img src={mediaUrl(image.asset.previewUrl ?? image.asset.thumbUrl)} alt={image.asset.filename} />
+                <span>{image.asset.filename}</span>
+                <div className="thumb-actions">
+                  <button onClick={() => window.open(mediaUrl(image.asset.originalUrl ?? image.asset.previewUrl), '_blank')} title="放大查看"><Eye size={14} /></button>
+                  <button onClick={() => move(index, index - 1)} title="前移"><ArrowUp size={14} /></button>
+                  <button onClick={() => move(index, index + 1)} title="后移"><ArrowDown size={14} /></button>
+                  <button onClick={() => {
+                    setWorking((current) => current.filter((itemImage) => itemImage.id !== image.id))
+                    setRemovedIds((current) => [...current, image.id])
+                    setDirty(true)
+                  }} title="删除图片"><Trash2 size={14} /></button>
+                </div>
+              </div>
+            ))}
+            {pendingFiles.map((file, index) => (
+              <div className="saved-image-card is-pending" key={`${file.name}-${file.size}-${index}`}>
+                <img src={URL.createObjectURL(file)} alt={file.name} />
+                <span>{file.name}</span>
+                <div className="thumb-actions">
+                  <button onClick={() => setPendingFiles((files) => files.filter((_, fileIndex) => fileIndex !== index))} title="删除图片"><Trash2 size={14} /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+          {working.length + pendingFiles.length > 6 && <span className="inline-error">超过 6 张，需删除后才能保存</span>}
+        </div>
+        <details className="tag-details" open>
+          <summary>标签摘要</summary>
+          <Meta label="AI 标签" value={compactTagLine(item.aiTags ?? {})} />
+          <Meta label="生效标签" value={compactTagLine(item.effectiveTags ?? {})} />
+        </details>
+        <div className="drawer-actions">
+          <button className="secondary" disabled={!dirty || working.length + pendingFiles.length > 6} onClick={() => void save(false)}>仅保存</button>
+          <button className="primary" disabled={!dirty || working.length + pendingFiles.length > 6} onClick={() => void save(true)}>保存并重新打标</button>
+        </div>
+        <div className="danger-zone">
+          <strong>删除</strong>
+          <button className="secondary" onClick={() => void run('归档搭配服饰中...', () => api.deleteStylingGarment(item.id), () => {
+            onChange(null)
+            onClose()
+          })}>归档</button>
+          <label className="danger-check"><input type="checkbox" checked={confirmPurge} onChange={(event) => setConfirmPurge(event.target.checked)} /> 同时删除关联记录和文件</label>
+          {confirmPurge && <input value={confirmCode} onChange={(event) => setConfirmCode(event.target.value)} placeholder={`输入 ${item.code} 确认`} />}
+          {confirmPurge && <button className="danger" disabled={confirmCode !== item.code} onClick={() => void run('级联删除搭配服饰中...', () => api.deleteStylingGarment(item.id, { purge: true, confirmCode }), () => {
+            onChange(null)
+            onClose()
+          })}>级联删除</button>}
+        </div>
+      </aside>
     </div>
   )
 }

@@ -150,6 +150,22 @@ export const api = {
     request<{ item: StylingGarment }>(`/api/styling-garments/${id}/save-and-tag`, { method: 'POST' }),
   updateStylingGarment: (id: number, payload: { code?: string; manualTags?: Record<string, unknown> }) =>
     request<{ item: StylingGarment }>(`/api/styling-garments/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  getStylingGarment: (id: number) =>
+    request<{ item: StylingGarment }>(`/api/styling-garments/${id}`),
+  addStylingGarmentImages: (id: number, files: File[]) => {
+    const form = new FormData()
+    files.forEach((file) => form.append('files', file))
+    return request<{ item: StylingGarment }>(`/api/styling-garments/${id}/images`, { method: 'POST', body: form })
+  },
+  updateStylingGarmentImage: (id: number, payload: { sortOrder?: number }) =>
+    request<{ item: StylingGarment }>(`/api/styling-garment-images/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteStylingGarmentImage: (id: number) =>
+    request<{ item: StylingGarment }>(`/api/styling-garment-images/${id}`, { method: 'DELETE' }),
+  deleteStylingGarment: (id: number, options?: { purge?: boolean; confirmCode?: string }) =>
+    request<{ ok: boolean; archived?: boolean; purged?: boolean }>(
+      params(`/api/styling-garments/${id}`, { purge: options?.purge, confirmCode: options?.confirmCode }),
+      { method: 'DELETE' },
+    ),
   listTasks: (options?: { limit?: number; offset?: number }) =>
     request<Paginated<GenerationTask>>(params('/api/generation-tasks', options ?? {})),
   getTask: (id: number, includeDebug = false) =>
