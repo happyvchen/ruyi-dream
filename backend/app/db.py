@@ -172,6 +172,168 @@ def init_db() -> None:
               payload_json TEXT NOT NULL,
               created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS media_assets (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              object_key TEXT NOT NULL,
+              thumb_key TEXT,
+              preview_key TEXT,
+              original_filename TEXT NOT NULL,
+              mime_type TEXT NOT NULL,
+              width INTEGER,
+              height INTEGER,
+              size_bytes INTEGER,
+              thumb_size_bytes INTEGER,
+              preview_size_bytes INTEGER,
+              hash TEXT,
+              status TEXT NOT NULL DEFAULT 'READY',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              deleted_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS styling_garments (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              code TEXT NOT NULL UNIQUE,
+              status TEXT NOT NULL DEFAULT 'DRAFT',
+              manual_tags_json TEXT,
+              ai_tags_json TEXT,
+              tag_schema_version TEXT,
+              tag_completed_at TEXT,
+              tag_error TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              deleted_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS styling_garment_images (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              styling_garment_id INTEGER NOT NULL REFERENCES styling_garments(id) ON DELETE CASCADE,
+              media_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              status TEXT NOT NULL DEFAULT 'READY',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              deleted_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS generation_tasks (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'DRAFT',
+              current_input_version_id INTEGER,
+              active_styling_id INTEGER,
+              active_preview_id INTEGER,
+              active_result_set_id INTEGER,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              deleted_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS generation_task_input_versions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+              version_number INTEGER NOT NULL,
+              name_snapshot TEXT NOT NULL,
+              image_snapshot_json TEXT NOT NULL,
+              hero_visual_summary TEXT,
+              created_at TEXT NOT NULL,
+              UNIQUE(task_id, version_number)
+            );
+
+            CREATE TABLE IF NOT EXISTS generation_task_images (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+              media_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              status TEXT NOT NULL DEFAULT 'READY',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              deleted_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS generation_stylings (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+              input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
+              source_material_ids_json TEXT NOT NULL,
+              selected_material_ids_json TEXT NOT NULL,
+              selected_material_snapshot_json TEXT NOT NULL,
+              reason_summary TEXT,
+              warnings_json TEXT,
+              status TEXT NOT NULL DEFAULT 'SUCCEEDED',
+              attempt_id INTEGER,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS generation_shot_plans (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+              styling_id INTEGER NOT NULL REFERENCES generation_stylings(id) ON DELETE CASCADE,
+              sort_order INTEGER NOT NULL,
+              shot_type TEXT,
+              plan_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(styling_id, sort_order)
+            );
+
+            CREATE TABLE IF NOT EXISTS generation_previews (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+              styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
+              input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
+              preview_asset_id INTEGER REFERENCES media_assets(id),
+              status TEXT NOT NULL DEFAULT 'QUEUED',
+              active_attempt_id INTEGER,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS generation_result_sets (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+              input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
+              styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
+              preview_id INTEGER NOT NULL REFERENCES generation_previews(id),
+              status TEXT NOT NULL DEFAULT 'RUNNING',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS generation_result_images_new (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              result_set_id INTEGER NOT NULL REFERENCES generation_result_sets(id) ON DELETE CASCADE,
+              shot_plan_id INTEGER NOT NULL REFERENCES generation_shot_plans(id),
+              sort_order INTEGER NOT NULL,
+              status TEXT NOT NULL DEFAULT 'QUEUED',
+              current_asset_id INTEGER REFERENCES media_assets(id),
+              active_attempt_id INTEGER,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS generation_attempts (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              owner_type TEXT NOT NULL,
+              owner_id INTEGER NOT NULL,
+              provider TEXT NOT NULL,
+              provider_request_id TEXT,
+              status TEXT NOT NULL DEFAULT 'RUNNING',
+              started_at TEXT,
+              completed_at TEXT,
+              failed_at TEXT,
+              cancelled_at TEXT,
+              error_code TEXT,
+              error_message TEXT,
+              request_snapshot_json TEXT,
+              response_snapshot_json TEXT,
+              output_asset_id INTEGER REFERENCES media_assets(id),
+              retry_of_attempt_id INTEGER REFERENCES generation_attempts(id),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
             """
         )
         ensure_migration_table(db)

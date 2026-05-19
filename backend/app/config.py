@@ -47,7 +47,7 @@ class Settings:
     max_garment_images_per_sku = int(os.getenv("APP_MAX_GARMENT_IMAGES_PER_SKU", "20"))
     max_head_references_per_profile = int(os.getenv("APP_MAX_HEAD_REFERENCES_PER_PROFILE", "20"))
     api_access_token = os.getenv("APP_API_ACCESS_TOKEN", os.getenv("APP_ACCESS_TOKEN", ""))
-    gate_password = os.getenv("APP_GATE_PASSWORD", "")
+    gate_password = os.getenv("APP_GATE_PASSWORD", "password")
     gate_password_hash = os.getenv("APP_GATE_PASSWORD_HASH", "")
     session_secret = os.getenv("APP_SESSION_SECRET", "")
     session_ttl_seconds = int(os.getenv("APP_SESSION_TTL_SECONDS", str(12 * 60 * 60)))
@@ -71,7 +71,7 @@ class Settings:
         origin.strip()
         for origin in os.getenv(
             "BACKEND_CORS_ORIGINS",
-            "http://localhost:5173,http://127.0.0.1:5173",
+            "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174",
         ).split(",")
         if origin.strip()
     ]
