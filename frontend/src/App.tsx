@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { FormEvent, ReactNode } from 'react'
+import type { DragEvent, FormEvent, ReactNode } from 'react'
 import {
   Bot,
   ChevronLeft,
@@ -8,10 +8,13 @@ import {
   Download,
   Eye,
   FileImage,
+  FolderOpen,
   GalleryVerticalEnd,
   History,
   ImagePlus,
+  Images,
   Library,
+  Layers3,
   Loader2,
   LogOut,
   PanelLeftClose,
@@ -30,6 +33,17 @@ import type { GenerationTask, MediaAsset, ModelProfile, StylingGarment } from '.
 
 type Page = 'studio' | 'library' | 'model' | 'records'
 type StudioStep = 0 | 1 | 2 | 3
+type FileSystemEntry = {
+  name: string
+  isFile: boolean
+  isDirectory: boolean
+}
+type FileSystemFileEntry = FileSystemEntry & {
+  file: (success: (file: File) => void, error?: () => void) => void
+}
+type FileSystemDirectoryEntry = FileSystemEntry & {
+  createReader: () => { readEntries: (success: (entries: FileSystemEntry[]) => void, error?: () => void) => void }
+}
 
 const steps = [
   { title: '上传主推款', icon: Upload },
@@ -254,17 +268,50 @@ function StepRail({ active, max, onSelect }: { active: StudioStep; max: StudioSt
 
 function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any }) {
   const [files, setFiles] = useState<File[]>([])
-  const [name, setName] = useState(() => timestampName())
+  const [name, setName] = useState('')
+
+  function addHeroFiles(nextFiles: File[]) {
+    const imageFiles = nextFiles
+      .filter((file) => file.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(file.name))
+      .sort((a, b) => importPath(a).localeCompare(importPath(b), 'zh-CN', { numeric: true }))
+      .slice(0, 8)
+    setFiles(imageFiles)
+    const firstPath = imageFiles[0] ? importPath(imageFiles[0]) : ''
+    const defaultName = firstPath.includes('/') ? sanitizeClientName(firstPath.split('/')[0]) : timestampName()
+    setName(defaultName)
+  }
+
   return (
     <div className="step-panel">
-      <div className="step-copy"><h2>上传主推款</h2><p>推荐 3-5 张，最多 8 张。按正面、背面/侧面、细节排序。</p></div>
-      <UploadBox files={files} setFiles={setFiles} max={8} />
-      <div className="inline-form">
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="任务名称" />
-        <button className="primary" disabled={!files.length} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, files), (r: { item: GenerationTask }) => setTask(r.item))}>
-          <ImagePlus size={16} /> 创建任务
-        </button>
+      <div className="step-copy"><h2>上传主推款</h2><p>支持多张图片或一个文件夹。推荐 3-5 张，最多 8 张，排序越靠前越重要。</p></div>
+      <div className="hero-upload">
+        <div>
+          <Upload size={24} />
+          <strong>上传主推款图片</strong>
+          <span>{files.length ? `已选择 ${files.length}/8 张` : '选择图片或文件夹后再填写任务名'}</span>
+        </div>
+        <div className="import-actions">
+          <label className="secondary">
+            <ImagePlus size={16} /> 选择图片
+            <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => addHeroFiles(Array.from(event.target.files ?? []))} />
+          </label>
+          <label className="secondary">
+            <FolderOpen size={16} /> 选择文件夹
+            <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} onChange={(event) => addHeroFiles(Array.from(event.target.files ?? []))} />
+          </label>
+        </div>
       </div>
+      {files.length > 0 && (
+        <div className="upload-review">
+          <ThumbGrid assets={files.map((file, index) => ({ id: index, objectKey: '', filename: file.name, mimeType: file.type, thumbUrl: URL.createObjectURL(file) }))} />
+          <div className="inline-form">
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="任务名称" />
+            <button className="primary" disabled={!files.length || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, files), (r: { item: GenerationTask }) => setTask(r.item))}>
+              <ImagePlus size={16} /> 创建任务
+            </button>
+          </div>
+        </div>
+      )}
       {task && <CurrentTaskCard task={task} />}
     </div>
   )
@@ -319,26 +366,126 @@ function FinalStep({ task, setTask, run }: { task: GenerationTask | null; setTas
 }
 
 function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }) {
-  const [files, setFiles] = useState<File[]>([])
-  const [code, setCode] = useState(timestampName())
   const [query, setQuery] = useState('')
-  const visible = garments.filter((item) => !query || item.code.toLowerCase().includes(query.toLowerCase()))
+  const visible = garments.filter((item) => {
+    const haystack = `${item.code} ${JSON.stringify(item.effectiveTags ?? item.aiTags ?? {})}`.toLowerCase()
+    return !query || haystack.includes(query.toLowerCase())
+  })
   return (
     <section className="page">
       <PageTitle title="搭配服饰库" subtitle="真实会出现在最终图里的配角服装。当前不支持鞋、包、饰品入库。" />
-      <div className="library-layout">
-        <div className="panel">
-          <div className="toolbar"><div className="search"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索 code / 标签" /></div></div>
+      <BatchImportPanel run={run} />
+      <div className="panel library-panel">
+        <div className="toolbar">
+          <div className="search"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索 code / 标签" /></div>
+          <span className="muted-count">{visible.length} / {garments.length} 套</span>
+        </div>
+        {visible.length ? (
           <div className="garment-grid">{visible.map((item) => <GarmentCard key={item.id} item={item} run={run} onTag={() => void run('AI 打标中...', () => api.tagStylingGarment(item.id))} />)}</div>
-        </div>
-        <div className="panel side-editor">
-          <h3>导入搭配服饰</h3>
-          <UploadBox files={files} setFiles={setFiles} max={6} compact />
-          <input value={code} onChange={(e) => setCode(e.target.value)} />
-          <button className="primary wide" disabled={!files.length} onClick={() => void run('保存搭配服饰中...', () => api.createStylingGarment(code, files), () => { setFiles([]); setCode(timestampName()) })}>保存</button>
-        </div>
+        ) : <EmptyState title="暂无搭配服饰" text="上传散图、一个文件夹，或拖入多个一级文件夹创建搭配服饰草稿。" />}
       </div>
     </section>
+  )
+}
+
+type ImportBatch = {
+  id: string
+  code: string
+  files: File[]
+}
+
+function BatchImportPanel({ run }: { run: any }) {
+  const [batches, setBatches] = useState<ImportBatch[]>([])
+  const [localError, setLocalError] = useState('')
+
+  function addFiles(files: File[]) {
+    const next = groupImportFiles(files)
+    setLocalError('')
+    setBatches((current) => {
+      const existingCodes = new Set(current.map((item) => item.code))
+      return [
+        ...current,
+        ...next.map((item) => {
+          if (!existingCodes.has(item.code)) {
+            existingCodes.add(item.code)
+            return item
+          }
+          const code = `${item.code}-${current.length + 1}`
+          existingCodes.add(code)
+          return { ...item, id: `${item.id}-${current.length}`, code }
+        }),
+      ]
+    })
+  }
+
+  async function handleDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault()
+    const files = await filesFromDataTransfer(event.dataTransfer)
+    addFiles(files)
+  }
+
+  function updateCode(id: string, code: string) {
+    setBatches((items) => items.map((item) => item.id === id ? { ...item, code } : item))
+  }
+
+  function removeBatch(id: string) {
+    setBatches((items) => items.filter((item) => item.id !== id))
+  }
+
+  async function saveDrafts() {
+    const invalid = batches.find((batch) => !sanitizeClientName(batch.code))
+    if (invalid) {
+      setLocalError('每套搭配服饰都需要一个有效 code')
+      return
+    }
+    await run(`导入 ${batches.length} 套搭配服饰中...`, async () => {
+      for (const batch of batches) {
+        await api.createStylingGarment(batch.code, batch.files)
+      }
+      return true
+    }, () => setBatches([]))
+  }
+
+  return (
+    <div className="panel import-panel">
+      <div className="import-head">
+        <div>
+          <h3>导入搭配服饰</h3>
+          <p>散图会合并为一套；单文件夹是一套；拖入多个一级文件夹会拆成多套。单套最多 6 张，推荐 1-3 张。</p>
+        </div>
+        <button className="primary" disabled={!batches.length} onClick={() => void saveDrafts()}>导入草稿</button>
+      </div>
+      <div className="import-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
+        <Images size={22} />
+        <strong>拖入图片或文件夹</strong>
+        <span>支持多张图片、一个文件夹、多个一级文件夹</span>
+        <div className="import-actions">
+          <label className="secondary">
+            <ImagePlus size={16} /> 选择图片
+            <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
+          </label>
+          <label className="secondary">
+            <FolderOpen size={16} /> 选择文件夹
+            <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
+          </label>
+        </div>
+      </div>
+      {localError && <span className="inline-error">{localError}</span>}
+      {batches.length > 0 && (
+        <div className="batch-list">
+          {batches.map((batch) => (
+            <div className="batch-row" key={batch.id}>
+              <div className="batch-icon"><Layers3 size={18} /></div>
+              <div>
+                <input value={batch.code} onChange={(event) => updateCode(batch.id, event.target.value)} aria-label="搭配服饰 code" />
+                <span>{batch.files.length} 张 · {batch.files.slice(0, 3).map((file) => file.name).join(' / ')}{batch.files.length > 3 ? ' ...' : ''}</span>
+              </div>
+              <button className="secondary" onClick={() => removeBatch(batch.id)}>移除</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -426,6 +573,7 @@ function GarmentCard({ item, onTag, run }: { item: StylingGarment; onTag?: () =>
     <div className="garment-card">
       <AssetThumb asset={item.images?.[0]?.asset ?? (item.coverUrl ? { id: item.id, objectKey: '', filename: item.code, mimeType: '', thumbUrl: item.coverUrl } : null)} large />
       <div><strong>{item.code}</strong><span className={`status ${item.status.toLowerCase()}`}>{garmentStatus(item.status)}</span></div>
+      {item.tagError && <span className="inline-error">{item.tagError}</span>}
       <p>{brief}</p>
       <div className="tag-summary">
         <span>{String(tags.category ?? effective.category ?? 'unknown')}</span>
@@ -438,9 +586,29 @@ function GarmentCard({ item, onTag, run }: { item: StylingGarment; onTag?: () =>
         <Meta label="AI 标签" value={compactTagLine(tags)} />
         <Meta label="标题证据" value={compactTagLine(item.officialTitleTags ?? {})} />
         <Meta label="生效标签" value={compactTagLine(effective)} />
+        {run && <CodeEditor item={item} run={run} />}
         {run && <ManualTagsEditor item={item} run={run} />}
       </details>
       {onTag && <button className="secondary" onClick={onTag}>{item.status === 'READY' ? '重新打标' : '保存并打标'}</button>}
+    </div>
+  )
+}
+
+function CodeEditor({ item, run }: { item: StylingGarment; run: any }) {
+  const [value, setValue] = useState(item.code)
+  const changed = value.trim() !== item.code
+
+  useEffect(() => {
+    setValue(item.code)
+  }, [item.id, item.code])
+
+  return (
+    <div className="code-editor">
+      <label>code</label>
+      <div>
+        <input value={value} onChange={(event) => setValue(event.target.value)} />
+        <button className="secondary" disabled={!changed} onClick={() => void run('保存 code 中...', () => api.updateStylingGarment(item.id, { code: value }))}>保存</button>
+      </div>
     </div>
   )
 }
@@ -541,6 +709,83 @@ function compactTagLine(value: Record<string, unknown>) {
     .filter((key) => value[key] !== undefined && value[key] !== null && value[key] !== '')
     .map((key) => `${key}: ${Array.isArray(value[key]) ? (value[key] as unknown[]).join('/') : typeof value[key] === 'object' ? JSON.stringify(value[key]) : String(value[key])}`)
   return parts.length ? parts.slice(0, 4).join(' · ') : '暂无'
+}
+
+function groupImportFiles(files: File[]): ImportBatch[] {
+  const imageFiles = files
+    .filter((file) => file.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(file.name))
+    .sort((a, b) => importPath(a).localeCompare(importPath(b), 'zh-CN', { numeric: true }))
+  if (!imageFiles.length) return []
+
+  const paths = imageFiles.map(importPath)
+  const hasFolders = paths.some((path) => path.includes('/'))
+  if (!hasFolders) {
+    return [{ id: `loose-${Date.now()}`, code: timestampName(), files: imageFiles.slice(0, 6) }]
+  }
+
+  const splitPaths = paths.map((path) => path.split('/').filter(Boolean))
+  const roots = new Set(splitPaths.map((parts) => parts[0]))
+  const root = roots.size === 1 ? splitPaths[0][0] : ''
+  const hasImagesAtRoot = Boolean(root) && splitPaths.some((parts) => parts.length === 2)
+  const hasNestedFolders = Boolean(root) && splitPaths.some((parts) => parts.length > 2)
+  const grouped = new Map<string, File[]>()
+
+  imageFiles.forEach((file) => {
+    const parts = importPath(file).split('/').filter(Boolean)
+    const key = roots.size === 1 && hasNestedFolders && !hasImagesAtRoot ? parts.slice(0, 2).join('/') : parts[0]
+    grouped.set(key, [...(grouped.get(key) ?? []), file])
+  })
+
+  return Array.from(grouped.entries()).map(([key, groupFiles], index) => ({
+    id: `${key}-${index}`,
+    code: sanitizeClientName(key.split('/').pop() || key || timestampName()),
+    files: groupFiles.slice(0, 6),
+  }))
+}
+
+function importPath(file: File) {
+  return ((file as File & { webkitRelativePath?: string; relativePath?: string }).webkitRelativePath || (file as File & { relativePath?: string }).relativePath || file.name).replace(/^\/+/, '')
+}
+
+function sanitizeClientName(value: string) {
+  return value.trim().replace(/[^\u4e00-\u9fa5A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80)
+}
+
+async function filesFromDataTransfer(dataTransfer: DataTransfer): Promise<File[]> {
+  const entries = Array.from(dataTransfer.items)
+    .map((item) => (item as DataTransferItem & { webkitGetAsEntry?: () => FileSystemEntry | null }).webkitGetAsEntry?.())
+    .filter(Boolean)
+  if (!entries.length) return Array.from(dataTransfer.files)
+  const files = await Promise.all(entries.map((entry) => readEntry(entry as FileSystemEntry, '')))
+  return files.flat()
+}
+
+function readEntry(entry: FileSystemEntry, parentPath: string): Promise<File[]> {
+  if (entry.isFile) {
+    return new Promise((resolve) => {
+      ;(entry as FileSystemFileEntry).file((file) => {
+        Object.defineProperty(file, 'relativePath', { value: `${parentPath}${file.name}` })
+        resolve([file])
+      }, () => resolve([]))
+    })
+  }
+  const directory = entry as FileSystemDirectoryEntry
+  const reader = directory.createReader()
+  return new Promise((resolve) => {
+    const allEntries: FileSystemEntry[] = []
+    const readBatch = () => {
+      reader.readEntries(async (batch) => {
+        if (!batch.length) {
+          const nested = await Promise.all(allEntries.map((child) => readEntry(child, `${parentPath}${directory.name}/`)))
+          resolve(nested.flat())
+          return
+        }
+        allEntries.push(...batch)
+        readBatch()
+      }, () => resolve([]))
+    }
+    readBatch()
+  })
 }
 
 function angleLabel(angle?: string | null) {
