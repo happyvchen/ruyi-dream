@@ -13,6 +13,8 @@
 | `00_product_overview/CLAUDE.md` | 产品定位、MVP 范围、PRD | **任何**产品/功能设计前 |
 | `01_generation_flow/CLAUDE.md` | 生成主流程、Image-2 输入策略、生成要素职责拆分 | 设计生成链路、任务包、prompt 策略时 |
 | `02_brand_and_assets/CLAUDE.md` | 搭配服饰、标签、媒体资产、数字模特、ShotPlan 字段 | 处理素材、标签、媒体、图位规则时 |
+| `02_brand_and_assets/lily_tagging_research_raw.md` | Lily 标签体系资料备份：官方公开信息、天猫店铺采集、本地素材盘点、甄别规则 | 追溯 Lily 标签体系设计依据时 |
+| `02_brand_and_assets/lily_tagging_system.md` | Lily 服装视觉生产标签体系：AI 标签、人工标签、官方标题标签、选搭压缩格式 | 实现或评审 Lily 标签体系时 |
 | `03_ux_guide/CLAUDE.md` | 普通用户视角 UI/UX、页面信息层级、交互边界 | 设计或实现前端页面时 |
 | `04_implementation_guide/CLAUDE.md` | 技术路线、生产实操、模型分工、任务包落地方式 | 工程实现、技术拆分、生产流程设计时 |
 
