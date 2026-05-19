@@ -164,7 +164,17 @@ class ReviewStatusRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
+    username: str | None = None
     password: str
+
+
+class StylingGarmentUpdateRequest(BaseModel):
+    code: str | None = None
+    manualTags: dict[str, Any] | None = None
+
+
+class GenerationTaskUpdateRequest(BaseModel):
+    name: str | None = None
 
 
 class GarmentSkuUpdateRequest(BaseModel):
@@ -282,9 +292,12 @@ def login(payload: LoginRequest, request: Request) -> JSONResponse:
         return JSONResponse({"authRequired": False, "authenticated": True})
     if is_login_rate_limited(request):
         return JSONResponse(status_code=429, content={"detail": "登录尝试过多，请稍后再试"})
+    if payload.username is not None and payload.username != "user":
+        record_login_failure(request)
+        return JSONResponse(status_code=401, content={"detail": "用户名或密码不正确"})
     if not is_gate_password_valid(payload.password):
         record_login_failure(request)
-        return JSONResponse(status_code=401, content={"detail": "访问密码不正确"})
+        return JSONResponse(status_code=401, content={"detail": "用户名或密码不正确"})
     clear_login_failures(request)
     response = JSONResponse({"authRequired": True, "authenticated": True})
     response.set_cookie(
@@ -743,6 +756,413 @@ def delete_garment_image(image_id: int) -> dict[str, Any]:
 
     cleanup_objects(image_object_keys(storage_path))
     return {"ok": True}
+
+
+@app.get("/api/styling-garments")
+def list_styling_garments(
+    limit: int = Query(60, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    keyword: str | None = Query(None),
+) -> dict[str, Any]:
+    search = f"%{keyword.strip()}%" if keyword and keyword.strip() else None
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT sg.*,
+              (SELECT ma.object_key FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_key,
+              (SELECT COUNT(*) FROM styling_garment_images sgi WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL) AS image_count
+            FROM styling_garments sg
+            WHERE sg.deleted_at IS NULL
+              AND (? IS NULL OR sg.code LIKE ? OR sg.status LIKE ? OR sg.ai_tags_json LIKE ?)
+            ORDER BY sg.updated_at DESC, sg.id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (search, search, search, search, limit + 1, offset),
+        ).fetchall()
+        items = rows[:limit]
+        return {
+            "items": [serialize_styling_garment(row, include_images=False) for row in items],
+            "limit": limit,
+            "offset": offset,
+            "nextOffset": offset + limit if len(rows) > limit else None,
+            "hasMore": len(rows) > limit,
+        }
+
+
+@app.get("/api/styling-garments/{garment_id}")
+def get_styling_garment(garment_id: int) -> dict[str, Any]:
+    return {"item": get_styling_garment_by_id(garment_id)}
+
+
+@app.post("/api/styling-garments")
+async def create_styling_garment(
+    code: str = Form(...),
+    files: list[UploadFile] = File(...),
+) -> dict[str, Any]:
+    clean_code = sanitize_name(code)
+    if not clean_code:
+        raise HTTPException(status_code=400, detail="搭配服饰代码不能为空")
+    if not files:
+        raise HTTPException(status_code=400, detail="至少上传一张图片")
+    if len(files) > 6:
+        raise HTTPException(status_code=400, detail="单套搭配服饰最多上传 6 张图片")
+    timestamp = now_iso()
+    prefix = join_key("styling-garments", f"{clean_code}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}")
+    assets = await save_uploads_as_media_assets(files, prefix)
+    with get_db() as db:
+        duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
+        if duplicate:
+            cleanup_objects([key for asset in assets for key in image_object_keys(asset["objectKey"])])
+            raise HTTPException(status_code=409, detail="搭配服饰代码已存在")
+        cursor = db.execute(
+            """
+            INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, tag_schema_version, created_at, updated_at)
+            VALUES (?, 'DRAFT', ?, ?, ?, ?, ?)
+            """,
+            (clean_code, dumps({}), dumps({}), "styling-garment-tags-v1", timestamp, timestamp),
+        )
+        garment_id = int(cursor.lastrowid)
+        for index, asset in enumerate(assets):
+            db.execute(
+                """
+                INSERT INTO styling_garment_images
+                  (styling_garment_id, media_asset_id, sort_order, status, created_at, updated_at)
+                VALUES (?, ?, ?, 'READY', ?, ?)
+                """,
+                (garment_id, asset["id"], index, timestamp, timestamp),
+            )
+        log_event(db, "styling_garment", garment_id, "created", {"code": clean_code, "fileCount": len(assets)})
+    return {"item": get_styling_garment_by_id(garment_id)}
+
+
+@app.patch("/api/styling-garments/{garment_id}")
+def update_styling_garment(garment_id: int, payload: StylingGarmentUpdateRequest) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    if payload.code is not None:
+        clean_code = sanitize_name(payload.code)
+        if not clean_code:
+            raise HTTPException(status_code=400, detail="搭配服饰代码不能为空")
+        updates["code"] = clean_code
+    if payload.manualTags is not None:
+        updates["manual_tags_json"] = dumps(payload.manualTags)
+    if not updates:
+        return {"item": get_styling_garment_by_id(garment_id)}
+    with get_db() as db:
+        row = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="搭配服饰不存在")
+        if "code" in updates:
+            duplicate = db.execute(
+                "SELECT id FROM styling_garments WHERE code = ? AND id <> ? AND deleted_at IS NULL",
+                (updates["code"], garment_id),
+            ).fetchone()
+            if duplicate:
+                raise HTTPException(status_code=409, detail="搭配服饰代码已存在")
+        updates["updated_at"] = now_iso()
+        set_clause = ", ".join(f"{key} = ?" for key in updates)
+        db.execute(f"UPDATE styling_garments SET {set_clause} WHERE id = ?", (*updates.values(), garment_id))
+    return {"item": get_styling_garment_by_id(garment_id)}
+
+
+@app.post("/api/styling-garments/{garment_id}/save-and-tag")
+async def save_and_tag_styling_garment(garment_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="搭配服饰不存在")
+        timestamp = now_iso()
+        db.execute("UPDATE styling_garments SET status = 'TAGGING_RUNNING', tag_error = NULL, updated_at = ? WHERE id = ?", (timestamp, garment_id))
+    try:
+        tags = await tag_styling_garment_with_gemini(garment_id)
+    except Exception as exc:
+        with get_db() as db:
+            db.execute(
+                "UPDATE styling_garments SET status = 'TAGGING_FAILED', tag_error = ?, updated_at = ? WHERE id = ?",
+                (str(exc), now_iso(), garment_id),
+            )
+        return {"item": get_styling_garment_by_id(garment_id)}
+    with get_db() as db:
+        timestamp = now_iso()
+        db.execute(
+            """
+            UPDATE styling_garments
+            SET status = 'READY', ai_tags_json = ?, tag_schema_version = ?, tag_completed_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (dumps(tags), tags.get("schema_version", "styling-garment-tags-v1"), timestamp, timestamp, garment_id),
+        )
+        log_event(db, "styling_garment", garment_id, "tagged", tags)
+    return {"item": get_styling_garment_by_id(garment_id)}
+
+
+@app.delete("/api/styling-garments/{garment_id}")
+def delete_styling_garment(garment_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute("SELECT id FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="搭配服饰不存在")
+        timestamp = now_iso()
+        db.execute("UPDATE styling_garments SET status = 'DELETED', deleted_at = ?, updated_at = ? WHERE id = ?", (timestamp, timestamp, garment_id))
+        db.execute("UPDATE styling_garment_images SET deleted_at = ?, updated_at = ? WHERE styling_garment_id = ?", (timestamp, timestamp, garment_id))
+    return {"ok": True}
+
+
+@app.post("/api/generation-tasks")
+async def create_generation_task(
+    name: str | None = Form(None),
+    files: list[UploadFile] = File(...),
+) -> dict[str, Any]:
+    if not files:
+        raise HTTPException(status_code=400, detail="至少上传一张主推款图片")
+    if len(files) > 8:
+        raise HTTPException(status_code=400, detail="主推款最多上传 8 张图片")
+    task_name = (name or datetime.now().strftime("%Y%m%d%H%M%S")).strip()
+    prefix = join_key("generation-tasks", f"{sanitize_name(task_name) or 'task'}-{uuid4().hex[:8]}")
+    assets = await save_uploads_as_media_assets(files, prefix)
+    timestamp = now_iso()
+    with get_db() as db:
+        cursor = db.execute(
+            "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES (?, 'READY_FOR_STYLING', ?, ?)",
+            (task_name, timestamp, timestamp),
+        )
+        task_id = int(cursor.lastrowid)
+        for index, asset in enumerate(assets):
+            db.execute(
+                """
+                INSERT INTO generation_task_images (task_id, media_asset_id, sort_order, status, created_at, updated_at)
+                VALUES (?, ?, ?, 'READY', ?, ?)
+                """,
+                (task_id, asset["id"], index, timestamp, timestamp),
+            )
+        log_event(db, "generation_task", task_id, "created", {"name": task_name, "fileCount": len(assets)})
+    return {"item": get_generation_task_by_id(task_id)}
+
+
+@app.get("/api/generation-tasks")
+def list_generation_tasks(limit: int = Query(30, ge=1, le=100), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT * FROM generation_tasks WHERE deleted_at IS NULL ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
+            (limit + 1, offset),
+        ).fetchall()
+        items = rows[:limit]
+        return {
+            "items": [serialize_generation_task(row, include_detail=False) for row in items],
+            "limit": limit,
+            "offset": offset,
+            "nextOffset": offset + limit if len(rows) > limit else None,
+            "hasMore": len(rows) > limit,
+        }
+
+
+@app.get("/api/generation-tasks/{task_id}")
+def get_generation_task(task_id: int, include_debug: bool = Query(False, alias="includeDebug")) -> dict[str, Any]:
+    return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
+
+
+@app.patch("/api/generation-tasks/{task_id}")
+def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -> dict[str, Any]:
+    if payload.name is None:
+        return {"item": get_generation_task_by_id(task_id)}
+    with get_db() as db:
+        row = db.execute("SELECT id FROM generation_tasks WHERE id = ? AND deleted_at IS NULL", (task_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="生成任务不存在")
+        db.execute("UPDATE generation_tasks SET name = ?, updated_at = ? WHERE id = ?", (payload.name.strip() or "未命名任务", now_iso(), task_id))
+    return {"item": get_generation_task_by_id(task_id)}
+
+
+@app.post("/api/generation-tasks/{task_id}/select-styling")
+async def select_generation_styling(task_id: int) -> dict[str, Any]:
+    task = get_generation_task_row(task_id)
+    if task["status"] not in {"READY_FOR_STYLING", "STYLING_READY", "FAILED"}:
+        raise HTTPException(status_code=409, detail="当前任务状态不能智能选搭")
+    input_version_id = create_generation_input_version(task_id)
+    with get_db() as db:
+        db.execute("UPDATE generation_tasks SET status = 'STYLING_RUNNING', current_input_version_id = ?, updated_at = ? WHERE id = ?", (input_version_id, now_iso(), task_id))
+    attempt_id = create_attempt("generation_styling", task_id, "gemini")
+    try:
+        selection = await select_styling_with_gemini(task_id, input_version_id)
+        selected_ids = selection.get("selected_material_ids", [])
+        if not isinstance(selected_ids, list):
+            raise RuntimeError("Gemini 返回 selected_material_ids 格式不合法")
+        selected_ids = [int(item) for item in selected_ids]
+        source_ids, selected_snapshot = get_styling_source_and_selected_snapshots(selected_ids)
+    except Exception as exc:
+        finish_attempt(attempt_id, "FAILED", error_message=str(exc))
+        with get_db() as db:
+            db.execute("UPDATE generation_tasks SET status = 'FAILED', updated_at = ? WHERE id = ?", (now_iso(), task_id))
+        raise HTTPException(status_code=502, detail=f"智能选搭失败：{exc}") from exc
+    with get_db() as db:
+        timestamp = now_iso()
+        cursor = db.execute(
+            """
+            INSERT INTO generation_stylings
+              (task_id, input_version_id, source_material_ids_json, selected_material_ids_json,
+               selected_material_snapshot_json, reason_summary, warnings_json, status, attempt_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'SUCCEEDED', ?, ?, ?)
+            """,
+            (
+                task_id,
+                input_version_id,
+                dumps(source_ids),
+                dumps(selected_ids),
+                dumps(selected_snapshot),
+                str(selection.get("reason_summary") or "已根据主推款和搭配服饰标签完成智能选搭。"),
+                dumps(selection.get("warnings") or []),
+                attempt_id,
+                timestamp,
+                timestamp,
+            ),
+        )
+        styling_id = int(cursor.lastrowid)
+        hero_summary = str(selection.get("hero_visual_summary") or "").strip()
+        if hero_summary:
+            db.execute("UPDATE generation_task_input_versions SET hero_visual_summary = ? WHERE id = ?", (hero_summary, input_version_id))
+        db.execute(
+            "UPDATE generation_tasks SET status = 'STYLING_READY', active_styling_id = ?, updated_at = ? WHERE id = ?",
+            (styling_id, timestamp, task_id),
+        )
+    finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=selection)
+    return {"item": get_generation_task_by_id(task_id, include_debug=True)}
+
+
+@app.post("/api/generation-tasks/{task_id}/preview")
+async def create_generation_preview(task_id: int) -> dict[str, Any]:
+    task = get_generation_task_row(task_id)
+    styling_id = task["active_styling_id"]
+    input_version_id = task["current_input_version_id"]
+    if not styling_id or not input_version_id or task["status"] not in {"STYLING_READY", "PREVIEW_READY", "FAILED"}:
+        raise HTTPException(status_code=409, detail="请先完成智能选搭")
+    with get_db() as db:
+        db.execute("UPDATE generation_tasks SET status = 'PREVIEW_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
+    shot_plans = ensure_generation_shot_plans(task_id, int(styling_id))
+    timestamp = now_iso()
+    with get_db() as db:
+        cursor = db.execute(
+            """
+            INSERT INTO generation_previews (task_id, styling_id, input_version_id, status, created_at, updated_at)
+            VALUES (?, ?, ?, 'RUNNING', ?, ?)
+            """,
+            (task_id, styling_id, input_version_id, timestamp, timestamp),
+        )
+        preview_id = int(cursor.lastrowid)
+    attempt_id = create_attempt("generation_preview", preview_id, "image-2")
+    try:
+        task_package = build_new_preview_task_package(task_id, int(styling_id), shot_plans)
+        asset_id, provider_response = await generate_or_placeholder_asset(task_package, join_key("generation-tasks", str(task_id), "preview", f"preview-{preview_id}.png"), "六宫格预览")
+    except Exception as exc:
+        finish_attempt(attempt_id, "FAILED", error_message=str(exc))
+        with get_db() as db:
+            timestamp = now_iso()
+            db.execute("UPDATE generation_previews SET status = 'FAILED', active_attempt_id = ?, updated_at = ? WHERE id = ?", (attempt_id, timestamp, preview_id))
+            db.execute("UPDATE generation_tasks SET status = 'FAILED', updated_at = ? WHERE id = ?", (timestamp, task_id))
+        raise HTTPException(status_code=502, detail=f"六宫格预览失败：{exc}") from exc
+    finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=provider_response, output_asset_id=asset_id)
+    with get_db() as db:
+        timestamp = now_iso()
+        db.execute(
+            "UPDATE generation_previews SET status = 'SUCCEEDED', preview_asset_id = ?, active_attempt_id = ?, updated_at = ? WHERE id = ?",
+            (asset_id, attempt_id, timestamp, preview_id),
+        )
+        db.execute(
+            "UPDATE generation_tasks SET status = 'PREVIEW_READY', active_preview_id = ?, updated_at = ? WHERE id = ?",
+            (preview_id, timestamp, task_id),
+        )
+    return {"item": get_generation_task_by_id(task_id, include_debug=True)}
+
+
+@app.post("/api/generation-tasks/{task_id}/generate-final")
+async def generate_final_images(task_id: int) -> dict[str, Any]:
+    task = get_generation_task_row(task_id)
+    if task["status"] not in {"PREVIEW_READY", "FINAL_PARTIAL", "COMPLETED"} or not task["active_preview_id"]:
+        raise HTTPException(status_code=409, detail="请先生成六宫格预览")
+    preview_id = int(task["active_preview_id"])
+    styling_id = int(task["active_styling_id"])
+    input_version_id = int(task["current_input_version_id"])
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute("UPDATE generation_tasks SET status = 'FINAL_RUNNING', updated_at = ? WHERE id = ?", (timestamp, task_id))
+        cursor = db.execute(
+            """
+            INSERT INTO generation_result_sets (task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'RUNNING', ?, ?)
+            """,
+            (task_id, input_version_id, styling_id, preview_id, timestamp, timestamp),
+        )
+        result_set_id = int(cursor.lastrowid)
+        shot_rows = db.execute(
+            "SELECT * FROM generation_shot_plans WHERE styling_id = ? AND sort_order <= 5 ORDER BY sort_order",
+            (styling_id,),
+        ).fetchall()
+        image_ids: list[int] = []
+        for shot in shot_rows:
+            image_cursor = db.execute(
+                """
+                INSERT INTO generation_result_images_new
+                  (result_set_id, shot_plan_id, sort_order, status, created_at, updated_at)
+                VALUES (?, ?, ?, 'QUEUED', ?, ?)
+                """,
+                (result_set_id, shot["id"], shot["sort_order"], timestamp, timestamp),
+            )
+            image_ids.append(int(image_cursor.lastrowid))
+    results = await asyncio.gather(
+        *(generate_single_final_image(task_id, result_set_id, image_id) for image_id in image_ids),
+        return_exceptions=True,
+    )
+    succeeded = sum(1 for result in results if not isinstance(result, Exception))
+    final_status = "COMPLETED" if succeeded == len(image_ids) else "FINAL_PARTIAL"
+    with get_db() as db:
+        timestamp = now_iso()
+        db.execute("UPDATE generation_result_sets SET status = ?, updated_at = ? WHERE id = ?", ("SUCCEEDED" if final_status == "COMPLETED" else "PARTIAL", timestamp, result_set_id))
+        db.execute("UPDATE generation_tasks SET status = ?, active_result_set_id = ?, updated_at = ? WHERE id = ?", (final_status, result_set_id, timestamp, task_id))
+    return {"item": get_generation_task_by_id(task_id, include_debug=True)}
+
+
+@app.post("/api/generation-result-images-new/{image_id}/retry")
+async def retry_new_result_image(image_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute(
+            """
+            SELECT gri.*, grs.task_id, grs.id AS result_set_id
+            FROM generation_result_images_new gri
+            JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+            WHERE gri.id = ?
+            """,
+            (image_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="结果图不存在")
+    await generate_single_final_image(int(row["task_id"]), int(row["result_set_id"]), image_id)
+    return {"item": get_generation_task_by_id(int(row["task_id"]), include_debug=True)}
+
+
+@app.get("/api/generation-records")
+def list_new_generation_records(limit: int = Query(30, ge=1, le=100), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT * FROM generation_tasks
+            WHERE deleted_at IS NULL AND status <> 'DRAFT' AND current_input_version_id IS NOT NULL
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit + 1, offset),
+        ).fetchall()
+        items = rows[:limit]
+        return {
+            "items": [serialize_generation_task(row, include_detail=False) for row in items],
+            "limit": limit,
+            "offset": offset,
+            "nextOffset": offset + limit if len(rows) > limit else None,
+            "hasMore": len(rows) > limit,
+        }
+
+
+@app.get("/api/generation-records/{task_id}")
+def get_new_generation_record(task_id: int, include_debug: bool = Query(False, alias="includeDebug")) -> dict[str, Any]:
+    return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
 
 
 @app.get("/api/model-profiles")
@@ -2822,6 +3242,837 @@ def stable_media_url(key: str | Path | None, variant: str = "original") -> str |
     if not key:
         return None
     return f"/api/media?{urlencode({'key': clean_key(key), 'variant': variant})}"
+
+
+async def save_uploads_as_media_assets(files: list[UploadFile], prefix: str) -> list[dict[str, Any]]:
+    timestamp = now_iso()
+    saved: list[dict[str, Any]] = []
+    for index, upload in enumerate(files):
+        content, content_type = await validate_upload_image(upload)
+        filename = sanitize_filename(upload.filename or "image")
+        key = unique_key(join_key(prefix, f"{index + 1:03d}-{filename}"))
+        put_fileobj(key, BytesIO(content), content_type)
+        derivative = generate_image_derivatives(key, content)
+        width = height = None
+        with Image.open(BytesIO(content)) as image:
+            width, height = image.size
+        asset = {
+            "objectKey": key,
+            "thumbKey": derivative.get("thumb"),
+            "previewKey": derivative.get("preview"),
+            "originalFilename": upload.filename or filename,
+            "mimeType": content_type,
+            "width": width,
+            "height": height,
+            "sizeBytes": len(content),
+            "thumbSizeBytes": derivative.get("thumbSize"),
+            "previewSizeBytes": derivative.get("previewSize"),
+            "hash": hashlib.sha256(content).hexdigest(),
+        }
+        with get_db() as db:
+            cursor = db.execute(
+                """
+                INSERT INTO media_assets
+                  (object_key, thumb_key, preview_key, original_filename, mime_type, width, height,
+                   size_bytes, thumb_size_bytes, preview_size_bytes, hash, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'READY', ?, ?)
+                """,
+                (
+                    asset["objectKey"],
+                    asset["thumbKey"],
+                    asset["previewKey"],
+                    asset["originalFilename"],
+                    asset["mimeType"],
+                    asset["width"],
+                    asset["height"],
+                    asset["sizeBytes"],
+                    asset["thumbSizeBytes"],
+                    asset["previewSizeBytes"],
+                    asset["hash"],
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            asset["id"] = int(cursor.lastrowid)
+        saved.append(asset)
+    return saved
+
+
+def insert_generated_media_asset(object_key: str, filename: str, content: bytes, content_type: str, derivative: dict[str, Any]) -> int:
+    timestamp = now_iso()
+    width = height = None
+    with suppress(Exception):
+        with Image.open(BytesIO(content)) as image:
+            width, height = image.size
+    with get_db() as db:
+        cursor = db.execute(
+            """
+            INSERT INTO media_assets
+              (object_key, thumb_key, preview_key, original_filename, mime_type, width, height,
+               size_bytes, thumb_size_bytes, preview_size_bytes, hash, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'READY', ?, ?)
+            """,
+            (
+                object_key,
+                derivative.get("thumb"),
+                derivative.get("preview"),
+                filename,
+                content_type,
+                width,
+                height,
+                len(content),
+                derivative.get("thumbSize"),
+                derivative.get("previewSize"),
+                hashlib.sha256(content).hexdigest(),
+                timestamp,
+                timestamp,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
+def serialize_media_asset(row: Any | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "objectKey": row["object_key"],
+        "filename": row["original_filename"],
+        "mimeType": row["mime_type"],
+        "width": row["width"],
+        "height": row["height"],
+        "sizeBytes": row["size_bytes"],
+        "url": stable_media_url(row["object_key"], "preview"),
+        "thumbUrl": stable_media_url(row["object_key"], "thumb"),
+        "previewUrl": stable_media_url(row["object_key"], "preview"),
+        "originalUrl": stable_media_url(row["object_key"], "original"),
+        "createdAt": row["created_at"],
+    }
+
+
+def get_media_asset_by_id(asset_id: int | None) -> dict[str, Any] | None:
+    if not asset_id:
+        return None
+    with get_db() as db:
+        row = db.execute("SELECT * FROM media_assets WHERE id = ?", (asset_id,)).fetchone()
+    return serialize_media_asset(row)
+
+
+def serialize_styling_garment(row: Any, include_images: bool = True) -> dict[str, Any]:
+    item = {
+        "id": row["id"],
+        "code": row["code"],
+        "status": row["status"],
+        "manualTags": loads(row["manual_tags_json"], {}),
+        "aiTags": loads(row["ai_tags_json"], {}),
+        "tagSchemaVersion": row["tag_schema_version"],
+        "tagCompletedAt": row["tag_completed_at"],
+        "tagError": row["tag_error"],
+        "imageCount": row["image_count"] if "image_count" in row.keys() else None,
+        "coverUrl": stable_media_url(row["cover_key"], "thumb") if "cover_key" in row.keys() else None,
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+    if include_images:
+        with get_db() as db:
+            images = db.execute(
+                """
+                SELECT ma.*, sgi.id AS link_id, sgi.sort_order AS link_sort_order FROM styling_garment_images sgi
+                JOIN media_assets ma ON ma.id = sgi.media_asset_id
+                WHERE sgi.styling_garment_id = ? AND sgi.deleted_at IS NULL
+                ORDER BY sgi.sort_order, sgi.id
+                """,
+                (row["id"],),
+            ).fetchall()
+        item["images"] = [
+            {
+                "id": image["link_id"],
+                "sortOrder": image["link_sort_order"],
+                "asset": serialize_media_asset(image),
+            }
+            for image in images
+        ]
+    return item
+
+
+def get_styling_garment_by_id(garment_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute(
+            """
+            SELECT sg.*,
+              (SELECT ma.object_key FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_key,
+              (SELECT COUNT(*) FROM styling_garment_images sgi WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL) AS image_count
+            FROM styling_garments sg
+            WHERE sg.id = ? AND sg.deleted_at IS NULL
+            """,
+            (garment_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="搭配服饰不存在")
+    return serialize_styling_garment(row, include_images=True)
+
+
+async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
+    garment = get_styling_garment_by_id(garment_id)
+    if not settings.gemini_api_key:
+        return fallback_styling_tags(garment)
+    try:
+        from google import genai
+        from google.genai import types
+    except Exception:
+        return fallback_styling_tags(garment)
+    prompt = """
+你是服饰电商搭配服饰库打标助手。请基于图片输出精简稳定 JSON，不要 Markdown。
+schema_version 固定为 styling-garment-tags-v1。
+category 只能是 top, bottom, dress, outerwear, set, other_garment, unsupported_accessory, unknown。
+style 尽量使用 business, commute, minimal, elegant, casual。
+brief 必须很短，适合在 1000 条素材中传给 Gemini 做选搭。
+"""
+    contents: list[Any] = [prompt]
+    for image in garment.get("images", [])[:6]:
+        asset = image.get("asset") or {}
+        object_key = asset.get("objectKey")
+        if object_key and object_exists(object_key):
+            contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
+    client = genai.Client(api_key=settings.gemini_api_key)
+    response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents)
+    text = getattr(response, "text", "") or "{}"
+    return normalize_styling_tags(loads(extract_json_text(text), {}), garment)
+
+
+def fallback_styling_tags(garment: dict[str, Any]) -> dict[str, Any]:
+    code = garment.get("code", "GARMENT")
+    return {
+        "schema_version": "styling-garment-tags-v1",
+        "category": "other_garment",
+        "sub_category": "",
+        "colors": {"primary": "unknown", "secondary": []},
+        "style": ["commute", "minimal"],
+        "season": ["spring", "autumn"],
+        "material": [],
+        "silhouette": [],
+        "patterns": ["solid"],
+        "fit_notes": "",
+        "pairing_notes": "适合作为主推款的克制通勤搭配服饰",
+        "avoid_pairing_with": [],
+        "brief": f"{code} 搭配服饰，通勤简洁风格",
+        "confidence": 0.5,
+    }
+
+
+def normalize_styling_tags(tags: dict[str, Any], garment: dict[str, Any]) -> dict[str, Any]:
+    fallback = fallback_styling_tags(garment)
+    merged = {**fallback, **(tags if isinstance(tags, dict) else {})}
+    merged["schema_version"] = "styling-garment-tags-v1"
+    if merged.get("category") not in {"top", "bottom", "dress", "outerwear", "set", "other_garment", "unsupported_accessory", "unknown"}:
+        merged["category"] = "unknown"
+    for key in ("style", "season", "material", "silhouette", "patterns", "avoid_pairing_with"):
+        if isinstance(merged.get(key), str):
+            merged[key] = [merged[key]]
+        elif not isinstance(merged.get(key), list):
+            merged[key] = []
+    if not isinstance(merged.get("colors"), dict):
+        merged["colors"] = {"primary": "unknown", "secondary": []}
+    merged["brief"] = str(merged.get("brief") or fallback["brief"])[:160]
+    return merged
+
+
+def extract_json_text(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.strip("`")
+        if stripped.lower().startswith("json"):
+            stripped = stripped[4:]
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start >= 0 and end >= start:
+        return stripped[start : end + 1]
+    return stripped or "{}"
+
+
+def get_generation_task_row(task_id: int) -> Any:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_tasks WHERE id = ? AND deleted_at IS NULL", (task_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="生成任务不存在")
+    return row
+
+
+def create_generation_input_version(task_id: int) -> int:
+    task = get_generation_task_row(task_id)
+    with get_db() as db:
+        image_rows = db.execute(
+            """
+            SELECT gti.sort_order, ma.* FROM generation_task_images gti
+            JOIN media_assets ma ON ma.id = gti.media_asset_id
+            WHERE gti.task_id = ? AND gti.deleted_at IS NULL
+            ORDER BY gti.sort_order, gti.id
+            """,
+            (task_id,),
+        ).fetchall()
+        if not image_rows:
+            raise HTTPException(status_code=400, detail="请先上传主推款图片")
+        version_number = int(db.execute(
+            "SELECT COALESCE(MAX(version_number), 0) + 1 AS next_version FROM generation_task_input_versions WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()["next_version"])
+        timestamp = now_iso()
+        snapshot = [
+            {"sortOrder": row["sort_order"], "asset": serialize_media_asset(row)}
+            for row in image_rows
+        ]
+        cursor = db.execute(
+            """
+            INSERT INTO generation_task_input_versions
+              (task_id, version_number, name_snapshot, image_snapshot_json, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (task_id, version_number, task["name"], dumps(snapshot), timestamp),
+        )
+        return int(cursor.lastrowid)
+
+
+def create_attempt(owner_type: str, owner_id: int, provider: str, request_snapshot: dict[str, Any] | None = None) -> int:
+    timestamp = now_iso()
+    with get_db() as db:
+        cursor = db.execute(
+            """
+            INSERT INTO generation_attempts
+              (owner_type, owner_id, provider, status, started_at, request_snapshot_json, created_at, updated_at)
+            VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?)
+            """,
+            (owner_type, owner_id, provider, timestamp, dumps(request_snapshot or {}), timestamp, timestamp),
+        )
+        return int(cursor.lastrowid)
+
+
+def finish_attempt(
+    attempt_id: int,
+    status: str,
+    response_snapshot: dict[str, Any] | None = None,
+    output_asset_id: int | None = None,
+    error_message: str | None = None,
+) -> None:
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE generation_attempts
+            SET status = ?, completed_at = ?, failed_at = ?, response_snapshot_json = ?, output_asset_id = ?,
+                error_message = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                status,
+                timestamp if status == "SUCCEEDED" else None,
+                timestamp if status == "FAILED" else None,
+                dumps(response_snapshot or {}),
+                output_asset_id,
+                error_message,
+                timestamp,
+                attempt_id,
+            ),
+        )
+
+
+async def select_styling_with_gemini(task_id: int, input_version_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        input_row = db.execute("SELECT * FROM generation_task_input_versions WHERE id = ?", (input_version_id,)).fetchone()
+        material_rows = db.execute(
+            "SELECT id, code, ai_tags_json FROM styling_garments WHERE deleted_at IS NULL AND status = 'READY' ORDER BY updated_at DESC, id DESC"
+        ).fetchall()
+    material_cards = [
+        {
+            "id": row["id"],
+            "code": row["code"],
+            "tags": loads(row["ai_tags_json"], {}),
+        }
+        for row in material_rows
+    ]
+    if not settings.gemini_api_key:
+        return fallback_styling_selection(input_row, material_cards)
+    try:
+        from google import genai
+        from google.genai import types
+    except Exception:
+        return fallback_styling_selection(input_row, material_cards)
+    prompt = f"""
+你是服饰品牌 AI 摄影棚的智能选搭助手。
+任务：根据主推款图片，从搭配服饰库中选择适合一起穿到模特身上的配角服饰。
+你只负责选择服饰 ID，不生成穿着关系和拍摄方案。
+允许返回空数组。只能从 material_cards 中选择 ID。
+
+material_cards:
+{dumps(material_cards)}
+
+请只返回 JSON：
+{{
+  "selected_material_ids": [1, 2],
+  "hero_visual_summary": "极短主推款视觉摘要",
+  "reason_summary": "极短选择理由",
+  "warnings": []
+}}
+"""
+    contents: list[Any] = [prompt]
+    for item in loads(input_row["image_snapshot_json"], [])[:8]:
+        asset = (item.get("asset") or {})
+        object_key = asset.get("objectKey")
+        if object_key and object_exists(object_key):
+            contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
+    client = genai.Client(api_key=settings.gemini_api_key)
+    response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents)
+    return loads(extract_json_text(getattr(response, "text", "") or "{}"), {})
+
+
+def fallback_styling_selection(input_row: Any, material_cards: list[dict[str, Any]]) -> dict[str, Any]:
+    selected = [int(card["id"]) for card in material_cards[:2]]
+    return {
+        "selected_material_ids": selected,
+        "hero_visual_summary": "主推款图片已作为商品事实源。",
+        "reason_summary": "开发环境未配置 Gemini，已按最近可用搭配服饰生成默认选搭。",
+        "warnings": ["fallback_selection"],
+    }
+
+
+def get_styling_source_and_selected_snapshots(selected_ids: list[int]) -> tuple[list[int], list[dict[str, Any]]]:
+    with get_db() as db:
+        rows = db.execute("SELECT * FROM styling_garments WHERE deleted_at IS NULL AND status = 'READY' ORDER BY updated_at DESC, id DESC").fetchall()
+    source_ids = [int(row["id"]) for row in rows]
+    selected_set = set(selected_ids)
+    invalid = selected_set - set(source_ids)
+    if invalid:
+        raise RuntimeError(f"Gemini 返回了非法搭配服饰 ID：{sorted(invalid)}")
+    return source_ids, [get_styling_garment_by_id(item_id) for item_id in selected_ids]
+
+
+def ensure_generation_shot_plans(task_id: int, styling_id: int) -> list[dict[str, Any]]:
+    with get_db() as db:
+        existing = db.execute(
+            "SELECT * FROM generation_shot_plans WHERE styling_id = ? ORDER BY sort_order",
+            (styling_id,),
+        ).fetchall()
+        if existing:
+            return [serialize_new_shot_plan(row) for row in existing]
+        styling = db.execute("SELECT * FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
+        selected_snapshot = loads(styling["selected_material_snapshot_json"], [])
+    plans = build_default_new_shot_plans(selected_snapshot)
+    with get_db() as db:
+        timestamp = now_iso()
+        for plan in plans:
+            db.execute(
+                """
+                INSERT INTO generation_shot_plans
+                  (task_id, styling_id, sort_order, shot_type, plan_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (task_id, styling_id, plan["sortOrder"], plan["shotType"], dumps(plan), timestamp, timestamp),
+            )
+    with get_db() as db:
+        rows = db.execute("SELECT * FROM generation_shot_plans WHERE styling_id = ? ORDER BY sort_order", (styling_id,)).fetchall()
+    return [serialize_new_shot_plan(row) for row in rows]
+
+
+def build_default_new_shot_plans(selected_snapshot: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    garment_refs = ["hero", *[f"styling:{item.get('id')}" for item in selected_snapshot]]
+    base = [
+        ("hero", "正面全身主视觉", "正面自然站姿", "正面", "主推款完整轮廓，搭配服饰自然可见"),
+        ("full_body", "全身搭配展示", "轻微 3/4 身位，重心自然偏移", "轻斜正", "主推款与搭配服饰的整体比例"),
+        ("half_body", "半身结构展示", "上半身克制姿态，手臂自然", "正面或轻侧", "领口、肩线、门襟、内搭关系"),
+        ("side", "侧身版型展示", "侧身轻走动感", "侧面", "厚薄、衣长、垂坠和侧面轮廓"),
+        ("detail", "设计细节近景", "局部近景，可不露脸", "局部", "面料、袖口、腰线或关键设计点"),
+        ("reference", "参考格", "备用姿态", "自然", "参考，不进入最终生成"),
+    ]
+    return [
+        {
+            "sortOrder": index,
+            "shotType": shot_type,
+            "framing": framing,
+            "pose": pose,
+            "cameraAngle": angle,
+            "mainFocus": focus,
+            "visibleGarments": garment_refs,
+            "generatedAccessoryNotes": "可生成低存在感鞋、包、首饰作为辅助，不做特写，不抢主推款。",
+            "backgroundLighting": "白/浅灰棚拍背景，柔和均匀光线，轻微落地阴影。",
+            "compositionNotes": "构图克制、商品优先、留白干净，避免报刊大片和外景感。",
+            "negativeConstraints": ["不要文字水印", "不要改款换色", "不要让生成配饰成为视觉中心"],
+        }
+        for index, (shot_type, framing, pose, angle, focus) in enumerate(base, start=1)
+    ]
+
+
+def serialize_new_shot_plan(row: Any) -> dict[str, Any]:
+    plan = loads(row["plan_json"], {})
+    return {"id": row["id"], "sortOrder": row["sort_order"], "shotType": row["shot_type"], "plan": plan}
+
+
+def build_new_preview_task_package(task_id: int, styling_id: int, shot_plans: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "generation": {"stage": "preview_grid"},
+        "prompt": build_new_preview_prompt(shot_plans),
+        "imageInputs": build_new_image_inputs(task_id, styling_id, include_preview=False),
+        "shotPlans": shot_plans,
+    }
+
+
+def build_new_preview_prompt(shot_plans: list[dict[str, Any]]) -> str:
+    return "\n".join([
+        "生成一张 3x2 六宫格电商棚拍分镜预览图。",
+        "主推款和搭配服饰参考图是真实商品事实来源，必须保持商品级保真。",
+        "数字模特参考图用于保持同一身份、发型和气质。",
+        "鞋、包、饰品只作为辅助搭配，不作为画面核心，不做特写。",
+        "六个格子按以下 ShotPlan 执行，第 6 格仅参考，最终不会生成大图。",
+        dumps([plan["plan"] for plan in shot_plans]),
+        "不要生成文字、水印、logo、编号或边框说明。",
+    ])
+
+
+def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute(
+            """
+            SELECT gri.*, gsp.plan_json, gp.preview_asset_id, grs.styling_id
+            FROM generation_result_images_new gri
+            JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+            JOIN generation_previews gp ON gp.id = grs.preview_id
+            JOIN generation_shot_plans gsp ON gsp.id = gri.shot_plan_id
+            WHERE gri.id = ?
+            """,
+            (result_image_id,),
+        ).fetchone()
+    shot_plan = loads(row["plan_json"], {})
+    return {
+        "generation": {"stage": "final_image"},
+        "prompt": build_new_final_prompt(int(row["sort_order"]), shot_plan),
+        "imageInputs": build_new_image_inputs(task_id, int(row["styling_id"]), include_preview=True, preview_asset_id=row["preview_asset_id"]),
+        "shotPlan": shot_plan,
+    }
+
+
+def build_new_final_prompt(shot_index: int, shot_plan: dict[str, Any]) -> str:
+    return "\n".join([
+        f"生成一张电商棚拍成片。当前生成第 {shot_index} 张，只生成单张图，不要生成拼图或六宫格。",
+        f"参考六宫格预览图中的第 {shot_index} 格，只参考姿势、身位、景别、构图、背景和光影方向。",
+        "六宫格不是商品事实来源。主推款参考图是主角商品事实来源，搭配服饰参考图是配角商品事实来源。",
+        "必须保持主推款和搭配服饰的品类、颜色、面料、版型、结构、比例和可见细节。",
+        f"当前 ShotPlan：{dumps(shot_plan)}",
+        "鞋、包、饰品只作为辅助搭配，不作为画面核心，不做特写。",
+        "不要改款、换色、替换商品；不要添加文字、水印、logo。",
+    ])
+
+
+def build_new_image_inputs(task_id: int, styling_id: int, include_preview: bool, preview_asset_id: int | None = None) -> list[dict[str, Any]]:
+    inputs: list[dict[str, Any]] = []
+    if include_preview and preview_asset_id:
+        asset = get_media_asset_by_id(preview_asset_id)
+        if asset:
+            inputs.append(image_input_from_asset(asset, "preview_grid"))
+    with get_db() as db:
+        task_images = db.execute(
+            """
+            SELECT ma.* FROM generation_task_images gti
+            JOIN media_assets ma ON ma.id = gti.media_asset_id
+            WHERE gti.task_id = ? AND gti.deleted_at IS NULL
+            ORDER BY gti.sort_order, gti.id LIMIT 3
+            """,
+            (task_id,),
+        ).fetchall()
+        styling = db.execute("SELECT selected_material_ids_json FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
+    inputs.extend(image_input_from_asset(serialize_media_asset(row), "hero_garment") for row in task_images)
+    selected_ids = loads(styling["selected_material_ids_json"], []) if styling else []
+    remaining = max(0, 10 - len(inputs) - 2)
+    for material_id in selected_ids:
+        if remaining <= 0:
+            break
+        garment = get_styling_garment_by_id(int(material_id))
+        images = garment.get("images", [])
+        if images:
+            inputs.append(image_input_from_asset(images[0]["asset"], "styling_garment"))
+            remaining -= 1
+    inputs.extend(get_default_model_image_inputs(limit=max(0, 10 - len(inputs)))[:2])
+    return inputs[:10]
+
+
+def image_input_from_asset(asset: dict[str, Any] | None, role: str) -> dict[str, Any]:
+    asset = asset or {}
+    return {
+        "role": role,
+        "assetId": asset.get("id"),
+        "objectKey": asset.get("objectKey"),
+        "filename": asset.get("filename"),
+        "url": asset.get("originalUrl"),
+    }
+
+
+def get_default_model_image_inputs(limit: int = 2) -> list[dict[str, Any]]:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM model_profiles ORDER BY is_default DESC, id LIMIT 1").fetchone()
+    if not row:
+        return []
+    profile = loads(row["profile_json"], {})
+    refs = ordered_head_references(profile, profile.get("headReferences") or {})
+    inputs: list[dict[str, Any]] = []
+    for angle, filename in refs.items():
+        key = join_key(row["asset_dir"], filename)
+        if filename and object_exists(key):
+            inputs.append({"role": "model_identity", "objectKey": key, "filename": filename, "angle": angle})
+        if len(inputs) >= limit:
+            break
+    return inputs
+
+
+async def generate_or_placeholder_asset(task_package: dict[str, Any], output_key: str, label: str) -> tuple[int, dict[str, Any]]:
+    if settings.fal_key:
+        payload = await get_image_provider().generate(task_package, output_key)
+        content = get_bytes(payload["outputPath"])
+        asset_id = insert_generated_media_asset(
+            payload["outputPath"],
+            Path(payload["outputPath"]).name,
+            content,
+            f"image/{settings.gpt_image2_output_format}",
+            {
+                "thumb": payload.get("thumbPath"),
+                "preview": payload.get("previewPath"),
+                "thumbSize": payload.get("thumbFileSize"),
+                "previewSize": payload.get("previewFileSize"),
+            },
+        )
+        return asset_id, payload
+    content = create_placeholder_png(label)
+    put_bytes(output_key, content, "image/png")
+    derivative = generate_image_derivatives(output_key, content)
+    asset_id = insert_generated_media_asset(output_key, Path(output_key).name, content, "image/png", derivative)
+    return asset_id, {"provider": "placeholder", "outputPath": output_key, "message": "FAL_KEY 未配置，生成占位图"}
+
+
+def create_placeholder_png(label: str) -> bytes:
+    image = Image.new("RGB", (1200, 1200), (246, 248, 250))
+    try:
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(image)
+        for y in range(0, 1200, 24):
+            shade = 246 - min(18, y // 80)
+            draw.line((0, y, 1200, y), fill=(shade, shade + 2, 252))
+        draw.rounded_rectangle((120, 120, 1080, 1080), radius=36, outline=(150, 170, 210), width=3)
+        draw.text((170, 170), "Ruyi-Dream", fill=(20, 30, 45))
+        draw.text((170, 220), label, fill=(40, 70, 110))
+        draw.text((170, 1020), "placeholder image - configure FAL_KEY for Image-2", fill=(90, 105, 130))
+    except Exception:
+        pass
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+async def generate_single_final_image(task_id: int, result_set_id: int, image_id: int) -> int:
+    with get_db() as db:
+        db.execute("UPDATE generation_result_images_new SET status = 'RUNNING', updated_at = ? WHERE id = ?", (now_iso(), image_id))
+    attempt_id = create_attempt("generation_result_image", image_id, "image-2")
+    try:
+        task_package = build_new_final_task_package(task_id, image_id)
+        with get_db() as db:
+            sort_order = db.execute("SELECT sort_order FROM generation_result_images_new WHERE id = ?", (image_id,)).fetchone()["sort_order"]
+        output_key = join_key("generation-tasks", str(task_id), "final", f"{result_set_id}-{sort_order}.png")
+        asset_id, provider_response = await generate_or_placeholder_asset(task_package, output_key, f"最终成片 {sort_order}")
+    except Exception as exc:
+        finish_attempt(attempt_id, "FAILED", error_message=str(exc))
+        with get_db() as db:
+            db.execute(
+                "UPDATE generation_result_images_new SET status = 'FAILED', active_attempt_id = ?, updated_at = ? WHERE id = ?",
+                (attempt_id, now_iso(), image_id),
+            )
+        raise
+    finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=provider_response, output_asset_id=asset_id)
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE generation_result_images_new
+            SET status = 'SUCCEEDED', current_asset_id = ?, active_attempt_id = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (asset_id, attempt_id, now_iso(), image_id),
+        )
+    return asset_id
+
+
+def serialize_generation_task(row: Any, include_detail: bool = True, include_debug: bool = False) -> dict[str, Any]:
+    item = {
+        "id": row["id"],
+        "name": row["name"],
+        "status": row["status"],
+        "currentInputVersionId": row["current_input_version_id"],
+        "activeStylingId": row["active_styling_id"],
+        "activePreviewId": row["active_preview_id"],
+        "activeResultSetId": row["active_result_set_id"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+    if not include_detail:
+        item["summary"] = get_generation_task_summary(row["id"])
+        return item
+    with get_db() as db:
+        image_rows = db.execute(
+            """
+            SELECT ma.*, gti.id AS link_id, gti.sort_order AS link_sort_order FROM generation_task_images gti
+            JOIN media_assets ma ON ma.id = gti.media_asset_id
+            WHERE gti.task_id = ? AND gti.deleted_at IS NULL
+            ORDER BY gti.sort_order, gti.id
+            """,
+            (row["id"],),
+        ).fetchall()
+    item["images"] = [{"id": image["link_id"], "sortOrder": image["link_sort_order"], "asset": serialize_media_asset(image)} for image in image_rows]
+    item["inputVersion"] = get_input_version(row["current_input_version_id"])
+    item["styling"] = get_generation_styling(row["active_styling_id"])
+    item["shotPlans"] = get_task_shot_plans(row["active_styling_id"])
+    item["preview"] = get_generation_preview(row["active_preview_id"])
+    item["resultSet"] = get_generation_result_set(row["active_result_set_id"])
+    if include_debug:
+        item["attempts"] = get_task_attempts(row["id"])
+    return item
+
+
+def get_generation_task_by_id(task_id: int, include_debug: bool = False) -> dict[str, Any]:
+    row = get_generation_task_row(task_id)
+    return serialize_generation_task(row, include_detail=True, include_debug=include_debug)
+
+
+def get_generation_task_summary(task_id: int) -> dict[str, Any]:
+    task = get_generation_task_by_id(task_id, include_debug=False)
+    images = task.get("images", [])
+    result_images = ((task.get("resultSet") or {}).get("images") or [])
+    return {
+        "cover": images[0]["asset"] if images else None,
+        "preview": (task.get("preview") or {}).get("asset"),
+        "finalImages": [image.get("asset") for image in result_images if image.get("asset")],
+        "selectedGarments": ((task.get("styling") or {}).get("selectedMaterials") or []),
+    }
+
+
+def get_input_version(input_version_id: int | None) -> dict[str, Any] | None:
+    if not input_version_id:
+        return None
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_task_input_versions WHERE id = ?", (input_version_id,)).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "taskId": row["task_id"],
+        "versionNumber": row["version_number"],
+        "nameSnapshot": row["name_snapshot"],
+        "imageSnapshot": loads(row["image_snapshot_json"], []),
+        "heroVisualSummary": row["hero_visual_summary"],
+        "createdAt": row["created_at"],
+    }
+
+
+def get_generation_styling(styling_id: int | None) -> dict[str, Any] | None:
+    if not styling_id:
+        return None
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "taskId": row["task_id"],
+        "inputVersionId": row["input_version_id"],
+        "sourceMaterialIds": loads(row["source_material_ids_json"], []),
+        "selectedMaterialIds": loads(row["selected_material_ids_json"], []),
+        "selectedMaterials": loads(row["selected_material_snapshot_json"], []),
+        "reasonSummary": row["reason_summary"],
+        "warnings": loads(row["warnings_json"], []),
+        "status": row["status"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def get_task_shot_plans(styling_id: int | None) -> list[dict[str, Any]]:
+    if not styling_id:
+        return []
+    with get_db() as db:
+        rows = db.execute("SELECT * FROM generation_shot_plans WHERE styling_id = ? ORDER BY sort_order", (styling_id,)).fetchall()
+    return [serialize_new_shot_plan(row) for row in rows]
+
+
+def get_generation_preview(preview_id: int | None) -> dict[str, Any] | None:
+    if not preview_id:
+        return None
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_previews WHERE id = ?", (preview_id,)).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "status": row["status"],
+        "asset": get_media_asset_by_id(row["preview_asset_id"]),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def get_generation_result_set(result_set_id: int | None) -> dict[str, Any] | None:
+    if not result_set_id:
+        return None
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_result_sets WHERE id = ?", (result_set_id,)).fetchone()
+        images = db.execute(
+            "SELECT * FROM generation_result_images_new WHERE result_set_id = ? ORDER BY sort_order",
+            (result_set_id,),
+        ).fetchall()
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "status": row["status"],
+        "images": [
+            {
+                "id": image["id"],
+                "sortOrder": image["sort_order"],
+                "status": image["status"],
+                "asset": get_media_asset_by_id(image["current_asset_id"]),
+                "activeAttemptId": image["active_attempt_id"],
+            }
+            for image in images
+        ],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def get_task_attempts(task_id: int) -> list[dict[str, Any]]:
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT ga.* FROM generation_attempts ga
+            WHERE (ga.owner_type = 'generation_styling' AND ga.owner_id = ?)
+               OR ga.owner_id IN (SELECT id FROM generation_previews WHERE task_id = ?)
+               OR ga.owner_id IN (
+                    SELECT gri.id FROM generation_result_images_new gri
+                    JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+                    WHERE grs.task_id = ?
+                  )
+            ORDER BY ga.created_at DESC
+            """,
+            (task_id, task_id, task_id),
+        ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "ownerType": row["owner_type"],
+            "ownerId": row["owner_id"],
+            "provider": row["provider"],
+            "status": row["status"],
+            "startedAt": row["started_at"],
+            "completedAt": row["completed_at"],
+            "failedAt": row["failed_at"],
+            "errorMessage": row["error_message"],
+            "requestSnapshot": loads(row["request_snapshot_json"], {}),
+            "responseSnapshot": loads(row["response_snapshot_json"], {}),
+        }
+        for row in rows
+    ]
 
 
 def upload_media_metadata(key: str | Path, content: bytes, derivative: dict[str, Any]) -> dict[str, Any]:

@@ -1,27 +1,108 @@
-import type { EventLog, GarmentImage, GarmentSku, GenerationImage, GenerationRun, ModelProfile, PaginatedResponse, ShotPlan } from './types'
+export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'
+export type Paginated<T> = {
+  items: T[]
+  limit: number
+  offset: number
+  nextOffset: number | null
+  hasMore: boolean
+}
 
-function apiHeaders(init?: RequestInit): HeadersInit {
-  const headers = new Headers(init?.headers)
-  if (!(init?.body instanceof FormData) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
-  return headers
+export type MediaAsset = {
+  id: number
+  objectKey: string
+  filename: string
+  mimeType: string
+  width?: number | null
+  height?: number | null
+  sizeBytes?: number | null
+  url?: string | null
+  thumbUrl?: string | null
+  previewUrl?: string | null
+  originalUrl?: string | null
+}
+
+export type StylingGarment = {
+  id: number
+  code: string
+  status: string
+  aiTags: Record<string, unknown>
+  manualTags: Record<string, unknown>
+  tagError?: string | null
+  imageCount?: number | null
+  coverUrl?: string | null
+  images?: { id: number; sortOrder: number; asset: MediaAsset }[]
+  createdAt: string
+  updatedAt: string
+}
+
+export type GenerationTask = {
+  id: number
+  name: string
+  status: string
+  createdAt: string
+  updatedAt: string
+  images?: { id: number; sortOrder: number; asset: MediaAsset }[]
+  styling?: {
+    id: number
+    selectedMaterials: StylingGarment[]
+    reasonSummary?: string
+    warnings?: string[]
+  } | null
+  shotPlans?: { id: number; sortOrder: number; shotType: string; plan: Record<string, unknown> }[]
+  preview?: { id: number; status: string; asset?: MediaAsset | null } | null
+  resultSet?: {
+    id: number
+    status: string
+    images: { id: number; sortOrder: number; status: string; asset?: MediaAsset | null }[]
+  } | null
+  summary?: {
+    cover?: MediaAsset | null
+    preview?: MediaAsset | null
+    finalImages?: MediaAsset[]
+    selectedGarments?: StylingGarment[]
+  }
+  attempts?: unknown[]
+}
+
+export type ModelProfile = {
+  id: number
+  modelId: string
+  name: string
+  profile: {
+    height?: string
+    weight?: string
+    bodyShape?: string
+    bust?: string
+    waist?: string
+    hips?: string
+    notes?: string
+    headReferenceEntries?: {
+      id: string
+      angle: string | null
+      filename: string
+      thumbUrl?: string | null
+      previewUrl?: string | null
+      originalUrl?: string | null
+    }[]
+  }
+  isDefault: boolean
+  thumbUrl?: string | null
+  previewUrl?: string | null
+}
+
+function headers(init?: RequestInit) {
+  const h = new Headers(init?.headers)
+  if (!(init?.body instanceof FormData) && !h.has('Content-Type')) h.set('Content-Type', 'application/json')
+  return h
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  let response: Response
-  try {
-    response = await fetch(`${API_BASE}${path}`, {
-      ...init,
-      credentials: 'include',
-      headers: apiHeaders(init),
-    })
-  } catch (err) {
-    if (err instanceof TypeError) {
-      throw new Error('无法连接后端服务，请检查后端是否已启动。')
-    }
-    throw err
-  }
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    credentials: 'include',
+    headers: headers(init),
+  })
   if (!response.ok) {
     const detail = await response.json().catch(() => ({ detail: response.statusText }))
     throw new Error(typeof detail.detail === 'string' ? detail.detail : '请求失败')
@@ -29,14 +110,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
-export const mediaUrl = (url?: string | null) => {
-  if (!url) return ''
-  return /^https?:\/\//i.test(url) ? url : `${API_BASE}${url}`
-}
-
-function withParams(path: string, params: Record<string, string | number | boolean | null | undefined>) {
+function params(path: string, values: Record<string, string | number | boolean | undefined | null>) {
   const search = new URLSearchParams()
-  Object.entries(params).forEach(([key, value]) => {
+  Object.entries(values).forEach(([key, value]) => {
     if (value === undefined || value === null || value === false || value === '') return
     search.set(key, String(value))
   })
@@ -44,207 +120,52 @@ function withParams(path: string, params: Record<string, string | number | boole
   return query ? `${path}?${query}` : path
 }
 
-async function responseErrorMessage(response: Response, fallback: string) {
-  const contentType = response.headers.get('content-type') ?? ''
-  if (contentType.includes('application/json')) {
-    const detail = await response.json().catch(() => null)
-    if (typeof detail?.detail === 'string') return detail.detail
-  }
-  const text = await response.text().catch(() => '')
-  return text.trim() || fallback
-}
-
-function filenameFromContentDisposition(header: string | null, fallback: string) {
-  if (!header) return fallback
-  const utf8Match = header.match(/filename\*=UTF-8''([^;]+)/i)
-  if (utf8Match?.[1]) return decodeURIComponent(utf8Match[1])
-  const match = header.match(/filename="?([^";]+)"?/i)
-  return match?.[1] ?? fallback
+export function mediaUrl(url?: string | null) {
+  if (!url) return ''
+  return /^https?:\/\//i.test(url) ? url : `${API_BASE}${url}`
 }
 
 export const api = {
-  health: () => request<Record<string, unknown>>('/api/health'),
   session: () => request<{ authRequired: boolean; authenticated: boolean }>('/api/auth/session'),
-  login: (password: string) =>
+  login: (username: string, password: string) =>
     request<{ authRequired: boolean; authenticated: boolean }>('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ username, password }),
     }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
-  listSkus: (options?: { includeArchived?: boolean; limit?: number; offset?: number; keyword?: string }) =>
-    request<PaginatedResponse<GarmentSku>>(withParams('/api/garment-skus', {
-      includeArchived: options?.includeArchived,
-      limit: options?.limit,
-      offset: options?.offset,
-      keyword: options?.keyword,
-    })),
-  getSku: (id: number, options?: { imageLimit?: number; imageOffset?: number }) =>
-    request<{ item: GarmentSku }>(withParams(`/api/garment-skus/${id}`, {
-      imageLimit: options?.imageLimit,
-      imageOffset: options?.imageOffset,
-    })),
-  listSkuImages: (id: number, options?: { limit?: number; offset?: number }) =>
-    request<PaginatedResponse<GarmentImage>>(withParams(`/api/garment-skus/${id}/images`, {
-      limit: options?.limit,
-      offset: options?.offset,
-    })),
-  uploadSku: (sku: string, files: File[], title?: string) => {
+  listStylingGarments: (options?: { limit?: number; offset?: number; keyword?: string }) =>
+    request<Paginated<StylingGarment>>(params('/api/styling-garments', options ?? {})),
+  createStylingGarment: (code: string, files: File[]) => {
     const form = new FormData()
-    form.append('sku', sku)
-    if (title) form.append('title', title)
+    form.append('code', code)
     files.forEach((file) => form.append('files', file))
-    return request<{ item: GarmentSku }>('/api/garment-skus', { method: 'POST', body: form })
+    return request<{ item: StylingGarment }>('/api/styling-garments', { method: 'POST', body: form })
   },
-  updateSku: (id: number, payload: { sku?: string; title?: string; status?: string }) =>
-    request<{ item: GarmentSku }>(`/api/garment-skus/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    }),
-  deleteSku: (id: number, options?: { purge?: boolean; confirmSku?: string }) => {
-    const params = new URLSearchParams()
-    if (options?.purge) params.set('purge', 'true')
-    if (options?.confirmSku) params.set('confirmSku', options.confirmSku)
-    const suffix = params.size ? `?${params.toString()}` : ''
-    return request<{ ok: boolean; archived?: boolean; purged?: boolean; objectCleanupErrors?: { prefix: string; error: string }[] }>(`/api/garment-skus/${id}${suffix}`, {
-      method: 'DELETE',
-    })
-  },
-  addSkuImages: (id: number, files: File[]) => {
+  tagStylingGarment: (id: number) =>
+    request<{ item: StylingGarment }>(`/api/styling-garments/${id}/save-and-tag`, { method: 'POST' }),
+  listTasks: (options?: { limit?: number; offset?: number }) =>
+    request<Paginated<GenerationTask>>(params('/api/generation-tasks', options ?? {})),
+  getTask: (id: number, includeDebug = false) =>
+    request<{ item: GenerationTask }>(params(`/api/generation-tasks/${id}`, { includeDebug })),
+  createTask: (name: string, files: File[]) => {
     const form = new FormData()
+    if (name) form.append('name', name)
     files.forEach((file) => form.append('files', file))
-    return request<{ item: GarmentSku }>(`/api/garment-skus/${id}/images`, { method: 'POST', body: form })
+    return request<{ item: GenerationTask }>('/api/generation-tasks', { method: 'POST', body: form })
   },
-  updateGarmentImage: (id: number, payload: { role?: string; sortOrder?: number }) =>
-    request<{ item: GarmentImage }>(`/api/garment-images/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    }),
-  deleteGarmentImage: (id: number) =>
-    request<{ ok: boolean }>(`/api/garment-images/${id}`, {
-      method: 'DELETE',
-    }),
-  listModels: (options?: { limit?: number; offset?: number; keyword?: string }) =>
-    request<PaginatedResponse<ModelProfile>>(withParams('/api/model-profiles', {
-      limit: options?.limit,
-      offset: options?.offset,
-      keyword: options?.keyword,
-    })),
-  createModel: (payload: { modelId: string; name: string; isDefault?: boolean; profile?: Record<string, unknown> }) =>
-    request<{ item: ModelProfile }>('/api/model-profiles', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
-  updateModel: (id: number, payload: { modelId?: string; name?: string; isDefault?: boolean; profile?: Record<string, unknown> }) =>
-    request<{ item: ModelProfile }>(`/api/model-profiles/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    }),
-  deleteModel: (id: number) =>
-    request<{ ok: boolean }>(`/api/model-profiles/${id}`, {
-      method: 'DELETE',
-    }),
-  addModelHeadReferences: (id: number, files: File[], angle?: string) => {
-    const form = new FormData()
-    if (angle) form.append('angle', angle)
-    files.forEach((file) => form.append('files', file))
-    return request<{ item: ModelProfile }>(`/api/model-profiles/${id}/head-references`, { method: 'POST', body: form })
-  },
-  updateModelHeadReference: (id: number, sourceAngle: string, payload: { angle?: string; orderIndex?: number }) =>
-    request<{ item: ModelProfile }>(`/api/model-profiles/${id}/head-references/${encodeURIComponent(sourceAngle)}`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    }),
-  replaceModelHeadReference: (id: number, angle: string, file: File) => {
-    const form = new FormData()
-    form.append('angle', angle)
-    form.append('file', file)
-    return request<{ item: ModelProfile }>(`/api/model-profiles/${id}/head-references`, { method: 'POST', body: form })
-  },
-  deleteModelHeadReference: (id: number, angle: string) =>
-    request<{ item: ModelProfile }>(`/api/model-profiles/${id}/head-references/${encodeURIComponent(angle)}`, {
-      method: 'DELETE',
-    }),
-  createPlan: (skuId: number, modelProfileId?: number) =>
-    request<{ item: ShotPlan }>('/api/shot-plans', {
-      method: 'POST',
-      body: JSON.stringify({ skuId, modelProfileId }),
-    }),
-  getDefaultPlan: (skuId: number) =>
-    request<{ item: ShotPlan | null }>(`/api/garment-skus/${skuId}/default-shot-plan`),
-  getLatestPreviewRun: (skuId: number, options?: { shotPlanId?: number }) =>
-    request<{ item: GenerationRun | null }>(withParams(`/api/garment-skus/${skuId}/latest-preview-run`, {
-      shotPlanId: options?.shotPlanId,
-    })),
-  getPlan: (shotPlanId: number) => request<{ item: ShotPlan }>(`/api/shot-plans/${shotPlanId}`),
-  updatePlan: (shotPlanId: number, plan: ShotPlan['plan']) =>
-    request<{ item: ShotPlan }>(`/api/shot-plans/${shotPlanId}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ plan }),
-    }),
-  previewGrid: (shotPlanId: number) =>
-    request<{ item: GenerationRun }>('/api/preview-runs', {
-      method: 'POST',
-      body: JSON.stringify({ shotPlanId }),
-    }),
-  generateGroup: (shotPlanId: number, previewRunId?: number) =>
-    request<{ item: GenerationRun }>('/api/generation-runs', {
-      method: 'POST',
-      body: JSON.stringify({ shotPlanId, previewRunId }),
-    }),
-  listRuns: (options?: { includeArchived?: boolean; limit?: number; offset?: number; skuId?: number; keyword?: string }) =>
-    request<PaginatedResponse<GenerationRun>>(withParams('/api/generation-runs', {
-      includeArchived: options?.includeArchived,
-      limit: options?.limit,
-      offset: options?.offset,
-      skuId: options?.skuId,
-      keyword: options?.keyword,
-    })),
-  getRun: (runId: number, options?: { includeDebug?: boolean }) =>
-    request<{ item: GenerationRun }>(withParams(`/api/generation-runs/${runId}`, {
-      includeDebug: options?.includeDebug,
-    })),
-  getRunStatus: (runId: number) => request<{ item: GenerationRun }>(`/api/generation-runs/${runId}/status`),
-  deleteRun: (runId: number) =>
-    request<{ ok: boolean }>(`/api/generation-runs/${runId}`, {
-      method: 'DELETE',
-    }),
-  cancelRun: (runId: number) =>
-    request<{ item: GenerationRun }>(`/api/generation-runs/${runId}/cancel`, {
-      method: 'POST',
-    }),
-  regenerate: (imageId: number, reason: string, note?: string) =>
-    request<{ item: GenerationRun }>(`/api/generation-images/${imageId}/regenerate`, {
-      method: 'POST',
-      body: JSON.stringify({ reason, note }),
-    }),
-  cancelImage: (imageId: number) =>
-    request<{ item: GenerationImage }>(`/api/generation-images/${imageId}/cancel`, {
-      method: 'POST',
-    }),
-  setFinal: (imageId: number, isFinal: boolean) =>
-    request<{ item: GenerationImage }>(`/api/generation-images/${imageId}/final`, {
-      method: 'PATCH',
-      body: JSON.stringify({ isFinal }),
-    }),
-  setReviewStatus: (imageId: number, status: string, note?: string) =>
-    request<{ item: GenerationImage }>(`/api/generation-images/${imageId}/review`, {
-      method: 'PATCH',
-      body: JSON.stringify({ status, note }),
-    }),
-  exportRun: async (runId: number) => {
-    const response = await fetch(`${API_BASE}/api/exports/runs/${runId}`, { method: 'POST', credentials: 'include', headers: apiHeaders() })
-    if (!response.ok) throw new Error(await responseErrorMessage(response, '导出失败'))
-    const blob = await response.blob()
-    const url = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = filenameFromContentDisposition(response.headers.get('content-disposition'), `generation-run-${runId}.zip`)
-    anchor.style.display = 'none'
-    document.body.appendChild(anchor)
-    anchor.click()
-    anchor.remove()
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-    return { filename: anchor.download }
-  },
-  logs: () => request<{ items: EventLog[] }>('/api/logs?limit=30'),
+  updateTask: (id: number, payload: { name?: string }) =>
+    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  selectStyling: (id: number) =>
+    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/select-styling`, { method: 'POST' }),
+  previewTask: (id: number) =>
+    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/preview`, { method: 'POST' }),
+  generateFinal: (id: number) =>
+    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/generate-final`, { method: 'POST' }),
+  retryResultImage: (id: number) =>
+    request<{ item: GenerationTask }>(`/api/generation-result-images-new/${id}/retry`, { method: 'POST' }),
+  listRecords: (options?: { limit?: number; offset?: number }) =>
+    request<Paginated<GenerationTask>>(params('/api/generation-records', options ?? {})),
+  getRecord: (id: number, includeDebug = false) =>
+    request<{ item: GenerationTask }>(params(`/api/generation-records/${id}`, { includeDebug })),
+  listModels: () => request<Paginated<ModelProfile>>('/api/model-profiles?limit=30'),
 }
