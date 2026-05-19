@@ -200,14 +200,18 @@ class BackendSmokeTests(unittest.TestCase):
                 image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_images)").fetchall()}
                 garment_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_images)").fetchall()}
                 sku_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_skus)").fetchall()}
+                styling_garment_columns = {row["name"] for row in db.execute("PRAGMA table_info(styling_garments)").fetchall()}
                 template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
         self.assertIn("preview_path", garment_image_columns)
         self.assertIn("archived_at", sku_columns)
+        self.assertIn("official_title_tags_json", styling_garment_columns)
+        self.assertIn("effective_tags_json", styling_garment_columns)
+        self.assertIn("tag_meta_json", styling_garment_columns)
         self.assertGreaterEqual(template_count, 1)
 
     def test_terminal_generation_run_cancel_returns_conflict(self) -> None:

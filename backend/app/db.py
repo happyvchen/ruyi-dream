@@ -19,6 +19,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("006", "add_brand_template_versions", "migration_add_brand_template_versions"),
     ("007", "add_garment_sku_archive_columns", "migration_add_garment_sku_archive_columns"),
     ("008", "add_media_derivative_metadata", "migration_add_media_derivative_metadata"),
+    ("009", "add_lily_tagging_columns", "migration_add_lily_tagging_columns"),
 )
 
 
@@ -198,6 +199,9 @@ def init_db() -> None:
               status TEXT NOT NULL DEFAULT 'DRAFT',
               manual_tags_json TEXT,
               ai_tags_json TEXT,
+              official_title_tags_json TEXT,
+              effective_tags_json TEXT,
+              tag_meta_json TEXT,
               tag_schema_version TEXT,
               tag_completed_at TEXT,
               tag_error TEXT,
@@ -368,6 +372,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_brand_template_versions": migration_add_brand_template_versions,
         "migration_add_garment_sku_archive_columns": migration_add_garment_sku_archive_columns,
         "migration_add_media_derivative_metadata": migration_add_media_derivative_metadata,
+        "migration_add_lily_tagging_columns": migration_add_lily_tagging_columns,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -455,6 +460,12 @@ def migration_add_media_derivative_metadata(db: sqlite3.Connection) -> None:
         ensure_column(db, table, "file_size", "INTEGER")
         ensure_column(db, table, "thumb_file_size", "INTEGER")
         ensure_column(db, table, "preview_file_size", "INTEGER")
+
+
+def migration_add_lily_tagging_columns(db: sqlite3.Connection) -> None:
+    ensure_column(db, "styling_garments", "official_title_tags_json", "TEXT")
+    ensure_column(db, "styling_garments", "effective_tags_json", "TEXT")
+    ensure_column(db, "styling_garments", "tag_meta_json", "TEXT")
 
 
 def ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:

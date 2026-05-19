@@ -219,6 +219,7 @@ ACTIVE_IMAGE_STATUSES = {"QUEUED", "SUBMITTED", "IN_QUEUE", "IN_PROGRESS", "RUNN
 TERMINAL_IMAGE_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
 PLANNING_STATUSES = {"PLANNING"}
 REVIEW_STATUSES = {"candidate", "approved", "needs_regen", "needs_retouch", "delivered"}
+LILY_TAG_SCHEMA_VERSION = "lily-garment-tags-v1"
 LOGIN_FAILURE_WINDOW_SECONDS = 300
 LOGIN_FAILURE_LIMIT = 8
 login_failures_by_client: dict[str, list[float]] = {}
@@ -820,7 +821,7 @@ async def create_styling_garment(
             INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, tag_schema_version, created_at, updated_at)
             VALUES (?, 'DRAFT', ?, ?, ?, ?, ?)
             """,
-            (clean_code, dumps({}), dumps({}), "styling-garment-tags-v1", timestamp, timestamp),
+            (clean_code, dumps({}), dumps({}), LILY_TAG_SCHEMA_VERSION, timestamp, timestamp),
         )
         garment_id = int(cursor.lastrowid)
         for index, asset in enumerate(assets):
@@ -845,7 +846,7 @@ def update_styling_garment(garment_id: int, payload: StylingGarmentUpdateRequest
             raise HTTPException(status_code=400, detail="搭配服饰代码不能为空")
         updates["code"] = clean_code
     if payload.manualTags is not None:
-        updates["manual_tags_json"] = dumps(payload.manualTags)
+        updates["manual_tags_json"] = dumps(normalize_manual_business_tags(payload.manualTags))
     if not updates:
         return {"item": get_styling_garment_by_id(garment_id)}
     with get_db() as db:
@@ -859,6 +860,13 @@ def update_styling_garment(garment_id: int, payload: StylingGarmentUpdateRequest
             ).fetchone()
             if duplicate:
                 raise HTTPException(status_code=409, detail="搭配服饰代码已存在")
+        manual_tags = loads(updates.get("manual_tags_json") if "manual_tags_json" in updates else row["manual_tags_json"], {})
+        effective_tags = build_effective_tags(
+            loads(row["ai_tags_json"], {}),
+            loads(row["official_title_tags_json"], {}),
+            manual_tags,
+        )
+        updates["effective_tags_json"] = dumps(effective_tags)
         updates["updated_at"] = now_iso()
         set_clause = ", ".join(f"{key} = ?" for key in updates)
         db.execute(f"UPDATE styling_garments SET {set_clause} WHERE id = ?", (*updates.values(), garment_id))
@@ -874,7 +882,7 @@ async def save_and_tag_styling_garment(garment_id: int) -> dict[str, Any]:
         timestamp = now_iso()
         db.execute("UPDATE styling_garments SET status = 'TAGGING_RUNNING', tag_error = NULL, updated_at = ? WHERE id = ?", (timestamp, garment_id))
     try:
-        tags = await tag_styling_garment_with_gemini(garment_id)
+        tagging_result = await tag_styling_garment_with_gemini(garment_id)
     except Exception as exc:
         with get_db() as db:
             db.execute(
@@ -884,15 +892,37 @@ async def save_and_tag_styling_garment(garment_id: int) -> dict[str, Any]:
         return {"item": get_styling_garment_by_id(garment_id)}
     with get_db() as db:
         timestamp = now_iso()
+        row = db.execute("SELECT manual_tags_json FROM styling_garments WHERE id = ?", (garment_id,)).fetchone()
+        manual_tags = loads(row["manual_tags_json"], {}) if row else {}
+        ai_tags = tagging_result.get("ai_tags", {})
+        official_title_tags = tagging_result.get("official_title_tags", {})
+        tag_meta = tagging_result.get("tag_meta", {})
+        effective_tags = build_effective_tags(ai_tags, official_title_tags, manual_tags)
         db.execute(
             """
             UPDATE styling_garments
-            SET status = 'READY', ai_tags_json = ?, tag_schema_version = ?, tag_completed_at = ?, updated_at = ?
+            SET status = 'READY',
+                ai_tags_json = ?,
+                official_title_tags_json = ?,
+                effective_tags_json = ?,
+                tag_meta_json = ?,
+                tag_schema_version = ?,
+                tag_completed_at = ?,
+                updated_at = ?
             WHERE id = ?
             """,
-            (dumps(tags), tags.get("schema_version", "styling-garment-tags-v1"), timestamp, timestamp, garment_id),
+            (
+                dumps(ai_tags),
+                dumps(official_title_tags),
+                dumps(effective_tags),
+                dumps(tag_meta),
+                tagging_result.get("schema_version", LILY_TAG_SCHEMA_VERSION),
+                timestamp,
+                timestamp,
+                garment_id,
+            ),
         )
-        log_event(db, "styling_garment", garment_id, "tagged", tags)
+        log_event(db, "styling_garment", garment_id, "tagged", tagging_result)
     return {"item": get_styling_garment_by_id(garment_id)}
 
 
@@ -3359,12 +3389,21 @@ def get_media_asset_by_id(asset_id: int | None) -> dict[str, Any] | None:
 
 
 def serialize_styling_garment(row: Any, include_images: bool = True) -> dict[str, Any]:
+    ai_tags = loads(row["ai_tags_json"], {})
+    manual_tags = loads(row["manual_tags_json"], {})
+    official_title_tags = loads(row["official_title_tags_json"], {}) if "official_title_tags_json" in row.keys() else {}
+    effective_tags = loads(row["effective_tags_json"], {}) if "effective_tags_json" in row.keys() else {}
+    if not effective_tags:
+        effective_tags = build_effective_tags(ai_tags, official_title_tags, manual_tags)
     item = {
         "id": row["id"],
         "code": row["code"],
         "status": row["status"],
-        "manualTags": loads(row["manual_tags_json"], {}),
-        "aiTags": loads(row["ai_tags_json"], {}),
+        "manualTags": manual_tags,
+        "aiTags": ai_tags,
+        "officialTitleTags": official_title_tags,
+        "effectiveTags": effective_tags,
+        "tagMeta": loads(row["tag_meta_json"], {}) if "tag_meta_json" in row.keys() else {},
         "tagSchemaVersion": row["tag_schema_version"],
         "tagCompletedAt": row["tag_completed_at"],
         "tagError": row["tag_error"],
@@ -3416,19 +3455,13 @@ def get_styling_garment_by_id(garment_id: int) -> dict[str, Any]:
 async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
     garment = get_styling_garment_by_id(garment_id)
     if not settings.gemini_api_key:
-        return fallback_styling_tags(garment)
+        return fallback_lily_tagging_result(garment)
     try:
         from google import genai
         from google.genai import types
     except Exception:
-        return fallback_styling_tags(garment)
-    prompt = """
-你是服饰电商搭配服饰库打标助手。请基于图片输出精简稳定 JSON，不要 Markdown。
-schema_version 固定为 styling-garment-tags-v1。
-category 只能是 top, bottom, dress, outerwear, set, other_garment, unsupported_accessory, unknown。
-style 尽量使用 business, commute, minimal, elegant, casual。
-brief 必须很短，适合在 1000 条素材中传给 Gemini 做选搭。
-"""
+        return fallback_lily_tagging_result(garment)
+    prompt = build_lily_tagging_prompt(garment)
     contents: list[Any] = [prompt]
     for image in garment.get("images", [])[:6]:
         asset = image.get("asset") or {}
@@ -3436,46 +3469,333 @@ brief 必须很短，适合在 1000 条素材中传给 Gemini 做选搭。
         if object_key and object_exists(object_key):
             contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
     client = genai.Client(api_key=settings.gemini_api_key)
-    response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents)
+    try:
+        config = types.GenerateContentConfig(response_mime_type="application/json")
+        response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents, config=config)
+    except TypeError:
+        response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents)
     text = getattr(response, "text", "") or "{}"
-    return normalize_styling_tags(loads(extract_json_text(text), {}), garment)
+    return normalize_lily_tagging_result(loads(extract_json_text(text), {}), garment)
+
+
+def build_lily_tagging_prompt(garment: dict[str, Any]) -> str:
+    image_hints = [
+        {
+            "image_id": image.get("id"),
+            "role_hint": "primary" if index == 0 else "reference",
+            "filename": ((image.get("asset") or {}).get("filename") or ""),
+        }
+        for index, image in enumerate(garment.get("images", [])[:6])
+    ]
+    return f"""
+你是 Lily 商务时装的服装视觉生产资产打标助手。请只基于图片生成只读 AI 标签，并抽取可选官方标题证据。
+
+【核心职责】
+- 图片事实优先，标题只是证据层。
+- 不把鞋、包、饰品当作可售服装资产。
+- 不把“复古、老钱风、法式、小香风”等标题词升级为 Lily 全局品牌调性。
+- 不输出 Markdown，不输出解释，只输出严格 JSON。
+
+【Lily 全局品牌边界】
+核心：商务时装、都市通勤、年轻职业女性、简约、优雅、自信、清新明快、轻松但得体、时尚但不夸张、商品优先。
+避免：传统严肃职业制服感、夸张时装大片感、网红辣妹风、森系甜美少女风、街头潮牌风、宴会礼服感。
+
+【资产信息】
+code: {garment.get("code")}
+images: {dumps(image_hints)}
+
+【输出 JSON】
+{{
+  "schema_version": "{LILY_TAG_SCHEMA_VERSION}",
+  "ai_tags": {{
+    "category": "top | bottom | dress | jumpsuit | outerwear | knitwear | suit_set | other_garment | unsupported_accessory | unknown",
+    "sub_category": "shirt | blouse | t_shirt | vest | camisole | cardigan | blazer | jacket | trench | coat | down_jacket | trousers | jeans | shorts | skirt | dress | other",
+    "official_category_candidates": [],
+    "is_set": false,
+    "colors": {{"primary": "black | white | ivory | beige | grey | blue | navy | brown | green | red | pink | yellow | purple | metallic | multi | unknown", "secondary": [], "temperature": "warm | cool | neutral | mixed | unknown", "contrast_level": "low | medium | high", "color_distribution": "solid | color_block | trim | gradient | print_based"}},
+    "materials_visual": [],
+    "surface_texture": [],
+    "fit": "slim | regular | relaxed | loose | oversized | unknown",
+    "silhouette": [],
+    "structure": [],
+    "length": {{"top_length": "cropped | hip | long | unknown", "sleeve_length": "sleeveless | short | elbow | three_quarter | long | unknown", "bottom_length": "short | knee | midi | ankle | full | unknown"}},
+    "neckline": [],
+    "closure": [],
+    "details": [],
+    "patterns": [],
+    "pattern_scale": "none | small | medium | large | mixed",
+    "wearability": {{"can_be_worn_alone": true, "can_be_inner_layer": false, "can_be_outer_layer": false, "can_be_bottom_pairing": false, "can_be_set_anchor": false, "recommended_wearing_methods": [], "coverage_risk": "none | may_cover_hero | likely_cover_hero | unknown"}},
+    "lily_style": {{"business_fashion_score": 0.0, "commute_score": 0.0, "clean_score": 0.0, "relaxed_score": 0.0, "feminine_score": 0.0, "fashion_detail_score": 0.0, "formality": "casual | smart_casual | office | formal | unknown", "style_notes": []}},
+    "occasion": [],
+    "season": [],
+    "season_confidence": 0.0,
+    "styling_compatibility": {{"best_pairing_categories": [], "avoid_pairing_categories": [], "color_pairing": {{"works_with": [], "avoid_with": [], "notes": ""}}, "silhouette_pairing": {{"works_with": [], "avoid_with": [], "notes": ""}}, "style_risk": [], "pairing_brief": ""}}
+  }},
+  "official_title_tags": {{"raw_title": "", "year": "", "season_text": "", "official_series": [], "official_material_terms": [], "official_style_terms": [], "official_category_terms": [], "official_selling_points": []}},
+  "tag_meta": {{"overall_confidence": 0.0, "field_confidence": {{}}, "needs_review": false, "review_reasons": [], "source_image_ids": [], "warnings": []}}
+}}
+"""
+
+
+def fallback_lily_tagging_result(garment: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": LILY_TAG_SCHEMA_VERSION,
+        "ai_tags": fallback_styling_tags(garment),
+        "official_title_tags": {},
+        "tag_meta": {
+            "tagger_provider": "fallback",
+            "tagger_model": "fallback",
+            "schema_version": LILY_TAG_SCHEMA_VERSION,
+            "overall_confidence": 0.5,
+            "field_confidence": {},
+            "needs_review": True,
+            "review_reasons": ["fallback_tags"],
+            "source_image_ids": [str(image.get("id")) for image in garment.get("images", [])],
+            "warnings": ["Gemini 未配置或不可用，已生成保守兜底标签"],
+        },
+    }
 
 
 def fallback_styling_tags(garment: dict[str, Any]) -> dict[str, Any]:
     code = garment.get("code", "GARMENT")
     return {
-        "schema_version": "styling-garment-tags-v1",
         "category": "other_garment",
-        "sub_category": "",
-        "colors": {"primary": "unknown", "secondary": []},
-        "style": ["commute", "minimal"],
-        "season": ["spring", "autumn"],
-        "material": [],
+        "sub_category": "other",
+        "official_category_candidates": [],
+        "is_set": False,
+        "colors": {"primary": "unknown", "secondary": [], "temperature": "unknown", "contrast_level": "medium", "color_distribution": "solid"},
+        "materials_visual": [],
+        "surface_texture": [],
+        "fit": "unknown",
         "silhouette": [],
-        "patterns": ["solid"],
-        "fit_notes": "",
-        "pairing_notes": "适合作为主推款的克制通勤搭配服饰",
-        "avoid_pairing_with": [],
-        "brief": f"{code} 搭配服饰，通勤简洁风格",
-        "confidence": 0.5,
+        "structure": [],
+        "length": {"top_length": "unknown", "sleeve_length": "unknown", "bottom_length": "unknown"},
+        "neckline": [],
+        "closure": [],
+        "details": [],
+        "patterns": ["unknown"],
+        "pattern_scale": "unknown",
+        "wearability": {
+            "can_be_worn_alone": True,
+            "can_be_inner_layer": False,
+            "can_be_outer_layer": False,
+            "can_be_bottom_pairing": False,
+            "can_be_set_anchor": False,
+            "recommended_wearing_methods": [],
+            "coverage_risk": "unknown",
+        },
+        "lily_style": {
+            "business_fashion_score": 0.5,
+            "commute_score": 0.5,
+            "clean_score": 0.5,
+            "relaxed_score": 0.5,
+            "feminine_score": 0.5,
+            "fashion_detail_score": 0.5,
+            "formality": "unknown",
+            "style_notes": [],
+        },
+        "occasion": ["commute"],
+        "season": ["spring", "autumn"],
+        "season_confidence": 0.5,
+        "styling_compatibility": {
+            "best_pairing_categories": [],
+            "avoid_pairing_categories": [],
+            "color_pairing": {"works_with": [], "avoid_with": [], "notes": ""},
+            "silhouette_pairing": {"works_with": [], "avoid_with": [], "notes": ""},
+            "style_risk": ["none"],
+            "pairing_brief": f"{code} 搭配服饰，通勤简洁风格",
+        },
     }
 
 
-def normalize_styling_tags(tags: dict[str, Any], garment: dict[str, Any]) -> dict[str, Any]:
+def normalize_lily_tagging_result(raw: dict[str, Any], garment: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raw = {}
+    if "ai_tags" in raw:
+        ai_tags = normalize_styling_tags(raw.get("ai_tags"), garment)
+        official_title_tags = normalize_official_title_tags(raw.get("official_title_tags"))
+        tag_meta = normalize_tag_meta(raw.get("tag_meta"), garment)
+    else:
+        ai_tags = normalize_styling_tags(raw, garment)
+        official_title_tags = {}
+        tag_meta = normalize_tag_meta({}, garment)
+    return {
+        "schema_version": LILY_TAG_SCHEMA_VERSION,
+        "ai_tags": ai_tags,
+        "official_title_tags": official_title_tags,
+        "tag_meta": tag_meta,
+    }
+
+
+def normalize_styling_tags(tags: Any, garment: dict[str, Any]) -> dict[str, Any]:
     fallback = fallback_styling_tags(garment)
-    merged = {**fallback, **(tags if isinstance(tags, dict) else {})}
-    merged["schema_version"] = "styling-garment-tags-v1"
-    if merged.get("category") not in {"top", "bottom", "dress", "outerwear", "set", "other_garment", "unsupported_accessory", "unknown"}:
+    merged = deep_merge(fallback, tags if isinstance(tags, dict) else {})
+    if merged.get("category") not in {"top", "bottom", "dress", "jumpsuit", "outerwear", "knitwear", "suit_set", "other_garment", "unsupported_accessory", "unknown"}:
         merged["category"] = "unknown"
-    for key in ("style", "season", "material", "silhouette", "patterns", "avoid_pairing_with"):
+    if merged.get("sub_category") not in {"shirt", "blouse", "t_shirt", "vest", "camisole", "cardigan", "blazer", "jacket", "trench", "coat", "down_jacket", "trousers", "jeans", "shorts", "skirt", "dress", "other"}:
+        merged["sub_category"] = "other"
+    for key in ("materials_visual", "surface_texture", "silhouette", "structure", "neckline", "closure", "details", "patterns", "occasion", "season"):
         if isinstance(merged.get(key), str):
             merged[key] = [merged[key]]
         elif not isinstance(merged.get(key), list):
             merged[key] = []
     if not isinstance(merged.get("colors"), dict):
-        merged["colors"] = {"primary": "unknown", "secondary": []}
-    merged["brief"] = str(merged.get("brief") or fallback["brief"])[:160]
+        merged["colors"] = fallback["colors"]
+    merged["lily_style"] = normalize_score_object(merged.get("lily_style"), fallback["lily_style"])
+    merged["season_confidence"] = clamp_float(merged.get("season_confidence"), 0.0, 1.0, 0.0)
+    compatibility = merged.get("styling_compatibility")
+    if not isinstance(compatibility, dict):
+        merged["styling_compatibility"] = fallback["styling_compatibility"]
+    else:
+        compatibility["pairing_brief"] = str(compatibility.get("pairing_brief") or "")[:120]
     return merged
+
+
+def normalize_official_title_tags(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        value = {}
+    normalized = {
+        "raw_title": str(value.get("raw_title") or "")[:160],
+        "year": str(value.get("year") or "")[:16],
+        "season_text": str(value.get("season_text") or "")[:40],
+        "official_series": ensure_string_list(value.get("official_series")),
+        "official_material_terms": ensure_string_list(value.get("official_material_terms")),
+        "official_style_terms": ensure_string_list(value.get("official_style_terms")),
+        "official_category_terms": ensure_string_list(value.get("official_category_terms")),
+        "official_selling_points": ensure_string_list(value.get("official_selling_points")),
+    }
+    return normalized
+
+
+def normalize_manual_business_tags(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "season_year",
+        "season_drop",
+        "launch_batch",
+        "retail_channel",
+        "series",
+        "collaboration",
+        "internal_collection",
+        "styling_priority",
+        "do_not_use_for_styling",
+        "notes",
+    }
+    normalized = {key: value[key] for key in allowed if key in value}
+    for key in ("retail_channel", "series", "collaboration", "internal_collection"):
+        if key in normalized:
+            normalized[key] = ensure_string_list(normalized[key])
+    if "do_not_use_for_styling" in normalized:
+        normalized["do_not_use_for_styling"] = bool(normalized["do_not_use_for_styling"])
+    return normalized
+
+
+def normalize_tag_meta(value: Any, garment: dict[str, Any]) -> dict[str, Any]:
+    meta = value if isinstance(value, dict) else {}
+    confidence = clamp_float(meta.get("overall_confidence"), 0.0, 1.0, 0.5)
+    review_reasons = ensure_string_list(meta.get("review_reasons"))
+    if confidence < 0.72 and "low_confidence" not in review_reasons:
+        review_reasons.append("low_confidence")
+    return {
+        "tagger_provider": "gemini",
+        "tagger_model": settings.gemini_model,
+        "schema_version": LILY_TAG_SCHEMA_VERSION,
+        "overall_confidence": confidence,
+        "field_confidence": meta.get("field_confidence") if isinstance(meta.get("field_confidence"), dict) else {},
+        "needs_review": bool(meta.get("needs_review")) or confidence < 0.72,
+        "review_reasons": review_reasons,
+        "source_image_ids": ensure_string_list(meta.get("source_image_ids")) or [str(image.get("id")) for image in garment.get("images", [])],
+        "warnings": ensure_string_list(meta.get("warnings")),
+    }
+
+
+def build_effective_tags(ai_tags: dict[str, Any], official_title_tags: dict[str, Any], manual_tags: dict[str, Any]) -> dict[str, Any]:
+    compatibility = ai_tags.get("styling_compatibility") if isinstance(ai_tags.get("styling_compatibility"), dict) else {}
+    colors = ai_tags.get("colors") if isinstance(ai_tags.get("colors"), dict) else {}
+    return {
+        "schema_version": LILY_TAG_SCHEMA_VERSION,
+        "category": ai_tags.get("category", "unknown"),
+        "sub_category": ai_tags.get("sub_category", "other"),
+        "colors": [value for value in [colors.get("primary"), *(colors.get("secondary") or [])] if value],
+        "fit": ai_tags.get("fit", "unknown"),
+        "silhouette": ai_tags.get("silhouette", []),
+        "materials_visual": ai_tags.get("materials_visual", []),
+        "details": ai_tags.get("details", []),
+        "patterns": ai_tags.get("patterns", []),
+        "occasion": ai_tags.get("occasion", []),
+        "season": ai_tags.get("season", []),
+        "wearability": ai_tags.get("wearability", {}),
+        "lily_style": ai_tags.get("lily_style", {}),
+        "styling_compatibility": compatibility,
+        "official": official_title_tags,
+        "manual": manual_tags,
+        "pairing_brief": compatibility.get("pairing_brief", ""),
+        "risk": compatibility.get("style_risk", []),
+    }
+
+
+def compress_tags_for_styling(row: Any) -> dict[str, Any]:
+    effective = loads(row["effective_tags_json"], {}) if "effective_tags_json" in row.keys() else {}
+    if not effective:
+        effective = build_effective_tags(loads(row["ai_tags_json"], {}), {}, loads(row["manual_tags_json"], {}))
+    manual = effective.get("manual") if isinstance(effective.get("manual"), dict) else {}
+    return {
+        "id": row["id"],
+        "code": row["code"],
+        "category": effective.get("category", "unknown"),
+        "sub_category": effective.get("sub_category", "other"),
+        "colors": effective.get("colors", []),
+        "fit": effective.get("fit", "unknown"),
+        "silhouette": effective.get("silhouette", []),
+        "materials_visual": effective.get("materials_visual", []),
+        "details": effective.get("details", []),
+        "occasion": effective.get("occasion", []),
+        "season": effective.get("season", []),
+        "wearability": effective.get("wearability", {}),
+        "manual": {
+            "season_year": manual.get("season_year"),
+            "series": manual.get("series", []),
+            "do_not_use_for_styling": bool(manual.get("do_not_use_for_styling")),
+        },
+        "pairing_brief": effective.get("pairing_brief", ""),
+        "risk": effective.get("risk", []),
+    }
+
+
+def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def normalize_score_object(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    result = {**fallback, **source}
+    for key in ("business_fashion_score", "commute_score", "clean_score", "relaxed_score", "feminine_score", "fashion_detail_score"):
+        result[key] = clamp_float(result.get(key), 0.0, 1.0, 0.0)
+    result["style_notes"] = [str(item)[:80] for item in ensure_string_list(result.get("style_notes"))[:3]]
+    return result
+
+
+def ensure_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item)[:80] for item in value if item is not None and str(item)]
+    if isinstance(value, str) and value:
+        return [value[:80]]
+    return []
+
+
+def clamp_float(value: Any, minimum: float, maximum: float, fallback: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(minimum, min(maximum, number))
 
 
 def extract_json_text(text: str) -> str:
@@ -3580,16 +3900,15 @@ async def select_styling_with_gemini(task_id: int, input_version_id: int) -> dic
     with get_db() as db:
         input_row = db.execute("SELECT * FROM generation_task_input_versions WHERE id = ?", (input_version_id,)).fetchone()
         material_rows = db.execute(
-            "SELECT id, code, ai_tags_json FROM styling_garments WHERE deleted_at IS NULL AND status = 'READY' ORDER BY updated_at DESC, id DESC"
+            """
+            SELECT id, code, ai_tags_json, manual_tags_json, effective_tags_json
+            FROM styling_garments
+            WHERE deleted_at IS NULL AND status = 'READY'
+            ORDER BY updated_at DESC, id DESC
+            """
         ).fetchall()
-    material_cards = [
-        {
-            "id": row["id"],
-            "code": row["code"],
-            "tags": loads(row["ai_tags_json"], {}),
-        }
-        for row in material_rows
-    ]
+    material_cards = [compress_tags_for_styling(row) for row in material_rows]
+    material_cards = [card for card in material_cards if not (card.get("manual") or {}).get("do_not_use_for_styling")]
     if not settings.gemini_api_key:
         return fallback_styling_selection(input_row, material_cards)
     try:
