@@ -291,6 +291,65 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
 .garment-card div:nth-child(2) { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .garment-card strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .garment-card p { min-height: 36px; color: #64748b; font-size: 12px; line-height: 1.45; }
+.tag-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.tag-summary span {
+  max-width: 100%;
+  height: 22px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tag-details {
+  padding: 8px;
+  background: #f8fafc;
+}
+.tag-details summary {
+  cursor: pointer;
+  color: #0f7cff;
+  font-size: 12px;
+  font-weight: 700;
+}
+.tag-details .meta {
+  grid-template-columns: 70px minmax(0, 1fr);
+  margin-top: 8px;
+  font-size: 12px;
+}
+.tag-details .meta strong {
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+.manual-tags {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+.manual-tags label {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+.manual-tags textarea {
+  min-height: 112px;
+  resize: vertical;
+  padding: 8px;
+  border: 1px solid #d8e0ea;
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #334155;
+  background: #fff;
+}
+.inline-error { color: #be123c; font-size: 12px; }
 .status, .chip {
   display: inline-flex;
   align-items: center;

@@ -11,6 +11,7 @@
 | `assets_and_parameters.md` | 媒体资产、主推款、搭配服饰、标签、数字模特、ShotPlan 字段 | 处理素材、标签、图片输入、模特和参数时 |
 | `lily_tagging_research_raw.md` | Lily 标签体系设计前的公开资料、天猫店铺采集、本地素材盘点和甄别规则备份 | 设计或调整 Lily 标签体系前 |
 | `lily_tagging_system.md` | Lily 服装视觉生产标签体系：来源分层、AI 标签、人工标签、选搭压缩格式、前台展示规则 | 实现或评审标签体系、智能选搭输入、标签展示/治理时 |
+| `lily_gemini_tagging_flow.md` | Gemini 实际打标流水线：输入、判断步骤、输出、后端校验、effective_tags 合成 | 实现打标服务、排查打标质量或联调标签展示时 |
 | `category_shot_rules.md` | 旧版各服装品类默认 5 张组图规则，可作为 ShotPlan 参考 | 需要参考品类图位语言时 |
 | `brand_style_templates.md` | 目标品牌 背景、光线、Pose、鞋包、配饰、禁区参考 | 设计品牌边界或生成配饰约束时 |
 | `optional_measurement_enhancement.md` | 模特尺寸、服装尺寸、品类尺寸字段 | 解决衣长、裙长、裤长、下摆比例等问题时 |

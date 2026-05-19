@@ -329,7 +329,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
       <div className="library-layout">
         <div className="panel">
           <div className="toolbar"><div className="search"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索 code / 标签" /></div></div>
-          <div className="garment-grid">{visible.map((item) => <GarmentCard key={item.id} item={item} onTag={() => void run('AI 打标中...', () => api.tagStylingGarment(item.id))} />)}</div>
+          <div className="garment-grid">{visible.map((item) => <GarmentCard key={item.id} item={item} run={run} onTag={() => void run('AI 打标中...', () => api.tagStylingGarment(item.id))} />)}</div>
         </div>
         <div className="panel side-editor">
           <h3>导入搭配服饰</h3>
@@ -415,14 +415,62 @@ function UploadBox({ files, setFiles, max, compact = false }: { files: File[]; s
   )
 }
 
-function GarmentCard({ item, onTag }: { item: StylingGarment; onTag?: () => void }) {
+function GarmentCard({ item, onTag, run }: { item: StylingGarment; onTag?: () => void; run?: any }) {
   const tags = item.aiTags ?? {}
+  const effective = item.effectiveTags ?? {}
+  const meta = item.tagMeta ?? {}
+  const compatibility = typeof tags.styling_compatibility === 'object' && tags.styling_compatibility ? tags.styling_compatibility as Record<string, unknown> : {}
+  const colors = typeof tags.colors === 'object' && tags.colors ? tags.colors as Record<string, unknown> : {}
+  const brief = String(effective.pairing_brief || compatibility.pairing_brief || '等待标签')
   return (
     <div className="garment-card">
       <AssetThumb asset={item.images?.[0]?.asset ?? (item.coverUrl ? { id: item.id, objectKey: '', filename: item.code, mimeType: '', thumbUrl: item.coverUrl } : null)} large />
       <div><strong>{item.code}</strong><span className={`status ${item.status.toLowerCase()}`}>{garmentStatus(item.status)}</span></div>
-      <p>{String(tags.brief ?? '等待标签')}</p>
+      <p>{brief}</p>
+      <div className="tag-summary">
+        <span>{String(tags.category ?? effective.category ?? 'unknown')}</span>
+        <span>{String(tags.sub_category ?? effective.sub_category ?? 'other')}</span>
+        <span>{String(colors.primary ?? 'unknown')}</span>
+      </div>
+      <details className="tag-details">
+        <summary>查看标签</summary>
+        <Meta label="AI 置信度" value={formatConfidence(meta.overall_confidence)} />
+        <Meta label="AI 标签" value={compactTagLine(tags)} />
+        <Meta label="标题证据" value={compactTagLine(item.officialTitleTags ?? {})} />
+        <Meta label="生效标签" value={compactTagLine(effective)} />
+        {run && <ManualTagsEditor item={item} run={run} />}
+      </details>
       {onTag && <button className="secondary" onClick={onTag}>{item.status === 'READY' ? '重新打标' : '保存并打标'}</button>}
+    </div>
+  )
+}
+
+function ManualTagsEditor({ item, run }: { item: StylingGarment; run: any }) {
+  const [value, setValue] = useState(() => JSON.stringify(item.manualTags ?? {}, null, 2))
+  const [localError, setLocalError] = useState('')
+
+  useEffect(() => {
+    setValue(JSON.stringify(item.manualTags ?? {}, null, 2))
+    setLocalError('')
+  }, [item.id, item.manualTags])
+
+  function save() {
+    try {
+      const parsed = value.trim() ? JSON.parse(value) : {}
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('人工标签必须是 JSON 对象')
+      setLocalError('')
+      void run('保存人工标签中...', () => api.updateStylingGarment(item.id, { manualTags: parsed }))
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : 'JSON 格式不正确')
+    }
+  }
+
+  return (
+    <div className="manual-tags">
+      <label>人工业务标签</label>
+      <textarea value={value} onChange={(event) => setValue(event.target.value)} spellCheck={false} />
+      {localError && <span className="inline-error">{localError}</span>}
+      <button className="secondary" onClick={save}>保存人工标签</button>
     </div>
   )
 }
@@ -480,6 +528,19 @@ function statusText(status: string) {
 
 function garmentStatus(status: string) {
   return statusText(status)
+}
+
+function formatConfidence(value: unknown) {
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) ? `${Math.round(number * 100)}%` : '未生成'
+}
+
+function compactTagLine(value: Record<string, unknown>) {
+  const keys = ['category', 'sub_category', 'colors', 'season', 'occasion', 'pairing_brief', 'year', 'official_series']
+  const parts = keys
+    .filter((key) => value[key] !== undefined && value[key] !== null && value[key] !== '')
+    .map((key) => `${key}: ${Array.isArray(value[key]) ? (value[key] as unknown[]).join('/') : typeof value[key] === 'object' ? JSON.stringify(value[key]) : String(value[key])}`)
+  return parts.length ? parts.slice(0, 4).join(' · ') : '暂无'
 }
 
 function angleLabel(angle?: string | null) {

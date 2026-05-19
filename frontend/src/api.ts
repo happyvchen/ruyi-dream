@@ -28,6 +28,11 @@ export type StylingGarment = {
   status: string
   aiTags: Record<string, unknown>
   manualTags: Record<string, unknown>
+  officialTitleTags?: Record<string, unknown>
+  effectiveTags?: Record<string, unknown>
+  tagMeta?: Record<string, unknown>
+  tagSchemaVersion?: string | null
+  tagCompletedAt?: string | null
   tagError?: string | null
   imageCount?: number | null
   coverUrl?: string | null
@@ -143,6 +148,8 @@ export const api = {
   },
   tagStylingGarment: (id: number) =>
     request<{ item: StylingGarment }>(`/api/styling-garments/${id}/save-and-tag`, { method: 'POST' }),
+  updateStylingGarment: (id: number, payload: { code?: string; manualTags?: Record<string, unknown> }) =>
+    request<{ item: StylingGarment }>(`/api/styling-garments/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   listTasks: (options?: { limit?: number; offset?: number }) =>
     request<Paginated<GenerationTask>>(params('/api/generation-tasks', options ?? {})),
   getTask: (id: number, includeDebug = false) =>
