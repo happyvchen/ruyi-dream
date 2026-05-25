@@ -425,15 +425,15 @@ Authorization: Bearer <token>
 - 前 5 格严格对应当前方案的 5 条分镜，第 6 格为备用候选姿势。
 - 图片入参顺序为：数字模特身份参考图在前，当前货号服装素材图在后，总数最多 10 张。
 - 数字模特图按 UI 当前显示顺序取前 4 张；服装图按 UI 当前显示顺序使用剩余额度，通常取 6 张，但当模特图少于 4 张时可超过 6 张，总数仍不超过 10。
-- prompt 中的图片编号必须与最终传给 Image-2 的 `image_urls` 顺序一致。
+- prompt 中的图片编号必须与最终传给 Image-2 的 provider 图片 URL 顺序一致。
 - prompt 必须直接引用当前货号已保存的拍摄方案、服饰搭配、统一背景和 5 条分镜剧本，并声明服装素材图是商品事实来源；缺少关键方案字段时任务应失败，不允许使用通用兜底搭配文案。
-- 所有输入图先上传 fal，最终只把 fal Image URLs 传给 Image-2。
-- 预览任务的 Image-2 请求使用 `image_size = square_hd`、`quality = high`；不得传 `1024x1024` 这类 fal schema 不接受的尺寸字符串。
-- `provider_request_json`、`image_inputs_json` 和 `attempts_json` 保留图片角色、源对象 key、文件名、fal URL 与最终 prompt。
+- 所有输入图先上传到当前 Image-2 provider，最终只把 provider 返回的 URL 传给 Image-2。toapis 使用 `reference_images`，fal 使用 `image_urls`。
+- 预览任务的 Image-2 请求使用当前 provider 的正方形安全配置；fal 为 `image_size = square_hd`、`quality = high`，toapis 为 `size = 1:1`。
+- `provider_request_json`、`image_inputs_json` 和 `attempts_json` 保留图片角色、源对象 key、文件名、provider URL 与最终 prompt。
 
 预览图用于确认姿势、身位、构图、搭配和整体调性，不作为最终交付成片。
 
-对预览图点击“重生”时，后端仍使用同一套预览构建规则重新生成 task package：最多 4 张模特图在前、服装图按剩余额度补齐到最多 10 张、2x3 Contact Sheet prompt、全部输入图先上传 fal。历史图片记录里的旧 `task_package_json` 只作为审计记录，不作为预览重生的规则来源；若历史预览属于旧方案，后端应使用当前货号最新可用方案重建任务。
+对预览图点击“重生”时，后端仍使用同一套预览构建规则重新生成 task package：最多 4 张模特图在前、服装图按剩余额度补齐到最多 10 张、2x3 Contact Sheet prompt、全部输入图先上传当前 Image-2 provider。历史图片记录里的旧 `task_package_json` 只作为审计记录，不作为预览重生的规则来源；若历史预览属于旧方案，后端应使用当前货号最新可用方案重建任务。
 
 ### 创建生成批次
 
@@ -465,8 +465,8 @@ Authorization: Bearer <token>
 - 组装单张 `task_package`，包括服装、模特、品牌模板、shot、输入图和约束快照。
 - 合成中文 Image 2 prompt。
 - 每张图先以 `QUEUED` 状态持久化，并立即返回 `GenerationRun`。
-- 后台 poller 捡起 `QUEUED` 图片后，先将参考图上传到 fal，再把 fal Image URLs 交给 Image-2。
-- 通过 fal queue 提交每张图，保存 fal `request_id`、`status_url`、`response_url`、`cancel_url`。
+- 后台 poller 捡起 `QUEUED` 图片后，先将参考图上传到当前 Image-2 provider，再把 provider URL 交给 Image-2。
+- 通过当前 provider 提交每张图，保存 provider task id、状态 URL 和原始响应快照。
 - 立即返回 `GenerationRun`，不等待图片生成完成。
 
 响应中的每张 `GenerationImage` 可能处于：
@@ -475,7 +475,7 @@ Authorization: Bearer <token>
 SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED
 ```
 
-生产实现只支持 fal provider。任务会进入 queue 状态，并通过后台 poller 更新为 `IN_QUEUE` / `IN_PROGRESS` / `SUCCEEDED` / `FAILED` 等应用内状态。
+生产实现支持 toapis 和 fal provider，默认 toapis，可通过 `.env` 的 `GPT_IMAGE2_PROVIDER` 切换。任务会进入 queue 状态，并通过后台 poller 更新为 `SUBMITTED` / `IN_QUEUE` / `IN_PROGRESS` / `SUCCEEDED` / `FAILED` 等应用内状态。
 
 ### 查询生成批次
 
@@ -572,7 +572,7 @@ SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED
 GENERATION_POLL_INTERVAL_SECONDS=5
 ```
 
-控制。poller 会先扫描 `QUEUED` 且尚无 `provider_request_id` 的图片并提交 fal/Image-2；随后扫描状态为 `SUBMITTED`、`IN_QUEUE`、`IN_PROGRESS`、`RUNNING` 且有 `provider_request_id` 的任务，调用 fal `status_url` 获取真实状态。页面刷新不影响后台提交和状态推进。
+控制。poller 会先扫描 `QUEUED` 且尚无 `provider_request_id` 的图片并提交当前 Image-2 provider；随后扫描状态为 `SUBMITTED`、`IN_QUEUE`、`IN_PROGRESS`、`RUNNING` 且有 `provider_request_id` 的任务，调用 provider status URL 获取真实状态。页面刷新不影响后台提交和状态推进。
 
 fal 状态映射：
 

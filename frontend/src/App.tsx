@@ -35,7 +35,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
-import type { GenerationTask, MediaAsset, ModelProfile, StylingGarment } from './api'
+import type { AIOperation, GenerationTask, MediaAsset, ModelProfile, StylingGarment } from './api'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 
@@ -78,6 +78,7 @@ export function App() {
   const [garments, setGarments] = useState<StylingGarment[]>([])
   const [models, setModels] = useState<ModelProfile[]>([])
   const [recordDetail, setRecordDetail] = useState<GenerationTask | null>(null)
+  const [localOperations, setLocalOperations] = useState<AIOperation[]>([])
 
   useEffect(() => {
     void api.session()
@@ -104,12 +105,30 @@ export function App() {
     if (page === 'records' && recordDetail?.id) window.history.replaceState(null, '', routeToUrl({ page, recordId: recordDetail.id }))
   }, [page, task?.id, recordDetail?.id])
 
-  const hasRunningTagging = garments.some((item) => item.status === 'TAGGING_RUNNING')
+  const runningTaggingIds = useMemo(() => garments.filter((item) => item.status === 'TAGGING_RUNNING').map((item) => item.id), [garments])
+  const runningTaggingKey = runningTaggingIds.join(',')
+  const hasRunningTagging = runningTaggingIds.length > 0
   useEffect(() => {
     if (!authenticated || !hasRunningTagging) return
-    const timer = window.setInterval(() => void refreshAll().catch(() => undefined), 2000)
+    const timer = window.setInterval(() => {
+      void Promise.all(runningTaggingIds.map((id) => api.getStylingGarment(id).then((response) => response.item).catch(() => null)))
+        .then((latestItems) => {
+          const latestById = new Map(latestItems.filter((item): item is StylingGarment => Boolean(item)).map((item) => [item.id, item]))
+          if (!latestById.size) return
+          setGarments((items) => items.map((item) => latestById.get(item.id) ?? item))
+        })
+    }, 3000)
     return () => window.clearInterval(timer)
-  }, [authenticated, hasRunningTagging])
+  }, [authenticated, hasRunningTagging, runningTaggingKey])
+
+  const hasRunningGeneration = task?.status === 'PREVIEW_RUNNING' || task?.status === 'FINAL_RUNNING'
+  useEffect(() => {
+    if (!authenticated || !task?.id || !hasRunningGeneration) return
+    const timer = window.setInterval(() => {
+      void api.getTask(task.id).then((response) => setTask(response.item)).catch(() => undefined)
+    }, 2000)
+    return () => window.clearInterval(timer)
+  }, [authenticated, task?.id, hasRunningGeneration])
 
   async function refreshAll() {
     const [garmentResult, taskResult, recordResult, modelResult] = await Promise.all([
@@ -155,6 +174,21 @@ export function App() {
     }
   }
 
+  function startLocalOperation(operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) {
+    const next: AIOperation = {
+      ...operation,
+      id: -Date.now() - localOperations.length,
+      status: operation.status ?? 'RUNNING',
+      startedAt: operation.startedAt ?? new Date().toISOString(),
+    }
+    setLocalOperations((items) => [next, ...items.filter((item) => !(item.ownerType === next.ownerType && item.ownerId === next.ownerId))].slice(0, 20))
+    return next
+  }
+
+  function clearLocalOperationsFor(ownerTypes: string[]) {
+    setLocalOperations((items) => items.filter((item) => !ownerTypes.includes(item.ownerType)))
+  }
+
   if (!checked) return <BootScreen />
   if (!authenticated) return <LoginPage onAuthed={() => setAuthenticated(true)} />
 
@@ -198,7 +232,7 @@ export function App() {
       <main className="workspace">
         {error && <div className="toast">{error}</div>}
         {busy && <div className="busy"><Loader2 size={16} className="spin" />{busy}</div>}
-        {page === 'studio' && <StudioPage task={task} setTask={setTask} tasks={tasks} run={run} />}
+        {page === 'studio' && <StudioPage task={task} setTask={setTask} tasks={tasks} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
         {page === 'library' && <LibraryPage garments={garments} run={run} />}
         {page === 'model' && <ModelPage models={models} />}
         {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} run={run} />}
@@ -247,11 +281,14 @@ function LoginPage({ onAuthed }: { onAuthed: () => void }) {
   )
 }
 
-function StudioPage({ task, setTask, tasks, run }: {
+function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask | null) => void
   tasks: GenerationTask[]
   run: <T>(label: string, action: () => Promise<T>, after?: (value: T) => void) => Promise<T | undefined>
+  localOperations: AIOperation[]
+  startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
+  clearLocalOperationsFor: (ownerTypes: string[]) => void
 }) {
   const [step, setStep] = useState<StudioStep>(0)
   const currentStep = getTaskStep(task)
@@ -272,9 +309,9 @@ function StudioPage({ task, setTask, tasks, run }: {
         <div className="panel studio-main">
           <StepRail active={visibleStep} max={currentStep} onSelect={setStep} />
           {visibleStep === 0 && <UploadHeroStep task={task} setTask={setTask} run={run} />}
-          {visibleStep === 1 && <StylingStep task={task} setTask={setTask} run={run} />}
-          {visibleStep === 2 && <PreviewStep task={task} setTask={setTask} run={run} />}
-          {visibleStep === 3 && <FinalStep task={task} setTask={setTask} run={run} />}
+          {visibleStep === 1 && <StylingStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
+          {visibleStep === 2 && <PreviewStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
+          {visibleStep === 3 && <FinalStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
         </div>
         <aside className="panel task-rail">
           <h3>任务摘要</h3>
@@ -285,6 +322,7 @@ function StudioPage({ task, setTask, tasks, run }: {
               <Meta label="状态" value={statusText(task.status)} />
               <Meta label="搭配服饰" value={`${task.styling?.selectedMaterials?.length ?? 0} 件`} />
               <Meta label="最终图" value={`${task.resultSet?.images?.filter((i) => i.status === 'SUCCEEDED').length ?? 0}/5`} />
+              <AIOperationList operations={visibleTaskOperations(task, localOperations)} compact />
             </>
           ) : <EmptyState title="暂无任务" text="上传主推款后会在这里形成拍摄任务。" />}
           <h3>最近任务</h3>
@@ -445,60 +483,101 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
   )
 }
 
-function StylingStep({ task, setTask, run }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any }) {
+function StylingStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
+  task: GenerationTask | null
+  setTask: (task: GenerationTask) => void
+  run: any
+  localOperations: AIOperation[]
+  startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
+  clearLocalOperationsFor: (ownerTypes: string[]) => void
+}) {
   const canSelect = task?.status === 'READY_FOR_STYLING' || (task?.status === 'FAILED' && !task.styling)
+  const operations = task ? operationFallbacks(task, localOperations, 'generation_styling') : []
   return (
     <div className="step-panel">
       <div className="step-copy"><h2>AI 智能选搭</h2><p>系统只从搭配服饰库选择真实服饰，暂不支持手动替换或重新搭配。</p></div>
+      <AIOperationList operations={operations} />
       {task?.styling ? (
         <div className="selected-strip">
           {task.styling.selectedMaterials.length ? task.styling.selectedMaterials.map((item) => <GarmentCard key={item.id} item={item} />) : <EmptyState title="未选择库内服饰" text="Gemini 判断本次可以不加入库内搭配服饰。" />}
         </div>
       ) : <EmptyState title="等待智能选搭" text="点击按钮后会冻结当前主推款输入版本。" />}
       <button className="primary" disabled={!canSelect} onClick={() => task && void run('智能选搭中...', () => {
+        startLocalOperation({ ownerType: 'generation_styling', ownerId: task.id, provider: 'gemini' })
         setTask({ ...task, status: 'STYLING_RUNNING' })
         return api.selectStyling(task.id)
-      }, (r: { item: GenerationTask }) => setTask(r.item))}>
+      }, (r: { item: GenerationTask }) => {
+        clearLocalOperationsFor(['generation_styling'])
+        setTask(r.item)
+      })}>
         <WandSparkles size={16} /> AI 智能选搭
       </button>
     </div>
   )
 }
 
-function PreviewStep({ task, setTask, run }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any }) {
+function PreviewStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
+  task: GenerationTask | null
+  setTask: (task: GenerationTask) => void
+  run: any
+  localOperations: AIOperation[]
+  startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
+  clearLocalOperationsFor: (ownerTypes: string[]) => void
+}) {
   const canPreview = task?.status === 'STYLING_READY' || (task?.status === 'FAILED' && !!task.styling && !task.preview)
+  const operations = task ? operationFallbacks(task, localOperations, 'generation_preview') : []
   return (
     <div className="step-panel">
       <div className="step-copy"><h2>六宫格预览</h2><p>只显示一张 3x2 预览图。最终固定生成前 5 格，第 6 格忽略。</p></div>
+      <AIOperationList operations={operations} />
       {task?.preview?.asset ? <img className="preview-board" src={mediaUrl(task.preview.asset.previewUrl || task.preview.asset.url)} /> : <EmptyState title="尚未生成六宫格" text="系统会先生成 ShotPlan，再调用 Image-2 输出六宫格。" />}
       <button className="primary" disabled={!canPreview} onClick={() => task && void run('生成六宫格预览中...', () => {
+        startLocalOperation({ ownerType: 'generation_preview', ownerId: task.id, provider: 'image-2' })
         setTask({ ...task, status: 'PREVIEW_RUNNING' })
         return api.previewTask(task.id)
-      }, (r: { item: GenerationTask }) => setTask(r.item))}>
+      }, (r: { item: GenerationTask }) => {
+        clearLocalOperationsFor(['generation_preview'])
+        setTask(r.item)
+      })}>
         <GalleryVerticalEnd size={16} /> 生成预览
       </button>
     </div>
   )
 }
 
-function FinalStep({ task, setTask, run }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any }) {
+function FinalStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
+  task: GenerationTask | null
+  setTask: (task: GenerationTask) => void
+  run: any
+  localOperations: AIOperation[]
+  startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
+  clearLocalOperationsFor: (ownerTypes: string[]) => void
+}) {
   const images = task?.resultSet?.images ?? []
   const canGenerate = task?.status === 'PREVIEW_READY'
+  const finalOperations = task ? finalImageOperations(task, localOperations) : []
   return (
     <div className="step-panel">
       <div className="step-copy"><h2>生成成片</h2><p>并发生成前 5 格。每张图可单独下载，失败可单张重试。</p></div>
+      <AIOperationList operations={finalOperations} />
       <div className="result-grid">
         {images.length ? images.map((image) => (
           <div className="result-card" key={image.id}>
-            {image.asset ? <img src={mediaUrl(image.asset.previewUrl || image.asset.url)} /> : <div className="image-placeholder">{statusText(image.status)}</div>}
+            {image.asset ? <img src={mediaUrl(image.asset.previewUrl || image.asset.url)} /> : <div className="image-placeholder">{statusText(image.status)}{image.activeAttempt && isAttemptRunning(image.activeAttempt) && <small>{formatDuration(elapsedSeconds(image.activeAttempt.startedAt || image.updatedAt))}</small>}</div>}
             <div><span>#{image.sortOrder}</span>{image.asset && <a href={mediaUrl(image.asset.originalUrl)} target="_blank" rel="noreferrer"><Download size={15} /></a>}{image.status === 'FAILED' && <button onClick={() => void run('单张重试中...', () => api.retryResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item))}><RotateCcw size={14} /></button>}</div>
           </div>
         )) : <EmptyState title="尚未生成最终图" text="点击生成成片后会生成前 5 张。" />}
       </div>
       <button className="primary" disabled={!canGenerate} onClick={() => task && void run('生成最终成片中...', () => {
+        for (let index = 1; index <= 5; index += 1) {
+          startLocalOperation({ ownerType: 'generation_result_image', ownerId: index, provider: 'image-2' })
+        }
         setTask({ ...task, status: 'FINAL_RUNNING' })
         return api.generateFinal(task.id)
-      }, (r: { item: GenerationTask }) => setTask(r.item))}>
+      }, (r: { item: GenerationTask }) => {
+        clearLocalOperationsFor(['generation_result_image'])
+        setTask(r.item)
+      })}>
         <Sparkles size={16} /> 生成成片
       </button>
     </div>
@@ -578,6 +657,7 @@ type ImportBatch = {
 function BatchImportPanel({ run }: { run: any }) {
   const [batches, setBatches] = useState<ImportBatch[]>([])
   const [localError, setLocalError] = useState('')
+  const [importOperations, setImportOperations] = useState<AIOperation[]>([])
 
   function addFiles(files: File[]) {
     const next = groupImportFiles(files)
@@ -629,12 +709,27 @@ function BatchImportPanel({ run }: { run: any }) {
       return
     }
     await run(`导入 ${batches.length} 套搭配服饰中...`, async () => {
+      const startedAt = new Date().toISOString()
+      setImportOperations(batches.map((batch, index) => ({
+        id: -(index + 1),
+        ownerType: 'styling_garment_tagging',
+        ownerId: index + 1,
+        provider: 'gemini',
+        status: 'SUBMITTED',
+        startedAt,
+        providerRequestId: batch.code,
+      })))
       for (const batch of batches) {
+        setImportOperations((items) => items.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'RUNNING', startedAt: item.startedAt || new Date().toISOString() } : item))
         const created = await api.createStylingGarment(batch.code, batch.files)
         await api.tagStylingGarment(created.item.id)
+        setImportOperations((items) => items.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'SUBMITTED' } : item))
       }
       return true
-    }, () => setBatches([]))
+    }, () => {
+      setBatches([])
+      window.setTimeout(() => setImportOperations([]), 1600)
+    })
   }
 
   return (
@@ -661,6 +756,7 @@ function BatchImportPanel({ run }: { run: any }) {
           </label>
         </div>
       </div>
+      <AIOperationList operations={importOperations.map((operation) => ({ ...operation, ownerType: 'styling_garment_tagging', provider: operation.provider || 'gemini' }))} />
       {localError && <span className="inline-error">{localError}</span>}
       {batches.length > 0 && (
         <div className="batch-list">
@@ -886,6 +982,7 @@ function GarmentCard({ item, onTag, onOpen, onArchive, run }: {
   const brief = tagText(effective.pairing_brief || compatibility.pairing_brief)
   const tagging = item.status === 'TAGGING_RUNNING'
   const chips = garmentTagChips(item)
+  const runningTagAttempt = latestRunningTagAttempt(item)
   return (
     <div className={`garment-card ${tagging ? 'is-tagging' : ''}`}>
       <div className="garment-cover">
@@ -895,6 +992,7 @@ function GarmentCard({ item, onTag, onOpen, onArchive, run }: {
       <div className="garment-card-head"><strong title={item.code}>{item.code}</strong><span className={`status ${item.status.toLowerCase()}`}>{garmentStatus(item.status)}</span></div>
       {item.tagError && <span className="inline-error">{item.tagError}</span>}
       <p>{tagging ? '正在识别服饰信息，完成后可进入智能选搭。' : brief || '待识别搭配信息'}</p>
+      {tagging && runningTagAttempt && <AIOperationList operations={[runningTagAttempt]} compact />}
       <div className="tag-summary">
         {chips.map((chip) => <span key={chip}>{chip}</span>)}
         {!chips.length && <span>{tagging ? '识别中' : '待识别'}</span>}
@@ -927,6 +1025,7 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
   const [pendingDimensions, setPendingDimensions] = useState<Record<string, { width: number; height: number }>>({})
   const [replacementDimensions, setReplacementDimensions] = useState<Record<number, { width: number; height: number }>>({})
   const tagging = item.status === 'TAGGING_RUNNING'
+  const runningTagAttempt = latestRunningTagAttempt(item)
 
   useEffect(() => {
     setWorking(item.images ?? [])
@@ -981,6 +1080,7 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
         <div className="drawer-section">
           <Meta label="更新时间" value={dateText(item.updatedAt)} />
           <Meta label="图片" value={`${working.length + pendingFiles.length}/6 张`} />
+          {tagging && runningTagAttempt && <AIOperationList operations={[runningTagAttempt]} />}
           <CodeEditor item={item} run={run} disabled={tagging} />
         </div>
         <div className="drawer-section">
@@ -1200,6 +1300,139 @@ function GeminiTagAttemptPanel({ attempts }: { attempts: NonNullable<StylingGarm
   )
 }
 
+function AIOperationList({ operations, compact = false }: { operations: AIOperation[]; compact?: boolean }) {
+  const active = operations.filter(Boolean).slice(0, compact ? 4 : 8)
+  const now = useTicker(active.some(isAttemptRunning))
+  if (!active.length) return null
+  return (
+    <div className={`ai-operation-list ${compact ? 'compact' : ''}`}>
+      {active.map((operation, index) => (
+        <AIOperationCard key={`${operation.id}-${operation.ownerType}-${operation.ownerId}-${index}`} operation={operation} now={now} compact={compact} index={index} />
+      ))}
+    </div>
+  )
+}
+
+function AIOperationCard({ operation, now, compact, index }: { operation: AIOperation; now: number; compact?: boolean; index: number }) {
+  const running = isAttemptRunning(operation)
+  const seconds = elapsedSeconds(operation.startedAt || operation.createdAt, now, operation.completedAt || operation.failedAt)
+  return (
+    <div className={`ai-operation-card ${running ? 'is-running' : ''} ${compact ? 'compact' : ''}`}>
+      <div className="ai-operation-icon">{running ? <Loader2 size={15} className="spin" /> : <Clock3 size={15} />}</div>
+      <div>
+        <strong>{operationLabel(operation, index)}</strong>
+        <span>{operationProvider(operation.provider)} · {statusText(operation.status)}</span>
+      </div>
+      <time>{formatDuration(seconds)}</time>
+    </div>
+  )
+}
+
+function useTicker(enabled: boolean) {
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    if (!enabled) return
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [enabled])
+  return now
+}
+
+function operationFallbacks(task: GenerationTask, localOperations: AIOperation[], ownerType: string) {
+  const remote = (task.aiOperations ?? []).filter((operation) => operation.ownerType === ownerType)
+  const local = localOperations.filter((operation) => operation.ownerType === ownerType)
+  if (remote.length) return remote
+  if (local.length) return local
+  if (ownerType === 'generation_styling' && task.status === 'STYLING_RUNNING') {
+    return [syntheticOperation(ownerType, task.id, 'gemini', task.updatedAt)]
+  }
+  if (ownerType === 'generation_preview' && task.status === 'PREVIEW_RUNNING') {
+    return [syntheticOperation(ownerType, task.activePreviewId ?? task.id, 'image-2', task.preview?.createdAt || task.updatedAt)]
+  }
+  return []
+}
+
+function finalImageOperations(task: GenerationTask, localOperations: AIOperation[]) {
+  const imageAttempts = (task.resultSet?.images ?? []).map((image) => image.activeAttempt).filter(Boolean) as AIOperation[]
+  if (imageAttempts.length) return imageAttempts
+  const local = localOperations.filter((operation) => operation.ownerType === 'generation_result_image')
+  if (local.length) return local
+  if (task.status === 'FINAL_RUNNING') {
+    return Array.from({ length: 5 }, (_, index) => syntheticOperation('generation_result_image', index + 1, 'image-2', task.updatedAt))
+  }
+  return []
+}
+
+function latestRunningTagAttempt(item: StylingGarment): AIOperation | null {
+  const attempt = (item.tagAttempts ?? []).find((entry) => entry.status === 'RUNNING')
+  if (attempt) {
+    return {
+      id: attempt.id,
+      ownerType: 'styling_garment_tagging',
+      ownerId: item.id,
+      provider: attempt.provider,
+      status: attempt.status,
+      startedAt: attempt.startedAt,
+      completedAt: attempt.completedAt,
+      failedAt: attempt.failedAt,
+      errorMessage: attempt.errorMessage,
+    }
+  }
+  if (item.status === 'TAGGING_RUNNING') return syntheticOperation('styling_garment_tagging', item.id, 'gemini', item.updatedAt)
+  return null
+}
+
+function visibleTaskOperations(task: GenerationTask, localOperations: AIOperation[]) {
+  const activeRemote = (task.aiOperations ?? []).filter((operation) => isAttemptRunning(operation))
+  const activeLocal = localOperations.filter(isAttemptRunning)
+  return [...activeLocal, ...activeRemote]
+}
+
+function syntheticOperation(ownerType: string, ownerId: number, provider: string, startedAt?: string | null): AIOperation {
+  return {
+    id: -ownerId,
+    ownerType,
+    ownerId,
+    provider,
+    status: 'RUNNING',
+    startedAt: startedAt || new Date().toISOString(),
+  }
+}
+
+function isAttemptRunning(operation: AIOperation) {
+  return ['RUNNING', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS'].includes(operation.status)
+}
+
+function operationLabel(operation: AIOperation, index = 0) {
+  if (operation.ownerType === 'styling_garment_tagging') return operation.providerRequestId ? `服饰标签识别 · ${operation.providerRequestId}` : '服饰标签识别'
+  if (operation.ownerType === 'generation_styling') return '智能选搭'
+  if (operation.ownerType === 'generation_preview') return '六宫格预览'
+  if (operation.ownerType === 'generation_result_image') return `最终图 ${operation.ownerId > 0 && operation.id < 0 ? operation.ownerId : index + 1}`
+  return 'AI 调用'
+}
+
+function operationProvider(provider: string) {
+  if (provider === 'gemini') return 'Gemini'
+  if (provider === 'image-2') return 'Image-2'
+  if (provider === 'fal') return 'Image-2 / fal'
+  if (provider === 'toapis') return 'Image-2 / toapis'
+  return provider || 'AI'
+}
+
+function elapsedSeconds(start?: string | null, now = Date.now(), end?: string | null) {
+  if (!start) return 0
+  const startMs = Date.parse(start)
+  if (!Number.isFinite(startMs)) return 0
+  const endMs = end ? Date.parse(end) : now
+  return Math.max(0, Math.floor((endMs - startMs) / 1000))
+}
+
+function formatDuration(seconds: number) {
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  return `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`
+}
+
 function CurrentTaskCard({ task }: { task: GenerationTask }) {
   return <div className="current-task"><ThumbGrid assets={(task.images ?? []).map((item) => item.asset)} /><Meta label="当前任务" value={task.name} /><Meta label="状态" value={statusText(task.status)} /></div>
 }
@@ -1299,6 +1532,9 @@ function statusText(status: string) {
     TAGGING_RUNNING: '正在打标',
     TAGGING_FAILED: '打标失败',
     RUNNING: '运行中',
+    SUBMITTED: '已提交',
+    IN_QUEUE: '排队中',
+    IN_PROGRESS: '生成中',
     SUCCEEDED: '成功',
   }
   return map[status] ?? status

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import logging
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 from io import BytesIO
@@ -42,6 +43,7 @@ from .planner import PlannerError, SHOT_SLOTS, normalize_plan as normalize_plann
 
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = settings.max_upload_image_pixels
 
 
@@ -312,7 +314,7 @@ def health() -> dict[str, Any]:
         "ok": True,
         "storage": "configured" if settings.s3_access_key_id and settings.s3_secret_access_key else "missing_credentials",
         "geminiConfigured": bool(settings.gemini_api_key),
-        "imageProviderConfigured": bool(settings.gpt_image2_queue_url and settings.fal_key),
+        "imageProviderConfigured": settings.is_image_provider_configured(),
     }
 
 
@@ -1501,17 +1503,25 @@ async def create_generation_preview(task_id: int) -> dict[str, Any]:
         )
         preview_id = int(cursor.lastrowid)
     attempt_id = create_attempt("generation_preview", preview_id, "image-2")
+    schedule_background_generation(run_preview_generation(task_id, int(styling_id), shot_plans, preview_id, attempt_id))
+    return {"item": get_generation_task_by_id(task_id, include_debug=True)}
+
+
+async def run_preview_generation(task_id: int, styling_id: int, shot_plans: list[Any], preview_id: int, attempt_id: int) -> None:
     try:
-        task_package = build_new_preview_task_package(task_id, int(styling_id), shot_plans)
-        asset_id, provider_response = await generate_or_placeholder_asset(task_package, join_key("generation-tasks", str(task_id), "preview", f"preview-{preview_id}.png"), "六宫格预览")
+        task_package = build_new_preview_task_package(task_id, styling_id, shot_plans)
+        asset_id, provider_response = await generate_image_asset(task_package, join_key("generation-tasks", str(task_id), "preview", f"preview-{preview_id}.png"))
     except Exception as exc:
-        finish_attempt(attempt_id, "FAILED", error_message=str(exc))
+        provider_response = getattr(exc, "provider_response", None)
+        finish_attempt(attempt_id, "FAILED", response_snapshot=provider_response, error_message=str(exc))
+        persist_attempt_provider_request_id(attempt_id, provider_response)
         with get_db() as db:
             timestamp = now_iso()
             db.execute("UPDATE generation_previews SET status = 'FAILED', active_attempt_id = ?, updated_at = ? WHERE id = ?", (attempt_id, timestamp, preview_id))
             db.execute("UPDATE generation_tasks SET status = 'FAILED', updated_at = ? WHERE id = ?", (timestamp, task_id))
-        raise HTTPException(status_code=502, detail=f"六宫格预览失败：{exc}") from exc
+        return
     finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=provider_response, output_asset_id=asset_id)
+    persist_attempt_provider_request_id(attempt_id, provider_response)
     with get_db() as db:
         timestamp = now_iso()
         db.execute(
@@ -1522,7 +1532,6 @@ async def create_generation_preview(task_id: int) -> dict[str, Any]:
             "UPDATE generation_tasks SET status = 'PREVIEW_READY', active_preview_id = ?, updated_at = ? WHERE id = ?",
             (preview_id, timestamp, task_id),
         )
-    return {"item": get_generation_task_by_id(task_id, include_debug=True)}
 
 
 @app.post("/api/generation-tasks/{task_id}/generate-final")
@@ -1544,6 +1553,7 @@ async def generate_final_images(task_id: int) -> dict[str, Any]:
             (task_id, input_version_id, styling_id, preview_id, timestamp, timestamp),
         )
         result_set_id = int(cursor.lastrowid)
+        db.execute("UPDATE generation_tasks SET active_result_set_id = ?, updated_at = ? WHERE id = ?", (result_set_id, timestamp, task_id))
         shot_rows = db.execute(
             "SELECT * FROM generation_shot_plans WHERE styling_id = ? AND sort_order <= 5 ORDER BY sort_order",
             (styling_id,),
@@ -1559,17 +1569,21 @@ async def generate_final_images(task_id: int) -> dict[str, Any]:
                 (result_set_id, shot["id"], shot["sort_order"], timestamp, timestamp),
             )
             image_ids.append(int(image_cursor.lastrowid))
+    schedule_background_generation(run_final_generation(task_id, result_set_id, image_ids))
+    return {"item": get_generation_task_by_id(task_id, include_debug=True)}
+
+
+async def run_final_generation(task_id: int, result_set_id: int, image_ids: list[int]) -> None:
     results = await asyncio.gather(
         *(generate_single_final_image(task_id, result_set_id, image_id) for image_id in image_ids),
         return_exceptions=True,
     )
     succeeded = sum(1 for result in results if not isinstance(result, Exception))
-    final_status = "COMPLETED" if succeeded == len(image_ids) else "FINAL_PARTIAL"
+    final_status = "COMPLETED" if image_ids and succeeded == len(image_ids) else "FINAL_PARTIAL"
     with get_db() as db:
         timestamp = now_iso()
         db.execute("UPDATE generation_result_sets SET status = ?, updated_at = ? WHERE id = ?", ("SUCCEEDED" if final_status == "COMPLETED" else "PARTIAL", timestamp, result_set_id))
         db.execute("UPDATE generation_tasks SET status = ?, active_result_set_id = ?, updated_at = ? WHERE id = ?", (final_status, result_set_id, timestamp, task_id))
-    return {"item": get_generation_task_by_id(task_id, include_debug=True)}
 
 
 @app.post("/api/generation-result-images-new/{image_id}/retry")
@@ -1586,23 +1600,28 @@ async def retry_new_result_image(image_id: int) -> dict[str, Any]:
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="结果图不存在")
-    await generate_single_final_image(int(row["task_id"]), int(row["result_set_id"]), image_id)
+    schedule_background_generation(run_result_image_retry(int(row["task_id"]), int(row["result_set_id"]), image_id))
+    return {"item": get_generation_task_by_id(int(row["task_id"]), include_debug=True)}
+
+
+async def run_result_image_retry(task_id: int, result_set_id: int, image_id: int) -> None:
+    with suppress(Exception):
+        await generate_single_final_image(task_id, result_set_id, image_id)
     with get_db() as db:
         status_rows = db.execute(
             "SELECT status FROM generation_result_images_new WHERE result_set_id = ?",
-            (row["result_set_id"],),
+            (result_set_id,),
         ).fetchall()
         completed = bool(status_rows) and all(item["status"] == "SUCCEEDED" for item in status_rows)
         status = "COMPLETED" if completed else "FINAL_PARTIAL"
         db.execute(
             "UPDATE generation_result_sets SET status = ?, updated_at = ? WHERE id = ?",
-            ("SUCCEEDED" if completed else "PARTIAL", now_iso(), row["result_set_id"]),
+            ("SUCCEEDED" if completed else "PARTIAL", now_iso(), result_set_id),
         )
         db.execute(
             "UPDATE generation_tasks SET status = ?, updated_at = ? WHERE id = ?",
-            (status, now_iso(), row["task_id"]),
+            (status, now_iso(), task_id),
         )
-    return {"item": get_generation_task_by_id(int(row["task_id"]), include_debug=True)}
 
 
 @app.get("/api/generation-records")
@@ -2680,6 +2699,19 @@ def claim_generation_image(image_id: int, worker_id: str, status: str) -> Any | 
         return db.execute("SELECT * FROM generation_images WHERE id = ?", (image_id,)).fetchone()
 
 
+def row_value(row: Any, key: str, default: Any = None) -> Any:
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        if key in row.keys():
+            return row[key]
+    except (AttributeError, KeyError, TypeError):
+        pass
+    return default
+
+
 def fail_generation_image(db: Any, image_id: int, status: str, payload: dict[str, Any]) -> None:
     timestamp = now_iso()
     db.execute(
@@ -3249,7 +3281,7 @@ def build_task_package(
         "imageInputs": image_inputs,
         "generation": {
             "targetModel": "GPT Image-2",
-            "provider": "fal",
+            "provider": settings.image_provider,
             "stage": "final_group",
             "output": {"aspectRatio": "1:1", "size": "1200x1200"},
             "constraints": [
@@ -4600,6 +4632,19 @@ def finish_attempt(
         )
 
 
+def persist_attempt_provider_request_id(attempt_id: int, provider_response: dict[str, Any] | None) -> None:
+    if not isinstance(provider_response, dict):
+        return
+    provider_request_id = provider_response.get("providerRequestId")
+    if not provider_request_id:
+        return
+    with get_db() as db:
+        db.execute(
+            "UPDATE generation_attempts SET provider_request_id = ?, updated_at = ? WHERE id = ?",
+            (str(provider_request_id), now_iso(), attempt_id),
+        )
+
+
 async def select_styling_with_gemini(task_id: int, input_version_id: int) -> dict[str, Any]:
     with get_db() as db:
         input_row = db.execute("SELECT * FROM generation_task_input_versions WHERE id = ?", (input_version_id,)).fetchone()
@@ -4860,61 +4905,73 @@ def snapshot_default_model() -> dict[str, Any]:
     }
 
 
-async def generate_or_placeholder_asset(task_package: dict[str, Any], output_key: str, label: str) -> tuple[int, dict[str, Any]]:
-    if settings.fal_key:
-        payload = await get_image_provider().generate(task_package, output_key)
-        content = get_bytes(payload["outputPath"])
-        asset_id = insert_generated_media_asset(
-            payload["outputPath"],
-            Path(payload["outputPath"]).name,
-            content,
-            f"image/{settings.gpt_image2_output_format}",
-            {
-                "thumb": payload.get("thumbPath"),
-                "preview": payload.get("previewPath"),
-                "thumbSize": payload.get("thumbFileSize"),
-                "previewSize": payload.get("previewFileSize"),
-            },
-        )
-        return asset_id, payload
-    content = create_placeholder_png(label)
-    put_bytes(output_key, content, "image/png")
-    derivative = generate_image_derivatives(output_key, content)
-    asset_id = insert_generated_media_asset(output_key, Path(output_key).name, content, "image/png", derivative)
-    return asset_id, {"provider": "placeholder", "outputPath": output_key, "message": "FAL_KEY 未配置，生成占位图"}
+def schedule_background_generation(coro: Any) -> None:
+    task = asyncio.create_task(coro)
+
+    def report_failure(done: asyncio.Task[Any]) -> None:
+        with suppress(asyncio.CancelledError):
+            exc = done.exception()
+            if exc:
+                logger.exception("Background generation task failed", exc_info=exc)
+
+    task.add_done_callback(report_failure)
 
 
-def create_placeholder_png(label: str) -> bytes:
-    image = Image.new("RGB", (1200, 1200), (246, 248, 250))
-    try:
-        from PIL import ImageDraw
-        draw = ImageDraw.Draw(image)
-        for y in range(0, 1200, 24):
-            shade = 246 - min(18, y // 80)
-            draw.line((0, y, 1200, y), fill=(shade, shade + 2, 252))
-        draw.rounded_rectangle((120, 120, 1080, 1080), radius=36, outline=(150, 170, 210), width=3)
-        draw.text((170, 170), "Ruyi-Dream", fill=(20, 30, 45))
-        draw.text((170, 220), label, fill=(40, 70, 110))
-        draw.text((170, 1020), "placeholder image - configure FAL_KEY for Image-2", fill=(90, 105, 130))
-    except Exception:
-        pass
-    buffer = BytesIO()
-    image.save(buffer, format="PNG")
-    return buffer.getvalue()
+async def generate_image_asset(task_package: dict[str, Any], output_key: str) -> tuple[int, dict[str, Any]]:
+    if not settings.is_image_provider_configured():
+        raise RuntimeError(image_provider_missing_message())
+    payload = await asyncio.to_thread(run_image_provider_generate, task_package, output_key)
+    if payload.get("provider") == "placeholder":
+        raise RuntimeError("Image-2 provider 返回占位图，拒绝将占位图记为生成成功。")
+    content = get_bytes(payload["outputPath"])
+    asset_id = insert_generated_media_asset(
+        payload["outputPath"],
+        Path(payload["outputPath"]).name,
+        content,
+        f"image/{settings.gpt_image2_output_format}",
+        {
+            "thumb": payload.get("thumbPath"),
+            "preview": payload.get("previewPath"),
+            "thumbSize": payload.get("thumbFileSize"),
+            "previewSize": payload.get("previewFileSize"),
+        },
+    )
+    return asset_id, payload
+
+
+def run_image_provider_generate(task_package: dict[str, Any], output_key: str) -> dict[str, Any]:
+    return asyncio.run(get_image_provider().generate(task_package, output_key))
+
+
+def image_provider_missing_message() -> str:
+    if settings.image_provider == "toapis":
+        return "Image-2 provider 未配置：当前使用 toapis，请设置 TOAPIS_API_KEY，或将 GPT_IMAGE2_PROVIDER=fal 并设置 FAL_KEY。"
+    if settings.image_provider == "fal":
+        return "Image-2 provider 未配置：当前使用 fal，请设置 FAL_KEY。"
+    return f"Image-2 provider 未配置：不支持的 provider {settings.image_provider}。"
 
 
 async def generate_single_final_image(task_id: int, result_set_id: int, image_id: int) -> int:
-    with get_db() as db:
-        db.execute("UPDATE generation_result_images_new SET status = 'RUNNING', updated_at = ? WHERE id = ?", (now_iso(), image_id))
     attempt_id = create_attempt("generation_result_image", image_id, "image-2")
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE generation_result_images_new
+            SET status = 'RUNNING', active_attempt_id = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (attempt_id, now_iso(), image_id),
+        )
     try:
         task_package = build_new_final_task_package(task_id, image_id)
         with get_db() as db:
             sort_order = db.execute("SELECT sort_order FROM generation_result_images_new WHERE id = ?", (image_id,)).fetchone()["sort_order"]
         output_key = join_key("generation-tasks", str(task_id), "final", f"{result_set_id}-{sort_order}.png")
-        asset_id, provider_response = await generate_or_placeholder_asset(task_package, output_key, f"最终成片 {sort_order}")
+        asset_id, provider_response = await generate_image_asset(task_package, output_key)
     except Exception as exc:
-        finish_attempt(attempt_id, "FAILED", error_message=str(exc))
+        provider_response = getattr(exc, "provider_response", None)
+        finish_attempt(attempt_id, "FAILED", response_snapshot=provider_response, error_message=str(exc))
+        persist_attempt_provider_request_id(attempt_id, provider_response)
         with get_db() as db:
             db.execute(
                 "UPDATE generation_result_images_new SET status = 'FAILED', active_attempt_id = ?, updated_at = ? WHERE id = ?",
@@ -4922,6 +4979,7 @@ async def generate_single_final_image(task_id: int, result_set_id: int, image_id
             )
         raise
     finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=provider_response, output_asset_id=asset_id)
+    persist_attempt_provider_request_id(attempt_id, provider_response)
     with get_db() as db:
         db.execute(
             """
@@ -4965,6 +5023,7 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
     item["shotPlans"] = get_task_shot_plans(row["active_styling_id"])
     item["preview"] = get_generation_preview(row["active_preview_id"])
     item["resultSet"] = get_generation_result_set(row["active_result_set_id"])
+    item["aiOperations"] = get_task_ai_operations(row["id"])
     if include_debug:
         item["attempts"] = get_task_attempts(row["id"])
     return item
@@ -5073,6 +5132,9 @@ def get_generation_result_set(result_set_id: int | None) -> dict[str, Any] | Non
                 "status": image["status"],
                 "asset": get_media_asset_by_id(image["current_asset_id"]),
                 "activeAttemptId": image["active_attempt_id"],
+                "activeAttempt": get_attempt_summary(image["active_attempt_id"]),
+                "createdAt": image["created_at"],
+                "updatedAt": image["updated_at"],
             }
             for image in images
         ],
@@ -5113,6 +5175,56 @@ def get_task_attempts(task_id: int) -> list[dict[str, Any]]:
         }
         for row in rows
     ]
+
+
+def get_attempt_summary(attempt_id: int | None) -> dict[str, Any] | None:
+    if not attempt_id:
+        return None
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
+    if not row:
+        return None
+    return serialize_attempt_summary(row)
+
+
+def serialize_attempt_summary(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "ownerType": row["owner_type"],
+        "ownerId": row["owner_id"],
+        "provider": row["provider"],
+        "providerRequestId": row["provider_request_id"],
+        "status": row["status"],
+        "startedAt": row["started_at"],
+        "completedAt": row["completed_at"],
+        "failedAt": row["failed_at"],
+        "errorMessage": row["error_message"],
+        "outputAssetId": row["output_asset_id"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def get_task_ai_operations(task_id: int) -> list[dict[str, Any]]:
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT ga.* FROM generation_attempts ga
+            WHERE (ga.owner_type = 'generation_styling' AND ga.owner_id = ?)
+               OR (ga.owner_type = 'generation_preview' AND ga.owner_id IN (
+                    SELECT id FROM generation_previews WHERE task_id = ?
+                  ))
+               OR (ga.owner_type = 'generation_result_image' AND ga.owner_id IN (
+                    SELECT gri.id FROM generation_result_images_new gri
+                    JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+                    WHERE grs.task_id = ?
+                  ))
+            ORDER BY ga.created_at DESC, ga.id DESC
+            LIMIT 30
+            """,
+            (task_id, task_id, task_id),
+        ).fetchall()
+    return [serialize_attempt_summary(row) for row in rows]
 
 
 def upload_media_metadata(key: str | Path, content: bytes, derivative: dict[str, Any]) -> dict[str, Any]:

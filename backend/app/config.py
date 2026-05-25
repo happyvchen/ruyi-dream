@@ -55,13 +55,17 @@ class Settings:
     trust_reverse_proxy_auth = os.getenv("APP_TRUST_REVERSE_PROXY_AUTH", "false").lower() in {"1", "true", "yes", "on"}
     gemini_api_key = os.getenv("GEMINI_API_KEY", "")
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
-    image_provider = os.getenv("GPT_IMAGE2_PROVIDER", "fal").lower()
-    gpt_image2_model_id = os.getenv("GPT_IMAGE2_MODEL_ID", "openai/gpt-image-2/edit")
+    image_provider = os.getenv("GPT_IMAGE2_PROVIDER", "toapis").lower()
+    gpt_image2_model_id = os.getenv("GPT_IMAGE2_MODEL_ID", "gpt-image-2")
     gpt_image2_api_base_url = os.getenv("GPT_IMAGE2_API_BASE_URL", "https://fal.run/openai/gpt-image-2/edit")
     gpt_image2_queue_url = os.getenv("GPT_IMAGE2_QUEUE_URL", "https://queue.fal.run/openai/gpt-image-2/edit")
     fal_key = os.getenv("FAL_KEY", "")
+    toapis_api_key = os.getenv("TOAPIS_API_KEY", "")
+    toapis_base_url = os.getenv("TOAPIS_BASE_URL", "https://toapis.com")
     gpt_image2_quality = os.getenv("GPT_IMAGE2_QUALITY", "high")
     gpt_image2_output_format = os.getenv("GPT_IMAGE2_OUTPUT_FORMAT", "png")
+    gpt_image2_size = os.getenv("GPT_IMAGE2_SIZE", "1:1")
+    gpt_image2_resolution = os.getenv("GPT_IMAGE2_RESOLUTION", "1K")
     generation_poll_interval_seconds = float(os.getenv("GENERATION_POLL_INTERVAL_SECONDS", "5"))
     generation_lock_ttl_seconds = int(os.getenv("GENERATION_LOCK_TTL_SECONDS", "120"))
     generation_image_timeout_seconds = int(os.getenv("GENERATION_IMAGE_TIMEOUT_SECONDS", str(30 * 60)))
@@ -141,6 +145,13 @@ class Settings:
     def effective_session_secret(self) -> str:
         seed = self.session_secret or self.gate_password or self.gate_password_hash or "dev-session"
         return hashlib.sha256(f"{seed}:ruyi-session".encode("utf-8")).hexdigest()
+
+    def is_image_provider_configured(self) -> bool:
+        if self.image_provider == "toapis":
+            return bool(self.toapis_api_key)
+        if self.image_provider == "fal":
+            return bool(self.gpt_image2_queue_url and self.fal_key)
+        return False
 
 
 @lru_cache

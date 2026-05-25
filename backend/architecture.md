@@ -13,7 +13,7 @@
 | `app/main.py` | FastAPI app、API 路由、生成/重生/导出编排、后台生成状态 poller |
 | `app/db.py` | SQLite 初始化、默认模特 seed、事件日志写入 |
 | `app/planner.py` | Gemini 组图策划；读取 `backend/ref/` 下的客户实施引用文档 |
-| `app/image_provider.py` | fal GPT Image-2 Provider adapter、参考图上传、queue 提交、状态查询和结果下载 |
+| `app/image_provider.py` | GPT Image-2 provider adapters；默认 toapis，保留 fal，负责参考图上传、任务提交、状态查询和结果下载 |
 | `app/image_derivatives.py` | `thumb` / `preview` WebP 衍生图生成、历史缺失衍生图按需补齐 |
 | `app/config.py` | 环境变量、对象存储、数据库、模型配置 |
 | `app/object_storage.py` | S3 兼容对象存储访问、预签名 URL、对象删除和读取 |
@@ -32,7 +32,7 @@
 | `garment-facts` | 商品事实卡、Gemini 识别摘要；当前不做素材角色解析 |
 | `brand-template` | 品牌模板、品类/图位参考图检索；当前内嵌在 planner 输出和 task package |
 | `planner` | 根据服装主图、品牌调性和品类规则生成默认 shot plan 和单张任务包 |
-| `generation` | 提交 Image 2 / fal queue，管理生成状态、单张重生和结果下载 |
+| `generation` | 提交 Image 2 provider 任务，管理生成状态、单张重生和结果下载 |
 | `export` | 结果命名、打包、导出 |
 
 ## 数据对象
@@ -44,7 +44,7 @@
 - `BrandTemplate`：品牌背景、光线、Pose、鞋包、构图边界；当前没有独立表
 - `ShotPlan`：一组图的图位、镜头、角度、展示重点；当前最新一条作为货号默认组图方案
 - `GenerationRun`：一次整组生成批次
-- `GenerationImage`：单张生成任务记录、任务包、provider 请求/响应、fal request id、attempts、最终图标记
+- `GenerationImage`：单张生成任务记录、任务包、provider 请求/响应、provider task id、attempts、最终图标记
 - `TaskPackage`：保存在 `generation_images.task_package_json` 的单张生成契约
 - `EventLog`：SQLite + JSONL 双写的事件留痕
 
@@ -94,13 +94,13 @@ POST /api/generation-runs
 
 后台 poller
   -> 扫描 QUEUED generation_images
-  -> 先上传参考图到 fal，拿到 fal Image URLs
-  -> 提交 fal queue
-  -> 保存 request_id/status_url/response_url/cancel_url
+  -> 先上传参考图到当前 Image-2 provider，拿到 provider URLs
+  -> 提交 provider async task
+  -> 保存 task id/status_url/provider 原始响应
   -> 扫描未完成 generation_images
-  -> 查询 fal status_url
+  -> 查询 provider status_url
   -> 更新 provider_status 和应用内 status
-  -> 完成后读取 response_url
+  -> 完成后读取 provider 结果 URL
   -> 下载图片并写入对象存储 output_path
   -> 聚合更新 generation_run.status
 ```

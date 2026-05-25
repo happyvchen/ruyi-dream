@@ -17,7 +17,7 @@ ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + 
 | Storage | S3 兼容对象存储，私有化默认 RustFS |
 | Metadata | SQLite：`backend/data/app.sqlite3` |
 | Planner | Gemini API；失败直接返回错误并记录事件日志 |
-| Image Provider | `app/image_provider.py`，fal GPT Image-2 queue 提交、状态查询、结果下载 |
+| Image Provider | `app/image_provider.py`，GPT Image-2 provider 适配；默认 toapis，保留 fal queue 提交、状态查询、结果下载 |
 
 直接依赖见 `requirements.txt`，传递依赖约束见 `requirements.constraints.txt`。不要预先引入复杂 SaaS 权限、多租户、计费、队列集群。
 
