@@ -426,6 +426,43 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(plan["quality_gate_mode"], "fallback")
         main.validate_styling_plan(plan, candidate_snapshot)
 
+    def test_normalize_styling_plan_does_not_trust_model_quality_gate_mode(self) -> None:
+        main = importlib.import_module("app.main")
+        candidate_snapshot = {
+            "candidate_material_ids": [9],
+            "material_cards": [
+                {"id": 9, "category": "outerwear", "colors": ["brown"]},
+            ],
+        }
+        raw_plan = {
+            "quality_gate_mode": "fallback",
+            "selected_material_ids": [9],
+            "selected_outfit_id": "candidate_a",
+            "outfit_candidates": [
+                {
+                    "id": "candidate_a",
+                    "selected_material_ids": [9],
+                    "wearing_notes": "外套完全敞开穿着。",
+                    "aesthetic_diagnosis": {
+                        "color_weight": "上半身深色面积过大。",
+                        "silhouette_balance": "外套体量偏重。",
+                    },
+                    "scores": {
+                        "aesthetic_score": 0.4,
+                        "brand_fit_score": 0.9,
+                        "hero_visibility_score": 0.9,
+                        "commercial_readiness_score": 0.9,
+                    },
+                }
+            ],
+        }
+
+        plan = main.normalize_styling_plan(raw_plan, candidate_snapshot)
+
+        self.assertEqual(plan["quality_gate_mode"], "production")
+        with self.assertRaisesRegex(RuntimeError, "aesthetic_score"):
+            main.validate_styling_plan(plan, candidate_snapshot)
+
     def test_styling_plan_rejects_high_waist_dark_outerwear_stack(self) -> None:
         main = importlib.import_module("app.main")
         candidate_snapshot = {

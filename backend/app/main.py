@@ -4968,10 +4968,10 @@ def fallback_styling_plan(input_row: Any, candidate_snapshot: dict[str, Any], re
         "rejected_candidates": [],
         "warnings": ["fallback_styling_plan", reason],
     }
-    return normalize_styling_plan(plan, candidate_snapshot)
+    return normalize_styling_plan(plan, candidate_snapshot, quality_gate_mode="fallback")
 
 
-def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
+def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, Any], quality_gate_mode: str = "production") -> dict[str, Any]:
     source = raw if isinstance(raw, dict) else {}
     hero = source.get("hero_understanding") if isinstance(source.get("hero_understanding"), dict) else {}
     intents = source.get("styling_intents") if isinstance(source.get("styling_intents"), list) else []
@@ -4989,7 +4989,7 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
     warnings = ensure_string_list(source.get("warnings"))
     return {
         "schema_version": "styling-plan-v1",
-        "quality_gate_mode": str(source.get("quality_gate_mode") or "production")[:40],
+        "quality_gate_mode": "fallback" if quality_gate_mode == "fallback" else "production",
         "hero_understanding": {
             "hero_visual_summary": str(hero.get("hero_visual_summary") or source.get("hero_visual_summary") or "主推款图片已作为商品事实源。")[:120],
             "hero_selling_points": ensure_string_list(hero.get("hero_selling_points"))[:8],

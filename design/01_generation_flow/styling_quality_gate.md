@@ -41,6 +41,7 @@ AI Stylist 在选择最终 outfit 前，必须对每个候选做以下审美诊�
   "aesthetic_diagnosis": {
     "color_weight": "深棕上装面积较大，但外套仅披肩且保持敞开，避免压住白色裤装",
     "silhouette_balance": "短上装或塞腰处理保证高腰线；避免长外套自然垂落遮挡腰部",
+    "waistline_proportion": "高腰、收腰、腰带和裤腰等主推款比例卖点必须清楚可见",
     "season_material_fit": "轻薄针织可接受，厚重外套只可作为非主视觉披搭",
     "template_risk": "存在常见通勤三件套模板风险，需要预览重点检查",
     "brand_read": "克制通勤但不能显老气"
