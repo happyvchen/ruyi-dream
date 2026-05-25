@@ -706,7 +706,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
               item={item}
               run={run}
               onOpen={() => void openDetail(item)}
-              onTag={['TAGGING_FAILED', 'TAGGING_READY'].includes(item.status) ? () => void run('重新识别标签中...', () => api.tagStylingGarment(item.id)) : undefined}
+              onTag={['DRAFT', 'TAGGING_FAILED', 'TAGGING_READY'].includes(item.status) ? () => void run('重新识别标签中...', () => api.tagStylingGarment(item.id)) : undefined}
             />
           ))}</div>
         ) : <EmptyState title={query ? '没有匹配的搭配服饰' : '暂无搭配服饰'} text={query ? '换一个货号或标签关键词试试。' : '点击右上角导入搭配服饰。'} />}
@@ -722,12 +722,18 @@ type ImportBatch = {
   files: File[]
 }
 
+type ImportPhase = 'idle' | 'uploading' | 'tagging' | 'done'
+
 function BatchImportPanel({ run }: { run: any }) {
   const [batches, setBatches] = useState<ImportBatch[]>([])
   const [localError, setLocalError] = useState('')
   const [importOperations, setImportOperations] = useState<AIOperation[]>([])
+  const [importPhase, setImportPhase] = useState<ImportPhase>('idle')
+  const [uploadedCount, setUploadedCount] = useState(0)
+  const isImporting = importPhase === 'uploading' || importPhase === 'tagging'
 
   function addFiles(files: File[]) {
+    if (isImporting) return
     const next = groupImportFiles(files)
     setLocalError('')
     setBatches((current) => {
@@ -749,19 +755,23 @@ function BatchImportPanel({ run }: { run: any }) {
 
   async function handleDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault()
+    if (isImporting) return
     const files = await filesFromDataTransfer(event.dataTransfer)
     addFiles(files)
   }
 
   function updateCode(id: string, code: string) {
+    if (isImporting) return
     setBatches((items) => items.map((item) => item.id === id ? { ...item, code } : item))
   }
 
   function updateFiles(id: string, files: File[]) {
+    if (isImporting) return
     setBatches((items) => items.map((item) => item.id === id ? { ...item, files } : item))
   }
 
   function removeBatch(id: string) {
+    if (isImporting) return
     setBatches((items) => items.filter((item) => item.id !== id))
   }
 
@@ -776,29 +786,63 @@ function BatchImportPanel({ run }: { run: any }) {
       setLocalError(`${oversized.code} 已选择 ${oversized.files.length} 张图片，每款服饰最多只允许导入 6 张`)
       return
     }
-    await run(`导入 ${batches.length} 套搭配服饰中...`, async () => {
-      const startedAt = new Date().toISOString()
-      setImportOperations(batches.map((batch, index) => ({
-        id: -(index + 1),
-        ownerType: 'styling_garment_tagging',
-        ownerId: index + 1,
-        provider: 'gemini',
-        status: 'SUBMITTED',
-        startedAt,
-        providerRequestId: batch.code,
-      })))
-      for (const batch of batches) {
-        setImportOperations((items) => items.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'RUNNING', startedAt: item.startedAt || new Date().toISOString() } : item))
-        const created = await api.createStylingGarment(batch.code, batch.files)
-        await api.tagStylingGarment(created.item.id)
-        setImportOperations((items) => items.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'SUBMITTED' } : item))
-      }
-      return true
-    }, () => {
-      setBatches([])
-      window.setTimeout(() => setImportOperations([]), 1600)
-    })
+    setUploadedCount(0)
+    setImportPhase('uploading')
+    try {
+      await run(`上传 ${batches.length} 套搭配服饰中...`, async () => {
+        const startedAt = new Date().toISOString()
+        setImportOperations(batches.map((batch, index) => ({
+          id: -(index + 1),
+          ownerType: 'styling_garment_upload',
+          ownerId: index + 1,
+          provider: 'browser',
+          status: 'SUBMITTED',
+          startedAt,
+          providerRequestId: batch.code,
+        })))
+        const createdItems: StylingGarment[] = []
+        for (const batch of batches) {
+          setImportOperations((items) => items.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'RUNNING', startedAt: item.startedAt || new Date().toISOString() } : item))
+          const created = await api.createStylingGarment(batch.code, batch.files)
+          createdItems.push(created.item)
+          setUploadedCount(createdItems.length)
+          setImportOperations((items) => items.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'SUCCEEDED', completedAt: new Date().toISOString() } : item))
+        }
+        setImportPhase('tagging')
+        setImportOperations(createdItems.map((item, index) => ({
+          id: -(index + 1),
+          ownerType: 'styling_garment_tagging',
+          ownerId: item.id,
+          provider: 'gemini',
+          status: 'SUBMITTED',
+          startedAt: new Date().toISOString(),
+          providerRequestId: item.code,
+        })))
+        setImportOperations((items) => items.map((operation) => ({ ...operation, status: 'RUNNING', startedAt: operation.startedAt || new Date().toISOString() })))
+        await api.tagStylingGarments(createdItems.map((item) => item.id))
+        setImportOperations((items) => items.map((operation) => ({ ...operation, status: 'SUBMITTED' })))
+        setImportPhase('done')
+        return true
+      }, () => {
+        setBatches([])
+        window.setTimeout(() => {
+          setImportOperations([])
+          setUploadedCount(0)
+          setImportPhase('idle')
+        }, 1600)
+      })
+    } catch {
+      setImportPhase('idle')
+    }
   }
+
+  const importNotice = importPhase === 'uploading'
+    ? `正在上传图片，请勿刷新或离开页面。已保存 ${uploadedCount}/${batches.length} 套。`
+    : importPhase === 'tagging'
+      ? '图片已全部保存，可放心离开页面；系统正在提交服饰标签识别。'
+      : importPhase === 'done'
+        ? '图片已保存，标签识别已提交，可放心离开页面。'
+        : ''
 
   return (
     <div className="panel import-panel">
@@ -807,24 +851,25 @@ function BatchImportPanel({ run }: { run: any }) {
           <h3>导入搭配服饰</h3>
           <p>散图会合并为一套；单文件夹是一套；拖入多个一级文件夹会拆成多套。导入后系统会自动识别标签，单套最多 6 张，推荐 1-3 张。</p>
         </div>
-        <button className="primary" disabled={!batches.length} onClick={() => void saveDrafts()}>导入</button>
+        <button className="primary" disabled={!batches.length || isImporting} onClick={() => void saveDrafts()}>导入</button>
       </div>
-      <div className="import-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
+      {importNotice && <div className={`import-notice ${importPhase === 'uploading' ? 'is-warning' : 'is-safe'}`}>{importNotice}</div>}
+      <div className={`import-drop ${isImporting ? 'is-disabled' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
         <Images size={22} />
         <strong>拖入图片或文件夹</strong>
         <span>支持多张图片、一个文件夹、多个一级文件夹</span>
         <div className="import-actions">
-          <label className="secondary">
+          <label className={`secondary ${isImporting ? 'is-disabled' : ''}`}>
             <ImagePlus size={16} /> 选择图片
-            <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
+            <input disabled={isImporting} type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
           </label>
-          <label className="secondary">
+          <label className={`secondary ${isImporting ? 'is-disabled' : ''}`}>
             <FolderOpen size={16} /> 选择文件夹
-            <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
+            <input disabled={isImporting} type="file" multiple {...{ webkitdirectory: '', directory: '' }} onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
           </label>
         </div>
       </div>
-      <AIOperationList operations={importOperations.map((operation) => ({ ...operation, ownerType: 'styling_garment_tagging', provider: operation.provider || 'gemini' }))} />
+      <AIOperationList operations={importOperations} />
       {localError && <span className="inline-error">{localError}</span>}
       {batches.length > 0 && (
         <div className="batch-list">
@@ -1466,6 +1511,7 @@ function isAttemptRunning(operation: AIOperation) {
 }
 
 function operationLabel(operation: AIOperation, index = 0) {
+  if (operation.ownerType === 'styling_garment_upload') return '搭配服饰上传'
   if (operation.ownerType === 'styling_garment_tagging') return '服饰标签识别'
   if (operation.ownerType === 'generation_styling') return '智能选搭'
   if (operation.ownerType === 'generation_preview') return '六宫格预览'

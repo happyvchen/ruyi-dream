@@ -504,6 +504,22 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
   font-size: 13px;
   line-height: 1.5;
 }
+.import-notice {
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.import-notice.is-warning {
+  color: #92400e;
+  border: 1px solid #fed7aa;
+  background: #fff7ed;
+}
+.import-notice.is-safe {
+  color: #047857;
+  border: 1px solid #a7f3d0;
+  background: #ecfdf5;
+}
 .import-drop {
   min-height: 118px;
   display: grid;
@@ -514,6 +530,10 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
   border-radius: 8px;
   color: #334155;
   background: #f8fafc;
+}
+.import-drop.is-disabled {
+  opacity: .72;
+  pointer-events: none;
 }
 .import-drop span { color: #64748b; font-size: 13px; }
 .import-actions { display: flex; gap: 10px; margin-top: 6px; }

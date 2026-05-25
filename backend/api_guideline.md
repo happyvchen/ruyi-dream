@@ -41,6 +41,7 @@ Authorization: Bearer <token>
 | `/api/styling-garments/{garment_id}` | GET | 搭配服饰详情、图片、分层标签和打标 attempt 技术快照 |
 | `/api/styling-garments/{garment_id}` | PATCH | 编辑 code 或人工业务标签；打标中禁止修改 |
 | `/api/styling-garments/{garment_id}/save-and-tag` | POST | 系统默认触发 Gemini 打标；通过复核策略后进入 `READY`，否则进入 `TAGGING_READY` |
+| `/api/styling-garments/batch-save-and-tag` | POST | 批量把已保存搭配服饰置为 `TAGGING_RUNNING` 并提交后台打标 |
 | `/api/styling-garments/{garment_id}` | DELETE | 归档搭配服饰；打标中禁止归档 |
 | `/api/generation-tasks` | GET | AI 摄影棚任务列表 |
 | `/api/generation-tasks` | POST | 上传主推款图片并创建 `DRAFT` 拍摄任务 |
@@ -169,7 +170,8 @@ Authorization: Bearer <token>
 
 - `GET /api/styling-garments` 支持 `limit`、`offset`、`keyword`，搜索必须走服务端，不能只过滤首屏数据。
 - `POST /api/styling-garments` 接收 `code` 和 `files`，单套最多 6 张，写入媒体资产后创建 `DRAFT` 记录。
-- 前端导入成功后默认立即调用 `POST /api/styling-garments/{id}/save-and-tag`，不要求用户确认是否打标。
+- 前端批量导入时先调用 `POST /api/styling-garments` 保存所有套装，全部保存成功后调用 `POST /api/styling-garments/batch-save-and-tag` 一次性提交这些记录的打标任务。
+- 单套重新识别继续调用 `POST /api/styling-garments/{id}/save-and-tag`，不要求用户确认是否打标。
 - `TAGGING_RUNNING` 期间服务端拒绝 code/标签修改、重复打标和归档。
 - 打标输出分层返回 `aiTags`、`officialTitleTags`、`manualTags`、`effectiveTags` 和 `tagMeta`。
 - `GET /api/styling-garments/{id}` 额外返回 `tagAttempts`；每项包含 provider、状态、时间、错误以及 `requestSnapshot` / `responseSnapshot`，供折叠技术详情查看。
@@ -255,7 +257,9 @@ Authorization: Bearer <token>
 - 上传前先在浏览器本地形成待上传图包，支持散图、单文件夹、多文件夹。
 - 用户可在“预览与编辑”阶段修改 code、删除图片、替换图片、拖动排序。
 - 批量上传图片或文件夹时允许先列出超过 6 张图片，便于用户整理；超过 6 张不允许保存/导入。
-- 点击 `导入` 后保存搭配服饰并触发打标任务。打标接口先把状态置为 `TAGGING_RUNNING` 并立即返回，新建卡片显示 `正在打标` 等状态，后台继续完成打标。
+- 点击 `导入` 后分两阶段执行：先把本次所有搭配服饰图片上传并保存为服务端记录，再为已保存记录触发打标任务。
+- 上传阶段本地文件仍只在浏览器内，前端必须提示“正在上传图片，请勿刷新或离开页面”；当所有搭配服饰记录保存成功后，刷新页面不再丢失本次导入的数据。
+- 打标接口先把状态置为 `TAGGING_RUNNING` 并立即返回，新建卡片显示 `正在打标` 等状态，后台继续完成打标；Gemini 打标不阻塞后续已保存服饰的展示和页面刷新。
 - 已保存搭配服饰图片发生排序、替换、删除或追加后，前端提示“此次修改会影响打标”，并提供 `仅保存` 与 `保存并重新打标`。
 - `TAGGING_RUNNING` 期间服务端拒绝 code/标签/图片编辑、再次打标和删除/归档；前端轮询卡片状态并禁用冲突操作。
 - 单图替换使用原子替换接口，不通过“先删后加”模拟，确保仅剩一张图片时也能替换。

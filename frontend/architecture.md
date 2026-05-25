@@ -39,6 +39,8 @@ AI 摄影棚上传主推款 -> AI 智能选搭 -> 六宫格预览 -> 生成前 5
 
 当前新版路由为 `/studio?task={taskId}`、`/library`、`/model`、`/records?task={taskId}`。当前拍摄任务和记录详情写入 URL，可在刷新或分享后恢复；上传中尚未保存的本地文件和折叠状态仍只保存在 React state。
 
+搭配服饰批量导入使用两阶段前端流程：先逐套上传并创建服务端 `StylingGarment` 记录，全部上传成功后再提交 Gemini 标签识别。上传阶段刷新会丢失尚未上传的浏览器本地文件，因此 UI 必须提示不要刷新或离开页面；全部保存成功后，标签识别是否完成不再影响数据恢复。
+
 ## 状态分工
 
 - Server state：`StylingGarment`、`GenerationTask`、默认模特、生成 attempts。
