@@ -1104,16 +1104,77 @@ def delete_styling_garment(
         if purge:
             image_rows = db.execute(
                 """
-                SELECT ma.object_key FROM styling_garment_images sgi
+                SELECT ma.id, ma.object_key FROM styling_garment_images sgi
                 JOIN media_assets ma ON ma.id = sgi.media_asset_id
                 WHERE sgi.styling_garment_id = ?
                 """,
                 (garment_id,),
             ).fetchall()
+            styling_rows = db.execute(
+                "SELECT task_id, selected_material_ids_json FROM generation_stylings"
+            ).fetchall()
+            dependent_task_ids = [
+                int(styling["task_id"])
+                for styling in styling_rows
+                if garment_id in {int(item) for item in loads(styling["selected_material_ids_json"], [])}
+            ]
+            dependent_asset_ids: list[int] = []
+            if dependent_task_ids:
+                placeholders = ", ".join("?" for _ in dependent_task_ids)
+                dependent_assets = db.execute(
+                    f"""
+                    SELECT media_asset_id AS asset_id FROM generation_task_images WHERE task_id IN ({placeholders})
+                    UNION
+                    SELECT preview_asset_id AS asset_id FROM generation_previews WHERE task_id IN ({placeholders}) AND preview_asset_id IS NOT NULL
+                    UNION
+                    SELECT gri.current_asset_id AS asset_id FROM generation_result_images_new gri
+                    JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+                    WHERE grs.task_id IN ({placeholders}) AND gri.current_asset_id IS NOT NULL
+                    UNION
+                    SELECT ga.output_asset_id AS asset_id FROM generation_attempts ga
+                    WHERE ga.output_asset_id IS NOT NULL AND (
+                         (ga.owner_type = 'generation_styling' AND ga.owner_id IN ({placeholders}))
+                         OR (ga.owner_type = 'generation_preview' AND ga.owner_id IN (
+                              SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
+                            ))
+                         OR (ga.owner_type = 'generation_result_image' AND ga.owner_id IN (
+                              SELECT gri.id FROM generation_result_images_new gri
+                              JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+                              WHERE grs.task_id IN ({placeholders})
+                            ))
+                    )
+                    """,
+                    (
+                        *dependent_task_ids, *dependent_task_ids, *dependent_task_ids,
+                        *dependent_task_ids, *dependent_task_ids, *dependent_task_ids,
+                    ),
+                ).fetchall()
+                dependent_asset_ids = [int(asset["asset_id"]) for asset in dependent_assets]
+                db.execute(
+                    f"""
+                    DELETE FROM generation_attempts
+                    WHERE (owner_type = 'generation_styling' AND owner_id IN ({placeholders}))
+                       OR (owner_type = 'generation_preview' AND owner_id IN (
+                            SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
+                          ))
+                       OR (owner_type = 'generation_result_image' AND owner_id IN (
+                            SELECT gri.id FROM generation_result_images_new gri
+                            JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+                            WHERE grs.task_id IN ({placeholders})
+                          ))
+                    """,
+                    (*dependent_task_ids, *dependent_task_ids, *dependent_task_ids),
+                )
+                db.execute(f"DELETE FROM generation_tasks WHERE id IN ({placeholders})", dependent_task_ids)
+            asset_ids = [int(image["id"]) for image in image_rows] + dependent_asset_ids
             cleanup_objects([key for image in image_rows for key in image_object_keys(image["object_key"])])
             db.execute("DELETE FROM styling_garments WHERE id = ?", (garment_id,))
-            log_event(db, "styling_garment", garment_id, "purged", {"code": row["code"]})
-            return {"ok": True, "purged": True}
+            if asset_ids:
+                placeholders = ", ".join("?" for _ in asset_ids)
+                db.execute(f"DELETE FROM media_assets WHERE id IN ({placeholders})", asset_ids)
+            cleanup_errors = cleanup_prefixes([join_key("generation-tasks", str(task_id)) for task_id in dependent_task_ids])
+            log_event(db, "styling_garment", garment_id, "purged", {"code": row["code"], "deletedTaskIds": dependent_task_ids})
+            return {"ok": True, "purged": True, "deletedTaskIds": dependent_task_ids, "objectCleanupErrors": cleanup_errors}
         db.execute("UPDATE styling_garments SET status = 'DELETED', deleted_at = ?, updated_at = ? WHERE id = ?", (timestamp, timestamp, garment_id))
         db.execute("UPDATE styling_garment_images SET deleted_at = ?, updated_at = ? WHERE styling_garment_id = ?", (timestamp, timestamp, garment_id))
         log_event(db, "styling_garment", garment_id, "archived", {"code": row["code"]})

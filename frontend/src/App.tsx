@@ -474,7 +474,7 @@ function BatchImportPanel({ run }: { run: any }) {
     }
     const oversized = batches.find((batch) => batch.files.length > 6)
     if (oversized) {
-      setLocalError(`${oversized.code} 已选择 ${oversized.files.length} 张图片，单套最多保存 6 张`)
+      setLocalError(`${oversized.code} 已选择 ${oversized.files.length} 张图片，每款服饰最多只允许导入 6 张`)
       return
     }
     await run(`导入 ${batches.length} 套搭配服饰中...`, async () => {
@@ -491,7 +491,7 @@ function BatchImportPanel({ run }: { run: any }) {
       <div className="import-head">
         <div>
           <h3>导入搭配服饰</h3>
-          <p>散图会合并为一套；单文件夹是一套；拖入多个一级文件夹会拆成多套。可先批量选择，保存时单套最多 6 张，推荐 1-3 张。</p>
+          <p>散图会合并为一套；单文件夹是一套；拖入多个一级文件夹会拆成多套。可先批量选择，导入时每款服饰最多 6 张，推荐 1-3 张。</p>
         </div>
         <button className="primary" disabled={!batches.length} onClick={() => void saveDrafts()}>导入</button>
       </div>
@@ -735,6 +735,14 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
     setRemovedIds([])
     setDirty(false)
   }, [item.id])
+
+  useEffect(() => {
+    if (item.status !== 'TAGGING_RUNNING') return
+    const timer = window.setInterval(() => {
+      void api.getStylingGarment(item.id).then((result) => onChange(result.item)).catch(() => undefined)
+    }, 2000)
+    return () => window.clearInterval(timer)
+  }, [item.id, item.status, onChange])
 
   function move(from: number, to: number) {
     if (to < 0 || to >= working.length) return
@@ -987,7 +995,7 @@ function groupImportFiles(files: File[]): ImportBatch[] {
   const paths = imageFiles.map(importPath)
   const hasFolders = paths.some((path) => path.includes('/'))
   if (!hasFolders) {
-    return [{ id: `loose-${Date.now()}`, code: timestampName(), files: imageFiles.slice(0, 6) }]
+    return [{ id: `loose-${Date.now()}`, code: timestampName(), files: imageFiles }]
   }
 
   const splitPaths = paths.map((path) => path.split('/').filter(Boolean))
@@ -1006,7 +1014,7 @@ function groupImportFiles(files: File[]): ImportBatch[] {
   return Array.from(grouped.entries()).map(([key, groupFiles], index) => ({
     id: `${key}-${index}`,
     code: sanitizeClientName(key.split('/').pop() || key || timestampName()),
-    files: groupFiles.slice(0, 6),
+    files: groupFiles,
   }))
 }
 
