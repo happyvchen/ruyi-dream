@@ -201,6 +201,8 @@ export const api = {
   },
   tagStylingGarment: (id: number) =>
     request<{ item: StylingGarment }>(`/api/styling-garments/${id}/save-and-tag`, { method: 'POST' }),
+  tagStylingGarments: (ids: number[]) =>
+    request<{ items: StylingGarment[] }>('/api/styling-garments/batch-save-and-tag', { method: 'POST', body: JSON.stringify({ ids }) }),
   updateStylingGarment: (id: number, payload: { code?: string; manualTags?: Record<string, unknown> }) =>
     request<{ item: StylingGarment }>(`/api/styling-garments/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   getStylingGarment: (id: number) =>
