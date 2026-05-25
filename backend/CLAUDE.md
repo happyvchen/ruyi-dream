@@ -40,7 +40,7 @@ ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + 
 - 维护数字模特档案和素材引用
 - 管理 AI 摄影棚主推款任务、输入版本和状态机
 - 对 READY 搭配服饰做候选召回和标签压缩
-- 调用 AI Stylist 生成 `StylingPlan`，保存完整 request/response 快照
+- 调用 AI Stylist 生成带 Aesthetic Critic 诊断的 `StylingPlan`，保存完整 request/response 快照
 - 基于 `StylingPlan` 生成 ShotPlan 和 Image-2 任务包
 - 管理生成任务状态、单张重试、结果下载和记录复盘
 - 保存实验/生产结果、候选召回、StylingPlan 和 provider attempts 元数据
