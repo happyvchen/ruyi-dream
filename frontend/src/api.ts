@@ -16,6 +16,13 @@ export type MediaAsset = {
   width?: number | null
   height?: number | null
   sizeBytes?: number | null
+  originalFilename?: string | null
+  originalMimeType?: string | null
+  originalWidth?: number | null
+  originalHeight?: number | null
+  originalSizeBytes?: number | null
+  thumbSizeBytes?: number | null
+  previewSizeBytes?: number | null
   url?: string | null
   thumbUrl?: string | null
   previewUrl?: string | null
@@ -47,6 +54,7 @@ export type StylingGarment = {
   tagError?: string | null
   imageCount?: number | null
   coverUrl?: string | null
+  coverAsset?: MediaAsset | null
   images?: { id: number; sortOrder: number; asset: MediaAsset }[]
   createdAt: string
   updatedAt: string

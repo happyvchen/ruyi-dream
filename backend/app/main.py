@@ -814,8 +814,20 @@ def list_styling_garments(
         rows = db.execute(
             """
             SELECT sg.*,
+              (SELECT ma.id FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_asset_id,
               (SELECT ma.object_key FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
                WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_key,
+              (SELECT ma.original_filename FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_filename,
+              (SELECT ma.mime_type FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_mime_type,
+              (SELECT ma.width FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_width,
+              (SELECT ma.height FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_height,
+              (SELECT ma.size_bytes FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_size_bytes,
               (SELECT COUNT(*) FROM styling_garment_images sgi WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL) AS image_count
             FROM styling_garments sg
             WHERE sg.deleted_at IS NULL
@@ -3955,6 +3967,13 @@ def serialize_media_asset(row: Any | None) -> dict[str, Any] | None:
         "width": row["width"],
         "height": row["height"],
         "sizeBytes": row["size_bytes"],
+        "originalFilename": row["original_filename"],
+        "originalMimeType": row["mime_type"],
+        "originalWidth": row["width"],
+        "originalHeight": row["height"],
+        "originalSizeBytes": row["size_bytes"],
+        "thumbSizeBytes": row["thumb_size_bytes"] if "thumb_size_bytes" in row.keys() else None,
+        "previewSizeBytes": row["preview_size_bytes"] if "preview_size_bytes" in row.keys() else None,
         "url": stable_media_url(row["object_key"], "preview"),
         "thumbUrl": stable_media_url(row["object_key"], "thumb"),
         "previewUrl": stable_media_url(row["object_key"], "preview"),
@@ -3993,6 +4012,7 @@ def serialize_styling_garment(row: Any, include_images: bool = True) -> dict[str
         "tagError": row["tag_error"],
         "imageCount": row["image_count"] if "image_count" in row.keys() else None,
         "coverUrl": stable_media_url(row["cover_key"], "thumb") if "cover_key" in row.keys() else None,
+        "coverAsset": serialize_cover_asset(row),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
@@ -4016,6 +4036,29 @@ def serialize_styling_garment(row: Any, include_images: bool = True) -> dict[str
             for image in images
         ]
     return item
+
+
+def serialize_cover_asset(row: Any) -> dict[str, Any] | None:
+    if "cover_key" not in row.keys() or not row["cover_key"]:
+        return None
+    return {
+        "id": row["cover_asset_id"] if "cover_asset_id" in row.keys() else row["id"],
+        "objectKey": row["cover_key"],
+        "filename": row["cover_filename"] if "cover_filename" in row.keys() and row["cover_filename"] else row["code"],
+        "mimeType": row["cover_mime_type"] if "cover_mime_type" in row.keys() and row["cover_mime_type"] else "",
+        "width": row["cover_width"] if "cover_width" in row.keys() else None,
+        "height": row["cover_height"] if "cover_height" in row.keys() else None,
+        "sizeBytes": row["cover_size_bytes"] if "cover_size_bytes" in row.keys() else None,
+        "originalFilename": row["cover_filename"] if "cover_filename" in row.keys() and row["cover_filename"] else row["code"],
+        "originalMimeType": row["cover_mime_type"] if "cover_mime_type" in row.keys() and row["cover_mime_type"] else "",
+        "originalWidth": row["cover_width"] if "cover_width" in row.keys() else None,
+        "originalHeight": row["cover_height"] if "cover_height" in row.keys() else None,
+        "originalSizeBytes": row["cover_size_bytes"] if "cover_size_bytes" in row.keys() else None,
+        "url": stable_media_url(row["cover_key"], "preview"),
+        "thumbUrl": stable_media_url(row["cover_key"], "thumb"),
+        "previewUrl": stable_media_url(row["cover_key"], "preview"),
+        "originalUrl": stable_media_url(row["cover_key"], "original"),
+    }
 
 
 def get_styling_garment_tag_attempts(garment_id: int) -> list[dict[str, Any]]:
