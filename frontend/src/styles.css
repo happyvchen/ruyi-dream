@@ -669,6 +669,7 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
 }
 .status.tagging_failed { background: #fff1f2; color: #be123c; }
 .status.tagging_running { background: #eef6ff; color: #2563eb; }
+.status.tagging_ready { background: #fff7ed; color: #c2410c; }
 .status.ready { background: #ecfdf5; color: #047857; }
 
 @keyframes shimmer {

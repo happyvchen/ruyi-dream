@@ -224,6 +224,35 @@ TERMINAL_IMAGE_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
 PLANNING_STATUSES = {"PLANNING"}
 REVIEW_STATUSES = {"candidate", "approved", "needs_regen", "needs_retouch", "delivered"}
 LILY_TAG_SCHEMA_VERSION = "lily-garment-tags-v1"
+TAG_REVIEW_CONFIDENCE_THRESHOLD = 0.72
+TAG_CATEGORIES = {"top", "bottom", "dress", "jumpsuit", "outerwear", "knitwear", "suit_set", "other_garment", "unsupported_accessory", "unknown"}
+TAG_SUB_CATEGORIES = {"shirt", "blouse", "t_shirt", "vest", "camisole", "cardigan", "blazer", "jacket", "trench", "coat", "down_jacket", "trousers", "jeans", "shorts", "skirt", "dress", "other"}
+TAG_COLORS = {"black", "white", "ivory", "beige", "grey", "blue", "navy", "brown", "green", "red", "pink", "yellow", "purple", "metallic", "multi", "unknown"}
+TAG_COLOR_TEMPERATURES = {"warm", "cool", "neutral", "mixed", "unknown"}
+TAG_CONTRAST_LEVELS = {"low", "medium", "high"}
+TAG_COLOR_DISTRIBUTIONS = {"solid", "color_block", "trim", "gradient", "print_based"}
+TAG_MATERIALS_VISUAL = {"cotton_like", "linen_like", "silk_like", "satin_like", "acetate_like", "knit", "wool_like", "denim", "leather_like", "lace", "chiffon", "tweed_like", "down_padded", "technical_fabric", "unknown"}
+TAG_SURFACE_TEXTURES = {"smooth", "ribbed", "openwork", "slub", "woven_texture", "sheer", "glossy", "matte", "structured", "soft_drape"}
+TAG_FITS = {"slim", "regular", "relaxed", "loose", "oversized", "unknown"}
+TAG_SILHOUETTES = {"straight", "a_line", "h_line", "x_line", "wide_leg", "flare", "tapered", "cropped", "waist_defined", "boxy"}
+TAG_STRUCTURES = {"tailored", "soft", "draped", "layered", "structured_shoulder", "dropped_shoulder", "pleated", "gathered"}
+TAG_TOP_LENGTHS = {"cropped", "hip", "long", "unknown"}
+TAG_SLEEVE_LENGTHS = {"sleeveless", "short", "elbow", "three_quarter", "long", "unknown"}
+TAG_BOTTOM_LENGTHS = {"short", "knee", "midi", "ankle", "full", "unknown"}
+TAG_NECKLINES = {"crew", "v_neck", "polo", "shirt_collar", "lapel", "boat", "square", "halter", "cowl", "unknown"}
+TAG_CLOSURES = {"button", "zipper", "pullover", "wrap", "tie", "open_front", "unknown"}
+TAG_DETAILS = {"asymmetric", "lace", "contrast_trim", "embroidery", "pocket", "pleat", "cutout", "patchwork", "print", "button", "ruffle", "bow_tie", "belt", "slit"}
+TAG_PATTERNS = {"solid", "stripe", "check", "polka_dot", "floral", "graphic", "abstract", "texture_pattern", "logo", "animal", "unknown"}
+TAG_PATTERN_SCALES = {"none", "small", "medium", "large", "mixed", "unknown"}
+TAG_WEARING_METHODS = {"buttoned", "open", "tucked", "untucked", "belted", "layered"}
+TAG_COVERAGE_RISKS = {"none", "may_cover_hero", "likely_cover_hero", "unknown"}
+TAG_FORMALITIES = {"casual", "smart_casual", "office", "formal", "unknown"}
+TAG_OCCASIONS = {"daily", "commute", "office", "light_social", "date", "travel", "home"}
+TAG_SEASONS = {"spring", "summer", "autumn", "winter"}
+TAG_PAIRING_CATEGORIES = {"top", "bottom", "outerwear", "dress", "knitwear"}
+TAG_SILHOUETTE_PAIRINGS = {"slim_top", "relaxed_top", "wide_leg_bottom", "straight_bottom", "a_line_skirt"}
+TAG_STYLE_RISKS = {"too_formal", "too_casual", "too_sweet", "too_street", "too_party", "too_heavy", "too_busy", "none"}
+TAG_REVIEW_REASONS = {"low_confidence", "conflicting_images", "unclear_category", "title_image_conflict", "insufficient_images", "unsupported_accessory", "uncertain_material", "uncertain_color", "uncertain_fit", "fallback_tags"}
 LOGIN_FAILURE_WINDOW_SECONDS = 300
 LOGIN_FAILURE_LIMIT = 8
 login_failures_by_client: dict[str, list[float]] = {}
@@ -912,12 +941,15 @@ async def run_styling_garment_tagging(garment_id: int) -> None:
         manual_tags = loads(row["manual_tags_json"], {}) if row else {}
         ai_tags = tagging_result.get("ai_tags", {})
         official_title_tags = tagging_result.get("official_title_tags", {})
-        tag_meta = tagging_result.get("tag_meta", {})
+        tag_meta = apply_tag_review_policy(ai_tags, tagging_result.get("tag_meta", {}))
         effective_tags = build_effective_tags(ai_tags, official_title_tags, manual_tags)
+        next_status = tagging_status_for_result(ai_tags, tag_meta)
+        if next_status == "TAGGING_READY":
+            tag_meta = {**tag_meta, "needs_review": True}
         db.execute(
             """
             UPDATE styling_garments
-            SET status = 'READY',
+            SET status = ?,
                 ai_tags_json = ?,
                 official_title_tags_json = ?,
                 effective_tags_json = ?,
@@ -928,6 +960,7 @@ async def run_styling_garment_tagging(garment_id: int) -> None:
             WHERE id = ?
             """,
             (
+                next_status,
                 dumps(ai_tags),
                 dumps(official_title_tags),
                 dumps(effective_tags),
@@ -3737,49 +3770,148 @@ def build_lily_tagging_prompt(garment: dict[str, Any]) -> str:
         {
             "image_id": image.get("id"),
             "role_hint": "primary" if index == 0 else "reference",
+            "sort_order": index,
             "filename": ((image.get("asset") or {}).get("filename") or ""),
+            "mime_type": ((image.get("asset") or {}).get("mimeType") or ""),
+            "width": ((image.get("asset") or {}).get("width")),
+            "height": ((image.get("asset") or {}).get("height")),
         }
         for index, image in enumerate(garment.get("images", [])[:6])
     ]
+    tagging_input = {
+        "asset_id": f"styling_garment_{garment.get('id')}",
+        "code": garment.get("code"),
+        "images": image_hints,
+        "official_title": "",
+        "brand_boundary": {
+            "core": ["商务时装", "都市通勤", "年轻职业女性", "简约", "优雅", "自信", "清新明快", "轻松但得体", "时尚但不夸张", "商品优先", "现代", "利落", "干净"],
+            "avoid": ["传统严肃职业制服感", "夸张时装大片感", "网红辣妹风", "森系/甜美少女风", "街头潮牌风", "宴会礼服感", "鞋包饰品抢服装主体", "复杂外景或戏剧化强光"],
+        },
+        "schema_version": LILY_TAG_SCHEMA_VERSION,
+    }
     return f"""
-你是 Lily 商务时装的服装视觉生产资产打标助手。请只基于图片生成只读 AI 标签，并抽取可选官方标题证据。
+你是 Lily 商务时装品牌的服装视觉生产资产打标专家。你的任务是把一组真实服装图片转成可追溯、可校验、可用于智能选搭的结构化标签。
 
-【核心职责】
-- 图片事实优先，标题只是证据层。
-- 不把鞋、包、饰品当作可售服装资产。
-- 不把“复古、老钱风、法式、小香风”等标题词升级为 Lily 全局品牌调性。
-- 不输出 Markdown，不输出解释，只输出严格 JSON。
+你不是文案助手，也不是生图助手。不要写 prompt，不要写营销文案，不要决定商品是否最终可用。
 
-【Lily 全局品牌边界】
-核心：商务时装、都市通勤、年轻职业女性、简约、优雅、自信、清新明快、轻松但得体、时尚但不夸张、商品优先。
-避免：传统严肃职业制服感、夸张时装大片感、网红辣妹风、森系甜美少女风、街头潮牌风、宴会礼服感。
+【本次输入】
+{dumps(tagging_input)}
 
-【资产信息】
-code: {garment.get("code")}
-images: {dumps(image_hints)}
+【图片与文字的优先级】
+1. 图片事实最高：服装品类、颜色、版型、结构、细节、可见性必须以图片为准。
+2. 多图一致性第二：如果多张图疑似不同商品，标记 needs_review=true，并在 review_reasons 加 conflicting_images。
+3. 官方标题只是证据层：只能进入 official_title_tags；不得覆盖图片事实。
+4. Lily 品牌边界只用于风格分数和风险判断，不要把品牌词机械复制到每件商品。
 
-【输出 JSON】
+【先做这些判断】
+1. 判断图片组是否展示同一件可售服装资产。
+2. 排除模特、鞋、包、首饰、背景、道具；它们不是本资产。
+3. 判断主商品大类、子类、是否套装。
+4. 判断颜色、图案、视觉材质、表面纹理、版型、轮廓、长度、领型、闭合方式、细节。
+5. 判断穿着能力：可单穿、可内搭、可外搭、能否作为下装搭配、是否可能遮挡主推款。
+6. 判断 Lily 场景适配和搭配约束。
+7. 标注每个低置信度原因。
+
+【枚举与评判规则】
+- category:
+  - top: 衬衫、T 恤、背心、针织上衣等上装。
+  - bottom: 裤装、半裙、短裤等下装。
+  - dress: 连衣裙。
+  - jumpsuit: 连体裤/连体衣。
+  - outerwear: 西装、夹克、风衣、大衣、羽绒外套等外穿外套。
+  - knitwear: 以针织视觉为主且更适合作为针织单品管理的服装。
+  - suit_set: 明确成套售卖或图片主体为套装。
+  - other_garment: 是服装但不能稳定归入以上品类。
+  - unsupported_accessory: 鞋、包、首饰、围巾、帽子等非服装配饰。
+  - unknown: 图片不足或无法判断。
+- sub_category 可选值: shirt, blouse, t_shirt, vest, camisole, cardigan, blazer, jacket, trench, coat, down_jacket, trousers, jeans, shorts, skirt, dress, other。
+- colors.primary 可选值: black, white, ivory, beige, grey, blue, navy, brown, green, red, pink, yellow, purple, metallic, multi, unknown。
+  - primary 是视觉面积最大或商品识别最重要的颜色。
+  - secondary 只写明显辅色；不要写光影造成的颜色。
+  - temperature: warm, cool, neutral, mixed, unknown。
+  - contrast_level: low, medium, high。
+  - color_distribution: solid, color_block, trim, gradient, print_based。
+- materials_visual 可选值: cotton_like, linen_like, silk_like, satin_like, acetate_like, knit, wool_like, denim, leather_like, lace, chiffon, tweed_like, down_padded, technical_fabric, unknown。
+  - 只判断视觉材质；不要把标题中的“桑蚕丝/莱赛尔/醋酸”等成分当作图片事实。
+- surface_texture 可选值: smooth, ribbed, openwork, slub, woven_texture, sheer, glossy, matte, structured, soft_drape。
+- fit 可选值: slim, regular, relaxed, loose, oversized, unknown。
+  - slim=贴身修身；regular=常规合体；relaxed=略宽松；loose=明显宽松；oversized=刻意大廓形。
+- silhouette 可选值: straight, a_line, h_line, x_line, wide_leg, flare, tapered, cropped, waist_defined, boxy。
+- structure 可选值: tailored, soft, draped, layered, structured_shoulder, dropped_shoulder, pleated, gathered。
+- length:
+  - top_length: cropped, hip, long, unknown。
+  - sleeve_length: sleeveless, short, elbow, three_quarter, long, unknown。
+  - bottom_length: short, knee, midi, ankle, full, unknown。
+- neckline 可选值: crew, v_neck, polo, shirt_collar, lapel, boat, square, halter, cowl, unknown。
+- closure 可选值: button, zipper, pullover, wrap, tie, open_front, unknown。
+- details 可选值: asymmetric, lace, contrast_trim, embroidery, pocket, pleat, cutout, patchwork, print, button, ruffle, bow_tie, belt, slit。
+- patterns 可选值: solid, stripe, check, polka_dot, floral, graphic, abstract, texture_pattern, logo, animal, unknown。
+- pattern_scale 可选值: none, small, medium, large, mixed。
+- wearability:
+  - can_be_worn_alone: 单独穿着是否成立。
+  - can_be_inner_layer: 作为内搭是否自然。
+  - can_be_outer_layer: 作为外搭是否自然。
+  - can_be_bottom_pairing: 是否是下装/可与上装搭配。
+  - can_be_set_anchor: 是否可作为套装核心。
+  - recommended_wearing_methods 可选值: buttoned, open, tucked, untucked, belted, layered。
+  - coverage_risk 可选值: none, may_cover_hero, likely_cover_hero, unknown。
+- lily_style 分数均为 0-1:
+  - business_fashion_score: 是否符合商务时装，而非制服或纯休闲。
+  - commute_score: 是否适合都市通勤。
+  - clean_score: 是否清爽、利落、不过度复杂。
+  - relaxed_score: 是否轻松但得体。
+  - feminine_score: 是否有女性化柔和/优雅特征。
+  - fashion_detail_score: 是否有设计点但不夸张。
+  - formality 可选值: casual, smart_casual, office, formal, unknown。
+  - style_notes 最多 3 条，每条不超过 30 个中文字符。
+- occasion 可选值: daily, commute, office, light_social, date, travel, home。
+- season 可选值: spring, summer, autumn, winter。
+- styling_compatibility:
+  - best_pairing_categories 可选值: top, bottom, outerwear, dress, knitwear。
+  - color_pairing.works_with 使用颜色枚举。
+  - silhouette_pairing.works_with 可选值: slim_top, relaxed_top, wide_leg_bottom, straight_bottom, a_line_skirt。
+  - style_risk 可选值: too_formal, too_casual, too_sweet, too_street, too_party, too_heavy, too_busy, none。
+  - pairing_brief 必须是短句，用于全库选搭，最多 40 个中文字符。
+
+【复核规则】
+以下任一情况必须 needs_review=true:
+- category 为 unknown 或 unsupported_accessory。
+- overall_confidence < 0.72。
+- 多图疑似不同商品。
+- 图片只有局部细节，无法判断主商品。
+- 标题与图片冲突。
+
+review_reasons 可选值: low_confidence, conflicting_images, unclear_category, title_image_conflict, insufficient_images, unsupported_accessory, uncertain_material, uncertain_color, uncertain_fit。
+
+【输出要求】
+- 只输出严格 JSON，不输出 Markdown，不输出解释。
+- 所有枚举字段必须从可选值中选择；不确定用 unknown 或空数组。
+- 自由文本字段要短，不写散文。
+- 置信度必须是 0 到 1 的数字。
+- tag_meta.source_image_ids 使用输入中的 image_id。
+
+【输出 JSON 模板】
 {{
   "schema_version": "{LILY_TAG_SCHEMA_VERSION}",
   "ai_tags": {{
-    "category": "top | bottom | dress | jumpsuit | outerwear | knitwear | suit_set | other_garment | unsupported_accessory | unknown",
-    "sub_category": "shirt | blouse | t_shirt | vest | camisole | cardigan | blazer | jacket | trench | coat | down_jacket | trousers | jeans | shorts | skirt | dress | other",
+    "category": "unknown",
+    "sub_category": "other",
     "official_category_candidates": [],
     "is_set": false,
-    "colors": {{"primary": "black | white | ivory | beige | grey | blue | navy | brown | green | red | pink | yellow | purple | metallic | multi | unknown", "secondary": [], "temperature": "warm | cool | neutral | mixed | unknown", "contrast_level": "low | medium | high", "color_distribution": "solid | color_block | trim | gradient | print_based"}},
+    "colors": {{"primary": "unknown", "secondary": [], "temperature": "unknown", "contrast_level": "medium", "color_distribution": "solid"}},
     "materials_visual": [],
     "surface_texture": [],
-    "fit": "slim | regular | relaxed | loose | oversized | unknown",
+    "fit": "unknown",
     "silhouette": [],
     "structure": [],
-    "length": {{"top_length": "cropped | hip | long | unknown", "sleeve_length": "sleeveless | short | elbow | three_quarter | long | unknown", "bottom_length": "short | knee | midi | ankle | full | unknown"}},
+    "length": {{"top_length": "unknown", "sleeve_length": "unknown", "bottom_length": "unknown"}},
     "neckline": [],
     "closure": [],
     "details": [],
     "patterns": [],
-    "pattern_scale": "none | small | medium | large | mixed",
-    "wearability": {{"can_be_worn_alone": true, "can_be_inner_layer": false, "can_be_outer_layer": false, "can_be_bottom_pairing": false, "can_be_set_anchor": false, "recommended_wearing_methods": [], "coverage_risk": "none | may_cover_hero | likely_cover_hero | unknown"}},
-    "lily_style": {{"business_fashion_score": 0.0, "commute_score": 0.0, "clean_score": 0.0, "relaxed_score": 0.0, "feminine_score": 0.0, "fashion_detail_score": 0.0, "formality": "casual | smart_casual | office | formal | unknown", "style_notes": []}},
+    "pattern_scale": "none",
+    "wearability": {{"can_be_worn_alone": true, "can_be_inner_layer": false, "can_be_outer_layer": false, "can_be_bottom_pairing": false, "can_be_set_anchor": false, "recommended_wearing_methods": [], "coverage_risk": "unknown"}},
+    "lily_style": {{"business_fashion_score": 0.0, "commute_score": 0.0, "clean_score": 0.0, "relaxed_score": 0.0, "feminine_score": 0.0, "fashion_detail_score": 0.0, "formality": "unknown", "style_notes": []}},
     "occasion": [],
     "season": [],
     "season_confidence": 0.0,
@@ -3884,24 +4016,27 @@ def normalize_lily_tagging_result(raw: dict[str, Any], garment: dict[str, Any]) 
 def normalize_styling_tags(tags: Any, garment: dict[str, Any]) -> dict[str, Any]:
     fallback = fallback_styling_tags(garment)
     merged = deep_merge(fallback, tags if isinstance(tags, dict) else {})
-    if merged.get("category") not in {"top", "bottom", "dress", "jumpsuit", "outerwear", "knitwear", "suit_set", "other_garment", "unsupported_accessory", "unknown"}:
-        merged["category"] = "unknown"
-    if merged.get("sub_category") not in {"shirt", "blouse", "t_shirt", "vest", "camisole", "cardigan", "blazer", "jacket", "trench", "coat", "down_jacket", "trousers", "jeans", "shorts", "skirt", "dress", "other"}:
-        merged["sub_category"] = "other"
-    for key in ("materials_visual", "surface_texture", "silhouette", "structure", "neckline", "closure", "details", "patterns", "occasion", "season"):
-        if isinstance(merged.get(key), str):
-            merged[key] = [merged[key]]
-        elif not isinstance(merged.get(key), list):
-            merged[key] = []
-    if not isinstance(merged.get("colors"), dict):
-        merged["colors"] = fallback["colors"]
+    merged["category"] = normalize_enum(merged.get("category"), TAG_CATEGORIES, "unknown")
+    merged["sub_category"] = normalize_enum(merged.get("sub_category"), TAG_SUB_CATEGORIES, "other")
+    merged["is_set"] = bool(merged.get("is_set"))
+    merged["colors"] = normalize_color_tags(merged.get("colors"), fallback["colors"])
+    merged["materials_visual"] = normalize_enum_list(merged.get("materials_visual"), TAG_MATERIALS_VISUAL)
+    merged["surface_texture"] = normalize_enum_list(merged.get("surface_texture"), TAG_SURFACE_TEXTURES)
+    merged["fit"] = normalize_enum(merged.get("fit"), TAG_FITS, "unknown")
+    merged["silhouette"] = normalize_enum_list(merged.get("silhouette"), TAG_SILHOUETTES)
+    merged["structure"] = normalize_enum_list(merged.get("structure"), TAG_STRUCTURES)
+    merged["length"] = normalize_length_tags(merged.get("length"), fallback["length"])
+    merged["neckline"] = normalize_enum_list(merged.get("neckline"), TAG_NECKLINES)
+    merged["closure"] = normalize_enum_list(merged.get("closure"), TAG_CLOSURES)
+    merged["details"] = normalize_enum_list(merged.get("details"), TAG_DETAILS)
+    merged["patterns"] = normalize_enum_list(merged.get("patterns"), TAG_PATTERNS)
+    merged["pattern_scale"] = normalize_enum(merged.get("pattern_scale"), TAG_PATTERN_SCALES, "unknown")
+    merged["wearability"] = normalize_wearability_tags(merged.get("wearability"), fallback["wearability"])
     merged["lily_style"] = normalize_score_object(merged.get("lily_style"), fallback["lily_style"])
+    merged["occasion"] = normalize_enum_list(merged.get("occasion"), TAG_OCCASIONS)
+    merged["season"] = normalize_enum_list(merged.get("season"), TAG_SEASONS)
     merged["season_confidence"] = clamp_float(merged.get("season_confidence"), 0.0, 1.0, 0.0)
-    compatibility = merged.get("styling_compatibility")
-    if not isinstance(compatibility, dict):
-        merged["styling_compatibility"] = fallback["styling_compatibility"]
-    else:
-        compatibility["pairing_brief"] = str(compatibility.get("pairing_brief") or "")[:120]
+    merged["styling_compatibility"] = normalize_styling_compatibility(merged.get("styling_compatibility"), fallback["styling_compatibility"])
     return merged
 
 
@@ -3948,20 +4083,41 @@ def normalize_manual_business_tags(value: Any) -> dict[str, Any]:
 def normalize_tag_meta(value: Any, garment: dict[str, Any]) -> dict[str, Any]:
     meta = value if isinstance(value, dict) else {}
     confidence = clamp_float(meta.get("overall_confidence"), 0.0, 1.0, 0.5)
-    review_reasons = ensure_string_list(meta.get("review_reasons"))
-    if confidence < 0.72 and "low_confidence" not in review_reasons:
+    review_reasons = normalize_enum_list(meta.get("review_reasons"), TAG_REVIEW_REASONS)
+    if confidence < TAG_REVIEW_CONFIDENCE_THRESHOLD and "low_confidence" not in review_reasons:
         review_reasons.append("low_confidence")
     return {
-        "tagger_provider": "gemini",
-        "tagger_model": settings.gemini_model,
+        "tagger_provider": str(meta.get("tagger_provider") or "gemini")[:40],
+        "tagger_model": str(meta.get("tagger_model") or settings.gemini_model)[:80],
         "schema_version": LILY_TAG_SCHEMA_VERSION,
         "overall_confidence": confidence,
         "field_confidence": meta.get("field_confidence") if isinstance(meta.get("field_confidence"), dict) else {},
-        "needs_review": bool(meta.get("needs_review")) or confidence < 0.72,
+        "needs_review": bool(meta.get("needs_review")) or confidence < TAG_REVIEW_CONFIDENCE_THRESHOLD,
         "review_reasons": review_reasons,
         "source_image_ids": ensure_string_list(meta.get("source_image_ids")) or [str(image.get("id")) for image in garment.get("images", [])],
         "warnings": ensure_string_list(meta.get("warnings")),
     }
+
+
+def tagging_status_for_result(ai_tags: dict[str, Any], tag_meta: dict[str, Any]) -> str:
+    if tag_meta.get("needs_review") or tag_meta.get("tagger_provider") == "fallback":
+        return "TAGGING_READY"
+    if ai_tags.get("category") in {"unknown", "unsupported_accessory"}:
+        return "TAGGING_READY"
+    return "READY"
+
+
+def apply_tag_review_policy(ai_tags: dict[str, Any], tag_meta: dict[str, Any]) -> dict[str, Any]:
+    reasons = normalize_enum_list(tag_meta.get("review_reasons"), TAG_REVIEW_REASONS)
+    category = ai_tags.get("category")
+    if category == "unknown" and "unclear_category" not in reasons:
+        reasons.append("unclear_category")
+    if category == "unsupported_accessory" and "unsupported_accessory" not in reasons:
+        reasons.append("unsupported_accessory")
+    if tag_meta.get("tagger_provider") == "fallback" and "fallback_tags" not in reasons:
+        reasons.append("fallback_tags")
+    needs_review = bool(tag_meta.get("needs_review")) or bool(reasons)
+    return {**tag_meta, "needs_review": needs_review, "review_reasons": reasons}
 
 
 def build_effective_tags(ai_tags: dict[str, Any], official_title_tags: dict[str, Any], manual_tags: dict[str, Any]) -> dict[str, Any]:
@@ -4032,8 +4188,81 @@ def normalize_score_object(value: Any, fallback: dict[str, Any]) -> dict[str, An
     result = {**fallback, **source}
     for key in ("business_fashion_score", "commute_score", "clean_score", "relaxed_score", "feminine_score", "fashion_detail_score"):
         result[key] = clamp_float(result.get(key), 0.0, 1.0, 0.0)
-    result["style_notes"] = [str(item)[:80] for item in ensure_string_list(result.get("style_notes"))[:3]]
+    result["formality"] = normalize_enum(result.get("formality"), TAG_FORMALITIES, "unknown")
+    result["style_notes"] = [str(item)[:30] for item in ensure_string_list(result.get("style_notes"))[:3]]
     return result
+
+
+def normalize_enum(value: Any, allowed: set[str], fallback: str) -> str:
+    text = str(value or "").strip()
+    return text if text in allowed else fallback
+
+
+def normalize_enum_list(value: Any, allowed: set[str], limit: int = 12) -> list[str]:
+    values = ensure_string_list(value)
+    result: list[str] = []
+    for item in values:
+        if item in allowed and item not in result:
+            result.append(item)
+    return result[:limit]
+
+
+def normalize_color_tags(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "primary": normalize_enum(source.get("primary"), TAG_COLORS, fallback.get("primary", "unknown")),
+        "secondary": normalize_enum_list(source.get("secondary"), TAG_COLORS, limit=4),
+        "temperature": normalize_enum(source.get("temperature"), TAG_COLOR_TEMPERATURES, fallback.get("temperature", "unknown")),
+        "contrast_level": normalize_enum(source.get("contrast_level"), TAG_CONTRAST_LEVELS, fallback.get("contrast_level", "medium")),
+        "color_distribution": normalize_enum(source.get("color_distribution"), TAG_COLOR_DISTRIBUTIONS, fallback.get("color_distribution", "solid")),
+    }
+
+
+def normalize_length_tags(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "top_length": normalize_enum(source.get("top_length"), TAG_TOP_LENGTHS, fallback.get("top_length", "unknown")),
+        "sleeve_length": normalize_enum(source.get("sleeve_length"), TAG_SLEEVE_LENGTHS, fallback.get("sleeve_length", "unknown")),
+        "bottom_length": normalize_enum(source.get("bottom_length"), TAG_BOTTOM_LENGTHS, fallback.get("bottom_length", "unknown")),
+    }
+
+
+def normalize_wearability_tags(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "can_be_worn_alone": bool(source.get("can_be_worn_alone", fallback.get("can_be_worn_alone", True))),
+        "can_be_inner_layer": bool(source.get("can_be_inner_layer", fallback.get("can_be_inner_layer", False))),
+        "can_be_outer_layer": bool(source.get("can_be_outer_layer", fallback.get("can_be_outer_layer", False))),
+        "can_be_bottom_pairing": bool(source.get("can_be_bottom_pairing", fallback.get("can_be_bottom_pairing", False))),
+        "can_be_set_anchor": bool(source.get("can_be_set_anchor", fallback.get("can_be_set_anchor", False))),
+        "recommended_wearing_methods": normalize_enum_list(source.get("recommended_wearing_methods"), TAG_WEARING_METHODS),
+        "coverage_risk": normalize_enum(source.get("coverage_risk"), TAG_COVERAGE_RISKS, fallback.get("coverage_risk", "unknown")),
+    }
+
+
+def normalize_pairing_block(value: Any, allowed_values: set[str]) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "works_with": normalize_enum_list(source.get("works_with"), allowed_values),
+        "avoid_with": normalize_enum_list(source.get("avoid_with"), allowed_values),
+        "notes": str(source.get("notes") or "")[:80],
+    }
+
+
+def normalize_styling_compatibility(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    fallback_color = fallback.get("color_pairing") if isinstance(fallback.get("color_pairing"), dict) else {}
+    fallback_silhouette = fallback.get("silhouette_pairing") if isinstance(fallback.get("silhouette_pairing"), dict) else {}
+    color_pairing = source.get("color_pairing") if isinstance(source.get("color_pairing"), dict) else fallback_color
+    silhouette_pairing = source.get("silhouette_pairing") if isinstance(source.get("silhouette_pairing"), dict) else fallback_silhouette
+    return {
+        "best_pairing_categories": normalize_enum_list(source.get("best_pairing_categories"), TAG_PAIRING_CATEGORIES),
+        "avoid_pairing_categories": normalize_enum_list(source.get("avoid_pairing_categories"), TAG_PAIRING_CATEGORIES),
+        "color_pairing": normalize_pairing_block(color_pairing, TAG_COLORS),
+        "silhouette_pairing": normalize_pairing_block(silhouette_pairing, TAG_SILHOUETTE_PAIRINGS),
+        "style_risk": normalize_enum_list(source.get("style_risk"), TAG_STYLE_RISKS) or ["none"],
+        "pairing_brief": str(source.get("pairing_brief") or fallback.get("pairing_brief") or "")[:40],
+    }
 
 
 def ensure_string_list(value: Any) -> list[str]:

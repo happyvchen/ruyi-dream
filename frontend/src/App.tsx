@@ -433,7 +433,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
               item={item}
               run={run}
               onOpen={() => void openDetail(item)}
-              onTag={item.status === 'TAGGING_FAILED' ? () => void run('重新打标中...', () => api.tagStylingGarment(item.id)) : undefined}
+              onTag={['TAGGING_FAILED', 'TAGGING_READY'].includes(item.status) ? () => void run('重新打标中...', () => api.tagStylingGarment(item.id)) : undefined}
             />
           ))}</div>
         ) : <EmptyState title={query ? '没有匹配的搭配服饰' : '暂无搭配服饰'} text={query ? '换一个 code 或标签关键词试试。' : '点击右上角导入搭配服饰。'} />}
@@ -953,6 +953,7 @@ function statusText(status: string) {
     COMPLETED: '已完成',
     FAILED: '失败',
     READY: '可用',
+    TAGGING_READY: '待复核',
     TAGGING_RUNNING: '正在打标',
     TAGGING_FAILED: '打标失败',
   }

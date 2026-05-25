@@ -300,6 +300,57 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(edit.status_code, 409)
         self.assertEqual(archive.status_code, 409)
 
+    def test_lily_tagging_normalization_filters_invalid_enums(self) -> None:
+        main = importlib.import_module("app.main")
+        garment = {"code": "TEST", "images": [{"id": 1}]}
+
+        normalized = main.normalize_styling_tags(
+            {
+                "category": "shoe",
+                "sub_category": "bag",
+                "colors": {"primary": "cyan", "secondary": ["white", "neon"], "temperature": "hot"},
+                "materials_visual": ["denim", "plastic"],
+                "fit": "giant",
+                "patterns": ["solid", "paisley"],
+                "styling_compatibility": {
+                    "style_risk": ["none", "too_gothic"],
+                    "pairing_brief": "适合搭配浅色直筒裤，保持清爽通勤感，不要过长",
+                },
+            },
+            garment,
+        )
+
+        self.assertEqual(normalized["category"], "unknown")
+        self.assertEqual(normalized["sub_category"], "other")
+        self.assertEqual(normalized["colors"]["primary"], "unknown")
+        self.assertEqual(normalized["colors"]["secondary"], ["white"])
+        self.assertEqual(normalized["materials_visual"], ["denim"])
+        self.assertEqual(normalized["fit"], "unknown")
+        self.assertEqual(normalized["patterns"], ["solid"])
+        self.assertEqual(normalized["styling_compatibility"]["style_risk"], ["none"])
+        self.assertLessEqual(len(normalized["styling_compatibility"]["pairing_brief"]), 40)
+
+    def test_lily_tagging_review_results_do_not_enter_ready(self) -> None:
+        main = importlib.import_module("app.main")
+
+        ready_meta = main.apply_tag_review_policy(
+            {"category": "top"},
+            {"tagger_provider": "gemini", "overall_confidence": 0.9, "needs_review": False, "review_reasons": []},
+        )
+        review_meta = main.apply_tag_review_policy(
+            {"category": "unsupported_accessory"},
+            {"tagger_provider": "gemini", "overall_confidence": 0.9, "needs_review": False, "review_reasons": []},
+        )
+        fallback_meta = main.apply_tag_review_policy(
+            {"category": "top"},
+            {"tagger_provider": "fallback", "overall_confidence": 0.5, "needs_review": True, "review_reasons": ["fallback_tags"]},
+        )
+
+        self.assertEqual(main.tagging_status_for_result({"category": "top"}, ready_meta), "READY")
+        self.assertEqual(main.tagging_status_for_result({"category": "unsupported_accessory"}, review_meta), "TAGGING_READY")
+        self.assertIn("unsupported_accessory", review_meta["review_reasons"])
+        self.assertEqual(main.tagging_status_for_result({"category": "top"}, fallback_meta), "TAGGING_READY")
+
     def test_generation_inputs_use_selected_material_snapshot_after_archive(self) -> None:
         config = importlib.import_module("app.config")
         db_module = importlib.import_module("app.db")
