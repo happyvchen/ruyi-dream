@@ -1602,6 +1602,7 @@ function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () =
   const canStep = items.length > 1
   const naturalSize = naturalSizes[current.src]
   const remoteSize = remoteSizes[current.src]
+  const zoomedStyle = zoom === 'fit' ? undefined : { width: naturalSize ? `${naturalSize.width * zoom}px` : 'auto' }
   const details = {
     ...(current.details ?? {}),
     ...(naturalSize && (!current.details?.尺寸 || current.details?.尺寸 === '尺寸读取中') ? { 尺寸: dimensionText(naturalSize) } : {}),
@@ -1684,7 +1685,7 @@ function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () =
           src={current.src}
           alt={current.title}
           className={zoom === 'fit' ? 'is-fit' : 'is-zoomed'}
-          style={zoom === 'fit' ? undefined : { width: `${zoom * 100}%` }}
+          style={zoomedStyle}
           onLoad={(event) => {
             const img = event.currentTarget
             setNaturalSizes((value) => ({ ...value, [current.src]: { width: img.naturalWidth, height: img.naturalHeight } }))
