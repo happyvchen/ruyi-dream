@@ -2,7 +2,7 @@
 
 ## 1. 总体流程
 
-新版 Ruyi-Dream 的生成链路是：
+Ruyi-Dream 的新版生成链路以 `AI Stylist` 为策划核心。系统不是把主推款和搭配库交给模型直接返回几个 ID，而是让模型像品牌造型师一样先理解主推款，再探索造型方向、生成多套 outfit 候选、自评审美和商品可见性，最后输出可追溯的 `StylingPlan`。
 
 ```mermaid
 flowchart TD
@@ -10,20 +10,35 @@ flowchart TD
   B --> C["READY 搭配服饰"]
   D["AI 摄影棚上传主推款"] --> E["创建 GenerationTask 草稿"]
   E --> F["冻结输入版本"]
-  C --> G["Gemini 智能选搭"]
-  F --> G
-  G --> H["生成 6 条 ShotPlan"]
-  H --> I["Image-2 生成 3x2 六宫格预览"]
-  I --> J["并发生成前 5 张最终图"]
-  J --> K["单张下载 / 生成记录复盘"]
+  C --> G["候选召回<br/>标签 / 颜色 / 季节 / 品类 / 未来 embedding"]
+  F --> H["主推款理解<br/>商品事实 / 卖点 / 展示风险"]
+  H --> I["造型意图探索<br/>3-5 个方向"]
+  G --> J["多套 Outfit 候选"]
+  I --> J
+  J --> K["Stylist Critic<br/>审美 / 品牌 / 商品可见性"]
+  K --> L["选中 StylingPlan"]
+  L --> M["生成 6 条 ShotPlan"]
+  M --> N["Image-2 生成 3x2 六宫格预览"]
+  N --> O["并发生成前 5 张最终图"]
+  O --> P["单张下载 / 生成记录复盘 / 反馈沉淀"]
 ```
 
 职责边界：
 
-- `Gemini 智能选搭` 只负责从搭配服饰库选择配角服饰。
-- `ShotPlan` 负责穿着关系、图位、景别、姿势、身位、环境、光影、镜头、构图和生成配饰边界。
-- `Image-2` 负责按输入图片和 ShotPlan 生成六宫格预览与最终成片。
+- `AI Stylist` 负责主推款理解、造型方向探索、候选 outfit 组合、审美与商品可见性自评，并输出 `StylingPlan`。
+- 候选召回层负责把 READY 搭配服饰按标签、颜色、品类、季节、风格和后续 embedding 召回压缩成可判断候选，不负责最终审美决策。
+- `StylingPlan` 是选搭阶段的结构化产物，记录造型意图、候选方案、选中 outfit、拒绝理由、评分和警告。
+- `ShotPlan` 承接 `StylingPlan`，负责穿着关系、图位、景别、姿势、身位、环境、光影、镜头、构图、主推款展示重点和生成配饰边界。
+- `Image-2` 负责按输入图片、`StylingPlan` 和 `ShotPlan` 生成六宫格预览与最终成片，不负责选搭、状态管理或历史追溯。
 - 鞋、包、饰品在 MVP 阶段不是可售级商品事实源，只能作为生成配饰文字边界出现。
+
+核心原则：
+
+```text
+搭配服饰服务主推款，而不是主推款服务整套造型。
+```
+
+模型可以探索，但每个探索都必须回答：是否好看、是否符合 Lily、是否让主推款更好卖。
 
 ## 2. 搭配服饰库预处理
 
@@ -64,42 +79,128 @@ DELETED
 
 点击 `AI 智能选搭` 后冻结当前输入，创建 `GenerationTaskInputVersion`。用户之后返回上一步修改主推款图片，会创建新的输入版本，并要求后续阶段重新生成；旧版本数据保留。
 
-## 4. AI 智能选搭
+## 4. AI Stylist 智能选搭
 
-输入：
+### 4.1 输入
 
 - 当前输入版本的主推款图片。
-- 当前全部 `READY` 搭配服饰经后端压缩后的 `effective_tags` 候选卡片，例如 ID、code、category、colors、fit、season、pairing_brief 和 risk。
+- 当前全部 `READY` 搭配服饰经后端压缩后的 `effective_tags` 候选卡片，例如 ID、code、category、colors、fit、season、pairing_brief、wearability 和 risk。
+- 候选召回结果。MVP 可用标签和简单排序实现，后续增加视觉 embedding、历史采纳率、人工反馈和销售/点击信号。
+- Lily 品牌边界、商品主角原则和生产验收维度。
 
-不输入：
+MVP 阶段默认不输入用户长 prompt。用户只确认拍摄信息和结果，不被训练成 prompt 工程师。
 
-- 搭配服饰图片本身。
-- embedding / 向量检索结果。
-- 用户提示词。MVP 暂不支持。
+### 4.2 工作流
 
-输出：
+`AI Stylist` 至少分为三个逻辑步骤，可在工程上按多次 Gemini 调用实现，也可先以一次调用返回完整结构，但输出必须保留分步结果。
+
+1. **Hero Understanding**
+   - 识别主推款事实、品类、颜色、廓形、关键卖点和不可遮挡区域。
+   - 判断主推款是否本身已经是完整 look，例如连衣裙、套装、强设计上衣。
+   - 输出 `hero_visual_summary`、`hero_selling_points`、`hero_visibility_risks`。
+
+2. **Styling Intent Exploration**
+   - 生成 3-5 个造型方向，例如单穿主推、轻通勤、松弛叠穿、同色系高级感、反差色、轻社交。
+   - 每个方向说明适用条件、商品展示收益和风险。
+   - 允许探索，但不能把主推款降级为整套 look 的背景元素。
+
+3. **Outfit Proposals + Critic**
+   - 基于召回候选提出多套完整 outfit 候选。
+   - 每套候选说明真实搭配服饰、生成配饰、穿着方式、主推款展示重点。
+   - 由 Stylist Critic 同时打分：`aesthetic_score`、`brand_fit_score`、`hero_visibility_score`、`commercial_readiness_score`。
+   - 最终选择一套 outfit；空的库内搭配是合法优秀结果，不是失败。
+
+### 4.3 输出
+
+选搭阶段输出 `StylingPlan`，而不是只输出 ID。
 
 ```json
 {
-  "selected_material_ids": [1, 2],
-  "hero_visual_summary": "short internal summary",
-  "reason_summary": "short explanation",
+  "schema_version": "styling-plan-v1",
+  "hero_understanding": {
+    "hero_visual_summary": "深蓝色V领短袖牛仔连衣裙，附带棕色收腰皮带",
+    "hero_selling_points": ["V领", "腰带", "裙身廓形", "面料肌理"],
+    "hero_visibility_risks": ["外套可能遮挡前襟和腰带"]
+  },
+  "styling_intents": [
+    {
+      "id": "hero_first_single_piece",
+      "title": "主推款单穿",
+      "reason": "连衣裙本身已经构成完整通勤 look",
+      "risk": "需要用鞋包丰富画面但不能抢主推款"
+    }
+  ],
+  "outfit_candidates": [
+    {
+      "id": "candidate_a",
+      "mode": "hero_first_single_piece",
+      "selected_material_ids": [],
+      "generated_accessories": ["棕色乐福鞋", "小号通勤包"],
+      "wearing_notes": "主推连衣裙单穿，鞋包呼应腰带",
+      "hero_focus": ["腰带", "V领", "裙摆比例"],
+      "scores": {
+        "aesthetic_score": 0.86,
+        "brand_fit_score": 0.9,
+        "hero_visibility_score": 0.95,
+        "commercial_readiness_score": 0.92
+      },
+      "risk_notes": []
+    }
+  ],
+  "selected_outfit_id": "candidate_a",
+  "selected_material_ids": [],
+  "reason_summary": "主推连衣裙自带完整造型，采用单穿并以生成鞋包补足通勤氛围。",
+  "rejected_candidates": [
+    {
+      "id": "candidate_b",
+      "reason": "外套会弱化V领、腰带和连衣裙廓形"
+    }
+  ],
   "warnings": []
 }
 ```
 
-规则：
+### 4.4 业务校验
 
-- `SourceMaterialIDs` 为当前全部可用搭配服饰。
-- 被选中的搭配服饰图片与 tags 在选搭完成时写入快照；后续预览与成片读取快照，库内归档或更新不得覆盖已有任务事实源。用户明确执行级联删除时，实际选中过该服饰的任务、快照、主推款上传素材和生成输出随之一并删除。
-- 空的 `selected_material_ids` 允许。
-- 非法 ID、重复 ID、选择非 READY 素材、JSON 不可解析视为失败。
-- MVP 不支持成功后重新搭配，不支持手动替换或移除配角。
-- `hero_visual_summary` 只是链路上下文，不是商品事实权威；商品事实仍以主推款图片为准。
+后端不写死审美规则，但必须校验基础真实性和生产边界：
 
-## 5. ShotPlan
+- 选中的搭配服饰 ID 必须来自当前 READY 候选。
+- 不允许重复 ID。
+- `selected_material_ids` 可为空。
+- 组合必须是一个可穿 outfit；如果选择多个外套、多个互斥上装或其它明显冲突组合，必须由 `StylingPlan` 解释具体穿着方式，否则视为失败或要求重试。
+- 当 `hero_visibility_score` 或 `commercial_readiness_score` 低于阈值时，不自动进入预览；前台可显示风险并允许用户确认或重新选搭。
+- request snapshot 必须保存主推款快照、候选召回结果、传给 Gemini 的 material cards、完整 prompt/任务说明和每步响应。
+
+## 5. 候选召回
+
+MVP 可以先用全量 READY tags，但生产实现应增加候选召回层，避免 Gemini 在噪音候选中直接拍脑袋。
+
+召回目标：
+
+- 保留 Gemini 的审美自主性。
+- 缩小候选噪音，提升稳定性和可解释性。
+- 让后续接入 embedding、人工反馈和品牌偏好学习时不改动主流程。
+
+召回特征：
+
+- 品类互补：主推款类型、可穿组合、是否完整 look。
+- 色彩关系：同色系、邻近色、对比色、腰带/纽扣/图案呼应。
+- 季节和场景：通勤、轻社交、春夏/秋冬。
+- 风格分数：Lily 商务时装、干净、松弛、女性化、设计感。
+- 风险：遮挡主推款、过于复杂、过于正式、过于休闲。
+- 未来增强：CLIP/多模态 embedding、历史采纳率、人工偏好、销售或点击表现。
+
+## 6. ShotPlan
 
 预览前，系统为 6 个格子生成结构化 ShotPlan。ShotPlan 是最终生成与记录复盘的结构化事实，不应只依赖六宫格图片像素。
+
+ShotPlan 必须读取选中的 `StylingPlan`，尤其是：
+
+- `mode`：单穿主推、轻外搭、内搭层次、成套通勤等。
+- `hero_focus`：每格必须服务的主推款卖点。
+- `wearing_notes`：真实搭配服饰如何穿到模特身上。
+- `generated_accessories`：鞋、包、饰品的风格边界。
+- `risk_notes`：遮挡、喧宾夺主、商品细节弱化等风险。
 
 每条 ShotPlan 至少包含：
 
@@ -112,6 +213,8 @@ DELETED
   "camera_angle": "string",
   "main_focus": "string",
   "visible_garments": ["hero", "styling:123"],
+  "hero_selling_points": ["string"],
+  "wearing_notes": "string",
   "generated_accessory_notes": "string",
   "background_lighting": "string",
   "composition_notes": "string",
@@ -121,21 +224,22 @@ DELETED
 
 第 6 条 ShotPlan 可以生成并保存，但 MVP 最终直接忽略第 6 格，不进入最终成片。
 
-## 6. 六宫格预览
+## 7. 六宫格预览
 
 预览阶段调用 Image-2，输出一张 3x2 六宫格总图。
 
 输入包括：
 
 - 主推款图片。
-- 选中搭配服饰图片。
+- 选中搭配服饰图片；如果 `selected_material_ids` 为空，则不传库内搭配服饰图片。
 - 数字模特图片。
+- 选中 `StylingPlan`。
 - 6 条 ShotPlan。
 - 品牌棚拍边界与生成配饰边界。
 
 MVP 不裁切六宫格，不存 6 个 frame，只保存总图。成功后不支持换一版预览；失败可重试当前预览阶段。
 
-## 7. 最终成片生成
+## 8. 最终成片生成
 
 最终阶段固定生成前 5 格，5 张图并发调用 Image-2。
 
@@ -143,6 +247,7 @@ MVP 不裁切六宫格，不存 6 个 frame，只保存总图。成功后不支�
 
 - 同一张六宫格预览图。
 - 对应的 ShotPlan。
+- 选中 `StylingPlan`。
 - 主推款图片。
 - 选中搭配服饰图片。
 - 数字模特图片。
@@ -151,30 +256,32 @@ MVP 不裁切六宫格，不存 6 个 frame，只保存总图。成功后不支�
 提示词需要明确：
 
 ```text
-参考六宫格预览图中的第 N 格作为姿势、身位、景别、构图和光影方向。六宫格不是商品事实来源。主推款和搭配服饰的商品事实始终以各自服装参考图为准。
+参考六宫格预览图中的第 N 格作为姿势、身位、景别、构图和光影方向。六宫格不是商品事实来源。主推款和搭配服饰的商品事实始终以各自服装参考图为准。搭配服饰和生成配饰必须服务主推款展示，不得让主推款沦为整套造型的背景元素。
 ```
 
 最终图按“结果批次 -> 5 个图位 -> 每图多次 attempt”建模。单张失败可重试该张；成功后 MVP 不支持换一版整组。
 
-## 8. 重试与失败
+## 9. 重试与失败
 
 MVP 支持失败后重试当前阶段：
 
 - 打标失败可重试打标。
-- 选搭失败可重试选搭。
+- 选搭失败可重试 AI Stylist。
 - 预览失败可重试预览。
 - 最终单张失败可重试该张。
 
 MVP 不支持成功后的重新搭配、重新预览或重新整组生成。这些能力后续扩展。
 
-## 9. 记录与恢复
+## 10. 记录、恢复与反馈
 
 生成记录只展示进入过 AI 阶段的任务。草稿保存但不污染生成记录列表。
 
 历史记录保存：
 
 - 主推款输入版本快照。
-- 搭配服饰选择快照。
+- 候选召回快照。
+- `StylingPlan` 完整快照。
+- 被选中和被拒绝搭配服饰快照。
 - 数字模特快照。
 - 六宫格预览图。
 - 6 条 ShotPlan。
@@ -182,3 +289,5 @@ MVP 不支持成功后的重新搭配、重新预览或重新整组生成。这�
 - provider request/response。
 
 历史再次生成默认使用当时快照，不读取素材库或数字模特的最新版本。
+
+后续生产增强应记录用户对方案的接受、拒绝、重选、下载和人工反馈，沉淀品牌偏好库。反馈不能直接覆盖历史任务，只能影响未来候选召回和 AI Stylist 排序。
