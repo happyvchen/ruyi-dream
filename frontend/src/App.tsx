@@ -521,6 +521,7 @@ function StylingPlanSummary({ task }: { task: GenerationTask }) {
   const scores = (styling.criticScores && Object.keys(styling.criticScores).length ? styling.criticScores : planValue<Record<string, unknown>>(selected ?? {}, 'scores') ?? {}) as Record<string, unknown>
   const generatedAccessories = stringList(planValue(selected ?? {}, 'generated_accessories'))
   const heroFocus = stringList(planValue(selected ?? {}, 'hero_focus'))
+  const aestheticDiagnosis = diagnosisItems(planValue<Record<string, unknown>>(selected ?? {}, 'aesthetic_diagnosis') ?? {})
   const rejected = styling.rejectedCandidates?.length ? styling.rejectedCandidates : planValue<Record<string, unknown>[]>(plan, 'rejected_candidates') ?? []
   return (
     <div className="styling-plan">
@@ -539,6 +540,7 @@ function StylingPlanSummary({ task }: { task: GenerationTask }) {
       <p>{styling.reasonSummary || stringValue(planValue(plan, 'reason_summary'))}</p>
       <div className="styling-plan-grid">
         <InfoBlock title="主推款理解" items={[stringValue(hero.hero_visual_summary), ...stringList(hero.hero_selling_points)].filter(Boolean)} />
+        <InfoBlock title="审美诊断" items={aestheticDiagnosis} empty="暂无审美诊断" />
         <InfoBlock title="图位重点" items={heroFocus.length ? heroFocus : stringList(hero.hero_selling_points)} />
         <InfoBlock title="生成配饰" items={generatedAccessories.length ? generatedAccessories : ['低存在感鞋包饰品']} />
         <InfoBlock title="风险提示" items={[...stringList(hero.hero_visibility_risks), ...(styling.warnings ?? [])].filter(Boolean)} empty="暂无明显风险" />
@@ -577,6 +579,21 @@ function stringValue(value: unknown) {
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean) : []
+}
+
+function diagnosisItems(value: Record<string, unknown>): string[] {
+  const labels: Record<string, string> = {
+    color_weight: '色彩',
+    silhouette_balance: '廓形',
+    waistline_proportion: '比例',
+    season_material_fit: '材质',
+    template_risk: '模板',
+    brand_read: '品牌',
+  }
+  return Object.entries(labels).map(([key, label]) => {
+    const text = stringValue(value[key])
+    return text ? `${label}: ${text}` : ''
+  }).filter(Boolean)
 }
 
 function PreviewStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
