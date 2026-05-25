@@ -7,14 +7,14 @@
 默认主流程：
 
 ```text
-服装素材页导入/编辑货号图片 -> 保存默认组图方案 -> 生成组图页选择货号 -> 直接生成/重生/导出 -> 生成记录复盘/恢复
+AI 摄影棚上传主推款 -> AI 智能选搭 -> 六宫格预览 -> 生成前 5 张成片 -> 生成记录复盘
 ```
 
 ## 当前代码结构
 
 | 路径 | 职责 |
 |---|---|
-| `src/App.tsx` | 单页 MVP 主界面、轻量路由、生成组图、服装素材、数字模特、生成记录 |
+| `src/App.tsx` | 单页 MVP 主界面、AI 摄影棚、搭配服饰库、数字模特、生成记录 |
 | `src/api.ts` | API base、请求封装、导出下载 |
 | `src/types.ts` | 前端类型定义 |
 | `src/styles.css` | 全局样式 |
@@ -26,10 +26,10 @@
 
 | 页面 | 职责 |
 |---|---|
-| `generate` | 生成工作台：选择货号，读取默认组图方案，触发生成、重生、最终图、导出 |
-| `garments` | 货号图片导入、预览与编辑、素材图管理、默认组图方案生成/更新 |
-| `models` | 数字模特档案、头图上传、角度维护、参数维护 |
-| `history` | 任务级生成记录、任务详情、入参快照、图位输出；高级调试 JSON 仅在调试开关开启时展示 |
+| `studio` | AI 摄影棚：上传主推款、智能选搭、六宫格预览、生成成片 |
+| `library` | 搭配服饰库：导入真实配角服装、自动打标、搜索和标签摘要 |
+| `model` | 数字模特：只读展示当前默认模特 |
+| `records` | 生成记录：进入过 AI 阶段的任务、输入快照、选搭、预览、结果；技术 JSON 默认折叠 |
 
 `BrandTemplates` 当前没有独立页面，默认品牌规则由后端 planner 和设计文档承载。
 
@@ -37,56 +37,24 @@
 
 前端使用浏览器 History API 做轻量路由，不额外引入路由依赖。URL 用来表达可恢复位置，React state 继续承载临时交互状态。
 
-当前路由：
-
-| URL | 页面/状态 |
-|---|---|
-| `/generate` | 生成组图工作台 |
-| `/generate?sku={sku}` | 生成组图页，选中指定货号 |
-| `/generate?run={runId}` | 生成组图页，恢复指定历史任务 |
-| `/garment-skus` | 服装素材列表 |
-| `/garment-skus/{sku}` | 服装素材页，打开指定货号 |
-| `/model-profiles` | 数字模特列表/编辑页 |
-| `/model-profiles/{modelId}` | 数字模特页，打开指定模特 |
-| `/generation-runs` | 生成记录列表 |
-| `/generation-runs/{runId}` | 生成记录页，打开指定任务详情 |
-
-路由规则：
-
-- SKU 使用业务货号。
-- 数字模特使用 `modelId`。
-- 生成任务使用 `runId`。
-- 顶部 Tab、列表选择和恢复历史任务都会同步 URL。
-- 刷新页面后通过 URL 重新加载对应对象。
-- 弹窗、折叠面板、导入草稿、hover 等临时 UI 状态不进入 URL。
+当前 `App.tsx` 内部使用本地页面状态切换 `studio`、`library`、`model`、`records`，尚未把新版页面状态同步到 URL。旧版 `/garment-skus`、`/generation-runs` 路由文件仍在仓库中，不能作为当前页面事实来源。
 
 ## 状态分工
 
-- Server state：货号、模特、默认 shot plan、generation run、generation image attempts、event logs。
-- URL state：当前 Tab、选中 SKU、选中模特、选中生成任务、生成页恢复 run。
-- Client state：上传预览货号、模特编辑草稿、loading/error、折叠/弹窗等临时状态。
+- Server state：`StylingGarment`、`GenerationTask`、默认模特、生成 attempts。
+- Client state：当前页面、主推款上传草稿、搭配服饰导入草稿、loading/error、折叠状态。
 - 当前使用 React local state；后续数据流复杂后再考虑引入 React Query。
 
 ## 组件/区域
 
-- 生成工作台两步卡片：选择服装、使用默认方案。
-- 生成结果网格：单张状态、重生、设为最终图。
-- 服装素材页：导入货号图片、待保存货号、货号列表、素材图卡片、默认组图方案、识别摘要、编辑信息。
-- 上传预览卡片和已保存素材卡片使用统一视觉结构：文件名、图片尺寸、文件大小、删除按钮。
-- 数字模特页：多模特列表、基础参数、头部参考图上传/替换/排序/角度维护。
-- 生成组图页右侧记录概览：最近任务缩略图、货号、状态、完成张数、记录号、重生次数；点击后在生成组图页恢复历史任务。
-- 生成记录页：任务列表、任务详情、入参快照、输出与重生过程；attempts 和高级调试 JSON 默认隐藏，仅用于排查。
+- AI 摄影棚四步卡片：上传主推款、AI 智能选搭、六宫格预览、生成成片。
+- 搭配服饰库：导入服饰、列表搜索、标签摘要、打标状态、归档。
+- 数字模特页：默认模特只读展示。
+- 生成记录页：任务列表、任务详情、ShotPlan 与 attempts 折叠展示。
 
 ## 生成记录语义
 
-前台“生成记录”的主粒度是 `GenerationRun`：
-
-- 每次整组生成一条记录。
-- 同一个货号重复生成一次，产生另一条记录。
-- 单张重生不新建任务记录，追加到对应 `GenerationImage.attempts`。
-- `event_logs` 仍保留为后端审计/排查信息，但不作为普通用户的生成记录主视图。
-
-生成记录列表接口使用 `GET /api/generation-runs`，详情使用 `GET /api/generation-runs/{run_id}`。生成中轮询使用 `GET /api/generation-runs/{run_id}/status`，避免把任务包、provider 响应和 attempts 等重字段带入高频路径。
+前台“生成记录”的主粒度是进入过 AI 阶段的 `GenerationTask`。列表接口使用 `GET /api/generation-records`，详情使用 `GET /api/generation-records/{task_id}`。`event_logs` 仍保留为后端审计/排查信息，但不作为普通用户的生成记录主视图。
 
 ## 媒体与轮询
 

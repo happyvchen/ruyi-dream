@@ -36,6 +36,21 @@ Authorization: Bearer <token>
 | Resource | Method | 说明 |
 |---|---|
 | `/api/health` | GET | 健康检查；只返回非敏感 readiness 状态 |
+| `/api/styling-garments` | GET | 搭配服饰库列表，支持 `keyword` 搜索 |
+| `/api/styling-garments` | POST | 创建一套搭配服饰并上传 1-6 张图片 |
+| `/api/styling-garments/{garment_id}` | GET | 搭配服饰详情、图片、标签 |
+| `/api/styling-garments/{garment_id}` | PATCH | 编辑 code 或人工业务标签；打标中禁止修改 |
+| `/api/styling-garments/{garment_id}/save-and-tag` | POST | 系统默认触发 Gemini 打标；成功后进入 `READY` |
+| `/api/styling-garments/{garment_id}` | DELETE | 归档搭配服饰；打标中禁止归档 |
+| `/api/generation-tasks` | GET | AI 摄影棚任务列表 |
+| `/api/generation-tasks` | POST | 上传主推款图片并创建拍摄任务 |
+| `/api/generation-tasks/{task_id}` | GET | 拍摄任务详情 |
+| `/api/generation-tasks/{task_id}/select-styling` | POST | 冻结当前输入版本并从 READY 搭配服饰中智能选搭 |
+| `/api/generation-tasks/{task_id}/preview` | POST | 生成 6 条 ShotPlan 和 3x2 六宫格预览 |
+| `/api/generation-tasks/{task_id}/generate-final` | POST | 按前 5 条 ShotPlan 并发生成最终成片 |
+| `/api/generation-result-images-new/{image_id}/retry` | POST | 重试单张最终图 |
+| `/api/generation-records` | GET | 进入过 AI 阶段的生成记录列表 |
+| `/api/generation-records/{task_id}` | GET | 生成记录详情和技术快照 |
 | `/api/garment-skus` | GET | 货号图包列表 |
 | `/api/garment-skus` | POST | 上传一个货号图包和多张素材图 |
 | `/api/garment-skus/{sku_id}` | GET | 货号详情、素材图片、识别摘要 |
@@ -73,7 +88,7 @@ Authorization: Bearer <token>
 
 当前没有独立 `/api/brand-templates` 管理接口。默认品牌模板以 `brand_template_versions` 版本化保存，生成任务包和 `template_snapshot_json` 会记录模板 id/version。
 
-前台“生成记录”列表使用 `/api/generation-runs`，不是直接展示 `/api/logs`。`event_logs` 仍用于排查和审计。
+新版前台“生成记录”列表使用 `/api/generation-records`，不是直接展示 `/api/logs`。旧版 `/api/generation-runs` 和 `/api/garment-skus` 仍作为兼容接口保留，不能作为新版页面主流程依据。`event_logs` 仍用于排查和审计。
 
 写接口在 cookie 会话下会校验 `Origin` / `Referer` 是否属于 `BACKEND_CORS_ORIGINS`，脚本调用应使用可选的 `APP_API_ACCESS_TOKEN`。
 
@@ -141,7 +156,17 @@ Authorization: Bearer <token>
 - 旧数据若缺少衍生图，媒体访问层会尽量补生成；补生成失败时回退到原图，保证旧记录仍可显示。
 - 删除单张素材或替换/删除头像时，会同步清理对应衍生图。删除整个货号或模特目录时，会通过对象前缀清理。
 
-## 服装素材 CRUD 契约
+## 搭配服饰库契约
+
+新版页面使用 `StylingGarment`：
+
+- `GET /api/styling-garments` 支持 `limit`、`offset`、`keyword`，搜索必须走服务端，不能只过滤首屏数据。
+- `POST /api/styling-garments` 接收 `code` 和 `files`，单套最多 6 张，写入媒体资产后创建 `DRAFT` 记录。
+- 前端导入成功后默认立即调用 `POST /api/styling-garments/{id}/save-and-tag`，不要求用户确认是否打标。
+- `TAGGING_RUNNING` 期间服务端拒绝 code/标签修改、重复打标和归档。
+- 只有 `READY` 状态进入智能选搭候选；`TAGGING_FAILED` 和 `DELETED` 不参与选搭。
+
+## 旧版服装素材 CRUD 契约
 
 ### 上传与默认方案
 
