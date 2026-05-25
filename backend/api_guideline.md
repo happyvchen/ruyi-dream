@@ -43,8 +43,13 @@ Authorization: Bearer <token>
 | `/api/styling-garments/{garment_id}/save-and-tag` | POST | 系统默认触发 Gemini 打标；通过复核策略后进入 `READY`，否则进入 `TAGGING_READY` |
 | `/api/styling-garments/{garment_id}` | DELETE | 归档搭配服饰；打标中禁止归档 |
 | `/api/generation-tasks` | GET | AI 摄影棚任务列表 |
-| `/api/generation-tasks` | POST | 上传主推款图片并创建拍摄任务 |
+| `/api/generation-tasks` | POST | 上传主推款图片并创建 `DRAFT` 拍摄任务 |
 | `/api/generation-tasks/{task_id}` | GET | 拍摄任务详情 |
+| `/api/generation-tasks/{task_id}` | PATCH | 草稿期修改任务名；进入 AI 阶段后拒绝修改 |
+| `/api/generation-tasks/{task_id}/images` | POST | 草稿期追加主推款图片，最多 8 张 |
+| `/api/generation-task-images/{image_id}/replace` | POST | 草稿期替换单张主推款图片 |
+| `/api/generation-task-images/{image_id}` | PATCH / DELETE | 草稿期调整排序或移除主推款图片 |
+| `/api/generation-tasks/{task_id}/ready` | POST | 确认草稿，进入待智能选搭状态 |
 | `/api/generation-tasks/{task_id}/select-styling` | POST | 冻结当前输入版本并从 READY 搭配服饰中智能选搭 |
 | `/api/generation-tasks/{task_id}/preview` | POST | 生成 6 条 ShotPlan 和 3x2 六宫格预览 |
 | `/api/generation-tasks/{task_id}/generate-final` | POST | 按前 5 条 ShotPlan 并发生成最终成片 |
@@ -89,6 +94,8 @@ Authorization: Bearer <token>
 当前没有独立 `/api/brand-templates` 管理接口。默认品牌模板以 `brand_template_versions` 版本化保存，生成任务包和 `template_snapshot_json` 会记录模板 id/version。
 
 新版前台“生成记录”列表使用 `/api/generation-records`，不是直接展示 `/api/logs`。旧版 `/api/generation-runs` 和 `/api/garment-skus` 仍作为兼容接口保留，不能作为新版页面主流程依据。`event_logs` 仍用于排查和审计。
+
+新版任务在调用 `select-styling` 时冻结主推款图片和默认数字模特快照。六宫格与最终成片只读取该输入版本以及选搭快照；已成功的选搭、预览和整组成片不开放重新生成，部分失败只通过单张结果图重试恢复。
 
 写接口在 cookie 会话下会校验 `Origin` / `Referer` 是否属于 `BACKEND_CORS_ORIGINS`，脚本调用应使用可选的 `APP_API_ACCESS_TOKEN`。
 

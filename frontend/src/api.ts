@@ -59,6 +59,12 @@ export type GenerationTask = {
   createdAt: string
   updatedAt: string
   images?: { id: number; sortOrder: number; asset: MediaAsset }[]
+  inputVersion?: {
+    id: number
+    versionNumber: number
+    imageSnapshot: { sortOrder: number; asset: MediaAsset }[]
+    modelSnapshot?: Record<string, unknown>
+  } | null
   styling?: {
     id: number
     selectedMaterials: StylingGarment[]
@@ -194,6 +200,22 @@ export const api = {
   },
   updateTask: (id: number, payload: { name?: string }) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  addTaskImages: (id: number, files: File[]) => {
+    const form = new FormData()
+    files.forEach((file) => form.append('files', file))
+    return request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/images`, { method: 'POST', body: form })
+  },
+  replaceTaskImage: (id: number, file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<{ item: GenerationTask }>(`/api/generation-task-images/${id}/replace`, { method: 'POST', body: form })
+  },
+  updateTaskImage: (id: number, sortOrder: number) =>
+    request<{ item: GenerationTask }>(`/api/generation-task-images/${id}`, { method: 'PATCH', body: JSON.stringify({ sortOrder }) }),
+  deleteTaskImage: (id: number) =>
+    request<{ item: GenerationTask }>(`/api/generation-task-images/${id}`, { method: 'DELETE' }),
+  readyTask: (id: number) =>
+    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/ready`, { method: 'POST' }),
   selectStyling: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/select-styling`, { method: 'POST' }),
   previewTask: (id: number) =>

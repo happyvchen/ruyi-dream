@@ -181,6 +181,10 @@ class GenerationTaskUpdateRequest(BaseModel):
     name: str | None = None
 
 
+class GenerationTaskImageUpdateRequest(BaseModel):
+    sortOrder: int | None = None
+
+
 class GarmentSkuUpdateRequest(BaseModel):
     sku: str | None = None
     title: str | None = None
@@ -1240,7 +1244,7 @@ async def create_generation_task(
     timestamp = now_iso()
     with get_db() as db:
         cursor = db.execute(
-            "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES (?, 'READY_FOR_STYLING', ?, ?)",
+            "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES (?, 'DRAFT', ?, ?)",
             (task_name, timestamp, timestamp),
         )
         task_id = int(cursor.lastrowid)
@@ -1283,17 +1287,145 @@ def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -
     if payload.name is None:
         return {"item": get_generation_task_by_id(task_id)}
     with get_db() as db:
-        row = db.execute("SELECT id FROM generation_tasks WHERE id = ? AND deleted_at IS NULL", (task_id,)).fetchone()
+        row = db.execute("SELECT * FROM generation_tasks WHERE id = ? AND deleted_at IS NULL", (task_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="生成任务不存在")
+        ensure_generation_task_draft(row)
         db.execute("UPDATE generation_tasks SET name = ?, updated_at = ? WHERE id = ?", (payload.name.strip() or "未命名任务", now_iso(), task_id))
+    return {"item": get_generation_task_by_id(task_id)}
+
+
+def ensure_generation_task_draft(task: Any) -> None:
+    if task["status"] != "DRAFT":
+        raise HTTPException(status_code=409, detail="任务进入 AI 阶段后不可修改主推款输入")
+
+
+@app.post("/api/generation-tasks/{task_id}/images")
+async def add_generation_task_images(task_id: int, files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    task = get_generation_task_row(task_id)
+    ensure_generation_task_draft(task)
+    with get_db() as db:
+        count = int(db.execute(
+            "SELECT COUNT(*) AS count FROM generation_task_images WHERE task_id = ? AND deleted_at IS NULL",
+            (task_id,),
+        ).fetchone()["count"])
+        max_sort = int(db.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) AS max_sort FROM generation_task_images WHERE task_id = ? AND deleted_at IS NULL",
+            (task_id,),
+        ).fetchone()["max_sort"])
+    if not files or count + len(files) > 8:
+        raise HTTPException(status_code=400, detail="主推款最多上传 8 张图片")
+    prefix = join_key("generation-tasks", f"{sanitize_name(task['name']) or 'task'}-{uuid4().hex[:8]}")
+    assets = await save_uploads_as_media_assets(files, prefix)
+    timestamp = now_iso()
+    with get_db() as db:
+        for offset, asset in enumerate(assets, start=1):
+            db.execute(
+                """
+                INSERT INTO generation_task_images (task_id, media_asset_id, sort_order, status, created_at, updated_at)
+                VALUES (?, ?, ?, 'READY', ?, ?)
+                """,
+                (task_id, asset["id"], max_sort + offset, timestamp, timestamp),
+            )
+        db.execute("UPDATE generation_tasks SET updated_at = ? WHERE id = ?", (timestamp, task_id))
+    return {"item": get_generation_task_by_id(task_id)}
+
+
+@app.post("/api/generation-task-images/{image_id}/replace")
+async def replace_generation_task_image(image_id: int, file: UploadFile = File(...)) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute(
+            """
+            SELECT gti.task_id, gt.name, gt.status FROM generation_task_images gti
+            JOIN generation_tasks gt ON gt.id = gti.task_id
+            WHERE gti.id = ? AND gti.deleted_at IS NULL AND gt.deleted_at IS NULL
+            """,
+            (image_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="主推款图片不存在")
+    ensure_generation_task_draft(row)
+    prefix = join_key("generation-tasks", f"{sanitize_name(row['name']) or 'task'}-{uuid4().hex[:8]}")
+    asset = (await save_uploads_as_media_assets([file], prefix))[0]
+    with get_db() as db:
+        db.execute(
+            "UPDATE generation_task_images SET media_asset_id = ?, updated_at = ? WHERE id = ?",
+            (asset["id"], now_iso(), image_id),
+        )
+        db.execute("UPDATE generation_tasks SET updated_at = ? WHERE id = ?", (now_iso(), row["task_id"]))
+    return {"item": get_generation_task_by_id(int(row["task_id"]))}
+
+
+@app.patch("/api/generation-task-images/{image_id}")
+def update_generation_task_image(image_id: int, payload: GenerationTaskImageUpdateRequest) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute(
+            """
+            SELECT gti.task_id, gt.status FROM generation_task_images gti
+            JOIN generation_tasks gt ON gt.id = gti.task_id
+            WHERE gti.id = ? AND gti.deleted_at IS NULL AND gt.deleted_at IS NULL
+            """,
+            (image_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="主推款图片不存在")
+        ensure_generation_task_draft(row)
+        if payload.sortOrder is not None:
+            db.execute(
+                "UPDATE generation_task_images SET sort_order = ?, updated_at = ? WHERE id = ?",
+                (payload.sortOrder, now_iso(), image_id),
+            )
+            db.execute("UPDATE generation_tasks SET updated_at = ? WHERE id = ?", (now_iso(), row["task_id"]))
+    return {"item": get_generation_task_by_id(int(row["task_id"]))}
+
+
+@app.delete("/api/generation-task-images/{image_id}")
+def delete_generation_task_image(image_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute(
+            """
+            SELECT gti.task_id, gt.status FROM generation_task_images gti
+            JOIN generation_tasks gt ON gt.id = gti.task_id
+            WHERE gti.id = ? AND gti.deleted_at IS NULL AND gt.deleted_at IS NULL
+            """,
+            (image_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="主推款图片不存在")
+        ensure_generation_task_draft(row)
+        count = int(db.execute(
+            "SELECT COUNT(*) AS count FROM generation_task_images WHERE task_id = ? AND deleted_at IS NULL",
+            (row["task_id"],),
+        ).fetchone()["count"])
+        if count <= 1:
+            raise HTTPException(status_code=409, detail="主推款至少保留一张图片")
+        timestamp = now_iso()
+        db.execute("UPDATE generation_task_images SET deleted_at = ?, updated_at = ? WHERE id = ?", (timestamp, timestamp, image_id))
+        db.execute("UPDATE generation_tasks SET updated_at = ? WHERE id = ?", (timestamp, row["task_id"]))
+    return {"item": get_generation_task_by_id(int(row["task_id"]))}
+
+
+@app.post("/api/generation-tasks/{task_id}/ready")
+def ready_generation_task(task_id: int) -> dict[str, Any]:
+    task = get_generation_task_row(task_id)
+    ensure_generation_task_draft(task)
+    with get_db() as db:
+        count = int(db.execute(
+            "SELECT COUNT(*) AS count FROM generation_task_images WHERE task_id = ? AND deleted_at IS NULL",
+            (task_id,),
+        ).fetchone()["count"])
+        if count < 1:
+            raise HTTPException(status_code=400, detail="请先上传主推款图片")
+        db.execute("UPDATE generation_tasks SET status = 'READY_FOR_STYLING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
     return {"item": get_generation_task_by_id(task_id)}
 
 
 @app.post("/api/generation-tasks/{task_id}/select-styling")
 async def select_generation_styling(task_id: int) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
-    if task["status"] not in {"READY_FOR_STYLING", "STYLING_READY", "FAILED"}:
+    if task["status"] != "READY_FOR_STYLING" and not (
+        task["status"] == "FAILED" and not task["active_styling_id"]
+    ):
         raise HTTPException(status_code=409, detail="当前任务状态不能智能选搭")
     input_version_id = create_generation_input_version(task_id)
     with get_db() as db:
@@ -1350,7 +1482,10 @@ async def create_generation_preview(task_id: int) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     styling_id = task["active_styling_id"]
     input_version_id = task["current_input_version_id"]
-    if not styling_id or not input_version_id or task["status"] not in {"STYLING_READY", "PREVIEW_READY", "FAILED"}:
+    if not styling_id or not input_version_id or (
+        task["status"] != "STYLING_READY"
+        and not (task["status"] == "FAILED" and not task["active_preview_id"])
+    ):
         raise HTTPException(status_code=409, detail="请先完成智能选搭")
     with get_db() as db:
         db.execute("UPDATE generation_tasks SET status = 'PREVIEW_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
@@ -1393,7 +1528,7 @@ async def create_generation_preview(task_id: int) -> dict[str, Any]:
 @app.post("/api/generation-tasks/{task_id}/generate-final")
 async def generate_final_images(task_id: int) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
-    if task["status"] not in {"PREVIEW_READY", "FINAL_PARTIAL", "COMPLETED"} or not task["active_preview_id"]:
+    if task["status"] != "PREVIEW_READY" or not task["active_preview_id"]:
         raise HTTPException(status_code=409, detail="请先生成六宫格预览")
     preview_id = int(task["active_preview_id"])
     styling_id = int(task["active_styling_id"])
@@ -1452,6 +1587,21 @@ async def retry_new_result_image(image_id: int) -> dict[str, Any]:
         if not row:
             raise HTTPException(status_code=404, detail="结果图不存在")
     await generate_single_final_image(int(row["task_id"]), int(row["result_set_id"]), image_id)
+    with get_db() as db:
+        status_rows = db.execute(
+            "SELECT status FROM generation_result_images_new WHERE result_set_id = ?",
+            (row["result_set_id"],),
+        ).fetchall()
+        completed = bool(status_rows) and all(item["status"] == "SUCCEEDED" for item in status_rows)
+        status = "COMPLETED" if completed else "FINAL_PARTIAL"
+        db.execute(
+            "UPDATE generation_result_sets SET status = ?, updated_at = ? WHERE id = ?",
+            ("SUCCEEDED" if completed else "PARTIAL", now_iso(), row["result_set_id"]),
+        )
+        db.execute(
+            "UPDATE generation_tasks SET status = ?, updated_at = ? WHERE id = ?",
+            (status, now_iso(), row["task_id"]),
+        )
     return {"item": get_generation_task_by_id(int(row["task_id"]), include_debug=True)}
 
 
@@ -4395,13 +4545,14 @@ def create_generation_input_version(task_id: int) -> int:
             {"sortOrder": row["sort_order"], "asset": serialize_media_asset(row)}
             for row in image_rows
         ]
+        model_snapshot = snapshot_default_model()
         cursor = db.execute(
             """
             INSERT INTO generation_task_input_versions
-              (task_id, version_number, name_snapshot, image_snapshot_json, created_at)
-            VALUES (?, ?, ?, ?, ?)
+              (task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (task_id, version_number, task["name"], dumps(snapshot), timestamp),
+            (task_id, version_number, task["name"], dumps(snapshot), dumps(model_snapshot), timestamp),
         )
         return int(cursor.lastrowid)
 
@@ -4640,17 +4791,16 @@ def build_new_image_inputs(task_id: int, styling_id: int, include_preview: bool,
         if asset:
             inputs.append(image_input_from_asset(asset, "preview_grid"))
     with get_db() as db:
-        task_images = db.execute(
-            """
-            SELECT ma.* FROM generation_task_images gti
-            JOIN media_assets ma ON ma.id = gti.media_asset_id
-            WHERE gti.task_id = ? AND gti.deleted_at IS NULL
-            ORDER BY gti.sort_order, gti.id LIMIT 3
-            """,
-            (task_id,),
-        ).fetchall()
-        styling = db.execute("SELECT selected_material_snapshot_json FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
-    inputs.extend(image_input_from_asset(serialize_media_asset(row), "hero_garment") for row in task_images)
+        styling = db.execute(
+            "SELECT selected_material_snapshot_json, input_version_id FROM generation_stylings WHERE id = ?",
+            (styling_id,),
+        ).fetchone()
+        input_version = db.execute(
+            "SELECT image_snapshot_json, model_snapshot_json FROM generation_task_input_versions WHERE id = ?",
+            (styling["input_version_id"],),
+        ).fetchone() if styling else None
+    hero_snapshot = loads(input_version["image_snapshot_json"], []) if input_version else []
+    inputs.extend(image_input_from_asset(item.get("asset"), "hero_garment") for item in hero_snapshot[:3])
     selected_materials = loads(styling["selected_material_snapshot_json"], []) if styling else []
     remaining = max(0, 10 - len(inputs) - 2)
     for garment in selected_materials:
@@ -4660,7 +4810,11 @@ def build_new_image_inputs(task_id: int, styling_id: int, include_preview: bool,
         if images:
             inputs.append(image_input_from_asset(images[0]["asset"], "styling_garment"))
             remaining -= 1
-    inputs.extend(get_default_model_image_inputs(limit=max(0, 10 - len(inputs)))[:2])
+    model_snapshot = loads(input_version["model_snapshot_json"], {}) if input_version else {}
+    model_inputs = model_snapshot.get("imageInputs", []) if isinstance(model_snapshot, dict) else []
+    if not model_inputs:
+        model_inputs = get_default_model_image_inputs(limit=2)
+    inputs.extend(model_inputs[:max(0, 10 - len(inputs))][:2])
     return inputs[:10]
 
 
@@ -4690,6 +4844,20 @@ def get_default_model_image_inputs(limit: int = 2) -> list[dict[str, Any]]:
         if len(inputs) >= limit:
             break
     return inputs
+
+
+def snapshot_default_model() -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM model_profiles ORDER BY is_default DESC, id LIMIT 1").fetchone()
+    if not row:
+        return {}
+    return {
+        "id": row["id"],
+        "modelId": row["model_id"],
+        "name": row["name"],
+        "profile": loads(row["profile_json"], {}),
+        "imageInputs": get_default_model_image_inputs(limit=2),
+    }
 
 
 async def generate_or_placeholder_asset(task_package: dict[str, Any], output_key: str, label: str) -> tuple[int, dict[str, Any]]:
@@ -4832,6 +5000,7 @@ def get_input_version(input_version_id: int | None) -> dict[str, Any] | None:
         "versionNumber": row["version_number"],
         "nameSnapshot": row["name_snapshot"],
         "imageSnapshot": loads(row["image_snapshot_json"], []),
+        "modelSnapshot": loads(row["model_snapshot_json"], {}) if "model_snapshot_json" in row.keys() else {},
         "heroVisualSummary": row["hero_visual_summary"],
         "createdAt": row["created_at"],
     }
