@@ -925,12 +925,14 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
   const [confirmCode, setConfirmCode] = useState('')
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const [pendingDimensions, setPendingDimensions] = useState<Record<string, { width: number; height: number }>>({})
+  const [replacementDimensions, setReplacementDimensions] = useState<Record<number, { width: number; height: number }>>({})
   const tagging = item.status === 'TAGGING_RUNNING'
 
   useEffect(() => {
     setWorking(item.images ?? [])
     setPendingFiles([])
     setReplacementFiles({})
+    setReplacementDimensions({})
     setRemovedIds([])
     setDirty(false)
   }, [item.id])
@@ -995,43 +997,59 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
           <p className="edit-hint">此次修改会影响打标。排序第一张会作为封面和主要参考图。</p>
           {tagging && <p className="edit-hint">正在打标，完成后可继续修改或归档。</p>}
           <div className="saved-image-grid">
-            {working.map((image, index) => (
-              <div
-                className="saved-image-card"
-                key={image.id}
-                draggable={!tagging}
-                onDragStart={() => setDragIndex(index)}
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={() => {
-                  if (dragIndex !== null) move(dragIndex, index)
-                  setDragIndex(null)
-                }}
-              >
-                <button className="image-open" onClick={() => setViewer(assetLightboxImage(image.asset))} title="放大查看">
-                  <img src={replacementFiles[image.id] ? URL.createObjectURL(replacementFiles[image.id]) : mediaUrl(image.asset.previewUrl ?? image.asset.thumbUrl)} alt={image.asset.filename} />
-                </button>
-                <span>{replacementFiles[image.id]?.name ?? image.asset.filename}<small>{replacementFiles[image.id] ? formatBytes(replacementFiles[image.id].size) : assetMeta(image.asset)}</small></span>
-                <div className="thumb-actions">
-                  <button onClick={() => setViewer(assetLightboxImage(image.asset))} title="放大查看"><Eye size={14} /></button>
-                  <button disabled={tagging} onClick={() => move(index, index - 1)} title="前移"><ArrowUp size={14} /></button>
-                  <button disabled={tagging} onClick={() => move(index, index + 1)} title="后移"><ArrowDown size={14} /></button>
-                  <label className={tagging ? 'is-disabled' : ''} title="替换图片">
-                    <ImagePlus size={14} />
-                    <input disabled={tagging} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
-                      const replacement = event.target.files?.[0]
-                      if (!replacement) return
-                      setReplacementFiles((current) => ({ ...current, [image.id]: replacement }))
+            {working.map((image, index) => {
+              const replacement = replacementFiles[image.id]
+              return (
+                <div
+                  className="saved-image-card"
+                  key={image.id}
+                  draggable={!tagging}
+                  onDragStart={() => setDragIndex(index)}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={() => {
+                    if (dragIndex !== null) move(dragIndex, index)
+                    setDragIndex(null)
+                  }}
+                >
+                  {replacement ? (
+                    <FilePreviewButton
+                      file={replacement}
+                      dimensions={replacementDimensions[image.id]}
+                      onDimensions={(value) => setReplacementDimensions((current) => ({ ...current, [image.id]: value }))}
+                      onOpen={(nextImage) => setViewer(nextImage)}
+                    />
+                  ) : (
+                    <button className="image-open" onClick={() => setViewer(assetLightboxImage(image.asset))} title="放大查看">
+                      <img src={mediaUrl(image.asset.previewUrl ?? image.asset.thumbUrl)} alt={image.asset.filename} />
+                    </button>
+                  )}
+                  <span>{replacement?.name ?? image.asset.filename}<small>{replacement ? fileMeta(replacement, replacementDimensions[image.id]) : assetMeta(image.asset)}</small></span>
+                  <div className="thumb-actions">
+                    {replacement ? (
+                      <FilePreviewAction file={replacement} dimensions={replacementDimensions[image.id]} onOpen={(nextImage) => setViewer(nextImage)} />
+                    ) : (
+                      <button onClick={() => setViewer(assetLightboxImage(image.asset))} title="放大查看"><Eye size={14} /></button>
+                    )}
+                    <button disabled={tagging} onClick={() => move(index, index - 1)} title="前移"><ArrowUp size={14} /></button>
+                    <button disabled={tagging} onClick={() => move(index, index + 1)} title="后移"><ArrowDown size={14} /></button>
+                    <label className={tagging ? 'is-disabled' : ''} title="替换图片">
+                      <ImagePlus size={14} />
+                      <input disabled={tagging} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
+                        const nextReplacement = event.target.files?.[0]
+                        if (!nextReplacement) return
+                        setReplacementFiles((current) => ({ ...current, [image.id]: nextReplacement }))
+                        setDirty(true)
+                      }} />
+                    </label>
+                    <button disabled={tagging} onClick={() => {
+                      setWorking((current) => current.filter((itemImage) => itemImage.id !== image.id))
+                      setRemovedIds((current) => [...current, image.id])
                       setDirty(true)
-                    }} />
-                  </label>
-                  <button disabled={tagging} onClick={() => {
-                    setWorking((current) => current.filter((itemImage) => itemImage.id !== image.id))
-                    setRemovedIds((current) => [...current, image.id])
-                    setDirty(true)
-                  }} title="删除图片"><Trash2 size={14} /></button>
+                    }} title="删除图片"><Trash2 size={14} /></button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
             {pendingFiles.map((file, index) => (
               <div className="saved-image-card is-pending" key={`${file.name}-${file.size}-${index}`}>
                 <FilePreviewButton
