@@ -804,6 +804,7 @@ def list_styling_garments(
     offset: int = Query(0, ge=0),
     keyword: str | None = Query(None),
 ) -> dict[str, Any]:
+    expire_stale_styling_garment_tagging()
     search = f"%{keyword.strip()}%" if keyword and keyword.strip() else None
     with get_db() as db:
         rows = db.execute(
@@ -832,12 +833,53 @@ def list_styling_garments(
 
 @app.get("/api/styling-garments/{garment_id}")
 def get_styling_garment(garment_id: int) -> dict[str, Any]:
+    expire_stale_styling_garment_tagging()
     return {"item": get_styling_garment_by_id(garment_id)}
 
 
 def ensure_styling_garment_not_tagging(row: Any) -> None:
     if row["status"] == "TAGGING_RUNNING":
         raise HTTPException(status_code=409, detail="正在打标，完成后才能修改或归档搭配服饰")
+
+
+def expire_stale_styling_garment_tagging() -> None:
+    timeout_before = datetime.fromtimestamp(time.time() - settings.generation_image_timeout_seconds).isoformat(timespec="seconds")
+    timestamp = now_iso()
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT id FROM styling_garments
+            WHERE status = 'TAGGING_RUNNING'
+              AND updated_at < ?
+              AND deleted_at IS NULL
+            """,
+            (timeout_before,),
+        ).fetchall()
+        if not rows:
+            return
+        ids = [int(row["id"]) for row in rows]
+        placeholders = ",".join("?" for _ in ids)
+        message = "打标任务长时间未完成，已自动停止轮询，可手动重新打标。"
+        db.execute(
+            f"""
+            UPDATE styling_garments
+            SET status = 'TAGGING_FAILED', tag_error = ?, updated_at = ?
+            WHERE id IN ({placeholders})
+            """,
+            (message, timestamp, *ids),
+        )
+        db.execute(
+            f"""
+            UPDATE generation_attempts
+            SET status = 'FAILED', failed_at = ?, error_code = 'TIMEOUT', error_message = ?, updated_at = ?
+            WHERE owner_type = 'styling_garment_tagging'
+              AND owner_id IN ({placeholders})
+              AND status = 'RUNNING'
+            """,
+            (timestamp, message, timestamp, *ids),
+        )
+        for garment_id in ids:
+            log_event(db, "styling_garment", garment_id, "tagging_timed_out", {"timeoutAt": timestamp})
 
 
 @app.post("/api/styling-garments")
@@ -1425,13 +1467,18 @@ def ready_generation_task(task_id: int) -> dict[str, Any]:
 @app.post("/api/generation-tasks/{task_id}/select-styling")
 async def select_generation_styling(task_id: int) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
-    if task["status"] != "READY_FOR_STYLING" and not (
-        task["status"] == "FAILED" and not task["active_styling_id"]
-    ):
+    if task["status"] not in {
+        "READY_FOR_STYLING",
+        "STYLING_READY",
+        "PREVIEW_READY",
+        "COMPLETED",
+        "FINAL_PARTIAL",
+        "FAILED",
+    }:
         raise HTTPException(status_code=409, detail="当前任务状态不能智能选搭")
     input_version_id = create_generation_input_version(task_id)
     with get_db() as db:
-        db.execute("UPDATE generation_tasks SET status = 'STYLING_RUNNING', current_input_version_id = ?, updated_at = ? WHERE id = ?", (input_version_id, now_iso(), task_id))
+        db.execute("UPDATE generation_tasks SET status = 'STYLING_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
     attempt_id: int | None = None
     try:
         styling_plan, request_snapshot = await select_styling_with_gemini(task_id, input_version_id)
@@ -1482,8 +1529,17 @@ async def select_generation_styling(task_id: int) -> dict[str, Any]:
         if hero_summary:
             db.execute("UPDATE generation_task_input_versions SET hero_visual_summary = ? WHERE id = ?", (hero_summary, input_version_id))
         db.execute(
-            "UPDATE generation_tasks SET status = 'STYLING_READY', active_styling_id = ?, updated_at = ? WHERE id = ?",
-            (styling_id, timestamp, task_id),
+            """
+            UPDATE generation_tasks
+            SET status = 'STYLING_READY',
+                current_input_version_id = ?,
+                active_styling_id = ?,
+                active_preview_id = NULL,
+                active_result_set_id = NULL,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (input_version_id, styling_id, timestamp, task_id),
         )
     finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=styling_plan)
     return {"item": get_generation_task_by_id(task_id, include_debug=True)}
@@ -1495,12 +1551,15 @@ async def create_generation_preview(task_id: int) -> dict[str, Any]:
     styling_id = task["active_styling_id"]
     input_version_id = task["current_input_version_id"]
     if not styling_id or not input_version_id or (
-        task["status"] != "STYLING_READY"
+        task["status"] not in {"STYLING_READY", "PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL"}
         and not (task["status"] == "FAILED" and not task["active_preview_id"])
     ):
         raise HTTPException(status_code=409, detail="请先完成智能选搭")
     with get_db() as db:
-        db.execute("UPDATE generation_tasks SET status = 'PREVIEW_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
+        db.execute(
+            "UPDATE generation_tasks SET status = 'PREVIEW_RUNNING', active_result_set_id = NULL, updated_at = ? WHERE id = ?",
+            (now_iso(), task_id),
+        )
     shot_plans = ensure_generation_shot_plans(task_id, int(styling_id))
     timestamp = now_iso()
     with get_db() as db:
@@ -1547,7 +1606,12 @@ async def run_preview_generation(task_id: int, styling_id: int, shot_plans: list
 @app.post("/api/generation-tasks/{task_id}/generate-final")
 async def generate_final_images(task_id: int) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
-    if task["status"] != "PREVIEW_READY" or not task["active_preview_id"]:
+    if (
+        task["status"] not in {"PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL"}
+        or not task["active_preview_id"]
+        or not task["active_styling_id"]
+        or not task["current_input_version_id"]
+    ):
         raise HTTPException(status_code=409, detail="请先生成六宫格预览")
     preview_id = int(task["active_preview_id"])
     styling_id = int(task["active_styling_id"])
