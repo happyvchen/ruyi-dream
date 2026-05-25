@@ -333,9 +333,10 @@ class BackendSmokeTests(unittest.TestCase):
                 sku_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_skus)").fetchall()}
                 styling_garment_columns = {row["name"] for row in db.execute("PRAGMA table_info(styling_garments)").fetchall()}
                 input_version_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_task_input_versions)").fetchall()}
+                styling_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_stylings)").fetchall()}
                 template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
@@ -343,6 +344,9 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("archived_at", sku_columns)
         self.assertIn("official_title_tags_json", styling_garment_columns)
         self.assertIn("effective_tags_json", styling_garment_columns)
+        self.assertIn("styling_plan_json", styling_columns)
+        self.assertIn("candidate_retrieval_snapshot_json", styling_columns)
+        self.assertIn("outfit_candidates_json", styling_columns)
         self.assertIn("tag_meta_json", styling_garment_columns)
         self.assertIn("model_snapshot_json", input_version_columns)
         self.assertGreaterEqual(template_count, 1)

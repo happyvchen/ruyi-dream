@@ -1246,6 +1246,12 @@ def delete_styling_garment(
                     """,
                     (*dependent_task_ids, *dependent_task_ids, *dependent_task_ids),
                 )
+                if dependent_asset_ids:
+                    asset_placeholders = ", ".join("?" for _ in dependent_asset_ids)
+                    db.execute(
+                        f"DELETE FROM generation_attempts WHERE output_asset_id IN ({asset_placeholders})",
+                        dependent_asset_ids,
+                    )
                 db.execute(f"DELETE FROM generation_tasks WHERE id IN ({placeholders})", dependent_task_ids)
             asset_ids = [int(image["id"]) for image in image_rows] + dependent_asset_ids
             dependent_media_rows: list[Any] = []
