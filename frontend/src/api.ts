@@ -144,7 +144,7 @@ function params(path: string, values: Record<string, string | number | boolean |
 
 export function mediaUrl(url?: string | null) {
   if (!url) return ''
-  return /^https?:\/\//i.test(url) ? url : `${API_BASE}${url}`
+  return /^(https?:|blob:|data:)/i.test(url) ? url : `${API_BASE}${url}`
 }
 
 export const api = {

@@ -31,6 +31,8 @@ import {
   UserRound,
   X,
   WandSparkles,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
 import type { GenerationTask, MediaAsset, ModelProfile, StylingGarment } from './api'
@@ -48,6 +50,12 @@ type FileSystemFileEntry = FileSystemEntry & {
 }
 type FileSystemDirectoryEntry = FileSystemEntry & {
   createReader: () => { readEntries: (success: (entries: FileSystemEntry[]) => void, error?: () => void) => void }
+}
+type LightboxImage = {
+  src: string
+  title: string
+  meta?: string
+  downloadUrl?: string
 }
 
 const steps = [
@@ -318,22 +326,27 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
     const imageFiles = nextFiles
       .filter((file) => file.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(file.name))
       .sort((a, b) => importPath(a).localeCompare(importPath(b), 'zh-CN', { numeric: true }))
-      .slice(0, 8)
     setFiles(imageFiles)
     const firstPath = imageFiles[0] ? importPath(imageFiles[0]) : ''
     const defaultName = firstPath.includes('/') ? sanitizeClientName(firstPath.split('/')[0]) : timestampName()
     setName(defaultName)
   }
 
+  async function handleDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault()
+    const droppedFiles = await filesFromDataTransfer(event.dataTransfer)
+    addHeroFiles(droppedFiles)
+  }
+
   return (
     <div className="step-panel">
       <div className="step-copy"><h2>上传主推款</h2><p>支持多张图片或一个文件夹。推荐 3-5 张，最多 8 张，排序越靠前越重要。</p></div>
       {task?.status === 'DRAFT' && <HeroDraftEditor task={task} setTask={setTask} run={run} />}
-      <div className="hero-upload">
+      <div className="hero-upload" onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
         <div>
-          <Upload size={24} />
-          <strong>{task?.status === 'DRAFT' ? '新建另一项拍摄任务' : '上传主推款图片'}</strong>
-          <span>{files.length ? `已选择 ${files.length}/8 张` : '选择图片或文件夹后再填写任务名'}</span>
+          <Images size={22} />
+          <strong>{task?.status === 'DRAFT' ? '拖入图片或文件夹新建另一项拍摄任务' : '拖入主推款图片或文件夹'}</strong>
+          <span>{files.length ? `已选择 ${files.length} 张，可拖动排序` : '支持多张图片或一个文件夹'}</span>
         </div>
         <div className="import-actions">
           <label className="secondary">
@@ -348,10 +361,18 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
       </div>
       {files.length > 0 && (
         <div className="upload-review">
-          <ThumbGrid assets={files.map((file, index) => ({ id: index, objectKey: '', filename: file.name, mimeType: file.type, thumbUrl: URL.createObjectURL(file) }))} />
+          <div className="batch-card-head">
+            <div className="batch-icon"><Layers3 size={18} /></div>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="任务名称" aria-label="任务名称" />
+            <span className={`count-pill ${files.length > 8 ? 'is-over' : ''}`}>{files.length}/8 张</span>
+          </div>
+          <div className="batch-note">
+            <span>推荐 3-5 张，最多只允许 8 张用于创建任务。</span>
+            {files.length > 8 && <strong>当前超过 8 张，请删除或调整后再创建</strong>}
+          </div>
+          <FileThumbList files={files} onChange={setFiles} />
           <div className="inline-form">
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="任务名称" />
-            <button className="primary" disabled={!files.length || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, files), (r: { item: GenerationTask }) => setTask(r.item))}>
+            <button className="primary" disabled={!files.length || files.length > 8 || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, files), (r: { item: GenerationTask }) => setTask(r.item))}>
               <ImagePlus size={16} /> 创建任务
             </button>
           </div>
@@ -364,6 +385,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
 
 function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask: (task: GenerationTask) => void; run: any }) {
   const [name, setName] = useState(task.name)
+  const [viewer, setViewer] = useState<LightboxImage | null>(null)
 
   useEffect(() => setName(task.name), [task.id, task.name])
 
@@ -394,9 +416,12 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
       <div className="draft-image-grid">
         {(task.images ?? []).map((image, index) => (
           <div className="saved-image-card" key={image.id}>
-            <img src={mediaUrl(image.asset.previewUrl ?? image.asset.thumbUrl)} alt={image.asset.filename} />
-            <span>{image.asset.filename}</span>
+            <button className="image-open" onClick={() => setViewer(assetLightboxImage(image.asset))} title="放大查看">
+              <img src={mediaUrl(image.asset.previewUrl ?? image.asset.thumbUrl)} alt={image.asset.filename} />
+            </button>
+            <span>{image.asset.filename}<small>{assetMeta(image.asset)}</small></span>
             <div className="thumb-actions">
+              <button onClick={() => setViewer(assetLightboxImage(image.asset))} title="放大查看"><Eye size={14} /></button>
               <button disabled={index === 0} onClick={() => void move(index, -1)} title="前移"><ArrowUp size={14} /></button>
               <button disabled={index === (task.images?.length ?? 0) - 1} onClick={() => void move(index, 1)} title="后移"><ArrowDown size={14} /></button>
               <label title="替换图片">
@@ -415,6 +440,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
       <button className="primary" onClick={() => void run('确认主推款输入中...', () => api.readyTask(task.id), (r: { item: GenerationTask }) => setTask(r.item))}>
         确认并进入智能选搭
       </button>
+      {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </div>
   )
 }
@@ -677,6 +703,8 @@ function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
 
 function FileThumbList({ files, onChange }: { files: File[]; onChange: (files: File[]) => void }) {
   const [dragIndex, setDragIndex] = useState<number | null>(null)
+  const [viewer, setViewer] = useState<LightboxImage | null>(null)
+  const [dimensions, setDimensions] = useState<Record<string, { width: number; height: number }>>({})
   function move(from: number, to: number) {
     if (to < 0 || to >= files.length) return
     const next = [...files]
@@ -698,9 +726,15 @@ function FileThumbList({ files, onChange }: { files: File[]; onChange: (files: F
             setDragIndex(null)
           }}
         >
-          <img src={URL.createObjectURL(file)} alt={file.name} />
-          <span>{file.name}</span>
+          <FilePreviewButton
+            file={file}
+            dimensions={dimensions[fileKey(file)]}
+            onDimensions={(value) => setDimensions((current) => ({ ...current, [fileKey(file)]: value }))}
+            onOpen={(image) => setViewer(image)}
+          />
+          <span>{file.name}<small>{fileMeta(file, dimensions[fileKey(file)])}</small></span>
           <div className="thumb-actions">
+            <FilePreviewAction file={file} dimensions={dimensions[fileKey(file)]} onOpen={(image) => setViewer(image)} />
             <button onClick={() => move(index, index - 1)} title="前移"><ArrowUp size={14} /></button>
             <button onClick={() => move(index, index + 1)} title="后移"><ArrowDown size={14} /></button>
             <label title="替换图片">
@@ -730,8 +764,39 @@ function FileThumbList({ files, onChange }: { files: File[]; onChange: (files: F
           event.target.value = ''
         }} />
       </label>
+      {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </div>
   )
+}
+
+function FilePreviewButton({ file, dimensions, onDimensions, onOpen }: {
+  file: File
+  dimensions?: { width: number; height: number }
+  onDimensions: (dimensions: { width: number; height: number }) => void
+  onOpen: (image: LightboxImage) => void
+}) {
+  const url = useObjectUrl(file)
+  return (
+    <button className="image-open" onClick={() => onOpen(fileLightboxImage(file, url, dimensions))} title="放大查看">
+      <img
+        src={url}
+        alt={file.name}
+        onLoad={(event) => onDimensions({
+          width: event.currentTarget.naturalWidth,
+          height: event.currentTarget.naturalHeight,
+        })}
+      />
+    </button>
+  )
+}
+
+function FilePreviewAction({ file, dimensions, onOpen }: {
+  file: File
+  dimensions?: { width: number; height: number }
+  onOpen: (image: LightboxImage) => void
+}) {
+  const url = useObjectUrl(file)
+  return <button onClick={() => onOpen(fileLightboxImage(file, url, dimensions))} title="放大查看"><Eye size={14} /></button>
 }
 
 function ModelPage({ models }: { models: ModelProfile[] }) {
@@ -858,12 +923,16 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const [confirmPurge, setConfirmPurge] = useState(false)
   const [confirmCode, setConfirmCode] = useState('')
+  const [viewer, setViewer] = useState<LightboxImage | null>(null)
+  const [pendingDimensions, setPendingDimensions] = useState<Record<string, { width: number; height: number }>>({})
+  const [replacementDimensions, setReplacementDimensions] = useState<Record<number, { width: number; height: number }>>({})
   const tagging = item.status === 'TAGGING_RUNNING'
 
   useEffect(() => {
     setWorking(item.images ?? [])
     setPendingFiles([])
     setReplacementFiles({})
+    setReplacementDimensions({})
     setRemovedIds([])
     setDirty(false)
   }, [item.id])
@@ -928,46 +997,70 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
           <p className="edit-hint">此次修改会影响打标。排序第一张会作为封面和主要参考图。</p>
           {tagging && <p className="edit-hint">正在打标，完成后可继续修改或归档。</p>}
           <div className="saved-image-grid">
-            {working.map((image, index) => (
-              <div
-                className="saved-image-card"
-                key={image.id}
-                draggable={!tagging}
-                onDragStart={() => setDragIndex(index)}
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={() => {
-                  if (dragIndex !== null) move(dragIndex, index)
-                  setDragIndex(null)
-                }}
-              >
-                <img src={replacementFiles[image.id] ? URL.createObjectURL(replacementFiles[image.id]) : mediaUrl(image.asset.previewUrl ?? image.asset.thumbUrl)} alt={image.asset.filename} />
-                <span>{replacementFiles[image.id]?.name ?? image.asset.filename}</span>
-                <div className="thumb-actions">
-                  <button onClick={() => window.open(mediaUrl(image.asset.originalUrl ?? image.asset.previewUrl), '_blank')} title="放大查看"><Eye size={14} /></button>
-                  <button disabled={tagging} onClick={() => move(index, index - 1)} title="前移"><ArrowUp size={14} /></button>
-                  <button disabled={tagging} onClick={() => move(index, index + 1)} title="后移"><ArrowDown size={14} /></button>
-                  <label className={tagging ? 'is-disabled' : ''} title="替换图片">
-                    <ImagePlus size={14} />
-                    <input disabled={tagging} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
-                      const replacement = event.target.files?.[0]
-                      if (!replacement) return
-                      setReplacementFiles((current) => ({ ...current, [image.id]: replacement }))
+            {working.map((image, index) => {
+              const replacement = replacementFiles[image.id]
+              return (
+                <div
+                  className="saved-image-card"
+                  key={image.id}
+                  draggable={!tagging}
+                  onDragStart={() => setDragIndex(index)}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={() => {
+                    if (dragIndex !== null) move(dragIndex, index)
+                    setDragIndex(null)
+                  }}
+                >
+                  {replacement ? (
+                    <FilePreviewButton
+                      file={replacement}
+                      dimensions={replacementDimensions[image.id]}
+                      onDimensions={(value) => setReplacementDimensions((current) => ({ ...current, [image.id]: value }))}
+                      onOpen={(nextImage) => setViewer(nextImage)}
+                    />
+                  ) : (
+                    <button className="image-open" onClick={() => setViewer(assetLightboxImage(image.asset))} title="放大查看">
+                      <img src={mediaUrl(image.asset.previewUrl ?? image.asset.thumbUrl)} alt={image.asset.filename} />
+                    </button>
+                  )}
+                  <span>{replacement?.name ?? image.asset.filename}<small>{replacement ? fileMeta(replacement, replacementDimensions[image.id]) : assetMeta(image.asset)}</small></span>
+                  <div className="thumb-actions">
+                    {replacement ? (
+                      <FilePreviewAction file={replacement} dimensions={replacementDimensions[image.id]} onOpen={(nextImage) => setViewer(nextImage)} />
+                    ) : (
+                      <button onClick={() => setViewer(assetLightboxImage(image.asset))} title="放大查看"><Eye size={14} /></button>
+                    )}
+                    <button disabled={tagging} onClick={() => move(index, index - 1)} title="前移"><ArrowUp size={14} /></button>
+                    <button disabled={tagging} onClick={() => move(index, index + 1)} title="后移"><ArrowDown size={14} /></button>
+                    <label className={tagging ? 'is-disabled' : ''} title="替换图片">
+                      <ImagePlus size={14} />
+                      <input disabled={tagging} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
+                        const nextReplacement = event.target.files?.[0]
+                        if (!nextReplacement) return
+                        setReplacementFiles((current) => ({ ...current, [image.id]: nextReplacement }))
+                        setDirty(true)
+                      }} />
+                    </label>
+                    <button disabled={tagging} onClick={() => {
+                      setWorking((current) => current.filter((itemImage) => itemImage.id !== image.id))
+                      setRemovedIds((current) => [...current, image.id])
                       setDirty(true)
-                    }} />
-                  </label>
-                  <button disabled={tagging} onClick={() => {
-                    setWorking((current) => current.filter((itemImage) => itemImage.id !== image.id))
-                    setRemovedIds((current) => [...current, image.id])
-                    setDirty(true)
-                  }} title="删除图片"><Trash2 size={14} /></button>
+                    }} title="删除图片"><Trash2 size={14} /></button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
             {pendingFiles.map((file, index) => (
               <div className="saved-image-card is-pending" key={`${file.name}-${file.size}-${index}`}>
-                <img src={URL.createObjectURL(file)} alt={file.name} />
-                <span>{file.name}</span>
+                <FilePreviewButton
+                  file={file}
+                  dimensions={pendingDimensions[fileKey(file)]}
+                  onDimensions={(value) => setPendingDimensions((current) => ({ ...current, [fileKey(file)]: value }))}
+                  onOpen={(image) => setViewer(image)}
+                />
+                <span>{file.name}<small>{fileMeta(file, pendingDimensions[fileKey(file)])}</small></span>
                 <div className="thumb-actions">
+                  <FilePreviewAction file={file} dimensions={pendingDimensions[fileKey(file)]} onOpen={(image) => setViewer(image)} />
                   <button onClick={() => setPendingFiles((files) => files.filter((_, fileIndex) => fileIndex !== index))} title="删除图片"><Trash2 size={14} /></button>
                 </div>
               </div>
@@ -1002,6 +1095,7 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
           })}>级联删除</button>}
         </div>
       </aside>
+      {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </div>
   )
 }
@@ -1115,11 +1209,60 @@ function ThumbGrid({ assets, compact = false }: { assets: MediaAsset[]; compact?
 }
 
 function AssetThumb({ asset, large = false }: { asset?: MediaAsset | null; large?: boolean }) {
-  return <div className={`asset-thumb ${large ? 'large' : ''}`}>{asset?.thumbUrl || asset?.previewUrl || asset?.url ? <img src={mediaUrl(asset.thumbUrl || asset.previewUrl || asset.url)} /> : <FileImage size={18} />}</div>
+  const [viewer, setViewer] = useState<LightboxImage | null>(null)
+  const hasImage = asset?.thumbUrl || asset?.previewUrl || asset?.url
+  return (
+    <>
+      <div className={`asset-thumb ${large ? 'large' : ''}`}>
+        {asset && hasImage ? (
+          <button className="asset-open" onClick={() => setViewer(assetLightboxImage(asset))} title="放大查看">
+            <img src={mediaUrl(asset.thumbUrl || asset.previewUrl || asset.url)} alt={asset.filename} />
+          </button>
+        ) : <FileImage size={18} />}
+      </div>
+      {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
+    </>
+  )
 }
 
 function FinalImageStrip({ images }: { images: { id: number; sortOrder: number; status: string; asset?: MediaAsset | null }[] }) {
   return <div className="final-strip">{images.map((image) => <AssetThumb key={image.id} asset={image.asset} />)}</div>
+}
+
+function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () => void }) {
+  const [zoom, setZoom] = useState(1)
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+      if (event.key === '+' || event.key === '=') setZoom((value) => Math.min(3, value + 0.25))
+      if (event.key === '-') setZoom((value) => Math.max(0.5, value - 0.25))
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [onClose])
+
+  return (
+    <div className="lightbox" role="dialog" aria-modal="true" onClick={onClose}>
+      <div className="lightbox-panel" onClick={(event) => event.stopPropagation()}>
+        <div className="lightbox-head">
+          <div>
+            <strong>{image.title}</strong>
+            {image.meta && <span>{image.meta}</span>}
+          </div>
+          <div className="lightbox-actions">
+            <button onClick={() => setZoom((value) => Math.max(0.5, value - 0.25))} title="缩小"><ZoomOut size={16} /></button>
+            <span>{Math.round(zoom * 100)}%</span>
+            <button onClick={() => setZoom((value) => Math.min(3, value + 0.25))} title="放大"><ZoomIn size={16} /></button>
+            {image.downloadUrl && <a href={image.downloadUrl} target="_blank" rel="noreferrer" title="打开原图"><Download size={16} /></a>}
+            <button onClick={onClose} title="关闭"><X size={16} /></button>
+          </div>
+        </div>
+        <div className="lightbox-stage">
+          <img src={image.src} alt={image.title} style={{ transform: `scale(${zoom})` }} />
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function Meta({ label, value }: { label: string; value: ReactNode }) {
@@ -1240,6 +1383,57 @@ function groupImportFiles(files: File[]): ImportBatch[] {
 
 function importPath(file: File) {
   return ((file as File & { webkitRelativePath?: string; relativePath?: string }).webkitRelativePath || (file as File & { relativePath?: string }).relativePath || file.name).replace(/^\/+/, '')
+}
+
+function fileKey(file: File) {
+  return `${file.name}-${file.size}-${file.lastModified}`
+}
+
+function useObjectUrl(file: File) {
+  const [url, setUrl] = useState('')
+  useEffect(() => {
+    const nextUrl = URL.createObjectURL(file)
+    setUrl(nextUrl)
+    return () => URL.revokeObjectURL(nextUrl)
+  }, [file])
+  return url
+}
+
+function formatBytes(value?: number | null) {
+  if (!value) return '未知大小'
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+
+function dimensionText(dimensions?: { width?: number | null; height?: number | null }) {
+  return dimensions?.width && dimensions?.height ? `${dimensions.width} x ${dimensions.height}` : '尺寸读取中'
+}
+
+function fileMeta(file: File, dimensions?: { width: number; height: number }) {
+  return `${dimensionText(dimensions)} · ${formatBytes(file.size)}`
+}
+
+function assetMeta(asset: MediaAsset) {
+  return `${dimensionText(asset)} · ${formatBytes(asset.sizeBytes)}`
+}
+
+function fileLightboxImage(file: File, src: string, dimensions?: { width: number; height: number }): LightboxImage {
+  return {
+    src,
+    title: file.name,
+    meta: fileMeta(file, dimensions),
+  }
+}
+
+function assetLightboxImage(asset: MediaAsset): LightboxImage {
+  const src = mediaUrl(asset.originalUrl ?? asset.previewUrl ?? asset.thumbUrl ?? asset.url)
+  return {
+    src,
+    title: asset.filename,
+    meta: assetMeta(asset),
+    downloadUrl: src,
+  }
 }
 
 function sanitizeClientName(value: string) {
