@@ -804,6 +804,7 @@ def list_styling_garments(
     offset: int = Query(0, ge=0),
     keyword: str | None = Query(None),
 ) -> dict[str, Any]:
+    expire_stale_styling_garment_tagging()
     search = f"%{keyword.strip()}%" if keyword and keyword.strip() else None
     with get_db() as db:
         rows = db.execute(
@@ -832,12 +833,53 @@ def list_styling_garments(
 
 @app.get("/api/styling-garments/{garment_id}")
 def get_styling_garment(garment_id: int) -> dict[str, Any]:
+    expire_stale_styling_garment_tagging()
     return {"item": get_styling_garment_by_id(garment_id)}
 
 
 def ensure_styling_garment_not_tagging(row: Any) -> None:
     if row["status"] == "TAGGING_RUNNING":
         raise HTTPException(status_code=409, detail="正在打标，完成后才能修改或归档搭配服饰")
+
+
+def expire_stale_styling_garment_tagging() -> None:
+    timeout_before = datetime.fromtimestamp(time.time() - settings.generation_image_timeout_seconds).isoformat(timespec="seconds")
+    timestamp = now_iso()
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT id FROM styling_garments
+            WHERE status = 'TAGGING_RUNNING'
+              AND updated_at < ?
+              AND deleted_at IS NULL
+            """,
+            (timeout_before,),
+        ).fetchall()
+        if not rows:
+            return
+        ids = [int(row["id"]) for row in rows]
+        placeholders = ",".join("?" for _ in ids)
+        message = "打标任务长时间未完成，已自动停止轮询，可手动重新打标。"
+        db.execute(
+            f"""
+            UPDATE styling_garments
+            SET status = 'TAGGING_FAILED', tag_error = ?, updated_at = ?
+            WHERE id IN ({placeholders})
+            """,
+            (message, timestamp, *ids),
+        )
+        db.execute(
+            f"""
+            UPDATE generation_attempts
+            SET status = 'FAILED', failed_at = ?, error_code = 'TIMEOUT', error_message = ?, updated_at = ?
+            WHERE owner_type = 'styling_garment_tagging'
+              AND owner_id IN ({placeholders})
+              AND status = 'RUNNING'
+            """,
+            (timestamp, message, timestamp, *ids),
+        )
+        for garment_id in ids:
+            log_event(db, "styling_garment", garment_id, "tagging_timed_out", {"timeoutAt": timestamp})
 
 
 @app.post("/api/styling-garments")
@@ -1192,8 +1234,7 @@ def delete_styling_garment(
                 db.execute(
                     f"""
                     DELETE FROM generation_attempts
-                    WHERE (owner_type = 'generation_styling' AND owner_id IN ({placeholders}))
-                       OR (owner_type = 'generation_preview' AND owner_id IN (
+                    WHERE (owner_type = 'generation_preview' AND owner_id IN (
                             SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
                           ))
                        OR (owner_type = 'generation_result_image' AND owner_id IN (
@@ -1202,8 +1243,18 @@ def delete_styling_garment(
                             WHERE grs.task_id IN ({placeholders})
                           ))
                     """,
-                    (*dependent_task_ids, *dependent_task_ids, *dependent_task_ids),
+                    (*dependent_task_ids, *dependent_task_ids),
                 )
+                db.execute(
+                    f"DELETE FROM generation_attempts WHERE owner_type = 'generation_styling' AND owner_id IN ({placeholders})",
+                    dependent_task_ids,
+                )
+                if dependent_asset_ids:
+                    asset_placeholders = ", ".join("?" for _ in dependent_asset_ids)
+                    db.execute(
+                        f"DELETE FROM generation_attempts WHERE output_asset_id IN ({asset_placeholders})",
+                        dependent_asset_ids,
+                    )
                 db.execute(f"DELETE FROM generation_tasks WHERE id IN ({placeholders})", dependent_task_ids)
             asset_ids = [int(image["id"]) for image in image_rows] + dependent_asset_ids
             dependent_media_rows: list[Any] = []
@@ -1425,23 +1476,29 @@ def ready_generation_task(task_id: int) -> dict[str, Any]:
 @app.post("/api/generation-tasks/{task_id}/select-styling")
 async def select_generation_styling(task_id: int) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
-    if task["status"] != "READY_FOR_STYLING" and not (
-        task["status"] == "FAILED" and not task["active_styling_id"]
-    ):
+    if task["status"] not in {
+        "READY_FOR_STYLING",
+        "STYLING_READY",
+        "PREVIEW_READY",
+        "COMPLETED",
+        "FINAL_PARTIAL",
+        "FAILED",
+    }:
         raise HTTPException(status_code=409, detail="当前任务状态不能智能选搭")
     input_version_id = create_generation_input_version(task_id)
     with get_db() as db:
-        db.execute("UPDATE generation_tasks SET status = 'STYLING_RUNNING', current_input_version_id = ?, updated_at = ? WHERE id = ?", (input_version_id, now_iso(), task_id))
-    attempt_id = create_attempt("generation_styling", task_id, "gemini")
+        db.execute("UPDATE generation_tasks SET status = 'STYLING_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
+    attempt_id: int | None = None
     try:
-        selection = await select_styling_with_gemini(task_id, input_version_id)
-        selected_ids = selection.get("selected_material_ids", [])
-        if not isinstance(selected_ids, list):
-            raise RuntimeError("Gemini 返回 selected_material_ids 格式不合法")
-        selected_ids = [int(item) for item in selected_ids]
+        styling_plan, request_snapshot = await select_styling_with_gemini(task_id, input_version_id)
+        attempt_id = create_attempt("generation_styling", task_id, "gemini", request_snapshot)
+        candidate_snapshot = request_snapshot["candidate_retrieval"]
+        validate_styling_plan(styling_plan, candidate_snapshot)
+        selected_ids = [int(item) for item in styling_plan.get("selected_material_ids", [])]
         source_ids, selected_snapshot = get_styling_source_and_selected_snapshots(selected_ids)
     except Exception as exc:
-        finish_attempt(attempt_id, "FAILED", error_message=str(exc))
+        if attempt_id:
+            finish_attempt(attempt_id, "FAILED", error_message=str(exc))
         with get_db() as db:
             db.execute("UPDATE generation_tasks SET status = 'FAILED', updated_at = ? WHERE id = ?", (now_iso(), task_id))
         raise HTTPException(status_code=502, detail=f"智能选搭失败：{exc}") from exc
@@ -1450,32 +1507,50 @@ async def select_generation_styling(task_id: int) -> dict[str, Any]:
         cursor = db.execute(
             """
             INSERT INTO generation_stylings
-              (task_id, input_version_id, source_material_ids_json, selected_material_ids_json,
-               selected_material_snapshot_json, reason_summary, warnings_json, status, attempt_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'SUCCEEDED', ?, ?, ?)
+              (task_id, input_version_id, source_material_ids_json, candidate_material_ids_json,
+               candidate_retrieval_snapshot_json, selected_material_ids_json, selected_material_snapshot_json,
+               styling_plan_json, hero_understanding_json, outfit_candidates_json, critic_scores_json,
+               rejected_candidates_json, reason_summary, warnings_json, status, attempt_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUCCEEDED', ?, ?, ?)
             """,
             (
                 task_id,
                 input_version_id,
                 dumps(source_ids),
+                dumps(candidate_snapshot.get("candidate_material_ids") or []),
+                dumps(candidate_snapshot),
                 dumps(selected_ids),
                 dumps(selected_snapshot),
-                str(selection.get("reason_summary") or "已根据主推款和搭配服饰标签完成智能选搭。"),
-                dumps(selection.get("warnings") or []),
+                dumps(styling_plan),
+                dumps(styling_plan.get("hero_understanding") or {}),
+                dumps(styling_plan.get("outfit_candidates") or []),
+                dumps(get_selected_outfit_scores(styling_plan)),
+                dumps(styling_plan.get("rejected_candidates") or []),
+                str(styling_plan.get("reason_summary") or "已根据主推款和搭配服饰标签完成 AI Stylist 造型方案。"),
+                dumps(styling_plan.get("warnings") or []),
                 attempt_id,
                 timestamp,
                 timestamp,
             ),
         )
         styling_id = int(cursor.lastrowid)
-        hero_summary = str(selection.get("hero_visual_summary") or "").strip()
+        hero_summary = str((styling_plan.get("hero_understanding") or {}).get("hero_visual_summary") or "").strip()
         if hero_summary:
             db.execute("UPDATE generation_task_input_versions SET hero_visual_summary = ? WHERE id = ?", (hero_summary, input_version_id))
         db.execute(
-            "UPDATE generation_tasks SET status = 'STYLING_READY', active_styling_id = ?, updated_at = ? WHERE id = ?",
-            (styling_id, timestamp, task_id),
+            """
+            UPDATE generation_tasks
+            SET status = 'STYLING_READY',
+                current_input_version_id = ?,
+                active_styling_id = ?,
+                active_preview_id = NULL,
+                active_result_set_id = NULL,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (input_version_id, styling_id, timestamp, task_id),
         )
-    finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=selection)
+    finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=styling_plan)
     return {"item": get_generation_task_by_id(task_id, include_debug=True)}
 
 
@@ -1485,12 +1560,15 @@ async def create_generation_preview(task_id: int) -> dict[str, Any]:
     styling_id = task["active_styling_id"]
     input_version_id = task["current_input_version_id"]
     if not styling_id or not input_version_id or (
-        task["status"] != "STYLING_READY"
+        task["status"] not in {"STYLING_READY", "PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL"}
         and not (task["status"] == "FAILED" and not task["active_preview_id"])
     ):
         raise HTTPException(status_code=409, detail="请先完成智能选搭")
     with get_db() as db:
-        db.execute("UPDATE generation_tasks SET status = 'PREVIEW_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
+        db.execute(
+            "UPDATE generation_tasks SET status = 'PREVIEW_RUNNING', active_result_set_id = NULL, updated_at = ? WHERE id = ?",
+            (now_iso(), task_id),
+        )
     shot_plans = ensure_generation_shot_plans(task_id, int(styling_id))
     timestamp = now_iso()
     with get_db() as db:
@@ -1537,7 +1615,12 @@ async def run_preview_generation(task_id: int, styling_id: int, shot_plans: list
 @app.post("/api/generation-tasks/{task_id}/generate-final")
 async def generate_final_images(task_id: int) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
-    if task["status"] != "PREVIEW_READY" or not task["active_preview_id"]:
+    if (
+        task["status"] not in {"PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL"}
+        or not task["active_preview_id"]
+        or not task["active_styling_id"]
+        or not task["current_input_version_id"]
+    ):
         raise HTTPException(status_code=409, detail="请先生成六宫格预览")
     preview_id = int(task["active_preview_id"])
     styling_id = int(task["active_styling_id"])
@@ -4645,7 +4728,7 @@ def persist_attempt_provider_request_id(attempt_id: int, provider_response: dict
         )
 
 
-async def select_styling_with_gemini(task_id: int, input_version_id: int) -> dict[str, Any]:
+async def select_styling_with_gemini(task_id: int, input_version_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
     with get_db() as db:
         input_row = db.execute("SELECT * FROM generation_task_input_versions WHERE id = ?", (input_version_id,)).fetchone()
         material_rows = db.execute(
@@ -4658,49 +4741,288 @@ async def select_styling_with_gemini(task_id: int, input_version_id: int) -> dic
         ).fetchall()
     material_cards = [compress_tags_for_styling(row) for row in material_rows]
     material_cards = [card for card in material_cards if not (card.get("manual") or {}).get("do_not_use_for_styling")]
+    candidate_snapshot = build_candidate_retrieval_snapshot(input_row, material_cards)
+    request_snapshot = build_ai_stylist_request_snapshot(input_row, candidate_snapshot)
     if not settings.gemini_api_key:
-        return fallback_styling_selection(input_row, material_cards)
+        return fallback_styling_plan(input_row, candidate_snapshot, "gemini_api_key_missing"), request_snapshot
     try:
         from google import genai
         from google.genai import types
     except Exception:
-        return fallback_styling_selection(input_row, material_cards)
+        return fallback_styling_plan(input_row, candidate_snapshot, "google_genai_import_failed"), request_snapshot
     prompt = f"""
-你是服饰品牌 AI 摄影棚的智能选搭助手。
-任务：根据主推款图片，从搭配服饰库中选择适合一起穿到模特身上的配角服饰。
-你只负责选择服饰 ID，不生成穿着关系和拍摄方案。
-允许返回空数组。只能从 material_cards 中选择 ID。
+你是 Lily 服饰品牌 AI 摄影棚的 AI Stylist。你的任务不是简单返回服饰 ID，而是为本次主推款生成一个可用于电商棚拍的 StylingPlan。
 
-material_cards:
-{dumps(material_cards)}
+核心原则：
+1. 搭配服饰服务主推款，而不是主推款服务整套造型。
+2. 可以发挥审美自主性，探索多套 outfit，但必须保持商品生产可用。
+3. 主推款必须是视觉中心。搭配服饰、鞋包饰品不能遮挡或抢走主推款卖点。
+4. 只能从 candidate_retrieval.material_cards 中选择 READY 服饰 ID。允许 selected_material_ids 为空。
+5. 鞋、包、饰品只能作为 generated_accessories 文字描述，不作为库内商品级事实。
+6. 如果选择多个可能互斥的服饰，必须在 wearing_notes 中说明真实可穿方式，否则不要选择。
+
+candidate_retrieval:
+{dumps(candidate_snapshot)}
 
 请只返回 JSON：
 {{
-  "selected_material_ids": [1, 2],
-  "hero_visual_summary": "极短主推款视觉摘要",
-  "reason_summary": "极短选择理由",
+  "schema_version": "styling-plan-v1",
+  "hero_understanding": {{
+    "hero_visual_summary": "极短主推款视觉摘要",
+    "hero_selling_points": ["主推款核心卖点"],
+    "hero_visibility_risks": ["可能遮挡或弱化主推款的风险"]
+  }},
+  "styling_intents": [
+    {{"id": "intent_a", "title": "造型方向", "reason": "为什么适合", "risk": "风险"}}
+  ],
+  "outfit_candidates": [
+    {{
+      "id": "candidate_a",
+      "mode": "hero_first_single_piece | light_layering | office_outfit | tonal_outfit | contrast_outfit",
+      "selected_material_ids": [],
+      "generated_accessories": ["低存在感鞋包饰品"],
+      "wearing_notes": "真实穿着方式",
+      "hero_focus": ["本方案必须露出的主推款卖点"],
+      "scores": {{
+        "aesthetic_score": 0.0,
+        "brand_fit_score": 0.0,
+        "hero_visibility_score": 0.0,
+        "commercial_readiness_score": 0.0
+      }},
+      "risk_notes": []
+    }}
+  ],
+  "selected_outfit_id": "candidate_a",
+  "selected_material_ids": [],
+  "reason_summary": "极短最终选择理由",
+  "rejected_candidates": [
+    {{"id": "candidate_b", "reason": "拒绝原因"}}
+  ],
   "warnings": []
 }}
 """
+    request_snapshot = {**request_snapshot, "prompt": prompt}
     contents: list[Any] = [prompt]
     for item in loads(input_row["image_snapshot_json"], [])[:8]:
         asset = (item.get("asset") or {})
         object_key = asset.get("objectKey")
         if object_key and object_exists(object_key):
             contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
-    client = genai.Client(api_key=settings.gemini_api_key)
-    response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents)
-    return loads(extract_json_text(getattr(response, "text", "") or "{}"), {})
+    try:
+        client = genai.Client(api_key=settings.gemini_api_key)
+        response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents)
+        raw = loads(extract_json_text(getattr(response, "text", "") or "{}"), {})
+    except Exception as exc:
+        return fallback_styling_plan(input_row, candidate_snapshot, f"gemini_call_failed:{exc}"), request_snapshot
+    return normalize_styling_plan(raw, candidate_snapshot), request_snapshot
 
 
-def fallback_styling_selection(input_row: Any, material_cards: list[dict[str, Any]]) -> dict[str, Any]:
-    selected = [int(card["id"]) for card in material_cards[:2]]
+def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict[str, Any]]) -> dict[str, Any]:
+    cards = sorted(material_cards, key=candidate_priority_key)
     return {
-        "selected_material_ids": selected,
-        "hero_visual_summary": "主推款图片已作为商品事实源。",
-        "reason_summary": "开发环境未配置 Gemini，已按最近可用搭配服饰生成默认选搭。",
-        "warnings": ["fallback_selection"],
+        "schema_version": "candidate-retrieval-v1",
+        "strategy": "tag_based_priority",
+        "input_version_id": int(input_row["id"]),
+        "source_material_ids": [int(card["id"]) for card in material_cards],
+        "candidate_material_ids": [int(card["id"]) for card in cards],
+        "material_cards": cards,
+        "notes": [
+            "MVP 使用 READY tags 召回和多样性排序；后续可接入 embedding、人工反馈和销售/点击数据。",
+        ],
     }
+
+
+def candidate_priority_key(card: dict[str, Any]) -> tuple[int, str]:
+    category = str(card.get("category") or "")
+    risk = card.get("risk") if isinstance(card.get("risk"), list) else []
+    wearability = card.get("wearability") if isinstance(card.get("wearability"), dict) else {}
+    coverage_risk = str(wearability.get("coverage_risk") or "")
+    penalty = 0
+    if category == "outerwear":
+        penalty += 2
+    if coverage_risk in {"may_cover_hero", "likely_cover_hero"}:
+        penalty += 3
+    if any(str(item) != "none" for item in risk):
+        penalty += 1
+    return (penalty, str(card.get("code") or ""))
+
+
+def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": "ai-stylist-request-v1",
+        "model": settings.gemini_model,
+        "input_version": {
+            "id": input_row["id"],
+            "taskId": input_row["task_id"],
+            "nameSnapshot": input_row["name_snapshot"],
+            "imageSnapshot": loads(input_row["image_snapshot_json"], []),
+        },
+        "candidate_retrieval": candidate_snapshot,
+        "brand_boundary": {
+            "core": ["商务时装", "都市通勤", "年轻职业女性", "简约", "优雅", "自信", "商品优先", "现代", "利落", "干净"],
+            "principle": "搭配服饰服务主推款，而不是主推款服务整套造型。",
+        },
+        "output_schema": "styling-plan-v1",
+    }
+
+
+def fallback_styling_plan(input_row: Any, candidate_snapshot: dict[str, Any], reason: str) -> dict[str, Any]:
+    plan = {
+        "schema_version": "styling-plan-v1",
+        "hero_understanding": {
+            "hero_visual_summary": "主推款图片已作为商品事实源。",
+            "hero_selling_points": ["主推款整体轮廓", "主推款关键细节"],
+            "hero_visibility_risks": ["AI Stylist 未完成真实审美判断"],
+        },
+        "styling_intents": [
+            {
+                "id": "hero_first_single_piece",
+                "title": "主推款优先",
+                "reason": "模型不可用时采用最保守的商品优先方案。",
+                "risk": "未进行真实智能选搭。",
+            },
+        ],
+        "outfit_candidates": [
+            {
+                "id": "candidate_a",
+                "mode": "hero_first_single_piece",
+                "selected_material_ids": [],
+                "generated_accessories": ["低存在感通勤鞋", "小号通勤包"],
+                "wearing_notes": "主推款作为画面唯一商品级服饰。",
+                "hero_focus": ["主推款整体轮廓", "主推款关键细节"],
+                "scores": {
+                    "aesthetic_score": 0.5,
+                    "brand_fit_score": 0.5,
+                    "hero_visibility_score": 0.95,
+                    "commercial_readiness_score": 0.65,
+                },
+                "risk_notes": [reason],
+            },
+        ],
+        "selected_outfit_id": "candidate_a",
+        "selected_material_ids": [],
+        "reason_summary": "AI Stylist 不可用，采用主推款优先的保守方案。",
+        "rejected_candidates": [],
+        "warnings": ["fallback_styling_plan", reason],
+    }
+    return normalize_styling_plan(plan, candidate_snapshot)
+
+
+def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+    hero = source.get("hero_understanding") if isinstance(source.get("hero_understanding"), dict) else {}
+    intents = source.get("styling_intents") if isinstance(source.get("styling_intents"), list) else []
+    candidates = source.get("outfit_candidates") if isinstance(source.get("outfit_candidates"), list) else []
+    candidate_ids = {int(item) for item in candidate_snapshot.get("candidate_material_ids", [])}
+    normalized_candidates = [normalize_outfit_candidate(item, candidate_ids, index) for index, item in enumerate(candidates, start=1) if isinstance(item, dict)]
+    if not normalized_candidates:
+        normalized_candidates = [normalize_outfit_candidate({}, candidate_ids, 1)]
+    selected_outfit_id = str(source.get("selected_outfit_id") or normalized_candidates[0]["id"])
+    if selected_outfit_id not in {item["id"] for item in normalized_candidates}:
+        selected_outfit_id = normalized_candidates[0]["id"]
+    selected = next(item for item in normalized_candidates if item["id"] == selected_outfit_id)
+    selected_ids = source.get("selected_material_ids") if isinstance(source.get("selected_material_ids"), list) else selected["selected_material_ids"]
+    selected_ids = normalize_selected_material_ids(selected_ids, candidate_ids)
+    warnings = ensure_string_list(source.get("warnings"))
+    return {
+        "schema_version": "styling-plan-v1",
+        "hero_understanding": {
+            "hero_visual_summary": str(hero.get("hero_visual_summary") or source.get("hero_visual_summary") or "主推款图片已作为商品事实源。")[:120],
+            "hero_selling_points": ensure_string_list(hero.get("hero_selling_points"))[:8],
+            "hero_visibility_risks": ensure_string_list(hero.get("hero_visibility_risks"))[:8],
+        },
+        "styling_intents": [
+            {
+                "id": str(item.get("id") or f"intent_{index}")[:40],
+                "title": str(item.get("title") or "造型方向")[:40],
+                "reason": str(item.get("reason") or "")[:120],
+                "risk": str(item.get("risk") or "")[:120],
+            }
+            for index, item in enumerate(intents, start=1)
+            if isinstance(item, dict)
+        ][:5],
+        "outfit_candidates": normalized_candidates[:5],
+        "selected_outfit_id": selected_outfit_id,
+        "selected_material_ids": selected_ids,
+        "reason_summary": str(source.get("reason_summary") or "已根据主推款和搭配服饰标签完成 AI Stylist 造型方案。")[:180],
+        "rejected_candidates": [
+            {"id": str(item.get("id") or "")[:40], "reason": str(item.get("reason") or "")[:160]}
+            for item in (source.get("rejected_candidates") if isinstance(source.get("rejected_candidates"), list) else [])
+            if isinstance(item, dict)
+        ][:5],
+        "warnings": warnings[:8],
+    }
+
+
+def normalize_outfit_candidate(candidate: dict[str, Any], candidate_ids: set[int], index: int) -> dict[str, Any]:
+    scores = candidate.get("scores") if isinstance(candidate.get("scores"), dict) else {}
+    selected_ids = normalize_selected_material_ids(candidate.get("selected_material_ids"), candidate_ids)
+    return {
+        "id": str(candidate.get("id") or f"candidate_{index}")[:40],
+        "mode": str(candidate.get("mode") or ("light_layering" if selected_ids else "hero_first_single_piece"))[:40],
+        "selected_material_ids": selected_ids,
+        "generated_accessories": ensure_string_list(candidate.get("generated_accessories"))[:6],
+        "wearing_notes": str(candidate.get("wearing_notes") or ("主推款作为画面唯一商品级服饰。" if not selected_ids else "搭配服饰以不遮挡主推款的方式穿着。"))[:180],
+        "hero_focus": ensure_string_list(candidate.get("hero_focus"))[:8],
+        "scores": {
+            "aesthetic_score": clamp_float(scores.get("aesthetic_score"), 0, 1, 0.5),
+            "brand_fit_score": clamp_float(scores.get("brand_fit_score"), 0, 1, 0.5),
+            "hero_visibility_score": clamp_float(scores.get("hero_visibility_score"), 0, 1, 0.8 if not selected_ids else 0.6),
+            "commercial_readiness_score": clamp_float(scores.get("commercial_readiness_score"), 0, 1, 0.7),
+        },
+        "risk_notes": ensure_string_list(candidate.get("risk_notes"))[:8],
+    }
+
+
+def normalize_selected_material_ids(value: Any, candidate_ids: set[int]) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    selected: list[int] = []
+    for item in value:
+        try:
+            item_id = int(item)
+        except (TypeError, ValueError):
+            continue
+        if item_id in candidate_ids and item_id not in selected:
+            selected.append(item_id)
+    return selected[:4]
+
+
+def validate_styling_plan(plan: dict[str, Any], candidate_snapshot: dict[str, Any]) -> None:
+    candidate_ids = {int(item) for item in candidate_snapshot.get("candidate_material_ids", [])}
+    selected_ids = plan.get("selected_material_ids") if isinstance(plan.get("selected_material_ids"), list) else []
+    invalid = set(int(item) for item in selected_ids) - candidate_ids
+    if invalid:
+        raise RuntimeError(f"AI Stylist 返回了非法搭配服饰 ID：{sorted(invalid)}")
+    if len(selected_ids) != len(set(selected_ids)):
+        raise RuntimeError("AI Stylist 返回了重复搭配服饰 ID")
+    selected_outfit = next(
+        (item for item in plan.get("outfit_candidates", []) if item.get("id") == plan.get("selected_outfit_id")),
+        {},
+    )
+    if has_unexplained_outerwear_conflict(selected_ids, candidate_snapshot, selected_outfit):
+        raise RuntimeError("AI Stylist 返回了多个外套但没有解释真实穿着方式")
+    scores = selected_outfit.get("scores") if isinstance(selected_outfit.get("scores"), dict) else {}
+    if float(scores.get("hero_visibility_score") or 1) < 0.35 or float(scores.get("commercial_readiness_score") or 1) < 0.35:
+        raise RuntimeError("AI Stylist 方案的主推款可见性或商业可用性过低")
+
+
+def has_unexplained_outerwear_conflict(selected_ids: list[int], candidate_snapshot: dict[str, Any], selected_outfit: dict[str, Any]) -> bool:
+    cards = {int(card["id"]): card for card in candidate_snapshot.get("material_cards", []) if isinstance(card, dict) and card.get("id") is not None}
+    outerwear_count = sum(1 for item_id in selected_ids if str(cards.get(int(item_id), {}).get("category") or "") == "outerwear")
+    if outerwear_count <= 1:
+        return False
+    notes = str(selected_outfit.get("wearing_notes") or "")
+    return not any(keyword in notes for keyword in ("肩搭", "手持", "不同时穿", "备用", "其中一件"))
+
+
+def get_selected_outfit_scores(styling_plan: dict[str, Any]) -> dict[str, Any]:
+    selected_outfit = next(
+        (item for item in styling_plan.get("outfit_candidates", []) if item.get("id") == styling_plan.get("selected_outfit_id")),
+        {},
+    )
+    scores = selected_outfit.get("scores") if isinstance(selected_outfit.get("scores"), dict) else {}
+    return scores
 
 
 def get_styling_source_and_selected_snapshots(selected_ids: list[int]) -> tuple[list[int], list[dict[str, Any]]]:
@@ -4724,7 +5046,8 @@ def ensure_generation_shot_plans(task_id: int, styling_id: int) -> list[dict[str
             return [serialize_new_shot_plan(row) for row in existing]
         styling = db.execute("SELECT * FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
         selected_snapshot = loads(styling["selected_material_snapshot_json"], [])
-    plans = build_default_new_shot_plans(selected_snapshot)
+        styling_plan = loads(styling["styling_plan_json"], {}) if "styling_plan_json" in styling.keys() else {}
+    plans = build_default_new_shot_plans(selected_snapshot, styling_plan)
     with get_db() as db:
         timestamp = now_iso()
         for plan in plans:
@@ -4741,8 +5064,18 @@ def ensure_generation_shot_plans(task_id: int, styling_id: int) -> list[dict[str
     return [serialize_new_shot_plan(row) for row in rows]
 
 
-def build_default_new_shot_plans(selected_snapshot: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_default_new_shot_plans(selected_snapshot: list[dict[str, Any]], styling_plan: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    styling_plan = styling_plan or {}
     garment_refs = ["hero", *[f"styling:{item.get('id')}" for item in selected_snapshot]]
+    selected_outfit = next(
+        (item for item in styling_plan.get("outfit_candidates", []) if item.get("id") == styling_plan.get("selected_outfit_id")),
+        {},
+    )
+    hero = styling_plan.get("hero_understanding") if isinstance(styling_plan.get("hero_understanding"), dict) else {}
+    hero_points = ensure_string_list(hero.get("hero_selling_points")) or ensure_string_list(selected_outfit.get("hero_focus"))
+    wearing_notes = str(selected_outfit.get("wearing_notes") or styling_plan.get("reason_summary") or "搭配服饰服务主推款展示。")
+    generated_accessories = ensure_string_list(selected_outfit.get("generated_accessories"))
+    accessory_notes = "、".join(generated_accessories) if generated_accessories else "可生成低存在感鞋、包、首饰作为辅助，不做特写，不抢主推款。"
     base = [
         ("hero", "正面全身主视觉", "正面自然站姿", "正面", "主推款完整轮廓，搭配服饰自然可见"),
         ("full_body", "全身搭配展示", "轻微 3/4 身位，重心自然偏移", "轻斜正", "主推款与搭配服饰的整体比例"),
@@ -4760,10 +5093,12 @@ def build_default_new_shot_plans(selected_snapshot: list[dict[str, Any]]) -> lis
             "cameraAngle": angle,
             "mainFocus": focus,
             "visibleGarments": garment_refs,
-            "generatedAccessoryNotes": "可生成低存在感鞋、包、首饰作为辅助，不做特写，不抢主推款。",
+            "heroSellingPoints": hero_points,
+            "wearingNotes": wearing_notes,
+            "generatedAccessoryNotes": accessory_notes,
             "backgroundLighting": "白/浅灰棚拍背景，柔和均匀光线，轻微落地阴影。",
             "compositionNotes": "构图克制、商品优先、留白干净，避免报刊大片和外景感。",
-            "negativeConstraints": ["不要文字水印", "不要改款换色", "不要让生成配饰成为视觉中心"],
+            "negativeConstraints": ["不要文字水印", "不要改款换色", "不要让生成配饰成为视觉中心", "不要让搭配服饰抢主推款视觉中心"],
         }
         for index, (shot_type, framing, pose, angle, focus) in enumerate(base, start=1)
     ]
@@ -4775,18 +5110,22 @@ def serialize_new_shot_plan(row: Any) -> dict[str, Any]:
 
 
 def build_new_preview_task_package(task_id: int, styling_id: int, shot_plans: list[dict[str, Any]]) -> dict[str, Any]:
+    styling_plan = get_styling_plan_by_id(styling_id)
     return {
         "generation": {"stage": "preview_grid"},
-        "prompt": build_new_preview_prompt(shot_plans),
+        "prompt": build_new_preview_prompt(shot_plans, styling_plan),
         "imageInputs": build_new_image_inputs(task_id, styling_id, include_preview=False),
+        "stylingPlan": styling_plan,
         "shotPlans": shot_plans,
     }
 
 
-def build_new_preview_prompt(shot_plans: list[dict[str, Any]]) -> str:
+def build_new_preview_prompt(shot_plans: list[dict[str, Any]], styling_plan: dict[str, Any]) -> str:
     return "\n".join([
         "生成一张 3x2 六宫格电商棚拍分镜预览图。",
         "主推款和搭配服饰参考图是真实商品事实来源，必须保持商品级保真。",
+        "搭配服饰和生成配饰必须服务主推款展示，不得让主推款沦为整套造型的背景元素。",
+        f"当前 StylingPlan：{dumps(styling_plan)}",
         "数字模特参考图用于保持同一身份、发型和气质。",
         "鞋、包、饰品只作为辅助搭配，不作为画面核心，不做特写。",
         "六个格子按以下 ShotPlan 执行，第 6 格仅参考，最终不会生成大图。",
@@ -4809,24 +5148,35 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
             (result_image_id,),
         ).fetchone()
     shot_plan = loads(row["plan_json"], {})
+    styling_plan = get_styling_plan_by_id(int(row["styling_id"]))
     return {
         "generation": {"stage": "final_image"},
-        "prompt": build_new_final_prompt(int(row["sort_order"]), shot_plan),
+        "prompt": build_new_final_prompt(int(row["sort_order"]), shot_plan, styling_plan),
         "imageInputs": build_new_image_inputs(task_id, int(row["styling_id"]), include_preview=True, preview_asset_id=row["preview_asset_id"]),
+        "stylingPlan": styling_plan,
         "shotPlan": shot_plan,
     }
 
 
-def build_new_final_prompt(shot_index: int, shot_plan: dict[str, Any]) -> str:
+def build_new_final_prompt(shot_index: int, shot_plan: dict[str, Any], styling_plan: dict[str, Any]) -> str:
     return "\n".join([
         f"生成一张电商棚拍成片。当前生成第 {shot_index} 张，只生成单张图，不要生成拼图或六宫格。",
         f"参考六宫格预览图中的第 {shot_index} 格，只参考姿势、身位、景别、构图、背景和光影方向。",
         "六宫格不是商品事实来源。主推款参考图是主角商品事实来源，搭配服饰参考图是配角商品事实来源。",
         "必须保持主推款和搭配服饰的品类、颜色、面料、版型、结构、比例和可见细节。",
+        f"当前 StylingPlan：{dumps(styling_plan)}",
         f"当前 ShotPlan：{dumps(shot_plan)}",
         "鞋、包、饰品只作为辅助搭配，不作为画面核心，不做特写。",
-        "不要改款、换色、替换商品；不要添加文字、水印、logo。",
+        "不要让搭配服饰或生成配饰抢主推款视觉中心；不要改款、换色、替换商品；不要添加文字、水印、logo。",
     ])
+
+
+def get_styling_plan_by_id(styling_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute("SELECT styling_plan_json FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
+    if not row:
+        return {}
+    return loads(row["styling_plan_json"], {})
 
 
 def build_new_image_inputs(task_id: int, styling_id: int, include_preview: bool, preview_asset_id: int | None = None) -> list[dict[str, Any]]:
@@ -5072,13 +5422,21 @@ def get_generation_styling(styling_id: int | None) -> dict[str, Any] | None:
         row = db.execute("SELECT * FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
     if not row:
         return None
+    styling_plan = loads(row["styling_plan_json"], {}) if "styling_plan_json" in row.keys() else {}
     return {
         "id": row["id"],
         "taskId": row["task_id"],
         "inputVersionId": row["input_version_id"],
         "sourceMaterialIds": loads(row["source_material_ids_json"], []),
+        "candidateMaterialIds": loads(row["candidate_material_ids_json"], []) if "candidate_material_ids_json" in row.keys() else [],
+        "candidateRetrievalSnapshot": loads(row["candidate_retrieval_snapshot_json"], {}) if "candidate_retrieval_snapshot_json" in row.keys() else {},
         "selectedMaterialIds": loads(row["selected_material_ids_json"], []),
         "selectedMaterials": loads(row["selected_material_snapshot_json"], []),
+        "stylingPlan": styling_plan,
+        "heroUnderstanding": loads(row["hero_understanding_json"], {}) if "hero_understanding_json" in row.keys() else styling_plan.get("hero_understanding", {}),
+        "outfitCandidates": loads(row["outfit_candidates_json"], []) if "outfit_candidates_json" in row.keys() else styling_plan.get("outfit_candidates", []),
+        "criticScores": loads(row["critic_scores_json"], {}) if "critic_scores_json" in row.keys() else get_selected_outfit_scores(styling_plan),
+        "rejectedCandidates": loads(row["rejected_candidates_json"], []) if "rejected_candidates_json" in row.keys() else styling_plan.get("rejected_candidates", []),
         "reasonSummary": row["reason_summary"],
         "warnings": loads(row["warnings_json"], []),
         "status": row["status"],

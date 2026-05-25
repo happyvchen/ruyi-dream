@@ -111,12 +111,7 @@ export function App() {
   useEffect(() => {
     if (!authenticated || !hasRunningTagging) return
     const timer = window.setInterval(() => {
-      void Promise.all(runningTaggingIds.map((id) => api.getStylingGarment(id).then((response) => response.item).catch(() => null)))
-        .then((latestItems) => {
-          const latestById = new Map(latestItems.filter((item): item is StylingGarment => Boolean(item)).map((item) => [item.id, item]))
-          if (!latestById.size) return
-          setGarments((items) => items.map((item) => latestById.get(item.id) ?? item))
-        })
+      void api.listStylingGarments({ limit: 80 }).then((response) => setGarments(response.items)).catch(() => undefined)
     }, 3000)
     return () => window.clearInterval(timer)
   }, [authenticated, hasRunningTagging, runningTaggingKey])
@@ -491,29 +486,97 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
 }) {
-  const canSelect = task?.status === 'READY_FOR_STYLING' || (task?.status === 'FAILED' && !task.styling)
+  const canSelect = !!task && ['READY_FOR_STYLING', 'STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED'].includes(task.status)
+  const hasStyling = !!task?.styling
   const operations = task ? operationFallbacks(task, localOperations, 'generation_styling') : []
   return (
     <div className="step-panel">
-      <div className="step-copy"><h2>AI 智能选搭</h2><p>系统只从搭配服饰库选择真实服饰，暂不支持手动替换或重新搭配。</p></div>
+      <div className="step-copy"><h2>AI 智能选搭</h2><p>AI Stylist 会先理解主推款，再生成推荐造型方案；搭配服饰必须服务主推款展示。</p></div>
       <AIOperationList operations={operations} />
       {task?.styling ? (
-        <div className="selected-strip">
-          {task.styling.selectedMaterials.length ? task.styling.selectedMaterials.map((item) => <GarmentCard key={item.id} item={item} />) : <EmptyState title="未选择库内服饰" text="系统判断本次可以不加入库内搭配服饰。" />}
-        </div>
+        <StylingPlanSummary task={task} />
       ) : <EmptyState title="等待智能选搭" text="点击按钮后会冻结当前主推款输入版本。" />}
-      <button className="primary" disabled={!canSelect} onClick={() => task && void run('智能选搭中...', () => {
+      <button className="primary" disabled={!canSelect} onClick={() => task && void run(hasStyling ? '重新选搭中...' : '智能选搭中...', () => {
         startLocalOperation({ ownerType: 'generation_styling', ownerId: task.id, provider: 'gemini' })
-        setTask({ ...task, status: 'STYLING_RUNNING' })
+        setTask({ ...task, status: 'STYLING_RUNNING', preview: null, resultSet: null, activePreviewId: null, activeResultSetId: null })
         return api.selectStyling(task.id)
       }, (r: { item: GenerationTask }) => {
         clearLocalOperationsFor(['generation_styling'])
         setTask(r.item)
       })}>
-        <WandSparkles size={16} /> AI 智能选搭
+        <WandSparkles size={16} /> {hasStyling ? '重新选搭' : 'AI 智能选搭'}
       </button>
     </div>
   )
+}
+
+function StylingPlanSummary({ task }: { task: GenerationTask }) {
+  const styling = task.styling
+  if (!styling) return null
+  const plan = styling.stylingPlan ?? {}
+  const hero = (styling.heroUnderstanding ?? planValue<Record<string, unknown>>(plan, 'hero_understanding') ?? {}) as Record<string, unknown>
+  const candidates = styling.outfitCandidates?.length ? styling.outfitCandidates : planValue<Record<string, unknown>[]>(plan, 'outfit_candidates') ?? []
+  const selectedOutfitId = stringValue(planValue(plan, 'selected_outfit_id'))
+  const selected = candidates.find((item) => stringValue(item.id) === selectedOutfitId) ?? candidates[0]
+  const scores = (styling.criticScores && Object.keys(styling.criticScores).length ? styling.criticScores : planValue<Record<string, unknown>>(selected ?? {}, 'scores') ?? {}) as Record<string, unknown>
+  const generatedAccessories = stringList(planValue(selected ?? {}, 'generated_accessories'))
+  const heroFocus = stringList(planValue(selected ?? {}, 'hero_focus'))
+  const rejected = styling.rejectedCandidates?.length ? styling.rejectedCandidates : planValue<Record<string, unknown>[]>(plan, 'rejected_candidates') ?? []
+  return (
+    <div className="styling-plan">
+      <div className="styling-plan-head">
+        <div>
+          <span>推荐造型方案</span>
+          <h3>{stringValue(planValue(selected ?? {}, 'mode')) || '主推款优先'}</h3>
+        </div>
+        <div className="score-strip">
+          <ScorePill label="审美" value={scores.aesthetic_score} />
+          <ScorePill label="品牌" value={scores.brand_fit_score} />
+          <ScorePill label="主推可见" value={scores.hero_visibility_score} />
+          <ScorePill label="商业可用" value={scores.commercial_readiness_score} />
+        </div>
+      </div>
+      <p>{styling.reasonSummary || stringValue(planValue(plan, 'reason_summary'))}</p>
+      <div className="styling-plan-grid">
+        <InfoBlock title="主推款理解" items={[stringValue(hero.hero_visual_summary), ...stringList(hero.hero_selling_points)].filter(Boolean)} />
+        <InfoBlock title="图位重点" items={heroFocus.length ? heroFocus : stringList(hero.hero_selling_points)} />
+        <InfoBlock title="生成配饰" items={generatedAccessories.length ? generatedAccessories : ['低存在感鞋包饰品']} />
+        <InfoBlock title="风险提示" items={[...stringList(hero.hero_visibility_risks), ...(styling.warnings ?? [])].filter(Boolean)} empty="暂无明显风险" />
+      </div>
+      <div className="selected-strip">
+        {styling.selectedMaterials.length ? styling.selectedMaterials.map((item) => <GarmentCard key={item.id} item={item} />) : <EmptyState title="无需库内搭配服饰" text="AI Stylist 判断本次以主推款单穿或生成配饰辅助更合适。" />}
+      </div>
+      {rejected.length > 0 && (
+        <div className="rejected-list">
+          <strong>未采用方案</strong>
+          {rejected.slice(0, 3).map((item, index) => <span key={`${stringValue(item.id)}-${index}`}>{stringValue(item.reason)}</span>)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function InfoBlock({ title, items, empty = '暂无' }: { title: string; items: string[]; empty?: string }) {
+  const displayItems = items.filter(Boolean)
+  return <div className="info-block"><span>{title}</span>{displayItems.length ? displayItems.slice(0, 4).map((item, index) => <strong key={`${item}-${index}`}>{item}</strong>) : <em>{empty}</em>}</div>
+}
+
+function ScorePill({ label, value }: { label: string; value: unknown }) {
+  const number = typeof value === 'number' ? value : Number(value)
+  const text = Number.isFinite(number) ? `${Math.round(number * 100)}` : '-'
+  return <span><b>{text}</b>{label}</span>
+}
+
+function planValue<T = unknown>(source: Record<string, unknown>, key: string): T | undefined {
+  return source[key] as T | undefined
+}
+
+function stringValue(value: unknown) {
+  return typeof value === 'string' ? value : ''
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean) : []
 }
 
 function PreviewStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
@@ -524,22 +587,25 @@ function PreviewStep({ task, setTask, run, localOperations, startLocalOperation,
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
 }) {
-  const canPreview = task?.status === 'STYLING_READY' || (task?.status === 'FAILED' && !!task.styling && !task.preview)
+  const canPreview = (
+    !!task?.styling && ['STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL'].includes(task?.status ?? '')
+  ) || (task?.status === 'FAILED' && !!task.styling && !task.preview)
+  const hasPreview = !!task?.preview?.asset
   const operations = task ? operationFallbacks(task, localOperations, 'generation_preview') : []
   return (
     <div className="step-panel">
       <div className="step-copy"><h2>六宫格预览</h2><p>只显示一张 3x2 预览图。最终固定生成前 5 格，第 6 格忽略。</p></div>
       <AIOperationList operations={operations} />
       {task?.preview?.asset ? <img className="preview-board" src={mediaUrl(task.preview.asset.previewUrl || task.preview.asset.url)} /> : <EmptyState title="尚未生成六宫格" text="点击生成预览后，系统会输出一张 3x2 分镜预览图。" />}
-      <button className="primary" disabled={!canPreview} onClick={() => task && void run('生成六宫格预览中...', () => {
+      <button className="primary" disabled={!canPreview} onClick={() => task && void run(hasPreview ? '重新生成六宫格预览中...' : '生成六宫格预览中...', () => {
         startLocalOperation({ ownerType: 'generation_preview', ownerId: task.id, provider: 'image-2' })
-        setTask({ ...task, status: 'PREVIEW_RUNNING' })
+        setTask({ ...task, status: 'PREVIEW_RUNNING', resultSet: null, activeResultSetId: null })
         return api.previewTask(task.id)
       }, (r: { item: GenerationTask }) => {
         clearLocalOperationsFor(['generation_preview'])
         setTask(r.item)
       })}>
-        <GalleryVerticalEnd size={16} /> 生成预览
+        <GalleryVerticalEnd size={16} /> {hasPreview ? '重新生成分镜预览' : '生成预览'}
       </button>
     </div>
   )
@@ -554,7 +620,8 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
   clearLocalOperationsFor: (ownerTypes: string[]) => void
 }) {
   const images = task?.resultSet?.images ?? []
-  const canGenerate = task?.status === 'PREVIEW_READY'
+  const canGenerate = !!task?.preview?.asset && ['PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL'].includes(task?.status ?? '')
+  const hasFinalImages = images.some((image) => !!image.asset)
   const finalOperations = task ? finalImageOperations(task, localOperations) : []
   return (
     <div className="step-panel">
@@ -568,7 +635,7 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
           </div>
         )) : <EmptyState title="尚未生成最终图" text="点击生成成片后会生成前 5 张。" />}
       </div>
-      <button className="primary" disabled={!canGenerate} onClick={() => task && void run('生成最终成片中...', () => {
+      <button className="primary" disabled={!canGenerate} onClick={() => task && void run(hasFinalImages ? '重新生成最终成片中...' : '生成最终成片中...', () => {
         for (let index = 1; index <= 5; index += 1) {
           startLocalOperation({ ownerType: 'generation_result_image', ownerId: index, provider: 'image-2' })
         }
@@ -578,7 +645,7 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
         clearLocalOperationsFor(['generation_result_image'])
         setTask(r.item)
       })}>
-        <Sparkles size={16} /> 生成成片
+        <Sparkles size={16} /> {hasFinalImages ? '重新生成成片' : '生成成片'}
       </button>
     </div>
   )
@@ -591,7 +658,8 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
   const [showImport, setShowImport] = useState(false)
 
   async function openDetail(item: StylingGarment) {
-    await run('读取搭配服饰详情中...', () => api.getStylingGarment(item.id), (result: { item: StylingGarment }) => setDetail(result.item))
+    const result = await api.getStylingGarment(item.id)
+    setDetail(result.item)
   }
 
   useEffect(() => {

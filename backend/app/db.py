@@ -21,6 +21,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("008", "add_media_derivative_metadata", "migration_add_media_derivative_metadata"),
     ("009", "add_lily_tagging_columns", "migration_add_lily_tagging_columns"),
     ("010", "add_generation_input_model_snapshot", "migration_add_generation_input_model_snapshot"),
+    ("011", "add_generation_styling_plan_columns", "migration_add_generation_styling_plan_columns"),
 )
 
 
@@ -263,8 +264,15 @@ def init_db() -> None:
               task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
               input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
               source_material_ids_json TEXT NOT NULL,
+              candidate_material_ids_json TEXT,
+              candidate_retrieval_snapshot_json TEXT,
               selected_material_ids_json TEXT NOT NULL,
               selected_material_snapshot_json TEXT NOT NULL,
+              styling_plan_json TEXT,
+              hero_understanding_json TEXT,
+              outfit_candidates_json TEXT,
+              critic_scores_json TEXT,
+              rejected_candidates_json TEXT,
               reason_summary TEXT,
               warnings_json TEXT,
               status TEXT NOT NULL DEFAULT 'SUCCEEDED',
@@ -376,6 +384,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_media_derivative_metadata": migration_add_media_derivative_metadata,
         "migration_add_lily_tagging_columns": migration_add_lily_tagging_columns,
         "migration_add_generation_input_model_snapshot": migration_add_generation_input_model_snapshot,
+        "migration_add_generation_styling_plan_columns": migration_add_generation_styling_plan_columns,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -473,6 +482,16 @@ def migration_add_lily_tagging_columns(db: sqlite3.Connection) -> None:
 
 def migration_add_generation_input_model_snapshot(db: sqlite3.Connection) -> None:
     ensure_column(db, "generation_task_input_versions", "model_snapshot_json", "TEXT")
+
+
+def migration_add_generation_styling_plan_columns(db: sqlite3.Connection) -> None:
+    ensure_column(db, "generation_stylings", "candidate_material_ids_json", "TEXT")
+    ensure_column(db, "generation_stylings", "candidate_retrieval_snapshot_json", "TEXT")
+    ensure_column(db, "generation_stylings", "styling_plan_json", "TEXT")
+    ensure_column(db, "generation_stylings", "hero_understanding_json", "TEXT")
+    ensure_column(db, "generation_stylings", "outfit_candidates_json", "TEXT")
+    ensure_column(db, "generation_stylings", "critic_scores_json", "TEXT")
+    ensure_column(db, "generation_stylings", "rejected_candidates_json", "TEXT")
 
 
 def ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:

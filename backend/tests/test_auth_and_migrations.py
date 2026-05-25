@@ -333,9 +333,10 @@ class BackendSmokeTests(unittest.TestCase):
                 sku_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_skus)").fetchall()}
                 styling_garment_columns = {row["name"] for row in db.execute("PRAGMA table_info(styling_garments)").fetchall()}
                 input_version_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_task_input_versions)").fetchall()}
+                styling_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_stylings)").fetchall()}
                 template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
@@ -343,6 +344,9 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("archived_at", sku_columns)
         self.assertIn("official_title_tags_json", styling_garment_columns)
         self.assertIn("effective_tags_json", styling_garment_columns)
+        self.assertIn("styling_plan_json", styling_columns)
+        self.assertIn("candidate_retrieval_snapshot_json", styling_columns)
+        self.assertIn("outfit_candidates_json", styling_columns)
         self.assertIn("tag_meta_json", styling_garment_columns)
         self.assertIn("model_snapshot_json", input_version_columns)
         self.assertGreaterEqual(template_count, 1)
@@ -411,27 +415,73 @@ class BackendSmokeTests(unittest.TestCase):
         main = importlib.import_module("app.main")
 
         with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
-            os.environ["APP_DATABASE_PATH"] = db_file.name
-            config.get_settings.cache_clear()
-            db_module.init_db()
-            timestamp = db_module.now_iso()
-            code = f"STYLING-LOCK-{os.urandom(5).hex()}"
-            with db_module.get_db() as db:
-                garment_id = db.execute(
-                    """
-                    INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, created_at, updated_at)
-                    VALUES (?, 'TAGGING_RUNNING', '{}', '{}', ?, ?)
-                    """,
-                    (code, timestamp, timestamp),
-                ).lastrowid
+            with patch.object(config.Settings, "database_path", config.Path(db_file.name)):
+                config.get_settings.cache_clear()
+                db_module.init_db()
+                timestamp = db_module.now_iso()
+                code = f"STYLING-LOCK-{os.urandom(5).hex()}"
+                with db_module.get_db() as db:
+                    garment_id = db.execute(
+                        """
+                        INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, created_at, updated_at)
+                        VALUES (?, 'TAGGING_RUNNING', '{}', '{}', ?, ?)
+                        """,
+                        (code, timestamp, timestamp),
+                    ).lastrowid
 
-            client = TestClient(main.app)
-            self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
-            edit = client.patch(f"/api/styling-garments/{garment_id}", json={"code": "CHANGED"})
-            archive = client.delete(f"/api/styling-garments/{garment_id}")
+                client = TestClient(main.app)
+                self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+                edit = client.patch(f"/api/styling-garments/{garment_id}", json={"code": "CHANGED"})
+                archive = client.delete(f"/api/styling-garments/{garment_id}")
+            config.get_settings.cache_clear()
 
         self.assertEqual(edit.status_code, 409)
         self.assertEqual(archive.status_code, 409)
+
+    def test_stale_tagging_garment_is_expired_on_read(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            with patch.object(config.Settings, "database_path", config.Path(db_file.name)):
+                config.get_settings.cache_clear()
+                db_module.init_db()
+                stale_timestamp = "2000-01-01T00:00:00"
+                code = f"STALE-TAGGING-{os.urandom(5).hex()}"
+                with db_module.get_db() as db:
+                    garment_id = db.execute(
+                        """
+                        INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, created_at, updated_at)
+                        VALUES (?, 'TAGGING_RUNNING', '{}', '{}', ?, ?)
+                        """,
+                        (code, stale_timestamp, stale_timestamp),
+                    ).lastrowid
+                    attempt_id = db.execute(
+                        """
+                        INSERT INTO generation_attempts
+                          (owner_type, owner_id, provider, status, started_at, created_at, updated_at)
+                        VALUES ('styling_garment_tagging', ?, 'gemini', 'RUNNING', ?, ?, ?)
+                        """,
+                        (garment_id, stale_timestamp, stale_timestamp, stale_timestamp),
+                    ).lastrowid
+
+                client = TestClient(main.app)
+                self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+                response = client.get(f"/api/styling-garments/{garment_id}")
+
+                with db_module.get_db() as db:
+                    garment_status = db.execute("SELECT status FROM styling_garments WHERE id = ?", (garment_id,)).fetchone()["status"]
+                    attempt = db.execute("SELECT status, error_code FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
+            config.get_settings.cache_clear()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["item"]["status"], "TAGGING_FAILED")
+        self.assertEqual(garment_status, "TAGGING_FAILED")
+        self.assertEqual(attempt["status"], "FAILED")
+        self.assertEqual(attempt["error_code"], "TIMEOUT")
 
     def test_lily_tagging_normalization_filters_invalid_enums(self) -> None:
         main = importlib.import_module("app.main")
@@ -538,7 +588,7 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(styling_inputs[0]["objectKey"], "styling/snapshot.png")
         self.assertEqual(model_inputs[0]["objectKey"], "models/frozen.png")
 
-    def test_generation_task_freezes_draft_before_ai_and_rejects_completed_reruns(self) -> None:
+    def test_generation_task_freezes_draft_before_ai_and_rejects_running_reruns(self) -> None:
         from fastapi.testclient import TestClient
 
         config = importlib.import_module("app.config")
@@ -578,9 +628,13 @@ class BackendSmokeTests(unittest.TestCase):
             self.assertEqual(client.patch(f"/api/generation-tasks/{task_id}", json={"name": "changed"}).status_code, 409)
 
             with db_module.get_db() as db:
-                db.execute("UPDATE generation_tasks SET status = 'COMPLETED', active_preview_id = 1 WHERE id = ?", (task_id,))
+                db.execute("UPDATE generation_tasks SET status = 'STYLING_RUNNING' WHERE id = ?", (task_id,))
             self.assertEqual(client.post(f"/api/generation-tasks/{task_id}/select-styling").status_code, 409)
+            with db_module.get_db() as db:
+                db.execute("UPDATE generation_tasks SET status = 'PREVIEW_RUNNING' WHERE id = ?", (task_id,))
             self.assertEqual(client.post(f"/api/generation-tasks/{task_id}/preview").status_code, 409)
+            with db_module.get_db() as db:
+                db.execute("UPDATE generation_tasks SET status = 'FINAL_RUNNING', active_preview_id = 1 WHERE id = ?", (task_id,))
             self.assertEqual(client.post(f"/api/generation-tasks/{task_id}/generate-final").status_code, 409)
 
     def test_purge_styling_garment_removes_tasks_that_selected_it(self) -> None:
@@ -652,6 +706,14 @@ class BackendSmokeTests(unittest.TestCase):
                     VALUES ('generation_styling', ?, 'test', 'SUCCEEDED', ?, ?, ?)
                     """,
                     (task_id, output_asset_id, timestamp, timestamp),
+                )
+                db.execute(
+                    """
+                    INSERT INTO generation_attempts
+                      (owner_type, owner_id, provider, status, created_at, updated_at)
+                    VALUES ('generation_styling', ?, 'test', 'FAILED', ?, ?)
+                    """,
+                    (task_id, timestamp, timestamp),
                 )
 
             client = TestClient(main.app)

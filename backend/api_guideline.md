@@ -50,7 +50,7 @@ Authorization: Bearer <token>
 | `/api/generation-task-images/{image_id}/replace` | POST | 草稿期替换单张主推款图片 |
 | `/api/generation-task-images/{image_id}` | PATCH / DELETE | 草稿期调整排序或移除主推款图片 |
 | `/api/generation-tasks/{task_id}/ready` | POST | 确认草稿，进入待智能选搭状态 |
-| `/api/generation-tasks/{task_id}/select-styling` | POST | 冻结当前输入版本并从 READY 搭配服饰中智能选搭 |
+| `/api/generation-tasks/{task_id}/select-styling` | POST | 冻结当前输入版本，执行候选召回和 AI Stylist，返回 `StylingPlan` |
 | `/api/generation-tasks/{task_id}/preview` | POST | 生成 6 条 ShotPlan 和 3x2 六宫格预览 |
 | `/api/generation-tasks/{task_id}/generate-final` | POST | 按前 5 条 ShotPlan 并发生成最终成片 |
 | `/api/generation-result-images-new/{image_id}/retry` | POST | 重试单张最终图 |
@@ -95,7 +95,7 @@ Authorization: Bearer <token>
 
 新版前台“生成记录”列表使用 `/api/generation-records`，不是直接展示 `/api/logs`。旧版 `/api/generation-runs` 和 `/api/garment-skus` 仍作为兼容接口保留，不能作为新版页面主流程依据。`event_logs` 仍用于排查和审计。
 
-新版任务在调用 `select-styling` 时冻结主推款图片和默认数字模特快照。六宫格与最终成片只读取该输入版本以及选搭快照；已成功的选搭、预览和整组成片不开放重新生成，部分失败只通过单张结果图重试恢复。
+新版任务在调用 `select-styling` 时冻结主推款图片和默认数字模特快照。后端先生成候选召回快照，再调用 AI Stylist 输出 `StylingPlan`。六宫格与最终成片只读取该输入版本、`StylingPlan` 以及选搭快照；已成功的选搭、六宫格预览和整组成片允许重新生成，新结果设为当前 active 版本，历史结果继续保留用于追溯。部分失败仍支持单张结果图重试恢复。
 
 写接口在 cookie 会话下会校验 `Origin` / `Referer` 是否属于 `BACKEND_CORS_ORIGINS`，脚本调用应使用可选的 `APP_API_ACCESS_TOKEN`。
 
@@ -175,6 +175,57 @@ Authorization: Bearer <token>
 - `GET /api/styling-garments/{id}` 额外返回 `tagAttempts`；每项包含 provider、状态、时间、错误以及 `requestSnapshot` / `responseSnapshot`，供折叠技术详情查看。
 - 低置信度、`unknown`、`unsupported_accessory`、provider fallback 或模型显式要求复核时，状态为 `TAGGING_READY`。
 - 只有 `READY` 状态进入智能选搭候选；`TAGGING_READY`、`TAGGING_FAILED` 和 `DELETED` 不参与选搭。
+
+## AI Stylist / StylingPlan 契约
+
+`POST /api/generation-tasks/{task_id}/select-styling` 不再以“返回若干搭配服饰 ID”为完整目标。接口语义是生成并保存本次任务的 `StylingPlan`。
+
+输入职责：
+
+- 冻结当前主推款图片和任务名，创建 `GenerationTaskInputVersion`。
+- 读取当前 READY 搭配服饰，生成 `candidate_retrieval_snapshot`。
+- 向 AI Stylist 提供主推款图片、候选卡片、Lily 品牌边界和商品主角验收维度。
+
+输出字段应包含：
+
+```json
+{
+  "styling": {
+    "id": 12,
+    "selectedMaterialIds": [6, 10],
+    "selectedMaterials": [],
+    "reasonSummary": "string",
+    "warnings": [],
+    "stylingPlan": {
+      "schema_version": "styling-plan-v1",
+      "hero_understanding": {},
+      "styling_intents": [],
+      "outfit_candidates": [],
+      "selected_outfit_id": "candidate_a",
+      "selected_material_ids": [],
+      "rejected_candidates": [],
+      "warnings": []
+    }
+  }
+}
+```
+
+后端校验：
+
+- 选中 ID 必须来自本次 READY 候选。
+- 不允许重复 ID。
+- 空 `selected_material_ids` 合法。
+- 明显互斥穿搭必须有 `wearing_notes` 解释，否则视为失败。
+- `hero_visibility_score` 或 `commercial_readiness_score` 低于生产阈值时，不自动进入预览。
+
+技术详情必须保存：
+
+- 主推款输入快照。
+- 候选召回快照。
+- 传给 AI Stylist 的 material cards。
+- 完整 prompt / 任务说明。
+- AI Stylist 每一步响应或一次性返回的分步结构。
+- 最终 `StylingPlan`、被拒方案和评分。
 
 ## 旧版服装素材 CRUD 契约
 

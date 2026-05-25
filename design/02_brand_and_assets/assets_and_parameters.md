@@ -99,11 +99,30 @@ DELETED
 - `ai_tags` 承载图片可判断的视觉事实和搭配推断。
 - `official_title_tags` 只保存官方文字证据，不覆盖图片事实。
 - `manual_business_tags` 只维护年份、系列、禁用选搭等业务信息。
-- `effective_tags` 由后端合成，并压缩后提供给智能选搭。
+- `effective_tags` 由后端合成，并压缩后提供给候选召回和 AI Stylist。
 - Gemini 打标请求必须提供枚举、评判规则、复核条件和严格输出模板，不能只给空 JSON 结构。
 - 后端必须校验和归一化模型输出；需复核或 fallback 的标签不能直接进入 `READY`。
 
-## 5. 数字模特
+## 5. 候选召回与 StylingPlan
+
+搭配服饰标签不是最终审美结论，而是 AI Stylist 的候选输入。生产链路必须区分：
+
+- `effective_tags`：素材事实和搭配约束，用于召回、压缩和解释。
+- `candidate_retrieval_snapshot`：本次任务进入 AI Stylist 前的候选集合、排序和过滤原因。
+- `StylingPlan`：AI Stylist 对主推款和候选服饰做造型判断后的结构化方案。
+
+`StylingPlan` 至少保存：
+
+- 主推款理解：品类、卖点、不可遮挡区域和展示风险。
+- 造型意图：3-5 个可选造型方向。
+- outfit 候选：每套候选的真实搭配服饰、生成配饰、穿着方式和主推款展示重点。
+- 自评分数：审美、Lily 品牌贴合、主推款可见性、商业可用性。
+- 选中方案、拒绝方案和原因。
+- 最终 `selected_material_ids`，可为空。
+
+商品可见性优先级高于普通搭配好看程度。搭配服饰必须服务主推款，不应让主推款沦为整套 look 的背景元素。
+
+## 6. 数字模特
 
 MVP 只有一个后台维护的默认数字模特，前台只读。
 
@@ -117,7 +136,7 @@ MVP 只有一个后台维护的默认数字模特，前台只读。
 
 生成时选择 2 张数字模特图进入 Image-2 输入，并保存模特快照。历史再次生成默认使用当时快照，不读取当前最新模特。
 
-## 6. Image-2 输入图片预算
+## 7. Image-2 输入图片预算
 
 Image-2 单次最多 10 张输入图。
 
@@ -130,9 +149,9 @@ MVP 选图器：
 
 如果 10 张预算冲突，MVP 暂用固定截断并记录实际输入资产；更精细的降级优先级记 TODO。
 
-## 7. ShotPlan 字段
+## 8. ShotPlan 字段
 
-每个预览任务生成 6 条 ShotPlan。第 6 条在 MVP 最终生成时直接忽略。
+每个预览任务生成 6 条 ShotPlan。第 6 条在 MVP 最终生成时直接忽略。ShotPlan 必须读取选中的 `StylingPlan`，把造型意图、穿着方式、主推款卖点和风险落到每个图位。
 
 字段：
 
@@ -143,6 +162,8 @@ MVP 选图器：
 - `camera_angle`
 - `main_focus`
 - `visible_garments`
+- `hero_selling_points`
+- `wearing_notes`
 - `generated_accessory_notes`
 - `background_lighting`
 - `composition_notes`
@@ -155,7 +176,7 @@ MVP 选图器：
 - 不做特写。
 - 不抢主推款和搭配服饰的视觉中心。
 
-## 8. 输出与下载
+## 9. 输出与下载
 
 MVP 只要求单张下载。批量 ZIP、统一命名、平台规格导出记为后续 TODO。
 

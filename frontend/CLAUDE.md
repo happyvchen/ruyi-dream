@@ -2,7 +2,7 @@
 
 ## 职责 (Scope)
 
-ruyi-dream MVP 的前端实现目录。当前前端是 React + Vite + TypeScript 的单页 MVP，用于承载普通用户的新版“AI 摄影棚”：上传主推款、从搭配服饰库自动选搭、生成六宫格预览、生成前 5 张成片、复盘生成记录。
+ruyi-dream MVP 的前端实现目录。当前前端是 React + Vite + TypeScript 的单页 MVP，用于承载普通用户的新版“AI 摄影棚”：上传主推款、展示 AI Stylist 推荐造型方案、从搭配服饰库自动选搭或判断无需库内配角、生成六宫格预览、生成前 5 张成片、复盘生成记录。
 
 UX 源头在 `../design/03_ux_guide/user_uiux.md`，本目录只管“前端怎么组织代码”和“界面规则怎么落地”。
 
@@ -35,7 +35,7 @@ UX 源头在 `../design/03_ux_guide/user_uiux.md`，本目录只管“前端怎�
 
 ## 核心前端职责
 
-- `AI 摄影棚`：创建主推款 `GenerationTask`，推进智能选搭、六宫格预览和最终成片。
+- `AI 摄影棚`：创建主推款 `GenerationTask`，推进 AI Stylist 造型方案、六宫格预览和最终成片。
 - `搭配服饰库`：导入真实配角服装 `StylingGarment`，系统默认启动打标；列表展示摘要，详情展示完整分层标签，不向普通用户展示底层模型调用快照。
 - `数字模特`：只读展示当前默认数字模特。
 - `生成记录`：展示进入过生成阶段的 `GenerationTask`，聚焦入参、搭配、分镜预览和结果。
@@ -45,7 +45,7 @@ UX 源头在 `../design/03_ux_guide/user_uiux.md`，本目录只管“前端怎�
 
 - 前端实现前先读 `../design/03_ux_guide/CLAUDE.md`。
 - 接口联调前先读 `../backend/api_guideline.md`、`../backend/domain_model.md`。
-- 默认不展示 prompt、Image 2 任务包、策划器细节、底层模型名称和调用详情。
+- 默认不展示 prompt、Image 2 任务包、StylingPlan JSON、策划器细节、底层模型名称和调用详情。
 - 生成记录主视图展示进入过 AI 阶段的 `GenerationTask`，不要退回事件日志流水账。
 - 核心业务对象切换要同步 URL；临时草稿、弹窗、折叠状态不要写入 URL。
 - 页面语言使用摄影和电商语言：首图、全身、半身、背面、局部、重生、导出。

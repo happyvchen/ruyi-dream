@@ -8,7 +8,8 @@
 MediaAsset
 -> StylingGarment 打标
 -> GenerationTask / InputVersion
--> Gemini 选搭
+-> Candidate Retrieval 候选召回
+-> AI Stylist / StylingPlan
 -> ShotPlan
 -> Image-2 六宫格预览
 -> Image-2 前 5 张并发生成
@@ -118,19 +119,28 @@ ABANDONED
 
 ### 2.6 GenerationStyling
 
-智能选搭结果：
+AI Stylist 造型方案结果：
 
 - id
 - task_id
 - input_version_id
 - source_material_ids_json
+- candidate_material_ids_json
+- candidate_retrieval_snapshot_json
 - selected_material_ids_json
 - selected_material_snapshot_json
+- styling_plan_json
+- hero_understanding_json
+- outfit_candidates_json
+- critic_scores_json
+- rejected_candidates_json
 - reason_summary
 - warnings_json
 - status
 - attempt_id
 - created_at / updated_at
+
+`selected_material_ids_json` 只是从 `StylingPlan` 派生出的关系索引，用于素材快照、查询和前端卡片展示，不是选搭阶段的完整结果。生产排查和后续 ShotPlan 必须读取 `styling_plan_json`。
 
 MVP 不支持成功后重新搭配。失败重试可以新增 attempt 并更新当前 styling 状态。
 
@@ -212,16 +222,74 @@ MVP 只保存一张六宫格总图，不裁 frame。未来支持重新预览时�
 - `media service`：上传、衍生图、预签名、稳定读取路径。
 - `styling garment service`：搭配服饰草稿、保存、打标、状态推进。
 - `generation task service`：任务草稿、输入版本、状态机。
-- `styling selection service`：组装主推款图片和全量 tags，调用 Gemini 选搭。
-- `shot plan service`：生成 6 条 ShotPlan。
+- `candidate retrieval service`：基于 READY 服饰 tags、颜色、品类、季节、风险和未来 embedding 生成候选召回快照。
+- `AI Stylist service`：组装主推款图片、候选卡片、品牌边界和商品验收维度，调用 Gemini 生成 `StylingPlan`。
+- `styling critic service`：校验 `StylingPlan` 的基础业务事实、可穿性、主推款可见性和商业可用性阈值。
+- `shot plan service`：基于 `StylingPlan` 生成 6 条 ShotPlan。
 - `image input selector`：按阶段选择最多 10 张 Image-2 输入图。
 - `image generation service`：六宫格预览和最终图生成。
 - `attempt service`：provider 调用、重试、耗时、错误和快照。
 - `history service`：生成记录列表、详情、技术详情。
 
-## 4. 模型调用
+## 4. AI Stylist 实现建议
 
-### 4.1 Gemini 打标
+### 4.1 调用结构
+
+优先实现为可追溯的分步工作流：
+
+```text
+HeroUnderstanding
+-> StylingIntentExploration
+-> OutfitCandidateGeneration
+-> StylistCritic
+-> StylingPlanSelection
+```
+
+工程上可以先用一次 Gemini 调用返回完整 JSON，但 `request_snapshot_json` 和 `response_snapshot_json` 必须保存分步结构，不能只保存最终 `selected_material_ids`。
+
+### 4.2 候选召回
+
+MVP 可先使用规则化召回：
+
+- 只取 `READY` 搭配服饰。
+- 压缩 `effective_tags`。
+- 根据主推款品类和 tags 粗排互补品类。
+- 降权 `coverage_risk` 高、风格风险高或季节冲突明显的服饰。
+- 保留一定多样性，避免候选全是同一品类。
+
+后续生产增强：
+
+- CLIP / 多模态 embedding 召回。
+- 历史人工采纳、拒绝、下载、复拍和销售/点击表现。
+- 品牌专属偏好 profile。
+
+### 4.3 业务校验
+
+后端校验应覆盖真实性和生产边界，而不是硬编码审美：
+
+- 选中 ID 必须来自本次 READY 候选。
+- 不允许重复 ID。
+- 空选中合法。
+- 明显互斥穿搭必须在 `wearing_notes` 中解释，否则拒绝。
+- `hero_visibility_score` 和 `commercial_readiness_score` 低于阈值时，不自动进入预览。
+- `StylingPlan` 必须保存拒绝方案和原因，便于复盘。
+
+### 4.4 ShotPlan 联动
+
+ShotPlan 生成必须读取：
+
+- `selected_outfit.mode`
+- `hero_selling_points`
+- `hero_visibility_risks`
+- `wearing_notes`
+- `generated_accessories`
+- `risk_notes`
+
+例如主推款是白色高腰阔腿裤时，搭配方案可以完整，但 ShotPlan 必须保证裤子的高腰、褶裥、垂坠和比例是图位重点，而不是让上装或外套成为主角。
+
+## 5. 模型调用
+
+### 5.1 Gemini 打标
 
 输入：
 
@@ -244,45 +312,55 @@ MVP 只保存一张六宫格总图，不裁 frame。未来支持重新预览时�
 - 解析/调用失败进入 `TAGGING_FAILED`。
 - 每次调用以 `GenerationAttempt.owner_type = styling_garment_tagging` 保存 prompt、图片输入元数据、原始/归一化返回和错误信息。
 
-### 4.2 Gemini 智能选搭
+### 5.2 AI Stylist / StylingPlan
 
 输入：
 
 - 主推款图片。
-- 全部 `READY` 搭配服饰 tags。
+- 候选召回快照。
+- READY 搭配服饰压缩 tags。
+- Lily 品牌边界。
+- 商品主角验收维度。
 
 输出：
 
-- `selected_material_ids`
-- `hero_visual_summary`
-- `reason_summary`
+- `hero_understanding`
+- `styling_intents`
+- `outfit_candidates`
+- `selected_outfit_id`
+- `selected_material_ids` 派生索引
+- `rejected_candidates`
+- `critic_scores`
 - `warnings`
 
 校验：
 
 - 空集合允许。
 - 非法 ID、非 READY、重复 ID、不可解析 JSON 失败。
+- 明显互斥穿搭缺少穿着解释时失败。
+- 商品可见性或商业可用性低于阈值时不自动进入预览。
 
-### 4.3 ShotPlan 生成
+### 5.3 ShotPlan 生成
 
 输入：
 
 - 主推款图片或极简视觉摘要。
+- `StylingPlan`。
 - 选中的搭配服饰快照。
 - 数字模特快照。
 - 品牌棚拍边界。
 
 输出：6 条结构化 ShotPlan。
 
-### 4.4 Image-2 六宫格预览
+### 5.4 Image-2 六宫格预览
 
 输出一张 3x2 六宫格总图。MVP 不裁切 frame。
 
-### 4.5 Image-2 最终图
+### 5.5 Image-2 最终图
 
 并发生成前 5 张。每张传同一张六宫格预览图，并在 prompt 中指定参考第 N 格。
 
-## 5. API 草案
+## 6. API 草案
 
 仅作为实现方向：
 
@@ -308,7 +386,7 @@ GET    /api/generation-records/{taskId}
 GET    /api/generation-records/{taskId}?includeDebug=true
 ```
 
-## 6. 实现注意
+## 7. 实现注意
 
 - 所有状态推进由后端服务完成，前端不直接写阶段状态。
 - 成功后的“重新搭配 / 重新预览 / 整组换版”不进 MVP。
@@ -316,4 +394,4 @@ GET    /api/generation-records/{taskId}?includeDebug=true
 - `ImageCount` 不作为强字段，界面需要时统计。
 - 生成记录默认隐藏技术详情。
 - 搭配服饰详情展示完整分层标签；Gemini 打标请求/返回属于默认折叠的技术详情。
-- 主推款、搭配服饰、数字模特、ShotPlan 和 provider 调用都要快照。
+- 主推款、候选召回、StylingPlan、搭配服饰、数字模特、ShotPlan 和 provider 调用都要快照。

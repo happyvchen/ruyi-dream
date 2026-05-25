@@ -4,7 +4,7 @@
 
 本目录存放 ruyi-dream MVP 的权威设计文档：产品范围、生成流程、搭配服饰与媒体规则、UX、技术生产路线。
 
-新版形态是 B2B AI 数字化摄影棚：用户上传主推款，系统从搭配服饰库选择真实可见的配角服饰，生成 3x2 六宫格预览，并按前 5 格生成电商棚拍成片。旧版 demo 已封存为 `demo-20260518`，只复用其中有效工程手段，不延续旧版产品形态作为主流程。
+新版形态是 B2B AI 数字化摄影棚：用户上传主推款，系统通过 AI Stylist 工作流理解主推款、探索多套造型方案、从搭配服饰库选择真实可见的配角服饰或判断无需库内配角，生成 3x2 六宫格预览，并按前 5 格生成电商棚拍成片。旧版 demo 已封存为 `demo-20260518`，只复用其中有效工程手段，不延续旧版产品形态作为主流程。
 
 ## 文档索引 (Index)
 
@@ -18,6 +18,7 @@
 | `02_brand_and_assets/lily_gemini_tagging_flow.md` | Lily Gemini 打标流程：输入、输出、校验、effective_tags 合成和选搭压缩 | 实现或排查 Gemini 打标时 |
 | `03_ux_guide/CLAUDE.md` | 普通用户视角 UI/UX、页面信息层级、交互边界 | 设计或实现前端页面时 |
 | `04_implementation_guide/CLAUDE.md` | 技术路线、生产实操、模型分工、任务包落地方式 | 工程实现、技术拆分、生产流程设计时 |
+| `archive/CLAUDE.md` | 已弃用设计资产和过程复盘 | 追溯历史方案、理解弃用原因时 |
 
 ## 权威边界 (Authority)
 
@@ -30,11 +31,12 @@
 - **品牌调性参考**：`02_brand_and_assets/brand_style_templates.md`
 - **前台 UI/UX 源头**：`03_ux_guide/user_uiux.md`
 - **技术生产路线源头**：`04_implementation_guide/technical_route_and_operations.md`
+- **归档文档不是权威源头**：`archive/` 仅用于追溯历史方案和弃用原因
 
 ## 本地规则 (Local Rules)
 
 1. **任何设计前先读产品范围和职责拆分**：至少阅读 `00_product_overview/product_overview.md` 与 `01_generation_flow/generation_responsibility_matrix.md`。
-2. **先判断职责，再写 prompt**：任何生成问题先判断属于主推款事实、搭配服饰事实、数字模特、ShotPlan、生成配饰、媒体输入预算还是导出规格。
+2. **先判断职责，再写 prompt**：任何生成问题先判断属于主推款事实、候选召回、AI Stylist、StylingPlan、搭配服饰事实、数字模特、ShotPlan、生成配饰、媒体输入预算还是导出规格。
 3. **Image-2 只做视觉生成**：智能选搭、ShotPlan、标签体系、历史快照和状态机由前置服务负责。
 4. **前台 UI 不展示系统复杂性**：普通用户默认只看到主推款、搭配服饰、六宫格、最终结果和生成记录；prompt、provider 请求、快照 JSON 只在技术详情出现。
 5. **实验结论要升格后才能成为规范**：外部文档、临时验证和历史讨论的发现，只有同步进对应权威文档后，才可作为正式实现依据。
