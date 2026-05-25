@@ -54,6 +54,9 @@ MediaAsset
 - status
 - manual_tags_json
 - ai_tags_json
+- official_title_tags_json
+- effective_tags_json
+- tag_meta_json
 - tag_schema_version
 - tag_completed_at
 - created_at / updated_at / deleted_at
@@ -220,9 +223,26 @@ MVP 只保存一张六宫格总图，不裁 frame。未来支持重新预览时�
 
 ### 4.1 Gemini 打标
 
-输入：一套搭配服饰图片。  
-输出：稳定 schema 的 `ai_tags_json`。  
-失败：`TAGGING_FAILED`，不进入选搭候选。
+输入：
+
+- 一套搭配服饰的前 3-6 张图片及图片元数据。
+- 可选官方标题或商品信息。
+- Lily 品牌边界。
+- `lily-garment-tags-v1` 的完整枚举、字段判定规则、复核条件和 JSON 输出模板。
+
+输出：
+
+- `ai_tags_json`
+- `official_title_tags_json`
+- `tag_meta_json`
+- 后端合成的 `effective_tags_json`
+
+治理：
+
+- 后端对枚举、嵌套字段、置信度和短文本做归一化与校验。
+- 低置信度、配饰误入、品类不明确、模型标记复核或 fallback 结果进入 `TAGGING_READY`，不进入选搭候选。
+- 解析/调用失败进入 `TAGGING_FAILED`。
+- 每次调用以 `GenerationAttempt.owner_type = styling_garment_tagging` 保存 prompt、图片输入元数据、原始/归一化返回和错误信息。
 
 ### 4.2 Gemini 智能选搭
 
@@ -295,4 +315,5 @@ GET    /api/generation-records/{taskId}?includeDebug=true
 - 失败重试必须保留旧 attempt。
 - `ImageCount` 不作为强字段，界面需要时统计。
 - 生成记录默认隐藏技术详情。
+- 搭配服饰详情展示完整分层标签；Gemini 打标请求/返回属于默认折叠的技术详情。
 - 主推款、搭配服饰、数字模特、ShotPlan 和 provider 调用都要快照。

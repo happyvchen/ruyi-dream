@@ -36,7 +36,7 @@ MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂�
 
 当前职责：
 
-- 保存全局唯一 `code`、状态、AI 标签、人工业务标签、生效标签和打标错误。
+- 保存全局唯一 `code`、状态、AI 标签、官方标题标签、人工业务标签、生效标签、标签元信息和打标错误。
 - 通过 `StylingGarmentImage` 关联 1-6 张图片，排序第一张作为封面和主要参考图。
 - 导入后由前端默认触发 `/save-and-tag`，服务端进入 `TAGGING_RUNNING` 并调用 Gemini 打标。
 - 只有 `READY` 且未被人工标签标记 `do_not_use_for_styling` 的服饰进入智能选搭候选。
@@ -48,6 +48,7 @@ MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂�
 |---|---|
 | `DRAFT` | 已创建但尚未完成打标 |
 | `TAGGING_RUNNING` | 正在打标；此时禁止修改和归档 |
+| `TAGGING_READY` | 标签已生成但需要复核，不进入智能选搭候选 |
 | `READY` | 可进入智能选搭候选 |
 | `TAGGING_FAILED` | 打标失败，保留素材但不参与选搭 |
 | `DELETED` | 已归档，日常列表隐藏 |
@@ -67,6 +68,8 @@ AI 摄影棚中的一次主推款拍摄任务。
 ### 3.3 GenerationAttempt
 
 所有 Gemini / Image-2 调用的过程记录。保存 provider、状态、开始/完成/失败时间、request/response 快照、错误信息和输出媒体，用于技术详情与问题排查。
+
+搭配服饰打标使用 `owner_type = styling_garment_tagging`、`owner_id = StylingGarment.id` 记录 attempt。请求快照包含 Gemini prompt、schema version、模型名与输入图片元数据；响应快照包含原始返回和归一化后的结构化标签。详情 UI 默认折叠展示这些技术信息。
 
 ## 4. 旧版兼容对象
 

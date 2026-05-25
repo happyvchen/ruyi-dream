@@ -38,9 +38,9 @@ Authorization: Bearer <token>
 | `/api/health` | GET | 健康检查；只返回非敏感 readiness 状态 |
 | `/api/styling-garments` | GET | 搭配服饰库列表，支持 `keyword` 搜索 |
 | `/api/styling-garments` | POST | 创建一套搭配服饰并上传 1-6 张图片 |
-| `/api/styling-garments/{garment_id}` | GET | 搭配服饰详情、图片、标签 |
+| `/api/styling-garments/{garment_id}` | GET | 搭配服饰详情、图片、分层标签和打标 attempt 技术快照 |
 | `/api/styling-garments/{garment_id}` | PATCH | 编辑 code 或人工业务标签；打标中禁止修改 |
-| `/api/styling-garments/{garment_id}/save-and-tag` | POST | 系统默认触发 Gemini 打标；成功后进入 `READY` |
+| `/api/styling-garments/{garment_id}/save-and-tag` | POST | 系统默认触发 Gemini 打标；通过复核策略后进入 `READY`，否则进入 `TAGGING_READY` |
 | `/api/styling-garments/{garment_id}` | DELETE | 归档搭配服饰；打标中禁止归档 |
 | `/api/generation-tasks` | GET | AI 摄影棚任务列表 |
 | `/api/generation-tasks` | POST | 上传主推款图片并创建拍摄任务 |
@@ -164,7 +164,10 @@ Authorization: Bearer <token>
 - `POST /api/styling-garments` 接收 `code` 和 `files`，单套最多 6 张，写入媒体资产后创建 `DRAFT` 记录。
 - 前端导入成功后默认立即调用 `POST /api/styling-garments/{id}/save-and-tag`，不要求用户确认是否打标。
 - `TAGGING_RUNNING` 期间服务端拒绝 code/标签修改、重复打标和归档。
-- 只有 `READY` 状态进入智能选搭候选；`TAGGING_FAILED` 和 `DELETED` 不参与选搭。
+- 打标输出分层返回 `aiTags`、`officialTitleTags`、`manualTags`、`effectiveTags` 和 `tagMeta`。
+- `GET /api/styling-garments/{id}` 额外返回 `tagAttempts`；每项包含 provider、状态、时间、错误以及 `requestSnapshot` / `responseSnapshot`，供折叠技术详情查看。
+- 低置信度、`unknown`、`unsupported_accessory`、provider fallback 或模型显式要求复核时，状态为 `TAGGING_READY`。
+- 只有 `READY` 状态进入智能选搭候选；`TAGGING_READY`、`TAGGING_FAILED` 和 `DELETED` 不参与选搭。
 
 ## 旧版服装素材 CRUD 契约
 

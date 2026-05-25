@@ -36,7 +36,7 @@ UX 源头在 `../design/03_ux_guide/user_uiux.md`，本目录只管“前端怎�
 ## 核心前端职责
 
 - `AI 摄影棚`：创建主推款 `GenerationTask`，推进智能选搭、六宫格预览和最终成片。
-- `搭配服饰库`：导入真实配角服装 `StylingGarment`，系统默认启动打标，展示 code、状态和标签摘要。
+- `搭配服饰库`：导入真实配角服装 `StylingGarment`，系统默认启动打标；列表展示摘要，详情展示完整分层标签和默认折叠的 Gemini 打标调用快照。
 - `数字模特`：只读展示当前默认数字模特。
 - `生成记录`：展示进入过 AI 阶段的 `GenerationTask`，技术详情默认折叠。
 - 默认不展示 prompt、Image-2 任务包、provider 请求等复杂细节。

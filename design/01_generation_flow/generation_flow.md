@@ -42,11 +42,12 @@ flowchart TD
 
 ```text
 DRAFT -> TAGGING_RUNNING -> READY
-TAGGING_FAILED
+DRAFT -> TAGGING_RUNNING -> TAGGING_READY
+DRAFT -> TAGGING_RUNNING -> TAGGING_FAILED
 DELETED
 ```
 
-点击 `导入` 后保存搭配服饰并触发 Gemini 打标。导入动作本身表示搭配服饰已经进入库；后续打标状态显示在新建搭配服饰卡片上并自动刷新。打标执行期间锁定该搭配服饰的图片集合、排序、标签编辑和归档。已保存搭配服饰的图片排序、替换、删除或追加会影响打标，UI 应提供 `仅保存` 与 `保存并重新打标`。标签体系是后续重点优化对象，但 MVP 必须有稳定、瘦小、准确的 schema。选搭阶段会把全部可用 tags 传给 Gemini，因此 tags 不应膨胀成冗长描述。
+点击 `导入` 后保存搭配服饰并触发 Gemini 打标。导入动作本身表示搭配服饰已经进入库；后续打标状态显示在新建搭配服饰卡片上并自动刷新。打标执行期间锁定该搭配服饰的图片集合、排序、标签编辑和归档。已保存搭配服饰的图片排序、替换、删除或追加会影响打标，UI 应提供 `仅保存` 与 `保存并重新打标`。打标使用 `lily-garment-tags-v1` 的完整判定规程并由后端校验；低置信度、fallback 或品类风险结果进入 `TAGGING_READY`，不参与选搭。列表保持标签摘要，详情展示完整分层标签和默认折叠的调用快照。
 
 ## 3. 主推款输入版本
 
@@ -68,8 +69,7 @@ DELETED
 输入：
 
 - 当前输入版本的主推款图片。
-- 当前全部 `READY` 搭配服饰的完整 tags。
-- 每套搭配服饰的压缩标识信息，例如 ID、code、category、colors、style、season、brief。
+- 当前全部 `READY` 搭配服饰经后端压缩后的 `effective_tags` 候选卡片，例如 ID、code、category、colors、fit、season、pairing_brief 和 risk。
 
 不输入：
 
