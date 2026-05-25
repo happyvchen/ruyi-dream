@@ -374,6 +374,58 @@ class BackendSmokeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "满分"):
             main.validate_styling_plan(plan, candidate_snapshot)
 
+    def test_styling_plan_allows_full_scores_with_complete_diagnosis(self) -> None:
+        main = importlib.import_module("app.main")
+        candidate_snapshot = {
+            "candidate_material_ids": [],
+            "material_cards": [],
+        }
+        plan = {
+            "selected_material_ids": [],
+            "selected_outfit_id": "candidate_a",
+            "outfit_candidates": [
+                {
+                    "id": "candidate_a",
+                    "selected_material_ids": [],
+                    "wearing_notes": "主推款单穿。",
+                    "aesthetic_diagnosis": {
+                        "color_weight": "色彩干净轻量。",
+                        "silhouette_balance": "主推款比例完整。",
+                        "waistline_proportion": "腰线清楚。",
+                        "season_material_fit": "材质季节匹配。",
+                        "template_risk": "没有套用完整通勤模板。",
+                        "brand_read": "符合 Lily 干净通勤调性。",
+                    },
+                    "scores": {
+                        "aesthetic_score": 1,
+                        "brand_fit_score": 1,
+                        "hero_visibility_score": 1,
+                        "commercial_readiness_score": 1,
+                    },
+                    "risk_notes": [],
+                }
+            ],
+        }
+
+        main.validate_styling_plan(plan, candidate_snapshot)
+
+    def test_fallback_styling_plan_bypasses_production_quality_gate(self) -> None:
+        main = importlib.import_module("app.main")
+        candidate_snapshot = {
+            "candidate_material_ids": [],
+            "material_cards": [],
+        }
+        input_row = {
+            "id": 1,
+            "task_id": 1,
+            "name_snapshot": "fallback",
+            "image_snapshot_json": "[]",
+        }
+        plan = main.fallback_styling_plan(input_row, candidate_snapshot, "gemini_api_key_missing")
+
+        self.assertEqual(plan["quality_gate_mode"], "fallback")
+        main.validate_styling_plan(plan, candidate_snapshot)
+
     def test_styling_plan_rejects_high_waist_dark_outerwear_stack(self) -> None:
         main = importlib.import_module("app.main")
         candidate_snapshot = {

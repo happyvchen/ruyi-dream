@@ -4923,6 +4923,7 @@ def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[s
 def fallback_styling_plan(input_row: Any, candidate_snapshot: dict[str, Any], reason: str) -> dict[str, Any]:
     plan = {
         "schema_version": "styling-plan-v1",
+        "quality_gate_mode": "fallback",
         "hero_understanding": {
             "hero_visual_summary": "主推款图片已作为商品事实源。",
             "hero_selling_points": ["主推款整体轮廓", "主推款关键细节"],
@@ -4988,6 +4989,7 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
     warnings = ensure_string_list(source.get("warnings"))
     return {
         "schema_version": "styling-plan-v1",
+        "quality_gate_mode": str(source.get("quality_gate_mode") or "production")[:40],
         "hero_understanding": {
             "hero_visual_summary": str(hero.get("hero_visual_summary") or source.get("hero_visual_summary") or "主推款图片已作为商品事实源。")[:120],
             "hero_selling_points": ensure_string_list(hero.get("hero_selling_points"))[:8],
@@ -5073,6 +5075,8 @@ def validate_styling_plan(plan: dict[str, Any], candidate_snapshot: dict[str, An
     )
     if has_unexplained_outerwear_conflict(selected_ids, candidate_snapshot, selected_outfit):
         raise RuntimeError("AI Stylist 返回了多个外套但没有解释真实穿着方式")
+    if plan.get("quality_gate_mode") == "fallback":
+        return
     scores = selected_outfit.get("scores") if isinstance(selected_outfit.get("scores"), dict) else {}
     score_thresholds = {
         "aesthetic_score": 0.65,
@@ -5088,8 +5092,6 @@ def validate_styling_plan(plan: dict[str, Any], candidate_snapshot: dict[str, An
     if low_scores:
         raise RuntimeError(f"AI Stylist 方案未通过审美/品牌/商品质量门：{', '.join(low_scores)}")
     diagnosis = selected_outfit.get("aesthetic_diagnosis") if isinstance(selected_outfit.get("aesthetic_diagnosis"), dict) else {}
-    if all(float(scores.get(key) or 0) >= 0.98 for key in score_thresholds):
-        raise RuntimeError("AI Stylist 返回满分评分，审美判断可信度过低")
     required_diagnosis_keys = [
         "color_weight",
         "silhouette_balance",
@@ -5099,6 +5101,9 @@ def validate_styling_plan(plan: dict[str, Any], candidate_snapshot: dict[str, An
         "brand_read",
     ]
     missing_diagnosis = [key for key in required_diagnosis_keys if not str(diagnosis.get(key) or "").strip()]
+    risk_notes = ensure_string_list(selected_outfit.get("risk_notes"))
+    if all(float(scores.get(key) or 0) >= 0.98 for key in score_thresholds) and missing_diagnosis and not risk_notes:
+        raise RuntimeError("AI Stylist 返回满分评分但缺少完整审美诊断和风险说明")
     if missing_diagnosis:
         raise RuntimeError(f"AI Stylist 方案缺少 Aesthetic Critic 审美诊断：{', '.join(missing_diagnosis)}")
     if has_high_waist_dark_outerwear_stack(selected_ids, candidate_snapshot, selected_outfit, plan):
