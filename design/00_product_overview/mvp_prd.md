@@ -113,11 +113,12 @@ AI 智能选搭规则：
 
 ```text
 DRAFT -> TAGGING_RUNNING -> READY
-TAGGING_FAILED
+DRAFT -> TAGGING_RUNNING -> TAGGING_READY
+DRAFT -> TAGGING_RUNNING -> TAGGING_FAILED
 DELETED
 ```
 
-上传即创建草稿；点击保存才开始 Gemini 打标。打标中锁定图片集合和排序，素材 code 可改。打标失败的素材保留但不进入选搭候选，用户可重试打标或编辑后重新保存。
+上传即创建草稿；点击保存才开始 Gemini 打标。打标中锁定图片集合和排序，素材 code 可改。低置信度、fallback 或非服装风险结果进入 `TAGGING_READY` 并显示为 `待复核`，不进入选搭候选；打标失败的素材保留，用户可重试打标或编辑后重新保存。
 
 ### 4.3 数字模特
 

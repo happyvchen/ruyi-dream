@@ -69,42 +69,39 @@
 ```text
 DRAFT
 TAGGING_RUNNING
+TAGGING_READY
 READY
 TAGGING_FAILED
 DELETED
 ```
 
-只有 `READY` 状态进入智能选搭候选。打标失败素材保留但不参与选搭。
+只有 `READY` 状态进入智能选搭候选。`TAGGING_READY` 表示结构化标签已经生成，但因低置信度、识别为非服装配饰、品类不明确、fallback 打标或其它复核原因而暂不进入选搭；打标失败素材保留但不参与选搭。
 
 ## 4. 标签 schema
 
-标签体系是后续重点优化对象。MVP 先使用稳定、瘦小、准确的 schema，因为选搭阶段会把全部可用搭配服饰 tags 传给 Gemini。
+当前权威标签 schema 为 `lily-garment-tags-v1`，完整字段和枚举见 `lily_tagging_system.md`，实际 Gemini 打标规程见 `lily_gemini_tagging_flow.md`。
 
-建议结构：
+搭配服饰保留来源分层：
 
 ```json
 {
-  "schema_version": "styling-garment-tags-v1",
-  "category": "top | bottom | dress | outerwear | set | other_garment | unsupported_accessory | unknown",
-  "sub_category": "string",
-  "colors": {
-    "primary": "string",
-    "secondary": ["string"]
-  },
-  "style": ["business", "commute", "minimal", "elegant", "casual"],
-  "season": ["spring", "summer", "autumn", "winter"],
-  "material": ["string"],
-  "silhouette": ["string"],
-  "patterns": ["solid", "stripe", "check", "print", "texture"],
-  "fit_notes": "string",
-  "pairing_notes": "string",
-  "avoid_pairing_with": ["string"],
-  "brief": "string",
-  "confidence": 0.0
+  "schema_version": "lily-garment-tags-v1",
+  "ai_tags": {},
+  "official_title_tags": {},
+  "manual_business_tags": {},
+  "effective_tags": {},
+  "tag_meta": {}
 }
 ```
 
-`brief` 必须短，用于 Gemini 全库选搭。完整、准确优先，但禁止把 tags 写成冗长散文。
+原则：
+
+- `ai_tags` 承载图片可判断的视觉事实和搭配推断。
+- `official_title_tags` 只保存官方文字证据，不覆盖图片事实。
+- `manual_business_tags` 只维护年份、系列、禁用选搭等业务信息。
+- `effective_tags` 由后端合成，并压缩后提供给智能选搭。
+- Gemini 打标请求必须提供枚举、评判规则、复核条件和严格输出模板，不能只给空 JSON 结构。
+- 后端必须校验和归一化模型输出；需复核或 fallback 的标签不能直接进入 `READY`。
 
 ## 5. 数字模特
 

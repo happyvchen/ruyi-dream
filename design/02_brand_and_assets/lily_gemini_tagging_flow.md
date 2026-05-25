@@ -36,10 +36,11 @@ TAGGING_RUNNING
 每次打标输入包含：
 
 - 当前服装资产的前 3-6 张图片。
-- 图片顺序、图片 id、role hint。
+- 图片顺序、图片 id、role hint、文件名、mime 和可用尺寸元数据。
 - 可选官方标题。
 - Lily 全局品牌边界。
-- 严格 JSON 输出要求。
+- 完整标签判定规程：字段含义、合法枚举、判断规则、自由文本长度和复核条件。
+- 严格 JSON 输出模板。
 
 示例：
 
@@ -65,6 +66,8 @@ Gemini 必须按以下优先级判断：
 ```text
 图片事实 > 多图一致性 > 官方标题证据 > Lily 全局边界
 ```
+
+仅传输 JSON 外形而不传字段判定规则是不充分的。模型必须明确知道，例如 `materials_visual` 只能描述视觉材质、`coverage_risk` 用于判断是否遮挡主推款、`lily_style` 分数服务品牌适配而非复制营销词，以及何时必须返回 `unknown` 或 `needs_review`。
 
 ## 4. Gemini 判断步骤
 
@@ -168,14 +171,29 @@ Gemini 返回严格 JSON：
 - `category` 未把配饰当服装。
 - 标题和图片冲突时记录 `title_image_conflict`。
 
-失败时：
+解析失败或结构无法校验时：
 
 ```text
 status = TAGGING_FAILED
 tag_error = 错误原因
 ```
 
-成功时写入：
+结构化输出成功但需要复核时：
+
+```text
+status = TAGGING_READY
+```
+
+包括：
+
+- `category = unknown` 或 `unsupported_accessory`。
+- `overall_confidence < 0.72`。
+- Gemini 标记 `needs_review`。
+- 使用 fallback 标签，未获得真实 Gemini 识别结果。
+
+只有通过复核策略的结果写为 `READY`，进入智能选搭候选。
+
+成功写入：
 
 ```text
 ai_tags_json
@@ -184,6 +202,18 @@ tag_meta_json
 tag_schema_version
 tag_completed_at
 ```
+
+### 6.1 调用快照
+
+每次打标都保存一次 provider attempt，包含：
+
+- provider 与 model。
+- 发送给模型的完整 prompt 和 schema version。
+- 图片输入的 id、排序、role hint、object key、文件名、mime 和尺寸元数据。
+- provider 原始返回、归一化后的标签输出，或失败错误信息。
+- 开始、完成或失败时间。
+
+这些信息用于技术排查和模型质量回溯，前台默认折叠展示，不作为普通业务操作的主信息。
 
 ## 7. 后端合成 `effective_tags`
 
