@@ -18,6 +18,7 @@
 | `02_brand_and_assets/lily_gemini_tagging_flow.md` | Lily Gemini 打标流程：输入、输出、校验、effective_tags 合成和选搭压缩 | 实现或排查 Gemini 打标时 |
 | `03_ux_guide/CLAUDE.md` | 普通用户视角 UI/UX、页面信息层级、交互边界 | 设计或实现前端页面时 |
 | `04_implementation_guide/CLAUDE.md` | 技术路线、生产实操、模型分工、任务包落地方式 | 工程实现、技术拆分、生产流程设计时 |
+| `archive/CLAUDE.md` | 已弃用设计资产和过程复盘 | 追溯历史方案、理解弃用原因时 |
 
 ## 权威边界 (Authority)
 
@@ -30,6 +31,7 @@
 - **品牌调性参考**：`02_brand_and_assets/brand_style_templates.md`
 - **前台 UI/UX 源头**：`03_ux_guide/user_uiux.md`
 - **技术生产路线源头**：`04_implementation_guide/technical_route_and_operations.md`
+- **归档文档不是权威源头**：`archive/` 仅用于追溯历史方案和弃用原因
 
 ## 本地规则 (Local Rules)
 
