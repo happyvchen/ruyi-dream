@@ -161,24 +161,23 @@ Gemini 返回严格 JSON：
 
 ## 6. 后端校验
 
-后端收到 Gemini 响应后必须校验：
+后端收到 Gemini 响应后执行解析、归一化和复核策略：
 
-- JSON 可解析。
-- 枚举值合法。
-- 必填字段存在。
-- 自由文本长度不超过限制。
-- 置信度为 0-1。
-- `category` 未把配饰当服装。
-- 标题和图片冲突时记录 `title_image_conflict`。
+- JSON 必须可解析；不可解析属于不可恢复失败。
+- 非法或缺失枚举归一化为 `unknown`、默认值或空数组。
+- 自由文本按字段限制截断。
+- 置信度限制在 0-1 范围内；低置信度进入复核。
+- `category` 为配饰或不明确时进入复核，不作为可用服装候选。
+- 标题和图片冲突时记录 `title_image_conflict` 并进入复核。
 
-解析失败或结构无法校验时：
+provider 调用失败或返回内容无法解析为 JSON 时：
 
 ```text
 status = TAGGING_FAILED
 tag_error = 错误原因
 ```
 
-结构化输出成功但需要复核时：
+JSON 可解析但归一化后存在风险、缺失或不确定项时：
 
 ```text
 status = TAGGING_READY
