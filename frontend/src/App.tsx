@@ -148,7 +148,7 @@ export function App() {
       if (detail) setTask(detail)
     }
     if (route.page === 'records' && route.recordId && !recordDetail) {
-      const detail = await api.getRecord(route.recordId, true).then((r) => r.item).catch(() => null)
+      const detail = await api.getRecord(route.recordId, false).then((r) => r.item).catch(() => null)
       if (detail) setRecordDetail(detail)
     }
   }
@@ -474,7 +474,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
           </div>
         ))}
       </div>
-      <p className="edit-hint">确认后可进入智能选搭；点击智能选搭时会冻结主推款图片和默认数字模特快照。</p>
+      <p className="edit-hint">确认后可进入智能选搭；系统会保留本次主推款和默认数字模特信息用于后续生成。</p>
       <button className="primary" onClick={() => void run('确认主推款输入中...', () => api.readyTask(task.id), (r: { item: GenerationTask }) => setTask(r.item))}>
         确认并进入智能选搭
       </button>
@@ -499,7 +499,7 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
       <AIOperationList operations={operations} />
       {task?.styling ? (
         <div className="selected-strip">
-          {task.styling.selectedMaterials.length ? task.styling.selectedMaterials.map((item) => <GarmentCard key={item.id} item={item} />) : <EmptyState title="未选择库内服饰" text="Gemini 判断本次可以不加入库内搭配服饰。" />}
+          {task.styling.selectedMaterials.length ? task.styling.selectedMaterials.map((item) => <GarmentCard key={item.id} item={item} />) : <EmptyState title="未选择库内服饰" text="系统判断本次可以不加入库内搭配服饰。" />}
         </div>
       ) : <EmptyState title="等待智能选搭" text="点击按钮后会冻结当前主推款输入版本。" />}
       <button className="primary" disabled={!canSelect} onClick={() => task && void run('智能选搭中...', () => {
@@ -530,7 +530,7 @@ function PreviewStep({ task, setTask, run, localOperations, startLocalOperation,
     <div className="step-panel">
       <div className="step-copy"><h2>六宫格预览</h2><p>只显示一张 3x2 预览图。最终固定生成前 5 格，第 6 格忽略。</p></div>
       <AIOperationList operations={operations} />
-      {task?.preview?.asset ? <img className="preview-board" src={mediaUrl(task.preview.asset.previewUrl || task.preview.asset.url)} /> : <EmptyState title="尚未生成六宫格" text="系统会先生成 ShotPlan，再调用 Image-2 输出六宫格。" />}
+      {task?.preview?.asset ? <img className="preview-board" src={mediaUrl(task.preview.asset.previewUrl || task.preview.asset.url)} /> : <EmptyState title="尚未生成六宫格" text="点击生成预览后，系统会输出一张 3x2 分镜预览图。" />}
       <button className="primary" disabled={!canPreview} onClick={() => task && void run('生成六宫格预览中...', () => {
         startLocalOperation({ ownerType: 'generation_preview', ownerId: task.id, provider: 'image-2' })
         setTask({ ...task, status: 'PREVIEW_RUNNING' })
@@ -628,7 +628,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
       {showImport && <BatchImportPanel run={run} />}
       <div className="panel library-panel">
         <div className="toolbar">
-          <div className="search"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索 code / 标签" /></div>
+          <div className="search"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索货号 / 标签" /></div>
           <span className="muted-count">{items.length} 套</span>
         </div>
         {items.length ? (
@@ -638,10 +638,10 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
               item={item}
               run={run}
               onOpen={() => void openDetail(item)}
-              onTag={['TAGGING_FAILED', 'TAGGING_READY'].includes(item.status) ? () => void run('重新打标中...', () => api.tagStylingGarment(item.id)) : undefined}
+              onTag={['TAGGING_FAILED', 'TAGGING_READY'].includes(item.status) ? () => void run('重新识别标签中...', () => api.tagStylingGarment(item.id)) : undefined}
             />
           ))}</div>
-        ) : <EmptyState title={query ? '没有匹配的搭配服饰' : '暂无搭配服饰'} text={query ? '换一个 code 或标签关键词试试。' : '点击右上角导入搭配服饰。'} />}
+        ) : <EmptyState title={query ? '没有匹配的搭配服饰' : '暂无搭配服饰'} text={query ? '换一个货号或标签关键词试试。' : '点击右上角导入搭配服饰。'} />}
       </div>
       {detail && <GarmentDetailDrawer item={detail} run={run} onClose={() => setDetail(null)} onChange={setDetail} />}
     </section>
@@ -700,7 +700,7 @@ function BatchImportPanel({ run }: { run: any }) {
   async function saveDrafts() {
     const invalid = batches.find((batch) => !sanitizeClientName(batch.code))
     if (invalid) {
-      setLocalError('每套搭配服饰都需要一个有效 code')
+      setLocalError('每套搭配服饰都需要一个有效货号')
       return
     }
     const oversized = batches.find((batch) => batch.files.length > 6)
@@ -737,7 +737,7 @@ function BatchImportPanel({ run }: { run: any }) {
       <div className="import-head">
         <div>
           <h3>导入搭配服饰</h3>
-          <p>散图会合并为一套；单文件夹是一套；拖入多个一级文件夹会拆成多套。导入后系统会自动打标，单套最多 6 张，推荐 1-3 张。</p>
+          <p>散图会合并为一套；单文件夹是一套；拖入多个一级文件夹会拆成多套。导入后系统会自动识别标签，单套最多 6 张，推荐 1-3 张。</p>
         </div>
         <button className="primary" disabled={!batches.length} onClick={() => void saveDrafts()}>导入</button>
       </div>
@@ -785,7 +785,7 @@ function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
     <div className={`batch-card ${batch.files.length > 6 ? 'has-error' : ''}`}>
       <div className="batch-card-head">
         <div className="batch-icon"><Layers3 size={18} /></div>
-        <input value={batch.code} onChange={(event) => onCode(event.target.value)} aria-label="搭配服饰 code" />
+        <input value={batch.code} onChange={(event) => onCode(event.target.value)} aria-label="搭配服饰货号" />
         <button className="secondary icon-button" onClick={onRemove} title="移除整套"><Trash2 size={16} /></button>
       </div>
       <div className="batch-note">
@@ -924,11 +924,11 @@ function ModelPage({ models }: { models: ModelProfile[] }) {
 function RecordsPage({ records, detail, setDetail, run }: { records: GenerationTask[]; detail: GenerationTask | null; setDetail: (task: GenerationTask | null) => void; run: any }) {
   return (
     <section className="page">
-      <PageTitle title="生成记录" subtitle="只展示进入过 AI 阶段的任务，技术详情默认折叠。" />
+      <PageTitle title="生成记录" subtitle="查看历史拍摄任务、分镜预览和最终成片。" />
       <div className="records-layout">
         <div className="panel record-list">
           {records.filter((item) => item.status !== 'DRAFT').map((item) => (
-            <button key={item.id} className="record-row" onClick={() => void run('读取记录中...', () => api.getRecord(item.id, true), (r: { item: GenerationTask }) => setDetail(r.item))}>
+            <button key={item.id} className="record-row" onClick={() => void run('读取记录中...', () => api.getRecord(item.id, false), (r: { item: GenerationTask }) => setDetail(r.item))}>
               <AssetThumb asset={item.summary?.cover ?? null} />
               <div><strong>{item.name}</strong><span>{statusText(item.status)} · {dateText(item.updatedAt)}</span></div>
               <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} />)}</div>
@@ -944,9 +944,8 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
               <Meta label="选中搭配" value={`${detail.styling?.selectedMaterials?.length ?? 0} 件`} />
               {detail.preview?.asset && <img className="detail-preview" src={mediaUrl(detail.preview.asset.previewUrl)} />}
               <FinalImageStrip images={detail.resultSet?.images ?? []} />
-              <details><summary>技术详情</summary><pre>{JSON.stringify({ shotPlans: detail.shotPlans, attempts: detail.attempts }, null, 2)}</pre></details>
             </>
-          ) : <EmptyState title="选择一条记录" text="查看生成细节和技术快照。" />}
+          ) : <EmptyState title="选择一条记录" text="查看分镜预览、搭配服饰和最终成片。" />}
         </div>
       </div>
     </section>
@@ -1000,7 +999,7 @@ function GarmentCard({ item, onTag, onOpen, onArchive, run }: {
       {meta.overall_confidence !== undefined && !tagging && <span className="confidence-text">AI 置信度 {formatConfidence(meta.overall_confidence)}</span>}
       <div className="card-actions">
         {onOpen && <button className="secondary" onClick={onOpen}><Eye size={16} /> 详情</button>}
-        {onTag && <button className="secondary" disabled={tagging} onClick={onTag}>重新打标</button>}
+        {onTag && <button className="secondary" disabled={tagging} onClick={onTag}>重新识别标签</button>}
         {onArchive && <button className="secondary" disabled={tagging} onClick={onArchive}><Trash2 size={16} /> 归档</button>}
       </div>
     </div>
@@ -1056,7 +1055,7 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
   async function save(retag: boolean) {
     const visibleCount = working.length + pendingFiles.length
     if (visibleCount > 6) throw new Error('单套搭配服饰最多保存 6 张图片')
-    await run(retag ? '保存并重新打标中...' : '保存搭配服饰中...', async () => {
+    await run(retag ? '保存并重新识别标签中...' : '保存搭配服饰中...', async () => {
       for (const [id, file] of Object.entries(replacementFiles)) await api.replaceStylingGarmentImage(Number(id), file)
       const addBeforeDelete = working.length === 0 && pendingFiles.length > 0
       if (addBeforeDelete) await api.addStylingGarmentImages(item.id, pendingFiles)
@@ -1094,8 +1093,8 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
               }} />
             </label>
           </div>
-          <p className="edit-hint">此次修改会影响打标。排序第一张会作为封面和主要参考图。</p>
-          {tagging && <p className="edit-hint">正在打标，完成后可继续修改或归档。</p>}
+          <p className="edit-hint">此次修改会影响标签识别。排序第一张会作为封面和主要参考图。</p>
+          {tagging && <p className="edit-hint">正在识别标签，完成后可继续修改或归档。</p>}
           <div className="saved-image-grid">
             {working.map((image, index) => {
               const replacement = replacementFiles[image.id]
@@ -1175,11 +1174,10 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
           <TagObjectPanel title="人工业务标签" data={item.manualTags ?? {}} />
           <TagObjectPanel title="官方标题信息" data={item.officialTitleTags ?? {}} />
           <TagObjectPanel title="标签元信息" data={item.tagMeta ?? {}} />
-          <GeminiTagAttemptPanel attempts={item.tagAttempts ?? []} />
         </div>
         <div className="drawer-actions">
           <button className="secondary" disabled={tagging || !dirty || working.length + pendingFiles.length > 6} onClick={() => void save(false)}>仅保存</button>
-          <button className="primary" disabled={tagging || !dirty || working.length + pendingFiles.length > 6} onClick={() => void save(true)}>保存并重新打标</button>
+          <button className="primary" disabled={tagging || !dirty || working.length + pendingFiles.length > 6} onClick={() => void save(true)}>保存并重新识别标签</button>
         </div>
         <div className="danger-zone">
           <strong>删除</strong>
@@ -1210,10 +1208,10 @@ function CodeEditor({ item, run, disabled = false }: { item: StylingGarment; run
 
   return (
     <div className="code-editor">
-      <label>code</label>
+      <label>货号</label>
       <div>
         <input disabled={disabled} value={value} onChange={(event) => setValue(event.target.value)} />
-        <button className="secondary" disabled={disabled || !changed} onClick={() => void run('保存 code 中...', () => api.updateStylingGarment(item.id, { code: value }))}>保存</button>
+        <button className="secondary" disabled={disabled || !changed} onClick={() => void run('保存货号中...', () => api.updateStylingGarment(item.id, { code: value }))}>保存</button>
       </div>
     </div>
   )
@@ -1229,10 +1227,6 @@ function TagObjectPanel({ title, data, defaultOpen = false }: { title: string; d
           <div className="tag-field-grid">
             {entries.map(([key, value]) => <TagField key={key} label={key} value={value} />)}
           </div>
-          <details className="json-details">
-            <summary>JSON</summary>
-            <pre>{JSON.stringify(data, null, 2)}</pre>
-          </details>
         </>
       ) : <p className="empty-inline">暂无</p>}
     </details>
@@ -1273,33 +1267,6 @@ function formatTagPrimitive(value: unknown) {
   return String(value)
 }
 
-function GeminiTagAttemptPanel({ attempts }: { attempts: NonNullable<StylingGarment['tagAttempts']> }) {
-  return (
-    <details className="tag-details provider-details">
-      <summary>Gemini 调用详情</summary>
-      {attempts.length ? attempts.map((attempt, index) => (
-        <details className="attempt-card" key={attempt.id} open={index === 0}>
-          <summary>
-            <span>{attempt.provider}</span>
-            <span className={`status ${attempt.status.toLowerCase()}`}>{statusText(attempt.status)}</span>
-            <span>{attempt.startedAt ? dateText(attempt.startedAt) : '未记录时间'}</span>
-          </summary>
-          {attempt.errorMessage && <p className="inline-error">{attempt.errorMessage}</p>}
-          <Meta label="完成时间" value={attempt.completedAt ? dateText(attempt.completedAt) : attempt.failedAt ? dateText(attempt.failedAt) : '未完成'} />
-          <details className="json-details">
-            <summary>请求参数</summary>
-            <pre>{JSON.stringify(attempt.requestSnapshot ?? {}, null, 2)}</pre>
-          </details>
-          <details className="json-details">
-            <summary>返回结果</summary>
-            <pre>{JSON.stringify(attempt.responseSnapshot ?? {}, null, 2)}</pre>
-          </details>
-        </details>
-      )) : <p className="empty-inline">暂无调用记录</p>}
-    </details>
-  )
-}
-
 function AIOperationList({ operations, compact = false }: { operations: AIOperation[]; compact?: boolean }) {
   const active = operations.filter(Boolean).slice(0, compact ? 4 : 8)
   const now = useTicker(active.some(isAttemptRunning))
@@ -1321,7 +1288,7 @@ function AIOperationCard({ operation, now, compact, index }: { operation: AIOper
       <div className="ai-operation-icon">{running ? <Loader2 size={15} className="spin" /> : <Clock3 size={15} />}</div>
       <div>
         <strong>{operationLabel(operation, index)}</strong>
-        <span>{operationProvider(operation.provider)} · {statusText(operation.status)}</span>
+        <span>{statusText(operation.status)}</span>
       </div>
       <time>{formatDuration(seconds)}</time>
     </div>
@@ -1404,19 +1371,11 @@ function isAttemptRunning(operation: AIOperation) {
 }
 
 function operationLabel(operation: AIOperation, index = 0) {
-  if (operation.ownerType === 'styling_garment_tagging') return operation.providerRequestId ? `服饰标签识别 · ${operation.providerRequestId}` : '服饰标签识别'
+  if (operation.ownerType === 'styling_garment_tagging') return '服饰标签识别'
   if (operation.ownerType === 'generation_styling') return '智能选搭'
   if (operation.ownerType === 'generation_preview') return '六宫格预览'
   if (operation.ownerType === 'generation_result_image') return `最终图 ${operation.ownerId > 0 && operation.id < 0 ? operation.ownerId : index + 1}`
-  return 'AI 调用'
-}
-
-function operationProvider(provider: string) {
-  if (provider === 'gemini') return 'Gemini'
-  if (provider === 'image-2') return 'Image-2'
-  if (provider === 'fal') return 'Image-2 / fal'
-  if (provider === 'toapis') return 'Image-2 / toapis'
-  return provider || 'AI'
+  return '系统处理中'
 }
 
 function elapsedSeconds(start?: string | null, now = Date.now(), end?: string | null) {
@@ -1529,8 +1488,8 @@ function statusText(status: string) {
     FAILED: '失败',
     READY: '可用',
     TAGGING_READY: '待复核',
-    TAGGING_RUNNING: '正在打标',
-    TAGGING_FAILED: '打标失败',
+    TAGGING_RUNNING: '识别中',
+    TAGGING_FAILED: '识别失败',
     RUNNING: '运行中',
     SUBMITTED: '已提交',
     IN_QUEUE: '排队中',

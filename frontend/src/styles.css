@@ -765,44 +765,10 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
   font-weight: 600;
   overflow-wrap: anywhere;
 }
-.json-details {
-  margin-top: 8px;
-}
-.json-details summary {
-  color: #64748b;
-}
-.json-details pre {
-  max-height: 320px;
-  overflow: auto;
-  margin-top: 8px;
-  padding: 10px;
-  border-radius: 6px;
-  background: #0f172a;
-  color: #e2e8f0;
-  font-size: 11px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
 .empty-inline {
   margin-top: 8px;
   color: #94a3b8;
   font-size: 12px;
-}
-.provider-details {
-  background: #fff;
-}
-.attempt-card {
-  margin-top: 8px;
-  padding: 8px;
-  border-radius: 6px;
-  background: #f8fafc;
-}
-.attempt-card > summary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: #334155;
 }
 .status.succeeded { background: #ecfdf5; color: #047857; }
 .status.running { background: #eef6ff; color: #2563eb; }

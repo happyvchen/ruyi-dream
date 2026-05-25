@@ -36,16 +36,16 @@ UX 源头在 `../design/03_ux_guide/user_uiux.md`，本目录只管“前端怎�
 ## 核心前端职责
 
 - `AI 摄影棚`：创建主推款 `GenerationTask`，推进智能选搭、六宫格预览和最终成片。
-- `搭配服饰库`：导入真实配角服装 `StylingGarment`，系统默认启动打标；列表展示摘要，详情展示完整分层标签和默认折叠的 Gemini 打标调用快照。
+- `搭配服饰库`：导入真实配角服装 `StylingGarment`，系统默认启动打标；列表展示摘要，详情展示完整分层标签，不向普通用户展示底层模型调用快照。
 - `数字模特`：只读展示当前默认数字模特。
-- `生成记录`：展示进入过 AI 阶段的 `GenerationTask`，技术详情默认折叠。
-- 默认不展示 prompt、Image-2 任务包、provider 请求等复杂细节。
+- `生成记录`：展示进入过生成阶段的 `GenerationTask`，聚焦入参、搭配、分镜预览和结果。
+- 默认不展示 prompt、Image-2 任务包、provider 请求、模型名称、调用快照等复杂细节。
 
 ## 本地规则 (Local Rules)
 
 - 前端实现前先读 `../design/03_ux_guide/CLAUDE.md`。
 - 接口联调前先读 `../backend/api_guideline.md`、`../backend/domain_model.md`。
-- 默认不展示 prompt、Image 2 任务包、策划器细节。
+- 默认不展示 prompt、Image 2 任务包、策划器细节、底层模型名称和调用详情。
 - 生成记录主视图展示进入过 AI 阶段的 `GenerationTask`，不要退回事件日志流水账。
 - 核心业务对象切换要同步 URL；临时草稿、弹窗、折叠状态不要写入 URL。
 - 页面语言使用摄影和电商语言：首图、全身、半身、背面、局部、重生、导出。
