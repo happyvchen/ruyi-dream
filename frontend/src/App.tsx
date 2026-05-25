@@ -65,6 +65,7 @@ export function App() {
   const [error, setError] = useState('')
   const [task, setTask] = useState<GenerationTask | null>(null)
   const [tasks, setTasks] = useState<GenerationTask[]>([])
+  const [records, setRecords] = useState<GenerationTask[]>([])
   const [garments, setGarments] = useState<StylingGarment[]>([])
   const [models, setModels] = useState<ModelProfile[]>([])
   const [recordDetail, setRecordDetail] = useState<GenerationTask | null>(null)
@@ -91,13 +92,15 @@ export function App() {
   }, [authenticated, hasRunningTagging])
 
   async function refreshAll() {
-    const [garmentResult, taskResult, modelResult] = await Promise.all([
+    const [garmentResult, taskResult, recordResult, modelResult] = await Promise.all([
       api.listStylingGarments({ limit: 80 }),
       api.listTasks({ limit: 30 }),
+      api.listRecords({ limit: 30 }),
       api.listModels(),
     ])
     setGarments(garmentResult.items)
     setTasks(taskResult.items)
+    setRecords(recordResult.items)
     setModels(modelResult.items)
     if (!task && taskResult.items[0]) {
       const detail = await api.getTask(taskResult.items[0].id).then((r) => r.item).catch(() => null)
@@ -167,7 +170,7 @@ export function App() {
         {page === 'studio' && <StudioPage task={task} setTask={setTask} tasks={tasks} run={run} />}
         {page === 'library' && <LibraryPage garments={garments} run={run} />}
         {page === 'model' && <ModelPage models={models} />}
-        {page === 'records' && <RecordsPage records={tasks} detail={recordDetail} setDetail={setRecordDetail} run={run} />}
+        {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} run={run} />}
       </main>
     </div>
   )
@@ -379,39 +382,61 @@ function FinalStep({ task, setTask, run }: { task: GenerationTask | null; setTas
 function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }) {
   const [query, setQuery] = useState('')
   const [detail, setDetail] = useState<StylingGarment | null>(null)
-  const visible = garments.filter((item) => {
-    const haystack = `${item.code} ${JSON.stringify(item.effectiveTags ?? item.aiTags ?? {})}`.toLowerCase()
-    return !query || haystack.includes(query.toLowerCase())
-  })
+  const [items, setItems] = useState<StylingGarment[]>(garments)
+  const [showImport, setShowImport] = useState(false)
+
   async function openDetail(item: StylingGarment) {
     await run('读取搭配服饰详情中...', () => api.getStylingGarment(item.id), (result: { item: StylingGarment }) => setDetail(result.item))
   }
+
+  useEffect(() => {
+    const keyword = query.trim()
+    if (!keyword) {
+      setItems(garments)
+      return
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      void api.listStylingGarments({ limit: 80, keyword }).then((result) => {
+        if (!cancelled) setItems(result.items)
+      }).catch(() => undefined)
+    }, 250)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [garments, query])
+
   useEffect(() => {
     if (!detail) return
     const latest = garments.find((item) => item.id === detail.id)
-    if (latest && latest.status !== detail.status) void openDetail(latest)
-  }, [garments, detail?.id, detail?.status])
+    if (latest && (latest.status !== detail.status || latest.code !== detail.code || latest.updatedAt !== detail.updatedAt)) void openDetail(latest)
+  }, [garments, detail?.id, detail?.status, detail?.code, detail?.updatedAt])
   return (
     <section className="page">
-      <PageTitle title="搭配服饰库" subtitle="真实会出现在最终图里的配角服装。当前不支持鞋、包、饰品入库。" />
-      <BatchImportPanel run={run} />
+      <div className="library-title-row">
+        <PageTitle title="搭配服饰库" subtitle="真实会出现在最终图里的配角服装。当前不支持鞋、包、饰品入库。" />
+        <button className="primary" onClick={() => setShowImport((value) => !value)}>
+          <ImagePlus size={16} /> {showImport ? '收起导入' : '导入搭配服饰'}
+        </button>
+      </div>
+      {showImport && <BatchImportPanel run={run} />}
       <div className="panel library-panel">
         <div className="toolbar">
           <div className="search"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索 code / 标签" /></div>
-          <span className="muted-count">{visible.length} / {garments.length} 套</span>
+          <span className="muted-count">{items.length} 套</span>
         </div>
-        {visible.length ? (
-          <div className="garment-grid">{visible.map((item) => (
+        {items.length ? (
+          <div className="garment-grid">{items.map((item) => (
             <GarmentCard
               key={item.id}
               item={item}
               run={run}
               onOpen={() => void openDetail(item)}
-              onArchive={() => void run('归档搭配服饰中...', () => api.deleteStylingGarment(item.id))}
-              onTag={() => void run('AI 打标中...', () => api.tagStylingGarment(item.id))}
+              onTag={item.status === 'TAGGING_FAILED' ? () => void run('重新打标中...', () => api.tagStylingGarment(item.id)) : undefined}
             />
           ))}</div>
-        ) : <EmptyState title="暂无搭配服饰" text="上传散图、一个文件夹，或拖入多个一级文件夹创建搭配服饰草稿。" />}
+        ) : <EmptyState title={query ? '没有匹配的搭配服饰' : '暂无搭配服饰'} text={query ? '换一个 code 或标签关键词试试。' : '点击右上角导入搭配服饰。'} />}
       </div>
       {detail && <GarmentDetailDrawer item={detail} run={run} onClose={() => setDetail(null)} onChange={setDetail} />}
     </section>
@@ -491,7 +516,7 @@ function BatchImportPanel({ run }: { run: any }) {
       <div className="import-head">
         <div>
           <h3>导入搭配服饰</h3>
-          <p>散图会合并为一套；单文件夹是一套；拖入多个一级文件夹会拆成多套。可先批量选择，导入时每款服饰最多 6 张，推荐 1-3 张。</p>
+          <p>散图会合并为一套；单文件夹是一套；拖入多个一级文件夹会拆成多套。导入后系统会自动打标，单套最多 6 张，推荐 1-3 张。</p>
         </div>
         <button className="primary" disabled={!batches.length} onClick={() => void saveDrafts()}>导入</button>
       </div>
@@ -680,32 +705,26 @@ function GarmentCard({ item, onTag, onOpen, onArchive, run }: {
   const effective = item.effectiveTags ?? {}
   const meta = item.tagMeta ?? {}
   const compatibility = typeof tags.styling_compatibility === 'object' && tags.styling_compatibility ? tags.styling_compatibility as Record<string, unknown> : {}
-  const colors = typeof tags.colors === 'object' && tags.colors ? tags.colors as Record<string, unknown> : {}
-  const brief = String(effective.pairing_brief || compatibility.pairing_brief || '等待标签')
+  const brief = tagText(effective.pairing_brief || compatibility.pairing_brief)
   const tagging = item.status === 'TAGGING_RUNNING'
+  const chips = garmentTagChips(item)
   return (
-    <div className="garment-card">
-      <AssetThumb asset={item.images?.[0]?.asset ?? (item.coverUrl ? { id: item.id, objectKey: '', filename: item.code, mimeType: '', thumbUrl: item.coverUrl } : null)} large />
-      <div><strong>{item.code}</strong><span className={`status ${item.status.toLowerCase()}`}>{garmentStatus(item.status)}</span></div>
-      {item.tagError && <span className="inline-error">{item.tagError}</span>}
-      <p>{brief}</p>
-      <div className="tag-summary">
-        <span>{String(tags.category ?? effective.category ?? 'unknown')}</span>
-        <span>{String(tags.sub_category ?? effective.sub_category ?? 'other')}</span>
-        <span>{String(colors.primary ?? 'unknown')}</span>
+    <div className={`garment-card ${tagging ? 'is-tagging' : ''}`}>
+      <div className="garment-cover">
+        <AssetThumb asset={item.images?.[0]?.asset ?? (item.coverUrl ? { id: item.id, objectKey: '', filename: item.code, mimeType: '', thumbUrl: item.coverUrl } : null)} large />
+        {tagging && <span className="cover-badge">识别中</span>}
       </div>
-      <details className="tag-details">
-        <summary>查看标签</summary>
-        <Meta label="AI 置信度" value={formatConfidence(meta.overall_confidence)} />
-        <Meta label="AI 标签" value={compactTagLine(tags)} />
-        <Meta label="标题证据" value={compactTagLine(item.officialTitleTags ?? {})} />
-        <Meta label="生效标签" value={compactTagLine(effective)} />
-        {run && <CodeEditor item={item} run={run} disabled={tagging} />}
-        {run && <ManualTagsEditor item={item} run={run} disabled={tagging} />}
-      </details>
+      <div className="garment-card-head"><strong title={item.code}>{item.code}</strong><span className={`status ${item.status.toLowerCase()}`}>{garmentStatus(item.status)}</span></div>
+      {item.tagError && <span className="inline-error">{item.tagError}</span>}
+      <p>{tagging ? '正在识别服饰信息，完成后可进入智能选搭。' : brief || '待识别搭配信息'}</p>
+      <div className="tag-summary">
+        {chips.map((chip) => <span key={chip}>{chip}</span>)}
+        {!chips.length && <span>{tagging ? '识别中' : '待识别'}</span>}
+      </div>
+      {meta.overall_confidence !== undefined && !tagging && <span className="confidence-text">AI 置信度 {formatConfidence(meta.overall_confidence)}</span>}
       <div className="card-actions">
         {onOpen && <button className="secondary" onClick={onOpen}><Eye size={16} /> 详情</button>}
-        {onTag && <button className="secondary" disabled={tagging} onClick={onTag}>{tagging ? '正在打标' : item.status === 'READY' ? '重新打标' : '保存并打标'}</button>}
+        {onTag && <button className="secondary" disabled={tagging} onClick={onTag}>重新打标</button>}
         {onArchive && <button className="secondary" disabled={tagging} onClick={onArchive}><Trash2 size={16} /> 归档</button>}
       </div>
     </div>
@@ -780,6 +799,7 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
         <div className="drawer-section">
           <Meta label="更新时间" value={dateText(item.updatedAt)} />
           <Meta label="图片" value={`${working.length + pendingFiles.length}/6 张`} />
+          <CodeEditor item={item} run={run} disabled={tagging} />
         </div>
         <div className="drawer-section">
           <div className="section-head">
@@ -888,36 +908,6 @@ function CodeEditor({ item, run, disabled = false }: { item: StylingGarment; run
   )
 }
 
-function ManualTagsEditor({ item, run, disabled = false }: { item: StylingGarment; run: any; disabled?: boolean }) {
-  const [value, setValue] = useState(() => JSON.stringify(item.manualTags ?? {}, null, 2))
-  const [localError, setLocalError] = useState('')
-
-  useEffect(() => {
-    setValue(JSON.stringify(item.manualTags ?? {}, null, 2))
-    setLocalError('')
-  }, [item.id, item.manualTags])
-
-  function save() {
-    try {
-      const parsed = value.trim() ? JSON.parse(value) : {}
-      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('人工标签必须是 JSON 对象')
-      setLocalError('')
-      void run('保存人工标签中...', () => api.updateStylingGarment(item.id, { manualTags: parsed }))
-    } catch (err) {
-      setLocalError(err instanceof Error ? err.message : 'JSON 格式不正确')
-    }
-  }
-
-  return (
-    <div className="manual-tags">
-      <label>人工业务标签</label>
-      <textarea disabled={disabled} value={value} onChange={(event) => setValue(event.target.value)} spellCheck={false} />
-      {localError && <span className="inline-error">{localError}</span>}
-      <button className="secondary" disabled={disabled} onClick={save}>保存人工标签</button>
-    </div>
-  )
-}
-
 function CurrentTaskCard({ task }: { task: GenerationTask }) {
   return <div className="current-task"><ThumbGrid assets={(task.images ?? []).map((item) => item.asset)} /><Meta label="当前任务" value={task.name} /><Meta label="状态" value={statusText(task.status)} /></div>
 }
@@ -976,6 +966,34 @@ function garmentStatus(status: string) {
 function formatConfidence(value: unknown) {
   const number = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(number) ? `${Math.round(number * 100)}%` : '未生成'
+}
+
+function tagText(value: unknown) {
+  const text = String(value ?? '').trim()
+  if (!text || ['unknown', 'other', '等待标签', '暂无'].includes(text.toLowerCase())) return ''
+  return text
+}
+
+function collectTagValues(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(tagText).filter(Boolean)
+  if (typeof value === 'object' && value) {
+    const colors = value as Record<string, unknown>
+    return [colors.primary, ...(Array.isArray(colors.secondary) ? colors.secondary : [])].map(tagText).filter(Boolean)
+  }
+  const text = tagText(value)
+  return text ? [text] : []
+}
+
+function garmentTagChips(item: StylingGarment) {
+  const tags = item.aiTags ?? {}
+  const effective = item.effectiveTags ?? {}
+  const values = [
+    ...collectTagValues(tags.category ?? effective.category),
+    ...collectTagValues(tags.sub_category ?? effective.sub_category),
+    ...collectTagValues(tags.colors ?? effective.colors),
+    ...collectTagValues(effective.season ?? tags.season),
+  ]
+  return Array.from(new Set(values)).slice(0, 3)
 }
 
 function compactTagLine(value: Record<string, unknown>) {

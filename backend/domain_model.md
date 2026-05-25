@@ -7,12 +7,12 @@
 当前后端围绕一条核心生产链路建模：
 
 ```text
-上传服装货号图包
--> 本地预览与编辑
--> 保存上传并生成默认组图方案
--> GPT Image-2 Provider 逐张生成
--> 单张重生 / 设为最终图
--> 导出和留痕
+搭配服饰库导入并打标
+-> AI 摄影棚上传主推款
+-> Gemini 从 READY 搭配服饰 tags 中智能选搭
+-> 生成 3x2 六宫格预览
+-> Image-2 并发生成前 5 张成片
+-> 生成记录复盘
 ```
 
 MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂素材资产管理。所有对象暂时默认属于单一工作空间，但领域模型应保留后续 SaaS 化扩展空间。
@@ -21,16 +21,56 @@ MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂�
 
 | Domain | 业务含义 | 当前主要对象 | 当前代码位置 |
 |---|---|---|---|
-| Garment Asset | 服装货号和上传素材 | `GarmentSku`, `GarmentImage` | `app/main.py`, `app/db.py` |
+| Styling Library | 搭配服饰库和 AI 标签 | `StylingGarment`, `StylingGarmentImage`, `MediaAsset` | `app/main.py`, `app/db.py` |
+| Studio Task | 主推款拍摄任务和输入版本 | `GenerationTask`, `GenerationTaskInputVersion`, `GenerationTaskImage` | `app/main.py`, `app/db.py` |
 | Model Profile | 数字模特档案 | `ModelProfile` | `app/db.py` |
-| Planning | 组图策划和服装识别摘要 | `ShotPlan`, `GarmentAnalysis`, `Shot` | `app/planner.py`, `app/main.py` |
-| Generation | 生成批次、单张图、重生链路 | `GenerationRun`, `GenerationImage`, `TaskPackage` | `app/main.py`, `app/image_provider.py` |
-| Export | 最终图导出 | ZIP 文件，无独立表 | `app/main.py` |
+| Styling & Planning | 智能选搭、ShotPlan、六宫格预览 | `GenerationStyling`, `GenerationShotPlan`, `GenerationPreview` | `app/main.py` |
+| Generation | 最终结果批次、结果图、attempt | `GenerationResultSet`, `GenerationResultImage`, `GenerationAttempt` | `app/main.py`, `app/image_provider.py` |
 | Audit Log | 操作和系统事件留痕 | `EventLog` | `app/db.py` |
 
-## 3. 业务对象
+## 3. 新版核心业务对象
 
-### 3.1 GarmentSku
+### 3.1 StylingGarment
+
+搭配服饰库中的一套配角服装。当前只支持真实服装，不支持鞋、包、首饰入库。
+
+当前职责：
+
+- 保存全局唯一 `code`、状态、AI 标签、人工业务标签、生效标签和打标错误。
+- 通过 `StylingGarmentImage` 关联 1-6 张图片，排序第一张作为封面和主要参考图。
+- 导入后由前端默认触发 `/save-and-tag`，服务端进入 `TAGGING_RUNNING` 并调用 Gemini 打标。
+- 只有 `READY` 且未被人工标签标记 `do_not_use_for_styling` 的服饰进入智能选搭候选。
+- 默认删除为归档：写入 `DELETED/deleted_at`，不影响已冻结的历史生成快照。
+
+状态：
+
+| 状态 | 含义 |
+|---|---|
+| `DRAFT` | 已创建但尚未完成打标 |
+| `TAGGING_RUNNING` | 正在打标；此时禁止修改和归档 |
+| `READY` | 可进入智能选搭候选 |
+| `TAGGING_FAILED` | 打标失败，保留素材但不参与选搭 |
+| `DELETED` | 已归档，日常列表隐藏 |
+
+### 3.2 GenerationTask
+
+AI 摄影棚中的一次主推款拍摄任务。
+
+当前职责：
+
+- 保存任务名、主推款图片、当前输入版本和权威状态。
+- 点击智能选搭时创建 `GenerationTaskInputVersion`，冻结主推款图片快照。
+- 通过 `GenerationStyling` 保存候选搭配服饰 ID、选中 ID、选中服饰快照、理由和 warnings。
+- 预览阶段生成 6 条 `GenerationShotPlan`，并保存一张 3x2 六宫格 `GenerationPreview`。
+- 最终阶段创建 `GenerationResultSet`，并按前 5 条 ShotPlan 并发生成 `GenerationResultImage`。
+
+### 3.3 GenerationAttempt
+
+所有 Gemini / Image-2 调用的过程记录。保存 provider、状态、开始/完成/失败时间、request/response 快照、错误信息和输出媒体，用于技术详情与问题排查。
+
+## 4. 旧版兼容对象
+
+### 4.1 GarmentSku
 
 服装货号图包，是用户在“服装素材”页面上传和选择的核心对象。
 
