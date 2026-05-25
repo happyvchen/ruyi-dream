@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import sqlite3
 from typing import Any, Iterator
@@ -26,7 +26,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
 
 
 def now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def dumps(value: Any) -> str:
