@@ -140,7 +140,7 @@ AI Stylist 造型方案结果：
 - attempt_id
 - created_at / updated_at
 
-`selected_material_ids_json` 只是 `StylingPlan` 的兼容摘要，不是选搭阶段的完整结果。生产排查和后续 ShotPlan 必须读取 `styling_plan_json`。
+`selected_material_ids_json` 只是从 `StylingPlan` 派生出的关系索引，用于素材快照、查询和前端卡片展示，不是选搭阶段的完整结果。生产排查和后续 ShotPlan 必须读取 `styling_plan_json`。
 
 MVP 不支持成功后重新搭配。失败重试可以新增 attempt 并更新当前 styling 状态。
 
@@ -328,7 +328,7 @@ ShotPlan 生成必须读取：
 - `styling_intents`
 - `outfit_candidates`
 - `selected_outfit_id`
-- `selected_material_ids` 兼容摘要
+- `selected_material_ids` 派生索引
 - `rejected_candidates`
 - `critic_scores`
 - `warnings`

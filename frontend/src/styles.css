@@ -169,6 +169,87 @@ h1, h2, h3, p { margin: 0; }
 .step-copy h2 { font-size: 22px; }
 .step-copy p { color: #667085; font-size: 14px; }
 
+.styling-plan {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid #d8e0ea;
+  border-radius: 8px;
+  background: #fff;
+}
+.styling-plan-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.styling-plan-head span, .info-block span {
+  color: #64748b;
+  font-size: 12px;
+}
+.styling-plan-head h3 {
+  margin-top: 4px;
+  font-size: 20px;
+}
+.styling-plan > p {
+  color: #334155;
+  line-height: 1.6;
+}
+.score-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(54px, 1fr));
+  gap: 8px;
+  min-width: 280px;
+}
+.score-strip span {
+  display: grid;
+  place-items: center;
+  min-height: 54px;
+  padding: 8px 6px;
+  border: 1px solid #d8e0ea;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 11px;
+}
+.score-strip b {
+  color: #05243c;
+  font-size: 18px;
+}
+.styling-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.info-block {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-height: 116px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+.info-block strong, .info-block em {
+  color: #1e293b;
+  font-size: 13px;
+  font-style: normal;
+  line-height: 1.45;
+}
+.rejected-list {
+  display: grid;
+  gap: 6px;
+  padding-top: 4px;
+}
+.rejected-list strong {
+  font-size: 13px;
+}
+.rejected-list span {
+  color: #64748b;
+  font-size: 13px;
+}
+
 .ai-operation-list {
   display: grid;
   gap: 8px;

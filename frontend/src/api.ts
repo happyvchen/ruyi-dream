@@ -87,7 +87,13 @@ export type GenerationTask = {
   } | null
   styling?: {
     id: number
+    selectedMaterialIds?: number[]
     selectedMaterials: StylingGarment[]
+    stylingPlan?: Record<string, unknown>
+    heroUnderstanding?: Record<string, unknown>
+    outfitCandidates?: Record<string, unknown>[]
+    criticScores?: Record<string, unknown>
+    rejectedCandidates?: Record<string, unknown>[]
     reasonSummary?: string
     warnings?: string[]
   } | null

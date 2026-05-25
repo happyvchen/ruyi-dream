@@ -495,12 +495,10 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
   const operations = task ? operationFallbacks(task, localOperations, 'generation_styling') : []
   return (
     <div className="step-panel">
-      <div className="step-copy"><h2>AI 智能选搭</h2><p>系统只从搭配服饰库选择真实服饰，暂不支持手动替换或重新搭配。</p></div>
+      <div className="step-copy"><h2>AI 智能选搭</h2><p>AI Stylist 会先理解主推款，再生成推荐造型方案；搭配服饰必须服务主推款展示。</p></div>
       <AIOperationList operations={operations} />
       {task?.styling ? (
-        <div className="selected-strip">
-          {task.styling.selectedMaterials.length ? task.styling.selectedMaterials.map((item) => <GarmentCard key={item.id} item={item} />) : <EmptyState title="未选择库内服饰" text="系统判断本次可以不加入库内搭配服饰。" />}
-        </div>
+        <StylingPlanSummary task={task} />
       ) : <EmptyState title="等待智能选搭" text="点击按钮后会冻结当前主推款输入版本。" />}
       <button className="primary" disabled={!canSelect} onClick={() => task && void run('智能选搭中...', () => {
         startLocalOperation({ ownerType: 'generation_styling', ownerId: task.id, provider: 'gemini' })
@@ -514,6 +512,75 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
       </button>
     </div>
   )
+}
+
+function StylingPlanSummary({ task }: { task: GenerationTask }) {
+  const styling = task.styling
+  if (!styling) return null
+  const plan = styling.stylingPlan ?? {}
+  const hero = (styling.heroUnderstanding ?? planValue<Record<string, unknown>>(plan, 'hero_understanding') ?? {}) as Record<string, unknown>
+  const candidates = styling.outfitCandidates?.length ? styling.outfitCandidates : planValue<Record<string, unknown>[]>(plan, 'outfit_candidates') ?? []
+  const selectedOutfitId = stringValue(planValue(plan, 'selected_outfit_id'))
+  const selected = candidates.find((item) => stringValue(item.id) === selectedOutfitId) ?? candidates[0]
+  const scores = (styling.criticScores && Object.keys(styling.criticScores).length ? styling.criticScores : planValue<Record<string, unknown>>(selected ?? {}, 'scores') ?? {}) as Record<string, unknown>
+  const generatedAccessories = stringList(planValue(selected ?? {}, 'generated_accessories'))
+  const heroFocus = stringList(planValue(selected ?? {}, 'hero_focus'))
+  const rejected = styling.rejectedCandidates?.length ? styling.rejectedCandidates : planValue<Record<string, unknown>[]>(plan, 'rejected_candidates') ?? []
+  return (
+    <div className="styling-plan">
+      <div className="styling-plan-head">
+        <div>
+          <span>推荐造型方案</span>
+          <h3>{stringValue(planValue(selected ?? {}, 'mode')) || '主推款优先'}</h3>
+        </div>
+        <div className="score-strip">
+          <ScorePill label="审美" value={scores.aesthetic_score} />
+          <ScorePill label="品牌" value={scores.brand_fit_score} />
+          <ScorePill label="主推可见" value={scores.hero_visibility_score} />
+          <ScorePill label="商业可用" value={scores.commercial_readiness_score} />
+        </div>
+      </div>
+      <p>{styling.reasonSummary || stringValue(planValue(plan, 'reason_summary'))}</p>
+      <div className="styling-plan-grid">
+        <InfoBlock title="主推款理解" items={[stringValue(hero.hero_visual_summary), ...stringList(hero.hero_selling_points)].filter(Boolean)} />
+        <InfoBlock title="图位重点" items={heroFocus.length ? heroFocus : stringList(hero.hero_selling_points)} />
+        <InfoBlock title="生成配饰" items={generatedAccessories.length ? generatedAccessories : ['低存在感鞋包饰品']} />
+        <InfoBlock title="风险提示" items={[...stringList(hero.hero_visibility_risks), ...(styling.warnings ?? [])].filter(Boolean)} empty="暂无明显风险" />
+      </div>
+      <div className="selected-strip">
+        {styling.selectedMaterials.length ? styling.selectedMaterials.map((item) => <GarmentCard key={item.id} item={item} />) : <EmptyState title="无需库内搭配服饰" text="AI Stylist 判断本次以主推款单穿或生成配饰辅助更合适。" />}
+      </div>
+      {rejected.length > 0 && (
+        <div className="rejected-list">
+          <strong>未采用方案</strong>
+          {rejected.slice(0, 3).map((item, index) => <span key={`${stringValue(item.id)}-${index}`}>{stringValue(item.reason)}</span>)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function InfoBlock({ title, items, empty = '暂无' }: { title: string; items: string[]; empty?: string }) {
+  const displayItems = items.filter(Boolean)
+  return <div className="info-block"><span>{title}</span>{displayItems.length ? displayItems.slice(0, 4).map((item, index) => <strong key={`${item}-${index}`}>{item}</strong>) : <em>{empty}</em>}</div>
+}
+
+function ScorePill({ label, value }: { label: string; value: unknown }) {
+  const number = typeof value === 'number' ? value : Number(value)
+  const text = Number.isFinite(number) ? `${Math.round(number * 100)}` : '-'
+  return <span><b>{text}</b>{label}</span>
+}
+
+function planValue<T = unknown>(source: Record<string, unknown>, key: string): T | undefined {
+  return source[key] as T | undefined
+}
+
+function stringValue(value: unknown) {
+  return typeof value === 'string' ? value : ''
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean) : []
 }
 
 function PreviewStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
