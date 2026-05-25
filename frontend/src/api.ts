@@ -157,6 +157,11 @@ export const api = {
     files.forEach((file) => form.append('files', file))
     return request<{ item: StylingGarment }>(`/api/styling-garments/${id}/images`, { method: 'POST', body: form })
   },
+  replaceStylingGarmentImage: (id: number, file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<{ item: StylingGarment }>(`/api/styling-garment-images/${id}/replace`, { method: 'POST', body: form })
+  },
   updateStylingGarmentImage: (id: number, payload: { sortOrder?: number }) =>
     request<{ item: StylingGarment }>(`/api/styling-garment-images/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteStylingGarmentImage: (id: number) =>

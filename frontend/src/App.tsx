@@ -83,6 +83,13 @@ export function App() {
     void refreshAll()
   }, [authenticated])
 
+  const hasRunningTagging = garments.some((item) => item.status === 'TAGGING_RUNNING')
+  useEffect(() => {
+    if (!authenticated || !hasRunningTagging) return
+    const timer = window.setInterval(() => void refreshAll().catch(() => undefined), 2000)
+    return () => window.clearInterval(timer)
+  }, [authenticated, hasRunningTagging])
+
   async function refreshAll() {
     const [garmentResult, taskResult, modelResult] = await Promise.all([
       api.listStylingGarments({ limit: 80 }),
@@ -379,6 +386,11 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
   async function openDetail(item: StylingGarment) {
     await run('读取搭配服饰详情中...', () => api.getStylingGarment(item.id), (result: { item: StylingGarment }) => setDetail(result.item))
   }
+  useEffect(() => {
+    if (!detail) return
+    const latest = garments.find((item) => item.id === detail.id)
+    if (latest && latest.status !== detail.status) void openDetail(latest)
+  }, [garments, detail?.id, detail?.status])
   return (
     <section className="page">
       <PageTitle title="搭配服饰库" subtitle="真实会出现在最终图里的配角服装。当前不支持鞋、包、饰品入库。" />
@@ -670,6 +682,7 @@ function GarmentCard({ item, onTag, onOpen, onArchive, run }: {
   const compatibility = typeof tags.styling_compatibility === 'object' && tags.styling_compatibility ? tags.styling_compatibility as Record<string, unknown> : {}
   const colors = typeof tags.colors === 'object' && tags.colors ? tags.colors as Record<string, unknown> : {}
   const brief = String(effective.pairing_brief || compatibility.pairing_brief || '等待标签')
+  const tagging = item.status === 'TAGGING_RUNNING'
   return (
     <div className="garment-card">
       <AssetThumb asset={item.images?.[0]?.asset ?? (item.coverUrl ? { id: item.id, objectKey: '', filename: item.code, mimeType: '', thumbUrl: item.coverUrl } : null)} large />
@@ -687,13 +700,13 @@ function GarmentCard({ item, onTag, onOpen, onArchive, run }: {
         <Meta label="AI 标签" value={compactTagLine(tags)} />
         <Meta label="标题证据" value={compactTagLine(item.officialTitleTags ?? {})} />
         <Meta label="生效标签" value={compactTagLine(effective)} />
-        {run && <CodeEditor item={item} run={run} />}
-        {run && <ManualTagsEditor item={item} run={run} />}
+        {run && <CodeEditor item={item} run={run} disabled={tagging} />}
+        {run && <ManualTagsEditor item={item} run={run} disabled={tagging} />}
       </details>
       <div className="card-actions">
         {onOpen && <button className="secondary" onClick={onOpen}><Eye size={16} /> 详情</button>}
-        {onTag && <button className="secondary" onClick={onTag}>{item.status === 'READY' ? '重新打标' : '保存并打标'}</button>}
-        {onArchive && <button className="secondary" onClick={onArchive}><Trash2 size={16} /> 归档</button>}
+        {onTag && <button className="secondary" disabled={tagging} onClick={onTag}>{tagging ? '正在打标' : item.status === 'READY' ? '重新打标' : '保存并打标'}</button>}
+        {onArchive && <button className="secondary" disabled={tagging} onClick={onArchive}><Trash2 size={16} /> 归档</button>}
       </div>
     </div>
   )
@@ -707,15 +720,18 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
 }) {
   const [working, setWorking] = useState(item.images ?? [])
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
+  const [replacementFiles, setReplacementFiles] = useState<Record<number, File>>({})
   const [removedIds, setRemovedIds] = useState<number[]>([])
   const [dirty, setDirty] = useState(false)
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const [confirmPurge, setConfirmPurge] = useState(false)
   const [confirmCode, setConfirmCode] = useState('')
+  const tagging = item.status === 'TAGGING_RUNNING'
 
   useEffect(() => {
     setWorking(item.images ?? [])
     setPendingFiles([])
+    setReplacementFiles({})
     setRemovedIds([])
     setDirty(false)
   }, [item.id])
@@ -733,12 +749,13 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
     const visibleCount = working.length + pendingFiles.length
     if (visibleCount > 6) throw new Error('单套搭配服饰最多保存 6 张图片')
     await run(retag ? '保存并重新打标中...' : '保存搭配服饰中...', async () => {
+      for (const [id, file] of Object.entries(replacementFiles)) await api.replaceStylingGarmentImage(Number(id), file)
+      const addBeforeDelete = working.length === 0 && pendingFiles.length > 0
+      if (addBeforeDelete) await api.addStylingGarmentImages(item.id, pendingFiles)
       for (const id of removedIds) await api.deleteStylingGarmentImage(id)
       for (const [index, image] of working.entries()) await api.updateStylingGarmentImage(image.id, { sortOrder: index })
-      let latest = item
-      if (pendingFiles.length) latest = (await api.addStylingGarmentImages(item.id, pendingFiles)).item
-      if (retag) latest = (await api.tagStylingGarment(item.id)).item
-      return latest
+      if (pendingFiles.length && !addBeforeDelete) await api.addStylingGarmentImages(item.id, pendingFiles)
+      return retag ? (await api.tagStylingGarment(item.id)).item : (await api.getStylingGarment(item.id)).item
     }, (latest: StylingGarment) => onChange(latest))
   }
 
@@ -759,21 +776,22 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
         <div className="drawer-section">
           <div className="section-head">
             <strong>图片</strong>
-            <label className="secondary">
+            <label className={`secondary ${tagging ? 'is-disabled' : ''}`}>
               <ImagePlus size={16} /> 追加
-              <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => {
+              <input disabled={tagging} type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => {
                 setPendingFiles((current) => [...current, ...Array.from(event.target.files ?? [])])
                 setDirty(true)
               }} />
             </label>
           </div>
           <p className="edit-hint">此次修改会影响打标。排序第一张会作为封面和主要参考图。</p>
+          {tagging && <p className="edit-hint">正在打标，完成后可继续修改或归档。</p>}
           <div className="saved-image-grid">
             {working.map((image, index) => (
               <div
                 className="saved-image-card"
                 key={image.id}
-                draggable
+                draggable={!tagging}
                 onDragStart={() => setDragIndex(index)}
                 onDragOver={(event) => event.preventDefault()}
                 onDrop={() => {
@@ -781,13 +799,22 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
                   setDragIndex(null)
                 }}
               >
-                <img src={mediaUrl(image.asset.previewUrl ?? image.asset.thumbUrl)} alt={image.asset.filename} />
-                <span>{image.asset.filename}</span>
+                <img src={replacementFiles[image.id] ? URL.createObjectURL(replacementFiles[image.id]) : mediaUrl(image.asset.previewUrl ?? image.asset.thumbUrl)} alt={image.asset.filename} />
+                <span>{replacementFiles[image.id]?.name ?? image.asset.filename}</span>
                 <div className="thumb-actions">
                   <button onClick={() => window.open(mediaUrl(image.asset.originalUrl ?? image.asset.previewUrl), '_blank')} title="放大查看"><Eye size={14} /></button>
-                  <button onClick={() => move(index, index - 1)} title="前移"><ArrowUp size={14} /></button>
-                  <button onClick={() => move(index, index + 1)} title="后移"><ArrowDown size={14} /></button>
-                  <button onClick={() => {
+                  <button disabled={tagging} onClick={() => move(index, index - 1)} title="前移"><ArrowUp size={14} /></button>
+                  <button disabled={tagging} onClick={() => move(index, index + 1)} title="后移"><ArrowDown size={14} /></button>
+                  <label className={tagging ? 'is-disabled' : ''} title="替换图片">
+                    <ImagePlus size={14} />
+                    <input disabled={tagging} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
+                      const replacement = event.target.files?.[0]
+                      if (!replacement) return
+                      setReplacementFiles((current) => ({ ...current, [image.id]: replacement }))
+                      setDirty(true)
+                    }} />
+                  </label>
+                  <button disabled={tagging} onClick={() => {
                     setWorking((current) => current.filter((itemImage) => itemImage.id !== image.id))
                     setRemovedIds((current) => [...current, image.id])
                     setDirty(true)
@@ -813,18 +840,18 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
           <Meta label="生效标签" value={compactTagLine(item.effectiveTags ?? {})} />
         </details>
         <div className="drawer-actions">
-          <button className="secondary" disabled={!dirty || working.length + pendingFiles.length > 6} onClick={() => void save(false)}>仅保存</button>
-          <button className="primary" disabled={!dirty || working.length + pendingFiles.length > 6} onClick={() => void save(true)}>保存并重新打标</button>
+          <button className="secondary" disabled={tagging || !dirty || working.length + pendingFiles.length > 6} onClick={() => void save(false)}>仅保存</button>
+          <button className="primary" disabled={tagging || !dirty || working.length + pendingFiles.length > 6} onClick={() => void save(true)}>保存并重新打标</button>
         </div>
         <div className="danger-zone">
           <strong>删除</strong>
-          <button className="secondary" onClick={() => void run('归档搭配服饰中...', () => api.deleteStylingGarment(item.id), () => {
+          <button className="secondary" disabled={tagging} onClick={() => void run('归档搭配服饰中...', () => api.deleteStylingGarment(item.id), () => {
             onChange(null)
             onClose()
           })}>归档</button>
-          <label className="danger-check"><input type="checkbox" checked={confirmPurge} onChange={(event) => setConfirmPurge(event.target.checked)} /> 同时删除关联记录和文件</label>
+          <label className="danger-check"><input disabled={tagging} type="checkbox" checked={confirmPurge} onChange={(event) => setConfirmPurge(event.target.checked)} /> 同时删除关联记录和文件</label>
           {confirmPurge && <input value={confirmCode} onChange={(event) => setConfirmCode(event.target.value)} placeholder={`输入 ${item.code} 确认`} />}
-          {confirmPurge && <button className="danger" disabled={confirmCode !== item.code} onClick={() => void run('级联删除搭配服饰中...', () => api.deleteStylingGarment(item.id, { purge: true, confirmCode }), () => {
+          {confirmPurge && <button className="danger" disabled={tagging || confirmCode !== item.code} onClick={() => void run('级联删除搭配服饰中...', () => api.deleteStylingGarment(item.id, { purge: true, confirmCode }), () => {
             onChange(null)
             onClose()
           })}>级联删除</button>}
@@ -834,7 +861,7 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
   )
 }
 
-function CodeEditor({ item, run }: { item: StylingGarment; run: any }) {
+function CodeEditor({ item, run, disabled = false }: { item: StylingGarment; run: any; disabled?: boolean }) {
   const [value, setValue] = useState(item.code)
   const changed = value.trim() !== item.code
 
@@ -846,14 +873,14 @@ function CodeEditor({ item, run }: { item: StylingGarment; run: any }) {
     <div className="code-editor">
       <label>code</label>
       <div>
-        <input value={value} onChange={(event) => setValue(event.target.value)} />
-        <button className="secondary" disabled={!changed} onClick={() => void run('保存 code 中...', () => api.updateStylingGarment(item.id, { code: value }))}>保存</button>
+        <input disabled={disabled} value={value} onChange={(event) => setValue(event.target.value)} />
+        <button className="secondary" disabled={disabled || !changed} onClick={() => void run('保存 code 中...', () => api.updateStylingGarment(item.id, { code: value }))}>保存</button>
       </div>
     </div>
   )
 }
 
-function ManualTagsEditor({ item, run }: { item: StylingGarment; run: any }) {
+function ManualTagsEditor({ item, run, disabled = false }: { item: StylingGarment; run: any; disabled?: boolean }) {
   const [value, setValue] = useState(() => JSON.stringify(item.manualTags ?? {}, null, 2))
   const [localError, setLocalError] = useState('')
 
@@ -876,9 +903,9 @@ function ManualTagsEditor({ item, run }: { item: StylingGarment; run: any }) {
   return (
     <div className="manual-tags">
       <label>人工业务标签</label>
-      <textarea value={value} onChange={(event) => setValue(event.target.value)} spellCheck={false} />
+      <textarea disabled={disabled} value={value} onChange={(event) => setValue(event.target.value)} spellCheck={false} />
       {localError && <span className="inline-error">{localError}</span>}
-      <button className="secondary" onClick={save}>保存人工标签</button>
+      <button className="secondary" disabled={disabled} onClick={save}>保存人工标签</button>
     </div>
   )
 }

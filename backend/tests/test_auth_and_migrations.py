@@ -270,6 +270,78 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertEqual(status, "SUCCEEDED")
 
+    def test_tagging_running_styling_garment_rejects_mutation_and_archive(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            code = f"STYLING-LOCK-{os.urandom(5).hex()}"
+            with db_module.get_db() as db:
+                garment_id = db.execute(
+                    """
+                    INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, created_at, updated_at)
+                    VALUES (?, 'TAGGING_RUNNING', '{}', '{}', ?, ?)
+                    """,
+                    (code, timestamp, timestamp),
+                ).lastrowid
+
+            client = TestClient(main.app)
+            self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+            edit = client.patch(f"/api/styling-garments/{garment_id}", json={"code": "CHANGED"})
+            archive = client.delete(f"/api/styling-garments/{garment_id}")
+
+        self.assertEqual(edit.status_code, 409)
+        self.assertEqual(archive.status_code, 409)
+
+    def test_generation_inputs_use_selected_material_snapshot_after_archive(self) -> None:
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            snapshot = [{
+                "id": 99,
+                "code": "ARCHIVED-STYLING",
+                "images": [{"asset": {"id": 901, "objectKey": "styling/snapshot.png", "filename": "snapshot.png", "originalUrl": "/api/media?key=styling/snapshot.png&variant=original"}}],
+            }]
+            with db_module.get_db() as db:
+                task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('snapshot', 'STYLING_READY', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                input_id = db.execute(
+                    """
+                    INSERT INTO generation_task_input_versions (task_id, version_number, name_snapshot, image_snapshot_json, created_at)
+                    VALUES (?, 1, 'snapshot', '[]', ?)
+                    """,
+                    (task_id, timestamp),
+                ).lastrowid
+                styling_id = db.execute(
+                    """
+                    INSERT INTO generation_stylings
+                      (task_id, input_version_id, source_material_ids_json, selected_material_ids_json,
+                       selected_material_snapshot_json, status, created_at, updated_at)
+                    VALUES (?, ?, '[99]', '[99]', ?, 'SUCCEEDED', ?, ?)
+                    """,
+                    (task_id, input_id, db_module.dumps(snapshot), timestamp, timestamp),
+                ).lastrowid
+
+            inputs = main.build_new_image_inputs(int(task_id), int(styling_id), include_preview=False)
+
+        styling_inputs = [item for item in inputs if item["role"] == "styling_garment"]
+        self.assertEqual(styling_inputs[0]["objectKey"], "styling/snapshot.png")
+
     def test_sku_delete_archives_unless_related_records_are_confirmed_for_deletion(self) -> None:
         from fastapi.testclient import TestClient
 

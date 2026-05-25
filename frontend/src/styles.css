@@ -409,6 +409,10 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
   color: #334155;
 }
 .thumb-actions input { display: none; }
+.thumb-actions button:disabled, .thumb-actions .is-disabled, .section-head .is-disabled {
+  opacity: .42;
+  cursor: not-allowed;
+}
 .saved-image-card.is-pending { border-color: #7dd3fc; }
 .garment-grid {
   display: grid;
