@@ -224,7 +224,7 @@ MVP 只保存一张六宫格总图，不裁 frame。未来支持重新预览时�
 - `generation task service`：任务草稿、输入版本、状态机。
 - `candidate retrieval service`：基于 READY 服饰 tags、颜色、品类、季节、风险和未来 embedding 生成候选召回快照。
 - `AI Stylist service`：组装主推款图片、候选卡片、品牌边界和商品验收维度，调用 Gemini 生成 `StylingPlan`。
-- `styling critic service`：校验 `StylingPlan` 的基础业务事实、可穿性、主推款可见性和商业可用性阈值。
+- `aesthetic critic service`：校验 `StylingPlan` 的基础业务事实、可穿性、审美成立性、品牌成立性、主推款可见性和商业可用性阈值。
 - `shot plan service`：基于 `StylingPlan` 生成 6 条 ShotPlan。
 - `image input selector`：按阶段选择最多 10 张 Image-2 输入图。
 - `image generation service`：六宫格预览和最终图生成。
@@ -241,7 +241,7 @@ MVP 只保存一张六宫格总图，不裁 frame。未来支持重新预览时�
 HeroUnderstanding
 -> StylingIntentExploration
 -> OutfitCandidateGeneration
--> StylistCritic
+-> AestheticCritic
 -> StylingPlanSelection
 ```
 
@@ -271,7 +271,9 @@ MVP 可先使用规则化召回：
 - 不允许重复 ID。
 - 空选中合法。
 - 明显互斥穿搭必须在 `wearing_notes` 中解释，否则拒绝。
-- `hero_visibility_score` 和 `commercial_readiness_score` 低于阈值时，不自动进入预览。
+- `aesthetic_score`、`brand_fit_score`、`hero_visibility_score` 和 `commercial_readiness_score` 任一低于阈值时，不自动进入预览。
+- 满分评分但缺少 `aesthetic_diagnosis` 或风险解释时，视为低可信模型输出，应重试或降级为空选搭。
+- 主推款是高腰裤、连衣裙、收腰上衣等强腰线商品时，选择外套必须说明如何避免色块压迫、腰线遮挡和比例失衡。
 - `StylingPlan` 必须保存拒绝方案和原因，便于复盘。
 
 ### 4.4 ShotPlan 联动
@@ -327,6 +329,7 @@ ShotPlan 生成必须读取：
 - `hero_understanding`
 - `styling_intents`
 - `outfit_candidates`
+- `aesthetic_diagnosis`
 - `selected_outfit_id`
 - `selected_material_ids` 派生索引
 - `rejected_candidates`
@@ -338,7 +341,7 @@ ShotPlan 生成必须读取：
 - 空集合允许。
 - 非法 ID、非 READY、重复 ID、不可解析 JSON 失败。
 - 明显互斥穿搭缺少穿着解释时失败。
-- 商品可见性或商业可用性低于阈值时不自动进入预览。
+- 审美、品牌贴合、商品可见性或商业可用性任一低于阈值时不自动进入预览。
 
 ### 5.3 ShotPlan 生成
 

@@ -313,6 +313,199 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertFalse(fake_client.create_called)
 
+    def test_styling_plan_requires_aesthetic_quality_gate(self) -> None:
+        main = importlib.import_module("app.main")
+        candidate_snapshot = {
+            "candidate_material_ids": [9],
+            "material_cards": [
+                {"id": 9, "category": "outerwear", "colors": ["brown"]},
+            ],
+        }
+        plan = {
+            "selected_material_ids": [9],
+            "selected_outfit_id": "candidate_a",
+            "outfit_candidates": [
+                {
+                    "id": "candidate_a",
+                    "selected_material_ids": [9],
+                    "wearing_notes": "外套完全敞开穿着。",
+                    "aesthetic_diagnosis": {
+                        "color_weight": "上半身深色面积过大。",
+                        "silhouette_balance": "外套体量偏重。",
+                    },
+                    "scores": {
+                        "aesthetic_score": 0.4,
+                        "brand_fit_score": 0.9,
+                        "hero_visibility_score": 0.9,
+                        "commercial_readiness_score": 0.9,
+                    },
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "aesthetic_score"):
+            main.validate_styling_plan(plan, candidate_snapshot)
+
+    def test_styling_plan_rejects_full_scores_without_diagnosis(self) -> None:
+        main = importlib.import_module("app.main")
+        candidate_snapshot = {
+            "candidate_material_ids": [],
+            "material_cards": [],
+        }
+        plan = {
+            "selected_material_ids": [],
+            "selected_outfit_id": "candidate_a",
+            "outfit_candidates": [
+                {
+                    "id": "candidate_a",
+                    "selected_material_ids": [],
+                    "wearing_notes": "主推款单穿。",
+                    "scores": {
+                        "aesthetic_score": 1,
+                        "brand_fit_score": 1,
+                        "hero_visibility_score": 1,
+                        "commercial_readiness_score": 1,
+                    },
+                    "risk_notes": [],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "满分"):
+            main.validate_styling_plan(plan, candidate_snapshot)
+
+    def test_styling_plan_allows_full_scores_with_complete_diagnosis(self) -> None:
+        main = importlib.import_module("app.main")
+        candidate_snapshot = {
+            "candidate_material_ids": [],
+            "material_cards": [],
+        }
+        plan = {
+            "selected_material_ids": [],
+            "selected_outfit_id": "candidate_a",
+            "outfit_candidates": [
+                {
+                    "id": "candidate_a",
+                    "selected_material_ids": [],
+                    "wearing_notes": "主推款单穿。",
+                    "aesthetic_diagnosis": {
+                        "color_weight": "色彩干净轻量。",
+                        "silhouette_balance": "主推款比例完整。",
+                        "waistline_proportion": "腰线清楚。",
+                        "season_material_fit": "材质季节匹配。",
+                        "template_risk": "没有套用完整通勤模板。",
+                        "brand_read": "符合 Lily 干净通勤调性。",
+                    },
+                    "scores": {
+                        "aesthetic_score": 1,
+                        "brand_fit_score": 1,
+                        "hero_visibility_score": 1,
+                        "commercial_readiness_score": 1,
+                    },
+                    "risk_notes": [],
+                }
+            ],
+        }
+
+        main.validate_styling_plan(plan, candidate_snapshot)
+
+    def test_fallback_styling_plan_bypasses_production_quality_gate(self) -> None:
+        main = importlib.import_module("app.main")
+        candidate_snapshot = {
+            "candidate_material_ids": [],
+            "material_cards": [],
+        }
+        input_row = {
+            "id": 1,
+            "task_id": 1,
+            "name_snapshot": "fallback",
+            "image_snapshot_json": "[]",
+        }
+        plan = main.fallback_styling_plan(input_row, candidate_snapshot, "gemini_api_key_missing")
+
+        self.assertEqual(plan["quality_gate_mode"], "fallback")
+        main.validate_styling_plan(plan, candidate_snapshot)
+
+    def test_normalize_styling_plan_does_not_trust_model_quality_gate_mode(self) -> None:
+        main = importlib.import_module("app.main")
+        candidate_snapshot = {
+            "candidate_material_ids": [9],
+            "material_cards": [
+                {"id": 9, "category": "outerwear", "colors": ["brown"]},
+            ],
+        }
+        raw_plan = {
+            "quality_gate_mode": "fallback",
+            "selected_material_ids": [9],
+            "selected_outfit_id": "candidate_a",
+            "outfit_candidates": [
+                {
+                    "id": "candidate_a",
+                    "selected_material_ids": [9],
+                    "wearing_notes": "外套完全敞开穿着。",
+                    "aesthetic_diagnosis": {
+                        "color_weight": "上半身深色面积过大。",
+                        "silhouette_balance": "外套体量偏重。",
+                    },
+                    "scores": {
+                        "aesthetic_score": 0.4,
+                        "brand_fit_score": 0.9,
+                        "hero_visibility_score": 0.9,
+                        "commercial_readiness_score": 0.9,
+                    },
+                }
+            ],
+        }
+
+        plan = main.normalize_styling_plan(raw_plan, candidate_snapshot)
+
+        self.assertEqual(plan["quality_gate_mode"], "production")
+        with self.assertRaisesRegex(RuntimeError, "aesthetic_score"):
+            main.validate_styling_plan(plan, candidate_snapshot)
+
+    def test_styling_plan_rejects_high_waist_dark_outerwear_stack(self) -> None:
+        main = importlib.import_module("app.main")
+        candidate_snapshot = {
+            "candidate_material_ids": [9, 10],
+            "material_cards": [
+                {"id": 9, "category": "outerwear", "colors": ["brown"]},
+                {"id": 10, "category": "top", "colors": ["brown"]},
+            ],
+        }
+        plan = {
+            "hero_understanding": {
+                "hero_visual_summary": "白色高腰阔腿西装裤，腰部有环扣和褶裥。",
+            },
+            "selected_material_ids": [10, 9],
+            "selected_outfit_id": "candidate_a",
+            "outfit_candidates": [
+                {
+                    "id": "candidate_a",
+                    "selected_material_ids": [10, 9],
+                    "wearing_notes": "针织衫塞入裤腰，西装外套敞开穿着。",
+                    "hero_focus": ["腰部环扣", "裤管垂坠"],
+                    "aesthetic_diagnosis": {
+                        "color_weight": "深棕和白色形成对比。",
+                        "silhouette_balance": "外套敞开。",
+                        "waistline_proportion": "上衣塞腰。",
+                        "season_material_fit": "秋冬通勤。",
+                        "template_risk": "常见通勤三件套。",
+                        "brand_read": "商务通勤。",
+                    },
+                    "scores": {
+                        "aesthetic_score": 0.9,
+                        "brand_fit_score": 0.9,
+                        "hero_visibility_score": 0.9,
+                        "commercial_readiness_score": 0.9,
+                    },
+                    "risk_notes": ["外套可能遮挡腰部。"],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "高腰裤"):
+            main.validate_styling_plan(plan, candidate_snapshot)
+
     def test_schema_migrations_are_recorded(self) -> None:
         config = importlib.import_module("app.config")
         config.get_settings.cache_clear()

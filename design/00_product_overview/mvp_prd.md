@@ -20,7 +20,7 @@ Ruyi-Dream 新版 MVP 是一个 B2B AI 数字化摄影棚。它服务一个单�
 - 搭配服饰散图、单文件夹或多文件夹上传。
 - 上传即创建草稿记录，保存过程数据。
 - 搭配服饰保存后由 Gemini 打标。
-- 搭配阶段把主推款图片、候选召回结果和可用搭配服饰 tags 交给 AI Stylist，返回完整 `StylingPlan`，包括主推款理解、造型方向、候选 outfit、选中方案、自评分数、拒绝理由和警告。
+- 搭配阶段把主推款图片、候选召回结果和可用搭配服饰 tags 交给 AI Stylist，返回完整 `StylingPlan`，包括主推款理解、造型方向、候选 outfit、Aesthetic Critic 诊断、选中方案、自评分数、拒绝理由和警告。
 - 预览阶段生成 6 条结构化 ShotPlan，并由 Image-2 输出一张 3x2 六宫格预览图。
 - 最终阶段固定按前 5 个 ShotPlan 并发生成 5 张成片。
 - 失败后支持重试当前阶段。
@@ -65,11 +65,12 @@ Ruyi-Dream 新版 MVP 是一个 B2B AI 数字化摄影棚。它服务一个单�
 AI 智能选搭规则：
 
 - 点击按钮后冻结当前输入版本。
-- 输入给 AI Stylist：主推款图片 + 候选召回结果 + 可用搭配服饰 tags + Lily 品牌边界 + 商品主角验收维度。
+- 输入给 AI Stylist：主推款图片 + 候选召回结果 + 可用搭配服饰 tags + Lily 品牌边界 + Aesthetic Critic 维度 + 商品主角验收维度。
 - 不保存完整主推款标签，但允许保存极简 `hero_visual_summary`，用于 ShotPlan 和记录复盘。
 - `SourceMaterialIDs` 为当前全部可用搭配服饰。
-- AI Stylist 返回 `StylingPlan`，不是只返回选中的搭配服饰 ID。`StylingPlan` 必须包含候选 outfit、选中方案、评分、拒绝理由和警告。
+- AI Stylist 返回 `StylingPlan`，不是只返回选中的搭配服饰 ID。`StylingPlan` 必须包含候选 outfit、审美诊断、选中方案、评分、拒绝理由和警告。
 - 空的库内搭配允许；非法 ID、重复 ID、不可解析 JSON、选择非 READY 素材、无法解释的互斥穿搭组合视为失败。
+- 主推款可见但搭配难看、沉闷、笨重、廉价、比例失衡或明显不符合 Lily 调性，也视为选搭失败，不应进入预览。
 - 已有选搭后支持重新选搭；新 `StylingPlan` 成为当前拍摄方案，历史方案保留用于追溯。
 
 预览规则：
@@ -187,7 +188,7 @@ MVP 只读展示当前默认数字模特：
 
 1. 能上传并保存搭配服饰，完成 AI 打标。
 2. 能上传主推款并创建 AI 摄影棚任务。
-3. 能把主推款图片、候选召回结果和可用搭配服饰 tags 交给 AI Stylist，产出可解释 `StylingPlan`。
+3. 能把主推款图片、候选召回结果和可用搭配服饰 tags 交给 AI Stylist，产出可解释且审美成立的 `StylingPlan`。
 4. 能生成六宫格预览。
 5. 能按前 5 格并发生成最终图。
 6. 能单张下载最终图。

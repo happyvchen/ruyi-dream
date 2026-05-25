@@ -62,7 +62,7 @@ AI 摄影棚中的一次主推款拍摄任务。
 
 - 创建后先处于 `DRAFT`；AI 前允许修改任务名、追加/替换/移除/排序主推款图片，确认后进入 `READY_FOR_STYLING`。
 - 点击智能选搭时创建 `GenerationTaskInputVersion`，同时冻结主推款图片和当前默认数字模特快照。
-- 通过 `GenerationStyling` 保存候选召回快照、完整 `StylingPlan`、选中 ID、选中服饰快照、被拒方案、评分、理由和 warnings。
+- 通过 `GenerationStyling` 保存候选召回快照、完整 `StylingPlan`、选中 ID、选中服饰快照、Aesthetic Critic 诊断、被拒方案、评分、理由和 warnings。
 - 预览阶段基于 `StylingPlan` 生成 6 条 `GenerationShotPlan`，并保存一张 3x2 六宫格 `GenerationPreview`。
 - 最终阶段创建 `GenerationResultSet`，并按前 5 条 ShotPlan 并发生成 `GenerationResultImage`。
 - 预览和最终生成只读取冻结的主推款、搭配服饰和数字模特输入；成功后不允许重新选搭、重新预览或再次生成整组，最终单图失败通过单张重试恢复。
@@ -73,7 +73,7 @@ AI 摄影棚中的一次主推款拍摄任务。
 
 搭配服饰打标使用 `owner_type = styling_garment_tagging`、`owner_id = StylingGarment.id` 记录 attempt。请求快照包含 Gemini prompt、schema version、模型名与输入图片元数据；响应快照包含原始返回和归一化后的结构化标签。详情 UI 默认折叠展示这些技术信息。
 
-AI Stylist 使用 `owner_type = generation_styling`、`owner_id = GenerationTask.id` 记录 attempt。请求快照必须包含主推款输入快照、候选召回结果、material cards、任务说明和 prompt；响应快照必须包含完整 `StylingPlan`，不能只保存 `selected_material_ids`。
+AI Stylist 使用 `owner_type = generation_styling`、`owner_id = GenerationTask.id` 记录 attempt。请求快照必须包含主推款输入快照、候选召回结果、material cards、Aesthetic Critic 维度、任务说明和 prompt；响应快照必须包含完整 `StylingPlan`，不能只保存 `selected_material_ids`。
 
 ## 4. 旧版兼容对象
 

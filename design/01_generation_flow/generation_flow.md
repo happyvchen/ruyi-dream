@@ -2,7 +2,7 @@
 
 ## 1. 总体流程
 
-Ruyi-Dream 的新版生成链路以 `AI Stylist` 为策划核心。系统不是把主推款和搭配库交给模型直接返回几个 ID，而是让模型像品牌造型师一样先理解主推款，再探索造型方向、生成多套 outfit 候选、自评审美和商品可见性，最后输出可追溯的 `StylingPlan`。
+Ruyi-Dream 的新版生成链路以 `AI Stylist` 为策划核心。系统不是把主推款和搭配库交给模型直接返回几个 ID，也不是只检查主推款是否露出，而是让模型像品牌造型师一样先理解主推款，再探索造型方向、生成多套 outfit 候选，用 Aesthetic Critic 判断这套搭配是否真正好看、符合 Lily 并让主推款更好卖，最后输出可追溯的 `StylingPlan`。
 
 ```mermaid
 flowchart TD
@@ -15,7 +15,7 @@ flowchart TD
   H --> I["造型意图探索<br/>3-5 个方向"]
   G --> J["多套 Outfit 候选"]
   I --> J
-  J --> K["Stylist Critic<br/>审美 / 品牌 / 商品可见性"]
+  J --> K["Aesthetic Critic<br/>审美成立 / 品牌成立 / 商品成立"]
   K --> L["选中 StylingPlan"]
   L --> M["生成 6 条 ShotPlan"]
   M --> N["Image-2 生成 3x2 六宫格预览"]
@@ -26,6 +26,7 @@ flowchart TD
 职责边界：
 
 - `AI Stylist` 负责主推款理解、造型方向探索、候选 outfit 组合、审美与商品可见性自评，并输出 `StylingPlan`。
+- `Aesthetic Critic` 是 AI Stylist 的必经质量门，负责否决逻辑可穿但视觉难看、比例失衡、色块沉重、品牌感不足或模板化的 outfit。
 - 候选召回层负责把 READY 搭配服饰按标签、颜色、品类、季节、风格和后续 embedding 召回压缩成可判断候选，不负责最终审美决策。
 - `StylingPlan` 是选搭阶段的结构化产物，记录造型意图、候选方案、选中 outfit、拒绝理由、评分和警告。
 - `ShotPlan` 承接 `StylingPlan`，负责穿着关系、图位、景别、姿势、身位、环境、光影、镜头、构图、主推款展示重点和生成配饰边界。
@@ -38,7 +39,7 @@ flowchart TD
 搭配服饰服务主推款，而不是主推款服务整套造型。
 ```
 
-模型可以探索，但每个探索都必须回答：是否好看、是否符合 Lily、是否让主推款更好卖。
+模型可以探索，但每个探索都必须回答：是否好看、是否符合 Lily、是否让主推款更好卖。主推款可见只是底线，不是充分条件。
 
 ## 2. 搭配服饰库预处理
 
@@ -104,10 +105,11 @@ MVP 阶段默认不输入用户长 prompt。用户只确认拍摄信息和结果
    - 每个方向说明适用条件、商品展示收益和风险。
    - 允许探索，但不能把主推款降级为整套 look 的背景元素。
 
-3. **Outfit Proposals + Critic**
+3. **Outfit Proposals + Aesthetic Critic**
    - 基于召回候选提出多套完整 outfit 候选。
    - 每套候选说明真实搭配服饰、生成配饰、穿着方式、主推款展示重点。
-   - 由 Stylist Critic 同时打分：`aesthetic_score`、`brand_fit_score`、`hero_visibility_score`、`commercial_readiness_score`。
+   - 由 Aesthetic Critic 同时诊断：色彩重量、廓形体量、腰线比例、季节材质、模板化风险和品牌采用可能性。
+   - 同时打分：`aesthetic_score`、`brand_fit_score`、`hero_visibility_score`、`commercial_readiness_score`。
    - 最终选择一套 outfit；空的库内搭配是合法优秀结果，不是失败。
 
 ### 4.3 输出
@@ -138,6 +140,13 @@ MVP 阶段默认不输入用户长 prompt。用户只确认拍摄信息和结果
       "generated_accessories": ["棕色乐福鞋", "小号通勤包"],
       "wearing_notes": "主推连衣裙单穿，鞋包呼应腰带",
       "hero_focus": ["腰带", "V领", "裙摆比例"],
+      "aesthetic_diagnosis": {
+        "color_weight": "鞋包只做低存在感呼应，不形成大面积深色压迫",
+        "silhouette_balance": "单穿保持连衣裙完整腰线和裙身比例",
+        "season_material_fit": "牛仔连衣裙适合轻通勤表达",
+        "template_risk": "避免套用外套叠穿模板",
+        "brand_read": "干净、利落、轻熟通勤"
+      },
       "scores": {
         "aesthetic_score": 0.86,
         "brand_fit_score": 0.9,
@@ -162,14 +171,28 @@ MVP 阶段默认不输入用户长 prompt。用户只确认拍摄信息和结果
 
 ### 4.4 业务校验
 
-后端不写死审美规则，但必须校验基础真实性和生产边界：
+后端不写死审美规则，但必须校验基础真实性、生产边界和最低质量门：
 
 - 选中的搭配服饰 ID 必须来自当前 READY 候选。
 - 不允许重复 ID。
 - `selected_material_ids` 可为空。
 - 组合必须是一个可穿 outfit；如果选择多个外套、多个互斥上装或其它明显冲突组合，必须由 `StylingPlan` 解释具体穿着方式，否则视为失败或要求重试。
-- 当 `hero_visibility_score` 或 `commercial_readiness_score` 低于阈值时，不自动进入预览；前台可显示风险并允许用户确认或重新选搭。
+- 当 `aesthetic_score`、`brand_fit_score`、`hero_visibility_score` 或 `commercial_readiness_score` 任一低于阈值时，不自动进入预览；前台可显示风险并允许用户确认或重新选搭。
+- 如果所有评分都是满分，但 `risk_notes` 和 `aesthetic_diagnosis` 缺失，视为低可信输出，应重试或降级为空选搭。
+- 选择外套搭配高腰裤、连衣裙或强腰线商品时，必须说明外套如何不破坏腰线和主推比例。
 - request snapshot 必须保存主推款快照、候选召回结果、传给 Gemini 的 material cards、完整 prompt/任务说明和每步响应。
+
+### 4.5 失败案例与新口径
+
+白色高腰阔腿裤选择深棕针织衫和深棕西装外套的方案，虽然能让裤子露出，也写明了上衣塞腰、外套敞开，但实际预览呈现出上半身沉重、色块生硬、季节感偏厚、裤子的轻盈高级感被压住。这类结果应判定为选搭失败。
+
+新版口径：
+
+```text
+商品可见性合格但审美失败，仍然是失败。
+```
+
+如果候选库里没有真正适合白色阔腿裤的轻量短上装、浅色马甲或干净内搭，系统应优先选择空选搭或单件轻量配角，而不是硬凑深色通勤三件套。
 
 ## 5. 候选召回
 
@@ -188,6 +211,7 @@ MVP 可以先用全量 READY tags，但生产实现应增加候选召回层，�
 - 季节和场景：通勤、轻社交、春夏/秋冬。
 - 风格分数：Lily 商务时装、干净、松弛、女性化、设计感。
 - 风险：遮挡主推款、过于复杂、过于正式、过于休闲。
+- 审美风险：色块重量失衡、上半身过重、廓形互相打架、模板化通勤、品牌感不足。
 - 未来增强：CLIP/多模态 embedding、历史采纳率、人工偏好、销售或点击表现。
 
 ## 6. ShotPlan

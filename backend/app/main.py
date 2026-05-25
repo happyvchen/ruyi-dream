@@ -4791,6 +4791,16 @@ async def select_styling_with_gemini(task_id: int, input_version_id: int) -> tup
 4. 只能从 candidate_retrieval.material_cards 中选择 READY 服饰 ID。允许 selected_material_ids 为空。
 5. 鞋、包、饰品只能作为 generated_accessories 文字描述，不作为库内商品级事实。
 6. 如果选择多个可能互斥的服饰，必须在 wearing_notes 中说明真实可穿方式，否则不要选择。
+7. 商品可见性只是底线，不是充分条件；如果 outfit 沉闷、笨重、廉价、比例失衡、色块压迫、模板化或不符合 Lily 调性，即使主推款露出也必须拒绝。
+8. 候选库没有真正提升主推款的配角服饰时，应选择空 selected_material_ids 或更轻量的单件配角，不要硬凑完整通勤 look。
+
+Aesthetic Critic 必须检查：
+- color_weight: 上下身深浅和面积是否平衡，是否让主推款更高级。
+- silhouette_balance: 上衣、外套、下装体量是否互相打架，是否压住模特比例。
+- waistline_proportion: 高腰、收腰、腰带、裤腰等卖点是否被真正放大。
+- season_material_fit: 厚重针织、深色外套、皮革等是否和主推款季节/材质冲突。
+- template_risk: 是否只是套用“针织+西装+阔腿裤”“外套+连衣裙”等公式。
+- brand_read: 是否像 Lily 真正会采用的电商棚拍造型。
 
 candidate_retrieval:
 {dumps(candidate_snapshot)}
@@ -4814,6 +4824,14 @@ candidate_retrieval:
       "generated_accessories": ["低存在感鞋包饰品"],
       "wearing_notes": "真实穿着方式",
       "hero_focus": ["本方案必须露出的主推款卖点"],
+      "aesthetic_diagnosis": {{
+        "color_weight": "色彩重量诊断",
+        "silhouette_balance": "廓形体量诊断",
+        "waistline_proportion": "腰线和比例诊断",
+        "season_material_fit": "季节和材质诊断",
+        "template_risk": "模板化风险诊断",
+        "brand_read": "Lily 品牌采用可能性"
+      }},
       "scores": {{
         "aesthetic_score": 0.0,
         "brand_fit_score": 0.0,
@@ -4893,6 +4911,11 @@ def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[s
             "core": ["商务时装", "都市通勤", "年轻职业女性", "简约", "优雅", "自信", "商品优先", "现代", "利落", "干净"],
             "principle": "搭配服饰服务主推款，而不是主推款服务整套造型。",
         },
+        "aesthetic_quality_gate": {
+            "principle": "商品可见性只是底线；审美成立、Lily 品牌成立、商品主角成立必须同时通过。",
+            "reject_if": ["沉闷", "笨重", "廉价通勤", "比例失衡", "色块压迫", "模板化搭配", "配角成为视觉故事"],
+            "diagnosis_fields": ["color_weight", "silhouette_balance", "waistline_proportion", "season_material_fit", "template_risk", "brand_read"],
+        },
         "output_schema": "styling-plan-v1",
     }
 
@@ -4900,6 +4923,7 @@ def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[s
 def fallback_styling_plan(input_row: Any, candidate_snapshot: dict[str, Any], reason: str) -> dict[str, Any]:
     plan = {
         "schema_version": "styling-plan-v1",
+        "quality_gate_mode": "fallback",
         "hero_understanding": {
             "hero_visual_summary": "主推款图片已作为商品事实源。",
             "hero_selling_points": ["主推款整体轮廓", "主推款关键细节"],
@@ -4921,11 +4945,19 @@ def fallback_styling_plan(input_row: Any, candidate_snapshot: dict[str, Any], re
                 "generated_accessories": ["低存在感通勤鞋", "小号通勤包"],
                 "wearing_notes": "主推款作为画面唯一商品级服饰。",
                 "hero_focus": ["主推款整体轮廓", "主推款关键细节"],
+                "aesthetic_diagnosis": {
+                    "color_weight": "模型不可用，未完成真实色彩重量判断。",
+                    "silhouette_balance": "模型不可用，采用主推款单穿以避免配角体量干扰。",
+                    "waistline_proportion": "模型不可用，优先保留主推款比例。",
+                    "season_material_fit": "模型不可用，未完成季节材质判断。",
+                    "template_risk": "模型不可用，避免套用完整 outfit 模板。",
+                    "brand_read": "模型不可用，无法确认 Lily 品牌采用可能性。",
+                },
                 "scores": {
-                    "aesthetic_score": 0.5,
-                    "brand_fit_score": 0.5,
+                    "aesthetic_score": 0.45,
+                    "brand_fit_score": 0.45,
                     "hero_visibility_score": 0.95,
-                    "commercial_readiness_score": 0.65,
+                    "commercial_readiness_score": 0.55,
                 },
                 "risk_notes": [reason],
             },
@@ -4936,10 +4968,10 @@ def fallback_styling_plan(input_row: Any, candidate_snapshot: dict[str, Any], re
         "rejected_candidates": [],
         "warnings": ["fallback_styling_plan", reason],
     }
-    return normalize_styling_plan(plan, candidate_snapshot)
+    return normalize_styling_plan(plan, candidate_snapshot, quality_gate_mode="fallback")
 
 
-def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
+def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, Any], quality_gate_mode: str = "production") -> dict[str, Any]:
     source = raw if isinstance(raw, dict) else {}
     hero = source.get("hero_understanding") if isinstance(source.get("hero_understanding"), dict) else {}
     intents = source.get("styling_intents") if isinstance(source.get("styling_intents"), list) else []
@@ -4957,6 +4989,7 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
     warnings = ensure_string_list(source.get("warnings"))
     return {
         "schema_version": "styling-plan-v1",
+        "quality_gate_mode": "fallback" if quality_gate_mode == "fallback" else "production",
         "hero_understanding": {
             "hero_visual_summary": str(hero.get("hero_visual_summary") or source.get("hero_visual_summary") or "主推款图片已作为商品事实源。")[:120],
             "hero_selling_points": ensure_string_list(hero.get("hero_selling_points"))[:8],
@@ -4988,6 +5021,7 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
 def normalize_outfit_candidate(candidate: dict[str, Any], candidate_ids: set[int], index: int) -> dict[str, Any]:
     scores = candidate.get("scores") if isinstance(candidate.get("scores"), dict) else {}
     selected_ids = normalize_selected_material_ids(candidate.get("selected_material_ids"), candidate_ids)
+    diagnosis = candidate.get("aesthetic_diagnosis") if isinstance(candidate.get("aesthetic_diagnosis"), dict) else {}
     return {
         "id": str(candidate.get("id") or f"candidate_{index}")[:40],
         "mode": str(candidate.get("mode") or ("light_layering" if selected_ids else "hero_first_single_piece"))[:40],
@@ -4995,6 +5029,14 @@ def normalize_outfit_candidate(candidate: dict[str, Any], candidate_ids: set[int
         "generated_accessories": ensure_string_list(candidate.get("generated_accessories"))[:6],
         "wearing_notes": str(candidate.get("wearing_notes") or ("主推款作为画面唯一商品级服饰。" if not selected_ids else "搭配服饰以不遮挡主推款的方式穿着。"))[:180],
         "hero_focus": ensure_string_list(candidate.get("hero_focus"))[:8],
+        "aesthetic_diagnosis": {
+            "color_weight": str(diagnosis.get("color_weight") or "")[:180],
+            "silhouette_balance": str(diagnosis.get("silhouette_balance") or "")[:180],
+            "waistline_proportion": str(diagnosis.get("waistline_proportion") or "")[:180],
+            "season_material_fit": str(diagnosis.get("season_material_fit") or "")[:180],
+            "template_risk": str(diagnosis.get("template_risk") or "")[:180],
+            "brand_read": str(diagnosis.get("brand_read") or "")[:180],
+        },
         "scores": {
             "aesthetic_score": clamp_float(scores.get("aesthetic_score"), 0, 1, 0.5),
             "brand_fit_score": clamp_float(scores.get("brand_fit_score"), 0, 1, 0.5),
@@ -5033,9 +5075,39 @@ def validate_styling_plan(plan: dict[str, Any], candidate_snapshot: dict[str, An
     )
     if has_unexplained_outerwear_conflict(selected_ids, candidate_snapshot, selected_outfit):
         raise RuntimeError("AI Stylist 返回了多个外套但没有解释真实穿着方式")
+    if plan.get("quality_gate_mode") == "fallback":
+        return
     scores = selected_outfit.get("scores") if isinstance(selected_outfit.get("scores"), dict) else {}
-    if float(scores.get("hero_visibility_score") or 1) < 0.35 or float(scores.get("commercial_readiness_score") or 1) < 0.35:
-        raise RuntimeError("AI Stylist 方案的主推款可见性或商业可用性过低")
+    score_thresholds = {
+        "aesthetic_score": 0.65,
+        "brand_fit_score": 0.65,
+        "hero_visibility_score": 0.55,
+        "commercial_readiness_score": 0.6,
+    }
+    low_scores = [
+        key
+        for key, threshold in score_thresholds.items()
+        if float(scores.get(key) or 0) < threshold
+    ]
+    if low_scores:
+        raise RuntimeError(f"AI Stylist 方案未通过审美/品牌/商品质量门：{', '.join(low_scores)}")
+    diagnosis = selected_outfit.get("aesthetic_diagnosis") if isinstance(selected_outfit.get("aesthetic_diagnosis"), dict) else {}
+    required_diagnosis_keys = [
+        "color_weight",
+        "silhouette_balance",
+        "waistline_proportion",
+        "season_material_fit",
+        "template_risk",
+        "brand_read",
+    ]
+    missing_diagnosis = [key for key in required_diagnosis_keys if not str(diagnosis.get(key) or "").strip()]
+    risk_notes = ensure_string_list(selected_outfit.get("risk_notes"))
+    if all(float(scores.get(key) or 0) >= 0.98 for key in score_thresholds) and missing_diagnosis and not risk_notes:
+        raise RuntimeError("AI Stylist 返回满分评分但缺少完整审美诊断和风险说明")
+    if missing_diagnosis:
+        raise RuntimeError(f"AI Stylist 方案缺少 Aesthetic Critic 审美诊断：{', '.join(missing_diagnosis)}")
+    if has_high_waist_dark_outerwear_stack(selected_ids, candidate_snapshot, selected_outfit, plan):
+        raise RuntimeError("AI Stylist 方案存在高腰裤搭配深色厚重外套组合，审美风险过高")
 
 
 def has_unexplained_outerwear_conflict(selected_ids: list[int], candidate_snapshot: dict[str, Any], selected_outfit: dict[str, Any]) -> bool:
@@ -5045,6 +5117,31 @@ def has_unexplained_outerwear_conflict(selected_ids: list[int], candidate_snapsh
         return False
     notes = str(selected_outfit.get("wearing_notes") or "")
     return not any(keyword in notes for keyword in ("肩搭", "手持", "不同时穿", "备用", "其中一件"))
+
+
+def has_high_waist_dark_outerwear_stack(selected_ids: list[int], candidate_snapshot: dict[str, Any], selected_outfit: dict[str, Any], plan: dict[str, Any]) -> bool:
+    hero = plan.get("hero_understanding") if isinstance(plan.get("hero_understanding"), dict) else {}
+    hero_text = " ".join([
+        str(hero.get("hero_visual_summary") or ""),
+        " ".join(ensure_string_list(hero.get("hero_selling_points"))),
+        " ".join(ensure_string_list(selected_outfit.get("hero_focus"))),
+    ])
+    is_high_waist_bottom = any(keyword in hero_text for keyword in ("高腰", "裤", "阔腿", "腰头", "裤腰", "褶裥", "垂坠"))
+    if not is_high_waist_bottom:
+        return False
+    cards = {int(card["id"]): card for card in candidate_snapshot.get("material_cards", []) if isinstance(card, dict) and card.get("id") is not None}
+    selected_cards = [cards.get(int(item_id), {}) for item_id in selected_ids]
+    has_outerwear = any(str(card.get("category") or "") == "outerwear" for card in selected_cards)
+    if not has_outerwear:
+        return False
+    dark_colors = {"black", "brown", "navy", "grey"}
+    dark_upper_count = 0
+    for card in selected_cards:
+        category = str(card.get("category") or "")
+        colors = card.get("colors") if isinstance(card.get("colors"), list) else []
+        if category in {"top", "outerwear", "set", "other_garment"} and any(str(color) in dark_colors for color in colors):
+            dark_upper_count += 1
+    return dark_upper_count >= 2
 
 
 def get_selected_outfit_scores(styling_plan: dict[str, Any]) -> dict[str, Any]:

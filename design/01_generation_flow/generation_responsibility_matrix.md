@@ -11,7 +11,7 @@ StylingPlan 负责选搭意图和验收，ShotPlan 负责导演，Image-2 负责
 
 Image-2 是最终视觉生成器，不是选搭大脑、标签系统、历史记录系统或任务状态机。
 
-Gemini 在 `AI Stylist` 阶段应被当作造型总监，而不是简单分类器。它可以探索多套搭配方案，但必须交付结构化 `StylingPlan`、候选理由、拒绝理由和审美/品牌/商品可见性评分。
+Gemini 在 `AI Stylist` 阶段应被当作造型总监，而不是简单分类器。它可以探索多套搭配方案，但必须交付结构化 `StylingPlan`、候选理由、拒绝理由和审美/品牌/商品可见性评分。主推款可见只是底线；如果 outfit 色块沉重、廓形失衡、品牌感不足或视觉上难看，即使商品露出也必须判定失败。
 
 ## 2. 要素总览
 
@@ -23,6 +23,7 @@ Gemini 在 `AI Stylist` 阶段应被当作造型总监，而不是简单分类�
 | 数字模特身份 | 保持同一位默认数字模特 |
 | 候选召回 | 从 READY 搭配服饰中压缩出可判断候选 |
 | AI Stylist | 探索造型方向、生成多套 outfit、做审美和商品可见性自评 |
+| Aesthetic Critic | 判断 outfit 是否真正好看、符合 Lily、让主推款更有购买吸引力 |
 | StylingPlan | 保存选中方案、备选方案、穿着方式、评分、风险和理由 |
 | ShotPlan | 定义每格图位、姿态、景别、穿着关系、构图、光影 |
 | 六宫格预览 | 提供前 5 张最终图的导演分镜参考 |
@@ -40,7 +41,8 @@ Gemini 在 `AI Stylist` 阶段应被当作造型总监，而不是简单分类�
 | 搭配服饰标签 | Gemini 按完整标签规程打标 + 后端校验/复核策略 | 人工业务 tags、调用快照 | Image-2 |
 | 候选召回 | 后端召回服务 | effective tags、未来 embedding、历史反馈 | Image-2 |
 | AI Stylist | Gemini 基于主推款图片和候选卡片生成多套 outfit 并自评 | Lily 品牌边界、商品主角原则、候选召回 | 单次 ID 选择器、Image-2 |
-| StylingPlan | AI Stylist 输出 + 后端校验 | 候选快照、被拒方案、评分、风险提示 | ShotPlan 像素反推 |
+| Aesthetic Critic | AI Stylist 必经质量门 | 色彩重量、廓形体量、季节材质、模板化风险、品牌采用可能性 | 后端硬编码大量审美 if/else、Image-2 事后补救 |
+| StylingPlan | AI Stylist 输出 + 后端校验 | 候选快照、被拒方案、评分、审美诊断、风险提示 | ShotPlan 像素反推 |
 | 数字模特 | 数字模特图片和参数快照 | 文本身份边界 | 模型默认人物 |
 | ShotPlan | 规则/Gemini 基于 StylingPlan 生成结构化拍摄方案 | 品类图位参考、品牌边界、主推款卖点 | 六宫格像素反推 |
 | 六宫格预览 | Image-2 | StylingPlan、ShotPlan、商品图片、模特图 | 业务状态机 |
@@ -77,7 +79,7 @@ flowchart LR
 - AI Stylist 主推款理解
 - 造型意图探索
 - 多套 outfit 候选
-- Stylist Critic 自评
+- Aesthetic Critic 自评和否决
 - 选中 StylingPlan
 - 6 条 ShotPlan
 - Image-2 10 图预算选图器

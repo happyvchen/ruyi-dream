@@ -186,7 +186,7 @@ Authorization: Bearer <token>
 
 - 冻结当前主推款图片和任务名，创建 `GenerationTaskInputVersion`。
 - 读取当前 READY 搭配服饰，生成 `candidate_retrieval_snapshot`。
-- 向 AI Stylist 提供主推款图片、候选卡片、Lily 品牌边界和商品主角验收维度。
+- 向 AI Stylist 提供主推款图片、候选卡片、Lily 品牌边界、Aesthetic Critic 维度和商品主角验收维度。
 
 输出字段应包含：
 
@@ -202,7 +202,12 @@ Authorization: Bearer <token>
       "schema_version": "styling-plan-v1",
       "hero_understanding": {},
       "styling_intents": [],
-      "outfit_candidates": [],
+      "outfit_candidates": [
+        {
+          "aesthetic_diagnosis": {},
+          "scores": {}
+        }
+      ],
       "selected_outfit_id": "candidate_a",
       "selected_material_ids": [],
       "rejected_candidates": [],
@@ -218,7 +223,8 @@ Authorization: Bearer <token>
 - 不允许重复 ID。
 - 空 `selected_material_ids` 合法。
 - 明显互斥穿搭必须有 `wearing_notes` 解释，否则视为失败。
-- `hero_visibility_score` 或 `commercial_readiness_score` 低于生产阈值时，不自动进入预览。
+- `aesthetic_score`、`brand_fit_score`、`hero_visibility_score` 或 `commercial_readiness_score` 任一低于生产阈值时，不自动进入预览。
+- 主推款可见但搭配沉闷、笨重、比例失衡或不符合 Lily 调性时，仍应判定为选搭失败。
 
 技术详情必须保存：
 
@@ -227,7 +233,7 @@ Authorization: Bearer <token>
 - 传给 AI Stylist 的 material cards。
 - 完整 prompt / 任务说明。
 - AI Stylist 每一步响应或一次性返回的分步结构。
-- 最终 `StylingPlan`、被拒方案和评分。
+- 最终 `StylingPlan`、Aesthetic Critic 诊断、被拒方案和评分。
 
 ## 旧版服装素材 CRUD 契约
 

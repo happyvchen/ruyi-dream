@@ -2,7 +2,7 @@
 
 ## 职责 (Scope)
 
-ruyi-dream MVP 的前端实现目录。当前前端是 React + Vite + TypeScript 的单页 MVP，用于承载普通用户的新版“AI 摄影棚”：上传主推款、展示 AI Stylist 推荐造型方案、从搭配服饰库自动选搭或判断无需库内配角、生成六宫格预览、生成前 5 张成片、复盘生成记录。
+ruyi-dream MVP 的前端实现目录。当前前端是 React + Vite + TypeScript 的单页 MVP，用于承载普通用户的新版“AI 摄影棚”：上传主推款、展示带审美诊断的 AI Stylist 推荐造型方案、从搭配服饰库自动选搭或判断无需库内配角、生成六宫格预览、生成前 5 张成片、复盘生成记录。
 
 UX 源头在 `../design/03_ux_guide/user_uiux.md`，本目录只管“前端怎么组织代码”和“界面规则怎么落地”。
 
