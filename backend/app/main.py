@@ -1234,8 +1234,7 @@ def delete_styling_garment(
                 db.execute(
                     f"""
                     DELETE FROM generation_attempts
-                    WHERE (owner_type = 'generation_styling' AND owner_id IN ({placeholders}))
-                       OR (owner_type = 'generation_preview' AND owner_id IN (
+                    WHERE (owner_type = 'generation_preview' AND owner_id IN (
                             SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
                           ))
                        OR (owner_type = 'generation_result_image' AND owner_id IN (
@@ -1244,7 +1243,11 @@ def delete_styling_garment(
                             WHERE grs.task_id IN ({placeholders})
                           ))
                     """,
-                    (*dependent_task_ids, *dependent_task_ids, *dependent_task_ids),
+                    (*dependent_task_ids, *dependent_task_ids),
+                )
+                db.execute(
+                    f"DELETE FROM generation_attempts WHERE owner_type = 'generation_styling' AND owner_id IN ({placeholders})",
+                    dependent_task_ids,
                 )
                 if dependent_asset_ids:
                     asset_placeholders = ", ".join("?" for _ in dependent_asset_ids)

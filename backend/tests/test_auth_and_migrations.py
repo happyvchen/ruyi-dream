@@ -707,6 +707,14 @@ class BackendSmokeTests(unittest.TestCase):
                     """,
                     (task_id, output_asset_id, timestamp, timestamp),
                 )
+                db.execute(
+                    """
+                    INSERT INTO generation_attempts
+                      (owner_type, owner_id, provider, status, created_at, updated_at)
+                    VALUES ('generation_styling', ?, 'test', 'FAILED', ?, ?)
+                    """,
+                    (task_id, timestamp, timestamp),
+                )
 
             client = TestClient(main.app)
             self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
