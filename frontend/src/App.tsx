@@ -617,6 +617,19 @@ function FileThumbList({ files, onChange }: { files: File[]; onChange: (files: F
           </div>
         </div>
       ))}
+      <label className="file-thumb file-thumb-add" title="新增图片">
+        <div className="add-icon-wrapper">
+          <ImagePlus size={24} />
+        </div>
+        <span>新增图片</span>
+        <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => {
+          const added = Array.from(event.target.files ?? [])
+          if (added.length) {
+            onChange([...files, ...added])
+          }
+          event.target.value = ''
+        }} />
+      </label>
     </div>
   )
 }
