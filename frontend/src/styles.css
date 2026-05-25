@@ -7,15 +7,18 @@
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 1180px; }
+html, body, #root { height: 100%; }
+body { margin: 0; min-width: 1180px; overflow: hidden; }
 button, input { font: inherit; }
 button { cursor: pointer; }
 h1, h2, h3, p { margin: 0; }
 
 .app-shell {
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
   display: grid;
   grid-template-columns: auto 1fr;
+  overflow: hidden;
   background:
     linear-gradient(135deg, rgba(10, 132, 255, 0.08), transparent 28%),
     radial-gradient(circle at 90% 10%, rgba(0, 212, 255, 0.12), transparent 22%),
@@ -24,7 +27,8 @@ h1, h2, h3, p { margin: 0; }
 
 .sidebar {
   width: 248px;
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   padding: 18px 14px;
@@ -107,6 +111,9 @@ h1, h2, h3, p { margin: 0; }
 .workspace {
   position: relative;
   min-width: 0;
+  min-height: 0;
+  height: 100vh;
+  overflow-y: auto;
   padding: 28px;
 }
 .page {
@@ -137,7 +144,16 @@ h1, h2, h3, p { margin: 0; }
   gap: 18px;
 }
 .studio-main { min-height: 720px; padding: 18px; }
-.task-rail { padding: 18px; display: grid; align-content: start; gap: 16px; }
+.task-rail {
+  position: sticky;
+  top: 28px;
+  max-height: calc(100vh - 56px);
+  overflow: auto;
+  padding: 18px;
+  display: grid;
+  align-content: start;
+  gap: 16px;
+}
 
 .step-rail {
   display: grid;
@@ -463,6 +479,12 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
   gap: 18px;
 }
 .record-list, .record-detail, .side-editor { padding: 18px; }
+.record-detail {
+  position: sticky;
+  top: 28px;
+  max-height: calc(100vh - 56px);
+  overflow: auto;
+}
 .library-title-row {
   display: flex;
   align-items: flex-end;
@@ -471,6 +493,16 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
 }
 .library-title-row .page-title { flex: 1; }
 .library-panel, .import-panel { padding: 18px; }
+.library-panel .toolbar {
+  position: sticky;
+  top: -1px;
+  z-index: 2;
+  margin: -18px -18px 0;
+  padding: 18px;
+  border-bottom: 1px solid #e2e8f0;
+  background: rgba(255,255,255,.94);
+  backdrop-filter: blur(14px);
+}
 .search {
   display: flex;
   align-items: center;
