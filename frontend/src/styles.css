@@ -534,8 +534,11 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
 }
 .tag-details {
   padding: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
   background: #f8fafc;
 }
+.tag-details + .tag-details { margin-top: 8px; }
 .tag-details summary {
   cursor: pointer;
   color: #0f7cff;
@@ -551,6 +554,99 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
   overflow-wrap: anywhere;
   font-weight: 600;
 }
+.tag-field-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+.tag-field {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr);
+  gap: 10px;
+  padding: 8px;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 12px;
+}
+.tag-field > span {
+  color: #64748b;
+  overflow-wrap: anywhere;
+}
+.tag-field > div {
+  color: #0f172a;
+  overflow-wrap: anywhere;
+}
+.tag-field em {
+  color: #94a3b8;
+  font-style: normal;
+}
+.tag-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.tag-chip-row span {
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: #eef6ff;
+  color: #155e75;
+}
+.nested-tags {
+  display: grid;
+  gap: 5px;
+}
+.nested-tags div {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr);
+  gap: 8px;
+}
+.nested-tags b {
+  color: #64748b;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.json-details {
+  margin-top: 8px;
+}
+.json-details summary {
+  color: #64748b;
+}
+.json-details pre {
+  max-height: 320px;
+  overflow: auto;
+  margin-top: 8px;
+  padding: 10px;
+  border-radius: 6px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.empty-inline {
+  margin-top: 8px;
+  color: #94a3b8;
+  font-size: 12px;
+}
+.provider-details {
+  background: #fff;
+}
+.attempt-card {
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+.attempt-card > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #334155;
+}
+.status.succeeded { background: #ecfdf5; color: #047857; }
+.status.running { background: #eef6ff; color: #2563eb; }
 .card-actions {
   display: flex;
   align-items: center;

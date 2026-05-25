@@ -31,6 +31,17 @@ export type StylingGarment = {
   officialTitleTags?: Record<string, unknown>
   effectiveTags?: Record<string, unknown>
   tagMeta?: Record<string, unknown>
+  tagAttempts?: {
+    id: number
+    provider: string
+    status: string
+    startedAt?: string | null
+    completedAt?: string | null
+    failedAt?: string | null
+    errorMessage?: string | null
+    requestSnapshot?: Record<string, unknown>
+    responseSnapshot?: Record<string, unknown>
+  }[]
   tagSchemaVersion?: string | null
   tagCompletedAt?: string | null
   tagError?: string | null

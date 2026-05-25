@@ -3691,6 +3691,7 @@ def serialize_styling_garment(row: Any, include_images: bool = True) -> dict[str
         "officialTitleTags": official_title_tags,
         "effectiveTags": effective_tags,
         "tagMeta": loads(row["tag_meta_json"], {}) if "tag_meta_json" in row.keys() else {},
+        "tagAttempts": get_styling_garment_tag_attempts(row["id"]) if include_images else [],
         "tagSchemaVersion": row["tag_schema_version"],
         "tagCompletedAt": row["tag_completed_at"],
         "tagError": row["tag_error"],
@@ -3721,6 +3722,33 @@ def serialize_styling_garment(row: Any, include_images: bool = True) -> dict[str
     return item
 
 
+def get_styling_garment_tag_attempts(garment_id: int) -> list[dict[str, Any]]:
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT * FROM generation_attempts
+            WHERE owner_type = 'styling_garment_tagging' AND owner_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 10
+            """,
+            (garment_id,),
+        ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "provider": row["provider"],
+            "status": row["status"],
+            "startedAt": row["started_at"],
+            "completedAt": row["completed_at"],
+            "failedAt": row["failed_at"],
+            "errorMessage": row["error_message"],
+            "requestSnapshot": loads(row["request_snapshot_json"], {}),
+            "responseSnapshot": loads(row["response_snapshot_json"], {}),
+        }
+        for row in rows
+    ]
+
+
 def get_styling_garment_by_id(garment_id: int) -> dict[str, Any]:
     with get_db() as db:
         row = db.execute(
@@ -3741,14 +3769,22 @@ def get_styling_garment_by_id(garment_id: int) -> dict[str, Any]:
 
 async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
     garment = get_styling_garment_by_id(garment_id)
+    prompt = build_lily_tagging_prompt(garment)
+    request_snapshot = build_lily_tagging_request_snapshot(garment, prompt)
     if not settings.gemini_api_key:
-        return fallback_lily_tagging_result(garment)
+        tagging_result = fallback_lily_tagging_result(garment)
+        attempt_id = create_attempt("styling_garment_tagging", garment_id, "fallback", request_snapshot)
+        finish_attempt(attempt_id, "SUCCEEDED", {"reason": "gemini_api_key_missing", "normalized": tagging_result})
+        return tagging_result
     try:
         from google import genai
         from google.genai import types
     except Exception:
-        return fallback_lily_tagging_result(garment)
-    prompt = build_lily_tagging_prompt(garment)
+        tagging_result = fallback_lily_tagging_result(garment)
+        attempt_id = create_attempt("styling_garment_tagging", garment_id, "fallback", request_snapshot)
+        finish_attempt(attempt_id, "SUCCEEDED", {"reason": "google_genai_import_failed", "normalized": tagging_result})
+        return tagging_result
+    attempt_id = create_attempt("styling_garment_tagging", garment_id, "gemini", request_snapshot)
     contents: list[Any] = [prompt]
     for image in garment.get("images", [])[:6]:
         asset = image.get("asset") or {}
@@ -3761,8 +3797,42 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
         response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents, config=config)
     except TypeError:
         response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents)
+    except Exception as exc:
+        finish_attempt(attempt_id, "FAILED", error_message=str(exc))
+        raise
     text = getattr(response, "text", "") or "{}"
-    return normalize_lily_tagging_result(loads(extract_json_text(text), {}), garment)
+    try:
+        raw = loads(extract_json_text(text), {})
+    except Exception as exc:
+        finish_attempt(attempt_id, "FAILED", {"raw_text": text}, error_message=f"Gemini 返回内容不是合法 JSON：{exc}")
+        raise
+    normalized = normalize_lily_tagging_result(raw, garment)
+    finish_attempt(attempt_id, "SUCCEEDED", {"raw_text": text, "raw_json": raw, "normalized": normalized})
+    return normalized
+
+
+def build_lily_tagging_request_snapshot(garment: dict[str, Any], prompt: str) -> dict[str, Any]:
+    return {
+        "schema_version": LILY_TAG_SCHEMA_VERSION,
+        "model": settings.gemini_model,
+        "prompt": prompt,
+        "images": [
+            {
+                "image_id": image.get("id"),
+                "sort_order": image.get("sortOrder"),
+                "role_hint": "primary" if index == 0 else "reference",
+                "asset": {
+                    "id": ((image.get("asset") or {}).get("id")),
+                    "objectKey": ((image.get("asset") or {}).get("objectKey")),
+                    "filename": ((image.get("asset") or {}).get("filename")),
+                    "mimeType": ((image.get("asset") or {}).get("mimeType")),
+                    "width": ((image.get("asset") or {}).get("width")),
+                    "height": ((image.get("asset") or {}).get("height")),
+                },
+            }
+            for index, image in enumerate(garment.get("images", [])[:6])
+        ],
+    }
 
 
 def build_lily_tagging_prompt(garment: dict[str, Any]) -> str:

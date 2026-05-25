@@ -862,11 +862,15 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
           </div>
           {working.length + pendingFiles.length > 6 && <span className="inline-error">超过 6 张，需删除后才能保存</span>}
         </div>
-        <details className="tag-details" open>
-          <summary>标签摘要</summary>
-          <Meta label="AI 标签" value={compactTagLine(item.aiTags ?? {})} />
-          <Meta label="生效标签" value={compactTagLine(item.effectiveTags ?? {})} />
-        </details>
+        <div className="drawer-section">
+          <div className="section-head"><strong>标签</strong></div>
+          <TagObjectPanel title="AI 识别标签" data={item.aiTags ?? {}} defaultOpen />
+          <TagObjectPanel title="生效标签" data={item.effectiveTags ?? {}} defaultOpen />
+          <TagObjectPanel title="人工业务标签" data={item.manualTags ?? {}} />
+          <TagObjectPanel title="官方标题信息" data={item.officialTitleTags ?? {}} />
+          <TagObjectPanel title="标签元信息" data={item.tagMeta ?? {}} />
+          <GeminiTagAttemptPanel attempts={item.tagAttempts ?? []} />
+        </div>
         <div className="drawer-actions">
           <button className="secondary" disabled={tagging || !dirty || working.length + pendingFiles.length > 6} onClick={() => void save(false)}>仅保存</button>
           <button className="primary" disabled={tagging || !dirty || working.length + pendingFiles.length > 6} onClick={() => void save(true)}>保存并重新打标</button>
@@ -905,6 +909,87 @@ function CodeEditor({ item, run, disabled = false }: { item: StylingGarment; run
         <button className="secondary" disabled={disabled || !changed} onClick={() => void run('保存 code 中...', () => api.updateStylingGarment(item.id, { code: value }))}>保存</button>
       </div>
     </div>
+  )
+}
+
+function TagObjectPanel({ title, data, defaultOpen = false }: { title: string; data: Record<string, unknown>; defaultOpen?: boolean }) {
+  const entries = Object.entries(data ?? {}).filter(([, value]) => value !== undefined && value !== null && value !== '')
+  return (
+    <details className="tag-details" open={defaultOpen}>
+      <summary>{title}</summary>
+      {entries.length ? (
+        <>
+          <div className="tag-field-grid">
+            {entries.map(([key, value]) => <TagField key={key} label={key} value={value} />)}
+          </div>
+          <details className="json-details">
+            <summary>JSON</summary>
+            <pre>{JSON.stringify(data, null, 2)}</pre>
+          </details>
+        </>
+      ) : <p className="empty-inline">暂无</p>}
+    </details>
+  )
+}
+
+function TagField({ label, value }: { label: string; value: unknown }) {
+  return (
+    <div className="tag-field">
+      <span>{label}</span>
+      <div>{renderTagValue(value)}</div>
+    </div>
+  )
+}
+
+function renderTagValue(value: unknown): ReactNode {
+  if (Array.isArray(value)) {
+    if (!value.length) return <em>空</em>
+    return <div className="tag-chip-row">{value.map((item, index) => <span key={`${String(item)}-${index}`}>{String(item)}</span>)}</div>
+  }
+  if (typeof value === 'object' && value) {
+    return (
+      <div className="nested-tags">
+        {Object.entries(value as Record<string, unknown>).map(([key, nested]) => (
+          <div key={key}><b>{key}</b><span>{formatTagPrimitive(nested)}</span></div>
+        ))}
+      </div>
+    )
+  }
+  return <>{formatTagPrimitive(value)}</>
+}
+
+function formatTagPrimitive(value: unknown) {
+  if (typeof value === 'boolean') return value ? '是' : '否'
+  if (value === undefined || value === null || value === '') return '空'
+  if (Array.isArray(value)) return value.length ? value.join(' / ') : '空'
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
+function GeminiTagAttemptPanel({ attempts }: { attempts: NonNullable<StylingGarment['tagAttempts']> }) {
+  return (
+    <details className="tag-details provider-details">
+      <summary>Gemini 调用详情</summary>
+      {attempts.length ? attempts.map((attempt, index) => (
+        <details className="attempt-card" key={attempt.id} open={index === 0}>
+          <summary>
+            <span>{attempt.provider}</span>
+            <span className={`status ${attempt.status.toLowerCase()}`}>{statusText(attempt.status)}</span>
+            <span>{attempt.startedAt ? dateText(attempt.startedAt) : '未记录时间'}</span>
+          </summary>
+          {attempt.errorMessage && <p className="inline-error">{attempt.errorMessage}</p>}
+          <Meta label="完成时间" value={attempt.completedAt ? dateText(attempt.completedAt) : attempt.failedAt ? dateText(attempt.failedAt) : '未完成'} />
+          <details className="json-details">
+            <summary>请求参数</summary>
+            <pre>{JSON.stringify(attempt.requestSnapshot ?? {}, null, 2)}</pre>
+          </details>
+          <details className="json-details">
+            <summary>返回结果</summary>
+            <pre>{JSON.stringify(attempt.responseSnapshot ?? {}, null, 2)}</pre>
+          </details>
+        </details>
+      )) : <p className="empty-inline">暂无调用记录</p>}
+    </details>
   )
 }
 
@@ -956,6 +1041,8 @@ function statusText(status: string) {
     TAGGING_READY: '待复核',
     TAGGING_RUNNING: '正在打标',
     TAGGING_FAILED: '打标失败',
+    RUNNING: '运行中',
+    SUCCEEDED: '成功',
   }
   return map[status] ?? status
 }
