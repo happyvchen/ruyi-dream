@@ -432,6 +432,38 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
   cursor: not-allowed;
 }
 .saved-image-card.is-pending { border-color: #7dd3fc; }
+.file-thumb-add {
+  border: 1px dashed #b7c6d8;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.file-thumb-add .add-icon-wrapper {
+  width: 100%;
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f8fafc;
+  color: #64748b;
+  transition: all 0.25s ease;
+}
+.file-thumb-add span {
+  text-align: center;
+  color: #64748b;
+  transition: all 0.25s ease;
+}
+.file-thumb-add:hover {
+  border-color: #0f7cff;
+  box-shadow: 0 4px 12px rgba(15, 124, 255, 0.08);
+}
+.file-thumb-add:hover .add-icon-wrapper {
+  color: #0f7cff;
+  background: #f0f7ff;
+}
+.file-thumb-add:hover span {
+  color: #0f7cff;
+  font-weight: 500;
+}
 .garment-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
