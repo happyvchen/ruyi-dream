@@ -211,6 +211,21 @@ h1, h2, h3, p { margin: 0; }
   border-radius: 8px;
   background: #fff;
 }
+.hero-draft {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid #d8e0ea;
+  border-radius: 10px;
+  background: #fff;
+}
+.hero-draft .inline-form input:first-child { flex: 1; }
+.hero-draft input[type="file"] { display: none; }
+.draft-image-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 10px;
+}
 
 .inline-form, .toolbar {
   display: flex;

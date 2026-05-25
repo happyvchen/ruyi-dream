@@ -59,11 +59,12 @@ AI 摄影棚中的一次主推款拍摄任务。
 
 当前职责：
 
-- 保存任务名、主推款图片、当前输入版本和权威状态。
-- 点击智能选搭时创建 `GenerationTaskInputVersion`，冻结主推款图片快照。
+- 创建后先处于 `DRAFT`；AI 前允许修改任务名、追加/替换/移除/排序主推款图片，确认后进入 `READY_FOR_STYLING`。
+- 点击智能选搭时创建 `GenerationTaskInputVersion`，同时冻结主推款图片和当前默认数字模特快照。
 - 通过 `GenerationStyling` 保存候选搭配服饰 ID、选中 ID、选中服饰快照、理由和 warnings。
 - 预览阶段生成 6 条 `GenerationShotPlan`，并保存一张 3x2 六宫格 `GenerationPreview`。
 - 最终阶段创建 `GenerationResultSet`，并按前 5 条 ShotPlan 并发生成 `GenerationResultImage`。
+- 预览和最终生成只读取冻结的主推款、搭配服饰和数字模特输入；成功后不允许重新选搭、重新预览或再次生成整组，最终单图失败通过单张重试恢复。
 
 ### 3.3 GenerationAttempt
 

@@ -201,9 +201,10 @@ class BackendSmokeTests(unittest.TestCase):
                 garment_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_images)").fetchall()}
                 sku_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_skus)").fetchall()}
                 styling_garment_columns = {row["name"] for row in db.execute("PRAGMA table_info(styling_garments)").fetchall()}
+                input_version_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_task_input_versions)").fetchall()}
                 template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
@@ -212,6 +213,7 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("official_title_tags_json", styling_garment_columns)
         self.assertIn("effective_tags_json", styling_garment_columns)
         self.assertIn("tag_meta_json", styling_garment_columns)
+        self.assertIn("model_snapshot_json", input_version_columns)
         self.assertGreaterEqual(template_count, 1)
 
     def test_terminal_generation_run_cancel_returns_conflict(self) -> None:
@@ -366,6 +368,13 @@ class BackendSmokeTests(unittest.TestCase):
                 "code": "ARCHIVED-STYLING",
                 "images": [{"asset": {"id": 901, "objectKey": "styling/snapshot.png", "filename": "snapshot.png", "originalUrl": "/api/media?key=styling/snapshot.png&variant=original"}}],
             }]
+            hero_snapshot = [{
+                "sortOrder": 0,
+                "asset": {"id": 902, "objectKey": "hero/frozen.png", "filename": "frozen.png", "originalUrl": "/api/media?key=hero/frozen.png&variant=original"},
+            }]
+            model_snapshot = {
+                "imageInputs": [{"role": "model_identity", "objectKey": "models/frozen.png", "filename": "frozen-model.png", "angle": "front"}],
+            }
             with db_module.get_db() as db:
                 task_id = db.execute(
                     "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('snapshot', 'STYLING_READY', ?, ?)",
@@ -373,10 +382,11 @@ class BackendSmokeTests(unittest.TestCase):
                 ).lastrowid
                 input_id = db.execute(
                     """
-                    INSERT INTO generation_task_input_versions (task_id, version_number, name_snapshot, image_snapshot_json, created_at)
-                    VALUES (?, 1, 'snapshot', '[]', ?)
+                    INSERT INTO generation_task_input_versions
+                      (task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, created_at)
+                    VALUES (?, 1, 'snapshot', ?, ?, ?)
                     """,
-                    (task_id, timestamp),
+                    (task_id, db_module.dumps(hero_snapshot), db_module.dumps(model_snapshot), timestamp),
                 ).lastrowid
                 styling_id = db.execute(
                     """
@@ -388,11 +398,59 @@ class BackendSmokeTests(unittest.TestCase):
                     (task_id, input_id, db_module.dumps(snapshot), timestamp, timestamp),
                 ).lastrowid
 
-            with patch.object(main, "get_default_model_image_inputs", return_value=[]):
-                inputs = main.build_new_image_inputs(int(task_id), int(styling_id), include_preview=False)
+            inputs = main.build_new_image_inputs(int(task_id), int(styling_id), include_preview=False)
 
+        hero_inputs = [item for item in inputs if item["role"] == "hero_garment"]
         styling_inputs = [item for item in inputs if item["role"] == "styling_garment"]
+        model_inputs = [item for item in inputs if item["role"] == "model_identity"]
+        self.assertEqual(hero_inputs[0]["objectKey"], "hero/frozen.png")
         self.assertEqual(styling_inputs[0]["objectKey"], "styling/snapshot.png")
+        self.assertEqual(model_inputs[0]["objectKey"], "models/frozen.png")
+
+    def test_generation_task_freezes_draft_before_ai_and_rejects_completed_reruns(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            with db_module.get_db() as db:
+                task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('draft', 'DRAFT', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                asset_id = db.execute(
+                    """
+                    INSERT INTO media_assets (object_key, original_filename, mime_type, status, created_at, updated_at)
+                    VALUES ('hero/draft.png', 'draft.png', 'image/png', 'READY', ?, ?)
+                    """,
+                    (timestamp, timestamp),
+                ).lastrowid
+                db.execute(
+                    """
+                    INSERT INTO generation_task_images (task_id, media_asset_id, sort_order, status, created_at, updated_at)
+                    VALUES (?, ?, 0, 'READY', ?, ?)
+                    """,
+                    (task_id, asset_id, timestamp, timestamp),
+                )
+
+            client = TestClient(main.app)
+            self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+            ready = client.post(f"/api/generation-tasks/{task_id}/ready")
+            self.assertEqual(ready.status_code, 200)
+            self.assertEqual(ready.json()["item"]["status"], "READY_FOR_STYLING")
+            self.assertEqual(client.patch(f"/api/generation-tasks/{task_id}", json={"name": "changed"}).status_code, 409)
+
+            with db_module.get_db() as db:
+                db.execute("UPDATE generation_tasks SET status = 'COMPLETED', active_preview_id = 1 WHERE id = ?", (task_id,))
+            self.assertEqual(client.post(f"/api/generation-tasks/{task_id}/select-styling").status_code, 409)
+            self.assertEqual(client.post(f"/api/generation-tasks/{task_id}/preview").status_code, 409)
+            self.assertEqual(client.post(f"/api/generation-tasks/{task_id}/generate-final").status_code, 409)
 
     def test_purge_styling_garment_removes_tasks_that_selected_it(self) -> None:
         from fastapi.testclient import TestClient

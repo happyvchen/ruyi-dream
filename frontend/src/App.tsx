@@ -34,8 +34,9 @@ import {
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
 import type { GenerationTask, MediaAsset, ModelProfile, StylingGarment } from './api'
+import { parseRoute, routeToUrl } from './routes'
+import type { Page } from './routes'
 
-type Page = 'studio' | 'library' | 'model' | 'records'
 type StudioStep = 0 | 1 | 2 | 3
 type FileSystemEntry = {
   name: string
@@ -59,7 +60,7 @@ const steps = [
 export function App() {
   const [checked, setChecked] = useState(false)
   const [authenticated, setAuthenticated] = useState(false)
-  const [page, setPage] = useState<Page>('studio')
+  const [page, setPage] = useState<Page>(() => parseRoute().page)
   const [collapsed, setCollapsed] = useState(false)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
@@ -84,6 +85,17 @@ export function App() {
     void refreshAll()
   }, [authenticated])
 
+  useEffect(() => {
+    const handlePopState = () => setPage(parseRoute().page)
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
+
+  useEffect(() => {
+    if (page === 'studio' && task?.id) window.history.replaceState(null, '', routeToUrl({ page, taskId: task.id }))
+    if (page === 'records' && recordDetail?.id) window.history.replaceState(null, '', routeToUrl({ page, recordId: recordDetail.id }))
+  }, [page, task?.id, recordDetail?.id])
+
   const hasRunningTagging = garments.some((item) => item.status === 'TAGGING_RUNNING')
   useEffect(() => {
     if (!authenticated || !hasRunningTagging) return
@@ -102,10 +114,21 @@ export function App() {
     setTasks(taskResult.items)
     setRecords(recordResult.items)
     setModels(modelResult.items)
-    if (!task && taskResult.items[0]) {
-      const detail = await api.getTask(taskResult.items[0].id).then((r) => r.item).catch(() => null)
+    const route = parseRoute()
+    const requestedTaskId = route.page === 'studio' ? route.taskId : undefined
+    if ((!task || requestedTaskId) && (requestedTaskId || taskResult.items[0])) {
+      const detail = await api.getTask(requestedTaskId ?? taskResult.items[0].id).then((r) => r.item).catch(() => null)
       if (detail) setTask(detail)
     }
+    if (route.page === 'records' && route.recordId && !recordDetail) {
+      const detail = await api.getRecord(route.recordId, true).then((r) => r.item).catch(() => null)
+      if (detail) setRecordDetail(detail)
+    }
+  }
+
+  function navigate(next: Page) {
+    setPage(next)
+    window.history.pushState(null, '', routeToUrl({ page: next }))
   }
 
   async function run<T>(label: string, action: () => Promise<T>, after?: (value: T) => void) {
@@ -145,7 +168,7 @@ export function App() {
           {nav.map((item) => {
             const Icon = item.icon
             return (
-              <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => setPage(item.id)} title={item.label}>
+              <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => navigate(item.id)} title={item.label}>
                 <Icon size={18} />
                 {!collapsed && <span>{item.label}</span>}
               </button>
@@ -226,6 +249,13 @@ function StudioPage({ task, setTask, tasks, run }: {
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
   useEffect(() => setStep(currentStep), [task?.id, task?.status])
+  useEffect(() => {
+    if (!task || !['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)) return
+    const timer = window.setInterval(() => {
+      void api.getTask(task.id).then((result) => setTask(result.item)).catch(() => undefined)
+    }, 1500)
+    return () => window.clearInterval(timer)
+  }, [task?.id, task?.status, setTask])
 
   return (
     <section className="page">
@@ -298,10 +328,11 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
   return (
     <div className="step-panel">
       <div className="step-copy"><h2>上传主推款</h2><p>支持多张图片或一个文件夹。推荐 3-5 张，最多 8 张，排序越靠前越重要。</p></div>
+      {task?.status === 'DRAFT' && <HeroDraftEditor task={task} setTask={setTask} run={run} />}
       <div className="hero-upload">
         <div>
           <Upload size={24} />
-          <strong>上传主推款图片</strong>
+          <strong>{task?.status === 'DRAFT' ? '新建另一项拍摄任务' : '上传主推款图片'}</strong>
           <span>{files.length ? `已选择 ${files.length}/8 张` : '选择图片或文件夹后再填写任务名'}</span>
         </div>
         <div className="import-actions">
@@ -326,12 +357,70 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
           </div>
         </div>
       )}
-      {task && <CurrentTaskCard task={task} />}
+      {task && task.status !== 'DRAFT' && <CurrentTaskCard task={task} />}
+    </div>
+  )
+}
+
+function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask: (task: GenerationTask) => void; run: any }) {
+  const [name, setName] = useState(task.name)
+
+  useEffect(() => setName(task.name), [task.id, task.name])
+
+  async function move(index: number, direction: -1 | 1) {
+    const images = task.images ?? []
+    const other = images[index + direction]
+    if (!other) return
+    await run('调整主推款顺序中...', async () => {
+      await api.updateTaskImage(images[index].id, other.sortOrder)
+      return api.updateTaskImage(other.id, images[index].sortOrder)
+    }, (result: { item: GenerationTask }) => setTask(result.item))
+  }
+
+  return (
+    <div className="hero-draft">
+      <div className="section-head"><strong>当前草稿</strong><span className="status draft">待确认</span></div>
+      <div className="inline-form">
+        <input value={name} onChange={(event) => setName(event.target.value)} placeholder="任务名称" />
+        <button className="secondary" disabled={name.trim() === task.name} onClick={() => void run('保存任务名称中...', () => api.updateTask(task.id, { name }), (r: { item: GenerationTask }) => setTask(r.item))}>保存名称</button>
+        <label className="secondary">
+          <ImagePlus size={16} /> 追加图片
+          <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => {
+            const next = Array.from(event.target.files ?? [])
+            if (next.length) void run('追加主推款图片中...', () => api.addTaskImages(task.id, next), (r: { item: GenerationTask }) => setTask(r.item))
+          }} />
+        </label>
+      </div>
+      <div className="draft-image-grid">
+        {(task.images ?? []).map((image, index) => (
+          <div className="saved-image-card" key={image.id}>
+            <img src={mediaUrl(image.asset.previewUrl ?? image.asset.thumbUrl)} alt={image.asset.filename} />
+            <span>{image.asset.filename}</span>
+            <div className="thumb-actions">
+              <button disabled={index === 0} onClick={() => void move(index, -1)} title="前移"><ArrowUp size={14} /></button>
+              <button disabled={index === (task.images?.length ?? 0) - 1} onClick={() => void move(index, 1)} title="后移"><ArrowDown size={14} /></button>
+              <label title="替换图片">
+                <ImagePlus size={14} />
+                <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
+                  const replacement = event.target.files?.[0]
+                  if (replacement) void run('替换主推款图片中...', () => api.replaceTaskImage(image.id, replacement), (r: { item: GenerationTask }) => setTask(r.item))
+                }} />
+              </label>
+              <button disabled={(task.images?.length ?? 0) <= 1} onClick={() => void run('移除主推款图片中...', () => api.deleteTaskImage(image.id), (r: { item: GenerationTask }) => setTask(r.item))} title="删除图片"><Trash2 size={14} /></button>
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="edit-hint">确认后可进入智能选搭；点击智能选搭时会冻结主推款图片和默认数字模特快照。</p>
+      <button className="primary" onClick={() => void run('确认主推款输入中...', () => api.readyTask(task.id), (r: { item: GenerationTask }) => setTask(r.item))}>
+        确认并进入智能选搭
+      </button>
     </div>
   )
 }
 
 function StylingStep({ task, setTask, run }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any }) {
+  const canSelect = task?.status === 'READY_FOR_STYLING' || (task?.status === 'FAILED' && !task.styling)
   return (
     <div className="step-panel">
       <div className="step-copy"><h2>AI 智能选搭</h2><p>系统只从搭配服饰库选择真实服饰，暂不支持手动替换或重新搭配。</p></div>
@@ -340,7 +429,10 @@ function StylingStep({ task, setTask, run }: { task: GenerationTask | null; setT
           {task.styling.selectedMaterials.length ? task.styling.selectedMaterials.map((item) => <GarmentCard key={item.id} item={item} />) : <EmptyState title="未选择库内服饰" text="Gemini 判断本次可以不加入库内搭配服饰。" />}
         </div>
       ) : <EmptyState title="等待智能选搭" text="点击按钮后会冻结当前主推款输入版本。" />}
-      <button className="primary" disabled={!task} onClick={() => task && void run('智能选搭中...', () => api.selectStyling(task.id), (r: { item: GenerationTask }) => setTask(r.item))}>
+      <button className="primary" disabled={!canSelect} onClick={() => task && void run('智能选搭中...', () => {
+        setTask({ ...task, status: 'STYLING_RUNNING' })
+        return api.selectStyling(task.id)
+      }, (r: { item: GenerationTask }) => setTask(r.item))}>
         <WandSparkles size={16} /> AI 智能选搭
       </button>
     </div>
@@ -348,11 +440,15 @@ function StylingStep({ task, setTask, run }: { task: GenerationTask | null; setT
 }
 
 function PreviewStep({ task, setTask, run }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any }) {
+  const canPreview = task?.status === 'STYLING_READY' || (task?.status === 'FAILED' && !!task.styling && !task.preview)
   return (
     <div className="step-panel">
       <div className="step-copy"><h2>六宫格预览</h2><p>只显示一张 3x2 预览图。最终固定生成前 5 格，第 6 格忽略。</p></div>
       {task?.preview?.asset ? <img className="preview-board" src={mediaUrl(task.preview.asset.previewUrl || task.preview.asset.url)} /> : <EmptyState title="尚未生成六宫格" text="系统会先生成 ShotPlan，再调用 Image-2 输出六宫格。" />}
-      <button className="primary" disabled={!task?.styling} onClick={() => task && void run('生成六宫格预览中...', () => api.previewTask(task.id), (r: { item: GenerationTask }) => setTask(r.item))}>
+      <button className="primary" disabled={!canPreview} onClick={() => task && void run('生成六宫格预览中...', () => {
+        setTask({ ...task, status: 'PREVIEW_RUNNING' })
+        return api.previewTask(task.id)
+      }, (r: { item: GenerationTask }) => setTask(r.item))}>
         <GalleryVerticalEnd size={16} /> 生成预览
       </button>
     </div>
@@ -361,6 +457,7 @@ function PreviewStep({ task, setTask, run }: { task: GenerationTask | null; setT
 
 function FinalStep({ task, setTask, run }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any }) {
   const images = task?.resultSet?.images ?? []
+  const canGenerate = task?.status === 'PREVIEW_READY'
   return (
     <div className="step-panel">
       <div className="step-copy"><h2>生成成片</h2><p>并发生成前 5 格。每张图可单独下载，失败可单张重试。</p></div>
@@ -372,7 +469,10 @@ function FinalStep({ task, setTask, run }: { task: GenerationTask | null; setTas
           </div>
         )) : <EmptyState title="尚未生成最终图" text="点击生成成片后会生成前 5 张。" />}
       </div>
-      <button className="primary" disabled={!task?.preview} onClick={() => task && void run('生成最终成片中...', () => api.generateFinal(task.id), (r: { item: GenerationTask }) => setTask(r.item))}>
+      <button className="primary" disabled={!canGenerate} onClick={() => task && void run('生成最终成片中...', () => {
+        setTask({ ...task, status: 'FINAL_RUNNING' })
+        return api.generateFinal(task.id)
+      }, (r: { item: GenerationTask }) => setTask(r.item))}>
         <Sparkles size={16} /> 生成成片
       </button>
     </div>
@@ -1032,7 +1132,8 @@ function EmptyState({ title, text }: { title: string; text: string }) {
 
 function getTaskStep(task: GenerationTask | null): StudioStep {
   if (!task) return 0
-  if (['READY_FOR_STYLING', 'STYLING_RUNNING', 'FAILED'].includes(task.status)) return 1
+  if (task.status === 'FAILED') return task.styling ? 2 : 1
+  if (['READY_FOR_STYLING', 'STYLING_RUNNING'].includes(task.status)) return 1
   if (['STYLING_READY', 'PREVIEW_RUNNING'].includes(task.status)) return 2
   if (['PREVIEW_READY', 'FINAL_RUNNING', 'FINAL_PARTIAL', 'COMPLETED'].includes(task.status)) return 3
   return 0
@@ -1040,7 +1141,7 @@ function getTaskStep(task: GenerationTask | null): StudioStep {
 
 function statusText(status: string) {
   const map: Record<string, string> = {
-    DRAFT: '草稿',
+    DRAFT: '待确认',
     READY_FOR_STYLING: '待选搭',
     STYLING_RUNNING: '选搭中',
     STYLING_READY: '已选搭',

@@ -20,6 +20,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("007", "add_garment_sku_archive_columns", "migration_add_garment_sku_archive_columns"),
     ("008", "add_media_derivative_metadata", "migration_add_media_derivative_metadata"),
     ("009", "add_lily_tagging_columns", "migration_add_lily_tagging_columns"),
+    ("010", "add_generation_input_model_snapshot", "migration_add_generation_input_model_snapshot"),
 )
 
 
@@ -240,6 +241,7 @@ def init_db() -> None:
               version_number INTEGER NOT NULL,
               name_snapshot TEXT NOT NULL,
               image_snapshot_json TEXT NOT NULL,
+              model_snapshot_json TEXT,
               hero_visual_summary TEXT,
               created_at TEXT NOT NULL,
               UNIQUE(task_id, version_number)
@@ -373,6 +375,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_garment_sku_archive_columns": migration_add_garment_sku_archive_columns,
         "migration_add_media_derivative_metadata": migration_add_media_derivative_metadata,
         "migration_add_lily_tagging_columns": migration_add_lily_tagging_columns,
+        "migration_add_generation_input_model_snapshot": migration_add_generation_input_model_snapshot,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -466,6 +469,10 @@ def migration_add_lily_tagging_columns(db: sqlite3.Connection) -> None:
     ensure_column(db, "styling_garments", "official_title_tags_json", "TEXT")
     ensure_column(db, "styling_garments", "effective_tags_json", "TEXT")
     ensure_column(db, "styling_garments", "tag_meta_json", "TEXT")
+
+
+def migration_add_generation_input_model_snapshot(db: sqlite3.Connection) -> None:
+    ensure_column(db, "generation_task_input_versions", "model_snapshot_json", "TEXT")
 
 
 def ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
