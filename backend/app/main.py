@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import logging
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 import secrets
@@ -2750,7 +2750,7 @@ def create_generation_image(
 
 
 def future_iso(seconds: int) -> str:
-    return datetime.fromtimestamp(time.time() + seconds).isoformat(timespec="seconds")
+    return datetime.fromtimestamp(time.time() + seconds, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def lock_until_iso() -> str:

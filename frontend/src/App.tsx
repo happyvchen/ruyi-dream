@@ -1336,7 +1336,7 @@ function formatTagPrimitive(value: unknown) {
 }
 
 function AIOperationList({ operations, compact = false }: { operations: AIOperation[]; compact?: boolean }) {
-  const active = operations.filter(Boolean).slice(0, compact ? 4 : 8)
+  const active = mergeOperations(operations.filter(Boolean)).slice(0, compact ? 4 : 8)
   const now = useTicker(active.some(isAttemptRunning))
   if (!active.length) return null
   return (
@@ -1376,7 +1376,7 @@ function useTicker(enabled: boolean) {
 function operationFallbacks(task: GenerationTask, localOperations: AIOperation[], ownerType: string) {
   const remote = (task.aiOperations ?? []).filter((operation) => operation.ownerType === ownerType)
   const local = localOperations.filter((operation) => operation.ownerType === ownerType)
-  if (remote.length) return remote
+  if (remote.length) return mergeOperations([...remote, ...local])
   if (local.length) return local
   if (ownerType === 'generation_styling' && task.status === 'STYLING_RUNNING') {
     return [syntheticOperation(ownerType, task.id, 'gemini', task.updatedAt)]
@@ -1389,8 +1389,8 @@ function operationFallbacks(task: GenerationTask, localOperations: AIOperation[]
 
 function finalImageOperations(task: GenerationTask, localOperations: AIOperation[]) {
   const imageAttempts = (task.resultSet?.images ?? []).map((image) => image.activeAttempt).filter(Boolean) as AIOperation[]
-  if (imageAttempts.length) return imageAttempts
   const local = localOperations.filter((operation) => operation.ownerType === 'generation_result_image')
+  if (imageAttempts.length) return mergeOperations([...imageAttempts, ...local])
   if (local.length) return local
   if (task.status === 'FINAL_RUNNING') {
     return Array.from({ length: 5 }, (_, index) => syntheticOperation('generation_result_image', index + 1, 'image-2', task.updatedAt))
@@ -1420,7 +1420,34 @@ function latestRunningTagAttempt(item: StylingGarment): AIOperation | null {
 function visibleTaskOperations(task: GenerationTask, localOperations: AIOperation[]) {
   const activeRemote = (task.aiOperations ?? []).filter((operation) => isAttemptRunning(operation))
   const activeLocal = localOperations.filter(isAttemptRunning)
-  return [...activeLocal, ...activeRemote]
+  return mergeOperations([...activeRemote, ...activeLocal])
+}
+
+function mergeOperations(operations: AIOperation[]) {
+  const byKey = new Map<string, AIOperation>()
+  for (const operation of operations) {
+    const key = operationKey(operation)
+    const existing = byKey.get(key)
+    if (!existing || operationRank(operation) > operationRank(existing)) {
+      byKey.set(key, operation)
+    }
+  }
+  return Array.from(byKey.values()).sort((left, right) => operationTime(right) - operationTime(left))
+}
+
+function operationKey(operation: AIOperation) {
+  if (operation.ownerType === 'generation_result_image') {
+    return `${operation.ownerType}:${operation.ownerId || operation.id}`
+  }
+  return `${operation.ownerType}:${operation.provider}:${operation.ownerId > 0 ? operation.ownerId : 'current'}`
+}
+
+function operationRank(operation: AIOperation) {
+  return operation.id > 0 ? 2 : 1
+}
+
+function operationTime(operation: AIOperation) {
+  return parseRuyiTime(operation.startedAt || operation.createdAt || operation.updatedAt)
 }
 
 function syntheticOperation(ownerType: string, ownerId: number, provider: string, startedAt?: string | null): AIOperation {
@@ -1448,10 +1475,16 @@ function operationLabel(operation: AIOperation, index = 0) {
 
 function elapsedSeconds(start?: string | null, now = Date.now(), end?: string | null) {
   if (!start) return 0
-  const startMs = Date.parse(start)
+  const startMs = parseRuyiTime(start)
   if (!Number.isFinite(startMs)) return 0
-  const endMs = end ? Date.parse(end) : now
+  const endMs = end ? parseRuyiTime(end) : now
   return Math.max(0, Math.floor((endMs - startMs) / 1000))
+}
+
+function parseRuyiTime(value?: string | null) {
+  if (!value) return Number.NaN
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/.test(value) ? value : `${value}Z`
+  return Date.parse(normalized)
 }
 
 function formatDuration(seconds: number) {
@@ -1761,5 +1794,5 @@ function timestampName() {
 }
 
 function dateText(value: string) {
-  return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  return new Date(parseRuyiTime(value)).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
