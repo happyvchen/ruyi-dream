@@ -126,6 +126,137 @@ class BackendSmokeTests(unittest.TestCase):
         _, generic_content_type = asyncio.run(main.validate_upload_image(generic_upload))
         self.assertEqual(generic_content_type, "image/jpeg")
 
+    def test_toapis_image_provider_can_be_selected_by_env(self) -> None:
+        os.environ["GPT_IMAGE2_PROVIDER"] = "toapis"
+        os.environ["GPT_IMAGE2_MODEL_ID"] = "gpt-image-2"
+        config = importlib.import_module("app.config")
+        config = importlib.reload(config)
+        config.get_settings.cache_clear()
+        self.addCleanup(config.get_settings.cache_clear)
+
+        settings = config.get_settings()
+
+        self.assertEqual(settings.image_provider, "toapis")
+        self.assertEqual(settings.gpt_image2_model_id, "gpt-image-2")
+
+    def test_toapis_request_uses_reference_images(self) -> None:
+        os.environ["GPT_IMAGE2_PROVIDER"] = "toapis"
+        os.environ["GPT_IMAGE2_MODEL_ID"] = "gpt-image-2"
+        config = importlib.import_module("app.config")
+        config = importlib.reload(config)
+        config.get_settings.cache_clear()
+        self.addCleanup(config.get_settings.cache_clear)
+        image_provider = importlib.import_module("app.image_provider")
+
+        request = image_provider.build_toapis_request_snapshot(
+            {
+                "prompt": "生成棚拍图",
+                "generation": {"stage": "final_group"},
+            },
+            ["https://files.toapis.com/uploads/reference.png"],
+        )
+
+        self.assertEqual(request["model"], "gpt-image-2")
+        self.assertEqual(request["reference_images"], ["https://files.toapis.com/uploads/reference.png"])
+        self.assertNotIn("image_urls", request)
+        self.assertEqual(request["response_format"], "url")
+
+    def test_toapis_status_response_extracts_result_url(self) -> None:
+        image_provider = importlib.import_module("app.image_provider")
+
+        self.assertEqual(image_provider.map_toapis_status("completed"), "SUCCEEDED")
+        self.assertEqual(
+            image_provider.extract_toapis_output_url(
+                {"result": {"data": [{"url": "https://files.toapis.com/generated.png"}]}}
+            ),
+            "https://files.toapis.com/generated.png",
+        )
+
+    def test_toapis_upload_uses_requests_file_upload(self) -> None:
+        image_provider = importlib.import_module("app.image_provider")
+
+        class FakeResponse:
+            ok = True
+            status_code = 200
+            text = ""
+
+            def json(self) -> dict[str, object]:
+                return {"data": {"url": "https://files.toapis.com/uploads/reference.png"}}
+
+        with patch("requests.post", return_value=FakeResponse()) as post:
+            response = image_provider.post_multipart_file(
+                "https://toapis.com/v1/uploads/images",
+                "file",
+                "reference.png",
+                b"image-bytes",
+                "image/png",
+                "test-toapis-key",
+            )
+
+        self.assertEqual(response["data"]["url"], "https://files.toapis.com/uploads/reference.png")
+        self.assertEqual(post.call_args.kwargs["headers"], {"Authorization": "Bearer test-toapis-key"})
+        self.assertIn("files", post.call_args.kwargs)
+        self.assertEqual(post.call_args.kwargs["files"]["file"], ("reference.png", b"image-bytes", "image/png"))
+
+    def test_toapis_json_calls_use_requests(self) -> None:
+        image_provider = importlib.import_module("app.image_provider")
+
+        class FakeResponse:
+            ok = True
+            status_code = 200
+            text = ""
+
+            def json(self) -> dict[str, object]:
+                return {"id": "task-1", "status": "submitted"}
+
+        with patch("requests.request", return_value=FakeResponse()) as request:
+            response = image_provider.post_json(
+                "https://toapis.com/v1/images/generations",
+                {"model": "gpt-image-2"},
+                "test-toapis-key",
+                auth_scheme="Bearer",
+                error_label="GPT Image-2 toapis 请求失败",
+            )
+
+        self.assertEqual(response["id"], "task-1")
+        self.assertEqual(request.call_args.args[0], "POST")
+        self.assertEqual(request.call_args.kwargs["headers"], {"Authorization": "Bearer test-toapis-key"})
+        self.assertEqual(request.call_args.kwargs["json"], {"model": "gpt-image-2"})
+
+    def test_fal_generate_uses_queue_polling_instead_of_sync_endpoint(self) -> None:
+        os.environ["GPT_IMAGE2_PROVIDER"] = "fal"
+        os.environ["GPT_IMAGE2_MODEL_ID"] = "openai/gpt-image-2/edit"
+        os.environ["FAL_KEY"] = "test-fal-key"
+        config = importlib.import_module("app.config")
+        config = importlib.reload(config)
+        config.get_settings.cache_clear()
+        self.addCleanup(config.get_settings.cache_clear)
+        image_provider = importlib.import_module("app.image_provider")
+
+        submit_response = {
+            "request_id": "fal-request-1",
+            "status_url": "https://queue.fal.run/status",
+            "response_url": "https://queue.fal.run/response",
+            "cancel_url": "https://queue.fal.run/cancel",
+        }
+        status_response = {"status": "COMPLETED"}
+        final_response = {"images": [{"url": "https://fal.media/output.png"}]}
+
+        with (
+            patch.object(image_provider, "prepare_fal_image_inputs", return_value=([{"providerUrl": "https://v3.fal.media/input.png"}], ["https://v3.fal.media/input.png"])),
+            patch.object(image_provider, "post_json", return_value=submit_response) as post_json,
+            patch.object(image_provider, "get_json", side_effect=[status_response, final_response]),
+            patch.object(image_provider, "download_bytes", return_value=(b"png-bytes", "image/png")),
+            patch.object(image_provider, "put_bytes"),
+            patch.object(image_provider, "generate_image_derivatives", return_value={"thumb": "thumb.webp", "preview": "preview.webp"}),
+            patch.object(image_provider.time, "sleep", return_value=None),
+        ):
+            result = asyncio.run(image_provider.GPTImage2FalProvider().generate({"prompt": "test", "imageInputs": []}, "outputs/test.png"))
+
+        self.assertEqual(result["status"], "SUCCEEDED")
+        self.assertEqual(result["providerRequestId"], "fal-request-1")
+        self.assertEqual(post_json.call_args.args[0], "https://queue.fal.run/openai/gpt-image-2/edit")
+
     def test_upload_validation_rejects_decodable_but_unsupported_image_formats(self) -> None:
         from fastapi import HTTPException, UploadFile
         from PIL import Image

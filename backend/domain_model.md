@@ -271,7 +271,7 @@ AI 摄影棚中的一次主推款拍摄任务。
 - 保存完整 `task_package_json`，这是后续接真实 GPT Image-2 三方平台的核心契约。
 - 保存 provider 请求和响应，保证可复盘。
 - 保存最近一次重生原因 `regenerate_reason`。
-- 通过 `attempts_json` 保存初次生成和每次重生的调用记录，包括 prompt、输入图、provider request/response、fal request id、输出路径和时间戳。
+- 通过 `attempts_json` 保存初次生成和每次重生的调用记录，包括 prompt、输入图、provider request/response、provider task id、输出路径和时间戳。
 - 支持标记为最终图 `is_final`。
 
 当前 `task_package_json` 结构：
@@ -289,7 +289,7 @@ AI 摄影棚中的一次主推款拍摄任务。
   "shot": {},
   "generation": {
     "targetModel": "GPT Image-2",
-    "provider": "fal",
+    "provider": "toapis",
     "output": {
       "aspectRatio": "1:1",
       "size": "1200x1200"
@@ -314,14 +314,14 @@ AI 摄影棚中的一次主推款拍摄任务。
 
 - 输出一张 2x3 视觉预览图，前 5 格对应 `ShotPlan.shots` 的 5 条分镜，第 6 格为备用候选姿势。
 - 画面中禁止出现文字、编号、标签、水印、logo、脚本说明或边框说明。
-- 图片入参固定为“模特身份参考图在前、服装素材参考图在后”，且总数最多 10 张，遵守 fal `image_urls <= 10` 的限制。
+- 图片入参固定为“模特身份参考图在前、服装素材参考图在后”，且总数最多 10 张，遵守 Image-2 provider 的参考图数量限制。
 - 模特图按数字模特 UI 当前显示顺序取前 4 张；若不足 4 张，以实际数量为准。
 - 服装图按当前货号素材 UI 当前显示顺序补齐剩余额度；通常为 6 张，但如果模特图少于 4 张则服装图可超过 6 张，总数仍不超过 10；如果服装图不足则以实际数量为准。不要求维护 `main/front/back/detail` 等角色。
 - prompt 的“生图方案/分镜剧本/服饰搭配/统一背景”必须来自当前货号最新可用 Gemini 方案；服装具体事实默认由服装素材图主导，不由 Gemini 文本复述。如果缺少服饰搭配等关键策划信息，应让任务失败并在 UI 暴露错误，不允许静默使用兜底文案。
-- 发给 Image-2 之前，所有图片都必须先上传 fal，最终 `provider_request_json.image_urls` 只允许 fal 返回的 Image URLs。
+- 发给 Image-2 之前，所有图片都必须先上传当前 provider；toapis 使用 `provider_request_json.reference_images`，fal 使用 `provider_request_json.image_urls`。
 - `image_inputs_json` / `attempts_json.imageInputs` 必须保留每张输入图的 `role`、`filename`、`sourceObjectKey`、`providerUrl`，用于审计图片编号与 prompt 中“图片角色”的对应关系。
 - 对预览图点击“重生”时，不复用历史 `task_package_json` 中可能过期的预览规则；必须按当前货号最新可用 `ShotPlan` 和上述预览规则重新构建 task package，再追加 `regeneration` 要求。若历史预览记录绑定了旧方案，重生时要自动切到最新可用方案。
-- 预览类 Image-2 请求使用 fal 合法枚举 `image_size = square_hd` 和 `quality = high`，避免 `auto` 尺寸导致 Contact Sheet 比例漂移。
+- 预览类 Image-2 请求使用当前 provider 的正方形安全配置，避免尺寸漂移影响 Contact Sheet。
 
 重生时会在 task package 中追加：
 

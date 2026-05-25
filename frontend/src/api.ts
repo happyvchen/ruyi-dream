@@ -52,10 +52,30 @@ export type StylingGarment = {
   updatedAt: string
 }
 
+export type AIOperation = {
+  id: number
+  ownerType: string
+  ownerId: number
+  provider: string
+  providerRequestId?: string | null
+  status: string
+  startedAt?: string | null
+  completedAt?: string | null
+  failedAt?: string | null
+  errorMessage?: string | null
+  outputAssetId?: number | null
+  createdAt?: string | null
+  updatedAt?: string | null
+}
+
 export type GenerationTask = {
   id: number
   name: string
   status: string
+  currentInputVersionId?: number | null
+  activeStylingId?: number | null
+  activePreviewId?: number | null
+  activeResultSetId?: number | null
   createdAt: string
   updatedAt: string
   images?: { id: number; sortOrder: number; asset: MediaAsset }[]
@@ -72,11 +92,20 @@ export type GenerationTask = {
     warnings?: string[]
   } | null
   shotPlans?: { id: number; sortOrder: number; shotType: string; plan: Record<string, unknown> }[]
-  preview?: { id: number; status: string; asset?: MediaAsset | null } | null
+  preview?: { id: number; status: string; asset?: MediaAsset | null; createdAt?: string; updatedAt?: string } | null
   resultSet?: {
     id: number
     status: string
-    images: { id: number; sortOrder: number; status: string; asset?: MediaAsset | null }[]
+    images: {
+      id: number
+      sortOrder: number
+      status: string
+      asset?: MediaAsset | null
+      activeAttemptId?: number | null
+      activeAttempt?: AIOperation | null
+      createdAt?: string
+      updatedAt?: string
+    }[]
   } | null
   summary?: {
     cover?: MediaAsset | null
@@ -84,6 +113,7 @@ export type GenerationTask = {
     finalImages?: MediaAsset[]
     selectedGarments?: StylingGarment[]
   }
+  aiOperations?: AIOperation[]
   attempts?: unknown[]
 }
 

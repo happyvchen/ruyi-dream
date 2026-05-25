@@ -169,6 +169,65 @@ h1, h2, h3, p { margin: 0; }
 .step-copy h2 { font-size: 22px; }
 .step-copy p { color: #667085; font-size: 14px; }
 
+.ai-operation-list {
+  display: grid;
+  gap: 8px;
+}
+.ai-operation-list.compact {
+  gap: 6px;
+}
+.ai-operation-card {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 54px;
+  padding: 9px 10px;
+  border: 1px solid #d8e0ea;
+  border-radius: 8px;
+  background: #fff;
+}
+.ai-operation-card.is-running {
+  border-color: #bae6fd;
+  background: linear-gradient(135deg, #eefbff, #f8fbff);
+}
+.ai-operation-card.compact {
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  min-height: 44px;
+  padding: 7px 8px;
+}
+.ai-operation-icon {
+  width: 30px;
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: #0f7cff;
+  background: #e8f7ff;
+}
+.ai-operation-card strong {
+  display: block;
+  overflow: hidden;
+  color: #1e293b;
+  font-size: 13px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ai-operation-card span {
+  display: block;
+  margin-top: 2px;
+  color: #64748b;
+  font-size: 12px;
+}
+.ai-operation-card time {
+  min-width: 48px;
+  color: #0369a1;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  text-align: right;
+}
+
 .upload-box {
   min-height: 210px;
   display: grid;
@@ -296,6 +355,16 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
   object-fit: cover;
   background: #f1f5f9;
   color: #64748b;
+}
+.image-placeholder {
+  gap: 5px;
+  align-content: center;
+  font-weight: 700;
+}
+.image-placeholder small {
+  color: #0369a1;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 .result-card div:last-child {
   height: 38px;
