@@ -270,6 +270,173 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertEqual(status, "SUCCEEDED")
 
+    def test_tagging_running_styling_garment_rejects_mutation_and_archive(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            code = f"STYLING-LOCK-{os.urandom(5).hex()}"
+            with db_module.get_db() as db:
+                garment_id = db.execute(
+                    """
+                    INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, created_at, updated_at)
+                    VALUES (?, 'TAGGING_RUNNING', '{}', '{}', ?, ?)
+                    """,
+                    (code, timestamp, timestamp),
+                ).lastrowid
+
+            client = TestClient(main.app)
+            self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+            edit = client.patch(f"/api/styling-garments/{garment_id}", json={"code": "CHANGED"})
+            archive = client.delete(f"/api/styling-garments/{garment_id}")
+
+        self.assertEqual(edit.status_code, 409)
+        self.assertEqual(archive.status_code, 409)
+
+    def test_generation_inputs_use_selected_material_snapshot_after_archive(self) -> None:
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            snapshot = [{
+                "id": 99,
+                "code": "ARCHIVED-STYLING",
+                "images": [{"asset": {"id": 901, "objectKey": "styling/snapshot.png", "filename": "snapshot.png", "originalUrl": "/api/media?key=styling/snapshot.png&variant=original"}}],
+            }]
+            with db_module.get_db() as db:
+                task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('snapshot', 'STYLING_READY', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                input_id = db.execute(
+                    """
+                    INSERT INTO generation_task_input_versions (task_id, version_number, name_snapshot, image_snapshot_json, created_at)
+                    VALUES (?, 1, 'snapshot', '[]', ?)
+                    """,
+                    (task_id, timestamp),
+                ).lastrowid
+                styling_id = db.execute(
+                    """
+                    INSERT INTO generation_stylings
+                      (task_id, input_version_id, source_material_ids_json, selected_material_ids_json,
+                       selected_material_snapshot_json, status, created_at, updated_at)
+                    VALUES (?, ?, '[99]', '[99]', ?, 'SUCCEEDED', ?, ?)
+                    """,
+                    (task_id, input_id, db_module.dumps(snapshot), timestamp, timestamp),
+                ).lastrowid
+
+            with patch.object(main, "get_default_model_image_inputs", return_value=[]):
+                inputs = main.build_new_image_inputs(int(task_id), int(styling_id), include_preview=False)
+
+        styling_inputs = [item for item in inputs if item["role"] == "styling_garment"]
+        self.assertEqual(styling_inputs[0]["objectKey"], "styling/snapshot.png")
+
+    def test_purge_styling_garment_removes_tasks_that_selected_it(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            code = f"STYLING-PURGE-{os.urandom(5).hex()}"
+            with db_module.get_db() as db:
+                garment_id = db.execute(
+                    """
+                    INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, created_at, updated_at)
+                    VALUES (?, 'READY', '{}', '{}', ?, ?)
+                    """,
+                    (code, timestamp, timestamp),
+                ).lastrowid
+                task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('dependent', 'STYLING_READY', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                hero_asset_id = db.execute(
+                    """
+                    INSERT INTO media_assets (object_key, original_filename, mime_type, status, created_at, updated_at)
+                    VALUES ('generation-tasks/dependent-abc123/hero.png', 'hero.png', 'image/png', 'READY', ?, ?)
+                    """,
+                    (timestamp, timestamp),
+                ).lastrowid
+                db.execute(
+                    """
+                    INSERT INTO generation_task_images (task_id, media_asset_id, sort_order, status, created_at, updated_at)
+                    VALUES (?, ?, 0, 'READY', ?, ?)
+                    """,
+                    (task_id, hero_asset_id, timestamp, timestamp),
+                )
+                input_id = db.execute(
+                    """
+                    INSERT INTO generation_task_input_versions (task_id, version_number, name_snapshot, image_snapshot_json, created_at)
+                    VALUES (?, 1, 'dependent', '[]', ?)
+                    """,
+                    (task_id, timestamp),
+                ).lastrowid
+                db.execute(
+                    """
+                    INSERT INTO generation_stylings
+                      (task_id, input_version_id, source_material_ids_json, selected_material_ids_json,
+                       selected_material_snapshot_json, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, '[]', 'SUCCEEDED', ?, ?)
+                    """,
+                    (task_id, input_id, db_module.dumps([garment_id]), db_module.dumps([garment_id]), timestamp, timestamp),
+                )
+                output_asset_id = db.execute(
+                    """
+                    INSERT INTO media_assets (object_key, original_filename, mime_type, status, created_at, updated_at)
+                    VALUES ('generation-tasks/dependent/output.png', 'output.png', 'image/png', 'READY', ?, ?)
+                    """,
+                    (timestamp, timestamp),
+                ).lastrowid
+                db.execute(
+                    """
+                    INSERT INTO generation_attempts
+                      (owner_type, owner_id, provider, status, output_asset_id, created_at, updated_at)
+                    VALUES ('generation_styling', ?, 'test', 'SUCCEEDED', ?, ?, ?)
+                    """,
+                    (task_id, output_asset_id, timestamp, timestamp),
+                )
+
+            client = TestClient(main.app)
+            self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+            with (
+                patch.object(main, "cleanup_objects") as cleanup_objects,
+                patch.object(main, "cleanup_prefixes", return_value=[]),
+            ):
+                purged = client.delete(f"/api/styling-garments/{garment_id}?purge=true&confirmCode={code}")
+
+            self.assertEqual(purged.status_code, 200)
+            self.assertEqual(purged.json()["deletedTaskIds"], [task_id])
+            removed_keys = cleanup_objects.call_args.args[0]
+            self.assertIn("generation-tasks/dependent-abc123/hero.png", removed_keys)
+            with db_module.get_db() as db:
+                task_count = db.execute("SELECT COUNT(*) AS count FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()["count"]
+                attempt_count = db.execute("SELECT COUNT(*) AS count FROM generation_attempts WHERE owner_id = ?", (task_id,)).fetchone()["count"]
+                output_asset_count = db.execute("SELECT COUNT(*) AS count FROM media_assets WHERE id = ?", (output_asset_id,)).fetchone()["count"]
+                hero_asset_count = db.execute("SELECT COUNT(*) AS count FROM media_assets WHERE id = ?", (hero_asset_id,)).fetchone()["count"]
+
+        self.assertEqual(task_count, 0)
+        self.assertEqual(attempt_count, 0)
+        self.assertEqual(output_asset_count, 0)
+        self.assertEqual(hero_asset_count, 0)
+
     def test_sku_delete_archives_unless_related_records_are_confirmed_for_deletion(self) -> None:
         from fastapi.testclient import TestClient
 

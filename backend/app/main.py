@@ -15,7 +15,7 @@ import zipfile
 from typing import Any
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from PIL import Image, UnidentifiedImageError
@@ -171,6 +171,10 @@ class LoginRequest(BaseModel):
 class StylingGarmentUpdateRequest(BaseModel):
     code: str | None = None
     manualTags: dict[str, Any] | None = None
+
+
+class StylingGarmentImageUpdateRequest(BaseModel):
+    sortOrder: int | None = None
 
 
 class GenerationTaskUpdateRequest(BaseModel):
@@ -796,6 +800,11 @@ def get_styling_garment(garment_id: int) -> dict[str, Any]:
     return {"item": get_styling_garment_by_id(garment_id)}
 
 
+def ensure_styling_garment_not_tagging(row: Any) -> None:
+    if row["status"] == "TAGGING_RUNNING":
+        raise HTTPException(status_code=409, detail="正在打标，完成后才能修改或归档搭配服饰")
+
+
 @app.post("/api/styling-garments")
 async def create_styling_garment(
     code: str = Form(...),
@@ -853,6 +862,7 @@ def update_styling_garment(garment_id: int, payload: StylingGarmentUpdateRequest
         row = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="搭配服饰不存在")
+        ensure_styling_garment_not_tagging(row)
         if "code" in updates:
             duplicate = db.execute(
                 "SELECT id FROM styling_garments WHERE code = ? AND id <> ? AND deleted_at IS NULL",
@@ -874,13 +884,19 @@ def update_styling_garment(garment_id: int, payload: StylingGarmentUpdateRequest
 
 
 @app.post("/api/styling-garments/{garment_id}/save-and-tag")
-async def save_and_tag_styling_garment(garment_id: int) -> dict[str, Any]:
+async def save_and_tag_styling_garment(garment_id: int, background_tasks: BackgroundTasks) -> dict[str, Any]:
     with get_db() as db:
         row = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="搭配服饰不存在")
+        ensure_styling_garment_not_tagging(row)
         timestamp = now_iso()
         db.execute("UPDATE styling_garments SET status = 'TAGGING_RUNNING', tag_error = NULL, updated_at = ? WHERE id = ?", (timestamp, garment_id))
+    background_tasks.add_task(run_styling_garment_tagging, garment_id)
+    return {"item": get_styling_garment_by_id(garment_id)}
+
+
+async def run_styling_garment_tagging(garment_id: int) -> None:
     try:
         tagging_result = await tag_styling_garment_with_gemini(garment_id)
     except Exception as exc:
@@ -889,7 +905,7 @@ async def save_and_tag_styling_garment(garment_id: int) -> dict[str, Any]:
                 "UPDATE styling_garments SET status = 'TAGGING_FAILED', tag_error = ?, updated_at = ? WHERE id = ?",
                 (str(exc), now_iso(), garment_id),
             )
-        return {"item": get_styling_garment_by_id(garment_id)}
+        return
     with get_db() as db:
         timestamp = now_iso()
         row = db.execute("SELECT manual_tags_json FROM styling_garments WHERE id = ?", (garment_id,)).fetchone()
@@ -923,19 +939,257 @@ async def save_and_tag_styling_garment(garment_id: int) -> dict[str, Any]:
             ),
         )
         log_event(db, "styling_garment", garment_id, "tagged", tagging_result)
+
+
+@app.post("/api/styling-garments/{garment_id}/images")
+async def add_styling_garment_images(
+    garment_id: int,
+    files: list[UploadFile] = File(...),
+) -> dict[str, Any]:
+    if not files:
+        raise HTTPException(status_code=400, detail="至少上传一张图片")
+    with get_db() as db:
+        row = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="搭配服饰不存在")
+        ensure_styling_garment_not_tagging(row)
+        existing_count = db.execute(
+            "SELECT COUNT(*) AS count FROM styling_garment_images WHERE styling_garment_id = ? AND deleted_at IS NULL",
+            (garment_id,),
+        ).fetchone()["count"]
+        if int(existing_count) + len(files) > 6:
+            raise HTTPException(status_code=400, detail="单套搭配服饰最多保存 6 张图片")
+        max_sort = db.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) AS max_sort FROM styling_garment_images WHERE styling_garment_id = ? AND deleted_at IS NULL",
+            (garment_id,),
+        ).fetchone()["max_sort"]
+    prefix = join_key("styling-garments", f"{sanitize_name(row['code'])}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}")
+    assets = await save_uploads_as_media_assets(files, prefix)
+    timestamp = now_iso()
+    with get_db() as db:
+        current = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
+        if not current:
+            cleanup_objects([key for asset in assets for key in image_object_keys(asset["objectKey"])])
+            raise HTTPException(status_code=404, detail="搭配服饰不存在")
+        try:
+            ensure_styling_garment_not_tagging(current)
+        except HTTPException:
+            cleanup_objects([key for asset in assets for key in image_object_keys(asset["objectKey"])])
+            raise
+        for offset, asset in enumerate(assets, start=1):
+            db.execute(
+                """
+                INSERT INTO styling_garment_images
+                  (styling_garment_id, media_asset_id, sort_order, status, created_at, updated_at)
+                VALUES (?, ?, ?, 'READY', ?, ?)
+                """,
+                (garment_id, asset["id"], int(max_sort) + offset, timestamp, timestamp),
+            )
+        db.execute("UPDATE styling_garments SET updated_at = ? WHERE id = ?", (timestamp, garment_id))
+        log_event(db, "styling_garment", garment_id, "images_added", {"fileCount": len(assets)})
+    return {"item": get_styling_garment_by_id(garment_id)}
+
+
+@app.post("/api/styling-garment-images/{image_id}/replace")
+async def replace_styling_garment_image(image_id: int, file: UploadFile = File(...)) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute(
+            """
+            SELECT sgi.*, sg.code, sg.status AS garment_status, sg.deleted_at AS garment_deleted_at,
+                   ma.object_key AS previous_object_key
+            FROM styling_garment_images sgi
+            JOIN styling_garments sg ON sg.id = sgi.styling_garment_id
+            JOIN media_assets ma ON ma.id = sgi.media_asset_id
+            WHERE sgi.id = ? AND sgi.deleted_at IS NULL
+            """,
+            (image_id,),
+        ).fetchone()
+    if not row or row["garment_deleted_at"] is not None:
+        raise HTTPException(status_code=404, detail="搭配服饰图片不存在")
+    ensure_styling_garment_not_tagging({"status": row["garment_status"]})
+    prefix = join_key("styling-garments", f"{sanitize_name(row['code'])}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}")
+    assets = await save_uploads_as_media_assets([file], prefix)
+    replacement = assets[0]
+    garment_id = int(row["styling_garment_id"])
+    timestamp = now_iso()
+    with get_db() as db:
+        current = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
+        if not current:
+            cleanup_objects(image_object_keys(replacement["objectKey"]))
+            raise HTTPException(status_code=404, detail="搭配服饰不存在")
+        try:
+            ensure_styling_garment_not_tagging(current)
+        except HTTPException:
+            cleanup_objects(image_object_keys(replacement["objectKey"]))
+            raise
+        db.execute(
+            "UPDATE styling_garment_images SET media_asset_id = ?, updated_at = ? WHERE id = ?",
+            (replacement["id"], timestamp, image_id),
+        )
+        db.execute("UPDATE styling_garments SET updated_at = ? WHERE id = ?", (timestamp, garment_id))
+        log_event(db, "styling_garment", garment_id, "image_replaced", {"imageId": image_id})
+    return {"item": get_styling_garment_by_id(garment_id)}
+
+
+@app.patch("/api/styling-garment-images/{image_id}")
+def update_styling_garment_image(image_id: int, payload: StylingGarmentImageUpdateRequest) -> dict[str, Any]:
+    if payload.sortOrder is None:
+        with get_db() as db:
+            row = db.execute(
+                "SELECT sgi.styling_garment_id, sg.status FROM styling_garment_images sgi JOIN styling_garments sg ON sg.id = sgi.styling_garment_id WHERE sgi.id = ? AND sgi.deleted_at IS NULL AND sg.deleted_at IS NULL",
+                (image_id,),
+            ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="搭配服饰图片不存在")
+        ensure_styling_garment_not_tagging(row)
+        return {"item": get_styling_garment_by_id(int(row["styling_garment_id"]))}
+    if payload.sortOrder < 0:
+        raise HTTPException(status_code=400, detail="图片排序不能小于 0")
+    timestamp = now_iso()
+    with get_db() as db:
+        row = db.execute(
+            "SELECT sgi.styling_garment_id, sg.status FROM styling_garment_images sgi JOIN styling_garments sg ON sg.id = sgi.styling_garment_id WHERE sgi.id = ? AND sgi.deleted_at IS NULL AND sg.deleted_at IS NULL",
+            (image_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="搭配服饰图片不存在")
+        ensure_styling_garment_not_tagging(row)
+        garment_id = int(row["styling_garment_id"])
+        db.execute(
+            "UPDATE styling_garment_images SET sort_order = ?, updated_at = ? WHERE id = ?",
+            (payload.sortOrder, timestamp, image_id),
+        )
+        db.execute("UPDATE styling_garments SET updated_at = ? WHERE id = ?", (timestamp, garment_id))
+    return {"item": get_styling_garment_by_id(garment_id)}
+
+
+@app.delete("/api/styling-garment-images/{image_id}")
+def delete_styling_garment_image(image_id: int) -> dict[str, Any]:
+    timestamp = now_iso()
+    with get_db() as db:
+        row = db.execute(
+            "SELECT sgi.*, sg.status AS garment_status FROM styling_garment_images sgi JOIN styling_garments sg ON sg.id = sgi.styling_garment_id WHERE sgi.id = ? AND sgi.deleted_at IS NULL AND sg.deleted_at IS NULL",
+            (image_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="搭配服饰图片不存在")
+        ensure_styling_garment_not_tagging({"status": row["garment_status"]})
+        garment_id = int(row["styling_garment_id"])
+        remaining = db.execute(
+            "SELECT COUNT(*) AS count FROM styling_garment_images WHERE styling_garment_id = ? AND deleted_at IS NULL AND id <> ?",
+            (garment_id, image_id),
+        ).fetchone()["count"]
+        if int(remaining) < 1:
+            raise HTTPException(status_code=409, detail="每套搭配服饰至少保留一张图片")
+        db.execute("UPDATE styling_garment_images SET deleted_at = ?, updated_at = ? WHERE id = ?", (timestamp, timestamp, image_id))
+        db.execute("UPDATE styling_garments SET updated_at = ? WHERE id = ?", (timestamp, garment_id))
+        log_event(db, "styling_garment", garment_id, "image_deleted", {"imageId": image_id})
     return {"item": get_styling_garment_by_id(garment_id)}
 
 
 @app.delete("/api/styling-garments/{garment_id}")
-def delete_styling_garment(garment_id: int) -> dict[str, Any]:
+def delete_styling_garment(
+    garment_id: int,
+    purge: bool = Query(False),
+    confirm_code: str | None = Query(None, alias="confirmCode"),
+) -> dict[str, Any]:
     with get_db() as db:
-        row = db.execute("SELECT id FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
+        row = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="搭配服饰不存在")
+        ensure_styling_garment_not_tagging(row)
+        if purge and confirm_code != row["code"]:
+            raise HTTPException(status_code=400, detail="请输入完整 code 以确认删除关联记录和文件")
         timestamp = now_iso()
+        if purge:
+            image_rows = db.execute(
+                """
+                SELECT ma.id, ma.object_key FROM styling_garment_images sgi
+                JOIN media_assets ma ON ma.id = sgi.media_asset_id
+                WHERE sgi.styling_garment_id = ?
+                """,
+                (garment_id,),
+            ).fetchall()
+            styling_rows = db.execute(
+                "SELECT task_id, selected_material_ids_json FROM generation_stylings"
+            ).fetchall()
+            dependent_task_ids = [
+                int(styling["task_id"])
+                for styling in styling_rows
+                if garment_id in {int(item) for item in loads(styling["selected_material_ids_json"], [])}
+            ]
+            dependent_asset_ids: list[int] = []
+            if dependent_task_ids:
+                placeholders = ", ".join("?" for _ in dependent_task_ids)
+                dependent_assets = db.execute(
+                    f"""
+                    SELECT media_asset_id AS asset_id FROM generation_task_images WHERE task_id IN ({placeholders})
+                    UNION
+                    SELECT preview_asset_id AS asset_id FROM generation_previews WHERE task_id IN ({placeholders}) AND preview_asset_id IS NOT NULL
+                    UNION
+                    SELECT gri.current_asset_id AS asset_id FROM generation_result_images_new gri
+                    JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+                    WHERE grs.task_id IN ({placeholders}) AND gri.current_asset_id IS NOT NULL
+                    UNION
+                    SELECT ga.output_asset_id AS asset_id FROM generation_attempts ga
+                    WHERE ga.output_asset_id IS NOT NULL AND (
+                         (ga.owner_type = 'generation_styling' AND ga.owner_id IN ({placeholders}))
+                         OR (ga.owner_type = 'generation_preview' AND ga.owner_id IN (
+                              SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
+                            ))
+                         OR (ga.owner_type = 'generation_result_image' AND ga.owner_id IN (
+                              SELECT gri.id FROM generation_result_images_new gri
+                              JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+                              WHERE grs.task_id IN ({placeholders})
+                            ))
+                    )
+                    """,
+                    (
+                        *dependent_task_ids, *dependent_task_ids, *dependent_task_ids,
+                        *dependent_task_ids, *dependent_task_ids, *dependent_task_ids,
+                    ),
+                ).fetchall()
+                dependent_asset_ids = [int(asset["asset_id"]) for asset in dependent_assets]
+                db.execute(
+                    f"""
+                    DELETE FROM generation_attempts
+                    WHERE (owner_type = 'generation_styling' AND owner_id IN ({placeholders}))
+                       OR (owner_type = 'generation_preview' AND owner_id IN (
+                            SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
+                          ))
+                       OR (owner_type = 'generation_result_image' AND owner_id IN (
+                            SELECT gri.id FROM generation_result_images_new gri
+                            JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+                            WHERE grs.task_id IN ({placeholders})
+                          ))
+                    """,
+                    (*dependent_task_ids, *dependent_task_ids, *dependent_task_ids),
+                )
+                db.execute(f"DELETE FROM generation_tasks WHERE id IN ({placeholders})", dependent_task_ids)
+            asset_ids = [int(image["id"]) for image in image_rows] + dependent_asset_ids
+            dependent_media_rows: list[Any] = []
+            if dependent_asset_ids:
+                placeholders = ", ".join("?" for _ in dependent_asset_ids)
+                dependent_media_rows = db.execute(
+                    f"SELECT object_key FROM media_assets WHERE id IN ({placeholders})",
+                    dependent_asset_ids,
+                ).fetchall()
+            cleanup_objects([
+                key
+                for media in [*image_rows, *dependent_media_rows]
+                for key in image_object_keys(media["object_key"])
+            ])
+            db.execute("DELETE FROM styling_garments WHERE id = ?", (garment_id,))
+            if asset_ids:
+                placeholders = ", ".join("?" for _ in asset_ids)
+                db.execute(f"DELETE FROM media_assets WHERE id IN ({placeholders})", asset_ids)
+            cleanup_errors = cleanup_prefixes([join_key("generation-tasks", str(task_id)) for task_id in dependent_task_ids])
+            log_event(db, "styling_garment", garment_id, "purged", {"code": row["code"], "deletedTaskIds": dependent_task_ids})
+            return {"ok": True, "purged": True, "deletedTaskIds": dependent_task_ids, "objectCleanupErrors": cleanup_errors}
         db.execute("UPDATE styling_garments SET status = 'DELETED', deleted_at = ?, updated_at = ? WHERE id = ?", (timestamp, timestamp, garment_id))
         db.execute("UPDATE styling_garment_images SET deleted_at = ?, updated_at = ? WHERE styling_garment_id = ?", (timestamp, timestamp, garment_id))
-    return {"ok": True}
+        log_event(db, "styling_garment", garment_id, "archived", {"code": row["code"]})
+    return {"ok": True, "archived": True}
 
 
 @app.post("/api/generation-tasks")
@@ -4096,14 +4350,13 @@ def build_new_image_inputs(task_id: int, styling_id: int, include_preview: bool,
             """,
             (task_id,),
         ).fetchall()
-        styling = db.execute("SELECT selected_material_ids_json FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
+        styling = db.execute("SELECT selected_material_snapshot_json FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
     inputs.extend(image_input_from_asset(serialize_media_asset(row), "hero_garment") for row in task_images)
-    selected_ids = loads(styling["selected_material_ids_json"], []) if styling else []
+    selected_materials = loads(styling["selected_material_snapshot_json"], []) if styling else []
     remaining = max(0, 10 - len(inputs) - 2)
-    for material_id in selected_ids:
+    for garment in selected_materials:
         if remaining <= 0:
             break
-        garment = get_styling_garment_by_id(int(material_id))
         images = garment.get("images", [])
         if images:
             inputs.append(image_input_from_asset(images[0]["asset"], "styling_garment"))
