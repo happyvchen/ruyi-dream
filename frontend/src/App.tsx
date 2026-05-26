@@ -1029,11 +1029,10 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
       <div className="import-head">
         <div>
           <h3>导入搭配服饰</h3>
-          <p>散图会合并为一套；单文件夹是一套；拖入多个一级文件夹会拆成多套。导入后系统会自动识别标签，单套最多 6 张，推荐 1-3 张。</p>
+          <p>散图会合并为一套；单文件夹是一套；拖入多个一级文件夹会拆成多套。导入后系统会自动识别标签，单套最多 6 张。</p>
         </div>
         <button className="primary" disabled={!batches.length} onClick={saveDrafts}>导入</button>
       </div>
-      <div className="import-notice is-safe">导入开始后会进入下方进度区，上传入口会立即释放，可继续选择下一批文件夹。</div>
       <div className="import-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
         <Images size={22} />
         <strong>拖入图片或文件夹</strong>
