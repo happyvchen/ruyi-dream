@@ -777,6 +777,20 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(normalized["styling_compatibility"]["style_risk"], ["none"])
         self.assertLessEqual(len(normalized["styling_compatibility"]["pairing_brief"]), 40)
 
+    def test_lily_tagging_json_parser_recovers_trailing_brace(self) -> None:
+        main = importlib.import_module("app.main")
+
+        parsed = main.parse_lily_tagging_json('{"schema_version":"lily-garment-tags-v1","ai_tags":{"category":"outerwear"}}\n\n}')
+
+        self.assertEqual(parsed["schema_version"], "lily-garment-tags-v1")
+        self.assertEqual(parsed["ai_tags"]["category"], "outerwear")
+
+    def test_lily_tagging_json_parser_rejects_non_json_trailing_text(self) -> None:
+        main = importlib.import_module("app.main")
+
+        with self.assertRaises(Exception):
+            main.parse_lily_tagging_json('{"schema_version":"lily-garment-tags-v1"}\nexplanation}')
+
     def test_lily_tagging_review_results_do_not_enter_ready(self) -> None:
         main = importlib.import_module("app.main")
 
