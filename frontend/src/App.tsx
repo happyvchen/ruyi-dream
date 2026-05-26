@@ -72,7 +72,8 @@ const steps = [
   { title: '生成成片', icon: Sparkles },
 ] as const
 
-const pageSizeOptions = [20, 50, 100] as const
+const defaultPageSizeOptions = [20, 50, 100] as const
+const densePageSizeOptions = [12, 50, 100] as const
 
 export function App() {
   const [checked, setChecked] = useState(false)
@@ -721,7 +722,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
   const [offset, setOffset] = useState(0)
   const [total, setTotal] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
-  const [pageSize, setPageSize] = useState(20)
+  const [pageSize, setPageSize] = useState(12)
   const [searching, setSearching] = useState(false)
   const [includeArchived, setIncludeArchived] = useState(false)
   const [selectedGarmentIds, setSelectedGarmentIds] = useState<Set<number>>(() => new Set())
@@ -865,6 +866,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
           disabled={searching}
           offset={offset}
           pageSize={pageSize}
+          pageSizeOptions={densePageSizeOptions}
           total={total}
           totalPages={totalPages}
           onOffsetChange={setOffset}
@@ -1293,7 +1295,7 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
   const [includeArchived, setIncludeArchived] = useState(false)
   const [selectedRecordIds, setSelectedRecordIds] = useState<Set<number>>(() => new Set())
   const [deleteRecordDialog, setDeleteRecordDialog] = useState<GenerationTask[] | null>(null)
-  const [pageSize, setPageSize] = useState(20)
+  const [pageSize, setPageSize] = useState(12)
   const visibleRecords = items.filter((item) => item.status !== 'DRAFT')
   const selectableRecordIds = visibleRecords.filter((item) => !isTaskRunning(item)).map((item) => item.id)
   const allVisibleRecordsSelected = selectableRecordIds.length > 0 && selectableRecordIds.every((id) => selectedRecordIds.has(id))
@@ -1432,6 +1434,7 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
             disabled={loading}
             offset={offset}
             pageSize={pageSize}
+            pageSizeOptions={densePageSizeOptions}
             total={total}
             totalPages={totalPages}
             onOffsetChange={setOffset}
@@ -1531,9 +1534,10 @@ function DeleteConfirmDialog({ title, items, onClose, onConfirm }: {
   )
 }
 
-function PaginationControls({ offset, pageSize, total, totalPages, disabled, compact = false, onOffsetChange, onPageSizeChange }: {
+function PaginationControls({ offset, pageSize, pageSizeOptions = defaultPageSizeOptions, total, totalPages, disabled, compact = false, onOffsetChange, onPageSizeChange }: {
   offset: number
   pageSize: number
+  pageSizeOptions?: readonly number[]
   total: number
   totalPages: number
   disabled?: boolean
