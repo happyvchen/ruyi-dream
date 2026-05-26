@@ -1730,12 +1730,34 @@ async def run_final_generation(task_id: int, result_set_id: int, image_ids: list
         return_exceptions=True,
     )
     with get_db() as db:
-        timestamp = now_iso()
-        status_rows = db.execute("SELECT status FROM generation_result_images_new WHERE result_set_id = ?", (result_set_id,)).fetchall()
-        completed = bool(status_rows) and all(item["status"] == "SUCCEEDED" for item in status_rows)
-        final_status = "COMPLETED" if completed else "FINAL_PARTIAL"
-        db.execute("UPDATE generation_result_sets SET status = ?, updated_at = ? WHERE id = ?", ("SUCCEEDED" if final_status == "COMPLETED" else "PARTIAL", timestamp, result_set_id))
-        db.execute("UPDATE generation_tasks SET status = ?, active_result_set_id = ?, updated_at = ? WHERE id = ?", (final_status, result_set_id, timestamp, task_id))
+        reconcile_final_result_set(db, result_set_id, task_id)
+
+
+def reconcile_final_result_set(db: Any, result_set_id: int, task_id: int | None = None) -> tuple[str, str]:
+    if task_id is None:
+        row = db.execute("SELECT task_id FROM generation_result_sets WHERE id = ?", (result_set_id,)).fetchone()
+        if not row:
+            return "PARTIAL", "FINAL_PARTIAL"
+        task_id = int(row["task_id"])
+    status_rows = db.execute("SELECT status FROM generation_result_images_new WHERE result_set_id = ?", (result_set_id,)).fetchall()
+    statuses = [row["status"] for row in status_rows]
+    timestamp = now_iso()
+    if any(status in {"QUEUED", "RUNNING"} for status in statuses):
+        db.execute("UPDATE generation_result_sets SET status = 'RUNNING', updated_at = ? WHERE id = ?", (timestamp, result_set_id))
+        db.execute(
+            "UPDATE generation_tasks SET status = 'FINAL_RUNNING', active_result_set_id = ?, updated_at = ? WHERE id = ?",
+            (result_set_id, timestamp, task_id),
+        )
+        return "RUNNING", "FINAL_RUNNING"
+    completed = bool(statuses) and all(status == "SUCCEEDED" for status in statuses)
+    result_set_status = "SUCCEEDED" if completed else "PARTIAL"
+    task_status = "COMPLETED" if completed else "FINAL_PARTIAL"
+    db.execute("UPDATE generation_result_sets SET status = ?, updated_at = ? WHERE id = ?", (result_set_status, timestamp, result_set_id))
+    db.execute(
+        "UPDATE generation_tasks SET status = ?, active_result_set_id = ?, updated_at = ? WHERE id = ?",
+        (task_status, result_set_id, timestamp, task_id),
+    )
+    return result_set_status, task_status
 
 
 @app.post("/api/generation-result-images-new/{image_id}/retry")
@@ -1754,32 +1776,26 @@ async def retry_new_result_image(image_id: int) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail="结果图不存在")
         if row["status"] != "FAILED":
             raise HTTPException(status_code=409, detail="只有失败的结果图可以重试")
+        timestamp = now_iso()
+        db.execute(
+            """
+            UPDATE generation_result_images_new
+            SET status = 'QUEUED', active_attempt_id = NULL,
+                locked_by = NULL, locked_until = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp, image_id),
+        )
+        db.execute("UPDATE generation_result_sets SET status = 'RUNNING', updated_at = ? WHERE id = ?", (timestamp, row["result_set_id"]))
+        db.execute(
+            "UPDATE generation_tasks SET status = 'FINAL_RUNNING', active_result_set_id = ?, updated_at = ? WHERE id = ?",
+            (row["result_set_id"], timestamp, row["task_id"]),
+        )
     schedule_background_generation(
-        run_result_image_retry(int(row["task_id"]), int(row["result_set_id"]), image_id),
-        job_key=result_image_job_key(image_id),
+        run_final_generation(int(row["task_id"]), int(row["result_set_id"]), [image_id]),
+        job_key=final_set_job_key(int(row["result_set_id"])),
     )
     return {"item": get_generation_task_by_id(int(row["task_id"]), include_debug=True)}
-
-
-async def run_result_image_retry(task_id: int, result_set_id: int, image_id: int) -> None:
-    with suppress(Exception):
-        await generate_single_final_image(task_id, result_set_id, image_id)
-    with get_db() as db:
-        status_rows = db.execute(
-            "SELECT status FROM generation_result_images_new WHERE result_set_id = ?",
-            (result_set_id,),
-        ).fetchall()
-        completed = bool(status_rows) and all(item["status"] == "SUCCEEDED" for item in status_rows)
-        status = "COMPLETED" if completed else "FINAL_PARTIAL"
-        db.execute(
-            "UPDATE generation_result_sets SET status = ?, updated_at = ? WHERE id = ?",
-            ("SUCCEEDED" if completed else "PARTIAL", now_iso(), result_set_id),
-        )
-        db.execute(
-            "UPDATE generation_tasks SET status = ?, updated_at = ? WHERE id = ?",
-            (status, now_iso(), task_id),
-        )
-
 
 @app.get("/api/generation-records")
 def list_new_generation_records(limit: int = Query(30, ge=1, le=100), offset: int = Query(0, ge=0)) -> dict[str, Any]:
@@ -5841,10 +5857,6 @@ def final_set_job_key(result_set_id: int) -> str:
     return f"generation_result_set:{result_set_id}"
 
 
-def result_image_job_key(image_id: int) -> str:
-    return f"generation_result_image:{image_id}"
-
-
 def lease_generation_preview(preview_id: int, attempt_id: int) -> None:
     timestamp = now_iso()
     with get_db() as db:
@@ -5890,6 +5902,7 @@ def refresh_pending_new_generation_jobs() -> None:
             """
             SELECT DISTINCT grs.id, grs.task_id
             FROM generation_result_sets grs
+            JOIN generation_tasks gt ON gt.active_result_set_id = grs.id
             JOIN generation_result_images_new gri ON gri.result_set_id = grs.id
             WHERE grs.status = 'RUNNING'
               AND gri.status IN ('QUEUED', 'RUNNING')
@@ -5898,6 +5911,24 @@ def refresh_pending_new_generation_jobs() -> None:
             LIMIT 3
             """,
             (timestamp,),
+        ).fetchall()
+        terminal_result_sets = db.execute(
+            """
+            SELECT grs.id, grs.task_id
+            FROM generation_result_sets grs
+            JOIN generation_tasks gt ON gt.active_result_set_id = grs.id
+            WHERE (
+                grs.status = 'RUNNING'
+                AND NOT EXISTS (
+                  SELECT 1 FROM generation_result_images_new gri
+                  WHERE gri.result_set_id = grs.id
+                    AND gri.status IN ('QUEUED', 'RUNNING')
+                )
+              )
+              OR (gt.status = 'FINAL_RUNNING' AND grs.status IN ('SUCCEEDED', 'PARTIAL'))
+            ORDER BY grs.updated_at, grs.id
+            LIMIT 10
+            """
         ).fetchall()
 
     for row in preview_rows:
@@ -5934,9 +5965,16 @@ def refresh_pending_new_generation_jobs() -> None:
                 fail_stale_attempt(image["active_attempt_id"] if "active_attempt_id" in image.keys() else None, "成片生成任务锁过期，已由后台恢复重试。")
             schedule_background_generation(run_final_generation(int(row["task_id"]), int(row["id"]), image_ids), job_key=key)
 
+    for row in terminal_result_sets:
+        with get_db() as db:
+            reconcile_final_result_set(db, int(row["id"]), int(row["task_id"]))
+
 
 def schedule_background_generation(coro: Any, job_key: str | None = None) -> None:
     if job_key and job_key in active_background_generation_jobs:
+        close = getattr(coro, "close", None)
+        if callable(close):
+            close()
         return
     if job_key:
         active_background_generation_jobs.add(job_key)
