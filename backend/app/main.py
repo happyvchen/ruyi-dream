@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
@@ -4145,7 +4146,7 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
         raise
     text = getattr(response, "text", "") or "{}"
     try:
-        raw = loads(extract_json_text(text), {})
+        raw = parse_lily_tagging_json(text)
     except Exception as exc:
         finish_attempt(attempt_id, "FAILED", {"raw_text": text}, error_message=f"Gemini 返回内容不是合法 JSON：{exc}")
         raise
@@ -4727,6 +4728,30 @@ def extract_json_text(text: str) -> str:
     if start >= 0 and end >= start:
         return stripped[start : end + 1]
     return stripped or "{}"
+
+
+def parse_lily_tagging_json(text: str) -> dict[str, Any]:
+    json_text = extract_json_text(text)
+    try:
+        parsed = loads(json_text, {})
+    except json.JSONDecodeError as strict_error:
+        decoder = json.JSONDecoder()
+        try:
+            parsed, end_index = decoder.raw_decode(json_text)
+        except json.JSONDecodeError:
+            raise strict_error from None
+        trailing = json_text[end_index:].strip()
+        if trailing and not is_recoverable_json_trailing_noise(trailing):
+            raise strict_error from None
+    if not isinstance(parsed, dict):
+        raise ValueError("Gemini 返回 JSON 顶层不是对象")
+    return parsed
+
+
+def is_recoverable_json_trailing_noise(value: str) -> bool:
+    if not value:
+        return True
+    return set(value) <= {"}"}
 
 
 def get_generation_task_row(task_id: int) -> Any:
