@@ -80,9 +80,20 @@ class BackendSmokeTests(unittest.TestCase):
         from fastapi.testclient import TestClient
 
         main = importlib.import_module("app.main")
+        db_module = importlib.import_module("app.db")
         client = TestClient(main.app)
         login = client.post("/api/auth/login", json={"password": "letmein-123456"})
         self.assertEqual(login.status_code, 200)
+        db_module.init_db()
+        timestamp = db_module.now_iso()
+        with db_module.get_db() as db:
+            db.execute(
+                """
+                INSERT INTO media_assets (object_key, thumb_key, original_filename, mime_type, status, created_at, updated_at)
+                VALUES ('uploads/sample.jpg', 'uploads/_derived/thumb/sample.webp', 'sample.jpg', 'image/jpeg', 'READY', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
 
         signed_url = "http://203.0.113.10:9000/ruyi-dream/uploads/sample.webp?X-Amz-Expires=900&X-Amz-Signature=test"
         with (
@@ -409,7 +420,7 @@ class BackendSmokeTests(unittest.TestCase):
 
         main.validate_styling_plan(plan, candidate_snapshot)
 
-    def test_fallback_styling_plan_bypasses_production_quality_gate(self) -> None:
+    def test_fallback_styling_plan_is_rejected_by_production_quality_gate(self) -> None:
         main = importlib.import_module("app.main")
         candidate_snapshot = {
             "candidate_material_ids": [],
@@ -424,7 +435,8 @@ class BackendSmokeTests(unittest.TestCase):
         plan = main.fallback_styling_plan(input_row, candidate_snapshot, "gemini_api_key_missing")
 
         self.assertEqual(plan["quality_gate_mode"], "fallback")
-        main.validate_styling_plan(plan, candidate_snapshot)
+        with self.assertRaisesRegex(RuntimeError, "fallback"):
+            main.validate_styling_plan(plan, candidate_snapshot)
 
     def test_normalize_styling_plan_does_not_trust_model_quality_gate_mode(self) -> None:
         main = importlib.import_module("app.main")
@@ -598,9 +610,11 @@ class BackendSmokeTests(unittest.TestCase):
                 styling_garment_columns = {row["name"] for row in db.execute("PRAGMA table_info(styling_garments)").fetchall()}
                 input_version_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_task_input_versions)").fetchall()}
                 styling_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_stylings)").fetchall()}
+                preview_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_previews)").fetchall()}
+                result_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_result_images_new)").fetchall()}
                 template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
@@ -611,6 +625,8 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("styling_plan_json", styling_columns)
         self.assertIn("candidate_retrieval_snapshot_json", styling_columns)
         self.assertIn("outfit_candidates_json", styling_columns)
+        self.assertIn("locked_until", preview_columns)
+        self.assertIn("run_attempts", result_image_columns)
         self.assertIn("tag_meta_json", styling_garment_columns)
         self.assertIn("model_snapshot_json", input_version_columns)
         self.assertGreaterEqual(template_count, 1)

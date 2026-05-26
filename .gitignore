@@ -5,8 +5,11 @@ __pycache__/
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
+.playwright-mcp/
 .env
 .env.local
+.env.prod
+.env.*.prod
 backend/.env
 backend/.env.local
 deployment/rustfs/.env
