@@ -41,7 +41,7 @@ services:
       APP_LOG_DIR: /app/data/logs
       APP_S3_ENDPOINT_URL: http://rustfs:9000
       APP_S3_PUBLIC_ENDPOINT_URL: ${PUBLIC_S3_URL:-http://127.0.0.1:9000}
-      APP_STORAGE_BUCKET: ${APP_STORAGE_BUCKET:-ruyi-dream}
+      APP_S3_BUCKET: ${APP_S3_BUCKET:-${APP_STORAGE_BUCKET:-ruyi-dream}}
       APP_S3_REGION: auto
       APP_S3_FORCE_PATH_STYLE: "true"
       APP_S3_PRESIGN_EXPIRES_SECONDS: 900

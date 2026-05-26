@@ -20,8 +20,8 @@ Browser
   -> backend: FastAPI API, port 8000
        -> SQLite metadata, ./deployment/app-data/backend/app.sqlite3
        -> RustFS S3 API, docker network http://rustfs:9000
-       -> fal GPT Image-2 queue
-       -> Gemini planner
+       -> Image-2 provider (default toapis, optional fal)
+       -> Gemini AI Stylist / tagging
   -> RustFS public presigned URL, port 9000
 ```
 
@@ -110,9 +110,9 @@ APP_S3_ENDPOINT_URL=http://rustfs:9000
 - `APP_SESSION_COOKIE_SECURE` 在 HTTPS 部署中应设置为 `true`；本地或 HTTP 测试环境才允许为 `false`。
 - 轮换访问密码时，如果需要立即踢出所有已登录浏览器，必须同步轮换 `APP_SESSION_SECRET`。
 - `APP_API_ACCESS_TOKEN` 只作为脚本/运维调用的可选 fallback，不作为浏览器前端门禁，也不注入前端静态包。
-- `FAL_KEY` 和 `GEMINI_API_KEY` 只放在部署环境，不写入文档或镜像。
+- `TOAPIS_API_KEY`、`FAL_KEY` 和 `GEMINI_API_KEY` 只放在部署环境，不写入文档或镜像。
 - RustFS bucket 保持私有，浏览器只通过后端生成的短期预签名 URL 访问对象。
-- `APP_STORAGE_BUCKET` 必须符合 S3 bucket 命名规则：3-63 个字符，只用小写字母、数字、短横线和点号；推荐 `ruyi-dream` 这类小写短横线命名。
+- `APP_S3_BUCKET` 必须符合 S3 bucket 命名规则：3-63 个字符，只用小写字母、数字、短横线和点号；`APP_STORAGE_BUCKET` 仅作为旧配置别名保留。
 - 对公网开放时必须接入 HTTPS 反向代理，并把 public URL 改为 HTTPS。
 - 当前 SQLite 适合 MVP 单机部署；多人高并发或多副本后端需要迁移到外部数据库。
 - 当前 planner/generation poller 运行在后端进程内；多后端副本会造成重复扫描风险，扩展前应拆成单独 worker 或加分布式锁。

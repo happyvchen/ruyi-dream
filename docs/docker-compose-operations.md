@@ -45,8 +45,10 @@ APP_API_ACCESS_TOKEN=<optional-ops-script-token>
 PUBLIC_BACKEND_URL=http://<server-ip-or-domain>:8000
 PUBLIC_S3_URL=http://<server-ip-or-domain>:9000
 BACKEND_CORS_ORIGINS=http://<server-ip-or-domain>:5173
-GEMINI_API_KEY=<optional-but-required-for-planning>
-FAL_KEY=<required-for-real-image-generation>
+    GEMINI_API_KEY=<required-for-ai-stylist-and-tagging>
+    GPT_IMAGE2_PROVIDER=toapis
+    TOAPIS_API_KEY=<required-for-default-real-image-generation>
+    FAL_KEY=<required-only-when-GPT_IMAGE2_PROVIDER=fal>
 ```
 
 根目录 `.env` 是 Compose、后端裸跑和本地联调共同使用的主配置源。不要再维护一份 `backend/.env`；如需后端本机临时覆盖，使用不提交 Git 的 `backend/.env.local`。
@@ -63,7 +65,7 @@ PUBLIC_BACKEND_URL=http://<server-ip-or-domain>:18000
 对象存储 bucket 推荐保持：
 
 ```env
-APP_STORAGE_BUCKET=ruyi-dream
+APP_S3_BUCKET=ruyi-dream
 ```
 
 bucket 名必须符合 S3 命名规则：3-63 个字符，只用小写字母、数字、短横线和点号；不要用中文、大写、下划线或带空格的值。
@@ -260,8 +262,9 @@ docker compose logs --tail=200 rustfs
 - 服务器时间不准，S3 签名报 `RequestTimeTooSkewed`。
 - `PUBLIC_S3_URL` 不是浏览器可访问地址，导致图片预览失败。
 - `RUSTFS_SERVER_DOMAINS` 被误用于 path-style 部署，后端创建 bucket 时报 `InvalidBucketName`。
-- `FAL_KEY` 未配置，真实生图任务会失败。
-- `GEMINI_API_KEY` 未配置，默认方案策划会失败。
+- 默认 provider 为 `toapis` 时，`TOAPIS_API_KEY` 未配置会导致真实生图任务失败。
+- provider 切到 `fal` 时，`FAL_KEY` 未配置会导致真实生图任务失败。
+- `GEMINI_API_KEY` 未配置，AI Stylist 选搭和搭配服饰打标会失败。
 - `APP_ENV=production` 但没有设置 `APP_GATE_PASSWORD` / `APP_GATE_PASSWORD_HASH`，且没有显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。
 - 启用内置门禁但没有设置 `APP_SESSION_SECRET`。
 
@@ -289,7 +292,7 @@ PermissionError: [Errno 13] Permission denied: '/app/data/logs'
 InvalidBucketName
 ```
 
-确认 `APP_STORAGE_BUCKET` 合法，并确认没有在 path-style 部署里设置 `RUSTFS_SERVER_DOMAINS`。
+确认 `APP_S3_BUCKET` 或兼容别名 `APP_STORAGE_BUCKET` 合法，并确认没有在 path-style 部署里设置 `RUSTFS_SERVER_DOMAINS`。
 
 前端能打开但 API 失败：
 

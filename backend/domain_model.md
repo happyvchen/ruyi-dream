@@ -65,7 +65,7 @@ AI 摄影棚中的一次主推款拍摄任务。
 - 通过 `GenerationStyling` 保存候选漏斗快照、完整 `StylingPlan`、选中 ID、选中服饰快照、Aesthetic Critic 诊断、被拒方案、评分、理由和 warnings。
 - 预览阶段基于 `StylingPlan` 生成 6 条 `GenerationShotPlan`，并保存一张 3x2 六宫格 `GenerationPreview`。
 - 最终阶段创建 `GenerationResultSet`，并按前 5 条 ShotPlan 并发生成 `GenerationResultImage`。
-- 预览和最终生成只读取冻结的主推款、搭配服饰和数字模特输入；成功后不允许重新选搭、重新预览或再次生成整组，最终单图失败通过单张重试恢复。
+- 预览和最终生成只读取冻结的主推款、搭配服饰和数字模特输入；最终单图失败通过单张重试恢复。成功后是否允许重新选搭、重新预览或再次生成整组仍是产品决策项，当前代码暂时允许并保留历史结果用于追溯。
 
 ### 3.3 GenerationAttempt
 
@@ -81,7 +81,7 @@ AI Stylist 使用 `owner_type = generation_styling`、`owner_id = GenerationTask
 
 ### 4.1 GarmentSku
 
-服装货号图包，是用户在“服装素材”页面上传和选择的核心对象。
+服装货号图包，是旧版“服装素材 / 生成组图”兼容对象。新版前台主流程不再以 `GarmentSku` 为入口，而是使用 `StylingGarment` 和 `GenerationTask`。
 
 当前职责：
 
@@ -92,7 +92,7 @@ AI Stylist 使用 `owner_type = generation_styling`、`owner_id = GenerationTask
 - 支持编辑货号、标题、状态。
 - 支持删除未产生生成记录的应用内素材副本。
 - 上传入口支持散图、单文件夹、多文件夹；保存前会先在浏览器本地形成待上传图包，用户可编辑货号/标题、删除图片，再保存上传。
-- 保存上传后会为该货号创建一条默认 `ShotPlan`。后续“生成组图”页不再临时策划，而是直接使用货号默认组图方案。
+- 旧版保存上传后会为该货号创建一条默认 `ShotPlan`。该规则仅服务旧版兼容接口和历史数据，不作为新版 AI 摄影棚主流程依据。
 
 当前状态含义：
 
@@ -189,7 +189,7 @@ AI Stylist 使用 `owner_type = generation_styling`、`owner_id = GenerationTask
 - 保存 `planner_provider` 和原始响应 `raw_response`，用于调试和复盘。
 - 作为生成批次 `GenerationRun` 的输入。
 - 一个货号可以有多条历史 `ShotPlan`。当前默认方案规则为：取该货号最新的未失败 Gemini 方案；`PLANNING` 方案表示已持久化、等待后台 Gemini 策划完成。
-- “服装素材”页负责生成/更新默认组图方案；“生成组图”页只读取并使用默认方案。
+- 旧版“服装素材”页负责生成/更新默认组图方案；旧版“生成组图”页只读取并使用默认方案。新版 AI 摄影棚不以该默认方案作为主流程输入。
 - 上传新图包保存成功或点击“更新默认方案”后，后端先创建 `ShotPlan.status = PLANNING` 并立即返回；后台 planner poller 再调用 Gemini。Gemini 不可用、SDK 缺失、引用文档缺失或返回格式异常时，该方案更新为 `FAILED` 并写入事件日志，不创建假方案。
 
 当前 `plan_json` 约定：

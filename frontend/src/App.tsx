@@ -122,15 +122,6 @@ export function App() {
     return () => window.clearInterval(timer)
   }, [authenticated, hasRunningTagging, runningTaggingKey])
 
-  const hasRunningGeneration = task?.status === 'PREVIEW_RUNNING' || task?.status === 'FINAL_RUNNING'
-  useEffect(() => {
-    if (!authenticated || !task?.id || !hasRunningGeneration) return
-    const timer = window.setInterval(() => {
-      void api.getTask(task.id).then((response) => setTask(response.item)).catch(() => undefined)
-    }, 2000)
-    return () => window.clearInterval(timer)
-  }, [authenticated, task?.id, hasRunningGeneration])
-
   async function refreshAll() {
     const [garmentResult, taskResult, recordResult, modelResult] = await Promise.all([
       api.listStylingGarments({ limit: 80 }),
@@ -247,8 +238,9 @@ function BootScreen() {
 }
 
 function LoginPage({ onAuthed }: { onAuthed: () => void }) {
-  const [username, setUsername] = useState('user')
-  const [password, setPassword] = useState('password')
+  const showDemoLogin = import.meta.env.DEV || import.meta.env.VITE_SHOW_DEMO_LOGIN === 'true'
+  const [username, setUsername] = useState(showDemoLogin ? 'user' : '')
+  const [password, setPassword] = useState(showDemoLogin ? 'password' : '')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -272,7 +264,7 @@ function LoginPage({ onAuthed }: { onAuthed: () => void }) {
       <form className="login-card" onSubmit={submit}>
         <div className="login-logo"><Sparkles size={22} /> Ruyi-Dream</div>
         <h1>AI 数字化摄影棚</h1>
-        <p>保护性入口。当前演示账号为 user / password。</p>
+        <p>{showDemoLogin ? '保护性入口。当前演示账号为 user / password。' : '保护性入口。请输入管理员提供的访问凭据。'}</p>
         <label>用户名<input value={username} onChange={(e) => setUsername(e.target.value)} /></label>
         <label>密码<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} /></label>
         {error && <div className="form-error">{error}</div>}

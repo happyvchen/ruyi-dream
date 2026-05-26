@@ -120,7 +120,7 @@
 - 每个图位的当前成片和重新生成记录
 - 分镜预览与最终成片
 
-生成组图页右侧的生成记录是紧凑概览。点击后应直接在生成组图页恢复历史任务，而不是跳到生成记录页。
+`AI 摄影棚` 的任务摘要只展示当前拍摄任务的紧凑概览。完整历史在 `生成记录` 页面查看；点击记录可通过 URL 恢复指定拍摄任务详情。
 
 如需内部排查 prompt、任务文本、provider 摘要，应放在后台或工程调试入口，不进入普通用户前台。
 
@@ -129,12 +129,12 @@
 支持：
 
 ```text
-/generate
-/generate?sku={sku}
-/generate?run={runId}
-/garment-skus/{sku}
-/model-profiles/{modelId}
-/generation-runs/{runId}
+/studio
+/studio?task={taskId}
+/library
+/model
+/records
+/records?task={taskId}
 ```
 
 核心对象切换要同步 URL，方便刷新恢复和分享。弹窗、折叠、hover、临时上传草稿不进入 URL。

@@ -1,8 +1,10 @@
 # ruyi-dream MVP
 
-本项目是 ruyi-dream 的标准化 MVP。当前阶段先服务单一试点客户和单一工作空间，但产品设计应保留后续 SaaS 化、多客户、多租户、权限、计费和主视频生成扩展空间。
+Ruyi-Dream 是面向服饰品牌视觉生产团队的 B2B AI 数字化摄影棚。当前阶段服务单一试点客户和单一工作空间，但工程设计保留后续 SaaS 化、多客户、多租户、权限和计费扩展空间。
 
-项目目标是：基于 `1 个服装货号` 及其默认组图方案，自动生成一组可用于淘宝、天猫等电商场景的品牌风格模特服装展示图；后续可结合 Seedance 2.0 扩展电商主视频生成。
+新版 MVP 的核心链路是：用户在 `AI 摄影棚` 上传本次主推款，系统通过 AI Stylist 工作流理解主推款、探索并批判多套造型方案，从提前维护的 `搭配服饰库` 中选择真实可见且服务主推款的配角服饰，生成 3x2 六宫格预览，并按前 5 格并发生成电商棚拍成片。
+
+旧版 demo 已封存为 `demo-20260518`。后续只复用其中仍有效的工程手段，例如 S3/RustFS 对象存储、原图/预览图/缩略图三层媒体结构、后台任务轮询、provider 调试快照等；不要让旧版“单货号默认组图方案”形态继续主导新版设计。
 
 ## Agent 入口
 
@@ -14,40 +16,43 @@
 - [frontend/CLAUDE.md](frontend/CLAUDE.md)：前端工程入口
 - [backend/CLAUDE.md](backend/CLAUDE.md)：后端工程入口
 
+README 面向人类快速了解项目；agent 的权威入口始终是 `AGENTS.md` / `CLAUDE.md` 和各目录 `CLAUDE.md`。
+
 ## 当前范围
 
-- 服务对象：当前为单一试点客户，产品定位为标准化工具
+- 服务对象：单一试点客户，单一工作空间
 - 产品阶段：MVP
-- 主生产入口：生成组图
-- 素材准备入口：服装素材
-- 数字模特：产品支持多数字模特，当前阶段先维护 1 个默认数字模特
-- 风格方向：品牌白/浅灰棚拍主图风格
-- 输出目标：每个货号生成一套主图
-- 暂不包含：自动质量检测、多客户 SaaS、复杂权限、外景大片、视频生成、ZIP 上传、素材图角色识别
+- 主生产入口：`AI 摄影棚`
+- 素材准备入口：`搭配服饰库`、`数字模特`
+- 输出目标：每个主推款任务生成 1 张 3x2 六宫格预览和前 5 格最终棚拍成片
+- 默认视觉生成器：`Image-2`，当前默认 provider 为 `toapis`，保留 `fal` 兼容配置
+- 对象存储：统一使用 S3 兼容对象存储；私有化默认 RustFS
+- 暂不包含：复杂多租户权限、计费、自动质量检测、视频生成、鞋包饰品商品级入库
 
-## 当前 MVP 流程
+## 新版 MVP 流程
 
 ```text
-服装素材页导入货号图片
--> 浏览器本地预览与编辑
--> 保存上传
--> 生成/更新该货号默认组图方案
--> 生成组图页选择货号
--> 点击“预览”创建生成任务并生成 2x3 分镜预览
--> 满意后点击“生成”，在同一任务下追加 5 张最终大图
--> 提交 GPT Image-2 / fal queue
--> 后台轮询状态并将结果写入对象存储
--> 单张重生 / 设为最终图 / 导出
--> 生成记录中复盘任务，必要时恢复到生成组图页继续操作
+搭配服饰库维护真实服饰素材与标签
+-> 数字模特维护默认模特身份参考
+-> AI 摄影棚上传本次主推款
+-> 冻结主推款输入版本和默认模特快照
+-> AI Stylist 理解主推款并检索候选搭配服饰
+-> Aesthetic Critic 批判审美成立性、品牌成立性和商品成立性
+-> 输出可追溯 StylingPlan
+-> ShotPlan 将 StylingPlan 落到六宫格图位、穿着关系、镜头和姿势
+-> 生成 3x2 六宫格预览
+-> 按前 5 格并发生成最终电商棚拍成片
+-> 生成记录复盘任务、最终图、attempt 和 provider 调试信息
 ```
 
-上传支持：
+产品原则：
 
-- 上传 N 张图片，并填写货号，保存为一个货号。
-- 上传一个文件夹，货号默认使用文件夹名并可修改。
-- 上传 N 个文件夹，对应 N 个货号。
-- 保存前可编辑货号/标题、删除图片。
-- 第一张图片默认作为封面。
+1. 用户不写长 prompt，用户确认拍摄信息和生成结果。
+2. 系统生成的是一组电商棚拍成片，不是单张自由创作图。
+3. 主推款和被选中的搭配服饰都是真实商品，最终图中需要商品级保真。
+4. 搭配服饰必须服务主推款，而不是让主推款服务整套造型。
+5. `Image-2` 是最终视觉生成器，不承担标签体系、选搭策略、历史追溯和业务状态管理。
+6. 前台 UI 面向普通业务用户，AI 任务包、prompt、provider 请求等复杂细节默认隐藏。
 
 ## 配置管理
 
@@ -61,7 +66,7 @@
 - 根目录 `.env.example` 是唯一提交到 Git 的环境变量模板。
 - 根目录 `.env` 是本地开发、Docker Compose 和后端裸跑共同读取的主配置文件，不提交 Git。
 - `backend/.env.local` 是可选的后端本地覆盖文件，只用于临时覆盖少量后端变量，不放共享密钥，不提交 Git。
-- 生产环境应由部署平台、CI/CD 或 Secret Manager 注入环境变量，不依赖仓库中的真实 `.env`。
+- 生产环境应由部署平台、CI/CD 或 Secret Manager 注入环境变量，不依赖仓库中的真实 `.env` / `.env.prod`。
 
 首次配置：
 
@@ -78,30 +83,28 @@ GEMINI_MODEL=gemini-3-flash-preview
 
 APP_S3_ENDPOINT_URL=http://127.0.0.1:9000
 APP_S3_PUBLIC_ENDPOINT_URL=http://127.0.0.1:9000
-APP_STORAGE_BUCKET=ruyi-dream
+APP_S3_BUCKET=ruyi-dream
 APP_S3_REGION=auto
 APP_S3_FORCE_PATH_STYLE=true
 APP_S3_PRESIGN_EXPIRES_SECONDS=900
-RUSTFS_ACCESS_KEY=<local-or-production-access-key>
-RUSTFS_SECRET_KEY=<local-or-production-secret-key>
+APP_S3_ACCESS_KEY_ID=<local-or-production-access-key>
+APP_S3_SECRET_ACCESS_KEY=<local-or-production-secret-key>
 APP_GATE_PASSWORD=<production-app-password>
 APP_SESSION_SECRET=<production-session-signing-secret>
 APP_API_ACCESS_TOKEN=<optional-ops-script-token>
 APP_TRUST_REVERSE_PROXY_AUTH=false
 
-GPT_IMAGE2_PROVIDER=fal
-GPT_IMAGE2_MODEL_ID=openai/gpt-image-2/edit
-GPT_IMAGE2_API_BASE_URL=https://fal.run/openai/gpt-image-2/edit
-GPT_IMAGE2_QUEUE_URL=https://queue.fal.run/openai/gpt-image-2/edit
+GPT_IMAGE2_PROVIDER=toapis
+TOAPIS_API_KEY=
+TOAPIS_BASE_URL=https://toapis.com
 FAL_KEY=
 GPT_IMAGE2_QUALITY=high
 GPT_IMAGE2_OUTPUT_FORMAT=png
+GPT_IMAGE2_RESOLUTION=1K
 GENERATION_POLL_INTERVAL_SECONDS=5
 ```
 
 输入图片、生成结果和导出 ZIP 统一写入 S3 兼容对象存储。私有化部署默认使用 RustFS，生产部署方式见 [RustFS 对象存储部署](deployment/rustfs/README.md)。
-
-真实生图只支持 fal queue。点击生成后后端立即返回任务记录，后台会先把参考图上传到 fal，再提交 Image-2 queue 并持续查询状态。`FAL_KEY` 未配置时，预览/生成任务会失败并在 UI 中显示错误，不再使用占位图或本地 fallback。
 
 ## Docker Compose 部署
 
@@ -109,7 +112,7 @@ GENERATION_POLL_INTERVAL_SECONDS=5
 
 ```bash
 cp .env.example .env
-# 编辑 .env，设置 RustFS 密钥、PUBLIC_BACKEND_URL、PUBLIC_S3_URL、GEMINI_API_KEY、FAL_KEY
+# 编辑 .env，设置 RustFS 密钥、PUBLIC_BACKEND_URL、PUBLIC_S3_URL、GEMINI_API_KEY、TOAPIS_API_KEY 或 FAL_KEY
 docker compose up -d --build
 docker compose ps
 ```
@@ -133,25 +136,20 @@ docker compose ps
 前端支持可恢复 URL：
 
 ```text
-/generate
-/generate?sku=125329C0908714
-/generate?run=7
-/garment-skus
-/garment-skus/125329C0908714
-/model-profiles
-/model-profiles/Face-01
-/generation-runs
-/generation-runs/7
+/studio
+/studio?task={taskId}
+/library
+/model
+/records
+/records?task={taskId}
 ```
 
 其中：
 
-- `/generate?run={runId}` 会在生成组图页恢复指定历史任务。
-- `/garment-skus/{sku}` 会打开指定货号。
-- `/model-profiles/{modelId}` 会打开指定数字模特。
-- `/generation-runs/{runId}` 会打开指定生成记录详情。
-
-前台“生成记录”以任务为主粒度：一次“预览 -> 生成”的完整链路只对应一条记录；预览图、最终 5 张图以及单张重生都收纳在该任务内对应图位的 attempts 中，不额外新增任务记录。
+- `/studio?task={taskId}` 会在 AI 摄影棚恢复指定任务。
+- `/library` 用于维护搭配服饰库。
+- `/model` 用于维护默认数字模特。
+- `/records?task={taskId}` 会打开指定生成记录详情。
 
 ## 项目结构
 
@@ -174,7 +172,7 @@ docker compose ps
 └── docker-compose.yml
 ```
 
-当前 `frontend/` 已初始化为 React + Vite + TypeScript 单页 MVP；`backend/` 已初始化为 FastAPI + SQLite + S3 兼容对象存储 MVP。
+当前 `frontend/` 是 React + Vite + TypeScript 单页 MVP；`backend/` 是 FastAPI + SQLite + S3 兼容对象存储 MVP。
 
 ## 文档目录
 
@@ -182,12 +180,10 @@ docker compose ps
 - [产品总览](design/00_product_overview/product_overview.md)
 - [MVP PRD](design/00_product_overview/mvp_prd.md)
 - [生成流程](design/01_generation_flow/generation_flow.md)
-- [Image 2 输入职责拆分与提示词策略](design/01_generation_flow/image2_input_strategy.md)
+- [Image-2 输入职责拆分与提示词策略](design/01_generation_flow/image2_input_strategy.md)
 - [生成要素职责拆分总表](design/01_generation_flow/generation_responsibility_matrix.md)
 - [品类组图规则](design/02_brand_and_assets/category_shot_rules.md)
 - [素材与参数规范](design/02_brand_and_assets/assets_and_parameters.md)
-- [品牌调性模板库](design/02_brand_and_assets/brand_style_templates.md)
-- [尺寸可选增强模块](design/02_brand_and_assets/optional_measurement_enhancement.md)
 - [普通用户视角 UI/UX 设计](design/03_ux_guide/user_uiux.md)
 - [技术路线与生产实操](design/04_implementation_guide/technical_route_and_operations.md)
 - [Docker Compose 部署设计](docs/deployment-architecture.md)
@@ -197,15 +193,3 @@ docker compose ps
 - [后端领域模型](backend/domain_model.md)
 - [后端数据库结构](backend/database_schema.md)
 - [RustFS 对象存储部署](deployment/rustfs/README.md)
-
-## 核心原则
-
-1. 用户不写 prompt，用户确认拍摄信息。
-2. 系统不是生成单张图，而是生成一组电商主图。
-3. 产品优先复刻客户既有棚拍语言，而不是扩展创意场景。
-4. MVP 只保留必要功能，避免 SaaS 化过度设计。
-5. 服装保真优先于画面炫技。
-6. Image 2 是最终视觉生成器，不承担品牌策略、搭配判断、Pose 策划和镜头规划。
-7. 品牌调性、品类规则、Pose、搭配和镜头方案应由前置推理/策划层生成，再交给 Image 2 执行。
-8. 前台 UI 面向普通业务用户，默认只展示服装、模特、组图方案、生成结果；AI 任务包、prompt、策划器等复杂细节默认隐藏。
-9. 真实生图是持久化异步任务，不在前端 HTTP 请求内长时间等待。

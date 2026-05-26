@@ -22,6 +22,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("009", "add_lily_tagging_columns", "migration_add_lily_tagging_columns"),
     ("010", "add_generation_input_model_snapshot", "migration_add_generation_input_model_snapshot"),
     ("011", "add_generation_styling_plan_columns", "migration_add_generation_styling_plan_columns"),
+    ("012", "add_new_generation_recovery_columns", "migration_add_new_generation_recovery_columns"),
 )
 
 
@@ -301,6 +302,9 @@ def init_db() -> None:
               preview_asset_id INTEGER REFERENCES media_assets(id),
               status TEXT NOT NULL DEFAULT 'QUEUED',
               active_attempt_id INTEGER,
+              locked_by TEXT,
+              locked_until TEXT,
+              run_attempts INTEGER NOT NULL DEFAULT 0,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
@@ -324,6 +328,9 @@ def init_db() -> None:
               status TEXT NOT NULL DEFAULT 'QUEUED',
               current_asset_id INTEGER REFERENCES media_assets(id),
               active_attempt_id INTEGER,
+              locked_by TEXT,
+              locked_until TEXT,
+              run_attempts INTEGER NOT NULL DEFAULT 0,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
@@ -385,6 +392,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_lily_tagging_columns": migration_add_lily_tagging_columns,
         "migration_add_generation_input_model_snapshot": migration_add_generation_input_model_snapshot,
         "migration_add_generation_styling_plan_columns": migration_add_generation_styling_plan_columns,
+        "migration_add_new_generation_recovery_columns": migration_add_new_generation_recovery_columns,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -492,6 +500,13 @@ def migration_add_generation_styling_plan_columns(db: sqlite3.Connection) -> Non
     ensure_column(db, "generation_stylings", "outfit_candidates_json", "TEXT")
     ensure_column(db, "generation_stylings", "critic_scores_json", "TEXT")
     ensure_column(db, "generation_stylings", "rejected_candidates_json", "TEXT")
+
+
+def migration_add_new_generation_recovery_columns(db: sqlite3.Connection) -> None:
+    for table in ("generation_previews", "generation_result_images_new"):
+        ensure_column(db, table, "locked_by", "TEXT")
+        ensure_column(db, table, "locked_until", "TEXT")
+        ensure_column(db, table, "run_attempts", "INTEGER NOT NULL DEFAULT 0")
 
 
 def ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:

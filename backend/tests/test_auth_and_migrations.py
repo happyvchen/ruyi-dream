@@ -27,6 +27,83 @@ class BackendSmokeTests(unittest.TestCase):
         os.environ.clear()
         os.environ.update(self._old_env)
 
+    def _create_new_final_result_set(
+        self,
+        db_module: object,
+        image_statuses: list[str],
+        task_status: str = "FINAL_RUNNING",
+        result_set_status: str = "RUNNING",
+    ) -> tuple[int, int, list[int]]:
+        timestamp = db_module.now_iso()
+        with db_module.get_db() as db:
+            task_id = db.execute(
+                "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('final recovery', ?, ?, ?)",
+                (task_status, timestamp, timestamp),
+            ).lastrowid
+            input_id = db.execute(
+                """
+                INSERT INTO generation_task_input_versions (task_id, version_number, name_snapshot, image_snapshot_json, created_at)
+                VALUES (?, 1, 'final recovery', '[]', ?)
+                """,
+                (task_id, timestamp),
+            ).lastrowid
+            styling_id = db.execute(
+                """
+                INSERT INTO generation_stylings
+                  (task_id, input_version_id, source_material_ids_json, selected_material_ids_json,
+                   selected_material_snapshot_json, status, created_at, updated_at)
+                VALUES (?, ?, '[]', '[]', '[]', 'SUCCEEDED', ?, ?)
+                """,
+                (task_id, input_id, timestamp, timestamp),
+            ).lastrowid
+            preview_id = db.execute(
+                """
+                INSERT INTO generation_previews (task_id, styling_id, input_version_id, status, created_at, updated_at)
+                VALUES (?, ?, ?, 'SUCCEEDED', ?, ?)
+                """,
+                (task_id, styling_id, input_id, timestamp, timestamp),
+            ).lastrowid
+            shot_ids: list[int] = []
+            for index, _status in enumerate(image_statuses, start=1):
+                shot_ids.append(
+                    db.execute(
+                        """
+                        INSERT INTO generation_shot_plans (task_id, styling_id, sort_order, shot_type, plan_json, created_at, updated_at)
+                        VALUES (?, ?, ?, 'test', '{}', ?, ?)
+                        """,
+                        (task_id, styling_id, index, timestamp, timestamp),
+                    ).lastrowid
+                )
+            result_set_id = db.execute(
+                """
+                INSERT INTO generation_result_sets (task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (task_id, input_id, styling_id, preview_id, result_set_status, timestamp, timestamp),
+            ).lastrowid
+            image_ids: list[int] = []
+            for index, status in enumerate(image_statuses, start=1):
+                image_ids.append(
+                    db.execute(
+                        """
+                        INSERT INTO generation_result_images_new
+                          (result_set_id, shot_plan_id, sort_order, status, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (result_set_id, shot_ids[index - 1], index, status, timestamp, timestamp),
+                    ).lastrowid
+                )
+            db.execute(
+                """
+                UPDATE generation_tasks
+                SET current_input_version_id = ?, active_styling_id = ?, active_preview_id = ?,
+                    active_result_set_id = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (input_id, styling_id, preview_id, result_set_id, timestamp, task_id),
+            )
+        return int(task_id), int(result_set_id), [int(image_id) for image_id in image_ids]
+
     def test_app_gate_session_flow(self) -> None:
         from fastapi.testclient import TestClient
 
@@ -80,9 +157,20 @@ class BackendSmokeTests(unittest.TestCase):
         from fastapi.testclient import TestClient
 
         main = importlib.import_module("app.main")
+        db_module = importlib.import_module("app.db")
         client = TestClient(main.app)
         login = client.post("/api/auth/login", json={"password": "letmein-123456"})
         self.assertEqual(login.status_code, 200)
+        db_module.init_db()
+        timestamp = db_module.now_iso()
+        with db_module.get_db() as db:
+            db.execute(
+                """
+                INSERT INTO media_assets (object_key, thumb_key, original_filename, mime_type, status, created_at, updated_at)
+                VALUES ('uploads/sample.jpg', 'uploads/_derived/thumb/sample.webp', 'sample.jpg', 'image/jpeg', 'READY', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
 
         signed_url = "http://203.0.113.10:9000/ruyi-dream/uploads/sample.webp?X-Amz-Expires=900&X-Amz-Signature=test"
         with (
@@ -100,6 +188,72 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("no-store", response.headers["cache-control"])
         self.assertNotIn("max-age=3600", response.headers["cache-control"])
         self.assertEqual(response.headers["pragma"], "no-cache")
+
+    def test_media_redirect_allows_registered_legacy_media_keys(self) -> None:
+        from fastapi.testclient import TestClient
+
+        main = importlib.import_module("app.main")
+        db_module = importlib.import_module("app.db")
+        client = TestClient(main.app)
+        self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+        db_module.init_db()
+        timestamp = db_module.now_iso()
+        with db_module.get_db() as db:
+            sku_id = db.execute(
+                "INSERT INTO garment_skus (sku, storage_path, status, created_at, updated_at) VALUES ('LEGACY', 'uploads/legacy', 'NEW', ?, ?)",
+                (timestamp, timestamp),
+            ).lastrowid
+            db.execute(
+                """
+                INSERT INTO garment_images
+                  (sku_id, filename, storage_path, thumb_path, preview_path, mime_type, created_at)
+                VALUES (?, 'legacy.jpg', 'uploads/legacy/original.jpg', 'uploads/legacy/thumb.webp',
+                        'uploads/legacy/preview.webp', 'image/jpeg', ?)
+                """,
+                (sku_id, timestamp),
+            )
+            model_id = db.execute("SELECT id FROM model_profiles ORDER BY id LIMIT 1").fetchone()["id"]
+            shot_plan_id = db.execute(
+                """
+                INSERT INTO shot_plans
+                  (sku_id, model_profile_id, status, plan_json, planner_provider, created_at, updated_at)
+                VALUES (?, ?, 'DRAFT', '{}', 'test', ?, ?)
+                """,
+                (sku_id, model_id, timestamp, timestamp),
+            ).lastrowid
+            run_id = db.execute(
+                """
+                INSERT INTO generation_runs
+                  (sku_id, shot_plan_id, model_profile_id, status, kind, output_dir, created_at, updated_at)
+                VALUES (?, ?, ?, 'SUCCEEDED', 'group', 'outputs/legacy', ?, ?)
+                """,
+                (sku_id, shot_plan_id, model_id, timestamp, timestamp),
+            ).lastrowid
+            db.execute(
+                """
+                INSERT INTO generation_images
+                  (run_id, shot_index, title, status, output_path, thumb_path, preview_path, task_package_json, created_at, updated_at)
+                VALUES (?, 1, 'legacy final', 'SUCCEEDED', 'outputs/legacy/final.png',
+                        'outputs/legacy/final-thumb.webp', 'outputs/legacy/final-preview.webp', '{}', ?, ?)
+                """,
+                (run_id, timestamp, timestamp),
+            )
+
+        signed_url = "http://203.0.113.10:9000/ruyi-dream/registered.webp?X-Amz-Signature=test"
+        with (
+            patch.object(main, "existing_derivative_or_original", return_value=None),
+            patch.object(main, "object_exists", return_value=True),
+            patch.object(main, "presigned_get_url", return_value=signed_url) as presigned_get_url,
+        ):
+            garment_response = client.get("/api/media?key=uploads/legacy/preview.webp&variant=preview", follow_redirects=False)
+            generation_response = client.get("/api/media?key=outputs/legacy/final-thumb.webp&variant=thumb", follow_redirects=False)
+            unknown_response = client.get("/api/media?key=uploads/not-registered.jpg&variant=original", follow_redirects=False)
+
+        self.assertEqual(garment_response.status_code, 307)
+        self.assertEqual(generation_response.status_code, 307)
+        self.assertEqual(unknown_response.status_code, 404)
+        presigned_get_url.assert_any_call("uploads/legacy/preview.webp")
+        presigned_get_url.assert_any_call("outputs/legacy/final-thumb.webp")
 
     def test_upload_validation_accepts_decodable_images_despite_content_type_mismatch(self) -> None:
         from fastapi import UploadFile
@@ -409,7 +563,7 @@ class BackendSmokeTests(unittest.TestCase):
 
         main.validate_styling_plan(plan, candidate_snapshot)
 
-    def test_fallback_styling_plan_bypasses_production_quality_gate(self) -> None:
+    def test_fallback_styling_plan_is_rejected_by_production_quality_gate(self) -> None:
         main = importlib.import_module("app.main")
         candidate_snapshot = {
             "candidate_material_ids": [],
@@ -424,7 +578,8 @@ class BackendSmokeTests(unittest.TestCase):
         plan = main.fallback_styling_plan(input_row, candidate_snapshot, "gemini_api_key_missing")
 
         self.assertEqual(plan["quality_gate_mode"], "fallback")
-        main.validate_styling_plan(plan, candidate_snapshot)
+        with self.assertRaisesRegex(RuntimeError, "fallback"):
+            main.validate_styling_plan(plan, candidate_snapshot)
 
     def test_normalize_styling_plan_does_not_trust_model_quality_gate_mode(self) -> None:
         main = importlib.import_module("app.main")
@@ -598,9 +753,11 @@ class BackendSmokeTests(unittest.TestCase):
                 styling_garment_columns = {row["name"] for row in db.execute("PRAGMA table_info(styling_garments)").fetchall()}
                 input_version_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_task_input_versions)").fetchall()}
                 styling_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_stylings)").fetchall()}
+                preview_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_previews)").fetchall()}
+                result_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_result_images_new)").fetchall()}
                 template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
@@ -611,6 +768,8 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("styling_plan_json", styling_columns)
         self.assertIn("candidate_retrieval_snapshot_json", styling_columns)
         self.assertIn("outfit_candidates_json", styling_columns)
+        self.assertIn("locked_until", preview_columns)
+        self.assertIn("run_attempts", result_image_columns)
         self.assertIn("tag_meta_json", styling_garment_columns)
         self.assertIn("model_snapshot_json", input_version_columns)
         self.assertGreaterEqual(template_count, 1)
@@ -914,6 +1073,94 @@ class BackendSmokeTests(unittest.TestCase):
             with db_module.get_db() as db:
                 db.execute("UPDATE generation_tasks SET status = 'FINAL_RUNNING', active_preview_id = 1 WHERE id = ?", (task_id,))
             self.assertEqual(client.post(f"/api/generation-tasks/{task_id}/generate-final").status_code, 409)
+
+    def test_retry_failed_new_result_image_marks_parent_running_before_background_job(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            task_id, result_set_id, image_ids = self._create_new_final_result_set(
+                db_module,
+                ["SUCCEEDED", "FAILED"],
+                task_status="FINAL_PARTIAL",
+                result_set_status="PARTIAL",
+            )
+
+            client = TestClient(main.app)
+            self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+
+            def close_background_coroutine(coro: object, job_key: str | None = None) -> None:
+                del job_key
+                coro.close()
+
+            with patch.object(main, "schedule_background_generation", side_effect=close_background_coroutine) as schedule:
+                response = client.post(f"/api/generation-result-images-new/{image_ids[1]}/retry")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["item"]["status"], "FINAL_RUNNING")
+            self.assertEqual(schedule.call_args.kwargs["job_key"], main.final_set_job_key(result_set_id))
+            with db_module.get_db() as db:
+                task = db.execute("SELECT status, active_result_set_id FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
+                result_set = db.execute("SELECT status FROM generation_result_sets WHERE id = ?", (result_set_id,)).fetchone()
+                image = db.execute("SELECT status, active_attempt_id, locked_until FROM generation_result_images_new WHERE id = ?", (image_ids[1],)).fetchone()
+            self.assertEqual(task["status"], "FINAL_RUNNING")
+            self.assertEqual(task["active_result_set_id"], result_set_id)
+            self.assertEqual(result_set["status"], "RUNNING")
+            self.assertEqual(image["status"], "QUEUED")
+            self.assertIsNone(image["active_attempt_id"])
+            self.assertIsNone(image["locked_until"])
+
+    def test_new_generation_recovery_reconciles_running_result_sets_with_terminal_children(self) -> None:
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            completed_task_id, completed_result_set_id, _completed_images = self._create_new_final_result_set(
+                db_module,
+                ["SUCCEEDED", "SUCCEEDED"],
+            )
+            partial_task_id, partial_result_set_id, _partial_images = self._create_new_final_result_set(
+                db_module,
+                ["SUCCEEDED", "FAILED"],
+            )
+            half_reconciled_task_id, half_reconciled_result_set_id, _half_reconciled_images = self._create_new_final_result_set(
+                db_module,
+                ["SUCCEEDED", "SUCCEEDED"],
+                task_status="FINAL_RUNNING",
+                result_set_status="SUCCEEDED",
+            )
+
+            def close_background_coroutine(coro: object, job_key: str | None = None) -> None:
+                del job_key
+                coro.close()
+
+            with patch.object(main, "schedule_background_generation", side_effect=close_background_coroutine):
+                main.refresh_pending_new_generation_jobs()
+
+            with db_module.get_db() as db:
+                completed_task = db.execute("SELECT status FROM generation_tasks WHERE id = ?", (completed_task_id,)).fetchone()
+                completed_set = db.execute("SELECT status FROM generation_result_sets WHERE id = ?", (completed_result_set_id,)).fetchone()
+                partial_task = db.execute("SELECT status FROM generation_tasks WHERE id = ?", (partial_task_id,)).fetchone()
+                partial_set = db.execute("SELECT status FROM generation_result_sets WHERE id = ?", (partial_result_set_id,)).fetchone()
+                half_reconciled_task = db.execute("SELECT status FROM generation_tasks WHERE id = ?", (half_reconciled_task_id,)).fetchone()
+                half_reconciled_set = db.execute("SELECT status FROM generation_result_sets WHERE id = ?", (half_reconciled_result_set_id,)).fetchone()
+
+            self.assertEqual(completed_task["status"], "COMPLETED")
+            self.assertEqual(completed_set["status"], "SUCCEEDED")
+            self.assertEqual(partial_task["status"], "FINAL_PARTIAL")
+            self.assertEqual(partial_set["status"], "PARTIAL")
+            self.assertEqual(half_reconciled_task["status"], "COMPLETED")
+            self.assertEqual(half_reconciled_set["status"], "SUCCEEDED")
 
     def test_purge_styling_garment_removes_tasks_that_selected_it(self) -> None:
         from fastapi.testclient import TestClient

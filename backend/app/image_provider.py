@@ -721,7 +721,7 @@ def build_preview_prompt_lines(
     garment_count = sum(1 for item in image_inputs if item.get("role") == "garment_reference")
     styling_text = str(planning_script.get("styling") or "").strip()
     if not styling_text:
-        raise RuntimeError("分镜预览缺少服饰搭配：请先在服装素材页生成或保存完整的生图方案")
+        raise RuntimeError("分镜预览缺少服饰搭配：请先完成 AI 智能选搭并保存完整造型方案")
     return [
         "【任务】：",
         "根据给定的模特身份参考图和服装素材参考图，生成一张 2x3 商业摄影分镜预览图（Contact Sheet）。",

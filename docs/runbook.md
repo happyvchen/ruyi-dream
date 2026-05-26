@@ -2,7 +2,7 @@
 
 ## Scope
 
-This runbook is for MVP single-machine private deployments using Docker Compose, FastAPI, SQLite, RustFS, Gemini, and fal GPT Image-2.
+This runbook is for MVP single-machine private deployments using Docker Compose, FastAPI, SQLite, RustFS, Gemini, and the configured Image-2 provider.
 
 Use it to decide whether an incident is configuration, storage, provider, data, or application code related.
 
@@ -31,7 +31,7 @@ Expected `/api/health` response is intentionally non-sensitive:
 | Level | Impact | Examples | Action |
 | --- | --- | --- | --- |
 | SEV-1 | Production blocked or data at risk | Backend cannot start, SQLite corruption, RustFS data inaccessible | Stop writes, preserve logs, escalate to engineering immediately |
-| SEV-2 | Core generation flow degraded | fal failures, Gemini failures, upload failures for all users | Triage provider/config/storage, escalate if not fixed in 30 minutes |
+| SEV-2 | Core generation flow degraded | Image-2 provider failures, Gemini failures, upload failures for all users | Triage provider/config/storage, escalate if not fixed in 30 minutes |
 | SEV-3 | Partial or recoverable issue | One SKU fails, one run stuck, preview URL not reachable from one browser | Use this runbook, collect affected IDs, escalate if repeated |
 
 ## Backend Will Not Start
@@ -153,34 +153,35 @@ Recovery:
 3. Retry plan creation from the UI.
 4. If repeated, preserve the SKU id and backend logs for engineering.
 
-## fal / GPT Image-2 Generation Fails
+## Image-2 Generation Fails
 
 Symptoms:
 
-- Generation image status becomes `FAILED`.
-- Runs stay in active status for too long.
+- Preview or final image status becomes `FAILED`.
+- AI Studio tasks stay in active status for too long.
 - `/api/health` shows `imageProviderConfigured=false`.
 
 Checks:
 
 ```bash
-docker compose logs --tail=300 backend | grep -Ei "fal|generation|provider"
+docker compose logs --tail=300 backend | grep -Ei "toapis|fal|generation|provider"
 ```
 
 Recovery:
 
-1. Confirm `FAL_KEY` is present in `.env`.
-2. Confirm outbound network access to fal queue URLs.
-3. Retry individual failed images from the UI.
-4. If a run is stuck, record `generation_run.id` and affected `generation_images.id`.
+1. Confirm `GPT_IMAGE2_PROVIDER` matches the intended provider.
+2. For the default `toapis` provider, confirm `TOAPIS_API_KEY` is present in `.env`.
+3. For the optional `fal` provider, confirm `FAL_KEY` is present in `.env`.
+4. Confirm outbound network access to the provider API.
+5. Retry individual failed final images from the UI.
+6. If a task is stuck, record `generation_tasks.id`, `generation_previews.id`, `generation_result_sets.id`, and affected `generation_result_images_new.id`.
 
 Task control:
 
-- Each active image gets a database lease via `locked_by` / `locked_until`, so a second poller does not submit the same image while the lease is valid.
-- `GENERATION_SUBMIT_RETRY_LIMIT` controls submit retries before an image is failed.
-- `GENERATION_STATUS_RETRY_LIMIT` controls status-check retries before an image is failed.
-- `GENERATION_IMAGE_TIMEOUT_SECONDS` marks long-running queued/submitted images as failed.
-- Operators can cancel an active run in the UI, or call `POST /api/generation-runs/<run_id>/cancel`.
+- New AI Studio preview and final image tasks use `locked_by` / `locked_until` / `run_attempts` so the backend poller can recover stale in-process jobs after restart.
+- Legacy `generation_images` still use submit/status retry counters for old `generation-runs` compatibility.
+- `GENERATION_IMAGE_TIMEOUT_SECONDS` controls the lease duration for new AI Studio jobs and timeout handling for legacy generation images.
+- Final images that failed can be retried individually from the UI.
 
 Current limitation:
 

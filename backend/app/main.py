@@ -6,7 +6,7 @@ import hmac
 import json
 import logging
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 import secrets
@@ -268,6 +268,7 @@ LOGIN_FAILURE_WINDOW_SECONDS = 300
 LOGIN_FAILURE_LIMIT = 8
 login_failures_by_client: dict[str, list[float]] = {}
 ALLOWED_UPLOAD_FORMATS = {"JPEG", "PNG", "WEBP"}
+active_background_generation_jobs: set[str] = set()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> Any:
@@ -1538,9 +1539,9 @@ async def select_generation_styling(task_id: int) -> dict[str, Any]:
         db.execute("UPDATE generation_tasks SET status = 'STYLING_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
     attempt_id: int | None = None
     try:
-        styling_plan, request_snapshot = await select_styling_with_gemini(task_id, input_version_id)
+        input_row, candidate_snapshot, request_snapshot = build_ai_stylist_context(input_version_id)
         attempt_id = create_attempt("generation_styling", task_id, "gemini", request_snapshot)
-        candidate_snapshot = request_snapshot["candidate_retrieval"]
+        styling_plan = await select_styling_with_gemini(input_row, candidate_snapshot, request_snapshot)
         validate_styling_plan(styling_plan, candidate_snapshot)
         selected_ids = [int(item) for item in styling_plan.get("selected_material_ids", [])]
         source_ids, selected_snapshot = get_styling_source_and_selected_snapshots(selected_ids)
@@ -1629,7 +1630,11 @@ async def create_generation_preview(task_id: int) -> dict[str, Any]:
         )
         preview_id = int(cursor.lastrowid)
     attempt_id = create_attempt("generation_preview", preview_id, "image-2")
-    schedule_background_generation(run_preview_generation(task_id, int(styling_id), shot_plans, preview_id, attempt_id))
+    lease_generation_preview(preview_id, attempt_id)
+    schedule_background_generation(
+        run_preview_generation(task_id, int(styling_id), shot_plans, preview_id, attempt_id),
+        job_key=preview_job_key(preview_id),
+    )
     return {"item": get_generation_task_by_id(task_id, include_debug=True)}
 
 
@@ -1643,7 +1648,14 @@ async def run_preview_generation(task_id: int, styling_id: int, shot_plans: list
         persist_attempt_provider_request_id(attempt_id, provider_response)
         with get_db() as db:
             timestamp = now_iso()
-            db.execute("UPDATE generation_previews SET status = 'FAILED', active_attempt_id = ?, updated_at = ? WHERE id = ?", (attempt_id, timestamp, preview_id))
+            db.execute(
+                """
+                UPDATE generation_previews
+                SET status = 'FAILED', active_attempt_id = ?, locked_by = NULL, locked_until = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (attempt_id, timestamp, preview_id),
+            )
             db.execute("UPDATE generation_tasks SET status = 'FAILED', updated_at = ? WHERE id = ?", (timestamp, task_id))
         return
     finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=provider_response, output_asset_id=asset_id)
@@ -1651,7 +1663,12 @@ async def run_preview_generation(task_id: int, styling_id: int, shot_plans: list
     with get_db() as db:
         timestamp = now_iso()
         db.execute(
-            "UPDATE generation_previews SET status = 'SUCCEEDED', preview_asset_id = ?, active_attempt_id = ?, updated_at = ? WHERE id = ?",
+            """
+            UPDATE generation_previews
+            SET status = 'SUCCEEDED', preview_asset_id = ?, active_attempt_id = ?,
+                locked_by = NULL, locked_until = NULL, updated_at = ?
+            WHERE id = ?
+            """,
             (asset_id, attempt_id, timestamp, preview_id),
         )
         db.execute(
@@ -1700,21 +1717,47 @@ async def generate_final_images(task_id: int) -> dict[str, Any]:
                 (result_set_id, shot["id"], shot["sort_order"], timestamp, timestamp),
             )
             image_ids.append(int(image_cursor.lastrowid))
-    schedule_background_generation(run_final_generation(task_id, result_set_id, image_ids))
+    schedule_background_generation(
+        run_final_generation(task_id, result_set_id, image_ids),
+        job_key=final_set_job_key(result_set_id),
+    )
     return {"item": get_generation_task_by_id(task_id, include_debug=True)}
 
 
 async def run_final_generation(task_id: int, result_set_id: int, image_ids: list[int]) -> None:
-    results = await asyncio.gather(
+    await asyncio.gather(
         *(generate_single_final_image(task_id, result_set_id, image_id) for image_id in image_ids),
         return_exceptions=True,
     )
-    succeeded = sum(1 for result in results if not isinstance(result, Exception))
-    final_status = "COMPLETED" if image_ids and succeeded == len(image_ids) else "FINAL_PARTIAL"
     with get_db() as db:
-        timestamp = now_iso()
-        db.execute("UPDATE generation_result_sets SET status = ?, updated_at = ? WHERE id = ?", ("SUCCEEDED" if final_status == "COMPLETED" else "PARTIAL", timestamp, result_set_id))
-        db.execute("UPDATE generation_tasks SET status = ?, active_result_set_id = ?, updated_at = ? WHERE id = ?", (final_status, result_set_id, timestamp, task_id))
+        reconcile_final_result_set(db, result_set_id, task_id)
+
+
+def reconcile_final_result_set(db: Any, result_set_id: int, task_id: int | None = None) -> tuple[str, str]:
+    if task_id is None:
+        row = db.execute("SELECT task_id FROM generation_result_sets WHERE id = ?", (result_set_id,)).fetchone()
+        if not row:
+            return "PARTIAL", "FINAL_PARTIAL"
+        task_id = int(row["task_id"])
+    status_rows = db.execute("SELECT status FROM generation_result_images_new WHERE result_set_id = ?", (result_set_id,)).fetchall()
+    statuses = [row["status"] for row in status_rows]
+    timestamp = now_iso()
+    if any(status in {"QUEUED", "RUNNING"} for status in statuses):
+        db.execute("UPDATE generation_result_sets SET status = 'RUNNING', updated_at = ? WHERE id = ?", (timestamp, result_set_id))
+        db.execute(
+            "UPDATE generation_tasks SET status = 'FINAL_RUNNING', active_result_set_id = ?, updated_at = ? WHERE id = ?",
+            (result_set_id, timestamp, task_id),
+        )
+        return "RUNNING", "FINAL_RUNNING"
+    completed = bool(statuses) and all(status == "SUCCEEDED" for status in statuses)
+    result_set_status = "SUCCEEDED" if completed else "PARTIAL"
+    task_status = "COMPLETED" if completed else "FINAL_PARTIAL"
+    db.execute("UPDATE generation_result_sets SET status = ?, updated_at = ? WHERE id = ?", (result_set_status, timestamp, result_set_id))
+    db.execute(
+        "UPDATE generation_tasks SET status = ?, active_result_set_id = ?, updated_at = ? WHERE id = ?",
+        (task_status, result_set_id, timestamp, task_id),
+    )
+    return result_set_status, task_status
 
 
 @app.post("/api/generation-result-images-new/{image_id}/retry")
@@ -1731,37 +1774,41 @@ async def retry_new_result_image(image_id: int) -> dict[str, Any]:
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="结果图不存在")
-    schedule_background_generation(run_result_image_retry(int(row["task_id"]), int(row["result_set_id"]), image_id))
+        if row["status"] != "FAILED":
+            raise HTTPException(status_code=409, detail="只有失败的结果图可以重试")
+        timestamp = now_iso()
+        db.execute(
+            """
+            UPDATE generation_result_images_new
+            SET status = 'QUEUED', active_attempt_id = NULL,
+                locked_by = NULL, locked_until = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp, image_id),
+        )
+        db.execute("UPDATE generation_result_sets SET status = 'RUNNING', updated_at = ? WHERE id = ?", (timestamp, row["result_set_id"]))
+        db.execute(
+            "UPDATE generation_tasks SET status = 'FINAL_RUNNING', active_result_set_id = ?, updated_at = ? WHERE id = ?",
+            (row["result_set_id"], timestamp, row["task_id"]),
+        )
+    schedule_background_generation(
+        run_final_generation(int(row["task_id"]), int(row["result_set_id"]), [image_id]),
+        job_key=final_set_job_key(int(row["result_set_id"])),
+    )
     return {"item": get_generation_task_by_id(int(row["task_id"]), include_debug=True)}
-
-
-async def run_result_image_retry(task_id: int, result_set_id: int, image_id: int) -> None:
-    with suppress(Exception):
-        await generate_single_final_image(task_id, result_set_id, image_id)
-    with get_db() as db:
-        status_rows = db.execute(
-            "SELECT status FROM generation_result_images_new WHERE result_set_id = ?",
-            (result_set_id,),
-        ).fetchall()
-        completed = bool(status_rows) and all(item["status"] == "SUCCEEDED" for item in status_rows)
-        status = "COMPLETED" if completed else "FINAL_PARTIAL"
-        db.execute(
-            "UPDATE generation_result_sets SET status = ?, updated_at = ? WHERE id = ?",
-            ("SUCCEEDED" if completed else "PARTIAL", now_iso(), result_set_id),
-        )
-        db.execute(
-            "UPDATE generation_tasks SET status = ?, updated_at = ? WHERE id = ?",
-            (status, now_iso(), task_id),
-        )
-
 
 @app.get("/api/generation-records")
 def list_new_generation_records(limit: int = Query(30, ge=1, le=100), offset: int = Query(0, ge=0)) -> dict[str, Any]:
     with get_db() as db:
         rows = db.execute(
             """
-            SELECT * FROM generation_tasks
-            WHERE deleted_at IS NULL AND status <> 'DRAFT' AND current_input_version_id IS NOT NULL
+            SELECT * FROM generation_tasks gt
+            WHERE gt.deleted_at IS NULL
+              AND gt.status <> 'DRAFT'
+              AND (
+                gt.current_input_version_id IS NOT NULL
+                OR EXISTS (SELECT 1 FROM generation_task_input_versions giv WHERE giv.task_id = gt.id)
+              )
             ORDER BY updated_at DESC, id DESC
             LIMIT ? OFFSET ?
             """,
@@ -2115,9 +2162,17 @@ def get_media(key: str = Query(...), variant: str = Query("original")) -> Redire
     object_key = clean_key(key)
     if variant not in {"thumb", "preview", "original"}:
         raise HTTPException(status_code=400, detail="图片规格不合法")
+    media_keys = registered_media_keys(object_key)
+    if not media_keys:
+        raise HTTPException(status_code=404, detail="图片不存在")
+    object_key = media_keys["object_key"]
     target_key = object_key
     if variant in {"thumb", "preview"}:
-        target_key = existing_derivative_or_original(object_key, variant) or object_key
+        registered_variant_key = media_keys.get(f"{variant}_key")
+        if registered_variant_key and object_exists(registered_variant_key):
+            target_key = registered_variant_key
+        else:
+            target_key = existing_derivative_or_original(object_key, variant) or object_key
     if not object_exists(target_key):
         raise HTTPException(status_code=404, detail="图片不存在")
     url = presigned_get_url(target_key)
@@ -2130,6 +2185,50 @@ def get_media(key: str = Query(...), variant: str = Query("original")) -> Redire
             "Pragma": "no-cache",
         },
     )
+
+
+def registered_media_keys(object_key: str) -> dict[str, str | None] | None:
+    with get_db() as db:
+        asset = db.execute(
+            """
+            SELECT object_key, thumb_key, preview_key FROM media_assets
+            WHERE object_key = ? OR thumb_key = ? OR preview_key = ?
+            """,
+            (object_key, object_key, object_key),
+        ).fetchone()
+        if asset:
+            return {
+                "object_key": clean_key(asset["object_key"]),
+                "thumb_key": clean_key(asset["thumb_key"]) if asset["thumb_key"] else None,
+                "preview_key": clean_key(asset["preview_key"]) if asset["preview_key"] else None,
+            }
+        legacy_garment = db.execute(
+            """
+            SELECT storage_path, thumb_path, preview_path FROM garment_images
+            WHERE storage_path = ? OR thumb_path = ? OR preview_path = ?
+            """,
+            (object_key, object_key, object_key),
+        ).fetchone()
+        if legacy_garment:
+            return {
+                "object_key": clean_key(legacy_garment["storage_path"]),
+                "thumb_key": clean_key(legacy_garment["thumb_path"]) if legacy_garment["thumb_path"] else None,
+                "preview_key": clean_key(legacy_garment["preview_path"]) if legacy_garment["preview_path"] else None,
+            }
+        legacy_generation = db.execute(
+            """
+            SELECT output_path, thumb_path, preview_path FROM generation_images
+            WHERE output_path = ? OR thumb_path = ? OR preview_path = ?
+            """,
+            (object_key, object_key, object_key),
+        ).fetchone()
+        if legacy_generation:
+            return {
+                "object_key": clean_key(legacy_generation["output_path"]),
+                "thumb_key": clean_key(legacy_generation["thumb_path"]) if legacy_generation["thumb_path"] else None,
+                "preview_key": clean_key(legacy_generation["preview_path"]) if legacy_generation["preview_path"] else None,
+            }
+    return None
 
 
 @app.post("/api/shot-plans")
@@ -2956,6 +3055,7 @@ async def generation_poller_loop() -> None:
         await asyncio.sleep(settings.generation_poll_interval_seconds)
         try:
             await asyncio.to_thread(refresh_pending_generation_images)
+            refresh_pending_new_generation_jobs()
         except Exception as exc:  # pragma: no cover - background safety net
             with get_db() as db:
                 log_event(db, "generation_poller", None, "failed", {"error": str(exc)})
@@ -3877,54 +3977,70 @@ def stable_media_url(key: str | Path | None, variant: str = "original") -> str |
 async def save_uploads_as_media_assets(files: list[UploadFile], prefix: str) -> list[dict[str, Any]]:
     timestamp = now_iso()
     saved: list[dict[str, Any]] = []
-    for index, upload in enumerate(files):
-        content, content_type = await validate_upload_image(upload)
-        filename = sanitize_filename(upload.filename or "image")
-        key = unique_key(join_key(prefix, f"{index + 1:03d}-{filename}"))
-        put_fileobj(key, BytesIO(content), content_type)
-        derivative = generate_image_derivatives(key, content)
-        width = height = None
-        with Image.open(BytesIO(content)) as image:
-            width, height = image.size
-        asset = {
-            "objectKey": key,
-            "thumbKey": derivative.get("thumb"),
-            "previewKey": derivative.get("preview"),
-            "originalFilename": upload.filename or filename,
-            "mimeType": content_type,
-            "width": width,
-            "height": height,
-            "sizeBytes": len(content),
-            "thumbSizeBytes": derivative.get("thumbSize"),
-            "previewSizeBytes": derivative.get("previewSize"),
-            "hash": hashlib.sha256(content).hexdigest(),
-        }
-        with get_db() as db:
-            cursor = db.execute(
-                """
-                INSERT INTO media_assets
-                  (object_key, thumb_key, preview_key, original_filename, mime_type, width, height,
-                   size_bytes, thumb_size_bytes, preview_size_bytes, hash, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'READY', ?, ?)
-                """,
-                (
-                    asset["objectKey"],
-                    asset["thumbKey"],
-                    asset["previewKey"],
-                    asset["originalFilename"],
-                    asset["mimeType"],
-                    asset["width"],
-                    asset["height"],
-                    asset["sizeBytes"],
-                    asset["thumbSizeBytes"],
-                    asset["previewSizeBytes"],
-                    asset["hash"],
-                    timestamp,
-                    timestamp,
-                ),
-            )
-            asset["id"] = int(cursor.lastrowid)
-        saved.append(asset)
+    saved_object_keys: list[str] = []
+    saved_asset_ids: list[int] = []
+    try:
+        for index, upload in enumerate(files):
+            content, content_type = await validate_upload_image(upload)
+            filename = sanitize_filename(upload.filename or "image")
+            key = unique_key(join_key(prefix, f"{index + 1:03d}-{filename}"))
+            put_fileobj(key, BytesIO(content), content_type)
+            saved_object_keys.append(key)
+            derivative = generate_image_derivatives(key, content)
+            saved_object_keys.extend([item for item in (derivative.get("thumb"), derivative.get("preview")) if item])
+            width = height = None
+            with Image.open(BytesIO(content)) as image:
+                width, height = image.size
+            asset = {
+                "objectKey": key,
+                "thumbKey": derivative.get("thumb"),
+                "previewKey": derivative.get("preview"),
+                "originalFilename": upload.filename or filename,
+                "mimeType": content_type,
+                "width": width,
+                "height": height,
+                "sizeBytes": len(content),
+                "thumbSizeBytes": derivative.get("thumbSize"),
+                "previewSizeBytes": derivative.get("previewSize"),
+                "hash": hashlib.sha256(content).hexdigest(),
+            }
+            with get_db() as db:
+                cursor = db.execute(
+                    """
+                    INSERT INTO media_assets
+                      (object_key, thumb_key, preview_key, original_filename, mime_type, width, height,
+                       size_bytes, thumb_size_bytes, preview_size_bytes, hash, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'READY', ?, ?)
+                    """,
+                    (
+                        asset["objectKey"],
+                        asset["thumbKey"],
+                        asset["previewKey"],
+                        asset["originalFilename"],
+                        asset["mimeType"],
+                        asset["width"],
+                        asset["height"],
+                        asset["sizeBytes"],
+                        asset["thumbSizeBytes"],
+                        asset["previewSizeBytes"],
+                        asset["hash"],
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                asset["id"] = int(cursor.lastrowid)
+            saved_asset_ids.append(int(asset["id"]))
+            saved.append(asset)
+    except Exception:
+        if saved_asset_ids:
+            with suppress(Exception):
+                with get_db() as db:
+                    db.execute(
+                        f"DELETE FROM media_assets WHERE id IN ({','.join('?' for _ in saved_asset_ids)})",
+                        saved_asset_ids,
+                    )
+        cleanup_objects(saved_object_keys)
+        raise
     return saved
 
 
@@ -4853,7 +4969,23 @@ def persist_attempt_provider_request_id(attempt_id: int, provider_response: dict
         )
 
 
-async def select_styling_with_gemini(task_id: int, input_version_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
+def fail_stale_attempt(attempt_id: int | None, message: str) -> None:
+    if not attempt_id:
+        return
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE generation_attempts
+            SET status = 'FAILED', failed_at = ?, error_code = 'STALE_JOB_RECOVERED',
+                error_message = ?, updated_at = ?
+            WHERE id = ? AND status = 'RUNNING'
+            """,
+            (timestamp, message, timestamp, attempt_id),
+        )
+
+
+def build_ai_stylist_context(input_version_id: int) -> tuple[Any, dict[str, Any], dict[str, Any]]:
     with get_db() as db:
         input_row = db.execute("SELECT * FROM generation_task_input_versions WHERE id = ?", (input_version_id,)).fetchone()
         material_rows = db.execute(
@@ -4882,13 +5014,17 @@ async def select_styling_with_gemini(task_id: int, input_version_id: int) -> tup
     material_cards = [card for card in material_cards if not (card.get("manual") or {}).get("do_not_use_for_styling")]
     candidate_snapshot = build_candidate_retrieval_snapshot(input_row, material_cards)
     request_snapshot = build_ai_stylist_request_snapshot(input_row, candidate_snapshot)
+    return input_row, candidate_snapshot, request_snapshot
+
+
+async def select_styling_with_gemini(input_row: Any, candidate_snapshot: dict[str, Any], request_snapshot: dict[str, Any]) -> dict[str, Any]:
     if not settings.gemini_api_key:
-        return fallback_styling_plan(input_row, candidate_snapshot, "gemini_api_key_missing"), request_snapshot
+        raise RuntimeError("Gemini API 未配置，AI Stylist 不能进入生产选搭。")
     try:
         from google import genai
         from google.genai import types
-    except Exception:
-        return fallback_styling_plan(input_row, candidate_snapshot, "google_genai_import_failed"), request_snapshot
+    except Exception as exc:
+        raise RuntimeError("google-genai SDK 不可用，AI Stylist 不能进入生产选搭。") from exc
     prompt = f"""
 你是 Lily 服饰品牌 AI 摄影棚的 AI Stylist。你的任务不是简单返回服饰 ID，而是为本次主推款生成一个可用于电商棚拍的 StylingPlan。
 
@@ -4977,8 +5113,8 @@ candidate_retrieval:
         response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents)
         raw = loads(extract_json_text(getattr(response, "text", "") or "{}"), {})
     except Exception as exc:
-        return fallback_styling_plan(input_row, candidate_snapshot, f"gemini_call_failed:{exc}"), request_snapshot
-    return normalize_styling_plan(raw, candidate_snapshot), request_snapshot
+        raise RuntimeError(f"Gemini AI Stylist 调用失败：{exc}") from exc
+    return normalize_styling_plan(raw, candidate_snapshot)
 
 
 def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict[str, Any]]) -> dict[str, Any]:
@@ -5385,7 +5521,7 @@ def validate_styling_plan(plan: dict[str, Any], candidate_snapshot: dict[str, An
     if has_unexplained_outerwear_conflict(selected_ids, candidate_snapshot, selected_outfit):
         raise RuntimeError("AI Stylist 返回了多个外套但没有解释真实穿着方式")
     if plan.get("quality_gate_mode") == "fallback":
-        return
+        raise RuntimeError("AI Stylist fallback 方案不能进入生产质量门")
     scores = selected_outfit.get("scores") if isinstance(selected_outfit.get("scores"), dict) else {}
     score_thresholds = {
         "aesthetic_score": 0.65,
@@ -5709,14 +5845,150 @@ def snapshot_default_model() -> dict[str, Any]:
     }
 
 
-def schedule_background_generation(coro: Any) -> None:
+def job_lease_until() -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=settings.generation_image_timeout_seconds)).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def preview_job_key(preview_id: int) -> str:
+    return f"generation_preview:{preview_id}"
+
+
+def final_set_job_key(result_set_id: int) -> str:
+    return f"generation_result_set:{result_set_id}"
+
+
+def lease_generation_preview(preview_id: int, attempt_id: int) -> None:
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE generation_previews
+            SET status = 'RUNNING', active_attempt_id = ?, locked_by = ?, locked_until = ?,
+                run_attempts = COALESCE(run_attempts, 0) + 1, updated_at = ?
+            WHERE id = ?
+            """,
+            (attempt_id, f"worker-{uuid4()}", job_lease_until(), timestamp, preview_id),
+        )
+
+
+def lease_generation_result_image(image_id: int, attempt_id: int) -> None:
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE generation_result_images_new
+            SET status = 'RUNNING', active_attempt_id = ?, locked_by = ?, locked_until = ?,
+                run_attempts = COALESCE(run_attempts, 0) + 1, updated_at = ?
+            WHERE id = ?
+            """,
+            (attempt_id, f"worker-{uuid4()}", job_lease_until(), timestamp, image_id),
+        )
+
+
+def refresh_pending_new_generation_jobs() -> None:
+    timestamp = now_iso()
+    with get_db() as db:
+        preview_rows = db.execute(
+            """
+            SELECT * FROM generation_previews
+            WHERE status IN ('QUEUED', 'RUNNING')
+              AND (locked_until IS NULL OR locked_until < ?)
+            ORDER BY updated_at, id
+            LIMIT 3
+            """,
+            (timestamp,),
+        ).fetchall()
+        result_sets = db.execute(
+            """
+            SELECT DISTINCT grs.id, grs.task_id
+            FROM generation_result_sets grs
+            JOIN generation_tasks gt ON gt.active_result_set_id = grs.id
+            JOIN generation_result_images_new gri ON gri.result_set_id = grs.id
+            WHERE grs.status = 'RUNNING'
+              AND gri.status IN ('QUEUED', 'RUNNING')
+              AND (gri.locked_until IS NULL OR gri.locked_until < ?)
+            ORDER BY grs.updated_at, grs.id
+            LIMIT 3
+            """,
+            (timestamp,),
+        ).fetchall()
+        terminal_result_sets = db.execute(
+            """
+            SELECT grs.id, grs.task_id
+            FROM generation_result_sets grs
+            JOIN generation_tasks gt ON gt.active_result_set_id = grs.id
+            WHERE (
+                grs.status = 'RUNNING'
+                AND NOT EXISTS (
+                  SELECT 1 FROM generation_result_images_new gri
+                  WHERE gri.result_set_id = grs.id
+                    AND gri.status IN ('QUEUED', 'RUNNING')
+                )
+              )
+              OR (gt.status = 'FINAL_RUNNING' AND grs.status IN ('SUCCEEDED', 'PARTIAL'))
+            ORDER BY grs.updated_at, grs.id
+            LIMIT 10
+            """
+        ).fetchall()
+
+    for row in preview_rows:
+        key = preview_job_key(int(row["id"]))
+        if key in active_background_generation_jobs:
+            continue
+        fail_stale_attempt(row["active_attempt_id"], "预览生成任务锁过期，已由后台恢复重试。")
+        attempt_id = create_attempt("generation_preview", int(row["id"]), "image-2")
+        lease_generation_preview(int(row["id"]), attempt_id)
+        shot_plans = ensure_generation_shot_plans(int(row["task_id"]), int(row["styling_id"]))
+        schedule_background_generation(
+            run_preview_generation(int(row["task_id"]), int(row["styling_id"]), shot_plans, int(row["id"]), attempt_id),
+            job_key=key,
+        )
+
+    for row in result_sets:
+        key = final_set_job_key(int(row["id"]))
+        if key in active_background_generation_jobs:
+            continue
+        with get_db() as db:
+            image_rows = db.execute(
+                """
+                SELECT id, active_attempt_id FROM generation_result_images_new
+                WHERE result_set_id = ?
+                  AND status IN ('QUEUED', 'RUNNING')
+                  AND (locked_until IS NULL OR locked_until < ?)
+                ORDER BY sort_order, id
+                """,
+                (row["id"], timestamp),
+            ).fetchall()
+        image_ids = [int(image["id"]) for image in image_rows]
+        if image_ids:
+            for image in image_rows:
+                fail_stale_attempt(image["active_attempt_id"] if "active_attempt_id" in image.keys() else None, "成片生成任务锁过期，已由后台恢复重试。")
+            schedule_background_generation(run_final_generation(int(row["task_id"]), int(row["id"]), image_ids), job_key=key)
+
+    for row in terminal_result_sets:
+        with get_db() as db:
+            reconcile_final_result_set(db, int(row["id"]), int(row["task_id"]))
+
+
+def schedule_background_generation(coro: Any, job_key: str | None = None) -> None:
+    if job_key and job_key in active_background_generation_jobs:
+        close = getattr(coro, "close", None)
+        if callable(close):
+            close()
+        return
+    if job_key:
+        active_background_generation_jobs.add(job_key)
     task = asyncio.create_task(coro)
 
     def report_failure(done: asyncio.Task[Any]) -> None:
-        with suppress(asyncio.CancelledError):
-            exc = done.exception()
-            if exc:
-                logger.exception("Background generation task failed", exc_info=exc)
+        try:
+            with suppress(asyncio.CancelledError):
+                exc = done.exception()
+                if exc:
+                    logger.exception("Background generation task failed", exc_info=exc)
+        finally:
+            if job_key:
+                active_background_generation_jobs.discard(job_key)
 
     task.add_done_callback(report_failure)
 
@@ -5757,6 +6029,7 @@ def image_provider_missing_message() -> str:
 
 async def generate_single_final_image(task_id: int, result_set_id: int, image_id: int) -> int:
     attempt_id = create_attempt("generation_result_image", image_id, "image-2")
+    lease_generation_result_image(image_id, attempt_id)
     with get_db() as db:
         db.execute(
             """
@@ -5778,7 +6051,11 @@ async def generate_single_final_image(task_id: int, result_set_id: int, image_id
         persist_attempt_provider_request_id(attempt_id, provider_response)
         with get_db() as db:
             db.execute(
-                "UPDATE generation_result_images_new SET status = 'FAILED', active_attempt_id = ?, updated_at = ? WHERE id = ?",
+                """
+                UPDATE generation_result_images_new
+                SET status = 'FAILED', active_attempt_id = ?, locked_by = NULL, locked_until = NULL, updated_at = ?
+                WHERE id = ?
+                """,
                 (attempt_id, now_iso(), image_id),
             )
         raise
@@ -5788,7 +6065,8 @@ async def generate_single_final_image(task_id: int, result_set_id: int, image_id
         db.execute(
             """
             UPDATE generation_result_images_new
-            SET status = 'SUCCEEDED', current_asset_id = ?, active_attempt_id = ?, updated_at = ?
+            SET status = 'SUCCEEDED', current_asset_id = ?, active_attempt_id = ?,
+                locked_by = NULL, locked_until = NULL, updated_at = ?
             WHERE id = ?
             """,
             (asset_id, attempt_id, now_iso(), image_id),
@@ -5823,7 +6101,7 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
         ).fetchall()
     item["images"] = [{"id": image["link_id"], "sortOrder": image["link_sort_order"], "asset": serialize_media_asset(image)} for image in image_rows]
     item["inputVersion"] = get_input_version(row["current_input_version_id"])
-    item["styling"] = get_generation_styling(row["active_styling_id"])
+    item["styling"] = get_generation_styling(row["active_styling_id"], include_debug=include_debug)
     item["shotPlans"] = get_task_shot_plans(row["active_styling_id"])
     item["preview"] = get_generation_preview(row["active_preview_id"])
     item["resultSet"] = get_generation_result_set(row["active_result_set_id"])
@@ -5869,7 +6147,7 @@ def get_input_version(input_version_id: int | None) -> dict[str, Any] | None:
     }
 
 
-def get_generation_styling(styling_id: int | None) -> dict[str, Any] | None:
+def get_generation_styling(styling_id: int | None, include_debug: bool = False) -> dict[str, Any] | None:
     if not styling_id:
         return None
     with get_db() as db:
@@ -5877,13 +6155,12 @@ def get_generation_styling(styling_id: int | None) -> dict[str, Any] | None:
     if not row:
         return None
     styling_plan = loads(row["styling_plan_json"], {}) if "styling_plan_json" in row.keys() else {}
-    return {
+    item = {
         "id": row["id"],
         "taskId": row["task_id"],
         "inputVersionId": row["input_version_id"],
         "sourceMaterialIds": loads(row["source_material_ids_json"], []),
         "candidateMaterialIds": loads(row["candidate_material_ids_json"], []) if "candidate_material_ids_json" in row.keys() else [],
-        "candidateRetrievalSnapshot": loads(row["candidate_retrieval_snapshot_json"], {}) if "candidate_retrieval_snapshot_json" in row.keys() else {},
         "selectedMaterialIds": loads(row["selected_material_ids_json"], []),
         "selectedMaterials": loads(row["selected_material_snapshot_json"], []),
         "stylingPlan": styling_plan,
@@ -5897,6 +6174,9 @@ def get_generation_styling(styling_id: int | None) -> dict[str, Any] | None:
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
+    if include_debug:
+        item["candidateRetrievalSnapshot"] = loads(row["candidate_retrieval_snapshot_json"], {}) if "candidate_retrieval_snapshot_json" in row.keys() else {}
+    return item
 
 
 def get_task_shot_plans(styling_id: int | None) -> list[dict[str, Any]]:
@@ -5961,12 +6241,14 @@ def get_task_attempts(task_id: int) -> list[dict[str, Any]]:
             """
             SELECT ga.* FROM generation_attempts ga
             WHERE (ga.owner_type = 'generation_styling' AND ga.owner_id = ?)
-               OR ga.owner_id IN (SELECT id FROM generation_previews WHERE task_id = ?)
-               OR ga.owner_id IN (
+               OR (ga.owner_type = 'generation_preview' AND ga.owner_id IN (
+                    SELECT id FROM generation_previews WHERE task_id = ?
+                  ))
+               OR (ga.owner_type = 'generation_result_image' AND ga.owner_id IN (
                     SELECT gri.id FROM generation_result_images_new gri
                     JOIN generation_result_sets grs ON grs.id = gri.result_set_id
                     WHERE grs.task_id = ?
-                  )
+                  ))
             ORDER BY ga.created_at DESC
             """,
             (task_id, task_id, task_id),
