@@ -750,7 +750,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
             <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索货号 / 标签" />
             {searching && <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span>}
           </div>
-          <span className="muted-count">{offset + 1}-{offset + items.length} 套{hasMore ? '+' : ''}</span>
+          <span className="muted-count">{items.length ? `${offset + 1}-${offset + items.length} 套${hasMore ? '+' : ''}` : '0 套'}</span>
         </div>
         <div className={`library-results ${searching ? 'is-loading' : ''}`}>
         {items.length ? (
@@ -1523,7 +1523,7 @@ function formatTagPrimitive(value: unknown) {
 function AIOperationList({ operations, compact = false }: { operations: AIOperation[]; compact?: boolean }) {
   const [expanded, setExpanded] = useState(false)
   const merged = mergeOperations(operations.filter(Boolean))
-  const maxVisible = compact ? 4 : expanded ? 8 : 3
+  const maxVisible = compact ? 4 : expanded ? merged.length : 3
   const active = merged.slice(0, maxVisible)
   const now = useTicker(active.some(isAttemptRunning))
   if (!active.length) return null
@@ -1532,7 +1532,7 @@ function AIOperationList({ operations, compact = false }: { operations: AIOperat
       {active.map((operation, index) => (
         <AIOperationCard key={`${operation.id}-${operation.ownerType}-${operation.ownerId}-${index}`} operation={operation} now={now} compact={compact} index={index} />
       ))}
-      {!compact && merged.length > maxVisible && (
+      {!compact && !expanded && merged.length > maxVisible && (
         <button className="operation-more" onClick={() => setExpanded(true)}>
           展开其余 {merged.length - maxVisible} 项进度
         </button>
