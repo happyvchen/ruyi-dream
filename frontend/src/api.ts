@@ -84,6 +84,8 @@ export type GenerationTask = {
   activeStylingId?: number | null
   activePreviewId?: number | null
   activeResultSetId?: number | null
+  archivedAt?: string | null
+  archiveReason?: string | null
   createdAt: string
   updatedAt: string
   images?: { id: number; sortOrder: number; asset: MediaAsset }[]
@@ -234,10 +236,14 @@ export const api = {
       params(`/api/styling-garments/${id}`, { purge: options?.purge, confirmCode: options?.confirmCode }),
       { method: 'DELETE' },
     ),
-  listTasks: (options?: { limit?: number; offset?: number }) =>
+  listTasks: (options?: { limit?: number; offset?: number; includeArchived?: boolean }) =>
     request<Paginated<GenerationTask>>(params('/api/generation-tasks', options ?? {})),
   getTask: (id: number, includeDebug = false) =>
     request<{ item: GenerationTask }>(params(`/api/generation-tasks/${id}`, { includeDebug })),
+  archiveTask: (id: number) =>
+    request<{ ok: boolean; archived: boolean; item: GenerationTask }>(`/api/generation-tasks/${id}/archive`, { method: 'POST' }),
+  deleteTask: (id: number, confirmName: string) =>
+    request<{ ok: boolean; deleted: boolean }>(`/api/generation-tasks/${id}`, { method: 'DELETE', body: JSON.stringify({ confirmName }) }),
   createTask: (name: string, files: File[]) => {
     const form = new FormData()
     if (name) form.append('name', name)
@@ -270,7 +276,7 @@ export const api = {
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/generate-final`, { method: 'POST' }),
   retryResultImage: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-result-images-new/${id}/retry`, { method: 'POST' }),
-  listRecords: (options?: { limit?: number; offset?: number }) =>
+  listRecords: (options?: { limit?: number; offset?: number; includeArchived?: boolean }) =>
     request<Paginated<GenerationTask>>(params('/api/generation-records', options ?? {})),
   getRecord: (id: number, includeDebug = false) =>
     request<{ item: GenerationTask }>(params(`/api/generation-records/${id}`, { includeDebug })),

@@ -752,12 +752,13 @@ class BackendSmokeTests(unittest.TestCase):
                 sku_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_skus)").fetchall()}
                 styling_garment_columns = {row["name"] for row in db.execute("PRAGMA table_info(styling_garments)").fetchall()}
                 input_version_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_task_input_versions)").fetchall()}
+                task_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_tasks)").fetchall()}
                 styling_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_stylings)").fetchall()}
                 preview_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_previews)").fetchall()}
                 result_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_result_images_new)").fetchall()}
                 template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
@@ -772,6 +773,8 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("run_attempts", result_image_columns)
         self.assertIn("tag_meta_json", styling_garment_columns)
         self.assertIn("model_snapshot_json", input_version_columns)
+        self.assertIn("archived_at", task_columns)
+        self.assertIn("archive_reason", task_columns)
         self.assertGreaterEqual(template_count, 1)
 
     def test_terminal_generation_run_cancel_returns_conflict(self) -> None:
@@ -1073,6 +1076,55 @@ class BackendSmokeTests(unittest.TestCase):
             with db_module.get_db() as db:
                 db.execute("UPDATE generation_tasks SET status = 'FINAL_RUNNING', active_preview_id = 1 WHERE id = ?", (task_id,))
             self.assertEqual(client.post(f"/api/generation-tasks/{task_id}/generate-final").status_code, 409)
+
+    def test_generation_task_archive_and_delete_hide_default_lists(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            with db_module.get_db() as db:
+                archived_task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('archive me', 'STYLING_READY', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                deleted_task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('delete me', 'STYLING_READY', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                for task_id, name in ((archived_task_id, "archive me"), (deleted_task_id, "delete me")):
+                    db.execute(
+                        """
+                        INSERT INTO generation_task_input_versions (task_id, version_number, name_snapshot, image_snapshot_json, created_at)
+                        VALUES (?, 1, ?, '[]', ?)
+                        """,
+                        (task_id, name, timestamp),
+                    )
+
+            client = TestClient(main.app)
+            self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+
+            archived = client.post(f"/api/generation-tasks/{archived_task_id}/archive")
+            self.assertEqual(archived.status_code, 200)
+            self.assertIsNotNone(archived.json()["item"]["archivedAt"])
+            default_record_ids = [item["id"] for item in client.get("/api/generation-records").json()["items"]]
+            self.assertNotIn(archived_task_id, default_record_ids)
+            archived_record_ids = [item["id"] for item in client.get("/api/generation-records?includeArchived=true").json()["items"]]
+            self.assertIn(archived_task_id, archived_record_ids)
+
+            bad_delete = client.request("DELETE", f"/api/generation-tasks/{deleted_task_id}", json={"confirmName": "wrong"})
+            self.assertEqual(bad_delete.status_code, 400)
+            deleted = client.request("DELETE", f"/api/generation-tasks/{deleted_task_id}", json={"confirmName": "delete me"})
+            self.assertEqual(deleted.status_code, 200)
+            default_task_ids = [item["id"] for item in client.get("/api/generation-tasks").json()["items"]]
+            self.assertNotIn(deleted_task_id, default_task_ids)
+            self.assertEqual(client.get(f"/api/generation-tasks/{deleted_task_id}").status_code, 404)
 
     def test_retry_failed_new_result_image_marks_parent_running_before_background_job(self) -> None:
         from fastapi.testclient import TestClient

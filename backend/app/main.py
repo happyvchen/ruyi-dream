@@ -192,6 +192,10 @@ class GenerationTaskImageUpdateRequest(BaseModel):
     sortOrder: int | None = None
 
 
+class GenerationTaskDeleteRequest(BaseModel):
+    confirmName: str | None = None
+
+
 class GarmentSkuUpdateRequest(BaseModel):
     sku: str | None = None
     title: str | None = None
@@ -1363,11 +1367,21 @@ async def create_generation_task(
 
 
 @app.get("/api/generation-tasks")
-def list_generation_tasks(limit: int = Query(30, ge=1, le=100), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+def list_generation_tasks(
+    include_archived: bool = Query(False, alias="includeArchived"),
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
     with get_db() as db:
         rows = db.execute(
-            "SELECT * FROM generation_tasks WHERE deleted_at IS NULL ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
-            (limit + 1, offset),
+            """
+            SELECT * FROM generation_tasks
+            WHERE deleted_at IS NULL
+              AND (? OR archived_at IS NULL)
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (include_archived, limit + 1, offset),
         ).fetchall()
         items = rows[:limit]
         return {
@@ -1382,6 +1396,39 @@ def list_generation_tasks(limit: int = Query(30, ge=1, le=100), offset: int = Qu
 @app.get("/api/generation-tasks/{task_id}")
 def get_generation_task(task_id: int, include_debug: bool = Query(False, alias="includeDebug")) -> dict[str, Any]:
     return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
+
+
+@app.post("/api/generation-tasks/{task_id}/archive")
+def archive_generation_task(task_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_tasks WHERE id = ? AND deleted_at IS NULL", (task_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="生成任务不存在")
+        ensure_generation_task_not_running(row)
+        timestamp = now_iso()
+        if row["archived_at"] is None:
+            db.execute(
+                "UPDATE generation_tasks SET archived_at = ?, archive_reason = ?, updated_at = ? WHERE id = ?",
+                (timestamp, "user_archived", timestamp, task_id),
+            )
+            log_event(db, "generation_task", task_id, "archived", {"name": row["name"]})
+    return {"ok": True, "archived": True, "item": get_generation_task_by_id(task_id)}
+
+
+@app.delete("/api/generation-tasks/{task_id}")
+def delete_generation_task(task_id: int, payload: GenerationTaskDeleteRequest | None = None) -> dict[str, Any]:
+    confirm_name = (payload.confirmName if payload else None) or ""
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_tasks WHERE id = ? AND deleted_at IS NULL", (task_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="生成任务不存在")
+        ensure_generation_task_not_running(row)
+        if confirm_name != row["name"]:
+            raise HTTPException(status_code=400, detail="请输入完整任务名以确认删除")
+        timestamp = now_iso()
+        db.execute("UPDATE generation_tasks SET deleted_at = ?, updated_at = ? WHERE id = ?", (timestamp, timestamp, task_id))
+        log_event(db, "generation_task", task_id, "deleted", {"name": row["name"]})
+    return {"ok": True, "deleted": True}
 
 
 @app.patch("/api/generation-tasks/{task_id}")
@@ -1400,6 +1447,11 @@ def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -
 def ensure_generation_task_draft(task: Any) -> None:
     if task["status"] != "DRAFT":
         raise HTTPException(status_code=409, detail="任务进入 AI 阶段后不可修改主推款输入")
+
+
+def ensure_generation_task_not_running(task: Any) -> None:
+    if task["status"] in {"STYLING_RUNNING", "PREVIEW_RUNNING", "FINAL_RUNNING"}:
+        raise HTTPException(status_code=409, detail="任务正在生成中，完成后才能归档或删除")
 
 
 @app.post("/api/generation-tasks/{task_id}/images")
@@ -1798,12 +1850,17 @@ async def retry_new_result_image(image_id: int) -> dict[str, Any]:
     return {"item": get_generation_task_by_id(int(row["task_id"]), include_debug=True)}
 
 @app.get("/api/generation-records")
-def list_new_generation_records(limit: int = Query(30, ge=1, le=100), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+def list_new_generation_records(
+    include_archived: bool = Query(False, alias="includeArchived"),
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
     with get_db() as db:
         rows = db.execute(
             """
             SELECT * FROM generation_tasks gt
             WHERE gt.deleted_at IS NULL
+              AND (? OR gt.archived_at IS NULL)
               AND gt.status <> 'DRAFT'
               AND (
                 gt.current_input_version_id IS NOT NULL
@@ -1812,7 +1869,7 @@ def list_new_generation_records(limit: int = Query(30, ge=1, le=100), offset: in
             ORDER BY updated_at DESC, id DESC
             LIMIT ? OFFSET ?
             """,
-            (limit + 1, offset),
+            (include_archived, limit + 1, offset),
         ).fetchall()
         items = rows[:limit]
         return {
@@ -6083,6 +6140,8 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
         "activeStylingId": row["active_styling_id"],
         "activePreviewId": row["active_preview_id"],
         "activeResultSetId": row["active_result_set_id"],
+        "archivedAt": row["archived_at"] if "archived_at" in row.keys() else None,
+        "archiveReason": row["archive_reason"] if "archive_reason" in row.keys() else None,
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }

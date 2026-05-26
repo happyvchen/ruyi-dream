@@ -284,9 +284,28 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
   clearLocalOperationsFor: (ownerTypes: string[]) => void
 }) {
   const [step, setStep] = useState<StudioStep>(0)
+  const [taskItems, setTaskItems] = useState<GenerationTask[]>(tasks.slice(0, 5))
+  const [taskOffset, setTaskOffset] = useState(0)
+  const [taskHasMore, setTaskHasMore] = useState(false)
+  const [taskNextOffset, setTaskNextOffset] = useState<number | null>(null)
+  const [tasksLoading, setTasksLoading] = useState(false)
+  const recentTaskPageSize = 5
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
   useEffect(() => setStep(currentStep), [task?.id, task?.status])
+  useEffect(() => {
+    let cancelled = false
+    setTasksLoading(true)
+    void api.listTasks({ limit: recentTaskPageSize, offset: taskOffset }).then((result) => {
+      if (cancelled) return
+      setTaskItems(result.items)
+      setTaskHasMore(result.hasMore)
+      setTaskNextOffset(result.nextOffset)
+    }).catch(() => undefined).finally(() => {
+      if (!cancelled) setTasksLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [tasks, taskOffset])
   useEffect(() => {
     if (!task || !['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)) return
     const timer = window.setInterval(() => {
@@ -294,6 +313,37 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
     }, 1500)
     return () => window.clearInterval(timer)
   }, [task?.id, task?.status, setTask])
+
+  function refreshRecentTasks(targetOffset = taskOffset) {
+    return api.listTasks({ limit: recentTaskPageSize, offset: targetOffset }).then((result) => {
+      setTaskItems(result.items)
+      setTaskHasMore(result.hasMore)
+      setTaskNextOffset(result.nextOffset)
+      if (!result.items.length && targetOffset > 0) setTaskOffset(Math.max(0, targetOffset - recentTaskPageSize))
+    })
+  }
+
+  function archiveRecentTask(item: GenerationTask) {
+    void run('归档任务中...', () => api.archiveTask(item.id), () => {
+      if (task?.id === item.id) {
+        setTask(null)
+        window.history.replaceState(null, '', routeToUrl({ page: 'studio' }))
+      }
+      void refreshRecentTasks().catch(() => undefined)
+    })
+  }
+
+  function deleteRecentTask(item: GenerationTask) {
+    const confirmName = window.prompt(`输入完整任务名以删除：${item.name}`) ?? ''
+    if (confirmName !== item.name) return
+    void run('删除任务中...', () => api.deleteTask(item.id, confirmName), () => {
+      if (task?.id === item.id) {
+        setTask(null)
+        window.history.replaceState(null, '', routeToUrl({ page: 'studio' }))
+      }
+      void refreshRecentTasks().catch(() => undefined)
+    })
+  }
 
   return (
     <section className="page">
@@ -320,11 +370,21 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
           ) : <EmptyState title="暂无任务" text="上传主推款后会在这里形成拍摄任务。" />}
           <h3>最近任务</h3>
           <div className="mini-list">
-            {tasks.slice(0, 5).map((item) => (
-              <button key={item.id} onClick={() => void api.getTask(item.id).then((r) => setTask(r.item))}>
-                <span>{item.name}</span><em>{statusText(item.status)}</em>
-              </button>
+            {taskItems.map((item) => (
+              <div key={item.id} className={`mini-row ${task?.id === item.id ? 'active' : ''}`}>
+                <button onClick={() => void api.getTask(item.id).then((r) => setTask(r.item))}>
+                  <span>{item.name}</span><em>{statusText(item.status)}</em>
+                </button>
+                <button className="ghost-icon" disabled={isTaskRunning(item)} onClick={() => archiveRecentTask(item)} title="归档"><FolderOpen size={14} /></button>
+                <button className="ghost-icon danger-icon" disabled={isTaskRunning(item)} onClick={() => deleteRecentTask(item)} title="删除"><Trash2 size={14} /></button>
+              </div>
             ))}
+            {!taskItems.length && <EmptyState title="暂无任务" text="新建拍摄任务后会出现在这里。" />}
+          </div>
+          <div className="compact-pagination">
+            <button className="secondary icon-button" disabled={taskOffset === 0 || tasksLoading} onClick={() => setTaskOffset(Math.max(0, taskOffset - recentTaskPageSize))} title="上一页"><ChevronLeft size={16} /></button>
+            <span>第 {Math.floor(taskOffset / recentTaskPageSize) + 1} 页</span>
+            <button className="secondary icon-button" disabled={!taskHasMore || tasksLoading} onClick={() => setTaskOffset(taskNextOffset ?? taskOffset + recentTaskPageSize)} title="下一页"><ChevronRight size={16} /></button>
           </div>
         </aside>
       </div>
@@ -1167,25 +1227,93 @@ function ModelPage({ models }: { models: ModelProfile[] }) {
 }
 
 function RecordsPage({ records, detail, setDetail, run }: { records: GenerationTask[]; detail: GenerationTask | null; setDetail: (task: GenerationTask | null) => void; run: any }) {
+  const [items, setItems] = useState<GenerationTask[]>(records)
+  const [offset, setOffset] = useState(0)
+  const [hasMore, setHasMore] = useState(false)
+  const [nextOffset, setNextOffset] = useState<number | null>(null)
+  const [loading, setLoading] = useState(false)
+  const pageSize = 12
+
+  function refreshRecordPage(targetOffset = offset) {
+    return api.listRecords({ limit: pageSize, offset: targetOffset }).then((result) => {
+      setItems(result.items)
+      setHasMore(result.hasMore)
+      setNextOffset(result.nextOffset)
+      if (!result.items.length && targetOffset > 0) setOffset(Math.max(0, targetOffset - pageSize))
+    })
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    void api.listRecords({ limit: pageSize, offset }).then((result) => {
+      if (cancelled) return
+      setItems(result.items)
+      setHasMore(result.hasMore)
+      setNextOffset(result.nextOffset)
+    }).catch(() => undefined).finally(() => {
+      if (!cancelled) setLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [records, offset])
+
+  function openRecord(item: GenerationTask) {
+    void run('读取记录中...', () => api.getRecord(item.id, false), (r: { item: GenerationTask }) => setDetail(r.item))
+  }
+
+  function archiveRecord(item: GenerationTask) {
+    void run('归档记录中...', () => api.archiveTask(item.id), () => {
+      if (detail?.id === item.id) {
+        setDetail(null)
+        window.history.replaceState(null, '', routeToUrl({ page: 'records' }))
+      }
+      void refreshRecordPage().catch(() => undefined)
+    })
+  }
+
+  function deleteRecord(item: GenerationTask) {
+    const confirmName = window.prompt(`输入完整任务名以删除：${item.name}`) ?? ''
+    if (confirmName !== item.name) return
+    void run('删除记录中...', () => api.deleteTask(item.id, confirmName), () => {
+      if (detail?.id === item.id) {
+        setDetail(null)
+        window.history.replaceState(null, '', routeToUrl({ page: 'records' }))
+      }
+      void refreshRecordPage().catch(() => undefined)
+    })
+  }
+
   return (
     <section className="page">
       <PageTitle title="生成记录" subtitle="查看历史拍摄任务、分镜预览和最终成片。" />
       <div className="records-layout">
         <div className="panel record-list">
-          {records.filter((item) => item.status !== 'DRAFT').map((item) => (
-            <button
+          <div className="record-list-head">
+            <span className="muted-count">{items.length ? `${offset + 1}-${offset + items.length} 条${hasMore ? '+' : ''}` : '0 条'}</span>
+          </div>
+          {items.filter((item) => item.status !== 'DRAFT').map((item) => (
+            <div
               key={item.id}
               className={`record-row ${detail?.id === item.id ? 'active' : ''}`}
-              aria-current={detail?.id === item.id ? 'true' : undefined}
-              title="查看记录详情"
-              onClick={() => void run('读取记录中...', () => api.getRecord(item.id, false), (r: { item: GenerationTask }) => setDetail(r.item))}
             >
-              <AssetThumb asset={item.summary?.cover ?? null} interactive={false} />
-              <div><strong>{item.name}</strong><span>{statusText(item.status)} · {dateText(item.updatedAt)}</span></div>
-              <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
-              <span className="record-eye" aria-hidden="true"><Eye size={16} /></span>
-            </button>
+              <button className="record-open" aria-current={detail?.id === item.id ? 'true' : undefined} title="查看记录详情" onClick={() => openRecord(item)}>
+                <AssetThumb asset={item.summary?.cover ?? null} interactive={false} />
+                <div><strong>{item.name}</strong><span>{statusText(item.status)} · {dateText(item.updatedAt)}</span></div>
+                <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
+                <span className="record-eye" aria-hidden="true"><Eye size={16} /></span>
+              </button>
+              <div className="record-actions">
+                <button className="ghost-icon" disabled={isTaskRunning(item)} onClick={() => archiveRecord(item)} title="归档"><FolderOpen size={15} /></button>
+                <button className="ghost-icon danger-icon" disabled={isTaskRunning(item)} onClick={() => deleteRecord(item)} title="删除"><Trash2 size={15} /></button>
+              </div>
+            </div>
           ))}
+          {!items.length && <EmptyState title="暂无生成记录" text="进入 AI 阶段的任务会出现在这里。" />}
+          <div className="pagination-bar">
+            <button className="secondary" disabled={offset === 0 || loading} onClick={() => setOffset(Math.max(0, offset - pageSize))}><ChevronLeft size={16} />上一页</button>
+            <span>第 {Math.floor(offset / pageSize) + 1} 页</span>
+            <button className="secondary" disabled={!hasMore || loading} onClick={() => setOffset(nextOffset ?? offset + pageSize)}>下一页<ChevronRight size={16} /></button>
+          </div>
         </div>
         <div className="panel record-detail">
           {detail ? (
@@ -1862,6 +1990,10 @@ function getTaskStep(task: GenerationTask | null): StudioStep {
   if (['STYLING_READY', 'PREVIEW_RUNNING'].includes(task.status)) return 2
   if (['PREVIEW_READY', 'FINAL_RUNNING', 'FINAL_PARTIAL', 'COMPLETED'].includes(task.status)) return 3
   return 0
+}
+
+function isTaskRunning(task: GenerationTask) {
+  return ['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)
 }
 
 function statusText(status: string) {

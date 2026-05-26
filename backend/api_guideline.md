@@ -47,6 +47,8 @@ Authorization: Bearer <token>
 | `/api/generation-tasks` | POST | 上传主推款图片并创建 `DRAFT` 拍摄任务 |
 | `/api/generation-tasks/{task_id}` | GET | 拍摄任务详情 |
 | `/api/generation-tasks/{task_id}` | PATCH | 草稿期修改任务名；进入 AI 阶段后拒绝修改 |
+| `/api/generation-tasks/{task_id}/archive` | POST | 归档拍摄任务；从默认任务和记录列表隐藏但保留文件与历史 |
+| `/api/generation-tasks/{task_id}` | DELETE | 删除拍摄任务；要求完整任务名确认，软删除应用内记录，不清理对象文件 |
 | `/api/generation-tasks/{task_id}/images` | POST | 草稿期追加主推款图片，最多 8 张 |
 | `/api/generation-task-images/{image_id}/replace` | POST | 草稿期替换单张主推款图片 |
 | `/api/generation-task-images/{image_id}` | PATCH / DELETE | 草稿期调整排序或移除主推款图片 |
@@ -134,8 +136,8 @@ Authorization: Bearer <token>
 | `GET /api/garment-skus` | `includeArchived`、`limit`、`offset`、`keyword` |
 | `GET /api/garment-skus/{sku_id}/images` | `limit`、`offset` |
 | `GET /api/styling-garments` | `limit`、`offset`、`keyword` |
-| `GET /api/generation-tasks` | `limit`、`offset` |
-| `GET /api/generation-records` | `limit`、`offset` |
+| `GET /api/generation-tasks` | `includeArchived`、`limit`、`offset` |
+| `GET /api/generation-records` | `includeArchived`、`limit`、`offset` |
 | `GET /api/model-profiles` | `limit`、`offset`、`keyword` |
 | `GET /api/generation-runs` | `includeArchived`、`limit`、`offset`、`skuId`、`keyword` |
 

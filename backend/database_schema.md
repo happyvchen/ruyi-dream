@@ -511,6 +511,7 @@ CREATE TABLE schema_migrations (
 | `006` | `add_brand_template_versions` | 增加品牌模板版本表 |
 | `007` | `add_garment_sku_archive_columns` | 增加货号归档字段 |
 | `008` | `add_media_derivative_metadata` | 增加素材图和生成图的 `thumb` / `preview` 路径与三档文件大小字段 |
+| `013` | `add_generation_task_archive_columns` | 增加新版拍摄任务归档字段 |
 
 ## 3. 关系图
 
