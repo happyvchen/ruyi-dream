@@ -130,6 +130,18 @@ Gemini 输出 `StylingPlan`，并必须说明：
 
 ## 6. 阶段性实施计划
 
+当前 PR #32 已落地阶段 1 的后端主链路，未引入新表、向量库或外部检索组件。阶段 1 的实现状态如下：
+
+- 已实现：基于现有 `effective_tags_json` 合成轻量 `visual_caption`、衣长、遮挡风险、可穿着字段和候选主图引用。
+- 已实现：`candidate-retrieval-v2 / candidate_funnel_v1`，包含互斥品类硬过滤、遮挡/厚重/深色/长上衣风险降权、多样性保留和 Top 20 小候选集。
+- 已实现：后端生成 `outfit_drafts`，默认包含主推款优先空选搭方案，并为 Top 候选生成单件草案。
+- 已实现：AI Stylist 请求附带主推款图片和 Top 候选主图，不再只给 tags。
+- 已实现：`accessory_boundary` 和质量门拒绝公文包、大体量托特等模板化配饰；fallback 默认只保留低存在感鞋，不再默认补包。
+- 已实现：`StylingPlan` 归一化保存 `brand_evidence`。阶段 1 使用品牌边界证据占位，阶段 2 替换为官方样本检索。
+- 尚未实现：独立 `BrandStyleSample` 表、官方样本导入和样本检索。
+- 尚未实现：多模态 embedding、向量检索、compatibility ranker 和反馈学习。
+- 尚未实现：用 Gemini 对主推款先做结构化视觉理解后再过滤。当前主推款品类/卖点先用任务名启发式推断，后续可升级为独立 `HeroUnderstanding` 步骤。
+
 ### 阶段 1：无需新基础设施的候选漏斗
 
 目标：基于现有 SQLite、对象存储、Gemini 打标和 `candidate_retrieval_snapshot`，先解决明显模板化和满分误判。
