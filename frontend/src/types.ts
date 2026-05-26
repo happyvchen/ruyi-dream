@@ -209,4 +209,6 @@ export type PaginatedResponse<T> = {
   offset: number
   nextOffset: number | null
   hasMore: boolean
+  total: number
+  totalPages: number
 }

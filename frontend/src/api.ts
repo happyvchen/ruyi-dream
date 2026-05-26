@@ -6,6 +6,8 @@ export type Paginated<T> = {
   offset: number
   nextOffset: number | null
   hasMore: boolean
+  total: number
+  totalPages: number
 }
 
 export type MediaAsset = {

@@ -116,6 +116,8 @@ Authorization: Bearer <token>
   "items": [],
   "limit": 30,
   "offset": 0,
+  "total": 135,
+  "totalPages": 5,
   "nextOffset": 30,
   "hasMore": true
 }
@@ -125,6 +127,8 @@ Authorization: Bearer <token>
 
 - `limit` 有服务端上限；前端应按接口默认值或业务页设置传入。
 - `offset` 从 `0` 开始。
+- `total` 是当前筛选条件下的总条数。
+- `totalPages = ceil(total / limit)`；无数据时为 `0`。
 - `hasMore = true` 时，前端可用 `nextOffset` 请求下一页。
 - `hasMore = false` 时，`nextOffset = null`。
 

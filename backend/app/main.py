@@ -854,13 +854,25 @@ def list_styling_garments(
             """,
             (include_archived, search, search, search, search, limit + 1, offset),
         ).fetchall()
+        total = int(db.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM styling_garments sg
+            WHERE sg.deleted_at IS NULL
+              AND (? OR sg.archived_at IS NULL)
+              AND (? IS NULL OR sg.code LIKE ? OR sg.status LIKE ? OR sg.ai_tags_json LIKE ?)
+            """,
+            (include_archived, search, search, search, search),
+        ).fetchone()["total"])
         items = rows[:limit]
         return {
             "items": [serialize_styling_garment(row, include_images=False) for row in items],
             "limit": limit,
             "offset": offset,
-            "nextOffset": offset + limit if len(rows) > limit else None,
-            "hasMore": len(rows) > limit,
+            "nextOffset": offset + limit if offset + limit < total else None,
+            "hasMore": offset + limit < total,
+            "total": total,
+            "totalPages": (total + limit - 1) // limit if total else 0,
         }
 
 
@@ -1461,13 +1473,23 @@ def list_generation_tasks(
             """,
             (include_archived, limit + 1, offset),
         ).fetchall()
+        total = int(db.execute(
+            """
+            SELECT COUNT(*) AS total FROM generation_tasks
+            WHERE deleted_at IS NULL
+              AND (? OR archived_at IS NULL)
+            """,
+            (include_archived,),
+        ).fetchone()["total"])
         items = rows[:limit]
         return {
             "items": [serialize_generation_task(row, include_detail=False) for row in items],
             "limit": limit,
             "offset": offset,
-            "nextOffset": offset + limit if len(rows) > limit else None,
-            "hasMore": len(rows) > limit,
+            "nextOffset": offset + limit if offset + limit < total else None,
+            "hasMore": offset + limit < total,
+            "total": total,
+            "totalPages": (total + limit - 1) // limit if total else 0,
         }
 
 
@@ -2067,13 +2089,28 @@ def list_new_generation_records(
             """,
             (include_archived, limit + 1, offset),
         ).fetchall()
+        total = int(db.execute(
+            """
+            SELECT COUNT(*) AS total FROM generation_tasks gt
+            WHERE gt.deleted_at IS NULL
+              AND (? OR gt.archived_at IS NULL)
+              AND gt.status <> 'DRAFT'
+              AND (
+                gt.current_input_version_id IS NOT NULL
+                OR EXISTS (SELECT 1 FROM generation_task_input_versions giv WHERE giv.task_id = gt.id)
+              )
+            """,
+            (include_archived,),
+        ).fetchone()["total"])
         items = rows[:limit]
         return {
             "items": [serialize_generation_task(row, include_detail=False) for row in items],
             "limit": limit,
             "offset": offset,
-            "nextOffset": offset + limit if len(rows) > limit else None,
-            "hasMore": len(rows) > limit,
+            "nextOffset": offset + limit if offset + limit < total else None,
+            "hasMore": offset + limit < total,
+            "total": total,
+            "totalPages": (total + limit - 1) // limit if total else 0,
         }
 
 
@@ -2099,13 +2136,22 @@ def list_model_profiles(
             """,
             (search, search, search, limit + 1, offset),
         ).fetchall()
+        total = int(db.execute(
+            """
+            SELECT COUNT(*) AS total FROM model_profiles
+            WHERE (? IS NULL OR model_id LIKE ? OR name LIKE ?)
+            """,
+            (search, search, search),
+        ).fetchone()["total"])
         items = rows[:limit]
         return {
             "items": [serialize_model(row) for row in items],
             "limit": limit,
             "offset": offset,
-            "nextOffset": offset + limit if len(rows) > limit else None,
-            "hasMore": len(rows) > limit,
+            "nextOffset": offset + limit if offset + limit < total else None,
+            "hasMore": offset + limit < total,
+            "total": total,
+            "totalPages": (total + limit - 1) // limit if total else 0,
         }
 
 

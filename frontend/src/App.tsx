@@ -72,6 +72,8 @@ const steps = [
   { title: '生成成片', icon: Sparkles },
 ] as const
 
+const pageSizeOptions = [20, 50, 100] as const
+
 export function App() {
   const [checked, setChecked] = useState(false)
   const [authenticated, setAuthenticated] = useState(false)
@@ -287,10 +289,10 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
   const [step, setStep] = useState<StudioStep>(0)
   const [taskItems, setTaskItems] = useState<GenerationTask[]>(tasks.slice(0, 5))
   const [taskOffset, setTaskOffset] = useState(0)
-  const [taskHasMore, setTaskHasMore] = useState(false)
-  const [taskNextOffset, setTaskNextOffset] = useState<number | null>(null)
+  const [taskTotal, setTaskTotal] = useState(0)
+  const [taskTotalPages, setTaskTotalPages] = useState(0)
+  const [recentTaskPageSize, setRecentTaskPageSize] = useState(20)
   const [tasksLoading, setTasksLoading] = useState(false)
-  const recentTaskPageSize = 5
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
   useEffect(() => setStep(currentStep), [task?.id, task?.status])
@@ -300,13 +302,13 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
     void api.listTasks({ limit: recentTaskPageSize, offset: taskOffset }).then((result) => {
       if (cancelled) return
       setTaskItems(result.items)
-      setTaskHasMore(result.hasMore)
-      setTaskNextOffset(result.nextOffset)
+      setTaskTotal(result.total)
+      setTaskTotalPages(result.totalPages)
     }).catch(() => undefined).finally(() => {
       if (!cancelled) setTasksLoading(false)
     })
     return () => { cancelled = true }
-  }, [tasks, taskOffset])
+  }, [tasks, taskOffset, recentTaskPageSize])
   useEffect(() => {
     if (!task || !['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)) return
     const timer = window.setInterval(() => {
@@ -318,8 +320,8 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
   function refreshRecentTasks(targetOffset = taskOffset) {
     return api.listTasks({ limit: recentTaskPageSize, offset: targetOffset }).then((result) => {
       setTaskItems(result.items)
-      setTaskHasMore(result.hasMore)
-      setTaskNextOffset(result.nextOffset)
+      setTaskTotal(result.total)
+      setTaskTotalPages(result.totalPages)
       if (!result.items.length && targetOffset > 0) setTaskOffset(Math.max(0, targetOffset - recentTaskPageSize))
     })
   }
@@ -358,11 +360,19 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
             ))}
             {!taskItems.length && <EmptyState title="暂无任务" text="新建拍摄任务后会出现在这里。" />}
           </div>
-          <div className="compact-pagination">
-            <button className="secondary icon-button" disabled={taskOffset === 0 || tasksLoading} onClick={() => setTaskOffset(Math.max(0, taskOffset - recentTaskPageSize))} title="上一页"><ChevronLeft size={16} /></button>
-            <span>第 {Math.floor(taskOffset / recentTaskPageSize) + 1} 页</span>
-            <button className="secondary icon-button" disabled={!taskHasMore || tasksLoading} onClick={() => setTaskOffset(taskNextOffset ?? taskOffset + recentTaskPageSize)} title="下一页"><ChevronRight size={16} /></button>
-          </div>
+          <PaginationControls
+            compact
+            disabled={tasksLoading}
+            offset={taskOffset}
+            pageSize={recentTaskPageSize}
+            total={taskTotal}
+            totalPages={taskTotalPages}
+            onOffsetChange={setTaskOffset}
+            onPageSizeChange={(value) => {
+              setRecentTaskPageSize(value)
+              setTaskOffset(0)
+            }}
+          />
         </aside>
       </div>
     </section>
@@ -709,13 +719,13 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
   const [items, setItems] = useState<StylingGarment[]>(garments)
   const [showImport, setShowImport] = useState(false)
   const [offset, setOffset] = useState(0)
-  const [hasMore, setHasMore] = useState(false)
-  const [nextOffset, setNextOffset] = useState<number | null>(null)
+  const [total, setTotal] = useState(0)
+  const [totalPages, setTotalPages] = useState(0)
+  const [pageSize, setPageSize] = useState(20)
   const [searching, setSearching] = useState(false)
   const [includeArchived, setIncludeArchived] = useState(false)
   const [selectedGarmentIds, setSelectedGarmentIds] = useState<Set<number>>(() => new Set())
   const [deleteGarmentDialog, setDeleteGarmentDialog] = useState<StylingGarment[] | null>(null)
-  const pageSize = 12
   const selectableGarmentIds = items.filter((item) => item.status !== 'TAGGING_RUNNING').map((item) => item.id)
   const allVisibleGarmentsSelected = selectableGarmentIds.length > 0 && selectableGarmentIds.every((id) => selectedGarmentIds.has(id))
 
@@ -728,8 +738,8 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
     const keyword = query.trim()
     return api.listStylingGarments({ limit: pageSize, offset: targetOffset, keyword: keyword || undefined, includeArchived }).then((result) => {
       setItems(result.items)
-      setHasMore(result.hasMore)
-      setNextOffset(result.nextOffset)
+      setTotal(result.total)
+      setTotalPages(result.totalPages)
     })
   }
 
@@ -750,8 +760,8 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
       void api.listStylingGarments({ limit: pageSize, offset, keyword: keyword || undefined, includeArchived }).then((result) => {
         if (!cancelled) {
           setItems(result.items)
-          setHasMore(result.hasMore)
-          setNextOffset(result.nextOffset)
+          setTotal(result.total)
+          setTotalPages(result.totalPages)
         }
       }).catch(() => undefined).finally(() => {
         if (!cancelled) setSearching(false)
@@ -761,7 +771,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [garments, offset, query, includeArchived])
+  }, [garments, offset, query, includeArchived, pageSize])
 
   useEffect(() => setSelectedGarmentIds(new Set()), [offset, includeArchived, query])
 
@@ -833,7 +843,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
                 删除 {selectedGarmentIds.size} 项
               </button>
             )}
-            <span className="muted-count">{items.length ? `${offset + 1}-${offset + items.length} 套${hasMore ? '+' : ''}` : '0 套'}</span>
+            <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 套` : '0 套'}</span>
           </div>
         </div>
         <div className={`library-results ${searching ? 'is-loading' : ''}`}>
@@ -851,11 +861,18 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
           ))}</div>
         ) : <EmptyState title={query ? '没有匹配的搭配服饰' : '暂无搭配服饰'} text={query ? '换一个货号或标签关键词试试。' : '点击右上角导入搭配服饰。'} />}
         </div>
-        <div className="pagination-bar">
-          <button className="secondary" disabled={offset === 0 || searching} onClick={() => setOffset(Math.max(0, offset - pageSize))}><ChevronLeft size={16} />上一页</button>
-          <span>第 {Math.floor(offset / pageSize) + 1} 页</span>
-          <button className="secondary" disabled={!hasMore || searching} onClick={() => setOffset(nextOffset ?? offset + pageSize)}>下一页<ChevronRight size={16} /></button>
-        </div>
+        <PaginationControls
+          disabled={searching}
+          offset={offset}
+          pageSize={pageSize}
+          total={total}
+          totalPages={totalPages}
+          onOffsetChange={setOffset}
+          onPageSizeChange={(value) => {
+            setPageSize(value)
+            setOffset(0)
+          }}
+        />
       </div>
       {detail && <GarmentDetailDrawer item={detail} run={run} onClose={() => setDetail(null)} onChange={setDetail} onDelete={() => setDeleteGarmentDialog([detail])} />}
       {deleteGarmentDialog && (
@@ -1270,13 +1287,13 @@ function ModelPage({ models }: { models: ModelProfile[] }) {
 function RecordsPage({ records, detail, setDetail, run }: { records: GenerationTask[]; detail: GenerationTask | null; setDetail: (task: GenerationTask | null) => void; run: any }) {
   const [items, setItems] = useState<GenerationTask[]>(records)
   const [offset, setOffset] = useState(0)
-  const [hasMore, setHasMore] = useState(false)
-  const [nextOffset, setNextOffset] = useState<number | null>(null)
+  const [total, setTotal] = useState(0)
+  const [totalPages, setTotalPages] = useState(0)
   const [loading, setLoading] = useState(false)
   const [includeArchived, setIncludeArchived] = useState(false)
   const [selectedRecordIds, setSelectedRecordIds] = useState<Set<number>>(() => new Set())
   const [deleteRecordDialog, setDeleteRecordDialog] = useState<GenerationTask[] | null>(null)
-  const pageSize = 12
+  const [pageSize, setPageSize] = useState(20)
   const visibleRecords = items.filter((item) => item.status !== 'DRAFT')
   const selectableRecordIds = visibleRecords.filter((item) => !isTaskRunning(item)).map((item) => item.id)
   const allVisibleRecordsSelected = selectableRecordIds.length > 0 && selectableRecordIds.every((id) => selectedRecordIds.has(id))
@@ -1284,8 +1301,8 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
   function refreshRecordPage(targetOffset = offset) {
     return api.listRecords({ limit: pageSize, offset: targetOffset, includeArchived }).then((result) => {
       setItems(result.items)
-      setHasMore(result.hasMore)
-      setNextOffset(result.nextOffset)
+      setTotal(result.total)
+      setTotalPages(result.totalPages)
       if (!result.items.length && targetOffset > 0) setOffset(Math.max(0, targetOffset - pageSize))
     })
   }
@@ -1296,13 +1313,13 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
     void api.listRecords({ limit: pageSize, offset, includeArchived }).then((result) => {
       if (cancelled) return
       setItems(result.items)
-      setHasMore(result.hasMore)
-      setNextOffset(result.nextOffset)
+      setTotal(result.total)
+      setTotalPages(result.totalPages)
     }).catch(() => undefined).finally(() => {
       if (!cancelled) setLoading(false)
     })
     return () => { cancelled = true }
-  }, [records, offset, includeArchived])
+  }, [records, offset, includeArchived, pageSize])
 
   useEffect(() => setSelectedRecordIds(new Set()), [offset, includeArchived])
 
@@ -1380,7 +1397,7 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
                   删除 {selectedRecordIds.size} 项
                 </button>
               )}
-              <span className="muted-count">{items.length ? `${offset + 1}-${offset + items.length} 条${hasMore ? '+' : ''}` : '0 条'}</span>
+              <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 条` : '0 条'}</span>
             </div>
           </div>
           {visibleRecords.map((item) => (
@@ -1411,11 +1428,18 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
             </div>
           ))}
           {!items.length && <EmptyState title="暂无生成记录" text="进入 AI 阶段的任务会出现在这里。" />}
-          <div className="pagination-bar">
-            <button className="secondary" disabled={offset === 0 || loading} onClick={() => setOffset(Math.max(0, offset - pageSize))}><ChevronLeft size={16} />上一页</button>
-            <span>第 {Math.floor(offset / pageSize) + 1} 页</span>
-            <button className="secondary" disabled={!hasMore || loading} onClick={() => setOffset(nextOffset ?? offset + pageSize)}>下一页<ChevronRight size={16} /></button>
-          </div>
+          <PaginationControls
+            disabled={loading}
+            offset={offset}
+            pageSize={pageSize}
+            total={total}
+            totalPages={totalPages}
+            onOffsetChange={setOffset}
+            onPageSizeChange={(value) => {
+              setPageSize(value)
+              setOffset(0)
+            }}
+          />
         </div>
         <div className="panel record-detail">
           {detail ? (
@@ -1504,6 +1528,80 @@ function DeleteConfirmDialog({ title, items, onClose, onConfirm }: {
       </form>
     </div>,
     document.body,
+  )
+}
+
+function PaginationControls({ offset, pageSize, total, totalPages, disabled, compact = false, onOffsetChange, onPageSizeChange }: {
+  offset: number
+  pageSize: number
+  total: number
+  totalPages: number
+  disabled?: boolean
+  compact?: boolean
+  onOffsetChange: (offset: number) => void
+  onPageSizeChange: (pageSize: number) => void
+}) {
+  const currentPage = total > 0 ? Math.floor(offset / pageSize) + 1 : 0
+  const firstItem = total > 0 ? offset + 1 : 0
+  const lastItem = Math.min(offset + pageSize, total)
+  const lastOffset = totalPages > 0 ? (totalPages - 1) * pageSize : 0
+  const canPrev = currentPage > 1 && !disabled
+  const canNext = currentPage < totalPages && !disabled
+  const [pageInput, setPageInput] = useState(String(currentPage))
+
+  useEffect(() => {
+    setPageInput(String(currentPage))
+  }, [currentPage])
+
+  function goToPage(value: number) {
+    if (!totalPages || disabled) return
+    const page = Math.min(Math.max(value, 1), totalPages)
+    onOffsetChange((page - 1) * pageSize)
+  }
+
+  function commitPageInput() {
+    const page = Number(pageInput)
+    if (!Number.isFinite(page) || page < 1) {
+      setPageInput(String(currentPage))
+      return
+    }
+    goToPage(page)
+  }
+
+  return (
+    <div className={`pagination-bar ${compact ? 'compact-pagination' : ''}`}>
+      <div className="pagination-pages">
+        <button className="secondary" disabled={!canPrev} onClick={() => goToPage(1)}>首页</button>
+        <button className="secondary" disabled={!canPrev} onClick={() => goToPage(currentPage - 1)}><ChevronLeft size={16} />上一页</button>
+        <label className="page-jump">第
+          <input
+            type="number"
+            min={totalPages ? 1 : 0}
+            max={Math.max(totalPages, 1)}
+            value={pageInput}
+            disabled={disabled || totalPages === 0}
+            onBlur={commitPageInput}
+            onChange={(event) => setPageInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') commitPageInput()
+            }}
+          />
+          页
+        </label>
+        <span>共 {totalPages} 页</span>
+        <button className="secondary" disabled={!canNext} onClick={() => goToPage(currentPage + 1)}>下一页<ChevronRight size={16} /></button>
+        <button className="secondary" disabled={!canNext} onClick={() => onOffsetChange(lastOffset)}>尾页</button>
+      </div>
+      <div className="pagination-meta">
+        <span>共 {total} 条</span>
+        <span>{total > 0 ? `${firstItem}-${lastItem} 条` : '当前 0 条'}</span>
+        <label>每页
+          <select value={pageSize} disabled={disabled} onChange={(event) => onPageSizeChange(Number(event.target.value))}>
+            {pageSizeOptions.map((value) => <option key={value} value={value}>{value} 行</option>)}
+          </select>
+        </label>
+      </div>
+    </div>
   )
 }
 
