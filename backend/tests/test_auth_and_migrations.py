@@ -752,12 +752,13 @@ class BackendSmokeTests(unittest.TestCase):
                 sku_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_skus)").fetchall()}
                 styling_garment_columns = {row["name"] for row in db.execute("PRAGMA table_info(styling_garments)").fetchall()}
                 input_version_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_task_input_versions)").fetchall()}
+                task_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_tasks)").fetchall()}
                 styling_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_stylings)").fetchall()}
                 preview_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_previews)").fetchall()}
                 result_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_result_images_new)").fetchall()}
                 template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
@@ -771,7 +772,11 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("locked_until", preview_columns)
         self.assertIn("run_attempts", result_image_columns)
         self.assertIn("tag_meta_json", styling_garment_columns)
+        self.assertIn("archived_at", styling_garment_columns)
+        self.assertIn("archive_reason", styling_garment_columns)
         self.assertIn("model_snapshot_json", input_version_columns)
+        self.assertIn("archived_at", task_columns)
+        self.assertIn("archive_reason", task_columns)
         self.assertGreaterEqual(template_count, 1)
 
     def test_terminal_generation_run_cancel_returns_conflict(self) -> None:
@@ -1074,6 +1079,113 @@ class BackendSmokeTests(unittest.TestCase):
                 db.execute("UPDATE generation_tasks SET status = 'FINAL_RUNNING', active_preview_id = 1 WHERE id = ?", (task_id,))
             self.assertEqual(client.post(f"/api/generation-tasks/{task_id}/generate-final").status_code, 409)
 
+    def test_generation_task_archive_and_delete_hide_default_lists(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            with db_module.get_db() as db:
+                archived_task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('archive me', 'STYLING_READY', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                batch_archived_task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('batch archive me', 'STYLING_READY', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                deleted_task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('delete me', 'STYLING_READY', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                batch_deleted_task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('batch delete me', 'STYLING_READY', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                for task_id, name in (
+                    (archived_task_id, "archive me"),
+                    (batch_archived_task_id, "batch archive me"),
+                    (deleted_task_id, "delete me"),
+                    (batch_deleted_task_id, "batch delete me"),
+                ):
+                    db.execute(
+                        """
+                        INSERT INTO generation_task_input_versions (task_id, version_number, name_snapshot, image_snapshot_json, created_at)
+                        VALUES (?, 1, ?, '[]', ?)
+                        """,
+                        (task_id, name, timestamp),
+                    )
+                deleted_media_ids: list[int] = []
+                for task_id, key in (
+                    (deleted_task_id, "generation-tasks/delete-me/source.jpg"),
+                    (batch_deleted_task_id, "generation-tasks/batch-delete-me/source.jpg"),
+                ):
+                    media_id = db.execute(
+                        """
+                        INSERT INTO media_assets (object_key, original_filename, mime_type, status, created_at, updated_at)
+                        VALUES (?, 'source.jpg', 'image/jpeg', 'READY', ?, ?)
+                        """,
+                        (key, timestamp, timestamp),
+                    ).lastrowid
+                    deleted_media_ids.append(media_id)
+                    db.execute(
+                        """
+                        INSERT INTO generation_task_images (task_id, media_asset_id, sort_order, status, created_at, updated_at)
+                        VALUES (?, ?, 0, 'READY', ?, ?)
+                        """,
+                        (task_id, media_id, timestamp, timestamp),
+                    )
+
+            client = TestClient(main.app)
+            self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+
+            archived = client.post(f"/api/generation-tasks/{archived_task_id}/archive")
+            self.assertEqual(archived.status_code, 200)
+            self.assertIsNotNone(archived.json()["item"]["archivedAt"])
+            batch_archived = client.post("/api/generation-tasks/batch-archive", json={"ids": [batch_archived_task_id]})
+            self.assertEqual(batch_archived.status_code, 200)
+            default_record_ids = [item["id"] for item in client.get("/api/generation-records").json()["items"]]
+            self.assertNotIn(archived_task_id, default_record_ids)
+            self.assertNotIn(batch_archived_task_id, default_record_ids)
+            archived_record_ids = [item["id"] for item in client.get("/api/generation-records?includeArchived=true").json()["items"]]
+            self.assertIn(archived_task_id, archived_record_ids)
+            self.assertIn(batch_archived_task_id, archived_record_ids)
+
+            missing_purge = client.request("DELETE", f"/api/generation-tasks/{deleted_task_id}", json={"confirmName": "delete me"})
+            self.assertEqual(missing_purge.status_code, 400)
+            bad_delete = client.request("DELETE", f"/api/generation-tasks/{deleted_task_id}", json={"purge": True, "confirmName": "wrong"})
+            self.assertEqual(bad_delete.status_code, 400)
+            bad_batch_delete = client.post("/api/generation-tasks/batch-purge", json={"purge": True, "ids": [batch_deleted_task_id], "confirmPhrase": "wrong"})
+            self.assertEqual(bad_batch_delete.status_code, 400)
+            with (
+                patch.object(main, "delete_object", return_value=None) as delete_object,
+                patch.object(main, "delete_prefix", return_value=None),
+            ):
+                deleted = client.request("DELETE", f"/api/generation-tasks/{deleted_task_id}", json={"purge": True, "confirmName": "delete me"})
+                self.assertEqual(deleted.status_code, 200)
+                self.assertTrue(deleted.json()["purged"])
+                batch_deleted = client.post("/api/generation-tasks/batch-purge", json={"purge": True, "ids": [batch_deleted_task_id], "confirmPhrase": "全部删除"})
+                self.assertEqual(batch_deleted.status_code, 200)
+                self.assertEqual(batch_deleted.json()["deletedTaskIds"], [batch_deleted_task_id])
+                self.assertGreaterEqual(delete_object.call_count, 2)
+            default_task_ids = [item["id"] for item in client.get("/api/generation-tasks").json()["items"]]
+            self.assertNotIn(deleted_task_id, default_task_ids)
+            self.assertNotIn(batch_deleted_task_id, default_task_ids)
+            self.assertEqual(client.get(f"/api/generation-tasks/{deleted_task_id}").status_code, 404)
+            self.assertEqual(client.get(f"/api/generation-tasks/{batch_deleted_task_id}").status_code, 404)
+            with db_module.get_db() as db:
+                media_count = db.execute(
+                    f"SELECT COUNT(*) AS count FROM media_assets WHERE id IN ({', '.join('?' for _ in deleted_media_ids)})",
+                    deleted_media_ids,
+                ).fetchone()["count"]
+            self.assertEqual(media_count, 0)
+
     def test_retry_failed_new_result_image_marks_parent_running_before_background_job(self) -> None:
         from fastapi.testclient import TestClient
 
@@ -1175,6 +1287,9 @@ class BackendSmokeTests(unittest.TestCase):
             db_module.init_db()
             timestamp = db_module.now_iso()
             code = f"STYLING-PURGE-{os.urandom(5).hex()}"
+            archive_code = f"STYLING-ARCHIVE-{os.urandom(5).hex()}"
+            batch_archive_code = f"STYLING-BATCH-ARCHIVE-{os.urandom(5).hex()}"
+            batch_purge_code = f"STYLING-BATCH-PURGE-{os.urandom(5).hex()}"
             with db_module.get_db() as db:
                 garment_id = db.execute(
                     """
@@ -1182,6 +1297,27 @@ class BackendSmokeTests(unittest.TestCase):
                     VALUES (?, 'READY', '{}', '{}', ?, ?)
                     """,
                     (code, timestamp, timestamp),
+                ).lastrowid
+                archive_garment_id = db.execute(
+                    """
+                    INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, created_at, updated_at)
+                    VALUES (?, 'READY', '{}', '{}', ?, ?)
+                    """,
+                    (archive_code, timestamp, timestamp),
+                ).lastrowid
+                batch_archive_garment_id = db.execute(
+                    """
+                    INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, created_at, updated_at)
+                    VALUES (?, 'READY', '{}', '{}', ?, ?)
+                    """,
+                    (batch_archive_code, timestamp, timestamp),
+                ).lastrowid
+                batch_purge_garment_id = db.execute(
+                    """
+                    INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, created_at, updated_at)
+                    VALUES (?, 'READY', '{}', '{}', ?, ?)
+                    """,
+                    (batch_purge_code, timestamp, timestamp),
                 ).lastrowid
                 task_id = db.execute(
                     "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('dependent', 'STYLING_READY', ?, ?)",
@@ -1243,6 +1379,21 @@ class BackendSmokeTests(unittest.TestCase):
 
             client = TestClient(main.app)
             self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+            archived = client.delete(f"/api/styling-garments/{archive_garment_id}")
+            self.assertEqual(archived.status_code, 200)
+            batch_archived = client.post("/api/styling-garments/batch-delete", json={"ids": [batch_archive_garment_id]})
+            self.assertEqual(batch_archived.status_code, 200)
+            default_garment_ids = [item["id"] for item in client.get("/api/styling-garments").json()["items"]]
+            self.assertNotIn(archive_garment_id, default_garment_ids)
+            self.assertNotIn(batch_archive_garment_id, default_garment_ids)
+            archived_garment_ids = [item["id"] for item in client.get("/api/styling-garments?includeArchived=true").json()["items"]]
+            self.assertIn(archive_garment_id, archived_garment_ids)
+            self.assertIn(batch_archive_garment_id, archived_garment_ids)
+            bad_batch_purge = client.post("/api/styling-garments/batch-delete", json={"ids": [batch_purge_garment_id], "purge": True, "confirmPhrase": "wrong"})
+            self.assertEqual(bad_batch_purge.status_code, 400)
+            batch_purged = client.post("/api/styling-garments/batch-delete", json={"ids": [batch_purge_garment_id], "purge": True, "confirmPhrase": "全部删除"})
+            self.assertEqual(batch_purged.status_code, 200)
+            self.assertEqual(batch_purged.json()["deletedGarmentIds"], [batch_purge_garment_id])
             with (
                 patch.object(main, "cleanup_objects") as cleanup_objects,
                 patch.object(main, "cleanup_prefixes", return_value=[]),
@@ -1258,11 +1409,13 @@ class BackendSmokeTests(unittest.TestCase):
                 attempt_count = db.execute("SELECT COUNT(*) AS count FROM generation_attempts WHERE owner_id = ?", (task_id,)).fetchone()["count"]
                 output_asset_count = db.execute("SELECT COUNT(*) AS count FROM media_assets WHERE id = ?", (output_asset_id,)).fetchone()["count"]
                 hero_asset_count = db.execute("SELECT COUNT(*) AS count FROM media_assets WHERE id = ?", (hero_asset_id,)).fetchone()["count"]
+                batch_purge_garment_count = db.execute("SELECT COUNT(*) AS count FROM styling_garments WHERE id = ?", (batch_purge_garment_id,)).fetchone()["count"]
 
         self.assertEqual(task_count, 0)
         self.assertEqual(attempt_count, 0)
         self.assertEqual(output_asset_count, 0)
         self.assertEqual(hero_asset_count, 0)
+        self.assertEqual(batch_purge_garment_count, 0)
 
     def test_sku_delete_archives_unless_related_records_are_confirmed_for_deletion(self) -> None:
         from fastapi.testclient import TestClient

@@ -6,6 +6,8 @@ export type Paginated<T> = {
   offset: number
   nextOffset: number | null
   hasMore: boolean
+  total: number
+  totalPages: number
 }
 
 export type MediaAsset = {
@@ -52,6 +54,8 @@ export type StylingGarment = {
   tagSchemaVersion?: string | null
   tagCompletedAt?: string | null
   tagError?: string | null
+  archivedAt?: string | null
+  archiveReason?: string | null
   imageCount?: number | null
   coverUrl?: string | null
   coverAsset?: MediaAsset | null
@@ -84,6 +88,8 @@ export type GenerationTask = {
   activeStylingId?: number | null
   activePreviewId?: number | null
   activeResultSetId?: number | null
+  archivedAt?: string | null
+  archiveReason?: string | null
   createdAt: string
   updatedAt: string
   images?: { id: number; sortOrder: number; asset: MediaAsset }[]
@@ -199,7 +205,7 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
-  listStylingGarments: (options?: { limit?: number; offset?: number; keyword?: string }) =>
+  listStylingGarments: (options?: { limit?: number; offset?: number; keyword?: string; includeArchived?: boolean }) =>
     request<Paginated<StylingGarment>>(params('/api/styling-garments', options ?? {})),
   createStylingGarment: (code: string, files: File[]) => {
     const form = new FormData()
@@ -234,10 +240,23 @@ export const api = {
       params(`/api/styling-garments/${id}`, { purge: options?.purge, confirmCode: options?.confirmCode }),
       { method: 'DELETE' },
     ),
-  listTasks: (options?: { limit?: number; offset?: number }) =>
+  deleteStylingGarments: (ids: number[], options?: { purge?: boolean; confirmPhrase?: string }) =>
+    request<{ ok: boolean; archived?: boolean; purged?: boolean; ids?: number[]; deletedGarmentIds?: number[]; deletedTaskIds?: number[] }>(
+      '/api/styling-garments/batch-delete',
+      { method: 'POST', body: JSON.stringify({ ids, purge: options?.purge, confirmPhrase: options?.confirmPhrase }) },
+    ),
+  listTasks: (options?: { limit?: number; offset?: number; includeArchived?: boolean }) =>
     request<Paginated<GenerationTask>>(params('/api/generation-tasks', options ?? {})),
   getTask: (id: number, includeDebug = false) =>
     request<{ item: GenerationTask }>(params(`/api/generation-tasks/${id}`, { includeDebug })),
+  archiveTask: (id: number) =>
+    request<{ ok: boolean; archived: boolean; item: GenerationTask }>(`/api/generation-tasks/${id}/archive`, { method: 'POST' }),
+  archiveTasks: (ids: number[]) =>
+    request<{ ok: boolean; archived: boolean; ids: number[] }>('/api/generation-tasks/batch-archive', { method: 'POST', body: JSON.stringify({ ids }) }),
+  deleteTask: (id: number, confirmName: string) =>
+    request<{ ok: boolean; purged: boolean; deletedTaskIds: number[] }>(`/api/generation-tasks/${id}`, { method: 'DELETE', body: JSON.stringify({ purge: true, confirmName }) }),
+  deleteTasks: (ids: number[], confirmPhrase: string) =>
+    request<{ ok: boolean; purged: boolean; deletedTaskIds: number[] }>('/api/generation-tasks/batch-purge', { method: 'POST', body: JSON.stringify({ purge: true, ids, confirmPhrase }) }),
   createTask: (name: string, files: File[]) => {
     const form = new FormData()
     if (name) form.append('name', name)
@@ -270,7 +289,7 @@ export const api = {
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/generate-final`, { method: 'POST' }),
   retryResultImage: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-result-images-new/${id}/retry`, { method: 'POST' }),
-  listRecords: (options?: { limit?: number; offset?: number }) =>
+  listRecords: (options?: { limit?: number; offset?: number; includeArchived?: boolean }) =>
     request<Paginated<GenerationTask>>(params('/api/generation-records', options ?? {})),
   getRecord: (id: number, includeDebug = false) =>
     request<{ item: GenerationTask }>(params(`/api/generation-records/${id}`, { includeDebug })),

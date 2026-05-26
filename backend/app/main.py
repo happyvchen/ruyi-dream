@@ -180,6 +180,12 @@ class StylingGarmentBatchTagRequest(BaseModel):
     ids: list[int]
 
 
+class StylingGarmentDeleteRequest(BaseModel):
+    ids: list[int] | None = None
+    purge: bool = False
+    confirmPhrase: str | None = None
+
+
 class StylingGarmentImageUpdateRequest(BaseModel):
     sortOrder: int | None = None
 
@@ -190,6 +196,13 @@ class GenerationTaskUpdateRequest(BaseModel):
 
 class GenerationTaskImageUpdateRequest(BaseModel):
     sortOrder: int | None = None
+
+
+class GenerationTaskDeleteRequest(BaseModel):
+    confirmName: str | None = None
+    confirmPhrase: str | None = None
+    ids: list[int] | None = None
+    purge: bool = False
 
 
 class GarmentSkuUpdateRequest(BaseModel):
@@ -806,6 +819,7 @@ def delete_garment_image(image_id: int) -> dict[str, Any]:
 
 @app.get("/api/styling-garments")
 def list_styling_garments(
+    include_archived: bool = Query(False, alias="includeArchived"),
     limit: int = Query(60, ge=1, le=200),
     offset: int = Query(0, ge=0),
     keyword: str | None = Query(None),
@@ -833,19 +847,32 @@ def list_styling_garments(
               (SELECT COUNT(*) FROM styling_garment_images sgi WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL) AS image_count
             FROM styling_garments sg
             WHERE sg.deleted_at IS NULL
+              AND (? OR sg.archived_at IS NULL)
               AND (? IS NULL OR sg.code LIKE ? OR sg.status LIKE ? OR sg.ai_tags_json LIKE ?)
             ORDER BY sg.updated_at DESC, sg.id DESC
             LIMIT ? OFFSET ?
             """,
-            (search, search, search, search, limit + 1, offset),
+            (include_archived, search, search, search, search, limit + 1, offset),
         ).fetchall()
+        total = int(db.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM styling_garments sg
+            WHERE sg.deleted_at IS NULL
+              AND (? OR sg.archived_at IS NULL)
+              AND (? IS NULL OR sg.code LIKE ? OR sg.status LIKE ? OR sg.ai_tags_json LIKE ?)
+            """,
+            (include_archived, search, search, search, search),
+        ).fetchone()["total"])
         items = rows[:limit]
         return {
             "items": [serialize_styling_garment(row, include_images=False) for row in items],
             "limit": limit,
             "offset": offset,
-            "nextOffset": offset + limit if len(rows) > limit else None,
-            "hasMore": len(rows) > limit,
+            "nextOffset": offset + limit if offset + limit < total else None,
+            "hasMore": offset + limit < total,
+            "total": total,
+            "totalPages": (total + limit - 1) // limit if total else 0,
         }
 
 
@@ -857,7 +884,7 @@ def get_styling_garment(garment_id: int) -> dict[str, Any]:
 
 def ensure_styling_garment_not_tagging(row: Any) -> None:
     if row["status"] == "TAGGING_RUNNING":
-        raise HTTPException(status_code=409, detail="正在打标，完成后才能修改或归档搭配服饰")
+        raise HTTPException(status_code=409, detail="正在打标，完成后才能修改或删除搭配服饰")
 
 
 def expire_stale_styling_garment_tagging() -> None:
@@ -1230,105 +1257,172 @@ def delete_styling_garment(
         ensure_styling_garment_not_tagging(row)
         if purge and confirm_code != row["code"]:
             raise HTTPException(status_code=400, detail="请输入完整 code 以确认删除关联记录和文件")
-        timestamp = now_iso()
         if purge:
-            image_rows = db.execute(
-                """
-                SELECT ma.id, ma.object_key FROM styling_garment_images sgi
-                JOIN media_assets ma ON ma.id = sgi.media_asset_id
-                WHERE sgi.styling_garment_id = ?
-                """,
-                (garment_id,),
-            ).fetchall()
-            styling_rows = db.execute(
-                "SELECT task_id, selected_material_ids_json FROM generation_stylings"
-            ).fetchall()
-            dependent_task_ids = [
-                int(styling["task_id"])
-                for styling in styling_rows
-                if garment_id in {int(item) for item in loads(styling["selected_material_ids_json"], [])}
-            ]
-            dependent_asset_ids: list[int] = []
-            if dependent_task_ids:
-                placeholders = ", ".join("?" for _ in dependent_task_ids)
-                dependent_assets = db.execute(
-                    f"""
-                    SELECT media_asset_id AS asset_id FROM generation_task_images WHERE task_id IN ({placeholders})
-                    UNION
-                    SELECT preview_asset_id AS asset_id FROM generation_previews WHERE task_id IN ({placeholders}) AND preview_asset_id IS NOT NULL
-                    UNION
-                    SELECT gri.current_asset_id AS asset_id FROM generation_result_images_new gri
-                    JOIN generation_result_sets grs ON grs.id = gri.result_set_id
-                    WHERE grs.task_id IN ({placeholders}) AND gri.current_asset_id IS NOT NULL
-                    UNION
-                    SELECT ga.output_asset_id AS asset_id FROM generation_attempts ga
-                    WHERE ga.output_asset_id IS NOT NULL AND (
-                         (ga.owner_type = 'generation_styling' AND ga.owner_id IN ({placeholders}))
-                         OR (ga.owner_type = 'generation_preview' AND ga.owner_id IN (
-                              SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
-                            ))
-                         OR (ga.owner_type = 'generation_result_image' AND ga.owner_id IN (
-                              SELECT gri.id FROM generation_result_images_new gri
-                              JOIN generation_result_sets grs ON grs.id = gri.result_set_id
-                              WHERE grs.task_id IN ({placeholders})
-                            ))
-                    )
-                    """,
-                    (
-                        *dependent_task_ids, *dependent_task_ids, *dependent_task_ids,
-                        *dependent_task_ids, *dependent_task_ids, *dependent_task_ids,
-                    ),
-                ).fetchall()
-                dependent_asset_ids = [int(asset["asset_id"]) for asset in dependent_assets]
-                db.execute(
-                    f"""
-                    DELETE FROM generation_attempts
-                    WHERE (owner_type = 'generation_preview' AND owner_id IN (
-                            SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
-                          ))
-                       OR (owner_type = 'generation_result_image' AND owner_id IN (
-                            SELECT gri.id FROM generation_result_images_new gri
-                            JOIN generation_result_sets grs ON grs.id = gri.result_set_id
-                            WHERE grs.task_id IN ({placeholders})
-                          ))
-                    """,
-                    (*dependent_task_ids, *dependent_task_ids),
-                )
-                db.execute(
-                    f"DELETE FROM generation_attempts WHERE owner_type = 'generation_styling' AND owner_id IN ({placeholders})",
-                    dependent_task_ids,
-                )
-                if dependent_asset_ids:
-                    asset_placeholders = ", ".join("?" for _ in dependent_asset_ids)
-                    db.execute(
-                        f"DELETE FROM generation_attempts WHERE output_asset_id IN ({asset_placeholders})",
-                        dependent_asset_ids,
-                    )
-                db.execute(f"DELETE FROM generation_tasks WHERE id IN ({placeholders})", dependent_task_ids)
-            asset_ids = [int(image["id"]) for image in image_rows] + dependent_asset_ids
-            dependent_media_rows: list[Any] = []
-            if dependent_asset_ids:
-                placeholders = ", ".join("?" for _ in dependent_asset_ids)
-                dependent_media_rows = db.execute(
-                    f"SELECT object_key FROM media_assets WHERE id IN ({placeholders})",
-                    dependent_asset_ids,
-                ).fetchall()
-            cleanup_objects([
-                key
-                for media in [*image_rows, *dependent_media_rows]
-                for key in image_object_keys(media["object_key"])
-            ])
-            db.execute("DELETE FROM styling_garments WHERE id = ?", (garment_id,))
-            if asset_ids:
-                placeholders = ", ".join("?" for _ in asset_ids)
-                db.execute(f"DELETE FROM media_assets WHERE id IN ({placeholders})", asset_ids)
-            cleanup_errors = cleanup_prefixes([join_key("generation-tasks", str(task_id)) for task_id in dependent_task_ids])
-            log_event(db, "styling_garment", garment_id, "purged", {"code": row["code"], "deletedTaskIds": dependent_task_ids})
-            return {"ok": True, "purged": True, "deletedTaskIds": dependent_task_ids, "objectCleanupErrors": cleanup_errors}
-        db.execute("UPDATE styling_garments SET status = 'DELETED', deleted_at = ?, updated_at = ? WHERE id = ?", (timestamp, timestamp, garment_id))
-        db.execute("UPDATE styling_garment_images SET deleted_at = ?, updated_at = ? WHERE styling_garment_id = ?", (timestamp, timestamp, garment_id))
+            deleted_task_ids, cleanup_errors = purge_styling_garment(db, garment_id, row["code"])
+            log_event(db, "styling_garment", garment_id, "purged", {"code": row["code"], "deletedTaskIds": deleted_task_ids})
+            return {"ok": True, "purged": True, "deletedTaskIds": deleted_task_ids, "objectCleanupErrors": cleanup_errors}
+        archive_styling_garments(db, [garment_id], "user_archived")
         log_event(db, "styling_garment", garment_id, "archived", {"code": row["code"]})
     return {"ok": True, "archived": True}
+
+
+@app.post("/api/styling-garments/batch-delete")
+def delete_styling_garments(payload: StylingGarmentDeleteRequest) -> dict[str, Any]:
+    garment_ids = normalized_styling_garment_ids(payload.ids or [])
+    with get_db() as db:
+        rows = get_styling_garment_rows_for_mutation(db, garment_ids)
+        for row in rows:
+            ensure_styling_garment_not_tagging(row)
+        if payload.purge:
+            if payload.confirmPhrase != "全部删除":
+                raise HTTPException(status_code=400, detail="请输入“全部删除”以确认批量删除")
+            deleted_task_ids: list[int] = []
+            cleanup_errors: list[dict[str, str]] = []
+            for row in rows:
+                task_ids, errors = purge_styling_garment(db, int(row["id"]), row["code"])
+                deleted_task_ids.extend(task_ids)
+                cleanup_errors.extend(errors)
+                log_event(db, "styling_garment", int(row["id"]), "purged", {"code": row["code"], "batch": True, "deletedTaskIds": task_ids})
+            return {
+                "ok": True,
+                "purged": True,
+                "deletedGarmentIds": garment_ids,
+                "deletedTaskIds": list(dict.fromkeys(deleted_task_ids)),
+                "objectCleanupErrors": cleanup_errors,
+            }
+        archive_styling_garments(db, garment_ids, "user_batch_archived")
+        for row in rows:
+            log_event(db, "styling_garment", int(row["id"]), "archived", {"code": row["code"], "batch": True})
+    return {"ok": True, "archived": True, "ids": garment_ids}
+
+
+def normalized_styling_garment_ids(ids: list[int]) -> list[int]:
+    normalized = list(dict.fromkeys(int(garment_id) for garment_id in ids if int(garment_id) > 0))
+    if not normalized:
+        raise HTTPException(status_code=400, detail="请选择至少一套搭配服饰")
+    if len(normalized) > 100:
+        raise HTTPException(status_code=400, detail="单次最多处理 100 套搭配服饰")
+    return normalized
+
+
+def get_styling_garment_rows_for_mutation(db: Any, garment_ids: list[int]) -> list[Any]:
+    placeholders = ", ".join("?" for _ in garment_ids)
+    rows = db.execute(
+        f"SELECT * FROM styling_garments WHERE id IN ({placeholders}) AND deleted_at IS NULL",
+        garment_ids,
+    ).fetchall()
+    if len(rows) != len(garment_ids):
+        raise HTTPException(status_code=404, detail="部分搭配服饰不存在")
+    return rows
+
+
+def archive_styling_garments(db: Any, garment_ids: list[int], reason: str) -> None:
+    garment_ids = normalized_styling_garment_ids(garment_ids)
+    timestamp = now_iso()
+    placeholders = ", ".join("?" for _ in garment_ids)
+    db.execute(
+        f"""
+        UPDATE styling_garments
+        SET archived_at = COALESCE(archived_at, ?),
+            archive_reason = COALESCE(archive_reason, ?),
+            updated_at = ?
+        WHERE id IN ({placeholders})
+        """,
+        (timestamp, reason, timestamp, *garment_ids),
+    )
+
+
+def purge_styling_garment(db: Any, garment_id: int, code: str) -> tuple[list[int], list[dict[str, str]]]:
+    image_rows = db.execute(
+        """
+        SELECT ma.id, ma.object_key FROM styling_garment_images sgi
+        JOIN media_assets ma ON ma.id = sgi.media_asset_id
+        WHERE sgi.styling_garment_id = ?
+        """,
+        (garment_id,),
+    ).fetchall()
+    styling_rows = db.execute("SELECT task_id, selected_material_ids_json FROM generation_stylings").fetchall()
+    dependent_task_ids = [
+        int(styling["task_id"])
+        for styling in styling_rows
+        if garment_id in {int(item) for item in loads(styling["selected_material_ids_json"], [])}
+    ]
+    dependent_asset_ids: list[int] = []
+    if dependent_task_ids:
+        placeholders = ", ".join("?" for _ in dependent_task_ids)
+        dependent_assets = db.execute(
+            f"""
+            SELECT media_asset_id AS asset_id FROM generation_task_images WHERE task_id IN ({placeholders})
+            UNION
+            SELECT preview_asset_id AS asset_id FROM generation_previews WHERE task_id IN ({placeholders}) AND preview_asset_id IS NOT NULL
+            UNION
+            SELECT gri.current_asset_id AS asset_id FROM generation_result_images_new gri
+            JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+            WHERE grs.task_id IN ({placeholders}) AND gri.current_asset_id IS NOT NULL
+            UNION
+            SELECT ga.output_asset_id AS asset_id FROM generation_attempts ga
+            WHERE ga.output_asset_id IS NOT NULL AND (
+                 (ga.owner_type = 'generation_styling' AND ga.owner_id IN ({placeholders}))
+                 OR (ga.owner_type = 'generation_preview' AND ga.owner_id IN (
+                      SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
+                    ))
+                 OR (ga.owner_type = 'generation_result_image' AND ga.owner_id IN (
+                      SELECT gri.id FROM generation_result_images_new gri
+                      JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+                      WHERE grs.task_id IN ({placeholders})
+                    ))
+            )
+            """,
+            (
+                *dependent_task_ids, *dependent_task_ids, *dependent_task_ids,
+                *dependent_task_ids, *dependent_task_ids, *dependent_task_ids,
+            ),
+        ).fetchall()
+        dependent_asset_ids = [int(asset["asset_id"]) for asset in dependent_assets]
+        db.execute(
+            f"""
+            DELETE FROM generation_attempts
+            WHERE (owner_type = 'generation_preview' AND owner_id IN (
+                    SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
+                  ))
+               OR (owner_type = 'generation_result_image' AND owner_id IN (
+                    SELECT gri.id FROM generation_result_images_new gri
+                    JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+                    WHERE grs.task_id IN ({placeholders})
+                  ))
+            """,
+            (*dependent_task_ids, *dependent_task_ids),
+        )
+        db.execute(
+            f"DELETE FROM generation_attempts WHERE owner_type = 'generation_styling' AND owner_id IN ({placeholders})",
+            dependent_task_ids,
+        )
+        if dependent_asset_ids:
+            asset_placeholders = ", ".join("?" for _ in dependent_asset_ids)
+            db.execute(
+                f"DELETE FROM generation_attempts WHERE output_asset_id IN ({asset_placeholders})",
+                dependent_asset_ids,
+            )
+        db.execute(f"DELETE FROM generation_tasks WHERE id IN ({placeholders})", dependent_task_ids)
+    asset_ids = [int(image["id"]) for image in image_rows] + dependent_asset_ids
+    dependent_media_rows: list[Any] = []
+    if dependent_asset_ids:
+        placeholders = ", ".join("?" for _ in dependent_asset_ids)
+        dependent_media_rows = db.execute(
+            f"SELECT object_key FROM media_assets WHERE id IN ({placeholders})",
+            dependent_asset_ids,
+        ).fetchall()
+    cleanup_objects([
+        key
+        for media in [*image_rows, *dependent_media_rows]
+        for key in image_object_keys(media["object_key"])
+    ])
+    db.execute("DELETE FROM styling_garments WHERE id = ?", (garment_id,))
+    if asset_ids:
+        placeholders = ", ".join("?" for _ in asset_ids)
+        db.execute(f"DELETE FROM media_assets WHERE id IN ({placeholders})", asset_ids)
+    cleanup_errors = cleanup_prefixes([join_key("generation-tasks", str(task_id)) for task_id in dependent_task_ids])
+    return dependent_task_ids, cleanup_errors
 
 
 @app.post("/api/generation-tasks")
@@ -1363,25 +1457,117 @@ async def create_generation_task(
 
 
 @app.get("/api/generation-tasks")
-def list_generation_tasks(limit: int = Query(30, ge=1, le=100), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+def list_generation_tasks(
+    include_archived: bool = Query(False, alias="includeArchived"),
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
     with get_db() as db:
         rows = db.execute(
-            "SELECT * FROM generation_tasks WHERE deleted_at IS NULL ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
-            (limit + 1, offset),
+            """
+            SELECT * FROM generation_tasks
+            WHERE deleted_at IS NULL
+              AND (? OR archived_at IS NULL)
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (include_archived, limit + 1, offset),
         ).fetchall()
+        total = int(db.execute(
+            """
+            SELECT COUNT(*) AS total FROM generation_tasks
+            WHERE deleted_at IS NULL
+              AND (? OR archived_at IS NULL)
+            """,
+            (include_archived,),
+        ).fetchone()["total"])
         items = rows[:limit]
         return {
             "items": [serialize_generation_task(row, include_detail=False) for row in items],
             "limit": limit,
             "offset": offset,
-            "nextOffset": offset + limit if len(rows) > limit else None,
-            "hasMore": len(rows) > limit,
+            "nextOffset": offset + limit if offset + limit < total else None,
+            "hasMore": offset + limit < total,
+            "total": total,
+            "totalPages": (total + limit - 1) // limit if total else 0,
         }
 
 
 @app.get("/api/generation-tasks/{task_id}")
 def get_generation_task(task_id: int, include_debug: bool = Query(False, alias="includeDebug")) -> dict[str, Any]:
     return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
+
+
+@app.post("/api/generation-tasks/{task_id}/archive")
+def archive_generation_task(task_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_tasks WHERE id = ? AND deleted_at IS NULL", (task_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="生成任务不存在")
+        ensure_generation_task_not_running(row)
+        timestamp = now_iso()
+        if row["archived_at"] is None:
+            db.execute(
+                "UPDATE generation_tasks SET archived_at = ?, archive_reason = ?, updated_at = ? WHERE id = ?",
+                (timestamp, "user_archived", timestamp, task_id),
+            )
+            log_event(db, "generation_task", task_id, "archived", {"name": row["name"]})
+    return {"ok": True, "archived": True, "item": get_generation_task_by_id(task_id)}
+
+
+@app.post("/api/generation-tasks/batch-archive")
+def archive_generation_tasks(payload: GenerationTaskDeleteRequest) -> dict[str, Any]:
+    task_ids = normalized_task_ids(payload.ids or [])
+    with get_db() as db:
+        rows = get_generation_task_rows_for_mutation(db, task_ids)
+        for row in rows:
+            ensure_generation_task_not_running(row)
+        timestamp = now_iso()
+        placeholders = ", ".join("?" for _ in task_ids)
+        db.execute(
+            f"""
+            UPDATE generation_tasks
+            SET archived_at = COALESCE(archived_at, ?),
+                archive_reason = COALESCE(archive_reason, 'user_archived'),
+                updated_at = ?
+            WHERE id IN ({placeholders})
+            """,
+            (timestamp, timestamp, *task_ids),
+        )
+        for row in rows:
+            log_event(db, "generation_task", int(row["id"]), "archived", {"name": row["name"], "batch": True})
+    return {"ok": True, "archived": True, "ids": task_ids}
+
+
+@app.delete("/api/generation-tasks/{task_id}")
+def delete_generation_task(task_id: int, payload: GenerationTaskDeleteRequest | None = None) -> dict[str, Any]:
+    if not payload or not payload.purge:
+        raise HTTPException(status_code=400, detail="删除任务必须勾选彻底删除")
+    confirm_name = payload.confirmName or ""
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_tasks WHERE id = ? AND deleted_at IS NULL", (task_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="生成任务不存在")
+        ensure_generation_task_not_running(row)
+        if confirm_name != row["name"]:
+            raise HTTPException(status_code=400, detail="请输入完整任务名以确认彻底删除")
+        cleanup_errors = purge_generation_tasks(db, [task_id], "user_purged")
+    return {"ok": True, "purged": True, "deletedTaskIds": [task_id], "objectCleanupErrors": cleanup_errors}
+
+
+@app.post("/api/generation-tasks/batch-purge")
+def purge_generation_tasks_batch(payload: GenerationTaskDeleteRequest) -> dict[str, Any]:
+    if not payload.purge:
+        raise HTTPException(status_code=400, detail="删除任务必须勾选彻底删除")
+    if payload.confirmPhrase != "全部删除":
+        raise HTTPException(status_code=400, detail="请输入“全部删除”以确认批量删除")
+    task_ids = normalized_task_ids(payload.ids or [])
+    with get_db() as db:
+        rows = get_generation_task_rows_for_mutation(db, task_ids)
+        for row in rows:
+            ensure_generation_task_not_running(row)
+        cleanup_errors = purge_generation_tasks(db, task_ids, "user_batch_purged")
+    return {"ok": True, "purged": True, "deletedTaskIds": task_ids, "objectCleanupErrors": cleanup_errors}
 
 
 @app.patch("/api/generation-tasks/{task_id}")
@@ -1400,6 +1586,90 @@ def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -
 def ensure_generation_task_draft(task: Any) -> None:
     if task["status"] != "DRAFT":
         raise HTTPException(status_code=409, detail="任务进入 AI 阶段后不可修改主推款输入")
+
+
+def ensure_generation_task_not_running(task: Any) -> None:
+    if task["status"] in {"STYLING_RUNNING", "PREVIEW_RUNNING", "FINAL_RUNNING"}:
+        raise HTTPException(status_code=409, detail="任务正在生成中，完成后才能删除")
+
+
+def normalized_task_ids(ids: list[int]) -> list[int]:
+    normalized = list(dict.fromkeys(int(task_id) for task_id in ids if int(task_id) > 0))
+    if not normalized:
+        raise HTTPException(status_code=400, detail="请选择至少一条任务")
+    if len(normalized) > 100:
+        raise HTTPException(status_code=400, detail="单次最多处理 100 条任务")
+    return normalized
+
+
+def get_generation_task_rows_for_mutation(db: Any, task_ids: list[int]) -> list[Any]:
+    placeholders = ", ".join("?" for _ in task_ids)
+    rows = db.execute(
+        f"SELECT * FROM generation_tasks WHERE id IN ({placeholders}) AND deleted_at IS NULL",
+        task_ids,
+    ).fetchall()
+    if len(rows) != len(task_ids):
+        raise HTTPException(status_code=404, detail="部分生成任务不存在")
+    return rows
+
+
+def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[dict[str, str]]:
+    task_ids = normalized_task_ids(task_ids)
+    placeholders = ", ".join("?" for _ in task_ids)
+    asset_rows = db.execute(
+        f"""
+        SELECT media_asset_id AS asset_id FROM generation_task_images WHERE task_id IN ({placeholders})
+        UNION
+        SELECT preview_asset_id AS asset_id FROM generation_previews WHERE task_id IN ({placeholders}) AND preview_asset_id IS NOT NULL
+        UNION
+        SELECT gri.current_asset_id AS asset_id FROM generation_result_images_new gri
+        JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+        WHERE grs.task_id IN ({placeholders}) AND gri.current_asset_id IS NOT NULL
+        UNION
+        SELECT output_asset_id AS asset_id FROM generation_attempts
+        WHERE output_asset_id IS NOT NULL AND (
+             (owner_type = 'generation_styling' AND owner_id IN ({placeholders}))
+             OR (owner_type = 'generation_preview' AND owner_id IN (
+                  SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
+                ))
+             OR (owner_type = 'generation_result_image' AND owner_id IN (
+                  SELECT gri.id FROM generation_result_images_new gri
+                  JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+                  WHERE grs.task_id IN ({placeholders})
+                ))
+        )
+        """,
+        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
+    ).fetchall()
+    asset_ids = list(dict.fromkeys(int(row["asset_id"]) for row in asset_rows if row["asset_id"] is not None))
+    media_rows: list[Any] = []
+    if asset_ids:
+        asset_placeholders = ", ".join("?" for _ in asset_ids)
+        media_rows = db.execute(f"SELECT id, object_key FROM media_assets WHERE id IN ({asset_placeholders})", asset_ids).fetchall()
+    cleanup_objects([key for media in media_rows for key in image_object_keys(media["object_key"])])
+    db.execute(
+        f"""
+        DELETE FROM generation_attempts
+        WHERE (owner_type = 'generation_styling' AND owner_id IN ({placeholders}))
+           OR (owner_type = 'generation_preview' AND owner_id IN (
+                SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
+              ))
+           OR (owner_type = 'generation_result_image' AND owner_id IN (
+                SELECT gri.id FROM generation_result_images_new gri
+                JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+                WHERE grs.task_id IN ({placeholders})
+              ))
+        """,
+        (*task_ids, *task_ids, *task_ids),
+    )
+    rows = get_generation_task_rows_for_mutation(db, task_ids)
+    db.execute(f"DELETE FROM generation_tasks WHERE id IN ({placeholders})", task_ids)
+    if asset_ids:
+        asset_placeholders = ", ".join("?" for _ in asset_ids)
+        db.execute(f"DELETE FROM media_assets WHERE id IN ({asset_placeholders})", asset_ids)
+    for row in rows:
+        log_event(db, "generation_task", int(row["id"]), "purged", {"name": row["name"], "reason": reason})
+    return cleanup_prefixes([join_key("generation-tasks", str(task_id)) for task_id in task_ids])
 
 
 @app.post("/api/generation-tasks/{task_id}/images")
@@ -1798,12 +2068,17 @@ async def retry_new_result_image(image_id: int) -> dict[str, Any]:
     return {"item": get_generation_task_by_id(int(row["task_id"]), include_debug=True)}
 
 @app.get("/api/generation-records")
-def list_new_generation_records(limit: int = Query(30, ge=1, le=100), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+def list_new_generation_records(
+    include_archived: bool = Query(False, alias="includeArchived"),
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
     with get_db() as db:
         rows = db.execute(
             """
             SELECT * FROM generation_tasks gt
             WHERE gt.deleted_at IS NULL
+              AND (? OR gt.archived_at IS NULL)
               AND gt.status <> 'DRAFT'
               AND (
                 gt.current_input_version_id IS NOT NULL
@@ -1812,15 +2087,30 @@ def list_new_generation_records(limit: int = Query(30, ge=1, le=100), offset: in
             ORDER BY updated_at DESC, id DESC
             LIMIT ? OFFSET ?
             """,
-            (limit + 1, offset),
+            (include_archived, limit + 1, offset),
         ).fetchall()
+        total = int(db.execute(
+            """
+            SELECT COUNT(*) AS total FROM generation_tasks gt
+            WHERE gt.deleted_at IS NULL
+              AND (? OR gt.archived_at IS NULL)
+              AND gt.status <> 'DRAFT'
+              AND (
+                gt.current_input_version_id IS NOT NULL
+                OR EXISTS (SELECT 1 FROM generation_task_input_versions giv WHERE giv.task_id = gt.id)
+              )
+            """,
+            (include_archived,),
+        ).fetchone()["total"])
         items = rows[:limit]
         return {
             "items": [serialize_generation_task(row, include_detail=False) for row in items],
             "limit": limit,
             "offset": offset,
-            "nextOffset": offset + limit if len(rows) > limit else None,
-            "hasMore": len(rows) > limit,
+            "nextOffset": offset + limit if offset + limit < total else None,
+            "hasMore": offset + limit < total,
+            "total": total,
+            "totalPages": (total + limit - 1) // limit if total else 0,
         }
 
 
@@ -1846,13 +2136,22 @@ def list_model_profiles(
             """,
             (search, search, search, limit + 1, offset),
         ).fetchall()
+        total = int(db.execute(
+            """
+            SELECT COUNT(*) AS total FROM model_profiles
+            WHERE (? IS NULL OR model_id LIKE ? OR name LIKE ?)
+            """,
+            (search, search, search),
+        ).fetchone()["total"])
         items = rows[:limit]
         return {
             "items": [serialize_model(row) for row in items],
             "limit": limit,
             "offset": offset,
-            "nextOffset": offset + limit if len(rows) > limit else None,
-            "hasMore": len(rows) > limit,
+            "nextOffset": offset + limit if offset + limit < total else None,
+            "hasMore": offset + limit < total,
+            "total": total,
+            "totalPages": (total + limit - 1) // limit if total else 0,
         }
 
 
@@ -4131,6 +4430,8 @@ def serialize_styling_garment(row: Any, include_images: bool = True) -> dict[str
         "tagSchemaVersion": row["tag_schema_version"],
         "tagCompletedAt": row["tag_completed_at"],
         "tagError": row["tag_error"],
+        "archivedAt": row["archived_at"] if "archived_at" in row.keys() else None,
+        "archiveReason": row["archive_reason"] if "archive_reason" in row.keys() else None,
         "imageCount": row["image_count"] if "image_count" in row.keys() else None,
         "coverUrl": stable_media_url(row["cover_key"], "thumb") if "cover_key" in row.keys() else None,
         "coverAsset": serialize_cover_asset(row),
@@ -6083,6 +6384,8 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
         "activeStylingId": row["active_styling_id"],
         "activePreviewId": row["active_preview_id"],
         "activeResultSetId": row["active_result_set_id"],
+        "archivedAt": row["archived_at"] if "archived_at" in row.keys() else None,
+        "archiveReason": row["archive_reason"] if "archive_reason" in row.keys() else None,
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }

@@ -42,11 +42,16 @@ Authorization: Bearer <token>
 | `/api/styling-garments/{garment_id}` | PATCH | 编辑 code 或人工业务标签；打标中禁止修改 |
 | `/api/styling-garments/{garment_id}/save-and-tag` | POST | 系统默认触发 Gemini 打标；通过复核策略后进入 `READY`，否则进入 `TAGGING_READY` |
 | `/api/styling-garments/batch-save-and-tag` | POST | 批量把已保存搭配服饰置为 `TAGGING_RUNNING` 并提交后台打标 |
-| `/api/styling-garments/{garment_id}` | DELETE | 归档搭配服饰；打标中禁止归档 |
+| `/api/styling-garments/{garment_id}` | DELETE | 删除搭配服饰；默认从日常列表移除，传 `purge=true` 且确认 code 时彻底删除关联记录和文件 |
+| `/api/styling-garments/batch-delete` | POST | 批量删除搭配服饰；默认从日常列表移除，传 `purge=true` 且确认短语 `全部删除` 时彻底删除 |
 | `/api/generation-tasks` | GET | AI 摄影棚任务列表 |
 | `/api/generation-tasks` | POST | 上传主推款图片并创建 `DRAFT` 拍摄任务 |
 | `/api/generation-tasks/{task_id}` | GET | 拍摄任务详情 |
 | `/api/generation-tasks/{task_id}` | PATCH | 草稿期修改任务名；进入 AI 阶段后拒绝修改 |
+| `/api/generation-tasks/{task_id}/archive` | POST | 归档拍摄任务；从默认任务和记录列表隐藏但保留文件与历史 |
+| `/api/generation-tasks/batch-archive` | POST | 批量归档拍摄任务；从默认任务和记录列表隐藏但保留文件与历史 |
+| `/api/generation-tasks/{task_id}` | DELETE | 彻底删除拍摄任务；必须传 `purge=true` 并输入完整任务名确认，会清理任务、生成结果和对象文件 |
+| `/api/generation-tasks/batch-purge` | POST | 批量彻底删除拍摄任务；必须传 `purge=true`、任务 id 列表并输入确认短语 `全部删除` |
 | `/api/generation-tasks/{task_id}/images` | POST | 草稿期追加主推款图片，最多 8 张 |
 | `/api/generation-task-images/{image_id}/replace` | POST | 草稿期替换单张主推款图片 |
 | `/api/generation-task-images/{image_id}` | PATCH / DELETE | 草稿期调整排序或移除主推款图片 |
@@ -111,6 +116,8 @@ Authorization: Bearer <token>
   "items": [],
   "limit": 30,
   "offset": 0,
+  "total": 135,
+  "totalPages": 5,
   "nextOffset": 30,
   "hasMore": true
 }
@@ -120,6 +127,8 @@ Authorization: Bearer <token>
 
 - `limit` 有服务端上限；前端应按接口默认值或业务页设置传入。
 - `offset` 从 `0` 开始。
+- `total` 是当前筛选条件下的总条数。
+- `totalPages = ceil(total / limit)`；无数据时为 `0`。
 - `hasMore = true` 时，前端可用 `nextOffset` 请求下一页。
 - `hasMore = false` 时，`nextOffset = null`。
 
@@ -133,9 +142,9 @@ Authorization: Bearer <token>
 |---|---|
 | `GET /api/garment-skus` | `includeArchived`、`limit`、`offset`、`keyword` |
 | `GET /api/garment-skus/{sku_id}/images` | `limit`、`offset` |
-| `GET /api/styling-garments` | `limit`、`offset`、`keyword` |
-| `GET /api/generation-tasks` | `limit`、`offset` |
-| `GET /api/generation-records` | `limit`、`offset` |
+| `GET /api/styling-garments` | `includeArchived`、`limit`、`offset`、`keyword` |
+| `GET /api/generation-tasks` | `includeArchived`、`limit`、`offset` |
+| `GET /api/generation-records` | `includeArchived`、`limit`、`offset` |
 | `GET /api/model-profiles` | `limit`、`offset`、`keyword` |
 | `GET /api/generation-runs` | `includeArchived`、`limit`、`offset`、`skuId`、`keyword` |
 
@@ -175,7 +184,7 @@ Authorization: Bearer <token>
 - `POST /api/styling-garments` 接收 `code` 和 `files`，单套最多 6 张，写入媒体资产后创建 `DRAFT` 记录。
 - 前端批量导入时先调用 `POST /api/styling-garments` 保存非重复套装，遇到已存在 code 的套装跳过并保留在导入面板，已保存套装继续调用 `POST /api/styling-garments/batch-save-and-tag` 提交打标任务。
 - 单套重新识别继续调用 `POST /api/styling-garments/{id}/save-and-tag`，不要求用户确认是否打标。
-- `TAGGING_RUNNING` 期间服务端拒绝 code/标签修改、重复打标和归档。
+- `TAGGING_RUNNING` 期间服务端拒绝 code/标签修改、重复打标和删除。
 - 打标输出分层返回 `aiTags`、`officialTitleTags`、`manualTags`、`effectiveTags` 和 `tagMeta`。
 - `GET /api/styling-garments/{id}` 额外返回 `tagAttempts`；每项包含 provider、状态、时间、错误以及 `requestSnapshot` / `responseSnapshot`，供折叠技术详情查看。
 - 低置信度、`unknown`、`unsupported_accessory`、provider fallback 或模型显式要求复核时，状态为 `TAGGING_READY`。
@@ -275,10 +284,10 @@ Authorization: Bearer <token>
 - 打标接口先把状态置为 `TAGGING_RUNNING` 并立即返回，新建卡片显示 `正在打标` 等状态，后台继续完成打标；Gemini 打标不阻塞后续已保存服饰的展示和页面刷新。
 - 批量导入不提供“追加到已有搭配服饰”的隐式入口；修改已有服饰图片应在服饰详情页完成，并按图片变更规则选择是否重新打标。
 - 已保存搭配服饰图片发生排序、替换、删除或追加后，前端提示“此次修改会影响打标”，并提供 `仅保存` 与 `保存并重新打标`。
-- `TAGGING_RUNNING` 期间服务端拒绝 code/标签/图片编辑、再次打标和删除/归档；前端轮询卡片状态并禁用冲突操作。
+- `TAGGING_RUNNING` 期间服务端拒绝 code/标签/图片编辑、再次打标和删除；前端轮询卡片状态并禁用冲突操作。
 - 单图替换使用原子替换接口，不通过“先删后加”模拟，确保仅剩一张图片时也能替换。
 - 已完成智能选搭的任务在预览和成片阶段读取 `selected_material_snapshot_json` 中冻结的素材资产，不回读可能已归档的当前库对象。
-- `级联删除` 删除搭配服饰时，同时删除实际选中过它的生成任务、冻结快照、任务上传的主推款素材、生成输出和对应媒体记录；仅曾作为候选但未选中的任务不受影响。
+- 彻底删除搭配服饰时，同时删除实际选中过它的生成任务、冻结快照、任务上传的主推款素材、生成输出和对应媒体记录；仅曾作为候选但未选中的任务不受影响。
 - 保存上传成功后立即调用 `POST /api/shot-plans` 创建默认组图方案。
 - 上传图包的卡片样式与已保存素材卡片一致：展示文件名、尺寸、大小和删除入口。
 

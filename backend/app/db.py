@@ -23,6 +23,8 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("010", "add_generation_input_model_snapshot", "migration_add_generation_input_model_snapshot"),
     ("011", "add_generation_styling_plan_columns", "migration_add_generation_styling_plan_columns"),
     ("012", "add_new_generation_recovery_columns", "migration_add_new_generation_recovery_columns"),
+    ("013", "add_generation_task_archive_columns", "migration_add_generation_task_archive_columns"),
+    ("014", "add_styling_garment_archive_columns", "migration_add_styling_garment_archive_columns"),
 )
 
 
@@ -208,6 +210,8 @@ def init_db() -> None:
               tag_schema_version TEXT,
               tag_completed_at TEXT,
               tag_error TEXT,
+              archived_at TEXT,
+              archive_reason TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               deleted_at TEXT
@@ -232,6 +236,8 @@ def init_db() -> None:
               active_styling_id INTEGER,
               active_preview_id INTEGER,
               active_result_set_id INTEGER,
+              archived_at TEXT,
+              archive_reason TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               deleted_at TEXT
@@ -393,6 +399,8 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_generation_input_model_snapshot": migration_add_generation_input_model_snapshot,
         "migration_add_generation_styling_plan_columns": migration_add_generation_styling_plan_columns,
         "migration_add_new_generation_recovery_columns": migration_add_new_generation_recovery_columns,
+        "migration_add_generation_task_archive_columns": migration_add_generation_task_archive_columns,
+        "migration_add_styling_garment_archive_columns": migration_add_styling_garment_archive_columns,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -507,6 +515,16 @@ def migration_add_new_generation_recovery_columns(db: sqlite3.Connection) -> Non
         ensure_column(db, table, "locked_by", "TEXT")
         ensure_column(db, table, "locked_until", "TEXT")
         ensure_column(db, table, "run_attempts", "INTEGER NOT NULL DEFAULT 0")
+
+
+def migration_add_generation_task_archive_columns(db: sqlite3.Connection) -> None:
+    ensure_column(db, "generation_tasks", "archived_at", "TEXT")
+    ensure_column(db, "generation_tasks", "archive_reason", "TEXT")
+
+
+def migration_add_styling_garment_archive_columns(db: sqlite3.Connection) -> None:
+    ensure_column(db, "styling_garments", "archived_at", "TEXT")
+    ensure_column(db, "styling_garments", "archive_reason", "TEXT")
 
 
 def ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
