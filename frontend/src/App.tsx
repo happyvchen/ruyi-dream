@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { DragEvent, FormEvent, ReactNode } from 'react'
 import {
   Bot,
@@ -53,10 +54,15 @@ type FileSystemDirectoryEntry = FileSystemEntry & {
 }
 type LightboxImage = {
   src: string
+  thumbSrc?: string
   title: string
   meta?: string
   downloadUrl?: string
+  details?: Record<string, ReactNode>
+  items?: LightboxImageItem[]
+  initialIndex?: number
 }
+type LightboxImageItem = Omit<LightboxImage, 'items' | 'initialIndex'>
 
 const steps = [
   { title: '上传主推款', icon: Upload },
@@ -449,12 +455,12 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
       <div className="draft-image-grid">
         {(task.images ?? []).map((image, index) => (
           <div className="saved-image-card" key={image.id}>
-            <button className="image-open" onClick={() => setViewer(assetLightboxImage(image.asset))} title="放大查看">
-              <img src={mediaUrl(image.asset.previewUrl ?? image.asset.thumbUrl)} alt={image.asset.filename} />
+            <button className="image-open" onClick={() => setViewer(assetLightboxImage(image.asset, (task.images ?? []).map((item) => item.asset)))} title="放大查看">
+              <img src={mediaUrl(assetThumbSrc(image.asset))} alt={image.asset.filename} />
             </button>
             <span>{image.asset.filename}<small>{assetMeta(image.asset)}</small></span>
             <div className="thumb-actions">
-              <button onClick={() => setViewer(assetLightboxImage(image.asset))} title="放大查看"><Eye size={14} /></button>
+              <button onClick={() => setViewer(assetLightboxImage(image.asset, (task.images ?? []).map((item) => item.asset)))} title="放大查看"><Eye size={14} /></button>
               <button disabled={index === 0} onClick={() => void move(index, -1)} title="前移"><ArrowUp size={14} /></button>
               <button disabled={index === (task.images?.length ?? 0) - 1} onClick={() => void move(index, 1)} title="后移"><ArrowDown size={14} /></button>
               <label title="替换图片">
@@ -613,7 +619,7 @@ function PreviewStep({ task, setTask, run, localOperations, startLocalOperation,
     <div className="step-panel">
       <div className="step-copy"><h2>六宫格预览</h2><p>只显示一张 3x2 预览图。最终固定生成前 5 格，第 6 格忽略。</p></div>
       <AIOperationList operations={operations} />
-      {task?.preview?.asset ? <img className="preview-board" src={mediaUrl(task.preview.asset.previewUrl || task.preview.asset.url)} /> : <EmptyState title="尚未生成六宫格" text="点击生成预览后，系统会输出一张 3x2 分镜预览图。" />}
+      {task?.preview?.asset ? <img className="preview-board" src={mediaUrl(assetPreviewSrc(task.preview.asset))} /> : <EmptyState title="尚未生成六宫格" text="点击生成预览后，系统会输出一张 3x2 分镜预览图。" />}
       <button className="primary" disabled={!canPreview} onClick={() => task && void run(hasPreview ? '重新生成六宫格预览中...' : '生成六宫格预览中...', () => {
         startLocalOperation({ ownerType: 'generation_preview', ownerId: task.id, provider: 'image-2' })
         setTask({ ...task, status: 'PREVIEW_RUNNING', resultSet: null, activeResultSetId: null })
@@ -647,8 +653,8 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
       <div className="result-grid">
         {images.length ? images.map((image) => (
           <div className="result-card" key={image.id}>
-            {image.asset ? <img src={mediaUrl(image.asset.previewUrl || image.asset.url)} /> : <div className="image-placeholder">{statusText(image.status)}{image.activeAttempt && isAttemptRunning(image.activeAttempt) && <small>{formatDuration(elapsedSeconds(image.activeAttempt.startedAt || image.updatedAt))}</small>}</div>}
-            <div><span>#{image.sortOrder}</span>{image.asset && <a href={mediaUrl(image.asset.originalUrl)} target="_blank" rel="noreferrer"><Download size={15} /></a>}{image.status === 'FAILED' && <button onClick={() => void run('单张重试中...', () => api.retryResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item))}><RotateCcw size={14} /></button>}</div>
+            {image.asset ? <img src={mediaUrl(assetPreviewSrc(image.asset))} /> : <div className="image-placeholder">{statusText(image.status)}{image.activeAttempt && isAttemptRunning(image.activeAttempt) && <small>{formatDuration(elapsedSeconds(image.activeAttempt.startedAt || image.updatedAt))}</small>}</div>}
+            <div><span>#{image.sortOrder}</span>{image.asset && <a href={mediaUrl(assetOriginalSrc(image.asset))} target="_blank" rel="noreferrer"><Download size={15} /></a>}{image.status === 'FAILED' && <button onClick={() => void run('单张重试中...', () => api.retryResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item))}><RotateCcw size={14} /></button>}</div>
           </div>
         )) : <EmptyState title="尚未生成最终图" text="点击生成成片后会生成前 5 张。" />}
       </div>
@@ -1072,7 +1078,7 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
               <h3>{detail.name}</h3>
               <Meta label="状态" value={statusText(detail.status)} />
               <Meta label="选中搭配" value={`${detail.styling?.selectedMaterials?.length ?? 0} 件`} />
-              {detail.preview?.asset && <img className="detail-preview" src={mediaUrl(detail.preview.asset.previewUrl)} />}
+              {detail.preview?.asset && <img className="detail-preview" src={mediaUrl(assetPreviewSrc(detail.preview.asset))} />}
               <FinalImageStrip images={detail.resultSet?.images ?? []} />
             </>
           ) : <EmptyState title="选择一条记录" text="查看分镜预览、搭配服饰和最终成片。" />}
@@ -1115,7 +1121,7 @@ function GarmentCard({ item, onTag, onOpen, onArchive, run }: {
   return (
     <div className={`garment-card ${tagging ? 'is-tagging' : ''}`}>
       <div className="garment-cover">
-        <AssetThumb asset={item.images?.[0]?.asset ?? (item.coverUrl ? { id: item.id, objectKey: '', filename: item.code, mimeType: '', thumbUrl: item.coverUrl } : null)} large />
+        <AssetThumb asset={item.images?.[0]?.asset ?? item.coverAsset ?? (item.coverUrl ? { id: item.id, objectKey: '', filename: item.code, mimeType: '', thumbUrl: item.coverUrl } : null)} large />
         {tagging && <span className="cover-badge">识别中</span>}
       </div>
       <div className="garment-card-head"><strong title={item.code}>{item.code}</strong><span className={`status ${item.status.toLowerCase()}`}>{garmentStatus(item.status)}</span></div>
@@ -1248,8 +1254,8 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
                       onOpen={(nextImage) => setViewer(nextImage)}
                     />
                   ) : (
-                    <button className="image-open" onClick={() => setViewer(assetLightboxImage(image.asset))} title="放大查看">
-                      <img src={mediaUrl(image.asset.previewUrl ?? image.asset.thumbUrl)} alt={image.asset.filename} />
+                    <button className="image-open" onClick={() => setViewer(assetLightboxImage(image.asset, working.map((itemImage) => itemImage.asset)))} title="放大查看">
+                      <img src={mediaUrl(assetThumbSrc(image.asset))} alt={image.asset.filename} />
                     </button>
                   )}
                   <span>{replacement?.name ?? image.asset.filename}<small>{replacement ? fileMeta(replacement, replacementDimensions[image.id]) : assetMeta(image.asset)}</small></span>
@@ -1257,7 +1263,7 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
                     {replacement ? (
                       <FilePreviewAction file={replacement} dimensions={replacementDimensions[image.id]} onOpen={(nextImage) => setViewer(nextImage)} />
                     ) : (
-                      <button onClick={() => setViewer(assetLightboxImage(image.asset))} title="放大查看"><Eye size={14} /></button>
+                      <button onClick={() => setViewer(assetLightboxImage(image.asset, working.map((itemImage) => itemImage.asset)))} title="放大查看"><Eye size={14} /></button>
                     )}
                     <button disabled={tagging} onClick={() => move(index, index - 1)} title="前移"><ArrowUp size={14} /></button>
                     <button disabled={tagging} onClick={() => move(index, index + 1)} title="后移"><ArrowDown size={14} /></button>
@@ -1566,13 +1572,13 @@ function ThumbGrid({ assets, compact = false }: { assets: MediaAsset[]; compact?
 
 function AssetThumb({ asset, large = false }: { asset?: MediaAsset | null; large?: boolean }) {
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
-  const hasImage = asset?.thumbUrl || asset?.previewUrl || asset?.url
+  const hasImage = asset ? assetThumbSrc(asset) : ''
   return (
     <>
       <div className={`asset-thumb ${large ? 'large' : ''}`}>
         {asset && hasImage ? (
           <button className="asset-open" onClick={() => setViewer(assetLightboxImage(asset))} title="放大查看">
-            <img src={mediaUrl(asset.thumbUrl || asset.previewUrl || asset.url)} alt={asset.filename} />
+            <img src={mediaUrl(assetThumbSrc(asset))} alt={asset.filename} />
           </button>
         ) : <FileImage size={18} />}
       </div>
@@ -1586,38 +1592,125 @@ function FinalImageStrip({ images }: { images: { id: number; sortOrder: number; 
 }
 
 function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () => void }) {
-  const [zoom, setZoom] = useState(1)
+  const [items] = useState<LightboxImageItem[]>(() => image.items?.length ? image.items : [image])
+  const [index, setIndex] = useState(() => image.initialIndex ?? 0)
+  const [zoom, setZoom] = useState<'fit' | number>('fit')
+  const [naturalSizes, setNaturalSizes] = useState<Record<string, { width: number; height: number }>>({})
+  const [remoteSizes, setRemoteSizes] = useState<Record<string, number>>({})
+  const current = items[index] ?? items[0]
+  const zoomLabel = zoom === 'fit' ? '适应' : `${Math.round(zoom * 100)}%`
+  const canStep = items.length > 1
+  const naturalSize = naturalSizes[current.src]
+  const remoteSize = remoteSizes[current.src]
+  const zoomedStyle = zoom === 'fit' ? undefined : { width: naturalSize ? `${naturalSize.width * zoom}px` : 'auto' }
+  const details = {
+    ...(current.details ?? {}),
+    ...(naturalSize && (!current.details?.尺寸 || current.details?.尺寸 === '尺寸读取中') ? { 尺寸: dimensionText(naturalSize) } : {}),
+    ...(remoteSize && (!current.details?.大小 || current.details?.大小 === '未知大小') ? { 大小: formatBytes(remoteSize) } : {}),
+  }
+  const setNext = () => {
+    if (!canStep) return
+    setIndex((value) => (value + 1) % items.length)
+    setZoom('fit')
+  }
+  const setPrev = () => {
+    if (!canStep) return
+    setIndex((value) => (value - 1 + items.length) % items.length)
+    setZoom('fit')
+  }
+  const adjustZoom = (direction: 1 | -1) => {
+    setZoom((value) => {
+      const base = value === 'fit' ? 1 : value
+      return Math.min(4, Math.max(0.5, base + direction * 0.25))
+    })
+  }
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
-      if (event.key === '+' || event.key === '=') setZoom((value) => Math.min(3, value + 0.25))
-      if (event.key === '-') setZoom((value) => Math.max(0.5, value - 0.25))
+      if (event.key === '+' || event.key === '=') adjustZoom(1)
+      if (event.key === '-') adjustZoom(-1)
+      if (event.key === '0') setZoom('fit')
+      if (event.key === 'ArrowRight') setNext()
+      if (event.key === 'ArrowLeft') setPrev()
     }
     window.addEventListener('keydown', handleKey)
     return () => window.removeEventListener('keydown', handleKey)
-  }, [onClose])
+  }, [canStep, onClose])
 
-  return (
-    <div className="lightbox" role="dialog" aria-modal="true" onClick={onClose}>
-      <div className="lightbox-panel" onClick={(event) => event.stopPropagation()}>
+  useEffect(() => {
+    const previous = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previous
+    }
+  }, [])
+
+  useEffect(() => {
+    if (current.details?.大小 && current.details.大小 !== '未知大小') return
+    if (remoteSizes[current.src]) return
+    let cancelled = false
+    fetch(current.src, { method: 'HEAD' })
+      .then((response) => Number(response.headers.get('content-length')))
+      .then((size) => {
+        if (!cancelled && Number.isFinite(size) && size > 0) setRemoteSizes((value) => ({ ...value, [current.src]: size }))
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [current.details, current.src, remoteSizes])
+
+  return createPortal(
+    <div className="lightbox" role="dialog" aria-modal="true" aria-label="图片检查器" onClick={onClose}>
+      <div className="lightbox-chrome" onClick={(event) => event.stopPropagation()}>
         <div className="lightbox-head">
-          <div>
-            <strong>{image.title}</strong>
-            {image.meta && <span>{image.meta}</span>}
+          <div className="inspector-title">
+            <strong>{current.title}</strong>
+            <span>{index + 1} / {items.length}{current.meta ? ` · ${current.meta}` : ''}</span>
           </div>
           <div className="lightbox-actions">
-            <button onClick={() => setZoom((value) => Math.max(0.5, value - 0.25))} title="缩小"><ZoomOut size={16} /></button>
-            <span>{Math.round(zoom * 100)}%</span>
-            <button onClick={() => setZoom((value) => Math.min(3, value + 0.25))} title="放大"><ZoomIn size={16} /></button>
-            {image.downloadUrl && <a href={image.downloadUrl} target="_blank" rel="noreferrer" title="打开原图"><Download size={16} /></a>}
+            <button onClick={() => setPrev()} disabled={!canStep} title="上一张"><ChevronLeft size={16} /></button>
+            <button onClick={() => adjustZoom(-1)} title="缩小"><ZoomOut size={16} /></button>
+            <button className="text-action" onClick={() => setZoom('fit')} title="适应窗口">{zoomLabel}</button>
+            <button onClick={() => adjustZoom(1)} title="放大"><ZoomIn size={16} /></button>
+            <button onClick={() => setZoom(1)} title="原始尺寸">1:1</button>
+            {current.downloadUrl && <a href={current.downloadUrl} target="_blank" rel="noreferrer" title="打开原图"><Download size={16} /></a>}
+            <button onClick={() => setNext()} disabled={!canStep} title="下一张"><ChevronRight size={16} /></button>
             <button onClick={onClose} title="关闭"><X size={16} /></button>
           </div>
         </div>
-        <div className="lightbox-stage">
-          <img src={image.src} alt={image.title} style={{ transform: `scale(${zoom})` }} />
-        </div>
       </div>
-    </div>
+      <div className="lightbox-stage" onClick={(event) => event.stopPropagation()}>
+        <img
+          src={current.src}
+          alt={current.title}
+          className={zoom === 'fit' ? 'is-fit' : 'is-zoomed'}
+          style={zoomedStyle}
+          onLoad={(event) => {
+            const img = event.currentTarget
+            setNaturalSizes((value) => ({ ...value, [current.src]: { width: img.naturalWidth, height: img.naturalHeight } }))
+          }}
+        />
+      </div>
+      <div className="lightbox-meta" onClick={(event) => event.stopPropagation()}>
+        {Object.entries(details).map(([label, value]) => (
+          <span key={label}><b>{label}</b>{value}</span>
+        ))}
+      </div>
+        {items.length > 1 && (
+          <div className="inspector-strip" aria-label="同组图片" onClick={(event) => event.stopPropagation()}>
+            {items.map((item, itemIndex) => (
+              <button className={itemIndex === index ? 'active' : ''} key={`${item.title}-${itemIndex}`} onClick={() => {
+                setIndex(itemIndex)
+                setZoom('fit')
+              }} title={item.title}>
+                <img src={item.thumbSrc ?? item.src} alt={item.title} />
+              </button>
+            ))}
+          </div>
+        )}
+    </div>,
+    document.body,
   )
 }
 
@@ -1774,25 +1867,65 @@ function fileMeta(file: File, dimensions?: { width: number; height: number }) {
 }
 
 function assetMeta(asset: MediaAsset) {
-  return `${dimensionText(asset)} · ${formatBytes(asset.sizeBytes)}`
+  return `${dimensionText({ width: asset.originalWidth ?? asset.width, height: asset.originalHeight ?? asset.height })} · ${formatBytes(asset.originalSizeBytes ?? asset.sizeBytes)}`
 }
 
 function fileLightboxImage(file: File, src: string, dimensions?: { width: number; height: number }): LightboxImage {
   return {
     src,
+    thumbSrc: src,
     title: file.name,
     meta: fileMeta(file, dimensions),
+    details: {
+      文件名: file.name,
+      尺寸: dimensionText(dimensions),
+      大小: formatBytes(file.size),
+      类型: file.type || '未知类型',
+    },
   }
 }
 
-function assetLightboxImage(asset: MediaAsset): LightboxImage {
-  const src = mediaUrl(asset.originalUrl ?? asset.previewUrl ?? asset.thumbUrl ?? asset.url)
+function assetLightboxImage(asset: MediaAsset, group?: MediaAsset[]): LightboxImage {
+  const items = group?.map((item) => assetLightboxItem(item))
+  const src = mediaUrl(assetOriginalSrc(asset))
+  return {
+    ...assetLightboxItem(asset),
+    src,
+    downloadUrl: src,
+    items,
+    initialIndex: Math.max(0, group?.findIndex((item) => item.id === asset.id) ?? 0),
+  }
+}
+
+function assetLightboxItem(asset: MediaAsset): LightboxImageItem {
+  const src = mediaUrl(assetOriginalSrc(asset))
   return {
     src,
-    title: asset.filename,
+    thumbSrc: mediaUrl(assetThumbSrc(asset)),
+    title: asset.originalFilename ?? asset.filename,
     meta: assetMeta(asset),
     downloadUrl: src,
+    details: {
+      文件名: asset.originalFilename ?? asset.filename,
+      尺寸: dimensionText({ width: asset.originalWidth ?? asset.width, height: asset.originalHeight ?? asset.height }),
+      大小: formatBytes(asset.originalSizeBytes ?? asset.sizeBytes),
+      类型: asset.originalMimeType || asset.mimeType || '未知类型',
+    },
   }
+}
+
+function assetThumbSrc(asset: MediaAsset) {
+  return asset.thumbUrl ?? asset.previewUrl ?? asset.url ?? asset.originalUrl ?? ''
+}
+
+function assetPreviewSrc(asset: MediaAsset) {
+  return asset.previewUrl ?? asset.thumbUrl ?? asset.url ?? asset.originalUrl ?? ''
+}
+
+function assetOriginalSrc(asset: MediaAsset) {
+  const direct = asset.originalUrl ?? asset.url ?? asset.previewUrl ?? asset.thumbUrl
+  if (!direct) return ''
+  return direct.replace(/([?&]variant=)(thumb|preview)(?=&|$)/, '$1original')
 }
 
 function sanitizeClientName(value: string) {
