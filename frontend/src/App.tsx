@@ -63,6 +63,7 @@ type LightboxImage = {
   initialIndex?: number
 }
 type LightboxImageItem = Omit<LightboxImage, 'items' | 'initialIndex'>
+type DeleteDialogTarget = Pick<GenerationTask, 'id' | 'name'>
 
 const steps = [
   { title: '上传主推款', icon: Upload },
@@ -290,13 +291,9 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
   const [taskNextOffset, setTaskNextOffset] = useState<number | null>(null)
   const [tasksLoading, setTasksLoading] = useState(false)
   const [taskIncludeArchived, setTaskIncludeArchived] = useState(false)
-  const [taskCascadeDelete, setTaskCascadeDelete] = useState(false)
-  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<number>>(() => new Set())
   const recentTaskPageSize = 5
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
-  const selectableTaskIds = useMemo(() => taskItems.filter((item) => !isTaskRunning(item)).map((item) => item.id), [taskItems])
-  const allVisibleTasksSelected = selectableTaskIds.length > 0 && selectableTaskIds.every((id) => selectedTaskIds.has(id))
   useEffect(() => setStep(currentStep), [task?.id, task?.status])
   useEffect(() => {
     let cancelled = false
@@ -311,7 +308,6 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
     })
     return () => { cancelled = true }
   }, [tasks, taskOffset, taskIncludeArchived])
-  useEffect(() => setSelectedTaskIds(new Set()), [taskOffset, taskIncludeArchived])
   useEffect(() => {
     if (!task || !['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)) return
     const timer = window.setInterval(() => {
@@ -326,79 +322,6 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
       setTaskHasMore(result.hasMore)
       setTaskNextOffset(result.nextOffset)
       if (!result.items.length && targetOffset > 0) setTaskOffset(Math.max(0, targetOffset - recentTaskPageSize))
-    })
-  }
-
-  function toggleRecentTaskSelection(id: number, checked: boolean) {
-    setSelectedTaskIds((current) => {
-      const next = new Set(current)
-      if (checked) next.add(id)
-      else next.delete(id)
-      return next
-    })
-  }
-
-  function toggleVisibleTaskSelection(checked: boolean) {
-    setSelectedTaskIds((current) => {
-      const next = new Set(current)
-      selectableTaskIds.forEach((id) => {
-        if (checked) next.add(id)
-        else next.delete(id)
-      })
-      return next
-    })
-  }
-
-  function clearCurrentTaskIfAffected(ids: number[]) {
-    if (task && ids.includes(task.id)) {
-      setTask(null)
-      window.history.replaceState(null, '', routeToUrl({ page: 'studio' }))
-    }
-  }
-
-  function runRecentTaskAction(item: GenerationTask) {
-    if (taskCascadeDelete) {
-      const confirmName = window.prompt(`输入完整任务名以级联删除：${item.name}`) ?? ''
-      if (confirmName !== item.name) return
-      void run('级联删除任务中...', () => api.deleteTask(item.id, confirmName), () => {
-        clearCurrentTaskIfAffected([item.id])
-        setSelectedTaskIds((current) => {
-          const next = new Set(current)
-          next.delete(item.id)
-          return next
-        })
-        void refreshRecentTasks().catch(() => undefined)
-      })
-      return
-    }
-    void run('归档任务中...', () => api.archiveTask(item.id), () => {
-      clearCurrentTaskIfAffected([item.id])
-      setSelectedTaskIds((current) => {
-        const next = new Set(current)
-        next.delete(item.id)
-        return next
-      })
-      void refreshRecentTasks().catch(() => undefined)
-    })
-  }
-
-  function runRecentBatchAction() {
-    const ids = Array.from(selectedTaskIds)
-    if (!ids.length) return
-    if (taskCascadeDelete) {
-      const confirmPhrase = window.prompt(`将级联删除 ${ids.length} 条任务。输入“级联删除”确认。`) ?? ''
-      if (confirmPhrase !== '级联删除') return
-      void run('批量级联删除任务中...', () => api.deleteTasks(ids, confirmPhrase), () => {
-        clearCurrentTaskIfAffected(ids)
-        setSelectedTaskIds(new Set())
-        void refreshRecentTasks().catch(() => undefined)
-      })
-      return
-    }
-    void run('批量归档任务中...', () => api.archiveTasks(ids), () => {
-      clearCurrentTaskIfAffected(ids)
-      setSelectedTaskIds(new Set())
-      void refreshRecentTasks().catch(() => undefined)
     })
   }
 
@@ -430,35 +353,13 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
             <label><input type="checkbox" checked={taskIncludeArchived} onChange={(event) => {
               setTaskOffset(0)
               setTaskIncludeArchived(event.target.checked)
-              setSelectedTaskIds(new Set())
-            }} /> 查看归档</label>
-            <label><input type="checkbox" checked={taskCascadeDelete} onChange={(event) => setTaskCascadeDelete(event.target.checked)} /> 级联删除</label>
-            <label><input type="checkbox" checked={allVisibleTasksSelected} disabled={!selectableTaskIds.length} onChange={(event) => toggleVisibleTaskSelection(event.target.checked)} /> 全选本页</label>
+            }} /> 查看已删除</label>
           </div>
-          {selectedTaskIds.size > 0 && (
-            <button className={taskCascadeDelete ? 'danger wide' : 'secondary wide'} onClick={runRecentBatchAction}>
-              {taskCascadeDelete ? '批量级联删除' : '批量归档'} {selectedTaskIds.size} 项
-            </button>
-          )}
           <div className="mini-list">
             {taskItems.map((item) => (
-              <div key={item.id} className={`mini-row ${task?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
-                <input
-                  type="checkbox"
-                  checked={selectedTaskIds.has(item.id)}
-                  disabled={isTaskRunning(item)}
-                  onChange={(event) => toggleRecentTaskSelection(item.id, event.target.checked)}
-                  aria-label={`选择 ${item.name}`}
-                />
+              <div key={item.id} className={`mini-row view-only ${task?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
                 <button onClick={() => void api.getTask(item.id).then((r) => setTask(r.item))}>
-                  <span>{item.name}</span><em>{item.archivedAt ? '已归档' : statusText(item.status)}</em>
-                </button>
-                <button
-                  className={taskCascadeDelete ? 'danger mini-action' : 'secondary mini-action'}
-                  disabled={isTaskRunning(item) || (!taskCascadeDelete && !!item.archivedAt)}
-                  onClick={() => runRecentTaskAction(item)}
-                >
-                  {taskCascadeDelete ? '级联删除' : item.archivedAt ? '已归档' : '归档'}
+                  <span>{item.name}</span><em>{item.archivedAt ? '已删除' : statusText(item.status)}</em>
                 </button>
               </div>
             ))}
@@ -818,7 +719,12 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
   const [hasMore, setHasMore] = useState(false)
   const [nextOffset, setNextOffset] = useState<number | null>(null)
   const [searching, setSearching] = useState(false)
+  const [includeArchived, setIncludeArchived] = useState(false)
+  const [selectedGarmentIds, setSelectedGarmentIds] = useState<Set<number>>(() => new Set())
+  const [deleteGarmentDialog, setDeleteGarmentDialog] = useState<StylingGarment[] | null>(null)
   const pageSize = 12
+  const selectableGarmentIds = items.filter((item) => item.status !== 'TAGGING_RUNNING').map((item) => item.id)
+  const allVisibleGarmentsSelected = selectableGarmentIds.length > 0 && selectableGarmentIds.every((id) => selectedGarmentIds.has(id))
 
   async function openDetail(item: StylingGarment) {
     const result = await api.getStylingGarment(item.id)
@@ -827,7 +733,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
 
   function refreshLibraryPage(targetOffset = offset) {
     const keyword = query.trim()
-    return api.listStylingGarments({ limit: pageSize, offset: targetOffset, keyword: keyword || undefined }).then((result) => {
+    return api.listStylingGarments({ limit: pageSize, offset: targetOffset, keyword: keyword || undefined, includeArchived }).then((result) => {
       setItems(result.items)
       setHasMore(result.hasMore)
       setNextOffset(result.nextOffset)
@@ -848,7 +754,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
     let cancelled = false
     setSearching(true)
     const timer = window.setTimeout(() => {
-      void api.listStylingGarments({ limit: pageSize, offset, keyword: keyword || undefined }).then((result) => {
+      void api.listStylingGarments({ limit: pageSize, offset, keyword: keyword || undefined, includeArchived }).then((result) => {
         if (!cancelled) {
           setItems(result.items)
           setHasMore(result.hasMore)
@@ -862,13 +768,49 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [garments, offset, query])
+  }, [garments, offset, query, includeArchived])
+
+  useEffect(() => setSelectedGarmentIds(new Set()), [offset, includeArchived, query])
 
   useEffect(() => {
     if (!detail) return
     const latest = garments.find((item) => item.id === detail.id)
     if (latest && (latest.status !== detail.status || latest.code !== detail.code || latest.updatedAt !== detail.updatedAt)) void openDetail(latest)
   }, [garments, detail?.id, detail?.status, detail?.code, detail?.updatedAt])
+
+  function toggleGarmentSelection(id: number, checked: boolean) {
+    setSelectedGarmentIds((current) => {
+      const next = new Set(current)
+      if (checked) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+
+  function toggleVisibleGarmentSelection(checked: boolean) {
+    setSelectedGarmentIds((current) => {
+      const next = new Set(current)
+      selectableGarmentIds.forEach((id) => {
+        if (checked) next.add(id)
+        else next.delete(id)
+      })
+      return next
+    })
+  }
+
+  function confirmGarmentDelete(targets: DeleteDialogTarget[], purge: boolean, confirmText: string) {
+    const ids = targets.map((item) => item.id)
+    const action = purge
+      ? () => ids.length === 1 ? api.deleteStylingGarment(ids[0], { purge: true, confirmCode: confirmText }) : api.deleteStylingGarments(ids, { purge: true, confirmPhrase: confirmText })
+      : () => api.deleteStylingGarments(ids)
+    void run(purge ? '彻底删除搭配服饰中...' : '删除搭配服饰中...', action, () => {
+      if (detail && ids.includes(detail.id)) setDetail(null)
+      setSelectedGarmentIds(new Set())
+      setDeleteGarmentDialog(null)
+      void refreshLibraryPage().catch(() => undefined)
+    })
+  }
+
   return (
     <section className="page">
       <div className="library-title-row">
@@ -885,7 +827,21 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
             <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索货号 / 标签" />
             {searching && <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span>}
           </div>
-          <span className="muted-count">{items.length ? `${offset + 1}-${offset + items.length} 套${hasMore ? '+' : ''}` : '0 套'}</span>
+          <div className="archive-controls">
+            <label><input type="checkbox" checked={includeArchived} onChange={(event) => {
+              setOffset(0)
+              setIncludeArchived(event.target.checked)
+            }} /> 查看已删除</label>
+            <label><input type="checkbox" checked={allVisibleGarmentsSelected} disabled={!selectableGarmentIds.length} onChange={(event) => toggleVisibleGarmentSelection(event.target.checked)} /> 全选本页</label>
+          </div>
+          <div className="record-list-meta">
+            {selectedGarmentIds.size > 0 && (
+              <button className="secondary" onClick={() => setDeleteGarmentDialog(items.filter((item) => selectedGarmentIds.has(item.id)))}>
+                删除 {selectedGarmentIds.size} 项
+              </button>
+            )}
+            <span className="muted-count">{items.length ? `${offset + 1}-${offset + items.length} 套${hasMore ? '+' : ''}` : '0 套'}</span>
+          </div>
         </div>
         <div className={`library-results ${searching ? 'is-loading' : ''}`}>
         {items.length ? (
@@ -893,9 +849,11 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
             <GarmentCard
               key={item.id}
               item={item}
-              run={run}
               onOpen={() => void openDetail(item)}
               onTag={['DRAFT', 'TAGGING_FAILED', 'TAGGING_READY'].includes(item.status) ? () => void run('重新识别标签中...', () => api.tagStylingGarment(item.id)) : undefined}
+              selected={selectedGarmentIds.has(item.id)}
+              onSelect={(checked) => toggleGarmentSelection(item.id, checked)}
+              onDelete={() => setDeleteGarmentDialog([item])}
             />
           ))}</div>
         ) : <EmptyState title={query ? '没有匹配的搭配服饰' : '暂无搭配服饰'} text={query ? '换一个货号或标签关键词试试。' : '点击右上角导入搭配服饰。'} />}
@@ -906,7 +864,15 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
           <button className="secondary" disabled={!hasMore || searching} onClick={() => setOffset(nextOffset ?? offset + pageSize)}>下一页<ChevronRight size={16} /></button>
         </div>
       </div>
-      {detail && <GarmentDetailDrawer item={detail} run={run} onClose={() => setDetail(null)} onChange={setDetail} />}
+      {detail && <GarmentDetailDrawer item={detail} run={run} onClose={() => setDetail(null)} onChange={setDetail} onDelete={() => setDeleteGarmentDialog([detail])} />}
+      {deleteGarmentDialog && (
+        <DeleteConfirmDialog
+          title={deleteGarmentDialog.length === 1 ? '删除搭配服饰' : `删除 ${deleteGarmentDialog.length} 套搭配服饰`}
+          items={deleteGarmentDialog.map((item) => ({ id: item.id, name: item.code }))}
+          onClose={() => setDeleteGarmentDialog(null)}
+          onConfirm={confirmGarmentDelete}
+        />
+      )}
     </section>
   )
 }
@@ -1315,8 +1281,8 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
   const [nextOffset, setNextOffset] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
   const [includeArchived, setIncludeArchived] = useState(false)
-  const [cascadeDelete, setCascadeDelete] = useState(false)
   const [selectedRecordIds, setSelectedRecordIds] = useState<Set<number>>(() => new Set())
+  const [deleteRecordDialog, setDeleteRecordDialog] = useState<GenerationTask[] | null>(null)
   const pageSize = 12
   const visibleRecords = items.filter((item) => item.status !== 'DRAFT')
   const selectableRecordIds = visibleRecords.filter((item) => !isTaskRunning(item)).map((item) => item.id)
@@ -1378,48 +1344,25 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
     }
   }
 
-  function runRecordAction(item: GenerationTask) {
-    if (cascadeDelete) {
-      const confirmName = window.prompt(`输入完整任务名以级联删除：${item.name}`) ?? ''
-      if (confirmName !== item.name) return
-      void run('级联删除记录中...', () => api.deleteTask(item.id, confirmName), () => {
-        clearRecordDetailIfAffected([item.id])
-        setSelectedRecordIds((current) => {
-          const next = new Set(current)
-          next.delete(item.id)
-          return next
-        })
-        void refreshRecordPage().catch(() => undefined)
-      })
-      return
-    }
-    void run('归档记录中...', () => api.archiveTask(item.id), () => {
-      clearRecordDetailIfAffected([item.id])
-      setSelectedRecordIds((current) => {
-        const next = new Set(current)
-        next.delete(item.id)
-        return next
-      })
-      void refreshRecordPage().catch(() => undefined)
-    })
+  function openRecordDeleteDialog(item: GenerationTask) {
+    setDeleteRecordDialog([item])
   }
 
   function runRecordBatchAction() {
     const ids = Array.from(selectedRecordIds)
     if (!ids.length) return
-    if (cascadeDelete) {
-      const confirmPhrase = window.prompt(`将级联删除 ${ids.length} 条记录。输入“级联删除”确认。`) ?? ''
-      if (confirmPhrase !== '级联删除') return
-      void run('批量级联删除记录中...', () => api.deleteTasks(ids, confirmPhrase), () => {
-        clearRecordDetailIfAffected(ids)
-        setSelectedRecordIds(new Set())
-        void refreshRecordPage().catch(() => undefined)
-      })
-      return
-    }
-    void run('批量归档记录中...', () => api.archiveTasks(ids), () => {
+    setDeleteRecordDialog(visibleRecords.filter((item) => selectedRecordIds.has(item.id)))
+  }
+
+  function confirmRecordDelete(items: DeleteDialogTarget[], purge: boolean, confirmText: string) {
+    const ids = items.map((item) => item.id)
+    const action = purge
+      ? () => ids.length === 1 ? api.deleteTask(ids[0], confirmText) : api.deleteTasks(ids, confirmText)
+      : () => api.archiveTasks(ids)
+    void run(purge ? '彻底删除记录中...' : '删除记录中...', action, () => {
       clearRecordDetailIfAffected(ids)
       setSelectedRecordIds(new Set())
+      setDeleteRecordDialog(null)
       void refreshRecordPage().catch(() => undefined)
     })
   }
@@ -1435,14 +1378,13 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
                 setOffset(0)
                 setIncludeArchived(event.target.checked)
                 setSelectedRecordIds(new Set())
-              }} /> 查看归档</label>
-              <label><input type="checkbox" checked={cascadeDelete} onChange={(event) => setCascadeDelete(event.target.checked)} /> 级联删除</label>
+              }} /> 查看已删除</label>
               <label><input type="checkbox" checked={allVisibleRecordsSelected} disabled={!selectableRecordIds.length} onChange={(event) => toggleVisibleRecordSelection(event.target.checked)} /> 全选本页</label>
             </div>
             <div className="record-list-meta">
               {selectedRecordIds.size > 0 && (
-                <button className={cascadeDelete ? 'danger' : 'secondary'} onClick={runRecordBatchAction}>
-                  {cascadeDelete ? '批量级联删除' : '批量归档'} {selectedRecordIds.size} 项
+                <button className="secondary" onClick={runRecordBatchAction}>
+                  删除 {selectedRecordIds.size} 项
                 </button>
               )}
               <span className="muted-count">{items.length ? `${offset + 1}-${offset + items.length} 条${hasMore ? '+' : ''}` : '0 条'}</span>
@@ -1462,16 +1404,16 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
               />
               <button className="record-open" aria-current={detail?.id === item.id ? 'true' : undefined} title="查看记录详情" onClick={() => openRecord(item)}>
                 <AssetThumb asset={item.summary?.cover ?? null} interactive={false} />
-                <div><strong>{item.name}</strong><span>{item.archivedAt ? '已归档' : statusText(item.status)} · {dateText(item.updatedAt)}</span></div>
+                <div><strong>{item.name}</strong><span>{item.archivedAt ? '已删除' : statusText(item.status)} · {dateText(item.updatedAt)}</span></div>
                 <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
                 <span className="record-eye" aria-hidden="true"><Eye size={16} /></span>
               </button>
               <button
-                className={cascadeDelete ? 'danger record-action-button' : 'secondary record-action-button'}
-                disabled={isTaskRunning(item) || (!cascadeDelete && !!item.archivedAt)}
-                onClick={() => runRecordAction(item)}
+                className="secondary record-action-button"
+                disabled={isTaskRunning(item)}
+                onClick={() => openRecordDeleteDialog(item)}
               >
-                {cascadeDelete ? '级联删除' : item.archivedAt ? '已归档' : '归档'}
+                删除
               </button>
             </div>
           ))}
@@ -1494,7 +1436,81 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
           ) : <EmptyState title="选择一条记录" text="查看分镜预览、搭配服饰和最终成片。" />}
         </div>
       </div>
+      {deleteRecordDialog && (
+        <DeleteConfirmDialog
+          title={deleteRecordDialog.length === 1 ? '删除记录' : `删除 ${deleteRecordDialog.length} 条记录`}
+          items={deleteRecordDialog}
+          onClose={() => setDeleteRecordDialog(null)}
+          onConfirm={confirmRecordDelete}
+        />
+      )}
     </section>
+  )
+}
+
+function DeleteConfirmDialog({ title, items, onClose, onConfirm }: {
+  title: string
+  items: DeleteDialogTarget[]
+  onClose: () => void
+  onConfirm: (items: DeleteDialogTarget[], purge: boolean, confirmText: string) => void
+}) {
+  const [purge, setPurge] = useState(false)
+  const [confirmText, setConfirmText] = useState('')
+  const expectedText = items.length === 1 ? items[0].name : '全部删除'
+  const canConfirm = !purge || confirmText === expectedText
+
+  useEffect(() => {
+    setPurge(false)
+    setConfirmText('')
+  }, [items])
+
+  function submit(event: FormEvent) {
+    event.preventDefault()
+    if (!canConfirm) return
+    onConfirm(items, purge, confirmText)
+  }
+
+  return createPortal(
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <form className="confirm-modal" role="dialog" aria-modal="true" aria-label={title} onSubmit={submit} onClick={(event) => event.stopPropagation()}>
+        <div className="confirm-head">
+          <h2>{title}</h2>
+          <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
+        </div>
+        <p className="confirm-copy">
+          确认后会从日常列表移除，可通过“查看已删除”找回。
+        </p>
+        <div className="confirm-items">
+          {items.slice(0, 4).map((item) => <span key={item.id}>{item.name}</span>)}
+          {items.length > 4 && <span>另 {items.length - 4} 项</span>}
+        </div>
+        <label className="danger-check">
+          <input type="checkbox" checked={purge} onChange={(event) => {
+            setPurge(event.target.checked)
+            setConfirmText('')
+          }} />
+          同时彻底删除关联记录和文件
+        </label>
+        {purge && (
+          <label className="confirm-field">
+            <span>{items.length === 1 ? '输入完整名称确认彻底删除' : '输入“全部删除”确认彻底删除'}</span>
+            <input
+              autoFocus
+              value={confirmText}
+              onChange={(event) => setConfirmText(event.target.value)}
+              placeholder={expectedText}
+            />
+          </label>
+        )}
+        <div className="confirm-actions">
+          <button type="button" className="secondary" onClick={onClose}>取消</button>
+          <button className={purge ? 'danger' : 'primary'} disabled={!canConfirm}>
+            确认
+          </button>
+        </div>
+      </form>
+    </div>,
+    document.body,
   )
 }
 
@@ -1513,12 +1529,13 @@ function UploadBox({ files, setFiles, max, compact = false }: { files: File[]; s
   )
 }
 
-function GarmentCard({ item, onTag, onOpen, onArchive, run }: {
+function GarmentCard({ item, onTag, onOpen, onDelete, selected, onSelect }: {
   item: StylingGarment
   onTag?: () => void
   onOpen?: () => void
-  onArchive?: () => void
-  run?: any
+  onDelete?: () => void
+  selected?: boolean
+  onSelect?: (checked: boolean) => void
 }) {
   const tags = item.aiTags ?? {}
   const effective = item.effectiveTags ?? {}
@@ -1529,10 +1546,16 @@ function GarmentCard({ item, onTag, onOpen, onArchive, run }: {
   const chips = garmentTagChips(item)
   const runningTagAttempt = latestRunningTagAttempt(item)
   return (
-    <div className={`garment-card ${tagging ? 'is-tagging' : ''}`}>
+    <div className={`garment-card ${tagging ? 'is-tagging' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
+      {onSelect && (
+        <label className="card-select" title="选择">
+          <input type="checkbox" checked={!!selected} disabled={tagging} onChange={(event) => onSelect(event.target.checked)} />
+        </label>
+      )}
       <div className="garment-cover">
         <AssetThumb asset={item.images?.[0]?.asset ?? item.coverAsset ?? (item.coverUrl ? { id: item.id, objectKey: '', filename: item.code, mimeType: '', thumbUrl: item.coverUrl } : null)} large />
         {tagging && <span className="cover-badge">识别中</span>}
+        {item.archivedAt && <span className="cover-badge">已删除</span>}
       </div>
       <div className="garment-card-head"><strong title={item.code}>{item.code}</strong><span className={`status ${item.status.toLowerCase()}`}>{garmentStatus(item.status)}</span></div>
       {item.tagError && <span className="inline-error">{item.tagError}</span>}
@@ -1546,17 +1569,18 @@ function GarmentCard({ item, onTag, onOpen, onArchive, run }: {
       <div className="card-actions">
         {onOpen && <button className="secondary" onClick={onOpen}><Eye size={16} /> 详情</button>}
         {onTag && <button className="secondary" disabled={tagging} onClick={onTag}>重新识别标签</button>}
-        {onArchive && <button className="secondary" disabled={tagging} onClick={onArchive}><Trash2 size={16} /> 归档</button>}
+        {onDelete && <button className="secondary" disabled={tagging} onClick={onDelete}><Trash2 size={16} /> 删除</button>}
       </div>
     </div>
   )
 }
 
-function GarmentDetailDrawer({ item, run, onClose, onChange }: {
+function GarmentDetailDrawer({ item, run, onClose, onChange, onDelete }: {
   item: StylingGarment
   run: any
   onClose: () => void
   onChange: (item: StylingGarment | null) => void
+  onDelete: () => void
 }) {
   const [working, setWorking] = useState(item.images ?? [])
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
@@ -1564,8 +1588,6 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
   const [removedIds, setRemovedIds] = useState<number[]>([])
   const [dirty, setDirty] = useState(false)
   const [dragIndex, setDragIndex] = useState<number | null>(null)
-  const [confirmPurge, setConfirmPurge] = useState(false)
-  const [confirmCode, setConfirmCode] = useState('')
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const [pendingDimensions, setPendingDimensions] = useState<Record<string, { width: number; height: number }>>({})
   const [replacementDimensions, setReplacementDimensions] = useState<Record<number, { width: number; height: number }>>({})
@@ -1640,7 +1662,7 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
             </label>
           </div>
           <p className="edit-hint">此次修改会影响标签识别。排序第一张会作为封面和主要参考图。</p>
-          {tagging && <p className="edit-hint">正在识别标签，完成后可继续修改或归档。</p>}
+          {tagging && <p className="edit-hint">正在识别标签，完成后可继续修改或删除。</p>}
           <div className="saved-image-grid">
             {working.map((image, index) => {
               const replacement = replacementFiles[image.id]
@@ -1727,16 +1749,10 @@ function GarmentDetailDrawer({ item, run, onClose, onChange }: {
         </div>
         <div className="danger-zone">
           <strong>删除</strong>
-          <button className="secondary" disabled={tagging} onClick={() => void run('归档搭配服饰中...', () => api.deleteStylingGarment(item.id), () => {
-            onChange(null)
+          <button className="secondary" disabled={tagging} onClick={() => {
+            onDelete()
             onClose()
-          })}>归档</button>
-          <label className="danger-check"><input disabled={tagging} type="checkbox" checked={confirmPurge} onChange={(event) => setConfirmPurge(event.target.checked)} /> 同时删除关联记录和文件</label>
-          {confirmPurge && <input value={confirmCode} onChange={(event) => setConfirmCode(event.target.value)} placeholder={`输入 ${item.code} 确认`} />}
-          {confirmPurge && <button className="danger" disabled={tagging || confirmCode !== item.code} onClick={() => void run('级联删除搭配服饰中...', () => api.deleteStylingGarment(item.id, { purge: true, confirmCode }), () => {
-            onChange(null)
-            onClose()
-          })}>级联删除</button>}
+          }}>删除</button>
         </div>
       </aside>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}

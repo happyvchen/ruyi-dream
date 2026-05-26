@@ -52,6 +52,8 @@ export type StylingGarment = {
   tagSchemaVersion?: string | null
   tagCompletedAt?: string | null
   tagError?: string | null
+  archivedAt?: string | null
+  archiveReason?: string | null
   imageCount?: number | null
   coverUrl?: string | null
   coverAsset?: MediaAsset | null
@@ -201,7 +203,7 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
-  listStylingGarments: (options?: { limit?: number; offset?: number; keyword?: string }) =>
+  listStylingGarments: (options?: { limit?: number; offset?: number; keyword?: string; includeArchived?: boolean }) =>
     request<Paginated<StylingGarment>>(params('/api/styling-garments', options ?? {})),
   createStylingGarment: (code: string, files: File[]) => {
     const form = new FormData()
@@ -235,6 +237,11 @@ export const api = {
     request<{ ok: boolean; archived?: boolean; purged?: boolean }>(
       params(`/api/styling-garments/${id}`, { purge: options?.purge, confirmCode: options?.confirmCode }),
       { method: 'DELETE' },
+    ),
+  deleteStylingGarments: (ids: number[], options?: { purge?: boolean; confirmPhrase?: string }) =>
+    request<{ ok: boolean; archived?: boolean; purged?: boolean; ids?: number[]; deletedGarmentIds?: number[]; deletedTaskIds?: number[] }>(
+      '/api/styling-garments/batch-delete',
+      { method: 'POST', body: JSON.stringify({ ids, purge: options?.purge, confirmPhrase: options?.confirmPhrase }) },
     ),
   listTasks: (options?: { limit?: number; offset?: number; includeArchived?: boolean }) =>
     request<Paginated<GenerationTask>>(params('/api/generation-tasks', options ?? {})),

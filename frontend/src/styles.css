@@ -390,6 +390,7 @@ h1, h2, h3, p { margin: 0; }
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
 }
 input {
   height: 42px;
@@ -968,6 +969,30 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
 }
 .status.succeeded { background: #ecfdf5; color: #047857; }
 .status.running { background: #eef6ff; color: #2563eb; }
+.garment-card { position: relative; }
+.garment-card.is-archived {
+  background: #f8fafc;
+}
+.card-select {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid #d8e0ea;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .92);
+}
+.card-select input {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  padding: 0;
+  accent-color: #0f7cff;
+}
 .card-actions {
   display: flex;
   align-items: center;
@@ -989,6 +1014,60 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
   display: flex;
   justify-content: flex-end;
   background: rgba(15, 23, 42, .28);
+}
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, .32);
+}
+.confirm-modal {
+  width: min(460px, 100%);
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 28px 90px rgba(15, 23, 42, .28);
+}
+.confirm-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.confirm-head h2 {
+  font-size: 20px;
+}
+.confirm-copy {
+  color: #475569;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.confirm-items {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 13px;
+}
+.confirm-field {
+  display: grid;
+  gap: 6px;
+  color: #7f1d1d;
+  font-size: 13px;
+  font-weight: 700;
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }
 .detail-drawer {
   width: min(720px, 88vw);
@@ -1177,6 +1256,9 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
   border: 1px solid #d8e0ea;
   border-radius: 8px;
   background: #fff;
+}
+.mini-row.view-only {
+  grid-template-columns: minmax(0, 1fr);
 }
 .mini-row.active {
   border-color: #38bdf8;
