@@ -1173,11 +1173,17 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
       <div className="records-layout">
         <div className="panel record-list">
           {records.filter((item) => item.status !== 'DRAFT').map((item) => (
-            <button key={item.id} className="record-row" onClick={() => void run('读取记录中...', () => api.getRecord(item.id, false), (r: { item: GenerationTask }) => setDetail(r.item))}>
-              <AssetThumb asset={item.summary?.cover ?? null} />
+            <button
+              key={item.id}
+              className={`record-row ${detail?.id === item.id ? 'active' : ''}`}
+              aria-current={detail?.id === item.id ? 'true' : undefined}
+              title="查看记录详情"
+              onClick={() => void run('读取记录中...', () => api.getRecord(item.id, false), (r: { item: GenerationTask }) => setDetail(r.item))}
+            >
+              <AssetThumb asset={item.summary?.cover ?? null} interactive={false} />
               <div><strong>{item.name}</strong><span>{statusText(item.status)} · {dateText(item.updatedAt)}</span></div>
-              <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} />)}</div>
-              <Eye size={16} />
+              <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
+              <span className="record-eye" aria-hidden="true"><Eye size={16} /></span>
             </button>
           ))}
         </div>
@@ -1692,18 +1698,21 @@ function ThumbGrid({ assets, compact = false }: { assets: MediaAsset[]; compact?
   return <div className={`thumb-grid ${compact ? 'compact' : ''}`}>{assets.slice(0, compact ? 4 : 8).map((asset) => <AssetThumb key={asset.id} asset={asset} />)}</div>
 }
 
-function AssetThumb({ asset, large = false }: { asset?: MediaAsset | null; large?: boolean }) {
+function AssetThumb({ asset, large = false, interactive = true }: { asset?: MediaAsset | null; large?: boolean; interactive?: boolean }) {
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const [failed, setFailed] = useState(false)
   const src = asset ? assetThumbSrc(asset) : ''
   useEffect(() => setFailed(false), [asset?.id, src])
+  const image = asset && src && !failed ? <img src={mediaUrl(src)} alt={asset.filename} onError={() => setFailed(true)} /> : null
   return (
     <>
       <div className={`asset-thumb ${large ? 'large' : ''} ${failed ? 'is-broken' : ''}`}>
-        {asset && src && !failed ? (
-          <button className="asset-open" onClick={() => setViewer(assetLightboxImage(asset))} title="放大查看">
-            <img src={mediaUrl(src)} alt={asset.filename} onError={() => setFailed(true)} />
-          </button>
+        {image && asset ? (
+          interactive ? (
+            <button className="asset-open" onClick={() => setViewer(assetLightboxImage(asset))} title="放大查看">
+              {image}
+            </button>
+          ) : image
         ) : <div className="asset-fallback"><FileImage size={20} /><span>图片不可用</span></div>}
       </div>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}

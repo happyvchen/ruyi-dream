@@ -478,6 +478,7 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
   display: grid;
   grid-template-columns: minmax(0, 1fr) 320px;
   gap: 18px;
+  align-items: start;
 }
 .record-list, .record-detail, .side-editor { padding: 18px; }
 .library-title-row {
@@ -1183,10 +1184,32 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
   background: #fff;
   text-align: left;
 }
+.record-row:hover,
+.record-row:focus-visible {
+  border-color: #9bd7ff;
+  box-shadow: 0 0 0 3px rgba(14, 165, 233, .08);
+}
+.record-row.active {
+  border-color: #38bdf8;
+  background: linear-gradient(135deg, #f0fbff, #fff);
+}
 .record-row span { display: block; margin-top: 4px; color: #64748b; font-size: 12px; }
+.record-eye {
+  display: grid;
+  place-items: center;
+  color: #0f7cff;
+}
 .strip, .final-strip { display: flex; gap: 6px; }
 .strip .asset-thumb, .final-strip .asset-thumb { width: 36px; }
-.record-detail { display: grid; align-content: start; gap: 14px; }
+.record-detail {
+  position: sticky;
+  top: 0;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  max-height: calc(100vh - 56px);
+  overflow: auto;
+}
 .detail-preview {
   width: 100%;
   border-radius: 10px;
