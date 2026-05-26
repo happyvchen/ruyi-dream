@@ -290,7 +290,6 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
   const [taskHasMore, setTaskHasMore] = useState(false)
   const [taskNextOffset, setTaskNextOffset] = useState<number | null>(null)
   const [tasksLoading, setTasksLoading] = useState(false)
-  const [taskIncludeArchived, setTaskIncludeArchived] = useState(false)
   const recentTaskPageSize = 5
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
@@ -298,7 +297,7 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
   useEffect(() => {
     let cancelled = false
     setTasksLoading(true)
-    void api.listTasks({ limit: recentTaskPageSize, offset: taskOffset, includeArchived: taskIncludeArchived }).then((result) => {
+    void api.listTasks({ limit: recentTaskPageSize, offset: taskOffset }).then((result) => {
       if (cancelled) return
       setTaskItems(result.items)
       setTaskHasMore(result.hasMore)
@@ -307,7 +306,7 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
       if (!cancelled) setTasksLoading(false)
     })
     return () => { cancelled = true }
-  }, [tasks, taskOffset, taskIncludeArchived])
+  }, [tasks, taskOffset])
   useEffect(() => {
     if (!task || !['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)) return
     const timer = window.setInterval(() => {
@@ -317,7 +316,7 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
   }, [task?.id, task?.status, setTask])
 
   function refreshRecentTasks(targetOffset = taskOffset) {
-    return api.listTasks({ limit: recentTaskPageSize, offset: targetOffset, includeArchived: taskIncludeArchived }).then((result) => {
+    return api.listTasks({ limit: recentTaskPageSize, offset: targetOffset }).then((result) => {
       setTaskItems(result.items)
       setTaskHasMore(result.hasMore)
       setTaskNextOffset(result.nextOffset)
@@ -349,12 +348,6 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
             </>
           ) : <EmptyState title="暂无任务" text="上传主推款后会在这里形成拍摄任务。" />}
           <h3>最近任务</h3>
-          <div className="archive-controls compact">
-            <label><input type="checkbox" checked={taskIncludeArchived} onChange={(event) => {
-              setTaskOffset(0)
-              setTaskIncludeArchived(event.target.checked)
-            }} /> 查看已删除</label>
-          </div>
           <div className="mini-list">
             {taskItems.map((item) => (
               <div key={item.id} className={`mini-row view-only ${task?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
