@@ -716,7 +716,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
           <ImagePlus size={16} /> {showImport ? '收起导入' : '导入搭配服饰'}
         </button>
       </div>
-      {showImport && <BatchImportPanel run={run} />}
+      {showImport && <BatchImportPanel onImported={() => void api.listStylingGarments({ limit: 80, keyword: query.trim() || undefined }).then((result) => setItems(result.items)).catch(() => undefined)} />}
       <div className="panel library-panel">
         <div className="toolbar">
           <div className="search"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索货号 / 标签" /></div>
@@ -743,20 +743,25 @@ type ImportBatch = {
   id: string
   code: string
   files: File[]
+  error?: string
 }
 
-type ImportPhase = 'idle' | 'uploading' | 'tagging' | 'done'
+type ImportJob = {
+  id: string
+  title: string
+  status: 'RUNNING' | 'SUCCEEDED' | 'FAILED'
+  total: number
+  uploaded: number
+  skipped: number
+  operations: AIOperation[]
+}
 
-function BatchImportPanel({ run }: { run: any }) {
+function BatchImportPanel({ onImported }: { onImported: () => void }) {
   const [batches, setBatches] = useState<ImportBatch[]>([])
   const [localError, setLocalError] = useState('')
-  const [importOperations, setImportOperations] = useState<AIOperation[]>([])
-  const [importPhase, setImportPhase] = useState<ImportPhase>('idle')
-  const [uploadedCount, setUploadedCount] = useState(0)
-  const isImporting = importPhase === 'uploading' || importPhase === 'tagging'
+  const [importJobs, setImportJobs] = useState<ImportJob[]>([])
 
   function addFiles(files: File[]) {
-    if (isImporting) return
     const next = groupImportFiles(files)
     setLocalError('')
     setBatches((current) => {
@@ -766,11 +771,11 @@ function BatchImportPanel({ run }: { run: any }) {
         ...next.map((item) => {
           if (!existingCodes.has(item.code)) {
             existingCodes.add(item.code)
-            return item
+            return { ...item, error: undefined }
           }
           const code = `${item.code}-${current.length + 1}`
           existingCodes.add(code)
-          return { ...item, id: `${item.id}-${current.length}`, code }
+          return { ...item, id: `${item.id}-${current.length}`, code, error: undefined }
         }),
       ]
     })
@@ -778,94 +783,156 @@ function BatchImportPanel({ run }: { run: any }) {
 
   async function handleDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault()
-    if (isImporting) return
     const files = await filesFromDataTransfer(event.dataTransfer)
     addFiles(files)
   }
 
   function updateCode(id: string, code: string) {
-    if (isImporting) return
-    setBatches((items) => items.map((item) => item.id === id ? { ...item, code } : item))
+    setBatches((items) => items.map((item) => item.id === id ? { ...item, code, error: undefined } : item))
   }
 
   function updateFiles(id: string, files: File[]) {
-    if (isImporting) return
-    setBatches((items) => items.map((item) => item.id === id ? { ...item, files } : item))
+    setBatches((items) => items.map((item) => item.id === id ? { ...item, files, error: undefined } : item))
   }
 
   function removeBatch(id: string) {
-    if (isImporting) return
     setBatches((items) => items.filter((item) => item.id !== id))
   }
 
-  async function saveDrafts() {
-    const invalid = batches.find((batch) => !sanitizeClientName(batch.code))
-    if (invalid) {
-      setLocalError('每套搭配服饰都需要一个有效货号')
+  function saveDrafts() {
+    const seen = new Set<string>()
+    const ready: ImportBatch[] = []
+    const blocked: ImportBatch[] = []
+    batches.forEach((batch) => {
+      const code = sanitizeClientName(batch.code)
+      if (!code) {
+        blocked.push({ ...batch, error: '每套搭配服饰都需要一个有效货号' })
+        return
+      }
+      if (batch.files.length > 6) {
+        blocked.push({ ...batch, code, error: '超过 6 张，需删除后才能导入' })
+        return
+      }
+      if (seen.has(code)) {
+        blocked.push({ ...batch, code, error: '本批次代码重复，已跳过' })
+        return
+      }
+      seen.add(code)
+      ready.push({ ...batch, code, error: undefined })
+    })
+    setBatches(blocked)
+    if (!ready.length) {
+      setLocalError(blocked.length ? '没有可导入的新服饰，请先处理标红项' : '请先选择图片或文件夹')
       return
     }
-    const oversized = batches.find((batch) => batch.files.length > 6)
-    if (oversized) {
-      setLocalError(`${oversized.code} 已选择 ${oversized.files.length} 张图片，每款服饰最多只允许导入 6 张`)
+    setLocalError(blocked.length ? '已开始导入非重复项，标红项处理后可再次导入' : '')
+    startImportJob(ready)
+  }
+
+  function updateJob(jobId: string, updater: (job: ImportJob) => ImportJob) {
+    setImportJobs((jobs) => jobs.map((job) => job.id === jobId ? updater(job) : job))
+  }
+
+  function addSkippedBatch(batch: ImportBatch, error: string) {
+    setBatches((items) => {
+      if (items.some((item) => item.id === batch.id)) return items
+      return [...items, { ...batch, error }]
+    })
+  }
+
+  function startImportJob(jobBatches: ImportBatch[]) {
+    const jobId = `import-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const startedAt = new Date().toISOString()
+    const initialOperations: AIOperation[] = jobBatches.map((batch, index) => ({
+      id: -(index + 1),
+      ownerType: 'styling_garment_upload',
+      ownerId: index + 1,
+      provider: 'browser',
+      status: 'SUBMITTED',
+      startedAt,
+      providerRequestId: batch.code,
+    }))
+    const nextJob: ImportJob = {
+      id: jobId,
+      title: `${jobBatches.length} 套搭配服饰`,
+      status: 'RUNNING',
+      total: jobBatches.length,
+      uploaded: 0,
+      skipped: 0,
+      operations: initialOperations,
+    }
+    setImportJobs((jobs) => [nextJob, ...jobs].slice(0, 5))
+    void runImportJob(jobId, jobBatches)
+  }
+
+  async function runImportJob(jobId: string, jobBatches: ImportBatch[]) {
+    const createdItems: StylingGarment[] = []
+    let skipped = 0
+    for (const batch of jobBatches) {
+      updateJob(jobId, (job) => ({
+        ...job,
+        operations: job.operations.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'RUNNING', startedAt: item.startedAt || new Date().toISOString() } : item),
+      }))
+      try {
+        const created = await api.createStylingGarment(batch.code, batch.files)
+        createdItems.push(created.item)
+        updateJob(jobId, (job) => ({
+          ...job,
+          uploaded: createdItems.length,
+          operations: job.operations.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'SUCCEEDED', completedAt: new Date().toISOString() } : item),
+        }))
+      } catch (err) {
+        const message = err instanceof Error ? err.message : '导入失败'
+        skipped += 1
+        addSkippedBatch(batch, message === '搭配服饰代码已存在' ? '代码已存在，已跳过' : message)
+        updateJob(jobId, (job) => ({
+          ...job,
+          skipped,
+          operations: job.operations.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'FAILED', failedAt: new Date().toISOString(), errorMessage: message } : item),
+        }))
+      }
+    }
+    if (!createdItems.length) {
+      updateJob(jobId, (job) => ({ ...job, status: 'FAILED' }))
       return
     }
-    setUploadedCount(0)
-    setImportPhase('uploading')
-    try {
-      await run(`上传 ${batches.length} 套搭配服饰中...`, async () => {
-        const startedAt = new Date().toISOString()
-        setImportOperations(batches.map((batch, index) => ({
-          id: -(index + 1),
+    updateJob(jobId, (job) => ({
+      ...job,
+      operations: [
+        ...createdItems.map((item, index) => ({
+          id: -(index + 1 + job.total),
           ownerType: 'styling_garment_upload',
-          ownerId: index + 1,
+          ownerId: item.id,
           provider: 'browser',
-          status: 'SUBMITTED',
-          startedAt,
-          providerRequestId: batch.code,
-        })))
-        const createdItems: StylingGarment[] = []
-        for (const batch of batches) {
-          setImportOperations((items) => items.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'RUNNING', startedAt: item.startedAt || new Date().toISOString() } : item))
-          const created = await api.createStylingGarment(batch.code, batch.files)
-          createdItems.push(created.item)
-          setUploadedCount(createdItems.length)
-          setImportOperations((items) => items.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'SUCCEEDED', completedAt: new Date().toISOString() } : item))
-        }
-        setImportPhase('tagging')
-        setImportOperations(createdItems.map((item, index) => ({
-          id: -(index + 1),
+          status: 'SUCCEEDED',
+          completedAt: new Date().toISOString(),
+          providerRequestId: item.code,
+        })),
+        ...createdItems.map((item, index) => ({
+          id: -(index + 1 + job.total + createdItems.length),
           ownerType: 'styling_garment_tagging',
           ownerId: item.id,
           provider: 'gemini',
-          status: 'SUBMITTED',
+          status: 'RUNNING',
           startedAt: new Date().toISOString(),
           providerRequestId: item.code,
-        })))
-        setImportOperations((items) => items.map((operation) => ({ ...operation, status: 'RUNNING', startedAt: operation.startedAt || new Date().toISOString() })))
-        await api.tagStylingGarments(createdItems.map((item) => item.id))
-        setImportOperations((items) => items.map((operation) => ({ ...operation, status: 'SUBMITTED' })))
-        setImportPhase('done')
-        return true
-      }, () => {
-        setBatches([])
-        window.setTimeout(() => {
-          setImportOperations([])
-          setUploadedCount(0)
-          setImportPhase('idle')
-        }, 1600)
-      })
+        })),
+        ...job.operations.filter((operation) => operation.status === 'FAILED'),
+      ],
+    }))
+    try {
+      await api.tagStylingGarments(createdItems.map((item) => item.id))
+      updateJob(jobId, (job) => ({
+        ...job,
+        status: job.skipped ? 'FAILED' : 'SUCCEEDED',
+        operations: job.operations.map((operation) => operation.ownerType === 'styling_garment_tagging' ? { ...operation, status: 'SUBMITTED' } : operation),
+      }))
     } catch {
-      setImportPhase('idle')
+      updateJob(jobId, (job) => ({ ...job, status: 'FAILED' }))
+    } finally {
+      onImported()
     }
   }
-
-  const importNotice = importPhase === 'uploading'
-    ? `正在上传图片，请勿刷新或离开页面。已保存 ${uploadedCount}/${batches.length} 套。`
-    : importPhase === 'tagging'
-      ? '图片已全部保存，可放心离开页面；系统正在提交服饰标签识别。'
-      : importPhase === 'done'
-        ? '图片已保存，标签识别已提交，可放心离开页面。'
-        : ''
 
   return (
     <div className="panel import-panel">
@@ -874,25 +941,24 @@ function BatchImportPanel({ run }: { run: any }) {
           <h3>导入搭配服饰</h3>
           <p>散图会合并为一套；单文件夹是一套；拖入多个一级文件夹会拆成多套。导入后系统会自动识别标签，单套最多 6 张，推荐 1-3 张。</p>
         </div>
-        <button className="primary" disabled={!batches.length || isImporting} onClick={() => void saveDrafts()}>导入</button>
+        <button className="primary" disabled={!batches.length} onClick={saveDrafts}>导入</button>
       </div>
-      {importNotice && <div className={`import-notice ${importPhase === 'uploading' ? 'is-warning' : 'is-safe'}`}>{importNotice}</div>}
-      <div className={`import-drop ${isImporting ? 'is-disabled' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
+      <div className="import-notice is-safe">导入开始后会进入下方进度区，上传入口会立即释放，可继续选择下一批文件夹。</div>
+      <div className="import-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
         <Images size={22} />
         <strong>拖入图片或文件夹</strong>
         <span>支持多张图片、一个文件夹、多个一级文件夹</span>
         <div className="import-actions">
-          <label className={`secondary ${isImporting ? 'is-disabled' : ''}`}>
+          <label className="secondary">
             <ImagePlus size={16} /> 选择图片
-            <input disabled={isImporting} type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
+            <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
           </label>
-          <label className={`secondary ${isImporting ? 'is-disabled' : ''}`}>
+          <label className="secondary">
             <FolderOpen size={16} /> 选择文件夹
-            <input disabled={isImporting} type="file" multiple {...{ webkitdirectory: '', directory: '' }} onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
+            <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
           </label>
         </div>
       </div>
-      <AIOperationList operations={importOperations} />
       {localError && <span className="inline-error">{localError}</span>}
       {batches.length > 0 && (
         <div className="batch-list">
@@ -907,6 +973,19 @@ function BatchImportPanel({ run }: { run: any }) {
           ))}
         </div>
       )}
+      {importJobs.length > 0 && (
+        <div className="import-job-list">
+          {importJobs.map((job) => (
+            <div className={`import-job ${job.status === 'FAILED' ? 'has-error' : ''}`} key={job.id}>
+              <div className="import-job-head">
+                <strong>{job.title}</strong>
+                <span>{job.uploaded}/{job.total} 已入库{job.skipped ? `，${job.skipped} 项跳过` : ''}</span>
+              </div>
+              <AIOperationList operations={job.operations} />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -918,7 +997,7 @@ function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
   onRemove: () => void
 }) {
   return (
-    <div className={`batch-card ${batch.files.length > 6 ? 'has-error' : ''}`}>
+    <div className={`batch-card ${batch.files.length > 6 || batch.error ? 'has-error' : ''}`}>
       <div className="batch-card-head">
         <div className="batch-icon"><Layers3 size={18} /></div>
         <input value={batch.code} onChange={(event) => onCode(event.target.value)} aria-label="搭配服饰货号" />
@@ -926,7 +1005,7 @@ function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
       </div>
       <div className="batch-note">
         <span>{batch.files.length} 张图片</span>
-        {batch.files.length > 6 && <strong>超过 6 张，需删除后才能导入</strong>}
+        {(batch.error || batch.files.length > 6) && <strong>{batch.error ?? '超过 6 张，需删除后才能导入'}</strong>}
       </div>
       <FileThumbList files={batch.files} onChange={onFiles} />
     </div>

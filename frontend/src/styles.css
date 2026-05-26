@@ -546,6 +546,36 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
 .import-actions { display: flex; gap: 10px; margin-top: 6px; }
 .import-actions input { display: none; }
 .batch-list { display: grid; gap: 12px; }
+.import-job-list {
+  display: grid;
+  gap: 10px;
+}
+.import-job {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #d8e0ea;
+  border-radius: 8px;
+  background: #fff;
+}
+.import-job.has-error {
+  border-color: #fed7aa;
+  background: #fffbf6;
+}
+.import-job-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.import-job-head strong {
+  color: #1e293b;
+  font-size: 13px;
+}
+.import-job-head span {
+  color: #64748b;
+  font-size: 12px;
+}
 .batch-card {
   display: grid;
   gap: 10px;

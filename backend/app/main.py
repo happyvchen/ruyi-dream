@@ -910,6 +910,10 @@ async def create_styling_garment(
         raise HTTPException(status_code=400, detail="至少上传一张图片")
     if len(files) > 6:
         raise HTTPException(status_code=400, detail="单套搭配服饰最多上传 6 张图片")
+    with get_db() as db:
+        duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
+        if duplicate:
+            raise HTTPException(status_code=409, detail="搭配服饰代码已存在")
     timestamp = now_iso()
     prefix = join_key("styling-garments", f"{clean_code}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}")
     assets = await save_uploads_as_media_assets(files, prefix)
