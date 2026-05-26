@@ -8,7 +8,8 @@
 MediaAsset
 -> StylingGarment 打标
 -> GenerationTask / InputVersion
--> Candidate Retrieval 候选召回
+-> Brand Style Index / Retrieval Features
+-> Candidate Funnel 候选漏斗
 -> AI Stylist / StylingPlan
 -> ShotPlan
 -> Image-2 六宫格预览
@@ -127,6 +128,8 @@ AI Stylist 造型方案结果：
 - source_material_ids_json
 - candidate_material_ids_json
 - candidate_retrieval_snapshot_json
+- outfit_drafts_json
+- brand_evidence_snapshot_json
 - selected_material_ids_json
 - selected_material_snapshot_json
 - styling_plan_json
@@ -143,6 +146,50 @@ AI Stylist 造型方案结果：
 `selected_material_ids_json` 只是从 `StylingPlan` 派生出的关系索引，用于素材快照、查询和前端卡片展示，不是选搭阶段的完整结果。生产排查和后续 ShotPlan 必须读取 `styling_plan_json`。
 
 MVP 不支持成功后重新搭配。失败重试可以新增 attempt 并更新当前 styling 状态。
+
+### 2.6.1 StylingGarmentRetrievalFeature
+
+阶段 1 可直接并入 `effective_tags_json`，阶段 2/3 建议拆表：
+
+- id
+- styling_garment_id
+- visual_caption
+- volume_tags_json
+- length_tags_json
+- coverage_risk
+- wearing_affordance_json
+- retrieval_risk_json
+- embedding_json
+- embedding_model
+- embedding_version
+- created_at / updated_at
+
+这些字段用于候选漏斗，不直接展示给普通用户。
+
+### 2.6.2 BrandStyleSample
+
+Lily 官方和客户确认的品牌样本：
+
+- id
+- source_type
+- source_url
+- season
+- series
+- category
+- image_asset_id
+- official_title
+- visual_caption
+- brand_style_tags_json
+- accessory_boundary_json
+- embedding_json
+- embedding_model
+- embedding_version
+- confidence
+- reviewed_by
+- reviewed_at
+- created_at / updated_at
+
+品牌样本是风格证据，不是商品事实源。生成时不能把品牌样本中的商品当作本次可售服饰生成。
 
 ### 2.7 GenerationShotPlan
 
@@ -222,8 +269,9 @@ MVP 只保存一张六宫格总图，不裁 frame。未来支持重新预览时�
 - `media service`：上传、衍生图、预签名、稳定读取路径。
 - `styling garment service`：搭配服饰草稿、保存、打标、状态推进。
 - `generation task service`：任务草稿、输入版本、状态机。
-- `candidate retrieval service`：基于 READY 服饰 tags、颜色、品类、季节、风险和未来 embedding 生成候选召回快照。
-- `AI Stylist service`：组装主推款图片、候选卡片、品牌边界和商品验收维度，调用 Gemini 生成 `StylingPlan`。
+- `brand style service`：维护 Lily 官方样本、客户 lookbook、品牌 caption、配饰边界和未来 embedding。
+- `candidate funnel service`：基于 READY 服饰 tags、caption、颜色、品类、季节、遮挡风险、品牌样本相似度和未来 embedding，生成候选召回、兼容性排序和 outfit 草案快照。
+- `AI Stylist service`：组装主推款图片、小候选集、候选缩略图、outfit 草案、品牌证据和商品验收维度，调用 Gemini 生成 `StylingPlan`。
 - `aesthetic critic service`：校验 `StylingPlan` 的基础业务事实、可穿性、审美成立性、品牌成立性、主推款可见性和商业可用性阈值。
 - `shot plan service`：基于 `StylingPlan` 生成 6 条 ShotPlan。
 - `image input selector`：按阶段选择最多 10 张 Image-2 输入图。
@@ -247,21 +295,26 @@ HeroUnderstanding
 
 工程上可以先用一次 Gemini 调用返回完整 JSON，但 `request_snapshot_json` 和 `response_snapshot_json` 必须保存分步结构，不能只保存最终 `selected_material_ids`。
 
-### 4.2 候选召回
+### 4.2 候选漏斗
 
-MVP 可先使用规则化召回：
+MVP 不再把全量 READY tags 直接交给 Gemini。候选漏斗先把全量库缩小为少量候选，再由 Gemini 做审美决策。
+
+阶段 1 可先使用规则化漏斗：
 
 - 只取 `READY` 搭配服饰。
 - 压缩 `effective_tags`。
-- 根据主推款品类和 tags 粗排互补品类。
-- 降权 `coverage_risk` 高、风格风险高或季节冲突明显的服饰。
-- 保留一定多样性，避免候选全是同一品类。
+- 使用主推款品类、卖点和不可遮挡区域做硬过滤。
+- 根据品类互补、颜色、季节、廓形和穿着方式粗排。
+- 降权 `coverage_risk` 高、长外套、深色厚重、大体量、风格风险高或季节冲突明显的服饰。
+- 生成 3-8 套 outfit 草案，并保留一定多样性，避免候选全是同一公式。
+- AI Stylist 输入控制在 12-20 件候选服饰，并附必要主图或缩略图。
 
 后续生产增强：
 
-- CLIP / 多模态 embedding 召回。
+- Lily Brand Style Index 官方样本检索。
+- CLIP / 多模态 embedding 召回与相似度排序。
 - 历史人工采纳、拒绝、下载、复拍和销售/点击表现。
-- 品牌专属偏好 profile。
+- 品牌专属偏好 profile 和 compatibility ranker。
 
 ### 4.3 业务校验
 
@@ -274,6 +327,8 @@ MVP 可先使用规则化召回：
 - `aesthetic_score`、`brand_fit_score`、`hero_visibility_score` 和 `commercial_readiness_score` 任一低于阈值时，不自动进入预览。
 - 满分评分但缺少 `aesthetic_diagnosis` 或风险解释时，视为低可信模型输出，应重试或降级为空选搭。
 - 主推款是高腰裤、连衣裙、收腰上衣等强腰线商品时，选择外套必须说明如何避免色块压迫、腰线遮挡和比例失衡。
+- 有遮挡风险、模板化风险、配饰遮挡风险或品牌证据不足时，不允许四项满分。
+- 公文包、大体量手提包、夸张首饰等生成配饰必须受控，不能由 Gemini 自由补全为传统办公室套装。
 - `StylingPlan` 必须保存拒绝方案和原因，便于复盘。
 
 ### 4.4 ShotPlan 联动
@@ -319,8 +374,10 @@ ShotPlan 生成必须读取：
 输入：
 
 - 主推款图片。
-- 候选召回快照。
-- READY 搭配服饰压缩 tags。
+- 候选漏斗快照。
+- 小候选集搭配服饰压缩 tags、caption 和必要主图/缩略图。
+- 后端生成的 outfit 草案。
+- 与本次任务相关的 Lily 品牌样本证据。
 - Lily 品牌边界。
 - 商品主角验收维度。
 
@@ -335,6 +392,7 @@ ShotPlan 生成必须读取：
 - `rejected_candidates`
 - `critic_scores`
 - `warnings`
+- `brand_evidence` 或等价品牌证据引用
 
 校验：
 
@@ -362,6 +420,44 @@ ShotPlan 生成必须读取：
 ### 5.5 Image-2 最终图
 
 并发生成前 5 张。每张传同一张六宫格预览图，并在 prompt 中指定参考第 N 格。
+
+### 5.6 阶段性实施计划
+
+#### 阶段 1：现有架构内完成候选漏斗
+
+不引入新基础设施，仅扩展后端逻辑和 JSON 字段：
+
+- 已实现：扩展 `effective_tags_json` 的后端压缩使用，向候选卡片加入视觉 caption、衣长、遮挡风险、可穿着字段和候选主图引用。
+- 已实现：`candidate-retrieval-v2 / candidate_funnel_v1`，包含硬过滤、风险降权、多样性保留和 Top 20 小候选集。
+- 已实现：后端生成 `outfit_drafts`，并把草案交给 AI Stylist 参考。
+- 已实现：AI Stylist 只接收小候选集，并附 Top 候选主图，避免只看 tags。
+- 已实现：生成配饰改为受控边界，fallback 不再默认补包，生产质量门拒绝公文包、大体量托特等模板化配饰。
+- 已实现：满分、缺诊断、高腰裤 + 深色厚重外套组合等质量门与文档口径一致。
+- 待增强：当前主推款品类/卖点用任务名启发式推断，后续应升级为独立视觉理解步骤。
+- 待增强：当前品牌证据为 Phase 1 品牌边界占位，阶段 2 替换为 Lily 官方样本检索。
+
+#### 阶段 2：Lily 官方样本库
+
+继续沿用现有数据库和对象存储：
+
+- 新增品牌样本数据结构。
+- 导入 Lily 官网、天猫/淘宝、海外官方店、官方社媒和客户 lookbook 的可验证样本。
+- 为品牌样本生成 caption、style tags、配饰边界和人工复核状态。
+- AI Stylist 输入携带 3-5 个相关品牌样本摘要。
+
+#### 阶段 3：多模态 embedding 和向量检索
+
+当搭配服饰库和品牌样本规模扩大到几百或上千件时引入：
+
+- 多模态 embedding 模型。
+- 向量存储，可从数据库 JSON/内存计算起步，后续迁移到 pgvector、Qdrant、Milvus 或 Vertex AI Vector Search。
+- embedding 版本管理和召回快照。
+
+#### 阶段 4：兼容性 ranker 和反馈闭环
+
+- 记录用户接受、重选、预览通过、最终下载和人工否决原因。
+- 将反馈、销售、点击和复拍表现加入候选排序。
+- 维护品类、季节、系列维度的品牌偏好 profile。
 
 ## 6. API 草案
 

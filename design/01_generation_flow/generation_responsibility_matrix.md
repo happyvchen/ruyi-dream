@@ -5,13 +5,13 @@
 新版 Ruyi-Dream 的稳定性来自职责拆分，也来自让模型在正确层级发挥自主性：
 
 ```text
-商品图片负责事实，标签和召回负责候选，AI Stylist 负责造型判断，
+商品图片负责事实，标签、品牌样本和候选漏斗负责候选，AI Stylist 负责造型判断，
 StylingPlan 负责选搭意图和验收，ShotPlan 负责导演，Image-2 负责生成。
 ```
 
 Image-2 是最终视觉生成器，不是选搭大脑、标签系统、历史记录系统或任务状态机。
 
-Gemini 在 `AI Stylist` 阶段应被当作造型总监，而不是简单分类器。它可以探索多套搭配方案，但必须交付结构化 `StylingPlan`、候选理由、拒绝理由和审美/品牌/商品可见性评分。主推款可见只是底线；如果 outfit 色块沉重、廓形失衡、品牌感不足或视觉上难看，即使商品露出也必须判定失败。
+Gemini 在 `AI Stylist` 阶段应被当作造型总监，而不是简单分类器或全库搜索引擎。它可以探索多套搭配方案，但必须基于候选漏斗提供的小候选集、真实候选图和 Lily 官方风格证据，交付结构化 `StylingPlan`、候选理由、拒绝理由和审美/品牌/商品可见性评分。主推款可见只是底线；如果 outfit 色块沉重、廓形失衡、品牌感不足或视觉上难看，即使商品露出也必须判定失败。
 
 ## 2. 要素总览
 
@@ -22,6 +22,8 @@ Gemini 在 `AI Stylist` 阶段应被当作造型总监，而不是简单分类�
 | 搭配服饰事实 | 被选中的配角服饰也必须商品级保真 |
 | 数字模特身份 | 保持同一位默认数字模特 |
 | 候选召回 | 从 READY 搭配服饰中压缩出可判断候选 |
+| 品牌样本库 | 保存 Lily 官方和客户确认的风格证据、配饰边界和未来 embedding |
+| 候选漏斗 | 从全量 READY 服饰压缩到少量候选和 outfit 草案 |
 | AI Stylist | 探索造型方向、生成多套 outfit、做审美和商品可见性自评 |
 | Aesthetic Critic | 判断 outfit 是否真正好看、符合 Lily、让主推款更有购买吸引力 |
 | StylingPlan | 保存选中方案、备选方案、穿着方式、评分、风险和理由 |
@@ -39,8 +41,10 @@ Gemini 在 `AI Stylist` 阶段应被当作造型总监，而不是简单分类�
 | 主推款理解 | AI Stylist | 主推款图片、品牌边界、商品拍摄验收维度 | Image-2、用户长 prompt |
 | 搭配服饰事实 | 搭配服饰图片 | 搭配服饰快照、短文本保真边界 | 生成配饰描述 |
 | 搭配服饰标签 | Gemini 按完整标签规程打标 + 后端校验/复核策略 | 人工业务 tags、调用快照 | Image-2 |
-| 候选召回 | 后端召回服务 | effective tags、未来 embedding、历史反馈 | Image-2 |
-| AI Stylist | Gemini 基于主推款图片和候选卡片生成多套 outfit 并自评 | Lily 品牌边界、商品主角原则、候选召回 | 单次 ID 选择器、Image-2 |
+| 品牌样本库 | 后端品牌样本服务 | Lily 官网/天猫/淘宝/官方社媒/客户 lookbook、未来 embedding | Gemini 临场编造品牌风格 |
+| 候选召回 | 后端召回服务 | effective tags、caption、未来 embedding、历史反馈 | Image-2、Gemini 全库搜索 |
+| 候选漏斗 | 后端排序和 outfit 草案服务 | 主推款理解、品牌样本、风险降权、兼容性 ranker | Gemini 直接看全量图库 |
+| AI Stylist | Gemini 基于主推款图片、小候选集、候选图和品牌证据生成多套 outfit 并自评 | Lily 品牌边界、商品主角原则、候选漏斗 | 单次 ID 选择器、Image-2、全库搜索 |
 | Aesthetic Critic | AI Stylist 必经质量门 | 色彩重量、廓形体量、季节材质、模板化风险、品牌采用可能性 | 后端硬编码大量审美 if/else、Image-2 事后补救 |
 | StylingPlan | AI Stylist 输出 + 后端校验 | 候选快照、被拒方案、评分、审美诊断、风险提示 | ShotPlan 像素反推 |
 | 数字模特 | 数字模特图片和参数快照 | 文本身份边界 | 模型默认人物 |
@@ -50,29 +54,40 @@ Gemini 在 `AI Stylist` 阶段应被当作造型总监，而不是简单分类�
 | 生成配饰 | StylingPlan/ShotPlan/prompt 文本边界 | 品牌模板参考 | 搭配服饰库商品事实 |
 | 历史复盘 | 快照和 attempt | provider request/response | 当前素材库最新状态 |
 
-## 4. 三层架构
+## 4. 分层架构
 
 ```mermaid
 flowchart LR
-  A["预处理层<br/>搭配服饰打标 / 媒体资产 / 数字模特"] --> B["召回层<br/>READY 候选压缩 / 风格与风险排序"]
-  B --> C["策划层<br/>AI Stylist / StylingPlan / ShotPlan"]
-  C --> D["生成层<br/>Image-2 六宫格 / 最终单图"]
+  A["预处理层<br/>搭配服饰打标 / 媒体资产 / 数字模特"] --> B["品牌与召回层<br/>Brand Style Index / READY 候选压缩 / 风格与风险排序"]
+  B --> C["候选漏斗层<br/>硬过滤 / 兼容性排序 / outfit 草案"]
+  C --> D0["策划层<br/>AI Stylist / StylingPlan / ShotPlan"]
+  D0 --> D["生成层<br/>Image-2 六宫格 / 最终单图"]
   D --> E["记录与恢复<br/>快照 / attempts / 反馈"]
 ```
 
 预处理层：
 
 - 搭配服饰上传和打标
+- 搭配服饰 caption、检索字段和未来 embedding
 - 媒体三层衍生图
 - 数字模特维护
 - 主推款输入版本冻结
+- Lily 官方和客户确认品牌样本维护
 
 召回层：
 
 - READY 状态过滤
 - 标签压缩
 - 品类、颜色、季节、风格、遮挡风险排序
+- 品牌样本相似度和配饰边界检索
 - 未来接入视觉 embedding、人工反馈、销售/点击数据
+
+候选漏斗层：
+
+- 主推款卖点和不可遮挡区域硬过滤
+- 风险降权和多样性保留
+- 3-8 套 outfit 草案
+- 12-20 件小候选集和必要候选图
 
 策划层：
 
@@ -105,6 +120,7 @@ flowchart LR
 
 - 不把用户训练成 prompt 工程师。
 - 不让 Image-2 从全库选择搭配服饰。
+- 不把全量搭配服饰库直接喂给 Gemini。
 - 不把 AI Stylist 降级成一次性 `selected_material_ids` 分类器。
 - 不把审美规则写死成大量 if/else；只保留真实性、可穿性、商品主角和状态合法性等生产边界。
 - 不把鞋包饰品当作商品级事实源，除非未来它们正式入库。

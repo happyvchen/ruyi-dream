@@ -506,6 +506,77 @@ class BackendSmokeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "高腰裤"):
             main.validate_styling_plan(plan, candidate_snapshot)
 
+    def test_candidate_funnel_caps_candidates_and_filters_conflicting_bottoms(self) -> None:
+        main = importlib.import_module("app.main")
+        input_row = {
+            "id": 1,
+            "task_id": 1,
+            "name_snapshot": "白色高腰阔腿裤",
+            "image_snapshot_json": "[]",
+        }
+        material_cards = [
+            {"id": 1, "code": "BOTTOM", "category": "bottom", "colors": ["white"], "wearability": {}, "risk": []},
+            {
+                "id": 2,
+                "code": "OUTER",
+                "category": "outerwear",
+                "colors": ["brown"],
+                "wearability": {"coverage_risk": "likely_cover_hero"},
+                "risk": ["too_heavy"],
+            },
+            {"id": 3, "code": "TOP", "category": "top", "colors": ["ivory"], "wearability": {}, "risk": []},
+            *[
+                {"id": index, "code": f"TOP-{index}", "category": "top", "colors": ["beige"], "wearability": {}, "risk": []}
+                for index in range(4, 30)
+            ],
+        ]
+
+        snapshot = main.build_candidate_retrieval_snapshot(input_row, material_cards)
+
+        self.assertEqual(snapshot["schema_version"], "candidate-retrieval-v2")
+        self.assertLessEqual(len(snapshot["material_cards"]), 20)
+        self.assertNotIn(1, snapshot["candidate_material_ids"])
+        self.assertIn(1, snapshot["source_material_ids"])
+        self.assertTrue(any(item["id"] == 1 and "same_bottom_category_excluded" in item["reasons"] for item in snapshot["filtered_out"]))
+        self.assertEqual(snapshot["outfit_drafts"][0]["selected_material_ids"], [])
+
+    def test_styling_plan_rejects_forbidden_briefcase_accessory_template(self) -> None:
+        main = importlib.import_module("app.main")
+        candidate_snapshot = {
+            "candidate_material_ids": [],
+            "material_cards": [],
+        }
+        plan = {
+            "selected_material_ids": [],
+            "selected_outfit_id": "candidate_a",
+            "outfit_candidates": [
+                {
+                    "id": "candidate_a",
+                    "selected_material_ids": [],
+                    "generated_accessories": ["棕色尖头高跟皮鞋", "米白色手提公文包"],
+                    "wearing_notes": "主推款单穿。",
+                    "aesthetic_diagnosis": {
+                        "color_weight": "色彩干净轻量。",
+                        "silhouette_balance": "主推款比例完整。",
+                        "waistline_proportion": "腰线清楚。",
+                        "season_material_fit": "材质季节匹配。",
+                        "template_risk": "没有套用完整通勤模板。",
+                        "brand_read": "符合 Lily 干净通勤调性。",
+                    },
+                    "scores": {
+                        "aesthetic_score": 0.9,
+                        "brand_fit_score": 0.9,
+                        "hero_visibility_score": 0.9,
+                        "commercial_readiness_score": 0.9,
+                    },
+                    "risk_notes": [],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "模板化配饰"):
+            main.validate_styling_plan(plan, candidate_snapshot)
+
     def test_schema_migrations_are_recorded(self) -> None:
         config = importlib.import_module("app.config")
         config.get_settings.cache_clear()

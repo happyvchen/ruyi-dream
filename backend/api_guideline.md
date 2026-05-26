@@ -185,8 +185,8 @@ Authorization: Bearer <token>
 输入职责：
 
 - 冻结当前主推款图片和任务名，创建 `GenerationTaskInputVersion`。
-- 读取当前 READY 搭配服饰，生成 `candidate_retrieval_snapshot`。
-- 向 AI Stylist 提供主推款图片、候选卡片、Lily 品牌边界、Aesthetic Critic 维度和商品主角验收维度。
+- 读取当前 READY 搭配服饰，生成 `candidate_retrieval_snapshot`。当前实现使用 `candidate-retrieval-v2 / candidate_funnel_v1`，先做互斥品类过滤、风险降权、多样性保留和 Top 小候选集。
+- 向 AI Stylist 提供主推款图片、候选卡片、Top 候选主图、outfit 草案、品牌边界证据、受控配饰边界、Aesthetic Critic 维度和商品主角验收维度。
 
 输出字段应包含：
 
@@ -210,6 +210,7 @@ Authorization: Bearer <token>
       ],
       "selected_outfit_id": "candidate_a",
       "selected_material_ids": [],
+      "brand_evidence": [],
       "rejected_candidates": [],
       "warnings": []
     }
@@ -225,12 +226,13 @@ Authorization: Bearer <token>
 - 明显互斥穿搭必须有 `wearing_notes` 解释，否则视为失败。
 - `aesthetic_score`、`brand_fit_score`、`hero_visibility_score` 或 `commercial_readiness_score` 任一低于生产阈值时，不自动进入预览。
 - 主推款可见但搭配沉闷、笨重、比例失衡或不符合 Lily 调性时，仍应判定为选搭失败。
+- 生成配饰不得使用公文包、大体量托特等传统办公室模板化配饰。
 
 技术详情必须保存：
 
 - 主推款输入快照。
-- 候选召回快照。
-- 传给 AI Stylist 的 material cards。
+- 候选漏斗快照。
+- 传给 AI Stylist 的 material cards、outfit 草案、品牌证据和配饰边界。
 - 完整 prompt / 任务说明。
 - AI Stylist 每一步响应或一次性返回的分步结构。
 - 最终 `StylingPlan`、Aesthetic Critic 诊断、被拒方案和评分。

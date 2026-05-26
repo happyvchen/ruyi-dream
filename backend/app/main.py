@@ -4539,6 +4539,7 @@ def build_effective_tags(ai_tags: dict[str, Any], official_title_tags: dict[str,
         "colors": [value for value in [colors.get("primary"), *(colors.get("secondary") or [])] if value],
         "fit": ai_tags.get("fit", "unknown"),
         "silhouette": ai_tags.get("silhouette", []),
+        "length": ai_tags.get("length", {}),
         "materials_visual": ai_tags.get("materials_visual", []),
         "details": ai_tags.get("details", []),
         "patterns": ai_tags.get("patterns", []),
@@ -4559,6 +4560,9 @@ def compress_tags_for_styling(row: Any) -> dict[str, Any]:
     if not effective:
         effective = build_effective_tags(loads(row["ai_tags_json"], {}), {}, loads(row["manual_tags_json"], {}))
     manual = effective.get("manual") if isinstance(effective.get("manual"), dict) else {}
+    wearability = effective.get("wearability") if isinstance(effective.get("wearability"), dict) else {}
+    length = effective.get("length") if isinstance(effective.get("length"), dict) else {}
+    cover_asset = serialize_cover_asset(row) if "cover_key" in row.keys() else None
     return {
         "id": row["id"],
         "code": row["code"],
@@ -4567,11 +4571,16 @@ def compress_tags_for_styling(row: Any) -> dict[str, Any]:
         "colors": effective.get("colors", []),
         "fit": effective.get("fit", "unknown"),
         "silhouette": effective.get("silhouette", []),
+        "length": {
+            "top_length": length.get("top_length", "unknown"),
+            "sleeve_length": length.get("sleeve_length", "unknown"),
+            "bottom_length": length.get("bottom_length", "unknown"),
+        },
         "materials_visual": effective.get("materials_visual", []),
         "details": effective.get("details", []),
         "occasion": effective.get("occasion", []),
         "season": effective.get("season", []),
-        "wearability": effective.get("wearability", {}),
+        "wearability": wearability,
         "manual": {
             "season_year": manual.get("season_year"),
             "series": manual.get("series", []),
@@ -4579,7 +4588,20 @@ def compress_tags_for_styling(row: Any) -> dict[str, Any]:
         },
         "pairing_brief": effective.get("pairing_brief", ""),
         "risk": effective.get("risk", []),
+        "visual_caption": build_phase_one_visual_caption(effective),
+        "cover_asset": cover_asset,
     }
+
+
+def build_phase_one_visual_caption(effective: dict[str, Any]) -> str:
+    parts = [
+        str(effective.get("category") or ""),
+        "/".join(str(color) for color in (effective.get("colors") if isinstance(effective.get("colors"), list) else [])[:3]),
+        str(effective.get("fit") or ""),
+        "/".join(str(item) for item in (effective.get("materials_visual") if isinstance(effective.get("materials_visual"), list) else [])[:3]),
+        str(effective.get("pairing_brief") or ""),
+    ]
+    return "，".join(part for part in parts if part)[:160]
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -4807,9 +4829,23 @@ async def select_styling_with_gemini(task_id: int, input_version_id: int) -> tup
         input_row = db.execute("SELECT * FROM generation_task_input_versions WHERE id = ?", (input_version_id,)).fetchone()
         material_rows = db.execute(
             """
-            SELECT id, code, ai_tags_json, manual_tags_json, effective_tags_json
-            FROM styling_garments
-            WHERE deleted_at IS NULL AND status = 'READY'
+            SELECT sg.id, sg.code, sg.ai_tags_json, sg.manual_tags_json, sg.effective_tags_json,
+              (SELECT ma.id FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_asset_id,
+              (SELECT ma.object_key FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_key,
+              (SELECT ma.original_filename FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_filename,
+              (SELECT ma.mime_type FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_mime_type,
+              (SELECT ma.width FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_width,
+              (SELECT ma.height FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_height,
+              (SELECT ma.size_bytes FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_size_bytes
+            FROM styling_garments sg
+            WHERE sg.deleted_at IS NULL AND sg.status = 'READY'
             ORDER BY updated_at DESC, id DESC
             """
         ).fetchall()
@@ -4831,11 +4867,13 @@ async def select_styling_with_gemini(task_id: int, input_version_id: int) -> tup
 1. 搭配服饰服务主推款，而不是主推款服务整套造型。
 2. 可以发挥审美自主性，探索多套 outfit，但必须保持商品生产可用。
 3. 主推款必须是视觉中心。搭配服饰、鞋包饰品不能遮挡或抢走主推款卖点。
-4. 只能从 candidate_retrieval.material_cards 中选择 READY 服饰 ID。允许 selected_material_ids 为空。
-5. 鞋、包、饰品只能作为 generated_accessories 文字描述，不作为库内商品级事实。
-6. 如果选择多个可能互斥的服饰，必须在 wearing_notes 中说明真实可穿方式，否则不要选择。
-7. 商品可见性只是底线，不是充分条件；如果 outfit 沉闷、笨重、廉价、比例失衡、色块压迫、模板化或不符合 Lily 调性，即使主推款露出也必须拒绝。
-8. 候选库没有真正提升主推款的配角服饰时，应选择空 selected_material_ids 或更轻量的单件配角，不要硬凑完整通勤 look。
+4. 只能从 candidate_retrieval.material_cards 这个小候选集中选择 READY 服饰 ID。允许 selected_material_ids 为空。
+5. 优先参考 candidate_retrieval.outfit_drafts，但你可以拒绝全部草案并选择更好的空配角方案。
+6. 鞋、包、饰品只能作为 generated_accessories 文字描述，不作为库内商品级事实；配饰可以为空。
+7. 不要默认生成项链、公文包、商务手提公文包、大体量托特包。需要包时必须小体量、侧拿/手持且不遮挡主推款。
+8. 如果选择多个可能互斥的服饰，必须在 wearing_notes 中说明真实可穿方式，否则不要选择。
+9. 商品可见性只是底线，不是充分条件；如果 outfit 沉闷、笨重、廉价、比例失衡、色块压迫、模板化或不符合 Lily 调性，即使主推款露出也必须拒绝。
+10. 候选库没有真正提升主推款的配角服饰时，应选择空 selected_material_ids 或更轻量的单件配角，不要硬凑完整通勤 look。
 
 Aesthetic Critic 必须检查：
 - color_weight: 上下身深浅和面积是否平衡，是否让主推款更高级。
@@ -4900,6 +4938,11 @@ candidate_retrieval:
         object_key = asset.get("objectKey")
         if object_key and object_exists(object_key):
             contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
+    for card in candidate_snapshot.get("material_cards", [])[:12]:
+        cover_asset = card.get("cover_asset") if isinstance(card, dict) and isinstance(card.get("cover_asset"), dict) else {}
+        object_key = cover_asset.get("objectKey")
+        if object_key and object_exists(object_key):
+            contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=cover_asset.get("mimeType") or "image/png"))
     try:
         client = genai.Client(api_key=settings.gemini_api_key)
         response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents)
@@ -4910,33 +4953,208 @@ candidate_retrieval:
 
 
 def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict[str, Any]]) -> dict[str, Any]:
-    cards = sorted(material_cards, key=candidate_priority_key)
+    hero_profile = infer_hero_profile(input_row)
+    ranked_cards = rank_candidate_materials(hero_profile, material_cards)
+    candidate_cards = select_diverse_candidate_cards(ranked_cards, limit=20)
+    outfit_drafts = build_outfit_drafts(candidate_cards, hero_profile)
+    filtered_out = [
+        {
+            "id": int(item["card"]["id"]),
+            "code": item["card"].get("code"),
+            "reasons": item["reasons"],
+        }
+        for item in ranked_cards
+        if item["excluded"]
+    ][:40]
     return {
-        "schema_version": "candidate-retrieval-v1",
-        "strategy": "tag_based_priority",
+        "schema_version": "candidate-retrieval-v2",
+        "strategy": "candidate_funnel_v1",
         "input_version_id": int(input_row["id"]),
         "source_material_ids": [int(card["id"]) for card in material_cards],
-        "candidate_material_ids": [int(card["id"]) for card in cards],
-        "material_cards": cards,
+        "candidate_material_ids": [int(card["id"]) for card in candidate_cards],
+        "candidate_pool_size": len([item for item in ranked_cards if not item["excluded"]]),
+        "candidate_limit": 20,
+        "hero_profile": hero_profile,
+        "material_cards": candidate_cards,
+        "outfit_drafts": outfit_drafts,
+        "filtered_out": filtered_out,
+        "brand_style_evidence": build_phase_one_brand_style_evidence(hero_profile),
+        "accessory_boundary": build_accessory_boundary(),
         "notes": [
-            "MVP 使用 READY tags 召回和多样性排序；后续可接入 embedding、人工反馈和销售/点击数据。",
+            "Phase 1 使用硬过滤、风险降权、多样性保留和 outfit 草案压缩 READY 搭配库。",
+            "Gemini 只接收小候选集、候选缩略图、草案和品牌边界；后续可接入 embedding、品牌样本库和反馈排序。",
         ],
     }
 
 
-def candidate_priority_key(card: dict[str, Any]) -> tuple[int, str]:
+def infer_hero_profile(input_row: Any) -> dict[str, Any]:
+    name = str(input_row["name_snapshot"] if "name_snapshot" in input_row.keys() else "").strip()
+    text = name.lower()
+    is_bottom = any(keyword in name for keyword in ("裤", "半裙", "裙裤", "阔腿", "直筒裤")) or any(
+        keyword in text for keyword in ("pants", "trouser", "skirt", "bottom")
+    )
+    is_dress = any(keyword in name for keyword in ("连衣裙", "裙装")) or "dress" in text
+    is_top = any(keyword in name for keyword in ("衬衫", "上衣", "针织", "t恤", "T恤")) or any(
+        keyword in text for keyword in ("shirt", "blouse", "top", "knit")
+    )
+    category = "bottom" if is_bottom else "dress" if is_dress else "top" if is_top else "unknown"
+    high_waist = any(keyword in name for keyword in ("高腰", "腰头", "裤腰", "腰带", "褶裥", "阔腿"))
+    light_color = any(keyword in name for keyword in ("白", "米白", "象牙", "浅", "ivory", "white", "beige"))
+    selling_points = []
+    if high_waist:
+        selling_points.extend(["腰线", "腰头细节"])
+    if any(keyword in name for keyword in ("阔腿", "垂坠")):
+        selling_points.append("裤腿垂坠")
+    if not selling_points:
+        selling_points.append("主推款整体轮廓")
+    visibility_risks = ["腰线遮挡", "配角体量压过主推款"] if category in {"bottom", "dress"} else ["领口或门襟遮挡", "配角抢走视觉中心"]
+    return {
+        "source": "task_name_phase_one_heuristic",
+        "name_snapshot": name,
+        "category": category,
+        "is_high_waist_or_waist_focus": high_waist,
+        "is_light_colored": light_color,
+        "selling_points": selling_points[:6],
+        "visibility_risks": visibility_risks,
+    }
+
+
+def rank_candidate_materials(hero_profile: dict[str, Any], material_cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ranked = []
+    for card in material_cards:
+        score, reasons, excluded = score_candidate_card(hero_profile, card)
+        ranked.append({"card": {**card, "funnel_score": round(score, 3), "funnel_reasons": reasons}, "score": score, "reasons": reasons, "excluded": excluded})
+    return sorted(ranked, key=lambda item: (item["excluded"], -float(item["score"]), str(item["card"].get("code") or "")))
+
+
+def score_candidate_card(hero_profile: dict[str, Any], card: dict[str, Any]) -> tuple[float, list[str], bool]:
     category = str(card.get("category") or "")
     risk = card.get("risk") if isinstance(card.get("risk"), list) else []
     wearability = card.get("wearability") if isinstance(card.get("wearability"), dict) else {}
     coverage_risk = str(wearability.get("coverage_risk") or "")
-    penalty = 0
+    colors = card.get("colors") if isinstance(card.get("colors"), list) else []
+    length = card.get("length") if isinstance(card.get("length"), dict) else {}
+    silhouette = card.get("silhouette") if isinstance(card.get("silhouette"), list) else []
+    score = 1.0
+    reasons: list[str] = []
+    excluded = False
+    hero_category = str(hero_profile.get("category") or "unknown")
+    if category in {"unsupported_accessory", "unknown"}:
+        score -= 0.45
+        reasons.append("category_low_confidence")
+    if hero_category == "bottom" and category == "bottom":
+        score -= 1.0
+        excluded = True
+        reasons.append("same_bottom_category_excluded")
+    if hero_category == "dress" and category in {"bottom", "dress", "jumpsuit", "suit_set"}:
+        score -= 1.0
+        excluded = True
+        reasons.append("dress_conflicting_category_excluded")
+    if hero_category == "top" and category == "top":
+        score -= 0.6
+        reasons.append("same_top_category_downranked")
     if category == "outerwear":
-        penalty += 2
+        score -= 0.2
+        reasons.append("outerwear_needs_visibility_check")
     if coverage_risk in {"may_cover_hero", "likely_cover_hero"}:
-        penalty += 3
+        score -= 0.35 if coverage_risk == "may_cover_hero" else 0.55
+        reasons.append(f"coverage_risk_{coverage_risk}")
     if any(str(item) != "none" for item in risk):
-        penalty += 1
-    return (penalty, str(card.get("code") or ""))
+        score -= 0.16
+        reasons.append("style_risk")
+    if hero_profile.get("is_high_waist_or_waist_focus"):
+        if category == "outerwear":
+            score -= 0.2
+            reasons.append("waist_focus_outerwear_downranked")
+        if str(length.get("top_length") or "") == "long":
+            score -= 0.25
+            reasons.append("long_top_may_cover_waist")
+    dark_colors = {"black", "brown", "navy", "grey"}
+    if hero_profile.get("is_light_colored") and category in {"top", "outerwear", "knitwear"} and any(str(color) in dark_colors for color in colors):
+        score -= 0.12
+        reasons.append("dark_upper_against_light_hero")
+    if category in {"top", "knitwear"}:
+        score += 0.18
+        reasons.append("upper_pairing_candidate")
+    if category == "outerwear" and "waist_defined" in silhouette:
+        score += 0.08
+        reasons.append("structured_layer_candidate")
+    return max(0.0, score), reasons or ["neutral_candidate"], excluded
+
+
+def select_diverse_candidate_cards(ranked_cards: list[dict[str, Any]], limit: int = 20) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    category_counts: dict[str, int] = {}
+    for item in ranked_cards:
+        if item["excluded"]:
+            continue
+        card = item["card"]
+        category = str(card.get("category") or "unknown")
+        if category_counts.get(category, 0) >= 8 and len(selected) < max(12, limit // 2):
+            continue
+        selected.append(card)
+        category_counts[category] = category_counts.get(category, 0) + 1
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def build_outfit_drafts(candidate_cards: list[dict[str, Any]], hero_profile: dict[str, Any]) -> list[dict[str, Any]]:
+    drafts: list[dict[str, Any]] = [
+        {
+            "id": "draft_hero_first",
+            "mode": "hero_first_single_piece",
+            "selected_material_ids": [],
+            "generated_accessories": ["低存在感裸色或米色简洁鞋"],
+            "reason": "当候选配角无法提升主推款时，保留主推款单品表达。",
+            "risk_notes": ["需要 Gemini 判断是否略显单薄。"],
+        }
+    ]
+    for card in candidate_cards[:6]:
+        category = str(card.get("category") or "unknown")
+        mode = "light_layering" if category == "outerwear" else "office_outfit" if category in {"top", "knitwear"} else "tonal_outfit"
+        drafts.append(
+            {
+                "id": f"draft_{card.get('id')}",
+                "mode": mode,
+                "selected_material_ids": [int(card["id"])],
+                "generated_accessories": ["低存在感裸色或米色简洁鞋"],
+                "reason": str(card.get("pairing_brief") or "候选单品需服务主推款展示。")[:120],
+                "risk_notes": ensure_string_list(card.get("funnel_reasons"))[:5],
+            }
+        )
+        if len(drafts) >= 5:
+            break
+    return drafts
+
+
+def build_accessory_boundary() -> dict[str, Any]:
+    return {
+        "allow_empty": True,
+        "default": ["低存在感裸色或米色简洁鞋"],
+        "avoid_default": ["项链", "手提公文包", "商务公文包", "大体量托特包"],
+        "bag_rule": "默认无包；确有必要时只能小体量侧拿或手持，不遮挡腰线、裤褶、口袋、门襟。",
+        "jewelry_rule": "默认无项链；只允许极简耳饰或极低存在感首饰辅助氛围。",
+    }
+
+
+def build_phase_one_brand_style_evidence(hero_profile: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "phase1_lily_business_fashion",
+            "source_type": "phase_one_brand_boundary",
+            "visual_caption": "Lily 商务时装强调现代、干净、女性化剪裁和轻松高级的通勤表达。",
+            "brand_style_tags": ["商务时装", "现代简洁", "轻松高级", "女性化剪裁"],
+            "accessory_boundary": "配饰低存在感，不用传统公文包模板抢画面。",
+        },
+        {
+            "id": "phase1_hero_first_product",
+            "source_type": "phase_one_product_principle",
+            "visual_caption": "主推款必须是商品级视觉中心，配角只负责放大卖点。",
+            "brand_style_tags": ["商品主角", "比例清楚", *ensure_string_list(hero_profile.get("category"))[:1]],
+            "accessory_boundary": "包和首饰可省略。",
+        },
+    ]
 
 
 def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -4985,7 +5203,7 @@ def fallback_styling_plan(input_row: Any, candidate_snapshot: dict[str, Any], re
                 "id": "candidate_a",
                 "mode": "hero_first_single_piece",
                 "selected_material_ids": [],
-                "generated_accessories": ["低存在感通勤鞋", "小号通勤包"],
+                "generated_accessories": ["低存在感裸色或米色简洁鞋"],
                 "wearing_notes": "主推款作为画面唯一商品级服饰。",
                 "hero_focus": ["主推款整体轮廓", "主推款关键细节"],
                 "aesthetic_diagnosis": {
@@ -5051,6 +5269,7 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
         "outfit_candidates": normalized_candidates[:5],
         "selected_outfit_id": selected_outfit_id,
         "selected_material_ids": selected_ids,
+        "brand_evidence": normalize_brand_evidence(source.get("brand_evidence"), candidate_snapshot),
         "reason_summary": str(source.get("reason_summary") or "已根据主推款和搭配服饰标签完成 AI Stylist 造型方案。")[:180],
         "rejected_candidates": [
             {"id": str(item.get("id") or "")[:40], "reason": str(item.get("reason") or "")[:160]}
@@ -5059,6 +5278,24 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
         ][:5],
         "warnings": warnings[:8],
     }
+
+
+def normalize_brand_evidence(value: Any, candidate_snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    source = value if isinstance(value, list) else candidate_snapshot.get("brand_style_evidence")
+    evidence: list[dict[str, Any]] = []
+    for item in (source if isinstance(source, list) else []):
+        if not isinstance(item, dict):
+            continue
+        evidence.append(
+            {
+                "id": str(item.get("id") or "")[:80],
+                "source_type": str(item.get("source_type") or "")[:80],
+                "visual_caption": str(item.get("visual_caption") or "")[:180],
+                "brand_style_tags": ensure_string_list(item.get("brand_style_tags"))[:8],
+                "accessory_boundary": str(item.get("accessory_boundary") or "")[:180],
+            }
+        )
+    return evidence[:5]
 
 
 def normalize_outfit_candidate(candidate: dict[str, Any], candidate_ids: set[int], index: int) -> dict[str, Any]:
@@ -5149,6 +5386,8 @@ def validate_styling_plan(plan: dict[str, Any], candidate_snapshot: dict[str, An
         raise RuntimeError("AI Stylist 返回满分评分但缺少完整审美诊断和风险说明")
     if missing_diagnosis:
         raise RuntimeError(f"AI Stylist 方案缺少 Aesthetic Critic 审美诊断：{', '.join(missing_diagnosis)}")
+    if has_forbidden_accessory_template(selected_outfit):
+        raise RuntimeError("AI Stylist 方案使用了不符合 Lily 边界的模板化配饰")
     if has_high_waist_dark_outerwear_stack(selected_ids, candidate_snapshot, selected_outfit, plan):
         raise RuntimeError("AI Stylist 方案存在高腰裤搭配深色厚重外套组合，审美风险过高")
 
@@ -5160,6 +5399,21 @@ def has_unexplained_outerwear_conflict(selected_ids: list[int], candidate_snapsh
         return False
     notes = str(selected_outfit.get("wearing_notes") or "")
     return not any(keyword in notes for keyword in ("肩搭", "手持", "不同时穿", "备用", "其中一件"))
+
+
+def has_forbidden_accessory_template(selected_outfit: dict[str, Any]) -> bool:
+    accessories = " ".join(ensure_string_list(selected_outfit.get("generated_accessories"))).lower()
+    forbidden = [
+        "公文包",
+        "商务手提",
+        "手提公文",
+        "大体量托特",
+        "大号托特",
+        "briefcase",
+        "document bag",
+        "large tote",
+    ]
+    return any(keyword in accessories for keyword in forbidden)
 
 
 def has_high_waist_dark_outerwear_stack(selected_ids: list[int], candidate_snapshot: dict[str, Any], selected_outfit: dict[str, Any], plan: dict[str, Any]) -> bool:
