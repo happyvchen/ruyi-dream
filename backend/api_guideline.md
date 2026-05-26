@@ -34,7 +34,7 @@ Authorization: Bearer <token>
 ## 当前资源
 
 | Resource | Method | 说明 |
-|---|---|
+|---|---|---|
 | `/api/health` | GET | 健康检查；只返回非敏感 readiness 状态 |
 | `/api/styling-garments` | GET | 搭配服饰库列表，支持 `keyword` 搜索 |
 | `/api/styling-garments` | POST | 创建一套搭配服饰并上传 1-6 张图片 |
@@ -57,17 +57,17 @@ Authorization: Bearer <token>
 | `/api/generation-result-images-new/{image_id}/retry` | POST | 重试单张最终图 |
 | `/api/generation-records` | GET | 进入过 AI 阶段的生成记录列表 |
 | `/api/generation-records/{task_id}` | GET | 生成记录详情和技术快照 |
-| `/api/garment-skus` | GET | 货号图包列表 |
-| `/api/garment-skus` | POST | 上传一个货号图包和多张素材图 |
-| `/api/garment-skus/{sku_id}` | GET | 货号详情、素材图片、识别摘要 |
-| `/api/garment-skus/{sku_id}` | PATCH | 编辑货号、标题、状态 |
-| `/api/garment-skus/{sku_id}` | DELETE | 删除应用内素材副本；已有生成记录时禁止删除 |
-| `/api/garment-skus/{sku_id}/images` | GET | 分页读取该货号素材图片 |
-| `/api/garment-skus/{sku_id}/images` | POST | 给已有货号追加素材图 |
-| `/api/garment-skus/{sku_id}/latest-preview-run` | GET | 获取货号最新可用分镜预览任务，供切换货号时恢复预览 |
-| `/api/garment-images/{image_id}` | PATCH | 编辑单张图片角色和排序；当前 UI 不开放角色编辑 |
-| `/api/garment-images/{image_id}` | DELETE | 删除应用内图片副本；每个货号至少保留一张 |
-| `/api/media` | GET | 稳定媒体入口，按 `key` 和 `variant` 跳转到对象存储短期预签名 URL |
+| `/api/garment-skus` | GET | 旧版货号图包兼容列表；新版前台不作为主流程入口 |
+| `/api/garment-skus` | POST | 旧版货号图包上传兼容接口 |
+| `/api/garment-skus/{sku_id}` | GET | 旧版货号详情、素材图片、识别摘要 |
+| `/api/garment-skus/{sku_id}` | PATCH | 旧版货号编辑兼容接口 |
+| `/api/garment-skus/{sku_id}` | DELETE | 旧版货号归档/删除兼容接口；已有生成记录时禁止直接删除 |
+| `/api/garment-skus/{sku_id}/images` | GET | 旧版货号素材图片分页 |
+| `/api/garment-skus/{sku_id}/images` | POST | 旧版货号追加素材图 |
+| `/api/garment-skus/{sku_id}/latest-preview-run` | GET | 旧版分镜预览恢复兼容接口 |
+| `/api/garment-images/{image_id}` | PATCH | 旧版单张素材图角色和排序兼容接口；新版 UI 不开放角色编辑 |
+| `/api/garment-images/{image_id}` | DELETE | 旧版应用内图片副本删除接口；每个货号至少保留一张 |
+| `/api/media` | GET | 稳定媒体入口，仅允许数据库已登记的 media_assets 或旧版兼容媒体 key 跳转到对象存储短期预签名 URL |
 | `/api/model-profiles` | GET | 数字模特档案列表 |
 | `/api/model-profiles` | POST | 新建数字模特档案 |
 | `/api/model-profiles/{model_profile_id}` | PATCH | 编辑数字模特基础档案 |
@@ -76,19 +76,19 @@ Authorization: Bearer <token>
 | `/api/model-profiles/{model_profile_id}/head-references/{reference_id}` | PATCH | 修改头像角度或排序 |
 | `/api/model-profiles/{model_profile_id}/head-references/{reference_id}` | DELETE | 删除单张头像 |
 | `/api/model-profiles/{model_profile_id}/assets/{filename}` | GET | 跳转到模特头像素材的预签名访问 URL |
-| `/api/shot-plans` | POST | 根据货号和模特生成组图方案 |
-| `/api/shot-plans/{shot_plan_id}` | GET | 查看组图方案 |
-| `/api/garment-skus/{sku_id}/default-shot-plan` | GET | 获取货号默认组图方案，当前取最新一条 `shot_plans` |
-| `/api/generation-runs` | POST | 根据组图方案创建生成批次，并提交每张图到后台生成队列 |
-| `/api/generation-runs` | GET | 生成批次列表；返回前台历史任务摘要、缩略图和重生次数 |
-| `/api/generation-runs/{run_id}` | GET | 生成批次详情和单张结果 |
-| `/api/generation-runs/{run_id}/status` | GET | 生成中轮询使用的轻量状态接口 |
-| `/api/generation-runs/{run_id}` | DELETE | 归档生成记录；隐藏列表项但保留数据库记录、对象 key 和事件日志 |
-| `/api/generation-runs/{run_id}/cancel` | POST | 取消该批次中仍处于 active 状态的图片任务 |
-| `/api/generation-images/{image_id}/regenerate` | POST | 单张重生；不新增生成任务记录，在同一记录追加 attempt |
-| `/api/generation-images/{image_id}/cancel` | POST | 取消单张 active 图片任务 |
-| `/api/generation-images/{image_id}/final` | PATCH | 设置/取消最终图 |
-| `/api/generation-images/{image_id}/review` | PATCH | 设置业务审核/交付状态 |
+| `/api/shot-plans` | POST | 旧版货号组图方案兼容接口；新版 ShotPlan 由 `generation-tasks/{id}/preview` 生成 |
+| `/api/shot-plans/{shot_plan_id}` | GET | 旧版组图方案查看接口 |
+| `/api/garment-skus/{sku_id}/default-shot-plan` | GET | 旧版货号默认组图方案兼容接口 |
+| `/api/generation-runs` | POST | 旧版生成批次兼容接口；新版前台使用 `generation-tasks` |
+| `/api/generation-runs` | GET | 旧版生成批次列表兼容接口 |
+| `/api/generation-runs/{run_id}` | GET | 旧版生成批次详情和单张结果 |
+| `/api/generation-runs/{run_id}/status` | GET | 旧版生成中轮询轻量状态接口 |
+| `/api/generation-runs/{run_id}` | DELETE | 旧版生成记录归档接口 |
+| `/api/generation-runs/{run_id}/cancel` | POST | 旧版 active 图片任务取消接口 |
+| `/api/generation-images/{image_id}/regenerate` | POST | 旧版单张重生兼容接口 |
+| `/api/generation-images/{image_id}/cancel` | POST | 旧版单张 active 图片任务取消接口 |
+| `/api/generation-images/{image_id}/final` | PATCH | 旧版设置/取消最终图 |
+| `/api/generation-images/{image_id}/review` | PATCH | 旧版业务审核/交付状态 |
 | `/api/logs` | GET | 事件日志 |
 | `/api/exports/runs/{run_id}` | POST | 打包导出该 run 的最终图或全部图 |
 
@@ -96,7 +96,7 @@ Authorization: Bearer <token>
 
 新版前台“生成记录”列表使用 `/api/generation-records`，不是直接展示 `/api/logs`。旧版 `/api/generation-runs` 和 `/api/garment-skus` 仍作为兼容接口保留，不能作为新版页面主流程依据。`event_logs` 仍用于排查和审计。
 
-新版任务在调用 `select-styling` 时冻结主推款图片和默认数字模特快照。后端先生成候选召回快照，再调用 AI Stylist 输出 `StylingPlan`。六宫格与最终成片只读取该输入版本、`StylingPlan` 以及选搭快照；已成功的选搭、六宫格预览和整组成片允许重新生成，新结果设为当前 active 版本，历史结果继续保留用于追溯。部分失败仍支持单张结果图重试恢复。
+新版任务在调用 `select-styling` 时冻结主推款图片和默认数字模特快照。后端先生成候选召回快照，再调用 AI Stylist 输出 `StylingPlan`。六宫格与最终成片只读取该输入版本、`StylingPlan` 以及选搭快照。成功后是否允许整阶段重新选搭、重新预览或重新生成成片仍是产品决策项；当前代码暂时允许并保留历史结果用于追溯。部分失败支持单张结果图重试恢复。
 
 写接口在 cookie 会话下会校验 `Origin` / `Referer` 是否属于 `BACKEND_CORS_ORIGINS`，脚本调用应使用可选的 `APP_API_ACCESS_TOKEN`。
 
@@ -125,7 +125,7 @@ Authorization: Bearer <token>
 
 ### 轻量状态接口
 
-生成中页面轮询 `GET /api/generation-runs/{run_id}/status`。该接口只返回任务基础字段和每张图的状态、展示 URL、审核/最终图等前台必要字段，不返回任务包、provider 原始响应或 attempt 明细。
+新版生成中页面轮询 `GET /api/generation-tasks/{task_id}`，响应默认只返回业务所需的任务、AI 操作摘要、预览和结果图信息；候选召回、provider 原始响应和完整 attempt 明细仅在 `includeDebug=true` 时返回。旧版 `GET /api/generation-runs/{run_id}/status` 只服务兼容页面和旧记录。
 
 当前支持分页的接口：
 
@@ -133,6 +133,9 @@ Authorization: Bearer <token>
 |---|---|
 | `GET /api/garment-skus` | `includeArchived`、`limit`、`offset`、`keyword` |
 | `GET /api/garment-skus/{sku_id}/images` | `limit`、`offset` |
+| `GET /api/styling-garments` | `limit`、`offset`、`keyword` |
+| `GET /api/generation-tasks` | `limit`、`offset` |
+| `GET /api/generation-records` | `limit`、`offset` |
 | `GET /api/model-profiles` | `limit`、`offset`、`keyword` |
 | `GET /api/generation-runs` | `includeArchived`、`limit`、`offset`、`skuId`、`keyword` |
 
@@ -238,6 +241,8 @@ Authorization: Bearer <token>
 - 最终 `StylingPlan`、Aesthetic Critic 诊断、被拒方案和评分。
 
 ## 旧版服装素材 CRUD 契约
+
+本节记录 `garment-skus` / `shot-plans` / `generation-runs` 兼容接口，便于旧数据维护、历史导出和回归测试。新版前台主流程以 `styling-garments`、`generation-tasks`、`generation-records` 为准。
 
 ### 上传与默认方案
 
@@ -592,7 +597,7 @@ SUBMITTED / IN_QUEUE / IN_PROGRESS / SUCCEEDED / FAILED
 
 `GET /api/generation-runs/{run_id}`
 
-详情页、恢复历史任务和排查场景使用该接口，而不是直接轮询 fal。默认响应为轻量业务字段；内部调试字段仅在 `includeDebug=true` 时返回。生成中高频刷新应使用 `GET /api/generation-runs/{run_id}/status`。
+旧版详情页、恢复历史任务和排查场景使用该接口，而不是直接轮询 provider。默认响应为轻量业务字段；内部调试字段仅在 `includeDebug=true` 时返回。旧版生成中高频刷新应使用 `GET /api/generation-runs/{run_id}/status`。
 
 ```json
 {
@@ -638,9 +643,9 @@ GENERATION_POLL_INTERVAL_SECONDS=5
 
 控制。poller 会先扫描 `QUEUED` 且尚无 `provider_request_id` 的图片并提交当前 Image-2 provider；随后扫描状态为 `SUBMITTED`、`IN_QUEUE`、`IN_PROGRESS`、`RUNNING` 且有 `provider_request_id` 的任务，调用 provider status URL 获取真实状态。页面刷新不影响后台提交和状态推进。
 
-fal 状态映射：
+provider 状态映射示例：
 
-| fal 状态 | 本地 `GenerationImage.status` |
+| provider 状态 | 本地 `GenerationImage.status` |
 |---|---|
 | `IN_QUEUE` | `IN_QUEUE` |
 | `IN_PROGRESS` | `IN_PROGRESS` |
@@ -648,7 +653,7 @@ fal 状态映射：
 | `FAILED` / `ERROR` | `FAILED` |
 | `CANCELED` / `CANCELLED` | `CANCELLED` |
 
-完成后，后端使用 fal `response_url` 获取结果，并下载第一张图片写入 `output_path` 对象 key，同时生成 `thumb` / `preview` 衍生图。
+完成后，后端通过当前 provider adapter 获取结果，并下载第一张图片写入 `output_path` 对象 key，同时生成 `thumb` / `preview` 衍生图。
 
 ### 单张重生
 
@@ -668,7 +673,7 @@ fal 状态映射：
 - 读取原 `task_package_json`。
 - 写入 `regeneration.reason` 和 `regeneration.note`。
 - 重新合成中文 prompt。
-- 提交新的 fal queue request。
+- 提交新的当前 provider request。
 - 不新增 `generation_images` 记录。
 - 在原记录 `attempts_json` 中追加 attempt。
 - 更新当前 `output_path`、`provider_request_id`、`provider_status`、provider 快照和状态。

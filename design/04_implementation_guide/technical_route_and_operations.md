@@ -145,7 +145,7 @@ AI Stylist 造型方案结果：
 
 `selected_material_ids_json` 只是从 `StylingPlan` 派生出的关系索引，用于素材快照、查询和前端卡片展示，不是选搭阶段的完整结果。生产排查和后续 ShotPlan 必须读取 `styling_plan_json`。
 
-MVP 不支持成功后重新搭配。失败重试可以新增 attempt 并更新当前 styling 状态。
+成功后是否允许重新搭配仍是待拍板决策；当前代码暂时允许重新选搭并保留历史结果。失败重试可以新增 attempt 并更新当前 styling 状态。
 
 ### 2.6.1 StylingGarmentRetrievalFeature
 
@@ -488,7 +488,7 @@ GET    /api/generation-records/{taskId}?includeDebug=true
 ## 7. 实现注意
 
 - 所有状态推进由后端服务完成，前端不直接写阶段状态。
-- 成功后的“重新搭配 / 重新预览 / 整组换版”不进 MVP。
+- 成功后的“重新搭配 / 重新预览 / 整组换版”策略待产品拍板；当前代码暂时允许整阶段重跑，若决定禁止需同步前后端状态机。
 - 失败重试必须保留旧 attempt。
 - `ImageCount` 不作为强字段，界面需要时统计。
 - 生成记录默认隐藏技术详情。

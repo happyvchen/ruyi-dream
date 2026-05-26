@@ -2146,20 +2146,17 @@ def get_media(key: str = Query(...), variant: str = Query("original")) -> Redire
     object_key = clean_key(key)
     if variant not in {"thumb", "preview", "original"}:
         raise HTTPException(status_code=400, detail="图片规格不合法")
-    with get_db() as db:
-        asset = db.execute(
-            """
-            SELECT object_key, thumb_key, preview_key FROM media_assets
-            WHERE object_key = ? OR thumb_key = ? OR preview_key = ?
-            """,
-            (object_key, object_key, object_key),
-        ).fetchone()
-    if not asset:
+    media_keys = registered_media_keys(object_key)
+    if not media_keys:
         raise HTTPException(status_code=404, detail="图片不存在")
-    object_key = clean_key(asset["object_key"])
+    object_key = media_keys["object_key"]
     target_key = object_key
     if variant in {"thumb", "preview"}:
-        target_key = existing_derivative_or_original(object_key, variant) or object_key
+        registered_variant_key = media_keys.get(f"{variant}_key")
+        if registered_variant_key and object_exists(registered_variant_key):
+            target_key = registered_variant_key
+        else:
+            target_key = existing_derivative_or_original(object_key, variant) or object_key
     if not object_exists(target_key):
         raise HTTPException(status_code=404, detail="图片不存在")
     url = presigned_get_url(target_key)
@@ -2172,6 +2169,50 @@ def get_media(key: str = Query(...), variant: str = Query("original")) -> Redire
             "Pragma": "no-cache",
         },
     )
+
+
+def registered_media_keys(object_key: str) -> dict[str, str | None] | None:
+    with get_db() as db:
+        asset = db.execute(
+            """
+            SELECT object_key, thumb_key, preview_key FROM media_assets
+            WHERE object_key = ? OR thumb_key = ? OR preview_key = ?
+            """,
+            (object_key, object_key, object_key),
+        ).fetchone()
+        if asset:
+            return {
+                "object_key": clean_key(asset["object_key"]),
+                "thumb_key": clean_key(asset["thumb_key"]) if asset["thumb_key"] else None,
+                "preview_key": clean_key(asset["preview_key"]) if asset["preview_key"] else None,
+            }
+        legacy_garment = db.execute(
+            """
+            SELECT storage_path, thumb_path, preview_path FROM garment_images
+            WHERE storage_path = ? OR thumb_path = ? OR preview_path = ?
+            """,
+            (object_key, object_key, object_key),
+        ).fetchone()
+        if legacy_garment:
+            return {
+                "object_key": clean_key(legacy_garment["storage_path"]),
+                "thumb_key": clean_key(legacy_garment["thumb_path"]) if legacy_garment["thumb_path"] else None,
+                "preview_key": clean_key(legacy_garment["preview_path"]) if legacy_garment["preview_path"] else None,
+            }
+        legacy_generation = db.execute(
+            """
+            SELECT output_path, thumb_path, preview_path FROM generation_images
+            WHERE output_path = ? OR thumb_path = ? OR preview_path = ?
+            """,
+            (object_key, object_key, object_key),
+        ).fetchone()
+        if legacy_generation:
+            return {
+                "object_key": clean_key(legacy_generation["output_path"]),
+                "thumb_key": clean_key(legacy_generation["thumb_path"]) if legacy_generation["thumb_path"] else None,
+                "preview_key": clean_key(legacy_generation["preview_path"]) if legacy_generation["preview_path"] else None,
+            }
+    return None
 
 
 @app.post("/api/shot-plans")

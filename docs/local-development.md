@@ -7,7 +7,7 @@
 ```bash
 cd /Users/fushuai/GitRepository/ruyi-dream
 cp .env.example .env
-# 编辑根目录 .env，至少设置 RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY
+# 编辑根目录 .env，至少设置 APP_S3_ACCESS_KEY_ID / APP_S3_SECRET_ACCESS_KEY
 docker compose up -d rustfs
 ```
 
@@ -43,9 +43,9 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```env
 APP_S3_ENDPOINT_URL=http://127.0.0.1:9000
 APP_S3_PUBLIC_ENDPOINT_URL=http://127.0.0.1:9000
-APP_STORAGE_BUCKET=ruyi-dream
-RUSTFS_ACCESS_KEY=admin
-RUSTFS_SECRET_KEY=change-me
+APP_S3_BUCKET=ruyi-dream
+APP_S3_ACCESS_KEY_ID=admin
+APP_S3_SECRET_ACCESS_KEY=change-me
 APP_GATE_PASSWORD=local-dev-password
 APP_GATE_PASSWORD_HASH=
 APP_SESSION_SECRET=local-dev-session-secret-change-me
@@ -60,12 +60,14 @@ BACKEND_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 
 `APP_SESSION_COOKIE_SECURE=false` 适用于本地 HTTP。只有当前端通过 HTTPS 访问时，才应设置为 `true`。
 
-历史 RustFS 数据要求 `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` 与创建数据目录时一致，否则旧素材和生成图可能无法访问。
+历史 RustFS 数据要求对象存储 access key / secret key 与创建数据目录时一致。新配置优先使用 `APP_S3_ACCESS_KEY_ID` / `APP_S3_SECRET_ACCESS_KEY`，旧 `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` 仅作为兼容别名。
 
 需要真实策划和生图时再补：
 
 ```env
 GEMINI_API_KEY=
+GPT_IMAGE2_PROVIDER=toapis
+TOAPIS_API_KEY=
 FAL_KEY=
 ```
 
@@ -140,7 +142,7 @@ npm run dev
 ```bash
 cd /Users/fushuai/GitRepository/ruyi-dream
 cp .env.example .env
-# 编辑 .env，设置 RustFS 密钥、PUBLIC_BACKEND_URL、PUBLIC_S3_URL、GEMINI_API_KEY、FAL_KEY
+# 编辑 .env，设置对象存储密钥、PUBLIC_BACKEND_URL、PUBLIC_S3_URL、GEMINI_API_KEY、TOAPIS_API_KEY
 docker compose up -d --build
 docker compose ps
 ```

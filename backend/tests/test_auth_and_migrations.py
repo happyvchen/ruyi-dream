@@ -112,6 +112,72 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertNotIn("max-age=3600", response.headers["cache-control"])
         self.assertEqual(response.headers["pragma"], "no-cache")
 
+    def test_media_redirect_allows_registered_legacy_media_keys(self) -> None:
+        from fastapi.testclient import TestClient
+
+        main = importlib.import_module("app.main")
+        db_module = importlib.import_module("app.db")
+        client = TestClient(main.app)
+        self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+        db_module.init_db()
+        timestamp = db_module.now_iso()
+        with db_module.get_db() as db:
+            sku_id = db.execute(
+                "INSERT INTO garment_skus (sku, storage_path, status, created_at, updated_at) VALUES ('LEGACY', 'uploads/legacy', 'NEW', ?, ?)",
+                (timestamp, timestamp),
+            ).lastrowid
+            db.execute(
+                """
+                INSERT INTO garment_images
+                  (sku_id, filename, storage_path, thumb_path, preview_path, mime_type, created_at)
+                VALUES (?, 'legacy.jpg', 'uploads/legacy/original.jpg', 'uploads/legacy/thumb.webp',
+                        'uploads/legacy/preview.webp', 'image/jpeg', ?)
+                """,
+                (sku_id, timestamp),
+            )
+            model_id = db.execute("SELECT id FROM model_profiles ORDER BY id LIMIT 1").fetchone()["id"]
+            shot_plan_id = db.execute(
+                """
+                INSERT INTO shot_plans
+                  (sku_id, model_profile_id, status, plan_json, planner_provider, created_at, updated_at)
+                VALUES (?, ?, 'DRAFT', '{}', 'test', ?, ?)
+                """,
+                (sku_id, model_id, timestamp, timestamp),
+            ).lastrowid
+            run_id = db.execute(
+                """
+                INSERT INTO generation_runs
+                  (sku_id, shot_plan_id, model_profile_id, status, kind, output_dir, created_at, updated_at)
+                VALUES (?, ?, ?, 'SUCCEEDED', 'group', 'outputs/legacy', ?, ?)
+                """,
+                (sku_id, shot_plan_id, model_id, timestamp, timestamp),
+            ).lastrowid
+            db.execute(
+                """
+                INSERT INTO generation_images
+                  (run_id, shot_index, title, status, output_path, thumb_path, preview_path, task_package_json, created_at, updated_at)
+                VALUES (?, 1, 'legacy final', 'SUCCEEDED', 'outputs/legacy/final.png',
+                        'outputs/legacy/final-thumb.webp', 'outputs/legacy/final-preview.webp', '{}', ?, ?)
+                """,
+                (run_id, timestamp, timestamp),
+            )
+
+        signed_url = "http://203.0.113.10:9000/ruyi-dream/registered.webp?X-Amz-Signature=test"
+        with (
+            patch.object(main, "existing_derivative_or_original", return_value=None),
+            patch.object(main, "object_exists", return_value=True),
+            patch.object(main, "presigned_get_url", return_value=signed_url) as presigned_get_url,
+        ):
+            garment_response = client.get("/api/media?key=uploads/legacy/preview.webp&variant=preview", follow_redirects=False)
+            generation_response = client.get("/api/media?key=outputs/legacy/final-thumb.webp&variant=thumb", follow_redirects=False)
+            unknown_response = client.get("/api/media?key=uploads/not-registered.jpg&variant=original", follow_redirects=False)
+
+        self.assertEqual(garment_response.status_code, 307)
+        self.assertEqual(generation_response.status_code, 307)
+        self.assertEqual(unknown_response.status_code, 404)
+        presigned_get_url.assert_any_call("uploads/legacy/preview.webp")
+        presigned_get_url.assert_any_call("outputs/legacy/final-thumb.webp")
+
     def test_upload_validation_accepts_decodable_images_despite_content_type_mismatch(self) -> None:
         from fastapi import UploadFile
         from PIL import Image
