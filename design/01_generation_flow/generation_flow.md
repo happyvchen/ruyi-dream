@@ -10,10 +10,11 @@ flowchart TD
   B --> C["READY 搭配服饰"]
   D["AI 摄影棚上传主推款"] --> E["创建 GenerationTask 草稿"]
   E --> F["冻结输入版本"]
-  C --> G["候选召回<br/>标签 / 颜色 / 季节 / 品类 / 未来 embedding"]
+  C --> Q["离线资产理解<br/>标签 / caption / 风险 / 未来 embedding"]
+  Q --> G["候选漏斗<br/>硬过滤 / 召回 / 排序 / outfit 草案"]
   F --> H["主推款理解<br/>商品事实 / 卖点 / 展示风险"]
   H --> I["造型意图探索<br/>3-5 个方向"]
-  G --> J["多套 Outfit 候选"]
+  G --> J["小候选集 Outfit"]
   I --> J
   J --> K["Aesthetic Critic<br/>审美成立 / 品牌成立 / 商品成立"]
   K --> L["选中 StylingPlan"]
@@ -27,7 +28,7 @@ flowchart TD
 
 - `AI Stylist` 负责主推款理解、造型方向探索、候选 outfit 组合、审美与商品可见性自评，并输出 `StylingPlan`。
 - `Aesthetic Critic` 是 AI Stylist 的必经质量门，负责否决逻辑可穿但视觉难看、比例失衡、色块沉重、品牌感不足或模板化的 outfit。
-- 候选召回层负责把 READY 搭配服饰按标签、颜色、品类、季节、风格和后续 embedding 召回压缩成可判断候选，不负责最终审美决策。
+- 候选漏斗层负责把 READY 搭配服饰按标签、caption、颜色、品类、季节、风险、品牌样本相似度和后续 embedding 压缩成少量可判断候选，不负责最终审美决策。
 - `StylingPlan` 是选搭阶段的结构化产物，记录造型意图、候选方案、选中 outfit、拒绝理由、评分和警告。
 - `ShotPlan` 承接 `StylingPlan`，负责穿着关系、图位、景别、姿势、身位、环境、光影、镜头、构图、主推款展示重点和生成配饰边界。
 - `Image-2` 负责按输入图片、`StylingPlan` 和 `ShotPlan` 生成六宫格预览与最终成片，不负责选搭、状态管理或历史追溯。
@@ -85,8 +86,11 @@ DELETED
 ### 4.1 输入
 
 - 当前输入版本的主推款图片。
-- 当前全部 `READY` 搭配服饰经后端压缩后的 `effective_tags` 候选卡片，例如 ID、code、category、colors、fit、season、pairing_brief、wearability 和 risk。
-- 候选召回结果。MVP 可用标签和简单排序实现，后续增加视觉 embedding、历史采纳率、人工反馈和销售/点击信号。
+- 候选漏斗输出的小候选集，而不是当前全部 `READY` 搭配服饰。
+- Top 候选服饰的压缩事实卡片，例如 ID、code、category、colors、fit、season、pairing_brief、wearability、risk、短 caption 和遮挡风险。
+- Top 候选服饰的主图或缩略图。Gemini 只看少量候选图，不看全库图片。
+- 后端生成的 3-8 套 outfit 草案，每套包含候选服饰、穿着方式、主推款卖点收益和风险。
+- 与本次主推款和候选最相关的 Lily 官方品牌样本摘要。阶段 1 可用品牌边界文本占位，阶段 2 必须使用 `Lily Brand Style Index`。
 - Lily 品牌边界、商品主角原则和生产验收维度。
 
 MVP 阶段默认不输入用户长 prompt。用户只确认拍摄信息和结果，不被训练成 prompt 工程师。
@@ -106,7 +110,7 @@ MVP 阶段默认不输入用户长 prompt。用户只确认拍摄信息和结果
    - 允许探索，但不能把主推款降级为整套 look 的背景元素。
 
 3. **Outfit Proposals + Aesthetic Critic**
-   - 基于召回候选提出多套完整 outfit 候选。
+   - 基于候选漏斗和 outfit 草案提出多套完整 outfit 候选。
    - 每套候选说明真实搭配服饰、生成配饰、穿着方式、主推款展示重点。
    - 由 Aesthetic Critic 同时诊断：色彩重量、廓形体量、腰线比例、季节材质、模板化风险和品牌采用可能性。
    - 同时打分：`aesthetic_score`、`brand_fit_score`、`hero_visibility_score`、`commercial_readiness_score`。
@@ -137,12 +141,13 @@ MVP 阶段默认不输入用户长 prompt。用户只确认拍摄信息和结果
       "id": "candidate_a",
       "mode": "hero_first_single_piece",
       "selected_material_ids": [],
-      "generated_accessories": ["棕色乐福鞋", "小号通勤包"],
+      "generated_accessories": ["低存在感棕色乐福鞋"],
       "wearing_notes": "主推连衣裙单穿，鞋包呼应腰带",
       "hero_focus": ["腰带", "V领", "裙摆比例"],
       "aesthetic_diagnosis": {
         "color_weight": "鞋包只做低存在感呼应，不形成大面积深色压迫",
         "silhouette_balance": "单穿保持连衣裙完整腰线和裙身比例",
+        "waistline_proportion": "腰带和收腰位置完整可见",
         "season_material_fit": "牛仔连衣裙适合轻通勤表达",
         "template_risk": "避免套用外套叠穿模板",
         "brand_read": "干净、利落、轻熟通勤"
@@ -180,7 +185,7 @@ MVP 阶段默认不输入用户长 prompt。用户只确认拍摄信息和结果
 - 当 `aesthetic_score`、`brand_fit_score`、`hero_visibility_score` 或 `commercial_readiness_score` 任一低于阈值时，不自动进入预览；前台可显示风险并允许用户确认或重新选搭。
 - 如果所有评分都是满分，但 `risk_notes` 和 `aesthetic_diagnosis` 缺失，视为低可信输出，应重试或降级为空选搭。
 - 选择外套搭配高腰裤、连衣裙或强腰线商品时，必须说明外套如何不破坏腰线和主推比例。
-- request snapshot 必须保存主推款快照、候选召回结果、传给 Gemini 的 material cards、完整 prompt/任务说明和每步响应。
+- request snapshot 必须保存主推款快照、候选漏斗结果、传给 Gemini 的候选卡片/候选图片/品牌样本证据、完整 prompt/任务说明和每步响应。
 
 ### 4.5 失败案例与新口径
 
@@ -194,25 +199,25 @@ MVP 阶段默认不输入用户长 prompt。用户只确认拍摄信息和结果
 
 如果候选库里没有真正适合白色阔腿裤的轻量短上装、浅色马甲或干净内搭，系统应优先选择空选搭或单件轻量配角，而不是硬凑深色通勤三件套。
 
-## 5. 候选召回
+## 5. 候选漏斗与品牌风格检索
 
-MVP 可以先用全量 READY tags，但生产实现应增加候选召回层，避免 Gemini 在噪音候选中直接拍脑袋。
+系统不能把全量 READY 服饰图片、缩略图或完整 tags 一次性喂给 Gemini。新版使用“检索负责找候选，排序负责控噪音，Gemini 负责审美决策”的候选漏斗。完整方案见 `brand_style_retrieval_workflow.md`。
 
-召回目标：
+漏斗目标：
 
 - 保留 Gemini 的审美自主性。
 - 缩小候选噪音，提升稳定性和可解释性。
-- 让后续接入 embedding、人工反馈和品牌偏好学习时不改动主流程。
+- 支持搭配库扩展到几百或上千件后，Gemini 请求体仍保持小候选集。
+- 让 Lily 官方风格证据进入选搭，而不是只靠抽象品牌形容词。
 
-召回特征：
+四层漏斗：
 
-- 品类互补：主推款类型、可穿组合、是否完整 look。
-- 色彩关系：同色系、邻近色、对比色、腰带/纽扣/图案呼应。
-- 季节和场景：通勤、轻社交、春夏/秋冬。
-- 风格分数：Lily 商务时装、干净、松弛、女性化、设计感。
-- 风险：遮挡主推款、过于复杂、过于正式、过于休闲。
-- 审美风险：色块重量失衡、上半身过重、廓形互相打架、模板化通勤、品牌感不足。
-- 未来增强：CLIP/多模态 embedding、历史采纳率、人工偏好、销售或点击表现。
+1. **离线资产理解**：入库时生成标签、短 caption、衣长体量、遮挡风险、可塞腰/可敞开、未来 embedding。
+2. **主推款理解与硬过滤**：根据主推款品类、卖点和不可遮挡区域，排除互斥品类并降权高风险单品。
+3. **召回与兼容性排序**：按品类互补、色彩关系、廓形关系、季节材质、Lily 风格相似度和模板化惩罚输出 12-20 件候选与 3-8 套 outfit 草案。
+4. **Gemini 决策**：只看小候选集、候选图、主推款图和品牌样本证据，输出 `StylingPlan`。
+
+阶段 1 可以不引入向量库，先使用规则、标签、caption 和风险降权。阶段 3 再引入多模态 embedding 和向量检索。
 
 ## 6. ShotPlan
 
