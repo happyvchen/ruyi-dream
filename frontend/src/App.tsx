@@ -679,29 +679,55 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
   const [detail, setDetail] = useState<StylingGarment | null>(null)
   const [items, setItems] = useState<StylingGarment[]>(garments)
   const [showImport, setShowImport] = useState(false)
+  const [offset, setOffset] = useState(0)
+  const [hasMore, setHasMore] = useState(false)
+  const [nextOffset, setNextOffset] = useState<number | null>(null)
+  const [searching, setSearching] = useState(false)
+  const pageSize = 12
 
   async function openDetail(item: StylingGarment) {
     const result = await api.getStylingGarment(item.id)
     setDetail(result.item)
   }
 
+  function refreshLibraryPage(targetOffset = offset) {
+    const keyword = query.trim()
+    return api.listStylingGarments({ limit: pageSize, offset: targetOffset, keyword: keyword || undefined }).then((result) => {
+      setItems(result.items)
+      setHasMore(result.hasMore)
+      setNextOffset(result.nextOffset)
+    })
+  }
+
+  function refreshFirstLibraryPage() {
+    setOffset(0)
+    return refreshLibraryPage(0)
+  }
+
+  useEffect(() => {
+    setOffset(0)
+  }, [query])
+
   useEffect(() => {
     const keyword = query.trim()
-    if (!keyword) {
-      setItems(garments)
-      return
-    }
     let cancelled = false
+    setSearching(true)
     const timer = window.setTimeout(() => {
-      void api.listStylingGarments({ limit: 80, keyword }).then((result) => {
-        if (!cancelled) setItems(result.items)
-      }).catch(() => undefined)
+      void api.listStylingGarments({ limit: pageSize, offset, keyword: keyword || undefined }).then((result) => {
+        if (!cancelled) {
+          setItems(result.items)
+          setHasMore(result.hasMore)
+          setNextOffset(result.nextOffset)
+        }
+      }).catch(() => undefined).finally(() => {
+        if (!cancelled) setSearching(false)
+      })
     }, 250)
     return () => {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [garments, query])
+  }, [garments, offset, query])
 
   useEffect(() => {
     if (!detail) return
@@ -716,12 +742,17 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
           <ImagePlus size={16} /> {showImport ? '收起导入' : '导入搭配服饰'}
         </button>
       </div>
-      {showImport && <BatchImportPanel onImported={() => void api.listStylingGarments({ limit: 80, keyword: query.trim() || undefined }).then((result) => setItems(result.items)).catch(() => undefined)} />}
+      {showImport && <BatchImportPanel onImported={() => void refreshFirstLibraryPage().catch(() => undefined)} />}
       <div className="panel library-panel">
         <div className="toolbar">
-          <div className="search"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索货号 / 标签" /></div>
-          <span className="muted-count">{items.length} 套</span>
+          <div className={`search ${searching ? 'is-searching' : ''}`}>
+            <Search size={16} />
+            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索货号 / 标签" />
+            {searching && <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span>}
+          </div>
+          <span className="muted-count">{offset + 1}-{offset + items.length} 套{hasMore ? '+' : ''}</span>
         </div>
+        <div className={`library-results ${searching ? 'is-loading' : ''}`}>
         {items.length ? (
           <div className="garment-grid">{items.map((item) => (
             <GarmentCard
@@ -733,6 +764,12 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
             />
           ))}</div>
         ) : <EmptyState title={query ? '没有匹配的搭配服饰' : '暂无搭配服饰'} text={query ? '换一个货号或标签关键词试试。' : '点击右上角导入搭配服饰。'} />}
+        </div>
+        <div className="pagination-bar">
+          <button className="secondary" disabled={offset === 0 || searching} onClick={() => setOffset(Math.max(0, offset - pageSize))}><ChevronLeft size={16} />上一页</button>
+          <span>第 {Math.floor(offset / pageSize) + 1} 页</span>
+          <button className="secondary" disabled={!hasMore || searching} onClick={() => setOffset(nextOffset ?? offset + pageSize)}>下一页<ChevronRight size={16} /></button>
+        </div>
       </div>
       {detail && <GarmentDetailDrawer item={detail} run={run} onClose={() => setDetail(null)} onChange={setDetail} />}
     </section>
@@ -881,6 +918,7 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
           uploaded: createdItems.length,
           operations: job.operations.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'SUCCEEDED', completedAt: new Date().toISOString() } : item),
         }))
+        onImported()
       } catch (err) {
         const message = err instanceof Error ? err.message : '导入失败'
         skipped += 1
@@ -1483,7 +1521,10 @@ function formatTagPrimitive(value: unknown) {
 }
 
 function AIOperationList({ operations, compact = false }: { operations: AIOperation[]; compact?: boolean }) {
-  const active = mergeOperations(operations.filter(Boolean)).slice(0, compact ? 4 : 8)
+  const [expanded, setExpanded] = useState(false)
+  const merged = mergeOperations(operations.filter(Boolean))
+  const maxVisible = compact ? 4 : expanded ? 8 : 3
+  const active = merged.slice(0, maxVisible)
   const now = useTicker(active.some(isAttemptRunning))
   if (!active.length) return null
   return (
@@ -1491,6 +1532,16 @@ function AIOperationList({ operations, compact = false }: { operations: AIOperat
       {active.map((operation, index) => (
         <AIOperationCard key={`${operation.id}-${operation.ownerType}-${operation.ownerId}-${index}`} operation={operation} now={now} compact={compact} index={index} />
       ))}
+      {!compact && merged.length > maxVisible && (
+        <button className="operation-more" onClick={() => setExpanded(true)}>
+          展开其余 {merged.length - maxVisible} 项进度
+        </button>
+      )}
+      {!compact && expanded && merged.length > 3 && (
+        <button className="operation-more" onClick={() => setExpanded(false)}>
+          收起进度
+        </button>
+      )}
     </div>
   )
 }
@@ -1651,15 +1702,17 @@ function ThumbGrid({ assets, compact = false }: { assets: MediaAsset[]; compact?
 
 function AssetThumb({ asset, large = false }: { asset?: MediaAsset | null; large?: boolean }) {
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
-  const hasImage = asset ? assetThumbSrc(asset) : ''
+  const [failed, setFailed] = useState(false)
+  const src = asset ? assetThumbSrc(asset) : ''
+  useEffect(() => setFailed(false), [asset?.id, src])
   return (
     <>
-      <div className={`asset-thumb ${large ? 'large' : ''}`}>
-        {asset && hasImage ? (
+      <div className={`asset-thumb ${large ? 'large' : ''} ${failed ? 'is-broken' : ''}`}>
+        {asset && src && !failed ? (
           <button className="asset-open" onClick={() => setViewer(assetLightboxImage(asset))} title="放大查看">
-            <img src={mediaUrl(assetThumbSrc(asset))} alt={asset.filename} />
+            <img src={mediaUrl(src)} alt={asset.filename} onError={() => setFailed(true)} />
           </button>
-        ) : <FileImage size={18} />}
+        ) : <div className="asset-fallback"><FileImage size={20} /><span>图片不可用</span></div>}
       </div>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </>
