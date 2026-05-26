@@ -913,6 +913,14 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
   color: #0f172a;
   font-weight: 700;
   text-align: center;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.page-jump input::-webkit-outer-spin-button,
+.page-jump input::-webkit-inner-spin-button {
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
 }
 .pagination-meta select {
   height: 34px;
