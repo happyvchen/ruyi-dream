@@ -48,7 +48,9 @@ Authorization: Bearer <token>
 | `/api/generation-tasks/{task_id}` | GET | 拍摄任务详情 |
 | `/api/generation-tasks/{task_id}` | PATCH | 草稿期修改任务名；进入 AI 阶段后拒绝修改 |
 | `/api/generation-tasks/{task_id}/archive` | POST | 归档拍摄任务；从默认任务和记录列表隐藏但保留文件与历史 |
-| `/api/generation-tasks/{task_id}` | DELETE | 删除拍摄任务；要求完整任务名确认，软删除应用内记录，不清理对象文件 |
+| `/api/generation-tasks/batch-archive` | POST | 批量归档拍摄任务；从默认任务和记录列表隐藏但保留文件与历史 |
+| `/api/generation-tasks/{task_id}` | DELETE | 级联删除拍摄任务；必须传 `purge=true` 并输入完整任务名确认，会清理任务、生成结果和对象文件 |
+| `/api/generation-tasks/batch-purge` | POST | 批量级联删除拍摄任务；必须传 `purge=true`、任务 id 列表并输入确认短语 `级联删除` |
 | `/api/generation-tasks/{task_id}/images` | POST | 草稿期追加主推款图片，最多 8 张 |
 | `/api/generation-task-images/{image_id}/replace` | POST | 草稿期替换单张主推款图片 |
 | `/api/generation-task-images/{image_id}` | PATCH / DELETE | 草稿期调整排序或移除主推款图片 |

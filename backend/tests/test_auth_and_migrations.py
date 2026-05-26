@@ -1094,17 +1094,50 @@ class BackendSmokeTests(unittest.TestCase):
                     "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('archive me', 'STYLING_READY', ?, ?)",
                     (timestamp, timestamp),
                 ).lastrowid
+                batch_archived_task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('batch archive me', 'STYLING_READY', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
                 deleted_task_id = db.execute(
                     "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('delete me', 'STYLING_READY', ?, ?)",
                     (timestamp, timestamp),
                 ).lastrowid
-                for task_id, name in ((archived_task_id, "archive me"), (deleted_task_id, "delete me")):
+                batch_deleted_task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('batch delete me', 'STYLING_READY', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                for task_id, name in (
+                    (archived_task_id, "archive me"),
+                    (batch_archived_task_id, "batch archive me"),
+                    (deleted_task_id, "delete me"),
+                    (batch_deleted_task_id, "batch delete me"),
+                ):
                     db.execute(
                         """
                         INSERT INTO generation_task_input_versions (task_id, version_number, name_snapshot, image_snapshot_json, created_at)
                         VALUES (?, 1, ?, '[]', ?)
                         """,
                         (task_id, name, timestamp),
+                    )
+                deleted_media_ids: list[int] = []
+                for task_id, key in (
+                    (deleted_task_id, "generation-tasks/delete-me/source.jpg"),
+                    (batch_deleted_task_id, "generation-tasks/batch-delete-me/source.jpg"),
+                ):
+                    media_id = db.execute(
+                        """
+                        INSERT INTO media_assets (object_key, original_filename, mime_type, status, created_at, updated_at)
+                        VALUES (?, 'source.jpg', 'image/jpeg', 'READY', ?, ?)
+                        """,
+                        (key, timestamp, timestamp),
+                    ).lastrowid
+                    deleted_media_ids.append(media_id)
+                    db.execute(
+                        """
+                        INSERT INTO generation_task_images (task_id, media_asset_id, sort_order, status, created_at, updated_at)
+                        VALUES (?, ?, 0, 'READY', ?, ?)
+                        """,
+                        (task_id, media_id, timestamp, timestamp),
                     )
 
             client = TestClient(main.app)
@@ -1113,18 +1146,43 @@ class BackendSmokeTests(unittest.TestCase):
             archived = client.post(f"/api/generation-tasks/{archived_task_id}/archive")
             self.assertEqual(archived.status_code, 200)
             self.assertIsNotNone(archived.json()["item"]["archivedAt"])
+            batch_archived = client.post("/api/generation-tasks/batch-archive", json={"ids": [batch_archived_task_id]})
+            self.assertEqual(batch_archived.status_code, 200)
             default_record_ids = [item["id"] for item in client.get("/api/generation-records").json()["items"]]
             self.assertNotIn(archived_task_id, default_record_ids)
+            self.assertNotIn(batch_archived_task_id, default_record_ids)
             archived_record_ids = [item["id"] for item in client.get("/api/generation-records?includeArchived=true").json()["items"]]
             self.assertIn(archived_task_id, archived_record_ids)
+            self.assertIn(batch_archived_task_id, archived_record_ids)
 
-            bad_delete = client.request("DELETE", f"/api/generation-tasks/{deleted_task_id}", json={"confirmName": "wrong"})
+            missing_purge = client.request("DELETE", f"/api/generation-tasks/{deleted_task_id}", json={"confirmName": "delete me"})
+            self.assertEqual(missing_purge.status_code, 400)
+            bad_delete = client.request("DELETE", f"/api/generation-tasks/{deleted_task_id}", json={"purge": True, "confirmName": "wrong"})
             self.assertEqual(bad_delete.status_code, 400)
-            deleted = client.request("DELETE", f"/api/generation-tasks/{deleted_task_id}", json={"confirmName": "delete me"})
-            self.assertEqual(deleted.status_code, 200)
+            bad_batch_delete = client.post("/api/generation-tasks/batch-purge", json={"purge": True, "ids": [batch_deleted_task_id], "confirmPhrase": "wrong"})
+            self.assertEqual(bad_batch_delete.status_code, 400)
+            with (
+                patch.object(main, "delete_object", return_value=None) as delete_object,
+                patch.object(main, "delete_prefix", return_value=None),
+            ):
+                deleted = client.request("DELETE", f"/api/generation-tasks/{deleted_task_id}", json={"purge": True, "confirmName": "delete me"})
+                self.assertEqual(deleted.status_code, 200)
+                self.assertTrue(deleted.json()["purged"])
+                batch_deleted = client.post("/api/generation-tasks/batch-purge", json={"purge": True, "ids": [batch_deleted_task_id], "confirmPhrase": "级联删除"})
+                self.assertEqual(batch_deleted.status_code, 200)
+                self.assertEqual(batch_deleted.json()["deletedTaskIds"], [batch_deleted_task_id])
+                self.assertGreaterEqual(delete_object.call_count, 2)
             default_task_ids = [item["id"] for item in client.get("/api/generation-tasks").json()["items"]]
             self.assertNotIn(deleted_task_id, default_task_ids)
+            self.assertNotIn(batch_deleted_task_id, default_task_ids)
             self.assertEqual(client.get(f"/api/generation-tasks/{deleted_task_id}").status_code, 404)
+            self.assertEqual(client.get(f"/api/generation-tasks/{batch_deleted_task_id}").status_code, 404)
+            with db_module.get_db() as db:
+                media_count = db.execute(
+                    f"SELECT COUNT(*) AS count FROM media_assets WHERE id IN ({', '.join('?' for _ in deleted_media_ids)})",
+                    deleted_media_ids,
+                ).fetchone()["count"]
+            self.assertEqual(media_count, 0)
 
     def test_retry_failed_new_result_image_marks_parent_running_before_background_job(self) -> None:
         from fastapi.testclient import TestClient

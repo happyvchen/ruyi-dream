@@ -289,14 +289,19 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
   const [taskHasMore, setTaskHasMore] = useState(false)
   const [taskNextOffset, setTaskNextOffset] = useState<number | null>(null)
   const [tasksLoading, setTasksLoading] = useState(false)
+  const [taskIncludeArchived, setTaskIncludeArchived] = useState(false)
+  const [taskCascadeDelete, setTaskCascadeDelete] = useState(false)
+  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<number>>(() => new Set())
   const recentTaskPageSize = 5
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
+  const selectableTaskIds = useMemo(() => taskItems.filter((item) => !isTaskRunning(item)).map((item) => item.id), [taskItems])
+  const allVisibleTasksSelected = selectableTaskIds.length > 0 && selectableTaskIds.every((id) => selectedTaskIds.has(id))
   useEffect(() => setStep(currentStep), [task?.id, task?.status])
   useEffect(() => {
     let cancelled = false
     setTasksLoading(true)
-    void api.listTasks({ limit: recentTaskPageSize, offset: taskOffset }).then((result) => {
+    void api.listTasks({ limit: recentTaskPageSize, offset: taskOffset, includeArchived: taskIncludeArchived }).then((result) => {
       if (cancelled) return
       setTaskItems(result.items)
       setTaskHasMore(result.hasMore)
@@ -305,7 +310,8 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
       if (!cancelled) setTasksLoading(false)
     })
     return () => { cancelled = true }
-  }, [tasks, taskOffset])
+  }, [tasks, taskOffset, taskIncludeArchived])
+  useEffect(() => setSelectedTaskIds(new Set()), [taskOffset, taskIncludeArchived])
   useEffect(() => {
     if (!task || !['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)) return
     const timer = window.setInterval(() => {
@@ -315,7 +321,7 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
   }, [task?.id, task?.status, setTask])
 
   function refreshRecentTasks(targetOffset = taskOffset) {
-    return api.listTasks({ limit: recentTaskPageSize, offset: targetOffset }).then((result) => {
+    return api.listTasks({ limit: recentTaskPageSize, offset: targetOffset, includeArchived: taskIncludeArchived }).then((result) => {
       setTaskItems(result.items)
       setTaskHasMore(result.hasMore)
       setTaskNextOffset(result.nextOffset)
@@ -323,24 +329,75 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
     })
   }
 
-  function archiveRecentTask(item: GenerationTask) {
+  function toggleRecentTaskSelection(id: number, checked: boolean) {
+    setSelectedTaskIds((current) => {
+      const next = new Set(current)
+      if (checked) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+
+  function toggleVisibleTaskSelection(checked: boolean) {
+    setSelectedTaskIds((current) => {
+      const next = new Set(current)
+      selectableTaskIds.forEach((id) => {
+        if (checked) next.add(id)
+        else next.delete(id)
+      })
+      return next
+    })
+  }
+
+  function clearCurrentTaskIfAffected(ids: number[]) {
+    if (task && ids.includes(task.id)) {
+      setTask(null)
+      window.history.replaceState(null, '', routeToUrl({ page: 'studio' }))
+    }
+  }
+
+  function runRecentTaskAction(item: GenerationTask) {
+    if (taskCascadeDelete) {
+      const confirmName = window.prompt(`输入完整任务名以级联删除：${item.name}`) ?? ''
+      if (confirmName !== item.name) return
+      void run('级联删除任务中...', () => api.deleteTask(item.id, confirmName), () => {
+        clearCurrentTaskIfAffected([item.id])
+        setSelectedTaskIds((current) => {
+          const next = new Set(current)
+          next.delete(item.id)
+          return next
+        })
+        void refreshRecentTasks().catch(() => undefined)
+      })
+      return
+    }
     void run('归档任务中...', () => api.archiveTask(item.id), () => {
-      if (task?.id === item.id) {
-        setTask(null)
-        window.history.replaceState(null, '', routeToUrl({ page: 'studio' }))
-      }
+      clearCurrentTaskIfAffected([item.id])
+      setSelectedTaskIds((current) => {
+        const next = new Set(current)
+        next.delete(item.id)
+        return next
+      })
       void refreshRecentTasks().catch(() => undefined)
     })
   }
 
-  function deleteRecentTask(item: GenerationTask) {
-    const confirmName = window.prompt(`输入完整任务名以删除：${item.name}`) ?? ''
-    if (confirmName !== item.name) return
-    void run('删除任务中...', () => api.deleteTask(item.id, confirmName), () => {
-      if (task?.id === item.id) {
-        setTask(null)
-        window.history.replaceState(null, '', routeToUrl({ page: 'studio' }))
-      }
+  function runRecentBatchAction() {
+    const ids = Array.from(selectedTaskIds)
+    if (!ids.length) return
+    if (taskCascadeDelete) {
+      const confirmPhrase = window.prompt(`将级联删除 ${ids.length} 条任务。输入“级联删除”确认。`) ?? ''
+      if (confirmPhrase !== '级联删除') return
+      void run('批量级联删除任务中...', () => api.deleteTasks(ids, confirmPhrase), () => {
+        clearCurrentTaskIfAffected(ids)
+        setSelectedTaskIds(new Set())
+        void refreshRecentTasks().catch(() => undefined)
+      })
+      return
+    }
+    void run('批量归档任务中...', () => api.archiveTasks(ids), () => {
+      clearCurrentTaskIfAffected(ids)
+      setSelectedTaskIds(new Set())
       void refreshRecentTasks().catch(() => undefined)
     })
   }
@@ -369,14 +426,40 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
             </>
           ) : <EmptyState title="暂无任务" text="上传主推款后会在这里形成拍摄任务。" />}
           <h3>最近任务</h3>
+          <div className="archive-controls compact">
+            <label><input type="checkbox" checked={taskIncludeArchived} onChange={(event) => {
+              setTaskOffset(0)
+              setTaskIncludeArchived(event.target.checked)
+              setSelectedTaskIds(new Set())
+            }} /> 查看归档</label>
+            <label><input type="checkbox" checked={taskCascadeDelete} onChange={(event) => setTaskCascadeDelete(event.target.checked)} /> 级联删除</label>
+            <label><input type="checkbox" checked={allVisibleTasksSelected} disabled={!selectableTaskIds.length} onChange={(event) => toggleVisibleTaskSelection(event.target.checked)} /> 全选本页</label>
+          </div>
+          {selectedTaskIds.size > 0 && (
+            <button className={taskCascadeDelete ? 'danger wide' : 'secondary wide'} onClick={runRecentBatchAction}>
+              {taskCascadeDelete ? '批量级联删除' : '批量归档'} {selectedTaskIds.size} 项
+            </button>
+          )}
           <div className="mini-list">
             {taskItems.map((item) => (
-              <div key={item.id} className={`mini-row ${task?.id === item.id ? 'active' : ''}`}>
+              <div key={item.id} className={`mini-row ${task?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
+                <input
+                  type="checkbox"
+                  checked={selectedTaskIds.has(item.id)}
+                  disabled={isTaskRunning(item)}
+                  onChange={(event) => toggleRecentTaskSelection(item.id, event.target.checked)}
+                  aria-label={`选择 ${item.name}`}
+                />
                 <button onClick={() => void api.getTask(item.id).then((r) => setTask(r.item))}>
-                  <span>{item.name}</span><em>{statusText(item.status)}</em>
+                  <span>{item.name}</span><em>{item.archivedAt ? '已归档' : statusText(item.status)}</em>
                 </button>
-                <button className="ghost-icon" disabled={isTaskRunning(item)} onClick={() => archiveRecentTask(item)} title="归档"><FolderOpen size={14} /></button>
-                <button className="ghost-icon danger-icon" disabled={isTaskRunning(item)} onClick={() => deleteRecentTask(item)} title="删除"><Trash2 size={14} /></button>
+                <button
+                  className={taskCascadeDelete ? 'danger mini-action' : 'secondary mini-action'}
+                  disabled={isTaskRunning(item) || (!taskCascadeDelete && !!item.archivedAt)}
+                  onClick={() => runRecentTaskAction(item)}
+                >
+                  {taskCascadeDelete ? '级联删除' : item.archivedAt ? '已归档' : '归档'}
+                </button>
               </div>
             ))}
             {!taskItems.length && <EmptyState title="暂无任务" text="新建拍摄任务后会出现在这里。" />}
@@ -1231,10 +1314,16 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
   const [hasMore, setHasMore] = useState(false)
   const [nextOffset, setNextOffset] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
+  const [includeArchived, setIncludeArchived] = useState(false)
+  const [cascadeDelete, setCascadeDelete] = useState(false)
+  const [selectedRecordIds, setSelectedRecordIds] = useState<Set<number>>(() => new Set())
   const pageSize = 12
+  const visibleRecords = items.filter((item) => item.status !== 'DRAFT')
+  const selectableRecordIds = visibleRecords.filter((item) => !isTaskRunning(item)).map((item) => item.id)
+  const allVisibleRecordsSelected = selectableRecordIds.length > 0 && selectableRecordIds.every((id) => selectedRecordIds.has(id))
 
   function refreshRecordPage(targetOffset = offset) {
-    return api.listRecords({ limit: pageSize, offset: targetOffset }).then((result) => {
+    return api.listRecords({ limit: pageSize, offset: targetOffset, includeArchived }).then((result) => {
       setItems(result.items)
       setHasMore(result.hasMore)
       setNextOffset(result.nextOffset)
@@ -1245,7 +1334,7 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
   useEffect(() => {
     let cancelled = false
     setLoading(true)
-    void api.listRecords({ limit: pageSize, offset }).then((result) => {
+    void api.listRecords({ limit: pageSize, offset, includeArchived }).then((result) => {
       if (cancelled) return
       setItems(result.items)
       setHasMore(result.hasMore)
@@ -1254,30 +1343,83 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
       if (!cancelled) setLoading(false)
     })
     return () => { cancelled = true }
-  }, [records, offset])
+  }, [records, offset, includeArchived])
+
+  useEffect(() => setSelectedRecordIds(new Set()), [offset, includeArchived])
 
   function openRecord(item: GenerationTask) {
     void run('读取记录中...', () => api.getRecord(item.id, false), (r: { item: GenerationTask }) => setDetail(r.item))
   }
 
-  function archiveRecord(item: GenerationTask) {
+  function toggleRecordSelection(id: number, checked: boolean) {
+    setSelectedRecordIds((current) => {
+      const next = new Set(current)
+      if (checked) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+
+  function toggleVisibleRecordSelection(checked: boolean) {
+    setSelectedRecordIds((current) => {
+      const next = new Set(current)
+      selectableRecordIds.forEach((id) => {
+        if (checked) next.add(id)
+        else next.delete(id)
+      })
+      return next
+    })
+  }
+
+  function clearRecordDetailIfAffected(ids: number[]) {
+    if (detail && ids.includes(detail.id)) {
+      setDetail(null)
+      window.history.replaceState(null, '', routeToUrl({ page: 'records' }))
+    }
+  }
+
+  function runRecordAction(item: GenerationTask) {
+    if (cascadeDelete) {
+      const confirmName = window.prompt(`输入完整任务名以级联删除：${item.name}`) ?? ''
+      if (confirmName !== item.name) return
+      void run('级联删除记录中...', () => api.deleteTask(item.id, confirmName), () => {
+        clearRecordDetailIfAffected([item.id])
+        setSelectedRecordIds((current) => {
+          const next = new Set(current)
+          next.delete(item.id)
+          return next
+        })
+        void refreshRecordPage().catch(() => undefined)
+      })
+      return
+    }
     void run('归档记录中...', () => api.archiveTask(item.id), () => {
-      if (detail?.id === item.id) {
-        setDetail(null)
-        window.history.replaceState(null, '', routeToUrl({ page: 'records' }))
-      }
+      clearRecordDetailIfAffected([item.id])
+      setSelectedRecordIds((current) => {
+        const next = new Set(current)
+        next.delete(item.id)
+        return next
+      })
       void refreshRecordPage().catch(() => undefined)
     })
   }
 
-  function deleteRecord(item: GenerationTask) {
-    const confirmName = window.prompt(`输入完整任务名以删除：${item.name}`) ?? ''
-    if (confirmName !== item.name) return
-    void run('删除记录中...', () => api.deleteTask(item.id, confirmName), () => {
-      if (detail?.id === item.id) {
-        setDetail(null)
-        window.history.replaceState(null, '', routeToUrl({ page: 'records' }))
-      }
+  function runRecordBatchAction() {
+    const ids = Array.from(selectedRecordIds)
+    if (!ids.length) return
+    if (cascadeDelete) {
+      const confirmPhrase = window.prompt(`将级联删除 ${ids.length} 条记录。输入“级联删除”确认。`) ?? ''
+      if (confirmPhrase !== '级联删除') return
+      void run('批量级联删除记录中...', () => api.deleteTasks(ids, confirmPhrase), () => {
+        clearRecordDetailIfAffected(ids)
+        setSelectedRecordIds(new Set())
+        void refreshRecordPage().catch(() => undefined)
+      })
+      return
+    }
+    void run('批量归档记录中...', () => api.archiveTasks(ids), () => {
+      clearRecordDetailIfAffected(ids)
+      setSelectedRecordIds(new Set())
       void refreshRecordPage().catch(() => undefined)
     })
   }
@@ -1288,23 +1430,49 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
       <div className="records-layout">
         <div className="panel record-list">
           <div className="record-list-head">
-            <span className="muted-count">{items.length ? `${offset + 1}-${offset + items.length} 条${hasMore ? '+' : ''}` : '0 条'}</span>
+            <div className="archive-controls">
+              <label><input type="checkbox" checked={includeArchived} onChange={(event) => {
+                setOffset(0)
+                setIncludeArchived(event.target.checked)
+                setSelectedRecordIds(new Set())
+              }} /> 查看归档</label>
+              <label><input type="checkbox" checked={cascadeDelete} onChange={(event) => setCascadeDelete(event.target.checked)} /> 级联删除</label>
+              <label><input type="checkbox" checked={allVisibleRecordsSelected} disabled={!selectableRecordIds.length} onChange={(event) => toggleVisibleRecordSelection(event.target.checked)} /> 全选本页</label>
+            </div>
+            <div className="record-list-meta">
+              {selectedRecordIds.size > 0 && (
+                <button className={cascadeDelete ? 'danger' : 'secondary'} onClick={runRecordBatchAction}>
+                  {cascadeDelete ? '批量级联删除' : '批量归档'} {selectedRecordIds.size} 项
+                </button>
+              )}
+              <span className="muted-count">{items.length ? `${offset + 1}-${offset + items.length} 条${hasMore ? '+' : ''}` : '0 条'}</span>
+            </div>
           </div>
-          {items.filter((item) => item.status !== 'DRAFT').map((item) => (
+          {visibleRecords.map((item) => (
             <div
               key={item.id}
-              className={`record-row ${detail?.id === item.id ? 'active' : ''}`}
+              className={`record-row ${detail?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}
             >
+              <input
+                type="checkbox"
+                checked={selectedRecordIds.has(item.id)}
+                disabled={isTaskRunning(item)}
+                onChange={(event) => toggleRecordSelection(item.id, event.target.checked)}
+                aria-label={`选择 ${item.name}`}
+              />
               <button className="record-open" aria-current={detail?.id === item.id ? 'true' : undefined} title="查看记录详情" onClick={() => openRecord(item)}>
                 <AssetThumb asset={item.summary?.cover ?? null} interactive={false} />
-                <div><strong>{item.name}</strong><span>{statusText(item.status)} · {dateText(item.updatedAt)}</span></div>
+                <div><strong>{item.name}</strong><span>{item.archivedAt ? '已归档' : statusText(item.status)} · {dateText(item.updatedAt)}</span></div>
                 <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
                 <span className="record-eye" aria-hidden="true"><Eye size={16} /></span>
               </button>
-              <div className="record-actions">
-                <button className="ghost-icon" disabled={isTaskRunning(item)} onClick={() => archiveRecord(item)} title="归档"><FolderOpen size={15} /></button>
-                <button className="ghost-icon danger-icon" disabled={isTaskRunning(item)} onClick={() => deleteRecord(item)} title="删除"><Trash2 size={15} /></button>
-              </div>
+              <button
+                className={cascadeDelete ? 'danger record-action-button' : 'secondary record-action-button'}
+                disabled={isTaskRunning(item) || (!cascadeDelete && !!item.archivedAt)}
+                onClick={() => runRecordAction(item)}
+              >
+                {cascadeDelete ? '级联删除' : item.archivedAt ? '已归档' : '归档'}
+              </button>
             </div>
           ))}
           {!items.length && <EmptyState title="暂无生成记录" text="进入 AI 阶段的任务会出现在这里。" />}

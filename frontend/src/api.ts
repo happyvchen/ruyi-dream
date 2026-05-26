@@ -242,8 +242,12 @@ export const api = {
     request<{ item: GenerationTask }>(params(`/api/generation-tasks/${id}`, { includeDebug })),
   archiveTask: (id: number) =>
     request<{ ok: boolean; archived: boolean; item: GenerationTask }>(`/api/generation-tasks/${id}/archive`, { method: 'POST' }),
+  archiveTasks: (ids: number[]) =>
+    request<{ ok: boolean; archived: boolean; ids: number[] }>('/api/generation-tasks/batch-archive', { method: 'POST', body: JSON.stringify({ ids }) }),
   deleteTask: (id: number, confirmName: string) =>
-    request<{ ok: boolean; deleted: boolean }>(`/api/generation-tasks/${id}`, { method: 'DELETE', body: JSON.stringify({ confirmName }) }),
+    request<{ ok: boolean; purged: boolean; deletedTaskIds: number[] }>(`/api/generation-tasks/${id}`, { method: 'DELETE', body: JSON.stringify({ purge: true, confirmName }) }),
+  deleteTasks: (ids: number[], confirmPhrase: string) =>
+    request<{ ok: boolean; purged: boolean; deletedTaskIds: number[] }>('/api/generation-tasks/batch-purge', { method: 'POST', body: JSON.stringify({ purge: true, ids, confirmPhrase }) }),
   createTask: (name: string, files: File[]) => {
     const form = new FormData()
     if (name) form.append('name', name)

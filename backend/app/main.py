@@ -194,6 +194,9 @@ class GenerationTaskImageUpdateRequest(BaseModel):
 
 class GenerationTaskDeleteRequest(BaseModel):
     confirmName: str | None = None
+    confirmPhrase: str | None = None
+    ids: list[int] | None = None
+    purge: bool = False
 
 
 class GarmentSkuUpdateRequest(BaseModel):
@@ -1415,20 +1418,59 @@ def archive_generation_task(task_id: int) -> dict[str, Any]:
     return {"ok": True, "archived": True, "item": get_generation_task_by_id(task_id)}
 
 
+@app.post("/api/generation-tasks/batch-archive")
+def archive_generation_tasks(payload: GenerationTaskDeleteRequest) -> dict[str, Any]:
+    task_ids = normalized_task_ids(payload.ids or [])
+    with get_db() as db:
+        rows = get_generation_task_rows_for_mutation(db, task_ids)
+        for row in rows:
+            ensure_generation_task_not_running(row)
+        timestamp = now_iso()
+        placeholders = ", ".join("?" for _ in task_ids)
+        db.execute(
+            f"""
+            UPDATE generation_tasks
+            SET archived_at = COALESCE(archived_at, ?),
+                archive_reason = COALESCE(archive_reason, 'user_archived'),
+                updated_at = ?
+            WHERE id IN ({placeholders})
+            """,
+            (timestamp, timestamp, *task_ids),
+        )
+        for row in rows:
+            log_event(db, "generation_task", int(row["id"]), "archived", {"name": row["name"], "batch": True})
+    return {"ok": True, "archived": True, "ids": task_ids}
+
+
 @app.delete("/api/generation-tasks/{task_id}")
 def delete_generation_task(task_id: int, payload: GenerationTaskDeleteRequest | None = None) -> dict[str, Any]:
-    confirm_name = (payload.confirmName if payload else None) or ""
+    if not payload or not payload.purge:
+        raise HTTPException(status_code=400, detail="删除任务必须勾选级联删除")
+    confirm_name = payload.confirmName or ""
     with get_db() as db:
         row = db.execute("SELECT * FROM generation_tasks WHERE id = ? AND deleted_at IS NULL", (task_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="生成任务不存在")
         ensure_generation_task_not_running(row)
         if confirm_name != row["name"]:
-            raise HTTPException(status_code=400, detail="请输入完整任务名以确认删除")
-        timestamp = now_iso()
-        db.execute("UPDATE generation_tasks SET deleted_at = ?, updated_at = ? WHERE id = ?", (timestamp, timestamp, task_id))
-        log_event(db, "generation_task", task_id, "deleted", {"name": row["name"]})
-    return {"ok": True, "deleted": True}
+            raise HTTPException(status_code=400, detail="请输入完整任务名以确认级联删除")
+        cleanup_errors = purge_generation_tasks(db, [task_id], "user_purged")
+    return {"ok": True, "purged": True, "deletedTaskIds": [task_id], "objectCleanupErrors": cleanup_errors}
+
+
+@app.post("/api/generation-tasks/batch-purge")
+def purge_generation_tasks_batch(payload: GenerationTaskDeleteRequest) -> dict[str, Any]:
+    if not payload.purge:
+        raise HTTPException(status_code=400, detail="删除任务必须勾选级联删除")
+    if payload.confirmPhrase != "级联删除":
+        raise HTTPException(status_code=400, detail="请输入“级联删除”以确认批量删除")
+    task_ids = normalized_task_ids(payload.ids or [])
+    with get_db() as db:
+        rows = get_generation_task_rows_for_mutation(db, task_ids)
+        for row in rows:
+            ensure_generation_task_not_running(row)
+        cleanup_errors = purge_generation_tasks(db, task_ids, "user_batch_purged")
+    return {"ok": True, "purged": True, "deletedTaskIds": task_ids, "objectCleanupErrors": cleanup_errors}
 
 
 @app.patch("/api/generation-tasks/{task_id}")
@@ -1452,6 +1494,85 @@ def ensure_generation_task_draft(task: Any) -> None:
 def ensure_generation_task_not_running(task: Any) -> None:
     if task["status"] in {"STYLING_RUNNING", "PREVIEW_RUNNING", "FINAL_RUNNING"}:
         raise HTTPException(status_code=409, detail="任务正在生成中，完成后才能归档或删除")
+
+
+def normalized_task_ids(ids: list[int]) -> list[int]:
+    normalized = list(dict.fromkeys(int(task_id) for task_id in ids if int(task_id) > 0))
+    if not normalized:
+        raise HTTPException(status_code=400, detail="请选择至少一条任务")
+    if len(normalized) > 100:
+        raise HTTPException(status_code=400, detail="单次最多处理 100 条任务")
+    return normalized
+
+
+def get_generation_task_rows_for_mutation(db: Any, task_ids: list[int]) -> list[Any]:
+    placeholders = ", ".join("?" for _ in task_ids)
+    rows = db.execute(
+        f"SELECT * FROM generation_tasks WHERE id IN ({placeholders}) AND deleted_at IS NULL",
+        task_ids,
+    ).fetchall()
+    if len(rows) != len(task_ids):
+        raise HTTPException(status_code=404, detail="部分生成任务不存在")
+    return rows
+
+
+def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[dict[str, str]]:
+    task_ids = normalized_task_ids(task_ids)
+    placeholders = ", ".join("?" for _ in task_ids)
+    asset_rows = db.execute(
+        f"""
+        SELECT media_asset_id AS asset_id FROM generation_task_images WHERE task_id IN ({placeholders})
+        UNION
+        SELECT preview_asset_id AS asset_id FROM generation_previews WHERE task_id IN ({placeholders}) AND preview_asset_id IS NOT NULL
+        UNION
+        SELECT gri.current_asset_id AS asset_id FROM generation_result_images_new gri
+        JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+        WHERE grs.task_id IN ({placeholders}) AND gri.current_asset_id IS NOT NULL
+        UNION
+        SELECT output_asset_id AS asset_id FROM generation_attempts
+        WHERE output_asset_id IS NOT NULL AND (
+             (owner_type = 'generation_styling' AND owner_id IN ({placeholders}))
+             OR (owner_type = 'generation_preview' AND owner_id IN (
+                  SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
+                ))
+             OR (owner_type = 'generation_result_image' AND owner_id IN (
+                  SELECT gri.id FROM generation_result_images_new gri
+                  JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+                  WHERE grs.task_id IN ({placeholders})
+                ))
+        )
+        """,
+        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
+    ).fetchall()
+    asset_ids = list(dict.fromkeys(int(row["asset_id"]) for row in asset_rows if row["asset_id"] is not None))
+    media_rows: list[Any] = []
+    if asset_ids:
+        asset_placeholders = ", ".join("?" for _ in asset_ids)
+        media_rows = db.execute(f"SELECT id, object_key FROM media_assets WHERE id IN ({asset_placeholders})", asset_ids).fetchall()
+    cleanup_objects([key for media in media_rows for key in image_object_keys(media["object_key"])])
+    db.execute(
+        f"""
+        DELETE FROM generation_attempts
+        WHERE (owner_type = 'generation_styling' AND owner_id IN ({placeholders}))
+           OR (owner_type = 'generation_preview' AND owner_id IN (
+                SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
+              ))
+           OR (owner_type = 'generation_result_image' AND owner_id IN (
+                SELECT gri.id FROM generation_result_images_new gri
+                JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+                WHERE grs.task_id IN ({placeholders})
+              ))
+        """,
+        (*task_ids, *task_ids, *task_ids),
+    )
+    rows = get_generation_task_rows_for_mutation(db, task_ids)
+    db.execute(f"DELETE FROM generation_tasks WHERE id IN ({placeholders})", task_ids)
+    if asset_ids:
+        asset_placeholders = ", ".join("?" for _ in asset_ids)
+        db.execute(f"DELETE FROM media_assets WHERE id IN ({asset_placeholders})", asset_ids)
+    for row in rows:
+        log_event(db, "generation_task", int(row["id"]), "purged", {"name": row["name"], "reason": reason})
+    return cleanup_prefixes([join_key("generation-tasks", str(task_id)) for task_id in task_ids])
 
 
 @app.post("/api/generation-tasks/{task_id}/images")
