@@ -12,7 +12,7 @@
 |---|---|---|
 | `00_product_overview/CLAUDE.md` | 产品定位、MVP 范围、PRD | **任何**产品/功能设计前 |
 | `01_generation_flow/CLAUDE.md` | 生成主流程、Image-2 输入策略、生成要素职责拆分 | 设计生成链路、任务包、prompt 策略时 |
-| `01_generation_flow/brand_style_retrieval_workflow.md` | Lily 品牌样本库、候选漏斗、受控配饰和阶段性实施计划 | 设计大规模搭配库选搭、品牌风格检索、配饰边界时 |
+| `01_generation_flow/brand_style_retrieval_workflow.md` | Lily 官方样本库、候选漏斗、穿法质量门、受控配饰和阶段性实施计划 | 设计大规模搭配库选搭、品牌风格检索、穿法/配饰边界时 |
 | `02_brand_and_assets/CLAUDE.md` | 搭配服饰、标签、媒体资产、数字模特、ShotPlan 字段 | 处理素材、标签、媒体、图位规则时 |
 | `02_brand_and_assets/lily_tagging_research_raw.md` | Lily 标签体系资料备份：官方公开信息、天猫店铺采集、本地素材盘点、甄别规则 | 追溯 Lily 标签体系设计依据时 |
 | `02_brand_and_assets/lily_tagging_system.md` | Lily 服装视觉生产标签体系：AI 标签、人工标签、官方标题标签、选搭压缩格式 | 实现或评审 Lily 标签体系时 |
@@ -27,7 +27,7 @@
 - **Image-2 输入策略源头**：`01_generation_flow/image2_input_strategy.md`
 - **生成职责拆分源头**：`01_generation_flow/generation_responsibility_matrix.md`
 - **素材/标签/媒体源头**：`02_brand_and_assets/assets_and_parameters.md`
-- **图位规则参考**：`02_brand_and_assets/category_shot_rules.md`
+- **ShotPlan 品类图位规则**：`02_brand_and_assets/category_shot_rules.md`
 - **品牌调性参考**：`02_brand_and_assets/brand_style_templates.md`
 - **前台 UI/UX 源头**：`03_ux_guide/user_uiux.md`
 - **技术生产路线源头**：`04_implementation_guide/technical_route_and_operations.md`
