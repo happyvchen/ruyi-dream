@@ -37,7 +37,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
-import type { AIOperation, GenerationTask, MediaAsset, ModelProfile, StylingGarment } from './api'
+import type { AIOperation, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, StylingGarment } from './api'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 
@@ -366,7 +366,7 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
                   setTask(r.item)
                   window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
                 })}>
-                  <span>{item.name}</span><em>{item.archivedAt ? '已删除' : statusText(item.status)}</em>
+                  <span>{item.name}</span><em>{item.archivedAt ? '已归档' : statusText(item.status)}</em>
                 </button>
                 {isTaskRunning(item) && (
                   <button
@@ -756,6 +756,8 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
   const [includeArchived, setIncludeArchived] = useState(false)
   const [selectedGarmentIds, setSelectedGarmentIds] = useState<Set<number>>(() => new Set())
   const [deleteGarmentDialog, setDeleteGarmentDialog] = useState<StylingGarment[] | null>(null)
+  const [deleteGarmentImpact, setDeleteGarmentImpact] = useState<DeleteImpact | null>(null)
+  const [deleteGarmentImpactLoading, setDeleteGarmentImpactLoading] = useState(false)
   const selectableGarmentIds = items.filter((item) => item.status !== 'TAGGING_RUNNING').map((item) => item.id)
   const allVisibleGarmentsSelected = selectableGarmentIds.length > 0 && selectableGarmentIds.every((id) => selectedGarmentIds.has(id))
 
@@ -836,12 +838,24 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
     const action = purge
       ? () => ids.length === 1 ? api.deleteStylingGarment(ids[0], { purge: true, confirmCode: confirmText }) : api.deleteStylingGarments(ids, { purge: true, confirmPhrase: confirmText })
       : () => api.deleteStylingGarments(ids)
-    void run(purge ? '彻底删除搭配服饰中...' : '删除搭配服饰中...', action, () => {
+    void run(purge ? '彻底删除搭配服饰中...' : '归档搭配服饰中...', action, () => {
       if (detail && ids.includes(detail.id)) setDetail(null)
       setSelectedGarmentIds(new Set())
       setDeleteGarmentDialog(null)
+      setDeleteGarmentImpact(null)
       void refreshLibraryPage().catch(() => undefined)
     })
+  }
+
+  function openGarmentDeleteDialog(targets: StylingGarment[]) {
+    const ids = targets.map((item) => item.id)
+    setDeleteGarmentDialog(targets)
+    setDeleteGarmentImpact(null)
+    setDeleteGarmentImpactLoading(true)
+    void api.getStylingGarmentDeleteImpact(ids)
+      .then((response) => setDeleteGarmentImpact(response.impact))
+      .catch(() => setDeleteGarmentImpact(null))
+      .finally(() => setDeleteGarmentImpactLoading(false))
   }
 
   return (
@@ -864,13 +878,13 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
             <label><input type="checkbox" checked={includeArchived} onChange={(event) => {
               setOffset(0)
               setIncludeArchived(event.target.checked)
-            }} /> 查看已删除</label>
+            }} /> 查看已归档</label>
             <label><input type="checkbox" checked={allVisibleGarmentsSelected} disabled={!selectableGarmentIds.length} onChange={(event) => toggleVisibleGarmentSelection(event.target.checked)} /> 全选本页</label>
           </div>
           <div className="record-list-meta">
             {selectedGarmentIds.size > 0 && (
-              <button className="secondary" onClick={() => setDeleteGarmentDialog(items.filter((item) => selectedGarmentIds.has(item.id)))}>
-                删除 {selectedGarmentIds.size} 项
+              <button className="secondary" onClick={() => openGarmentDeleteDialog(items.filter((item) => selectedGarmentIds.has(item.id)))}>
+                归档 {selectedGarmentIds.size} 项
               </button>
             )}
             <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 套` : '0 套'}</span>
@@ -886,7 +900,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
               onTag={['DRAFT', 'TAGGING_FAILED', 'TAGGING_READY'].includes(item.status) ? () => void run('重新识别标签中...', () => api.tagStylingGarment(item.id)) : undefined}
               selected={selectedGarmentIds.has(item.id)}
               onSelect={(checked) => toggleGarmentSelection(item.id, checked)}
-              onDelete={() => setDeleteGarmentDialog([item])}
+              onDelete={() => openGarmentDeleteDialog([item])}
             />
           ))}</div>
         ) : <EmptyState title={query ? '没有匹配的搭配服饰' : '暂无搭配服饰'} text={query ? '换一个货号或标签关键词试试。' : '点击右上角导入搭配服饰。'} />}
@@ -905,13 +919,15 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
           }}
         />
       </div>
-      {detail && <GarmentDetailDrawer item={detail} run={run} onClose={() => setDetail(null)} onChange={setDetail} onDelete={() => setDeleteGarmentDialog([detail])} />}
+      {detail && <GarmentDetailDrawer item={detail} run={run} onClose={() => setDetail(null)} onChange={setDetail} onDelete={() => openGarmentDeleteDialog([detail])} />}
       {deleteGarmentDialog && (
         <DeleteConfirmDialog
-          title={deleteGarmentDialog.length === 1 ? '删除搭配服饰' : `删除 ${deleteGarmentDialog.length} 套搭配服饰`}
+          title={deleteGarmentDialog.length === 1 ? '归档搭配服饰' : `归档 ${deleteGarmentDialog.length} 套搭配服饰`}
           items={deleteGarmentDialog.map((item) => ({ id: item.id, name: item.code }))}
           onClose={() => setDeleteGarmentDialog(null)}
           onConfirm={confirmGarmentDelete}
+          impact={deleteGarmentImpact}
+          impactLoading={deleteGarmentImpactLoading}
         />
       )}
     </section>
@@ -1324,6 +1340,8 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
   const [includeArchived, setIncludeArchived] = useState(false)
   const [selectedRecordIds, setSelectedRecordIds] = useState<Set<number>>(() => new Set())
   const [deleteRecordDialog, setDeleteRecordDialog] = useState<GenerationTask[] | null>(null)
+  const [deleteRecordImpact, setDeleteRecordImpact] = useState<DeleteImpact | null>(null)
+  const [deleteRecordImpactLoading, setDeleteRecordImpactLoading] = useState(false)
   const [pageSize, setPageSize] = useState(12)
   const selectableRecordIds = items.filter((item) => !isTaskRunning(item)).map((item) => item.id)
   const allVisibleRecordsSelected = selectableRecordIds.length > 0 && selectableRecordIds.every((id) => selectedRecordIds.has(id))
@@ -1385,13 +1403,24 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
   }
 
   function openRecordDeleteDialog(item: GenerationTask) {
-    setDeleteRecordDialog([item])
+    openRecordDeleteDialogForItems([item])
   }
 
   function runRecordBatchAction() {
     const ids = Array.from(selectedRecordIds)
     if (!ids.length) return
-    setDeleteRecordDialog(items.filter((item) => selectedRecordIds.has(item.id)))
+    openRecordDeleteDialogForItems(items.filter((item) => selectedRecordIds.has(item.id)))
+  }
+
+  function openRecordDeleteDialogForItems(targets: GenerationTask[]) {
+    const ids = targets.map((item) => item.id)
+    setDeleteRecordDialog(targets)
+    setDeleteRecordImpact(null)
+    setDeleteRecordImpactLoading(true)
+    void api.getTaskDeleteImpact(ids)
+      .then((response) => setDeleteRecordImpact(response.impact))
+      .catch(() => setDeleteRecordImpact(null))
+      .finally(() => setDeleteRecordImpactLoading(false))
   }
 
   function confirmRecordDelete(items: DeleteDialogTarget[], purge: boolean, confirmText: string) {
@@ -1399,10 +1428,11 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
     const action = purge
       ? () => ids.length === 1 ? api.deleteTask(ids[0], confirmText) : api.deleteTasks(ids, confirmText)
       : () => api.archiveTasks(ids)
-    void run(purge ? '彻底删除记录中...' : '删除记录中...', action, () => {
+    void run(purge ? '彻底删除记录中...' : '归档记录中...', action, () => {
       clearRecordDetailIfAffected(ids)
       setSelectedRecordIds(new Set())
       setDeleteRecordDialog(null)
+      setDeleteRecordImpact(null)
       void refreshRecordPage().catch(() => undefined)
     })
   }
@@ -1426,13 +1456,13 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
                 setOffset(0)
                 setIncludeArchived(event.target.checked)
                 setSelectedRecordIds(new Set())
-              }} /> 查看已删除</label>
+              }} /> 查看已归档</label>
               <label><input type="checkbox" checked={allVisibleRecordsSelected} disabled={!selectableRecordIds.length} onChange={(event) => toggleVisibleRecordSelection(event.target.checked)} /> 全选本页</label>
             </div>
             <div className="record-list-meta">
               {selectedRecordIds.size > 0 && (
                 <button className="secondary" onClick={runRecordBatchAction}>
-                  删除 {selectedRecordIds.size} 项
+                  归档 {selectedRecordIds.size} 项
                 </button>
               )}
               <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 条` : '0 条'}</span>
@@ -1452,7 +1482,7 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
               />
               <button className="record-open" aria-current={detail?.id === item.id ? 'true' : undefined} title="查看记录详情" onClick={() => openRecord(item)}>
                 <AssetThumb asset={item.summary?.cover ?? null} interactive={false} />
-                <div><strong>{item.name}</strong><span>{item.archivedAt ? '已删除' : statusText(item.status)} · {dateText(item.createdAt)}</span></div>
+                <div><strong>{item.name}</strong><span>{item.archivedAt ? '已归档' : statusText(item.status)} · {dateText(item.createdAt)}</span></div>
                 <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
                 <span className="record-eye" aria-hidden="true"><Eye size={16} /></span>
               </button>
@@ -1460,7 +1490,7 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
                 className="secondary record-action-button"
                 onClick={() => isTaskRunning(item) ? cancelRecordTask(item) : openRecordDeleteDialog(item)}
               >
-                {isTaskRunning(item) ? '取消生成' : '删除'}
+                {isTaskRunning(item) ? '取消生成' : '归档'}
               </button>
             </div>
           ))}
@@ -1493,21 +1523,25 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
       </div>
       {deleteRecordDialog && (
         <DeleteConfirmDialog
-          title={deleteRecordDialog.length === 1 ? '删除记录' : `删除 ${deleteRecordDialog.length} 条记录`}
+          title={deleteRecordDialog.length === 1 ? '归档记录' : `归档 ${deleteRecordDialog.length} 条记录`}
           items={deleteRecordDialog}
           onClose={() => setDeleteRecordDialog(null)}
           onConfirm={confirmRecordDelete}
+          impact={deleteRecordImpact}
+          impactLoading={deleteRecordImpactLoading}
         />
       )}
     </section>
   )
 }
 
-function DeleteConfirmDialog({ title, items, onClose, onConfirm }: {
+function DeleteConfirmDialog({ title, items, onClose, onConfirm, impact = null, impactLoading = false }: {
   title: string
   items: DeleteDialogTarget[]
   onClose: () => void
   onConfirm: (items: DeleteDialogTarget[], purge: boolean, confirmText: string) => void
+  impact?: DeleteImpact | null
+  impactLoading?: boolean
 }) {
   const [purge, setPurge] = useState(false)
   const [confirmText, setConfirmText] = useState('')
@@ -1533,7 +1567,7 @@ function DeleteConfirmDialog({ title, items, onClose, onConfirm }: {
           <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
         </div>
         <p className="confirm-copy">
-          确认后会从日常列表移除，可通过“查看已删除”找回。
+          确认后会归档并从日常列表移除，可通过“查看已归档”找回。
         </p>
         <div className="confirm-items">
           {items.slice(0, 4).map((item) => <span key={item.id}>{item.name}</span>)}
@@ -1547,15 +1581,20 @@ function DeleteConfirmDialog({ title, items, onClose, onConfirm }: {
           同时彻底删除关联记录和文件
         </label>
         {purge && (
-          <label className="confirm-field">
-            <span>{items.length === 1 ? '输入完整名称确认彻底删除' : '输入“全部删除”确认彻底删除'}</span>
-            <input
-              autoFocus
-              value={confirmText}
-              onChange={(event) => setConfirmText(event.target.value)}
-              placeholder={expectedText}
-            />
-          </label>
+          <>
+            <div className="confirm-copy">
+              {impactLoading ? '正在计算影响范围...' : deleteImpactText(impact)}
+            </div>
+            <label className="confirm-field">
+              <span>{items.length === 1 ? '输入完整名称确认彻底删除' : '输入“全部删除”确认彻底删除'}</span>
+              <input
+                autoFocus
+                value={confirmText}
+                onChange={(event) => setConfirmText(event.target.value)}
+                placeholder={expectedText}
+              />
+            </label>
+          </>
         )}
         <div className="confirm-actions">
           <button type="button" className="secondary" onClick={onClose}>取消</button>
@@ -1685,7 +1724,7 @@ function GarmentCard({ item, onTag, onOpen, onDelete, selected, onSelect }: {
       <div className="garment-cover">
         <AssetThumb asset={item.images?.[0]?.asset ?? item.coverAsset ?? (item.coverUrl ? { id: item.id, objectKey: '', filename: item.code, mimeType: '', thumbUrl: item.coverUrl } : null)} large />
         {tagging && <span className="cover-badge">识别中</span>}
-        {item.archivedAt && <span className="cover-badge">已删除</span>}
+        {item.archivedAt && <span className="cover-badge">已归档</span>}
       </div>
       <div className="garment-card-head"><strong title={item.code}>{item.code}</strong><span className={`status ${item.status.toLowerCase()}`}>{garmentStatus(item.status)}</span></div>
       {item.tagError && <span className="inline-error">{item.tagError}</span>}
@@ -1699,7 +1738,7 @@ function GarmentCard({ item, onTag, onOpen, onDelete, selected, onSelect }: {
       <div className="card-actions">
         {onOpen && <button className="secondary" onClick={onOpen}><Eye size={16} /> 详情</button>}
         {onTag && <button className="secondary" disabled={tagging} onClick={onTag}>重新识别标签</button>}
-        {onDelete && <button className="secondary" disabled={tagging} onClick={onDelete}><Trash2 size={16} /> 删除</button>}
+        {onDelete && <button className="secondary" disabled={tagging} onClick={onDelete}><Trash2 size={16} /> 归档</button>}
       </div>
     </div>
   )
@@ -1878,11 +1917,11 @@ function GarmentDetailDrawer({ item, run, onClose, onChange, onDelete }: {
           <button className="primary" disabled={tagging || !dirty || working.length + pendingFiles.length > 6} onClick={() => void save(true)}>保存并重新识别标签</button>
         </div>
         <div className="danger-zone">
-          <strong>删除</strong>
+          <strong>归档</strong>
           <button className="secondary" disabled={tagging} onClick={() => {
             onDelete()
             onClose()
-          }}>删除</button>
+          }}>归档</button>
         </div>
       </aside>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
@@ -2440,6 +2479,19 @@ function formatBytes(value?: number | null) {
   if (value < 1024) return `${value} B`
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
   return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+
+function deleteImpactText(impact?: DeleteImpact | null) {
+  if (!impact) return '影响范围暂时无法计算。彻底删除会移除关联表单数据和已登记的存储文件，且不可恢复。'
+  const parts: string[] = []
+  if (impact.garmentCount) parts.push(`${impact.garmentCount} 套搭配服饰`)
+  if (impact.garmentImageCount) parts.push(`${impact.garmentImageCount} 张服饰图`)
+  const taskCount = impact.dependentTaskCount ?? impact.taskCount ?? 0
+  if (taskCount) parts.push(`${taskCount} 条生成记录`)
+  if (impact.resultImageCount) parts.push(`${impact.resultImageCount} 张结果图记录`)
+  if (impact.mediaAssetCount) parts.push(`${impact.mediaAssetCount} 个存储文件`)
+  const scope = parts.length ? parts.join('、') : '当前选中项'
+  return `彻底删除将移除 ${scope}，预计原始文件 ${formatBytes(impact.estimatedBytes)}。该操作不可恢复。`
 }
 
 function dimensionText(dimensions?: { width?: number | null; height?: number | null }) {

@@ -44,6 +44,7 @@ Authorization: Bearer <token>
 | `/api/styling-garments/batch-save-and-tag` | POST | 批量把已保存搭配服饰置为 `TAGGING_RUNNING` 并提交后台打标 |
 | `/api/styling-garments/{garment_id}` | DELETE | 删除搭配服饰；默认从日常列表移除，传 `purge=true` 且确认 code 时彻底删除关联记录和文件 |
 | `/api/styling-garments/batch-delete` | POST | 批量删除搭配服饰；默认从日常列表移除，传 `purge=true` 且确认短语 `全部删除` 时彻底删除 |
+| `/api/styling-garments/delete-impact` | POST | 彻底删除前的影响预检，返回依赖生成记录、媒体数量和估算大小 |
 | `/api/generation-tasks` | GET | AI 摄影棚任务列表 |
 | `/api/generation-tasks` | POST | 上传主推款图片并创建 `DRAFT` 拍摄任务 |
 | `/api/generation-tasks/{task_id}` | GET | 拍摄任务详情 |
@@ -53,6 +54,7 @@ Authorization: Bearer <token>
 | `/api/generation-tasks/batch-archive` | POST | 批量归档拍摄任务；从默认任务和记录列表隐藏但保留文件与历史 |
 | `/api/generation-tasks/{task_id}` | DELETE | 彻底删除拍摄任务；必须传 `purge=true` 并输入完整任务名确认，会清理任务、生成结果和对象文件 |
 | `/api/generation-tasks/batch-purge` | POST | 批量彻底删除拍摄任务；必须传 `purge=true`、任务 id 列表并输入确认短语 `全部删除` |
+| `/api/generation-tasks/delete-impact` | POST | 彻底删除前的影响预检，返回任务输入、分镜、结果、媒体数量和估算大小 |
 | `/api/generation-tasks/{task_id}/images` | POST | 草稿期追加主推款图片，最多 8 张 |
 | `/api/generation-task-images/{image_id}/replace` | POST | 草稿期替换单张主推款图片 |
 | `/api/generation-task-images/{image_id}` | PATCH / DELETE | 草稿期调整排序或移除主推款图片 |
@@ -178,6 +180,8 @@ Authorization: Bearer <token>
 - 上传/生成完成时会把 `thumb_path`、`preview_path` 和三档文件大小落库；历史数据可用 `backend/scripts/repair_media_metadata.py` 补齐。
 - 旧数据若缺少衍生图，媒体访问层会尽量补生成；补生成失败时回退到原图，保证旧记录仍可显示。
 - 删除单张素材或替换/删除头像时，会同步清理对应衍生图。删除整个货号或模特目录时，会通过对象前缀清理。
+- 新版 `MediaAsset` 删除遵循引用计数：删除/替换单张搭配服饰图片或主推款草稿图片时，先解除当前关系，再确认没有其它关系表和历史快照引用该媒体，最后清理原图、`thumb`、`preview` 和 `media_assets` 元数据。
+- 彻底删除任务或搭配服饰时，对象清理以已登记 `media_assets` 为主，真实对象 key 推导出的 prefix 只作为兜底，避免依赖任务名或数据库 id 猜测路径。
 
 ## 搭配服饰库契约
 
@@ -192,6 +196,7 @@ Authorization: Bearer <token>
 - `GET /api/styling-garments/{id}` 额外返回 `tagAttempts`；每项包含 provider、状态、时间、错误以及 `requestSnapshot` / `responseSnapshot`，供折叠技术详情查看。
 - 低置信度、`unknown`、`unsupported_accessory`、provider fallback 或模型显式要求复核时，状态为 `TAGGING_READY`。
 - 只有 `READY` 状态进入智能选搭候选；`TAGGING_READY`、`TAGGING_FAILED` 和 `DELETED` 不参与选搭。
+- 默认删除搭配服饰是归档：写入 `archived_at/archive_reason`，日常列表隐藏、不参与新选搭，但历史任务继续读取冻结快照。`purge=true` 会删除该服饰及选中过它的生成任务、结果和对象文件，前端必须先调用 `/api/styling-garments/delete-impact` 展示影响范围。
 
 ## AI Stylist / StylingPlan 契约
 

@@ -139,6 +139,24 @@ export type GenerationTask = {
   attempts?: unknown[]
 }
 
+export type DeleteImpact = {
+  garmentCount?: number
+  garmentImageCount?: number
+  dependentTaskIds?: number[]
+  dependentTaskCount?: number
+  taskCount?: number
+  taskImageCount?: number
+  inputVersionCount?: number
+  stylingCount?: number
+  shotPlanCount?: number
+  previewCount?: number
+  resultSetCount?: number
+  resultImageCount?: number
+  mediaAssetCount?: number
+  estimatedBytes?: number
+  dependentTaskImpact?: DeleteImpact
+}
+
 export type ModelProfile = {
   id: number
   modelId: string
@@ -247,6 +265,8 @@ export const api = {
       '/api/styling-garments/batch-delete',
       { method: 'POST', body: JSON.stringify({ ids, purge: options?.purge, confirmPhrase: options?.confirmPhrase }) },
     ),
+  getStylingGarmentDeleteImpact: (ids: number[]) =>
+    request<{ impact: DeleteImpact }>('/api/styling-garments/delete-impact', { method: 'POST', body: JSON.stringify({ ids }) }),
   listTasks: (options?: { limit?: number; offset?: number; includeArchived?: boolean }) =>
     request<Paginated<GenerationTask>>(params('/api/generation-tasks', options ?? {})),
   getTask: (id: number, includeDebug = false) =>
@@ -261,6 +281,8 @@ export const api = {
     request<{ ok: boolean; purged: boolean; deletedTaskIds: number[] }>(`/api/generation-tasks/${id}`, { method: 'DELETE', body: JSON.stringify({ purge: true, confirmName }) }),
   deleteTasks: (ids: number[], confirmPhrase: string) =>
     request<{ ok: boolean; purged: boolean; deletedTaskIds: number[] }>('/api/generation-tasks/batch-purge', { method: 'POST', body: JSON.stringify({ purge: true, ids, confirmPhrase }) }),
+  getTaskDeleteImpact: (ids: number[]) =>
+    request<{ impact: DeleteImpact }>('/api/generation-tasks/delete-impact', { method: 'POST', body: JSON.stringify({ ids }) }),
   createTask: (name: string, files: File[]) => {
     const form = new FormData()
     if (name) form.append('name', name)
