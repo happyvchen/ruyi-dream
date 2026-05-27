@@ -639,16 +639,16 @@ class BackendSmokeTests(unittest.TestCase):
                 {
                     "id": "candidate_a",
                     "selected_material_ids": [10, 9],
-                    "wearing_notes": "针织衫下摆收进裤腰，西装外套敞开穿着。",
+                    "wearing_notes": "短款针织衫自然落在裤腰上方，西装外套敞开穿着。",
                     "hero_focus": ["腰部环扣", "裤管垂坠"],
                     "aesthetic_diagnosis": {
                         "color_weight": "深棕和白色形成对比。",
                         "silhouette_balance": "外套敞开。",
-                        "waistline_proportion": "上衣塞腰。",
+                        "waistline_proportion": "短款上衣露出裤腰。",
                         "season_material_fit": "秋冬通勤。",
                         "template_risk": "常见通勤三件套。",
-                        "wearing_method_validity": "针织衫塞腰需要穿法校验。",
-                        "tuck_quality": "塞腰存在腰腹臃肿风险。",
+                        "wearing_method_validity": "短款上衣和敞开外套穿法成立。",
+                        "tuck_quality": "无塞腰穿法。",
                         "brand_read": "商务通勤。",
                     },
                     "scores": {
@@ -779,6 +779,34 @@ class BackendSmokeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "塞腰"):
             main.validate_styling_plan(plan, candidate_snapshot)
+
+    def test_forbidden_tuck_method_detects_equivalent_waist_tuck_phrases(self) -> None:
+        main = importlib.import_module("app.main")
+        candidate_snapshot = {
+            "candidate_material_ids": [9],
+            "hero_profile": {"category": "bottom"},
+            "material_cards": [
+                {
+                    "id": 9,
+                    "category": "knitwear",
+                    "sub_category": "cardigan",
+                    "materials_visual": ["knit"],
+                    "details": ["button"],
+                    "wearability": {"recommended_wearing_methods": ["buttoned", "open"]},
+                },
+            ],
+        }
+
+        phrases = [
+            "针织开衫下摆收进裤腰。",
+            "针织开衫扎进裤腰。",
+            "针织开衫掖进裤腰。",
+            "针织开衫束进裤腰。",
+            "针织开衫 tucked-in 到裤腰。",
+        ]
+        for phrase in phrases:
+            with self.subTest(phrase=phrase):
+                self.assertTrue(main.has_forbidden_tuck_method([9], candidate_snapshot, {"wearing_notes": phrase}))
 
     def test_bottom_shot_plan_uses_category_specific_frames(self) -> None:
         main = importlib.import_module("app.main")

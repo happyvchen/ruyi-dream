@@ -6133,12 +6133,62 @@ def has_forbidden_accessory_template(selected_outfit: dict[str, Any]) -> bool:
     return any(keyword in accessories for keyword in forbidden)
 
 
+def detect_tuck_usage(notes: str) -> tuple[bool, bool]:
+    text = str(notes or "").lower()
+    compact = "".join(text.split()).replace("_", "-")
+    half_tuck_keywords = (
+        "半塞",
+        "轻微前塞",
+        "前片塞",
+        "前摆塞",
+        "前侧塞",
+        "half-tuck",
+        "halftuck",
+        "front-tuck",
+        "fronttuck",
+    )
+    explicit_full_tuck_keywords = (
+        "全塞",
+        "完全塞",
+        "全部塞",
+        "塞入裤腰",
+        "塞进裤腰",
+        "塞到裤腰",
+        "塞在裤腰",
+        "塞腰",
+        "收进裤腰",
+        "收入裤腰",
+        "扎进裤腰",
+        "扎入裤腰",
+        "掖进裤腰",
+        "掖入裤腰",
+        "束进裤腰",
+        "束入裤腰",
+        "收进腰头",
+        "扎进腰头",
+        "掖进腰头",
+        "束进腰头",
+        "tucked-in",
+        "tuckedin",
+        "tuckinto",
+        "tuckedinto",
+        "fullytucked",
+        "fulltuck",
+    )
+    is_half_tuck = any(keyword in compact for keyword in half_tuck_keywords)
+    is_full_tuck = any(keyword in compact for keyword in explicit_full_tuck_keywords)
+    if not is_half_tuck and not is_full_tuck and "untucked" not in compact and "un-tucked" not in compact:
+        is_full_tuck = "tucked" in compact
+    if not is_half_tuck and not is_full_tuck:
+        is_full_tuck = ("tuck" in compact or "塞" in compact) and any(keyword in compact for keyword in ("裤腰", "腰头", "waist"))
+    return is_half_tuck, is_full_tuck
+
+
 def has_forbidden_tuck_method(selected_ids: list[int], candidate_snapshot: dict[str, Any], selected_outfit: dict[str, Any]) -> bool:
     notes = str(selected_outfit.get("wearing_notes") or "")
-    if not any(keyword in notes.lower() for keyword in ("塞", "tuck")):
+    is_half_tuck, is_full_tuck = detect_tuck_usage(notes)
+    if not is_half_tuck and not is_full_tuck:
         return False
-    is_half_tuck = any(keyword in notes.lower() for keyword in ("半塞", "轻微前塞", "前片", "half"))
-    is_full_tuck = any(keyword in notes.lower() for keyword in ("全塞", "完全塞", "塞入裤腰", "塞进裤腰", "tucked"))
     cards = {int(card["id"]): card for card in candidate_snapshot.get("material_cards", []) if isinstance(card, dict) and card.get("id") is not None}
     selected_cards = [cards.get(int(item_id), {}) for item_id in selected_ids]
     hero_profile = candidate_snapshot.get("hero_profile") if isinstance(candidate_snapshot.get("hero_profile"), dict) else {}
