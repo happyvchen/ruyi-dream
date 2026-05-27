@@ -255,6 +255,29 @@ class BackendSmokeTests(unittest.TestCase):
         presigned_get_url.assert_any_call("uploads/legacy/preview.webp")
         presigned_get_url.assert_any_call("outputs/legacy/final-thumb.webp")
 
+    def test_media_redirect_allows_model_profile_head_references(self) -> None:
+        from fastapi.testclient import TestClient
+
+        main = importlib.import_module("app.main")
+        db_module = importlib.import_module("app.db")
+        client = TestClient(main.app)
+        self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+        db_module.init_db()
+
+        signed_url = "http://203.0.113.10:9000/ruyi-dream/model-preview.webp?X-Amz-Signature=test"
+        with (
+            patch.object(main, "object_exists", return_value=True),
+            patch.object(main, "presigned_get_url", return_value=signed_url) as presigned_get_url,
+        ):
+            response = client.get(
+                "/api/media?key=model-profiles/Face-01/front.png&variant=preview",
+                follow_redirects=False,
+            )
+
+        self.assertEqual(response.status_code, 307)
+        self.assertEqual(response.headers["location"], signed_url)
+        presigned_get_url.assert_called_with("model-profiles/Face-01/_derived/preview/front.webp")
+
     def test_upload_validation_accepts_decodable_images_despite_content_type_mismatch(self) -> None:
         from fastapi import UploadFile
         from PIL import Image

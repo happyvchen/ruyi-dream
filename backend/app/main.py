@@ -2504,6 +2504,9 @@ def registered_media_keys(object_key: str) -> dict[str, str | None] | None:
                 "thumb_key": clean_key(asset["thumb_key"]) if asset["thumb_key"] else None,
                 "preview_key": clean_key(asset["preview_key"]) if asset["preview_key"] else None,
             }
+        model_reference = registered_model_reference_keys(db, object_key)
+        if model_reference:
+            return model_reference
         legacy_garment = db.execute(
             """
             SELECT storage_path, thumb_path, preview_path FROM garment_images
@@ -2530,6 +2533,26 @@ def registered_media_keys(object_key: str) -> dict[str, str | None] | None:
                 "thumb_key": clean_key(legacy_generation["thumb_path"]) if legacy_generation["thumb_path"] else None,
                 "preview_key": clean_key(legacy_generation["preview_path"]) if legacy_generation["preview_path"] else None,
             }
+    return None
+
+
+def registered_model_reference_keys(db: Any, object_key: str) -> dict[str, str | None] | None:
+    rows = db.execute("SELECT asset_dir, profile_json FROM model_profiles").fetchall()
+    for row in rows:
+        profile = loads(row["profile_json"], {})
+        references = profile.get("headReferences") if isinstance(profile.get("headReferences"), dict) else {}
+        for filename in references.values():
+            if not filename:
+                continue
+            original_key = join_key(row["asset_dir"], sanitize_filename(str(filename)))
+            thumb_key = derivative_key(original_key, "thumb")
+            preview_key = derivative_key(original_key, "preview")
+            if object_key in {original_key, thumb_key, preview_key}:
+                return {
+                    "object_key": original_key,
+                    "thumb_key": thumb_key,
+                    "preview_key": preview_key,
+                }
     return None
 
 
