@@ -1887,10 +1887,13 @@ async def select_generation_styling(task_id: int) -> dict[str, Any]:
     input_version_id = create_generation_input_version(task_id)
     with get_db() as db:
         db.execute("UPDATE generation_tasks SET status = 'STYLING_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
-    attempt_id: int | None = None
+    attempt_id = create_attempt("generation_styling", task_id, "gemini")
     try:
         input_row, candidate_snapshot, request_snapshot = build_ai_stylist_context(input_version_id)
-        attempt_id = create_attempt("generation_styling", task_id, "gemini", request_snapshot)
+        update_attempt_request_snapshot(attempt_id, request_snapshot)
+        if generation_task_or_attempt_cancelled(task_id, attempt_id):
+            finish_attempt(attempt_id, "CANCELLED")
+            return {"item": get_generation_task_by_id(task_id)}
         styling_plan = await select_styling_with_gemini(input_row, candidate_snapshot, request_snapshot)
         validate_styling_plan(styling_plan, candidate_snapshot)
         styling_plan = attach_styling_quality_signals(styling_plan, collect_styling_quality_signals(styling_plan, candidate_snapshot))
@@ -5369,6 +5372,28 @@ def create_attempt(owner_type: str, owner_id: int, provider: str, request_snapsh
             (owner_type, owner_id, provider, timestamp, dumps(request_snapshot or {}), timestamp, timestamp),
         )
         return int(cursor.lastrowid)
+
+
+def update_attempt_request_snapshot(attempt_id: int, request_snapshot: dict[str, Any]) -> None:
+    with get_db() as db:
+        db.execute(
+            "UPDATE generation_attempts SET request_snapshot_json = ?, updated_at = ? WHERE id = ?",
+            (dumps(request_snapshot), now_iso(), attempt_id),
+        )
+
+
+def generation_task_or_attempt_cancelled(task_id: int, attempt_id: int) -> bool:
+    with get_db() as db:
+        row = db.execute(
+            """
+            SELECT gt.status AS task_status, ga.status AS attempt_status
+            FROM generation_tasks gt
+            LEFT JOIN generation_attempts ga ON ga.id = ?
+            WHERE gt.id = ?
+            """,
+            (attempt_id, task_id),
+        ).fetchone()
+    return not row or row["task_status"] == "CANCELLED" or row["attempt_status"] == "CANCELLED"
 
 
 def finish_attempt(

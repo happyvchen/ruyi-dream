@@ -8,7 +8,7 @@ import unittest
 import zipfile
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlsplit
 
 
@@ -1081,6 +1081,68 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(preview_status, "CANCELLED")
         self.assertEqual(attempt["status"], "CANCELLED")
         self.assertIsNotNone(attempt["cancelled_at"])
+
+    def test_select_styling_cancel_before_provider_call_prevents_gemini_spend(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            with db_module.get_db() as db:
+                task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('styling race', 'READY_FOR_STYLING', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                media_id = db.execute(
+                    """
+                    INSERT INTO media_assets (object_key, original_filename, mime_type, status, created_at, updated_at)
+                    VALUES ('generation-tasks/styling-race/hero.jpg', 'hero.jpg', 'image/jpeg', 'READY', ?, ?)
+                    """,
+                    (timestamp, timestamp),
+                ).lastrowid
+                db.execute(
+                    """
+                    INSERT INTO generation_task_images (task_id, media_asset_id, sort_order, status, created_at, updated_at)
+                    VALUES (?, ?, 0, 'READY', ?, ?)
+                    """,
+                    (task_id, media_id, timestamp, timestamp),
+                )
+
+            client = TestClient(main.app)
+            self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+
+            def cancel_during_context(input_version_id: int) -> tuple[object, dict[str, object], dict[str, object]]:
+                main.cancel_generation_task(int(task_id))
+                return object(), {}, {"inputVersionId": input_version_id}
+
+            with (
+                patch.object(main, "build_ai_stylist_context", side_effect=cancel_during_context),
+                patch.object(main, "select_styling_with_gemini", new_callable=AsyncMock) as gemini,
+            ):
+                response = client.post(f"/api/generation-tasks/{task_id}/select-styling")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["item"]["status"], "CANCELLED")
+            gemini.assert_not_awaited()
+            with db_module.get_db() as db:
+                attempt = db.execute(
+                    """
+                    SELECT status, cancelled_at, request_snapshot_json
+                    FROM generation_attempts
+                    WHERE owner_type = 'generation_styling' AND owner_id = ?
+                    """,
+                    (task_id,),
+                ).fetchone()
+
+        self.assertEqual(attempt["status"], "CANCELLED")
+        self.assertIsNotNone(attempt["cancelled_at"])
+        self.assertIn("inputVersionId", attempt["request_snapshot_json"])
 
     def test_running_generation_task_cancel_preserves_partial_final_results(self) -> None:
         from fastapi.testclient import TestClient
