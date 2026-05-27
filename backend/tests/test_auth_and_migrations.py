@@ -1122,6 +1122,7 @@ class BackendSmokeTests(unittest.TestCase):
                 return object(), {}, {"inputVersionId": input_version_id}
 
             with (
+                patch.object(main, "snapshot_default_model", return_value={}),
                 patch.object(main, "build_ai_stylist_context", side_effect=cancel_during_context),
                 patch.object(main, "select_styling_with_gemini", new_callable=AsyncMock) as gemini,
             ):
