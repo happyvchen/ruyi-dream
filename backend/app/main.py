@@ -849,7 +849,7 @@ def list_styling_garments(
             WHERE sg.deleted_at IS NULL
               AND (? OR sg.archived_at IS NULL)
               AND (? IS NULL OR sg.code LIKE ? OR sg.status LIKE ? OR sg.ai_tags_json LIKE ?)
-            ORDER BY sg.updated_at DESC, sg.id DESC
+            ORDER BY sg.created_at DESC, sg.id DESC
             LIMIT ? OFFSET ?
             """,
             (include_archived, search, search, search, search, limit + 1, offset),
@@ -1468,7 +1468,7 @@ def list_generation_tasks(
             SELECT * FROM generation_tasks
             WHERE deleted_at IS NULL
               AND (? OR archived_at IS NULL)
-            ORDER BY updated_at DESC, id DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT ? OFFSET ?
             """,
             (include_archived, limit + 1, offset),
@@ -2082,12 +2082,7 @@ def list_new_generation_records(
             SELECT * FROM generation_tasks gt
             WHERE gt.deleted_at IS NULL
               AND (? OR gt.archived_at IS NULL)
-              AND gt.status <> 'DRAFT'
-              AND (
-                gt.current_input_version_id IS NOT NULL
-                OR EXISTS (SELECT 1 FROM generation_task_input_versions giv WHERE giv.task_id = gt.id)
-              )
-            ORDER BY created_at DESC, id DESC
+            ORDER BY gt.created_at DESC, gt.id DESC
             LIMIT ? OFFSET ?
             """,
             (include_archived, limit + 1, offset),
@@ -2097,11 +2092,6 @@ def list_new_generation_records(
             SELECT COUNT(*) AS total FROM generation_tasks gt
             WHERE gt.deleted_at IS NULL
               AND (? OR gt.archived_at IS NULL)
-              AND gt.status <> 'DRAFT'
-              AND (
-                gt.current_input_version_id IS NOT NULL
-                OR EXISTS (SELECT 1 FROM generation_task_input_versions giv WHERE giv.task_id = gt.id)
-              )
             """,
             (include_archived,),
         ).fetchone()["total"])

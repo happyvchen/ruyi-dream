@@ -105,15 +105,25 @@ export function App() {
   }, [authenticated])
 
   useEffect(() => {
-    const handlePopState = () => setPage(parseRoute().page)
+    const handlePopState = () => {
+      const route = parseRoute()
+      setPage(route.page)
+      if (route.page === 'studio' && !route.taskId) setTask(null)
+      if (route.page === 'studio' && route.taskId) {
+        void api.getTask(route.taskId).then((result) => setTask(result.item)).catch(() => undefined)
+      }
+      if (route.page === 'records' && !route.recordId) setRecordDetail(null)
+      if (route.page === 'records' && route.recordId) {
+        void api.getRecord(route.recordId, false).then((result) => setRecordDetail(result.item)).catch(() => undefined)
+      }
+    }
     window.addEventListener('popstate', handlePopState)
     return () => window.removeEventListener('popstate', handlePopState)
   }, [])
 
   useEffect(() => {
-    if (page === 'studio' && task?.id) window.history.replaceState(null, '', routeToUrl({ page, taskId: task.id }))
     if (page === 'records' && recordDetail?.id) window.history.replaceState(null, '', routeToUrl({ page, recordId: recordDetail.id }))
-  }, [page, task?.id, recordDetail?.id])
+  }, [page, recordDetail?.id])
 
   const runningTaggingIds = useMemo(() => garments.filter((item) => item.status === 'TAGGING_RUNNING').map((item) => item.id), [garments])
   const runningTaggingKey = runningTaggingIds.join(',')
@@ -139,8 +149,8 @@ export function App() {
     setModels(modelResult.items)
     const route = parseRoute()
     const requestedTaskId = route.page === 'studio' ? route.taskId : undefined
-    if ((!task || requestedTaskId) && (requestedTaskId || taskResult.items[0])) {
-      const detail = await api.getTask(requestedTaskId ?? taskResult.items[0].id).then((r) => r.item).catch(() => null)
+    if (requestedTaskId && (!task || task.id !== requestedTaskId)) {
+      const detail = await api.getTask(requestedTaskId).then((r) => r.item).catch(() => null)
       if (detail) setTask(detail)
     }
     if (route.page === 'records' && route.recordId && !recordDetail) {
@@ -151,6 +161,8 @@ export function App() {
 
   function navigate(next: Page) {
     setPage(next)
+    if (next === 'studio') setTask(null)
+    if (next === 'records') setRecordDetail(null)
     window.history.pushState(null, '', routeToUrl({ page: next }))
   }
 
@@ -336,12 +348,15 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
           <div className="mini-list">
             {taskItems.map((item) => (
               <div key={item.id} className={`mini-row view-only ${task?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
-                <button onClick={() => void api.getRecord(item.id).then((r) => setTask(r.item))}>
+                <button onClick={() => void api.getRecord(item.id).then((r) => {
+                  setTask(r.item)
+                  window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
+                })}>
                   <span>{item.name}</span><em>{item.archivedAt ? '已删除' : statusText(item.status)}</em>
                 </button>
               </div>
             ))}
-            {!taskItems.length && <EmptyState title="暂无任务" text="进入 AI 阶段的任务会出现在这里。" />}
+            {!taskItems.length && <EmptyState title="暂无任务" text="创建拍摄任务后会出现在这里。" />}
           </div>
         </aside>
       </div>
@@ -420,7 +435,10 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
           </div>
           <FileThumbList files={files} onChange={setFiles} />
           <div className="inline-form">
-            <button className="primary" disabled={!files.length || files.length > 8 || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, files), (r: { item: GenerationTask }) => setTask(r.item))}>
+            <button className="primary" disabled={!files.length || files.length > 8 || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, files), (r: { item: GenerationTask }) => {
+              setTask(r.item)
+              window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: r.item.id }))
+            })}>
               <ImagePlus size={16} /> 创建任务
             </button>
           </div>
@@ -1278,8 +1296,7 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
   const [selectedRecordIds, setSelectedRecordIds] = useState<Set<number>>(() => new Set())
   const [deleteRecordDialog, setDeleteRecordDialog] = useState<GenerationTask[] | null>(null)
   const [pageSize, setPageSize] = useState(12)
-  const visibleRecords = items.filter((item) => item.status !== 'DRAFT')
-  const selectableRecordIds = visibleRecords.filter((item) => !isTaskRunning(item)).map((item) => item.id)
+  const selectableRecordIds = items.filter((item) => !isTaskRunning(item)).map((item) => item.id)
   const allVisibleRecordsSelected = selectableRecordIds.length > 0 && selectableRecordIds.every((id) => selectedRecordIds.has(id))
 
   function refreshRecordPage(targetOffset = offset) {
@@ -1345,7 +1362,7 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
   function runRecordBatchAction() {
     const ids = Array.from(selectedRecordIds)
     if (!ids.length) return
-    setDeleteRecordDialog(visibleRecords.filter((item) => selectedRecordIds.has(item.id)))
+    setDeleteRecordDialog(items.filter((item) => selectedRecordIds.has(item.id)))
   }
 
   function confirmRecordDelete(items: DeleteDialogTarget[], purge: boolean, confirmText: string) {
@@ -1384,7 +1401,7 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
               <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 条` : '0 条'}</span>
             </div>
           </div>
-          {visibleRecords.map((item) => (
+          {items.map((item) => (
             <div
               key={item.id}
               className={`record-row ${detail?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}
@@ -1411,7 +1428,7 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
               </button>
             </div>
           ))}
-          {!items.length && <EmptyState title="暂无生成记录" text="进入 AI 阶段的任务会出现在这里。" />}
+          {!items.length && <EmptyState title="暂无生成记录" text="创建拍摄任务后会出现在这里。" />}
           <PaginationControls
             disabled={loading}
             offset={offset}

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import zipfile
 from io import BytesIO
+from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
@@ -1238,6 +1239,8 @@ class BackendSmokeTests(unittest.TestCase):
 
             client = TestClient(main.app)
             self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+            draft_record_ids = [item["id"] for item in client.get("/api/generation-records").json()["items"]]
+            self.assertIn(task_id, draft_record_ids)
             ready = client.post(f"/api/generation-tasks/{task_id}/ready")
             self.assertEqual(ready.status_code, 200)
             self.assertEqual(ready.json()["item"]["status"], "READY_FOR_STYLING")
@@ -1252,6 +1255,58 @@ class BackendSmokeTests(unittest.TestCase):
             with db_module.get_db() as db:
                 db.execute("UPDATE generation_tasks SET status = 'FINAL_RUNNING', active_preview_id = 1 WHERE id = ?", (task_id,))
             self.assertEqual(client.post(f"/api/generation-tasks/{task_id}/generate-final").status_code, 409)
+
+    def test_user_lists_default_to_created_at_desc_even_after_updates(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.Settings.database_path = Path(db_file.name)
+            config.get_settings.cache_clear()
+            db_module.get_settings = config.get_settings
+            main.settings = config.get_settings()
+            db_module.init_db()
+            older_created = "2026-01-01T00:00:00"
+            newer_created = "2026-01-02T00:00:00"
+            older_updated = "2026-01-01T01:00:00"
+            newer_updated = "2026-01-03T00:00:00"
+            with db_module.get_db() as db:
+                older_task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('older task', 'DRAFT', ?, ?)",
+                    (older_created, newer_updated),
+                ).lastrowid
+                newer_task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('newer task', 'DRAFT', ?, ?)",
+                    (newer_created, older_updated),
+                ).lastrowid
+                older_garment_id = db.execute(
+                    """
+                    INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, created_at, updated_at)
+                    VALUES ('OLDER-GARMENT', 'READY', '{}', '{}', ?, ?)
+                    """,
+                    (older_created, newer_updated),
+                ).lastrowid
+                newer_garment_id = db.execute(
+                    """
+                    INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, created_at, updated_at)
+                    VALUES ('NEWER-GARMENT', 'READY', '{}', '{}', ?, ?)
+                    """,
+                    (newer_created, older_updated),
+                ).lastrowid
+
+            client = TestClient(main.app)
+            self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+
+            task_ids = [item["id"] for item in client.get("/api/generation-tasks").json()["items"]]
+            record_ids = [item["id"] for item in client.get("/api/generation-records").json()["items"]]
+            garment_ids = [item["id"] for item in client.get("/api/styling-garments").json()["items"]]
+            self.assertLess(task_ids.index(newer_task_id), task_ids.index(older_task_id))
+            self.assertLess(record_ids.index(newer_task_id), record_ids.index(older_task_id))
+            self.assertLess(garment_ids.index(newer_garment_id), garment_ids.index(older_garment_id))
 
     def test_generation_task_archive_and_delete_hide_default_lists(self) -> None:
         from fastapi.testclient import TestClient

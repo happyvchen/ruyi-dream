@@ -60,7 +60,7 @@ Authorization: Bearer <token>
 | `/api/generation-tasks/{task_id}/preview` | POST | 生成 6 条 ShotPlan 和 3x2 六宫格预览 |
 | `/api/generation-tasks/{task_id}/generate-final` | POST | 按前 5 条 ShotPlan 并发生成最终成片 |
 | `/api/generation-result-images-new/{image_id}/retry` | POST | 重试单张最终图 |
-| `/api/generation-records` | GET | 进入过 AI 阶段的生成记录列表 |
+| `/api/generation-records` | GET | 从草稿开始的生成记录列表 |
 | `/api/generation-records/{task_id}` | GET | 生成记录详情和技术快照 |
 | `/api/garment-skus` | GET | 旧版货号图包兼容列表；新版前台不作为主流程入口 |
 | `/api/garment-skus` | POST | 旧版货号图包上传兼容接口 |
@@ -99,7 +99,7 @@ Authorization: Bearer <token>
 
 当前没有独立 `/api/brand-templates` 管理接口。默认品牌模板以 `brand_template_versions` 版本化保存，生成任务包和 `template_snapshot_json` 会记录模板 id/version。
 
-新版前台“生成记录”列表使用 `/api/generation-records`，不是直接展示 `/api/logs`。旧版 `/api/generation-runs` 和 `/api/garment-skus` 仍作为兼容接口保留，不能作为新版页面主流程依据。`event_logs` 仍用于排查和审计。
+新版前台“生成记录”列表使用 `/api/generation-records`，并与 AI 摄影棚“最近任务”保持同一套 `GenerationTask` 列表口径，不是直接展示 `/api/logs`。旧版 `/api/generation-runs` 和 `/api/garment-skus` 仍作为兼容接口保留，不能作为新版页面主流程依据。`event_logs` 仍用于排查和审计。
 
 新版任务在调用 `select-styling` 时冻结主推款图片和默认数字模特快照。后端先生成候选召回快照，再调用 AI Stylist 输出 `StylingPlan`。六宫格与最终成片只读取该输入版本、`StylingPlan` 以及选搭快照。成功后是否允许整阶段重新选搭、重新预览或重新生成成片仍是产品决策项；当前代码暂时允许并保留历史结果用于追溯。部分失败支持单张结果图重试恢复。
 
@@ -147,6 +147,8 @@ Authorization: Bearer <token>
 | `GET /api/generation-records` | `includeArchived`、`limit`、`offset` |
 | `GET /api/model-profiles` | `limit`、`offset`、`keyword` |
 | `GET /api/generation-runs` | `includeArchived`、`limit`、`offset`、`skuId`、`keyword` |
+
+普通用户可见列表默认按创建时间倒序返回：搭配服饰库、AI 摄影棚最近任务和生成记录均使用 `created_at DESC, id DESC`。编辑名称、打标、追加图片、生成阶段推进、归档等只更新业务状态，不应改变这些列表的默认展示顺序。
 
 搜索框只要表现为全局搜索，就必须调用对应列表接口的 `keyword` 参数；不能只过滤前端已加载的首屏数据。
 
