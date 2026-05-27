@@ -958,7 +958,7 @@ class BackendSmokeTests(unittest.TestCase):
                 result_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_result_images_new)").fetchall()}
                 template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
@@ -1295,6 +1295,125 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(garment_status, "TAGGING_FAILED")
         self.assertEqual(attempt["status"], "FAILED")
         self.assertEqual(attempt["error_code"], "TIMEOUT")
+
+    def test_successful_tagging_clears_timeout_error_state(self) -> None:
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        timeout_message = "打标任务长时间未完成，已自动停止轮询，可手动重新打标。"
+        tagging_result = {
+            "schema_version": main.LILY_TAG_SCHEMA_VERSION,
+            "ai_tags": {"category": "top"},
+            "official_title_tags": {},
+            "tag_meta": {
+                "tagger_provider": "gemini",
+                "overall_confidence": 0.95,
+                "needs_review": False,
+                "review_reasons": [],
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            with patch.object(config.Settings, "database_path", config.Path(db_file.name)):
+                config.get_settings.cache_clear()
+                db_module.init_db()
+                timestamp = db_module.now_iso()
+                code = f"STALE-SUCCESS-{os.urandom(5).hex()}"
+                with db_module.get_db() as db:
+                    garment_id = db.execute(
+                        """
+                        INSERT INTO styling_garments
+                          (code, status, manual_tags_json, ai_tags_json, tag_error, created_at, updated_at)
+                        VALUES (?, 'TAGGING_FAILED', '{}', '{}', ?, ?, ?)
+                        """,
+                        (code, timeout_message, timestamp, timestamp),
+                    ).lastrowid
+                    attempt_id = db.execute(
+                        """
+                        INSERT INTO generation_attempts
+                          (owner_type, owner_id, provider, status, started_at, failed_at,
+                           error_code, error_message, created_at, updated_at)
+                        VALUES ('styling_garment_tagging', ?, 'gemini', 'FAILED', ?, ?,
+                                'TIMEOUT', ?, ?, ?)
+                        """,
+                        (garment_id, timestamp, timestamp, timeout_message, timestamp, timestamp),
+                    ).lastrowid
+
+                with patch.object(main, "tag_styling_garment_with_gemini", new=AsyncMock(return_value=tagging_result)):
+                    asyncio.run(main.run_styling_garment_tagging(int(garment_id)))
+                main.finish_attempt(int(attempt_id), "SUCCEEDED", {"normalized": tagging_result})
+
+                with db_module.get_db() as db:
+                    garment = db.execute(
+                        "SELECT status, tag_error, tag_completed_at FROM styling_garments WHERE id = ?",
+                        (garment_id,),
+                    ).fetchone()
+                    attempt = db.execute(
+                        "SELECT status, error_code, error_message, failed_at FROM generation_attempts WHERE id = ?",
+                        (attempt_id,),
+                    ).fetchone()
+            config.get_settings.cache_clear()
+
+        self.assertEqual(garment["status"], "READY")
+        self.assertIsNone(garment["tag_error"])
+        self.assertIsNotNone(garment["tag_completed_at"])
+        self.assertEqual(attempt["status"], "SUCCEEDED")
+        self.assertIsNone(attempt["error_code"])
+        self.assertIsNone(attempt["error_message"])
+        self.assertIsNone(attempt["failed_at"])
+
+    def test_migration_clears_existing_successful_tagging_timeout_errors(self) -> None:
+        db_module = importlib.import_module("app.db")
+
+        timeout_message = "打标任务长时间未完成，已自动停止轮询，可手动重新打标。"
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            conn = db_module.sqlite3.connect(db_file.name)
+            conn.row_factory = db_module.sqlite3.Row
+            conn.executescript(
+                """
+                CREATE TABLE styling_garments (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  code TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  tag_completed_at TEXT,
+                  tag_error TEXT
+                );
+                CREATE TABLE generation_attempts (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  owner_type TEXT NOT NULL,
+                  owner_id INTEGER NOT NULL,
+                  status TEXT NOT NULL,
+                  error_code TEXT,
+                  error_message TEXT,
+                  failed_at TEXT
+                );
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO styling_garments (code, status, tag_completed_at, tag_error)
+                VALUES ('CLEAN-ME', 'READY', '2026-05-26T09:53:42Z', ?)
+                """,
+                (timeout_message,),
+            )
+            conn.execute(
+                """
+                INSERT INTO generation_attempts
+                  (owner_type, owner_id, status, error_code, error_message, failed_at)
+                VALUES ('styling_garment_tagging', 1, 'SUCCEEDED', 'TIMEOUT', ?, '2026-05-26T09:52:11Z')
+                """,
+                (timeout_message,),
+            )
+            db_module.migration_clear_successful_tagging_timeout_errors(conn)
+            garment = conn.execute("SELECT tag_error FROM styling_garments WHERE code = 'CLEAN-ME'").fetchone()
+            attempt = conn.execute("SELECT error_code, error_message, failed_at FROM generation_attempts WHERE owner_id = 1").fetchone()
+            conn.close()
+
+        self.assertIsNone(garment["tag_error"])
+        self.assertIsNone(attempt["error_code"])
+        self.assertIsNone(attempt["error_message"])
+        self.assertIsNone(attempt["failed_at"])
 
     def test_lily_tagging_normalization_filters_invalid_enums(self) -> None:
         main = importlib.import_module("app.main")
