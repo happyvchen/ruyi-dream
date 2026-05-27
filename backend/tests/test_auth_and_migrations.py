@@ -1991,6 +1991,7 @@ class BackendSmokeTests(unittest.TestCase):
                 patch.object(main, "delete_object", return_value=None) as delete_object,
                 patch.object(main, "put_fileobj", return_value="generation-tasks/draft-cleanup/replacement.jpg"),
                 patch.object(main, "generate_image_derivatives", return_value={"thumb": "generation-tasks/draft-cleanup/_derived/thumb/replacement.webp", "preview": "generation-tasks/draft-cleanup/_derived/preview/replacement.webp"}),
+                patch.object(main, "unique_key", side_effect=lambda key: main.clean_key(key)),
             ):
                 removed = client.delete(f"/api/generation-task-images/{link_ids[0]}")
                 replaced = client.post(f"/api/generation-task-images/{link_ids[1]}/replace", files=upload)
