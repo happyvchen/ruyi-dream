@@ -46,16 +46,19 @@ from .planner import PlannerError, SHOT_SLOTS, normalize_plan as normalize_plann
 settings = get_settings()
 logger = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = settings.max_upload_image_pixels
+SESSION_ROLES = {"user", "admin"}
 
 
 def is_request_authenticated(request: Request) -> bool:
-    if settings.trust_reverse_proxy_auth:
-        return True
-    if is_api_token_valid(request):
-        return True
+    return get_request_role(request) is not None
+
+
+def get_request_role(request: Request) -> str | None:
+    if settings.trust_reverse_proxy_auth or is_api_token_valid(request):
+        return "admin"
     if not settings.is_gate_enabled():
-        return True
-    return is_session_cookie_valid(request.cookies.get("ruyi_session", ""))
+        return "admin"
+    return get_session_cookie_role(request.cookies.get("ruyi_session", ""))
 
 
 def is_api_token_valid(request: Request) -> bool:
@@ -81,36 +84,59 @@ def is_write_origin_allowed(request: Request) -> bool:
     return any(source == allowed or source.startswith(f"{allowed}/") for allowed in settings.cors_origins)
 
 
-def is_gate_password_valid(password: str) -> bool:
-    if settings.gate_password and secrets.compare_digest(password, settings.gate_password):
+def is_fixed_password_valid(password: str, expected_password: str, expected_hash: str) -> bool:
+    if expected_password and secrets.compare_digest(password, expected_password):
         return True
-    if settings.gate_password_hash:
+    if expected_hash:
         digest = hashlib.sha256(password.encode("utf-8")).hexdigest()
-        return secrets.compare_digest(digest, settings.gate_password_hash)
+        return secrets.compare_digest(digest, expected_hash)
     return False
+
+
+def authenticate_fixed_account(username: str | None, password: str) -> str | None:
+    account = (username or settings.user_username).strip().lower()
+    user_username = settings.user_username.strip().lower()
+    admin_username = settings.admin_username.strip().lower()
+    if account == user_username and is_fixed_password_valid(password, settings.user_password, settings.user_password_hash):
+        return "user"
+    if (
+        account == admin_username
+        and settings.is_admin_account_enabled()
+        and is_fixed_password_valid(password, settings.admin_password, settings.admin_password_hash)
+    ):
+        return "admin"
+    return None
 
 
 def sign_session_payload(payload: str) -> str:
     return hmac.new(settings.effective_session_secret().encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def create_session_cookie() -> str:
+def create_session_cookie(role: str) -> str:
+    if role not in SESSION_ROLES:
+        raise ValueError("Unsupported session role.")
     expires_at = int(time.time() + settings.session_ttl_seconds)
-    payload = f"{expires_at}.{secrets.token_urlsafe(18)}"
+    payload = f"{expires_at}.{role}.{secrets.token_urlsafe(18)}"
     return f"{payload}.{sign_session_payload(payload)}"
 
 
-def is_session_cookie_valid(cookie: str) -> bool:
+def get_session_cookie_role(cookie: str) -> str | None:
     parts = cookie.split(".")
-    if len(parts) != 3:
-        return False
-    expires_at, nonce, signature = parts
+    if len(parts) != 4:
+        return None
+    expires_at, role, nonce, signature = parts
     if not expires_at.isdigit() or not nonce:
-        return False
-    payload = f"{expires_at}.{nonce}"
+        return None
+    if role not in SESSION_ROLES:
+        return None
+    payload = f"{expires_at}.{role}.{nonce}"
     if not secrets.compare_digest(signature, sign_session_payload(payload)):
-        return False
-    return int(expires_at) > int(time.time())
+        return None
+    return role if int(expires_at) > int(time.time()) else None
+
+
+def is_session_cookie_valid(cookie: str) -> bool:
+    return get_session_cookie_role(cookie) is not None
 
 
 def auth_client_key(request: Request) -> str:
@@ -343,30 +369,30 @@ def health() -> dict[str, Any]:
 
 
 @app.get("/api/auth/session")
-def get_auth_session(request: Request) -> dict[str, bool]:
+def get_auth_session(request: Request) -> dict[str, bool | str | None]:
+    role = get_request_role(request)
     return {
         "authRequired": settings.is_gate_enabled() and not settings.trust_reverse_proxy_auth,
-        "authenticated": is_request_authenticated(request),
+        "authenticated": role is not None,
+        "role": role,
     }
 
 
 @app.post("/api/auth/login")
 def login(payload: LoginRequest, request: Request) -> JSONResponse:
     if not settings.is_gate_enabled():
-        return JSONResponse({"authRequired": False, "authenticated": True})
+        return JSONResponse({"authRequired": False, "authenticated": True, "role": "admin"})
     if is_login_rate_limited(request):
         return JSONResponse(status_code=429, content={"detail": "登录尝试过多，请稍后再试"})
-    if payload.username is not None and payload.username != "user":
-        record_login_failure(request)
-        return JSONResponse(status_code=401, content={"detail": "用户名或密码不正确"})
-    if not is_gate_password_valid(payload.password):
+    role = authenticate_fixed_account(payload.username, payload.password)
+    if role is None:
         record_login_failure(request)
         return JSONResponse(status_code=401, content={"detail": "用户名或密码不正确"})
     clear_login_failures(request)
-    response = JSONResponse({"authRequired": True, "authenticated": True})
+    response = JSONResponse({"authRequired": True, "authenticated": True, "role": role})
     response.set_cookie(
         "ruyi_session",
-        create_session_cookie(),
+        create_session_cookie(role),
         max_age=settings.session_ttl_seconds,
         httponly=True,
         samesite="lax",
