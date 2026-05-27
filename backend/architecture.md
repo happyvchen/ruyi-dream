@@ -41,7 +41,7 @@
 - `GenerationTaskImage`：主推款图片链接；AI 前可增删改排序，进入 AI 后由输入版本快照读取
 - `GenerationTaskInputVersion`：主推款、默认数字模特和输入元数据快照
 - `StylingGarment`：搭配服饰库真实商品；只有 `READY` 可进入候选漏斗
-- `GenerationStyling`：AI Stylist 输出的 `StylingPlan`、候选召回、选中搭配和质量门记录
+- `GenerationStyling`：AI Stylist 输出的 `StylingPlan`、候选召回、选中搭配和质量信号记录
 - `GenerationShotPlan`：由 `StylingPlan` 落地到 3x2 六宫格图位的镜头、姿势、穿着关系和展示重点
 - `GenerationPreview`：六宫格预览总图；第 6 格仅参考，最终不生成大图
 - `GenerationResultSet` / `GenerationResultImageNew`：前 5 格最终成片集合和单图状态
@@ -99,7 +99,7 @@ POST /api/generation-tasks/{id}/select-styling
   -> 创建 GenerationTaskInputVersion
   -> 创建 generation_styling attempt
   -> 调用 Gemini AI Stylist
-  -> 校验 StylingPlan 质量门
+  -> 校验 StylingPlan 结构并记录质量信号
   -> 写入 GenerationStyling
 
 POST /api/generation-tasks/{id}/preview

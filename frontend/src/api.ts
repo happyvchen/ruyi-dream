@@ -109,6 +109,7 @@ export type GenerationTask = {
     outfitCandidates?: Record<string, unknown>[]
     criticScores?: Record<string, unknown>
     rejectedCandidates?: Record<string, unknown>[]
+    qualitySignals?: Record<string, unknown>[]
     reasonSummary?: string
     warnings?: string[]
   } | null

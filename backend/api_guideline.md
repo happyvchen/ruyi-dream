@@ -223,9 +223,11 @@ Authorization: Bearer <token>
       "selected_outfit_id": "candidate_a",
       "selected_material_ids": [],
       "brand_evidence": [],
+      "quality_signals": [],
       "rejected_candidates": [],
       "warnings": []
-    }
+    },
+    "qualitySignals": []
   }
 }
 ```
@@ -235,10 +237,10 @@ Authorization: Bearer <token>
 - 选中 ID 必须来自本次 READY 候选。
 - 不允许重复 ID。
 - 空 `selected_material_ids` 合法。
-- 明显互斥穿搭必须有 `wearing_notes` 解释，否则视为失败。
-- `aesthetic_score`、`brand_fit_score`、`hero_visibility_score` 或 `commercial_readiness_score` 任一低于生产阈值时，不自动进入预览。
-- 主推款可见但搭配沉闷、笨重、比例失衡或不符合 Lily 调性时，仍应判定为选搭失败。
-- 生成配饰不得使用公文包、大体量托特等传统办公室模板化配饰。
+- 明显互斥穿搭应有 `wearing_notes` 解释；缺少解释时记录 `qualitySignals`。
+- `aesthetic_score`、`brand_fit_score`、`hero_visibility_score` 或 `commercial_readiness_score` 任一低于生产阈值时，记录 `qualitySignals`。
+- 主推款可见但搭配沉闷、笨重、比例失衡或不符合 Lily 调性时，记录为客户审核和流程优化信号。
+- 生成配饰不应使用公文包、大体量托特等传统办公室模板化配饰；若出现则记录 `qualitySignals`。
 
 技术详情必须保存：
 
@@ -247,7 +249,7 @@ Authorization: Bearer <token>
 - 传给 AI Stylist 的 material cards、outfit 草案、品牌证据和配饰边界。
 - 完整 prompt / 任务说明。
 - AI Stylist 每一步响应或一次性返回的分步结构。
-- 最终 `StylingPlan`、Aesthetic Critic 诊断、被拒方案和评分。
+- 最终 `StylingPlan`、Aesthetic Critic 诊断、质量信号、被拒方案和评分。
 
 ## 旧版服装素材 CRUD 契约
 

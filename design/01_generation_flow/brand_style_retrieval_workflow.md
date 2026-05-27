@@ -1,4 +1,4 @@
-# Lily 官方样本库、穿法质量门与 AI Stylist 候选漏斗
+# Lily 官方样本库、穿法质量信号与 AI Stylist 候选漏斗
 
 ## 1. 背景
 
@@ -21,13 +21,13 @@
 新版方案采用：
 
 ```text
-主推款视觉理解 -> Lily 官方样本证据 -> 候选漏斗 -> 穿法合法性校验 -> AI Stylist / Aesthetic Critic -> 按主推品类生成 ShotPlan
+主推款视觉理解 -> Lily 官方样本证据 -> 候选漏斗 -> 穿法合法性信号 -> AI Stylist / Aesthetic Critic -> 按主推品类生成 ShotPlan
 ```
 
 ## 2. 核心原则
 
 ```text
-检索负责找候选，质量门负责守边界，Gemini 负责审美决策。
+检索负责找候选，质量信号负责记录风险和驱动改进，Gemini 负责审美决策，客户审核负责最终质量判定。
 ```
 
 生产链路必须避免三种误区：
@@ -161,7 +161,7 @@ Gemini 输出 `StylingPlan`，并必须说明：
 
 ## 5. 穿法合法性与 Aesthetic Critic
 
-`wearing_notes` 不是自由文案，它必须通过穿法质量门。
+`wearing_notes` 不是自由文案。系统必须识别穿法是否被服饰结构支持，但这类业务质量问题应记录为 `quality_signals`，不直接作为普通用户可见报错。
 
 ### 5.1 穿法合法性
 
@@ -173,7 +173,7 @@ Gemini 输出 `StylingPlan`，并必须说明：
 - 高腰裤可以要求“腰头可见”，但不能默认推导为“上衣全塞”。
 - 半塞必须说明哪一侧/前片如何不遮挡门襟、裤褶、腰带扣。
 
-### 5.2 审美质量门
+### 5.2 审美质量信号
 
 Aesthetic Critic 除原有维度外，必须新增：
 
@@ -241,7 +241,7 @@ Aesthetic Critic 除原有维度外，必须新增：
 - 已保存 `LibraryAdequacyReport` / `library_adequacy_snapshot_json`，用于区分选搭逻辑失败和库内供给不足。
 - outfit 草案已按主推品类生成，裤装主推会优先轻量上装、针织和短马甲，而不是固定取排序前几件。
 - AI Stylist 输入已包含库充足性、穿法合法性、塞腰质量和裤装主推保护要求。
-- 后端质量门已拦截不支持的全塞/半塞穿法。
+- 后端已将不支持的全塞/半塞穿法记录为 `quality_signals`，不再把业务质量问题直接暴露为用户可见失败。
 - ShotPlan 已能按主推品类生成结构化图位；裤装会生成腰脚、腰膝/腰胯、侧身动态等图位。
 
 阶段 1 剩余：
@@ -254,16 +254,16 @@ Aesthetic Critic 除原有维度外，必须新增：
 
 阶段 2-4 尚未开始。
 
-### 阶段 1：修正当前质量门和品类 ShotPlan
+### 阶段 1：修正当前质量信号和品类 ShotPlan
 
-目标：在现有架构内先阻断白色高腰阔腿裤案例中的明确失败。
+目标：在现有架构内先识别白色高腰阔腿裤案例中的明确风险，避免把内部质量判断变成用户可见失败。
 
 范围：
 
 - 将主推款理解从任务名启发式升级为视觉理解步骤，输出结构化 `HeroUnderstanding`。
 - 将 `HeroUnderstanding` 作为候选漏斗、AI Stylist 和 ShotPlan 的共同输入。
 - 扩展搭配服饰穿法字段，区分 `tucked`、`half_tucked`、`untucked`、`open`、`buttoned`、`layered`。
-- 增加穿法合法性校验：推荐穿法不支持 `tucked` 的开衫/外套/厚针织不得被要求全塞。
+- 增加穿法合法性信号：推荐穿法不支持 `tucked` 的开衫/外套/厚针织若被要求全塞，记录为审核风险并进入后续优化。
 - 增加 Aesthetic Critic 维度：`wearing_method_validity`、`tuck_quality`、`official_style_evidence`、`shotplan_readiness`。
 - 重写 ShotPlan 生成：按主推款品类读取 `category_shot_rules.md`，裤装必须覆盖全身、腰脚、腰膝/腰胯、侧身/动态和正面颜色图。
 - 如果第 6 格比前 5 格更适合作为主图，前 5 格自动判定为需重排。
@@ -306,7 +306,7 @@ Aesthetic Critic 除原有维度外，必须新增：
 - 为搭配服饰图、品牌样本图和文本摘要生成多模态 embedding。
 - 早期可在数据库中保存向量并用内存计算；规模扩大后迁移到 pgvector、Qdrant、Milvus 或 Vertex AI Vector Search。
 - 候选召回加入图像相似度、品牌样本相似度和主推款视觉兼容度。
-- 保留硬过滤和穿法质量门，embedding 只负责召回和排序，不直接决定最终选搭。
+- 保留硬过滤和穿法质量信号，embedding 只负责召回和排序，不直接决定最终选搭。
 
 验收：
 
@@ -341,7 +341,7 @@ Aesthetic Critic 除原有维度外，必须新增：
 - outfit 草案快照。
 - `LibraryAdequacyReport`，用于区分选搭逻辑失败与搭配库供给不足。
 - 品牌样本表或 JSON 快照。
-- ShotPlan 品类矩阵和图位质量门。
+- ShotPlan 品类矩阵和图位质量信号。
 
 阶段 3 开始建议引入：
 

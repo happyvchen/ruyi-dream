@@ -62,7 +62,7 @@ AI 摄影棚中的一次主推款拍摄任务。
 
 - 创建后先处于 `DRAFT`；AI 前允许修改任务名、追加/替换/移除/排序主推款图片，确认后进入 `READY_FOR_STYLING`。
 - 点击智能选搭时创建 `GenerationTaskInputVersion`，同时冻结主推款图片和当前默认数字模特快照。
-- 通过 `GenerationStyling` 保存候选漏斗快照、完整 `StylingPlan`、选中 ID、选中服饰快照、Aesthetic Critic 诊断、被拒方案、评分、理由和 warnings。
+- 通过 `GenerationStyling` 保存候选漏斗快照、完整 `StylingPlan`、选中 ID、选中服饰快照、Aesthetic Critic 诊断、质量信号、被拒方案、评分、理由和 warnings。
 - 预览阶段基于 `StylingPlan` 生成 6 条 `GenerationShotPlan`，并保存一张 3x2 六宫格 `GenerationPreview`。
 - 最终阶段创建 `GenerationResultSet`，并按前 5 条 ShotPlan 并发生成 `GenerationResultImage`。
 - 预览和最终生成只读取冻结的主推款、搭配服饰和数字模特输入；最终单图失败通过单张重试恢复。成功后是否允许重新选搭、重新预览或再次生成整组仍是产品决策项，当前代码暂时允许并保留历史结果用于追溯。

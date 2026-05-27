@@ -322,7 +322,7 @@ MVP 只保存一张六宫格总图，不裁 frame。未来支持重新预览时�
 - `candidate funnel service`：基于 READY 服饰 tags、caption、颜色、品类、季节、遮挡风险、品牌样本相似度和未来 embedding，生成候选召回、兼容性排序和 outfit 草案快照。
 - `library adequacy service`：基于候选排除原因和可用候选统计，判断库内是否有更好搭配、是否应空选搭或补库。
 - `AI Stylist service`：组装主推款图片、小候选集、候选缩略图、outfit 草案、品牌证据和商品验收维度，调用 Gemini 生成 `StylingPlan`。
-- `aesthetic critic service`：校验 `StylingPlan` 的基础业务事实、可穿性、审美成立性、品牌成立性、主推款可见性和商业可用性阈值。
+- `aesthetic critic service`：校验 `StylingPlan` 的基础业务事实，并把可穿性、审美成立性、品牌成立性、主推款可见性和商业可用性问题记录为质量信号。
 - `shot plan service`：基于 `StylingPlan` 生成 6 条 ShotPlan。
 - `image input selector`：按阶段选择最多 10 张 Image-2 输入图。
 - `image generation service`：六宫格预览和最终图生成。
@@ -357,7 +357,7 @@ MVP 不再把全量 READY tags 直接交给 Gemini。候选漏斗先把全量库
 - 使用主推款视觉理解出的品类、卖点和不可遮挡区域做硬过滤。
 - 根据品类互补、颜色、季节、廓形和穿着方式粗排。
 - 降权 `coverage_risk` 高、长外套、深色厚重、大体量、风格风险高或季节冲突明显的服饰。
-- 校验穿法能力：候选草案不得建议搭配服饰未支持的穿法；开衫、外套、厚针织和有明显门襟/纽扣/镂空下摆结构的上衣默认禁止全塞。
+- 记录穿法能力信号：候选草案不应建议搭配服饰未支持的穿法；开衫、外套、厚针织和有明显门襟/纽扣/镂空下摆结构的上衣若被要求全塞，应进入 `quality_signals` 和后续修正/审核闭环。
 - 按主推品类生成 3-8 套 outfit 草案，并保留一定多样性，避免候选全是同一公式或只是排序前几件。
 - 生成 `LibraryAdequacyReport`，说明当前库内是否存在更优候选、哪些候选因穿法/品类/季节被排除、是否建议空选搭或补库。
 - AI Stylist 输入控制在 12-20 件候选服饰，并附必要主图或缩略图。
@@ -369,23 +369,23 @@ MVP 不再把全量 READY tags 直接交给 Gemini。候选漏斗先把全量库
 - 历史人工采纳、拒绝、下载、复拍和销售/点击表现。
 - 品牌专属偏好 profile 和 compatibility ranker。
 
-### 4.3 业务校验
+### 4.3 业务校验与质量信号
 
-后端校验应覆盖真实性和生产边界，而不是硬编码审美：
+后端校验应覆盖真实性和生产边界；审美、穿法和品牌风险记录为 `quality_signals`，不作为普通用户可见硬失败：
 
 - 选中 ID 必须来自本次 READY 候选。
 - 选中 ID 不得是当前主推款同 `code`、同输入素材或同商品身份。
 - 不允许重复 ID。
 - 空选中合法。
-- 明显互斥穿搭必须在 `wearing_notes` 中解释，否则拒绝。
-- `wearing_notes` 中的穿法必须被搭配服饰 `wearing_affordance` 支持；模型新增穿法必须说明结构依据并进入风险提示。
-- 推荐穿法不包含 `tucked` 的开衫、外套、厚针织、明显门襟/纽扣/镂空下摆上衣，不得被要求全塞。
-- `aesthetic_score`、`brand_fit_score`、`hero_visibility_score` 和 `commercial_readiness_score` 任一低于阈值时，不自动进入预览。
-- 满分评分但缺少 `aesthetic_diagnosis` 或风险解释时，视为低可信模型输出，应重试或降级为空选搭。
+- 明显互斥穿搭应在 `wearing_notes` 中解释；缺少解释时记录质量信号。
+- `wearing_notes` 中的穿法应被搭配服饰 `wearing_affordance` 支持；模型新增穿法应说明结构依据并进入风险提示。
+- 推荐穿法不包含 `tucked` 的开衫、外套、厚针织、明显门襟/纽扣/镂空下摆上衣若被要求全塞，记录穿法风险信号。
+- `aesthetic_score`、`brand_fit_score`、`hero_visibility_score` 和 `commercial_readiness_score` 任一低于阈值时，记录低分质量信号。
+- 满分评分但缺少 `aesthetic_diagnosis` 或风险解释时，记录低可信模型输出信号。
 - 主推款是高腰裤、连衣裙、收腰上衣等强腰线商品时，选择外套必须说明如何避免色块压迫、腰线遮挡和比例失衡。
-- 有遮挡风险、穿法风险、模板化风险、配饰遮挡风险或品牌证据不足时，不允许四项满分。
+- 有遮挡风险、穿法风险、模板化风险、配饰遮挡风险或品牌证据不足时，不应四项满分；若出现满分，应记录信号供复盘。
 - 公文包、大体量手提包、夸张首饰等生成配饰必须受控，不能由 Gemini 自由补全为传统办公室套装。
-- 搭配失败复盘必须检查 `LibraryAdequacyReport`：库内有更好候选却未选中是选搭逻辑失败；库内没有更好候选时，应输出空选搭、低存在感生成配饰或补库建议。
+- 搭配质量复盘必须检查 `LibraryAdequacyReport`：库内有更好候选却未选中是选搭逻辑问题；库内没有更好候选时，应输出空选搭、低存在感生成配饰或补库建议。
 - `StylingPlan` 必须保存拒绝方案和原因，便于复盘。
 
 ### 4.4 ShotPlan 联动
@@ -461,14 +461,15 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 - `rejected_candidates`
 - `critic_scores`
 - `warnings`
+- `quality_signals`
 - `brand_evidence` 或等价品牌证据引用
 
 校验：
 
 - 空集合允许。
 - 非法 ID、非 READY、重复 ID、不可解析 JSON 失败。
-- 明显互斥穿搭缺少穿着解释时失败。
-- 审美、品牌贴合、商品可见性或商业可用性任一低于阈值时不自动进入预览。
+- 明显互斥穿搭缺少穿着解释时记录质量信号。
+- 审美、品牌贴合、商品可见性或商业可用性任一低于阈值时记录质量信号。
 
 ### 5.3 ShotPlan 生成
 
@@ -510,7 +511,7 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 - `LibraryAdequacyReport` 快照，包含可用品类统计、同主推款排除数、潜在更优候选和补库缺口。
 - 按主推品类生成 outfit 草案。
 - AI Stylist prompt 增加库充足性、穿法合法性、塞腰质量、裤装主推保护规则。
-- 质量门拒绝不支持的全塞/半塞穿法。
+- 不支持的全塞/半塞穿法已改为 `quality_signals`，不再把业务质量问题直接暴露为用户可见失败。
 - `build_default_new_shot_plans` 按主推品类输出结构化 ShotPlan，裤装覆盖全身、腰脚、腰膝/腰胯、侧身动态和正面版型。
 - 前端 API 类型已增加 `libraryAdequacy`。
 
@@ -525,9 +526,9 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 - 前台展示库充足性诊断、补库建议和候选排除原因。
 - 使用新代码重新跑 335-338 并形成端到端回归记录。
 
-#### 阶段 1：修正主推款理解、穿法质量门和品类 ShotPlan
+#### 阶段 1：修正主推款理解、穿法质量信号和品类 ShotPlan
 
-不引入新基础设施，先修正当前白色高腰阔腿裤案例中的明确失败：
+不引入新基础设施，先识别当前白色高腰阔腿裤案例中的明确风险，并避免内部质量判断让普通用户停在失败页：
 
 - 新增或固化 `HeroUnderstanding` 步骤，以图片识别主推品类、卖点、不可遮挡区域和图位需求。
 - 将 `HeroUnderstanding` 作为候选漏斗、AI Stylist 和 ShotPlan 的共同输入，删除任务名启发式作为主来源的旧口径。
@@ -536,7 +537,7 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 - 新增 `LibraryAdequacyReport`，区分选搭逻辑失败和搭配库供给不足。
 - outfit 草案按主推品类生成，不能固定输出排序前几件。
 - 扩展搭配服饰穿法能力和穿法禁忌字段，区分 `tucked`、`half_tucked`、`untucked`、`open`、`buttoned`、`layered`。
-- 增加穿法合法性质量门，禁止未支持 `tucked` 的开衫/外套/厚针织被要求全塞。
+- 增加穿法合法性质量信号，未支持 `tucked` 的开衫/外套/厚针织若被要求全塞，应记录为审核风险和后续优化依据。
 - 扩展 Aesthetic Critic：`wearing_method_validity`、`tuck_quality`、`official_style_evidence`、`shotplan_readiness`。
 - ShotPlan 生成读取主推品类矩阵；裤装必须覆盖全身、腰脚、腰膝/腰胯、侧身/动态和标准正面颜色图。
 - 第 6 格备用姿态若优于前 5 格，前 5 格重排。
