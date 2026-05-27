@@ -7,8 +7,8 @@
 | 模块 | 设计 | 后端 | 前端 | 联调 |
 |---|---|---|---|---|
 | Product Scope | 已整理 | N/A | N/A | N/A |
-| Generation Flow | 已整理 | MVP 已实现 | 工作台已实现 | 已跑通 |
-| Brand & Assets | 已整理 | 默认模特与品类规则已接入 | 页面摘要展示 | 已跑通 |
+| Generation Flow | 已整理；阶段 1 方案已补充 | 阶段 1 第一版已实现；阶段 2-4 未开始 | 工作台已实现；库充足性未展示 | 基础链路已跑通；335-338 新代码回归未跑 |
+| Brand & Assets | 已整理；品类 ShotPlan 已补强 | 默认模特与品类规则已接入；官方样本库未实现 | 页面摘要展示 | 已跑通 |
 | User Workspace UX | 已整理 | N/A | 上传预览编辑/默认方案/生成/重生 | 已跑通 |
 | Export / History | 已整理 | 事件日志 + ZIP 导出 | 记录区 + 导出入口 | 已跑通 |
 | Object Storage | 已确定 | S3 兼容对象存储已接入，默认 RustFS | 稳定媒体 URL 与三档图片展示已支持 | 已验证 |
@@ -29,6 +29,7 @@
 - [x] 新版摄影棚草稿闭环：主推款任务先保存为草稿，AI 前支持名称与图片增删/替换/排序，确认后进入智能选搭。
 - [x] 新版摄影棚历史一致性：输入版本冻结主推款和默认数字模特快照，预览/成片均读取冻结输入。
 - [x] 新版摄影棚任务与记录支持 URL 恢复；失败最终图走单张重试。
+- [x] 阶段 1 第一版选搭质量门：同 `code` 主推款识别、主推款自己排除、`LibraryAdequacyReport` 快照、按品类 outfit 草案、不支持塞腰拦截、品类化 ShotPlan。
 - [x] 构建验证：后端 compileall、前端 `npm run build`、API smoke test 已通过。
 
 ## 当前实现说明
@@ -39,12 +40,19 @@
 - 历史媒体修复：`backend/scripts/repair_media_metadata.py` 可补齐旧素材和旧生成结果的衍生图与文件大小。
 - 生成：生成任务的输出写入 `outputs/{sku}/{timestamp}/`，完成后生成对应缩略图和预览图；生成中轮询走轻量状态接口。
 - AI 摄影棚：`GenerationTask` 草稿确认后进入选搭；进入 AI 后使用冻结主推款/搭配服饰/数字模特快照推进六宫格和前 5 张成片。
+- AI Stylist 阶段 1 第一版：候选漏斗会用同 `code` 的搭配库标签辅助主推款理解；若找不到同 `code`，仍可能 fallback 到任务名启发式。库充足性诊断已保存到后端快照，但前台尚未展示。
 - 导出：ZIP 写入 `exports/{sku}/`，同时通过接口流式返回给前端。
 - 日志：业务事件写入 SQLite，并双写 `backend/data/logs/*.jsonl`。
 - 部署：客户本地化部署默认使用 RustFS Docker；未来 SaaS 可把同一套 S3 配置切到 OSS、COS、AWS S3、GCS 兼容接口等。
 
 ## 后续建议
 
+- [ ] 独立视觉 `HeroUnderstanding` provider 调用，替代任务名启发式 fallback。
+- [ ] 主推品类为 `unknown` 时进入复核或安全 fallback，不进入正常候选漏斗。
+- [ ] 用新代码重新跑 335-338，验证候选召回、库充足性、ShotPlan 和预览图是否达到预期。
+- [ ] 前台展示 `LibraryAdequacyReport`、候选排除原因和补库建议。
+- [ ] Lily 官方样本库：表结构、样本导入、样本检索、ShotPlan 姿势/取景参考。
+- [ ] 多模态 embedding、向量检索、compatibility ranker 和反馈闭环。
 - [ ] 成功阶段整阶段重跑策略待产品拍板：当前代码仍允许成功后重新选搭、重新预览和重新生成成片；若决定禁止，需要同步前后端状态机。
 - [ ] 重生 attempt 与当前成功图分离，避免失败重生覆盖已成功结果。
 - [ ] 上传安全校验补强：文件大小、数量、扩展名、真实图片解码。

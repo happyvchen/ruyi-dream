@@ -25,6 +25,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("012", "add_new_generation_recovery_columns", "migration_add_new_generation_recovery_columns"),
     ("013", "add_generation_task_archive_columns", "migration_add_generation_task_archive_columns"),
     ("014", "add_styling_garment_archive_columns", "migration_add_styling_garment_archive_columns"),
+    ("015", "add_library_adequacy_snapshot", "migration_add_library_adequacy_snapshot"),
 )
 
 
@@ -273,6 +274,7 @@ def init_db() -> None:
               source_material_ids_json TEXT NOT NULL,
               candidate_material_ids_json TEXT,
               candidate_retrieval_snapshot_json TEXT,
+              library_adequacy_snapshot_json TEXT,
               selected_material_ids_json TEXT NOT NULL,
               selected_material_snapshot_json TEXT NOT NULL,
               styling_plan_json TEXT,
@@ -401,6 +403,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_new_generation_recovery_columns": migration_add_new_generation_recovery_columns,
         "migration_add_generation_task_archive_columns": migration_add_generation_task_archive_columns,
         "migration_add_styling_garment_archive_columns": migration_add_styling_garment_archive_columns,
+        "migration_add_library_adequacy_snapshot": migration_add_library_adequacy_snapshot,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -503,11 +506,16 @@ def migration_add_generation_input_model_snapshot(db: sqlite3.Connection) -> Non
 def migration_add_generation_styling_plan_columns(db: sqlite3.Connection) -> None:
     ensure_column(db, "generation_stylings", "candidate_material_ids_json", "TEXT")
     ensure_column(db, "generation_stylings", "candidate_retrieval_snapshot_json", "TEXT")
+    ensure_column(db, "generation_stylings", "library_adequacy_snapshot_json", "TEXT")
     ensure_column(db, "generation_stylings", "styling_plan_json", "TEXT")
     ensure_column(db, "generation_stylings", "hero_understanding_json", "TEXT")
     ensure_column(db, "generation_stylings", "outfit_candidates_json", "TEXT")
     ensure_column(db, "generation_stylings", "critic_scores_json", "TEXT")
     ensure_column(db, "generation_stylings", "rejected_candidates_json", "TEXT")
+
+
+def migration_add_library_adequacy_snapshot(db: sqlite3.Connection) -> None:
+    ensure_column(db, "generation_stylings", "library_adequacy_snapshot_json", "TEXT")
 
 
 def migration_add_new_generation_recovery_columns(db: sqlite3.Connection) -> None:
