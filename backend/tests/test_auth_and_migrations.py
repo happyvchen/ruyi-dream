@@ -8,7 +8,7 @@ import unittest
 import zipfile
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlsplit
 
 
@@ -1009,6 +1009,190 @@ class BackendSmokeTests(unittest.TestCase):
                 status = db.execute("SELECT status FROM generation_runs WHERE id = ?", (run_id,)).fetchone()["status"]
 
         self.assertEqual(status, "SUCCEEDED")
+
+    def test_running_generation_task_cancel_marks_preview_and_attempt_cancelled(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            with db_module.get_db() as db:
+                task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('preview cancel', 'PREVIEW_RUNNING', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                input_id = db.execute(
+                    """
+                    INSERT INTO generation_task_input_versions (task_id, version_number, name_snapshot, image_snapshot_json, created_at)
+                    VALUES (?, 1, 'preview cancel', '[]', ?)
+                    """,
+                    (task_id, timestamp),
+                ).lastrowid
+                styling_id = db.execute(
+                    """
+                    INSERT INTO generation_stylings
+                      (task_id, input_version_id, source_material_ids_json, selected_material_ids_json,
+                       selected_material_snapshot_json, status, created_at, updated_at)
+                    VALUES (?, ?, '[]', '[]', '[]', 'SUCCEEDED', ?, ?)
+                    """,
+                    (task_id, input_id, timestamp, timestamp),
+                ).lastrowid
+                preview_id = db.execute(
+                    """
+                    INSERT INTO generation_previews (task_id, styling_id, input_version_id, status, created_at, updated_at)
+                    VALUES (?, ?, ?, 'RUNNING', ?, ?)
+                    """,
+                    (task_id, styling_id, input_id, timestamp, timestamp),
+                ).lastrowid
+                attempt_id = db.execute(
+                    """
+                    INSERT INTO generation_attempts (owner_type, owner_id, provider, status, started_at, created_at, updated_at)
+                    VALUES ('generation_preview', ?, 'image-2', 'RUNNING', ?, ?, ?)
+                    """,
+                    (preview_id, timestamp, timestamp, timestamp),
+                ).lastrowid
+                db.execute(
+                    """
+                    UPDATE generation_tasks
+                    SET current_input_version_id = ?, active_styling_id = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (input_id, styling_id, timestamp, task_id),
+                )
+
+            client = TestClient(main.app)
+            self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+            response = client.post(f"/api/generation-tasks/{task_id}/cancel")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["item"]["status"], "CANCELLED")
+
+            with db_module.get_db() as db:
+                task_status = db.execute("SELECT status FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()["status"]
+                preview_status = db.execute("SELECT status FROM generation_previews WHERE id = ?", (preview_id,)).fetchone()["status"]
+                attempt = db.execute("SELECT status, cancelled_at FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
+
+        self.assertEqual(task_status, "CANCELLED")
+        self.assertEqual(preview_status, "CANCELLED")
+        self.assertEqual(attempt["status"], "CANCELLED")
+        self.assertIsNotNone(attempt["cancelled_at"])
+
+    def test_select_styling_cancel_before_provider_call_prevents_gemini_spend(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            with db_module.get_db() as db:
+                task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('styling race', 'READY_FOR_STYLING', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                media_id = db.execute(
+                    """
+                    INSERT INTO media_assets (object_key, original_filename, mime_type, status, created_at, updated_at)
+                    VALUES ('generation-tasks/styling-race/hero.jpg', 'hero.jpg', 'image/jpeg', 'READY', ?, ?)
+                    """,
+                    (timestamp, timestamp),
+                ).lastrowid
+                db.execute(
+                    """
+                    INSERT INTO generation_task_images (task_id, media_asset_id, sort_order, status, created_at, updated_at)
+                    VALUES (?, ?, 0, 'READY', ?, ?)
+                    """,
+                    (task_id, media_id, timestamp, timestamp),
+                )
+
+            client = TestClient(main.app)
+            self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+
+            def cancel_during_context(input_version_id: int) -> tuple[object, dict[str, object], dict[str, object]]:
+                main.cancel_generation_task(int(task_id))
+                return object(), {}, {"inputVersionId": input_version_id}
+
+            with (
+                patch.object(main, "snapshot_default_model", return_value={}),
+                patch.object(main, "build_ai_stylist_context", side_effect=cancel_during_context),
+                patch.object(main, "select_styling_with_gemini", new_callable=AsyncMock) as gemini,
+            ):
+                response = client.post(f"/api/generation-tasks/{task_id}/select-styling")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["item"]["status"], "CANCELLED")
+            gemini.assert_not_awaited()
+            with db_module.get_db() as db:
+                attempt = db.execute(
+                    """
+                    SELECT status, cancelled_at, request_snapshot_json
+                    FROM generation_attempts
+                    WHERE owner_type = 'generation_styling' AND owner_id = ?
+                    """,
+                    (task_id,),
+                ).fetchone()
+
+        self.assertEqual(attempt["status"], "CANCELLED")
+        self.assertIsNotNone(attempt["cancelled_at"])
+        self.assertIn("inputVersionId", attempt["request_snapshot_json"])
+
+    def test_running_generation_task_cancel_preserves_partial_final_results(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            task_id, result_set_id, image_ids = self._create_new_final_result_set(
+                db_module,
+                ["SUCCEEDED", "RUNNING", "QUEUED"],
+            )
+            timestamp = db_module.now_iso()
+            with db_module.get_db() as db:
+                attempt_id = db.execute(
+                    """
+                    INSERT INTO generation_attempts (owner_type, owner_id, provider, status, started_at, created_at, updated_at)
+                    VALUES ('generation_result_image', ?, 'image-2', 'RUNNING', ?, ?, ?)
+                    """,
+                    (image_ids[1], timestamp, timestamp, timestamp),
+                ).lastrowid
+
+            client = TestClient(main.app)
+            self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+            response = client.post(f"/api/generation-tasks/{task_id}/cancel")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["item"]["status"], "FINAL_PARTIAL")
+
+            with db_module.get_db() as db:
+                task_status = db.execute("SELECT status FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()["status"]
+                result_set_status = db.execute("SELECT status FROM generation_result_sets WHERE id = ?", (result_set_id,)).fetchone()["status"]
+                image_statuses = [
+                    row["status"]
+                    for row in db.execute(
+                        "SELECT status FROM generation_result_images_new WHERE result_set_id = ? ORDER BY sort_order",
+                        (result_set_id,),
+                    ).fetchall()
+                ]
+                attempt = db.execute("SELECT status, cancelled_at FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
+
+        self.assertEqual(task_status, "FINAL_PARTIAL")
+        self.assertEqual(result_set_status, "PARTIAL")
+        self.assertEqual(image_statuses, ["SUCCEEDED", "CANCELLED", "CANCELLED"])
+        self.assertEqual(attempt["status"], "CANCELLED")
+        self.assertIsNotNone(attempt["cancelled_at"])
 
     def test_tagging_running_styling_garment_rejects_mutation_and_archive(self) -> None:
         from fastapi.testclient import TestClient
