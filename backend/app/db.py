@@ -26,6 +26,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("013", "add_generation_task_archive_columns", "migration_add_generation_task_archive_columns"),
     ("014", "add_styling_garment_archive_columns", "migration_add_styling_garment_archive_columns"),
     ("015", "add_library_adequacy_snapshot", "migration_add_library_adequacy_snapshot"),
+    ("016", "clear_successful_tagging_timeout_errors", "migration_clear_successful_tagging_timeout_errors"),
 )
 
 
@@ -404,6 +405,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_generation_task_archive_columns": migration_add_generation_task_archive_columns,
         "migration_add_styling_garment_archive_columns": migration_add_styling_garment_archive_columns,
         "migration_add_library_adequacy_snapshot": migration_add_library_adequacy_snapshot,
+        "migration_clear_successful_tagging_timeout_errors": migration_clear_successful_tagging_timeout_errors,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -533,6 +535,29 @@ def migration_add_generation_task_archive_columns(db: sqlite3.Connection) -> Non
 def migration_add_styling_garment_archive_columns(db: sqlite3.Connection) -> None:
     ensure_column(db, "styling_garments", "archived_at", "TEXT")
     ensure_column(db, "styling_garments", "archive_reason", "TEXT")
+
+
+def migration_clear_successful_tagging_timeout_errors(db: sqlite3.Connection) -> None:
+    db.execute(
+        """
+        UPDATE styling_garments
+        SET tag_error = NULL
+        WHERE status IN ('READY', 'TAGGING_READY')
+          AND tag_completed_at IS NOT NULL
+          AND tag_error IS NOT NULL
+        """
+    )
+    db.execute(
+        """
+        UPDATE generation_attempts
+        SET error_code = NULL,
+            error_message = NULL,
+            failed_at = NULL
+        WHERE owner_type = 'styling_garment_tagging'
+          AND status = 'SUCCEEDED'
+          AND error_code = 'TIMEOUT'
+        """
+    )
 
 
 def ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:

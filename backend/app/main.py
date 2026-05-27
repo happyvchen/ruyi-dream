@@ -1147,6 +1147,7 @@ async def run_styling_garment_tagging(garment_id: int) -> None:
                 tag_meta_json = ?,
                 tag_schema_version = ?,
                 tag_completed_at = ?,
+                tag_error = NULL,
                 updated_at = ?
             WHERE id = ?
             """,
@@ -5595,6 +5596,7 @@ def finish_attempt(
             """
             UPDATE generation_attempts
             SET status = ?, completed_at = ?, failed_at = ?, cancelled_at = ?, response_snapshot_json = ?, output_asset_id = ?,
+                error_code = CASE WHEN ? = 'SUCCEEDED' THEN NULL ELSE error_code END,
                 error_message = ?, updated_at = ?
             WHERE id = ?
             """,
@@ -5605,6 +5607,7 @@ def finish_attempt(
                 timestamp if status == "CANCELLED" else None,
                 dumps(response_snapshot or {}),
                 output_asset_id,
+                status,
                 error_message,
                 timestamp,
                 attempt_id,
