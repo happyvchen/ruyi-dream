@@ -38,8 +38,8 @@ class Settings:
     s3_public_endpoint_url = os.getenv("APP_S3_PUBLIC_ENDPOINT_URL", s3_endpoint_url)
     s3_bucket = os.getenv("APP_S3_BUCKET", os.getenv("APP_STORAGE_BUCKET", "ruyi-dream"))
     s3_region = os.getenv("APP_S3_REGION", "auto")
-    s3_access_key_id = os.getenv("APP_S3_ACCESS_KEY_ID", os.getenv("RUSTFS_ACCESS_KEY", ""))
-    s3_secret_access_key = os.getenv("APP_S3_SECRET_ACCESS_KEY", os.getenv("RUSTFS_SECRET_KEY", ""))
+    s3_access_key_id = os.getenv("APP_S3_ACCESS_KEY_ID", "")
+    s3_secret_access_key = os.getenv("APP_S3_SECRET_ACCESS_KEY", "")
     s3_force_path_style = os.getenv("APP_S3_FORCE_PATH_STYLE", "true").lower() in {"1", "true", "yes", "on"}
     s3_presign_expires_seconds = int(os.getenv("APP_S3_PRESIGN_EXPIRES_SECONDS", "900"))
     max_upload_image_bytes = int(os.getenv("APP_MAX_UPLOAD_IMAGE_BYTES", str(15 * 1024 * 1024)))
@@ -83,9 +83,9 @@ class Settings:
     def validate(self) -> None:
         missing = []
         if not self.s3_access_key_id:
-            missing.append("APP_S3_ACCESS_KEY_ID or RUSTFS_ACCESS_KEY")
+            missing.append("APP_S3_ACCESS_KEY_ID")
         if not self.s3_secret_access_key:
-            missing.append("APP_S3_SECRET_ACCESS_KEY or RUSTFS_SECRET_KEY")
+            missing.append("APP_S3_SECRET_ACCESS_KEY")
         if missing:
             joined = ", ".join(missing)
             raise RuntimeError(f"Missing required object storage credential(s): {joined}")

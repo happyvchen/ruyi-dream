@@ -77,8 +77,8 @@ def _bucket_error_message(action: str, error: ClientError) -> str:
         f"Object storage bucket {action} failed for bucket '{settings.s3_bucket}' "
         f"at '{settings.s3_endpoint_url}' (status={status_code}, code={error_code}). "
         "Verify APP_S3_ENDPOINT_URL, APP_S3_BUCKET/APP_STORAGE_BUCKET, "
-        "APP_S3_ACCESS_KEY_ID/RUSTFS_ACCESS_KEY, and "
-        "APP_S3_SECRET_ACCESS_KEY/RUSTFS_SECRET_KEY match the running S3/RustFS service."
+        "APP_S3_REGION, APP_S3_FORCE_PATH_STYLE, APP_S3_ACCESS_KEY_ID, and "
+        "APP_S3_SECRET_ACCESS_KEY match the configured S3-compatible object storage service."
     )
 
 

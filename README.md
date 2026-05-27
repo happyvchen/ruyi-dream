@@ -104,15 +104,15 @@ GPT_IMAGE2_RESOLUTION=1K
 GENERATION_POLL_INTERVAL_SECONDS=5
 ```
 
-输入图片、生成结果和导出 ZIP 统一写入 S3 兼容对象存储。私有化部署默认使用 RustFS，生产部署方式见 [RustFS 对象存储部署](deployment/rustfs/README.md)。
+输入图片、生成结果和导出 ZIP 统一写入 S3 兼容对象存储。私有化部署默认使用 RustFS；也可以通过同一组 `APP_S3_*` 配置切换到 OSS、COS、AWS S3 或其它 S3 兼容服务。生产部署方式见 [RustFS 对象存储部署](deployment/rustfs/README.md)。
 
 ## Docker Compose 部署
 
-项目根目录提供完整 `docker-compose.yml`：
+项目根目录提供应用 `docker-compose.yml` 和可选 RustFS `docker-compose.rustfs.yml`。`.env.example` 默认通过 `COMPOSE_FILE` 同时启用两者；宿主机裸跑后端使用 `APP_S3_ENDPOINT_URL=http://127.0.0.1:9000`，容器内 backend 会由 `docker-compose.rustfs.yml` 覆盖为 `http://rustfs:9000`：
 
 ```bash
 cp .env.example .env
-# 编辑 .env，设置 RustFS 密钥、PUBLIC_BACKEND_URL、PUBLIC_S3_URL、GEMINI_API_KEY、TOAPIS_API_KEY 或 FAL_KEY
+# 编辑 .env，设置 APP_S3_*、PUBLIC_BACKEND_URL、PUBLIC_S3_URL、GEMINI_API_KEY、TOAPIS_API_KEY 或 FAL_KEY
 docker compose up -d --build
 docker compose ps
 ```
@@ -123,6 +123,21 @@ docker compose ps
 - 后端：`http://127.0.0.1:8000`
 - RustFS S3 API：`http://127.0.0.1:9000`
 - RustFS Console：`http://127.0.0.1:9001`
+
+使用外部 S3 兼容对象存储时，把 `.env` 里的 `COMPOSE_FILE` 改为只包含应用 Compose 文件，并配置同一组 `APP_S3_*`：
+
+```env
+COMPOSE_FILE=docker-compose.yml
+APP_S3_ENDPOINT_URL=https://<s3-compatible-endpoint>
+APP_S3_PUBLIC_ENDPOINT_URL=https://<browser-reachable-s3-endpoint>
+APP_S3_BUCKET=ruyi-dream-prod
+APP_S3_REGION=<region-or-auto>
+APP_S3_FORCE_PATH_STYLE=false
+APP_S3_ACCESS_KEY_ID=<access-key-id>
+APP_S3_SECRET_ACCESS_KEY=<secret-access-key>
+```
+
+RustFS/MinIO 常用 `APP_S3_FORCE_PATH_STYLE=true`；阿里 OSS 等要求 virtual-hosted style 的服务应设为 `false`。
 
 部署设计、日常运维、备份恢复见：
 

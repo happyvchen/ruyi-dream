@@ -45,8 +45,8 @@ docker compose config
 
 Common causes:
 
-- Missing `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY`.
-- `APP_ENV=production` with placeholder or weak RustFS credentials.
+- Missing `APP_S3_ACCESS_KEY_ID` / `APP_S3_SECRET_ACCESS_KEY`.
+- `APP_ENV=production` with placeholder or weak object storage credentials.
 - `APP_ENV=production` without `APP_GATE_PASSWORD` / `APP_GATE_PASSWORD_HASH` and without `APP_TRUST_REVERSE_PROXY_AUTH=true`.
 - Built-in app gate configured without `APP_SESSION_SECRET`.
 - RustFS not ready yet; Compose should restart backend automatically.

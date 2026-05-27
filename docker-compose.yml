@@ -1,50 +1,20 @@
 services:
-  rustfs:
-    image: rustfs/rustfs:1.0.0-beta.1@sha256:3c2d55977829620284ece8593901bf776bcfc0fc9972784352de4dcffdb92416
-    container_name: ruyi-dream-rustfs
-    restart: unless-stopped
-    environment:
-      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?set RUSTFS_ACCESS_KEY in .env}
-      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?set RUSTFS_SECRET_KEY in .env}
-      RUSTFS_CONSOLE_ENABLE: "true"
-      RUSTFS_OBS_LOG_DIRECTORY: /var/log/rustfs
-    command:
-      - --address
-      - :9000
-      - --console-enable
-      - /data
-    ports:
-      - "${RUSTFS_API_PORT:-9000}:9000"
-      - "${RUSTFS_CONSOLE_PORT:-9001}:9001"
-    volumes:
-      - ./deployment/rustfs/data:/data
-      - ./deployment/rustfs/config:/etc/rustfs
-      - ./deployment/rustfs/certs:/certs:ro
-      - ./deployment/rustfs/logs:/var/log/rustfs
-    logging:
-      driver: json-file
-      options:
-        max-size: "100m"
-        max-file: "10"
-
   backend:
     container_name: ruyi-dream-backend
     build:
       context: ./backend
     restart: unless-stopped
-    depends_on:
-      - rustfs
     environment:
       APP_ENV: ${APP_ENV:-development}
       APP_DATA_DIR: /app/data
       APP_DATABASE_PATH: /app/data/app.sqlite3
       APP_LOG_DIR: /app/data/logs
-      APP_S3_ENDPOINT_URL: http://rustfs:9000
-      APP_S3_PUBLIC_ENDPOINT_URL: ${PUBLIC_S3_URL:-http://127.0.0.1:9000}
+      APP_S3_ENDPOINT_URL: ${APP_S3_ENDPOINT_URL:-http://127.0.0.1:9000}
+      APP_S3_PUBLIC_ENDPOINT_URL: ${APP_S3_PUBLIC_ENDPOINT_URL:-${PUBLIC_S3_URL:-http://127.0.0.1:9000}}
       APP_S3_BUCKET: ${APP_S3_BUCKET:-${APP_STORAGE_BUCKET:-ruyi-dream}}
-      APP_S3_REGION: auto
-      APP_S3_FORCE_PATH_STYLE: "true"
-      APP_S3_PRESIGN_EXPIRES_SECONDS: 900
+      APP_S3_REGION: ${APP_S3_REGION:-auto}
+      APP_S3_FORCE_PATH_STYLE: ${APP_S3_FORCE_PATH_STYLE:-true}
+      APP_S3_PRESIGN_EXPIRES_SECONDS: ${APP_S3_PRESIGN_EXPIRES_SECONDS:-900}
       APP_MAX_UPLOAD_IMAGE_BYTES: ${APP_MAX_UPLOAD_IMAGE_BYTES:-15728640}
       APP_MAX_UPLOAD_IMAGE_PIXELS: ${APP_MAX_UPLOAD_IMAGE_PIXELS:-25000000}
       APP_MAX_GARMENT_IMAGES_PER_SKU: ${APP_MAX_GARMENT_IMAGES_PER_SKU:-20}
@@ -56,8 +26,8 @@ services:
       APP_SESSION_COOKIE_SECURE: ${APP_SESSION_COOKIE_SECURE:-false}
       APP_API_ACCESS_TOKEN: ${APP_API_ACCESS_TOKEN:-}
       APP_TRUST_REVERSE_PROXY_AUTH: ${APP_TRUST_REVERSE_PROXY_AUTH:-false}
-      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?set RUSTFS_ACCESS_KEY in .env}
-      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?set RUSTFS_SECRET_KEY in .env}
+      APP_S3_ACCESS_KEY_ID: ${APP_S3_ACCESS_KEY_ID:-}
+      APP_S3_SECRET_ACCESS_KEY: ${APP_S3_SECRET_ACCESS_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3-flash-preview}
       GPT_IMAGE2_PROVIDER: ${GPT_IMAGE2_PROVIDER:-toapis}

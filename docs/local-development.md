@@ -60,7 +60,7 @@ BACKEND_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 
 `APP_SESSION_COOKIE_SECURE=false` 适用于本地 HTTP。只有当前端通过 HTTPS 访问时，才应设置为 `true`。
 
-历史 RustFS 数据要求对象存储 access key / secret key 与创建数据目录时一致。新配置优先使用 `APP_S3_ACCESS_KEY_ID` / `APP_S3_SECRET_ACCESS_KEY`，旧 `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` 仅作为兼容别名。
+历史 RustFS 数据要求对象存储 access key / secret key 与创建数据目录时一致。项目统一使用 `APP_S3_ACCESS_KEY_ID` / `APP_S3_SECRET_ACCESS_KEY` 配置这些凭证；RustFS 容器内部需要的变量由 Compose 映射。
 
 需要真实策划和生图时再补：
 
