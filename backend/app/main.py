@@ -2086,7 +2086,7 @@ def list_new_generation_records(
                 gt.current_input_version_id IS NOT NULL
                 OR EXISTS (SELECT 1 FROM generation_task_input_versions giv WHERE giv.task_id = gt.id)
               )
-            ORDER BY updated_at DESC, id DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT ? OFFSET ?
             """,
             (include_archived, limit + 1, offset),

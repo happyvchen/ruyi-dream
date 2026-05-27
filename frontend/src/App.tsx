@@ -228,7 +228,7 @@ export function App() {
       <main className="workspace">
         {error && <div className="toast">{error}</div>}
         {busy && <div className="busy"><Loader2 size={16} className="spin" />{busy}</div>}
-        {page === 'studio' && <StudioPage task={task} setTask={setTask} tasks={tasks} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
+        {page === 'studio' && <StudioPage task={task} setTask={setTask} records={records} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
         {page === 'library' && <LibraryPage garments={garments} run={run} />}
         {page === 'model' && <ModelPage models={models} />}
         {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} run={run} />}
@@ -278,38 +278,28 @@ function LoginPage({ onAuthed }: { onAuthed: () => void }) {
   )
 }
 
-function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
+function StudioPage({ task, setTask, records, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask | null) => void
-  tasks: GenerationTask[]
+  records: GenerationTask[]
   run: <T>(label: string, action: () => Promise<T>, after?: (value: T) => void) => Promise<T | undefined>
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
 }) {
   const [step, setStep] = useState<StudioStep>(0)
-  const [taskItems, setTaskItems] = useState<GenerationTask[]>(tasks.slice(0, 5))
-  const [taskOffset, setTaskOffset] = useState(0)
-  const [taskTotal, setTaskTotal] = useState(0)
-  const [taskTotalPages, setTaskTotalPages] = useState(0)
-  const [recentTaskPageSize, setRecentTaskPageSize] = useState(20)
-  const [tasksLoading, setTasksLoading] = useState(false)
+  const [taskItems, setTaskItems] = useState<GenerationTask[]>(records.slice(0, 10))
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
   useEffect(() => setStep(currentStep), [task?.id, task?.status])
   useEffect(() => {
     let cancelled = false
-    setTasksLoading(true)
-    void api.listTasks({ limit: recentTaskPageSize, offset: taskOffset }).then((result) => {
+    void api.listRecords({ limit: 10, offset: 0 }).then((result) => {
       if (cancelled) return
       setTaskItems(result.items)
-      setTaskTotal(result.total)
-      setTaskTotalPages(result.totalPages)
-    }).catch(() => undefined).finally(() => {
-      if (!cancelled) setTasksLoading(false)
-    })
+    }).catch(() => undefined)
     return () => { cancelled = true }
-  }, [tasks, taskOffset, recentTaskPageSize])
+  }, [records])
   useEffect(() => {
     if (!task || !['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)) return
     const timer = window.setInterval(() => {
@@ -317,16 +307,6 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
     }, 1500)
     return () => window.clearInterval(timer)
   }, [task?.id, task?.status, setTask])
-
-  function refreshRecentTasks(targetOffset = taskOffset) {
-    return api.listTasks({ limit: recentTaskPageSize, offset: targetOffset }).then((result) => {
-      setTaskItems(result.items)
-      setTaskTotal(result.total)
-      setTaskTotalPages(result.totalPages)
-      if (!result.items.length && targetOffset > 0) setTaskOffset(Math.max(0, targetOffset - recentTaskPageSize))
-    })
-  }
-
   return (
     <section className="page">
       <PageTitle title="AI 摄影棚" subtitle="上传主推款，让系统选搭配角服饰并生成电商棚拍成片。" />
@@ -354,26 +334,13 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
           <div className="mini-list">
             {taskItems.map((item) => (
               <div key={item.id} className={`mini-row view-only ${task?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
-                <button onClick={() => void api.getTask(item.id).then((r) => setTask(r.item))}>
+                <button onClick={() => void api.getRecord(item.id).then((r) => setTask(r.item))}>
                   <span>{item.name}</span><em>{item.archivedAt ? '已删除' : statusText(item.status)}</em>
                 </button>
               </div>
             ))}
-            {!taskItems.length && <EmptyState title="暂无任务" text="新建拍摄任务后会出现在这里。" />}
+            {!taskItems.length && <EmptyState title="暂无任务" text="进入 AI 阶段的任务会出现在这里。" />}
           </div>
-          <PaginationControls
-            compact
-            disabled={tasksLoading}
-            offset={taskOffset}
-            pageSize={recentTaskPageSize}
-            total={taskTotal}
-            totalPages={taskTotalPages}
-            onOffsetChange={setTaskOffset}
-            onPageSizeChange={(value) => {
-              setRecentTaskPageSize(value)
-              setTaskOffset(0)
-            }}
-          />
         </aside>
       </div>
     </section>
@@ -650,6 +617,7 @@ function PreviewStep({ task, setTask, run, localOperations, startLocalOperation,
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
 }) {
+  const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const canPreview = (
     !!task?.styling && ['STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL'].includes(task?.status ?? '')
   ) || (task?.status === 'FAILED' && !!task.styling && !task.preview)
@@ -659,7 +627,11 @@ function PreviewStep({ task, setTask, run, localOperations, startLocalOperation,
     <div className="step-panel">
       <div className="step-copy"><h2>六宫格预览</h2><p>只显示一张 3x2 预览图。最终固定生成前 5 格，第 6 格忽略。</p></div>
       <AIOperationList operations={operations} />
-      {task?.preview?.asset ? <img className="preview-board" src={mediaUrl(assetPreviewSrc(task.preview.asset))} /> : <EmptyState title="尚未生成六宫格" text="点击生成预览后，系统会输出一张 3x2 分镜预览图。" />}
+      {task?.preview?.asset ? (
+        <button className="preview-board-open" onClick={() => task.preview?.asset && setViewer(assetLightboxImage(task.preview.asset))} title="放大查看">
+          <img className="preview-board" src={mediaUrl(assetPreviewSrc(task.preview.asset))} />
+        </button>
+      ) : <EmptyState title="尚未生成六宫格" text="点击生成预览后，系统会输出一张 3x2 分镜预览图。" />}
       <button className="primary" disabled={!canPreview} onClick={() => task && void run(hasPreview ? '重新生成六宫格预览中...' : '生成六宫格预览中...', () => {
         startLocalOperation({ ownerType: 'generation_preview', ownerId: task.id, provider: 'image-2' })
         setTask({ ...task, status: 'PREVIEW_RUNNING', resultSet: null, activeResultSetId: null })
@@ -670,6 +642,7 @@ function PreviewStep({ task, setTask, run, localOperations, startLocalOperation,
       })}>
         <GalleryVerticalEnd size={16} /> {hasPreview ? '重新生成分镜预览' : '生成预览'}
       </button>
+      {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </div>
   )
 }
@@ -682,7 +655,9 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
 }) {
+  const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const images = task?.resultSet?.images ?? []
+  const finalAssets = images.map((image) => image.asset).filter((asset): asset is MediaAsset => !!asset)
   const canGenerate = !!task?.preview?.asset && ['PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL'].includes(task?.status ?? '')
   const hasFinalImages = images.some((image) => !!image.asset)
   const finalOperations = task ? finalImageOperations(task, localOperations) : []
@@ -693,7 +668,11 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
       <div className="result-grid">
         {images.length ? images.map((image) => (
           <div className="result-card" key={image.id}>
-            {image.asset ? <img src={mediaUrl(assetPreviewSrc(image.asset))} /> : <div className="image-placeholder">{statusText(image.status)}{image.activeAttempt && isAttemptRunning(image.activeAttempt) && <small>{formatDuration(elapsedSeconds(image.activeAttempt.startedAt || image.updatedAt))}</small>}</div>}
+            {image.asset ? (
+              <button className="result-image-open" onClick={() => image.asset && setViewer(assetLightboxImage(image.asset, finalAssets))} title="放大查看">
+                <img src={mediaUrl(assetPreviewSrc(image.asset))} />
+              </button>
+            ) : <div className="image-placeholder">{statusText(image.status)}{image.activeAttempt && isAttemptRunning(image.activeAttempt) && <small>{formatDuration(elapsedSeconds(image.activeAttempt.startedAt || image.updatedAt))}</small>}</div>}
             <div><span>#{image.sortOrder}</span>{image.asset && <a href={mediaUrl(assetOriginalSrc(image.asset))} target="_blank" rel="noreferrer"><Download size={15} /></a>}{image.status === 'FAILED' && <button onClick={() => void run('单张重试中...', () => api.retryResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item))}><RotateCcw size={14} /></button>}</div>
           </div>
         )) : <EmptyState title="尚未生成最终图" text="点击生成成片后会生成前 5 张。" />}
@@ -710,6 +689,7 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
       })}>
         <Sparkles size={16} /> {hasFinalImages ? '重新生成成片' : '生成成片'}
       </button>
+      {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </div>
   )
 }
@@ -1416,7 +1396,7 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
               />
               <button className="record-open" aria-current={detail?.id === item.id ? 'true' : undefined} title="查看记录详情" onClick={() => openRecord(item)}>
                 <AssetThumb asset={item.summary?.cover ?? null} interactive={false} />
-                <div><strong>{item.name}</strong><span>{item.archivedAt ? '已删除' : statusText(item.status)} · {dateText(item.updatedAt)}</span></div>
+                <div><strong>{item.name}</strong><span>{item.archivedAt ? '已删除' : statusText(item.status)} · {dateText(item.createdAt)}</span></div>
                 <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
                 <span className="record-eye" aria-hidden="true"><Eye size={16} /></span>
               </button>
