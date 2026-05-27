@@ -1238,6 +1238,8 @@ class BackendSmokeTests(unittest.TestCase):
 
             client = TestClient(main.app)
             self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+            draft_record_ids = [item["id"] for item in client.get("/api/generation-records").json()["items"]]
+            self.assertIn(task_id, draft_record_ids)
             ready = client.post(f"/api/generation-tasks/{task_id}/ready")
             self.assertEqual(ready.status_code, 200)
             self.assertEqual(ready.json()["item"]["status"], "READY_FOR_STYLING")

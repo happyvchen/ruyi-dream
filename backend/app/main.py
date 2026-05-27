@@ -2082,12 +2082,7 @@ def list_new_generation_records(
             SELECT * FROM generation_tasks gt
             WHERE gt.deleted_at IS NULL
               AND (? OR gt.archived_at IS NULL)
-              AND gt.status <> 'DRAFT'
-              AND (
-                gt.current_input_version_id IS NOT NULL
-                OR EXISTS (SELECT 1 FROM generation_task_input_versions giv WHERE giv.task_id = gt.id)
-              )
-            ORDER BY created_at DESC, id DESC
+            ORDER BY updated_at DESC, id DESC
             LIMIT ? OFFSET ?
             """,
             (include_archived, limit + 1, offset),
@@ -2097,11 +2092,6 @@ def list_new_generation_records(
             SELECT COUNT(*) AS total FROM generation_tasks gt
             WHERE gt.deleted_at IS NULL
               AND (? OR gt.archived_at IS NULL)
-              AND gt.status <> 'DRAFT'
-              AND (
-                gt.current_input_version_id IS NOT NULL
-                OR EXISTS (SELECT 1 FROM generation_task_input_versions giv WHERE giv.task_id = gt.id)
-              )
             """,
             (include_archived,),
         ).fetchone()["total"])
