@@ -10,7 +10,7 @@
 |---|---|---|
 | `generation_flow.md` | 主推款输入版本 -> 候选召回 -> AI Stylist / StylingPlan -> ShotPlan -> 六宫格预览 -> 前 5 张最终图 | 实现或调整生成主流程时 |
 | `brand_style_retrieval_workflow.md` | Lily 品牌样本库、候选漏斗、搭配库充足性诊断、受控配饰和阶段性实施计划 | 设计或实现大规模搭配库选搭、品牌风格检索、配饰边界时 |
-| `styling_quality_gate.md` | AI Stylist 审美质量门：避免逻辑正确但视觉难看的选搭 | 设计或排查智能选搭质量问题时 |
+| `styling_quality_signals.md` | AI Stylist 质量信号与客户审核闭环：避免业务质量问题变成用户可见报错 | 设计或排查智能选搭质量问题时 |
 | `image2_input_strategy.md` | 10 图输入限制、图片角色、预览/最终 prompt 策略 | 设计任务包、prompt、图片输入优先级时 |
 | `generation_responsibility_matrix.md` | 商品、模特、ShotPlan、生成配饰、导出等要素由谁负责 | 分析生成问题归因和修复方案时 |
 

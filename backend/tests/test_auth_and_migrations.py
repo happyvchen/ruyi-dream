@@ -467,7 +467,7 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertFalse(fake_client.create_called)
 
-    def test_styling_plan_requires_aesthetic_quality_gate(self) -> None:
+    def test_styling_plan_records_low_score_quality_signal(self) -> None:
         main = importlib.import_module("app.main")
         candidate_snapshot = {
             "candidate_material_ids": [9],
@@ -497,10 +497,12 @@ class BackendSmokeTests(unittest.TestCase):
             ],
         }
 
-        with self.assertRaisesRegex(RuntimeError, "aesthetic_score"):
-            main.validate_styling_plan(plan, candidate_snapshot)
+        main.validate_styling_plan(plan, candidate_snapshot)
+        signals = main.collect_styling_quality_signals(plan, candidate_snapshot)
 
-    def test_styling_plan_rejects_full_scores_without_diagnosis(self) -> None:
+        self.assertTrue(any(signal["code"] == "low_critic_scores" and "aesthetic_score" in signal["fields"] for signal in signals))
+
+    def test_styling_plan_records_full_scores_without_diagnosis_signal(self) -> None:
         main = importlib.import_module("app.main")
         candidate_snapshot = {
             "candidate_material_ids": [],
@@ -525,8 +527,10 @@ class BackendSmokeTests(unittest.TestCase):
             ],
         }
 
-        with self.assertRaisesRegex(RuntimeError, "满分"):
-            main.validate_styling_plan(plan, candidate_snapshot)
+        main.validate_styling_plan(plan, candidate_snapshot)
+        signals = main.collect_styling_quality_signals(plan, candidate_snapshot)
+
+        self.assertTrue(any(signal["code"] == "suspicious_full_scores" for signal in signals))
 
     def test_styling_plan_allows_full_scores_with_complete_diagnosis(self) -> None:
         main = importlib.import_module("app.main")
@@ -565,7 +569,7 @@ class BackendSmokeTests(unittest.TestCase):
 
         main.validate_styling_plan(plan, candidate_snapshot)
 
-    def test_fallback_styling_plan_is_rejected_by_production_quality_gate(self) -> None:
+    def test_fallback_styling_plan_is_rejected_by_production_source_check(self) -> None:
         main = importlib.import_module("app.main")
         candidate_snapshot = {
             "candidate_material_ids": [],
@@ -579,11 +583,11 @@ class BackendSmokeTests(unittest.TestCase):
         }
         plan = main.fallback_styling_plan(input_row, candidate_snapshot, "gemini_api_key_missing")
 
-        self.assertEqual(plan["quality_gate_mode"], "fallback")
+        self.assertEqual(plan["plan_source_mode"], "fallback")
         with self.assertRaisesRegex(RuntimeError, "fallback"):
             main.validate_styling_plan(plan, candidate_snapshot)
 
-    def test_normalize_styling_plan_does_not_trust_model_quality_gate_mode(self) -> None:
+    def test_normalize_styling_plan_does_not_trust_model_plan_source_mode(self) -> None:
         main = importlib.import_module("app.main")
         candidate_snapshot = {
             "candidate_material_ids": [9],
@@ -592,7 +596,7 @@ class BackendSmokeTests(unittest.TestCase):
             ],
         }
         raw_plan = {
-            "quality_gate_mode": "fallback",
+            "plan_source_mode": "fallback",
             "selected_material_ids": [9],
             "selected_outfit_id": "candidate_a",
             "outfit_candidates": [
@@ -616,11 +620,13 @@ class BackendSmokeTests(unittest.TestCase):
 
         plan = main.normalize_styling_plan(raw_plan, candidate_snapshot)
 
-        self.assertEqual(plan["quality_gate_mode"], "production")
-        with self.assertRaisesRegex(RuntimeError, "aesthetic_score"):
-            main.validate_styling_plan(plan, candidate_snapshot)
+        self.assertEqual(plan["plan_source_mode"], "production")
+        main.validate_styling_plan(plan, candidate_snapshot)
+        signals = main.collect_styling_quality_signals(plan, candidate_snapshot)
 
-    def test_styling_plan_rejects_high_waist_dark_outerwear_stack(self) -> None:
+        self.assertTrue(any(signal["code"] == "low_critic_scores" for signal in signals))
+
+    def test_styling_plan_records_high_waist_dark_outerwear_stack_signal(self) -> None:
         main = importlib.import_module("app.main")
         candidate_snapshot = {
             "candidate_material_ids": [9, 10],
@@ -662,8 +668,10 @@ class BackendSmokeTests(unittest.TestCase):
             ],
         }
 
-        with self.assertRaisesRegex(RuntimeError, "高腰裤"):
-            main.validate_styling_plan(plan, candidate_snapshot)
+        main.validate_styling_plan(plan, candidate_snapshot)
+        signals = main.collect_styling_quality_signals(plan, candidate_snapshot)
+
+        self.assertTrue(any(signal["code"] == "high_waist_dark_outerwear_stack" for signal in signals))
 
     def test_candidate_funnel_caps_candidates_and_filters_conflicting_bottoms(self) -> None:
         main = importlib.import_module("app.main")
@@ -731,7 +739,7 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertTrue(any(item["id"] == 10 and "current_hero_same_code_excluded" in item["reasons"] for item in snapshot["filtered_out"]))
         self.assertEqual(snapshot["library_adequacy"]["excluded_current_hero_count"], 1)
 
-    def test_styling_plan_rejects_unsupported_tuck_method(self) -> None:
+    def test_styling_plan_records_unsupported_tuck_method_signal(self) -> None:
         main = importlib.import_module("app.main")
         candidate_snapshot = {
             "candidate_material_ids": [9],
@@ -777,8 +785,10 @@ class BackendSmokeTests(unittest.TestCase):
             ],
         }
 
-        with self.assertRaisesRegex(RuntimeError, "塞腰"):
-            main.validate_styling_plan(plan, candidate_snapshot)
+        main.validate_styling_plan(plan, candidate_snapshot)
+        signals = main.collect_styling_quality_signals(plan, candidate_snapshot)
+
+        self.assertTrue(any(signal["code"] == "unsupported_tuck_method" for signal in signals))
 
     def test_forbidden_tuck_method_detects_equivalent_waist_tuck_phrases(self) -> None:
         main = importlib.import_module("app.main")
@@ -831,7 +841,7 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual([item["shotType"] for item in plans[:5]], ["pants_hero", "pants_waist_to_feet", "pants_waist_detail", "pants_side_motion", "pants_front_fit"])
         self.assertIn("腰头", plans[1]["mainFocus"])
 
-    def test_styling_plan_rejects_forbidden_briefcase_accessory_template(self) -> None:
+    def test_styling_plan_records_forbidden_briefcase_accessory_signal(self) -> None:
         main = importlib.import_module("app.main")
         candidate_snapshot = {
             "candidate_material_ids": [],
@@ -867,8 +877,10 @@ class BackendSmokeTests(unittest.TestCase):
             ],
         }
 
-        with self.assertRaisesRegex(RuntimeError, "模板化配饰"):
-            main.validate_styling_plan(plan, candidate_snapshot)
+        main.validate_styling_plan(plan, candidate_snapshot)
+        signals = main.collect_styling_quality_signals(plan, candidate_snapshot)
+
+        self.assertTrue(any(signal["code"] == "template_accessory_risk" for signal in signals))
 
     def test_schema_migrations_are_recorded(self) -> None:
         config = importlib.import_module("app.config")

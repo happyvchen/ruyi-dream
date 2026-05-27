@@ -163,6 +163,8 @@ export function App() {
       await refreshAll().catch(() => undefined)
       return value
     } catch (err) {
+      setLocalOperations((items) => items.filter((item) => !isAttemptRunning(item)))
+      await refreshAll().catch(() => undefined)
       setError(err instanceof Error ? err.message : '操作失败')
       throw err
     } finally {

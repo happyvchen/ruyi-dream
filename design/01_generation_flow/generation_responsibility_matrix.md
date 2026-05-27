@@ -48,7 +48,7 @@ Gemini 在 `AI Stylist` 阶段应被当作造型总监，而不是简单分类�
 | 候选漏斗 | 后端排序和 outfit 草案服务 | 主推款理解、品牌样本、风险降权、兼容性 ranker | Gemini 直接看全量图库 |
 | 搭配库充足性诊断 | 后端候选漏斗服务 | READY 服饰统计、排除原因、被拒候选、人工补库建议 | Gemini 事后猜测、Image-2 视觉补救 |
 | AI Stylist | Gemini 基于主推款图片、小候选集、候选图和品牌证据生成多套 outfit 并自评 | Lily 品牌边界、商品主角原则、候选漏斗 | 单次 ID 选择器、Image-2、全库搜索 |
-| Aesthetic Critic | AI Stylist 必经质量门 | 色彩重量、廓形体量、季节材质、模板化风险、穿法质量、官方样本证据、品牌采用可能性 | 后端硬编码大量审美 if/else、Image-2 事后补救 |
+| Aesthetic Critic | AI Stylist 必经质量信号 | 色彩重量、廓形体量、季节材质、模板化风险、穿法质量、官方样本证据、品牌采用可能性 | 后端硬编码大量审美 if/else、Image-2 事后补救 |
 | StylingPlan | AI Stylist 输出 + 后端校验 | 候选快照、被拒方案、评分、审美诊断、风险提示 | ShotPlan 像素反推 |
 | 数字模特 | 数字模特图片和参数快照 | 文本身份边界 | 模型默认人物 |
 | ShotPlan | 规则/Gemini 基于主推品类和 StylingPlan 生成结构化拍摄方案 | 品类图位矩阵、品牌样本、主推款卖点 | 通用全身图模板、六宫格像素反推 |
