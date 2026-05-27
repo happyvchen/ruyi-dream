@@ -10,6 +10,7 @@ MediaAsset
 -> GenerationTask / InputVersion
 -> Brand Style Index / Retrieval Features
 -> Candidate Funnel 候选漏斗
+-> Library Adequacy Report 搭配库充足性诊断
 -> AI Stylist / StylingPlan
 -> ShotPlan
 -> Image-2 六宫格预览
@@ -128,6 +129,7 @@ AI Stylist 造型方案结果：
 - source_material_ids_json
 - candidate_material_ids_json
 - candidate_retrieval_snapshot_json
+- library_adequacy_snapshot_json
 - outfit_drafts_json
 - brand_evidence_snapshot_json
 - selected_material_ids_json
@@ -217,6 +219,27 @@ Lily 官方和客户确认的品牌样本：
 
 任务名、文件夹名和 SKU 只能作为辅助证据；主推款品类、卖点和不可遮挡区域以图片理解为准。
 
+正常生产链路中，`category = unknown` 不能进入候选漏斗。若视觉理解低置信度，应进入人工复核、安全 fallback 或空选搭策略，而不是继续使用通用模板。
+
+### 2.6.4 LibraryAdequacyReport
+
+搭配库充足性诊断用于判断当前库内是否确实存在更好候选，避免把“库里没有合适衣服”误判成“AI Stylist 不会搭”。
+
+阶段 1 可作为 `GenerationStyling.library_adequacy_snapshot_json` 保存，后续可独立建表。建议字段：
+
+- `library_ready_count`
+- `usable_by_category_json`
+- `excluded_current_hero_count`
+- `blocked_by_wearing_method_count`
+- `blocked_by_category_count`
+- `blocked_by_season_or_material_count`
+- `candidate_gap_notes_json`
+- `better_alternative_ids_json`
+- `better_alternative_reason_json`
+- `supply_gap_notes_json`
+- `recommend_empty_pairing`
+- `created_at`
+
 ### 2.7 GenerationShotPlan
 
 - id
@@ -297,6 +320,7 @@ MVP 只保存一张六宫格总图，不裁 frame。未来支持重新预览时�
 - `generation task service`：任务草稿、输入版本、状态机。
 - `brand style service`：维护 Lily 官方样本、客户 lookbook、品牌 caption、配饰边界和未来 embedding。
 - `candidate funnel service`：基于 READY 服饰 tags、caption、颜色、品类、季节、遮挡风险、品牌样本相似度和未来 embedding，生成候选召回、兼容性排序和 outfit 草案快照。
+- `library adequacy service`：基于候选排除原因和可用候选统计，判断库内是否有更好搭配、是否应空选搭或补库。
 - `AI Stylist service`：组装主推款图片、小候选集、候选缩略图、outfit 草案、品牌证据和商品验收维度，调用 Gemini 生成 `StylingPlan`。
 - `aesthetic critic service`：校验 `StylingPlan` 的基础业务事实、可穿性、审美成立性、品牌成立性、主推款可见性和商业可用性阈值。
 - `shot plan service`：基于 `StylingPlan` 生成 6 条 ShotPlan。
@@ -328,12 +352,14 @@ MVP 不再把全量 READY tags 直接交给 Gemini。候选漏斗先把全量库
 阶段 1 使用规则化漏斗，但必须以前置 `HeroUnderstanding` 为输入：
 
 - 只取 `READY` 搭配服饰。
+- 排除当前主推款同 `code`、同输入素材或同商品身份的搭配服饰。
 - 压缩 `effective_tags`。
 - 使用主推款视觉理解出的品类、卖点和不可遮挡区域做硬过滤。
 - 根据品类互补、颜色、季节、廓形和穿着方式粗排。
 - 降权 `coverage_risk` 高、长外套、深色厚重、大体量、风格风险高或季节冲突明显的服饰。
 - 校验穿法能力：候选草案不得建议搭配服饰未支持的穿法；开衫、外套、厚针织和有明显门襟/纽扣/镂空下摆结构的上衣默认禁止全塞。
-- 生成 3-8 套 outfit 草案，并保留一定多样性，避免候选全是同一公式。
+- 按主推品类生成 3-8 套 outfit 草案，并保留一定多样性，避免候选全是同一公式或只是排序前几件。
+- 生成 `LibraryAdequacyReport`，说明当前库内是否存在更优候选、哪些候选因穿法/品类/季节被排除、是否建议空选搭或补库。
 - AI Stylist 输入控制在 12-20 件候选服饰，并附必要主图或缩略图。
 
 后续生产增强：
@@ -348,6 +374,7 @@ MVP 不再把全量 READY tags 直接交给 Gemini。候选漏斗先把全量库
 后端校验应覆盖真实性和生产边界，而不是硬编码审美：
 
 - 选中 ID 必须来自本次 READY 候选。
+- 选中 ID 不得是当前主推款同 `code`、同输入素材或同商品身份。
 - 不允许重复 ID。
 - 空选中合法。
 - 明显互斥穿搭必须在 `wearing_notes` 中解释，否则拒绝。
@@ -358,6 +385,7 @@ MVP 不再把全量 READY tags 直接交给 Gemini。候选漏斗先把全量库
 - 主推款是高腰裤、连衣裙、收腰上衣等强腰线商品时，选择外套必须说明如何避免色块压迫、腰线遮挡和比例失衡。
 - 有遮挡风险、穿法风险、模板化风险、配饰遮挡风险或品牌证据不足时，不允许四项满分。
 - 公文包、大体量手提包、夸张首饰等生成配饰必须受控，不能由 Gemini 自由补全为传统办公室套装。
+- 搭配失败复盘必须检查 `LibraryAdequacyReport`：库内有更好候选却未选中是选搭逻辑失败；库内没有更好候选时，应输出空选搭、低存在感生成配饰或补库建议。
 - `StylingPlan` 必须保存拒绝方案和原因，便于复盘。
 
 ### 4.4 ShotPlan 联动
@@ -415,6 +443,7 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 
 - 主推款图片。
 - 候选漏斗快照。
+- 搭配库充足性诊断摘要。
 - 小候选集搭配服饰压缩 tags、caption 和必要主图/缩略图。
 - 后端生成的 outfit 草案。
 - 与本次任务相关的 Lily 品牌样本证据。
@@ -470,12 +499,42 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 
 ### 5.6 阶段性实施计划
 
+#### 当前实现状态（2026-05-27）
+
+阶段 1 第一版已经落地到代码，已通过后端 smoke tests 和前端 typecheck。
+
+已实现：
+
+- `generation_stylings.library_adequacy_snapshot_json` 字段与迁移 `015`。
+- 候选漏斗使用同 `code` 搭配库标签辅助主推款理解，并排除当前主推款自己。
+- `LibraryAdequacyReport` 快照，包含可用品类统计、同主推款排除数、潜在更优候选和补库缺口。
+- 按主推品类生成 outfit 草案。
+- AI Stylist prompt 增加库充足性、穿法合法性、塞腰质量、裤装主推保护规则。
+- 质量门拒绝不支持的全塞/半塞穿法。
+- `build_default_new_shot_plans` 按主推品类输出结构化 ShotPlan，裤装覆盖全身、腰脚、腰膝/腰胯、侧身动态和正面版型。
+- 前端 API 类型已增加 `libraryAdequacy`。
+
+尚未实现：
+
+- 独立视觉 `HeroUnderstanding` provider 调用。
+- `category = unknown` 的完整复核/安全 fallback 状态机。
+- Lily 官方样本库表、样本导入、样本检索。
+- 基于官方样本的姿势/取景参考检索。
+- 多模态 embedding、向量检索和 compatibility ranker。
+- 反馈闭环与品牌偏好学习。
+- 前台展示库充足性诊断、补库建议和候选排除原因。
+- 使用新代码重新跑 335-338 并形成端到端回归记录。
+
 #### 阶段 1：修正主推款理解、穿法质量门和品类 ShotPlan
 
 不引入新基础设施，先修正当前白色高腰阔腿裤案例中的明确失败：
 
 - 新增或固化 `HeroUnderstanding` 步骤，以图片识别主推品类、卖点、不可遮挡区域和图位需求。
 - 将 `HeroUnderstanding` 作为候选漏斗、AI Stylist 和 ShotPlan 的共同输入，删除任务名启发式作为主来源的旧口径。
+- 主推品类为 `unknown` 时不得进入正常候选漏斗；低置信度进入复核或安全 fallback。
+- 排除当前主推款同 `code`、同输入素材或同商品身份的候选。
+- 新增 `LibraryAdequacyReport`，区分选搭逻辑失败和搭配库供给不足。
+- outfit 草案按主推品类生成，不能固定输出排序前几件。
 - 扩展搭配服饰穿法能力和穿法禁忌字段，区分 `tucked`、`half_tucked`、`untucked`、`open`、`buttoned`、`layered`。
 - 增加穿法合法性质量门，禁止未支持 `tucked` 的开衫/外套/厚针织被要求全塞。
 - 扩展 Aesthetic Critic：`wearing_method_validity`、`tuck_quality`、`official_style_evidence`、`shotplan_readiness`。
@@ -485,6 +544,10 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 验收：
 
 - 白色高腰阔腿裤不再默认把镂空开衫强行全塞。
+- 候选召回快照中的主推品类不得为 `unknown`，且来源不能只依赖任务名启发式。
+- 当前主推款自己不会出现在可选搭配候选中。
+- 四个不同主推品类任务不会得到同一组 outfit 草案。
+- 搭配不好时可从 `LibraryAdequacyReport` 判断是否库内确实没有更优候选。
 - 裤装六宫格不再出现 4 张以上重复全身图。
 - AI Stylist 不允许在缺少穿法证据或官方样本证据时给四项满分。
 
@@ -553,3 +616,4 @@ GET    /api/generation-records/{taskId}?includeDebug=true
 - 生成记录默认隐藏技术详情。
 - 搭配服饰详情展示完整分层标签；Gemini 打标请求/返回属于默认折叠的技术详情。
 - 主推款、候选召回、StylingPlan、搭配服饰、数字模特、ShotPlan 和 provider 调用都要快照。
+- 选搭复盘必须同时读取候选召回快照和搭配库充足性诊断，不能只看最终图片或模型理由。

@@ -548,6 +548,8 @@ class BackendSmokeTests(unittest.TestCase):
                         "waistline_proportion": "腰线清楚。",
                         "season_material_fit": "材质季节匹配。",
                         "template_risk": "没有套用完整通勤模板。",
+                        "wearing_method_validity": "主推款单穿，无额外穿法风险。",
+                        "tuck_quality": "无塞腰穿法。",
                         "brand_read": "符合 Lily 干净通勤调性。",
                     },
                     "scores": {
@@ -624,7 +626,7 @@ class BackendSmokeTests(unittest.TestCase):
             "candidate_material_ids": [9, 10],
             "material_cards": [
                 {"id": 9, "category": "outerwear", "colors": ["brown"]},
-                {"id": 10, "category": "top", "colors": ["brown"]},
+                {"id": 10, "category": "top", "colors": ["brown"], "wearability": {"recommended_wearing_methods": ["tucked"]}},
             ],
         }
         plan = {
@@ -637,7 +639,7 @@ class BackendSmokeTests(unittest.TestCase):
                 {
                     "id": "candidate_a",
                     "selected_material_ids": [10, 9],
-                    "wearing_notes": "针织衫塞入裤腰，西装外套敞开穿着。",
+                    "wearing_notes": "针织衫下摆收进裤腰，西装外套敞开穿着。",
                     "hero_focus": ["腰部环扣", "裤管垂坠"],
                     "aesthetic_diagnosis": {
                         "color_weight": "深棕和白色形成对比。",
@@ -645,6 +647,8 @@ class BackendSmokeTests(unittest.TestCase):
                         "waistline_proportion": "上衣塞腰。",
                         "season_material_fit": "秋冬通勤。",
                         "template_risk": "常见通勤三件套。",
+                        "wearing_method_validity": "针织衫塞腰需要穿法校验。",
+                        "tuck_quality": "塞腰存在腰腹臃肿风险。",
                         "brand_read": "商务通勤。",
                     },
                     "scores": {
@@ -694,6 +698,110 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn(1, snapshot["source_material_ids"])
         self.assertTrue(any(item["id"] == 1 and "same_bottom_category_excluded" in item["reasons"] for item in snapshot["filtered_out"]))
         self.assertEqual(snapshot["outfit_drafts"][0]["selected_material_ids"], [])
+        self.assertIn("library_adequacy", snapshot)
+
+    def test_candidate_funnel_uses_matching_material_as_hero_and_excludes_it(self) -> None:
+        main = importlib.import_module("app.main")
+        input_row = {
+            "id": 1,
+            "task_id": 1,
+            "name_snapshot": "PANTS-001",
+            "image_snapshot_json": "[]",
+        }
+        material_cards = [
+            {
+                "id": 10,
+                "code": "PANTS-001",
+                "category": "bottom",
+                "colors": ["white"],
+                "details": ["belt", "pleat"],
+                "silhouette": ["wide_leg"],
+                "wearability": {"recommended_wearing_methods": ["belted", "tucked"]},
+                "risk": [],
+            },
+            {"id": 11, "code": "VEST-001", "category": "top", "colors": ["white"], "wearability": {}, "risk": []},
+        ]
+
+        snapshot = main.build_candidate_retrieval_snapshot(input_row, material_cards)
+
+        self.assertEqual(snapshot["hero_profile"]["source"], "styling_garment_code_match")
+        self.assertEqual(snapshot["hero_profile"]["category"], "bottom")
+        self.assertNotIn(10, snapshot["candidate_material_ids"])
+        self.assertIn(11, snapshot["candidate_material_ids"])
+        self.assertTrue(any(item["id"] == 10 and "current_hero_same_code_excluded" in item["reasons"] for item in snapshot["filtered_out"]))
+        self.assertEqual(snapshot["library_adequacy"]["excluded_current_hero_count"], 1)
+
+    def test_styling_plan_rejects_unsupported_tuck_method(self) -> None:
+        main = importlib.import_module("app.main")
+        candidate_snapshot = {
+            "candidate_material_ids": [9],
+            "hero_profile": {"category": "bottom"},
+            "material_cards": [
+                {
+                    "id": 9,
+                    "category": "knitwear",
+                    "sub_category": "cardigan",
+                    "materials_visual": ["knit"],
+                    "details": ["button"],
+                    "wearability": {"recommended_wearing_methods": ["buttoned", "open"]},
+                    "colors": ["ivory"],
+                },
+            ],
+        }
+        plan = {
+            "selected_material_ids": [9],
+            "selected_outfit_id": "candidate_a",
+            "outfit_candidates": [
+                {
+                    "id": "candidate_a",
+                    "selected_material_ids": [9],
+                    "wearing_notes": "针织开衫全部扣起并全塞入裤腰。",
+                    "aesthetic_diagnosis": {
+                        "color_weight": "浅色同色系。",
+                        "silhouette_balance": "上短下长。",
+                        "waistline_proportion": "露出裤腰。",
+                        "season_material_fit": "春夏匹配。",
+                        "template_risk": "通勤公式。",
+                        "wearing_method_validity": "缺少全塞依据。",
+                        "tuck_quality": "全塞会挤压门襟。",
+                        "brand_read": "偏 Lily。",
+                    },
+                    "scores": {
+                        "aesthetic_score": 0.9,
+                        "brand_fit_score": 0.9,
+                        "hero_visibility_score": 0.9,
+                        "commercial_readiness_score": 0.9,
+                    },
+                    "risk_notes": ["穿法风险。"],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "塞腰"):
+            main.validate_styling_plan(plan, candidate_snapshot)
+
+    def test_bottom_shot_plan_uses_category_specific_frames(self) -> None:
+        main = importlib.import_module("app.main")
+        plans = main.build_default_new_shot_plans(
+            [],
+            {
+                "hero_understanding": {
+                    "category": "bottom",
+                    "hero_selling_points": ["腰头", "裤褶", "裤腿垂坠"],
+                },
+                "selected_outfit_id": "candidate_a",
+                "outfit_candidates": [
+                    {
+                        "id": "candidate_a",
+                        "selected_material_ids": [],
+                        "wearing_notes": "主推裤装单穿展示。",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual([item["shotType"] for item in plans[:5]], ["pants_hero", "pants_waist_to_feet", "pants_waist_detail", "pants_side_motion", "pants_front_fit"])
+        self.assertIn("腰头", plans[1]["mainFocus"])
 
     def test_styling_plan_rejects_forbidden_briefcase_accessory_template(self) -> None:
         main = importlib.import_module("app.main")
@@ -716,6 +824,8 @@ class BackendSmokeTests(unittest.TestCase):
                         "waistline_proportion": "腰线清楚。",
                         "season_material_fit": "材质季节匹配。",
                         "template_risk": "没有套用完整通勤模板。",
+                        "wearing_method_validity": "主推款单穿，无额外穿法风险。",
+                        "tuck_quality": "无塞腰穿法。",
                         "brand_read": "符合 Lily 干净通勤调性。",
                     },
                     "scores": {
@@ -758,7 +868,7 @@ class BackendSmokeTests(unittest.TestCase):
                 result_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_result_images_new)").fetchall()}
                 template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
@@ -768,6 +878,7 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("effective_tags_json", styling_garment_columns)
         self.assertIn("styling_plan_json", styling_columns)
         self.assertIn("candidate_retrieval_snapshot_json", styling_columns)
+        self.assertIn("library_adequacy_snapshot_json", styling_columns)
         self.assertIn("outfit_candidates_json", styling_columns)
         self.assertIn("locked_until", preview_columns)
         self.assertIn("run_attempts", result_image_columns)
