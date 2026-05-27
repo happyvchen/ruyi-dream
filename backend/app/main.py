@@ -2074,12 +2074,20 @@ async def select_generation_styling(task_id: int) -> dict[str, Any]:
     with get_db() as db:
         db.execute("UPDATE generation_tasks SET status = 'STYLING_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
     attempt_id = create_attempt("generation_styling", task_id, "gemini")
+    schedule_background_generation(
+        run_generation_styling(task_id, input_version_id, attempt_id),
+        job_key=styling_job_key(task_id),
+    )
+    return {"item": get_generation_task_by_id(task_id, include_debug=True)}
+
+
+async def run_generation_styling(task_id: int, input_version_id: int, attempt_id: int) -> None:
     try:
         input_row, candidate_snapshot, request_snapshot = build_ai_stylist_context(input_version_id)
         update_attempt_request_snapshot(attempt_id, request_snapshot)
         if generation_task_or_attempt_cancelled(task_id, attempt_id):
             finish_attempt(attempt_id, "CANCELLED")
-            return {"item": get_generation_task_by_id(task_id)}
+            return
         styling_plan = await select_styling_with_gemini(input_row, candidate_snapshot, request_snapshot)
         validate_styling_plan(styling_plan, candidate_snapshot)
         styling_plan = attach_styling_quality_signals(styling_plan, collect_styling_quality_signals(styling_plan, candidate_snapshot))
@@ -2091,18 +2099,19 @@ async def select_generation_styling(task_id: int) -> dict[str, Any]:
             if not current or current["status"] == "CANCELLED":
                 if attempt_id:
                     finish_attempt(attempt_id, "CANCELLED", error_message=str(exc))
-                return {"item": get_generation_task_by_id(task_id)}
+                return
         if attempt_id:
             finish_attempt(attempt_id, "FAILED", error_message=str(exc))
         with get_db() as db:
             db.execute("UPDATE generation_tasks SET status = 'FAILED', updated_at = ? WHERE id = ?", (now_iso(), task_id))
-        raise HTTPException(status_code=502, detail=f"智能选搭失败：{exc}") from exc
+        logger.exception("Background styling task failed for generation_task=%s", task_id, exc_info=exc)
+        return
     with get_db() as db:
         current = db.execute("SELECT status FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
         if current and current["status"] == "CANCELLED":
             if attempt_id:
                 finish_attempt(attempt_id, "CANCELLED", response_snapshot=styling_plan)
-            return {"item": get_generation_task_by_id(task_id)}
+            return
     with get_db() as db:
         timestamp = now_iso()
         cursor = db.execute(
@@ -2154,7 +2163,6 @@ async def select_generation_styling(task_id: int) -> dict[str, Any]:
             (input_version_id, styling_id, timestamp, task_id),
         )
     finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=styling_plan)
-    return {"item": get_generation_task_by_id(task_id, include_debug=True)}
 
 
 @app.post("/api/generation-tasks/{task_id}/preview")
@@ -6939,6 +6947,10 @@ def preview_job_key(preview_id: int) -> str:
 
 def final_set_job_key(result_set_id: int) -> str:
     return f"generation_result_set:{result_set_id}"
+
+
+def styling_job_key(task_id: int) -> str:
+    return f"generation_styling:{task_id}"
 
 
 def lease_generation_preview(preview_id: int, attempt_id: int) -> None:

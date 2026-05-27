@@ -65,6 +65,7 @@ type LightboxImage = {
 }
 type LightboxImageItem = Omit<LightboxImage, 'items' | 'initialIndex'>
 type DeleteDialogTarget = Pick<GenerationTask, 'id' | 'name'>
+type RunOptions = { refresh?: boolean }
 
 const steps = [
   { title: '上传主推款', icon: Upload },
@@ -167,17 +168,17 @@ export function App() {
     window.history.pushState(null, '', routeToUrl({ page: next }))
   }
 
-  async function run<T>(label: string, action: () => Promise<T>, after?: (value: T) => void) {
+  async function run<T>(label: string, action: () => Promise<T>, after?: (value: T) => void, options: RunOptions = {}) {
     setBusy(label)
     setError('')
     try {
       const value = await action()
       after?.(value)
-      await refreshAll().catch(() => undefined)
+      if (options.refresh !== false) await refreshAll().catch(() => undefined)
       return value
     } catch (err) {
       setLocalOperations((items) => items.filter((item) => !isAttemptRunning(item)))
-      await refreshAll().catch(() => undefined)
+      if (options.refresh !== false) await refreshAll().catch(() => undefined)
       setError(err instanceof Error ? err.message : '操作失败')
       throw err
     } finally {
@@ -297,7 +298,7 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
   task: GenerationTask | null
   setTask: (task: GenerationTask | null) => void
   records: GenerationTask[]
-  run: <T>(label: string, action: () => Promise<T>, after?: (value: T) => void) => Promise<T | undefined>
+  run: <T>(label: string, action: () => Promise<T>, after?: (value: T) => void, options?: RunOptions) => Promise<T | undefined>
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
@@ -362,10 +363,11 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
           <div className="mini-list">
             {taskItems.map((item) => (
               <div key={item.id} className={`mini-row view-only ${task?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
-                <button onClick={() => void api.getRecord(item.id).then((r) => {
-                  setTask(r.item)
+                <button onClick={() => {
+                  setTask(item)
                   window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
-                })}>
+                  void api.getRecord(item.id).then((r) => setTask(r.item)).catch(() => undefined)
+                }}>
                   <span>{item.name}</span><em>{item.archivedAt ? '已归档' : statusText(item.status)}</em>
                 </button>
                 {isTaskRunning(item) && (
@@ -565,7 +567,7 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
       }, (r: { item: GenerationTask }) => {
         clearLocalOperationsFor(['generation_styling'])
         setTask(r.item)
-      })}>
+      }, { refresh: false })}>
         <WandSparkles size={16} /> {hasStyling ? '重新选搭' : 'AI 智能选搭'}
       </button>
     </div>
@@ -688,7 +690,7 @@ function PreviewStep({ task, setTask, run, localOperations, startLocalOperation,
       }, (r: { item: GenerationTask }) => {
         clearLocalOperationsFor(['generation_preview'])
         setTask(r.item)
-      })}>
+      }, { refresh: false })}>
         <GalleryVerticalEnd size={16} /> {hasPreview ? '重新生成分镜预览' : '生成预览'}
       </button>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
@@ -735,7 +737,7 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
       }, (r: { item: GenerationTask }) => {
         clearLocalOperationsFor(['generation_result_image'])
         setTask(r.item)
-      })}>
+      }, { refresh: false })}>
         <Sparkles size={16} /> {hasFinalImages ? '重新生成成片' : '生成成片'}
       </button>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
@@ -839,11 +841,12 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
     const action = purge
       ? () => ids.length === 1 ? api.deleteStylingGarment(ids[0], { purge: true, confirmCode: confirmText }) : api.deleteStylingGarments(ids, { purge: true, confirmPhrase: confirmText })
       : () => api.deleteStylingGarments(ids)
+    setDeleteGarmentDialog(null)
+    setDeleteGarmentImpact(null)
+    setItems((current) => current.filter((item) => !ids.includes(item.id)))
     void run(purge ? '彻底删除搭配服饰中...' : '归档搭配服饰中...', action, () => {
       if (detail && ids.includes(detail.id)) setDetail(null)
       setSelectedGarmentIds(new Set())
-      setDeleteGarmentDialog(null)
-      setDeleteGarmentImpact(null)
       void refreshLibraryPage().catch(() => undefined)
     })
   }
@@ -1374,7 +1377,11 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
   useEffect(() => setSelectedRecordIds(new Set()), [offset, includeArchived, pageSize])
 
   function openRecord(item: GenerationTask) {
-    void run('读取记录中...', () => api.getRecord(item.id, false), (r: { item: GenerationTask }) => setDetail(r.item))
+    setDetail(item)
+    window.history.replaceState(null, '', routeToUrl({ page: 'records', recordId: item.id }))
+    void api.getRecord(item.id, false)
+      .then((r) => setDetail(r.item))
+      .catch(() => undefined)
   }
 
   function toggleRecordSelection(id: number, checked: boolean) {
@@ -1429,11 +1436,12 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
     const action = purge
       ? () => ids.length === 1 ? api.deleteTask(ids[0], confirmText) : api.deleteTasks(ids, confirmText)
       : () => api.archiveTasks(ids)
+    setDeleteRecordDialog(null)
+    setDeleteRecordImpact(null)
+    setItems((current) => current.filter((item) => !ids.includes(item.id)))
     void run(purge ? '彻底删除记录中...' : '归档记录中...', action, () => {
       clearRecordDetailIfAffected(ids)
       setSelectedRecordIds(new Set())
-      setDeleteRecordDialog(null)
-      setDeleteRecordImpact(null)
       void refreshRecordPage().catch(() => undefined)
     })
   }
@@ -1546,17 +1554,20 @@ function DeleteConfirmDialog({ title, items, onClose, onConfirm, impact = null, 
 }) {
   const [purge, setPurge] = useState(false)
   const [confirmText, setConfirmText] = useState('')
+  const [submitting, setSubmitting] = useState(false)
   const expectedText = items.length === 1 ? items[0].name : '全部删除'
-  const canConfirm = !purge || confirmText === expectedText
+  const canConfirm = !submitting && (!purge || confirmText === expectedText)
 
   useEffect(() => {
     setPurge(false)
     setConfirmText('')
+    setSubmitting(false)
   }, [items])
 
   function submit(event: FormEvent) {
     event.preventDefault()
     if (!canConfirm) return
+    setSubmitting(true)
     onConfirm(items, purge, confirmText)
   }
 
@@ -1600,7 +1611,7 @@ function DeleteConfirmDialog({ title, items, onClose, onConfirm, impact = null, 
         <div className="confirm-actions">
           <button type="button" className="secondary" onClick={onClose}>取消</button>
           <button className={purge ? 'danger' : 'primary'} disabled={!canConfirm}>
-            确认
+            {submitting ? '处理中...' : '确认'}
           </button>
         </div>
       </form>
