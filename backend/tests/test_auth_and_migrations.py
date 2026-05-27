@@ -19,7 +19,8 @@ class BackendSmokeTests(unittest.TestCase):
             {
                 "APP_S3_ACCESS_KEY_ID": "test-access-key",
                 "APP_S3_SECRET_ACCESS_KEY": "test-secret-key",
-                "APP_GATE_PASSWORD": "letmein-123456",
+                "APP_USER_PASSWORD": "letmein-123456",
+                "APP_ADMIN_PASSWORD": "admin-letmein-123456",
                 "APP_SESSION_SECRET": "session-secret-123",
             }
         )
@@ -123,7 +124,8 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(client.get("/api/auth/session").json(), {"authRequired": True, "authenticated": True, "role": "user"})
 
         admin_client = TestClient(main.app)
-        admin_login = admin_client.post("/api/auth/login", json={"username": "admin", "password": "letmein-123456"})
+        self.assertEqual(admin_client.post("/api/auth/login", json={"username": "admin", "password": "letmein-123456"}).status_code, 401)
+        admin_login = admin_client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
         self.assertEqual(admin_login.status_code, 200)
         self.assertEqual(admin_login.json()["role"], "admin")
         self.assertEqual(admin_client.get("/api/auth/session").json(), {"authRequired": True, "authenticated": True, "role": "admin"})

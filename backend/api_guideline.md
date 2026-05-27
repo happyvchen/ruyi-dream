@@ -11,7 +11,6 @@
 `/api/health` 保持匿名访问，用于容器和反向代理健康检查。生产环境默认使用固定账号 app gate：
 
 - 后端通过固定 `user` / `admin` 两类账号保留角色身份；当前两个角色访问同一套业务工作台 API。
-- `APP_GATE_PASSWORD` / `APP_GATE_PASSWORD_HASH` 保持兼容，默认等价于 `user` 账号密码。
 - 推荐显式配置 `APP_USER_PASSWORD_HASH` 和 `APP_ADMIN_PASSWORD_HASH`；开发环境可用明文密码变量，生产环境必须使用足够强的凭据和 `APP_SESSION_SECRET`。
 - 登录成功后签发 `HttpOnly`、`SameSite=Lax` 的 `ruyi_session` cookie，签名 payload 中包含 `role=user|admin`。
 - 前端只保存短期 session cookie，不把部署密码或长期 token 编译进静态资源。

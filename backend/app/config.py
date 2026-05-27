@@ -47,19 +47,12 @@ class Settings:
     max_garment_images_per_sku = int(os.getenv("APP_MAX_GARMENT_IMAGES_PER_SKU", "20"))
     max_head_references_per_profile = int(os.getenv("APP_MAX_HEAD_REFERENCES_PER_PROFILE", "20"))
     api_access_token = os.getenv("APP_API_ACCESS_TOKEN", os.getenv("APP_ACCESS_TOKEN", ""))
-    gate_password = os.getenv("APP_GATE_PASSWORD", "password")
-    gate_password_hash = os.getenv("APP_GATE_PASSWORD_HASH", "")
     user_username = os.getenv("APP_USER_USERNAME", "user")
-    user_password_hash = os.getenv("APP_USER_PASSWORD_HASH", gate_password_hash)
-    user_password = os.getenv("APP_USER_PASSWORD", gate_password if not user_password_hash else "")
+    user_password_hash = os.getenv("APP_USER_PASSWORD_HASH", "")
+    user_password = os.getenv("APP_USER_PASSWORD", "password" if not user_password_hash else "")
     admin_username = os.getenv("APP_ADMIN_USERNAME", "admin")
     admin_password_hash = os.getenv("APP_ADMIN_PASSWORD_HASH", "")
-    admin_password = os.getenv(
-        "APP_ADMIN_PASSWORD",
-        gate_password
-        if not admin_password_hash and os.getenv("APP_ENV", "development").lower() not in {"prod", "production"}
-        else "",
-    )
+    admin_password = os.getenv("APP_ADMIN_PASSWORD", "password" if not admin_password_hash else "")
     session_secret = os.getenv("APP_SESSION_SECRET", "")
     session_ttl_seconds = int(os.getenv("APP_SESSION_TTL_SECONDS", str(12 * 60 * 60)))
     session_cookie_secure = os.getenv("APP_SESSION_COOKIE_SECURE", "false").lower() in {"1", "true", "yes", "on"}
