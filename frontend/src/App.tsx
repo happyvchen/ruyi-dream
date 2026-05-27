@@ -65,7 +65,7 @@ type LightboxImage = {
 }
 type LightboxImageItem = Omit<LightboxImage, 'items' | 'initialIndex'>
 type DeleteDialogTarget = Pick<GenerationTask, 'id' | 'name'>
-type RunOptions = { refresh?: boolean }
+type RunOptions = { refresh?: boolean | 'background' }
 
 const steps = [
   { title: '上传主推款', icon: Upload },
@@ -174,11 +174,13 @@ export function App() {
     try {
       const value = await action()
       after?.(value)
-      if (options.refresh !== false) await refreshAll().catch(() => undefined)
+      if (options.refresh === 'background') void refreshAll().catch(() => undefined)
+      else if (options.refresh !== false) await refreshAll().catch(() => undefined)
       return value
     } catch (err) {
       setLocalOperations((items) => items.filter((item) => !isAttemptRunning(item)))
-      if (options.refresh !== false) await refreshAll().catch(() => undefined)
+      if (options.refresh === 'background') void refreshAll().catch(() => undefined)
+      else if (options.refresh !== false) await refreshAll().catch(() => undefined)
       setError(err instanceof Error ? err.message : '操作失败')
       throw err
     } finally {
@@ -313,7 +315,7 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
     void run('取消生成中...', () => api.cancelTask(task.id), (r: { item: GenerationTask }) => {
       clearLocalOperationsFor(['generation_styling', 'generation_preview', 'generation_result_image'])
       setTask(r.item)
-    })
+    }, { refresh: 'background' })
   }
   useEffect(() => setStep(currentStep), [task?.id, task?.status])
   useEffect(() => {
@@ -379,7 +381,7 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
                         clearLocalOperationsFor(['generation_styling', 'generation_preview', 'generation_result_image'])
                         if (task?.id === item.id) setTask(r.item)
                         setTaskItems((current) => current.map((entry) => entry.id === item.id ? r.item : entry))
-                      })
+                      }, { refresh: 'background' })
                     }}
                   >
                     取消
@@ -469,7 +471,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
             <button className="primary" disabled={!files.length || files.length > 8 || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, files), (r: { item: GenerationTask }) => {
               setTask(r.item)
               window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: r.item.id }))
-            })}>
+            }, { refresh: 'background' })}>
               <ImagePlus size={16} /> 创建任务
             </button>
           </div>
@@ -493,7 +495,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
     await run('调整主推款顺序中...', async () => {
       await api.updateTaskImage(images[index].id, other.sortOrder)
       return api.updateTaskImage(other.id, images[index].sortOrder)
-    }, (result: { item: GenerationTask }) => setTask(result.item))
+    }, (result: { item: GenerationTask }) => setTask(result.item), { refresh: 'background' })
   }
 
   return (
@@ -501,12 +503,12 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
       <div className="section-head"><strong>当前草稿</strong><span className="status draft">待确认</span></div>
       <div className="inline-form">
         <input value={name} onChange={(event) => setName(event.target.value)} placeholder="任务名称" />
-        <button className="secondary" disabled={name.trim() === task.name} onClick={() => void run('保存任务名称中...', () => api.updateTask(task.id, { name }), (r: { item: GenerationTask }) => setTask(r.item))}>保存名称</button>
+        <button className="secondary" disabled={name.trim() === task.name} onClick={() => void run('保存任务名称中...', () => api.updateTask(task.id, { name }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>保存名称</button>
         <label className="secondary">
           <ImagePlus size={16} /> 追加图片
           <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => {
             const next = Array.from(event.target.files ?? [])
-            if (next.length) void run('追加主推款图片中...', () => api.addTaskImages(task.id, next), (r: { item: GenerationTask }) => setTask(r.item))
+            if (next.length) void run('追加主推款图片中...', () => api.addTaskImages(task.id, next), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })
           }} />
         </label>
       </div>
@@ -525,16 +527,16 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
                 <ImagePlus size={14} />
                 <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
                   const replacement = event.target.files?.[0]
-                  if (replacement) void run('替换主推款图片中...', () => api.replaceTaskImage(image.id, replacement), (r: { item: GenerationTask }) => setTask(r.item))
+                  if (replacement) void run('替换主推款图片中...', () => api.replaceTaskImage(image.id, replacement), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })
                 }} />
               </label>
-              <button disabled={(task.images?.length ?? 0) <= 1} onClick={() => void run('移除主推款图片中...', () => api.deleteTaskImage(image.id), (r: { item: GenerationTask }) => setTask(r.item))} title="删除图片"><Trash2 size={14} /></button>
+              <button disabled={(task.images?.length ?? 0) <= 1} onClick={() => void run('移除主推款图片中...', () => api.deleteTaskImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="删除图片"><Trash2 size={14} /></button>
             </div>
           </div>
         ))}
       </div>
       <p className="edit-hint">确认后可进入智能选搭；系统会保留本次主推款和默认数字模特信息用于后续生成。</p>
-      <button className="primary" onClick={() => void run('确认主推款输入中...', () => api.readyTask(task.id), (r: { item: GenerationTask }) => setTask(r.item))}>
+      <button className="primary" onClick={() => void run('确认主推款输入中...', () => api.readyTask(task.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>
         确认并进入智能选搭
       </button>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
@@ -724,7 +726,7 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
                 <img src={mediaUrl(assetPreviewSrc(image.asset))} />
               </button>
             ) : <div className="image-placeholder">{statusText(image.status)}{image.activeAttempt && isAttemptRunning(image.activeAttempt) && <small>{formatDuration(elapsedSeconds(image.activeAttempt.startedAt || image.updatedAt))}</small>}</div>}
-            <div><span>#{image.sortOrder}</span>{image.asset && <a href={mediaUrl(assetOriginalSrc(image.asset))} target="_blank" rel="noreferrer"><Download size={15} /></a>}{image.status === 'FAILED' && <button onClick={() => void run('单张重试中...', () => api.retryResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item))}><RotateCcw size={14} /></button>}</div>
+            <div><span>#{image.sortOrder}</span>{image.asset && <a href={mediaUrl(assetOriginalSrc(image.asset))} target="_blank" rel="noreferrer"><Download size={15} /></a>}{image.status === 'FAILED' && <button onClick={() => void run('单张重试中...', () => api.retryResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}><RotateCcw size={14} /></button>}</div>
           </div>
         )) : <EmptyState title="尚未生成最终图" text="点击生成成片后会生成前 5 张。" />}
       </div>
@@ -848,7 +850,12 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
       if (detail && ids.includes(detail.id)) setDetail(null)
       setSelectedGarmentIds(new Set())
       void refreshLibraryPage().catch(() => undefined)
-    })
+    }, { refresh: 'background' })
+  }
+
+  function updateGarmentInView(next: StylingGarment) {
+    setItems((current) => current.map((item) => item.id === next.id ? next : item))
+    if (detail?.id === next.id) setDetail(next)
   }
 
   function openGarmentDeleteDialog(targets: StylingGarment[]) {
@@ -901,7 +908,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
               key={item.id}
               item={item}
               onOpen={() => void openDetail(item)}
-              onTag={['DRAFT', 'TAGGING_FAILED', 'TAGGING_READY'].includes(item.status) ? () => void run('重新识别标签中...', () => api.tagStylingGarment(item.id)) : undefined}
+              onTag={['DRAFT', 'TAGGING_FAILED', 'TAGGING_READY'].includes(item.status) ? () => void run('重新识别标签中...', () => api.tagStylingGarment(item.id), (r: { item: StylingGarment }) => updateGarmentInView(r.item), { refresh: 'background' }) : undefined}
               selected={selectedGarmentIds.has(item.id)}
               onSelect={(checked) => toggleGarmentSelection(item.id, checked)}
               onDelete={() => openGarmentDeleteDialog([item])}
@@ -1443,7 +1450,7 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
       clearRecordDetailIfAffected(ids)
       setSelectedRecordIds(new Set())
       void refreshRecordPage().catch(() => undefined)
-    })
+    }, { refresh: 'background' })
   }
 
   function cancelRecordTask(item: GenerationTask) {
@@ -1451,7 +1458,7 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
     void run('取消生成中...', () => api.cancelTask(item.id), (r: { item: GenerationTask }) => {
       setItems((current) => current.map((entry) => entry.id === item.id ? r.item : entry))
       if (detail?.id === item.id) setDetail(r.item)
-    })
+    }, { refresh: 'background' })
   }
 
   return (
@@ -1805,14 +1812,14 @@ function GarmentDetailDrawer({ item, run, onClose, onChange, onDelete }: {
     const visibleCount = working.length + pendingFiles.length
     if (visibleCount > 6) throw new Error('单套搭配服饰最多保存 6 张图片')
     await run(retag ? '保存并重新识别标签中...' : '保存搭配服饰中...', async () => {
-      for (const [id, file] of Object.entries(replacementFiles)) await api.replaceStylingGarmentImage(Number(id), file)
+      await Promise.all(Object.entries(replacementFiles).map(([id, file]) => api.replaceStylingGarmentImage(Number(id), file)))
       const addBeforeDelete = working.length === 0 && pendingFiles.length > 0
       if (addBeforeDelete) await api.addStylingGarmentImages(item.id, pendingFiles)
-      for (const id of removedIds) await api.deleteStylingGarmentImage(id)
-      for (const [index, image] of working.entries()) await api.updateStylingGarmentImage(image.id, { sortOrder: index })
+      await Promise.all(removedIds.map((id) => api.deleteStylingGarmentImage(id)))
+      await Promise.all(working.map((image, index) => api.updateStylingGarmentImage(image.id, { sortOrder: index })))
       if (pendingFiles.length && !addBeforeDelete) await api.addStylingGarmentImages(item.id, pendingFiles)
       return retag ? (await api.tagStylingGarment(item.id)).item : (await api.getStylingGarment(item.id)).item
-    }, (latest: StylingGarment) => onChange(latest))
+    }, (latest: StylingGarment) => onChange(latest), { refresh: 'background' })
   }
 
   return (
@@ -1954,7 +1961,7 @@ function CodeEditor({ item, run, disabled = false }: { item: StylingGarment; run
       <label>货号</label>
       <div>
         <input disabled={disabled} value={value} onChange={(event) => setValue(event.target.value)} />
-        <button className="secondary" disabled={disabled || !changed} onClick={() => void run('保存货号中...', () => api.updateStylingGarment(item.id, { code: value }))}>保存</button>
+        <button className="secondary" disabled={disabled || !changed} onClick={() => void run('保存货号中...', () => api.updateStylingGarment(item.id, { code: value }), undefined, { refresh: 'background' })}>保存</button>
       </div>
     </div>
   )
