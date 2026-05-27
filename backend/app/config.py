@@ -47,8 +47,12 @@ class Settings:
     max_garment_images_per_sku = int(os.getenv("APP_MAX_GARMENT_IMAGES_PER_SKU", "20"))
     max_head_references_per_profile = int(os.getenv("APP_MAX_HEAD_REFERENCES_PER_PROFILE", "20"))
     api_access_token = os.getenv("APP_API_ACCESS_TOKEN", os.getenv("APP_ACCESS_TOKEN", ""))
-    gate_password = os.getenv("APP_GATE_PASSWORD", "password")
-    gate_password_hash = os.getenv("APP_GATE_PASSWORD_HASH", "")
+    user_username = os.getenv("APP_USER_USERNAME", "user")
+    user_password_hash = os.getenv("APP_USER_PASSWORD_HASH", "")
+    user_password = os.getenv("APP_USER_PASSWORD", "password" if not user_password_hash else "")
+    admin_username = os.getenv("APP_ADMIN_USERNAME", "admin")
+    admin_password_hash = os.getenv("APP_ADMIN_PASSWORD_HASH", "")
+    admin_password = os.getenv("APP_ADMIN_PASSWORD", "password" if not admin_password_hash else "")
     session_secret = os.getenv("APP_SESSION_SECRET", "")
     session_ttl_seconds = int(os.getenv("APP_SESSION_TTL_SECONDS", str(12 * 60 * 60)))
     session_cookie_secure = os.getenv("APP_SESSION_COOKIE_SECURE", "false").lower() in {"1", "true", "yes", "on"}
@@ -105,19 +109,29 @@ class Settings:
             self._validate_production_credential("secret key", self.s3_secret_access_key)
             if self.api_access_token:
                 self._validate_production_credential("API access token", self.api_access_token)
-            if self.gate_password:
-                self._validate_production_credential("gate password", self.gate_password)
-            if self.gate_password_hash:
-                self._validate_gate_password_hash(self.gate_password_hash)
+            if self.user_password:
+                self._validate_production_credential("user password", self.user_password)
+            if self.user_password_hash:
+                self._validate_password_hash("APP_USER_PASSWORD_HASH", self.user_password_hash)
+            if self.admin_password:
+                self._validate_production_credential("admin password", self.admin_password)
+            if self.admin_password_hash:
+                self._validate_password_hash("APP_ADMIN_PASSWORD_HASH", self.admin_password_hash)
             if self.session_secret:
                 self._validate_production_credential("session secret", self.session_secret)
-            if not self.trust_reverse_proxy_auth and not self.gate_password and not self.gate_password_hash:
+            if not self.trust_reverse_proxy_auth and not self.is_gate_enabled():
                 raise RuntimeError(
-                    "Production must set APP_GATE_PASSWORD or APP_GATE_PASSWORD_HASH, "
+                    "Production must configure at least one fixed app account, "
                     "or explicitly set APP_TRUST_REVERSE_PROXY_AUTH=true."
                 )
-            if (self.gate_password or self.gate_password_hash) and not self.session_secret:
+            if self.is_gate_enabled() and not self.session_secret:
                 raise RuntimeError("Production app gate requires APP_SESSION_SECRET.")
+        if not self.user_username.strip():
+            raise RuntimeError("APP_USER_USERNAME must not be empty.")
+        if not self.admin_username.strip():
+            raise RuntimeError("APP_ADMIN_USERNAME must not be empty.")
+        if self.user_username.strip().lower() == self.admin_username.strip().lower():
+            raise RuntimeError("APP_USER_USERNAME and APP_ADMIN_USERNAME must be different.")
 
     def _validate_production_credential(self, label: str, value: str) -> None:
         normalized = value.strip().lower()
@@ -131,19 +145,29 @@ class Settings:
         if normalized in PLACEHOLDER_SECRET_VALUES or normalized.startswith("replace-with-"):
             raise RuntimeError(f"Production object storage {label} must not use a placeholder or default value.")
 
-    def _validate_gate_password_hash(self, value: str) -> None:
+    def _validate_password_hash(self, label: str, value: str) -> None:
         if len(value) != 64:
-            raise RuntimeError("APP_GATE_PASSWORD_HASH must be a SHA-256 hex digest.")
+            raise RuntimeError(f"{label} must be a SHA-256 hex digest.")
         try:
             int(value, 16)
         except ValueError as exc:
-            raise RuntimeError("APP_GATE_PASSWORD_HASH must be a SHA-256 hex digest.") from exc
+            raise RuntimeError(f"{label} must be a SHA-256 hex digest.") from exc
 
     def is_gate_enabled(self) -> bool:
-        return bool(self.gate_password or self.gate_password_hash)
+        return bool(self.user_password or self.user_password_hash or self.admin_password or self.admin_password_hash)
+
+    def is_admin_account_enabled(self) -> bool:
+        return bool(self.admin_password or self.admin_password_hash)
 
     def effective_session_secret(self) -> str:
-        seed = self.session_secret or self.gate_password or self.gate_password_hash or "dev-session"
+        seed = (
+            self.session_secret
+            or self.user_password
+            or self.user_password_hash
+            or self.admin_password
+            or self.admin_password_hash
+            or "dev-session"
+        )
         return hashlib.sha256(f"{seed}:ruyi-session".encode("utf-8")).hexdigest()
 
     def is_image_provider_configured(self) -> bool:

@@ -46,8 +46,12 @@ APP_S3_PUBLIC_ENDPOINT_URL=http://127.0.0.1:9000
 APP_S3_BUCKET=ruyi-dream
 APP_S3_ACCESS_KEY_ID=admin
 APP_S3_SECRET_ACCESS_KEY=change-me
-APP_GATE_PASSWORD=local-dev-password
-APP_GATE_PASSWORD_HASH=
+APP_USER_USERNAME=user
+APP_USER_PASSWORD=local-user-password
+APP_USER_PASSWORD_HASH=
+APP_ADMIN_USERNAME=admin
+APP_ADMIN_PASSWORD=local-admin-password
+APP_ADMIN_PASSWORD_HASH=
 APP_SESSION_SECRET=local-dev-session-secret-change-me
 APP_SESSION_TTL_SECONDS=43200
 APP_SESSION_COOKIE_SECURE=false
@@ -56,7 +60,7 @@ APP_TRUST_REVERSE_PROXY_AUTH=false
 BACKEND_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 ```
 
-`APP_GATE_PASSWORD` 是打开前端工作台时输入的访问密码。本地如果不想启用登录页，可以留空 `APP_GATE_PASSWORD` 和 `APP_GATE_PASSWORD_HASH`；如果要模拟生产门禁，就设置 `APP_GATE_PASSWORD`，同时设置一段较长的 `APP_SESSION_SECRET`。
+`APP_USER_PASSWORD` 和 `APP_ADMIN_PASSWORD` 是固定 `user` / `admin` 两个账号的登录密码。本地如果不想启用登录页，可以留空两套账号的 password/hash；如果要模拟生产门禁，就设置这两个密码，同时设置一段较长的 `APP_SESSION_SECRET`。
 
 `APP_SESSION_COOKIE_SECURE=false` 适用于本地 HTTP。只有当前端通过 HTTPS 访问时，才应设置为 `true`。
 
@@ -94,7 +98,7 @@ npm install
 npm run dev
 ```
 
-前端本地 dev server 会读取项目根目录 `.env`，并自动把 `PUBLIC_BACKEND_URL` 映射为 `VITE_API_BASE_URL`。本地如需模拟生产门禁，设置 `APP_GATE_PASSWORD` 后通过登录页进入；`APP_API_ACCESS_TOKEN` 不会自动注入前端静态包。
+前端本地 dev server 会读取项目根目录 `.env`，并自动把 `PUBLIC_BACKEND_URL` 映射为 `VITE_API_BASE_URL`。本地如需模拟生产门禁，设置 `APP_USER_PASSWORD` / `APP_ADMIN_PASSWORD` 后通过登录页进入；`APP_API_ACCESS_TOKEN` 不会自动注入前端静态包。
 
 默认访问：
 

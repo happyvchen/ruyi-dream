@@ -21,6 +21,8 @@ ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + 
 
 直接依赖见 `requirements.txt`，传递依赖约束见 `requirements.constraints.txt`。不要预先引入复杂 SaaS 权限、多租户、计费、队列集群。
 
+访问控制当前使用固定 `user` / `admin` 双账号框架，不建立用户表、权限组或租户模型。本阶段两个角色访问同一套普通拍摄工作台；新增 admin 能力必须以“admin UI/UX 大于等于 user”为前提，并在后端按 session role 做权限判断。
+
 ## 文档索引 (Index)
 
 | 文件 | 内容 | 何时需要读 |
@@ -54,6 +56,7 @@ ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + 
 - 不擅自删除、覆盖、移动用户素材和生成结果。
 - 删除/归档实现必须遵守 `../design/04_implementation_guide/archive_purge_policy.md`：默认归档，彻底删除先做影响预检，媒体文件按引用计数释放。
 - MVP 不做多租户、复杂权限、计费、模板市场。
+- 不把固定双账号框架扩展成注册、邀请、成员管理或复杂 RBAC，除非产品范围明确升级。
 - 不把 `.venv/`、`__pycache__/`、`data/`、`storage/` 运行产物当作业务源码或设计依据。
 - 新增后端文档或目录时更新本文件索引。
 

@@ -123,7 +123,7 @@ APP_S3_FORCE_PATH_STYLE=false
 - 后端裸跑同样读取根目录 `.env`；`backend/.env.local` 仅允许作为本机临时覆盖文件，不作为共享配置源。
 - `.env` 不提交 Git，生产必须使用强随机 `APP_S3_ACCESS_KEY_ID` / `APP_S3_SECRET_ACCESS_KEY`；即使默认 RustFS 部署也使用这组通用 S3 命名。
 - 生产环境设置 `APP_ENV=production`；后端启动时会拒绝缺失或默认对象存储密钥。
-- 生产环境必须设置 `APP_GATE_PASSWORD` 或 `APP_GATE_PASSWORD_HASH`，并设置 `APP_SESSION_SECRET` 作为 MVP single-password app gate；如果访问控制由 HTTPS 反向代理或企业网关完成，则必须显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。
+- 生产环境必须设置固定账号密码或 hash：`APP_USER_PASSWORD_HASH` / `APP_ADMIN_PASSWORD_HASH`，并设置 `APP_SESSION_SECRET`；如果访问控制由 HTTPS 反向代理或企业网关完成，则必须显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。
 - `APP_SESSION_COOKIE_SECURE` 在 HTTPS 部署中应设置为 `true`；本地或 HTTP 测试环境才允许为 `false`。
 - 轮换访问密码时，如果需要立即踢出所有已登录浏览器，必须同步轮换 `APP_SESSION_SECRET`。
 - `APP_API_ACCESS_TOKEN` 只作为脚本/运维调用的可选 fallback，不作为浏览器前端门禁，也不注入前端静态包。

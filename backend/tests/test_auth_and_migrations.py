@@ -19,7 +19,8 @@ class BackendSmokeTests(unittest.TestCase):
             {
                 "APP_S3_ACCESS_KEY_ID": "test-access-key",
                 "APP_S3_SECRET_ACCESS_KEY": "test-secret-key",
-                "APP_GATE_PASSWORD": "letmein-123456",
+                "APP_USER_PASSWORD": "letmein-123456",
+                "APP_ADMIN_PASSWORD": "admin-letmein-123456",
                 "APP_SESSION_SECRET": "session-secret-123",
             }
         )
@@ -111,15 +112,22 @@ class BackendSmokeTests(unittest.TestCase):
         config = importlib.import_module("app.config")
         config.get_settings.cache_clear()
         main = importlib.import_module("app.main")
-        client = TestClient(main.app)
+        with patch.object(main, "ensure_bucket", return_value=None), TestClient(main.app) as client:
+            self.assertEqual(client.get("/api/auth/session").json(), {"authRequired": True, "authenticated": False, "role": None})
+            self.assertEqual(client.get("/api/garment-skus").status_code, 401)
+            self.assertEqual(client.post("/api/auth/login", json={"password": "bad"}).status_code, 401)
+            login = client.post("/api/auth/login", json={"password": "letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            self.assertEqual(login.json()["role"], "user")
+            self.assertIn("set-cookie", login.headers)
+            self.assertEqual(client.get("/api/auth/session").json(), {"authRequired": True, "authenticated": True, "role": "user"})
 
-        self.assertEqual(client.get("/api/auth/session").json(), {"authRequired": True, "authenticated": False})
-        self.assertEqual(client.get("/api/garment-skus").status_code, 401)
-        self.assertEqual(client.post("/api/auth/login", json={"password": "bad"}).status_code, 401)
-        login = client.post("/api/auth/login", json={"password": "letmein-123456"})
-        self.assertEqual(login.status_code, 200)
-        self.assertIn("set-cookie", login.headers)
-        self.assertEqual(client.get("/api/auth/session").json(), {"authRequired": True, "authenticated": True})
+            self.assertEqual(client.post("/api/auth/login", json={"username": "admin", "password": "letmein-123456"}).status_code, 401)
+            admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(admin_login.status_code, 200)
+            self.assertEqual(admin_login.json()["role"], "admin")
+            self.assertEqual(client.get("/api/auth/session").json(), {"authRequired": True, "authenticated": True, "role": "admin"})
+            self.assertEqual(client.get("/api/garment-skus").status_code, 200)
 
     def test_presigned_urls_are_signed_with_public_s3_endpoint(self) -> None:
         object_storage = importlib.import_module("app.object_storage")

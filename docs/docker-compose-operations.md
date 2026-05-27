@@ -36,8 +36,12 @@ cp .env.example .env
 APP_S3_ACCESS_KEY_ID=<random-access-key>
 APP_S3_SECRET_ACCESS_KEY=<random-secret-key>
 APP_ENV=production
-APP_GATE_PASSWORD=<random-app-password>
-APP_GATE_PASSWORD_HASH=
+APP_USER_USERNAME=user
+APP_USER_PASSWORD=<random-user-password>
+APP_USER_PASSWORD_HASH=
+APP_ADMIN_USERNAME=admin
+APP_ADMIN_PASSWORD=<random-admin-password>
+APP_ADMIN_PASSWORD_HASH=
 APP_SESSION_SECRET=<random-session-signing-secret>
 APP_SESSION_TTL_SECONDS=43200
 APP_SESSION_COOKIE_SECURE=true
@@ -101,12 +105,12 @@ APP_S3_SECRET_ACCESS_KEY=<secret-access-key>
 
 默认 `.env.example` 通过 `COMPOSE_FILE=docker-compose.yml:docker-compose.rustfs.yml` 启动本机 RustFS。改成 `COMPOSE_FILE=docker-compose.yml` 后，Compose 不会创建 RustFS 服务。
 
-如果已经由 HTTPS 反向代理或企业网关完成访问控制，可不设置内置门禁密码，但生产环境必须显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。`APP_API_ACCESS_TOKEN` 只用于脚本/运维调用，不作为浏览器前端门禁。
+如果已经由 HTTPS 反向代理或企业网关完成访问控制，可不设置内置账号密码，但生产环境必须显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。`APP_API_ACCESS_TOKEN` 只用于脚本/运维调用，不作为浏览器前端门禁。
 
 门禁配置说明：
 
-- `APP_GATE_PASSWORD` 是浏览器进入工作台时输入的访问密码，生产环境必须使用强随机密码。
-- `APP_GATE_PASSWORD_HASH` 可替代明文密码，当前格式为 SHA-256 hex digest；即便使用 hash，也要保证原始密码足够强。
+- `APP_USER_PASSWORD` / `APP_ADMIN_PASSWORD` 分别是固定 `user` / `admin` 账号的登录密码，生产环境必须使用不同的强随机密码。
+- `APP_USER_PASSWORD_HASH` / `APP_ADMIN_PASSWORD_HASH` 可替代明文密码，当前格式为 SHA-256 hex digest；即便使用 hash，也要保证原始密码足够强。
 - `APP_SESSION_SECRET` 用于签名登录 session，必须是另一段强随机密钥。
 - `APP_SESSION_COOKIE_SECURE=true` 只适用于 HTTPS。如果测试环境仍是 HTTP，应暂时设为 `false`。
 - 如果要轮换访问密码并强制所有已登录浏览器重新登录，需要同时轮换 `APP_SESSION_SECRET` 并重启后端。
@@ -287,7 +291,7 @@ docker compose logs --tail=200 rustfs
 - 默认 provider 为 `toapis` 时，`TOAPIS_API_KEY` 未配置会导致真实生图任务失败。
 - provider 切到 `fal` 时，`FAL_KEY` 未配置会导致真实生图任务失败。
 - `GEMINI_API_KEY` 未配置，AI Stylist 选搭和搭配服饰打标会失败。
-- `APP_ENV=production` 但没有设置 `APP_GATE_PASSWORD` / `APP_GATE_PASSWORD_HASH`，且没有显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。
+- `APP_ENV=production` 但没有设置固定账号密码/hash，且没有显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。
 - 启用内置门禁但没有设置 `APP_SESSION_SECRET`。
 
 针对实际部署中遇到的典型日志：
@@ -332,7 +336,7 @@ curl http://127.0.0.1:8000/api/health
 
 ## 安全和暴露面
 
-- 内网试点可以直接暴露 `5173/8000/9000/9001`，但生产环境至少启用 single-password app gate 或由反向代理完成访问控制。
+- 内网试点可以直接暴露 `5173/8000/9000/9001`，但生产环境至少启用固定账号 app gate 或由反向代理完成访问控制。
 - 对公网开放时，应放到 HTTPS 反向代理后面，并限制 RustFS Console 访问。
 - 不要公开 RustFS bucket。
 - 不要把 `.env`、数据库、对象数据目录提交到 Git。

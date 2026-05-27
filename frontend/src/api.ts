@@ -1,5 +1,13 @@
 export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'
 
+export type SessionRole = 'user' | 'admin'
+
+export type AuthSession = {
+  authRequired: boolean
+  authenticated: boolean
+  role?: SessionRole | null
+}
+
 export type Paginated<T> = {
   items: T[]
   limit: number
@@ -218,9 +226,9 @@ export function mediaUrl(url?: string | null) {
 }
 
 export const api = {
-  session: () => request<{ authRequired: boolean; authenticated: boolean }>('/api/auth/session'),
+  session: () => request<AuthSession>('/api/auth/session'),
   login: (username: string, password: string) =>
-    request<{ authRequired: boolean; authenticated: boolean }>('/api/auth/login', {
+    request<AuthSession>('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     }),

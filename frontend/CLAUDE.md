@@ -22,6 +22,8 @@ UX 源头在 `../design/03_ux_guide/user_uiux.md`，本目录只管“前端怎�
 
 当前未引入 Tailwind、React Query、Zustand。不要为了“规范化”提前引入复杂状态库或后台管理框架。
 
+访问身份当前由固定 `user` / `admin` 双账号区分，但本阶段两个角色展示同一套普通拍摄工作台。后续 admin 新增模块必须以“admin UI/UX 大于等于 user”为原则追加，不削减 user 已有工作流；不要在本阶段引入完整后台管理框架、用户管理系统或复杂 RBAC。
+
 ## 文档索引 (Index)
 
 | 文件 | 内容 | 何时需要读 |
@@ -46,6 +48,7 @@ UX 源头在 `../design/03_ux_guide/user_uiux.md`，本目录只管“前端怎�
 - 前端实现前先读 `../design/03_ux_guide/CLAUDE.md`。
 - 接口联调前先读 `../backend/api_guideline.md`、`../backend/domain_model.md`。
 - 默认不展示 prompt、Image 2 任务包、StylingPlan JSON、策划器细节、底层模型名称和调用详情。
+- 后续技术人员配置、provider 状态和调试入口只能作为 admin 的增量模块接入，不混入 user 体验，也不能替代普通拍摄工作台。
 - 生成记录主视图展示进入过 AI 阶段的 `GenerationTask`，不要退回事件日志流水账。
 - 删除入口默认呈现为“归档”；用户勾选彻底删除时必须展示后端影响预检结果，说明关联记录和文件会被不可恢复地删除。
 - 核心业务对象切换要同步 URL；临时草稿、弹窗、折叠状态不要写入 URL。

@@ -286,9 +286,9 @@ function LoginPage({ onAuthed }: { onAuthed: () => void }) {
       <form className="login-card" onSubmit={submit}>
         <div className="login-logo"><Sparkles size={22} /> Ruyi-Dream</div>
         <h1>AI 数字化摄影棚</h1>
-        <p>{showDemoLogin ? '保护性入口。当前演示账号为 user / password。' : '保护性入口。请输入管理员提供的访问凭据。'}</p>
-        <label>用户名<input value={username} onChange={(e) => setUsername(e.target.value)} /></label>
-        <label>密码<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} /></label>
+        <p>{showDemoLogin ? '保护性入口。当前演示账号为 user / password 或 admin / password。' : '保护性入口。请输入管理员提供的访问凭据。'}</p>
+        <label>用户名<input autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} /></label>
+        <label>密码<input autoComplete="current-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} /></label>
         {error && <div className="form-error">{error}</div>}
         <button className="primary wide" disabled={busy}>{busy ? <Loader2 className="spin" size={16} /> : <Shield size={16} />} 登录</button>
       </form>

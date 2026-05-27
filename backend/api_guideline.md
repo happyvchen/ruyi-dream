@@ -8,18 +8,28 @@
 
 ## 访问控制
 
-`/api/health` 保持匿名访问，用于容器和反向代理健康检查。生产环境默认使用 single-password app gate：
+`/api/health` 保持匿名访问，用于容器和反向代理健康检查。生产环境默认使用固定账号 app gate：
 
-- 后端通过 `APP_GATE_PASSWORD` 或 `APP_GATE_PASSWORD_HASH` 校验访问密码。
-- 登录成功后签发 `HttpOnly`、`SameSite=Lax` 的 `ruyi_session` cookie。
+- 后端通过固定 `user` / `admin` 两类账号保留角色身份；当前两个角色访问同一套业务工作台 API。
+- 推荐显式配置 `APP_USER_PASSWORD_HASH` 和 `APP_ADMIN_PASSWORD_HASH`；开发环境可用明文密码变量，生产环境必须使用足够强的凭据和 `APP_SESSION_SECRET`。
+- 登录成功后签发 `HttpOnly`、`SameSite=Lax` 的 `ruyi_session` cookie，签名 payload 中包含 `role=user|admin`。
 - 前端只保存短期 session cookie，不把部署密码或长期 token 编译进静态资源。
+
+固定账号配置：
+
+| 环境变量 | 说明 |
+|---|---|
+| `APP_USER_USERNAME` | 普通用户账号名，默认 `user` |
+| `APP_USER_PASSWORD` / `APP_USER_PASSWORD_HASH` | 普通用户密码或 SHA-256 hash |
+| `APP_ADMIN_USERNAME` | 技术账号名，默认 `admin` |
+| `APP_ADMIN_PASSWORD` / `APP_ADMIN_PASSWORD_HASH` | 技术账号密码或 SHA-256 hash |
 
 认证接口：
 
 | Resource | Method | 说明 |
 |---|---|---|
-| `/api/auth/session` | GET | 查询是否需要门禁和当前是否已登录 |
-| `/api/auth/login` | POST | 提交 `{ "password": "..." }` 并写入 session cookie |
+| `/api/auth/session` | GET | 查询是否需要门禁、当前是否已登录和当前 `role` |
+| `/api/auth/login` | POST | 提交 `{ "username": "user|admin", "password": "..." }` 并写入 session cookie |
 | `/api/auth/logout` | POST | 清理 session cookie |
 
 `APP_API_ACCESS_TOKEN` 只作为脚本/运维调用的可选 fallback。配置后可携带任一请求头：
@@ -29,7 +39,9 @@ X-Ruyi-Access-Token: <token>
 Authorization: Bearer <token>
 ```
 
-生产环境必须配置 `APP_GATE_PASSWORD` 或 `APP_GATE_PASSWORD_HASH`，并配置 `APP_SESSION_SECRET`；如果外部反向代理/企业网关已经完成访问控制，可显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true` 跳过内置门禁。
+携带有效 `APP_API_ACCESS_TOKEN` 或启用 `APP_TRUST_REVERSE_PROXY_AUTH=true` 的请求按 `admin` 角色处理。生产环境必须配置至少一个固定账号并配置 `APP_SESSION_SECRET`；如果外部反向代理/企业网关已经完成访问控制，可显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true` 跳过内置门禁。
+
+MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。后续 SaaS 化时，固定 role 可迁移为数据库用户和 RBAC。当前产品约束是 admin UI/UX 必须大于等于 user：本阶段两者页面一致，后续 admin-only 能力只能作为增量能力追加。
 
 ## 当前资源
 
