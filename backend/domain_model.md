@@ -41,7 +41,9 @@ MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂�
 - 通过 `StylingGarmentImage` 关联 1-6 张图片，排序第一张作为封面和主要参考图。
 - 导入后由前端默认触发 `/save-and-tag`，服务端进入 `TAGGING_RUNNING` 并调用 Gemini 打标。
 - 只有 `READY` 且未被人工标签标记 `do_not_use_for_styling` 的服饰进入智能选搭候选。
-- 默认删除为归档：写入 `DELETED/deleted_at`，不影响已冻结的历史生成快照。
+- 默认删除为归档：写入 `archived_at/archive_reason`，不影响已冻结的历史生成快照。
+- 彻底删除必须先做影响预检；如果历史生成任务选中过该服饰，会同时删除依赖任务、结果和已登记对象文件。
+- 单张图片移除或替换后，后端按引用计数释放不再被关系表或历史快照引用的 `MediaAsset`、原图、预览图和缩略图。
 
 状态：
 
@@ -52,7 +54,7 @@ MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂�
 | `TAGGING_READY` | 标签已生成但需要复核，不进入智能选搭候选 |
 | `READY` | 可进入智能选搭候选 |
 | `TAGGING_FAILED` | 打标失败，保留素材但不参与选搭 |
-| `DELETED` | 已归档，日常列表隐藏 |
+| `DELETED` | 旧兼容语义；新版归档使用 `archived_at`，日常列表隐藏 |
 
 ### 3.2 GenerationTask
 
@@ -61,11 +63,13 @@ AI 摄影棚中的一次主推款拍摄任务。
 当前职责：
 
 - 创建后先处于 `DRAFT`；AI 前允许修改任务名、追加/替换/移除/排序主推款图片，确认后进入 `READY_FOR_STYLING`。
+- 草稿期主推款图片移除或替换会释放无引用媒体文件；进入 AI 阶段后，输入图片冻结在 `GenerationTaskInputVersion`，不能再单独修改。
 - 点击智能选搭时创建 `GenerationTaskInputVersion`，同时冻结主推款图片和当前默认数字模特快照。
 - 通过 `GenerationStyling` 保存候选漏斗快照、完整 `StylingPlan`、选中 ID、选中服饰快照、Aesthetic Critic 诊断、质量信号、被拒方案、评分、理由和 warnings。
 - 预览阶段基于 `StylingPlan` 生成 6 条 `GenerationShotPlan`，并保存一张 3x2 六宫格 `GenerationPreview`。
 - 最终阶段创建 `GenerationResultSet`，并按前 5 条 ShotPlan 并发生成 `GenerationResultImage`。
 - 预览和最终生成只读取冻结的主推款、搭配服饰和数字模特输入；最终单图失败通过单张重试恢复。成功后是否允许重新选搭、重新预览或再次生成整组仍是产品决策项，当前代码暂时允许并保留历史结果用于追溯。
+- 生成记录默认删除为归档：写入 `archived_at/archive_reason`，默认列表隐藏但保留所有数据和对象文件。彻底删除会删除任务、输入版本、StylingPlan、ShotPlan、预览、结果、attempt 和已登记对象文件。
 
 ### 3.3 GenerationAttempt
 

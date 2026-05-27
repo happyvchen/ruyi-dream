@@ -47,6 +47,7 @@ UX 源头在 `../design/03_ux_guide/user_uiux.md`，本目录只管“前端怎�
 - 接口联调前先读 `../backend/api_guideline.md`、`../backend/domain_model.md`。
 - 默认不展示 prompt、Image 2 任务包、StylingPlan JSON、策划器细节、底层模型名称和调用详情。
 - 生成记录主视图展示进入过 AI 阶段的 `GenerationTask`，不要退回事件日志流水账。
+- 删除入口默认呈现为“归档”；用户勾选彻底删除时必须展示后端影响预检结果，说明关联记录和文件会被不可恢复地删除。
 - 核心业务对象切换要同步 URL；临时草稿、弹窗、折叠状态不要写入 URL。
 - 页面语言使用摄影和电商语言：首图、全身、半身、背面、局部、重生、导出。
 - 不把 MVP 做成复杂 SaaS 后台。

@@ -29,6 +29,7 @@ ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + 
 | `api_guideline.md` | 当前 API 契约：路由、资源、任务状态、错误处理 | 设计接口或前后端联调前 |
 | `domain_model.md` | 当前 MVP 实际业务对象、Domain 边界、对象关系、对象存储布局 | 理解业务建模或新增后端模块前 |
 | `database_schema.md` | 当前 SQLite 表结构、字段说明、关系图、后续候选表 | 修改数据库、写迁移或排查数据问题前 |
+| `../design/04_implementation_guide/archive_purge_policy.md` | 归档、彻底删除、媒体引用计数和 OSS 清理策略 | 修改删除、归档、批量清理、媒体替换时 |
 | `requirements.txt` / `requirements.constraints.txt` | Python 直接依赖与传递依赖约束 | 安装、升级依赖时 |
 | `app/` | FastAPI 后端源码 | 修改后端实现时 |
 | `scripts/` | 一次性维护脚本，如媒体衍生图元数据补齐 | 修复历史数据或运维补数时 |
@@ -51,6 +52,7 @@ ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + 
 - 修改业务对象前先读 `domain_model.md`；修改表结构前先读 `database_schema.md`。
 - 不把品牌策略、Pose 选择、图位规划写死在 prompt 字符串里，应有结构化 task package。
 - 不擅自删除、覆盖、移动用户素材和生成结果。
+- 删除/归档实现必须遵守 `../design/04_implementation_guide/archive_purge_policy.md`：默认归档，彻底删除先做影响预检，媒体文件按引用计数释放。
 - MVP 不做多租户、复杂权限、计费、模板市场。
 - 不把 `.venv/`、`__pycache__/`、`data/`、`storage/` 运行产物当作业务源码或设计依据。
 - 新增后端文档或目录时更新本文件索引。
