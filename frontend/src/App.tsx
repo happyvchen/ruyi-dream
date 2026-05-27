@@ -759,6 +759,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
   const [deleteGarmentImpact, setDeleteGarmentImpact] = useState<DeleteImpact | null>(null)
   const [deleteGarmentImpactLoading, setDeleteGarmentImpactLoading] = useState(false)
   const selectableGarmentIds = items.filter((item) => item.status !== 'TAGGING_RUNNING').map((item) => item.id)
+  const selectedVisibleGarments = items.filter((item) => selectedGarmentIds.has(item.id) && selectableGarmentIds.includes(item.id))
   const allVisibleGarmentsSelected = selectableGarmentIds.length > 0 && selectableGarmentIds.every((id) => selectedGarmentIds.has(id))
 
   async function openDetail(item: StylingGarment) {
@@ -805,7 +806,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
     }
   }, [garments, offset, query, includeArchived, pageSize])
 
-  useEffect(() => setSelectedGarmentIds(new Set()), [offset, includeArchived, query])
+  useEffect(() => setSelectedGarmentIds(new Set()), [offset, includeArchived, query, pageSize])
 
   useEffect(() => {
     if (!detail) return
@@ -882,9 +883,9 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
             <label><input type="checkbox" checked={allVisibleGarmentsSelected} disabled={!selectableGarmentIds.length} onChange={(event) => toggleVisibleGarmentSelection(event.target.checked)} /> 全选本页</label>
           </div>
           <div className="record-list-meta">
-            {selectedGarmentIds.size > 0 && (
-              <button className="secondary" onClick={() => openGarmentDeleteDialog(items.filter((item) => selectedGarmentIds.has(item.id)))}>
-                归档 {selectedGarmentIds.size} 项
+            {selectedVisibleGarments.length > 0 && (
+              <button className="secondary" onClick={() => openGarmentDeleteDialog(selectedVisibleGarments)}>
+                归档 {selectedVisibleGarments.length} 项
               </button>
             )}
             <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 套` : '0 套'}</span>
@@ -1344,6 +1345,7 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
   const [deleteRecordImpactLoading, setDeleteRecordImpactLoading] = useState(false)
   const [pageSize, setPageSize] = useState(12)
   const selectableRecordIds = items.filter((item) => !isTaskRunning(item)).map((item) => item.id)
+  const selectedVisibleRecords = items.filter((item) => selectedRecordIds.has(item.id) && selectableRecordIds.includes(item.id))
   const allVisibleRecordsSelected = selectableRecordIds.length > 0 && selectableRecordIds.every((id) => selectedRecordIds.has(id))
 
   function refreshRecordPage(targetOffset = offset) {
@@ -1369,7 +1371,7 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
     return () => { cancelled = true }
   }, [records, offset, includeArchived, pageSize])
 
-  useEffect(() => setSelectedRecordIds(new Set()), [offset, includeArchived])
+  useEffect(() => setSelectedRecordIds(new Set()), [offset, includeArchived, pageSize])
 
   function openRecord(item: GenerationTask) {
     void run('读取记录中...', () => api.getRecord(item.id, false), (r: { item: GenerationTask }) => setDetail(r.item))
@@ -1407,9 +1409,8 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
   }
 
   function runRecordBatchAction() {
-    const ids = Array.from(selectedRecordIds)
-    if (!ids.length) return
-    openRecordDeleteDialogForItems(items.filter((item) => selectedRecordIds.has(item.id)))
+    if (!selectedVisibleRecords.length) return
+    openRecordDeleteDialogForItems(selectedVisibleRecords)
   }
 
   function openRecordDeleteDialogForItems(targets: GenerationTask[]) {
@@ -1460,9 +1461,9 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
               <label><input type="checkbox" checked={allVisibleRecordsSelected} disabled={!selectableRecordIds.length} onChange={(event) => toggleVisibleRecordSelection(event.target.checked)} /> 全选本页</label>
             </div>
             <div className="record-list-meta">
-              {selectedRecordIds.size > 0 && (
+              {selectedVisibleRecords.length > 0 && (
                 <button className="secondary" onClick={runRecordBatchAction}>
-                  归档 {selectedRecordIds.size} 项
+                  归档 {selectedVisibleRecords.length} 项
                 </button>
               )}
               <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 条` : '0 条'}</span>
