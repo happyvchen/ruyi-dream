@@ -228,7 +228,7 @@ export function App() {
       <main className="workspace">
         {error && <div className="toast">{error}</div>}
         {busy && <div className="busy"><Loader2 size={16} className="spin" />{busy}</div>}
-        {page === 'studio' && <StudioPage task={task} setTask={setTask} tasks={tasks} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
+        {page === 'studio' && <StudioPage task={task} setTask={setTask} records={records} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
         {page === 'library' && <LibraryPage garments={garments} run={run} />}
         {page === 'model' && <ModelPage models={models} />}
         {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} run={run} />}
@@ -278,38 +278,28 @@ function LoginPage({ onAuthed }: { onAuthed: () => void }) {
   )
 }
 
-function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
+function StudioPage({ task, setTask, records, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask | null) => void
-  tasks: GenerationTask[]
+  records: GenerationTask[]
   run: <T>(label: string, action: () => Promise<T>, after?: (value: T) => void) => Promise<T | undefined>
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
 }) {
   const [step, setStep] = useState<StudioStep>(0)
-  const [taskItems, setTaskItems] = useState<GenerationTask[]>(tasks.slice(0, 5))
-  const [taskOffset, setTaskOffset] = useState(0)
-  const [taskTotal, setTaskTotal] = useState(0)
-  const [taskTotalPages, setTaskTotalPages] = useState(0)
-  const [recentTaskPageSize, setRecentTaskPageSize] = useState(20)
-  const [tasksLoading, setTasksLoading] = useState(false)
+  const [taskItems, setTaskItems] = useState<GenerationTask[]>(records.slice(0, 10))
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
   useEffect(() => setStep(currentStep), [task?.id, task?.status])
   useEffect(() => {
     let cancelled = false
-    setTasksLoading(true)
-    void api.listTasks({ limit: recentTaskPageSize, offset: taskOffset }).then((result) => {
+    void api.listRecords({ limit: 10, offset: 0 }).then((result) => {
       if (cancelled) return
       setTaskItems(result.items)
-      setTaskTotal(result.total)
-      setTaskTotalPages(result.totalPages)
-    }).catch(() => undefined).finally(() => {
-      if (!cancelled) setTasksLoading(false)
-    })
+    }).catch(() => undefined)
     return () => { cancelled = true }
-  }, [tasks, taskOffset, recentTaskPageSize])
+  }, [records])
   useEffect(() => {
     if (!task || !['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)) return
     const timer = window.setInterval(() => {
@@ -317,16 +307,6 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
     }, 1500)
     return () => window.clearInterval(timer)
   }, [task?.id, task?.status, setTask])
-
-  function refreshRecentTasks(targetOffset = taskOffset) {
-    return api.listTasks({ limit: recentTaskPageSize, offset: targetOffset }).then((result) => {
-      setTaskItems(result.items)
-      setTaskTotal(result.total)
-      setTaskTotalPages(result.totalPages)
-      if (!result.items.length && targetOffset > 0) setTaskOffset(Math.max(0, targetOffset - recentTaskPageSize))
-    })
-  }
-
   return (
     <section className="page">
       <PageTitle title="AI 摄影棚" subtitle="上传主推款，让系统选搭配角服饰并生成电商棚拍成片。" />
@@ -354,26 +334,13 @@ function StudioPage({ task, setTask, tasks, run, localOperations, startLocalOper
           <div className="mini-list">
             {taskItems.map((item) => (
               <div key={item.id} className={`mini-row view-only ${task?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
-                <button onClick={() => void api.getTask(item.id).then((r) => setTask(r.item))}>
+                <button onClick={() => void api.getRecord(item.id).then((r) => setTask(r.item))}>
                   <span>{item.name}</span><em>{item.archivedAt ? '已删除' : statusText(item.status)}</em>
                 </button>
               </div>
             ))}
-            {!taskItems.length && <EmptyState title="暂无任务" text="新建拍摄任务后会出现在这里。" />}
+            {!taskItems.length && <EmptyState title="暂无任务" text="进入 AI 阶段的任务会出现在这里。" />}
           </div>
-          <PaginationControls
-            compact
-            disabled={tasksLoading}
-            offset={taskOffset}
-            pageSize={recentTaskPageSize}
-            total={taskTotal}
-            totalPages={taskTotalPages}
-            onOffsetChange={setTaskOffset}
-            onPageSizeChange={(value) => {
-              setRecentTaskPageSize(value)
-              setTaskOffset(0)
-            }}
-          />
         </aside>
       </div>
     </section>
@@ -1416,7 +1383,7 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
               />
               <button className="record-open" aria-current={detail?.id === item.id ? 'true' : undefined} title="查看记录详情" onClick={() => openRecord(item)}>
                 <AssetThumb asset={item.summary?.cover ?? null} interactive={false} />
-                <div><strong>{item.name}</strong><span>{item.archivedAt ? '已删除' : statusText(item.status)} · {dateText(item.updatedAt)}</span></div>
+                <div><strong>{item.name}</strong><span>{item.archivedAt ? '已删除' : statusText(item.status)} · {dateText(item.createdAt)}</span></div>
                 <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
                 <span className="record-eye" aria-hidden="true"><Eye size={16} /></span>
               </button>
