@@ -617,6 +617,7 @@ function PreviewStep({ task, setTask, run, localOperations, startLocalOperation,
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
 }) {
+  const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const canPreview = (
     !!task?.styling && ['STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL'].includes(task?.status ?? '')
   ) || (task?.status === 'FAILED' && !!task.styling && !task.preview)
@@ -626,7 +627,11 @@ function PreviewStep({ task, setTask, run, localOperations, startLocalOperation,
     <div className="step-panel">
       <div className="step-copy"><h2>六宫格预览</h2><p>只显示一张 3x2 预览图。最终固定生成前 5 格，第 6 格忽略。</p></div>
       <AIOperationList operations={operations} />
-      {task?.preview?.asset ? <img className="preview-board" src={mediaUrl(assetPreviewSrc(task.preview.asset))} /> : <EmptyState title="尚未生成六宫格" text="点击生成预览后，系统会输出一张 3x2 分镜预览图。" />}
+      {task?.preview?.asset ? (
+        <button className="preview-board-open" onClick={() => task.preview?.asset && setViewer(assetLightboxImage(task.preview.asset))} title="放大查看">
+          <img className="preview-board" src={mediaUrl(assetPreviewSrc(task.preview.asset))} />
+        </button>
+      ) : <EmptyState title="尚未生成六宫格" text="点击生成预览后，系统会输出一张 3x2 分镜预览图。" />}
       <button className="primary" disabled={!canPreview} onClick={() => task && void run(hasPreview ? '重新生成六宫格预览中...' : '生成六宫格预览中...', () => {
         startLocalOperation({ ownerType: 'generation_preview', ownerId: task.id, provider: 'image-2' })
         setTask({ ...task, status: 'PREVIEW_RUNNING', resultSet: null, activeResultSetId: null })
@@ -637,6 +642,7 @@ function PreviewStep({ task, setTask, run, localOperations, startLocalOperation,
       })}>
         <GalleryVerticalEnd size={16} /> {hasPreview ? '重新生成分镜预览' : '生成预览'}
       </button>
+      {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </div>
   )
 }
@@ -649,7 +655,9 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
 }) {
+  const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const images = task?.resultSet?.images ?? []
+  const finalAssets = images.map((image) => image.asset).filter((asset): asset is MediaAsset => !!asset)
   const canGenerate = !!task?.preview?.asset && ['PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL'].includes(task?.status ?? '')
   const hasFinalImages = images.some((image) => !!image.asset)
   const finalOperations = task ? finalImageOperations(task, localOperations) : []
@@ -660,7 +668,11 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
       <div className="result-grid">
         {images.length ? images.map((image) => (
           <div className="result-card" key={image.id}>
-            {image.asset ? <img src={mediaUrl(assetPreviewSrc(image.asset))} /> : <div className="image-placeholder">{statusText(image.status)}{image.activeAttempt && isAttemptRunning(image.activeAttempt) && <small>{formatDuration(elapsedSeconds(image.activeAttempt.startedAt || image.updatedAt))}</small>}</div>}
+            {image.asset ? (
+              <button className="result-image-open" onClick={() => image.asset && setViewer(assetLightboxImage(image.asset, finalAssets))} title="放大查看">
+                <img src={mediaUrl(assetPreviewSrc(image.asset))} />
+              </button>
+            ) : <div className="image-placeholder">{statusText(image.status)}{image.activeAttempt && isAttemptRunning(image.activeAttempt) && <small>{formatDuration(elapsedSeconds(image.activeAttempt.startedAt || image.updatedAt))}</small>}</div>}
             <div><span>#{image.sortOrder}</span>{image.asset && <a href={mediaUrl(assetOriginalSrc(image.asset))} target="_blank" rel="noreferrer"><Download size={15} /></a>}{image.status === 'FAILED' && <button onClick={() => void run('单张重试中...', () => api.retryResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item))}><RotateCcw size={14} /></button>}</div>
           </div>
         )) : <EmptyState title="尚未生成最终图" text="点击生成成片后会生成前 5 张。" />}
@@ -677,6 +689,7 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
       })}>
         <Sparkles size={16} /> {hasFinalImages ? '重新生成成片' : '生成成片'}
       </button>
+      {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </div>
   )
 }
