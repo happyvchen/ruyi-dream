@@ -4,10 +4,10 @@
 
 ## 适用边界
 
-- 前端、后端、RustFS 由项目根目录 `docker-compose.yml` 管理。
-- SQLite 和 RustFS 数据保存在宿主机 bind mount 目录。
+- 前端、后端由项目根目录 `docker-compose.yml` 管理；本机 RustFS 由可选 `docker-compose.rustfs.yml` 管理。
+- SQLite 保存在宿主机 bind mount 目录；默认 RustFS 部署时，对象数据也保存在宿主机 bind mount 目录。
 - 单客户、单工作空间、单后端进程。
-- 暂不覆盖 Kubernetes、多副本后端、外部数据库或托管对象存储部署。
+- 暂不覆盖 Kubernetes、多副本后端或外部数据库。对象存储默认随 Compose 启动 RustFS；也支持切换到外部 S3 兼容服务。
 
 ## 防火墙和安全组
 
@@ -18,8 +18,8 @@
 | `22` | SSH | 只允许运维 IP |
 | `5173` | 前端 | 试点可公网开放 |
 | `8000` 或自定义 `BACKEND_PORT` | 后端 API | 试点可公网开放，需 app gate |
-| `9000` | RustFS S3 API | 预签名图片需要浏览器可访问；优先限制来源 |
-| `9001` | RustFS Console | 不建议公网开放 |
+| `9000` | RustFS S3 API | 仅默认 RustFS 部署需要；预签名图片需要浏览器可访问；优先限制来源 |
+| `9001` | RustFS Console | 仅默认 RustFS 部署需要；不建议公网开放 |
 
 后端还需要出站 HTTPS 访问 Gemini 和 fal。
 
@@ -33,8 +33,8 @@ cp .env.example .env
 编辑 `.env`：
 
 ```env
-RUSTFS_ACCESS_KEY=<random-access-key>
-RUSTFS_SECRET_KEY=<random-secret-key>
+APP_S3_ACCESS_KEY_ID=<random-access-key>
+APP_S3_SECRET_ACCESS_KEY=<random-secret-key>
 APP_ENV=production
 APP_GATE_PASSWORD=<random-app-password>
 APP_GATE_PASSWORD_HASH=
@@ -70,14 +70,36 @@ APP_S3_BUCKET=ruyi-dream
 
 bucket 名必须符合 S3 命名规则：3-63 个字符，只用小写字母、数字、短横线和点号；不要用中文、大写、下划线或带空格的值。
 
-当前应用使用 path-style S3：
+默认 RustFS 部署使用 path-style S3：
 
 ```text
-http://rustfs:9000/<bucket>
-http://<PUBLIC_S3_URL>/<bucket>
+宿主机裸跑后端: http://127.0.0.1:9000/<bucket>
+Compose 后端容器: http://rustfs:9000/<bucket>
+浏览器访问预签名 URL: http://<PUBLIC_S3_URL>/<bucket>
 ```
 
 默认部署不要设置 `RUSTFS_SERVER_DOMAINS`。该变量只用于 virtual-host style S3，例如 `http://bucket.s3.example.com`，并要求 DNS、反向代理和 RustFS Host 配置完全匹配。误设置时，后端创建 bucket 可能报 `InvalidBucketName`。
+
+### 使用外部 S3 兼容对象存储
+
+如果对象存储由 OSS、COS、AWS S3、MinIO 集群或其它 S3 兼容服务提供，只需要改 `.env` 中这组配置：
+
+```env
+COMPOSE_FILE=docker-compose.yml
+APP_S3_ENDPOINT_URL=https://<s3-compatible-endpoint>
+APP_S3_PUBLIC_ENDPOINT_URL=https://<browser-reachable-s3-endpoint>
+APP_S3_BUCKET=ruyi-dream-prod
+APP_S3_REGION=<region-or-auto>
+APP_S3_FORCE_PATH_STYLE=false
+APP_S3_ACCESS_KEY_ID=<access-key-id>
+APP_S3_SECRET_ACCESS_KEY=<secret-access-key>
+```
+
+`APP_S3_ENDPOINT_URL` 是后端访问对象存储的地址；`APP_S3_PUBLIC_ENDPOINT_URL` 是预签名图片 URL 使用的浏览器可达地址。两者可以不同，例如后端走云厂商内网 endpoint，浏览器走公网 endpoint 或自定义域名。
+
+`APP_S3_FORCE_PATH_STYLE` 按服务要求设置：RustFS/MinIO 通常为 `true`；要求 virtual-hosted style 的服务设为 `false`。生产建议提前手动创建私有 bucket，并给应用凭证授予该 bucket 的最小读写删列权限。
+
+默认 `.env.example` 通过 `COMPOSE_FILE=docker-compose.yml:docker-compose.rustfs.yml` 启动本机 RustFS。改成 `COMPOSE_FILE=docker-compose.yml` 后，Compose 不会创建 RustFS 服务。
 
 如果已经由 HTTPS 反向代理或企业网关完成访问控制，可不设置内置门禁密码，但生产环境必须显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。`APP_API_ACCESS_TOKEN` 只用于脚本/运维调用，不作为浏览器前端门禁。
 
@@ -255,12 +277,12 @@ docker compose logs --tail=200 rustfs
 
 常见原因：
 
-- `.env` 中 RustFS 账号密码与已有数据目录不一致。
+- `.env` 中对象存储 endpoint、bucket、region、addressing style 或账号密码不匹配；默认 RustFS 部署还要确认账号密码与已有数据目录一致。
 - RustFS bind mount 目录未授权给 UID `10001`，日志包含 `Permission denied`。
 - `deployment/app-data/backend` 未授权给后端容器的 `app` 用户，日志包含无法创建 `/app/data/logs`。
 - RustFS 尚未 ready，等待后端自动重启。
 - 服务器时间不准，S3 签名报 `RequestTimeTooSkewed`。
-- `PUBLIC_S3_URL` 不是浏览器可访问地址，导致图片预览失败。
+- `APP_S3_PUBLIC_ENDPOINT_URL` 或兼容的 `PUBLIC_S3_URL` 不是浏览器可访问地址，导致图片预览失败。
 - `RUSTFS_SERVER_DOMAINS` 被误用于 path-style 部署，后端创建 bucket 时报 `InvalidBucketName`。
 - 默认 provider 为 `toapis` 时，`TOAPIS_API_KEY` 未配置会导致真实生图任务失败。
 - provider 切到 `fal` 时，`FAL_KEY` 未配置会导致真实生图任务失败。
@@ -280,7 +302,7 @@ Bind for 0.0.0.0:8000 failed: port is already allocated
 Production object storage access key must be at least 12 characters.
 ```
 
-替换 `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` 为至少 12 位强随机值。
+替换 `APP_S3_ACCESS_KEY_ID` / `APP_S3_SECRET_ACCESS_KEY` 为至少 12 位强随机值。
 
 ```text
 PermissionError: [Errno 13] Permission denied: '/app/data/logs'

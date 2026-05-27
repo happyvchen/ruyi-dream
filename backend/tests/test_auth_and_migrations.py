@@ -154,6 +154,32 @@ class BackendSmokeTests(unittest.TestCase):
             parse_qs(urlsplit(internal_url).query)["X-Amz-Signature"],
         )
 
+    def test_virtual_hosted_s3_presigned_urls_are_supported(self) -> None:
+        object_storage = importlib.import_module("app.object_storage")
+        object_storage.s3_client.cache_clear()
+        object_storage.presign_s3_client.cache_clear()
+        self.addCleanup(object_storage.s3_client.cache_clear)
+        self.addCleanup(object_storage.presign_s3_client.cache_clear)
+
+        class FakeSettings:
+            s3_endpoint_url = "https://oss-cn-hangzhou-internal.aliyuncs.com"
+            s3_public_endpoint_url = "https://oss-cn-hangzhou.aliyuncs.com"
+            s3_region = "cn-hangzhou"
+            s3_access_key_id = "test-access-key"
+            s3_secret_access_key = "test-secret-key"
+            s3_force_path_style = False
+            s3_bucket = "ruyi-dream-prod"
+            s3_presign_expires_seconds = 900
+
+        with patch.object(object_storage, "get_settings", return_value=FakeSettings):
+            public_url = object_storage.presigned_get_url("uploads/sample.jpg")
+
+        self.assertIsNotNone(public_url)
+        split_url = urlsplit(public_url)
+        self.assertEqual(split_url.scheme, "https")
+        self.assertEqual(split_url.netloc, "ruyi-dream-prod.oss-cn-hangzhou.aliyuncs.com")
+        self.assertEqual(split_url.path, "/uploads/sample.jpg")
+
     def test_media_redirect_is_not_cached_past_presigned_url_ttl(self) -> None:
         from fastapi.testclient import TestClient
 

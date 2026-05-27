@@ -67,7 +67,7 @@ FastAPI Route (app/main.py)
 Docker Compose 中后端使用：
 
 - `/app/data` 挂载到宿主机 `deployment/app-data/backend`，保存 SQLite 和应用日志。
-- `APP_S3_ENDPOINT_URL=http://rustfs:9000`，供容器内部访问 RustFS。
+- `APP_S3_ENDPOINT_URL`，后端访问 S3 兼容对象存储的地址；宿主机裸跑默认 `http://127.0.0.1:9000`，完整 Compose 启用 RustFS 时由 `docker-compose.rustfs.yml` 覆盖为容器内部地址 `http://rustfs:9000`。
 - `APP_S3_PUBLIC_ENDPOINT_URL`，供后端生成对象存储短期预签名 URL；前台默认访问稳定的 `/api/media?...` 路径。
 - `BACKEND_CORS_ORIGINS`，允许前端静态站点访问 API。
 

@@ -36,7 +36,7 @@ cd deployment/rustfs
 cp .env.example .env
 ```
 
-编辑 `.env`，将 `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` 替换为足够长的随机值。`APP_ENV=production` 时，应用会拒绝少于 12 个字符或明显占位符的密钥。
+编辑 `.env`，将 `APP_S3_ACCESS_KEY_ID` / `APP_S3_SECRET_ACCESS_KEY` 替换为足够长的随机值。`APP_ENV=production` 时，应用会拒绝少于 12 个字符或明显占位符的密钥。
 
 当前应用使用 path-style S3 地址，即 `http://rustfs:9000/<bucket>` 和 `http://<public-s3-url>/<bucket>`。不要为默认部署设置 `RUSTFS_SERVER_DOMAINS`；该变量只适用于 virtual-host style，例如 `http://bucket.s3.example.com`，并要求 DNS、反向代理和 RustFS Host 配置完全匹配。
 
@@ -86,7 +86,7 @@ curl -fsS http://localhost:9000/health/live
 set -a
 . ./.env
 set +a
-mc alias set app-rustfs http://localhost:9000 "$RUSTFS_ACCESS_KEY" "$RUSTFS_SECRET_KEY"
+mc alias set app-rustfs http://localhost:9000 "$APP_S3_ACCESS_KEY_ID" "$APP_S3_SECRET_ACCESS_KEY"
 mc mb "app-rustfs/$APP_STORAGE_BUCKET"
 mc ls app-rustfs
 ```
@@ -104,8 +104,8 @@ APP_STORAGE_BUCKET=ruyi-dream
 APP_S3_REGION=auto
 APP_S3_FORCE_PATH_STYLE=true
 APP_S3_PRESIGN_EXPIRES_SECONDS=900
-RUSTFS_ACCESS_KEY=admin
-RUSTFS_SECRET_KEY=replace-with-secret-key
+APP_S3_ACCESS_KEY_ID=admin
+APP_S3_SECRET_ACCESS_KEY=replace-with-secret-key
 ```
 
 后端服务访问对象存储时使用内部 Docker/网络访问地址；生成浏览器访问的预签名 URL 时使用公网或局域网可访问地址。
