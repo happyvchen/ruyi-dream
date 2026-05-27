@@ -47,7 +47,7 @@ Common causes:
 
 - Missing `APP_S3_ACCESS_KEY_ID` / `APP_S3_SECRET_ACCESS_KEY`.
 - `APP_ENV=production` with placeholder or weak object storage credentials.
-- `APP_ENV=production` without `APP_GATE_PASSWORD` / `APP_GATE_PASSWORD_HASH` and without `APP_TRUST_REVERSE_PROXY_AUTH=true`.
+- `APP_ENV=production` without fixed account password/hash configuration and without `APP_TRUST_REVERSE_PROXY_AUTH=true`.
 - Built-in app gate configured without `APP_SESSION_SECRET`.
 - RustFS not ready yet; Compose should restart backend automatically.
 - `deployment/app-data/backend` is not writable by the backend container `app` user.
@@ -70,7 +70,7 @@ chmod -R 750 deployment/app-data/backend
 
 ## Login or API Returns 401
 
-The browser app uses the built-in password gate when `APP_GATE_PASSWORD` or `APP_GATE_PASSWORD_HASH` is configured. Login writes a signed `HttpOnly` session cookie; all business `/api/*` routes require that cookie.
+The browser app uses the built-in fixed-account gate when `APP_USER_PASSWORD` / `APP_ADMIN_PASSWORD` or their hash variants are configured. Login writes a signed `HttpOnly` session cookie with `role=user|admin`; all business `/api/*` routes require that cookie.
 
 Check:
 
@@ -85,7 +85,7 @@ X-Ruyi-Access-Token: <token>
 Authorization: Bearer <token>
 ```
 
-Changing `APP_GATE_PASSWORD`, `APP_GATE_PASSWORD_HASH`, `APP_SESSION_SECRET`, or `APP_API_ACCESS_TOKEN` only requires restarting the backend:
+Changing `APP_USER_PASSWORD`, `APP_ADMIN_PASSWORD`, their hash variants, `APP_SESSION_SECRET`, or `APP_API_ACCESS_TOKEN` only requires restarting the backend:
 
 ```bash
 docker compose up -d backend
@@ -93,7 +93,7 @@ docker compose up -d backend
 
 Important:
 
-- If only `APP_GATE_PASSWORD` changes, existing browser sessions remain valid until their cookie expires.
+- If only a user/admin password changes, existing browser sessions remain valid until their cookie expires.
 - To force all browsers to log in again immediately, rotate `APP_SESSION_SECRET` at the same time.
 - `APP_SESSION_COOKIE_SECURE=true` requires HTTPS. Use `false` only for local HTTP or temporary HTTP test environments.
 
@@ -101,8 +101,10 @@ If an external reverse proxy handles authentication instead, production `.env` m
 
 ```env
 APP_TRUST_REVERSE_PROXY_AUTH=true
-APP_GATE_PASSWORD=
-APP_GATE_PASSWORD_HASH=
+APP_USER_PASSWORD=
+APP_USER_PASSWORD_HASH=
+APP_ADMIN_PASSWORD=
+APP_ADMIN_PASSWORD_HASH=
 ```
 
 ## Upload Fails
