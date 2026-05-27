@@ -7,6 +7,7 @@ import {
   ArrowUp,
   ChevronLeft,
   ChevronRight,
+  CircleStop,
   Clock3,
   Download,
   Eye,
@@ -305,6 +306,14 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
   const [taskItems, setTaskItems] = useState<GenerationTask[]>(records.slice(0, 10))
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
+  function cancelCurrentTask() {
+    if (!task || !isTaskRunning(task)) return
+    if (!window.confirm('确定取消本次生成吗？已提交给生成服务的图片可能仍会完成并产生费用；系统会停止后续生成，并保留已完成结果。')) return
+    void run('取消生成中...', () => api.cancelTask(task.id), (r: { item: GenerationTask }) => {
+      clearLocalOperationsFor(['generation_styling', 'generation_preview', 'generation_result_image'])
+      setTask(r.item)
+    })
+  }
   useEffect(() => setStep(currentStep), [task?.id, task?.status])
   useEffect(() => {
     let cancelled = false
@@ -341,6 +350,11 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
               <Meta label="状态" value={statusText(task.status)} />
               <Meta label="搭配服饰" value={`${task.styling?.selectedMaterials?.length ?? 0} 件`} />
               <Meta label="最终图" value={`${task.resultSet?.images?.filter((i) => i.status === 'SUCCEEDED').length ?? 0}/5`} />
+              {isTaskRunning(task) && (
+                <button className="secondary wide" onClick={cancelCurrentTask}>
+                  <CircleStop size={16} /> 取消生成
+                </button>
+              )}
               <AIOperationList operations={visibleTaskOperations(task, localOperations)} compact />
             </>
           ) : <EmptyState title="暂无任务" text="上传主推款后会在这里形成拍摄任务。" />}
@@ -354,6 +368,21 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
                 })}>
                   <span>{item.name}</span><em>{item.archivedAt ? '已删除' : statusText(item.status)}</em>
                 </button>
+                {isTaskRunning(item) && (
+                  <button
+                    className="secondary mini-action"
+                    onClick={() => {
+                      if (!window.confirm('确定取消本次生成吗？已提交给生成服务的图片可能仍会完成并产生费用；系统会停止后续生成，并保留已完成结果。')) return
+                      void run('取消生成中...', () => api.cancelTask(item.id), (r: { item: GenerationTask }) => {
+                        clearLocalOperationsFor(['generation_styling', 'generation_preview', 'generation_result_image'])
+                        if (task?.id === item.id) setTask(r.item)
+                        setTaskItems((current) => current.map((entry) => entry.id === item.id ? r.item : entry))
+                      })
+                    }}
+                  >
+                    取消
+                  </button>
+                )}
               </div>
             ))}
             {!taskItems.length && <EmptyState title="暂无任务" text="创建拍摄任务后会出现在这里。" />}
@@ -519,7 +548,7 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
 }) {
-  const canSelect = !!task && ['READY_FOR_STYLING', 'STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED'].includes(task.status)
+  const canSelect = !!task && ['READY_FOR_STYLING', 'STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task.status)
   const hasStyling = !!task?.styling
   const operations = task ? operationFallbacks(task, localOperations, 'generation_styling') : []
   return (
@@ -639,7 +668,7 @@ function PreviewStep({ task, setTask, run, localOperations, startLocalOperation,
 }) {
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const canPreview = (
-    !!task?.styling && ['STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL'].includes(task?.status ?? '')
+    !!task?.styling && ['STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'CANCELLED'].includes(task?.status ?? '')
   ) || (task?.status === 'FAILED' && !!task.styling && !task.preview)
   const hasPreview = !!task?.preview?.asset
   const operations = task ? operationFallbacks(task, localOperations, 'generation_preview') : []
@@ -678,7 +707,7 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const images = task?.resultSet?.images ?? []
   const finalAssets = images.map((image) => image.asset).filter((asset): asset is MediaAsset => !!asset)
-  const canGenerate = !!task?.preview?.asset && ['PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL'].includes(task?.status ?? '')
+  const canGenerate = !!task?.preview?.asset && ['PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'CANCELLED'].includes(task?.status ?? '')
   const hasFinalImages = images.some((image) => !!image.asset)
   const finalOperations = task ? finalImageOperations(task, localOperations) : []
   return (
@@ -1378,6 +1407,14 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
     })
   }
 
+  function cancelRecordTask(item: GenerationTask) {
+    if (!window.confirm('确定取消本次生成吗？已提交给生成服务的图片可能仍会完成并产生费用；系统会停止后续生成，并保留已完成结果。')) return
+    void run('取消生成中...', () => api.cancelTask(item.id), (r: { item: GenerationTask }) => {
+      setItems((current) => current.map((entry) => entry.id === item.id ? r.item : entry))
+      if (detail?.id === item.id) setDetail(r.item)
+    })
+  }
+
   return (
     <section className="page">
       <PageTitle title="生成记录" subtitle="查看历史拍摄任务、分镜预览和最终成片。" />
@@ -1421,10 +1458,9 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
               </button>
               <button
                 className="secondary record-action-button"
-                disabled={isTaskRunning(item)}
-                onClick={() => openRecordDeleteDialog(item)}
+                onClick={() => isTaskRunning(item) ? cancelRecordTask(item) : openRecordDeleteDialog(item)}
               >
-                删除
+                {isTaskRunning(item) ? '取消生成' : '删除'}
               </button>
             </div>
           ))}
@@ -2262,6 +2298,11 @@ function EmptyState({ title, text }: { title: string; text: string }) {
 
 function getTaskStep(task: GenerationTask | null): StudioStep {
   if (!task) return 0
+  if (task.status === 'CANCELLED') {
+    if (task.resultSet?.images?.length) return 3
+    if (task.preview || task.styling) return 2
+    return 1
+  }
   if (task.status === 'FAILED') return task.styling ? 2 : 1
   if (['READY_FOR_STYLING', 'STYLING_RUNNING'].includes(task.status)) return 1
   if (['STYLING_READY', 'PREVIEW_RUNNING'].includes(task.status)) return 2
@@ -2285,6 +2326,7 @@ function statusText(status: string) {
     FINAL_PARTIAL: '部分完成',
     COMPLETED: '已完成',
     FAILED: '失败',
+    CANCELLED: '已取消',
     READY: '可用',
     TAGGING_READY: '待复核',
     TAGGING_RUNNING: '识别中',

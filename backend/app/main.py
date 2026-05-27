@@ -245,6 +245,7 @@ UNASSIGNED_HEAD_REFERENCE_PREFIX = "__unassigned__"
 
 ACTIVE_IMAGE_STATUSES = {"QUEUED", "SUBMITTED", "IN_QUEUE", "IN_PROGRESS", "RUNNING"}
 TERMINAL_IMAGE_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
+RUNNING_GENERATION_TASK_STATUSES = {"STYLING_RUNNING", "PREVIEW_RUNNING", "FINAL_RUNNING"}
 PLANNING_STATUSES = {"PLANNING"}
 REVIEW_STATUSES = {"candidate", "approved", "needs_regen", "needs_retouch", "delivered"}
 LILY_TAG_SCHEMA_VERSION = "lily-garment-tags-v1"
@@ -1539,6 +1540,61 @@ def archive_generation_tasks(payload: GenerationTaskDeleteRequest) -> dict[str, 
     return {"ok": True, "archived": True, "ids": task_ids}
 
 
+@app.post("/api/generation-tasks/{task_id}/cancel")
+def cancel_generation_task(task_id: int) -> dict[str, Any]:
+    timestamp = now_iso()
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_tasks WHERE id = ? AND deleted_at IS NULL", (task_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="生成任务不存在")
+        if row["status"] not in RUNNING_GENERATION_TASK_STATUSES:
+            raise HTTPException(status_code=409, detail="只有生成中的任务可以取消")
+
+        cancelled_preview_count = 0
+        cancelled_image_count = 0
+        if row["status"] == "PREVIEW_RUNNING":
+            preview_cursor = db.execute(
+                """
+                UPDATE generation_previews
+                SET status = 'CANCELLED', locked_by = NULL, locked_until = NULL, updated_at = ?
+                WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING')
+                """,
+                (timestamp, task_id),
+            )
+            cancelled_preview_count = int(preview_cursor.rowcount or 0)
+        elif row["status"] == "FINAL_RUNNING" and row["active_result_set_id"]:
+            image_cursor = db.execute(
+                """
+                UPDATE generation_result_images_new
+                SET status = 'CANCELLED', locked_by = NULL, locked_until = NULL, updated_at = ?
+                WHERE result_set_id = ? AND status IN ('QUEUED', 'RUNNING')
+                """,
+                (timestamp, int(row["active_result_set_id"])),
+            )
+            cancelled_image_count = int(image_cursor.rowcount or 0)
+
+        cancel_running_task_attempts(db, task_id, timestamp)
+        if row["status"] == "FINAL_RUNNING" and row["active_result_set_id"]:
+            reconcile_final_result_set(db, int(row["active_result_set_id"]), task_id)
+        else:
+            db.execute(
+                "UPDATE generation_tasks SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
+                (timestamp, task_id),
+            )
+        log_event(
+            db,
+            "generation_task",
+            task_id,
+            "cancelled",
+            {
+                "previousStatus": row["status"],
+                "cancelledPreviewCount": cancelled_preview_count,
+                "cancelledImageCount": cancelled_image_count,
+            },
+        )
+    return {"ok": True, "cancelled": True, "item": get_generation_task_by_id(task_id)}
+
+
 @app.delete("/api/generation-tasks/{task_id}")
 def delete_generation_task(task_id: int, payload: GenerationTaskDeleteRequest | None = None) -> dict[str, Any]:
     if not payload or not payload.purge:
@@ -1589,8 +1645,31 @@ def ensure_generation_task_draft(task: Any) -> None:
 
 
 def ensure_generation_task_not_running(task: Any) -> None:
-    if task["status"] in {"STYLING_RUNNING", "PREVIEW_RUNNING", "FINAL_RUNNING"}:
-        raise HTTPException(status_code=409, detail="任务正在生成中，完成后才能删除")
+    if task["status"] in RUNNING_GENERATION_TASK_STATUSES:
+        raise HTTPException(status_code=409, detail="任务正在生成中，请先取消生成")
+
+
+def cancel_running_task_attempts(db: Any, task_id: int, timestamp: str) -> None:
+    db.execute(
+        """
+        UPDATE generation_attempts
+        SET status = 'CANCELLED', cancelled_at = COALESCE(cancelled_at, ?), updated_at = ?
+        WHERE status = 'RUNNING'
+          AND (
+            (owner_type = 'generation_styling' AND owner_id = ?)
+            OR (owner_type = 'generation_preview' AND owner_id IN (
+              SELECT id FROM generation_previews WHERE task_id = ?
+            ))
+            OR (owner_type = 'generation_result_image' AND owner_id IN (
+              SELECT gri.id
+              FROM generation_result_images_new gri
+              JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+              WHERE grs.task_id = ?
+            ))
+          )
+        """,
+        (timestamp, timestamp, task_id, task_id, task_id),
+    )
 
 
 def normalized_task_ids(ids: list[int]) -> list[int]:
@@ -1802,6 +1881,7 @@ async def select_generation_styling(task_id: int) -> dict[str, Any]:
         "COMPLETED",
         "FINAL_PARTIAL",
         "FAILED",
+        "CANCELLED",
     }:
         raise HTTPException(status_code=409, detail="当前任务状态不能智能选搭")
     input_version_id = create_generation_input_version(task_id)
@@ -1817,11 +1897,23 @@ async def select_generation_styling(task_id: int) -> dict[str, Any]:
         selected_ids = [int(item) for item in styling_plan.get("selected_material_ids", [])]
         source_ids, selected_snapshot = get_styling_source_and_selected_snapshots(selected_ids)
     except Exception as exc:
+        with get_db() as db:
+            current = db.execute("SELECT status FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
+            if not current or current["status"] == "CANCELLED":
+                if attempt_id:
+                    finish_attempt(attempt_id, "CANCELLED", error_message=str(exc))
+                return {"item": get_generation_task_by_id(task_id)}
         if attempt_id:
             finish_attempt(attempt_id, "FAILED", error_message=str(exc))
         with get_db() as db:
             db.execute("UPDATE generation_tasks SET status = 'FAILED', updated_at = ? WHERE id = ?", (now_iso(), task_id))
         raise HTTPException(status_code=502, detail=f"智能选搭失败：{exc}") from exc
+    with get_db() as db:
+        current = db.execute("SELECT status FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
+        if current and current["status"] == "CANCELLED":
+            if attempt_id:
+                finish_attempt(attempt_id, "CANCELLED", response_snapshot=styling_plan)
+            return {"item": get_generation_task_by_id(task_id)}
     with get_db() as db:
         timestamp = now_iso()
         cursor = db.execute(
@@ -1882,7 +1974,7 @@ async def create_generation_preview(task_id: int) -> dict[str, Any]:
     styling_id = task["active_styling_id"]
     input_version_id = task["current_input_version_id"]
     if not styling_id or not input_version_id or (
-        task["status"] not in {"STYLING_READY", "PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL"}
+        task["status"] not in {"STYLING_READY", "PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
         and not (task["status"] == "FAILED" and not task["active_preview_id"])
     ):
         raise HTTPException(status_code=409, detail="请先完成智能选搭")
@@ -1917,6 +2009,20 @@ async def run_preview_generation(task_id: int, styling_id: int, shot_plans: list
         asset_id, provider_response = await generate_image_asset(task_package, join_key("generation-tasks", str(task_id), "preview", f"preview-{preview_id}.png"))
     except Exception as exc:
         provider_response = getattr(exc, "provider_response", None)
+        with get_db() as db:
+            current = db.execute(
+                """
+                SELECT gp.status AS preview_status, gt.status AS task_status
+                FROM generation_previews gp
+                JOIN generation_tasks gt ON gt.id = gp.task_id
+                WHERE gp.id = ?
+                """,
+                (preview_id,),
+            ).fetchone()
+            if current and (current["preview_status"] == "CANCELLED" or current["task_status"] == "CANCELLED"):
+                finish_attempt(attempt_id, "CANCELLED", response_snapshot=provider_response, error_message=str(exc))
+                persist_attempt_provider_request_id(attempt_id, provider_response)
+                return
         finish_attempt(attempt_id, "FAILED", response_snapshot=provider_response, error_message=str(exc))
         persist_attempt_provider_request_id(attempt_id, provider_response)
         with get_db() as db:
@@ -1931,6 +2037,20 @@ async def run_preview_generation(task_id: int, styling_id: int, shot_plans: list
             )
             db.execute("UPDATE generation_tasks SET status = 'FAILED', updated_at = ? WHERE id = ?", (timestamp, task_id))
         return
+    with get_db() as db:
+        current = db.execute(
+            """
+            SELECT gp.status AS preview_status, gt.status AS task_status
+            FROM generation_previews gp
+            JOIN generation_tasks gt ON gt.id = gp.task_id
+            WHERE gp.id = ?
+            """,
+            (preview_id,),
+        ).fetchone()
+        if current and (current["preview_status"] == "CANCELLED" or current["task_status"] == "CANCELLED"):
+            finish_attempt(attempt_id, "CANCELLED", response_snapshot=provider_response, output_asset_id=asset_id)
+            persist_attempt_provider_request_id(attempt_id, provider_response)
+            return
     finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=provider_response, output_asset_id=asset_id)
     persist_attempt_provider_request_id(attempt_id, provider_response)
     with get_db() as db:
@@ -1954,7 +2074,7 @@ async def run_preview_generation(task_id: int, styling_id: int, shot_plans: list
 async def generate_final_images(task_id: int) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     if (
-        task["status"] not in {"PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL"}
+        task["status"] not in {"PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
         or not task["active_preview_id"]
         or not task["active_styling_id"]
         or not task["current_input_version_id"]
@@ -2022,6 +2142,13 @@ def reconcile_final_result_set(db: Any, result_set_id: int, task_id: int | None 
             (result_set_id, timestamp, task_id),
         )
         return "RUNNING", "FINAL_RUNNING"
+    if statuses and all(status == "CANCELLED" for status in statuses):
+        db.execute("UPDATE generation_result_sets SET status = 'CANCELLED', updated_at = ? WHERE id = ?", (timestamp, result_set_id))
+        db.execute(
+            "UPDATE generation_tasks SET status = 'CANCELLED', active_result_set_id = ?, updated_at = ? WHERE id = ?",
+            (result_set_id, timestamp, task_id),
+        )
+        return "CANCELLED", "CANCELLED"
     completed = bool(statuses) and all(status == "SUCCEEDED" for status in statuses)
     result_set_status = "SUCCEEDED" if completed else "PARTIAL"
     task_status = "COMPLETED" if completed else "FINAL_PARTIAL"
@@ -5256,7 +5383,7 @@ def finish_attempt(
         db.execute(
             """
             UPDATE generation_attempts
-            SET status = ?, completed_at = ?, failed_at = ?, response_snapshot_json = ?, output_asset_id = ?,
+            SET status = ?, completed_at = ?, failed_at = ?, cancelled_at = ?, response_snapshot_json = ?, output_asset_id = ?,
                 error_message = ?, updated_at = ?
             WHERE id = ?
             """,
@@ -5264,6 +5391,7 @@ def finish_attempt(
                 status,
                 timestamp if status == "SUCCEEDED" else None,
                 timestamp if status == "FAILED" else None,
+                timestamp if status == "CANCELLED" else None,
                 dumps(response_snapshot or {}),
                 output_asset_id,
                 error_message,
@@ -6610,7 +6738,7 @@ def lease_generation_preview(preview_id: int, attempt_id: int) -> None:
             UPDATE generation_previews
             SET status = 'RUNNING', active_attempt_id = ?, locked_by = ?, locked_until = ?,
                 run_attempts = COALESCE(run_attempts, 0) + 1, updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND status IN ('QUEUED', 'RUNNING')
             """,
             (attempt_id, f"worker-{uuid4()}", job_lease_until(), timestamp, preview_id),
         )
@@ -6624,7 +6752,7 @@ def lease_generation_result_image(image_id: int, attempt_id: int) -> None:
             UPDATE generation_result_images_new
             SET status = 'RUNNING', active_attempt_id = ?, locked_by = ?, locked_until = ?,
                 run_attempts = COALESCE(run_attempts, 0) + 1, updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND status IN ('QUEUED', 'RUNNING')
             """,
             (attempt_id, f"worker-{uuid4()}", job_lease_until(), timestamp, image_id),
         )
@@ -6776,6 +6904,10 @@ async def generate_single_final_image(task_id: int, result_set_id: int, image_id
     attempt_id = create_attempt("generation_result_image", image_id, "image-2")
     lease_generation_result_image(image_id, attempt_id)
     with get_db() as db:
+        row = db.execute("SELECT status FROM generation_result_images_new WHERE id = ?", (image_id,)).fetchone()
+        if row and row["status"] == "CANCELLED":
+            finish_attempt(attempt_id, "CANCELLED")
+            return 0
         db.execute(
             """
             UPDATE generation_result_images_new
@@ -6792,6 +6924,21 @@ async def generate_single_final_image(task_id: int, result_set_id: int, image_id
         asset_id, provider_response = await generate_image_asset(task_package, output_key)
     except Exception as exc:
         provider_response = getattr(exc, "provider_response", None)
+        with get_db() as db:
+            current = db.execute(
+                """
+                SELECT gri.status AS image_status, gt.status AS task_status
+                FROM generation_result_images_new gri
+                JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+                JOIN generation_tasks gt ON gt.id = grs.task_id
+                WHERE gri.id = ?
+                """,
+                (image_id,),
+            ).fetchone()
+            if current and (current["image_status"] == "CANCELLED" or current["task_status"] == "CANCELLED"):
+                finish_attempt(attempt_id, "CANCELLED", response_snapshot=provider_response, error_message=str(exc))
+                persist_attempt_provider_request_id(attempt_id, provider_response)
+                return 0
         finish_attempt(attempt_id, "FAILED", response_snapshot=provider_response, error_message=str(exc))
         persist_attempt_provider_request_id(attempt_id, provider_response)
         with get_db() as db:
@@ -6804,6 +6951,21 @@ async def generate_single_final_image(task_id: int, result_set_id: int, image_id
                 (attempt_id, now_iso(), image_id),
             )
         raise
+    with get_db() as db:
+        current = db.execute(
+            """
+            SELECT gri.status AS image_status, gt.status AS task_status
+            FROM generation_result_images_new gri
+            JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+            JOIN generation_tasks gt ON gt.id = grs.task_id
+            WHERE gri.id = ?
+            """,
+            (image_id,),
+        ).fetchone()
+        if current and (current["image_status"] == "CANCELLED" or current["task_status"] == "CANCELLED"):
+            finish_attempt(attempt_id, "CANCELLED", response_snapshot=provider_response, output_asset_id=asset_id)
+            persist_attempt_provider_request_id(attempt_id, provider_response)
+            return asset_id
     finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=provider_response, output_asset_id=asset_id)
     persist_attempt_provider_request_id(attempt_id, provider_response)
     with get_db() as db:

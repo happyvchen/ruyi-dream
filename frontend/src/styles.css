@@ -1329,6 +1329,9 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
 .mini-row.view-only {
   grid-template-columns: minmax(0, 1fr);
 }
+.mini-row.view-only:has(.mini-action) {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
 .mini-row.active {
   border-color: #38bdf8;
   background: #f0fbff;
