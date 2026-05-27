@@ -148,6 +148,8 @@ Authorization: Bearer <token>
 | `GET /api/model-profiles` | `limit`、`offset`、`keyword` |
 | `GET /api/generation-runs` | `includeArchived`、`limit`、`offset`、`skuId`、`keyword` |
 
+普通用户可见列表默认按创建时间倒序返回：搭配服饰库、AI 摄影棚最近任务和生成记录均使用 `created_at DESC, id DESC`。编辑名称、打标、追加图片、生成阶段推进、归档等只更新业务状态，不应改变这些列表的默认展示顺序。
+
 搜索框只要表现为全局搜索，就必须调用对应列表接口的 `keyword` 参数；不能只过滤前端已加载的首屏数据。
 
 ### 三档图片 URL
