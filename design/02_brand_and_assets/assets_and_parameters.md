@@ -109,7 +109,7 @@ DELETED
 
 - `effective_tags`：素材事实和搭配约束，用于召回、压缩和解释。
 - `visual_caption` / `retrieval_features`：每件搭配服饰的短视觉摘要、衣长体量、遮挡风险、可塞腰/可敞开等检索字段。
-- `brand_profile`：admin 维护的单一品牌资料，包括品牌名称、标语、价值观、美学、沟通语调和业务概览；初始为空，不做双语结构。
+- `brand_profile`：admin 维护的单一品牌调性资料，包括品牌名称、标语、品牌定位、视觉风格、搭配原则、拍摄调性和风格禁区；初始为空，不做双语结构。
 - `brand_style_samples`：Lily 官方或客户确认的品牌样本，作为品牌风格和配饰边界证据。
 - `candidate_retrieval_snapshot`：本次任务进入 AI Stylist 前的候选集合、排序和过滤原因。
 - `StylingPlan`：AI Stylist 对主推款和候选服饰做造型判断后的结构化方案。
@@ -122,16 +122,18 @@ DELETED
 
 - `name`：品牌名称
 - `tagline`：品牌标语
-- `values`：品牌价值观文本
-- `aesthetic`：品牌美学文本
-- `tone`：沟通语调文本
-- `business_overview`：业务概览 / 品牌简介
+- `positioning`：品牌定位
+- `visual_style`：视觉风格
+- `styling_principles`：搭配原则
+- `shooting_tone`：拍摄调性
+- `style_avoidance`：风格禁区
 
 规则：
 
 - 后端不 seed 默认内容，初始所有字段为空。
 - 所有字段均为字符串，不保存数组结构或双语 key/value 结构。
 - 不支持双语字段，不维护中英文 key/value 成对结构。
+- 字段用于约束选搭和拍摄判断，不作为品牌百科或营销话术库。
 - 删除后恢复为空状态，不影响已有历史任务快照。
 - 未来如果进入生成链路，应以结构化资料作为品牌参考输入，并在任务输入或 planner 快照中记录当时版本。
 

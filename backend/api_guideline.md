@@ -737,10 +737,11 @@ provider 状态映射示例：
     "id": 1,
     "name": "LILY",
     "tagline": "商务新风尚，成就你的每一步。",
-    "values": "彰显女性力量\n时尚平权\n创新驱动\n职场优雅",
-    "aesthetic": "摩登职场风尚\n力量感极简风\n结构感职场风\n纯净都市优雅",
-    "tone": "专业\n赋能\n优雅\n现代",
-    "businessOverview": "LILY 是中国领先的时尚品牌...",
+    "positioning": "LILY 是面向现代职场女性的商务时装品牌...",
+    "visualStyle": "现代商务时尚、利落剪裁、结构感职场风、纯净都市优雅。",
+    "stylingPrinciples": "搭配必须服务主推款，优先突出主推款的版型、面料、腰线和商品卖点。",
+    "shootingTone": "画面应专业、现代、优雅、有力量。",
+    "styleAvoidance": "避免甜美少女感、夸张潮流感、沉闷传统正装感和复杂配饰喧宾夺主。",
     "createdAt": "2026-05-28T10:00:00Z",
     "updatedAt": "2026-05-28T10:00:00Z"
   }
@@ -755,10 +756,11 @@ provider 状态映射示例：
 {
   "name": "LILY",
   "tagline": "商务新风尚，成就你的每一步。",
-  "values": "彰显女性力量\n时尚平权\n创新驱动\n职场优雅",
-  "aesthetic": "摩登职场风尚\n力量感极简风\n结构感职场风\n纯净都市优雅",
-  "tone": "专业\n赋能\n优雅\n现代",
-  "businessOverview": "LILY 是中国领先的时尚品牌..."
+  "positioning": "LILY 是面向现代职场女性的商务时装品牌...",
+  "visualStyle": "现代商务时尚、利落剪裁、结构感职场风、纯净都市优雅。",
+  "stylingPrinciples": "搭配必须服务主推款，优先突出主推款的版型、面料、腰线和商品卖点。",
+  "shootingTone": "画面应专业、现代、优雅、有力量。",
+  "styleAvoidance": "避免甜美少女感、夸张潮流感、沉闷传统正装感和复杂配饰喧宾夺主。"
 }
 ```
 

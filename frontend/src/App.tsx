@@ -1379,35 +1379,40 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
   const [brandId, setBrandId] = useState<number | null>(initialBrandInfo?.id ?? null)
   const [name, setName] = useState(initialBrandInfo?.name ?? '')
   const [tagline, setTagline] = useState(initialBrandInfo?.tagline ?? '')
-  const [values, setValues] = useState(initialBrandInfo?.values ?? '')
-  const [aesthetic, setAesthetic] = useState(initialBrandInfo?.aesthetic ?? '')
-  const [tone, setTone] = useState(initialBrandInfo?.tone ?? '')
-  const [businessOverview, setBusinessOverview] = useState(initialBrandInfo?.businessOverview ?? '')
+  const [positioning, setPositioning] = useState(initialBrandInfo?.positioning ?? '')
+  const [visualStyle, setVisualStyle] = useState(initialBrandInfo?.visualStyle ?? '')
+  const [stylingPrinciples, setStylingPrinciples] = useState(initialBrandInfo?.stylingPrinciples ?? '')
+  const [shootingTone, setShootingTone] = useState(initialBrandInfo?.shootingTone ?? '')
+  const [styleAvoidance, setStyleAvoidance] = useState(initialBrandInfo?.styleAvoidance ?? '')
 
   useEffect(() => {
     setBrandId(initialBrandInfo?.id ?? null)
     setName(initialBrandInfo?.name ?? '')
     setTagline(initialBrandInfo?.tagline ?? '')
-    setValues(initialBrandInfo?.values ?? '')
-    setAesthetic(initialBrandInfo?.aesthetic ?? '')
-    setTone(initialBrandInfo?.tone ?? '')
-    setBusinessOverview(initialBrandInfo?.businessOverview ?? '')
+    setPositioning(initialBrandInfo?.positioning ?? '')
+    setVisualStyle(initialBrandInfo?.visualStyle ?? '')
+    setStylingPrinciples(initialBrandInfo?.stylingPrinciples ?? '')
+    setShootingTone(initialBrandInfo?.shootingTone ?? '')
+    setStyleAvoidance(initialBrandInfo?.styleAvoidance ?? '')
   }, [initialBrandInfo?.id, initialBrandInfo?.updatedAt])
 
-  const cleanValues = values.trim()
-  const cleanAesthetic = aesthetic.trim()
-  const cleanTone = tone.trim()
-  const hasContent = Boolean(name.trim() || tagline.trim() || cleanValues || cleanAesthetic || cleanTone || businessOverview.trim())
+  const cleanPositioning = positioning.trim()
+  const cleanVisualStyle = visualStyle.trim()
+  const cleanStylingPrinciples = stylingPrinciples.trim()
+  const cleanShootingTone = shootingTone.trim()
+  const cleanStyleAvoidance = styleAvoidance.trim()
+  const hasContent = Boolean(name.trim() || tagline.trim() || cleanPositioning || cleanVisualStyle || cleanStylingPrinciples || cleanShootingTone || cleanStyleAvoidance)
   const summaryName = name.trim() || '未填写品牌名称'
 
   function payload() {
     return {
       name: name.trim(),
       tagline: tagline.trim(),
-      values: cleanValues,
-      aesthetic: cleanAesthetic,
-      tone: cleanTone,
-      businessOverview: businessOverview.trim(),
+      positioning: cleanPositioning,
+      visualStyle: cleanVisualStyle,
+      stylingPrinciples: cleanStylingPrinciples,
+      shootingTone: cleanShootingTone,
+      styleAvoidance: cleanStyleAvoidance,
     }
   }
 
@@ -1427,10 +1432,11 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
       setBrandId(null)
       setName('')
       setTagline('')
-      setValues('')
-      setAesthetic('')
-      setTone('')
-      setBusinessOverview('')
+      setPositioning('')
+      setVisualStyle('')
+      setStylingPrinciples('')
+      setShootingTone('')
+      setStyleAvoidance('')
     }, { refresh: false })
   }
 
@@ -1447,9 +1453,9 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
           <h2>{summaryName}</h2>
           <Meta label="状态" value={brandId ? '已保存' : hasContent ? '未保存' : '初始为空'} />
           <Meta label="标语" value={tagline.trim() ? '已填写' : '未填写'} />
-          <Meta label="价值观" value={cleanValues ? '已填写' : '未填写'} />
-          <Meta label="品牌美学" value={cleanAesthetic ? '已填写' : '未填写'} />
-          <Meta label="沟通语调" value={cleanTone ? '已填写' : '未填写'} />
+          <Meta label="品牌定位" value={cleanPositioning ? '已填写' : '未填写'} />
+          <Meta label="视觉风格" value={cleanVisualStyle ? '已填写' : '未填写'} />
+          <Meta label="风格禁区" value={cleanStyleAvoidance ? '已填写' : '未填写'} />
           <p>保存后将作为后续选搭与 ShotPlan 的品牌参考。</p>
         </aside>
         <div className="brand-info-form">
@@ -1462,20 +1468,24 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
             <textarea value={tagline} onChange={(event) => setTagline(event.target.value)} />
           </div>
           <div className="brand-field">
-            <label>品牌价值观</label>
-            <textarea value={values} onChange={(event) => setValues(event.target.value)} />
+            <label>品牌定位</label>
+            <textarea value={positioning} onChange={(event) => setPositioning(event.target.value)} />
           </div>
           <div className="brand-field">
-            <label>品牌美学</label>
-            <textarea value={aesthetic} onChange={(event) => setAesthetic(event.target.value)} />
+            <label>视觉风格</label>
+            <textarea value={visualStyle} onChange={(event) => setVisualStyle(event.target.value)} />
           </div>
           <div className="brand-field">
-            <label>沟通语调</label>
-            <textarea value={tone} onChange={(event) => setTone(event.target.value)} />
+            <label>搭配原则</label>
+            <textarea value={stylingPrinciples} onChange={(event) => setStylingPrinciples(event.target.value)} />
           </div>
           <div className="brand-field">
-            <label>业务概览</label>
-            <textarea className="large" value={businessOverview} onChange={(event) => setBusinessOverview(event.target.value)} />
+            <label>拍摄调性</label>
+            <textarea value={shootingTone} onChange={(event) => setShootingTone(event.target.value)} />
+          </div>
+          <div className="brand-field">
+            <label>风格禁区</label>
+            <textarea className="large" value={styleAvoidance} onChange={(event) => setStyleAvoidance(event.target.value)} />
           </div>
         </div>
       </div>

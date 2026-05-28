@@ -261,10 +261,11 @@ class ModelProfileUpsertRequest(BaseModel):
 class BrandInfoUpsertRequest(BaseModel):
     name: str | None = None
     tagline: str | None = None
-    values: str | None = None
-    aesthetic: str | None = None
-    tone: str | None = None
-    businessOverview: str | None = None
+    positioning: str | None = None
+    visualStyle: str | None = None
+    stylingPrinciples: str | None = None
+    shootingTone: str | None = None
+    styleAvoidance: str | None = None
 
 
 class HeadReferenceUpdateRequest(BaseModel):
@@ -2487,16 +2488,17 @@ def create_brand_info(payload: BrandInfoUpsertRequest, request: Request) -> dict
         db.execute(
             """
             INSERT INTO brand_profiles
-              (id, name, tagline, brand_values, aesthetic, tone, business_overview, created_at, updated_at)
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+              (id, name, tagline, positioning, visual_style, styling_principles, shooting_tone, style_avoidance, created_at, updated_at)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 profile["name"],
                 profile["tagline"],
-                profile["values"],
-                profile["aesthetic"],
-                profile["tone"],
-                profile["businessOverview"],
+                profile["positioning"],
+                profile["visualStyle"],
+                profile["stylingPrinciples"],
+                profile["shootingTone"],
+                profile["styleAvoidance"],
                 timestamp,
                 timestamp,
             ),
@@ -2518,10 +2520,11 @@ def update_brand_info(payload: BrandInfoUpsertRequest, request: Request) -> dict
             key_map = {
                 "name": "name",
                 "tagline": "tagline",
-                "values": "brand_values",
-                "aesthetic": "aesthetic",
-                "tone": "tone",
-                "businessOverview": "business_overview",
+                "positioning": "positioning",
+                "visualStyle": "visual_style",
+                "stylingPrinciples": "styling_principles",
+                "shootingTone": "shooting_tone",
+                "styleAvoidance": "style_avoidance",
             }
             for key, value in updates.items():
                 column = key_map[key]
@@ -7708,10 +7711,11 @@ def serialize_brand_info(row: Any) -> dict[str, Any]:
         "id": row["id"],
         "name": row["name"],
         "tagline": row["tagline"],
-        "values": row["brand_values"],
-        "aesthetic": row["aesthetic"],
-        "tone": row["tone"],
-        "businessOverview": row["business_overview"],
+        "positioning": row["positioning"],
+        "visualStyle": row["visual_style"],
+        "stylingPrinciples": row["styling_principles"],
+        "shootingTone": row["shooting_tone"],
+        "styleAvoidance": row["style_avoidance"],
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
@@ -7950,14 +7954,16 @@ def normalize_brand_info_payload(payload: BrandInfoUpsertRequest, partial: bool 
         normalized["name"] = (payload.name or "").strip()
     if not partial or payload.tagline is not None:
         normalized["tagline"] = (payload.tagline or "").strip()
-    if not partial or payload.values is not None:
-        normalized["values"] = (payload.values or "").strip()
-    if not partial or payload.aesthetic is not None:
-        normalized["aesthetic"] = (payload.aesthetic or "").strip()
-    if not partial or payload.tone is not None:
-        normalized["tone"] = (payload.tone or "").strip()
-    if not partial or payload.businessOverview is not None:
-        normalized["businessOverview"] = (payload.businessOverview or "").strip()
+    if not partial or payload.positioning is not None:
+        normalized["positioning"] = (payload.positioning or "").strip()
+    if not partial or payload.visualStyle is not None:
+        normalized["visualStyle"] = (payload.visualStyle or "").strip()
+    if not partial or payload.stylingPrinciples is not None:
+        normalized["stylingPrinciples"] = (payload.stylingPrinciples or "").strip()
+    if not partial or payload.shootingTone is not None:
+        normalized["shootingTone"] = (payload.shootingTone or "").strip()
+    if not partial or payload.styleAvoidance is not None:
+        normalized["styleAvoidance"] = (payload.styleAvoidance or "").strip()
     return normalized
 
 

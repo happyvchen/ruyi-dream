@@ -195,10 +195,11 @@ export type BrandInfo = {
   id: number
   name: string
   tagline: string
-  values: string
-  aesthetic: string
-  tone: string
-  businessOverview: string
+  positioning: string
+  visualStyle: string
+  stylingPrinciples: string
+  shootingTone: string
+  styleAvoidance: string
   createdAt: string
   updatedAt: string
 }
@@ -206,10 +207,11 @@ export type BrandInfo = {
 export type BrandInfoPayload = {
   name?: string
   tagline?: string
-  values?: string
-  aesthetic?: string
-  tone?: string
-  businessOverview?: string
+  positioning?: string
+  visualStyle?: string
+  stylingPrinciples?: string
+  shootingTone?: string
+  styleAvoidance?: string
 }
 
 function headers(init?: RequestInit) {

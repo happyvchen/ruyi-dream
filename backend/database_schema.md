@@ -161,10 +161,11 @@ CREATE TABLE brand_profiles (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   name TEXT NOT NULL DEFAULT '',
   tagline TEXT NOT NULL DEFAULT '',
-  brand_values TEXT NOT NULL DEFAULT '',
-  aesthetic TEXT NOT NULL DEFAULT '',
-  tone TEXT NOT NULL DEFAULT '',
-  business_overview TEXT NOT NULL DEFAULT '',
+  positioning TEXT NOT NULL DEFAULT '',
+  visual_style TEXT NOT NULL DEFAULT '',
+  styling_principles TEXT NOT NULL DEFAULT '',
+  shooting_tone TEXT NOT NULL DEFAULT '',
+  style_avoidance TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -177,10 +178,11 @@ CREATE TABLE brand_profiles (
 | `id` | INTEGER | 固定为 1，保证 MVP 只维护单一品牌资料 |
 | `name` | TEXT | 品牌名称；初始为空 |
 | `tagline` | TEXT | 品牌标语；初始为空 |
-| `brand_values` | TEXT | 品牌价值观文本；初始为空 |
-| `aesthetic` | TEXT | 品牌美学文本；初始为空 |
-| `tone` | TEXT | 沟通语调文本；初始为空 |
-| `business_overview` | TEXT | 业务概览 / 品牌简介；初始为空 |
+| `positioning` | TEXT | 品牌定位；初始为空 |
+| `visual_style` | TEXT | 视觉风格；初始为空 |
+| `styling_principles` | TEXT | 搭配原则；初始为空 |
+| `shooting_tone` | TEXT | 拍摄调性；初始为空 |
+| `style_avoidance` | TEXT | 风格禁区；初始为空 |
 | `created_at` | TEXT | 创建时间 |
 | `updated_at` | TEXT | 更新时间 |
 

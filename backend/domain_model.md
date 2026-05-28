@@ -80,13 +80,13 @@ admin 维护的单一品牌资料。MVP 当前服务单一试点客户和单一�
 
 当前职责：
 
-- 保存 `name`、`tagline`、`values`、`aesthetic`、`tone` 和 `business_overview`。
+- 保存 `name`、`tagline`、`positioning`、`visual_style`、`styling_principles`、`shooting_tone` 和 `style_avoidance`。
 - 初始不自动种子化，所有字段默认为空；admin 首次保存时创建记录。
 - 只有一条记录，删除后恢复为空状态。
 - 所有 `/api/brand-info` 接口必须按服务端 session role 校验 admin 权限。
 - 前端只给 admin 展示 `品牌信息` 入口；普通 `user` 保持原有拍摄工作台。
 
-`values`、`aesthetic`、`tone` 均为普通字符串字段，不保存数组或中英文成对结构。
+`positioning`、`visual_style`、`styling_principles`、`shooting_tone`、`style_avoidance` 均为普通字符串字段，不保存数组或中英文成对结构。
 
 ### 3.4 GenerationAttempt
 
