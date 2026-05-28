@@ -41,6 +41,7 @@ ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + 
 
 - 保存和管理服装货号图包对象
 - 维护数字模特档案和素材引用
+- 维护 admin-only 单一品牌资料，供后续选搭和 ShotPlan 作为结构化品牌参考
 - 管理 AI 摄影棚主推款任务、输入版本和状态机
 - 对 READY 搭配服饰做候选漏斗、风险降权、outfit 草案和标签压缩
 - 调用 AI Stylist 生成带 Aesthetic Critic 诊断的 `StylingPlan`，保存完整 request/response 快照

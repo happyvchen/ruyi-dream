@@ -53,6 +53,11 @@ def is_request_authenticated(request: Request) -> bool:
     return get_request_role(request) is not None
 
 
+def require_admin(request: Request) -> None:
+    if get_request_role(request) != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可操作")
+
+
 def get_request_role(request: Request) -> str | None:
     if settings.trust_reverse_proxy_auth or is_api_token_valid(request):
         return "admin"
@@ -251,6 +256,15 @@ class ModelProfileUpsertRequest(BaseModel):
     name: str | None = None
     isDefault: bool | None = None
     profile: dict[str, Any] | None = None
+
+
+class BrandInfoUpsertRequest(BaseModel):
+    name: str | None = None
+    tagline: str | None = None
+    values: list[str] | None = None
+    aesthetic: list[str] | None = None
+    tone: list[str] | None = None
+    businessOverview: str | None = None
 
 
 class HeadReferenceUpdateRequest(BaseModel):
@@ -2455,6 +2469,85 @@ def get_new_generation_record(task_id: int, include_debug: bool = Query(False, a
     return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
 
 
+@app.get("/api/brand-info")
+def get_brand_info(request: Request) -> dict[str, Any]:
+    require_admin(request)
+    return {"item": get_current_brand_info()}
+
+
+@app.post("/api/brand-info")
+def create_brand_info(payload: BrandInfoUpsertRequest, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    timestamp = now_iso()
+    profile = normalize_brand_info_payload(payload)
+    with get_db() as db:
+        existing = db.execute("SELECT id FROM brand_profiles WHERE id = 1").fetchone()
+        if existing:
+            raise HTTPException(status_code=409, detail="品牌信息已存在")
+        db.execute(
+            """
+            INSERT INTO brand_profiles
+              (id, name, tagline, values_json, aesthetic_json, tone_json, business_overview, created_at, updated_at)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                profile["name"],
+                profile["tagline"],
+                dumps(profile["values"]),
+                dumps(profile["aesthetic"]),
+                dumps(profile["tone"]),
+                profile["businessOverview"],
+                timestamp,
+                timestamp,
+            ),
+        )
+        log_event(db, "brand_profile", 1, "created", profile)
+    return {"item": get_current_brand_info()}
+
+
+@app.patch("/api/brand-info")
+def update_brand_info(payload: BrandInfoUpsertRequest, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    updates = normalize_brand_info_payload(payload, partial=True)
+    with get_db() as db:
+        row = db.execute("SELECT * FROM brand_profiles WHERE id = 1").fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="品牌信息不存在")
+        if updates:
+            db_updates: dict[str, Any] = {}
+            key_map = {
+                "name": "name",
+                "tagline": "tagline",
+                "values": "values_json",
+                "aesthetic": "aesthetic_json",
+                "tone": "tone_json",
+                "businessOverview": "business_overview",
+            }
+            for key, value in updates.items():
+                column = key_map[key]
+                db_updates[column] = dumps(value) if isinstance(value, list) else value
+            db_updates["updated_at"] = now_iso()
+            set_clause = ", ".join(f"{key} = ?" for key in db_updates)
+            db.execute(
+                f"UPDATE brand_profiles SET {set_clause} WHERE id = 1",
+                (*db_updates.values(),),
+            )
+            log_event(db, "brand_profile", 1, "updated", updates)
+    return {"item": get_current_brand_info()}
+
+
+@app.delete("/api/brand-info")
+def delete_brand_info(request: Request) -> dict[str, Any]:
+    require_admin(request)
+    with get_db() as db:
+        row = db.execute("SELECT * FROM brand_profiles WHERE id = 1").fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="品牌信息不存在")
+        db.execute("DELETE FROM brand_profiles WHERE id = 1")
+        log_event(db, "brand_profile", 1, "deleted", serialize_brand_info(row))
+    return {"ok": True}
+
+
 @app.get("/api/model-profiles")
 def list_model_profiles(
     limit: int = Query(30, ge=1, le=100),
@@ -4582,6 +4675,12 @@ def sku_delete_impact(db: Any, sku_id: int) -> dict[str, int]:
         "archivedGenerationRunCount": int(row["archived_generation_run_count"] or 0),
         "generationImageCount": int(row["generation_image_count"] or 0),
     }
+
+
+def get_current_brand_info() -> dict[str, Any] | None:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM brand_profiles WHERE id = 1").fetchone()
+        return serialize_brand_info(row) if row else None
 
 
 def get_model_profile_by_id(model_profile_id: int) -> dict[str, Any]:
@@ -7604,6 +7703,20 @@ def serialize_model(row: Any) -> dict[str, Any]:
     }
 
 
+def serialize_brand_info(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "tagline": row["tagline"],
+        "values": loads(row["values_json"], []),
+        "aesthetic": loads(row["aesthetic_json"], []),
+        "tone": loads(row["tone_json"], []),
+        "businessOverview": row["business_overview"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
 def serialize_shot_plan(row: Any) -> dict[str, Any]:
     plan = loads(row["plan_json"], {})
     with get_db() as db:
@@ -7829,6 +7942,34 @@ def sanitize_reference_key(value: str) -> str:
 
 def sanitize_reference_id(value: str) -> str:
     return "".join(ch for ch in value.strip() if ch.isalnum() or ch in {"-", "_"})
+
+
+def normalize_string_list(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    normalized: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
+def normalize_brand_info_payload(payload: BrandInfoUpsertRequest, partial: bool = False) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    if not partial or payload.name is not None:
+        normalized["name"] = (payload.name or "").strip()
+    if not partial or payload.tagline is not None:
+        normalized["tagline"] = (payload.tagline or "").strip()
+    if not partial or payload.values is not None:
+        normalized["values"] = normalize_string_list(payload.values)
+    if not partial or payload.aesthetic is not None:
+        normalized["aesthetic"] = normalize_string_list(payload.aesthetic)
+    if not partial or payload.tone is not None:
+        normalized["tone"] = normalize_string_list(payload.tone)
+    if not partial or payload.businessOverview is not None:
+        normalized["businessOverview"] = (payload.businessOverview or "").strip()
+    return normalized
 
 
 def normalize_model_profile(profile: dict[str, Any]) -> dict[str, Any]:

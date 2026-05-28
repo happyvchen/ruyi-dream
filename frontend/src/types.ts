@@ -70,6 +70,18 @@ export type ModelProfile = {
   updatedAt: string
 }
 
+export type BrandInfo = {
+  id: number
+  name: string
+  tagline: string
+  values: string[]
+  aesthetic: string[]
+  tone: string[]
+  businessOverview: string
+  createdAt: string
+  updatedAt: string
+}
+
 export type Shot = {
   shotIndex: number
   englishName?: string

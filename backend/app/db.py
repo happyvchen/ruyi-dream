@@ -27,6 +27,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("014", "add_styling_garment_archive_columns", "migration_add_styling_garment_archive_columns"),
     ("015", "add_library_adequacy_snapshot", "migration_add_library_adequacy_snapshot"),
     ("016", "clear_successful_tagging_timeout_errors", "migration_clear_successful_tagging_timeout_errors"),
+    ("017", "add_brand_profiles", "migration_add_brand_profiles"),
 )
 
 
@@ -97,6 +98,18 @@ def init_db() -> None:
               asset_dir TEXT NOT NULL,
               profile_json TEXT NOT NULL,
               is_default INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS brand_profiles (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              name TEXT NOT NULL DEFAULT '',
+              tagline TEXT NOT NULL DEFAULT '',
+              values_json TEXT NOT NULL DEFAULT '[]',
+              aesthetic_json TEXT NOT NULL DEFAULT '[]',
+              tone_json TEXT NOT NULL DEFAULT '[]',
+              business_overview TEXT NOT NULL DEFAULT '',
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
@@ -406,6 +419,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_styling_garment_archive_columns": migration_add_styling_garment_archive_columns,
         "migration_add_library_adequacy_snapshot": migration_add_library_adequacy_snapshot,
         "migration_clear_successful_tagging_timeout_errors": migration_clear_successful_tagging_timeout_errors,
+        "migration_add_brand_profiles": migration_add_brand_profiles,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -556,6 +570,24 @@ def migration_clear_successful_tagging_timeout_errors(db: sqlite3.Connection) ->
         WHERE owner_type = 'styling_garment_tagging'
           AND status = 'SUCCEEDED'
           AND error_code = 'TIMEOUT'
+        """
+    )
+
+
+def migration_add_brand_profiles(db: sqlite3.Connection) -> None:
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS brand_profiles (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          name TEXT NOT NULL DEFAULT '',
+          tagline TEXT NOT NULL DEFAULT '',
+          values_json TEXT NOT NULL DEFAULT '[]',
+          aesthetic_json TEXT NOT NULL DEFAULT '[]',
+          tone_json TEXT NOT NULL DEFAULT '[]',
+          business_overview TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
         """
     )
 
