@@ -5,7 +5,6 @@ import {
   Bot,
   ArrowDown,
   ArrowUp,
-  Braces,
   Building2,
   ChevronLeft,
   ChevronRight,
@@ -1482,7 +1481,7 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
       <PageTitle
         title="品牌信息"
         subtitle="维护用于 AI Stylist 和棚拍生成的单一品牌资料。"
-        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={openImportJson}><Braces size={16} />导入</button><button className="secondary" onClick={openExportJson}><Braces size={16} />导出</button><button className="secondary" onClick={remove} disabled={!brandId}><Trash2 size={16} />删除</button><button className="primary" onClick={save}><Save size={16} />保存</button></div>}
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={openImportJson}>导入</button><button className="secondary" onClick={openExportJson}>导出</button><button className="secondary" onClick={remove} disabled={!brandId}><Trash2 size={16} />删除</button><button className="primary" onClick={save}><Save size={16} />保存</button></div>}
       />
       {jsonDialog && (
         <BrandJsonDialog
