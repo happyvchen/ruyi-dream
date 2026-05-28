@@ -1456,18 +1456,18 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
         <div className="brand-info-form">
           <div className="brand-field">
             <label>品牌名称</label>
-            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：LILY" />
+            <input value={name} onChange={(event) => setName(event.target.value)} />
           </div>
           <div className="brand-field">
             <label>品牌标语</label>
-            <textarea value={tagline} onChange={(event) => setTagline(event.target.value)} placeholder="填写一句面向拍摄和选搭的品牌标语" />
+            <textarea value={tagline} onChange={(event) => setTagline(event.target.value)} />
           </div>
-          <BrandListEditor title="品牌价值观" items={values} onChange={setValues} placeholder="例如：彰显女性力量" />
-          <BrandListEditor title="品牌美学" items={aesthetic} onChange={setAesthetic} placeholder="例如：摩登职场风尚" />
-          <BrandListEditor title="沟通语调" items={tone} onChange={setTone} placeholder="例如：专业" />
+          <BrandListEditor title="品牌价值观" items={values} onChange={setValues} />
+          <BrandListEditor title="品牌美学" items={aesthetic} onChange={setAesthetic} />
+          <BrandListEditor title="沟通语调" items={tone} onChange={setTone} />
           <div className="brand-field">
             <label>业务概览</label>
-            <textarea className="large" value={businessOverview} onChange={(event) => setBusinessOverview(event.target.value)} placeholder="填写品牌简介、核心客群、品类定位和视觉生产边界" />
+            <textarea className="large" value={businessOverview} onChange={(event) => setBusinessOverview(event.target.value)} />
           </div>
         </div>
       </div>
@@ -1475,11 +1475,10 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
   )
 }
 
-function BrandListEditor({ title, items, onChange, placeholder }: {
+function BrandListEditor({ title, items, onChange }: {
   title: string
   items: string[]
   onChange: (items: string[]) => void
-  placeholder: string
 }) {
   const visibleItems = items.length ? items : ['']
   function update(index: number, value: string) {
@@ -1498,7 +1497,7 @@ function BrandListEditor({ title, items, onChange, placeholder }: {
       <div className="brand-list-editor">
         {visibleItems.map((item, index) => (
           <div className="brand-list-row" key={`${title}-${index}`}>
-            <input value={item} onChange={(event) => update(index, event.target.value)} placeholder={placeholder} />
+            <input value={item} onChange={(event) => update(index, event.target.value)} />
             <button className="ghost-icon danger-icon" onClick={() => remove(index)} title="删除"><Trash2 size={15} /></button>
           </div>
         ))}
