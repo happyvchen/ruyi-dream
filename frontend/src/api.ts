@@ -489,6 +489,7 @@ export const api = {
   exportTaxonomyRules: () => request<TaxonomyExportPayload>('/api/taxonomy/export'),
   getTaxonomyPromptCard: (mode: 'full' | 'compact') =>
     request<TaxonomyPromptCard>(params('/api/taxonomy/prompt-card', { mode })),
+  getTaxonomyStarterKit: () => request<TaxonomyExportPayload>('/api/taxonomy/starter-kit'),
   importTaxonomyRules: (payload: { dimensions: unknown[]; tags: unknown[]; relations: unknown[]; applicabilityRules: unknown[] }) =>
     request<TaxonomyRules>('/api/taxonomy/import', { method: 'POST', body: JSON.stringify(payload) }),
   createTaxonomyDimension: (payload: TaxonomyDimensionPayload & { code: string; labelZh: string }) =>

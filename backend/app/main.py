@@ -41,6 +41,7 @@ from .object_storage import (
     unique_key,
 )
 from .planner import PlannerError, SHOT_SLOTS, normalize_plan as normalize_planner_plan, plan_with_gemini
+from .taxonomy_starter import legacy_lily_taxonomy_starter_payload
 
 
 settings = get_settings()
@@ -382,36 +383,24 @@ TERMINAL_IMAGE_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
 RUNNING_GENERATION_TASK_STATUSES = {"STYLING_RUNNING", "PREVIEW_RUNNING", "FINAL_RUNNING"}
 PLANNING_STATUSES = {"PLANNING"}
 REVIEW_STATUSES = {"candidate", "approved", "needs_regen", "needs_retouch", "delivered"}
-LILY_TAG_SCHEMA_VERSION = "lily-garment-tags-v1"
+TAXONOMY_TAGGING_SCHEMA_VERSION = "ruyi-taxonomy-tagging-v1"
 TAG_REVIEW_CONFIDENCE_THRESHOLD = 0.72
-TAG_CATEGORIES = {"top", "bottom", "dress", "jumpsuit", "outerwear", "knitwear", "suit_set", "other_garment", "unsupported_accessory", "unknown"}
-TAG_SUB_CATEGORIES = {"shirt", "blouse", "t_shirt", "vest", "camisole", "cardigan", "blazer", "jacket", "trench", "coat", "down_jacket", "trousers", "jeans", "shorts", "skirt", "dress", "other"}
-TAG_COLORS = {"black", "white", "ivory", "beige", "grey", "blue", "navy", "brown", "green", "red", "pink", "yellow", "purple", "metallic", "multi", "unknown"}
-TAG_COLOR_TEMPERATURES = {"warm", "cool", "neutral", "mixed", "unknown"}
-TAG_CONTRAST_LEVELS = {"low", "medium", "high"}
-TAG_COLOR_DISTRIBUTIONS = {"solid", "color_block", "trim", "gradient", "print_based"}
-TAG_MATERIALS_VISUAL = {"cotton_like", "linen_like", "silk_like", "satin_like", "acetate_like", "knit", "wool_like", "denim", "leather_like", "lace", "chiffon", "tweed_like", "down_padded", "technical_fabric", "unknown"}
-TAG_SURFACE_TEXTURES = {"smooth", "ribbed", "openwork", "slub", "woven_texture", "sheer", "glossy", "matte", "structured", "soft_drape"}
-TAG_FITS = {"slim", "regular", "relaxed", "loose", "oversized", "unknown"}
-TAG_SILHOUETTES = {"straight", "a_line", "h_line", "x_line", "wide_leg", "flare", "tapered", "cropped", "waist_defined", "boxy"}
-TAG_STRUCTURES = {"tailored", "soft", "draped", "layered", "structured_shoulder", "dropped_shoulder", "pleated", "gathered"}
-TAG_TOP_LENGTHS = {"cropped", "hip", "long", "unknown"}
-TAG_SLEEVE_LENGTHS = {"sleeveless", "short", "elbow", "three_quarter", "long", "unknown"}
-TAG_BOTTOM_LENGTHS = {"short", "knee", "midi", "ankle", "full", "unknown"}
-TAG_NECKLINES = {"crew", "v_neck", "polo", "shirt_collar", "lapel", "boat", "square", "halter", "cowl", "unknown"}
-TAG_CLOSURES = {"button", "zipper", "pullover", "wrap", "tie", "open_front", "unknown"}
-TAG_DETAILS = {"asymmetric", "lace", "contrast_trim", "embroidery", "pocket", "pleat", "cutout", "patchwork", "print", "button", "ruffle", "bow_tie", "belt", "slit"}
-TAG_PATTERNS = {"solid", "stripe", "check", "polka_dot", "floral", "graphic", "abstract", "texture_pattern", "logo", "animal", "unknown"}
-TAG_PATTERN_SCALES = {"none", "small", "medium", "large", "mixed", "unknown"}
-TAG_WEARING_METHODS = {"buttoned", "open", "tucked", "untucked", "belted", "layered"}
-TAG_COVERAGE_RISKS = {"none", "may_cover_hero", "likely_cover_hero", "unknown"}
-TAG_FORMALITIES = {"casual", "smart_casual", "office", "formal", "unknown"}
-TAG_OCCASIONS = {"daily", "commute", "office", "light_social", "date", "travel", "home"}
-TAG_SEASONS = {"spring", "summer", "autumn", "winter"}
-TAG_PAIRING_CATEGORIES = {"top", "bottom", "outerwear", "dress", "knitwear"}
-TAG_SILHOUETTE_PAIRINGS = {"slim_top", "relaxed_top", "wide_leg_bottom", "straight_bottom", "a_line_skirt"}
-TAG_STYLE_RISKS = {"too_formal", "too_casual", "too_sweet", "too_street", "too_party", "too_heavy", "too_busy", "none"}
-TAG_REVIEW_REASONS = {"low_confidence", "conflicting_images", "unclear_category", "title_image_conflict", "insufficient_images", "unsupported_accessory", "uncertain_material", "uncertain_color", "uncertain_fit", "fallback_tags"}
+TAXONOMY_REVIEW_REASONS = {
+    "low_confidence",
+    "conflicting_images",
+    "unclear_category",
+    "title_image_conflict",
+    "insufficient_images",
+    "unsupported_accessory",
+    "uncertain_material",
+    "uncertain_color",
+    "uncertain_fit",
+    "fallback_tags",
+    "unmapped_observation",
+    "invalid_tag_reference",
+    "missing_required_rule",
+    "disallowed_tag",
+}
 LOGIN_FAILURE_WINDOW_SECONDS = 300
 LOGIN_FAILURE_LIMIT = 8
 login_failures_by_client: dict[str, list[float]] = {}
@@ -1153,7 +1142,7 @@ async def create_styling_garment(
             INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, tag_schema_version, created_at, updated_at)
             VALUES (?, 'DRAFT', ?, ?, ?, ?, ?)
             """,
-            (clean_code, dumps({}), dumps({}), LILY_TAG_SCHEMA_VERSION, timestamp, timestamp),
+            (clean_code, dumps({}), dumps({}), TAXONOMY_TAGGING_SCHEMA_VERSION, timestamp, timestamp),
         )
         garment_id = int(cursor.lastrowid)
         for index, asset in enumerate(assets):
@@ -1268,7 +1257,7 @@ async def run_styling_garment_tagging(garment_id: int) -> None:
         timestamp = now_iso()
         row = db.execute("SELECT manual_tags_json FROM styling_garments WHERE id = ?", (garment_id,)).fetchone()
         manual_tags = loads(row["manual_tags_json"], {}) if row else {}
-        ai_tags = tagging_result.get("ai_tags", {})
+        ai_tags = tagging_result.get("ai_tags") if isinstance(tagging_result.get("ai_tags"), dict) else tagging_result
         official_title_tags = tagging_result.get("official_title_tags", {})
         tag_meta = apply_tag_review_policy(ai_tags, tagging_result.get("tag_meta", {}))
         effective_tags = build_effective_tags(ai_tags, official_title_tags, manual_tags)
@@ -1295,7 +1284,7 @@ async def run_styling_garment_tagging(garment_id: int) -> None:
                 dumps(official_title_tags),
                 dumps(effective_tags),
                 dumps(tag_meta),
-                tagging_result.get("schema_version", LILY_TAG_SCHEMA_VERSION),
+                tagging_result.get("schema_version", TAXONOMY_TAGGING_SCHEMA_VERSION),
                 timestamp,
                 timestamp,
                 garment_id,
@@ -2752,6 +2741,12 @@ def get_taxonomy_prompt_card(request: Request, mode: str = Query("compact")) -> 
         "mode": normalized_mode,
         "content": build_active_taxonomy_prompt_card(normalized_mode),
     }
+
+
+@app.get("/api/taxonomy/starter-kit")
+def get_taxonomy_starter_kit(request: Request) -> dict[str, Any]:
+    require_admin(request)
+    return legacy_lily_taxonomy_starter_payload()
 
 
 @app.post("/api/taxonomy/import")
@@ -5587,10 +5582,12 @@ def get_styling_garment_by_id(garment_id: int) -> dict[str, Any]:
 
 async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
     garment = get_styling_garment_by_id(garment_id)
-    prompt = build_lily_tagging_prompt(garment)
-    request_snapshot = build_lily_tagging_request_snapshot(garment, prompt)
+    taxonomy_context = build_active_taxonomy_context()
+    ensure_taxonomy_ready_for_tagging(taxonomy_context)
+    prompt = build_taxonomy_tagging_prompt(garment, taxonomy_context)
+    request_snapshot = build_taxonomy_tagging_request_snapshot(garment, prompt, taxonomy_context)
     if not settings.gemini_api_key:
-        tagging_result = fallback_lily_tagging_result(garment)
+        tagging_result = fallback_taxonomy_tagging_result(garment, taxonomy_context)
         attempt_id = create_attempt("styling_garment_tagging", garment_id, "fallback", request_snapshot)
         finish_attempt(attempt_id, "SUCCEEDED", {"reason": "gemini_api_key_missing", "normalized": tagging_result})
         return tagging_result
@@ -5598,7 +5595,7 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
         from google import genai
         from google.genai import types
     except Exception:
-        tagging_result = fallback_lily_tagging_result(garment)
+        tagging_result = fallback_taxonomy_tagging_result(garment, taxonomy_context)
         attempt_id = create_attempt("styling_garment_tagging", garment_id, "fallback", request_snapshot)
         finish_attempt(attempt_id, "SUCCEEDED", {"reason": "google_genai_import_failed", "normalized": tagging_result})
         return tagging_result
@@ -5624,16 +5621,23 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
     except Exception as exc:
         finish_attempt(attempt_id, "FAILED", {"raw_text": text}, error_message=f"Gemini 返回内容不是合法 JSON：{exc}")
         raise
-    normalized = normalize_lily_tagging_result(raw, garment)
+    normalized = normalize_taxonomy_tagging_result(raw, garment, taxonomy_context)
     finish_attempt(attempt_id, "SUCCEEDED", {"raw_text": text, "raw_json": raw, "normalized": normalized})
     return normalized
 
 
-def build_lily_tagging_request_snapshot(garment: dict[str, Any], prompt: str) -> dict[str, Any]:
+def build_taxonomy_tagging_request_snapshot(garment: dict[str, Any], prompt: str, taxonomy_context: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema_version": LILY_TAG_SCHEMA_VERSION,
+        "schema_version": TAXONOMY_TAGGING_SCHEMA_VERSION,
         "model": settings.gemini_model,
         "prompt": prompt,
+        "taxonomy": {
+            "dimension_count": len(taxonomy_context["dimensions"]),
+            "tag_count": len(taxonomy_context["tags"]),
+            "relation_count": len(taxonomy_context["relations"]),
+            "applicability_rule_count": len(taxonomy_context["applicabilityRules"]),
+            "content_hash": taxonomy_context.get("contentHash"),
+        },
         "images": [
             {
                 "image_id": image.get("id"),
@@ -5653,7 +5657,7 @@ def build_lily_tagging_request_snapshot(garment: dict[str, Any], prompt: str) ->
     }
 
 
-def build_lily_tagging_prompt(garment: dict[str, Any]) -> str:
+def build_taxonomy_tagging_prompt(garment: dict[str, Any], taxonomy_context: dict[str, Any]) -> str:
     image_hints = [
         {
             "image_id": image.get("id"),
@@ -5671,16 +5675,17 @@ def build_lily_tagging_prompt(garment: dict[str, Any]) -> str:
         "code": garment.get("code"),
         "images": image_hints,
         "official_title": "",
-        "brand_boundary": {
+        "brand_boundary_reference": {
             "core": ["商务时装", "都市通勤", "年轻职业女性", "简约", "优雅", "自信", "清新明快", "轻松但得体", "时尚但不夸张", "商品优先", "现代", "利落", "干净"],
             "avoid": ["传统严肃职业制服感", "夸张时装大片感", "网红辣妹风", "森系/甜美少女风", "街头潮牌风", "宴会礼服感", "鞋包饰品抢服装主体", "复杂外景或戏剧化强光"],
         },
-        "schema_version": LILY_TAG_SCHEMA_VERSION,
+        "schema_version": TAXONOMY_TAGGING_SCHEMA_VERSION,
     }
+    taxonomy_card = render_compact_taxonomy_prompt_card(taxonomy_context)
     return f"""
-你是 Lily 商务时装品牌的服装视觉生产资产打标专家。你的任务是把一组真实服装图片转成可追溯、可校验、可用于智能选搭的结构化标签。
+你是 Ruyi-Dream 的服装视觉生产资产打标专家。你的任务是把真实服装图片转成可追溯、可校验、可用于智能选搭的结构化标签。
 
-你不是文案助手，也不是生图助手。不要写 prompt，不要写营销文案，不要决定商品是否最终可用。
+你不是文案助手，也不是生图助手。不要写生图 prompt，不要写营销文案，不要决定最终成片，只做服装事实识别、证据说明和规则内打标。
 
 【本次输入】
 {dumps(tagging_input)}
@@ -5689,243 +5694,330 @@ def build_lily_tagging_prompt(garment: dict[str, Any]) -> str:
 1. 图片事实最高：服装品类、颜色、版型、结构、细节、可见性必须以图片为准。
 2. 多图一致性第二：如果多张图疑似不同商品，标记 needs_review=true，并在 review_reasons 加 conflicting_images。
 3. 官方标题只是证据层：只能进入 official_title_tags；不得覆盖图片事实。
-4. Lily 品牌边界只用于风格分数和风险判断，不要把品牌词机械复制到每件商品。
+4. 品牌边界只用于风格分数和风险判断，不要把品牌词机械复制到每件商品。
 
-【先做这些判断】
+【判断步骤】
 1. 判断图片组是否展示同一件可售服装资产。
 2. 排除模特、鞋、包、首饰、背景、道具；它们不是本资产。
-3. 判断主商品大类、子类、是否套装。
-4. 判断颜色、图案、视觉材质、表面纹理、版型、轮廓、长度、领型、闭合方式、细节。
-5. 判断穿着能力：可单穿、可内搭、可外搭、能否作为下装搭配、是否可能遮挡主推款。
-6. 判断 Lily 场景适配和搭配约束。
-7. 标注每个低置信度原因。
+3. 先判断主商品品类，再根据品类适用范围判断可用的部件与设计细节。
+4. 判断颜色、图案、视觉材质、表面肌理、版型、廓形、结构、长度、领型、闭合方式、设计细节。
+5. 判断穿着能力：可单穿、可内搭、可外搭、可作为下装搭配、是否可能遮挡主推款。
+6. 判断 Lily 场景适配、搭配约束和风格风险。
+7. 标注每个低置信度原因，并用中文写清楚证据。
 
-【枚举与评判规则】
-- category:
-  - top: 衬衫、T 恤、背心、针织上衣等上装。
-  - bottom: 裤装、半裙、短裤等下装。
-  - dress: 连衣裙。
-  - jumpsuit: 连体裤/连体衣。
-  - outerwear: 西装、夹克、风衣、大衣、羽绒外套等外穿外套。
-  - knitwear: 以针织视觉为主且更适合作为针织单品管理的服装。
-  - suit_set: 明确成套售卖或图片主体为套装。
-  - other_garment: 是服装但不能稳定归入以上品类。
-  - unsupported_accessory: 鞋、包、首饰、围巾、帽子等非服装配饰。
-  - unknown: 图片不足或无法判断。
-- sub_category 可选值: shirt, blouse, t_shirt, vest, camisole, cardigan, blazer, jacket, trench, coat, down_jacket, trousers, jeans, shorts, skirt, dress, other。
-- colors.primary 可选值: black, white, ivory, beige, grey, blue, navy, brown, green, red, pink, yellow, purple, metallic, multi, unknown。
-  - primary 是视觉面积最大或商品识别最重要的颜色。
-  - secondary 只写明显辅色；不要写光影造成的颜色。
-  - temperature: warm, cool, neutral, mixed, unknown。
-  - contrast_level: low, medium, high。
-  - color_distribution: solid, color_block, trim, gradient, print_based。
-- materials_visual 可选值: cotton_like, linen_like, silk_like, satin_like, acetate_like, knit, wool_like, denim, leather_like, lace, chiffon, tweed_like, down_padded, technical_fabric, unknown。
-  - 只判断视觉材质；不要把标题中的“桑蚕丝/莱赛尔/醋酸”等成分当作图片事实。
-- surface_texture 可选值: smooth, ribbed, openwork, slub, woven_texture, sheer, glossy, matte, structured, soft_drape。
-- fit 可选值: slim, regular, relaxed, loose, oversized, unknown。
-  - slim=贴身修身；regular=常规合体；relaxed=略宽松；loose=明显宽松；oversized=刻意大廓形。
-- silhouette 可选值: straight, a_line, h_line, x_line, wide_leg, flare, tapered, cropped, waist_defined, boxy。
-- structure 可选值: tailored, soft, draped, layered, structured_shoulder, dropped_shoulder, pleated, gathered。
-- length:
-  - top_length: cropped, hip, long, unknown。
-  - sleeve_length: sleeveless, short, elbow, three_quarter, long, unknown。
-  - bottom_length: short, knee, midi, ankle, full, unknown。
-- neckline 可选值: crew, v_neck, polo, shirt_collar, lapel, boat, square, halter, cowl, unknown。
-- closure 可选值: button, zipper, pullover, wrap, tie, open_front, unknown。
-- details 可选值: asymmetric, lace, contrast_trim, embroidery, pocket, pleat, cutout, patchwork, print, button, ruffle, bow_tie, belt, slit。
-- patterns 可选值: solid, stripe, check, polka_dot, floral, graphic, abstract, texture_pattern, logo, animal, unknown。
-- pattern_scale 可选值: none, small, medium, large, mixed。
-- wearability:
-  - can_be_worn_alone: 单独穿着是否成立。
-  - can_be_inner_layer: 作为内搭是否自然。
-  - can_be_outer_layer: 作为外搭是否自然。
-  - can_be_bottom_pairing: 是否是下装/可与上装搭配。
-  - can_be_set_anchor: 是否可作为套装核心。
-  - recommended_wearing_methods 可选值: buttoned, open, tucked, untucked, belted, layered。
-  - coverage_risk 可选值: none, may_cover_hero, likely_cover_hero, unknown。
-- lily_style 分数均为 0-1:
-  - business_fashion_score: 是否符合商务时装，而非制服或纯休闲。
-  - commute_score: 是否适合都市通勤。
-  - clean_score: 是否清爽、利落、不过度复杂。
-  - relaxed_score: 是否轻松但得体。
-  - feminine_score: 是否有女性化柔和/优雅特征。
-  - fashion_detail_score: 是否有设计点但不夸张。
-  - formality 可选值: casual, smart_casual, office, formal, unknown。
-  - style_notes 最多 3 条，每条不超过 30 个中文字符。
-- occasion 可选值: daily, commute, office, light_social, date, travel, home。
-- season 可选值: spring, summer, autumn, winter。
-- styling_compatibility:
-  - best_pairing_categories 可选值: top, bottom, outerwear, dress, knitwear。
-  - color_pairing.works_with 使用颜色枚举。
-  - silhouette_pairing.works_with 可选值: slim_top, relaxed_top, wide_leg_bottom, straight_bottom, a_line_skirt。
-  - style_risk 可选值: too_formal, too_casual, too_sweet, too_street, too_party, too_heavy, too_busy, none。
-  - pairing_brief 必须是短句，用于全库选搭，最多 40 个中文字符。
+【启用中的标签规则】
+{taxonomy_card}
+
+【规则外发现】
+- 如果你看到了规则中没有的真实视觉事实，不要创造 tag_code。
+- 把它写入 unmapped_observations 或 suggested_new_tags，供管理员审核扩展标签规则。
+- unmapped_observations/suggested_new_tags 不会自动成为正式标签。
 
 【复核规则】
 以下任一情况必须 needs_review=true:
-- category 为 unknown 或 unsupported_accessory。
+- 没有可靠品类，或 category 为 unknown / unsupported_accessory。
 - overall_confidence < 0.72。
 - 多图疑似不同商品。
 - 图片只有局部细节，无法判断主商品。
 - 标题与图片冲突。
-
-review_reasons 可选值: low_confidence, conflicting_images, unclear_category, title_image_conflict, insufficient_images, unsupported_accessory, uncertain_material, uncertain_color, uncertain_fit。
+- 输出了规则外观察、非法 tag_code、禁用适用规则，或缺少 required 适用规则。
 
 【输出要求】
 - 只输出严格 JSON，不输出 Markdown，不输出解释。
-- 所有枚举字段必须从可选值中选择；不确定用 unknown 或空数组。
-- 自由文本字段要短，不写散文。
+- 正式 tags 数组只能引用“启用、可直接打标”的 dimension_code + tag_code。
+- value_type 必须和标签 value_kind 一致；score 标签必须给出 0 到 1 的 score。
+- evidence、note、visual_profile、warnings 等自然语言全部使用中文。
 - 置信度必须是 0 到 1 的数字。
 - tag_meta.source_image_ids 使用输入中的 image_id。
 
 【输出 JSON 模板】
 {{
-  "schema_version": "{LILY_TAG_SCHEMA_VERSION}",
-  "ai_tags": {{
-    "category": "unknown",
-    "sub_category": "other",
-    "official_category_candidates": [],
-    "is_set": false,
-    "colors": {{"primary": "unknown", "secondary": [], "temperature": "unknown", "contrast_level": "medium", "color_distribution": "solid"}},
-    "materials_visual": [],
-    "surface_texture": [],
-    "fit": "unknown",
-    "silhouette": [],
-    "structure": [],
-    "length": {{"top_length": "unknown", "sleeve_length": "unknown", "bottom_length": "unknown"}},
-    "neckline": [],
-    "closure": [],
-    "details": [],
-    "patterns": [],
-    "pattern_scale": "none",
-    "wearability": {{"can_be_worn_alone": true, "can_be_inner_layer": false, "can_be_outer_layer": false, "can_be_bottom_pairing": false, "can_be_set_anchor": false, "recommended_wearing_methods": [], "coverage_risk": "unknown"}},
-    "lily_style": {{"business_fashion_score": 0.0, "commute_score": 0.0, "clean_score": 0.0, "relaxed_score": 0.0, "feminine_score": 0.0, "fashion_detail_score": 0.0, "formality": "unknown", "style_notes": []}},
-    "occasion": [],
-    "season": [],
-    "season_confidence": 0.0,
-    "styling_compatibility": {{"best_pairing_categories": [], "avoid_pairing_categories": [], "color_pairing": {{"works_with": [], "avoid_with": [], "notes": ""}}, "silhouette_pairing": {{"works_with": [], "avoid_with": [], "notes": ""}}, "style_risk": [], "pairing_brief": ""}}
+  "schema_version": "{TAXONOMY_TAGGING_SCHEMA_VERSION}",
+  "tags": [
+    {{
+      "dimension_code": "category",
+      "tag_code": "unknown",
+      "value_type": "tag",
+      "score": null,
+      "value_text": null,
+      "value_bool": null,
+      "confidence": 0.0,
+      "evidence": "中文图片证据"
+    }}
+  ],
+  "visual_profile": {{
+    "overall_summary": "中文整体视觉摘要，最多 80 字",
+    "key_parts": ["必须保真的服装部件或设计细节"],
+    "styling_interpretation": "中文搭配师解读，最多 80 字",
+    "pairing_suggestion_text": "适合搭配的中文短句",
+    "avoid_pairing_text": "需要避免的搭配中文短句",
+    "uncertain_points": ["证据不足或需人工判断的点"]
   }},
-  "official_title_tags": {{"raw_title": "", "year": "", "season_text": "", "official_series": [], "official_material_terms": [], "official_style_terms": [], "official_category_terms": [], "official_selling_points": []}},
+  "official_title_tags": {{"raw_title": "", "official_material_terms": [], "official_style_terms": [], "official_category_terms": [], "official_selling_points": []}},
+  "unmapped_observations": [{{"text": "规则外但图片可见的观察", "evidence": "中文证据", "confidence": 0.0}}],
+  "suggested_new_tags": [{{"dimension_code": "design_detail", "label_zh": "建议新增中文名", "reason": "为什么现有规则不够"}}],
   "tag_meta": {{"overall_confidence": 0.0, "field_confidence": {{}}, "needs_review": false, "review_reasons": [], "source_image_ids": [], "warnings": []}}
 }}
 """
 
 
-def fallback_lily_tagging_result(garment: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "schema_version": LILY_TAG_SCHEMA_VERSION,
-        "ai_tags": fallback_styling_tags(garment),
-        "official_title_tags": {},
-        "tag_meta": {
-            "tagger_provider": "fallback",
-            "tagger_model": "fallback",
-            "schema_version": LILY_TAG_SCHEMA_VERSION,
-            "overall_confidence": 0.5,
-            "field_confidence": {},
-            "needs_review": True,
-            "review_reasons": ["fallback_tags"],
-            "source_image_ids": [str(image.get("id")) for image in garment.get("images", [])],
-            "warnings": ["Gemini 未配置或不可用，已生成保守兜底标签"],
+def fallback_taxonomy_tagging_result(garment: dict[str, Any], taxonomy_context: dict[str, Any]) -> dict[str, Any]:
+    fallback_tags = []
+    category_unknown = taxonomy_context["tagByKey"].get(("category", "unknown"))
+    if category_unknown and category_unknown.get("isSelectable"):
+        fallback_tags.append({
+            "dimension_code": "category",
+            "tag_code": "unknown",
+            "value_type": "tag",
+            "score": None,
+            "value_text": None,
+            "value_bool": None,
+            "confidence": 0.5,
+            "evidence": "Gemini 未配置或不可用，无法完成图片判断。",
+        })
+    return normalize_taxonomy_tagging_result(
+        {
+            "schema_version": TAXONOMY_TAGGING_SCHEMA_VERSION,
+            "tags": fallback_tags,
+            "visual_profile": {
+                "overall_summary": f"{garment.get('code', '该服饰')} 待重新识别。",
+                "key_parts": [],
+                "styling_interpretation": "",
+                "pairing_suggestion_text": "",
+                "avoid_pairing_text": "",
+                "uncertain_points": ["Gemini 未配置或不可用"],
+            },
+            "official_title_tags": {},
+            "unmapped_observations": [],
+            "suggested_new_tags": [],
+            "tag_meta": {
+                "tagger_provider": "fallback",
+                "tagger_model": "fallback",
+                "schema_version": TAXONOMY_TAGGING_SCHEMA_VERSION,
+                "overall_confidence": 0.5,
+                "field_confidence": {},
+                "needs_review": True,
+                "review_reasons": ["fallback_tags"],
+                "source_image_ids": [str(image.get("id")) for image in garment.get("images", [])],
+                "warnings": ["Gemini 未配置或不可用，未生成完整正式标签"],
+            },
         },
-    }
+        garment,
+        taxonomy_context,
+    )
 
 
-def fallback_styling_tags(garment: dict[str, Any]) -> dict[str, Any]:
-    code = garment.get("code", "GARMENT")
-    return {
-        "category": "other_garment",
-        "sub_category": "other",
-        "official_category_candidates": [],
-        "is_set": False,
-        "colors": {"primary": "unknown", "secondary": [], "temperature": "unknown", "contrast_level": "medium", "color_distribution": "solid"},
-        "materials_visual": [],
-        "surface_texture": [],
-        "fit": "unknown",
-        "silhouette": [],
-        "structure": [],
-        "length": {"top_length": "unknown", "sleeve_length": "unknown", "bottom_length": "unknown"},
-        "neckline": [],
-        "closure": [],
-        "details": [],
-        "patterns": ["unknown"],
-        "pattern_scale": "unknown",
-        "wearability": {
-            "can_be_worn_alone": True,
-            "can_be_inner_layer": False,
-            "can_be_outer_layer": False,
-            "can_be_bottom_pairing": False,
-            "can_be_set_anchor": False,
-            "recommended_wearing_methods": [],
-            "coverage_risk": "unknown",
-        },
-        "lily_style": {
-            "business_fashion_score": 0.5,
-            "commute_score": 0.5,
-            "clean_score": 0.5,
-            "relaxed_score": 0.5,
-            "feminine_score": 0.5,
-            "fashion_detail_score": 0.5,
-            "formality": "unknown",
-            "style_notes": [],
-        },
-        "occasion": ["commute"],
-        "season": ["spring", "autumn"],
-        "season_confidence": 0.5,
-        "styling_compatibility": {
-            "best_pairing_categories": [],
-            "avoid_pairing_categories": [],
-            "color_pairing": {"works_with": [], "avoid_with": [], "notes": ""},
-            "silhouette_pairing": {"works_with": [], "avoid_with": [], "notes": ""},
-            "style_risk": ["none"],
-            "pairing_brief": f"{code} 搭配服饰，通勤简洁风格",
-        },
-    }
-
-
-def normalize_lily_tagging_result(raw: dict[str, Any], garment: dict[str, Any]) -> dict[str, Any]:
+def normalize_taxonomy_tagging_result(raw: dict[str, Any], garment: dict[str, Any], taxonomy_context: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raw = {}
-    if "ai_tags" in raw:
-        ai_tags = normalize_styling_tags(raw.get("ai_tags"), garment)
-        official_title_tags = normalize_official_title_tags(raw.get("official_title_tags"))
-        tag_meta = normalize_tag_meta(raw.get("tag_meta"), garment)
-    else:
-        ai_tags = normalize_styling_tags(raw, garment)
-        official_title_tags = {}
-        tag_meta = normalize_tag_meta({}, garment)
+    tags_value = raw.get("tags")
+    if not isinstance(tags_value, list) and isinstance(raw.get("ai_tags"), dict):
+        tags_value = raw["ai_tags"].get("tags")
+    normalized_tags, validation = normalize_taxonomy_tag_entries(tags_value, taxonomy_context)
+    visual_profile = normalize_visual_profile(raw.get("visual_profile"))
+    official_title_tags = normalize_official_title_tags(raw.get("official_title_tags"))
+    unmapped = normalize_unmapped_observations(raw.get("unmapped_observations"))
+    suggestions = normalize_suggested_new_tags(raw.get("suggested_new_tags"))
+    tag_meta = normalize_taxonomy_tag_meta(raw.get("tag_meta"), garment, validation, unmapped, suggestions, normalized_tags)
     return {
-        "schema_version": LILY_TAG_SCHEMA_VERSION,
-        "ai_tags": ai_tags,
+        "schema_version": TAXONOMY_TAGGING_SCHEMA_VERSION,
+        "tags": normalized_tags,
+        "tags_by_dimension": group_taxonomy_tags_by_dimension(normalized_tags),
+        "visual_profile": visual_profile,
+        "unmapped_observations": unmapped,
+        "suggested_new_tags": suggestions,
+        "validation": validation,
+        "label_summary": taxonomy_label_summary(normalized_tags, taxonomy_context),
         "official_title_tags": official_title_tags,
         "tag_meta": tag_meta,
     }
 
 
-def normalize_styling_tags(tags: Any, garment: dict[str, Any]) -> dict[str, Any]:
-    fallback = fallback_styling_tags(garment)
-    merged = deep_merge(fallback, tags if isinstance(tags, dict) else {})
-    merged["category"] = normalize_enum(merged.get("category"), TAG_CATEGORIES, "unknown")
-    merged["sub_category"] = normalize_enum(merged.get("sub_category"), TAG_SUB_CATEGORIES, "other")
-    merged["is_set"] = bool(merged.get("is_set"))
-    merged["colors"] = normalize_color_tags(merged.get("colors"), fallback["colors"])
-    merged["materials_visual"] = normalize_enum_list(merged.get("materials_visual"), TAG_MATERIALS_VISUAL)
-    merged["surface_texture"] = normalize_enum_list(merged.get("surface_texture"), TAG_SURFACE_TEXTURES)
-    merged["fit"] = normalize_enum(merged.get("fit"), TAG_FITS, "unknown")
-    merged["silhouette"] = normalize_enum_list(merged.get("silhouette"), TAG_SILHOUETTES)
-    merged["structure"] = normalize_enum_list(merged.get("structure"), TAG_STRUCTURES)
-    merged["length"] = normalize_length_tags(merged.get("length"), fallback["length"])
-    merged["neckline"] = normalize_enum_list(merged.get("neckline"), TAG_NECKLINES)
-    merged["closure"] = normalize_enum_list(merged.get("closure"), TAG_CLOSURES)
-    merged["details"] = normalize_enum_list(merged.get("details"), TAG_DETAILS)
-    merged["patterns"] = normalize_enum_list(merged.get("patterns"), TAG_PATTERNS)
-    merged["pattern_scale"] = normalize_enum(merged.get("pattern_scale"), TAG_PATTERN_SCALES, "unknown")
-    merged["wearability"] = normalize_wearability_tags(merged.get("wearability"), fallback["wearability"])
-    merged["lily_style"] = normalize_score_object(merged.get("lily_style"), fallback["lily_style"])
-    merged["occasion"] = normalize_enum_list(merged.get("occasion"), TAG_OCCASIONS)
-    merged["season"] = normalize_enum_list(merged.get("season"), TAG_SEASONS)
-    merged["season_confidence"] = clamp_float(merged.get("season_confidence"), 0.0, 1.0, 0.0)
-    merged["styling_compatibility"] = normalize_styling_compatibility(merged.get("styling_compatibility"), fallback["styling_compatibility"])
-    return merged
+def normalize_taxonomy_tag_entries(value: Any, taxonomy_context: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    active_tags = taxonomy_context["tagByKey"]
+    result: list[dict[str, Any]] = []
+    invalid: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for raw_item in value if isinstance(value, list) else []:
+        if not isinstance(raw_item, dict):
+            invalid.append({"reason": "标签项不是对象", "raw": raw_item})
+            continue
+        dimension_code = sanitize_name(str(raw_item.get("dimension_code") or raw_item.get("dimensionCode") or ""))
+        tag_code = sanitize_name(str(raw_item.get("tag_code") or raw_item.get("tagCode") or ""))
+        tag_def = active_tags.get((dimension_code, tag_code))
+        if not tag_def or not tag_def.get("isSelectable"):
+            invalid.append({"reason": "非法或不可直接打标的标签引用", "dimension_code": dimension_code, "tag_code": tag_code})
+            continue
+        value_type = str(raw_item.get("value_type") or raw_item.get("valueKind") or tag_def.get("valueKind") or "tag").strip()
+        expected_type = str(tag_def.get("valueKind") or "tag")
+        if value_type != expected_type:
+            value_type = expected_type
+        item: dict[str, Any] = {
+            "dimension_code": dimension_code,
+            "tag_code": tag_code,
+            "value_type": value_type,
+            "score": None,
+            "value_text": None,
+            "value_bool": None,
+            "confidence": clamp_float(raw_item.get("confidence"), 0.0, 1.0, 0.0),
+            "evidence": str(raw_item.get("evidence") or raw_item.get("note") or "")[:240],
+        }
+        if value_type == "score":
+            item["score"] = clamp_float(raw_item.get("score"), 0.0, 1.0, 0.0)
+        elif value_type == "boolean":
+            item["value_bool"] = bool(raw_item.get("value_bool", raw_item.get("valueBool", True)))
+        elif value_type == "text":
+            item["value_text"] = str(raw_item.get("value_text") or raw_item.get("valueText") or "")[:240]
+        key = (dimension_code, tag_code, value_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+
+    validation = validate_taxonomy_tag_entries(result, taxonomy_context)
+    if invalid:
+        validation["invalidTagReferences"] = invalid[:20]
+        validation["reviewReasons"].append("invalid_tag_reference")
+    validation["reviewReasons"] = list(dict.fromkeys(validation["reviewReasons"]))
+    return result, validation
+
+
+def validate_taxonomy_tag_entries(tags: list[dict[str, Any]], taxonomy_context: dict[str, Any]) -> dict[str, Any]:
+    tag_by_key = taxonomy_context["tagByKey"]
+    selected_keys = {(item["dimension_code"], item["tag_code"]) for item in tags}
+    category_keys = [key for key in selected_keys if key[0] == "category"]
+    review_reasons: list[str] = []
+    disallowed: list[dict[str, Any]] = []
+    missing_required: list[dict[str, Any]] = []
+    if not category_keys:
+        review_reasons.append("unclear_category")
+    for category_key in category_keys:
+        for rule in taxonomy_context["applicabilityRules"]:
+            if not taxonomy_rule_matches_category(rule, category_key, tag_by_key):
+                continue
+            target_key = (rule["targetDimensionCode"], rule["targetTagCode"])
+            if rule["mode"] == "disallowed" and target_key in selected_keys:
+                review_reasons.append("disallowed_tag")
+                disallowed.append(rule)
+            if rule["mode"] == "required" and target_key not in selected_keys:
+                review_reasons.append("missing_required_rule")
+                missing_required.append(rule)
+    return {
+        "reviewReasons": review_reasons,
+        "disallowedRules": disallowed[:20],
+        "missingRequiredRules": missing_required[:20],
+    }
+
+
+def taxonomy_rule_matches_category(rule: dict[str, Any], category_key: tuple[str, str], tag_by_key: dict[tuple[str, str], dict[str, Any]]) -> bool:
+    rule_key = (rule["categoryDimensionCode"], rule["categoryTagCode"])
+    if rule_key == category_key:
+        return True
+    if not rule.get("appliesToDescendants"):
+        return False
+    current = tag_by_key.get(category_key)
+    while current and current.get("parentCode"):
+        parent_key = (current["dimensionCode"], current["parentCode"])
+        if parent_key == rule_key:
+            return True
+        current = tag_by_key.get(parent_key)
+    return False
+
+
+def normalize_visual_profile(value: Any) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "overall_summary": str(source.get("overall_summary") or source.get("overallSummary") or "")[:240],
+        "key_parts": ensure_string_list(source.get("key_parts") or source.get("keyParts"))[:12],
+        "styling_interpretation": str(source.get("styling_interpretation") or source.get("stylingInterpretation") or "")[:240],
+        "pairing_suggestion_text": str(source.get("pairing_suggestion_text") or source.get("pairingSuggestionText") or "")[:240],
+        "avoid_pairing_text": str(source.get("avoid_pairing_text") or source.get("avoidPairingText") or "")[:240],
+        "uncertain_points": ensure_string_list(source.get("uncertain_points") or source.get("uncertainPoints"))[:12],
+    }
+
+
+def normalize_unmapped_observations(value: Any) -> list[dict[str, Any]]:
+    observations: list[dict[str, Any]] = []
+    for item in value if isinstance(value, list) else []:
+        if isinstance(item, dict):
+            text = str(item.get("text") or item.get("label_zh") or item.get("labelZh") or "").strip()
+            if text:
+                observations.append({
+                    "text": text[:120],
+                    "evidence": str(item.get("evidence") or "")[:240],
+                    "confidence": clamp_float(item.get("confidence"), 0.0, 1.0, 0.0),
+                })
+        elif str(item).strip():
+            observations.append({"text": str(item).strip()[:120], "evidence": "", "confidence": 0.0})
+    return observations[:20]
+
+
+def normalize_suggested_new_tags(value: Any) -> list[dict[str, Any]]:
+    suggestions: list[dict[str, Any]] = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label_zh") or item.get("labelZh") or item.get("label") or "").strip()
+        if not label:
+            continue
+        suggestions.append({
+            "dimension_code": sanitize_name(str(item.get("dimension_code") or item.get("dimensionCode") or ""))[:80],
+            "label_zh": label[:80],
+            "reason": str(item.get("reason") or "")[:240],
+        })
+    return suggestions[:20]
+
+
+def normalize_taxonomy_tag_meta(
+    value: Any,
+    garment: dict[str, Any],
+    validation: dict[str, Any],
+    unmapped: list[dict[str, Any]],
+    suggestions: list[dict[str, Any]],
+    tags: list[dict[str, Any]],
+) -> dict[str, Any]:
+    meta = value if isinstance(value, dict) else {}
+    confidence = clamp_float(meta.get("overall_confidence"), 0.0, 1.0, 0.5)
+    reasons = [reason for reason in ensure_string_list(meta.get("review_reasons")) if reason in TAXONOMY_REVIEW_REASONS]
+    reasons.extend(reason for reason in validation.get("reviewReasons", []) if reason in TAXONOMY_REVIEW_REASONS)
+    if confidence < TAG_REVIEW_CONFIDENCE_THRESHOLD:
+        reasons.append("low_confidence")
+    if unmapped or suggestions:
+        reasons.append("unmapped_observation")
+    selected_category_codes = [item["tag_code"] for item in tags if item["dimension_code"] == "category"]
+    if "unknown" in selected_category_codes:
+        reasons.append("unclear_category")
+    if "unsupported_accessory" in selected_category_codes:
+        reasons.append("unsupported_accessory")
+    reasons = list(dict.fromkeys(reasons))
+    return {
+        "tagger_provider": str(meta.get("tagger_provider") or "gemini")[:40],
+        "tagger_model": str(meta.get("tagger_model") or settings.gemini_model)[:80],
+        "schema_version": TAXONOMY_TAGGING_SCHEMA_VERSION,
+        "overall_confidence": confidence,
+        "field_confidence": meta.get("field_confidence") if isinstance(meta.get("field_confidence"), dict) else {},
+        "needs_review": bool(meta.get("needs_review")) or bool(reasons),
+        "review_reasons": reasons,
+        "source_image_ids": ensure_string_list(meta.get("source_image_ids")) or [str(image.get("id")) for image in garment.get("images", [])],
+        "warnings": ensure_string_list(meta.get("warnings")),
+    }
+
+
+def group_taxonomy_tags_by_dimension(tags: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in tags:
+        grouped.setdefault(item["dimension_code"], []).append(item)
+    return grouped
+
+
+def taxonomy_label_summary(tags: list[dict[str, Any]], taxonomy_context: dict[str, Any]) -> dict[str, list[str]]:
+    tag_by_key = taxonomy_context["tagByKey"]
+    summary: dict[str, list[str]] = {}
+    for item in tags:
+        tag_def = tag_by_key.get((item["dimension_code"], item["tag_code"]))
+        label = tag_def.get("labelZh") if tag_def else item["tag_code"]
+        summary.setdefault(item["dimension_code"], []).append(str(label))
+    return summary
 
 
 def normalize_official_title_tags(value: Any) -> dict[str, Any]:
@@ -5968,39 +6060,21 @@ def normalize_manual_business_tags(value: Any) -> dict[str, Any]:
     return normalized
 
 
-def normalize_tag_meta(value: Any, garment: dict[str, Any]) -> dict[str, Any]:
-    meta = value if isinstance(value, dict) else {}
-    confidence = clamp_float(meta.get("overall_confidence"), 0.0, 1.0, 0.5)
-    review_reasons = normalize_enum_list(meta.get("review_reasons"), TAG_REVIEW_REASONS)
-    if confidence < TAG_REVIEW_CONFIDENCE_THRESHOLD and "low_confidence" not in review_reasons:
-        review_reasons.append("low_confidence")
-    return {
-        "tagger_provider": str(meta.get("tagger_provider") or "gemini")[:40],
-        "tagger_model": str(meta.get("tagger_model") or settings.gemini_model)[:80],
-        "schema_version": LILY_TAG_SCHEMA_VERSION,
-        "overall_confidence": confidence,
-        "field_confidence": meta.get("field_confidence") if isinstance(meta.get("field_confidence"), dict) else {},
-        "needs_review": bool(meta.get("needs_review")) or confidence < TAG_REVIEW_CONFIDENCE_THRESHOLD,
-        "review_reasons": review_reasons,
-        "source_image_ids": ensure_string_list(meta.get("source_image_ids")) or [str(image.get("id")) for image in garment.get("images", [])],
-        "warnings": ensure_string_list(meta.get("warnings")),
-    }
-
-
 def tagging_status_for_result(ai_tags: dict[str, Any], tag_meta: dict[str, Any]) -> str:
     if tag_meta.get("needs_review") or tag_meta.get("tagger_provider") == "fallback":
         return "TAGGING_READY"
-    if ai_tags.get("category") in {"unknown", "unsupported_accessory"}:
+    category_codes = taxonomy_codes_for_dimension(ai_tags, "category")
+    if not category_codes or "unknown" in category_codes or "unsupported_accessory" in category_codes:
         return "TAGGING_READY"
     return "READY"
 
 
 def apply_tag_review_policy(ai_tags: dict[str, Any], tag_meta: dict[str, Any]) -> dict[str, Any]:
-    reasons = normalize_enum_list(tag_meta.get("review_reasons"), TAG_REVIEW_REASONS)
-    category = ai_tags.get("category")
-    if category == "unknown" and "unclear_category" not in reasons:
+    reasons = [reason for reason in ensure_string_list(tag_meta.get("review_reasons")) if reason in TAXONOMY_REVIEW_REASONS]
+    category_codes = taxonomy_codes_for_dimension(ai_tags, "category")
+    if (not category_codes or "unknown" in category_codes) and "unclear_category" not in reasons:
         reasons.append("unclear_category")
-    if category == "unsupported_accessory" and "unsupported_accessory" not in reasons:
+    if "unsupported_accessory" in category_codes and "unsupported_accessory" not in reasons:
         reasons.append("unsupported_accessory")
     if tag_meta.get("tagger_provider") == "fallback" and "fallback_tags" not in reasons:
         reasons.append("fallback_tags")
@@ -6009,29 +6083,112 @@ def apply_tag_review_policy(ai_tags: dict[str, Any], tag_meta: dict[str, Any]) -
 
 
 def build_effective_tags(ai_tags: dict[str, Any], official_title_tags: dict[str, Any], manual_tags: dict[str, Any]) -> dict[str, Any]:
-    compatibility = ai_tags.get("styling_compatibility") if isinstance(ai_tags.get("styling_compatibility"), dict) else {}
-    colors = ai_tags.get("colors") if isinstance(ai_tags.get("colors"), dict) else {}
+    taxonomy_context = build_active_taxonomy_context()
+    tag_entries = ai_tags.get("tags") if isinstance(ai_tags.get("tags"), list) else []
+    by_dimension = group_taxonomy_tags_by_dimension(tag_entries if isinstance(tag_entries, list) else [])
+    category, sub_category = derive_effective_category(by_dimension.get("category", []), taxonomy_context)
+    visual_profile = ai_tags.get("visual_profile") if isinstance(ai_tags.get("visual_profile"), dict) else {}
+    label_summary = taxonomy_label_summary(tag_entries if isinstance(tag_entries, list) else [], taxonomy_context)
+    lily_style = {
+        item["tag_code"]: item.get("score")
+        for item in by_dimension.get("lily_style_score", [])
+        if item.get("value_type") == "score"
+    }
+    wearability = {
+        item["tag_code"]: item.get("value_bool")
+        for item in by_dimension.get("wearability", [])
+        if item.get("value_type") == "boolean"
+    }
+    wearing_methods = [item["tag_code"] for item in by_dimension.get("wearing_method", [])]
+    coverage_risk = first_taxonomy_code(by_dimension.get("coverage_risk", []), "unknown")
+    if wearing_methods:
+        wearability["recommended_wearing_methods"] = wearing_methods
+    if coverage_risk:
+        wearability["coverage_risk"] = coverage_risk
     return {
-        "schema_version": LILY_TAG_SCHEMA_VERSION,
-        "category": ai_tags.get("category", "unknown"),
-        "sub_category": ai_tags.get("sub_category", "other"),
-        "colors": [value for value in [colors.get("primary"), *(colors.get("secondary") or [])] if value],
-        "fit": ai_tags.get("fit", "unknown"),
-        "silhouette": ai_tags.get("silhouette", []),
-        "length": ai_tags.get("length", {}),
-        "materials_visual": ai_tags.get("materials_visual", []),
-        "details": ai_tags.get("details", []),
-        "patterns": ai_tags.get("patterns", []),
-        "occasion": ai_tags.get("occasion", []),
-        "season": ai_tags.get("season", []),
-        "wearability": ai_tags.get("wearability", {}),
-        "lily_style": ai_tags.get("lily_style", {}),
-        "styling_compatibility": compatibility,
+        "schema_version": TAXONOMY_TAGGING_SCHEMA_VERSION,
+        "category": category,
+        "sub_category": sub_category,
+        "colors": taxonomy_codes(by_dimension.get("color", [])),
+        "color_attributes": taxonomy_codes(by_dimension.get("color_attribute", [])),
+        "fit": first_taxonomy_code(by_dimension.get("fit", []), "unknown"),
+        "silhouette": taxonomy_codes(by_dimension.get("silhouette", [])),
+        "structure": taxonomy_codes(by_dimension.get("structure", [])),
+        "length": derive_effective_lengths(by_dimension.get("length", [])),
+        "materials_visual": taxonomy_codes(by_dimension.get("material_visual", [])),
+        "surface_texture": taxonomy_codes(by_dimension.get("surface_texture", [])),
+        "details": taxonomy_codes(by_dimension.get("design_detail", [])),
+        "patterns": taxonomy_codes(by_dimension.get("pattern", [])),
+        "pattern_scale": first_taxonomy_code(by_dimension.get("pattern_scale", []), ""),
+        "neckline": taxonomy_codes(by_dimension.get("neckline", [])),
+        "closure": taxonomy_codes(by_dimension.get("closure", [])),
+        "occasion": taxonomy_codes(by_dimension.get("occasion", [])),
+        "season": taxonomy_codes(by_dimension.get("season", [])),
+        "wearability": wearability,
+        "lily_style": lily_style,
+        "formality": first_taxonomy_code(by_dimension.get("formality", []), "unknown"),
+        "styling_compatibility": {
+            "pairing_logic": taxonomy_codes(by_dimension.get("pairing_logic", [])),
+            "style_risk": taxonomy_codes(by_dimension.get("style_risk", [])),
+        },
+        "visual_profile": visual_profile,
+        "label_summary": label_summary,
+        "unmapped_observations": ai_tags.get("unmapped_observations", []),
+        "suggested_new_tags": ai_tags.get("suggested_new_tags", []),
         "official": official_title_tags,
         "manual": manual_tags,
-        "pairing_brief": compatibility.get("pairing_brief", ""),
-        "risk": compatibility.get("style_risk", []),
+        "pairing_brief": str(visual_profile.get("pairing_suggestion_text") or visual_profile.get("styling_interpretation") or visual_profile.get("overall_summary") or "")[:160],
+        "risk": taxonomy_codes(by_dimension.get("style_risk", [])),
     }
+
+
+def taxonomy_codes_for_dimension(ai_tags: dict[str, Any], dimension_code: str) -> list[str]:
+    return [
+        item.get("tag_code")
+        for item in ai_tags.get("tags", [])
+        if isinstance(item, dict) and item.get("dimension_code") == dimension_code and item.get("tag_code")
+    ]
+
+
+def taxonomy_codes(entries: list[dict[str, Any]] | None) -> list[str]:
+    return [str(item.get("tag_code")) for item in entries or [] if item.get("tag_code")]
+
+
+def first_taxonomy_code(entries: list[dict[str, Any]] | None, fallback: str) -> str:
+    values = taxonomy_codes(entries)
+    return values[0] if values else fallback
+
+
+def derive_effective_category(category_entries: list[dict[str, Any]], taxonomy_context: dict[str, Any]) -> tuple[str, str]:
+    tag_by_key = taxonomy_context["tagByKey"]
+    selected = [
+        tag_by_key.get(("category", item["tag_code"]))
+        for item in category_entries
+        if item.get("tag_code")
+    ]
+    selected = [item for item in selected if item]
+    if not selected:
+        return "unknown", "other"
+    selected.sort(key=lambda item: int(item.get("level") or 1), reverse=True)
+    leaf = selected[0]
+    parent_code = leaf.get("parentCode")
+    if parent_code:
+        return str(parent_code), str(leaf["code"])
+    return str(leaf["code"]), "other"
+
+
+def derive_effective_lengths(entries: list[dict[str, Any]] | None) -> dict[str, str]:
+    result = {"top_length": "unknown", "sleeve_length": "unknown", "bottom_length": "unknown"}
+    for code in taxonomy_codes(entries):
+        if code.startswith("top_"):
+            result["top_length"] = code.removeprefix("top_")
+        elif code.startswith("sleeve_"):
+            result["sleeve_length"] = code.removeprefix("sleeve_")
+        elif code.startswith("bottom_"):
+            result["bottom_length"] = code.removeprefix("bottom_")
+        elif code == "unknown":
+            continue
+    return result
 
 
 def replace_garment_tag_assignments(
@@ -6099,60 +6256,19 @@ def replace_garment_tag_assignments(
             ),
         )
 
-    add("category", ai_tags.get("category"))
-    add("category", ai_tags.get("sub_category"))
-    colors = ai_tags.get("colors") if isinstance(ai_tags.get("colors"), dict) else {}
-    add("color", colors.get("primary"))
-    for color in ensure_string_list(colors.get("secondary")):
-        add("color", color)
-    for key in ("temperature", "contrast_level", "color_distribution"):
-        add("color_attribute", colors.get(key))
-    for item in ensure_string_list(ai_tags.get("materials_visual")):
-        add("material_visual", item)
-    for item in ensure_string_list(ai_tags.get("surface_texture")):
-        add("surface_texture", item)
-    add("fit", ai_tags.get("fit"))
-    for item in ensure_string_list(ai_tags.get("silhouette")):
-        add("silhouette", item)
-    for item in ensure_string_list(ai_tags.get("structure")):
-        add("structure", item)
-    length = ai_tags.get("length") if isinstance(ai_tags.get("length"), dict) else {}
-    length_map = {"top_length": "top", "sleeve_length": "sleeve", "bottom_length": "bottom"}
-    for key, prefix in length_map.items():
-        value = str(length.get(key) or "").strip()
-        add("length", f"{prefix}_{value}" if value and value != "unknown" else "unknown")
-    for item in ensure_string_list(ai_tags.get("neckline")):
-        add("neckline", item)
-    for item in ensure_string_list(ai_tags.get("closure")):
-        add("closure", item)
-    for item in ensure_string_list(ai_tags.get("details")):
-        add("design_detail", item)
-    for item in ensure_string_list(ai_tags.get("patterns")):
-        add("pattern", item)
-    add("pattern_scale", ai_tags.get("pattern_scale"))
-    wearability = ai_tags.get("wearability") if isinstance(ai_tags.get("wearability"), dict) else {}
-    for key in ("can_be_worn_alone", "can_be_inner_layer", "can_be_outer_layer", "can_be_bottom_pairing", "can_be_set_anchor"):
-        if key in wearability:
-            add("wearability", key, value_kind="boolean", value_bool=bool(wearability.get(key)))
-    for item in ensure_string_list(wearability.get("recommended_wearing_methods")):
-        add("wearing_method", item)
-    add("coverage_risk", wearability.get("coverage_risk"))
-    lily_style = ai_tags.get("lily_style") if isinstance(ai_tags.get("lily_style"), dict) else {}
-    for key in ("business_fashion_score", "commute_score", "clean_score", "relaxed_score", "feminine_score", "fashion_detail_score"):
-        if key in lily_style:
-            add("lily_style_score", key, value_kind="score", value_number=clamp_float(lily_style.get(key), 0.0, 1.0, 0.0))
-    add("formality", lily_style.get("formality"))
-    for item in ensure_string_list(ai_tags.get("occasion")):
-        add("occasion", item)
-    for item in ensure_string_list(ai_tags.get("season")):
-        add("season", item)
-    compatibility = ai_tags.get("styling_compatibility") if isinstance(ai_tags.get("styling_compatibility"), dict) else {}
-    for item in ensure_string_list(compatibility.get("best_pairing_categories")):
-        add("pairing_logic", f"best_pairing_{item}")
-    for item in ensure_string_list(compatibility.get("avoid_pairing_categories")):
-        add("pairing_logic", f"avoid_pairing_{item}")
-    for item in ensure_string_list(compatibility.get("style_risk")):
-        add("style_risk", item)
+    for item in ai_tags.get("tags", []) if isinstance(ai_tags.get("tags"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        add(
+            str(item.get("dimension_code") or ""),
+            item.get("tag_code"),
+            source="ai",
+            value_kind=str(item.get("value_type") or "tag"),
+            value_number=item.get("score") if item.get("value_type") == "score" else None,
+            value_text=str(item.get("value_text") or "")[:240] if item.get("value_type") == "text" else None,
+            value_bool=bool(item.get("value_bool")) if item.get("value_type") == "boolean" else None,
+            evidence={"evidence": item.get("evidence")},
+        )
     for item in ensure_string_list(tag_meta.get("review_reasons") if isinstance(tag_meta, dict) else []):
         add("review_reason", item, source="system", item_status="confirmed")
     if isinstance(manual_tags, dict):
@@ -6224,98 +6340,6 @@ def build_phase_one_visual_caption(effective: dict[str, Any]) -> str:
         str(effective.get("pairing_brief") or ""),
     ]
     return "，".join(part for part in parts if part)[:160]
-
-
-def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(base)
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = deep_merge(merged[key], value)
-        else:
-            merged[key] = value
-    return merged
-
-
-def normalize_score_object(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
-    source = value if isinstance(value, dict) else {}
-    result = {**fallback, **source}
-    for key in ("business_fashion_score", "commute_score", "clean_score", "relaxed_score", "feminine_score", "fashion_detail_score"):
-        result[key] = clamp_float(result.get(key), 0.0, 1.0, 0.0)
-    result["formality"] = normalize_enum(result.get("formality"), TAG_FORMALITIES, "unknown")
-    result["style_notes"] = [str(item)[:30] for item in ensure_string_list(result.get("style_notes"))[:3]]
-    return result
-
-
-def normalize_enum(value: Any, allowed: set[str], fallback: str) -> str:
-    text = str(value or "").strip()
-    return text if text in allowed else fallback
-
-
-def normalize_enum_list(value: Any, allowed: set[str], limit: int = 12) -> list[str]:
-    values = ensure_string_list(value)
-    result: list[str] = []
-    for item in values:
-        if item in allowed and item not in result:
-            result.append(item)
-    return result[:limit]
-
-
-def normalize_color_tags(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
-    source = value if isinstance(value, dict) else {}
-    return {
-        "primary": normalize_enum(source.get("primary"), TAG_COLORS, fallback.get("primary", "unknown")),
-        "secondary": normalize_enum_list(source.get("secondary"), TAG_COLORS, limit=4),
-        "temperature": normalize_enum(source.get("temperature"), TAG_COLOR_TEMPERATURES, fallback.get("temperature", "unknown")),
-        "contrast_level": normalize_enum(source.get("contrast_level"), TAG_CONTRAST_LEVELS, fallback.get("contrast_level", "medium")),
-        "color_distribution": normalize_enum(source.get("color_distribution"), TAG_COLOR_DISTRIBUTIONS, fallback.get("color_distribution", "solid")),
-    }
-
-
-def normalize_length_tags(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
-    source = value if isinstance(value, dict) else {}
-    return {
-        "top_length": normalize_enum(source.get("top_length"), TAG_TOP_LENGTHS, fallback.get("top_length", "unknown")),
-        "sleeve_length": normalize_enum(source.get("sleeve_length"), TAG_SLEEVE_LENGTHS, fallback.get("sleeve_length", "unknown")),
-        "bottom_length": normalize_enum(source.get("bottom_length"), TAG_BOTTOM_LENGTHS, fallback.get("bottom_length", "unknown")),
-    }
-
-
-def normalize_wearability_tags(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
-    source = value if isinstance(value, dict) else {}
-    return {
-        "can_be_worn_alone": bool(source.get("can_be_worn_alone", fallback.get("can_be_worn_alone", True))),
-        "can_be_inner_layer": bool(source.get("can_be_inner_layer", fallback.get("can_be_inner_layer", False))),
-        "can_be_outer_layer": bool(source.get("can_be_outer_layer", fallback.get("can_be_outer_layer", False))),
-        "can_be_bottom_pairing": bool(source.get("can_be_bottom_pairing", fallback.get("can_be_bottom_pairing", False))),
-        "can_be_set_anchor": bool(source.get("can_be_set_anchor", fallback.get("can_be_set_anchor", False))),
-        "recommended_wearing_methods": normalize_enum_list(source.get("recommended_wearing_methods"), TAG_WEARING_METHODS),
-        "coverage_risk": normalize_enum(source.get("coverage_risk"), TAG_COVERAGE_RISKS, fallback.get("coverage_risk", "unknown")),
-    }
-
-
-def normalize_pairing_block(value: Any, allowed_values: set[str]) -> dict[str, Any]:
-    source = value if isinstance(value, dict) else {}
-    return {
-        "works_with": normalize_enum_list(source.get("works_with"), allowed_values),
-        "avoid_with": normalize_enum_list(source.get("avoid_with"), allowed_values),
-        "notes": str(source.get("notes") or "")[:80],
-    }
-
-
-def normalize_styling_compatibility(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
-    source = value if isinstance(value, dict) else {}
-    fallback_color = fallback.get("color_pairing") if isinstance(fallback.get("color_pairing"), dict) else {}
-    fallback_silhouette = fallback.get("silhouette_pairing") if isinstance(fallback.get("silhouette_pairing"), dict) else {}
-    color_pairing = source.get("color_pairing") if isinstance(source.get("color_pairing"), dict) else fallback_color
-    silhouette_pairing = source.get("silhouette_pairing") if isinstance(source.get("silhouette_pairing"), dict) else fallback_silhouette
-    return {
-        "best_pairing_categories": normalize_enum_list(source.get("best_pairing_categories"), TAG_PAIRING_CATEGORIES),
-        "avoid_pairing_categories": normalize_enum_list(source.get("avoid_pairing_categories"), TAG_PAIRING_CATEGORIES),
-        "color_pairing": normalize_pairing_block(color_pairing, TAG_COLORS),
-        "silhouette_pairing": normalize_pairing_block(silhouette_pairing, TAG_SILHOUETTE_PAIRINGS),
-        "style_risk": normalize_enum_list(source.get("style_risk"), TAG_STYLE_RISKS) or ["none"],
-        "pairing_brief": str(source.get("pairing_brief") or fallback.get("pairing_brief") or "")[:40],
-    }
 
 
 def ensure_string_list(value: Any) -> list[str]:
@@ -8537,7 +8561,7 @@ def build_taxonomy_tree(tags: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return roots
 
 
-def build_active_taxonomy_prompt_card(mode: str) -> str:
+def build_active_taxonomy_context() -> dict[str, Any]:
     with get_db() as db:
         dimensions = [serialize_tag_dimension(row) for row in db.execute(
             """
@@ -8585,15 +8609,31 @@ def build_active_taxonomy_prompt_card(mode: str) -> str:
             and (rule["targetDimensionCode"], rule["targetTagCode"]) in active_tag_keys
         )
     ]
-
-    context = {
+    content = dumps({
+        "dimensions": dimensions,
+        "tags": tags,
+        "relations": relations,
+        "applicabilityRules": applicability_rules,
+    })
+    return {
         "dimensions": dimensions,
         "tags": tags,
         "relations": relations,
         "applicabilityRules": applicability_rules,
         "dimensionByCode": {dimension["code"]: dimension for dimension in dimensions},
         "tagByKey": {(tag["dimensionCode"], tag["code"]): tag for tag in tags},
+        "contentHash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
     }
+
+
+def ensure_taxonomy_ready_for_tagging(context: dict[str, Any]) -> None:
+    selectable = [tag for tag in context["tags"] if tag.get("isSelectable")]
+    if not context["dimensions"] or not selectable:
+        raise RuntimeError("标签规则为空：请先由管理员在“标签规则”中导入或配置启用的维度和可打标标签。")
+
+
+def build_active_taxonomy_prompt_card(mode: str) -> str:
+    context = build_active_taxonomy_context()
     if mode == "full":
         return render_full_taxonomy_prompt_card(context)
     return render_compact_taxonomy_prompt_card(context)

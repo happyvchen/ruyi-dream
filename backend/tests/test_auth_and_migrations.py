@@ -1099,6 +1099,7 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertEqual(user_login.status_code, 200)
                     self.assertEqual(client.get("/api/taxonomy/rules").status_code, 403)
                     self.assertEqual(client.get("/api/taxonomy/prompt-card?mode=full").status_code, 403)
+                    self.assertEqual(client.get("/api/taxonomy/starter-kit").status_code, 403)
 
                     admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
                     self.assertEqual(admin_login.status_code, 200)
@@ -1124,6 +1125,10 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertIn("品类适用范围：", compact_prompt.json()["content"])
                     self.assertIn("输出 JSON（字段名保持英文用于系统解析；字段内容使用中文）", compact_prompt.json()["content"])
                     self.assertEqual(client.get("/api/taxonomy/prompt-card?mode=raw").status_code, 400)
+                    starter_kit = client.get("/api/taxonomy/starter-kit")
+                    self.assertEqual(starter_kit.status_code, 200)
+                    self.assertEqual(starter_kit.json()["source"], "legacy-lily-prompt-distilled")
+                    self.assertGreater(len(starter_kit.json()["tags"]), 50)
 
                     created_category_dimension = client.post(
                         "/api/taxonomy/dimensions",
@@ -1698,9 +1703,21 @@ class BackendSmokeTests(unittest.TestCase):
 
         timeout_message = "打标任务长时间未完成，已自动停止轮询，可手动重新打标。"
         tagging_result = {
-            "schema_version": main.LILY_TAG_SCHEMA_VERSION,
-            "ai_tags": {"category": "top"},
+            "schema_version": main.TAXONOMY_TAGGING_SCHEMA_VERSION,
+            "tags": [{
+                "dimension_code": "category",
+                "tag_code": "top",
+                "value_type": "tag",
+                "score": None,
+                "value_text": None,
+                "value_bool": None,
+                "confidence": 0.95,
+                "evidence": "正面图显示为上装。",
+            }],
             "official_title_tags": {},
+            "visual_profile": {},
+            "unmapped_observations": [],
+            "suggested_new_tags": [],
             "tag_meta": {
                 "tagger_provider": "gemini",
                 "overall_confidence": 0.95,
@@ -1810,35 +1827,38 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIsNone(attempt["error_message"])
         self.assertIsNone(attempt["failed_at"])
 
-    def test_lily_tagging_normalization_filters_invalid_enums(self) -> None:
+    def test_taxonomy_tagging_normalization_filters_invalid_refs(self) -> None:
         main = importlib.import_module("app.main")
         garment = {"code": "TEST", "images": [{"id": 1}]}
+        context = {
+            "dimensions": [{"code": "category"}, {"code": "color"}],
+            "tags": [],
+            "relations": [],
+            "applicabilityRules": [],
+            "tagByKey": {
+                ("category", "top"): {"dimensionCode": "category", "code": "top", "labelZh": "上装", "valueKind": "tag", "isSelectable": True},
+                ("color", "white"): {"dimensionCode": "color", "code": "white", "labelZh": "白色", "valueKind": "tag", "isSelectable": True},
+            },
+        }
 
-        normalized = main.normalize_styling_tags(
+        normalized = main.normalize_taxonomy_tagging_result(
             {
-                "category": "shoe",
-                "sub_category": "bag",
-                "colors": {"primary": "cyan", "secondary": ["white", "neon"], "temperature": "hot"},
-                "materials_visual": ["denim", "plastic"],
-                "fit": "giant",
-                "patterns": ["solid", "paisley"],
-                "styling_compatibility": {
-                    "style_risk": ["none", "too_gothic"],
-                    "pairing_brief": "适合搭配浅色直筒裤，保持清爽通勤感，不要过长",
-                },
+                "tags": [
+                    {"dimension_code": "category", "tag_code": "top", "value_type": "tag", "confidence": 0.95, "evidence": "图片为上装"},
+                    {"dimension_code": "category", "tag_code": "shoe", "value_type": "tag", "confidence": 0.9, "evidence": "非法标签"},
+                    {"dimension_code": "color", "tag_code": "white", "value_type": "tag", "confidence": 0.8, "evidence": "主色偏白"},
+                ],
+                "unmapped_observations": [{"text": "规则外可见细节", "evidence": "图片可见", "confidence": 0.7}],
+                "tag_meta": {"overall_confidence": 0.9, "needs_review": False, "review_reasons": []},
             },
             garment,
+            context,
         )
 
-        self.assertEqual(normalized["category"], "unknown")
-        self.assertEqual(normalized["sub_category"], "other")
-        self.assertEqual(normalized["colors"]["primary"], "unknown")
-        self.assertEqual(normalized["colors"]["secondary"], ["white"])
-        self.assertEqual(normalized["materials_visual"], ["denim"])
-        self.assertEqual(normalized["fit"], "unknown")
-        self.assertEqual(normalized["patterns"], ["solid"])
-        self.assertEqual(normalized["styling_compatibility"]["style_risk"], ["none"])
-        self.assertLessEqual(len(normalized["styling_compatibility"]["pairing_brief"]), 40)
+        self.assertEqual([item["tag_code"] for item in normalized["tags"]], ["top", "white"])
+        self.assertIn("invalid_tag_reference", normalized["tag_meta"]["review_reasons"])
+        self.assertIn("unmapped_observation", normalized["tag_meta"]["review_reasons"])
+        self.assertEqual(normalized["label_summary"]["category"], ["上装"])
 
     def test_lily_tagging_json_parser_recovers_trailing_brace(self) -> None:
         main = importlib.import_module("app.main")
@@ -1858,22 +1878,22 @@ class BackendSmokeTests(unittest.TestCase):
         main = importlib.import_module("app.main")
 
         ready_meta = main.apply_tag_review_policy(
-            {"category": "top"},
+            {"tags": [{"dimension_code": "category", "tag_code": "top"}]},
             {"tagger_provider": "gemini", "overall_confidence": 0.9, "needs_review": False, "review_reasons": []},
         )
         review_meta = main.apply_tag_review_policy(
-            {"category": "unsupported_accessory"},
+            {"tags": [{"dimension_code": "category", "tag_code": "unsupported_accessory"}]},
             {"tagger_provider": "gemini", "overall_confidence": 0.9, "needs_review": False, "review_reasons": []},
         )
         fallback_meta = main.apply_tag_review_policy(
-            {"category": "top"},
+            {"tags": [{"dimension_code": "category", "tag_code": "top"}]},
             {"tagger_provider": "fallback", "overall_confidence": 0.5, "needs_review": True, "review_reasons": ["fallback_tags"]},
         )
 
-        self.assertEqual(main.tagging_status_for_result({"category": "top"}, ready_meta), "READY")
-        self.assertEqual(main.tagging_status_for_result({"category": "unsupported_accessory"}, review_meta), "TAGGING_READY")
+        self.assertEqual(main.tagging_status_for_result({"tags": [{"dimension_code": "category", "tag_code": "top"}]}, ready_meta), "READY")
+        self.assertEqual(main.tagging_status_for_result({"tags": [{"dimension_code": "category", "tag_code": "unsupported_accessory"}]}, review_meta), "TAGGING_READY")
         self.assertIn("unsupported_accessory", review_meta["review_reasons"])
-        self.assertEqual(main.tagging_status_for_result({"category": "top"}, fallback_meta), "TAGGING_READY")
+        self.assertEqual(main.tagging_status_for_result({"tags": [{"dimension_code": "category", "tag_code": "top"}]}, fallback_meta), "TAGGING_READY")
 
     def test_generation_inputs_use_selected_material_snapshot_after_archive(self) -> None:
         config = importlib.import_module("app.config")
