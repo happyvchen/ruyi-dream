@@ -9,7 +9,7 @@
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
 body { margin: 0; min-width: 1180px; overflow: hidden; }
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 textarea { font: inherit; }
 button { cursor: pointer; }
 h1, h2, h3, p { margin: 0; }
@@ -393,7 +393,7 @@ h1, h2, h3, p { margin: 0; }
   gap: 10px;
   flex-wrap: wrap;
 }
-input {
+input, select {
   height: 42px;
   min-width: 0;
   padding: 0 12px;
@@ -414,7 +414,7 @@ textarea {
   outline: none;
   resize: vertical;
 }
-input:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16); }
+input:focus, select:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16); }
 .primary, .secondary, .danger {
   display: inline-flex;
   align-items: center;
@@ -1467,7 +1467,7 @@ input:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(
 }
 .taxonomy-layout {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-columns: 260px minmax(0, 1fr) 330px;
   gap: 18px;
   align-items: start;
 }
@@ -1527,6 +1527,11 @@ input:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(
   color: #111827;
   font-size: 22px;
 }
+.taxonomy-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
 .taxonomy-panel-head strong {
   padding: 6px 10px;
   border: 1px solid #d8e0ea;
@@ -1546,13 +1551,23 @@ input:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(
   background: #fff;
   overflow: hidden;
 }
+.taxonomy-node.is-inactive {
+  opacity: .62;
+}
 .taxonomy-node-row {
   min-height: 54px;
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+.taxonomy-node-row:hover, .taxonomy-node-row.active {
+  background: #effbff;
 }
 .taxonomy-node-row strong {
   display: block;
@@ -1596,6 +1611,46 @@ input:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(
 }
 .taxonomy-children .taxonomy-node {
   box-shadow: none;
+}
+.taxonomy-editor {
+  padding: 16px;
+  display: grid;
+  gap: 16px;
+  max-height: calc(100vh - 250px);
+  overflow: auto;
+}
+.taxonomy-editor-section {
+  display: grid;
+  gap: 10px;
+}
+.taxonomy-editor-section + .taxonomy-editor-section {
+  padding-top: 14px;
+  border-top: 1px solid #e2e8f0;
+}
+.taxonomy-editor-section label {
+  display: grid;
+  gap: 6px;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 700;
+}
+.taxonomy-editor-section textarea {
+  min-height: 80px;
+}
+.taxonomy-editor-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.checkbox-line {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  font-weight: 600;
+}
+.checkbox-line input {
+  width: 16px;
+  height: 16px;
+  padding: 0;
 }
 .head-grid {
   display: grid;

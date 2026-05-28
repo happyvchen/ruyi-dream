@@ -40,7 +40,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
-import type { AIOperation, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, SessionRole, StylingGarment, TaxonomyDimension, TaxonomyRules, TaxonomyTag } from './api'
+import type { AIOperation, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, SessionRole, StylingGarment, TaxonomyDimensionPayload, TaxonomyRules, TaxonomyTag, TaxonomyTagPayload } from './api'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 
@@ -1611,7 +1611,10 @@ function BrandJsonDialog({ dialog, setDialog, onClose, onImport }: {
 function TagRulesPage({ run }: { run: any }) {
   const [rules, setRules] = useState<TaxonomyRules | null>(null)
   const [activeCode, setActiveCode] = useState('')
+  const [selectedTagId, setSelectedTagId] = useState<number | 'new' | null>(null)
   const [loading, setLoading] = useState(false)
+  const [dimensionDraft, setDimensionDraft] = useState<TaxonomyDimensionPayload>({})
+  const [tagDraft, setTagDraft] = useState<TaxonomyTagPayload>({})
 
   function loadRules() {
     setLoading(true)
@@ -1627,6 +1630,83 @@ function TagRulesPage({ run }: { run: any }) {
 
   const activeDimension = rules?.dimensions.find((item) => item.code === activeCode) ?? rules?.dimensions[0]
   const activeTags = activeDimension?.tags ?? []
+  const flatTags = flattenTaxonomyTags(activeTags)
+  const selectedTag = typeof selectedTagId === 'number' ? flatTags.find((tag) => tag.id === selectedTagId) ?? null : null
+
+  useEffect(() => {
+    if (!activeDimension) return
+    setDimensionDraft({
+      labelZh: activeDimension.labelZh,
+      descriptionZh: activeDimension.descriptionZh ?? '',
+      sortOrder: activeDimension.sortOrder,
+      isActive: activeDimension.isActive,
+    })
+    setSelectedTagId(null)
+  }, [activeDimension?.code])
+
+  useEffect(() => {
+    if (!activeDimension) return
+    if (selectedTagId === 'new') {
+      setTagDraft({
+        dimensionCode: activeDimension.code,
+        code: '',
+        labelZh: '',
+        descriptionZh: '',
+        parentCode: null,
+        level: 1,
+        valueKind: 'tag',
+        isSelectable: true,
+        isActive: true,
+        sortOrder: 0,
+      })
+      return
+    }
+    if (selectedTag) {
+      setTagDraft({
+        labelZh: selectedTag.labelZh,
+        descriptionZh: selectedTag.descriptionZh ?? '',
+        parentCode: selectedTag.parentCode ?? null,
+        level: selectedTag.level,
+        valueKind: selectedTag.valueKind,
+        isSelectable: selectedTag.isSelectable,
+        isActive: selectedTag.isActive,
+        sortOrder: selectedTag.sortOrder,
+      })
+      return
+    }
+    setTagDraft({})
+  }, [activeDimension?.code, selectedTagId, selectedTag?.id])
+
+  function applyRules(next: TaxonomyRules) {
+    setRules(next)
+    setActiveCode((current) => next.dimensions.some((item) => item.code === current) ? current : next.dimensions[0]?.code ?? '')
+  }
+
+  function saveDimension() {
+    if (!activeDimension) return
+    void run('保存标签维度中...', () => api.updateTaxonomyDimension(activeDimension.code, dimensionDraft), applyRules, { refresh: false })
+  }
+
+  function saveTag() {
+    if (!activeDimension) return
+    if (selectedTagId === 'new') {
+      const payload = {
+        ...tagDraft,
+        dimensionCode: activeDimension.code,
+        code: String(tagDraft.code ?? ''),
+        labelZh: String(tagDraft.labelZh ?? ''),
+      }
+      void run('新增标签中...', () => api.createTaxonomyTag(payload), (next: TaxonomyRules) => {
+        applyRules(next)
+        const created = flattenTaxonomyTags(next.dimensions.find((item) => item.code === activeDimension.code)?.tags ?? []).find((item) => item.code === payload.code)
+        setSelectedTagId(created?.id ?? null)
+      }, { refresh: false })
+      return
+    }
+    if (selectedTag) {
+      void run('保存标签中...', () => api.updateTaxonomyTag(selectedTag.id, tagDraft), applyRules, { refresh: false })
+    }
+  }
 
   return (
     <section className="page">
@@ -1659,14 +1739,62 @@ function TagRulesPage({ run }: { run: any }) {
                   <span>{activeDimension.code}</span>
                   <h2>{activeDimension.labelZh}</h2>
                 </div>
-                <strong>{countTaxonomyTags(activeTags)} 个标签</strong>
+                <div className="taxonomy-head-actions">
+                  <strong>{countTaxonomyTags(activeTags)} 个标签</strong>
+                  <button className="secondary" onClick={() => setSelectedTagId('new')}>新增标签</button>
+                </div>
               </div>
               <div className="taxonomy-tree">
-                {activeTags.map((tag) => <TaxonomyTagNode key={tag.code} tag={tag} />)}
+                {activeTags.map((tag) => <TaxonomyTagNode key={tag.code} tag={tag} selectedId={typeof selectedTagId === 'number' ? selectedTagId : null} onSelect={setSelectedTagId} />)}
               </div>
             </>
           ) : <EmptyState title="暂无标签规则" text="标签字典尚未初始化。" />}
         </div>
+        <aside className="panel taxonomy-editor">
+          {activeDimension ? (
+            <>
+              <div className="taxonomy-editor-section">
+                <div className="section-head"><strong>维度编辑</strong><span>{activeDimension.code}</span></div>
+                <label>中文名称<input value={String(dimensionDraft.labelZh ?? '')} onChange={(event) => setDimensionDraft((current) => ({ ...current, labelZh: event.target.value }))} /></label>
+                <label>说明<textarea value={String(dimensionDraft.descriptionZh ?? '')} onChange={(event) => setDimensionDraft((current) => ({ ...current, descriptionZh: event.target.value }))} /></label>
+                <label>排序<input type="number" value={Number(dimensionDraft.sortOrder ?? 0)} onChange={(event) => setDimensionDraft((current) => ({ ...current, sortOrder: Number(event.target.value) }))} /></label>
+                <label className="checkbox-line"><input type="checkbox" checked={dimensionDraft.isActive !== false} onChange={(event) => setDimensionDraft((current) => ({ ...current, isActive: event.target.checked }))} /> 启用</label>
+                <button className="primary" onClick={saveDimension}><Save size={16} />保存维度</button>
+              </div>
+              <div className="taxonomy-editor-section">
+                <div className="section-head"><strong>{selectedTagId === 'new' ? '新增标签' : '标签编辑'}</strong>{selectedTag && <span>{selectedTag.code}</span>}</div>
+                {selectedTagId || selectedTag ? (
+                  <>
+                    {selectedTagId === 'new' && <label>code<input value={String(tagDraft.code ?? '')} onChange={(event) => setTagDraft((current) => ({ ...current, code: event.target.value }))} /></label>}
+                    <label>中文名称<input value={String(tagDraft.labelZh ?? '')} onChange={(event) => setTagDraft((current) => ({ ...current, labelZh: event.target.value }))} /></label>
+                    <label>说明<textarea value={String(tagDraft.descriptionZh ?? '')} onChange={(event) => setTagDraft((current) => ({ ...current, descriptionZh: event.target.value }))} /></label>
+                    <label>父级
+                      <select value={tagDraft.parentCode ?? ''} onChange={(event) => setTagDraft((current) => ({ ...current, parentCode: event.target.value || null }))}>
+                        <option value="">无父级</option>
+                        {flatTags.filter((tag) => tag.id !== selectedTag?.id).map((tag) => <option key={tag.id} value={tag.code}>{tag.labelZh} / {tag.code}</option>)}
+                      </select>
+                    </label>
+                    <div className="taxonomy-editor-grid">
+                      <label>层级<input type="number" min={1} max={8} value={Number(tagDraft.level ?? 1)} onChange={(event) => setTagDraft((current) => ({ ...current, level: Number(event.target.value) }))} /></label>
+                      <label>排序<input type="number" value={Number(tagDraft.sortOrder ?? 0)} onChange={(event) => setTagDraft((current) => ({ ...current, sortOrder: Number(event.target.value) }))} /></label>
+                    </div>
+                    <label>值类型
+                      <select value={String(tagDraft.valueKind ?? 'tag')} onChange={(event) => setTagDraft((current) => ({ ...current, valueKind: event.target.value }))}>
+                        <option value="tag">标签</option>
+                        <option value="score">分值</option>
+                        <option value="boolean">开关</option>
+                        <option value="text">文本</option>
+                      </select>
+                    </label>
+                    <label className="checkbox-line"><input type="checkbox" checked={tagDraft.isSelectable !== false} onChange={(event) => setTagDraft((current) => ({ ...current, isSelectable: event.target.checked }))} /> 可用于服装打标</label>
+                    <label className="checkbox-line"><input type="checkbox" checked={tagDraft.isActive !== false} onChange={(event) => setTagDraft((current) => ({ ...current, isActive: event.target.checked }))} /> 启用</label>
+                    <button className="primary" onClick={saveTag}><Save size={16} />{selectedTagId === 'new' ? '新增标签' : '保存标签'}</button>
+                  </>
+                ) : <p className="empty-inline">选择一个标签，或点击新增标签。</p>}
+              </div>
+            </>
+          ) : <EmptyState title="暂无维度" text="标签字典尚未初始化。" />}
+        </aside>
       </div>
     </section>
   )
@@ -1676,26 +1804,31 @@ function MetricCard({ label, value }: { label: string; value: number }) {
   return <div className="panel taxonomy-metric"><span>{label}</span><strong>{value}</strong></div>
 }
 
-function TaxonomyTagNode({ tag }: { tag: TaxonomyTag }) {
+function TaxonomyTagNode({ tag, selectedId, onSelect }: { tag: TaxonomyTag; selectedId: number | null; onSelect: (id: number) => void }) {
   return (
-    <div className="taxonomy-node">
-      <div className="taxonomy-node-row">
+    <div className={`taxonomy-node ${tag.isActive ? '' : 'is-inactive'}`}>
+      <button className={`taxonomy-node-row ${selectedId === tag.id ? 'active' : ''}`} onClick={() => onSelect(tag.id)}>
         <div>
           <strong>{tag.labelZh}</strong>
           <span>{tag.code}</span>
         </div>
         <div className="taxonomy-node-meta">
           <em>{valueKindLabel(tag.valueKind)}</em>
+          {!tag.isActive && <em>停用</em>}
           {tag.usageCount > 0 && <b>{tag.usageCount}</b>}
         </div>
-      </div>
-      {tag.children.length > 0 && <div className="taxonomy-children">{tag.children.map((child) => <TaxonomyTagNode key={child.code} tag={child} />)}</div>}
+      </button>
+      {tag.children.length > 0 && <div className="taxonomy-children">{tag.children.map((child) => <TaxonomyTagNode key={child.code} tag={child} selectedId={selectedId} onSelect={onSelect} />)}</div>}
     </div>
   )
 }
 
 function countTaxonomyTags(tags: TaxonomyTag[]): number {
   return tags.reduce((total, tag) => total + 1 + countTaxonomyTags(tag.children), 0)
+}
+
+function flattenTaxonomyTags(tags: TaxonomyTag[]): TaxonomyTag[] {
+  return tags.flatMap((tag) => [tag, ...flattenTaxonomyTags(tag.children)])
 }
 
 function valueKindLabel(kind: string) {

@@ -253,6 +253,27 @@ export type TaxonomyRules = {
   }
 }
 
+export type TaxonomyDimensionPayload = {
+  labelZh?: string
+  descriptionZh?: string
+  sortOrder?: number
+  isActive?: boolean
+}
+
+export type TaxonomyTagPayload = {
+  dimensionCode?: string
+  code?: string
+  labelZh?: string
+  descriptionZh?: string
+  parentCode?: string | null
+  level?: number
+  valueKind?: string
+  isSelectable?: boolean
+  isActive?: boolean
+  sortOrder?: number
+  metadata?: Record<string, unknown>
+}
+
 function headers(init?: RequestInit) {
   const h = new Headers(init?.headers)
   if (!(init?.body instanceof FormData) && !h.has('Content-Type')) h.set('Content-Type', 'application/json')
@@ -397,5 +418,11 @@ export const api = {
     request<{ item: BrandInfo }>('/api/brand-info', { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteBrandInfo: () => request<{ ok: boolean }>('/api/brand-info', { method: 'DELETE' }),
   getTaxonomyRules: () => request<TaxonomyRules>('/api/taxonomy/rules'),
+  updateTaxonomyDimension: (code: string, payload: TaxonomyDimensionPayload) =>
+    request<TaxonomyRules>(`/api/taxonomy/dimensions/${code}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  createTaxonomyTag: (payload: TaxonomyTagPayload & { dimensionCode: string; code: string; labelZh: string }) =>
+    request<TaxonomyRules>('/api/taxonomy/tags', { method: 'POST', body: JSON.stringify(payload) }),
+  updateTaxonomyTag: (id: number, payload: TaxonomyTagPayload) =>
+    request<TaxonomyRules>(`/api/taxonomy/tags/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   backfillTaxonomyAssignments: () => request<{ ok: boolean; garmentCount: number }>('/api/taxonomy/backfill-assignments', { method: 'POST' }),
 }

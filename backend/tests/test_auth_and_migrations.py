@@ -1103,6 +1103,39 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertGreaterEqual(payload["summary"]["tagCount"], 100)
                     self.assertTrue(any(item["code"] == "category" for item in payload["dimensions"]))
 
+                    updated_dimension = client.patch(
+                        "/api/taxonomy/dimensions/category",
+                        json={"labelZh": "品类规则", "descriptionZh": "可编辑维度", "sortOrder": 9},
+                    )
+                    self.assertEqual(updated_dimension.status_code, 200)
+                    category_dimension = next(item for item in updated_dimension.json()["dimensions"] if item["code"] == "category")
+                    self.assertEqual(category_dimension["labelZh"], "品类规则")
+
+                    created_tag = client.post(
+                        "/api/taxonomy/tags",
+                        json={
+                            "dimensionCode": "category",
+                            "code": "test_tag",
+                            "labelZh": "测试标签",
+                            "parentCode": "top",
+                            "valueKind": "tag",
+                        },
+                    )
+                    self.assertEqual(created_tag.status_code, 200)
+                    with db_module.get_db() as db:
+                        tag_id = db.execute("SELECT id FROM tag_defs WHERE dimension_code = 'category' AND code = 'test_tag'").fetchone()["id"]
+
+                    updated_tag = client.patch(
+                        f"/api/taxonomy/tags/{tag_id}",
+                        json={"labelZh": "测试标签已改", "isSelectable": False, "sortOrder": 77},
+                    )
+                    self.assertEqual(updated_tag.status_code, 200)
+                    with db_module.get_db() as db:
+                        row = db.execute("SELECT label_zh, is_selectable, sort_order FROM tag_defs WHERE id = ?", (tag_id,)).fetchone()
+                    self.assertEqual(row["label_zh"], "测试标签已改")
+                    self.assertEqual(row["is_selectable"], 0)
+                    self.assertEqual(row["sort_order"], 77)
+
     def test_brand_info_legacy_fields_migrate_to_guidance_text(self) -> None:
         config = importlib.import_module("app.config")
         db_module = importlib.import_module("app.db")
