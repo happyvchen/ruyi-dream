@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -16,8 +17,16 @@ from urllib.parse import parse_qs, urlsplit
 class BackendSmokeTests(unittest.TestCase):
     def setUp(self) -> None:
         self._old_env = dict(os.environ)
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self._test_root = Path(self._temp_dir.name)
+        self._test_data_dir = self._test_root / "data"
+        self._test_log_dir = self._test_data_dir / "logs"
+        self._test_database_path = self._test_data_dir / "app.sqlite3"
         os.environ.update(
             {
+                "APP_DATA_DIR": str(self._test_data_dir),
+                "APP_DATABASE_PATH": str(self._test_database_path),
+                "APP_LOG_DIR": str(self._test_log_dir),
                 "APP_S3_ACCESS_KEY_ID": "test-access-key",
                 "APP_S3_SECRET_ACCESS_KEY": "test-secret-key",
                 "APP_USER_PASSWORD": "letmein-123456",
@@ -25,10 +34,29 @@ class BackendSmokeTests(unittest.TestCase):
                 "APP_SESSION_SECRET": "session-secret-123",
             }
         )
+        self._apply_test_settings()
 
     def tearDown(self) -> None:
         os.environ.clear()
         os.environ.update(self._old_env)
+        config = sys.modules.get("app.config")
+        if config is not None:
+            config.get_settings.cache_clear()
+        self._temp_dir.cleanup()
+
+    def _apply_test_settings(self) -> None:
+        config = importlib.import_module("app.config")
+        config.Settings.data_dir = self._test_data_dir
+        config.Settings.database_path = self._test_database_path
+        config.Settings.log_dir = self._test_log_dir
+        config.get_settings.cache_clear()
+        db_module = sys.modules.get("app.db")
+        if db_module is not None:
+            db_module.get_settings = config.get_settings
+        main = sys.modules.get("app.main")
+        if main is not None:
+            main.settings = config.get_settings()
+            main.Image.MAX_IMAGE_PIXELS = main.settings.max_upload_image_pixels
 
     def _create_new_final_result_set(
         self,
