@@ -337,6 +337,11 @@ export type TaxonomyExportPayload = {
   applicabilityRules: TaxonomyApplicabilityRule[]
 }
 
+export type TaxonomyPromptCard = {
+  mode: 'full' | 'compact'
+  content: string
+}
+
 function headers(init?: RequestInit) {
   const h = new Headers(init?.headers)
   if (!(init?.body instanceof FormData) && !h.has('Content-Type')) h.set('Content-Type', 'application/json')
@@ -482,6 +487,8 @@ export const api = {
   deleteBrandInfo: () => request<{ ok: boolean }>('/api/brand-info', { method: 'DELETE' }),
   getTaxonomyRules: () => request<TaxonomyRules>('/api/taxonomy/rules'),
   exportTaxonomyRules: () => request<TaxonomyExportPayload>('/api/taxonomy/export'),
+  getTaxonomyPromptCard: (mode: 'full' | 'compact') =>
+    request<TaxonomyPromptCard>(params('/api/taxonomy/prompt-card', { mode })),
   importTaxonomyRules: (payload: { dimensions: unknown[]; tags: unknown[]; relations: unknown[]; applicabilityRules: unknown[] }) =>
     request<TaxonomyRules>('/api/taxonomy/import', { method: 'POST', body: JSON.stringify(payload) }),
   createTaxonomyDimension: (payload: TaxonomyDimensionPayload & { code: string; labelZh: string }) =>

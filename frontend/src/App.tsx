@@ -12,6 +12,7 @@ import {
   Clock3,
   Download,
   Eye,
+  FileText,
   FileImage,
   FolderOpen,
   GalleryVerticalEnd,
@@ -40,7 +41,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
-import type { AIOperation, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, SessionRole, StylingGarment, TaxonomyApplicabilityPayload, TaxonomyApplicabilityRule, TaxonomyDimensionPayload, TaxonomyExportPayload, TaxonomyRelation, TaxonomyRelationPayload, TaxonomyRules, TaxonomyTag, TaxonomyTagPayload } from './api'
+import type { AIOperation, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, SessionRole, StylingGarment, TaxonomyApplicabilityPayload, TaxonomyApplicabilityRule, TaxonomyDimensionPayload, TaxonomyExportPayload, TaxonomyPromptCard, TaxonomyRelation, TaxonomyRelationPayload, TaxonomyRules, TaxonomyTag, TaxonomyTagPayload } from './api'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 
@@ -1622,6 +1623,7 @@ function TagRulesPage({ run }: { run: any }) {
   const [relationDraft, setRelationDraft] = useState<TaxonomyRelationPayload>({})
   const [applicabilityDraft, setApplicabilityDraft] = useState<TaxonomyApplicabilityPayload>({})
   const [jsonDialog, setJsonDialog] = useState<{ mode: 'import' | 'export'; text: string; error?: string } | null>(null)
+  const [promptDialog, setPromptDialog] = useState<{ mode: 'full' | 'compact'; text: string } | null>(null)
 
   function loadRules() {
     setLoading(true)
@@ -1936,6 +1938,12 @@ function TagRulesPage({ run }: { run: any }) {
     }, { refresh: false })
   }
 
+  function openPromptCard(mode: 'full' | 'compact') {
+    void run(`生成 ${mode} Prompt 中...`, () => api.getTaxonomyPromptCard(mode), (payload: TaxonomyPromptCard) => {
+      setPromptDialog({ mode: payload.mode, text: payload.content })
+    }, { refresh: false })
+  }
+
   function openImportJson() {
     if (!window.confirm('导入 JSON 会按 code 合并更新维度、标签和关系，不会自动删除缺失项，是否继续？')) return
     setJsonDialog({ mode: 'import', text: '' })
@@ -1966,8 +1974,14 @@ function TagRulesPage({ run }: { run: any }) {
       <PageTitle
         title="标签规则"
         subtitle="维护服装标签字典、层级树、标签关系和商品打标投影。"
-        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={openImportJson}><Upload size={16} />导入</button><button className="secondary" onClick={openExportJson}><Download size={16} />导出</button><button className="secondary" disabled={loading} onClick={() => void loadRules()}><RotateCcw size={16} />刷新</button><button className="primary" onClick={() => void run('同步标签投影中...', () => api.backfillTaxonomyAssignments(), () => void loadRules(), { refresh: false })}><Save size={16} />同步现有标签</button></div>}
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={() => openPromptCard('full')}><FileText size={16} />full</button><button className="secondary" onClick={() => openPromptCard('compact')}><FileText size={16} />compact</button><button className="secondary" onClick={openImportJson}><Upload size={16} />导入</button><button className="secondary" onClick={openExportJson}><Download size={16} />导出</button><button className="secondary" disabled={loading} onClick={() => void loadRules()}><RotateCcw size={16} />刷新</button><button className="primary" onClick={() => void run('同步标签投影中...', () => api.backfillTaxonomyAssignments(), () => void loadRules(), { refresh: false })}><Save size={16} />同步现有标签</button></div>}
       />
+      {promptDialog && (
+        <TaxonomyPromptDialog
+          dialog={promptDialog}
+          onClose={() => setPromptDialog(null)}
+        />
+      )}
       {jsonDialog && (
         <TaxonomyJsonDialog
           dialog={jsonDialog}
@@ -2250,6 +2264,30 @@ function parseTaxonomyJson(text: string): { dimensions: unknown[]; tags: unknown
   if (relations != null && !Array.isArray(relations)) throw new Error('relations 必须是数组。')
   if (applicabilityRules != null && !Array.isArray(applicabilityRules)) throw new Error('applicabilityRules 必须是数组。')
   return { dimensions, tags, relations: Array.isArray(relations) ? relations : [], applicabilityRules: Array.isArray(applicabilityRules) ? applicabilityRules : [] }
+}
+
+function TaxonomyPromptDialog({ dialog, onClose }: {
+  dialog: { mode: 'full' | 'compact'; text: string }
+  onClose: () => void
+}) {
+  return createPortal(
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <form className="confirm-modal brand-json-modal" role="dialog" aria-modal="true" aria-label={`${dialog.mode} Prompt`} onSubmit={(event) => event.preventDefault()} onClick={(event) => event.stopPropagation()}>
+        <div className="confirm-head">
+          <div>
+            <h2>{dialog.mode === 'full' ? 'Full Prompt 原样输出' : 'Compact Prompt 原样输出'}</h2>
+            <p>仅包含标签规则中已启用的维度、标签、关系和适用范围。</p>
+          </div>
+          <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
+        </div>
+        <textarea readOnly value={dialog.text} />
+        <div className="confirm-actions">
+          <button type="button" className="secondary" onClick={onClose}>关闭</button>
+        </div>
+      </form>
+    </div>,
+    document.body,
+  )
 }
 
 function TaxonomyJsonDialog({ dialog, setDialog, onClose, onImport }: {

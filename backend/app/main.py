@@ -2742,6 +2742,18 @@ def export_taxonomy_rules(request: Request) -> dict[str, Any]:
     }
 
 
+@app.get("/api/taxonomy/prompt-card")
+def get_taxonomy_prompt_card(request: Request, mode: str = Query("compact")) -> dict[str, Any]:
+    require_admin(request)
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in {"full", "compact"}:
+        raise HTTPException(status_code=400, detail="Prompt 格式仅支持 full 或 compact")
+    return {
+        "mode": normalized_mode,
+        "content": build_active_taxonomy_prompt_card(normalized_mode),
+    }
+
+
 @app.post("/api/taxonomy/import")
 def import_taxonomy_rules(payload: TaxonomyImportRequest, request: Request) -> dict[str, Any]:
     require_admin(request)
@@ -8523,6 +8535,260 @@ def build_taxonomy_tree(tags: list[dict[str, Any]]) -> list[dict[str, Any]]:
         else:
             roots.append(tag)
     return roots
+
+
+def build_active_taxonomy_prompt_card(mode: str) -> str:
+    with get_db() as db:
+        dimensions = [serialize_tag_dimension(row) for row in db.execute(
+            """
+            SELECT * FROM tag_dimensions
+            WHERE is_active = 1
+            ORDER BY sort_order, id
+            """
+        ).fetchall()]
+        tags = [serialize_tag_def(row) for row in db.execute(
+            """
+            SELECT * FROM tag_defs
+            WHERE is_active = 1
+            ORDER BY dimension_code, level, parent_code, sort_order, id
+            """
+        ).fetchall()]
+        relations = [serialize_tag_relation(row) for row in db.execute(
+            """
+            SELECT * FROM tag_relations
+            WHERE is_active = 1
+            ORDER BY from_dimension_code, from_tag_code, relation_type, to_dimension_code, to_tag_code, id
+            """
+        ).fetchall()]
+        applicability_rules = [serialize_tag_applicability_rule(row) for row in db.execute(
+            """
+            SELECT * FROM tag_applicability_rules
+            WHERE is_active = 1
+            ORDER BY category_dimension_code, category_tag_code, mode, target_dimension_code, target_tag_code, id
+            """
+        ).fetchall()]
+
+    active_dimension_codes = {dimension["code"] for dimension in dimensions}
+    active_tag_keys = {(tag["dimensionCode"], tag["code"]) for tag in tags if tag["dimensionCode"] in active_dimension_codes}
+    tags = [tag for tag in tags if (tag["dimensionCode"], tag["code"]) in active_tag_keys]
+    relations = [
+        relation for relation in relations
+        if (
+            (relation["fromDimensionCode"], relation["fromTagCode"]) in active_tag_keys
+            and (relation["toDimensionCode"], relation["toTagCode"]) in active_tag_keys
+        )
+    ]
+    applicability_rules = [
+        rule for rule in applicability_rules
+        if (
+            (rule["categoryDimensionCode"], rule["categoryTagCode"]) in active_tag_keys
+            and (rule["targetDimensionCode"], rule["targetTagCode"]) in active_tag_keys
+        )
+    ]
+
+    context = {
+        "dimensions": dimensions,
+        "tags": tags,
+        "relations": relations,
+        "applicabilityRules": applicability_rules,
+        "dimensionByCode": {dimension["code"]: dimension for dimension in dimensions},
+        "tagByKey": {(tag["dimensionCode"], tag["code"]): tag for tag in tags},
+    }
+    if mode == "full":
+        return render_full_taxonomy_prompt_card(context)
+    return render_compact_taxonomy_prompt_card(context)
+
+
+def render_full_taxonomy_prompt_card(context: dict[str, Any]) -> str:
+    dimensions: list[dict[str, Any]] = context["dimensions"]
+    tags: list[dict[str, Any]] = context["tags"]
+    relations: list[dict[str, Any]] = context["relations"]
+    applicability_rules: list[dict[str, Any]] = context["applicabilityRules"]
+    tag_by_key: dict[tuple[str, str], dict[str, Any]] = context["tagByKey"]
+    tags_by_dimension: dict[str, list[dict[str, Any]]] = {}
+    for tag in tags:
+        tags_by_dimension.setdefault(tag["dimensionCode"], []).append(tag)
+
+    lines = [
+        "# Ruyi-Dream 服装标签规则卡 / full",
+        "",
+        "用途：本规则卡作为 AI 服装打标 Prompt 的标签字典与约束段。请先理解商品图片，再只从本卡启用的维度、标签、关系和适用范围中选择标签。",
+        "",
+        "## 核心约束",
+        "- 只能输出本卡出现的 tag code，不要创造同义词、新标签或自然语言散词。",
+        "- 标签输出必须保留 dimension_code 与 tag_code；中文名称只用于理解，不作为稳定 ID。",
+        "- 先判断 category，再应用对应 category 的适用范围；适用范围里的 required/recommended/allowed/disallowed 优先级高于通用倾向。",
+        "- value_kind=score 的标签需要输出 0 到 1 的 score；value_kind=tag/boolean/text 按标签含义输出。",
+        "- is_selectable=false 的标签可用于理解层级和规则，不应直接作为商品打标结果。",
+        "- 如果图片证据不足，降低 confidence，写出 evidence，不要硬猜。",
+        "",
+        "## 维度",
+        "| code | 中文名 | 说明 |",
+        "| --- | --- | --- |",
+    ]
+    for dimension in dimensions:
+        lines.append(f"| {md_cell(dimension['code'])} | {md_cell(dimension['labelZh'])} | {md_cell(dimension.get('descriptionZh') or '')} |")
+
+    lines.extend(["", "## 标签字典"])
+    for dimension in dimensions:
+        dimension_tags = tags_by_dimension.get(dimension["code"], [])
+        if not dimension_tags:
+            continue
+        lines.extend([
+            "",
+            f"### {dimension['code']} / {dimension['labelZh']}",
+            "| code | 中文名 | 父级 | 层级 | 值类型 | 可直接打标 | 说明 |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+        ])
+        for tag in dimension_tags:
+            parent = tag.get("parentCode") or ""
+            parent_label = taxonomy_prompt_tag_ref(tag_by_key, tag["dimensionCode"], str(parent), with_description=False) if parent else ""
+            lines.append(
+                f"| {md_cell(tag['code'])} | {md_cell(tag['labelZh'])} | {md_cell(parent_label)} | "
+                f"{md_cell(str(tag['level']))} | {md_cell(tag['valueKind'])} | "
+                f"{'yes' if tag['isSelectable'] else 'no'} | {md_cell(tag.get('descriptionZh') or '')} |"
+            )
+
+    lines.extend([
+        "",
+        "## 品类适用范围",
+        "说明：适用范围用于按品类限定可用的服装部件、设计细节和其他维度，避免所有品类共用同一套细节字段。",
+    ])
+    if applicability_rules:
+        grouped_rules: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for rule in applicability_rules:
+            grouped_rules.setdefault((rule["categoryDimensionCode"], rule["categoryTagCode"]), []).append(rule)
+        for (category_dimension_code, category_tag_code), rules in grouped_rules.items():
+            lines.extend([
+                "",
+                f"### {taxonomy_prompt_tag_ref(tag_by_key, category_dimension_code, category_tag_code)}",
+                "| mode | target | 范围 | 说明 |",
+                "| --- | --- | --- | --- |",
+            ])
+            for rule in rules:
+                target = taxonomy_prompt_tag_ref(tag_by_key, rule["targetDimensionCode"], rule["targetTagCode"])
+                scope = "含子品类" if rule["appliesToDescendants"] else "仅当前品类"
+                lines.append(f"| {md_cell(rule['mode'])} | {md_cell(target)} | {scope} | {md_cell(rule.get('note') or '')} |")
+    else:
+        lines.append("")
+        lines.append("暂无启用的适用范围。")
+
+    lines.extend(["", "## 标签关系"])
+    if relations:
+        lines.extend([
+            "| from | relation_type | to | weight | 说明 |",
+            "| --- | --- | --- | --- | --- |",
+        ])
+        for relation in relations:
+            source = taxonomy_prompt_tag_ref(tag_by_key, relation["fromDimensionCode"], relation["fromTagCode"])
+            target = taxonomy_prompt_tag_ref(tag_by_key, relation["toDimensionCode"], relation["toTagCode"])
+            lines.append(
+                f"| {md_cell(source)} | {md_cell(relation['relationType'])} | {md_cell(target)} | "
+                f"{md_cell(str(relation['weight']))} | {md_cell(relation.get('descriptionZh') or '')} |"
+            )
+    else:
+        lines.append("暂无启用的标签关系。")
+
+    lines.extend([
+        "",
+        "## 建议输出结构",
+        "```json",
+        json.dumps({
+            "tags": [
+                {
+                    "dimension_code": "category",
+                    "tag_code": "example_code",
+                    "value_type": "tag",
+                    "score": None,
+                    "confidence": 0.0,
+                    "evidence": "来自图片的可观察依据"
+                }
+            ],
+            "visual_profile": {
+                "overall_summary": "商品整体视觉摘要",
+                "key_parts": ["需要保真的服装部件或设计细节"],
+                "uncertain_points": ["证据不足或需要人工审核的点"]
+            }
+        }, ensure_ascii=False, indent=2),
+        "```",
+    ])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_compact_taxonomy_prompt_card(context: dict[str, Any]) -> str:
+    dimensions: list[dict[str, Any]] = context["dimensions"]
+    tags: list[dict[str, Any]] = context["tags"]
+    relations: list[dict[str, Any]] = context["relations"]
+    applicability_rules: list[dict[str, Any]] = context["applicabilityRules"]
+    tag_by_key: dict[tuple[str, str], dict[str, Any]] = context["tagByKey"]
+    tags_by_dimension: dict[str, list[dict[str, Any]]] = {}
+    for tag in tags:
+        tags_by_dimension.setdefault(tag["dimensionCode"], []).append(tag)
+
+    lines = [
+        "# Ruyi-Dream 服装标签规则卡 / compact",
+        "RULES: only use active codes listed below; do not invent tag codes; choose category first; apply CATEGORY_SCOPES before final tags; use score 0..1 for value_kind=score; mark low confidence when visual evidence is weak.",
+        "DIMENSIONS: " + "; ".join(f"{dimension['code']}={dimension['labelZh']}" for dimension in dimensions),
+        "TAGS:",
+    ]
+    for dimension in dimensions:
+        dimension_tags = tags_by_dimension.get(dimension["code"], [])
+        if not dimension_tags:
+            continue
+        entries = []
+        for tag in dimension_tags:
+            parent = f"<{tag['parentCode']}>" if tag.get("parentCode") else ""
+            selectable = "" if tag["isSelectable"] else "[context_only]"
+            value_kind = "" if tag["valueKind"] == "tag" else f"[{tag['valueKind']}]"
+            entries.append(f"{tag['code']}({tag['labelZh']}){parent}{value_kind}{selectable}")
+        lines.append(f"- {dimension['code']}: " + "; ".join(entries))
+
+    lines.append("CATEGORY_SCOPES:")
+    if applicability_rules:
+        grouped_rules: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for rule in applicability_rules:
+            grouped_rules.setdefault((rule["categoryDimensionCode"], rule["categoryTagCode"]), []).append(rule)
+        for (category_dimension_code, category_tag_code), rules in grouped_rules.items():
+            scope_entries = []
+            for rule in rules:
+                target = taxonomy_prompt_tag_ref(tag_by_key, rule["targetDimensionCode"], rule["targetTagCode"], with_label=True, with_description=False)
+                scope = "+children" if rule["appliesToDescendants"] else "self"
+                note = f"({rule['note']})" if rule.get("note") else ""
+                scope_entries.append(f"{rule['mode']} {target} scope={scope}{note}")
+            lines.append(f"- {taxonomy_prompt_tag_ref(tag_by_key, category_dimension_code, category_tag_code, with_label=True, with_description=False)}: " + "; ".join(scope_entries))
+    else:
+        lines.append("- none")
+
+    lines.append("RELATIONS:")
+    if relations:
+        for relation in relations:
+            source = taxonomy_prompt_tag_ref(tag_by_key, relation["fromDimensionCode"], relation["fromTagCode"], with_label=True, with_description=False)
+            target = taxonomy_prompt_tag_ref(tag_by_key, relation["toDimensionCode"], relation["toTagCode"], with_label=True, with_description=False)
+            note = f" ({relation['descriptionZh']})" if relation.get("descriptionZh") else ""
+            lines.append(f"- {source} --{relation['relationType']}:{relation['weight']}--> {target}{note}")
+    else:
+        lines.append("- none")
+    lines.append('OUTPUT_JSON: {"tags":[{"dimension_code":"","tag_code":"","value_type":"tag|score|boolean|text","score":null,"confidence":0.0,"evidence":""}],"visual_profile":{"overall_summary":"","key_parts":[],"uncertain_points":[]}}')
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def taxonomy_prompt_tag_ref(
+    tag_by_key: dict[tuple[str, str], dict[str, Any]],
+    dimension_code: str,
+    tag_code: str,
+    with_label: bool = True,
+    with_description: bool = True,
+) -> str:
+    tag = tag_by_key.get((dimension_code, tag_code))
+    if not tag:
+        return f"{dimension_code}.{tag_code}"
+    label = f"({tag['labelZh']})" if with_label else ""
+    description = f" - {tag['descriptionZh']}" if with_description and tag.get("descriptionZh") else ""
+    return f"{dimension_code}.{tag_code}{label}{description}"
+
+
+def md_cell(value: str) -> str:
+    return str(value).replace("|", "\\|").replace("\n", " ").strip()
 
 
 def serialize_shot_plan(row: Any) -> dict[str, Any]:

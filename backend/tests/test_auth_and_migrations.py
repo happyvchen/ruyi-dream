@@ -1098,6 +1098,7 @@ class BackendSmokeTests(unittest.TestCase):
                     user_login = client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"})
                     self.assertEqual(user_login.status_code, 200)
                     self.assertEqual(client.get("/api/taxonomy/rules").status_code, 403)
+                    self.assertEqual(client.get("/api/taxonomy/prompt-card?mode=full").status_code, 403)
 
                     admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
                     self.assertEqual(admin_login.status_code, 200)
@@ -1111,6 +1112,20 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertTrue(any(item["code"] == "category" for item in payload["dimensions"]))
                     self.assertTrue(any(item["code"] == "garment_part" for item in payload["dimensions"]))
                     self.assertTrue(any(item["targetDimensionCode"] == "garment_part" for item in payload["applicabilityRules"]))
+
+                    full_prompt = client.get("/api/taxonomy/prompt-card?mode=full")
+                    self.assertEqual(full_prompt.status_code, 200)
+                    self.assertEqual(full_prompt.json()["mode"], "full")
+                    self.assertIn("# Ruyi-Dream 服装标签规则卡 / full", full_prompt.json()["content"])
+                    self.assertIn("## 品类适用范围", full_prompt.json()["content"])
+                    self.assertIn("garment_part", full_prompt.json()["content"])
+
+                    compact_prompt = client.get("/api/taxonomy/prompt-card?mode=compact")
+                    self.assertEqual(compact_prompt.status_code, 200)
+                    self.assertEqual(compact_prompt.json()["mode"], "compact")
+                    self.assertIn("CATEGORY_SCOPES:", compact_prompt.json()["content"])
+                    self.assertIn("OUTPUT_JSON:", compact_prompt.json()["content"])
+                    self.assertEqual(client.get("/api/taxonomy/prompt-card?mode=raw").status_code, 400)
 
                     updated_dimension = client.patch(
                         "/api/taxonomy/dimensions/category",
@@ -1224,6 +1239,9 @@ class BackendSmokeTests(unittest.TestCase):
                     applicability = next(item for item in updated_applicability.json()["applicabilityRules"] if item["id"] == applicability_id)
                     self.assertEqual(applicability["mode"], "required")
                     self.assertFalse(applicability["isActive"])
+                    after_inactive_prompt = client.get("/api/taxonomy/prompt-card?mode=full")
+                    self.assertEqual(after_inactive_prompt.status_code, 200)
+                    self.assertNotIn("按品类限定测试细节", after_inactive_prompt.json()["content"])
 
                     exported = client.get("/api/taxonomy/export")
                     self.assertEqual(exported.status_code, 200)
