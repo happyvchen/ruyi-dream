@@ -31,6 +31,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("018", "normalize_brand_profile_text_fields", "migration_normalize_brand_profile_text_fields"),
     ("019", "reframe_brand_profile_guidance_fields", "migration_reframe_brand_profile_guidance_fields"),
     ("020", "rename_brand_profile_production_guidance_fields", "migration_rename_brand_profile_production_guidance_fields"),
+    ("021", "add_taxonomy_skeleton", "migration_add_taxonomy_skeleton"),
 )
 
 
@@ -387,6 +388,7 @@ def init_db() -> None:
         run_migrations(db)
         seed_default_brand_template(db)
         seed_default_model(db)
+        seed_default_taxonomy(db)
 
 
 def ensure_migration_table(db: sqlite3.Connection) -> None:
@@ -427,6 +429,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_normalize_brand_profile_text_fields": migration_normalize_brand_profile_text_fields,
         "migration_reframe_brand_profile_guidance_fields": migration_reframe_brand_profile_guidance_fields,
         "migration_rename_brand_profile_production_guidance_fields": migration_rename_brand_profile_production_guidance_fields,
+        "migration_add_taxonomy_skeleton": migration_add_taxonomy_skeleton,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -773,6 +776,11 @@ def migration_rename_brand_profile_production_guidance_fields(db: sqlite3.Connec
     db.execute("ALTER TABLE brand_profiles_new RENAME TO brand_profiles")
 
 
+def migration_add_taxonomy_skeleton(db: sqlite3.Connection) -> None:
+    create_taxonomy_tables(db)
+    seed_default_taxonomy(db)
+
+
 def ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
@@ -966,6 +974,208 @@ def combine_text(*values: Any) -> str:
         if text and text not in parts:
             parts.append(text)
     return "；".join(parts)
+
+
+def create_taxonomy_tables(db: sqlite3.Connection) -> None:
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS tag_dimensions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          code TEXT NOT NULL UNIQUE,
+          label_zh TEXT NOT NULL,
+          description_zh TEXT,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS tag_defs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          dimension_code TEXT NOT NULL REFERENCES tag_dimensions(code),
+          code TEXT NOT NULL,
+          label_zh TEXT NOT NULL,
+          description_zh TEXT,
+          parent_code TEXT,
+          level INTEGER NOT NULL DEFAULT 1,
+          value_kind TEXT NOT NULL DEFAULT 'tag',
+          is_selectable INTEGER NOT NULL DEFAULT 1,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          metadata_json TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(dimension_code, code),
+          FOREIGN KEY (dimension_code, parent_code) REFERENCES tag_defs(dimension_code, code)
+        );
+
+        CREATE TABLE IF NOT EXISTS tag_relations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          from_dimension_code TEXT NOT NULL,
+          from_tag_code TEXT NOT NULL,
+          relation_type TEXT NOT NULL,
+          to_dimension_code TEXT NOT NULL,
+          to_tag_code TEXT NOT NULL,
+          weight REAL NOT NULL DEFAULT 1.0,
+          description_zh TEXT,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(from_dimension_code, from_tag_code, relation_type, to_dimension_code, to_tag_code),
+          FOREIGN KEY (from_dimension_code, from_tag_code) REFERENCES tag_defs(dimension_code, code),
+          FOREIGN KEY (to_dimension_code, to_tag_code) REFERENCES tag_defs(dimension_code, code)
+        );
+
+        CREATE TABLE IF NOT EXISTS garment_tag_assignments (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          garment_id INTEGER NOT NULL REFERENCES styling_garments(id) ON DELETE CASCADE,
+          dimension_code TEXT NOT NULL,
+          tag_code TEXT NOT NULL,
+          value_kind TEXT NOT NULL DEFAULT 'tag',
+          value_number REAL,
+          value_text TEXT,
+          value_bool INTEGER,
+          confidence REAL,
+          source TEXT NOT NULL DEFAULT 'system',
+          status TEXT NOT NULL DEFAULT 'confirmed',
+          evidence_json TEXT,
+          note TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(garment_id, dimension_code, tag_code, source),
+          FOREIGN KEY (dimension_code, tag_code) REFERENCES tag_defs(dimension_code, code)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tag_defs_dimension ON tag_defs(dimension_code, sort_order, id);
+        CREATE INDEX IF NOT EXISTS idx_garment_tag_assignments_garment ON garment_tag_assignments(garment_id);
+        CREATE INDEX IF NOT EXISTS idx_garment_tag_assignments_tag ON garment_tag_assignments(dimension_code, tag_code, status);
+        """
+    )
+
+
+def seed_default_taxonomy(db: sqlite3.Connection) -> None:
+    create_taxonomy_tables(db)
+    timestamp = now_iso()
+    dimensions = [
+        ("category", "品类", "服装系统品类和规范子类。", 10),
+        ("color", "色彩", "主色、辅色等可见颜色。", 20),
+        ("color_attribute", "色彩属性", "冷暖、对比和色彩分布。", 30),
+        ("material_visual", "视觉材质", "AI 可从图片判断的视觉材质。", 40),
+        ("surface_texture", "表面肌理", "面料表面纹理、光泽和垂坠。", 50),
+        ("fit", "版型", "修身、常规、宽松等合体程度。", 60),
+        ("silhouette", "廓形", "轮廓、比例和视觉结构。", 70),
+        ("structure", "结构", "肩线、褶皱、垂坠等结构语言。", 80),
+        ("length", "长度", "上衣、袖长、下装长度。", 90),
+        ("neckline", "领型", "领口和领型。", 100),
+        ("closure", "闭合方式", "纽扣、拉链、套头等穿脱结构。", 110),
+        ("design_detail", "设计细节", "口袋、撞色、褶皱、开衩等设计点。", 120),
+        ("pattern", "图案", "纯色、条纹、格纹、印花等。", 130),
+        ("pattern_scale", "图案大小", "图案视觉尺度。", 140),
+        ("wearing_method", "穿法", "扣合、敞开、塞腰等真实穿法。", 150),
+        ("wearability", "穿着能力", "可单穿、内搭、外搭、下装搭配等能力。", 160),
+        ("coverage_risk", "遮挡风险", "作为搭配服饰时遮挡主推款的风险。", 170),
+        ("lily_style_score", "Lily 风格分值", "商务时装、通勤、干净度等 0-1 分值项。", 180),
+        ("formality", "正式度", "休闲到正式的分档。", 190),
+        ("occasion", "适用场景", "通勤、办公室、日常等场景。", 200),
+        ("season", "季节", "春夏秋冬。", 210),
+        ("pairing_logic", "搭配逻辑", "适合搭配、避免搭配、色彩和廓形匹配。", 220),
+        ("style_risk", "风格风险", "过甜、过街头、过重等搭配风险。", 230),
+        ("manual_business", "人工业务标签", "运营维护的非视觉业务信息。", 240),
+        ("review_reason", "复核原因", "低置信度、品类不清等复核原因。", 250),
+    ]
+    for code, label, description, sort_order in dimensions:
+        db.execute(
+            """
+            INSERT INTO tag_dimensions (code, label_zh, description_zh, sort_order, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(code) DO UPDATE SET
+              label_zh = excluded.label_zh,
+              description_zh = excluded.description_zh,
+              sort_order = excluded.sort_order,
+              updated_at = excluded.updated_at
+            """,
+            (code, label, description, sort_order, timestamp, timestamp),
+        )
+
+    def add_tags(dimension: str, values: list[tuple[str, str] | tuple[str, str, str | None, int, str]]) -> None:
+        for index, item in enumerate(values, start=1):
+            if len(item) == 2:
+                code, label = item
+                parent_code = None
+                level = 1
+                value_kind = "tag"
+            else:
+                code, label, parent_code, level, value_kind = item
+            db.execute(
+                """
+                INSERT INTO tag_defs
+                  (dimension_code, code, label_zh, parent_code, level, value_kind, sort_order, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(dimension_code, code) DO UPDATE SET
+                  label_zh = excluded.label_zh,
+                  parent_code = excluded.parent_code,
+                  level = excluded.level,
+                  value_kind = excluded.value_kind,
+                  sort_order = excluded.sort_order,
+                  updated_at = excluded.updated_at
+                """,
+                (dimension, code, label, parent_code, level, value_kind, index * 10, timestamp, timestamp),
+            )
+
+    add_tags("category", [
+        ("top", "上装"), ("shirt", "衬衫", "top", 2, "tag"), ("blouse", "罩衫", "top", 2, "tag"),
+        ("t_shirt", "T恤", "top", 2, "tag"), ("vest", "马甲/背心", "top", 2, "tag"), ("camisole", "吊带", "top", 2, "tag"),
+        ("knitwear", "针织类"), ("cardigan", "针织开衫", "knitwear", 2, "tag"),
+        ("bottom", "下装"), ("trousers", "裤装", "bottom", 2, "tag"), ("jeans", "牛仔裤", "bottom", 2, "tag"),
+        ("shorts", "短裤", "bottom", 2, "tag"), ("skirt", "半身裙", "bottom", 2, "tag"),
+        ("dress", "连衣裙"), ("jumpsuit", "连体裤/连体衣"), ("suit_set", "套装"),
+        ("outerwear", "外套类"), ("blazer", "西装", "outerwear", 2, "tag"), ("jacket", "夹克", "outerwear", 2, "tag"),
+        ("trench", "风衣", "outerwear", 2, "tag"), ("coat", "大衣", "outerwear", 2, "tag"),
+        ("down_jacket", "羽绒服", "outerwear", 2, "tag"), ("other_garment", "其他服装"),
+        ("unsupported_accessory", "不支持入库配饰"), ("unknown", "未知"),
+    ])
+    add_tags("color", [("black", "黑色"), ("white", "白色"), ("ivory", "象牙白"), ("beige", "米色"), ("grey", "灰色"), ("blue", "蓝色"), ("navy", "藏青色"), ("brown", "棕色"), ("green", "绿色"), ("red", "红色"), ("pink", "粉色"), ("yellow", "黄色"), ("purple", "紫色"), ("metallic", "金属色"), ("multi", "多色"), ("unknown", "未知")])
+    add_tags("color_attribute", [("warm", "暖调"), ("cool", "冷调"), ("neutral", "中性"), ("mixed", "混合冷暖"), ("low", "低对比"), ("medium", "中对比"), ("high", "高对比"), ("solid", "纯色"), ("color_block", "色块"), ("trim", "边饰/镶边"), ("gradient", "渐变"), ("print_based", "基于图案")])
+    add_tags("material_visual", [("cotton_like", "棉感"), ("linen_like", "亚麻感"), ("silk_like", "真丝感"), ("satin_like", "缎面感"), ("acetate_like", "醋酸感"), ("knit", "针织"), ("wool_like", "羊毛感"), ("denim", "丹宁"), ("leather_like", "皮革感"), ("lace", "蕾丝"), ("chiffon", "雪纺"), ("tweed_like", "粗花呢/香风感"), ("down_padded", "羽绒填充感"), ("technical_fabric", "科技面料感"), ("unknown", "未知")])
+    add_tags("surface_texture", [("smooth", "平滑"), ("ribbed", "坑条"), ("openwork", "镂空织法"), ("slub", "竹节肌理"), ("woven_texture", "编织肌理"), ("sheer", "半透"), ("glossy", "有光泽"), ("matte", "哑光"), ("structured", "挺括"), ("soft_drape", "柔软垂坠")])
+    add_tags("fit", [("slim", "修身"), ("regular", "常规"), ("relaxed", "微宽松"), ("loose", "宽松"), ("oversized", "廓形宽大"), ("unknown", "未知")])
+    add_tags("silhouette", [("straight", "直线型"), ("a_line", "A字型"), ("h_line", "H型"), ("x_line", "X型"), ("wide_leg", "阔腿"), ("flare", "微喇/喇叭"), ("tapered", "锥形"), ("cropped", "短款"), ("waist_defined", "收腰/腰线明确"), ("boxy", "方正廓形")])
+    add_tags("structure", [("tailored", "剪裁感"), ("soft", "柔软结构"), ("draped", "垂坠"), ("layered", "层次"), ("structured_shoulder", "结构肩"), ("dropped_shoulder", "落肩"), ("pleated", "褶裥"), ("gathered", "抽褶")])
+    add_tags("length", [("top_cropped", "短上衣"), ("top_hip", "及胯上衣"), ("top_long", "长上衣"), ("sleeve_sleeveless", "无袖"), ("sleeve_short", "短袖"), ("sleeve_elbow", "肘袖"), ("sleeve_three_quarter", "七分袖"), ("sleeve_long", "长袖"), ("bottom_short", "短款下装"), ("bottom_knee", "及膝"), ("bottom_midi", "中长"), ("bottom_ankle", "九分/及踝"), ("bottom_full", "全长"), ("unknown", "未知")])
+    add_tags("neckline", [("crew", "圆领"), ("v_neck", "V领"), ("polo", "Polo领"), ("shirt_collar", "衬衫领"), ("lapel", "翻领"), ("boat", "船领"), ("square", "方领"), ("halter", "挂脖"), ("cowl", "垂褶领"), ("unknown", "未知")])
+    add_tags("closure", [("button", "纽扣"), ("zipper", "拉链"), ("pullover", "套头"), ("wrap", "裹身"), ("tie", "系带"), ("open_front", "开襟"), ("unknown", "未知")])
+    add_tags("design_detail", [("asymmetric", "不对称"), ("lace", "蕾丝"), ("contrast_trim", "撞色边饰"), ("embroidery", "绣花"), ("pocket", "口袋"), ("pleat", "褶皱"), ("cutout", "镂空"), ("patchwork", "拼接"), ("print", "印花"), ("button", "纽扣细节"), ("ruffle", "荷叶边"), ("bow_tie", "蝴蝶结/飘带"), ("belt", "腰带"), ("slit", "开衩")])
+    add_tags("pattern", [("solid", "纯色"), ("stripe", "条纹"), ("check", "格纹"), ("polka_dot", "波点"), ("floral", "花卉"), ("graphic", "图形"), ("abstract", "抽象"), ("texture_pattern", "肌理图案"), ("logo", "Logo"), ("animal", "动物纹"), ("unknown", "未知")])
+    add_tags("pattern_scale", [("none", "无图案"), ("small", "小图案"), ("medium", "中图案"), ("large", "大图案"), ("mixed", "混合尺度"), ("unknown", "未知")])
+    add_tags("wearing_method", [("buttoned", "扣合"), ("open", "敞开"), ("tucked", "塞腰"), ("untucked", "自然下摆"), ("belted", "系腰带"), ("layered", "叠穿")])
+    add_tags("wearability", [("can_be_worn_alone", "可单穿", None, 1, "boolean"), ("can_be_inner_layer", "可作内搭", None, 1, "boolean"), ("can_be_outer_layer", "可作外搭", None, 1, "boolean"), ("can_be_bottom_pairing", "可作下装搭配", None, 1, "boolean"), ("can_be_set_anchor", "可作套装核心", None, 1, "boolean")])
+    add_tags("coverage_risk", [("none", "无明显遮挡风险"), ("may_cover_hero", "可能遮挡主推款"), ("likely_cover_hero", "较可能遮挡主推款"), ("unknown", "未知")])
+    add_tags("lily_style_score", [("business_fashion_score", "商务时装感", None, 1, "score"), ("commute_score", "通勤适配度", None, 1, "score"), ("clean_score", "干净利落度", None, 1, "score"), ("relaxed_score", "松弛得体度", None, 1, "score"), ("feminine_score", "女性化柔和度", None, 1, "score"), ("fashion_detail_score", "时装细节度", None, 1, "score")])
+    add_tags("formality", [("casual", "休闲"), ("smart_casual", "精致休闲"), ("office", "办公室"), ("formal", "正式"), ("unknown", "未知")])
+    add_tags("occasion", [("daily", "日常"), ("commute", "通勤"), ("office", "办公室"), ("light_social", "轻社交"), ("date", "约会"), ("travel", "旅行"), ("home", "居家")])
+    add_tags("season", [("spring", "春"), ("summer", "夏"), ("autumn", "秋"), ("winter", "冬")])
+    add_tags("pairing_logic", [("best_pairing_top", "适合搭配上装"), ("best_pairing_bottom", "适合搭配下装"), ("best_pairing_outerwear", "适合搭配外套"), ("best_pairing_dress", "适合搭配连衣裙"), ("best_pairing_knitwear", "适合搭配针织"), ("avoid_pairing_top", "避免搭配上装"), ("avoid_pairing_bottom", "避免搭配下装"), ("avoid_pairing_outerwear", "避免搭配外套"), ("avoid_pairing_dress", "避免搭配连衣裙"), ("avoid_pairing_knitwear", "避免搭配针织")])
+    add_tags("style_risk", [("too_formal", "过正式"), ("too_casual", "过休闲"), ("too_sweet", "过甜美"), ("too_street", "过街头"), ("too_party", "过宴会"), ("too_heavy", "过厚重"), ("too_busy", "过繁复"), ("none", "无明显风险")])
+    add_tags("manual_business", [("styling_priority", "选搭优先级", None, 1, "text"), ("do_not_use_for_styling", "不进入智能选搭", None, 1, "boolean"), ("season_year", "年份", None, 1, "text"), ("season_drop", "上新季节", None, 1, "text"), ("launch_batch", "上新批次", None, 1, "text"), ("retail_channel", "零售渠道", None, 1, "text"), ("series", "系列", None, 1, "text"), ("collaboration", "联名", None, 1, "text"), ("internal_collection", "内部企划系列", None, 1, "text"), ("notes", "人工备注", None, 1, "text")])
+    add_tags("review_reason", [("low_confidence", "低置信度"), ("conflicting_images", "多图疑似不同商品"), ("unclear_category", "品类不清"), ("title_image_conflict", "标题和图片冲突"), ("insufficient_images", "图片不足"), ("unsupported_accessory", "不支持的配饰"), ("uncertain_material", "材质不确定"), ("uncertain_color", "颜色不确定"), ("uncertain_fit", "版型不确定"), ("fallback_tags", "兜底标签")])
+
+    relations = [
+        ("category", "blazer", "parent_of", "category", "outerwear", 1.0, "西装归属外套类。"),
+        ("category", "jacket", "parent_of", "category", "outerwear", 1.0, "夹克归属外套类。"),
+        ("category", "trench", "parent_of", "category", "outerwear", 1.0, "风衣归属外套类。"),
+        ("category", "dress", "slot_mapping", "wearability", "can_be_worn_alone", 1.0, "连衣裙通常可单穿。"),
+        ("category", "outerwear", "implies", "wearability", "can_be_outer_layer", 1.0, "外套类通常可作外搭。"),
+        ("category", "down_jacket", "implies", "style_risk", "too_heavy", 0.7, "羽绒服在轻量通勤搭配里可能偏厚重。"),
+    ]
+    for relation in relations:
+        db.execute(
+            """
+            INSERT OR IGNORE INTO tag_relations
+              (from_dimension_code, from_tag_code, relation_type, to_dimension_code, to_tag_code, weight, description_zh, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (*relation, timestamp, timestamp),
+        )
 
 
 def seed_default_model(db: sqlite3.Connection) -> None:

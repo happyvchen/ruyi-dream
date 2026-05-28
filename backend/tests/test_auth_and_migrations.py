@@ -972,10 +972,13 @@ class BackendSmokeTests(unittest.TestCase):
                     preview_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_previews)").fetchall()}
                     result_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_result_images_new)").fetchall()}
                     brand_profile_columns = {row["name"] for row in db.execute("PRAGMA table_info(brand_profiles)").fetchall()}
+                    taxonomy_dimension_count = db.execute("SELECT COUNT(*) AS count FROM tag_dimensions").fetchone()["count"]
+                    taxonomy_tag_count = db.execute("SELECT COUNT(*) AS count FROM tag_defs").fetchone()["count"]
+                    assignment_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_tag_assignments)").fetchall()}
                     brand_profile_count = db.execute("SELECT COUNT(*) AS count FROM brand_profiles").fetchone()["count"]
                     template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016", "017", "018", "019", "020"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016", "017", "018", "019", "020", "021"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
@@ -1000,6 +1003,11 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("styling_guidelines", brand_profile_columns)
         self.assertIn("shooting_guidelines", brand_profile_columns)
         self.assertIn("negative_constraints", brand_profile_columns)
+        self.assertGreaterEqual(taxonomy_dimension_count, 20)
+        self.assertGreaterEqual(taxonomy_tag_count, 100)
+        self.assertIn("dimension_code", assignment_columns)
+        self.assertIn("tag_code", assignment_columns)
+        self.assertIn("source", assignment_columns)
         self.assertEqual(brand_profile_count, 0)
         self.assertGreaterEqual(template_count, 1)
 
@@ -1059,6 +1067,41 @@ class BackendSmokeTests(unittest.TestCase):
                     deleted = client.delete("/api/brand-info")
                     self.assertEqual(deleted.status_code, 200)
                     self.assertEqual(client.get("/api/brand-info").json(), {"item": None})
+
+    def test_taxonomy_rules_are_admin_only_and_seeded(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file, tempfile.TemporaryDirectory() as log_dir:
+            log_dir_path = Path(log_dir)
+
+            class FakeSettings:
+                database_path = Path(db_file.name)
+                log_dir = log_dir_path
+
+            with (
+                patch.object(db_module, "get_settings", return_value=FakeSettings),
+                patch.object(main.settings, "database_path", Path(db_file.name)),
+            ):
+                config.get_settings.cache_clear()
+                db_module.init_db()
+
+                with patch.object(main, "ensure_bucket", return_value=None), TestClient(main.app) as client:
+                    user_login = client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"})
+                    self.assertEqual(user_login.status_code, 200)
+                    self.assertEqual(client.get("/api/taxonomy/rules").status_code, 403)
+
+                    admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+                    self.assertEqual(admin_login.status_code, 200)
+                    response = client.get("/api/taxonomy/rules")
+                    self.assertEqual(response.status_code, 200)
+                    payload = response.json()
+                    self.assertGreaterEqual(payload["summary"]["dimensionCount"], 20)
+                    self.assertGreaterEqual(payload["summary"]["tagCount"], 100)
+                    self.assertTrue(any(item["code"] == "category" for item in payload["dimensions"]))
 
     def test_brand_info_legacy_fields_migrate_to_guidance_text(self) -> None:
         config = importlib.import_module("app.config")

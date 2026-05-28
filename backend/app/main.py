@@ -1114,6 +1114,14 @@ def update_styling_garment(garment_id: int, payload: StylingGarmentUpdateRequest
         updates["updated_at"] = now_iso()
         set_clause = ", ".join(f"{key} = ?" for key in updates)
         db.execute(f"UPDATE styling_garments SET {set_clause} WHERE id = ?", (*updates.values(), garment_id))
+        replace_garment_tag_assignments(
+            db,
+            garment_id,
+            loads(row["ai_tags_json"], {}),
+            loads(row["official_title_tags_json"], {}),
+            manual_tags,
+            loads(row["tag_meta_json"], {}) if "tag_meta_json" in row.keys() else {},
+        )
     return {"item": get_styling_garment_by_id(garment_id)}
 
 
@@ -1204,6 +1212,7 @@ async def run_styling_garment_tagging(garment_id: int) -> None:
                 garment_id,
             ),
         )
+        replace_garment_tag_assignments(db, garment_id, ai_tags, official_title_tags, manual_tags, tag_meta)
         log_event(db, "styling_garment", garment_id, "tagged", tagging_result)
 
 
@@ -2549,6 +2558,77 @@ def delete_brand_info(request: Request) -> dict[str, Any]:
         db.execute("DELETE FROM brand_profiles WHERE id = 1")
         log_event(db, "brand_profile", 1, "deleted", serialize_brand_info(row))
     return {"ok": True}
+
+
+@app.get("/api/taxonomy/rules")
+def get_taxonomy_rules(request: Request) -> dict[str, Any]:
+    require_admin(request)
+    with get_db() as db:
+        dimensions = db.execute(
+            """
+            SELECT * FROM tag_dimensions
+            WHERE is_active = 1
+            ORDER BY sort_order, id
+            """
+        ).fetchall()
+        tags = db.execute(
+            """
+            SELECT td.*,
+                   COUNT(gta.id) AS usage_count
+            FROM tag_defs td
+            LEFT JOIN garment_tag_assignments gta
+              ON gta.dimension_code = td.dimension_code
+             AND gta.tag_code = td.code
+             AND gta.status IN ('pending', 'confirmed')
+            WHERE td.is_active = 1
+            GROUP BY td.id
+            ORDER BY td.dimension_code, td.sort_order, td.id
+            """
+        ).fetchall()
+        assignment_total = db.execute("SELECT COUNT(*) AS count FROM garment_tag_assignments").fetchone()["count"]
+        tagged_garment_total = db.execute("SELECT COUNT(DISTINCT garment_id) AS count FROM garment_tag_assignments").fetchone()["count"]
+    tags_by_dimension: dict[str, list[dict[str, Any]]] = {}
+    for row in tags:
+        tags_by_dimension.setdefault(row["dimension_code"], []).append(serialize_tag_def(row))
+    return {
+        "dimensions": [
+            {
+                **serialize_tag_dimension(row),
+                "tags": build_taxonomy_tree(tags_by_dimension.get(row["code"], [])),
+            }
+            for row in dimensions
+        ],
+        "summary": {
+            "dimensionCount": len(dimensions),
+            "tagCount": len(tags),
+            "assignmentCount": int(assignment_total or 0),
+            "taggedGarmentCount": int(tagged_garment_total or 0),
+        },
+    }
+
+
+@app.post("/api/taxonomy/backfill-assignments")
+def backfill_taxonomy_assignments(request: Request) -> dict[str, Any]:
+    require_admin(request)
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT id, ai_tags_json, official_title_tags_json, manual_tags_json, tag_meta_json
+            FROM styling_garments
+            WHERE deleted_at IS NULL
+            """
+        ).fetchall()
+        for row in rows:
+            replace_garment_tag_assignments(
+                db,
+                int(row["id"]),
+                loads(row["ai_tags_json"], {}),
+                loads(row["official_title_tags_json"], {}),
+                loads(row["manual_tags_json"], {}),
+                loads(row["tag_meta_json"], {}),
+            )
+        log_event(db, "taxonomy", None, "assignments_backfilled", {"garmentCount": len(rows)})
+    return {"ok": True, "garmentCount": len(rows)}
 
 
 @app.get("/api/model-profiles")
@@ -5438,6 +5518,149 @@ def build_effective_tags(ai_tags: dict[str, Any], official_title_tags: dict[str,
     }
 
 
+def replace_garment_tag_assignments(
+    db: Any,
+    garment_id: int,
+    ai_tags: dict[str, Any],
+    official_title_tags: dict[str, Any],
+    manual_tags: dict[str, Any],
+    tag_meta: dict[str, Any],
+) -> None:
+    timestamp = now_iso()
+    defs = taxonomy_def_keys(db)
+    status = "pending" if tag_meta.get("needs_review") else "confirmed"
+    confidence = clamp_float(tag_meta.get("overall_confidence"), 0.0, 1.0, 0.0) if tag_meta else None
+    db.execute("DELETE FROM garment_tag_assignments WHERE garment_id = ?", (garment_id,))
+
+    def add(
+        dimension_code: str,
+        tag_code: Any,
+        *,
+        source: str = "ai",
+        value_kind: str = "tag",
+        value_number: float | None = None,
+        value_text: str | None = None,
+        value_bool: bool | None = None,
+        item_status: str = status,
+        evidence: dict[str, Any] | None = None,
+        note: str | None = None,
+    ) -> None:
+        code = str(tag_code or "").strip()
+        if not code or (dimension_code, code) not in defs:
+            return
+        db.execute(
+            """
+            INSERT INTO garment_tag_assignments
+              (garment_id, dimension_code, tag_code, value_kind, value_number, value_text, value_bool,
+               confidence, source, status, evidence_json, note, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(garment_id, dimension_code, tag_code, source) DO UPDATE SET
+              value_kind = excluded.value_kind,
+              value_number = excluded.value_number,
+              value_text = excluded.value_text,
+              value_bool = excluded.value_bool,
+              confidence = excluded.confidence,
+              status = excluded.status,
+              evidence_json = excluded.evidence_json,
+              note = excluded.note,
+              updated_at = excluded.updated_at
+            """,
+            (
+                garment_id,
+                dimension_code,
+                code,
+                value_kind,
+                value_number,
+                value_text,
+                1 if value_bool else 0 if value_bool is not None else None,
+                confidence,
+                source,
+                item_status,
+                dumps(evidence or {}),
+                note,
+                timestamp,
+                timestamp,
+            ),
+        )
+
+    add("category", ai_tags.get("category"))
+    add("category", ai_tags.get("sub_category"))
+    colors = ai_tags.get("colors") if isinstance(ai_tags.get("colors"), dict) else {}
+    add("color", colors.get("primary"))
+    for color in ensure_string_list(colors.get("secondary")):
+        add("color", color)
+    for key in ("temperature", "contrast_level", "color_distribution"):
+        add("color_attribute", colors.get(key))
+    for item in ensure_string_list(ai_tags.get("materials_visual")):
+        add("material_visual", item)
+    for item in ensure_string_list(ai_tags.get("surface_texture")):
+        add("surface_texture", item)
+    add("fit", ai_tags.get("fit"))
+    for item in ensure_string_list(ai_tags.get("silhouette")):
+        add("silhouette", item)
+    for item in ensure_string_list(ai_tags.get("structure")):
+        add("structure", item)
+    length = ai_tags.get("length") if isinstance(ai_tags.get("length"), dict) else {}
+    length_map = {"top_length": "top", "sleeve_length": "sleeve", "bottom_length": "bottom"}
+    for key, prefix in length_map.items():
+        value = str(length.get(key) or "").strip()
+        add("length", f"{prefix}_{value}" if value and value != "unknown" else "unknown")
+    for item in ensure_string_list(ai_tags.get("neckline")):
+        add("neckline", item)
+    for item in ensure_string_list(ai_tags.get("closure")):
+        add("closure", item)
+    for item in ensure_string_list(ai_tags.get("details")):
+        add("design_detail", item)
+    for item in ensure_string_list(ai_tags.get("patterns")):
+        add("pattern", item)
+    add("pattern_scale", ai_tags.get("pattern_scale"))
+    wearability = ai_tags.get("wearability") if isinstance(ai_tags.get("wearability"), dict) else {}
+    for key in ("can_be_worn_alone", "can_be_inner_layer", "can_be_outer_layer", "can_be_bottom_pairing", "can_be_set_anchor"):
+        if key in wearability:
+            add("wearability", key, value_kind="boolean", value_bool=bool(wearability.get(key)))
+    for item in ensure_string_list(wearability.get("recommended_wearing_methods")):
+        add("wearing_method", item)
+    add("coverage_risk", wearability.get("coverage_risk"))
+    lily_style = ai_tags.get("lily_style") if isinstance(ai_tags.get("lily_style"), dict) else {}
+    for key in ("business_fashion_score", "commute_score", "clean_score", "relaxed_score", "feminine_score", "fashion_detail_score"):
+        if key in lily_style:
+            add("lily_style_score", key, value_kind="score", value_number=clamp_float(lily_style.get(key), 0.0, 1.0, 0.0))
+    add("formality", lily_style.get("formality"))
+    for item in ensure_string_list(ai_tags.get("occasion")):
+        add("occasion", item)
+    for item in ensure_string_list(ai_tags.get("season")):
+        add("season", item)
+    compatibility = ai_tags.get("styling_compatibility") if isinstance(ai_tags.get("styling_compatibility"), dict) else {}
+    for item in ensure_string_list(compatibility.get("best_pairing_categories")):
+        add("pairing_logic", f"best_pairing_{item}")
+    for item in ensure_string_list(compatibility.get("avoid_pairing_categories")):
+        add("pairing_logic", f"avoid_pairing_{item}")
+    for item in ensure_string_list(compatibility.get("style_risk")):
+        add("style_risk", item)
+    for item in ensure_string_list(tag_meta.get("review_reasons") if isinstance(tag_meta, dict) else []):
+        add("review_reason", item, source="system", item_status="confirmed")
+    if isinstance(manual_tags, dict):
+        for key, value in manual_tags.items():
+            if isinstance(value, list):
+                text = "，".join(str(item) for item in value if str(item).strip())
+            elif isinstance(value, bool):
+                add("manual_business", key, source="manual", value_kind="boolean", value_bool=value, item_status="confirmed")
+                continue
+            else:
+                text = str(value or "").strip()
+            if text:
+                add("manual_business", key, source="manual", value_kind="text", value_text=text[:240], item_status="confirmed")
+    if official_title_tags:
+        raw_title = str(official_title_tags.get("raw_title") or "").strip()
+        if raw_title:
+            add("manual_business", "notes", source="official", value_kind="text", value_text=raw_title[:240], item_status="confirmed", note="官方标题原文")
+
+
+def taxonomy_def_keys(db: Any) -> set[tuple[str, str]]:
+    rows = db.execute("SELECT dimension_code, code FROM tag_defs WHERE is_active = 1").fetchall()
+    return {(str(row["dimension_code"]), str(row["code"])) for row in rows}
+
+
 def compress_tags_for_styling(row: Any) -> dict[str, Any]:
     effective = loads(row["effective_tags_json"], {}) if "effective_tags_json" in row.keys() else {}
     if not effective:
@@ -7719,6 +7942,51 @@ def serialize_brand_info(row: Any) -> dict[str, Any]:
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
+
+
+def serialize_tag_dimension(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "code": row["code"],
+        "labelZh": row["label_zh"],
+        "descriptionZh": row["description_zh"],
+        "sortOrder": row["sort_order"],
+        "isActive": bool(row["is_active"]),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def serialize_tag_def(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "dimensionCode": row["dimension_code"],
+        "code": row["code"],
+        "labelZh": row["label_zh"],
+        "descriptionZh": row["description_zh"],
+        "parentCode": row["parent_code"],
+        "level": row["level"],
+        "valueKind": row["value_kind"],
+        "isSelectable": bool(row["is_selectable"]),
+        "isActive": bool(row["is_active"]),
+        "sortOrder": row["sort_order"],
+        "metadata": loads(row["metadata_json"], {}) if "metadata_json" in row.keys() else {},
+        "usageCount": int(row["usage_count"] or 0) if "usage_count" in row.keys() else 0,
+        "children": [],
+    }
+
+
+def build_taxonomy_tree(tags: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_code = {tag["code"]: {**tag, "children": []} for tag in tags}
+    roots: list[dict[str, Any]] = []
+    for tag in by_code.values():
+        parent_code = tag.get("parentCode")
+        parent = by_code.get(str(parent_code)) if parent_code else None
+        if parent:
+            parent["children"].append(tag)
+        else:
+            roots.append(tag)
+    return roots
 
 
 def serialize_shot_plan(row: Any) -> dict[str, Any]:

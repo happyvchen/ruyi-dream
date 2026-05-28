@@ -1,4 +1,4 @@
-export type Page = 'studio' | 'library' | 'model' | 'brand' | 'records'
+export type Page = 'studio' | 'library' | 'model' | 'brand' | 'tag-rules' | 'records'
 
 export type AppRoute = {
   page: Page
@@ -17,6 +17,7 @@ export function parseRoute(): AppRoute {
   if (path === '/library') return { page: 'library' }
   if (path === '/model') return { page: 'model' }
   if (path === '/brand') return { page: 'brand' }
+  if (path === '/tag-rules') return { page: 'tag-rules' }
   if (path === '/records') return { page: 'records', recordId: positiveId(params.get('task')) }
   return { page: 'studio', taskId: positiveId(params.get('task')) }
 }
@@ -25,6 +26,7 @@ export function routeToUrl(route: AppRoute) {
   if (route.page === 'library') return '/library'
   if (route.page === 'model') return '/model'
   if (route.page === 'brand') return '/brand'
+  if (route.page === 'tag-rules') return '/tag-rules'
   if (route.page === 'records') return route.recordId ? `/records?task=${route.recordId}` : '/records'
   return route.taskId ? `/studio?task=${route.taskId}` : '/studio'
 }

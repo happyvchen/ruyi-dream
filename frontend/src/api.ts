@@ -214,6 +214,45 @@ export type BrandInfoPayload = {
   negativeConstraints?: string
 }
 
+export type TaxonomyTag = {
+  id: number
+  dimensionCode: string
+  code: string
+  labelZh: string
+  descriptionZh?: string | null
+  parentCode?: string | null
+  level: number
+  valueKind: string
+  isSelectable: boolean
+  isActive: boolean
+  sortOrder: number
+  metadata?: Record<string, unknown>
+  usageCount: number
+  children: TaxonomyTag[]
+}
+
+export type TaxonomyDimension = {
+  id: number
+  code: string
+  labelZh: string
+  descriptionZh?: string | null
+  sortOrder: number
+  isActive: boolean
+  createdAt: string
+  updatedAt: string
+  tags: TaxonomyTag[]
+}
+
+export type TaxonomyRules = {
+  dimensions: TaxonomyDimension[]
+  summary: {
+    dimensionCount: number
+    tagCount: number
+    assignmentCount: number
+    taggedGarmentCount: number
+  }
+}
+
 function headers(init?: RequestInit) {
   const h = new Headers(init?.headers)
   if (!(init?.body instanceof FormData) && !h.has('Content-Type')) h.set('Content-Type', 'application/json')
@@ -357,4 +396,6 @@ export const api = {
   updateBrandInfo: (payload: BrandInfoPayload) =>
     request<{ item: BrandInfo }>('/api/brand-info', { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteBrandInfo: () => request<{ ok: boolean }>('/api/brand-info', { method: 'DELETE' }),
+  getTaxonomyRules: () => request<TaxonomyRules>('/api/taxonomy/rules'),
+  backfillTaxonomyAssignments: () => request<{ ok: boolean; garmentCount: number }>('/api/taxonomy/backfill-assignments', { method: 'POST' }),
 }

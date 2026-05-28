@@ -29,6 +29,7 @@ import {
   Search,
   Shield,
   Sparkles,
+  Tags,
   Trash2,
   Upload,
   User,
@@ -39,7 +40,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
-import type { AIOperation, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, SessionRole, StylingGarment } from './api'
+import type { AIOperation, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, SessionRole, StylingGarment, TaxonomyDimension, TaxonomyRules, TaxonomyTag } from './api'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 
@@ -101,7 +102,7 @@ export function App() {
       .then((session) => {
         setAuthenticated(session.authenticated)
         setRole(session.role ?? null)
-        if (session.role !== 'admin' && parseRoute().page === 'brand') {
+        if (session.role !== 'admin' && ['brand', 'tag-rules'].includes(parseRoute().page)) {
           setPage('studio')
           window.history.replaceState(null, '', routeToUrl({ page: 'studio' }))
         }
@@ -116,7 +117,7 @@ export function App() {
   }, [authenticated, role])
 
   useEffect(() => {
-    if (!authenticated || role === 'admin' || page !== 'brand') return
+    if (!authenticated || role === 'admin' || !['brand', 'tag-rules'].includes(page)) return
     setPage('studio')
     window.history.replaceState(null, '', routeToUrl({ page: 'studio' }))
   }, [authenticated, role, page])
@@ -235,6 +236,7 @@ export function App() {
     { id: 'library' as const, label: '搭配服饰库', icon: Library },
     { id: 'model' as const, label: '数字模特', icon: UserRound },
     ...(role === 'admin' ? [{ id: 'brand' as const, label: '品牌信息', icon: Building2 }] : []),
+    ...(role === 'admin' ? [{ id: 'tag-rules' as const, label: '标签规则', icon: Tags }] : []),
     { id: 'records' as const, label: '生成记录', icon: History },
   ]
 
@@ -278,6 +280,7 @@ export function App() {
         {page === 'library' && <LibraryPage garments={garments} run={run} />}
         {page === 'model' && <ModelPage models={models} />}
         {page === 'brand' && role === 'admin' && <BrandInfoPage initialBrandInfo={brandInfo} setBrandInfo={setBrandInfo} run={run} />}
+        {page === 'tag-rules' && role === 'admin' && <TagRulesPage run={run} />}
         {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} run={run} />}
       </main>
     </div>
@@ -1603,6 +1606,103 @@ function BrandJsonDialog({ dialog, setDialog, onClose, onImport }: {
     </div>,
     document.body,
   )
+}
+
+function TagRulesPage({ run }: { run: any }) {
+  const [rules, setRules] = useState<TaxonomyRules | null>(null)
+  const [activeCode, setActiveCode] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  function loadRules() {
+    setLoading(true)
+    return api.getTaxonomyRules().then((result) => {
+      setRules(result)
+      setActiveCode((current) => current || result.dimensions[0]?.code || '')
+    }).finally(() => setLoading(false))
+  }
+
+  useEffect(() => {
+    void loadRules().catch(() => undefined)
+  }, [])
+
+  const activeDimension = rules?.dimensions.find((item) => item.code === activeCode) ?? rules?.dimensions[0]
+  const activeTags = activeDimension?.tags ?? []
+
+  return (
+    <section className="page">
+      <PageTitle
+        title="标签规则"
+        subtitle="维护服装标签字典、维度树和商品打标投影。"
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" disabled={loading} onClick={() => void loadRules()}><RotateCcw size={16} />刷新</button><button className="primary" onClick={() => void run('同步标签投影中...', () => api.backfillTaxonomyAssignments(), () => void loadRules(), { refresh: false })}><Save size={16} />同步现有标签</button></div>}
+      />
+      <div className="taxonomy-summary">
+        <MetricCard label="维度" value={rules?.summary.dimensionCount ?? 0} />
+        <MetricCard label="标准标签" value={rules?.summary.tagCount ?? 0} />
+        <MetricCard label="打标记录" value={rules?.summary.assignmentCount ?? 0} />
+        <MetricCard label="已投影服饰" value={rules?.summary.taggedGarmentCount ?? 0} />
+      </div>
+      <div className="taxonomy-layout">
+        <aside className="panel taxonomy-dimensions">
+          {(rules?.dimensions ?? []).map((dimension) => (
+            <button key={dimension.code} className={dimension.code === activeDimension?.code ? 'active' : ''} onClick={() => setActiveCode(dimension.code)}>
+              <span>{dimension.labelZh}</span>
+              <em>{dimension.code}</em>
+            </button>
+          ))}
+          {!rules && <EmptyState title={loading ? '加载中' : '暂无标签规则'} text={loading ? '正在读取标签字典。' : '标签字典尚未初始化。'} />}
+        </aside>
+        <div className="panel taxonomy-tree-panel">
+          {activeDimension ? (
+            <>
+              <div className="taxonomy-panel-head">
+                <div>
+                  <span>{activeDimension.code}</span>
+                  <h2>{activeDimension.labelZh}</h2>
+                </div>
+                <strong>{countTaxonomyTags(activeTags)} 个标签</strong>
+              </div>
+              <div className="taxonomy-tree">
+                {activeTags.map((tag) => <TaxonomyTagNode key={tag.code} tag={tag} />)}
+              </div>
+            </>
+          ) : <EmptyState title="暂无标签规则" text="标签字典尚未初始化。" />}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function MetricCard({ label, value }: { label: string; value: number }) {
+  return <div className="panel taxonomy-metric"><span>{label}</span><strong>{value}</strong></div>
+}
+
+function TaxonomyTagNode({ tag }: { tag: TaxonomyTag }) {
+  return (
+    <div className="taxonomy-node">
+      <div className="taxonomy-node-row">
+        <div>
+          <strong>{tag.labelZh}</strong>
+          <span>{tag.code}</span>
+        </div>
+        <div className="taxonomy-node-meta">
+          <em>{valueKindLabel(tag.valueKind)}</em>
+          {tag.usageCount > 0 && <b>{tag.usageCount}</b>}
+        </div>
+      </div>
+      {tag.children.length > 0 && <div className="taxonomy-children">{tag.children.map((child) => <TaxonomyTagNode key={child.code} tag={child} />)}</div>}
+    </div>
+  )
+}
+
+function countTaxonomyTags(tags: TaxonomyTag[]): number {
+  return tags.reduce((total, tag) => total + 1 + countTaxonomyTags(tag.children), 0)
+}
+
+function valueKindLabel(kind: string) {
+  if (kind === 'score') return '分值'
+  if (kind === 'boolean') return '开关'
+  if (kind === 'text') return '文本'
+  return '标签'
 }
 
 function RecordsPage({ records, detail, setDetail, run }: { records: GenerationTask[]; detail: GenerationTask | null; setDetail: (task: GenerationTask | null) => void; run: any }) {
