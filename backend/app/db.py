@@ -1088,11 +1088,7 @@ def seed_default_taxonomy(db: sqlite3.Connection) -> None:
             """
             INSERT INTO tag_dimensions (code, label_zh, description_zh, sort_order, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(code) DO UPDATE SET
-              label_zh = excluded.label_zh,
-              description_zh = excluded.description_zh,
-              sort_order = excluded.sort_order,
-              updated_at = excluded.updated_at
+            ON CONFLICT(code) DO NOTHING
             """,
             (code, label, description, sort_order, timestamp, timestamp),
         )
@@ -1111,13 +1107,7 @@ def seed_default_taxonomy(db: sqlite3.Connection) -> None:
                 INSERT INTO tag_defs
                   (dimension_code, code, label_zh, parent_code, level, value_kind, sort_order, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(dimension_code, code) DO UPDATE SET
-                  label_zh = excluded.label_zh,
-                  parent_code = excluded.parent_code,
-                  level = excluded.level,
-                  value_kind = excluded.value_kind,
-                  sort_order = excluded.sort_order,
-                  updated_at = excluded.updated_at
+                ON CONFLICT(dimension_code, code) DO NOTHING
                 """,
                 (dimension, code, label, parent_code, level, value_kind, index * 10, timestamp, timestamp),
             )

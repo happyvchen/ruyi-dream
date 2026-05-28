@@ -1101,6 +1101,7 @@ class BackendSmokeTests(unittest.TestCase):
                     payload = response.json()
                     self.assertGreaterEqual(payload["summary"]["dimensionCount"], 20)
                     self.assertGreaterEqual(payload["summary"]["tagCount"], 100)
+                    self.assertGreaterEqual(payload["summary"]["relationCount"], 1)
                     self.assertTrue(any(item["code"] == "category" for item in payload["dimensions"]))
 
                     updated_dimension = client.patch(
@@ -1110,6 +1111,19 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertEqual(updated_dimension.status_code, 200)
                     category_dimension = next(item for item in updated_dimension.json()["dimensions"] if item["code"] == "category")
                     self.assertEqual(category_dimension["labelZh"], "品类规则")
+
+                    db_module.init_db()
+                    persisted_dimension = client.get("/api/taxonomy/rules")
+                    self.assertEqual(persisted_dimension.status_code, 200)
+                    category_dimension = next(item for item in persisted_dimension.json()["dimensions"] if item["code"] == "category")
+                    self.assertEqual(category_dimension["labelZh"], "品类规则")
+
+                    created_dimension = client.post(
+                        "/api/taxonomy/dimensions",
+                        json={"code": "test_dimension", "labelZh": "测试维度", "sortOrder": 999},
+                    )
+                    self.assertEqual(created_dimension.status_code, 200)
+                    self.assertTrue(any(item["code"] == "test_dimension" for item in created_dimension.json()["dimensions"]))
 
                     created_tag = client.post(
                         "/api/taxonomy/tags",
@@ -1135,6 +1149,74 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertEqual(row["label_zh"], "测试标签已改")
                     self.assertEqual(row["is_selectable"], 0)
                     self.assertEqual(row["sort_order"], 77)
+
+                    cleared_parent = client.patch(f"/api/taxonomy/tags/{tag_id}", json={"parentCode": None})
+                    self.assertEqual(cleared_parent.status_code, 200)
+                    with db_module.get_db() as db:
+                        row = db.execute("SELECT parent_code FROM tag_defs WHERE id = ?", (tag_id,)).fetchone()
+                    self.assertIsNone(row["parent_code"])
+
+                    created_relation = client.post(
+                        "/api/taxonomy/relations",
+                        json={
+                            "fromDimensionCode": "category",
+                            "fromTagCode": "test_tag",
+                            "relationType": "implies",
+                            "toDimensionCode": "wearability",
+                            "toTagCode": "can_be_worn_alone",
+                            "weight": 0.5,
+                        },
+                    )
+                    self.assertEqual(created_relation.status_code, 200)
+                    relation_id = next(
+                        item["id"] for item in created_relation.json()["relations"]
+                        if item["fromTagCode"] == "test_tag" and item["relationType"] == "implies"
+                    )
+
+                    updated_relation = client.patch(
+                        f"/api/taxonomy/relations/{relation_id}",
+                        json={"weight": 0.75, "descriptionZh": "测试关系"},
+                    )
+                    self.assertEqual(updated_relation.status_code, 200)
+                    relation = next(item for item in updated_relation.json()["relations"] if item["id"] == relation_id)
+                    self.assertEqual(relation["weight"], 0.75)
+                    self.assertEqual(relation["descriptionZh"], "测试关系")
+
+                    exported = client.get("/api/taxonomy/export")
+                    self.assertEqual(exported.status_code, 200)
+                    self.assertEqual(exported.json()["schemaVersion"], "ruyi-taxonomy-rules-v1")
+                    self.assertTrue(any(item["code"] == "category" for item in exported.json()["dimensions"]))
+
+                    imported = client.post(
+                        "/api/taxonomy/import",
+                        json={
+                            "dimensions": [{"code": "import_dimension", "labelZh": "导入维度"}],
+                            "tags": [{"dimensionCode": "import_dimension", "code": "import_tag", "labelZh": "导入标签"}],
+                            "relations": [{
+                                "fromDimensionCode": "import_dimension",
+                                "fromTagCode": "import_tag",
+                                "relationType": "implies",
+                                "toDimensionCode": "category",
+                                "toTagCode": "top",
+                            }],
+                        },
+                    )
+                    self.assertEqual(imported.status_code, 200)
+                    self.assertTrue(any(item["code"] == "import_dimension" for item in imported.json()["dimensions"]))
+                    self.assertTrue(any(item["fromTagCode"] == "import_tag" for item in imported.json()["relations"]))
+
+                    deleted_relation = client.delete(f"/api/taxonomy/relations/{relation_id}")
+                    self.assertEqual(deleted_relation.status_code, 200)
+                    self.assertFalse(any(item["id"] == relation_id for item in deleted_relation.json()["relations"]))
+
+                    deleted_tag = client.delete(f"/api/taxonomy/tags/{tag_id}")
+                    self.assertEqual(deleted_tag.status_code, 200)
+                    with db_module.get_db() as db:
+                        self.assertIsNone(db.execute("SELECT id FROM tag_defs WHERE id = ?", (tag_id,)).fetchone())
+
+                    deleted_dimension = client.delete("/api/taxonomy/dimensions/test_dimension")
+                    self.assertEqual(deleted_dimension.status_code, 200)
+                    self.assertFalse(any(item["code"] == "test_dimension" for item in deleted_dimension.json()["dimensions"]))
 
     def test_brand_info_legacy_fields_migrate_to_guidance_text(self) -> None:
         config = importlib.import_module("app.config")

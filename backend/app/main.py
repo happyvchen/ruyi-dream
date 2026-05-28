@@ -21,7 +21,7 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from PIL import Image, UnidentifiedImageError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .config import get_settings
 from .db import dumps, get_db, init_db, loads, log_event, now_iso
@@ -275,6 +275,11 @@ class TaxonomyDimensionUpdateRequest(BaseModel):
     isActive: bool | None = None
 
 
+class TaxonomyDimensionCreateRequest(TaxonomyDimensionUpdateRequest):
+    code: str
+    labelZh: str
+
+
 class TaxonomyTagCreateRequest(BaseModel):
     dimensionCode: str
     code: str
@@ -299,6 +304,34 @@ class TaxonomyTagUpdateRequest(BaseModel):
     isActive: bool | None = None
     sortOrder: int | None = None
     metadata: dict[str, Any] | None = None
+
+
+class TaxonomyRelationCreateRequest(BaseModel):
+    fromDimensionCode: str
+    fromTagCode: str
+    relationType: str
+    toDimensionCode: str
+    toTagCode: str
+    weight: float | None = None
+    descriptionZh: str | None = None
+    isActive: bool | None = None
+
+
+class TaxonomyRelationUpdateRequest(BaseModel):
+    fromDimensionCode: str | None = None
+    fromTagCode: str | None = None
+    relationType: str | None = None
+    toDimensionCode: str | None = None
+    toTagCode: str | None = None
+    weight: float | None = None
+    descriptionZh: str | None = None
+    isActive: bool | None = None
+
+
+class TaxonomyImportRequest(BaseModel):
+    dimensions: list[dict[str, Any]] = Field(default_factory=list)
+    tags: list[dict[str, Any]] = Field(default_factory=list)
+    relations: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class HeadReferenceUpdateRequest(BaseModel):
@@ -2618,6 +2651,12 @@ def get_taxonomy_rules(request: Request) -> dict[str, Any]:
         ).fetchall()
         assignment_total = db.execute("SELECT COUNT(*) AS count FROM garment_tag_assignments").fetchone()["count"]
         tagged_garment_total = db.execute("SELECT COUNT(DISTINCT garment_id) AS count FROM garment_tag_assignments").fetchone()["count"]
+        relations = db.execute(
+            """
+            SELECT * FROM tag_relations
+            ORDER BY from_dimension_code, from_tag_code, relation_type, to_dimension_code, to_tag_code, id
+            """
+        ).fetchall()
     tags_by_dimension: dict[str, list[dict[str, Any]]] = {}
     for row in tags:
         tags_by_dimension.setdefault(row["dimension_code"], []).append(serialize_tag_def(row))
@@ -2632,10 +2671,78 @@ def get_taxonomy_rules(request: Request) -> dict[str, Any]:
         "summary": {
             "dimensionCount": len(dimensions),
             "tagCount": len(tags),
+            "relationCount": len(relations),
             "assignmentCount": int(assignment_total or 0),
             "taggedGarmentCount": int(tagged_garment_total or 0),
         },
+        "relations": [serialize_tag_relation(row) for row in relations],
     }
+
+
+@app.get("/api/taxonomy/export")
+def export_taxonomy_rules(request: Request) -> dict[str, Any]:
+    require_admin(request)
+    with get_db() as db:
+        dimensions = db.execute("SELECT * FROM tag_dimensions ORDER BY sort_order, id").fetchall()
+        tags = db.execute(
+            """
+            SELECT * FROM tag_defs
+            ORDER BY dimension_code, level, parent_code, sort_order, id
+            """
+        ).fetchall()
+        relations = db.execute(
+            """
+            SELECT * FROM tag_relations
+            ORDER BY from_dimension_code, from_tag_code, relation_type, to_dimension_code, to_tag_code, id
+            """
+        ).fetchall()
+    return {
+        "schemaVersion": "ruyi-taxonomy-rules-v1",
+        "dimensions": [serialize_tag_dimension(row) for row in dimensions],
+        "tags": [serialize_tag_def(row) | {"children": []} for row in tags],
+        "relations": [serialize_tag_relation(row) for row in relations],
+    }
+
+
+@app.post("/api/taxonomy/import")
+def import_taxonomy_rules(payload: TaxonomyImportRequest, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    normalized_dimensions = [normalize_taxonomy_dimension_create_payload(item) for item in payload.dimensions]
+    normalized_tags = [normalize_taxonomy_tag_import_payload(item) for item in payload.tags]
+    normalized_relations = [normalize_taxonomy_relation_import_payload(item) for item in payload.relations]
+    timestamp = now_iso()
+    with get_db() as db:
+        for dimension in normalized_dimensions:
+            upsert_taxonomy_dimension(db, dimension, timestamp)
+        for tag in normalized_tags:
+            ensure_taxonomy_dimension_exists(db, tag["dimension_code"])
+            upsert_taxonomy_tag(db, {**tag, "parent_code": None}, timestamp)
+        for tag in normalized_tags:
+            validate_taxonomy_parent(db, tag["dimension_code"], tag.get("parent_code"), current_code=tag["code"])
+            update_taxonomy_tag_parent(db, tag, timestamp)
+        for relation in normalized_relations:
+            validate_taxonomy_relation_tags(db, relation)
+            upsert_taxonomy_relation(db, relation, timestamp)
+        log_event(db, "taxonomy", None, "imported", {
+            "dimensionCount": len(normalized_dimensions),
+            "tagCount": len(normalized_tags),
+            "relationCount": len(normalized_relations),
+        })
+    return get_taxonomy_rules(request)
+
+
+@app.post("/api/taxonomy/dimensions")
+def create_taxonomy_dimension(payload: TaxonomyDimensionCreateRequest, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    normalized = normalize_taxonomy_dimension_create_payload(payload.model_dump() if hasattr(payload, "model_dump") else payload.dict())
+    timestamp = now_iso()
+    with get_db() as db:
+        existing = db.execute("SELECT id FROM tag_dimensions WHERE code = ?", (normalized["code"],)).fetchone()
+        if existing:
+            raise HTTPException(status_code=409, detail="标签维度 code 已存在")
+        upsert_taxonomy_dimension(db, normalized, timestamp)
+        log_event(db, "taxonomy_dimension", None, "created", normalized)
+    return get_taxonomy_rules(request)
 
 
 @app.patch("/api/taxonomy/dimensions/{dimension_code}")
@@ -2653,6 +2760,25 @@ def update_taxonomy_dimension(dimension_code: str, payload: TaxonomyDimensionUpd
         set_clause = ", ".join(f"{key} = ?" for key in updates)
         db.execute(f"UPDATE tag_dimensions SET {set_clause} WHERE code = ?", (*updates.values(), code))
         log_event(db, "taxonomy_dimension", int(row["id"]), "updated", {"code": code, **updates})
+    return get_taxonomy_rules(request)
+
+
+@app.delete("/api/taxonomy/dimensions/{dimension_code}")
+def delete_taxonomy_dimension(dimension_code: str, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    code = sanitize_taxonomy_code(dimension_code)
+    with get_db() as db:
+        row = db.execute("SELECT * FROM tag_dimensions WHERE code = ?", (code,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="标签维度不存在")
+        tag_count = db.execute("SELECT COUNT(*) AS count FROM tag_defs WHERE dimension_code = ?", (code,)).fetchone()["count"]
+        if tag_count:
+            raise HTTPException(status_code=409, detail="维度下仍有标签，请先删除或迁移标签")
+        assignment_count = db.execute("SELECT COUNT(*) AS count FROM garment_tag_assignments WHERE dimension_code = ?", (code,)).fetchone()["count"]
+        if assignment_count:
+            raise HTTPException(status_code=409, detail="维度已有商品打标引用，不能删除")
+        db.execute("DELETE FROM tag_dimensions WHERE code = ?", (code,))
+        log_event(db, "taxonomy_dimension", int(row["id"]), "deleted", serialize_tag_dimension(row))
     return get_taxonomy_rules(request)
 
 
@@ -2697,6 +2823,46 @@ def create_taxonomy_tag(payload: TaxonomyTagCreateRequest, request: Request) -> 
     return get_taxonomy_rules(request)
 
 
+@app.delete("/api/taxonomy/tags/{tag_id}")
+def delete_taxonomy_tag(tag_id: int, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    with get_db() as db:
+        row = db.execute("SELECT * FROM tag_defs WHERE id = ?", (tag_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="标签不存在")
+        child_count = db.execute(
+            "SELECT COUNT(*) AS count FROM tag_defs WHERE dimension_code = ? AND parent_code = ?",
+            (row["dimension_code"], row["code"]),
+        ).fetchone()["count"]
+        if child_count:
+            raise HTTPException(status_code=409, detail="标签仍有子标签，请先删除或迁移子标签")
+        usage_count = db.execute(
+            "SELECT COUNT(*) AS count FROM garment_tag_assignments WHERE dimension_code = ? AND tag_code = ?",
+            (row["dimension_code"], row["code"]),
+        ).fetchone()["count"]
+        if usage_count:
+            raise HTTPException(status_code=409, detail="标签已有商品打标引用，不能删除；可先停用")
+        relation_count = db.execute(
+            """
+            SELECT COUNT(*) AS count FROM tag_relations
+            WHERE (from_dimension_code = ? AND from_tag_code = ?)
+               OR (to_dimension_code = ? AND to_tag_code = ?)
+            """,
+            (row["dimension_code"], row["code"], row["dimension_code"], row["code"]),
+        ).fetchone()["count"]
+        db.execute(
+            """
+            DELETE FROM tag_relations
+            WHERE (from_dimension_code = ? AND from_tag_code = ?)
+               OR (to_dimension_code = ? AND to_tag_code = ?)
+            """,
+            (row["dimension_code"], row["code"], row["dimension_code"], row["code"]),
+        )
+        db.execute("DELETE FROM tag_defs WHERE id = ?", (tag_id,))
+        log_event(db, "taxonomy_tag", tag_id, "deleted", {**serialize_tag_def(row), "deletedRelationCount": int(relation_count or 0)})
+    return get_taxonomy_rules(request)
+
+
 @app.patch("/api/taxonomy/tags/{tag_id}")
 def update_taxonomy_tag(tag_id: int, payload: TaxonomyTagUpdateRequest, request: Request) -> dict[str, Any]:
     require_admin(request)
@@ -2713,6 +2879,92 @@ def update_taxonomy_tag(tag_id: int, payload: TaxonomyTagUpdateRequest, request:
         set_clause = ", ".join(f"{key} = ?" for key in updates)
         db.execute(f"UPDATE tag_defs SET {set_clause} WHERE id = ?", (*updates.values(), tag_id))
         log_event(db, "taxonomy_tag", tag_id, "updated", updates)
+    return get_taxonomy_rules(request)
+
+
+@app.post("/api/taxonomy/relations")
+def create_taxonomy_relation(payload: TaxonomyRelationCreateRequest, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    normalized = normalize_taxonomy_relation_create_payload(payload)
+    timestamp = now_iso()
+    with get_db() as db:
+        validate_taxonomy_relation_tags(db, normalized)
+        existing = db.execute(
+            """
+            SELECT id FROM tag_relations
+            WHERE from_dimension_code = ? AND from_tag_code = ? AND relation_type = ?
+              AND to_dimension_code = ? AND to_tag_code = ?
+            """,
+            (
+                normalized["from_dimension_code"],
+                normalized["from_tag_code"],
+                normalized["relation_type"],
+                normalized["to_dimension_code"],
+                normalized["to_tag_code"],
+            ),
+        ).fetchone()
+        if existing:
+            raise HTTPException(status_code=409, detail="标签关系已存在")
+        cursor = insert_taxonomy_relation(db, normalized, timestamp)
+        log_event(db, "taxonomy_relation", int(cursor.lastrowid), "created", normalized)
+    return get_taxonomy_rules(request)
+
+
+@app.patch("/api/taxonomy/relations/{relation_id}")
+def update_taxonomy_relation(relation_id: int, payload: TaxonomyRelationUpdateRequest, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    updates = normalize_taxonomy_relation_update_payload(payload)
+    if not updates:
+        return get_taxonomy_rules(request)
+    with get_db() as db:
+        row = db.execute("SELECT * FROM tag_relations WHERE id = ?", (relation_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="标签关系不存在")
+        next_relation = {
+            "from_dimension_code": updates.get("from_dimension_code", row["from_dimension_code"]),
+            "from_tag_code": updates.get("from_tag_code", row["from_tag_code"]),
+            "relation_type": updates.get("relation_type", row["relation_type"]),
+            "to_dimension_code": updates.get("to_dimension_code", row["to_dimension_code"]),
+            "to_tag_code": updates.get("to_tag_code", row["to_tag_code"]),
+            "weight": updates.get("weight", row["weight"]),
+            "description_zh": updates.get("description_zh", row["description_zh"]),
+            "is_active": updates.get("is_active", row["is_active"]),
+        }
+        validate_taxonomy_relation_tags(db, next_relation)
+        duplicate = db.execute(
+            """
+            SELECT id FROM tag_relations
+            WHERE id <> ?
+              AND from_dimension_code = ? AND from_tag_code = ? AND relation_type = ?
+              AND to_dimension_code = ? AND to_tag_code = ?
+            """,
+            (
+                relation_id,
+                next_relation["from_dimension_code"],
+                next_relation["from_tag_code"],
+                next_relation["relation_type"],
+                next_relation["to_dimension_code"],
+                next_relation["to_tag_code"],
+            ),
+        ).fetchone()
+        if duplicate:
+            raise HTTPException(status_code=409, detail="标签关系已存在")
+        updates["updated_at"] = now_iso()
+        set_clause = ", ".join(f"{key} = ?" for key in updates)
+        db.execute(f"UPDATE tag_relations SET {set_clause} WHERE id = ?", (*updates.values(), relation_id))
+        log_event(db, "taxonomy_relation", relation_id, "updated", updates)
+    return get_taxonomy_rules(request)
+
+
+@app.delete("/api/taxonomy/relations/{relation_id}")
+def delete_taxonomy_relation(relation_id: int, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    with get_db() as db:
+        row = db.execute("SELECT * FROM tag_relations WHERE id = ?", (relation_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="标签关系不存在")
+        db.execute("DELETE FROM tag_relations WHERE id = ?", (relation_id,))
+        log_event(db, "taxonomy_relation", relation_id, "deleted", serialize_tag_relation(row))
     return get_taxonomy_rules(request)
 
 
@@ -8085,6 +8337,22 @@ def serialize_tag_def(row: Any) -> dict[str, Any]:
     }
 
 
+def serialize_tag_relation(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "fromDimensionCode": row["from_dimension_code"],
+        "fromTagCode": row["from_tag_code"],
+        "relationType": row["relation_type"],
+        "toDimensionCode": row["to_dimension_code"],
+        "toTagCode": row["to_tag_code"],
+        "weight": row["weight"],
+        "descriptionZh": row["description_zh"],
+        "isActive": bool(row["is_active"]),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
 def build_taxonomy_tree(tags: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_code = {tag["code"]: {**tag, "children": []} for tag in tags}
     roots: list[dict[str, Any]] = []
@@ -8347,11 +8615,32 @@ def normalize_brand_info_payload(payload: BrandInfoUpsertRequest, partial: bool 
 TAXONOMY_VALUE_KINDS = {"tag", "score", "boolean", "text"}
 
 
+def payload_has_field(payload: BaseModel, field: str) -> bool:
+    fields = getattr(payload, "model_fields_set", None)
+    if fields is None:
+        fields = getattr(payload, "__fields_set__", set())
+    return field in fields
+
+
 def sanitize_taxonomy_code(value: str) -> str:
     clean = sanitize_name(value)
     if not clean:
         raise HTTPException(status_code=400, detail="标签 code 不能为空")
     return clean
+
+
+def normalize_taxonomy_dimension_create_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    code = sanitize_taxonomy_code(str(payload.get("code") or ""))
+    label = str(payload.get("labelZh") or payload.get("label_zh") or "").strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="维度名称不能为空")
+    return {
+        "code": code,
+        "label_zh": label[:80],
+        "description_zh": str(payload.get("descriptionZh") or payload.get("description_zh") or "").strip()[:240],
+        "sort_order": int(payload.get("sortOrder") if payload.get("sortOrder") is not None else payload.get("sort_order") or 0),
+        "is_active": 1 if payload.get("isActive", payload.get("is_active", True)) is not False else 0,
+    }
 
 
 def normalize_taxonomy_dimension_payload(payload: TaxonomyDimensionUpdateRequest) -> dict[str, Any]:
@@ -8395,6 +8684,33 @@ def normalize_taxonomy_tag_create_payload(payload: TaxonomyTagCreateRequest) -> 
     }
 
 
+def normalize_taxonomy_tag_import_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    dimension_code = sanitize_taxonomy_code(str(payload.get("dimensionCode") or payload.get("dimension_code") or ""))
+    code = sanitize_taxonomy_code(str(payload.get("code") or ""))
+    label = str(payload.get("labelZh") or payload.get("label_zh") or "").strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="标签名称不能为空")
+    value_kind = str(payload.get("valueKind") or payload.get("value_kind") or "tag").strip()
+    if value_kind not in TAXONOMY_VALUE_KINDS:
+        raise HTTPException(status_code=400, detail="标签值类型不支持")
+    parent_value = payload.get("parentCode") if "parentCode" in payload else payload.get("parent_code")
+    parent_code = sanitize_taxonomy_code(str(parent_value)) if parent_value else None
+    metadata = payload.get("metadata")
+    return {
+        "dimension_code": dimension_code,
+        "code": code,
+        "label_zh": label[:80],
+        "description_zh": str(payload.get("descriptionZh") or payload.get("description_zh") or "").strip()[:240],
+        "parent_code": parent_code,
+        "level": max(1, min(int(payload.get("level") or (2 if parent_code else 1)), 8)),
+        "value_kind": value_kind,
+        "is_selectable": 1 if payload.get("isSelectable", payload.get("is_selectable", True)) is not False else 0,
+        "is_active": 1 if payload.get("isActive", payload.get("is_active", True)) is not False else 0,
+        "sort_order": int(payload.get("sortOrder") if payload.get("sortOrder") is not None else payload.get("sort_order") or 0),
+        "metadata": metadata if isinstance(metadata, dict) else {},
+    }
+
+
 def normalize_taxonomy_tag_update_payload(payload: TaxonomyTagUpdateRequest) -> dict[str, Any]:
     updates: dict[str, Any] = {}
     if payload.labelZh is not None:
@@ -8404,7 +8720,7 @@ def normalize_taxonomy_tag_update_payload(payload: TaxonomyTagUpdateRequest) -> 
         updates["label_zh"] = label[:80]
     if payload.descriptionZh is not None:
         updates["description_zh"] = payload.descriptionZh.strip()[:240]
-    if payload.parentCode is not None:
+    if payload_has_field(payload, "parentCode"):
         updates["parent_code"] = sanitize_taxonomy_code(payload.parentCode) if payload.parentCode else None
     if payload.level is not None:
         updates["level"] = max(1, min(int(payload.level), 8))
@@ -8424,6 +8740,61 @@ def normalize_taxonomy_tag_update_payload(payload: TaxonomyTagUpdateRequest) -> 
     return updates
 
 
+def normalize_taxonomy_relation_type(value: str) -> str:
+    clean = sanitize_name(value)
+    if not clean:
+        raise HTTPException(status_code=400, detail="关系类型不能为空")
+    return clean[:64]
+
+
+def normalize_taxonomy_relation_create_payload(payload: TaxonomyRelationCreateRequest) -> dict[str, Any]:
+    return {
+        "from_dimension_code": sanitize_taxonomy_code(payload.fromDimensionCode),
+        "from_tag_code": sanitize_taxonomy_code(payload.fromTagCode),
+        "relation_type": normalize_taxonomy_relation_type(payload.relationType),
+        "to_dimension_code": sanitize_taxonomy_code(payload.toDimensionCode),
+        "to_tag_code": sanitize_taxonomy_code(payload.toTagCode),
+        "weight": max(-10.0, min(float(payload.weight if payload.weight is not None else 1.0), 10.0)),
+        "description_zh": (payload.descriptionZh or "").strip()[:240],
+        "is_active": 1 if payload.isActive is not False else 0,
+    }
+
+
+def normalize_taxonomy_relation_import_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    weight = payload.get("weight")
+    return {
+        "from_dimension_code": sanitize_taxonomy_code(str(payload.get("fromDimensionCode") or payload.get("from_dimension_code") or "")),
+        "from_tag_code": sanitize_taxonomy_code(str(payload.get("fromTagCode") or payload.get("from_tag_code") or "")),
+        "relation_type": normalize_taxonomy_relation_type(str(payload.get("relationType") or payload.get("relation_type") or "")),
+        "to_dimension_code": sanitize_taxonomy_code(str(payload.get("toDimensionCode") or payload.get("to_dimension_code") or "")),
+        "to_tag_code": sanitize_taxonomy_code(str(payload.get("toTagCode") or payload.get("to_tag_code") or "")),
+        "weight": max(-10.0, min(float(weight if weight is not None else 1.0), 10.0)),
+        "description_zh": str(payload.get("descriptionZh") or payload.get("description_zh") or "").strip()[:240],
+        "is_active": 1 if payload.get("isActive", payload.get("is_active", True)) is not False else 0,
+    }
+
+
+def normalize_taxonomy_relation_update_payload(payload: TaxonomyRelationUpdateRequest) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    if payload.fromDimensionCode is not None:
+        updates["from_dimension_code"] = sanitize_taxonomy_code(payload.fromDimensionCode)
+    if payload.fromTagCode is not None:
+        updates["from_tag_code"] = sanitize_taxonomy_code(payload.fromTagCode)
+    if payload.relationType is not None:
+        updates["relation_type"] = normalize_taxonomy_relation_type(payload.relationType)
+    if payload.toDimensionCode is not None:
+        updates["to_dimension_code"] = sanitize_taxonomy_code(payload.toDimensionCode)
+    if payload.toTagCode is not None:
+        updates["to_tag_code"] = sanitize_taxonomy_code(payload.toTagCode)
+    if payload.weight is not None:
+        updates["weight"] = max(-10.0, min(float(payload.weight), 10.0))
+    if payload.descriptionZh is not None:
+        updates["description_zh"] = payload.descriptionZh.strip()[:240]
+    if payload.isActive is not None:
+        updates["is_active"] = 1 if payload.isActive else 0
+    return updates
+
+
 def ensure_taxonomy_dimension_exists(db: Any, dimension_code: str) -> None:
     if not db.execute("SELECT id FROM tag_dimensions WHERE code = ?", (dimension_code,)).fetchone():
         raise HTTPException(status_code=404, detail="标签维度不存在")
@@ -8440,6 +8811,150 @@ def validate_taxonomy_parent(db: Any, dimension_code: str, parent_code: str | No
     ).fetchone()
     if not parent:
         raise HTTPException(status_code=400, detail="父级标签不存在")
+    cursor = parent_code
+    seen = {current_code} if current_code else set()
+    while cursor:
+        if cursor in seen:
+            raise HTTPException(status_code=400, detail="父级标签不能形成循环")
+        seen.add(cursor)
+        next_row = db.execute(
+            "SELECT parent_code FROM tag_defs WHERE dimension_code = ? AND code = ?",
+            (dimension_code, cursor),
+        ).fetchone()
+        cursor = next_row["parent_code"] if next_row else None
+
+
+def validate_taxonomy_relation_tags(db: Any, relation: dict[str, Any]) -> None:
+    for dimension_key, tag_key in (("from_dimension_code", "from_tag_code"), ("to_dimension_code", "to_tag_code")):
+        row = db.execute(
+            "SELECT id FROM tag_defs WHERE dimension_code = ? AND code = ?",
+            (relation[dimension_key], relation[tag_key]),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=400, detail="标签关系引用的标签不存在")
+
+
+def upsert_taxonomy_dimension(db: Any, dimension: dict[str, Any], timestamp: str) -> None:
+    db.execute(
+        """
+        INSERT INTO tag_dimensions (code, label_zh, description_zh, sort_order, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(code) DO UPDATE SET
+          label_zh = excluded.label_zh,
+          description_zh = excluded.description_zh,
+          sort_order = excluded.sort_order,
+          is_active = excluded.is_active,
+          updated_at = excluded.updated_at
+        """,
+        (
+            dimension["code"],
+            dimension["label_zh"],
+            dimension["description_zh"],
+            dimension["sort_order"],
+            dimension["is_active"],
+            timestamp,
+            timestamp,
+        ),
+    )
+
+
+def upsert_taxonomy_tag(db: Any, tag: dict[str, Any], timestamp: str) -> None:
+    db.execute(
+        """
+        INSERT INTO tag_defs
+          (dimension_code, code, label_zh, description_zh, parent_code, level, value_kind,
+           is_selectable, is_active, sort_order, metadata_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(dimension_code, code) DO UPDATE SET
+          label_zh = excluded.label_zh,
+          description_zh = excluded.description_zh,
+          parent_code = excluded.parent_code,
+          level = excluded.level,
+          value_kind = excluded.value_kind,
+          is_selectable = excluded.is_selectable,
+          is_active = excluded.is_active,
+          sort_order = excluded.sort_order,
+          metadata_json = excluded.metadata_json,
+          updated_at = excluded.updated_at
+        """,
+        (
+            tag["dimension_code"],
+            tag["code"],
+            tag["label_zh"],
+            tag["description_zh"],
+            tag.get("parent_code"),
+            tag["level"],
+            tag["value_kind"],
+            tag["is_selectable"],
+            tag["is_active"],
+            tag["sort_order"],
+            dumps(tag["metadata"]),
+            timestamp,
+            timestamp,
+        ),
+    )
+
+
+def update_taxonomy_tag_parent(db: Any, tag: dict[str, Any], timestamp: str) -> None:
+    db.execute(
+        """
+        UPDATE tag_defs
+        SET parent_code = ?, level = ?, updated_at = ?
+        WHERE dimension_code = ? AND code = ?
+        """,
+        (tag.get("parent_code"), tag["level"], timestamp, tag["dimension_code"], tag["code"]),
+    )
+
+
+def insert_taxonomy_relation(db: Any, relation: dict[str, Any], timestamp: str) -> Any:
+    return db.execute(
+        """
+        INSERT INTO tag_relations
+          (from_dimension_code, from_tag_code, relation_type, to_dimension_code, to_tag_code,
+           weight, description_zh, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            relation["from_dimension_code"],
+            relation["from_tag_code"],
+            relation["relation_type"],
+            relation["to_dimension_code"],
+            relation["to_tag_code"],
+            relation["weight"],
+            relation["description_zh"],
+            relation["is_active"],
+            timestamp,
+            timestamp,
+        ),
+    )
+
+
+def upsert_taxonomy_relation(db: Any, relation: dict[str, Any], timestamp: str) -> None:
+    db.execute(
+        """
+        INSERT INTO tag_relations
+          (from_dimension_code, from_tag_code, relation_type, to_dimension_code, to_tag_code,
+           weight, description_zh, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(from_dimension_code, from_tag_code, relation_type, to_dimension_code, to_tag_code) DO UPDATE SET
+          weight = excluded.weight,
+          description_zh = excluded.description_zh,
+          is_active = excluded.is_active,
+          updated_at = excluded.updated_at
+        """,
+        (
+            relation["from_dimension_code"],
+            relation["from_tag_code"],
+            relation["relation_type"],
+            relation["to_dimension_code"],
+            relation["to_tag_code"],
+            relation["weight"],
+            relation["description_zh"],
+            relation["is_active"],
+            timestamp,
+            timestamp,
+        ),
+    )
 
 
 def normalize_model_profile(profile: dict[str, Any]) -> dict[str, Any]:
