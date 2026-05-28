@@ -972,10 +972,15 @@ class BackendSmokeTests(unittest.TestCase):
                     preview_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_previews)").fetchall()}
                     result_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_result_images_new)").fetchall()}
                     brand_profile_columns = {row["name"] for row in db.execute("PRAGMA table_info(brand_profiles)").fetchall()}
+                    taxonomy_dimension_count = db.execute("SELECT COUNT(*) AS count FROM tag_dimensions").fetchone()["count"]
+                    taxonomy_tag_count = db.execute("SELECT COUNT(*) AS count FROM tag_defs").fetchone()["count"]
+                    applicability_columns = {row["name"] for row in db.execute("PRAGMA table_info(tag_applicability_rules)").fetchall()}
+                    applicability_count = db.execute("SELECT COUNT(*) AS count FROM tag_applicability_rules").fetchone()["count"]
+                    assignment_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_tag_assignments)").fetchall()}
                     brand_profile_count = db.execute("SELECT COUNT(*) AS count FROM brand_profiles").fetchone()["count"]
                     template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016", "017", "018", "019", "020"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016", "017", "018", "019", "020", "021", "022"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
@@ -1000,6 +1005,14 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("styling_guidelines", brand_profile_columns)
         self.assertIn("shooting_guidelines", brand_profile_columns)
         self.assertIn("negative_constraints", brand_profile_columns)
+        self.assertEqual(taxonomy_dimension_count, 0)
+        self.assertEqual(taxonomy_tag_count, 0)
+        self.assertIn("category_tag_code", applicability_columns)
+        self.assertIn("target_tag_code", applicability_columns)
+        self.assertEqual(applicability_count, 0)
+        self.assertIn("dimension_code", assignment_columns)
+        self.assertIn("tag_code", assignment_columns)
+        self.assertIn("source", assignment_columns)
         self.assertEqual(brand_profile_count, 0)
         self.assertGreaterEqual(template_count, 1)
 
@@ -1059,6 +1072,250 @@ class BackendSmokeTests(unittest.TestCase):
                     deleted = client.delete("/api/brand-info")
                     self.assertEqual(deleted.status_code, 200)
                     self.assertEqual(client.get("/api/brand-info").json(), {"item": None})
+
+    def test_taxonomy_rules_are_admin_only_and_user_configured(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file, tempfile.TemporaryDirectory() as log_dir:
+            log_dir_path = Path(log_dir)
+
+            class FakeSettings:
+                database_path = Path(db_file.name)
+                log_dir = log_dir_path
+
+            with (
+                patch.object(db_module, "get_settings", return_value=FakeSettings),
+                patch.object(main.settings, "database_path", Path(db_file.name)),
+            ):
+                config.get_settings.cache_clear()
+                db_module.init_db()
+
+                with patch.object(main, "ensure_bucket", return_value=None), TestClient(main.app) as client:
+                    user_login = client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"})
+                    self.assertEqual(user_login.status_code, 200)
+                    self.assertEqual(client.get("/api/taxonomy/rules").status_code, 403)
+                    self.assertEqual(client.get("/api/taxonomy/prompt-card?mode=full").status_code, 403)
+
+                    admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+                    self.assertEqual(admin_login.status_code, 200)
+                    response = client.get("/api/taxonomy/rules")
+                    self.assertEqual(response.status_code, 200)
+                    payload = response.json()
+                    self.assertEqual(payload["summary"]["dimensionCount"], 0)
+                    self.assertEqual(payload["summary"]["tagCount"], 0)
+                    self.assertEqual(payload["summary"]["relationCount"], 0)
+                    self.assertEqual(payload["summary"]["applicabilityRuleCount"], 0)
+
+                    full_prompt = client.get("/api/taxonomy/prompt-card?mode=full")
+                    self.assertEqual(full_prompt.status_code, 200)
+                    self.assertEqual(full_prompt.json()["mode"], "full")
+                    self.assertIn("# Ruyi-Dream 服装标签规则卡 / 完整版", full_prompt.json()["content"])
+                    self.assertIn("## 品类适用范围", full_prompt.json()["content"])
+                    self.assertIn("字段内容、证据说明、视觉摘要等自然语言必须使用中文", full_prompt.json()["content"])
+
+                    compact_prompt = client.get("/api/taxonomy/prompt-card?mode=compact")
+                    self.assertEqual(compact_prompt.status_code, 200)
+                    self.assertEqual(compact_prompt.json()["mode"], "compact")
+                    self.assertIn("# Ruyi-Dream 服装标签规则卡 / 精简版", compact_prompt.json()["content"])
+                    self.assertIn("品类适用范围：", compact_prompt.json()["content"])
+                    self.assertIn("输出 JSON（字段名保持英文用于系统解析；字段内容使用中文）", compact_prompt.json()["content"])
+                    self.assertEqual(client.get("/api/taxonomy/prompt-card?mode=raw").status_code, 400)
+
+                    created_category_dimension = client.post(
+                        "/api/taxonomy/dimensions",
+                        json={"code": "category", "labelZh": "品类", "sortOrder": 10},
+                    )
+                    self.assertEqual(created_category_dimension.status_code, 200)
+
+                    created_wearability_dimension = client.post(
+                        "/api/taxonomy/dimensions",
+                        json={"code": "wearability", "labelZh": "穿着能力", "sortOrder": 20},
+                    )
+                    self.assertEqual(created_wearability_dimension.status_code, 200)
+
+                    created_top_tag = client.post(
+                        "/api/taxonomy/tags",
+                        json={"dimensionCode": "category", "code": "top", "labelZh": "上装"},
+                    )
+                    self.assertEqual(created_top_tag.status_code, 200)
+
+                    created_wearability_tag = client.post(
+                        "/api/taxonomy/tags",
+                        json={"dimensionCode": "wearability", "code": "can_be_worn_alone", "labelZh": "可单穿", "valueKind": "boolean"},
+                    )
+                    self.assertEqual(created_wearability_tag.status_code, 200)
+
+                    updated_dimension = client.patch(
+                        "/api/taxonomy/dimensions/category",
+                        json={"labelZh": "品类规则", "descriptionZh": "可编辑维度", "sortOrder": 9},
+                    )
+                    self.assertEqual(updated_dimension.status_code, 200)
+                    category_dimension = next(item for item in updated_dimension.json()["dimensions"] if item["code"] == "category")
+                    self.assertEqual(category_dimension["labelZh"], "品类规则")
+
+                    db_module.init_db()
+                    persisted_dimension = client.get("/api/taxonomy/rules")
+                    self.assertEqual(persisted_dimension.status_code, 200)
+                    category_dimension = next(item for item in persisted_dimension.json()["dimensions"] if item["code"] == "category")
+                    self.assertEqual(category_dimension["labelZh"], "品类规则")
+
+                    created_dimension = client.post(
+                        "/api/taxonomy/dimensions",
+                        json={"code": "test_dimension", "labelZh": "测试维度", "sortOrder": 999},
+                    )
+                    self.assertEqual(created_dimension.status_code, 200)
+                    self.assertTrue(any(item["code"] == "test_dimension" for item in created_dimension.json()["dimensions"]))
+
+                    created_target_tag = client.post(
+                        "/api/taxonomy/tags",
+                        json={"dimensionCode": "test_dimension", "code": "test_detail", "labelZh": "测试细节"},
+                    )
+                    self.assertEqual(created_target_tag.status_code, 200)
+                    with db_module.get_db() as db:
+                        target_tag_id = db.execute("SELECT id FROM tag_defs WHERE dimension_code = 'test_dimension' AND code = 'test_detail'").fetchone()["id"]
+
+                    created_tag = client.post(
+                        "/api/taxonomy/tags",
+                        json={
+                            "dimensionCode": "category",
+                            "code": "test_tag",
+                            "labelZh": "测试标签",
+                            "parentCode": "top",
+                            "valueKind": "tag",
+                        },
+                    )
+                    self.assertEqual(created_tag.status_code, 200)
+                    with db_module.get_db() as db:
+                        tag_id = db.execute("SELECT id FROM tag_defs WHERE dimension_code = 'category' AND code = 'test_tag'").fetchone()["id"]
+
+                    updated_tag = client.patch(
+                        f"/api/taxonomy/tags/{tag_id}",
+                        json={"labelZh": "测试标签已改", "isSelectable": False, "sortOrder": 77},
+                    )
+                    self.assertEqual(updated_tag.status_code, 200)
+                    with db_module.get_db() as db:
+                        row = db.execute("SELECT label_zh, is_selectable, sort_order FROM tag_defs WHERE id = ?", (tag_id,)).fetchone()
+                    self.assertEqual(row["label_zh"], "测试标签已改")
+                    self.assertEqual(row["is_selectable"], 0)
+                    self.assertEqual(row["sort_order"], 77)
+
+                    cleared_parent = client.patch(f"/api/taxonomy/tags/{tag_id}", json={"parentCode": None})
+                    self.assertEqual(cleared_parent.status_code, 200)
+                    with db_module.get_db() as db:
+                        row = db.execute("SELECT parent_code FROM tag_defs WHERE id = ?", (tag_id,)).fetchone()
+                    self.assertIsNone(row["parent_code"])
+
+                    created_relation = client.post(
+                        "/api/taxonomy/relations",
+                        json={
+                            "fromDimensionCode": "category",
+                            "fromTagCode": "test_tag",
+                            "relationType": "implies",
+                            "toDimensionCode": "wearability",
+                            "toTagCode": "can_be_worn_alone",
+                            "weight": 0.5,
+                        },
+                    )
+                    self.assertEqual(created_relation.status_code, 200)
+                    relation_id = next(
+                        item["id"] for item in created_relation.json()["relations"]
+                        if item["fromTagCode"] == "test_tag" and item["relationType"] == "implies"
+                    )
+
+                    updated_relation = client.patch(
+                        f"/api/taxonomy/relations/{relation_id}",
+                        json={"weight": 0.75, "descriptionZh": "测试关系"},
+                    )
+                    self.assertEqual(updated_relation.status_code, 200)
+                    relation = next(item for item in updated_relation.json()["relations"] if item["id"] == relation_id)
+                    self.assertEqual(relation["weight"], 0.75)
+                    self.assertEqual(relation["descriptionZh"], "测试关系")
+
+                    created_applicability = client.post(
+                        "/api/taxonomy/applicability-rules",
+                        json={
+                            "categoryDimensionCode": "category",
+                            "categoryTagCode": "test_tag",
+                            "targetDimensionCode": "test_dimension",
+                            "targetTagCode": "test_detail",
+                            "mode": "recommended",
+                            "appliesToDescendants": False,
+                            "note": "按品类限定测试细节",
+                        },
+                    )
+                    self.assertEqual(created_applicability.status_code, 200)
+                    applicability_id = next(
+                        item["id"] for item in created_applicability.json()["applicabilityRules"]
+                        if item["categoryTagCode"] == "test_tag" and item["targetTagCode"] == "test_detail"
+                    )
+
+                    updated_applicability = client.patch(
+                        f"/api/taxonomy/applicability-rules/{applicability_id}",
+                        json={"mode": "required", "isActive": False},
+                    )
+                    self.assertEqual(updated_applicability.status_code, 200)
+                    applicability = next(item for item in updated_applicability.json()["applicabilityRules"] if item["id"] == applicability_id)
+                    self.assertEqual(applicability["mode"], "required")
+                    self.assertFalse(applicability["isActive"])
+                    after_inactive_prompt = client.get("/api/taxonomy/prompt-card?mode=full")
+                    self.assertEqual(after_inactive_prompt.status_code, 200)
+                    self.assertNotIn("按品类限定测试细节", after_inactive_prompt.json()["content"])
+
+                    exported = client.get("/api/taxonomy/export")
+                    self.assertEqual(exported.status_code, 200)
+                    self.assertEqual(exported.json()["schemaVersion"], "ruyi-taxonomy-rules-v1")
+                    self.assertTrue(any(item["code"] == "category" for item in exported.json()["dimensions"]))
+                    self.assertTrue(any(item["targetTagCode"] == "test_detail" for item in exported.json()["applicabilityRules"]))
+
+                    imported = client.post(
+                        "/api/taxonomy/import",
+                        json={
+                            "dimensions": [{"code": "import_dimension", "labelZh": "导入维度"}],
+                            "tags": [{"dimensionCode": "import_dimension", "code": "import_tag", "labelZh": "导入标签"}],
+                            "relations": [{
+                                "fromDimensionCode": "import_dimension",
+                                "fromTagCode": "import_tag",
+                                "relationType": "implies",
+                                "toDimensionCode": "category",
+                                "toTagCode": "top",
+                            }],
+                            "applicabilityRules": [{
+                                "categoryDimensionCode": "category",
+                                "categoryTagCode": "top",
+                                "targetDimensionCode": "import_dimension",
+                                "targetTagCode": "import_tag",
+                                "mode": "allowed",
+                            }],
+                        },
+                    )
+                    self.assertEqual(imported.status_code, 200)
+                    self.assertTrue(any(item["code"] == "import_dimension" for item in imported.json()["dimensions"]))
+                    self.assertTrue(any(item["fromTagCode"] == "import_tag" for item in imported.json()["relations"]))
+                    self.assertTrue(any(item["targetTagCode"] == "import_tag" for item in imported.json()["applicabilityRules"]))
+
+                    deleted_relation = client.delete(f"/api/taxonomy/relations/{relation_id}")
+                    self.assertEqual(deleted_relation.status_code, 200)
+                    self.assertFalse(any(item["id"] == relation_id for item in deleted_relation.json()["relations"]))
+
+                    deleted_applicability = client.delete(f"/api/taxonomy/applicability-rules/{applicability_id}")
+                    self.assertEqual(deleted_applicability.status_code, 200)
+                    self.assertFalse(any(item["id"] == applicability_id for item in deleted_applicability.json()["applicabilityRules"]))
+
+                    deleted_tag = client.delete(f"/api/taxonomy/tags/{tag_id}")
+                    self.assertEqual(deleted_tag.status_code, 200)
+                    with db_module.get_db() as db:
+                        self.assertIsNone(db.execute("SELECT id FROM tag_defs WHERE id = ?", (tag_id,)).fetchone())
+
+                    deleted_target_tag = client.delete(f"/api/taxonomy/tags/{target_tag_id}")
+                    self.assertEqual(deleted_target_tag.status_code, 200)
+
+                    deleted_dimension = client.delete("/api/taxonomy/dimensions/test_dimension")
+                    self.assertEqual(deleted_dimension.status_code, 200)
+                    self.assertFalse(any(item["code"] == "test_dimension" for item in deleted_dimension.json()["dimensions"]))
 
     def test_brand_info_legacy_fields_migrate_to_guidance_text(self) -> None:
         config = importlib.import_module("app.config")
@@ -1441,9 +1698,21 @@ class BackendSmokeTests(unittest.TestCase):
 
         timeout_message = "打标任务长时间未完成，已自动停止轮询，可手动重新打标。"
         tagging_result = {
-            "schema_version": main.LILY_TAG_SCHEMA_VERSION,
-            "ai_tags": {"category": "top"},
+            "schema_version": main.TAXONOMY_TAGGING_SCHEMA_VERSION,
+            "tags": [{
+                "dimension_code": "category",
+                "tag_code": "top",
+                "value_type": "tag",
+                "score": None,
+                "value_text": None,
+                "value_bool": None,
+                "confidence": 0.95,
+                "evidence": "正面图显示为上装。",
+            }],
             "official_title_tags": {},
+            "visual_profile": {},
+            "unmapped_observations": [],
+            "suggested_new_tags": [],
             "tag_meta": {
                 "tagger_provider": "gemini",
                 "overall_confidence": 0.95,
@@ -1553,35 +1822,38 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIsNone(attempt["error_message"])
         self.assertIsNone(attempt["failed_at"])
 
-    def test_lily_tagging_normalization_filters_invalid_enums(self) -> None:
+    def test_taxonomy_tagging_normalization_filters_invalid_refs(self) -> None:
         main = importlib.import_module("app.main")
         garment = {"code": "TEST", "images": [{"id": 1}]}
+        context = {
+            "dimensions": [{"code": "category"}, {"code": "color"}],
+            "tags": [],
+            "relations": [],
+            "applicabilityRules": [],
+            "tagByKey": {
+                ("category", "top"): {"dimensionCode": "category", "code": "top", "labelZh": "上装", "valueKind": "tag", "isSelectable": True},
+                ("color", "white"): {"dimensionCode": "color", "code": "white", "labelZh": "白色", "valueKind": "tag", "isSelectable": True},
+            },
+        }
 
-        normalized = main.normalize_styling_tags(
+        normalized = main.normalize_taxonomy_tagging_result(
             {
-                "category": "shoe",
-                "sub_category": "bag",
-                "colors": {"primary": "cyan", "secondary": ["white", "neon"], "temperature": "hot"},
-                "materials_visual": ["denim", "plastic"],
-                "fit": "giant",
-                "patterns": ["solid", "paisley"],
-                "styling_compatibility": {
-                    "style_risk": ["none", "too_gothic"],
-                    "pairing_brief": "适合搭配浅色直筒裤，保持清爽通勤感，不要过长",
-                },
+                "tags": [
+                    {"dimension_code": "category", "tag_code": "top", "value_type": "tag", "confidence": 0.95, "evidence": "图片为上装"},
+                    {"dimension_code": "category", "tag_code": "shoe", "value_type": "tag", "confidence": 0.9, "evidence": "非法标签"},
+                    {"dimension_code": "color", "tag_code": "white", "value_type": "tag", "confidence": 0.8, "evidence": "主色偏白"},
+                ],
+                "unmapped_observations": [{"text": "规则外可见细节", "evidence": "图片可见", "confidence": 0.7}],
+                "tag_meta": {"overall_confidence": 0.9, "needs_review": False, "review_reasons": []},
             },
             garment,
+            context,
         )
 
-        self.assertEqual(normalized["category"], "unknown")
-        self.assertEqual(normalized["sub_category"], "other")
-        self.assertEqual(normalized["colors"]["primary"], "unknown")
-        self.assertEqual(normalized["colors"]["secondary"], ["white"])
-        self.assertEqual(normalized["materials_visual"], ["denim"])
-        self.assertEqual(normalized["fit"], "unknown")
-        self.assertEqual(normalized["patterns"], ["solid"])
-        self.assertEqual(normalized["styling_compatibility"]["style_risk"], ["none"])
-        self.assertLessEqual(len(normalized["styling_compatibility"]["pairing_brief"]), 40)
+        self.assertEqual([item["tag_code"] for item in normalized["tags"]], ["top", "white"])
+        self.assertIn("invalid_tag_reference", normalized["tag_meta"]["review_reasons"])
+        self.assertIn("unmapped_observation", normalized["tag_meta"]["review_reasons"])
+        self.assertEqual(normalized["label_summary"]["category"], ["上装"])
 
     def test_lily_tagging_json_parser_recovers_trailing_brace(self) -> None:
         main = importlib.import_module("app.main")
@@ -1601,22 +1873,22 @@ class BackendSmokeTests(unittest.TestCase):
         main = importlib.import_module("app.main")
 
         ready_meta = main.apply_tag_review_policy(
-            {"category": "top"},
+            {"tags": [{"dimension_code": "category", "tag_code": "top"}]},
             {"tagger_provider": "gemini", "overall_confidence": 0.9, "needs_review": False, "review_reasons": []},
         )
         review_meta = main.apply_tag_review_policy(
-            {"category": "unsupported_accessory"},
+            {"tags": [{"dimension_code": "category", "tag_code": "unsupported_accessory"}]},
             {"tagger_provider": "gemini", "overall_confidence": 0.9, "needs_review": False, "review_reasons": []},
         )
         fallback_meta = main.apply_tag_review_policy(
-            {"category": "top"},
+            {"tags": [{"dimension_code": "category", "tag_code": "top"}]},
             {"tagger_provider": "fallback", "overall_confidence": 0.5, "needs_review": True, "review_reasons": ["fallback_tags"]},
         )
 
-        self.assertEqual(main.tagging_status_for_result({"category": "top"}, ready_meta), "READY")
-        self.assertEqual(main.tagging_status_for_result({"category": "unsupported_accessory"}, review_meta), "TAGGING_READY")
+        self.assertEqual(main.tagging_status_for_result({"tags": [{"dimension_code": "category", "tag_code": "top"}]}, ready_meta), "READY")
+        self.assertEqual(main.tagging_status_for_result({"tags": [{"dimension_code": "category", "tag_code": "unsupported_accessory"}]}, review_meta), "TAGGING_READY")
         self.assertIn("unsupported_accessory", review_meta["review_reasons"])
-        self.assertEqual(main.tagging_status_for_result({"category": "top"}, fallback_meta), "TAGGING_READY")
+        self.assertEqual(main.tagging_status_for_result({"tags": [{"dimension_code": "category", "tag_code": "top"}]}, fallback_meta), "TAGGING_READY")
 
     def test_generation_inputs_use_selected_material_snapshot_after_archive(self) -> None:
         config = importlib.import_module("app.config")

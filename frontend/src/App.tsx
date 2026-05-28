@@ -12,6 +12,7 @@ import {
   Clock3,
   Download,
   Eye,
+  FileText,
   FileImage,
   FolderOpen,
   GalleryVerticalEnd,
@@ -29,6 +30,7 @@ import {
   Search,
   Shield,
   Sparkles,
+  Tags,
   Trash2,
   Upload,
   User,
@@ -39,7 +41,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
-import type { AIOperation, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, SessionRole, StylingGarment } from './api'
+import type { AIOperation, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, SessionRole, StylingGarment, TaxonomyApplicabilityPayload, TaxonomyApplicabilityRule, TaxonomyDimensionPayload, TaxonomyExportPayload, TaxonomyPromptCard, TaxonomyRelation, TaxonomyRelationPayload, TaxonomyRules, TaxonomyTag, TaxonomyTagPayload } from './api'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 
@@ -101,7 +103,7 @@ export function App() {
       .then((session) => {
         setAuthenticated(session.authenticated)
         setRole(session.role ?? null)
-        if (session.role !== 'admin' && parseRoute().page === 'brand') {
+        if (session.role !== 'admin' && ['brand', 'tag-rules'].includes(parseRoute().page)) {
           setPage('studio')
           window.history.replaceState(null, '', routeToUrl({ page: 'studio' }))
         }
@@ -116,7 +118,7 @@ export function App() {
   }, [authenticated, role])
 
   useEffect(() => {
-    if (!authenticated || role === 'admin' || page !== 'brand') return
+    if (!authenticated || role === 'admin' || !['brand', 'tag-rules'].includes(page)) return
     setPage('studio')
     window.history.replaceState(null, '', routeToUrl({ page: 'studio' }))
   }, [authenticated, role, page])
@@ -235,6 +237,7 @@ export function App() {
     { id: 'library' as const, label: '搭配服饰库', icon: Library },
     { id: 'model' as const, label: '数字模特', icon: UserRound },
     ...(role === 'admin' ? [{ id: 'brand' as const, label: '品牌信息', icon: Building2 }] : []),
+    ...(role === 'admin' ? [{ id: 'tag-rules' as const, label: '标签规则', icon: Tags }] : []),
     { id: 'records' as const, label: '生成记录', icon: History },
   ]
 
@@ -278,6 +281,7 @@ export function App() {
         {page === 'library' && <LibraryPage garments={garments} run={run} />}
         {page === 'model' && <ModelPage models={models} />}
         {page === 'brand' && role === 'admin' && <BrandInfoPage initialBrandInfo={brandInfo} setBrandInfo={setBrandInfo} run={run} />}
+        {page === 'tag-rules' && role === 'admin' && <TagRulesPage run={run} />}
         {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} run={run} />}
       </main>
     </div>
@@ -1605,6 +1609,774 @@ function BrandJsonDialog({ dialog, setDialog, onClose, onImport }: {
   )
 }
 
+function TagRulesPage({ run }: { run: any }) {
+  const [rules, setRules] = useState<TaxonomyRules | null>(null)
+  const [activeCode, setActiveCode] = useState<string | 'new'>('')
+  const [centerView, setCenterView] = useState<'tags' | 'relations' | 'applicability'>('tags')
+  const [editorMode, setEditorMode] = useState<'dimension' | 'tag' | 'relation' | 'applicability'>('dimension')
+  const [selectedTagId, setSelectedTagId] = useState<number | 'new' | null>(null)
+  const [selectedRelationId, setSelectedRelationId] = useState<number | 'new' | null>(null)
+  const [selectedApplicabilityId, setSelectedApplicabilityId] = useState<number | 'new' | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [dimensionDraft, setDimensionDraft] = useState<TaxonomyDimensionPayload>({})
+  const [tagDraft, setTagDraft] = useState<TaxonomyTagPayload>({})
+  const [relationDraft, setRelationDraft] = useState<TaxonomyRelationPayload>({})
+  const [applicabilityDraft, setApplicabilityDraft] = useState<TaxonomyApplicabilityPayload>({})
+  const [jsonDialog, setJsonDialog] = useState<{ mode: 'import' | 'export'; text: string; error?: string } | null>(null)
+  const [promptDialog, setPromptDialog] = useState<{ mode: 'full' | 'compact'; text: string } | null>(null)
+
+  function loadRules() {
+    setLoading(true)
+    return api.getTaxonomyRules().then((result) => {
+      setRules(result)
+      setActiveCode((current) => current && (current === 'new' || result.dimensions.some((item) => item.code === current)) ? current : result.dimensions[0]?.code || '')
+    }).finally(() => setLoading(false))
+  }
+
+  useEffect(() => {
+    void loadRules().catch(() => undefined)
+  }, [])
+
+  const activeDimension = activeCode === 'new' ? null : rules?.dimensions.find((item) => item.code === activeCode) ?? rules?.dimensions[0]
+  const activeTags = activeDimension?.tags ?? []
+  const flatTags = flattenTaxonomyTags(activeTags)
+  const allFlatTags = flattenTaxonomyDimensions(rules?.dimensions ?? [])
+  const selectedTag = typeof selectedTagId === 'number' ? flatTags.find((tag) => tag.id === selectedTagId) ?? null : null
+  const selectedRelation = typeof selectedRelationId === 'number' ? rules?.relations.find((relation) => relation.id === selectedRelationId) ?? null : null
+  const selectedApplicability = typeof selectedApplicabilityId === 'number' ? rules?.applicabilityRules.find((rule) => rule.id === selectedApplicabilityId) ?? null : null
+  const visibleRelations = (rules?.relations ?? []).filter((relation) => (
+    activeDimension
+      ? relation.fromDimensionCode === activeDimension.code || relation.toDimensionCode === activeDimension.code
+      : true
+  ))
+  const visibleApplicabilityRules = (rules?.applicabilityRules ?? []).filter((rule) => (
+    activeDimension ? rule.targetDimensionCode === activeDimension.code || rule.categoryDimensionCode === activeDimension.code : true
+  ))
+  const editingNewDimension = activeCode === 'new'
+
+  useEffect(() => {
+    if (activeCode === 'new') {
+      setDimensionDraft({ code: '', labelZh: '', descriptionZh: '', sortOrder: (rules?.dimensions.length ?? 0) * 10 + 10, isActive: true })
+      return
+    }
+    if (activeDimension) {
+      setDimensionDraft({
+        labelZh: activeDimension.labelZh,
+        descriptionZh: activeDimension.descriptionZh ?? '',
+        sortOrder: activeDimension.sortOrder,
+        isActive: activeDimension.isActive,
+      })
+    }
+    setSelectedTagId(null)
+    setSelectedRelationId(null)
+    setSelectedApplicabilityId(null)
+  }, [activeCode, activeDimension?.updatedAt])
+
+  useEffect(() => {
+    if (!activeDimension) return
+    if (selectedTagId === 'new') {
+      setTagDraft({
+        dimensionCode: activeDimension.code,
+        code: '',
+        labelZh: '',
+        descriptionZh: '',
+        parentCode: null,
+        level: 1,
+        valueKind: 'tag',
+        isSelectable: true,
+        isActive: true,
+        sortOrder: 0,
+      })
+      return
+    }
+    if (selectedTag) {
+      setTagDraft({
+        labelZh: selectedTag.labelZh,
+        descriptionZh: selectedTag.descriptionZh ?? '',
+        parentCode: selectedTag.parentCode ?? null,
+        level: selectedTag.level,
+        valueKind: selectedTag.valueKind,
+        isSelectable: selectedTag.isSelectable,
+        isActive: selectedTag.isActive,
+        sortOrder: selectedTag.sortOrder,
+      })
+      return
+    }
+    setTagDraft({})
+  }, [activeDimension?.code, selectedTagId, selectedTag?.id])
+
+  useEffect(() => {
+    if (selectedRelationId === 'new') {
+      const fromTag = flatTags[0]
+      const toTag = allFlatTags.find((item) => item.code !== fromTag?.code || item.dimensionCode !== fromTag?.dimensionCode)
+      setRelationDraft({
+        fromDimensionCode: fromTag?.dimensionCode ?? activeDimension?.code ?? '',
+        fromTagCode: fromTag?.code ?? '',
+        relationType: 'implies',
+        toDimensionCode: toTag?.dimensionCode ?? activeDimension?.code ?? '',
+        toTagCode: toTag?.code ?? '',
+        weight: 1,
+        descriptionZh: '',
+        isActive: true,
+      })
+      return
+    }
+    if (selectedRelation) {
+      setRelationDraft({
+        fromDimensionCode: selectedRelation.fromDimensionCode,
+        fromTagCode: selectedRelation.fromTagCode,
+        relationType: selectedRelation.relationType,
+        toDimensionCode: selectedRelation.toDimensionCode,
+        toTagCode: selectedRelation.toTagCode,
+        weight: selectedRelation.weight,
+        descriptionZh: selectedRelation.descriptionZh ?? '',
+        isActive: selectedRelation.isActive,
+      })
+      return
+    }
+    setRelationDraft({})
+  }, [selectedRelationId, selectedRelation?.id, activeDimension?.code, rules?.relations.length])
+
+  useEffect(() => {
+    const categoryTags = flattenTaxonomyTags(rules?.dimensions.find((dimension) => dimension.code === 'category')?.tags ?? [])
+    if (selectedApplicabilityId === 'new') {
+      const targetTag = flatTags[0] ?? allFlatTags.find((tag) => tag.dimensionCode !== 'category')
+      setApplicabilityDraft({
+        categoryDimensionCode: 'category',
+        categoryTagCode: categoryTags[0]?.code ?? '',
+        targetDimensionCode: targetTag?.dimensionCode ?? activeDimension?.code ?? '',
+        targetTagCode: targetTag?.code ?? '',
+        mode: 'allowed',
+        appliesToDescendants: true,
+        note: '',
+        isActive: true,
+      })
+      return
+    }
+    if (selectedApplicability) {
+      setApplicabilityDraft({
+        categoryDimensionCode: selectedApplicability.categoryDimensionCode,
+        categoryTagCode: selectedApplicability.categoryTagCode,
+        targetDimensionCode: selectedApplicability.targetDimensionCode,
+        targetTagCode: selectedApplicability.targetTagCode,
+        mode: selectedApplicability.mode,
+        appliesToDescendants: selectedApplicability.appliesToDescendants,
+        note: selectedApplicability.note ?? '',
+        isActive: selectedApplicability.isActive,
+      })
+      return
+    }
+    setApplicabilityDraft({})
+  }, [selectedApplicabilityId, selectedApplicability?.id, activeDimension?.code, rules?.applicabilityRules.length])
+
+  function applyRules(next: TaxonomyRules) {
+    setRules(next)
+    setActiveCode((current) => current === 'new' || next.dimensions.some((item) => item.code === current) ? current : next.dimensions[0]?.code ?? '')
+  }
+
+  function selectDimension(code: string | 'new') {
+    setActiveCode(code)
+    setEditorMode('dimension')
+    setSelectedTagId(null)
+    setSelectedRelationId(null)
+    setSelectedApplicabilityId(null)
+  }
+
+  function selectTag(id: number) {
+    setSelectedTagId(id)
+    setSelectedRelationId(null)
+    setSelectedApplicabilityId(null)
+    setEditorMode('tag')
+  }
+
+  function selectRelation(id: number) {
+    setSelectedRelationId(id)
+    setSelectedTagId(null)
+    setSelectedApplicabilityId(null)
+    setEditorMode('relation')
+  }
+
+  function selectApplicability(id: number) {
+    setSelectedApplicabilityId(id)
+    setSelectedTagId(null)
+    setSelectedRelationId(null)
+    setEditorMode('applicability')
+  }
+
+  function saveDimension() {
+    const labelZh = String(dimensionDraft.labelZh ?? '').trim()
+    if (editingNewDimension) {
+      const code = String(dimensionDraft.code ?? '').trim()
+      void run('新增标签维度中...', () => api.createTaxonomyDimension({ ...dimensionDraft, code, labelZh }), (next: TaxonomyRules) => {
+        applyRules(next)
+        const created = next.dimensions.find((item) => item.code === code) ?? next.dimensions.find((item) => item.labelZh === labelZh)
+        setActiveCode(created?.code ?? next.dimensions[0]?.code ?? '')
+      }, { refresh: false })
+      return
+    }
+    if (!activeDimension) return
+    void run('保存标签维度中...', () => api.updateTaxonomyDimension(activeDimension.code, { ...dimensionDraft, labelZh }), applyRules, { refresh: false })
+  }
+
+  function deleteDimension() {
+    if (!activeDimension) return
+    if (!window.confirm(`确定删除维度「${activeDimension.labelZh}」吗？仅空维度可删除；已有标签或打标引用时后端会拒绝。`)) return
+    void run('删除标签维度中...', () => api.deleteTaxonomyDimension(activeDimension.code), (next: TaxonomyRules) => {
+      applyRules(next)
+      setActiveCode(next.dimensions[0]?.code ?? '')
+    }, { refresh: false })
+  }
+
+  function saveTag() {
+    if (!activeDimension) return
+    if (selectedTagId === 'new') {
+      const payload = {
+        ...tagDraft,
+        dimensionCode: activeDimension.code,
+        code: String(tagDraft.code ?? ''),
+        labelZh: String(tagDraft.labelZh ?? ''),
+      }
+      void run('新增标签中...', () => api.createTaxonomyTag(payload), (next: TaxonomyRules) => {
+        applyRules(next)
+        const created = flattenTaxonomyTags(next.dimensions.find((item) => item.code === activeDimension.code)?.tags ?? []).find((item) => item.code === payload.code)
+        setSelectedTagId(created?.id ?? null)
+      }, { refresh: false })
+      return
+    }
+    if (selectedTag) {
+      void run('保存标签中...', () => api.updateTaxonomyTag(selectedTag.id, tagDraft), applyRules, { refresh: false })
+    }
+  }
+
+  function deleteTag() {
+    if (!selectedTag) return
+    if (!window.confirm(`确定删除标签「${selectedTag.labelZh}」吗？已有子标签或商品引用时后端会拒绝；生产中更推荐停用。`)) return
+    void run('删除标签中...', () => api.deleteTaxonomyTag(selectedTag.id), (next: TaxonomyRules) => {
+      applyRules(next)
+      setSelectedTagId(null)
+      setEditorMode('dimension')
+    }, { refresh: false })
+  }
+
+  function saveRelation() {
+    const payload = {
+      ...relationDraft,
+      fromDimensionCode: String(relationDraft.fromDimensionCode ?? ''),
+      fromTagCode: String(relationDraft.fromTagCode ?? ''),
+      relationType: String(relationDraft.relationType ?? ''),
+      toDimensionCode: String(relationDraft.toDimensionCode ?? ''),
+      toTagCode: String(relationDraft.toTagCode ?? ''),
+    }
+    if (selectedRelationId === 'new') {
+      void run('新增标签关系中...', () => api.createTaxonomyRelation(payload), (next: TaxonomyRules) => {
+        applyRules(next)
+        const created = next.relations.find((item) => (
+          item.fromDimensionCode === payload.fromDimensionCode
+          && item.fromTagCode === payload.fromTagCode
+          && item.relationType === payload.relationType
+          && item.toDimensionCode === payload.toDimensionCode
+          && item.toTagCode === payload.toTagCode
+        ))
+        setSelectedRelationId(created?.id ?? null)
+      }, { refresh: false })
+      return
+    }
+    if (selectedRelation) {
+      void run('保存标签关系中...', () => api.updateTaxonomyRelation(selectedRelation.id, relationDraft), applyRules, { refresh: false })
+    }
+  }
+
+  function deleteRelation() {
+    if (!selectedRelation) return
+    if (!window.confirm('确定删除这条标签关系吗？')) return
+    void run('删除标签关系中...', () => api.deleteTaxonomyRelation(selectedRelation.id), (next: TaxonomyRules) => {
+      applyRules(next)
+      setSelectedRelationId(null)
+      setEditorMode('dimension')
+    }, { refresh: false })
+  }
+
+  function saveApplicability() {
+    const payload = {
+      ...applicabilityDraft,
+      categoryDimensionCode: String(applicabilityDraft.categoryDimensionCode || 'category'),
+      categoryTagCode: String(applicabilityDraft.categoryTagCode ?? ''),
+      targetDimensionCode: String(applicabilityDraft.targetDimensionCode ?? ''),
+      targetTagCode: String(applicabilityDraft.targetTagCode ?? ''),
+    }
+    if (selectedApplicabilityId === 'new') {
+      void run('新增适用规则中...', () => api.createTaxonomyApplicabilityRule(payload), (next: TaxonomyRules) => {
+        applyRules(next)
+        const created = next.applicabilityRules.find((item) => (
+          item.categoryDimensionCode === payload.categoryDimensionCode
+          && item.categoryTagCode === payload.categoryTagCode
+          && item.targetDimensionCode === payload.targetDimensionCode
+          && item.targetTagCode === payload.targetTagCode
+        ))
+        setSelectedApplicabilityId(created?.id ?? null)
+      }, { refresh: false })
+      return
+    }
+    if (selectedApplicability) {
+      void run('保存适用规则中...', () => api.updateTaxonomyApplicabilityRule(selectedApplicability.id, applicabilityDraft), applyRules, { refresh: false })
+    }
+  }
+
+  function deleteApplicability() {
+    if (!selectedApplicability) return
+    if (!window.confirm('确定删除这条品类适用规则吗？')) return
+    void run('删除适用规则中...', () => api.deleteTaxonomyApplicabilityRule(selectedApplicability.id), (next: TaxonomyRules) => {
+      applyRules(next)
+      setSelectedApplicabilityId(null)
+      setEditorMode('dimension')
+    }, { refresh: false })
+  }
+
+  function openExportJson() {
+    void run('导出标签规则中...', () => api.exportTaxonomyRules(), (payload: TaxonomyExportPayload) => {
+      setJsonDialog({ mode: 'export', text: `${JSON.stringify(payload, null, 2)}\n` })
+    }, { refresh: false })
+  }
+
+  function openPromptCard(mode: 'full' | 'compact') {
+    void run(`生成 ${mode} Prompt 中...`, () => api.getTaxonomyPromptCard(mode), (payload: TaxonomyPromptCard) => {
+      setPromptDialog({ mode: payload.mode, text: payload.content })
+    }, { refresh: false })
+  }
+
+  function openImportJson() {
+    if (!window.confirm('导入 JSON 会按 code 合并更新维度、标签和关系，不会自动删除缺失项，是否继续？')) return
+    setJsonDialog({ mode: 'import', text: '' })
+  }
+
+  function confirmImportJson() {
+    if (!jsonDialog || jsonDialog.mode !== 'import') return
+    if (jsonDialog.text.length > 2 * 1024 * 1024) {
+      setJsonDialog({ ...jsonDialog, error: 'JSON 内容过大，请控制在 2MB 以内。' })
+      return
+    }
+    let payload: { dimensions: unknown[]; tags: unknown[]; relations: unknown[]; applicabilityRules: unknown[] }
+    try {
+      payload = parseTaxonomyJson(jsonDialog.text)
+    } catch (error) {
+      setJsonDialog({ ...jsonDialog, error: error instanceof Error ? error.message : 'JSON 导入失败。' })
+      return
+    }
+    void run('导入标签规则中...', () => api.importTaxonomyRules(payload), (next: TaxonomyRules) => {
+      applyRules(next)
+      setJsonDialog(null)
+      window.alert('标签规则已导入并应用。')
+    }, { refresh: false })
+  }
+
+  return (
+    <section className="page">
+      <PageTitle
+        title="标签规则"
+        subtitle="维护服装标签字典、层级树、标签关系和商品打标投影。"
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={() => openPromptCard('full')}><FileText size={16} />完整 Prompt</button><button className="secondary" onClick={() => openPromptCard('compact')}><FileText size={16} />精简 Prompt</button><button className="secondary" onClick={openImportJson}><Upload size={16} />导入</button><button className="secondary" onClick={openExportJson}><Download size={16} />导出</button><button className="secondary" disabled={loading} onClick={() => void loadRules()}><RotateCcw size={16} />刷新</button><button className="primary" onClick={() => void run('同步标签投影中...', () => api.backfillTaxonomyAssignments(), () => void loadRules(), { refresh: false })}><Save size={16} />同步现有标签</button></div>}
+      />
+      {promptDialog && (
+        <TaxonomyPromptDialog
+          dialog={promptDialog}
+          onClose={() => setPromptDialog(null)}
+        />
+      )}
+      {jsonDialog && (
+        <TaxonomyJsonDialog
+          dialog={jsonDialog}
+          setDialog={setJsonDialog}
+          onClose={() => setJsonDialog(null)}
+          onImport={confirmImportJson}
+        />
+      )}
+      <div className="taxonomy-summary">
+        <MetricCard label="维度" value={rules?.summary.dimensionCount ?? 0} />
+        <MetricCard label="标准标签" value={rules?.summary.tagCount ?? 0} />
+        <MetricCard label="标签关系" value={rules?.summary.relationCount ?? 0} />
+        <MetricCard label="适用规则" value={rules?.summary.applicabilityRuleCount ?? 0} />
+        <MetricCard label="已投影服饰" value={rules?.summary.taggedGarmentCount ?? 0} />
+      </div>
+      <div className="taxonomy-layout">
+        <aside className="panel taxonomy-dimensions">
+          <button className={activeCode === 'new' ? 'active' : ''} onClick={() => selectDimension('new')}>
+            <span>新增维度</span>
+            <em>new_dimension</em>
+          </button>
+          {(rules?.dimensions ?? []).map((dimension) => (
+            <button key={dimension.code} className={dimension.code === activeDimension?.code ? 'active' : ''} onClick={() => selectDimension(dimension.code)}>
+              <span>{dimension.labelZh}</span>
+              <em>{dimension.code}{!dimension.isActive ? ' / 停用' : ''}</em>
+            </button>
+          ))}
+          {!rules && <EmptyState title={loading ? '加载中' : '暂无标签规则'} text={loading ? '正在读取标签字典。' : '标签字典尚未初始化。'} />}
+        </aside>
+        <div className="panel taxonomy-tree-panel">
+          {activeDimension ? (
+            <>
+              <div className="taxonomy-panel-head">
+                <div>
+                  <span>{activeDimension.code}</span>
+                  <h2>{activeDimension.labelZh}</h2>
+                </div>
+                <div className="taxonomy-head-actions">
+                  <div className="segmented">
+                    <button className={centerView === 'tags' ? 'active' : ''} onClick={() => setCenterView('tags')}>标签树</button>
+                    <button className={centerView === 'relations' ? 'active' : ''} onClick={() => setCenterView('relations')}>关系</button>
+                    <button className={centerView === 'applicability' ? 'active' : ''} onClick={() => setCenterView('applicability')}>适用范围</button>
+                  </div>
+                  <strong>{centerView === 'tags' ? `${countTaxonomyTags(activeTags)} 个标签` : centerView === 'relations' ? `${visibleRelations.length} 条关系` : `${visibleApplicabilityRules.length} 条规则`}</strong>
+                  {centerView === 'tags' && <button className="secondary" onClick={() => { setSelectedTagId('new'); setEditorMode('tag') }}>新增标签</button>}
+                  {centerView === 'relations' && <button className="secondary" onClick={() => { setSelectedRelationId('new'); setSelectedTagId(null); setSelectedApplicabilityId(null); setEditorMode('relation') }}>新增关系</button>}
+                  {centerView === 'applicability' && <button className="secondary" onClick={() => { setSelectedApplicabilityId('new'); setSelectedTagId(null); setSelectedRelationId(null); setEditorMode('applicability') }}>新增适用规则</button>}
+                </div>
+              </div>
+              {centerView === 'tags' ? (
+                <div className="taxonomy-tree">
+                  {activeTags.map((tag) => <TaxonomyTagNode key={tag.code} tag={tag} selectedId={typeof selectedTagId === 'number' ? selectedTagId : null} onSelect={selectTag} />)}
+                  {!activeTags.length && <EmptyState title="暂无标签" text="当前维度还没有标签，可从右上角新增。" />}
+                </div>
+              ) : centerView === 'relations' ? (
+                <div className="taxonomy-relation-list">
+                  {visibleRelations.map((relation) => (
+                    <button key={relation.id} className={`taxonomy-relation-card ${selectedRelationId === relation.id ? 'active' : ''} ${relation.isActive ? '' : 'is-inactive'}`} onClick={() => selectRelation(relation.id)}>
+                      <strong>{relationLabel(relation, allFlatTags)}</strong>
+                      <span>{relation.relationType} / weight {relation.weight}</span>
+                      {relation.descriptionZh && <em>{relation.descriptionZh}</em>}
+                    </button>
+                  ))}
+                  {!visibleRelations.length && <EmptyState title="暂无关系" text="可新增品类映射、暗含关系、搭配兼容或避免规则。" />}
+                </div>
+              ) : (
+                <div className="taxonomy-relation-list">
+                  {visibleApplicabilityRules.map((rule) => (
+                    <button key={rule.id} className={`taxonomy-relation-card ${selectedApplicabilityId === rule.id ? 'active' : ''} ${rule.isActive ? '' : 'is-inactive'}`} onClick={() => selectApplicability(rule.id)}>
+                      <strong>{applicabilityRuleLabel(rule, allFlatTags)}</strong>
+                      <span>{applicabilityModeLabel(rule.mode)} / {rule.appliesToDescendants ? '含子品类' : '仅当前品类'}</span>
+                      {rule.note && <em>{rule.note}</em>}
+                    </button>
+                  ))}
+                  {!visibleApplicabilityRules.length && <EmptyState title="暂无适用规则" text="用于限定某品类可使用哪些服装部件和设计细节，避免所有品类共用一套字段。" />}
+                </div>
+              )}
+            </>
+          ) : editingNewDimension ? <EmptyState title="正在新增维度" text="先在右侧填写 code 和中文名称，保存后即可维护标签树。" /> : <EmptyState title="暂无标签规则" text="标签字典尚未初始化。" />}
+        </div>
+        <aside className="panel taxonomy-editor">
+          {editingNewDimension || activeDimension ? (
+            <>
+              {editorMode === 'dimension' && <div className="taxonomy-editor-section">
+                <div className="section-head"><strong>{editingNewDimension ? '新增维度' : '维度编辑'}</strong><span>{editingNewDimension ? 'new' : activeDimension?.code}</span></div>
+                {editingNewDimension && <label>code<input value={String(dimensionDraft.code ?? '')} onChange={(event) => setDimensionDraft((current) => ({ ...current, code: event.target.value }))} /></label>}
+                <label>中文名称<input value={String(dimensionDraft.labelZh ?? '')} onChange={(event) => setDimensionDraft((current) => ({ ...current, labelZh: event.target.value }))} /></label>
+                <label>说明<textarea value={String(dimensionDraft.descriptionZh ?? '')} onChange={(event) => setDimensionDraft((current) => ({ ...current, descriptionZh: event.target.value }))} /></label>
+                <label>排序<input type="number" value={Number(dimensionDraft.sortOrder ?? 0)} onChange={(event) => setDimensionDraft((current) => ({ ...current, sortOrder: Number(event.target.value) }))} /></label>
+                <label className="checkbox-line"><input type="checkbox" checked={dimensionDraft.isActive !== false} onChange={(event) => setDimensionDraft((current) => ({ ...current, isActive: event.target.checked }))} /> 启用</label>
+                <div className="taxonomy-editor-actions">
+                  {!editingNewDimension && <button className="secondary" onClick={deleteDimension}><Trash2 size={16} />删除</button>}
+                  <button className="primary" onClick={saveDimension}><Save size={16} />{editingNewDimension ? '新增维度' : '保存维度'}</button>
+                </div>
+              </div>}
+              {editorMode === 'tag' && <div className="taxonomy-editor-section">
+                <div className="section-head"><strong>{selectedTagId === 'new' ? '新增标签' : '标签编辑'}</strong>{selectedTag && <span>{selectedTag.code}</span>}</div>
+                {activeDimension && (selectedTagId || selectedTag) ? (
+                  <>
+                    {selectedTagId === 'new' && <label>code<input value={String(tagDraft.code ?? '')} onChange={(event) => setTagDraft((current) => ({ ...current, code: event.target.value }))} /></label>}
+                    <label>中文名称<input value={String(tagDraft.labelZh ?? '')} onChange={(event) => setTagDraft((current) => ({ ...current, labelZh: event.target.value }))} /></label>
+                    <label>说明<textarea value={String(tagDraft.descriptionZh ?? '')} onChange={(event) => setTagDraft((current) => ({ ...current, descriptionZh: event.target.value }))} /></label>
+                    <label>父级
+                      <select value={tagDraft.parentCode ?? ''} onChange={(event) => setTagDraft((current) => ({ ...current, parentCode: event.target.value || null }))}>
+                        <option value="">无父级</option>
+                        {flatTags.filter((tag) => tag.id !== selectedTag?.id).map((tag) => <option key={tag.id} value={tag.code}>{tag.labelZh} / {tag.code}</option>)}
+                      </select>
+                    </label>
+                    <div className="taxonomy-editor-grid">
+                      <label>层级<input type="number" min={1} max={8} value={Number(tagDraft.level ?? 1)} onChange={(event) => setTagDraft((current) => ({ ...current, level: Number(event.target.value) }))} /></label>
+                      <label>排序<input type="number" value={Number(tagDraft.sortOrder ?? 0)} onChange={(event) => setTagDraft((current) => ({ ...current, sortOrder: Number(event.target.value) }))} /></label>
+                    </div>
+                    <label>值类型
+                      <select value={String(tagDraft.valueKind ?? 'tag')} onChange={(event) => setTagDraft((current) => ({ ...current, valueKind: event.target.value }))}>
+                        <option value="tag">标签</option>
+                        <option value="score">分值</option>
+                        <option value="boolean">开关</option>
+                        <option value="text">文本</option>
+                      </select>
+                    </label>
+                    <label className="checkbox-line"><input type="checkbox" checked={tagDraft.isSelectable !== false} onChange={(event) => setTagDraft((current) => ({ ...current, isSelectable: event.target.checked }))} /> 可用于服装打标</label>
+                    <label className="checkbox-line"><input type="checkbox" checked={tagDraft.isActive !== false} onChange={(event) => setTagDraft((current) => ({ ...current, isActive: event.target.checked }))} /> 启用</label>
+                    <div className="taxonomy-editor-actions">
+                      {selectedTag && <button className="secondary" onClick={deleteTag}><Trash2 size={16} />删除</button>}
+                      <button className="primary" onClick={saveTag}><Save size={16} />{selectedTagId === 'new' ? '新增标签' : '保存标签'}</button>
+                    </div>
+                  </>
+                ) : <p className="empty-inline">选择一个标签，或点击新增标签。</p>}
+              </div>}
+              {editorMode === 'relation' && <div className="taxonomy-editor-section">
+                <div className="section-head"><strong>{selectedRelationId === 'new' ? '新增关系' : '关系编辑'}</strong>{selectedRelation && <span>#{selectedRelation.id}</span>}</div>
+                {selectedRelationId || selectedRelation ? (
+                  <>
+                    <TaxonomyTagPicker label="来源标签" dimensions={rules?.dimensions ?? []} draftDimensionCode={relationDraft.fromDimensionCode ?? ''} draftTagCode={relationDraft.fromTagCode ?? ''} onChange={(dimensionCode, tagCode) => setRelationDraft((current) => ({ ...current, fromDimensionCode: dimensionCode, fromTagCode: tagCode }))} />
+                    <label>关系类型
+                      <input list="taxonomy-relation-types" value={String(relationDraft.relationType ?? '')} onChange={(event) => setRelationDraft((current) => ({ ...current, relationType: event.target.value }))} />
+                    </label>
+                    <datalist id="taxonomy-relation-types">
+                      <option value="implies" />
+                      <option value="slot_mapping" />
+                      <option value="style_mapping" />
+                      <option value="compatible_with" />
+                      <option value="avoid_with" />
+                      <option value="parent_of" />
+                    </datalist>
+                    <TaxonomyTagPicker label="目标标签" dimensions={rules?.dimensions ?? []} draftDimensionCode={relationDraft.toDimensionCode ?? ''} draftTagCode={relationDraft.toTagCode ?? ''} onChange={(dimensionCode, tagCode) => setRelationDraft((current) => ({ ...current, toDimensionCode: dimensionCode, toTagCode: tagCode }))} />
+                    <label>权重<input type="number" min={-10} max={10} step={0.1} value={Number(relationDraft.weight ?? 1)} onChange={(event) => setRelationDraft((current) => ({ ...current, weight: Number(event.target.value) }))} /></label>
+                    <label>说明<textarea value={String(relationDraft.descriptionZh ?? '')} onChange={(event) => setRelationDraft((current) => ({ ...current, descriptionZh: event.target.value }))} /></label>
+                    <label className="checkbox-line"><input type="checkbox" checked={relationDraft.isActive !== false} onChange={(event) => setRelationDraft((current) => ({ ...current, isActive: event.target.checked }))} /> 启用</label>
+                    <div className="taxonomy-editor-actions">
+                      {selectedRelation && <button className="secondary" onClick={deleteRelation}><Trash2 size={16} />删除</button>}
+                      <button className="primary" onClick={saveRelation}><Save size={16} />{selectedRelationId === 'new' ? '新增关系' : '保存关系'}</button>
+                    </div>
+                  </>
+                ) : <p className="empty-inline">选择一条关系，或点击新增关系。</p>}
+              </div>}
+              {editorMode === 'applicability' && <div className="taxonomy-editor-section">
+                <div className="section-head"><strong>{selectedApplicabilityId === 'new' ? '新增适用规则' : '适用规则编辑'}</strong>{selectedApplicability && <span>#{selectedApplicability.id}</span>}</div>
+                {selectedApplicabilityId || selectedApplicability ? (
+                  <>
+                    <TaxonomyCategoryPicker
+                      label="适用品类"
+                      dimensions={rules?.dimensions ?? []}
+                      draftDimensionCode={applicabilityDraft.categoryDimensionCode ?? 'category'}
+                      draftTagCode={applicabilityDraft.categoryTagCode ?? ''}
+                      onChange={(dimensionCode, tagCode) => setApplicabilityDraft((current) => ({ ...current, categoryDimensionCode: dimensionCode, categoryTagCode: tagCode }))}
+                    />
+                    <TaxonomyTagPicker
+                      label="可用部件/细节"
+                      dimensions={(rules?.dimensions ?? []).filter((dimension) => dimension.code !== 'category')}
+                      draftDimensionCode={applicabilityDraft.targetDimensionCode ?? activeDimension?.code ?? ''}
+                      draftTagCode={applicabilityDraft.targetTagCode ?? ''}
+                      onChange={(dimensionCode, tagCode) => setApplicabilityDraft((current) => ({ ...current, targetDimensionCode: dimensionCode, targetTagCode: tagCode }))}
+                    />
+                    <label>规则模式
+                      <select value={String(applicabilityDraft.mode ?? 'allowed')} onChange={(event) => setApplicabilityDraft((current) => ({ ...current, mode: event.target.value }))}>
+                        <option value="allowed">允许</option>
+                        <option value="recommended">推荐</option>
+                        <option value="required">必填</option>
+                        <option value="disallowed">禁用</option>
+                      </select>
+                    </label>
+                    <label>说明<textarea value={String(applicabilityDraft.note ?? '')} onChange={(event) => setApplicabilityDraft((current) => ({ ...current, note: event.target.value }))} /></label>
+                    <label className="checkbox-line"><input type="checkbox" checked={applicabilityDraft.appliesToDescendants !== false} onChange={(event) => setApplicabilityDraft((current) => ({ ...current, appliesToDescendants: event.target.checked }))} /> 适用于子品类</label>
+                    <label className="checkbox-line"><input type="checkbox" checked={applicabilityDraft.isActive !== false} onChange={(event) => setApplicabilityDraft((current) => ({ ...current, isActive: event.target.checked }))} /> 启用</label>
+                    <div className="taxonomy-editor-actions">
+                      {selectedApplicability && <button className="secondary" onClick={deleteApplicability}><Trash2 size={16} />删除</button>}
+                      <button className="primary" onClick={saveApplicability}><Save size={16} />{selectedApplicabilityId === 'new' ? '新增规则' : '保存规则'}</button>
+                    </div>
+                  </>
+                ) : <p className="empty-inline">选择一条适用规则，或点击新增适用规则。</p>}
+              </div>}
+            </>
+          ) : <EmptyState title="暂无维度" text="标签字典尚未初始化。" />}
+        </aside>
+      </div>
+    </section>
+  )
+}
+
+function MetricCard({ label, value }: { label: string; value: number }) {
+  return <div className="panel taxonomy-metric"><span>{label}</span><strong>{value}</strong></div>
+}
+
+function TaxonomyTagNode({ tag, selectedId, onSelect }: { tag: TaxonomyTag; selectedId: number | null; onSelect: (id: number) => void }) {
+  return (
+    <div className={`taxonomy-node ${tag.isActive ? '' : 'is-inactive'}`}>
+      <button className={`taxonomy-node-row ${selectedId === tag.id ? 'active' : ''}`} onClick={() => onSelect(tag.id)}>
+        <div>
+          <strong>{tag.labelZh}</strong>
+          <span>{tag.code}</span>
+        </div>
+        <div className="taxonomy-node-meta">
+          <em>{valueKindLabel(tag.valueKind)}</em>
+          {!tag.isActive && <em>停用</em>}
+          {tag.usageCount > 0 && <b>{tag.usageCount}</b>}
+        </div>
+      </button>
+      {tag.children.length > 0 && <div className="taxonomy-children">{tag.children.map((child) => <TaxonomyTagNode key={child.code} tag={child} selectedId={selectedId} onSelect={onSelect} />)}</div>}
+    </div>
+  )
+}
+
+function countTaxonomyTags(tags: TaxonomyTag[]): number {
+  return tags.reduce((total, tag) => total + 1 + countTaxonomyTags(tag.children), 0)
+}
+
+function flattenTaxonomyTags(tags: TaxonomyTag[]): TaxonomyTag[] {
+  return tags.flatMap((tag) => [tag, ...flattenTaxonomyTags(tag.children)])
+}
+
+function flattenTaxonomyDimensions(dimensions: { tags: TaxonomyTag[] }[]): TaxonomyTag[] {
+  return dimensions.flatMap((dimension) => flattenTaxonomyTags(dimension.tags))
+}
+
+function valueKindLabel(kind: string) {
+  if (kind === 'score') return '分值'
+  if (kind === 'boolean') return '开关'
+  if (kind === 'text') return '文本'
+  return '标签'
+}
+
+function tagLabel(tags: TaxonomyTag[], dimensionCode?: string, tagCode?: string) {
+  const tag = tags.find((item) => item.dimensionCode === dimensionCode && item.code === tagCode)
+  return tag ? `${tag.labelZh} / ${tag.dimensionCode}.${tag.code}` : `${dimensionCode ?? '-'} / ${tagCode ?? '-'}`
+}
+
+function relationLabel(relation: TaxonomyRelation, tags: TaxonomyTag[]) {
+  return `${tagLabel(tags, relation.fromDimensionCode, relation.fromTagCode)} -> ${tagLabel(tags, relation.toDimensionCode, relation.toTagCode)}`
+}
+
+function applicabilityRuleLabel(rule: TaxonomyApplicabilityRule, tags: TaxonomyTag[]) {
+  return `${tagLabel(tags, rule.categoryDimensionCode, rule.categoryTagCode)} -> ${tagLabel(tags, rule.targetDimensionCode, rule.targetTagCode)}`
+}
+
+function applicabilityModeLabel(mode: string) {
+  if (mode === 'recommended') return '推荐'
+  if (mode === 'required') return '必填'
+  if (mode === 'disallowed') return '禁用'
+  return '允许'
+}
+
+function parseTaxonomyJson(text: string): { dimensions: unknown[]; tags: unknown[]; relations: unknown[]; applicabilityRules: unknown[] } {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error('JSON 格式不正确。')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('JSON 内容必须是对象。')
+  }
+  const source = parsed as Record<string, unknown>
+  const dimensions = source.dimensions
+  const tags = source.tags
+  const relations = source.relations
+  const applicabilityRules = source.applicabilityRules
+  if (!Array.isArray(dimensions)) throw new Error('dimensions 必须是数组。')
+  if (!Array.isArray(tags)) throw new Error('tags 必须是数组。')
+  if (relations != null && !Array.isArray(relations)) throw new Error('relations 必须是数组。')
+  if (applicabilityRules != null && !Array.isArray(applicabilityRules)) throw new Error('applicabilityRules 必须是数组。')
+  return { dimensions, tags, relations: Array.isArray(relations) ? relations : [], applicabilityRules: Array.isArray(applicabilityRules) ? applicabilityRules : [] }
+}
+
+function TaxonomyPromptDialog({ dialog, onClose }: {
+  dialog: { mode: 'full' | 'compact'; text: string }
+  onClose: () => void
+}) {
+  return createPortal(
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <form className="confirm-modal brand-json-modal" role="dialog" aria-modal="true" aria-label={`${dialog.mode} Prompt`} onSubmit={(event) => event.preventDefault()} onClick={(event) => event.stopPropagation()}>
+        <div className="confirm-head">
+          <div>
+            <h2>{dialog.mode === 'full' ? '完整 Prompt 原样输出' : '精简 Prompt 原样输出'}</h2>
+            <p>仅包含标签规则中已启用的维度、标签、关系和适用范围。</p>
+          </div>
+          <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
+        </div>
+        <textarea readOnly value={dialog.text} />
+        <div className="confirm-actions">
+          <button type="button" className="secondary" onClick={onClose}>关闭</button>
+        </div>
+      </form>
+    </div>,
+    document.body,
+  )
+}
+
+function TaxonomyJsonDialog({ dialog, setDialog, onClose, onImport }: {
+  dialog: { mode: 'import' | 'export'; text: string; error?: string }
+  setDialog: (dialog: { mode: 'import' | 'export'; text: string; error?: string }) => void
+  onClose: () => void
+  onImport: () => void
+}) {
+  const isImport = dialog.mode === 'import'
+  return createPortal(
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <form className="confirm-modal brand-json-modal" role="dialog" aria-modal="true" aria-label={isImport ? '导入标签规则' : '导出标签规则'} onSubmit={(event) => {
+        event.preventDefault()
+        if (isImport) onImport()
+      }} onClick={(event) => event.stopPropagation()}>
+        <div className="confirm-head">
+          <div><h2>{isImport ? '导入标签规则' : '导出标签规则'}</h2></div>
+          <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
+        </div>
+        <textarea
+          readOnly={!isImport}
+          value={dialog.text}
+          onChange={(event) => setDialog({ mode: dialog.mode, text: event.target.value })}
+        />
+        {dialog.error && <p className="json-error">{dialog.error}</p>}
+        <div className="confirm-actions">
+          <button type="button" className="secondary" onClick={onClose}>关闭</button>
+          {isImport && <button type="submit" className="primary">导入并应用</button>}
+        </div>
+      </form>
+    </div>,
+    document.body,
+  )
+}
+
+function TaxonomyTagPicker({ label, dimensions, draftDimensionCode, draftTagCode, onChange }: {
+  label: string
+  dimensions: { code: string; labelZh: string; tags: TaxonomyTag[] }[]
+  draftDimensionCode: string
+  draftTagCode: string
+  onChange: (dimensionCode: string, tagCode: string) => void
+}) {
+  const selectedDimension = dimensions.find((dimension) => dimension.code === draftDimensionCode) ?? dimensions[0]
+  const tags = flattenTaxonomyTags(selectedDimension?.tags ?? [])
+  const selectedTagCode = tags.some((tag) => tag.code === draftTagCode) ? draftTagCode : tags[0]?.code ?? ''
+  return (
+    <div className="taxonomy-tag-picker">
+      <span>{label}</span>
+      <select value={selectedDimension?.code ?? ''} onChange={(event) => {
+        const nextDimension = dimensions.find((dimension) => dimension.code === event.target.value)
+        const nextTag = flattenTaxonomyTags(nextDimension?.tags ?? [])[0]
+        onChange(event.target.value, nextTag?.code ?? '')
+      }}>
+        {dimensions.map((dimension) => <option key={dimension.code} value={dimension.code}>{dimension.labelZh} / {dimension.code}</option>)}
+      </select>
+      <select value={selectedTagCode} onChange={(event) => onChange(selectedDimension?.code ?? '', event.target.value)}>
+        {tags.map((tag) => <option key={tag.id} value={tag.code}>{tag.labelZh} / {tag.code}</option>)}
+      </select>
+    </div>
+  )
+}
+
+function TaxonomyCategoryPicker({ label, dimensions, draftDimensionCode, draftTagCode, onChange }: {
+  label: string
+  dimensions: { code: string; labelZh: string; tags: TaxonomyTag[] }[]
+  draftDimensionCode: string
+  draftTagCode: string
+  onChange: (dimensionCode: string, tagCode: string) => void
+}) {
+  const categoryDimension = dimensions.find((dimension) => dimension.code === (draftDimensionCode || 'category')) ?? dimensions.find((dimension) => dimension.code === 'category') ?? dimensions[0]
+  const tags = flattenTaxonomyTags(categoryDimension?.tags ?? [])
+  const selectedTagCode = tags.some((tag) => tag.code === draftTagCode) ? draftTagCode : tags[0]?.code ?? ''
+  return (
+    <div className="taxonomy-tag-picker">
+      <span>{label}</span>
+      <select value={categoryDimension?.code ?? ''} onChange={(event) => {
+        const nextDimension = dimensions.find((dimension) => dimension.code === event.target.value)
+        const nextTag = flattenTaxonomyTags(nextDimension?.tags ?? [])[0]
+        onChange(event.target.value, nextTag?.code ?? '')
+      }}>
+        {dimensions.filter((dimension) => dimension.code === 'category').map((dimension) => <option key={dimension.code} value={dimension.code}>{dimension.labelZh} / {dimension.code}</option>)}
+      </select>
+      <select value={selectedTagCode} onChange={(event) => onChange(categoryDimension?.code ?? 'category', event.target.value)}>
+        {tags.map((tag) => <option key={tag.id} value={tag.code}>{tag.labelZh} / {tag.code}</option>)}
+      </select>
+    </div>
+  )
+}
+
 function RecordsPage({ records, detail, setDetail, run }: { records: GenerationTask[]; detail: GenerationTask | null; setDetail: (task: GenerationTask | null) => void; run: any }) {
   const [items, setItems] = useState<GenerationTask[]>(records)
   const [offset, setOffset] = useState(0)
@@ -2258,6 +3030,18 @@ function TagField({ label, value }: { label: string; value: unknown }) {
 function renderTagValue(value: unknown): ReactNode {
   if (Array.isArray(value)) {
     if (!value.length) return <em>空</em>
+    if (value.some((item) => typeof item === 'object' && item)) {
+      return (
+        <div className="nested-tags">
+          {value.map((item, index) => (
+            <div key={index}>
+              <b>{index + 1}</b>
+              <span>{typeof item === 'object' && item ? JSON.stringify(item, null, 0) : formatTagPrimitive(item)}</span>
+            </div>
+          ))}
+        </div>
+      )
+    }
     return <div className="tag-chip-row">{value.map((item, index) => <span key={`${String(item)}-${index}`}>{String(item)}</span>)}</div>
   }
   if (typeof value === 'object' && value) {

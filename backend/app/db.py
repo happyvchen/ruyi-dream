@@ -31,6 +31,8 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("018", "normalize_brand_profile_text_fields", "migration_normalize_brand_profile_text_fields"),
     ("019", "reframe_brand_profile_guidance_fields", "migration_reframe_brand_profile_guidance_fields"),
     ("020", "rename_brand_profile_production_guidance_fields", "migration_rename_brand_profile_production_guidance_fields"),
+    ("021", "add_taxonomy_skeleton", "migration_add_taxonomy_skeleton"),
+    ("022", "add_taxonomy_applicability_rules", "migration_add_taxonomy_applicability_rules"),
 )
 
 
@@ -387,6 +389,7 @@ def init_db() -> None:
         run_migrations(db)
         seed_default_brand_template(db)
         seed_default_model(db)
+        create_taxonomy_tables(db)
 
 
 def ensure_migration_table(db: sqlite3.Connection) -> None:
@@ -427,6 +430,8 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_normalize_brand_profile_text_fields": migration_normalize_brand_profile_text_fields,
         "migration_reframe_brand_profile_guidance_fields": migration_reframe_brand_profile_guidance_fields,
         "migration_rename_brand_profile_production_guidance_fields": migration_rename_brand_profile_production_guidance_fields,
+        "migration_add_taxonomy_skeleton": migration_add_taxonomy_skeleton,
+        "migration_add_taxonomy_applicability_rules": migration_add_taxonomy_applicability_rules,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -773,6 +778,14 @@ def migration_rename_brand_profile_production_guidance_fields(db: sqlite3.Connec
     db.execute("ALTER TABLE brand_profiles_new RENAME TO brand_profiles")
 
 
+def migration_add_taxonomy_skeleton(db: sqlite3.Connection) -> None:
+    create_taxonomy_tables(db)
+
+
+def migration_add_taxonomy_applicability_rules(db: sqlite3.Connection) -> None:
+    create_taxonomy_tables(db)
+
+
 def ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
@@ -966,6 +979,102 @@ def combine_text(*values: Any) -> str:
         if text and text not in parts:
             parts.append(text)
     return "；".join(parts)
+
+
+def create_taxonomy_tables(db: sqlite3.Connection) -> None:
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS tag_dimensions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          code TEXT NOT NULL UNIQUE,
+          label_zh TEXT NOT NULL,
+          description_zh TEXT,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS tag_defs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          dimension_code TEXT NOT NULL REFERENCES tag_dimensions(code),
+          code TEXT NOT NULL,
+          label_zh TEXT NOT NULL,
+          description_zh TEXT,
+          parent_code TEXT,
+          level INTEGER NOT NULL DEFAULT 1,
+          value_kind TEXT NOT NULL DEFAULT 'tag',
+          is_selectable INTEGER NOT NULL DEFAULT 1,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          metadata_json TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(dimension_code, code),
+          FOREIGN KEY (dimension_code, parent_code) REFERENCES tag_defs(dimension_code, code)
+        );
+
+        CREATE TABLE IF NOT EXISTS tag_relations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          from_dimension_code TEXT NOT NULL,
+          from_tag_code TEXT NOT NULL,
+          relation_type TEXT NOT NULL,
+          to_dimension_code TEXT NOT NULL,
+          to_tag_code TEXT NOT NULL,
+          weight REAL NOT NULL DEFAULT 1.0,
+          description_zh TEXT,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(from_dimension_code, from_tag_code, relation_type, to_dimension_code, to_tag_code),
+          FOREIGN KEY (from_dimension_code, from_tag_code) REFERENCES tag_defs(dimension_code, code),
+          FOREIGN KEY (to_dimension_code, to_tag_code) REFERENCES tag_defs(dimension_code, code)
+        );
+
+        CREATE TABLE IF NOT EXISTS tag_applicability_rules (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          category_dimension_code TEXT NOT NULL DEFAULT 'category',
+          category_tag_code TEXT NOT NULL,
+          target_dimension_code TEXT NOT NULL,
+          target_tag_code TEXT NOT NULL,
+          mode TEXT NOT NULL DEFAULT 'allowed',
+          applies_to_descendants INTEGER NOT NULL DEFAULT 1,
+          note TEXT,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(category_dimension_code, category_tag_code, target_dimension_code, target_tag_code),
+          FOREIGN KEY (category_dimension_code, category_tag_code) REFERENCES tag_defs(dimension_code, code),
+          FOREIGN KEY (target_dimension_code, target_tag_code) REFERENCES tag_defs(dimension_code, code)
+        );
+
+        CREATE TABLE IF NOT EXISTS garment_tag_assignments (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          garment_id INTEGER NOT NULL REFERENCES styling_garments(id) ON DELETE CASCADE,
+          dimension_code TEXT NOT NULL,
+          tag_code TEXT NOT NULL,
+          value_kind TEXT NOT NULL DEFAULT 'tag',
+          value_number REAL,
+          value_text TEXT,
+          value_bool INTEGER,
+          confidence REAL,
+          source TEXT NOT NULL DEFAULT 'system',
+          status TEXT NOT NULL DEFAULT 'confirmed',
+          evidence_json TEXT,
+          note TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(garment_id, dimension_code, tag_code, source),
+          FOREIGN KEY (dimension_code, tag_code) REFERENCES tag_defs(dimension_code, code)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tag_defs_dimension ON tag_defs(dimension_code, sort_order, id);
+        CREATE INDEX IF NOT EXISTS idx_tag_applicability_category ON tag_applicability_rules(category_dimension_code, category_tag_code, is_active);
+        CREATE INDEX IF NOT EXISTS idx_tag_applicability_target ON tag_applicability_rules(target_dimension_code, target_tag_code, is_active);
+        CREATE INDEX IF NOT EXISTS idx_garment_tag_assignments_garment ON garment_tag_assignments(garment_id);
+        CREATE INDEX IF NOT EXISTS idx_garment_tag_assignments_tag ON garment_tag_assignments(dimension_code, tag_code, status);
+        """
+    )
 
 
 def seed_default_model(db: sqlite3.Connection) -> None:
