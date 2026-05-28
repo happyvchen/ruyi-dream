@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { ChangeEvent, DragEvent, FormEvent, ReactNode } from 'react'
+import type { DragEvent, FormEvent, ReactNode } from 'react'
 import {
   Bot,
   ArrowDown,
   ArrowUp,
+  Braces,
   Building2,
   ChevronLeft,
   ChevronRight,
@@ -1376,7 +1377,7 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
   setBrandInfo: (item: BrandInfo | null) => void
   run: <T>(label: string, action: () => Promise<T>, after?: (value: T) => void, options?: RunOptions) => Promise<T | undefined>
 }) {
-  const importInputRef = useRef<HTMLInputElement | null>(null)
+  const [jsonDialog, setJsonDialog] = useState<{ mode: 'import' | 'export'; text: string; error?: string } | null>(null)
   const [brandId, setBrandId] = useState<number | null>(initialBrandInfo?.id ?? null)
   const [name, setName] = useState(initialBrandInfo?.name ?? '')
   const [tagline, setTagline] = useState(initialBrandInfo?.tagline ?? '')
@@ -1427,42 +1428,28 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
     setNegativeConstraints(next.negativeConstraints ?? '')
   }
 
-  function exportJson() {
-    const data = payload()
-    const blob = new Blob([`${JSON.stringify(data, null, 2)}\n`], { type: 'application/json;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `${jsonFilename(data.name || 'brand-info')}.json`
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-    URL.revokeObjectURL(url)
+  function openExportJson() {
+    setJsonDialog({ mode: 'export', text: `${JSON.stringify(payload(), null, 2)}\n` })
   }
 
-  function importJson() {
+  function openImportJson() {
     if (hasContent && !window.confirm('导入 JSON 会覆盖当前表单内容，是否继续？')) return
-    importInputRef.current?.click()
+    setJsonDialog({ mode: 'import', text: '' })
   }
 
-  async function handleImportJson(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0]
-    event.target.value = ''
-    if (!file) return
-    if (!file.name.toLowerCase().endsWith('.json')) {
-      window.alert('请选择 JSON 文件。')
-      return
-    }
-    if (file.size > 64 * 1024) {
-      window.alert('JSON 文件过大，请控制在 64KB 以内。')
+  function confirmImportJson() {
+    if (!jsonDialog || jsonDialog.mode !== 'import') return
+    if (jsonDialog.text.length > 64 * 1024) {
+      setJsonDialog({ ...jsonDialog, error: 'JSON 内容过大，请控制在 64KB 以内。' })
       return
     }
     try {
-      const data = parseBrandInfoJson(await file.text())
+      const data = parseBrandInfoJson(jsonDialog.text)
       applyPayload(data)
+      setJsonDialog(null)
       window.alert('已导入到表单，请检查后保存。')
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : 'JSON 导入失败。')
+      setJsonDialog({ ...jsonDialog, error: error instanceof Error ? error.message : 'JSON 导入失败。' })
     }
   }
 
@@ -1495,9 +1482,16 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
       <PageTitle
         title="品牌信息"
         subtitle="维护用于 AI Stylist 和棚拍生成的单一品牌资料。"
-        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={importJson}><Upload size={16} />导入 JSON</button><button className="secondary" onClick={exportJson}><Download size={16} />导出 JSON</button><button className="secondary" onClick={remove} disabled={!brandId}><Trash2 size={16} />删除</button><button className="primary" onClick={save}><Save size={16} />保存</button></div>}
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={openImportJson}><Braces size={16} />导入</button><button className="secondary" onClick={openExportJson}><Braces size={16} />导出</button><button className="secondary" onClick={remove} disabled={!brandId}><Trash2 size={16} />删除</button><button className="primary" onClick={save}><Save size={16} />保存</button></div>}
       />
-      <input ref={importInputRef} type="file" accept="application/json,.json" hidden onChange={handleImportJson} />
+      {jsonDialog && (
+        <BrandJsonDialog
+          dialog={jsonDialog}
+          setDialog={setJsonDialog}
+          onClose={() => setJsonDialog(null)}
+          onImport={confirmImportJson}
+        />
+      )}
       <div className="panel brand-info-page">
         <aside className="brand-info-meta">
           <span className="chip">{brandId ? '单一品牌资料' : '空白草稿'}</span>
@@ -1579,8 +1573,37 @@ function parseBrandInfoJson(text: string): BrandInfoPayload {
   return result
 }
 
-function jsonFilename(value: string) {
-  return value.trim().replace(/[^\u4e00-\u9fa5A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'brand-info'
+function BrandJsonDialog({ dialog, setDialog, onClose, onImport }: {
+  dialog: { mode: 'import' | 'export'; text: string; error?: string }
+  setDialog: (dialog: { mode: 'import' | 'export'; text: string; error?: string }) => void
+  onClose: () => void
+  onImport: () => void
+}) {
+  const isImport = dialog.mode === 'import'
+  return createPortal(
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <form className="confirm-modal brand-json-modal" role="dialog" aria-modal="true" aria-label={isImport ? '导入品牌信息' : '导出品牌信息'} onSubmit={(event) => {
+        event.preventDefault()
+        if (isImport) onImport()
+      }} onClick={(event) => event.stopPropagation()}>
+        <div className="confirm-head">
+          <div><h2>{isImport ? '导入' : '导出'}</h2></div>
+          <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
+        </div>
+        <textarea
+          readOnly={!isImport}
+          value={dialog.text}
+          onChange={(event) => setDialog({ mode: dialog.mode, text: event.target.value })}
+        />
+        {dialog.error && <p className="json-error">{dialog.error}</p>}
+        <div className="confirm-actions">
+          <button type="button" className="secondary" onClick={onClose}>关闭</button>
+          {isImport && <button type="submit" className="primary">导入到表单</button>}
+        </div>
+      </form>
+    </div>,
+    document.body,
+  )
 }
 
 function RecordsPage({ records, detail, setDetail, run }: { records: GenerationTask[]; detail: GenerationTask | null; setDetail: (task: GenerationTask | null) => void; run: any }) {
