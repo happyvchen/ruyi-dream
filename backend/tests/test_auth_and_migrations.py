@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import os
+import sqlite3
 import tempfile
 import unittest
 import zipfile
@@ -945,30 +946,36 @@ class BackendSmokeTests(unittest.TestCase):
         config.get_settings.cache_clear()
         db_module = importlib.import_module("app.db")
 
-        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
-            os.environ["APP_DATABASE_PATH"] = db_file.name
-            config.get_settings.cache_clear()
-            db_module.init_db()
-            db_module.init_db()
-            with db_module.get_db() as db:
-                versions = [
-                    row["version"]
-                    for row in db.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
-                ]
-                image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_images)").fetchall()}
-                garment_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_images)").fetchall()}
-                sku_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_skus)").fetchall()}
-                styling_garment_columns = {row["name"] for row in db.execute("PRAGMA table_info(styling_garments)").fetchall()}
-                input_version_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_task_input_versions)").fetchall()}
-                task_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_tasks)").fetchall()}
-                styling_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_stylings)").fetchall()}
-                preview_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_previews)").fetchall()}
-                result_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_result_images_new)").fetchall()}
-                brand_profile_columns = {row["name"] for row in db.execute("PRAGMA table_info(brand_profiles)").fetchall()}
-                brand_profile_count = db.execute("SELECT COUNT(*) AS count FROM brand_profiles").fetchone()["count"]
-                template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file, tempfile.TemporaryDirectory() as log_dir:
+            log_dir_path = Path(log_dir)
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016", "017"])
+            class FakeSettings:
+                database_path = Path(db_file.name)
+                log_dir = log_dir_path
+
+            with patch.object(db_module, "get_settings", return_value=FakeSettings):
+                config.get_settings.cache_clear()
+                db_module.init_db()
+                db_module.init_db()
+                with db_module.get_db() as db:
+                    versions = [
+                        row["version"]
+                        for row in db.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
+                    ]
+                    image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_images)").fetchall()}
+                    garment_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_images)").fetchall()}
+                    sku_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_skus)").fetchall()}
+                    styling_garment_columns = {row["name"] for row in db.execute("PRAGMA table_info(styling_garments)").fetchall()}
+                    input_version_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_task_input_versions)").fetchall()}
+                    task_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_tasks)").fetchall()}
+                    styling_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_stylings)").fetchall()}
+                    preview_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_previews)").fetchall()}
+                    result_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_result_images_new)").fetchall()}
+                    brand_profile_columns = {row["name"] for row in db.execute("PRAGMA table_info(brand_profiles)").fetchall()}
+                    brand_profile_count = db.execute("SELECT COUNT(*) AS count FROM brand_profiles").fetchone()["count"]
+                    template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
+
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016", "017", "018"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
@@ -988,6 +995,7 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("model_snapshot_json", input_version_columns)
         self.assertIn("archived_at", task_columns)
         self.assertIn("archive_reason", task_columns)
+        self.assertIn("brand_values", brand_profile_columns)
         self.assertIn("business_overview", brand_profile_columns)
         self.assertEqual(brand_profile_count, 0)
         self.assertGreaterEqual(template_count, 1)
@@ -999,45 +1007,104 @@ class BackendSmokeTests(unittest.TestCase):
         db_module = importlib.import_module("app.db")
         main = importlib.import_module("app.main")
 
-        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
-            os.environ["APP_DATABASE_PATH"] = db_file.name
-            config.get_settings.cache_clear()
-            db_module.init_db()
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file, tempfile.TemporaryDirectory() as log_dir:
+            log_dir_path = Path(log_dir)
 
-            with patch.object(main, "ensure_bucket", return_value=None), TestClient(main.app) as client:
-                self.assertEqual(client.get("/api/brand-info").status_code, 401)
+            class FakeSettings:
+                database_path = Path(db_file.name)
+                log_dir = log_dir_path
 
-                user_login = client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"})
-                self.assertEqual(user_login.status_code, 200)
-                self.assertEqual(client.get("/api/brand-info").status_code, 403)
+            with (
+                patch.object(db_module, "get_settings", return_value=FakeSettings),
+                patch.object(main.settings, "database_path", Path(db_file.name)),
+            ):
+                config.get_settings.cache_clear()
+                db_module.init_db()
 
-                admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
-                self.assertEqual(admin_login.status_code, 200)
-                self.assertEqual(client.get("/api/brand-info").json(), {"item": None})
+                with patch.object(main, "ensure_bucket", return_value=None), TestClient(main.app) as client:
+                    self.assertEqual(client.get("/api/brand-info").status_code, 401)
 
-                payload = {
-                    "name": "LILY",
-                    "tagline": "商务新风尚，成就你的每一步。",
-                    "values": ["彰显女性力量", "时尚平权", "时尚平权", ""],
-                    "aesthetic": ["摩登职场风尚"],
-                    "tone": ["专业", "现代"],
-                    "businessOverview": "LILY 是中国领先的时尚品牌。",
-                }
-                created = client.post("/api/brand-info", json=payload)
-                self.assertEqual(created.status_code, 200)
-                item = created.json()["item"]
-                self.assertEqual(item["name"], "LILY")
-                self.assertEqual(item["values"], ["彰显女性力量", "时尚平权"])
-                self.assertEqual(client.post("/api/brand-info", json=payload).status_code, 409)
+                    user_login = client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"})
+                    self.assertEqual(user_login.status_code, 200)
+                    self.assertEqual(client.get("/api/brand-info").status_code, 403)
 
-                updated = client.patch("/api/brand-info", json={"tone": ["优雅"]})
-                self.assertEqual(updated.status_code, 200)
-                self.assertEqual(updated.json()["item"]["tone"], ["优雅"])
-                self.assertEqual(updated.json()["item"]["name"], "LILY")
+                    admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+                    self.assertEqual(admin_login.status_code, 200)
+                    self.assertEqual(client.get("/api/brand-info").json(), {"item": None})
 
-                deleted = client.delete("/api/brand-info")
-                self.assertEqual(deleted.status_code, 200)
-                self.assertEqual(client.get("/api/brand-info").json(), {"item": None})
+                    payload = {
+                        "name": "LILY",
+                        "tagline": "商务新风尚，成就你的每一步。",
+                        "values": "彰显女性力量\n时尚平权",
+                        "aesthetic": "摩登职场风尚",
+                        "tone": "专业\n现代",
+                        "businessOverview": "LILY 是中国领先的时尚品牌。",
+                    }
+                    created = client.post("/api/brand-info", json=payload)
+                    self.assertEqual(created.status_code, 200)
+                    item = created.json()["item"]
+                    self.assertEqual(item["name"], "LILY")
+                    self.assertEqual(item["values"], "彰显女性力量\n时尚平权")
+                    self.assertEqual(client.post("/api/brand-info", json=payload).status_code, 409)
+
+                    updated = client.patch("/api/brand-info", json={"tone": "优雅"})
+                    self.assertEqual(updated.status_code, 200)
+                    self.assertEqual(updated.json()["item"]["tone"], "优雅")
+                    self.assertEqual(updated.json()["item"]["name"], "LILY")
+
+                    deleted = client.delete("/api/brand-info")
+                    self.assertEqual(deleted.status_code, 200)
+                    self.assertEqual(client.get("/api/brand-info").json(), {"item": None})
+
+    def test_brand_info_legacy_array_fields_migrate_to_text(self) -> None:
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file, tempfile.TemporaryDirectory() as log_dir:
+            log_dir_path = Path(log_dir)
+
+            class FakeSettings:
+                database_path = Path(db_file.name)
+                log_dir = log_dir_path
+
+            timestamp = "2026-05-28T10:00:00Z"
+            with sqlite3.connect(db_file.name) as db:
+                db.execute(
+                    """
+                    CREATE TABLE brand_profiles (
+                      id INTEGER PRIMARY KEY CHECK (id = 1),
+                      name TEXT NOT NULL DEFAULT '',
+                      tagline TEXT NOT NULL DEFAULT '',
+                      values_json TEXT NOT NULL DEFAULT '[]',
+                      aesthetic_json TEXT NOT NULL DEFAULT '[]',
+                      tone_json TEXT NOT NULL DEFAULT '[]',
+                      business_overview TEXT NOT NULL DEFAULT '',
+                      created_at TEXT NOT NULL,
+                      updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                db.execute(
+                    """
+                    INSERT INTO brand_profiles
+                      (id, name, tagline, values_json, aesthetic_json, tone_json, business_overview, created_at, updated_at)
+                    VALUES (1, 'LILY', '商务新风尚', '["彰显女性力量", "时尚平权"]', '["摩登职场风尚"]', '["专业", "现代"]', '品牌简介', ?, ?)
+                    """,
+                    (timestamp, timestamp),
+                )
+
+            with patch.object(db_module, "get_settings", return_value=FakeSettings):
+                config.get_settings.cache_clear()
+                db_module.init_db()
+                with db_module.get_db() as db:
+                    columns = {row["name"] for row in db.execute("PRAGMA table_info(brand_profiles)").fetchall()}
+                    row = db.execute("SELECT * FROM brand_profiles WHERE id = 1").fetchone()
+
+        self.assertIn("brand_values", columns)
+        self.assertNotIn("values_json", columns)
+        self.assertEqual(row["brand_values"], "彰显女性力量\n时尚平权")
+        self.assertEqual(row["aesthetic"], "摩登职场风尚")
+        self.assertEqual(row["tone"], "专业\n现代")
 
     def test_terminal_generation_run_cancel_returns_conflict(self) -> None:
         from fastapi.testclient import TestClient

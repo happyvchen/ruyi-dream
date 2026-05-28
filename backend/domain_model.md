@@ -86,7 +86,7 @@ admin 维护的单一品牌资料。MVP 当前服务单一试点客户和单一�
 - 所有 `/api/brand-info` 接口必须按服务端 session role 校验 admin 权限。
 - 前端只给 admin 展示 `品牌信息` 入口；普通 `user` 保持原有拍摄工作台。
 
-`values`、`aesthetic`、`tone` 均为普通字符串列表，不保存中英文成对结构。
+`values`、`aesthetic`、`tone` 均为普通字符串字段，不保存数组或中英文成对结构。
 
 ### 3.4 GenerationAttempt
 

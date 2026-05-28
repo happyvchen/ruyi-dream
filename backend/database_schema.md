@@ -161,9 +161,9 @@ CREATE TABLE brand_profiles (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   name TEXT NOT NULL DEFAULT '',
   tagline TEXT NOT NULL DEFAULT '',
-  values_json TEXT NOT NULL DEFAULT '[]',
-  aesthetic_json TEXT NOT NULL DEFAULT '[]',
-  tone_json TEXT NOT NULL DEFAULT '[]',
+  brand_values TEXT NOT NULL DEFAULT '',
+  aesthetic TEXT NOT NULL DEFAULT '',
+  tone TEXT NOT NULL DEFAULT '',
   business_overview TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -177,9 +177,9 @@ CREATE TABLE brand_profiles (
 | `id` | INTEGER | 固定为 1，保证 MVP 只维护单一品牌资料 |
 | `name` | TEXT | 品牌名称；初始为空 |
 | `tagline` | TEXT | 品牌标语；初始为空 |
-| `values_json` | TEXT | 品牌价值观字符串列表；初始为空数组 |
-| `aesthetic_json` | TEXT | 品牌美学字符串列表；初始为空数组 |
-| `tone_json` | TEXT | 沟通语调字符串列表；初始为空数组 |
+| `brand_values` | TEXT | 品牌价值观文本；初始为空 |
+| `aesthetic` | TEXT | 品牌美学文本；初始为空 |
+| `tone` | TEXT | 沟通语调文本；初始为空 |
 | `business_overview` | TEXT | 业务概览 / 品牌简介；初始为空 |
 | `created_at` | TEXT | 创建时间 |
 | `updated_at` | TEXT | 更新时间 |
@@ -188,6 +188,7 @@ CREATE TABLE brand_profiles (
 
 - 启动时不 seed 默认品牌资料，admin 首次保存时创建记录。
 - 当前不支持双语字段，不保存中英文 key/value 成对结构。
+- 当前所有业务字段均为字符串，不保存数组结构。
 - `/api/brand-info` 全部接口均为 admin-only。
 
 ### 2.5 `shot_plans`

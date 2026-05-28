@@ -261,9 +261,9 @@ class ModelProfileUpsertRequest(BaseModel):
 class BrandInfoUpsertRequest(BaseModel):
     name: str | None = None
     tagline: str | None = None
-    values: list[str] | None = None
-    aesthetic: list[str] | None = None
-    tone: list[str] | None = None
+    values: str | None = None
+    aesthetic: str | None = None
+    tone: str | None = None
     businessOverview: str | None = None
 
 
@@ -2487,15 +2487,15 @@ def create_brand_info(payload: BrandInfoUpsertRequest, request: Request) -> dict
         db.execute(
             """
             INSERT INTO brand_profiles
-              (id, name, tagline, values_json, aesthetic_json, tone_json, business_overview, created_at, updated_at)
+              (id, name, tagline, brand_values, aesthetic, tone, business_overview, created_at, updated_at)
             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 profile["name"],
                 profile["tagline"],
-                dumps(profile["values"]),
-                dumps(profile["aesthetic"]),
-                dumps(profile["tone"]),
+                profile["values"],
+                profile["aesthetic"],
+                profile["tone"],
                 profile["businessOverview"],
                 timestamp,
                 timestamp,
@@ -2518,14 +2518,14 @@ def update_brand_info(payload: BrandInfoUpsertRequest, request: Request) -> dict
             key_map = {
                 "name": "name",
                 "tagline": "tagline",
-                "values": "values_json",
-                "aesthetic": "aesthetic_json",
-                "tone": "tone_json",
+                "values": "brand_values",
+                "aesthetic": "aesthetic",
+                "tone": "tone",
                 "businessOverview": "business_overview",
             }
             for key, value in updates.items():
                 column = key_map[key]
-                db_updates[column] = dumps(value) if isinstance(value, list) else value
+                db_updates[column] = value
             db_updates["updated_at"] = now_iso()
             set_clause = ", ".join(f"{key} = ?" for key in db_updates)
             db.execute(
@@ -7708,9 +7708,9 @@ def serialize_brand_info(row: Any) -> dict[str, Any]:
         "id": row["id"],
         "name": row["name"],
         "tagline": row["tagline"],
-        "values": loads(row["values_json"], []),
-        "aesthetic": loads(row["aesthetic_json"], []),
-        "tone": loads(row["tone_json"], []),
+        "values": row["brand_values"],
+        "aesthetic": row["aesthetic"],
+        "tone": row["tone"],
         "businessOverview": row["business_overview"],
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
@@ -7944,17 +7944,6 @@ def sanitize_reference_id(value: str) -> str:
     return "".join(ch for ch in value.strip() if ch.isalnum() or ch in {"-", "_"})
 
 
-def normalize_string_list(values: list[str] | None) -> list[str]:
-    if not values:
-        return []
-    normalized: list[str] = []
-    for value in values:
-        text = str(value or "").strip()
-        if text and text not in normalized:
-            normalized.append(text)
-    return normalized
-
-
 def normalize_brand_info_payload(payload: BrandInfoUpsertRequest, partial: bool = False) -> dict[str, Any]:
     normalized: dict[str, Any] = {}
     if not partial or payload.name is not None:
@@ -7962,11 +7951,11 @@ def normalize_brand_info_payload(payload: BrandInfoUpsertRequest, partial: bool 
     if not partial or payload.tagline is not None:
         normalized["tagline"] = (payload.tagline or "").strip()
     if not partial or payload.values is not None:
-        normalized["values"] = normalize_string_list(payload.values)
+        normalized["values"] = (payload.values or "").strip()
     if not partial or payload.aesthetic is not None:
-        normalized["aesthetic"] = normalize_string_list(payload.aesthetic)
+        normalized["aesthetic"] = (payload.aesthetic or "").strip()
     if not partial or payload.tone is not None:
-        normalized["tone"] = normalize_string_list(payload.tone)
+        normalized["tone"] = (payload.tone or "").strip()
     if not partial or payload.businessOverview is not None:
         normalized["businessOverview"] = (payload.businessOverview or "").strip()
     return normalized

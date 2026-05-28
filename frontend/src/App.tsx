@@ -24,7 +24,6 @@ import {
   LogOut,
   PanelLeftClose,
   PanelLeftOpen,
-  Plus,
   RotateCcw,
   Save,
   Search,
@@ -1380,25 +1379,25 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
   const [brandId, setBrandId] = useState<number | null>(initialBrandInfo?.id ?? null)
   const [name, setName] = useState(initialBrandInfo?.name ?? '')
   const [tagline, setTagline] = useState(initialBrandInfo?.tagline ?? '')
-  const [values, setValues] = useState<string[]>(initialBrandInfo?.values?.length ? initialBrandInfo.values : [''])
-  const [aesthetic, setAesthetic] = useState<string[]>(initialBrandInfo?.aesthetic?.length ? initialBrandInfo.aesthetic : [''])
-  const [tone, setTone] = useState<string[]>(initialBrandInfo?.tone?.length ? initialBrandInfo.tone : [''])
+  const [values, setValues] = useState(initialBrandInfo?.values ?? '')
+  const [aesthetic, setAesthetic] = useState(initialBrandInfo?.aesthetic ?? '')
+  const [tone, setTone] = useState(initialBrandInfo?.tone ?? '')
   const [businessOverview, setBusinessOverview] = useState(initialBrandInfo?.businessOverview ?? '')
 
   useEffect(() => {
     setBrandId(initialBrandInfo?.id ?? null)
     setName(initialBrandInfo?.name ?? '')
     setTagline(initialBrandInfo?.tagline ?? '')
-    setValues(initialBrandInfo?.values?.length ? initialBrandInfo.values : [''])
-    setAesthetic(initialBrandInfo?.aesthetic?.length ? initialBrandInfo.aesthetic : [''])
-    setTone(initialBrandInfo?.tone?.length ? initialBrandInfo.tone : [''])
+    setValues(initialBrandInfo?.values ?? '')
+    setAesthetic(initialBrandInfo?.aesthetic ?? '')
+    setTone(initialBrandInfo?.tone ?? '')
     setBusinessOverview(initialBrandInfo?.businessOverview ?? '')
   }, [initialBrandInfo?.id, initialBrandInfo?.updatedAt])
 
-  const cleanValues = compactList(values)
-  const cleanAesthetic = compactList(aesthetic)
-  const cleanTone = compactList(tone)
-  const hasContent = Boolean(name.trim() || tagline.trim() || cleanValues.length || cleanAesthetic.length || cleanTone.length || businessOverview.trim())
+  const cleanValues = values.trim()
+  const cleanAesthetic = aesthetic.trim()
+  const cleanTone = tone.trim()
+  const hasContent = Boolean(name.trim() || tagline.trim() || cleanValues || cleanAesthetic || cleanTone || businessOverview.trim())
   const summaryName = name.trim() || '未填写品牌名称'
 
   function payload() {
@@ -1428,9 +1427,9 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
       setBrandId(null)
       setName('')
       setTagline('')
-      setValues([''])
-      setAesthetic([''])
-      setTone([''])
+      setValues('')
+      setAesthetic('')
+      setTone('')
       setBusinessOverview('')
     }, { refresh: false })
   }
@@ -1448,9 +1447,9 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
           <h2>{summaryName}</h2>
           <Meta label="状态" value={brandId ? '已保存' : hasContent ? '未保存' : '初始为空'} />
           <Meta label="标语" value={tagline.trim() ? '已填写' : '未填写'} />
-          <Meta label="价值观" value={`${cleanValues.length} 项`} />
-          <Meta label="品牌美学" value={`${cleanAesthetic.length} 项`} />
-          <Meta label="沟通语调" value={`${cleanTone.length} 项`} />
+          <Meta label="价值观" value={cleanValues ? '已填写' : '未填写'} />
+          <Meta label="品牌美学" value={cleanAesthetic ? '已填写' : '未填写'} />
+          <Meta label="沟通语调" value={cleanTone ? '已填写' : '未填写'} />
           <p>保存后将作为后续选搭与 ShotPlan 的品牌参考。</p>
         </aside>
         <div className="brand-info-form">
@@ -1462,9 +1461,18 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
             <label>品牌标语</label>
             <textarea value={tagline} onChange={(event) => setTagline(event.target.value)} />
           </div>
-          <BrandListEditor title="品牌价值观" items={values} onChange={setValues} />
-          <BrandListEditor title="品牌美学" items={aesthetic} onChange={setAesthetic} />
-          <BrandListEditor title="沟通语调" items={tone} onChange={setTone} />
+          <div className="brand-field">
+            <label>品牌价值观</label>
+            <textarea value={values} onChange={(event) => setValues(event.target.value)} />
+          </div>
+          <div className="brand-field">
+            <label>品牌美学</label>
+            <textarea value={aesthetic} onChange={(event) => setAesthetic(event.target.value)} />
+          </div>
+          <div className="brand-field">
+            <label>沟通语调</label>
+            <textarea value={tone} onChange={(event) => setTone(event.target.value)} />
+          </div>
           <div className="brand-field">
             <label>业务概览</label>
             <textarea className="large" value={businessOverview} onChange={(event) => setBusinessOverview(event.target.value)} />
@@ -1472,37 +1480,6 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
         </div>
       </div>
     </section>
-  )
-}
-
-function BrandListEditor({ title, items, onChange }: {
-  title: string
-  items: string[]
-  onChange: (items: string[]) => void
-}) {
-  const visibleItems = items.length ? items : ['']
-  function update(index: number, value: string) {
-    onChange(visibleItems.map((item, itemIndex) => itemIndex === index ? value : item))
-  }
-  function remove(index: number) {
-    const next = visibleItems.filter((_, itemIndex) => itemIndex !== index)
-    onChange(next.length ? next : [''])
-  }
-  return (
-    <div className="brand-field">
-      <div className="brand-field-head">
-        <label>{title}</label>
-        <button className="secondary icon-button mini-icon" onClick={() => onChange([...visibleItems, ''])} title={`新增${title}`}><Plus size={15} /></button>
-      </div>
-      <div className="brand-list-editor">
-        {visibleItems.map((item, index) => (
-          <div className="brand-list-row" key={`${title}-${index}`}>
-            <input value={item} onChange={(event) => update(index, event.target.value)} />
-            <button className="ghost-icon danger-icon" onClick={() => remove(index)} title="删除"><Trash2 size={15} /></button>
-          </div>
-        ))}
-      </div>
-    </div>
   )
 }
 
@@ -2512,10 +2489,6 @@ function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () =
 
 function Meta({ label, value }: { label: string; value: ReactNode }) {
   return <div className="meta"><span>{label}</span><strong>{value}</strong></div>
-}
-
-function compactList(items: string[]) {
-  return items.map((item) => item.trim()).filter(Boolean)
 }
 
 function EmptyState({ title, text }: { title: string; text: string }) {
