@@ -32,6 +32,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("019", "reframe_brand_profile_guidance_fields", "migration_reframe_brand_profile_guidance_fields"),
     ("020", "rename_brand_profile_production_guidance_fields", "migration_rename_brand_profile_production_guidance_fields"),
     ("021", "add_taxonomy_skeleton", "migration_add_taxonomy_skeleton"),
+    ("022", "add_taxonomy_applicability_rules", "migration_add_taxonomy_applicability_rules"),
 )
 
 
@@ -430,6 +431,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_reframe_brand_profile_guidance_fields": migration_reframe_brand_profile_guidance_fields,
         "migration_rename_brand_profile_production_guidance_fields": migration_rename_brand_profile_production_guidance_fields,
         "migration_add_taxonomy_skeleton": migration_add_taxonomy_skeleton,
+        "migration_add_taxonomy_applicability_rules": migration_add_taxonomy_applicability_rules,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -781,6 +783,11 @@ def migration_add_taxonomy_skeleton(db: sqlite3.Connection) -> None:
     seed_default_taxonomy(db)
 
 
+def migration_add_taxonomy_applicability_rules(db: sqlite3.Connection) -> None:
+    create_taxonomy_tables(db)
+    seed_default_taxonomy(db)
+
+
 def ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
@@ -1026,6 +1033,23 @@ def create_taxonomy_tables(db: sqlite3.Connection) -> None:
           FOREIGN KEY (to_dimension_code, to_tag_code) REFERENCES tag_defs(dimension_code, code)
         );
 
+        CREATE TABLE IF NOT EXISTS tag_applicability_rules (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          category_dimension_code TEXT NOT NULL DEFAULT 'category',
+          category_tag_code TEXT NOT NULL,
+          target_dimension_code TEXT NOT NULL,
+          target_tag_code TEXT NOT NULL,
+          mode TEXT NOT NULL DEFAULT 'allowed',
+          applies_to_descendants INTEGER NOT NULL DEFAULT 1,
+          note TEXT,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(category_dimension_code, category_tag_code, target_dimension_code, target_tag_code),
+          FOREIGN KEY (category_dimension_code, category_tag_code) REFERENCES tag_defs(dimension_code, code),
+          FOREIGN KEY (target_dimension_code, target_tag_code) REFERENCES tag_defs(dimension_code, code)
+        );
+
         CREATE TABLE IF NOT EXISTS garment_tag_assignments (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           garment_id INTEGER NOT NULL REFERENCES styling_garments(id) ON DELETE CASCADE,
@@ -1047,6 +1071,8 @@ def create_taxonomy_tables(db: sqlite3.Connection) -> None:
         );
 
         CREATE INDEX IF NOT EXISTS idx_tag_defs_dimension ON tag_defs(dimension_code, sort_order, id);
+        CREATE INDEX IF NOT EXISTS idx_tag_applicability_category ON tag_applicability_rules(category_dimension_code, category_tag_code, is_active);
+        CREATE INDEX IF NOT EXISTS idx_tag_applicability_target ON tag_applicability_rules(target_dimension_code, target_tag_code, is_active);
         CREATE INDEX IF NOT EXISTS idx_garment_tag_assignments_garment ON garment_tag_assignments(garment_id);
         CREATE INDEX IF NOT EXISTS idx_garment_tag_assignments_tag ON garment_tag_assignments(dimension_code, tag_code, status);
         """
@@ -1068,20 +1094,21 @@ def seed_default_taxonomy(db: sqlite3.Connection) -> None:
         ("length", "长度", "上衣、袖长、下装长度。", 90),
         ("neckline", "领型", "领口和领型。", 100),
         ("closure", "闭合方式", "纽扣、拉链、套头等穿脱结构。", 110),
-        ("design_detail", "设计细节", "口袋、撞色、褶皱、开衩等设计点。", 120),
-        ("pattern", "图案", "纯色、条纹、格纹、印花等。", 130),
-        ("pattern_scale", "图案大小", "图案视觉尺度。", 140),
-        ("wearing_method", "穿法", "扣合、敞开、塞腰等真实穿法。", 150),
-        ("wearability", "穿着能力", "可单穿、内搭、外搭、下装搭配等能力。", 160),
-        ("coverage_risk", "遮挡风险", "作为搭配服饰时遮挡主推款的风险。", 170),
-        ("lily_style_score", "Lily 风格分值", "商务时装、通勤、干净度等 0-1 分值项。", 180),
-        ("formality", "正式度", "休闲到正式的分档。", 190),
-        ("occasion", "适用场景", "通勤、办公室、日常等场景。", 200),
-        ("season", "季节", "春夏秋冬。", 210),
-        ("pairing_logic", "搭配逻辑", "适合搭配、避免搭配、色彩和廓形匹配。", 220),
-        ("style_risk", "风格风险", "过甜、过街头、过重等搭配风险。", 230),
-        ("manual_business", "人工业务标签", "运营维护的非视觉业务信息。", 240),
-        ("review_reason", "复核原因", "低置信度、品类不清等复核原因。", 250),
+        ("garment_part", "服装部件", "按品类约束使用的领、袖、肩、腰头、裤脚、裙摆等部件。", 120),
+        ("design_detail", "设计细节", "口袋、撞色、褶皱、开衩等设计点。", 130),
+        ("pattern", "图案", "纯色、条纹、格纹、印花等。", 140),
+        ("pattern_scale", "图案大小", "图案视觉尺度。", 150),
+        ("wearing_method", "穿法", "扣合、敞开、塞腰等真实穿法。", 160),
+        ("wearability", "穿着能力", "可单穿、内搭、外搭、下装搭配等能力。", 170),
+        ("coverage_risk", "遮挡风险", "作为搭配服饰时遮挡主推款的风险。", 180),
+        ("lily_style_score", "Lily 风格分值", "商务时装、通勤、干净度等 0-1 分值项。", 190),
+        ("formality", "正式度", "休闲到正式的分档。", 200),
+        ("occasion", "适用场景", "通勤、办公室、日常等场景。", 210),
+        ("season", "季节", "春夏秋冬。", 220),
+        ("pairing_logic", "搭配逻辑", "适合搭配、避免搭配、色彩和廓形匹配。", 230),
+        ("style_risk", "风格风险", "过甜、过街头、过重等搭配风险。", 240),
+        ("manual_business", "人工业务标签", "运营维护的非视觉业务信息。", 250),
+        ("review_reason", "复核原因", "低置信度、品类不清等复核原因。", 260),
     ]
     for code, label, description, sort_order in dimensions:
         db.execute(
@@ -1134,6 +1161,15 @@ def seed_default_taxonomy(db: sqlite3.Connection) -> None:
     add_tags("length", [("top_cropped", "短上衣"), ("top_hip", "及胯上衣"), ("top_long", "长上衣"), ("sleeve_sleeveless", "无袖"), ("sleeve_short", "短袖"), ("sleeve_elbow", "肘袖"), ("sleeve_three_quarter", "七分袖"), ("sleeve_long", "长袖"), ("bottom_short", "短款下装"), ("bottom_knee", "及膝"), ("bottom_midi", "中长"), ("bottom_ankle", "九分/及踝"), ("bottom_full", "全长"), ("unknown", "未知")])
     add_tags("neckline", [("crew", "圆领"), ("v_neck", "V领"), ("polo", "Polo领"), ("shirt_collar", "衬衫领"), ("lapel", "翻领"), ("boat", "船领"), ("square", "方领"), ("halter", "挂脖"), ("cowl", "垂褶领"), ("unknown", "未知")])
     add_tags("closure", [("button", "纽扣"), ("zipper", "拉链"), ("pullover", "套头"), ("wrap", "裹身"), ("tie", "系带"), ("open_front", "开襟"), ("unknown", "未知")])
+    add_tags("garment_part", [
+        ("collar", "领部"), ("lapel", "翻领", "collar", 2, "tag"), ("neckline_area", "领口区域", "collar", 2, "tag"),
+        ("shoulder", "肩部"), ("structured_shoulder_part", "结构肩/垫肩", "shoulder", 2, "tag"), ("armhole", "袖窿", "shoulder", 2, "tag"),
+        ("sleeve", "袖部"), ("cuff", "袖口", "sleeve", 2, "tag"),
+        ("front_body", "前身"), ("placket", "门襟", "front_body", 2, "tag"), ("button_area", "纽扣区域", "front_body", 2, "tag"), ("pocket_area", "口袋区域", "front_body", 2, "tag"),
+        ("waist", "腰部"), ("waistline", "腰线", "waist", 2, "tag"), ("waistband", "腰头", "waist", 2, "tag"), ("belt_loop", "裤袢/腰袢", "waist", 2, "tag"),
+        ("bottom_part", "下摆/裤裙部"), ("hem", "下摆", "bottom_part", 2, "tag"), ("skirt_hem", "裙摆", "bottom_part", 2, "tag"), ("leg_opening", "裤脚", "bottom_part", 2, "tag"), ("side_slit", "侧开衩", "bottom_part", 2, "tag"),
+        ("trouser_part", "裤装结构"), ("front_pleat", "裤褶", "trouser_part", 2, "tag"), ("crease_line", "中缝线", "trouser_part", 2, "tag"),
+    ])
     add_tags("design_detail", [("asymmetric", "不对称"), ("lace", "蕾丝"), ("contrast_trim", "撞色边饰"), ("embroidery", "绣花"), ("pocket", "口袋"), ("pleat", "褶皱"), ("cutout", "镂空"), ("patchwork", "拼接"), ("print", "印花"), ("button", "纽扣细节"), ("ruffle", "荷叶边"), ("bow_tie", "蝴蝶结/飘带"), ("belt", "腰带"), ("slit", "开衩")])
     add_tags("pattern", [("solid", "纯色"), ("stripe", "条纹"), ("check", "格纹"), ("polka_dot", "波点"), ("floral", "花卉"), ("graphic", "图形"), ("abstract", "抽象"), ("texture_pattern", "肌理图案"), ("logo", "Logo"), ("animal", "动物纹"), ("unknown", "未知")])
     add_tags("pattern_scale", [("none", "无图案"), ("small", "小图案"), ("medium", "中图案"), ("large", "大图案"), ("mixed", "混合尺度"), ("unknown", "未知")])
@@ -1165,6 +1201,56 @@ def seed_default_taxonomy(db: sqlite3.Connection) -> None:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (*relation, timestamp, timestamp),
+        )
+
+    applicability_rules = [
+        ("category", "blazer", "garment_part", "lapel", "required", 1, "西装必须关注翻领。"),
+        ("category", "blazer", "garment_part", "structured_shoulder_part", "recommended", 1, "西装通常需要识别肩部结构。"),
+        ("category", "blazer", "garment_part", "placket", "recommended", 1, "西装门襟影响开合与穿法。"),
+        ("category", "blazer", "garment_part", "cuff", "allowed", 1, "袖口可作为细节观察对象。"),
+        ("category", "blazer", "garment_part", "pocket_area", "allowed", 1, "口袋区域可作为设计细节。"),
+        ("category", "blazer", "garment_part", "waistline", "recommended", 1, "短款或收腰西装需要关注腰线。"),
+        ("category", "blazer", "design_detail", "button", "allowed", 1, "西装可关注纽扣细节。"),
+        ("category", "blazer", "design_detail", "pocket", "allowed", 1, "西装可关注口袋设计。"),
+        ("category", "trousers", "garment_part", "waistband", "required", 1, "裤装必须关注腰头。"),
+        ("category", "trousers", "garment_part", "front_pleat", "recommended", 1, "裤褶影响正式度和廓形。"),
+        ("category", "trousers", "garment_part", "leg_opening", "required", 1, "裤脚影响裤型判断。"),
+        ("category", "trousers", "garment_part", "crease_line", "allowed", 1, "中缝线可体现通勤正式感。"),
+        ("category", "trousers", "design_detail", "pleat", "allowed", 1, "裤装可关注褶皱/裤褶。"),
+        ("category", "trousers", "design_detail", "slit", "allowed", 1, "部分裤装有开衩裤脚。"),
+        ("category", "skirt", "garment_part", "waistband", "recommended", 1, "半身裙通常关注腰头。"),
+        ("category", "skirt", "garment_part", "skirt_hem", "required", 1, "半身裙必须关注裙摆。"),
+        ("category", "skirt", "garment_part", "side_slit", "allowed", 1, "半身裙可有侧开衩。"),
+        ("category", "skirt", "design_detail", "pleat", "allowed", 1, "百褶/A字裙等可关注褶皱。"),
+        ("category", "skirt", "design_detail", "slit", "allowed", 1, "半身裙可关注开衩。"),
+        ("category", "dress", "garment_part", "neckline_area", "recommended", 1, "连衣裙需要关注领口区域。"),
+        ("category", "dress", "garment_part", "sleeve", "allowed", 1, "连衣裙可关注袖部。"),
+        ("category", "dress", "garment_part", "waistline", "recommended", 1, "连衣裙腰线影响比例。"),
+        ("category", "dress", "garment_part", "skirt_hem", "required", 1, "连衣裙必须关注裙摆。"),
+        ("category", "dress", "garment_part", "side_slit", "allowed", 1, "连衣裙可有开衩。"),
+        ("category", "dress", "design_detail", "lace", "allowed", 1, "连衣裙可关注蕾丝。"),
+        ("category", "dress", "design_detail", "ruffle", "allowed", 1, "连衣裙可关注荷叶边。"),
+        ("category", "shirt", "garment_part", "collar", "required", 1, "衬衫必须关注领部。"),
+        ("category", "shirt", "garment_part", "placket", "required", 1, "衬衫必须关注门襟。"),
+        ("category", "shirt", "garment_part", "cuff", "recommended", 1, "长袖衬衫需要关注袖口。"),
+        ("category", "shirt", "design_detail", "button", "allowed", 1, "衬衫可关注纽扣。"),
+        ("category", "blouse", "garment_part", "neckline_area", "recommended", 1, "罩衫需要关注领口区域。"),
+        ("category", "blouse", "garment_part", "sleeve", "recommended", 1, "罩衫袖型常影响风格。"),
+        ("category", "blouse", "design_detail", "bow_tie", "allowed", 1, "罩衫可关注飘带。"),
+        ("category", "blouse", "design_detail", "ruffle", "allowed", 1, "罩衫可关注荷叶边。"),
+        ("category", "knitwear", "garment_part", "neckline_area", "recommended", 1, "针织需关注领口。"),
+        ("category", "knitwear", "garment_part", "cuff", "allowed", 1, "针织可关注袖口。"),
+        ("category", "knitwear", "garment_part", "hem", "recommended", 1, "针织下摆影响比例。"),
+    ]
+    for rule in applicability_rules:
+        db.execute(
+            """
+            INSERT OR IGNORE INTO tag_applicability_rules
+              (category_dimension_code, category_tag_code, target_dimension_code, target_tag_code,
+               mode, applies_to_descendants, note, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (*rule, timestamp, timestamp),
         )
 
 

@@ -257,13 +257,29 @@ export type TaxonomyRelation = {
   updatedAt: string
 }
 
+export type TaxonomyApplicabilityRule = {
+  id: number
+  categoryDimensionCode: string
+  categoryTagCode: string
+  targetDimensionCode: string
+  targetTagCode: string
+  mode: string
+  appliesToDescendants: boolean
+  note?: string | null
+  isActive: boolean
+  createdAt: string
+  updatedAt: string
+}
+
 export type TaxonomyRules = {
   dimensions: TaxonomyDimension[]
   relations: TaxonomyRelation[]
+  applicabilityRules: TaxonomyApplicabilityRule[]
   summary: {
     dimensionCount: number
     tagCount: number
     relationCount: number
+    applicabilityRuleCount: number
     assignmentCount: number
     taggedGarmentCount: number
   }
@@ -302,11 +318,23 @@ export type TaxonomyRelationPayload = {
   isActive?: boolean
 }
 
+export type TaxonomyApplicabilityPayload = {
+  categoryDimensionCode?: string
+  categoryTagCode?: string
+  targetDimensionCode?: string
+  targetTagCode?: string
+  mode?: string
+  appliesToDescendants?: boolean
+  note?: string
+  isActive?: boolean
+}
+
 export type TaxonomyExportPayload = {
   schemaVersion: string
   dimensions: TaxonomyDimension[]
   tags: TaxonomyTag[]
   relations: TaxonomyRelation[]
+  applicabilityRules: TaxonomyApplicabilityRule[]
 }
 
 function headers(init?: RequestInit) {
@@ -454,7 +482,7 @@ export const api = {
   deleteBrandInfo: () => request<{ ok: boolean }>('/api/brand-info', { method: 'DELETE' }),
   getTaxonomyRules: () => request<TaxonomyRules>('/api/taxonomy/rules'),
   exportTaxonomyRules: () => request<TaxonomyExportPayload>('/api/taxonomy/export'),
-  importTaxonomyRules: (payload: { dimensions: unknown[]; tags: unknown[]; relations: unknown[] }) =>
+  importTaxonomyRules: (payload: { dimensions: unknown[]; tags: unknown[]; relations: unknown[]; applicabilityRules: unknown[] }) =>
     request<TaxonomyRules>('/api/taxonomy/import', { method: 'POST', body: JSON.stringify(payload) }),
   createTaxonomyDimension: (payload: TaxonomyDimensionPayload & { code: string; labelZh: string }) =>
     request<TaxonomyRules>('/api/taxonomy/dimensions', { method: 'POST', body: JSON.stringify(payload) }),
@@ -474,5 +502,11 @@ export const api = {
     request<TaxonomyRules>(`/api/taxonomy/relations/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteTaxonomyRelation: (id: number) =>
     request<TaxonomyRules>(`/api/taxonomy/relations/${id}`, { method: 'DELETE' }),
+  createTaxonomyApplicabilityRule: (payload: TaxonomyApplicabilityPayload & { categoryTagCode: string; targetDimensionCode: string; targetTagCode: string }) =>
+    request<TaxonomyRules>('/api/taxonomy/applicability-rules', { method: 'POST', body: JSON.stringify(payload) }),
+  updateTaxonomyApplicabilityRule: (id: number, payload: TaxonomyApplicabilityPayload) =>
+    request<TaxonomyRules>(`/api/taxonomy/applicability-rules/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteTaxonomyApplicabilityRule: (id: number) =>
+    request<TaxonomyRules>(`/api/taxonomy/applicability-rules/${id}`, { method: 'DELETE' }),
   backfillTaxonomyAssignments: () => request<{ ok: boolean; garmentCount: number }>('/api/taxonomy/backfill-assignments', { method: 'POST' }),
 }

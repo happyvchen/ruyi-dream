@@ -974,11 +974,13 @@ class BackendSmokeTests(unittest.TestCase):
                     brand_profile_columns = {row["name"] for row in db.execute("PRAGMA table_info(brand_profiles)").fetchall()}
                     taxonomy_dimension_count = db.execute("SELECT COUNT(*) AS count FROM tag_dimensions").fetchone()["count"]
                     taxonomy_tag_count = db.execute("SELECT COUNT(*) AS count FROM tag_defs").fetchone()["count"]
+                    applicability_columns = {row["name"] for row in db.execute("PRAGMA table_info(tag_applicability_rules)").fetchall()}
+                    applicability_count = db.execute("SELECT COUNT(*) AS count FROM tag_applicability_rules").fetchone()["count"]
                     assignment_columns = {row["name"] for row in db.execute("PRAGMA table_info(garment_tag_assignments)").fetchall()}
                     brand_profile_count = db.execute("SELECT COUNT(*) AS count FROM brand_profiles").fetchone()["count"]
                     template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016", "017", "018", "019", "020", "021"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016", "017", "018", "019", "020", "021", "022"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
@@ -1005,6 +1007,9 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("negative_constraints", brand_profile_columns)
         self.assertGreaterEqual(taxonomy_dimension_count, 20)
         self.assertGreaterEqual(taxonomy_tag_count, 100)
+        self.assertIn("category_tag_code", applicability_columns)
+        self.assertIn("target_tag_code", applicability_columns)
+        self.assertGreaterEqual(applicability_count, 1)
         self.assertIn("dimension_code", assignment_columns)
         self.assertIn("tag_code", assignment_columns)
         self.assertIn("source", assignment_columns)
@@ -1102,7 +1107,10 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertGreaterEqual(payload["summary"]["dimensionCount"], 20)
                     self.assertGreaterEqual(payload["summary"]["tagCount"], 100)
                     self.assertGreaterEqual(payload["summary"]["relationCount"], 1)
+                    self.assertGreaterEqual(payload["summary"]["applicabilityRuleCount"], 1)
                     self.assertTrue(any(item["code"] == "category" for item in payload["dimensions"]))
+                    self.assertTrue(any(item["code"] == "garment_part" for item in payload["dimensions"]))
+                    self.assertTrue(any(item["targetDimensionCode"] == "garment_part" for item in payload["applicabilityRules"]))
 
                     updated_dimension = client.patch(
                         "/api/taxonomy/dimensions/category",
@@ -1124,6 +1132,14 @@ class BackendSmokeTests(unittest.TestCase):
                     )
                     self.assertEqual(created_dimension.status_code, 200)
                     self.assertTrue(any(item["code"] == "test_dimension" for item in created_dimension.json()["dimensions"]))
+
+                    created_target_tag = client.post(
+                        "/api/taxonomy/tags",
+                        json={"dimensionCode": "test_dimension", "code": "test_detail", "labelZh": "测试细节"},
+                    )
+                    self.assertEqual(created_target_tag.status_code, 200)
+                    with db_module.get_db() as db:
+                        target_tag_id = db.execute("SELECT id FROM tag_defs WHERE dimension_code = 'test_dimension' AND code = 'test_detail'").fetchone()["id"]
 
                     created_tag = client.post(
                         "/api/taxonomy/tags",
@@ -1182,10 +1198,38 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertEqual(relation["weight"], 0.75)
                     self.assertEqual(relation["descriptionZh"], "测试关系")
 
+                    created_applicability = client.post(
+                        "/api/taxonomy/applicability-rules",
+                        json={
+                            "categoryDimensionCode": "category",
+                            "categoryTagCode": "test_tag",
+                            "targetDimensionCode": "test_dimension",
+                            "targetTagCode": "test_detail",
+                            "mode": "recommended",
+                            "appliesToDescendants": False,
+                            "note": "按品类限定测试细节",
+                        },
+                    )
+                    self.assertEqual(created_applicability.status_code, 200)
+                    applicability_id = next(
+                        item["id"] for item in created_applicability.json()["applicabilityRules"]
+                        if item["categoryTagCode"] == "test_tag" and item["targetTagCode"] == "test_detail"
+                    )
+
+                    updated_applicability = client.patch(
+                        f"/api/taxonomy/applicability-rules/{applicability_id}",
+                        json={"mode": "required", "isActive": False},
+                    )
+                    self.assertEqual(updated_applicability.status_code, 200)
+                    applicability = next(item for item in updated_applicability.json()["applicabilityRules"] if item["id"] == applicability_id)
+                    self.assertEqual(applicability["mode"], "required")
+                    self.assertFalse(applicability["isActive"])
+
                     exported = client.get("/api/taxonomy/export")
                     self.assertEqual(exported.status_code, 200)
                     self.assertEqual(exported.json()["schemaVersion"], "ruyi-taxonomy-rules-v1")
                     self.assertTrue(any(item["code"] == "category" for item in exported.json()["dimensions"]))
+                    self.assertTrue(any(item["targetTagCode"] == "test_detail" for item in exported.json()["applicabilityRules"]))
 
                     imported = client.post(
                         "/api/taxonomy/import",
@@ -1199,20 +1243,35 @@ class BackendSmokeTests(unittest.TestCase):
                                 "toDimensionCode": "category",
                                 "toTagCode": "top",
                             }],
+                            "applicabilityRules": [{
+                                "categoryDimensionCode": "category",
+                                "categoryTagCode": "top",
+                                "targetDimensionCode": "import_dimension",
+                                "targetTagCode": "import_tag",
+                                "mode": "allowed",
+                            }],
                         },
                     )
                     self.assertEqual(imported.status_code, 200)
                     self.assertTrue(any(item["code"] == "import_dimension" for item in imported.json()["dimensions"]))
                     self.assertTrue(any(item["fromTagCode"] == "import_tag" for item in imported.json()["relations"]))
+                    self.assertTrue(any(item["targetTagCode"] == "import_tag" for item in imported.json()["applicabilityRules"]))
 
                     deleted_relation = client.delete(f"/api/taxonomy/relations/{relation_id}")
                     self.assertEqual(deleted_relation.status_code, 200)
                     self.assertFalse(any(item["id"] == relation_id for item in deleted_relation.json()["relations"]))
 
+                    deleted_applicability = client.delete(f"/api/taxonomy/applicability-rules/{applicability_id}")
+                    self.assertEqual(deleted_applicability.status_code, 200)
+                    self.assertFalse(any(item["id"] == applicability_id for item in deleted_applicability.json()["applicabilityRules"]))
+
                     deleted_tag = client.delete(f"/api/taxonomy/tags/{tag_id}")
                     self.assertEqual(deleted_tag.status_code, 200)
                     with db_module.get_db() as db:
                         self.assertIsNone(db.execute("SELECT id FROM tag_defs WHERE id = ?", (tag_id,)).fetchone())
+
+                    deleted_target_tag = client.delete(f"/api/taxonomy/tags/{target_tag_id}")
+                    self.assertEqual(deleted_target_tag.status_code, 200)
 
                     deleted_dimension = client.delete("/api/taxonomy/dimensions/test_dimension")
                     self.assertEqual(deleted_dimension.status_code, 200)

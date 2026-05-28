@@ -328,10 +328,33 @@ class TaxonomyRelationUpdateRequest(BaseModel):
     isActive: bool | None = None
 
 
+class TaxonomyApplicabilityCreateRequest(BaseModel):
+    categoryDimensionCode: str = "category"
+    categoryTagCode: str
+    targetDimensionCode: str
+    targetTagCode: str
+    mode: str | None = None
+    appliesToDescendants: bool | None = None
+    note: str | None = None
+    isActive: bool | None = None
+
+
+class TaxonomyApplicabilityUpdateRequest(BaseModel):
+    categoryDimensionCode: str | None = None
+    categoryTagCode: str | None = None
+    targetDimensionCode: str | None = None
+    targetTagCode: str | None = None
+    mode: str | None = None
+    appliesToDescendants: bool | None = None
+    note: str | None = None
+    isActive: bool | None = None
+
+
 class TaxonomyImportRequest(BaseModel):
     dimensions: list[dict[str, Any]] = Field(default_factory=list)
     tags: list[dict[str, Any]] = Field(default_factory=list)
     relations: list[dict[str, Any]] = Field(default_factory=list)
+    applicabilityRules: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class HeadReferenceUpdateRequest(BaseModel):
@@ -2657,6 +2680,12 @@ def get_taxonomy_rules(request: Request) -> dict[str, Any]:
             ORDER BY from_dimension_code, from_tag_code, relation_type, to_dimension_code, to_tag_code, id
             """
         ).fetchall()
+        applicability_rules = db.execute(
+            """
+            SELECT * FROM tag_applicability_rules
+            ORDER BY category_dimension_code, category_tag_code, target_dimension_code, target_tag_code, id
+            """
+        ).fetchall()
     tags_by_dimension: dict[str, list[dict[str, Any]]] = {}
     for row in tags:
         tags_by_dimension.setdefault(row["dimension_code"], []).append(serialize_tag_def(row))
@@ -2672,10 +2701,12 @@ def get_taxonomy_rules(request: Request) -> dict[str, Any]:
             "dimensionCount": len(dimensions),
             "tagCount": len(tags),
             "relationCount": len(relations),
+            "applicabilityRuleCount": len(applicability_rules),
             "assignmentCount": int(assignment_total or 0),
             "taggedGarmentCount": int(tagged_garment_total or 0),
         },
         "relations": [serialize_tag_relation(row) for row in relations],
+        "applicabilityRules": [serialize_tag_applicability_rule(row) for row in applicability_rules],
     }
 
 
@@ -2696,11 +2727,18 @@ def export_taxonomy_rules(request: Request) -> dict[str, Any]:
             ORDER BY from_dimension_code, from_tag_code, relation_type, to_dimension_code, to_tag_code, id
             """
         ).fetchall()
+        applicability_rules = db.execute(
+            """
+            SELECT * FROM tag_applicability_rules
+            ORDER BY category_dimension_code, category_tag_code, target_dimension_code, target_tag_code, id
+            """
+        ).fetchall()
     return {
         "schemaVersion": "ruyi-taxonomy-rules-v1",
         "dimensions": [serialize_tag_dimension(row) for row in dimensions],
         "tags": [serialize_tag_def(row) | {"children": []} for row in tags],
         "relations": [serialize_tag_relation(row) for row in relations],
+        "applicabilityRules": [serialize_tag_applicability_rule(row) for row in applicability_rules],
     }
 
 
@@ -2710,6 +2748,7 @@ def import_taxonomy_rules(payload: TaxonomyImportRequest, request: Request) -> d
     normalized_dimensions = [normalize_taxonomy_dimension_create_payload(item) for item in payload.dimensions]
     normalized_tags = [normalize_taxonomy_tag_import_payload(item) for item in payload.tags]
     normalized_relations = [normalize_taxonomy_relation_import_payload(item) for item in payload.relations]
+    normalized_applicability_rules = [normalize_taxonomy_applicability_import_payload(item) for item in payload.applicabilityRules]
     timestamp = now_iso()
     with get_db() as db:
         for dimension in normalized_dimensions:
@@ -2723,10 +2762,14 @@ def import_taxonomy_rules(payload: TaxonomyImportRequest, request: Request) -> d
         for relation in normalized_relations:
             validate_taxonomy_relation_tags(db, relation)
             upsert_taxonomy_relation(db, relation, timestamp)
+        for rule in normalized_applicability_rules:
+            validate_taxonomy_applicability_tags(db, rule)
+            upsert_taxonomy_applicability_rule(db, rule, timestamp)
         log_event(db, "taxonomy", None, "imported", {
             "dimensionCount": len(normalized_dimensions),
             "tagCount": len(normalized_tags),
             "relationCount": len(normalized_relations),
+            "applicabilityRuleCount": len(normalized_applicability_rules),
         })
     return get_taxonomy_rules(request)
 
@@ -2850,6 +2893,14 @@ def delete_taxonomy_tag(tag_id: int, request: Request) -> dict[str, Any]:
             """,
             (row["dimension_code"], row["code"], row["dimension_code"], row["code"]),
         ).fetchone()["count"]
+        applicability_count = db.execute(
+            """
+            SELECT COUNT(*) AS count FROM tag_applicability_rules
+            WHERE (category_dimension_code = ? AND category_tag_code = ?)
+               OR (target_dimension_code = ? AND target_tag_code = ?)
+            """,
+            (row["dimension_code"], row["code"], row["dimension_code"], row["code"]),
+        ).fetchone()["count"]
         db.execute(
             """
             DELETE FROM tag_relations
@@ -2858,8 +2909,16 @@ def delete_taxonomy_tag(tag_id: int, request: Request) -> dict[str, Any]:
             """,
             (row["dimension_code"], row["code"], row["dimension_code"], row["code"]),
         )
+        db.execute(
+            """
+            DELETE FROM tag_applicability_rules
+            WHERE (category_dimension_code = ? AND category_tag_code = ?)
+               OR (target_dimension_code = ? AND target_tag_code = ?)
+            """,
+            (row["dimension_code"], row["code"], row["dimension_code"], row["code"]),
+        )
         db.execute("DELETE FROM tag_defs WHERE id = ?", (tag_id,))
-        log_event(db, "taxonomy_tag", tag_id, "deleted", {**serialize_tag_def(row), "deletedRelationCount": int(relation_count or 0)})
+        log_event(db, "taxonomy_tag", tag_id, "deleted", {**serialize_tag_def(row), "deletedRelationCount": int(relation_count or 0), "deletedApplicabilityRuleCount": int(applicability_count or 0)})
     return get_taxonomy_rules(request)
 
 
@@ -2965,6 +3024,90 @@ def delete_taxonomy_relation(relation_id: int, request: Request) -> dict[str, An
             raise HTTPException(status_code=404, detail="标签关系不存在")
         db.execute("DELETE FROM tag_relations WHERE id = ?", (relation_id,))
         log_event(db, "taxonomy_relation", relation_id, "deleted", serialize_tag_relation(row))
+    return get_taxonomy_rules(request)
+
+
+@app.post("/api/taxonomy/applicability-rules")
+def create_taxonomy_applicability_rule(payload: TaxonomyApplicabilityCreateRequest, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    normalized = normalize_taxonomy_applicability_create_payload(payload)
+    timestamp = now_iso()
+    with get_db() as db:
+        validate_taxonomy_applicability_tags(db, normalized)
+        existing = db.execute(
+            """
+            SELECT id FROM tag_applicability_rules
+            WHERE category_dimension_code = ? AND category_tag_code = ?
+              AND target_dimension_code = ? AND target_tag_code = ?
+            """,
+            (
+                normalized["category_dimension_code"],
+                normalized["category_tag_code"],
+                normalized["target_dimension_code"],
+                normalized["target_tag_code"],
+            ),
+        ).fetchone()
+        if existing:
+            raise HTTPException(status_code=409, detail="适用规则已存在")
+        cursor = insert_taxonomy_applicability_rule(db, normalized, timestamp)
+        log_event(db, "taxonomy_applicability_rule", int(cursor.lastrowid), "created", normalized)
+    return get_taxonomy_rules(request)
+
+
+@app.patch("/api/taxonomy/applicability-rules/{rule_id}")
+def update_taxonomy_applicability_rule(rule_id: int, payload: TaxonomyApplicabilityUpdateRequest, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    updates = normalize_taxonomy_applicability_update_payload(payload)
+    if not updates:
+        return get_taxonomy_rules(request)
+    with get_db() as db:
+        row = db.execute("SELECT * FROM tag_applicability_rules WHERE id = ?", (rule_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="适用规则不存在")
+        next_rule = {
+            "category_dimension_code": updates.get("category_dimension_code", row["category_dimension_code"]),
+            "category_tag_code": updates.get("category_tag_code", row["category_tag_code"]),
+            "target_dimension_code": updates.get("target_dimension_code", row["target_dimension_code"]),
+            "target_tag_code": updates.get("target_tag_code", row["target_tag_code"]),
+            "mode": updates.get("mode", row["mode"]),
+            "applies_to_descendants": updates.get("applies_to_descendants", row["applies_to_descendants"]),
+            "note": updates.get("note", row["note"]),
+            "is_active": updates.get("is_active", row["is_active"]),
+        }
+        validate_taxonomy_applicability_tags(db, next_rule)
+        duplicate = db.execute(
+            """
+            SELECT id FROM tag_applicability_rules
+            WHERE id <> ?
+              AND category_dimension_code = ? AND category_tag_code = ?
+              AND target_dimension_code = ? AND target_tag_code = ?
+            """,
+            (
+                rule_id,
+                next_rule["category_dimension_code"],
+                next_rule["category_tag_code"],
+                next_rule["target_dimension_code"],
+                next_rule["target_tag_code"],
+            ),
+        ).fetchone()
+        if duplicate:
+            raise HTTPException(status_code=409, detail="适用规则已存在")
+        updates["updated_at"] = now_iso()
+        set_clause = ", ".join(f"{key} = ?" for key in updates)
+        db.execute(f"UPDATE tag_applicability_rules SET {set_clause} WHERE id = ?", (*updates.values(), rule_id))
+        log_event(db, "taxonomy_applicability_rule", rule_id, "updated", updates)
+    return get_taxonomy_rules(request)
+
+
+@app.delete("/api/taxonomy/applicability-rules/{rule_id}")
+def delete_taxonomy_applicability_rule(rule_id: int, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    with get_db() as db:
+        row = db.execute("SELECT * FROM tag_applicability_rules WHERE id = ?", (rule_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="适用规则不存在")
+        db.execute("DELETE FROM tag_applicability_rules WHERE id = ?", (rule_id,))
+        log_event(db, "taxonomy_applicability_rule", rule_id, "deleted", serialize_tag_applicability_rule(row))
     return get_taxonomy_rules(request)
 
 
@@ -8353,6 +8496,22 @@ def serialize_tag_relation(row: Any) -> dict[str, Any]:
     }
 
 
+def serialize_tag_applicability_rule(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "categoryDimensionCode": row["category_dimension_code"],
+        "categoryTagCode": row["category_tag_code"],
+        "targetDimensionCode": row["target_dimension_code"],
+        "targetTagCode": row["target_tag_code"],
+        "mode": row["mode"],
+        "appliesToDescendants": bool(row["applies_to_descendants"]),
+        "note": row["note"],
+        "isActive": bool(row["is_active"]),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
 def build_taxonomy_tree(tags: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_code = {tag["code"]: {**tag, "children": []} for tag in tags}
     roots: list[dict[str, Any]] = []
@@ -8613,6 +8772,7 @@ def normalize_brand_info_payload(payload: BrandInfoUpsertRequest, partial: bool 
 
 
 TAXONOMY_VALUE_KINDS = {"tag", "score", "boolean", "text"}
+TAXONOMY_APPLICABILITY_MODES = {"allowed", "recommended", "required", "disallowed"}
 
 
 def payload_has_field(payload: BaseModel, field: str) -> bool:
@@ -8795,6 +8955,60 @@ def normalize_taxonomy_relation_update_payload(payload: TaxonomyRelationUpdateRe
     return updates
 
 
+def normalize_taxonomy_applicability_mode(value: str | None) -> str:
+    mode = str(value or "allowed").strip()
+    if mode not in TAXONOMY_APPLICABILITY_MODES:
+        raise HTTPException(status_code=400, detail="适用规则模式不支持")
+    return mode
+
+
+def normalize_taxonomy_applicability_create_payload(payload: TaxonomyApplicabilityCreateRequest) -> dict[str, Any]:
+    return {
+        "category_dimension_code": sanitize_taxonomy_code(payload.categoryDimensionCode or "category"),
+        "category_tag_code": sanitize_taxonomy_code(payload.categoryTagCode),
+        "target_dimension_code": sanitize_taxonomy_code(payload.targetDimensionCode),
+        "target_tag_code": sanitize_taxonomy_code(payload.targetTagCode),
+        "mode": normalize_taxonomy_applicability_mode(payload.mode),
+        "applies_to_descendants": 1 if payload.appliesToDescendants is not False else 0,
+        "note": (payload.note or "").strip()[:240],
+        "is_active": 1 if payload.isActive is not False else 0,
+    }
+
+
+def normalize_taxonomy_applicability_import_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "category_dimension_code": sanitize_taxonomy_code(str(payload.get("categoryDimensionCode") or payload.get("category_dimension_code") or "category")),
+        "category_tag_code": sanitize_taxonomy_code(str(payload.get("categoryTagCode") or payload.get("category_tag_code") or "")),
+        "target_dimension_code": sanitize_taxonomy_code(str(payload.get("targetDimensionCode") or payload.get("target_dimension_code") or "")),
+        "target_tag_code": sanitize_taxonomy_code(str(payload.get("targetTagCode") or payload.get("target_tag_code") or "")),
+        "mode": normalize_taxonomy_applicability_mode(str(payload.get("mode") or "allowed")),
+        "applies_to_descendants": 1 if payload.get("appliesToDescendants", payload.get("applies_to_descendants", True)) is not False else 0,
+        "note": str(payload.get("note") or "").strip()[:240],
+        "is_active": 1 if payload.get("isActive", payload.get("is_active", True)) is not False else 0,
+    }
+
+
+def normalize_taxonomy_applicability_update_payload(payload: TaxonomyApplicabilityUpdateRequest) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    if payload.categoryDimensionCode is not None:
+        updates["category_dimension_code"] = sanitize_taxonomy_code(payload.categoryDimensionCode)
+    if payload.categoryTagCode is not None:
+        updates["category_tag_code"] = sanitize_taxonomy_code(payload.categoryTagCode)
+    if payload.targetDimensionCode is not None:
+        updates["target_dimension_code"] = sanitize_taxonomy_code(payload.targetDimensionCode)
+    if payload.targetTagCode is not None:
+        updates["target_tag_code"] = sanitize_taxonomy_code(payload.targetTagCode)
+    if payload.mode is not None:
+        updates["mode"] = normalize_taxonomy_applicability_mode(payload.mode)
+    if payload.appliesToDescendants is not None:
+        updates["applies_to_descendants"] = 1 if payload.appliesToDescendants else 0
+    if payload.note is not None:
+        updates["note"] = payload.note.strip()[:240]
+    if payload.isActive is not None:
+        updates["is_active"] = 1 if payload.isActive else 0
+    return updates
+
+
 def ensure_taxonomy_dimension_exists(db: Any, dimension_code: str) -> None:
     if not db.execute("SELECT id FROM tag_dimensions WHERE code = ?", (dimension_code,)).fetchone():
         raise HTTPException(status_code=404, detail="标签维度不存在")
@@ -8832,6 +9046,16 @@ def validate_taxonomy_relation_tags(db: Any, relation: dict[str, Any]) -> None:
         ).fetchone()
         if not row:
             raise HTTPException(status_code=400, detail="标签关系引用的标签不存在")
+
+
+def validate_taxonomy_applicability_tags(db: Any, rule: dict[str, Any]) -> None:
+    for dimension_key, tag_key in (("category_dimension_code", "category_tag_code"), ("target_dimension_code", "target_tag_code")):
+        row = db.execute(
+            "SELECT id FROM tag_defs WHERE dimension_code = ? AND code = ?",
+            (rule[dimension_key], rule[tag_key]),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=400, detail="适用规则引用的标签不存在")
 
 
 def upsert_taxonomy_dimension(db: Any, dimension: dict[str, Any], timestamp: str) -> None:
@@ -8951,6 +9175,58 @@ def upsert_taxonomy_relation(db: Any, relation: dict[str, Any], timestamp: str) 
             relation["weight"],
             relation["description_zh"],
             relation["is_active"],
+            timestamp,
+            timestamp,
+        ),
+    )
+
+
+def insert_taxonomy_applicability_rule(db: Any, rule: dict[str, Any], timestamp: str) -> Any:
+    return db.execute(
+        """
+        INSERT INTO tag_applicability_rules
+          (category_dimension_code, category_tag_code, target_dimension_code, target_tag_code,
+           mode, applies_to_descendants, note, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            rule["category_dimension_code"],
+            rule["category_tag_code"],
+            rule["target_dimension_code"],
+            rule["target_tag_code"],
+            rule["mode"],
+            rule["applies_to_descendants"],
+            rule["note"],
+            rule["is_active"],
+            timestamp,
+            timestamp,
+        ),
+    )
+
+
+def upsert_taxonomy_applicability_rule(db: Any, rule: dict[str, Any], timestamp: str) -> None:
+    db.execute(
+        """
+        INSERT INTO tag_applicability_rules
+          (category_dimension_code, category_tag_code, target_dimension_code, target_tag_code,
+           mode, applies_to_descendants, note, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(category_dimension_code, category_tag_code, target_dimension_code, target_tag_code) DO UPDATE SET
+          mode = excluded.mode,
+          applies_to_descendants = excluded.applies_to_descendants,
+          note = excluded.note,
+          is_active = excluded.is_active,
+          updated_at = excluded.updated_at
+        """,
+        (
+            rule["category_dimension_code"],
+            rule["category_tag_code"],
+            rule["target_dimension_code"],
+            rule["target_tag_code"],
+            rule["mode"],
+            rule["applies_to_descendants"],
+            rule["note"],
+            rule["is_active"],
             timestamp,
             timestamp,
         ),
