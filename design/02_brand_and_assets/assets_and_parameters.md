@@ -109,7 +109,7 @@ DELETED
 
 - `effective_tags`：素材事实和搭配约束，用于召回、压缩和解释。
 - `visual_caption` / `retrieval_features`：每件搭配服饰的短视觉摘要、衣长体量、遮挡风险、可塞腰/可敞开等检索字段。
-- `brand_profile`：admin 维护的单一品牌调性资料，包括品牌名称、标语、品牌定位、视觉风格、搭配原则、拍摄调性和风格禁区；初始为空，不做双语结构。
+- `brand_profile`：admin 维护的单一品牌生产准则资料，包括品牌名称、标语、品牌核心、风格 DNA、选搭准则、拍摄准则和负向约束；初始为空，不做双语结构。
 - `brand_style_samples`：Lily 官方或客户确认的品牌样本，作为品牌风格和配饰边界证据。
 - `candidate_retrieval_snapshot`：本次任务进入 AI Stylist 前的候选集合、排序和过滤原因。
 - `StylingPlan`：AI Stylist 对主推款和候选服饰做造型判断后的结构化方案。
@@ -122,11 +122,11 @@ DELETED
 
 - `name`：品牌名称
 - `tagline`：品牌标语
-- `positioning`：品牌定位
-- `visual_style`：视觉风格
-- `styling_principles`：搭配原则
-- `shooting_tone`：拍摄调性
-- `style_avoidance`：风格禁区
+- `brand_core`：品牌核心
+- `style_dna`：风格 DNA
+- `styling_guidelines`：选搭准则
+- `shooting_guidelines`：拍摄准则
+- `negative_constraints`：负向约束
 
 规则：
 

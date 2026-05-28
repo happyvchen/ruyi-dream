@@ -161,11 +161,11 @@ CREATE TABLE brand_profiles (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   name TEXT NOT NULL DEFAULT '',
   tagline TEXT NOT NULL DEFAULT '',
-  positioning TEXT NOT NULL DEFAULT '',
-  visual_style TEXT NOT NULL DEFAULT '',
-  styling_principles TEXT NOT NULL DEFAULT '',
-  shooting_tone TEXT NOT NULL DEFAULT '',
-  style_avoidance TEXT NOT NULL DEFAULT '',
+  brand_core TEXT NOT NULL DEFAULT '',
+  style_dna TEXT NOT NULL DEFAULT '',
+  styling_guidelines TEXT NOT NULL DEFAULT '',
+  shooting_guidelines TEXT NOT NULL DEFAULT '',
+  negative_constraints TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -178,11 +178,11 @@ CREATE TABLE brand_profiles (
 | `id` | INTEGER | 固定为 1，保证 MVP 只维护单一品牌资料 |
 | `name` | TEXT | 品牌名称；初始为空 |
 | `tagline` | TEXT | 品牌标语；初始为空 |
-| `positioning` | TEXT | 品牌定位；初始为空 |
-| `visual_style` | TEXT | 视觉风格；初始为空 |
-| `styling_principles` | TEXT | 搭配原则；初始为空 |
-| `shooting_tone` | TEXT | 拍摄调性；初始为空 |
-| `style_avoidance` | TEXT | 风格禁区；初始为空 |
+| `brand_core` | TEXT | 品牌核心；初始为空 |
+| `style_dna` | TEXT | 风格 DNA；初始为空 |
+| `styling_guidelines` | TEXT | 选搭准则；初始为空 |
+| `shooting_guidelines` | TEXT | 拍摄准则；初始为空 |
+| `negative_constraints` | TEXT | 负向约束；初始为空 |
 | `created_at` | TEXT | 创建时间 |
 | `updated_at` | TEXT | 更新时间 |
 

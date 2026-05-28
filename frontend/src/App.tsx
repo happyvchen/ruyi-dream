@@ -1379,40 +1379,40 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
   const [brandId, setBrandId] = useState<number | null>(initialBrandInfo?.id ?? null)
   const [name, setName] = useState(initialBrandInfo?.name ?? '')
   const [tagline, setTagline] = useState(initialBrandInfo?.tagline ?? '')
-  const [positioning, setPositioning] = useState(initialBrandInfo?.positioning ?? '')
-  const [visualStyle, setVisualStyle] = useState(initialBrandInfo?.visualStyle ?? '')
-  const [stylingPrinciples, setStylingPrinciples] = useState(initialBrandInfo?.stylingPrinciples ?? '')
-  const [shootingTone, setShootingTone] = useState(initialBrandInfo?.shootingTone ?? '')
-  const [styleAvoidance, setStyleAvoidance] = useState(initialBrandInfo?.styleAvoidance ?? '')
+  const [brandCore, setBrandCore] = useState(initialBrandInfo?.brandCore ?? '')
+  const [styleDna, setStyleDna] = useState(initialBrandInfo?.styleDna ?? '')
+  const [stylingGuidelines, setStylingGuidelines] = useState(initialBrandInfo?.stylingGuidelines ?? '')
+  const [shootingGuidelines, setShootingGuidelines] = useState(initialBrandInfo?.shootingGuidelines ?? '')
+  const [negativeConstraints, setNegativeConstraints] = useState(initialBrandInfo?.negativeConstraints ?? '')
 
   useEffect(() => {
     setBrandId(initialBrandInfo?.id ?? null)
     setName(initialBrandInfo?.name ?? '')
     setTagline(initialBrandInfo?.tagline ?? '')
-    setPositioning(initialBrandInfo?.positioning ?? '')
-    setVisualStyle(initialBrandInfo?.visualStyle ?? '')
-    setStylingPrinciples(initialBrandInfo?.stylingPrinciples ?? '')
-    setShootingTone(initialBrandInfo?.shootingTone ?? '')
-    setStyleAvoidance(initialBrandInfo?.styleAvoidance ?? '')
+    setBrandCore(initialBrandInfo?.brandCore ?? '')
+    setStyleDna(initialBrandInfo?.styleDna ?? '')
+    setStylingGuidelines(initialBrandInfo?.stylingGuidelines ?? '')
+    setShootingGuidelines(initialBrandInfo?.shootingGuidelines ?? '')
+    setNegativeConstraints(initialBrandInfo?.negativeConstraints ?? '')
   }, [initialBrandInfo?.id, initialBrandInfo?.updatedAt])
 
-  const cleanPositioning = positioning.trim()
-  const cleanVisualStyle = visualStyle.trim()
-  const cleanStylingPrinciples = stylingPrinciples.trim()
-  const cleanShootingTone = shootingTone.trim()
-  const cleanStyleAvoidance = styleAvoidance.trim()
-  const hasContent = Boolean(name.trim() || tagline.trim() || cleanPositioning || cleanVisualStyle || cleanStylingPrinciples || cleanShootingTone || cleanStyleAvoidance)
+  const cleanBrandCore = brandCore.trim()
+  const cleanStyleDna = styleDna.trim()
+  const cleanStylingGuidelines = stylingGuidelines.trim()
+  const cleanShootingGuidelines = shootingGuidelines.trim()
+  const cleanNegativeConstraints = negativeConstraints.trim()
+  const hasContent = Boolean(name.trim() || tagline.trim() || cleanBrandCore || cleanStyleDna || cleanStylingGuidelines || cleanShootingGuidelines || cleanNegativeConstraints)
   const summaryName = name.trim() || '未填写品牌名称'
 
   function payload() {
     return {
       name: name.trim(),
       tagline: tagline.trim(),
-      positioning: cleanPositioning,
-      visualStyle: cleanVisualStyle,
-      stylingPrinciples: cleanStylingPrinciples,
-      shootingTone: cleanShootingTone,
-      styleAvoidance: cleanStyleAvoidance,
+      brandCore: cleanBrandCore,
+      styleDna: cleanStyleDna,
+      stylingGuidelines: cleanStylingGuidelines,
+      shootingGuidelines: cleanShootingGuidelines,
+      negativeConstraints: cleanNegativeConstraints,
     }
   }
 
@@ -1432,11 +1432,11 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
       setBrandId(null)
       setName('')
       setTagline('')
-      setPositioning('')
-      setVisualStyle('')
-      setStylingPrinciples('')
-      setShootingTone('')
-      setStyleAvoidance('')
+      setBrandCore('')
+      setStyleDna('')
+      setStylingGuidelines('')
+      setShootingGuidelines('')
+      setNegativeConstraints('')
     }, { refresh: false })
   }
 
@@ -1453,9 +1453,9 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
           <h2>{summaryName}</h2>
           <Meta label="状态" value={brandId ? '已保存' : hasContent ? '未保存' : '初始为空'} />
           <Meta label="标语" value={tagline.trim() ? '已填写' : '未填写'} />
-          <Meta label="品牌定位" value={cleanPositioning ? '已填写' : '未填写'} />
-          <Meta label="视觉风格" value={cleanVisualStyle ? '已填写' : '未填写'} />
-          <Meta label="风格禁区" value={cleanStyleAvoidance ? '已填写' : '未填写'} />
+          <Meta label="品牌核心" value={cleanBrandCore ? '已填写' : '未填写'} />
+          <Meta label="风格 DNA" value={cleanStyleDna ? '已填写' : '未填写'} />
+          <Meta label="负向约束" value={cleanNegativeConstraints ? '已填写' : '未填写'} />
           <p>保存后将作为后续选搭与 ShotPlan 的品牌参考。</p>
         </aside>
         <div className="brand-info-form">
@@ -1468,24 +1468,24 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
             <textarea value={tagline} onChange={(event) => setTagline(event.target.value)} />
           </div>
           <div className="brand-field">
-            <label>品牌定位</label>
-            <textarea value={positioning} onChange={(event) => setPositioning(event.target.value)} />
+            <label>品牌核心</label>
+            <textarea value={brandCore} onChange={(event) => setBrandCore(event.target.value)} />
           </div>
           <div className="brand-field">
-            <label>视觉风格</label>
-            <textarea value={visualStyle} onChange={(event) => setVisualStyle(event.target.value)} />
+            <label>风格 DNA</label>
+            <textarea value={styleDna} onChange={(event) => setStyleDna(event.target.value)} />
           </div>
           <div className="brand-field">
-            <label>搭配原则</label>
-            <textarea value={stylingPrinciples} onChange={(event) => setStylingPrinciples(event.target.value)} />
+            <label>选搭准则</label>
+            <textarea value={stylingGuidelines} onChange={(event) => setStylingGuidelines(event.target.value)} />
           </div>
           <div className="brand-field">
-            <label>拍摄调性</label>
-            <textarea value={shootingTone} onChange={(event) => setShootingTone(event.target.value)} />
+            <label>拍摄准则</label>
+            <textarea value={shootingGuidelines} onChange={(event) => setShootingGuidelines(event.target.value)} />
           </div>
           <div className="brand-field">
-            <label>风格禁区</label>
-            <textarea className="large" value={styleAvoidance} onChange={(event) => setStyleAvoidance(event.target.value)} />
+            <label>负向约束</label>
+            <textarea className="large" value={negativeConstraints} onChange={(event) => setNegativeConstraints(event.target.value)} />
           </div>
         </div>
       </div>

@@ -975,7 +975,7 @@ class BackendSmokeTests(unittest.TestCase):
                     brand_profile_count = db.execute("SELECT COUNT(*) AS count FROM brand_profiles").fetchone()["count"]
                     template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016", "017", "018", "019"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016", "017", "018", "019", "020"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
@@ -995,11 +995,11 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("model_snapshot_json", input_version_columns)
         self.assertIn("archived_at", task_columns)
         self.assertIn("archive_reason", task_columns)
-        self.assertIn("positioning", brand_profile_columns)
-        self.assertIn("visual_style", brand_profile_columns)
-        self.assertIn("styling_principles", brand_profile_columns)
-        self.assertIn("shooting_tone", brand_profile_columns)
-        self.assertIn("style_avoidance", brand_profile_columns)
+        self.assertIn("brand_core", brand_profile_columns)
+        self.assertIn("style_dna", brand_profile_columns)
+        self.assertIn("styling_guidelines", brand_profile_columns)
+        self.assertIn("shooting_guidelines", brand_profile_columns)
+        self.assertIn("negative_constraints", brand_profile_columns)
         self.assertEqual(brand_profile_count, 0)
         self.assertGreaterEqual(template_count, 1)
 
@@ -1038,22 +1038,22 @@ class BackendSmokeTests(unittest.TestCase):
                     payload = {
                         "name": "LILY",
                         "tagline": "商务新风尚，成就你的每一步。",
-                        "positioning": "面向现代职场女性的商务时装品牌。",
-                        "visualStyle": "现代商务时尚、利落剪裁、纯净都市优雅。",
-                        "stylingPrinciples": "搭配必须服务主推款，突出版型、面料和腰线。",
-                        "shootingTone": "专业、现代、优雅、有力量。",
-                        "styleAvoidance": "避免甜美少女感、沉闷传统正装感和复杂配饰喧宾夺主。",
+                        "brandCore": "面向现代职场女性的商务时装品牌。",
+                        "styleDna": "Business Fashion、Modern Corporate Chic、Professional Elegance。",
+                        "stylingGuidelines": "选搭必须服务主推款，突出版型、面料和腰线。",
+                        "shootingGuidelines": "商品导向的商业 Lookbook 摄影。",
+                        "negativeConstraints": "避免甜美少女感、沉闷传统正装感和复杂配饰喧宾夺主。",
                     }
                     created = client.post("/api/brand-info", json=payload)
                     self.assertEqual(created.status_code, 200)
                     item = created.json()["item"]
                     self.assertEqual(item["name"], "LILY")
-                    self.assertEqual(item["visualStyle"], "现代商务时尚、利落剪裁、纯净都市优雅。")
+                    self.assertEqual(item["styleDna"], "Business Fashion、Modern Corporate Chic、Professional Elegance。")
                     self.assertEqual(client.post("/api/brand-info", json=payload).status_code, 409)
 
-                    updated = client.patch("/api/brand-info", json={"shootingTone": "自信、利落、轻松优雅。"})
+                    updated = client.patch("/api/brand-info", json={"shootingGuidelines": "全身构图，柔和低反差光线。"})
                     self.assertEqual(updated.status_code, 200)
-                    self.assertEqual(updated.json()["item"]["shootingTone"], "自信、利落、轻松优雅。")
+                    self.assertEqual(updated.json()["item"]["shootingGuidelines"], "全身构图，柔和低反差光线。")
                     self.assertEqual(updated.json()["item"]["name"], "LILY")
 
                     deleted = client.delete("/api/brand-info")
@@ -1104,18 +1104,19 @@ class BackendSmokeTests(unittest.TestCase):
                     columns = {row["name"] for row in db.execute("PRAGMA table_info(brand_profiles)").fetchall()}
                     row = db.execute("SELECT * FROM brand_profiles WHERE id = 1").fetchone()
 
-        self.assertIn("positioning", columns)
-        self.assertIn("visual_style", columns)
-        self.assertIn("styling_principles", columns)
-        self.assertIn("shooting_tone", columns)
-        self.assertIn("style_avoidance", columns)
+        self.assertIn("brand_core", columns)
+        self.assertIn("style_dna", columns)
+        self.assertIn("styling_guidelines", columns)
+        self.assertIn("shooting_guidelines", columns)
+        self.assertIn("negative_constraints", columns)
+        self.assertNotIn("positioning", columns)
         self.assertNotIn("brand_values", columns)
         self.assertNotIn("values_json", columns)
-        self.assertEqual(row["positioning"], "品牌简介")
-        self.assertEqual(row["visual_style"], "摩登职场风尚")
-        self.assertEqual(row["styling_principles"], "彰显女性力量\n时尚平权")
-        self.assertEqual(row["shooting_tone"], "专业\n现代")
-        self.assertEqual(row["style_avoidance"], "")
+        self.assertEqual(row["brand_core"], "品牌简介")
+        self.assertEqual(row["style_dna"], "摩登职场风尚")
+        self.assertEqual(row["styling_guidelines"], "彰显女性力量\n时尚平权")
+        self.assertEqual(row["shooting_guidelines"], "专业\n现代")
+        self.assertEqual(row["negative_constraints"], "")
 
     def test_terminal_generation_run_cancel_returns_conflict(self) -> None:
         from fastapi.testclient import TestClient

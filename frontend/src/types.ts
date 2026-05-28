@@ -74,11 +74,11 @@ export type BrandInfo = {
   id: number
   name: string
   tagline: string
-  positioning: string
-  visualStyle: string
-  stylingPrinciples: string
-  shootingTone: string
-  styleAvoidance: string
+  brandCore: string
+  styleDna: string
+  stylingGuidelines: string
+  shootingGuidelines: string
+  negativeConstraints: string
   createdAt: string
   updatedAt: string
 }
