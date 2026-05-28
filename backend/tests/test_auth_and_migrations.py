@@ -1116,15 +1116,17 @@ class BackendSmokeTests(unittest.TestCase):
                     full_prompt = client.get("/api/taxonomy/prompt-card?mode=full")
                     self.assertEqual(full_prompt.status_code, 200)
                     self.assertEqual(full_prompt.json()["mode"], "full")
-                    self.assertIn("# Ruyi-Dream 服装标签规则卡 / full", full_prompt.json()["content"])
+                    self.assertIn("# Ruyi-Dream 服装标签规则卡 / 完整版", full_prompt.json()["content"])
                     self.assertIn("## 品类适用范围", full_prompt.json()["content"])
                     self.assertIn("garment_part", full_prompt.json()["content"])
+                    self.assertIn("字段内容、证据说明、视觉摘要等自然语言必须使用中文", full_prompt.json()["content"])
 
                     compact_prompt = client.get("/api/taxonomy/prompt-card?mode=compact")
                     self.assertEqual(compact_prompt.status_code, 200)
                     self.assertEqual(compact_prompt.json()["mode"], "compact")
-                    self.assertIn("CATEGORY_SCOPES:", compact_prompt.json()["content"])
-                    self.assertIn("OUTPUT_JSON:", compact_prompt.json()["content"])
+                    self.assertIn("# Ruyi-Dream 服装标签规则卡 / 精简版", compact_prompt.json()["content"])
+                    self.assertIn("品类适用范围：", compact_prompt.json()["content"])
+                    self.assertIn("输出 JSON（字段名保持英文用于系统解析；字段内容使用中文）", compact_prompt.json()["content"])
                     self.assertEqual(client.get("/api/taxonomy/prompt-card?mode=raw").status_code, 400)
 
                     updated_dimension = client.patch(

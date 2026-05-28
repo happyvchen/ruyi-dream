@@ -1974,7 +1974,7 @@ function TagRulesPage({ run }: { run: any }) {
       <PageTitle
         title="标签规则"
         subtitle="维护服装标签字典、层级树、标签关系和商品打标投影。"
-        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={() => openPromptCard('full')}><FileText size={16} />full</button><button className="secondary" onClick={() => openPromptCard('compact')}><FileText size={16} />compact</button><button className="secondary" onClick={openImportJson}><Upload size={16} />导入</button><button className="secondary" onClick={openExportJson}><Download size={16} />导出</button><button className="secondary" disabled={loading} onClick={() => void loadRules()}><RotateCcw size={16} />刷新</button><button className="primary" onClick={() => void run('同步标签投影中...', () => api.backfillTaxonomyAssignments(), () => void loadRules(), { refresh: false })}><Save size={16} />同步现有标签</button></div>}
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={() => openPromptCard('full')}><FileText size={16} />完整 Prompt</button><button className="secondary" onClick={() => openPromptCard('compact')}><FileText size={16} />精简 Prompt</button><button className="secondary" onClick={openImportJson}><Upload size={16} />导入</button><button className="secondary" onClick={openExportJson}><Download size={16} />导出</button><button className="secondary" disabled={loading} onClick={() => void loadRules()}><RotateCcw size={16} />刷新</button><button className="primary" onClick={() => void run('同步标签投影中...', () => api.backfillTaxonomyAssignments(), () => void loadRules(), { refresh: false })}><Save size={16} />同步现有标签</button></div>}
       />
       {promptDialog && (
         <TaxonomyPromptDialog
@@ -2275,7 +2275,7 @@ function TaxonomyPromptDialog({ dialog, onClose }: {
       <form className="confirm-modal brand-json-modal" role="dialog" aria-modal="true" aria-label={`${dialog.mode} Prompt`} onSubmit={(event) => event.preventDefault()} onClick={(event) => event.stopPropagation()}>
         <div className="confirm-head">
           <div>
-            <h2>{dialog.mode === 'full' ? 'Full Prompt 原样输出' : 'Compact Prompt 原样输出'}</h2>
+            <h2>{dialog.mode === 'full' ? '完整 Prompt 原样输出' : '精简 Prompt 原样输出'}</h2>
             <p>仅包含标签规则中已启用的维度、标签、关系和适用范围。</p>
           </div>
           <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>

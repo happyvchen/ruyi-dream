@@ -8610,7 +8610,7 @@ def render_full_taxonomy_prompt_card(context: dict[str, Any]) -> str:
         tags_by_dimension.setdefault(tag["dimensionCode"], []).append(tag)
 
     lines = [
-        "# Ruyi-Dream 服装标签规则卡 / full",
+        "# Ruyi-Dream 服装标签规则卡 / 完整版",
         "",
         "用途：本规则卡作为 AI 服装打标 Prompt 的标签字典与约束段。请先理解商品图片，再只从本卡启用的维度、标签、关系和适用范围中选择标签。",
         "",
@@ -8645,8 +8645,8 @@ def render_full_taxonomy_prompt_card(context: dict[str, Any]) -> str:
             parent_label = taxonomy_prompt_tag_ref(tag_by_key, tag["dimensionCode"], str(parent), with_description=False) if parent else ""
             lines.append(
                 f"| {md_cell(tag['code'])} | {md_cell(tag['labelZh'])} | {md_cell(parent_label)} | "
-                f"{md_cell(str(tag['level']))} | {md_cell(tag['valueKind'])} | "
-                f"{'yes' if tag['isSelectable'] else 'no'} | {md_cell(tag.get('descriptionZh') or '')} |"
+                f"{md_cell(str(tag['level']))} | {md_cell(taxonomy_prompt_value_kind_label(tag['valueKind']))} | "
+                f"{'是' if tag['isSelectable'] else '否，仅用于层级/规则理解'} | {md_cell(tag.get('descriptionZh') or '')} |"
             )
 
     lines.extend([
@@ -8668,7 +8668,7 @@ def render_full_taxonomy_prompt_card(context: dict[str, Any]) -> str:
             for rule in rules:
                 target = taxonomy_prompt_tag_ref(tag_by_key, rule["targetDimensionCode"], rule["targetTagCode"])
                 scope = "含子品类" if rule["appliesToDescendants"] else "仅当前品类"
-                lines.append(f"| {md_cell(rule['mode'])} | {md_cell(target)} | {scope} | {md_cell(rule.get('note') or '')} |")
+                lines.append(f"| {md_cell(taxonomy_prompt_applicability_mode_label(rule['mode']))} | {md_cell(target)} | {scope} | {md_cell(rule.get('note') or '')} |")
     else:
         lines.append("")
         lines.append("暂无启用的适用范围。")
@@ -8683,7 +8683,7 @@ def render_full_taxonomy_prompt_card(context: dict[str, Any]) -> str:
             source = taxonomy_prompt_tag_ref(tag_by_key, relation["fromDimensionCode"], relation["fromTagCode"])
             target = taxonomy_prompt_tag_ref(tag_by_key, relation["toDimensionCode"], relation["toTagCode"])
             lines.append(
-                f"| {md_cell(source)} | {md_cell(relation['relationType'])} | {md_cell(target)} | "
+                f"| {md_cell(source)} | {md_cell(taxonomy_prompt_relation_type_label(relation['relationType']))} | {md_cell(target)} | "
                 f"{md_cell(str(relation['weight']))} | {md_cell(relation.get('descriptionZh') or '')} |"
             )
     else:
@@ -8692,6 +8692,7 @@ def render_full_taxonomy_prompt_card(context: dict[str, Any]) -> str:
     lines.extend([
         "",
         "## 建议输出结构",
+        "说明：JSON 字段名保持英文，方便后端稳定解析；字段内容、证据说明、视觉摘要等自然语言必须使用中文。",
         "```json",
         json.dumps({
             "tags": [
@@ -8726,10 +8727,10 @@ def render_compact_taxonomy_prompt_card(context: dict[str, Any]) -> str:
         tags_by_dimension.setdefault(tag["dimensionCode"], []).append(tag)
 
     lines = [
-        "# Ruyi-Dream 服装标签规则卡 / compact",
-        "RULES: only use active codes listed below; do not invent tag codes; choose category first; apply CATEGORY_SCOPES before final tags; use score 0..1 for value_kind=score; mark low confidence when visual evidence is weak.",
-        "DIMENSIONS: " + "; ".join(f"{dimension['code']}={dimension['labelZh']}" for dimension in dimensions),
-        "TAGS:",
+        "# Ruyi-Dream 服装标签规则卡 / 精简版",
+        "规则：只能使用下方启用的 code；不要创造新标签、同义词或自然语言散词；先判断品类 category；最终打标前必须应用“品类适用范围”；值类型为“分值”的标签使用 0 到 1 的 score；图片证据不足时降低 confidence，并用中文写明证据或不确定点。",
+        "维度：" + "；".join(f"{dimension['code']}={dimension['labelZh']}" for dimension in dimensions),
+        "标签：",
     ]
     for dimension in dimensions:
         dimension_tags = tags_by_dimension.get(dimension["code"], [])
@@ -8738,12 +8739,12 @@ def render_compact_taxonomy_prompt_card(context: dict[str, Any]) -> str:
         entries = []
         for tag in dimension_tags:
             parent = f"<{tag['parentCode']}>" if tag.get("parentCode") else ""
-            selectable = "" if tag["isSelectable"] else "[context_only]"
-            value_kind = "" if tag["valueKind"] == "tag" else f"[{tag['valueKind']}]"
+            selectable = "" if tag["isSelectable"] else "[仅作上下文]"
+            value_kind = "" if tag["valueKind"] == "tag" else f"[{taxonomy_prompt_value_kind_label(tag['valueKind'])}]"
             entries.append(f"{tag['code']}({tag['labelZh']}){parent}{value_kind}{selectable}")
-        lines.append(f"- {dimension['code']}: " + "; ".join(entries))
+        lines.append(f"- {dimension['code']}： " + "；".join(entries))
 
-    lines.append("CATEGORY_SCOPES:")
+    lines.append("品类适用范围：")
     if applicability_rules:
         grouped_rules: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for rule in applicability_rules:
@@ -8752,23 +8753,23 @@ def render_compact_taxonomy_prompt_card(context: dict[str, Any]) -> str:
             scope_entries = []
             for rule in rules:
                 target = taxonomy_prompt_tag_ref(tag_by_key, rule["targetDimensionCode"], rule["targetTagCode"], with_label=True, with_description=False)
-                scope = "+children" if rule["appliesToDescendants"] else "self"
+                scope = "含子品类" if rule["appliesToDescendants"] else "仅当前品类"
                 note = f"({rule['note']})" if rule.get("note") else ""
-                scope_entries.append(f"{rule['mode']} {target} scope={scope}{note}")
-            lines.append(f"- {taxonomy_prompt_tag_ref(tag_by_key, category_dimension_code, category_tag_code, with_label=True, with_description=False)}: " + "; ".join(scope_entries))
+                scope_entries.append(f"{taxonomy_prompt_applicability_mode_label(rule['mode'])} {target}，范围={scope}{note}")
+            lines.append(f"- {taxonomy_prompt_tag_ref(tag_by_key, category_dimension_code, category_tag_code, with_label=True, with_description=False)}： " + "；".join(scope_entries))
     else:
-        lines.append("- none")
+        lines.append("- 无")
 
-    lines.append("RELATIONS:")
+    lines.append("标签关系：")
     if relations:
         for relation in relations:
             source = taxonomy_prompt_tag_ref(tag_by_key, relation["fromDimensionCode"], relation["fromTagCode"], with_label=True, with_description=False)
             target = taxonomy_prompt_tag_ref(tag_by_key, relation["toDimensionCode"], relation["toTagCode"], with_label=True, with_description=False)
             note = f" ({relation['descriptionZh']})" if relation.get("descriptionZh") else ""
-            lines.append(f"- {source} --{relation['relationType']}:{relation['weight']}--> {target}{note}")
+            lines.append(f"- {source} --{taxonomy_prompt_relation_type_label(relation['relationType'])}，权重={relation['weight']}--> {target}{note}")
     else:
-        lines.append("- none")
-    lines.append('OUTPUT_JSON: {"tags":[{"dimension_code":"","tag_code":"","value_type":"tag|score|boolean|text","score":null,"confidence":0.0,"evidence":""}],"visual_profile":{"overall_summary":"","key_parts":[],"uncertain_points":[]}}')
+        lines.append("- 无")
+    lines.append('输出 JSON（字段名保持英文用于系统解析；字段内容使用中文）: {"tags":[{"dimension_code":"","tag_code":"","value_type":"tag|score|boolean|text","score":null,"confidence":0.0,"evidence":""}],"visual_profile":{"overall_summary":"","key_parts":[],"uncertain_points":[]}}')
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -8789,6 +8790,38 @@ def taxonomy_prompt_tag_ref(
 
 def md_cell(value: str) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ").strip()
+
+
+def taxonomy_prompt_value_kind_label(value: str) -> str:
+    labels = {
+        "tag": "标签",
+        "score": "分值",
+        "boolean": "布尔",
+        "text": "文本",
+    }
+    return labels.get(value, value)
+
+
+def taxonomy_prompt_applicability_mode_label(value: str) -> str:
+    labels = {
+        "allowed": "允许",
+        "recommended": "推荐",
+        "required": "必填",
+        "disallowed": "禁用",
+    }
+    return labels.get(value, value)
+
+
+def taxonomy_prompt_relation_type_label(value: str) -> str:
+    labels = {
+        "implies": "暗含",
+        "compatible_with": "适合搭配",
+        "avoid_with": "避免搭配",
+        "parent_of": "父子归属",
+        "slot_mapping": "穿搭位置映射",
+        "style_mapping": "风格倾向映射",
+    }
+    return f"{value} / {labels[value]}" if value in labels else value
 
 
 def serialize_shot_plan(row: Any) -> dict[str, Any]:
