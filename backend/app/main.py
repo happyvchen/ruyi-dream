@@ -41,7 +41,6 @@ from .object_storage import (
     unique_key,
 )
 from .planner import PlannerError, SHOT_SLOTS, normalize_plan as normalize_planner_plan, plan_with_gemini
-from .taxonomy_starter import legacy_lily_taxonomy_starter_payload
 
 
 settings = get_settings()
@@ -2741,12 +2740,6 @@ def get_taxonomy_prompt_card(request: Request, mode: str = Query("compact")) -> 
         "mode": normalized_mode,
         "content": build_active_taxonomy_prompt_card(normalized_mode),
     }
-
-
-@app.get("/api/taxonomy/starter-kit")
-def get_taxonomy_starter_kit(request: Request) -> dict[str, Any]:
-    require_admin(request)
-    return legacy_lily_taxonomy_starter_payload()
 
 
 @app.post("/api/taxonomy/import")

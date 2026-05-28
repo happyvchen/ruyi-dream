@@ -1099,7 +1099,6 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertEqual(user_login.status_code, 200)
                     self.assertEqual(client.get("/api/taxonomy/rules").status_code, 403)
                     self.assertEqual(client.get("/api/taxonomy/prompt-card?mode=full").status_code, 403)
-                    self.assertEqual(client.get("/api/taxonomy/starter-kit").status_code, 403)
 
                     admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
                     self.assertEqual(admin_login.status_code, 200)
@@ -1125,10 +1124,6 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertIn("品类适用范围：", compact_prompt.json()["content"])
                     self.assertIn("输出 JSON（字段名保持英文用于系统解析；字段内容使用中文）", compact_prompt.json()["content"])
                     self.assertEqual(client.get("/api/taxonomy/prompt-card?mode=raw").status_code, 400)
-                    starter_kit = client.get("/api/taxonomy/starter-kit")
-                    self.assertEqual(starter_kit.status_code, 200)
-                    self.assertEqual(starter_kit.json()["source"], "legacy-lily-prompt-distilled")
-                    self.assertGreater(len(starter_kit.json()["tags"]), 50)
 
                     created_category_dimension = client.post(
                         "/api/taxonomy/dimensions",

@@ -1949,13 +1949,6 @@ function TagRulesPage({ run }: { run: any }) {
     setJsonDialog({ mode: 'import', text: '' })
   }
 
-  function openStarterKit() {
-    if (!window.confirm('旧版知识模板会载入导入框供你检查，点击“导入并应用”后才会写入标签规则。是否继续？')) return
-    void run('载入旧版知识模板中...', () => api.getTaxonomyStarterKit(), (payload: TaxonomyExportPayload) => {
-      setJsonDialog({ mode: 'import', text: `${JSON.stringify(payload, null, 2)}\n` })
-    }, { refresh: false })
-  }
-
   function confirmImportJson() {
     if (!jsonDialog || jsonDialog.mode !== 'import') return
     if (jsonDialog.text.length > 2 * 1024 * 1024) {
@@ -1981,7 +1974,7 @@ function TagRulesPage({ run }: { run: any }) {
       <PageTitle
         title="标签规则"
         subtitle="维护服装标签字典、层级树、标签关系和商品打标投影。"
-        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={() => openPromptCard('full')}><FileText size={16} />完整 Prompt</button><button className="secondary" onClick={() => openPromptCard('compact')}><FileText size={16} />精简 Prompt</button><button className="secondary" onClick={openStarterKit}><FileText size={16} />旧版知识模板</button><button className="secondary" onClick={openImportJson}><Upload size={16} />导入</button><button className="secondary" onClick={openExportJson}><Download size={16} />导出</button><button className="secondary" disabled={loading} onClick={() => void loadRules()}><RotateCcw size={16} />刷新</button><button className="primary" onClick={() => void run('同步标签投影中...', () => api.backfillTaxonomyAssignments(), () => void loadRules(), { refresh: false })}><Save size={16} />同步现有标签</button></div>}
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={() => openPromptCard('full')}><FileText size={16} />完整 Prompt</button><button className="secondary" onClick={() => openPromptCard('compact')}><FileText size={16} />精简 Prompt</button><button className="secondary" onClick={openImportJson}><Upload size={16} />导入</button><button className="secondary" onClick={openExportJson}><Download size={16} />导出</button><button className="secondary" disabled={loading} onClick={() => void loadRules()}><RotateCcw size={16} />刷新</button><button className="primary" onClick={() => void run('同步标签投影中...', () => api.backfillTaxonomyAssignments(), () => void loadRules(), { refresh: false })}><Save size={16} />同步现有标签</button></div>}
       />
       {promptDialog && (
         <TaxonomyPromptDialog
