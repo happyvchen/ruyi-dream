@@ -1005,11 +1005,11 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("styling_guidelines", brand_profile_columns)
         self.assertIn("shooting_guidelines", brand_profile_columns)
         self.assertIn("negative_constraints", brand_profile_columns)
-        self.assertGreaterEqual(taxonomy_dimension_count, 20)
-        self.assertGreaterEqual(taxonomy_tag_count, 100)
+        self.assertEqual(taxonomy_dimension_count, 0)
+        self.assertEqual(taxonomy_tag_count, 0)
         self.assertIn("category_tag_code", applicability_columns)
         self.assertIn("target_tag_code", applicability_columns)
-        self.assertGreaterEqual(applicability_count, 1)
+        self.assertEqual(applicability_count, 0)
         self.assertIn("dimension_code", assignment_columns)
         self.assertIn("tag_code", assignment_columns)
         self.assertIn("source", assignment_columns)
@@ -1073,7 +1073,7 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertEqual(deleted.status_code, 200)
                     self.assertEqual(client.get("/api/brand-info").json(), {"item": None})
 
-    def test_taxonomy_rules_are_admin_only_and_seeded(self) -> None:
+    def test_taxonomy_rules_are_admin_only_and_user_configured(self) -> None:
         from fastapi.testclient import TestClient
 
         config = importlib.import_module("app.config")
@@ -1105,20 +1105,16 @@ class BackendSmokeTests(unittest.TestCase):
                     response = client.get("/api/taxonomy/rules")
                     self.assertEqual(response.status_code, 200)
                     payload = response.json()
-                    self.assertGreaterEqual(payload["summary"]["dimensionCount"], 20)
-                    self.assertGreaterEqual(payload["summary"]["tagCount"], 100)
-                    self.assertGreaterEqual(payload["summary"]["relationCount"], 1)
-                    self.assertGreaterEqual(payload["summary"]["applicabilityRuleCount"], 1)
-                    self.assertTrue(any(item["code"] == "category" for item in payload["dimensions"]))
-                    self.assertTrue(any(item["code"] == "garment_part" for item in payload["dimensions"]))
-                    self.assertTrue(any(item["targetDimensionCode"] == "garment_part" for item in payload["applicabilityRules"]))
+                    self.assertEqual(payload["summary"]["dimensionCount"], 0)
+                    self.assertEqual(payload["summary"]["tagCount"], 0)
+                    self.assertEqual(payload["summary"]["relationCount"], 0)
+                    self.assertEqual(payload["summary"]["applicabilityRuleCount"], 0)
 
                     full_prompt = client.get("/api/taxonomy/prompt-card?mode=full")
                     self.assertEqual(full_prompt.status_code, 200)
                     self.assertEqual(full_prompt.json()["mode"], "full")
                     self.assertIn("# Ruyi-Dream 服装标签规则卡 / 完整版", full_prompt.json()["content"])
                     self.assertIn("## 品类适用范围", full_prompt.json()["content"])
-                    self.assertIn("garment_part", full_prompt.json()["content"])
                     self.assertIn("字段内容、证据说明、视觉摘要等自然语言必须使用中文", full_prompt.json()["content"])
 
                     compact_prompt = client.get("/api/taxonomy/prompt-card?mode=compact")
@@ -1128,6 +1124,30 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertIn("品类适用范围：", compact_prompt.json()["content"])
                     self.assertIn("输出 JSON（字段名保持英文用于系统解析；字段内容使用中文）", compact_prompt.json()["content"])
                     self.assertEqual(client.get("/api/taxonomy/prompt-card?mode=raw").status_code, 400)
+
+                    created_category_dimension = client.post(
+                        "/api/taxonomy/dimensions",
+                        json={"code": "category", "labelZh": "品类", "sortOrder": 10},
+                    )
+                    self.assertEqual(created_category_dimension.status_code, 200)
+
+                    created_wearability_dimension = client.post(
+                        "/api/taxonomy/dimensions",
+                        json={"code": "wearability", "labelZh": "穿着能力", "sortOrder": 20},
+                    )
+                    self.assertEqual(created_wearability_dimension.status_code, 200)
+
+                    created_top_tag = client.post(
+                        "/api/taxonomy/tags",
+                        json={"dimensionCode": "category", "code": "top", "labelZh": "上装"},
+                    )
+                    self.assertEqual(created_top_tag.status_code, 200)
+
+                    created_wearability_tag = client.post(
+                        "/api/taxonomy/tags",
+                        json={"dimensionCode": "wearability", "code": "can_be_worn_alone", "labelZh": "可单穿", "valueKind": "boolean"},
+                    )
+                    self.assertEqual(created_wearability_tag.status_code, 200)
 
                     updated_dimension = client.patch(
                         "/api/taxonomy/dimensions/category",
