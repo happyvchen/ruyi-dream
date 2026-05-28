@@ -191,6 +191,29 @@ export type ModelProfile = {
   previewUrl?: string | null
 }
 
+export type BrandInfo = {
+  id: number
+  name: string
+  tagline: string
+  brandCore: string
+  styleDna: string
+  stylingGuidelines: string
+  shootingGuidelines: string
+  negativeConstraints: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type BrandInfoPayload = {
+  name?: string
+  tagline?: string
+  brandCore?: string
+  styleDna?: string
+  stylingGuidelines?: string
+  shootingGuidelines?: string
+  negativeConstraints?: string
+}
+
 function headers(init?: RequestInit) {
   const h = new Headers(init?.headers)
   if (!(init?.body instanceof FormData) && !h.has('Content-Type')) h.set('Content-Type', 'application/json')
@@ -328,4 +351,10 @@ export const api = {
   getRecord: (id: number, includeDebug = false) =>
     request<{ item: GenerationTask }>(params(`/api/generation-records/${id}`, { includeDebug })),
   listModels: () => request<Paginated<ModelProfile>>('/api/model-profiles?limit=30'),
+  getBrandInfo: () => request<{ item: BrandInfo | null }>('/api/brand-info'),
+  createBrandInfo: (payload: BrandInfoPayload) =>
+    request<{ item: BrandInfo }>('/api/brand-info', { method: 'POST', body: JSON.stringify(payload) }),
+  updateBrandInfo: (payload: BrandInfoPayload) =>
+    request<{ item: BrandInfo }>('/api/brand-info', { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteBrandInfo: () => request<{ ok: boolean }>('/api/brand-info', { method: 'DELETE' }),
 }

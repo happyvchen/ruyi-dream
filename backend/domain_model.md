@@ -27,6 +27,7 @@ MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂�
 | Styling Library | 搭配服饰库和 AI 标签 | `StylingGarment`, `StylingGarmentImage`, `MediaAsset` | `app/main.py`, `app/db.py` |
 | Studio Task | 主推款拍摄任务和输入版本 | `GenerationTask`, `GenerationTaskInputVersion`, `GenerationTaskImage` | `app/main.py`, `app/db.py` |
 | Model Profile | 数字模特档案 | `ModelProfile` | `app/db.py` |
+| Brand Profile | 单一品牌资料 | `BrandProfile` | `app/main.py`, `app/db.py` |
 | Styling & Planning | 候选召回、AI Stylist、StylingPlan、ShotPlan、六宫格预览 | `GenerationStyling`, `GenerationShotPlan`, `GenerationPreview` | `app/main.py` |
 | Generation | 最终结果批次、结果图、attempt | `GenerationResultSet`, `GenerationResultImage`, `GenerationAttempt` | `app/main.py`, `app/image_provider.py` |
 | Audit Log | 操作和系统事件留痕 | `EventLog` | `app/db.py` |
@@ -73,7 +74,21 @@ AI 摄影棚中的一次主推款拍摄任务。
 - 预览和最终生成只读取冻结的主推款、搭配服饰和数字模特输入；最终单图失败通过单张重试恢复。成功后是否允许重新选搭、重新预览或再次生成整组仍是产品决策项，当前代码暂时允许并保留历史结果用于追溯。
 - 生成记录默认删除为归档：写入 `archived_at/archive_reason`，默认列表隐藏但保留所有数据和对象文件。彻底删除会删除任务、输入版本、StylingPlan、ShotPlan、预览、结果、attempt 和已登记对象文件。
 
-### 3.3 GenerationAttempt
+### 3.3 BrandProfile
+
+admin 维护的单一品牌资料。MVP 当前服务单一试点客户和单一工作空间，因此不做品牌列表、多模板切换或双语字段。
+
+当前职责：
+
+- 保存 `name`、`tagline`、`brand_core`、`style_dna`、`styling_guidelines`、`shooting_guidelines` 和 `negative_constraints`。
+- 初始不自动种子化，所有字段默认为空；admin 首次保存时创建记录。
+- 只有一条记录，删除后恢复为空状态。
+- 所有 `/api/brand-info` 接口必须按服务端 session role 校验 admin 权限。
+- 前端只给 admin 展示 `品牌信息` 入口；普通 `user` 保持原有拍摄工作台。
+
+`brand_core`、`style_dna`、`styling_guidelines`、`shooting_guidelines`、`negative_constraints` 均为普通字符串字段，不保存数组或中英文成对结构。
+
+### 3.4 GenerationAttempt
 
 所有 Gemini / Image-2 调用的过程记录。保存 provider、状态、开始/完成/失败时间、request/response 快照、错误信息和输出媒体，用于技术详情与问题排查。
 

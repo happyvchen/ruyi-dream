@@ -14,13 +14,14 @@ backend/app/db.py:init_db()
 
 ## 1. 表总览
 
-当前一共 8 张业务表，另有 1 张 schema 版本表：
+当前一共 9 张业务表，另有 1 张 schema 版本表：
 
 | 表名 | 业务对象 | 说明 |
 |---|---|---|
 | `garment_skus` | `GarmentSku` | 服装货号图包 |
 | `garment_images` | `GarmentImage` | 货号下的单张素材图 |
 | `model_profiles` | `ModelProfile` | 数字模特档案 |
+| `brand_profiles` | `BrandProfile` | admin 维护的单一品牌资料 |
 | `shot_plans` | `ShotPlan` | 组图方案 / Gemini 策划结果 |
 | `brand_template_versions` | `BrandTemplateVersion` | 品牌调性模板版本 |
 | `generation_runs` | `GenerationRun` | 一次组图生成批次 |
@@ -153,7 +154,46 @@ CREATE TABLE model_profiles (
 - `headReferenceOrder` 也保存在 `profile_json` 中，用于拖拽排序。
 - `headReferenceMeta`、`headReferenceUrls`、`headReferenceEntries` 为运行时序列化补充信息，不是独立表字段。
 
-### 2.4 `shot_plans`
+### 2.4 `brand_profiles`
+
+```sql
+CREATE TABLE brand_profiles (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  name TEXT NOT NULL DEFAULT '',
+  tagline TEXT NOT NULL DEFAULT '',
+  brand_core TEXT NOT NULL DEFAULT '',
+  style_dna TEXT NOT NULL DEFAULT '',
+  styling_guidelines TEXT NOT NULL DEFAULT '',
+  shooting_guidelines TEXT NOT NULL DEFAULT '',
+  negative_constraints TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+```
+
+字段说明：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | INTEGER | 固定为 1，保证 MVP 只维护单一品牌资料 |
+| `name` | TEXT | 品牌名称；初始为空 |
+| `tagline` | TEXT | 品牌标语；初始为空 |
+| `brand_core` | TEXT | 品牌核心；初始为空 |
+| `style_dna` | TEXT | 风格 DNA；初始为空 |
+| `styling_guidelines` | TEXT | 选搭准则；初始为空 |
+| `shooting_guidelines` | TEXT | 拍摄准则；初始为空 |
+| `negative_constraints` | TEXT | 负向约束；初始为空 |
+| `created_at` | TEXT | 创建时间 |
+| `updated_at` | TEXT | 更新时间 |
+
+实现备注：
+
+- 启动时不 seed 默认品牌资料，admin 首次保存时创建记录。
+- 当前不支持双语字段，不保存中英文 key/value 成对结构。
+- 当前所有业务字段均为字符串，不保存数组结构。
+- `/api/brand-info` 全部接口均为 admin-only。
+
+### 2.5 `shot_plans`
 
 ```sql
 CREATE TABLE shot_plans (
@@ -205,7 +245,7 @@ CREATE TABLE shot_plans (
 - 旧版业务上的“默认组图方案”由查询规则决定：`WHERE sku_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1`。
 - 旧版上传新货号后可创建默认方案。新版 AI 摄影棚主流程不读取货号默认组图方案，而是在预览阶段为 `GenerationTask` / `GenerationStyling` 生成 `generation_shot_plans`。
 
-### 2.5 `shot_plan_shots`
+### 2.6 `shot_plan_shots`
 
 ```sql
 CREATE TABLE shot_plan_shots (
@@ -231,7 +271,7 @@ CREATE TABLE shot_plan_shots (
 
 图位字段对应产品内的“分镜剧本”。5 条记录固定顺序为：全身主视觉、品类核心展示、设计细节近景、身位/动态补充、标准正面颜色图。`background` 属于整组共用生图方案，不在单张分镜内重复保存；模特头图参考由后端根据身位和可用头像自动选择，不由 Gemini 输出。
 
-### 2.6 `generation_runs`
+### 2.7 `generation_runs`
 
 ```sql
 CREATE TABLE generation_runs (
@@ -269,7 +309,7 @@ CREATE TABLE generation_runs (
 | `created_at` | TEXT | 创建时间 |
 | `updated_at` | TEXT | 更新时间 |
 
-### 2.6 `generation_images`
+### 2.8 `generation_images`
 
 ```sql
 CREATE TABLE generation_images (
@@ -440,7 +480,7 @@ ALTER TABLE generation_images ADD COLUMN preview_file_size INTEGER;
 ]
 ```
 
-### 2.7 `event_logs`
+### 2.9 `event_logs`
 
 ```sql
 CREATE TABLE event_logs (
@@ -464,7 +504,7 @@ CREATE TABLE event_logs (
 | `payload_json` | TEXT | 事件负载 |
 | `created_at` | TEXT | 创建时间 |
 
-### 2.8 `brand_template_versions`
+### 2.10 `brand_template_versions`
 
 ```sql
 CREATE TABLE brand_template_versions (
@@ -489,7 +529,7 @@ CREATE TABLE brand_template_versions (
 | `snapshot_json` | TEXT | 品牌调性、背景、光线、搭配边界等模板快照 |
 | `is_active` | INTEGER | 是否当前默认模板 |
 
-### 2.9 `schema_migrations`
+### 2.11 `schema_migrations`
 
 ```sql
 CREATE TABLE schema_migrations (

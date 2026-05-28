@@ -27,6 +27,10 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("014", "add_styling_garment_archive_columns", "migration_add_styling_garment_archive_columns"),
     ("015", "add_library_adequacy_snapshot", "migration_add_library_adequacy_snapshot"),
     ("016", "clear_successful_tagging_timeout_errors", "migration_clear_successful_tagging_timeout_errors"),
+    ("017", "add_brand_profiles", "migration_add_brand_profiles"),
+    ("018", "normalize_brand_profile_text_fields", "migration_normalize_brand_profile_text_fields"),
+    ("019", "reframe_brand_profile_guidance_fields", "migration_reframe_brand_profile_guidance_fields"),
+    ("020", "rename_brand_profile_production_guidance_fields", "migration_rename_brand_profile_production_guidance_fields"),
 )
 
 
@@ -97,6 +101,19 @@ def init_db() -> None:
               asset_dir TEXT NOT NULL,
               profile_json TEXT NOT NULL,
               is_default INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS brand_profiles (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              name TEXT NOT NULL DEFAULT '',
+              tagline TEXT NOT NULL DEFAULT '',
+              brand_core TEXT NOT NULL DEFAULT '',
+              style_dna TEXT NOT NULL DEFAULT '',
+              styling_guidelines TEXT NOT NULL DEFAULT '',
+              shooting_guidelines TEXT NOT NULL DEFAULT '',
+              negative_constraints TEXT NOT NULL DEFAULT '',
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
@@ -406,6 +423,10 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_styling_garment_archive_columns": migration_add_styling_garment_archive_columns,
         "migration_add_library_adequacy_snapshot": migration_add_library_adequacy_snapshot,
         "migration_clear_successful_tagging_timeout_errors": migration_clear_successful_tagging_timeout_errors,
+        "migration_add_brand_profiles": migration_add_brand_profiles,
+        "migration_normalize_brand_profile_text_fields": migration_normalize_brand_profile_text_fields,
+        "migration_reframe_brand_profile_guidance_fields": migration_reframe_brand_profile_guidance_fields,
+        "migration_rename_brand_profile_production_guidance_fields": migration_rename_brand_profile_production_guidance_fields,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -558,6 +579,198 @@ def migration_clear_successful_tagging_timeout_errors(db: sqlite3.Connection) ->
           AND error_code = 'TIMEOUT'
         """
     )
+
+
+def migration_add_brand_profiles(db: sqlite3.Connection) -> None:
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS brand_profiles (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          name TEXT NOT NULL DEFAULT '',
+          tagline TEXT NOT NULL DEFAULT '',
+          brand_core TEXT NOT NULL DEFAULT '',
+          style_dna TEXT NOT NULL DEFAULT '',
+          styling_guidelines TEXT NOT NULL DEFAULT '',
+          shooting_guidelines TEXT NOT NULL DEFAULT '',
+          negative_constraints TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def migration_normalize_brand_profile_text_fields(db: sqlite3.Connection) -> None:
+    columns = table_columns(db, "brand_profiles")
+    if {"brand_core", "style_dna", "styling_guidelines", "shooting_guidelines", "negative_constraints"}.issubset(columns):
+        return
+    if {"positioning", "visual_style", "styling_principles", "shooting_tone", "style_avoidance"}.issubset(columns):
+        return
+    if {"brand_values", "aesthetic", "tone"}.issubset(columns) and not {"values_json", "aesthetic_json", "tone_json"} & columns:
+        return
+
+    rows = db.execute("SELECT * FROM brand_profiles ORDER BY id").fetchall()
+    db.execute("DROP TABLE IF EXISTS brand_profiles_new")
+    db.execute(
+        """
+        CREATE TABLE brand_profiles_new (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          name TEXT NOT NULL DEFAULT '',
+          tagline TEXT NOT NULL DEFAULT '',
+          brand_values TEXT NOT NULL DEFAULT '',
+          aesthetic TEXT NOT NULL DEFAULT '',
+          tone TEXT NOT NULL DEFAULT '',
+          business_overview TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    for row in rows:
+        db.execute(
+            """
+            INSERT INTO brand_profiles_new
+              (id, name, tagline, brand_values, aesthetic, tone, business_overview, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["id"],
+                row_value(row, "name") or "",
+                row_value(row, "tagline") or "",
+                normalize_migrated_brand_text(row_value(row, "brand_values"), row_value(row, "values_json")),
+                normalize_migrated_brand_text(row_value(row, "aesthetic"), row_value(row, "aesthetic_json")),
+                normalize_migrated_brand_text(row_value(row, "tone"), row_value(row, "tone_json")),
+                row_value(row, "business_overview") or "",
+                row["created_at"],
+                row["updated_at"],
+            ),
+        )
+    db.execute("DROP TABLE brand_profiles")
+    db.execute("ALTER TABLE brand_profiles_new RENAME TO brand_profiles")
+
+
+def normalize_migrated_brand_text(current_value: Any, legacy_json_value: Any) -> str:
+    current_text = str(current_value or "").strip()
+    if current_text:
+        return current_text
+    legacy = loads(str(legacy_json_value), []) if legacy_json_value else []
+    if isinstance(legacy, list):
+        return "\n".join(str(item).strip() for item in legacy if str(item).strip())
+    return str(legacy or "").strip()
+
+
+def migration_reframe_brand_profile_guidance_fields(db: sqlite3.Connection) -> None:
+    columns = table_columns(db, "brand_profiles")
+    final_columns = {"brand_core", "style_dna", "styling_guidelines", "shooting_guidelines", "negative_constraints"}
+    if final_columns.issubset(columns):
+        return
+    target_columns = {"positioning", "visual_style", "styling_principles", "shooting_tone", "style_avoidance"}
+    legacy_columns = {"brand_values", "aesthetic", "tone", "business_overview", "values_json", "aesthetic_json", "tone_json"}
+    if target_columns.issubset(columns) and not legacy_columns & columns:
+        return
+
+    rows = db.execute("SELECT * FROM brand_profiles ORDER BY id").fetchall()
+    db.execute("DROP TABLE IF EXISTS brand_profiles_new")
+    db.execute(
+        """
+        CREATE TABLE brand_profiles_new (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          name TEXT NOT NULL DEFAULT '',
+          tagline TEXT NOT NULL DEFAULT '',
+          positioning TEXT NOT NULL DEFAULT '',
+          visual_style TEXT NOT NULL DEFAULT '',
+          styling_principles TEXT NOT NULL DEFAULT '',
+          shooting_tone TEXT NOT NULL DEFAULT '',
+          style_avoidance TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    for row in rows:
+        db.execute(
+            """
+            INSERT INTO brand_profiles_new
+              (id, name, tagline, positioning, visual_style, styling_principles, shooting_tone, style_avoidance, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["id"],
+                row_value(row, "name") or "",
+                row_value(row, "tagline") or "",
+                row_value(row, "positioning") or row_value(row, "business_overview") or "",
+                row_value(row, "visual_style") or normalize_migrated_brand_text(row_value(row, "aesthetic"), row_value(row, "aesthetic_json")),
+                row_value(row, "styling_principles") or normalize_migrated_brand_text(row_value(row, "brand_values"), row_value(row, "values_json")),
+                row_value(row, "shooting_tone") or normalize_migrated_brand_text(row_value(row, "tone"), row_value(row, "tone_json")),
+                row_value(row, "style_avoidance") or "",
+                row["created_at"],
+                row["updated_at"],
+            ),
+        )
+    db.execute("DROP TABLE brand_profiles")
+    db.execute("ALTER TABLE brand_profiles_new RENAME TO brand_profiles")
+
+
+def migration_rename_brand_profile_production_guidance_fields(db: sqlite3.Connection) -> None:
+    columns = table_columns(db, "brand_profiles")
+    final_columns = {"brand_core", "style_dna", "styling_guidelines", "shooting_guidelines", "negative_constraints"}
+    legacy_columns = {
+        "positioning",
+        "visual_style",
+        "styling_principles",
+        "shooting_tone",
+        "style_avoidance",
+        "brand_values",
+        "aesthetic",
+        "tone",
+        "business_overview",
+        "values_json",
+        "aesthetic_json",
+        "tone_json",
+    }
+    if final_columns.issubset(columns) and not legacy_columns & columns:
+        return
+
+    rows = db.execute("SELECT * FROM brand_profiles ORDER BY id").fetchall()
+    db.execute("DROP TABLE IF EXISTS brand_profiles_new")
+    db.execute(
+        """
+        CREATE TABLE brand_profiles_new (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          name TEXT NOT NULL DEFAULT '',
+          tagline TEXT NOT NULL DEFAULT '',
+          brand_core TEXT NOT NULL DEFAULT '',
+          style_dna TEXT NOT NULL DEFAULT '',
+          styling_guidelines TEXT NOT NULL DEFAULT '',
+          shooting_guidelines TEXT NOT NULL DEFAULT '',
+          negative_constraints TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    for row in rows:
+        db.execute(
+            """
+            INSERT INTO brand_profiles_new
+              (id, name, tagline, brand_core, style_dna, styling_guidelines, shooting_guidelines, negative_constraints, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["id"],
+                row_value(row, "name") or "",
+                row_value(row, "tagline") or "",
+                row_value(row, "brand_core") or row_value(row, "positioning") or row_value(row, "business_overview") or "",
+                row_value(row, "style_dna") or row_value(row, "visual_style") or normalize_migrated_brand_text(row_value(row, "aesthetic"), row_value(row, "aesthetic_json")),
+                row_value(row, "styling_guidelines") or row_value(row, "styling_principles") or normalize_migrated_brand_text(row_value(row, "brand_values"), row_value(row, "values_json")),
+                row_value(row, "shooting_guidelines") or row_value(row, "shooting_tone") or normalize_migrated_brand_text(row_value(row, "tone"), row_value(row, "tone_json")),
+                row_value(row, "negative_constraints") or row_value(row, "style_avoidance") or "",
+                row["created_at"],
+                row["updated_at"],
+            ),
+        )
+    db.execute("DROP TABLE brand_profiles")
+    db.execute("ALTER TABLE brand_profiles_new RENAME TO brand_profiles")
 
 
 def ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:

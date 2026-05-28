@@ -109,13 +109,35 @@ DELETED
 
 - `effective_tags`：素材事实和搭配约束，用于召回、压缩和解释。
 - `visual_caption` / `retrieval_features`：每件搭配服饰的短视觉摘要、衣长体量、遮挡风险、可塞腰/可敞开等检索字段。
+- `brand_profile`：admin 维护的单一品牌生产准则资料，包括品牌名称、标语、品牌核心、风格 DNA、选搭准则、拍摄准则和负向约束；初始为空，不做双语结构。
 - `brand_style_samples`：Lily 官方或客户确认的品牌样本，作为品牌风格和配饰边界证据。
 - `candidate_retrieval_snapshot`：本次任务进入 AI Stylist 前的候选集合、排序和过滤原因。
 - `StylingPlan`：AI Stylist 对主推款和候选服饰做造型判断后的结构化方案。
 
 全量搭配服饰库不直接输入 Gemini。候选漏斗必须先完成硬过滤、召回、排序和 outfit 草案生成，再把少量候选卡片、必要缩略图和品牌样本证据交给 AI Stylist。
 
-### 5.1 Lily Brand Style Index
+### 5.1 品牌信息
+
+`brand_profile` 是 admin 在前台维护的单一品牌资料，不替代官方样本库，也不是品牌模板版本系统。MVP 当前字段为：
+
+- `name`：品牌名称
+- `tagline`：品牌标语
+- `brand_core`：品牌核心
+- `style_dna`：风格 DNA
+- `styling_guidelines`：选搭准则
+- `shooting_guidelines`：拍摄准则
+- `negative_constraints`：负向约束
+
+规则：
+
+- 后端不 seed 默认内容，初始所有字段为空。
+- 所有字段均为字符串，不保存数组结构或双语 key/value 结构。
+- 不支持双语字段，不维护中英文 key/value 成对结构。
+- 字段用于约束选搭和拍摄判断，不作为品牌百科或营销话术库。
+- 删除后恢复为空状态，不影响已有历史任务快照。
+- 未来如果进入生成链路，应以结构化资料作为品牌参考输入，并在任务输入或 planner 快照中记录当时版本。
+
+### 5.2 Lily Brand Style Index
 
 `Lily Brand Style Index` 保存 Lily 官方风格证据，不是商品事实源。样本可来自：
 
@@ -144,7 +166,7 @@ DELETED
 
 品牌样本只用于召回、排序、品牌解释和配饰边界。最终图的商品级保真仍以主推款图片和被选中搭配服饰图片为准。
 
-### 5.2 生成配饰边界
+### 5.3 生成配饰边界
 
 鞋、包、首饰在 MVP 阶段不入库，因此只能作为受控文字边界：
 

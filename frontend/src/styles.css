@@ -10,6 +10,7 @@
 html, body, #root { height: 100%; }
 body { margin: 0; min-width: 1180px; overflow: hidden; }
 button, input { font: inherit; }
+textarea { font: inherit; }
 button { cursor: pointer; }
 h1, h2, h3, p { margin: 0; }
 
@@ -402,7 +403,18 @@ input {
   color: #111827;
   outline: none;
 }
-input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16); }
+textarea {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #d8e0ea;
+  border-radius: 8px;
+  background: rgba(255,255,255,.92);
+  color: #111827;
+  line-height: 1.55;
+  outline: none;
+  resize: vertical;
+}
+input:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16); }
 .primary, .secondary, .danger {
   display: inline-flex;
   align-items: center;
@@ -1368,6 +1380,56 @@ input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16);
   padding: 22px;
 }
 .model-meta { display: grid; align-content: start; gap: 16px; }
+.brand-info-page {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 24px;
+  padding: 22px;
+}
+.brand-info-meta {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+.brand-info-meta h2 {
+  color: #111827;
+  font-size: 22px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.brand-info-meta p {
+  margin-top: 6px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.brand-info-form {
+  display: grid;
+  gap: 14px;
+}
+.brand-field {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid #d8e0ea;
+  border-radius: 8px;
+  background: #fff;
+}
+.brand-field label {
+  color: #1e293b;
+  font-size: 13px;
+  font-weight: 800;
+}
+.brand-field textarea {
+  min-height: 78px;
+}
+.brand-field textarea.large {
+  min-height: 150px;
+}
 .head-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

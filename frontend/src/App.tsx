@@ -5,6 +5,7 @@ import {
   Bot,
   ArrowDown,
   ArrowUp,
+  Building2,
   ChevronLeft,
   ChevronRight,
   CircleStop,
@@ -24,6 +25,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   RotateCcw,
+  Save,
   Search,
   Shield,
   Sparkles,
@@ -37,7 +39,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
-import type { AIOperation, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, StylingGarment } from './api'
+import type { AIOperation, BrandInfo, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, SessionRole, StylingGarment } from './api'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 
@@ -80,6 +82,7 @@ const densePageSizeOptions = [12, 50, 100] as const
 export function App() {
   const [checked, setChecked] = useState(false)
   const [authenticated, setAuthenticated] = useState(false)
+  const [role, setRole] = useState<SessionRole | null>(null)
   const [page, setPage] = useState<Page>(() => parseRoute().page)
   const [collapsed, setCollapsed] = useState(false)
   const [busy, setBusy] = useState('')
@@ -89,6 +92,7 @@ export function App() {
   const [records, setRecords] = useState<GenerationTask[]>([])
   const [garments, setGarments] = useState<StylingGarment[]>([])
   const [models, setModels] = useState<ModelProfile[]>([])
+  const [brandInfo, setBrandInfo] = useState<BrandInfo | null>(null)
   const [recordDetail, setRecordDetail] = useState<GenerationTask | null>(null)
   const [localOperations, setLocalOperations] = useState<AIOperation[]>([])
 
@@ -96,6 +100,11 @@ export function App() {
     void api.session()
       .then((session) => {
         setAuthenticated(session.authenticated)
+        setRole(session.role ?? null)
+        if (session.role !== 'admin' && parseRoute().page === 'brand') {
+          setPage('studio')
+          window.history.replaceState(null, '', routeToUrl({ page: 'studio' }))
+        }
         setChecked(true)
       })
       .catch(() => setChecked(true))
@@ -104,7 +113,13 @@ export function App() {
   useEffect(() => {
     if (!authenticated) return
     void refreshAll()
-  }, [authenticated])
+  }, [authenticated, role])
+
+  useEffect(() => {
+    if (!authenticated || role === 'admin' || page !== 'brand') return
+    setPage('studio')
+    window.history.replaceState(null, '', routeToUrl({ page: 'studio' }))
+  }, [authenticated, role, page])
 
   useEffect(() => {
     const handlePopState = () => {
@@ -149,6 +164,12 @@ export function App() {
     setTasks(taskResult.items)
     setRecords(recordResult.items)
     setModels(modelResult.items)
+    if (role === 'admin') {
+      const brandResult = await api.getBrandInfo().catch(() => ({ item: null }))
+      setBrandInfo(brandResult.item)
+    } else {
+      setBrandInfo(null)
+    }
     const route = parseRoute()
     const requestedTaskId = route.page === 'studio' ? route.taskId : undefined
     if (requestedTaskId && (!task || task.id !== requestedTaskId)) {
@@ -204,12 +225,16 @@ export function App() {
   }
 
   if (!checked) return <BootScreen />
-  if (!authenticated) return <LoginPage onAuthed={() => setAuthenticated(true)} />
+  if (!authenticated) return <LoginPage onAuthed={(session) => {
+    setAuthenticated(true)
+    setRole(session.role ?? null)
+  }} />
 
   const nav = [
     { id: 'studio' as const, label: 'AI 摄影棚', icon: Bot },
     { id: 'library' as const, label: '搭配服饰库', icon: Library },
     { id: 'model' as const, label: '数字模特', icon: UserRound },
+    ...(role === 'admin' ? [{ id: 'brand' as const, label: '品牌信息', icon: Building2 }] : []),
     { id: 'records' as const, label: '生成记录', icon: History },
   ]
 
@@ -238,8 +263,11 @@ export function App() {
           </button>
           <div className="user-block">
             <div className="avatar"><User size={16} /></div>
-            {!collapsed && <div><span>用户</span><strong>user</strong></div>}
-            {!collapsed && <button className="ghost-icon" onClick={() => void api.logout().then(() => setAuthenticated(false))}><LogOut size={16} /></button>}
+            {!collapsed && <div><span>用户</span><strong>{role ?? 'user'}</strong></div>}
+            {!collapsed && <button className="ghost-icon" onClick={() => void api.logout().then(() => {
+              setAuthenticated(false)
+              setRole(null)
+            })}><LogOut size={16} /></button>}
           </div>
         </div>
       </aside>
@@ -249,6 +277,7 @@ export function App() {
         {page === 'studio' && <StudioPage task={task} setTask={setTask} records={records} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
         {page === 'library' && <LibraryPage garments={garments} run={run} />}
         {page === 'model' && <ModelPage models={models} />}
+        {page === 'brand' && role === 'admin' && <BrandInfoPage initialBrandInfo={brandInfo} setBrandInfo={setBrandInfo} run={run} />}
         {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} run={run} />}
       </main>
     </div>
@@ -259,7 +288,7 @@ function BootScreen() {
   return <div className="login-screen"><div className="login-card"><Loader2 className="spin" /> 启动中...</div></div>
 }
 
-function LoginPage({ onAuthed }: { onAuthed: () => void }) {
+function LoginPage({ onAuthed }: { onAuthed: (session: { role?: SessionRole | null }) => void }) {
   const showDemoLogin = import.meta.env.DEV || import.meta.env.VITE_SHOW_DEMO_LOGIN === 'true'
   const [username, setUsername] = useState(showDemoLogin ? 'user' : '')
   const [password, setPassword] = useState(showDemoLogin ? 'password' : '')
@@ -271,8 +300,8 @@ function LoginPage({ onAuthed }: { onAuthed: () => void }) {
     setBusy(true)
     setError('')
     try {
-      await api.login(username, password)
-      onAuthed()
+      const session = await api.login(username, password)
+      onAuthed(session)
     } catch (err) {
       setError(err instanceof Error ? err.message : '登录失败')
     } finally {
@@ -1342,6 +1371,128 @@ function ModelPage({ models }: { models: ModelProfile[] }) {
   )
 }
 
+function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
+  initialBrandInfo: BrandInfo | null
+  setBrandInfo: (item: BrandInfo | null) => void
+  run: <T>(label: string, action: () => Promise<T>, after?: (value: T) => void, options?: RunOptions) => Promise<T | undefined>
+}) {
+  const [brandId, setBrandId] = useState<number | null>(initialBrandInfo?.id ?? null)
+  const [name, setName] = useState(initialBrandInfo?.name ?? '')
+  const [tagline, setTagline] = useState(initialBrandInfo?.tagline ?? '')
+  const [brandCore, setBrandCore] = useState(initialBrandInfo?.brandCore ?? '')
+  const [styleDna, setStyleDna] = useState(initialBrandInfo?.styleDna ?? '')
+  const [stylingGuidelines, setStylingGuidelines] = useState(initialBrandInfo?.stylingGuidelines ?? '')
+  const [shootingGuidelines, setShootingGuidelines] = useState(initialBrandInfo?.shootingGuidelines ?? '')
+  const [negativeConstraints, setNegativeConstraints] = useState(initialBrandInfo?.negativeConstraints ?? '')
+
+  useEffect(() => {
+    setBrandId(initialBrandInfo?.id ?? null)
+    setName(initialBrandInfo?.name ?? '')
+    setTagline(initialBrandInfo?.tagline ?? '')
+    setBrandCore(initialBrandInfo?.brandCore ?? '')
+    setStyleDna(initialBrandInfo?.styleDna ?? '')
+    setStylingGuidelines(initialBrandInfo?.stylingGuidelines ?? '')
+    setShootingGuidelines(initialBrandInfo?.shootingGuidelines ?? '')
+    setNegativeConstraints(initialBrandInfo?.negativeConstraints ?? '')
+  }, [initialBrandInfo?.id, initialBrandInfo?.updatedAt])
+
+  const cleanBrandCore = brandCore.trim()
+  const cleanStyleDna = styleDna.trim()
+  const cleanStylingGuidelines = stylingGuidelines.trim()
+  const cleanShootingGuidelines = shootingGuidelines.trim()
+  const cleanNegativeConstraints = negativeConstraints.trim()
+  const hasContent = Boolean(name.trim() || tagline.trim() || cleanBrandCore || cleanStyleDna || cleanStylingGuidelines || cleanShootingGuidelines || cleanNegativeConstraints)
+  const summaryName = name.trim() || '未填写品牌名称'
+
+  function payload() {
+    return {
+      name: name.trim(),
+      tagline: tagline.trim(),
+      brandCore: cleanBrandCore,
+      styleDna: cleanStyleDna,
+      stylingGuidelines: cleanStylingGuidelines,
+      shootingGuidelines: cleanShootingGuidelines,
+      negativeConstraints: cleanNegativeConstraints,
+    }
+  }
+
+  function save() {
+    const action = brandId ? () => api.updateBrandInfo(payload()) : () => api.createBrandInfo(payload())
+    void run(brandId ? '保存品牌信息中...' : '创建品牌信息中...', action, (result: { item: BrandInfo }) => {
+      setBrandInfo(result.item)
+      setBrandId(result.item.id)
+    }, { refresh: false })
+  }
+
+  function remove() {
+    if (!brandId) return
+    if (!window.confirm('确定删除当前品牌信息吗？删除后页面会回到空表单，后续新任务将无法读取这份品牌资料。')) return
+    void run('删除品牌信息中...', () => api.deleteBrandInfo(), () => {
+      setBrandInfo(null)
+      setBrandId(null)
+      setName('')
+      setTagline('')
+      setBrandCore('')
+      setStyleDna('')
+      setStylingGuidelines('')
+      setShootingGuidelines('')
+      setNegativeConstraints('')
+    }, { refresh: false })
+  }
+
+  return (
+    <section className="page">
+      <PageTitle
+        title="品牌信息"
+        subtitle="维护用于 AI Stylist 和棚拍生成的单一品牌资料。"
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={remove} disabled={!brandId}><Trash2 size={16} />删除</button><button className="primary" onClick={save}><Save size={16} />保存</button></div>}
+      />
+      <div className="panel brand-info-page">
+        <aside className="brand-info-meta">
+          <span className="chip">{brandId ? '单一品牌资料' : '空白草稿'}</span>
+          <h2>{summaryName}</h2>
+          <Meta label="状态" value={brandId ? '已保存' : hasContent ? '未保存' : '初始为空'} />
+          <Meta label="标语" value={tagline.trim() ? '已填写' : '未填写'} />
+          <Meta label="品牌核心" value={cleanBrandCore ? '已填写' : '未填写'} />
+          <Meta label="风格 DNA" value={cleanStyleDna ? '已填写' : '未填写'} />
+          <Meta label="负向约束" value={cleanNegativeConstraints ? '已填写' : '未填写'} />
+          <p>保存后将作为后续选搭与 ShotPlan 的品牌参考。</p>
+        </aside>
+        <div className="brand-info-form">
+          <div className="brand-field">
+            <label>品牌名称</label>
+            <input value={name} onChange={(event) => setName(event.target.value)} />
+          </div>
+          <div className="brand-field">
+            <label>品牌标语</label>
+            <textarea value={tagline} onChange={(event) => setTagline(event.target.value)} />
+          </div>
+          <div className="brand-field">
+            <label>品牌核心</label>
+            <textarea value={brandCore} onChange={(event) => setBrandCore(event.target.value)} />
+          </div>
+          <div className="brand-field">
+            <label>风格 DNA</label>
+            <textarea value={styleDna} onChange={(event) => setStyleDna(event.target.value)} />
+          </div>
+          <div className="brand-field">
+            <label>选搭准则</label>
+            <textarea value={stylingGuidelines} onChange={(event) => setStylingGuidelines(event.target.value)} />
+          </div>
+          <div className="brand-field">
+            <label>拍摄准则</label>
+            <textarea value={shootingGuidelines} onChange={(event) => setShootingGuidelines(event.target.value)} />
+          </div>
+          <div className="brand-field">
+            <label>负向约束</label>
+            <textarea className="large" value={negativeConstraints} onChange={(event) => setNegativeConstraints(event.target.value)} />
+          </div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
 function RecordsPage({ records, detail, setDetail, run }: { records: GenerationTask[]; detail: GenerationTask | null; setDetail: (task: GenerationTask | null) => void; run: any }) {
   const [items, setItems] = useState<GenerationTask[]>(records)
   const [offset, setOffset] = useState(0)
@@ -1702,8 +1853,8 @@ function PaginationControls({ offset, pageSize, pageSizeOptions = defaultPageSiz
   )
 }
 
-function PageTitle({ title, subtitle }: { title: string; subtitle: string }) {
-  return <div className="page-title"><div><h1>{title}</h1><p>{subtitle}</p></div></div>
+function PageTitle({ title, subtitle, actions }: { title: string; subtitle: string; actions?: ReactNode }) {
+  return <div className="page-title"><div><h1>{title}</h1><p>{subtitle}</p></div>{actions}</div>
 }
 
 function UploadBox({ files, setFiles, max, compact = false }: { files: File[]; setFiles: (files: File[]) => void; max: number; compact?: boolean }) {

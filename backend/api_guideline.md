@@ -96,6 +96,10 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 | `/api/model-profiles/{model_profile_id}/head-references/{reference_id}` | PATCH | 修改头像角度或排序 |
 | `/api/model-profiles/{model_profile_id}/head-references/{reference_id}` | DELETE | 删除单张头像 |
 | `/api/model-profiles/{model_profile_id}/assets/{filename}` | GET | 跳转到模特头像素材的预签名访问 URL |
+| `/api/brand-info` | GET | admin 查询单一品牌资料；未创建时返回 `item: null` |
+| `/api/brand-info` | POST | admin 创建单一品牌资料；初始值由前端提交，后端不预置 |
+| `/api/brand-info` | PATCH | admin 编辑单一品牌资料 |
+| `/api/brand-info` | DELETE | admin 删除单一品牌资料，恢复为空状态 |
 | `/api/shot-plans` | POST | 旧版货号组图方案兼容接口；新版 ShotPlan 由 `generation-tasks/{id}/preview` 生成 |
 | `/api/shot-plans/{shot_plan_id}` | GET | 旧版组图方案查看接口 |
 | `/api/garment-skus/{sku_id}/default-shot-plan` | GET | 旧版货号默认组图方案兼容接口 |
@@ -113,6 +117,8 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 | `/api/exports/runs/{run_id}` | POST | 打包导出该 run 的最终图或全部图 |
 
 当前没有独立 `/api/brand-templates` 管理接口。默认品牌模板以 `brand_template_versions` 版本化保存，生成任务包和 `template_snapshot_json` 会记录模板 id/version。
+
+`/api/brand-info` 是 admin-only 的单记录品牌资料维护接口，不是模板版本管理接口。当前不支持双语字段，也不保存中英文 key/value 成对结构。
 
 新版前台“生成记录”列表使用 `/api/generation-records`，并与 AI 摄影棚“最近任务”保持同一套 `GenerationTask` 列表口径，不是直接展示 `/api/logs`。旧版 `/api/generation-runs` 和 `/api/garment-skus` 仍作为兼容接口保留，不能作为新版页面主流程依据。`event_logs` 仍用于排查和审计。
 
@@ -710,6 +716,61 @@ provider 状态映射示例：
 - 更新当前 `output_path`、`provider_request_id`、`provider_status`、provider 快照和状态。
 
 返回仍然是原 `GenerationRun`。
+
+## 品牌信息 CRUD 契约
+
+`GET /api/brand-info`
+
+响应：
+
+```json
+{
+  "item": null
+}
+```
+
+未创建品牌资料时返回 `item: null`。创建后返回：
+
+```json
+{
+  "item": {
+    "id": 1,
+    "name": "LILY",
+    "tagline": "商务新风尚，成就你的每一步。",
+    "brandCore": "LILY 是以现代职场女性为核心的 Business Fashion 商务时装品牌...",
+    "styleDna": "Business Fashion、Modern Corporate Chic、Professional Elegance、Empowered Minimalism...",
+    "stylingGuidelines": "选搭应体现 professional yet stylish、structured yet feminine、work-to-life wardrobe...",
+    "shootingGuidelines": "采用商品导向的 commercial lookbook / e-commerce fashion photography...",
+    "negativeConstraints": "避免传统职业制服感、过度性感、甜美少女感、网红写真感、街头潮流感...",
+    "createdAt": "2026-05-28T10:00:00Z",
+    "updatedAt": "2026-05-28T10:00:00Z"
+  }
+}
+```
+
+`POST /api/brand-info`
+
+`PATCH /api/brand-info`
+
+```json
+{
+  "name": "LILY",
+  "tagline": "商务新风尚，成就你的每一步。",
+  "brandCore": "LILY 是以现代职场女性为核心的 Business Fashion 商务时装品牌...",
+  "styleDna": "Business Fashion、Modern Corporate Chic、Professional Elegance、Empowered Minimalism...",
+  "stylingGuidelines": "选搭应体现 professional yet stylish、structured yet feminine、work-to-life wardrobe...",
+  "shootingGuidelines": "采用商品导向的 commercial lookbook / e-commerce fashion photography...",
+  "negativeConstraints": "避免传统职业制服感、过度性感、甜美少女感、网红写真感、街头潮流感..."
+}
+```
+
+说明：
+
+- 全部字段可为空；后端启动不 seed 默认内容。
+- 全部字段均为字符串；后端只做首尾空白裁剪，不做数组解析或去重。
+- 当前只维护单一品牌资料，重复 `POST` 返回 `409`。
+- 全部 `/api/brand-info` 接口均要求 admin session；普通 user 返回 `403`。
+- `DELETE /api/brand-info` 删除单条记录，后续 `GET` 再次返回 `item: null`。
 
 ## 数字模特 CRUD 契约
 
