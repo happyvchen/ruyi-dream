@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { DragEvent, FormEvent, ReactNode } from 'react'
+import type { ChangeEvent, DragEvent, FormEvent, ReactNode } from 'react'
 import {
   Bot,
   ArrowDown,
@@ -39,7 +39,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
-import type { AIOperation, BrandInfo, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, SessionRole, StylingGarment } from './api'
+import type { AIOperation, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, SessionRole, StylingGarment } from './api'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 
@@ -1376,6 +1376,7 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
   setBrandInfo: (item: BrandInfo | null) => void
   run: <T>(label: string, action: () => Promise<T>, after?: (value: T) => void, options?: RunOptions) => Promise<T | undefined>
 }) {
+  const importInputRef = useRef<HTMLInputElement | null>(null)
   const [brandId, setBrandId] = useState<number | null>(initialBrandInfo?.id ?? null)
   const [name, setName] = useState(initialBrandInfo?.name ?? '')
   const [tagline, setTagline] = useState(initialBrandInfo?.tagline ?? '')
@@ -1416,6 +1417,55 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
     }
   }
 
+  function applyPayload(next: BrandInfoPayload) {
+    setName(next.name ?? '')
+    setTagline(next.tagline ?? '')
+    setBrandCore(next.brandCore ?? '')
+    setStyleDna(next.styleDna ?? '')
+    setStylingGuidelines(next.stylingGuidelines ?? '')
+    setShootingGuidelines(next.shootingGuidelines ?? '')
+    setNegativeConstraints(next.negativeConstraints ?? '')
+  }
+
+  function exportJson() {
+    const data = payload()
+    const blob = new Blob([`${JSON.stringify(data, null, 2)}\n`], { type: 'application/json;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${jsonFilename(data.name || 'brand-info')}.json`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+  }
+
+  function importJson() {
+    if (hasContent && !window.confirm('导入 JSON 会覆盖当前表单内容，是否继续？')) return
+    importInputRef.current?.click()
+  }
+
+  async function handleImportJson(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    if (!file.name.toLowerCase().endsWith('.json')) {
+      window.alert('请选择 JSON 文件。')
+      return
+    }
+    if (file.size > 64 * 1024) {
+      window.alert('JSON 文件过大，请控制在 64KB 以内。')
+      return
+    }
+    try {
+      const data = parseBrandInfoJson(await file.text())
+      applyPayload(data)
+      window.alert('已导入到表单，请检查后保存。')
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'JSON 导入失败。')
+    }
+  }
+
   function save() {
     const action = brandId ? () => api.updateBrandInfo(payload()) : () => api.createBrandInfo(payload())
     void run(brandId ? '保存品牌信息中...' : '创建品牌信息中...', action, (result: { item: BrandInfo }) => {
@@ -1445,8 +1495,9 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
       <PageTitle
         title="品牌信息"
         subtitle="维护用于 AI Stylist 和棚拍生成的单一品牌资料。"
-        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={remove} disabled={!brandId}><Trash2 size={16} />删除</button><button className="primary" onClick={save}><Save size={16} />保存</button></div>}
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={importJson}><Upload size={16} />导入 JSON</button><button className="secondary" onClick={exportJson}><Download size={16} />导出 JSON</button><button className="secondary" onClick={remove} disabled={!brandId}><Trash2 size={16} />删除</button><button className="primary" onClick={save}><Save size={16} />保存</button></div>}
       />
+      <input ref={importInputRef} type="file" accept="application/json,.json" hidden onChange={handleImportJson} />
       <div className="panel brand-info-page">
         <aside className="brand-info-meta">
           <span className="chip">{brandId ? '单一品牌资料' : '空白草稿'}</span>
@@ -1491,6 +1542,45 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
       </div>
     </section>
   )
+}
+
+const BRAND_INFO_JSON_FIELDS = [
+  'name',
+  'tagline',
+  'brandCore',
+  'styleDna',
+  'stylingGuidelines',
+  'shootingGuidelines',
+  'negativeConstraints',
+] as const
+
+function parseBrandInfoJson(text: string): BrandInfoPayload {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error('JSON 格式不正确。')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('JSON 内容必须是对象。')
+  }
+  const source = parsed as Record<string, unknown>
+  const result: BrandInfoPayload = {}
+  for (const field of BRAND_INFO_JSON_FIELDS) {
+    const value = source[field]
+    if (value == null) {
+      result[field] = ''
+    } else if (typeof value === 'string') {
+      result[field] = value
+    } else {
+      throw new Error(`${field} 必须是字符串。`)
+    }
+  }
+  return result
+}
+
+function jsonFilename(value: string) {
+  return value.trim().replace(/[^\u4e00-\u9fa5A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'brand-info'
 }
 
 function RecordsPage({ records, detail, setDetail, run }: { records: GenerationTask[]; detail: GenerationTask | null; setDetail: (task: GenerationTask | null) => void; run: any }) {
