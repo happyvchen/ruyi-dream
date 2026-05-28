@@ -39,7 +39,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
-import type { AIOperation, BrandInfo, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, SessionRole, StylingGarment } from './api'
+import type { AIOperation, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, SessionRole, StylingGarment } from './api'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 
@@ -1376,6 +1376,7 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
   setBrandInfo: (item: BrandInfo | null) => void
   run: <T>(label: string, action: () => Promise<T>, after?: (value: T) => void, options?: RunOptions) => Promise<T | undefined>
 }) {
+  const [jsonDialog, setJsonDialog] = useState<{ mode: 'import' | 'export'; text: string; error?: string } | null>(null)
   const [brandId, setBrandId] = useState<number | null>(initialBrandInfo?.id ?? null)
   const [name, setName] = useState(initialBrandInfo?.name ?? '')
   const [tagline, setTagline] = useState(initialBrandInfo?.tagline ?? '')
@@ -1416,6 +1417,41 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
     }
   }
 
+  function applyPayload(next: BrandInfoPayload) {
+    setName(next.name ?? '')
+    setTagline(next.tagline ?? '')
+    setBrandCore(next.brandCore ?? '')
+    setStyleDna(next.styleDna ?? '')
+    setStylingGuidelines(next.stylingGuidelines ?? '')
+    setShootingGuidelines(next.shootingGuidelines ?? '')
+    setNegativeConstraints(next.negativeConstraints ?? '')
+  }
+
+  function openExportJson() {
+    setJsonDialog({ mode: 'export', text: `${JSON.stringify(payload(), null, 2)}\n` })
+  }
+
+  function openImportJson() {
+    if (hasContent && !window.confirm('导入 JSON 会覆盖当前表单内容，是否继续？')) return
+    setJsonDialog({ mode: 'import', text: '' })
+  }
+
+  function confirmImportJson() {
+    if (!jsonDialog || jsonDialog.mode !== 'import') return
+    if (jsonDialog.text.length > 64 * 1024) {
+      setJsonDialog({ ...jsonDialog, error: 'JSON 内容过大，请控制在 64KB 以内。' })
+      return
+    }
+    try {
+      const data = parseBrandInfoJson(jsonDialog.text)
+      applyPayload(data)
+      setJsonDialog(null)
+      window.alert('已导入到表单，请检查后保存。')
+    } catch (error) {
+      setJsonDialog({ ...jsonDialog, error: error instanceof Error ? error.message : 'JSON 导入失败。' })
+    }
+  }
+
   function save() {
     const action = brandId ? () => api.updateBrandInfo(payload()) : () => api.createBrandInfo(payload())
     void run(brandId ? '保存品牌信息中...' : '创建品牌信息中...', action, (result: { item: BrandInfo }) => {
@@ -1445,8 +1481,16 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
       <PageTitle
         title="品牌信息"
         subtitle="维护用于 AI Stylist 和棚拍生成的单一品牌资料。"
-        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={remove} disabled={!brandId}><Trash2 size={16} />删除</button><button className="primary" onClick={save}><Save size={16} />保存</button></div>}
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={openImportJson}>导入</button><button className="secondary" onClick={openExportJson}>导出</button><button className="secondary" onClick={remove} disabled={!brandId}><Trash2 size={16} />删除</button><button className="primary" onClick={save}><Save size={16} />保存</button></div>}
       />
+      {jsonDialog && (
+        <BrandJsonDialog
+          dialog={jsonDialog}
+          setDialog={setJsonDialog}
+          onClose={() => setJsonDialog(null)}
+          onImport={confirmImportJson}
+        />
+      )}
       <div className="panel brand-info-page">
         <aside className="brand-info-meta">
           <span className="chip">{brandId ? '单一品牌资料' : '空白草稿'}</span>
@@ -1490,6 +1534,74 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
         </div>
       </div>
     </section>
+  )
+}
+
+const BRAND_INFO_JSON_FIELDS = [
+  'name',
+  'tagline',
+  'brandCore',
+  'styleDna',
+  'stylingGuidelines',
+  'shootingGuidelines',
+  'negativeConstraints',
+] as const
+
+function parseBrandInfoJson(text: string): BrandInfoPayload {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error('JSON 格式不正确。')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('JSON 内容必须是对象。')
+  }
+  const source = parsed as Record<string, unknown>
+  const result: BrandInfoPayload = {}
+  for (const field of BRAND_INFO_JSON_FIELDS) {
+    const value = source[field]
+    if (value == null) {
+      result[field] = ''
+    } else if (typeof value === 'string') {
+      result[field] = value
+    } else {
+      throw new Error(`${field} 必须是字符串。`)
+    }
+  }
+  return result
+}
+
+function BrandJsonDialog({ dialog, setDialog, onClose, onImport }: {
+  dialog: { mode: 'import' | 'export'; text: string; error?: string }
+  setDialog: (dialog: { mode: 'import' | 'export'; text: string; error?: string }) => void
+  onClose: () => void
+  onImport: () => void
+}) {
+  const isImport = dialog.mode === 'import'
+  return createPortal(
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <form className="confirm-modal brand-json-modal" role="dialog" aria-modal="true" aria-label={isImport ? '导入品牌信息' : '导出品牌信息'} onSubmit={(event) => {
+        event.preventDefault()
+        if (isImport) onImport()
+      }} onClick={(event) => event.stopPropagation()}>
+        <div className="confirm-head">
+          <div><h2>{isImport ? '导入' : '导出'}</h2></div>
+          <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
+        </div>
+        <textarea
+          readOnly={!isImport}
+          value={dialog.text}
+          onChange={(event) => setDialog({ mode: dialog.mode, text: event.target.value })}
+        />
+        {dialog.error && <p className="json-error">{dialog.error}</p>}
+        <div className="confirm-actions">
+          <button type="button" className="secondary" onClick={onClose}>关闭</button>
+          {isImport && <button type="submit" className="primary">导入到表单</button>}
+        </div>
+      </form>
+    </div>,
+    document.body,
   )
 }
 

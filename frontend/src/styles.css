@@ -1430,6 +1430,20 @@ input:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(
 .brand-field textarea.large {
   min-height: 150px;
 }
+.brand-json-modal textarea {
+  width: 100%;
+  min-height: min(52vh, 440px);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  resize: vertical;
+}
+.json-error {
+  margin: 0;
+  color: #b91c1c;
+  font-size: 13px;
+  font-weight: 700;
+}
 .head-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
