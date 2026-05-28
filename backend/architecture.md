@@ -30,20 +30,22 @@
 | `assets` | 主推款、搭配服饰、数字模特和生成结果的对象索引 |
 | `model-profile` | 数字模特档案、头部角度、身体参数 |
 | `styling-garment` | 搭配服饰库、Gemini 打标、生效标签和选搭候选管理 |
-| `generation-task` | AI 摄影棚主推款任务、输入版本、StylingPlan、ShotPlan、预览和最终图 |
+| `generation-task` | AI 摄影棚主推款任务、输入版本、StylingPlan、ShootScript、ShotPlan、分镜预览和最终图 |
+| `shoot-config` | AI Director 全局导演规则、基础/默认 6 镜头规则、标签一级品类 6 镜头覆盖规则 |
 | `legacy-generation` | 旧版 `garment-skus` / `generation-runs` 兼容接口，保留用于旧数据和工程参考 |
 | `generation` | 提交 Image-2 provider 任务，管理生成状态、单张重试和结果下载 |
 | `export` | 结果命名、打包、导出 |
 
 ## 数据对象
 
-- `GenerationTask`：新版 AI 摄影棚主任务；草稿确认后冻结主推款输入，进入选搭、预览和成片阶段
+- `GenerationTask`：新版 AI 摄影棚主任务；草稿确认后冻结主推款输入，进入选搭、拍摄剧本、分镜预览和成片阶段
 - `GenerationTaskImage`：主推款图片链接；AI 前可增删改排序，进入 AI 后由输入版本快照读取
 - `GenerationTaskInputVersion`：主推款、默认数字模特和输入元数据快照
 - `StylingGarment`：搭配服饰库真实商品；只有 `READY` 可进入候选漏斗
 - `GenerationStyling`：AI Stylist 输出的 `StylingPlan`、候选召回、选中搭配和质量信号记录
-- `GenerationShotPlan`：由 `StylingPlan` 落地到 3x2 六宫格图位的镜头、姿势、穿着关系和展示重点
-- `GenerationPreview`：六宫格预览总图；第 6 格仅参考，最终不生成大图
+- `GenerationShootScript`：AI Director 基于 `StylingPlan` 一次性生成的拍摄剧本，包含全局导演设定、搭配风险、配饰调整和 6 个镜头
+- `GenerationShotPlan`：从 `ShootScript` 派生的单镜头图位、景别、取景、姿势、走位、穿着关系和展示重点
+- `GenerationPreview`：分镜预览总图；第 6 格仅参考，最终不生成大图
 - `GenerationResultSet` / `GenerationResultImageNew`：前 5 格最终成片集合和单图状态
 - `GenerationAttempt`：AI Stylist、预览、最终图、打标等 AI 操作的请求/响应/错误快照
 - `ModelProfile`：模特身份图、头部角度、身体参数、禁止项
@@ -102,9 +104,15 @@ POST /api/generation-tasks/{id}/select-styling
   -> 校验 StylingPlan 结构并记录质量信号
   -> 写入 GenerationStyling
 
+POST /api/generation-tasks/{id}/shoot-script
+  -> 创建 GenerationShootScript 和 generation_shoot_script attempt
+  -> 调用 Gemini AI Director
+  -> 校验 ShootScript 结构并写入 6 条 GenerationShotPlan
+  -> 旧分镜预览和旧成片失效但保留
+
 POST /api/generation-tasks/{id}/preview
   -> 创建 GenerationPreview 和 generation_preview attempt
-  -> 调用 Image-2 生成 3x2 六宫格
+  -> 调用 Image-2 生成 3x2 分镜预览
   -> 写入 preview_asset_id
 
 POST /api/generation-tasks/{id}/generate-final
@@ -113,7 +121,7 @@ POST /api/generation-tasks/{id}/generate-final
   -> 聚合为 COMPLETED 或 FINAL_PARTIAL
 ```
 
-`generation_previews` 和 `generation_result_images_new` 使用 `locked_by` / `locked_until` / `run_attempts` 做单实例恢复。后端重启后，poller 会扫描锁过期的 RUNNING/QUEUED 新版任务，标记旧 attempt 为失败并创建新的 attempt 继续执行。多实例或高并发场景仍应升级为独立 worker 或外部队列。
+`generation_shoot_scripts`、`generation_previews` 和 `generation_result_images_new` 使用 `locked_by` / `locked_until` / `run_attempts` 做单实例恢复。后端重启后，poller 会扫描锁过期的 RUNNING/QUEUED 新版任务，标记旧 attempt 为失败并创建新的 attempt 继续执行。多实例或高并发场景仍应升级为独立 worker 或外部队列。
 
 前端不直接等待 provider，也不直接查询 provider。生成中页面轮询 `GET /api/generation-tasks/{task_id}`，只展示业务状态、AI 操作摘要、预览和结果图；候选召回、provider 请求/响应和 attempt 明细默认不返回，仅在 `includeDebug=true` 时返回。
 
@@ -122,10 +130,10 @@ POST /api/generation-tasks/{id}/generate-final
 - `/studio?task={task_id}`：在 AI 摄影棚恢复指定任务。
 - `/records?task={task_id}`：在生成记录页打开指定任务详情。
 
-一次新版用户任务只对应一条 `generation_tasks`。预览阶段保存一张 3x2 六宫格总图，最终阶段固定读取前 5 条 `generation_shot_plans` 并发生成：
+一次新版用户任务只对应一条 `generation_tasks`。拍摄剧本阶段保存一个 `generation_shoot_scripts` artifact 和 6 条 `generation_shot_plans`。分镜预览阶段保存一张 3x2 分镜预览总图，最终阶段固定读取当前拍摄剧本的前 5 条 `generation_shot_plans` 并发生成：
 
-- 第 1-5 格对应最终成片，第 6 格忽略。
-- 输入图优先使用六宫格预览、冻结的主推款图片、选中搭配服饰快照和默认数字模特快照。
+- 第 1-5 个镜头对应最终成片，第 6 个镜头忽略。
+- 输入图优先使用分镜预览、冻结的主推款图片、选中搭配服饰快照和默认数字模特快照。
 - `Image-2` 只负责最终视觉生成，不承担选搭、标签、历史追溯或业务状态管理。
 - provider 默认 `toapis`，保留 `fal` 兼容适配。
 

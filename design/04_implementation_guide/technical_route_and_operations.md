@@ -12,8 +12,8 @@ MediaAsset
 -> Candidate Funnel 候选漏斗
 -> Library Adequacy Report 搭配库充足性诊断
 -> AI Stylist / StylingPlan
--> ShotPlan
--> Image-2 六宫格预览
+-> ShootScript / ShotPlan
+-> Image-2 分镜预览
 -> Image-2 前 5 张并发生成
 -> 生成记录复盘
 ```
@@ -84,7 +84,8 @@ AI 摄影棚任务外壳：
 - status
 - current_input_version_id
 - active_styling_id
-- active_preview_id
+- active_shoot_script_id
+- active_storyboard_preview_id
 - active_result_set_id
 - created_at / updated_at
 
@@ -95,6 +96,8 @@ DRAFT
 READY_FOR_STYLING
 STYLING_RUNNING
 STYLING_READY
+SCRIPT_RUNNING
+SCRIPT_READY
 PREVIEW_RUNNING
 PREVIEW_READY
 FINAL_RUNNING
@@ -145,9 +148,9 @@ AI Stylist 造型方案结果：
 - attempt_id
 - created_at / updated_at
 
-`selected_material_ids_json` 只是从 `StylingPlan` 派生出的关系索引，用于素材快照、查询和前端卡片展示，不是选搭阶段的完整结果。生产排查和后续 ShotPlan 必须读取 `styling_plan_json`。
+`selected_material_ids_json` 只是从 `StylingPlan` 派生出的关系索引，用于素材快照、查询和前端卡片展示，不是选搭阶段的完整结果。生产排查和后续 ShootScript / ShotPlan 必须读取 `styling_plan_json`。
 
-成功后是否允许重新搭配仍是待拍板决策；当前代码暂时允许重新选搭并保留历史结果。失败重试可以新增 attempt 并更新当前 styling 状态。
+支持重新选搭；新 `StylingPlan` 成功后成为当前方案，并使旧拍摄剧本、旧分镜预览和旧成片失效但保留。失败重试可以新增 attempt 并更新当前 styling 状态。
 
 ### 2.6.1 StylingGarmentRetrievalFeature
 
@@ -240,11 +243,28 @@ Lily 官方和客户确认的品牌样本：
 - `recommend_empty_pairing`
 - `created_at`
 
-### 2.7 GenerationShotPlan
+### 2.7 GenerationShootScript
 
 - id
 - task_id
+- input_version_id
 - styling_id
+- status
+- script_json
+- summary_json
+- styling_risks_json
+- accessory_adjustments_json
+- active_attempt_id
+- created_at / updated_at
+- superseded_at
+
+拍摄剧本一次性包含全局导演设定和 6 条 ShotPlan。用户可查看，不可编辑。生成前读取 `ShootConfig`：全局导演规则按 CRUD 后的启用条目动态组装；品类规则只引用 `标签规则` 中的一级品类，未命中时使用基础/默认 6 镜头规则。后台应提供 ShootConfig 导入导出和单一 `Prompt 预览`，预览底层与拍摄剧本生成调用使用同一个后端组装方法，只渲染文本，不触发外部 AI。完整 schema 见 `../01_generation_flow/shoot_script_workflow.md`。
+
+### 2.8 GenerationShotPlan
+
+- id
+- task_id
+- shoot_script_id
 - sort_order
 - shot_type
 - plan_json
@@ -252,30 +272,32 @@ Lily 官方和客户确认的品牌样本：
 
 固定 6 条，最终只用前 5 条。
 
-### 2.8 GenerationPreview
+### 2.9 GenerationStoryboardPreview
 
 - id
 - task_id
 - styling_id
+- shoot_script_id
 - input_version_id
 - preview_asset_id
 - status
 - active_attempt_id
 - created_at / updated_at
 
-MVP 只保存一张六宫格总图，不裁 frame。未来支持重新预览时，可允许一个 styling 下多条 preview。
+MVP 只保存一张分镜预览总图，不裁 frame。支持重新生成分镜预览；新预览成功后旧成片失效但保留。
 
-### 2.9 GenerationResultSet
+### 2.10 GenerationResultSet
 
 - id
 - task_id
 - input_version_id
 - styling_id
-- preview_id
+- shoot_script_id
+- storyboard_preview_id
 - status
 - created_at / updated_at
 
-### 2.10 GenerationResultImage
+### 2.11 GenerationResultImage
 
 - id
 - result_set_id
@@ -287,7 +309,7 @@ MVP 只保存一张六宫格总图，不裁 frame。未来支持重新预览时�
 
 固定 5 条，对应前 5 个 ShotPlan。
 
-### 2.11 GenerationAttempt
+### 2.12 GenerationAttempt
 
 可统一承载 Gemini 和 Image-2 调用：
 
@@ -323,9 +345,9 @@ MVP 只保存一张六宫格总图，不裁 frame。未来支持重新预览时�
 - `library adequacy service`：基于候选排除原因和可用候选统计，判断库内是否有更好搭配、是否应空选搭或补库。
 - `AI Stylist service`：组装主推款图片、小候选集、候选缩略图、outfit 草案、品牌证据和商品验收维度，调用 Gemini 生成 `StylingPlan`。
 - `aesthetic critic service`：校验 `StylingPlan` 的基础业务事实，并把可穿性、审美成立性、品牌成立性、主推款可见性和商业可用性问题记录为质量信号。
-- `shot plan service`：基于 `StylingPlan` 生成 6 条 ShotPlan。
+- `shoot script service`：基于 `StylingPlan`、品牌规则、品类图位规则、数字模特和搭配风险生成 ShootScript 与 6 条 ShotPlan。
 - `image input selector`：按阶段选择最多 10 张 Image-2 输入图。
-- `image generation service`：六宫格预览和最终图生成。
+- `image generation service`：分镜预览和最终图生成。
 - `attempt service`：provider 调用、重试、耗时、错误和快照。
 - `history service`：生成记录列表、详情、技术详情。
 
@@ -482,7 +504,7 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 - 品牌棚拍边界。
 - 主推品类对应的 `category_shot_rules.md` 图位矩阵。
 
-输出：6 条结构化 ShotPlan。
+输出：一个 ShootScript 和 6 条结构化 ShotPlan。
 
 校验：
 
@@ -490,13 +512,13 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 - 每条 `main_focus` 必须服务主推款卖点，不能让搭配服饰成为默认主角。
 - 裤装、半裙、短裤等下装必须包含腰脚或腰膝近景；上衣必须包含臀上/胸腰近景；连衣裙必须保留完整比例和腰线/裙摆说明。
 
-### 5.4 Image-2 六宫格预览
+### 5.4 Image-2 分镜预览
 
-输出一张 3x2 六宫格总图。MVP 不裁切 frame。
+输出一张 3x2 分镜预览总图。MVP 不裁切 frame。
 
 ### 5.5 Image-2 最终图
 
-并发生成前 5 张。每张传同一张六宫格预览图，并在 prompt 中指定参考第 N 格。
+并发生成前 5 张。每张传同一张分镜预览图，并在 prompt 中指定参考第 N 格。分镜预览只提供姿势、身位、景别、构图、背景和光影方向，不作为商品事实来源。
 
 ### 5.6 阶段性实施计划
 
@@ -549,7 +571,7 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 - 当前主推款自己不会出现在可选搭配候选中。
 - 四个不同主推品类任务不会得到同一组 outfit 草案。
 - 搭配不好时可从 `LibraryAdequacyReport` 判断是否库内确实没有更优候选。
-- 裤装六宫格不再出现 4 张以上重复全身图。
+- 裤装分镜预览不再出现 4 张以上重复全身图。
 - AI Stylist 不允许在缺少穿法证据或官方样本证据时给四项满分。
 
 #### 阶段 2：Lily 官方样本库

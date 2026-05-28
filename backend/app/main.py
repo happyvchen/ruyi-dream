@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 import secrets
+import sqlite3
 from tempfile import TemporaryDirectory
 import time
 from uuid import uuid4
@@ -47,6 +48,7 @@ settings = get_settings()
 logger = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = settings.max_upload_image_pixels
 SESSION_ROLES = {"user", "admin"}
+SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES = {"unknown", "unsupported_accessory"}
 
 
 def is_request_authenticated(request: Request) -> bool:
@@ -268,6 +270,14 @@ class BrandInfoUpsertRequest(BaseModel):
     negativeConstraints: str | None = None
 
 
+class ShootConfigUpdateRequest(BaseModel):
+    config: dict[str, Any]
+
+
+class ShootConfigImportRequest(BaseModel):
+    config: dict[str, Any]
+
+
 class TaxonomyDimensionUpdateRequest(BaseModel):
     labelZh: str | None = None
     descriptionZh: str | None = None
@@ -379,7 +389,7 @@ UNASSIGNED_HEAD_REFERENCE_PREFIX = "__unassigned__"
 
 ACTIVE_IMAGE_STATUSES = {"QUEUED", "SUBMITTED", "IN_QUEUE", "IN_PROGRESS", "RUNNING"}
 TERMINAL_IMAGE_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
-RUNNING_GENERATION_TASK_STATUSES = {"STYLING_RUNNING", "PREVIEW_RUNNING", "FINAL_RUNNING"}
+RUNNING_GENERATION_TASK_STATUSES = {"STYLING_RUNNING", "SCRIPT_RUNNING", "PREVIEW_RUNNING", "FINAL_RUNNING"}
 PLANNING_STATUSES = {"PLANNING"}
 REVIEW_STATUSES = {"candidate", "approved", "needs_regen", "needs_retouch", "delivered"}
 TAXONOMY_TAGGING_SCHEMA_VERSION = "ruyi-taxonomy-tagging-v1"
@@ -1540,12 +1550,13 @@ def generation_task_delete_impact(db: Any, task_ids: list[int]) -> dict[str, Any
           (SELECT COUNT(*) FROM generation_task_images WHERE task_id IN ({placeholders})) AS task_image_count,
           (SELECT COUNT(*) FROM generation_task_input_versions WHERE task_id IN ({placeholders})) AS input_version_count,
           (SELECT COUNT(*) FROM generation_stylings WHERE task_id IN ({placeholders})) AS styling_count,
+          (SELECT COUNT(*) FROM generation_shoot_scripts WHERE task_id IN ({placeholders})) AS shoot_script_count,
           (SELECT COUNT(*) FROM generation_shot_plans WHERE task_id IN ({placeholders})) AS shot_plan_count,
           (SELECT COUNT(*) FROM generation_previews WHERE task_id IN ({placeholders})) AS preview_count,
           (SELECT COUNT(*) FROM generation_result_sets WHERE task_id IN ({placeholders})) AS result_set_count,
           (SELECT COUNT(*) FROM generation_result_images_new gri JOIN generation_result_sets grs ON grs.id = gri.result_set_id WHERE grs.task_id IN ({placeholders})) AS result_image_count
         """,
-        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
+        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
     ).fetchone()
     asset_rows = db.execute(
         f"""
@@ -1560,6 +1571,9 @@ def generation_task_delete_impact(db: Any, task_ids: list[int]) -> dict[str, Any
         SELECT output_asset_id AS asset_id FROM generation_attempts
         WHERE output_asset_id IS NOT NULL AND (
              (owner_type = 'generation_styling' AND owner_id IN ({placeholders}))
+             OR (owner_type = 'generation_shoot_script' AND owner_id IN (
+                  SELECT id FROM generation_shoot_scripts WHERE task_id IN ({placeholders})
+                ))
              OR (owner_type = 'generation_preview' AND owner_id IN (
                   SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
                 ))
@@ -1570,7 +1584,7 @@ def generation_task_delete_impact(db: Any, task_ids: list[int]) -> dict[str, Any
                 ))
         )
         """,
-        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
+        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
     ).fetchall()
     asset_ids = list(dict.fromkeys(int(asset["asset_id"]) for asset in asset_rows if asset["asset_id"] is not None))
     media_rows = media_asset_rows_for_ids(db, asset_ids)
@@ -1580,6 +1594,7 @@ def generation_task_delete_impact(db: Any, task_ids: list[int]) -> dict[str, Any
         "taskImageCount": int(row["task_image_count"] or 0),
         "inputVersionCount": int(row["input_version_count"] or 0),
         "stylingCount": int(row["styling_count"] or 0),
+        "shootScriptCount": int(row["shoot_script_count"] or 0),
         "shotPlanCount": int(row["shot_plan_count"] or 0),
         "previewCount": int(row["preview_count"] or 0),
         "resultSetCount": int(row["result_set_count"] or 0),
@@ -1858,7 +1873,16 @@ def cancel_generation_task(task_id: int) -> dict[str, Any]:
 
         cancelled_preview_count = 0
         cancelled_image_count = 0
-        if row["status"] == "PREVIEW_RUNNING":
+        if row["status"] == "SCRIPT_RUNNING":
+            db.execute(
+                """
+                UPDATE generation_shoot_scripts
+                SET status = 'CANCELLED', locked_by = NULL, locked_until = NULL, updated_at = ?
+                WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING')
+                """,
+                (timestamp, task_id),
+            )
+        elif row["status"] == "PREVIEW_RUNNING":
             preview_cursor = db.execute(
                 """
                 UPDATE generation_previews
@@ -1970,6 +1994,9 @@ def cancel_running_task_attempts(db: Any, task_id: int, timestamp: str) -> None:
         WHERE status = 'RUNNING'
           AND (
             (owner_type = 'generation_styling' AND owner_id = ?)
+            OR (owner_type = 'generation_shoot_script' AND owner_id IN (
+              SELECT id FROM generation_shoot_scripts WHERE task_id = ?
+            ))
             OR (owner_type = 'generation_preview' AND owner_id IN (
               SELECT id FROM generation_previews WHERE task_id = ?
             ))
@@ -1981,7 +2008,7 @@ def cancel_running_task_attempts(db: Any, task_id: int, timestamp: str) -> None:
             ))
           )
         """,
-        (timestamp, timestamp, task_id, task_id, task_id),
+        (timestamp, timestamp, task_id, task_id, task_id, task_id),
     )
 
 
@@ -2021,6 +2048,9 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[di
         SELECT output_asset_id AS asset_id FROM generation_attempts
         WHERE output_asset_id IS NOT NULL AND (
              (owner_type = 'generation_styling' AND owner_id IN ({placeholders}))
+             OR (owner_type = 'generation_shoot_script' AND owner_id IN (
+                  SELECT id FROM generation_shoot_scripts WHERE task_id IN ({placeholders})
+                ))
              OR (owner_type = 'generation_preview' AND owner_id IN (
                   SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
                 ))
@@ -2031,7 +2061,7 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[di
                 ))
         )
         """,
-        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
+        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
     ).fetchall()
     asset_ids = list(dict.fromkeys(int(row["asset_id"]) for row in asset_rows if row["asset_id"] is not None))
     media_rows = media_asset_rows_for_ids(db, asset_ids)
@@ -2041,6 +2071,9 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[di
         f"""
         DELETE FROM generation_attempts
         WHERE (owner_type = 'generation_styling' AND owner_id IN ({placeholders}))
+           OR (owner_type = 'generation_shoot_script' AND owner_id IN (
+                SELECT id FROM generation_shoot_scripts WHERE task_id IN ({placeholders})
+              ))
            OR (owner_type = 'generation_preview' AND owner_id IN (
                 SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
               ))
@@ -2050,7 +2083,7 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[di
                 WHERE grs.task_id IN ({placeholders})
               ))
         """,
-        (*task_ids, *task_ids, *task_ids),
+        (*task_ids, *task_ids, *task_ids, *task_ids),
     )
     rows = get_generation_task_rows_for_mutation(db, task_ids)
     db.execute(f"DELETE FROM generation_tasks WHERE id IN ({placeholders})", task_ids)
@@ -2274,6 +2307,8 @@ async def select_generation_styling(task_id: int) -> dict[str, Any]:
             SET status = 'STYLING_READY',
                 current_input_version_id = ?,
                 active_styling_id = ?,
+                active_shoot_script_id = NULL,
+                active_storyboard_preview_id = NULL,
                 active_preview_id = NULL,
                 active_result_set_id = NULL,
                 updated_at = ?
@@ -2285,44 +2320,269 @@ async def select_generation_styling(task_id: int) -> dict[str, Any]:
     return {"item": get_generation_task_by_id(task_id, include_debug=True)}
 
 
-@app.post("/api/generation-tasks/{task_id}/preview")
-async def create_generation_preview(task_id: int) -> dict[str, Any]:
+@app.post("/api/generation-tasks/{task_id}/shoot-script")
+async def create_generation_shoot_script(task_id: int) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     styling_id = task["active_styling_id"]
     input_version_id = task["current_input_version_id"]
-    if not styling_id or not input_version_id or (
-        task["status"] not in {"STYLING_READY", "PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
-        and not (task["status"] == "FAILED" and not task["active_preview_id"])
-    ):
-        raise HTTPException(status_code=409, detail="请先完成智能选搭")
-    with get_db() as db:
-        db.execute(
-            "UPDATE generation_tasks SET status = 'PREVIEW_RUNNING', active_result_set_id = NULL, updated_at = ? WHERE id = ?",
-            (now_iso(), task_id),
-        )
-    shot_plans = ensure_generation_shot_plans(task_id, int(styling_id))
+    if not styling_id or not input_version_id or task["status"] not in {
+        "STYLING_READY",
+        "SCRIPT_READY",
+        "PREVIEW_READY",
+        "COMPLETED",
+        "FINAL_PARTIAL",
+        "FAILED",
+        "CANCELLED",
+    }:
+        raise HTTPException(status_code=409, detail="请先完成 AI 智能选搭")
     timestamp = now_iso()
     with get_db() as db:
         cursor = db.execute(
             """
-            INSERT INTO generation_previews (task_id, styling_id, input_version_id, status, created_at, updated_at)
-            VALUES (?, ?, ?, 'RUNNING', ?, ?)
+            INSERT INTO generation_shoot_scripts
+              (task_id, input_version_id, styling_id, status, script_json, summary_json,
+               styling_risks_json, accessory_adjustments_json, created_at, updated_at)
+            VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?)
             """,
-            (task_id, styling_id, input_version_id, timestamp, timestamp),
+            (
+                task_id,
+                input_version_id,
+                styling_id,
+                dumps({}),
+                dumps({}),
+                dumps([]),
+                dumps([]),
+                timestamp,
+                timestamp,
+            ),
+        )
+        shoot_script_id = int(cursor.lastrowid)
+        db.execute(
+            "UPDATE generation_tasks SET status = 'SCRIPT_RUNNING', updated_at = ? WHERE id = ?",
+            (timestamp, task_id),
+        )
+    attempt_id = create_attempt("generation_shoot_script", shoot_script_id, "gemini")
+    with get_db() as db:
+        db.execute("UPDATE generation_shoot_scripts SET active_attempt_id = ? WHERE id = ?", (attempt_id, shoot_script_id))
+    try:
+        request_snapshot = build_shoot_script_request_snapshot(task_id, int(styling_id), int(input_version_id))
+        update_attempt_request_snapshot(attempt_id, request_snapshot)
+        shoot_script = await generate_shoot_script_with_gemini(request_snapshot)
+        shoot_script = normalize_shoot_script(shoot_script, request_snapshot)
+        validate_shoot_script(shoot_script)
+        shot_plans = shoot_script_to_generation_shot_plans(shoot_script)
+    except Exception as exc:
+        if shoot_script_generation_cancelled(task_id, shoot_script_id, attempt_id):
+            finish_attempt(attempt_id, "CANCELLED", error_message="拍摄剧本生成已取消")
+            mark_shoot_script_generation_cancelled(shoot_script_id)
+            return {"item": get_generation_task_by_id(task_id, include_debug=True)}
+        finish_attempt(attempt_id, "FAILED", error_message=str(exc))
+        with get_db() as db:
+            previous_active = db.execute("SELECT active_shoot_script_id FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
+            fallback_status = "SCRIPT_READY" if previous_active and previous_active["active_shoot_script_id"] else "FAILED"
+            db.execute(
+                """
+                UPDATE generation_shoot_scripts
+                SET status = 'FAILED', updated_at = ?
+                WHERE id = ?
+                """,
+                (now_iso(), shoot_script_id),
+            )
+            db.execute("UPDATE generation_tasks SET status = ?, updated_at = ? WHERE id = ?", (fallback_status, now_iso(), task_id))
+        raise HTTPException(status_code=502, detail=f"拍摄剧本生成失败：{exc}") from exc
+    if shoot_script_generation_cancelled(task_id, shoot_script_id, attempt_id):
+        finish_attempt(attempt_id, "CANCELLED", error_message="拍摄剧本生成已取消")
+        mark_shoot_script_generation_cancelled(shoot_script_id)
+        return {"item": get_generation_task_by_id(task_id, include_debug=True)}
+    cancelled_after_provider_return = False
+    status_changed_after_provider_return = False
+    with get_db() as db:
+        timestamp = now_iso()
+        success_cursor = db.execute(
+            """
+            UPDATE generation_shoot_scripts
+            SET status = 'SUCCEEDED',
+                script_json = ?,
+                summary_json = ?,
+                styling_risks_json = ?,
+                accessory_adjustments_json = ?,
+                active_attempt_id = ?,
+                updated_at = ?
+            WHERE id = ?
+              AND status = 'RUNNING'
+              AND NOT EXISTS (
+                SELECT 1 FROM generation_tasks
+                WHERE id = ? AND status = 'CANCELLED'
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM generation_attempts
+                WHERE id = ? AND status = 'CANCELLED'
+              )
+            """,
+            (
+                dumps(shoot_script),
+                dumps(shoot_script.get("user_visible_summary") or {}),
+                dumps(shoot_script.get("styling_risks") or []),
+                dumps(shoot_script.get("accessory_adjustments") or []),
+                attempt_id,
+                timestamp,
+                shoot_script_id,
+                task_id,
+                attempt_id,
+            ),
+        )
+        if int(success_cursor.rowcount or 0) == 0:
+            current = db.execute(
+                """
+                SELECT gt.status AS task_status,
+                       gss.status AS shoot_script_status,
+                       ga.status AS attempt_status
+                FROM generation_tasks gt
+                LEFT JOIN generation_shoot_scripts gss ON gss.id = ?
+                LEFT JOIN generation_attempts ga ON ga.id = ?
+                WHERE gt.id = ?
+                """,
+                (shoot_script_id, attempt_id, task_id),
+            ).fetchone()
+            if (
+                not current
+                or current["task_status"] == "CANCELLED"
+                or current["shoot_script_status"] == "CANCELLED"
+                or current["attempt_status"] == "CANCELLED"
+            ):
+                cancelled_after_provider_return = True
+                db.execute(
+                    """
+                    UPDATE generation_attempts
+                    SET status = 'CANCELLED',
+                        cancelled_at = COALESCE(cancelled_at, ?),
+                        error_message = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (timestamp, "拍摄剧本生成已取消", timestamp, attempt_id),
+                )
+                db.execute(
+                    """
+                    UPDATE generation_shoot_scripts
+                    SET status = 'CANCELLED', locked_by = NULL, locked_until = NULL, updated_at = ?
+                    WHERE id = ? AND status IN ('QUEUED', 'RUNNING', 'CANCELLED')
+                    """,
+                    (timestamp, shoot_script_id),
+                )
+            else:
+                status_changed_after_provider_return = True
+                db.execute(
+                    """
+                    UPDATE generation_attempts
+                    SET status = 'FAILED',
+                        failed_at = COALESCE(failed_at, ?),
+                        error_message = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (timestamp, "拍摄剧本生成状态已变更", timestamp, attempt_id),
+                )
+        else:
+            db.execute(
+                """
+                UPDATE generation_shoot_scripts
+                SET status = 'SUPERSEDED', superseded_at = ?, updated_at = ?
+                WHERE task_id = ? AND id <> ? AND status = 'SUCCEEDED'
+                """,
+                (timestamp, timestamp, task_id, shoot_script_id),
+            )
+            db.execute(
+                """
+                UPDATE generation_previews
+                SET status = 'SUPERSEDED', updated_at = ?
+                WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
+                """,
+                (timestamp, task_id),
+            )
+            db.execute(
+                """
+                UPDATE generation_result_sets
+                SET status = 'SUPERSEDED', updated_at = ?
+                WHERE task_id = ? AND status IN ('RUNNING', 'SUCCEEDED', 'PARTIAL', 'FAILED')
+                """,
+                (timestamp, task_id),
+            )
+            for plan in shot_plans:
+                db.execute(
+                    """
+                    INSERT INTO generation_shot_plans
+                      (task_id, styling_id, shoot_script_id, sort_order, shot_type, plan_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_id,
+                        styling_id,
+                        shoot_script_id,
+                        plan["sortOrder"],
+                        plan["shotType"],
+                        dumps(plan),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            db.execute(
+                """
+                UPDATE generation_tasks
+                SET status = 'SCRIPT_READY',
+                    active_shoot_script_id = ?,
+                    active_storyboard_preview_id = NULL,
+                    active_preview_id = NULL,
+                    active_result_set_id = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (shoot_script_id, timestamp, task_id),
+            )
+    if cancelled_after_provider_return:
+        return {"item": get_generation_task_by_id(task_id, include_debug=True)}
+    if status_changed_after_provider_return:
+        raise HTTPException(status_code=409, detail="拍摄剧本生成状态已变更，请刷新后重试")
+    finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=shoot_script)
+    return {"item": get_generation_task_by_id(task_id, include_debug=True)}
+
+
+@app.post("/api/generation-tasks/{task_id}/preview")
+async def create_generation_preview(task_id: int) -> dict[str, Any]:
+    task = get_generation_task_row(task_id)
+    styling_id = task["active_styling_id"]
+    shoot_script_id = task["active_shoot_script_id"] if "active_shoot_script_id" in task.keys() else None
+    input_version_id = task["current_input_version_id"]
+    if not styling_id or not shoot_script_id or not input_version_id or (
+        task["status"] not in {"SCRIPT_READY", "PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
+        and not (task["status"] == "FAILED" and not task["active_storyboard_preview_id"])
+    ):
+        raise HTTPException(status_code=409, detail="请先生成拍摄剧本")
+    with get_db() as db:
+        db.execute("UPDATE generation_tasks SET status = 'PREVIEW_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
+    shot_plans = get_task_shot_plans_by_script(int(shoot_script_id))
+    timestamp = now_iso()
+    with get_db() as db:
+        cursor = db.execute(
+            """
+            INSERT INTO generation_previews (task_id, styling_id, shoot_script_id, input_version_id, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'RUNNING', ?, ?)
+            """,
+            (task_id, styling_id, shoot_script_id, input_version_id, timestamp, timestamp),
         )
         preview_id = int(cursor.lastrowid)
     attempt_id = create_attempt("generation_preview", preview_id, "image-2")
     lease_generation_preview(preview_id, attempt_id)
     schedule_background_generation(
-        run_preview_generation(task_id, int(styling_id), shot_plans, preview_id, attempt_id),
+        run_preview_generation(task_id, int(styling_id), int(shoot_script_id), shot_plans, preview_id, attempt_id),
         job_key=preview_job_key(preview_id),
     )
     return {"item": get_generation_task_by_id(task_id, include_debug=True)}
 
 
-async def run_preview_generation(task_id: int, styling_id: int, shot_plans: list[Any], preview_id: int, attempt_id: int) -> None:
+async def run_preview_generation(task_id: int, styling_id: int, shoot_script_id: int, shot_plans: list[Any], preview_id: int, attempt_id: int) -> None:
     try:
-        task_package = build_new_preview_task_package(task_id, styling_id, shot_plans)
+        task_package = build_new_preview_task_package(task_id, styling_id, shoot_script_id, shot_plans)
         asset_id, provider_response = await generate_image_asset(task_package, join_key("generation-tasks", str(task_id), "preview", f"preview-{preview_id}.png"))
     except Exception as exc:
         provider_response = getattr(exc, "provider_response", None)
@@ -2382,8 +2642,32 @@ async def run_preview_generation(task_id: int, styling_id: int, shot_plans: list
             (asset_id, attempt_id, timestamp, preview_id),
         )
         db.execute(
-            "UPDATE generation_tasks SET status = 'PREVIEW_READY', active_preview_id = ?, updated_at = ? WHERE id = ?",
-            (preview_id, timestamp, task_id),
+            """
+            UPDATE generation_previews
+            SET status = 'SUPERSEDED', updated_at = ?
+            WHERE task_id = ? AND id <> ? AND status = 'SUCCEEDED'
+            """,
+            (timestamp, task_id, preview_id),
+        )
+        db.execute(
+            """
+            UPDATE generation_result_sets
+            SET status = 'SUPERSEDED', updated_at = ?
+            WHERE task_id = ? AND status IN ('RUNNING', 'SUCCEEDED', 'PARTIAL', 'FAILED')
+            """,
+            (timestamp, task_id),
+        )
+        db.execute(
+            """
+            UPDATE generation_tasks
+            SET status = 'PREVIEW_READY',
+                active_preview_id = ?,
+                active_storyboard_preview_id = ?,
+                active_result_set_id = NULL,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (preview_id, preview_id, timestamp, task_id),
         )
 
 
@@ -2392,29 +2676,39 @@ async def generate_final_images(task_id: int) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     if (
         task["status"] not in {"PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
-        or not task["active_preview_id"]
+        or not task["active_storyboard_preview_id"]
         or not task["active_styling_id"]
+        or not task["active_shoot_script_id"]
         or not task["current_input_version_id"]
     ):
-        raise HTTPException(status_code=409, detail="请先生成六宫格预览")
-    preview_id = int(task["active_preview_id"])
+        raise HTTPException(status_code=409, detail="请先生成分镜预览")
+    preview_id = int(task["active_storyboard_preview_id"])
     styling_id = int(task["active_styling_id"])
+    shoot_script_id = int(task["active_shoot_script_id"])
     input_version_id = int(task["current_input_version_id"])
     timestamp = now_iso()
     with get_db() as db:
         db.execute("UPDATE generation_tasks SET status = 'FINAL_RUNNING', updated_at = ? WHERE id = ?", (timestamp, task_id))
         cursor = db.execute(
             """
-            INSERT INTO generation_result_sets (task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'RUNNING', ?, ?)
+            INSERT INTO generation_result_sets (task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'RUNNING', ?, ?)
             """,
-            (task_id, input_version_id, styling_id, preview_id, timestamp, timestamp),
+            (task_id, input_version_id, styling_id, shoot_script_id, preview_id, timestamp, timestamp),
         )
         result_set_id = int(cursor.lastrowid)
+        db.execute(
+            """
+            UPDATE generation_result_sets
+            SET status = 'SUPERSEDED', updated_at = ?
+            WHERE task_id = ? AND id <> ? AND status IN ('SUCCEEDED', 'PARTIAL', 'FAILED')
+            """,
+            (timestamp, task_id, result_set_id),
+        )
         db.execute("UPDATE generation_tasks SET active_result_set_id = ?, updated_at = ? WHERE id = ?", (result_set_id, timestamp, task_id))
         shot_rows = db.execute(
-            "SELECT * FROM generation_shot_plans WHERE styling_id = ? AND sort_order <= 5 ORDER BY sort_order",
-            (styling_id,),
+            "SELECT * FROM generation_shot_plans WHERE shoot_script_id = ? AND sort_order <= 5 ORDER BY sort_order",
+            (shoot_script_id,),
         ).fetchall()
         image_ids: list[int] = []
         for shot in shot_rows:
@@ -2491,8 +2785,8 @@ async def retry_new_result_image(image_id: int) -> dict[str, Any]:
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="结果图不存在")
-        if row["status"] != "FAILED":
-            raise HTTPException(status_code=409, detail="只有失败的结果图可以重试")
+        if row["status"] in {"QUEUED", "RUNNING"}:
+            raise HTTPException(status_code=409, detail="当前结果图仍在生成中")
         timestamp = now_iso()
         db.execute(
             """
@@ -2637,6 +2931,71 @@ def delete_brand_info(request: Request) -> dict[str, Any]:
     return {"ok": True}
 
 
+@app.get("/api/shoot-config")
+def get_shoot_config(request: Request) -> dict[str, Any]:
+    require_admin(request)
+    return {"item": serialize_shoot_config(get_active_shoot_config())}
+
+
+@app.get("/api/shoot-config/export")
+def export_shoot_config(request: Request) -> dict[str, Any]:
+    require_admin(request)
+    config = normalize_shoot_config_payload(get_active_shoot_config())
+    return {
+        "schemaVersion": "ruyi-shoot-config-v1",
+        "config": config,
+        "categoryOptionsSnapshot": get_shoot_config_category_options(),
+    }
+
+
+@app.get("/api/shoot-config/prompt-card")
+def get_shoot_config_prompt_card(request: Request) -> dict[str, Any]:
+    require_admin(request)
+    return {
+        "content": build_active_shoot_config_prompt_card(),
+    }
+
+
+@app.patch("/api/shoot-config")
+def update_shoot_config(payload: ShootConfigUpdateRequest, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    config = normalize_shoot_config_payload(payload.config)
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute(
+            """
+            INSERT INTO shoot_configs (id, config_json, created_at, updated_at)
+            VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              config_json = excluded.config_json,
+              updated_at = excluded.updated_at
+            """,
+            (dumps(config), timestamp, timestamp),
+        )
+        log_event(db, "shoot_config", 1, "updated", {"schemaVersion": config["schemaVersion"]})
+    return {"item": serialize_shoot_config(config)}
+
+
+@app.post("/api/shoot-config/import")
+def import_shoot_config(payload: ShootConfigImportRequest, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    config = normalize_shoot_config_payload(payload.config)
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute(
+            """
+            INSERT INTO shoot_configs (id, config_json, created_at, updated_at)
+            VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              config_json = excluded.config_json,
+              updated_at = excluded.updated_at
+            """,
+            (dumps(config), timestamp, timestamp),
+        )
+        log_event(db, "shoot_config", 1, "imported", {"schemaVersion": config["schemaVersion"]})
+    return {"item": serialize_shoot_config(config)}
+
+
 @app.get("/api/taxonomy/rules")
 def get_taxonomy_rules(request: Request) -> dict[str, Any]:
     require_admin(request)
@@ -2731,14 +3090,10 @@ def export_taxonomy_rules(request: Request) -> dict[str, Any]:
 
 
 @app.get("/api/taxonomy/prompt-card")
-def get_taxonomy_prompt_card(request: Request, mode: str = Query("compact")) -> dict[str, Any]:
+def get_taxonomy_prompt_card(request: Request) -> dict[str, Any]:
     require_admin(request)
-    normalized_mode = mode.strip().lower()
-    if normalized_mode not in {"full", "compact"}:
-        raise HTTPException(status_code=400, detail="Prompt 格式仅支持 full 或 compact")
     return {
-        "mode": normalized_mode,
-        "content": build_active_taxonomy_prompt_card(normalized_mode),
+        "content": build_active_taxonomy_prompt_card(),
     }
 
 
@@ -5674,7 +6029,7 @@ def build_taxonomy_tagging_prompt(garment: dict[str, Any], taxonomy_context: dic
         },
         "schema_version": TAXONOMY_TAGGING_SCHEMA_VERSION,
     }
-    taxonomy_card = render_compact_taxonomy_prompt_card(taxonomy_context)
+    taxonomy_card = build_taxonomy_prompt_card_from_context(taxonomy_context)
     return f"""
 你是 Ruyi-Dream 的服装视觉生产资产打标专家。你的任务是把真实服装图片转成可追溯、可校验、可用于智能选搭的结构化标签。
 
@@ -6467,6 +6822,40 @@ def generation_task_or_attempt_cancelled(task_id: int, attempt_id: int) -> bool:
     return not row or row["task_status"] == "CANCELLED" or row["attempt_status"] == "CANCELLED"
 
 
+def shoot_script_generation_cancelled(task_id: int, shoot_script_id: int, attempt_id: int) -> bool:
+    with get_db() as db:
+        row = db.execute(
+            """
+            SELECT gt.status AS task_status,
+                   gss.status AS shoot_script_status,
+                   ga.status AS attempt_status
+            FROM generation_tasks gt
+            LEFT JOIN generation_shoot_scripts gss ON gss.id = ?
+            LEFT JOIN generation_attempts ga ON ga.id = ?
+            WHERE gt.id = ?
+            """,
+            (shoot_script_id, attempt_id, task_id),
+        ).fetchone()
+    return (
+        not row
+        or row["task_status"] == "CANCELLED"
+        or row["shoot_script_status"] == "CANCELLED"
+        or row["attempt_status"] == "CANCELLED"
+    )
+
+
+def mark_shoot_script_generation_cancelled(shoot_script_id: int) -> None:
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE generation_shoot_scripts
+            SET status = 'CANCELLED', locked_by = NULL, locked_until = NULL, updated_at = ?
+            WHERE id = ? AND status IN ('QUEUED', 'RUNNING', 'CANCELLED')
+            """,
+            (now_iso(), shoot_script_id),
+        )
+
+
 def finish_attempt(
     attempt_id: int,
     status: str,
@@ -7245,7 +7634,16 @@ def normalize_brand_evidence(value: Any, candidate_snapshot: dict[str, Any]) -> 
 
 def normalize_hero_category(value: Any) -> str:
     category = str(value or "unknown").strip()
-    allowed = {"top", "bottom", "dress", "jumpsuit", "outerwear", "knitwear", "suit_set", "other_garment", "unknown"}
+    fallback_allowed = {"top", "bottom", "skirt", "shorts", "dress", "jumpsuit", "outerwear", "knitwear", "suit_set", "other_garment", "unknown"}
+    try:
+        active_category_codes = {
+            str(option["code"])
+            for option in get_shoot_config_category_options()
+            if option.get("dimensionCode") == "category" and option.get("isActive")
+        }
+    except Exception:
+        active_category_codes = set()
+    allowed = active_category_codes or fallback_allowed
     return category if category in allowed else "unknown"
 
 
@@ -7584,6 +7982,218 @@ def ensure_generation_shot_plans(task_id: int, styling_id: int) -> list[dict[str
     return [serialize_new_shot_plan(row) for row in rows]
 
 
+def default_shoot_config() -> dict[str, Any]:
+    return {
+        "schemaVersion": "shoot-config-v2",
+        "globalRules": [
+            {"id": "brand_tone", "label": "品牌调性", "value": "Lily 商务时装，现代、干净、轻熟、自信、克制，商品优先。", "enabled": True, "sortOrder": 10},
+            {"id": "background", "label": "背景", "value": "白色或浅灰棚拍背景，背景不抢服装主体。", "enabled": True, "sortOrder": 20},
+            {"id": "lighting", "label": "光线", "value": "柔和均匀、低反差、真实肤色，服装边缘和结构清楚。", "enabled": True, "sortOrder": 30},
+            {"id": "model", "label": "模特导演", "value": "同一位数字模特，自然、自信、从容、克制。", "enabled": True, "sortOrder": 40},
+            {"id": "hair_makeup", "label": "妆发边界", "value": "保持数字模特原有脸型、五官、头型、发型和气质。", "enabled": True, "sortOrder": 50},
+            {"id": "accessory", "label": "配饰边界", "value": "鞋包首饰低存在感，可省略；不得遮挡主推款卖点。", "enabled": True, "sortOrder": 60},
+            {"id": "consistency", "label": "一致性规则", "value": "6 个镜头必须是同一位模特、同一套造型、同一背景光线体系。", "enabled": True, "sortOrder": 70},
+            {"id": "product_fidelity", "label": "商品保真规则", "value": "主推款图片是主角商品事实来源。选中搭配服饰图片是配角商品事实来源。", "enabled": True, "sortOrder": 80},
+            {"id": "negative", "label": "负向约束", "value": "不要文字、水印、logo、编号和边框说明。不要改款换色。不要让生成配饰成为视觉中心。", "enabled": True, "sortOrder": 90},
+        ],
+        "defaultShotRule": {"shots": shot_template_to_config_rules(build_builtin_category_shot_template("other_garment"))},
+        "categoryShotRules": [
+            {"categoryDimensionCode": "category", "categoryTagCode": category, "shots": shot_template_to_config_rules(build_builtin_category_shot_template(category))}
+            for category in ["bottom", "skirt", "shorts", "top", "knitwear", "outerwear", "dress", "suit_set"]
+        ],
+    }
+
+
+def shot_template_to_config_rules(template: list[tuple[str, str, str, str, str]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "shotType": shot_type,
+            "shotRoleLabel": f"镜头 {index}",
+            "framing": framing,
+            "pose": pose,
+            "cameraAngle": angle,
+            "mainFocus": focus,
+        }
+        for index, (shot_type, framing, pose, angle, focus) in enumerate(template[:6], start=1)
+    ]
+
+
+def get_active_shoot_config() -> dict[str, Any]:
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT config_json FROM shoot_configs WHERE id = 1").fetchone()
+    except sqlite3.OperationalError:
+        return default_shoot_config()
+    if not row:
+        return default_shoot_config()
+    return normalize_shoot_config_payload(loads(row["config_json"], {}))
+
+
+def serialize_shoot_config(config: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_shoot_config_payload(config)
+    normalized["categoryOptions"] = get_shoot_config_category_options()
+    return normalized
+
+
+def normalize_shoot_config_payload(config: dict[str, Any]) -> dict[str, Any]:
+    source = config if isinstance(config, dict) else {}
+    fallback = default_shoot_config()
+    if "globalDirecting" in source or isinstance(source.get("categoryShotRules"), dict):
+        source = migrate_shoot_config_v1_to_v2(source)
+    normalized = {
+        "schemaVersion": "shoot-config-v2",
+        "globalRules": normalize_shoot_config_global_rules(source.get("globalRules"), fallback["globalRules"]),
+        "defaultShotRule": {
+            "shots": normalize_shoot_config_category_rules(
+                ((source.get("defaultShotRule") or {}).get("shots") if isinstance(source.get("defaultShotRule"), dict) else None),
+                fallback["defaultShotRule"]["shots"],
+            )
+        },
+        "categoryShotRules": normalize_shoot_config_category_rule_overrides(source.get("categoryShotRules"), fallback["categoryShotRules"]),
+    }
+    return normalized
+
+
+def migrate_shoot_config_v1_to_v2(source: dict[str, Any]) -> dict[str, Any]:
+    global_source = source.get("globalDirecting") if isinstance(source.get("globalDirecting"), dict) else {}
+    global_rules = [
+        {"id": "brand_tone", "label": "品牌调性", "value": str(global_source.get("brandTone") or ""), "enabled": True, "sortOrder": 10},
+        {"id": "background", "label": "背景", "value": str(global_source.get("background") or ""), "enabled": True, "sortOrder": 20},
+        {"id": "lighting", "label": "光线", "value": str(global_source.get("lighting") or ""), "enabled": True, "sortOrder": 30},
+        {"id": "model", "label": "模特导演", "value": str(global_source.get("modelDirection") or ""), "enabled": True, "sortOrder": 40},
+        {"id": "hair_makeup", "label": "妆发边界", "value": str(global_source.get("hairMakeupBoundary") or ""), "enabled": True, "sortOrder": 50},
+        {"id": "accessory", "label": "配饰边界", "value": str(global_source.get("accessoryBoundary") or ""), "enabled": True, "sortOrder": 60},
+        {"id": "consistency", "label": "一致性规则", "value": "。".join(ensure_string_list(global_source.get("consistencyRules"))), "enabled": True, "sortOrder": 70},
+        {"id": "product_fidelity", "label": "商品保真规则", "value": "。".join(ensure_string_list(global_source.get("productFidelityRules"))), "enabled": True, "sortOrder": 80},
+        {"id": "negative", "label": "负向约束", "value": "。".join(ensure_string_list(global_source.get("negativeConstraints"))), "enabled": True, "sortOrder": 90},
+    ]
+    category_source = source.get("categoryShotRules") if isinstance(source.get("categoryShotRules"), dict) else {}
+    return {
+        "schemaVersion": "shoot-config-v2",
+        "globalRules": global_rules,
+        "defaultShotRule": {"shots": category_source.get("other_garment") or []},
+        "categoryShotRules": [
+            {"categoryDimensionCode": "category", "categoryTagCode": str(category), "shots": rules}
+            for category, rules in category_source.items()
+            if category != "other_garment" and isinstance(rules, list)
+        ],
+    }
+
+
+def normalize_shoot_config_global_rules(value: Any, fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    source_rules = value if isinstance(value, list) else fallback
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(source_rules[:40], start=1):
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()[:80]
+        rule_value = str(item.get("value") or "").strip()[:2000]
+        if not label or not rule_value:
+            continue
+        rule_id = sanitize_config_id(str(item.get("id") or label))
+        if rule_id in seen:
+            rule_id = f"{rule_id}_{index}"
+        seen.add(rule_id)
+        normalized.append(
+            {
+                "id": rule_id,
+                "label": label,
+                "value": rule_value,
+                "enabled": bool(item.get("enabled", True)),
+                "sortOrder": int(item.get("sortOrder") or index * 10),
+            }
+        )
+    return sorted(normalized or fallback, key=lambda item: (int(item.get("sortOrder") or 0), str(item.get("id") or "")))
+
+
+def sanitize_config_id(value: str) -> str:
+    normalized = "".join(ch.lower() if ch.isalnum() else "_" for ch in value.strip())
+    normalized = "_".join(part for part in normalized.split("_") if part)
+    return normalized[:64] or f"rule_{uuid4().hex[:8]}"
+
+
+def normalize_shoot_config_category_rule_overrides(value: Any, fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    source_rules = value if isinstance(value, list) else fallback
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    options = get_shoot_config_category_options()
+    valid_category_keys = {(str(option["dimensionCode"]), str(option["code"])) for option in options} if options else set()
+    for item in source_rules[:80]:
+        if not isinstance(item, dict):
+            continue
+        dimension_code = sanitize_taxonomy_code(str(item.get("categoryDimensionCode") or "category"))
+        tag_code = sanitize_taxonomy_code(str(item.get("categoryTagCode") or ""))
+        if not tag_code:
+            continue
+        if tag_code in SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES:
+            continue
+        key = (dimension_code, tag_code)
+        if valid_category_keys and key not in valid_category_keys:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        fallback_rules = next(
+            (rule.get("shots") for rule in fallback if rule.get("categoryDimensionCode") == dimension_code and rule.get("categoryTagCode") == tag_code),
+            default_shoot_config()["defaultShotRule"]["shots"],
+        )
+        normalized.append(
+            {
+                "categoryDimensionCode": dimension_code,
+                "categoryTagCode": tag_code,
+                "shots": normalize_shoot_config_category_rules(item.get("shots"), fallback_rules),
+            }
+        )
+    return normalized
+
+
+def normalize_shoot_config_category_rules(rules: Any, fallback_rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    source_rules = rules if isinstance(rules, list) else []
+    normalized: list[dict[str, Any]] = []
+    for index in range(6):
+        source = source_rules[index] if len(source_rules) > index and isinstance(source_rules[index], dict) else {}
+        fallback = fallback_rules[index] if len(fallback_rules) > index else {}
+        normalized.append(
+            {
+                "shotType": str(source.get("shotType") or fallback.get("shotType") or "reference")[:120],
+                "shotRoleLabel": str(source.get("shotRoleLabel") or fallback.get("shotRoleLabel") or f"镜头 {index + 1}")[:120],
+                "framing": str(source.get("framing") or fallback.get("framing") or "")[:500],
+                "pose": str(source.get("pose") or fallback.get("pose") or "")[:500],
+                "cameraAngle": str(source.get("cameraAngle") or fallback.get("cameraAngle") or "")[:300],
+                "mainFocus": str(source.get("mainFocus") or fallback.get("mainFocus") or "")[:500],
+            }
+        )
+    return normalized
+
+
+def get_shoot_config_category_options() -> list[dict[str, Any]]:
+    try:
+        with get_db() as db:
+            rows = db.execute(
+                """
+                SELECT * FROM tag_defs
+                WHERE dimension_code = 'category'
+                  AND (parent_code IS NULL OR parent_code = '')
+                  AND level <= 1
+                ORDER BY sort_order, id
+                """
+            ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [
+        {
+            "id": row["id"],
+            "dimensionCode": row["dimension_code"],
+            "code": row["code"],
+            "labelZh": row["label_zh"],
+            "isActive": bool(row["is_active"]),
+            "sortOrder": row["sort_order"],
+        }
+        for row in rows
+    ]
+
+
 def build_default_new_shot_plans(selected_snapshot: list[dict[str, Any]], styling_plan: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     styling_plan = styling_plan or {}
     garment_refs = ["hero", *[f"styling:{item.get('id')}" for item in selected_snapshot]]
@@ -7618,7 +8228,496 @@ def build_default_new_shot_plans(selected_snapshot: list[dict[str, Any]], stylin
     ]
 
 
+def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_version_id: int) -> dict[str, Any]:
+    styling_plan = get_styling_plan_by_id(styling_id)
+    shoot_config = get_active_shoot_config()
+    with get_db() as db:
+        input_row = db.execute("SELECT * FROM generation_task_input_versions WHERE id = ?", (input_version_id,)).fetchone()
+        styling_row = db.execute("SELECT * FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
+    selected_snapshot = loads(styling_row["selected_material_snapshot_json"], []) if styling_row else []
+    base_plans = build_default_new_shot_plans(selected_snapshot, styling_plan)
+    return {
+        "schema_version": "shoot-script-request-v1",
+        "model": settings.gemini_model,
+        "task_id": task_id,
+        "input_version": {
+            "id": input_version_id,
+            "name_snapshot": input_row["name_snapshot"] if input_row else "",
+            "image_snapshot": loads(input_row["image_snapshot_json"], []) if input_row else [],
+            "model_snapshot": loads(input_row["model_snapshot_json"], {}) if input_row and "model_snapshot_json" in input_row.keys() else {},
+        },
+        "styling_id": styling_id,
+        "styling_plan": styling_plan,
+        "selected_material_snapshot": selected_snapshot,
+        "brand_info": get_current_brand_info() or {},
+        "shoot_config": shoot_config,
+        "base_shot_rules": base_plans,
+        "category_rule_summary": build_shoot_script_category_rule_summary(shoot_config),
+        "accessory_boundary": build_accessory_boundary(),
+        "output_schema": "shoot-script-v1",
+    }
+
+
+def build_shoot_script_category_rule_summary(shoot_config: dict[str, Any] | None = None) -> dict[str, Any]:
+    config = shoot_config or get_active_shoot_config()
+    category_rules = config.get("categoryShotRules") if isinstance(config.get("categoryShotRules"), list) else []
+    category_options = {
+        (str(option["dimensionCode"]), str(option["code"])): option
+        for option in get_shoot_config_category_options()
+    }
+    summary = {
+        "universal_six_shots": [
+            "1 全身主视觉：建立整体比例和第一视觉。",
+            "2 品类核心展示：展示该品类最重要结构。",
+            "3 设计细节近景：展示卖点、结构、面料或工艺。",
+            "4 身位/动态补充：展示侧面、背面、走动或动态。",
+            "5 标准正面颜色图：平台友好、颜色和版型稳定展示。",
+            "6 备用姿态：只作预览参考，不进入最终成片。",
+        ],
+        "default": format_shoot_config_shot_rules_for_prompt((config.get("defaultShotRule") or {}).get("shots") if isinstance(config.get("defaultShotRule"), dict) else []),
+    }
+    for item in category_rules:
+        if not isinstance(item, dict):
+            continue
+        dimension_code = str(item.get("categoryDimensionCode") or "category")
+        tag_code = str(item.get("categoryTagCode") or "")
+        if tag_code in SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES:
+            continue
+        option = category_options.get((dimension_code, tag_code))
+        if category_options and (not option or not option.get("isActive")):
+            continue
+        label = str(option.get("labelZh") or tag_code) if option else tag_code
+        key = f"{dimension_code}:{tag_code} {label}".strip()
+        summary[key] = format_shoot_config_shot_rules_for_prompt(item.get("shots"))
+    return summary
+
+
+def format_shoot_config_shot_rules_for_prompt(rules: Any) -> str:
+    if not isinstance(rules, list):
+        return ""
+    return "；".join(
+        f"{index}. {rule.get('shotRoleLabel') or rule.get('shotType')}: {rule.get('framing')}，重点 {rule.get('mainFocus')}"
+        for index, rule in enumerate(rules[:6], start=1)
+        if isinstance(rule, dict)
+    )
+
+
+def format_shoot_config_global_rules_for_prompt(config: dict[str, Any]) -> str:
+    rules = config.get("globalRules") if isinstance(config.get("globalRules"), list) else default_shoot_config()["globalRules"]
+    enabled_rules = [
+        item for item in rules
+        if isinstance(item, dict) and item.get("enabled", True) and str(item.get("label") or "").strip() and str(item.get("value") or "").strip()
+    ]
+    enabled_rules.sort(key=lambda item: (int(item.get("sortOrder") or 0), str(item.get("id") or "")))
+    if not enabled_rules:
+        return "- 暂无启用的全局导演规则，按商品事实和基础图位规则生成。"
+    return "\n".join(f"- {item.get('label')}：{item.get('value')}" for item in enabled_rules)
+
+
+def build_active_shoot_config_prompt_card() -> str:
+    config = normalize_shoot_config_payload(get_active_shoot_config())
+    return build_shoot_script_config_prompt_card(config)
+
+
+def active_shoot_config_category_rules(config: dict[str, Any]) -> list[tuple[str, str, str, list[dict[str, Any]]]]:
+    options = {
+        (str(option["dimensionCode"]), str(option["code"])): option
+        for option in get_shoot_config_category_options()
+    }
+    items: list[tuple[str, str, str, list[dict[str, Any]]]] = []
+    rules = config.get("categoryShotRules") if isinstance(config.get("categoryShotRules"), list) else []
+    for item in rules:
+        if not isinstance(item, dict):
+            continue
+        dimension_code = str(item.get("categoryDimensionCode") or "category")
+        tag_code = str(item.get("categoryTagCode") or "")
+        if tag_code in SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES:
+            continue
+        option = options.get((dimension_code, tag_code))
+        if options and (not option or not option.get("isActive")):
+            continue
+        label = str(option.get("labelZh") or tag_code) if option else tag_code
+        shots = normalize_shoot_config_category_rules(item.get("shots"), default_shoot_config()["defaultShotRule"]["shots"])
+        items.append((dimension_code, tag_code, label, shots))
+    return items
+
+
+def build_shoot_script_config_prompt_card(config: dict[str, Any]) -> str:
+    default_shots = (config.get("defaultShotRule") or {}).get("shots") if isinstance(config.get("defaultShotRule"), dict) else []
+    category_rules = active_shoot_config_category_rules(config)
+    lines = [
+        "# Ruyi-Dream 拍摄配置 Prompt",
+        "规则：按启用的全局导演规则生成 ShootScript；命中标签一级品类时使用对应 6 镜头规则，未命中时使用默认 6 镜头；前 5 镜头生成成片，第 6 镜头仅预览参考；库内搭配服饰不可替换，生成配饰可调整但必须披露。",
+        "全局导演规则：",
+        format_shoot_config_global_rules_for_prompt(config),
+        "默认 6 镜头：" + format_shoot_config_shot_rules_for_prompt(default_shots),
+        "品类覆盖规则：",
+    ]
+    if category_rules:
+        for dimension_code, tag_code, label, shots in category_rules:
+            lines.append(f"- {dimension_code}:{tag_code}({label})：{format_shoot_config_shot_rules_for_prompt(shots)}")
+    else:
+        lines.append("- 无")
+    lines.append('输出 JSON：{"schema_version":"shoot-script-v1","global_directing":{"rules":[{"label":"","value":""}]},"shots":[{"shot_index":1,"shot_role":"","framing":"","crop_range":"","pose":"","movement":"","main_focus":"","forbidden_occlusion_zones":[]}],"styling_risks":[],"accessory_adjustments":[]}')
+    return "\n".join(lines).rstrip() + "\n"
+
+
+async def generate_shoot_script_with_gemini(request_snapshot: dict[str, Any]) -> dict[str, Any]:
+    if not settings.gemini_api_key:
+        raise RuntimeError("Gemini API 未配置，拍摄剧本不能进入生产生成。")
+    try:
+        from google import genai
+        from google.genai import types
+    except Exception as exc:
+        raise RuntimeError("google-genai SDK 不可用，拍摄剧本不能进入生产生成。") from exc
+    shoot_config = request_snapshot.get("shoot_config") if isinstance(request_snapshot.get("shoot_config"), dict) else default_shoot_config()
+    director_config_prompt = build_shoot_script_config_prompt_card(shoot_config)
+    prompt = f"""
+你是 Lily 品牌 AI 摄影棚的 AI Director。你的任务是基于已完成的 StylingPlan，一次性生成完整拍摄剧本 ShootScript。
+
+职责边界：
+1. 你负责导演判断：全局拍摄设定、镜头景别、取景范围、模特姿势、身姿走位、构图、背景光线、不可遮挡区域。
+2. 你不能替换库内搭配服饰。如果库内搭配服饰存在拍摄风险，仍正常输出剧本，并在 styling_risks 中披露风险和建议。
+3. 鞋、帽、包、首饰等生成类配饰不是商品事实源；你可以调整、弱化或取消，但必须在 accessory_adjustments 中披露调整原因。
+4. 前 5 个镜头要形成完整商品说明，第 6 个镜头只作为备用姿态，不进入最终成片。
+5. 分镜预览和最终成片都将读取此 ShootScript。不要输出长 prompt，只输出结构化 JSON。
+
+后台拍摄配置 Prompt：
+{director_config_prompt}
+- 允许轻斜正、3/4 斜正、轻侧身、重心偏移、错腿、自然垂手、单手插袋、轻扶腰、轻走动、侧身轻转、回身。
+- 避免站军姿、双手贴腿、夸张扭腰、过度张腿、网红摆拍、时装秀 pose、复杂背景、戏剧强光、过度配饰。
+
+本次输入：
+{dumps(request_snapshot)}
+
+请只返回 JSON，结构如下：
+{{
+  "schema_version": "shoot-script-v1",
+  "script_source_mode": "production",
+  "input_refs": {{
+    "task_id": {int(request_snapshot.get("task_id") or 0)},
+    "input_version_id": {int((request_snapshot.get("input_version") or {{}}).get("id") or 0)},
+    "styling_id": {int(request_snapshot.get("styling_id") or 0)},
+    "styling_plan_version": "styling-plan-v1",
+    "model_snapshot_id": "Face-01"
+  }},
+  "global_directing": {{
+    "rules": [{{"label": "string", "value": "string"}}],
+    "brand_tone": "string",
+    "background": "string",
+    "lighting": "string",
+    "model_direction": "string",
+    "hair_makeup_boundary": "string",
+    "accessory_boundary": "string",
+    "consistency_rules": ["string"],
+    "product_fidelity_rules": ["string"],
+    "negative_constraints": ["string"]
+  }},
+  "styling_risks": [
+    {{
+      "risk_id": "string",
+      "severity": "low | medium | high | blocking",
+      "material_id": 0,
+      "material_code": "string",
+      "risk": "string",
+      "affected_shots": [1],
+      "director_strategy": "string",
+      "user_visible_recommendation": "string"
+    }}
+  ],
+  "accessory_adjustments": [
+    {{
+      "item_type": "bag | footwear | jewelry | hat | other",
+      "original_direction": "string",
+      "adjusted_direction": "string",
+      "reason": "string",
+      "affected_shots": [1]
+    }}
+  ],
+  "shots": [
+    {{
+      "shot_index": 1,
+      "shot_role": "hero_full_body",
+      "shot_role_label": "全身主视觉",
+      "framing": "string",
+      "crop_range": "string",
+      "model_scale": "string",
+      "camera_angle": "string",
+      "body_position": "string",
+      "pose": "string",
+      "movement": "string",
+      "hand_position": "string",
+      "main_focus": "string",
+      "visible_garments": ["hero"],
+      "hero_selling_points": ["string"],
+      "forbidden_occlusion_zones": ["string"],
+      "composition_notes": "string",
+      "acceptance_criteria": ["string"],
+      "negative_constraints": ["string"]
+    }}
+  ],
+  "user_visible_summary": {{
+    "title": "string",
+    "summary": "string",
+    "key_points": ["string"],
+    "risk_summary": "string"
+  }},
+  "warnings": []
+}}
+"""
+    contents: list[Any] = [prompt]
+    for item in ((request_snapshot.get("input_version") or {}).get("image_snapshot") or [])[:6]:
+        asset = item.get("asset") if isinstance(item, dict) else {}
+        object_key = asset.get("objectKey") if isinstance(asset, dict) else None
+        if object_key and object_exists(object_key):
+            contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
+    for material in request_snapshot.get("selected_material_snapshot", [])[:4]:
+        images = material.get("images") if isinstance(material, dict) else []
+        first = images[0] if images else {}
+        asset = first.get("asset") if isinstance(first, dict) else {}
+        object_key = asset.get("objectKey") if isinstance(asset, dict) else None
+        if object_key and object_exists(object_key):
+            contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
+    try:
+        client = genai.Client(api_key=settings.gemini_api_key)
+        response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents)
+        return loads(extract_json_text(getattr(response, "text", "") or "{}"), {})
+    except Exception as exc:
+        raise RuntimeError(f"Gemini 拍摄剧本调用失败：{exc}") from exc
+
+
+def normalize_shoot_script(raw: dict[str, Any], request_snapshot: dict[str, Any]) -> dict[str, Any]:
+    styling_plan = request_snapshot.get("styling_plan") if isinstance(request_snapshot.get("styling_plan"), dict) else {}
+    base_plans = request_snapshot.get("base_shot_rules") if isinstance(request_snapshot.get("base_shot_rules"), list) else []
+    hero = styling_plan.get("hero_understanding") if isinstance(styling_plan.get("hero_understanding"), dict) else {}
+    source = raw if isinstance(raw, dict) else {}
+    input_version = request_snapshot.get("input_version") if isinstance(request_snapshot.get("input_version"), dict) else {}
+    shoot_config = request_snapshot.get("shoot_config") if isinstance(request_snapshot.get("shoot_config"), dict) else default_shoot_config()
+    config_global_rules = [
+        {"label": str(item.get("label") or ""), "value": str(item.get("value") or "")}
+        for item in (shoot_config.get("globalRules") if isinstance(shoot_config.get("globalRules"), list) else default_shoot_config()["globalRules"])
+        if isinstance(item, dict) and item.get("enabled", True) and str(item.get("label") or "").strip() and str(item.get("value") or "").strip()
+    ]
+    global_directing = source.get("global_directing") if isinstance(source.get("global_directing"), dict) else {}
+    fallback_consistency_rules = [value for value in [global_rule_value(config_global_rules, ["一致性规则"])] if value]
+    fallback_product_fidelity_rules = [value for value in [global_rule_value(config_global_rules, ["商品保真规则", "商品保真"])] if value]
+    fallback_negative_constraints = [value for value in [global_rule_value(config_global_rules, ["负向约束"])] if value]
+    normalized = {
+        "schema_version": "shoot-script-v1",
+        "script_source_mode": str(source.get("script_source_mode") or "production"),
+        "input_refs": {
+            "task_id": int(request_snapshot.get("task_id") or 0),
+            "input_version_id": int(input_version.get("id") or 0),
+            "styling_id": int(request_snapshot.get("styling_id") or 0),
+            "styling_plan_version": str((styling_plan.get("schema_version") if isinstance(styling_plan, dict) else "") or "styling-plan-v1"),
+            "model_snapshot_id": str(((input_version.get("model_snapshot") or {}).get("modelId") if isinstance(input_version.get("model_snapshot"), dict) else "") or "Face-01"),
+        },
+        "global_directing": {
+            "rules": normalize_shoot_script_global_rules(global_directing.get("rules"), config_global_rules),
+            "brand_tone": str(global_directing.get("brand_tone") or global_rule_value(config_global_rules, ["品牌调性", "品牌风格"])),
+            "background": str(global_directing.get("background") or global_rule_value(config_global_rules, ["背景"])),
+            "lighting": str(global_directing.get("lighting") or global_rule_value(config_global_rules, ["光线"])),
+            "model_direction": str(global_directing.get("model_direction") or global_rule_value(config_global_rules, ["模特导演", "模特"])),
+            "hair_makeup_boundary": str(global_directing.get("hair_makeup_boundary") or global_rule_value(config_global_rules, ["妆发边界", "妆发"])),
+            "accessory_boundary": str(global_directing.get("accessory_boundary") or global_rule_value(config_global_rules, ["配饰边界", "配饰"])),
+            "consistency_rules": ensure_string_list(global_directing.get("consistency_rules")) or fallback_consistency_rules,
+            "product_fidelity_rules": ensure_string_list(global_directing.get("product_fidelity_rules")) or fallback_product_fidelity_rules,
+            "negative_constraints": ensure_string_list(global_directing.get("negative_constraints")) or fallback_negative_constraints,
+        },
+        "styling_risks": normalize_styling_risks(source.get("styling_risks")),
+        "accessory_adjustments": normalize_accessory_adjustments(source.get("accessory_adjustments")),
+        "shots": normalize_shoot_script_shots(source.get("shots"), base_plans, hero),
+        "user_visible_summary": normalize_shoot_script_summary(source.get("user_visible_summary"), hero),
+        "warnings": ensure_string_list(source.get("warnings")),
+    }
+    return normalized
+
+
+def normalize_styling_risks(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    risks: list[dict[str, Any]] = []
+    for index, item in enumerate(value[:12], start=1):
+        if not isinstance(item, dict):
+            continue
+        risks.append(
+            {
+                "risk_id": str(item.get("risk_id") or f"risk_{index}"),
+                "severity": str(item.get("severity") or "medium"),
+                "material_id": item.get("material_id"),
+                "material_code": str(item.get("material_code") or ""),
+                "risk": str(item.get("risk") or ""),
+                "affected_shots": [int(x) for x in ensure_string_list(item.get("affected_shots")) if str(x).isdigit()][:6],
+                "director_strategy": str(item.get("director_strategy") or ""),
+                "user_visible_recommendation": str(item.get("user_visible_recommendation") or ""),
+            }
+        )
+    return risks
+
+
+def normalize_shoot_script_global_rules(value: Any, fallback_rules: list[dict[str, str]]) -> list[dict[str, str]]:
+    if isinstance(value, list):
+        rules = [
+            {"label": str(item.get("label") or ""), "value": str(item.get("value") or "")}
+            for item in value
+            if isinstance(item, dict) and str(item.get("label") or "").strip() and str(item.get("value") or "").strip()
+        ]
+        if rules:
+            return rules[:40]
+    return fallback_rules[:40]
+
+
+def global_rule_value(rules: list[dict[str, str]], labels: list[str]) -> str:
+    for label in labels:
+        for item in rules:
+            if str(item.get("label") or "") == label:
+                return str(item.get("value") or "")
+    return ""
+
+
+def normalize_accessory_adjustments(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    adjustments: list[dict[str, Any]] = []
+    for item in value[:12]:
+        if not isinstance(item, dict):
+            continue
+        adjustments.append(
+            {
+                "item_type": str(item.get("item_type") or "other"),
+                "original_direction": str(item.get("original_direction") or ""),
+                "adjusted_direction": str(item.get("adjusted_direction") or ""),
+                "reason": str(item.get("reason") or ""),
+                "affected_shots": [int(x) for x in ensure_string_list(item.get("affected_shots")) if str(x).isdigit()][:6],
+            }
+        )
+    return adjustments
+
+
+def normalize_shoot_script_shots(value: Any, base_plans: list[Any], hero: dict[str, Any]) -> list[dict[str, Any]]:
+    source_shots = value if isinstance(value, list) and value else []
+    shots: list[dict[str, Any]] = []
+    for index in range(1, 7):
+        source = next((item for item in source_shots if isinstance(item, dict) and int(item.get("shot_index") or 0) == index), None)
+        base = base_plans[index - 1] if len(base_plans) >= index and isinstance(base_plans[index - 1], dict) else {}
+        shots.append(normalize_shoot_script_shot(source or {}, base, hero, index))
+    return shots
+
+
+def normalize_shoot_script_shot(source: dict[str, Any], base: dict[str, Any], hero: dict[str, Any], index: int) -> dict[str, Any]:
+    shot_type = str(source.get("shot_role") or base.get("shotType") or "reference")
+    return {
+        "shot_index": index,
+        "shot_role": shot_type,
+        "shot_role_label": str(source.get("shot_role_label") or shot_type),
+        "framing": str(source.get("framing") or base.get("framing") or ""),
+        "crop_range": str(source.get("crop_range") or source.get("cropRange") or base.get("framing") or ""),
+        "model_scale": str(source.get("model_scale") or source.get("modelScale") or ""),
+        "camera_angle": str(source.get("camera_angle") or source.get("cameraAngle") or base.get("cameraAngle") or ""),
+        "body_position": str(source.get("body_position") or source.get("bodyPosition") or base.get("cameraAngle") or ""),
+        "pose": str(source.get("pose") or base.get("pose") or ""),
+        "movement": str(source.get("movement") or ""),
+        "hand_position": str(source.get("hand_position") or source.get("handPosition") or ""),
+        "main_focus": str(source.get("main_focus") or source.get("mainFocus") or base.get("mainFocus") or ""),
+        "visible_garments": ensure_string_list(source.get("visible_garments") or source.get("visibleGarments") or base.get("visibleGarments")),
+        "hero_selling_points": ensure_string_list(source.get("hero_selling_points") or source.get("heroSellingPoints") or base.get("heroSellingPoints") or hero.get("hero_selling_points")),
+        "forbidden_occlusion_zones": ensure_string_list(source.get("forbidden_occlusion_zones") or source.get("forbiddenOcclusionZones") or hero.get("forbidden_occlusion_zones") or hero.get("hero_visibility_risks")),
+        "composition_notes": str(source.get("composition_notes") or source.get("compositionNotes") or base.get("compositionNotes") or ""),
+        "acceptance_criteria": ensure_string_list(source.get("acceptance_criteria") or source.get("acceptanceCriteria")) or ["主推款品类、颜色、版型和长度清楚。", "搭配服饰服务主推款，不抢视觉中心。"],
+        "negative_constraints": ensure_string_list(source.get("negative_constraints") or source.get("negativeConstraints") or base.get("negativeConstraints")),
+    }
+
+
+def normalize_shoot_script_summary(value: Any, hero: dict[str, Any]) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "title": str(source.get("title") or "Lily 电商棚拍拍摄剧本"),
+        "summary": str(source.get("summary") or "本组拍摄以主推款商品表达为核心，覆盖完整比例、品类核心、设计细节、动态补充和标准正面图。"),
+        "key_points": ensure_string_list(source.get("key_points")) or ensure_string_list(hero.get("shot_requirements")),
+        "risk_summary": str(source.get("risk_summary") or ""),
+    }
+
+
+def validate_shoot_script(script: dict[str, Any]) -> None:
+    if script.get("schema_version") != "shoot-script-v1":
+        raise RuntimeError("ShootScript schema_version 无效")
+    shots = script.get("shots")
+    if not isinstance(shots, list) or len(shots) != 6:
+        raise RuntimeError("ShootScript 必须包含 6 个镜头")
+    indexes = [int(item.get("shot_index") or 0) for item in shots if isinstance(item, dict)]
+    if sorted(indexes) != [1, 2, 3, 4, 5, 6]:
+        raise RuntimeError("ShootScript 镜头序号必须为 1-6 且不重复")
+
+
+def shoot_script_to_generation_shot_plans(script: dict[str, Any]) -> list[dict[str, Any]]:
+    plans = []
+    for shot in script.get("shots", []):
+        index = int(shot.get("shot_index") or len(plans) + 1)
+        plans.append(
+            {
+                "sortOrder": index,
+                "shotType": str(shot.get("shot_role") or "reference"),
+                "framing": str(shot.get("framing") or ""),
+                "pose": str(shot.get("pose") or ""),
+                "cameraAngle": str(shot.get("camera_angle") or ""),
+                "mainFocus": str(shot.get("main_focus") or ""),
+                "plan": shot,
+                **shot,
+            }
+        )
+    return plans
+
+
 def build_category_shot_template(hero_category: str) -> list[tuple[str, str, str, str, str]]:
+    config = get_active_shoot_config()
+    rules = find_shoot_config_category_shot_rules(config, hero_category)
+    if rules is None and isinstance(config.get("defaultShotRule"), dict):
+        rules = config.get("defaultShotRule", {}).get("shots")
+    if isinstance(rules, list) and len(rules) >= 6:
+        return shoot_config_rules_to_template(rules)
+    return build_builtin_category_shot_template("other_garment")
+
+
+def find_shoot_config_category_shot_rules(config: dict[str, Any], hero_category: str) -> list[dict[str, Any]] | None:
+    category_code = str(hero_category or "").strip()
+    if not category_code or category_code in SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES:
+        return None
+    category_options = {
+        (str(option["dimensionCode"]), str(option["code"])): option
+        for option in get_shoot_config_category_options()
+    }
+    if category_options:
+        option = category_options.get(("category", category_code))
+        if not option or not option.get("isActive"):
+            return None
+    category_rules = config.get("categoryShotRules") if isinstance(config.get("categoryShotRules"), list) else []
+    for item in category_rules:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("categoryDimensionCode") or "category") == "category" and str(item.get("categoryTagCode") or "") == category_code:
+            shots = item.get("shots")
+            return shots if isinstance(shots, list) else None
+    return None
+
+
+def shoot_config_rules_to_template(rules: list[dict[str, Any]]) -> list[tuple[str, str, str, str, str]]:
+    template = [
+        (
+            str(rule.get("shotType") or "reference"),
+            str(rule.get("framing") or ""),
+            str(rule.get("pose") or ""),
+            str(rule.get("cameraAngle") or ""),
+            str(rule.get("mainFocus") or ""),
+        )
+        for rule in rules[:6]
+        if isinstance(rule, dict)
+    ]
+    if len(template) == 6:
+        return template
+    return build_builtin_category_shot_template("other_garment")
+
+
+def build_builtin_category_shot_template(hero_category: str) -> list[tuple[str, str, str, str, str]]:
     if hero_category == "bottom":
         return [
             ("pants_hero", "全身或近全身主视觉，裤脚和鞋完整", "腿部自然分开，一腿微前，手自然垂放或单手插袋", "正面或轻斜正", "裤装完整裤型、腿长比例、整体 look"),
@@ -7670,23 +8769,26 @@ def serialize_new_shot_plan(row: Any) -> dict[str, Any]:
     return {"id": row["id"], "sortOrder": row["sort_order"], "shotType": row["shot_type"], "plan": plan}
 
 
-def build_new_preview_task_package(task_id: int, styling_id: int, shot_plans: list[dict[str, Any]]) -> dict[str, Any]:
+def build_new_preview_task_package(task_id: int, styling_id: int, shoot_script_id: int, shot_plans: list[dict[str, Any]]) -> dict[str, Any]:
     styling_plan = get_styling_plan_by_id(styling_id)
+    shoot_script = get_shoot_script_json_by_id(shoot_script_id)
     return {
         "generation": {"stage": "preview_grid"},
-        "prompt": build_new_preview_prompt(shot_plans, styling_plan),
+        "prompt": build_new_preview_prompt(shot_plans, styling_plan, shoot_script),
         "imageInputs": build_new_image_inputs(task_id, styling_id, include_preview=False),
         "stylingPlan": styling_plan,
+        "shootScript": shoot_script,
         "shotPlans": shot_plans,
     }
 
 
-def build_new_preview_prompt(shot_plans: list[dict[str, Any]], styling_plan: dict[str, Any]) -> str:
+def build_new_preview_prompt(shot_plans: list[dict[str, Any]], styling_plan: dict[str, Any], shoot_script: dict[str, Any]) -> str:
     return "\n".join([
-        "生成一张 3x2 六宫格电商棚拍分镜预览图。",
+        "生成一张 3x2 电商棚拍分镜预览图。",
         "主推款和搭配服饰参考图是真实商品事实来源，必须保持商品级保真。",
         "搭配服饰和生成配饰必须服务主推款展示，不得让主推款沦为整套造型的背景元素。",
         f"当前 StylingPlan：{dumps(styling_plan)}",
+        f"当前 ShootScript：{dumps(shoot_script)}",
         "数字模特参考图用于保持同一身份、发型和气质。",
         "鞋、包、饰品只作为辅助搭配，不作为画面核心，不做特写。",
         "六个格子按以下 ShotPlan 执行，第 6 格仅参考，最终不会生成大图。",
@@ -7699,7 +8801,7 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
     with get_db() as db:
         row = db.execute(
             """
-            SELECT gri.*, gsp.plan_json, gp.preview_asset_id, grs.styling_id
+            SELECT gri.*, gsp.plan_json, gp.preview_asset_id, grs.styling_id, grs.shoot_script_id
             FROM generation_result_images_new gri
             JOIN generation_result_sets grs ON grs.id = gri.result_set_id
             JOIN generation_previews gp ON gp.id = grs.preview_id
@@ -7710,22 +8812,25 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         ).fetchone()
     shot_plan = loads(row["plan_json"], {})
     styling_plan = get_styling_plan_by_id(int(row["styling_id"]))
+    shoot_script = get_shoot_script_json_by_id(int(row["shoot_script_id"])) if row["shoot_script_id"] else {}
     return {
         "generation": {"stage": "final_image"},
-        "prompt": build_new_final_prompt(int(row["sort_order"]), shot_plan, styling_plan),
+        "prompt": build_new_final_prompt(int(row["sort_order"]), shot_plan, styling_plan, shoot_script),
         "imageInputs": build_new_image_inputs(task_id, int(row["styling_id"]), include_preview=True, preview_asset_id=row["preview_asset_id"]),
         "stylingPlan": styling_plan,
+        "shootScript": shoot_script,
         "shotPlan": shot_plan,
     }
 
 
-def build_new_final_prompt(shot_index: int, shot_plan: dict[str, Any], styling_plan: dict[str, Any]) -> str:
+def build_new_final_prompt(shot_index: int, shot_plan: dict[str, Any], styling_plan: dict[str, Any], shoot_script: dict[str, Any]) -> str:
     return "\n".join([
-        f"生成一张电商棚拍成片。当前生成第 {shot_index} 张，只生成单张图，不要生成拼图或六宫格。",
-        f"参考六宫格预览图中的第 {shot_index} 格，只参考姿势、身位、景别、构图、背景和光影方向。",
-        "六宫格不是商品事实来源。主推款参考图是主角商品事实来源，搭配服饰参考图是配角商品事实来源。",
+        f"生成一张电商棚拍成片。当前生成第 {shot_index} 张，只生成单张图，不要生成拼图或分镜预览。",
+        f"参考分镜预览图中的第 {shot_index} 格，只参考姿势、身位、景别、构图、背景和光影方向。",
+        "分镜预览不是商品事实来源。主推款参考图是主角商品事实来源，搭配服饰参考图是配角商品事实来源。",
         "必须保持主推款和搭配服饰的品类、颜色、面料、版型、结构、比例和可见细节。",
         f"当前 StylingPlan：{dumps(styling_plan)}",
+        f"当前 ShootScript：{dumps(shoot_script)}",
         f"当前 ShotPlan：{dumps(shot_plan)}",
         "鞋、包、饰品只作为辅助搭配，不作为画面核心，不做特写。",
         "不要让搭配服饰或生成配饰抢主推款视觉中心；不要改款、换色、替换商品；不要添加文字、水印、logo。",
@@ -7738,6 +8843,14 @@ def get_styling_plan_by_id(styling_id: int) -> dict[str, Any]:
     if not row:
         return {}
     return loads(row["styling_plan_json"], {})
+
+
+def get_shoot_script_json_by_id(shoot_script_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute("SELECT script_json FROM generation_shoot_scripts WHERE id = ?", (shoot_script_id,)).fetchone()
+    if not row:
+        return {}
+    return loads(row["script_json"], {})
 
 
 def build_new_image_inputs(task_id: int, styling_id: int, include_preview: bool, preview_asset_id: int | None = None) -> list[dict[str, Any]]:
@@ -7909,9 +9022,10 @@ def refresh_pending_new_generation_jobs() -> None:
         fail_stale_attempt(row["active_attempt_id"], "预览生成任务锁过期，已由后台恢复重试。")
         attempt_id = create_attempt("generation_preview", int(row["id"]), "image-2")
         lease_generation_preview(int(row["id"]), attempt_id)
-        shot_plans = ensure_generation_shot_plans(int(row["task_id"]), int(row["styling_id"]))
+        shoot_script_id = int(row["shoot_script_id"]) if "shoot_script_id" in row.keys() and row["shoot_script_id"] else 0
+        shot_plans = get_task_shot_plans_by_script(shoot_script_id)
         schedule_background_generation(
-            run_preview_generation(int(row["task_id"]), int(row["styling_id"]), shot_plans, int(row["id"]), attempt_id),
+            run_preview_generation(int(row["task_id"]), int(row["styling_id"]), shoot_script_id, shot_plans, int(row["id"]), attempt_id),
             job_key=key,
         )
 
@@ -8086,7 +9200,9 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
         "status": row["status"],
         "currentInputVersionId": row["current_input_version_id"],
         "activeStylingId": row["active_styling_id"],
+        "activeShootScriptId": row["active_shoot_script_id"] if "active_shoot_script_id" in row.keys() else None,
         "activePreviewId": row["active_preview_id"],
+        "activeStoryboardPreviewId": row["active_storyboard_preview_id"] if "active_storyboard_preview_id" in row.keys() else row["active_preview_id"],
         "activeResultSetId": row["active_result_set_id"],
         "archivedAt": row["archived_at"] if "archived_at" in row.keys() else None,
         "archiveReason": row["archive_reason"] if "archive_reason" in row.keys() else None,
@@ -8109,8 +9225,11 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
     item["images"] = [{"id": image["link_id"], "sortOrder": image["link_sort_order"], "asset": serialize_media_asset(image)} for image in image_rows]
     item["inputVersion"] = get_input_version(row["current_input_version_id"])
     item["styling"] = get_generation_styling(row["active_styling_id"], include_debug=include_debug)
-    item["shotPlans"] = get_task_shot_plans(row["active_styling_id"])
-    item["preview"] = get_generation_preview(row["active_preview_id"])
+    item["shootScript"] = get_generation_shoot_script(row["active_shoot_script_id"] if "active_shoot_script_id" in row.keys() else None, include_debug=include_debug)
+    item["shotPlans"] = get_task_shot_plans_by_script(row["active_shoot_script_id"] if "active_shoot_script_id" in row.keys() else None)
+    preview_id = row["active_storyboard_preview_id"] if "active_storyboard_preview_id" in row.keys() and row["active_storyboard_preview_id"] else row["active_preview_id"]
+    item["preview"] = get_generation_preview(preview_id)
+    item["storyboardPreview"] = item["preview"]
     item["resultSet"] = get_generation_result_set(row["active_result_set_id"])
     item["aiOperations"] = get_task_ai_operations(row["id"])
     if include_debug:
@@ -8197,6 +9316,42 @@ def get_task_shot_plans(styling_id: int | None) -> list[dict[str, Any]]:
     return [serialize_new_shot_plan(row) for row in rows]
 
 
+def get_task_shot_plans_by_script(shoot_script_id: int | None) -> list[dict[str, Any]]:
+    if not shoot_script_id:
+        return []
+    with get_db() as db:
+        rows = db.execute("SELECT * FROM generation_shot_plans WHERE shoot_script_id = ? ORDER BY sort_order", (shoot_script_id,)).fetchall()
+    return [serialize_new_shot_plan(row) for row in rows]
+
+
+def get_generation_shoot_script(shoot_script_id: int | None, include_debug: bool = False) -> dict[str, Any] | None:
+    if not shoot_script_id:
+        return None
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_shoot_scripts WHERE id = ?", (shoot_script_id,)).fetchone()
+    if not row:
+        return None
+    script = loads(row["script_json"], {})
+    item = {
+        "id": row["id"],
+        "taskId": row["task_id"],
+        "inputVersionId": row["input_version_id"],
+        "stylingId": row["styling_id"],
+        "status": row["status"],
+        "script": script,
+        "summary": loads(row["summary_json"], {}) if "summary_json" in row.keys() else script.get("user_visible_summary", {}),
+        "stylingRisks": loads(row["styling_risks_json"], []) if "styling_risks_json" in row.keys() else script.get("styling_risks", []),
+        "accessoryAdjustments": loads(row["accessory_adjustments_json"], []) if "accessory_adjustments_json" in row.keys() else script.get("accessory_adjustments", []),
+        "activeAttemptId": row["active_attempt_id"],
+        "activeAttempt": get_attempt_summary(row["active_attempt_id"]),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+    if include_debug:
+        item["scriptJson"] = script
+    return item
+
+
 def get_generation_preview(preview_id: int | None) -> dict[str, Any] | None:
     if not preview_id:
         return None
@@ -8207,6 +9362,7 @@ def get_generation_preview(preview_id: int | None) -> dict[str, Any] | None:
     return {
         "id": row["id"],
         "status": row["status"],
+        "shootScriptId": row["shoot_script_id"] if "shoot_script_id" in row.keys() else None,
         "asset": get_media_asset_by_id(row["preview_asset_id"]),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
@@ -8227,6 +9383,8 @@ def get_generation_result_set(result_set_id: int | None) -> dict[str, Any] | Non
     return {
         "id": row["id"],
         "status": row["status"],
+        "shootScriptId": row["shoot_script_id"] if "shoot_script_id" in row.keys() else None,
+        "previewId": row["preview_id"] if "preview_id" in row.keys() else None,
         "images": [
             {
                 "id": image["id"],
@@ -8251,6 +9409,9 @@ def get_task_attempts(task_id: int) -> list[dict[str, Any]]:
             """
             SELECT ga.* FROM generation_attempts ga
             WHERE (ga.owner_type = 'generation_styling' AND ga.owner_id = ?)
+               OR (ga.owner_type = 'generation_shoot_script' AND ga.owner_id IN (
+                    SELECT id FROM generation_shoot_scripts WHERE task_id = ?
+                  ))
                OR (ga.owner_type = 'generation_preview' AND ga.owner_id IN (
                     SELECT id FROM generation_previews WHERE task_id = ?
                   ))
@@ -8261,7 +9422,7 @@ def get_task_attempts(task_id: int) -> list[dict[str, Any]]:
                   ))
             ORDER BY ga.created_at DESC
             """,
-            (task_id, task_id, task_id),
+            (task_id, task_id, task_id, task_id),
         ).fetchall()
     return [
         {
@@ -8315,6 +9476,9 @@ def get_task_ai_operations(task_id: int) -> list[dict[str, Any]]:
             """
             SELECT ga.* FROM generation_attempts ga
             WHERE (ga.owner_type = 'generation_styling' AND ga.owner_id = ?)
+               OR (ga.owner_type = 'generation_shoot_script' AND ga.owner_id IN (
+                    SELECT id FROM generation_shoot_scripts WHERE task_id = ?
+                  ))
                OR (ga.owner_type = 'generation_preview' AND ga.owner_id IN (
                     SELECT id FROM generation_previews WHERE task_id = ?
                   ))
@@ -8326,7 +9490,7 @@ def get_task_ai_operations(task_id: int) -> list[dict[str, Any]]:
             ORDER BY ga.created_at DESC, ga.id DESC
             LIMIT 30
             """,
-            (task_id, task_id, task_id),
+            (task_id, task_id, task_id, task_id),
         ).fetchall()
     return [serialize_attempt_summary(row) for row in rows]
 
@@ -8625,14 +9789,12 @@ def ensure_taxonomy_ready_for_tagging(context: dict[str, Any]) -> None:
         raise RuntimeError("标签规则为空：请先由管理员在“标签规则”中导入或配置启用的维度和可打标标签。")
 
 
-def build_active_taxonomy_prompt_card(mode: str) -> str:
+def build_active_taxonomy_prompt_card() -> str:
     context = build_active_taxonomy_context()
-    if mode == "full":
-        return render_full_taxonomy_prompt_card(context)
-    return render_compact_taxonomy_prompt_card(context)
+    return build_taxonomy_prompt_card_from_context(context)
 
 
-def render_full_taxonomy_prompt_card(context: dict[str, Any]) -> str:
+def build_taxonomy_prompt_card_from_context(context: dict[str, Any]) -> str:
     dimensions: list[dict[str, Any]] = context["dimensions"]
     tags: list[dict[str, Any]] = context["tags"]
     relations: list[dict[str, Any]] = context["relations"]
@@ -8643,124 +9805,7 @@ def render_full_taxonomy_prompt_card(context: dict[str, Any]) -> str:
         tags_by_dimension.setdefault(tag["dimensionCode"], []).append(tag)
 
     lines = [
-        "# Ruyi-Dream 服装标签规则卡 / 完整版",
-        "",
-        "用途：本规则卡作为 AI 服装打标 Prompt 的标签字典与约束段。请先理解商品图片，再只从本卡启用的维度、标签、关系和适用范围中选择标签。",
-        "",
-        "## 核心约束",
-        "- 只能输出本卡出现的 tag code，不要创造同义词、新标签或自然语言散词。",
-        "- 标签输出必须保留 dimension_code 与 tag_code；中文名称只用于理解，不作为稳定 ID。",
-        "- 先判断 category，再应用对应 category 的适用范围；适用范围里的 required/recommended/allowed/disallowed 优先级高于通用倾向。",
-        "- value_kind=score 的标签需要输出 0 到 1 的 score；value_kind=tag/boolean/text 按标签含义输出。",
-        "- is_selectable=false 的标签可用于理解层级和规则，不应直接作为商品打标结果。",
-        "- 如果图片证据不足，降低 confidence，写出 evidence，不要硬猜。",
-        "",
-        "## 维度",
-        "| code | 中文名 | 说明 |",
-        "| --- | --- | --- |",
-    ]
-    for dimension in dimensions:
-        lines.append(f"| {md_cell(dimension['code'])} | {md_cell(dimension['labelZh'])} | {md_cell(dimension.get('descriptionZh') or '')} |")
-
-    lines.extend(["", "## 标签字典"])
-    for dimension in dimensions:
-        dimension_tags = tags_by_dimension.get(dimension["code"], [])
-        if not dimension_tags:
-            continue
-        lines.extend([
-            "",
-            f"### {dimension['code']} / {dimension['labelZh']}",
-            "| code | 中文名 | 父级 | 层级 | 值类型 | 可直接打标 | 说明 |",
-            "| --- | --- | --- | --- | --- | --- | --- |",
-        ])
-        for tag in dimension_tags:
-            parent = tag.get("parentCode") or ""
-            parent_label = taxonomy_prompt_tag_ref(tag_by_key, tag["dimensionCode"], str(parent), with_description=False) if parent else ""
-            lines.append(
-                f"| {md_cell(tag['code'])} | {md_cell(tag['labelZh'])} | {md_cell(parent_label)} | "
-                f"{md_cell(str(tag['level']))} | {md_cell(taxonomy_prompt_value_kind_label(tag['valueKind']))} | "
-                f"{'是' if tag['isSelectable'] else '否，仅用于层级/规则理解'} | {md_cell(tag.get('descriptionZh') or '')} |"
-            )
-
-    lines.extend([
-        "",
-        "## 品类适用范围",
-        "说明：适用范围用于按品类限定可用的服装部件、设计细节和其他维度，避免所有品类共用同一套细节字段。",
-    ])
-    if applicability_rules:
-        grouped_rules: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        for rule in applicability_rules:
-            grouped_rules.setdefault((rule["categoryDimensionCode"], rule["categoryTagCode"]), []).append(rule)
-        for (category_dimension_code, category_tag_code), rules in grouped_rules.items():
-            lines.extend([
-                "",
-                f"### {taxonomy_prompt_tag_ref(tag_by_key, category_dimension_code, category_tag_code)}",
-                "| mode | target | 范围 | 说明 |",
-                "| --- | --- | --- | --- |",
-            ])
-            for rule in rules:
-                target = taxonomy_prompt_tag_ref(tag_by_key, rule["targetDimensionCode"], rule["targetTagCode"])
-                scope = "含子品类" if rule["appliesToDescendants"] else "仅当前品类"
-                lines.append(f"| {md_cell(taxonomy_prompt_applicability_mode_label(rule['mode']))} | {md_cell(target)} | {scope} | {md_cell(rule.get('note') or '')} |")
-    else:
-        lines.append("")
-        lines.append("暂无启用的适用范围。")
-
-    lines.extend(["", "## 标签关系"])
-    if relations:
-        lines.extend([
-            "| from | relation_type | to | weight | 说明 |",
-            "| --- | --- | --- | --- | --- |",
-        ])
-        for relation in relations:
-            source = taxonomy_prompt_tag_ref(tag_by_key, relation["fromDimensionCode"], relation["fromTagCode"])
-            target = taxonomy_prompt_tag_ref(tag_by_key, relation["toDimensionCode"], relation["toTagCode"])
-            lines.append(
-                f"| {md_cell(source)} | {md_cell(taxonomy_prompt_relation_type_label(relation['relationType']))} | {md_cell(target)} | "
-                f"{md_cell(str(relation['weight']))} | {md_cell(relation.get('descriptionZh') or '')} |"
-            )
-    else:
-        lines.append("暂无启用的标签关系。")
-
-    lines.extend([
-        "",
-        "## 建议输出结构",
-        "说明：JSON 字段名保持英文，方便后端稳定解析；字段内容、证据说明、视觉摘要等自然语言必须使用中文。",
-        "```json",
-        json.dumps({
-            "tags": [
-                {
-                    "dimension_code": "category",
-                    "tag_code": "example_code",
-                    "value_type": "tag",
-                    "score": None,
-                    "confidence": 0.0,
-                    "evidence": "来自图片的可观察依据"
-                }
-            ],
-            "visual_profile": {
-                "overall_summary": "商品整体视觉摘要",
-                "key_parts": ["需要保真的服装部件或设计细节"],
-                "uncertain_points": ["证据不足或需要人工审核的点"]
-            }
-        }, ensure_ascii=False, indent=2),
-        "```",
-    ])
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def render_compact_taxonomy_prompt_card(context: dict[str, Any]) -> str:
-    dimensions: list[dict[str, Any]] = context["dimensions"]
-    tags: list[dict[str, Any]] = context["tags"]
-    relations: list[dict[str, Any]] = context["relations"]
-    applicability_rules: list[dict[str, Any]] = context["applicabilityRules"]
-    tag_by_key: dict[tuple[str, str], dict[str, Any]] = context["tagByKey"]
-    tags_by_dimension: dict[str, list[dict[str, Any]]] = {}
-    for tag in tags:
-        tags_by_dimension.setdefault(tag["dimensionCode"], []).append(tag)
-
-    lines = [
-        "# Ruyi-Dream 服装标签规则卡 / 精简版",
+        "# Ruyi-Dream 服装标签规则卡",
         "规则：只能使用下方启用的 code；不要创造新标签、同义词或自然语言散词；先判断品类 category；最终打标前必须应用“品类适用范围”；值类型为“分值”的标签使用 0 到 1 的 score；图片证据不足时降低 confidence，并用中文写明证据或不确定点。",
         "维度：" + "；".join(f"{dimension['code']}={dimension['labelZh']}" for dimension in dimensions),
         "标签：",
@@ -8819,10 +9864,6 @@ def taxonomy_prompt_tag_ref(
     label = f"({tag['labelZh']})" if with_label else ""
     description = f" - {tag['descriptionZh']}" if with_description and tag.get("descriptionZh") else ""
     return f"{dimension_code}.{tag_code}{label}{description}"
-
-
-def md_cell(value: str) -> str:
-    return str(value).replace("|", "\\|").replace("\n", " ").strip()
 
 
 def taxonomy_prompt_value_kind_label(value: str) -> str:

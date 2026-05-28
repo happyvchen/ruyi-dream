@@ -243,7 +243,7 @@ CREATE TABLE shot_plans (
 - 当前没有单独 `is_default` 字段。
 - 一个货号可保留多条历史 `shot_plans`。
 - 旧版业务上的“默认组图方案”由查询规则决定：`WHERE sku_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1`。
-- 旧版上传新货号后可创建默认方案。新版 AI 摄影棚主流程不读取货号默认组图方案，而是在预览阶段为 `GenerationTask` / `GenerationStyling` 生成 `generation_shot_plans`。
+- 旧版上传新货号后可创建默认方案。新版 AI 摄影棚主流程不读取货号默认组图方案，而是在拍摄剧本阶段为 `GenerationTask` / `GenerationStyling` / `GenerationShootScript` 生成 `generation_shot_plans`。
 
 ### 2.6 `shot_plan_shots`
 

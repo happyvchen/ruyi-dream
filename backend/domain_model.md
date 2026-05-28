@@ -11,7 +11,8 @@
 -> AI 摄影棚上传主推款
 -> 候选召回
 -> AI Stylist 生成 StylingPlan
--> 生成 3x2 六宫格预览
+-> AI Director 生成拍摄剧本 ShootScript 和 6 条 ShotPlan
+-> 生成 3x2 分镜预览
 -> Image-2 并发生成前 5 张成片
 -> 生成记录复盘
 ```
@@ -28,7 +29,8 @@ MVP 当前不实现多租户、权限、计费、模板市场，也不做复杂�
 | Studio Task | 主推款拍摄任务和输入版本 | `GenerationTask`, `GenerationTaskInputVersion`, `GenerationTaskImage` | `app/main.py`, `app/db.py` |
 | Model Profile | 数字模特档案 | `ModelProfile` | `app/db.py` |
 | Brand Profile | 单一品牌资料 | `BrandProfile` | `app/main.py`, `app/db.py` |
-| Styling & Planning | 候选召回、AI Stylist、StylingPlan、ShotPlan、六宫格预览 | `GenerationStyling`, `GenerationShotPlan`, `GenerationPreview` | `app/main.py` |
+| Shoot Config | 拍摄剧本配置、全局导演规则、默认图位规则和标签一级品类图位覆盖规则 | `ShootConfig` | `app/main.py`, `app/db.py` |
+| Styling & Planning | 候选召回、AI Stylist、StylingPlan、ShootScript、ShotPlan、分镜预览 | `GenerationStyling`, `GenerationShootScript`, `GenerationShotPlan`, `GenerationPreview` | `app/main.py` |
 | Generation | 最终结果批次、结果图、attempt | `GenerationResultSet`, `GenerationResultImage`, `GenerationAttempt` | `app/main.py`, `app/image_provider.py` |
 | Audit Log | 操作和系统事件留痕 | `EventLog` | `app/db.py` |
 
@@ -69,10 +71,11 @@ AI 摄影棚中的一次主推款拍摄任务。
 - 草稿期主推款图片移除或替换会释放无引用媒体文件；进入 AI 阶段后，输入图片冻结在 `GenerationTaskInputVersion`，不能再单独修改。
 - 点击智能选搭时创建 `GenerationTaskInputVersion`，同时冻结主推款图片和当前默认数字模特快照。
 - 通过 `GenerationStyling` 保存候选漏斗快照、完整 `StylingPlan`、选中 ID、选中服饰快照、Aesthetic Critic 诊断、质量信号、被拒方案、评分、理由和 warnings。
-- 预览阶段基于 `StylingPlan` 生成 6 条 `GenerationShotPlan`，并保存一张 3x2 六宫格 `GenerationPreview`。
-- 最终阶段创建 `GenerationResultSet`，并按前 5 条 ShotPlan 并发生成 `GenerationResultImage`。
-- 预览和最终生成只读取冻结的主推款、搭配服饰和数字模特输入；最终单图失败通过单张重试恢复。成功后是否允许重新选搭、重新预览或再次生成整组仍是产品决策项，当前代码暂时允许并保留历史结果用于追溯。
-- 生成记录默认删除为归档：写入 `archived_at/archive_reason`，默认列表隐藏但保留所有数据和对象文件。彻底删除会删除任务、输入版本、StylingPlan、ShotPlan、预览、结果、attempt 和已登记对象文件。
+- 拍摄剧本阶段基于 `StylingPlan` 生成 `GenerationShootScript` 和 6 条 `GenerationShotPlan`。
+- 分镜预览阶段基于当前拍摄剧本保存一张 3x2 `GenerationPreview`。
+- 最终阶段创建 `GenerationResultSet`，并按当前拍摄剧本前 5 条 ShotPlan 并发生成 `GenerationResultImage`。
+- 分镜预览和最终生成只读取冻结的主推款、搭配服饰、数字模特输入、当前 `StylingPlan` 和当前 `ShootScript`；最终单图失败通过单张重新生成恢复。每一步都支持重新生成，新上游成功后旧下游结果失效但保留用于追溯。
+- 生成记录默认删除为归档：写入 `archived_at/archive_reason`，默认列表隐藏但保留所有数据和对象文件。彻底删除会删除任务、输入版本、StylingPlan、ShootScript、ShotPlan、预览、结果、attempt 和已登记对象文件。
 
 ### 3.3 BrandProfile
 

@@ -33,6 +33,8 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("020", "rename_brand_profile_production_guidance_fields", "migration_rename_brand_profile_production_guidance_fields"),
     ("021", "add_taxonomy_skeleton", "migration_add_taxonomy_skeleton"),
     ("022", "add_taxonomy_applicability_rules", "migration_add_taxonomy_applicability_rules"),
+    ("023", "add_shoot_script_workflow", "migration_add_shoot_script_workflow"),
+    ("024", "add_shoot_config", "migration_add_shoot_config"),
 )
 
 
@@ -255,7 +257,9 @@ def init_db() -> None:
               status TEXT NOT NULL DEFAULT 'DRAFT',
               current_input_version_id INTEGER,
               active_styling_id INTEGER,
+              active_shoot_script_id INTEGER,
               active_preview_id INTEGER,
+              active_storyboard_preview_id INTEGER,
               active_result_set_id INTEGER,
               archived_at TEXT,
               archive_reason TEXT,
@@ -310,22 +314,50 @@ def init_db() -> None:
               updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS generation_shoot_scripts (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+              input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
+              styling_id INTEGER NOT NULL REFERENCES generation_stylings(id) ON DELETE CASCADE,
+              status TEXT NOT NULL DEFAULT 'SUCCEEDED',
+              script_json TEXT NOT NULL,
+              summary_json TEXT,
+              styling_risks_json TEXT,
+              accessory_adjustments_json TEXT,
+              active_attempt_id INTEGER,
+              locked_by TEXT,
+              locked_until TEXT,
+              run_attempts INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              superseded_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS shoot_configs (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              config_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS generation_shot_plans (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
               styling_id INTEGER NOT NULL REFERENCES generation_stylings(id) ON DELETE CASCADE,
+              shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id) ON DELETE CASCADE,
               sort_order INTEGER NOT NULL,
               shot_type TEXT,
               plan_json TEXT NOT NULL,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
-              UNIQUE(styling_id, sort_order)
+              UNIQUE(shoot_script_id, sort_order)
             );
 
             CREATE TABLE IF NOT EXISTS generation_previews (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
               styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
+              shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id),
               input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
               preview_asset_id INTEGER REFERENCES media_assets(id),
               status TEXT NOT NULL DEFAULT 'QUEUED',
@@ -342,6 +374,7 @@ def init_db() -> None:
               task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
               input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
               styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
+              shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id),
               preview_id INTEGER NOT NULL REFERENCES generation_previews(id),
               status TEXT NOT NULL DEFAULT 'RUNNING',
               created_at TEXT NOT NULL,
@@ -432,6 +465,8 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_rename_brand_profile_production_guidance_fields": migration_rename_brand_profile_production_guidance_fields,
         "migration_add_taxonomy_skeleton": migration_add_taxonomy_skeleton,
         "migration_add_taxonomy_applicability_rules": migration_add_taxonomy_applicability_rules,
+        "migration_add_shoot_script_workflow": migration_add_shoot_script_workflow,
+        "migration_add_shoot_config": migration_add_shoot_config,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -784,6 +819,261 @@ def migration_add_taxonomy_skeleton(db: sqlite3.Connection) -> None:
 
 def migration_add_taxonomy_applicability_rules(db: sqlite3.Connection) -> None:
     create_taxonomy_tables(db)
+
+
+def migration_add_shoot_script_workflow(db: sqlite3.Connection) -> None:
+    ensure_column(db, "generation_tasks", "active_shoot_script_id", "INTEGER")
+    ensure_column(db, "generation_tasks", "active_storyboard_preview_id", "INTEGER")
+    create_generation_shoot_script_tables(db)
+    backfill_generation_shoot_scripts(db)
+    rebuild_generation_shot_plans_for_shoot_scripts(db)
+    ensure_column(db, "generation_previews", "shoot_script_id", "INTEGER REFERENCES generation_shoot_scripts(id)")
+    ensure_column(db, "generation_result_sets", "shoot_script_id", "INTEGER REFERENCES generation_shoot_scripts(id)")
+    backfill_generation_preview_and_result_script_refs(db)
+
+
+def migration_add_shoot_config(db: sqlite3.Connection) -> None:
+    create_shoot_config_table(db)
+
+
+def create_shoot_config_table(db: sqlite3.Connection) -> None:
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shoot_configs (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          config_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def create_generation_shoot_script_tables(db: sqlite3.Connection) -> None:
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS generation_shoot_scripts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+          input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
+          styling_id INTEGER NOT NULL REFERENCES generation_stylings(id) ON DELETE CASCADE,
+          status TEXT NOT NULL DEFAULT 'SUCCEEDED',
+          script_json TEXT NOT NULL,
+          summary_json TEXT,
+          styling_risks_json TEXT,
+          accessory_adjustments_json TEXT,
+          active_attempt_id INTEGER,
+          locked_by TEXT,
+          locked_until TEXT,
+          run_attempts INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          superseded_at TEXT
+        )
+        """
+    )
+
+
+def build_legacy_shoot_script_from_plans(styling_row: sqlite3.Row, shot_rows: list[sqlite3.Row]) -> dict[str, Any]:
+    shots = []
+    for row in shot_rows:
+        plan = loads(row["plan_json"], {}) if "plan_json" in row.keys() else {}
+        shots.append(normalize_legacy_shoot_script_shot(plan, int(row["sort_order"])))
+    return {
+        "schema_version": "shoot-script-v1",
+        "script_source_mode": "legacy_migration",
+        "input_refs": {
+            "task_id": int(styling_row["task_id"]),
+            "input_version_id": int(styling_row["input_version_id"]),
+            "styling_id": int(styling_row["id"]),
+            "styling_plan_version": "styling-plan-v1",
+        },
+        "global_directing": {
+            "brand_tone": "Lily 商务时装，现代、干净、轻熟、自信、克制，商品优先。",
+            "background": "白色或浅灰棚拍背景，背景不抢服装主体。",
+            "lighting": "柔和均匀、低反差、真实肤色，服装边缘和结构清楚。",
+            "model_direction": "同一位数字模特，自然、自信、从容、克制。",
+            "hair_makeup_boundary": "保持数字模特原有脸型、五官、头型、发型和气质。",
+            "accessory_boundary": "鞋包首饰低存在感，可省略；不得遮挡主推款卖点。",
+            "consistency_rules": ["6 个镜头必须是同一位模特、同一套造型、同一背景光线体系。"],
+            "product_fidelity_rules": ["主推款图片是主角商品事实来源。", "选中搭配服饰图片是配角商品事实来源。"],
+            "negative_constraints": ["不要文字、水印、logo、编号和边框说明。"],
+        },
+        "styling_risks": [],
+        "accessory_adjustments": [],
+        "shots": shots,
+        "user_visible_summary": {
+            "title": "历史迁移拍摄剧本",
+            "summary": "由旧版 ShotPlan 自动迁移生成，用于新版分镜预览和成片链路复盘。",
+            "key_points": [],
+            "risk_summary": "",
+        },
+        "warnings": ["legacy_migration"],
+    }
+
+
+def normalize_legacy_shoot_script_shot(plan: dict[str, Any], sort_order: int) -> dict[str, Any]:
+    return {
+        "shot_index": int(plan.get("sortOrder") or plan.get("shot_index") or sort_order),
+        "shot_role": str(plan.get("shotType") or plan.get("shot_type") or "reference"),
+        "shot_role_label": str(plan.get("shotRoleLabel") or plan.get("shot_type") or plan.get("shotType") or "镜头方案"),
+        "framing": str(plan.get("framing") or plan.get("frame") or ""),
+        "crop_range": str(plan.get("cropRange") or plan.get("crop_range") or plan.get("framing") or ""),
+        "model_scale": str(plan.get("modelScale") or ""),
+        "camera_angle": str(plan.get("cameraAngle") or plan.get("camera_angle") or ""),
+        "body_position": str(plan.get("bodyPosition") or plan.get("cameraAngle") or ""),
+        "pose": str(plan.get("pose") or ""),
+        "movement": str(plan.get("movement") or ""),
+        "hand_position": str(plan.get("handPosition") or ""),
+        "main_focus": str(plan.get("mainFocus") or plan.get("main_focus") or ""),
+        "visible_garments": ensure_list_for_migration(plan.get("visibleGarments") or plan.get("visible_garments")),
+        "hero_selling_points": ensure_list_for_migration(plan.get("heroSellingPoints") or plan.get("hero_selling_points")),
+        "forbidden_occlusion_zones": ensure_list_for_migration(plan.get("forbiddenOcclusionZones") or plan.get("forbidden_occlusion_zones")),
+        "composition_notes": str(plan.get("compositionNotes") or plan.get("composition_notes") or ""),
+        "acceptance_criteria": ensure_list_for_migration(plan.get("acceptanceCriteria") or plan.get("acceptance_criteria")),
+        "negative_constraints": ensure_list_for_migration(plan.get("negativeConstraints") or plan.get("negative_constraints")),
+    }
+
+
+def ensure_list_for_migration(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value in (None, ""):
+        return []
+    return [value]
+
+
+def backfill_generation_shoot_scripts(db: sqlite3.Connection) -> None:
+    styling_rows = db.execute(
+        """
+        SELECT gs.*
+        FROM generation_stylings gs
+        WHERE EXISTS (SELECT 1 FROM generation_shot_plans gsp WHERE gsp.styling_id = gs.id)
+          AND NOT EXISTS (SELECT 1 FROM generation_shoot_scripts gss WHERE gss.styling_id = gs.id)
+        ORDER BY gs.id
+        """
+    ).fetchall()
+    for styling in styling_rows:
+        shot_rows = db.execute(
+            "SELECT * FROM generation_shot_plans WHERE styling_id = ? ORDER BY sort_order",
+            (styling["id"],),
+        ).fetchall()
+        script = build_legacy_shoot_script_from_plans(styling, shot_rows)
+        timestamp = styling["updated_at"] if "updated_at" in styling.keys() and styling["updated_at"] else now_iso()
+        cursor = db.execute(
+            """
+            INSERT INTO generation_shoot_scripts
+              (task_id, input_version_id, styling_id, status, script_json, summary_json,
+               styling_risks_json, accessory_adjustments_json, active_attempt_id, created_at, updated_at)
+            VALUES (?, ?, ?, 'SUCCEEDED', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                styling["task_id"],
+                styling["input_version_id"],
+                styling["id"],
+                dumps(script),
+                dumps(script.get("user_visible_summary") or {}),
+                dumps(script.get("styling_risks") or []),
+                dumps(script.get("accessory_adjustments") or []),
+                styling["attempt_id"] if "attempt_id" in styling.keys() else None,
+                timestamp,
+                timestamp,
+            ),
+        )
+        shoot_script_id = int(cursor.lastrowid)
+        db.execute(
+            """
+            UPDATE generation_tasks
+            SET active_shoot_script_id = COALESCE(active_shoot_script_id, ?)
+            WHERE id = ? AND active_styling_id = ?
+            """,
+            (shoot_script_id, styling["task_id"], styling["id"]),
+        )
+
+
+def rebuild_generation_shot_plans_for_shoot_scripts(db: sqlite3.Connection) -> None:
+    columns = table_columns(db, "generation_shot_plans")
+    if "shoot_script_id" in columns:
+        return
+    rows = db.execute("SELECT * FROM generation_shot_plans ORDER BY id").fetchall()
+    db.commit()
+    db.execute("PRAGMA foreign_keys = OFF")
+    db.execute("BEGIN")
+    db.execute("DROP TABLE IF EXISTS generation_shot_plans_new")
+    db.execute(
+        """
+        CREATE TABLE generation_shot_plans_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+          styling_id INTEGER NOT NULL REFERENCES generation_stylings(id) ON DELETE CASCADE,
+          shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id) ON DELETE CASCADE,
+          sort_order INTEGER NOT NULL,
+          shot_type TEXT,
+          plan_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(shoot_script_id, sort_order)
+        )
+        """
+    )
+    for row in rows:
+        script = db.execute(
+            "SELECT id FROM generation_shoot_scripts WHERE styling_id = ? ORDER BY id LIMIT 1",
+            (row["styling_id"],),
+        ).fetchone()
+        db.execute(
+            """
+            INSERT INTO generation_shot_plans_new
+              (id, task_id, styling_id, shoot_script_id, sort_order, shot_type, plan_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["id"],
+                row["task_id"],
+                row["styling_id"],
+                script["id"] if script else None,
+                row["sort_order"],
+                row["shot_type"],
+                row["plan_json"],
+                row["created_at"],
+                row["updated_at"],
+            ),
+        )
+    db.execute("DROP TABLE generation_shot_plans")
+    db.execute("ALTER TABLE generation_shot_plans_new RENAME TO generation_shot_plans")
+    db.execute("COMMIT")
+    db.execute("PRAGMA foreign_keys = ON")
+
+
+def backfill_generation_preview_and_result_script_refs(db: sqlite3.Connection) -> None:
+    db.execute(
+        """
+        UPDATE generation_previews
+        SET shoot_script_id = (
+          SELECT id FROM generation_shoot_scripts
+          WHERE generation_shoot_scripts.styling_id = generation_previews.styling_id
+          ORDER BY id LIMIT 1
+        )
+        WHERE shoot_script_id IS NULL
+        """
+    )
+    db.execute(
+        """
+        UPDATE generation_result_sets
+        SET shoot_script_id = (
+          SELECT shoot_script_id FROM generation_previews
+          WHERE generation_previews.id = generation_result_sets.preview_id
+        )
+        WHERE shoot_script_id IS NULL
+        """
+    )
+    db.execute(
+        """
+        UPDATE generation_tasks
+        SET active_storyboard_preview_id = COALESCE(active_storyboard_preview_id, active_preview_id)
+        WHERE active_storyboard_preview_id IS NULL AND active_preview_id IS NOT NULL
+        """
+    )
 
 
 def ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:

@@ -29,6 +29,7 @@ import {
   Save,
   Search,
   Shield,
+  SlidersHorizontal,
   Sparkles,
   Tags,
   Trash2,
@@ -41,11 +42,11 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
-import type { AIOperation, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, SessionRole, StylingGarment, TaxonomyApplicabilityPayload, TaxonomyApplicabilityRule, TaxonomyDimensionPayload, TaxonomyExportPayload, TaxonomyPromptCard, TaxonomyRelation, TaxonomyRelationPayload, TaxonomyRules, TaxonomyTag, TaxonomyTagPayload } from './api'
+import type { AIOperation, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, SessionRole, ShootConfig, ShootConfigCategoryOption, ShootConfigExportPayload, ShootConfigGlobalRule, ShootConfigPromptCard, ShootConfigShotRule, StylingGarment, TaxonomyApplicabilityPayload, TaxonomyApplicabilityRule, TaxonomyDimensionPayload, TaxonomyExportPayload, TaxonomyPromptCard, TaxonomyRelation, TaxonomyRelationPayload, TaxonomyRules, TaxonomyTag, TaxonomyTagPayload } from './api'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 
-type StudioStep = 0 | 1 | 2 | 3
+type StudioStep = 0 | 1 | 2 | 3 | 4
 type FileSystemEntry = {
   name: string
   isFile: boolean
@@ -67,6 +68,8 @@ type LightboxImage = {
   items?: LightboxImageItem[]
   initialIndex?: number
 }
+
+const NON_SHOOT_CONFIG_CATEGORY_CODES = new Set(['unknown', 'unsupported_accessory'])
 type LightboxImageItem = Omit<LightboxImage, 'items' | 'initialIndex'>
 type DeleteDialogTarget = Pick<GenerationTask, 'id' | 'name'>
 type RunOptions = { refresh?: boolean | 'background' }
@@ -74,7 +77,8 @@ type RunOptions = { refresh?: boolean | 'background' }
 const steps = [
   { title: '上传主推款', icon: Upload },
   { title: 'AI 智能选搭', icon: WandSparkles },
-  { title: '六宫格预览', icon: GalleryVerticalEnd },
+  { title: '生成拍摄剧本', icon: FileText },
+  { title: '生成分镜预览', icon: GalleryVerticalEnd },
   { title: '生成成片', icon: Sparkles },
 ] as const
 
@@ -103,7 +107,7 @@ export function App() {
       .then((session) => {
         setAuthenticated(session.authenticated)
         setRole(session.role ?? null)
-        if (session.role !== 'admin' && ['brand', 'tag-rules'].includes(parseRoute().page)) {
+        if (session.role !== 'admin' && ['brand', 'shoot-config', 'tag-rules'].includes(parseRoute().page)) {
           setPage('studio')
           window.history.replaceState(null, '', routeToUrl({ page: 'studio' }))
         }
@@ -118,7 +122,7 @@ export function App() {
   }, [authenticated, role])
 
   useEffect(() => {
-    if (!authenticated || role === 'admin' || !['brand', 'tag-rules'].includes(page)) return
+    if (!authenticated || role === 'admin' || !['brand', 'shoot-config', 'tag-rules'].includes(page)) return
     setPage('studio')
     window.history.replaceState(null, '', routeToUrl({ page: 'studio' }))
   }, [authenticated, role, page])
@@ -238,6 +242,7 @@ export function App() {
     { id: 'model' as const, label: '数字模特', icon: UserRound },
     ...(role === 'admin' ? [{ id: 'brand' as const, label: '品牌信息', icon: Building2 }] : []),
     ...(role === 'admin' ? [{ id: 'tag-rules' as const, label: '标签规则', icon: Tags }] : []),
+    ...(role === 'admin' ? [{ id: 'shoot-config' as const, label: '拍摄配置', icon: SlidersHorizontal }] : []),
     { id: 'records' as const, label: '生成记录', icon: History },
   ]
 
@@ -281,6 +286,7 @@ export function App() {
         {page === 'library' && <LibraryPage garments={garments} run={run} />}
         {page === 'model' && <ModelPage models={models} />}
         {page === 'brand' && role === 'admin' && <BrandInfoPage initialBrandInfo={brandInfo} setBrandInfo={setBrandInfo} run={run} />}
+        {page === 'shoot-config' && role === 'admin' && <ShootConfigPage run={run} />}
         {page === 'tag-rules' && role === 'admin' && <TagRulesPage run={run} />}
         {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} run={run} />}
       </main>
@@ -346,7 +352,7 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
     if (!task || !isTaskRunning(task)) return
     if (!window.confirm('确定取消本次生成吗？已提交给生成服务的图片可能仍会完成并产生费用；系统会停止后续生成，并保留已完成结果。')) return
     void run('取消生成中...', () => api.cancelTask(task.id), (r: { item: GenerationTask }) => {
-      clearLocalOperationsFor(['generation_styling', 'generation_preview', 'generation_result_image'])
+      clearLocalOperationsFor(['generation_styling', 'generation_shoot_script', 'generation_preview', 'generation_result_image'])
       setTask(r.item)
     }, { refresh: 'background' })
   }
@@ -360,7 +366,7 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
     return () => { cancelled = true }
   }, [records])
   useEffect(() => {
-    if (!task || !['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)) return
+    if (!task || !['STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)) return
     const timer = window.setInterval(() => {
       void api.getTask(task.id).then((result) => setTask(result.item)).catch(() => undefined)
     }, 1500)
@@ -374,8 +380,9 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
           <StepRail active={visibleStep} max={currentStep} onSelect={setStep} />
           {visibleStep === 0 && <UploadHeroStep task={task} setTask={setTask} run={run} />}
           {visibleStep === 1 && <StylingStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
-          {visibleStep === 2 && <PreviewStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
-          {visibleStep === 3 && <FinalStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
+          {visibleStep === 2 && <ShootScriptStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
+          {visibleStep === 3 && <PreviewStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
+          {visibleStep === 4 && <FinalStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
         </div>
         <aside className="panel task-rail">
           <h3>任务摘要</h3>
@@ -411,7 +418,7 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
                     onClick={() => {
                       if (!window.confirm('确定取消本次生成吗？已提交给生成服务的图片可能仍会完成并产生费用；系统会停止后续生成，并保留已完成结果。')) return
                       void run('取消生成中...', () => api.cancelTask(item.id), (r: { item: GenerationTask }) => {
-                        clearLocalOperationsFor(['generation_styling', 'generation_preview', 'generation_result_image'])
+                        clearLocalOperationsFor(['generation_styling', 'generation_shoot_script', 'generation_preview', 'generation_result_image'])
                         if (task?.id === item.id) setTask(r.item)
                         setTaskItems((current) => current.map((entry) => entry.id === item.id ? r.item : entry))
                       }, { refresh: 'background' })
@@ -585,7 +592,7 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
 }) {
-  const canSelect = !!task && ['READY_FOR_STYLING', 'STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task.status)
+  const canSelect = !!task && ['READY_FOR_STYLING', 'STYLING_READY', 'SCRIPT_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task.status)
   const hasStyling = !!task?.styling
   const operations = task ? operationFallbacks(task, localOperations, 'generation_styling') : []
   return (
@@ -597,7 +604,19 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
       ) : <EmptyState title="等待智能选搭" text="点击按钮后会冻结当前主推款输入版本。" />}
       <button className="primary" disabled={!canSelect} onClick={() => task && void run(hasStyling ? '重新选搭中...' : '智能选搭中...', () => {
         startLocalOperation({ ownerType: 'generation_styling', ownerId: task.id, provider: 'gemini' })
-        setTask({ ...task, status: 'STYLING_RUNNING', preview: null, resultSet: null, activePreviewId: null, activeResultSetId: null })
+        setTask({
+          ...task,
+          status: 'STYLING_RUNNING',
+          shootScript: null,
+          shotPlans: [],
+          preview: null,
+          storyboardPreview: null,
+          resultSet: null,
+          activeShootScriptId: null,
+          activeStoryboardPreviewId: null,
+          activePreviewId: null,
+          activeResultSetId: null,
+        })
         return api.selectStyling(task.id)
       }, (r: { item: GenerationTask }) => {
         clearLocalOperationsFor(['generation_styling'])
@@ -673,11 +692,24 @@ function planValue<T = unknown>(source: Record<string, unknown>, key: string): T
 }
 
 function stringValue(value: unknown) {
-  return typeof value === 'string' ? value : ''
+  if (typeof value === 'string') return value
+  if (typeof value === 'number') return String(value)
+  return ''
 }
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean) : []
+}
+
+function arrayValue<T = unknown>(source: unknown, key: string): T[] {
+  if (!source || typeof source !== 'object') return []
+  const value = (source as Record<string, unknown>)[key]
+  return Array.isArray(value) ? value.filter((item): item is T => typeof item === 'object' && item !== null) : []
+}
+
+function numberValue(value: unknown) {
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) ? number : 0
 }
 
 function diagnosisItems(value: Record<string, unknown>): string[] {
@@ -695,6 +727,117 @@ function diagnosisItems(value: Record<string, unknown>): string[] {
   }).filter(Boolean)
 }
 
+function ShootScriptStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
+  task: GenerationTask | null
+  setTask: (task: GenerationTask) => void
+  run: any
+  localOperations: AIOperation[]
+  startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
+  clearLocalOperationsFor: (ownerTypes: string[]) => void
+}) {
+  const canGenerate = (
+    !!task?.styling && ['STYLING_READY', 'SCRIPT_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task?.status ?? '')
+  )
+  const hasScript = !!task?.shootScript?.script
+  const operations = task ? operationFallbacks(task, localOperations, 'generation_shoot_script') : []
+  return (
+    <div className="step-panel">
+      <div className="step-copy"><h2>生成拍摄剧本</h2><p>AI Director 会一次性生成 6 个镜头的景别、取景、姿势、走位、背景光线和商品展示要求。</p></div>
+      <AIOperationList operations={operations} />
+      {task?.shootScript ? <ShootScriptSummary task={task} /> : <EmptyState title="尚未生成拍摄剧本" text="点击生成后，系统会把选搭方案转成拍摄前可执行的分镜剧本。" />}
+      <button className="primary" disabled={!canGenerate} onClick={() => task && void run(hasScript ? '重新生成拍摄剧本中...' : '生成拍摄剧本中...', () => {
+        startLocalOperation({ ownerType: 'generation_shoot_script', ownerId: task.id, provider: 'gemini' })
+        setTask({
+          ...task,
+          status: 'SCRIPT_RUNNING',
+          shootScript: task.shootScript ? { ...task.shootScript, status: 'RUNNING' } : null,
+          preview: null,
+          storyboardPreview: null,
+          resultSet: null,
+          activeStoryboardPreviewId: null,
+          activePreviewId: null,
+          activeResultSetId: null,
+        })
+        return api.createShootScript(task.id)
+      }, (r: { item: GenerationTask }) => {
+        clearLocalOperationsFor(['generation_shoot_script'])
+        setTask(r.item)
+      }, { refresh: false })}>
+        <FileText size={16} /> {hasScript ? '重新生成拍摄剧本' : '生成拍摄剧本'}
+      </button>
+    </div>
+  )
+}
+
+function ShootScriptSummary({ task }: { task: GenerationTask }) {
+  const shootScript = task.shootScript
+  if (!shootScript) return null
+  const script = shootScript.script ?? {}
+  const summary = (shootScript.summary && Object.keys(shootScript.summary).length ? shootScript.summary : planValue<Record<string, unknown>>(script, 'user_visible_summary') ?? {}) as Record<string, unknown>
+  const directing = (planValue<Record<string, unknown>>(script, 'global_directing') ?? {}) as Record<string, unknown>
+  const shots = shootScriptShots(task)
+  const risks = shootScript.stylingRisks?.length ? shootScript.stylingRisks : arrayValue<Record<string, unknown>>(script, 'styling_risks')
+  const adjustments = shootScript.accessoryAdjustments?.length ? shootScript.accessoryAdjustments : arrayValue<Record<string, unknown>>(script, 'accessory_adjustments')
+  return (
+    <div className="styling-plan shoot-script-plan">
+      <div className="styling-plan-head">
+        <div>
+          <span>拍摄剧本</span>
+          <h3>{stringValue(summary.title) || 'Lily 电商棚拍拍摄剧本'}</h3>
+        </div>
+        <div className="score-strip script-strip">
+          <span><b>{shots.length || 6}</b>镜头</span>
+          <span><b>{risks.length}</b>风险</span>
+          <span><b>{adjustments.length}</b>调整</span>
+        </div>
+      </div>
+      <p>{stringValue(summary.summary) || '本组拍摄以主推款商品表达为核心，覆盖完整比例、品类核心、设计细节、动态补充和标准正面图。'}</p>
+      <div className="styling-plan-grid script-directing-grid">
+        <InfoBlock title="品牌调性" items={[stringValue(directing.brand_tone)]} />
+        <InfoBlock title="背景光线" items={[stringValue(directing.background), stringValue(directing.lighting)].filter(Boolean)} />
+        <InfoBlock title="模特导演" items={[stringValue(directing.model_direction), stringValue(directing.hair_makeup_boundary)].filter(Boolean)} />
+        <InfoBlock title="商品保真" items={stringList(directing.product_fidelity_rules)} />
+      </div>
+      {risks.length > 0 && (
+        <div className="rejected-list">
+          <strong>选搭风险与建议</strong>
+          {risks.map((item, index) => (
+            <span key={`${stringValue(item.risk_id)}-${index}`}>{[stringValue(item.severity), stringValue(item.risk), stringValue(item.user_visible_recommendation)].filter(Boolean).join(' · ')}</span>
+          ))}
+        </div>
+      )}
+      {adjustments.length > 0 && (
+        <div className="rejected-list">
+          <strong>生成配饰调整</strong>
+          {adjustments.map((item, index) => (
+            <span key={`${stringValue(item.item_type)}-${index}`}>{[stringValue(item.item_type), stringValue(item.adjusted_direction), stringValue(item.reason)].filter(Boolean).join(' · ')}</span>
+          ))}
+        </div>
+      )}
+      <div className="shot-card-grid">
+        {shots.map((shot, index) => (
+          <div className="shot-card" key={`${numberValue(shot.shot_index) || index + 1}-${stringValue(shot.shot_role)}`}>
+            <div><span>#{numberValue(shot.shot_index) || index + 1}</span><strong>{stringValue(shot.shot_role_label) || stringValue(shot.shot_role) || '镜头'}</strong></div>
+            <p>{stringValue(shot.main_focus) || stringValue(shot.mainFocus)}</p>
+            <dl>
+              <dt>景别</dt><dd>{stringValue(shot.framing) || '未指定'}</dd>
+              <dt>取景</dt><dd>{stringValue(shot.crop_range) || stringValue(shot.cropRange) || '未指定'}</dd>
+              <dt>姿势</dt><dd>{stringValue(shot.pose) || '未指定'}</dd>
+              <dt>走位</dt><dd>{stringValue(shot.movement) || stringValue(shot.body_position) || stringValue(shot.bodyPosition) || '未指定'}</dd>
+            </dl>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function shootScriptShots(task: GenerationTask): Record<string, unknown>[] {
+  const scriptShots = arrayValue<Record<string, unknown>>(task.shootScript?.script ?? {}, 'shots')
+  if (scriptShots.length) return scriptShots
+  return (task.shotPlans ?? []).map((item) => ({ shot_index: item.sortOrder, shot_role: item.shotType, ...(item.plan ?? {}) } as Record<string, unknown>))
+}
+
 function PreviewStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask) => void
@@ -704,21 +847,22 @@ function PreviewStep({ task, setTask, run, localOperations, startLocalOperation,
   clearLocalOperationsFor: (ownerTypes: string[]) => void
 }) {
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
+  const preview = task?.storyboardPreview ?? task?.preview ?? null
   const canPreview = (
-    !!task?.styling && ['STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'CANCELLED'].includes(task?.status ?? '')
-  ) || (task?.status === 'FAILED' && !!task.styling && !task.preview)
-  const hasPreview = !!task?.preview?.asset
+    !!task?.shootScript && ['SCRIPT_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'CANCELLED'].includes(task?.status ?? '')
+  ) || (task?.status === 'FAILED' && !!task.shootScript && !preview?.asset)
+  const hasPreview = !!preview?.asset
   const operations = task ? operationFallbacks(task, localOperations, 'generation_preview') : []
   return (
     <div className="step-panel">
-      <div className="step-copy"><h2>六宫格预览</h2><p>只显示一张 3x2 预览图。最终固定生成前 5 格，第 6 格忽略。</p></div>
+      <div className="step-copy"><h2>生成分镜预览</h2><p>按拍摄剧本生成一张 3x2 分镜预览图。最终固定生成前 5 个镜头，第 6 个镜头忽略。</p></div>
       <AIOperationList operations={operations} />
-      {task?.preview?.asset ? (
-        <button className="preview-board-open" onClick={() => task.preview?.asset && setViewer(assetLightboxImage(task.preview.asset))} title="放大查看">
-          <img className="preview-board" src={mediaUrl(assetPreviewSrc(task.preview.asset))} />
+      {preview?.asset ? (
+        <button className="preview-board-open" onClick={() => preview.asset && setViewer(assetLightboxImage(preview.asset))} title="放大查看">
+          <img className="preview-board" src={mediaUrl(assetPreviewSrc(preview.asset))} />
         </button>
-      ) : <EmptyState title="尚未生成六宫格" text="点击生成预览后，系统会输出一张 3x2 分镜预览图。" />}
-      <button className="primary" disabled={!canPreview} onClick={() => task && void run(hasPreview ? '重新生成六宫格预览中...' : '生成六宫格预览中...', () => {
+      ) : <EmptyState title="尚未生成分镜预览" text="点击生成预览后，系统会根据拍摄剧本输出一张 3x2 分镜预览图。" />}
+      <button className="primary" disabled={!canPreview} onClick={() => task && void run(hasPreview ? '重新生成分镜预览中...' : '生成分镜预览中...', () => {
         startLocalOperation({ ownerType: 'generation_preview', ownerId: task.id, provider: 'image-2' })
         setTask({ ...task, status: 'PREVIEW_RUNNING', resultSet: null, activeResultSetId: null })
         return api.previewTask(task.id)
@@ -744,12 +888,13 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const images = task?.resultSet?.images ?? []
   const finalAssets = images.map((image) => image.asset).filter((asset): asset is MediaAsset => !!asset)
-  const canGenerate = !!task?.preview?.asset && ['PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'CANCELLED'].includes(task?.status ?? '')
+  const preview = task?.storyboardPreview ?? task?.preview ?? null
+  const canGenerate = !!preview?.asset && ['PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'CANCELLED'].includes(task?.status ?? '')
   const hasFinalImages = images.some((image) => !!image.asset)
   const finalOperations = task ? finalImageOperations(task, localOperations) : []
   return (
     <div className="step-panel">
-      <div className="step-copy"><h2>生成成片</h2><p>并发生成前 5 格。每张图可单独下载，失败可单张重试。</p></div>
+      <div className="step-copy"><h2>生成成片</h2><p>并发生成前 5 个镜头。每张图可单独下载，也可单张重新生成。</p></div>
       <AIOperationList operations={finalOperations} />
       <div className="result-grid">
         {images.length ? images.map((image) => (
@@ -759,9 +904,9 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
                 <img src={mediaUrl(assetPreviewSrc(image.asset))} />
               </button>
             ) : <div className="image-placeholder">{statusText(image.status)}{image.activeAttempt && isAttemptRunning(image.activeAttempt) && <small>{formatDuration(elapsedSeconds(image.activeAttempt.startedAt || image.updatedAt))}</small>}</div>}
-            <div><span>#{image.sortOrder}</span>{image.asset && <a href={mediaUrl(assetOriginalSrc(image.asset))} target="_blank" rel="noreferrer"><Download size={15} /></a>}{image.status === 'FAILED' && <button onClick={() => void run('单张重试中...', () => api.retryResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}><RotateCcw size={14} /></button>}</div>
+            <div><span>#{image.sortOrder}</span>{image.asset && <a href={mediaUrl(assetOriginalSrc(image.asset))} target="_blank" rel="noreferrer"><Download size={15} /></a>}{!['QUEUED', 'RUNNING'].includes(image.status) && <button onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成"><RotateCcw size={14} /></button>}</div>
           </div>
-        )) : <EmptyState title="尚未生成最终图" text="点击生成成片后会生成前 5 张。" />}
+        )) : <EmptyState title="尚未生成最终图" text="点击生成成片后会生成前 5 个镜头。" />}
       </div>
       <button className="primary" disabled={!canGenerate} onClick={() => task && void run(hasFinalImages ? '重新生成最终成片中...' : '生成最终成片中...', () => {
         for (let index = 1; index <= 5; index += 1) {
@@ -1609,6 +1754,380 @@ function BrandJsonDialog({ dialog, setDialog, onClose, onImport }: {
   )
 }
 
+function ShootConfigPage({ run }: { run: any }) {
+  const [config, setConfig] = useState<ShootConfig | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [categoryToAdd, setCategoryToAdd] = useState('')
+  const [jsonDialog, setJsonDialog] = useState<{ mode: 'import' | 'export'; text: string; error?: string } | null>(null)
+  const [promptDialog, setPromptDialog] = useState<{ text: string } | null>(null)
+
+  const categoryOptions = useMemo(
+    () => [...(config?.categoryOptions ?? [])].sort((a, b) => (a.sortOrder - b.sortOrder) || (a.id - b.id)),
+    [config?.categoryOptions],
+  )
+  const configuredCategoryKeys = useMemo(
+    () => new Set((config?.categoryShotRules ?? []).map((rule) => `${rule.categoryDimensionCode}:${rule.categoryTagCode}`)),
+    [config?.categoryShotRules],
+  )
+  const configurableCategoryOptions = categoryOptions.filter((option) => !NON_SHOOT_CONFIG_CATEGORY_CODES.has(option.code))
+  const addableCategoryOptions = configurableCategoryOptions.filter((option) => option.isActive && !configuredCategoryKeys.has(`${option.dimensionCode}:${option.code}`))
+  const enabledGlobalRuleCount = config?.globalRules.filter((rule) => rule.enabled).length ?? 0
+  const activeCategoryRuleCount = (config?.categoryShotRules ?? []).filter((rule) => {
+    const option = findShootCategoryOption(categoryOptions, rule.categoryDimensionCode, rule.categoryTagCode)
+    return option?.isActive
+  }).length
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    void api.getShootConfig()
+      .then((result) => {
+        if (!cancelled) setConfig(result.item)
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [])
+
+  function updateGlobalRule(index: number, field: keyof ShootConfigGlobalRule, value: string | boolean | number) {
+    setConfig((current) => {
+      if (!current) return current
+      const globalRules = [...current.globalRules]
+      globalRules[index] = { ...globalRules[index], [field]: value }
+      return { ...current, globalRules }
+    })
+  }
+
+  function addGlobalRule() {
+    setConfig((current) => {
+      if (!current) return current
+      const nextSort = Math.max(0, ...current.globalRules.map((rule) => Number(rule.sortOrder || 0))) + 10
+      return {
+        ...current,
+        globalRules: [
+          ...current.globalRules,
+          { id: `rule_${Date.now().toString(36)}`, label: '新导演规则', value: '', enabled: true, sortOrder: nextSort },
+        ],
+      }
+    })
+  }
+
+  function removeGlobalRule(index: number) {
+    setConfig((current) => current ? { ...current, globalRules: current.globalRules.filter((_, ruleIndex) => ruleIndex !== index) } : current)
+  }
+
+  function updateDefaultShotRule(index: number, field: keyof ShootConfigShotRule, value: string) {
+    setConfig((current) => {
+      if (!current) return current
+      const shots = [...current.defaultShotRule.shots]
+      shots[index] = { ...shots[index], [field]: value }
+      return { ...current, defaultShotRule: { shots } }
+    })
+  }
+
+  function updateCategoryShotRule(ruleIndex: number, shotIndex: number, field: keyof ShootConfigShotRule, value: string) {
+    setConfig((current) => {
+      if (!current) return current
+      const categoryShotRules = [...current.categoryShotRules]
+      const target = categoryShotRules[ruleIndex]
+      const shots = [...target.shots]
+      shots[shotIndex] = { ...shots[shotIndex], [field]: value }
+      categoryShotRules[ruleIndex] = { ...target, shots }
+      return { ...current, categoryShotRules }
+    })
+  }
+
+  function addCategoryRule() {
+    if (!addableCategoryOptions.length) return
+    const selectedCode = categoryToAdd || addableCategoryOptions[0].code
+    const option = addableCategoryOptions.find((item) => item.code === selectedCode) ?? addableCategoryOptions[0]
+    setConfig((current) => {
+      if (!current) return current
+      return {
+        ...current,
+        categoryShotRules: [
+          ...current.categoryShotRules,
+          {
+            categoryDimensionCode: option.dimensionCode,
+            categoryTagCode: option.code,
+            shots: cloneShootConfigShots(current.defaultShotRule.shots),
+          },
+        ],
+      }
+    })
+    setCategoryToAdd('')
+  }
+
+  function removeCategoryRule(index: number) {
+    setConfig((current) => current ? { ...current, categoryShotRules: current.categoryShotRules.filter((_, ruleIndex) => ruleIndex !== index) } : current)
+  }
+
+  function save() {
+    if (!config) return
+    void run('保存拍摄配置中...', () => api.updateShootConfig(config), (result: { item: ShootConfig }) => setConfig(result.item), { refresh: false })
+  }
+
+  function openExportJson() {
+    void run('导出拍摄配置中...', () => api.exportShootConfig(), (payload: ShootConfigExportPayload) => {
+      setJsonDialog({ mode: 'export', text: `${JSON.stringify(payload, null, 2)}\n` })
+    }, { refresh: false })
+  }
+
+  function openPromptCard() {
+    void run('生成拍摄配置 Prompt 预览中...', () => api.getShootConfigPromptCard(), (payload: ShootConfigPromptCard) => {
+      setPromptDialog({ text: payload.content })
+    }, { refresh: false })
+  }
+
+  function openImportJson() {
+    if (!window.confirm('导入 JSON 会覆盖当前拍摄配置，并按当前标签规则校验品类引用；不影响标签规则本身。是否继续？')) return
+    setJsonDialog({ mode: 'import', text: '' })
+  }
+
+  function confirmImportJson() {
+    if (!jsonDialog || jsonDialog.mode !== 'import') return
+    if (jsonDialog.text.length > 1024 * 1024) {
+      setJsonDialog({ ...jsonDialog, error: 'JSON 内容过大，请控制在 1MB 以内。' })
+      return
+    }
+    let payload: unknown
+    try {
+      payload = parseShootConfigJson(jsonDialog.text)
+    } catch (error) {
+      setJsonDialog({ ...jsonDialog, error: error instanceof Error ? error.message : 'JSON 导入失败。' })
+      return
+    }
+    void run('导入拍摄配置中...', () => api.importShootConfig(payload), (result: { item: ShootConfig }) => {
+      setConfig(result.item)
+      setJsonDialog(null)
+      window.alert('拍摄配置已导入并应用。')
+    }, { refresh: false })
+  }
+
+  return (
+    <section className="page">
+      <PageTitle
+        title="拍摄配置"
+        subtitle="维护 AI Director 生成拍摄剧本时读取的全局导演规则和品类图位规则。"
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={openPromptCard} disabled={!config}><FileText size={16} />Prompt 预览</button><button className="secondary" onClick={openImportJson}><Upload size={16} />导入</button><button className="secondary" onClick={openExportJson} disabled={!config}><Download size={16} />导出</button><button className="primary" onClick={save} disabled={!config}><Save size={16} />保存</button></div>}
+      />
+      {promptDialog && (
+        <ShootConfigPromptDialog
+          dialog={promptDialog}
+          onClose={() => setPromptDialog(null)}
+        />
+      )}
+      {jsonDialog && (
+        <ShootConfigJsonDialog
+          dialog={jsonDialog}
+          setDialog={setJsonDialog}
+          onClose={() => setJsonDialog(null)}
+          onImport={confirmImportJson}
+        />
+      )}
+      {loading && <div className="panel"><EmptyState title="读取拍摄配置中" text="正在加载当前拍摄规则。" /></div>}
+      {config && (
+        <>
+          <div className="taxonomy-summary shoot-config-summary">
+            <MetricCard label="启用全局规则" value={enabledGlobalRuleCount} />
+            <MetricCard label="默认镜头" value={config.defaultShotRule.shots.length} />
+            <MetricCard label="品类覆盖" value={activeCategoryRuleCount} />
+            <MetricCard label="可新增品类" value={addableCategoryOptions.length} />
+          </div>
+          <div className="shoot-config-layout">
+            <details className="panel shoot-config-section" open>
+              <summary>
+                <div>
+                  <strong>全局导演规则</strong>
+                  <span>{enabledGlobalRuleCount} / {config.globalRules.length} 条启用，按排序进入 AI Director Prompt。</span>
+                </div>
+                <button className="secondary" type="button" onClick={(event) => { event.preventDefault(); addGlobalRule() }}>新增规则</button>
+              </summary>
+              <p className="shoot-config-note">可删除、改名、停用或调整排序；保存后，后端会按当前条目动态组装 Prompt。</p>
+              <div className="shoot-global-rules">
+              {config.globalRules.map((rule, index) => (
+                <div className="shoot-global-rule-card" key={`${rule.id}-${index}`}>
+                  <div className="shoot-global-rule-head">
+                    <label className="checkbox-line"><input type="checkbox" checked={rule.enabled} onChange={(event) => updateGlobalRule(index, 'enabled', event.target.checked)} /> 启用</label>
+                    <button className="ghost-icon danger-icon" type="button" onClick={() => removeGlobalRule(index)} title="删除规则"><Trash2 size={16} /></button>
+                  </div>
+                  <div className="shoot-global-rule-fields">
+                    <label>名称<input value={rule.label} onChange={(event) => updateGlobalRule(index, 'label', event.target.value)} /></label>
+                    <label>排序<input type="number" value={rule.sortOrder} onChange={(event) => updateGlobalRule(index, 'sortOrder', Number(event.target.value))} /></label>
+                    <label className="wide">规则内容<textarea value={rule.value} onChange={(event) => updateGlobalRule(index, 'value', event.target.value)} /></label>
+                  </div>
+                </div>
+              ))}
+              </div>
+            </details>
+
+            <details className="panel shoot-config-section" open>
+              <summary>
+                <div>
+                  <strong>基础/默认 6 镜头规则</strong>
+                  <span>未命中具体品类、品类停用或品类规则被删除时使用。</span>
+                </div>
+                <span className="chip">Default</span>
+              </summary>
+              <ShootRuleEditor shots={config.defaultShotRule.shots} onChangeShot={updateDefaultShotRule} />
+            </details>
+
+            <details className="panel shoot-config-section" open>
+              <summary>
+                <div>
+                  <strong>品类 6 镜头基础规则</strong>
+                  <span>从标签规则的一级品类选择，只维护每类独有的 6 个 ShotPlan。</span>
+                </div>
+              </summary>
+              <div className="shoot-category-add">
+                <select value={categoryToAdd} disabled={!addableCategoryOptions.length} onChange={(event) => setCategoryToAdd(event.target.value)}>
+                  <option value="">{addableCategoryOptions.length ? '选择一级品类' : '无可新增品类'}</option>
+                  {addableCategoryOptions.map((option) => <option key={`${option.dimensionCode}:${option.code}`} value={option.code}>{option.labelZh} / {option.code}</option>)}
+                </select>
+                <button className="secondary" type="button" disabled={!addableCategoryOptions.length} onClick={addCategoryRule}>新增品类规则</button>
+              </div>
+              <div className="shoot-category-rule-list">
+            {config.categoryShotRules.map((rule, ruleIndex) => {
+              const option = findShootCategoryOption(categoryOptions, rule.categoryDimensionCode, rule.categoryTagCode)
+              return (
+                <details className="shoot-category-rule" key={`${rule.categoryDimensionCode}:${rule.categoryTagCode}:${ruleIndex}`} open={ruleIndex === 0}>
+                  <summary>
+                    <div>
+                      <strong>{option?.labelZh ?? rule.categoryTagCode}</strong>
+                      <span>{rule.categoryDimensionCode}:{rule.categoryTagCode}{option && !option.isActive ? ' / 已停用' : ''}</span>
+                    </div>
+                    <small>{rule.shots.length} shots</small>
+                  </summary>
+                  <div className="shoot-rule-detail-head">
+                    <div>
+                      <Meta label="来源" value="标签规则一级品类" />
+                      <Meta label="状态" value={option ? (option.isActive ? '启用' : '停用') : '标签已删除'} />
+                    </div>
+                    <button className="secondary" type="button" onClick={() => removeCategoryRule(ruleIndex)}><Trash2 size={16} />删除品类规则</button>
+                  </div>
+                  <ShootRuleEditor shots={rule.shots} onChangeShot={(shotIndex, field, value) => updateCategoryShotRule(ruleIndex, shotIndex, field, value)} />
+                </details>
+              )
+            })}
+              </div>
+            {!config.categoryShotRules.length && <EmptyState title="暂无品类覆盖规则" text="未命中具体品类时会使用基础/默认 6 镜头规则。" />}
+            </details>
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
+function ShootRuleEditor({ shots, onChangeShot }: {
+  shots: ShootConfigShotRule[]
+  onChangeShot: (index: number, field: keyof ShootConfigShotRule, value: string) => void
+}) {
+  return (
+    <div className="shoot-rule-grid">
+      {shots.map((rule, index) => (
+        <div className="shoot-rule-card" key={index}>
+          <div><span>#{index + 1}</span><input value={rule.shotRoleLabel} onChange={(event) => onChangeShot(index, 'shotRoleLabel', event.target.value)} /></div>
+          <label>类型<input value={rule.shotType} onChange={(event) => onChangeShot(index, 'shotType', event.target.value)} /></label>
+          <label>景别/取景<textarea value={rule.framing} onChange={(event) => onChangeShot(index, 'framing', event.target.value)} /></label>
+          <label>姿势<textarea value={rule.pose} onChange={(event) => onChangeShot(index, 'pose', event.target.value)} /></label>
+          <label>角度<input value={rule.cameraAngle} onChange={(event) => onChangeShot(index, 'cameraAngle', event.target.value)} /></label>
+          <label>展示重点<textarea value={rule.mainFocus} onChange={(event) => onChangeShot(index, 'mainFocus', event.target.value)} /></label>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function cloneShootConfigShots(shots: ShootConfigShotRule[]): ShootConfigShotRule[] {
+  return shots.slice(0, 6).map((shot) => ({ ...shot }))
+}
+
+function findShootCategoryOption(options: ShootConfigCategoryOption[], dimensionCode: string, tagCode: string) {
+  return options.find((option) => option.dimensionCode === dimensionCode && option.code === tagCode)
+}
+
+function parseShootConfigJson(text: string): unknown {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error('JSON 格式不正确。')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('JSON 内容必须是对象。')
+  }
+  const source = parsed as Record<string, unknown>
+  const config = source.config && typeof source.config === 'object' && !Array.isArray(source.config) ? source.config : source
+  const configObject = config as Record<string, unknown>
+  if (!Array.isArray(configObject.globalRules)) throw new Error('globalRules 必须是数组。')
+  if (!configObject.defaultShotRule || typeof configObject.defaultShotRule !== 'object') throw new Error('defaultShotRule 必须是对象。')
+  if (!Array.isArray(configObject.categoryShotRules)) throw new Error('categoryShotRules 必须是数组。')
+  return config
+}
+
+function ShootConfigPromptDialog({ dialog, onClose }: {
+  dialog: { text: string }
+  onClose: () => void
+}) {
+  return createPortal(
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <form className="confirm-modal brand-json-modal" role="dialog" aria-modal="true" aria-label="Prompt 预览" onSubmit={(event) => event.preventDefault()} onClick={(event) => event.stopPropagation()}>
+        <div className="confirm-head">
+          <div>
+            <h2>Prompt 预览</h2>
+            <p>展示后端实际传给 AI Director 的拍摄配置规则段，不触发模型调用。</p>
+          </div>
+          <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
+        </div>
+        <textarea readOnly value={dialog.text} />
+        <div className="confirm-actions">
+          <button type="button" className="secondary" onClick={onClose}>关闭</button>
+        </div>
+      </form>
+    </div>,
+    document.body,
+  )
+}
+
+function ShootConfigJsonDialog({ dialog, setDialog, onClose, onImport }: {
+  dialog: { mode: 'import' | 'export'; text: string; error?: string }
+  setDialog: (dialog: { mode: 'import' | 'export'; text: string; error?: string }) => void
+  onClose: () => void
+  onImport: () => void
+}) {
+  const isImport = dialog.mode === 'import'
+  return createPortal(
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <form className="confirm-modal brand-json-modal" role="dialog" aria-modal="true" aria-label={isImport ? '导入拍摄配置' : '导出拍摄配置'} onSubmit={(event) => {
+        event.preventDefault()
+        if (isImport) onImport()
+      }} onClick={(event) => event.stopPropagation()}>
+        <div className="confirm-head">
+          <div>
+            <h2>{isImport ? '导入拍摄配置' : '导出拍摄配置'}</h2>
+            <p>{isImport ? '导入后会覆盖当前拍摄配置，并按当前标签规则过滤不可用的品类引用。' : '导出包含当前配置和标签品类快照；导入时只应用 config。'}</p>
+          </div>
+          <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
+        </div>
+        <textarea
+          readOnly={!isImport}
+          value={dialog.text}
+          onChange={(event) => setDialog({ mode: dialog.mode, text: event.target.value })}
+        />
+        {dialog.error && <p className="json-error">{dialog.error}</p>}
+        <div className="confirm-actions">
+          <button type="button" className="secondary" onClick={onClose}>关闭</button>
+          {isImport && <button type="submit" className="primary">导入并应用</button>}
+        </div>
+      </form>
+    </div>,
+    document.body,
+  )
+}
+
 function TagRulesPage({ run }: { run: any }) {
   const [rules, setRules] = useState<TaxonomyRules | null>(null)
   const [activeCode, setActiveCode] = useState<string | 'new'>('')
@@ -1623,7 +2142,7 @@ function TagRulesPage({ run }: { run: any }) {
   const [relationDraft, setRelationDraft] = useState<TaxonomyRelationPayload>({})
   const [applicabilityDraft, setApplicabilityDraft] = useState<TaxonomyApplicabilityPayload>({})
   const [jsonDialog, setJsonDialog] = useState<{ mode: 'import' | 'export'; text: string; error?: string } | null>(null)
-  const [promptDialog, setPromptDialog] = useState<{ mode: 'full' | 'compact'; text: string } | null>(null)
+  const [promptDialog, setPromptDialog] = useState<{ text: string } | null>(null)
 
   function loadRules() {
     setLoading(true)
@@ -1938,9 +2457,9 @@ function TagRulesPage({ run }: { run: any }) {
     }, { refresh: false })
   }
 
-  function openPromptCard(mode: 'full' | 'compact') {
-    void run(`生成 ${mode} Prompt 中...`, () => api.getTaxonomyPromptCard(mode), (payload: TaxonomyPromptCard) => {
-      setPromptDialog({ mode: payload.mode, text: payload.content })
+  function openPromptCard() {
+    void run('生成标签规则 Prompt 预览中...', () => api.getTaxonomyPromptCard(), (payload: TaxonomyPromptCard) => {
+      setPromptDialog({ text: payload.content })
     }, { refresh: false })
   }
 
@@ -1974,7 +2493,7 @@ function TagRulesPage({ run }: { run: any }) {
       <PageTitle
         title="标签规则"
         subtitle="维护服装标签字典、层级树、标签关系和商品打标投影。"
-        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={() => openPromptCard('full')}><FileText size={16} />完整 Prompt</button><button className="secondary" onClick={() => openPromptCard('compact')}><FileText size={16} />精简 Prompt</button><button className="secondary" onClick={openImportJson}><Upload size={16} />导入</button><button className="secondary" onClick={openExportJson}><Download size={16} />导出</button><button className="secondary" disabled={loading} onClick={() => void loadRules()}><RotateCcw size={16} />刷新</button><button className="primary" onClick={() => void run('同步标签投影中...', () => api.backfillTaxonomyAssignments(), () => void loadRules(), { refresh: false })}><Save size={16} />同步现有标签</button></div>}
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={openPromptCard}><FileText size={16} />Prompt 预览</button><button className="secondary" onClick={openImportJson}><Upload size={16} />导入</button><button className="secondary" onClick={openExportJson}><Download size={16} />导出</button><button className="primary" onClick={() => void run('同步标签投影中...', () => api.backfillTaxonomyAssignments(), () => void loadRules(), { refresh: false })}><Save size={16} />同步现有标签</button></div>}
       />
       {promptDialog && (
         <TaxonomyPromptDialog
@@ -2267,16 +2786,16 @@ function parseTaxonomyJson(text: string): { dimensions: unknown[]; tags: unknown
 }
 
 function TaxonomyPromptDialog({ dialog, onClose }: {
-  dialog: { mode: 'full' | 'compact'; text: string }
+  dialog: { text: string }
   onClose: () => void
 }) {
   return createPortal(
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <form className="confirm-modal brand-json-modal" role="dialog" aria-modal="true" aria-label={`${dialog.mode} Prompt`} onSubmit={(event) => event.preventDefault()} onClick={(event) => event.stopPropagation()}>
+      <form className="confirm-modal brand-json-modal" role="dialog" aria-modal="true" aria-label="Prompt 预览" onSubmit={(event) => event.preventDefault()} onClick={(event) => event.stopPropagation()}>
         <div className="confirm-head">
           <div>
-            <h2>{dialog.mode === 'full' ? '完整 Prompt 原样输出' : '精简 Prompt 原样输出'}</h2>
-            <p>仅包含标签规则中已启用的维度、标签、关系和适用范围。</p>
+            <h2>Prompt 预览</h2>
+            <p>展示后端实际传给服装打标模型的标签规则卡，不触发模型调用。</p>
           </div>
           <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
         </div>
@@ -2566,7 +3085,9 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
               <h3>{detail.name}</h3>
               <Meta label="状态" value={statusText(detail.status)} />
               <Meta label="选中搭配" value={`${detail.styling?.selectedMaterials?.length ?? 0} 件`} />
-              {detail.preview?.asset && <img className="detail-preview" src={mediaUrl(assetPreviewSrc(detail.preview.asset))} />}
+              <Meta label="拍摄剧本" value={detail.shootScript ? '已生成' : '未生成'} />
+              {detail.shootScript?.summary?.summary && <p className="record-script-summary">{String(detail.shootScript.summary.summary)}</p>}
+              {(detail.storyboardPreview?.asset ?? detail.preview?.asset) && <img className="detail-preview" src={mediaUrl(assetPreviewSrc((detail.storyboardPreview?.asset ?? detail.preview?.asset) as MediaAsset))} />}
               <FinalImageStrip images={detail.resultSet?.images ?? []} />
             </>
           ) : <EmptyState title="选择一条记录" text="查看分镜预览、搭配服饰和最终成片。" />}
@@ -3123,8 +3644,11 @@ function operationFallbacks(task: GenerationTask, localOperations: AIOperation[]
   if (ownerType === 'generation_styling' && task.status === 'STYLING_RUNNING') {
     return [syntheticOperation(ownerType, task.id, 'gemini', task.updatedAt)]
   }
+  if (ownerType === 'generation_shoot_script' && task.status === 'SCRIPT_RUNNING') {
+    return [syntheticOperation(ownerType, task.activeShootScriptId ?? task.id, 'gemini', task.shootScript?.createdAt || task.updatedAt)]
+  }
   if (ownerType === 'generation_preview' && task.status === 'PREVIEW_RUNNING') {
-    return [syntheticOperation(ownerType, task.activePreviewId ?? task.id, 'image-2', task.preview?.createdAt || task.updatedAt)]
+    return [syntheticOperation(ownerType, task.activeStoryboardPreviewId ?? task.activePreviewId ?? task.id, 'image-2', task.storyboardPreview?.createdAt || task.preview?.createdAt || task.updatedAt)]
   }
   return []
 }
@@ -3211,7 +3735,8 @@ function operationLabel(operation: AIOperation, index = 0) {
   if (operation.ownerType === 'styling_garment_upload') return '搭配服饰上传'
   if (operation.ownerType === 'styling_garment_tagging') return '服饰标签识别'
   if (operation.ownerType === 'generation_styling') return '智能选搭'
-  if (operation.ownerType === 'generation_preview') return '六宫格预览'
+  if (operation.ownerType === 'generation_shoot_script') return '拍摄剧本'
+  if (operation.ownerType === 'generation_preview') return '分镜预览'
   if (operation.ownerType === 'generation_result_image') return `最终图 ${operation.ownerId > 0 && operation.id < 0 ? operation.ownerId : index + 1}`
   return '系统处理中'
 }
@@ -3404,19 +3929,26 @@ function EmptyState({ title, text }: { title: string; text: string }) {
 function getTaskStep(task: GenerationTask | null): StudioStep {
   if (!task) return 0
   if (task.status === 'CANCELLED') {
-    if (task.resultSet?.images?.length) return 3
-    if (task.preview || task.styling) return 2
+    if (task.resultSet?.images?.length) return 4
+    if (task.storyboardPreview || task.preview) return 3
+    if (task.shootScript || task.styling) return 2
     return 1
   }
-  if (task.status === 'FAILED') return task.styling ? 2 : 1
+  if (task.status === 'FAILED') {
+    if (task.resultSet?.images?.length) return 4
+    if (task.storyboardPreview || task.preview) return 3
+    if (task.shootScript || task.styling) return 2
+    return 1
+  }
   if (['READY_FOR_STYLING', 'STYLING_RUNNING'].includes(task.status)) return 1
-  if (['STYLING_READY', 'PREVIEW_RUNNING'].includes(task.status)) return 2
-  if (['PREVIEW_READY', 'FINAL_RUNNING', 'FINAL_PARTIAL', 'COMPLETED'].includes(task.status)) return 3
+  if (['STYLING_READY', 'SCRIPT_RUNNING', 'SCRIPT_READY'].includes(task.status)) return 2
+  if (['PREVIEW_RUNNING', 'PREVIEW_READY'].includes(task.status)) return 3
+  if (['FINAL_RUNNING', 'FINAL_PARTIAL', 'COMPLETED'].includes(task.status)) return 4
   return 0
 }
 
 function isTaskRunning(task: GenerationTask) {
-  return ['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)
+  return ['STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)
 }
 
 function statusText(status: string) {
@@ -3425,13 +3957,16 @@ function statusText(status: string) {
     READY_FOR_STYLING: '待选搭',
     STYLING_RUNNING: '选搭中',
     STYLING_READY: '已选搭',
-    PREVIEW_RUNNING: '预览中',
-    PREVIEW_READY: '预览完成',
+    SCRIPT_RUNNING: '剧本生成中',
+    SCRIPT_READY: '剧本完成',
+    PREVIEW_RUNNING: '分镜预览中',
+    PREVIEW_READY: '分镜预览完成',
     FINAL_RUNNING: '生成中',
     FINAL_PARTIAL: '部分完成',
     COMPLETED: '已完成',
     FAILED: '失败',
     CANCELLED: '已取消',
+    SUPERSEDED: '已失效',
     READY: '可用',
     TAGGING_READY: '待复核',
     TAGGING_RUNNING: '识别中',
@@ -3554,6 +4089,7 @@ function deleteImpactText(impact?: DeleteImpact | null) {
   if (impact.garmentImageCount) parts.push(`${impact.garmentImageCount} 张服饰图`)
   const taskCount = impact.dependentTaskCount ?? impact.taskCount ?? 0
   if (taskCount) parts.push(`${taskCount} 条生成记录`)
+  if (impact.shootScriptCount) parts.push(`${impact.shootScriptCount} 份拍摄剧本`)
   if (impact.resultImageCount) parts.push(`${impact.resultImageCount} 张结果图记录`)
   if (impact.mediaAssetCount) parts.push(`${impact.mediaAssetCount} 个存储文件`)
   const scope = parts.length ? parts.join('、') : '当前选中项'
