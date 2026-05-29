@@ -6,7 +6,7 @@
 
 ```text
 商品图片负责事实，标签、品牌样本和候选漏斗负责候选，AI Stylist 负责造型判断，
-StylingPlan 负责选搭意图和验收，ShotPlan 负责导演，Image-2 负责生成。
+StylingPlan 负责选搭意图和验收，ShootScript 负责导演，ShotPlan 负责单镜头，Image-2 负责生成。
 ```
 
 Image-2 是最终视觉生成器，不是选搭大脑、标签系统、历史记录系统或任务状态机。
@@ -29,10 +29,11 @@ Gemini 在 `AI Stylist` 阶段应被当作造型总监，而不是简单分类�
 | AI Stylist | 探索造型方向、生成多套 outfit、做审美和商品可见性自评 |
 | Aesthetic Critic | 判断 outfit 是否真正好看、符合 Lily、让主推款更有购买吸引力 |
 | StylingPlan | 保存选中方案、备选方案、穿着方式、评分、风险和理由 |
-| ShotPlan | 定义每格图位、姿态、景别、穿着关系、构图、光影 |
-| 六宫格预览 | 提供前 5 张最终图的导演分镜参考 |
+| ShootScript / 拍摄剧本 | 定义整组导演设定、搭配风险、配饰调整和 6 个镜头 |
+| ShotPlan | 定义单格图位、姿态、景别、取景范围、穿着关系、构图、光影 |
+| 分镜预览 | 提供前 5 张最终图的导演分镜参考 |
 | 生成配饰 | 鞋、包、饰品只辅助画面，不做商品级验收 |
-| 同组一致性 | 通过同一输入快照、同一 StylingPlan、同一六宫格、同一模特快照和 ShotPlan 保持 |
+| 同组一致性 | 通过同一输入快照、同一 StylingPlan、同一 ShootScript、同一分镜预览、同一模特快照和 ShotPlan 保持 |
 | 平台输出 | MVP 先单张下载，批量导出后续实现 |
 
 ## 3. 职责拆分
@@ -51,10 +52,11 @@ Gemini 在 `AI Stylist` 阶段应被当作造型总监，而不是简单分类�
 | Aesthetic Critic | AI Stylist 必经质量信号 | 色彩重量、廓形体量、季节材质、模板化风险、穿法质量、官方样本证据、品牌采用可能性 | 后端硬编码大量审美 if/else、Image-2 事后补救 |
 | StylingPlan | AI Stylist 输出 + 后端校验 | 候选快照、被拒方案、评分、审美诊断、风险提示 | ShotPlan 像素反推 |
 | 数字模特 | 数字模特图片和参数快照 | 文本身份边界 | 模型默认人物 |
-| ShotPlan | 规则/Gemini 基于主推品类和 StylingPlan 生成结构化拍摄方案 | 品类图位矩阵、品牌样本、主推款卖点 | 通用全身图模板、六宫格像素反推 |
-| 六宫格预览 | Image-2 | StylingPlan、ShotPlan、商品图片、模特图 | 业务状态机 |
-| 最终成片 | Image-2 | 六宫格第 N 格、StylingPlan、ShotPlan、商品图片 | Gemini 选图或替换商品 |
-| 生成配饰 | StylingPlan/ShotPlan/prompt 文本边界 | 品牌模板参考 | 搭配服饰库商品事实 |
+| ShootScript | AI 导演基于 StylingPlan 一次性生成结构化拍摄剧本 | 品类图位矩阵、品牌规则、主推款卖点、数字模特、搭配风险 | Image-2、前端临时状态、分镜预览像素反推 |
+| ShotPlan | ShootScript 的单镜头结构 | 主推品类、镜头用途、商品卖点、不可遮挡区域 | 通用全身图模板、分镜预览像素反推 |
+| 分镜预览 | Image-2 | StylingPlan、ShootScript、ShotPlan、商品图片、模特图 | 业务状态机 |
+| 最终成片 | Image-2 | 分镜预览第 N 格、StylingPlan、ShootScript、ShotPlan、商品图片 | Gemini 选图或替换商品 |
+| 生成配饰 | StylingPlan/ShootScript/ShotPlan 文本边界 | 品牌模板参考 | 搭配服饰库商品事实 |
 | 历史复盘 | 快照和 attempt | provider request/response | 当前素材库最新状态 |
 
 ## 4. 分层架构
@@ -63,8 +65,8 @@ Gemini 在 `AI Stylist` 阶段应被当作造型总监，而不是简单分类�
 flowchart LR
   A["预处理层<br/>搭配服饰打标 / 媒体资产 / 数字模特"] --> B["品牌与召回层<br/>Brand Style Index / READY 候选压缩 / 风格与风险排序"]
   B --> C["候选漏斗层<br/>硬过滤 / 兼容性排序 / outfit 草案"]
-  C --> D0["策划层<br/>AI Stylist / StylingPlan / ShotPlan"]
-  D0 --> D["生成层<br/>Image-2 六宫格 / 最终单图"]
+  C --> D0["策划层<br/>AI Stylist / StylingPlan / ShootScript / ShotPlan"]
+  D0 --> D["生成层<br/>Image-2 分镜预览 / 最终单图"]
   D --> E["记录与恢复<br/>快照 / attempts / 反馈"]
 ```
 
@@ -103,12 +105,13 @@ flowchart LR
 - 多套 outfit 候选
 - Aesthetic Critic 自评和否决，包含穿法质量与官方样本证据
 - 选中 StylingPlan
+- 生成 ShootScript 拍摄剧本
 - 按主推品类生成 6 条 ShotPlan
 - Image-2 10 图预算选图器
 
 生成层：
 
-- 3x2 六宫格预览
+- 3x2 分镜预览
 - 前 5 格并发最终生成
 - 单张失败重试
 

@@ -94,6 +94,8 @@ export type GenerationTask = {
   status: string
   currentInputVersionId?: number | null
   activeStylingId?: number | null
+  activeShootScriptId?: number | null
+  activeStoryboardPreviewId?: number | null
   activePreviewId?: number | null
   activeResultSetId?: number | null
   archivedAt?: string | null
@@ -121,11 +123,26 @@ export type GenerationTask = {
     reasonSummary?: string
     warnings?: string[]
   } | null
+  shootScript?: {
+    id: number
+    status: string
+    script?: Record<string, unknown>
+    summary?: Record<string, unknown>
+    stylingRisks?: Record<string, unknown>[]
+    accessoryAdjustments?: Record<string, unknown>[]
+    activeAttemptId?: number | null
+    activeAttempt?: AIOperation | null
+    createdAt?: string
+    updatedAt?: string
+  } | null
   shotPlans?: { id: number; sortOrder: number; shotType: string; plan: Record<string, unknown> }[]
-  preview?: { id: number; status: string; asset?: MediaAsset | null; createdAt?: string; updatedAt?: string } | null
+  preview?: { id: number; status: string; asset?: MediaAsset | null; shootScriptId?: number | null; createdAt?: string; updatedAt?: string } | null
+  storyboardPreview?: { id: number; status: string; asset?: MediaAsset | null; shootScriptId?: number | null; createdAt?: string; updatedAt?: string } | null
   resultSet?: {
     id: number
     status: string
+    shootScriptId?: number | null
+    previewId?: number | null
     images: {
       id: number
       sortOrder: number
@@ -156,6 +173,7 @@ export type DeleteImpact = {
   taskImageCount?: number
   inputVersionCount?: number
   stylingCount?: number
+  shootScriptCount?: number
   shotPlanCount?: number
   previewCount?: number
   resultSetCount?: number
@@ -212,6 +230,56 @@ export type BrandInfoPayload = {
   stylingGuidelines?: string
   shootingGuidelines?: string
   negativeConstraints?: string
+}
+
+export type ShootConfigShotRule = {
+  shotType: string
+  shotRoleLabel: string
+  framing: string
+  pose: string
+  cameraAngle: string
+  mainFocus: string
+}
+
+export type ShootConfigGlobalRule = {
+  id: string
+  label: string
+  value: string
+  enabled: boolean
+  sortOrder: number
+}
+
+export type ShootConfigCategoryOption = {
+  id: number
+  dimensionCode: string
+  code: string
+  labelZh: string
+  isActive: boolean
+  sortOrder: number
+}
+
+export type ShootConfigCategoryRule = {
+  categoryDimensionCode: string
+  categoryTagCode: string
+  shots: ShootConfigShotRule[]
+}
+
+export type ShootConfig = {
+  schemaVersion: string
+  globalRules: ShootConfigGlobalRule[]
+  defaultShotRule: { shots: ShootConfigShotRule[] }
+  categoryShotRules: ShootConfigCategoryRule[]
+  categoryOptions: ShootConfigCategoryOption[]
+}
+
+export type ShootConfigExportPayload = {
+  schemaVersion: string
+  config: ShootConfig
+  categoryOptionsSnapshot: ShootConfigCategoryOption[]
+}
+
+export type ShootConfigPromptCard = {
+  content: string
 }
 
 export type TaxonomyTag = {
@@ -338,7 +406,6 @@ export type TaxonomyExportPayload = {
 }
 
 export type TaxonomyPromptCard = {
-  mode: 'full' | 'compact'
   content: string
 }
 
@@ -468,6 +535,8 @@ export const api = {
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/ready`, { method: 'POST' }),
   selectStyling: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/select-styling`, { method: 'POST' }),
+  createShootScript: (id: number) =>
+    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/shoot-script`, { method: 'POST' }),
   previewTask: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/preview`, { method: 'POST' }),
   generateFinal: (id: number) =>
@@ -485,10 +554,16 @@ export const api = {
   updateBrandInfo: (payload: BrandInfoPayload) =>
     request<{ item: BrandInfo }>('/api/brand-info', { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteBrandInfo: () => request<{ ok: boolean }>('/api/brand-info', { method: 'DELETE' }),
+  getShootConfig: () => request<{ item: ShootConfig }>('/api/shoot-config'),
+  exportShootConfig: () => request<ShootConfigExportPayload>('/api/shoot-config/export'),
+  getShootConfigPromptCard: () => request<ShootConfigPromptCard>('/api/shoot-config/prompt-card'),
+  importShootConfig: (config: unknown) =>
+    request<{ item: ShootConfig }>('/api/shoot-config/import', { method: 'POST', body: JSON.stringify({ config }) }),
+  updateShootConfig: (config: ShootConfig) =>
+    request<{ item: ShootConfig }>('/api/shoot-config', { method: 'PATCH', body: JSON.stringify({ config }) }),
   getTaxonomyRules: () => request<TaxonomyRules>('/api/taxonomy/rules'),
   exportTaxonomyRules: () => request<TaxonomyExportPayload>('/api/taxonomy/export'),
-  getTaxonomyPromptCard: (mode: 'full' | 'compact') =>
-    request<TaxonomyPromptCard>(params('/api/taxonomy/prompt-card', { mode })),
+  getTaxonomyPromptCard: () => request<TaxonomyPromptCard>('/api/taxonomy/prompt-card'),
   importTaxonomyRules: (payload: { dimensions: unknown[]; tags: unknown[]; relations: unknown[]; applicabilityRules: unknown[] }) =>
     request<TaxonomyRules>('/api/taxonomy/import', { method: 'POST', body: JSON.stringify(payload) }),
   createTaxonomyDimension: (payload: TaxonomyDimensionPayload & { code: string; labelZh: string }) =>

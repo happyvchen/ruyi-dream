@@ -13,8 +13,8 @@
 ## 本地规则 (Local Rules)
 
 - 前台像“B2B 摄影工作台”，不是“AI 参数控制台”。
-- 默认流程为：上传主推款 -> AI 智能选搭 -> 六宫格预览 -> 生成成片。
-- prompt、provider 请求、ShotPlan JSON、快照 JSON 只在技术详情出现。
+- 默认流程为：上传主推款 -> AI 智能选搭 -> 生成拍摄剧本 -> 生成分镜预览 -> 生成成片。
+- prompt、provider 请求、ShootScript / ShotPlan JSON、快照 JSON 只在技术详情出现。
 
 ## 相关 (See Also)
 

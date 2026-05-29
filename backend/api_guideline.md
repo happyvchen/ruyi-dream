@@ -61,7 +61,7 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 | `/api/generation-tasks` | POST | 上传主推款图片并创建 `DRAFT` 拍摄任务 |
 | `/api/generation-tasks/{task_id}` | GET | 拍摄任务详情 |
 | `/api/generation-tasks/{task_id}` | PATCH | 草稿期修改任务名；进入 AI 阶段后拒绝修改 |
-| `/api/generation-tasks/{task_id}/cancel` | POST | 取消运行中的智能选搭、六宫格预览或成片生成；停止后续本地任务，已提交 provider 的调用可能仍产生费用，已完成结果保留 |
+| `/api/generation-tasks/{task_id}/cancel` | POST | 取消运行中的智能选搭、拍摄剧本、分镜预览或成片生成；停止后续本地任务，已提交 provider 的调用可能仍产生费用，已完成结果保留 |
 | `/api/generation-tasks/{task_id}/archive` | POST | 归档拍摄任务；从默认任务和记录列表隐藏但保留文件与历史 |
 | `/api/generation-tasks/batch-archive` | POST | 批量归档拍摄任务；从默认任务和记录列表隐藏但保留文件与历史 |
 | `/api/generation-tasks/{task_id}` | DELETE | 彻底删除拍摄任务；必须传 `purge=true` 并输入完整任务名确认，会清理任务、生成结果和对象文件 |
@@ -72,9 +72,12 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 | `/api/generation-task-images/{image_id}` | PATCH / DELETE | 草稿期调整排序或移除主推款图片 |
 | `/api/generation-tasks/{task_id}/ready` | POST | 确认草稿，进入待智能选搭状态 |
 | `/api/generation-tasks/{task_id}/select-styling` | POST | 冻结当前输入版本，执行候选召回和 AI Stylist，返回 `StylingPlan` |
-| `/api/generation-tasks/{task_id}/preview` | POST | 生成 6 条 ShotPlan 和 3x2 六宫格预览 |
-| `/api/generation-tasks/{task_id}/generate-final` | POST | 按前 5 条 ShotPlan 并发生成最终成片 |
-| `/api/generation-result-images-new/{image_id}/retry` | POST | 重试单张最终图 |
+| `/api/generation-tasks/{task_id}/shoot-script` | POST | 基于当前 `StylingPlan` 生成只读拍摄剧本和 6 条 ShotPlan |
+| `/api/generation-tasks/{task_id}/preview` | POST | 基于当前拍摄剧本生成 3x2 分镜预览 |
+| `/api/generation-tasks/{task_id}/generate-final` | POST | 按当前拍摄剧本前 5 条 ShotPlan 并发生成最终成片 |
+| `/api/generation-result-images-new/{image_id}/retry` | POST | 单张最终图重新生成 |
+
+长耗时生成接口在外部模型或 provider 返回后、写入成功状态前必须复查任务、当前 artifact 和 attempt 状态。若用户已取消，原请求只能保持 `CANCELLED`，不得把任务写回 ready/succeeded 状态，不得更新 active 指针，也不得覆盖或失效既有下游结果。
 | `/api/generation-records` | GET | 从草稿开始的生成记录列表 |
 | `/api/generation-records/{task_id}` | GET | 生成记录详情和技术快照 |
 | `/api/garment-skus` | GET | 旧版货号图包兼容列表；新版前台不作为主流程入口 |
@@ -100,7 +103,12 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 | `/api/brand-info` | POST | admin 创建单一品牌资料；初始值由前端提交，后端不预置 |
 | `/api/brand-info` | PATCH | admin 编辑单一品牌资料 |
 | `/api/brand-info` | DELETE | admin 删除单一品牌资料，恢复为空状态 |
-| `/api/shot-plans` | POST | 旧版货号组图方案兼容接口；新版 ShotPlan 由 `generation-tasks/{id}/preview` 生成 |
+| `/api/shoot-config` | GET | admin 查询拍摄配置；未保存时返回 Lily 默认全局导演规则、基础/默认 6 镜头规则、标签一级品类选项和品类图位覆盖规则 |
+| `/api/shoot-config/export` | GET | admin 导出当前拍摄配置 JSON；包含可导入的 `config` 和标签一级品类快照 |
+| `/api/shoot-config/prompt-card` | GET | admin 查看当前拍摄配置的 Prompt 预览；渲染结果与拍摄剧本生成时传给 AI Director 的拍摄配置规则段一致，不触发模型调用 |
+| `/api/shoot-config` | PATCH | admin 保存拍摄配置，后续拍摄剧本生成会读取启用的全局规则和命中的品类 shots；品类必须引用标签规则中的一级品类 |
+| `/api/shoot-config/import` | POST | admin 导入并覆盖拍摄配置；后端按当前标签规则校验和归一化品类引用 |
+| `/api/shot-plans` | POST | 旧版货号组图方案兼容接口；新版 ShotPlan 由 `generation-tasks/{id}/shoot-script` 生成 |
 | `/api/shot-plans/{shot_plan_id}` | GET | 旧版组图方案查看接口 |
 | `/api/garment-skus/{sku_id}/default-shot-plan` | GET | 旧版货号默认组图方案兼容接口 |
 | `/api/generation-runs` | POST | 旧版生成批次兼容接口；新版前台使用 `generation-tasks` |
@@ -122,7 +130,7 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 
 新版前台“生成记录”列表使用 `/api/generation-records`，并与 AI 摄影棚“最近任务”保持同一套 `GenerationTask` 列表口径，不是直接展示 `/api/logs`。旧版 `/api/generation-runs` 和 `/api/garment-skus` 仍作为兼容接口保留，不能作为新版页面主流程依据。`event_logs` 仍用于排查和审计。
 
-新版任务在调用 `select-styling` 时冻结主推款图片和默认数字模特快照。后端先生成候选召回快照，再调用 AI Stylist 输出 `StylingPlan`。六宫格与最终成片只读取该输入版本、`StylingPlan` 以及选搭快照。成功后是否允许整阶段重新选搭、重新预览或重新生成成片仍是产品决策项；当前代码暂时允许并保留历史结果用于追溯。部分失败支持单张结果图重试恢复。
+新版任务在调用 `select-styling` 时冻结主推款图片和默认数字模特快照。后端先生成候选召回快照，再调用 AI Stylist 输出 `StylingPlan`。拍摄剧本阶段调用 AI Director 输出 `ShootScript` 和 6 条 `ShotPlan`；分镜预览与最终成片只读取当前输入版本、`StylingPlan`、`ShootScript`、选搭快照和预览一致性参考。当前每个阶段都支持重新生成；新上游成功后，下游旧预览和旧成片失效但保留用于追溯。部分失败支持单张结果图重新生成恢复。
 
 写接口在 cookie 会话下会校验 `Origin` / `Referer` 是否属于 `BACKEND_CORS_ORIGINS`，脚本调用应使用可选的 `APP_API_ACCESS_TOKEN`。
 

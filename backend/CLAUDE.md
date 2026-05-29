@@ -2,7 +2,7 @@
 
 ## 职责 (Scope)
 
-ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + SQLite + S3 兼容对象存储的 MVP，实现搭配服饰打标与调用快照、主推款任务流、AI Stylist / StylingPlan、Image-2 预览/成片生成、结果复盘，并保留旧版组图接口兼容能力。
+ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + SQLite + S3 兼容对象存储的 MVP，实现搭配服饰打标与调用快照、主推款任务流、AI Stylist / StylingPlan、拍摄剧本 / ShootScript、Image-2 分镜预览/成片生成、结果复盘，并保留旧版组图接口兼容能力。
 
 设计层面的产品范围、生成职责和技术路线在 `../design/`，本目录只管“代码怎么写”和“后端契约怎么落地”。
 
@@ -41,11 +41,11 @@ ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + 
 
 - 保存和管理服装货号图包对象
 - 维护数字模特档案和素材引用
-- 维护 admin-only 单一品牌资料，供后续选搭和 ShotPlan 作为结构化品牌参考
+- 维护 admin-only 单一品牌资料，供后续选搭、拍摄剧本和 ShotPlan 作为结构化品牌参考
 - 管理 AI 摄影棚主推款任务、输入版本和状态机
 - 对 READY 搭配服饰做候选漏斗、风险降权、outfit 草案和标签压缩
 - 调用 AI Stylist 生成带 Aesthetic Critic 诊断的 `StylingPlan`，保存完整 request/response 快照
-- 基于 `StylingPlan` 生成 ShotPlan 和 Image-2 任务包
+- 基于 `StylingPlan` 生成 ShootScript / ShotPlan 和 Image-2 任务包
 - 管理生成任务状态、单张重试、结果下载和记录复盘
 - 保存实验/生产结果、候选漏斗、StylingPlan 和 provider attempts 元数据
 

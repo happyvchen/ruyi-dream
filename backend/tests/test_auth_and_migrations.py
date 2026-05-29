@@ -997,7 +997,11 @@ class BackendSmokeTests(unittest.TestCase):
                     input_version_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_task_input_versions)").fetchall()}
                     task_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_tasks)").fetchall()}
                     styling_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_stylings)").fetchall()}
+                    shoot_script_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_shoot_scripts)").fetchall()}
+                    shot_plan_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_shot_plans)").fetchall()}
+                    shoot_config_columns = {row["name"] for row in db.execute("PRAGMA table_info(shoot_configs)").fetchall()}
                     preview_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_previews)").fetchall()}
+                    result_set_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_result_sets)").fetchall()}
                     result_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_result_images_new)").fetchall()}
                     brand_profile_columns = {row["name"] for row in db.execute("PRAGMA table_info(brand_profiles)").fetchall()}
                     taxonomy_dimension_count = db.execute("SELECT COUNT(*) AS count FROM tag_dimensions").fetchone()["count"]
@@ -1008,7 +1012,7 @@ class BackendSmokeTests(unittest.TestCase):
                     brand_profile_count = db.execute("SELECT COUNT(*) AS count FROM brand_profiles").fetchone()["count"]
                     template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016", "017", "018", "019", "020", "021", "022"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016", "017", "018", "019", "020", "021", "022", "023", "024"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
@@ -1026,8 +1030,18 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("archived_at", styling_garment_columns)
         self.assertIn("archive_reason", styling_garment_columns)
         self.assertIn("model_snapshot_json", input_version_columns)
+        self.assertIn("active_shoot_script_id", task_columns)
+        self.assertIn("active_storyboard_preview_id", task_columns)
         self.assertIn("archived_at", task_columns)
         self.assertIn("archive_reason", task_columns)
+        self.assertIn("script_json", shoot_script_columns)
+        self.assertIn("summary_json", shoot_script_columns)
+        self.assertIn("styling_risks_json", shoot_script_columns)
+        self.assertIn("accessory_adjustments_json", shoot_script_columns)
+        self.assertIn("shoot_script_id", shot_plan_columns)
+        self.assertIn("config_json", shoot_config_columns)
+        self.assertIn("shoot_script_id", preview_columns)
+        self.assertIn("shoot_script_id", result_set_columns)
         self.assertIn("brand_core", brand_profile_columns)
         self.assertIn("style_dna", brand_profile_columns)
         self.assertIn("styling_guidelines", brand_profile_columns)
@@ -1126,7 +1140,7 @@ class BackendSmokeTests(unittest.TestCase):
                     user_login = client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"})
                     self.assertEqual(user_login.status_code, 200)
                     self.assertEqual(client.get("/api/taxonomy/rules").status_code, 403)
-                    self.assertEqual(client.get("/api/taxonomy/prompt-card?mode=full").status_code, 403)
+                    self.assertEqual(client.get("/api/taxonomy/prompt-card").status_code, 403)
 
                     admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
                     self.assertEqual(admin_login.status_code, 200)
@@ -1138,20 +1152,11 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertEqual(payload["summary"]["relationCount"], 0)
                     self.assertEqual(payload["summary"]["applicabilityRuleCount"], 0)
 
-                    full_prompt = client.get("/api/taxonomy/prompt-card?mode=full")
-                    self.assertEqual(full_prompt.status_code, 200)
-                    self.assertEqual(full_prompt.json()["mode"], "full")
-                    self.assertIn("# Ruyi-Dream 服装标签规则卡 / 完整版", full_prompt.json()["content"])
-                    self.assertIn("## 品类适用范围", full_prompt.json()["content"])
-                    self.assertIn("字段内容、证据说明、视觉摘要等自然语言必须使用中文", full_prompt.json()["content"])
-
-                    compact_prompt = client.get("/api/taxonomy/prompt-card?mode=compact")
-                    self.assertEqual(compact_prompt.status_code, 200)
-                    self.assertEqual(compact_prompt.json()["mode"], "compact")
-                    self.assertIn("# Ruyi-Dream 服装标签规则卡 / 精简版", compact_prompt.json()["content"])
-                    self.assertIn("品类适用范围：", compact_prompt.json()["content"])
-                    self.assertIn("输出 JSON（字段名保持英文用于系统解析；字段内容使用中文）", compact_prompt.json()["content"])
-                    self.assertEqual(client.get("/api/taxonomy/prompt-card?mode=raw").status_code, 400)
+                    prompt = client.get("/api/taxonomy/prompt-card")
+                    self.assertEqual(prompt.status_code, 200)
+                    self.assertIn("# Ruyi-Dream 服装标签规则卡", prompt.json()["content"])
+                    self.assertIn("品类适用范围：", prompt.json()["content"])
+                    self.assertIn("输出 JSON（字段名保持英文用于系统解析；字段内容使用中文）", prompt.json()["content"])
 
                     created_category_dimension = client.post(
                         "/api/taxonomy/dimensions",
@@ -1289,7 +1294,7 @@ class BackendSmokeTests(unittest.TestCase):
                     applicability = next(item for item in updated_applicability.json()["applicabilityRules"] if item["id"] == applicability_id)
                     self.assertEqual(applicability["mode"], "required")
                     self.assertFalse(applicability["isActive"])
-                    after_inactive_prompt = client.get("/api/taxonomy/prompt-card?mode=full")
+                    after_inactive_prompt = client.get("/api/taxonomy/prompt-card")
                     self.assertEqual(after_inactive_prompt.status_code, 200)
                     self.assertNotIn("按品类限定测试细节", after_inactive_prompt.json()["content"])
 
@@ -1344,6 +1349,72 @@ class BackendSmokeTests(unittest.TestCase):
                     deleted_dimension = client.delete("/api/taxonomy/dimensions/test_dimension")
                     self.assertEqual(deleted_dimension.status_code, 200)
                     self.assertFalse(any(item["code"] == "test_dimension" for item in deleted_dimension.json()["dimensions"]))
+
+    def test_shoot_config_prompt_import_and_export_are_admin_only(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file, tempfile.TemporaryDirectory() as log_dir:
+            log_dir_path = Path(log_dir)
+
+            class FakeSettings:
+                database_path = Path(db_file.name)
+                log_dir = log_dir_path
+
+            with (
+                patch.object(db_module, "get_settings", return_value=FakeSettings),
+                patch.object(main.settings, "database_path", Path(db_file.name)),
+            ):
+                config.get_settings.cache_clear()
+                db_module.init_db()
+
+                with patch.object(main, "ensure_bucket", return_value=None), TestClient(main.app) as client:
+                    self.assertEqual(client.get("/api/shoot-config").status_code, 401)
+
+                    user_login = client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"})
+                    self.assertEqual(user_login.status_code, 200)
+                    self.assertEqual(client.get("/api/shoot-config/export").status_code, 403)
+                    self.assertEqual(client.get("/api/shoot-config/prompt-card").status_code, 403)
+
+                    admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+                    self.assertEqual(admin_login.status_code, 200)
+                    self.assertEqual(client.post("/api/taxonomy/dimensions", json={"code": "category", "labelZh": "品类"}).status_code, 200)
+                    self.assertEqual(client.post("/api/taxonomy/tags", json={"dimensionCode": "category", "code": "top", "labelZh": "上装"}).status_code, 200)
+
+                    prompt = client.get("/api/shoot-config/prompt-card")
+                    self.assertEqual(prompt.status_code, 200)
+                    self.assertIn("# Ruyi-Dream 拍摄配置 Prompt", prompt.json()["content"])
+                    self.assertIn("默认 6 镜头", prompt.json()["content"])
+
+                    exported = client.get("/api/shoot-config/export")
+                    self.assertEqual(exported.status_code, 200)
+                    exported_payload = exported.json()
+                    self.assertEqual(exported_payload["schemaVersion"], "ruyi-shoot-config-v1")
+                    config_payload = exported_payload["config"]
+                    config_payload["globalRules"] = [
+                        {"id": "brand_style", "label": "品牌风格", "value": "干净、现代、商品优先。", "enabled": True, "sortOrder": 10}
+                    ]
+                    config_payload["categoryShotRules"] = [
+                        {
+                            "categoryDimensionCode": "category",
+                            "categoryTagCode": "top",
+                            "shots": config_payload["defaultShotRule"]["shots"],
+                        },
+                        {
+                            "categoryDimensionCode": "category",
+                            "categoryTagCode": "unknown",
+                            "shots": config_payload["defaultShotRule"]["shots"],
+                        },
+                    ]
+
+                    imported = client.post("/api/shoot-config/import", json={"config": config_payload})
+                    self.assertEqual(imported.status_code, 200)
+                    item = imported.json()["item"]
+                    self.assertEqual(item["globalRules"][0]["label"], "品牌风格")
+                    self.assertEqual([rule["categoryTagCode"] for rule in item["categoryShotRules"]], ["top"])
 
     def test_brand_info_legacy_fields_migrate_to_guidance_text(self) -> None:
         config = importlib.import_module("app.config")
@@ -1530,6 +1601,313 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(preview_status, "CANCELLED")
         self.assertEqual(attempt["status"], "CANCELLED")
         self.assertIsNotNone(attempt["cancelled_at"])
+
+    def test_shoot_script_generation_persists_script_and_invalidates_downstream_outputs(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        raw_script = {
+            "schema_version": "shoot-script-v1",
+            "global_directing": {
+                "brand_tone": "Lily 商务时装，商品优先。",
+                "background": "浅灰棚拍背景。",
+                "lighting": "柔和均匀光。",
+                "model_direction": "自然、自信、克制。",
+                "hair_makeup_boundary": "保持数字模特原貌。",
+                "accessory_boundary": "配饰低存在感。",
+                "consistency_rules": ["同一位模特"],
+                "product_fidelity_rules": ["主推款保真"],
+                "negative_constraints": ["不要文字水印"],
+            },
+            "styling_risks": [
+                {
+                    "risk_id": "risk_1",
+                    "severity": "medium",
+                    "material_id": 12,
+                    "material_code": "SK-001",
+                    "risk": "下装可能抢主推款视觉中心。",
+                    "affected_shots": [1, 2],
+                    "director_strategy": "降低下装存在感。",
+                    "user_visible_recommendation": "建议后续替换更轻量下装。",
+                }
+            ],
+            "accessory_adjustments": [
+                {
+                    "item_type": "bag",
+                    "original_direction": "手提包",
+                    "adjusted_direction": "取消包",
+                    "reason": "避免遮挡衣身。",
+                    "affected_shots": [1],
+                }
+            ],
+            "shots": [
+                {
+                    "shot_index": index,
+                    "shot_role": "hero_full_body" if index == 1 else "reference",
+                    "shot_role_label": f"镜头 {index}",
+                    "framing": "全身图",
+                    "crop_range": "头到脚完整",
+                    "model_scale": "全身",
+                    "camera_angle": "轻斜正",
+                    "body_position": "自然重心",
+                    "pose": "一腿微前",
+                    "movement": "轻走动" if index == 4 else "静态",
+                    "hand_position": "自然垂手",
+                    "main_focus": "主推款完整比例",
+                    "visible_garments": ["hero"],
+                    "hero_selling_points": ["版型"],
+                    "forbidden_occlusion_zones": ["衣身"],
+                    "composition_notes": "商品优先",
+                    "acceptance_criteria": ["主推款清楚"],
+                    "negative_constraints": ["不要改款"],
+                }
+                for index in range(1, 7)
+            ],
+            "user_visible_summary": {
+                "title": "测试拍摄剧本",
+                "summary": "覆盖 6 个镜头。",
+                "key_points": ["完整比例", "细节展示"],
+                "risk_summary": "存在一项搭配风险。",
+            },
+            "warnings": [],
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            with db_module.get_db() as db:
+                task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('script task', 'PREVIEW_READY', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                input_id = db.execute(
+                    """
+                    INSERT INTO generation_task_input_versions (task_id, version_number, name_snapshot, image_snapshot_json, created_at)
+                    VALUES (?, 1, 'script task', '[]', ?)
+                    """,
+                    (task_id, timestamp),
+                ).lastrowid
+                styling_id = db.execute(
+                    """
+                    INSERT INTO generation_stylings
+                      (task_id, input_version_id, source_material_ids_json, selected_material_ids_json,
+                       selected_material_snapshot_json, styling_plan_json, status, created_at, updated_at)
+                    VALUES (?, ?, '[]', '[]', '[]', ?, 'SUCCEEDED', ?, ?)
+                    """,
+                    (task_id, input_id, db_module.dumps({"selected_outfit_id": "look_1", "outfit_candidates": []}), timestamp, timestamp),
+                ).lastrowid
+                old_script_id = db.execute(
+                    """
+                    INSERT INTO generation_shoot_scripts
+                      (task_id, input_version_id, styling_id, status, script_json, created_at, updated_at)
+                    VALUES (?, ?, ?, 'SUCCEEDED', '{}', ?, ?)
+                    """,
+                    (task_id, input_id, styling_id, timestamp, timestamp),
+                ).lastrowid
+                old_preview_id = db.execute(
+                    """
+                    INSERT INTO generation_previews (task_id, styling_id, shoot_script_id, input_version_id, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'SUCCEEDED', ?, ?)
+                    """,
+                    (task_id, styling_id, old_script_id, input_id, timestamp, timestamp),
+                ).lastrowid
+                old_result_set_id = db.execute(
+                    """
+                    INSERT INTO generation_result_sets (task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 'SUCCEEDED', ?, ?)
+                    """,
+                    (task_id, input_id, styling_id, old_script_id, old_preview_id, timestamp, timestamp),
+                ).lastrowid
+                db.execute(
+                    """
+                    UPDATE generation_tasks
+                    SET current_input_version_id = ?, active_styling_id = ?, active_shoot_script_id = ?,
+                        active_storyboard_preview_id = ?, active_preview_id = ?, active_result_set_id = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (input_id, styling_id, old_script_id, old_preview_id, old_preview_id, old_result_set_id, timestamp, task_id),
+                )
+
+            client = TestClient(main.app)
+            self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+            with patch.object(main, "generate_shoot_script_with_gemini", new_callable=AsyncMock, return_value=raw_script) as gemini:
+                response = client.post(f"/api/generation-tasks/{task_id}/shoot-script")
+
+            self.assertEqual(response.status_code, 200)
+            item = response.json()["item"]
+            self.assertEqual(item["status"], "SCRIPT_READY")
+            self.assertEqual(item["shootScript"]["summary"]["title"], "测试拍摄剧本")
+            self.assertEqual(len(item["shotPlans"]), 6)
+            self.assertIsNone(item["storyboardPreview"])
+            self.assertIsNone(item["resultSet"])
+            gemini.assert_awaited_once()
+
+            with db_module.get_db() as db:
+                old_script_status = db.execute("SELECT status FROM generation_shoot_scripts WHERE id = ?", (old_script_id,)).fetchone()["status"]
+                old_preview_status = db.execute("SELECT status FROM generation_previews WHERE id = ?", (old_preview_id,)).fetchone()["status"]
+                old_result_status = db.execute("SELECT status FROM generation_result_sets WHERE id = ?", (old_result_set_id,)).fetchone()["status"]
+                shot_plan_count = db.execute("SELECT COUNT(*) AS count FROM generation_shot_plans WHERE shoot_script_id = ?", (item["activeShootScriptId"],)).fetchone()["count"]
+
+        self.assertEqual(old_script_status, "SUPERSEDED")
+        self.assertEqual(old_preview_status, "SUPERSEDED")
+        self.assertEqual(old_result_status, "SUPERSEDED")
+        self.assertEqual(shot_plan_count, 6)
+
+    def test_shoot_script_generation_cancelled_during_gemini_does_not_revive_task(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        raw_script = {
+            "schema_version": "shoot-script-v1",
+            "global_directing": {
+                "brand_tone": "Lily 商务时装，商品优先。",
+                "background": "浅灰棚拍背景。",
+                "lighting": "柔和均匀光。",
+                "model_direction": "自然、自信、克制。",
+                "hair_makeup_boundary": "保持数字模特原貌。",
+                "accessory_boundary": "配饰低存在感。",
+                "consistency_rules": ["同一位模特"],
+                "product_fidelity_rules": ["主推款保真"],
+                "negative_constraints": ["不要文字水印"],
+            },
+            "shots": [
+                {
+                    "shot_index": index,
+                    "shot_role": "hero_full_body" if index == 1 else "reference",
+                    "shot_role_label": f"镜头 {index}",
+                    "framing": "全身图",
+                    "crop_range": "头到脚完整",
+                    "model_scale": "全身",
+                    "camera_angle": "轻斜正",
+                    "body_position": "自然重心",
+                    "pose": "一腿微前",
+                    "movement": "轻走动" if index == 4 else "静态",
+                    "hand_position": "自然垂手",
+                    "main_focus": "主推款完整比例",
+                    "visible_garments": ["hero"],
+                    "hero_selling_points": ["版型"],
+                    "forbidden_occlusion_zones": ["衣身"],
+                    "composition_notes": "商品优先",
+                    "acceptance_criteria": ["主推款清楚"],
+                    "negative_constraints": ["不要改款"],
+                }
+                for index in range(1, 7)
+            ],
+            "user_visible_summary": {
+                "title": "取消后返回的剧本",
+                "summary": "该剧本不应落库为成功。",
+                "key_points": ["不应复活任务"],
+                "risk_summary": "无",
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            with db_module.get_db() as db:
+                task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('script cancel task', 'PREVIEW_READY', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                input_id = db.execute(
+                    """
+                    INSERT INTO generation_task_input_versions (task_id, version_number, name_snapshot, image_snapshot_json, created_at)
+                    VALUES (?, 1, 'script cancel task', '[]', ?)
+                    """,
+                    (task_id, timestamp),
+                ).lastrowid
+                styling_id = db.execute(
+                    """
+                    INSERT INTO generation_stylings
+                      (task_id, input_version_id, source_material_ids_json, selected_material_ids_json,
+                       selected_material_snapshot_json, styling_plan_json, status, created_at, updated_at)
+                    VALUES (?, ?, '[]', '[]', '[]', ?, 'SUCCEEDED', ?, ?)
+                    """,
+                    (task_id, input_id, db_module.dumps({"selected_outfit_id": "look_1", "outfit_candidates": []}), timestamp, timestamp),
+                ).lastrowid
+                old_script_id = db.execute(
+                    """
+                    INSERT INTO generation_shoot_scripts
+                      (task_id, input_version_id, styling_id, status, script_json, created_at, updated_at)
+                    VALUES (?, ?, ?, 'SUCCEEDED', '{}', ?, ?)
+                    """,
+                    (task_id, input_id, styling_id, timestamp, timestamp),
+                ).lastrowid
+                old_preview_id = db.execute(
+                    """
+                    INSERT INTO generation_previews (task_id, styling_id, shoot_script_id, input_version_id, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'SUCCEEDED', ?, ?)
+                    """,
+                    (task_id, styling_id, old_script_id, input_id, timestamp, timestamp),
+                ).lastrowid
+                old_result_set_id = db.execute(
+                    """
+                    INSERT INTO generation_result_sets (task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 'SUCCEEDED', ?, ?)
+                    """,
+                    (task_id, input_id, styling_id, old_script_id, old_preview_id, timestamp, timestamp),
+                ).lastrowid
+                db.execute(
+                    """
+                    UPDATE generation_tasks
+                    SET current_input_version_id = ?, active_styling_id = ?, active_shoot_script_id = ?,
+                        active_storyboard_preview_id = ?, active_preview_id = ?, active_result_set_id = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (input_id, styling_id, old_script_id, old_preview_id, old_preview_id, old_result_set_id, timestamp, task_id),
+                )
+
+            async def cancel_during_gemini(_request_snapshot: dict[str, object]) -> dict[str, object]:
+                main.cancel_generation_task(int(task_id))
+                return raw_script
+
+            client = TestClient(main.app)
+            self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+            with patch.object(main, "generate_shoot_script_with_gemini", new_callable=AsyncMock, side_effect=cancel_during_gemini) as gemini:
+                response = client.post(f"/api/generation-tasks/{task_id}/shoot-script")
+
+            self.assertEqual(response.status_code, 200)
+            item = response.json()["item"]
+            self.assertEqual(item["status"], "CANCELLED")
+            self.assertEqual(item["activeShootScriptId"], old_script_id)
+            gemini.assert_awaited_once()
+
+            with db_module.get_db() as db:
+                task_status = db.execute("SELECT status FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()["status"]
+                old_script_status = db.execute("SELECT status FROM generation_shoot_scripts WHERE id = ?", (old_script_id,)).fetchone()["status"]
+                old_preview_status = db.execute("SELECT status FROM generation_previews WHERE id = ?", (old_preview_id,)).fetchone()["status"]
+                old_result_status = db.execute("SELECT status FROM generation_result_sets WHERE id = ?", (old_result_set_id,)).fetchone()["status"]
+                new_script = db.execute(
+                    "SELECT id, status, active_attempt_id FROM generation_shoot_scripts WHERE task_id = ? AND id <> ?",
+                    (task_id, old_script_id),
+                ).fetchone()
+                attempt = db.execute(
+                    "SELECT status, cancelled_at FROM generation_attempts WHERE id = ?",
+                    (new_script["active_attempt_id"],),
+                ).fetchone()
+                new_shot_plan_count = db.execute(
+                    "SELECT COUNT(*) AS count FROM generation_shot_plans WHERE shoot_script_id = ?",
+                    (new_script["id"],),
+                ).fetchone()["count"]
+
+        self.assertEqual(task_status, "CANCELLED")
+        self.assertEqual(new_script["status"], "CANCELLED")
+        self.assertEqual(attempt["status"], "CANCELLED")
+        self.assertIsNotNone(attempt["cancelled_at"])
+        self.assertEqual(new_shot_plan_count, 0)
+        self.assertEqual(old_script_status, "SUCCEEDED")
+        self.assertEqual(old_preview_status, "SUCCEEDED")
+        self.assertEqual(old_result_status, "SUCCEEDED")
 
     def test_select_styling_cancel_before_provider_call_prevents_gemini_spend(self) -> None:
         from fastapi.testclient import TestClient
