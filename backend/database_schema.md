@@ -14,7 +14,7 @@ backend/app/db.py:init_db()
 
 ## 1. 表总览
 
-当前一共 9 张业务表，另有 1 张 schema 版本表：
+当前数据库包含旧版兼容表、新版生成流表、配置表和 schema 版本表；以下总览列出核心表：
 
 | 表名 | 业务对象 | 说明 |
 |---|---|---|
@@ -22,6 +22,7 @@ backend/app/db.py:init_db()
 | `garment_images` | `GarmentImage` | 货号下的单张素材图 |
 | `model_profiles` | `ModelProfile` | 数字模特档案 |
 | `brand_profiles` | `BrandProfile` | admin 维护的单一品牌资料 |
+| `ai_policy_configs` | `AiPolicyConfig` | admin 维护的 AI 选搭结构化业务策略 |
 | `shot_plans` | `ShotPlan` | 组图方案 / Gemini 策划结果 |
 | `brand_template_versions` | `BrandTemplateVersion` | 品牌调性模板版本 |
 | `generation_runs` | `GenerationRun` | 一次组图生成批次 |
@@ -193,7 +194,34 @@ CREATE TABLE brand_profiles (
 - 当前所有业务字段均为字符串，不保存数组结构。
 - `/api/brand-info` 全部接口均为 admin-only。
 
-### 2.5 `shot_plans`
+### 2.5 `ai_policy_configs`
+
+```sql
+CREATE TABLE ai_policy_configs (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  config_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+```
+
+字段说明：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | INTEGER | 固定为 1，保证 MVP 只维护一份 AI 选搭策略 |
+| `config_json` | TEXT | `ai-policy-config-v1` JSON，包含候选漏斗、品类策略、质量信号、配饰边界、库充足性和品牌边界 |
+| `created_at` | TEXT | 创建时间 |
+| `updated_at` | TEXT | 更新时间 |
+
+实现备注：
+
+- 启动时不强制 seed 记录；没有记录时后端使用 `default_ai_policy_config()`。
+- `/api/ai-policy-config`、`/export`、`/import`、`/prompt-card` 全部为 admin-only。
+- 配置快照进入 `candidate_retrieval_snapshot` 和拍摄剧本 request snapshot，用于历史复盘。
+- 后端仍保留合法 ID、归档/删除/READY 状态、当前主推款排除和 schema 校验等硬边界；灵活业务权重和阈值不应写死。
+
+### 2.6 `shot_plans`
 
 ```sql
 CREATE TABLE shot_plans (
@@ -245,7 +273,7 @@ CREATE TABLE shot_plans (
 - 旧版业务上的“默认组图方案”由查询规则决定：`WHERE sku_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1`。
 - 旧版上传新货号后可创建默认方案。新版 AI 摄影棚主流程不读取货号默认组图方案，而是在拍摄剧本阶段为 `GenerationTask` / `GenerationStyling` / `GenerationShootScript` 生成 `generation_shot_plans`。
 
-### 2.6 `shot_plan_shots`
+### 2.7 `shot_plan_shots`
 
 ```sql
 CREATE TABLE shot_plan_shots (
@@ -271,7 +299,7 @@ CREATE TABLE shot_plan_shots (
 
 图位字段对应产品内的“分镜剧本”。5 条记录固定顺序为：全身主视觉、品类核心展示、设计细节近景、身位/动态补充、标准正面颜色图。`background` 属于整组共用生图方案，不在单张分镜内重复保存；模特头图参考由后端根据身位和可用头像自动选择，不由 Gemini 输出。
 
-### 2.7 `generation_runs`
+### 2.8 `generation_runs`
 
 ```sql
 CREATE TABLE generation_runs (
@@ -309,7 +337,7 @@ CREATE TABLE generation_runs (
 | `created_at` | TEXT | 创建时间 |
 | `updated_at` | TEXT | 更新时间 |
 
-### 2.8 `generation_images`
+### 2.9 `generation_images`
 
 ```sql
 CREATE TABLE generation_images (
@@ -480,7 +508,7 @@ ALTER TABLE generation_images ADD COLUMN preview_file_size INTEGER;
 ]
 ```
 
-### 2.9 `event_logs`
+### 2.10 `event_logs`
 
 ```sql
 CREATE TABLE event_logs (
@@ -504,7 +532,7 @@ CREATE TABLE event_logs (
 | `payload_json` | TEXT | 事件负载 |
 | `created_at` | TEXT | 创建时间 |
 
-### 2.10 `brand_template_versions`
+### 2.11 `brand_template_versions`
 
 ```sql
 CREATE TABLE brand_template_versions (
@@ -529,7 +557,7 @@ CREATE TABLE brand_template_versions (
 | `snapshot_json` | TEXT | 品牌调性、背景、光线、搭配边界等模板快照 |
 | `is_active` | INTEGER | 是否当前默认模板 |
 
-### 2.11 `schema_migrations`
+### 2.12 `schema_migrations`
 
 ```sql
 CREATE TABLE schema_migrations (

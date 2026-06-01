@@ -39,7 +39,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
-import type { AIOperation, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptPlaceholder, SessionRole, ShootConfig, ShootConfigCategoryOption, ShootConfigExportPayload, ShootConfigGlobalRule, ShootConfigPromptCard, ShootConfigShotRule, StylingGarment, TaxonomyApplicabilityPayload, TaxonomyApplicabilityRule, TaxonomyDimensionPayload, TaxonomyExportPayload, TaxonomyPromptCard, TaxonomyRelation, TaxonomyRelationPayload, TaxonomyRules, TaxonomyTag, TaxonomyTagPayload } from './api'
+import type { AIOperation, AiPolicyConfig, AiPolicyConfigExportPayload, AiPolicyConfigPromptCard, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptPlaceholder, SessionRole, ShootConfig, ShootConfigCategoryOption, ShootConfigExportPayload, ShootConfigGlobalRule, ShootConfigPromptCard, ShootConfigShotRule, StylingGarment, TaxonomyApplicabilityPayload, TaxonomyApplicabilityRule, TaxonomyDimensionPayload, TaxonomyExportPayload, TaxonomyPromptCard, TaxonomyRelation, TaxonomyRelationPayload, TaxonomyRules, TaxonomyTag, TaxonomyTagPayload } from './api'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 
@@ -1597,6 +1597,7 @@ function ModelPage({ models }: { models: ModelProfile[] }) {
 }
 
 function PromptMaintenancePage({ run }: { run: any }) {
+  const [mode, setMode] = useState<'prompt' | 'policy'>('prompt')
   const [items, setItems] = useState<PromptConfig[]>([])
   const [placeholders, setPlaceholders] = useState<PromptPlaceholder[]>([])
   const [activeKey, setActiveKey] = useState('')
@@ -1604,6 +1605,11 @@ function PromptMaintenancePage({ run }: { run: any }) {
   const [rendered, setRendered] = useState('')
   const [missing, setMissing] = useState<string[]>([])
   const [usedSegments, setUsedSegments] = useState<string[]>([])
+  const [policyConfig, setPolicyConfig] = useState<AiPolicyConfig | null>(null)
+  const [policyDraft, setPolicyDraft] = useState('')
+  const [policyPromptCard, setPolicyPromptCard] = useState('')
+  const [policyError, setPolicyError] = useState('')
+  const [jsonDialog, setJsonDialog] = useState<{ mode: 'import' | 'export'; text: string; error?: string } | null>(null)
 
   function loadConfigs(selectKey?: string) {
     return api.listPromptConfigs().then((result) => {
@@ -1621,12 +1627,23 @@ function PromptMaintenancePage({ run }: { run: any }) {
 
   useEffect(() => {
     void loadConfigs().catch(() => undefined)
+    void loadPolicyConfig().catch(() => undefined)
   }, [])
 
   const activeItem = items.find((item) => item.key === activeKey) || items[0]
   const dirty = Boolean(activeItem && draft !== activeItem.content)
+  const policyDirty = Boolean(policyConfig && policyDraft !== `${JSON.stringify(policyConfig, null, 2)}\n`)
   const segments = items.filter((item) => item.groupType === 'segment')
   const assemblies = items.filter((item) => item.groupType === 'assembly')
+
+  function loadPolicyConfig() {
+    return Promise.all([api.getAiPolicyConfig(), api.getAiPolicyConfigPromptCard()]).then(([configResult, promptResult]) => {
+      setPolicyConfig(configResult.item)
+      setPolicyDraft(`${JSON.stringify(configResult.item, null, 2)}\n`)
+      setPolicyPromptCard(promptResult.content)
+      setPolicyError('')
+    })
+  }
 
   function selectItem(key: string) {
     const next = items.find((item) => item.key === key)
@@ -1657,6 +1674,60 @@ function PromptMaintenancePage({ run }: { run: any }) {
     }, { refresh: false })
   }
 
+  function openPolicyPromptCard() {
+    void run('读取 AI 策略 Prompt 预览中...', () => api.getAiPolicyConfigPromptCard(), (result: AiPolicyConfigPromptCard) => {
+      setPolicyPromptCard(result.content)
+    }, { refresh: false })
+  }
+
+  function savePolicy() {
+    let parsed: AiPolicyConfig
+    try {
+      parsed = parseAiPolicyConfigJson(policyDraft) as AiPolicyConfig
+    } catch (error) {
+      setPolicyError(error instanceof Error ? error.message : 'JSON 格式不正确。')
+      return
+    }
+    void run('保存 AI 策略配置中...', () => api.updateAiPolicyConfig(parsed), (result: { item: AiPolicyConfig }) => {
+      setPolicyConfig(result.item)
+      setPolicyDraft(`${JSON.stringify(result.item, null, 2)}\n`)
+      setPolicyError('')
+      void api.getAiPolicyConfigPromptCard().then((prompt) => setPolicyPromptCard(prompt.content)).catch(() => undefined)
+    }, { refresh: false })
+  }
+
+  function openPolicyExportJson() {
+    void run('导出 AI 策略配置中...', () => api.exportAiPolicyConfig(), (result: AiPolicyConfigExportPayload) => {
+      setJsonDialog({ mode: 'export', text: `${JSON.stringify(result, null, 2)}\n` })
+    }, { refresh: false })
+  }
+
+  function openPolicyImportJson() {
+    setJsonDialog({ mode: 'import', text: '' })
+  }
+
+  function confirmPolicyImportJson() {
+    if (!jsonDialog || jsonDialog.mode !== 'import') return
+    if (jsonDialog.text.length > 1024 * 1024) {
+      setJsonDialog({ ...jsonDialog, error: 'JSON 内容过大，请控制在 1MB 以内。' })
+      return
+    }
+    let parsed: unknown
+    try {
+      parsed = parseAiPolicyConfigJson(jsonDialog.text)
+    } catch (error) {
+      setJsonDialog({ ...jsonDialog, error: error instanceof Error ? error.message : 'JSON 导入失败。' })
+      return
+    }
+    void run('导入 AI 策略配置中...', () => api.importAiPolicyConfig(parsed), (result: { item: AiPolicyConfig }) => {
+      setPolicyConfig(result.item)
+      setPolicyDraft(`${JSON.stringify(result.item, null, 2)}\n`)
+      setJsonDialog(null)
+      setPolicyError('')
+      void api.getAiPolicyConfigPromptCard().then((prompt) => setPolicyPromptCard(prompt.content)).catch(() => undefined)
+    }, { refresh: false })
+  }
+
   function insertPlaceholder(name: string) {
     setDraft((current) => `${current}${current.endsWith('\n') || !current ? '' : '\n'}{{${name}}}`)
   }
@@ -1665,16 +1736,59 @@ function PromptMaintenancePage({ run }: { run: any }) {
     <section className="page">
       <PageTitle
         title="Prompt 维护"
-        subtitle="维护分段 Prompt 和各生成步骤的组装模板；预览只做文本渲染，不触发 AI 额度。"
-        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={refreshPreview} disabled={!activeItem}><Eye size={16} />预览</button><button className="primary" onClick={save} disabled={!activeItem || !dirty}><Save size={16} />保存</button></div>}
+        subtitle="维护分段 Prompt、组装模板和 AI 选搭策略；预览只做文本渲染，不触发 AI 额度。"
+        actions={mode === 'prompt'
+          ? <div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={refreshPreview} disabled={!activeItem}><Eye size={16} />预览</button><button className="primary" onClick={save} disabled={!activeItem || !dirty}><Save size={16} />保存</button></div>
+          : <div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={openPolicyPromptCard}><FileText size={16} />Prompt 预览</button><button className="secondary" onClick={openPolicyImportJson}><Upload size={16} />导入</button><button className="secondary" onClick={openPolicyExportJson} disabled={!policyConfig}><Download size={16} />导出</button><button className="primary" onClick={savePolicy} disabled={!policyConfig || !policyDirty}><Save size={16} />保存</button></div>}
       />
+      {jsonDialog && (
+        <AiPolicyJsonDialog
+          dialog={jsonDialog}
+          setDialog={setJsonDialog}
+          onClose={() => setJsonDialog(null)}
+          onImport={confirmPolicyImportJson}
+        />
+      )}
       <div className="prompt-maintenance-layout">
         <aside className="panel prompt-nav-panel">
-          <PromptNavGroup title="分段 Prompt" items={segments} activeKey={activeKey} onSelect={selectItem} />
-          <PromptNavGroup title="组装 Prompt" items={assemblies} activeKey={activeKey} onSelect={selectItem} />
+          <div className="prompt-mode-switch">
+            <button className={mode === 'prompt' ? 'active' : ''} onClick={() => setMode('prompt')}>Prompt 模板</button>
+            <button className={mode === 'policy' ? 'active' : ''} onClick={() => setMode('policy')}>AI 策略配置</button>
+          </div>
+          {mode === 'prompt' ? (
+            <>
+              <PromptNavGroup title="分段 Prompt" items={segments} activeKey={activeKey} onSelect={selectItem} />
+              <PromptNavGroup title="组装 Prompt" items={assemblies} activeKey={activeKey} onSelect={selectItem} />
+            </>
+          ) : (
+            <div className="prompt-nav-group">
+              <h3>策略分区</h3>
+              <button className="active" type="button">
+                <strong>AI 选搭策略</strong>
+                <span>{policyDirty ? '未保存' : '已保存'}</span>
+              </button>
+            </div>
+          )}
         </aside>
         <section className="panel prompt-editor-panel">
-          {activeItem ? (
+          {mode === 'policy' ? (
+            policyConfig ? (
+              <>
+                <div className="prompt-editor-head">
+                  <div>
+                    <span className="chip">结构化策略</span>
+                    <h2>AI 选搭策略配置</h2>
+                    <p>控制候选漏斗、品类权重、质量信号、生成配饰和品牌边界。</p>
+                  </div>
+                  <div className="prompt-status">
+                    <span className={policyDirty ? 'status-badge warning' : 'status-badge ok'}>{policyDirty ? '未保存' : '已保存'}</span>
+                  </div>
+                </div>
+                {policyError && <div className="inline-error">{policyError}</div>}
+                <textarea className="prompt-editor-textarea" value={policyDraft} onChange={(event) => { setPolicyDraft(event.target.value); setPolicyError('') }} spellCheck={false} />
+              </>
+            ) : <EmptyState title="暂无 AI 策略配置" text="后端还没有返回可维护的 AI 策略配置。" />
+          ) : activeItem ? (
             <>
               <div className="prompt-editor-head">
                 <div>
@@ -1692,29 +1806,96 @@ function PromptMaintenancePage({ run }: { run: any }) {
           ) : <EmptyState title="暂无 Prompt 配置" text="后端还没有返回可维护的 Prompt 配置。" />}
         </section>
         <aside className="panel prompt-preview-panel">
-          <div className="prompt-side-section">
-            <h3>预览</h3>
-            <div className="prompt-rendered-section"><pre>{rendered}</pre></div>
-          </div>
-          <div className="prompt-side-section">
-            <h3>校验</h3>
-            <Meta label="引用分段" value={usedSegments.length ? usedSegments.join('、') : '无'} />
-            <Meta label="缺失占位符" value={missing.length ? missing.join('、') : '无'} />
-          </div>
-          <div className="prompt-side-section">
-            <h3>占位符</h3>
-            <div className="prompt-placeholder-list">
-              {placeholders.map((placeholder) => (
-                <button key={placeholder.name} type="button" onClick={() => insertPlaceholder(placeholder.name)}>
-                  <code>{`{{${placeholder.name}}}`}</code>
-                  <span>{placeholder.description}</span>
-                </button>
-              ))}
-            </div>
-          </div>
+          {mode === 'policy' ? (
+            <>
+              <div className="prompt-side-section">
+                <h3>Prompt 摘要</h3>
+                <div className="prompt-rendered-section"><pre>{policyPromptCard}</pre></div>
+              </div>
+              <div className="prompt-side-section">
+                <h3>策略状态</h3>
+                <Meta label="Schema" value={policyConfig?.schemaVersion ?? '未加载'} />
+                <Meta label="配置状态" value={policyDirty ? '未保存' : '已保存'} />
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="prompt-side-section">
+                <h3>预览</h3>
+                <div className="prompt-rendered-section"><pre>{rendered}</pre></div>
+              </div>
+              <div className="prompt-side-section">
+                <h3>校验</h3>
+                <Meta label="引用分段" value={usedSegments.length ? usedSegments.join('、') : '无'} />
+                <Meta label="缺失占位符" value={missing.length ? missing.join('、') : '无'} />
+              </div>
+              <div className="prompt-side-section">
+                <h3>占位符</h3>
+                <div className="prompt-placeholder-list">
+                  {placeholders.map((placeholder) => (
+                    <button key={placeholder.name} type="button" onClick={() => insertPlaceholder(placeholder.name)}>
+                      <code>{`{{${placeholder.name}}}`}</code>
+                      <span>{placeholder.description}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
         </aside>
       </div>
     </section>
+  )
+}
+
+function parseAiPolicyConfigJson(text: string): unknown {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error('JSON 格式不正确。')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('JSON 内容必须是对象。')
+  }
+  const source = parsed as Record<string, unknown>
+  const config = source.config && typeof source.config === 'object' && !Array.isArray(source.config) ? source.config : source
+  const configObject = config as Record<string, unknown>
+  if (typeof configObject.candidateFunnel !== 'object' || !configObject.candidateFunnel) throw new Error('candidateFunnel 必须是对象。')
+  if (typeof configObject.qualitySignalPolicy !== 'object' || !configObject.qualitySignalPolicy) throw new Error('qualitySignalPolicy 必须是对象。')
+  if (typeof configObject.accessoryPolicy !== 'object' || !configObject.accessoryPolicy) throw new Error('accessoryPolicy 必须是对象。')
+  return config
+}
+
+function AiPolicyJsonDialog({ dialog, setDialog, onClose, onImport }: {
+  dialog: { mode: 'import' | 'export'; text: string; error?: string }
+  setDialog: (dialog: { mode: 'import' | 'export'; text: string; error?: string }) => void
+  onClose: () => void
+  onImport: () => void
+}) {
+  const isImport = dialog.mode === 'import'
+  return createPortal(
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <form className="confirm-modal brand-json-modal" role="dialog" aria-modal="true" aria-label={isImport ? '导入 AI 策略配置' : '导出 AI 策略配置'} onSubmit={(event) => {
+        event.preventDefault()
+        if (isImport) onImport()
+      }} onClick={(event) => event.stopPropagation()}>
+        <div className="confirm-head">
+          <div>
+            <h2>{isImport ? '导入 AI 策略配置' : '导出 AI 策略配置'}</h2>
+            <p>{isImport ? '粘贴 JSON 后导入并应用。' : '当前后端生效配置。'}</p>
+          </div>
+          <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
+        </div>
+        <textarea readOnly={!isImport} value={dialog.text} onChange={(event) => setDialog({ ...dialog, text: event.target.value, error: '' })} />
+        {dialog.error && <div className="inline-error">{dialog.error}</div>}
+        <div className="confirm-actions">
+          <button type="button" className="secondary" onClick={onClose}>关闭</button>
+          {isImport && <button type="submit" className="primary">导入</button>}
+        </div>
+      </form>
+    </div>,
+    document.body,
   )
 }
 

@@ -760,6 +760,81 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertTrue(any(signal["code"] == "high_waist_dark_outerwear_stack" for signal in signals))
 
+    def test_dress_policy_downranks_outerwear_and_prefers_light_upper_drafts(self) -> None:
+        main = importlib.import_module("app.main")
+        policy = main.default_ai_policy_config()
+        hero_profile = {
+            "category": "dress",
+            "hero_code": "DRESS-001",
+            "is_high_waist_or_waist_focus": True,
+            "is_light_colored": True,
+        }
+        cards = [
+            {"id": 1, "code": "OUTER", "category": "outerwear", "colors": ["brown"], "wearability": {"coverage_risk": "may_cover_hero"}, "risk": []},
+            {"id": 2, "code": "KNIT", "category": "knitwear", "colors": ["ivory"], "wearability": {"coverage_risk": "none"}, "risk": []},
+        ]
+
+        ranked = main.rank_candidate_materials(hero_profile, cards, policy)
+        candidate_cards = [item["card"] for item in ranked if not item["excluded"]]
+        drafts = main.build_outfit_drafts(candidate_cards, hero_profile, policy)
+
+        self.assertEqual(candidate_cards[0]["code"], "KNIT")
+        self.assertEqual(drafts[1]["selected_material_ids"], [2])
+        self.assertGreater(candidate_cards[0]["funnel_score"], candidate_cards[1]["funnel_score"])
+
+    def test_dress_outerwear_selection_records_policy_signals(self) -> None:
+        main = importlib.import_module("app.main")
+        policy = main.default_ai_policy_config()
+        candidate_snapshot = {
+            "ai_policy_config": policy,
+            "hero_profile": {"category": "dress"},
+            "candidate_material_ids": [9, 10],
+            "material_cards": [
+                {"id": 9, "code": "OUTER", "category": "outerwear", "colors": ["brown"], "wearability": {"coverage_risk": "may_cover_hero"}},
+                {"id": 10, "code": "KNIT", "category": "knitwear", "colors": ["ivory"], "wearability": {"coverage_risk": "none"}},
+            ],
+            "library_adequacy": {
+                "better_alternatives": [
+                    {"id": 10, "code": "KNIT", "category": "knitwear"},
+                ],
+            },
+        }
+        plan = {
+            "selected_material_ids": [9],
+            "selected_outfit_id": "candidate_a",
+            "outfit_candidates": [
+                {
+                    "id": "candidate_a",
+                    "selected_material_ids": [9],
+                    "wearing_notes": "外套敞开穿着。",
+                    "aesthetic_diagnosis": {
+                        "color_weight": "偏重。",
+                        "silhouette_balance": "外套压住裙型。",
+                        "waistline_proportion": "腰线可能不清楚。",
+                        "season_material_fit": "偏秋冬。",
+                        "template_risk": "外套模板化。",
+                        "wearing_method_validity": "可穿但需要审核。",
+                        "tuck_quality": "无塞腰。",
+                        "brand_read": "需要审核。",
+                    },
+                    "scores": {
+                        "aesthetic_score": 0.9,
+                        "brand_fit_score": 0.9,
+                        "hero_visibility_score": 0.9,
+                        "commercial_readiness_score": 0.9,
+                    },
+                    "risk_notes": [],
+                }
+            ],
+        }
+
+        main.validate_styling_plan(plan, candidate_snapshot)
+        signals = main.collect_styling_quality_signals(plan, candidate_snapshot)
+        signal_codes = {signal["code"] for signal in signals}
+
+        self.assertIn("dress_outerwear_layering_risk", signal_codes)
+        self.assertIn("selected_below_better_alternatives", signal_codes)
+
     def test_candidate_funnel_caps_candidates_and_filters_conflicting_bottoms(self) -> None:
         main = importlib.import_module("app.main")
         input_row = {
@@ -779,6 +854,8 @@ class BackendSmokeTests(unittest.TestCase):
                 "risk": ["too_heavy"],
             },
             {"id": 3, "code": "TOP", "category": "top", "colors": ["ivory"], "wearability": {}, "risk": []},
+            {"id": 30, "code": "UNKNOWN", "category": "unknown", "colors": ["ivory"], "wearability": {}, "risk": []},
+            {"id": 31, "code": "BAG", "category": "unsupported_accessory", "colors": ["black"], "wearability": {}, "risk": []},
             *[
                 {"id": index, "code": f"TOP-{index}", "category": "top", "colors": ["beige"], "wearability": {}, "risk": []}
                 for index in range(4, 30)
@@ -790,10 +867,76 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(snapshot["schema_version"], "candidate-retrieval-v2")
         self.assertLessEqual(len(snapshot["material_cards"]), 20)
         self.assertNotIn(1, snapshot["candidate_material_ids"])
+        self.assertNotIn(30, snapshot["candidate_material_ids"])
+        self.assertNotIn(31, snapshot["candidate_material_ids"])
         self.assertIn(1, snapshot["source_material_ids"])
         self.assertTrue(any(item["id"] == 1 and "same_bottom_category_excluded" in item["reasons"] for item in snapshot["filtered_out"]))
+        self.assertTrue(any(item["id"] == 30 and "unknown_hard_excluded" in item["reasons"] for item in snapshot["filtered_out"]))
         self.assertEqual(snapshot["outfit_drafts"][0]["selected_material_ids"], [])
         self.assertIn("library_adequacy", snapshot)
+
+    def test_styling_plan_preserves_policy_configured_diagnosis_and_scores(self) -> None:
+        main = importlib.import_module("app.main")
+        policy = main.default_ai_policy_config()
+        policy["qualitySignalPolicy"]["requiredDiagnosisKeys"].append("new_critic_dimension")
+        policy["qualitySignalPolicy"]["scoreThresholds"]["new_score"] = 0.7
+        candidate_snapshot = {
+            "ai_policy_config": policy,
+            "candidate_material_ids": [],
+            "material_cards": [],
+        }
+        raw_plan = {
+            "selected_outfit_id": "candidate_a",
+            "outfit_candidates": [
+                {
+                    "id": "candidate_a",
+                    "aesthetic_diagnosis": {"new_critic_dimension": "新增维度说明。"},
+                    "scores": {"new_score": 0.82},
+                    "risk_notes": [],
+                }
+            ],
+        }
+
+        plan = main.normalize_styling_plan(raw_plan, candidate_snapshot)
+        outfit = plan["outfit_candidates"][0]
+
+        self.assertEqual(outfit["aesthetic_diagnosis"]["new_critic_dimension"], "新增维度说明。")
+        self.assertEqual(outfit["scores"]["new_score"], 0.82)
+
+    def test_candidate_hard_excluded_categories_cannot_be_configured_back_in(self) -> None:
+        main = importlib.import_module("app.main")
+        policy = main.default_ai_policy_config()
+        policy["candidateFunnel"]["hardExcludedCategories"] = ["other_garment"]
+        normalized = main.normalize_ai_policy_config_payload(policy)
+
+        self.assertIn("unknown", normalized["candidateFunnel"]["hardExcludedCategories"])
+        self.assertIn("unsupported_accessory", normalized["candidateFunnel"]["hardExcludedCategories"])
+
+        score, reasons, excluded = main.score_candidate_card({"category": "dress"}, {"id": 1, "category": "unknown"}, normalized)
+
+        self.assertTrue(excluded)
+        self.assertIn("unknown_hard_excluded", reasons)
+
+    def test_unknown_hero_category_blocks_candidate_selection(self) -> None:
+        main = importlib.import_module("app.main")
+        input_row = {
+            "id": 1,
+            "task_id": 1,
+            "name_snapshot": "未识别主推款",
+            "image_snapshot_json": "[]",
+        }
+        material_cards = [
+            {"id": 1, "code": "TOP", "category": "top", "colors": ["white"], "wearability": {}, "risk": []},
+            {"id": 2, "code": "BOTTOM", "category": "bottom", "colors": ["black"], "wearability": {}, "risk": []},
+        ]
+
+        snapshot = main.build_candidate_retrieval_snapshot(input_row, material_cards)
+
+        self.assertEqual(snapshot["hero_profile"]["category"], "unknown")
+        self.assertEqual(snapshot["candidate_material_ids"], [])
+        self.assertEqual(snapshot["candidate_pool_size"], 0)
+        self.assertTrue(snapshot["library_adequacy"]["recommend_empty_pairing"])
+        self.assertTrue(any("品类无法确认" in note for note in snapshot["library_adequacy"]["supply_gap_notes"]))
 
     def test_candidate_funnel_uses_matching_material_as_hero_and_excludes_it(self) -> None:
         main = importlib.import_module("app.main")
@@ -1001,6 +1144,7 @@ class BackendSmokeTests(unittest.TestCase):
                     shot_plan_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_shot_plans)").fetchall()}
                     shoot_config_columns = {row["name"] for row in db.execute("PRAGMA table_info(shoot_configs)").fetchall()}
                     prompt_config_columns = {row["name"] for row in db.execute("PRAGMA table_info(prompt_configs)").fetchall()}
+                    ai_policy_config_columns = {row["name"] for row in db.execute("PRAGMA table_info(ai_policy_configs)").fetchall()}
                     preview_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_previews)").fetchall()}
                     result_set_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_result_sets)").fetchall()}
                     result_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_result_images_new)").fetchall()}
@@ -1013,7 +1157,7 @@ class BackendSmokeTests(unittest.TestCase):
                     brand_profile_count = db.execute("SELECT COUNT(*) AS count FROM brand_profiles").fetchone()["count"]
                     template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016", "017", "018", "019", "020", "021", "022", "023", "024", "025"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016", "017", "018", "019", "020", "021", "022", "023", "024", "025", "026"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
@@ -1042,6 +1186,7 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("shoot_script_id", shot_plan_columns)
         self.assertIn("config_json", shoot_config_columns)
         self.assertIn("content", prompt_config_columns)
+        self.assertIn("config_json", ai_policy_config_columns)
         self.assertIn("shoot_script_id", preview_columns)
         self.assertIn("shoot_script_id", result_set_columns)
         self.assertIn("brand_core", brand_profile_columns)
@@ -1477,6 +1622,115 @@ class BackendSmokeTests(unittest.TestCase):
                     item = imported.json()["item"]
                     self.assertEqual(item["globalRules"][0]["label"], "品牌风格")
                     self.assertEqual([rule["categoryTagCode"] for rule in item["categoryShotRules"]], ["top"])
+
+    def test_ai_policy_config_is_admin_only_and_exportable(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file, tempfile.TemporaryDirectory() as log_dir:
+            log_dir_path = Path(log_dir)
+
+            class FakeSettings:
+                database_path = Path(db_file.name)
+                log_dir = log_dir_path
+
+            with (
+                patch.object(db_module, "get_settings", return_value=FakeSettings),
+                patch.object(main.settings, "database_path", Path(db_file.name)),
+            ):
+                config.get_settings.cache_clear()
+                db_module.init_db()
+
+                with patch.object(main, "ensure_bucket", return_value=None), TestClient(main.app) as client:
+                    self.assertEqual(client.get("/api/ai-policy-config").status_code, 401)
+
+                    user_login = client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"})
+                    self.assertEqual(user_login.status_code, 200)
+                    self.assertEqual(client.get("/api/ai-policy-config/export").status_code, 403)
+                    self.assertEqual(client.get("/api/ai-policy-config/prompt-card").status_code, 403)
+
+                    admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+                    self.assertEqual(admin_login.status_code, 200)
+                    exported = client.get("/api/ai-policy-config/export")
+                    self.assertEqual(exported.status_code, 200)
+                    payload = exported.json()["config"]
+                    self.assertEqual(payload["schemaVersion"], "ai-policy-config-v1")
+                    payload["candidateFunnel"]["candidateImageLimit"] = 18
+                    imported = client.post("/api/ai-policy-config/import", json={"config": payload})
+                    self.assertEqual(imported.status_code, 200)
+                    self.assertEqual(imported.json()["item"]["candidateFunnel"]["candidateImageLimit"], 18)
+                    prompt = client.get("/api/ai-policy-config/prompt-card")
+                    self.assertEqual(prompt.status_code, 200)
+                    self.assertIn("AI 选搭策略配置", prompt.json()["content"])
+
+    def test_shoot_script_request_reuses_styling_policy_snapshot(self) -> None:
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file, tempfile.TemporaryDirectory() as log_dir:
+            log_dir_path = Path(log_dir)
+
+            class FakeSettings:
+                database_path = Path(db_file.name)
+                log_dir = log_dir_path
+
+            with (
+                patch.object(db_module, "get_settings", return_value=FakeSettings),
+                patch.object(main.settings, "database_path", Path(db_file.name)),
+            ):
+                config.get_settings.cache_clear()
+                db_module.init_db()
+                timestamp = db_module.now_iso()
+                active_policy = main.default_ai_policy_config()
+                active_policy["candidateFunnel"]["candidateImageLimit"] = 9
+                snapshot_policy = main.default_ai_policy_config()
+                snapshot_policy["candidateFunnel"]["candidateImageLimit"] = 17
+                with db_module.get_db() as db:
+                    db.execute(
+                        "INSERT INTO ai_policy_configs (id, config_json, created_at, updated_at) VALUES (1, ?, ?, ?)",
+                        (db_module.dumps(active_policy), timestamp, timestamp),
+                    )
+                    task_id = db.execute(
+                        "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('policy snapshot', 'STYLING_SELECTED', ?, ?)",
+                        (timestamp, timestamp),
+                    ).lastrowid
+                    input_id = db.execute(
+                        """
+                        INSERT INTO generation_task_input_versions (task_id, version_number, name_snapshot, image_snapshot_json, created_at)
+                        VALUES (?, 1, 'policy snapshot', '[]', ?)
+                        """,
+                        (task_id, timestamp),
+                    ).lastrowid
+                    styling_plan = {
+                        "hero_understanding": {"category": "dress", "hero_selling_points": ["腰线"]},
+                        "selected_outfit_id": "candidate_a",
+                        "outfit_candidates": [{"id": "candidate_a", "selected_material_ids": [], "wearing_notes": "主推款单穿。"}],
+                    }
+                    styling_id = db.execute(
+                        """
+                        INSERT INTO generation_stylings
+                          (task_id, input_version_id, source_material_ids_json, candidate_retrieval_snapshot_json,
+                           selected_material_ids_json, selected_material_snapshot_json, styling_plan_json, status, created_at, updated_at)
+                        VALUES (?, ?, '[]', ?, '[]', '[]', ?, 'SUCCEEDED', ?, ?)
+                        """,
+                        (
+                            task_id,
+                            input_id,
+                            db_module.dumps({"ai_policy_config": snapshot_policy, "ai_policy_prompt_card": "SNAPSHOT CARD"}),
+                            db_module.dumps(styling_plan),
+                            timestamp,
+                            timestamp,
+                        ),
+                    ).lastrowid
+
+                request_snapshot = main.build_shoot_script_request_snapshot(task_id, styling_id, input_id)
+
+        self.assertEqual(request_snapshot["ai_policy_config"]["candidateFunnel"]["candidateImageLimit"], 17)
+        self.assertEqual(request_snapshot["ai_policy_prompt_card"], "SNAPSHOT CARD")
 
     def test_brand_info_legacy_fields_migrate_to_guidance_text(self) -> None:
         config = importlib.import_module("app.config")
