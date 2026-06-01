@@ -1000,6 +1000,7 @@ class BackendSmokeTests(unittest.TestCase):
                     shoot_script_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_shoot_scripts)").fetchall()}
                     shot_plan_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_shot_plans)").fetchall()}
                     shoot_config_columns = {row["name"] for row in db.execute("PRAGMA table_info(shoot_configs)").fetchall()}
+                    prompt_config_columns = {row["name"] for row in db.execute("PRAGMA table_info(prompt_configs)").fetchall()}
                     preview_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_previews)").fetchall()}
                     result_set_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_result_sets)").fetchall()}
                     result_image_columns = {row["name"] for row in db.execute("PRAGMA table_info(generation_result_images_new)").fetchall()}
@@ -1012,7 +1013,7 @@ class BackendSmokeTests(unittest.TestCase):
                     brand_profile_count = db.execute("SELECT COUNT(*) AS count FROM brand_profiles").fetchone()["count"]
                     template_count = db.execute("SELECT COUNT(*) AS count FROM brand_template_versions").fetchone()["count"]
 
-        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016", "017", "018", "019", "020", "021", "022", "023", "024"])
+        self.assertEqual(versions, ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016", "017", "018", "019", "020", "021", "022", "023", "024", "025"])
         self.assertIn("review_status", image_columns)
         self.assertIn("locked_by", image_columns)
         self.assertIn("thumb_path", image_columns)
@@ -1040,6 +1041,7 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("accessory_adjustments_json", shoot_script_columns)
         self.assertIn("shoot_script_id", shot_plan_columns)
         self.assertIn("config_json", shoot_config_columns)
+        self.assertIn("content", prompt_config_columns)
         self.assertIn("shoot_script_id", preview_columns)
         self.assertIn("shoot_script_id", result_set_columns)
         self.assertIn("brand_core", brand_profile_columns)
@@ -1114,6 +1116,56 @@ class BackendSmokeTests(unittest.TestCase):
                     deleted = client.delete("/api/brand-info")
                     self.assertEqual(deleted.status_code, 200)
                     self.assertEqual(client.get("/api/brand-info").json(), {"item": None})
+
+    def test_prompt_configs_are_admin_only_and_render_placeholders(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file, tempfile.TemporaryDirectory() as log_dir:
+            log_dir_path = Path(log_dir)
+
+            class FakeSettings:
+                database_path = Path(db_file.name)
+                log_dir = log_dir_path
+
+            with (
+                patch.object(db_module, "get_settings", return_value=FakeSettings),
+                patch.object(main.settings, "database_path", Path(db_file.name)),
+            ):
+                config.get_settings.cache_clear()
+                db_module.init_db()
+
+                with patch.object(main, "ensure_bucket", return_value=None), TestClient(main.app) as client:
+                    self.assertEqual(client.get("/api/prompt-configs").status_code, 401)
+                    user_login = client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"})
+                    self.assertEqual(user_login.status_code, 200)
+                    self.assertEqual(client.get("/api/prompt-configs").status_code, 403)
+
+                    admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+                    self.assertEqual(admin_login.status_code, 200)
+                    listed = client.get("/api/prompt-configs")
+                    self.assertEqual(listed.status_code, 200)
+                    self.assertIn("segment.brand_info", {item["key"] for item in listed.json()["items"]})
+                    placeholder_names = {item["name"] for item in listed.json()["placeholders"]}
+                    self.assertNotIn("runtime.taxonomy_card", placeholder_names)
+                    self.assertNotIn("runtime.shoot_config_card", placeholder_names)
+                    self.assertNotIn("runtime.tagging_input", placeholder_names)
+                    listed_keys = {item["key"] for item in listed.json()["items"]}
+                    self.assertNotIn("segment.tag_rules", listed_keys)
+                    self.assertNotIn("segment.director_rules", listed_keys)
+                    self.assertNotIn("segment.shot_rules", listed_keys)
+
+                    updated = client.patch("/api/prompt-configs/assembly.ai_tagging", json={"content": "品牌：{{segment.brand_info}}"})
+                    self.assertEqual(updated.status_code, 200)
+                    self.assertIn("商务时装", updated.json()["preview"]["rendered"])
+                    self.assertFalse(updated.json()["preview"]["diagnostics"]["missingPlaceholders"])
+
+                    reset = client.post("/api/prompt-configs/assembly.ai_tagging/reset")
+                    self.assertEqual(reset.status_code, 200)
+                    self.assertFalse(reset.json()["item"]["isCustomized"])
 
     def test_taxonomy_rules_are_admin_only_and_user_configured(self) -> None:
         from fastapi.testclient import TestClient
@@ -2097,6 +2149,43 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(attempt["status"], "FAILED")
         self.assertEqual(attempt["error_code"], "TIMEOUT")
 
+    def test_fresh_tagging_garment_is_not_expired_by_local_timezone(self) -> None:
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            with patch.object(config.Settings, "database_path", config.Path(db_file.name)):
+                config.get_settings.cache_clear()
+                db_module.init_db()
+                timestamp = db_module.now_iso()
+                with db_module.get_db() as db:
+                    garment_id = db.execute(
+                        """
+                        INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, created_at, updated_at)
+                        VALUES ('FRESH-TAGGING', 'TAGGING_RUNNING', '{}', '{}', ?, ?)
+                        """,
+                        (timestamp, timestamp),
+                    ).lastrowid
+                    attempt_id = db.execute(
+                        """
+                        INSERT INTO generation_attempts
+                          (owner_type, owner_id, provider, status, started_at, created_at, updated_at)
+                        VALUES ('styling_garment_tagging', ?, 'gemini', 'RUNNING', ?, ?, ?)
+                        """,
+                        (garment_id, timestamp, timestamp, timestamp),
+                    ).lastrowid
+
+                main.expire_stale_styling_garment_tagging()
+
+                with db_module.get_db() as db:
+                    garment_status = db.execute("SELECT status FROM styling_garments WHERE id = ?", (garment_id,)).fetchone()["status"]
+                    attempt_status = db.execute("SELECT status FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()["status"]
+            config.get_settings.cache_clear()
+
+        self.assertEqual(garment_status, "TAGGING_RUNNING")
+        self.assertEqual(attempt_status, "RUNNING")
+
     def test_successful_tagging_clears_timeout_error_state(self) -> None:
         config = importlib.import_module("app.config")
         db_module = importlib.import_module("app.db")
@@ -2104,21 +2193,15 @@ class BackendSmokeTests(unittest.TestCase):
 
         timeout_message = "打标任务长时间未完成，已自动停止轮询，可手动重新打标。"
         tagging_result = {
-            "schema_version": main.TAXONOMY_TAGGING_SCHEMA_VERSION,
-            "tags": [{
-                "dimension_code": "category",
-                "tag_code": "top",
-                "value_type": "tag",
-                "score": None,
-                "value_text": None,
-                "value_bool": None,
-                "confidence": 0.95,
-                "evidence": "正面图显示为上装。",
-            }],
+            "schema_version": main.PROMPT_TAGGING_RESULT_VERSION,
+            "ai_tags": {
+                "一级品类": ["上装"],
+                "二级品类": ["衬衫"],
+                "色彩": ["白色"],
+                "整体视觉语义": "正面图显示为白色上装。",
+                "置信度": 95,
+            },
             "official_title_tags": {},
-            "visual_profile": {},
-            "unmapped_observations": [],
-            "suggested_new_tags": [],
             "tag_meta": {
                 "tagger_provider": "gemini",
                 "overall_confidence": 0.95,
@@ -2228,38 +2311,57 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIsNone(attempt["error_message"])
         self.assertIsNone(attempt["failed_at"])
 
-    def test_taxonomy_tagging_normalization_filters_invalid_refs(self) -> None:
+    def test_prompt_tagging_result_keeps_freeform_json_and_derives_effective_summary(self) -> None:
         main = importlib.import_module("app.main")
         garment = {"code": "TEST", "images": [{"id": 1}]}
-        context = {
-            "dimensions": [{"code": "category"}, {"code": "color"}],
-            "tags": [],
-            "relations": [],
-            "applicabilityRules": [],
-            "tagByKey": {
-                ("category", "top"): {"dimensionCode": "category", "code": "top", "labelZh": "上装", "valueKind": "tag", "isSelectable": True},
-                ("color", "white"): {"dimensionCode": "color", "code": "white", "labelZh": "白色", "valueKind": "tag", "isSelectable": True},
-            },
-        }
 
-        normalized = main.normalize_taxonomy_tagging_result(
+        normalized = main.normalize_prompt_tagging_result(
             {
-                "tags": [
-                    {"dimension_code": "category", "tag_code": "top", "value_type": "tag", "confidence": 0.95, "evidence": "图片为上装"},
-                    {"dimension_code": "category", "tag_code": "shoe", "value_type": "tag", "confidence": 0.9, "evidence": "非法标签"},
-                    {"dimension_code": "color", "tag_code": "white", "value_type": "tag", "confidence": 0.8, "evidence": "主色偏白"},
-                ],
-                "unmapped_observations": [{"text": "规则外可见细节", "evidence": "图片可见", "confidence": 0.7}],
-                "tag_meta": {"overall_confidence": 0.9, "needs_review": False, "review_reasons": []},
+                "一级品类": ["上装"],
+                "二级品类": ["衬衫"],
+                "色彩": ["白色"],
+                "面料材质": ["棉感"],
+                "整体视觉语义": "白色衬衫，视觉干净利落。",
+                "置信度": 88,
             },
             garment,
-            context,
         )
+        effective = main.build_effective_tags(normalized["ai_tags"], {}, {})
 
-        self.assertEqual([item["tag_code"] for item in normalized["tags"]], ["top", "white"])
-        self.assertIn("invalid_tag_reference", normalized["tag_meta"]["review_reasons"])
-        self.assertIn("unmapped_observation", normalized["tag_meta"]["review_reasons"])
-        self.assertEqual(normalized["label_summary"]["category"], ["上装"])
+        self.assertEqual(normalized["ai_tags"]["一级品类"], ["上装"])
+        self.assertEqual(normalized["tag_meta"]["overall_confidence"], 0.88)
+        self.assertEqual(effective["category"], "top")
+        self.assertEqual(effective["category_label"], "上装")
+        self.assertEqual(effective["colors"], ["white"])
+        self.assertEqual(effective["pairing_brief"], "白色衬衫，视觉干净利落。")
+
+    def test_prompt_tagging_result_derives_from_nested_freeform_json(self) -> None:
+        main = importlib.import_module("app.main")
+        garment = {"code": "TEST", "images": [{"id": 1}]}
+
+        normalized = main.normalize_prompt_tagging_result(
+            {
+                "服装标签卡": {
+                    "基础信息": {"一级品类": ["外套类"], "二级品类": ["西装"], "色彩": ["藏青色"]},
+                    "语义描述": {"整体视觉语义": "藏青色西装外套，结构清楚，适合通勤搭配。"},
+                },
+                "质量": {"置信度": 93},
+            },
+            garment,
+        )
+        effective = main.build_effective_tags(normalized["ai_tags"], {}, {})
+
+        self.assertEqual(effective["category"], "outerwear")
+        self.assertEqual(effective["sub_category"], "西装")
+        self.assertEqual(effective["colors"], ["navy"])
+        self.assertEqual(effective["pairing_brief"], "藏青色西装外套，结构清楚，适合通勤搭配。")
+
+    def test_lily_tagging_json_parser_wraps_non_object_json(self) -> None:
+        main = importlib.import_module("app.main")
+
+        parsed = main.parse_lily_tagging_json('["上装", "白色"]')
+
+        self.assertEqual(parsed["raw_result"], ["上装", "白色"])
 
     def test_lily_tagging_json_parser_recovers_trailing_brace(self) -> None:
         main = importlib.import_module("app.main")
@@ -2269,32 +2371,40 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(parsed["schema_version"], "lily-garment-tags-v1")
         self.assertEqual(parsed["ai_tags"]["category"], "outerwear")
 
+    def test_lily_tagging_json_parser_recovers_prompt_style_trailing_commas(self) -> None:
+        main = importlib.import_module("app.main")
+
+        parsed = main.parse_lily_tagging_json('{"一级品类":["上装"],"色彩":["白色"],"风险点":"",}')
+
+        self.assertEqual(parsed["一级品类"], ["上装"])
+        self.assertEqual(parsed["色彩"], ["白色"])
+
     def test_lily_tagging_json_parser_rejects_non_json_trailing_text(self) -> None:
         main = importlib.import_module("app.main")
 
         with self.assertRaises(Exception):
             main.parse_lily_tagging_json('{"schema_version":"lily-garment-tags-v1"}\nexplanation}')
 
-    def test_lily_tagging_review_results_do_not_enter_ready(self) -> None:
+    def test_prompt_tagging_review_results_do_not_enter_ready(self) -> None:
         main = importlib.import_module("app.main")
 
         ready_meta = main.apply_tag_review_policy(
-            {"tags": [{"dimension_code": "category", "tag_code": "top"}]},
+            {"一级品类": ["上装"], "置信度": 90},
             {"tagger_provider": "gemini", "overall_confidence": 0.9, "needs_review": False, "review_reasons": []},
         )
         review_meta = main.apply_tag_review_policy(
-            {"tags": [{"dimension_code": "category", "tag_code": "unsupported_accessory"}]},
-            {"tagger_provider": "gemini", "overall_confidence": 0.9, "needs_review": False, "review_reasons": []},
+            {"一级品类": ["上装"], "置信度": 60},
+            {"tagger_provider": "gemini", "overall_confidence": 0.6, "needs_review": False, "review_reasons": []},
         )
         fallback_meta = main.apply_tag_review_policy(
-            {"tags": [{"dimension_code": "category", "tag_code": "top"}]},
+            {"一级品类": ["未知"], "风险点": "Gemini 未配置"},
             {"tagger_provider": "fallback", "overall_confidence": 0.5, "needs_review": True, "review_reasons": ["fallback_tags"]},
         )
 
-        self.assertEqual(main.tagging_status_for_result({"tags": [{"dimension_code": "category", "tag_code": "top"}]}, ready_meta), "READY")
-        self.assertEqual(main.tagging_status_for_result({"tags": [{"dimension_code": "category", "tag_code": "unsupported_accessory"}]}, review_meta), "TAGGING_READY")
-        self.assertIn("unsupported_accessory", review_meta["review_reasons"])
-        self.assertEqual(main.tagging_status_for_result({"tags": [{"dimension_code": "category", "tag_code": "top"}]}, fallback_meta), "TAGGING_READY")
+        self.assertEqual(main.tagging_status_for_result({"一级品类": ["上装"], "置信度": 90}, ready_meta), "READY")
+        self.assertEqual(main.tagging_status_for_result({"一级品类": ["上装"], "置信度": 60}, review_meta), "TAGGING_READY")
+        self.assertIn("low_confidence", review_meta["review_reasons"])
+        self.assertEqual(main.tagging_status_for_result({"一级品类": ["未知"], "风险点": "Gemini 未配置"}, fallback_meta), "TAGGING_READY")
 
     def test_generation_inputs_use_selected_material_snapshot_after_archive(self) -> None:
         config = importlib.import_module("app.config")

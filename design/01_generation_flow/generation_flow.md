@@ -7,7 +7,7 @@ Ruyi-Dream 的新版生成链路以 `AI Stylist` 为策划核心。系统不是�
 ```mermaid
 flowchart TD
   A["搭配服饰库上传"] --> B["保存并 Gemini 打标"]
-  B --> C["READY 搭配服饰"]
+  B --> C["未归档 READY 搭配服饰"]
   D["AI 摄影棚上传主推款"] --> E["创建 GenerationTask 草稿"]
   E --> F["冻结输入版本"]
   C --> Q["离线资产理解<br/>标签 / caption / 风险 / 未来 embedding"]
@@ -30,7 +30,7 @@ flowchart TD
 
 - `AI Stylist` 负责主推款理解、造型方向探索、候选 outfit 组合、审美与商品可见性自评，并输出 `StylingPlan`。
 - `Aesthetic Critic` 是 AI Stylist 的必经质量信号，负责记录逻辑可穿但视觉难看、比例失衡、色块沉重、品牌感不足或模板化的 outfit 风险，并供系统改选、客户审核和后续流程优化使用。
-- 候选漏斗层负责把 READY 搭配服饰按标签、caption、颜色、品类、季节、风险、品牌样本相似度和后续 embedding 压缩成少量可判断候选，不负责最终审美决策。
+- 候选漏斗层负责把未归档 READY 搭配服饰的标签事实全量提供给 AI Stylist，并按标签、caption、颜色、品类、季节、风险、品牌样本相似度和后续 embedding 压缩成少量可直接选择候选，不负责最终审美决策。
 - 搭配库充足性诊断负责判断库内是否存在更优候选，或当前失败是否来自搭配库供给不足。
 - `StylingPlan` 是选搭阶段的结构化产物，记录造型意图、候选方案、选中 outfit、拒绝理由、评分和警告。
 - `ShootScript` / 拍摄剧本承接 `StylingPlan`，一次性生成整组全局导演设定和 6 条 `ShotPlan`，负责穿着关系、图位、景别、姿势、身位、走位、环境、光影、镜头、构图、主推款展示重点、搭配服饰风险和生成配饰调整。
@@ -89,7 +89,8 @@ DELETED
 ### 4.1 输入
 
 - 当前输入版本的主推款图片。
-- 候选漏斗输出的小候选集，而不是当前全部 `READY` 搭配服饰。
+- `candidate_retrieval_snapshot.library_tag_cards`：当前未归档 READY 搭配服饰的全量标签事实，包含 `ai_tags`、`manual_tags`、`official_title_tags`、`effective_tags` 和 `tag_meta`；人工禁用选搭的服饰不进入该上下文。
+- `candidate_retrieval_snapshot.material_cards`：候选漏斗输出的小候选集，而不是当前全部 `READY` 搭配服饰。
 - Top 候选服饰的压缩事实卡片，例如 ID、code、category、colors、fit、season、pairing_brief、wearability、risk、短 caption 和遮挡风险。
 - Top 候选服饰的主图或缩略图。Gemini 只看少量候选图，不看全库图片。
 - 后端生成的 3-8 套 outfit 草案，每套包含候选服饰、穿着方式、主推款卖点收益和风险。
@@ -138,7 +139,7 @@ MVP 阶段默认不输入用户长 prompt。用户只确认拍摄信息和结果
   },
   "styling_intents": [
     {
-      "id": "hero_first_single_piece",
+      "intent_key": "hero_first_single_piece",
       "title": "主推款单穿",
       "reason": "连衣裙本身已经构成完整通勤 look",
       "risk": "需要用鞋包丰富画面但不能抢主推款"
@@ -146,9 +147,12 @@ MVP 阶段默认不输入用户长 prompt。用户只确认拍摄信息和结果
   ],
   "outfit_candidates": [
     {
-      "id": "candidate_a",
+      "outfit_key": "candidate_a",
+      "title": "主推款单穿",
       "mode": "hero_first_single_piece",
       "selected_material_ids": [],
+      "selected_material_codes": [],
+      "selected_materials": [],
       "generated_accessories": ["低存在感棕色乐福鞋"],
       "wearing_notes": "主推连衣裙单穿，鞋包呼应腰带",
       "hero_focus": ["腰带", "V领", "裙摆比例"],
@@ -173,13 +177,16 @@ MVP 阶段默认不输入用户长 prompt。用户只确认拍摄信息和结果
       "risk_notes": []
     }
   ],
-  "selected_outfit_id": "candidate_a",
+  "selected_outfit_key": "candidate_a",
   "selected_material_ids": [],
+  "selected_material_codes": [],
+  "selected_materials": [],
   "reason_summary": "主推连衣裙自带完整造型，采用单穿并以生成鞋包补足通勤氛围。",
   "rejected_candidates": [
     {
-      "id": "candidate_b",
-      "reason": "外套会弱化V领、腰带和连衣裙廓形"
+      "outfit_key": "candidate_b",
+      "reason": "外套会弱化V领、腰带和连衣裙廓形",
+      "material_codes": []
     }
   ],
   "warnings": []
@@ -190,7 +197,8 @@ MVP 阶段默认不输入用户长 prompt。用户只确认拍摄信息和结果
 
 后端不写死审美规则；它只对工程/数据不可继续的问题做硬失败，对审美、穿法和品牌风险记录 `quality_signals`：
 
-- 选中的搭配服饰 ID 必须来自当前 READY 候选。
+- 选中的搭配服饰系统 ID 必须来自当前未归档 READY 候选 `material_cards[].id`，并只用于后端关联、快照和任务包组装。
+- 面向 UI、生成记录和人工审核时展示搭配服饰业务主键 `code`；`selected_material_codes` 只能原样复制候选 `material_cards[].code`，不能替代系统 ID 参与关联。
 - 当前主推款同 `code`、同输入素材或同商品身份不得作为搭配服饰候选或选中结果。
 - 不允许重复 ID。
 - `selected_material_ids` 可为空。

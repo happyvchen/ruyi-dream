@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -49,6 +50,232 @@ logger = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = settings.max_upload_image_pixels
 SESSION_ROLES = {"user", "admin"}
 SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES = {"unknown", "unsupported_accessory"}
+PROMPT_PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-zA-Z0-9_.-]+)\s*}}")
+
+
+def default_prompt_config_defs() -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "segment.brand_info",
+            "groupType": "segment",
+            "title": "品牌信息",
+            "description": "Lily 品牌调性、商品主角原则、选搭边界和负向风格约束。",
+            "sortOrder": 10,
+            "content": """【品牌信息】
+品牌定位：Lily 商务时装，现代、干净、轻熟、自信、克制，商品优先。
+核心风格：都市通勤、简约优雅、清新明快、轻松但得体、时尚但不夸张。
+选搭原则：搭配服饰必须服务主推款，不让主推款变成整套造型的背景元素。
+拍摄原则：电商棚拍、背景克制、光线真实、服装结构清楚、商品可售感优先。
+负向约束：避免传统严肃职业制服感、夸张时装大片感、网红辣妹风、森系少女风、街头潮牌风、宴会礼服感、复杂外景、戏剧强光、鞋包饰品抢主体。
+""",
+        },
+        {
+            "key": "segment.tag_rules",
+            "groupType": "segment",
+            "title": "标签规则",
+            "description": "搭配服饰 AI 打标时使用的标签体系、适用规则和关系说明。",
+            "deprecated": True,
+            "sortOrder": 20,
+            "content": """【标签规则】
+请在这里维护 AI 打标可使用的标签名、标签值示例、字段格式和判断口径。
+
+默认建议：
+- 每个标签项都可多选。
+- 语义描述采用“观察事实 + 视觉判断 + 搭配影响”的结构。
+- 标签值示例不是封闭枚举；图片中存在但规则未覆盖的真实视觉事实可以直接用更合适的中文标签值表达。
+- 不具备某标签名时可以省略该字段。
+""",
+        },
+        {
+            "key": "segment.director_rules",
+            "groupType": "segment",
+            "title": "导演规则",
+            "description": "AI Director 生成 ShootScript 时使用的全局导演边界。",
+            "deprecated": True,
+            "sortOrder": 30,
+            "content": f"""【导演规则】
+{safe_prompt_runtime_value(build_active_shoot_config_prompt_card, "# 拍摄配置导入失败，请在此处维护完整导演规则。")}
+
+补充姿态边界：
+- 允许轻斜正、3/4 斜正、轻侧身、重心偏移、错腿、自然垂手、单手插袋、轻扶腰、轻走动、侧身轻转、回身。
+- 避免站军姿、双手贴腿、夸张扭腰、过度张腿、网红摆拍、时装秀 pose、复杂背景、戏剧强光、过度配饰。
+""",
+        },
+        {
+            "key": "segment.shot_rules",
+            "groupType": "segment",
+            "title": "镜头规则",
+            "description": "默认 6 镜头、品类覆盖镜头以及第 6 格仅预览的规则。",
+            "deprecated": True,
+            "sortOrder": 40,
+            "content": f"""【镜头规则】
+{safe_prompt_runtime_value(lambda: build_shoot_script_category_rule_summary(), "请在此处维护默认 6 镜头与品类覆盖镜头规则。")}
+
+固定规则：
+- ShootScript 必须包含 6 个 ShotPlan。
+- 分镜预览生成 3x2，总共 6 格。
+- 最终成片只生成前 5 格，第 6 格只作为预览参考。
+""",
+        },
+        {
+            "key": "assembly.ai_tagging",
+            "groupType": "assembly",
+            "title": "AI 打标",
+            "description": "搭配服饰库保存并打标时提交给 Gemini 的完整 Prompt 模板。",
+            "sortOrder": 110,
+            "content": """你是一名专业服装标注专家和女装搭配师，擅长根据多张服装图片识别服装的品类、颜色、廓形、材质、设计细节、风格语义、适用场景和搭配逻辑。
+
+【你的任务】
+根据提供的多张服装图片，按照本 Prompt 中维护的打标规则为该服装生成结构化服装标签卡。
+
+【重要规则】
+1. 必须综合所有图片判断，不要只依据第一张图。
+2. 根据服装图片事实进行打标，不要根据主观想象推断图片中没有的信息。
+3. 每个标签的结构为“标签名：标签值”，主要语言为中文，必要时可以英文辅助。
+4. 标签规则由本 Prompt 自身定义；字段和返回结构允许随 Prompt 维护变化，但必须保持 JSON 可解析。
+5. 服装不具备某标签名时直接不显示该标签，比如“裤子”没有“领型”。
+6. 输出必须是严格 JSON，不要输出 Markdown，不要输出解释性正文。
+
+【输出结构】
+请输出一个以标签名为 key 的 JSON 对象。字段可以按实际标签规则增减，示例：
+{
+  "一级品类": [],
+  "二级品类": [],
+  "色彩": [],
+  "版型": [],
+  "整体视觉语义": "",
+  "风格语义": "",
+  "置信度": 88,
+  "风险点": ""
+}
+""",
+        },
+        {
+            "key": "assembly.ai_styling",
+            "groupType": "assembly",
+            "title": "AI 选搭",
+            "description": "AI 摄影棚智能选搭阶段提交给 Gemini AI Stylist 的完整 Prompt 模板。",
+            "sortOrder": 120,
+            "content": f"""你是 Lily 服饰品牌 AI 摄影棚的 AI Stylist。你的任务是为本次主推款生成一个高质量商业审美、符合品牌调性、可用于电商棚拍的 StylingPlan。
+
+{{{{segment.brand_info}}}}
+
+【你的任务】
+根据提供的多张主推款服装图片和候选搭配服饰库快照，深度理解主推款，然后依据品牌信息的调性，从候选搭配服饰中选取搭配服装，并适当搭配鞋包配饰。
+
+【核心原则】
+1. 整体搭配要符合【品牌信息】中描述的品牌调性。
+2. 可以发挥审美自主性，探索多套 outfit，但必须保持商品生产可用。
+3. 主推款必须是视觉中心，包括搭配服饰、鞋包饰品也要服务于主推款，不能遮挡或抢走主推款卖点。
+4. candidate_retrieval.library_tag_cards 会展示搭配服饰库中未归档 READY 服饰的全量标签信息，包括 AI 打标、人工覆盖、生效标签、官方标题标签和标签元信息；AI Stylist 必须先阅读这些标签事实再判断造型方向。
+5. 可直接选择的库内搭配服饰以 candidate_retrieval.material_cards / candidate_material_ids 为准；表主键一律使用 material_id，对应 material_cards[].id；业务展示一律使用 material_code，对应 material_cards[].code，必须原样复制，不得编造。
+6. 允许 selected_material_ids 为空；候选库没有真正提升主推款的配角服饰时，应选择空库内搭配方案。
+7. 鞋、包、饰品只能作为 generated_accessories 文字描述，不作为库内商品级事实，要求描述清晰具体；配饰可以为空。
+8. 商品可见性只是底线，不是充分条件；如果 outfit 沉闷、笨重、廉价、比例失衡、色块压迫、模板化或不符合 Lily 调性，即使主推款露出也必须优先改选更轻量方案、空库内搭配或记录审核风险。
+9. wearing_notes 中的穿法必须被主推款和搭配服饰的 recommended_wearing_methods 支持。
+10. reason_summary、rejected_candidates[].reason、risk_notes、warnings 等面向用户文本禁止出现系统 ID / material_id；如需指代库内服饰，使用 material_code 或自然服饰描述。
+11. 输出必须是严格 JSON，不要输出 Markdown，不要输出解释性正文。
+
+Aesthetic Critic 必须检查：
+- color_weight
+- silhouette_balance
+- waistline_proportion
+- season_material_fit
+- template_risk
+- wearing_method_validity
+- tuck_quality
+- brand_read
+
+candidate_retrieval:
+{{{{runtime.candidate_retrieval}}}}
+
+【输出结构】
+{styling_output_schema_prompt()}
+""",
+        },
+        {
+            "key": "assembly.shoot_script",
+            "groupType": "assembly",
+            "title": "拍摄剧本",
+            "description": "AI Director 基于 StylingPlan 生成 ShootScript + 6 个 ShotPlan 的完整 Prompt 模板。",
+            "sortOrder": 130,
+            "content": f"""你是 Lily 品牌 AI 摄影棚的 AI Director。你的任务是基于已完成的 StylingPlan，一次性生成完整拍摄剧本 ShootScript。
+
+职责边界：
+1. 你负责导演判断：全局拍摄设定、镜头景别、取景范围、模特姿势、身姿走位、构图、背景光线、不可遮挡区域。
+2. 你不能替换库内搭配服饰。如果库内搭配服饰存在拍摄风险，仍正常输出剧本，并在 styling_risks 中披露风险和建议。
+3. 鞋、帽、包、首饰等生成类配饰不是商品事实源；你可以调整、弱化或取消，但必须在 accessory_adjustments 中披露调整原因。
+4. 前 5 个镜头要形成完整商品说明，第 6 个镜头只作为备用姿态，不进入最终成片。
+5. 分镜预览和最终成片都将读取此 ShootScript。不要输出长 prompt，只输出结构化 JSON。
+
+{{{{segment.brand_info}}}}
+本次输入：
+{{{{runtime.request_snapshot}}}}
+
+请只返回 JSON，结构如下：
+{shoot_script_output_schema_prompt()}
+""",
+        },
+        {
+            "key": "assembly.storyboard_preview",
+            "groupType": "assembly",
+            "title": "分镜预览",
+            "description": "Image-2 生成 3x2 分镜预览图时使用的完整 Prompt 模板。",
+            "sortOrder": 140,
+            "content": """生成一张 3x2 电商棚拍分镜预览图。
+
+{{segment.brand_info}}
+主推款和搭配服饰参考图是真实商品事实来源，必须保持商品级保真。
+搭配服饰和生成配饰必须服务主推款展示，不得让主推款沦为整套造型的背景元素。
+
+当前 StylingPlan：
+{{runtime.styling_plan}}
+
+当前 ShootScript：
+{{runtime.shoot_script}}
+
+数字模特参考图用于保持同一身份、发型和气质。
+鞋、包、饰品只作为辅助搭配，不作为画面核心，不做特写。
+六个格子按以下 ShotPlan 执行，第 6 格仅参考，最终不会生成大图。
+
+{{runtime.shot_plans}}
+
+不要生成文字、水印、logo、编号或边框说明。
+""",
+        },
+        {
+            "key": "assembly.final_image",
+            "groupType": "assembly",
+            "title": "生成成片",
+            "description": "Image-2 生成单张最终成片时使用的完整 Prompt 模板。",
+            "sortOrder": 150,
+            "content": """生成一张电商棚拍成片。当前生成第 {{runtime.shot_index}} 张，只生成单张图，不要生成拼图或分镜预览。
+
+参考分镜预览图中的第 {{runtime.shot_index}} 格，只参考姿势、身位、景别、构图、背景和光影方向。
+分镜预览不是商品事实来源。主推款参考图是主角商品事实来源，搭配服饰参考图是配角商品事实来源。
+
+{{segment.brand_info}}
+必须保持主推款和搭配服饰的品类、颜色、面料、版型、结构、比例和可见细节。
+
+当前 StylingPlan：
+{{runtime.styling_plan}}
+
+当前 ShootScript：
+{{runtime.shoot_script}}
+
+当前 ShotPlan：
+{{runtime.shot_plan}}
+
+鞋、包、饰品只作为辅助搭配，不作为画面核心，不做特写。
+不要让搭配服饰或生成配饰抢主推款视觉中心；不要改款、换色、替换商品；不要添加文字、水印、logo。
+""",
+        },
+    ]
+
+
+def prompt_config_defaults_by_key() -> dict[str, dict[str, Any]]:
+    return {item["key"]: item for item in default_prompt_config_defs()}
+
 
 
 def is_request_authenticated(request: Request) -> bool:
@@ -367,6 +594,10 @@ class TaxonomyImportRequest(BaseModel):
     applicabilityRules: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class PromptConfigUpdateRequest(BaseModel):
+    content: str
+
+
 class HeadReferenceUpdateRequest(BaseModel):
     angle: str | None = None
     orderIndex: int | None = None
@@ -393,6 +624,7 @@ RUNNING_GENERATION_TASK_STATUSES = {"STYLING_RUNNING", "SCRIPT_RUNNING", "PREVIE
 PLANNING_STATUSES = {"PLANNING"}
 REVIEW_STATUSES = {"candidate", "approved", "needs_regen", "needs_retouch", "delivered"}
 TAXONOMY_TAGGING_SCHEMA_VERSION = "ruyi-taxonomy-tagging-v1"
+PROMPT_TAGGING_RESULT_VERSION = "prompt-configured-json-v1"
 TAG_REVIEW_CONFIDENCE_THRESHOLD = 0.72
 TAXONOMY_REVIEW_REASONS = {
     "low_confidence",
@@ -409,6 +641,7 @@ TAXONOMY_REVIEW_REASONS = {
     "invalid_tag_reference",
     "missing_required_rule",
     "disallowed_tag",
+    "empty_result",
 }
 LOGIN_FAILURE_WINDOW_SECONDS = 300
 LOGIN_FAILURE_LIMIT = 8
@@ -1083,7 +1316,11 @@ def ensure_styling_garment_not_tagging(row: Any) -> None:
 
 
 def expire_stale_styling_garment_tagging() -> None:
-    timeout_before = datetime.fromtimestamp(time.time() - settings.generation_image_timeout_seconds).isoformat(timespec="seconds")
+    timeout_before = (
+        datetime.fromtimestamp(time.time() - settings.generation_image_timeout_seconds, timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
     timestamp = now_iso()
     with get_db() as db:
         rows = db.execute(
@@ -1151,7 +1388,7 @@ async def create_styling_garment(
             INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, tag_schema_version, created_at, updated_at)
             VALUES (?, 'DRAFT', ?, ?, ?, ?, ?)
             """,
-            (clean_code, dumps({}), dumps({}), TAXONOMY_TAGGING_SCHEMA_VERSION, timestamp, timestamp),
+            (clean_code, dumps({}), dumps({}), PROMPT_TAGGING_RESULT_VERSION, timestamp, timestamp),
         )
         garment_id = int(cursor.lastrowid)
         for index, asset in enumerate(assets):
@@ -1293,7 +1530,7 @@ async def run_styling_garment_tagging(garment_id: int) -> None:
                 dumps(official_title_tags),
                 dumps(effective_tags),
                 dumps(tag_meta),
-                tagging_result.get("schema_version", TAXONOMY_TAGGING_SCHEMA_VERSION),
+                tagging_result.get("schema_version", PROMPT_TAGGING_RESULT_VERSION),
                 timestamp,
                 timestamp,
                 garment_id,
@@ -2337,6 +2574,19 @@ async def create_generation_shoot_script(task_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="请先完成 AI 智能选搭")
     timestamp = now_iso()
     with get_db() as db:
+        transition = db.execute(
+            """
+            UPDATE generation_tasks
+            SET status = 'SCRIPT_RUNNING', updated_at = ?
+            WHERE id = ?
+              AND current_input_version_id = ?
+              AND active_styling_id = ?
+              AND status IN ('STYLING_READY', 'SCRIPT_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED')
+            """,
+            (timestamp, task_id, input_version_id, styling_id),
+        )
+        if int(transition.rowcount or 0) == 0:
+            raise HTTPException(status_code=409, detail="拍摄剧本已在生成中，请勿重复提交")
         cursor = db.execute(
             """
             INSERT INTO generation_shoot_scripts
@@ -2357,10 +2607,6 @@ async def create_generation_shoot_script(task_id: int) -> dict[str, Any]:
             ),
         )
         shoot_script_id = int(cursor.lastrowid)
-        db.execute(
-            "UPDATE generation_tasks SET status = 'SCRIPT_RUNNING', updated_at = ? WHERE id = ?",
-            (timestamp, task_id),
-        )
     attempt_id = create_attempt("generation_shoot_script", shoot_script_id, "gemini")
     with get_db() as db:
         db.execute("UPDATE generation_shoot_scripts SET active_attempt_id = ? WHERE id = ?", (attempt_id, shoot_script_id))
@@ -2848,6 +3094,88 @@ def list_new_generation_records(
 @app.get("/api/generation-records/{task_id}")
 def get_new_generation_record(task_id: int, include_debug: bool = Query(False, alias="includeDebug")) -> dict[str, Any]:
     return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
+
+
+@app.get("/api/prompt-configs")
+def list_prompt_configs(request: Request) -> dict[str, Any]:
+    require_admin(request)
+    items = get_all_prompt_configs()
+    return {
+        "items": items,
+        "placeholders": available_prompt_placeholders(),
+    }
+
+
+@app.get("/api/prompt-configs/{config_key}/preview")
+def preview_prompt_config(config_key: str, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    rendered, diagnostics = render_prompt_config(config_key, sample_prompt_runtime())
+    return {"rendered": rendered, "diagnostics": diagnostics}
+
+
+@app.patch("/api/prompt-configs/{config_key}")
+def update_prompt_config(config_key: str, payload: PromptConfigUpdateRequest, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    key = normalize_prompt_config_key(config_key)
+    defaults = prompt_config_defaults_by_key()
+    if key not in defaults:
+        raise HTTPException(status_code=404, detail="Prompt 配置不存在")
+    content = payload.content[:120000]
+    timestamp = now_iso()
+    default = defaults[key]
+    with get_db() as db:
+        db.execute(
+            """
+            INSERT INTO prompt_configs (key, group_type, title, description, content, sort_order, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+              content = excluded.content,
+              updated_at = excluded.updated_at
+            """,
+            (
+                key,
+                default["groupType"],
+                default["title"],
+                default.get("description") or "",
+                content,
+                int(default.get("sortOrder") or 0),
+                timestamp,
+            ),
+        )
+        log_event(db, "prompt_config", None, "updated", {"key": key})
+    return {"item": get_prompt_config(key), "preview": preview_prompt_config(key, request)}
+
+
+@app.post("/api/prompt-configs/{config_key}/reset")
+def reset_prompt_config(config_key: str, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    key = normalize_prompt_config_key(config_key)
+    defaults = prompt_config_defaults_by_key()
+    if key not in defaults:
+        raise HTTPException(status_code=404, detail="Prompt 配置不存在")
+    default = defaults[key]
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute(
+            """
+            INSERT INTO prompt_configs (key, group_type, title, description, content, sort_order, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+              content = excluded.content,
+              updated_at = excluded.updated_at
+            """,
+            (
+                key,
+                default["groupType"],
+                default["title"],
+                default.get("description") or "",
+                default["content"],
+                int(default.get("sortOrder") or 0),
+                timestamp,
+            ),
+        )
+        log_event(db, "prompt_config", None, "reset", {"key": key})
+    return {"item": get_prompt_config(key), "preview": preview_prompt_config(key, request)}
 
 
 @app.get("/api/brand-info")
@@ -5902,6 +6230,7 @@ def get_styling_garment_tag_attempts(garment_id: int) -> list[dict[str, Any]]:
             "startedAt": row["started_at"],
             "completedAt": row["completed_at"],
             "failedAt": row["failed_at"],
+            "errorCode": row["error_code"] if "error_code" in row.keys() else None,
             "errorMessage": row["error_message"],
             "requestSnapshot": loads(row["request_snapshot_json"], {}),
             "responseSnapshot": loads(row["response_snapshot_json"], {}),
@@ -5930,12 +6259,10 @@ def get_styling_garment_by_id(garment_id: int) -> dict[str, Any]:
 
 async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
     garment = get_styling_garment_by_id(garment_id)
-    taxonomy_context = build_active_taxonomy_context()
-    ensure_taxonomy_ready_for_tagging(taxonomy_context)
-    prompt = build_taxonomy_tagging_prompt(garment, taxonomy_context)
-    request_snapshot = build_taxonomy_tagging_request_snapshot(garment, prompt, taxonomy_context)
+    prompt = build_taxonomy_tagging_prompt(garment)
+    request_snapshot = build_taxonomy_tagging_request_snapshot(garment, prompt)
     if not settings.gemini_api_key:
-        tagging_result = fallback_taxonomy_tagging_result(garment, taxonomy_context)
+        tagging_result = fallback_taxonomy_tagging_result(garment)
         attempt_id = create_attempt("styling_garment_tagging", garment_id, "fallback", request_snapshot)
         finish_attempt(attempt_id, "SUCCEEDED", {"reason": "gemini_api_key_missing", "normalized": tagging_result})
         return tagging_result
@@ -5943,7 +6270,7 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
         from google import genai
         from google.genai import types
     except Exception:
-        tagging_result = fallback_taxonomy_tagging_result(garment, taxonomy_context)
+        tagging_result = fallback_taxonomy_tagging_result(garment)
         attempt_id = create_attempt("styling_garment_tagging", garment_id, "fallback", request_snapshot)
         finish_attempt(attempt_id, "SUCCEEDED", {"reason": "google_genai_import_failed", "normalized": tagging_result})
         return tagging_result
@@ -5969,23 +6296,16 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
     except Exception as exc:
         finish_attempt(attempt_id, "FAILED", {"raw_text": text}, error_message=f"Gemini 返回内容不是合法 JSON：{exc}")
         raise
-    normalized = normalize_taxonomy_tagging_result(raw, garment, taxonomy_context)
+    normalized = normalize_prompt_tagging_result(raw, garment)
     finish_attempt(attempt_id, "SUCCEEDED", {"raw_text": text, "raw_json": raw, "normalized": normalized})
     return normalized
 
 
-def build_taxonomy_tagging_request_snapshot(garment: dict[str, Any], prompt: str, taxonomy_context: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "schema_version": TAXONOMY_TAGGING_SCHEMA_VERSION,
+def build_taxonomy_tagging_request_snapshot(garment: dict[str, Any], prompt: str, taxonomy_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    snapshot = {
+        "schema_version": PROMPT_TAGGING_RESULT_VERSION,
         "model": settings.gemini_model,
         "prompt": prompt,
-        "taxonomy": {
-            "dimension_count": len(taxonomy_context["dimensions"]),
-            "tag_count": len(taxonomy_context["tags"]),
-            "relation_count": len(taxonomy_context["relations"]),
-            "applicability_rule_count": len(taxonomy_context["applicabilityRules"]),
-            "content_hash": taxonomy_context.get("contentHash"),
-        },
         "images": [
             {
                 "image_id": image.get("id"),
@@ -6003,156 +6323,255 @@ def build_taxonomy_tagging_request_snapshot(garment: dict[str, Any], prompt: str
             for index, image in enumerate(garment.get("images", [])[:6])
         ],
     }
-
-
-def build_taxonomy_tagging_prompt(garment: dict[str, Any], taxonomy_context: dict[str, Any]) -> str:
-    image_hints = [
-        {
-            "image_id": image.get("id"),
-            "role_hint": "primary" if index == 0 else "reference",
-            "sort_order": index,
-            "filename": ((image.get("asset") or {}).get("filename") or ""),
-            "mime_type": ((image.get("asset") or {}).get("mimeType") or ""),
-            "width": ((image.get("asset") or {}).get("width")),
-            "height": ((image.get("asset") or {}).get("height")),
+    if taxonomy_context:
+        snapshot["taxonomy"] = {
+            "dimension_count": len(taxonomy_context["dimensions"]),
+            "tag_count": len(taxonomy_context["tags"]),
+            "relation_count": len(taxonomy_context["relations"]),
+            "applicability_rule_count": len(taxonomy_context["applicabilityRules"]),
+            "content_hash": taxonomy_context.get("contentHash"),
         }
-        for index, image in enumerate(garment.get("images", [])[:6])
-    ]
-    tagging_input = {
-        "asset_id": f"styling_garment_{garment.get('id')}",
-        "code": garment.get("code"),
-        "images": image_hints,
-        "official_title": "",
-        "brand_boundary_reference": {
-            "core": ["商务时装", "都市通勤", "年轻职业女性", "简约", "优雅", "自信", "清新明快", "轻松但得体", "时尚但不夸张", "商品优先", "现代", "利落", "干净"],
-            "avoid": ["传统严肃职业制服感", "夸张时装大片感", "网红辣妹风", "森系/甜美少女风", "街头潮牌风", "宴会礼服感", "鞋包饰品抢服装主体", "复杂外景或戏剧化强光"],
-        },
-        "schema_version": TAXONOMY_TAGGING_SCHEMA_VERSION,
-    }
-    taxonomy_card = build_taxonomy_prompt_card_from_context(taxonomy_context)
-    return f"""
-你是 Ruyi-Dream 的服装视觉生产资产打标专家。你的任务是把真实服装图片转成可追溯、可校验、可用于智能选搭的结构化标签。
-
-你不是文案助手，也不是生图助手。不要写生图 prompt，不要写营销文案，不要决定最终成片，只做服装事实识别、证据说明和规则内打标。
-
-【本次输入】
-{dumps(tagging_input)}
-
-【图片与文字的优先级】
-1. 图片事实最高：服装品类、颜色、版型、结构、细节、可见性必须以图片为准。
-2. 多图一致性第二：如果多张图疑似不同商品，标记 needs_review=true，并在 review_reasons 加 conflicting_images。
-3. 官方标题只是证据层：只能进入 official_title_tags；不得覆盖图片事实。
-4. 品牌边界只用于风格分数和风险判断，不要把品牌词机械复制到每件商品。
-
-【判断步骤】
-1. 判断图片组是否展示同一件可售服装资产。
-2. 排除模特、鞋、包、首饰、背景、道具；它们不是本资产。
-3. 先判断主商品品类，再根据品类适用范围判断可用的部件与设计细节。
-4. 判断颜色、图案、视觉材质、表面肌理、版型、廓形、结构、长度、领型、闭合方式、设计细节。
-5. 判断穿着能力：可单穿、可内搭、可外搭、可作为下装搭配、是否可能遮挡主推款。
-6. 判断 Lily 场景适配、搭配约束和风格风险。
-7. 标注每个低置信度原因，并用中文写清楚证据。
-
-【启用中的标签规则】
-{taxonomy_card}
-
-【规则外发现】
-- 如果你看到了规则中没有的真实视觉事实，不要创造 tag_code。
-- 把它写入 unmapped_observations 或 suggested_new_tags，供管理员审核扩展标签规则。
-- unmapped_observations/suggested_new_tags 不会自动成为正式标签。
-
-【复核规则】
-以下任一情况必须 needs_review=true:
-- 没有可靠品类，或 category 为 unknown / unsupported_accessory。
-- overall_confidence < 0.72。
-- 多图疑似不同商品。
-- 图片只有局部细节，无法判断主商品。
-- 标题与图片冲突。
-- 输出了规则外观察、非法 tag_code、禁用适用规则，或缺少 required 适用规则。
-
-【输出要求】
-- 只输出严格 JSON，不输出 Markdown，不输出解释。
-- 正式 tags 数组只能引用“启用、可直接打标”的 dimension_code + tag_code。
-- value_type 必须和标签 value_kind 一致；score 标签必须给出 0 到 1 的 score。
-- evidence、note、visual_profile、warnings 等自然语言全部使用中文。
-- 置信度必须是 0 到 1 的数字。
-- tag_meta.source_image_ids 使用输入中的 image_id。
-
-【输出 JSON 模板】
-{{
-  "schema_version": "{TAXONOMY_TAGGING_SCHEMA_VERSION}",
-  "tags": [
-    {{
-      "dimension_code": "category",
-      "tag_code": "unknown",
-      "value_type": "tag",
-      "score": null,
-      "value_text": null,
-      "value_bool": null,
-      "confidence": 0.0,
-      "evidence": "中文图片证据"
-    }}
-  ],
-  "visual_profile": {{
-    "overall_summary": "中文整体视觉摘要，最多 80 字",
-    "key_parts": ["必须保真的服装部件或设计细节"],
-    "styling_interpretation": "中文搭配师解读，最多 80 字",
-    "pairing_suggestion_text": "适合搭配的中文短句",
-    "avoid_pairing_text": "需要避免的搭配中文短句",
-    "uncertain_points": ["证据不足或需人工判断的点"]
-  }},
-  "official_title_tags": {{"raw_title": "", "official_material_terms": [], "official_style_terms": [], "official_category_terms": [], "official_selling_points": []}},
-  "unmapped_observations": [{{"text": "规则外但图片可见的观察", "evidence": "中文证据", "confidence": 0.0}}],
-  "suggested_new_tags": [{{"dimension_code": "design_detail", "label_zh": "建议新增中文名", "reason": "为什么现有规则不够"}}],
-  "tag_meta": {{"overall_confidence": 0.0, "field_confidence": {{}}, "needs_review": false, "review_reasons": [], "source_image_ids": [], "warnings": []}}
-}}
-"""
+    return snapshot
 
 
-def fallback_taxonomy_tagging_result(garment: dict[str, Any], taxonomy_context: dict[str, Any]) -> dict[str, Any]:
-    fallback_tags = []
-    category_unknown = taxonomy_context["tagByKey"].get(("category", "unknown"))
-    if category_unknown and category_unknown.get("isSelectable"):
-        fallback_tags.append({
-            "dimension_code": "category",
-            "tag_code": "unknown",
-            "value_type": "tag",
-            "score": None,
-            "value_text": None,
-            "value_bool": None,
-            "confidence": 0.5,
-            "evidence": "Gemini 未配置或不可用，无法完成图片判断。",
-        })
-    return normalize_taxonomy_tagging_result(
+def build_taxonomy_tagging_prompt(garment: dict[str, Any] | None = None, taxonomy_context: dict[str, Any] | None = None) -> str:
+    return render_prompt_template("assembly.ai_tagging")
+
+
+def fallback_taxonomy_tagging_result(garment: dict[str, Any], taxonomy_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    return normalize_prompt_tagging_result(
         {
-            "schema_version": TAXONOMY_TAGGING_SCHEMA_VERSION,
-            "tags": fallback_tags,
-            "visual_profile": {
-                "overall_summary": f"{garment.get('code', '该服饰')} 待重新识别。",
-                "key_parts": [],
-                "styling_interpretation": "",
-                "pairing_suggestion_text": "",
-                "avoid_pairing_text": "",
-                "uncertain_points": ["Gemini 未配置或不可用"],
-            },
-            "official_title_tags": {},
-            "unmapped_observations": [],
-            "suggested_new_tags": [],
-            "tag_meta": {
-                "tagger_provider": "fallback",
-                "tagger_model": "fallback",
-                "schema_version": TAXONOMY_TAGGING_SCHEMA_VERSION,
-                "overall_confidence": 0.5,
-                "field_confidence": {},
-                "needs_review": True,
-                "review_reasons": ["fallback_tags"],
-                "source_image_ids": [str(image.get("id")) for image in garment.get("images", [])],
-                "warnings": ["Gemini 未配置或不可用，未生成完整正式标签"],
-            },
+            "一级品类": ["未知"],
+            "整体视觉语义": f"{garment.get('code', '该服饰')} 待重新识别。",
+            "置信度": 50,
+            "风险点": "Gemini 未配置或不可用，无法完成图片判断。",
         },
         garment,
-        taxonomy_context,
+        provider="fallback",
+        warnings=["Gemini 未配置或不可用，未生成完整标签"],
+        review_reasons=["fallback_tags"],
     )
+
+
+TAG_PROMPT_FIELD_ALIASES = {
+    "category": ["一级品类", "品类", "主品类", "category"],
+    "sub_category": ["二级品类", "细分品类", "子品类", "sub_category", "subcategory"],
+    "colors": ["色彩", "颜色", "主色", "color", "colors"],
+    "color_attributes": ["色调", "色彩属性", "颜色氛围", "color_attribute", "color_attributes"],
+    "materials_visual": ["面料材质", "视觉材质", "材质", "material_visual", "materials_visual"],
+    "surface_texture": ["表面肌理", "肌理", "surface_texture"],
+    "fit": ["版型", "fit"],
+    "silhouette": ["廓形", "silhouette"],
+    "structure": ["结构", "structure"],
+    "length": ["长度", "衣长", "裤长", "裙长", "length"],
+    "neckline": ["领型", "neckline"],
+    "sleeve": ["袖型与袖长", "袖长", "袖型", "sleeve"],
+    "shoulder": ["肩部版型", "肩部", "shoulder"],
+    "trouser_shape": ["裤型", "trouser_shape"],
+    "skirt_shape": ["裙型", "skirt_shape"],
+    "waist_height": ["腰高", "waist_height"],
+    "waist_design": ["腰线设计", "waist_design"],
+    "closure": ["闭合方式", "closure"],
+    "details": ["设计细节", "细节", "detail", "details"],
+    "patterns": ["图案", "pattern", "patterns"],
+    "wearing_methods": ["穿法", "wearing_method", "wearing_methods"],
+    "wearability": ["穿着能力", "wearability"],
+    "occasion": ["适用场景", "场景", "occasion"],
+    "season": ["季节", "season"],
+    "overall_summary": ["整体视觉语义", "整体视觉描述", "整体描述", "overall_summary"],
+    "structure_summary": ["结构/廓形语义", "结构廓形语义", "structure_summary"],
+    "material_summary": ["材质/肌理语义", "材质肌理语义", "material_summary"],
+    "color_summary": ["颜色/氛围语义", "颜色氛围语义", "color_summary"],
+    "style_summary": ["风格语义", "风格描述", "style_summary"],
+    "confidence": ["置信度", "confidence", "overall_confidence"],
+    "risk": ["风险点", "风险", "risk", "risks"],
+}
+
+CATEGORY_LABEL_TO_CODE = {
+    "上装": "top",
+    "针织类": "knitwear",
+    "针织": "knitwear",
+    "裤装": "bottom",
+    "裤子": "bottom",
+    "下装": "bottom",
+    "半身裙": "skirt",
+    "短裤": "shorts",
+    "连衣裙": "dress",
+    "连体类": "jumpsuit",
+    "连体裤": "jumpsuit",
+    "连体衣": "jumpsuit",
+    "外套类": "outerwear",
+    "外套": "outerwear",
+    "套装": "suit_set",
+    "其他": "other_garment",
+    "未知": "unknown",
+}
+
+COLOR_LABEL_TO_CODE = {
+    "黑色": "black",
+    "白色": "white",
+    "象牙白": "ivory",
+    "米色": "beige",
+    "灰色": "grey",
+    "蓝色": "blue",
+    "藏青色": "navy",
+    "棕色": "brown",
+    "绿色": "green",
+    "红色": "red",
+    "粉色": "pink",
+    "黄色": "yellow",
+    "紫色": "purple",
+    "金属色": "metallic",
+    "多色": "multi",
+}
+
+GENERIC_LABEL_TO_CODE = {
+    "针织": "knit",
+    "羊毛感": "wool_like",
+    "粗花呢/香风感": "tweed_like",
+    "粗花呢": "tweed_like",
+    "香风感": "tweed_like",
+    "纽扣": "button",
+    "纽扣细节": "button",
+    "不对称": "asymmetric",
+    "短上衣": "cropped",
+    "及胯上衣": "hip",
+    "长上衣": "long",
+}
+
+
+def normalize_prompt_tagging_result(
+    raw: Any,
+    garment: dict[str, Any],
+    *,
+    provider: str = "gemini",
+    warnings: list[str] | None = None,
+    review_reasons: list[str] | None = None,
+) -> dict[str, Any]:
+    ai_tags = raw if isinstance(raw, dict) else {"raw_result": raw}
+    tag_meta = build_prompt_tag_meta(ai_tags, garment, provider=provider, warnings=warnings, review_reasons=review_reasons)
+    return {
+        "schema_version": PROMPT_TAGGING_RESULT_VERSION,
+        "ai_tags": ai_tags,
+        "official_title_tags": {},
+        "tag_meta": tag_meta,
+    }
+
+
+def build_prompt_tag_meta(
+    ai_tags: dict[str, Any],
+    garment: dict[str, Any],
+    *,
+    provider: str,
+    warnings: list[str] | None = None,
+    review_reasons: list[str] | None = None,
+) -> dict[str, Any]:
+    confidence = extract_prompt_confidence(ai_tags)
+    reasons = ensure_string_list(review_reasons)
+    if not has_meaningful_prompt_result(ai_tags):
+        reasons.append("empty_result")
+    if confidence is not None and confidence < TAG_REVIEW_CONFIDENCE_THRESHOLD:
+        reasons.append("low_confidence")
+    if provider == "fallback" and "fallback_tags" not in reasons:
+        reasons.append("fallback_tags")
+    reasons = list(dict.fromkeys(reasons))
+    return {
+        "tagger_provider": provider,
+        "tagger_model": "fallback" if provider == "fallback" else settings.gemini_model,
+        "result_format": "prompt_configured_json",
+        "overall_confidence": confidence if confidence is not None else 0.5,
+        "needs_review": bool(reasons),
+        "review_reasons": reasons,
+        "source_image_ids": [str(image.get("id")) for image in garment.get("images", [])],
+        "warnings": ensure_string_list(warnings),
+    }
+
+
+def has_meaningful_prompt_result(value: Any) -> bool:
+    if value is None or value == "":
+        return False
+    if isinstance(value, list):
+        return any(has_meaningful_prompt_result(item) for item in value)
+    if isinstance(value, dict):
+        return any(has_meaningful_prompt_result(item) for item in value.values())
+    return True
+
+
+def prompt_field_value(source: dict[str, Any], canonical_key: str) -> Any:
+    aliases = set(TAG_PROMPT_FIELD_ALIASES.get(canonical_key, [canonical_key]))
+    return prompt_field_value_recursive(source, aliases)
+
+
+def prompt_field_value_recursive(value: Any, aliases: set[str]) -> Any:
+    if isinstance(value, dict):
+        for key in aliases:
+            if key in value and value[key] not in (None, ""):
+                return value[key]
+        for nested in value.values():
+            found = prompt_field_value_recursive(nested, aliases)
+            if found not in (None, ""):
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = prompt_field_value_recursive(item, aliases)
+            if found not in (None, ""):
+                return found
+    return None
+
+
+def extract_prompt_confidence(source: dict[str, Any]) -> float | None:
+    value = prompt_field_value(source, "confidence")
+    if value is None and isinstance(source.get("tag_meta"), dict):
+        value = source["tag_meta"].get("overall_confidence")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number > 1:
+        number = number / 100
+    return max(0.0, min(1.0, number))
+
+
+def prompt_value_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip()[:120] for item in value if str(item).strip()]
+    if isinstance(value, dict):
+        values: list[str] = []
+        for nested in value.values():
+            values.extend(prompt_value_list(nested))
+        return values
+    text = str(value).strip()
+    if not text:
+        return []
+    return [item.strip()[:120] for item in re.split(r"[,，/、;；]", text) if item.strip()]
+
+
+def first_prompt_value(value: Any, fallback: str = "unknown") -> str:
+    values = prompt_value_list(value)
+    return values[0] if values else fallback
+
+
+def prompt_code_values(value: Any, mapping: dict[str, str] | None = None) -> list[str]:
+    mapping = mapping or {}
+    values = prompt_value_list(value)
+    return [mapping.get(item, item) for item in values]
+
+
+def first_prompt_code(value: Any, mapping: dict[str, str] | None = None, fallback: str = "unknown") -> str:
+    values = prompt_code_values(value, mapping)
+    return values[0] if values else fallback
+
+
+def prompt_text_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return "，".join(str(item).strip() for item in value if str(item).strip())[:240]
+    if isinstance(value, dict):
+        return dumps(value)[:240]
+    return str(value).strip()[:240]
 
 
 def normalize_taxonomy_tagging_result(raw: dict[str, Any], garment: dict[str, Any], taxonomy_context: dict[str, Any]) -> dict[str, Any]:
@@ -6411,82 +6830,148 @@ def normalize_manual_business_tags(value: Any) -> dict[str, Any]:
 def tagging_status_for_result(ai_tags: dict[str, Any], tag_meta: dict[str, Any]) -> str:
     if tag_meta.get("needs_review") or tag_meta.get("tagger_provider") == "fallback":
         return "TAGGING_READY"
-    category_codes = taxonomy_codes_for_dimension(ai_tags, "category")
-    if not category_codes or "unknown" in category_codes or "unsupported_accessory" in category_codes:
+    if not has_meaningful_prompt_result(ai_tags):
         return "TAGGING_READY"
     return "READY"
 
 
 def apply_tag_review_policy(ai_tags: dict[str, Any], tag_meta: dict[str, Any]) -> dict[str, Any]:
-    reasons = [reason for reason in ensure_string_list(tag_meta.get("review_reasons")) if reason in TAXONOMY_REVIEW_REASONS]
-    category_codes = taxonomy_codes_for_dimension(ai_tags, "category")
-    if (not category_codes or "unknown" in category_codes) and "unclear_category" not in reasons:
-        reasons.append("unclear_category")
-    if "unsupported_accessory" in category_codes and "unsupported_accessory" not in reasons:
-        reasons.append("unsupported_accessory")
+    reasons = ensure_string_list(tag_meta.get("review_reasons")) if isinstance(tag_meta, dict) else []
+    confidence = tag_meta.get("overall_confidence") if isinstance(tag_meta, dict) else None
+    inferred_confidence = extract_prompt_confidence(ai_tags) if isinstance(ai_tags, dict) else None
+    if inferred_confidence is not None:
+        confidence = inferred_confidence
+    if not has_meaningful_prompt_result(ai_tags) and "empty_result" not in reasons:
+        reasons.append("empty_result")
+    if confidence is not None and clamp_float(confidence, 0.0, 1.0, 1.0) < TAG_REVIEW_CONFIDENCE_THRESHOLD and "low_confidence" not in reasons:
+        reasons.append("low_confidence")
     if tag_meta.get("tagger_provider") == "fallback" and "fallback_tags" not in reasons:
         reasons.append("fallback_tags")
     needs_review = bool(tag_meta.get("needs_review")) or bool(reasons)
-    return {**tag_meta, "needs_review": needs_review, "review_reasons": reasons}
+    return {**tag_meta, "overall_confidence": confidence if confidence is not None else tag_meta.get("overall_confidence"), "needs_review": needs_review, "review_reasons": list(dict.fromkeys(reasons))}
 
 
 def build_effective_tags(ai_tags: dict[str, Any], official_title_tags: dict[str, Any], manual_tags: dict[str, Any]) -> dict[str, Any]:
-    taxonomy_context = build_active_taxonomy_context()
     tag_entries = ai_tags.get("tags") if isinstance(ai_tags.get("tags"), list) else []
-    by_dimension = group_taxonomy_tags_by_dimension(tag_entries if isinstance(tag_entries, list) else [])
-    category, sub_category = derive_effective_category(by_dimension.get("category", []), taxonomy_context)
-    visual_profile = ai_tags.get("visual_profile") if isinstance(ai_tags.get("visual_profile"), dict) else {}
-    label_summary = taxonomy_label_summary(tag_entries if isinstance(tag_entries, list) else [], taxonomy_context)
-    lily_style = {
-        item["tag_code"]: item.get("score")
-        for item in by_dimension.get("lily_style_score", [])
-        if item.get("value_type") == "score"
+    if tag_entries:
+        taxonomy_context = build_active_taxonomy_context()
+        by_dimension = group_taxonomy_tags_by_dimension(tag_entries if isinstance(tag_entries, list) else [])
+        category, sub_category = derive_effective_category(by_dimension.get("category", []), taxonomy_context)
+        visual_profile = ai_tags.get("visual_profile") if isinstance(ai_tags.get("visual_profile"), dict) else {}
+        label_summary = taxonomy_label_summary(tag_entries if isinstance(tag_entries, list) else [], taxonomy_context)
+        lily_style = {
+            item["tag_code"]: item.get("score")
+            for item in by_dimension.get("lily_style_score", [])
+            if item.get("value_type") == "score"
+        }
+        wearability = {
+            item["tag_code"]: item.get("value_bool")
+            for item in by_dimension.get("wearability", [])
+            if item.get("value_type") == "boolean"
+        }
+        wearing_methods = [item["tag_code"] for item in by_dimension.get("wearing_method", [])]
+        coverage_risk = first_taxonomy_code(by_dimension.get("coverage_risk", []), "unknown")
+        if wearing_methods:
+            wearability["recommended_wearing_methods"] = wearing_methods
+        if coverage_risk:
+            wearability["coverage_risk"] = coverage_risk
+        return {
+            "schema_version": TAXONOMY_TAGGING_SCHEMA_VERSION,
+            "result_format": "taxonomy_tags",
+            "category": category,
+            "sub_category": sub_category,
+            "colors": taxonomy_codes(by_dimension.get("color", [])),
+            "color_attributes": taxonomy_codes(by_dimension.get("color_attribute", [])),
+            "fit": first_taxonomy_code(by_dimension.get("fit", []), "unknown"),
+            "silhouette": taxonomy_codes(by_dimension.get("silhouette", [])),
+            "structure": taxonomy_codes(by_dimension.get("structure", [])),
+            "length": derive_effective_lengths(by_dimension.get("length", [])),
+            "materials_visual": taxonomy_codes(by_dimension.get("material_visual", [])),
+            "surface_texture": taxonomy_codes(by_dimension.get("surface_texture", [])),
+            "details": taxonomy_codes(by_dimension.get("design_detail", [])),
+            "patterns": taxonomy_codes(by_dimension.get("pattern", [])),
+            "pattern_scale": first_taxonomy_code(by_dimension.get("pattern_scale", []), ""),
+            "neckline": taxonomy_codes(by_dimension.get("neckline", [])),
+            "closure": taxonomy_codes(by_dimension.get("closure", [])),
+            "occasion": taxonomy_codes(by_dimension.get("occasion", [])),
+            "season": taxonomy_codes(by_dimension.get("season", [])),
+            "wearability": wearability,
+            "lily_style": lily_style,
+            "formality": first_taxonomy_code(by_dimension.get("formality", []), "unknown"),
+            "styling_compatibility": {
+                "pairing_logic": taxonomy_codes(by_dimension.get("pairing_logic", [])),
+                "style_risk": taxonomy_codes(by_dimension.get("style_risk", [])),
+            },
+            "visual_profile": visual_profile,
+            "label_summary": label_summary,
+            "unmapped_observations": ai_tags.get("unmapped_observations", []),
+            "suggested_new_tags": ai_tags.get("suggested_new_tags", []),
+            "official": official_title_tags,
+            "manual": manual_tags,
+            "pairing_brief": str(visual_profile.get("pairing_suggestion_text") or visual_profile.get("styling_interpretation") or visual_profile.get("overall_summary") or "")[:160],
+            "risk": taxonomy_codes(by_dimension.get("style_risk", [])),
+        }
+
+    visual_profile = {
+        "overall_summary": prompt_text_value(prompt_field_value(ai_tags, "overall_summary")),
+        "structure_summary": prompt_text_value(prompt_field_value(ai_tags, "structure_summary")),
+        "material_summary": prompt_text_value(prompt_field_value(ai_tags, "material_summary")),
+        "color_summary": prompt_text_value(prompt_field_value(ai_tags, "color_summary")),
+        "style_summary": prompt_text_value(prompt_field_value(ai_tags, "style_summary")),
     }
-    wearability = {
-        item["tag_code"]: item.get("value_bool")
-        for item in by_dimension.get("wearability", [])
-        if item.get("value_type") == "boolean"
-    }
-    wearing_methods = [item["tag_code"] for item in by_dimension.get("wearing_method", [])]
-    coverage_risk = first_taxonomy_code(by_dimension.get("coverage_risk", []), "unknown")
+    visual_profile = {key: value for key, value in visual_profile.items() if value}
+    category = first_prompt_code(prompt_field_value(ai_tags, "category"), CATEGORY_LABEL_TO_CODE)
+    sub_category = first_prompt_value(prompt_field_value(ai_tags, "sub_category"), "other")
+    wearing_methods = prompt_code_values(prompt_field_value(ai_tags, "wearing_methods"), GENERIC_LABEL_TO_CODE)
+    wearability_values = prompt_value_list(prompt_field_value(ai_tags, "wearability"))
+    wearability: dict[str, Any] = {}
+    if wearability_values:
+        wearability["values"] = wearability_values
     if wearing_methods:
         wearability["recommended_wearing_methods"] = wearing_methods
-    if coverage_risk:
-        wearability["coverage_risk"] = coverage_risk
+    label_summary = {
+        "category": prompt_value_list(prompt_field_value(ai_tags, "category")),
+        "sub_category": prompt_value_list(prompt_field_value(ai_tags, "sub_category")),
+        "colors": prompt_value_list(prompt_field_value(ai_tags, "colors")),
+        "season": prompt_value_list(prompt_field_value(ai_tags, "season")),
+    }
+    label_summary = {key: value for key, value in label_summary.items() if value}
+    pairing_brief = (
+        visual_profile.get("style_summary")
+        or visual_profile.get("overall_summary")
+        or visual_profile.get("structure_summary")
+        or "，".join(label_summary.get("category", []) + label_summary.get("colors", []))
+    )[:160]
     return {
-        "schema_version": TAXONOMY_TAGGING_SCHEMA_VERSION,
+        "schema_version": PROMPT_TAGGING_RESULT_VERSION,
+        "result_format": "prompt_configured_json",
         "category": category,
         "sub_category": sub_category,
-        "colors": taxonomy_codes(by_dimension.get("color", [])),
-        "color_attributes": taxonomy_codes(by_dimension.get("color_attribute", [])),
-        "fit": first_taxonomy_code(by_dimension.get("fit", []), "unknown"),
-        "silhouette": taxonomy_codes(by_dimension.get("silhouette", [])),
-        "structure": taxonomy_codes(by_dimension.get("structure", [])),
-        "length": derive_effective_lengths(by_dimension.get("length", [])),
-        "materials_visual": taxonomy_codes(by_dimension.get("material_visual", [])),
-        "surface_texture": taxonomy_codes(by_dimension.get("surface_texture", [])),
-        "details": taxonomy_codes(by_dimension.get("design_detail", [])),
-        "patterns": taxonomy_codes(by_dimension.get("pattern", [])),
-        "pattern_scale": first_taxonomy_code(by_dimension.get("pattern_scale", []), ""),
-        "neckline": taxonomy_codes(by_dimension.get("neckline", [])),
-        "closure": taxonomy_codes(by_dimension.get("closure", [])),
-        "occasion": taxonomy_codes(by_dimension.get("occasion", [])),
-        "season": taxonomy_codes(by_dimension.get("season", [])),
+        "category_label": first_prompt_value(prompt_field_value(ai_tags, "category")),
+        "colors": prompt_code_values(prompt_field_value(ai_tags, "colors"), COLOR_LABEL_TO_CODE),
+        "color_labels": prompt_value_list(prompt_field_value(ai_tags, "colors")),
+        "color_attributes": prompt_value_list(prompt_field_value(ai_tags, "color_attributes")),
+        "fit": first_prompt_value(prompt_field_value(ai_tags, "fit")),
+        "silhouette": prompt_value_list(prompt_field_value(ai_tags, "silhouette")),
+        "structure": prompt_value_list(prompt_field_value(ai_tags, "structure")),
+        "length": {"values": prompt_code_values(prompt_field_value(ai_tags, "length"), GENERIC_LABEL_TO_CODE), "labels": prompt_value_list(prompt_field_value(ai_tags, "length"))},
+        "materials_visual": prompt_code_values(prompt_field_value(ai_tags, "materials_visual"), GENERIC_LABEL_TO_CODE),
+        "material_labels": prompt_value_list(prompt_field_value(ai_tags, "materials_visual")),
+        "surface_texture": prompt_value_list(prompt_field_value(ai_tags, "surface_texture")),
+        "details": prompt_code_values(prompt_field_value(ai_tags, "details"), GENERIC_LABEL_TO_CODE),
+        "detail_labels": prompt_value_list(prompt_field_value(ai_tags, "details")),
+        "patterns": prompt_value_list(prompt_field_value(ai_tags, "patterns")),
+        "neckline": prompt_value_list(prompt_field_value(ai_tags, "neckline")),
+        "closure": prompt_code_values(prompt_field_value(ai_tags, "closure"), GENERIC_LABEL_TO_CODE),
+        "occasion": prompt_value_list(prompt_field_value(ai_tags, "occasion")),
+        "season": prompt_value_list(prompt_field_value(ai_tags, "season")),
         "wearability": wearability,
-        "lily_style": lily_style,
-        "formality": first_taxonomy_code(by_dimension.get("formality", []), "unknown"),
-        "styling_compatibility": {
-            "pairing_logic": taxonomy_codes(by_dimension.get("pairing_logic", [])),
-            "style_risk": taxonomy_codes(by_dimension.get("style_risk", [])),
-        },
         "visual_profile": visual_profile,
         "label_summary": label_summary,
-        "unmapped_observations": ai_tags.get("unmapped_observations", []),
-        "suggested_new_tags": ai_tags.get("suggested_new_tags", []),
-        "official": official_title_tags,
         "manual": manual_tags,
-        "pairing_brief": str(visual_profile.get("pairing_suggestion_text") or visual_profile.get("styling_interpretation") or visual_profile.get("overall_summary") or "")[:160],
-        "risk": taxonomy_codes(by_dimension.get("style_risk", [])),
+        "official": official_title_tags,
+        "pairing_brief": pairing_brief,
+        "risk": prompt_value_list(prompt_field_value(ai_tags, "risk")),
     }
 
 
@@ -6642,9 +7127,13 @@ def taxonomy_def_keys(db: Any) -> set[tuple[str, str]]:
 
 
 def compress_tags_for_styling(row: Any) -> dict[str, Any]:
+    ai_tags = loads(row["ai_tags_json"], {}) if "ai_tags_json" in row.keys() else {}
+    manual_tags = loads(row["manual_tags_json"], {}) if "manual_tags_json" in row.keys() else {}
+    official_title_tags = loads(row["official_title_tags_json"], {}) if "official_title_tags_json" in row.keys() else {}
+    tag_meta = loads(row["tag_meta_json"], {}) if "tag_meta_json" in row.keys() else {}
     effective = loads(row["effective_tags_json"], {}) if "effective_tags_json" in row.keys() else {}
     if not effective:
-        effective = build_effective_tags(loads(row["ai_tags_json"], {}), {}, loads(row["manual_tags_json"], {}))
+        effective = build_effective_tags(ai_tags, official_title_tags, manual_tags)
     manual = effective.get("manual") if isinstance(effective.get("manual"), dict) else {}
     wearability = effective.get("wearability") if isinstance(effective.get("wearability"), dict) else {}
     length = effective.get("length") if isinstance(effective.get("length"), dict) else {}
@@ -6672,11 +7161,22 @@ def compress_tags_for_styling(row: Any) -> dict[str, Any]:
             "series": manual.get("series", []),
             "do_not_use_for_styling": bool(manual.get("do_not_use_for_styling")),
         },
+        "tag_facts": {
+            "ai_tags": ai_tags,
+            "manual_tags": manual_tags,
+            "official_title_tags": official_title_tags,
+            "effective_tags": effective,
+            "tag_meta": tag_meta,
+        },
         "pairing_brief": effective.get("pairing_brief", ""),
         "risk": effective.get("risk", []),
         "visual_caption": build_phase_one_visual_caption(effective),
         "cover_asset": cover_asset,
     }
+
+
+def library_tag_card_for_prompt(card: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in card.items() if key != "cover_asset"}
 
 
 def build_phase_one_visual_caption(effective: dict[str, Any]) -> str:
@@ -6724,6 +7224,15 @@ def parse_lily_tagging_json(text: str) -> dict[str, Any]:
     try:
         parsed = loads(json_text, {})
     except json.JSONDecodeError as strict_error:
+        relaxed_json_text = remove_json_trailing_commas(json_text)
+        if relaxed_json_text != json_text:
+            try:
+                parsed = loads(relaxed_json_text, {})
+            except json.JSONDecodeError:
+                parsed = None
+            else:
+                if isinstance(parsed, dict):
+                    return parsed
         decoder = json.JSONDecoder()
         try:
             parsed, end_index = decoder.raw_decode(json_text)
@@ -6733,8 +7242,17 @@ def parse_lily_tagging_json(text: str) -> dict[str, Any]:
         if trailing and not is_recoverable_json_trailing_noise(trailing):
             raise strict_error from None
     if not isinstance(parsed, dict):
-        raise ValueError("Gemini 返回 JSON 顶层不是对象")
+        return {"raw_result": parsed}
     return parsed
+
+
+def remove_json_trailing_commas(value: str) -> str:
+    previous = value
+    while True:
+        next_value = re.sub(r",\s*([}\]])", r"\1", previous)
+        if next_value == previous:
+            return next_value
+        previous = next_value
 
 
 def is_recoverable_json_trailing_noise(value: str) -> bool:
@@ -6922,7 +7440,8 @@ def build_ai_stylist_context(input_version_id: int) -> tuple[Any, dict[str, Any]
         input_row = db.execute("SELECT * FROM generation_task_input_versions WHERE id = ?", (input_version_id,)).fetchone()
         material_rows = db.execute(
             """
-            SELECT sg.id, sg.code, sg.ai_tags_json, sg.manual_tags_json, sg.effective_tags_json,
+            SELECT sg.id, sg.code, sg.ai_tags_json, sg.manual_tags_json, sg.official_title_tags_json,
+              sg.effective_tags_json, sg.tag_meta_json,
               (SELECT ma.id FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
                WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_asset_id,
               (SELECT ma.object_key FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
@@ -6938,7 +7457,7 @@ def build_ai_stylist_context(input_version_id: int) -> tuple[Any, dict[str, Any]
               (SELECT ma.size_bytes FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
                WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_size_bytes
             FROM styling_garments sg
-            WHERE sg.deleted_at IS NULL AND sg.status = 'READY'
+            WHERE sg.deleted_at IS NULL AND sg.archived_at IS NULL AND sg.status = 'READY'
             ORDER BY updated_at DESC, id DESC
             """
         ).fetchall()
@@ -6957,86 +7476,12 @@ async def select_styling_with_gemini(input_row: Any, candidate_snapshot: dict[st
         from google.genai import types
     except Exception as exc:
         raise RuntimeError("google-genai SDK 不可用，AI Stylist 不能进入生产选搭。") from exc
-    prompt = f"""
-你是 Lily 服饰品牌 AI 摄影棚的 AI Stylist。你的任务不是简单返回服饰 ID，而是为本次主推款生成一个可用于电商棚拍的 StylingPlan。
-
-核心原则：
-1. 搭配服饰服务主推款，而不是主推款服务整套造型。
-2. 可以发挥审美自主性，探索多套 outfit，但必须保持商品生产可用。
-3. 主推款必须是视觉中心。搭配服饰、鞋包饰品不能遮挡或抢走主推款卖点。
-4. 只能从 candidate_retrieval.material_cards 这个小候选集中选择 READY 服饰 ID。允许 selected_material_ids 为空。
-5. 优先参考 candidate_retrieval.outfit_drafts 和 candidate_retrieval.library_adequacy，但你可以拒绝全部草案并选择更好的空配角方案。
-6. 鞋、包、饰品只能作为 generated_accessories 文字描述，不作为库内商品级事实；配饰可以为空。
-7. 不要默认生成项链、公文包、商务手提公文包、大体量托特包。需要包时必须小体量、侧拿/手持且不遮挡主推款。
-8. 如果选择多个可能互斥的服饰，必须在 wearing_notes 中说明真实可穿方式，否则不要选择。
-9. 商品可见性只是底线，不是充分条件；如果 outfit 沉闷、笨重、廉价、比例失衡、色块压迫、模板化或不符合 Lily 调性，即使主推款露出也必须优先改选更轻量方案、空库内搭配或记录审核风险。
-10. 候选库没有真正提升主推款的配角服饰时，应选择空 selected_material_ids 或更轻量的单件配角，不要硬凑完整通勤 look。
-11. 主推款品类以 candidate_retrieval.hero_profile.category 为准；如果主推是裤装，必须优先保护腰头、门襟、裤褶、裤腿垂坠和裤脚关系。
-12. wearing_notes 中的穿法必须被主推款和搭配服饰的 recommended_wearing_methods 支持。开衫、外套、厚针织、明显门襟/纽扣/镂空下摆默认禁止全塞入裤腰。
-13. 高腰裤可以要求腰头可见，但不能把“腰头可见”自动写成“上衣全塞”。可以选择短上装、自然下摆、半塞、敞开外搭或空库内搭配。
-
-Aesthetic Critic 必须检查：
-- color_weight: 上下身深浅和面积是否平衡，是否让主推款更高级。
-- silhouette_balance: 上衣、外套、下装体量是否互相打架，是否压住模特比例。
-- waistline_proportion: 高腰、收腰、腰带、裤腰等卖点是否被真正放大。
-- season_material_fit: 厚重针织、深色外套、皮革等是否和主推款季节/材质冲突。
-- template_risk: 是否只是套用“针织+西装+阔腿裤”“外套+连衣裙”等公式。
-- wearing_method_validity: 穿法是否被单品结构和标签支持。
-- tuck_quality: 塞腰/半塞是否自然平整，不制造腰腹臃肿。
-- brand_read: 是否像 Lily 真正会采用的电商棚拍造型。
-
-candidate_retrieval:
-{dumps(candidate_snapshot)}
-
-请只返回 JSON：
-{{
-  "schema_version": "styling-plan-v1",
-  "hero_understanding": {{
-    "hero_visual_summary": "极短主推款视觉摘要",
-    "category": "bottom | top | knitwear | outerwear | dress | suit_set | other_garment",
-    "hero_selling_points": ["主推款核心卖点"],
-    "hero_visibility_risks": ["可能遮挡或弱化主推款的风险"],
-    "shot_requirements": ["本品类必须覆盖的图位"]
-  }},
-  "styling_intents": [
-    {{"id": "intent_a", "title": "造型方向", "reason": "为什么适合", "risk": "风险"}}
-  ],
-  "outfit_candidates": [
-    {{
-      "id": "candidate_a",
-      "mode": "hero_first_single_piece | light_layering | office_outfit | tonal_outfit | contrast_outfit",
-      "selected_material_ids": [],
-      "generated_accessories": ["低存在感鞋包饰品"],
-      "wearing_notes": "真实穿着方式",
-      "hero_focus": ["本方案必须露出的主推款卖点"],
-      "aesthetic_diagnosis": {{
-        "color_weight": "色彩重量诊断",
-        "silhouette_balance": "廓形体量诊断",
-        "waistline_proportion": "腰线和比例诊断",
-        "season_material_fit": "季节和材质诊断",
-        "template_risk": "模板化风险诊断",
-        "wearing_method_validity": "穿法合法性诊断",
-        "tuck_quality": "塞腰/半塞质量诊断；无塞腰则说明无需检查",
-        "brand_read": "Lily 品牌采用可能性"
-      }},
-      "scores": {{
-        "aesthetic_score": 0.0,
-        "brand_fit_score": 0.0,
-        "hero_visibility_score": 0.0,
-        "commercial_readiness_score": 0.0
-      }},
-      "risk_notes": []
-    }}
-  ],
-  "selected_outfit_id": "candidate_a",
-  "selected_material_ids": [],
-  "reason_summary": "极短最终选择理由",
-  "rejected_candidates": [
-    {{"id": "candidate_b", "reason": "拒绝原因"}}
-  ],
-  "warnings": []
-}}
-"""
+    prompt = render_prompt_template(
+        "assembly.ai_styling",
+        {
+            "candidate_retrieval": dumps(candidate_snapshot),
+        },
+    )
     request_snapshot = {**request_snapshot, "prompt": prompt}
     contents: list[Any] = [prompt]
     for item in loads(input_row["image_snapshot_json"], [])[:8]:
@@ -7062,6 +7507,7 @@ def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict
     hero_profile = infer_hero_profile(input_row, material_cards)
     ranked_cards = rank_candidate_materials(hero_profile, material_cards)
     candidate_cards = select_diverse_candidate_cards(ranked_cards, limit=20)
+    library_tag_cards = [library_tag_card_for_prompt(card) for card in material_cards]
     outfit_drafts = build_outfit_drafts(candidate_cards, hero_profile)
     library_adequacy = build_library_adequacy_report(hero_profile, ranked_cards, candidate_cards, outfit_drafts)
     filtered_out = [
@@ -7077,11 +7523,19 @@ def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict
         "schema_version": "candidate-retrieval-v2",
         "strategy": "candidate_funnel_v1",
         "input_version_id": int(input_row["id"]),
+        "library_scope": {
+            "status": "READY",
+            "archived_at": None,
+            "deleted_at": None,
+            "manual_do_not_use_for_styling": False,
+        },
         "source_material_ids": [int(card["id"]) for card in material_cards],
+        "library_tag_card_count": len(library_tag_cards),
         "candidate_material_ids": [int(card["id"]) for card in candidate_cards],
         "candidate_pool_size": len([item for item in ranked_cards if not item["excluded"]]),
         "candidate_limit": 20,
         "hero_profile": hero_profile,
+        "library_tag_cards": library_tag_cards,
         "material_cards": candidate_cards,
         "outfit_drafts": outfit_drafts,
         "library_adequacy": library_adequacy,
@@ -7089,8 +7543,8 @@ def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict
         "brand_style_evidence": build_phase_one_brand_style_evidence(hero_profile),
         "accessory_boundary": build_accessory_boundary(),
         "notes": [
-            "Phase 1 使用硬过滤、风险降权、多样性保留和 outfit 草案压缩 READY 搭配库。",
-            "Gemini 只接收小候选集、候选缩略图、草案和品牌边界；后续可接入 embedding、品牌样本库和反馈排序。",
+            "Phase 1 会把未归档 READY 搭配库的标签事实全量放入 library_tag_cards，并用硬过滤、风险降权、多样性保留生成 material_cards 优先候选集。",
+            "Gemini 接收全量标签文本、优先候选缩略图、草案和品牌边界；后续可接入 embedding、品牌样本库和反馈排序。",
         ],
     }
 
@@ -7555,6 +8009,7 @@ def fallback_styling_plan(input_row: Any, candidate_snapshot: dict[str, Any], re
                 "risk_notes": [reason],
             },
         ],
+        "selected_outfit_key": "candidate_a",
         "selected_outfit_id": "candidate_a",
         "selected_material_ids": [],
         "reason_summary": "AI Stylist 不可用，采用主推款优先的保守方案。",
@@ -7570,16 +8025,30 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
     intents = source.get("styling_intents") if isinstance(source.get("styling_intents"), list) else []
     candidates = source.get("outfit_candidates") if isinstance(source.get("outfit_candidates"), list) else []
     candidate_ids = {int(item) for item in candidate_snapshot.get("candidate_material_ids", [])}
-    normalized_candidates = [normalize_outfit_candidate(item, candidate_ids, index) for index, item in enumerate(candidates, start=1) if isinstance(item, dict)]
+    candidate_cards = candidate_cards_by_id(candidate_snapshot)
+    normalized_candidates = [
+        normalize_outfit_candidate(item, candidate_ids, candidate_cards, index)
+        for index, item in enumerate(candidates, start=1)
+        if isinstance(item, dict)
+    ]
     if not normalized_candidates:
-        normalized_candidates = [normalize_outfit_candidate({}, candidate_ids, 1)]
-    selected_outfit_id = str(source.get("selected_outfit_id") or normalized_candidates[0]["id"])
+        normalized_candidates = [normalize_outfit_candidate({}, candidate_ids, candidate_cards, 1)]
+    selected_outfit_id = str(source.get("selected_outfit_key") or source.get("selected_outfit_id") or normalized_candidates[0]["id"])
     if selected_outfit_id not in {item["id"] for item in normalized_candidates}:
         selected_outfit_id = normalized_candidates[0]["id"]
     selected = next(item for item in normalized_candidates if item["id"] == selected_outfit_id)
-    selected_ids = source.get("selected_material_ids") if isinstance(source.get("selected_material_ids"), list) else selected["selected_material_ids"]
-    selected_ids = normalize_selected_material_ids(selected_ids, candidate_ids)
+    selected_ids_source = source.get("selected_material_ids")
+    if not isinstance(selected_ids_source, list):
+        selected_ids_source = source.get("selected_materials") if isinstance(source.get("selected_materials"), list) else selected["selected_material_ids"]
+    selected_ids = normalize_selected_material_ids(selected_ids_source, candidate_ids)
+    if not selected_ids:
+        selected_ids = selected["selected_material_ids"]
+    selected_refs = normalize_selected_material_refs(source.get("selected_materials"), selected_ids, candidate_cards)
+    if not selected_refs:
+        selected_refs = normalize_selected_material_refs(selected.get("selected_materials"), selected_ids, candidate_cards)
+    selected_codes = [item["material_code"] for item in selected_refs if item.get("material_code")]
     warnings = ensure_string_list(source.get("warnings"))
+    rejected_source = source.get("rejected_candidates") if isinstance(source.get("rejected_candidates"), list) else []
     return {
         "schema_version": "styling-plan-v1",
         "plan_source_mode": "fallback" if plan_source_mode == "fallback" else "production",
@@ -7592,7 +8061,8 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
         },
         "styling_intents": [
             {
-                "id": str(item.get("id") or f"intent_{index}")[:40],
+                "intent_key": str(item.get("intent_key") or item.get("id") or f"intent_{index}")[:40],
+                "id": str(item.get("intent_key") or item.get("id") or f"intent_{index}")[:40],
                 "title": str(item.get("title") or "造型方向")[:40],
                 "reason": str(item.get("reason") or "")[:120],
                 "risk": str(item.get("risk") or "")[:120],
@@ -7601,15 +8071,14 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
             if isinstance(item, dict)
         ][:5],
         "outfit_candidates": normalized_candidates[:5],
+        "selected_outfit_key": selected_outfit_id,
         "selected_outfit_id": selected_outfit_id,
         "selected_material_ids": selected_ids,
+        "selected_material_codes": selected_codes,
+        "selected_materials": selected_refs,
         "brand_evidence": normalize_brand_evidence(source.get("brand_evidence"), candidate_snapshot),
         "reason_summary": str(source.get("reason_summary") or "已根据主推款和搭配服饰标签完成 AI Stylist 造型方案。")[:180],
-        "rejected_candidates": [
-            {"id": str(item.get("id") or "")[:40], "reason": str(item.get("reason") or "")[:160]}
-            for item in (source.get("rejected_candidates") if isinstance(source.get("rejected_candidates"), list) else [])
-            if isinstance(item, dict)
-        ][:5],
+        "rejected_candidates": normalize_rejected_candidates(rejected_source, normalized_candidates, candidate_cards),
         "warnings": warnings[:8],
     }
 
@@ -7647,14 +8116,36 @@ def normalize_hero_category(value: Any) -> str:
     return category if category in allowed else "unknown"
 
 
-def normalize_outfit_candidate(candidate: dict[str, Any], candidate_ids: set[int], index: int) -> dict[str, Any]:
+def candidate_cards_by_id(candidate_snapshot: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    cards: dict[int, dict[str, Any]] = {}
+    for collection_key in ("library_tag_cards", "material_cards"):
+        for card in candidate_snapshot.get(collection_key, []):
+            if not isinstance(card, dict) or card.get("id") is None:
+                continue
+            try:
+                cards[int(card["id"])] = card
+            except (TypeError, ValueError):
+                continue
+    return cards
+
+
+def normalize_outfit_candidate(candidate: dict[str, Any], candidate_ids: set[int], candidate_cards: dict[int, dict[str, Any]], index: int) -> dict[str, Any]:
     scores = candidate.get("scores") if isinstance(candidate.get("scores"), dict) else {}
     selected_ids = normalize_selected_material_ids(candidate.get("selected_material_ids"), candidate_ids)
+    if not selected_ids:
+        selected_ids = normalize_selected_material_ids(candidate.get("selected_materials"), candidate_ids)
+    selected_refs = normalize_selected_material_refs(candidate.get("selected_materials"), selected_ids, candidate_cards)
+    selected_codes = [item["material_code"] for item in selected_refs if item.get("material_code")]
     diagnosis = candidate.get("aesthetic_diagnosis") if isinstance(candidate.get("aesthetic_diagnosis"), dict) else {}
+    outfit_key = str(candidate.get("outfit_key") or candidate.get("id") or f"candidate_{index}")[:40]
     return {
-        "id": str(candidate.get("id") or f"candidate_{index}")[:40],
+        "outfit_key": outfit_key,
+        "id": outfit_key,
         "mode": str(candidate.get("mode") or ("light_layering" if selected_ids else "hero_first_single_piece"))[:40],
+        "title": str(candidate.get("title") or "")[:60],
         "selected_material_ids": selected_ids,
+        "selected_material_codes": selected_codes,
+        "selected_materials": selected_refs,
         "generated_accessories": ensure_string_list(candidate.get("generated_accessories"))[:6],
         "wearing_notes": str(candidate.get("wearing_notes") or ("主推款作为画面唯一商品级服饰。" if not selected_ids else "搭配服饰以不遮挡主推款的方式穿着。"))[:180],
         "hero_focus": ensure_string_list(candidate.get("hero_focus"))[:8],
@@ -7666,6 +8157,8 @@ def normalize_outfit_candidate(candidate: dict[str, Any], candidate_ids: set[int
             "template_risk": str(diagnosis.get("template_risk") or "")[:180],
             "wearing_method_validity": str(diagnosis.get("wearing_method_validity") or "")[:180],
             "tuck_quality": str(diagnosis.get("tuck_quality") or "")[:180],
+            "official_style_evidence": str(diagnosis.get("official_style_evidence") or "")[:180],
+            "shotplan_readiness": str(diagnosis.get("shotplan_readiness") or "")[:180],
             "brand_read": str(diagnosis.get("brand_read") or "")[:180],
         },
         "scores": {
@@ -7678,18 +8171,122 @@ def normalize_outfit_candidate(candidate: dict[str, Any], candidate_ids: set[int
     }
 
 
+def normalize_rejected_candidates(
+    rejected_source: list[Any],
+    normalized_candidates: list[dict[str, Any]],
+    candidate_cards: dict[int, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidates_by_key = {str(item.get("outfit_key") or item.get("id") or ""): item for item in normalized_candidates}
+    rejected: list[dict[str, Any]] = []
+    for item in rejected_source:
+        if not isinstance(item, dict):
+            continue
+        outfit_key = str(item.get("outfit_key") or item.get("id") or "")[:40]
+        material_codes = rejected_candidate_material_codes(item, candidates_by_key.get(outfit_key), candidate_cards)
+        rejected.append({
+            "outfit_key": outfit_key,
+            "id": outfit_key,
+            "reason": replace_material_ids_with_codes(str(item.get("reason") or ""), candidate_cards)[:160],
+            "material_codes": material_codes[:4],
+        })
+    return rejected[:5]
+
+
+def rejected_candidate_material_codes(
+    item: dict[str, Any],
+    matched_candidate: dict[str, Any] | None,
+    candidate_cards: dict[int, dict[str, Any]],
+) -> list[str]:
+    codes = ensure_string_list(item.get("material_codes") or item.get("selected_material_codes"))
+    if not codes and isinstance(item.get("selected_materials"), list):
+        codes = [
+            str(ref.get("material_code") or ref.get("code") or "")
+            for ref in item["selected_materials"]
+            if isinstance(ref, dict) and str(ref.get("material_code") or ref.get("code") or "")
+        ]
+    if not codes:
+        selected_ids = normalize_selected_material_ids(
+            item.get("selected_material_ids") if isinstance(item.get("selected_material_ids"), list) else item.get("selected_materials"),
+            set(candidate_cards.keys()),
+        )
+        codes = [
+            str(candidate_cards[item_id].get("code") or "")
+            for item_id in selected_ids
+            if item_id in candidate_cards and str(candidate_cards[item_id].get("code") or "")
+        ]
+    if not codes and matched_candidate:
+        codes = ensure_string_list(matched_candidate.get("selected_material_codes"))
+    return list(dict.fromkeys(code for code in codes if code))[:4]
+
+
+def replace_material_ids_with_codes(text: str, candidate_cards: dict[int, dict[str, Any]]) -> str:
+    result = text
+    for material_id, card in candidate_cards.items():
+        code = str(card.get("code") or "").strip()
+        if not code:
+            continue
+        escaped_id = re.escape(str(material_id))
+        result = re.sub(rf"\b(?:material[_\s-]*id|服饰ID|商品ID|ID)\s*[:：#-]?\s*{escaped_id}(?![A-Za-z0-9])", code, result, flags=re.IGNORECASE)
+        result = re.sub(
+            rf"(库内(?:针织衫|衬衫|外套|西装|上衣|下装|裤装|半裙|连衣裙|搭配服饰|服饰|单品)|皮革马甲)\s*{escaped_id}(?![A-Za-z0-9])",
+            rf"\1 {code} ",
+            result,
+        )
+    result = re.sub(r"\b(?:material[_\s-]*id|服饰ID|商品ID|ID)\s*[:：#-]?\s*\d+(?![A-Za-z0-9])", "该服饰", result, flags=re.IGNORECASE)
+    result = re.sub(r"(库内(?:针织衫|衬衫|外套|西装|上衣|下装|裤装|半裙|连衣裙|搭配服饰|服饰|单品)|皮革马甲)\s*\d+(?![A-Za-z0-9])", r"\1", result)
+    return result
+
+
 def normalize_selected_material_ids(value: Any, candidate_ids: set[int]) -> list[int]:
     if not isinstance(value, list):
         return []
     selected: list[int] = []
     for item in value:
+        if isinstance(item, dict):
+            item = item.get("material_id") or item.get("id")
         try:
             item_id = int(item)
         except (TypeError, ValueError):
             continue
-        if item_id in candidate_ids and item_id not in selected:
+        if item_id not in selected:
             selected.append(item_id)
     return selected[:4]
+
+
+def normalize_selected_material_refs(value: Any, selected_ids: list[int], candidate_cards: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+    refs_by_id: dict[int, dict[str, Any]] = {}
+    if isinstance(value, list):
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            try:
+                material_id = int(item.get("material_id") or item.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if material_id not in selected_ids:
+                continue
+            card = candidate_cards.get(material_id, {})
+            refs_by_id[material_id] = {
+                "material_id": material_id,
+                "material_code": str(card.get("code") or item.get("material_code") or item.get("code") or "")[:80],
+                "role": str(item.get("role") or card.get("category") or "")[:40],
+                "styling_purpose": str(item.get("styling_purpose") or item.get("purpose") or "")[:120],
+                "wearing_method": str(item.get("wearing_method") or "")[:120],
+                "visibility_boundary": str(item.get("visibility_boundary") or "")[:160],
+            }
+    refs: list[dict[str, Any]] = []
+    for material_id in selected_ids[:4]:
+        card = candidate_cards.get(material_id, {})
+        ref = refs_by_id.get(material_id) or {
+            "material_id": material_id,
+            "material_code": str(card.get("code") or "")[:80],
+            "role": str(card.get("category") or "")[:40],
+            "styling_purpose": "",
+            "wearing_method": "",
+            "visibility_boundary": "",
+        }
+        refs.append(ref)
+    return refs
 
 
 def validate_styling_plan(plan: dict[str, Any], candidate_snapshot: dict[str, Any]) -> None:
@@ -7706,10 +8303,7 @@ def validate_styling_plan(plan: dict[str, Any], candidate_snapshot: dict[str, An
 
 def collect_styling_quality_signals(plan: dict[str, Any], candidate_snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     selected_ids = plan.get("selected_material_ids") if isinstance(plan.get("selected_material_ids"), list) else []
-    selected_outfit = next(
-        (item for item in plan.get("outfit_candidates", []) if item.get("id") == plan.get("selected_outfit_id")),
-        {},
-    )
+    selected_outfit = selected_outfit_from_plan(plan)
     signals: list[dict[str, Any]] = []
     if has_unexplained_outerwear_conflict(selected_ids, candidate_snapshot, selected_outfit):
         signals.append(styling_quality_signal(
@@ -7935,12 +8529,21 @@ def has_high_waist_dark_outerwear_stack(selected_ids: list[int], candidate_snaps
 
 
 def get_selected_outfit_scores(styling_plan: dict[str, Any]) -> dict[str, Any]:
-    selected_outfit = next(
-        (item for item in styling_plan.get("outfit_candidates", []) if item.get("id") == styling_plan.get("selected_outfit_id")),
-        {},
-    )
+    selected_outfit = selected_outfit_from_plan(styling_plan)
     scores = selected_outfit.get("scores") if isinstance(selected_outfit.get("scores"), dict) else {}
     return scores
+
+
+def selected_outfit_from_plan(styling_plan: dict[str, Any]) -> dict[str, Any]:
+    selected_key = str(styling_plan.get("selected_outfit_key") or styling_plan.get("selected_outfit_id") or "")
+    return next(
+        (
+            item
+            for item in styling_plan.get("outfit_candidates", [])
+            if isinstance(item, dict) and str(item.get("outfit_key") or item.get("id") or "") == selected_key
+        ),
+        {},
+    )
 
 
 def get_styling_source_and_selected_snapshots(selected_ids: list[int]) -> tuple[list[int], list[dict[str, Any]]]:
@@ -8197,10 +8800,7 @@ def get_shoot_config_category_options() -> list[dict[str, Any]]:
 def build_default_new_shot_plans(selected_snapshot: list[dict[str, Any]], styling_plan: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     styling_plan = styling_plan or {}
     garment_refs = ["hero", *[f"styling:{item.get('id')}" for item in selected_snapshot]]
-    selected_outfit = next(
-        (item for item in styling_plan.get("outfit_candidates", []) if item.get("id") == styling_plan.get("selected_outfit_id")),
-        {},
-    )
+    selected_outfit = selected_outfit_from_plan(styling_plan)
     hero = styling_plan.get("hero_understanding") if isinstance(styling_plan.get("hero_understanding"), dict) else {}
     hero_category = normalize_hero_category(hero.get("category"))
     hero_points = ensure_string_list(hero.get("hero_selling_points")) or ensure_string_list(selected_outfit.get("hero_focus"))
@@ -8417,7 +9017,7 @@ async def generate_shoot_script_with_gemini(request_snapshot: dict[str, Any]) ->
     {{
       "risk_id": "string",
       "severity": "low | medium | high | blocking",
-      "material_id": 0,
+      "material_id": 123,
       "material_code": "string",
       "risk": "string",
       "affected_shots": [1],
@@ -8465,6 +9065,12 @@ async def generate_shoot_script_with_gemini(request_snapshot: dict[str, Any]) ->
   "warnings": []
 }}
 """
+    prompt = render_prompt_template(
+        "assembly.shoot_script",
+        {
+            "request_snapshot": dumps(request_snapshot),
+        },
+    )
     contents: list[Any] = [prompt]
     for item in ((request_snapshot.get("input_version") or {}).get("image_snapshot") or [])[:6]:
         asset = item.get("asset") if isinstance(item, dict) else {}
@@ -8783,18 +9389,14 @@ def build_new_preview_task_package(task_id: int, styling_id: int, shoot_script_i
 
 
 def build_new_preview_prompt(shot_plans: list[dict[str, Any]], styling_plan: dict[str, Any], shoot_script: dict[str, Any]) -> str:
-    return "\n".join([
-        "生成一张 3x2 电商棚拍分镜预览图。",
-        "主推款和搭配服饰参考图是真实商品事实来源，必须保持商品级保真。",
-        "搭配服饰和生成配饰必须服务主推款展示，不得让主推款沦为整套造型的背景元素。",
-        f"当前 StylingPlan：{dumps(styling_plan)}",
-        f"当前 ShootScript：{dumps(shoot_script)}",
-        "数字模特参考图用于保持同一身份、发型和气质。",
-        "鞋、包、饰品只作为辅助搭配，不作为画面核心，不做特写。",
-        "六个格子按以下 ShotPlan 执行，第 6 格仅参考，最终不会生成大图。",
-        dumps([plan["plan"] for plan in shot_plans]),
-        "不要生成文字、水印、logo、编号或边框说明。",
-    ])
+    return render_prompt_template(
+        "assembly.storyboard_preview",
+        {
+            "styling_plan": dumps(styling_plan),
+            "shoot_script": dumps(shoot_script),
+            "shot_plans": dumps([plan["plan"] for plan in shot_plans]),
+        },
+    )
 
 
 def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str, Any]:
@@ -8824,17 +9426,15 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
 
 
 def build_new_final_prompt(shot_index: int, shot_plan: dict[str, Any], styling_plan: dict[str, Any], shoot_script: dict[str, Any]) -> str:
-    return "\n".join([
-        f"生成一张电商棚拍成片。当前生成第 {shot_index} 张，只生成单张图，不要生成拼图或分镜预览。",
-        f"参考分镜预览图中的第 {shot_index} 格，只参考姿势、身位、景别、构图、背景和光影方向。",
-        "分镜预览不是商品事实来源。主推款参考图是主角商品事实来源，搭配服饰参考图是配角商品事实来源。",
-        "必须保持主推款和搭配服饰的品类、颜色、面料、版型、结构、比例和可见细节。",
-        f"当前 StylingPlan：{dumps(styling_plan)}",
-        f"当前 ShootScript：{dumps(shoot_script)}",
-        f"当前 ShotPlan：{dumps(shot_plan)}",
-        "鞋、包、饰品只作为辅助搭配，不作为画面核心，不做特写。",
-        "不要让搭配服饰或生成配饰抢主推款视觉中心；不要改款、换色、替换商品；不要添加文字、水印、logo。",
-    ])
+    return render_prompt_template(
+        "assembly.final_image",
+        {
+            "shot_index": str(shot_index),
+            "styling_plan": dumps(styling_plan),
+            "shoot_script": dumps(shoot_script),
+            "shot_plan": dumps(shot_plan),
+        },
+    )
 
 
 def get_styling_plan_by_id(styling_id: int) -> dict[str, Any]:
@@ -8927,6 +9527,303 @@ def snapshot_default_model() -> dict[str, Any]:
         "profile": loads(row["profile_json"], {}),
         "imageInputs": get_default_model_image_inputs(limit=2),
     }
+
+
+def normalize_prompt_config_key(value: str) -> str:
+    return str(value or "").strip().strip("/")
+
+
+def repair_prompt_placeholder_text(value: str) -> str:
+    return re.sub(r"(?<!{){((?:segment|runtime)\.[a-zA-Z0-9_.-]+)}(?!})", r"{{\1}}", value)
+
+
+def ensure_prompt_configs_seeded() -> None:
+    try:
+        with get_db() as db:
+            existing_rows = db.execute("SELECT key, content FROM prompt_configs").fetchall()
+            existing = {str(row["key"]) for row in existing_rows}
+            for row in existing_rows:
+                content = str(row["content"] or "")
+                repaired = repair_prompt_placeholder_text(content)
+                if repaired != content:
+                    db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?", (repaired, now_iso(), row["key"]))
+            timestamp = now_iso()
+            for default in default_prompt_config_defs():
+                if default["key"] in existing:
+                    continue
+                db.execute(
+                    """
+                    INSERT INTO prompt_configs (key, group_type, title, description, content, sort_order, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        default["key"],
+                        default["groupType"],
+                        default["title"],
+                        default.get("description") or "",
+                        default["content"],
+                        int(default.get("sortOrder") or 0),
+                        timestamp,
+                    ),
+                )
+    except sqlite3.OperationalError:
+        return
+
+
+def get_prompt_config_rows() -> dict[str, Any]:
+    ensure_prompt_configs_seeded()
+    try:
+        with get_db() as db:
+            rows = db.execute("SELECT * FROM prompt_configs").fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {str(row["key"]): row for row in rows}
+
+
+def get_all_prompt_configs() -> list[dict[str, Any]]:
+    rows = get_prompt_config_rows()
+    items: list[dict[str, Any]] = []
+    for default in default_prompt_config_defs():
+        if default.get("deprecated"):
+            continue
+        row = rows.get(default["key"])
+        content = row["content"] if row else default["content"]
+        updated_at = row["updated_at"] if row else None
+        rendered, diagnostics = render_prompt_config(default["key"], sample_prompt_runtime(), rows=rows)
+        is_customized = bool(row and str(row["content"] or "") != str(default["content"] or ""))
+        items.append(
+            {
+                "key": default["key"],
+                "groupType": default["groupType"],
+                "title": default["title"],
+                "description": default.get("description") or "",
+                "content": content,
+                "sortOrder": int(default.get("sortOrder") or 0),
+                "updatedAt": updated_at,
+                "isCustomized": is_customized,
+                "usedSegments": diagnostics.get("usedSegments", []),
+                "missingPlaceholders": diagnostics.get("missingPlaceholders", []),
+                "referencedPlaceholders": diagnostics.get("referencedPlaceholders", []),
+                "renderedPreview": rendered,
+            }
+        )
+    return sorted(items, key=lambda item: (str(item["groupType"]), int(item["sortOrder"])))
+
+
+def get_prompt_config(key: str) -> dict[str, Any]:
+    normalized = normalize_prompt_config_key(key)
+    rows = get_prompt_config_rows()
+    defaults = prompt_config_defaults_by_key()
+    default = defaults.get(normalized)
+    if not default:
+        raise HTTPException(status_code=404, detail="Prompt 配置不存在")
+    row = rows.get(normalized)
+    rendered, diagnostics = render_prompt_config(normalized, sample_prompt_runtime(), rows=rows)
+    is_customized = bool(row and str(row["content"] or "") != str(default["content"] or ""))
+    return {
+        "key": normalized,
+        "groupType": default["groupType"],
+        "title": default["title"],
+        "description": default.get("description") or "",
+        "content": row["content"] if row else default["content"],
+        "sortOrder": int(default.get("sortOrder") or 0),
+        "updatedAt": row["updated_at"] if row else None,
+        "isCustomized": is_customized,
+        "usedSegments": diagnostics.get("usedSegments", []),
+        "missingPlaceholders": diagnostics.get("missingPlaceholders", []),
+        "referencedPlaceholders": diagnostics.get("referencedPlaceholders", []),
+        "renderedPreview": rendered,
+    }
+
+
+def prompt_config_content(key: str, rows: dict[str, Any] | None = None) -> str:
+    normalized = normalize_prompt_config_key(key)
+    defaults = prompt_config_defaults_by_key()
+    rows = rows if rows is not None else get_prompt_config_rows()
+    row = rows.get(normalized)
+    if row:
+        return str(row["content"] or "")
+    default = defaults.get(normalized)
+    return str((default or {}).get("content") or "")
+
+
+def render_prompt_config(key: str, runtime: dict[str, Any] | None = None, rows: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
+    diagnostics: dict[str, Any] = {
+        "usedSegments": [],
+        "missingPlaceholders": [],
+        "referencedPlaceholders": [],
+    }
+    rows = rows if rows is not None else get_prompt_config_rows()
+    runtime = runtime or {}
+
+    def resolve_placeholder(name: str, stack: list[str]) -> str:
+        diagnostics["referencedPlaceholders"].append(name)
+        if name.startswith("segment."):
+            if name in stack:
+                diagnostics["missingPlaceholders"].append(f"{name} (循环引用)")
+                return f"[[循环引用:{name}]]"
+            if name not in prompt_config_defaults_by_key():
+                diagnostics["missingPlaceholders"].append(name)
+                return f"[[缺失分段:{name}]]"
+            if name not in diagnostics["usedSegments"]:
+                diagnostics["usedSegments"].append(name)
+            return render_text(prompt_config_content(name, rows), [*stack, name])
+        if name.startswith("runtime."):
+            value = runtime.get(name.removeprefix("runtime."))
+            if value is None:
+                diagnostics["missingPlaceholders"].append(name)
+                return f"[[缺失运行时:{name}]]"
+            if isinstance(value, str):
+                return value
+            return dumps(value)
+        diagnostics["missingPlaceholders"].append(name)
+        return f"[[未知占位符:{name}]]"
+
+    def render_text(text: str, stack: list[str]) -> str:
+        return PROMPT_PLACEHOLDER_PATTERN.sub(lambda match: resolve_placeholder(match.group(1), stack), text)
+
+    rendered = render_text(prompt_config_content(key, rows), [key]).strip() + "\n"
+    for field in ("usedSegments", "missingPlaceholders", "referencedPlaceholders"):
+        diagnostics[field] = sorted(set(diagnostics[field]))
+    return rendered, diagnostics
+
+
+def render_prompt_template(key: str, runtime: dict[str, Any] | None = None) -> str:
+    rendered, _diagnostics = render_prompt_config(key, runtime)
+    return rendered
+
+
+def safe_prompt_runtime_value(factory: Any, fallback: str) -> str:
+    try:
+        value = factory()
+    except Exception:
+        return fallback
+    if isinstance(value, str):
+        return value
+    return dumps(value)
+
+
+def sample_prompt_runtime() -> dict[str, Any]:
+    return {
+        "candidate_retrieval": dumps({"hero_profile": {"category": "bottom"}, "material_cards": [{"id": 1, "code": "LOOK-A"}], "outfit_drafts": []}),
+        "request_snapshot": dumps({"task_id": 1, "styling_plan": {"selected_outfit_key": "candidate_a"}, "selected_material_snapshot": []}),
+        "styling_plan": dumps({"schema_version": "styling-plan-v1", "selected_material_ids": []}),
+        "shoot_script": dumps({"schema_version": "shoot-script-v1", "shots": [{"shot_index": 1}]}),
+        "shot_plans": dumps([{"shot_index": 1, "shot_role": "hero_full_body"}]),
+        "shot_plan": dumps({"shot_index": 1, "shot_role": "hero_full_body"}),
+        "shot_index": "1",
+    }
+
+
+def available_prompt_placeholders() -> list[dict[str, str]]:
+    return [
+        {"name": "segment.brand_info", "scope": "segment", "description": "品牌信息分段 Prompt"},
+        {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "AI 选搭候选漏斗快照"},
+        {"name": "runtime.request_snapshot", "scope": "runtime", "description": "拍摄剧本阶段完整输入快照"},
+        {"name": "runtime.styling_plan", "scope": "runtime", "description": "当前 StylingPlan"},
+        {"name": "runtime.shoot_script", "scope": "runtime", "description": "当前 ShootScript"},
+        {"name": "runtime.shot_plans", "scope": "runtime", "description": "分镜预览 6 个 ShotPlan"},
+        {"name": "runtime.shot_plan", "scope": "runtime", "description": "当前最终成片 ShotPlan"},
+        {"name": "runtime.shot_index", "scope": "runtime", "description": "最终成片镜头序号"},
+    ]
+
+
+def taxonomy_output_schema_prompt() -> str:
+    return """输出 JSON 字段：
+{
+  "schema_version": "ruyi-taxonomy-tagging-v1",
+  "same_product": true,
+  "needs_review": false,
+  "review_reasons": [],
+  "overall_confidence": 0.0,
+  "tags": [{"dimension_code": "category", "tag_code": "bottom", "confidence": 0.0, "evidence": "string"}],
+  "official_title_tags": [],
+  "manual_review_suggestions": [],
+  "unmapped_observations": [],
+  "suggested_new_tags": [],
+  "tag_meta": {}
+}
+"""
+
+
+def styling_output_schema_prompt() -> str:
+    return """{
+  "schema_version": "styling-plan-v1",
+  "hero_understanding": {
+    "hero_visual_summary": "极短主推款视觉摘要",
+    "category": "bottom | top | knitwear | outerwear | dress | suit_set | other_garment",
+    "hero_selling_points": ["主推款核心卖点"],
+    "hero_visibility_risks": ["可能遮挡或弱化主推款的风险"],
+    "shot_requirements": ["本品类必须覆盖的图位"]
+  },
+  "styling_intents": [{"intent_key": "intent_a", "title": "造型方向", "reason": "为什么适合", "risk": "风险"}],
+  "outfit_candidates": [{
+    "outfit_key": "candidate_a",
+    "title": "给业务用户看的方案名",
+    "mode": "hero_first_single_piece | light_layering | office_outfit | tonal_outfit | contrast_outfit",
+    "selected_material_ids": [123],
+    "selected_material_codes": ["候选服饰 code，只用于展示和审计"],
+    "selected_materials": [{
+      "material_id": 123,
+      "material_code": "必须原样复制 candidate_retrieval.material_cards[].code",
+      "role": "top | knitwear | outerwear | bottom | dress | other",
+      "styling_purpose": "为什么这件服饰服务主推款",
+      "wearing_method": "真实穿法",
+      "visibility_boundary": "不得遮挡的主推款区域"
+    }],
+    "generated_accessories": ["低存在感鞋包饰品"],
+    "wearing_notes": "真实穿着方式",
+    "hero_focus": ["本方案必须露出的主推款卖点"],
+    "aesthetic_diagnosis": {
+      "color_weight": "色彩重量诊断",
+      "silhouette_balance": "廓形体量诊断",
+      "waistline_proportion": "腰线和比例诊断",
+      "season_material_fit": "季节和材质诊断",
+      "template_risk": "模板化风险诊断",
+      "wearing_method_validity": "穿法合法性诊断",
+      "tuck_quality": "塞腰/半塞质量诊断；无塞腰则说明无需检查",
+      "official_style_evidence": "品牌样本或品牌调性证据",
+      "shotplan_readiness": "是否能支持后续 6 个镜头",
+      "brand_read": "Lily 品牌采用可能性"
+    },
+    "scores": {"aesthetic_score": 0.0, "brand_fit_score": 0.0, "hero_visibility_score": 0.0, "commercial_readiness_score": 0.0},
+    "risk_notes": []
+  }],
+  "selected_outfit_key": "candidate_a",
+  "selected_material_ids": [123],
+  "selected_material_codes": ["候选服饰 code，只用于展示和审计"],
+  "selected_materials": [{"material_id": 123, "material_code": "候选服饰 code", "role": "配角角色", "styling_purpose": "选择原因", "wearing_method": "真实穿法", "visibility_boundary": "可见性边界"}],
+  "reason_summary": "极短最终选择理由",
+  "rejected_candidates": [{"outfit_key": "candidate_b", "reason": "拒绝原因", "material_codes": ["被拒方案涉及的业务 code"]}],
+  "warnings": []
+}
+"""
+
+
+def shoot_script_output_schema_prompt() -> str:
+    return """{
+  "schema_version": "shoot-script-v1",
+  "script_source_mode": "production",
+  "input_refs": {"task_id": 0, "input_version_id": 0, "styling_id": 0, "styling_plan_version": "styling-plan-v1", "model_snapshot_id": "Face-01"},
+  "global_directing": {
+    "rules": [{"label": "string", "value": "string"}],
+    "brand_tone": "string",
+    "background": "string",
+    "lighting": "string",
+    "model_direction": "string",
+    "hair_makeup_boundary": "string",
+    "accessory_boundary": "string",
+    "consistency_rules": ["string"],
+    "product_fidelity_rules": ["string"],
+    "negative_constraints": ["string"]
+  },
+  "styling_risks": [{"risk_id": "string", "severity": "low | medium | high | blocking", "material_id": 123, "material_code": "string", "risk": "string", "affected_shots": [1], "director_strategy": "string", "user_visible_recommendation": "string"}],
+  "accessory_adjustments": [{"item_type": "bag | footwear | jewelry | hat | other", "original_direction": "string", "adjusted_direction": "string", "reason": "string", "affected_shots": [1]}],
+  "shots": [{"shot_index": 1, "shot_role": "hero_full_body", "shot_role_label": "全身主视觉", "framing": "string", "crop_range": "string", "model_scale": "string", "camera_angle": "string", "body_position": "string", "pose": "string", "movement": "string", "hand_position": "string", "main_focus": "string", "visible_garments": ["hero"], "hero_selling_points": ["string"], "forbidden_occlusion_zones": ["string"], "composition_notes": "string", "acceptance_criteria": ["string"], "negative_constraints": ["string"]}],
+  "user_visible_summary": {"title": "string", "summary": "string", "key_points": ["string"], "risk_summary": "string"},
+  "warnings": []
+}
+"""
 
 
 def job_lease_until() -> str:

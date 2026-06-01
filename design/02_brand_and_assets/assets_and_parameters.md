@@ -111,10 +111,10 @@ DELETED
 - `visual_caption` / `retrieval_features`：每件搭配服饰的短视觉摘要、衣长体量、遮挡风险、可塞腰/可敞开等检索字段。
 - `brand_profile`：admin 维护的单一品牌生产准则资料，包括品牌名称、标语、品牌核心、风格 DNA、选搭准则、拍摄准则和负向约束；初始为空，不做双语结构。
 - `brand_style_samples`：Lily 官方或客户确认的品牌样本，作为品牌风格和配饰边界证据。
-- `candidate_retrieval_snapshot`：本次任务进入 AI Stylist 前的候选集合、排序和过滤原因。
+- `candidate_retrieval_snapshot`：本次任务进入 AI Stylist 前的未归档搭配库全量标签事实、候选集合、排序和过滤原因。
 - `StylingPlan`：AI Stylist 对主推款和候选服饰做造型判断后的结构化方案。
 
-全量搭配服饰库不直接输入 Gemini。候选漏斗必须先完成硬过滤、召回、排序和 outfit 草案生成，再把少量候选卡片、必要缩略图和品牌样本证据交给 AI Stylist。
+全量搭配服饰库图片不直接输入 Gemini。候选漏斗必须先完成未归档 READY 状态过滤和人工禁用过滤，再把全量标签事实写入 `library_tag_cards`，同时完成硬过滤、召回、排序和 outfit 草案生成，把少量可直接选择候选卡片、必要缩略图和品牌样本证据交给 AI Stylist。
 
 ### 5.1 品牌信息
 
@@ -185,7 +185,8 @@ DELETED
 - Aesthetic Critic 诊断：色彩重量、廓形体量、腰线比例、季节材质、模板化风险和品牌采用可能性。
 - 自评分数：审美、Lily 品牌贴合、主推款可见性、商业可用性。
 - 选中方案、拒绝方案、品牌证据和原因。
-- 最终 `selected_material_ids`，可为空。
+- 最终 `selected_material_ids`，可为空；这是后端唯一可执行的系统主键引用。
+- 最终 `selected_material_codes` / `selected_materials[].material_code`，只用于 UI 展示、生成记录和人工审核，必须来自搭配服饰业务主键 `code`，不能替代 ID 参与关联。
 
 商品可见性是底线，不是充分条件。搭配服饰必须服务主推款，也必须让主推款更有吸引力；如果整套 outfit 沉闷、笨重、廉价、比例失衡、色块压迫或不符合 Lily 调性，即使主推款清楚可见，也应判定为选搭失败。
 

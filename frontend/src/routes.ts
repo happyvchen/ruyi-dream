@@ -1,4 +1,4 @@
-export type Page = 'studio' | 'library' | 'model' | 'brand' | 'shoot-config' | 'tag-rules' | 'records'
+export type Page = 'studio' | 'library' | 'model' | 'brand' | 'shoot-config' | 'tag-rules' | 'prompt-maintenance' | 'records'
 
 export type AppRoute = {
   page: Page
@@ -16,9 +16,10 @@ export function parseRoute(): AppRoute {
   const params = new URLSearchParams(window.location.search)
   if (path === '/library') return { page: 'library' }
   if (path === '/model') return { page: 'model' }
-  if (path === '/brand') return { page: 'brand' }
-  if (path === '/shoot-config') return { page: 'shoot-config' }
-  if (path === '/tag-rules') return { page: 'tag-rules' }
+  if (path === '/brand') return { page: 'prompt-maintenance' }
+  if (path === '/shoot-config') return { page: 'prompt-maintenance' }
+  if (path === '/tag-rules') return { page: 'prompt-maintenance' }
+  if (path === '/prompt-maintenance') return { page: 'prompt-maintenance' }
   if (path === '/records') return { page: 'records', recordId: positiveId(params.get('task')) }
   return { page: 'studio', taskId: positiveId(params.get('task')) }
 }
@@ -29,6 +30,7 @@ export function routeToUrl(route: AppRoute) {
   if (route.page === 'brand') return '/brand'
   if (route.page === 'shoot-config') return '/shoot-config'
   if (route.page === 'tag-rules') return '/tag-rules'
+  if (route.page === 'prompt-maintenance') return '/prompt-maintenance'
   if (route.page === 'records') return route.recordId ? `/records?task=${route.recordId}` : '/records'
   return route.taskId ? `/studio?task=${route.taskId}` : '/studio'
 }
