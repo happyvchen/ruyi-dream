@@ -284,6 +284,25 @@ export type ShootConfigPromptCard = {
   content: string
 }
 
+export type AiPolicyConfig = {
+  schemaVersion: string
+  candidateFunnel: Record<string, unknown>
+  heroPolicy: Record<string, unknown>
+  qualitySignalPolicy: Record<string, unknown>
+  accessoryPolicy: Record<string, unknown>
+  libraryAdequacyPolicy: Record<string, unknown>
+  brandStylePolicy: Record<string, unknown>
+}
+
+export type AiPolicyConfigExportPayload = {
+  schemaVersion: string
+  config: AiPolicyConfig
+}
+
+export type AiPolicyConfigPromptCard = {
+  content: string
+}
+
 export type TaxonomyTag = {
   id: number
   dimensionCode: string
@@ -604,6 +623,13 @@ export const api = {
     request<{ item: ShootConfig }>('/api/shoot-config/import', { method: 'POST', body: JSON.stringify({ config }) }),
   updateShootConfig: (config: ShootConfig) =>
     request<{ item: ShootConfig }>('/api/shoot-config', { method: 'PATCH', body: JSON.stringify({ config }) }),
+  getAiPolicyConfig: () => request<{ item: AiPolicyConfig }>('/api/ai-policy-config'),
+  exportAiPolicyConfig: () => request<AiPolicyConfigExportPayload>('/api/ai-policy-config/export'),
+  getAiPolicyConfigPromptCard: () => request<AiPolicyConfigPromptCard>('/api/ai-policy-config/prompt-card'),
+  importAiPolicyConfig: (config: unknown) =>
+    request<{ item: AiPolicyConfig }>('/api/ai-policy-config/import', { method: 'POST', body: JSON.stringify({ config }) }),
+  updateAiPolicyConfig: (config: AiPolicyConfig) =>
+    request<{ item: AiPolicyConfig }>('/api/ai-policy-config', { method: 'PATCH', body: JSON.stringify({ config }) }),
   getTaxonomyRules: () => request<TaxonomyRules>('/api/taxonomy/rules'),
   exportTaxonomyRules: () => request<TaxonomyExportPayload>('/api/taxonomy/export'),
   getTaxonomyPromptCard: () => request<TaxonomyPromptCard>('/api/taxonomy/prompt-card'),

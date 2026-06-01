@@ -36,6 +36,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("023", "add_shoot_script_workflow", "migration_add_shoot_script_workflow"),
     ("024", "add_shoot_config", "migration_add_shoot_config"),
     ("025", "add_prompt_configs", "migration_add_prompt_configs"),
+    ("026", "add_ai_policy_config", "migration_add_ai_policy_config"),
 )
 
 
@@ -351,6 +352,13 @@ def init_db() -> None:
               updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS ai_policy_configs (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              config_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS generation_shot_plans (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
@@ -479,6 +487,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_shoot_script_workflow": migration_add_shoot_script_workflow,
         "migration_add_shoot_config": migration_add_shoot_config,
         "migration_add_prompt_configs": migration_add_prompt_configs,
+        "migration_add_ai_policy_config": migration_add_ai_policy_config,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -852,6 +861,10 @@ def migration_add_prompt_configs(db: sqlite3.Connection) -> None:
     create_prompt_config_table(db)
 
 
+def migration_add_ai_policy_config(db: sqlite3.Connection) -> None:
+    create_ai_policy_config_table(db)
+
+
 def create_shoot_config_table(db: sqlite3.Connection) -> None:
     db.execute(
         """
@@ -875,6 +888,19 @@ def create_prompt_config_table(db: sqlite3.Connection) -> None:
           description TEXT NOT NULL DEFAULT '',
           content TEXT NOT NULL DEFAULT '',
           sort_order INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def create_ai_policy_config_table(db: sqlite3.Connection) -> None:
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_policy_configs (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          config_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         )
         """

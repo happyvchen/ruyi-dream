@@ -155,6 +155,25 @@ h1, h2, h3, p { margin: 0; }
   padding: 14px;
   overflow: auto;
 }
+.prompt-mode-switch {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.prompt-mode-switch button {
+  min-height: 34px;
+  border: 1px solid #d8e0ea;
+  border-radius: 8px;
+  background: #fff;
+  color: #172033;
+  font-weight: 700;
+}
+.prompt-mode-switch button.active {
+  border-color: #38bdf8;
+  background: #eef8ff;
+  color: #0f4fb8;
+}
 .prompt-nav-group {
   display: grid;
   gap: 7px;

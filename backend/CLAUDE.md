@@ -42,6 +42,7 @@ ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + 
 - 保存和管理服装货号图包对象
 - 维护数字模特档案和素材引用
 - 维护 admin-only 单一品牌资料，供后续选搭、拍摄剧本和 ShotPlan 作为结构化品牌参考
+- 维护 admin-only AI 策略配置，供候选漏斗、质量信号、生成配饰边界和品牌边界作为结构化业务策略参考
 - 管理 AI 摄影棚主推款任务、输入版本和状态机
 - 对 READY 搭配服饰做候选漏斗、风险降权、outfit 草案和标签压缩；AI 打标原始 JSON 由 Prompt 驱动，后端只做最佳努力摘要派生
 - 调用 AI Stylist 生成带 Aesthetic Critic 诊断的 `StylingPlan`，保存完整 request/response 快照
@@ -54,7 +55,7 @@ ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + 
 - 后端实现前先读 `../design/CLAUDE.md`。
 - 修改业务对象前先读 `domain_model.md`；修改表结构前先读 `database_schema.md`。
 - AI 打标的规则、字段和输出结构由 `AI 打标` Prompt 自包含维护；后端必须完整保存任意可解析 JSON 返回，并最佳努力派生 `effective_tags_json`，不要重新假设固定 taxonomy 输出。
-- 不把品牌策略、Pose 选择、图位规划写死在不可维护的代码字符串里；需要由 Prompt 维护或结构化 task package 承载。
+- 不把品牌策略、选搭权重、品类互斥/降权、质量信号阈值、配饰边界、Pose 选择、图位规划写死在不可维护的代码字符串里；自然语言口径进入 Prompt 维护，结构化业务策略进入 AI 策略配置、ShootConfig 或 task package。
 - 不擅自删除、覆盖、移动用户素材和生成结果。
 - 删除/归档实现必须遵守 `../design/04_implementation_guide/archive_purge_policy.md`：默认归档，彻底删除先做影响预检，媒体文件按引用计数释放。
 - MVP 不做多租户、复杂权限、计费、模板市场。

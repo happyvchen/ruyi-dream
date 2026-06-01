@@ -111,6 +111,11 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 | `/api/shoot-config/prompt-card` | GET | admin 查看当前拍摄配置的 Prompt 预览；渲染结果与拍摄剧本生成时传给 AI Director 的拍摄配置规则段一致，不触发模型调用 |
 | `/api/shoot-config` | PATCH | admin 保存拍摄配置，后续拍摄剧本生成会读取启用的全局规则和命中的品类 shots；品类必须引用标签规则中的一级品类 |
 | `/api/shoot-config/import` | POST | admin 导入并覆盖拍摄配置；后端按当前标签规则校验和归一化品类引用 |
+| `/api/ai-policy-config` | GET | admin 查询 AI 选搭结构化策略；未保存时返回默认策略 |
+| `/api/ai-policy-config/export` | GET | admin 导出当前 AI 策略配置 JSON |
+| `/api/ai-policy-config/prompt-card` | GET | admin 查看当前 AI 策略配置的 Prompt 摘要；只做本地渲染，不触发模型调用 |
+| `/api/ai-policy-config` | PATCH | admin 保存 AI 策略配置，后续候选漏斗、质量信号和拍摄剧本 request snapshot 会读取该配置 |
+| `/api/ai-policy-config/import` | POST | admin 导入并覆盖 AI 策略配置；后端归一化 schema、阈值和列表长度 |
 | `/api/shot-plans` | POST | 旧版货号组图方案兼容接口；新版 ShotPlan 由 `generation-tasks/{id}/shoot-script` 生成 |
 | `/api/shot-plans/{shot_plan_id}` | GET | 旧版组图方案查看接口 |
 | `/api/garment-skus/{sku_id}/default-shot-plan` | GET | 旧版货号默认组图方案兼容接口 |
@@ -791,6 +796,7 @@ provider 状态映射示例：
 - 当前只维护单一品牌资料，重复 `POST` 返回 `409`。
 - 全部 `/api/brand-info` 接口均要求 admin session；普通 user 返回 `403`。
 - `DELETE /api/brand-info` 删除单条记录，后续 `GET` 再次返回 `item: null`。
+- 全部 `/api/ai-policy-config` 接口均要求 admin session；普通 user 返回 `403`。配置内容会进入 `candidate_retrieval_snapshot.ai_policy_config`、`ai_policy_prompt_card` 和拍摄剧本 request snapshot，用于历史复盘。
 
 ## 数字模特 CRUD 契约
 
