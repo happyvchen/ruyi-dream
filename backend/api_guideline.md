@@ -103,6 +103,9 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 | `/api/brand-info` | POST | admin 创建单一品牌资料；初始值由前端提交，后端不预置 |
 | `/api/brand-info` | PATCH | admin 编辑单一品牌资料 |
 | `/api/brand-info` | DELETE | admin 删除单一品牌资料，恢复为空状态 |
+| `/api/prompt-configs` | GET | admin 查询 Prompt 维护列表和可用占位符 |
+| `/api/prompt-configs/{config_key}/preview` | GET | admin 渲染当前 Prompt 预览；只做本地占位符替换，不触发模型调用 |
+| `/api/prompt-configs/{config_key}` | PATCH | admin 保存数据库中已有 Prompt；后续生成链路立即读取数据库配置 |
 | `/api/shoot-config` | GET | admin 查询拍摄配置；未保存时返回 Lily 默认全局导演规则、基础/默认 6 镜头规则、标签一级品类选项和品类图位覆盖规则 |
 | `/api/shoot-config/export` | GET | admin 导出当前拍摄配置 JSON；包含可导入的 `config` 和标签一级品类快照 |
 | `/api/shoot-config/prompt-card` | GET | admin 查看当前拍摄配置的 Prompt 预览；渲染结果与拍摄剧本生成时传给 AI Director 的拍摄配置规则段一致，不触发模型调用 |
@@ -131,6 +134,8 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 新版前台“生成记录”列表使用 `/api/generation-records`，并与 AI 摄影棚“最近任务”保持同一套 `GenerationTask` 列表口径，不是直接展示 `/api/logs`。旧版 `/api/generation-runs` 和 `/api/garment-skus` 仍作为兼容接口保留，不能作为新版页面主流程依据。`event_logs` 仍用于排查和审计。
 
 新版任务在调用 `select-styling` 时冻结主推款图片和默认数字模特快照。后端先生成候选召回快照，再调用 AI Stylist 输出 `StylingPlan`。拍摄剧本阶段调用 AI Director 输出 `ShootScript` 和 6 条 `ShotPlan`；分镜预览与最终成片只读取当前输入版本、`StylingPlan`、`ShootScript`、选搭快照和预览一致性参考。当前每个阶段都支持重新生成；新上游成功后，下游旧预览和旧成片失效但保留用于追溯。部分失败支持单张结果图重新生成恢复。
+
+`StylingPlan.generated_accessories` 只是 AI Stylist 初始配饰建议。拍摄剧本必须输出 `resolved_accessories` 作为最终配饰方案，并在每个 ShotPlan 中输出 `accessory_instructions`；分镜预览和最终成片以 ShootScript 为准，`accessory_adjustments` 覆盖 StylingPlan 的配饰建议。
 
 写接口在 cookie 会话下会校验 `Origin` / `Referer` 是否属于 `BACKEND_CORS_ORIGINS`，脚本调用应使用可选的 `APP_API_ACCESS_TOKEN`。
 

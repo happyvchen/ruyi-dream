@@ -53,231 +53,6 @@ SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES = {"unknown", "unsupported_accessory"}
 PROMPT_PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-zA-Z0-9_.-]+)\s*}}")
 
 
-def default_prompt_config_defs() -> list[dict[str, Any]]:
-    return [
-        {
-            "key": "segment.brand_info",
-            "groupType": "segment",
-            "title": "品牌信息",
-            "description": "Lily 品牌调性、商品主角原则、选搭边界和负向风格约束。",
-            "sortOrder": 10,
-            "content": """【品牌信息】
-品牌定位：Lily 商务时装，现代、干净、轻熟、自信、克制，商品优先。
-核心风格：都市通勤、简约优雅、清新明快、轻松但得体、时尚但不夸张。
-选搭原则：搭配服饰必须服务主推款，不让主推款变成整套造型的背景元素。
-拍摄原则：电商棚拍、背景克制、光线真实、服装结构清楚、商品可售感优先。
-负向约束：避免传统严肃职业制服感、夸张时装大片感、网红辣妹风、森系少女风、街头潮牌风、宴会礼服感、复杂外景、戏剧强光、鞋包饰品抢主体。
-""",
-        },
-        {
-            "key": "segment.tag_rules",
-            "groupType": "segment",
-            "title": "标签规则",
-            "description": "搭配服饰 AI 打标时使用的标签体系、适用规则和关系说明。",
-            "deprecated": True,
-            "sortOrder": 20,
-            "content": """【标签规则】
-请在这里维护 AI 打标可使用的标签名、标签值示例、字段格式和判断口径。
-
-默认建议：
-- 每个标签项都可多选。
-- 语义描述采用“观察事实 + 视觉判断 + 搭配影响”的结构。
-- 标签值示例不是封闭枚举；图片中存在但规则未覆盖的真实视觉事实可以直接用更合适的中文标签值表达。
-- 不具备某标签名时可以省略该字段。
-""",
-        },
-        {
-            "key": "segment.director_rules",
-            "groupType": "segment",
-            "title": "导演规则",
-            "description": "AI Director 生成 ShootScript 时使用的全局导演边界。",
-            "deprecated": True,
-            "sortOrder": 30,
-            "content": f"""【导演规则】
-{safe_prompt_runtime_value(build_active_shoot_config_prompt_card, "# 拍摄配置导入失败，请在此处维护完整导演规则。")}
-
-补充姿态边界：
-- 允许轻斜正、3/4 斜正、轻侧身、重心偏移、错腿、自然垂手、单手插袋、轻扶腰、轻走动、侧身轻转、回身。
-- 避免站军姿、双手贴腿、夸张扭腰、过度张腿、网红摆拍、时装秀 pose、复杂背景、戏剧强光、过度配饰。
-""",
-        },
-        {
-            "key": "segment.shot_rules",
-            "groupType": "segment",
-            "title": "镜头规则",
-            "description": "默认 6 镜头、品类覆盖镜头以及第 6 格仅预览的规则。",
-            "deprecated": True,
-            "sortOrder": 40,
-            "content": f"""【镜头规则】
-{safe_prompt_runtime_value(lambda: build_shoot_script_category_rule_summary(), "请在此处维护默认 6 镜头与品类覆盖镜头规则。")}
-
-固定规则：
-- ShootScript 必须包含 6 个 ShotPlan。
-- 分镜预览生成 3x2，总共 6 格。
-- 最终成片只生成前 5 格，第 6 格只作为预览参考。
-""",
-        },
-        {
-            "key": "assembly.ai_tagging",
-            "groupType": "assembly",
-            "title": "AI 打标",
-            "description": "搭配服饰库保存并打标时提交给 Gemini 的完整 Prompt 模板。",
-            "sortOrder": 110,
-            "content": """你是一名专业服装标注专家和女装搭配师，擅长根据多张服装图片识别服装的品类、颜色、廓形、材质、设计细节、风格语义、适用场景和搭配逻辑。
-
-【你的任务】
-根据提供的多张服装图片，按照本 Prompt 中维护的打标规则为该服装生成结构化服装标签卡。
-
-【重要规则】
-1. 必须综合所有图片判断，不要只依据第一张图。
-2. 根据服装图片事实进行打标，不要根据主观想象推断图片中没有的信息。
-3. 每个标签的结构为“标签名：标签值”，主要语言为中文，必要时可以英文辅助。
-4. 标签规则由本 Prompt 自身定义；字段和返回结构允许随 Prompt 维护变化，但必须保持 JSON 可解析。
-5. 服装不具备某标签名时直接不显示该标签，比如“裤子”没有“领型”。
-6. 输出必须是严格 JSON，不要输出 Markdown，不要输出解释性正文。
-
-【输出结构】
-请输出一个以标签名为 key 的 JSON 对象。字段可以按实际标签规则增减，示例：
-{
-  "一级品类": [],
-  "二级品类": [],
-  "色彩": [],
-  "版型": [],
-  "整体视觉语义": "",
-  "风格语义": "",
-  "置信度": 88,
-  "风险点": ""
-}
-""",
-        },
-        {
-            "key": "assembly.ai_styling",
-            "groupType": "assembly",
-            "title": "AI 选搭",
-            "description": "AI 摄影棚智能选搭阶段提交给 Gemini AI Stylist 的完整 Prompt 模板。",
-            "sortOrder": 120,
-            "content": f"""你是 Lily 服饰品牌 AI 摄影棚的 AI Stylist。你的任务是为本次主推款生成一个高质量商业审美、符合品牌调性、可用于电商棚拍的 StylingPlan。
-
-{{{{segment.brand_info}}}}
-
-【你的任务】
-根据提供的多张主推款服装图片和候选搭配服饰库快照，深度理解主推款，然后依据品牌信息的调性，从候选搭配服饰中选取搭配服装，并适当搭配鞋包配饰。
-
-【核心原则】
-1. 整体搭配要符合【品牌信息】中描述的品牌调性。
-2. 可以发挥审美自主性，探索多套 outfit，但必须保持商品生产可用。
-3. 主推款必须是视觉中心，包括搭配服饰、鞋包饰品也要服务于主推款，不能遮挡或抢走主推款卖点。
-4. candidate_retrieval.library_tag_cards 会展示搭配服饰库中未归档 READY 服饰的全量标签信息，包括 AI 打标、人工覆盖、生效标签、官方标题标签和标签元信息；AI Stylist 必须先阅读这些标签事实再判断造型方向。
-5. 可直接选择的库内搭配服饰以 candidate_retrieval.material_cards / candidate_material_ids 为准；表主键一律使用 material_id，对应 material_cards[].id；业务展示一律使用 material_code，对应 material_cards[].code，必须原样复制，不得编造。
-6. 允许 selected_material_ids 为空；候选库没有真正提升主推款的配角服饰时，应选择空库内搭配方案。
-7. 鞋、包、饰品只能作为 generated_accessories 文字描述，不作为库内商品级事实，要求描述清晰具体；配饰可以为空。
-8. 商品可见性只是底线，不是充分条件；如果 outfit 沉闷、笨重、廉价、比例失衡、色块压迫、模板化或不符合 Lily 调性，即使主推款露出也必须优先改选更轻量方案、空库内搭配或记录审核风险。
-9. wearing_notes 中的穿法必须被主推款和搭配服饰的 recommended_wearing_methods 支持。
-10. reason_summary、rejected_candidates[].reason、risk_notes、warnings 等面向用户文本禁止出现系统 ID / material_id；如需指代库内服饰，使用 material_code 或自然服饰描述。
-11. 输出必须是严格 JSON，不要输出 Markdown，不要输出解释性正文。
-
-Aesthetic Critic 必须检查：
-- color_weight
-- silhouette_balance
-- waistline_proportion
-- season_material_fit
-- template_risk
-- wearing_method_validity
-- tuck_quality
-- brand_read
-
-candidate_retrieval:
-{{{{runtime.candidate_retrieval}}}}
-
-【输出结构】
-{styling_output_schema_prompt()}
-""",
-        },
-        {
-            "key": "assembly.shoot_script",
-            "groupType": "assembly",
-            "title": "拍摄剧本",
-            "description": "AI Director 基于 StylingPlan 生成 ShootScript + 6 个 ShotPlan 的完整 Prompt 模板。",
-            "sortOrder": 130,
-            "content": f"""你是 Lily 品牌 AI 摄影棚的 AI Director。你的任务是基于已完成的 StylingPlan，一次性生成完整拍摄剧本 ShootScript。
-
-职责边界：
-1. 你负责导演判断：全局拍摄设定、镜头景别、取景范围、模特姿势、身姿走位、构图、背景光线、不可遮挡区域。
-2. 你不能替换库内搭配服饰。如果库内搭配服饰存在拍摄风险，仍正常输出剧本，并在 styling_risks 中披露风险和建议。
-3. 鞋、帽、包、首饰等生成类配饰不是商品事实源；你可以调整、弱化或取消，但必须在 accessory_adjustments 中披露调整原因。
-4. 前 5 个镜头要形成完整商品说明，第 6 个镜头只作为备用姿态，不进入最终成片。
-5. 分镜预览和最终成片都将读取此 ShootScript。不要输出长 prompt，只输出结构化 JSON。
-
-{{{{segment.brand_info}}}}
-本次输入：
-{{{{runtime.request_snapshot}}}}
-
-请只返回 JSON，结构如下：
-{shoot_script_output_schema_prompt()}
-""",
-        },
-        {
-            "key": "assembly.storyboard_preview",
-            "groupType": "assembly",
-            "title": "分镜预览",
-            "description": "Image-2 生成 3x2 分镜预览图时使用的完整 Prompt 模板。",
-            "sortOrder": 140,
-            "content": """生成一张 3x2 电商棚拍分镜预览图。
-
-{{segment.brand_info}}
-主推款和搭配服饰参考图是真实商品事实来源，必须保持商品级保真。
-搭配服饰和生成配饰必须服务主推款展示，不得让主推款沦为整套造型的背景元素。
-
-当前 StylingPlan：
-{{runtime.styling_plan}}
-
-当前 ShootScript：
-{{runtime.shoot_script}}
-
-数字模特参考图用于保持同一身份、发型和气质。
-鞋、包、饰品只作为辅助搭配，不作为画面核心，不做特写。
-六个格子按以下 ShotPlan 执行，第 6 格仅参考，最终不会生成大图。
-
-{{runtime.shot_plans}}
-
-不要生成文字、水印、logo、编号或边框说明。
-""",
-        },
-        {
-            "key": "assembly.final_image",
-            "groupType": "assembly",
-            "title": "生成成片",
-            "description": "Image-2 生成单张最终成片时使用的完整 Prompt 模板。",
-            "sortOrder": 150,
-            "content": """生成一张电商棚拍成片。当前生成第 {{runtime.shot_index}} 张，只生成单张图，不要生成拼图或分镜预览。
-
-参考分镜预览图中的第 {{runtime.shot_index}} 格，只参考姿势、身位、景别、构图、背景和光影方向。
-分镜预览不是商品事实来源。主推款参考图是主角商品事实来源，搭配服饰参考图是配角商品事实来源。
-
-{{segment.brand_info}}
-必须保持主推款和搭配服饰的品类、颜色、面料、版型、结构、比例和可见细节。
-
-当前 StylingPlan：
-{{runtime.styling_plan}}
-
-当前 ShootScript：
-{{runtime.shoot_script}}
-
-当前 ShotPlan：
-{{runtime.shot_plan}}
-
-鞋、包、饰品只作为辅助搭配，不作为画面核心，不做特写。
-不要让搭配服饰或生成配饰抢主推款视觉中心；不要改款、换色、替换商品；不要添加文字、水印、logo。
-""",
-        },
-    ]
-
-
-def prompt_config_defaults_by_key() -> dict[str, dict[str, Any]]:
-    return {item["key"]: item for item in default_prompt_config_defs()}
-
-
-
 def is_request_authenticated(request: Request) -> bool:
     return get_request_role(request) is not None
 
@@ -2461,6 +2236,7 @@ async def select_generation_styling(task_id: int) -> dict[str, Any]:
     if task["status"] not in {
         "READY_FOR_STYLING",
         "STYLING_READY",
+        "SCRIPT_READY",
         "PREVIEW_READY",
         "COMPLETED",
         "FINAL_PARTIAL",
@@ -2538,6 +2314,30 @@ async def select_generation_styling(task_id: int) -> dict[str, Any]:
         hero_summary = str((styling_plan.get("hero_understanding") or {}).get("hero_visual_summary") or "").strip()
         if hero_summary:
             db.execute("UPDATE generation_task_input_versions SET hero_visual_summary = ? WHERE id = ?", (hero_summary, input_version_id))
+        db.execute(
+            """
+            UPDATE generation_shoot_scripts
+            SET status = 'SUPERSEDED', superseded_at = ?, updated_at = ?
+            WHERE task_id = ? AND status = 'SUCCEEDED'
+            """,
+            (timestamp, timestamp, task_id),
+        )
+        db.execute(
+            """
+            UPDATE generation_previews
+            SET status = 'SUPERSEDED', updated_at = ?
+            WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
+            """,
+            (timestamp, task_id),
+        )
+        db.execute(
+            """
+            UPDATE generation_result_sets
+            SET status = 'SUPERSEDED', updated_at = ?
+            WHERE task_id = ? AND status IN ('RUNNING', 'SUCCEEDED', 'PARTIAL', 'FAILED')
+            """,
+            (timestamp, task_id),
+        )
         db.execute(
             """
             UPDATE generation_tasks
@@ -3109,7 +2909,10 @@ def list_prompt_configs(request: Request) -> dict[str, Any]:
 @app.get("/api/prompt-configs/{config_key}/preview")
 def preview_prompt_config(config_key: str, request: Request) -> dict[str, Any]:
     require_admin(request)
-    rendered, diagnostics = render_prompt_config(config_key, sample_prompt_runtime())
+    key = normalize_prompt_config_key(config_key)
+    if key not in get_prompt_config_rows():
+        raise HTTPException(status_code=404, detail="Prompt 配置不存在")
+    rendered, diagnostics = render_prompt_config(key, sample_prompt_runtime())
     return {"rendered": rendered, "diagnostics": diagnostics}
 
 
@@ -3117,64 +2920,21 @@ def preview_prompt_config(config_key: str, request: Request) -> dict[str, Any]:
 def update_prompt_config(config_key: str, payload: PromptConfigUpdateRequest, request: Request) -> dict[str, Any]:
     require_admin(request)
     key = normalize_prompt_config_key(config_key)
-    defaults = prompt_config_defaults_by_key()
-    if key not in defaults:
-        raise HTTPException(status_code=404, detail="Prompt 配置不存在")
     content = payload.content[:120000]
     timestamp = now_iso()
-    default = defaults[key]
     with get_db() as db:
+        existing = db.execute("SELECT key FROM prompt_configs WHERE key = ?", (key,)).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Prompt 配置不存在")
         db.execute(
             """
-            INSERT INTO prompt_configs (key, group_type, title, description, content, sort_order, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET
-              content = excluded.content,
-              updated_at = excluded.updated_at
+            UPDATE prompt_configs
+            SET content = ?, updated_at = ?
+            WHERE key = ?
             """,
-            (
-                key,
-                default["groupType"],
-                default["title"],
-                default.get("description") or "",
-                content,
-                int(default.get("sortOrder") or 0),
-                timestamp,
-            ),
+            (content, timestamp, key),
         )
         log_event(db, "prompt_config", None, "updated", {"key": key})
-    return {"item": get_prompt_config(key), "preview": preview_prompt_config(key, request)}
-
-
-@app.post("/api/prompt-configs/{config_key}/reset")
-def reset_prompt_config(config_key: str, request: Request) -> dict[str, Any]:
-    require_admin(request)
-    key = normalize_prompt_config_key(config_key)
-    defaults = prompt_config_defaults_by_key()
-    if key not in defaults:
-        raise HTTPException(status_code=404, detail="Prompt 配置不存在")
-    default = defaults[key]
-    timestamp = now_iso()
-    with get_db() as db:
-        db.execute(
-            """
-            INSERT INTO prompt_configs (key, group_type, title, description, content, sort_order, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET
-              content = excluded.content,
-              updated_at = excluded.updated_at
-            """,
-            (
-                key,
-                default["groupType"],
-                default["title"],
-                default.get("description") or "",
-                default["content"],
-                int(default.get("sortOrder") or 0),
-                timestamp,
-            ),
-        )
-        log_event(db, "prompt_config", None, "reset", {"key": key})
     return {"item": get_prompt_config(key), "preview": preview_prompt_config(key, request)}
 
 
@@ -8958,7 +8718,7 @@ def build_shoot_script_config_prompt_card(config: dict[str, Any]) -> str:
             lines.append(f"- {dimension_code}:{tag_code}({label})：{format_shoot_config_shot_rules_for_prompt(shots)}")
     else:
         lines.append("- 无")
-    lines.append('输出 JSON：{"schema_version":"shoot-script-v1","global_directing":{"rules":[{"label":"","value":""}]},"shots":[{"shot_index":1,"shot_role":"","framing":"","crop_range":"","pose":"","movement":"","main_focus":"","forbidden_occlusion_zones":[]}],"styling_risks":[],"accessory_adjustments":[]}')
+    lines.append('输出 JSON：{"schema_version":"shoot-script-v1","global_directing":{"rules":[{"label":"","value":""}]},"shots":[{"shot_index":1,"shot_role":"","framing":"","crop_range":"","pose":"","movement":"","main_focus":"","forbidden_occlusion_zones":[],"accessory_instructions":[]}],"styling_risks":[],"accessory_adjustments":[],"resolved_accessories":[]}')
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -8970,101 +8730,6 @@ async def generate_shoot_script_with_gemini(request_snapshot: dict[str, Any]) ->
         from google.genai import types
     except Exception as exc:
         raise RuntimeError("google-genai SDK 不可用，拍摄剧本不能进入生产生成。") from exc
-    shoot_config = request_snapshot.get("shoot_config") if isinstance(request_snapshot.get("shoot_config"), dict) else default_shoot_config()
-    director_config_prompt = build_shoot_script_config_prompt_card(shoot_config)
-    prompt = f"""
-你是 Lily 品牌 AI 摄影棚的 AI Director。你的任务是基于已完成的 StylingPlan，一次性生成完整拍摄剧本 ShootScript。
-
-职责边界：
-1. 你负责导演判断：全局拍摄设定、镜头景别、取景范围、模特姿势、身姿走位、构图、背景光线、不可遮挡区域。
-2. 你不能替换库内搭配服饰。如果库内搭配服饰存在拍摄风险，仍正常输出剧本，并在 styling_risks 中披露风险和建议。
-3. 鞋、帽、包、首饰等生成类配饰不是商品事实源；你可以调整、弱化或取消，但必须在 accessory_adjustments 中披露调整原因。
-4. 前 5 个镜头要形成完整商品说明，第 6 个镜头只作为备用姿态，不进入最终成片。
-5. 分镜预览和最终成片都将读取此 ShootScript。不要输出长 prompt，只输出结构化 JSON。
-
-后台拍摄配置 Prompt：
-{director_config_prompt}
-- 允许轻斜正、3/4 斜正、轻侧身、重心偏移、错腿、自然垂手、单手插袋、轻扶腰、轻走动、侧身轻转、回身。
-- 避免站军姿、双手贴腿、夸张扭腰、过度张腿、网红摆拍、时装秀 pose、复杂背景、戏剧强光、过度配饰。
-
-本次输入：
-{dumps(request_snapshot)}
-
-请只返回 JSON，结构如下：
-{{
-  "schema_version": "shoot-script-v1",
-  "script_source_mode": "production",
-  "input_refs": {{
-    "task_id": {int(request_snapshot.get("task_id") or 0)},
-    "input_version_id": {int((request_snapshot.get("input_version") or {{}}).get("id") or 0)},
-    "styling_id": {int(request_snapshot.get("styling_id") or 0)},
-    "styling_plan_version": "styling-plan-v1",
-    "model_snapshot_id": "Face-01"
-  }},
-  "global_directing": {{
-    "rules": [{{"label": "string", "value": "string"}}],
-    "brand_tone": "string",
-    "background": "string",
-    "lighting": "string",
-    "model_direction": "string",
-    "hair_makeup_boundary": "string",
-    "accessory_boundary": "string",
-    "consistency_rules": ["string"],
-    "product_fidelity_rules": ["string"],
-    "negative_constraints": ["string"]
-  }},
-  "styling_risks": [
-    {{
-      "risk_id": "string",
-      "severity": "low | medium | high | blocking",
-      "material_id": 123,
-      "material_code": "string",
-      "risk": "string",
-      "affected_shots": [1],
-      "director_strategy": "string",
-      "user_visible_recommendation": "string"
-    }}
-  ],
-  "accessory_adjustments": [
-    {{
-      "item_type": "bag | footwear | jewelry | hat | other",
-      "original_direction": "string",
-      "adjusted_direction": "string",
-      "reason": "string",
-      "affected_shots": [1]
-    }}
-  ],
-  "shots": [
-    {{
-      "shot_index": 1,
-      "shot_role": "hero_full_body",
-      "shot_role_label": "全身主视觉",
-      "framing": "string",
-      "crop_range": "string",
-      "model_scale": "string",
-      "camera_angle": "string",
-      "body_position": "string",
-      "pose": "string",
-      "movement": "string",
-      "hand_position": "string",
-      "main_focus": "string",
-      "visible_garments": ["hero"],
-      "hero_selling_points": ["string"],
-      "forbidden_occlusion_zones": ["string"],
-      "composition_notes": "string",
-      "acceptance_criteria": ["string"],
-      "negative_constraints": ["string"]
-    }}
-  ],
-  "user_visible_summary": {{
-    "title": "string",
-    "summary": "string",
-    "key_points": ["string"],
-    "risk_summary": "string"
-  }},
-  "warnings": []
-}}
-"""
     prompt = render_prompt_template(
         "assembly.shoot_script",
         {
@@ -9108,6 +8773,9 @@ def normalize_shoot_script(raw: dict[str, Any], request_snapshot: dict[str, Any]
     fallback_consistency_rules = [value for value in [global_rule_value(config_global_rules, ["一致性规则"])] if value]
     fallback_product_fidelity_rules = [value for value in [global_rule_value(config_global_rules, ["商品保真规则", "商品保真"])] if value]
     fallback_negative_constraints = [value for value in [global_rule_value(config_global_rules, ["负向约束"])] if value]
+    selected_outfit = selected_outfit_from_plan(styling_plan)
+    accessory_adjustments = normalize_accessory_adjustments(source.get("accessory_adjustments"))
+    resolved_accessories = normalize_resolved_accessories(source.get("resolved_accessories"), accessory_adjustments, selected_outfit)
     normalized = {
         "schema_version": "shoot-script-v1",
         "script_source_mode": str(source.get("script_source_mode") or "production"),
@@ -9131,8 +8799,9 @@ def normalize_shoot_script(raw: dict[str, Any], request_snapshot: dict[str, Any]
             "negative_constraints": ensure_string_list(global_directing.get("negative_constraints")) or fallback_negative_constraints,
         },
         "styling_risks": normalize_styling_risks(source.get("styling_risks")),
-        "accessory_adjustments": normalize_accessory_adjustments(source.get("accessory_adjustments")),
-        "shots": normalize_shoot_script_shots(source.get("shots"), base_plans, hero),
+        "accessory_adjustments": accessory_adjustments,
+        "resolved_accessories": resolved_accessories,
+        "shots": normalize_shoot_script_shots(source.get("shots"), base_plans, hero, resolved_accessories),
         "user_visible_summary": normalize_shoot_script_summary(source.get("user_visible_summary"), hero),
         "warnings": ensure_string_list(source.get("warnings")),
     }
@@ -9200,17 +8869,134 @@ def normalize_accessory_adjustments(value: Any) -> list[dict[str, Any]]:
     return adjustments
 
 
-def normalize_shoot_script_shots(value: Any, base_plans: list[Any], hero: dict[str, Any]) -> list[dict[str, Any]]:
+def normalize_resolved_accessories(value: Any, adjustments: list[dict[str, Any]], selected_outfit: dict[str, Any]) -> list[dict[str, Any]]:
+    if isinstance(value, list) and value:
+        resolved = [
+            normalize_resolved_accessory_item(item)
+            for item in value[:12]
+            if isinstance(item, dict)
+        ]
+        if resolved:
+            return resolved
+    initial_accessories = [
+        normalize_initial_accessory_text(text)
+        for text in ensure_string_list(selected_outfit.get("generated_accessories"))[:8]
+    ]
+    resolved_by_type = {item["item_type"]: item for item in initial_accessories}
+    for index, adjustment in enumerate(adjustments, start=1):
+        item_type = normalize_accessory_type(adjustment.get("item_type") or infer_accessory_type(adjustment.get("adjusted_direction") or adjustment.get("original_direction")))
+        final_direction = str(adjustment.get("adjusted_direction") or adjustment.get("original_direction") or "按导演配饰边界低存在感处理").strip()
+        visibility = "none" if accessory_direction_is_removed(final_direction) else "low"
+        resolved_by_type[item_type or f"other_{index}"] = {
+            "item_type": item_type,
+            "final_direction": final_direction[:180],
+            "source": "removed" if visibility == "none" else "director_adjusted",
+            "visibility": visibility,
+            "applies_to_shots": normalize_int_list(adjustment.get("affected_shots"), limit=6),
+            "reason": str(adjustment.get("reason") or "")[:180],
+        }
+    return list(resolved_by_type.values())[:12]
+
+
+def normalize_resolved_accessory_item(item: dict[str, Any]) -> dict[str, Any]:
+    final_direction = str(item.get("final_direction") or item.get("direction") or item.get("adjusted_direction") or "").strip()
+    visibility = str(item.get("visibility") or "").strip() or ("none" if accessory_direction_is_removed(final_direction) else "low")
+    if visibility not in {"none", "low", "medium"}:
+        visibility = "low"
+    source = str(item.get("source") or "director_adjusted")
+    if source not in {"styling_plan", "director_adjusted", "director_added", "removed"}:
+        source = "director_adjusted"
+    return {
+        "item_type": normalize_accessory_type(item.get("item_type") or infer_accessory_type(final_direction)),
+        "final_direction": final_direction[:180] or "按导演配饰边界低存在感处理",
+        "source": source,
+        "visibility": visibility,
+        "applies_to_shots": normalize_int_list(item.get("applies_to_shots") or item.get("affected_shots"), limit=6),
+        "reason": str(item.get("reason") or "")[:180],
+    }
+
+
+def normalize_initial_accessory_text(text: str) -> dict[str, Any]:
+    return {
+        "item_type": normalize_accessory_type(infer_accessory_type(text)),
+        "final_direction": str(text)[:180],
+        "source": "styling_plan",
+        "visibility": "low",
+        "applies_to_shots": [],
+        "reason": "来自 AI Stylist 初始生成配饰建议，AI Director 未调整。",
+    }
+
+
+def normalize_accessory_type(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"footwear", "shoes", "shoe", "鞋", "鞋履"}:
+        return "footwear"
+    if text in {"bag", "包", "包袋"}:
+        return "bag"
+    if text in {"jewelry", "jewellery", "首饰", "饰品", "耳饰", "项链", "腕表"}:
+        return "jewelry"
+    if text in {"hat", "帽", "帽子"}:
+        return "hat"
+    return "other"
+
+
+def infer_accessory_type(value: Any) -> str:
+    text = str(value or "").lower()
+    if any(keyword in text for keyword in ("鞋", "靴", "乐福", "高跟", "凉鞋", "loafer", "heel", "boot")):
+        return "footwear"
+    if any(keyword in text for keyword in ("包", "手袋", "托特", "肩背", "clutch", "bag", "tote")):
+        return "bag"
+    if any(keyword in text for keyword in ("耳", "项链", "戒指", "腕表", "手表", "首饰", "jewelry", "watch")):
+        return "jewelry"
+    if any(keyword in text for keyword in ("帽", "hat")):
+        return "hat"
+    return "other"
+
+
+def accessory_direction_is_removed(value: str) -> bool:
+    return any(keyword in str(value or "") for keyword in ("取消", "不使用", "省略", "不出现", "不要出现", "移除", "none", "remove"))
+
+
+def normalize_int_list(value: Any, limit: int) -> list[int]:
+    items = value if isinstance(value, list) else []
+    normalized: list[int] = []
+    for item in items:
+        try:
+            number = int(item)
+        except (TypeError, ValueError):
+            continue
+        if number not in normalized:
+            normalized.append(number)
+    return normalized[:limit]
+
+
+def accessory_instructions_for_shot(index: int, resolved_accessories: list[dict[str, Any]]) -> list[str]:
+    instructions: list[str] = []
+    for item in resolved_accessories:
+        applies = item.get("applies_to_shots") if isinstance(item.get("applies_to_shots"), list) else []
+        if applies and index not in [int(value) for value in applies if str(value).isdigit()]:
+            continue
+        direction = str(item.get("final_direction") or "").strip()
+        if not direction:
+            continue
+        if item.get("visibility") == "none":
+            instructions.append(f"{item.get('item_type')}: {direction}")
+        else:
+            instructions.append(f"{item.get('item_type')}: {direction}，低存在感，不做特写。")
+    return instructions[:6] or ["生成配饰低存在感，可省略，不做特写，不遮挡主推款和搭配服饰。"]
+
+
+def normalize_shoot_script_shots(value: Any, base_plans: list[Any], hero: dict[str, Any], resolved_accessories: list[dict[str, Any]]) -> list[dict[str, Any]]:
     source_shots = value if isinstance(value, list) and value else []
     shots: list[dict[str, Any]] = []
     for index in range(1, 7):
         source = next((item for item in source_shots if isinstance(item, dict) and int(item.get("shot_index") or 0) == index), None)
         base = base_plans[index - 1] if len(base_plans) >= index and isinstance(base_plans[index - 1], dict) else {}
-        shots.append(normalize_shoot_script_shot(source or {}, base, hero, index))
+        shots.append(normalize_shoot_script_shot(source or {}, base, hero, index, resolved_accessories))
     return shots
 
 
-def normalize_shoot_script_shot(source: dict[str, Any], base: dict[str, Any], hero: dict[str, Any], index: int) -> dict[str, Any]:
+def normalize_shoot_script_shot(source: dict[str, Any], base: dict[str, Any], hero: dict[str, Any], index: int, resolved_accessories: list[dict[str, Any]]) -> dict[str, Any]:
     shot_type = str(source.get("shot_role") or base.get("shotType") or "reference")
     return {
         "shot_index": index,
@@ -9229,6 +9015,7 @@ def normalize_shoot_script_shot(source: dict[str, Any], base: dict[str, Any], he
         "hero_selling_points": ensure_string_list(source.get("hero_selling_points") or source.get("heroSellingPoints") or base.get("heroSellingPoints") or hero.get("hero_selling_points")),
         "forbidden_occlusion_zones": ensure_string_list(source.get("forbidden_occlusion_zones") or source.get("forbiddenOcclusionZones") or hero.get("forbidden_occlusion_zones") or hero.get("hero_visibility_risks")),
         "composition_notes": str(source.get("composition_notes") or source.get("compositionNotes") or base.get("compositionNotes") or ""),
+        "accessory_instructions": ensure_string_list(source.get("accessory_instructions") or source.get("accessoryInstructions")) or accessory_instructions_for_shot(index, resolved_accessories),
         "acceptance_criteria": ensure_string_list(source.get("acceptance_criteria") or source.get("acceptanceCriteria")) or ["主推款品类、颜色、版型和长度清楚。", "搭配服饰服务主推款，不抢视觉中心。"],
         "negative_constraints": ensure_string_list(source.get("negative_constraints") or source.get("negativeConstraints") or base.get("negativeConstraints")),
     }
@@ -9537,41 +9324,21 @@ def repair_prompt_placeholder_text(value: str) -> str:
     return re.sub(r"(?<!{){((?:segment|runtime)\.[a-zA-Z0-9_.-]+)}(?!})", r"{{\1}}", value)
 
 
-def ensure_prompt_configs_seeded() -> None:
+def repair_prompt_config_placeholders() -> None:
     try:
         with get_db() as db:
             existing_rows = db.execute("SELECT key, content FROM prompt_configs").fetchall()
-            existing = {str(row["key"]) for row in existing_rows}
             for row in existing_rows:
                 content = str(row["content"] or "")
                 repaired = repair_prompt_placeholder_text(content)
                 if repaired != content:
                     db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?", (repaired, now_iso(), row["key"]))
-            timestamp = now_iso()
-            for default in default_prompt_config_defs():
-                if default["key"] in existing:
-                    continue
-                db.execute(
-                    """
-                    INSERT INTO prompt_configs (key, group_type, title, description, content, sort_order, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        default["key"],
-                        default["groupType"],
-                        default["title"],
-                        default.get("description") or "",
-                        default["content"],
-                        int(default.get("sortOrder") or 0),
-                        timestamp,
-                    ),
-                )
     except sqlite3.OperationalError:
         return
 
 
 def get_prompt_config_rows() -> dict[str, Any]:
-    ensure_prompt_configs_seeded()
+    repair_prompt_config_placeholders()
     try:
         with get_db() as db:
             rows = db.execute("SELECT * FROM prompt_configs").fetchall()
@@ -9580,55 +9347,16 @@ def get_prompt_config_rows() -> dict[str, Any]:
     return {str(row["key"]): row for row in rows}
 
 
-def get_all_prompt_configs() -> list[dict[str, Any]]:
-    rows = get_prompt_config_rows()
-    items: list[dict[str, Any]] = []
-    for default in default_prompt_config_defs():
-        if default.get("deprecated"):
-            continue
-        row = rows.get(default["key"])
-        content = row["content"] if row else default["content"]
-        updated_at = row["updated_at"] if row else None
-        rendered, diagnostics = render_prompt_config(default["key"], sample_prompt_runtime(), rows=rows)
-        is_customized = bool(row and str(row["content"] or "") != str(default["content"] or ""))
-        items.append(
-            {
-                "key": default["key"],
-                "groupType": default["groupType"],
-                "title": default["title"],
-                "description": default.get("description") or "",
-                "content": content,
-                "sortOrder": int(default.get("sortOrder") or 0),
-                "updatedAt": updated_at,
-                "isCustomized": is_customized,
-                "usedSegments": diagnostics.get("usedSegments", []),
-                "missingPlaceholders": diagnostics.get("missingPlaceholders", []),
-                "referencedPlaceholders": diagnostics.get("referencedPlaceholders", []),
-                "renderedPreview": rendered,
-            }
-        )
-    return sorted(items, key=lambda item: (str(item["groupType"]), int(item["sortOrder"])))
-
-
-def get_prompt_config(key: str) -> dict[str, Any]:
-    normalized = normalize_prompt_config_key(key)
-    rows = get_prompt_config_rows()
-    defaults = prompt_config_defaults_by_key()
-    default = defaults.get(normalized)
-    if not default:
-        raise HTTPException(status_code=404, detail="Prompt 配置不存在")
-    row = rows.get(normalized)
-    rendered, diagnostics = render_prompt_config(normalized, sample_prompt_runtime(), rows=rows)
-    is_customized = bool(row and str(row["content"] or "") != str(default["content"] or ""))
+def serialize_prompt_config_row(row: Any, rows: dict[str, Any]) -> dict[str, Any]:
+    rendered, diagnostics = render_prompt_config(str(row["key"]), sample_prompt_runtime(), rows=rows)
     return {
-        "key": normalized,
-        "groupType": default["groupType"],
-        "title": default["title"],
-        "description": default.get("description") or "",
-        "content": row["content"] if row else default["content"],
-        "sortOrder": int(default.get("sortOrder") or 0),
-        "updatedAt": row["updated_at"] if row else None,
-        "isCustomized": is_customized,
+        "key": str(row["key"]),
+        "groupType": str(row["group_type"] or "assembly"),
+        "title": str(row["title"] or row["key"]),
+        "description": str(row["description"] or ""),
+        "content": str(row["content"] or ""),
+        "sortOrder": int(row["sort_order"] or 0),
+        "updatedAt": row["updated_at"],
         "usedSegments": diagnostics.get("usedSegments", []),
         "missingPlaceholders": diagnostics.get("missingPlaceholders", []),
         "referencedPlaceholders": diagnostics.get("referencedPlaceholders", []),
@@ -9636,15 +9364,28 @@ def get_prompt_config(key: str) -> dict[str, Any]:
     }
 
 
-def prompt_config_content(key: str, rows: dict[str, Any] | None = None) -> str:
+def get_all_prompt_configs() -> list[dict[str, Any]]:
+    rows = get_prompt_config_rows()
+    items = [serialize_prompt_config_row(row, rows) for row in rows.values()]
+    return sorted(items, key=lambda item: (str(item["groupType"]), int(item["sortOrder"])))
+
+
+def get_prompt_config(key: str) -> dict[str, Any]:
     normalized = normalize_prompt_config_key(key)
-    defaults = prompt_config_defaults_by_key()
+    rows = get_prompt_config_rows()
+    row = rows.get(normalized)
+    if not row:
+        raise HTTPException(status_code=404, detail="Prompt 配置不存在")
+    return serialize_prompt_config_row(row, rows)
+
+
+def prompt_config_content(key: str, rows: dict[str, Any] | None = None) -> str | None:
+    normalized = normalize_prompt_config_key(key)
     rows = rows if rows is not None else get_prompt_config_rows()
     row = rows.get(normalized)
     if row:
         return str(row["content"] or "")
-    default = defaults.get(normalized)
-    return str((default or {}).get("content") or "")
+    return None
 
 
 def render_prompt_config(key: str, runtime: dict[str, Any] | None = None, rows: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
@@ -9662,12 +9403,12 @@ def render_prompt_config(key: str, runtime: dict[str, Any] | None = None, rows: 
             if name in stack:
                 diagnostics["missingPlaceholders"].append(f"{name} (循环引用)")
                 return f"[[循环引用:{name}]]"
-            if name not in prompt_config_defaults_by_key():
+            if name not in rows or str(rows[name]["group_type"] or "") != "segment":
                 diagnostics["missingPlaceholders"].append(name)
                 return f"[[缺失分段:{name}]]"
             if name not in diagnostics["usedSegments"]:
                 diagnostics["usedSegments"].append(name)
-            return render_text(prompt_config_content(name, rows), [*stack, name])
+            return render_text(prompt_config_content(name, rows) or "", [*stack, name])
         if name.startswith("runtime."):
             value = runtime.get(name.removeprefix("runtime."))
             if value is None:
@@ -9682,25 +9423,21 @@ def render_prompt_config(key: str, runtime: dict[str, Any] | None = None, rows: 
     def render_text(text: str, stack: list[str]) -> str:
         return PROMPT_PLACEHOLDER_PATTERN.sub(lambda match: resolve_placeholder(match.group(1), stack), text)
 
-    rendered = render_text(prompt_config_content(key, rows), [key]).strip() + "\n"
+    source = prompt_config_content(key, rows)
+    if source is None:
+        diagnostics["missingPlaceholders"].append(key)
+        source = ""
+    rendered = render_text(source, [key]).strip() + "\n"
     for field in ("usedSegments", "missingPlaceholders", "referencedPlaceholders"):
         diagnostics[field] = sorted(set(diagnostics[field]))
     return rendered, diagnostics
 
 
 def render_prompt_template(key: str, runtime: dict[str, Any] | None = None) -> str:
-    rendered, _diagnostics = render_prompt_config(key, runtime)
+    rendered, diagnostics = render_prompt_config(key, runtime)
+    if diagnostics.get("missingPlaceholders"):
+        raise RuntimeError(f"Prompt 配置缺失或占位符未填充：{', '.join(diagnostics['missingPlaceholders'])}")
     return rendered
-
-
-def safe_prompt_runtime_value(factory: Any, fallback: str) -> str:
-    try:
-        value = factory()
-    except Exception:
-        return fallback
-    if isinstance(value, str):
-        return value
-    return dumps(value)
 
 
 def sample_prompt_runtime() -> dict[str, Any]:
@@ -9726,104 +9463,6 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.shot_plan", "scope": "runtime", "description": "当前最终成片 ShotPlan"},
         {"name": "runtime.shot_index", "scope": "runtime", "description": "最终成片镜头序号"},
     ]
-
-
-def taxonomy_output_schema_prompt() -> str:
-    return """输出 JSON 字段：
-{
-  "schema_version": "ruyi-taxonomy-tagging-v1",
-  "same_product": true,
-  "needs_review": false,
-  "review_reasons": [],
-  "overall_confidence": 0.0,
-  "tags": [{"dimension_code": "category", "tag_code": "bottom", "confidence": 0.0, "evidence": "string"}],
-  "official_title_tags": [],
-  "manual_review_suggestions": [],
-  "unmapped_observations": [],
-  "suggested_new_tags": [],
-  "tag_meta": {}
-}
-"""
-
-
-def styling_output_schema_prompt() -> str:
-    return """{
-  "schema_version": "styling-plan-v1",
-  "hero_understanding": {
-    "hero_visual_summary": "极短主推款视觉摘要",
-    "category": "bottom | top | knitwear | outerwear | dress | suit_set | other_garment",
-    "hero_selling_points": ["主推款核心卖点"],
-    "hero_visibility_risks": ["可能遮挡或弱化主推款的风险"],
-    "shot_requirements": ["本品类必须覆盖的图位"]
-  },
-  "styling_intents": [{"intent_key": "intent_a", "title": "造型方向", "reason": "为什么适合", "risk": "风险"}],
-  "outfit_candidates": [{
-    "outfit_key": "candidate_a",
-    "title": "给业务用户看的方案名",
-    "mode": "hero_first_single_piece | light_layering | office_outfit | tonal_outfit | contrast_outfit",
-    "selected_material_ids": [123],
-    "selected_material_codes": ["候选服饰 code，只用于展示和审计"],
-    "selected_materials": [{
-      "material_id": 123,
-      "material_code": "必须原样复制 candidate_retrieval.material_cards[].code",
-      "role": "top | knitwear | outerwear | bottom | dress | other",
-      "styling_purpose": "为什么这件服饰服务主推款",
-      "wearing_method": "真实穿法",
-      "visibility_boundary": "不得遮挡的主推款区域"
-    }],
-    "generated_accessories": ["低存在感鞋包饰品"],
-    "wearing_notes": "真实穿着方式",
-    "hero_focus": ["本方案必须露出的主推款卖点"],
-    "aesthetic_diagnosis": {
-      "color_weight": "色彩重量诊断",
-      "silhouette_balance": "廓形体量诊断",
-      "waistline_proportion": "腰线和比例诊断",
-      "season_material_fit": "季节和材质诊断",
-      "template_risk": "模板化风险诊断",
-      "wearing_method_validity": "穿法合法性诊断",
-      "tuck_quality": "塞腰/半塞质量诊断；无塞腰则说明无需检查",
-      "official_style_evidence": "品牌样本或品牌调性证据",
-      "shotplan_readiness": "是否能支持后续 6 个镜头",
-      "brand_read": "Lily 品牌采用可能性"
-    },
-    "scores": {"aesthetic_score": 0.0, "brand_fit_score": 0.0, "hero_visibility_score": 0.0, "commercial_readiness_score": 0.0},
-    "risk_notes": []
-  }],
-  "selected_outfit_key": "candidate_a",
-  "selected_material_ids": [123],
-  "selected_material_codes": ["候选服饰 code，只用于展示和审计"],
-  "selected_materials": [{"material_id": 123, "material_code": "候选服饰 code", "role": "配角角色", "styling_purpose": "选择原因", "wearing_method": "真实穿法", "visibility_boundary": "可见性边界"}],
-  "reason_summary": "极短最终选择理由",
-  "rejected_candidates": [{"outfit_key": "candidate_b", "reason": "拒绝原因", "material_codes": ["被拒方案涉及的业务 code"]}],
-  "warnings": []
-}
-"""
-
-
-def shoot_script_output_schema_prompt() -> str:
-    return """{
-  "schema_version": "shoot-script-v1",
-  "script_source_mode": "production",
-  "input_refs": {"task_id": 0, "input_version_id": 0, "styling_id": 0, "styling_plan_version": "styling-plan-v1", "model_snapshot_id": "Face-01"},
-  "global_directing": {
-    "rules": [{"label": "string", "value": "string"}],
-    "brand_tone": "string",
-    "background": "string",
-    "lighting": "string",
-    "model_direction": "string",
-    "hair_makeup_boundary": "string",
-    "accessory_boundary": "string",
-    "consistency_rules": ["string"],
-    "product_fidelity_rules": ["string"],
-    "negative_constraints": ["string"]
-  },
-  "styling_risks": [{"risk_id": "string", "severity": "low | medium | high | blocking", "material_id": 123, "material_code": "string", "risk": "string", "affected_shots": [1], "director_strategy": "string", "user_visible_recommendation": "string"}],
-  "accessory_adjustments": [{"item_type": "bag | footwear | jewelry | hat | other", "original_direction": "string", "adjusted_direction": "string", "reason": "string", "affected_shots": [1]}],
-  "shots": [{"shot_index": 1, "shot_role": "hero_full_body", "shot_role_label": "全身主视觉", "framing": "string", "crop_range": "string", "model_scale": "string", "camera_angle": "string", "body_position": "string", "pose": "string", "movement": "string", "hand_position": "string", "main_focus": "string", "visible_garments": ["hero"], "hero_selling_points": ["string"], "forbidden_occlusion_zones": ["string"], "composition_notes": "string", "acceptance_criteria": ["string"], "negative_constraints": ["string"]}],
-  "user_visible_summary": {"title": "string", "summary": "string", "key_points": ["string"], "risk_summary": "string"},
-  "warnings": []
-}
-"""
 
 
 def job_lease_until() -> str:
@@ -10239,6 +9878,7 @@ def get_generation_shoot_script(shoot_script_id: int | None, include_debug: bool
         "summary": loads(row["summary_json"], {}) if "summary_json" in row.keys() else script.get("user_visible_summary", {}),
         "stylingRisks": loads(row["styling_risks_json"], []) if "styling_risks_json" in row.keys() else script.get("styling_risks", []),
         "accessoryAdjustments": loads(row["accessory_adjustments_json"], []) if "accessory_adjustments_json" in row.keys() else script.get("accessory_adjustments", []),
+        "resolvedAccessories": script.get("resolved_accessories", []),
         "activeAttemptId": row["active_attempt_id"],
         "activeAttempt": get_attempt_summary(row["active_attempt_id"]),
         "createdAt": row["created_at"],

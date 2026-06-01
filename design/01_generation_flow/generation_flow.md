@@ -33,7 +33,7 @@ flowchart TD
 - 候选漏斗层负责把未归档 READY 搭配服饰的标签事实全量提供给 AI Stylist，并按标签、caption、颜色、品类、季节、风险、品牌样本相似度和后续 embedding 压缩成少量可直接选择候选，不负责最终审美决策。
 - 搭配库充足性诊断负责判断库内是否存在更优候选，或当前失败是否来自搭配库供给不足。
 - `StylingPlan` 是选搭阶段的结构化产物，记录造型意图、候选方案、选中 outfit、拒绝理由、评分和警告。
-- `ShootScript` / 拍摄剧本承接 `StylingPlan`，一次性生成整组全局导演设定和 6 条 `ShotPlan`，负责穿着关系、图位、景别、姿势、身位、走位、环境、光影、镜头、构图、主推款展示重点、搭配服饰风险和生成配饰调整。
+- `ShootScript` / 拍摄剧本承接 `StylingPlan`，一次性生成整组全局导演设定和 6 条 `ShotPlan`，负责穿着关系、图位、景别、姿势、身位、走位、环境、光影、镜头、构图、主推款展示重点、搭配服饰风险、生成配饰调整和最终配饰方案。
 - `Image-2` 负责按输入图片、`StylingPlan`、`ShootScript` 和单镜头 `ShotPlan` 生成分镜预览与最终成片，不负责选搭、导演决策、状态管理或历史追溯。
 - 鞋、包、饰品在 MVP 阶段不是可售级商品事实源，只能作为生成配饰文字边界出现。
 
@@ -257,7 +257,7 @@ ShotPlan 必须读取选中的 `StylingPlan`，尤其是：
 - `mode`：单穿主推、轻外搭、内搭层次、成套通勤等。
 - `hero_focus`：每格必须服务的主推款卖点。
 - `wearing_notes`：真实搭配服饰如何穿到模特身上。
-- `generated_accessories`：鞋、包、饰品的风格边界。
+- `generated_accessories`：AI Stylist 给出的鞋、包、饰品初始风格边界。进入分镜预览和最终成片时，以 ShootScript 的 `resolved_accessories` 和 ShotPlan 的 `accessory_instructions` 为准。
 - `risk_notes`：遮挡、喧宾夺主、商品细节弱化等风险。
 
 主推款是裤装时，前 5 格必须覆盖：

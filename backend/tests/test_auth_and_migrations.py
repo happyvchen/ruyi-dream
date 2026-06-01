@@ -1080,7 +1080,6 @@ class BackendSmokeTests(unittest.TestCase):
             ):
                 config.get_settings.cache_clear()
                 db_module.init_db()
-
                 with patch.object(main, "ensure_bucket", return_value=None), TestClient(main.app) as client:
                     self.assertEqual(client.get("/api/brand-info").status_code, 401)
 
@@ -1137,6 +1136,18 @@ class BackendSmokeTests(unittest.TestCase):
             ):
                 config.get_settings.cache_clear()
                 db_module.init_db()
+                timestamp = db_module.now_iso()
+                with db_module.get_db() as db:
+                    db.executemany(
+                        """
+                        INSERT INTO prompt_configs (key, group_type, title, description, content, sort_order, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            ("segment.brand_info", "segment", "品牌信息", "品牌 Prompt", "Lily 商务时装", 10, timestamp),
+                            ("assembly.ai_tagging", "assembly", "AI 打标", "打标 Prompt", "旧内容", 110, timestamp),
+                        ],
+                    )
 
                 with patch.object(main, "ensure_bucket", return_value=None), TestClient(main.app) as client:
                     self.assertEqual(client.get("/api/prompt-configs").status_code, 401)
@@ -1164,8 +1175,7 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertFalse(updated.json()["preview"]["diagnostics"]["missingPlaceholders"])
 
                     reset = client.post("/api/prompt-configs/assembly.ai_tagging/reset")
-                    self.assertEqual(reset.status_code, 200)
-                    self.assertFalse(reset.json()["item"]["isCustomized"])
+                    self.assertIn(reset.status_code, {404, 405})
 
     def test_taxonomy_rules_are_admin_only_and_user_configured(self) -> None:
         from fastapi.testclient import TestClient
@@ -2023,6 +2033,118 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(attempt["status"], "CANCELLED")
         self.assertIsNotNone(attempt["cancelled_at"])
         self.assertIn("inputVersionId", attempt["request_snapshot_json"])
+
+    def test_select_styling_accepts_script_ready_task(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        styling_plan = {
+            "schema_version": "styling-plan-v1",
+            "selected_material_ids": [],
+            "selected_outfit_key": "look_1",
+            "hero_understanding": {"hero_visual_summary": "测试主推款"},
+            "outfit_candidates": [
+                {
+                    "outfit_key": "look_1",
+                    "selected_material_ids": [],
+                    "scores": {"aesthetic": 1},
+                }
+            ],
+            "rejected_candidates": [],
+            "reason_summary": "重新选搭通过。",
+            "warnings": [],
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            with db_module.get_db() as db:
+                task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('script-ready styling', 'SCRIPT_READY', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                media_id = db.execute(
+                    """
+                    INSERT INTO media_assets (object_key, original_filename, mime_type, status, created_at, updated_at)
+                    VALUES ('generation-tasks/script-ready/hero.jpg', 'hero.jpg', 'image/jpeg', 'READY', ?, ?)
+                    """,
+                    (timestamp, timestamp),
+                ).lastrowid
+                db.execute(
+                    """
+                    INSERT INTO generation_task_images (task_id, media_asset_id, sort_order, status, created_at, updated_at)
+                    VALUES (?, ?, 0, 'READY', ?, ?)
+                    """,
+                    (task_id, media_id, timestamp, timestamp),
+                )
+                input_id = db.execute(
+                    """
+                    INSERT INTO generation_task_input_versions (task_id, version_number, name_snapshot, image_snapshot_json, created_at)
+                    VALUES (?, 1, 'script-ready styling', '[]', ?)
+                    """,
+                    (task_id, timestamp),
+                ).lastrowid
+                styling_id = db.execute(
+                    """
+                    INSERT INTO generation_stylings
+                      (task_id, input_version_id, source_material_ids_json, selected_material_ids_json,
+                       selected_material_snapshot_json, styling_plan_json, status, created_at, updated_at)
+                    VALUES (?, ?, '[]', '[]', '[]', ?, 'SUCCEEDED', ?, ?)
+                    """,
+                    (task_id, input_id, db_module.dumps({"selected_outfit_key": "old"}), timestamp, timestamp),
+                ).lastrowid
+                shoot_script_id = db.execute(
+                    """
+                    INSERT INTO generation_shoot_scripts
+                      (task_id, input_version_id, styling_id, status, script_json, created_at, updated_at)
+                    VALUES (?, ?, ?, 'SUCCEEDED', '{}', ?, ?)
+                    """,
+                    (task_id, input_id, styling_id, timestamp, timestamp),
+                ).lastrowid
+                db.execute(
+                    """
+                    UPDATE generation_tasks
+                    SET current_input_version_id = ?, active_styling_id = ?, active_shoot_script_id = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (input_id, styling_id, shoot_script_id, timestamp, task_id),
+                )
+
+            def build_context(input_version_id: int) -> tuple[object, dict[str, object], dict[str, object]]:
+                with db_module.get_db() as db:
+                    input_row = db.execute("SELECT * FROM generation_task_input_versions WHERE id = ?", (input_version_id,)).fetchone()
+                return input_row, {"candidate_material_ids": [], "library_adequacy": {}}, {"inputVersionId": input_version_id}
+
+            client = TestClient(main.app)
+            self.assertEqual(client.post("/api/auth/login", json={"password": "letmein-123456"}).status_code, 200)
+            with (
+                patch.object(main, "snapshot_default_model", return_value={}),
+                patch.object(main, "build_ai_stylist_context", side_effect=build_context),
+                patch.object(main, "select_styling_with_gemini", new_callable=AsyncMock, return_value=styling_plan) as gemini,
+                patch.object(main, "validate_styling_plan", return_value=None),
+                patch.object(main, "collect_styling_quality_signals", return_value=[]),
+                patch.object(main, "attach_styling_quality_signals", side_effect=lambda plan, _signals: plan),
+                patch.object(main, "get_styling_source_and_selected_snapshots", return_value=([], [])),
+            ):
+                response = client.post(f"/api/generation-tasks/{task_id}/select-styling")
+
+            self.assertEqual(response.status_code, 200)
+            item = response.json()["item"]
+            self.assertEqual(item["status"], "STYLING_READY")
+            self.assertIsNotNone(item["activeStylingId"])
+            self.assertNotEqual(item["activeStylingId"], styling_id)
+            self.assertIsNone(item["activeShootScriptId"])
+            self.assertEqual(item["styling"]["reasonSummary"], "重新选搭通过。")
+            gemini.assert_awaited_once()
+            with db_module.get_db() as db:
+                old_script_status = db.execute("SELECT status FROM generation_shoot_scripts WHERE id = ?", (shoot_script_id,)).fetchone()["status"]
+
+        self.assertEqual(old_script_status, "SUPERSEDED")
 
     def test_running_generation_task_cancel_preserves_partial_final_results(self) -> None:
         from fastapi.testclient import TestClient

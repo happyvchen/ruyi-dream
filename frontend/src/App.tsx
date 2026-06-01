@@ -615,6 +615,7 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
       ) : <EmptyState title="等待智能选搭" text="点击按钮后会冻结当前主推款输入版本。" />}
       <button className="primary" disabled={!canSelect} onClick={() => task && void run(hasStyling ? '重新选搭中...' : '智能选搭中...', () => {
         startLocalOperation({ ownerType: 'generation_styling', ownerId: task.id, provider: 'gemini' })
+        const previousTask = task
         setTask({
           ...task,
           status: 'STYLING_RUNNING',
@@ -628,7 +629,10 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
           activePreviewId: null,
           activeResultSetId: null,
         })
-        return api.selectStyling(task.id)
+        return api.selectStyling(task.id).catch((error) => {
+          setTask(previousTask)
+          throw error
+        })
       }, (r: { item: GenerationTask }) => {
         clearLocalOperationsFor(['generation_styling'])
         setTask(r.item)
@@ -839,6 +843,7 @@ function ShootScriptSummary({ task }: { task: GenerationTask }) {
   const shots = shootScriptShots(task)
   const risks = shootScript.stylingRisks?.length ? shootScript.stylingRisks : arrayValue<Record<string, unknown>>(script, 'styling_risks')
   const adjustments = shootScript.accessoryAdjustments?.length ? shootScript.accessoryAdjustments : arrayValue<Record<string, unknown>>(script, 'accessory_adjustments')
+  const resolvedAccessories = shootScript.resolvedAccessories?.length ? shootScript.resolvedAccessories : arrayValue<Record<string, unknown>>(script, 'resolved_accessories')
   return (
     <div className="styling-plan shoot-script-plan">
       <div className="styling-plan-head">
@@ -849,7 +854,7 @@ function ShootScriptSummary({ task }: { task: GenerationTask }) {
         <div className="score-strip script-strip">
           <span><b>{shots.length || 6}</b>镜头</span>
           <span><b>{risks.length}</b>风险</span>
-          <span><b>{adjustments.length}</b>调整</span>
+          <span><b>{resolvedAccessories.length || adjustments.length}</b>配饰</span>
         </div>
       </div>
       <p>{stringValue(summary.summary) || '本组拍摄以主推款商品表达为核心，覆盖完整比例、品类核心、设计细节、动态补充和标准正面图。'}</p>
@@ -875,6 +880,14 @@ function ShootScriptSummary({ task }: { task: GenerationTask }) {
           ))}
         </div>
       )}
+      {resolvedAccessories.length > 0 && (
+        <div className="rejected-list">
+          <strong>最终配饰方案</strong>
+          {resolvedAccessories.map((item, index) => (
+            <span key={`${stringValue(item.item_type)}-${index}`}>{[stringValue(item.item_type), stringValue(item.final_direction), stringValue(item.visibility)].filter(Boolean).join(' · ')}</span>
+          ))}
+        </div>
+      )}
       <div className="shot-card-grid">
         {shots.map((shot, index) => (
           <div className="shot-card" key={`${numberValue(shot.shot_index) || index + 1}-${stringValue(shot.shot_role)}`}>
@@ -885,6 +898,7 @@ function ShootScriptSummary({ task }: { task: GenerationTask }) {
               <dt>取景</dt><dd>{stringValue(shot.crop_range) || stringValue(shot.cropRange) || '未指定'}</dd>
               <dt>姿势</dt><dd>{stringValue(shot.pose) || '未指定'}</dd>
               <dt>走位</dt><dd>{stringValue(shot.movement) || stringValue(shot.body_position) || stringValue(shot.bodyPosition) || '未指定'}</dd>
+              <dt>配饰</dt><dd>{stringList(shot.accessory_instructions ?? shot.accessoryInstructions).join('；') || '低存在感，不做特写'}</dd>
             </dl>
           </div>
         ))}
@@ -1643,17 +1657,6 @@ function PromptMaintenancePage({ run }: { run: any }) {
     }, { refresh: false })
   }
 
-  function reset() {
-    if (!activeItem || !window.confirm(`恢复「${activeItem.title}」为系统默认 Prompt？`)) return
-    void run('恢复默认 Prompt 中...', () => api.resetPromptConfig(activeItem.key), (result: { item: PromptConfig; preview: { rendered: string; diagnostics: { missingPlaceholders: string[]; usedSegments: string[] } } }) => {
-      setDraft(result.item.content)
-      setRendered(result.preview.rendered)
-      setMissing(result.preview.diagnostics.missingPlaceholders)
-      setUsedSegments(result.preview.diagnostics.usedSegments)
-      void loadConfigs(result.item.key)
-    }, { refresh: false })
-  }
-
   function insertPlaceholder(name: string) {
     setDraft((current) => `${current}${current.endsWith('\n') || !current ? '' : '\n'}{{${name}}}`)
   }
@@ -1663,7 +1666,7 @@ function PromptMaintenancePage({ run }: { run: any }) {
       <PageTitle
         title="Prompt 维护"
         subtitle="维护分段 Prompt 和各生成步骤的组装模板；预览只做文本渲染，不触发 AI 额度。"
-        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={refreshPreview} disabled={!activeItem}><Eye size={16} />预览</button><button className="secondary" onClick={reset} disabled={!activeItem}><RotateCcw size={16} />恢复默认</button><button className="primary" onClick={save} disabled={!activeItem || !dirty}><Save size={16} />保存</button></div>}
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={refreshPreview} disabled={!activeItem}><Eye size={16} />预览</button><button className="primary" onClick={save} disabled={!activeItem || !dirty}><Save size={16} />保存</button></div>}
       />
       <div className="prompt-maintenance-layout">
         <aside className="panel prompt-nav-panel">
@@ -1680,7 +1683,7 @@ function PromptMaintenancePage({ run }: { run: any }) {
                   <p>{activeItem.description}</p>
                 </div>
                 <div className="prompt-status">
-                  <span className={dirty ? 'status-badge warning' : 'status-badge ok'}>{dirty ? '未保存' : activeItem.isCustomized ? '已自定义' : '系统默认'}</span>
+                  <span className={dirty ? 'status-badge warning' : 'status-badge ok'}>{dirty ? '未保存' : '已保存'}</span>
                   {activeItem.updatedAt && <small>更新于 {dateText(activeItem.updatedAt)}</small>}
                 </div>
               </div>
@@ -1722,7 +1725,7 @@ function PromptNavGroup({ title, items, activeKey, onSelect }: { title: string; 
       {items.map((item) => (
         <button key={item.key} className={activeKey === item.key ? 'active' : ''} onClick={() => onSelect(item.key)}>
           <strong>{item.title}</strong>
-          <span>{item.isCustomized ? '已自定义' : '系统默认'}{item.missingPlaceholders.length ? ` · 缺失 ${item.missingPlaceholders.length}` : ''}</span>
+          <span>{item.missingPlaceholders.length ? `缺失 ${item.missingPlaceholders.length}` : '已保存'}</span>
         </button>
       ))}
     </div>
@@ -4187,20 +4190,22 @@ function getTaskStep(task: GenerationTask | null): StudioStep {
   if (!task) return 0
   if (task.status === 'CANCELLED') {
     if (task.resultSet?.images?.length) return 4
-    if (task.storyboardPreview || task.preview) return 3
-    if (task.shootScript || task.styling) return 2
+    if ((task.storyboardPreview ?? task.preview)?.asset) return 4
+    if (task.shootScript) return 3
+    if (task.styling) return 2
     return 1
   }
   if (task.status === 'FAILED') {
     if (task.resultSet?.images?.length) return 4
-    if (task.storyboardPreview || task.preview) return 3
-    if (task.shootScript || task.styling) return 2
+    if ((task.storyboardPreview ?? task.preview)?.asset) return 4
+    if (task.shootScript) return 3
+    if (task.styling) return 2
     return 1
   }
   if (['READY_FOR_STYLING', 'STYLING_RUNNING'].includes(task.status)) return 1
-  if (['STYLING_READY', 'SCRIPT_RUNNING', 'SCRIPT_READY'].includes(task.status)) return 2
-  if (['PREVIEW_RUNNING', 'PREVIEW_READY'].includes(task.status)) return 3
-  if (['FINAL_RUNNING', 'FINAL_PARTIAL', 'COMPLETED'].includes(task.status)) return 4
+  if (['STYLING_READY', 'SCRIPT_RUNNING'].includes(task.status)) return 2
+  if (['SCRIPT_READY', 'PREVIEW_RUNNING'].includes(task.status)) return 3
+  if (['PREVIEW_READY', 'FINAL_RUNNING', 'FINAL_PARTIAL', 'COMPLETED'].includes(task.status)) return 4
   return 0
 }
 

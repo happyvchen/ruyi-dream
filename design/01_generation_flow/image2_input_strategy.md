@@ -91,7 +91,9 @@ MVP 不做图片角色识别，选图器按排序和固定优先级取图。后�
 
 ### 4.5 生成配饰
 
-鞋、包、首饰等 MVP 阶段不作为真实商品入库。它们可以由 StylingPlan、ShotPlan 或 prompt 以文字描述生成，但必须遵守：
+鞋、包、首饰等 MVP 阶段不作为真实商品入库。它们可以由 StylingPlan 给出初始建议，但进入分镜预览和最终成片时，必须以 ShootScript 的 `resolved_accessories` 和单镜头 `accessory_instructions` 为最终执行口径。若 `ShootScript.accessory_adjustments` 与 `StylingPlan.generated_accessories` 冲突，以 ShootScript 为准。
+
+生成配饰必须遵守：
 
 - 不成为画面核心。
 - 不做局部特写。
@@ -127,7 +129,7 @@ MVP 不做图片角色识别，选图器按排序和固定优先级取图。后�
 {shot_plan_6}
 
 生成配饰：
-鞋、包、饰品只作为风格辅助，不作为商品特写或视觉中心。
+以 ShootScript.resolved_accessories 和 shots[].accessory_instructions 为准。鞋、包、饰品只作为风格辅助，不作为商品特写或视觉中心。
 
 禁止：
 不要生成文字、水印、logo、边框说明。不要改款、换色、替换主推款或搭配服饰。
@@ -162,7 +164,7 @@ MVP 不做图片角色识别，选图器按排序和固定优先级取图。后�
 {styling_plan}
 
 生成配饰：
-鞋、包、饰品只作为辅助搭配，不作为画面核心，不做特写。
+以 ShootScript.resolved_accessories 和当前 ShotPlan.accessory_instructions 为准。鞋、包、饰品只作为辅助搭配，不作为画面核心，不做特写。
 
 禁止：
 不要改款、换色、替换商品；不要添加文字、水印、logo；不要让生成配饰抢主推款视觉中心。

@@ -335,6 +335,7 @@ active_result_set_id
   "global_directing": {},
   "styling_risks": [],
   "accessory_adjustments": [],
+  "resolved_accessories": [],
   "shots": [],
   "user_visible_summary": {},
   "warnings": []
@@ -351,6 +352,7 @@ active_result_set_id
 | `global_directing` | 是 | 整组拍摄导演设定 |
 | `styling_risks` | 是 | 库内搭配服饰风险和建议 |
 | `accessory_adjustments` | 是 | 生成类鞋包饰品调整说明 |
+| `resolved_accessories` | 是 | 最终进入分镜预览和成片的配饰方案 |
 | `shots` | 是 | 6 个镜头 |
 | `user_visible_summary` | 是 | 前端可展示摘要 |
 | `warnings` | 是 | 系统警告 |
@@ -426,6 +428,43 @@ blocking
     "affected_shots": [1, 2, 3]
   }
 ]
+```
+
+### 7.5 resolved_accessories
+
+`resolved_accessories` 是最终配饰执行方案。`StylingPlan.generated_accessories` 只是 AI Stylist 的初始建议；如果 `ShootScript.accessory_adjustments` 对配饰做了保留、弱化、替换、取消或新增，分镜预览和最终成片必须以 `resolved_accessories` 为准。
+
+```json
+[
+  {
+    "item_type": "footwear",
+    "final_direction": "极简深棕色尖头鞋，低存在感，只辅助腰带色彩闭环",
+    "source": "director_adjusted",
+    "visibility": "low",
+    "applies_to_shots": [1, 2, 5],
+    "reason": "呼应主推款腰带，不遮挡裙摆和腰部卖点。"
+  },
+  {
+    "item_type": "bag",
+    "final_direction": "取消包袋",
+    "source": "removed",
+    "visibility": "none",
+    "applies_to_shots": [2, 3],
+    "reason": "避免遮挡腰部结构和口袋细节。"
+  }
+]
+```
+
+每个 `shots[]` 还应包含 `accessory_instructions`，把最终配饰方案落到单镜头：
+
+```json
+{
+  "shot_index": 1,
+  "accessory_instructions": [
+    "footwear: 极简深棕色尖头鞋，低存在感，不做特写。",
+    "bag: 取消包袋。"
+  ]
+}
 ```
 
 允许调整：

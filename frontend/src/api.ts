@@ -131,6 +131,7 @@ export type GenerationTask = {
     summary?: Record<string, unknown>
     stylingRisks?: Record<string, unknown>[]
     accessoryAdjustments?: Record<string, unknown>[]
+    resolvedAccessories?: Record<string, unknown>[]
     activeAttemptId?: number | null
     activeAttempt?: AIOperation | null
     createdAt?: string
@@ -430,7 +431,6 @@ export type PromptConfig = {
   content: string
   sortOrder: number
   updatedAt?: string | null
-  isCustomized: boolean
   usedSegments: string[]
   missingPlaceholders: string[]
   referencedPlaceholders: string[]
@@ -589,8 +589,6 @@ export const api = {
   listPromptConfigs: () => request<PromptConfigList>('/api/prompt-configs'),
   updatePromptConfig: (key: string, content: string) =>
     request<{ item: PromptConfig; preview: PromptConfigPreview }>(`/api/prompt-configs/${encodeURIComponent(key)}`, { method: 'PATCH', body: JSON.stringify({ content }) }),
-  resetPromptConfig: (key: string) =>
-    request<{ item: PromptConfig; preview: PromptConfigPreview }>(`/api/prompt-configs/${encodeURIComponent(key)}/reset`, { method: 'POST' }),
   previewPromptConfig: (key: string) =>
     request<PromptConfigPreview>(`/api/prompt-configs/${encodeURIComponent(key)}/preview`),
   getBrandInfo: () => request<{ item: BrandInfo | null }>('/api/brand-info'),
