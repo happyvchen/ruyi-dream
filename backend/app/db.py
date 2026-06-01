@@ -35,6 +35,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("022", "add_taxonomy_applicability_rules", "migration_add_taxonomy_applicability_rules"),
     ("023", "add_shoot_script_workflow", "migration_add_shoot_script_workflow"),
     ("024", "add_shoot_config", "migration_add_shoot_config"),
+    ("025", "add_prompt_configs", "migration_add_prompt_configs"),
 )
 
 
@@ -340,6 +341,16 @@ def init_db() -> None:
               updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS prompt_configs (
+              key TEXT PRIMARY KEY,
+              group_type TEXT NOT NULL,
+              title TEXT NOT NULL,
+              description TEXT NOT NULL DEFAULT '',
+              content TEXT NOT NULL DEFAULT '',
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS generation_shot_plans (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
@@ -467,6 +478,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_taxonomy_applicability_rules": migration_add_taxonomy_applicability_rules,
         "migration_add_shoot_script_workflow": migration_add_shoot_script_workflow,
         "migration_add_shoot_config": migration_add_shoot_config,
+        "migration_add_prompt_configs": migration_add_prompt_configs,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -836,6 +848,10 @@ def migration_add_shoot_config(db: sqlite3.Connection) -> None:
     create_shoot_config_table(db)
 
 
+def migration_add_prompt_configs(db: sqlite3.Connection) -> None:
+    create_prompt_config_table(db)
+
+
 def create_shoot_config_table(db: sqlite3.Connection) -> None:
     db.execute(
         """
@@ -843,6 +859,22 @@ def create_shoot_config_table(db: sqlite3.Connection) -> None:
           id INTEGER PRIMARY KEY CHECK (id = 1),
           config_json TEXT NOT NULL,
           created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def create_prompt_config_table(db: sqlite3.Connection) -> None:
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS prompt_configs (
+          key TEXT PRIMARY KEY,
+          group_type TEXT NOT NULL,
+          title TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          content TEXT NOT NULL DEFAULT '',
+          sort_order INTEGER NOT NULL DEFAULT 0,
           updated_at TEXT NOT NULL
         )
         """

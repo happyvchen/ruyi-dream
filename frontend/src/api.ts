@@ -55,6 +55,7 @@ export type StylingGarment = {
     startedAt?: string | null
     completedAt?: string | null
     failedAt?: string | null
+    errorCode?: string | null
     errorMessage?: string | null
     requestSnapshot?: Record<string, unknown>
     responseSnapshot?: Record<string, unknown>
@@ -130,6 +131,7 @@ export type GenerationTask = {
     summary?: Record<string, unknown>
     stylingRisks?: Record<string, unknown>[]
     accessoryAdjustments?: Record<string, unknown>[]
+    resolvedAccessories?: Record<string, unknown>[]
     activeAttemptId?: number | null
     activeAttempt?: AIOperation | null
     createdAt?: string
@@ -409,6 +411,42 @@ export type TaxonomyPromptCard = {
   content: string
 }
 
+export type PromptPlaceholder = {
+  name: string
+  scope: string
+  description: string
+}
+
+export type PromptConfigDiagnostics = {
+  usedSegments: string[]
+  missingPlaceholders: string[]
+  referencedPlaceholders: string[]
+}
+
+export type PromptConfig = {
+  key: string
+  groupType: 'segment' | 'assembly'
+  title: string
+  description: string
+  content: string
+  sortOrder: number
+  updatedAt?: string | null
+  usedSegments: string[]
+  missingPlaceholders: string[]
+  referencedPlaceholders: string[]
+  renderedPreview: string
+}
+
+export type PromptConfigList = {
+  items: PromptConfig[]
+  placeholders: PromptPlaceholder[]
+}
+
+export type PromptConfigPreview = {
+  rendered: string
+  diagnostics: PromptConfigDiagnostics
+}
+
 function headers(init?: RequestInit) {
   const h = new Headers(init?.headers)
   if (!(init?.body instanceof FormData) && !h.has('Content-Type')) h.set('Content-Type', 'application/json')
@@ -548,6 +586,11 @@ export const api = {
   getRecord: (id: number, includeDebug = false) =>
     request<{ item: GenerationTask }>(params(`/api/generation-records/${id}`, { includeDebug })),
   listModels: () => request<Paginated<ModelProfile>>('/api/model-profiles?limit=30'),
+  listPromptConfigs: () => request<PromptConfigList>('/api/prompt-configs'),
+  updatePromptConfig: (key: string, content: string) =>
+    request<{ item: PromptConfig; preview: PromptConfigPreview }>(`/api/prompt-configs/${encodeURIComponent(key)}`, { method: 'PATCH', body: JSON.stringify({ content }) }),
+  previewPromptConfig: (key: string) =>
+    request<PromptConfigPreview>(`/api/prompt-configs/${encodeURIComponent(key)}/preview`),
   getBrandInfo: () => request<{ item: BrandInfo | null }>('/api/brand-info'),
   createBrandInfo: (payload: BrandInfoPayload) =>
     request<{ item: BrandInfo }>('/api/brand-info', { method: 'POST', body: JSON.stringify(payload) }),

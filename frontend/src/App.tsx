@@ -5,7 +5,6 @@ import {
   Bot,
   ArrowDown,
   ArrowUp,
-  Building2,
   ChevronLeft,
   ChevronRight,
   CircleStop,
@@ -29,9 +28,7 @@ import {
   Save,
   Search,
   Shield,
-  SlidersHorizontal,
   Sparkles,
-  Tags,
   Trash2,
   Upload,
   User,
@@ -42,7 +39,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
-import type { AIOperation, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, SessionRole, ShootConfig, ShootConfigCategoryOption, ShootConfigExportPayload, ShootConfigGlobalRule, ShootConfigPromptCard, ShootConfigShotRule, StylingGarment, TaxonomyApplicabilityPayload, TaxonomyApplicabilityRule, TaxonomyDimensionPayload, TaxonomyExportPayload, TaxonomyPromptCard, TaxonomyRelation, TaxonomyRelationPayload, TaxonomyRules, TaxonomyTag, TaxonomyTagPayload } from './api'
+import type { AIOperation, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptPlaceholder, SessionRole, ShootConfig, ShootConfigCategoryOption, ShootConfigExportPayload, ShootConfigGlobalRule, ShootConfigPromptCard, ShootConfigShotRule, StylingGarment, TaxonomyApplicabilityPayload, TaxonomyApplicabilityRule, TaxonomyDimensionPayload, TaxonomyExportPayload, TaxonomyPromptCard, TaxonomyRelation, TaxonomyRelationPayload, TaxonomyRules, TaxonomyTag, TaxonomyTagPayload } from './api'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 
@@ -81,6 +78,7 @@ const steps = [
   { title: '生成分镜预览', icon: GalleryVerticalEnd },
   { title: '生成成片', icon: Sparkles },
 ] as const
+const adminPages = new Set<Page>(['brand', 'shoot-config', 'tag-rules', 'prompt-maintenance'])
 
 const defaultPageSizeOptions = [20, 50, 100] as const
 const densePageSizeOptions = [12, 50, 100] as const
@@ -107,7 +105,7 @@ export function App() {
       .then((session) => {
         setAuthenticated(session.authenticated)
         setRole(session.role ?? null)
-        if (session.role !== 'admin' && ['brand', 'shoot-config', 'tag-rules'].includes(parseRoute().page)) {
+        if (session.role !== 'admin' && adminPages.has(parseRoute().page)) {
           setPage('studio')
           window.history.replaceState(null, '', routeToUrl({ page: 'studio' }))
         }
@@ -122,7 +120,7 @@ export function App() {
   }, [authenticated, role])
 
   useEffect(() => {
-    if (!authenticated || role === 'admin' || !['brand', 'shoot-config', 'tag-rules'].includes(page)) return
+    if (!authenticated || role === 'admin' || !adminPages.has(page)) return
     setPage('studio')
     window.history.replaceState(null, '', routeToUrl({ page: 'studio' }))
   }, [authenticated, role, page])
@@ -240,9 +238,7 @@ export function App() {
     { id: 'studio' as const, label: 'AI 摄影棚', icon: Bot },
     { id: 'library' as const, label: '搭配服饰库', icon: Library },
     { id: 'model' as const, label: '数字模特', icon: UserRound },
-    ...(role === 'admin' ? [{ id: 'brand' as const, label: '品牌信息', icon: Building2 }] : []),
-    ...(role === 'admin' ? [{ id: 'tag-rules' as const, label: '标签规则', icon: Tags }] : []),
-    ...(role === 'admin' ? [{ id: 'shoot-config' as const, label: '拍摄配置', icon: SlidersHorizontal }] : []),
+    ...(role === 'admin' ? [{ id: 'prompt-maintenance' as const, label: 'Prompt 维护', icon: FileText }] : []),
     { id: 'records' as const, label: '生成记录', icon: History },
   ]
 
@@ -288,6 +284,7 @@ export function App() {
         {page === 'brand' && role === 'admin' && <BrandInfoPage initialBrandInfo={brandInfo} setBrandInfo={setBrandInfo} run={run} />}
         {page === 'shoot-config' && role === 'admin' && <ShootConfigPage run={run} />}
         {page === 'tag-rules' && role === 'admin' && <TagRulesPage run={run} />}
+        {page === 'prompt-maintenance' && role === 'admin' && <PromptMaintenancePage run={run} />}
         {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} run={run} />}
       </main>
     </div>
@@ -348,6 +345,10 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
   const [taskItems, setTaskItems] = useState<GenerationTask[]>(records.slice(0, 10))
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
+  function startNewTask() {
+    setTask(null)
+    window.history.pushState(null, '', routeToUrl({ page: 'studio' }))
+  }
   function cancelCurrentTask() {
     if (!task || !isTaskRunning(task)) return
     if (!window.confirm('确定取消本次生成吗？已提交给生成服务的图片可能仍会完成并产生费用；系统会停止后续生成，并保留已完成结果。')) return
@@ -374,7 +375,11 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
   }, [task?.id, task?.status, setTask])
   return (
     <section className="page">
-      <PageTitle title="AI 摄影棚" subtitle="上传主推款，让系统选搭配角服饰并生成电商棚拍成片。" />
+      <PageTitle
+        title="AI 摄影棚"
+        subtitle="上传主推款，让系统选搭配角服饰并生成电商棚拍成片。"
+        actions={task ? <button className="secondary" onClick={startNewTask}><ImagePlus size={16} />新建拍摄任务</button> : undefined}
+      />
       <div className="studio-grid">
         <div className="panel studio-main">
           <StepRail active={visibleStep} max={currentStep} onSelect={setStep} />
@@ -478,44 +483,50 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
     <div className="step-panel">
       <div className="step-copy"><h2>上传主推款</h2><p>支持多张图片或一个文件夹。推荐 3-5 张，最多 8 张，排序越靠前越重要。</p></div>
       {task?.status === 'DRAFT' && <HeroDraftEditor task={task} setTask={setTask} run={run} />}
-      <div className="hero-upload" onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
-        <div>
-          <Images size={22} />
-          <strong>{task?.status === 'DRAFT' ? '拖入图片或文件夹新建另一项拍摄任务' : '拖入主推款图片或文件夹'}</strong>
-          <span>{files.length ? `已选择 ${files.length} 张，可拖动排序` : '支持多张图片或一个文件夹'}</span>
-        </div>
-        <div className="import-actions">
-          <label className="secondary">
-            <ImagePlus size={16} /> 选择图片
-            <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => addHeroFiles(Array.from(event.target.files ?? []))} />
-          </label>
-          <label className="secondary">
-            <FolderOpen size={16} /> 选择文件夹
-            <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} onChange={(event) => addHeroFiles(Array.from(event.target.files ?? []))} />
-          </label>
-        </div>
-      </div>
-      {files.length > 0 && (
-        <div className="upload-review">
-          <div className="batch-card-head">
-            <div className="batch-icon"><Layers3 size={18} /></div>
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="任务名称" aria-label="任务名称" />
-            <span className={`count-pill ${files.length > 8 ? 'is-over' : ''}`}>{files.length}/8 张</span>
+      {!task && (
+        <>
+          <div className="hero-upload" onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
+            <div>
+              <Images size={22} />
+              <strong>拖入主推款图片或文件夹</strong>
+              <span>{files.length ? `已选择 ${files.length} 张，可拖动排序` : '支持多张图片或一个文件夹'}</span>
+            </div>
+            <div className="import-actions">
+              <label className="secondary">
+                <ImagePlus size={16} /> 选择图片
+                <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => addHeroFiles(Array.from(event.target.files ?? []))} />
+              </label>
+              <label className="secondary">
+                <FolderOpen size={16} /> 选择文件夹
+                <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} onChange={(event) => addHeroFiles(Array.from(event.target.files ?? []))} />
+              </label>
+            </div>
           </div>
-          <div className="batch-note">
-            <span>推荐 3-5 张，最多只允许 8 张用于创建任务。</span>
-            {files.length > 8 && <strong>当前超过 8 张，请删除或调整后再创建</strong>}
-          </div>
-          <FileThumbList files={files} onChange={setFiles} />
-          <div className="inline-form">
-            <button className="primary" disabled={!files.length || files.length > 8 || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, files), (r: { item: GenerationTask }) => {
-              setTask(r.item)
-              window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: r.item.id }))
-            }, { refresh: 'background' })}>
-              <ImagePlus size={16} /> 创建任务
-            </button>
-          </div>
-        </div>
+          {files.length > 0 && (
+            <div className="upload-review">
+              <div className="batch-card-head">
+                <div className="batch-icon"><Layers3 size={18} /></div>
+                <input value={name} onChange={(e) => setName(e.target.value)} placeholder="任务名称" aria-label="任务名称" />
+                <span className={`count-pill ${files.length > 8 ? 'is-over' : ''}`}>{files.length}/8 张</span>
+              </div>
+              <div className="batch-note">
+                <span>推荐 3-5 张，最多只允许 8 张用于创建任务。</span>
+                {files.length > 8 && <strong>当前超过 8 张，请删除或调整后再创建</strong>}
+              </div>
+              <FileThumbList files={files} onChange={setFiles} />
+              <div className="inline-form">
+                <button className="primary" disabled={!files.length || files.length > 8 || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, files), (r: { item: GenerationTask }) => {
+                  setTask(r.item)
+                  setFiles([])
+                  setName('')
+                  window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: r.item.id }))
+                }, { refresh: 'background' })}>
+                  <ImagePlus size={16} /> 创建任务
+                </button>
+              </div>
+            </div>
+          )}
+        </>
       )}
       {task && task.status !== 'DRAFT' && <CurrentTaskCard task={task} />}
     </div>
@@ -604,6 +615,7 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
       ) : <EmptyState title="等待智能选搭" text="点击按钮后会冻结当前主推款输入版本。" />}
       <button className="primary" disabled={!canSelect} onClick={() => task && void run(hasStyling ? '重新选搭中...' : '智能选搭中...', () => {
         startLocalOperation({ ownerType: 'generation_styling', ownerId: task.id, provider: 'gemini' })
+        const previousTask = task
         setTask({
           ...task,
           status: 'STYLING_RUNNING',
@@ -617,7 +629,10 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
           activePreviewId: null,
           activeResultSetId: null,
         })
-        return api.selectStyling(task.id)
+        return api.selectStyling(task.id).catch((error) => {
+          setTask(previousTask)
+          throw error
+        })
       }, (r: { item: GenerationTask }) => {
         clearLocalOperationsFor(['generation_styling'])
         setTask(r.item)
@@ -634,19 +649,20 @@ function StylingPlanSummary({ task }: { task: GenerationTask }) {
   const plan = styling.stylingPlan ?? {}
   const hero = (styling.heroUnderstanding ?? planValue<Record<string, unknown>>(plan, 'hero_understanding') ?? {}) as Record<string, unknown>
   const candidates = styling.outfitCandidates?.length ? styling.outfitCandidates : planValue<Record<string, unknown>[]>(plan, 'outfit_candidates') ?? []
-  const selectedOutfitId = stringValue(planValue(plan, 'selected_outfit_id'))
-  const selected = candidates.find((item) => stringValue(item.id) === selectedOutfitId) ?? candidates[0]
+  const selectedOutfitKey = stringValue(planValue(plan, 'selected_outfit_key')) || stringValue(planValue(plan, 'selected_outfit_id'))
+  const selected = candidates.find((item) => (stringValue(item.outfit_key) || stringValue(item.id)) === selectedOutfitKey) ?? candidates[0]
   const scores = (styling.criticScores && Object.keys(styling.criticScores).length ? styling.criticScores : planValue<Record<string, unknown>>(selected ?? {}, 'scores') ?? {}) as Record<string, unknown>
   const generatedAccessories = stringList(planValue(selected ?? {}, 'generated_accessories'))
   const heroFocus = stringList(planValue(selected ?? {}, 'hero_focus'))
   const aestheticDiagnosis = diagnosisItems(planValue<Record<string, unknown>>(selected ?? {}, 'aesthetic_diagnosis') ?? {})
   const rejected = styling.rejectedCandidates?.length ? styling.rejectedCandidates : planValue<Record<string, unknown>[]>(plan, 'rejected_candidates') ?? []
+  const materialCodesById = materialCodeMap(styling, candidates, plan)
   return (
     <div className="styling-plan">
       <div className="styling-plan-head">
         <div>
           <span>推荐造型方案</span>
-          <h3>{stringValue(planValue(selected ?? {}, 'mode')) || '主推款优先'}</h3>
+          <h3>{stringValue(planValue(selected ?? {}, 'title')) || stringValue(planValue(selected ?? {}, 'mode')) || '主推款优先'}</h3>
         </div>
         <div className="score-strip">
           <ScorePill label="审美" value={scores.aesthetic_score} />
@@ -669,7 +685,12 @@ function StylingPlanSummary({ task }: { task: GenerationTask }) {
       {rejected.length > 0 && (
         <div className="rejected-list">
           <strong>未采用方案</strong>
-          {rejected.slice(0, 3).map((item, index) => <span key={`${stringValue(item.id)}-${index}`}>{stringValue(item.reason)}</span>)}
+          {rejected.slice(0, 3).map((item, index) => {
+            const reason = userFacingMaterialText(stringValue(item.reason), materialCodesById)
+            const codes = rejectedMaterialCodes(item, materialCodesById)
+            const prefix = codes.length && !codes.some((code) => reason.includes(code)) ? codes.join('、') : ''
+            return <span key={`${stringValue(item.outfit_key) || stringValue(item.id)}-${index}`}>{[prefix, reason].filter(Boolean).join(' · ')}</span>
+          })}
         </div>
       )}
     </div>
@@ -699,6 +720,50 @@ function stringValue(value: unknown) {
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean) : []
+}
+
+function materialCodeMap(styling: NonNullable<GenerationTask['styling']>, candidates: Record<string, unknown>[], plan: Record<string, unknown>) {
+  const codesById = new Map<string, string>()
+  const add = (id: unknown, code: unknown) => {
+    const idText = stringValue(id)
+    const codeText = stringValue(code)
+    if (idText && codeText) codesById.set(idText, codeText)
+  }
+  styling.selectedMaterials.forEach((item) => add(item.id, item.code))
+  arrayValue<Record<string, unknown>>(plan, 'selected_materials').forEach((item) => add(item.material_id ?? item.id, item.material_code ?? item.code))
+  candidates.forEach((candidate) => {
+    arrayValue<Record<string, unknown>>(candidate, 'selected_materials').forEach((item) => add(item.material_id ?? item.id, item.material_code ?? item.code))
+    const ids = Array.isArray(candidate.selected_material_ids) ? candidate.selected_material_ids : []
+    const codes = Array.isArray(candidate.selected_material_codes) ? candidate.selected_material_codes : []
+    ids.forEach((id, index) => add(id, codes[index]))
+  })
+  return codesById
+}
+
+function rejectedMaterialCodes(item: Record<string, unknown>, codesById: Map<string, string>) {
+  const explicitCodes = stringList(item.material_codes ?? item.selected_material_codes)
+  const materialCodes = arrayValue<Record<string, unknown>>(item, 'selected_materials')
+    .map((ref) => stringValue(ref.material_code ?? ref.code))
+    .filter(Boolean)
+  const ids = Array.isArray(item.selected_material_ids) ? item.selected_material_ids : []
+  const mappedCodes = ids.map((id) => codesById.get(String(id))).filter((code): code is string => Boolean(code))
+  return Array.from(new Set([...explicitCodes, ...materialCodes, ...mappedCodes]))
+}
+
+function userFacingMaterialText(text: string, codesById: Map<string, string>) {
+  let result = text
+  for (const [id, code] of codesById.entries()) {
+    const escapedId = escapeRegExp(id)
+    result = result.replace(new RegExp(`\\b(?:material[_\\s-]*id|服饰ID|商品ID|ID)\\s*[:：#-]?\\s*${escapedId}(?![A-Za-z0-9])`, 'gi'), code)
+    result = result.replace(new RegExp(`(库内(?:针织衫|衬衫|外套|西装|上衣|下装|裤装|半裙|连衣裙|搭配服饰|服饰|单品)|皮革马甲)\\s*${escapedId}(?![A-Za-z0-9])`, 'g'), `$1 ${code} `)
+  }
+  result = result.replace(/\b(?:material[_\s-]*id|服饰ID|商品ID|ID)\s*[:：#-]?\s*\d+(?![A-Za-z0-9])/gi, '该服饰')
+  result = result.replace(/(库内(?:针织衫|衬衫|外套|西装|上衣|下装|裤装|半裙|连衣裙|搭配服饰|服饰|单品)|皮革马甲)\s*\d+(?![A-Za-z0-9])/g, '$1')
+  return result
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function arrayValue<T = unknown>(source: unknown, key: string): T[] {
@@ -778,6 +843,7 @@ function ShootScriptSummary({ task }: { task: GenerationTask }) {
   const shots = shootScriptShots(task)
   const risks = shootScript.stylingRisks?.length ? shootScript.stylingRisks : arrayValue<Record<string, unknown>>(script, 'styling_risks')
   const adjustments = shootScript.accessoryAdjustments?.length ? shootScript.accessoryAdjustments : arrayValue<Record<string, unknown>>(script, 'accessory_adjustments')
+  const resolvedAccessories = shootScript.resolvedAccessories?.length ? shootScript.resolvedAccessories : arrayValue<Record<string, unknown>>(script, 'resolved_accessories')
   return (
     <div className="styling-plan shoot-script-plan">
       <div className="styling-plan-head">
@@ -788,7 +854,7 @@ function ShootScriptSummary({ task }: { task: GenerationTask }) {
         <div className="score-strip script-strip">
           <span><b>{shots.length || 6}</b>镜头</span>
           <span><b>{risks.length}</b>风险</span>
-          <span><b>{adjustments.length}</b>调整</span>
+          <span><b>{resolvedAccessories.length || adjustments.length}</b>配饰</span>
         </div>
       </div>
       <p>{stringValue(summary.summary) || '本组拍摄以主推款商品表达为核心，覆盖完整比例、品类核心、设计细节、动态补充和标准正面图。'}</p>
@@ -814,6 +880,14 @@ function ShootScriptSummary({ task }: { task: GenerationTask }) {
           ))}
         </div>
       )}
+      {resolvedAccessories.length > 0 && (
+        <div className="rejected-list">
+          <strong>最终配饰方案</strong>
+          {resolvedAccessories.map((item, index) => (
+            <span key={`${stringValue(item.item_type)}-${index}`}>{[stringValue(item.item_type), stringValue(item.final_direction), stringValue(item.visibility)].filter(Boolean).join(' · ')}</span>
+          ))}
+        </div>
+      )}
       <div className="shot-card-grid">
         {shots.map((shot, index) => (
           <div className="shot-card" key={`${numberValue(shot.shot_index) || index + 1}-${stringValue(shot.shot_role)}`}>
@@ -824,6 +898,7 @@ function ShootScriptSummary({ task }: { task: GenerationTask }) {
               <dt>取景</dt><dd>{stringValue(shot.crop_range) || stringValue(shot.cropRange) || '未指定'}</dd>
               <dt>姿势</dt><dd>{stringValue(shot.pose) || '未指定'}</dd>
               <dt>走位</dt><dd>{stringValue(shot.movement) || stringValue(shot.body_position) || stringValue(shot.bodyPosition) || '未指定'}</dd>
+              <dt>配饰</dt><dd>{stringList(shot.accessory_instructions ?? shot.accessoryInstructions).join('；') || '低存在感，不做特写'}</dd>
             </dl>
           </div>
         ))}
@@ -946,6 +1021,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
 
   async function openDetail(item: StylingGarment) {
     const result = await api.getStylingGarment(item.id)
+    updateGarmentInView(result.item)
     setDetail(result.item)
   }
 
@@ -1108,7 +1184,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
           }}
         />
       </div>
-      {detail && <GarmentDetailDrawer item={detail} run={run} onClose={() => setDetail(null)} onChange={setDetail} onDelete={() => openGarmentDeleteDialog([detail])} />}
+      {detail && <GarmentDetailDrawer item={detail} run={run} onClose={() => setDetail(null)} onChange={updateGarmentInView} onDelete={() => openGarmentDeleteDialog([detail])} />}
       {deleteGarmentDialog && (
         <DeleteConfirmDialog
           title={deleteGarmentDialog.length === 1 ? '归档搭配服饰' : `归档 ${deleteGarmentDialog.length} 套搭配服饰`}
@@ -1517,6 +1593,142 @@ function ModelPage({ models }: { models: ModelProfile[] }) {
         </div>
       </div>
     </section>
+  )
+}
+
+function PromptMaintenancePage({ run }: { run: any }) {
+  const [items, setItems] = useState<PromptConfig[]>([])
+  const [placeholders, setPlaceholders] = useState<PromptPlaceholder[]>([])
+  const [activeKey, setActiveKey] = useState('')
+  const [draft, setDraft] = useState('')
+  const [rendered, setRendered] = useState('')
+  const [missing, setMissing] = useState<string[]>([])
+  const [usedSegments, setUsedSegments] = useState<string[]>([])
+
+  function loadConfigs(selectKey?: string) {
+    return api.listPromptConfigs().then((result) => {
+      setItems(result.items)
+      setPlaceholders(result.placeholders)
+      const nextKey = selectKey || activeKey || result.items[0]?.key || ''
+      const nextItem = result.items.find((item) => item.key === nextKey) || result.items[0]
+      setActiveKey(nextItem?.key ?? '')
+      setDraft(nextItem?.content ?? '')
+      setRendered(nextItem?.renderedPreview ?? '')
+      setMissing(nextItem?.missingPlaceholders ?? [])
+      setUsedSegments(nextItem?.usedSegments ?? [])
+    })
+  }
+
+  useEffect(() => {
+    void loadConfigs().catch(() => undefined)
+  }, [])
+
+  const activeItem = items.find((item) => item.key === activeKey) || items[0]
+  const dirty = Boolean(activeItem && draft !== activeItem.content)
+  const segments = items.filter((item) => item.groupType === 'segment')
+  const assemblies = items.filter((item) => item.groupType === 'assembly')
+
+  function selectItem(key: string) {
+    const next = items.find((item) => item.key === key)
+    if (!next) return
+    setActiveKey(key)
+    setDraft(next.content)
+    setRendered(next.renderedPreview)
+    setMissing(next.missingPlaceholders)
+    setUsedSegments(next.usedSegments)
+  }
+
+  function refreshPreview() {
+    if (!activeItem) return
+    void run('渲染 Prompt 预览中...', () => api.previewPromptConfig(activeItem.key), (result: { rendered: string; diagnostics: { missingPlaceholders: string[]; usedSegments: string[] } }) => {
+      setRendered(result.rendered)
+      setMissing(result.diagnostics.missingPlaceholders)
+      setUsedSegments(result.diagnostics.usedSegments)
+    }, { refresh: false })
+  }
+
+  function save() {
+    if (!activeItem) return
+    void run('保存 Prompt 配置中...', () => api.updatePromptConfig(activeItem.key, draft), (result: { item: PromptConfig; preview: { rendered: string; diagnostics: { missingPlaceholders: string[]; usedSegments: string[] } } }) => {
+      setRendered(result.preview.rendered)
+      setMissing(result.preview.diagnostics.missingPlaceholders)
+      setUsedSegments(result.preview.diagnostics.usedSegments)
+      void loadConfigs(result.item.key)
+    }, { refresh: false })
+  }
+
+  function insertPlaceholder(name: string) {
+    setDraft((current) => `${current}${current.endsWith('\n') || !current ? '' : '\n'}{{${name}}}`)
+  }
+
+  return (
+    <section className="page">
+      <PageTitle
+        title="Prompt 维护"
+        subtitle="维护分段 Prompt 和各生成步骤的组装模板；预览只做文本渲染，不触发 AI 额度。"
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={refreshPreview} disabled={!activeItem}><Eye size={16} />预览</button><button className="primary" onClick={save} disabled={!activeItem || !dirty}><Save size={16} />保存</button></div>}
+      />
+      <div className="prompt-maintenance-layout">
+        <aside className="panel prompt-nav-panel">
+          <PromptNavGroup title="分段 Prompt" items={segments} activeKey={activeKey} onSelect={selectItem} />
+          <PromptNavGroup title="组装 Prompt" items={assemblies} activeKey={activeKey} onSelect={selectItem} />
+        </aside>
+        <section className="panel prompt-editor-panel">
+          {activeItem ? (
+            <>
+              <div className="prompt-editor-head">
+                <div>
+                  <span className="chip">{activeItem.groupType === 'segment' ? '分段 Prompt' : '组装 Prompt'}</span>
+                  <h2>{activeItem.title}</h2>
+                  <p>{activeItem.description}</p>
+                </div>
+                <div className="prompt-status">
+                  <span className={dirty ? 'status-badge warning' : 'status-badge ok'}>{dirty ? '未保存' : '已保存'}</span>
+                  {activeItem.updatedAt && <small>更新于 {dateText(activeItem.updatedAt)}</small>}
+                </div>
+              </div>
+              <textarea className="prompt-editor-textarea" value={draft} onChange={(event) => setDraft(event.target.value)} spellCheck={false} />
+            </>
+          ) : <EmptyState title="暂无 Prompt 配置" text="后端还没有返回可维护的 Prompt 配置。" />}
+        </section>
+        <aside className="panel prompt-preview-panel">
+          <div className="prompt-side-section">
+            <h3>预览</h3>
+            <div className="prompt-rendered-section"><pre>{rendered}</pre></div>
+          </div>
+          <div className="prompt-side-section">
+            <h3>校验</h3>
+            <Meta label="引用分段" value={usedSegments.length ? usedSegments.join('、') : '无'} />
+            <Meta label="缺失占位符" value={missing.length ? missing.join('、') : '无'} />
+          </div>
+          <div className="prompt-side-section">
+            <h3>占位符</h3>
+            <div className="prompt-placeholder-list">
+              {placeholders.map((placeholder) => (
+                <button key={placeholder.name} type="button" onClick={() => insertPlaceholder(placeholder.name)}>
+                  <code>{`{{${placeholder.name}}}`}</code>
+                  <span>{placeholder.description}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+  )
+}
+
+function PromptNavGroup({ title, items, activeKey, onSelect }: { title: string; items: PromptConfig[]; activeKey: string; onSelect: (key: string) => void }) {
+  return (
+    <div className="prompt-nav-group">
+      <h3>{title}</h3>
+      {items.map((item) => (
+        <button key={item.key} className={activeKey === item.key ? 'active' : ''} onClick={() => onSelect(item.key)}>
+          <strong>{item.title}</strong>
+          <span>{item.missingPlaceholders.length ? `缺失 ${item.missingPlaceholders.length}` : '已保存'}</span>
+        </button>
+      ))}
+    </div>
   )
 }
 
@@ -3287,6 +3499,8 @@ function GarmentCard({ item, onTag, onOpen, onDelete, selected, onSelect }: {
   const compatibility = typeof tags.styling_compatibility === 'object' && tags.styling_compatibility ? tags.styling_compatibility as Record<string, unknown> : {}
   const brief = tagText(effective.pairing_brief || compatibility.pairing_brief)
   const tagging = item.status === 'TAGGING_RUNNING'
+  const failed = item.status === 'TAGGING_FAILED'
+  const showTagResult = !tagging && !failed
   const chips = garmentTagChips(item)
   const runningTagAttempt = latestRunningTagAttempt(item)
   return (
@@ -3302,14 +3516,14 @@ function GarmentCard({ item, onTag, onOpen, onDelete, selected, onSelect }: {
         {item.archivedAt && <span className="cover-badge">已归档</span>}
       </div>
       <div className="garment-card-head"><strong title={item.code}>{item.code}</strong><span className={`status ${item.status.toLowerCase()}`}>{garmentStatus(item.status)}</span></div>
-      {item.tagError && <span className="inline-error">{item.tagError}</span>}
-      <p>{tagging ? '正在识别服饰信息，完成后可进入智能选搭。' : brief || '待识别搭配信息'}</p>
+      {failed && item.tagError && <span className="inline-error">{item.tagError}</span>}
+      <p>{tagging ? '正在识别服饰信息，完成后可进入智能选搭。' : failed ? '打标未完成，可查看详情或重新打标。' : brief || '待识别搭配信息'}</p>
       {tagging && runningTagAttempt && <AIOperationList operations={[runningTagAttempt]} compact />}
       <div className="tag-summary">
-        {chips.map((chip) => <span key={chip}>{chip}</span>)}
-        {!chips.length && <span>{tagging ? '识别中' : '待识别'}</span>}
+        {showTagResult && chips.map((chip) => <span key={chip}>{chip}</span>)}
+        {(!showTagResult || !chips.length) && <span>{tagging ? '识别中' : failed ? '待重新打标' : '待识别'}</span>}
       </div>
-      {meta.overall_confidence !== undefined && !tagging && <span className="confidence-text">AI 置信度 {formatConfidence(meta.overall_confidence)}</span>}
+      {meta.overall_confidence !== undefined && showTagResult && <span className="confidence-text">AI 置信度 {formatConfidence(meta.overall_confidence)}</span>}
       <div className="card-actions">
         {onOpen && <button className="secondary" onClick={onOpen}><Eye size={16} /> 详情</button>}
         {onTag && <button className="secondary" disabled={tagging} onClick={onTag}>重新识别标签</button>}
@@ -3323,7 +3537,7 @@ function GarmentDetailDrawer({ item, run, onClose, onChange, onDelete }: {
   item: StylingGarment
   run: any
   onClose: () => void
-  onChange: (item: StylingGarment | null) => void
+  onChange: (item: StylingGarment) => void
   onDelete: () => void
 }) {
   const [working, setWorking] = useState(item.images ?? [])
@@ -3337,6 +3551,8 @@ function GarmentDetailDrawer({ item, run, onClose, onChange, onDelete }: {
   const [replacementDimensions, setReplacementDimensions] = useState<Record<number, { width: number; height: number }>>({})
   const tagging = item.status === 'TAGGING_RUNNING'
   const runningTagAttempt = latestRunningTagAttempt(item)
+  const failedTagAttempt = latestFailedTagAttempt(item)
+  const hasTaggingFailure = item.status === 'TAGGING_FAILED' || Boolean(item.tagError || failedTagAttempt)
 
   useEffect(() => {
     setWorking(item.images ?? [])
@@ -3354,6 +3570,14 @@ function GarmentDetailDrawer({ item, run, onClose, onChange, onDelete }: {
     }, 2000)
     return () => window.clearInterval(timer)
   }, [item.id, item.status, onChange])
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !viewer) onClose()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [onClose, viewer])
 
   function move(from: number, to: number) {
     if (to < 0 || to >= working.length) return
@@ -3378,9 +3602,14 @@ function GarmentDetailDrawer({ item, run, onClose, onChange, onDelete }: {
     }, (latest: StylingGarment) => onChange(latest), { refresh: 'background' })
   }
 
+  function retag() {
+    if (dirty && !window.confirm('当前有未保存的图片修改，本次重新打标将基于已保存的图片。是否继续？')) return
+    void run('重新打标中...', () => api.tagStylingGarment(item.id), (result: { item: StylingGarment }) => onChange(result.item), { refresh: 'background' })
+  }
+
   return (
-    <div className="drawer-backdrop">
-      <aside className="detail-drawer">
+    <div className="drawer-backdrop" onClick={onClose}>
+      <aside className="detail-drawer" onClick={(event) => event.stopPropagation()}>
         <div className="drawer-head">
           <div>
             <h2>{item.code}</h2>
@@ -3391,6 +3620,13 @@ function GarmentDetailDrawer({ item, run, onClose, onChange, onDelete }: {
         <div className="drawer-section">
           <Meta label="更新时间" value={dateText(item.updatedAt)} />
           <Meta label="图片" value={`${working.length + pendingFiles.length}/6 张`} />
+          {hasTaggingFailure && (
+            <TagObjectPanel
+              title="识别错误"
+              data={taggingErrorDisplay(item, failedTagAttempt)}
+              defaultOpen
+            />
+          )}
           {tagging && runningTagAttempt && <AIOperationList operations={[runningTagAttempt]} />}
           <CodeEditor item={item} run={run} disabled={tagging} />
         </div>
@@ -3481,13 +3717,11 @@ function GarmentDetailDrawer({ item, run, onClose, onChange, onDelete }: {
         </div>
         <div className="drawer-section">
           <div className="section-head"><strong>标签</strong></div>
-          <TagObjectPanel title="AI 识别标签" data={item.aiTags ?? {}} defaultOpen />
-          <TagObjectPanel title="生效标签" data={item.effectiveTags ?? {}} defaultOpen />
+          <TagObjectPanel title={hasTaggingFailure ? '上次 AI 打标返回' : 'AI 打标返回'} data={item.aiTags ?? {}} defaultOpen />
           <TagObjectPanel title="人工业务标签" data={item.manualTags ?? {}} />
-          <TagObjectPanel title="官方标题信息" data={item.officialTitleTags ?? {}} />
-          <TagObjectPanel title="标签元信息" data={item.tagMeta ?? {}} />
         </div>
         <div className="drawer-actions">
+          <button className="secondary" disabled={tagging} onClick={retag}>重新打标</button>
           <button className="secondary" disabled={tagging || !dirty || working.length + pendingFiles.length > 6} onClick={() => void save(false)}>仅保存</button>
           <button className="primary" disabled={tagging || !dirty || working.length + pendingFiles.length > 6} onClick={() => void save(true)}>保存并重新识别标签</button>
         </div>
@@ -3521,6 +3755,22 @@ function CodeEditor({ item, run, disabled = false }: { item: StylingGarment; run
       </div>
     </div>
   )
+}
+
+function latestFailedTagAttempt(item: StylingGarment) {
+  return (item.tagAttempts ?? []).find((entry) => entry.status === 'FAILED') ?? null
+}
+
+function taggingErrorDisplay(item: StylingGarment, attempt: NonNullable<StylingGarment['tagAttempts']>[number] | null): Record<string, unknown> {
+  const data: Record<string, unknown> = {
+    当前状态: garmentStatus(item.status),
+  }
+  if (item.tagError || attempt?.errorMessage) data.错误信息 = item.tagError || attempt?.errorMessage
+  if (attempt?.errorCode) data.错误码 = attempt.errorCode
+  if (attempt?.provider) data.服务 = attempt.provider
+  if (attempt?.startedAt) data.开始时间 = dateText(attempt.startedAt)
+  if (attempt?.failedAt) data.失败时间 = dateText(attempt.failedAt)
+  return data
 }
 
 function TagObjectPanel({ title, data, defaultOpen = false }: { title: string; data: Record<string, unknown>; defaultOpen?: boolean }) {
@@ -3639,6 +3889,9 @@ function useTicker(enabled: boolean) {
 function operationFallbacks(task: GenerationTask, localOperations: AIOperation[], ownerType: string) {
   const remote = (task.aiOperations ?? []).filter((operation) => operation.ownerType === ownerType)
   const local = localOperations.filter((operation) => operation.ownerType === ownerType)
+  const runningRemote = remote.filter(isAttemptRunning)
+  const runningLocal = local.filter(isAttemptRunning)
+  if (runningRemote.length || runningLocal.length) return mergeOperations([...runningRemote, ...runningLocal])
   if (remote.length) return mergeOperations([...remote, ...local])
   if (local.length) return local
   if (ownerType === 'generation_styling' && task.status === 'STYLING_RUNNING') {
@@ -3705,7 +3958,14 @@ function operationKey(operation: AIOperation) {
   if (operation.ownerType === 'generation_result_image') {
     return `${operation.ownerType}:${operation.ownerId || operation.id}`
   }
+  if (isStageOperation(operation.ownerType) && isAttemptRunning(operation)) {
+    return `${operation.ownerType}:${operation.provider}:active`
+  }
   return `${operation.ownerType}:${operation.provider}:${operation.ownerId > 0 ? operation.ownerId : 'current'}`
+}
+
+function isStageOperation(ownerType: string) {
+  return ['generation_styling', 'generation_shoot_script', 'generation_preview'].includes(ownerType)
 }
 
 function operationRank(operation: AIOperation) {
@@ -3930,20 +4190,22 @@ function getTaskStep(task: GenerationTask | null): StudioStep {
   if (!task) return 0
   if (task.status === 'CANCELLED') {
     if (task.resultSet?.images?.length) return 4
-    if (task.storyboardPreview || task.preview) return 3
-    if (task.shootScript || task.styling) return 2
+    if ((task.storyboardPreview ?? task.preview)?.asset) return 4
+    if (task.shootScript) return 3
+    if (task.styling) return 2
     return 1
   }
   if (task.status === 'FAILED') {
     if (task.resultSet?.images?.length) return 4
-    if (task.storyboardPreview || task.preview) return 3
-    if (task.shootScript || task.styling) return 2
+    if ((task.storyboardPreview ?? task.preview)?.asset) return 4
+    if (task.shootScript) return 3
+    if (task.styling) return 2
     return 1
   }
   if (['READY_FOR_STYLING', 'STYLING_RUNNING'].includes(task.status)) return 1
-  if (['STYLING_READY', 'SCRIPT_RUNNING', 'SCRIPT_READY'].includes(task.status)) return 2
-  if (['PREVIEW_RUNNING', 'PREVIEW_READY'].includes(task.status)) return 3
-  if (['FINAL_RUNNING', 'FINAL_PARTIAL', 'COMPLETED'].includes(task.status)) return 4
+  if (['STYLING_READY', 'SCRIPT_RUNNING'].includes(task.status)) return 2
+  if (['SCRIPT_READY', 'PREVIEW_RUNNING'].includes(task.status)) return 3
+  if (['PREVIEW_READY', 'FINAL_RUNNING', 'FINAL_PARTIAL', 'COMPLETED'].includes(task.status)) return 4
   return 0
 }
 
@@ -4009,10 +4271,10 @@ function garmentTagChips(item: StylingGarment) {
   const tags = item.aiTags ?? {}
   const effective = item.effectiveTags ?? {}
   const values = [
-    ...collectTagValues(tags.category ?? effective.category),
-    ...collectTagValues(tags.sub_category ?? effective.sub_category),
-    ...collectTagValues(tags.colors ?? effective.colors),
-    ...collectTagValues(effective.season ?? tags.season),
+    ...collectTagValues(tags['一级品类'] ?? tags.category ?? effective.category_label ?? effective.category),
+    ...collectTagValues(tags['二级品类'] ?? tags.sub_category ?? effective.sub_category),
+    ...collectTagValues(tags['色彩'] ?? tags['颜色'] ?? tags.colors ?? effective.color_labels ?? effective.colors),
+    ...collectTagValues(tags['季节'] ?? effective.season ?? tags.season),
   ]
   return Array.from(new Set(values)).slice(0, 3)
 }

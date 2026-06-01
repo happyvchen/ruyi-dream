@@ -103,6 +103,9 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 | `/api/brand-info` | POST | admin 创建单一品牌资料；初始值由前端提交，后端不预置 |
 | `/api/brand-info` | PATCH | admin 编辑单一品牌资料 |
 | `/api/brand-info` | DELETE | admin 删除单一品牌资料，恢复为空状态 |
+| `/api/prompt-configs` | GET | admin 查询 Prompt 维护列表和可用占位符 |
+| `/api/prompt-configs/{config_key}/preview` | GET | admin 渲染当前 Prompt 预览；只做本地占位符替换，不触发模型调用 |
+| `/api/prompt-configs/{config_key}` | PATCH | admin 保存数据库中已有 Prompt；后续生成链路立即读取数据库配置 |
 | `/api/shoot-config` | GET | admin 查询拍摄配置；未保存时返回 Lily 默认全局导演规则、基础/默认 6 镜头规则、标签一级品类选项和品类图位覆盖规则 |
 | `/api/shoot-config/export` | GET | admin 导出当前拍摄配置 JSON；包含可导入的 `config` 和标签一级品类快照 |
 | `/api/shoot-config/prompt-card` | GET | admin 查看当前拍摄配置的 Prompt 预览；渲染结果与拍摄剧本生成时传给 AI Director 的拍摄配置规则段一致，不触发模型调用 |
@@ -131,6 +134,8 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 新版前台“生成记录”列表使用 `/api/generation-records`，并与 AI 摄影棚“最近任务”保持同一套 `GenerationTask` 列表口径，不是直接展示 `/api/logs`。旧版 `/api/generation-runs` 和 `/api/garment-skus` 仍作为兼容接口保留，不能作为新版页面主流程依据。`event_logs` 仍用于排查和审计。
 
 新版任务在调用 `select-styling` 时冻结主推款图片和默认数字模特快照。后端先生成候选召回快照，再调用 AI Stylist 输出 `StylingPlan`。拍摄剧本阶段调用 AI Director 输出 `ShootScript` 和 6 条 `ShotPlan`；分镜预览与最终成片只读取当前输入版本、`StylingPlan`、`ShootScript`、选搭快照和预览一致性参考。当前每个阶段都支持重新生成；新上游成功后，下游旧预览和旧成片失效但保留用于追溯。部分失败支持单张结果图重新生成恢复。
+
+`StylingPlan.generated_accessories` 只是 AI Stylist 初始配饰建议。拍摄剧本必须输出 `resolved_accessories` 作为最终配饰方案，并在每个 ShotPlan 中输出 `accessory_instructions`；分镜预览和最终成片以 ShootScript 为准，`accessory_adjustments` 覆盖 StylingPlan 的配饰建议。
 
 写接口在 cookie 会话下会校验 `Origin` / `Referer` 是否属于 `BACKEND_CORS_ORIGINS`，脚本调用应使用可选的 `APP_API_ACCESS_TOKEN`。
 
@@ -231,8 +236,8 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 输入职责：
 
 - 冻结当前主推款图片和任务名，创建 `GenerationTaskInputVersion`。
-- 读取当前 READY 搭配服饰，生成 `candidate_retrieval_snapshot`。当前实现使用 `candidate-retrieval-v2 / candidate_funnel_v1`，先做互斥品类过滤、风险降权、多样性保留和 Top 小候选集。
-- 向 AI Stylist 提供主推款图片、候选卡片、Top 候选主图、outfit 草案、品牌边界证据、受控配饰边界、Aesthetic Critic 维度和商品主角验收维度。
+- 读取当前未归档 READY 搭配服饰，排除人工标记 `do_not_use_for_styling` 的服饰，生成 `candidate_retrieval_snapshot`。当前实现使用 `candidate-retrieval-v2 / candidate_funnel_v1`：`library_tag_cards` 全量填充未归档搭配服饰的 `aiTags`、`manualTags`、`officialTitleTags`、`effectiveTags` 和 `tagMeta`；`material_cards` 仍经过互斥品类过滤、风险降权和多样性保留，作为本次可直接选择的 Top 小候选集。
+- 向 AI Stylist 提供主推款图片、全量标签事实、Top 候选卡片、Top 候选主图、outfit 草案、品牌边界证据、受控配饰边界、Aesthetic Critic 维度和商品主角验收维度。
 
 输出字段应包含：
 
@@ -250,12 +255,18 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
       "styling_intents": [],
       "outfit_candidates": [
         {
+          "outfit_key": "candidate_a",
+          "selected_material_ids": [6],
+          "selected_material_codes": ["LILY-STYLE-001"],
+          "selected_materials": [{"material_id": 6, "material_code": "LILY-STYLE-001"}],
           "aesthetic_diagnosis": {},
           "scores": {}
         }
       ],
-      "selected_outfit_id": "candidate_a",
-      "selected_material_ids": [],
+      "selected_outfit_key": "candidate_a",
+      "selected_material_ids": [6],
+      "selected_material_codes": ["LILY-STYLE-001"],
+      "selected_materials": [{"material_id": 6, "material_code": "LILY-STYLE-001"}],
       "brand_evidence": [],
       "quality_signals": [],
       "rejected_candidates": [],
@@ -268,7 +279,8 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 
 后端校验：
 
-- 选中 ID 必须来自本次 READY 候选。
+- 系统表主键一律使用 ID：`selected_material_ids` 和 `selected_materials[].material_id` 必须来自本次未归档 READY 候选 `material_cards[].id`。
+- UI 和面向人的展示一律使用业务主键 CODE：`selected_material_codes` 和 `selected_materials[].material_code` 只能原样复制候选 `material_cards[].code`，不能作为后端关联依据。
 - 不允许重复 ID。
 - 空 `selected_material_ids` 合法。
 - 明显互斥穿搭应有 `wearing_notes` 解释；缺少解释时记录 `qualitySignals`。
@@ -280,7 +292,7 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 
 - 主推款输入快照。
 - 候选漏斗快照。
-- 传给 AI Stylist 的 material cards、outfit 草案、品牌证据和配饰边界。
+- 传给 AI Stylist 的 `library_tag_cards`、`material_cards`、outfit 草案、品牌证据和配饰边界。
 - 完整 prompt / 任务说明。
 - AI Stylist 每一步响应或一次性返回的分步结构。
 - 最终 `StylingPlan`、Aesthetic Critic 诊断、质量信号、被拒方案和评分。

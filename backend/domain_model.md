@@ -70,7 +70,7 @@ AI 摄影棚中的一次主推款拍摄任务。
 - 创建后先处于 `DRAFT`；AI 前允许修改任务名、追加/替换/移除/排序主推款图片，确认后进入 `READY_FOR_STYLING`。
 - 草稿期主推款图片移除或替换会释放无引用媒体文件；进入 AI 阶段后，输入图片冻结在 `GenerationTaskInputVersion`，不能再单独修改。
 - 点击智能选搭时创建 `GenerationTaskInputVersion`，同时冻结主推款图片和当前默认数字模特快照。
-- 通过 `GenerationStyling` 保存候选漏斗快照、完整 `StylingPlan`、选中 ID、选中服饰快照、Aesthetic Critic 诊断、质量信号、被拒方案、评分、理由和 warnings。
+- 通过 `GenerationStyling` 保存候选漏斗快照、完整 `StylingPlan`、选中系统 ID、选中服饰快照、Aesthetic Critic 诊断、质量信号、被拒方案、评分、理由和 warnings。系统关联使用 ID；面向 UI 和人工审核展示搭配服饰 `code`。
 - 拍摄剧本阶段基于 `StylingPlan` 生成 `GenerationShootScript` 和 6 条 `GenerationShotPlan`。
 - 分镜预览阶段基于当前拍摄剧本保存一张 3x2 `GenerationPreview`。
 - 最终阶段创建 `GenerationResultSet`，并按当前拍摄剧本前 5 条 ShotPlan 并发生成 `GenerationResultImage`。
