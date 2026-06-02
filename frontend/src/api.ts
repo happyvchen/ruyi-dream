@@ -89,6 +89,11 @@ export type AIOperation = {
   updatedAt?: string | null
 }
 
+export type AICallRecord = AIOperation & {
+  requestSnapshot?: Record<string, unknown>
+  responseSnapshot?: Record<string, unknown>
+}
+
 export type GenerationTask = {
   id: number
   name: string
@@ -280,29 +285,6 @@ export type ShootConfigExportPayload = {
   categoryOptionsSnapshot: ShootConfigCategoryOption[]
 }
 
-export type ShootConfigPromptCard = {
-  content: string
-}
-
-export type AiPolicyConfig = {
-  schemaVersion: string
-  candidateFunnel: Record<string, unknown>
-  heroPolicy: Record<string, unknown>
-  qualitySignalPolicy: Record<string, unknown>
-  accessoryPolicy: Record<string, unknown>
-  libraryAdequacyPolicy: Record<string, unknown>
-  brandStylePolicy: Record<string, unknown>
-}
-
-export type AiPolicyConfigExportPayload = {
-  schemaVersion: string
-  config: AiPolicyConfig
-}
-
-export type AiPolicyConfigPromptCard = {
-  content: string
-}
-
 export type TaxonomyTag = {
   id: number
   dimensionCode: string
@@ -424,10 +406,6 @@ export type TaxonomyExportPayload = {
   tags: TaxonomyTag[]
   relations: TaxonomyRelation[]
   applicabilityRules: TaxonomyApplicabilityRule[]
-}
-
-export type TaxonomyPromptCard = {
-  content: string
 }
 
 export type PromptPlaceholder = {
@@ -554,6 +532,8 @@ export const api = {
     request<Paginated<GenerationTask>>(params('/api/generation-tasks', options ?? {})),
   getTask: (id: number, includeDebug = false) =>
     request<{ item: GenerationTask }>(params(`/api/generation-tasks/${id}`, { includeDebug })),
+  getTaskAiInvocations: (id: number) =>
+    request<{ items: AICallRecord[] }>(`/api/generation-tasks/${id}/ai-invocations`),
   archiveTask: (id: number) =>
     request<{ ok: boolean; archived: boolean; item: GenerationTask }>(`/api/generation-tasks/${id}/archive`, { method: 'POST' }),
   archiveTasks: (ids: number[]) =>
@@ -618,21 +598,12 @@ export const api = {
   deleteBrandInfo: () => request<{ ok: boolean }>('/api/brand-info', { method: 'DELETE' }),
   getShootConfig: () => request<{ item: ShootConfig }>('/api/shoot-config'),
   exportShootConfig: () => request<ShootConfigExportPayload>('/api/shoot-config/export'),
-  getShootConfigPromptCard: () => request<ShootConfigPromptCard>('/api/shoot-config/prompt-card'),
   importShootConfig: (config: unknown) =>
     request<{ item: ShootConfig }>('/api/shoot-config/import', { method: 'POST', body: JSON.stringify({ config }) }),
   updateShootConfig: (config: ShootConfig) =>
     request<{ item: ShootConfig }>('/api/shoot-config', { method: 'PATCH', body: JSON.stringify({ config }) }),
-  getAiPolicyConfig: () => request<{ item: AiPolicyConfig }>('/api/ai-policy-config'),
-  exportAiPolicyConfig: () => request<AiPolicyConfigExportPayload>('/api/ai-policy-config/export'),
-  getAiPolicyConfigPromptCard: () => request<AiPolicyConfigPromptCard>('/api/ai-policy-config/prompt-card'),
-  importAiPolicyConfig: (config: unknown) =>
-    request<{ item: AiPolicyConfig }>('/api/ai-policy-config/import', { method: 'POST', body: JSON.stringify({ config }) }),
-  updateAiPolicyConfig: (config: AiPolicyConfig) =>
-    request<{ item: AiPolicyConfig }>('/api/ai-policy-config', { method: 'PATCH', body: JSON.stringify({ config }) }),
   getTaxonomyRules: () => request<TaxonomyRules>('/api/taxonomy/rules'),
   exportTaxonomyRules: () => request<TaxonomyExportPayload>('/api/taxonomy/export'),
-  getTaxonomyPromptCard: () => request<TaxonomyPromptCard>('/api/taxonomy/prompt-card'),
   importTaxonomyRules: (payload: { dimensions: unknown[]; tags: unknown[]; relations: unknown[]; applicabilityRules: unknown[] }) =>
     request<TaxonomyRules>('/api/taxonomy/import', { method: 'POST', body: JSON.stringify(payload) }),
   createTaxonomyDimension: (payload: TaxonomyDimensionPayload & { code: string; labelZh: string }) =>

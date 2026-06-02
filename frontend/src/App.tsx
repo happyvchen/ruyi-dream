@@ -39,7 +39,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, mediaUrl } from './api'
-import type { AIOperation, AiPolicyConfig, AiPolicyConfigExportPayload, AiPolicyConfigPromptCard, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptPlaceholder, SessionRole, ShootConfig, ShootConfigCategoryOption, ShootConfigExportPayload, ShootConfigGlobalRule, ShootConfigPromptCard, ShootConfigShotRule, StylingGarment, TaxonomyApplicabilityPayload, TaxonomyApplicabilityRule, TaxonomyDimensionPayload, TaxonomyExportPayload, TaxonomyPromptCard, TaxonomyRelation, TaxonomyRelationPayload, TaxonomyRules, TaxonomyTag, TaxonomyTagPayload } from './api'
+import type { AICallRecord, AIOperation, BrandInfo, BrandInfoPayload, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptPlaceholder, SessionRole, ShootConfig, ShootConfigCategoryOption, ShootConfigExportPayload, ShootConfigGlobalRule, ShootConfigShotRule, StylingGarment, TaxonomyApplicabilityPayload, TaxonomyApplicabilityRule, TaxonomyDimensionPayload, TaxonomyExportPayload, TaxonomyRelation, TaxonomyRelationPayload, TaxonomyRules, TaxonomyTag, TaxonomyTagPayload } from './api'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 
@@ -66,7 +66,7 @@ type LightboxImage = {
   initialIndex?: number
 }
 
-const NON_SHOOT_CONFIG_CATEGORY_CODES = new Set(['unknown', 'unsupported_accessory'])
+const NON_SHOOT_CONFIG_CATEGORY_CODES = new Set(['未知', '不支持入库配饰', 'unknown', 'unsupported_accessory'])
 type LightboxImageItem = Omit<LightboxImage, 'items' | 'initialIndex'>
 type DeleteDialogTarget = Pick<GenerationTask, 'id' | 'name'>
 type RunOptions = { refresh?: boolean | 'background' }
@@ -278,12 +278,10 @@ export function App() {
       <main className="workspace">
         {error && <div className="toast">{error}</div>}
         {busy && <div className="busy"><Loader2 size={16} className="spin" />{busy}</div>}
-        {page === 'studio' && <StudioPage task={task} setTask={setTask} records={records} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
+        {page === 'studio' && <StudioPage task={task} setTask={setTask} records={records} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
         {page === 'library' && <LibraryPage garments={garments} run={run} />}
         {page === 'model' && <ModelPage models={models} />}
         {page === 'brand' && role === 'admin' && <BrandInfoPage initialBrandInfo={brandInfo} setBrandInfo={setBrandInfo} run={run} />}
-        {page === 'shoot-config' && role === 'admin' && <ShootConfigPage run={run} />}
-        {page === 'tag-rules' && role === 'admin' && <TagRulesPage run={run} />}
         {page === 'prompt-maintenance' && role === 'admin' && <PromptMaintenancePage run={run} />}
         {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} run={run} />}
       </main>
@@ -332,10 +330,11 @@ function LoginPage({ onAuthed }: { onAuthed: (session: { role?: SessionRole | nu
   )
 }
 
-function StudioPage({ task, setTask, records, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
+function StudioPage({ task, setTask, records, role, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask | null) => void
   records: GenerationTask[]
+  role: SessionRole | null
   run: <T>(label: string, action: () => Promise<T>, after?: (value: T) => void, options?: RunOptions) => Promise<T | undefined>
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
@@ -343,8 +342,17 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
 }) {
   const [step, setStep] = useState<StudioStep>(0)
   const [taskItems, setTaskItems] = useState<GenerationTask[]>(records.slice(0, 10))
+  const [aiLogDialog, setAiLogDialog] = useState<{ title: string; ownerTypes: string[]; records: AICallRecord[]; loading: boolean; error?: string } | null>(null)
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
+  const isAdmin = role === 'admin'
+  function openAICallLogs(title: string, ownerTypes: string[]) {
+    if (!task || !isAdmin) return
+    setAiLogDialog({ title, ownerTypes, records: [], loading: true })
+    void api.getTaskAiInvocations(task.id)
+      .then((result) => setAiLogDialog({ title, ownerTypes, records: result.items, loading: false }))
+      .catch((error) => setAiLogDialog({ title, ownerTypes, records: [], loading: false, error: error instanceof Error ? error.message : '调用记录读取失败。' }))
+  }
   function startNewTask() {
     setTask(null)
     window.history.pushState(null, '', routeToUrl({ page: 'studio' }))
@@ -384,10 +392,10 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
         <div className="panel studio-main">
           <StepRail active={visibleStep} max={currentStep} onSelect={setStep} />
           {visibleStep === 0 && <UploadHeroStep task={task} setTask={setTask} run={run} />}
-          {visibleStep === 1 && <StylingStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
-          {visibleStep === 2 && <ShootScriptStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
-          {visibleStep === 3 && <PreviewStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
-          {visibleStep === 4 && <FinalStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
+          {visibleStep === 1 && <StylingStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+          {visibleStep === 2 && <ShootScriptStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+          {visibleStep === 3 && <PreviewStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+          {visibleStep === 4 && <FinalStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
         </div>
         <aside className="panel task-rail">
           <h3>任务摘要</h3>
@@ -438,6 +446,12 @@ function StudioPage({ task, setTask, records, run, localOperations, startLocalOp
           </div>
         </aside>
       </div>
+      {aiLogDialog && (
+        <AICallLogDialog
+          dialog={aiLogDialog}
+          onClose={() => setAiLogDialog(null)}
+        />
+      )}
     </section>
   )
 }
@@ -595,20 +609,41 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
   )
 }
 
-function StylingStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
+function StageHeader({ title, text, isAdmin, disabled, onOpenLogs }: {
+  title: string
+  text: string
+  isAdmin: boolean
+  disabled?: boolean
+  onOpenLogs: () => void
+}) {
+  return (
+    <div className="step-head">
+      <div className="step-copy"><h2>{title}</h2><p>{text}</p></div>
+      {isAdmin && (
+        <button className="secondary" type="button" disabled={disabled} onClick={onOpenLogs}>
+          <Eye size={16} />调用记录
+        </button>
+      )}
+    </div>
+  )
+}
+
+function StylingStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask) => void
   run: any
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
+  isAdmin: boolean
+  onOpenAICallLogs: (title: string, ownerTypes: string[]) => void
 }) {
   const canSelect = !!task && ['READY_FOR_STYLING', 'STYLING_READY', 'SCRIPT_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task.status)
   const hasStyling = !!task?.styling
   const operations = task ? operationFallbacks(task, localOperations, 'generation_styling') : []
   return (
     <div className="step-panel">
-      <div className="step-copy"><h2>AI 智能选搭</h2><p>AI Stylist 会先理解主推款，再生成推荐造型方案；搭配服饰必须服务主推款展示。</p></div>
+      <StageHeader title="AI 智能选搭" text="AI Stylist 会先理解主推款，再生成推荐造型方案；搭配服饰必须服务主推款展示。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('AI 智能选搭调用记录', ['generation_styling'])} />
       <AIOperationList operations={operations} />
       {task?.styling ? (
         <StylingPlanSummary task={task} />
@@ -792,13 +827,15 @@ function diagnosisItems(value: Record<string, unknown>): string[] {
   }).filter(Boolean)
 }
 
-function ShootScriptStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
+function ShootScriptStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask) => void
   run: any
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
+  isAdmin: boolean
+  onOpenAICallLogs: (title: string, ownerTypes: string[]) => void
 }) {
   const canGenerate = (
     !!task?.styling && ['STYLING_READY', 'SCRIPT_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task?.status ?? '')
@@ -807,7 +844,7 @@ function ShootScriptStep({ task, setTask, run, localOperations, startLocalOperat
   const operations = task ? operationFallbacks(task, localOperations, 'generation_shoot_script') : []
   return (
     <div className="step-panel">
-      <div className="step-copy"><h2>生成拍摄剧本</h2><p>AI Director 会一次性生成 6 个镜头的景别、取景、姿势、走位、背景光线和商品展示要求。</p></div>
+      <StageHeader title="生成拍摄剧本" text="AI Director 会一次性生成 6 个镜头的景别、取景、姿势、走位、背景光线和商品展示要求。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成拍摄剧本调用记录', ['generation_shoot_script'])} />
       <AIOperationList operations={operations} />
       {task?.shootScript ? <ShootScriptSummary task={task} /> : <EmptyState title="尚未生成拍摄剧本" text="点击生成后，系统会把选搭方案转成拍摄前可执行的分镜剧本。" />}
       <button className="primary" disabled={!canGenerate} onClick={() => task && void run(hasScript ? '重新生成拍摄剧本中...' : '生成拍摄剧本中...', () => {
@@ -913,13 +950,15 @@ function shootScriptShots(task: GenerationTask): Record<string, unknown>[] {
   return (task.shotPlans ?? []).map((item) => ({ shot_index: item.sortOrder, shot_role: item.shotType, ...(item.plan ?? {}) } as Record<string, unknown>))
 }
 
-function PreviewStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
+function PreviewStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask) => void
   run: any
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
+  isAdmin: boolean
+  onOpenAICallLogs: (title: string, ownerTypes: string[]) => void
 }) {
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const preview = task?.storyboardPreview ?? task?.preview ?? null
@@ -930,7 +969,7 @@ function PreviewStep({ task, setTask, run, localOperations, startLocalOperation,
   const operations = task ? operationFallbacks(task, localOperations, 'generation_preview') : []
   return (
     <div className="step-panel">
-      <div className="step-copy"><h2>生成分镜预览</h2><p>按拍摄剧本生成一张 3x2 分镜预览图。最终固定生成前 5 个镜头，第 6 个镜头忽略。</p></div>
+      <StageHeader title="生成分镜预览" text="按拍摄剧本生成一张 3x2 分镜预览图。最终固定生成前 5 个镜头，第 6 个镜头忽略。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成分镜预览调用记录', ['generation_preview'])} />
       <AIOperationList operations={operations} />
       {preview?.asset ? (
         <button className="preview-board-open" onClick={() => preview.asset && setViewer(assetLightboxImage(preview.asset))} title="放大查看">
@@ -952,13 +991,15 @@ function PreviewStep({ task, setTask, run, localOperations, startLocalOperation,
   )
 }
 
-function FinalStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
+function FinalStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask) => void
   run: any
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
+  isAdmin: boolean
+  onOpenAICallLogs: (title: string, ownerTypes: string[]) => void
 }) {
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const images = task?.resultSet?.images ?? []
@@ -969,7 +1010,7 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
   const finalOperations = task ? finalImageOperations(task, localOperations) : []
   return (
     <div className="step-panel">
-      <div className="step-copy"><h2>生成成片</h2><p>并发生成前 5 个镜头。每张图可单独下载，也可单张重新生成。</p></div>
+      <StageHeader title="生成成片" text="并发生成前 5 个镜头。每张图可单独下载，也可单张重新生成。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成成片调用记录', ['generation_result_image'])} />
       <AIOperationList operations={finalOperations} />
       <div className="result-grid">
         {images.length ? images.map((image) => (
@@ -1597,7 +1638,6 @@ function ModelPage({ models }: { models: ModelProfile[] }) {
 }
 
 function PromptMaintenancePage({ run }: { run: any }) {
-  const [mode, setMode] = useState<'prompt' | 'policy'>('prompt')
   const [items, setItems] = useState<PromptConfig[]>([])
   const [placeholders, setPlaceholders] = useState<PromptPlaceholder[]>([])
   const [activeKey, setActiveKey] = useState('')
@@ -1605,11 +1645,6 @@ function PromptMaintenancePage({ run }: { run: any }) {
   const [rendered, setRendered] = useState('')
   const [missing, setMissing] = useState<string[]>([])
   const [usedSegments, setUsedSegments] = useState<string[]>([])
-  const [policyConfig, setPolicyConfig] = useState<AiPolicyConfig | null>(null)
-  const [policyDraft, setPolicyDraft] = useState('')
-  const [policyPromptCard, setPolicyPromptCard] = useState('')
-  const [policyError, setPolicyError] = useState('')
-  const [jsonDialog, setJsonDialog] = useState<{ mode: 'import' | 'export'; text: string; error?: string } | null>(null)
 
   function loadConfigs(selectKey?: string) {
     return api.listPromptConfigs().then((result) => {
@@ -1627,23 +1662,12 @@ function PromptMaintenancePage({ run }: { run: any }) {
 
   useEffect(() => {
     void loadConfigs().catch(() => undefined)
-    void loadPolicyConfig().catch(() => undefined)
   }, [])
 
   const activeItem = items.find((item) => item.key === activeKey) || items[0]
   const dirty = Boolean(activeItem && draft !== activeItem.content)
-  const policyDirty = Boolean(policyConfig && policyDraft !== `${JSON.stringify(policyConfig, null, 2)}\n`)
   const segments = items.filter((item) => item.groupType === 'segment')
   const assemblies = items.filter((item) => item.groupType === 'assembly')
-
-  function loadPolicyConfig() {
-    return Promise.all([api.getAiPolicyConfig(), api.getAiPolicyConfigPromptCard()]).then(([configResult, promptResult]) => {
-      setPolicyConfig(configResult.item)
-      setPolicyDraft(`${JSON.stringify(configResult.item, null, 2)}\n`)
-      setPolicyPromptCard(promptResult.content)
-      setPolicyError('')
-    })
-  }
 
   function selectItem(key: string) {
     const next = items.find((item) => item.key === key)
@@ -1674,60 +1698,6 @@ function PromptMaintenancePage({ run }: { run: any }) {
     }, { refresh: false })
   }
 
-  function openPolicyPromptCard() {
-    void run('读取 AI 策略 Prompt 预览中...', () => api.getAiPolicyConfigPromptCard(), (result: AiPolicyConfigPromptCard) => {
-      setPolicyPromptCard(result.content)
-    }, { refresh: false })
-  }
-
-  function savePolicy() {
-    let parsed: AiPolicyConfig
-    try {
-      parsed = parseAiPolicyConfigJson(policyDraft) as AiPolicyConfig
-    } catch (error) {
-      setPolicyError(error instanceof Error ? error.message : 'JSON 格式不正确。')
-      return
-    }
-    void run('保存 AI 策略配置中...', () => api.updateAiPolicyConfig(parsed), (result: { item: AiPolicyConfig }) => {
-      setPolicyConfig(result.item)
-      setPolicyDraft(`${JSON.stringify(result.item, null, 2)}\n`)
-      setPolicyError('')
-      void api.getAiPolicyConfigPromptCard().then((prompt) => setPolicyPromptCard(prompt.content)).catch(() => undefined)
-    }, { refresh: false })
-  }
-
-  function openPolicyExportJson() {
-    void run('导出 AI 策略配置中...', () => api.exportAiPolicyConfig(), (result: AiPolicyConfigExportPayload) => {
-      setJsonDialog({ mode: 'export', text: `${JSON.stringify(result, null, 2)}\n` })
-    }, { refresh: false })
-  }
-
-  function openPolicyImportJson() {
-    setJsonDialog({ mode: 'import', text: '' })
-  }
-
-  function confirmPolicyImportJson() {
-    if (!jsonDialog || jsonDialog.mode !== 'import') return
-    if (jsonDialog.text.length > 1024 * 1024) {
-      setJsonDialog({ ...jsonDialog, error: 'JSON 内容过大，请控制在 1MB 以内。' })
-      return
-    }
-    let parsed: unknown
-    try {
-      parsed = parseAiPolicyConfigJson(jsonDialog.text)
-    } catch (error) {
-      setJsonDialog({ ...jsonDialog, error: error instanceof Error ? error.message : 'JSON 导入失败。' })
-      return
-    }
-    void run('导入 AI 策略配置中...', () => api.importAiPolicyConfig(parsed), (result: { item: AiPolicyConfig }) => {
-      setPolicyConfig(result.item)
-      setPolicyDraft(`${JSON.stringify(result.item, null, 2)}\n`)
-      setJsonDialog(null)
-      setPolicyError('')
-      void api.getAiPolicyConfigPromptCard().then((prompt) => setPolicyPromptCard(prompt.content)).catch(() => undefined)
-    }, { refresh: false })
-  }
-
   function insertPlaceholder(name: string) {
     setDraft((current) => `${current}${current.endsWith('\n') || !current ? '' : '\n'}{{${name}}}`)
   }
@@ -1736,59 +1706,16 @@ function PromptMaintenancePage({ run }: { run: any }) {
     <section className="page">
       <PageTitle
         title="Prompt 维护"
-        subtitle="维护分段 Prompt、组装模板和 AI 选搭策略；预览只做文本渲染，不触发 AI 额度。"
-        actions={mode === 'prompt'
-          ? <div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={refreshPreview} disabled={!activeItem}><Eye size={16} />预览</button><button className="primary" onClick={save} disabled={!activeItem || !dirty}><Save size={16} />保存</button></div>
-          : <div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={openPolicyPromptCard}><FileText size={16} />Prompt 预览</button><button className="secondary" onClick={openPolicyImportJson}><Upload size={16} />导入</button><button className="secondary" onClick={openPolicyExportJson} disabled={!policyConfig}><Download size={16} />导出</button><button className="primary" onClick={savePolicy} disabled={!policyConfig || !policyDirty}><Save size={16} />保存</button></div>}
+        subtitle="维护分段 Prompt 和组装 Prompt；AI 选搭原则直接写入 AI 选搭 Prompt 正文。"
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={refreshPreview} disabled={!activeItem}><Eye size={16} />预览</button><button className="primary" onClick={save} disabled={!activeItem || !dirty}><Save size={16} />保存</button></div>}
       />
-      {jsonDialog && (
-        <AiPolicyJsonDialog
-          dialog={jsonDialog}
-          setDialog={setJsonDialog}
-          onClose={() => setJsonDialog(null)}
-          onImport={confirmPolicyImportJson}
-        />
-      )}
       <div className="prompt-maintenance-layout">
         <aside className="panel prompt-nav-panel">
-          <div className="prompt-mode-switch">
-            <button className={mode === 'prompt' ? 'active' : ''} onClick={() => setMode('prompt')}>Prompt 模板</button>
-            <button className={mode === 'policy' ? 'active' : ''} onClick={() => setMode('policy')}>AI 策略配置</button>
-          </div>
-          {mode === 'prompt' ? (
-            <>
-              <PromptNavGroup title="分段 Prompt" items={segments} activeKey={activeKey} onSelect={selectItem} />
-              <PromptNavGroup title="组装 Prompt" items={assemblies} activeKey={activeKey} onSelect={selectItem} />
-            </>
-          ) : (
-            <div className="prompt-nav-group">
-              <h3>策略分区</h3>
-              <button className="active" type="button">
-                <strong>AI 选搭策略</strong>
-                <span>{policyDirty ? '未保存' : '已保存'}</span>
-              </button>
-            </div>
-          )}
+          <PromptNavGroup title="分段 Prompt" items={segments} activeKey={activeKey} onSelect={selectItem} />
+          <PromptNavGroup title="组装 Prompt" items={assemblies} activeKey={activeKey} onSelect={selectItem} />
         </aside>
         <section className="panel prompt-editor-panel">
-          {mode === 'policy' ? (
-            policyConfig ? (
-              <>
-                <div className="prompt-editor-head">
-                  <div>
-                    <span className="chip">结构化策略</span>
-                    <h2>AI 选搭策略配置</h2>
-                    <p>控制候选漏斗、品类权重、质量信号、生成配饰和品牌边界。</p>
-                  </div>
-                  <div className="prompt-status">
-                    <span className={policyDirty ? 'status-badge warning' : 'status-badge ok'}>{policyDirty ? '未保存' : '已保存'}</span>
-                  </div>
-                </div>
-                {policyError && <div className="inline-error">{policyError}</div>}
-                <textarea className="prompt-editor-textarea" value={policyDraft} onChange={(event) => { setPolicyDraft(event.target.value); setPolicyError('') }} spellCheck={false} />
-              </>
-            ) : <EmptyState title="暂无 AI 策略配置" text="后端还没有返回可维护的 AI 策略配置。" />
-          ) : activeItem ? (
+          {activeItem ? (
             <>
               <div className="prompt-editor-head">
                 <div>
@@ -1806,96 +1733,29 @@ function PromptMaintenancePage({ run }: { run: any }) {
           ) : <EmptyState title="暂无 Prompt 配置" text="后端还没有返回可维护的 Prompt 配置。" />}
         </section>
         <aside className="panel prompt-preview-panel">
-          {mode === 'policy' ? (
-            <>
-              <div className="prompt-side-section">
-                <h3>Prompt 摘要</h3>
-                <div className="prompt-rendered-section"><pre>{policyPromptCard}</pre></div>
-              </div>
-              <div className="prompt-side-section">
-                <h3>策略状态</h3>
-                <Meta label="Schema" value={policyConfig?.schemaVersion ?? '未加载'} />
-                <Meta label="配置状态" value={policyDirty ? '未保存' : '已保存'} />
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="prompt-side-section">
-                <h3>预览</h3>
-                <div className="prompt-rendered-section"><pre>{rendered}</pre></div>
-              </div>
-              <div className="prompt-side-section">
-                <h3>校验</h3>
-                <Meta label="引用分段" value={usedSegments.length ? usedSegments.join('、') : '无'} />
-                <Meta label="缺失占位符" value={missing.length ? missing.join('、') : '无'} />
-              </div>
-              <div className="prompt-side-section">
-                <h3>占位符</h3>
-                <div className="prompt-placeholder-list">
-                  {placeholders.map((placeholder) => (
-                    <button key={placeholder.name} type="button" onClick={() => insertPlaceholder(placeholder.name)}>
-                      <code>{`{{${placeholder.name}}}`}</code>
-                      <span>{placeholder.description}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </>
-          )}
+          <div className="prompt-side-section">
+            <h3>预览</h3>
+            <div className="prompt-rendered-section"><pre>{rendered}</pre></div>
+          </div>
+          <div className="prompt-side-section">
+            <h3>校验</h3>
+            <Meta label="引用分段" value={usedSegments.length ? usedSegments.join('、') : '无'} />
+            <Meta label="缺失占位符" value={missing.length ? missing.join('、') : '无'} />
+          </div>
+          <div className="prompt-side-section">
+            <h3>占位符</h3>
+            <div className="prompt-placeholder-list">
+              {placeholders.map((placeholder) => (
+                <button key={placeholder.name} type="button" onClick={() => insertPlaceholder(placeholder.name)}>
+                  <code>{`{{${placeholder.name}}}`}</code>
+                  <span>{placeholder.description}</span>
+                </button>
+              ))}
+            </div>
+          </div>
         </aside>
       </div>
     </section>
-  )
-}
-
-function parseAiPolicyConfigJson(text: string): unknown {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    throw new Error('JSON 格式不正确。')
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('JSON 内容必须是对象。')
-  }
-  const source = parsed as Record<string, unknown>
-  const config = source.config && typeof source.config === 'object' && !Array.isArray(source.config) ? source.config : source
-  const configObject = config as Record<string, unknown>
-  if (typeof configObject.candidateFunnel !== 'object' || !configObject.candidateFunnel) throw new Error('candidateFunnel 必须是对象。')
-  if (typeof configObject.qualitySignalPolicy !== 'object' || !configObject.qualitySignalPolicy) throw new Error('qualitySignalPolicy 必须是对象。')
-  if (typeof configObject.accessoryPolicy !== 'object' || !configObject.accessoryPolicy) throw new Error('accessoryPolicy 必须是对象。')
-  return config
-}
-
-function AiPolicyJsonDialog({ dialog, setDialog, onClose, onImport }: {
-  dialog: { mode: 'import' | 'export'; text: string; error?: string }
-  setDialog: (dialog: { mode: 'import' | 'export'; text: string; error?: string }) => void
-  onClose: () => void
-  onImport: () => void
-}) {
-  const isImport = dialog.mode === 'import'
-  return createPortal(
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <form className="confirm-modal brand-json-modal" role="dialog" aria-modal="true" aria-label={isImport ? '导入 AI 策略配置' : '导出 AI 策略配置'} onSubmit={(event) => {
-        event.preventDefault()
-        if (isImport) onImport()
-      }} onClick={(event) => event.stopPropagation()}>
-        <div className="confirm-head">
-          <div>
-            <h2>{isImport ? '导入 AI 策略配置' : '导出 AI 策略配置'}</h2>
-            <p>{isImport ? '粘贴 JSON 后导入并应用。' : '当前后端生效配置。'}</p>
-          </div>
-          <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
-        </div>
-        <textarea readOnly={!isImport} value={dialog.text} onChange={(event) => setDialog({ ...dialog, text: event.target.value, error: '' })} />
-        {dialog.error && <div className="inline-error">{dialog.error}</div>}
-        <div className="confirm-actions">
-          <button type="button" className="secondary" onClick={onClose}>关闭</button>
-          {isImport && <button type="submit" className="primary">导入</button>}
-        </div>
-      </form>
-    </div>,
-    document.body,
   )
 }
 
@@ -2152,7 +2012,6 @@ function ShootConfigPage({ run }: { run: any }) {
   const [loading, setLoading] = useState(true)
   const [categoryToAdd, setCategoryToAdd] = useState('')
   const [jsonDialog, setJsonDialog] = useState<{ mode: 'import' | 'export'; text: string; error?: string } | null>(null)
-  const [promptDialog, setPromptDialog] = useState<{ text: string } | null>(null)
 
   const categoryOptions = useMemo(
     () => [...(config?.categoryOptions ?? [])].sort((a, b) => (a.sortOrder - b.sortOrder) || (a.id - b.id)),
@@ -2163,7 +2022,7 @@ function ShootConfigPage({ run }: { run: any }) {
     [config?.categoryShotRules],
   )
   const configurableCategoryOptions = categoryOptions.filter((option) => !NON_SHOOT_CONFIG_CATEGORY_CODES.has(option.code))
-  const addableCategoryOptions = configurableCategoryOptions.filter((option) => option.isActive && !configuredCategoryKeys.has(`${option.dimensionCode}:${option.code}`))
+  const addableCategoryOptions = configurableCategoryOptions.filter((option) => option.isActive && !configuredCategoryKeys.has(`${option.dimensionCode}:${shootCategoryRuleTagCode(option)}`))
   const enabledGlobalRuleCount = config?.globalRules.filter((rule) => rule.enabled).length ?? 0
   const activeCategoryRuleCount = (config?.categoryShotRules ?? []).filter((rule) => {
     const option = findShootCategoryOption(categoryOptions, rule.categoryDimensionCode, rule.categoryTagCode)
@@ -2234,8 +2093,9 @@ function ShootConfigPage({ run }: { run: any }) {
 
   function addCategoryRule() {
     if (!addableCategoryOptions.length) return
-    const selectedCode = categoryToAdd || addableCategoryOptions[0].code
-    const option = addableCategoryOptions.find((item) => item.code === selectedCode) ?? addableCategoryOptions[0]
+    const selectedCode = categoryToAdd || shootCategoryRuleTagCode(addableCategoryOptions[0])
+    const option = addableCategoryOptions.find((item) => shootCategoryRuleTagCode(item) === selectedCode) ?? addableCategoryOptions[0]
+    const categoryTagCode = shootCategoryRuleTagCode(option)
     setConfig((current) => {
       if (!current) return current
       return {
@@ -2244,7 +2104,7 @@ function ShootConfigPage({ run }: { run: any }) {
           ...current.categoryShotRules,
           {
             categoryDimensionCode: option.dimensionCode,
-            categoryTagCode: option.code,
+            categoryTagCode,
             shots: cloneShootConfigShots(current.defaultShotRule.shots),
           },
         ],
@@ -2265,12 +2125,6 @@ function ShootConfigPage({ run }: { run: any }) {
   function openExportJson() {
     void run('导出拍摄配置中...', () => api.exportShootConfig(), (payload: ShootConfigExportPayload) => {
       setJsonDialog({ mode: 'export', text: `${JSON.stringify(payload, null, 2)}\n` })
-    }, { refresh: false })
-  }
-
-  function openPromptCard() {
-    void run('生成拍摄配置 Prompt 预览中...', () => api.getShootConfigPromptCard(), (payload: ShootConfigPromptCard) => {
-      setPromptDialog({ text: payload.content })
     }, { refresh: false })
   }
 
@@ -2303,15 +2157,9 @@ function ShootConfigPage({ run }: { run: any }) {
     <section className="page">
       <PageTitle
         title="拍摄配置"
-        subtitle="维护 AI Director 生成拍摄剧本时读取的全局导演规则和品类图位规则。"
-        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={openPromptCard} disabled={!config}><FileText size={16} />Prompt 预览</button><button className="secondary" onClick={openImportJson}><Upload size={16} />导入</button><button className="secondary" onClick={openExportJson} disabled={!config}><Download size={16} />导出</button><button className="primary" onClick={save} disabled={!config}><Save size={16} />保存</button></div>}
+        subtitle="维护默认 6 镜头和品类图位兜底数据；拍摄剧本 Prompt 在 Prompt 维护中统一配置。"
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={openImportJson}><Upload size={16} />导入</button><button className="secondary" onClick={openExportJson} disabled={!config}><Download size={16} />导出</button><button className="primary" onClick={save} disabled={!config}><Save size={16} />保存</button></div>}
       />
-      {promptDialog && (
-        <ShootConfigPromptDialog
-          dialog={promptDialog}
-          onClose={() => setPromptDialog(null)}
-        />
-      )}
       {jsonDialog && (
         <ShootConfigJsonDialog
           dialog={jsonDialog}
@@ -2334,11 +2182,11 @@ function ShootConfigPage({ run }: { run: any }) {
               <summary>
                 <div>
                   <strong>全局导演规则</strong>
-                  <span>{enabledGlobalRuleCount} / {config.globalRules.length} 条启用，按排序进入 AI Director Prompt。</span>
+                  <span>{enabledGlobalRuleCount} / {config.globalRules.length} 条启用，作为历史兜底配置保留。</span>
                 </div>
                 <button className="secondary" type="button" onClick={(event) => { event.preventDefault(); addGlobalRule() }}>新增规则</button>
               </summary>
-              <p className="shoot-config-note">可删除、改名、停用或调整排序；保存后，后端会按当前条目动态组装 Prompt。</p>
+              <p className="shoot-config-note">可删除、改名、停用或调整排序；拍摄剧本的正文规则请在 Prompt 维护中编辑。</p>
               <div className="shoot-global-rules">
               {config.globalRules.map((rule, index) => (
                 <div className="shoot-global-rule-card" key={`${rule.id}-${index}`}>
@@ -2377,7 +2225,10 @@ function ShootConfigPage({ run }: { run: any }) {
               <div className="shoot-category-add">
                 <select value={categoryToAdd} disabled={!addableCategoryOptions.length} onChange={(event) => setCategoryToAdd(event.target.value)}>
                   <option value="">{addableCategoryOptions.length ? '选择一级品类' : '无可新增品类'}</option>
-                  {addableCategoryOptions.map((option) => <option key={`${option.dimensionCode}:${option.code}`} value={option.code}>{option.labelZh} / {option.code}</option>)}
+                  {addableCategoryOptions.map((option) => {
+                    const tagCode = shootCategoryRuleTagCode(option)
+                    return <option key={`${option.dimensionCode}:${option.code}`} value={tagCode}>{option.labelZh} / {tagCode}</option>
+                  })}
                 </select>
                 <button className="secondary" type="button" disabled={!addableCategoryOptions.length} onClick={addCategoryRule}>新增品类规则</button>
               </div>
@@ -2438,8 +2289,12 @@ function cloneShootConfigShots(shots: ShootConfigShotRule[]): ShootConfigShotRul
   return shots.slice(0, 6).map((shot) => ({ ...shot }))
 }
 
+function shootCategoryRuleTagCode(option: ShootConfigCategoryOption) {
+  return option.labelZh.trim() || option.code
+}
+
 function findShootCategoryOption(options: ShootConfigCategoryOption[], dimensionCode: string, tagCode: string) {
-  return options.find((option) => option.dimensionCode === dimensionCode && option.code === tagCode)
+  return options.find((option) => option.dimensionCode === dimensionCode && (option.code === tagCode || shootCategoryRuleTagCode(option) === tagCode))
 }
 
 function parseShootConfigJson(text: string): unknown {
@@ -2459,30 +2314,6 @@ function parseShootConfigJson(text: string): unknown {
   if (!configObject.defaultShotRule || typeof configObject.defaultShotRule !== 'object') throw new Error('defaultShotRule 必须是对象。')
   if (!Array.isArray(configObject.categoryShotRules)) throw new Error('categoryShotRules 必须是数组。')
   return config
-}
-
-function ShootConfigPromptDialog({ dialog, onClose }: {
-  dialog: { text: string }
-  onClose: () => void
-}) {
-  return createPortal(
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <form className="confirm-modal brand-json-modal" role="dialog" aria-modal="true" aria-label="Prompt 预览" onSubmit={(event) => event.preventDefault()} onClick={(event) => event.stopPropagation()}>
-        <div className="confirm-head">
-          <div>
-            <h2>Prompt 预览</h2>
-            <p>展示后端实际传给 AI Director 的拍摄配置规则段，不触发模型调用。</p>
-          </div>
-          <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
-        </div>
-        <textarea readOnly value={dialog.text} />
-        <div className="confirm-actions">
-          <button type="button" className="secondary" onClick={onClose}>关闭</button>
-        </div>
-      </form>
-    </div>,
-    document.body,
-  )
 }
 
 function ShootConfigJsonDialog({ dialog, setDialog, onClose, onImport }: {
@@ -2535,7 +2366,6 @@ function TagRulesPage({ run }: { run: any }) {
   const [relationDraft, setRelationDraft] = useState<TaxonomyRelationPayload>({})
   const [applicabilityDraft, setApplicabilityDraft] = useState<TaxonomyApplicabilityPayload>({})
   const [jsonDialog, setJsonDialog] = useState<{ mode: 'import' | 'export'; text: string; error?: string } | null>(null)
-  const [promptDialog, setPromptDialog] = useState<{ text: string } | null>(null)
 
   function loadRules() {
     setLoading(true)
@@ -2850,12 +2680,6 @@ function TagRulesPage({ run }: { run: any }) {
     }, { refresh: false })
   }
 
-  function openPromptCard() {
-    void run('生成标签规则 Prompt 预览中...', () => api.getTaxonomyPromptCard(), (payload: TaxonomyPromptCard) => {
-      setPromptDialog({ text: payload.content })
-    }, { refresh: false })
-  }
-
   function openImportJson() {
     if (!window.confirm('导入 JSON 会按 code 合并更新维度、标签和关系，不会自动删除缺失项，是否继续？')) return
     setJsonDialog({ mode: 'import', text: '' })
@@ -2886,14 +2710,8 @@ function TagRulesPage({ run }: { run: any }) {
       <PageTitle
         title="标签规则"
         subtitle="维护服装标签字典、层级树、标签关系和商品打标投影。"
-        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={openPromptCard}><FileText size={16} />Prompt 预览</button><button className="secondary" onClick={openImportJson}><Upload size={16} />导入</button><button className="secondary" onClick={openExportJson}><Download size={16} />导出</button><button className="primary" onClick={() => void run('同步标签投影中...', () => api.backfillTaxonomyAssignments(), () => void loadRules(), { refresh: false })}><Save size={16} />同步现有标签</button></div>}
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={openImportJson}><Upload size={16} />导入</button><button className="secondary" onClick={openExportJson}><Download size={16} />导出</button><button className="primary" onClick={() => void run('同步标签投影中...', () => api.backfillTaxonomyAssignments(), () => void loadRules(), { refresh: false })}><Save size={16} />同步现有标签</button></div>}
       />
-      {promptDialog && (
-        <TaxonomyPromptDialog
-          dialog={promptDialog}
-          onClose={() => setPromptDialog(null)}
-        />
-      )}
       {jsonDialog && (
         <TaxonomyJsonDialog
           dialog={jsonDialog}
@@ -3176,30 +2994,6 @@ function parseTaxonomyJson(text: string): { dimensions: unknown[]; tags: unknown
   if (relations != null && !Array.isArray(relations)) throw new Error('relations 必须是数组。')
   if (applicabilityRules != null && !Array.isArray(applicabilityRules)) throw new Error('applicabilityRules 必须是数组。')
   return { dimensions, tags, relations: Array.isArray(relations) ? relations : [], applicabilityRules: Array.isArray(applicabilityRules) ? applicabilityRules : [] }
-}
-
-function TaxonomyPromptDialog({ dialog, onClose }: {
-  dialog: { text: string }
-  onClose: () => void
-}) {
-  return createPortal(
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <form className="confirm-modal brand-json-modal" role="dialog" aria-modal="true" aria-label="Prompt 预览" onSubmit={(event) => event.preventDefault()} onClick={(event) => event.stopPropagation()}>
-        <div className="confirm-head">
-          <div>
-            <h2>Prompt 预览</h2>
-            <p>展示后端实际传给服装打标模型的标签规则卡，不触发模型调用。</p>
-          </div>
-          <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
-        </div>
-        <textarea readOnly value={dialog.text} />
-        <div className="confirm-actions">
-          <button type="button" className="secondary" onClick={onClose}>关闭</button>
-        </div>
-      </form>
-    </div>,
-    document.body,
-  )
 }
 
 function TaxonomyJsonDialog({ dialog, setDialog, onClose, onImport }: {
@@ -3970,6 +3764,73 @@ function TagObjectPanel({ title, data, defaultOpen = false }: { title: string; d
   )
 }
 
+function AICallLogDialog({ dialog, onClose }: {
+  dialog: { title: string; ownerTypes: string[]; records: AICallRecord[]; loading: boolean; error?: string }
+  onClose: () => void
+}) {
+  const records = dialog.records.filter((record) => dialog.ownerTypes.includes(record.ownerType))
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <section className="confirm-modal ai-log-modal" role="dialog" aria-modal="true" aria-label={dialog.title} onClick={(event) => event.stopPropagation()}>
+        <div className="confirm-head">
+          <div>
+            <h2>{dialog.title}</h2>
+            <p>仅管理员可见，用于排查本阶段 AI/provider 调用的输入、输出和错误。</p>
+          </div>
+          <button className="ghost-icon" type="button" onClick={onClose} title="关闭"><X size={18} /></button>
+        </div>
+        {dialog.loading ? (
+          <EmptyState title="读取调用记录中" text="正在加载本任务的 AI 调用快照。" />
+        ) : dialog.error ? (
+          <div className="inline-error">{dialog.error}</div>
+        ) : records.length ? (
+          <div className="ai-log-list">
+            {records.map((record, index) => (
+              <details className="ai-log-entry" key={record.id} open={index === 0}>
+                <summary>
+                  <div>
+                    <strong>{operationLabel(record, index)}</strong>
+                    <span>{record.provider} · {statusText(record.status)}{record.providerRequestId ? ` · ${record.providerRequestId}` : ''}</span>
+                  </div>
+                  <time>{record.startedAt ? dateText(record.startedAt) : dateText(record.createdAt)}</time>
+                </summary>
+                <div className="ai-log-meta">
+                  <Meta label="开始" value={dateText(record.startedAt)} />
+                  <Meta label="完成" value={dateText(record.completedAt)} />
+                  <Meta label="失败" value={dateText(record.failedAt)} />
+                  <Meta label="输出资产" value={record.outputAssetId ? String(record.outputAssetId) : '无'} />
+                </div>
+                {record.errorMessage && <div className="inline-error">{record.errorMessage}</div>}
+                <div className="ai-log-json-grid">
+                  <div>
+                    <span>输入</span>
+                    <pre>{formatDebugJson(record.requestSnapshot)}</pre>
+                  </div>
+                  <div>
+                    <span>输出</span>
+                    <pre>{formatDebugJson(record.responseSnapshot)}</pre>
+                  </div>
+                </div>
+              </details>
+            ))}
+          </div>
+        ) : (
+          <EmptyState title="暂无调用记录" text="当前阶段还没有保存 AI 调用快照。" />
+        )}
+      </section>
+    </div>
+  )
+}
+
+function formatDebugJson(value: unknown) {
+  if (!value || (typeof value === 'object' && !Array.isArray(value) && !Object.keys(value as Record<string, unknown>).length)) return '{}'
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
 function TagField({ label, value }: { label: string; value: unknown }) {
   return (
     <div className="tag-field">
@@ -4670,6 +4531,7 @@ function timestampName() {
   return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
 }
 
-function dateText(value: string) {
+function dateText(value?: string | null) {
+  if (!value) return '无'
   return new Date(parseRuyiTime(value)).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }

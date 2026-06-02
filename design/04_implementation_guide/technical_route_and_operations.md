@@ -9,8 +9,8 @@ MediaAsset
 -> StylingGarment 打标
 -> GenerationTask / InputVersion
 -> Brand Style Index / Retrieval Features
--> Candidate Funnel 候选漏斗
--> Library Adequacy Report 搭配库充足性诊断
+-> 全量搭配库标签事实快照
+-> Prompt 业务规则
 -> AI Stylist / StylingPlan
 -> ShootScript / ShotPlan
 -> Image-2 分镜预览
@@ -258,7 +258,7 @@ Lily 官方和客户确认的品牌样本：
 - created_at / updated_at
 - superseded_at
 
-拍摄剧本一次性包含全局导演设定和 6 条 ShotPlan。用户可查看，不可编辑。生成前读取 `ShootConfig`：全局导演规则按 CRUD 后的启用条目动态组装；品类规则只引用 `标签规则` 中的一级品类，未命中时使用基础/默认 6 镜头规则。后台应提供 ShootConfig 导入导出和单一 `Prompt 预览`，预览底层与拍摄剧本生成调用使用同一个后端组装方法，只渲染文本，不触发外部 AI。完整 schema 见 `../01_generation_flow/shoot_script_workflow.md`。
+拍摄剧本一次性包含全局导演设定和 6 条 ShotPlan。用户可查看，不可编辑。拍摄剧本正文规则由 `Prompt 维护` 中的 `拍摄剧本` Prompt 统一配置；运行时只注入 AI 选搭结果，不再单独拼接标签规则卡或导演规则卡。`ShootConfig` 仅保留为默认 6 镜头和历史状态恢复的兜底数据。完整 schema 见 `../01_generation_flow/shoot_script_workflow.md`。
 
 ### 2.8 GenerationShotPlan
 
@@ -341,10 +341,10 @@ MVP 只保存一张分镜预览总图，不裁 frame。支持重新生成分镜�
 - `styling garment service`：搭配服饰草稿、保存、打标、状态推进。
 - `generation task service`：任务草稿、输入版本、状态机。
 - `brand style service`：维护 Lily 官方样本、客户 lookbook、品牌 caption、配饰边界和未来 embedding。
-- `candidate funnel service`：基于 READY 服饰 tags、caption、颜色、品类、季节、遮挡风险、品牌样本相似度和未来 embedding，生成候选召回、兼容性排序和 outfit 草案快照。
-- `library adequacy service`：基于候选排除原因和可用候选统计，判断库内是否有更好搭配、是否应空选搭或补库。
-- `AI Stylist service`：组装主推款图片、小候选集、候选缩略图、outfit 草案、品牌证据和商品验收维度，调用 Gemini 生成 `StylingPlan`。
-- `aesthetic critic service`：校验 `StylingPlan` 的基础业务事实，并把可穿性、审美成立性、品牌成立性、主推款可见性和商业可用性问题记录为质量信号。
+- `library tag snapshot service`：读取未归档 READY 搭配服饰库全量标签事实；Prompt 只接收 `code` 和标签事实，内部 ID 仅用于持久化映射和 request snapshot；不做候选漏斗、排序、评分、映射或质量判断。
+- `Prompt policy service`：维护 AI 打标、AI 选搭和拍摄剧本使用的 Prompt 业务规则；后端只渲染和保存，不解释为 Python 业务逻辑。
+- `AI Stylist service`：组装主推款图片、搭配库全量标签事实、品牌证据和 Prompt 业务规则，调用 Gemini 生成 `StylingPlan`、库充足性判断和质量信号。
+- `aesthetic critic`：由 AI Stylist Prompt 内部完成；后端不再另设业务质检服务。
 - `shoot script service`：基于 `StylingPlan`、品牌规则、品类图位规则、数字模特和搭配风险生成 ShootScript 与 6 条 ShotPlan。
 - `image input selector`：按阶段选择最多 10 张 Image-2 输入图。
 - `image generation service`：分镜预览和最终图生成。
@@ -367,22 +367,23 @@ HeroUnderstanding
 
 工程上可以先用一次 Gemini 调用返回完整 JSON，但 `request_snapshot_json` 和 `response_snapshot_json` 必须保存分步结构，不能只保存最终 `selected_material_ids`。
 
-### 4.2 候选漏斗
+### 4.2 全量标签事实输入
 
-MVP 不再把全量 READY tags 直接交给 Gemini。候选漏斗先把全量库缩小为少量候选，再由 Gemini 做审美决策。
+MVP 明确不做后端候选漏斗。AI Stylist 阶段的输入为：
 
-阶段 1 使用规则化漏斗，但必须以前置 `HeroUnderstanding` 为输入：
+- 主推款输入版本图片和任务名。
+- 未归档、未删除、`READY` 搭配服饰库全量标签事实 `library_tag_cards`。
+- 提示词输入只包含搭配服饰 `code` 和全量标签事实；内部 ID 映射仅用于后端持久化。
+- Prompt 维护中的 AI 选搭业务规则、品牌边界和配饰边界。
 
-- 只取 `READY` 搭配服饰。
-- 排除当前主推款同 `code`、同输入素材或同商品身份的搭配服饰。
-- 压缩 `effective_tags`。
-- 使用主推款视觉理解出的品类、卖点和不可遮挡区域做硬过滤。
-- 根据品类互补、颜色、季节、廓形和穿着方式粗排。
-- 降权 `coverage_risk` 高、长外套、深色厚重、大体量、风格风险高或季节冲突明显的服饰。
-- 记录穿法能力信号：候选草案不应建议搭配服饰未支持的穿法；开衫、外套、厚针织和有明显门襟/纽扣/镂空下摆结构的上衣若被要求全塞，应进入 `quality_signals` 和后续修正/审核闭环。
-- 按主推品类生成 3-8 套 outfit 草案，并保留一定多样性，避免候选全是同一公式或只是排序前几件。
-- 生成 `LibraryAdequacyReport`，说明当前库内是否存在更优候选、哪些候选因穿法/品类/季节被排除、是否建议空选搭或补库。
-- AI Stylist 输入控制在 12-20 件候选服饰，并附必要主图或缩略图。
+后端不得执行：
+
+- 候选召回、排序、评分、品类映射、风险降权、outfit 草案。
+- 主推款品类启发式推断。
+- 搭配库充足性判断。
+- 审美、品牌、商品可见性、穿法质量或配饰质量判断。
+
+AI Stylist Prompt 必须自行完成主推款理解、全量标签阅读、候选比较、拒绝原因、库充足性判断、Aesthetic Critic、最终选搭和 `quality_signals` 输出。
 
 后续生产增强：
 
@@ -464,10 +465,8 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 输入：
 
 - 主推款图片。
-- 候选漏斗快照。
-- 搭配库充足性诊断摘要。
-- 小候选集搭配服饰压缩 tags、caption 和必要主图/缩略图。
-- 后端生成的 outfit 草案。
+- 未归档 READY 搭配服饰库全量标签事实快照。
+- Prompt 维护中的 AI 选搭业务规则。
 - 与本次任务相关的 Lily 品牌样本证据。
 - Lily 品牌边界。
 - 商品主角验收维度。
@@ -522,19 +521,17 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 
 ### 5.6 阶段性实施计划
 
-#### 当前实现状态（2026-05-27）
+#### 当前实现状态（2026-06-02）
 
-阶段 1 第一版已经落地到代码，已通过后端 smoke tests 和前端 typecheck。
+MVP 已收敛为 Prompt 业务脑模式。后端不做候选漏斗、排序、评分、品类映射、质量判断或 ShotPlan 默认图位规划。
 
 已实现：
 
 - `generation_stylings.library_adequacy_snapshot_json` 字段与迁移 `015`。
-- 候选漏斗使用同 `code` 搭配库标签辅助主推款理解，并排除当前主推款自己。
-- `LibraryAdequacyReport` 快照，包含可用品类统计、同主推款排除数、潜在更优候选和补库缺口。
-- 按主推品类生成 outfit 草案。
-- AI Stylist prompt 增加库充足性、穿法合法性、塞腰质量、裤装主推保护规则。
-- 不支持的全塞/半塞穿法已改为 `quality_signals`，不再把业务质量问题直接暴露为用户可见失败。
-- `build_default_new_shot_plans` 按主推品类输出结构化 ShotPlan，裤装覆盖全身、腰脚、腰膝/腰胯、侧身动态和正面版型。
+- `candidate_retrieval_snapshot` 保存未归档 READY 搭配服饰库全量标签事实和 ID 白名单。
+- `assembly.ai_styling` Prompt 明确由 AI Stylist 完成主推款理解、全量标签阅读、搭配选择、库充足性、Aesthetic Critic 和质量信号输出。
+- 后端只校验 `selected_outfit_key` 是否存在、`selected_material_ids` 是否来自 ID 白名单且不重复，并保存模型输出。
+- 选搭阶段不追加候选服饰图片，避免后端因图片预算变相裁剪候选。
 - 前端 API 类型已增加 `libraryAdequacy`。
 
 尚未实现：

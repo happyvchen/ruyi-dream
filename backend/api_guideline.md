@@ -60,6 +60,7 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 | `/api/generation-tasks` | GET | AI 摄影棚任务列表 |
 | `/api/generation-tasks` | POST | 上传主推款图片并创建 `DRAFT` 拍摄任务 |
 | `/api/generation-tasks/{task_id}` | GET | 拍摄任务详情 |
+| `/api/generation-tasks/{task_id}/ai-invocations` | GET | admin-only 查看该任务智能选搭、拍摄剧本、分镜预览和成片生成的 AI/provider 调用输入输出快照 |
 | `/api/generation-tasks/{task_id}` | PATCH | 草稿期修改任务名；进入 AI 阶段后拒绝修改 |
 | `/api/generation-tasks/{task_id}/cancel` | POST | 取消运行中的智能选搭、拍摄剧本、分镜预览或成片生成；停止后续本地任务，已提交 provider 的调用可能仍产生费用，已完成结果保留 |
 | `/api/generation-tasks/{task_id}/archive` | POST | 归档拍摄任务；从默认任务和记录列表隐藏但保留文件与历史 |
@@ -71,7 +72,7 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 | `/api/generation-task-images/{image_id}/replace` | POST | 草稿期替换单张主推款图片 |
 | `/api/generation-task-images/{image_id}` | PATCH / DELETE | 草稿期调整排序或移除主推款图片 |
 | `/api/generation-tasks/{task_id}/ready` | POST | 确认草稿，进入待智能选搭状态 |
-| `/api/generation-tasks/{task_id}/select-styling` | POST | 冻结当前输入版本，执行候选召回和 AI Stylist，返回 `StylingPlan` |
+| `/api/generation-tasks/{task_id}/select-styling` | POST | 冻结当前输入版本，把搭配服饰库全量标签事实交给 AI Stylist，返回 `StylingPlan` |
 | `/api/generation-tasks/{task_id}/shoot-script` | POST | 基于当前 `StylingPlan` 生成只读拍摄剧本和 6 条 ShotPlan |
 | `/api/generation-tasks/{task_id}/preview` | POST | 基于当前拍摄剧本生成 3x2 分镜预览 |
 | `/api/generation-tasks/{task_id}/generate-final` | POST | 按当前拍摄剧本前 5 条 ShotPlan 并发生成最终成片 |
@@ -106,16 +107,10 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 | `/api/prompt-configs` | GET | admin 查询 Prompt 维护列表和可用占位符 |
 | `/api/prompt-configs/{config_key}/preview` | GET | admin 渲染当前 Prompt 预览；只做本地占位符替换，不触发模型调用 |
 | `/api/prompt-configs/{config_key}` | PATCH | admin 保存数据库中已有 Prompt；后续生成链路立即读取数据库配置 |
-| `/api/shoot-config` | GET | admin 查询拍摄配置；未保存时返回 Lily 默认全局导演规则、基础/默认 6 镜头规则、标签一级品类选项和品类图位覆盖规则 |
+| `/api/shoot-config` | GET | admin 查询拍摄配置；未保存时返回 Lily 默认兜底规则、基础/默认 6 镜头规则、标签一级品类选项和品类图位覆盖规则 |
 | `/api/shoot-config/export` | GET | admin 导出当前拍摄配置 JSON；包含可导入的 `config` 和标签一级品类快照 |
-| `/api/shoot-config/prompt-card` | GET | admin 查看当前拍摄配置的 Prompt 预览；渲染结果与拍摄剧本生成时传给 AI Director 的拍摄配置规则段一致，不触发模型调用 |
-| `/api/shoot-config` | PATCH | admin 保存拍摄配置，后续拍摄剧本生成会读取启用的全局规则和命中的品类 shots；品类必须引用标签规则中的一级品类 |
-| `/api/shoot-config/import` | POST | admin 导入并覆盖拍摄配置；后端按当前标签规则校验和归一化品类引用 |
-| `/api/ai-policy-config` | GET | admin 查询 AI 选搭结构化策略；未保存时返回默认策略 |
-| `/api/ai-policy-config/export` | GET | admin 导出当前 AI 策略配置 JSON |
-| `/api/ai-policy-config/prompt-card` | GET | admin 查看当前 AI 策略配置的 Prompt 摘要；只做本地渲染，不触发模型调用 |
-| `/api/ai-policy-config` | PATCH | admin 保存 AI 策略配置，后续候选漏斗、质量信号和拍摄剧本 request snapshot 会读取该配置 |
-| `/api/ai-policy-config/import` | POST | admin 导入并覆盖 AI 策略配置；后端归一化 schema、阈值和列表长度 |
+| `/api/shoot-config` | PATCH | admin 保存拍摄配置，后续拍摄剧本生成只把它作为历史兜底数据；拍摄剧本正文规则在 Prompt 维护中配置 |
+| `/api/shoot-config/import` | POST | admin 导入并覆盖拍摄配置；后端按当前标签数据校验和归一化品类引用 |
 | `/api/shot-plans` | POST | 旧版货号组图方案兼容接口；新版 ShotPlan 由 `generation-tasks/{id}/shoot-script` 生成 |
 | `/api/shot-plans/{shot_plan_id}` | GET | 旧版组图方案查看接口 |
 | `/api/garment-skus/{sku_id}/default-shot-plan` | GET | 旧版货号默认组图方案兼容接口 |
@@ -138,7 +133,7 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 
 新版前台“生成记录”列表使用 `/api/generation-records`，并与 AI 摄影棚“最近任务”保持同一套 `GenerationTask` 列表口径，不是直接展示 `/api/logs`。旧版 `/api/generation-runs` 和 `/api/garment-skus` 仍作为兼容接口保留，不能作为新版页面主流程依据。`event_logs` 仍用于排查和审计。
 
-新版任务在调用 `select-styling` 时冻结主推款图片和默认数字模特快照。后端先生成候选召回快照，再调用 AI Stylist 输出 `StylingPlan`。拍摄剧本阶段调用 AI Director 输出 `ShootScript` 和 6 条 `ShotPlan`；分镜预览与最终成片只读取当前输入版本、`StylingPlan`、`ShootScript`、选搭快照和预览一致性参考。当前每个阶段都支持重新生成；新上游成功后，下游旧预览和旧成片失效但保留用于追溯。部分失败支持单张结果图重新生成恢复。
+新版任务在调用 `select-styling` 时冻结主推款图片和默认数字模特快照。后端生成未归档 READY 搭配服饰库全量标签事实快照，再调用 AI Stylist 输出 `StylingPlan`。拍摄剧本阶段只把 AI 选搭结果作为运行时占位符传入 Prompt，调用 AI Director 输出 `ShootScript` 和 6 条 `ShotPlan`；分镜预览只读取拍摄剧本结果，最终成片只读取当前单镜头上下文。当前每个阶段都支持重新生成；新上游成功后，下游旧预览和旧成片失效但保留用于追溯。部分失败支持单张结果图重新生成恢复。
 
 `StylingPlan.generated_accessories` 只是 AI Stylist 初始配饰建议。拍摄剧本必须输出 `resolved_accessories` 作为最终配饰方案，并在每个 ShotPlan 中输出 `accessory_instructions`；分镜预览和最终成片以 ShootScript 为准，`accessory_adjustments` 覆盖 StylingPlan 的配饰建议。
 
@@ -173,7 +168,7 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 
 ### 轻量状态接口
 
-新版生成中页面轮询 `GET /api/generation-tasks/{task_id}`，响应默认只返回业务所需的任务、AI 操作摘要、预览和结果图信息；候选召回、provider 原始响应和完整 attempt 明细仅在 `includeDebug=true` 时返回。旧版 `GET /api/generation-runs/{run_id}/status` 只服务兼容页面和旧记录。
+新版生成中页面轮询 `GET /api/generation-tasks/{task_id}`，响应默认只返回业务所需的任务、AI 操作摘要、预览和结果图信息；全量标签事实快照、provider 原始响应和完整 attempt 明细仅在 `includeDebug=true` 时返回。旧版 `GET /api/generation-runs/{run_id}/status` 只服务兼容页面和旧记录。
 
 当前支持分页的接口：
 
@@ -241,8 +236,8 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 输入职责：
 
 - 冻结当前主推款图片和任务名，创建 `GenerationTaskInputVersion`。
-- 读取当前未归档 READY 搭配服饰，排除人工标记 `do_not_use_for_styling` 的服饰，生成 `candidate_retrieval_snapshot`。当前实现使用 `candidate-retrieval-v2 / candidate_funnel_v1`：`library_tag_cards` 全量填充未归档搭配服饰的 `aiTags`、`manualTags`、`officialTitleTags`、`effectiveTags` 和 `tagMeta`；`material_cards` 仍经过互斥品类过滤、风险降权和多样性保留，作为本次可直接选择的 Top 小候选集。
-- 向 AI Stylist 提供主推款图片、全量标签事实、Top 候选卡片、Top 候选主图、outfit 草案、品牌边界证据、受控配饰边界、Aesthetic Critic 维度和商品主角验收维度。
+- 读取当前未归档、未删除、`READY` 搭配服饰，生成 `candidate_retrieval_snapshot`。当前实现使用 `candidate-retrieval-v2 / prompt_managed_business_context_v1`：内部快照保留全量标签事实和持久化所需的内部 ID 映射。
+- 向 AI Stylist Prompt 提供主推款图片、搭配服饰库全量标签事实、Prompt 业务规则、品牌边界证据、受控配饰边界、Aesthetic Critic 维度和商品主角验收维度；提示词输入/输出中的搭配服饰业务标识统一使用 `code`，后端不提供 Top 候选、不追加候选服饰图片、不生成 outfit 草案。
 
 输出字段应包含：
 
@@ -284,20 +279,18 @@ MVP 不实现注册、邀请、成员管理、权限组、多租户或计费。�
 
 后端校验：
 
-- 系统表主键一律使用 ID：`selected_material_ids` 和 `selected_materials[].material_id` 必须来自本次未归档 READY 候选 `material_cards[].id`。
-- UI 和面向人的展示一律使用业务主键 CODE：`selected_material_codes` 和 `selected_materials[].material_code` 只能原样复制候选 `material_cards[].code`，不能作为后端关联依据。
+- 提示词输入/输出一律使用业务主键 CODE：`selected_material_codes` 和 `selected_materials[].material_code` 只能原样复制标签事实卡片中的 `code`。
+- 后端把模型返回的 `code` 映射为系统表内部 ID 后持久化；内部 ID 只用于数据库关联和历史兼容，不进入下游 Prompt。
 - 不允许重复 ID。
+- `selected_outfit_key` 必须存在于 `outfit_candidates`。
 - 空 `selected_material_ids` 合法。
-- 明显互斥穿搭应有 `wearing_notes` 解释；缺少解释时记录 `qualitySignals`。
-- `aesthetic_score`、`brand_fit_score`、`hero_visibility_score` 或 `commercial_readiness_score` 任一低于生产阈值时，记录 `qualitySignals`。
-- 主推款可见但搭配沉闷、笨重、比例失衡或不符合 Lily 调性时，记录为客户审核和流程优化信号。
-- 生成配饰不应使用公文包、大体量托特等传统办公室模板化配饰；若出现则记录 `qualitySignals`。
+- 后端不判断互斥穿搭、审美分数、品牌贴合、商品可见性、配饰质量或库充足性；这些内容由 AI Stylist Prompt 输出为 `quality_signals`、`warnings`、`risk_notes` 或拒绝理由。
 
 技术详情必须保存：
 
 - 主推款输入快照。
-- 候选漏斗快照。
-- 传给 AI Stylist 的 `library_tag_cards`、`material_cards`、outfit 草案、品牌证据和配饰边界。
+- 未归档 READY 搭配服饰库全量标签事实快照。
+- 传给 AI Stylist 的 `library_tag_cards`、Prompt 业务规则、品牌证据和配饰边界。
 - 完整 prompt / 任务说明。
 - AI Stylist 每一步响应或一次性返回的分步结构。
 - 最终 `StylingPlan`、Aesthetic Critic 诊断、质量信号、被拒方案和评分。
@@ -796,7 +789,7 @@ provider 状态映射示例：
 - 当前只维护单一品牌资料，重复 `POST` 返回 `409`。
 - 全部 `/api/brand-info` 接口均要求 admin session；普通 user 返回 `403`。
 - `DELETE /api/brand-info` 删除单条记录，后续 `GET` 再次返回 `item: null`。
-- 全部 `/api/ai-policy-config` 接口均要求 admin session；普通 user 返回 `403`。配置内容会进入 `candidate_retrieval_snapshot.ai_policy_config`、`ai_policy_prompt_card` 和拍摄剧本 request snapshot，用于历史复盘。
+- 不再提供独立 `/api/ai-policy-config` 配置接口。AI 选搭原则、品类策略、质量信号、配饰边界和库充足性口径直接维护在 `assembly.ai_styling` Prompt 正文；当次渲染后的 AI 选搭 Prompt 会进入 `candidate_retrieval_snapshot.ai_styling_prompt` 和后续拍摄剧本 request snapshot，用于历史复盘。
 
 ## 数字模特 CRUD 契约
 
