@@ -54,6 +54,17 @@ SYSTEM_HARD_EXCLUDED_CANDIDATE_CATEGORIES = ("未知", "不支持入库配饰")
 PROMPT_PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-zA-Z0-9_.-]+)\s*}}")
 AI_STYLING_PROMPT_CONFIG_KEY = "assembly.ai_styling"
 SHOOT_SCRIPT_PROMPT_CONFIG_KEY = "assembly.shoot_script"
+AI_STYLING_HERO_WEARING_BOUNDARY_MARKER = "【主推款穿法硬边界】"
+AI_STYLING_HERO_WEARING_BOUNDARY_SECTION = """【主推款穿法硬边界】
+1. 主推款是上装、针织类、针织开衫、外套类时，不得为了露出腰线、拉长比例或搭配高腰下装，把主推款写成全塞、扎入、掖入、束入裤腰或裙腰。
+2. 只有主推款图片、人工信息或标签事实明确支持轻薄可塞，且不会遮挡下摆、纽扣、门襟、图案、衣长比例和面料肌理时，才可建议半塞；必须在 wearing_method_validity 和 tuck_quality 中说明结构依据和风险。
+3. 针织开衫、厚针织、Polo 领针织、明显纽扣/门襟/罗纹/图案下摆的上衣默认采用自然下摆、扣合单穿、短款露出腰线或选择不遮挡的下装；不能输出“扎入裤腰 / 塞腰 / 全塞”。
+4. selected_materials[].wearing_method 应描述主推款与被选中配角服饰的真实穿着关系；不能为了让下装显比例而牺牲主推上衣的下摆、纽扣、门襟或图案展示。"""
+SHOOT_SCRIPT_HERO_WEARING_BOUNDARY_MARKER = "【主推款穿法纠偏】"
+SHOOT_SCRIPT_HERO_WEARING_BOUNDARY_SECTION = """【主推款穿法纠偏】
+1. 如果 AI 选搭结果要求主推上衣、针织衫、针织开衫或外套全塞、扎入、掖入、束入裤腰或裙腰，而主推款具有纽扣、门襟、罗纹、图案下摆、厚针织或常规衣长结构，你必须纠正为自然下摆、扣合单穿、短款自然露腰线或下装腰位不遮挡主推款。
+2. 拍摄剧本不得沿用不合理塞腰作为一致性规则、卖点、镜头重点或验收条件；需要在 styling_risks / warnings 中披露“已纠正不合理塞腰穿法”。
+3. 你不能替换 AI 选搭已选择的库内搭配服饰，但可以调整穿着关系，使配角服饰服务主推款，而不是让主推款服务下装比例。"""
 
 
 def is_request_authenticated(request: Request) -> bool:
@@ -9169,7 +9180,38 @@ def migrate_prompt_runtime_placeholders(key: str, value: str) -> str:
         for placeholder in ("{{runtime.shot_index}}", "{{runtime.styling_plan}}", "{{runtime.shoot_script}}", "{{runtime.shot_plan}}")
     ):
         migrated = final_image_prompt_template_v2()
+    migrated = ensure_prompt_config_wearing_boundaries(key, migrated)
     return migrated
+
+
+def ensure_prompt_config_wearing_boundaries(key: str, value: str) -> str:
+    if key == AI_STYLING_PROMPT_CONFIG_KEY:
+        return insert_prompt_section_if_missing(
+            value,
+            AI_STYLING_HERO_WEARING_BOUNDARY_MARKER,
+            AI_STYLING_HERO_WEARING_BOUNDARY_SECTION,
+            before_markers=["【品牌信息】", "{{segment.brand_info}}", "【搭配服饰库全量标签】"],
+        )
+    if key == SHOOT_SCRIPT_PROMPT_CONFIG_KEY:
+        return insert_prompt_section_if_missing(
+            value,
+            SHOOT_SCRIPT_HERO_WEARING_BOUNDARY_MARKER,
+            SHOOT_SCRIPT_HERO_WEARING_BOUNDARY_SECTION,
+            before_markers=["【AI 选搭结果】", "{{runtime.styling_result}}"],
+        )
+    return value
+
+
+def insert_prompt_section_if_missing(value: str, marker: str, section: str, before_markers: list[str]) -> str:
+    source = str(value or "")
+    if marker in source:
+        return source
+    clean_section = section.strip()
+    for before_marker in before_markers:
+        index = source.find(before_marker)
+        if index >= 0:
+            return source[:index].rstrip() + "\n\n" + clean_section + "\n\n" + source[index:].lstrip()
+    return source.rstrip() + "\n\n" + clean_section + "\n"
 
 
 def migrate_ai_styling_prompt_to_code_only(value: str) -> str:
@@ -9266,7 +9308,20 @@ def final_image_prompt_template_v2() -> str:
 
 
 def repair_prompt_config_placeholders() -> None:
-    return
+    try:
+        with get_db() as db:
+            rows = db.execute("SELECT key, content FROM prompt_configs").fetchall()
+            for row in rows:
+                key = str(row["key"] or "")
+                content = str(row["content"] or "")
+                migrated = migrate_prompt_runtime_placeholders(key, content)
+                if migrated != content:
+                    db.execute(
+                        "UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?",
+                        (migrated, now_iso(), key),
+                    )
+    except sqlite3.OperationalError:
+        return
 
 
 def get_prompt_config_rows() -> dict[str, Any]:

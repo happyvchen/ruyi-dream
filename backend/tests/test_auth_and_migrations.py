@@ -646,6 +646,68 @@ class BackendSmokeTests(unittest.TestCase):
         main.validate_styling_plan(plan, candidate_snapshot)
         self.assertEqual(plan["quality_signals"][0]["code"], "model_flag")
 
+    def test_prompt_config_repair_persists_hero_wearing_boundaries(self) -> None:
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            ai_styling_prompt = """你是 Lily 服饰品牌 AI 摄影棚的 AI Stylist。
+
+【核心原则】
+1. 主推款必须是视觉中心。
+
+【品牌信息】
+{{segment.brand_info}}
+
+【搭配服饰库全量标签】
+{{runtime.candidate_retrieval}}
+"""
+            shoot_script_prompt = """你是 Lily 品牌 AI 摄影棚的 AI Director。
+
+【职责边界】
+1. 你负责导演判断。
+
+【AI 选搭结果】
+{{runtime.styling_result}}
+"""
+            with db_module.get_db() as db:
+                db.executemany(
+                    """
+                    INSERT INTO prompt_configs (key, group_type, title, description, content, sort_order, updated_at)
+                    VALUES (?, 'assembly', ?, '', ?, ?, ?)
+                    """,
+                    [
+                        ("assembly.ai_styling", "AI 选搭", ai_styling_prompt, 120, timestamp),
+                        ("assembly.shoot_script", "拍摄剧本", shoot_script_prompt, 130, timestamp),
+                    ],
+                )
+
+            rows = main.get_prompt_config_rows()
+            ai_content = rows["assembly.ai_styling"]["content"]
+            shoot_content = rows["assembly.shoot_script"]["content"]
+
+        self.assertIn("【主推款穿法硬边界】", ai_content)
+        self.assertIn("不得为了露出腰线", ai_content)
+        self.assertIn("扎入裤腰 / 塞腰 / 全塞", ai_content)
+        self.assertLess(ai_content.index("【主推款穿法硬边界】"), ai_content.index("【品牌信息】"))
+        self.assertIn("【主推款穿法纠偏】", shoot_content)
+        self.assertIn("不得沿用不合理塞腰", shoot_content)
+        self.assertLess(shoot_content.index("【主推款穿法纠偏】"), shoot_content.index("【AI 选搭结果】"))
+
+    def test_prompt_config_wearing_boundary_repair_is_idempotent(self) -> None:
+        main = importlib.import_module("app.main")
+        content = "开头\n\n【主推款穿法硬边界】\n已有规则\n\n【品牌信息】\n{{segment.brand_info}}\n"
+
+        migrated = main.ensure_prompt_config_wearing_boundaries(main.AI_STYLING_PROMPT_CONFIG_KEY, content)
+
+        self.assertEqual(migrated.count("【主推款穿法硬边界】"), 1)
+        self.assertEqual(migrated, content)
+
     def test_fallback_styling_plan_is_rejected_by_production_source_check(self) -> None:
         main = importlib.import_module("app.main")
         candidate_snapshot = {
