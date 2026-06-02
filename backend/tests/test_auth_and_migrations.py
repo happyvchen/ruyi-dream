@@ -585,8 +585,10 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         item = response.json()["items"][0]
         self.assertEqual(item["ownerType"], "generation_styling")
-        self.assertEqual(item["requestSnapshot"]["prompt"], "input snapshot")
-        self.assertEqual(item["responseSnapshot"]["stylingPlan"]["selected_outfit_id"], "candidate_a")
+        self.assertEqual(item["modelInput"]["prompt"], "input snapshot")
+        self.assertEqual(item["modelOutput"]["stylingPlan"]["selected_outfit_id"], "candidate_a")
+        self.assertNotIn("requestSnapshot", item)
+        self.assertNotIn("responseSnapshot", item)
 
     def test_ai_styling_prompt_snapshot_uses_prompt_config(self) -> None:
         config = importlib.import_module("app.config")
@@ -618,7 +620,8 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertEqual(snapshot["promptConfigKey"], "assembly.ai_styling")
         self.assertIn('"code": "LOOK-A"', snapshot["prompt"])
-        self.assertIn('"category": "上装"', snapshot["prompt"])
+        self.assertIn('"effective_tags": {"colors": ["白色"]}', snapshot["prompt"])
+        self.assertNotIn('"category": "上装"', snapshot["prompt"])
         self.assertNotIn("candidate_material_ids", snapshot["prompt"])
         self.assertNotIn('"id": 1', snapshot["prompt"])
         self.assertNotIn("runtime.ai_policy", snapshot["prompt"])
@@ -727,7 +730,7 @@ class BackendSmokeTests(unittest.TestCase):
         snapshot = main.build_candidate_retrieval_snapshot(input_row, material_cards)
 
         self.assertEqual(snapshot["schema_version"], "candidate-retrieval-v2")
-        self.assertEqual(snapshot["strategy"], "prompt_managed_business_context_v1")
+        self.assertEqual(snapshot["strategy"], "prompt_config_raw_tag_facts_v1")
         self.assertEqual(snapshot["candidate_material_ids"], [item["id"] for item in material_cards])
         self.assertEqual(len(snapshot["library_tag_cards"]), len(material_cards))
         self.assertEqual(len(snapshot["material_cards"]), len(material_cards))
@@ -767,7 +770,9 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertEqual(snapshot["prompt_rule_source"], "assembly.ai_styling")
         self.assertNotIn("ai_policy_config", snapshot)
-        self.assertIn("ID 白名单", " ".join(snapshot["notes"]))
+        self.assertNotIn("notes", snapshot)
+        self.assertNotIn("library_adequacy", snapshot)
+        self.assertNotIn("brand_style_evidence", snapshot)
 
     def test_schema_migrations_are_recorded(self) -> None:
         config = importlib.import_module("app.config")
@@ -2299,10 +2304,8 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertEqual(normalized["ai_tags"]["一级品类"], ["上装"])
         self.assertEqual(normalized["tag_meta"]["overall_confidence"], 0.88)
-        self.assertEqual(effective["category"], "上装")
-        self.assertEqual(effective["category_label"], "上装")
-        self.assertEqual(effective["colors"], ["白色"])
-        self.assertEqual(effective["pairing_brief"], "白色衬衫，视觉干净利落。")
+        self.assertEqual(effective, normalized["ai_tags"])
+        self.assertNotIn("recommended_wearing_methods", str(effective))
 
     def test_prompt_tagging_result_derives_from_nested_freeform_json(self) -> None:
         main = importlib.import_module("app.main")
@@ -2320,10 +2323,8 @@ class BackendSmokeTests(unittest.TestCase):
         )
         effective = main.build_effective_tags(normalized["ai_tags"], {}, {})
 
-        self.assertEqual(effective["category"], "外套类")
-        self.assertEqual(effective["sub_category"], "西装")
-        self.assertEqual(effective["colors"], ["藏青色"])
-        self.assertEqual(effective["pairing_brief"], "藏青色西装外套，结构清楚，适合通勤搭配。")
+        self.assertEqual(effective, normalized["ai_tags"])
+        self.assertEqual(effective["服装标签卡"]["基础信息"]["一级品类"], ["外套类"])
 
     def test_lily_tagging_json_parser_wraps_non_object_json(self) -> None:
         main = importlib.import_module("app.main")
