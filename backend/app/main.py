@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 from .config import get_settings
 from .db import dumps, get_db, init_db, loads, log_event, now_iso
 from .image_derivatives import derivative_key, existing_derivative_or_original, generate_image_derivatives
-from .image_provider import get_image_provider
+from .image_provider import ImageProviderError, get_image_provider
 from .object_storage import (
     clean_key,
     delete_object,
@@ -2643,8 +2643,13 @@ async def create_generation_preview(task_id: int) -> dict[str, Any]:
 async def run_preview_generation(task_id: int, styling_id: int, shoot_script_id: int, shot_plans: list[Any], preview_id: int, attempt_id: int) -> None:
     try:
         task_package = build_new_preview_task_package(task_id, styling_id, shoot_script_id, shot_plans)
-        update_attempt_request_snapshot(attempt_id, task_package)
-        asset_id, provider_response = await generate_image_asset(task_package, join_key("generation-tasks", str(task_id), "preview", f"preview-{preview_id}.png"))
+        if not attempt_has_provider_request_id(attempt_id):
+            update_attempt_request_snapshot(attempt_id, task_package)
+        asset_id, provider_response = await generate_image_asset(
+            task_package,
+            join_key("generation-tasks", str(task_id), "preview", f"preview-{preview_id}.png"),
+            attempt_id=attempt_id,
+        )
     except Exception as exc:
         provider_response = getattr(exc, "provider_response", None)
         with get_db() as db:
@@ -2789,9 +2794,23 @@ async def generate_final_images(task_id: int) -> dict[str, Any]:
     return {"item": get_generation_task_by_id(task_id, include_debug=True)}
 
 
-async def run_final_generation(task_id: int, result_set_id: int, image_ids: list[int]) -> None:
+async def run_final_generation(
+    task_id: int,
+    result_set_id: int,
+    image_ids: list[int],
+    resume_attempts_by_image_id: dict[int, int] | None = None,
+) -> None:
+    resume_attempts_by_image_id = resume_attempts_by_image_id or {}
     await asyncio.gather(
-        *(generate_single_final_image(task_id, result_set_id, image_id) for image_id in image_ids),
+        *(
+            generate_single_final_image(
+                task_id,
+                result_set_id,
+                image_id,
+                attempt_id=resume_attempts_by_image_id.get(image_id),
+            )
+            for image_id in image_ids
+        ),
         return_exceptions=True,
     )
     with get_db() as db:
@@ -6965,16 +6984,58 @@ def finish_attempt(
 
 
 def persist_attempt_provider_request_id(attempt_id: int, provider_response: dict[str, Any] | None) -> None:
-    if not isinstance(provider_response, dict):
+    persist_attempt_provider_progress(attempt_id, provider_response)
+
+
+def persist_attempt_provider_progress(attempt_id: int | None, provider_response: dict[str, Any] | None) -> None:
+    if not attempt_id or not isinstance(provider_response, dict):
         return
     provider_request_id = provider_response.get("providerRequestId")
-    if not provider_request_id:
-        return
+    timestamp = now_iso()
     with get_db() as db:
+        if provider_request_id:
+            db.execute(
+                """
+                UPDATE generation_attempts
+                SET provider_request_id = ?, response_snapshot_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (str(provider_request_id), dumps(provider_response), timestamp, attempt_id),
+            )
+            return
         db.execute(
-            "UPDATE generation_attempts SET provider_request_id = ?, updated_at = ? WHERE id = ?",
-            (str(provider_request_id), now_iso(), attempt_id),
+            """
+            UPDATE generation_attempts
+            SET response_snapshot_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (dumps(provider_response), timestamp, attempt_id),
         )
+
+
+def attempt_has_provider_request_id(attempt_id: int | None) -> bool:
+    if not attempt_id:
+        return False
+    with get_db() as db:
+        row = db.execute("SELECT provider_request_id FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
+    return bool(row and row["provider_request_id"])
+
+
+def get_attempt_provider_resume_snapshot(attempt_id: int | None) -> dict[str, Any] | None:
+    if not attempt_id:
+        return None
+    with get_db() as db:
+        row = db.execute(
+            "SELECT provider_request_id, response_snapshot_json FROM generation_attempts WHERE id = ?",
+            (attempt_id,),
+        ).fetchone()
+    if not row or not row["provider_request_id"]:
+        return None
+    snapshot = loads(row["response_snapshot_json"], {})
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    snapshot["providerRequestId"] = row["provider_request_id"]
+    return snapshot
 
 
 def fail_stale_attempt(attempt_id: int | None, message: str) -> None:
@@ -9420,8 +9481,12 @@ def refresh_pending_new_generation_jobs() -> None:
         key = preview_job_key(int(row["id"]))
         if key in active_background_generation_jobs:
             continue
-        fail_stale_attempt(row["active_attempt_id"], "预览生成任务锁过期，已由后台恢复重试。")
-        attempt_id = create_attempt("generation_preview", int(row["id"]), "image-2")
+        active_attempt_id = int(row["active_attempt_id"]) if row["active_attempt_id"] else None
+        if attempt_has_provider_request_id(active_attempt_id):
+            attempt_id = int(active_attempt_id)
+        else:
+            fail_stale_attempt(active_attempt_id, "预览生成任务锁过期，已由后台恢复重试。")
+            attempt_id = create_attempt("generation_preview", int(row["id"]), "image-2")
         lease_generation_preview(int(row["id"]), attempt_id)
         shoot_script_id = int(row["shoot_script_id"]) if "shoot_script_id" in row.keys() and row["shoot_script_id"] else 0
         shot_plans = get_task_shot_plans_by_script(shoot_script_id)
@@ -9447,9 +9512,17 @@ def refresh_pending_new_generation_jobs() -> None:
             ).fetchall()
         image_ids = [int(image["id"]) for image in image_rows]
         if image_ids:
+            resume_attempts_by_image_id: dict[int, int] = {}
             for image in image_rows:
-                fail_stale_attempt(image["active_attempt_id"] if "active_attempt_id" in image.keys() else None, "成片生成任务锁过期，已由后台恢复重试。")
-            schedule_background_generation(run_final_generation(int(row["task_id"]), int(row["id"]), image_ids), job_key=key)
+                active_attempt_id = int(image["active_attempt_id"]) if "active_attempt_id" in image.keys() and image["active_attempt_id"] else None
+                if attempt_has_provider_request_id(active_attempt_id):
+                    resume_attempts_by_image_id[int(image["id"])] = int(active_attempt_id)
+                else:
+                    fail_stale_attempt(active_attempt_id, "成片生成任务锁过期，已由后台恢复重试。")
+            schedule_background_generation(
+                run_final_generation(int(row["task_id"]), int(row["id"]), image_ids, resume_attempts_by_image_id=resume_attempts_by_image_id),
+                job_key=key,
+            )
 
     for row in terminal_result_sets:
         with get_db() as db:
@@ -9479,10 +9552,31 @@ def schedule_background_generation(coro: Any, job_key: str | None = None) -> Non
     task.add_done_callback(report_failure)
 
 
-async def generate_image_asset(task_package: dict[str, Any], output_key: str) -> tuple[int, dict[str, Any]]:
+async def generate_image_asset(task_package: dict[str, Any], output_key: str, attempt_id: int | None = None) -> tuple[int, dict[str, Any]]:
     if not settings.is_image_provider_configured():
         raise RuntimeError(image_provider_missing_message())
-    payload = await asyncio.to_thread(run_image_provider_generate, task_package, output_key)
+    payload = get_attempt_provider_resume_snapshot(attempt_id)
+    if payload is None:
+        payload = await asyncio.to_thread(run_image_provider_submit, task_package, output_key)
+        persist_attempt_provider_progress(attempt_id, payload)
+
+    if payload.get("status") != "SUCCEEDED" or not payload.get("outputPath"):
+        deadline = time.time() + settings.generation_image_timeout_seconds
+        while time.time() < deadline:
+            await asyncio.sleep(3)
+            try:
+                latest = await asyncio.to_thread(run_image_provider_refresh, payload, output_key)
+            except Exception as exc:
+                raise ImageProviderError(f"图片生成状态查询失败，providerRequestId={payload.get('providerRequestId')}: {exc}", payload) from exc
+            payload = {**payload, **latest}
+            persist_attempt_provider_progress(attempt_id, payload)
+            if payload.get("status") in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                break
+        if payload.get("status") != "SUCCEEDED":
+            raise ImageProviderError(f"图片生成未成功，providerRequestId={payload.get('providerRequestId')}: {payload}", payload)
+        payload = {**payload, "submissionMode": "completed"}
+        persist_attempt_provider_progress(attempt_id, payload)
+
     if payload.get("provider") == "placeholder":
         raise RuntimeError("Image-2 provider 返回占位图，拒绝将占位图记为生成成功。")
     content = get_bytes(payload["outputPath"])
@@ -9505,6 +9599,25 @@ def run_image_provider_generate(task_package: dict[str, Any], output_key: str) -
     return asyncio.run(get_image_provider().generate(task_package, output_key))
 
 
+def run_image_provider_submit(task_package: dict[str, Any], output_key: str) -> dict[str, Any]:
+    return asyncio.run(get_image_provider().submit(task_package, output_key))
+
+
+def run_image_provider_refresh(provider_response: dict[str, Any], output_key: str) -> dict[str, Any]:
+    return asyncio.run(get_image_provider().refresh(provider_refresh_row(provider_response, output_key)))
+
+
+def provider_refresh_row(provider_response: dict[str, Any], output_key: str) -> dict[str, Any]:
+    provider_urls = provider_response.get("providerUrls") if isinstance(provider_response.get("providerUrls"), dict) else {}
+    return {
+        "provider_request_id": provider_response.get("providerRequestId"),
+        "provider_urls_json": dumps(provider_urls),
+        "output_path": str(provider_response.get("outputPath") or output_key),
+        "status": provider_response.get("status"),
+        "provider_status": provider_response.get("providerStatus"),
+    }
+
+
 def image_provider_missing_message() -> str:
     if settings.image_provider == "toapis":
         return "Image-2 provider 未配置：当前使用 toapis，请设置 TOAPIS_API_KEY，或将 GPT_IMAGE2_PROVIDER=fal 并设置 FAL_KEY。"
@@ -9513,8 +9626,9 @@ def image_provider_missing_message() -> str:
     return f"Image-2 provider 未配置：不支持的 provider {settings.image_provider}。"
 
 
-async def generate_single_final_image(task_id: int, result_set_id: int, image_id: int) -> int:
-    attempt_id = create_attempt("generation_result_image", image_id, "image-2")
+async def generate_single_final_image(task_id: int, result_set_id: int, image_id: int, attempt_id: int | None = None) -> int:
+    if attempt_id is None:
+        attempt_id = create_attempt("generation_result_image", image_id, "image-2")
     lease_generation_result_image(image_id, attempt_id)
     with get_db() as db:
         row = db.execute("SELECT status FROM generation_result_images_new WHERE id = ?", (image_id,)).fetchone()
@@ -9531,11 +9645,12 @@ async def generate_single_final_image(task_id: int, result_set_id: int, image_id
         )
     try:
         task_package = build_new_final_task_package(task_id, image_id)
-        update_attempt_request_snapshot(attempt_id, task_package)
+        if not attempt_has_provider_request_id(attempt_id):
+            update_attempt_request_snapshot(attempt_id, task_package)
         with get_db() as db:
             sort_order = db.execute("SELECT sort_order FROM generation_result_images_new WHERE id = ?", (image_id,)).fetchone()["sort_order"]
         output_key = join_key("generation-tasks", str(task_id), "final", f"{result_set_id}-{sort_order}.png")
-        asset_id, provider_response = await generate_image_asset(task_package, output_key)
+        asset_id, provider_response = await generate_image_asset(task_package, output_key, attempt_id=attempt_id)
     except Exception as exc:
         provider_response = getattr(exc, "provider_response", None)
         with get_db() as db:
