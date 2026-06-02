@@ -22,7 +22,7 @@ backend/app/db.py:init_db()
 | `garment_images` | `GarmentImage` | 货号下的单张素材图 |
 | `model_profiles` | `ModelProfile` | 数字模特档案 |
 | `brand_profiles` | `BrandProfile` | admin 维护的单一品牌资料 |
-| `ai_policy_configs` | `AiPolicyConfig` | admin 维护的 AI 选搭结构化业务策略 |
+| `ai_policy_configs` | `AiPolicyConfig` | 历史兼容表；新版不再提供独立 AI 选搭策略配置入口 |
 | `shot_plans` | `ShotPlan` | 组图方案 / Gemini 策划结果 |
 | `brand_template_versions` | `BrandTemplateVersion` | 品牌调性模板版本 |
 | `generation_runs` | `GenerationRun` | 一次组图生成批次 |
@@ -194,7 +194,7 @@ CREATE TABLE brand_profiles (
 - 当前所有业务字段均为字符串，不保存数组结构。
 - `/api/brand-info` 全部接口均为 admin-only。
 
-### 2.5 `ai_policy_configs`
+### 2.5 `ai_policy_configs`（历史兼容）
 
 ```sql
 CREATE TABLE ai_policy_configs (
@@ -209,17 +209,17 @@ CREATE TABLE ai_policy_configs (
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `id` | INTEGER | 固定为 1，保证 MVP 只维护一份 AI 选搭策略 |
-| `config_json` | TEXT | `ai-policy-config-v1` JSON，包含候选漏斗、品类策略、质量信号、配饰边界、库充足性和品牌边界 |
+| `id` | INTEGER | 固定为 1，历史上用于维护一份 AI 选搭策略 |
+| `config_json` | TEXT | `ai-policy-config-v1` JSON，历史上包含候选漏斗、品类策略、质量信号、配饰边界、库充足性和品牌边界 |
 | `created_at` | TEXT | 创建时间 |
 | `updated_at` | TEXT | 更新时间 |
 
 实现备注：
 
-- 启动时不强制 seed 记录；没有记录时后端使用 `default_ai_policy_config()`。
-- `/api/ai-policy-config`、`/export`、`/import`、`/prompt-card` 全部为 admin-only。
-- 配置快照进入 `candidate_retrieval_snapshot` 和拍摄剧本 request snapshot，用于历史复盘。
-- 后端仍保留合法 ID、归档/删除/READY 状态、当前主推款排除和 schema 校验等硬边界；灵活业务权重和阈值不应写死。
+- 该表保留用于历史数据和旧 Prompt 占位符迁移；新版不再暴露 `/api/ai-policy-config` 维护接口。
+- 新版 AI 选搭原则、品类策略、质量信号、配饰边界和库充足性口径直接写入 `assembly.ai_styling` Prompt 正文。
+- 当次渲染后的 AI 选搭 Prompt 进入 `candidate_retrieval_snapshot.ai_styling_prompt` 和拍摄剧本 request snapshot，用于历史复盘。
+- 后端仍保留合法 ID、归档/删除/READY 状态、当前主推款排除和 schema 校验等硬边界。
 
 ### 2.6 `shot_plans`
 

@@ -52,6 +52,8 @@ SESSION_ROLES = {"user", "admin"}
 SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES = {"未知", "不支持入库配饰", "unknown", "unsupported_accessory"}
 SYSTEM_HARD_EXCLUDED_CANDIDATE_CATEGORIES = ("未知", "不支持入库配饰")
 PROMPT_PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-zA-Z0-9_.-]+)\s*}}")
+AI_STYLING_PROMPT_CONFIG_KEY = "assembly.ai_styling"
+SHOOT_SCRIPT_PROMPT_CONFIG_KEY = "assembly.shoot_script"
 
 
 def is_request_authenticated(request: Request) -> bool:
@@ -278,14 +280,6 @@ class ShootConfigUpdateRequest(BaseModel):
 
 
 class ShootConfigImportRequest(BaseModel):
-    config: dict[str, Any]
-
-
-class AiPolicyConfigUpdateRequest(BaseModel):
-    config: dict[str, Any]
-
-
-class AiPolicyConfigImportRequest(BaseModel):
     config: dict[str, Any]
 
 
@@ -1841,6 +1835,13 @@ def get_generation_task(task_id: int, include_debug: bool = Query(False, alias="
     return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
 
 
+@app.get("/api/generation-tasks/{task_id}/ai-invocations")
+def get_generation_task_ai_invocations(task_id: int, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    get_generation_task_row(task_id)
+    return {"items": get_task_attempts(task_id)}
+
+
 @app.post("/api/generation-tasks/{task_id}/archive")
 def archive_generation_task(task_id: int) -> dict[str, Any]:
     with get_db() as db:
@@ -2263,9 +2264,8 @@ async def select_generation_styling(task_id: int) -> dict[str, Any]:
         if generation_task_or_attempt_cancelled(task_id, attempt_id):
             finish_attempt(attempt_id, "CANCELLED")
             return {"item": get_generation_task_by_id(task_id)}
-        styling_plan = await select_styling_with_gemini(input_row, candidate_snapshot, request_snapshot)
+        styling_plan = await select_styling_with_gemini(input_row, candidate_snapshot, request_snapshot, attempt_id=attempt_id)
         validate_styling_plan(styling_plan, candidate_snapshot)
-        styling_plan = attach_styling_quality_signals(styling_plan, collect_styling_quality_signals(styling_plan, candidate_snapshot))
         selected_ids = [int(item) for item in styling_plan.get("selected_material_ids", [])]
         source_ids, selected_snapshot = get_styling_source_and_selected_snapshots(selected_ids)
     except Exception as exc:
@@ -2421,6 +2421,10 @@ async def create_generation_shoot_script(task_id: int) -> dict[str, Any]:
         db.execute("UPDATE generation_shoot_scripts SET active_attempt_id = ? WHERE id = ?", (attempt_id, shoot_script_id))
     try:
         request_snapshot = build_shoot_script_request_snapshot(task_id, int(styling_id), int(input_version_id))
+        try:
+            request_snapshot = attach_shoot_script_prompt_snapshot(request_snapshot)
+        except RuntimeError:
+            pass
         update_attempt_request_snapshot(attempt_id, request_snapshot)
         shoot_script = await generate_shoot_script_with_gemini(request_snapshot)
         shoot_script = normalize_shoot_script(shoot_script, request_snapshot)
@@ -2638,6 +2642,7 @@ async def create_generation_preview(task_id: int) -> dict[str, Any]:
 async def run_preview_generation(task_id: int, styling_id: int, shoot_script_id: int, shot_plans: list[Any], preview_id: int, attempt_id: int) -> None:
     try:
         task_package = build_new_preview_task_package(task_id, styling_id, shoot_script_id, shot_plans)
+        update_attempt_request_snapshot(attempt_id, task_package)
         asset_id, provider_response = await generate_image_asset(task_package, join_key("generation-tasks", str(task_id), "preview", f"preview-{preview_id}.png"))
     except Exception as exc:
         provider_response = getattr(exc, "provider_response", None)
@@ -3045,14 +3050,6 @@ def export_shoot_config(request: Request) -> dict[str, Any]:
     }
 
 
-@app.get("/api/shoot-config/prompt-card")
-def get_shoot_config_prompt_card(request: Request) -> dict[str, Any]:
-    require_admin(request)
-    return {
-        "content": build_active_shoot_config_prompt_card(),
-    }
-
-
 @app.patch("/api/shoot-config")
 def update_shoot_config(payload: ShootConfigUpdateRequest, request: Request) -> dict[str, Any]:
     require_admin(request)
@@ -3091,70 +3088,6 @@ def import_shoot_config(payload: ShootConfigImportRequest, request: Request) -> 
         )
         log_event(db, "shoot_config", 1, "imported", {"schemaVersion": config["schemaVersion"]})
     return {"item": serialize_shoot_config(config)}
-
-
-@app.get("/api/ai-policy-config")
-def get_ai_policy_config(request: Request) -> dict[str, Any]:
-    require_admin(request)
-    return {"item": serialize_ai_policy_config(get_active_ai_policy_config())}
-
-
-@app.get("/api/ai-policy-config/export")
-def export_ai_policy_config(request: Request) -> dict[str, Any]:
-    require_admin(request)
-    config = normalize_ai_policy_config_payload(get_active_ai_policy_config())
-    return {
-        "schemaVersion": "ruyi-ai-policy-config-v1",
-        "config": config,
-    }
-
-
-@app.get("/api/ai-policy-config/prompt-card")
-def get_ai_policy_config_prompt_card(request: Request) -> dict[str, Any]:
-    require_admin(request)
-    return {
-        "content": build_active_ai_policy_prompt_card(),
-    }
-
-
-@app.patch("/api/ai-policy-config")
-def update_ai_policy_config(payload: AiPolicyConfigUpdateRequest, request: Request) -> dict[str, Any]:
-    require_admin(request)
-    config = normalize_ai_policy_config_payload(payload.config)
-    timestamp = now_iso()
-    with get_db() as db:
-        db.execute(
-            """
-            INSERT INTO ai_policy_configs (id, config_json, created_at, updated_at)
-            VALUES (1, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              config_json = excluded.config_json,
-              updated_at = excluded.updated_at
-            """,
-            (dumps(config), timestamp, timestamp),
-        )
-        log_event(db, "ai_policy_config", 1, "updated", {"schemaVersion": config["schemaVersion"]})
-    return {"item": serialize_ai_policy_config(config)}
-
-
-@app.post("/api/ai-policy-config/import")
-def import_ai_policy_config(payload: AiPolicyConfigImportRequest, request: Request) -> dict[str, Any]:
-    require_admin(request)
-    config = normalize_ai_policy_config_payload(payload.config)
-    timestamp = now_iso()
-    with get_db() as db:
-        db.execute(
-            """
-            INSERT INTO ai_policy_configs (id, config_json, created_at, updated_at)
-            VALUES (1, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              config_json = excluded.config_json,
-              updated_at = excluded.updated_at
-            """,
-            (dumps(config), timestamp, timestamp),
-        )
-        log_event(db, "ai_policy_config", 1, "imported", {"schemaVersion": config["schemaVersion"]})
-    return {"item": serialize_ai_policy_config(config)}
 
 
 @app.get("/api/taxonomy/rules")
@@ -3247,14 +3180,6 @@ def export_taxonomy_rules(request: Request) -> dict[str, Any]:
         "tags": [serialize_tag_def(row) | {"children": []} for row in tags],
         "relations": [serialize_tag_relation(row) for row in relations],
         "applicabilityRules": [serialize_tag_applicability_rule(row) for row in applicability_rules],
-    }
-
-
-@app.get("/api/taxonomy/prompt-card")
-def get_taxonomy_prompt_card(request: Request) -> dict[str, Any]:
-    require_admin(request)
-    return {
-        "content": build_active_taxonomy_prompt_card(),
     }
 
 
@@ -6168,15 +6093,7 @@ def build_taxonomy_tagging_request_snapshot(garment: dict[str, Any], prompt: str
 
 
 def build_taxonomy_tagging_prompt(garment: dict[str, Any] | None = None, taxonomy_context: dict[str, Any] | None = None) -> str:
-    taxonomy_context = taxonomy_context or build_active_taxonomy_context()
-    runtime = {
-        "taxonomy_prompt_card": build_taxonomy_prompt_card_from_context(taxonomy_context) if taxonomy_context.get("dimensions") else "",
-        "garment": dumps({
-            "code": (garment or {}).get("code"),
-            "image_count": len((garment or {}).get("images", [])),
-        }),
-    }
-    return render_prompt_template("assembly.ai_tagging", runtime)
+    return render_prompt_template("assembly.ai_tagging", {})
 
 
 def fallback_taxonomy_tagging_result(garment: dict[str, Any], taxonomy_context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -7253,14 +7170,16 @@ def build_ai_stylist_context(input_version_id: int) -> tuple[Any, dict[str, Any]
             """
         ).fetchall()
     material_cards = [compress_tags_for_styling(row) for row in material_rows]
-    material_cards = [card for card in material_cards if not (card.get("manual") or {}).get("do_not_use_for_styling")]
-    ai_policy_config = get_active_ai_policy_config()
-    candidate_snapshot = build_candidate_retrieval_snapshot(input_row, material_cards, ai_policy_config)
+    candidate_snapshot = build_candidate_retrieval_snapshot(input_row, material_cards)
     request_snapshot = build_ai_stylist_request_snapshot(input_row, candidate_snapshot)
+    request_snapshot = attach_ai_stylist_prompt_snapshot(request_snapshot, candidate_snapshot)
+    candidate_snapshot["ai_styling_prompt_config_key"] = request_snapshot["promptConfigKey"]
+    candidate_snapshot["ai_styling_prompt"] = request_snapshot["prompt"]
+    request_snapshot["candidate_retrieval"] = candidate_snapshot
     return input_row, candidate_snapshot, request_snapshot
 
 
-async def select_styling_with_gemini(input_row: Any, candidate_snapshot: dict[str, Any], request_snapshot: dict[str, Any]) -> dict[str, Any]:
+async def select_styling_with_gemini(input_row: Any, candidate_snapshot: dict[str, Any], request_snapshot: dict[str, Any], attempt_id: int | None = None) -> dict[str, Any]:
     if not settings.gemini_api_key:
         raise RuntimeError("Gemini API 未配置，AI Stylist 不能进入生产选搭。")
     try:
@@ -7268,29 +7187,17 @@ async def select_styling_with_gemini(input_row: Any, candidate_snapshot: dict[st
         from google.genai import types
     except Exception as exc:
         raise RuntimeError("google-genai SDK 不可用，AI Stylist 不能进入生产选搭。") from exc
-    prompt = render_prompt_template(
-        "assembly.ai_styling",
-        {
-            "candidate_retrieval": dumps(candidate_snapshot),
-            "ai_policy": dumps(candidate_snapshot.get("ai_policy_config") or {}),
-            "ai_policy_card": str(candidate_snapshot.get("ai_policy_prompt_card") or ""),
-        },
-    )
-    request_snapshot = {**request_snapshot, "prompt": prompt}
+    if not request_snapshot.get("prompt"):
+        request_snapshot = attach_ai_stylist_prompt_snapshot(request_snapshot, candidate_snapshot)
+    if attempt_id:
+        update_attempt_request_snapshot(attempt_id, request_snapshot)
+    prompt = str(request_snapshot.get("prompt") or "")
     contents: list[Any] = [prompt]
     for item in loads(input_row["image_snapshot_json"], [])[:8]:
         asset = (item.get("asset") or {})
         object_key = asset.get("objectKey")
         if object_key and object_exists(object_key):
             contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
-    policy = candidate_snapshot.get("ai_policy_config") if isinstance(candidate_snapshot.get("ai_policy_config"), dict) else default_ai_policy_config()
-    candidate_policy = policy.get("candidateFunnel") if isinstance(policy.get("candidateFunnel"), dict) else {}
-    image_limit = clamp_int(candidate_policy.get("candidateImageLimit"), 4, 30, 20)
-    for card in candidate_snapshot.get("material_cards", [])[:image_limit]:
-        cover_asset = card.get("cover_asset") if isinstance(card, dict) and isinstance(card.get("cover_asset"), dict) else {}
-        object_key = cover_asset.get("objectKey")
-        if object_key and object_exists(object_key):
-            contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=cover_asset.get("mimeType") or "image/png"))
     try:
         client = genai.Client(api_key=settings.gemini_api_key)
         response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents)
@@ -7300,441 +7207,94 @@ async def select_styling_with_gemini(input_row: Any, candidate_snapshot: dict[st
     return normalize_styling_plan(raw, candidate_snapshot)
 
 
-def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict[str, Any]], ai_policy_config: dict[str, Any] | None = None) -> dict[str, Any]:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or get_active_ai_policy_config())
-    candidate_policy = ai_policy_config.get("candidateFunnel") if isinstance(ai_policy_config.get("candidateFunnel"), dict) else {}
-    candidate_limit = clamp_int(candidate_policy.get("candidateLimit"), 4, 40, 20)
-    hero_profile = infer_hero_profile(input_row, material_cards, ai_policy_config)
-    ranked_cards = rank_candidate_materials(hero_profile, material_cards, ai_policy_config)
-    hero_category_blocked = str(hero_profile.get("category") or "") in set(ensure_string_list(candidate_policy.get("hardExcludedCategories")))
-    candidate_cards = [] if hero_category_blocked else select_diverse_candidate_cards(ranked_cards, limit=candidate_limit, ai_policy_config=ai_policy_config)
-    library_tag_cards = [library_tag_card_for_prompt(card) for card in material_cards]
-    outfit_drafts = build_outfit_drafts(candidate_cards, hero_profile, ai_policy_config)
-    library_adequacy = build_library_adequacy_report(hero_profile, ranked_cards, candidate_cards, outfit_drafts, ai_policy_config)
-    if hero_category_blocked:
-        library_adequacy["supply_gap_notes"] = [
-            *ensure_string_list(library_adequacy.get("supply_gap_notes")),
-            "主推款品类无法确认，候选漏斗已阻断库内配角选择；应补充主推款理解或人工复核。",
-        ]
-        library_adequacy["recommend_empty_pairing"] = True
-    filtered_out = [
+def attach_ai_stylist_prompt_snapshot(request_snapshot: dict[str, Any], candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
+    prompt = render_prompt_template(
+        AI_STYLING_PROMPT_CONFIG_KEY,
         {
-            "id": int(item["card"]["id"]),
-            "code": item["card"].get("code"),
-            "reasons": item["reasons"],
-        }
-        for item in ranked_cards
-        if item["excluded"]
-    ][:40]
+            "candidate_retrieval": dumps(candidate_retrieval_for_prompt(candidate_snapshot)),
+        },
+    )
+    return {**request_snapshot, "promptConfigKey": AI_STYLING_PROMPT_CONFIG_KEY, "prompt": prompt}
+
+
+def candidate_retrieval_for_prompt(candidate_snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    cards = candidate_snapshot.get("library_tag_cards") if isinstance(candidate_snapshot.get("library_tag_cards"), list) else []
+    return [styling_garment_card_for_prompt(card) for card in cards if isinstance(card, dict)]
+
+
+def styling_garment_card_for_prompt(card: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "code": str(card.get("code") or ""),
+        "category": card.get("category"),
+        "sub_category": card.get("sub_category"),
+        "colors": card.get("colors") or [],
+        "fit": card.get("fit"),
+        "silhouette": card.get("silhouette") or [],
+        "length": card.get("length") or {},
+        "materials_visual": card.get("materials_visual") or [],
+        "details": card.get("details") or [],
+        "occasion": card.get("occasion") or [],
+        "season": card.get("season") or [],
+        "wearability": card.get("wearability") or {},
+        "manual": card.get("manual") or {},
+        "pairing_brief": card.get("pairing_brief") or "",
+        "risk": card.get("risk") or [],
+        "visual_caption": card.get("visual_caption") or "",
+        "tag_facts": card.get("tag_facts") or {},
+    }
+
+
+def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict[str, Any]], ai_policy_config: dict[str, Any] | None = None) -> dict[str, Any]:
+    library_tag_cards = [library_tag_card_for_prompt(card) for card in material_cards]
     return {
         "schema_version": "candidate-retrieval-v2",
-        "strategy": "candidate_funnel_v1",
+        "strategy": "prompt_managed_business_context_v1",
         "input_version_id": int(input_row["id"]),
         "library_scope": {
             "status": "READY",
             "archived_at": None,
             "deleted_at": None,
-            "manual_do_not_use_for_styling": False,
         },
         "source_material_ids": [int(card["id"]) for card in material_cards],
         "library_tag_card_count": len(library_tag_cards),
-        "candidate_material_ids": [int(card["id"]) for card in candidate_cards],
-        "candidate_pool_size": 0 if hero_category_blocked else len([item for item in ranked_cards if not item["excluded"]]),
-        "candidate_limit": candidate_limit,
-        "candidate_image_limit": clamp_int(candidate_policy.get("candidateImageLimit"), 4, 30, 20),
-        "hero_profile": hero_profile,
+        "candidate_material_ids": [int(card["id"]) for card in material_cards],
+        "candidate_pool_size": len(material_cards),
+        "candidate_limit": len(material_cards),
+        "candidate_image_limit": 0,
+        "hero_context": {
+            "source": "prompt_managed",
+            "name_snapshot": str(input_row["name_snapshot"] if "name_snapshot" in input_row.keys() else ""),
+            "image_snapshot": loads(input_row["image_snapshot_json"], []) if "image_snapshot_json" in input_row.keys() else [],
+            "instruction": "主推款理解、品类判断、卖点、遮挡风险和拍摄要求全部由 AI Stylist Prompt 根据图片和全量标签事实完成。",
+        },
         "library_tag_cards": library_tag_cards,
-        "material_cards": candidate_cards,
-        "outfit_drafts": outfit_drafts,
-        "library_adequacy": library_adequacy,
-        "filtered_out": filtered_out,
-        "brand_style_evidence": build_phase_one_brand_style_evidence(hero_profile, ai_policy_config),
+        "material_cards": library_tag_cards,
+        "outfit_drafts": [],
+        "library_adequacy": build_library_context_report(material_cards),
+        "filtered_out": [],
+        "brand_style_evidence": build_phase_one_brand_style_evidence(ai_policy_config),
         "accessory_boundary": build_accessory_boundary(ai_policy_config),
-        "ai_policy_config": ai_policy_config,
-        "ai_policy_prompt_card": build_ai_policy_prompt_card(ai_policy_config),
+        "prompt_rule_source": AI_STYLING_PROMPT_CONFIG_KEY,
         "notes": [
-            "Phase 1 会把未归档 READY 搭配库的标签事实全量放入 library_tag_cards，并用硬过滤、风险降权、多样性保留生成 material_cards 优先候选集。",
-            "Gemini 接收全量标签文本、优先候选缩略图、草案和品牌边界；后续可接入 embedding、品牌样本库和反馈排序。",
-            *(
-                ["主推款品类命中硬排除配置时，后端按生产硬边界阻断库内候选，只保留空选搭草案和复核提示。"]
-                if hero_category_blocked
-                else []
-            ),
+            "后端只提供未归档 READY 搭配库全量标签事实和 ID 白名单。",
+            "AI 选搭原则、品类策略、质量信号、配饰边界和库充足性口径维护在 assembly.ai_styling Prompt 正文中。",
+            "AI Stylist 阶段不追加候选服饰图片，避免后端因图片预算变相裁剪候选；搭配库侧以全量标签事实进入 Prompt。",
+            "主推款理解、候选选择、映射、评分、质量信号、库充足性和 outfit 决策全部由 AI Stylist Prompt 完成。",
         ],
     }
 
 
-def infer_hero_profile(input_row: Any, material_cards: list[dict[str, Any]] | None = None, ai_policy_config: dict[str, Any] | None = None) -> dict[str, Any]:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    hero_policy = ai_policy_config.get("heroPolicy") if isinstance(ai_policy_config.get("heroPolicy"), dict) else {}
-    name = str(input_row["name_snapshot"] if "name_snapshot" in input_row.keys() else "").strip()
-    matching_card = find_matching_hero_card(name, material_cards or [])
-    if matching_card:
-        return build_hero_profile_from_card(input_row, matching_card, ai_policy_config)
-    text = name.lower()
-    category_keywords = hero_policy.get("taskNameCategoryKeywords") if isinstance(hero_policy.get("taskNameCategoryKeywords"), dict) else {}
-    candidate_policy = ai_policy_config.get("candidateFunnel") if isinstance(ai_policy_config.get("candidateFunnel"), dict) else {}
-    unknown_category = (ensure_string_list(candidate_policy.get("hardExcludedCategories")) or ["未知"])[0]
-    category = unknown_category
-    for candidate_category, keywords in category_keywords.items():
-        if any(keyword in name or keyword.lower() in text for keyword in ensure_string_list(keywords)):
-            category = str(candidate_category)
-            break
-    high_waist = any(keyword in name for keyword in ensure_string_list(hero_policy.get("taskNameWaistFocusKeywords")))
-    light_color = any(keyword in name or keyword.lower() in text for keyword in ensure_string_list(hero_policy.get("taskNameLightColorKeywords")))
-    selling_points = []
-    for rule in hero_policy.get("taskNameSellingPointRules", []):
-        if not isinstance(rule, dict):
-            continue
-        if any(keyword in name for keyword in ensure_string_list(rule.get("keywords"))):
-            selling_points.extend(label for label in ensure_string_list(rule.get("labels")) if label not in selling_points)
-    if not selling_points:
-        selling_points.append("主推款整体轮廓")
-    return {
-        "source": "task_name_phase_one_heuristic",
-        "confidence": 0.55 if category != unknown_category else 0.25,
-        "name_snapshot": name,
-        "hero_code": name,
-        "category": category,
-        "is_high_waist_or_waist_focus": high_waist,
-        "is_light_colored": light_color,
-        "recommended_wearing_methods": [],
-        "selling_points": selling_points[:6],
-        "visibility_risks": build_visibility_risks_for_category(category, ai_policy_config),
-        "shot_requirements": build_hero_shot_requirements(category, ai_policy_config),
+def build_library_context_report(material_cards: list[dict[str, Any]]) -> dict[str, Any]:
+    manual_flags = {
+        "do_not_use_for_styling": sum(1 for card in material_cards if (card.get("manual") or {}).get("do_not_use_for_styling")),
     }
-
-
-def find_matching_hero_card(name: str, material_cards: list[dict[str, Any]]) -> dict[str, Any] | None:
-    if not name:
-        return None
-    normalized_name = name.strip().lower()
-    for card in material_cards:
-        code = str(card.get("code") or "").strip().lower()
-        if code and code == normalized_name:
-            return card
-    return None
-
-
-def build_hero_profile_from_card(input_row: Any, card: dict[str, Any], ai_policy_config: dict[str, Any] | None = None) -> dict[str, Any]:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    candidate_policy = ai_policy_config.get("candidateFunnel") if isinstance(ai_policy_config.get("candidateFunnel"), dict) else {}
-    semantics = candidate_policy.get("semanticSets") if isinstance(candidate_policy.get("semanticSets"), dict) else {}
-    selling_point_labels = candidate_policy.get("heroProfileSellingPointLabels") if isinstance(candidate_policy.get("heroProfileSellingPointLabels"), dict) else {}
-    name = str(input_row["name_snapshot"] if "name_snapshot" in input_row.keys() else card.get("code") or "").strip()
-    category = str(card.get("category") or "未知")
-    colors = ensure_string_list(card.get("colors"))
-    details = ensure_string_list(card.get("details"))
-    structure = ensure_string_list(card.get("structure"))
-    neckline = ensure_string_list(card.get("neckline"))
-    closure = ensure_string_list(card.get("closure"))
-    silhouette = ensure_string_list(card.get("silhouette"))
-    materials = ensure_string_list(card.get("materials_visual"))
-    length = card.get("length") if isinstance(card.get("length"), dict) else {}
-    wearability = card.get("wearability") if isinstance(card.get("wearability"), dict) else {}
-    methods = ensure_string_list(wearability.get("recommended_wearing_methods"))
-    detail_tokens = set(details + structure + neckline + closure)
-    waist_detail_tokens = set(ensure_string_list(semantics.get("waistFocusDetails")))
-    waist_silhouette_tokens = set(ensure_string_list(semantics.get("waistFocusSilhouettes")))
-    is_waist_focus = bool(detail_tokens & waist_detail_tokens) or bool(set(silhouette) & waist_silhouette_tokens)
-    is_light = any(color in set(ensure_string_list(semantics.get("lightColors"))) for color in colors)
-    selling_points: list[str] = []
-    for token in [*details, *structure, *neckline, *closure, *silhouette]:
-        label = str(selling_point_labels.get(token) or "")
-        if label and label not in selling_points:
-            selling_points.append(label)
-    if materials:
-        selling_points.append("面料肌理")
-    if not selling_points:
-        selling_points.append("主推款整体轮廓")
-    visibility_risks = build_visibility_risks_for_category(category, ai_policy_config)
     return {
-        "source": "styling_garment_code_match",
-        "confidence": 0.9,
-        "name_snapshot": name,
-        "hero_code": str(card.get("code") or name),
-        "matched_material_id": int(card["id"]) if card.get("id") is not None else None,
-        "category": category,
-        "sub_category": str(card.get("sub_category") or ""),
-        "colors": colors,
-        "details": details,
-        "structure": structure,
-        "neckline": neckline,
-        "closure": closure,
-        "silhouette": silhouette,
-        "length": length,
-        "recommended_wearing_methods": methods,
-        "is_high_waist_or_waist_focus": is_waist_focus,
-        "is_light_colored": is_light,
-        "selling_points": selling_points[:8],
-        "visibility_risks": visibility_risks,
-        "shot_requirements": build_hero_shot_requirements(category, ai_policy_config),
-    }
-
-
-def build_visibility_risks_for_category(category: str, ai_policy_config: dict[str, Any] | None = None) -> list[str]:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    hero_policy = ai_policy_config.get("heroPolicy") if isinstance(ai_policy_config.get("heroPolicy"), dict) else {}
-    risks_by_category = hero_policy.get("visibilityRisksByCategory") if isinstance(hero_policy.get("visibilityRisksByCategory"), dict) else {}
-    return ensure_string_list(risks_by_category.get(category) or risks_by_category.get("default")) or ["配角抢走视觉中心", "主推款关键细节被遮挡"]
-
-
-def build_hero_shot_requirements(category: str, ai_policy_config: dict[str, Any] | None = None) -> list[str]:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    hero_policy = ai_policy_config.get("heroPolicy") if isinstance(ai_policy_config.get("heroPolicy"), dict) else {}
-    requirements_by_category = hero_policy.get("shotRequirementsByCategory") if isinstance(hero_policy.get("shotRequirementsByCategory"), dict) else {}
-    return ensure_string_list(requirements_by_category.get(category) or requirements_by_category.get("default")) or ["完整比例", "核心结构", "关键细节", "侧身补充", "标准正面图"]
-
-
-def rank_candidate_materials(hero_profile: dict[str, Any], material_cards: list[dict[str, Any]], ai_policy_config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    ranked = []
-    for card in material_cards:
-        score, reasons, excluded = score_candidate_card(hero_profile, card, ai_policy_config)
-        ranked.append({"card": {**card, "funnel_score": round(score, 3), "funnel_reasons": reasons}, "score": score, "reasons": reasons, "excluded": excluded})
-    return sorted(ranked, key=lambda item: (item["excluded"], -float(item["score"]), str(item["card"].get("code") or "")))
-
-
-def score_candidate_card(hero_profile: dict[str, Any], card: dict[str, Any], ai_policy_config: dict[str, Any] | None = None) -> tuple[float, list[str], bool]:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    candidate_policy = ai_policy_config.get("candidateFunnel") if isinstance(ai_policy_config.get("candidateFunnel"), dict) else {}
-    risk_adjustments = candidate_policy.get("riskAdjustments") if isinstance(candidate_policy.get("riskAdjustments"), dict) else {}
-    semantics = candidate_policy.get("semanticSets") if isinstance(candidate_policy.get("semanticSets"), dict) else {}
-    category = str(card.get("category") or "")
-    risk = card.get("risk") if isinstance(card.get("risk"), list) else []
-    wearability = card.get("wearability") if isinstance(card.get("wearability"), dict) else {}
-    coverage_risk = str(wearability.get("coverage_risk") or "")
-    colors = card.get("colors") if isinstance(card.get("colors"), list) else []
-    length = card.get("length") if isinstance(card.get("length"), dict) else {}
-    silhouette = card.get("silhouette") if isinstance(card.get("silhouette"), list) else []
-    score = 1.0
-    reasons: list[str] = []
-    excluded = False
-    hero_category = str(hero_profile.get("category") or "未知")
-    category_policy = ai_policy_category_policy(ai_policy_config, hero_category)
-    hero_code = str(hero_profile.get("hero_code") or hero_profile.get("name_snapshot") or "").strip().lower()
-    card_code = str(card.get("code") or "").strip().lower()
-    if hero_code and card_code and hero_code == card_code:
-        score -= 1.0
-        excluded = True
-        reasons.append("current_hero_same_code_excluded")
-    if hero_profile.get("matched_material_id") is not None and card.get("id") is not None and int(hero_profile["matched_material_id"]) == int(card["id"]):
-        score -= 1.0
-        excluded = True
-        reasons.append("current_hero_same_material_excluded")
-    hard_excluded_categories = set(ensure_string_list(candidate_policy.get("hardExcludedCategories")))
-    if category in hard_excluded_categories:
-        score -= 1.0
-        excluded = True
-        reasons.append(f"{category}_hard_excluded")
-    excluded_categories = set(ensure_string_list(category_policy.get("excludedCategories")))
-    if category in excluded_categories:
-        score -= 1.0
-        excluded = True
-        reasons.append(f"{hero_category}_{category}_category_excluded")
-    category_adjustments = category_policy.get("categoryScoreAdjustments") if isinstance(category_policy.get("categoryScoreAdjustments"), dict) else {}
-    if category in category_adjustments:
-        adjustment = float(category_adjustments.get(category) or 0)
-        score += adjustment
-        reasons.append(f"policy_category_adjustment_{category}_{adjustment:+.2f}")
-    coverage_risk_adjustments = candidate_policy.get("coverageRiskAdjustments") if isinstance(candidate_policy.get("coverageRiskAdjustments"), dict) else {}
-    if coverage_risk in coverage_risk_adjustments:
-        score += float(coverage_risk_adjustments.get(coverage_risk) or 0)
-        reasons.append(f"coverage_risk_{coverage_risk}")
-    no_style_risk_values = set(ensure_string_list(candidate_policy.get("noStyleRiskValues")))
-    if any(str(item) not in no_style_risk_values for item in risk):
-        score += float(risk_adjustments.get("styleRisk", -0.16))
-        reasons.append("style_risk")
-    if hero_profile.get("is_high_waist_or_waist_focus"):
-        waist_focus_category_adjustments = candidate_policy.get("waistFocusCategoryAdjustments") if isinstance(candidate_policy.get("waistFocusCategoryAdjustments"), dict) else {}
-        if category in waist_focus_category_adjustments:
-            adjustment = float(waist_focus_category_adjustments.get(category) or 0)
-            score += adjustment
-            reasons.append(f"waist_focus_category_adjustment_{category}_{adjustment:+.2f}")
-        long_top_values = set(ensure_string_list(candidate_policy.get("longTopLengthValues")))
-        if str(length.get("top_length") or "") in long_top_values:
-            score += float(risk_adjustments.get("longTopMayCoverWaist", -0.25))
-            reasons.append("long_top_may_cover_waist")
-        short_upper_categories = set(ensure_string_list(candidate_policy.get("waistFocusShortUpperCategories")))
-        short_upper_values = set(ensure_string_list(candidate_policy.get("shortUpperLengthValues")))
-        if category in short_upper_categories and str(length.get("top_length") or "") in short_upper_values:
-            score += float(risk_adjustments.get("waistFocusShortUpper", 0.12))
-            reasons.append("waist_focus_short_upper_candidate")
-    dark_colors = set(ensure_string_list(semantics.get("darkColors")))
-    dark_against_light_categories = set(ensure_string_list(candidate_policy.get("darkAgainstLightHeroCategories")))
-    if hero_profile.get("is_light_colored") and category in dark_against_light_categories and any(str(color) in dark_colors for color in colors):
-        score += float(risk_adjustments.get("darkUpperAgainstLightHero", -0.12))
-        reasons.append("dark_upper_against_light_hero")
-    light_pairing_policy = candidate_policy.get("lightPairingByHeroCategory") if isinstance(candidate_policy.get("lightPairingByHeroCategory"), dict) else {}
-    light_pairing_categories = set(ensure_string_list(light_pairing_policy.get(hero_category)))
-    if category in light_pairing_categories:
-        if any(str(color) in set(ensure_string_list(semantics.get("lightColors"))) for color in colors):
-            score += float(risk_adjustments.get("lightUpperForBottomHero", 0.1))
-            reasons.append("light_upper_for_bottom_hero")
-        materials = card.get("materials_visual") if isinstance(card.get("materials_visual"), list) else []
-        if any(str(material) in set(ensure_string_list(semantics.get("lightMaterials"))) for material in materials):
-            score += float(risk_adjustments.get("lightMaterialForBottomHero", 0.1))
-            reasons.append("light_material_for_bottom_hero")
-        if any(str(material) in set(ensure_string_list(semantics.get("heavyMaterials"))) for material in materials):
-            score += float(risk_adjustments.get("heavyMaterialForBottomHero", -0.18))
-            reasons.append("heavy_material_for_bottom_hero_downranked")
-        seasons = card.get("season") if isinstance(card.get("season"), list) else []
-        if seasons and not any(str(season) in set(ensure_string_list(semantics.get("springSummerSeasons"))) for season in seasons):
-            score += float(risk_adjustments.get("seasonMismatchForLightBottom", -0.12))
-            reasons.append("season_mismatch_for_light_bottom")
-    structured_layer_categories = set(ensure_string_list(candidate_policy.get("structuredLayerBonusCategories")))
-    structured_layer_silhouettes = set(ensure_string_list(candidate_policy.get("structuredLayerBonusSilhouettes")))
-    if category in structured_layer_categories and bool(set(silhouette) & structured_layer_silhouettes):
-        score += float(risk_adjustments.get("structuredOuterwear", 0.08))
-        reasons.append("structured_layer_candidate")
-    return max(0.0, score), reasons or ["neutral_candidate"], excluded
-
-
-def select_diverse_candidate_cards(ranked_cards: list[dict[str, Any]], limit: int = 20, ai_policy_config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    candidate_policy = ai_policy_config.get("candidateFunnel") if isinstance(ai_policy_config.get("candidateFunnel"), dict) else {}
-    category_caps = candidate_policy.get("categoryCaps") if isinstance(candidate_policy.get("categoryCaps"), dict) else {"default": 8}
-    default_cap = clamp_int(category_caps.get("default"), 1, 30, 8)
-    selected: list[dict[str, Any]] = []
-    category_counts: dict[str, int] = {}
-    for item in ranked_cards:
-        if item["excluded"]:
-            continue
-        card = item["card"]
-        category = str(card.get("category") or "未知")
-        category_cap = clamp_int(category_caps.get(category), 1, 30, default_cap)
-        if category_counts.get(category, 0) >= category_cap and len(selected) < max(12, limit // 2):
-            continue
-        selected.append(card)
-        category_counts[category] = category_counts.get(category, 0) + 1
-        if len(selected) >= limit:
-            break
-    return selected
-
-
-def build_outfit_drafts(candidate_cards: list[dict[str, Any]], hero_profile: dict[str, Any], ai_policy_config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    accessory_defaults = ((ai_policy_config.get("accessoryPolicy") or {}).get("default") if isinstance(ai_policy_config.get("accessoryPolicy"), dict) else None) or ["低存在感裸色或米色简洁鞋"]
-    hero_category = str(hero_profile.get("category") or "未知")
-    category_policy = ai_policy_category_policy(ai_policy_config, hero_category)
-    drafts: list[dict[str, Any]] = [
-        {
-            "id": "draft_hero_first",
-            "mode": str(category_policy.get("singlePieceMode") or "hero_first_single_piece"),
-            "selected_material_ids": [],
-            "generated_accessories": ensure_string_list(accessory_defaults)[:6],
-            "reason": str(category_policy.get("singlePieceReason") or "当候选配角无法提升主推款时，保留主推款单品表达。")[:240],
-            "risk_notes": ["需要 Gemini 判断是否略显单薄。"],
-        }
-    ]
-    preferred_cards = sort_cards_for_outfit_drafts(candidate_cards, hero_category, ai_policy_config)
-    for card in preferred_cards[:8]:
-        category = str(card.get("category") or "未知")
-        mode = draft_mode_for_category(hero_category, category, ai_policy_config)
-        drafts.append(
-            {
-                "id": f"draft_{card.get('id')}",
-                "mode": mode,
-                "selected_material_ids": [int(card["id"])],
-                "generated_accessories": ensure_string_list(accessory_defaults)[:6],
-                "reason": str(card.get("pairing_brief") or "候选单品需服务主推款展示。")[:120],
-                "risk_notes": ensure_string_list(card.get("funnel_reasons"))[:5],
-            }
-        )
-        if len(drafts) >= 6:
-            break
-    return drafts
-
-
-def sort_cards_for_outfit_drafts(candidate_cards: list[dict[str, Any]], hero_category: str, ai_policy_config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    category_policy = ai_policy_category_policy(ai_policy_config, hero_category)
-    priority_order = ensure_string_list(category_policy.get("draftCategoryPriority"))
-
-    def priority(card: dict[str, Any]) -> tuple[int, float, str]:
-        category = str(card.get("category") or "未知")
-        if priority_order:
-            category_priority = priority_order.index(category) if category in priority_order else len(priority_order) + 1
-        else:
-            category_priority = 0
-        return (category_priority, -float(card.get("funnel_score") or 0), str(card.get("code") or ""))
-
-    return sorted(candidate_cards, key=priority)
-
-
-def draft_mode_for_category(hero_category: str, card_category: str, ai_policy_config: dict[str, Any] | None = None) -> str:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    category_policy = ai_policy_category_policy(ai_policy_config, hero_category)
-    modes = category_policy.get("draftModeByCandidateCategory") if isinstance(category_policy.get("draftModeByCandidateCategory"), dict) else {}
-    candidate_policy = ai_policy_config.get("candidateFunnel") if isinstance(ai_policy_config.get("candidateFunnel"), dict) else {}
-    return str(modes.get(card_category) or candidate_policy.get("defaultDraftMode") or "office_outfit")[:80]
-
-
-def build_library_adequacy_report(
-    hero_profile: dict[str, Any],
-    ranked_cards: list[dict[str, Any]],
-    candidate_cards: list[dict[str, Any]],
-    outfit_drafts: list[dict[str, Any]],
-    ai_policy_config: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    library_policy = ai_policy_config.get("libraryAdequacyPolicy") if isinstance(ai_policy_config.get("libraryAdequacyPolicy"), dict) else {}
-    better_alternative_limit = clamp_int(library_policy.get("betterAlternativeLimit"), 0, 20, 5)
-    usable_by_category: dict[str, int] = {}
-    excluded_current_hero_count = 0
-    blocked_by_wearing_method_count = 0
-    blocked_by_category_count = 0
-    blocked_by_season_or_material_count = 0
-    better_alternatives: list[dict[str, Any]] = []
-    for item in ranked_cards:
-        card = item["card"]
-        category = str(card.get("category") or "未知")
-        reasons = ensure_string_list(item.get("reasons"))
-        if item["excluded"]:
-            if any("current_hero" in reason for reason in reasons):
-                excluded_current_hero_count += 1
-            if any("category" in reason or "same_" in reason for reason in reasons):
-                blocked_by_category_count += 1
-            continue
-        usable_by_category[category] = usable_by_category.get(category, 0) + 1
-        if any("tuck" in reason or "wearing" in reason for reason in reasons):
-            blocked_by_wearing_method_count += 1
-        if any("season" in reason or "material" in reason or "heavy" in reason for reason in reasons):
-            blocked_by_season_or_material_count += 1
-    for card in candidate_cards[:better_alternative_limit]:
-        better_alternatives.append(
-            {
-                "id": int(card["id"]),
-                "code": card.get("code"),
-                "category": card.get("category"),
-                "reason": "候选漏斗高分候选，需由 AI Stylist 与最终选中方案比较。",
-            }
-        )
-    hero_category = str(hero_profile.get("category") or "未知")
-    category_policy = ai_policy_category_policy(ai_policy_config, hero_category)
-    supply_gap_notes: list[str] = []
-    for rule in category_policy.get("supplyGapCategoryGroups", []):
-        if not isinstance(rule, dict):
-            continue
-        categories = ensure_string_list(rule.get("categories"))
-        minimum = clamp_int(rule.get("minimum"), 0, 20, 1)
-        count = sum(usable_by_category.get(category, 0) for category in categories)
-        note = str(rule.get("note") or "")
-        if count < minimum and note:
-            supply_gap_notes.append(note)
-    if not candidate_cards:
-        supply_gap_notes.append("当前候选漏斗没有可用搭配服饰，应优先空选搭或补库。")
-    return {
-        "schema_version": "library-adequacy-v1",
-        "library_ready_count": len(ranked_cards),
-        "usable_by_category": usable_by_category,
-        "excluded_current_hero_count": excluded_current_hero_count,
-        "blocked_by_wearing_method_count": blocked_by_wearing_method_count,
-        "blocked_by_category_count": blocked_by_category_count,
-        "blocked_by_season_or_material_count": blocked_by_season_or_material_count,
-        "better_alternatives": better_alternatives,
-        "supply_gap_notes": supply_gap_notes,
-        "recommend_empty_pairing": bool(library_policy.get("emptyPairingWhenSupplyGap", True) and supply_gap_notes and outfit_drafts and not outfit_drafts[0].get("selected_material_ids")),
+        "schema_version": "library-context-v1",
+        "library_ready_count": len(material_cards),
+        "counts_by_status": {"ready": len(material_cards)},
+        "manual_flags": manual_flags,
+        "decision_owner": "AI Stylist Prompt",
+        "notes": ["后端不判断库是否充足、不排序候选、不给出更优备选；这些结论由 Prompt 和大模型输出。"],
     }
 
 
@@ -7750,30 +7310,24 @@ def build_accessory_boundary(ai_policy_config: dict[str, Any] | None = None) -> 
     }
 
 
-def build_phase_one_brand_style_evidence(hero_profile: dict[str, Any], ai_policy_config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def build_phase_one_brand_style_evidence(ai_policy_config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
     brand = ai_policy_config.get("brandStylePolicy") if isinstance(ai_policy_config.get("brandStylePolicy"), dict) else {}
     evidence: list[dict[str, Any]] = []
     for item in brand.get("evidence", []):
         if not isinstance(item, dict):
             continue
-        tags = ensure_string_list(item.get("brand_style_tags"))
-        if str(item.get("id") or "") == "phase1_hero_first_product":
-            tags = [*tags, *ensure_string_list(hero_profile.get("category"))[:1]]
         evidence.append({
             "id": str(item.get("id") or "")[:80],
             "source_type": str(item.get("source_type") or "manual_policy")[:80],
             "visual_caption": str(item.get("visual_caption") or "")[:240],
-            "brand_style_tags": tags[:12],
+            "brand_style_tags": ensure_string_list(item.get("brand_style_tags"))[:12],
             "accessory_boundary": str(item.get("accessory_boundary") or "")[:240],
         })
     return evidence[:10]
 
 
 def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
-    ai_policy_config = candidate_snapshot.get("ai_policy_config") if isinstance(candidate_snapshot.get("ai_policy_config"), dict) else get_active_ai_policy_config()
-    brand_policy = ai_policy_config.get("brandStylePolicy") if isinstance(ai_policy_config.get("brandStylePolicy"), dict) else {}
-    quality_policy = ai_policy_config.get("qualitySignalPolicy") if isinstance(ai_policy_config.get("qualitySignalPolicy"), dict) else {}
     return {
         "schema_version": "ai-stylist-request-v1",
         "model": settings.gemini_model,
@@ -7784,17 +7338,8 @@ def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[s
             "imageSnapshot": loads(input_row["image_snapshot_json"], []),
         },
         "candidate_retrieval": candidate_snapshot,
-        "brand_boundary": {
-            "core": ensure_string_list(brand_policy.get("core")),
-            "principle": str(brand_policy.get("principle") or ""),
-        },
-        "aesthetic_quality_signals": {
-            "principle": str(quality_policy.get("principle") or ""),
-            "flag_if": ensure_string_list(quality_policy.get("flagIf")),
-            "diagnosis_fields": ensure_string_list(quality_policy.get("requiredDiagnosisKeys")),
-        },
-        "ai_policy_config": ai_policy_config,
-        "ai_policy_prompt_card": build_ai_policy_prompt_card(ai_policy_config),
+        "brand_info": get_current_brand_info() or {},
+        "prompt_rule_source": AI_STYLING_PROMPT_CONFIG_KEY,
         "output_schema": "styling-plan-v1",
     }
 
@@ -7858,27 +7403,28 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
     candidates = source.get("outfit_candidates") if isinstance(source.get("outfit_candidates"), list) else []
     candidate_ids = {int(item) for item in candidate_snapshot.get("candidate_material_ids", [])}
     candidate_cards = candidate_cards_by_id(candidate_snapshot)
-    ai_policy_config = candidate_snapshot.get("ai_policy_config") if isinstance(candidate_snapshot.get("ai_policy_config"), dict) else default_ai_policy_config()
+    candidate_cards_by_code_map = candidate_cards_by_code(candidate_snapshot)
     normalized_candidates = [
-        normalize_outfit_candidate(item, candidate_ids, candidate_cards, index, ai_policy_config)
+        normalize_outfit_candidate(item, candidate_ids, candidate_cards, candidate_cards_by_code_map, index)
         for index, item in enumerate(candidates, start=1)
         if isinstance(item, dict)
     ]
     if not normalized_candidates:
-        normalized_candidates = [normalize_outfit_candidate({}, candidate_ids, candidate_cards, 1, ai_policy_config)]
-    selected_outfit_id = str(source.get("selected_outfit_key") or source.get("selected_outfit_id") or normalized_candidates[0]["id"])
-    if selected_outfit_id not in {item["id"] for item in normalized_candidates}:
-        selected_outfit_id = normalized_candidates[0]["id"]
-    selected = next(item for item in normalized_candidates if item["id"] == selected_outfit_id)
+        normalized_candidates = [normalize_outfit_candidate({}, candidate_ids, candidate_cards, candidate_cards_by_code_map, 1)]
+    selected_outfit_id = str(source.get("selected_outfit_key") or source.get("selected_outfit_id") or "")
+    selected = next((item for item in normalized_candidates if item["id"] == selected_outfit_id), {})
+    selected_codes = normalize_selected_material_codes(source.get("selected_material_codes") or source.get("selected_materials"), candidate_cards_by_code_map)
+    selected_ids = selected_material_ids_for_codes(selected_codes, candidate_cards_by_code_map)
     selected_ids_source = source.get("selected_material_ids")
     if not isinstance(selected_ids_source, list):
-        selected_ids_source = source.get("selected_materials") if isinstance(source.get("selected_materials"), list) else selected["selected_material_ids"]
-    selected_ids = normalize_selected_material_ids(selected_ids_source, candidate_ids)
+        selected_ids_source = selected["selected_material_ids"] if isinstance(selected.get("selected_material_ids"), list) else []
     if not selected_ids:
-        selected_ids = selected["selected_material_ids"]
-    selected_refs = normalize_selected_material_refs(source.get("selected_materials"), selected_ids, candidate_cards)
+        selected_ids = normalize_selected_material_ids(selected_ids_source, candidate_ids)
+    if not selected_ids:
+        selected_ids = selected.get("selected_material_ids") if isinstance(selected.get("selected_material_ids"), list) else []
+    selected_refs = normalize_selected_material_refs(source.get("selected_materials"), selected_ids, candidate_cards, candidate_cards_by_code_map)
     if not selected_refs:
-        selected_refs = normalize_selected_material_refs(selected.get("selected_materials"), selected_ids, candidate_cards)
+        selected_refs = normalize_selected_material_refs(selected.get("selected_materials"), selected_ids, candidate_cards, candidate_cards_by_code_map)
     selected_codes = [item["material_code"] for item in selected_refs if item.get("material_code")]
     warnings = ensure_string_list(source.get("warnings"))
     rejected_source = source.get("rejected_candidates") if isinstance(source.get("rejected_candidates"), list) else []
@@ -7887,8 +7433,8 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
         "plan_source_mode": "fallback" if plan_source_mode == "fallback" else "production",
         "hero_understanding": {
             "hero_visual_summary": str(hero.get("hero_visual_summary") or source.get("hero_visual_summary") or "主推款图片已作为商品事实源。")[:120],
-            "category": normalize_hero_category(hero.get("category") or candidate_snapshot.get("hero_profile", {}).get("category")),
-            "shot_requirements": ensure_string_list(hero.get("shot_requirements") or candidate_snapshot.get("hero_profile", {}).get("shot_requirements"))[:8],
+            "category": str(hero.get("category") or "")[:80],
+            "shot_requirements": ensure_string_list(hero.get("shot_requirements"))[:8],
             "hero_selling_points": ensure_string_list(hero.get("hero_selling_points"))[:8],
             "hero_visibility_risks": ensure_string_list(hero.get("hero_visibility_risks"))[:8],
         },
@@ -7912,8 +7458,27 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
         "brand_evidence": normalize_brand_evidence(source.get("brand_evidence"), candidate_snapshot),
         "reason_summary": str(source.get("reason_summary") or "已根据主推款和搭配服饰标签完成 AI Stylist 造型方案。")[:180],
         "rejected_candidates": normalize_rejected_candidates(rejected_source, normalized_candidates, candidate_cards),
+        "quality_signals": normalize_model_quality_signals(source.get("quality_signals")),
         "warnings": warnings[:8],
     }
+
+
+def normalize_model_quality_signals(value: Any) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("code") or "")[:80]
+        message = str(item.get("message") or "")[:240]
+        if not code and not message:
+            continue
+        signals.append({
+            "code": code,
+            "category": str(item.get("category") or "")[:80],
+            "severity": str(item.get("severity") or "review")[:40],
+            "message": message,
+        })
+    return signals[:12]
 
 
 def normalize_brand_evidence(value: Any, candidate_snapshot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -7934,11 +7499,6 @@ def normalize_brand_evidence(value: Any, candidate_snapshot: dict[str, Any]) -> 
     return evidence[:5]
 
 
-def normalize_hero_category(value: Any) -> str:
-    category = str(value or "未知").strip()
-    return category or "未知"
-
-
 def candidate_cards_by_id(candidate_snapshot: dict[str, Any]) -> dict[int, dict[str, Any]]:
     cards: dict[int, dict[str, Any]] = {}
     for collection_key in ("library_tag_cards", "material_cards"):
@@ -7952,62 +7512,90 @@ def candidate_cards_by_id(candidate_snapshot: dict[str, Any]) -> dict[int, dict[
     return cards
 
 
-def normalize_outfit_candidate(candidate: dict[str, Any], candidate_ids: set[int], candidate_cards: dict[int, dict[str, Any]], index: int, ai_policy_config: dict[str, Any] | None = None) -> dict[str, Any]:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    quality_policy = ai_policy_config.get("qualitySignalPolicy") if isinstance(ai_policy_config.get("qualitySignalPolicy"), dict) else {}
-    diagnosis_keys = [
-        *default_ai_policy_config()["qualitySignalPolicy"]["requiredDiagnosisKeys"],
-        "official_style_evidence",
-        "shotplan_readiness",
-        *ensure_string_list(quality_policy.get("requiredDiagnosisKeys")),
-    ]
-    score_thresholds = quality_policy.get("scoreThresholds") if isinstance(quality_policy.get("scoreThresholds"), dict) else {}
-    score_keys = [
-        "aesthetic_score",
-        "brand_fit_score",
-        "hero_visibility_score",
-        "commercial_readiness_score",
-        *[str(key) for key in score_thresholds.keys()],
-    ]
+def candidate_cards_by_code(candidate_snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    cards: dict[str, dict[str, Any]] = {}
+    for collection_key in ("library_tag_cards", "material_cards"):
+        for card in candidate_snapshot.get(collection_key, []):
+            if not isinstance(card, dict):
+                continue
+            code = str(card.get("code") or "").strip()
+            if code:
+                cards[code] = card
+    return cards
+
+
+def normalize_selected_material_codes(value: Any, candidate_cards_by_code_map: dict[str, dict[str, Any]]) -> list[str]:
+    source = value if isinstance(value, list) else []
+    codes: list[str] = []
+    for item in source:
+        raw = item.get("material_code") or item.get("code") if isinstance(item, dict) else item
+        code = str(raw or "").strip()
+        if code and code in candidate_cards_by_code_map:
+            codes.append(code)
+    return list(dict.fromkeys(codes))[:4]
+
+
+def selected_material_ids_for_codes(codes: list[str], candidate_cards_by_code_map: dict[str, dict[str, Any]]) -> list[int]:
+    selected: list[int] = []
+    for code in codes:
+        card = candidate_cards_by_code_map.get(code) or {}
+        try:
+            selected.append(int(card.get("id")))
+        except (TypeError, ValueError):
+            continue
+    return selected[:4]
+
+
+def normalize_outfit_candidate(candidate: dict[str, Any], candidate_ids: set[int], candidate_cards: dict[int, dict[str, Any]], candidate_cards_by_code_map: dict[str, dict[str, Any]], index: int) -> dict[str, Any]:
     scores = candidate.get("scores") if isinstance(candidate.get("scores"), dict) else {}
-    selected_ids = normalize_selected_material_ids(candidate.get("selected_material_ids"), candidate_ids)
+    selected_codes = normalize_selected_material_codes(candidate.get("selected_material_codes") or candidate.get("selected_materials"), candidate_cards_by_code_map)
+    selected_ids = selected_material_ids_for_codes(selected_codes, candidate_cards_by_code_map)
+    if not selected_ids:
+        selected_ids = normalize_selected_material_ids(candidate.get("selected_material_ids"), candidate_ids)
     if not selected_ids:
         selected_ids = normalize_selected_material_ids(candidate.get("selected_materials"), candidate_ids)
-    selected_refs = normalize_selected_material_refs(candidate.get("selected_materials"), selected_ids, candidate_cards)
+    selected_refs = normalize_selected_material_refs(candidate.get("selected_materials"), selected_ids, candidate_cards, candidate_cards_by_code_map)
     selected_codes = [item["material_code"] for item in selected_refs if item.get("material_code")]
     diagnosis = candidate.get("aesthetic_diagnosis") if isinstance(candidate.get("aesthetic_diagnosis"), dict) else {}
     outfit_key = str(candidate.get("outfit_key") or candidate.get("id") or f"candidate_{index}")[:40]
     return {
         "outfit_key": outfit_key,
         "id": outfit_key,
-        "mode": str(candidate.get("mode") or ("light_layering" if selected_ids else "hero_first_single_piece"))[:40],
+        "mode": str(candidate.get("mode") or "")[:40],
         "title": str(candidate.get("title") or "")[:60],
         "selected_material_ids": selected_ids,
         "selected_material_codes": selected_codes,
         "selected_materials": selected_refs,
         "generated_accessories": ensure_string_list(candidate.get("generated_accessories"))[:6],
-        "wearing_notes": str(candidate.get("wearing_notes") or ("主推款作为画面唯一商品级服饰。" if not selected_ids else "搭配服饰以不遮挡主推款的方式穿着。"))[:180],
+        "wearing_notes": str(candidate.get("wearing_notes") or "")[:180],
         "hero_focus": ensure_string_list(candidate.get("hero_focus"))[:8],
-        "aesthetic_diagnosis": {
-            key: str(diagnosis.get(key) or "")[:180]
-            for key in dict.fromkeys(diagnosis_keys)
-        },
-        "scores": normalize_outfit_scores(scores, score_keys, bool(selected_ids)),
+        "aesthetic_diagnosis": normalize_string_dict(diagnosis, max_items=24, max_value_length=180),
+        "scores": normalize_outfit_scores(scores),
         "risk_notes": ensure_string_list(candidate.get("risk_notes"))[:8],
     }
 
 
-def normalize_outfit_scores(scores: dict[str, Any], score_keys: list[str], has_selected_ids: bool) -> dict[str, float]:
-    fallback_scores = {
-        "aesthetic_score": 0.5,
-        "brand_fit_score": 0.5,
-        "hero_visibility_score": 0.6 if has_selected_ids else 0.8,
-        "commercial_readiness_score": 0.7,
-    }
-    return {
-        key: clamp_float(scores.get(key), 0, 1, fallback_scores.get(key, 0.0))
-        for key in dict.fromkeys(score_keys)
-    }
+def normalize_string_dict(value: dict[str, Any], max_items: int = 24, max_value_length: int = 180) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, str] = {}
+    for key, raw in list(value.items())[:max_items]:
+        clean_key = str(key or "").strip()[:80]
+        if clean_key:
+            normalized[clean_key] = str(raw or "")[:max_value_length]
+    return normalized
+
+
+def normalize_outfit_scores(scores: dict[str, Any]) -> dict[str, float]:
+    if not isinstance(scores, dict):
+        return {}
+    normalized: dict[str, float] = {}
+    for key, value in scores.items():
+        try:
+            normalized[str(key)] = clamp_float(value, 0, 1, 0)
+        except (TypeError, ValueError):
+            continue
+    return normalized
 
 
 def normalize_rejected_candidates(
@@ -8076,6 +7664,96 @@ def replace_material_ids_with_codes(text: str, candidate_cards: dict[int, dict[s
     return result
 
 
+def strip_internal_prompt_fields(value: Any) -> Any:
+    internal_keys = {
+        "id",
+        "material_id",
+        "selected_material_ids",
+        "schema_version",
+        "schemaVersion",
+        "plan_source_mode",
+        "script_source_mode",
+        "input_refs",
+        "task_id",
+        "input_version_id",
+        "styling_id",
+        "model",
+        "prompt",
+        "promptConfigKey",
+        "createdAt",
+        "updatedAt",
+        "created_at",
+        "updated_at",
+    }
+    if isinstance(value, list):
+        return [strip_internal_prompt_fields(item) for item in value]
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in internal_keys:
+                continue
+            result[key] = strip_internal_prompt_fields(item)
+        return result
+    return value
+
+
+def styling_result_for_prompt(styling_plan: dict[str, Any], selected_material_snapshot: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    plan = strip_internal_prompt_fields(styling_plan if isinstance(styling_plan, dict) else {})
+    if selected_material_snapshot is not None:
+        plan["selected_material_tag_cards"] = [
+            styling_garment_card_for_prompt(compress_selected_material_for_prompt(item))
+            for item in selected_material_snapshot
+            if isinstance(item, dict)
+        ]
+    return plan
+
+
+def compress_selected_material_for_prompt(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "code": item.get("code"),
+        "category": item.get("category"),
+        "sub_category": item.get("subCategory") or item.get("sub_category"),
+        "colors": item.get("colors") or [],
+        "fit": item.get("fit"),
+        "silhouette": item.get("silhouette") or [],
+        "length": item.get("length") or {},
+        "materials_visual": item.get("materialsVisual") or item.get("materials_visual") or [],
+        "details": item.get("details") or [],
+        "occasion": item.get("occasion") or [],
+        "season": item.get("season") or [],
+        "wearability": item.get("wearability") or {},
+        "manual": item.get("manual") or {},
+        "pairing_brief": item.get("pairingBrief") or item.get("pairing_brief") or "",
+        "risk": item.get("risk") or [],
+        "visual_caption": item.get("visualCaption") or item.get("visual_caption") or "",
+        "tag_facts": item.get("tagFacts") or item.get("tag_facts") or {},
+    }
+
+
+def shoot_script_result_for_prompt(shoot_script: dict[str, Any]) -> dict[str, Any]:
+    return strip_internal_prompt_fields(shoot_script if isinstance(shoot_script, dict) else {})
+
+
+def current_shot_context_for_prompt(shot_index: int, shot_plan: dict[str, Any], styling_plan: dict[str, Any], shoot_script: dict[str, Any]) -> dict[str, Any]:
+    script = shoot_script if isinstance(shoot_script, dict) else {}
+    shot = strip_internal_prompt_fields(shot_plan if isinstance(shot_plan, dict) else {})
+    accessories = []
+    for item in script.get("resolved_accessories", []) if isinstance(script.get("resolved_accessories"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        applies = item.get("applies_to_shots") if isinstance(item.get("applies_to_shots"), list) else []
+        if not applies or shot_index in [int(value) for value in applies if str(value).isdigit()]:
+            accessories.append(strip_internal_prompt_fields(item))
+    return {
+        "preview_grid_cell": shot_index,
+        "styling": styling_result_for_prompt(styling_plan),
+        "global_directing": strip_internal_prompt_fields(script.get("global_directing") if isinstance(script.get("global_directing"), dict) else {}),
+        "current_shot": shot,
+        "resolved_accessories_for_this_shot": accessories,
+        "negative_constraints": strip_internal_prompt_fields((script.get("global_directing") or {}).get("negative_constraints") if isinstance(script.get("global_directing"), dict) else []),
+    }
+
+
 def normalize_selected_material_ids(value: Any, candidate_ids: set[int]) -> list[int]:
     if not isinstance(value, list):
         return []
@@ -8087,12 +7765,12 @@ def normalize_selected_material_ids(value: Any, candidate_ids: set[int]) -> list
             item_id = int(item)
         except (TypeError, ValueError):
             continue
-        if item_id not in selected:
-            selected.append(item_id)
+        selected.append(item_id)
     return selected[:4]
 
 
-def normalize_selected_material_refs(value: Any, selected_ids: list[int], candidate_cards: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+def normalize_selected_material_refs(value: Any, selected_ids: list[int], candidate_cards: dict[int, dict[str, Any]], candidate_cards_by_code_map: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    candidate_cards_by_code_map = candidate_cards_by_code_map or {}
     refs_by_id: dict[int, dict[str, Any]] = {}
     if isinstance(value, list):
         for item in value:
@@ -8101,7 +7779,12 @@ def normalize_selected_material_refs(value: Any, selected_ids: list[int], candid
             try:
                 material_id = int(item.get("material_id") or item.get("id"))
             except (TypeError, ValueError):
-                continue
+                code = str(item.get("material_code") or item.get("code") or "").strip()
+                card = candidate_cards_by_code_map.get(code) or {}
+                try:
+                    material_id = int(card.get("id"))
+                except (TypeError, ValueError):
+                    continue
             if material_id not in selected_ids:
                 continue
             card = candidate_cards.get(material_id, {})
@@ -8131,6 +7814,14 @@ def normalize_selected_material_refs(value: Any, selected_ids: list[int], candid
 def validate_styling_plan(plan: dict[str, Any], candidate_snapshot: dict[str, Any]) -> None:
     candidate_ids = {int(item) for item in candidate_snapshot.get("candidate_material_ids", [])}
     selected_ids = plan.get("selected_material_ids") if isinstance(plan.get("selected_material_ids"), list) else []
+    selected_key = str(plan.get("selected_outfit_key") or plan.get("selected_outfit_id") or "")
+    outfit_keys = {
+        str(item.get("outfit_key") or item.get("id") or "")
+        for item in plan.get("outfit_candidates", [])
+        if isinstance(item, dict)
+    }
+    if not selected_key or selected_key not in outfit_keys:
+        raise RuntimeError("AI Stylist 返回的 selected_outfit_key 不存在于 outfit_candidates")
     invalid = set(int(item) for item in selected_ids) - candidate_ids
     if invalid:
         raise RuntimeError(f"AI Stylist 返回了非法搭配服饰 ID：{sorted(invalid)}")
@@ -8138,261 +7829,6 @@ def validate_styling_plan(plan: dict[str, Any], candidate_snapshot: dict[str, An
         raise RuntimeError("AI Stylist 返回了重复搭配服饰 ID")
     if plan.get("plan_source_mode") == "fallback":
         raise RuntimeError("AI Stylist 工程 fallback 方案不能进入生产链路")
-
-
-def collect_styling_quality_signals(plan: dict[str, Any], candidate_snapshot: dict[str, Any]) -> list[dict[str, Any]]:
-    selected_ids = plan.get("selected_material_ids") if isinstance(plan.get("selected_material_ids"), list) else []
-    selected_outfit = selected_outfit_from_plan(plan)
-    ai_policy_config = candidate_snapshot.get("ai_policy_config") if isinstance(candidate_snapshot.get("ai_policy_config"), dict) else default_ai_policy_config()
-    quality_policy = ai_policy_config.get("qualitySignalPolicy") if isinstance(ai_policy_config.get("qualitySignalPolicy"), dict) else {}
-    signals: list[dict[str, Any]] = []
-    if quality_signal_enabled(ai_policy_config, "unexplainedOuterwearConflict") and has_unexplained_outerwear_conflict(selected_ids, candidate_snapshot, selected_outfit, ai_policy_config):
-        signals.append(styling_quality_signal(
-            "unexplained_outerwear_conflict",
-            quality_signal_message(ai_policy_config, "unexplainedOuterwearConflict", "多个外套候选缺少真实穿着解释，建议客户审核层次关系。"),
-            "wearing_method",
-        ))
-    scores = selected_outfit.get("scores") if isinstance(selected_outfit.get("scores"), dict) else {}
-    score_thresholds = quality_policy.get("scoreThresholds") if isinstance(quality_policy.get("scoreThresholds"), dict) else default_ai_policy_config()["qualitySignalPolicy"]["scoreThresholds"]
-    low_scores = [
-        key
-        for key, threshold in score_thresholds.items()
-        if float(scores.get(key) or 0) < float(threshold)
-    ]
-    if low_scores and quality_signal_enabled(ai_policy_config, "lowCriticScores"):
-        signals.append(styling_quality_signal(
-            "low_critic_scores",
-            f"{quality_signal_message(ai_policy_config, 'lowCriticScores', 'AI Stylist 自评分偏低')}：{', '.join(low_scores)}。",
-            "aesthetic_critic",
-            {"fields": low_scores},
-        ))
-    diagnosis = selected_outfit.get("aesthetic_diagnosis") if isinstance(selected_outfit.get("aesthetic_diagnosis"), dict) else {}
-    required_diagnosis_keys = ensure_string_list(quality_policy.get("requiredDiagnosisKeys")) or default_ai_policy_config()["qualitySignalPolicy"]["requiredDiagnosisKeys"]
-    missing_diagnosis = [key for key in required_diagnosis_keys if not str(diagnosis.get(key) or "").strip()]
-    risk_notes = ensure_string_list(selected_outfit.get("risk_notes"))
-    full_score_threshold = clamp_float(quality_policy.get("fullScoreThreshold"), 0.5, 1.0, 0.98)
-    if all(float(scores.get(key) or 0) >= full_score_threshold for key in score_thresholds) and missing_diagnosis and not risk_notes and quality_signal_enabled(ai_policy_config, "suspiciousFullScores"):
-        signals.append(styling_quality_signal(
-            "suspicious_full_scores",
-            quality_signal_message(ai_policy_config, "suspiciousFullScores", "AI Stylist 给出接近满分但缺少完整诊断和风险说明。"),
-            "aesthetic_critic",
-        ))
-    elif missing_diagnosis and quality_signal_enabled(ai_policy_config, "missingCriticDiagnosis"):
-        signals.append(styling_quality_signal(
-            "missing_critic_diagnosis",
-            f"{quality_signal_message(ai_policy_config, 'missingCriticDiagnosis', 'AI Stylist 缺少部分审美诊断')}：{', '.join(missing_diagnosis)}。",
-            "aesthetic_critic",
-            {"fields": missing_diagnosis},
-        ))
-    if quality_signal_enabled(ai_policy_config, "templateAccessoryRisk") and has_forbidden_accessory_template(selected_outfit, ai_policy_config):
-        signals.append(styling_quality_signal(
-            "template_accessory_risk",
-            quality_signal_message(ai_policy_config, "templateAccessoryRisk", "方案使用了不符合 Lily 边界的模板化配饰。"),
-            "accessory",
-        ))
-    if quality_signal_enabled(ai_policy_config, "unsupportedTuckMethod") and has_forbidden_tuck_method(selected_ids, candidate_snapshot, selected_outfit, ai_policy_config):
-        signals.append(styling_quality_signal(
-            "unsupported_tuck_method",
-            quality_signal_message(ai_policy_config, "unsupportedTuckMethod", "方案使用了搭配服饰或主推款不支持的塞腰/半塞穿法，建议审核上衣下摆处理。"),
-            "wearing_method",
-        ))
-    if quality_signal_enabled(ai_policy_config, "highWaistDarkOuterwearStack") and has_high_waist_dark_outerwear_stack(selected_ids, candidate_snapshot, selected_outfit, plan, ai_policy_config):
-        signals.append(styling_quality_signal(
-            "high_waist_dark_outerwear_stack",
-            quality_signal_message(ai_policy_config, "highWaistDarkOuterwearStack", "高腰裤搭配深色厚重外套存在压低比例和色块过重风险。"),
-            "aesthetic_critic",
-        ))
-    if has_dress_outerwear_layering_risk(selected_ids, candidate_snapshot, selected_outfit, ai_policy_config):
-        signal_config = ai_policy_signal_config(ai_policy_config, "dressOuterwearLayeringRisk")
-        if signal_config.get("enabled", True):
-            signals.append(styling_quality_signal(
-                "dress_outerwear_layering_risk",
-                str(signal_config.get("message") or "连衣裙搭配外套存在遮挡和比例风险。"),
-                "aesthetic_critic",
-            ))
-    if has_selected_below_better_alternatives(selected_ids, candidate_snapshot, ai_policy_config):
-        signal_config = ai_policy_signal_config(ai_policy_config, "selectedBelowBetterAlternatives")
-        if signal_config.get("enabled", True):
-            signals.append(styling_quality_signal(
-                "selected_below_better_alternatives",
-                str(signal_config.get("message") or "选中候选不在候选漏斗高分备选内。"),
-                "aesthetic_critic",
-            ))
-    return signals
-
-
-def styling_quality_signal(code: str, message: str, category: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
-    return {
-        "code": code,
-        "category": category,
-        "severity": "review",
-        "message": message,
-        **(extra or {}),
-    }
-
-
-def quality_signal_enabled(ai_policy_config: dict[str, Any], key: str) -> bool:
-    return bool(ai_policy_signal_config(ai_policy_config, key).get("enabled", True))
-
-
-def quality_signal_message(ai_policy_config: dict[str, Any], key: str, fallback: str) -> str:
-    return str(ai_policy_signal_config(ai_policy_config, key).get("message") or fallback)
-
-
-def attach_styling_quality_signals(plan: dict[str, Any], signals: list[dict[str, Any]]) -> dict[str, Any]:
-    if not signals:
-        return plan
-    existing = plan.get("quality_signals") if isinstance(plan.get("quality_signals"), list) else []
-    return {
-        **plan,
-        "quality_signals": [*existing, *signals][:12],
-        "quality_signal_summary": f"系统记录了 {len(signals)} 条造型审核信号，供客户审核和后续流程优化使用。",
-    }
-
-
-def has_unexplained_outerwear_conflict(selected_ids: list[int], candidate_snapshot: dict[str, Any], selected_outfit: dict[str, Any], ai_policy_config: dict[str, Any] | None = None) -> bool:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    quality_policy = ai_policy_config.get("qualitySignalPolicy") if isinstance(ai_policy_config.get("qualitySignalPolicy"), dict) else {}
-    signal_config = ai_policy_signal_config(ai_policy_config, "unexplainedOuterwearConflict")
-    conflict_categories = set(ensure_string_list(signal_config.get("conflictCategories")))
-    if not conflict_categories:
-        return False
-    cards = {int(card["id"]): card for card in candidate_snapshot.get("material_cards", []) if isinstance(card, dict) and card.get("id") is not None}
-    conflict_count = sum(1 for item_id in selected_ids if str(cards.get(int(item_id), {}).get("category") or "") in conflict_categories)
-    if conflict_count <= 1:
-        return False
-    notes = str(selected_outfit.get("wearing_notes") or "")
-    return not any(keyword in notes for keyword in ensure_string_list(quality_policy.get("layeringExplanationKeywords")))
-
-
-def has_forbidden_accessory_template(selected_outfit: dict[str, Any], ai_policy_config: dict[str, Any] | None = None) -> bool:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    quality_policy = ai_policy_config.get("qualitySignalPolicy") if isinstance(ai_policy_config.get("qualitySignalPolicy"), dict) else {}
-    accessories = " ".join(ensure_string_list(selected_outfit.get("generated_accessories"))).lower()
-    forbidden = ensure_string_list(quality_policy.get("forbiddenAccessoryKeywords"))
-    return any(str(keyword).lower() in accessories for keyword in forbidden)
-
-
-def detect_tuck_usage(notes: str, ai_policy_config: dict[str, Any] | None = None) -> tuple[bool, bool]:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    quality_policy = ai_policy_config.get("qualitySignalPolicy") if isinstance(ai_policy_config.get("qualitySignalPolicy"), dict) else {}
-    text = str(notes or "").lower()
-    compact = "".join(text.split()).replace("_", "-")
-    half_tuck_keywords = tuple(ensure_string_list(quality_policy.get("halfTuckKeywords")))
-    explicit_full_tuck_keywords = tuple(ensure_string_list(quality_policy.get("fullTuckKeywords")))
-    is_half_tuck = any(keyword in compact for keyword in half_tuck_keywords)
-    is_full_tuck = any(keyword in compact for keyword in explicit_full_tuck_keywords)
-    if not is_half_tuck and not is_full_tuck:
-        is_full_tuck = any(keyword in compact for keyword in ensure_string_list(quality_policy.get("genericTuckKeywords"))) and any(
-            keyword in compact for keyword in ensure_string_list(quality_policy.get("waistKeywords"))
-        )
-    return is_half_tuck, is_full_tuck
-
-
-def has_forbidden_tuck_method(selected_ids: list[int], candidate_snapshot: dict[str, Any], selected_outfit: dict[str, Any], ai_policy_config: dict[str, Any] | None = None) -> bool:
-    notes = str(selected_outfit.get("wearing_notes") or "")
-    is_half_tuck, is_full_tuck = detect_tuck_usage(notes, ai_policy_config)
-    if not is_half_tuck and not is_full_tuck:
-        return False
-    cards = {int(card["id"]): card for card in candidate_snapshot.get("material_cards", []) if isinstance(card, dict) and card.get("id") is not None}
-    selected_cards = [cards.get(int(item_id), {}) for item_id in selected_ids]
-    hero_profile = candidate_snapshot.get("hero_profile") if isinstance(candidate_snapshot.get("hero_profile"), dict) else {}
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    quality_policy = ai_policy_config.get("qualitySignalPolicy") if isinstance(ai_policy_config.get("qualitySignalPolicy"), dict) else {}
-    checked_hero_categories = set(ensure_string_list(quality_policy.get("tuckCheckedHeroCategories")))
-    checked_garment_categories = set(ensure_string_list(quality_policy.get("tuckCheckedGarmentCategories")))
-    structured_categories = set(ensure_string_list(quality_policy.get("structuredLayerCategories")))
-    structured_sub_categories = set(ensure_string_list(quality_policy.get("structuredLayerSubCategories")))
-    structured_details = set(ensure_string_list(quality_policy.get("structuredLayerDetails")))
-    structured_materials = set(ensure_string_list(quality_policy.get("structuredLayerMaterials")))
-    checked_cards = selected_cards[:]
-    if str(hero_profile.get("category") or "") in checked_hero_categories:
-        checked_cards.append(hero_profile)
-    for card in checked_cards:
-        category = str(card.get("category") or "")
-        wearability = card.get("wearability") if isinstance(card.get("wearability"), dict) else {}
-        methods = set(ensure_string_list(wearability.get("recommended_wearing_methods") or card.get("recommended_wearing_methods")))
-        if not methods and card.get("recommended_wearing_methods"):
-            methods = set(ensure_string_list(card.get("recommended_wearing_methods")))
-        details = set(ensure_string_list(card.get("details")))
-        materials = set(ensure_string_list(card.get("materials_visual")))
-        is_cardigan_like = category in structured_categories or str(card.get("sub_category") or "") in structured_sub_categories
-        is_structured_or_openwork = bool(details & structured_details) or bool(materials & structured_materials)
-        full_tuck_methods = set(ensure_string_list(quality_policy.get("fullTuckMethodValues")))
-        half_tuck_methods = set(ensure_string_list(quality_policy.get("halfTuckMethodValues")))
-        if is_full_tuck and category in checked_garment_categories and not (methods & full_tuck_methods):
-            return True
-        if is_half_tuck and category in checked_garment_categories and not (methods & (full_tuck_methods | half_tuck_methods)):
-            return True
-        if is_full_tuck and is_cardigan_like and is_structured_or_openwork:
-            return True
-    return False
-
-
-def has_high_waist_dark_outerwear_stack(selected_ids: list[int], candidate_snapshot: dict[str, Any], selected_outfit: dict[str, Any], plan: dict[str, Any], ai_policy_config: dict[str, Any] | None = None) -> bool:
-    hero = plan.get("hero_understanding") if isinstance(plan.get("hero_understanding"), dict) else {}
-    hero_text = " ".join([
-        str(hero.get("hero_visual_summary") or ""),
-        " ".join(ensure_string_list(hero.get("hero_selling_points"))),
-        " ".join(ensure_string_list(selected_outfit.get("hero_focus"))),
-    ])
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    quality_policy = ai_policy_config.get("qualitySignalPolicy") if isinstance(ai_policy_config.get("qualitySignalPolicy"), dict) else {}
-    is_high_waist_bottom = any(keyword in hero_text for keyword in ensure_string_list(quality_policy.get("highWaistHeroKeywords")))
-    if not is_high_waist_bottom:
-        return False
-    cards = {int(card["id"]): card for card in candidate_snapshot.get("material_cards", []) if isinstance(card, dict) and card.get("id") is not None}
-    selected_cards = [cards.get(int(item_id), {}) for item_id in selected_ids]
-    candidate_policy = ai_policy_config.get("candidateFunnel") if isinstance(ai_policy_config.get("candidateFunnel"), dict) else {}
-    semantics = candidate_policy.get("semanticSets") if isinstance(candidate_policy.get("semanticSets"), dict) else {}
-    dark_colors = set(ensure_string_list(semantics.get("darkColors")))
-    dark_stack_categories = set(ensure_string_list(quality_policy.get("highWaistDarkStackCategories")))
-    if not any(str(card.get("category") or "") in dark_stack_categories for card in selected_cards):
-        return False
-    dark_upper_count = 0
-    for card in selected_cards:
-        category = str(card.get("category") or "")
-        colors = card.get("colors") if isinstance(card.get("colors"), list) else []
-        if category in dark_stack_categories and any(str(color) in dark_colors for color in colors):
-            dark_upper_count += 1
-    return dark_upper_count >= 2
-
-
-def has_dress_outerwear_layering_risk(selected_ids: list[int], candidate_snapshot: dict[str, Any], selected_outfit: dict[str, Any], ai_policy_config: dict[str, Any] | None = None) -> bool:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    quality_policy = ai_policy_config.get("qualitySignalPolicy") if isinstance(ai_policy_config.get("qualitySignalPolicy"), dict) else {}
-    signal_config = ai_policy_signal_config(ai_policy_config, "dressOuterwearLayeringRisk")
-    hero_profile = candidate_snapshot.get("hero_profile") if isinstance(candidate_snapshot.get("hero_profile"), dict) else {}
-    hero_category = str(signal_config.get("heroCategory") or "")
-    candidate_category = str(signal_config.get("candidateCategory") or "")
-    if not hero_category or not candidate_category:
-        return False
-    if str(hero_profile.get("category") or "") != hero_category:
-        return False
-    cards = {int(card["id"]): card for card in candidate_snapshot.get("material_cards", []) if isinstance(card, dict) and card.get("id") is not None}
-    selected_cards = [cards.get(int(item_id), {}) for item_id in selected_ids]
-    if len(selected_cards) != 1 or str(selected_cards[0].get("category") or "") != candidate_category:
-        return False
-    notes = " ".join([
-        str(selected_outfit.get("wearing_notes") or ""),
-        " ".join(ensure_string_list(selected_outfit.get("risk_notes"))),
-    ])
-    return not any(keyword in notes for keyword in ensure_string_list(quality_policy.get("layeringExplanationKeywords")))
-
-
-def has_selected_below_better_alternatives(selected_ids: list[int], candidate_snapshot: dict[str, Any], ai_policy_config: dict[str, Any]) -> bool:
-    if not selected_ids:
-        return False
-    signal_config = ai_policy_signal_config(ai_policy_config, "selectedBelowBetterAlternatives")
-    top_count = clamp_int(signal_config.get("topAlternativeCount"), 1, 20, 5)
-    library = candidate_snapshot.get("library_adequacy") if isinstance(candidate_snapshot.get("library_adequacy"), dict) else {}
-    alternatives = library.get("better_alternatives") if isinstance(library.get("better_alternatives"), list) else []
-    top_ids = {
-        int(item["id"])
-        for item in alternatives[:top_count]
-        if isinstance(item, dict) and item.get("id") is not None
-    }
-    return bool(top_ids) and not any(int(item_id) in top_ids for item_id in selected_ids)
 
 
 def get_selected_outfit_scores(styling_plan: dict[str, Any]) -> dict[str, Any]:
@@ -8435,21 +7871,7 @@ def ensure_generation_shot_plans(task_id: int, styling_id: int) -> list[dict[str
         styling = db.execute("SELECT * FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
         selected_snapshot = loads(styling["selected_material_snapshot_json"], [])
         styling_plan = loads(styling["styling_plan_json"], {}) if "styling_plan_json" in styling.keys() else {}
-    plans = build_default_new_shot_plans(selected_snapshot, styling_plan)
-    with get_db() as db:
-        timestamp = now_iso()
-        for plan in plans:
-            db.execute(
-                """
-                INSERT INTO generation_shot_plans
-                  (task_id, styling_id, sort_order, shot_type, plan_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (task_id, styling_id, plan["sortOrder"], plan["shotType"], dumps(plan), timestamp, timestamp),
-            )
-    with get_db() as db:
-        rows = db.execute("SELECT * FROM generation_shot_plans WHERE styling_id = ? ORDER BY sort_order", (styling_id,)).fetchall()
-    return [serialize_new_shot_plan(row) for row in rows]
+    return []
 
 
 def default_ai_policy_config() -> dict[str, Any]:
@@ -8936,50 +8358,32 @@ def get_active_ai_policy_config() -> dict[str, Any]:
         return default_ai_policy_config()
 
 
-def serialize_ai_policy_config(config: dict[str, Any]) -> dict[str, Any]:
-    return normalize_ai_policy_config_payload(config)
-
-
-def build_active_ai_policy_prompt_card() -> str:
-    return build_ai_policy_prompt_card(get_active_ai_policy_config())
-
-
 def build_ai_policy_prompt_card(config: dict[str, Any]) -> str:
     policy = normalize_ai_policy_config_payload(config)
-    candidate = policy["candidateFunnel"]
     quality = policy["qualitySignalPolicy"]
     accessory = policy["accessoryPolicy"]
     brand = policy["brandStylePolicy"]
-    category_lines = [
-        f"- 主推 {item['heroCategory']}：排除 {', '.join(item['excludedCategories']) or '无'}；品类权重 {dumps(item['categoryScoreAdjustments'])}；草案优先级 {', '.join(item['draftCategoryPriority']) or '默认'}。"
-        for item in candidate["categoryPolicies"]
-    ]
+    candidate = policy["candidateFunnel"]
+    category_lines = []
+    for item in candidate.get("categoryPolicies", []):
+        if not isinstance(item, dict):
+            continue
+        category_lines.append(
+            f"- 主推 {item.get('heroCategory')}：{item.get('singlePieceReason') or '由 AI Stylist 判断是否需要库内搭配服饰。'}"
+        )
     lines = [
-        "# Ruyi-Dream AI 选搭策略配置",
-        f"候选漏斗：候选上限 {candidate['candidateLimit']}，候选图片上限 {candidate['candidateImageLimit']}，品类封顶 {dumps(candidate['categoryCaps'])}。",
-        "主推品类策略：",
+        "# Ruyi-Dream AI 选搭 Prompt 业务规则",
+        "执行边界：后端不做候选漏斗、排序、评分、映射、质量判断或改选；以下规则仅作为 Prompt 输入，由 AI Stylist 自行理解和执行。",
+        "搭配库输入：runtime.candidate_retrieval 是未归档 READY 搭配服饰的全量标签事实；所有 Prompt 输入、输出和引用服饰都使用 code，不暴露系统内部 ID。",
+        "主推品类业务提醒：",
         *category_lines,
-        "质量信号：分数阈值 " + dumps(quality["scoreThresholds"]) + "；必填诊断 " + "、".join(quality["requiredDiagnosisKeys"]) + "。",
+        "Aesthetic Critic 维度：" + "、".join(quality["requiredDiagnosisKeys"]) + "。",
+        "质量信号提醒：" + str(quality.get("principle") or ""),
+        "常见风险：" + "、".join(quality.get("flagIf") or []),
         "生成配饰：" + "；".join([f"默认 {', '.join(accessory['default'])}", f"避免 {', '.join(accessory['avoidDefault'])}", accessory["bagRule"], accessory["jewelryRule"]]),
         "品牌边界：" + "、".join(brand["core"]) + "；" + brand["principle"],
     ]
     return "\n".join(lines).rstrip() + "\n"
-
-
-def ai_policy_category_policy(config: dict[str, Any], hero_category: str) -> dict[str, Any]:
-    candidate = config.get("candidateFunnel") if isinstance(config.get("candidateFunnel"), dict) else {}
-    policies = candidate.get("categoryPolicies") if isinstance(candidate.get("categoryPolicies"), list) else []
-    for item in policies:
-        if isinstance(item, dict) and str(item.get("heroCategory") or "") == hero_category:
-            return item
-    return {}
-
-
-def ai_policy_signal_config(config: dict[str, Any], key: str) -> dict[str, Any]:
-    quality = config.get("qualitySignalPolicy") if isinstance(config.get("qualitySignalPolicy"), dict) else {}
-    signals = quality.get("signals") if isinstance(quality.get("signals"), dict) else {}
-    signal = signals.get(key) if isinstance(signals.get(key), dict) else {}
-    return signal
 
 
 def default_shoot_config() -> dict[str, Any]:
@@ -9190,37 +8594,6 @@ def get_shoot_config_category_options() -> list[dict[str, Any]]:
     ]
 
 
-def build_default_new_shot_plans(selected_snapshot: list[dict[str, Any]], styling_plan: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    styling_plan = styling_plan or {}
-    garment_refs = ["hero", *[f"styling:{item.get('id')}" for item in selected_snapshot]]
-    selected_outfit = selected_outfit_from_plan(styling_plan)
-    hero = styling_plan.get("hero_understanding") if isinstance(styling_plan.get("hero_understanding"), dict) else {}
-    hero_category = normalize_hero_category(hero.get("category"))
-    hero_points = ensure_string_list(hero.get("hero_selling_points")) or ensure_string_list(selected_outfit.get("hero_focus"))
-    wearing_notes = str(selected_outfit.get("wearing_notes") or styling_plan.get("reason_summary") or "搭配服饰服务主推款展示。")
-    generated_accessories = ensure_string_list(selected_outfit.get("generated_accessories"))
-    accessory_notes = "、".join(generated_accessories) if generated_accessories else "可生成低存在感鞋、包、首饰作为辅助，不做特写，不抢主推款。"
-    base = build_category_shot_template(hero_category)
-    return [
-        {
-            "sortOrder": index,
-            "shotType": shot_type,
-            "framing": framing,
-            "pose": pose,
-            "cameraAngle": angle,
-            "mainFocus": focus,
-            "visibleGarments": garment_refs,
-            "heroSellingPoints": hero_points,
-            "wearingNotes": wearing_notes,
-            "generatedAccessoryNotes": accessory_notes,
-            "backgroundLighting": "白/浅灰棚拍背景，柔和均匀光线，轻微落地阴影。",
-            "compositionNotes": "构图克制、商品优先、留白干净，避免报刊大片和外景感。",
-            "negativeConstraints": ["不要文字水印", "不要改款换色", "不要让生成配饰成为视觉中心", "不要让搭配服饰抢主推款视觉中心"],
-        }
-        for index, (shot_type, framing, pose, angle, focus) in enumerate(base, start=1)
-    ]
-
-
 def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_version_id: int) -> dict[str, Any]:
     styling_plan = get_styling_plan_by_id(styling_id)
     shoot_config = get_active_shoot_config()
@@ -9229,17 +8602,8 @@ def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_ver
         styling_row = db.execute("SELECT * FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
     selected_snapshot = loads(styling_row["selected_material_snapshot_json"], []) if styling_row else []
     candidate_snapshot = loads(styling_row["candidate_retrieval_snapshot_json"], {}) if styling_row and "candidate_retrieval_snapshot_json" in styling_row.keys() else {}
-    ai_policy_config = (
-        candidate_snapshot.get("ai_policy_config")
-        if isinstance(candidate_snapshot, dict) and isinstance(candidate_snapshot.get("ai_policy_config"), dict)
-        else get_active_ai_policy_config()
-    )
-    ai_policy_prompt_card = (
-        str(candidate_snapshot.get("ai_policy_prompt_card"))
-        if isinstance(candidate_snapshot, dict) and candidate_snapshot.get("ai_policy_prompt_card")
-        else build_ai_policy_prompt_card(ai_policy_config)
-    )
-    base_plans = build_default_new_shot_plans(selected_snapshot, styling_plan)
+    ai_styling_prompt = str(candidate_snapshot.get("ai_styling_prompt") or "") if isinstance(candidate_snapshot, dict) else ""
+    ai_styling_prompt_config_key = str(candidate_snapshot.get("ai_styling_prompt_config_key") or AI_STYLING_PROMPT_CONFIG_KEY) if isinstance(candidate_snapshot, dict) else AI_STYLING_PROMPT_CONFIG_KEY
     return {
         "schema_version": "shoot-script-request-v1",
         "model": settings.gemini_model,
@@ -9252,14 +8616,15 @@ def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_ver
         },
         "styling_id": styling_id,
         "styling_plan": styling_plan,
+        "styling_result": styling_result_for_prompt(styling_plan, selected_snapshot),
         "selected_material_snapshot": selected_snapshot,
         "brand_info": get_current_brand_info() or {},
         "shoot_config": shoot_config,
-        "ai_policy_config": ai_policy_config,
-        "ai_policy_prompt_card": ai_policy_prompt_card,
-        "base_shot_rules": base_plans,
+        "ai_styling_prompt_config_key": ai_styling_prompt_config_key,
+        "ai_styling_prompt": ai_styling_prompt,
+        "base_shot_rules": [],
         "category_rule_summary": build_shoot_script_category_rule_summary(shoot_config),
-        "accessory_boundary": build_accessory_boundary(ai_policy_config),
+        "accessory_boundary": candidate_snapshot.get("accessory_boundary") if isinstance(candidate_snapshot, dict) else build_accessory_boundary(),
         "output_schema": "shoot-script-v1",
     }
 
@@ -9306,64 +8671,6 @@ def format_shoot_config_shot_rules_for_prompt(rules: Any) -> str:
     )
 
 
-def format_shoot_config_global_rules_for_prompt(config: dict[str, Any]) -> str:
-    rules = config.get("globalRules") if isinstance(config.get("globalRules"), list) else default_shoot_config()["globalRules"]
-    enabled_rules = [
-        item for item in rules
-        if isinstance(item, dict) and item.get("enabled", True) and str(item.get("label") or "").strip() and str(item.get("value") or "").strip()
-    ]
-    enabled_rules.sort(key=lambda item: (int(item.get("sortOrder") or 0), str(item.get("id") or "")))
-    if not enabled_rules:
-        return "- 暂无启用的全局导演规则，按商品事实和基础图位规则生成。"
-    return "\n".join(f"- {item.get('label')}：{item.get('value')}" for item in enabled_rules)
-
-
-def build_active_shoot_config_prompt_card() -> str:
-    config = normalize_shoot_config_payload(get_active_shoot_config())
-    return build_shoot_script_config_prompt_card(config)
-
-
-def active_shoot_config_category_rules(config: dict[str, Any]) -> list[tuple[str, str, str, list[dict[str, Any]]]]:
-    options = {
-        (str(option["dimensionCode"]), str(option["code"])): option
-        for option in get_shoot_config_category_options()
-    }
-    items: list[tuple[str, str, str, list[dict[str, Any]]]] = []
-    rules = config.get("categoryShotRules") if isinstance(config.get("categoryShotRules"), list) else []
-    for item in rules:
-        if not isinstance(item, dict):
-            continue
-        dimension_code = str(item.get("categoryDimensionCode") or "category")
-        tag_code = str(item.get("categoryTagCode") or "")
-        if tag_code in SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES:
-            continue
-        option = options.get((dimension_code, tag_code))
-        label = str(option.get("labelZh") or tag_code) if option else tag_code
-        shots = normalize_shoot_config_category_rules(item.get("shots"), default_shoot_config()["defaultShotRule"]["shots"])
-        items.append((dimension_code, tag_code, label, shots))
-    return items
-
-
-def build_shoot_script_config_prompt_card(config: dict[str, Any]) -> str:
-    default_shots = (config.get("defaultShotRule") or {}).get("shots") if isinstance(config.get("defaultShotRule"), dict) else []
-    category_rules = active_shoot_config_category_rules(config)
-    lines = [
-        "# Ruyi-Dream 拍摄配置 Prompt",
-        "规则：按启用的全局导演规则生成 ShootScript；命中标签一级品类时使用对应 6 镜头规则，未命中时使用默认 6 镜头；前 5 镜头生成成片，第 6 镜头仅预览参考；库内搭配服饰不可替换，生成配饰可调整但必须披露。",
-        "全局导演规则：",
-        format_shoot_config_global_rules_for_prompt(config),
-        "默认 6 镜头：" + format_shoot_config_shot_rules_for_prompt(default_shots),
-        "品类覆盖规则：",
-    ]
-    if category_rules:
-        for dimension_code, tag_code, label, shots in category_rules:
-            lines.append(f"- {dimension_code}:{tag_code}({label})：{format_shoot_config_shot_rules_for_prompt(shots)}")
-    else:
-        lines.append("- 无")
-    lines.append('输出 JSON：{"schema_version":"shoot-script-v1","global_directing":{"rules":[{"label":"","value":""}]},"shots":[{"shot_index":1,"shot_role":"","framing":"","crop_range":"","pose":"","movement":"","main_focus":"","forbidden_occlusion_zones":[],"accessory_instructions":[]}],"styling_risks":[],"accessory_adjustments":[],"resolved_accessories":[]}')
-    return "\n".join(lines).rstrip() + "\n"
-
-
 async def generate_shoot_script_with_gemini(request_snapshot: dict[str, Any]) -> dict[str, Any]:
     if not settings.gemini_api_key:
         raise RuntimeError("Gemini API 未配置，拍摄剧本不能进入生产生成。")
@@ -9372,14 +8679,9 @@ async def generate_shoot_script_with_gemini(request_snapshot: dict[str, Any]) ->
         from google.genai import types
     except Exception as exc:
         raise RuntimeError("google-genai SDK 不可用，拍摄剧本不能进入生产生成。") from exc
-    prompt = render_prompt_template(
-        "assembly.shoot_script",
-        {
-            "request_snapshot": dumps(request_snapshot),
-            "ai_policy": dumps(request_snapshot.get("ai_policy_config") or {}),
-            "ai_policy_card": str(request_snapshot.get("ai_policy_prompt_card") or ""),
-        },
-    )
+    if not request_snapshot.get("prompt"):
+        request_snapshot = attach_shoot_script_prompt_snapshot(request_snapshot)
+    prompt = str(request_snapshot.get("prompt") or "")
     contents: list[Any] = [prompt]
     for item in ((request_snapshot.get("input_version") or {}).get("image_snapshot") or [])[:6]:
         asset = item.get("asset") if isinstance(item, dict) else {}
@@ -9399,6 +8701,16 @@ async def generate_shoot_script_with_gemini(request_snapshot: dict[str, Any]) ->
         return loads(extract_json_text(getattr(response, "text", "") or "{}"), {})
     except Exception as exc:
         raise RuntimeError(f"Gemini 拍摄剧本调用失败：{exc}") from exc
+
+
+def attach_shoot_script_prompt_snapshot(request_snapshot: dict[str, Any]) -> dict[str, Any]:
+    prompt = render_prompt_template(
+        SHOOT_SCRIPT_PROMPT_CONFIG_KEY,
+        {
+            "styling_result": dumps(request_snapshot.get("styling_result") or styling_result_for_prompt(request_snapshot.get("styling_plan") if isinstance(request_snapshot.get("styling_plan"), dict) else {})),
+        },
+    )
+    return {**request_snapshot, "promptConfigKey": SHOOT_SCRIPT_PROMPT_CONFIG_KEY, "prompt": prompt}
 
 
 def normalize_shoot_script(raw: dict[str, Any], request_snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -9815,9 +9127,7 @@ def build_new_preview_prompt(shot_plans: list[dict[str, Any]], styling_plan: dic
     return render_prompt_template(
         "assembly.storyboard_preview",
         {
-            "styling_plan": dumps(styling_plan),
-            "shoot_script": dumps(shoot_script),
-            "shot_plans": dumps([plan["plan"] for plan in shot_plans]),
+            "shoot_script_result": dumps(shoot_script_result_for_prompt(shoot_script)),
         },
     )
 
@@ -9852,10 +9162,7 @@ def build_new_final_prompt(shot_index: int, shot_plan: dict[str, Any], styling_p
     return render_prompt_template(
         "assembly.final_image",
         {
-            "shot_index": str(shot_index),
-            "styling_plan": dumps(styling_plan),
-            "shoot_script": dumps(shoot_script),
-            "shot_plan": dumps(shot_plan),
+            "current_shot_context": dumps(current_shot_context_for_prompt(shot_index, shot_plan, styling_plan, shoot_script)),
         },
     )
 
@@ -9960,15 +9267,157 @@ def repair_prompt_placeholder_text(value: str) -> str:
     return re.sub(r"(?<!{){((?:segment|runtime)\.[a-zA-Z0-9_.-]+)}(?!})", r"{{\1}}", value)
 
 
+def merge_legacy_ai_policy_placeholders(value: str) -> str:
+    if "{{runtime.ai_policy_card}}" not in value and "{{runtime.ai_policy}}" not in value:
+        return value
+    policy_text = (
+        build_ai_policy_prompt_card(get_active_ai_policy_config())
+        + "\n以上为原独立 AI 选搭策略配置迁移后的纯文字规则；后续请直接在 AI 选搭 Prompt 正文中维护。\n"
+    )
+    return (
+        value
+        .replace("{{runtime.ai_policy_card}}", policy_text)
+        .replace("{{runtime.ai_policy}}", policy_text)
+    )
+
+
+DEPRECATED_PROMPT_CONFIG_KEYS = {"segment.tag_rules", "segment.director_rules", "segment.shot_rules"}
+
+
+def migrate_prompt_runtime_placeholders(key: str, value: str) -> str:
+    migrated = value
+    migrated = migrated.replace("{{runtime.taxonomy_prompt_card}}", "")
+    migrated = migrated.replace("{{runtime.garment}}", "")
+    if key == AI_STYLING_PROMPT_CONFIG_KEY:
+        migrated = migrate_ai_styling_prompt_to_code_only(migrated)
+    if key == SHOOT_SCRIPT_PROMPT_CONFIG_KEY and (
+        "{{runtime.request_snapshot}}" in migrated
+        or "material_id" in migrated
+        or '"task_id"' in migrated
+        or '"input_version_id"' in migrated
+    ):
+        migrated = shoot_script_prompt_template_v2()
+    if key == "assembly.storyboard_preview" and any(
+        placeholder in migrated
+        for placeholder in ("{{runtime.styling_plan}}", "{{runtime.shoot_script}}", "{{runtime.shot_plans}}")
+    ):
+        migrated = storyboard_preview_prompt_template_v2()
+    if key == "assembly.final_image" and any(
+        placeholder in migrated
+        for placeholder in ("{{runtime.shot_index}}", "{{runtime.styling_plan}}", "{{runtime.shoot_script}}", "{{runtime.shot_plan}}")
+    ):
+        migrated = final_image_prompt_template_v2()
+    return migrated
+
+
+def migrate_ai_styling_prompt_to_code_only(value: str) -> str:
+    migrated = value
+    migrated = migrated.replace("candidate_retrieval.library_tag_cards 会展示搭配服饰库中全量标签信息", "candidate_retrieval 会展示搭配服饰库中所有可用服饰的 code 与全量标签事实")
+    migrated = migrated.replace("允许 selected_material_ids 为空；候选库没有真正提升主推款的配角服饰时，应选择空库内搭配方案", "允许 selected_material_codes 为空；候选库没有真正提升主推款的配角服饰时，应选择空库内搭配方案")
+    migrated = migrated.replace("material_id 必须来自 candidate_material_ids；material_code 必须原样复制对应标签卡 code；不得编造、替换或反查其它 ID", "material_code 必须原样复制对应标签卡 code；不得编造、替换或使用系统内部 ID")
+    migrated = migrated.replace("系统 ID / material_id", "系统内部 ID")
+    migrated = migrated.replace('"selected_material_ids": [123],\n', "")
+    migrated = migrated.replace('"material_id": 123,\n      ', "")
+    migrated = migrated.replace('"selected_material_ids": [123],\n  ', "")
+    migrated = migrated.replace('"material_id": 123, ', "")
+    migrated = migrated.replace('"selected_material_ids": [],\n', "")
+    migrated = migrated.replace('"selected_material_ids": [123],', "")
+    migrated = migrated.replace('"selected_material_codes": ["候选服饰 code，只用于展示和审计"]', '"selected_material_codes": ["候选服饰 code"]')
+    migrated = migrated.replace('"selected_materials": [{"material_id": 123, "material_code": "候选服饰 code",', '"selected_materials": [{"material_code": "候选服饰 code",')
+    migrated = migrated.replace('"material_code": "必须原样复制标签卡 code"', '"material_code": "必须原样复制标签卡 code"')
+    return migrated
+
+
+def shoot_script_prompt_template_v2() -> str:
+    return """你是 Lily 品牌 AI 摄影棚的 AI Director。你的任务是基于已完成的 AI 选搭结果，一次性生成完整拍摄剧本 ShootScript。
+
+职责边界：
+1. 你负责导演判断：全局拍摄设定、镜头景别、取景范围、模特姿势、身姿走位、构图、背景光线、不可遮挡区域。
+2. 你不能替换 AI 选搭已选择的库内搭配服饰；所有搭配服饰都用 code 表达，不要输出系统内部 ID。
+3. 鞋、帽、包、首饰等生成类配饰不是商品事实源；你可以调整、弱化或取消，但必须在 accessory_adjustments 中披露调整原因。
+4. 你必须输出 resolved_accessories 作为最终配饰方案；它是分镜预览和成片执行配饰的唯一准则，并覆盖 StylingPlan.generated_accessories。
+5. 每个 shots[] 必须输出 accessory_instructions，说明该镜头是否出现鞋、包、首饰、帽子，以及如何保持低存在感。
+6. 前 5 个镜头要形成完整商品说明，第 6 个镜头只作为备用姿态，不进入最终成片。
+7. 分镜预览和最终成片都将读取此 ShootScript。不要输出长 prompt，只输出结构化 JSON。
+
+{{segment.brand_info}}
+
+【AI 选搭结果】
+{{runtime.styling_result}}
+
+请只返回 JSON，结构如下：
+{
+  "global_directing": {
+    "brand_tone": "string",
+    "background": "string",
+    "lighting": "string",
+    "model_direction": "string",
+    "hair_makeup_boundary": "string",
+    "accessory_boundary": "string",
+    "consistency_rules": ["string"],
+    "product_fidelity_rules": ["string"],
+    "negative_constraints": ["string"]
+  },
+  "styling_risks": [{"risk_id": "string", "severity": "low | medium | high | blocking", "material_code": "string", "risk": "string", "affected_shots": [1], "director_strategy": "string", "user_visible_recommendation": "string"}],
+  "accessory_adjustments": [{"item_type": "bag | footwear | jewelry | hat | other", "original_direction": "string", "adjusted_direction": "string", "reason": "string", "affected_shots": [1]}],
+  "resolved_accessories": [{"item_type": "footwear | bag | jewelry | hat | other", "final_direction": "最终进入分镜和成片的配饰描述；取消则写取消", "source": "styling_plan | director_adjusted | director_added | removed", "visibility": "none | low | medium", "applies_to_shots": [1], "reason": "为什么这样执行"}],
+  "shots": [{"shot_index": 1, "shot_role": "hero_full_body", "shot_role_label": "全身主视觉", "framing": "string", "crop_range": "string", "model_scale": "string", "camera_angle": "string", "body_position": "string", "pose": "string", "movement": "string", "hand_position": "string", "main_focus": "string", "visible_garments": ["hero", "搭配服饰 code"], "hero_selling_points": ["string"], "forbidden_occlusion_zones": ["string"], "composition_notes": "string", "accessory_instructions": ["本镜头配饰执行说明"], "acceptance_criteria": ["string"], "negative_constraints": ["string"]}],
+  "user_visible_summary": {"title": "string", "summary": "string", "key_points": ["string"], "risk_summary": "string"},
+  "warnings": []
+}
+"""
+
+
+def storyboard_preview_prompt_template_v2() -> str:
+    return """生成一张 3x2 电商棚拍分镜预览图。
+
+{{segment.brand_info}}
+
+主推款和搭配服饰参考图是真实商品事实来源，必须保持商品级保真。
+搭配服饰和生成配饰必须服务主推款展示，不得让主推款沦为整套造型的背景元素。
+数字模特参考图用于保持同一身份、发型和气质。
+
+【拍摄剧本结果】
+{{runtime.shoot_script_result}}
+
+按拍摄剧本中的 6 个 shots 生成 3x2 分镜预览。第 6 格仅参考，最终不会生成大图。
+配饰执行优先级：以 resolved_accessories 和 shots[].accessory_instructions 为准。
+不要生成文字、水印、logo、编号或边框说明。
+"""
+
+
+def final_image_prompt_template_v2() -> str:
+    return """生成一张电商棚拍成片，只生成单张图，不要生成拼图或分镜预览。
+
+参考分镜预览图中 current_shot_context.preview_grid_cell 对应的格子，只参考姿势、身位、景别、构图、背景和光影方向。
+分镜预览不是商品事实来源。主推款参考图是主角商品事实来源，搭配服饰参考图是配角商品事实来源。
+
+{{segment.brand_info}}
+
+【当前单张成片上下文】
+{{runtime.current_shot_context}}
+
+必须保持主推款和搭配服饰的品类、颜色、面料、版型、结构、比例和可见细节。
+鞋、包、饰品只作为辅助搭配，不作为商品事实源，不做特写。
+不要让搭配服饰或生成配饰抢主推款视觉中心；不要改款、换色、替换商品；不要添加文字、水印、logo。
+"""
+
+
 def repair_prompt_config_placeholders() -> None:
     try:
         with get_db() as db:
+            for key in DEPRECATED_PROMPT_CONFIG_KEYS:
+                db.execute("DELETE FROM prompt_configs WHERE key = ?", (key,))
             existing_rows = db.execute("SELECT key, content FROM prompt_configs").fetchall()
             for row in existing_rows:
+                key = str(row["key"])
                 content = str(row["content"] or "")
                 repaired = repair_prompt_placeholder_text(content)
+                if key == AI_STYLING_PROMPT_CONFIG_KEY:
+                    repaired = merge_legacy_ai_policy_placeholders(repaired)
+                repaired = migrate_prompt_runtime_placeholders(key, repaired)
                 if repaired != content:
-                    db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?", (repaired, now_iso(), row["key"]))
+                    db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?", (repaired, now_iso(), key))
     except sqlite3.OperationalError:
         return
 
@@ -10077,36 +9526,21 @@ def render_prompt_template(key: str, runtime: dict[str, Any] | None = None) -> s
 
 
 def sample_prompt_runtime() -> dict[str, Any]:
-    ai_policy = default_ai_policy_config()
     return {
-        "candidate_retrieval": dumps({"hero_profile": {"category": "裤装"}, "material_cards": [{"id": 1, "code": "LOOK-A"}], "outfit_drafts": []}),
-        "request_snapshot": dumps({"task_id": 1, "styling_plan": {"selected_outfit_key": "candidate_a"}, "selected_material_snapshot": []}),
-        "taxonomy_prompt_card": "# Ruyi-Dream 服装标签规则卡\n规则：按管理员配置的标签 code 输出。\n",
-        "garment": dumps({"code": "LOOK-A", "image_count": 3}),
-        "ai_policy": dumps(ai_policy),
-        "ai_policy_card": build_ai_policy_prompt_card(ai_policy),
-        "styling_plan": dumps({"schema_version": "styling-plan-v1", "selected_material_ids": []}),
-        "shoot_script": dumps({"schema_version": "shoot-script-v1", "shots": [{"shot_index": 1}]}),
-        "shot_plans": dumps([{"shot_index": 1, "shot_role": "hero_full_body"}]),
-        "shot_plan": dumps({"shot_index": 1, "shot_role": "hero_full_body"}),
-        "shot_index": "1",
+        "candidate_retrieval": dumps([{"code": "LOOK-A", "category": "上装", "tag_facts": {"effective_tags": {"colors": ["白色"]}}}]),
+        "styling_result": dumps({"hero_understanding": {"category": "裤装"}, "selected_material_codes": ["LOOK-A"], "reason_summary": "轻量上装服务主推裤装。"}),
+        "shoot_script_result": dumps({"global_directing": {"background": "浅灰棚拍"}, "shots": [{"shot_index": 1, "shot_role": "hero_full_body", "main_focus": "主推款整体比例"}]}),
+        "current_shot_context": dumps({"preview_grid_cell": 1, "current_shot": {"shot_role": "hero_full_body", "main_focus": "主推款整体比例"}, "styling": {"selected_material_codes": ["LOOK-A"]}}),
     }
 
 
 def available_prompt_placeholders() -> list[dict[str, str]]:
     return [
         {"name": "segment.brand_info", "scope": "segment", "description": "品牌信息分段 Prompt"},
-        {"name": "runtime.taxonomy_prompt_card", "scope": "runtime", "description": "当前标签规则 Prompt 卡"},
-        {"name": "runtime.garment", "scope": "runtime", "description": "当前打标服饰基础信息"},
-        {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "AI 选搭候选漏斗快照"},
-        {"name": "runtime.request_snapshot", "scope": "runtime", "description": "拍摄剧本阶段完整输入快照"},
-        {"name": "runtime.ai_policy", "scope": "runtime", "description": "AI 选搭结构化策略配置"},
-        {"name": "runtime.ai_policy_card", "scope": "runtime", "description": "AI 选搭策略 Prompt 摘要"},
-        {"name": "runtime.styling_plan", "scope": "runtime", "description": "当前 StylingPlan"},
-        {"name": "runtime.shoot_script", "scope": "runtime", "description": "当前 ShootScript"},
-        {"name": "runtime.shot_plans", "scope": "runtime", "description": "分镜预览 6 个 ShotPlan"},
-        {"name": "runtime.shot_plan", "scope": "runtime", "description": "当前最终成片 ShotPlan"},
-        {"name": "runtime.shot_index", "scope": "runtime", "description": "最终成片镜头序号"},
+        {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服饰库中可用服饰的 code 与全量标签事实"},
+        {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭结果，使用搭配服饰 code 标识"},
+        {"name": "runtime.shoot_script_result", "scope": "runtime", "description": "拍摄剧本结果，用于分镜预览"},
+        {"name": "runtime.current_shot_context", "scope": "runtime", "description": "当前成片单镜头所需的选搭、剧本和分镜信息"},
     ]
 
 
@@ -10311,6 +9745,7 @@ async def generate_single_final_image(task_id: int, result_set_id: int, image_id
         )
     try:
         task_package = build_new_final_task_package(task_id, image_id)
+        update_attempt_request_snapshot(attempt_id, task_package)
         with get_db() as db:
             sort_order = db.execute("SELECT sort_order FROM generation_result_images_new WHERE id = ?", (image_id,)).fetchone()["sort_order"]
         output_key = join_key("generation-tasks", str(task_id), "final", f"{result_set_id}-{sort_order}.png")
@@ -10963,121 +10398,6 @@ def build_active_taxonomy_context() -> dict[str, Any]:
         "tagByKey": {(tag["dimensionCode"], tag["code"]): tag for tag in tags},
         "contentHash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
     }
-
-
-def ensure_taxonomy_ready_for_tagging(context: dict[str, Any]) -> None:
-    selectable = [tag for tag in context["tags"] if tag.get("isSelectable")]
-    if not context["dimensions"] or not selectable:
-        raise RuntimeError("标签规则为空：请先由管理员在“标签规则”中导入或配置启用的维度和可打标标签。")
-
-
-def build_active_taxonomy_prompt_card() -> str:
-    context = build_active_taxonomy_context()
-    return build_taxonomy_prompt_card_from_context(context)
-
-
-def build_taxonomy_prompt_card_from_context(context: dict[str, Any]) -> str:
-    dimensions: list[dict[str, Any]] = context["dimensions"]
-    tags: list[dict[str, Any]] = context["tags"]
-    relations: list[dict[str, Any]] = context["relations"]
-    applicability_rules: list[dict[str, Any]] = context["applicabilityRules"]
-    tag_by_key: dict[tuple[str, str], dict[str, Any]] = context["tagByKey"]
-    tags_by_dimension: dict[str, list[dict[str, Any]]] = {}
-    for tag in tags:
-        tags_by_dimension.setdefault(tag["dimensionCode"], []).append(tag)
-
-    lines = [
-        "# Ruyi-Dream 服装标签规则卡",
-        "规则：只能使用下方启用的 code；不要创造新标签、同义词或自然语言散词；先判断品类 category；最终打标前必须应用“品类适用范围”；值类型为“分值”的标签使用 0 到 1 的 score；图片证据不足时降低 confidence，并用中文写明证据或不确定点。",
-        "维度：" + "；".join(f"{dimension['code']}={dimension['labelZh']}" for dimension in dimensions),
-        "标签：",
-    ]
-    for dimension in dimensions:
-        dimension_tags = tags_by_dimension.get(dimension["code"], [])
-        if not dimension_tags:
-            continue
-        entries = []
-        for tag in dimension_tags:
-            parent = f"<{tag['parentCode']}>" if tag.get("parentCode") else ""
-            selectable = "" if tag["isSelectable"] else "[仅作上下文]"
-            value_kind = "" if tag["valueKind"] == "tag" else f"[{taxonomy_prompt_value_kind_label(tag['valueKind'])}]"
-            entries.append(f"{tag['code']}({tag['labelZh']}){parent}{value_kind}{selectable}")
-        lines.append(f"- {dimension['code']}： " + "；".join(entries))
-
-    lines.append("品类适用范围：")
-    if applicability_rules:
-        grouped_rules: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        for rule in applicability_rules:
-            grouped_rules.setdefault((rule["categoryDimensionCode"], rule["categoryTagCode"]), []).append(rule)
-        for (category_dimension_code, category_tag_code), rules in grouped_rules.items():
-            scope_entries = []
-            for rule in rules:
-                target = taxonomy_prompt_tag_ref(tag_by_key, rule["targetDimensionCode"], rule["targetTagCode"], with_label=True, with_description=False)
-                scope = "含子品类" if rule["appliesToDescendants"] else "仅当前品类"
-                note = f"({rule['note']})" if rule.get("note") else ""
-                scope_entries.append(f"{taxonomy_prompt_applicability_mode_label(rule['mode'])} {target}，范围={scope}{note}")
-            lines.append(f"- {taxonomy_prompt_tag_ref(tag_by_key, category_dimension_code, category_tag_code, with_label=True, with_description=False)}： " + "；".join(scope_entries))
-    else:
-        lines.append("- 无")
-
-    lines.append("标签关系：")
-    if relations:
-        for relation in relations:
-            source = taxonomy_prompt_tag_ref(tag_by_key, relation["fromDimensionCode"], relation["fromTagCode"], with_label=True, with_description=False)
-            target = taxonomy_prompt_tag_ref(tag_by_key, relation["toDimensionCode"], relation["toTagCode"], with_label=True, with_description=False)
-            note = f" ({relation['descriptionZh']})" if relation.get("descriptionZh") else ""
-            lines.append(f"- {source} --{taxonomy_prompt_relation_type_label(relation['relationType'])}，权重={relation['weight']}--> {target}{note}")
-    else:
-        lines.append("- 无")
-    lines.append('输出 JSON（字段名保持英文用于系统解析；字段内容使用中文）: {"tags":[{"dimension_code":"","tag_code":"","value_type":"tag|score|boolean|text","score":null,"confidence":0.0,"evidence":""}],"visual_profile":{"overall_summary":"","key_parts":[],"uncertain_points":[]}}')
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def taxonomy_prompt_tag_ref(
-    tag_by_key: dict[tuple[str, str], dict[str, Any]],
-    dimension_code: str,
-    tag_code: str,
-    with_label: bool = True,
-    with_description: bool = True,
-) -> str:
-    tag = tag_by_key.get((dimension_code, tag_code))
-    if not tag:
-        return f"{dimension_code}.{tag_code}"
-    label = f"({tag['labelZh']})" if with_label else ""
-    description = f" - {tag['descriptionZh']}" if with_description and tag.get("descriptionZh") else ""
-    return f"{dimension_code}.{tag_code}{label}{description}"
-
-
-def taxonomy_prompt_value_kind_label(value: str) -> str:
-    labels = {
-        "tag": "标签",
-        "score": "分值",
-        "boolean": "布尔",
-        "text": "文本",
-    }
-    return labels.get(value, value)
-
-
-def taxonomy_prompt_applicability_mode_label(value: str) -> str:
-    labels = {
-        "allowed": "允许",
-        "recommended": "推荐",
-        "required": "必填",
-        "disallowed": "禁用",
-    }
-    return labels.get(value, value)
-
-
-def taxonomy_prompt_relation_type_label(value: str) -> str:
-    labels = {
-        "implies": "暗含",
-        "compatible_with": "适合搭配",
-        "avoid_with": "避免搭配",
-        "parent_of": "父子归属",
-        "slot_mapping": "穿搭位置映射",
-        "style_mapping": "风格倾向映射",
-    }
-    return f"{value} / {labels[value]}" if value in labels else value
 
 
 def serialize_shot_plan(row: Any) -> dict[str, Any]:

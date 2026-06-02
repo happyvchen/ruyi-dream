@@ -554,107 +554,94 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertFalse(fake_client.create_called)
 
-    def test_styling_plan_records_low_score_quality_signal(self) -> None:
+    def test_ai_invocation_records_are_admin_only_and_include_snapshots(self) -> None:
+        from fastapi.testclient import TestClient
+
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        config.get_settings.cache_clear()
+        db_module.init_db()
+        timestamp = db_module.now_iso()
+        with db_module.get_db() as db:
+            task_id = db.execute(
+                "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('debug task', 'STYLING_READY', ?, ?)",
+                (timestamp, timestamp),
+            ).lastrowid
+        attempt_id = main.create_attempt("generation_styling", task_id, "gemini", {"prompt": "input snapshot"})
+        main.finish_attempt(attempt_id, "SUCCEEDED", response_snapshot={"stylingPlan": {"selected_outfit_id": "candidate_a"}})
+
+        with patch.object(main, "ensure_bucket", return_value=None), TestClient(main.app) as client:
+            self.assertEqual(client.get(f"/api/generation-tasks/{task_id}/ai-invocations").status_code, 401)
+
+            user_login = client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"})
+            self.assertEqual(user_login.status_code, 200)
+            self.assertEqual(client.get(f"/api/generation-tasks/{task_id}/ai-invocations").status_code, 403)
+
+            admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(admin_login.status_code, 200)
+            response = client.get(f"/api/generation-tasks/{task_id}/ai-invocations")
+
+        self.assertEqual(response.status_code, 200)
+        item = response.json()["items"][0]
+        self.assertEqual(item["ownerType"], "generation_styling")
+        self.assertEqual(item["requestSnapshot"]["prompt"], "input snapshot")
+        self.assertEqual(item["responseSnapshot"]["stylingPlan"]["selected_outfit_id"], "candidate_a")
+
+    def test_ai_styling_prompt_snapshot_uses_prompt_config(self) -> None:
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        config.get_settings.cache_clear()
+        db_module.init_db()
+        timestamp = db_module.now_iso()
+        with db_module.get_db() as db:
+            db.execute(
+                """
+                INSERT INTO prompt_configs (key, group_type, title, description, content, sort_order, updated_at)
+                VALUES ('assembly.ai_styling', 'assembly', 'AI 选搭', '', ?, 120, ?)
+                ON CONFLICT(key) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at
+                """,
+                ("选搭模板 {{runtime.candidate_retrieval}}", timestamp),
+            )
+
+        snapshot = main.attach_ai_stylist_prompt_snapshot(
+            {"schema_version": "ai-stylist-request-v1"},
+            {
+                "candidate_material_ids": [1, 2],
+                "library_tag_cards": [
+                    {"id": 1, "code": "LOOK-A", "category": "上装", "colors": ["白色"], "tag_facts": {"effective_tags": {"colors": ["白色"]}}},
+                    {"id": 2, "code": "LOOK-B", "category": "外套", "colors": ["黑色"], "tag_facts": {"effective_tags": {"colors": ["黑色"]}}},
+                ],
+            },
+        )
+
+        self.assertEqual(snapshot["promptConfigKey"], "assembly.ai_styling")
+        self.assertIn('"code": "LOOK-A"', snapshot["prompt"])
+        self.assertIn('"category": "上装"', snapshot["prompt"])
+        self.assertNotIn("candidate_material_ids", snapshot["prompt"])
+        self.assertNotIn('"id": 1', snapshot["prompt"])
+        self.assertNotIn("runtime.ai_policy", snapshot["prompt"])
+
+    def test_styling_plan_preserves_model_quality_signals_without_backend_judgement(self) -> None:
         main = importlib.import_module("app.main")
         candidate_snapshot = {
             "candidate_material_ids": [9],
-            "material_cards": [
-                {"id": 9, "category": "外套类", "colors": ["棕色"]},
-            ],
+            "material_cards": [{"id": 9, "code": "OUTER"}],
         }
-        plan = {
+        raw_plan = {
             "selected_material_ids": [9],
-            "selected_outfit_id": "candidate_a",
-            "outfit_candidates": [
-                {
-                    "id": "candidate_a",
-                    "selected_material_ids": [9],
-                    "wearing_notes": "外套完全敞开穿着。",
-                    "aesthetic_diagnosis": {
-                        "color_weight": "上半身深色面积过大。",
-                        "silhouette_balance": "外套体量偏重。",
-                    },
-                    "scores": {
-                        "aesthetic_score": 0.4,
-                        "brand_fit_score": 0.9,
-                        "hero_visibility_score": 0.9,
-                        "commercial_readiness_score": 0.9,
-                    },
-                }
+            "selected_outfit_key": "candidate_a",
+            "outfit_candidates": [{"outfit_key": "candidate_a", "selected_material_ids": [9]}],
+            "quality_signals": [
+                {"code": "model_flag", "category": "aesthetic", "severity": "review", "message": "由模型判断的风险。"}
             ],
         }
 
-        main.validate_styling_plan(plan, candidate_snapshot)
-        signals = main.collect_styling_quality_signals(plan, candidate_snapshot)
-
-        self.assertTrue(any(signal["code"] == "low_critic_scores" and "aesthetic_score" in signal["fields"] for signal in signals))
-
-    def test_styling_plan_records_full_scores_without_diagnosis_signal(self) -> None:
-        main = importlib.import_module("app.main")
-        candidate_snapshot = {
-            "candidate_material_ids": [],
-            "material_cards": [],
-        }
-        plan = {
-            "selected_material_ids": [],
-            "selected_outfit_id": "candidate_a",
-            "outfit_candidates": [
-                {
-                    "id": "candidate_a",
-                    "selected_material_ids": [],
-                    "wearing_notes": "主推款单穿。",
-                    "scores": {
-                        "aesthetic_score": 1,
-                        "brand_fit_score": 1,
-                        "hero_visibility_score": 1,
-                        "commercial_readiness_score": 1,
-                    },
-                    "risk_notes": [],
-                }
-            ],
-        }
+        plan = main.normalize_styling_plan(raw_plan, candidate_snapshot)
 
         main.validate_styling_plan(plan, candidate_snapshot)
-        signals = main.collect_styling_quality_signals(plan, candidate_snapshot)
-
-        self.assertTrue(any(signal["code"] == "suspicious_full_scores" for signal in signals))
-
-    def test_styling_plan_allows_full_scores_with_complete_diagnosis(self) -> None:
-        main = importlib.import_module("app.main")
-        candidate_snapshot = {
-            "candidate_material_ids": [],
-            "material_cards": [],
-        }
-        plan = {
-            "selected_material_ids": [],
-            "selected_outfit_id": "candidate_a",
-            "outfit_candidates": [
-                {
-                    "id": "candidate_a",
-                    "selected_material_ids": [],
-                    "wearing_notes": "主推款单穿。",
-                    "aesthetic_diagnosis": {
-                        "color_weight": "色彩干净轻量。",
-                        "silhouette_balance": "主推款比例完整。",
-                        "waistline_proportion": "腰线清楚。",
-                        "season_material_fit": "材质季节匹配。",
-                        "template_risk": "没有套用完整通勤模板。",
-                        "wearing_method_validity": "主推款单穿，无额外穿法风险。",
-                        "tuck_quality": "无塞腰穿法。",
-                        "brand_read": "符合 Lily 干净通勤调性。",
-                    },
-                    "scores": {
-                        "aesthetic_score": 1,
-                        "brand_fit_score": 1,
-                        "hero_visibility_score": 1,
-                        "commercial_readiness_score": 1,
-                    },
-                    "risk_notes": [],
-                }
-            ],
-        }
-
-        main.validate_styling_plan(plan, candidate_snapshot)
+        self.assertEqual(plan["quality_signals"][0]["code"], "model_flag")
 
     def test_fallback_styling_plan_is_rejected_by_production_source_check(self) -> None:
         main = importlib.import_module("app.main")
@@ -709,133 +696,8 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertEqual(plan["plan_source_mode"], "production")
         main.validate_styling_plan(plan, candidate_snapshot)
-        signals = main.collect_styling_quality_signals(plan, candidate_snapshot)
 
-        self.assertTrue(any(signal["code"] == "low_critic_scores" for signal in signals))
-
-    def test_styling_plan_records_high_waist_dark_outerwear_stack_signal(self) -> None:
-        main = importlib.import_module("app.main")
-        candidate_snapshot = {
-            "candidate_material_ids": [9, 10],
-            "material_cards": [
-                {"id": 9, "category": "外套类", "colors": ["棕色"]},
-                {"id": 10, "category": "上装", "colors": ["棕色"], "wearability": {"recommended_wearing_methods": ["塞腰"]}},
-            ],
-        }
-        plan = {
-            "hero_understanding": {
-                "hero_visual_summary": "白色高腰阔腿西装裤，腰部有环扣和褶裥。",
-            },
-            "selected_material_ids": [10, 9],
-            "selected_outfit_id": "candidate_a",
-            "outfit_candidates": [
-                {
-                    "id": "candidate_a",
-                    "selected_material_ids": [10, 9],
-                    "wearing_notes": "短款针织衫自然落在裤腰上方，西装外套敞开穿着。",
-                    "hero_focus": ["腰部环扣", "裤管垂坠"],
-                    "aesthetic_diagnosis": {
-                        "color_weight": "深棕和白色形成对比。",
-                        "silhouette_balance": "外套敞开。",
-                        "waistline_proportion": "短款上衣露出裤腰。",
-                        "season_material_fit": "秋冬通勤。",
-                        "template_risk": "常见通勤三件套。",
-                        "wearing_method_validity": "短款上衣和敞开外套穿法成立。",
-                        "tuck_quality": "无塞腰穿法。",
-                        "brand_read": "商务通勤。",
-                    },
-                    "scores": {
-                        "aesthetic_score": 0.9,
-                        "brand_fit_score": 0.9,
-                        "hero_visibility_score": 0.9,
-                        "commercial_readiness_score": 0.9,
-                    },
-                    "risk_notes": ["外套可能遮挡腰部。"],
-                }
-            ],
-        }
-
-        main.validate_styling_plan(plan, candidate_snapshot)
-        signals = main.collect_styling_quality_signals(plan, candidate_snapshot)
-
-        self.assertTrue(any(signal["code"] == "high_waist_dark_outerwear_stack" for signal in signals))
-
-    def test_dress_policy_downranks_outerwear_and_prefers_light_upper_drafts(self) -> None:
-        main = importlib.import_module("app.main")
-        policy = main.default_ai_policy_config()
-        hero_profile = {
-            "category": "连衣裙",
-            "hero_code": "DRESS-001",
-            "is_high_waist_or_waist_focus": True,
-            "is_light_colored": True,
-        }
-        cards = [
-            {"id": 1, "code": "OUTER", "category": "外套类", "colors": ["棕色"], "wearability": {"coverage_risk": "可能遮挡主推款"}, "risk": []},
-            {"id": 2, "code": "KNIT", "category": "针织类", "colors": ["象牙白"], "wearability": {"coverage_risk": "无明显遮挡风险"}, "risk": []},
-        ]
-
-        ranked = main.rank_candidate_materials(hero_profile, cards, policy)
-        candidate_cards = [item["card"] for item in ranked if not item["excluded"]]
-        drafts = main.build_outfit_drafts(candidate_cards, hero_profile, policy)
-
-        self.assertEqual(candidate_cards[0]["code"], "KNIT")
-        self.assertEqual(drafts[1]["selected_material_ids"], [2])
-        self.assertGreater(candidate_cards[0]["funnel_score"], candidate_cards[1]["funnel_score"])
-
-    def test_dress_outerwear_selection_records_policy_signals(self) -> None:
-        main = importlib.import_module("app.main")
-        policy = main.default_ai_policy_config()
-        candidate_snapshot = {
-            "ai_policy_config": policy,
-            "hero_profile": {"category": "连衣裙"},
-            "candidate_material_ids": [9, 10],
-            "material_cards": [
-                {"id": 9, "code": "OUTER", "category": "外套类", "colors": ["棕色"], "wearability": {"coverage_risk": "可能遮挡主推款"}},
-                {"id": 10, "code": "KNIT", "category": "针织类", "colors": ["象牙白"], "wearability": {"coverage_risk": "无明显遮挡风险"}},
-            ],
-            "library_adequacy": {
-                "better_alternatives": [
-                    {"id": 10, "code": "KNIT", "category": "针织类"},
-                ],
-            },
-        }
-        plan = {
-            "selected_material_ids": [9],
-            "selected_outfit_id": "candidate_a",
-            "outfit_candidates": [
-                {
-                    "id": "candidate_a",
-                    "selected_material_ids": [9],
-                    "wearing_notes": "外套敞开穿着。",
-                    "aesthetic_diagnosis": {
-                        "color_weight": "偏重。",
-                        "silhouette_balance": "外套压住裙型。",
-                        "waistline_proportion": "腰线可能不清楚。",
-                        "season_material_fit": "偏秋冬。",
-                        "template_risk": "外套模板化。",
-                        "wearing_method_validity": "可穿但需要审核。",
-                        "tuck_quality": "无塞腰。",
-                        "brand_read": "需要审核。",
-                    },
-                    "scores": {
-                        "aesthetic_score": 0.9,
-                        "brand_fit_score": 0.9,
-                        "hero_visibility_score": 0.9,
-                        "commercial_readiness_score": 0.9,
-                    },
-                    "risk_notes": [],
-                }
-            ],
-        }
-
-        main.validate_styling_plan(plan, candidate_snapshot)
-        signals = main.collect_styling_quality_signals(plan, candidate_snapshot)
-        signal_codes = {signal["code"] for signal in signals}
-
-        self.assertIn("dress_outerwear_layering_risk", signal_codes)
-        self.assertIn("selected_below_better_alternatives", signal_codes)
-
-    def test_candidate_funnel_caps_candidates_and_filters_conflicting_bottoms(self) -> None:
+    def test_ai_stylist_context_passes_full_library_tags_without_candidate_funnel(self) -> None:
         main = importlib.import_module("app.main")
         input_row = {
             "id": 1,
@@ -865,23 +727,16 @@ class BackendSmokeTests(unittest.TestCase):
         snapshot = main.build_candidate_retrieval_snapshot(input_row, material_cards)
 
         self.assertEqual(snapshot["schema_version"], "candidate-retrieval-v2")
-        self.assertLessEqual(len(snapshot["material_cards"]), 20)
-        self.assertNotIn(1, snapshot["candidate_material_ids"])
-        self.assertNotIn(30, snapshot["candidate_material_ids"])
-        self.assertNotIn(31, snapshot["candidate_material_ids"])
-        self.assertIn(1, snapshot["source_material_ids"])
-        self.assertTrue(any(item["id"] == 1 and "裤装_裤装_category_excluded" in item["reasons"] for item in snapshot["filtered_out"]))
-        self.assertTrue(any(item["id"] == 30 and "未知_hard_excluded" in item["reasons"] for item in snapshot["filtered_out"]))
-        self.assertEqual(snapshot["outfit_drafts"][0]["selected_material_ids"], [])
-        self.assertIn("library_adequacy", snapshot)
+        self.assertEqual(snapshot["strategy"], "prompt_managed_business_context_v1")
+        self.assertEqual(snapshot["candidate_material_ids"], [item["id"] for item in material_cards])
+        self.assertEqual(len(snapshot["library_tag_cards"]), len(material_cards))
+        self.assertEqual(len(snapshot["material_cards"]), len(material_cards))
+        self.assertEqual(snapshot["filtered_out"], [])
+        self.assertEqual(snapshot["outfit_drafts"], [])
 
-    def test_styling_plan_preserves_policy_configured_diagnosis_and_scores(self) -> None:
+    def test_styling_plan_preserves_model_diagnosis_and_scores(self) -> None:
         main = importlib.import_module("app.main")
-        policy = main.default_ai_policy_config()
-        policy["qualitySignalPolicy"]["requiredDiagnosisKeys"].append("new_critic_dimension")
-        policy["qualitySignalPolicy"]["scoreThresholds"]["new_score"] = 0.7
         candidate_snapshot = {
-            "ai_policy_config": policy,
             "candidate_material_ids": [],
             "material_cards": [],
         }
@@ -903,214 +758,16 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(outfit["aesthetic_diagnosis"]["new_critic_dimension"], "新增维度说明。")
         self.assertEqual(outfit["scores"]["new_score"], 0.82)
 
-    def test_candidate_hard_excluded_categories_cannot_be_configured_back_in(self) -> None:
+    def test_ai_styling_context_keeps_business_rules_in_prompt(self) -> None:
         main = importlib.import_module("app.main")
-        policy = main.default_ai_policy_config()
-        policy["candidateFunnel"]["hardExcludedCategories"] = ["其他服装"]
-        normalized = main.normalize_ai_policy_config_payload(policy)
-
-        self.assertIn("未知", normalized["candidateFunnel"]["hardExcludedCategories"])
-        self.assertIn("不支持入库配饰", normalized["candidateFunnel"]["hardExcludedCategories"])
-
-        score, reasons, excluded = main.score_candidate_card({"category": "连衣裙"}, {"id": 1, "category": "未知"}, normalized)
-
-        self.assertTrue(excluded)
-        self.assertIn("未知_hard_excluded", reasons)
-
-    def test_unknown_hero_category_blocks_candidate_selection(self) -> None:
-        main = importlib.import_module("app.main")
-        input_row = {
-            "id": 1,
-            "task_id": 1,
-            "name_snapshot": "未识别主推款",
-            "image_snapshot_json": "[]",
-        }
-        material_cards = [
-            {"id": 1, "code": "TOP", "category": "上装", "colors": ["白色"], "wearability": {}, "risk": []},
-            {"id": 2, "code": "BOTTOM", "category": "裤装", "colors": ["黑色"], "wearability": {}, "risk": []},
-        ]
-
-        snapshot = main.build_candidate_retrieval_snapshot(input_row, material_cards)
-
-        self.assertEqual(snapshot["hero_profile"]["category"], "未知")
-        self.assertEqual(snapshot["candidate_material_ids"], [])
-        self.assertEqual(snapshot["candidate_pool_size"], 0)
-        self.assertTrue(snapshot["library_adequacy"]["recommend_empty_pairing"])
-        self.assertTrue(any("品类无法确认" in note for note in snapshot["library_adequacy"]["supply_gap_notes"]))
-
-    def test_candidate_funnel_uses_matching_material_as_hero_and_excludes_it(self) -> None:
-        main = importlib.import_module("app.main")
-        input_row = {
-            "id": 1,
-            "task_id": 1,
-            "name_snapshot": "PANTS-001",
-            "image_snapshot_json": "[]",
-        }
-        material_cards = [
-            {
-                "id": 10,
-                "code": "PANTS-001",
-                "category": "裤装",
-                "colors": ["白色"],
-                "details": ["腰带", "褶裥"],
-                "silhouette": ["阔腿"],
-                "wearability": {"recommended_wearing_methods": ["系腰带", "塞腰"]},
-                "risk": [],
-            },
-            {"id": 11, "code": "VEST-001", "category": "上装", "colors": ["白色"], "wearability": {}, "risk": []},
-        ]
-
-        snapshot = main.build_candidate_retrieval_snapshot(input_row, material_cards)
-
-        self.assertEqual(snapshot["hero_profile"]["source"], "styling_garment_code_match")
-        self.assertEqual(snapshot["hero_profile"]["category"], "裤装")
-        self.assertNotIn(10, snapshot["candidate_material_ids"])
-        self.assertIn(11, snapshot["candidate_material_ids"])
-        self.assertTrue(any(item["id"] == 10 and "current_hero_same_code_excluded" in item["reasons"] for item in snapshot["filtered_out"]))
-        self.assertEqual(snapshot["library_adequacy"]["excluded_current_hero_count"], 1)
-
-    def test_styling_plan_records_unsupported_tuck_method_signal(self) -> None:
-        main = importlib.import_module("app.main")
-        candidate_snapshot = {
-            "candidate_material_ids": [9],
-            "hero_profile": {"category": "裤装"},
-            "material_cards": [
-                {
-                    "id": 9,
-                    "category": "针织类",
-                    "sub_category": "针织开衫",
-                    "materials_visual": ["针织"],
-                    "details": ["纽扣"],
-                    "wearability": {"recommended_wearing_methods": ["扣起", "敞开"]},
-                    "colors": ["象牙白"],
-                },
-            ],
-        }
-        plan = {
-            "selected_material_ids": [9],
-            "selected_outfit_id": "candidate_a",
-            "outfit_candidates": [
-                {
-                    "id": "candidate_a",
-                    "selected_material_ids": [9],
-                    "wearing_notes": "针织开衫全部扣起并全塞入裤腰。",
-                    "aesthetic_diagnosis": {
-                        "color_weight": "浅色同色系。",
-                        "silhouette_balance": "上短下长。",
-                        "waistline_proportion": "露出裤腰。",
-                        "season_material_fit": "春夏匹配。",
-                        "template_risk": "通勤公式。",
-                        "wearing_method_validity": "缺少全塞依据。",
-                        "tuck_quality": "全塞会挤压门襟。",
-                        "brand_read": "偏 Lily。",
-                    },
-                    "scores": {
-                        "aesthetic_score": 0.9,
-                        "brand_fit_score": 0.9,
-                        "hero_visibility_score": 0.9,
-                        "commercial_readiness_score": 0.9,
-                    },
-                    "risk_notes": ["穿法风险。"],
-                }
-            ],
-        }
-
-        main.validate_styling_plan(plan, candidate_snapshot)
-        signals = main.collect_styling_quality_signals(plan, candidate_snapshot)
-
-        self.assertTrue(any(signal["code"] == "unsupported_tuck_method" for signal in signals))
-
-    def test_forbidden_tuck_method_detects_equivalent_waist_tuck_phrases(self) -> None:
-        main = importlib.import_module("app.main")
-        candidate_snapshot = {
-            "candidate_material_ids": [9],
-            "hero_profile": {"category": "裤装"},
-            "material_cards": [
-                {
-                    "id": 9,
-                    "category": "针织类",
-                    "sub_category": "针织开衫",
-                    "materials_visual": ["针织"],
-                    "details": ["纽扣"],
-                    "wearability": {"recommended_wearing_methods": ["扣起", "敞开"]},
-                },
-            ],
-        }
-
-        phrases = [
-            "针织开衫下摆收进裤腰。",
-            "针织开衫扎进裤腰。",
-            "针织开衫掖进裤腰。",
-            "针织开衫束进裤腰。",
-            "针织开衫 tucked-in 到裤腰。",
-        ]
-        for phrase in phrases:
-            with self.subTest(phrase=phrase):
-                self.assertTrue(main.has_forbidden_tuck_method([9], candidate_snapshot, {"wearing_notes": phrase}))
-
-    def test_bottom_shot_plan_uses_category_specific_frames(self) -> None:
-        main = importlib.import_module("app.main")
-        plans = main.build_default_new_shot_plans(
+        snapshot = main.build_candidate_retrieval_snapshot(
+            {"id": 1, "task_id": 1, "name_snapshot": "测试", "image_snapshot_json": "[]"},
             [],
-            {
-                "hero_understanding": {
-                    "category": "裤装",
-                    "hero_selling_points": ["腰头", "裤褶", "裤腿垂坠"],
-                },
-                "selected_outfit_id": "candidate_a",
-                "outfit_candidates": [
-                    {
-                        "id": "candidate_a",
-                        "selected_material_ids": [],
-                        "wearing_notes": "主推裤装单穿展示。",
-                    }
-                ],
-            },
         )
 
-        self.assertEqual([item["shotType"] for item in plans[:5]], ["pants_hero", "pants_waist_to_feet", "pants_waist_detail", "pants_side_motion", "pants_front_fit"])
-        self.assertIn("腰头", plans[1]["mainFocus"])
-
-    def test_styling_plan_records_forbidden_briefcase_accessory_signal(self) -> None:
-        main = importlib.import_module("app.main")
-        candidate_snapshot = {
-            "candidate_material_ids": [],
-            "material_cards": [],
-        }
-        plan = {
-            "selected_material_ids": [],
-            "selected_outfit_id": "candidate_a",
-            "outfit_candidates": [
-                {
-                    "id": "candidate_a",
-                    "selected_material_ids": [],
-                    "generated_accessories": ["棕色尖头高跟皮鞋", "米白色手提公文包"],
-                    "wearing_notes": "主推款单穿。",
-                    "aesthetic_diagnosis": {
-                        "color_weight": "色彩干净轻量。",
-                        "silhouette_balance": "主推款比例完整。",
-                        "waistline_proportion": "腰线清楚。",
-                        "season_material_fit": "材质季节匹配。",
-                        "template_risk": "没有套用完整通勤模板。",
-                        "wearing_method_validity": "主推款单穿，无额外穿法风险。",
-                        "tuck_quality": "无塞腰穿法。",
-                        "brand_read": "符合 Lily 干净通勤调性。",
-                    },
-                    "scores": {
-                        "aesthetic_score": 0.9,
-                        "brand_fit_score": 0.9,
-                        "hero_visibility_score": 0.9,
-                        "commercial_readiness_score": 0.9,
-                    },
-                    "risk_notes": [],
-                }
-            ],
-        }
-
-        main.validate_styling_plan(plan, candidate_snapshot)
-        signals = main.collect_styling_quality_signals(plan, candidate_snapshot)
-
-        self.assertTrue(any(signal["code"] == "template_accessory_risk" for signal in signals))
+        self.assertEqual(snapshot["prompt_rule_source"], "assembly.ai_styling")
+        self.assertNotIn("ai_policy_config", snapshot)
+        self.assertIn("ID 白名单", " ".join(snapshot["notes"]))
 
     def test_schema_migrations_are_recorded(self) -> None:
         config = importlib.import_module("app.config")
@@ -1307,8 +964,14 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertIn("segment.brand_info", {item["key"] for item in listed.json()["items"]})
                     placeholder_names = {item["name"] for item in listed.json()["placeholders"]}
                     self.assertNotIn("runtime.taxonomy_card", placeholder_names)
+                    self.assertNotIn("runtime.taxonomy_prompt_card", placeholder_names)
                     self.assertNotIn("runtime.shoot_config_card", placeholder_names)
                     self.assertNotIn("runtime.tagging_input", placeholder_names)
+                    self.assertNotIn("runtime.request_snapshot", placeholder_names)
+                    self.assertNotIn("runtime.shot_plan", placeholder_names)
+                    self.assertIn("runtime.styling_result", placeholder_names)
+                    self.assertIn("runtime.shoot_script_result", placeholder_names)
+                    self.assertIn("runtime.current_shot_context", placeholder_names)
                     listed_keys = {item["key"] for item in listed.json()["items"]}
                     self.assertNotIn("segment.tag_rules", listed_keys)
                     self.assertNotIn("segment.director_rules", listed_keys)
@@ -1347,7 +1010,6 @@ class BackendSmokeTests(unittest.TestCase):
                     user_login = client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"})
                     self.assertEqual(user_login.status_code, 200)
                     self.assertEqual(client.get("/api/taxonomy/rules").status_code, 403)
-                    self.assertEqual(client.get("/api/taxonomy/prompt-card").status_code, 403)
 
                     admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
                     self.assertEqual(admin_login.status_code, 200)
@@ -1358,12 +1020,6 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertEqual(payload["summary"]["tagCount"], 0)
                     self.assertEqual(payload["summary"]["relationCount"], 0)
                     self.assertEqual(payload["summary"]["applicabilityRuleCount"], 0)
-
-                    prompt = client.get("/api/taxonomy/prompt-card")
-                    self.assertEqual(prompt.status_code, 200)
-                    self.assertIn("# Ruyi-Dream 服装标签规则卡", prompt.json()["content"])
-                    self.assertIn("品类适用范围：", prompt.json()["content"])
-                    self.assertIn("输出 JSON（字段名保持英文用于系统解析；字段内容使用中文）", prompt.json()["content"])
 
                     created_category_dimension = client.post(
                         "/api/taxonomy/dimensions",
@@ -1501,10 +1157,6 @@ class BackendSmokeTests(unittest.TestCase):
                     applicability = next(item for item in updated_applicability.json()["applicabilityRules"] if item["id"] == applicability_id)
                     self.assertEqual(applicability["mode"], "required")
                     self.assertFalse(applicability["isActive"])
-                    after_inactive_prompt = client.get("/api/taxonomy/prompt-card")
-                    self.assertEqual(after_inactive_prompt.status_code, 200)
-                    self.assertNotIn("按品类限定测试细节", after_inactive_prompt.json()["content"])
-
                     exported = client.get("/api/taxonomy/export")
                     self.assertEqual(exported.status_code, 200)
                     self.assertEqual(exported.json()["schemaVersion"], "ruyi-taxonomy-rules-v1")
@@ -1557,7 +1209,7 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertEqual(deleted_dimension.status_code, 200)
                     self.assertFalse(any(item["code"] == "test_dimension" for item in deleted_dimension.json()["dimensions"]))
 
-    def test_shoot_config_prompt_import_and_export_are_admin_only(self) -> None:
+    def test_shoot_config_import_and_export_are_admin_only(self) -> None:
         from fastapi.testclient import TestClient
 
         config = importlib.import_module("app.config")
@@ -1584,17 +1236,11 @@ class BackendSmokeTests(unittest.TestCase):
                     user_login = client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"})
                     self.assertEqual(user_login.status_code, 200)
                     self.assertEqual(client.get("/api/shoot-config/export").status_code, 403)
-                    self.assertEqual(client.get("/api/shoot-config/prompt-card").status_code, 403)
 
                     admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
                     self.assertEqual(admin_login.status_code, 200)
                     self.assertEqual(client.post("/api/taxonomy/dimensions", json={"code": "category", "labelZh": "品类"}).status_code, 200)
                     self.assertEqual(client.post("/api/taxonomy/tags", json={"dimensionCode": "category", "code": "top", "labelZh": "上装"}).status_code, 200)
-
-                    prompt = client.get("/api/shoot-config/prompt-card")
-                    self.assertEqual(prompt.status_code, 200)
-                    self.assertIn("# Ruyi-Dream 拍摄配置 Prompt", prompt.json()["content"])
-                    self.assertIn("默认 6 镜头", prompt.json()["content"])
 
                     exported = client.get("/api/shoot-config/export")
                     self.assertEqual(exported.status_code, 200)
@@ -1623,50 +1269,7 @@ class BackendSmokeTests(unittest.TestCase):
                     self.assertEqual(item["globalRules"][0]["label"], "品牌风格")
                     self.assertEqual([rule["categoryTagCode"] for rule in item["categoryShotRules"]], ["top"])
 
-    def test_ai_policy_config_is_admin_only_and_exportable(self) -> None:
-        from fastapi.testclient import TestClient
-
-        config = importlib.import_module("app.config")
-        db_module = importlib.import_module("app.db")
-        main = importlib.import_module("app.main")
-
-        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file, tempfile.TemporaryDirectory() as log_dir:
-            log_dir_path = Path(log_dir)
-
-            class FakeSettings:
-                database_path = Path(db_file.name)
-                log_dir = log_dir_path
-
-            with (
-                patch.object(db_module, "get_settings", return_value=FakeSettings),
-                patch.object(main.settings, "database_path", Path(db_file.name)),
-            ):
-                config.get_settings.cache_clear()
-                db_module.init_db()
-
-                with patch.object(main, "ensure_bucket", return_value=None), TestClient(main.app) as client:
-                    self.assertEqual(client.get("/api/ai-policy-config").status_code, 401)
-
-                    user_login = client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"})
-                    self.assertEqual(user_login.status_code, 200)
-                    self.assertEqual(client.get("/api/ai-policy-config/export").status_code, 403)
-                    self.assertEqual(client.get("/api/ai-policy-config/prompt-card").status_code, 403)
-
-                    admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
-                    self.assertEqual(admin_login.status_code, 200)
-                    exported = client.get("/api/ai-policy-config/export")
-                    self.assertEqual(exported.status_code, 200)
-                    payload = exported.json()["config"]
-                    self.assertEqual(payload["schemaVersion"], "ai-policy-config-v1")
-                    payload["candidateFunnel"]["candidateImageLimit"] = 18
-                    imported = client.post("/api/ai-policy-config/import", json={"config": payload})
-                    self.assertEqual(imported.status_code, 200)
-                    self.assertEqual(imported.json()["item"]["candidateFunnel"]["candidateImageLimit"], 18)
-                    prompt = client.get("/api/ai-policy-config/prompt-card")
-                    self.assertEqual(prompt.status_code, 200)
-                    self.assertIn("AI 选搭策略配置", prompt.json()["content"])
-
-    def test_shoot_script_request_reuses_styling_policy_snapshot(self) -> None:
+    def test_shoot_script_request_reuses_ai_styling_prompt_snapshot(self) -> None:
         config = importlib.import_module("app.config")
         db_module = importlib.import_module("app.db")
         main = importlib.import_module("app.main")
@@ -1685,23 +1288,15 @@ class BackendSmokeTests(unittest.TestCase):
                 config.get_settings.cache_clear()
                 db_module.init_db()
                 timestamp = db_module.now_iso()
-                active_policy = main.default_ai_policy_config()
-                active_policy["candidateFunnel"]["candidateImageLimit"] = 9
-                snapshot_policy = main.default_ai_policy_config()
-                snapshot_policy["candidateFunnel"]["candidateImageLimit"] = 17
                 with db_module.get_db() as db:
-                    db.execute(
-                        "INSERT INTO ai_policy_configs (id, config_json, created_at, updated_at) VALUES (1, ?, ?, ?)",
-                        (db_module.dumps(active_policy), timestamp, timestamp),
-                    )
                     task_id = db.execute(
-                        "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('policy snapshot', 'STYLING_SELECTED', ?, ?)",
+                        "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('prompt snapshot', 'STYLING_SELECTED', ?, ?)",
                         (timestamp, timestamp),
                     ).lastrowid
                     input_id = db.execute(
                         """
                         INSERT INTO generation_task_input_versions (task_id, version_number, name_snapshot, image_snapshot_json, created_at)
-                        VALUES (?, 1, 'policy snapshot', '[]', ?)
+                        VALUES (?, 1, 'prompt snapshot', '[]', ?)
                         """,
                         (task_id, timestamp),
                     ).lastrowid
@@ -1720,7 +1315,7 @@ class BackendSmokeTests(unittest.TestCase):
                         (
                             task_id,
                             input_id,
-                            db_module.dumps({"ai_policy_config": snapshot_policy, "ai_policy_prompt_card": "SNAPSHOT CARD"}),
+                            db_module.dumps({"ai_styling_prompt_config_key": "assembly.ai_styling", "ai_styling_prompt": "SNAPSHOT AI STYLING PROMPT"}),
                             db_module.dumps(styling_plan),
                             timestamp,
                             timestamp,
@@ -1729,8 +1324,8 @@ class BackendSmokeTests(unittest.TestCase):
 
                 request_snapshot = main.build_shoot_script_request_snapshot(task_id, styling_id, input_id)
 
-        self.assertEqual(request_snapshot["ai_policy_config"]["candidateFunnel"]["candidateImageLimit"], 17)
-        self.assertEqual(request_snapshot["ai_policy_prompt_card"], "SNAPSHOT CARD")
+        self.assertEqual(request_snapshot["ai_styling_prompt_config_key"], "assembly.ai_styling")
+        self.assertEqual(request_snapshot["ai_styling_prompt"], "SNAPSHOT AI STYLING PROMPT")
 
     def test_brand_info_legacy_fields_migrate_to_guidance_text(self) -> None:
         config = importlib.import_module("app.config")
@@ -2381,8 +1976,6 @@ class BackendSmokeTests(unittest.TestCase):
                 patch.object(main, "build_ai_stylist_context", side_effect=build_context),
                 patch.object(main, "select_styling_with_gemini", new_callable=AsyncMock, return_value=styling_plan) as gemini,
                 patch.object(main, "validate_styling_plan", return_value=None),
-                patch.object(main, "collect_styling_quality_signals", return_value=[]),
-                patch.object(main, "attach_styling_quality_signals", side_effect=lambda plan, _signals: plan),
                 patch.object(main, "get_styling_source_and_selected_snapshots", return_value=([], [])),
             ):
                 response = client.post(f"/api/generation-tasks/{task_id}/select-styling")

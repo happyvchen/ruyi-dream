@@ -42,20 +42,21 @@ ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + 
 - 保存和管理服装货号图包对象
 - 维护数字模特档案和素材引用
 - 维护 admin-only 单一品牌资料，供后续选搭、拍摄剧本和 ShotPlan 作为结构化品牌参考
-- 维护 admin-only AI 策略配置，供候选漏斗、质量信号、生成配饰边界和品牌边界作为结构化业务策略参考
+- 维护 admin-only Prompt 配置；AI 选搭原则、品类策略、质量信号、配饰边界和库充足性口径直接写入 `AI 选搭` Prompt 正文，后端不解释其中业务规则
 - 管理 AI 摄影棚主推款任务、输入版本和状态机
-- 对 READY 搭配服饰做候选漏斗、风险降权、outfit 草案和标签压缩；AI 打标原始 JSON 由 Prompt 驱动，后端只做最佳努力摘要派生
+- 对未归档 READY 搭配服饰做全量标签事实快照；不做候选漏斗、排序、评分、映射、质量判断或 outfit 草案
 - 调用 AI Stylist 生成带 Aesthetic Critic 诊断的 `StylingPlan`，保存完整 request/response 快照
 - 基于 `StylingPlan` 生成 ShootScript / ShotPlan 和 Image-2 任务包
 - 管理生成任务状态、单张重试、结果下载和记录复盘
-- 保存实验/生产结果、候选漏斗、StylingPlan 和 provider attempts 元数据
+- 保存实验/生产结果、全量标签事实快照、StylingPlan 和 provider attempts 元数据
 
 ## 本地规则 (Local Rules)
 
 - 后端实现前先读 `../design/CLAUDE.md`。
 - 修改业务对象前先读 `domain_model.md`；修改表结构前先读 `database_schema.md`。
 - AI 打标的规则、字段和输出结构由 `AI 打标` Prompt 自包含维护；后端必须完整保存任意可解析 JSON 返回，并最佳努力派生 `effective_tags_json`，不要重新假设固定 taxonomy 输出。
-- 不把品牌策略、选搭权重、品类互斥/降权、质量信号阈值、配饰边界、Pose 选择、图位规划写死在不可维护的代码字符串里；自然语言口径进入 Prompt 维护，结构化业务策略进入 AI 策略配置、ShootConfig 或 task package。
+- AI 智能选搭的业务内容全部进入 Prompt 维护：主推款理解、搭配选择、品类语义、质量信号、库充足性、配饰边界和品牌判断都由 Prompt + 大模型完成；Prompt 输入输出统一使用搭配服饰 `code`，后端只做 READY/归档/删除数据范围、code 到内部 ID 的持久化映射、schema、状态机、快照和 provider 调用。
+- 不把品牌策略、选搭权重、品类互斥/降权、质量信号阈值、配饰边界、Pose 选择、图位规划写死在不可维护的代码字符串里；这些业务口径进入 Prompt 维护，主要由对应 Prompt 正文表达，不作为 Python 执行逻辑。
 - 不擅自删除、覆盖、移动用户素材和生成结果。
 - 删除/归档实现必须遵守 `../design/04_implementation_guide/archive_purge_policy.md`：默认归档，彻底删除先做影响预检，媒体文件按引用计数释放。
 - MVP 不做多租户、复杂权限、计费、模板市场。
