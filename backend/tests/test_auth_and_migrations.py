@@ -559,7 +559,7 @@ class BackendSmokeTests(unittest.TestCase):
         candidate_snapshot = {
             "candidate_material_ids": [9],
             "material_cards": [
-                {"id": 9, "category": "outerwear", "colors": ["brown"]},
+                {"id": 9, "category": "外套类", "colors": ["棕色"]},
             ],
         }
         plan = {
@@ -679,7 +679,7 @@ class BackendSmokeTests(unittest.TestCase):
         candidate_snapshot = {
             "candidate_material_ids": [9],
             "material_cards": [
-                {"id": 9, "category": "outerwear", "colors": ["brown"]},
+                {"id": 9, "category": "外套类", "colors": ["棕色"]},
             ],
         }
         raw_plan = {
@@ -718,8 +718,8 @@ class BackendSmokeTests(unittest.TestCase):
         candidate_snapshot = {
             "candidate_material_ids": [9, 10],
             "material_cards": [
-                {"id": 9, "category": "outerwear", "colors": ["brown"]},
-                {"id": 10, "category": "top", "colors": ["brown"], "wearability": {"recommended_wearing_methods": ["tucked"]}},
+                {"id": 9, "category": "外套类", "colors": ["棕色"]},
+                {"id": 10, "category": "上装", "colors": ["棕色"], "wearability": {"recommended_wearing_methods": ["塞腰"]}},
             ],
         }
         plan = {
@@ -764,14 +764,14 @@ class BackendSmokeTests(unittest.TestCase):
         main = importlib.import_module("app.main")
         policy = main.default_ai_policy_config()
         hero_profile = {
-            "category": "dress",
+            "category": "连衣裙",
             "hero_code": "DRESS-001",
             "is_high_waist_or_waist_focus": True,
             "is_light_colored": True,
         }
         cards = [
-            {"id": 1, "code": "OUTER", "category": "outerwear", "colors": ["brown"], "wearability": {"coverage_risk": "may_cover_hero"}, "risk": []},
-            {"id": 2, "code": "KNIT", "category": "knitwear", "colors": ["ivory"], "wearability": {"coverage_risk": "none"}, "risk": []},
+            {"id": 1, "code": "OUTER", "category": "外套类", "colors": ["棕色"], "wearability": {"coverage_risk": "可能遮挡主推款"}, "risk": []},
+            {"id": 2, "code": "KNIT", "category": "针织类", "colors": ["象牙白"], "wearability": {"coverage_risk": "无明显遮挡风险"}, "risk": []},
         ]
 
         ranked = main.rank_candidate_materials(hero_profile, cards, policy)
@@ -787,15 +787,15 @@ class BackendSmokeTests(unittest.TestCase):
         policy = main.default_ai_policy_config()
         candidate_snapshot = {
             "ai_policy_config": policy,
-            "hero_profile": {"category": "dress"},
+            "hero_profile": {"category": "连衣裙"},
             "candidate_material_ids": [9, 10],
             "material_cards": [
-                {"id": 9, "code": "OUTER", "category": "outerwear", "colors": ["brown"], "wearability": {"coverage_risk": "may_cover_hero"}},
-                {"id": 10, "code": "KNIT", "category": "knitwear", "colors": ["ivory"], "wearability": {"coverage_risk": "none"}},
+                {"id": 9, "code": "OUTER", "category": "外套类", "colors": ["棕色"], "wearability": {"coverage_risk": "可能遮挡主推款"}},
+                {"id": 10, "code": "KNIT", "category": "针织类", "colors": ["象牙白"], "wearability": {"coverage_risk": "无明显遮挡风险"}},
             ],
             "library_adequacy": {
                 "better_alternatives": [
-                    {"id": 10, "code": "KNIT", "category": "knitwear"},
+                    {"id": 10, "code": "KNIT", "category": "针织类"},
                 ],
             },
         }
@@ -844,20 +844,20 @@ class BackendSmokeTests(unittest.TestCase):
             "image_snapshot_json": "[]",
         }
         material_cards = [
-            {"id": 1, "code": "BOTTOM", "category": "bottom", "colors": ["white"], "wearability": {}, "risk": []},
+            {"id": 1, "code": "BOTTOM", "category": "裤装", "colors": ["白色"], "wearability": {}, "risk": []},
             {
                 "id": 2,
                 "code": "OUTER",
-                "category": "outerwear",
-                "colors": ["brown"],
-                "wearability": {"coverage_risk": "likely_cover_hero"},
-                "risk": ["too_heavy"],
+                "category": "外套类",
+                "colors": ["棕色"],
+                "wearability": {"coverage_risk": "较可能遮挡主推款"},
+                "risk": ["过厚重"],
             },
-            {"id": 3, "code": "TOP", "category": "top", "colors": ["ivory"], "wearability": {}, "risk": []},
-            {"id": 30, "code": "UNKNOWN", "category": "unknown", "colors": ["ivory"], "wearability": {}, "risk": []},
-            {"id": 31, "code": "BAG", "category": "unsupported_accessory", "colors": ["black"], "wearability": {}, "risk": []},
+            {"id": 3, "code": "TOP", "category": "上装", "colors": ["象牙白"], "wearability": {}, "risk": []},
+            {"id": 30, "code": "UNKNOWN", "category": "未知", "colors": ["象牙白"], "wearability": {}, "risk": []},
+            {"id": 31, "code": "BAG", "category": "不支持入库配饰", "colors": ["黑色"], "wearability": {}, "risk": []},
             *[
-                {"id": index, "code": f"TOP-{index}", "category": "top", "colors": ["beige"], "wearability": {}, "risk": []}
+                {"id": index, "code": f"TOP-{index}", "category": "上装", "colors": ["米色"], "wearability": {}, "risk": []}
                 for index in range(4, 30)
             ],
         ]
@@ -870,8 +870,8 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertNotIn(30, snapshot["candidate_material_ids"])
         self.assertNotIn(31, snapshot["candidate_material_ids"])
         self.assertIn(1, snapshot["source_material_ids"])
-        self.assertTrue(any(item["id"] == 1 and "same_bottom_category_excluded" in item["reasons"] for item in snapshot["filtered_out"]))
-        self.assertTrue(any(item["id"] == 30 and "unknown_hard_excluded" in item["reasons"] for item in snapshot["filtered_out"]))
+        self.assertTrue(any(item["id"] == 1 and "裤装_裤装_category_excluded" in item["reasons"] for item in snapshot["filtered_out"]))
+        self.assertTrue(any(item["id"] == 30 and "未知_hard_excluded" in item["reasons"] for item in snapshot["filtered_out"]))
         self.assertEqual(snapshot["outfit_drafts"][0]["selected_material_ids"], [])
         self.assertIn("library_adequacy", snapshot)
 
@@ -906,16 +906,16 @@ class BackendSmokeTests(unittest.TestCase):
     def test_candidate_hard_excluded_categories_cannot_be_configured_back_in(self) -> None:
         main = importlib.import_module("app.main")
         policy = main.default_ai_policy_config()
-        policy["candidateFunnel"]["hardExcludedCategories"] = ["other_garment"]
+        policy["candidateFunnel"]["hardExcludedCategories"] = ["其他服装"]
         normalized = main.normalize_ai_policy_config_payload(policy)
 
-        self.assertIn("unknown", normalized["candidateFunnel"]["hardExcludedCategories"])
-        self.assertIn("unsupported_accessory", normalized["candidateFunnel"]["hardExcludedCategories"])
+        self.assertIn("未知", normalized["candidateFunnel"]["hardExcludedCategories"])
+        self.assertIn("不支持入库配饰", normalized["candidateFunnel"]["hardExcludedCategories"])
 
-        score, reasons, excluded = main.score_candidate_card({"category": "dress"}, {"id": 1, "category": "unknown"}, normalized)
+        score, reasons, excluded = main.score_candidate_card({"category": "连衣裙"}, {"id": 1, "category": "未知"}, normalized)
 
         self.assertTrue(excluded)
-        self.assertIn("unknown_hard_excluded", reasons)
+        self.assertIn("未知_hard_excluded", reasons)
 
     def test_unknown_hero_category_blocks_candidate_selection(self) -> None:
         main = importlib.import_module("app.main")
@@ -926,13 +926,13 @@ class BackendSmokeTests(unittest.TestCase):
             "image_snapshot_json": "[]",
         }
         material_cards = [
-            {"id": 1, "code": "TOP", "category": "top", "colors": ["white"], "wearability": {}, "risk": []},
-            {"id": 2, "code": "BOTTOM", "category": "bottom", "colors": ["black"], "wearability": {}, "risk": []},
+            {"id": 1, "code": "TOP", "category": "上装", "colors": ["白色"], "wearability": {}, "risk": []},
+            {"id": 2, "code": "BOTTOM", "category": "裤装", "colors": ["黑色"], "wearability": {}, "risk": []},
         ]
 
         snapshot = main.build_candidate_retrieval_snapshot(input_row, material_cards)
 
-        self.assertEqual(snapshot["hero_profile"]["category"], "unknown")
+        self.assertEqual(snapshot["hero_profile"]["category"], "未知")
         self.assertEqual(snapshot["candidate_material_ids"], [])
         self.assertEqual(snapshot["candidate_pool_size"], 0)
         self.assertTrue(snapshot["library_adequacy"]["recommend_empty_pairing"])
@@ -950,20 +950,20 @@ class BackendSmokeTests(unittest.TestCase):
             {
                 "id": 10,
                 "code": "PANTS-001",
-                "category": "bottom",
-                "colors": ["white"],
-                "details": ["belt", "pleat"],
-                "silhouette": ["wide_leg"],
-                "wearability": {"recommended_wearing_methods": ["belted", "tucked"]},
+                "category": "裤装",
+                "colors": ["白色"],
+                "details": ["腰带", "褶裥"],
+                "silhouette": ["阔腿"],
+                "wearability": {"recommended_wearing_methods": ["系腰带", "塞腰"]},
                 "risk": [],
             },
-            {"id": 11, "code": "VEST-001", "category": "top", "colors": ["white"], "wearability": {}, "risk": []},
+            {"id": 11, "code": "VEST-001", "category": "上装", "colors": ["白色"], "wearability": {}, "risk": []},
         ]
 
         snapshot = main.build_candidate_retrieval_snapshot(input_row, material_cards)
 
         self.assertEqual(snapshot["hero_profile"]["source"], "styling_garment_code_match")
-        self.assertEqual(snapshot["hero_profile"]["category"], "bottom")
+        self.assertEqual(snapshot["hero_profile"]["category"], "裤装")
         self.assertNotIn(10, snapshot["candidate_material_ids"])
         self.assertIn(11, snapshot["candidate_material_ids"])
         self.assertTrue(any(item["id"] == 10 and "current_hero_same_code_excluded" in item["reasons"] for item in snapshot["filtered_out"]))
@@ -973,16 +973,16 @@ class BackendSmokeTests(unittest.TestCase):
         main = importlib.import_module("app.main")
         candidate_snapshot = {
             "candidate_material_ids": [9],
-            "hero_profile": {"category": "bottom"},
+            "hero_profile": {"category": "裤装"},
             "material_cards": [
                 {
                     "id": 9,
-                    "category": "knitwear",
-                    "sub_category": "cardigan",
-                    "materials_visual": ["knit"],
-                    "details": ["button"],
-                    "wearability": {"recommended_wearing_methods": ["buttoned", "open"]},
-                    "colors": ["ivory"],
+                    "category": "针织类",
+                    "sub_category": "针织开衫",
+                    "materials_visual": ["针织"],
+                    "details": ["纽扣"],
+                    "wearability": {"recommended_wearing_methods": ["扣起", "敞开"]},
+                    "colors": ["象牙白"],
                 },
             ],
         }
@@ -1024,15 +1024,15 @@ class BackendSmokeTests(unittest.TestCase):
         main = importlib.import_module("app.main")
         candidate_snapshot = {
             "candidate_material_ids": [9],
-            "hero_profile": {"category": "bottom"},
+            "hero_profile": {"category": "裤装"},
             "material_cards": [
                 {
                     "id": 9,
-                    "category": "knitwear",
-                    "sub_category": "cardigan",
-                    "materials_visual": ["knit"],
-                    "details": ["button"],
-                    "wearability": {"recommended_wearing_methods": ["buttoned", "open"]},
+                    "category": "针织类",
+                    "sub_category": "针织开衫",
+                    "materials_visual": ["针织"],
+                    "details": ["纽扣"],
+                    "wearability": {"recommended_wearing_methods": ["扣起", "敞开"]},
                 },
             ],
         }
@@ -1054,7 +1054,7 @@ class BackendSmokeTests(unittest.TestCase):
             [],
             {
                 "hero_understanding": {
-                    "category": "bottom",
+                    "category": "裤装",
                     "hero_selling_points": ["腰头", "裤褶", "裤腿垂坠"],
                 },
                 "selected_outfit_id": "candidate_a",
@@ -1706,7 +1706,7 @@ class BackendSmokeTests(unittest.TestCase):
                         (task_id, timestamp),
                     ).lastrowid
                     styling_plan = {
-                        "hero_understanding": {"category": "dress", "hero_selling_points": ["腰线"]},
+                        "hero_understanding": {"category": "连衣裙", "hero_selling_points": ["腰线"]},
                         "selected_outfit_id": "candidate_a",
                         "outfit_candidates": [{"id": "candidate_a", "selected_material_ids": [], "wearing_notes": "主推款单穿。"}],
                     }
@@ -2706,9 +2706,9 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertEqual(normalized["ai_tags"]["一级品类"], ["上装"])
         self.assertEqual(normalized["tag_meta"]["overall_confidence"], 0.88)
-        self.assertEqual(effective["category"], "top")
+        self.assertEqual(effective["category"], "上装")
         self.assertEqual(effective["category_label"], "上装")
-        self.assertEqual(effective["colors"], ["white"])
+        self.assertEqual(effective["colors"], ["白色"])
         self.assertEqual(effective["pairing_brief"], "白色衬衫，视觉干净利落。")
 
     def test_prompt_tagging_result_derives_from_nested_freeform_json(self) -> None:
@@ -2727,9 +2727,9 @@ class BackendSmokeTests(unittest.TestCase):
         )
         effective = main.build_effective_tags(normalized["ai_tags"], {}, {})
 
-        self.assertEqual(effective["category"], "outerwear")
+        self.assertEqual(effective["category"], "外套类")
         self.assertEqual(effective["sub_category"], "西装")
-        self.assertEqual(effective["colors"], ["navy"])
+        self.assertEqual(effective["colors"], ["藏青色"])
         self.assertEqual(effective["pairing_brief"], "藏青色西装外套，结构清楚，适合通勤搭配。")
 
     def test_lily_tagging_json_parser_wraps_non_object_json(self) -> None:

@@ -49,8 +49,8 @@ settings = get_settings()
 logger = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = settings.max_upload_image_pixels
 SESSION_ROLES = {"user", "admin"}
-SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES = {"unknown", "unsupported_accessory"}
-SYSTEM_HARD_EXCLUDED_CANDIDATE_CATEGORIES = {"unknown", "unsupported_accessory"}
+SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES = {"未知", "不支持入库配饰", "unknown", "unsupported_accessory"}
+SYSTEM_HARD_EXCLUDED_CANDIDATE_CATEGORIES = ("未知", "不支持入库配饰")
 PROMPT_PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-zA-Z0-9_.-]+)\s*}}")
 
 
@@ -6168,7 +6168,15 @@ def build_taxonomy_tagging_request_snapshot(garment: dict[str, Any], prompt: str
 
 
 def build_taxonomy_tagging_prompt(garment: dict[str, Any] | None = None, taxonomy_context: dict[str, Any] | None = None) -> str:
-    return render_prompt_template("assembly.ai_tagging")
+    taxonomy_context = taxonomy_context or build_active_taxonomy_context()
+    runtime = {
+        "taxonomy_prompt_card": build_taxonomy_prompt_card_from_context(taxonomy_context) if taxonomy_context.get("dimensions") else "",
+        "garment": dumps({
+            "code": (garment or {}).get("code"),
+            "image_count": len((garment or {}).get("images", [])),
+        }),
+    }
+    return render_prompt_template("assembly.ai_tagging", runtime)
 
 
 def fallback_taxonomy_tagging_result(garment: dict[str, Any], taxonomy_context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -6220,59 +6228,6 @@ TAG_PROMPT_FIELD_ALIASES = {
     "risk": ["风险点", "风险", "risk", "risks"],
 }
 
-CATEGORY_LABEL_TO_CODE = {
-    "上装": "top",
-    "针织类": "knitwear",
-    "针织": "knitwear",
-    "裤装": "bottom",
-    "裤子": "bottom",
-    "下装": "bottom",
-    "半身裙": "skirt",
-    "短裤": "shorts",
-    "连衣裙": "dress",
-    "连体类": "jumpsuit",
-    "连体裤": "jumpsuit",
-    "连体衣": "jumpsuit",
-    "外套类": "outerwear",
-    "外套": "outerwear",
-    "套装": "suit_set",
-    "其他": "other_garment",
-    "未知": "unknown",
-}
-
-COLOR_LABEL_TO_CODE = {
-    "黑色": "black",
-    "白色": "white",
-    "象牙白": "ivory",
-    "米色": "beige",
-    "灰色": "grey",
-    "蓝色": "blue",
-    "藏青色": "navy",
-    "棕色": "brown",
-    "绿色": "green",
-    "红色": "red",
-    "粉色": "pink",
-    "黄色": "yellow",
-    "紫色": "purple",
-    "金属色": "metallic",
-    "多色": "multi",
-}
-
-GENERIC_LABEL_TO_CODE = {
-    "针织": "knit",
-    "羊毛感": "wool_like",
-    "粗花呢/香风感": "tweed_like",
-    "粗花呢": "tweed_like",
-    "香风感": "tweed_like",
-    "纽扣": "button",
-    "纽扣细节": "button",
-    "不对称": "asymmetric",
-    "短上衣": "cropped",
-    "及胯上衣": "hip",
-    "长上衣": "long",
-}
-
-
 def normalize_prompt_tagging_result(
     raw: Any,
     garment: dict[str, Any],
@@ -6281,6 +6236,11 @@ def normalize_prompt_tagging_result(
     warnings: list[str] | None = None,
     review_reasons: list[str] | None = None,
 ) -> dict[str, Any]:
+    if isinstance(raw, dict) and isinstance(raw.get("tags"), list):
+        try:
+            return normalize_taxonomy_tagging_result(raw, garment, build_active_taxonomy_context())
+        except Exception:
+            pass
     ai_tags = raw if isinstance(raw, dict) else {"raw_result": raw}
     tag_meta = build_prompt_tag_meta(ai_tags, garment, provider=provider, warnings=warnings, review_reasons=review_reasons)
     return {
@@ -6386,14 +6346,12 @@ def first_prompt_value(value: Any, fallback: str = "unknown") -> str:
     return values[0] if values else fallback
 
 
-def prompt_code_values(value: Any, mapping: dict[str, str] | None = None) -> list[str]:
-    mapping = mapping or {}
-    values = prompt_value_list(value)
-    return [mapping.get(item, item) for item in values]
+def prompt_code_values(value: Any) -> list[str]:
+    return prompt_value_list(value)
 
 
-def first_prompt_code(value: Any, mapping: dict[str, str] | None = None, fallback: str = "unknown") -> str:
-    values = prompt_code_values(value, mapping)
+def first_prompt_code(value: Any, fallback: str = "unknown") -> str:
+    values = prompt_code_values(value)
     return values[0] if values else fallback
 
 
@@ -6585,9 +6543,9 @@ def normalize_taxonomy_tag_meta(
     if unmapped or suggestions:
         reasons.append("unmapped_observation")
     selected_category_codes = [item["tag_code"] for item in tags if item["dimension_code"] == "category"]
-    if "unknown" in selected_category_codes:
+    if "未知" in selected_category_codes or "unknown" in selected_category_codes:
         reasons.append("unclear_category")
-    if "unsupported_accessory" in selected_category_codes:
+    if "不支持入库配饰" in selected_category_codes or "unsupported_accessory" in selected_category_codes:
         reasons.append("unsupported_accessory")
     reasons = list(dict.fromkeys(reasons))
     return {
@@ -6753,9 +6711,9 @@ def build_effective_tags(ai_tags: dict[str, Any], official_title_tags: dict[str,
         "style_summary": prompt_text_value(prompt_field_value(ai_tags, "style_summary")),
     }
     visual_profile = {key: value for key, value in visual_profile.items() if value}
-    category = first_prompt_code(prompt_field_value(ai_tags, "category"), CATEGORY_LABEL_TO_CODE)
+    category = first_prompt_code(prompt_field_value(ai_tags, "category"), "未知")
     sub_category = first_prompt_value(prompt_field_value(ai_tags, "sub_category"), "other")
-    wearing_methods = prompt_code_values(prompt_field_value(ai_tags, "wearing_methods"), GENERIC_LABEL_TO_CODE)
+    wearing_methods = prompt_code_values(prompt_field_value(ai_tags, "wearing_methods"))
     wearability_values = prompt_value_list(prompt_field_value(ai_tags, "wearability"))
     wearability: dict[str, Any] = {}
     if wearability_values:
@@ -6781,21 +6739,21 @@ def build_effective_tags(ai_tags: dict[str, Any], official_title_tags: dict[str,
         "category": category,
         "sub_category": sub_category,
         "category_label": first_prompt_value(prompt_field_value(ai_tags, "category")),
-        "colors": prompt_code_values(prompt_field_value(ai_tags, "colors"), COLOR_LABEL_TO_CODE),
+        "colors": prompt_code_values(prompt_field_value(ai_tags, "colors")),
         "color_labels": prompt_value_list(prompt_field_value(ai_tags, "colors")),
         "color_attributes": prompt_value_list(prompt_field_value(ai_tags, "color_attributes")),
         "fit": first_prompt_value(prompt_field_value(ai_tags, "fit")),
         "silhouette": prompt_value_list(prompt_field_value(ai_tags, "silhouette")),
         "structure": prompt_value_list(prompt_field_value(ai_tags, "structure")),
-        "length": {"values": prompt_code_values(prompt_field_value(ai_tags, "length"), GENERIC_LABEL_TO_CODE), "labels": prompt_value_list(prompt_field_value(ai_tags, "length"))},
-        "materials_visual": prompt_code_values(prompt_field_value(ai_tags, "materials_visual"), GENERIC_LABEL_TO_CODE),
+        "length": {"values": prompt_code_values(prompt_field_value(ai_tags, "length")), "labels": prompt_value_list(prompt_field_value(ai_tags, "length"))},
+        "materials_visual": prompt_code_values(prompt_field_value(ai_tags, "materials_visual")),
         "material_labels": prompt_value_list(prompt_field_value(ai_tags, "materials_visual")),
         "surface_texture": prompt_value_list(prompt_field_value(ai_tags, "surface_texture")),
-        "details": prompt_code_values(prompt_field_value(ai_tags, "details"), GENERIC_LABEL_TO_CODE),
+        "details": prompt_code_values(prompt_field_value(ai_tags, "details")),
         "detail_labels": prompt_value_list(prompt_field_value(ai_tags, "details")),
         "patterns": prompt_value_list(prompt_field_value(ai_tags, "patterns")),
         "neckline": prompt_value_list(prompt_field_value(ai_tags, "neckline")),
-        "closure": prompt_code_values(prompt_field_value(ai_tags, "closure"), GENERIC_LABEL_TO_CODE),
+        "closure": prompt_code_values(prompt_field_value(ai_tags, "closure")),
         "occasion": prompt_value_list(prompt_field_value(ai_tags, "occasion")),
         "season": prompt_value_list(prompt_field_value(ai_tags, "season")),
         "wearability": wearability,
@@ -6834,7 +6792,7 @@ def derive_effective_category(category_entries: list[dict[str, Any]], taxonomy_c
     ]
     selected = [item for item in selected if item]
     if not selected:
-        return "unknown", "other"
+        return "未知", "other"
     selected.sort(key=lambda item: int(item.get("level") or 1), reverse=True)
     leaf = selected[0]
     parent_code = leaf.get("parentCode")
@@ -6974,7 +6932,7 @@ def compress_tags_for_styling(row: Any) -> dict[str, Any]:
     return {
         "id": row["id"],
         "code": row["code"],
-        "category": effective.get("category", "unknown"),
+        "category": effective.get("category", "未知"),
         "sub_category": effective.get("sub_category", "other"),
         "colors": effective.get("colors", []),
         "fit": effective.get("fit", "unknown"),
@@ -7348,12 +7306,12 @@ def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict
     candidate_limit = clamp_int(candidate_policy.get("candidateLimit"), 4, 40, 20)
     hero_profile = infer_hero_profile(input_row, material_cards, ai_policy_config)
     ranked_cards = rank_candidate_materials(hero_profile, material_cards, ai_policy_config)
-    hero_category_unknown = str(hero_profile.get("category") or "") == "unknown"
-    candidate_cards = [] if hero_category_unknown else select_diverse_candidate_cards(ranked_cards, limit=candidate_limit, ai_policy_config=ai_policy_config)
+    hero_category_blocked = str(hero_profile.get("category") or "") in set(ensure_string_list(candidate_policy.get("hardExcludedCategories")))
+    candidate_cards = [] if hero_category_blocked else select_diverse_candidate_cards(ranked_cards, limit=candidate_limit, ai_policy_config=ai_policy_config)
     library_tag_cards = [library_tag_card_for_prompt(card) for card in material_cards]
     outfit_drafts = build_outfit_drafts(candidate_cards, hero_profile, ai_policy_config)
     library_adequacy = build_library_adequacy_report(hero_profile, ranked_cards, candidate_cards, outfit_drafts, ai_policy_config)
-    if hero_category_unknown:
+    if hero_category_blocked:
         library_adequacy["supply_gap_notes"] = [
             *ensure_string_list(library_adequacy.get("supply_gap_notes")),
             "主推款品类无法确认，候选漏斗已阻断库内配角选择；应补充主推款理解或人工复核。",
@@ -7381,7 +7339,7 @@ def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict
         "source_material_ids": [int(card["id"]) for card in material_cards],
         "library_tag_card_count": len(library_tag_cards),
         "candidate_material_ids": [int(card["id"]) for card in candidate_cards],
-        "candidate_pool_size": 0 if hero_category_unknown else len([item for item in ranked_cards if not item["excluded"]]),
+        "candidate_pool_size": 0 if hero_category_blocked else len([item for item in ranked_cards if not item["excluded"]]),
         "candidate_limit": candidate_limit,
         "candidate_image_limit": clamp_int(candidate_policy.get("candidateImageLimit"), 4, 30, 20),
         "hero_profile": hero_profile,
@@ -7398,8 +7356,8 @@ def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict
             "Phase 1 会把未归档 READY 搭配库的标签事实全量放入 library_tag_cards，并用硬过滤、风险降权、多样性保留生成 material_cards 优先候选集。",
             "Gemini 接收全量标签文本、优先候选缩略图、草案和品牌边界；后续可接入 embedding、品牌样本库和反馈排序。",
             *(
-                ["主推款品类为 unknown 时，后端按生产硬边界阻断库内候选，只保留空选搭草案和复核提示。"]
-                if hero_category_unknown
+                ["主推款品类命中硬排除配置时，后端按生产硬边界阻断库内候选，只保留空选搭草案和复核提示。"]
+                if hero_category_blocked
                 else []
             ),
         ],
@@ -7415,7 +7373,9 @@ def infer_hero_profile(input_row: Any, material_cards: list[dict[str, Any]] | No
         return build_hero_profile_from_card(input_row, matching_card, ai_policy_config)
     text = name.lower()
     category_keywords = hero_policy.get("taskNameCategoryKeywords") if isinstance(hero_policy.get("taskNameCategoryKeywords"), dict) else {}
-    category = "unknown"
+    candidate_policy = ai_policy_config.get("candidateFunnel") if isinstance(ai_policy_config.get("candidateFunnel"), dict) else {}
+    unknown_category = (ensure_string_list(candidate_policy.get("hardExcludedCategories")) or ["未知"])[0]
+    category = unknown_category
     for candidate_category, keywords in category_keywords.items():
         if any(keyword in name or keyword.lower() in text for keyword in ensure_string_list(keywords)):
             category = str(candidate_category)
@@ -7432,7 +7392,7 @@ def infer_hero_profile(input_row: Any, material_cards: list[dict[str, Any]] | No
         selling_points.append("主推款整体轮廓")
     return {
         "source": "task_name_phase_one_heuristic",
-        "confidence": 0.55 if category != "unknown" else 0.25,
+        "confidence": 0.55 if category != unknown_category else 0.25,
         "name_snapshot": name,
         "hero_code": name,
         "category": category,
@@ -7462,7 +7422,7 @@ def build_hero_profile_from_card(input_row: Any, card: dict[str, Any], ai_policy
     semantics = candidate_policy.get("semanticSets") if isinstance(candidate_policy.get("semanticSets"), dict) else {}
     selling_point_labels = candidate_policy.get("heroProfileSellingPointLabels") if isinstance(candidate_policy.get("heroProfileSellingPointLabels"), dict) else {}
     name = str(input_row["name_snapshot"] if "name_snapshot" in input_row.keys() else card.get("code") or "").strip()
-    category = str(card.get("category") or "unknown")
+    category = str(card.get("category") or "未知")
     colors = ensure_string_list(card.get("colors"))
     details = ensure_string_list(card.get("details"))
     structure = ensure_string_list(card.get("structure"))
@@ -7477,7 +7437,7 @@ def build_hero_profile_from_card(input_row: Any, card: dict[str, Any], ai_policy
     waist_detail_tokens = set(ensure_string_list(semantics.get("waistFocusDetails")))
     waist_silhouette_tokens = set(ensure_string_list(semantics.get("waistFocusSilhouettes")))
     is_waist_focus = bool(detail_tokens & waist_detail_tokens) or bool(set(silhouette) & waist_silhouette_tokens)
-    is_light = any(color in {"white", "ivory", "beige", "grey"} for color in colors)
+    is_light = any(color in set(ensure_string_list(semantics.get("lightColors"))) for color in colors)
     selling_points: list[str] = []
     for token in [*details, *structure, *neckline, *closure, *silhouette]:
         label = str(selling_point_labels.get(token) or "")
@@ -7550,7 +7510,7 @@ def score_candidate_card(hero_profile: dict[str, Any], card: dict[str, Any], ai_
     score = 1.0
     reasons: list[str] = []
     excluded = False
-    hero_category = str(hero_profile.get("category") or "unknown")
+    hero_category = str(hero_profile.get("category") or "未知")
     category_policy = ai_policy_category_policy(ai_policy_config, hero_category)
     hero_code = str(hero_profile.get("hero_code") or hero_profile.get("name_snapshot") or "").strip().lower()
     card_code = str(card.get("code") or "").strip().lower()
@@ -7567,63 +7527,64 @@ def score_candidate_card(hero_profile: dict[str, Any], card: dict[str, Any], ai_
         score -= 1.0
         excluded = True
         reasons.append(f"{category}_hard_excluded")
-    elif category in {"unsupported_accessory", "unknown"}:
-        score += float(risk_adjustments.get("categoryLowConfidence", -0.45))
-        reasons.append("category_low_confidence")
     excluded_categories = set(ensure_string_list(category_policy.get("excludedCategories")))
     if category in excluded_categories:
         score -= 1.0
         excluded = True
-        if hero_category == "bottom" and category == "bottom":
-            reasons.append("same_bottom_category_excluded")
-        elif hero_category == "dress":
-            reasons.append("dress_conflicting_category_excluded")
-        else:
-            reasons.append(f"{hero_category}_{category}_category_excluded")
+        reasons.append(f"{hero_category}_{category}_category_excluded")
     category_adjustments = category_policy.get("categoryScoreAdjustments") if isinstance(category_policy.get("categoryScoreAdjustments"), dict) else {}
     if category in category_adjustments:
         adjustment = float(category_adjustments.get(category) or 0)
         score += adjustment
         reasons.append(f"policy_category_adjustment_{category}_{adjustment:+.2f}")
-    if category == "outerwear":
-        score += float(risk_adjustments.get("outerwearDefault", -0.2))
-        reasons.append("outerwear_needs_visibility_check")
-    if coverage_risk in {"may_cover_hero", "likely_cover_hero"}:
-        score += float(risk_adjustments.get("coverageMayCoverHero" if coverage_risk == "may_cover_hero" else "coverageLikelyCoverHero", -0.35 if coverage_risk == "may_cover_hero" else -0.55))
+    coverage_risk_adjustments = candidate_policy.get("coverageRiskAdjustments") if isinstance(candidate_policy.get("coverageRiskAdjustments"), dict) else {}
+    if coverage_risk in coverage_risk_adjustments:
+        score += float(coverage_risk_adjustments.get(coverage_risk) or 0)
         reasons.append(f"coverage_risk_{coverage_risk}")
-    if any(str(item) != "none" for item in risk):
+    no_style_risk_values = set(ensure_string_list(candidate_policy.get("noStyleRiskValues")))
+    if any(str(item) not in no_style_risk_values for item in risk):
         score += float(risk_adjustments.get("styleRisk", -0.16))
         reasons.append("style_risk")
     if hero_profile.get("is_high_waist_or_waist_focus"):
-        if category == "outerwear":
-            score += float(risk_adjustments.get("waistFocusOuterwear", -0.2))
-            reasons.append("waist_focus_outerwear_downranked")
-        if str(length.get("top_length") or "") == "long":
+        waist_focus_category_adjustments = candidate_policy.get("waistFocusCategoryAdjustments") if isinstance(candidate_policy.get("waistFocusCategoryAdjustments"), dict) else {}
+        if category in waist_focus_category_adjustments:
+            adjustment = float(waist_focus_category_adjustments.get(category) or 0)
+            score += adjustment
+            reasons.append(f"waist_focus_category_adjustment_{category}_{adjustment:+.2f}")
+        long_top_values = set(ensure_string_list(candidate_policy.get("longTopLengthValues")))
+        if str(length.get("top_length") or "") in long_top_values:
             score += float(risk_adjustments.get("longTopMayCoverWaist", -0.25))
             reasons.append("long_top_may_cover_waist")
-        if hero_category == "bottom" and category in {"top", "knitwear"} and str(length.get("top_length") or "") in {"cropped", "hip"}:
+        short_upper_categories = set(ensure_string_list(candidate_policy.get("waistFocusShortUpperCategories")))
+        short_upper_values = set(ensure_string_list(candidate_policy.get("shortUpperLengthValues")))
+        if category in short_upper_categories and str(length.get("top_length") or "") in short_upper_values:
             score += float(risk_adjustments.get("waistFocusShortUpper", 0.12))
             reasons.append("waist_focus_short_upper_candidate")
-    dark_colors = set(ensure_string_list(semantics.get("darkColors")) or ["black", "brown", "navy", "grey"])
-    if hero_profile.get("is_light_colored") and category in {"top", "outerwear", "knitwear"} and any(str(color) in dark_colors for color in colors):
+    dark_colors = set(ensure_string_list(semantics.get("darkColors")))
+    dark_against_light_categories = set(ensure_string_list(candidate_policy.get("darkAgainstLightHeroCategories")))
+    if hero_profile.get("is_light_colored") and category in dark_against_light_categories and any(str(color) in dark_colors for color in colors):
         score += float(risk_adjustments.get("darkUpperAgainstLightHero", -0.12))
         reasons.append("dark_upper_against_light_hero")
-    if hero_category == "bottom" and category in {"top", "knitwear", "outerwear"}:
-        if any(str(color) in set(ensure_string_list(semantics.get("lightColors")) or ["white", "ivory", "beige"]) for color in colors):
+    light_pairing_policy = candidate_policy.get("lightPairingByHeroCategory") if isinstance(candidate_policy.get("lightPairingByHeroCategory"), dict) else {}
+    light_pairing_categories = set(ensure_string_list(light_pairing_policy.get(hero_category)))
+    if category in light_pairing_categories:
+        if any(str(color) in set(ensure_string_list(semantics.get("lightColors"))) for color in colors):
             score += float(risk_adjustments.get("lightUpperForBottomHero", 0.1))
             reasons.append("light_upper_for_bottom_hero")
         materials = card.get("materials_visual") if isinstance(card.get("materials_visual"), list) else []
-        if any(str(material) in set(ensure_string_list(semantics.get("lightMaterials")) or ["linen_like", "cotton_like", "silk_like", "chiffon"]) for material in materials):
+        if any(str(material) in set(ensure_string_list(semantics.get("lightMaterials"))) for material in materials):
             score += float(risk_adjustments.get("lightMaterialForBottomHero", 0.1))
             reasons.append("light_material_for_bottom_hero")
-        if any(str(material) in set(ensure_string_list(semantics.get("heavyMaterials")) or ["wool_like", "tweed_like", "leather_like"]) for material in materials):
+        if any(str(material) in set(ensure_string_list(semantics.get("heavyMaterials"))) for material in materials):
             score += float(risk_adjustments.get("heavyMaterialForBottomHero", -0.18))
             reasons.append("heavy_material_for_bottom_hero_downranked")
         seasons = card.get("season") if isinstance(card.get("season"), list) else []
-        if seasons and not any(str(season) in set(ensure_string_list(semantics.get("springSummerSeasons")) or ["spring", "summer"]) for season in seasons):
+        if seasons and not any(str(season) in set(ensure_string_list(semantics.get("springSummerSeasons"))) for season in seasons):
             score += float(risk_adjustments.get("seasonMismatchForLightBottom", -0.12))
             reasons.append("season_mismatch_for_light_bottom")
-    if category == "outerwear" and "waist_defined" in silhouette:
+    structured_layer_categories = set(ensure_string_list(candidate_policy.get("structuredLayerBonusCategories")))
+    structured_layer_silhouettes = set(ensure_string_list(candidate_policy.get("structuredLayerBonusSilhouettes")))
+    if category in structured_layer_categories and bool(set(silhouette) & structured_layer_silhouettes):
         score += float(risk_adjustments.get("structuredOuterwear", 0.08))
         reasons.append("structured_layer_candidate")
     return max(0.0, score), reasons or ["neutral_candidate"], excluded
@@ -7640,7 +7601,7 @@ def select_diverse_candidate_cards(ranked_cards: list[dict[str, Any]], limit: in
         if item["excluded"]:
             continue
         card = item["card"]
-        category = str(card.get("category") or "unknown")
+        category = str(card.get("category") or "未知")
         category_cap = clamp_int(category_caps.get(category), 1, 30, default_cap)
         if category_counts.get(category, 0) >= category_cap and len(selected) < max(12, limit // 2):
             continue
@@ -7654,7 +7615,7 @@ def select_diverse_candidate_cards(ranked_cards: list[dict[str, Any]], limit: in
 def build_outfit_drafts(candidate_cards: list[dict[str, Any]], hero_profile: dict[str, Any], ai_policy_config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
     accessory_defaults = ((ai_policy_config.get("accessoryPolicy") or {}).get("default") if isinstance(ai_policy_config.get("accessoryPolicy"), dict) else None) or ["低存在感裸色或米色简洁鞋"]
-    hero_category = str(hero_profile.get("category") or "unknown")
+    hero_category = str(hero_profile.get("category") or "未知")
     category_policy = ai_policy_category_policy(ai_policy_config, hero_category)
     drafts: list[dict[str, Any]] = [
         {
@@ -7668,7 +7629,7 @@ def build_outfit_drafts(candidate_cards: list[dict[str, Any]], hero_profile: dic
     ]
     preferred_cards = sort_cards_for_outfit_drafts(candidate_cards, hero_category, ai_policy_config)
     for card in preferred_cards[:8]:
-        category = str(card.get("category") or "unknown")
+        category = str(card.get("category") or "未知")
         mode = draft_mode_for_category(hero_category, category, ai_policy_config)
         drafts.append(
             {
@@ -7691,11 +7652,11 @@ def sort_cards_for_outfit_drafts(candidate_cards: list[dict[str, Any]], hero_cat
     priority_order = ensure_string_list(category_policy.get("draftCategoryPriority"))
 
     def priority(card: dict[str, Any]) -> tuple[int, float, str]:
-        category = str(card.get("category") or "unknown")
+        category = str(card.get("category") or "未知")
         if priority_order:
             category_priority = priority_order.index(category) if category in priority_order else len(priority_order) + 1
         else:
-            category_priority = {"top": 0, "bottom": 1, "knitwear": 1, "outerwear": 2}.get(category, 3)
+            category_priority = 0
         return (category_priority, -float(card.get("funnel_score") or 0), str(card.get("code") or ""))
 
     return sorted(candidate_cards, key=priority)
@@ -7727,7 +7688,7 @@ def build_library_adequacy_report(
     better_alternatives: list[dict[str, Any]] = []
     for item in ranked_cards:
         card = item["card"]
-        category = str(card.get("category") or "unknown")
+        category = str(card.get("category") or "未知")
         reasons = ensure_string_list(item.get("reasons"))
         if item["excluded"]:
             if any("current_hero" in reason for reason in reasons):
@@ -7749,7 +7710,7 @@ def build_library_adequacy_report(
                 "reason": "候选漏斗高分候选，需由 AI Stylist 与最终选中方案比较。",
             }
         )
-    hero_category = str(hero_profile.get("category") or "unknown")
+    hero_category = str(hero_profile.get("category") or "未知")
     category_policy = ai_policy_category_policy(ai_policy_config, hero_category)
     supply_gap_notes: list[str] = []
     for rule in category_policy.get("supplyGapCategoryGroups", []):
@@ -7974,18 +7935,8 @@ def normalize_brand_evidence(value: Any, candidate_snapshot: dict[str, Any]) -> 
 
 
 def normalize_hero_category(value: Any) -> str:
-    category = str(value or "unknown").strip()
-    fallback_allowed = {"top", "bottom", "skirt", "shorts", "dress", "jumpsuit", "outerwear", "knitwear", "suit_set", "other_garment", "unknown"}
-    try:
-        active_category_codes = {
-            str(option["code"])
-            for option in get_shoot_config_category_options()
-            if option.get("dimensionCode") == "category" and option.get("isActive")
-        }
-    except Exception:
-        active_category_codes = set()
-    allowed = active_category_codes or fallback_allowed
-    return category if category in allowed else "unknown"
+    category = str(value or "未知").strip()
+    return category or "未知"
 
 
 def candidate_cards_by_id(candidate_snapshot: dict[str, Any]) -> dict[int, dict[str, Any]]:
@@ -8302,9 +8253,13 @@ def attach_styling_quality_signals(plan: dict[str, Any], signals: list[dict[str,
 def has_unexplained_outerwear_conflict(selected_ids: list[int], candidate_snapshot: dict[str, Any], selected_outfit: dict[str, Any], ai_policy_config: dict[str, Any] | None = None) -> bool:
     ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
     quality_policy = ai_policy_config.get("qualitySignalPolicy") if isinstance(ai_policy_config.get("qualitySignalPolicy"), dict) else {}
+    signal_config = ai_policy_signal_config(ai_policy_config, "unexplainedOuterwearConflict")
+    conflict_categories = set(ensure_string_list(signal_config.get("conflictCategories")))
+    if not conflict_categories:
+        return False
     cards = {int(card["id"]): card for card in candidate_snapshot.get("material_cards", []) if isinstance(card, dict) and card.get("id") is not None}
-    outerwear_count = sum(1 for item_id in selected_ids if str(cards.get(int(item_id), {}).get("category") or "") == "outerwear")
-    if outerwear_count <= 1:
+    conflict_count = sum(1 for item_id in selected_ids if str(cards.get(int(item_id), {}).get("category") or "") in conflict_categories)
+    if conflict_count <= 1:
         return False
     notes = str(selected_outfit.get("wearing_notes") or "")
     return not any(keyword in notes for keyword in ensure_string_list(quality_policy.get("layeringExplanationKeywords")))
@@ -8327,8 +8282,6 @@ def detect_tuck_usage(notes: str, ai_policy_config: dict[str, Any] | None = None
     explicit_full_tuck_keywords = tuple(ensure_string_list(quality_policy.get("fullTuckKeywords")))
     is_half_tuck = any(keyword in compact for keyword in half_tuck_keywords)
     is_full_tuck = any(keyword in compact for keyword in explicit_full_tuck_keywords)
-    if not is_half_tuck and not is_full_tuck and "untucked" not in compact and "un-tucked" not in compact:
-        is_full_tuck = "tucked" in compact
     if not is_half_tuck and not is_full_tuck:
         is_full_tuck = any(keyword in compact for keyword in ensure_string_list(quality_policy.get("genericTuckKeywords"))) and any(
             keyword in compact for keyword in ensure_string_list(quality_policy.get("waistKeywords"))
@@ -8365,9 +8318,11 @@ def has_forbidden_tuck_method(selected_ids: list[int], candidate_snapshot: dict[
         materials = set(ensure_string_list(card.get("materials_visual")))
         is_cardigan_like = category in structured_categories or str(card.get("sub_category") or "") in structured_sub_categories
         is_structured_or_openwork = bool(details & structured_details) or bool(materials & structured_materials)
-        if is_full_tuck and category in checked_garment_categories and "tucked" not in methods:
+        full_tuck_methods = set(ensure_string_list(quality_policy.get("fullTuckMethodValues")))
+        half_tuck_methods = set(ensure_string_list(quality_policy.get("halfTuckMethodValues")))
+        if is_full_tuck and category in checked_garment_categories and not (methods & full_tuck_methods):
             return True
-        if is_half_tuck and category in checked_garment_categories and not ({"tucked", "half_tucked"} & methods):
+        if is_half_tuck and category in checked_garment_categories and not (methods & (full_tuck_methods | half_tuck_methods)):
             return True
         if is_full_tuck and is_cardigan_like and is_structured_or_openwork:
             return True
@@ -8388,13 +8343,12 @@ def has_high_waist_dark_outerwear_stack(selected_ids: list[int], candidate_snaps
         return False
     cards = {int(card["id"]): card for card in candidate_snapshot.get("material_cards", []) if isinstance(card, dict) and card.get("id") is not None}
     selected_cards = [cards.get(int(item_id), {}) for item_id in selected_ids]
-    has_outerwear = any(str(card.get("category") or "") == "outerwear" for card in selected_cards)
-    if not has_outerwear:
-        return False
     candidate_policy = ai_policy_config.get("candidateFunnel") if isinstance(ai_policy_config.get("candidateFunnel"), dict) else {}
     semantics = candidate_policy.get("semanticSets") if isinstance(candidate_policy.get("semanticSets"), dict) else {}
-    dark_colors = set(ensure_string_list(semantics.get("darkColors")) or ["black", "brown", "navy", "grey"])
+    dark_colors = set(ensure_string_list(semantics.get("darkColors")))
     dark_stack_categories = set(ensure_string_list(quality_policy.get("highWaistDarkStackCategories")))
+    if not any(str(card.get("category") or "") in dark_stack_categories for card in selected_cards):
+        return False
     dark_upper_count = 0
     for card in selected_cards:
         category = str(card.get("category") or "")
@@ -8409,11 +8363,15 @@ def has_dress_outerwear_layering_risk(selected_ids: list[int], candidate_snapsho
     quality_policy = ai_policy_config.get("qualitySignalPolicy") if isinstance(ai_policy_config.get("qualitySignalPolicy"), dict) else {}
     signal_config = ai_policy_signal_config(ai_policy_config, "dressOuterwearLayeringRisk")
     hero_profile = candidate_snapshot.get("hero_profile") if isinstance(candidate_snapshot.get("hero_profile"), dict) else {}
-    if str(hero_profile.get("category") or "") != str(signal_config.get("heroCategory") or "dress"):
+    hero_category = str(signal_config.get("heroCategory") or "")
+    candidate_category = str(signal_config.get("candidateCategory") or "")
+    if not hero_category or not candidate_category:
+        return False
+    if str(hero_profile.get("category") or "") != hero_category:
         return False
     cards = {int(card["id"]): card for card in candidate_snapshot.get("material_cards", []) if isinstance(card, dict) and card.get("id") is not None}
     selected_cards = [cards.get(int(item_id), {}) for item_id in selected_ids]
-    if len(selected_cards) != 1 or str(selected_cards[0].get("category") or "") != str(signal_config.get("candidateCategory") or "outerwear"):
+    if len(selected_cards) != 1 or str(selected_cards[0].get("category") or "") != candidate_category:
         return False
     notes = " ".join([
         str(selected_outfit.get("wearing_notes") or ""),
@@ -8500,66 +8458,63 @@ def default_ai_policy_config() -> dict[str, Any]:
         "candidateFunnel": {
             "candidateLimit": 20,
             "candidateImageLimit": 20,
-            "hardExcludedCategories": ["unknown", "unsupported_accessory"],
+            "hardExcludedCategories": ["未知", "不支持入库配饰"],
             "categoryCaps": {"default": 8},
             "categoryPolicies": [
                 {
-                    "heroCategory": "dress",
-                    "excludedCategories": ["bottom", "dress", "jumpsuit", "suit_set"],
-                    "categoryScoreAdjustments": {"top": 0.16, "knitwear": 0.12, "outerwear": -0.45},
-                    "draftCategoryPriority": ["top", "knitwear", "outerwear"],
-                    "draftModeByCandidateCategory": {"top": "light_overlay_or_inner_layer", "knitwear": "light_soft_layer", "outerwear": "review_required_open_layer"},
+                    "heroCategory": "连衣裙",
+                    "excludedCategories": ["裤装", "半身裙", "短裤", "连衣裙", "连体类", "套装"],
+                    "categoryScoreAdjustments": {"上装": 0.16, "针织类": 0.12, "外套类": -0.45},
+                    "draftCategoryPriority": ["上装", "针织类", "外套类"],
+                    "draftModeByCandidateCategory": {"上装": "light_overlay_or_inner_layer", "针织类": "light_soft_layer", "外套类": "review_required_open_layer"},
                     "singlePieceMode": "hero_first_single_piece",
                     "singlePieceReason": "连衣裙本身是完整造型；除非候选轻量且不遮挡腰线、领口和裙摆，否则优先单穿。",
                     "supplyGapCategoryGroups": [
-                        {"categories": ["top", "knitwear"], "minimum": 1, "note": "连衣裙主推缺少轻薄针织/上装类造型辅助候选，可优先单穿。"}
+                        {"categories": ["上装", "针织类"], "minimum": 1, "note": "连衣裙主推缺少轻薄针织/上装类造型辅助候选，可优先单穿。"}
                     ],
                 },
                 {
-                    "heroCategory": "bottom",
-                    "excludedCategories": ["bottom"],
-                    "categoryScoreAdjustments": {"top": 0.18, "knitwear": 0.18, "outerwear": -0.12},
-                    "draftCategoryPriority": ["top", "knitwear", "outerwear"],
-                    "draftModeByCandidateCategory": {"top": "waist_visible_light_top", "knitwear": "waist_visible_light_top", "outerwear": "open_light_layering"},
+                    "heroCategory": "裤装",
+                    "excludedCategories": ["裤装", "半身裙", "短裤"],
+                    "categoryScoreAdjustments": {"上装": 0.18, "针织类": 0.18, "外套类": -0.12},
+                    "draftCategoryPriority": ["上装", "针织类", "外套类"],
+                    "draftModeByCandidateCategory": {"上装": "waist_visible_light_top", "针织类": "waist_visible_light_top", "外套类": "open_light_layering"},
                     "supplyGapCategoryGroups": [
-                        {"categories": ["top", "knitwear"], "minimum": 1, "note": "裤装/下装主推缺少轻量上装或针织候选。"}
+                        {"categories": ["上装", "针织类"], "minimum": 1, "note": "裤装/下装主推缺少轻量上装或针织候选。"}
                     ],
                 },
                 {
-                    "heroCategory": "top",
-                    "categoryScoreAdjustments": {"bottom": 0.18, "outerwear": -0.08, "top": -0.6, "knitwear": -0.45},
-                    "draftCategoryPriority": ["bottom", "outerwear"],
-                    "draftModeByCandidateCategory": {"bottom": "simple_bottom_pairing", "outerwear": "review_required_open_layer"},
+                    "heroCategory": "上装",
+                    "categoryScoreAdjustments": {"裤装": 0.18, "半身裙": 0.18, "短裤": 0.12, "外套类": -0.08, "上装": -0.6, "针织类": -0.45},
+                    "draftCategoryPriority": ["裤装", "半身裙", "短裤", "外套类"],
+                    "draftModeByCandidateCategory": {"裤装": "simple_bottom_pairing", "半身裙": "simple_bottom_pairing", "短裤": "simple_bottom_pairing", "外套类": "review_required_open_layer"},
                     "supplyGapCategoryGroups": [
-                        {"categories": ["bottom"], "minimum": 1, "note": "上衣主推缺少简洁下装候选。"}
+                        {"categories": ["裤装", "半身裙", "短裤"], "minimum": 1, "note": "上衣主推缺少简洁下装候选。"}
                     ],
                 },
                 {
-                    "heroCategory": "knitwear",
-                    "categoryScoreAdjustments": {"bottom": 0.18, "outerwear": -0.08, "top": -0.45, "knitwear": -0.6},
-                    "draftCategoryPriority": ["bottom", "outerwear"],
-                    "draftModeByCandidateCategory": {"bottom": "simple_bottom_pairing", "outerwear": "review_required_open_layer"},
+                    "heroCategory": "针织类",
+                    "categoryScoreAdjustments": {"裤装": 0.18, "半身裙": 0.18, "短裤": 0.12, "外套类": -0.08, "上装": -0.45, "针织类": -0.6},
+                    "draftCategoryPriority": ["裤装", "半身裙", "短裤", "外套类"],
+                    "draftModeByCandidateCategory": {"裤装": "simple_bottom_pairing", "半身裙": "simple_bottom_pairing", "短裤": "simple_bottom_pairing", "外套类": "review_required_open_layer"},
                     "supplyGapCategoryGroups": [
-                        {"categories": ["bottom"], "minimum": 1, "note": "针织主推缺少简洁下装候选。"}
+                        {"categories": ["裤装", "半身裙", "短裤"], "minimum": 1, "note": "针织主推缺少简洁下装候选。"}
                     ],
                 },
                 {
-                    "heroCategory": "outerwear",
-                    "categoryScoreAdjustments": {"top": 0.18, "knitwear": 0.12, "bottom": 0.1, "dress": -0.08},
-                    "draftCategoryPriority": ["top", "knitwear", "bottom", "dress"],
-                    "draftModeByCandidateCategory": {"top": "outerwear_hero_outfit", "knitwear": "outerwear_hero_outfit", "bottom": "outerwear_hero_outfit", "dress": "outerwear_hero_outfit"},
+                    "heroCategory": "外套类",
+                    "categoryScoreAdjustments": {"上装": 0.18, "针织类": 0.12, "裤装": 0.1, "半身裙": 0.1, "连衣裙": -0.08},
+                    "draftCategoryPriority": ["上装", "针织类", "裤装", "半身裙", "连衣裙"],
+                    "draftModeByCandidateCategory": {"上装": "outerwear_hero_outfit", "针织类": "outerwear_hero_outfit", "裤装": "outerwear_hero_outfit", "半身裙": "outerwear_hero_outfit", "连衣裙": "outerwear_hero_outfit"},
                     "supplyGapCategoryGroups": [
-                        {"categories": ["top", "knitwear", "bottom"], "minimum": 2, "note": "外套主推缺少内搭或下装候选。"}
+                        {"categories": ["上装", "针织类", "裤装", "半身裙", "短裤"], "minimum": 2, "note": "外套主推缺少内搭或下装候选。"}
                     ],
                 },
             ],
             "riskAdjustments": {
-                "categoryLowConfidence": -0.45,
-                "outerwearDefault": -0.2,
                 "coverageMayCoverHero": -0.35,
                 "coverageLikelyCoverHero": -0.55,
                 "styleRisk": -0.16,
-                "waistFocusOuterwear": -0.2,
                 "longTopMayCoverWaist": -0.25,
                 "waistFocusShortUpper": 0.12,
                 "darkUpperAgainstLightHero": -0.12,
@@ -8569,34 +8524,46 @@ def default_ai_policy_config() -> dict[str, Any]:
                 "seasonMismatchForLightBottom": -0.12,
                 "structuredOuterwear": 0.08,
             },
+            "coverageRiskAdjustments": {"可能遮挡主推款": -0.35, "较可能遮挡主推款": -0.55},
+            "noStyleRiskValues": ["无明显风险", "无", "none"],
+            "waistFocusCategoryAdjustments": {"外套类": -0.2},
+            "longTopLengthValues": ["长上衣", "长款", "过臀"],
+            "waistFocusShortUpperCategories": ["上装", "针织类"],
+            "shortUpperLengthValues": ["短上衣", "及胯上衣", "短款"],
+            "darkAgainstLightHeroCategories": ["上装", "针织类", "外套类"],
+            "lightPairingByHeroCategory": {"裤装": ["上装", "针织类", "外套类"]},
+            "structuredLayerBonusCategories": ["外套类"],
+            "structuredLayerBonusSilhouettes": ["收腰", "收腰比例", "X型"],
             "semanticSets": {
-                "darkColors": ["black", "brown", "navy", "grey"],
-                "lightColors": ["white", "ivory", "beige"],
-                "lightMaterials": ["linen_like", "cotton_like", "silk_like", "chiffon"],
-                "heavyMaterials": ["wool_like", "tweed_like", "leather_like"],
-                "springSummerSeasons": ["spring", "summer"],
-                "waistFocusDetails": ["belt", "pleat", "pocket"],
-                "waistFocusSilhouettes": ["wide_leg", "waist_defined", "flare", "fit_and_flare"],
+                "darkColors": ["黑色", "棕色", "藏青色", "灰色"],
+                "lightColors": ["白色", "象牙白", "米色"],
+                "lightMaterials": ["亚麻感", "棉感", "真丝感", "雪纺"],
+                "heavyMaterials": ["羊毛感", "粗花呢/香风感", "皮革感"],
+                "springSummerSeasons": ["春季", "夏季"],
+                "waistFocusDetails": ["腰带", "褶裥", "口袋"],
+                "waistFocusSilhouettes": ["阔腿", "收腰", "收腰比例", "微喇", "喇叭"],
             },
             "heroProfileSellingPointLabels": {
-                "belt": "腰带/扣件细节",
-                "pleat": "褶位结构",
-                "pocket": "口袋结构",
-                "button": "纽扣/门襟",
-                "wide_leg": "阔腿裤型",
-                "waist_defined": "收腰比例",
-                "fit_and_flare": "收腰放摆比例",
-                "v_neck": "领口线条",
-                "square_neck": "领口线条",
-                "slit": "开衩/裙摆动态",
+                "腰带": "腰带/扣件细节",
+                "褶裥": "褶位结构",
+                "褶皱": "褶位结构",
+                "口袋": "口袋结构",
+                "纽扣": "纽扣/门襟",
+                "阔腿": "阔腿裤型",
+                "收腰": "收腰比例",
+                "V领": "领口线条",
+                "方领": "领口线条",
+                "开衩": "开衩/裙摆动态",
             },
             "defaultDraftMode": "office_outfit",
         },
         "heroPolicy": {
             "taskNameCategoryKeywords": {
-                "bottom": ["裤", "半裙", "裙裤", "阔腿", "直筒裤", "pants", "trouser", "skirt", "bottom"],
-                "dress": ["连衣裙", "裙装", "dress"],
-                "top": ["衬衫", "上衣", "针织", "t恤", "T恤", "shirt", "blouse", "top", "knit"],
+                "裤装": ["裤", "裙裤", "阔腿", "直筒裤", "pants", "trouser"],
+                "半身裙": ["半裙", "半身裙", "skirt"],
+                "连衣裙": ["连衣裙", "裙装", "dress"],
+                "上装": ["衬衫", "上衣", "t恤", "T恤", "shirt", "blouse", "top"],
+                "针织类": ["针织", "knit"],
             },
             "taskNameWaistFocusKeywords": ["高腰", "腰头", "裤腰", "腰带", "褶裥", "阔腿"],
             "taskNameLightColorKeywords": ["白", "米白", "象牙", "浅", "ivory", "white", "beige"],
@@ -8605,19 +8572,21 @@ def default_ai_policy_config() -> dict[str, Any]:
                 {"keywords": ["阔腿", "垂坠"], "labels": ["裤腿垂坠"]},
             ],
             "visibilityRisksByCategory": {
-                "bottom": ["腰头或门襟遮挡", "裤褶和口袋被手包遮挡", "上衣抢走下装视觉中心"],
-                "dress": ["外套遮挡腰线", "包袋遮挡裙摆或腰部结构", "鞋包过重破坏连衣裙完整感"],
-                "top": ["外套遮挡领口/门襟/下摆", "下装或腰带抢走上衣主角", "项链遮挡领口织法"],
-                "knitwear": ["外套遮挡领口/门襟/下摆", "下装或腰带抢走上衣主角", "项链遮挡领口织法"],
-                "outerwear": ["内搭抢走领口和门襟", "下装体量压制外套", "配饰遮挡翻领或口袋"],
+                "裤装": ["腰头或门襟遮挡", "裤褶和口袋被手包遮挡", "上衣抢走下装视觉中心"],
+                "半身裙": ["腰线遮挡", "裙摆比例被外套压住", "上衣抢走裙装视觉中心"],
+                "连衣裙": ["外套遮挡腰线", "包袋遮挡裙摆或腰部结构", "鞋包过重破坏连衣裙完整感"],
+                "上装": ["外套遮挡领口/门襟/下摆", "下装或腰带抢走上衣主角", "项链遮挡领口织法"],
+                "针织类": ["外套遮挡领口/门襟/下摆", "下装或腰带抢走上衣主角", "项链遮挡领口织法"],
+                "外套类": ["内搭抢走领口和门襟", "下装体量压制外套", "配饰遮挡翻领或口袋"],
                 "default": ["配角抢走视觉中心", "主推款关键细节被遮挡"],
             },
             "shotRequirementsByCategory": {
-                "bottom": ["全身/近全身", "腰脚下装图", "腰膝/腰胯近景", "侧身/3/4 动态", "正面颜色/版型图"],
-                "top": ["全身比例", "臀上/大腿中部核心展示", "胸腰近景", "侧身/3/4 补充", "标准正面颜色图"],
-                "knitwear": ["全身比例", "臀上/大腿中部核心展示", "胸腰近景", "侧身/3/4 补充", "标准正面颜色图"],
-                "outerwear": ["全身外套轮廓", "臀上/七分身门襟展示", "胸腰近景", "侧身/背面补充", "标准正面颜色图"],
-                "dress": ["全身裙型", "3/4 腰线裙摆", "胸腰或腰膝细节", "侧身/背面动态", "标准正面颜色图"],
+                "裤装": ["全身/近全身", "腰脚下装图", "腰膝/腰胯近景", "侧身/3/4 动态", "正面颜色/版型图"],
+                "半身裙": ["全身比例", "腰膝裙型", "腰胯细节", "侧身/3/4 动态", "标准正面颜色图"],
+                "上装": ["全身比例", "臀上/大腿中部核心展示", "胸腰近景", "侧身/3/4 补充", "标准正面颜色图"],
+                "针织类": ["全身比例", "臀上/大腿中部核心展示", "胸腰近景", "侧身/3/4 补充", "标准正面颜色图"],
+                "外套类": ["全身外套轮廓", "臀上/七分身门襟展示", "胸腰近景", "侧身/背面补充", "标准正面颜色图"],
+                "连衣裙": ["全身裙型", "3/4 腰线裙摆", "胸腰或腰膝细节", "侧身/背面动态", "标准正面颜色图"],
                 "default": ["完整比例", "核心结构", "关键细节", "侧身补充", "标准正面图"],
             },
         },
@@ -8647,17 +8616,20 @@ def default_ai_policy_config() -> dict[str, Any]:
             "fullTuckKeywords": ["全塞", "完全塞", "全部塞", "塞入裤腰", "塞进裤腰", "塞到裤腰", "塞在裤腰", "塞腰", "收进裤腰", "收入裤腰", "扎进裤腰", "扎入裤腰", "掖进裤腰", "掖入裤腰", "束进裤腰", "束入裤腰", "收进腰头", "扎进腰头", "掖进腰头", "束进腰头", "tucked-in", "tuckedin", "tuckinto", "tuckedinto", "fullytucked", "fulltuck"],
             "genericTuckKeywords": ["tuck", "塞"],
             "waistKeywords": ["裤腰", "腰头", "waist"],
-            "tuckCheckedHeroCategories": ["top", "knitwear", "outerwear"],
-            "tuckCheckedGarmentCategories": ["top", "knitwear", "outerwear"],
-            "structuredLayerCategories": ["outerwear"],
-            "structuredLayerSubCategories": ["cardigan", "jacket", "blazer", "coat", "trench"],
-            "structuredLayerDetails": ["button", "asymmetric"],
-            "structuredLayerMaterials": ["knit", "wool_like", "tweed_like"],
+            "fullTuckMethodValues": ["塞腰"],
+            "halfTuckMethodValues": ["半塞", "轻微前塞"],
+            "tuckCheckedHeroCategories": ["上装", "针织类", "外套类"],
+            "tuckCheckedGarmentCategories": ["上装", "针织类", "外套类"],
+            "structuredLayerCategories": ["外套类"],
+            "structuredLayerSubCategories": ["针织开衫", "西装", "夹克", "大衣", "风衣"],
+            "structuredLayerDetails": ["纽扣", "纽扣细节", "不对称", "不对称设计"],
+            "structuredLayerMaterials": ["针织", "羊毛感", "粗花呢/香风感"],
             "highWaistHeroKeywords": ["高腰", "裤", "阔腿", "腰头", "裤腰", "褶裥", "垂坠"],
-            "highWaistDarkStackCategories": ["top", "outerwear", "set", "other_garment"],
+            "highWaistDarkStackCategories": ["上装", "外套类", "套装", "其他服装"],
             "signals": {
                 "unexplainedOuterwearConflict": {
                     "enabled": True,
+                    "conflictCategories": ["外套类"],
                     "message": "多个外套候选缺少真实穿着解释，建议客户审核层次关系。",
                 },
                 "lowCriticScores": {
@@ -8686,8 +8658,8 @@ def default_ai_policy_config() -> dict[str, Any]:
                 },
                 "dressOuterwearLayeringRisk": {
                     "enabled": True,
-                    "heroCategory": "dress",
-                    "candidateCategory": "outerwear",
+                    "heroCategory": "连衣裙",
+                    "candidateCategory": "外套类",
                     "message": "连衣裙主推只选择外套时，存在腰线/裙型被遮挡、整套比例变笨重的风险，需证明外套确实服务主推款。",
                 },
                 "selectedBelowBetterAlternatives": {
@@ -8877,9 +8849,11 @@ def normalize_ai_policy_config_payload(payload: dict[str, Any] | None) -> dict[s
         "candidateFunnel": {
             "candidateLimit": clamp_int(candidate_source.get("candidateLimit"), 4, 40, fallback_candidate["candidateLimit"]),
             "candidateImageLimit": clamp_int(candidate_source.get("candidateImageLimit"), 4, 30, fallback_candidate["candidateImageLimit"]),
-            "hardExcludedCategories": sorted(
-                set(ensure_string_list(candidate_source.get("hardExcludedCategories") or fallback_candidate["hardExcludedCategories"]))
-                | SYSTEM_HARD_EXCLUDED_CANDIDATE_CATEGORIES
+            "hardExcludedCategories": list(
+                dict.fromkeys(
+                    ensure_string_list(candidate_source.get("hardExcludedCategories") or fallback_candidate["hardExcludedCategories"])
+                    + list(SYSTEM_HARD_EXCLUDED_CANDIDATE_CATEGORIES)
+                )
             )[:20],
             "categoryCaps": {
                 "default": 8,
@@ -8890,6 +8864,16 @@ def normalize_ai_policy_config_payload(payload: dict[str, Any] | None) -> dict[s
             },
             "categoryPolicies": normalized_category_policies,
             "riskAdjustments": normalize_number_map(candidate_source.get("riskAdjustments"), fallback_candidate["riskAdjustments"]),
+            "coverageRiskAdjustments": normalize_number_map(candidate_source.get("coverageRiskAdjustments"), fallback_candidate["coverageRiskAdjustments"]),
+            "noStyleRiskValues": ensure_string_list(candidate_source.get("noStyleRiskValues") or fallback_candidate["noStyleRiskValues"])[:20],
+            "waistFocusCategoryAdjustments": normalize_number_map(candidate_source.get("waistFocusCategoryAdjustments"), fallback_candidate["waistFocusCategoryAdjustments"]),
+            "longTopLengthValues": ensure_string_list(candidate_source.get("longTopLengthValues") or fallback_candidate["longTopLengthValues"])[:20],
+            "waistFocusShortUpperCategories": ensure_string_list(candidate_source.get("waistFocusShortUpperCategories") or fallback_candidate["waistFocusShortUpperCategories"])[:20],
+            "shortUpperLengthValues": ensure_string_list(candidate_source.get("shortUpperLengthValues") or fallback_candidate["shortUpperLengthValues"])[:20],
+            "darkAgainstLightHeroCategories": ensure_string_list(candidate_source.get("darkAgainstLightHeroCategories") or fallback_candidate["darkAgainstLightHeroCategories"])[:20],
+            "lightPairingByHeroCategory": normalize_list_map(candidate_source.get("lightPairingByHeroCategory"), fallback_candidate["lightPairingByHeroCategory"]),
+            "structuredLayerBonusCategories": ensure_string_list(candidate_source.get("structuredLayerBonusCategories") or fallback_candidate["structuredLayerBonusCategories"])[:20],
+            "structuredLayerBonusSilhouettes": ensure_string_list(candidate_source.get("structuredLayerBonusSilhouettes") or fallback_candidate["structuredLayerBonusSilhouettes"])[:20],
             "semanticSets": {
                 key: ensure_string_list(semantic_source.get(key) or fallback_semantics.get(key))[:30]
                 for key in fallback_semantics
@@ -8910,6 +8894,8 @@ def normalize_ai_policy_config_payload(payload: dict[str, Any] | None) -> dict[s
             "fullTuckKeywords": ensure_string_list(quality_source.get("fullTuckKeywords") or fallback_quality["fullTuckKeywords"])[:60],
             "genericTuckKeywords": ensure_string_list(quality_source.get("genericTuckKeywords") or fallback_quality["genericTuckKeywords"])[:20],
             "waistKeywords": ensure_string_list(quality_source.get("waistKeywords") or fallback_quality["waistKeywords"])[:20],
+            "fullTuckMethodValues": ensure_string_list(quality_source.get("fullTuckMethodValues") or fallback_quality["fullTuckMethodValues"])[:20],
+            "halfTuckMethodValues": ensure_string_list(quality_source.get("halfTuckMethodValues") or fallback_quality["halfTuckMethodValues"])[:20],
             "tuckCheckedHeroCategories": ensure_string_list(quality_source.get("tuckCheckedHeroCategories") or fallback_quality["tuckCheckedHeroCategories"])[:20],
             "tuckCheckedGarmentCategories": ensure_string_list(quality_source.get("tuckCheckedGarmentCategories") or fallback_quality["tuckCheckedGarmentCategories"])[:20],
             "structuredLayerCategories": ensure_string_list(quality_source.get("structuredLayerCategories") or fallback_quality["structuredLayerCategories"])[:20],
@@ -9013,7 +8999,7 @@ def default_shoot_config() -> dict[str, Any]:
         "defaultShotRule": {"shots": shot_template_to_config_rules(build_builtin_category_shot_template("other_garment"))},
         "categoryShotRules": [
             {"categoryDimensionCode": "category", "categoryTagCode": category, "shots": shot_template_to_config_rules(build_builtin_category_shot_template(category))}
-            for category in ["bottom", "skirt", "shorts", "top", "knitwear", "outerwear", "dress", "suit_set"]
+            for category in ["裤装", "半身裙", "短裤", "上装", "针织类", "外套类", "连衣裙", "套装"]
         ],
     }
 
@@ -9131,8 +9117,6 @@ def normalize_shoot_config_category_rule_overrides(value: Any, fallback: list[di
     source_rules = value if isinstance(value, list) else fallback
     normalized: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
-    options = get_shoot_config_category_options()
-    valid_category_keys = {(str(option["dimensionCode"]), str(option["code"])) for option in options} if options else set()
     for item in source_rules[:80]:
         if not isinstance(item, dict):
             continue
@@ -9143,8 +9127,6 @@ def normalize_shoot_config_category_rule_overrides(value: Any, fallback: list[di
         if tag_code in SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES:
             continue
         key = (dimension_code, tag_code)
-        if valid_category_keys and key not in valid_category_keys:
-            continue
         if key in seen:
             continue
         seen.add(key)
@@ -9308,8 +9290,6 @@ def build_shoot_script_category_rule_summary(shoot_config: dict[str, Any] | None
         if tag_code in SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES:
             continue
         option = category_options.get((dimension_code, tag_code))
-        if category_options and (not option or not option.get("isActive")):
-            continue
         label = str(option.get("labelZh") or tag_code) if option else tag_code
         key = f"{dimension_code}:{tag_code} {label}".strip()
         summary[key] = format_shoot_config_shot_rules_for_prompt(item.get("shots"))
@@ -9358,8 +9338,6 @@ def active_shoot_config_category_rules(config: dict[str, Any]) -> list[tuple[str
         if tag_code in SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES:
             continue
         option = options.get((dimension_code, tag_code))
-        if options and (not option or not option.get("isActive")):
-            continue
         label = str(option.get("labelZh") or tag_code) if option else tag_code
         shots = normalize_shoot_config_category_rules(item.get("shots"), default_shoot_config()["defaultShotRule"]["shots"])
         items.append((dimension_code, tag_code, label, shots))
@@ -9741,14 +9719,6 @@ def find_shoot_config_category_shot_rules(config: dict[str, Any], hero_category:
     category_code = str(hero_category or "").strip()
     if not category_code or category_code in SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES:
         return None
-    category_options = {
-        (str(option["dimensionCode"]), str(option["code"])): option
-        for option in get_shoot_config_category_options()
-    }
-    if category_options:
-        option = category_options.get(("category", category_code))
-        if not option or not option.get("isActive"):
-            return None
     category_rules = config.get("categoryShotRules") if isinstance(config.get("categoryShotRules"), list) else []
     for item in category_rules:
         if not isinstance(item, dict):
@@ -9777,7 +9747,7 @@ def shoot_config_rules_to_template(rules: list[dict[str, Any]]) -> list[tuple[st
 
 
 def build_builtin_category_shot_template(hero_category: str) -> list[tuple[str, str, str, str, str]]:
-    if hero_category == "bottom":
+    if hero_category == "裤装":
         return [
             ("pants_hero", "全身或近全身主视觉，裤脚和鞋完整", "腿部自然分开，一腿微前，手自然垂放或单手插袋", "正面或轻斜正", "裤装完整裤型、腿长比例、整体 look"),
             ("pants_waist_to_feet", "腰脚下装图或近全身", "双手插袋或单手插袋，腰头完整露出", "正面", "腰头、门襟、裤褶、裤腿、裤长"),
@@ -9786,7 +9756,7 @@ def build_builtin_category_shot_template(hero_category: str) -> list[tuple[str, 
             ("pants_front_fit", "腰脚下装图或近全身", "稳定克制，裤线清楚", "正面", "颜色、版型、裤长、落脚关系"),
             ("reference", "备用姿态", "轻斜正自然姿态", "自然", "参考，不进入最终生成"),
         ]
-    if hero_category in {"top", "knitwear"}:
+    if hero_category in {"上装", "针织类"}:
         return [
             ("top_hero", "全身图，上衣清楚，下装辅助比例", "肩颈打开，重心自然", "正面或轻斜正", "上衣整体穿着比例"),
             ("top_core", "臀上图或大腿中部图", "插袋、扶腰或自然垂手", "正面或 3/4 斜正", "领口、肩线、下摆、上衣版型"),
@@ -9795,7 +9765,7 @@ def build_builtin_category_shot_template(hero_category: str) -> list[tuple[str, 
             ("top_front_fit", "臀上图或大腿中部图", "稳定克制", "正面", "颜色、版型、正面结构"),
             ("reference", "备用姿态", "轻斜正替代姿态", "自然", "参考，不进入最终生成"),
         ]
-    if hero_category == "outerwear":
+    if hero_category == "外套类":
         return [
             ("outerwear_hero", "全身或近全身", "自然站立，手臂留出门襟", "正面或轻斜正", "外套整体轮廓"),
             ("outerwear_core", "臀上图、大腿中部图或七分身", "插袋、轻扶衣襟或自然垂手", "正面或 3/4 斜正", "领型、门襟、肩线、内搭关系"),
@@ -9804,7 +9774,7 @@ def build_builtin_category_shot_template(hero_category: str) -> list[tuple[str, 
             ("outerwear_front_fit", "臀上图或全身图", "稳定克制", "正面", "颜色、版型、平台友好"),
             ("reference", "备用姿态", "轻斜正替代姿态", "自然", "参考，不进入最终生成"),
         ]
-    if hero_category == "dress":
+    if hero_category == "连衣裙":
         return [
             ("dress_hero", "全身图，裙摆完整", "稳定自然", "正面或轻斜正", "连衣裙整体裙型"),
             ("dress_core", "全身、近全身或七分身", "轻转身、重心偏移", "3/4 斜正", "腰线、裙摆、身体轮廓"),
@@ -10109,8 +10079,10 @@ def render_prompt_template(key: str, runtime: dict[str, Any] | None = None) -> s
 def sample_prompt_runtime() -> dict[str, Any]:
     ai_policy = default_ai_policy_config()
     return {
-        "candidate_retrieval": dumps({"hero_profile": {"category": "bottom"}, "material_cards": [{"id": 1, "code": "LOOK-A"}], "outfit_drafts": []}),
+        "candidate_retrieval": dumps({"hero_profile": {"category": "裤装"}, "material_cards": [{"id": 1, "code": "LOOK-A"}], "outfit_drafts": []}),
         "request_snapshot": dumps({"task_id": 1, "styling_plan": {"selected_outfit_key": "candidate_a"}, "selected_material_snapshot": []}),
+        "taxonomy_prompt_card": "# Ruyi-Dream 服装标签规则卡\n规则：按管理员配置的标签 code 输出。\n",
+        "garment": dumps({"code": "LOOK-A", "image_count": 3}),
         "ai_policy": dumps(ai_policy),
         "ai_policy_card": build_ai_policy_prompt_card(ai_policy),
         "styling_plan": dumps({"schema_version": "styling-plan-v1", "selected_material_ids": []}),
@@ -10124,6 +10096,8 @@ def sample_prompt_runtime() -> dict[str, Any]:
 def available_prompt_placeholders() -> list[dict[str, str]]:
     return [
         {"name": "segment.brand_info", "scope": "segment", "description": "品牌信息分段 Prompt"},
+        {"name": "runtime.taxonomy_prompt_card", "scope": "runtime", "description": "当前标签规则 Prompt 卡"},
+        {"name": "runtime.garment", "scope": "runtime", "description": "当前打标服饰基础信息"},
         {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "AI 选搭候选漏斗快照"},
         {"name": "runtime.request_snapshot", "scope": "runtime", "description": "拍摄剧本阶段完整输入快照"},
         {"name": "runtime.ai_policy", "scope": "runtime", "description": "AI 选搭结构化策略配置"},

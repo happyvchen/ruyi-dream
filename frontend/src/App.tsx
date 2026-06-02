@@ -66,7 +66,7 @@ type LightboxImage = {
   initialIndex?: number
 }
 
-const NON_SHOOT_CONFIG_CATEGORY_CODES = new Set(['unknown', 'unsupported_accessory'])
+const NON_SHOOT_CONFIG_CATEGORY_CODES = new Set(['未知', '不支持入库配饰', 'unknown', 'unsupported_accessory'])
 type LightboxImageItem = Omit<LightboxImage, 'items' | 'initialIndex'>
 type DeleteDialogTarget = Pick<GenerationTask, 'id' | 'name'>
 type RunOptions = { refresh?: boolean | 'background' }
@@ -2163,7 +2163,7 @@ function ShootConfigPage({ run }: { run: any }) {
     [config?.categoryShotRules],
   )
   const configurableCategoryOptions = categoryOptions.filter((option) => !NON_SHOOT_CONFIG_CATEGORY_CODES.has(option.code))
-  const addableCategoryOptions = configurableCategoryOptions.filter((option) => option.isActive && !configuredCategoryKeys.has(`${option.dimensionCode}:${option.code}`))
+  const addableCategoryOptions = configurableCategoryOptions.filter((option) => option.isActive && !configuredCategoryKeys.has(`${option.dimensionCode}:${shootCategoryRuleTagCode(option)}`))
   const enabledGlobalRuleCount = config?.globalRules.filter((rule) => rule.enabled).length ?? 0
   const activeCategoryRuleCount = (config?.categoryShotRules ?? []).filter((rule) => {
     const option = findShootCategoryOption(categoryOptions, rule.categoryDimensionCode, rule.categoryTagCode)
@@ -2234,8 +2234,9 @@ function ShootConfigPage({ run }: { run: any }) {
 
   function addCategoryRule() {
     if (!addableCategoryOptions.length) return
-    const selectedCode = categoryToAdd || addableCategoryOptions[0].code
-    const option = addableCategoryOptions.find((item) => item.code === selectedCode) ?? addableCategoryOptions[0]
+    const selectedCode = categoryToAdd || shootCategoryRuleTagCode(addableCategoryOptions[0])
+    const option = addableCategoryOptions.find((item) => shootCategoryRuleTagCode(item) === selectedCode) ?? addableCategoryOptions[0]
+    const categoryTagCode = shootCategoryRuleTagCode(option)
     setConfig((current) => {
       if (!current) return current
       return {
@@ -2244,7 +2245,7 @@ function ShootConfigPage({ run }: { run: any }) {
           ...current.categoryShotRules,
           {
             categoryDimensionCode: option.dimensionCode,
-            categoryTagCode: option.code,
+            categoryTagCode,
             shots: cloneShootConfigShots(current.defaultShotRule.shots),
           },
         ],
@@ -2377,7 +2378,10 @@ function ShootConfigPage({ run }: { run: any }) {
               <div className="shoot-category-add">
                 <select value={categoryToAdd} disabled={!addableCategoryOptions.length} onChange={(event) => setCategoryToAdd(event.target.value)}>
                   <option value="">{addableCategoryOptions.length ? '选择一级品类' : '无可新增品类'}</option>
-                  {addableCategoryOptions.map((option) => <option key={`${option.dimensionCode}:${option.code}`} value={option.code}>{option.labelZh} / {option.code}</option>)}
+                  {addableCategoryOptions.map((option) => {
+                    const tagCode = shootCategoryRuleTagCode(option)
+                    return <option key={`${option.dimensionCode}:${option.code}`} value={tagCode}>{option.labelZh} / {tagCode}</option>
+                  })}
                 </select>
                 <button className="secondary" type="button" disabled={!addableCategoryOptions.length} onClick={addCategoryRule}>新增品类规则</button>
               </div>
@@ -2438,8 +2442,12 @@ function cloneShootConfigShots(shots: ShootConfigShotRule[]): ShootConfigShotRul
   return shots.slice(0, 6).map((shot) => ({ ...shot }))
 }
 
+function shootCategoryRuleTagCode(option: ShootConfigCategoryOption) {
+  return option.labelZh.trim() || option.code
+}
+
 function findShootCategoryOption(options: ShootConfigCategoryOption[], dimensionCode: string, tagCode: string) {
-  return options.find((option) => option.dimensionCode === dimensionCode && option.code === tagCode)
+  return options.find((option) => option.dimensionCode === dimensionCode && (option.code === tagCode || shootCategoryRuleTagCode(option) === tagCode))
 }
 
 function parseShootConfigJson(text: string): unknown {
