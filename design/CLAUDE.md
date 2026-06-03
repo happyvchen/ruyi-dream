@@ -10,6 +10,7 @@
 
 | 路径 | 内容 | 何时需要读 |
 |---|---|---|
+| `domain.md` | 新版 MVP 领域模型设计：模块边界、核心术语、对象定义、状态流转、职责约束和当前实现映射 | 设计领域对象、API、数据库、状态机、Prompt DTO 或跨模块流程前 |
 | `00_product_overview/CLAUDE.md` | 产品定位、MVP 范围、PRD | **任何**产品/功能设计前 |
 | `01_generation_flow/CLAUDE.md` | 生成主流程、Image-2 输入策略、生成要素职责拆分 | 设计生成链路、任务包、prompt 策略时 |
 | `01_generation_flow/shoot_script_workflow.md` | 拍摄剧本工作流最终设计：AI 智能选搭后生成 ShootScript、分镜预览、成片、状态机、重生/失效和迁移规则 | 设计或实现拍摄剧本、分镜预览、成片重生和状态恢复时 |
@@ -24,6 +25,7 @@
 
 ## 权威边界 (Authority)
 
+- **领域模型源头**：`domain.md`
 - **产品范围源头**：`00_product_overview/product_overview.md`、`00_product_overview/mvp_prd.md`
 - **生成主流程源头**：`01_generation_flow/generation_flow.md`
 - **Image-2 输入策略源头**：`01_generation_flow/image2_input_strategy.md`
@@ -37,7 +39,7 @@
 
 ## 本地规则 (Local Rules)
 
-1. **任何设计前先读产品范围和职责拆分**：至少阅读 `00_product_overview/product_overview.md` 与 `01_generation_flow/generation_responsibility_matrix.md`。
+1. **任何设计前先读领域、产品范围和职责拆分**：至少阅读 `domain.md`、`00_product_overview/product_overview.md` 与 `01_generation_flow/generation_responsibility_matrix.md`。
 2. **先判断职责，再写 prompt**：任何生成问题先判断属于主推款事实、候选召回、AI Stylist、StylingPlan、搭配服饰事实、数字模特、ShootScript、ShotPlan、生成配饰、媒体输入预算还是导出规格。
 3. **Image-2 只做视觉生成**：智能选搭、拍摄剧本、ShotPlan、标签体系、历史快照和状态机由前置服务负责。
 4. **前台 UI 不展示系统复杂性**：普通用户默认只看到主推款、搭配服饰、拍摄剧本、分镜预览、最终结果和生成记录；prompt、provider 请求、快照 JSON 只在技术详情出现。

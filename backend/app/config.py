@@ -44,7 +44,6 @@ class Settings:
     s3_presign_expires_seconds = int(os.getenv("APP_S3_PRESIGN_EXPIRES_SECONDS", "900"))
     max_upload_image_bytes = int(os.getenv("APP_MAX_UPLOAD_IMAGE_BYTES", str(15 * 1024 * 1024)))
     max_upload_image_pixels = int(os.getenv("APP_MAX_UPLOAD_IMAGE_PIXELS", str(25_000_000)))
-    max_garment_images_per_sku = int(os.getenv("APP_MAX_GARMENT_IMAGES_PER_SKU", "20"))
     max_head_references_per_profile = int(os.getenv("APP_MAX_HEAD_REFERENCES_PER_PROFILE", "20"))
     api_access_token = os.getenv("APP_API_ACCESS_TOKEN", os.getenv("APP_ACCESS_TOKEN", ""))
     user_username = os.getenv("APP_USER_USERNAME", "user")

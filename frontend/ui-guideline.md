@@ -166,11 +166,12 @@
 
 | 业务状态 | 用户文案 |
 |---|---|
-| 有拍摄方案 | 已生成拍摄方案 |
-| 无拍摄方案 | 缺少拍摄方案 |
-| `GarmentSku.NEW` | 待策划 |
-| `GarmentSku.ANALYZED` | 已策划 |
-| `GarmentSku.CONFIRMED` | 已确认 |
+| `READY_FOR_STYLING` | 待选搭 |
+| `STYLING_READY` | 已选搭 |
+| `SCRIPT_READY` | 剧本完成 |
+| `PREVIEW_READY` | 分镜预览完成 |
+| `FINAL_PARTIAL` | 部分完成 |
+| `COMPLETED` | 已完成 |
 
 ## 高级设置
 

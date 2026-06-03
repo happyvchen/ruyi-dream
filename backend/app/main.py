@@ -12,16 +12,14 @@ from io import BytesIO
 from pathlib import Path
 import secrets
 import sqlite3
-from tempfile import TemporaryDirectory
 import time
 from uuid import uuid4
-import zipfile
 from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
 
@@ -42,7 +40,6 @@ from .object_storage import (
     put_fileobj,
     unique_key,
 )
-from .planner import PlannerError, SHOT_SLOTS, normalize_plan as normalize_planner_plan, plan_with_gemini
 
 
 settings = get_settings()
@@ -50,7 +47,6 @@ logger = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = settings.max_upload_image_pixels
 SESSION_ROLES = {"user", "admin"}
 SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES = {"未知", "不支持入库配饰", "unknown", "unsupported_accessory"}
-SYSTEM_HARD_EXCLUDED_CANDIDATE_CATEGORIES = ("未知", "不支持入库配饰")
 PROMPT_PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-zA-Z0-9_.-]+)\s*}}")
 AI_STYLING_PROMPT_CONFIG_KEY = "assembly.ai_styling"
 SHOOT_SCRIPT_PROMPT_CONFIG_KEY = "assembly.shoot_script"
@@ -176,34 +172,6 @@ def clear_login_failures(request: Request) -> None:
     login_failures_by_client.pop(auth_client_key(request), None)
 
 
-class PlanCreateRequest(BaseModel):
-    skuId: int
-    modelProfileId: int | None = None
-
-
-class GenerateGroupRequest(BaseModel):
-    shotPlanId: int
-    previewRunId: int | None = None
-
-
-class ShotPlanUpdateRequest(BaseModel):
-    plan: dict[str, Any]
-
-
-class RegenerateRequest(BaseModel):
-    reason: str
-    note: str | None = None
-
-
-class FinalImageRequest(BaseModel):
-    isFinal: bool = True
-
-
-class ReviewStatusRequest(BaseModel):
-    status: str
-    note: str | None = None
-
-
 class LoginRequest(BaseModel):
     username: str | None = None
     password: str
@@ -245,17 +213,6 @@ class GenerationTaskDeleteRequest(BaseModel):
 
 class DeleteImpactRequest(BaseModel):
     ids: list[int]
-
-
-class GarmentSkuUpdateRequest(BaseModel):
-    sku: str | None = None
-    title: str | None = None
-    status: str | None = None
-
-
-class GarmentImageUpdateRequest(BaseModel):
-    role: str | None = None
-    sortOrder: int | None = None
 
 
 class ModelProfileUpsertRequest(BaseModel):
@@ -431,9 +388,7 @@ active_background_generation_jobs: set[str] = set()
 async def lifespan(app: FastAPI) -> Any:
     ensure_bucket()
     init_db()
-    backfill_shot_plan_script_data()
     app.state.generation_poller = asyncio.create_task(generation_poller_loop())
-    app.state.planner_poller = asyncio.create_task(planner_poller_loop())
     try:
         yield
     finally:
@@ -442,11 +397,6 @@ async def lifespan(app: FastAPI) -> Any:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
-        planner_task = getattr(app.state, "planner_poller", None)
-        if planner_task:
-            planner_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await planner_task
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
@@ -643,384 +593,6 @@ def media_asset_rows_for_ids(db: Any, asset_ids: list[int]) -> list[Any]:
         return []
     placeholders = ", ".join("?" for _ in asset_ids)
     return db.execute(f"SELECT id, object_key, size_bytes FROM media_assets WHERE id IN ({placeholders})", asset_ids).fetchall()
-
-
-@app.get("/api/garment-skus")
-def list_garment_skus(
-    include_archived: bool = Query(False, alias="includeArchived"),
-    limit: int = Query(30, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-    keyword: str | None = Query(None),
-) -> dict[str, Any]:
-    search = f"%{keyword.strip()}%" if keyword and keyword.strip() else None
-    with get_db() as db:
-        rows = db.execute(
-            """
-            SELECT gs.*,
-              (SELECT storage_path FROM garment_images gi WHERE gi.sku_id = gs.id ORDER BY sort_order, id LIMIT 1) AS cover_path,
-              (SELECT COUNT(*) FROM garment_images gi WHERE gi.sku_id = gs.id) AS image_count,
-              (SELECT COUNT(*) FROM shot_plans sp WHERE sp.sku_id = gs.id) AS shot_plan_count,
-              (SELECT COUNT(*) FROM generation_runs gr WHERE gr.sku_id = gs.id) AS generation_run_count,
-              (SELECT COUNT(*) FROM generation_runs gr WHERE gr.sku_id = gs.id AND gr.archived_at IS NOT NULL) AS archived_generation_run_count
-            FROM garment_skus gs
-            WHERE (? OR gs.archived_at IS NULL)
-              AND (? IS NULL OR gs.sku LIKE ? OR gs.title LIKE ? OR gs.status LIKE ?)
-            ORDER BY gs.created_at DESC, gs.id DESC
-            LIMIT ? OFFSET ?
-            """,
-            (include_archived, search, search, search, search, limit + 1, offset),
-        ).fetchall()
-        items = rows[:limit]
-        return {
-            "items": [serialize_sku(row) for row in items],
-            "limit": limit,
-            "offset": offset,
-            "nextOffset": offset + limit if len(rows) > limit else None,
-            "hasMore": len(rows) > limit,
-        }
-
-
-@app.post("/api/garment-skus")
-async def upload_garment_sku(
-    sku: str = Form(...),
-    title: str | None = Form(None),
-    files: list[UploadFile] = File(...),
-) -> dict[str, Any]:
-    clean_sku = sanitize_name(sku)
-    if not clean_sku:
-        raise HTTPException(status_code=400, detail="SKU 不能为空")
-    if not files:
-        raise HTTPException(status_code=400, detail="至少上传一张图片")
-    if len(files) > settings.max_garment_images_per_sku:
-        raise HTTPException(status_code=400, detail=f"单个货号最多上传 {settings.max_garment_images_per_sku} 张图片")
-
-    upload_id = f"{clean_sku}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
-    target_prefix = join_key("uploads", upload_id)
-
-    timestamp = now_iso()
-    validated_files: list[tuple[UploadFile, bytes, str]] = []
-    for upload in files:
-        content, content_type = await validate_upload_image(upload)
-        validated_files.append((upload, content, content_type))
-
-    saved_files: list[tuple[str, str, str, dict[str, Any]]] = []
-    try:
-        for index, (upload, content, content_type) in enumerate(validated_files):
-            safe_name = f"{index + 1:03d}-{sanitize_filename(upload.filename or 'image')}"
-            key = join_key(target_prefix, safe_name)
-            put_fileobj(key, BytesIO(content), content_type)
-            derivative = generate_image_derivatives(key, content)
-            saved_files.append((safe_name, key, content_type, upload_media_metadata(key, content, derivative)))
-    except Exception:
-        cleanup_objects([key for _, original_key, _, _ in saved_files for key in image_object_keys(original_key)])
-        raise
-
-    try:
-        with get_db() as db:
-            cursor = db.execute(
-                """
-                INSERT INTO garment_skus (sku, title, source, storage_path, status, created_at, updated_at)
-                VALUES (?, ?, 'upload', ?, 'NEW', ?, ?)
-                """,
-                (clean_sku, title or clean_sku, target_prefix, timestamp, timestamp),
-            )
-            sku_id = int(cursor.lastrowid)
-            for index, (filename, key, content_type, media) in enumerate(saved_files):
-                db.execute(
-                    """
-                    INSERT INTO garment_images
-                      (sku_id, filename, storage_path, thumb_path, preview_path, file_size,
-                       thumb_file_size, preview_file_size, mime_type, role, sort_order, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        sku_id,
-                        filename,
-                        key,
-                        media.get("thumbPath"),
-                        media.get("previewPath"),
-                        media.get("fileSize"),
-                        media.get("thumbFileSize"),
-                        media.get("previewFileSize"),
-                        content_type,
-                        "main" if index == 0 else "reference",
-                        index,
-                        timestamp,
-                    ),
-                )
-            log_event(
-                db,
-                "garment_sku",
-                sku_id,
-                "uploaded",
-                {"sku": clean_sku, "fileCount": len(saved_files), "storagePath": target_prefix},
-            )
-            row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
-    except Exception:
-        cleanup_objects([key for _, original_key, _, _ in saved_files for key in image_object_keys(original_key)])
-        raise
-    return {"item": get_sku_detail_by_id(sku_id), "summary": serialize_sku(row)}
-
-
-@app.get("/api/garment-skus/{sku_id}")
-def get_garment_sku(
-    sku_id: int,
-    image_limit: int = Query(24, alias="imageLimit", ge=1, le=120),
-    image_offset: int = Query(0, alias="imageOffset", ge=0),
-) -> dict[str, Any]:
-    return {"item": get_sku_detail_by_id(sku_id, image_limit=image_limit, image_offset=image_offset)}
-
-
-@app.get("/api/garment-skus/{sku_id}/images")
-def list_garment_sku_images(
-    sku_id: int,
-    limit: int = Query(24, ge=1, le=120),
-    offset: int = Query(0, ge=0),
-) -> dict[str, Any]:
-    with get_db() as db:
-        sku_row = db.execute("SELECT id FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
-        if not sku_row:
-            raise HTTPException(status_code=404, detail="货号不存在")
-        rows = db.execute(
-            "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY sort_order, id LIMIT ? OFFSET ?",
-            (sku_id, limit + 1, offset),
-        ).fetchall()
-        items = rows[:limit]
-        return {
-            "items": [serialize_image(image) for image in items],
-            "limit": limit,
-            "offset": offset,
-            "nextOffset": offset + limit if len(rows) > limit else None,
-            "hasMore": len(rows) > limit,
-        }
-
-
-@app.patch("/api/garment-skus/{sku_id}")
-def update_garment_sku(sku_id: int, payload: GarmentSkuUpdateRequest) -> dict[str, Any]:
-    updates: dict[str, Any] = {}
-    if payload.sku is not None:
-        clean_sku = sanitize_name(payload.sku)
-        if not clean_sku:
-            raise HTTPException(status_code=400, detail="SKU 不能为空")
-        updates["sku"] = clean_sku
-    if payload.title is not None:
-        updates["title"] = payload.title.strip() or None
-    if payload.status is not None:
-        if payload.status not in {"NEW", "ANALYZED", "CONFIRMED"}:
-            raise HTTPException(status_code=400, detail="状态不合法")
-        updates["status"] = payload.status
-    if not updates:
-        return {"item": get_sku_detail_by_id(sku_id)}
-
-    with get_db() as db:
-        row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="货号不存在")
-        updates["updated_at"] = now_iso()
-        set_clause = ", ".join(f"{key} = ?" for key in updates)
-        db.execute(
-            f"UPDATE garment_skus SET {set_clause} WHERE id = ?",
-            (*updates.values(), sku_id),
-        )
-        log_event(db, "garment_sku", sku_id, "updated", updates)
-    return {"item": get_sku_detail_by_id(sku_id)}
-
-
-@app.delete("/api/garment-skus/{sku_id}")
-def delete_garment_sku(
-    sku_id: int,
-    purge: bool = Query(False),
-    confirm_sku: str | None = Query(None, alias="confirmSku"),
-) -> dict[str, Any]:
-    with get_db() as db:
-        row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="货号不存在")
-        impact = sku_delete_impact(db, sku_id)
-        if purge and confirm_sku != row["sku"]:
-            raise HTTPException(status_code=400, detail="请输入完整货号以确认删除关联记录和文件")
-        timestamp = now_iso()
-        if not purge:
-            if "archived_at" in row.keys() and row["archived_at"]:
-                return {"ok": True, "archived": True, "objectCleanupErrors": []}
-            db.execute(
-                "UPDATE garment_skus SET archived_at = ?, archive_reason = ?, updated_at = ? WHERE id = ?",
-                (timestamp, "user_archived", timestamp, sku_id),
-            )
-            log_event(
-                db,
-                "garment_sku",
-                sku_id,
-                "archived",
-                {"sku": row["sku"], "storagePath": row["storage_path"], "impact": impact},
-            )
-            return {"ok": True, "archived": True, "objectCleanupErrors": []}
-        storage_path = row["storage_path"]
-        output_dirs = [
-            row["output_dir"]
-            for row in db.execute(
-                "SELECT DISTINCT output_dir FROM generation_runs WHERE sku_id = ? AND output_dir IS NOT NULL",
-                (sku_id,),
-            ).fetchall()
-            if row["output_dir"]
-        ]
-        db.execute("DELETE FROM garment_skus WHERE id = ?", (sku_id,))
-        log_event(
-            db,
-            "garment_sku",
-            sku_id,
-            "deleted_with_related_records",
-            {"sku": row["sku"], "storagePath": storage_path, "impact": impact},
-        )
-
-    cleanup_errors = cleanup_prefixes([storage_path, *output_dirs])
-    return {"ok": True, "purged": True, "objectCleanupErrors": cleanup_errors}
-
-
-@app.post("/api/garment-skus/{sku_id}/images")
-async def add_garment_images(sku_id: int, files: list[UploadFile] = File(...)) -> dict[str, Any]:
-    if not files:
-        raise HTTPException(status_code=400, detail="至少上传一张图片")
-    timestamp = now_iso()
-    validated_files: list[tuple[UploadFile, bytes, str]] = []
-    for upload in files:
-        content, content_type = await validate_upload_image(upload)
-        validated_files.append((upload, content, content_type))
-    saved: list[tuple[str, str, str, int, dict[str, Any]]] = []
-
-    with get_db() as db:
-        sku_row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
-        if not sku_row:
-            raise HTTPException(status_code=404, detail="货号不存在")
-        target_prefix = clean_key(sku_row["storage_path"])
-        current_max = db.execute(
-            "SELECT COALESCE(MAX(sort_order), -1) AS max_sort FROM garment_images WHERE sku_id = ?",
-            (sku_id,),
-        ).fetchone()["max_sort"]
-        current_count = db.execute(
-            "SELECT COUNT(*) AS count FROM garment_images WHERE sku_id = ?",
-            (sku_id,),
-        ).fetchone()["count"]
-        if int(current_count) + len(files) > settings.max_garment_images_per_sku:
-            raise HTTPException(status_code=400, detail=f"单个货号最多保留 {settings.max_garment_images_per_sku} 张图片")
-
-        try:
-            for offset, (upload, content, content_type) in enumerate(validated_files, start=1):
-                sort_order = int(current_max) + offset
-                safe_name = f"{sort_order + 1:03d}-{sanitize_filename(upload.filename or 'image')}"
-                key = unique_key(join_key(target_prefix, safe_name))
-                put_fileobj(key, BytesIO(content), content_type)
-                derivative = generate_image_derivatives(key, content)
-                saved.append((Path(key).name, key, content_type, sort_order, upload_media_metadata(key, content, derivative)))
-        except Exception:
-            cleanup_objects([key for _, original_key, _, _, _ in saved for key in image_object_keys(original_key)])
-            raise
-
-        try:
-            for filename, key, content_type, sort_order, media in saved:
-                db.execute(
-                    """
-                    INSERT INTO garment_images
-                      (sku_id, filename, storage_path, thumb_path, preview_path, file_size,
-                       thumb_file_size, preview_file_size, mime_type, role, sort_order, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reference', ?, ?)
-                    """,
-                    (
-                        sku_id,
-                        filename,
-                        key,
-                        media.get("thumbPath"),
-                        media.get("previewPath"),
-                        media.get("fileSize"),
-                        media.get("thumbFileSize"),
-                        media.get("previewFileSize"),
-                        content_type,
-                        sort_order,
-                        timestamp,
-                    ),
-                )
-            db.execute(
-                "UPDATE garment_skus SET updated_at = ? WHERE id = ?",
-                (timestamp, sku_id),
-            )
-            log_event(
-                db,
-                "garment_sku",
-                sku_id,
-                "images_added",
-                {"fileCount": len(saved), "files": [filename for filename, _, _, _, _ in saved]},
-            )
-        except Exception:
-            cleanup_objects([key for _, original_key, _, _, _ in saved for key in image_object_keys(original_key)])
-            raise
-    return {"item": get_sku_detail_by_id(sku_id)}
-
-
-@app.patch("/api/garment-images/{image_id}")
-def update_garment_image(image_id: int, payload: GarmentImageUpdateRequest) -> dict[str, Any]:
-    updates: dict[str, Any] = {}
-    if payload.role is not None:
-        allowed_roles = {"main", "reference", "front", "back", "detail", "fabric", "color", "3d"}
-        if payload.role not in allowed_roles:
-            raise HTTPException(status_code=400, detail="图片角色不合法")
-        updates["role"] = payload.role
-    if payload.sortOrder is not None:
-        if payload.sortOrder < 0:
-            raise HTTPException(status_code=400, detail="排序不能小于 0")
-        updates["sort_order"] = payload.sortOrder
-    if not updates:
-        with get_db() as db:
-            row = db.execute("SELECT * FROM garment_images WHERE id = ?", (image_id,)).fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="图片不存在")
-            return {"item": serialize_image(row)}
-
-    with get_db() as db:
-        row = db.execute("SELECT * FROM garment_images WHERE id = ?", (image_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="图片不存在")
-        set_clause = ", ".join(f"{key} = ?" for key in updates)
-        db.execute(
-            f"UPDATE garment_images SET {set_clause} WHERE id = ?",
-            (*updates.values(), image_id),
-        )
-        db.execute(
-            "UPDATE garment_skus SET updated_at = ? WHERE id = ?",
-            (now_iso(), row["sku_id"]),
-        )
-        log_event(db, "garment_image", image_id, "updated", updates)
-        updated = db.execute("SELECT * FROM garment_images WHERE id = ?", (image_id,)).fetchone()
-    return {"item": serialize_image(updated)}
-
-
-@app.delete("/api/garment-images/{image_id}")
-def delete_garment_image(image_id: int) -> dict[str, Any]:
-    with get_db() as db:
-        row = db.execute("SELECT * FROM garment_images WHERE id = ?", (image_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="图片不存在")
-        count = db.execute(
-            "SELECT COUNT(*) AS count FROM garment_images WHERE sku_id = ?",
-            (row["sku_id"],),
-        ).fetchone()["count"]
-        if count <= 1:
-            raise HTTPException(status_code=409, detail="每个货号至少保留一张图片")
-        storage_path = row["storage_path"]
-        db.execute("DELETE FROM garment_images WHERE id = ?", (image_id,))
-        db.execute(
-            "UPDATE garment_skus SET updated_at = ? WHERE id = ?",
-            (now_iso(), row["sku_id"]),
-        )
-        log_event(
-            db,
-            "garment_image",
-            image_id,
-            "deleted",
-            {"skuId": row["sku_id"], "filename": row["filename"], "storagePath": storage_path},
-        )
-
-    cleanup_objects(image_object_keys(storage_path))
-    return {"ok": True}
 
 
 @app.get("/api/styling-garments")
@@ -3726,11 +3298,11 @@ def delete_model_profile(model_profile_id: int) -> dict[str, Any]:
             raise HTTPException(status_code=409, detail="至少保留一个数字模特")
         usage_count = db.execute(
             """
-            SELECT
-              (SELECT COUNT(*) FROM shot_plans WHERE model_profile_id = ?) +
-              (SELECT COUNT(*) FROM generation_runs WHERE model_profile_id = ?) AS count
+            SELECT COUNT(*) AS count
+            FROM generation_task_input_versions
+            WHERE model_snapshot_json LIKE ? OR model_snapshot_json LIKE ?
             """,
-            (model_profile_id, model_profile_id),
+            (f'%"id":{model_profile_id}%', f'%"id": {model_profile_id}%'),
         ).fetchone()["count"]
         if usage_count:
             raise HTTPException(status_code=409, detail="该模特已有组图或生成记录，为保留生产历史暂不允许删除")
@@ -3981,32 +3553,6 @@ def registered_media_keys(object_key: str) -> dict[str, str | None] | None:
         model_reference = registered_model_reference_keys(db, object_key)
         if model_reference:
             return model_reference
-        legacy_garment = db.execute(
-            """
-            SELECT storage_path, thumb_path, preview_path FROM garment_images
-            WHERE storage_path = ? OR thumb_path = ? OR preview_path = ?
-            """,
-            (object_key, object_key, object_key),
-        ).fetchone()
-        if legacy_garment:
-            return {
-                "object_key": clean_key(legacy_garment["storage_path"]),
-                "thumb_key": clean_key(legacy_garment["thumb_path"]) if legacy_garment["thumb_path"] else None,
-                "preview_key": clean_key(legacy_garment["preview_path"]) if legacy_garment["preview_path"] else None,
-            }
-        legacy_generation = db.execute(
-            """
-            SELECT output_path, thumb_path, preview_path FROM generation_images
-            WHERE output_path = ? OR thumb_path = ? OR preview_path = ?
-            """,
-            (object_key, object_key, object_key),
-        ).fetchone()
-        if legacy_generation:
-            return {
-                "object_key": clean_key(legacy_generation["output_path"]),
-                "thumb_key": clean_key(legacy_generation["thumb_path"]) if legacy_generation["thumb_path"] else None,
-                "preview_key": clean_key(legacy_generation["preview_path"]) if legacy_generation["preview_path"] else None,
-            }
     return None
 
 
@@ -4030,529 +3576,6 @@ def registered_model_reference_keys(db: Any, object_key: str) -> dict[str, str |
     return None
 
 
-@app.post("/api/shot-plans")
-async def create_shot_plan(payload: PlanCreateRequest) -> dict[str, Any]:
-    with get_db() as db:
-        sku_row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (payload.skuId,)).fetchone()
-        if not sku_row:
-            raise HTTPException(status_code=404, detail="货号不存在")
-        model_row = resolve_model_profile(db, payload.modelProfileId)
-        timestamp = now_iso()
-        plan = build_pending_shot_plan(sku_row["sku"], model_row["model_id"])
-        cursor = db.execute(
-            """
-            INSERT INTO shot_plans
-              (sku_id, model_profile_id, status, plan_json, category, sales_info,
-               lily_tone, styling, background, planner_provider, raw_response, created_at, updated_at)
-            VALUES (?, ?, 'PLANNING', ?, ?, ?, ?, ?, ?, 'gemini', NULL, ?, ?)
-            """,
-            (
-                payload.skuId,
-                model_row["id"],
-                dumps(plan),
-                plan.get("category"),
-                plan_generation(plan).get("salesInfo"),
-                plan_generation(plan).get("lilyTone"),
-                plan_generation(plan).get("styling"),
-                plan_generation(plan).get("background"),
-                timestamp,
-                timestamp,
-            ),
-        )
-        plan_id = int(cursor.lastrowid)
-        sync_shot_plan_shots(db, plan_id, plan, timestamp)
-        log_event(
-            db,
-            "shot_plan",
-            plan_id,
-            "planner_queued",
-            {"skuId": payload.skuId, "modelProfileId": model_row["id"], "plannerProvider": "gemini"},
-        )
-        row = db.execute("SELECT * FROM shot_plans WHERE id = ?", (plan_id,)).fetchone()
-    return {"item": serialize_shot_plan(row)}
-
-
-@app.get("/api/shot-plans/{shot_plan_id}")
-def get_shot_plan(shot_plan_id: int) -> dict[str, Any]:
-    with get_db() as db:
-        row = db.execute("SELECT * FROM shot_plans WHERE id = ?", (shot_plan_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="组图方案不存在")
-        return {"item": serialize_shot_plan(row)}
-
-
-@app.patch("/api/shot-plans/{shot_plan_id}")
-def update_shot_plan(shot_plan_id: int, payload: ShotPlanUpdateRequest) -> dict[str, Any]:
-    timestamp = now_iso()
-    with get_db() as db:
-        row = db.execute("SELECT * FROM shot_plans WHERE id = ?", (shot_plan_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="组图方案不存在")
-        sku_row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (row["sku_id"],)).fetchone()
-        plan = normalize_editable_plan(payload.plan, sku_row["sku"])
-        db.execute(
-            """
-            UPDATE shot_plans
-            SET plan_json = ?, category = ?, sales_info = ?,
-                lily_tone = ?, styling = ?, background = ?,
-                status = 'DRAFT', updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                dumps(plan),
-                plan.get("category") or plan.get("garment", {}).get("category"),
-                plan_generation(plan).get("salesInfo"),
-                plan_generation(plan).get("lilyTone"),
-                plan_generation(plan).get("styling"),
-                plan_generation(plan).get("background"),
-                timestamp,
-                shot_plan_id,
-            ),
-        )
-        sync_shot_plan_shots(db, shot_plan_id, plan, timestamp)
-        db.execute(
-            "UPDATE garment_skus SET analysis_json = ?, status = 'ANALYZED', updated_at = ? WHERE id = ?",
-            (dumps(plan.get("garment", {})), timestamp, row["sku_id"]),
-        )
-        log_event(db, "shot_plan", shot_plan_id, "updated", {"plan": plan})
-        updated = db.execute("SELECT * FROM shot_plans WHERE id = ?", (shot_plan_id,)).fetchone()
-    return {"item": serialize_shot_plan(updated)}
-
-
-@app.get("/api/garment-skus/{sku_id}/default-shot-plan")
-def get_default_shot_plan(sku_id: int) -> dict[str, Any]:
-    with get_db() as db:
-        sku_row = db.execute("SELECT id FROM garment_skus WHERE id = ?", (sku_id,)).fetchone()
-        if not sku_row:
-            raise HTTPException(status_code=404, detail="货号不存在")
-        row = db.execute(
-            """
-            SELECT *
-            FROM shot_plans
-            WHERE sku_id = ? AND planner_provider = 'gemini' AND status <> 'FAILED'
-            ORDER BY updated_at DESC, id DESC
-            LIMIT 1
-            """,
-            (sku_id,),
-        ).fetchone()
-        return {"item": serialize_shot_plan(row) if row else None}
-
-
-@app.post("/api/preview-runs")
-async def generate_preview_grid(payload: GenerateGroupRequest) -> dict[str, Any]:
-    with get_db() as db:
-        plan_row = db.execute("SELECT * FROM shot_plans WHERE id = ?", (payload.shotPlanId,)).fetchone()
-        if not plan_row:
-            raise HTTPException(status_code=404, detail="组图方案不存在")
-        sku_row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (plan_row["sku_id"],)).fetchone()
-        model_row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (plan_row["model_profile_id"],)).fetchone()
-
-    plan = loads(plan_row["plan_json"], {})
-    plan["_planner"] = {
-        "provider": plan_row["planner_provider"],
-        "rawResponse": plan_row["raw_response"],
-    }
-    output_dir = join_key("outputs", sku_row["sku"], f"preview-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
-    timestamp = now_iso()
-    provider = get_image_provider()
-    preview_shot = build_preview_shot()
-    task_package = build_preview_task_package(sku_row, model_row, plan, preview_shot)
-
-    with get_db() as db:
-        run_cursor = db.execute(
-            """
-            INSERT INTO generation_runs
-              (sku_id, shot_plan_id, model_profile_id, kind, status, output_dir, created_at, updated_at)
-            VALUES (?, ?, ?, 'preview_grid', 'RUNNING', ?, ?, ?)
-            """,
-            (sku_row["id"], plan_row["id"], model_row["id"], str(output_dir), timestamp, timestamp),
-        )
-        run_id = int(run_cursor.lastrowid)
-        log_event(db, "generation_run", run_id, "preview_started", {"shotPlanId": plan_row["id"], "outputDir": str(output_dir)})
-
-    image_id = create_generation_image(
-        run_id=run_id,
-        plan=plan,
-        shot=preview_shot,
-        provider=provider,
-        output_dir=output_dir,
-        task_package_override=task_package,
-    )
-    update_generation_run_status(run_id)
-    with get_db() as db:
-        log_event(db, "generation_run", run_id, "preview_submitted", {"imageIds": [image_id]})
-    return {"item": get_generation_run_by_id(run_id)}
-
-
-@app.post("/api/generation-runs")
-async def generate_group(payload: GenerateGroupRequest) -> dict[str, Any]:
-    with get_db() as db:
-        plan_row = db.execute("SELECT * FROM shot_plans WHERE id = ?", (payload.shotPlanId,)).fetchone()
-        if not plan_row:
-            raise HTTPException(status_code=404, detail="组图方案不存在")
-        sku_row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (plan_row["sku_id"],)).fetchone()
-        model_row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (plan_row["model_profile_id"],)).fetchone()
-        preview_run_row = None
-        if payload.previewRunId:
-            preview_run_row = db.execute(
-                """
-                SELECT *
-                FROM generation_runs
-                WHERE id = ? AND sku_id = ? AND shot_plan_id = ?
-                """,
-                (payload.previewRunId, sku_row["id"], plan_row["id"]),
-            ).fetchone()
-            if not preview_run_row:
-                raise HTTPException(status_code=400, detail="分镜预览记录不存在或不属于当前方案")
-            preview_image_row = db.execute(
-                """
-                SELECT *
-                FROM generation_images
-                WHERE run_id = ? AND shot_index = 0 AND status = 'SUCCEEDED' AND output_path IS NOT NULL
-                ORDER BY id DESC
-                LIMIT 1
-                """,
-                (payload.previewRunId,),
-            ).fetchone()
-            if not preview_image_row:
-                raise HTTPException(status_code=422, detail="分镜预览尚未生成成功，不能用于最终生成")
-            existing_final_count = db.execute(
-                "SELECT COUNT(*) AS count FROM generation_images WHERE run_id = ? AND shot_index > 0",
-                (payload.previewRunId,),
-            ).fetchone()["count"]
-            if int(existing_final_count or 0) > 0:
-                return {"item": get_generation_run_by_id(int(payload.previewRunId))}
-
-    plan = loads(plan_row["plan_json"], {})
-    plan["_planner"] = {
-        "provider": plan_row["planner_provider"],
-        "rawResponse": plan_row["raw_response"],
-    }
-    output_dir = clean_key(preview_run_row["output_dir"]) if preview_run_row else join_key("outputs", sku_row["sku"], datetime.now().strftime("%Y%m%d-%H%M%S"))
-    timestamp = now_iso()
-    provider = get_image_provider()
-
-    if preview_run_row:
-        run_id = int(preview_run_row["id"])
-        with get_db() as db:
-            db.execute(
-                "UPDATE generation_runs SET kind = 'group', status = 'RUNNING', updated_at = ? WHERE id = ?",
-                (timestamp, run_id),
-            )
-            log_event(db, "generation_run", run_id, "final_generation_started", {"shotPlanId": plan_row["id"], "outputDir": str(output_dir)})
-    else:
-        with get_db() as db:
-            run_cursor = db.execute(
-                """
-                INSERT INTO generation_runs
-                  (sku_id, shot_plan_id, model_profile_id, kind, status, output_dir, created_at, updated_at)
-                VALUES (?, ?, ?, 'group', 'RUNNING', ?, ?, ?)
-                """,
-                (sku_row["id"], plan_row["id"], model_row["id"], str(output_dir), timestamp, timestamp),
-            )
-            run_id = int(run_cursor.lastrowid)
-            log_event(db, "generation_run", run_id, "started", {"shotPlanId": plan_row["id"], "outputDir": str(output_dir)})
-
-    preview_inputs = get_preview_grid_inputs(payload.previewRunId, plan_row["id"]) if payload.previewRunId else []
-    generated_ids: list[int] = []
-    for shot in plan.get("shots", []):
-        task_package = build_task_package(sku_row, model_row, plan, shot, preview_inputs=preview_inputs)
-        image_id = create_generation_image(
-            run_id=run_id,
-            plan=plan,
-            shot=shot,
-            provider=provider,
-            output_dir=output_dir,
-            task_package_override=task_package,
-        )
-        generated_ids.append(image_id)
-    update_generation_run_status(run_id)
-    with get_db() as db:
-        log_event(db, "generation_run", run_id, "submitted", {"imageIds": generated_ids, "previewRunId": payload.previewRunId})
-
-    return {"item": get_generation_run_by_id(run_id)}
-
-
-@app.get("/api/generation-runs")
-def list_generation_runs(
-    include_archived: bool = Query(False, alias="includeArchived"),
-    limit: int = Query(30, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-    sku_id: int | None = Query(None, alias="skuId"),
-    keyword: str | None = Query(None),
-) -> dict[str, Any]:
-    search = f"%{keyword.strip()}%" if keyword and keyword.strip() else None
-    with get_db() as db:
-        rows = db.execute(
-            """
-            SELECT gr.*, gs.sku, gs.title AS sku_title,
-              (SELECT COUNT(*) FROM generation_images gi WHERE gi.run_id = gr.id) AS image_count,
-              (SELECT COUNT(*) FROM generation_images gi WHERE gi.run_id = gr.id AND gi.status = 'SUCCEEDED') AS succeeded_count,
-              (SELECT COUNT(*) FROM generation_images gi WHERE gi.run_id = gr.id AND gi.is_final = 1) AS final_count,
-              (SELECT COALESCE(SUM(CASE WHEN gi.current_attempt_index > 1 THEN gi.current_attempt_index - 1 ELSE 0 END), 0)
-                 FROM generation_images gi WHERE gi.run_id = gr.id) AS regeneration_count
-            FROM generation_runs gr
-            JOIN garment_skus gs ON gs.id = gr.sku_id
-            WHERE (? OR gr.archived_at IS NULL)
-              AND (? IS NULL OR gr.sku_id = ?)
-              AND (? IS NULL OR gs.sku LIKE ? OR gs.title LIKE ? OR gr.status LIKE ? OR CAST(gr.id AS TEXT) LIKE ?)
-            ORDER BY gr.created_at DESC, gr.id DESC
-            LIMIT ? OFFSET ?
-            """,
-            (include_archived, sku_id, sku_id, search, search, search, search, search, limit + 1, offset),
-        ).fetchall()
-        items = rows[:limit]
-        return {
-            "items": [serialize_generation_run(row, include_images=False, include_summary=True) for row in items],
-            "limit": limit,
-            "offset": offset,
-            "nextOffset": offset + limit if len(rows) > limit else None,
-            "hasMore": len(rows) > limit,
-        }
-
-
-@app.get("/api/garment-skus/{sku_id}/latest-preview-run")
-def get_latest_preview_run(sku_id: int, shot_plan_id: int | None = Query(None, alias="shotPlanId")) -> dict[str, Any]:
-    with get_db() as db:
-        row = db.execute(
-            """
-            SELECT id
-            FROM generation_runs
-            WHERE sku_id = ?
-              AND kind = 'preview_grid'
-              AND archived_at IS NULL
-              AND (? IS NULL OR shot_plan_id = ?)
-            ORDER BY created_at DESC, id DESC
-            LIMIT 1
-            """,
-            (sku_id, shot_plan_id, shot_plan_id),
-        ).fetchone()
-    return {"item": get_generation_run_by_id(int(row["id"])) if row else None}
-
-
-@app.get("/api/generation-runs/{run_id}")
-def get_generation_run(run_id: int, include_debug: bool = Query(False, alias="includeDebug")) -> dict[str, Any]:
-    return {"item": get_generation_run_by_id(run_id, include_debug=include_debug)}
-
-
-@app.get("/api/generation-runs/{run_id}/status")
-def get_generation_run_status(run_id: int) -> dict[str, Any]:
-    return {"item": get_generation_run_by_id(run_id, status_only=True)}
-
-
-@app.delete("/api/generation-runs/{run_id}")
-def delete_generation_run(run_id: int) -> dict[str, bool]:
-    with get_db() as db:
-        row = db.execute("SELECT * FROM generation_runs WHERE id = ?", (run_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="生成记录不存在")
-        if "archived_at" in row.keys() and row["archived_at"]:
-            return {"ok": True}
-        timestamp = now_iso()
-        db.execute(
-            "UPDATE generation_runs SET archived_at = ?, archive_reason = ?, updated_at = ? WHERE id = ?",
-            (timestamp, "user_archived", timestamp, run_id),
-        )
-        log_event(
-            db,
-            "generation_run",
-            run_id,
-            "archived",
-            {"skuId": row["sku_id"], "shotPlanId": row["shot_plan_id"], "outputDir": row["output_dir"]},
-        )
-
-    return {"ok": True}
-
-
-@app.post("/api/generation-runs/{run_id}/cancel")
-def cancel_generation_run(run_id: int) -> dict[str, Any]:
-    timestamp = now_iso()
-    with get_db() as db:
-        row = db.execute("SELECT * FROM generation_runs WHERE id = ?", (run_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="生成记录不存在")
-        active_count = db.execute(
-            """
-            SELECT COUNT(*) AS count
-            FROM generation_images
-            WHERE run_id = ? AND status IN ('QUEUED', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS', 'RUNNING')
-            """,
-            (run_id,),
-        ).fetchone()["count"]
-        if not active_count:
-            raise HTTPException(status_code=409, detail="生成记录已结束，不能取消")
-        cursor = db.execute(
-            """
-            UPDATE generation_images
-            SET status = 'CANCELLED', cancel_requested_at = COALESCE(cancel_requested_at, ?),
-                completed_at = COALESCE(completed_at, ?), locked_by = NULL, locked_until = NULL,
-                updated_at = ?
-            WHERE run_id = ? AND status IN ('QUEUED', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS', 'RUNNING')
-            """,
-            (timestamp, timestamp, timestamp, run_id),
-        )
-        if cursor.rowcount <= 0:
-            raise HTTPException(status_code=409, detail="生成记录已结束，不能取消")
-        log_event(
-            db,
-            "generation_run",
-            run_id,
-            "cancelled",
-            {"cancelledAt": timestamp, "cancelledImageCount": cursor.rowcount},
-        )
-    update_generation_run_status(run_id)
-    return {"item": get_generation_run_by_id(run_id)}
-
-
-@app.post("/api/generation-images/{image_id}/regenerate")
-async def regenerate_image(image_id: int, payload: RegenerateRequest) -> dict[str, Any]:
-    with get_db() as db:
-        image_row = db.execute("SELECT * FROM generation_images WHERE id = ?", (image_id,)).fetchone()
-        if not image_row:
-            raise HTTPException(status_code=404, detail="生成图片不存在")
-        run_row = db.execute("SELECT * FROM generation_runs WHERE id = ?", (image_row["run_id"],)).fetchone()
-        sku_row = db.execute("SELECT * FROM garment_skus WHERE id = ?", (run_row["sku_id"],)).fetchone()
-        model_row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (run_row["model_profile_id"],)).fetchone()
-        db.execute("UPDATE generation_images SET status = 'QUEUED', updated_at = ? WHERE id = ?", (now_iso(), image_id))
-
-    image_task_package = loads(image_row["task_package_json"], {})
-    image_stage = image_task_package.get("generation", {}).get("stage") if isinstance(image_task_package.get("generation"), dict) else None
-    if int(image_row["shot_index"]) == 0 or image_stage == "preview_grid":
-        with get_db() as db:
-            plan_row = get_latest_usable_shot_plan_row(db, sku_row["id"]) or db.execute(
-                "SELECT * FROM shot_plans WHERE id = ?",
-                (run_row["shot_plan_id"],),
-            ).fetchone()
-        if not plan_row:
-            raise HTTPException(status_code=404, detail="组图方案不存在")
-        plan = loads(plan_row["plan_json"], {})
-        plan["_planner"] = {
-            "provider": plan_row["planner_provider"],
-            "rawResponse": plan_row["raw_response"],
-        }
-        task_package = build_preview_task_package(sku_row, model_row, plan, build_preview_shot())
-        if plan_row["id"] != run_row["shot_plan_id"]:
-            with get_db() as db:
-                db.execute(
-                    "UPDATE generation_runs SET shot_plan_id = ?, updated_at = ? WHERE id = ?",
-                    (plan_row["id"], now_iso(), run_row["id"]),
-                )
-            run_row = {**dict(run_row), "shot_plan_id": plan_row["id"]}
-    else:
-        task_package = image_task_package
-    task_package["regeneration"] = {"fromImageId": image_id, "reason": payload.reason, "note": payload.note}
-    output_dir = clean_key(run_row["output_dir"])
-    shot = task_package.get("shot", {})
-    shot_index = int(shot.get("shotIndex", image_row["shot_index"]))
-    title = str(shot.get("title", image_row["title"]))
-    suffix = f"{shot_index:02d}-{sanitize_filename(title)}-regen-{datetime.now().strftime('%H%M%S')}"
-    provider = get_image_provider()
-    output_path = join_key(output_dir, f"{suffix}{provider.output_suffix()}")
-
-    with get_db() as db:
-        log_event(
-            db,
-            "generation_image",
-            image_id,
-            "regenerate_requested",
-            {"reason": payload.reason, "note": payload.note},
-        )
-        db.execute(
-            """
-            UPDATE generation_images
-            SET status = 'QUEUED', output_path = ?, task_package_json = ?,
-                provider_request_json = NULL, provider_response_json = NULL, prompt_text = NULL,
-                image_inputs_json = ?, current_attempt_index = current_attempt_index + 1,
-                provider_request_id = NULL, provider_status = NULL, provider_urls_json = NULL,
-                provider_status_json = NULL, submitted_at = NULL, completed_at = NULL,
-                last_status_checked_at = NULL, locked_by = NULL, locked_until = NULL,
-                submit_attempts = 0, status_check_attempts = 0, status_error_attempts = 0,
-                cancel_requested_at = NULL,
-                timeout_at = ?, regenerate_reason = ?, review_status = 'candidate',
-                review_note = NULL, reviewed_at = NULL, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                str(output_path),
-                dumps(task_package),
-                dumps(task_package.get("imageInputs", [])),
-                future_iso(settings.generation_image_timeout_seconds),
-                payload.reason,
-                now_iso(),
-                image_id,
-            ),
-        )
-    update_generation_run_status(run_row["id"])
-    return {"item": get_generation_run_by_id(run_row["id"])}
-
-
-@app.post("/api/generation-images/{image_id}/cancel")
-def cancel_generation_image(image_id: int) -> dict[str, Any]:
-    timestamp = now_iso()
-    with get_db() as db:
-        row = db.execute("SELECT * FROM generation_images WHERE id = ?", (image_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="生成图片不存在")
-        if row["status"] not in ACTIVE_IMAGE_STATUSES:
-            return {"item": serialize_generation_image(row)}
-        db.execute(
-            """
-            UPDATE generation_images
-            SET status = 'CANCELLED', cancel_requested_at = COALESCE(cancel_requested_at, ?),
-                completed_at = COALESCE(completed_at, ?), locked_by = NULL, locked_until = NULL,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (timestamp, timestamp, timestamp, image_id),
-        )
-        log_event(db, "generation_image", image_id, "cancelled", {"cancelledAt": timestamp})
-        updated = db.execute("SELECT * FROM generation_images WHERE id = ?", (image_id,)).fetchone()
-    update_generation_run_status(row["run_id"])
-    return {"item": serialize_generation_image(updated)}
-
-
-@app.patch("/api/generation-images/{image_id}/final")
-def set_final_image(image_id: int, payload: FinalImageRequest) -> dict[str, Any]:
-    with get_db() as db:
-        row = db.execute("SELECT * FROM generation_images WHERE id = ?", (image_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="生成图片不存在")
-        db.execute(
-            "UPDATE generation_images SET is_final = ?, updated_at = ? WHERE id = ?",
-            (1 if payload.isFinal else 0, now_iso(), image_id),
-        )
-        log_event(db, "generation_image", image_id, "final_updated", {"isFinal": payload.isFinal})
-    return {"item": get_generation_image_by_id(image_id)}
-
-
-@app.patch("/api/generation-images/{image_id}/review")
-def set_generation_image_review_status(image_id: int, payload: ReviewStatusRequest) -> dict[str, Any]:
-    normalized_status = payload.status.strip().lower()
-    if normalized_status not in REVIEW_STATUSES:
-        raise HTTPException(status_code=400, detail="图片审核状态不合法")
-    timestamp = now_iso()
-    with get_db() as db:
-        row = db.execute("SELECT * FROM generation_images WHERE id = ?", (image_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="生成图片不存在")
-        db.execute(
-            """
-            UPDATE generation_images
-            SET review_status = ?, review_note = ?, reviewed_at = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (normalized_status, payload.note, timestamp, timestamp, image_id),
-        )
-        if normalized_status == "delivered":
-            db.execute(
-                "UPDATE generation_runs SET delivery_status = 'delivered', delivered_at = COALESCE(delivered_at, ?), updated_at = ? WHERE id = ?",
-                (timestamp, timestamp, row["run_id"]),
-            )
-        log_event(db, "generation_image", image_id, "review_updated", {"status": normalized_status, "note": payload.note})
-        updated = db.execute("SELECT * FROM generation_images WHERE id = ?", (image_id,)).fetchone()
-    return {"item": serialize_generation_image(updated)}
-
-
 @app.get("/api/logs")
 def list_logs(limit: int = 100) -> dict[str, Any]:
     with get_db() as db:
@@ -4563,169 +3586,12 @@ def list_logs(limit: int = 100) -> dict[str, Any]:
         return {"items": [serialize_log(row) for row in rows]}
 
 
-@app.post("/api/exports/runs/{run_id}")
-def export_run(run_id: int) -> StreamingResponse:
-    with get_db() as db:
-        run = db.execute(
-            """
-            SELECT gr.*, gs.sku
-            FROM generation_runs gr
-            JOIN garment_skus gs ON gs.id = gr.sku_id
-            WHERE gr.id = ?
-            """,
-            (run_id,),
-        ).fetchone()
-        if not run:
-            raise HTTPException(status_code=404, detail="生成任务不存在")
-        images = db.execute(
-            """
-            SELECT id, shot_index, status, output_path, is_final
-            FROM generation_images
-            WHERE run_id = ?
-            ORDER BY shot_index, id
-            """,
-            (run_id,),
-        ).fetchall()
-
-    group_images = [image for image in images if int(image["shot_index"] or 0) > 0]
-    if not group_images:
-        raise HTTPException(status_code=422, detail="没有可导出的最终组图")
-    incomplete_images = [
-        image
-        for image in group_images
-        if image["status"] != "SUCCEEDED" or not image["output_path"]
-    ]
-    if incomplete_images or run["status"] != "SUCCEEDED":
-        raise HTTPException(status_code=409, detail="最终组图尚未全部生成成功，不能导出 ZIP")
-    final_images = [image for image in group_images if image["is_final"]]
-    selected = final_images or group_images
-    if not selected:
-        raise HTTPException(status_code=422, detail="没有可导出的生成图")
-
-    zip_name = f"run-{run_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
-    zip_buffer = BytesIO()
-    written = 0
-    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for image in selected:
-            object_key = image["output_path"]
-            if not object_key:
-                continue
-            try:
-                archive.writestr(Path(object_key).name, get_bytes(object_key))
-                written += 1
-            except Exception:
-                continue
-    if written == 0:
-        raise HTTPException(status_code=422, detail="没有可导出的生成图")
-    zip_bytes = zip_buffer.getvalue()
-    export_key = join_key("exports", str(run["sku"] or run["sku_id"]), zip_name)
-    put_bytes(export_key, zip_bytes, "application/zip")
-
-    with get_db() as db:
-        log_event(
-            db,
-            "generation_run",
-            run_id,
-            "exported",
-            {"objectKey": export_key, "imageCount": written, "finalOnly": bool(final_images)},
-        )
-    return StreamingResponse(
-        BytesIO(zip_bytes),
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
-    )
-
-
-def create_generation_image(
-    run_id: int,
-    plan: dict[str, Any],
-    shot: dict[str, Any],
-    provider: Any,
-    output_dir: str,
-    regenerate_from_image_id: int | None = None,
-    regenerate_reason: str | None = None,
-    task_package_override: dict[str, Any] | None = None,
-) -> int:
-    shot_index = int(shot.get("shotIndex", 1))
-    title = str(shot.get("title", f"图 {shot_index}"))
-    suffix = f"{shot_index:02d}-{sanitize_filename(title)}"
-    if regenerate_from_image_id:
-        suffix = f"{suffix}-regen-{datetime.now().strftime('%H%M%S')}"
-    output_path = join_key(output_dir, f"{suffix}{provider.output_suffix()}")
-    if task_package_override is None:
-        raise ValueError("create_generation_image requires task_package_override")
-    task_package = task_package_override
-    timestamp = now_iso()
-    timeout_at = future_iso(settings.generation_image_timeout_seconds)
-
-    with get_db() as db:
-        cursor = db.execute(
-            """
-            INSERT INTO generation_images
-              (run_id, shot_index, title, status, output_path, task_package_json, regenerate_from_image_id,
-               regenerate_reason, image_inputs_json, template_snapshot_json, model_snapshot_json,
-               garment_snapshot_json, timeout_at, is_final, created_at, updated_at)
-            VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                run_id,
-                shot_index,
-                title,
-                str(output_path),
-                dumps(task_package),
-                regenerate_from_image_id,
-                regenerate_reason,
-                dumps(task_package.get("imageInputs", [])),
-                dumps({
-                    "brandStyle": task_package.get("brandStyle", plan.get("brandStyle", {})),
-                    "brandTemplate": task_package.get("brandTemplate", {}),
-                    "shot": shot,
-                    "plan": plan,
-                }),
-                dumps(task_package.get("model", {})),
-                dumps(task_package.get("garment", {})),
-                timeout_at,
-                1 if shot_index > 0 else 0,
-                timestamp,
-                timestamp,
-            ),
-        )
-        image_id = int(cursor.lastrowid)
-        log_event(db, "generation_image", image_id, "queued", {"runId": run_id, "shot": shot, "outputPath": str(output_path)})
-    return image_id
-
-
 def future_iso(seconds: int) -> str:
     return datetime.fromtimestamp(time.time() + seconds, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def lock_until_iso() -> str:
     return future_iso(settings.generation_lock_ttl_seconds)
-
-
-def release_generation_image_lock(db: Any, image_id: int) -> None:
-    db.execute("UPDATE generation_images SET locked_by = NULL, locked_until = NULL WHERE id = ?", (image_id,))
-
-
-def claim_generation_image(image_id: int, worker_id: str, status: str) -> Any | None:
-    timestamp = now_iso()
-    lock_until = lock_until_iso()
-    attempt_column = "submit_attempts" if status == "QUEUED" else "status_check_attempts"
-    with get_db() as db:
-        cursor = db.execute(
-            f"""
-            UPDATE generation_images
-            SET locked_by = ?, locked_until = ?, {attempt_column} = {attempt_column} + 1, updated_at = ?
-            WHERE id = ?
-              AND status = ?
-              AND (locked_until IS NULL OR locked_until < ?)
-              AND cancel_requested_at IS NULL
-            """,
-            (worker_id, lock_until, timestamp, image_id, status, timestamp),
-        )
-        if cursor.rowcount != 1:
-            return None
-        return db.execute("SELECT * FROM generation_images WHERE id = ?", (image_id,)).fetchone()
 
 
 def row_value(row: Any, key: str, default: Any = None) -> Any:
@@ -4741,988 +3607,14 @@ def row_value(row: Any, key: str, default: Any = None) -> Any:
     return default
 
 
-def fail_generation_image(db: Any, image_id: int, status: str, payload: dict[str, Any]) -> None:
-    timestamp = now_iso()
-    db.execute(
-        """
-        UPDATE generation_images
-        SET status = 'FAILED', provider_status = ?, provider_status_json = ?,
-            completed_at = COALESCE(completed_at, ?), last_status_checked_at = ?,
-            locked_by = NULL, locked_until = NULL, updated_at = ?
-        WHERE id = ?
-        """,
-        (status, dumps(payload), timestamp, timestamp, timestamp, image_id),
-    )
-
-
-def submit_generation_image(provider: Any, image_row: Any) -> None:
-    image_id = int(image_row["id"])
-    task_package = loads(image_row["task_package_json"], {})
-    output_path = image_row["output_path"]
-    if not output_path:
-        with get_db() as db:
-            fail_generation_image(db, image_id, "MISSING_OUTPUT_PATH", {"error": "缺少输出路径，无法提交生成任务"})
-            log_event(db, "generation_image", image_id, "failed", {"error": "缺少输出路径，无法提交生成任务"})
-        update_generation_run_status(image_row["run_id"])
-        return
-    try:
-        provider_response = asyncio.run(provider.submit(task_package, output_path))
-    except Exception as exc:
-        submit_attempts = int(row_value(image_row, "submit_attempts") or 0)
-        with get_db() as db:
-            if submit_attempts >= settings.generation_submit_retry_limit:
-                fail_generation_image(db, image_id, "SUBMIT_FAILED", {"error": str(exc), "attempts": submit_attempts})
-                log_event(db, "generation_image", image_id, "failed", {"error": str(exc), "attempts": submit_attempts})
-            else:
-                release_generation_image_lock(db, image_id)
-                log_event(db, "generation_image", image_id, "submit_retry_scheduled", {"error": str(exc), "attempts": submit_attempts})
-        update_generation_run_status(image_row["run_id"])
-        return
-    provider_request = provider_response.get("providerRequest") or {"taskPackage": task_package, "outputPath": str(output_path)}
-    prompt_text = provider_request.get("prompt") if isinstance(provider_request, dict) else None
-    next_status = provider_response.get("status", "SUBMITTED")
-    provider_status = provider_response.get("providerStatus")
-    provider_request_id = provider_response.get("providerRequestId")
-    provider_urls = provider_response.get("providerUrls", {})
-    provider_status_response = provider_response.get("providerStatusResponse")
-    media = provider_media_metadata(provider_response, output_path)
-    completed_at = now_iso() if next_status in TERMINAL_IMAGE_STATUSES else None
-    attempt = {
-        "attemptIndex": max(1, int(image_row["current_attempt_index"] or 0)),
-        "kind": "regeneration" if task_package.get("regeneration") else "initial",
-        "reason": task_package.get("regeneration", {}).get("reason") if isinstance(task_package.get("regeneration"), dict) else image_row["regenerate_reason"],
-        "note": task_package.get("regeneration", {}).get("note") if isinstance(task_package.get("regeneration"), dict) else None,
-        "prompt": prompt_text,
-        "imageInputs": provider_response.get("imageInputs", task_package.get("imageInputs", [])),
-        "providerRequest": provider_request,
-        "providerResponse": provider_response.get("providerResponse", provider_response),
-        "providerStatusResponse": provider_status_response,
-        "providerRequestId": provider_request_id,
-        "providerStatus": provider_status,
-        "outputPath": str(output_path),
-        "createdAt": now_iso(),
-    }
-    old_attempts = loads(image_row["attempts_json"], []) or []
-    attempts = [*old_attempts, attempt]
-    with get_db() as db:
-        db.execute(
-            """
-            UPDATE generation_images
-            SET status = ?, output_path = ?, thumb_path = ?, preview_path = ?,
-                file_size = COALESCE(?, file_size),
-                thumb_file_size = COALESCE(?, thumb_file_size),
-                preview_file_size = COALESCE(?, preview_file_size),
-                provider_request_json = ?,
-                provider_response_json = ?, prompt_text = ?, image_inputs_json = ?,
-                attempts_json = ?, current_attempt_index = ?, provider_request_id = ?,
-                provider_status = ?, provider_urls_json = ?, provider_status_json = ?,
-                submitted_at = ?, completed_at = ?, last_status_checked_at = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                next_status,
-                media.get("outputPath") or str(output_path),
-                media.get("thumbPath"),
-                media.get("previewPath"),
-                media.get("fileSize"),
-                media.get("thumbFileSize"),
-                media.get("previewFileSize"),
-                dumps(provider_request),
-                dumps(provider_response.get("providerResponse", provider_response)),
-                prompt_text,
-                dumps(provider_response.get("imageInputs", task_package.get("imageInputs", []))),
-                dumps(attempts),
-                attempt["attemptIndex"],
-                provider_request_id,
-                provider_status,
-                dumps(provider_urls),
-                dumps(provider_status_response),
-                now_iso(),
-                completed_at,
-                now_iso(),
-                now_iso(),
-                image_id,
-            ),
-        )
-        release_generation_image_lock(db, image_id)
-        log_event(db, "generation_image", image_id, "submitted", {"outputPath": str(output_path), "provider": provider_response})
-    update_generation_run_status(image_row["run_id"])
-
-
 async def generation_poller_loop() -> None:
     while True:
         await asyncio.sleep(settings.generation_poll_interval_seconds)
         try:
-            await asyncio.to_thread(refresh_pending_generation_images)
             refresh_pending_new_generation_jobs()
         except Exception as exc:  # pragma: no cover - background safety net
             with get_db() as db:
                 log_event(db, "generation_poller", None, "failed", {"error": str(exc)})
-
-
-async def planner_poller_loop() -> None:
-    while True:
-        await asyncio.sleep(settings.generation_poll_interval_seconds)
-        try:
-            await asyncio.to_thread(refresh_pending_shot_plans)
-        except Exception as exc:  # pragma: no cover - background safety net
-            with get_db() as db:
-                log_event(db, "planner_poller", None, "failed", {"error": str(exc)})
-
-
-def refresh_pending_shot_plans() -> None:
-    with get_db() as db:
-        rows = db.execute(
-            """
-            SELECT sp.*, gs.sku
-            FROM shot_plans sp
-            JOIN garment_skus gs ON gs.id = sp.sku_id
-            WHERE sp.status = 'PLANNING'
-            ORDER BY sp.created_at, sp.id
-            LIMIT 2
-            """
-        ).fetchall()
-    for row in rows:
-        run_planner_for_shot_plan(row)
-
-
-def run_planner_for_shot_plan(plan_row: Any) -> None:
-    with get_db() as db:
-        image_rows = db.execute(
-            "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY role = 'main' DESC, sort_order, id",
-            (plan_row["sku_id"],),
-        ).fetchall()
-        image_keys = [row["storage_path"] for row in image_rows]
-
-    with TemporaryDirectory(prefix="planner-inputs-") as temp_dir:
-        image_paths: list[Path] = []
-        for index, key in enumerate(image_keys[:6], start=1):
-            try:
-                path = Path(temp_dir) / f"{index:02d}-{Path(key).name}"
-                path.write_bytes(get_bytes(key))
-                image_paths.append(path)
-            except Exception:
-                continue
-        try:
-            plan, provider, raw = asyncio.run(plan_with_gemini(plan_row["sku"], image_paths))
-        except PlannerError as exc:
-            timestamp = now_iso()
-            with get_db() as db:
-                db.execute(
-                    "UPDATE shot_plans SET status = 'FAILED', raw_response = ?, updated_at = ? WHERE id = ?",
-                    (dumps({"error": str(exc), "providerRequest": exc.provider_request, "providerResponse": exc.provider_response}), timestamp, plan_row["id"]),
-                )
-                log_event(
-                    db,
-                    "shot_plan",
-                    plan_row["id"],
-                    "planner_failed",
-                    {
-                        "skuId": plan_row["sku_id"],
-                        "sku": plan_row["sku"],
-                        "modelProfileId": plan_row["model_profile_id"],
-                        "error": str(exc),
-                        "providerRequest": exc.provider_request,
-                        "providerResponse": exc.provider_response,
-                    },
-                )
-            return
-
-    timestamp = now_iso()
-    raw_snapshot = loads(raw, {})
-    with get_db() as db:
-        db.execute(
-            """
-            UPDATE shot_plans
-            SET status = 'DRAFT', plan_json = ?, category = ?, sales_info = ?,
-                lily_tone = ?, styling = ?, background = ?, planner_provider = ?,
-                raw_response = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                dumps(plan),
-                plan.get("category") or plan.get("garment", {}).get("category"),
-                plan_generation(plan).get("salesInfo"),
-                plan_generation(plan).get("lilyTone"),
-                plan_generation(plan).get("styling"),
-                plan_generation(plan).get("background"),
-                provider,
-                raw,
-                timestamp,
-                plan_row["id"],
-            ),
-        )
-        sync_shot_plan_shots(db, plan_row["id"], plan, timestamp)
-        db.execute(
-            "UPDATE garment_skus SET status = 'ANALYZED', analysis_json = ?, updated_at = ? WHERE id = ?",
-            (dumps(plan.get("garment", {})), timestamp, plan_row["sku_id"]),
-        )
-        parse_meta = raw_snapshot.get("parseMeta") if isinstance(raw_snapshot, dict) else None
-        if isinstance(parse_meta, dict) and str(parse_meta.get("mode", "")).startswith("recovered"):
-            log_event(
-                db,
-                "shot_plan",
-                plan_row["id"],
-                "planner_response_recovered",
-                {
-                    "skuId": plan_row["sku_id"],
-                    "sku": plan_row["sku"],
-                    "modelProfileId": plan_row["model_profile_id"],
-                    "mode": parse_meta.get("mode"),
-                    "parseError": parse_meta.get("parseError"),
-                    "trailingText": parse_meta.get("trailingText"),
-                },
-            )
-        log_event(
-            db,
-            "shot_plan",
-            plan_row["id"],
-            "created",
-            {"skuId": plan_row["sku_id"], "modelProfileId": plan_row["model_profile_id"], "plannerProvider": provider, "plan": plan},
-        )
-
-
-def refresh_pending_generation_images() -> None:
-    provider = get_image_provider()
-    expire_stale_generation_images()
-    worker_id = f"poller-{uuid4()}"
-    timestamp = now_iso()
-    with get_db() as db:
-        queued_rows = db.execute(
-            """
-            SELECT gi.*
-            FROM generation_images gi
-            JOIN generation_runs gr ON gr.id = gi.run_id
-            WHERE gi.status = 'QUEUED'
-              AND gi.provider_request_id IS NULL
-              AND gr.status <> 'CANCELLED'
-              AND gi.cancel_requested_at IS NULL
-              AND (gi.locked_until IS NULL OR gi.locked_until < ?)
-              AND gi.submit_attempts < ?
-            ORDER BY gi.updated_at, gi.id
-            LIMIT 5
-            """
-            ,
-            (timestamp, settings.generation_submit_retry_limit),
-        ).fetchall()
-        rows = db.execute(
-            """
-            SELECT *
-            FROM generation_images
-            WHERE status IN ('SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS', 'RUNNING')
-              AND provider_request_id IS NOT NULL
-              AND cancel_requested_at IS NULL
-              AND (locked_until IS NULL OR locked_until < ?)
-            ORDER BY updated_at
-            LIMIT 10
-            """
-            ,
-            (timestamp,),
-        ).fetchall()
-
-    for row in queued_rows:
-        claimed = claim_generation_image(int(row["id"]), worker_id, "QUEUED")
-        if claimed:
-            submit_generation_image(provider, claimed)
-    for row in rows:
-        claimed = claim_generation_image(int(row["id"]), worker_id, row["status"])
-        if claimed:
-            refresh_generation_image_status(provider, claimed)
-
-
-def expire_stale_generation_images() -> None:
-    timestamp = now_iso()
-    with get_db() as db:
-        rows = db.execute(
-            """
-            SELECT id, run_id
-            FROM generation_images
-            WHERE status IN ('QUEUED', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS', 'RUNNING')
-              AND timeout_at IS NOT NULL
-              AND timeout_at < ?
-            """,
-            (timestamp,),
-        ).fetchall()
-        for row in rows:
-            fail_generation_image(db, int(row["id"]), "TIMEOUT", {"error": "生成任务超时", "timeoutAt": timestamp})
-            log_event(db, "generation_image", row["id"], "timed_out", {"timeoutAt": timestamp})
-    for run_id in {int(row["run_id"]) for row in rows}:
-        update_generation_run_status(run_id)
-
-
-def refresh_generation_image_status(provider: Any, image_row: Any) -> None:
-    try:
-        result = asyncio.run(provider.refresh(image_row))
-    except Exception as exc:
-        failed_at = now_iso()
-        attempts = loads(image_row["attempts_json"], []) or []
-        status_error_attempts = int(row_value(image_row, "status_error_attempts") or 0) + 1
-        if attempts:
-            attempts[-1] = {
-                **attempts[-1],
-                "providerStatus": "STATUS_CHECK_FAILED",
-                "providerStatusResponse": {"error": str(exc)},
-                **({"completedAt": failed_at} if status_error_attempts >= settings.generation_status_retry_limit else {}),
-            }
-        with get_db() as db:
-            if status_error_attempts >= settings.generation_status_retry_limit:
-                db.execute(
-                    """
-                    UPDATE generation_images
-                    SET status = 'FAILED', provider_status = ?, provider_status_json = ?,
-                        attempts_json = ?, completed_at = COALESCE(completed_at, ?),
-                        last_status_checked_at = ?, locked_by = NULL, locked_until = NULL, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        "STATUS_CHECK_FAILED",
-                        dumps({"error": str(exc), "attempts": status_error_attempts}),
-                        dumps(attempts),
-                        failed_at,
-                        failed_at,
-                        failed_at,
-                        image_row["id"],
-                    ),
-                )
-                log_event(db, "generation_image", image_row["id"], "status_check_failed", {"error": str(exc), "attempts": status_error_attempts})
-            else:
-                db.execute(
-                    """
-                    UPDATE generation_images
-                    SET provider_status = ?, provider_status_json = ?, attempts_json = ?,
-                        status_error_attempts = ?,
-                        last_status_checked_at = ?, locked_by = NULL, locked_until = NULL, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        "STATUS_CHECK_RETRY",
-                        dumps({"error": str(exc), "attempts": status_error_attempts}),
-                        dumps(attempts),
-                        status_error_attempts,
-                        failed_at,
-                        failed_at,
-                        image_row["id"],
-                    ),
-                )
-                log_event(db, "generation_image", image_row["id"], "status_check_retry_scheduled", {"error": str(exc), "attempts": status_error_attempts})
-        update_generation_run_status(image_row["run_id"])
-        return
-
-    next_status = result.get("status", image_row["status"])
-    provider_status = result.get("providerStatus")
-    status_response = result.get("providerStatusResponse")
-    provider_response = result.get("providerResponse")
-    media = provider_media_metadata(result, image_row["output_path"])
-    completed_at = now_iso() if next_status in TERMINAL_IMAGE_STATUSES else None
-    attempts = loads(image_row["attempts_json"], []) or []
-    if attempts:
-        attempts[-1] = {
-            **attempts[-1],
-            "providerStatus": provider_status,
-            "providerStatusResponse": status_response,
-            **({"providerResponse": provider_response} if provider_response is not None else {}),
-            **({"completedAt": completed_at} if completed_at else {}),
-        }
-
-    with get_db() as db:
-        db.execute(
-            """
-            UPDATE generation_images
-            SET status = ?, output_path = COALESCE(?, output_path),
-                thumb_path = COALESCE(?, thumb_path),
-                preview_path = COALESCE(?, preview_path),
-                file_size = COALESCE(?, file_size),
-                thumb_file_size = COALESCE(?, thumb_file_size),
-                preview_file_size = COALESCE(?, preview_file_size),
-                provider_status = ?, provider_status_json = ?,
-                provider_response_json = COALESCE(?, provider_response_json),
-                attempts_json = ?, completed_at = COALESCE(?, completed_at),
-                status_error_attempts = 0, last_status_checked_at = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                next_status,
-                media.get("outputPath"),
-                media.get("thumbPath"),
-                media.get("previewPath"),
-                media.get("fileSize"),
-                media.get("thumbFileSize"),
-                media.get("previewFileSize"),
-                provider_status,
-                dumps(status_response),
-                dumps(provider_response) if provider_response is not None else None,
-                dumps(attempts),
-                completed_at,
-                now_iso(),
-                now_iso(),
-                image_row["id"],
-            ),
-        )
-        release_generation_image_lock(db, int(image_row["id"]))
-        log_event(
-            db,
-            "generation_image",
-            image_row["id"],
-            "status_updated",
-            {"status": next_status, "providerStatus": provider_status},
-        )
-    update_generation_run_status(image_row["run_id"])
-
-
-def update_generation_run_status(run_id: int) -> None:
-    with get_db() as db:
-        rows = db.execute("SELECT status FROM generation_images WHERE run_id = ?", (run_id,)).fetchall()
-        statuses = [row["status"] for row in rows]
-        if not statuses:
-            next_status = "CREATED"
-        elif any(status in ACTIVE_IMAGE_STATUSES for status in statuses):
-            next_status = "RUNNING"
-        elif all(status == "SUCCEEDED" for status in statuses):
-            next_status = "SUCCEEDED"
-        elif any(status == "SUCCEEDED" for status in statuses):
-            next_status = "PARTIAL_SUCCEEDED"
-        elif any(status == "CANCELLED" for status in statuses):
-            next_status = "CANCELLED"
-        else:
-            next_status = "FAILED"
-        db.execute(
-            "UPDATE generation_runs SET status = ?, updated_at = ? WHERE id = ?",
-            (next_status, now_iso(), run_id),
-        )
-
-
-def build_preview_task_package(sku_row: Any, model_row: Any, plan: dict[str, Any], shot: dict[str, Any]) -> dict[str, Any]:
-    package = build_task_package(sku_row, model_row, plan, shot)
-    base_constraints = [
-        item
-        for item in package["generation"]["constraints"]
-        if "分镜预览图" not in item and "预览图" not in item and "九宫格" not in item and "3x3" not in item
-    ]
-    package["generation"] = {
-        **package["generation"],
-        "stage": "preview_grid",
-        "output": {"aspectRatio": "1:1", "size": "1200x1200", "layout": "2x3 contact sheet"},
-        "constraints": [
-            *base_constraints,
-            "生成一张 2x3 分镜预览图，前 5 格对应最终组图分镜，第 6 格为备用候选姿势",
-            "分镜预览用于用户确认方向，不要输出单张最终成片",
-            "每格保持服装和配饰一致，不能改变商品结构、颜色、长度和比例",
-        ],
-    }
-    package["previewPlan"] = {
-        "goal": "给用户预览 5 个最终分镜和 1 个备用候选姿势",
-        "shots": plan.get("shots", []),
-    }
-    package["imageInputs"] = build_preview_image_inputs(sku_row, model_row, package["model"]["profile"])
-    return package
-
-
-def build_preview_shot() -> dict[str, Any]:
-    return {
-        "shotIndex": 0,
-        "title": "2x3 分镜预览",
-        "scene": "2x3 Contact Sheet",
-        "cropRange": "前 5 格对应分镜剧本，第 6 格为备用候选姿势",
-        "imagePurpose": "在服装、配饰、人物一致的前提下确认最终组图的分镜方向",
-        "poseTone": "6 个商业棚拍候选画面，覆盖正面、轻斜正、3/4 斜正、侧身、轻走动和备用候选姿势",
-        "bodyPosition": "多身位",
-        "styling": {},
-    }
-
-
-def build_pending_shot_plan(sku: str, model_id: str) -> dict[str, Any]:
-    shots = []
-    for slot in SHOT_SLOTS:
-        shots.append(
-            {
-                "shotIndex": slot["shotIndex"],
-                "englishName": slot.get("englishName"),
-                "title": slot.get("title", f"图 {slot['shotIndex']}"),
-                "task": "Gemini 正在生成分镜任务",
-                "scene": "",
-                "cropRange": "",
-                "modelScale": "",
-                "headTreatment": "",
-                "bodyPosition": "",
-                "poseTone": "",
-                "imagePurpose": "",
-            }
-        )
-    return {
-        "sku": sku,
-        "modelId": model_id,
-        "category": "策划中",
-        "garment": {"category": "策划中", "summary": "Gemini 正在识别服装品类并生成组图方案。"},
-        "brandStyle": {"name": "Lily 默认棚拍风格", "summary": "方案生成中。"},
-        "generationPlan": {
-            "salesInfo": "",
-            "lilyTone": "",
-            "styling": "",
-            "background": "",
-        },
-        "shots": shots,
-    }
-
-
-def build_task_package(
-    sku_row: Any,
-    model_row: Any,
-    plan: dict[str, Any],
-    shot: dict[str, Any],
-    preview_inputs: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    garment = plan.get("garment", {})
-    model_profile = loads(model_row["profile_json"], {})
-    if preview_inputs:
-        image_inputs = build_final_image_inputs(sku_row, model_row, model_profile, preview_inputs)
-    else:
-        image_inputs = build_image_inputs(sku_row, model_row, model_profile, shot)
-    brand_template = get_active_brand_template()
-    brand_style = {
-        **brand_template.get("snapshot", {}),
-        **(plan.get("brandStyle", {}) if isinstance(plan.get("brandStyle"), dict) else {}),
-        "templateId": brand_template.get("templateId"),
-        "templateVersion": brand_template.get("version"),
-    }
-    if sku_row["sku"] == "125309C7948510":
-        garment = {
-            **garment,
-            "proportionConstraints": (
-                "裙长保持膝上中段；裙摆为克制轻 A 字，不要变成大伞摆；"
-                "蓝白条纹只作为袖窿和下摆窄装饰层，不要扩大成大面积裙片。"
-            ),
-        }
-    return {
-        "sku": sku_row["sku"],
-        "garment": garment,
-        "model": {
-            "modelId": model_row["model_id"],
-            "profile": model_profile,
-            "identityLock": "high",
-        },
-        "brandStyle": brand_style,
-        "brandTemplate": brand_template,
-        "planningScript": {
-            "category": plan.get("category") or garment.get("category"),
-            **plan_generation(plan),
-        },
-        "planner": plan.get("_planner", {}),
-        "shot": shot,
-        "imageInputs": image_inputs,
-        "generation": {
-            "targetModel": "GPT Image-2",
-            "provider": settings.image_provider,
-            "stage": "final_group",
-            "output": {"aspectRatio": "1:1", "size": "1200x1200"},
-            "constraints": [
-                "服装素材参考图是唯一商品事实源",
-                "保持同一模特脸、发型、气质",
-                "保持白/浅灰棚拍风格",
-                "不生成无关文字、水印、logo",
-                "如果提供了分镜预览图，只把它作为姿势、身位、景别、构图、背景光线和搭配方向的参考",
-            ],
-        },
-    }
-
-
-def get_preview_grid_inputs(preview_run_id: int | None, shot_plan_id: int) -> list[dict[str, Any]]:
-    if not preview_run_id:
-        return []
-    with get_db() as db:
-        run_row = db.execute(
-            "SELECT * FROM generation_runs WHERE id = ? AND shot_plan_id = ?",
-            (preview_run_id, shot_plan_id),
-        ).fetchone()
-        if not run_row:
-            raise HTTPException(status_code=400, detail="分镜预览记录不存在或不属于当前方案")
-        image_rows = db.execute(
-            """
-            SELECT *
-            FROM generation_images
-            WHERE run_id = ? AND shot_index = 0 AND status = 'SUCCEEDED' AND output_path IS NOT NULL
-            ORDER BY shot_index, id
-            LIMIT 1
-            """,
-            (preview_run_id,),
-        ).fetchall()
-    inputs: list[dict[str, Any]] = []
-    for row in image_rows:
-        object_key = row["output_path"]
-        inputs.append(
-            {
-                "role": "preview_grid",
-                "filename": Path(object_key).name,
-                "objectKey": object_key,
-                "url": presigned_get_url(object_key),
-            }
-        )
-    if not inputs:
-        raise HTTPException(status_code=422, detail="分镜预览尚未生成成功，不能用于最终生成")
-    return inputs
-
-
-def normalize_editable_plan(plan: dict[str, Any], sku: str) -> dict[str, Any]:
-    if not isinstance(plan, dict):
-        raise HTTPException(status_code=400, detail="方案格式不合法")
-    shots = plan.get("shots")
-    if not isinstance(shots, list) or not shots:
-        raise HTTPException(status_code=400, detail="方案至少需要一个图位")
-    normalized = normalize_planner_plan(dict(plan), sku)
-    if len(normalized.get("shots", [])) != 5:
-        raise HTTPException(status_code=400, detail="方案必须包含 5 个固定图位")
-    return normalized
-
-
-def plan_generation(plan: dict[str, Any]) -> dict[str, Any]:
-    generation_plan = plan.get("generationPlan") if isinstance(plan.get("generationPlan"), dict) else {}
-    styling = generation_plan.get("styling")
-    if not styling:
-        legacy_parts = [
-            plan.get("styling"),
-            plan.get("stylingPlan"),
-            plan.get("colorPalette"),
-            plan.get("accessories"),
-        ]
-        styling = "；".join(str(part).strip() for part in legacy_parts if str(part or "").strip())
-    return {
-        "salesInfo": generation_plan.get("salesInfo") or plan.get("salesInfo"),
-        "lilyTone": generation_plan.get("lilyTone") or plan.get("lilyTone"),
-        "styling": styling,
-        "background": generation_plan.get("background") or plan.get("background"),
-    }
-
-
-def get_active_brand_template() -> dict[str, Any]:
-    with get_db() as db:
-        row = db.execute(
-            """
-            SELECT *
-            FROM brand_template_versions
-            WHERE is_active = 1
-            ORDER BY id DESC
-            LIMIT 1
-            """
-        ).fetchone()
-    if not row:
-        return {
-            "templateId": "inline-default",
-            "version": "unversioned",
-            "name": "默认棚拍模板",
-            "snapshot": {},
-        }
-    return {
-        "id": row["id"],
-        "templateId": row["template_id"],
-        "version": row["version"],
-        "name": row["name"],
-        "snapshot": loads(row["snapshot_json"], {}),
-    }
-
-
-def get_latest_usable_shot_plan_row(db: Any, sku_id: int) -> Any:
-    return db.execute(
-        """
-        SELECT *
-        FROM shot_plans
-        WHERE sku_id = ? AND planner_provider = 'gemini' AND status NOT IN ('FAILED', 'PLANNING')
-        ORDER BY updated_at DESC, id DESC
-        LIMIT 1
-        """,
-        (sku_id,),
-    ).fetchone()
-
-
-def sync_shot_plan_shots(db: Any, shot_plan_id: int, plan: dict[str, Any], timestamp: str) -> None:
-    db.execute("DELETE FROM shot_plan_shots WHERE shot_plan_id = ?", (shot_plan_id,))
-    for raw_shot in plan.get("shots", []):
-        shot = dict(raw_shot)
-        shot_index = int(shot.get("shotIndex", 1))
-        slot = next((item for item in SHOT_SLOTS if item["shotIndex"] == shot_index), SHOT_SLOTS[0])
-        db.execute(
-            """
-            INSERT INTO shot_plan_shots
-              (shot_plan_id, shot_index, english_name, title, task, scene, crop_range,
-               model_scale, head_treatment, body_position, pose_tone, image_purpose,
-               shot_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                shot_plan_id,
-                shot_index,
-                str(shot.get("englishName") or slot["englishName"]),
-                str(shot.get("title") or slot["title"]),
-                str(shot.get("task") or slot["task"]),
-                str(shot.get("scene") or ""),
-                str(shot.get("cropRange") or ""),
-                str(shot.get("modelScale") or ""),
-                str(shot.get("headTreatment") or ""),
-                str(shot.get("bodyPosition") or ""),
-                str(shot.get("poseTone") or ""),
-                str(shot.get("imagePurpose") or ""),
-                dumps(shot),
-                timestamp,
-                timestamp,
-            ),
-        )
-
-
-def backfill_shot_plan_script_data() -> None:
-    timestamp = now_iso()
-    with get_db() as db:
-        rows = db.execute(
-            """
-            SELECT sp.*, gs.sku
-            FROM shot_plans sp
-            JOIN garment_skus gs ON gs.id = sp.sku_id
-            WHERE sp.planner_provider = 'gemini'
-              AND sp.status NOT IN ('FAILED', 'PLANNING')
-              AND (
-                sp.category IS NULL OR sp.sales_info IS NULL OR sp.lily_tone IS NULL
-                OR sp.styling IS NULL OR sp.background IS NULL
-                OR NOT EXISTS (
-                  SELECT 1 FROM shot_plan_shots s WHERE s.shot_plan_id = sp.id
-                )
-              )
-            ORDER BY sp.id
-            """
-        ).fetchall()
-        for row in rows:
-            raw_plan = loads(row["plan_json"], {})
-            if not is_backfillable_shot_plan(raw_plan):
-                continue
-            plan = normalize_planner_plan(raw_plan, row["sku"])
-            generation_plan = plan_generation(plan)
-            db.execute(
-                """
-                UPDATE shot_plans
-                SET plan_json = ?, category = ?, sales_info = ?,
-                    lily_tone = ?, styling = ?, background = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    dumps(plan),
-                    plan.get("category") or plan.get("garment", {}).get("category"),
-                    generation_plan.get("salesInfo"),
-                    generation_plan.get("lilyTone"),
-                    generation_plan.get("styling"),
-                    generation_plan.get("background"),
-                    row["updated_at"] or timestamp,
-                    row["id"],
-                ),
-            )
-            sync_shot_plan_shots(db, row["id"], plan, row["updated_at"] or timestamp)
-
-
-def is_backfillable_shot_plan(plan: Any) -> bool:
-    shots = plan.get("shots") if isinstance(plan, dict) else None
-    return isinstance(shots, list) and len(shots) > 0 and all(isinstance(shot, dict) for shot in shots)
-
-
-def build_image_inputs(sku_row: Any, model_row: Any, model_profile: dict[str, Any], shot: dict[str, Any]) -> list[dict[str, Any]]:
-    inputs: list[dict[str, Any]] = []
-    with get_db() as db:
-        image_rows = db.execute(
-            "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY role = 'main' DESC, sort_order, id LIMIT 4",
-            (sku_row["id"],),
-        ).fetchall()
-    for row in image_rows:
-        object_key = row["storage_path"]
-        inputs.append(
-            {
-                "role": f"garment_{row['role']}",
-                "filename": row["filename"],
-                "objectKey": object_key,
-                "url": presigned_get_url(object_key),
-            }
-        )
-
-    head_reference = infer_head_reference_key(str(shot.get("bodyPosition") or "正面"))
-    head_references = model_profile.get("headReferences", {}) if isinstance(model_profile.get("headReferences"), dict) else {}
-    head_filename = head_references.get(head_reference) or f"{head_reference}.png"
-    head_key = join_key(model_row["asset_dir"], str(head_filename))
-    if object_exists(head_key):
-        inputs.append(
-            {
-                "role": "model_head",
-                "angle": head_reference,
-                "objectKey": head_key,
-                "url": presigned_get_url(head_key),
-            }
-        )
-    return inputs
-
-
-MAX_PREVIEW_REFERENCE_IMAGES = 10
-MAX_PREVIEW_MODEL_IMAGES = 4
-MAX_FINAL_REFERENCE_IMAGES = 10
-MAX_FINAL_MODEL_IMAGES = 4
-
-
-def build_final_image_inputs(
-    sku_row: Any,
-    model_row: Any,
-    model_profile: dict[str, Any],
-    preview_inputs: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    inputs: list[dict[str, Any]] = []
-    for item in preview_inputs[:1]:
-        inputs.append({**item, "role": "preview_grid"})
-
-    remaining = MAX_FINAL_REFERENCE_IMAGES - len(inputs)
-    if remaining <= 0:
-        return inputs
-
-    model_limit = min(MAX_FINAL_MODEL_IMAGES, remaining)
-    model_inputs = build_model_identity_inputs(model_row, model_profile, model_limit)
-    inputs.extend(model_inputs)
-
-    remaining = MAX_FINAL_REFERENCE_IMAGES - len(inputs)
-    if remaining <= 0:
-        return inputs
-    inputs.extend(build_garment_reference_inputs(sku_row, remaining))
-    return inputs
-
-
-def build_preview_image_inputs(sku_row: Any, model_row: Any, model_profile: dict[str, Any]) -> list[dict[str, Any]]:
-    inputs: list[dict[str, Any]] = []
-    inputs.extend(build_model_identity_inputs(model_row, model_profile, MAX_PREVIEW_MODEL_IMAGES))
-
-    garment_limit = max(MAX_PREVIEW_REFERENCE_IMAGES - len(inputs), 0)
-    if garment_limit <= 0:
-        return inputs
-    inputs.extend(build_garment_reference_inputs(sku_row, garment_limit))
-    return inputs
-
-
-def build_model_identity_inputs(model_row: Any, model_profile: dict[str, Any], limit: int) -> list[dict[str, Any]]:
-    inputs: list[dict[str, Any]] = []
-    head_references = model_profile.get("headReferences", {}) if isinstance(model_profile.get("headReferences"), dict) else {}
-    ordered_keys = get_ordered_head_reference_keys(model_profile, head_references)
-    for key in ordered_keys:
-        if len(inputs) >= limit:
-            break
-        filename = str(head_references.get(key) or "")
-        if not filename:
-            continue
-        object_key = join_key(model_row["asset_dir"], filename)
-        if object_exists(object_key):
-            inputs.append(
-                {
-                    "role": "model_identity",
-                    "angle": key,
-                    "filename": filename,
-                    "objectKey": object_key,
-                    "url": presigned_get_url(object_key),
-                }
-            )
-    return inputs
-
-
-def build_garment_reference_inputs(sku_row: Any, limit: int) -> list[dict[str, Any]]:
-    inputs: list[dict[str, Any]] = []
-    with get_db() as db:
-        image_rows = db.execute(
-            "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY sort_order, id LIMIT ?",
-            (sku_row["id"], limit),
-        ).fetchall()
-    for row in image_rows:
-        object_key = row["storage_path"]
-        inputs.append(
-            {
-                "role": "garment_reference",
-                "filename": row["filename"],
-                "objectKey": object_key,
-                "url": presigned_get_url(object_key),
-            }
-        )
-    return inputs
-
-
-def get_ordered_head_reference_keys(model_profile: dict[str, Any], head_references: dict[str, Any]) -> list[str]:
-    ordered_keys: list[str] = []
-    entries = model_profile.get("headReferenceEntries")
-    if isinstance(entries, list):
-        for entry in entries:
-            if isinstance(entry, dict):
-                key = str(entry.get("id") or entry.get("angle") or "").strip()
-                if key and key in head_references and key not in ordered_keys:
-                    ordered_keys.append(key)
-    order = model_profile.get("headReferenceOrder")
-    if isinstance(order, list):
-        for key in order:
-            key = str(key).strip()
-            if key and key in head_references and key not in ordered_keys:
-                ordered_keys.append(key)
-    for key in head_references:
-        if key not in ordered_keys:
-            ordered_keys.append(key)
-    return ordered_keys
-
-
-def infer_head_reference_key(body_position: str) -> str:
-    if "背" in body_position:
-        return "back"
-    if "右" in body_position:
-        return "right90"
-    if "侧" in body_position or "3/4" in body_position or "斜" in body_position:
-        return "left45"
-    return "front"
-
-
-def get_sku_detail_by_id(sku_id: int, image_limit: int = 24, image_offset: int = 0) -> dict[str, Any]:
-    with get_db() as db:
-        row = db.execute(
-            """
-            SELECT gs.*,
-              (SELECT COUNT(*) FROM garment_images gi WHERE gi.sku_id = gs.id) AS image_count,
-              (SELECT COUNT(*) FROM shot_plans sp WHERE sp.sku_id = gs.id) AS shot_plan_count,
-              (SELECT COUNT(*) FROM generation_runs gr WHERE gr.sku_id = gs.id) AS generation_run_count,
-              (SELECT COUNT(*) FROM generation_runs gr WHERE gr.sku_id = gs.id AND gr.archived_at IS NOT NULL) AS archived_generation_run_count
-            FROM garment_skus gs
-            WHERE gs.id = ?
-            """,
-            (sku_id,),
-        ).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="货号不存在")
-        images = db.execute(
-            "SELECT * FROM garment_images WHERE sku_id = ? ORDER BY sort_order, id LIMIT ? OFFSET ?",
-            (sku_id, image_limit + 1, image_offset),
-        ).fetchall()
-        visible_images = images[:image_limit]
-        item = serialize_sku(row)
-        item["images"] = [serialize_image(image) for image in visible_images]
-        item["imagePage"] = {
-            "limit": image_limit,
-            "offset": image_offset,
-            "nextOffset": image_offset + image_limit if len(images) > image_limit else None,
-            "hasMore": len(images) > image_limit,
-        }
-        return item
-
-
-def sku_delete_impact(db: Any, sku_id: int) -> dict[str, int]:
-    row = db.execute(
-        """
-        SELECT
-          (SELECT COUNT(*) FROM garment_images WHERE sku_id = ?) AS image_count,
-          (SELECT COUNT(*) FROM shot_plans WHERE sku_id = ?) AS shot_plan_count,
-          (SELECT COUNT(*) FROM generation_runs WHERE sku_id = ?) AS generation_run_count,
-          (SELECT COUNT(*) FROM generation_runs WHERE sku_id = ? AND archived_at IS NOT NULL) AS archived_generation_run_count,
-          (SELECT COUNT(*)
-             FROM generation_images gi
-             JOIN generation_runs gr ON gr.id = gi.run_id
-            WHERE gr.sku_id = ?) AS generation_image_count
-        """,
-        (sku_id, sku_id, sku_id, sku_id, sku_id),
-    ).fetchone()
-    return {
-        "imageCount": int(row["image_count"] or 0),
-        "shotPlanCount": int(row["shot_plan_count"] or 0),
-        "generationRunCount": int(row["generation_run_count"] or 0),
-        "archivedGenerationRunCount": int(row["archived_generation_run_count"] or 0),
-        "generationImageCount": int(row["generation_image_count"] or 0),
-    }
 
 
 def get_current_brand_info() -> dict[str, Any] | None:
@@ -5737,30 +3629,6 @@ def get_model_profile_by_id(model_profile_id: int) -> dict[str, Any]:
         if not row:
             raise HTTPException(status_code=404, detail="数字模特不存在")
         return serialize_model(row)
-
-
-def get_generation_run_by_id(run_id: int, include_debug: bool = False, status_only: bool = False) -> dict[str, Any]:
-    with get_db() as db:
-        row = db.execute(
-            """
-            SELECT gr.*, gs.sku, gs.title AS sku_title
-            FROM generation_runs gr
-            JOIN garment_skus gs ON gs.id = gr.sku_id
-            WHERE gr.id = ?
-            """,
-            (run_id,),
-        ).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="生成记录不存在")
-        return serialize_generation_run(row, include_images=True, include_debug=include_debug, status_only=status_only)
-
-
-def get_generation_image_by_id(image_id: int) -> dict[str, Any]:
-    with get_db() as db:
-        row = db.execute("SELECT * FROM generation_images WHERE id = ?", (image_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="生成图片不存在")
-        return serialize_generation_image(row)
 
 
 def resolve_model_profile(db: Any, model_profile_id: int | None) -> Any:
@@ -6753,7 +4621,49 @@ def compress_tags_for_styling(row: Any) -> dict[str, Any]:
 
 
 def library_tag_card_for_prompt(card: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in card.items() if key != "cover_asset"}
+    return styling_library_tag_card_for_prompt(card, include_internal=True)
+
+
+def styling_library_tag_card_for_prompt(card: dict[str, Any], include_internal: bool = False) -> dict[str, Any]:
+    tag_facts = first_dict(card.get("tag_facts"), card.get("tagFacts"))
+    ai_tags = first_dict(tag_facts.get("ai_tags"), tag_facts.get("aiTags"), card.get("ai_tags"), card.get("aiTags"))
+    manual = first_dict(card.get("manual"), card.get("manualTags"), tag_facts.get("manual_tags"), tag_facts.get("manualTags"))
+    tag_meta = first_dict(tag_facts.get("tag_meta"), tag_facts.get("tagMeta"), card.get("tagMeta"), card.get("tag_meta"))
+
+    result: dict[str, Any] = {
+        "code": str(card.get("code") or ""),
+        "ai_tags": ai_tags,
+        "manual_flags": compact_manual_prompt_flags(manual),
+        "review": compact_tag_review_meta(tag_meta),
+    }
+    if include_internal and card.get("id") is not None:
+        result["id"] = card.get("id")
+    return {key: value for key, value in result.items() if value not in (None, "", [], {})}
+
+
+def first_dict(*values: Any) -> dict[str, Any]:
+    for value in values:
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def compact_manual_prompt_flags(manual: dict[str, Any]) -> dict[str, Any]:
+    allowed = ("do_not_use_for_styling", "preferred_pairing", "avoid_pairing", "wearing_note", "styling_note")
+    return {key: manual[key] for key in allowed if key in manual and manual[key] not in (None, "", [], {})}
+
+
+def compact_tag_review_meta(tag_meta: dict[str, Any]) -> dict[str, Any]:
+    confidence = tag_meta.get("confidence", tag_meta.get("overall_confidence"))
+    reasons = ensure_string_list(tag_meta.get("review_reasons") or tag_meta.get("reasons"))[:4]
+    result: dict[str, Any] = {}
+    if confidence is not None:
+        result["confidence"] = clamp_float(confidence, 0, 1, 0)
+    if reasons:
+        result["reasons"] = reasons
+    if tag_meta.get("needs_review") is not None:
+        result["needs_review"] = bool(tag_meta.get("needs_review"))
+    return result
 
 
 def build_phase_one_visual_caption(effective: dict[str, Any]) -> str:
@@ -7085,7 +4995,6 @@ def build_ai_stylist_context(input_version_id: int) -> tuple[Any, dict[str, Any]
     request_snapshot = build_ai_stylist_request_snapshot(input_row, candidate_snapshot)
     request_snapshot = attach_ai_stylist_prompt_snapshot(request_snapshot, candidate_snapshot)
     candidate_snapshot["ai_styling_prompt_config_key"] = request_snapshot["promptConfigKey"]
-    candidate_snapshot["ai_styling_prompt"] = request_snapshot["prompt"]
     request_snapshot["candidate_retrieval"] = candidate_snapshot
     return input_row, candidate_snapshot, request_snapshot
 
@@ -7136,18 +5045,15 @@ def candidate_retrieval_for_prompt(candidate_snapshot: dict[str, Any]) -> list[d
 
 
 def styling_garment_card_for_prompt(card: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "code": str(card.get("code") or ""),
-        "manual": card.get("manual") or {},
-        "tag_facts": card.get("tag_facts") or {},
-    }
+    source = styling_library_tag_card_for_prompt(card) if "tag_facts" in card else card
+    return {key: value for key, value in source.items() if key != "id" and value not in (None, "", [], {})}
 
 
-def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict[str, Any]], ai_policy_config: dict[str, Any] | None = None) -> dict[str, Any]:
+def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict[str, Any]]) -> dict[str, Any]:
     library_tag_cards = [library_tag_card_for_prompt(card) for card in material_cards]
     return {
-        "schema_version": "candidate-retrieval-v2",
-        "strategy": "prompt_config_raw_tag_facts_v1",
+        "schema_version": "candidate-retrieval-v3",
+        "strategy": "direct_ai_tags_json_v1",
         "input_version_id": int(input_row["id"]),
         "library_scope": {
             "status": "READY",
@@ -7182,33 +5088,18 @@ def build_library_context_report(material_cards: list[dict[str, Any]]) -> dict[s
     }
 
 
-def build_accessory_boundary(ai_policy_config: dict[str, Any] | None = None) -> dict[str, Any]:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    accessory = ai_policy_config.get("accessoryPolicy") if isinstance(ai_policy_config.get("accessoryPolicy"), dict) else {}
+def build_accessory_boundary() -> dict[str, Any]:
     return {
-        "allow_empty": bool(accessory.get("allowEmpty", True)),
-        "default": ensure_string_list(accessory.get("default"))[:8],
-        "avoid_default": ensure_string_list(accessory.get("avoidDefault"))[:12],
-        "bag_rule": str(accessory.get("bagRule") or ""),
-        "jewelry_rule": str(accessory.get("jewelryRule") or ""),
+        "allow_empty": True,
+        "default": ["低存在感简洁鞋，可省略包和首饰"],
+        "avoid_default": ["夸张首饰", "传统公文包模板", "遮挡主推款卖点的配饰"],
+        "bag_rule": "包可省略；如出现，保持低存在感且不得遮挡主推款。",
+        "jewelry_rule": "首饰可省略；如出现，只作轻微风格辅助，不做特写。",
     }
 
 
-def build_phase_one_brand_style_evidence(ai_policy_config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    ai_policy_config = normalize_ai_policy_config_payload(ai_policy_config or default_ai_policy_config())
-    brand = ai_policy_config.get("brandStylePolicy") if isinstance(ai_policy_config.get("brandStylePolicy"), dict) else {}
-    evidence: list[dict[str, Any]] = []
-    for item in brand.get("evidence", []):
-        if not isinstance(item, dict):
-            continue
-        evidence.append({
-            "id": str(item.get("id") or "")[:80],
-            "source_type": str(item.get("source_type") or "manual_policy")[:80],
-            "visual_caption": str(item.get("visual_caption") or "")[:240],
-            "brand_style_tags": ensure_string_list(item.get("brand_style_tags"))[:12],
-            "accessory_boundary": str(item.get("accessory_boundary") or "")[:240],
-        })
-    return evidence[:10]
+def build_phase_one_brand_style_evidence() -> list[dict[str, Any]]:
+    return []
 
 
 def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -7581,19 +5472,70 @@ def strip_internal_prompt_fields(value: Any) -> Any:
 
 
 def styling_result_for_prompt(styling_plan: dict[str, Any], selected_material_snapshot: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    return strip_internal_prompt_fields(styling_plan if isinstance(styling_plan, dict) else {})
-
-
-def compress_selected_material_for_prompt(item: dict[str, Any]) -> dict[str, Any]:
+    plan = styling_plan if isinstance(styling_plan, dict) else {}
+    selected = selected_outfit_from_plan(plan)
+    selected_materials = selected_material_snapshot or []
+    selected_refs = selected.get("selected_materials") if isinstance(selected.get("selected_materials"), list) else []
     return {
-        "code": item.get("code"),
-        "manual": item.get("manual") or {},
-        "tag_facts": item.get("tagFacts") or item.get("tag_facts") or {},
+        "schema_version": "styling-plan-director-context-v1",
+        "hero_understanding": strip_internal_prompt_fields(plan.get("hero_understanding") if isinstance(plan.get("hero_understanding"), dict) else {}),
+        "styling_intents": strip_internal_prompt_fields(plan.get("styling_intents") if isinstance(plan.get("styling_intents"), list) else []),
+        "selected_outfit": strip_internal_prompt_fields({
+            "outfit_key": selected.get("outfit_key") or selected.get("id") or plan.get("selected_outfit_key"),
+            "mode": selected.get("mode"),
+            "title": selected.get("title"),
+            "selected_material_codes": selected.get("selected_material_codes") or plan.get("selected_material_codes") or [],
+            "selected_materials": selected_refs,
+            "generated_accessories": selected.get("generated_accessories") or [],
+            "wearing_notes": selected.get("wearing_notes") or "",
+            "hero_focus": selected.get("hero_focus") or [],
+            "aesthetic_diagnosis": selected.get("aesthetic_diagnosis") or {},
+            "scores": selected.get("scores") or {},
+            "risk_notes": selected.get("risk_notes") or [],
+        }),
+        "selected_material_tag_cards": [compress_selected_material_for_prompt(item) for item in selected_materials[:4] if isinstance(item, dict)],
+        "reason_summary": str(plan.get("reason_summary") or "")[:180],
+        "quality_signals": strip_internal_prompt_fields(plan.get("quality_signals") if isinstance(plan.get("quality_signals"), list) else []),
+        "warnings": ensure_string_list(plan.get("warnings"))[:6],
     }
 
 
+def compress_selected_material_for_prompt(item: dict[str, Any]) -> dict[str, Any]:
+    return styling_library_tag_card_for_prompt(item)
+
+
 def shoot_script_result_for_prompt(shoot_script: dict[str, Any]) -> dict[str, Any]:
-    return strip_internal_prompt_fields(shoot_script if isinstance(shoot_script, dict) else {})
+    script = shoot_script if isinstance(shoot_script, dict) else {}
+    shots = script.get("shots") if isinstance(script.get("shots"), list) else []
+    return {
+        "schema_version": "shoot-script-storyboard-context-v1",
+        "global_directing": strip_internal_prompt_fields(script.get("global_directing") if isinstance(script.get("global_directing"), dict) else {}),
+        "styling_risks": strip_internal_prompt_fields(script.get("styling_risks") if isinstance(script.get("styling_risks"), list) else []),
+        "resolved_accessories": strip_internal_prompt_fields(script.get("resolved_accessories") if isinstance(script.get("resolved_accessories"), list) else []),
+        "shots": [
+            strip_internal_prompt_fields({
+                "shot_index": shot.get("shot_index"),
+                "shot_role": shot.get("shot_role"),
+                "shot_role_label": shot.get("shot_role_label"),
+                "framing": shot.get("framing"),
+                "crop_range": shot.get("crop_range"),
+                "model_scale": shot.get("model_scale"),
+                "camera_angle": shot.get("camera_angle"),
+                "body_position": shot.get("body_position"),
+                "pose": shot.get("pose"),
+                "movement": shot.get("movement"),
+                "main_focus": shot.get("main_focus"),
+                "visible_garments": shot.get("visible_garments"),
+                "forbidden_occlusion_zones": shot.get("forbidden_occlusion_zones"),
+                "composition_notes": shot.get("composition_notes"),
+                "accessory_instructions": shot.get("accessory_instructions"),
+                "negative_constraints": shot.get("negative_constraints"),
+            })
+            for shot in shots[:6]
+            if isinstance(shot, dict)
+        ],
+        "user_visible_summary": strip_internal_prompt_fields(script.get("user_visible_summary") if isinstance(script.get("user_visible_summary"), dict) else {}),
+    }
 
 
 def current_shot_context_for_prompt(shot_index: int, shot_plan: dict[str, Any], styling_plan: dict[str, Any], shoot_script: dict[str, Any]) -> dict[str, Any]:
@@ -7607,8 +5549,12 @@ def current_shot_context_for_prompt(shot_index: int, shot_plan: dict[str, Any], 
         if not applies or shot_index in [int(value) for value in applies if str(value).isdigit()]:
             accessories.append(strip_internal_prompt_fields(item))
     return {
+        "schema_version": "final-image-shot-context-v1",
         "preview_grid_cell": shot_index,
-        "styling": styling_result_for_prompt(styling_plan),
+        "styling": {
+            "hero_understanding": styling_result_for_prompt(styling_plan).get("hero_understanding") or {},
+            "selected_outfit": styling_result_for_prompt(styling_plan).get("selected_outfit") or {},
+        },
         "global_directing": strip_internal_prompt_fields(script.get("global_directing") if isinstance(script.get("global_directing"), dict) else {}),
         "current_shot": shot,
         "resolved_accessories_for_this_shot": accessories,
@@ -7734,518 +5680,6 @@ def ensure_generation_shot_plans(task_id: int, styling_id: int) -> list[dict[str
         selected_snapshot = loads(styling["selected_material_snapshot_json"], [])
         styling_plan = loads(styling["styling_plan_json"], {}) if "styling_plan_json" in styling.keys() else {}
     return []
-
-
-def default_ai_policy_config() -> dict[str, Any]:
-    return {
-        "schemaVersion": "ai-policy-config-v1",
-        "candidateFunnel": {
-            "candidateLimit": 20,
-            "candidateImageLimit": 20,
-            "hardExcludedCategories": ["未知", "不支持入库配饰"],
-            "categoryCaps": {"default": 8},
-            "categoryPolicies": [
-                {
-                    "heroCategory": "连衣裙",
-                    "excludedCategories": ["裤装", "半身裙", "短裤", "连衣裙", "连体类", "套装"],
-                    "categoryScoreAdjustments": {"上装": 0.16, "针织类": 0.12, "外套类": -0.45},
-                    "draftCategoryPriority": ["上装", "针织类", "外套类"],
-                    "draftModeByCandidateCategory": {"上装": "light_overlay_or_inner_layer", "针织类": "light_soft_layer", "外套类": "review_required_open_layer"},
-                    "singlePieceMode": "hero_first_single_piece",
-                    "singlePieceReason": "连衣裙本身是完整造型；除非候选轻量且不遮挡腰线、领口和裙摆，否则优先单穿。",
-                    "supplyGapCategoryGroups": [
-                        {"categories": ["上装", "针织类"], "minimum": 1, "note": "连衣裙主推缺少轻薄针织/上装类造型辅助候选，可优先单穿。"}
-                    ],
-                },
-                {
-                    "heroCategory": "裤装",
-                    "excludedCategories": ["裤装", "半身裙", "短裤"],
-                    "categoryScoreAdjustments": {"上装": 0.18, "针织类": 0.18, "外套类": -0.12},
-                    "draftCategoryPriority": ["上装", "针织类", "外套类"],
-                    "draftModeByCandidateCategory": {"上装": "waist_visible_light_top", "针织类": "waist_visible_light_top", "外套类": "open_light_layering"},
-                    "supplyGapCategoryGroups": [
-                        {"categories": ["上装", "针织类"], "minimum": 1, "note": "裤装/下装主推缺少轻量上装或针织候选。"}
-                    ],
-                },
-                {
-                    "heroCategory": "上装",
-                    "categoryScoreAdjustments": {"裤装": 0.18, "半身裙": 0.18, "短裤": 0.12, "外套类": -0.08, "上装": -0.6, "针织类": -0.45},
-                    "draftCategoryPriority": ["裤装", "半身裙", "短裤", "外套类"],
-                    "draftModeByCandidateCategory": {"裤装": "simple_bottom_pairing", "半身裙": "simple_bottom_pairing", "短裤": "simple_bottom_pairing", "外套类": "review_required_open_layer"},
-                    "supplyGapCategoryGroups": [
-                        {"categories": ["裤装", "半身裙", "短裤"], "minimum": 1, "note": "上衣主推缺少简洁下装候选。"}
-                    ],
-                },
-                {
-                    "heroCategory": "针织类",
-                    "categoryScoreAdjustments": {"裤装": 0.18, "半身裙": 0.18, "短裤": 0.12, "外套类": -0.08, "上装": -0.45, "针织类": -0.6},
-                    "draftCategoryPriority": ["裤装", "半身裙", "短裤", "外套类"],
-                    "draftModeByCandidateCategory": {"裤装": "simple_bottom_pairing", "半身裙": "simple_bottom_pairing", "短裤": "simple_bottom_pairing", "外套类": "review_required_open_layer"},
-                    "supplyGapCategoryGroups": [
-                        {"categories": ["裤装", "半身裙", "短裤"], "minimum": 1, "note": "针织主推缺少简洁下装候选。"}
-                    ],
-                },
-                {
-                    "heroCategory": "外套类",
-                    "categoryScoreAdjustments": {"上装": 0.18, "针织类": 0.12, "裤装": 0.1, "半身裙": 0.1, "连衣裙": -0.08},
-                    "draftCategoryPriority": ["上装", "针织类", "裤装", "半身裙", "连衣裙"],
-                    "draftModeByCandidateCategory": {"上装": "outerwear_hero_outfit", "针织类": "outerwear_hero_outfit", "裤装": "outerwear_hero_outfit", "半身裙": "outerwear_hero_outfit", "连衣裙": "outerwear_hero_outfit"},
-                    "supplyGapCategoryGroups": [
-                        {"categories": ["上装", "针织类", "裤装", "半身裙", "短裤"], "minimum": 2, "note": "外套主推缺少内搭或下装候选。"}
-                    ],
-                },
-            ],
-            "riskAdjustments": {
-                "coverageMayCoverHero": -0.35,
-                "coverageLikelyCoverHero": -0.55,
-                "styleRisk": -0.16,
-                "longTopMayCoverWaist": -0.25,
-                "waistFocusShortUpper": 0.12,
-                "darkUpperAgainstLightHero": -0.12,
-                "lightUpperForBottomHero": 0.1,
-                "lightMaterialForBottomHero": 0.1,
-                "heavyMaterialForBottomHero": -0.18,
-                "seasonMismatchForLightBottom": -0.12,
-                "structuredOuterwear": 0.08,
-            },
-            "coverageRiskAdjustments": {"可能遮挡主推款": -0.35, "较可能遮挡主推款": -0.55},
-            "noStyleRiskValues": ["无明显风险", "无", "none"],
-            "waistFocusCategoryAdjustments": {"外套类": -0.2},
-            "longTopLengthValues": ["长上衣", "长款", "过臀"],
-            "waistFocusShortUpperCategories": ["上装", "针织类"],
-            "shortUpperLengthValues": ["短上衣", "及胯上衣", "短款"],
-            "darkAgainstLightHeroCategories": ["上装", "针织类", "外套类"],
-            "lightPairingByHeroCategory": {"裤装": ["上装", "针织类", "外套类"]},
-            "structuredLayerBonusCategories": ["外套类"],
-            "structuredLayerBonusSilhouettes": ["收腰", "收腰比例", "X型"],
-            "semanticSets": {
-                "darkColors": ["黑色", "棕色", "藏青色", "灰色"],
-                "lightColors": ["白色", "象牙白", "米色"],
-                "lightMaterials": ["亚麻感", "棉感", "真丝感", "雪纺"],
-                "heavyMaterials": ["羊毛感", "粗花呢/香风感", "皮革感"],
-                "springSummerSeasons": ["春季", "夏季"],
-                "waistFocusDetails": ["腰带", "褶裥", "口袋"],
-                "waistFocusSilhouettes": ["阔腿", "收腰", "收腰比例", "微喇", "喇叭"],
-            },
-            "heroProfileSellingPointLabels": {
-                "腰带": "腰带/扣件细节",
-                "褶裥": "褶位结构",
-                "褶皱": "褶位结构",
-                "口袋": "口袋结构",
-                "纽扣": "纽扣/门襟",
-                "阔腿": "阔腿裤型",
-                "收腰": "收腰比例",
-                "V领": "领口线条",
-                "方领": "领口线条",
-                "开衩": "开衩/裙摆动态",
-            },
-            "defaultDraftMode": "office_outfit",
-        },
-        "heroPolicy": {
-            "taskNameCategoryKeywords": {
-                "裤装": ["裤", "裙裤", "阔腿", "直筒裤", "pants", "trouser"],
-                "半身裙": ["半裙", "半身裙", "skirt"],
-                "连衣裙": ["连衣裙", "裙装", "dress"],
-                "上装": ["衬衫", "上衣", "t恤", "T恤", "shirt", "blouse", "top"],
-                "针织类": ["针织", "knit"],
-            },
-            "taskNameWaistFocusKeywords": ["高腰", "腰头", "裤腰", "腰带", "褶裥", "阔腿"],
-            "taskNameLightColorKeywords": ["白", "米白", "象牙", "浅", "ivory", "white", "beige"],
-            "taskNameSellingPointRules": [
-                {"keywords": ["高腰", "腰头", "裤腰", "腰带", "褶裥", "阔腿"], "labels": ["腰线", "腰头细节"]},
-                {"keywords": ["阔腿", "垂坠"], "labels": ["裤腿垂坠"]},
-            ],
-            "visibilityRisksByCategory": {
-                "裤装": ["腰头或门襟遮挡", "裤褶和口袋被手包遮挡", "上衣抢走下装视觉中心"],
-                "半身裙": ["腰线遮挡", "裙摆比例被外套压住", "上衣抢走裙装视觉中心"],
-                "连衣裙": ["外套遮挡腰线", "包袋遮挡裙摆或腰部结构", "鞋包过重破坏连衣裙完整感"],
-                "上装": ["外套遮挡领口/门襟/下摆", "下装或腰带抢走上衣主角", "项链遮挡领口织法"],
-                "针织类": ["外套遮挡领口/门襟/下摆", "下装或腰带抢走上衣主角", "项链遮挡领口织法"],
-                "外套类": ["内搭抢走领口和门襟", "下装体量压制外套", "配饰遮挡翻领或口袋"],
-                "default": ["配角抢走视觉中心", "主推款关键细节被遮挡"],
-            },
-            "shotRequirementsByCategory": {
-                "裤装": ["全身/近全身", "腰脚下装图", "腰膝/腰胯近景", "侧身/3/4 动态", "正面颜色/版型图"],
-                "半身裙": ["全身比例", "腰膝裙型", "腰胯细节", "侧身/3/4 动态", "标准正面颜色图"],
-                "上装": ["全身比例", "臀上/大腿中部核心展示", "胸腰近景", "侧身/3/4 补充", "标准正面颜色图"],
-                "针织类": ["全身比例", "臀上/大腿中部核心展示", "胸腰近景", "侧身/3/4 补充", "标准正面颜色图"],
-                "外套类": ["全身外套轮廓", "臀上/七分身门襟展示", "胸腰近景", "侧身/背面补充", "标准正面颜色图"],
-                "连衣裙": ["全身裙型", "3/4 腰线裙摆", "胸腰或腰膝细节", "侧身/背面动态", "标准正面颜色图"],
-                "default": ["完整比例", "核心结构", "关键细节", "侧身补充", "标准正面图"],
-            },
-        },
-        "qualitySignalPolicy": {
-            "principle": "商品可见性只是底线；审美、Lily 品牌感和商品主角表达都要形成质量信号，供系统改选和客户审核闭环使用。",
-            "flagIf": ["沉闷", "笨重", "廉价通勤", "比例失衡", "色块压迫", "模板化搭配", "配角成为视觉故事"],
-            "scoreThresholds": {
-                "aesthetic_score": 0.65,
-                "brand_fit_score": 0.65,
-                "hero_visibility_score": 0.55,
-                "commercial_readiness_score": 0.6,
-            },
-            "fullScoreThreshold": 0.98,
-            "requiredDiagnosisKeys": [
-                "color_weight",
-                "silhouette_balance",
-                "waistline_proportion",
-                "season_material_fit",
-                "template_risk",
-                "wearing_method_validity",
-                "tuck_quality",
-                "brand_read",
-            ],
-            "forbiddenAccessoryKeywords": ["公文包", "商务手提", "手提公文", "大体量托特", "大号托特", "briefcase", "document bag", "large tote"],
-            "layeringExplanationKeywords": ["肩搭", "手持", "不同时穿", "备用", "其中一件", "不穿上身", "仅作为道具"],
-            "halfTuckKeywords": ["半塞", "轻微前塞", "前片塞", "前摆塞", "前侧塞", "half-tuck", "halftuck", "front-tuck", "fronttuck"],
-            "fullTuckKeywords": ["全塞", "完全塞", "全部塞", "塞入裤腰", "塞进裤腰", "塞到裤腰", "塞在裤腰", "塞腰", "收进裤腰", "收入裤腰", "扎进裤腰", "扎入裤腰", "掖进裤腰", "掖入裤腰", "束进裤腰", "束入裤腰", "收进腰头", "扎进腰头", "掖进腰头", "束进腰头", "tucked-in", "tuckedin", "tuckinto", "tuckedinto", "fullytucked", "fulltuck"],
-            "genericTuckKeywords": ["tuck", "塞"],
-            "waistKeywords": ["裤腰", "腰头", "waist"],
-            "fullTuckMethodValues": ["塞腰"],
-            "halfTuckMethodValues": ["半塞", "轻微前塞"],
-            "tuckCheckedHeroCategories": ["上装", "针织类", "外套类"],
-            "tuckCheckedGarmentCategories": ["上装", "针织类", "外套类"],
-            "structuredLayerCategories": ["外套类"],
-            "structuredLayerSubCategories": ["针织开衫", "西装", "夹克", "大衣", "风衣"],
-            "structuredLayerDetails": ["纽扣", "纽扣细节", "不对称", "不对称设计"],
-            "structuredLayerMaterials": ["针织", "羊毛感", "粗花呢/香风感"],
-            "highWaistHeroKeywords": ["高腰", "裤", "阔腿", "腰头", "裤腰", "褶裥", "垂坠"],
-            "highWaistDarkStackCategories": ["上装", "外套类", "套装", "其他服装"],
-            "signals": {
-                "unexplainedOuterwearConflict": {
-                    "enabled": True,
-                    "conflictCategories": ["外套类"],
-                    "message": "多个外套候选缺少真实穿着解释，建议客户审核层次关系。",
-                },
-                "lowCriticScores": {
-                    "enabled": True,
-                    "message": "AI Stylist 自评分偏低。",
-                },
-                "suspiciousFullScores": {
-                    "enabled": True,
-                    "message": "AI Stylist 给出接近满分但缺少完整诊断和风险说明。",
-                },
-                "missingCriticDiagnosis": {
-                    "enabled": True,
-                    "message": "AI Stylist 缺少部分审美诊断。",
-                },
-                "templateAccessoryRisk": {
-                    "enabled": True,
-                    "message": "方案使用了不符合 Lily 边界的模板化配饰。",
-                },
-                "unsupportedTuckMethod": {
-                    "enabled": True,
-                    "message": "方案使用了搭配服饰或主推款不支持的塞腰/半塞穿法，建议审核上衣下摆处理。",
-                },
-                "highWaistDarkOuterwearStack": {
-                    "enabled": True,
-                    "message": "高腰裤搭配深色厚重外套存在压低比例和色块过重风险。",
-                },
-                "dressOuterwearLayeringRisk": {
-                    "enabled": True,
-                    "heroCategory": "连衣裙",
-                    "candidateCategory": "外套类",
-                    "message": "连衣裙主推只选择外套时，存在腰线/裙型被遮挡、整套比例变笨重的风险，需证明外套确实服务主推款。",
-                },
-                "selectedBelowBetterAlternatives": {
-                    "enabled": True,
-                    "topAlternativeCount": 5,
-                    "message": "选中候选不在候选漏斗高分备选内，且存在更轻量或更匹配的备选，需要复核选搭理由。",
-                },
-            },
-        },
-        "accessoryPolicy": {
-            "allowEmpty": True,
-            "default": ["低存在感裸色或米色简洁鞋"],
-            "avoidDefault": ["项链", "手提公文包", "商务公文包", "大体量托特包"],
-            "bagRule": "默认无包；确有必要时只能小体量侧拿或手持，不遮挡腰线、裤褶、口袋、门襟。",
-            "jewelryRule": "默认无项链；只允许极简耳饰或极低存在感首饰辅助氛围。",
-        },
-        "libraryAdequacyPolicy": {
-            "betterAlternativeLimit": 5,
-            "emptyPairingWhenSupplyGap": True,
-        },
-        "brandStylePolicy": {
-            "core": ["商务时装", "都市通勤", "年轻职业女性", "简约", "优雅", "自信", "商品优先", "现代", "利落", "干净"],
-            "principle": "搭配服饰服务主推款，而不是主推款服务整套造型。",
-            "evidence": [
-                {
-                    "id": "phase1_lily_business_fashion",
-                    "source_type": "phase_one_brand_boundary",
-                    "visual_caption": "Lily 商务时装强调现代、干净、女性化剪裁和轻松高级的通勤表达。",
-                    "brand_style_tags": ["商务时装", "现代简洁", "轻松高级", "女性化剪裁"],
-                    "accessory_boundary": "配饰低存在感，不用传统公文包模板抢画面。",
-                },
-                {
-                    "id": "phase1_hero_first_product",
-                    "visual_caption": "主推款必须是商品级视觉中心，配角只负责放大卖点。",
-                    "brand_style_tags": ["商品主角", "比例清楚"],
-                    "accessory_boundary": "包和首饰可省略。",
-                },
-            ],
-        },
-    }
-
-
-def clamp_int(value: Any, minimum: int, maximum: int, fallback: int) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return fallback
-    return max(minimum, min(maximum, number))
-
-
-def normalize_number_map(value: Any, fallback: dict[str, float]) -> dict[str, float]:
-    source = value if isinstance(value, dict) else {}
-    merged = dict(fallback)
-    for key, raw in source.items():
-        try:
-            merged[str(key)] = float(raw)
-        except (TypeError, ValueError):
-            continue
-    return merged
-
-
-def normalize_string_map(value: Any, fallback: dict[str, str]) -> dict[str, str]:
-    source = value if isinstance(value, dict) else {}
-    merged = dict(fallback)
-    for key, raw in source.items():
-        merged[str(key)] = str(raw)[:120]
-    return merged
-
-
-def normalize_list_map(value: Any, fallback: dict[str, list[str]]) -> dict[str, list[str]]:
-    source = value if isinstance(value, dict) else {}
-    keys = set(fallback) | {str(key) for key in source.keys()}
-    return {
-        key: ensure_string_list(source.get(key) if key in source else fallback.get(key))[:30]
-        for key in sorted(keys)
-    }
-
-
-def normalize_hero_policy_config(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
-    source = value if isinstance(value, dict) else {}
-    rules_source = source.get("taskNameSellingPointRules") if isinstance(source.get("taskNameSellingPointRules"), list) else fallback.get("taskNameSellingPointRules", [])
-    selling_point_rules = []
-    for item in rules_source:
-        if not isinstance(item, dict):
-            continue
-        keywords = ensure_string_list(item.get("keywords"))[:20]
-        labels = ensure_string_list(item.get("labels"))[:10]
-        if keywords and labels:
-            selling_point_rules.append({"keywords": keywords, "labels": labels})
-    return {
-        "taskNameCategoryKeywords": normalize_list_map(source.get("taskNameCategoryKeywords"), fallback.get("taskNameCategoryKeywords", {})),
-        "taskNameWaistFocusKeywords": ensure_string_list(source.get("taskNameWaistFocusKeywords") or fallback.get("taskNameWaistFocusKeywords"))[:30],
-        "taskNameLightColorKeywords": ensure_string_list(source.get("taskNameLightColorKeywords") or fallback.get("taskNameLightColorKeywords"))[:30],
-        "taskNameSellingPointRules": selling_point_rules[:20],
-        "visibilityRisksByCategory": normalize_list_map(source.get("visibilityRisksByCategory"), fallback.get("visibilityRisksByCategory", {})),
-        "shotRequirementsByCategory": normalize_list_map(source.get("shotRequirementsByCategory"), fallback.get("shotRequirementsByCategory", {})),
-    }
-
-
-def normalize_ai_policy_config_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
-    fallback = default_ai_policy_config()
-    source = payload if isinstance(payload, dict) else {}
-    candidate_source = source.get("candidateFunnel") if isinstance(source.get("candidateFunnel"), dict) else {}
-    fallback_candidate = fallback["candidateFunnel"]
-    source_policies = candidate_source.get("categoryPolicies") if isinstance(candidate_source.get("categoryPolicies"), list) else fallback_candidate["categoryPolicies"]
-    fallback_by_category = {str(item["heroCategory"]): item for item in fallback_candidate["categoryPolicies"]}
-    normalized_category_policies: list[dict[str, Any]] = []
-    for item in source_policies:
-        if not isinstance(item, dict):
-            continue
-        hero_category = str(item.get("heroCategory") or "").strip()
-        if not hero_category:
-            continue
-        fallback_item = fallback_by_category.get(hero_category, {})
-        source_gap_rules = item.get("supplyGapCategoryGroups") if isinstance(item.get("supplyGapCategoryGroups"), list) else fallback_item.get("supplyGapCategoryGroups", [])
-        normalized_gap_rules = []
-        for rule in source_gap_rules:
-            if not isinstance(rule, dict):
-                continue
-            categories = ensure_string_list(rule.get("categories"))[:8]
-            if not categories:
-                continue
-            normalized_gap_rules.append({
-                "categories": categories,
-                "minimum": clamp_int(rule.get("minimum"), 0, 20, 1),
-                "note": str(rule.get("note") or "")[:200],
-            })
-        normalized_category_policies.append({
-            "heroCategory": hero_category[:60],
-            "excludedCategories": ensure_string_list(item.get("excludedCategories") or fallback_item.get("excludedCategories"))[:12],
-            "categoryScoreAdjustments": normalize_number_map(item.get("categoryScoreAdjustments"), fallback_item.get("categoryScoreAdjustments", {})),
-            "draftCategoryPriority": ensure_string_list(item.get("draftCategoryPriority") or fallback_item.get("draftCategoryPriority"))[:12],
-            "draftModeByCandidateCategory": normalize_string_map(item.get("draftModeByCandidateCategory"), fallback_item.get("draftModeByCandidateCategory", {})),
-            "singlePieceMode": str(item.get("singlePieceMode") or fallback_item.get("singlePieceMode") or "hero_first_single_piece")[:80],
-            "singlePieceReason": str(item.get("singlePieceReason") or fallback_item.get("singlePieceReason") or "")[:240],
-            "supplyGapCategoryGroups": normalized_gap_rules,
-        })
-    if not normalized_category_policies:
-        normalized_category_policies = fallback_candidate["categoryPolicies"]
-    semantic_source = candidate_source.get("semanticSets") if isinstance(candidate_source.get("semanticSets"), dict) else {}
-    fallback_semantics = fallback_candidate["semanticSets"]
-    quality_source = source.get("qualitySignalPolicy") if isinstance(source.get("qualitySignalPolicy"), dict) else {}
-    fallback_quality = fallback["qualitySignalPolicy"]
-    signal_source = quality_source.get("signals") if isinstance(quality_source.get("signals"), dict) else {}
-    fallback_signals = fallback_quality["signals"]
-    normalized_signals: dict[str, Any] = {}
-    for key, fallback_signal in fallback_signals.items():
-        signal = signal_source.get(key) if isinstance(signal_source.get(key), dict) else {}
-        normalized_signals[key] = {
-            "enabled": bool(signal.get("enabled", fallback_signal.get("enabled", True))),
-            "message": str(signal.get("message") or fallback_signal.get("message") or "")[:240],
-        }
-        if "topAlternativeCount" in fallback_signal:
-            normalized_signals[key]["topAlternativeCount"] = clamp_int(signal.get("topAlternativeCount"), 1, 20, int(fallback_signal.get("topAlternativeCount") or 5))
-        for extra_key, fallback_value in fallback_signal.items():
-            if extra_key in {"enabled", "message", "topAlternativeCount"}:
-                continue
-            value = signal.get(extra_key, fallback_value)
-            if isinstance(fallback_value, bool):
-                normalized_signals[key][extra_key] = bool(value)
-            elif isinstance(fallback_value, int):
-                normalized_signals[key][extra_key] = clamp_int(value, 0, 100, fallback_value)
-            elif isinstance(fallback_value, list):
-                normalized_signals[key][extra_key] = ensure_string_list(value or fallback_value)[:20]
-            else:
-                normalized_signals[key][extra_key] = str(value or fallback_value)[:120]
-    accessory_source = source.get("accessoryPolicy") if isinstance(source.get("accessoryPolicy"), dict) else {}
-    fallback_accessory = fallback["accessoryPolicy"]
-    library_source = source.get("libraryAdequacyPolicy") if isinstance(source.get("libraryAdequacyPolicy"), dict) else {}
-    fallback_library = fallback["libraryAdequacyPolicy"]
-    brand_source = source.get("brandStylePolicy") if isinstance(source.get("brandStylePolicy"), dict) else {}
-    fallback_brand = fallback["brandStylePolicy"]
-    evidence_source = brand_source.get("evidence") if isinstance(brand_source.get("evidence"), list) else fallback_brand["evidence"]
-    evidence = []
-    for item in evidence_source:
-        if not isinstance(item, dict):
-            continue
-        evidence.append({
-            "id": str(item.get("id") or "")[:80],
-            "source_type": str(item.get("source_type") or "manual_policy")[:80],
-            "visual_caption": str(item.get("visual_caption") or "")[:240],
-            "brand_style_tags": ensure_string_list(item.get("brand_style_tags"))[:12],
-            "accessory_boundary": str(item.get("accessory_boundary") or "")[:240],
-        })
-    return {
-        "schemaVersion": "ai-policy-config-v1",
-        "candidateFunnel": {
-            "candidateLimit": clamp_int(candidate_source.get("candidateLimit"), 4, 40, fallback_candidate["candidateLimit"]),
-            "candidateImageLimit": clamp_int(candidate_source.get("candidateImageLimit"), 4, 30, fallback_candidate["candidateImageLimit"]),
-            "hardExcludedCategories": list(
-                dict.fromkeys(
-                    ensure_string_list(candidate_source.get("hardExcludedCategories") or fallback_candidate["hardExcludedCategories"])
-                    + list(SYSTEM_HARD_EXCLUDED_CANDIDATE_CATEGORIES)
-                )
-            )[:20],
-            "categoryCaps": {
-                "default": 8,
-                **{
-                    str(key): clamp_int(value, 1, 30, 8)
-                    for key, value in ((candidate_source.get("categoryCaps") if isinstance(candidate_source.get("categoryCaps"), dict) else fallback_candidate["categoryCaps"]).items())
-                },
-            },
-            "categoryPolicies": normalized_category_policies,
-            "riskAdjustments": normalize_number_map(candidate_source.get("riskAdjustments"), fallback_candidate["riskAdjustments"]),
-            "coverageRiskAdjustments": normalize_number_map(candidate_source.get("coverageRiskAdjustments"), fallback_candidate["coverageRiskAdjustments"]),
-            "noStyleRiskValues": ensure_string_list(candidate_source.get("noStyleRiskValues") or fallback_candidate["noStyleRiskValues"])[:20],
-            "waistFocusCategoryAdjustments": normalize_number_map(candidate_source.get("waistFocusCategoryAdjustments"), fallback_candidate["waistFocusCategoryAdjustments"]),
-            "longTopLengthValues": ensure_string_list(candidate_source.get("longTopLengthValues") or fallback_candidate["longTopLengthValues"])[:20],
-            "waistFocusShortUpperCategories": ensure_string_list(candidate_source.get("waistFocusShortUpperCategories") or fallback_candidate["waistFocusShortUpperCategories"])[:20],
-            "shortUpperLengthValues": ensure_string_list(candidate_source.get("shortUpperLengthValues") or fallback_candidate["shortUpperLengthValues"])[:20],
-            "darkAgainstLightHeroCategories": ensure_string_list(candidate_source.get("darkAgainstLightHeroCategories") or fallback_candidate["darkAgainstLightHeroCategories"])[:20],
-            "lightPairingByHeroCategory": normalize_list_map(candidate_source.get("lightPairingByHeroCategory"), fallback_candidate["lightPairingByHeroCategory"]),
-            "structuredLayerBonusCategories": ensure_string_list(candidate_source.get("structuredLayerBonusCategories") or fallback_candidate["structuredLayerBonusCategories"])[:20],
-            "structuredLayerBonusSilhouettes": ensure_string_list(candidate_source.get("structuredLayerBonusSilhouettes") or fallback_candidate["structuredLayerBonusSilhouettes"])[:20],
-            "semanticSets": {
-                key: ensure_string_list(semantic_source.get(key) or fallback_semantics.get(key))[:30]
-                for key in fallback_semantics
-            },
-            "heroProfileSellingPointLabels": normalize_string_map(candidate_source.get("heroProfileSellingPointLabels"), fallback_candidate["heroProfileSellingPointLabels"]),
-            "defaultDraftMode": str(candidate_source.get("defaultDraftMode") or fallback_candidate.get("defaultDraftMode") or "office_outfit")[:80],
-        },
-        "heroPolicy": normalize_hero_policy_config(source.get("heroPolicy"), fallback["heroPolicy"]),
-        "qualitySignalPolicy": {
-            "principle": str(quality_source.get("principle") or fallback_quality["principle"])[:300],
-            "flagIf": ensure_string_list(quality_source.get("flagIf") or fallback_quality["flagIf"])[:30],
-            "scoreThresholds": normalize_number_map(quality_source.get("scoreThresholds"), fallback_quality["scoreThresholds"]),
-            "fullScoreThreshold": clamp_float(quality_source.get("fullScoreThreshold"), 0.5, 1.0, fallback_quality["fullScoreThreshold"]),
-            "requiredDiagnosisKeys": ensure_string_list(quality_source.get("requiredDiagnosisKeys") or fallback_quality["requiredDiagnosisKeys"])[:20],
-            "forbiddenAccessoryKeywords": ensure_string_list(quality_source.get("forbiddenAccessoryKeywords") or fallback_quality["forbiddenAccessoryKeywords"])[:40],
-            "layeringExplanationKeywords": ensure_string_list(quality_source.get("layeringExplanationKeywords") or fallback_quality["layeringExplanationKeywords"])[:40],
-            "halfTuckKeywords": ensure_string_list(quality_source.get("halfTuckKeywords") or fallback_quality["halfTuckKeywords"])[:40],
-            "fullTuckKeywords": ensure_string_list(quality_source.get("fullTuckKeywords") or fallback_quality["fullTuckKeywords"])[:60],
-            "genericTuckKeywords": ensure_string_list(quality_source.get("genericTuckKeywords") or fallback_quality["genericTuckKeywords"])[:20],
-            "waistKeywords": ensure_string_list(quality_source.get("waistKeywords") or fallback_quality["waistKeywords"])[:20],
-            "fullTuckMethodValues": ensure_string_list(quality_source.get("fullTuckMethodValues") or fallback_quality["fullTuckMethodValues"])[:20],
-            "halfTuckMethodValues": ensure_string_list(quality_source.get("halfTuckMethodValues") or fallback_quality["halfTuckMethodValues"])[:20],
-            "tuckCheckedHeroCategories": ensure_string_list(quality_source.get("tuckCheckedHeroCategories") or fallback_quality["tuckCheckedHeroCategories"])[:20],
-            "tuckCheckedGarmentCategories": ensure_string_list(quality_source.get("tuckCheckedGarmentCategories") or fallback_quality["tuckCheckedGarmentCategories"])[:20],
-            "structuredLayerCategories": ensure_string_list(quality_source.get("structuredLayerCategories") or fallback_quality["structuredLayerCategories"])[:20],
-            "structuredLayerSubCategories": ensure_string_list(quality_source.get("structuredLayerSubCategories") or fallback_quality["structuredLayerSubCategories"])[:30],
-            "structuredLayerDetails": ensure_string_list(quality_source.get("structuredLayerDetails") or fallback_quality["structuredLayerDetails"])[:30],
-            "structuredLayerMaterials": ensure_string_list(quality_source.get("structuredLayerMaterials") or fallback_quality["structuredLayerMaterials"])[:30],
-            "highWaistHeroKeywords": ensure_string_list(quality_source.get("highWaistHeroKeywords") or fallback_quality["highWaistHeroKeywords"])[:30],
-            "highWaistDarkStackCategories": ensure_string_list(quality_source.get("highWaistDarkStackCategories") or fallback_quality["highWaistDarkStackCategories"])[:20],
-            "signals": normalized_signals,
-        },
-        "accessoryPolicy": {
-            "allowEmpty": bool(accessory_source.get("allowEmpty", fallback_accessory["allowEmpty"])),
-            "default": ensure_string_list(accessory_source.get("default") or fallback_accessory["default"])[:8],
-            "avoidDefault": ensure_string_list(accessory_source.get("avoidDefault") or fallback_accessory["avoidDefault"])[:12],
-            "bagRule": str(accessory_source.get("bagRule") or fallback_accessory["bagRule"])[:300],
-            "jewelryRule": str(accessory_source.get("jewelryRule") or fallback_accessory["jewelryRule"])[:300],
-        },
-        "libraryAdequacyPolicy": {
-            "betterAlternativeLimit": clamp_int(library_source.get("betterAlternativeLimit"), 0, 20, fallback_library["betterAlternativeLimit"]),
-            "emptyPairingWhenSupplyGap": bool(library_source.get("emptyPairingWhenSupplyGap", fallback_library["emptyPairingWhenSupplyGap"])),
-        },
-        "brandStylePolicy": {
-            "core": ensure_string_list(brand_source.get("core") or fallback_brand["core"])[:20],
-            "principle": str(brand_source.get("principle") or fallback_brand["principle"])[:300],
-            "evidence": evidence[:10],
-        },
-    }
-
-
-def get_active_ai_policy_config() -> dict[str, Any]:
-    try:
-        with get_db() as db:
-            row = db.execute("SELECT config_json FROM ai_policy_configs WHERE id = 1").fetchone()
-        if not row:
-            return default_ai_policy_config()
-        return normalize_ai_policy_config_payload(loads(row["config_json"], {}))
-    except (sqlite3.OperationalError, json.JSONDecodeError, TypeError):
-        return default_ai_policy_config()
-
-
-def build_ai_policy_prompt_card(config: dict[str, Any]) -> str:
-    policy = normalize_ai_policy_config_payload(config)
-    quality = policy["qualitySignalPolicy"]
-    accessory = policy["accessoryPolicy"]
-    brand = policy["brandStylePolicy"]
-    candidate = policy["candidateFunnel"]
-    category_lines = []
-    for item in candidate.get("categoryPolicies", []):
-        if not isinstance(item, dict):
-            continue
-        category_lines.append(
-            f"- 主推 {item.get('heroCategory')}：{item.get('singlePieceReason') or '由 AI Stylist 判断是否需要库内搭配服饰。'}"
-        )
-    lines = [
-        "# Ruyi-Dream AI 选搭 Prompt 业务规则",
-        "执行边界：后端不做候选漏斗、排序、评分、映射、质量判断或改选；以下规则仅作为 Prompt 输入，由 AI Stylist 自行理解和执行。",
-        "搭配库输入：runtime.candidate_retrieval 是未归档 READY 搭配服饰的全量标签事实；所有 Prompt 输入、输出和引用服饰都使用 code，不暴露系统内部 ID。",
-        "主推品类业务提醒：",
-        *category_lines,
-        "Aesthetic Critic 维度：" + "、".join(quality["requiredDiagnosisKeys"]) + "。",
-        "质量信号提醒：" + str(quality.get("principle") or ""),
-        "常见风险：" + "、".join(quality.get("flagIf") or []),
-        "生成配饰：" + "；".join([f"默认 {', '.join(accessory['default'])}", f"避免 {', '.join(accessory['avoidDefault'])}", accessory["bagRule"], accessory["jewelryRule"]]),
-        "品牌边界：" + "、".join(brand["core"]) + "；" + brand["principle"],
-    ]
-    return "\n".join(lines).rstrip() + "\n"
 
 
 def default_shoot_config() -> dict[str, Any]:
@@ -8463,9 +5897,8 @@ def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_ver
         input_row = db.execute("SELECT * FROM generation_task_input_versions WHERE id = ?", (input_version_id,)).fetchone()
         styling_row = db.execute("SELECT * FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
     selected_snapshot = loads(styling_row["selected_material_snapshot_json"], []) if styling_row else []
+    selected_material_image_refs = selected_material_image_refs_for_request(selected_snapshot)
     candidate_snapshot = loads(styling_row["candidate_retrieval_snapshot_json"], {}) if styling_row and "candidate_retrieval_snapshot_json" in styling_row.keys() else {}
-    ai_styling_prompt = str(candidate_snapshot.get("ai_styling_prompt") or "") if isinstance(candidate_snapshot, dict) else ""
-    ai_styling_prompt_config_key = str(candidate_snapshot.get("ai_styling_prompt_config_key") or AI_STYLING_PROMPT_CONFIG_KEY) if isinstance(candidate_snapshot, dict) else AI_STYLING_PROMPT_CONFIG_KEY
     return {
         "schema_version": "shoot-script-request-v1",
         "model": settings.gemini_model,
@@ -8479,16 +5912,31 @@ def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_ver
         "styling_id": styling_id,
         "styling_plan": styling_plan,
         "styling_result": styling_result_for_prompt(styling_plan, selected_snapshot),
-        "selected_material_snapshot": selected_snapshot,
+        "selected_material_snapshot": selected_material_image_refs,
         "brand_info": get_current_brand_info() or {},
         "shoot_config": shoot_config,
-        "ai_styling_prompt_config_key": ai_styling_prompt_config_key,
-        "ai_styling_prompt": ai_styling_prompt,
         "base_shot_rules": [],
         "category_rule_summary": build_shoot_script_category_rule_summary(shoot_config),
         "accessory_boundary": candidate_snapshot.get("accessory_boundary") if isinstance(candidate_snapshot, dict) else build_accessory_boundary(),
         "output_schema": "shoot-script-v1",
     }
+
+
+def selected_material_image_refs_for_request(selected_snapshot: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    for item in selected_snapshot[:4]:
+        if not isinstance(item, dict):
+            continue
+        images = item.get("images") if isinstance(item.get("images"), list) else []
+        refs.append({
+            "code": item.get("code"),
+            "images": [
+                {"asset": image.get("asset")}
+                for image in images[:6]
+                if isinstance(image, dict) and isinstance(image.get("asset"), dict)
+            ],
+        })
+    return refs
 
 
 def build_shoot_script_category_rule_summary(shoot_config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -9125,69 +6573,54 @@ def normalize_prompt_config_key(value: str) -> str:
     return str(value or "").strip().strip("/")
 
 
-def repair_prompt_placeholder_text(value: str) -> str:
-    return re.sub(r"(?<!{){((?:segment|runtime)\.[a-zA-Z0-9_.-]+)}(?!})", r"{{\1}}", value)
+def ai_styling_prompt_template_v2() -> str:
+    return """你是 Lily 品牌 AI 摄影棚的 AI Stylist。你的任务是理解主推款图片，并从搭配服饰库中选择真正服务主推款的造型方案。
 
+职责边界：
+1. 你必须先判断主推款的品类、卖点、不可遮挡区域和商品展示需求。
+2. 你要探索多套 outfit，并用 Aesthetic Critic 批判审美成立、Lily 品牌成立和主推款商品表达成立。
+3. 商品可见性只是底线；沉闷、笨重、廉价、比例失衡或不符合 Lily 时，即使主推款露出也应判为失败。
+4. 候选搭配服饰只用 code 标识，不要输出系统内部 ID。
+5. 鞋、包、饰品不是搭配库商品，可作为低存在感生成配饰，也可以省略。
+6. 如果库内没有真正提升主推款的配角服饰，允许 selected_material_codes 为空。
 
-def merge_legacy_ai_policy_placeholders(value: str) -> str:
-    if "{{runtime.ai_policy_card}}" not in value and "{{runtime.ai_policy}}" not in value:
-        return value
-    policy_text = (
-        build_ai_policy_prompt_card(get_active_ai_policy_config())
-        + "\n以上为原独立 AI 选搭策略配置迁移后的纯文字规则；后续请直接在 AI 选搭 Prompt 正文中维护。\n"
-    )
-    return (
-        value
-        .replace("{{runtime.ai_policy_card}}", policy_text)
-        .replace("{{runtime.ai_policy}}", policy_text)
-    )
+{{segment.brand_info}}
 
+【搭配服饰候选卡】
+{{runtime.candidate_retrieval}}
 
-DEPRECATED_PROMPT_CONFIG_KEYS = {"segment.tag_rules", "segment.director_rules", "segment.shot_rules"}
-
-
-def migrate_prompt_runtime_placeholders(key: str, value: str) -> str:
-    migrated = value
-    migrated = migrated.replace("{{runtime.taxonomy_prompt_card}}", "")
-    migrated = migrated.replace("{{runtime.garment}}", "")
-    if key == AI_STYLING_PROMPT_CONFIG_KEY:
-        migrated = migrate_ai_styling_prompt_to_code_only(migrated)
-    if key == SHOOT_SCRIPT_PROMPT_CONFIG_KEY and (
-        "{{runtime.request_snapshot}}" in migrated
-        or "material_id" in migrated
-        or '"task_id"' in migrated
-        or '"input_version_id"' in migrated
-    ):
-        migrated = shoot_script_prompt_template_v2()
-    if key == "assembly.storyboard_preview" and any(
-        placeholder in migrated
-        for placeholder in ("{{runtime.styling_plan}}", "{{runtime.shoot_script}}", "{{runtime.shot_plans}}")
-    ):
-        migrated = storyboard_preview_prompt_template_v2()
-    if key == "assembly.final_image" and any(
-        placeholder in migrated
-        for placeholder in ("{{runtime.shot_index}}", "{{runtime.styling_plan}}", "{{runtime.shoot_script}}", "{{runtime.shot_plan}}")
-    ):
-        migrated = final_image_prompt_template_v2()
-    return migrated
-
-
-def migrate_ai_styling_prompt_to_code_only(value: str) -> str:
-    migrated = value
-    migrated = migrated.replace("candidate_retrieval.library_tag_cards 会展示搭配服饰库中全量标签信息", "candidate_retrieval 会展示搭配服饰库中所有可用服饰的 code 与全量标签事实")
-    migrated = migrated.replace("允许 selected_material_ids 为空；候选库没有真正提升主推款的配角服饰时，应选择空库内搭配方案", "允许 selected_material_codes 为空；候选库没有真正提升主推款的配角服饰时，应选择空库内搭配方案")
-    migrated = migrated.replace("material_id 必须来自 candidate_material_ids；material_code 必须原样复制对应标签卡 code；不得编造、替换或反查其它 ID", "material_code 必须原样复制对应标签卡 code；不得编造、替换或使用系统内部 ID")
-    migrated = migrated.replace("系统 ID / material_id", "系统内部 ID")
-    migrated = migrated.replace('"selected_material_ids": [123],\n', "")
-    migrated = migrated.replace('"material_id": 123,\n      ', "")
-    migrated = migrated.replace('"selected_material_ids": [123],\n  ', "")
-    migrated = migrated.replace('"material_id": 123, ', "")
-    migrated = migrated.replace('"selected_material_ids": [],\n', "")
-    migrated = migrated.replace('"selected_material_ids": [123],', "")
-    migrated = migrated.replace('"selected_material_codes": ["候选服饰 code，只用于展示和审计"]', '"selected_material_codes": ["候选服饰 code"]')
-    migrated = migrated.replace('"selected_materials": [{"material_id": 123, "material_code": "候选服饰 code",', '"selected_materials": [{"material_code": "候选服饰 code",')
-    migrated = migrated.replace('"material_code": "必须原样复制标签卡 code"', '"material_code": "必须原样复制标签卡 code"')
-    return migrated
+请只返回 JSON，结构如下：
+{
+  "hero_understanding": {
+    "hero_visual_summary": "string",
+    "category": "string",
+    "shot_requirements": ["string"],
+    "hero_selling_points": ["string"],
+    "hero_visibility_risks": ["string"]
+  },
+  "styling_intents": [{"intent_key": "string", "title": "string", "reason": "string", "risk": "string"}],
+  "outfit_candidates": [{
+    "outfit_key": "candidate_a",
+    "mode": "string",
+    "title": "string",
+    "selected_material_codes": ["候选服饰 code"],
+    "selected_materials": [{"material_code": "候选服饰 code", "role": "string", "styling_purpose": "string", "wearing_method": "string", "visibility_boundary": "string"}],
+    "generated_accessories": ["string"],
+    "wearing_notes": "string",
+    "hero_focus": ["string"],
+    "aesthetic_diagnosis": {"color_weight": "string", "silhouette_balance": "string", "waistline_proportion": "string", "season_material_fit": "string", "template_risk": "string", "brand_read": "string"},
+    "scores": {"aesthetic_score": 0.0, "brand_fit_score": 0.0, "hero_visibility_score": 0.0, "commercial_readiness_score": 0.0},
+    "risk_notes": ["string"]
+  }],
+  "selected_outfit_key": "candidate_a",
+  "selected_material_codes": ["候选服饰 code"],
+  "selected_materials": [{"material_code": "候选服饰 code", "role": "string", "styling_purpose": "string", "wearing_method": "string", "visibility_boundary": "string"}],
+  "reason_summary": "string",
+  "rejected_candidates": [{"outfit_key": "string", "reason": "string", "material_codes": ["候选服饰 code"]}],
+  "quality_signals": [{"code": "string", "category": "string", "severity": "review", "message": "string"}],
+  "warnings": []
+}
+"""
 
 
 def shoot_script_prompt_template_v2() -> str:
@@ -9317,7 +6750,18 @@ def prompt_config_content(key: str, rows: dict[str, Any] | None = None) -> str |
     row = rows.get(normalized)
     if row:
         return str(row["content"] or "")
-    return None
+    return default_prompt_config_content(normalized)
+
+
+def default_prompt_config_content(key: str) -> str | None:
+    defaults = {
+        "segment.brand_info": "品牌信息：Lily 商务时装，现代、干净、轻熟、自信、克制，商品优先。背景以白色或浅灰棚拍为主，配饰低存在感，不遮挡商品卖点。\n",
+        AI_STYLING_PROMPT_CONFIG_KEY: ai_styling_prompt_template_v2(),
+        SHOOT_SCRIPT_PROMPT_CONFIG_KEY: shoot_script_prompt_template_v2(),
+        "assembly.storyboard_preview": storyboard_preview_prompt_template_v2(),
+        "assembly.final_image": final_image_prompt_template_v2(),
+    }
+    return defaults.get(key)
 
 
 def render_prompt_config(key: str, runtime: dict[str, Any] | None = None, rows: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
@@ -9335,7 +6779,10 @@ def render_prompt_config(key: str, runtime: dict[str, Any] | None = None, rows: 
             if name in stack:
                 diagnostics["missingPlaceholders"].append(f"{name} (循环引用)")
                 return f"[[循环引用:{name}]]"
-            if name not in rows or str(rows[name]["group_type"] or "") != "segment":
+            if name not in rows and default_prompt_config_content(name) is None:
+                diagnostics["missingPlaceholders"].append(name)
+                return f"[[缺失分段:{name}]]"
+            if name in rows and str(rows[name]["group_type"] or "") != "segment":
                 diagnostics["missingPlaceholders"].append(name)
                 return f"[[缺失分段:{name}]]"
             if name not in diagnostics["usedSegments"]:
@@ -9374,7 +6821,7 @@ def render_prompt_template(key: str, runtime: dict[str, Any] | None = None) -> s
 
 def sample_prompt_runtime() -> dict[str, Any]:
     return {
-        "candidate_retrieval": dumps([{"code": "LOOK-A", "category": "上装", "tag_facts": {"effective_tags": {"colors": ["白色"]}}}]),
+        "candidate_retrieval": dumps([{"code": "LOOK-A", "ai_tags": {"一级品类": ["上装"], "色彩": ["白色"], "版型": ["合体"], "风格语义": "轻量上装服务主推裤装。"}}]),
         "styling_result": dumps({"hero_understanding": {"category": "裤装"}, "selected_material_codes": ["LOOK-A"], "reason_summary": "轻量上装服务主推裤装。"}),
         "shoot_script_result": dumps({"global_directing": {"background": "浅灰棚拍"}, "shots": [{"shot_index": 1, "shot_role": "hero_full_body", "main_focus": "主推款整体比例"}]}),
         "current_shot_context": dumps({"preview_grid_cell": 1, "current_shot": {"shot_role": "hero_full_body", "main_focus": "主推款整体比例"}, "styling": {"selected_material_codes": ["LOOK-A"]}}),
@@ -9384,8 +6831,8 @@ def sample_prompt_runtime() -> dict[str, Any]:
 def available_prompt_placeholders() -> list[dict[str, str]]:
     return [
         {"name": "segment.brand_info", "scope": "segment", "description": "品牌信息分段 Prompt"},
-        {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服饰库中可用服饰的 code 与全量标签事实"},
-        {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭结果，使用搭配服饰 code 标识"},
+        {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服饰库 READY 服饰的全量 AI 标签事实卡"},
+        {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭导演上下文，使用搭配服饰 code 标识"},
         {"name": "runtime.shoot_script_result", "scope": "runtime", "description": "拍摄剧本结果，用于分镜预览"},
         {"name": "runtime.current_shot_context", "scope": "runtime", "description": "当前成片单镜头所需的选搭、剧本和分镜信息"},
     ]
@@ -10059,78 +7506,6 @@ def get_task_ai_operations(task_id: int) -> list[dict[str, Any]]:
     return [serialize_attempt_summary(row) for row in rows]
 
 
-def upload_media_metadata(key: str | Path, content: bytes, derivative: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "fileSize": len(content),
-        "thumbPath": derivative.get("thumb"),
-        "previewPath": derivative.get("preview"),
-        "thumbFileSize": derivative.get("thumbSize"),
-        "previewFileSize": derivative.get("previewSize"),
-    }
-
-
-def provider_media_metadata(payload: dict[str, Any], fallback_key: str | Path | None) -> dict[str, Any]:
-    output_path = payload.get("outputPath") or fallback_key
-    return {
-        "outputPath": clean_key(output_path) if output_path else None,
-        "thumbPath": payload.get("thumbPath"),
-        "previewPath": payload.get("previewPath"),
-        "fileSize": payload.get("fileSize"),
-        "thumbFileSize": payload.get("thumbFileSize"),
-        "previewFileSize": payload.get("previewFileSize"),
-    }
-
-
-def serialize_sku(row: Any) -> dict[str, Any]:
-    cover_path = row.keys() and row["cover_path"] if "cover_path" in row.keys() else None
-    generation_run_count = row["generation_run_count"] if "generation_run_count" in row.keys() else 0
-    archived_generation_run_count = row["archived_generation_run_count"] if "archived_generation_run_count" in row.keys() else 0
-    shot_plan_count = row["shot_plan_count"] if "shot_plan_count" in row.keys() else 0
-    return {
-        "id": row["id"],
-        "sku": row["sku"],
-        "title": row["title"],
-        "source": row["source"],
-        "status": row["status"],
-        "analysis": loads(row["analysis_json"], None),
-        "storagePath": row["storage_path"],
-        "coverUrl": stable_media_url(cover_path, "thumb"),
-        "coverThumbUrl": stable_media_url(cover_path, "thumb"),
-        "coverPreviewUrl": stable_media_url(cover_path, "preview"),
-        "coverOriginalUrl": stable_media_url(cover_path, "original"),
-        "coverFileSize": None,
-        "imageCount": row["image_count"] if "image_count" in row.keys() else None,
-        "deleteImpact": {
-            "generationRunCount": int(generation_run_count or 0),
-            "archivedGenerationRunCount": int(archived_generation_run_count or 0),
-            "shotPlanCount": int(shot_plan_count or 0),
-        },
-        "archivedAt": row["archived_at"] if "archived_at" in row.keys() else None,
-        "archiveReason": row["archive_reason"] if "archive_reason" in row.keys() else None,
-        "createdAt": row["created_at"],
-        "updatedAt": row["updated_at"],
-    }
-
-
-def serialize_image(row: Any) -> dict[str, Any]:
-    original_path = row["storage_path"]
-    return {
-        "id": row["id"],
-        "filename": row["filename"],
-        "role": row["role"],
-        "sortOrder": row["sort_order"],
-        "mimeType": row["mime_type"],
-        "url": stable_media_url(original_path, "preview"),
-        "thumbUrl": stable_media_url(original_path, "thumb"),
-        "previewUrl": stable_media_url(original_path, "preview"),
-        "originalUrl": stable_media_url(original_path, "original"),
-        "fileSize": row["file_size"] if "file_size" in row.keys() else None,
-        "thumbFileSize": row["thumb_file_size"] if "thumb_file_size" in row.keys() else None,
-        "previewFileSize": row["preview_file_size"] if "preview_file_size" in row.keys() else None,
-        "createdAt": row["created_at"],
-    }
-
-
 def serialize_model(row: Any) -> dict[str, Any]:
     profile = loads(row["profile_json"], {})
     raw_references = profile.get("headReferences", {}) or {}
@@ -10345,201 +7720,6 @@ def build_active_taxonomy_context() -> dict[str, Any]:
         "tagByKey": {(tag["dimensionCode"], tag["code"]): tag for tag in tags},
         "contentHash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
     }
-
-
-def serialize_shot_plan(row: Any) -> dict[str, Any]:
-    plan = loads(row["plan_json"], {})
-    with get_db() as db:
-        shot_rows = db.execute(
-            "SELECT * FROM shot_plan_shots WHERE shot_plan_id = ? ORDER BY shot_index",
-            (row["id"],),
-        ).fetchall()
-    if shot_rows:
-        plan["shots"] = [loads(shot["shot_json"], {}) for shot in shot_rows]
-    plan.setdefault("category", row["category"] if "category" in row.keys() else plan.get("garment", {}).get("category"))
-    generation_plan = plan.get("generationPlan") if isinstance(plan.get("generationPlan"), dict) else {}
-    plan["generationPlan"] = {
-        "salesInfo": generation_plan.get("salesInfo") or (row["sales_info"] if "sales_info" in row.keys() else None),
-        "lilyTone": generation_plan.get("lilyTone") or (row["lily_tone"] if "lily_tone" in row.keys() else None),
-        "styling": generation_plan.get("styling") or (row["styling"] if "styling" in row.keys() else None),
-        "background": generation_plan.get("background") or (row["background"] if "background" in row.keys() else None),
-    }
-    return {
-        "id": row["id"],
-        "skuId": row["sku_id"],
-        "modelProfileId": row["model_profile_id"],
-        "status": row["status"],
-        "plan": plan,
-        "plannerProvider": row["planner_provider"],
-        "rawResponse": row["raw_response"],
-        "createdAt": row["created_at"],
-        "updatedAt": row["updated_at"],
-    }
-
-
-def serialize_generation_run(
-    row: Any,
-    include_images: bool,
-    include_summary: bool = False,
-    include_debug: bool = False,
-    status_only: bool = False,
-) -> dict[str, Any]:
-    item = {
-        "id": row["id"],
-        "skuId": row["sku_id"],
-        "sku": row["sku"] if "sku" in row.keys() else None,
-        "skuTitle": row["sku_title"] if "sku_title" in row.keys() else None,
-        "shotPlanId": row["shot_plan_id"],
-        "modelProfileId": row["model_profile_id"],
-        "kind": row["kind"],
-        "status": row["status"],
-        "outputDir": row["output_dir"],
-        "deliveryStatus": row["delivery_status"] if "delivery_status" in row.keys() else "draft",
-        "deliveredAt": row["delivered_at"] if "delivered_at" in row.keys() else None,
-        "archivedAt": row["archived_at"] if "archived_at" in row.keys() else None,
-        "archiveReason": row["archive_reason"] if "archive_reason" in row.keys() else None,
-        "createdAt": row["created_at"],
-        "updatedAt": row["updated_at"],
-    }
-    if include_summary:
-        with get_db() as db:
-            preview_rows = db.execute(
-                """
-                SELECT id, shot_index, title, output_path, status, is_final, current_attempt_index
-                FROM generation_images
-                WHERE run_id = ? AND status = 'SUCCEEDED' AND output_path IS NOT NULL
-                ORDER BY is_final DESC, shot_index, id
-                LIMIT 10
-                """,
-                (row["id"],),
-            ).fetchall()
-            previews = [preview for preview in preview_rows if has_displayable_generation_output(preview)][:5]
-            item["summary"] = {
-                "imageCount": row["image_count"] if "image_count" in row.keys() else 0,
-                "succeededCount": row["succeeded_count"] if "succeeded_count" in row.keys() else 0,
-                "finalCount": row["final_count"] if "final_count" in row.keys() else 0,
-                "regenerationCount": row["regeneration_count"] if "regeneration_count" in row.keys() else 0,
-                "previews": [
-                    {
-                        "id": preview["id"],
-                        "shotIndex": preview["shot_index"],
-                        "title": preview["title"],
-                        "url": stable_media_url(preview["output_path"], "thumb"),
-                        "thumbUrl": stable_media_url(preview["output_path"], "thumb"),
-                        "previewUrl": stable_media_url(preview["output_path"], "preview"),
-                        "originalUrl": stable_media_url(preview["output_path"], "original"),
-                        "status": preview["status"],
-                        "isFinal": bool(preview["is_final"]),
-                        "attemptCount": preview["current_attempt_index"] or 1,
-                    }
-                    for preview in previews
-                ],
-            }
-    if include_images:
-        with get_db() as db:
-            images = db.execute(
-                "SELECT * FROM generation_images WHERE run_id = ? ORDER BY shot_index, id",
-                (row["id"],),
-            ).fetchall()
-            serializer = serialize_generation_image_status if status_only else serialize_generation_image
-            item["images"] = [serializer(image) if status_only else serializer(image, include_debug=include_debug) for image in images]
-    return item
-
-
-def serialize_generation_image_status(row: Any) -> dict[str, Any]:
-    displayable = has_displayable_generation_output(row)
-    original_path = row["output_path"] if displayable else None
-    return {
-        "id": row["id"],
-        "runId": row["run_id"],
-        "shotIndex": row["shot_index"],
-        "title": row["title"],
-        "status": row["status"],
-        "objectKey": row["output_path"],
-        "url": stable_media_url(original_path, "preview") if displayable else None,
-        "thumbUrl": stable_media_url(original_path, "thumb") if displayable else None,
-        "previewUrl": stable_media_url(original_path, "preview") if displayable else None,
-        "originalUrl": stable_media_url(original_path, "original") if displayable else None,
-        "fileSize": row["file_size"] if "file_size" in row.keys() else None,
-        "thumbFileSize": row["thumb_file_size"] if "thumb_file_size" in row.keys() else None,
-        "previewFileSize": row["preview_file_size"] if "preview_file_size" in row.keys() else None,
-        "currentAttemptIndex": row["current_attempt_index"] if "current_attempt_index" in row.keys() else 0,
-        "providerStatus": row["provider_status"] if "provider_status" in row.keys() else None,
-        "submittedAt": row["submitted_at"] if "submitted_at" in row.keys() else None,
-        "completedAt": row["completed_at"] if "completed_at" in row.keys() else None,
-        "lastStatusCheckedAt": row["last_status_checked_at"] if "last_status_checked_at" in row.keys() else None,
-        "cancelRequestedAt": row["cancel_requested_at"] if "cancel_requested_at" in row.keys() else None,
-        "timeoutAt": row["timeout_at"] if "timeout_at" in row.keys() else None,
-        "regenerateFromImageId": row["regenerate_from_image_id"],
-        "regenerateReason": row["regenerate_reason"],
-        "isFinal": bool(row["is_final"]),
-        "reviewStatus": row["review_status"] if "review_status" in row.keys() else "candidate",
-        "reviewNote": row["review_note"] if "review_note" in row.keys() else None,
-        "reviewedAt": row["reviewed_at"] if "reviewed_at" in row.keys() else None,
-        "createdAt": row["created_at"],
-        "updatedAt": row["updated_at"],
-    }
-
-
-def serialize_generation_image(row: Any, include_debug: bool = False) -> dict[str, Any]:
-    displayable = has_displayable_generation_output(row)
-    original_path = row["output_path"] if displayable else None
-    item = {
-        "id": row["id"],
-        "runId": row["run_id"],
-        "shotIndex": row["shot_index"],
-        "title": row["title"],
-        "status": row["status"],
-        "objectKey": row["output_path"],
-        "url": stable_media_url(original_path, "preview") if displayable else None,
-        "thumbUrl": stable_media_url(original_path, "thumb") if displayable else None,
-        "previewUrl": stable_media_url(original_path, "preview") if displayable else None,
-        "originalUrl": stable_media_url(original_path, "original") if displayable else None,
-        "fileSize": row["file_size"] if "file_size" in row.keys() else None,
-        "thumbFileSize": row["thumb_file_size"] if "thumb_file_size" in row.keys() else None,
-        "previewFileSize": row["preview_file_size"] if "preview_file_size" in row.keys() else None,
-        "prompt": row["prompt_text"] if "prompt_text" in row.keys() else None,
-        "currentAttemptIndex": row["current_attempt_index"] if "current_attempt_index" in row.keys() else 0,
-        "providerRequestId": row["provider_request_id"] if "provider_request_id" in row.keys() else None,
-        "providerStatus": row["provider_status"] if "provider_status" in row.keys() else None,
-        "submittedAt": row["submitted_at"] if "submitted_at" in row.keys() else None,
-        "completedAt": row["completed_at"] if "completed_at" in row.keys() else None,
-        "lastStatusCheckedAt": row["last_status_checked_at"] if "last_status_checked_at" in row.keys() else None,
-        "lockedBy": row["locked_by"] if "locked_by" in row.keys() else None,
-        "lockedUntil": row["locked_until"] if "locked_until" in row.keys() else None,
-        "submitAttempts": row["submit_attempts"] if "submit_attempts" in row.keys() else 0,
-        "statusCheckAttempts": row["status_check_attempts"] if "status_check_attempts" in row.keys() else 0,
-        "statusErrorAttempts": row["status_error_attempts"] if "status_error_attempts" in row.keys() else 0,
-        "cancelRequestedAt": row["cancel_requested_at"] if "cancel_requested_at" in row.keys() else None,
-        "timeoutAt": row["timeout_at"] if "timeout_at" in row.keys() else None,
-        "regenerateFromImageId": row["regenerate_from_image_id"],
-        "regenerateReason": row["regenerate_reason"],
-        "isFinal": bool(row["is_final"]),
-        "reviewStatus": row["review_status"] if "review_status" in row.keys() else "candidate",
-        "reviewNote": row["review_note"] if "review_note" in row.keys() else None,
-        "reviewedAt": row["reviewed_at"] if "reviewed_at" in row.keys() else None,
-        "createdAt": row["created_at"],
-        "updatedAt": row["updated_at"],
-    }
-    if include_debug:
-        item.update({
-            "taskPackage": loads(row["task_package_json"], {}),
-            "providerRequest": loads(row["provider_request_json"], None),
-            "providerResponse": loads(row["provider_response_json"], None),
-            "imageInputs": loads(row["image_inputs_json"], []) if "image_inputs_json" in row.keys() else [],
-            "templateSnapshot": loads(row["template_snapshot_json"], None) if "template_snapshot_json" in row.keys() else None,
-            "modelSnapshot": loads(row["model_snapshot_json"], None) if "model_snapshot_json" in row.keys() else None,
-            "garmentSnapshot": loads(row["garment_snapshot_json"], None) if "garment_snapshot_json" in row.keys() else None,
-            "attempts": loads(row["attempts_json"], []) if "attempts_json" in row.keys() else [],
-            "providerUrls": loads(row["provider_urls_json"], {}) if "provider_urls_json" in row.keys() else {},
-            "providerStatusResponse": loads(row["provider_status_json"], None) if "provider_status_json" in row.keys() else None,
-        })
-    return item
-
-
-def has_displayable_generation_output(row: Any) -> bool:
-    output_path = row["output_path"] if "output_path" in row.keys() else None
-    return row["status"] == "SUCCEEDED" and bool(output_path)
 
 
 def serialize_log(row: Any) -> dict[str, Any]:

@@ -181,8 +181,7 @@ Recovery:
 Task control:
 
 - New AI Studio preview and final image tasks use `locked_by` / `locked_until` / `run_attempts` so the backend poller can recover stale in-process jobs after restart.
-- Legacy `generation_images` still use submit/status retry counters for old `generation-runs` compatibility.
-- `GENERATION_IMAGE_TIMEOUT_SECONDS` controls the lease duration for new AI Studio jobs and timeout handling for legacy generation images.
+- `GENERATION_IMAGE_TIMEOUT_SECONDS` controls the lease duration and timeout handling for AI Studio preview and final image jobs.
 - Final images that failed can be retried individually from the UI.
 
 Current limitation:

@@ -12,7 +12,7 @@ Gemini 打标属于预处理层，只负责把一组服装图片转成可追溯�
 -> Gemini 返回严格 JSON
 -> 后端原样保存 ai_tags_json
 -> 后端最佳努力派生 effective_tags_json
--> 智能选搭读取压缩候选卡片
+-> 智能选搭读取 ai_tags_json 标签事实卡
 ```
 
 `segment.tag_rules` 已废弃；`AI 打标` Prompt 是唯一的打标规则入口。分类口径、字段名、标签值、语义描述方式、置信度和风险点都以当前 `AI 打标` Prompt 为准。
@@ -188,7 +188,7 @@ ai_tags_json 原始返回
 关键原则：
 
 - `ai_tags_json` 是事实来源和回溯来源，必须完整保存。
-- `effective_tags_json` 服务候选召回、AI Stylist 和前端摘要，允许不完整。
+- `effective_tags_json` 服务列表摘要和局部展示，允许不完整；AI Stylist 只读取完整 `ai_tags_json` 标签事实卡。
 - 人工标签补充业务上下文，不改写 AI 原始返回。
 - 如果当前 `AI 打标` Prompt 改了字段名或结构，后端应继续保存完整返回，并尽量通过别名派生可用摘要；无法派生的字段不应导致打标失败。
 
@@ -216,25 +216,27 @@ ai_tags_json 原始返回
 
 - 不重新调用 Gemini。
 - 后端重新合成 `effective_tags_json`。
-- 后续智能选搭读取新的压缩候选卡片。
+- 后续智能选搭读取新的 `ai_tags_json` 标签事实卡片。
 
-## 10. 选搭压缩
+## 10. 选搭标签事实卡
 
-智能选搭不直接读取完整 `ai_tags_json`。后端把 `effective_tags_json` 压缩成候选卡片：
+智能选搭直接读取完整 `ai_tags_json`。后端只负责把未归档 READY 搭配服饰按 `code` 组装成标签事实卡，并附带必要的人工业务标记和复核信息；进入 prompt 的卡片不暴露内部 id，也不把标签字段写死成固定摘要：
 
 ```json
 {
-  "id": 123,
   "code": "126239C5959601",
-  "category": "外套类",
-  "sub_category": "西装",
-  "colors": ["藏青色"],
-  "fit": "合体",
-  "materials_visual": ["羊毛感"],
-  "wearability": {},
-  "pairing_brief": "藏青色西装外套，结构清楚，适合通勤搭配。",
-  "risk": []
+  "ai_tags": {
+    "一级品类": ["外套类"],
+    "色彩": ["藏青色"],
+    "面料材质": ["羊毛感"],
+    "版型": ["合体"],
+    "穿着能力": ["可敞开外搭"],
+    "风格语义": "藏青色西装外套，结构清楚，适合通勤搭配。",
+    "风险点": []
+  },
+  "manual_flags": {},
+  "review": {"confidence": 0.86}
 }
 ```
 
-压缩卡片是 AI Stylist 的输入摘要，不是对原始打标 JSON 的替代。
+标签事实卡是 AI Stylist 的选搭输入。`ai_tags_json` 的字段允许随 AI 打标 Prompt 演进，后端不得因为字段名不认识而丢弃。

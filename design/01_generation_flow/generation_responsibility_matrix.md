@@ -11,7 +11,7 @@ StylingPlan 负责选搭意图和验收，ShootScript 负责导演，ShotPlan �
 
 Image-2 是最终视觉生成器，不是选搭大脑、标签系统、历史记录系统或任务状态机。
 
-MVP 阶段 Gemini 在 `AI Stylist` 阶段是唯一选搭业务脑。它基于主推款图片、Prompt 维护中的业务规则、未归档 READY 搭配库全量标签事实和 Lily 品牌边界，交付结构化 `StylingPlan`、候选理由、拒绝理由、质量信号和审美/品牌/商品可见性评分。后端不做候选漏斗、排序、评分、质量判断或改选；Prompt 输入输出统一使用搭配服饰 `code`，后端只做状态、快照、code 到内部 ID 的持久化映射和 schema 校验。
+MVP 阶段 Gemini 在 `AI Stylist` 阶段是唯一选搭业务脑。它基于主推款图片、Prompt 维护中的业务规则、未归档 READY 搭配库的全量 AI 标签事实卡和 Lily 品牌边界，交付结构化 `StylingPlan`、候选理由、拒绝理由、质量信号和审美/品牌/商品可见性评分。后端不做候选漏斗、排序、评分、质量判断或改选；Prompt 输入输出统一使用搭配服饰 `code`，后端只做状态、快照、code 到内部 ID 的持久化映射和 schema 校验。`styling_garments.ai_tags_json` 是 AI Stylist 的标签事实输入，必须以 `ai_tags` 对象进入候选卡；后端不能按固定字段名摘取“品类/颜色/材质”等摘要来替代完整标签事实。人工业务标记和复核信息只作为辅助字段进入。
 
 ## 2. 要素总览
 
@@ -45,7 +45,7 @@ MVP 阶段 Gemini 在 `AI Stylist` 阶段是唯一选搭业务脑。它基于主
 | 搭配服饰事实 | 搭配服饰图片 | 搭配服饰快照、短文本保真边界 | 生成配饰描述 |
 | 搭配服饰标签 | Gemini 按完整标签规程打标 + 后端校验/复核策略 | 人工业务 tags、调用快照 | Image-2 |
 | 品牌样本库 | 后端品牌样本服务 | Lily 官网/天猫/淘宝/官方社媒/客户 lookbook、未来 embedding | Gemini 临场编造品牌风格 |
-| 全量标签事实 | 后端快照服务 | 未归档 READY 状态范围、搭配服饰 code、标签摘要 | 后端排序、后端评分、Image-2 |
+| 搭配库候选卡 | 后端快照服务 | 未归档 READY 状态范围、搭配服饰 code、完整 `ai_tags_json` 标签事实、人工业务标记、复核信息 | 后端排序、后端评分、字段名白名单摘要、Image-2 |
 | Prompt 业务规则 | Prompt 维护中的 AI 选搭 Prompt 正文 | 品牌边界、配饰边界、质量信号口径 | Python if/else、独立策略配置入口 |
 | 搭配库充足性诊断 | AI Stylist | 全量标签事实、被拒方案、补库建议 | 后端候选漏斗、Image-2 视觉补救 |
 | AI Stylist | Gemini 基于主推款图片、全量标签事实和 Prompt 业务规则生成多套 outfit 并自评 | Lily 品牌边界、商品主角原则 | 后端选择器、Image-2 |
@@ -84,9 +84,9 @@ flowchart LR
 Prompt 与标签事实层：
 
 - 未归档 READY 状态过滤
-- 标签压缩
-- 未归档搭配库全量标签事实 `library_tag_cards`
-- 提示词输入只暴露搭配服饰 `code` 和标签事实；内部 ID 仅用于后端持久化映射
+- 标签事实卡组装
+- 未归档搭配库全量 AI 标签事实 `library_tag_cards`
+- 提示词输入只暴露搭配服饰 `code` 和 `ai_tags` 标签事实；内部 ID 仅用于后端持久化映射
 - Prompt 维护中的 AI 打标、AI 选搭和拍摄剧本业务规则
 - 后端不做候选漏斗、排序、评分、映射、质量判断或 outfit 草案
 
