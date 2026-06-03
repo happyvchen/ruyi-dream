@@ -2837,11 +2837,21 @@ async def run_final_generation(
 
 
 def reconcile_final_result_set(db: Any, result_set_id: int, task_id: int | None = None) -> tuple[str, str]:
+    row = db.execute(
+        """
+        SELECT grs.*, gt.status AS task_status, gt.active_result_set_id
+        FROM generation_result_sets grs
+        JOIN generation_tasks gt ON gt.id = grs.task_id
+        WHERE grs.id = ?
+        """,
+        (result_set_id,),
+    ).fetchone()
+    if not row:
+        return "PARTIAL", "FINAL_PARTIAL"
     if task_id is None:
-        row = db.execute("SELECT task_id FROM generation_result_sets WHERE id = ?", (result_set_id,)).fetchone()
-        if not row:
-            return "PARTIAL", "FINAL_PARTIAL"
         task_id = int(row["task_id"])
+    if row["status"] == "SUPERSEDED" or row["active_result_set_id"] != result_set_id:
+        return row["status"], row["task_status"]
     status_rows = db.execute("SELECT status FROM generation_result_images_new WHERE result_set_id = ?", (result_set_id,)).fetchall()
     statuses = [row["status"] for row in status_rows]
     timestamp = now_iso()
@@ -7870,15 +7880,15 @@ async def generate_single_final_image(
         attempt_id = create_attempt("generation_result_image", image_id, "image-2")
     lease_generation_result_image(image_id, attempt_id)
     with get_db() as db:
-        row = db.execute("SELECT status FROM generation_result_images_new WHERE id = ?", (image_id,)).fetchone()
-        if row and row["status"] == "CANCELLED":
+        row = get_final_image_generation_state(db, image_id)
+        if final_image_generation_cancelled(row, result_set_id):
             finish_attempt(attempt_id, "CANCELLED")
             return 0
         db.execute(
             """
             UPDATE generation_result_images_new
             SET status = 'RUNNING', active_attempt_id = ?, updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND status IN ('QUEUED', 'RUNNING')
             """,
             (attempt_id, now_iso(), image_id),
         )
@@ -7895,16 +7905,10 @@ async def generate_single_final_image(
         provider_response = getattr(exc, "provider_response", None)
         with get_db() as db:
             current = db.execute(
-                """
-                SELECT gri.status AS image_status, gt.status AS task_status
-                FROM generation_result_images_new gri
-                JOIN generation_result_sets grs ON grs.id = gri.result_set_id
-                JOIN generation_tasks gt ON gt.id = grs.task_id
-                WHERE gri.id = ?
-                """,
+                final_image_generation_state_sql(),
                 (image_id,),
             ).fetchone()
-            if current and (current["image_status"] == "CANCELLED" or current["task_status"] == "CANCELLED"):
+            if final_image_generation_cancelled(current, result_set_id):
                 finish_attempt(attempt_id, "CANCELLED", response_snapshot=provider_response, error_message=str(exc))
                 persist_attempt_provider_request_id(attempt_id, provider_response)
                 return 0
@@ -7915,23 +7919,17 @@ async def generate_single_final_image(
                 """
                 UPDATE generation_result_images_new
                 SET status = 'FAILED', active_attempt_id = ?, locked_by = NULL, locked_until = NULL, updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status IN ('QUEUED', 'RUNNING')
                 """,
                 (attempt_id, now_iso(), image_id),
             )
         raise
     with get_db() as db:
         current = db.execute(
-            """
-            SELECT gri.status AS image_status, gt.status AS task_status
-            FROM generation_result_images_new gri
-            JOIN generation_result_sets grs ON grs.id = gri.result_set_id
-            JOIN generation_tasks gt ON gt.id = grs.task_id
-            WHERE gri.id = ?
-            """,
+            final_image_generation_state_sql(),
             (image_id,),
         ).fetchone()
-        if current and (current["image_status"] == "CANCELLED" or current["task_status"] == "CANCELLED"):
+        if final_image_generation_cancelled(current, result_set_id):
             finish_attempt(attempt_id, "CANCELLED", response_snapshot=provider_response, output_asset_id=asset_id)
             persist_attempt_provider_request_id(attempt_id, provider_response)
             return asset_id
@@ -7943,11 +7941,40 @@ async def generate_single_final_image(
             UPDATE generation_result_images_new
             SET status = 'SUCCEEDED', current_asset_id = ?, active_attempt_id = ?,
                 locked_by = NULL, locked_until = NULL, updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND status IN ('QUEUED', 'RUNNING')
             """,
             (asset_id, attempt_id, now_iso(), image_id),
         )
     return asset_id
+
+
+def final_image_generation_state_sql() -> str:
+    return """
+        SELECT gri.status AS image_status,
+               grs.id AS result_set_id,
+               grs.status AS result_set_status,
+               gt.status AS task_status,
+               gt.active_result_set_id
+        FROM generation_result_images_new gri
+        JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+        JOIN generation_tasks gt ON gt.id = grs.task_id
+        WHERE gri.id = ?
+        """
+
+
+def get_final_image_generation_state(db: Any, image_id: int) -> Any:
+    return db.execute(final_image_generation_state_sql(), (image_id,)).fetchone()
+
+
+def final_image_generation_cancelled(row: Any, result_set_id: int) -> bool:
+    if not row:
+        return True
+    return (
+        row["image_status"] == "CANCELLED"
+        or row["result_set_status"] in {"CANCELLED", "SUPERSEDED"}
+        or row["task_status"] == "CANCELLED"
+        or row["active_result_set_id"] != result_set_id
+    )
 
 
 def serialize_generation_task(row: Any, include_detail: bool = True, include_debug: bool = False) -> dict[str, Any]:

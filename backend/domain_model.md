@@ -83,7 +83,7 @@ AI Director 基于当前 StylingPlan 生成 ShootScript。ShootScript 负责把�
 
 `一键成片` 在最终阶段复用当前 active result set。若当前结果为 `FINAL_PARTIAL`，自动续跑只把失败或缺失的单图重新排队，不覆盖已经成功的最终图；手动 `生成成片 / 重新生成成片` 仍创建新的结果集。
 
-创建新的最终图结果集、重新选搭、重新生成拍摄剧本或重新生成分镜预览时，旧 `GenerationResultSet` 会进入 `SUPERSEDED`。旧结果集中仍处于 `QUEUED` / `RUNNING` 的单图和 attempt 必须同步收口为 `CANCELLED`，避免被当前任务摘要误认为仍在生成。
+创建新的最终图结果集、重新选搭、重新生成拍摄剧本或重新生成分镜预览时，旧 `GenerationResultSet` 会进入 `SUPERSEDED`。旧结果集中仍处于 `QUEUED` / `RUNNING` 的单图和 attempt 必须同步收口为 `CANCELLED`，避免被当前任务摘要误认为仍在生成。若旧后台 job 晚于新结果集完成，旧结果集的单图落库和 reconcile 必须视为 no-op 或取消收口，不得回写 `GenerationTask.active_result_set_id`。
 
 ## GenerationAttempt
 
