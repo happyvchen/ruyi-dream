@@ -78,6 +78,7 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。旧 `/a
 
 Prompt 配置可使用以下 runtime：
 
+- `runtime.styling_garment`：AI 打标使用的当前搭配服饰 code 和图片输入摘要。
 - `runtime.candidate_retrieval`：AI Stylist 候选服饰紧凑卡片。
 - `runtime.hero_product_info`：跟随本阶段实际使用的主推款输入版本冻结的商品信息和业务事实补充；重新执行拍摄剧本、分镜预览、成片或单张重生时会冻结最新任务商品信息。
 - `runtime.ai_styling_user_instruction`：AI 智能选搭本次执行的用户介入要求。

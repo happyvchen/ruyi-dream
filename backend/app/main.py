@@ -4567,7 +4567,28 @@ def build_taxonomy_tagging_request_snapshot(garment: dict[str, Any], prompt: str
 
 
 def build_taxonomy_tagging_prompt(garment: dict[str, Any] | None = None, taxonomy_context: dict[str, Any] | None = None) -> str:
-    return render_prompt_template("assembly.ai_tagging", {})
+    return render_prompt_template("assembly.ai_tagging", {
+        "styling_garment": dumps(styling_garment_prompt_context(garment or {})),
+    })
+
+
+def styling_garment_prompt_context(garment: dict[str, Any]) -> dict[str, Any]:
+    images = garment.get("images") if isinstance(garment.get("images"), list) else []
+    return {
+        "schema_version": "styling-garment-tagging-context-v1",
+        "code": garment.get("code"),
+        "image_count": len(images),
+        "image_inputs": [
+            {
+                "sort_order": image.get("sortOrder"),
+                "role_hint": "primary" if index == 0 else "reference",
+                "filename": ((image.get("asset") or {}).get("filename")) if isinstance(image, dict) else None,
+                "mime_type": ((image.get("asset") or {}).get("mimeType")) if isinstance(image, dict) else None,
+            }
+            for index, image in enumerate(images[:6])
+            if isinstance(image, dict)
+        ],
+    }
 
 
 def fallback_taxonomy_tagging_result(garment: dict[str, Any], taxonomy_context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -7499,7 +7520,10 @@ def render_prompt_config(key: str, runtime: dict[str, Any] | None = None, rows: 
                 return f"[[缺失分段:{name}]]"
             if name not in diagnostics["usedSegments"]:
                 diagnostics["usedSegments"].append(name)
-            return render_text(prompt_config_content(name, rows) or "", [*stack, name])
+            segment_content = prompt_config_content(name, rows) or ""
+            if not segment_content.strip():
+                diagnostics["missingPlaceholders"].append(f"{name} (空内容)")
+            return render_text(segment_content, [*stack, name])
         if name.startswith("runtime."):
             value = runtime.get(name.removeprefix("runtime."))
             if value is None:
@@ -7518,6 +7542,8 @@ def render_prompt_config(key: str, runtime: dict[str, Any] | None = None, rows: 
     if source is None:
         diagnostics["missingPlaceholders"].append(key)
         source = ""
+    elif not source.strip():
+        diagnostics["missingPlaceholders"].append(f"{key} (空内容)")
     rendered = render_text(source, [key]).strip() + "\n"
     for field in ("usedSegments", "missingPlaceholders", "referencedPlaceholders"):
         diagnostics[field] = sorted(set(diagnostics[field]))
@@ -7533,6 +7559,7 @@ def render_prompt_template(key: str, runtime: dict[str, Any] | None = None) -> s
 
 def sample_prompt_runtime() -> dict[str, Any]:
     return {
+        "styling_garment": dumps({"code": "LOOK-A", "image_count": 3, "image_roles": ["primary", "reference", "reference"]}),
         "candidate_retrieval": dumps([{"code": "LOOK-A", "ai_tags": {"一级品类": ["上装"], "色彩": ["白色"], "版型": ["合体"], "风格语义": "轻量上装服务主推裤装。"}}]),
         "hero_product_info": dumps({"info": "夏季主推裤装，重点展示腰头和裤脚。"}),
         "ai_styling_user_instruction": dumps({"stage": "ai_styling", "instruction": "不要厚重外套，优先轻盈通勤。"}),
@@ -7551,6 +7578,7 @@ def sample_prompt_runtime() -> dict[str, Any]:
 def available_prompt_placeholders() -> list[dict[str, str]]:
     return [
         {"name": "segment.brand_info", "scope": "segment", "description": "品牌信息分段 Prompt"},
+        {"name": "runtime.styling_garment", "scope": "runtime", "description": "AI 打标使用的当前搭配服饰 code 和图片输入摘要"},
         {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服饰库 READY 服饰的全量 AI 标签事实卡"},
         {"name": "runtime.hero_product_info", "scope": "runtime", "description": "跟随主推款输入版本冻结的商品信息和业务事实补充"},
         {"name": "runtime.ai_styling_user_instruction", "scope": "runtime", "description": "AI 智能选搭本次执行的用户介入要求"},
@@ -8415,8 +8443,8 @@ def get_task_ai_operations(task_id: int) -> list[dict[str, Any]]:
                 task_id,
                 task["status"],
                 task["active_styling_id"],
-                task["active_shoot_script_id"],
-                task["active_storyboard_preview_id"] if "active_storyboard_preview_id" in task.keys() and task["active_storyboard_preview_id"] else task["active_preview_id"],
+                row_value(task, "active_shoot_script_id"),
+                row_value(task, "active_storyboard_preview_id") or task["active_preview_id"],
                 task["active_result_set_id"],
             ),
         ).fetchall()
