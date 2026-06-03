@@ -54,8 +54,9 @@ Image-2 阶段写入：
 
 ## Prompt 配置
 
-`prompt_configs` 只保存由 Prompt 维护写入的模板正文和分段。后端只负责建表、读写、渲染和保存快照；不会在初始化、迁移或缺配置时存储、seed 或 fallback 任何 Prompt 默认值。运行时占位符由后端提供：
+`prompt_configs` 保存可维护 Prompt 槽位和由 Prompt 维护写入的模板正文。后端会初始化空正文的固定槽位，保证 UI 可维护；但不会存储、seed 或 fallback 任何 Prompt 默认正文。缺配置或空正文在真实生成时都作为配置错误处理。运行时占位符由后端提供：
 
+- `runtime.styling_garment`：AI 打标使用的当前搭配服饰 code 和图片输入摘要。
 - `runtime.candidate_retrieval`：AI Stylist 使用的未归档 READY 搭配库全量标签事实卡，只暴露业务 `code`、`ai_tags` 和必要复核/人工标记。
 - `runtime.hero_product_info`：跟随本阶段实际使用的主推款输入版本冻结的商品信息和业务事实补充；重新执行拍摄剧本、分镜预览、成片或单张重生时会冻结最新任务商品信息。
 - `runtime.ai_styling_user_instruction`：AI 智能选搭本次执行的用户介入要求。
@@ -80,5 +81,6 @@ Image-2 阶段写入：
 | `029` | `add_generation_user_requirements` | 为 `generation_tasks`、`generation_task_input_versions` 和 `generation_stylings` 增加用户要求字段 |
 | `030` | `split_generation_user_inputs` | 增加商品信息和各阶段用户介入要求字段，并从旧用户要求字段做一次性回填 |
 | `031` | `add_generation_pending_stage_inputs` | 为 `generation_tasks` 增加各阶段待执行用户输入草稿字段 |
+| `032` | `add_shoot_script_runtime_columns` | 为旧库补齐拍摄剧本、分镜预览和成片复盘所需的运行时列 |
 
 新库直接创建当前 schema；旧库执行迁移链后只保留新版表并追加当前字段。旧业务数据不做兼容读取。

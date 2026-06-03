@@ -113,4 +113,4 @@ attempt 保存 provider、状态、请求快照、响应快照、错误、provid
 
 这套模型只在 AI Stylist 阶段提供搭配库 `ai_tags` 标签事实卡，避免把内部 id、旧 candidate snapshots、旧 AI Styling prompt 或完整上游对象重复塞入下游 prompt。
 
-Prompt 正文只来自 `prompt_configs`。后端不内置 Prompt 默认值，不在 `init_db()` 或迁移中 seed Prompt 配置，也不在缺配置时使用代码字符串 fallback；缺失配置应作为配置错误处理。
+Prompt 正文只来自 `prompt_configs.content`。后端只初始化空正文的可维护 Prompt 槽位，不内置 Prompt 默认正文，也不在缺配置或空正文时使用代码字符串 fallback；缺失配置或空正文应作为配置错误处理。

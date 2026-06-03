@@ -85,7 +85,7 @@ POST /api/generation-tasks/{id}/auto-run-final
 
 不实现独立 prompt 长度预算监控；本轮优化通过结构化 DTO 和删除旧兼容注入来控制上下文体量。
 
-Prompt 正文只来自 `prompt_configs`。后端不在代码、迁移或初始化中保存 Prompt 默认值；缺少 Prompt 配置时应暴露配置错误，而不是使用代码字符串 fallback。
+Prompt 正文只来自 `prompt_configs.content`。后端只初始化空正文的可维护 Prompt 槽位，不在代码、迁移或初始化中保存 Prompt 默认正文；缺少 Prompt 配置或正文为空时应暴露配置错误，而不是使用代码字符串 fallback。
 
 ## 媒体与恢复
 

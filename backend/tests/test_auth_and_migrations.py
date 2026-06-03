@@ -71,18 +71,36 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 INSERT INTO prompt_configs
                   (key, group_type, title, description, content, sort_order, updated_at)
                 VALUES (?, ?, ?, '', ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                  group_type = excluded.group_type,
+                  title = excluded.title,
+                  content = excluded.content,
+                  sort_order = excluded.sort_order,
+                  updated_at = excluded.updated_at
                 """,
                 (key, group_type, key, content, sort_order, timestamp),
             )
 
-    def test_prompt_configs_are_not_seeded_or_defaulted_by_backend(self) -> None:
+    def test_prompt_config_slots_are_seeded_empty_without_default_prompt_text(self) -> None:
         db_module = importlib.import_module("app.db")
         main = importlib.import_module("app.main")
 
         db_module.init_db()
 
-        self.assertEqual(main.get_prompt_config_rows(), {})
-        self.assertIsNone(main.prompt_config_content("assembly.ai_styling"))
+        rows = main.get_prompt_config_rows()
+        self.assertEqual(
+            set(rows),
+            {
+                "segment.brand_info",
+                "assembly.ai_tagging",
+                "assembly.ai_styling",
+                "assembly.shoot_script",
+                "assembly.storyboard_preview",
+                "assembly.final_image",
+            },
+        )
+        self.assertEqual(main.prompt_config_content("assembly.ai_styling"), "")
+        self.assertEqual(main.prompt_config_content("segment.brand_info"), "")
         with self.assertRaisesRegex(RuntimeError, "Prompt 配置缺失或占位符未填充"):
             main.render_prompt_template("assembly.ai_styling", main.sample_prompt_runtime())
 
@@ -196,6 +214,198 @@ class BackendCurrentFlowTests(unittest.TestCase):
             invocations = client.get("/api/generation-tasks/1/ai-invocations")
             self.assertEqual(invocations.status_code, 200)
             self.assertEqual(invocations.json()["items"][0]["modelOutput"]["secret"], "attempt raw")
+        finally:
+            client.close()
+
+    def test_records_list_survives_old_task_schema_after_shoot_script_migration(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+
+        timestamp = "2026-06-03T04:00:00Z"
+        with db_module.get_db() as db:
+            db.executescript(
+                """
+                CREATE TABLE schema_migrations (
+                  version TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  applied_at TEXT NOT NULL
+                );
+                INSERT INTO schema_migrations (version, name, applied_at) VALUES
+                  ('027', 'drop_legacy_generation_tables', '2026-06-03T04:00:00Z'),
+                  ('028', 'add_generation_task_auto_run', '2026-06-03T04:00:00Z'),
+                  ('029', 'add_generation_user_requirements', '2026-06-03T04:00:00Z'),
+                  ('030', 'split_generation_user_inputs', '2026-06-03T04:00:00Z'),
+                  ('031', 'add_generation_pending_stage_inputs', '2026-06-03T04:00:00Z');
+
+                CREATE TABLE generation_tasks (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  name TEXT NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'DRAFT',
+                  current_input_version_id INTEGER,
+                  active_styling_id INTEGER,
+                  active_preview_id INTEGER,
+                  active_result_set_id INTEGER,
+                  archived_at TEXT,
+                  archive_reason TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  deleted_at TEXT
+                );
+                CREATE TABLE generation_task_input_versions (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+                  version_number INTEGER NOT NULL,
+                  name_snapshot TEXT NOT NULL,
+                  image_snapshot_json TEXT NOT NULL,
+                  model_snapshot_json TEXT,
+                  hero_visual_summary TEXT,
+                  created_at TEXT NOT NULL,
+                  UNIQUE(task_id, version_number)
+                );
+                CREATE TABLE generation_task_images (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+                  media_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+                  sort_order INTEGER NOT NULL DEFAULT 0,
+                  status TEXT NOT NULL DEFAULT 'READY',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  deleted_at TEXT
+                );
+                CREATE TABLE generation_stylings (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+                  input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
+                  source_material_ids_json TEXT NOT NULL,
+                  selected_material_ids_json TEXT NOT NULL,
+                  selected_material_snapshot_json TEXT NOT NULL,
+                  styling_plan_json TEXT,
+                  reason_summary TEXT,
+                  warnings_json TEXT,
+                  status TEXT NOT NULL DEFAULT 'SUCCEEDED',
+                  attempt_id INTEGER,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE TABLE generation_shot_plans (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+                  styling_id INTEGER NOT NULL REFERENCES generation_stylings(id) ON DELETE CASCADE,
+                  sort_order INTEGER NOT NULL,
+                  shot_type TEXT,
+                  plan_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  UNIQUE(styling_id, sort_order)
+                );
+                CREATE TABLE generation_previews (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+                  styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
+                  input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
+                  preview_asset_id INTEGER REFERENCES media_assets(id),
+                  status TEXT NOT NULL DEFAULT 'QUEUED',
+                  active_attempt_id INTEGER,
+                  locked_by TEXT,
+                  locked_until TEXT,
+                  run_attempts INTEGER NOT NULL DEFAULT 0,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE TABLE generation_result_sets (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+                  input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
+                  styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
+                  preview_id INTEGER NOT NULL REFERENCES generation_previews(id),
+                  status TEXT NOT NULL DEFAULT 'RUNNING',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE TABLE generation_result_images_new (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  result_set_id INTEGER NOT NULL REFERENCES generation_result_sets(id) ON DELETE CASCADE,
+                  shot_plan_id INTEGER NOT NULL REFERENCES generation_shot_plans(id),
+                  sort_order INTEGER NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'QUEUED',
+                  current_asset_id INTEGER REFERENCES media_assets(id),
+                  active_attempt_id INTEGER,
+                  locked_by TEXT,
+                  locked_until TEXT,
+                  run_attempts INTEGER NOT NULL DEFAULT 0,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                """
+            )
+
+        db_module.init_db()
+        with db_module.get_db() as db:
+            self.assertTrue(db_module.table_has_column(db, "generation_tasks", "active_shoot_script_id"))
+            self.assertTrue(db_module.table_has_column(db, "generation_tasks", "active_storyboard_preview_id"))
+            self.assertTrue(db_module.table_has_column(db, "generation_previews", "shoot_script_id"))
+            self.assertTrue(db_module.table_has_column(db, "generation_result_sets", "shoot_script_id"))
+            self.assertTrue(db_module.table_has_column(db, "generation_shot_plans", "shoot_script_id"))
+            db.execute(
+                """
+                INSERT INTO media_assets
+                  (id, object_key, original_filename, mime_type, created_at, updated_at)
+                VALUES
+                  (101, 'hero/front.jpg', 'front.jpg', 'image/jpeg', ?, ?),
+                  (102, 'preview/grid.png', 'grid.png', 'image/png', ?, ?),
+                  (103, 'final/1.png', '1.png', 'image/png', ?, ?)
+                """,
+                (timestamp, timestamp, timestamp, timestamp, timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_tasks (id, name, status, current_input_version_id, active_styling_id, active_preview_id, active_result_set_id, created_at, updated_at) VALUES (1, 'Old task', 'COMPLETED', 2, 3, 4, 10, ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_task_images (id, task_id, media_asset_id, sort_order, status, created_at, updated_at) VALUES (1, 1, 101, 1, 'READY', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_task_input_versions (id, task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, hero_visual_summary, created_at) VALUES (2, 1, 1, 'Old task', ?, '{}', '主推款', ?)",
+                (db_module.dumps([{"asset": {"id": 101}}]), timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_stylings
+                  (id, task_id, input_version_id, source_material_ids_json, selected_material_ids_json,
+                   selected_material_snapshot_json, styling_plan_json, reason_summary, warnings_json, status, created_at, updated_at)
+                VALUES (3, 1, 2, '[]', '[]', '[]', '{}', '已选搭', '[]', 'SUCCEEDED', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_shot_plans (id, task_id, styling_id, sort_order, shot_type, plan_json, created_at, updated_at) VALUES (6, 1, 3, 1, 'hero', '{}', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_previews (id, task_id, styling_id, input_version_id, preview_asset_id, status, created_at, updated_at) VALUES (4, 1, 3, 2, 102, 'SUCCEEDED', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 4, 'SUCCEEDED', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_result_images_new (id, result_set_id, shot_plan_id, sort_order, status, current_asset_id, created_at, updated_at) VALUES (30, 10, 6, 1, 'SUCCEEDED', 103, ?, ?)",
+                (timestamp, timestamp),
+            )
+
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            response = client.get("/api/generation-records?limit=5")
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["total"], 1)
+            self.assertEqual(payload["items"][0]["id"], 1)
+            self.assertEqual(len(payload["items"][0]["summary"]["finalImages"]), 1)
         finally:
             client.close()
 

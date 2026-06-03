@@ -15,6 +15,16 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("029", "add_generation_user_requirements", "migration_add_generation_user_requirements"),
     ("030", "split_generation_user_inputs", "migration_split_generation_user_inputs"),
     ("031", "add_generation_pending_stage_inputs", "migration_add_generation_pending_stage_inputs"),
+    ("032", "add_shoot_script_runtime_columns", "migration_add_shoot_script_runtime_columns"),
+)
+
+PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
+    ("segment.brand_info", "segment", "品牌信息", "品牌信息分段 Prompt，可被组装 Prompt 引用。", 10),
+    ("assembly.ai_tagging", "assembly", "AI 打标", "搭配服饰入库后的图片理解和标签识别 Prompt。", 100),
+    ("assembly.ai_styling", "assembly", "AI 选搭", "AI Stylist 选搭 Prompt，包含主推款理解、搭配选择和质量判断。", 110),
+    ("assembly.shoot_script", "assembly", "拍摄剧本", "AI Director 拍摄剧本 Prompt，生成 ShootScript 和 6 个镜头。", 120),
+    ("assembly.storyboard_preview", "assembly", "分镜预览", "Image-2 分镜预览 Prompt，生成 3x2 分镜图。", 130),
+    ("assembly.final_image", "assembly", "生成成片", "Image-2 单张成片 Prompt，按前 5 个镜头生成最终图。", 140),
 )
 
 
@@ -326,6 +336,7 @@ def init_db() -> None:
         ensure_migration_table(db)
         run_migrations(db)
         seed_default_model(db)
+        ensure_prompt_config_catalog(db)
         create_taxonomy_tables(db)
 
 
@@ -352,6 +363,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_generation_user_requirements": migration_add_generation_user_requirements,
         "migration_split_generation_user_inputs": migration_split_generation_user_inputs,
         "migration_add_generation_pending_stage_inputs": migration_add_generation_pending_stage_inputs,
+        "migration_add_shoot_script_runtime_columns": migration_add_shoot_script_runtime_columns,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -427,6 +439,18 @@ def migration_add_generation_pending_stage_inputs(db: sqlite3.Connection) -> Non
             db.execute(f"ALTER TABLE generation_tasks ADD COLUMN {column} TEXT")
 
 
+def migration_add_shoot_script_runtime_columns(db: sqlite3.Connection) -> None:
+    for column in ("active_shoot_script_id", "active_storyboard_preview_id"):
+        if not table_has_column(db, "generation_tasks", column):
+            db.execute(f"ALTER TABLE generation_tasks ADD COLUMN {column} INTEGER")
+    if not table_has_column(db, "generation_shot_plans", "shoot_script_id"):
+        db.execute("ALTER TABLE generation_shot_plans ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id) ON DELETE CASCADE")
+    if not table_has_column(db, "generation_previews", "shoot_script_id"):
+        db.execute("ALTER TABLE generation_previews ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id)")
+    if not table_has_column(db, "generation_result_sets", "shoot_script_id"):
+        db.execute("ALTER TABLE generation_result_sets ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id)")
+
+
 def table_has_column(db: sqlite3.Connection, table: str, column: str) -> bool:
     return any(row["name"] == column for row in db.execute(f"PRAGMA table_info({table})").fetchall())
 
@@ -458,6 +482,25 @@ def create_prompt_config_table(db: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def ensure_prompt_config_catalog(db: sqlite3.Connection) -> None:
+    create_prompt_config_table(db)
+    timestamp = now_iso()
+    for key, group_type, title, description, sort_order in PROMPT_CONFIG_CATALOG:
+        db.execute(
+            """
+            INSERT INTO prompt_configs
+              (key, group_type, title, description, content, sort_order, updated_at)
+            VALUES (?, ?, ?, ?, '', ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+              group_type = excluded.group_type,
+              title = excluded.title,
+              description = excluded.description,
+              sort_order = excluded.sort_order
+            """,
+            (key, group_type, title, description, sort_order, timestamp),
+        )
 
 
 def create_generation_shoot_script_tables(db: sqlite3.Connection) -> None:
