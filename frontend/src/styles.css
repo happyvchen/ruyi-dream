@@ -323,29 +323,22 @@ h1, h2, h3, p { margin: 0; }
 .task-rail { padding: 18px; display: grid; align-content: start; gap: 16px; }
 .side-input-module {
   display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
   gap: 10px;
-  padding: 12px;
-  border: 1px solid #d8e0ea;
-  border-radius: 8px;
-  background: #f8fafc;
+  align-items: start;
+  font-size: 13px;
 }
-.side-input-module > div:first-child {
-  display: grid;
-  gap: 4px;
+.side-input-title {
+  color: #7b8797;
+  padding-top: 10px;
 }
-.side-input-module strong {
-  color: #1f2937;
-  font-size: 14px;
-}
-.side-input-module span {
-  color: #64748b;
-  font-size: 12px;
-  line-height: 1.5;
-}
+.side-input-control { min-width: 0; }
 .side-input-module textarea {
-  min-height: 112px;
+  width: 100%;
+  min-height: 156px;
   resize: vertical;
   background: #fff;
+  padding: 12px;
 }
 .side-input-actions {
   display: flex;
@@ -357,6 +350,12 @@ h1, h2, h3, p { margin: 0; }
   color: #94a3b8;
   font-size: 12px;
   font-style: normal;
+}
+.side-input-actions .secondary {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 7px;
+  font-size: 12px;
 }
 
 .step-rail {

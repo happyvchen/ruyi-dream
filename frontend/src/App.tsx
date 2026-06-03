@@ -763,23 +763,22 @@ function StageUserInputModule({ step, task, value, savedValue = '', onChange, on
   disabled?: boolean
 }) {
   const labels = [
-    { title: '商品信息', hint: '跟随主推款输入版本，后续步骤会把它作为商品事实补充。', placeholder: '例如：夏季主推阔腿裤，重点展示腰头、垂坠裤腿和裤脚，避免厚重外套。' },
-    { title: '智能选搭要求', hint: '执行 AI 智能选搭时生效。', placeholder: '例如：不要厚重外套，改成更轻盈的通勤搭配。' },
-    { title: '拍摄剧本要求', hint: '生成或重生拍摄剧本时生效。', placeholder: '例如：增加腰线和裤脚展示，动作更利落。' },
-    { title: '分镜预览要求', hint: '生成或重生分镜预览时生效。', placeholder: '例如：分镜姿态更舒展，背景保持简洁。' },
-    { title: '成片生成要求', hint: '整组成片或单张重生时生效。', placeholder: '例如：整体更干净，减少配饰存在感，保持棚拍电商质感。' },
+    { title: '商品信息', placeholder: '例如：夏季主推阔腿裤，重点展示腰头、垂坠裤腿和裤脚，避免厚重外套。' },
+    { title: '智能选搭要求', placeholder: '例如：不要厚重外套，改成更轻盈的通勤搭配。' },
+    { title: '拍摄剧本要求', placeholder: '例如：增加腰线和裤脚展示，动作更利落。' },
+    { title: '分镜预览要求', placeholder: '例如：分镜姿态更舒展，背景保持简洁。' },
+    { title: '成片生成要求', placeholder: '例如：整体更干净，减少配饰存在感，保持棚拍电商质感。' },
   ][step]
   const saveDisabled = disabled || !task || value.trim() === savedValue.trim()
   return (
     <div className="side-input-module">
-      <div>
-        <strong>{labels.title}</strong>
-        <span>{labels.hint}</span>
-      </div>
-      <textarea value={value} maxLength={800} disabled={disabled} onChange={(event) => onChange(event.target.value)} placeholder={labels.placeholder} />
-      <div className="side-input-actions">
-        <em>{value.length}/800</em>
-        {task && <button className="secondary" type="button" disabled={saveDisabled} onClick={onSave}>保存</button>}
+      <span className="side-input-title">{labels.title}</span>
+      <div className="side-input-control">
+        <textarea value={value} maxLength={800} disabled={disabled} onChange={(event) => onChange(event.target.value)} placeholder={labels.placeholder} />
+        <div className="side-input-actions">
+          <em>{value.length}/800</em>
+          {task && <button className="secondary" type="button" disabled={saveDisabled} onClick={onSave}>保存</button>}
+        </div>
       </div>
     </div>
   )
