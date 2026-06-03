@@ -347,6 +347,9 @@ class BackendCurrentFlowTests(unittest.TestCase):
             self.assertTrue(db_module.table_has_column(db, "generation_previews", "shoot_script_id"))
             self.assertTrue(db_module.table_has_column(db, "generation_result_sets", "shoot_script_id"))
             self.assertTrue(db_module.table_has_column(db, "generation_shot_plans", "shoot_script_id"))
+            unique_columns = db_module.table_unique_column_sets(db, "generation_shot_plans")
+            self.assertIn(("shoot_script_id", "sort_order"), unique_columns)
+            self.assertNotIn(("styling_id", "sort_order"), unique_columns)
             db.execute(
                 """
                 INSERT INTO media_assets
@@ -380,7 +383,21 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_shot_plans (id, task_id, styling_id, sort_order, shot_type, plan_json, created_at, updated_at) VALUES (6, 1, 3, 1, 'hero', '{}', ?, ?)",
+                """
+                INSERT INTO generation_shoot_scripts
+                  (id, task_id, input_version_id, styling_id, status, script_json, created_at, updated_at)
+                VALUES
+                  (5, 1, 2, 3, 'SUCCEEDED', '{}', ?, ?),
+                  (6, 1, 2, 3, 'SUCCEEDED', '{}', ?, ?)
+                """,
+                (timestamp, timestamp, timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_shot_plans (id, task_id, styling_id, shoot_script_id, sort_order, shot_type, plan_json, created_at, updated_at) VALUES (6, 1, 3, 5, 1, 'hero', '{}', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_shot_plans (id, task_id, styling_id, shoot_script_id, sort_order, shot_type, plan_json, created_at, updated_at) VALUES (7, 1, 3, 6, 1, 'hero', '{}', ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(

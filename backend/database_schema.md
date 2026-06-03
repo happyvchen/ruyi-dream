@@ -81,6 +81,6 @@ Image-2 阶段写入：
 | `029` | `add_generation_user_requirements` | 为 `generation_tasks`、`generation_task_input_versions` 和 `generation_stylings` 增加用户要求字段 |
 | `030` | `split_generation_user_inputs` | 增加商品信息和各阶段用户介入要求字段，并从旧用户要求字段做一次性回填 |
 | `031` | `add_generation_pending_stage_inputs` | 为 `generation_tasks` 增加各阶段待执行用户输入草稿字段 |
-| `032` | `add_shoot_script_runtime_columns` | 为旧库补齐拍摄剧本、分镜预览和成片复盘所需的运行时列 |
+| `032` | `add_shoot_script_runtime_columns` | 为旧库补齐拍摄剧本、分镜预览和成片复盘所需的运行时列，并将 `generation_shot_plans` 唯一约束迁到 `(shoot_script_id, sort_order)` |
 
 新库直接创建当前 schema；旧库执行迁移链后只保留新版表并追加当前字段。旧业务数据不做兼容读取。

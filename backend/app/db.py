@@ -445,14 +445,76 @@ def migration_add_shoot_script_runtime_columns(db: sqlite3.Connection) -> None:
             db.execute(f"ALTER TABLE generation_tasks ADD COLUMN {column} INTEGER")
     if not table_has_column(db, "generation_shot_plans", "shoot_script_id"):
         db.execute("ALTER TABLE generation_shot_plans ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id) ON DELETE CASCADE")
+    if generation_shot_plans_needs_constraint_rebuild(db):
+        rebuild_generation_shot_plans_for_shoot_script_unique(db)
     if not table_has_column(db, "generation_previews", "shoot_script_id"):
         db.execute("ALTER TABLE generation_previews ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id)")
     if not table_has_column(db, "generation_result_sets", "shoot_script_id"):
         db.execute("ALTER TABLE generation_result_sets ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id)")
 
 
+def generation_shot_plans_needs_constraint_rebuild(db: sqlite3.Connection) -> bool:
+    unique_columns = table_unique_column_sets(db, "generation_shot_plans")
+    return ("shoot_script_id", "sort_order") not in unique_columns or ("styling_id", "sort_order") in unique_columns
+
+
+def rebuild_generation_shot_plans_for_shoot_script_unique(db: sqlite3.Connection) -> None:
+    foreign_keys_enabled = db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    db.commit()
+    if foreign_keys_enabled:
+        db.execute("PRAGMA foreign_keys = OFF")
+    try:
+        db.executescript(
+            """
+            CREATE TABLE generation_shot_plans_new (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+              styling_id INTEGER NOT NULL REFERENCES generation_stylings(id) ON DELETE CASCADE,
+              shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id) ON DELETE CASCADE,
+              sort_order INTEGER NOT NULL,
+              shot_type TEXT,
+              plan_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(shoot_script_id, sort_order)
+            );
+
+            INSERT INTO generation_shot_plans_new
+              (id, task_id, styling_id, shoot_script_id, sort_order, shot_type, plan_json, created_at, updated_at)
+            SELECT
+              id, task_id, styling_id, shoot_script_id, sort_order, shot_type, plan_json, created_at, updated_at
+            FROM generation_shot_plans;
+
+            DROP TABLE generation_shot_plans;
+            ALTER TABLE generation_shot_plans_new RENAME TO generation_shot_plans;
+            """
+        )
+        db.execute("DELETE FROM sqlite_sequence WHERE name = 'generation_shot_plans'")
+        db.execute(
+            """
+            INSERT INTO sqlite_sequence (name, seq)
+            SELECT 'generation_shot_plans', COALESCE(MAX(id), 0)
+            FROM generation_shot_plans
+            """
+        )
+        db.commit()
+    finally:
+        if foreign_keys_enabled:
+            db.execute("PRAGMA foreign_keys = ON")
+
+
 def table_has_column(db: sqlite3.Connection, table: str, column: str) -> bool:
     return any(row["name"] == column for row in db.execute(f"PRAGMA table_info({table})").fetchall())
+
+
+def table_unique_column_sets(db: sqlite3.Connection, table: str) -> set[tuple[str, ...]]:
+    unique_columns: set[tuple[str, ...]] = set()
+    for index in db.execute(f"PRAGMA index_list({table})").fetchall():
+        if not index["unique"]:
+            continue
+        columns = tuple(row["name"] for row in db.execute(f"PRAGMA index_info({index['name']})").fetchall())
+        unique_columns.add(columns)
+    return unique_columns
 
 
 def create_shoot_config_table(db: sqlite3.Connection) -> None:
