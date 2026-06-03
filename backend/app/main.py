@@ -6883,10 +6883,14 @@ def refresh_pending_new_generation_jobs() -> None:
     with get_db() as db:
         preview_rows = db.execute(
             """
-            SELECT * FROM generation_previews
-            WHERE status IN ('QUEUED', 'RUNNING')
-              AND (locked_until IS NULL OR locked_until < ?)
-            ORDER BY updated_at, id
+            SELECT gp.* FROM generation_previews gp
+            LEFT JOIN generation_attempts ga ON ga.id = gp.active_attempt_id
+            WHERE gp.status IN ('QUEUED', 'RUNNING')
+              AND (
+                gp.locked_until IS NULL OR gp.locked_until < ?
+                OR (gp.status = 'RUNNING' AND ga.provider_request_id IS NOT NULL)
+              )
+            ORDER BY gp.updated_at, gp.id
             LIMIT 3
             """,
             (timestamp,),
@@ -6897,9 +6901,13 @@ def refresh_pending_new_generation_jobs() -> None:
             FROM generation_result_sets grs
             JOIN generation_tasks gt ON gt.active_result_set_id = grs.id
             JOIN generation_result_images_new gri ON gri.result_set_id = grs.id
+            LEFT JOIN generation_attempts ga ON ga.id = gri.active_attempt_id
             WHERE grs.status = 'RUNNING'
               AND gri.status IN ('QUEUED', 'RUNNING')
-              AND (gri.locked_until IS NULL OR gri.locked_until < ?)
+              AND (
+                gri.locked_until IS NULL OR gri.locked_until < ?
+                OR (gri.status = 'RUNNING' AND ga.provider_request_id IS NOT NULL)
+              )
             ORDER BY grs.updated_at, grs.id
             LIMIT 3
             """,
@@ -6949,11 +6957,15 @@ def refresh_pending_new_generation_jobs() -> None:
         with get_db() as db:
             image_rows = db.execute(
                 """
-                SELECT id, active_attempt_id FROM generation_result_images_new
-                WHERE result_set_id = ?
-                  AND status IN ('QUEUED', 'RUNNING')
-                  AND (locked_until IS NULL OR locked_until < ?)
-                ORDER BY sort_order, id
+                SELECT gri.id, gri.active_attempt_id FROM generation_result_images_new gri
+                LEFT JOIN generation_attempts ga ON ga.id = gri.active_attempt_id
+                WHERE gri.result_set_id = ?
+                  AND gri.status IN ('QUEUED', 'RUNNING')
+                  AND (
+                    gri.locked_until IS NULL OR gri.locked_until < ?
+                    OR (gri.status = 'RUNNING' AND ga.provider_request_id IS NOT NULL)
+                  )
+                ORDER BY gri.sort_order, gri.id
                 """,
                 (row["id"], timestamp),
             ).fetchall()
