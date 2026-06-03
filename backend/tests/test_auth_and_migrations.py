@@ -75,6 +75,17 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (key, group_type, key, content, sort_order, timestamp),
             )
 
+    def test_prompt_configs_are_not_seeded_or_defaulted_by_backend(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        db_module.init_db()
+
+        self.assertEqual(main.get_prompt_config_rows(), {})
+        self.assertIsNone(main.prompt_config_content("assembly.ai_styling"))
+        with self.assertRaisesRegex(RuntimeError, "Prompt 配置缺失或占位符未填充"):
+            main.render_prompt_template("assembly.ai_styling", main.sample_prompt_runtime())
+
     def test_generation_debug_payloads_are_admin_only(self) -> None:
         db_module = importlib.import_module("app.db")
         main = importlib.import_module("app.main")

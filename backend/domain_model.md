@@ -25,7 +25,7 @@ GenerationTask
 - `effective_tags_json`：最新生效标签。
 - `tag_meta_json`：置信度、复核原因和 schema 信息。
 
-AI Stylist 不直接接收上述 JSON 整包。后端把它们压缩成候选卡片，使用搭配服饰 `code` 作为 prompt 输入输出标识。
+AI Stylist 接收未归档 READY 搭配库的全量标签事实卡。后端只做状态范围过滤和结构化组装，使用搭配服饰 `code` 作为 prompt 输入输出标识，不做预筛选、排序、评分或审美判断。
 
 ## GenerationTask
 
@@ -55,12 +55,12 @@ AI Stylist 的职责是理解主推款、探索多套 outfit、批判审美与�
 
 保存内容：
 
-- `candidate_retrieval_snapshot_json`：本次 READY 搭配库紧凑候选卡、source ids、candidate ids 和 code/id 映射。
+- `candidate_retrieval_snapshot_json`：本次 READY 搭配库全量标签事实卡、source ids、candidate ids 和 code/id 映射。
 - `user_requirement_json`：上传补充要求、本次选搭微调要求和冲突处理策略。
 - `styling_plan_json`：完整 StylingPlan，包含候选方案、选中方案、被拒方案、诊断、评分、质量信号和 warnings。
 - `selected_material_snapshot_json`：选中搭配服饰的商品与图片快照。
 
-面向 prompt 的 `runtime.candidate_retrieval` 只包含紧凑候选卡，不包含内部 id、原始全文标签账本、旧 prompt 或完整历史快照。
+面向 prompt 的 `runtime.candidate_retrieval` 只包含业务 `code`、`ai_tags` 和必要人工/复核事实，不包含内部 id、图片快照、旧 prompt、完整历史快照或后端排序/评分结果。
 
 ## GenerationShootScript / ShotPlan
 
@@ -101,10 +101,12 @@ attempt 保存 provider、状态、请求快照、响应快照、错误、provid
 
 | 阶段 | Runtime | 内容 |
 |---|---|---|
-| AI Stylist | `candidate_retrieval` | READY 搭配库紧凑候选卡 |
+| AI Stylist | `candidate_retrieval` | READY 搭配库全量标签事实卡 |
 | AI Stylist | `user_requirement` | 上传补充要求、本次微调要求和冲突处理策略 |
 | AI Director | `styling_result` | 主推款理解、选中 outfit、选中服饰紧凑标签、质量信号 |
 | 分镜预览 | `shoot_script_result` | 全局导演、配饰、风险和 6 个镜头 |
 | 最终成片 | `current_shot_context` | 当前镜头、当前格子、选中 outfit、本镜头配饰和禁止项 |
 
-这套模型避免把 `styling_garments.ai_tags_json`、旧 candidate snapshots、旧 AI Styling prompt 或完整上游对象重复塞入下游 prompt。
+这套模型只在 AI Stylist 阶段提供搭配库 `ai_tags` 标签事实卡，避免把内部 id、旧 candidate snapshots、旧 AI Styling prompt 或完整上游对象重复塞入下游 prompt。
+
+Prompt 正文只来自 `prompt_configs`。后端不内置 Prompt 默认值，不在 `init_db()` 或迁移中 seed Prompt 配置，也不在缺配置时使用代码字符串 fallback；缺失配置应作为配置错误处理。

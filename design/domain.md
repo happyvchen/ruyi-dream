@@ -84,12 +84,12 @@ ShootScript 不重新选择库内搭配服饰；它只能基于已选 StylingPla
 
 | 阶段 | Runtime | 只传什么 |
 |---|---|---|
-| AI Stylist | `candidate_retrieval` | 未归档 READY 搭配库紧凑候选卡 |
+| AI Stylist | `candidate_retrieval` | 未归档 READY 搭配库全量标签事实卡 |
 | AI Director | `styling_result` + `model_identity_context` | 主推款理解、选中 outfit、选中服饰紧凑标签、质量信号、模特身份契约 |
 | 分镜预览 | `shoot_script_result` + `image_reference_manifest` | 全局导演、风险、配饰、6 个镜头、参考图角色和事实源 |
 | 最终成片 | `current_shot_context` + `image_reference_manifest` | 当前镜头、当前格子、选中 outfit、本镜头配饰、禁止项、参考图角色和事实源 |
 
-审计快照可以保存完整 request/response、素材快照和 provider 调试信息，但下游 prompt 不应透传完整上游 JSON、完整候选池、旧 prompt 或历史 response。
+审计快照可以保存完整 request/response、素材快照和 provider 调试信息，但下游 prompt 不应透传完整上游 JSON、旧 prompt 或历史 response。Prompt 正文只来自 `prompt_configs`；后端不内置、seed 或 fallback Prompt 默认值。
 
 ### 归档 vs 彻底删除
 
@@ -469,7 +469,7 @@ StylingPlan 至少表达：
 
 关键规则：
 
-- AI Stylist 接收未归档 READY 搭配库的紧凑候选卡；当前设计不由后端做审美排序、候选评分或质量改选。
+- AI Stylist 接收未归档 READY 搭配库的全量标签事实卡；当前设计不由后端做预筛选、审美排序、候选评分或质量改选。
 - Prompt 可见标识是 `code`，后端可执行关联必须用 `id`。
 - `selected_material_ids` 可以为空。空库内搭配是合法优秀结果，不是失败。
 - 非 READY、已归档、已删除、重复 ID、非法 ID 和当前主推款自己都不能作为选中搭配。
@@ -752,7 +752,7 @@ Image-2 单次最多 10 张输入图。MVP 选图策略：
 - 不把用户训练成 prompt 工程师。
 - 不把 Image-2 当成选搭策略、标签体系、历史状态机或商品事实判断器。
 - 不把全量搭配服饰库图片直接喂给 Gemini。
-- 不把完整 `ai_tags_json`、历史 prompt、旧候选快照和 provider response 透传到下游 prompt。
+- 搭配库 `ai_tags` 标签事实只进入 AI Stylist 阶段；不把历史 prompt、旧候选快照和 provider response 透传到下游 prompt。
 - 不把 `selected_material_ids` 当成 StylingPlan 的全部内容。
 - 不让 `category = unknown` 的主推款直接进入正常品类 ShotPlan。
 - 不让当前主推款自己作为搭配服饰候选。
