@@ -52,6 +52,7 @@ AI_STYLING_PROMPT_CONFIG_KEY = "assembly.ai_styling"
 SHOOT_SCRIPT_PROMPT_CONFIG_KEY = "assembly.shoot_script"
 AUTO_RUN_TARGET_FINAL = "FINAL"
 MAX_USER_REQUIREMENT_CHARS = 800
+MAX_USER_INPUT_CHARS = 800
 
 
 AI_STYLIST_SYSTEM_INSTRUCTION = """你是 Lily 品牌 AI 摄影棚的 AI Stylist。
@@ -222,11 +223,17 @@ class StylingGarmentImageUpdateRequest(BaseModel):
 
 class GenerationTaskUpdateRequest(BaseModel):
     name: str | None = None
+    heroProductInfo: str | None = None
     userRequirement: str | None = None
 
 
 class GenerationStylingRequest(BaseModel):
+    userInstruction: str | None = None
     userRequirement: str | None = None
+
+
+class GenerationStageInstructionRequest(BaseModel):
+    userInstruction: str | None = None
 
 
 class GenerationTaskImageUpdateRequest(BaseModel):
@@ -1366,6 +1373,7 @@ def purge_styling_garment(db: Any, garment_id: int, code: str) -> tuple[list[int
 @app.post("/api/generation-tasks")
 async def create_generation_task(
     name: str | None = Form(None),
+    heroProductInfo: str | None = Form(None),
     userRequirement: str | None = Form(None),
     files: list[UploadFile] = File(...),
 ) -> dict[str, Any]:
@@ -1377,11 +1385,11 @@ async def create_generation_task(
     prefix = join_key("generation-tasks", f"{sanitize_name(task_name) or 'task'}-{uuid4().hex[:8]}")
     assets = await save_uploads_as_media_assets(files, prefix)
     timestamp = now_iso()
-    user_requirement_text = normalize_user_requirement_text(userRequirement)
+    hero_product_info_text = normalize_user_input_text(heroProductInfo if heroProductInfo is not None else userRequirement)
     with get_db() as db:
         cursor = db.execute(
-            "INSERT INTO generation_tasks (name, user_requirement_text, status, created_at, updated_at) VALUES (?, ?, 'DRAFT', ?, ?)",
-            (task_name, user_requirement_text, timestamp, timestamp),
+            "INSERT INTO generation_tasks (name, hero_product_info_text, user_requirement_text, status, created_at, updated_at) VALUES (?, ?, ?, 'DRAFT', ?, ?)",
+            (task_name, hero_product_info_text, hero_product_info_text, timestamp, timestamp),
         )
         task_id = int(cursor.lastrowid)
         for index, asset in enumerate(assets):
@@ -1605,25 +1613,34 @@ def get_generation_tasks_delete_impact(payload: DeleteImpactRequest) -> dict[str
 
 @app.patch("/api/generation-tasks/{task_id}")
 def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -> dict[str, Any]:
-    if payload.name is None and not payload_has_field(payload, "userRequirement"):
+    if payload.name is None and not payload_has_field(payload, "heroProductInfo") and not payload_has_field(payload, "userRequirement"):
         return {"item": get_generation_task_by_id(task_id)}
     with get_db() as db:
         row = db.execute("SELECT * FROM generation_tasks WHERE id = ? AND deleted_at IS NULL", (task_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="生成任务不存在")
-        ensure_generation_task_draft(row)
+        ensure_generation_task_editable(row)
         updates: list[str] = []
         values: list[Any] = []
+        affects_input = False
         if payload.name is not None:
             updates.append("name = ?")
             values.append(payload.name.strip() or "未命名任务")
-        if payload_has_field(payload, "userRequirement"):
+        if payload_has_field(payload, "heroProductInfo") or payload_has_field(payload, "userRequirement"):
+            hero_info = payload.heroProductInfo if payload_has_field(payload, "heroProductInfo") else payload.userRequirement
+            normalized = normalize_user_input_text(hero_info)
+            updates.append("hero_product_info_text = ?")
+            values.append(normalized)
             updates.append("user_requirement_text = ?")
-            values.append(normalize_user_requirement_text(payload.userRequirement))
+            values.append(normalized)
+            affects_input = row["status"] != "DRAFT"
         updates.append("updated_at = ?")
-        values.append(now_iso())
+        timestamp = now_iso()
+        values.append(timestamp)
         values.append(task_id)
         db.execute(f"UPDATE generation_tasks SET {', '.join(updates)} WHERE id = ?", values)
+        if affects_input:
+            mark_generation_task_input_changed(db, task_id, timestamp, "hero_product_input_updated")
     return {"item": get_generation_task_by_id(task_id)}
 
 
@@ -1632,9 +1649,66 @@ def ensure_generation_task_draft(task: Any) -> None:
         raise HTTPException(status_code=409, detail="任务进入 AI 阶段后不可修改主推款输入")
 
 
+def ensure_generation_task_editable(task: Any) -> None:
+    ensure_generation_task_not_running(task)
+
+
 def ensure_generation_task_not_running(task: Any) -> None:
     if task["status"] in RUNNING_GENERATION_TASK_STATUSES:
         raise HTTPException(status_code=409, detail="任务正在生成中，请先取消生成")
+
+
+def mark_generation_task_input_changed(db: Any, task_id: int, timestamp: str, reason: str) -> None:
+    db.execute(
+        """
+        UPDATE generation_stylings
+        SET status = 'SUPERSEDED', updated_at = ?
+        WHERE task_id = ? AND status = 'SUCCEEDED'
+        """,
+        (timestamp, task_id),
+    )
+    db.execute(
+        """
+        UPDATE generation_shoot_scripts
+        SET status = 'SUPERSEDED', superseded_at = COALESCE(superseded_at, ?), updated_at = ?
+        WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
+        """,
+        (timestamp, timestamp, task_id),
+    )
+    db.execute(
+        """
+        UPDATE generation_previews
+        SET status = 'SUPERSEDED', updated_at = ?
+        WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
+        """,
+        (timestamp, task_id),
+    )
+    db.execute(
+        """
+        UPDATE generation_result_sets
+        SET status = 'SUPERSEDED', updated_at = ?
+        WHERE task_id = ? AND status IN ('RUNNING', 'SUCCEEDED', 'PARTIAL', 'FAILED')
+        """,
+        (timestamp, task_id),
+    )
+    db.execute(
+        """
+        UPDATE generation_tasks
+        SET status = 'READY_FOR_STYLING',
+            current_input_version_id = NULL,
+            active_styling_id = NULL,
+            active_shoot_script_id = NULL,
+            active_preview_id = NULL,
+            active_storyboard_preview_id = NULL,
+            active_result_set_id = NULL,
+            auto_run_target = NULL,
+            auto_run_requested_at = NULL,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (timestamp, task_id),
+    )
+    log_event(db, "generation_task", task_id, "input_changed", {"reason": reason})
 
 
 def cancel_running_task_attempts(db: Any, task_id: int, timestamp: str) -> None:
@@ -1749,7 +1823,7 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[di
 @app.post("/api/generation-tasks/{task_id}/images")
 async def add_generation_task_images(task_id: int, files: list[UploadFile] = File(...)) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
-    ensure_generation_task_draft(task)
+    ensure_generation_task_editable(task)
     with get_db() as db:
         count = int(db.execute(
             "SELECT COUNT(*) AS count FROM generation_task_images WHERE task_id = ? AND deleted_at IS NULL",
@@ -1774,6 +1848,8 @@ async def add_generation_task_images(task_id: int, files: list[UploadFile] = Fil
                 (task_id, asset["id"], max_sort + offset, timestamp, timestamp),
             )
         db.execute("UPDATE generation_tasks SET updated_at = ? WHERE id = ?", (timestamp, task_id))
+        if task["status"] != "DRAFT":
+            mark_generation_task_input_changed(db, task_id, timestamp, "hero_product_images_added")
     return {"item": get_generation_task_by_id(task_id)}
 
 
@@ -1790,16 +1866,19 @@ async def replace_generation_task_image(image_id: int, file: UploadFile = File(.
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="主推款图片不存在")
-    ensure_generation_task_draft(row)
+    ensure_generation_task_editable(row)
     prefix = join_key("generation-tasks", f"{sanitize_name(row['name']) or 'task'}-{uuid4().hex[:8]}")
     asset = (await save_uploads_as_media_assets([file], prefix))[0]
     with get_db() as db:
+        timestamp = now_iso()
         db.execute(
             "UPDATE generation_task_images SET media_asset_id = ?, updated_at = ? WHERE id = ?",
-            (asset["id"], now_iso(), image_id),
+            (asset["id"], timestamp, image_id),
         )
         release_media_asset_if_unreferenced(db, int(row["previous_media_asset_id"]))
-        db.execute("UPDATE generation_tasks SET updated_at = ? WHERE id = ?", (now_iso(), row["task_id"]))
+        db.execute("UPDATE generation_tasks SET updated_at = ? WHERE id = ?", (timestamp, row["task_id"]))
+        if row["status"] != "DRAFT":
+            mark_generation_task_input_changed(db, int(row["task_id"]), timestamp, "hero_product_image_replaced")
     return {"item": get_generation_task_by_id(int(row["task_id"]))}
 
 
@@ -1816,13 +1895,16 @@ def update_generation_task_image(image_id: int, payload: GenerationTaskImageUpda
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="主推款图片不存在")
-        ensure_generation_task_draft(row)
+        ensure_generation_task_editable(row)
         if payload.sortOrder is not None:
+            timestamp = now_iso()
             db.execute(
                 "UPDATE generation_task_images SET sort_order = ?, updated_at = ? WHERE id = ?",
-                (payload.sortOrder, now_iso(), image_id),
+                (payload.sortOrder, timestamp, image_id),
             )
-            db.execute("UPDATE generation_tasks SET updated_at = ? WHERE id = ?", (now_iso(), row["task_id"]))
+            db.execute("UPDATE generation_tasks SET updated_at = ? WHERE id = ?", (timestamp, row["task_id"]))
+            if row["status"] != "DRAFT":
+                mark_generation_task_input_changed(db, int(row["task_id"]), timestamp, "hero_product_image_reordered")
     return {"item": get_generation_task_by_id(int(row["task_id"]))}
 
 
@@ -1839,7 +1921,7 @@ def delete_generation_task_image(image_id: int) -> dict[str, Any]:
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="主推款图片不存在")
-        ensure_generation_task_draft(row)
+        ensure_generation_task_editable(row)
         count = int(db.execute(
             "SELECT COUNT(*) AS count FROM generation_task_images WHERE task_id = ? AND deleted_at IS NULL",
             (row["task_id"],),
@@ -1851,6 +1933,8 @@ def delete_generation_task_image(image_id: int) -> dict[str, Any]:
         db.execute("DELETE FROM generation_task_images WHERE id = ?", (image_id,))
         release_media_asset_if_unreferenced(db, media_asset_id)
         db.execute("UPDATE generation_tasks SET updated_at = ? WHERE id = ?", (timestamp, row["task_id"]))
+        if row["status"] != "DRAFT":
+            mark_generation_task_input_changed(db, int(row["task_id"]), timestamp, "hero_product_image_deleted")
     return {"item": get_generation_task_by_id(int(row["task_id"]))}
 
 
@@ -1875,7 +1959,7 @@ async def select_generation_styling(task_id: int, request: Request, payload: Gen
         task_id,
         include_debug=admin_debug_for_request(request),
         trigger="manual_step",
-        styling_adjustment=payload.userRequirement if payload else None,
+        user_instruction=payload.userInstruction if payload and payload_has_field(payload, "userInstruction") else (payload.userRequirement if payload else None),
     )
 
 
@@ -1883,7 +1967,7 @@ async def run_select_generation_styling(
     task_id: int,
     include_debug: bool = False,
     trigger: str = "manual_step",
-    styling_adjustment: str | None = None,
+    user_instruction: str | None = None,
 ) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     if task["status"] not in {
@@ -1897,14 +1981,18 @@ async def run_select_generation_styling(
         "CANCELLED",
     }:
         raise HTTPException(status_code=409, detail="当前任务状态不能智能选搭")
-    user_requirement_context = build_user_requirement_context(task, styling_adjustment)
-    input_version_id = create_generation_input_version(task_id, user_requirement_context)
+    hero_product_info_context = build_hero_product_info_context(task)
+    user_instruction_context = build_stage_user_instruction_context("ai_styling", user_instruction)
+    user_requirement_context = build_user_requirement_context(task, user_instruction)
+    input_version_id = create_generation_input_version(task_id, hero_product_info_context)
     with get_db() as db:
         db.execute("UPDATE generation_tasks SET status = 'STYLING_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
     attempt_id = create_attempt("generation_styling", task_id, "gemini")
     try:
         input_row, candidate_snapshot, request_snapshot = build_ai_stylist_context(input_version_id)
         request_snapshot["invocation"] = {"mode": trigger, "target": "styling"}
+        request_snapshot["hero_product_info"] = hero_product_info_context
+        request_snapshot["ai_styling_user_instruction"] = user_instruction_context
         request_snapshot["user_requirement"] = user_requirement_context
         update_attempt_request_snapshot(attempt_id, request_snapshot)
         if generation_task_or_attempt_cancelled(task_id, attempt_id):
@@ -1948,11 +2036,11 @@ async def run_select_generation_styling(
             """
             INSERT INTO generation_stylings
               (task_id, input_version_id, source_material_ids_json, candidate_material_ids_json,
-               candidate_retrieval_snapshot_json, user_requirement_json,
+               candidate_retrieval_snapshot_json, user_requirement_json, user_instruction_json,
                selected_material_ids_json, selected_material_snapshot_json,
                styling_plan_json, hero_understanding_json, outfit_candidates_json, critic_scores_json,
                rejected_candidates_json, reason_summary, warnings_json, status, attempt_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUCCEEDED', ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUCCEEDED', ?, ?, ?)
             """,
             (
                 task_id,
@@ -1961,6 +2049,7 @@ async def run_select_generation_styling(
                 dumps(candidate_snapshot.get("candidate_material_ids") or []),
                 dumps(candidate_snapshot),
                 dumps(user_requirement_context),
+                dumps(user_instruction_context),
                 dumps(selected_ids),
                 dumps(selected_snapshot),
                 dumps(styling_plan),
@@ -2023,11 +2112,16 @@ async def run_select_generation_styling(
 
 
 @app.post("/api/generation-tasks/{task_id}/shoot-script")
-async def create_generation_shoot_script(task_id: int, request: Request) -> dict[str, Any]:
-    return await run_create_generation_shoot_script(task_id, include_debug=admin_debug_for_request(request), trigger="manual_step")
+async def create_generation_shoot_script(task_id: int, request: Request, payload: GenerationStageInstructionRequest | None = None) -> dict[str, Any]:
+    return await run_create_generation_shoot_script(
+        task_id,
+        include_debug=admin_debug_for_request(request),
+        trigger="manual_step",
+        user_instruction=payload.userInstruction if payload else None,
+    )
 
 
-async def run_create_generation_shoot_script(task_id: int, include_debug: bool = False, trigger: str = "manual_step") -> dict[str, Any]:
+async def run_create_generation_shoot_script(task_id: int, include_debug: bool = False, trigger: str = "manual_step", user_instruction: str | None = None) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     styling_id = task["active_styling_id"]
     input_version_id = task["current_input_version_id"]
@@ -2042,6 +2136,7 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
     }:
         raise HTTPException(status_code=409, detail="请先完成 AI 智能选搭")
     timestamp = now_iso()
+    user_instruction_context = build_stage_user_instruction_context("shoot_script", user_instruction)
     with get_db() as db:
         transition = db.execute(
             """
@@ -2060,8 +2155,8 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
             """
             INSERT INTO generation_shoot_scripts
               (task_id, input_version_id, styling_id, status, script_json, summary_json,
-               styling_risks_json, accessory_adjustments_json, created_at, updated_at)
-            VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?)
+               styling_risks_json, accessory_adjustments_json, user_instruction_json, created_at, updated_at)
+            VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -2071,6 +2166,7 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
                 dumps({}),
                 dumps([]),
                 dumps([]),
+                dumps(user_instruction_context),
                 timestamp,
                 timestamp,
             ),
@@ -2080,7 +2176,7 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
     with get_db() as db:
         db.execute("UPDATE generation_shoot_scripts SET active_attempt_id = ? WHERE id = ?", (attempt_id, shoot_script_id))
     try:
-        request_snapshot = build_shoot_script_request_snapshot(task_id, int(styling_id), int(input_version_id))
+        request_snapshot = build_shoot_script_request_snapshot(task_id, int(styling_id), int(input_version_id), user_instruction_context)
         try:
             request_snapshot = attach_shoot_script_prompt_snapshot(request_snapshot)
         except RuntimeError:
@@ -2277,11 +2373,16 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
 
 
 @app.post("/api/generation-tasks/{task_id}/preview")
-async def create_generation_preview(task_id: int, request: Request) -> dict[str, Any]:
-    return await run_create_generation_preview(task_id, include_debug=admin_debug_for_request(request), trigger="manual_step")
+async def create_generation_preview(task_id: int, request: Request, payload: GenerationStageInstructionRequest | None = None) -> dict[str, Any]:
+    return await run_create_generation_preview(
+        task_id,
+        include_debug=admin_debug_for_request(request),
+        trigger="manual_step",
+        user_instruction=payload.userInstruction if payload else None,
+    )
 
 
-async def run_create_generation_preview(task_id: int, include_debug: bool = False, trigger: str = "manual_step") -> dict[str, Any]:
+async def run_create_generation_preview(task_id: int, include_debug: bool = False, trigger: str = "manual_step", user_instruction: str | None = None) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     styling_id = task["active_styling_id"]
     shoot_script_id = task["active_shoot_script_id"] if "active_shoot_script_id" in task.keys() else None
@@ -2295,13 +2396,14 @@ async def run_create_generation_preview(task_id: int, include_debug: bool = Fals
         db.execute("UPDATE generation_tasks SET status = 'PREVIEW_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
     shot_plans = get_task_shot_plans_by_script(int(shoot_script_id))
     timestamp = now_iso()
+    user_instruction_context = build_stage_user_instruction_context("storyboard_preview", user_instruction)
     with get_db() as db:
         cursor = db.execute(
             """
-            INSERT INTO generation_previews (task_id, styling_id, shoot_script_id, input_version_id, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'RUNNING', ?, ?)
+            INSERT INTO generation_previews (task_id, styling_id, shoot_script_id, input_version_id, user_instruction_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'RUNNING', ?, ?)
             """,
-            (task_id, styling_id, shoot_script_id, input_version_id, timestamp, timestamp),
+            (task_id, styling_id, shoot_script_id, input_version_id, dumps(user_instruction_context), timestamp, timestamp),
         )
         preview_id = int(cursor.lastrowid)
     attempt_id = create_attempt("generation_preview", preview_id, "image-2")
@@ -2429,8 +2531,14 @@ async def run_preview_generation(
 
 
 @app.post("/api/generation-tasks/{task_id}/generate-final")
-async def generate_final_images(task_id: int, request: Request) -> dict[str, Any]:
-    return await run_generate_final_images(task_id, include_debug=admin_debug_for_request(request), trigger="manual_step", continue_existing=False)
+async def generate_final_images(task_id: int, request: Request, payload: GenerationStageInstructionRequest | None = None) -> dict[str, Any]:
+    return await run_generate_final_images(
+        task_id,
+        include_debug=admin_debug_for_request(request),
+        trigger="manual_step",
+        continue_existing=False,
+        user_instruction=payload.userInstruction if payload else None,
+    )
 
 
 @app.post("/api/generation-tasks/{task_id}/auto-run-final")
@@ -2461,6 +2569,7 @@ async def run_generate_final_images(
     include_debug: bool = False,
     trigger: str = "manual_step",
     continue_existing: bool = False,
+    user_instruction: str | None = None,
 ) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     if (
@@ -2492,14 +2601,15 @@ async def run_generate_final_images(
                 )
             return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
     timestamp = now_iso()
+    user_instruction_context = build_stage_user_instruction_context("final_image", user_instruction)
     with get_db() as db:
         db.execute("UPDATE generation_tasks SET status = 'FINAL_RUNNING', updated_at = ? WHERE id = ?", (timestamp, task_id))
         cursor = db.execute(
             """
-            INSERT INTO generation_result_sets (task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'RUNNING', ?, ?)
+            INSERT INTO generation_result_sets (task_id, input_version_id, styling_id, shoot_script_id, preview_id, user_instruction_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'RUNNING', ?, ?)
             """,
-            (task_id, input_version_id, styling_id, shoot_script_id, preview_id, timestamp, timestamp),
+            (task_id, input_version_id, styling_id, shoot_script_id, preview_id, dumps(user_instruction_context), timestamp, timestamp),
         )
         result_set_id = int(cursor.lastrowid)
         db.execute(
@@ -2520,10 +2630,10 @@ async def run_generate_final_images(
             image_cursor = db.execute(
                 """
                 INSERT INTO generation_result_images_new
-                  (result_set_id, shot_plan_id, sort_order, status, created_at, updated_at)
-                VALUES (?, ?, ?, 'QUEUED', ?, ?)
+                  (result_set_id, shot_plan_id, sort_order, user_instruction_json, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'QUEUED', ?, ?)
                 """,
-                (result_set_id, shot["id"], shot["sort_order"], timestamp, timestamp),
+                (result_set_id, shot["id"], shot["sort_order"], dumps(user_instruction_context), timestamp, timestamp),
             )
             image_ids.append(int(image_cursor.lastrowid))
     schedule_background_generation(
@@ -2681,7 +2791,7 @@ def reconcile_final_result_set(db: Any, result_set_id: int, task_id: int | None 
 
 
 @app.post("/api/generation-result-images-new/{image_id}/retry")
-async def retry_new_result_image(image_id: int, request: Request) -> dict[str, Any]:
+async def retry_new_result_image(image_id: int, request: Request, payload: GenerationStageInstructionRequest | None = None) -> dict[str, Any]:
     with get_db() as db:
         row = db.execute(
             """
@@ -2700,14 +2810,17 @@ async def retry_new_result_image(image_id: int, request: Request) -> dict[str, A
         if row["status"] in {"QUEUED", "RUNNING"}:
             raise HTTPException(status_code=409, detail="当前结果图仍在生成中")
         timestamp = now_iso()
+        user_instruction_context = build_stage_user_instruction_context("final_image", payload.userInstruction if payload else None)
         db.execute(
             """
             UPDATE generation_result_images_new
             SET status = 'QUEUED', active_attempt_id = NULL,
-                locked_by = NULL, locked_until = NULL, updated_at = ?
+                locked_by = NULL, locked_until = NULL,
+                user_instruction_json = ?,
+                updated_at = ?
             WHERE id = ?
             """,
-            (timestamp, image_id),
+            (dumps(user_instruction_context), timestamp, image_id),
         )
         db.execute("UPDATE generation_result_sets SET status = 'RUNNING', updated_at = ? WHERE id = ?", (timestamp, row["result_set_id"]))
         db.execute(
@@ -3867,14 +3980,64 @@ def row_value(row: Any, key: str, default: Any = None) -> Any:
     return default
 
 
-def normalize_user_requirement_text(value: str | None) -> str:
+def normalize_user_input_text(value: str | None) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
-    return text[:MAX_USER_REQUIREMENT_CHARS]
+    return text[:MAX_USER_INPUT_CHARS]
+
+
+def normalize_user_requirement_text(value: str | None) -> str:
+    return normalize_user_input_text(value)
+
+
+def build_hero_product_info_context(task: Any) -> dict[str, Any]:
+    text = normalize_user_input_text(
+        row_value(task, "hero_product_info_text", None)
+        if row_value(task, "hero_product_info_text", None) is not None
+        else row_value(task, "user_requirement_text", "")
+    )
+    return {
+        "schema_version": "hero-product-info-v1",
+        "info": text,
+        "priority_policy": {
+            "fact_role": "用户补充的商品事实和业务要求，可贯穿后续工作流。",
+            "cannot_override": [
+                "主推款图片可见商品事实",
+                "搭配服饰库 READY 候选事实",
+                "数字模特身份契约",
+                "Lily 品牌硬边界",
+                "输出 schema",
+                "安全规则",
+            ],
+            "conflict_handling": "与不可覆盖边界冲突时，以边界为准并说明处理。",
+        },
+    }
+
+
+def build_stage_user_instruction_context(stage: str, instruction: str | None = None) -> dict[str, Any]:
+    text = normalize_user_input_text(instruction)
+    return {
+        "schema_version": "stage-user-instruction-v1",
+        "stage": stage,
+        "instruction": text,
+        "priority_policy": {
+            "user_instruction_priority": "本步骤用户介入要求高于默认阶段偏好。",
+            "cannot_override": [
+                "主推款图片商品事实",
+                "商品信息事实",
+                "搭配服饰库 READY 候选事实",
+                "数字模特身份契约",
+                "Lily 品牌硬边界",
+                "输出 schema",
+                "安全规则",
+            ],
+            "conflict_handling": "无法满足时必须说明冲突原因、未满足项和替代处理。",
+        },
+    }
 
 
 def build_user_requirement_context(task: Any, styling_adjustment: str | None = None) -> dict[str, Any]:
-    upload_requirement = normalize_user_requirement_text(row_value(task, "user_requirement_text", ""))
-    adjustment = normalize_user_requirement_text(styling_adjustment)
+    upload_requirement = normalize_user_input_text(row_value(task, "hero_product_info_text", None) or row_value(task, "user_requirement_text", ""))
+    adjustment = normalize_user_input_text(styling_adjustment)
     combined_parts = [part for part in (upload_requirement, adjustment) if part]
     return {
         "schema_version": "user-requirement-v1",
@@ -3904,6 +4067,18 @@ def append_user_requirement_block(prompt: str, context: dict[str, Any] | None) -
     if not has_user_requirement(context) or "【本次用户要求】" in prompt:
         return prompt
     return f"{prompt.rstrip()}\n\n【本次用户要求】\n{dumps(context)}\n"
+
+
+def has_user_input(context: dict[str, Any] | None) -> bool:
+    if not context:
+        return False
+    return bool(context.get("info") or context.get("instruction") or context.get("combined_requirement"))
+
+
+def append_runtime_input_block(prompt: str, title: str, context: dict[str, Any] | None) -> str:
+    if not has_user_input(context) or title in prompt:
+        return prompt
+    return f"{prompt.rstrip()}\n\n【{title}】\n{dumps(context)}\n"
 
 
 async def generation_poller_loop() -> None:
@@ -5055,7 +5230,7 @@ def get_generation_task_row(task_id: int) -> Any:
     return row
 
 
-def create_generation_input_version(task_id: int, user_requirement_context: dict[str, Any] | None = None) -> int:
+def create_generation_input_version(task_id: int, hero_product_info_context: dict[str, Any] | None = None) -> int:
     task = get_generation_task_row(task_id)
     with get_db() as db:
         image_rows = db.execute(
@@ -5082,10 +5257,19 @@ def create_generation_input_version(task_id: int, user_requirement_context: dict
         cursor = db.execute(
             """
             INSERT INTO generation_task_input_versions
-              (task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, user_requirement_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+              (task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, user_requirement_json, hero_product_info_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (task_id, version_number, task["name"], dumps(snapshot), dumps(model_snapshot), dumps(user_requirement_context or build_user_requirement_context(task)), timestamp),
+            (
+                task_id,
+                version_number,
+                task["name"],
+                dumps(snapshot),
+                dumps(model_snapshot),
+                dumps(build_user_requirement_context(task)),
+                dumps(hero_product_info_context or build_hero_product_info_context(task)),
+                timestamp,
+            ),
         )
         return int(cursor.lastrowid)
 
@@ -5338,10 +5522,13 @@ def attach_ai_stylist_prompt_snapshot(request_snapshot: dict[str, Any], candidat
         AI_STYLING_PROMPT_CONFIG_KEY,
         {
             "candidate_retrieval": dumps(candidate_retrieval_for_prompt(candidate_snapshot)),
+            "hero_product_info": dumps(request_snapshot.get("hero_product_info") or {}),
+            "ai_styling_user_instruction": dumps(request_snapshot.get("ai_styling_user_instruction") or {}),
             "user_requirement": dumps(request_snapshot.get("user_requirement") or {}),
         },
     )
-    prompt = append_user_requirement_block(prompt, request_snapshot.get("user_requirement") if isinstance(request_snapshot.get("user_requirement"), dict) else {})
+    prompt = append_runtime_input_block(prompt, "runtime.hero_product_info", request_snapshot.get("hero_product_info") if isinstance(request_snapshot.get("hero_product_info"), dict) else {})
+    prompt = append_runtime_input_block(prompt, "runtime.ai_styling_user_instruction", request_snapshot.get("ai_styling_user_instruction") if isinstance(request_snapshot.get("ai_styling_user_instruction"), dict) else {})
     return {**request_snapshot, "promptConfigKey": AI_STYLING_PROMPT_CONFIG_KEY, "prompt": prompt}
 
 
@@ -5394,6 +5581,7 @@ def build_phase_one_brand_style_evidence() -> list[dict[str, Any]]:
 
 def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
     user_requirement = loads(row_value(input_row, "user_requirement_json"), build_user_requirement_context({}))
+    hero_product_info = loads(row_value(input_row, "hero_product_info_json"), build_hero_product_info_context({}))
     return {
         "schema_version": "ai-stylist-request-v1",
         "model": settings.gemini_model,
@@ -5403,9 +5591,12 @@ def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[s
             "taskId": input_row["task_id"],
             "nameSnapshot": input_row["name_snapshot"],
             "imageSnapshot": loads(input_row["image_snapshot_json"], []),
+            "heroProductInfo": hero_product_info,
             "userRequirement": user_requirement,
         },
         "candidate_retrieval": candidate_snapshot,
+        "hero_product_info": hero_product_info,
+        "ai_styling_user_instruction": {},
         "user_requirement": user_requirement,
         "prompt_rule_source": AI_STYLING_PROMPT_CONFIG_KEY,
     }
@@ -6209,7 +6400,7 @@ def get_shoot_config_category_options() -> list[dict[str, Any]]:
     ]
 
 
-def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_version_id: int) -> dict[str, Any]:
+def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_version_id: int, user_instruction_context: dict[str, Any] | None = None) -> dict[str, Any]:
     styling_plan = get_styling_plan_by_id(styling_id)
     shoot_config = get_active_shoot_config()
     with get_db() as db:
@@ -6222,6 +6413,8 @@ def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_ver
         row_value(styling_row, "user_requirement_json"),
         loads(row_value(input_row, "user_requirement_json"), build_user_requirement_context({})),
     )
+    hero_product_info = loads(row_value(input_row, "hero_product_info_json"), build_hero_product_info_context({}))
+    shoot_script_user_instruction = user_instruction_context or build_stage_user_instruction_context("shoot_script")
     return {
         "schema_version": "shoot-script-request-v1",
         "model": settings.gemini_model,
@@ -6232,8 +6425,11 @@ def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_ver
             "name_snapshot": input_row["name_snapshot"] if input_row else "",
             "image_snapshot": loads(input_row["image_snapshot_json"], []) if input_row else [],
             "model_snapshot": loads(input_row["model_snapshot_json"], {}) if input_row and "model_snapshot_json" in input_row.keys() else {},
+            "hero_product_info": hero_product_info,
         },
         "styling_id": styling_id,
+        "hero_product_info": hero_product_info,
+        "shoot_script_user_instruction": shoot_script_user_instruction,
         "user_requirement": user_requirement,
         "styling_plan": styling_plan,
         "styling_result": styling_result_for_prompt(styling_plan, selected_snapshot),
@@ -6356,11 +6552,14 @@ def attach_shoot_script_prompt_snapshot(request_snapshot: dict[str, Any]) -> dic
         SHOOT_SCRIPT_PROMPT_CONFIG_KEY,
         {
             "styling_result": dumps(request_snapshot.get("styling_result") or styling_result_for_prompt(request_snapshot.get("styling_plan") if isinstance(request_snapshot.get("styling_plan"), dict) else {})),
+            "hero_product_info": dumps(request_snapshot.get("hero_product_info") or {}),
+            "shoot_script_user_instruction": dumps(request_snapshot.get("shoot_script_user_instruction") or {}),
             "user_requirement": dumps(request_snapshot.get("user_requirement") or {}),
             "model_identity_context": dumps(model_identity_context),
         },
     )
-    prompt = append_user_requirement_block(prompt, request_snapshot.get("user_requirement") if isinstance(request_snapshot.get("user_requirement"), dict) else {})
+    prompt = append_runtime_input_block(prompt, "runtime.hero_product_info", request_snapshot.get("hero_product_info") if isinstance(request_snapshot.get("hero_product_info"), dict) else {})
+    prompt = append_runtime_input_block(prompt, "runtime.shoot_script_user_instruction", request_snapshot.get("shoot_script_user_instruction") if isinstance(request_snapshot.get("shoot_script_user_instruction"), dict) else {})
     prompt = append_model_identity_contract(prompt, model_identity_context)
     return {**request_snapshot, "promptConfigKey": SHOOT_SCRIPT_PROMPT_CONFIG_KEY, "prompt": prompt}
 
@@ -6868,24 +7067,48 @@ def build_new_preview_task_package(task_id: int, styling_id: int, shoot_script_i
     styling_plan = get_styling_plan_by_id(styling_id)
     shoot_script = get_shoot_script_json_by_id(shoot_script_id)
     image_inputs = build_new_image_inputs(task_id, styling_id, include_preview=False)
+    with get_db() as db:
+        input_row = db.execute(
+            "SELECT gtiv.* FROM generation_task_input_versions gtiv JOIN generation_stylings gs ON gs.input_version_id = gtiv.id WHERE gs.id = ?",
+            (styling_id,),
+        ).fetchone()
+        preview_row = db.execute(
+            "SELECT user_instruction_json FROM generation_previews WHERE task_id = ? AND styling_id = ? AND shoot_script_id = ? ORDER BY id DESC LIMIT 1",
+            (task_id, styling_id, shoot_script_id),
+        ).fetchone()
+    hero_product_info = loads(row_value(input_row, "hero_product_info_json"), build_hero_product_info_context({}))
+    storyboard_preview_user_instruction = loads(row_value(preview_row, "user_instruction_json"), build_stage_user_instruction_context("storyboard_preview"))
     return {
         "generation": {"stage": "preview_grid"},
-        "prompt": build_new_preview_prompt(shot_plans, styling_plan, shoot_script, image_inputs),
+        "prompt": build_new_preview_prompt(shot_plans, styling_plan, shoot_script, image_inputs, hero_product_info, storyboard_preview_user_instruction),
         "imageInputs": image_inputs,
+        "heroProductInfo": hero_product_info,
+        "storyboardPreviewUserInstruction": storyboard_preview_user_instruction,
         "stylingPlan": styling_plan,
         "shootScript": shoot_script,
         "shotPlans": shot_plans,
     }
 
 
-def build_new_preview_prompt(shot_plans: list[dict[str, Any]], styling_plan: dict[str, Any], shoot_script: dict[str, Any], image_inputs: list[dict[str, Any]] | None = None) -> str:
+def build_new_preview_prompt(
+    shot_plans: list[dict[str, Any]],
+    styling_plan: dict[str, Any],
+    shoot_script: dict[str, Any],
+    image_inputs: list[dict[str, Any]] | None = None,
+    hero_product_info: dict[str, Any] | None = None,
+    storyboard_preview_user_instruction: dict[str, Any] | None = None,
+) -> str:
     prompt = render_prompt_template(
         "assembly.storyboard_preview",
         {
             "shoot_script_result": dumps(shoot_script_result_for_prompt(shoot_script)),
             "image_reference_manifest": dumps(image_reference_manifest_for_prompt(image_inputs or [])),
+            "hero_product_info": dumps(hero_product_info or {}),
+            "storyboard_preview_user_instruction": dumps(storyboard_preview_user_instruction or {}),
         },
     )
+    prompt = append_runtime_input_block(prompt, "runtime.hero_product_info", hero_product_info or {})
+    prompt = append_runtime_input_block(prompt, "runtime.storyboard_preview_user_instruction", storyboard_preview_user_instruction or {})
     return append_image_reference_manifest(prompt, image_inputs or [])
 
 
@@ -6893,7 +7116,8 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
     with get_db() as db:
         row = db.execute(
             """
-            SELECT gri.*, gsp.plan_json, gp.preview_asset_id, grs.styling_id, grs.shoot_script_id
+            SELECT gri.*, gsp.plan_json, gp.preview_asset_id, grs.styling_id, grs.shoot_script_id,
+                   grs.input_version_id, grs.user_instruction_json AS result_set_user_instruction_json
             FROM generation_result_images_new gri
             JOIN generation_result_sets grs ON grs.id = gri.result_set_id
             JOIN generation_previews gp ON gp.id = grs.preview_id
@@ -6906,24 +7130,45 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
     styling_plan = get_styling_plan_by_id(int(row["styling_id"]))
     shoot_script = get_shoot_script_json_by_id(int(row["shoot_script_id"])) if row["shoot_script_id"] else {}
     image_inputs = build_new_image_inputs(task_id, int(row["styling_id"]), include_preview=True, preview_asset_id=row["preview_asset_id"])
+    with get_db() as db:
+        input_row = db.execute("SELECT hero_product_info_json FROM generation_task_input_versions WHERE id = ?", (row["input_version_id"],)).fetchone()
+    hero_product_info = loads(row_value(input_row, "hero_product_info_json"), build_hero_product_info_context({}))
+    final_image_user_instruction = loads(
+        row_value(row, "user_instruction_json"),
+        loads(row_value(row, "result_set_user_instruction_json"), build_stage_user_instruction_context("final_image")),
+    )
     return {
         "generation": {"stage": "final_image"},
-        "prompt": build_new_final_prompt(int(row["sort_order"]), shot_plan, styling_plan, shoot_script, image_inputs),
+        "prompt": build_new_final_prompt(int(row["sort_order"]), shot_plan, styling_plan, shoot_script, image_inputs, hero_product_info, final_image_user_instruction),
         "imageInputs": image_inputs,
+        "heroProductInfo": hero_product_info,
+        "finalImageUserInstruction": final_image_user_instruction,
         "stylingPlan": styling_plan,
         "shootScript": shoot_script,
         "shotPlan": shot_plan,
     }
 
 
-def build_new_final_prompt(shot_index: int, shot_plan: dict[str, Any], styling_plan: dict[str, Any], shoot_script: dict[str, Any], image_inputs: list[dict[str, Any]] | None = None) -> str:
+def build_new_final_prompt(
+    shot_index: int,
+    shot_plan: dict[str, Any],
+    styling_plan: dict[str, Any],
+    shoot_script: dict[str, Any],
+    image_inputs: list[dict[str, Any]] | None = None,
+    hero_product_info: dict[str, Any] | None = None,
+    final_image_user_instruction: dict[str, Any] | None = None,
+) -> str:
     prompt = render_prompt_template(
         "assembly.final_image",
         {
             "current_shot_context": dumps(current_shot_context_for_prompt(shot_index, shot_plan, styling_plan, shoot_script)),
             "image_reference_manifest": dumps(image_reference_manifest_for_prompt(image_inputs or [])),
+            "hero_product_info": dumps(hero_product_info or {}),
+            "final_image_user_instruction": dumps(final_image_user_instruction or {}),
         },
     )
+    prompt = append_runtime_input_block(prompt, "runtime.hero_product_info", hero_product_info or {})
+    prompt = append_runtime_input_block(prompt, "runtime.final_image_user_instruction", final_image_user_instruction or {})
     return append_image_reference_manifest(prompt, image_inputs or [])
 
 
@@ -7136,6 +7381,11 @@ def render_prompt_template(key: str, runtime: dict[str, Any] | None = None) -> s
 def sample_prompt_runtime() -> dict[str, Any]:
     return {
         "candidate_retrieval": dumps([{"code": "LOOK-A", "ai_tags": {"一级品类": ["上装"], "色彩": ["白色"], "版型": ["合体"], "风格语义": "轻量上装服务主推裤装。"}}]),
+        "hero_product_info": dumps({"info": "夏季主推裤装，重点展示腰头和裤脚。"}),
+        "ai_styling_user_instruction": dumps({"stage": "ai_styling", "instruction": "不要厚重外套，优先轻盈通勤。"}),
+        "shoot_script_user_instruction": dumps({"stage": "shoot_script", "instruction": "腰线相关镜头要更明确。"}),
+        "storyboard_preview_user_instruction": dumps({"stage": "storyboard_preview", "instruction": "分镜姿态更舒展。"}),
+        "final_image_user_instruction": dumps({"stage": "final_image", "instruction": "成片整体更干净，减少配饰存在感。"}),
         "user_requirement": dumps({"combined_requirement": "重点展示腰线，避免厚重外套。", "priority_policy": {"conflict_handling": "无法满足时说明原因。"}}),
         "styling_result": dumps({"hero_understanding": {"category": "裤装"}, "selected_material_codes": ["LOOK-A"], "reason_summary": "轻量上装服务主推裤装。"}),
         "model_identity_context": dumps({"identity_contract": {"model_id": "Face-01", "must_preserve": ["same face", "same hair"]}}),
@@ -7149,7 +7399,12 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
     return [
         {"name": "segment.brand_info", "scope": "segment", "description": "品牌信息分段 Prompt"},
         {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服饰库 READY 服饰的全量 AI 标签事实卡"},
-        {"name": "runtime.user_requirement", "scope": "runtime", "description": "上传补充要求、本次微调要求和冲突处理策略"},
+        {"name": "runtime.hero_product_info", "scope": "runtime", "description": "跟随主推款输入版本冻结的商品信息和业务事实补充"},
+        {"name": "runtime.ai_styling_user_instruction", "scope": "runtime", "description": "AI 智能选搭本次执行的用户介入要求"},
+        {"name": "runtime.shoot_script_user_instruction", "scope": "runtime", "description": "拍摄剧本本次执行的用户介入要求"},
+        {"name": "runtime.storyboard_preview_user_instruction", "scope": "runtime", "description": "分镜预览本次执行的用户介入要求"},
+        {"name": "runtime.final_image_user_instruction", "scope": "runtime", "description": "最终成片或单张重生本次执行的用户介入要求"},
+        {"name": "runtime.user_requirement", "scope": "runtime", "description": "兼容旧模板的合成用户要求上下文"},
         {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭导演上下文，使用搭配服饰 code 标识"},
         {"name": "runtime.model_identity_context", "scope": "runtime", "description": "AI Director 使用的数字模特身份契约和参考图上下文"},
         {"name": "runtime.image_reference_manifest", "scope": "runtime", "description": "Image-2 输入参考图序号、角色和事实源优先级"},
@@ -7616,6 +7871,7 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
         "id": row["id"],
         "name": row["name"],
         "status": row["status"],
+        "heroProductInfo": row_value(row, "hero_product_info_text") or row_value(row, "user_requirement_text", ""),
         "userRequirement": row_value(row, "user_requirement_text", ""),
         "currentInputVersionId": row["current_input_version_id"],
         "activeStylingId": row["active_styling_id"],
@@ -7689,6 +7945,7 @@ def get_input_version(input_version_id: int | None) -> dict[str, Any] | None:
         "nameSnapshot": row["name_snapshot"],
         "imageSnapshot": loads(row["image_snapshot_json"], []),
         "modelSnapshot": loads(row["model_snapshot_json"], {}) if "model_snapshot_json" in row.keys() else {},
+        "heroProductInfo": loads(row_value(row, "hero_product_info_json"), build_hero_product_info_context({})),
         "userRequirement": loads(row_value(row, "user_requirement_json"), build_user_requirement_context({})),
         "heroVisualSummary": row["hero_visual_summary"],
         "createdAt": row["created_at"],
@@ -7713,6 +7970,7 @@ def get_generation_styling(styling_id: int | None, include_debug: bool = False) 
         "candidateMaterialIds": loads(row["candidate_material_ids_json"], []) if "candidate_material_ids_json" in row.keys() else [],
         "selectedMaterialIds": loads(row["selected_material_ids_json"], []),
         "selectedMaterials": loads(row["selected_material_snapshot_json"], []),
+        "userInstruction": loads(row_value(row, "user_instruction_json"), {}),
         "userRequirement": loads(row_value(row, "user_requirement_json"), {}),
         "stylingPlan": styling_plan,
         "heroUnderstanding": loads(row["hero_understanding_json"], {}) if "hero_understanding_json" in row.keys() else styling_plan.get("hero_understanding", {}),
@@ -7768,6 +8026,7 @@ def get_generation_shoot_script(shoot_script_id: int | None, include_debug: bool
         "status": row["status"],
         "script": script,
         "summary": loads(row["summary_json"], {}) if "summary_json" in row.keys() else script.get("user_visible_summary", {}),
+        "userInstruction": loads(row_value(row, "user_instruction_json"), {}),
         "stylingRisks": loads(row["styling_risks_json"], []) if "styling_risks_json" in row.keys() else script.get("styling_risks", []),
         "accessoryAdjustments": loads(row["accessory_adjustments_json"], []) if "accessory_adjustments_json" in row.keys() else script.get("accessory_adjustments", []),
         "resolvedAccessories": script.get("resolved_accessories", []),
@@ -7794,6 +8053,7 @@ def get_generation_preview(preview_id: int | None) -> dict[str, Any] | None:
         "id": row["id"],
         "status": row["status"],
         "shootScriptId": row["shoot_script_id"] if "shoot_script_id" in row.keys() else None,
+        "userInstruction": loads(row_value(row, "user_instruction_json"), {}),
         "asset": get_media_asset_by_id(row["preview_asset_id"]),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
@@ -7816,11 +8076,13 @@ def get_generation_result_set(result_set_id: int | None) -> dict[str, Any] | Non
         "status": row["status"],
         "shootScriptId": row["shoot_script_id"] if "shoot_script_id" in row.keys() else None,
         "previewId": row["preview_id"] if "preview_id" in row.keys() else None,
+        "userInstruction": loads(row_value(row, "user_instruction_json"), {}),
         "images": [
             {
                 "id": image["id"],
                 "sortOrder": image["sort_order"],
                 "status": image["status"],
+                "userInstruction": loads(row_value(image, "user_instruction_json"), {}),
                 "asset": get_media_asset_by_id(image["current_asset_id"]),
                 "activeAttemptId": image["active_attempt_id"],
                 "activeAttempt": get_attempt_summary(image["active_attempt_id"]),

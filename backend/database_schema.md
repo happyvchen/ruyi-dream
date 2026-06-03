@@ -29,18 +29,21 @@
 
 ## 生成主链路
 
-`generation_tasks` 是用户任务根节点。草稿阶段可维护 `generation_task_images` 和 `user_requirement_text`；进入 AI 后创建 `generation_task_input_versions`，冻结主推款图片、任务名、默认数字模特快照和本次用户要求。
+`generation_tasks` 是用户任务根节点。上传主推款阶段可维护 `generation_task_images` 和 `hero_product_info_text`；进入 AI 后创建 `generation_task_input_versions`，冻结主推款图片、任务名、默认数字模特快照和商品信息。任务进入 AI 阶段后仍允许用户返回上传页调整主推款图片或商品信息；一旦调整，旧阶段 artifact 和 attempt 继续保留，但当前 active 指针清空，任务回到待选搭状态。
 
 一键成片自动推进由 `generation_tasks.auto_run_target` 和 `auto_run_requested_at` 表达。当前唯一目标值为 `FINAL`。该字段只表示“继续自动推进到成片”的意图，不替代 `status`、阶段 artifact 状态或 active 指针；失败、完成、取消后清空。
 
 AI Stylist 写入 `generation_stylings`：
 
 - `candidate_retrieval_snapshot_json` 保存本次 READY 搭配库的全量标签事实卡和 code/id 映射。
-- `user_requirement_json` 保存本次 AI Stylist 实际读取的上传补充要求、微调要求和冲突处理策略。
+- `user_instruction_json` 保存本次 AI Stylist 实际读取的用户介入要求和冲突处理策略。
+- `user_requirement_json` 保留为旧合成用户要求兼容字段。
 - `styling_plan_json` 保存完整 StylingPlan，包括候选方案、被拒方案、Aesthetic Critic 诊断、质量信号和选中 outfit。
 - `selected_material_snapshot_json` 保存被选中搭配服饰的商品快照和图片快照。
 
 AI Director 写入 `generation_shoot_scripts`，并派生 6 条 `generation_shot_plans`。第 6 条只用于分镜预览参考，不进入最终成片。
+
+`generation_shoot_scripts.user_instruction_json`、`generation_previews.user_instruction_json`、`generation_result_sets.user_instruction_json` 和 `generation_result_images_new.user_instruction_json` 分别保存对应阶段本次执行的用户介入要求。每次重生会新建或更新本次执行记录，并在 `generation_attempts.request_snapshot_json` 中保留同一份 runtime 上下文。
 
 Image-2 阶段写入：
 
@@ -54,7 +57,12 @@ Image-2 阶段写入：
 `prompt_configs` 只保存由 Prompt 维护写入的模板正文和分段。后端只负责建表、读写、渲染和保存快照；不会在初始化、迁移或缺配置时存储、seed 或 fallback 任何 Prompt 默认值。运行时占位符由后端提供：
 
 - `runtime.candidate_retrieval`：AI Stylist 使用的未归档 READY 搭配库全量标签事实卡，只暴露业务 `code`、`ai_tags` 和必要复核/人工标记。
-- `runtime.user_requirement`：AI Stylist 使用的本次用户要求和冲突处理策略。
+- `runtime.hero_product_info`：跟随主推款输入版本冻结的商品信息和业务事实补充。
+- `runtime.ai_styling_user_instruction`：AI 智能选搭本次执行的用户介入要求。
+- `runtime.shoot_script_user_instruction`：拍摄剧本本次执行的用户介入要求。
+- `runtime.storyboard_preview_user_instruction`：分镜预览本次执行的用户介入要求。
+- `runtime.final_image_user_instruction`：最终成片或单张重生本次执行的用户介入要求。
+- `runtime.user_requirement`：兼容旧模板的合成用户要求上下文。
 - `runtime.styling_result`：AI Director 使用的 StylingPlan 导演上下文。
 - `runtime.shoot_script_result`：分镜预览使用的 ShootScript 上下文。
 - `runtime.current_shot_context`：单张最终成片上下文。
@@ -70,5 +78,6 @@ Image-2 阶段写入：
 | `027` | `drop_legacy_generation_tables` | 删除旧货号、旧 planner、旧 generation run/image、旧品牌模板、旧 AI policy 表 |
 | `028` | `add_generation_task_auto_run` | 为 `generation_tasks` 增加一键成片自动推进字段 |
 | `029` | `add_generation_user_requirements` | 为 `generation_tasks`、`generation_task_input_versions` 和 `generation_stylings` 增加用户要求字段 |
+| `030` | `split_generation_user_inputs` | 增加商品信息和各阶段用户介入要求字段，并从旧用户要求字段做一次性回填 |
 
 新库直接创建当前 schema；旧库执行迁移链后只保留新版表并追加当前字段。旧业务数据不做兼容读取。

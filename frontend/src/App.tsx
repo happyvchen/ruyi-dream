@@ -343,6 +343,11 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   const [step, setStep] = useState<StudioStep>(0)
   const [taskItems, setTaskItems] = useState<GenerationTask[]>(records.slice(0, 10))
   const [aiLogDialog, setAiLogDialog] = useState<{ title: string; ownerTypes: string[]; records: AICallRecord[]; loading: boolean; error?: string } | null>(null)
+  const [heroProductInfo, setHeroProductInfo] = useState('')
+  const [aiStylingInstruction, setAiStylingInstruction] = useState('')
+  const [shootScriptInstruction, setShootScriptInstruction] = useState('')
+  const [storyboardInstruction, setStoryboardInstruction] = useState('')
+  const [finalImageInstruction, setFinalImageInstruction] = useState('')
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
   const isAdmin = role === 'admin'
@@ -373,6 +378,11 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     }, { refresh: 'background' })
   }
   useEffect(() => setStep(currentStep), [task?.id, task?.status])
+  useEffect(() => setHeroProductInfo(task?.heroProductInfo ?? task?.userRequirement ?? ''), [task?.id, task?.heroProductInfo, task?.userRequirement])
+  useEffect(() => setAiStylingInstruction(stageInstructionText(task?.styling?.userInstruction)), [task?.id, task?.styling?.id])
+  useEffect(() => setShootScriptInstruction(stageInstructionText(task?.shootScript?.userInstruction)), [task?.id, task?.shootScript?.id])
+  useEffect(() => setStoryboardInstruction(stageInstructionText((task?.storyboardPreview ?? task?.preview)?.userInstruction)), [task?.id, (task?.storyboardPreview ?? task?.preview)?.id])
+  useEffect(() => setFinalImageInstruction(stageInstructionText(task?.resultSet?.userInstruction)), [task?.id, task?.resultSet?.id])
   useEffect(() => {
     let cancelled = false
     void api.listRecords({ limit: 10, offset: 0 }).then((result) => {
@@ -406,11 +416,11 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
         <div className="panel studio-main">
           {task && <AutoRunProgress task={task} />}
           <StepRail active={visibleStep} max={currentStep} onSelect={setStep} />
-          {visibleStep === 0 && <UploadHeroStep task={task} setTask={setTask} run={run} />}
-          {visibleStep === 1 && <StylingStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
-          {visibleStep === 2 && <ShootScriptStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
-          {visibleStep === 3 && <PreviewStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
-          {visibleStep === 4 && <FinalStep task={task} setTask={setTask} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+          {visibleStep === 0 && <UploadHeroStep task={task} setTask={setTask} run={run} heroProductInfo={heroProductInfo} />}
+          {visibleStep === 1 && <StylingStep task={task} setTask={setTask} run={run} userInstruction={aiStylingInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+          {visibleStep === 2 && <ShootScriptStep task={task} setTask={setTask} run={run} userInstruction={shootScriptInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+          {visibleStep === 3 && <PreviewStep task={task} setTask={setTask} run={run} userInstruction={storyboardInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+          {visibleStep === 4 && <FinalStep task={task} setTask={setTask} run={run} userInstruction={finalImageInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
         </div>
         <aside className="panel task-rail">
           <h3>任务摘要</h3>
@@ -419,7 +429,15 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
               <ThumbGrid assets={(task.images ?? []).map((item) => item.asset)} compact />
               <Meta label="任务" value={task.name} />
               <Meta label="状态" value={statusText(task.status)} />
-              {task.userRequirement && <Meta label="本次要求" value={task.userRequirement} />}
+              {task.heroProductInfo && <Meta label="商品信息" value={task.heroProductInfo} />}
+              <StageUserInputModule
+                step={visibleStep}
+                task={task}
+                value={stageInputValue(visibleStep, { heroProductInfo, aiStylingInstruction, shootScriptInstruction, storyboardInstruction, finalImageInstruction })}
+                onChange={(value) => updateStageInput(visibleStep, value, { setHeroProductInfo, setAiStylingInstruction, setShootScriptInstruction, setStoryboardInstruction, setFinalImageInstruction })}
+                onSaveHeroInfo={() => void run('保存商品信息中...', () => api.updateTask(task.id, { heroProductInfo }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}
+                disabled={isTaskRunning(task) || !!task.autoRunTarget}
+              />
               <Meta label="搭配服饰" value={`${task.styling?.selectedMaterials?.length ?? 0} 件`} />
               <Meta label="最终图" value={`${task.resultSet?.images?.filter((i) => i.status === 'SUCCEEDED').length ?? 0}/5`} />
               {isTaskRunning(task) && (
@@ -429,7 +447,18 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
               )}
               <AIOperationList operations={visibleTaskOperations(task, localOperations)} compact />
             </>
-          ) : <EmptyState title="暂无任务" text="上传主推款后会在这里形成拍摄任务。" />}
+          ) : (
+            <>
+              <StageUserInputModule
+                step={0}
+                task={null}
+                value={heroProductInfo}
+                onChange={setHeroProductInfo}
+                disabled={false}
+              />
+              <EmptyState title="暂无任务" text="上传主推款后会在这里形成拍摄任务。" />
+            </>
+          )}
           <h3>最近任务</h3>
           <div className="mini-list">
             {taskItems.map((item) => (
@@ -513,10 +542,9 @@ function AutoRunProgress({ task }: { task: GenerationTask }) {
   )
 }
 
-function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any }) {
+function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any; heroProductInfo: string }) {
   const [files, setFiles] = useState<File[]>([])
   const [name, setName] = useState('')
-  const [userRequirement, setUserRequirement] = useState('')
 
   function addHeroFiles(nextFiles: File[]) {
     const imageFiles = nextFiles
@@ -568,19 +596,12 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
                 <span>推荐 3-5 张，最多只允许 8 张用于创建任务。</span>
                 {files.length > 8 && <strong>当前超过 8 张，请删除或调整后再创建</strong>}
               </div>
-              <RequirementEditor
-                value={userRequirement}
-                onChange={setUserRequirement}
-                title="补充服装信息或拍摄要求（选填）"
-                placeholder="例如：这条裤子是夏季主推，重点展示腰头和裤脚，避免厚重外套。"
-              />
               <FileThumbList files={files} onChange={setFiles} />
               <div className="inline-form">
-                <button className="primary" disabled={!files.length || files.length > 8 || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, files, userRequirement), (r: { item: GenerationTask }) => {
+                <button className="primary" disabled={!files.length || files.length > 8 || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, files, heroProductInfo), (r: { item: GenerationTask }) => {
                   setTask(r.item)
                   setFiles([])
                   setName('')
-                  setUserRequirement('')
                   window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: r.item.id }))
                 }, { refresh: 'background' })}>
                   <ImagePlus size={16} /> 创建任务
@@ -590,18 +611,16 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
           )}
         </>
       )}
-      {task && task.status !== 'DRAFT' && <CurrentTaskCard task={task} />}
+      {task && task.status !== 'DRAFT' && <HeroDraftEditor task={task} setTask={setTask} run={run} />}
     </div>
   )
 }
 
 function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask: (task: GenerationTask) => void; run: any }) {
   const [name, setName] = useState(task.name)
-  const [userRequirement, setUserRequirement] = useState(task.userRequirement ?? '')
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
 
   useEffect(() => setName(task.name), [task.id, task.name])
-  useEffect(() => setUserRequirement(task.userRequirement ?? ''), [task.id, task.userRequirement])
 
   async function move(index: number, direction: -1 | 1) {
     const images = task.images ?? []
@@ -615,10 +634,10 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
 
   return (
     <div className="hero-draft">
-      <div className="section-head"><strong>当前草稿</strong><span className="status draft">待确认</span></div>
+      <div className="section-head"><strong>主推款图片</strong><span className="status draft">{task.status === 'DRAFT' ? '待确认' : '可调整'}</span></div>
       <div className="inline-form">
         <input value={name} onChange={(event) => setName(event.target.value)} placeholder="任务名称" />
-        <button className="secondary" disabled={name.trim() === task.name && userRequirement.trim() === (task.userRequirement ?? '').trim()} onClick={() => void run('保存拍摄信息中...', () => api.updateTask(task.id, { name, userRequirement }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>保存信息</button>
+        <button className="secondary" disabled={name.trim() === task.name} onClick={() => void run('保存任务名称中...', () => api.updateTask(task.id, { name }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>保存名称</button>
         <label className="secondary">
           <ImagePlus size={16} /> 追加图片
           <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => {
@@ -627,12 +646,6 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
           }} />
         </label>
       </div>
-      <RequirementEditor
-        value={userRequirement}
-        onChange={setUserRequirement}
-        title="补充服装信息或拍摄要求（选填）"
-        placeholder="例如：这条裤子是夏季主推，重点展示腰头和裤脚，避免厚重外套。"
-      />
       <div className="draft-image-grid">
         {(task.images ?? []).map((image, index) => (
           <div className="saved-image-card" key={image.id}>
@@ -656,10 +669,12 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
           </div>
         ))}
       </div>
-      <p className="edit-hint">确认后可进入智能选搭；系统会保留本次主推款和默认数字模特信息用于后续生成。</p>
-      <button className="primary" onClick={() => void run('确认主推款输入中...', () => api.readyTask(task.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>
-        确认并进入智能选搭
-      </button>
+      <p className="edit-hint">{task.status === 'DRAFT' ? '确认后可进入智能选搭；系统会保留本次主推款和默认数字模特信息用于后续生成。' : '调整图片会保留旧过程记录，并让当前任务回到待选搭状态。'}</p>
+      {task.status === 'DRAFT' && (
+        <button className="primary" onClick={() => void run('确认主推款输入中...', () => api.readyTask(task.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>
+          确认并进入智能选搭
+        </button>
+      )}
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </div>
   )
@@ -685,6 +700,76 @@ function RequirementEditor({ value, onChange, title, placeholder }: { value: str
   )
 }
 
+type StudioStageInputState = {
+  heroProductInfo: string
+  aiStylingInstruction: string
+  shootScriptInstruction: string
+  storyboardInstruction: string
+  finalImageInstruction: string
+}
+
+type StudioStageInputSetters = {
+  setHeroProductInfo: (value: string) => void
+  setAiStylingInstruction: (value: string) => void
+  setShootScriptInstruction: (value: string) => void
+  setStoryboardInstruction: (value: string) => void
+  setFinalImageInstruction: (value: string) => void
+}
+
+function stageInputValue(step: StudioStep, state: StudioStageInputState) {
+  if (step === 0) return state.heroProductInfo
+  if (step === 1) return state.aiStylingInstruction
+  if (step === 2) return state.shootScriptInstruction
+  if (step === 3) return state.storyboardInstruction
+  return state.finalImageInstruction
+}
+
+function updateStageInput(step: StudioStep, value: string, setters: StudioStageInputSetters) {
+  if (step === 0) setters.setHeroProductInfo(value)
+  else if (step === 1) setters.setAiStylingInstruction(value)
+  else if (step === 2) setters.setShootScriptInstruction(value)
+  else if (step === 3) setters.setStoryboardInstruction(value)
+  else setters.setFinalImageInstruction(value)
+}
+
+function stageInstructionText(value?: Record<string, unknown> | null) {
+  return stringValue(value?.instruction)
+}
+
+function StageUserInputModule({ step, task, value, onChange, onSaveHeroInfo, disabled = false }: {
+  step: StudioStep
+  task: GenerationTask | null
+  value: string
+  onChange: (value: string) => void
+  onSaveHeroInfo?: () => void
+  disabled?: boolean
+}) {
+  const isHeroInfo = step === 0
+  const labels = [
+    { title: '商品信息', hint: '跟随主推款输入版本，后续步骤会把它作为商品事实补充。', placeholder: '例如：夏季主推阔腿裤，重点展示腰头、垂坠裤腿和裤脚，避免厚重外套。' },
+    { title: '智能选搭要求', hint: '执行 AI 智能选搭时生效。', placeholder: '例如：不要厚重外套，改成更轻盈的通勤搭配。' },
+    { title: '拍摄剧本要求', hint: '生成或重生拍摄剧本时生效。', placeholder: '例如：增加腰线和裤脚展示，动作更利落。' },
+    { title: '分镜预览要求', hint: '生成或重生分镜预览时生效。', placeholder: '例如：分镜姿态更舒展，背景保持简洁。' },
+    { title: '成片生成要求', hint: '整组成片或单张重生时生效。', placeholder: '例如：整体更干净，减少配饰存在感，保持棚拍电商质感。' },
+  ][step]
+  const latestText = isHeroInfo ? (task?.heroProductInfo ?? task?.userRequirement ?? '') : value
+  return (
+    <div className="side-input-module">
+      <div>
+        <strong>{labels.title}</strong>
+        <span>{labels.hint}</span>
+      </div>
+      <textarea value={value} maxLength={800} disabled={disabled} onChange={(event) => onChange(event.target.value)} placeholder={labels.placeholder} />
+      <div className="side-input-actions">
+        <em>{value.length}/800</em>
+        {isHeroInfo && task && (
+          <button className="secondary" type="button" disabled={disabled || value.trim() === latestText.trim()} onClick={onSaveHeroInfo}>保存</button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function StageHeader({ title, text, isAdmin, disabled, onOpenLogs }: {
   title: string
   text: string
@@ -704,22 +789,21 @@ function StageHeader({ title, text, isAdmin, disabled, onOpenLogs }: {
   )
 }
 
-function StylingStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
+function StylingStep({ task, setTask, run, userInstruction, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask) => void
   run: any
+  userInstruction: string
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
   isAdmin: boolean
   onOpenAICallLogs: (title: string, ownerTypes: string[]) => void
 }) {
-  const [refinement, setRefinement] = useState('')
   const locked = !!task && (isTaskRunning(task) || !!task.autoRunTarget)
   const canSelect = !!task && !locked && ['READY_FOR_STYLING', 'STYLING_READY', 'SCRIPT_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task.status)
   const hasStyling = !!task?.styling
   const operations = task ? operationFallbacks(task, localOperations, 'generation_styling') : []
-  useEffect(() => setRefinement(''), [task?.id])
   return (
     <div className="step-panel">
       <StageHeader title="AI 智能选搭" text="AI Stylist 会先理解主推款，再生成推荐造型方案；搭配服饰必须服务主推款展示。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('AI 智能选搭调用记录', ['generation_styling'])} />
@@ -727,14 +811,6 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
       {task?.styling ? (
         <StylingPlanSummary task={task} isAdmin={isAdmin} />
       ) : <EmptyState title="等待智能选搭" text="点击按钮后会冻结当前主推款输入版本。" />}
-      {task && hasStyling && (
-        <RequirementEditor
-          value={refinement}
-          onChange={setRefinement}
-          title="按要求微调（选填）"
-          placeholder="例如：不要外套，改成更轻盈的通勤搭配；减少包袋，突出主推款腰线。"
-        />
-      )}
       <button className="primary" disabled={!canSelect} onClick={() => task && void run(hasStyling ? '重新选搭中...' : '智能选搭中...', () => {
         startLocalOperation({ ownerType: 'generation_styling', ownerId: task.id, provider: 'gemini' })
         const previousTask = task
@@ -751,13 +827,12 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
           activePreviewId: null,
           activeResultSetId: null,
         })
-        return api.selectStyling(task.id, refinement).catch((error) => {
+        return api.selectStyling(task.id, userInstruction).catch((error) => {
           setTask(previousTask)
           throw error
         })
       }, (r: { item: GenerationTask }) => {
         clearLocalOperationsFor(['generation_styling'])
-        setRefinement('')
         setTask(r.item)
       }, { refresh: false })}>
         <WandSparkles size={16} /> {hasStyling ? '重新选搭' : 'AI 智能选搭'}
@@ -780,8 +855,8 @@ function StylingPlanSummary({ task, isAdmin }: { task: GenerationTask; isAdmin: 
   const aestheticDiagnosis = diagnosisItems(planValue<Record<string, unknown>>(selected ?? {}, 'aesthetic_diagnosis') ?? {})
   const rejected = styling.rejectedCandidates?.length ? styling.rejectedCandidates : planValue<Record<string, unknown>[]>(plan, 'rejected_candidates') ?? []
   const materialCodesById = materialCodeMap(styling, candidates, plan)
-  const requirement = (styling.userRequirement ?? task.inputVersion?.userRequirement ?? {}) as Record<string, unknown>
-  const requirementText = stringValue(requirement.combined_requirement)
+  const requirement = (styling.userInstruction ?? styling.userRequirement ?? {}) as Record<string, unknown>
+  const requirementText = stringValue(requirement.instruction ?? requirement.combined_requirement)
   const requirementResolution = (styling.userRequirementResolution && Object.keys(styling.userRequirementResolution).length ? styling.userRequirementResolution : planValue<Record<string, unknown>>(plan, 'user_requirement_resolution') ?? {}) as Record<string, unknown>
   const requirementItems = [
     ...stringList(requirementResolution.satisfied).map((item) => `已满足：${item}`),
@@ -806,7 +881,7 @@ function StylingPlanSummary({ task, isAdmin }: { task: GenerationTask; isAdmin: 
       <p>{styling.reasonSummary || stringValue(planValue(plan, 'reason_summary'))}</p>
       {requirementText && (
         <div className="requirement-summary">
-          <span>本次要求</span>
+          <span>用户介入要求</span>
           <strong>{requirementText}</strong>
           {requirementItems.length > 0 && requirementItems.slice(0, 5).map((item, index) => <em key={`${item}-${index}`}>{item}</em>)}
         </div>
@@ -932,10 +1007,11 @@ function diagnosisItems(value: Record<string, unknown>): string[] {
   }).filter(Boolean)
 }
 
-function ShootScriptStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
+function ShootScriptStep({ task, setTask, run, userInstruction, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask) => void
   run: any
+  userInstruction: string
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
@@ -965,7 +1041,7 @@ function ShootScriptStep({ task, setTask, run, localOperations, startLocalOperat
           activePreviewId: null,
           activeResultSetId: null,
         })
-        return api.createShootScript(task.id)
+        return api.createShootScript(task.id, userInstruction)
       }, (r: { item: GenerationTask }) => {
         clearLocalOperationsFor(['generation_shoot_script'])
         setTask(r.item)
@@ -1056,10 +1132,11 @@ function shootScriptShots(task: GenerationTask): Record<string, unknown>[] {
   return (task.shotPlans ?? []).map((item) => ({ shot_index: item.sortOrder, shot_role: item.shotType, ...(item.plan ?? {}) } as Record<string, unknown>))
 }
 
-function PreviewStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
+function PreviewStep({ task, setTask, run, userInstruction, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask) => void
   run: any
+  userInstruction: string
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
@@ -1085,7 +1162,7 @@ function PreviewStep({ task, setTask, run, localOperations, startLocalOperation,
       <button className="primary" disabled={!canPreview} onClick={() => task && void run(hasPreview ? '重新生成分镜预览中...' : '生成分镜预览中...', () => {
         startLocalOperation({ ownerType: 'generation_preview', ownerId: task.id, provider: 'image-2' })
         setTask({ ...task, status: 'PREVIEW_RUNNING', resultSet: null, activeResultSetId: null })
-        return api.previewTask(task.id)
+        return api.previewTask(task.id, userInstruction)
       }, (r: { item: GenerationTask }) => {
         clearLocalOperationsFor(['generation_preview'])
         setTask(r.item)
@@ -1097,10 +1174,11 @@ function PreviewStep({ task, setTask, run, localOperations, startLocalOperation,
   )
 }
 
-function FinalStep({ task, setTask, run, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
+function FinalStep({ task, setTask, run, userInstruction, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask) => void
   run: any
+  userInstruction: string
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[]) => void
@@ -1126,7 +1204,7 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
                 <img src={mediaUrl(assetPreviewSrc(image.asset))} />
               </button>
             ) : <div className="image-placeholder">{statusText(image.status)}{image.activeAttempt && isAttemptRunning(image.activeAttempt) && <small>{formatDuration(elapsedSeconds(image.activeAttempt.startedAt || image.updatedAt))}</small>}</div>}
-            <div><span>#{image.sortOrder}</span>{image.asset && <a href={mediaUrl(assetOriginalSrc(image.asset))} target="_blank" rel="noreferrer"><Download size={15} /></a>}{!['QUEUED', 'RUNNING'].includes(image.status) && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成"><RotateCcw size={14} /></button>}</div>
+            <div><span>#{image.sortOrder}</span>{image.asset && <a href={mediaUrl(assetOriginalSrc(image.asset))} target="_blank" rel="noreferrer"><Download size={15} /></a>}{!['QUEUED', 'RUNNING'].includes(image.status) && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id, userInstruction), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成"><RotateCcw size={14} /></button>}</div>
           </div>
         )) : <EmptyState title="尚未生成最终图" text="点击生成成片后会生成前 5 个镜头。" />}
       </div>
@@ -1135,7 +1213,7 @@ function FinalStep({ task, setTask, run, localOperations, startLocalOperation, c
           startLocalOperation({ ownerType: 'generation_result_image', ownerId: index, provider: 'image-2' })
         }
         setTask({ ...task, status: 'FINAL_RUNNING' })
-        return api.generateFinal(task.id)
+        return api.generateFinal(task.id, userInstruction)
       }, (r: { item: GenerationTask }) => {
         clearLocalOperationsFor(['generation_result_image'])
         setTask(r.item)
@@ -4177,7 +4255,7 @@ function formatDuration(seconds: number) {
 }
 
 function CurrentTaskCard({ task }: { task: GenerationTask }) {
-  return <div className="current-task"><ThumbGrid assets={(task.images ?? []).map((item) => item.asset)} /><Meta label="当前任务" value={task.name} /><Meta label="状态" value={statusText(task.status)} />{task.userRequirement && <Meta label="本次要求" value={task.userRequirement} />}</div>
+  return <div className="current-task"><ThumbGrid assets={(task.images ?? []).map((item) => item.asset)} /><Meta label="当前任务" value={task.name} /><Meta label="状态" value={statusText(task.status)} />{task.heroProductInfo && <Meta label="商品信息" value={task.heroProductInfo} />}</div>
 }
 
 function ThumbGrid({ assets, compact = false }: { assets: MediaAsset[]; compact?: boolean }) {

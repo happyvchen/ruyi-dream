@@ -13,6 +13,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("027", "drop_legacy_generation_tables", "migration_drop_legacy_generation_tables"),
     ("028", "add_generation_task_auto_run", "migration_add_generation_task_auto_run"),
     ("029", "add_generation_user_requirements", "migration_add_generation_user_requirements"),
+    ("030", "split_generation_user_inputs", "migration_split_generation_user_inputs"),
 )
 
 
@@ -134,6 +135,7 @@ def init_db() -> None:
               name TEXT NOT NULL,
               status TEXT NOT NULL DEFAULT 'DRAFT',
               user_requirement_text TEXT,
+              hero_product_info_text TEXT,
               current_input_version_id INTEGER,
               active_styling_id INTEGER,
               active_shoot_script_id INTEGER,
@@ -157,6 +159,7 @@ def init_db() -> None:
               image_snapshot_json TEXT NOT NULL,
               model_snapshot_json TEXT,
               user_requirement_json TEXT,
+              hero_product_info_json TEXT,
               hero_visual_summary TEXT,
               created_at TEXT NOT NULL,
               UNIQUE(task_id, version_number)
@@ -181,6 +184,7 @@ def init_db() -> None:
               candidate_material_ids_json TEXT,
               candidate_retrieval_snapshot_json TEXT,
               user_requirement_json TEXT,
+              user_instruction_json TEXT,
               library_adequacy_snapshot_json TEXT,
               selected_material_ids_json TEXT NOT NULL,
               selected_material_snapshot_json TEXT NOT NULL,
@@ -207,6 +211,7 @@ def init_db() -> None:
               summary_json TEXT,
               styling_risks_json TEXT,
               accessory_adjustments_json TEXT,
+              user_instruction_json TEXT,
               active_attempt_id INTEGER,
               locked_by TEXT,
               locked_until TEXT,
@@ -251,6 +256,7 @@ def init_db() -> None:
               styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
               shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id),
               input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
+              user_instruction_json TEXT,
               preview_asset_id INTEGER REFERENCES media_assets(id),
               status TEXT NOT NULL DEFAULT 'QUEUED',
               active_attempt_id INTEGER,
@@ -268,6 +274,7 @@ def init_db() -> None:
               styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
               shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id),
               preview_id INTEGER NOT NULL REFERENCES generation_previews(id),
+              user_instruction_json TEXT,
               status TEXT NOT NULL DEFAULT 'RUNNING',
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
@@ -280,6 +287,7 @@ def init_db() -> None:
               sort_order INTEGER NOT NULL,
               status TEXT NOT NULL DEFAULT 'QUEUED',
               current_asset_id INTEGER REFERENCES media_assets(id),
+              user_instruction_json TEXT,
               active_attempt_id INTEGER,
               locked_by TEXT,
               locked_until TEXT,
@@ -337,6 +345,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_drop_legacy_generation_tables": migration_drop_legacy_generation_tables,
         "migration_add_generation_task_auto_run": migration_add_generation_task_auto_run,
         "migration_add_generation_user_requirements": migration_add_generation_user_requirements,
+        "migration_split_generation_user_inputs": migration_split_generation_user_inputs,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -379,6 +388,26 @@ def migration_add_generation_user_requirements(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE generation_task_input_versions ADD COLUMN user_requirement_json TEXT")
     if not table_has_column(db, "generation_stylings", "user_requirement_json"):
         db.execute("ALTER TABLE generation_stylings ADD COLUMN user_requirement_json TEXT")
+
+
+def migration_split_generation_user_inputs(db: sqlite3.Connection) -> None:
+    if not table_has_column(db, "generation_tasks", "hero_product_info_text"):
+        db.execute("ALTER TABLE generation_tasks ADD COLUMN hero_product_info_text TEXT")
+        db.execute("UPDATE generation_tasks SET hero_product_info_text = user_requirement_text WHERE hero_product_info_text IS NULL AND user_requirement_text IS NOT NULL")
+    if not table_has_column(db, "generation_task_input_versions", "hero_product_info_json"):
+        db.execute("ALTER TABLE generation_task_input_versions ADD COLUMN hero_product_info_json TEXT")
+        db.execute("UPDATE generation_task_input_versions SET hero_product_info_json = user_requirement_json WHERE hero_product_info_json IS NULL AND user_requirement_json IS NOT NULL")
+    if not table_has_column(db, "generation_stylings", "user_instruction_json"):
+        db.execute("ALTER TABLE generation_stylings ADD COLUMN user_instruction_json TEXT")
+        db.execute("UPDATE generation_stylings SET user_instruction_json = user_requirement_json WHERE user_instruction_json IS NULL AND user_requirement_json IS NOT NULL")
+    if not table_has_column(db, "generation_shoot_scripts", "user_instruction_json"):
+        db.execute("ALTER TABLE generation_shoot_scripts ADD COLUMN user_instruction_json TEXT")
+    if not table_has_column(db, "generation_previews", "user_instruction_json"):
+        db.execute("ALTER TABLE generation_previews ADD COLUMN user_instruction_json TEXT")
+    if not table_has_column(db, "generation_result_sets", "user_instruction_json"):
+        db.execute("ALTER TABLE generation_result_sets ADD COLUMN user_instruction_json TEXT")
+    if not table_has_column(db, "generation_result_images_new", "user_instruction_json"):
+        db.execute("ALTER TABLE generation_result_images_new ADD COLUMN user_instruction_json TEXT")
 
 
 def table_has_column(db: sqlite3.Connection, table: str, column: str) -> bool:

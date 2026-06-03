@@ -33,20 +33,20 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。旧 `/a
 | 路径 | 方法 | 说明 |
 |---|---|---|
 | `/api/generation-tasks` | GET | 任务列表 |
-| `/api/generation-tasks` | POST | 创建草稿任务，可携带上传阶段补充服装信息或拍摄要求 |
+| `/api/generation-tasks` | POST | 创建草稿任务，可携带商品信息 |
 | `/api/generation-tasks/{id}` | GET | 任务详情 |
-| `/api/generation-tasks/{id}` | PATCH | 编辑草稿任务名和补充要求 |
+| `/api/generation-tasks/{id}` | PATCH | 编辑任务名和商品信息；修改商品信息会让非草稿任务回到待选搭 |
 | `/api/generation-tasks/{id}` | DELETE | 归档或删除任务 |
 | `/api/generation-tasks/{id}/images` | POST | 上传主推款图片 |
 | `/api/generation-task-images/{image_id}` | PATCH | 调整主推款图片 |
 | `/api/generation-task-images/{image_id}` | DELETE | 删除主推款图片 |
 | `/api/generation-tasks/{id}/ready` | POST | 冻结草稿，进入选搭 |
-| `/api/generation-tasks/{id}/select-styling` | POST | 调用 AI Stylist，可携带本次微调要求 |
-| `/api/generation-tasks/{id}/shoot-script` | POST | 调用 AI Director |
-| `/api/generation-tasks/{id}/preview` | POST | 生成 3x2 分镜预览 |
-| `/api/generation-tasks/{id}/generate-final` | POST | 并发生成前 5 张成片 |
+| `/api/generation-tasks/{id}/select-styling` | POST | 调用 AI Stylist，可携带本次用户介入要求 |
+| `/api/generation-tasks/{id}/shoot-script` | POST | 调用 AI Director，可携带本次用户介入要求 |
+| `/api/generation-tasks/{id}/preview` | POST | 生成 3x2 分镜预览，可携带本次用户介入要求 |
+| `/api/generation-tasks/{id}/generate-final` | POST | 并发生成前 5 张成片，可携带本次用户介入要求 |
 | `/api/generation-tasks/{id}/auto-run-final` | POST | 一键成片：复用已有有效中间结果并自动完成后续步骤 |
-| `/api/generation-result-images/{image_id}/regenerate` | POST | 重生单张最终图 |
+| `/api/generation-result-images-new/{image_id}/retry` | POST | 重生单张最终图，可携带本次用户介入要求 |
 | `/api/generation-records` | GET | 生成记录列表 |
 
 所有会调用外部 AI/provider 的端点都必须由用户动作触发；本地验证和测试不得调用外部 AI/provider。`auto-run-final` 由一次用户动作触发，但内部仍按现有阶段创建独立 attempt，并在 request snapshot 中记录 `invocation.mode = auto_run`。
@@ -76,7 +76,12 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。旧 `/a
 Prompt 配置可使用以下 runtime：
 
 - `runtime.candidate_retrieval`：AI Stylist 候选服饰紧凑卡片。
-- `runtime.user_requirement`：上传阶段补充要求、本次选搭微调要求和冲突处理规则。
+- `runtime.hero_product_info`：跟随主推款输入版本冻结的商品信息和业务事实补充。
+- `runtime.ai_styling_user_instruction`：AI 智能选搭本次执行的用户介入要求。
+- `runtime.shoot_script_user_instruction`：拍摄剧本本次执行的用户介入要求。
+- `runtime.storyboard_preview_user_instruction`：分镜预览本次执行的用户介入要求。
+- `runtime.final_image_user_instruction`：最终成片或单张重生本次执行的用户介入要求。
+- `runtime.user_requirement`：兼容旧模板的合成用户要求上下文。
 - `runtime.styling_result`：AI Director 使用的选搭导演上下文。
 - `runtime.model_identity_context`：AI Director 使用的数字模特身份契约和参考图上下文。
 - `runtime.shoot_script_result`：分镜预览使用的拍摄剧本上下文。
@@ -117,10 +122,13 @@ Prompt 配置可使用以下 runtime：
 - Image-2 prompt 只给当前阶段必要结构；最终单张图只给当前镜头上下文。
 - 第 6 个 ShotPlan 只用于分镜预览，不进入最终成片。
 
-## 用户要求输入原则
+## 用户输入原则
 
-- 用户要求不是自由长 prompt，而是业务语言中的服装事实补充、拍摄要求或选搭微调。
-- 用户要求优先于默认搭配偏好；不得覆盖商品图片事实、搭配库 READY 范围、数字模特身份契约、品牌硬边界、输出 schema 和安全规则。
-- 进入 AI Stylist 前，后端把上传阶段补充要求和本次微调要求合成为 `runtime.user_requirement` 并冻结到输入版本快照。
+- 用户输入不是自由长 prompt，而是业务语言中的服装事实补充、拍摄要求或选搭微调。
+- 用户输入分为两类：跟随主推款输入版本的 `heroProductInfo`，以及每个阶段本次执行的 `userInstruction`。
+- `heroProductInfo` 在创建/更新任务时保存到 `generation_tasks.hero_product_info_text`，进入 AI Stylist 前冻结到 `generation_task_input_versions.hero_product_info_json`。
+- `userInstruction` 在每次阶段执行时分别保存到阶段 artifact 的 `user_instruction_json`，并同步写入 `generation_attempts.request_snapshot_json`，用于追溯多次重生过程。
+- 用户要求优先于默认搭配偏好和导演偏好；不得覆盖商品图片事实、搭配库 READY 范围、数字模特身份契约、品牌硬边界、输出 schema 和安全规则。
 - AI Stylist 输出必须包含 `user_requirement_resolution`，说明已满足项、未满足项、冲突项和替代处理。
 - AI Director 不重新选择搭配服饰，只承接 StylingPlan 中已解析的用户要求和选搭结论。
+- 上传页允许在非运行中状态继续 CRUD 主推款图片；修改主推款输入会保留旧过程记录，但清空当前 active artifact 并让任务回到待选搭。
