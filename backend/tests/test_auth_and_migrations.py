@@ -143,6 +143,26 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertEqual(parsed["一级品类"], ["外套类"])
         self.assertEqual(parsed["风险点"], "弱光下颜色容易偏黑。")
 
+    def test_gemini_json_parser_uses_first_complete_object_before_extra_data(self) -> None:
+        main = importlib.import_module("app.main")
+
+        parsed = main.parse_gemini_json_object(
+            """
+            {
+              "schema_version": "styling-plan-v1",
+              "selected_outfit": {"title": "轻商务针织搭配"},
+              "reason_summary": "已完成选搭。"
+            }
+            {
+              "extra": "模型重复输出的第二段 JSON，不应导致 Extra data 失败。"
+            }
+            """
+        )
+
+        self.assertEqual(parsed["schema_version"], "styling-plan-v1")
+        self.assertEqual(parsed["selected_outfit"]["title"], "轻商务针织搭配")
+        self.assertNotIn("extra", parsed)
+
     def test_generation_debug_payloads_are_admin_only(self) -> None:
         db_module = importlib.import_module("app.db")
         main = importlib.import_module("app.main")
