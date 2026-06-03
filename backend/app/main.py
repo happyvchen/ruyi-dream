@@ -1735,6 +1735,11 @@ def generation_task_stage_instruction_column(stage: str) -> str | None:
     }.get(stage)
 
 
+def pending_generation_task_stage_instruction(task: Any, stage: str) -> str:
+    column = generation_task_stage_instruction_column(stage)
+    return normalize_user_input_text(row_value(task, column, "")) if column else ""
+
+
 def persist_generation_task_stage_instruction(db: Any, task_id: int, stage: str, instruction: str | None, timestamp: str) -> None:
     column = generation_task_stage_instruction_column(stage)
     if not column:
@@ -2015,14 +2020,15 @@ async def run_select_generation_styling(
         "CANCELLED",
     }:
         raise HTTPException(status_code=409, detail="当前任务状态不能智能选搭")
+    effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "ai_styling")
     hero_product_info_context = build_hero_product_info_context(task)
-    user_instruction_context = build_stage_user_instruction_context("ai_styling", user_instruction)
-    user_requirement_context = build_user_requirement_context(task, user_instruction)
+    user_instruction_context = build_stage_user_instruction_context("ai_styling", effective_user_instruction)
+    user_requirement_context = build_user_requirement_context(task, effective_user_instruction)
     input_version_id = create_generation_input_version(task_id, hero_product_info_context)
     with get_db() as db:
         timestamp = now_iso()
         if user_instruction is not None:
-            persist_generation_task_stage_instruction(db, task_id, "ai_styling", user_instruction, timestamp)
+            persist_generation_task_stage_instruction(db, task_id, "ai_styling", effective_user_instruction, timestamp)
         db.execute("UPDATE generation_tasks SET status = 'STYLING_RUNNING', updated_at = ? WHERE id = ?", (timestamp, task_id))
     attempt_id = create_attempt("generation_styling", task_id, "gemini")
     try:
@@ -2173,10 +2179,11 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
     }:
         raise HTTPException(status_code=409, detail="请先完成 AI 智能选搭")
     timestamp = now_iso()
-    user_instruction_context = build_stage_user_instruction_context("shoot_script", user_instruction)
+    effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "shoot_script")
+    user_instruction_context = build_stage_user_instruction_context("shoot_script", effective_user_instruction)
     with get_db() as db:
         if user_instruction is not None:
-            persist_generation_task_stage_instruction(db, task_id, "shoot_script", user_instruction, timestamp)
+            persist_generation_task_stage_instruction(db, task_id, "shoot_script", effective_user_instruction, timestamp)
         transition = db.execute(
             """
             UPDATE generation_tasks
@@ -2435,10 +2442,11 @@ async def run_create_generation_preview(task_id: int, include_debug: bool = Fals
         db.execute("UPDATE generation_tasks SET status = 'PREVIEW_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
     shot_plans = get_task_shot_plans_by_script(int(shoot_script_id))
     timestamp = now_iso()
-    user_instruction_context = build_stage_user_instruction_context("storyboard_preview", user_instruction)
+    effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "storyboard_preview")
+    user_instruction_context = build_stage_user_instruction_context("storyboard_preview", effective_user_instruction)
     with get_db() as db:
         if user_instruction is not None:
-            persist_generation_task_stage_instruction(db, task_id, "storyboard_preview", user_instruction, timestamp)
+            persist_generation_task_stage_instruction(db, task_id, "storyboard_preview", effective_user_instruction, timestamp)
         cursor = db.execute(
             """
             INSERT INTO generation_previews (task_id, styling_id, shoot_script_id, input_version_id, user_instruction_json, status, created_at, updated_at)
@@ -2625,6 +2633,8 @@ async def run_generate_final_images(
     styling_id = int(task["active_styling_id"])
     shoot_script_id = int(task["active_shoot_script_id"])
     input_version_id = int(task["current_input_version_id"])
+    effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "final_image")
+    user_instruction_context = build_stage_user_instruction_context("final_image", effective_user_instruction)
     if continue_existing and task["active_result_set_id"]:
         image_ids = continue_active_final_result_set(
             task_id,
@@ -2633,6 +2643,7 @@ async def run_generate_final_images(
             styling_id,
             shoot_script_id,
             preview_id,
+            user_instruction_context,
         )
         if image_ids is not None:
             if image_ids:
@@ -2642,10 +2653,9 @@ async def run_generate_final_images(
                 )
             return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
     timestamp = now_iso()
-    user_instruction_context = build_stage_user_instruction_context("final_image", user_instruction)
     with get_db() as db:
         if user_instruction is not None:
-            persist_generation_task_stage_instruction(db, task_id, "final_image", user_instruction, timestamp)
+            persist_generation_task_stage_instruction(db, task_id, "final_image", effective_user_instruction, timestamp)
         db.execute("UPDATE generation_tasks SET status = 'FINAL_RUNNING', updated_at = ? WHERE id = ?", (timestamp, task_id))
         cursor = db.execute(
             """
@@ -2693,6 +2703,7 @@ def continue_active_final_result_set(
     styling_id: int,
     shoot_script_id: int,
     preview_id: int,
+    user_instruction_context: dict[str, Any] | None = None,
 ) -> list[int] | None:
     timestamp = now_iso()
     with get_db() as db:
@@ -2737,24 +2748,28 @@ def continue_active_final_result_set(
                         active_attempt_id = NULL,
                         locked_by = NULL,
                         locked_until = NULL,
+                        user_instruction_json = ?,
                         updated_at = ?
                     WHERE id = ?
                     """,
-                    (timestamp, int(existing["id"])),
+                    (dumps(user_instruction_context or {}), timestamp, int(existing["id"])),
                 )
                 image_ids.append(int(existing["id"]))
                 continue
             cursor = db.execute(
                 """
                 INSERT INTO generation_result_images_new
-                  (result_set_id, shot_plan_id, sort_order, status, created_at, updated_at)
-                VALUES (?, ?, ?, 'QUEUED', ?, ?)
+                  (result_set_id, shot_plan_id, sort_order, user_instruction_json, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'QUEUED', ?, ?)
                 """,
-                (result_set_id, int(shot["id"]), sort_order, timestamp, timestamp),
+                (result_set_id, int(shot["id"]), sort_order, dumps(user_instruction_context or {}), timestamp, timestamp),
             )
             image_ids.append(int(cursor.lastrowid))
         if image_ids:
-            db.execute("UPDATE generation_result_sets SET status = 'RUNNING', updated_at = ? WHERE id = ?", (timestamp, result_set_id))
+            db.execute(
+                "UPDATE generation_result_sets SET status = 'RUNNING', user_instruction_json = ?, updated_at = ? WHERE id = ?",
+                (dumps(user_instruction_context or {}), timestamp, result_set_id),
+            )
             db.execute(
                 "UPDATE generation_tasks SET status = 'FINAL_RUNNING', active_result_set_id = ?, updated_at = ? WHERE id = ?",
                 (result_set_id, timestamp, task_id),
@@ -2838,7 +2853,8 @@ async def retry_new_result_image(image_id: int, request: Request, payload: Gener
     with get_db() as db:
         row = db.execute(
             """
-            SELECT gri.*, grs.task_id, grs.id AS result_set_id, gt.status AS task_status
+            SELECT gri.*, grs.task_id, grs.id AS result_set_id, gt.status AS task_status,
+                   gt.final_image_user_instruction_text
             FROM generation_result_images_new gri
             JOIN generation_result_sets grs ON grs.id = gri.result_set_id
             JOIN generation_tasks gt ON gt.id = grs.task_id
@@ -2853,9 +2869,10 @@ async def retry_new_result_image(image_id: int, request: Request, payload: Gener
         if row["status"] in {"QUEUED", "RUNNING"}:
             raise HTTPException(status_code=409, detail="当前结果图仍在生成中")
         timestamp = now_iso()
-        user_instruction_context = build_stage_user_instruction_context("final_image", payload.userInstruction if payload else None)
+        effective_user_instruction = payload.userInstruction if payload and payload.userInstruction is not None else pending_generation_task_stage_instruction(row, "final_image")
+        user_instruction_context = build_stage_user_instruction_context("final_image", effective_user_instruction)
         if payload and payload.userInstruction is not None:
-            persist_generation_task_stage_instruction(db, int(row["task_id"]), "final_image", payload.userInstruction, timestamp)
+            persist_generation_task_stage_instruction(db, int(row["task_id"]), "final_image", effective_user_instruction, timestamp)
         db.execute(
             """
             UPDATE generation_result_images_new

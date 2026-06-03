@@ -129,6 +129,7 @@ Prompt 配置可使用以下 runtime：
 - `heroProductInfo` 在创建/更新任务时保存到 `generation_tasks.hero_product_info_text`，进入 AI Stylist 前冻结到 `generation_task_input_versions.hero_product_info_json`。
 - 每个阶段的用户输入草稿保存到 `generation_tasks.*_user_instruction_text`，保存动作不改变任务状态、不清空 active artifact。
 - `userInstruction` 在每次阶段执行时分别保存到阶段 artifact 的 `user_instruction_json`，并同步写入 `generation_attempts.request_snapshot_json`，用于追溯多次重生过程。
+- `auto-run-final` 自动推进各阶段时必须读取同一份任务级用户输入草稿，不能静默忽略已保存的阶段要求。
 - 用户要求优先于默认搭配偏好和导演偏好；不得覆盖商品图片事实、搭配库 READY 范围、数字模特身份契约、品牌硬边界、输出 schema 和安全规则。
 - AI Stylist 输出必须包含 `user_requirement_resolution`，说明已满足项、未满足项、冲突项和替代处理。
 - AI Director 不重新选择搭配服饰，只承接 StylingPlan 中已解析的用户要求和选搭结论。
