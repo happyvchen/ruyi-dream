@@ -104,6 +104,45 @@ class BackendCurrentFlowTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Prompt 配置缺失或占位符未填充"):
             main.render_prompt_template("assembly.ai_styling", main.sample_prompt_runtime())
 
+    def test_ai_tagging_parser_repairs_missing_property_commas(self) -> None:
+        main = importlib.import_module("app.main")
+
+        parsed = main.parse_lily_tagging_json(
+            """
+            ```json
+            {
+              "一级品类": ["针织类"]
+              "二级品类": ["针织开衫"],
+              "整体视觉语义": "黑色针织开衫，正面菱格图案醒目，适合作为主推款外搭。"
+              "结构/廓形语义": "短款开襟结构，袖身较修长，整体量感偏轻。",
+              "置信度": 88,
+            }
+            ```
+            """
+        )
+
+        self.assertEqual(parsed["一级品类"], ["针织类"])
+        self.assertEqual(parsed["二级品类"], ["针织开衫"])
+        self.assertEqual(parsed["置信度"], 88)
+        self.assertIn("短款开襟结构", parsed["结构/廓形语义"])
+
+    def test_ai_tagging_parser_drops_dangling_model_tail(self) -> None:
+        main = importlib.import_module("app.main")
+
+        parsed = main.parse_lily_tagging_json(
+            """
+            {
+              "一级品类": ["外套类"],
+              "整体视觉语义": "深色西装外套，线条利落。",
+              "风险点": "弱光下颜色容易偏黑。"
+              版型数据。"
+            }
+            """
+        )
+
+        self.assertEqual(parsed["一级品类"], ["外套类"])
+        self.assertEqual(parsed["风险点"], "弱光下颜色容易偏黑。")
+
     def test_generation_debug_payloads_are_admin_only(self) -> None:
         db_module = importlib.import_module("app.db")
         main = importlib.import_module("app.main")
