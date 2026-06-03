@@ -103,18 +103,18 @@ DELETED
 - Gemini 打标请求必须提供枚举、评判规则、复核条件和严格输出模板，不能只给空 JSON 结构。
 - 后端必须校验和归一化模型输出；需复核或 fallback 的标签不能直接进入 `READY`。
 
-## 5. 品牌样本、候选漏斗与 StylingPlan
+## 5. 品牌样本、全量标签事实与 StylingPlan
 
-搭配服饰标签不是最终审美结论，而是候选漏斗的素材事实输入。生产链路必须区分：
+搭配服饰标签不是最终审美结论，而是 AI Stylist 的素材事实输入。生产链路必须区分：
 
-- `effective_tags`：素材事实和搭配约束，用于召回、压缩和解释。
-- `visual_caption` / `retrieval_features`：每件搭配服饰的短视觉摘要、衣长体量、遮挡风险、可塞腰/可敞开等检索字段。
+- `effective_tags`：素材事实和搭配约束，用于列表摘要、局部展示和后续上下文压缩。
+- `visual_caption` / `retrieval_features`：每件搭配服饰的短视觉摘要、衣长体量、遮挡风险、可塞腰/可敞开等辅助字段。
 - `brand_profile`：admin 维护的单一品牌生产准则资料，包括品牌名称、标语、品牌核心、风格 DNA、选搭准则、拍摄准则和负向约束；初始为空，不做双语结构。
 - `brand_style_samples`：Lily 官方或客户确认的品牌样本，作为品牌风格和配饰边界证据。
 - `candidate_retrieval_snapshot`：本次任务进入 AI Stylist 前的未归档 READY 搭配库全量 AI 标签事实卡、source ids 和 code/id 映射。
 - `StylingPlan`：AI Stylist 对主推款和候选服饰做造型判断后的结构化方案。
 
-全量搭配服饰库图片不直接输入 Gemini。后端只完成未归档 READY 状态过滤和人工禁用过滤，把可用服饰组装为 `library_tag_cards` 标签事实卡；审美选择、库充足性、outfit 探索和拒绝理由由 AI Stylist 在 Prompt 中完成。
+全量搭配服饰库图片不直接输入 Gemini。后端只完成未归档 READY 状态过滤和人工禁用过滤，把可用服饰组装为 `library_tag_cards` 标签事实卡；审美选择、空库内搭配判断、outfit 探索和拒绝理由由 AI Stylist 在 Prompt 中完成。
 
 ### 5.1 品牌信息
 

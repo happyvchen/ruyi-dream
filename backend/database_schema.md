@@ -35,7 +35,7 @@
 
 AI Stylist 写入 `generation_stylings`：
 
-- `candidate_retrieval_snapshot_json` 保存本次 READY 搭配库的紧凑候选卡和 code/id 映射。
+- `candidate_retrieval_snapshot_json` 保存本次 READY 搭配库的全量标签事实卡和 code/id 映射。
 - `user_requirement_json` 保存本次 AI Stylist 实际读取的上传补充要求、微调要求和冲突处理策略。
 - `styling_plan_json` 保存完整 StylingPlan，包括候选方案、被拒方案、Aesthetic Critic 诊断、质量信号和选中 outfit。
 - `selected_material_snapshot_json` 保存被选中搭配服饰的商品快照和图片快照。
@@ -51,15 +51,15 @@ Image-2 阶段写入：
 
 ## Prompt 配置
 
-`prompt_configs` 只保存模板正文和分段。运行时占位符由后端提供：
+`prompt_configs` 只保存由 Prompt 维护写入的模板正文和分段。后端只负责建表、读写、渲染和保存快照；不会在初始化、迁移或缺配置时存储、seed 或 fallback 任何 Prompt 默认值。运行时占位符由后端提供：
 
-- `runtime.candidate_retrieval`：AI Stylist 使用的搭配库紧凑候选卡。
+- `runtime.candidate_retrieval`：AI Stylist 使用的未归档 READY 搭配库全量标签事实卡，只暴露业务 `code`、`ai_tags` 和必要复核/人工标记。
 - `runtime.user_requirement`：AI Stylist 使用的本次用户要求和冲突处理策略。
 - `runtime.styling_result`：AI Director 使用的 StylingPlan 导演上下文。
 - `runtime.shoot_script_result`：分镜预览使用的 ShootScript 上下文。
 - `runtime.current_shot_context`：单张最终成片上下文。
 
-旧 `ai_policy_configs` 表已删除。AI 选搭规则、质量信号、配饰边界和品牌口径直接维护在 `assembly.ai_styling` Prompt 正文及品牌/拍摄配置中。
+旧 `ai_policy_configs` 表已删除。AI 选搭规则、质量信号、配饰边界和品牌口径直接维护在 `assembly.ai_styling` Prompt 正文中；拍摄剧本、分镜预览和最终成片文字也必须来自对应 Prompt 配置。
 
 ## 迁移
 

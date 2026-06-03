@@ -127,7 +127,6 @@ export type GenerationTask = {
     userRequirementResolution?: Record<string, unknown>
     stylingPlan?: Record<string, unknown>
     heroUnderstanding?: Record<string, unknown>
-    libraryAdequacy?: Record<string, unknown>
     outfitCandidates?: Record<string, unknown>[]
     criticScores?: Record<string, unknown>
     rejectedCandidates?: Record<string, unknown>[]

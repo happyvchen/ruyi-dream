@@ -42,7 +42,7 @@ POST /api/generation-tasks/{id}/select-styling
   -> 创建 GenerationTaskInputVersion
   -> 冻结上传补充要求和本次微调要求
   -> 读取 READY 搭配服饰库
-  -> 构造紧凑 candidate_retrieval prompt DTO
+  -> 构造全量标签事实 candidate_retrieval prompt DTO
   -> 构造 user_requirement prompt DTO
   -> 调用 AI Stylist 生成 StylingPlan
   -> 保存完整 StylingPlan、选中服饰快照和 attempt
@@ -76,7 +76,7 @@ POST /api/generation-tasks/{id}/auto-run-final
 
 - `generation_attempts.request_snapshot_json` 可以保存技术排查需要的 request/response 快照。
 - 传给模型的 runtime 只给当前阶段必需信息，不透传完整历史阶段、完整候选池或旧 prompt。
-- AI Stylist 输入是搭配库紧凑候选卡和 `user_requirement`。用户要求优先于默认搭配偏好，但不能覆盖商品事实、搭配库事实、品牌硬边界、输出 schema 和安全规则。
+- AI Stylist 输入是未归档 READY 搭配库全量标签事实卡和 `user_requirement`。用户要求优先于默认搭配偏好，但不能覆盖商品事实、搭配库事实、品牌硬边界、输出 schema 和安全规则。
 - AI Director 输入是 `styling_result_for_prompt` + `model_identity_context_for_prompt`，只包含主推款理解、选中 outfit、选中服饰紧凑标签、理由、质量信号、warnings 和数字模特身份契约。
 - 分镜预览输入是 `shoot_script_result_for_prompt` + `image_reference_manifest_for_prompt`，只包含全局导演、配饰、风险、6 个镜头、输入参考图序号和事实源。
 - 最终成片输入是 `current_shot_context_for_prompt` + `image_reference_manifest_for_prompt`，只包含当前格子、当前镜头、全局导演、选中 outfit、本镜头配饰、输入参考图序号和事实源。
@@ -84,6 +84,8 @@ POST /api/generation-tasks/{id}/auto-run-final
 数字模特参考图是人物身份事实源。后端必须把 `model_identity` 参考图前置进 Image-2 输入，并在 prompt 中声明它们覆盖 ShootScript、分镜预览和品牌妆发文字；分镜预览只允许作为构图、姿势和光影参考。
 
 不实现独立 prompt 长度预算监控；本轮优化通过结构化 DTO 和删除旧兼容注入来控制上下文体量。
+
+Prompt 正文只来自 `prompt_configs`。后端不在代码、迁移或初始化中保存 Prompt 默认值；缺少 Prompt 配置时应暴露配置错误，而不是使用代码字符串 fallback。
 
 ## 媒体与恢复
 

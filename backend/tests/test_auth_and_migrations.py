@@ -63,6 +63,29 @@ class BackendCurrentFlowTests(unittest.TestCase):
             for item in value:
                 self.assert_no_model_raw_output(item)
 
+    def insert_prompt_config(self, db_module: object, key: str, group_type: str, content: str, sort_order: int) -> None:
+        timestamp = "2026-06-03T04:00:00Z"
+        with db_module.get_db() as db:
+            db.execute(
+                """
+                INSERT INTO prompt_configs
+                  (key, group_type, title, description, content, sort_order, updated_at)
+                VALUES (?, ?, ?, '', ?, ?, ?)
+                """,
+                (key, group_type, key, content, sort_order, timestamp),
+            )
+
+    def test_prompt_configs_are_not_seeded_or_defaulted_by_backend(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        db_module.init_db()
+
+        self.assertEqual(main.get_prompt_config_rows(), {})
+        self.assertIsNone(main.prompt_config_content("assembly.ai_styling"))
+        with self.assertRaisesRegex(RuntimeError, "Prompt 配置缺失或占位符未填充"):
+            main.render_prompt_template("assembly.ai_styling", main.sample_prompt_runtime())
+
     def test_generation_debug_payloads_are_admin_only(self) -> None:
         db_module = importlib.import_module("app.db")
         main = importlib.import_module("app.main")
@@ -525,6 +548,21 @@ class BackendCurrentFlowTests(unittest.TestCase):
             },
             "shots": [{"shot_index": 1, "shot_role": "hero", "main_focus": "主推款"}],
         }
+        self.insert_prompt_config(db_module, "segment.brand_info", "segment", "Lily 品牌信息", 10)
+        self.insert_prompt_config(
+            db_module,
+            "assembly.storyboard_preview",
+            "assembly",
+            "生成分镜预览。\n\n{{segment.brand_info}}\n\n【输入参考图角色清单】\n{{runtime.image_reference_manifest}}\n\n【拍摄剧本结果】\n{{runtime.shoot_script_result}}\n\n按拍摄剧本生成 3x2 分镜预览。",
+            140,
+        )
+        self.insert_prompt_config(
+            db_module,
+            "assembly.final_image",
+            "assembly",
+            "生成一张电商棚拍成片。\n\n分镜预览不是模特或商品事实来源。模特参考图是模特身份事实来源。\n不得根据拍摄剧本、品牌妆发或分镜构图把模特改成另一张脸、低马尾、盘发、长发或参考图中不存在的发型。\n\n【输入参考图角色清单】\n{{runtime.image_reference_manifest}}\n\n{{segment.brand_info}}\n\n【当前单张成片上下文】\n{{runtime.current_shot_context}}",
+            150,
+        )
         with db_module.get_db() as db:
             db.execute(
                 "INSERT INTO generation_tasks (id, name, status, current_input_version_id, active_styling_id, active_shoot_script_id, active_storyboard_preview_id, active_result_set_id, created_at, updated_at) VALUES (1, 'T', 'PREVIEW_READY', 2, 3, 5, 4, 10, ?, ?)",
