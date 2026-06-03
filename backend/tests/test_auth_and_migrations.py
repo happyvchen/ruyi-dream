@@ -841,7 +841,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
         )
         with db_module.get_db() as db:
             db.execute(
-                "INSERT INTO generation_tasks (id, name, status, current_input_version_id, active_styling_id, active_shoot_script_id, active_storyboard_preview_id, active_result_set_id, created_at, updated_at) VALUES (1, 'T', 'PREVIEW_READY', 2, 3, 5, 4, 10, ?, ?)",
+                "INSERT INTO generation_tasks (id, name, status, current_input_version_id, active_styling_id, active_shoot_script_id, active_storyboard_preview_id, active_result_set_id, created_at, updated_at) VALUES (1, 'T', 'PREVIEW_READY', 7, 3, 5, 4, 10, ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
@@ -849,8 +849,23 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (timestamp, timestamp, timestamp, timestamp, timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_task_input_versions (id, task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, created_at) VALUES (2, 1, 1, 'T', ?, ?, ?)",
-                (db_module.dumps(hero_snapshot), db_module.dumps(model_snapshot), timestamp),
+                """
+                INSERT INTO generation_task_input_versions
+                  (id, task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, hero_product_info_json, created_at)
+                VALUES
+                  (2, 1, 1, 'T', ?, ?, ?, ?),
+                  (7, 1, 2, 'T', ?, ?, ?, ?)
+                """,
+                (
+                    db_module.dumps(hero_snapshot),
+                    db_module.dumps(model_snapshot),
+                    db_module.dumps({"schema_version": "hero-product-info-v1", "info": "旧商品信息"}),
+                    timestamp,
+                    db_module.dumps(hero_snapshot),
+                    db_module.dumps(model_snapshot),
+                    db_module.dumps({"schema_version": "hero-product-info-v1", "info": "中短裙，裙摆刚过膝"}),
+                    timestamp,
+                ),
             )
             db.execute(
                 """
@@ -871,7 +886,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (db_module.dumps(shoot_script), timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_previews (id, task_id, styling_id, shoot_script_id, input_version_id, preview_asset_id, status, created_at, updated_at) VALUES (4, 1, 3, 5, 2, 103, 'SUCCEEDED', ?, ?)",
+                "INSERT INTO generation_previews (id, task_id, styling_id, shoot_script_id, input_version_id, preview_asset_id, status, created_at, updated_at) VALUES (4, 1, 3, 5, 7, 103, 'SUCCEEDED', ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
@@ -879,7 +894,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (db_module.dumps({"shot_index": 1, "shot_role": "hero", "main_focus": "主推款"}), timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 5, 4, 'RUNNING', ?, ?)",
+                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 7, 3, 5, 4, 'RUNNING', ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
@@ -887,13 +902,25 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (timestamp, timestamp),
             )
 
+        shoot_script_request = main.build_shoot_script_request_snapshot(
+            1,
+            3,
+            7,
+            main.build_stage_user_instruction_context("shoot_script", "突出裙摆长度"),
+        )
         preview_package = main.build_new_preview_task_package(1, 3, 5, [{"sortOrder": 1, "plan": {"shot_index": 1}}])
         final_package = main.build_new_final_task_package(1, 30)
 
         self.assertEqual([item["role"] for item in preview_package["imageInputs"][:2]], ["model_identity", "model_identity"])
         self.assertEqual([item["role"] for item in final_package["imageInputs"][:3]], ["model_identity", "model_identity", "preview_grid"])
+        self.assertEqual(shoot_script_request["input_version"]["id"], 7)
+        self.assertEqual(shoot_script_request["hero_product_info"]["info"], "中短裙，裙摆刚过膝")
+        self.assertEqual(shoot_script_request["shoot_script_user_instruction"]["instruction"], "突出裙摆长度")
         self.assertIn("输入参考图角色清单", preview_package["prompt"])
         self.assertIn("model_identity", preview_package["prompt"])
+        self.assertEqual(preview_package["inputVersionId"], 7)
+        self.assertEqual(preview_package["heroProductInfo"]["info"], "中短裙，裙摆刚过膝")
+        self.assertEqual(final_package["heroProductInfo"]["info"], "中短裙，裙摆刚过膝")
         self.assertIn("模特身份事实来源", final_package["prompt"])
         self.assertIn("preview_grid is composition-only", final_package["prompt"])
         self.assertIn("低马尾", final_package["prompt"])

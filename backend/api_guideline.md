@@ -79,7 +79,7 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。旧 `/a
 Prompt 配置可使用以下 runtime：
 
 - `runtime.candidate_retrieval`：AI Stylist 候选服饰紧凑卡片。
-- `runtime.hero_product_info`：跟随主推款输入版本冻结的商品信息和业务事实补充。
+- `runtime.hero_product_info`：跟随本阶段实际使用的主推款输入版本冻结的商品信息和业务事实补充；重新执行拍摄剧本、分镜预览、成片或单张重生时会冻结最新任务商品信息。
 - `runtime.ai_styling_user_instruction`：AI 智能选搭本次执行的用户介入要求。
 - `runtime.shoot_script_user_instruction`：拍摄剧本本次执行的用户介入要求。
 - `runtime.storyboard_preview_user_instruction`：分镜预览本次执行的用户介入要求。
@@ -129,7 +129,7 @@ Prompt 配置可使用以下 runtime：
 
 - 用户输入不是自由长 prompt，而是业务语言中的服装事实补充、拍摄要求或选搭微调。
 - 用户输入分为两类：跟随主推款输入版本的 `heroProductInfo`，以及每个阶段本次执行的 `userInstruction`。
-- `heroProductInfo` 在创建/更新任务时保存到 `generation_tasks.hero_product_info_text`，进入 AI Stylist 前冻结到 `generation_task_input_versions.hero_product_info_json`。
+- `heroProductInfo` 在创建/更新任务时保存到 `generation_tasks.hero_product_info_text`；进入 AI Stylist 前会冻结到 `generation_task_input_versions.hero_product_info_json`，重新执行拍摄剧本、分镜预览、成片或单张重生时也会冻结最新商品信息，允许用户跳过前序阶段，直接让新商品信息影响接下来执行的阶段。
 - 每个阶段的用户输入草稿保存到 `generation_tasks.*_user_instruction_text`，保存动作不改变任务状态、不清空 active artifact。
 - `userInstruction` 在每次阶段执行时分别保存到阶段 artifact 的 `user_instruction_json`，并同步写入 `generation_attempts.request_snapshot_json`，用于追溯多次重生过程。
 - `auto-run-final` 自动推进各阶段时必须读取同一份任务级用户输入草稿，不能静默忽略已保存的阶段要求。
