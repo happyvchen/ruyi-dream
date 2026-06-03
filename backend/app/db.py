@@ -11,6 +11,7 @@ from .config import get_settings
 
 MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("027", "drop_legacy_generation_tables", "migration_drop_legacy_generation_tables"),
+    ("028", "add_generation_task_auto_run", "migration_add_generation_task_auto_run"),
 )
 
 
@@ -137,6 +138,8 @@ def init_db() -> None:
               active_preview_id INTEGER,
               active_storyboard_preview_id INTEGER,
               active_result_set_id INTEGER,
+              auto_run_target TEXT,
+              auto_run_requested_at TEXT,
               archived_at TEXT,
               archive_reason TEXT,
               created_at TEXT NOT NULL,
@@ -328,6 +331,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
     }
     migration_functions = {
         "migration_drop_legacy_generation_tables": migration_drop_legacy_generation_tables,
+        "migration_add_generation_task_auto_run": migration_add_generation_task_auto_run,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -354,6 +358,17 @@ def migration_drop_legacy_generation_tables(db: sqlite3.Connection) -> None:
         "ai_policy_configs",
     ):
         db.execute(f"DROP TABLE IF EXISTS {table}")
+
+
+def migration_add_generation_task_auto_run(db: sqlite3.Connection) -> None:
+    if not table_has_column(db, "generation_tasks", "auto_run_target"):
+        db.execute("ALTER TABLE generation_tasks ADD COLUMN auto_run_target TEXT")
+    if not table_has_column(db, "generation_tasks", "auto_run_requested_at"):
+        db.execute("ALTER TABLE generation_tasks ADD COLUMN auto_run_requested_at TEXT")
+
+
+def table_has_column(db: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(row["name"] == column for row in db.execute(f"PRAGMA table_info({table})").fetchall())
 
 
 def create_shoot_config_table(db: sqlite3.Connection) -> None:

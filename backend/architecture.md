@@ -57,7 +57,15 @@ POST /api/generation-tasks/{id}/generate-final
   -> 固定读取前 5 个 ShotPlan
   -> 每张图只传当前单镜头上下文
   -> 并发调用 Image-2
+
+POST /api/generation-tasks/{id}/auto-run-final
+  -> 记录 auto_run_target = FINAL
+  -> 从当前第一个未完成阶段自动推进到成片
+  -> 复用当前 active StylingPlan / ShootScript / 分镜预览
+  -> FINAL_PARTIAL 时只补失败或缺失的最终图
 ```
+
+`一键成片` 只是一层自动编排壳。手动按钮和自动推进共用相同阶段实现、artifact 表、attempt 表、active 指针和失败语义。任一阶段失败或用户取消时，自动推进标记会清除；再次点击 `一键成片` 会根据当前 active 产物断点续跑。
 
 ## Prompt Context
 
@@ -78,7 +86,7 @@ POST /api/generation-tasks/{id}/generate-final
 
 对象存储保存原图，应用层登记 `thumb`、`preview`、`original` 三层媒体结构。前端访问稳定 `/api/media?key=...&variant=...`，后端校验 key 后跳转对象存储短期 URL。
 
-`generation_previews` 和 `generation_result_images_new` 使用 `locked_by` / `locked_until` / `run_attempts` 做单实例恢复。后端重启后，poller 扫描锁过期任务，标记旧 attempt 失败并重建 attempt 继续执行。
+`generation_previews` 和 `generation_result_images_new` 使用 `locked_by` / `locked_until` / `run_attempts` 做单实例恢复。后端重启后，poller 扫描锁过期任务，标记旧 attempt 失败并重建 attempt 继续执行。带有 `auto_run_target = FINAL` 的任务会在非运行中状态下重新调度自动推进。
 
 ## 约束
 

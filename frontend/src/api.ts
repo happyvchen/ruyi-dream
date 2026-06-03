@@ -104,6 +104,8 @@ export type GenerationTask = {
   activeStoryboardPreviewId?: number | null
   activePreviewId?: number | null
   activeResultSetId?: number | null
+  autoRunTarget?: string | null
+  autoRunRequestedAt?: string | null
   archivedAt?: string | null
   archiveReason?: string | null
   createdAt: string
@@ -578,6 +580,8 @@ export const api = {
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/preview`, { method: 'POST' }),
   generateFinal: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/generate-final`, { method: 'POST' }),
+  autoRunFinal: (id: number) =>
+    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/auto-run-final`, { method: 'POST' }),
   retryResultImage: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-result-images-new/${id}/retry`, { method: 'POST' }),
   listRecords: (options?: { limit?: number; offset?: number; includeArchived?: boolean }) =>

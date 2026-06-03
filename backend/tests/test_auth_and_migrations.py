@@ -316,6 +316,167 @@ class BackendCurrentFlowTests(unittest.TestCase):
 
         self.assertEqual(scheduled, [])
 
+    def test_auto_run_final_sets_resume_marker_without_calling_provider(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+
+        db_module.init_db()
+        timestamp = "2026-06-03T04:00:00Z"
+        with db_module.get_db() as db:
+            db.execute(
+                "INSERT INTO generation_tasks (id, name, status, created_at, updated_at) VALUES (1, 'T', 'READY_FOR_STYLING', ?, ?)",
+                (timestamp, timestamp),
+            )
+
+        scheduled: list[int] = []
+        original_schedule = main.schedule_auto_run_for_task
+
+        def capture_schedule(task_id: int) -> None:
+            scheduled.append(task_id)
+
+        main.schedule_auto_run_for_task = capture_schedule
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            response = client.post("/api/generation-tasks/1/auto-run-final")
+        finally:
+            client.close()
+            main.schedule_auto_run_for_task = original_schedule
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["item"]["autoRunTarget"], "FINAL")
+        self.assertEqual(scheduled, [1])
+        with db_module.get_db() as db:
+            row = db.execute("SELECT auto_run_target FROM generation_tasks WHERE id = 1").fetchone()
+        self.assertEqual(row["auto_run_target"], "FINAL")
+
+    def test_auto_run_final_partial_only_requeues_failed_and_missing_images(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        db_module.init_db()
+        timestamp = "2026-06-03T04:00:00Z"
+        with db_module.get_db() as db:
+            db.execute(
+                """
+                INSERT INTO generation_tasks
+                  (id, name, status, current_input_version_id, active_styling_id, active_shoot_script_id,
+                   active_storyboard_preview_id, active_result_set_id, created_at, updated_at)
+                VALUES (1, 'T', 'FINAL_PARTIAL', 2, 3, 5, 4, 10, ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_task_input_versions (id, task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, created_at) VALUES (2, 1, 1, 'T', '[]', '{}', ?)",
+                (timestamp,),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_stylings
+                  (id, task_id, input_version_id, source_material_ids_json, selected_material_ids_json, selected_material_snapshot_json,
+                   reason_summary, warnings_json, status, created_at, updated_at)
+                VALUES (3, 1, 2, '[]', '[]', '[]', '', '[]', 'SUCCEEDED', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_shoot_scripts (id, task_id, input_version_id, styling_id, status, script_json, created_at, updated_at) VALUES (5, 1, 2, 3, 'SUCCEEDED', '{}', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_previews (id, task_id, styling_id, shoot_script_id, input_version_id, status, created_at, updated_at) VALUES (4, 1, 3, 5, 2, 'SUCCEEDED', ?, ?)",
+                (timestamp, timestamp),
+            )
+            for index in range(1, 6):
+                db.execute(
+                    "INSERT INTO generation_shot_plans (id, task_id, styling_id, shoot_script_id, sort_order, plan_json, created_at, updated_at) VALUES (?, 1, 3, 5, ?, '{}', ?, ?)",
+                    (index + 5, index, timestamp, timestamp),
+                )
+            db.execute(
+                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 5, 4, 'PARTIAL', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_result_images_new (id, result_set_id, shot_plan_id, sort_order, status, created_at, updated_at) VALUES (30, 10, 6, 1, 'SUCCEEDED', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_result_images_new (id, result_set_id, shot_plan_id, sort_order, status, created_at, updated_at) VALUES (31, 10, 7, 2, 'FAILED', ?, ?)",
+                (timestamp, timestamp),
+            )
+
+        image_ids = main.continue_active_final_result_set(1, 10, 2, 3, 5, 4)
+
+        self.assertEqual(image_ids, [31, 32, 33, 34])
+        with db_module.get_db() as db:
+            rows = db.execute("SELECT sort_order, status, current_asset_id FROM generation_result_images_new WHERE result_set_id = 10 ORDER BY sort_order").fetchall()
+            task = db.execute("SELECT status FROM generation_tasks WHERE id = 1").fetchone()
+        self.assertEqual([(row["sort_order"], row["status"], row["current_asset_id"]) for row in rows], [
+            (1, "SUCCEEDED", None),
+            (2, "QUEUED", None),
+            (3, "QUEUED", None),
+            (4, "QUEUED", None),
+            (5, "QUEUED", None),
+        ])
+        self.assertEqual(task["status"], "FINAL_RUNNING")
+
+    def test_retry_final_image_rejects_when_task_is_running(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+
+        db_module.init_db()
+        timestamp = "2026-06-03T04:00:00Z"
+        with db_module.get_db() as db:
+            db.execute(
+                "INSERT INTO generation_tasks (id, name, status, active_result_set_id, created_at, updated_at) VALUES (1, 'T', 'FINAL_RUNNING', 10, ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_task_input_versions (id, task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, created_at) VALUES (2, 1, 1, 'T', '[]', '{}', ?)",
+                (timestamp,),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_stylings
+                  (id, task_id, input_version_id, source_material_ids_json, selected_material_ids_json, selected_material_snapshot_json,
+                   reason_summary, warnings_json, status, created_at, updated_at)
+                VALUES (3, 1, 2, '[]', '[]', '[]', '', '[]', 'SUCCEEDED', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_previews (id, task_id, styling_id, input_version_id, status, created_at, updated_at) VALUES (4, 1, 3, 2, 'SUCCEEDED', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_shoot_scripts (id, task_id, input_version_id, styling_id, status, script_json, created_at, updated_at) VALUES (5, 1, 2, 3, 'SUCCEEDED', '{}', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_shot_plans (id, task_id, styling_id, shoot_script_id, sort_order, plan_json, created_at, updated_at) VALUES (6, 1, 3, 5, 1, '{}', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 5, 4, 'RUNNING', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_result_images_new (id, result_set_id, shot_plan_id, sort_order, status, created_at, updated_at) VALUES (30, 10, 6, 1, 'FAILED', ?, ?)",
+                (timestamp, timestamp),
+            )
+
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            response = client.post("/api/generation-result-images-new/30/retry")
+        finally:
+            client.close()
+
+        self.assertEqual(response.status_code, 409)
+
     def test_image2_task_packages_pin_model_identity_references(self) -> None:
         db_module = importlib.import_module("app.db")
         main = importlib.import_module("app.main")
