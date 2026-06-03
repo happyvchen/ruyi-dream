@@ -22,7 +22,7 @@ Lily 标签体系是 Ruyi-Dream 的核心生产资产，不是临时 MVP 辅助�
 
 - `AI 打标` Prompt 是打标规则和输出结构的唯一维护入口；`segment.tag_rules` 已废弃。
 - Gemini 返回的 JSON 结构允许随 `AI 打标` Prompt 变化，后端必须完整保存原始 `ai_tags_json`。
-- 后端只对常见字段做最佳努力派生，形成 `effective_tags_json` 和智能选搭候选摘要；派生失败不应丢失原始返回。
+- 后端只对常见字段做最佳努力派生，形成 `effective_tags_json` 供列表摘要和局部展示使用；智能选搭候选卡必须直接携带完整 `ai_tags_json` 标签事实，不能依赖固定字段白名单摘要。派生失败不应丢失原始返回。
 - 本文中固定字段和枚举可作为长期标签治理参考，不再要求当前打标结果必须按固定 taxonomy schema 输出。
 
 ## 2. 品牌边界
@@ -471,35 +471,24 @@ DELETED
 - 多图之间显示不同商品且无法判断主商品。
 - 商品图过少或只有细节图。
 
-## 10. 选搭压缩格式
+## 10. 选搭标签事实卡
 
-智能选搭不应传完整标签 JSON。传给 Gemini 的候选项应是压缩、稳定、可解释的摘要。
+智能选搭应直接读取 `styling_garments.ai_tags_json`。传给 Gemini 的候选项只需要隐藏系统内部 ID 和图片快照，不应把标签字段压缩成固定白名单摘要；AI 打标 Prompt 新增的字段必须自然保留在 `ai_tags` 对象里。
 
 ```json
 {
-  "asset_id": "garment_123",
   "code": "126239C5959601",
-  "category": "top",
-  "sub_category": "shirt",
-  "colors": ["white", "navy"],
-  "fit": "regular",
-  "silhouette": ["waist_defined"],
-  "materials_visual": ["chiffon", "lace"],
-  "details": ["v_neck", "embroidery", "button"],
-  "occasion": ["commute", "office", "light_social"],
-  "season": ["summer"],
-  "wearability": {
-    "can_be_inner_layer": true,
-    "can_be_outer_layer": false,
-    "coverage_risk": "none"
+  "ai_tags": {
+    "一级品类": ["上装"],
+    "二级品类": ["衬衫"],
+    "色彩": ["白色", "藏青色"],
+    "面料材质": ["雪纺感", "蕾丝"],
+    "穿着能力": ["可单穿", "可作内搭"],
+    "风格语义": "轻通勤、清爽、精致",
+    "风险点": []
   },
-  "manual": {
-    "season_year": "2026",
-    "series": ["ART系列"],
-    "do_not_use_for_styling": false
-  },
-  "pairing_brief": "short reason-oriented sentence",
-  "risk": ["none"]
+  "manual_flags": {},
+  "review": {"confidence": 0.86}
 }
 ```
 

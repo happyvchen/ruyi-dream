@@ -84,15 +84,21 @@ class BackendCurrentFlowTests(unittest.TestCase):
             & tables
         )
 
-    def test_candidate_retrieval_prompt_uses_compact_cards(self) -> None:
+    def test_candidate_retrieval_prompt_uses_direct_ai_tag_cards(self) -> None:
         main = importlib.import_module("app.main")
+        ai_tags = {
+            "category": "上装",
+            "colors": ["白色"],
+            "materials_visual": ["梭织"],
+            "nested": {"kept": True},
+        }
         material_cards = [
             {
                 "id": 42,
                 "code": "LOOK-A",
                 "manual": {"styling_note": "适合轻通勤", "internal_note": "不应进入 prompt"},
                 "tag_facts": {
-                    "ai_tags": {"category": "上装", "colors": ["白色"], "materials_visual": ["梭织"]},
+                    "ai_tags": ai_tags,
                     "effective_tags": {
                         "category": "上装",
                         "colors": ["白色", "米色"],
@@ -111,34 +117,36 @@ class BackendCurrentFlowTests(unittest.TestCase):
         prompt_text = json.dumps(prompt_cards, ensure_ascii=False)
 
         self.assertEqual(prompt_cards[0]["code"], "LOOK-A")
-        self.assertEqual(prompt_cards[0]["category"], "上装")
-        self.assertEqual(prompt_cards[0]["colors"], ["白色", "米色"])
+        self.assertEqual(prompt_cards[0]["ai_tags"], ai_tags)
+        self.assertEqual(prompt_cards[0]["manual_flags"], {"styling_note": "适合轻通勤"})
+        self.assertEqual(prompt_cards[0]["review"]["confidence"], 0.91)
         self.assertNotIn("id", prompt_cards[0])
         self.assertNotIn("tag_facts", prompt_cards[0])
-        self.assertNotIn("ai_tags", prompt_text)
+        self.assertNotIn("effective_tags", prompt_text)
         self.assertNotIn("official_title_tags", prompt_text)
-        self.assertLess(len(prompt_text), 600)
 
-    def test_candidate_retrieval_prompt_reads_current_chinese_tag_schema(self) -> None:
+    def test_candidate_retrieval_prompt_does_not_depend_on_known_tag_keys(self) -> None:
         main = importlib.import_module("app.main")
+        ai_tags = {
+            "一级品类": ["连衣裙"],
+            "色彩": ["黑色", "蓝色", "白色"],
+            "面料材质": ["棉感", "挺括面料"],
+            "版型": ["合体", "微宽松"],
+            "廓形": ["A字型"],
+            "长度": ["及膝"],
+            "穿着能力": ["可单穿", "可作内搭"],
+            "风格语义": "摩登通勤，克制利落，适合职场场景。",
+            "风险点": "外搭可能遮挡袖口和裙摆拼接。",
+            "新规则临时字段": {"后端不应丢弃": True},
+        }
         material_cards = [
             {
                 "id": 24,
                 "code": "125309C7948510",
                 "manual": {},
                 "tag_facts": {
-                    "ai_tags": {},
-                    "effective_tags": {
-                        "一级品类": ["连衣裙"],
-                        "色彩": ["黑色", "蓝色", "白色"],
-                        "面料材质": ["棉感", "挺括面料"],
-                        "版型": ["合体", "微宽松"],
-                        "廓形": ["A字型"],
-                        "长度": ["及膝"],
-                        "穿着能力": ["可单穿", "可作内搭"],
-                        "风格语义": "摩登通勤，克制利落，适合职场场景。",
-                        "风险点": "外搭可能遮挡袖口和裙摆拼接。",
-                    },
+                    "ai_tags": ai_tags,
+                    "effective_tags": {"旧派生字段": "不应替代 ai_tags_json"},
                     "tag_meta": {"overall_confidence": 0.95, "needs_review": False},
                 },
             }
@@ -147,14 +155,32 @@ class BackendCurrentFlowTests(unittest.TestCase):
         snapshot = main.build_candidate_retrieval_snapshot({"id": 7}, material_cards)
         prompt_card = main.candidate_retrieval_for_prompt(snapshot)[0]
 
-        self.assertEqual(prompt_card["category"], "连衣裙")
-        self.assertEqual(prompt_card["colors"], ["黑色", "蓝色", "白色"])
-        self.assertEqual(prompt_card["materials"], ["棉感", "挺括面料"])
-        self.assertEqual(prompt_card["silhouette"], "A字型")
-        self.assertEqual(prompt_card["length"], "及膝")
-        self.assertEqual(prompt_card["wearing_capabilities"], ["可单穿", "可作内搭"])
-        self.assertIn("摩登通勤", prompt_card["style_summary"])
+        self.assertEqual(snapshot["schema_version"], "candidate-retrieval-v3")
+        self.assertEqual(snapshot["strategy"], "direct_ai_tags_json_v1")
+        self.assertEqual(prompt_card["ai_tags"], ai_tags)
+        self.assertTrue(prompt_card["ai_tags"]["新规则临时字段"]["后端不应丢弃"])
+        self.assertNotIn("旧派生字段", json.dumps(prompt_card, ensure_ascii=False))
         self.assertEqual(prompt_card["review"]["confidence"], 0.95)
+
+    def test_candidate_retrieval_prompt_does_not_substitute_effective_tags_for_ai_tags(self) -> None:
+        main = importlib.import_module("app.main")
+        material_cards = [
+            {
+                "id": 25,
+                "code": "NO-AI-TAGS",
+                "manual": {},
+                "tag_facts": {
+                    "ai_tags": {},
+                    "effective_tags": {"category": "不应进入 AI Stylist"},
+                    "tag_meta": {},
+                },
+            }
+        ]
+
+        snapshot = main.build_candidate_retrieval_snapshot({"id": 7}, material_cards)
+        prompt_card = main.candidate_retrieval_for_prompt(snapshot)[0]
+
+        self.assertEqual(prompt_card, {"code": "NO-AI-TAGS"})
 
     def test_downstream_prompt_dtos_do_not_carry_full_history(self) -> None:
         main = importlib.import_module("app.main")

@@ -4,39 +4,38 @@
 
 搭配服饰打标结果本身并不长。`styling_garments.ai_tags_json` 是 AI 打标的原始事实账本，应完整保存用于审计和详情展示。但生成链路过去把 `ai_tags_json`、`effective_tags_json`、`manual_tags_json`、`official_title_tags_json`、`tag_meta_json`、旧候选快照和旧 prompt 一起拼进下游请求，导致 prompt 体量被历史上下文和重复字段放大。
 
-新版原则：每个阶段只接收完成本阶段判断所需的结构化 DTO，不直接透传上游完整对象或历史 prompt。
+新版原则：每个阶段只接收完成本阶段判断所需的结构化 DTO，不直接透传上游完整对象或历史 prompt。AI Stylist 阶段例外地接收未归档 READY 搭配库的完整 `ai_tags_json` 标签事实，因为这部分本身就是选搭判断所需的业务输入，而不是历史上下文。
 
 ## 阶段输入
 
 | 阶段 | Runtime | 输入内容 | 明确不传 |
 |---|---|---|---|
-| AI Stylist | `candidate_retrieval` | READY 搭配库紧凑候选卡 | 内部 id、完整标签 JSON、图片快照、旧 prompt |
-| AI Director | `styling_result` | 主推款理解、选中 outfit、选中服饰紧凑标签、质量信号 | 全部 outfit 候选池、rejected 全文、AI Stylist prompt |
+| AI Stylist | `candidate_retrieval` | READY 搭配库 `code` + 完整 `ai_tags_json` 标签事实卡 | 内部 id、图片快照、旧 prompt、`effective_tags_json` 派生摘要 |
+| AI Director | `styling_result` | 主推款理解、选中 outfit、选中服饰 `ai_tags` 标签事实、质量信号 | 全部 outfit 候选池、rejected 全文、AI Stylist prompt、未选中的全库候选 |
 | 分镜预览 | `shoot_script_result` | 全局导演、风险、配饰、6 个镜头 | 完整 StylingPlan、候选池、原始标签 |
 | 最终成片 | `current_shot_context` | 当前镜头、当前格子、全局导演、选中 outfit、本镜头配饰 | 完整 ShootScript、全部镜头外细节、候选池 |
 
-## 搭配库候选卡
+## 搭配库标签事实卡
 
-AI Stylist 的候选卡以搭配服饰 `code` 为唯一模型可见标识：
+AI Stylist 的候选卡以搭配服饰 `code` 为唯一模型可见标识，并直接携带 `styling_garments.ai_tags_json` 的解析结果。后端不得把标签字段写死成品类、颜色、材质等白名单摘要；AI 打标 Prompt 新增字段后，应自然进入 `ai_tags` 对象。
 
 ```json
 {
   "code": "LOOK-A",
-  "category": "上装",
-  "colors": ["白色"],
-  "materials": ["梭织"],
-  "fit": "合体",
-  "silhouette": "短款利落",
-  "length": "及腰",
-  "wearing_capabilities": ["可塞腰"],
-  "style_summary": "通勤、清爽、轻量",
-  "pairing_risks": ["可能遮挡腰线"],
+  "ai_tags": {
+    "一级品类": ["上装"],
+    "色彩": ["白色"],
+    "面料材质": ["梭织"],
+    "穿着能力": ["可塞腰"],
+    "风格语义": "通勤、清爽、轻量",
+    "风险点": ["可能遮挡腰线"]
+  },
   "manual_flags": {},
   "review": {"confidence": 0.86}
 }
 ```
 
-后端内部仍可在快照中保存 code/id 映射用于持久化，但 prompt 输入输出不暴露系统内部 ID。
+后端内部仍可在快照中保存 code/id 映射用于持久化，但 prompt 输入输出不暴露系统内部 ID。最新实现只认 `ai_tags_json`；如果 READY 服饰缺少 `ai_tags_json`，应视为数据或打标状态问题处理，而不是用派生摘要替代。
 
 ## 下游压缩
 

@@ -4621,88 +4621,24 @@ def compress_tags_for_styling(row: Any) -> dict[str, Any]:
 
 
 def library_tag_card_for_prompt(card: dict[str, Any]) -> dict[str, Any]:
-    return compact_styling_library_card(card, include_internal=True)
+    return styling_library_tag_card_for_prompt(card, include_internal=True)
 
 
-def compact_styling_library_card(card: dict[str, Any], include_internal: bool = False) -> dict[str, Any]:
+def styling_library_tag_card_for_prompt(card: dict[str, Any], include_internal: bool = False) -> dict[str, Any]:
     tag_facts = card.get("tag_facts") if isinstance(card.get("tag_facts"), dict) else {}
-    effective = tag_facts.get("effective_tags") if isinstance(tag_facts.get("effective_tags"), dict) else {}
     ai_tags = tag_facts.get("ai_tags") if isinstance(tag_facts.get("ai_tags"), dict) else {}
     manual = card.get("manual") if isinstance(card.get("manual"), dict) else {}
     tag_meta = tag_facts.get("tag_meta") if isinstance(tag_facts.get("tag_meta"), dict) else {}
 
     result: dict[str, Any] = {
         "code": str(card.get("code") or ""),
-        "category": first_tag_value(
-            effective,
-            ai_tags,
-            ("category", "product_category", "category_l1", "category_l2", "一级品类", "二级品类"),
-        ),
-        "colors": first_tag_list(effective, ai_tags, ("colors", "color", "main_colors", "palette", "色彩", "色调"), 4),
-        "materials": first_tag_list(
-            effective,
-            ai_tags,
-            ("materials_visual", "materials", "material", "fabric", "fabric_texture", "面料材质", "表面肌理", "面料厚度"),
-            4,
-        ),
-        "fit": first_tag_value(effective, ai_tags, ("fit", "fit_type", "版型")),
-        "silhouette": first_tag_value(effective, ai_tags, ("silhouette", "profile", "shape", "廓形", "结构/廓形语义")),
-        "length": first_tag_value(effective, ai_tags, ("length", "top_length", "bottom_length", "skirt_length", "pants_length", "长度")),
-        "wearing_capabilities": first_tag_list(
-            effective,
-            ai_tags,
-            ("wearing_capabilities", "wearing_methods", "wearing_method", "can_style_as", "穿着能力"),
-            5,
-        ),
-        "style_summary": first_tag_text(
-            effective,
-            ai_tags,
-            ("pairing_brief", "style_summary", "style_keywords", "occasion", "season", "风格语义", "整体视觉语义", "颜色/氛围语义"),
-            220,
-        ),
-        "pairing_risks": first_tag_list(effective, ai_tags, ("pairing_risks", "risk_tags", "avoid_with", "visibility_risks", "风险点"), 5),
+        "ai_tags": ai_tags,
         "manual_flags": compact_manual_prompt_flags(manual),
         "review": compact_tag_review_meta(tag_meta),
     }
     if include_internal and card.get("id") is not None:
         result["id"] = card.get("id")
     return {key: value for key, value in result.items() if value not in (None, "", [], {})}
-
-
-def first_tag_value(primary: dict[str, Any], secondary: dict[str, Any], keys: tuple[str, ...]) -> str:
-    for source in (primary, secondary):
-        for key in keys:
-            value = source.get(key)
-            if isinstance(value, list):
-                value = next((item for item in value if item), "")
-            if isinstance(value, dict):
-                value = value.get("label") or value.get("value") or value.get("code")
-            if value:
-                return str(value)[:80]
-    return ""
-
-
-def first_tag_list(primary: dict[str, Any], secondary: dict[str, Any], keys: tuple[str, ...], limit: int) -> list[str]:
-    for source in (primary, secondary):
-        for key in keys:
-            values = ensure_string_list(source.get(key))
-            if values:
-                return values[:limit]
-    return []
-
-
-def first_tag_text(primary: dict[str, Any], secondary: dict[str, Any], keys: tuple[str, ...], limit: int) -> str:
-    parts: list[str] = []
-    for source in (primary, secondary):
-        for key in keys:
-            value = source.get(key)
-            if isinstance(value, list):
-                parts.extend(str(item) for item in value if item)
-            elif value:
-                parts.append(str(value))
-        if parts:
-            break
-    return "；".join(parts)[:limit]
 
 
 def compact_manual_prompt_flags(manual: dict[str, Any]) -> dict[str, Any]:
@@ -5102,15 +5038,15 @@ def candidate_retrieval_for_prompt(candidate_snapshot: dict[str, Any]) -> list[d
 
 
 def styling_garment_card_for_prompt(card: dict[str, Any]) -> dict[str, Any]:
-    source = compact_styling_library_card(card) if "tag_facts" in card else card
+    source = styling_library_tag_card_for_prompt(card) if "tag_facts" in card else card
     return {key: value for key, value in source.items() if key != "id" and value not in (None, "", [], {})}
 
 
 def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict[str, Any]]) -> dict[str, Any]:
     library_tag_cards = [library_tag_card_for_prompt(card) for card in material_cards]
     return {
-        "schema_version": "candidate-retrieval-v2",
-        "strategy": "compact_prompt_dto_v1",
+        "schema_version": "candidate-retrieval-v3",
+        "strategy": "direct_ai_tags_json_v1",
         "input_version_id": int(input_row["id"]),
         "library_scope": {
             "status": "READY",
@@ -5563,7 +5499,7 @@ def compress_selected_material_for_prompt(item: dict[str, Any]) -> dict[str, Any
         "manual": item.get("manual") or {},
         "tag_facts": item.get("tagFacts") or item.get("tag_facts") or {},
     }
-    return compact_styling_library_card(card)
+    return styling_library_tag_card_for_prompt(card)
 
 
 def shoot_script_result_for_prompt(shoot_script: dict[str, Any]) -> dict[str, Any]:
@@ -6865,7 +6801,7 @@ def render_prompt_template(key: str, runtime: dict[str, Any] | None = None) -> s
 
 def sample_prompt_runtime() -> dict[str, Any]:
     return {
-        "candidate_retrieval": dumps([{"code": "LOOK-A", "category": "上装", "colors": ["白色"], "fit": "合体", "style_summary": "轻量上装服务主推裤装。"}]),
+        "candidate_retrieval": dumps([{"code": "LOOK-A", "ai_tags": {"一级品类": ["上装"], "色彩": ["白色"], "版型": ["合体"], "风格语义": "轻量上装服务主推裤装。"}}]),
         "styling_result": dumps({"hero_understanding": {"category": "裤装"}, "selected_material_codes": ["LOOK-A"], "reason_summary": "轻量上装服务主推裤装。"}),
         "shoot_script_result": dumps({"global_directing": {"background": "浅灰棚拍"}, "shots": [{"shot_index": 1, "shot_role": "hero_full_body", "main_focus": "主推款整体比例"}]}),
         "current_shot_context": dumps({"preview_grid_cell": 1, "current_shot": {"shot_role": "hero_full_body", "main_focus": "主推款整体比例"}, "styling": {"selected_material_codes": ["LOOK-A"]}}),
@@ -6875,7 +6811,7 @@ def sample_prompt_runtime() -> dict[str, Any]:
 def available_prompt_placeholders() -> list[dict[str, str]]:
     return [
         {"name": "segment.brand_info", "scope": "segment", "description": "品牌信息分段 Prompt"},
-        {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服饰库 READY 服饰的紧凑候选卡"},
+        {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服饰库 READY 服饰的全量 AI 标签事实卡"},
         {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭导演上下文，使用搭配服饰 code 标识"},
         {"name": "runtime.shoot_script_result", "scope": "runtime", "description": "拍摄剧本结果，用于分镜预览"},
         {"name": "runtime.current_shot_context", "scope": "runtime", "description": "当前成片单镜头所需的选搭、剧本和分镜信息"},
