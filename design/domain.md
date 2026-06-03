@@ -76,7 +76,7 @@ ShootScript 不重新选择库内搭配服饰；它只能基于已选 StylingPla
 - **分镜预览**：Image-2 根据当前 ShootScript 生成的一张 3x2 总图，是导演、姿势、构图、光线和同组风格参考。
 - **成片**：Image-2 按前 5 个 ShotPlan 逐张生成的最终电商棚拍图。
 
-分镜预览不是商品事实来源。成片中的商品事实始终来自主推款原图和选中搭配服饰原图。
+分镜预览不是商品事实来源，也不是模特身份事实来源。成片中的商品事实始终来自主推款原图和选中搭配服饰原图；模特身份事实始终来自数字模特参考图和 `ModelIdentityContract`。
 
 ### Prompt DTO vs 审计快照
 
@@ -85,9 +85,9 @@ ShootScript 不重新选择库内搭配服饰；它只能基于已选 StylingPla
 | 阶段 | Runtime | 只传什么 |
 |---|---|---|
 | AI Stylist | `candidate_retrieval` | 未归档 READY 搭配库紧凑候选卡 |
-| AI Director | `styling_result` | 主推款理解、选中 outfit、选中服饰紧凑标签、质量信号 |
-| 分镜预览 | `shoot_script_result` | 全局导演、风险、配饰和 6 个镜头 |
-| 最终成片 | `current_shot_context` | 当前镜头、当前格子、选中 outfit、本镜头配饰和禁止项 |
+| AI Director | `styling_result` + `model_identity_context` | 主推款理解、选中 outfit、选中服饰紧凑标签、质量信号、模特身份契约 |
+| 分镜预览 | `shoot_script_result` + `image_reference_manifest` | 全局导演、风险、配饰、6 个镜头、参考图角色和事实源 |
+| 最终成片 | `current_shot_context` + `image_reference_manifest` | 当前镜头、当前格子、选中 outfit、本镜头配饰、禁止项、参考图角色和事实源 |
 
 审计快照可以保存完整 request/response、素材快照和 provider 调试信息，但下游 prompt 不应透传完整上游 JSON、完整候选池、旧 prompt 或历史 response。
 
@@ -217,6 +217,7 @@ ShootScript 不重新选择库内搭配服饰；它只能基于已选 StylingPla
 - MVP 只读展示当前默认数字模特。
 - 生成时保存数字模特快照，历史再次生成默认使用当时快照。
 - Image-2 输入中数字模特图是身份事实源，文本只能补充身体、发型、妆发和负向边界。
+- `ModelIdentityContract` 是从模特快照派生的强制契约；ShootScript、分镜预览、品牌妆发和 provider 默认审美不得覆盖脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。
 
 ### PromptConfig（Prompt 配置）
 
@@ -740,12 +741,12 @@ Image-2 单次最多 10 张输入图。MVP 选图策略：
 
 | 角色 | 数量 |
 |---|---:|
-| 分镜预览图 | 最终成片时 1 张 |
+| 分镜预览图 | 最终成片时 1 张，位于数字模特之后 |
 | 主推款 | 按排序最多 3 张 |
 | 搭配服饰 | 每套至少第 1 张，总计最多 4 张 |
-| 数字模特 | 最多 2 张 |
+| 数字模特 | 最多 2 张，固定作为 `reference_images` 前 2 位 |
 
-如果预算冲突，当前先固定截断并记录实际输入资产；后续可引入更精细的选图器。
+如果预算冲突，当前先固定截断并记录实际输入资产；后续可引入更精细的选图器。每次 Image-2 任务包必须记录 `image_reference_manifest`，声明每张输入图的序号、role 和事实源。
 
 ## 关键业务禁止项
 

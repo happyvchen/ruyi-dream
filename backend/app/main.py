@@ -5993,6 +5993,11 @@ async def generate_shoot_script_with_gemini(request_snapshot: dict[str, Any]) ->
         request_snapshot = attach_shoot_script_prompt_snapshot(request_snapshot)
     prompt = str(request_snapshot.get("prompt") or "")
     contents: list[Any] = [prompt]
+    model_snapshot = ((request_snapshot.get("input_version") or {}).get("model_snapshot") or {}) if isinstance(request_snapshot.get("input_version"), dict) else {}
+    for item in (model_snapshot.get("imageInputs") if isinstance(model_snapshot, dict) else []) or []:
+        object_key = item.get("objectKey") if isinstance(item, dict) else None
+        if object_key and object_exists(object_key):
+            contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type="image/png"))
     for item in ((request_snapshot.get("input_version") or {}).get("image_snapshot") or [])[:6]:
         asset = item.get("asset") if isinstance(item, dict) else {}
         object_key = asset.get("objectKey") if isinstance(asset, dict) else None
@@ -6014,12 +6019,17 @@ async def generate_shoot_script_with_gemini(request_snapshot: dict[str, Any]) ->
 
 
 def attach_shoot_script_prompt_snapshot(request_snapshot: dict[str, Any]) -> dict[str, Any]:
+    input_version = request_snapshot.get("input_version") if isinstance(request_snapshot.get("input_version"), dict) else {}
+    model_snapshot = input_version.get("model_snapshot") if isinstance(input_version.get("model_snapshot"), dict) else {}
+    model_identity_context = model_identity_context_for_prompt(model_snapshot)
     prompt = render_prompt_template(
         SHOOT_SCRIPT_PROMPT_CONFIG_KEY,
         {
             "styling_result": dumps(request_snapshot.get("styling_result") or styling_result_for_prompt(request_snapshot.get("styling_plan") if isinstance(request_snapshot.get("styling_plan"), dict) else {})),
+            "model_identity_context": dumps(model_identity_context),
         },
     )
+    prompt = append_model_identity_contract(prompt, model_identity_context)
     return {**request_snapshot, "promptConfigKey": SHOOT_SCRIPT_PROMPT_CONFIG_KEY, "prompt": prompt}
 
 
@@ -6029,6 +6039,8 @@ def normalize_shoot_script(raw: dict[str, Any], request_snapshot: dict[str, Any]
     hero = styling_plan.get("hero_understanding") if isinstance(styling_plan.get("hero_understanding"), dict) else {}
     source = raw if isinstance(raw, dict) else {}
     input_version = request_snapshot.get("input_version") if isinstance(request_snapshot.get("input_version"), dict) else {}
+    model_snapshot = input_version.get("model_snapshot") if isinstance(input_version.get("model_snapshot"), dict) else {}
+    model_identity_context = model_identity_context_for_prompt(model_snapshot)
     shoot_config = request_snapshot.get("shoot_config") if isinstance(request_snapshot.get("shoot_config"), dict) else default_shoot_config()
     config_global_rules = [
         {"label": str(item.get("label") or ""), "value": str(item.get("value") or "")}
@@ -6052,13 +6064,14 @@ def normalize_shoot_script(raw: dict[str, Any], request_snapshot: dict[str, Any]
             "styling_plan_version": str((styling_plan.get("schema_version") if isinstance(styling_plan, dict) else "") or "styling-plan-v1"),
             "model_snapshot_id": str(((input_version.get("model_snapshot") or {}).get("modelId") if isinstance(input_version.get("model_snapshot"), dict) else "") or "Face-01"),
         },
+        "model_identity_contract": model_identity_context.get("identity_contract", {}),
         "global_directing": {
             "rules": normalize_shoot_script_global_rules(global_directing.get("rules"), config_global_rules),
             "brand_tone": str(global_directing.get("brand_tone") or global_rule_value(config_global_rules, ["品牌调性", "品牌风格"])),
             "background": str(global_directing.get("background") or global_rule_value(config_global_rules, ["背景"])),
             "lighting": str(global_directing.get("lighting") or global_rule_value(config_global_rules, ["光线"])),
             "model_direction": str(global_directing.get("model_direction") or global_rule_value(config_global_rules, ["模特导演", "模特"])),
-            "hair_makeup_boundary": str(global_directing.get("hair_makeup_boundary") or global_rule_value(config_global_rules, ["妆发边界", "妆发"])),
+            "hair_makeup_boundary": str(model_identity_context.get("hair_makeup_boundary") or global_directing.get("hair_makeup_boundary") or global_rule_value(config_global_rules, ["妆发边界", "妆发"])),
             "accessory_boundary": str(global_directing.get("accessory_boundary") or global_rule_value(config_global_rules, ["配饰边界", "配饰"])),
             "consistency_rules": ensure_string_list(global_directing.get("consistency_rules")) or fallback_consistency_rules,
             "product_fidelity_rules": ensure_string_list(global_directing.get("product_fidelity_rules")) or fallback_product_fidelity_rules,
@@ -6420,26 +6433,128 @@ def serialize_new_shot_plan(row: Any) -> dict[str, Any]:
     return {"id": row["id"], "sortOrder": row["sort_order"], "shotType": row["shot_type"], "plan": plan}
 
 
+def model_identity_context_for_prompt(model_snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    snapshot = model_snapshot if isinstance(model_snapshot, dict) else {}
+    profile = snapshot.get("profile") if isinstance(snapshot.get("profile"), dict) else {}
+    image_inputs = snapshot.get("imageInputs") if isinstance(snapshot.get("imageInputs"), list) else []
+    contract = {
+        "model_id": str(snapshot.get("modelId") or snapshot.get("model_id") or "Face-01"),
+        "name": str(snapshot.get("name") or ""),
+        "fact_source": "model_identity_reference_images",
+        "must_preserve": [
+            "same person identity",
+            "face shape",
+            "facial features",
+            "head shape",
+            "hair length",
+            "hair outline",
+            "bangs/fringe if visible",
+            "skin tone",
+            "temperament",
+        ],
+        "must_not_change": [
+            "do not invent a different face",
+            "do not change hair length or hair outline",
+            "do not change bangs/fringe",
+            "do not switch to a ponytail, updo, long hair, or any hairstyle not visible in the model reference images",
+            "do not generate heavy makeup or a different facial expression style",
+        ],
+        "profile_notes": str(profile.get("notes") or ""),
+        "forbidden": ensure_string_list(profile.get("forbidden"))[:12],
+        "reference_images": [
+            {
+                "role": "model_identity",
+                "angle": str(item.get("angle") or ""),
+                "filename": str(item.get("filename") or ""),
+                "objectKey": str(item.get("objectKey") or ""),
+            }
+            for item in image_inputs[:6]
+            if isinstance(item, dict)
+        ],
+    }
+    return {
+        "schema_version": "model-identity-context-v1",
+        "identity_contract": contract,
+        "hair_makeup_boundary": (
+            "以数字模特参考图为唯一模特身份事实源；保持同一人的脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。"
+            "不得根据品牌妆发想象改成低马尾、盘发、长发、浓妆或任何参考图中不存在的造型。"
+        ),
+    }
+
+
+def append_model_identity_contract(prompt: str, model_identity_context: dict[str, Any]) -> str:
+    return (
+        prompt.rstrip()
+        + "\n\n【强制模特身份契约】\n"
+        + dumps(model_identity_context)
+        + "\n模特身份契约优先级高于任何品牌妆发、姿态或剧本想象；只能改变服装、姿势、机位和光线，不得改变模特本人身份、脸型、五官、头型、发长、发型轮廓和刘海形态。\n"
+    )
+
+
+def image_reference_manifest_for_prompt(image_inputs: list[dict[str, Any]]) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+    for index, item in enumerate(image_inputs, start=1):
+        role = str(item.get("role") or "")
+        fact_source = {
+            "model_identity": "模特身份事实源，最高身份优先级",
+            "hero_garment": "主推款商品事实源",
+            "styling_garment": "搭配服饰商品事实源",
+            "preview_grid": "分镜姿势、构图、景别、背景和光线参考，不是模特或商品事实源",
+        }.get(role, "辅助参考图")
+        entries.append(
+            {
+                "reference_index": index,
+                "role": role,
+                "fact_source": fact_source,
+                "filename": str(item.get("filename") or ""),
+                "objectKey": str(item.get("objectKey") or ""),
+                "angle": str(item.get("angle") or ""),
+            }
+        )
+    return {
+        "schema_version": "image-reference-manifest-v1",
+        "priority_rules": [
+            "model_identity references define the person identity and override storyboard or style text",
+            "preview_grid is composition-only and must never override model_identity, hero_garment, or styling_garment facts",
+            "hero_garment and styling_garment references define product facts",
+        ],
+        "references": entries,
+    }
+
+
+def append_image_reference_manifest(prompt: str, image_inputs: list[dict[str, Any]]) -> str:
+    return (
+        prompt.rstrip()
+        + "\n\n【输入参考图角色清单】\n"
+        + dumps(image_reference_manifest_for_prompt(image_inputs))
+        + "\n必须按 reference_index 理解 provider reference_images 的顺序。模特身份参考图不是风格参考，而是人物身份事实源。"
+        + "不得根据拍摄剧本、分镜预览或品牌妆发文字改变模特脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。\n"
+    )
+
+
 def build_new_preview_task_package(task_id: int, styling_id: int, shoot_script_id: int, shot_plans: list[dict[str, Any]]) -> dict[str, Any]:
     styling_plan = get_styling_plan_by_id(styling_id)
     shoot_script = get_shoot_script_json_by_id(shoot_script_id)
+    image_inputs = build_new_image_inputs(task_id, styling_id, include_preview=False)
     return {
         "generation": {"stage": "preview_grid"},
-        "prompt": build_new_preview_prompt(shot_plans, styling_plan, shoot_script),
-        "imageInputs": build_new_image_inputs(task_id, styling_id, include_preview=False),
+        "prompt": build_new_preview_prompt(shot_plans, styling_plan, shoot_script, image_inputs),
+        "imageInputs": image_inputs,
         "stylingPlan": styling_plan,
         "shootScript": shoot_script,
         "shotPlans": shot_plans,
     }
 
 
-def build_new_preview_prompt(shot_plans: list[dict[str, Any]], styling_plan: dict[str, Any], shoot_script: dict[str, Any]) -> str:
-    return render_prompt_template(
+def build_new_preview_prompt(shot_plans: list[dict[str, Any]], styling_plan: dict[str, Any], shoot_script: dict[str, Any], image_inputs: list[dict[str, Any]] | None = None) -> str:
+    prompt = render_prompt_template(
         "assembly.storyboard_preview",
         {
             "shoot_script_result": dumps(shoot_script_result_for_prompt(shoot_script)),
+            "image_reference_manifest": dumps(image_reference_manifest_for_prompt(image_inputs or [])),
         },
     )
+    return append_image_reference_manifest(prompt, image_inputs or [])
 
 
 def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str, Any]:
@@ -6458,23 +6573,26 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
     shot_plan = loads(row["plan_json"], {})
     styling_plan = get_styling_plan_by_id(int(row["styling_id"]))
     shoot_script = get_shoot_script_json_by_id(int(row["shoot_script_id"])) if row["shoot_script_id"] else {}
+    image_inputs = build_new_image_inputs(task_id, int(row["styling_id"]), include_preview=True, preview_asset_id=row["preview_asset_id"])
     return {
         "generation": {"stage": "final_image"},
-        "prompt": build_new_final_prompt(int(row["sort_order"]), shot_plan, styling_plan, shoot_script),
-        "imageInputs": build_new_image_inputs(task_id, int(row["styling_id"]), include_preview=True, preview_asset_id=row["preview_asset_id"]),
+        "prompt": build_new_final_prompt(int(row["sort_order"]), shot_plan, styling_plan, shoot_script, image_inputs),
+        "imageInputs": image_inputs,
         "stylingPlan": styling_plan,
         "shootScript": shoot_script,
         "shotPlan": shot_plan,
     }
 
 
-def build_new_final_prompt(shot_index: int, shot_plan: dict[str, Any], styling_plan: dict[str, Any], shoot_script: dict[str, Any]) -> str:
-    return render_prompt_template(
+def build_new_final_prompt(shot_index: int, shot_plan: dict[str, Any], styling_plan: dict[str, Any], shoot_script: dict[str, Any], image_inputs: list[dict[str, Any]] | None = None) -> str:
+    prompt = render_prompt_template(
         "assembly.final_image",
         {
             "current_shot_context": dumps(current_shot_context_for_prompt(shot_index, shot_plan, styling_plan, shoot_script)),
+            "image_reference_manifest": dumps(image_reference_manifest_for_prompt(image_inputs or [])),
         },
     )
+    return append_image_reference_manifest(prompt, image_inputs or [])
 
 
 def get_styling_plan_by_id(styling_id: int) -> dict[str, Any]:
@@ -6495,10 +6613,6 @@ def get_shoot_script_json_by_id(shoot_script_id: int) -> dict[str, Any]:
 
 def build_new_image_inputs(task_id: int, styling_id: int, include_preview: bool, preview_asset_id: int | None = None) -> list[dict[str, Any]]:
     inputs: list[dict[str, Any]] = []
-    if include_preview and preview_asset_id:
-        asset = get_media_asset_by_id(preview_asset_id)
-        if asset:
-            inputs.append(image_input_from_asset(asset, "preview_grid"))
     with get_db() as db:
         styling = db.execute(
             "SELECT selected_material_snapshot_json, input_version_id FROM generation_stylings WHERE id = ?",
@@ -6508,10 +6622,19 @@ def build_new_image_inputs(task_id: int, styling_id: int, include_preview: bool,
             "SELECT image_snapshot_json, model_snapshot_json FROM generation_task_input_versions WHERE id = ?",
             (styling["input_version_id"],),
         ).fetchone() if styling else None
+    model_snapshot = loads(input_version["model_snapshot_json"], {}) if input_version else {}
+    model_inputs = model_snapshot.get("imageInputs", []) if isinstance(model_snapshot, dict) else []
+    if not model_inputs:
+        model_inputs = get_default_model_image_inputs(limit=2)
+    inputs.extend({**item, "role": "model_identity"} for item in model_inputs[:2] if isinstance(item, dict))
+    if include_preview and preview_asset_id:
+        asset = get_media_asset_by_id(preview_asset_id)
+        if asset:
+            inputs.append(image_input_from_asset(asset, "preview_grid"))
     hero_snapshot = loads(input_version["image_snapshot_json"], []) if input_version else []
     inputs.extend(image_input_from_asset(item.get("asset"), "hero_garment") for item in hero_snapshot[:3])
     selected_materials = loads(styling["selected_material_snapshot_json"], []) if styling else []
-    remaining = max(0, 10 - len(inputs) - 2)
+    remaining = max(0, 10 - len(inputs))
     for garment in selected_materials:
         if remaining <= 0:
             break
@@ -6519,11 +6642,6 @@ def build_new_image_inputs(task_id: int, styling_id: int, include_preview: bool,
         if images:
             inputs.append(image_input_from_asset(images[0]["asset"], "styling_garment"))
             remaining -= 1
-    model_snapshot = loads(input_version["model_snapshot_json"], {}) if input_version else {}
-    model_inputs = model_snapshot.get("imageInputs", []) if isinstance(model_snapshot, dict) else []
-    if not model_inputs:
-        model_inputs = get_default_model_image_inputs(limit=2)
-    inputs.extend(model_inputs[:max(0, 10 - len(inputs))][:2])
     return inputs[:10]
 
 
@@ -6640,6 +6758,9 @@ def shoot_script_prompt_template_v2() -> str:
 【AI 选搭结果】
 {{runtime.styling_result}}
 
+【数字模特身份契约】
+{{runtime.model_identity_context}}
+
 请只返回 JSON，结构如下：
 {
   "global_directing": {
@@ -6668,9 +6789,13 @@ def storyboard_preview_prompt_template_v2() -> str:
 
 {{segment.brand_info}}
 
+【输入参考图角色清单】
+{{runtime.image_reference_manifest}}
+
 主推款和搭配服饰参考图是真实商品事实来源，必须保持商品级保真。
 搭配服饰和生成配饰必须服务主推款展示，不得让主推款沦为整套造型的背景元素。
-数字模特参考图用于保持同一身份、发型和气质。
+数字模特参考图是模特身份事实来源，必须保持同一人的脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。
+不得根据拍摄剧本、品牌妆发或分镜构图把模特改成另一张脸、低马尾、盘发、长发或参考图中不存在的发型。
 
 【拍摄剧本结果】
 {{runtime.shoot_script_result}}
@@ -6685,7 +6810,10 @@ def final_image_prompt_template_v2() -> str:
     return """生成一张电商棚拍成片，只生成单张图，不要生成拼图或分镜预览。
 
 参考分镜预览图中 current_shot_context.preview_grid_cell 对应的格子，只参考姿势、身位、景别、构图、背景和光影方向。
-分镜预览不是商品事实来源。主推款参考图是主角商品事实来源，搭配服饰参考图是配角商品事实来源。
+分镜预览不是模特或商品事实来源。模特参考图是模特身份事实来源，主推款参考图是主角商品事实来源，搭配服饰参考图是配角商品事实来源。
+
+【输入参考图角色清单】
+{{runtime.image_reference_manifest}}
 
 {{segment.brand_info}}
 
@@ -6693,6 +6821,7 @@ def final_image_prompt_template_v2() -> str:
 {{runtime.current_shot_context}}
 
 必须保持主推款和搭配服饰的品类、颜色、面料、版型、结构、比例和可见细节。
+必须保持同一位数字模特的脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。
 鞋、包、饰品只作为辅助搭配，不作为商品事实源，不做特写。
 不要让搭配服饰或生成配饰抢主推款视觉中心；不要改款、换色、替换商品；不要添加文字、水印、logo。
 """
@@ -6823,6 +6952,8 @@ def sample_prompt_runtime() -> dict[str, Any]:
     return {
         "candidate_retrieval": dumps([{"code": "LOOK-A", "ai_tags": {"一级品类": ["上装"], "色彩": ["白色"], "版型": ["合体"], "风格语义": "轻量上装服务主推裤装。"}}]),
         "styling_result": dumps({"hero_understanding": {"category": "裤装"}, "selected_material_codes": ["LOOK-A"], "reason_summary": "轻量上装服务主推裤装。"}),
+        "model_identity_context": dumps({"identity_contract": {"model_id": "Face-01", "must_preserve": ["same face", "same hair"]}}),
+        "image_reference_manifest": dumps({"references": [{"reference_index": 1, "role": "model_identity"}, {"reference_index": 2, "role": "hero_garment"}]}),
         "shoot_script_result": dumps({"global_directing": {"background": "浅灰棚拍"}, "shots": [{"shot_index": 1, "shot_role": "hero_full_body", "main_focus": "主推款整体比例"}]}),
         "current_shot_context": dumps({"preview_grid_cell": 1, "current_shot": {"shot_role": "hero_full_body", "main_focus": "主推款整体比例"}, "styling": {"selected_material_codes": ["LOOK-A"]}}),
     }
@@ -6833,6 +6964,8 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "segment.brand_info", "scope": "segment", "description": "品牌信息分段 Prompt"},
         {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服饰库 READY 服饰的全量 AI 标签事实卡"},
         {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭导演上下文，使用搭配服饰 code 标识"},
+        {"name": "runtime.model_identity_context", "scope": "runtime", "description": "AI Director 使用的数字模特身份契约和参考图上下文"},
+        {"name": "runtime.image_reference_manifest", "scope": "runtime", "description": "Image-2 输入参考图序号、角色和事实源优先级"},
         {"name": "runtime.shoot_script_result", "scope": "runtime", "description": "拍摄剧本结果，用于分镜预览"},
         {"name": "runtime.current_shot_context", "scope": "runtime", "description": "当前成片单镜头所需的选搭、剧本和分镜信息"},
     ]
