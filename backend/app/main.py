@@ -5320,7 +5320,7 @@ def parse_lily_tagging_json(text: str) -> dict[str, Any]:
     try:
         parsed = loads(json_text, {})
     except json.JSONDecodeError as strict_error:
-        relaxed_json_text = remove_json_trailing_commas(json_text)
+        relaxed_json_text = repair_jsonish_tagging_text(json_text)
         if relaxed_json_text != json_text:
             try:
                 parsed = loads(relaxed_json_text, {})
@@ -5349,6 +5349,29 @@ def remove_json_trailing_commas(value: str) -> str:
         if next_value == previous:
             return next_value
         previous = next_value
+
+
+def repair_jsonish_tagging_text(value: str) -> str:
+    return remove_dangling_json_object_tail(
+        insert_missing_json_property_commas(remove_json_trailing_commas(value))
+    )
+
+
+def insert_missing_json_property_commas(value: str) -> str:
+    value_token = r'"(?:\\.|[^"\\])*"|[\]}]|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null'
+    key_token = r'"[^"\r\n]+?"\s*:'
+    pattern = re.compile(rf"({value_token})(\s+)({key_token})")
+    previous = value
+    while True:
+        next_value = pattern.sub(r"\1,\2\3", previous)
+        if next_value == previous:
+            return next_value
+        previous = next_value
+
+
+def remove_dangling_json_object_tail(value: str) -> str:
+    value_token = r'"(?:\\.|[^"\\])*"|[\]}]|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null'
+    return re.sub(rf"({value_token})(\s+)([^{{}}\[\],:]+?)(\s*)\}}$", r"\1\4}", value)
 
 
 def is_recoverable_json_trailing_noise(value: str) -> bool:

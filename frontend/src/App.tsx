@@ -1318,7 +1318,11 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [garments, offset, query, includeArchived, pageSize])
+  }, [offset, query, includeArchived, pageSize])
+
+  useEffect(() => {
+    setItems((current) => current.map((item) => garments.find((latest) => latest.id === item.id) ?? item))
+  }, [garments])
 
   useEffect(() => setSelectedGarmentIds(new Set()), [offset, includeArchived, query, pageSize])
 
@@ -3687,7 +3691,7 @@ function GarmentCard({ item, onTag, onOpen, onDelete, selected, onSelect }: {
   const effective = item.effectiveTags ?? {}
   const meta = item.tagMeta ?? {}
   const compatibility = typeof tags.styling_compatibility === 'object' && tags.styling_compatibility ? tags.styling_compatibility as Record<string, unknown> : {}
-  const brief = tagText(effective.pairing_brief || compatibility.pairing_brief)
+  const brief = garmentBrief(item, compatibility)
   const tagging = item.status === 'TAGGING_RUNNING'
   const failed = item.status === 'TAGGING_FAILED'
   const showTagResult = !tagging && !failed
@@ -4565,6 +4569,31 @@ function garmentTagChips(item: StylingGarment) {
     ...collectTagValues(tags['季节'] ?? effective.season ?? tags.season),
   ]
   return Array.from(new Set(values)).slice(0, 3)
+}
+
+function firstTagText(...values: unknown[]) {
+  for (const value of values) {
+    const text = tagText(value)
+    if (text) return text
+  }
+  return ''
+}
+
+function garmentBrief(item: StylingGarment, compatibility?: Record<string, unknown>) {
+  const tags = item.aiTags ?? {}
+  const effective = item.effectiveTags ?? {}
+  return firstTagText(
+    effective.pairing_brief,
+    compatibility?.pairing_brief,
+    tags['搭配适配建议'],
+    tags['造型角色建议'],
+    tags['整体视觉语义'],
+    tags.overall_summary,
+    tags['风格语义'],
+    tags.style_summary,
+    tags['结构/廓形语义'],
+    tags.structure_summary,
+  )
 }
 
 function compactTagLine(value: Record<string, unknown>) {
