@@ -29,7 +29,7 @@ AI Stylist 不直接接收上述 JSON 整包。后端把它们压缩成候选卡
 
 ## GenerationTask
 
-AI 摄影棚主推款任务。草稿阶段可上传和排序主推款图片；进入 AI 后通过 `GenerationTaskInputVersion` 冻结输入。
+AI 摄影棚主推款任务。草稿阶段可上传和排序主推款图片，也可填写简短 `user_requirement_text` 作为服装事实补充或拍摄要求；进入 AI 后通过 `GenerationTaskInputVersion` 冻结输入。
 
 主要状态：
 
@@ -56,6 +56,7 @@ AI Stylist 的职责是理解主推款、探索多套 outfit、批判审美与�
 保存内容：
 
 - `candidate_retrieval_snapshot_json`：本次 READY 搭配库紧凑候选卡、source ids、candidate ids 和 code/id 映射。
+- `user_requirement_json`：上传补充要求、本次选搭微调要求和冲突处理策略。
 - `styling_plan_json`：完整 StylingPlan，包含候选方案、选中方案、被拒方案、诊断、评分、质量信号和 warnings。
 - `selected_material_snapshot_json`：选中搭配服饰的商品与图片快照。
 
@@ -101,6 +102,7 @@ attempt 保存 provider、状态、请求快照、响应快照、错误、provid
 | 阶段 | Runtime | 内容 |
 |---|---|---|
 | AI Stylist | `candidate_retrieval` | READY 搭配库紧凑候选卡 |
+| AI Stylist | `user_requirement` | 上传补充要求、本次微调要求和冲突处理策略 |
 | AI Director | `styling_result` | 主推款理解、选中 outfit、选中服饰紧凑标签、质量信号 |
 | 分镜预览 | `shoot_script_result` | 全局导演、配饰、风险和 6 个镜头 |
 | 最终成片 | `current_shot_context` | 当前镜头、当前格子、选中 outfit、本镜头配饰和禁止项 |

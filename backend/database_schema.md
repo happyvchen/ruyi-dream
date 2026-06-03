@@ -29,13 +29,14 @@
 
 ## 生成主链路
 
-`generation_tasks` 是用户任务根节点。草稿阶段可维护 `generation_task_images`；进入 AI 后创建 `generation_task_input_versions`，冻结主推款图片、任务名和默认数字模特快照。
+`generation_tasks` 是用户任务根节点。草稿阶段可维护 `generation_task_images` 和 `user_requirement_text`；进入 AI 后创建 `generation_task_input_versions`，冻结主推款图片、任务名、默认数字模特快照和本次用户要求。
 
 一键成片自动推进由 `generation_tasks.auto_run_target` 和 `auto_run_requested_at` 表达。当前唯一目标值为 `FINAL`。该字段只表示“继续自动推进到成片”的意图，不替代 `status`、阶段 artifact 状态或 active 指针；失败、完成、取消后清空。
 
 AI Stylist 写入 `generation_stylings`：
 
 - `candidate_retrieval_snapshot_json` 保存本次 READY 搭配库的紧凑候选卡和 code/id 映射。
+- `user_requirement_json` 保存本次 AI Stylist 实际读取的上传补充要求、微调要求和冲突处理策略。
 - `styling_plan_json` 保存完整 StylingPlan，包括候选方案、被拒方案、Aesthetic Critic 诊断、质量信号和选中 outfit。
 - `selected_material_snapshot_json` 保存被选中搭配服饰的商品快照和图片快照。
 
@@ -53,6 +54,7 @@ Image-2 阶段写入：
 `prompt_configs` 只保存模板正文和分段。运行时占位符由后端提供：
 
 - `runtime.candidate_retrieval`：AI Stylist 使用的搭配库紧凑候选卡。
+- `runtime.user_requirement`：AI Stylist 使用的本次用户要求和冲突处理策略。
 - `runtime.styling_result`：AI Director 使用的 StylingPlan 导演上下文。
 - `runtime.shoot_script_result`：分镜预览使用的 ShootScript 上下文。
 - `runtime.current_shot_context`：单张最终成片上下文。

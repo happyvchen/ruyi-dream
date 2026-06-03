@@ -432,6 +432,25 @@ h1, h2, h3, p { margin: 0; }
   color: #334155;
   line-height: 1.6;
 }
+.requirement-summary {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid #d8e0ea;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.requirement-summary span {
+  color: #64748b;
+  font-size: 12px;
+}
+.requirement-summary strong,
+.requirement-summary em {
+  color: #1e293b;
+  font-size: 13px;
+  font-style: normal;
+  line-height: 1.45;
+}
 .score-strip {
   display: grid;
   grid-template-columns: repeat(4, minmax(54px, 1fr));
@@ -673,6 +692,43 @@ h1, h2, h3, p { margin: 0; }
 }
 .hero-draft .inline-form input:first-child { flex: 1; }
 .hero-draft input[type="file"] { display: none; }
+.requirement-editor {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.requirement-editor label {
+  display: grid;
+  gap: 7px;
+}
+.requirement-editor label span {
+  color: #475569;
+  font-size: 13px;
+  font-weight: 700;
+}
+.requirement-editor textarea {
+  min-height: 84px;
+  background: #fff;
+}
+.requirement-editor > em {
+  justify-self: end;
+  color: #94a3b8;
+  font-size: 12px;
+  font-style: normal;
+}
+.requirement-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.requirement-chips .secondary {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
 .draft-image-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));

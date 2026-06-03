@@ -419,6 +419,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
               <ThumbGrid assets={(task.images ?? []).map((item) => item.asset)} compact />
               <Meta label="任务" value={task.name} />
               <Meta label="状态" value={statusText(task.status)} />
+              {task.userRequirement && <Meta label="本次要求" value={task.userRequirement} />}
               <Meta label="搭配服饰" value={`${task.styling?.selectedMaterials?.length ?? 0} 件`} />
               <Meta label="最终图" value={`${task.resultSet?.images?.filter((i) => i.status === 'SUCCEEDED').length ?? 0}/5`} />
               {isTaskRunning(task) && (
@@ -515,6 +516,7 @@ function AutoRunProgress({ task }: { task: GenerationTask }) {
 function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any }) {
   const [files, setFiles] = useState<File[]>([])
   const [name, setName] = useState('')
+  const [userRequirement, setUserRequirement] = useState('')
 
   function addHeroFiles(nextFiles: File[]) {
     const imageFiles = nextFiles
@@ -566,12 +568,19 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
                 <span>推荐 3-5 张，最多只允许 8 张用于创建任务。</span>
                 {files.length > 8 && <strong>当前超过 8 张，请删除或调整后再创建</strong>}
               </div>
+              <RequirementEditor
+                value={userRequirement}
+                onChange={setUserRequirement}
+                title="补充服装信息或拍摄要求（选填）"
+                placeholder="例如：这条裤子是夏季主推，重点展示腰头和裤脚，避免厚重外套。"
+              />
               <FileThumbList files={files} onChange={setFiles} />
               <div className="inline-form">
-                <button className="primary" disabled={!files.length || files.length > 8 || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, files), (r: { item: GenerationTask }) => {
+                <button className="primary" disabled={!files.length || files.length > 8 || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, files, userRequirement), (r: { item: GenerationTask }) => {
                   setTask(r.item)
                   setFiles([])
                   setName('')
+                  setUserRequirement('')
                   window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: r.item.id }))
                 }, { refresh: 'background' })}>
                   <ImagePlus size={16} /> 创建任务
@@ -588,9 +597,11 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
 
 function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask: (task: GenerationTask) => void; run: any }) {
   const [name, setName] = useState(task.name)
+  const [userRequirement, setUserRequirement] = useState(task.userRequirement ?? '')
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
 
   useEffect(() => setName(task.name), [task.id, task.name])
+  useEffect(() => setUserRequirement(task.userRequirement ?? ''), [task.id, task.userRequirement])
 
   async function move(index: number, direction: -1 | 1) {
     const images = task.images ?? []
@@ -607,7 +618,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
       <div className="section-head"><strong>当前草稿</strong><span className="status draft">待确认</span></div>
       <div className="inline-form">
         <input value={name} onChange={(event) => setName(event.target.value)} placeholder="任务名称" />
-        <button className="secondary" disabled={name.trim() === task.name} onClick={() => void run('保存任务名称中...', () => api.updateTask(task.id, { name }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>保存名称</button>
+        <button className="secondary" disabled={name.trim() === task.name && userRequirement.trim() === (task.userRequirement ?? '').trim()} onClick={() => void run('保存拍摄信息中...', () => api.updateTask(task.id, { name, userRequirement }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>保存信息</button>
         <label className="secondary">
           <ImagePlus size={16} /> 追加图片
           <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => {
@@ -616,6 +627,12 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
           }} />
         </label>
       </div>
+      <RequirementEditor
+        value={userRequirement}
+        onChange={setUserRequirement}
+        title="补充服装信息或拍摄要求（选填）"
+        placeholder="例如：这条裤子是夏季主推，重点展示腰头和裤脚，避免厚重外套。"
+      />
       <div className="draft-image-grid">
         {(task.images ?? []).map((image, index) => (
           <div className="saved-image-card" key={image.id}>
@@ -644,6 +661,26 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
         确认并进入智能选搭
       </button>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
+    </div>
+  )
+}
+
+function RequirementEditor({ value, onChange, title, placeholder }: { value: string; onChange: (value: string) => void; title: string; placeholder: string }) {
+  const chips = ['突出腰线', '更显腿长', '减少配饰', '避免外套', '更通勤', '尽量单穿']
+  function appendChip(chip: string) {
+    const next = value.trim() ? `${value.trim()}；${chip}` : chip
+    onChange(next)
+  }
+  return (
+    <div className="requirement-editor">
+      <label>
+        <span>{title}</span>
+        <textarea value={value} maxLength={800} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
+      </label>
+      <div className="requirement-chips">
+        {chips.map((chip) => <button key={chip} type="button" className="secondary" onClick={() => appendChip(chip)}>{chip}</button>)}
+      </div>
+      <em>{value.length}/800</em>
     </div>
   )
 }
@@ -677,10 +714,12 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
   isAdmin: boolean
   onOpenAICallLogs: (title: string, ownerTypes: string[]) => void
 }) {
+  const [refinement, setRefinement] = useState('')
   const locked = !!task && (isTaskRunning(task) || !!task.autoRunTarget)
   const canSelect = !!task && !locked && ['READY_FOR_STYLING', 'STYLING_READY', 'SCRIPT_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task.status)
   const hasStyling = !!task?.styling
   const operations = task ? operationFallbacks(task, localOperations, 'generation_styling') : []
+  useEffect(() => setRefinement(''), [task?.id])
   return (
     <div className="step-panel">
       <StageHeader title="AI 智能选搭" text="AI Stylist 会先理解主推款，再生成推荐造型方案；搭配服饰必须服务主推款展示。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('AI 智能选搭调用记录', ['generation_styling'])} />
@@ -688,6 +727,14 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
       {task?.styling ? (
         <StylingPlanSummary task={task} isAdmin={isAdmin} />
       ) : <EmptyState title="等待智能选搭" text="点击按钮后会冻结当前主推款输入版本。" />}
+      {task && hasStyling && (
+        <RequirementEditor
+          value={refinement}
+          onChange={setRefinement}
+          title="按要求微调（选填）"
+          placeholder="例如：不要外套，改成更轻盈的通勤搭配；减少包袋，突出主推款腰线。"
+        />
+      )}
       <button className="primary" disabled={!canSelect} onClick={() => task && void run(hasStyling ? '重新选搭中...' : '智能选搭中...', () => {
         startLocalOperation({ ownerType: 'generation_styling', ownerId: task.id, provider: 'gemini' })
         const previousTask = task
@@ -704,12 +751,13 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
           activePreviewId: null,
           activeResultSetId: null,
         })
-        return api.selectStyling(task.id).catch((error) => {
+        return api.selectStyling(task.id, refinement).catch((error) => {
           setTask(previousTask)
           throw error
         })
       }, (r: { item: GenerationTask }) => {
         clearLocalOperationsFor(['generation_styling'])
+        setRefinement('')
         setTask(r.item)
       }, { refresh: false })}>
         <WandSparkles size={16} /> {hasStyling ? '重新选搭' : 'AI 智能选搭'}
@@ -732,6 +780,15 @@ function StylingPlanSummary({ task, isAdmin }: { task: GenerationTask; isAdmin: 
   const aestheticDiagnosis = diagnosisItems(planValue<Record<string, unknown>>(selected ?? {}, 'aesthetic_diagnosis') ?? {})
   const rejected = styling.rejectedCandidates?.length ? styling.rejectedCandidates : planValue<Record<string, unknown>[]>(plan, 'rejected_candidates') ?? []
   const materialCodesById = materialCodeMap(styling, candidates, plan)
+  const requirement = (styling.userRequirement ?? task.inputVersion?.userRequirement ?? {}) as Record<string, unknown>
+  const requirementText = stringValue(requirement.combined_requirement)
+  const requirementResolution = (styling.userRequirementResolution && Object.keys(styling.userRequirementResolution).length ? styling.userRequirementResolution : planValue<Record<string, unknown>>(plan, 'user_requirement_resolution') ?? {}) as Record<string, unknown>
+  const requirementItems = [
+    ...stringList(requirementResolution.satisfied).map((item) => `已满足：${item}`),
+    ...stringList(requirementResolution.not_satisfied).map((item) => `未满足：${item}`),
+    ...stringList(requirementResolution.conflicts).map((item) => `冲突：${item}`),
+    ...stringList(requirementResolution.alternative_handling).map((item) => `替代：${item}`),
+  ]
   return (
     <div className="styling-plan">
       <div className="styling-plan-head">
@@ -747,6 +804,13 @@ function StylingPlanSummary({ task, isAdmin }: { task: GenerationTask; isAdmin: 
         </div>
       </div>
       <p>{styling.reasonSummary || stringValue(planValue(plan, 'reason_summary'))}</p>
+      {requirementText && (
+        <div className="requirement-summary">
+          <span>本次要求</span>
+          <strong>{requirementText}</strong>
+          {requirementItems.length > 0 && requirementItems.slice(0, 5).map((item, index) => <em key={`${item}-${index}`}>{item}</em>)}
+        </div>
+      )}
       <div className="styling-plan-grid">
         <InfoBlock title="主推款理解" items={[stringValue(hero.hero_visual_summary), ...stringList(hero.hero_selling_points)].filter(Boolean)} />
         <InfoBlock title="审美诊断" items={aestheticDiagnosis} empty="暂无审美诊断" />
@@ -4113,7 +4177,7 @@ function formatDuration(seconds: number) {
 }
 
 function CurrentTaskCard({ task }: { task: GenerationTask }) {
-  return <div className="current-task"><ThumbGrid assets={(task.images ?? []).map((item) => item.asset)} /><Meta label="当前任务" value={task.name} /><Meta label="状态" value={statusText(task.status)} /></div>
+  return <div className="current-task"><ThumbGrid assets={(task.images ?? []).map((item) => item.asset)} /><Meta label="当前任务" value={task.name} /><Meta label="状态" value={statusText(task.status)} />{task.userRequirement && <Meta label="本次要求" value={task.userRequirement} />}</div>
 }
 
 function ThumbGrid({ assets, compact = false }: { assets: MediaAsset[]; compact?: boolean }) {

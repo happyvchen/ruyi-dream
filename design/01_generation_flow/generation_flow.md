@@ -86,12 +86,13 @@ DELETED
 ### 4.1 输入
 
 - 当前输入版本的主推款图片。
+- 当前输入版本冻结的用户要求，包括上传阶段的补充服装信息或拍摄要求，以及本次重新选搭时填写的微调要求。
 - `runtime.candidate_retrieval`：当前未归档 READY 搭配服饰的全量 AI 标签事实卡，只暴露搭配服饰 `code`、`ai_tags`、必要人工业务标记和复核信息，不暴露系统内部 ID、图片快照或候选排序。
 - Prompt 维护中的 AI 选搭业务规则、品牌边界、配饰边界和 Aesthetic Critic 维度。
 - 与本次主推款和候选最相关的 Lily 官方品牌样本摘要。阶段 1 可用品牌边界文本占位，阶段 2 必须使用 `Lily Brand Style Index`。
 - Lily 品牌边界、商品主角原则和生产验收维度。
 
-MVP 阶段默认不输入用户长 prompt。用户只确认拍摄信息和结果，不被训练成 prompt 工程师。
+MVP 阶段不输入用户长 prompt，但允许用户输入简短业务要求。用户要求是本次任务的高优先级业务输入，在不违反商品图片事实、搭配库事实、品牌硬边界、输出 schema 和安全规则时，AI Stylist 必须优先满足。若用户要求与硬边界冲突，AI Stylist 必须在结构化输出中说明冲突原因和替代处理。
 
 ### 4.2 工作流
 
@@ -175,6 +176,12 @@ MVP 阶段默认不输入用户长 prompt。用户只确认拍摄信息和结果
   "selected_material_codes": [],
   "selected_materials": [],
   "reason_summary": "主推连衣裙自带完整造型，采用单穿并以生成鞋包补足通勤氛围。",
+  "user_requirement_resolution": {
+    "user_requirement_summary": "用户要求避免外套并突出腰线",
+    "satisfied": ["未选择外套", "前 5 个图位保留腰线展示"],
+    "not_satisfied": [],
+    "conflicts": []
+  },
   "rejected_candidates": [
     {
       "outfit_key": "candidate_b",

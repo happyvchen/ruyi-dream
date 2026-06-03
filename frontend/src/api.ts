@@ -98,6 +98,7 @@ export type GenerationTask = {
   id: number
   name: string
   status: string
+  userRequirement?: string | null
   currentInputVersionId?: number | null
   activeStylingId?: number | null
   activeShootScriptId?: number | null
@@ -116,11 +117,14 @@ export type GenerationTask = {
     versionNumber: number
     imageSnapshot: { sortOrder: number; asset: MediaAsset }[]
     modelSnapshot?: Record<string, unknown>
+    userRequirement?: Record<string, unknown>
   } | null
   styling?: {
     id: number
     selectedMaterialIds?: number[]
     selectedMaterials: StylingGarment[]
+    userRequirement?: Record<string, unknown>
+    userRequirementResolution?: Record<string, unknown>
     stylingPlan?: Record<string, unknown>
     heroUnderstanding?: Record<string, unknown>
     libraryAdequacy?: Record<string, unknown>
@@ -548,13 +552,14 @@ export const api = {
     request<{ ok: boolean; purged: boolean; deletedTaskIds: number[] }>('/api/generation-tasks/batch-purge', { method: 'POST', body: JSON.stringify({ purge: true, ids, confirmPhrase }) }),
   getTaskDeleteImpact: (ids: number[]) =>
     request<{ impact: DeleteImpact }>('/api/generation-tasks/delete-impact', { method: 'POST', body: JSON.stringify({ ids }) }),
-  createTask: (name: string, files: File[]) => {
+  createTask: (name: string, files: File[], userRequirement?: string) => {
     const form = new FormData()
     if (name) form.append('name', name)
+    if (userRequirement) form.append('userRequirement', userRequirement)
     files.forEach((file) => form.append('files', file))
     return request<{ item: GenerationTask }>('/api/generation-tasks', { method: 'POST', body: form })
   },
-  updateTask: (id: number, payload: { name?: string }) =>
+  updateTask: (id: number, payload: { name?: string; userRequirement?: string }) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   addTaskImages: (id: number, files: File[]) => {
     const form = new FormData()
@@ -572,8 +577,8 @@ export const api = {
     request<{ item: GenerationTask }>(`/api/generation-task-images/${id}`, { method: 'DELETE' }),
   readyTask: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/ready`, { method: 'POST' }),
-  selectStyling: (id: number) =>
-    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/select-styling`, { method: 'POST' }),
+  selectStyling: (id: number, userRequirement?: string) =>
+    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/select-styling`, { method: 'POST', body: JSON.stringify({ userRequirement }) }),
   createShootScript: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/shoot-script`, { method: 'POST' }),
   previewTask: (id: number) =>

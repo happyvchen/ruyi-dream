@@ -51,6 +51,19 @@ PROMPT_PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-zA-Z0-9_.-]+)\s*}}")
 AI_STYLING_PROMPT_CONFIG_KEY = "assembly.ai_styling"
 SHOOT_SCRIPT_PROMPT_CONFIG_KEY = "assembly.shoot_script"
 AUTO_RUN_TARGET_FINAL = "FINAL"
+MAX_USER_REQUIREMENT_CHARS = 800
+
+
+AI_STYLIST_SYSTEM_INSTRUCTION = """你是 Lily 品牌 AI 摄影棚的 AI Stylist。
+你必须遵守不可覆盖的生产边界：商品事实以主推款图片和搭配服饰库事实为准；搭配服饰只能来自 READY 候选 code；不得编造商品级服饰；必须返回合法 JSON。
+用户要求是本次任务的高优先级业务输入，高于默认搭配偏好；但不得覆盖商品图片事实、搭配库事实、Lily 品牌硬边界、输出 schema 和安全规则。
+当用户要求与硬边界冲突时，不要强行满足；请在 user_requirement_resolution 中说明冲突原因、未满足项和替代处理。"""
+
+
+AI_DIRECTOR_SYSTEM_INSTRUCTION = """你是 Lily 品牌 AI 摄影棚的 AI Director。
+你必须承接已完成的 StylingPlan 和其中的 user_requirement_resolution，不得重新选择库内搭配服饰。
+用户要求高于默认导演偏好；但不得覆盖商品事实、数字模特身份契约、已选搭配服饰、输出 schema 和安全规则。
+请只返回合法 JSON。"""
 
 
 def is_request_authenticated(request: Request) -> bool:
@@ -209,6 +222,11 @@ class StylingGarmentImageUpdateRequest(BaseModel):
 
 class GenerationTaskUpdateRequest(BaseModel):
     name: str | None = None
+    userRequirement: str | None = None
+
+
+class GenerationStylingRequest(BaseModel):
+    userRequirement: str | None = None
 
 
 class GenerationTaskImageUpdateRequest(BaseModel):
@@ -1348,6 +1366,7 @@ def purge_styling_garment(db: Any, garment_id: int, code: str) -> tuple[list[int
 @app.post("/api/generation-tasks")
 async def create_generation_task(
     name: str | None = Form(None),
+    userRequirement: str | None = Form(None),
     files: list[UploadFile] = File(...),
 ) -> dict[str, Any]:
     if not files:
@@ -1358,10 +1377,11 @@ async def create_generation_task(
     prefix = join_key("generation-tasks", f"{sanitize_name(task_name) or 'task'}-{uuid4().hex[:8]}")
     assets = await save_uploads_as_media_assets(files, prefix)
     timestamp = now_iso()
+    user_requirement_text = normalize_user_requirement_text(userRequirement)
     with get_db() as db:
         cursor = db.execute(
-            "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES (?, 'DRAFT', ?, ?)",
-            (task_name, timestamp, timestamp),
+            "INSERT INTO generation_tasks (name, user_requirement_text, status, created_at, updated_at) VALUES (?, ?, 'DRAFT', ?, ?)",
+            (task_name, user_requirement_text, timestamp, timestamp),
         )
         task_id = int(cursor.lastrowid)
         for index, asset in enumerate(assets):
@@ -1585,14 +1605,25 @@ def get_generation_tasks_delete_impact(payload: DeleteImpactRequest) -> dict[str
 
 @app.patch("/api/generation-tasks/{task_id}")
 def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -> dict[str, Any]:
-    if payload.name is None:
+    if payload.name is None and not payload_has_field(payload, "userRequirement"):
         return {"item": get_generation_task_by_id(task_id)}
     with get_db() as db:
         row = db.execute("SELECT * FROM generation_tasks WHERE id = ? AND deleted_at IS NULL", (task_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="生成任务不存在")
         ensure_generation_task_draft(row)
-        db.execute("UPDATE generation_tasks SET name = ?, updated_at = ? WHERE id = ?", (payload.name.strip() or "未命名任务", now_iso(), task_id))
+        updates: list[str] = []
+        values: list[Any] = []
+        if payload.name is not None:
+            updates.append("name = ?")
+            values.append(payload.name.strip() or "未命名任务")
+        if payload_has_field(payload, "userRequirement"):
+            updates.append("user_requirement_text = ?")
+            values.append(normalize_user_requirement_text(payload.userRequirement))
+        updates.append("updated_at = ?")
+        values.append(now_iso())
+        values.append(task_id)
+        db.execute(f"UPDATE generation_tasks SET {', '.join(updates)} WHERE id = ?", values)
     return {"item": get_generation_task_by_id(task_id)}
 
 
@@ -1839,11 +1870,21 @@ def ready_generation_task(task_id: int) -> dict[str, Any]:
 
 
 @app.post("/api/generation-tasks/{task_id}/select-styling")
-async def select_generation_styling(task_id: int, request: Request) -> dict[str, Any]:
-    return await run_select_generation_styling(task_id, include_debug=admin_debug_for_request(request), trigger="manual_step")
+async def select_generation_styling(task_id: int, request: Request, payload: GenerationStylingRequest | None = None) -> dict[str, Any]:
+    return await run_select_generation_styling(
+        task_id,
+        include_debug=admin_debug_for_request(request),
+        trigger="manual_step",
+        styling_adjustment=payload.userRequirement if payload else None,
+    )
 
 
-async def run_select_generation_styling(task_id: int, include_debug: bool = False, trigger: str = "manual_step") -> dict[str, Any]:
+async def run_select_generation_styling(
+    task_id: int,
+    include_debug: bool = False,
+    trigger: str = "manual_step",
+    styling_adjustment: str | None = None,
+) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     if task["status"] not in {
         "READY_FOR_STYLING",
@@ -1856,13 +1897,15 @@ async def run_select_generation_styling(task_id: int, include_debug: bool = Fals
         "CANCELLED",
     }:
         raise HTTPException(status_code=409, detail="当前任务状态不能智能选搭")
-    input_version_id = create_generation_input_version(task_id)
+    user_requirement_context = build_user_requirement_context(task, styling_adjustment)
+    input_version_id = create_generation_input_version(task_id, user_requirement_context)
     with get_db() as db:
         db.execute("UPDATE generation_tasks SET status = 'STYLING_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
     attempt_id = create_attempt("generation_styling", task_id, "gemini")
     try:
         input_row, candidate_snapshot, request_snapshot = build_ai_stylist_context(input_version_id)
         request_snapshot["invocation"] = {"mode": trigger, "target": "styling"}
+        request_snapshot["user_requirement"] = user_requirement_context
         update_attempt_request_snapshot(attempt_id, request_snapshot)
         if generation_task_or_attempt_cancelled(task_id, attempt_id):
             finish_attempt(attempt_id, "CANCELLED")
@@ -1906,10 +1949,11 @@ async def run_select_generation_styling(task_id: int, include_debug: bool = Fals
             INSERT INTO generation_stylings
               (task_id, input_version_id, source_material_ids_json, candidate_material_ids_json,
                candidate_retrieval_snapshot_json, library_adequacy_snapshot_json,
+               user_requirement_json,
                selected_material_ids_json, selected_material_snapshot_json,
                styling_plan_json, hero_understanding_json, outfit_candidates_json, critic_scores_json,
                rejected_candidates_json, reason_summary, warnings_json, status, attempt_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUCCEEDED', ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUCCEEDED', ?, ?, ?)
             """,
             (
                 task_id,
@@ -1918,6 +1962,7 @@ async def run_select_generation_styling(task_id: int, include_debug: bool = Fals
                 dumps(candidate_snapshot.get("candidate_material_ids") or []),
                 dumps(candidate_snapshot),
                 dumps(candidate_snapshot.get("library_adequacy") or {}),
+                dumps(user_requirement_context),
                 dumps(selected_ids),
                 dumps(selected_snapshot),
                 dumps(styling_plan),
@@ -3824,6 +3869,45 @@ def row_value(row: Any, key: str, default: Any = None) -> Any:
     return default
 
 
+def normalize_user_requirement_text(value: str | None) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text[:MAX_USER_REQUIREMENT_CHARS]
+
+
+def build_user_requirement_context(task: Any, styling_adjustment: str | None = None) -> dict[str, Any]:
+    upload_requirement = normalize_user_requirement_text(row_value(task, "user_requirement_text", ""))
+    adjustment = normalize_user_requirement_text(styling_adjustment)
+    combined_parts = [part for part in (upload_requirement, adjustment) if part]
+    return {
+        "schema_version": "user-requirement-v1",
+        "upload_requirement": upload_requirement,
+        "styling_adjustment": adjustment,
+        "combined_requirement": "；".join(combined_parts),
+        "priority_policy": {
+            "user_requirement_priority": "用户要求高于默认搭配偏好和默认导演偏好。",
+            "cannot_override": [
+                "主推款图片商品事实",
+                "搭配服饰库 READY 候选事实",
+                "数字模特身份契约",
+                "Lily 品牌硬边界",
+                "输出 schema",
+                "安全规则",
+            ],
+            "conflict_handling": "无法满足时必须说明冲突原因、未满足项和替代处理。",
+        },
+    }
+
+
+def has_user_requirement(context: dict[str, Any] | None) -> bool:
+    return bool((context or {}).get("combined_requirement"))
+
+
+def append_user_requirement_block(prompt: str, context: dict[str, Any] | None) -> str:
+    if not has_user_requirement(context) or "【本次用户要求】" in prompt:
+        return prompt
+    return f"{prompt.rstrip()}\n\n【本次用户要求】\n{dumps(context)}\n"
+
+
 async def generation_poller_loop() -> None:
     while True:
         await asyncio.sleep(settings.generation_poll_interval_seconds)
@@ -4973,7 +5057,7 @@ def get_generation_task_row(task_id: int) -> Any:
     return row
 
 
-def create_generation_input_version(task_id: int) -> int:
+def create_generation_input_version(task_id: int, user_requirement_context: dict[str, Any] | None = None) -> int:
     task = get_generation_task_row(task_id)
     with get_db() as db:
         image_rows = db.execute(
@@ -5000,10 +5084,10 @@ def create_generation_input_version(task_id: int) -> int:
         cursor = db.execute(
             """
             INSERT INTO generation_task_input_versions
-              (task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+              (task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, user_requirement_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (task_id, version_number, task["name"], dumps(snapshot), dumps(model_snapshot), timestamp),
+            (task_id, version_number, task["name"], dumps(snapshot), dumps(model_snapshot), dumps(user_requirement_context or build_user_requirement_context(task)), timestamp),
         )
         return int(cursor.lastrowid)
 
@@ -5229,15 +5313,20 @@ async def select_styling_with_gemini(input_row: Any, candidate_snapshot: dict[st
     if attempt_id:
         update_attempt_request_snapshot(attempt_id, request_snapshot)
     prompt = str(request_snapshot.get("prompt") or "")
-    contents: list[Any] = [prompt]
+    user_parts: list[Any] = [types.Part.from_text(text=prompt)]
     for item in loads(input_row["image_snapshot_json"], [])[:8]:
         asset = (item.get("asset") or {})
         object_key = asset.get("objectKey")
         if object_key and object_exists(object_key):
-            contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
+            user_parts.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
+    contents: list[Any] = [types.Content(role="user", parts=user_parts)]
     try:
         client = genai.Client(api_key=settings.gemini_api_key)
-        response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents)
+        config = types.GenerateContentConfig(
+            system_instruction=str(request_snapshot.get("systemInstruction") or AI_STYLIST_SYSTEM_INSTRUCTION),
+            response_mime_type="application/json",
+        )
+        response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents, config=config)
         raw = loads(extract_json_text(getattr(response, "text", "") or "{}"), {})
     except Exception as exc:
         raise RuntimeError(f"Gemini AI Stylist 调用失败：{exc}") from exc
@@ -5251,8 +5340,10 @@ def attach_ai_stylist_prompt_snapshot(request_snapshot: dict[str, Any], candidat
         AI_STYLING_PROMPT_CONFIG_KEY,
         {
             "candidate_retrieval": dumps(candidate_retrieval_for_prompt(candidate_snapshot)),
+            "user_requirement": dumps(request_snapshot.get("user_requirement") or {}),
         },
     )
+    prompt = append_user_requirement_block(prompt, request_snapshot.get("user_requirement") if isinstance(request_snapshot.get("user_requirement"), dict) else {})
     return {**request_snapshot, "promptConfigKey": AI_STYLING_PROMPT_CONFIG_KEY, "prompt": prompt}
 
 
@@ -5320,16 +5411,20 @@ def build_phase_one_brand_style_evidence() -> list[dict[str, Any]]:
 
 
 def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
+    user_requirement = loads(row_value(input_row, "user_requirement_json"), build_user_requirement_context({}))
     return {
         "schema_version": "ai-stylist-request-v1",
         "model": settings.gemini_model,
+        "systemInstruction": AI_STYLIST_SYSTEM_INSTRUCTION,
         "input_version": {
             "id": input_row["id"],
             "taskId": input_row["task_id"],
             "nameSnapshot": input_row["name_snapshot"],
             "imageSnapshot": loads(input_row["image_snapshot_json"], []),
+            "userRequirement": user_requirement,
         },
         "candidate_retrieval": candidate_snapshot,
+        "user_requirement": user_requirement,
         "prompt_rule_source": AI_STYLING_PROMPT_CONFIG_KEY,
     }
 
@@ -5447,9 +5542,21 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
         "selected_materials": selected_refs,
         "brand_evidence": normalize_brand_evidence(source.get("brand_evidence"), candidate_snapshot),
         "reason_summary": str(source.get("reason_summary") or "已根据主推款和搭配服饰标签完成 AI Stylist 造型方案。")[:180],
+        "user_requirement_resolution": normalize_user_requirement_resolution(source.get("user_requirement_resolution")),
         "rejected_candidates": normalize_rejected_candidates(rejected_source, normalized_candidates, candidate_cards),
         "quality_signals": normalize_model_quality_signals(source.get("quality_signals")),
         "warnings": warnings[:8],
+    }
+
+
+def normalize_user_requirement_resolution(value: Any) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "user_requirement_summary": str(source.get("user_requirement_summary") or source.get("summary") or "")[:180],
+        "satisfied": ensure_string_list(source.get("satisfied"))[:8],
+        "not_satisfied": ensure_string_list(source.get("not_satisfied"))[:8],
+        "conflicts": ensure_string_list(source.get("conflicts"))[:8],
+        "alternative_handling": ensure_string_list(source.get("alternative_handling"))[:8],
     }
 
 
@@ -5724,6 +5831,7 @@ def styling_result_for_prompt(styling_plan: dict[str, Any], selected_material_sn
         }),
         "selected_material_tag_cards": [compress_selected_material_for_prompt(item) for item in selected_materials[:4] if isinstance(item, dict)],
         "reason_summary": str(plan.get("reason_summary") or "")[:180],
+        "user_requirement_resolution": strip_internal_prompt_fields(plan.get("user_requirement_resolution") if isinstance(plan.get("user_requirement_resolution"), dict) else {}),
         "quality_signals": strip_internal_prompt_fields(plan.get("quality_signals") if isinstance(plan.get("quality_signals"), list) else []),
         "warnings": ensure_string_list(plan.get("warnings"))[:6],
     }
@@ -6128,9 +6236,14 @@ def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_ver
     selected_snapshot = loads(styling_row["selected_material_snapshot_json"], []) if styling_row else []
     selected_material_image_refs = selected_material_image_refs_for_request(selected_snapshot)
     candidate_snapshot = loads(styling_row["candidate_retrieval_snapshot_json"], {}) if styling_row and "candidate_retrieval_snapshot_json" in styling_row.keys() else {}
+    user_requirement = loads(
+        row_value(styling_row, "user_requirement_json"),
+        loads(row_value(input_row, "user_requirement_json"), build_user_requirement_context({})),
+    )
     return {
         "schema_version": "shoot-script-request-v1",
         "model": settings.gemini_model,
+        "systemInstruction": AI_DIRECTOR_SYSTEM_INSTRUCTION,
         "task_id": task_id,
         "input_version": {
             "id": input_version_id,
@@ -6139,6 +6252,7 @@ def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_ver
             "model_snapshot": loads(input_row["model_snapshot_json"], {}) if input_row and "model_snapshot_json" in input_row.keys() else {},
         },
         "styling_id": styling_id,
+        "user_requirement": user_requirement,
         "styling_plan": styling_plan,
         "styling_result": styling_result_for_prompt(styling_plan, selected_snapshot),
         "selected_material_snapshot": selected_material_image_refs,
@@ -6221,27 +6335,32 @@ async def generate_shoot_script_with_gemini(request_snapshot: dict[str, Any]) ->
     if not request_snapshot.get("prompt"):
         request_snapshot = attach_shoot_script_prompt_snapshot(request_snapshot)
     prompt = str(request_snapshot.get("prompt") or "")
-    contents: list[Any] = [prompt]
+    user_parts: list[Any] = [types.Part.from_text(text=prompt)]
     model_snapshot = ((request_snapshot.get("input_version") or {}).get("model_snapshot") or {}) if isinstance(request_snapshot.get("input_version"), dict) else {}
     for item in (model_snapshot.get("imageInputs") if isinstance(model_snapshot, dict) else []) or []:
         object_key = item.get("objectKey") if isinstance(item, dict) else None
         if object_key and object_exists(object_key):
-            contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type="image/png"))
+            user_parts.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type="image/png"))
     for item in ((request_snapshot.get("input_version") or {}).get("image_snapshot") or [])[:6]:
         asset = item.get("asset") if isinstance(item, dict) else {}
         object_key = asset.get("objectKey") if isinstance(asset, dict) else None
         if object_key and object_exists(object_key):
-            contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
+            user_parts.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
     for material in request_snapshot.get("selected_material_snapshot", [])[:4]:
         images = material.get("images") if isinstance(material, dict) else []
         first = images[0] if images else {}
         asset = first.get("asset") if isinstance(first, dict) else {}
         object_key = asset.get("objectKey") if isinstance(asset, dict) else None
         if object_key and object_exists(object_key):
-            contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
+            user_parts.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
+    contents: list[Any] = [types.Content(role="user", parts=user_parts)]
     try:
         client = genai.Client(api_key=settings.gemini_api_key)
-        response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents)
+        config = types.GenerateContentConfig(
+            system_instruction=str(request_snapshot.get("systemInstruction") or AI_DIRECTOR_SYSTEM_INSTRUCTION),
+            response_mime_type="application/json",
+        )
+        response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents, config=config)
         return loads(extract_json_text(getattr(response, "text", "") or "{}"), {})
     except Exception as exc:
         raise RuntimeError(f"Gemini 拍摄剧本调用失败：{exc}") from exc
@@ -6255,9 +6374,11 @@ def attach_shoot_script_prompt_snapshot(request_snapshot: dict[str, Any]) -> dic
         SHOOT_SCRIPT_PROMPT_CONFIG_KEY,
         {
             "styling_result": dumps(request_snapshot.get("styling_result") or styling_result_for_prompt(request_snapshot.get("styling_plan") if isinstance(request_snapshot.get("styling_plan"), dict) else {})),
+            "user_requirement": dumps(request_snapshot.get("user_requirement") or {}),
             "model_identity_context": dumps(model_identity_context),
         },
     )
+    prompt = append_user_requirement_block(prompt, request_snapshot.get("user_requirement") if isinstance(request_snapshot.get("user_requirement"), dict) else {})
     prompt = append_model_identity_contract(prompt, model_identity_context)
     return {**request_snapshot, "promptConfigKey": SHOOT_SCRIPT_PROMPT_CONFIG_KEY, "prompt": prompt}
 
@@ -6930,8 +7051,13 @@ def ai_styling_prompt_template_v2() -> str:
 4. 候选搭配服饰只用 code 标识，不要输出系统内部 ID。
 5. 鞋、包、饰品不是搭配库商品，可作为低存在感生成配饰，也可以省略。
 6. 如果库内没有真正提升主推款的配角服饰，允许 selected_material_codes 为空。
+7. 用户要求是本次任务的高优先级业务输入；在不违反商品事实、搭配库事实、品牌硬边界和输出 schema 时，必须优先满足。
+8. 如果用户要求无法满足，必须在 user_requirement_resolution 中说明冲突或未满足原因，不能沉默忽略。
 
 {{segment.brand_info}}
+
+【本次用户要求】
+{{runtime.user_requirement}}
 
 【搭配服饰候选卡】
 {{runtime.candidate_retrieval}}
@@ -6963,6 +7089,7 @@ def ai_styling_prompt_template_v2() -> str:
   "selected_material_codes": ["候选服饰 code"],
   "selected_materials": [{"material_code": "候选服饰 code", "role": "string", "styling_purpose": "string", "wearing_method": "string", "visibility_boundary": "string"}],
   "reason_summary": "string",
+  "user_requirement_resolution": {"user_requirement_summary": "string", "satisfied": ["string"], "not_satisfied": ["string"], "conflicts": ["string"], "alternative_handling": ["string"]},
   "rejected_candidates": [{"outfit_key": "string", "reason": "string", "material_codes": ["候选服饰 code"]}],
   "quality_signals": [{"code": "string", "category": "string", "severity": "review", "message": "string"}],
   "warnings": []
@@ -6983,6 +7110,9 @@ def shoot_script_prompt_template_v2() -> str:
 7. 分镜预览和最终成片都将读取此 ShootScript。不要输出长 prompt，只输出结构化 JSON。
 
 {{segment.brand_info}}
+
+【本次用户要求】
+{{runtime.user_requirement}}
 
 【AI 选搭结果】
 {{runtime.styling_result}}
@@ -7180,6 +7310,7 @@ def render_prompt_template(key: str, runtime: dict[str, Any] | None = None) -> s
 def sample_prompt_runtime() -> dict[str, Any]:
     return {
         "candidate_retrieval": dumps([{"code": "LOOK-A", "ai_tags": {"一级品类": ["上装"], "色彩": ["白色"], "版型": ["合体"], "风格语义": "轻量上装服务主推裤装。"}}]),
+        "user_requirement": dumps({"combined_requirement": "重点展示腰线，避免厚重外套。", "priority_policy": {"conflict_handling": "无法满足时说明原因。"}}),
         "styling_result": dumps({"hero_understanding": {"category": "裤装"}, "selected_material_codes": ["LOOK-A"], "reason_summary": "轻量上装服务主推裤装。"}),
         "model_identity_context": dumps({"identity_contract": {"model_id": "Face-01", "must_preserve": ["same face", "same hair"]}}),
         "image_reference_manifest": dumps({"references": [{"reference_index": 1, "role": "model_identity"}, {"reference_index": 2, "role": "hero_garment"}]}),
@@ -7192,6 +7323,7 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
     return [
         {"name": "segment.brand_info", "scope": "segment", "description": "品牌信息分段 Prompt"},
         {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服饰库 READY 服饰的全量 AI 标签事实卡"},
+        {"name": "runtime.user_requirement", "scope": "runtime", "description": "上传补充要求、本次微调要求和冲突处理策略"},
         {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭导演上下文，使用搭配服饰 code 标识"},
         {"name": "runtime.model_identity_context", "scope": "runtime", "description": "AI Director 使用的数字模特身份契约和参考图上下文"},
         {"name": "runtime.image_reference_manifest", "scope": "runtime", "description": "Image-2 输入参考图序号、角色和事实源优先级"},
@@ -7658,6 +7790,7 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
         "id": row["id"],
         "name": row["name"],
         "status": row["status"],
+        "userRequirement": row_value(row, "user_requirement_text", ""),
         "currentInputVersionId": row["current_input_version_id"],
         "activeStylingId": row["active_styling_id"],
         "activeShootScriptId": row["active_shoot_script_id"] if "active_shoot_script_id" in row.keys() else None,
@@ -7730,6 +7863,7 @@ def get_input_version(input_version_id: int | None) -> dict[str, Any] | None:
         "nameSnapshot": row["name_snapshot"],
         "imageSnapshot": loads(row["image_snapshot_json"], []),
         "modelSnapshot": loads(row["model_snapshot_json"], {}) if "model_snapshot_json" in row.keys() else {},
+        "userRequirement": loads(row_value(row, "user_requirement_json"), build_user_requirement_context({})),
         "heroVisualSummary": row["hero_visual_summary"],
         "createdAt": row["created_at"],
     }
@@ -7753,6 +7887,7 @@ def get_generation_styling(styling_id: int | None, include_debug: bool = False) 
         "candidateMaterialIds": loads(row["candidate_material_ids_json"], []) if "candidate_material_ids_json" in row.keys() else [],
         "selectedMaterialIds": loads(row["selected_material_ids_json"], []),
         "selectedMaterials": loads(row["selected_material_snapshot_json"], []),
+        "userRequirement": loads(row_value(row, "user_requirement_json"), {}),
         "stylingPlan": styling_plan,
         "heroUnderstanding": loads(row["hero_understanding_json"], {}) if "hero_understanding_json" in row.keys() else styling_plan.get("hero_understanding", {}),
         "libraryAdequacy": loads(row["library_adequacy_snapshot_json"], {}) if "library_adequacy_snapshot_json" in row.keys() else {},
@@ -7760,6 +7895,7 @@ def get_generation_styling(styling_id: int | None, include_debug: bool = False) 
         "criticScores": loads(row["critic_scores_json"], {}) if "critic_scores_json" in row.keys() else get_selected_outfit_scores(styling_plan),
         "rejectedCandidates": loads(row["rejected_candidates_json"], []) if "rejected_candidates_json" in row.keys() else styling_plan.get("rejected_candidates", []),
         "qualitySignals": styling_plan.get("quality_signals", []) if isinstance(styling_plan.get("quality_signals"), list) else [],
+        "userRequirementResolution": styling_plan.get("user_requirement_resolution", {}) if isinstance(styling_plan.get("user_requirement_resolution"), dict) else {},
         "reasonSummary": row["reason_summary"],
         "warnings": loads(row["warnings_json"], []),
         "status": row["status"],
