@@ -61,6 +61,16 @@ def require_admin(request: Request) -> None:
         raise HTTPException(status_code=403, detail="仅管理员可操作")
 
 
+def require_admin_debug(request: Request, include_debug: bool) -> bool:
+    if include_debug:
+        require_admin(request)
+    return include_debug
+
+
+def admin_debug_for_request(request: Request) -> bool:
+    return get_request_role(request) == "admin"
+
+
 def get_request_role(request: Request) -> str | None:
     if settings.trust_reverse_proxy_auth or is_api_token_valid(request):
         return "admin"
@@ -1403,8 +1413,8 @@ def list_generation_tasks(
 
 
 @app.get("/api/generation-tasks/{task_id}")
-def get_generation_task(task_id: int, include_debug: bool = Query(False, alias="includeDebug")) -> dict[str, Any]:
-    return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
+def get_generation_task(task_id: int, request: Request, include_debug: bool = Query(False, alias="includeDebug")) -> dict[str, Any]:
+    return {"item": get_generation_task_by_id(task_id, include_debug=require_admin_debug(request, include_debug))}
 
 
 @app.get("/api/generation-tasks/{task_id}/ai-invocations")
@@ -1813,7 +1823,7 @@ def ready_generation_task(task_id: int) -> dict[str, Any]:
 
 
 @app.post("/api/generation-tasks/{task_id}/select-styling")
-async def select_generation_styling(task_id: int) -> dict[str, Any]:
+async def select_generation_styling(task_id: int, request: Request) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     if task["status"] not in {
         "READY_FOR_STYLING",
@@ -1935,11 +1945,11 @@ async def select_generation_styling(task_id: int) -> dict[str, Any]:
             (input_version_id, styling_id, timestamp, task_id),
         )
     finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=styling_plan)
-    return {"item": get_generation_task_by_id(task_id, include_debug=True)}
+    return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
 
 
 @app.post("/api/generation-tasks/{task_id}/shoot-script")
-async def create_generation_shoot_script(task_id: int) -> dict[str, Any]:
+async def create_generation_shoot_script(task_id: int, request: Request) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     styling_id = task["active_styling_id"]
     input_version_id = task["current_input_version_id"]
@@ -2007,7 +2017,7 @@ async def create_generation_shoot_script(task_id: int) -> dict[str, Any]:
         if shoot_script_generation_cancelled(task_id, shoot_script_id, attempt_id):
             finish_attempt(attempt_id, "CANCELLED", error_message="拍摄剧本生成已取消")
             mark_shoot_script_generation_cancelled(shoot_script_id)
-            return {"item": get_generation_task_by_id(task_id, include_debug=True)}
+            return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
         finish_attempt(attempt_id, "FAILED", error_message=str(exc))
         with get_db() as db:
             previous_active = db.execute("SELECT active_shoot_script_id FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
@@ -2025,7 +2035,7 @@ async def create_generation_shoot_script(task_id: int) -> dict[str, Any]:
     if shoot_script_generation_cancelled(task_id, shoot_script_id, attempt_id):
         finish_attempt(attempt_id, "CANCELLED", error_message="拍摄剧本生成已取消")
         mark_shoot_script_generation_cancelled(shoot_script_id)
-        return {"item": get_generation_task_by_id(task_id, include_debug=True)}
+        return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
     cancelled_after_provider_return = False
     status_changed_after_provider_return = False
     with get_db() as db:
@@ -2172,15 +2182,15 @@ async def create_generation_shoot_script(task_id: int) -> dict[str, Any]:
                 (shoot_script_id, timestamp, task_id),
             )
     if cancelled_after_provider_return:
-        return {"item": get_generation_task_by_id(task_id, include_debug=True)}
+        return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
     if status_changed_after_provider_return:
         raise HTTPException(status_code=409, detail="拍摄剧本生成状态已变更，请刷新后重试")
     finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=shoot_script)
-    return {"item": get_generation_task_by_id(task_id, include_debug=True)}
+    return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
 
 
 @app.post("/api/generation-tasks/{task_id}/preview")
-async def create_generation_preview(task_id: int) -> dict[str, Any]:
+async def create_generation_preview(task_id: int, request: Request) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     styling_id = task["active_styling_id"]
     shoot_script_id = task["active_shoot_script_id"] if "active_shoot_script_id" in task.keys() else None
@@ -2209,7 +2219,7 @@ async def create_generation_preview(task_id: int) -> dict[str, Any]:
         run_preview_generation(task_id, int(styling_id), int(shoot_script_id), shot_plans, preview_id, attempt_id),
         job_key=preview_job_key(preview_id),
     )
-    return {"item": get_generation_task_by_id(task_id, include_debug=True)}
+    return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
 
 
 async def run_preview_generation(task_id: int, styling_id: int, shoot_script_id: int, shot_plans: list[Any], preview_id: int, attempt_id: int) -> None:
@@ -2310,7 +2320,7 @@ async def run_preview_generation(task_id: int, styling_id: int, shoot_script_id:
 
 
 @app.post("/api/generation-tasks/{task_id}/generate-final")
-async def generate_final_images(task_id: int) -> dict[str, Any]:
+async def generate_final_images(task_id: int, request: Request) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     if (
         task["status"] not in {"PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
@@ -2363,7 +2373,7 @@ async def generate_final_images(task_id: int) -> dict[str, Any]:
         run_final_generation(task_id, result_set_id, image_ids),
         job_key=final_set_job_key(result_set_id),
     )
-    return {"item": get_generation_task_by_id(task_id, include_debug=True)}
+    return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
 
 
 async def run_final_generation(
@@ -2424,7 +2434,7 @@ def reconcile_final_result_set(db: Any, result_set_id: int, task_id: int | None 
 
 
 @app.post("/api/generation-result-images-new/{image_id}/retry")
-async def retry_new_result_image(image_id: int) -> dict[str, Any]:
+async def retry_new_result_image(image_id: int, request: Request) -> dict[str, Any]:
     with get_db() as db:
         row = db.execute(
             """
@@ -2458,7 +2468,7 @@ async def retry_new_result_image(image_id: int) -> dict[str, Any]:
         run_final_generation(int(row["task_id"]), int(row["result_set_id"]), [image_id]),
         job_key=final_set_job_key(int(row["result_set_id"])),
     )
-    return {"item": get_generation_task_by_id(int(row["task_id"]), include_debug=True)}
+    return {"item": get_generation_task_by_id(int(row["task_id"]), include_debug=admin_debug_for_request(request))}
 
 @app.get("/api/generation-records")
 def list_new_generation_records(
@@ -2498,8 +2508,8 @@ def list_new_generation_records(
 
 
 @app.get("/api/generation-records/{task_id}")
-def get_new_generation_record(task_id: int, include_debug: bool = Query(False, alias="includeDebug")) -> dict[str, Any]:
-    return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
+def get_new_generation_record(task_id: int, request: Request, include_debug: bool = Query(False, alias="includeDebug")) -> dict[str, Any]:
+    return {"item": get_generation_task_by_id(task_id, include_debug=require_admin_debug(request, include_debug))}
 
 
 @app.get("/api/prompt-configs")
@@ -5471,6 +5481,18 @@ def strip_internal_prompt_fields(value: Any) -> Any:
     return value
 
 
+def strip_debug_response_fields(value: Any) -> Any:
+    if isinstance(value, list):
+        return [strip_debug_response_fields(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: strip_debug_response_fields(item)
+            for key, item in value.items()
+            if key != "model_raw_output"
+        }
+    return value
+
+
 def styling_result_for_prompt(styling_plan: dict[str, Any], selected_material_snapshot: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     plan = styling_plan if isinstance(styling_plan, dict) else {}
     selected = selected_outfit_from_plan(plan)
@@ -7390,6 +7412,8 @@ def get_generation_styling(styling_id: int | None, include_debug: bool = False) 
     if not row:
         return None
     styling_plan = loads(row["styling_plan_json"], {}) if "styling_plan_json" in row.keys() else {}
+    if not include_debug:
+        styling_plan = strip_debug_response_fields(styling_plan)
     item = {
         "id": row["id"],
         "taskId": row["task_id"],
@@ -7441,6 +7465,8 @@ def get_generation_shoot_script(shoot_script_id: int | None, include_debug: bool
     if not row:
         return None
     script = loads(row["script_json"], {})
+    if not include_debug:
+        script = strip_debug_response_fields(script)
     item = {
         "id": row["id"],
         "taskId": row["task_id"],
