@@ -445,7 +445,6 @@ ABANDONED
 - `source_material_ids_json`
 - `candidate_material_ids_json`
 - `candidate_retrieval_snapshot_json`
-- `library_adequacy_snapshot_json`
 - `selected_material_ids_json`
 - `selected_material_snapshot_json`
 - `styling_plan_json`
@@ -780,7 +779,7 @@ Image-2 单次最多 10 张输入图。MVP 选图策略：
 
 - 独立 HeroUnderstanding provider，替代任务名或同 code 启发式 fallback。
 - Lily Brand Style Index 独立对象、样本导入和检索。
-- 前台展示 LibraryAdequacyReport、候选排除原因和补库建议。
+- 前台展示 `StylingPlan` 候选比较、候选排除原因、质量信号和补充素材建议。
 - 多模态 embedding、向量检索和反馈闭环。
 - 单张重生版本与当前成功图更清晰地分离，避免失败重生覆盖已成功结果。
 - 生产级错误码、事件等级、可恢复操作指引和日志检索。

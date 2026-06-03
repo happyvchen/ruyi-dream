@@ -21,7 +21,7 @@ Ruyi-Dream 新版 MVP 是一个 B2B AI 数字化摄影棚。它服务一个单�
 - 搭配服饰散图、单文件夹或多文件夹上传。
 - 上传即创建草稿记录，保存过程数据。
 - 搭配服饰保存后由 Gemini 打标。
-- 搭配阶段先由候选漏斗基于主推款卖点、搭配服饰 tags/caption/风险、Lily 品牌样本证据和未来 embedding 生成小候选集与 outfit 草案，再交给 AI Stylist 返回完整 `StylingPlan`，包括主推款理解、造型方向、候选 outfit、Aesthetic Critic 诊断、选中方案、自评分数、拒绝理由和警告。
+- 搭配阶段把主推款图片、Prompt 业务规则、Lily 品牌边界和当前未归档 READY 搭配服饰库全量标签事实直接交给 AI Stylist；AI Stylist 返回完整 `StylingPlan`，包括主推款理解、造型方向、候选 outfit、Aesthetic Critic 诊断、选中方案、自评分数、拒绝理由和警告。
 - 拍摄剧本阶段一次性生成 `ShootScript`，包含全局导演设定和 6 条结构化 ShotPlan，用户可查看但不可编辑。
 - 分镜预览阶段读取当前拍摄剧本，并由 Image-2 输出一张 3x2 分镜预览图。
 - 最终阶段固定按前 5 个 ShotPlan 并发生成 5 张成片。
@@ -39,7 +39,7 @@ Ruyi-Dream 新版 MVP 是一个 B2B AI 数字化摄影棚。它服务一个单�
 - 批量 ZIP 导出、平台命名和规格导出。
 - 多客户 SaaS、权限、计费、模板市场。
 - 注册、邀请、找回密码、成员管理、复杂 RBAC 或可配置权限组。
-- 生产级 embedding / 向量检索闭环；MVP 阶段先用规则、标签、caption 和风险降权实现候选漏斗。
+- 生产级 embedding / 向量检索闭环；MVP 阶段不做后端预筛选、召回排序、兼容性评分或 outfit 草案。
 - 主推款长期商品库。
 - 搭配服饰显式版本表。
 - 视频生成执行链路。
@@ -68,10 +68,9 @@ Ruyi-Dream 新版 MVP 是一个 B2B AI 数字化摄影棚。它服务一个单�
 AI 智能选搭规则：
 
 - 点击按钮后冻结当前输入版本。
-- 输入给候选漏斗：主推款理解 + READY 搭配服饰 tags/caption/风险 + Lily 品牌样本证据。
-- 输入给 AI Stylist：主推款图片 + 小候选集 + 必要候选图 + outfit 草案 + Lily 品牌证据 + Aesthetic Critic 维度 + 商品主角验收维度。
+- 输入给 AI Stylist：主推款图片 + 用户简短业务要求 + 当前未归档 READY 搭配服饰库全量标签事实 + Lily 品牌边界 + Aesthetic Critic 维度 + 商品主角验收维度。
 - 不保存完整主推款标签，但允许保存极简 `hero_visual_summary`，用于 ShotPlan 和记录复盘。
-- `SourceMaterialIDs` 为当前全部可用搭配服饰；真正进入 Gemini 的是候选漏斗输出的小候选集。
+- `SourceMaterialIDs` 为当前全部可用搭配服饰；真正进入 Gemini 的是这些搭配服饰的全量标签事实卡，不传搭配服饰图片和后端排序。
 - AI Stylist 返回 `StylingPlan`，不是只返回选中的搭配服饰 ID。`StylingPlan` 必须包含候选 outfit、审美诊断、选中方案、评分、拒绝理由和警告。
 - 空的库内搭配允许；非法 ID、重复 ID、不可解析 JSON、选择非 READY 素材、无法解释的互斥穿搭组合视为失败。
 - 主推款可见但搭配难看、沉闷、笨重、廉价、比例失衡或明显不符合 Lily 调性，也视为选搭失败，不应进入预览。
@@ -203,7 +202,7 @@ MVP 只读展示当前默认数字模特：
 
 1. 能上传并保存搭配服饰，完成 AI 打标。
 2. 能上传主推款并创建 AI 摄影棚任务。
-3. 能先用候选漏斗把全量 READY 服饰压缩成小候选集和 outfit 草案，再交给 AI Stylist 产出可解释且审美成立的 `StylingPlan`。
+3. 能把全量 READY 搭配服饰标签事实直接交给 AI Stylist，并产出可解释且审美成立的 `StylingPlan`。
 4. 能生成可查看不可编辑的拍摄剧本。
 5. 能生成分镜预览。
 6. 能按前 5 个镜头并发生成最终图。

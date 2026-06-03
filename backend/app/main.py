@@ -1948,12 +1948,11 @@ async def run_select_generation_styling(
             """
             INSERT INTO generation_stylings
               (task_id, input_version_id, source_material_ids_json, candidate_material_ids_json,
-               candidate_retrieval_snapshot_json, library_adequacy_snapshot_json,
-               user_requirement_json,
+               candidate_retrieval_snapshot_json, user_requirement_json,
                selected_material_ids_json, selected_material_snapshot_json,
                styling_plan_json, hero_understanding_json, outfit_candidates_json, critic_scores_json,
                rejected_candidates_json, reason_summary, warnings_json, status, attempt_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUCCEEDED', ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUCCEEDED', ?, ?, ?)
             """,
             (
                 task_id,
@@ -1961,7 +1960,6 @@ async def run_select_generation_styling(
                 dumps(source_ids),
                 dumps(candidate_snapshot.get("candidate_material_ids") or []),
                 dumps(candidate_snapshot),
-                dumps(candidate_snapshot.get("library_adequacy") or {}),
                 dumps(user_requirement_context),
                 dumps(selected_ids),
                 dumps(selected_snapshot),
@@ -5376,23 +5374,7 @@ def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict
         "candidate_image_limit": 0,
         "library_tag_cards": library_tag_cards,
         "material_cards": library_tag_cards,
-        "outfit_drafts": [],
-        "filtered_out": [],
         "prompt_rule_source": AI_STYLING_PROMPT_CONFIG_KEY,
-    }
-
-
-def build_library_context_report(material_cards: list[dict[str, Any]]) -> dict[str, Any]:
-    manual_flags = {
-        "do_not_use_for_styling": sum(1 for card in material_cards if (card.get("manual") or {}).get("do_not_use_for_styling")),
-    }
-    return {
-        "schema_version": "library-context-v1",
-        "library_ready_count": len(material_cards),
-        "counts_by_status": {"ready": len(material_cards)},
-        "manual_flags": manual_flags,
-        "decision_owner": "AI Stylist Prompt",
-        "notes": ["后端不判断库是否充足、不排序候选、不给出更优备选；这些结论由 Prompt 和大模型输出。"],
     }
 
 
@@ -7041,151 +7023,6 @@ def normalize_prompt_config_key(value: str) -> str:
     return str(value or "").strip().strip("/")
 
 
-def ai_styling_prompt_template_v2() -> str:
-    return """你是 Lily 品牌 AI 摄影棚的 AI Stylist。你的任务是理解主推款图片，并从搭配服饰库中选择真正服务主推款的造型方案。
-
-职责边界：
-1. 你必须先判断主推款的品类、卖点、不可遮挡区域和商品展示需求。
-2. 你要探索多套 outfit，并用 Aesthetic Critic 批判审美成立、Lily 品牌成立和主推款商品表达成立。
-3. 商品可见性只是底线；沉闷、笨重、廉价、比例失衡或不符合 Lily 时，即使主推款露出也应判为失败。
-4. 候选搭配服饰只用 code 标识，不要输出系统内部 ID。
-5. 鞋、包、饰品不是搭配库商品，可作为低存在感生成配饰，也可以省略。
-6. 如果库内没有真正提升主推款的配角服饰，允许 selected_material_codes 为空。
-7. 用户要求是本次任务的高优先级业务输入；在不违反商品事实、搭配库事实、品牌硬边界和输出 schema 时，必须优先满足。
-8. 如果用户要求无法满足，必须在 user_requirement_resolution 中说明冲突或未满足原因，不能沉默忽略。
-
-{{segment.brand_info}}
-
-【本次用户要求】
-{{runtime.user_requirement}}
-
-【搭配服饰候选卡】
-{{runtime.candidate_retrieval}}
-
-请只返回 JSON，结构如下：
-{
-  "hero_understanding": {
-    "hero_visual_summary": "string",
-    "category": "string",
-    "shot_requirements": ["string"],
-    "hero_selling_points": ["string"],
-    "hero_visibility_risks": ["string"]
-  },
-  "styling_intents": [{"intent_key": "string", "title": "string", "reason": "string", "risk": "string"}],
-  "outfit_candidates": [{
-    "outfit_key": "candidate_a",
-    "mode": "string",
-    "title": "string",
-    "selected_material_codes": ["候选服饰 code"],
-    "selected_materials": [{"material_code": "候选服饰 code", "role": "string", "styling_purpose": "string", "wearing_method": "string", "visibility_boundary": "string"}],
-    "generated_accessories": ["string"],
-    "wearing_notes": "string",
-    "hero_focus": ["string"],
-    "aesthetic_diagnosis": {"color_weight": "string", "silhouette_balance": "string", "waistline_proportion": "string", "season_material_fit": "string", "template_risk": "string", "brand_read": "string"},
-    "scores": {"aesthetic_score": 0.0, "brand_fit_score": 0.0, "hero_visibility_score": 0.0, "commercial_readiness_score": 0.0},
-    "risk_notes": ["string"]
-  }],
-  "selected_outfit_key": "candidate_a",
-  "selected_material_codes": ["候选服饰 code"],
-  "selected_materials": [{"material_code": "候选服饰 code", "role": "string", "styling_purpose": "string", "wearing_method": "string", "visibility_boundary": "string"}],
-  "reason_summary": "string",
-  "user_requirement_resolution": {"user_requirement_summary": "string", "satisfied": ["string"], "not_satisfied": ["string"], "conflicts": ["string"], "alternative_handling": ["string"]},
-  "rejected_candidates": [{"outfit_key": "string", "reason": "string", "material_codes": ["候选服饰 code"]}],
-  "quality_signals": [{"code": "string", "category": "string", "severity": "review", "message": "string"}],
-  "warnings": []
-}
-"""
-
-
-def shoot_script_prompt_template_v2() -> str:
-    return """你是 Lily 品牌 AI 摄影棚的 AI Director。你的任务是基于已完成的 AI 选搭结果，一次性生成完整拍摄剧本 ShootScript。
-
-职责边界：
-1. 你负责导演判断：全局拍摄设定、镜头景别、取景范围、模特姿势、身姿走位、构图、背景光线、不可遮挡区域。
-2. 你不能替换 AI 选搭已选择的库内搭配服饰；所有搭配服饰都用 code 表达，不要输出系统内部 ID。
-3. 鞋、帽、包、首饰等生成类配饰不是商品事实源；你可以调整、弱化或取消，但必须在 accessory_adjustments 中披露调整原因。
-4. 你必须输出 resolved_accessories 作为最终配饰方案；它是分镜预览和成片执行配饰的唯一准则，并覆盖 StylingPlan.generated_accessories。
-5. 每个 shots[] 必须输出 accessory_instructions，说明该镜头是否出现鞋、包、首饰、帽子，以及如何保持低存在感。
-6. 前 5 个镜头要形成完整商品说明，第 6 个镜头只作为备用姿态，不进入最终成片。
-7. 分镜预览和最终成片都将读取此 ShootScript。不要输出长 prompt，只输出结构化 JSON。
-
-{{segment.brand_info}}
-
-【本次用户要求】
-{{runtime.user_requirement}}
-
-【AI 选搭结果】
-{{runtime.styling_result}}
-
-【数字模特身份契约】
-{{runtime.model_identity_context}}
-
-请只返回 JSON，结构如下：
-{
-  "global_directing": {
-    "brand_tone": "string",
-    "background": "string",
-    "lighting": "string",
-    "model_direction": "string",
-    "hair_makeup_boundary": "string",
-    "accessory_boundary": "string",
-    "consistency_rules": ["string"],
-    "product_fidelity_rules": ["string"],
-    "negative_constraints": ["string"]
-  },
-  "styling_risks": [{"risk_id": "string", "severity": "low | medium | high | blocking", "material_code": "string", "risk": "string", "affected_shots": [1], "director_strategy": "string", "user_visible_recommendation": "string"}],
-  "accessory_adjustments": [{"item_type": "bag | footwear | jewelry | hat | other", "original_direction": "string", "adjusted_direction": "string", "reason": "string", "affected_shots": [1]}],
-  "resolved_accessories": [{"item_type": "footwear | bag | jewelry | hat | other", "final_direction": "最终进入分镜和成片的配饰描述；取消则写取消", "source": "styling_plan | director_adjusted | director_added | removed", "visibility": "none | low | medium", "applies_to_shots": [1], "reason": "为什么这样执行"}],
-  "shots": [{"shot_index": 1, "shot_role": "hero_full_body", "shot_role_label": "全身主视觉", "framing": "string", "crop_range": "string", "model_scale": "string", "camera_angle": "string", "body_position": "string", "pose": "string", "movement": "string", "hand_position": "string", "main_focus": "string", "visible_garments": ["hero", "搭配服饰 code"], "hero_selling_points": ["string"], "forbidden_occlusion_zones": ["string"], "composition_notes": "string", "accessory_instructions": ["本镜头配饰执行说明"], "acceptance_criteria": ["string"], "negative_constraints": ["string"]}],
-  "user_visible_summary": {"title": "string", "summary": "string", "key_points": ["string"], "risk_summary": "string"},
-  "warnings": []
-}
-"""
-
-
-def storyboard_preview_prompt_template_v2() -> str:
-    return """生成一张 3x2 电商棚拍分镜预览图。
-
-{{segment.brand_info}}
-
-【输入参考图角色清单】
-{{runtime.image_reference_manifest}}
-
-主推款和搭配服饰参考图是真实商品事实来源，必须保持商品级保真。
-搭配服饰和生成配饰必须服务主推款展示，不得让主推款沦为整套造型的背景元素。
-数字模特参考图是模特身份事实来源，必须保持同一人的脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。
-不得根据拍摄剧本、品牌妆发或分镜构图把模特改成另一张脸、低马尾、盘发、长发或参考图中不存在的发型。
-
-【拍摄剧本结果】
-{{runtime.shoot_script_result}}
-
-按拍摄剧本中的 6 个 shots 生成 3x2 分镜预览。第 6 格仅参考，最终不会生成大图。
-配饰执行优先级：以 resolved_accessories 和 shots[].accessory_instructions 为准。
-不要生成文字、水印、logo、编号或边框说明。
-"""
-
-
-def final_image_prompt_template_v2() -> str:
-    return """生成一张电商棚拍成片，只生成单张图，不要生成拼图或分镜预览。
-
-参考分镜预览图中 current_shot_context.preview_grid_cell 对应的格子，只参考姿势、身位、景别、构图、背景和光影方向。
-分镜预览不是模特或商品事实来源。模特参考图是模特身份事实来源，主推款参考图是主角商品事实来源，搭配服饰参考图是配角商品事实来源。
-
-【输入参考图角色清单】
-{{runtime.image_reference_manifest}}
-
-{{segment.brand_info}}
-
-【当前单张成片上下文】
-{{runtime.current_shot_context}}
-
-必须保持主推款和搭配服饰的品类、颜色、面料、版型、结构、比例和可见细节。
-必须保持同一位数字模特的脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。
-鞋、包、饰品只作为辅助搭配，不作为商品事实源，不做特写。
-不要让搭配服饰或生成配饰抢主推款视觉中心；不要改款、换色、替换商品；不要添加文字、水印、logo。
-"""
-
-
 def repair_prompt_config_placeholders() -> None:
     return
 
@@ -7238,18 +7075,7 @@ def prompt_config_content(key: str, rows: dict[str, Any] | None = None) -> str |
     row = rows.get(normalized)
     if row:
         return str(row["content"] or "")
-    return default_prompt_config_content(normalized)
-
-
-def default_prompt_config_content(key: str) -> str | None:
-    defaults = {
-        "segment.brand_info": "品牌信息：Lily 商务时装，现代、干净、轻熟、自信、克制，商品优先。背景以白色或浅灰棚拍为主，配饰低存在感，不遮挡商品卖点。\n",
-        AI_STYLING_PROMPT_CONFIG_KEY: ai_styling_prompt_template_v2(),
-        SHOOT_SCRIPT_PROMPT_CONFIG_KEY: shoot_script_prompt_template_v2(),
-        "assembly.storyboard_preview": storyboard_preview_prompt_template_v2(),
-        "assembly.final_image": final_image_prompt_template_v2(),
-    }
-    return defaults.get(key)
+    return None
 
 
 def render_prompt_config(key: str, runtime: dict[str, Any] | None = None, rows: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
@@ -7267,7 +7093,7 @@ def render_prompt_config(key: str, runtime: dict[str, Any] | None = None, rows: 
             if name in stack:
                 diagnostics["missingPlaceholders"].append(f"{name} (循环引用)")
                 return f"[[循环引用:{name}]]"
-            if name not in rows and default_prompt_config_content(name) is None:
+            if name not in rows:
                 diagnostics["missingPlaceholders"].append(name)
                 return f"[[缺失分段:{name}]]"
             if name in rows and str(rows[name]["group_type"] or "") != "segment":
@@ -7890,7 +7716,6 @@ def get_generation_styling(styling_id: int | None, include_debug: bool = False) 
         "userRequirement": loads(row_value(row, "user_requirement_json"), {}),
         "stylingPlan": styling_plan,
         "heroUnderstanding": loads(row["hero_understanding_json"], {}) if "hero_understanding_json" in row.keys() else styling_plan.get("hero_understanding", {}),
-        "libraryAdequacy": loads(row["library_adequacy_snapshot_json"], {}) if "library_adequacy_snapshot_json" in row.keys() else {},
         "outfitCandidates": loads(row["outfit_candidates_json"], []) if "outfit_candidates_json" in row.keys() else styling_plan.get("outfit_candidates", []),
         "criticScores": loads(row["critic_scores_json"], {}) if "critic_scores_json" in row.keys() else get_selected_outfit_scores(styling_plan),
         "rejectedCandidates": loads(row["rejected_candidates_json"], []) if "rejected_candidates_json" in row.keys() else styling_plan.get("rejected_candidates", []),
@@ -7904,7 +7729,6 @@ def get_generation_styling(styling_id: int | None, include_debug: bool = False) 
     }
     if include_debug:
         item["candidateRetrievalSnapshot"] = loads(row["candidate_retrieval_snapshot_json"], {}) if "candidate_retrieval_snapshot_json" in row.keys() else {}
-        item["libraryAdequacySnapshot"] = item["libraryAdequacy"]
     else:
         item = strip_debug_response_fields(item)
     return item
