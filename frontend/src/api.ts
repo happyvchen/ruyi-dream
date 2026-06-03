@@ -98,7 +98,14 @@ export type GenerationTask = {
   id: number
   name: string
   status: string
+  heroProductInfo?: string | null
   userRequirement?: string | null
+  stageUserInputs?: {
+    aiStyling?: string | null
+    shootScript?: string | null
+    storyboardPreview?: string | null
+    finalImage?: string | null
+  }
   currentInputVersionId?: number | null
   activeStylingId?: number | null
   activeShootScriptId?: number | null
@@ -117,12 +124,14 @@ export type GenerationTask = {
     versionNumber: number
     imageSnapshot: { sortOrder: number; asset: MediaAsset }[]
     modelSnapshot?: Record<string, unknown>
+    heroProductInfo?: Record<string, unknown>
     userRequirement?: Record<string, unknown>
   } | null
   styling?: {
     id: number
     selectedMaterialIds?: number[]
     selectedMaterials: StylingGarment[]
+    userInstruction?: Record<string, unknown>
     userRequirement?: Record<string, unknown>
     userRequirementResolution?: Record<string, unknown>
     stylingPlan?: Record<string, unknown>
@@ -139,6 +148,7 @@ export type GenerationTask = {
     status: string
     script?: Record<string, unknown>
     summary?: Record<string, unknown>
+    userInstruction?: Record<string, unknown>
     stylingRisks?: Record<string, unknown>[]
     accessoryAdjustments?: Record<string, unknown>[]
     resolvedAccessories?: Record<string, unknown>[]
@@ -148,17 +158,19 @@ export type GenerationTask = {
     updatedAt?: string
   } | null
   shotPlans?: { id: number; sortOrder: number; shotType: string; plan: Record<string, unknown> }[]
-  preview?: { id: number; status: string; asset?: MediaAsset | null; shootScriptId?: number | null; createdAt?: string; updatedAt?: string } | null
-  storyboardPreview?: { id: number; status: string; asset?: MediaAsset | null; shootScriptId?: number | null; createdAt?: string; updatedAt?: string } | null
+  preview?: { id: number; status: string; asset?: MediaAsset | null; shootScriptId?: number | null; userInstruction?: Record<string, unknown>; createdAt?: string; updatedAt?: string } | null
+  storyboardPreview?: { id: number; status: string; asset?: MediaAsset | null; shootScriptId?: number | null; userInstruction?: Record<string, unknown>; createdAt?: string; updatedAt?: string } | null
   resultSet?: {
     id: number
     status: string
     shootScriptId?: number | null
     previewId?: number | null
+    userInstruction?: Record<string, unknown>
     images: {
       id: number
       sortOrder: number
       status: string
+      userInstruction?: Record<string, unknown>
       asset?: MediaAsset | null
       activeAttemptId?: number | null
       activeAttempt?: AIOperation | null
@@ -551,14 +563,21 @@ export const api = {
     request<{ ok: boolean; purged: boolean; deletedTaskIds: number[] }>('/api/generation-tasks/batch-purge', { method: 'POST', body: JSON.stringify({ purge: true, ids, confirmPhrase }) }),
   getTaskDeleteImpact: (ids: number[]) =>
     request<{ impact: DeleteImpact }>('/api/generation-tasks/delete-impact', { method: 'POST', body: JSON.stringify({ ids }) }),
-  createTask: (name: string, files: File[], userRequirement?: string) => {
+  createTask: (name: string, files: File[], heroProductInfo?: string) => {
     const form = new FormData()
     if (name) form.append('name', name)
-    if (userRequirement) form.append('userRequirement', userRequirement)
+    if (heroProductInfo) form.append('heroProductInfo', heroProductInfo)
     files.forEach((file) => form.append('files', file))
     return request<{ item: GenerationTask }>('/api/generation-tasks', { method: 'POST', body: form })
   },
-  updateTask: (id: number, payload: { name?: string; userRequirement?: string }) =>
+  updateTask: (id: number, payload: {
+    name?: string
+    heroProductInfo?: string
+    aiStylingUserInstruction?: string
+    shootScriptUserInstruction?: string
+    storyboardPreviewUserInstruction?: string
+    finalImageUserInstruction?: string
+  }) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   addTaskImages: (id: number, files: File[]) => {
     const form = new FormData()
@@ -576,18 +595,18 @@ export const api = {
     request<{ item: GenerationTask }>(`/api/generation-task-images/${id}`, { method: 'DELETE' }),
   readyTask: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/ready`, { method: 'POST' }),
-  selectStyling: (id: number, userRequirement?: string) =>
-    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/select-styling`, { method: 'POST', body: JSON.stringify({ userRequirement }) }),
-  createShootScript: (id: number) =>
-    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/shoot-script`, { method: 'POST' }),
-  previewTask: (id: number) =>
-    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/preview`, { method: 'POST' }),
-  generateFinal: (id: number) =>
-    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/generate-final`, { method: 'POST' }),
+  selectStyling: (id: number, userInstruction?: string) =>
+    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/select-styling`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
+  createShootScript: (id: number, userInstruction?: string) =>
+    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/shoot-script`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
+  previewTask: (id: number, userInstruction?: string) =>
+    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/preview`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
+  generateFinal: (id: number, userInstruction?: string) =>
+    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/generate-final`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
   autoRunFinal: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/auto-run-final`, { method: 'POST' }),
-  retryResultImage: (id: number) =>
-    request<{ item: GenerationTask }>(`/api/generation-result-images-new/${id}/retry`, { method: 'POST' }),
+  retryResultImage: (id: number, userInstruction?: string) =>
+    request<{ item: GenerationTask }>(`/api/generation-result-images-new/${id}/retry`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
   listRecords: (options?: { limit?: number; offset?: number; includeArchived?: boolean }) =>
     request<Paginated<GenerationTask>>(params('/api/generation-records', options ?? {})),
   getRecord: (id: number, includeDebug = false) =>
