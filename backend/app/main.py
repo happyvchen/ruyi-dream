@@ -4625,10 +4625,10 @@ def library_tag_card_for_prompt(card: dict[str, Any]) -> dict[str, Any]:
 
 
 def styling_library_tag_card_for_prompt(card: dict[str, Any], include_internal: bool = False) -> dict[str, Any]:
-    tag_facts = card.get("tag_facts") if isinstance(card.get("tag_facts"), dict) else {}
-    ai_tags = tag_facts.get("ai_tags") if isinstance(tag_facts.get("ai_tags"), dict) else {}
-    manual = card.get("manual") if isinstance(card.get("manual"), dict) else {}
-    tag_meta = tag_facts.get("tag_meta") if isinstance(tag_facts.get("tag_meta"), dict) else {}
+    tag_facts = first_dict(card.get("tag_facts"), card.get("tagFacts"))
+    ai_tags = first_dict(tag_facts.get("ai_tags"), tag_facts.get("aiTags"), card.get("ai_tags"), card.get("aiTags"))
+    manual = first_dict(card.get("manual"), card.get("manualTags"), tag_facts.get("manual_tags"), tag_facts.get("manualTags"))
+    tag_meta = first_dict(tag_facts.get("tag_meta"), tag_facts.get("tagMeta"), card.get("tagMeta"), card.get("tag_meta"))
 
     result: dict[str, Any] = {
         "code": str(card.get("code") or ""),
@@ -4639,6 +4639,13 @@ def styling_library_tag_card_for_prompt(card: dict[str, Any], include_internal: 
     if include_internal and card.get("id") is not None:
         result["id"] = card.get("id")
     return {key: value for key, value in result.items() if value not in (None, "", [], {})}
+
+
+def first_dict(*values: Any) -> dict[str, Any]:
+    for value in values:
+        if isinstance(value, dict):
+            return value
+    return {}
 
 
 def compact_manual_prompt_flags(manual: dict[str, Any]) -> dict[str, Any]:
@@ -5494,12 +5501,7 @@ def styling_result_for_prompt(styling_plan: dict[str, Any], selected_material_sn
 
 
 def compress_selected_material_for_prompt(item: dict[str, Any]) -> dict[str, Any]:
-    card = {
-        "code": item.get("code"),
-        "manual": item.get("manual") or {},
-        "tag_facts": item.get("tagFacts") or item.get("tag_facts") or {},
-    }
-    return styling_library_tag_card_for_prompt(card)
+    return styling_library_tag_card_for_prompt(item)
 
 
 def shoot_script_result_for_prompt(shoot_script: dict[str, Any]) -> dict[str, Any]:
@@ -5895,6 +5897,7 @@ def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_ver
         input_row = db.execute("SELECT * FROM generation_task_input_versions WHERE id = ?", (input_version_id,)).fetchone()
         styling_row = db.execute("SELECT * FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
     selected_snapshot = loads(styling_row["selected_material_snapshot_json"], []) if styling_row else []
+    selected_material_image_refs = selected_material_image_refs_for_request(selected_snapshot)
     candidate_snapshot = loads(styling_row["candidate_retrieval_snapshot_json"], {}) if styling_row and "candidate_retrieval_snapshot_json" in styling_row.keys() else {}
     return {
         "schema_version": "shoot-script-request-v1",
@@ -5909,7 +5912,7 @@ def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_ver
         "styling_id": styling_id,
         "styling_plan": styling_plan,
         "styling_result": styling_result_for_prompt(styling_plan, selected_snapshot),
-        "selected_material_snapshot": selected_snapshot,
+        "selected_material_snapshot": selected_material_image_refs,
         "brand_info": get_current_brand_info() or {},
         "shoot_config": shoot_config,
         "base_shot_rules": [],
@@ -5917,6 +5920,23 @@ def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_ver
         "accessory_boundary": candidate_snapshot.get("accessory_boundary") if isinstance(candidate_snapshot, dict) else build_accessory_boundary(),
         "output_schema": "shoot-script-v1",
     }
+
+
+def selected_material_image_refs_for_request(selected_snapshot: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    for item in selected_snapshot[:4]:
+        if not isinstance(item, dict):
+            continue
+        images = item.get("images") if isinstance(item.get("images"), list) else []
+        refs.append({
+            "code": item.get("code"),
+            "images": [
+                {"asset": image.get("asset")}
+                for image in images[:6]
+                if isinstance(image, dict) and isinstance(image.get("asset"), dict)
+            ],
+        })
+    return refs
 
 
 def build_shoot_script_category_rule_summary(shoot_config: dict[str, Any] | None = None) -> dict[str, Any]:
