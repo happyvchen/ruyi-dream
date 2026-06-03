@@ -90,8 +90,8 @@ export type AIOperation = {
 }
 
 export type AICallRecord = AIOperation & {
-  requestSnapshot?: Record<string, unknown>
-  responseSnapshot?: Record<string, unknown>
+  modelInput?: Record<string, unknown>
+  modelOutput?: Record<string, unknown>
 }
 
 export type GenerationTask = {

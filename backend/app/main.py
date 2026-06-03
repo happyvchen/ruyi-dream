@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 from .config import get_settings
 from .db import dumps, get_db, init_db, loads, log_event, now_iso
 from .image_derivatives import derivative_key, existing_derivative_or_original, generate_image_derivatives
-from .image_provider import get_image_provider
+from .image_provider import ImageProviderError, get_image_provider
 from .object_storage import (
     clean_key,
     delete_object,
@@ -1282,7 +1282,7 @@ async def run_styling_garment_tagging(garment_id: int) -> None:
         row = db.execute("SELECT manual_tags_json FROM styling_garments WHERE id = ?", (garment_id,)).fetchone()
         manual_tags = loads(row["manual_tags_json"], {}) if row else {}
         ai_tags = tagging_result.get("ai_tags") if isinstance(tagging_result.get("ai_tags"), dict) else tagging_result
-        official_title_tags = tagging_result.get("official_title_tags", {})
+        official_title_tags = tagging_result.get("official_title_tags", {}) if isinstance(tagging_result.get("official_title_tags"), dict) else {}
         tag_meta = apply_tag_review_policy(ai_tags, tagging_result.get("tag_meta", {}))
         effective_tags = build_effective_tags(ai_tags, official_title_tags, manual_tags)
         next_status = tagging_status_for_result(ai_tags, tag_meta)
@@ -2426,8 +2426,9 @@ async def create_generation_shoot_script(task_id: int) -> dict[str, Any]:
         except RuntimeError:
             pass
         update_attempt_request_snapshot(attempt_id, request_snapshot)
-        shoot_script = await generate_shoot_script_with_gemini(request_snapshot)
-        shoot_script = normalize_shoot_script(shoot_script, request_snapshot)
+        raw_shoot_script = await generate_shoot_script_with_gemini(request_snapshot)
+        shoot_script = normalize_shoot_script(raw_shoot_script, request_snapshot)
+        shoot_script["model_raw_output"] = raw_shoot_script
         validate_shoot_script(shoot_script)
         shot_plans = shoot_script_to_generation_shot_plans(shoot_script)
     except Exception as exc:
@@ -2642,8 +2643,13 @@ async def create_generation_preview(task_id: int) -> dict[str, Any]:
 async def run_preview_generation(task_id: int, styling_id: int, shoot_script_id: int, shot_plans: list[Any], preview_id: int, attempt_id: int) -> None:
     try:
         task_package = build_new_preview_task_package(task_id, styling_id, shoot_script_id, shot_plans)
-        update_attempt_request_snapshot(attempt_id, task_package)
-        asset_id, provider_response = await generate_image_asset(task_package, join_key("generation-tasks", str(task_id), "preview", f"preview-{preview_id}.png"))
+        if not attempt_has_provider_request_id(attempt_id):
+            update_attempt_request_snapshot(attempt_id, task_package)
+        asset_id, provider_response = await generate_image_asset(
+            task_package,
+            join_key("generation-tasks", str(task_id), "preview", f"preview-{preview_id}.png"),
+            attempt_id=attempt_id,
+        )
     except Exception as exc:
         provider_response = getattr(exc, "provider_response", None)
         with get_db() as db:
@@ -2788,9 +2794,23 @@ async def generate_final_images(task_id: int) -> dict[str, Any]:
     return {"item": get_generation_task_by_id(task_id, include_debug=True)}
 
 
-async def run_final_generation(task_id: int, result_set_id: int, image_ids: list[int]) -> None:
+async def run_final_generation(
+    task_id: int,
+    result_set_id: int,
+    image_ids: list[int],
+    resume_attempts_by_image_id: dict[int, int] | None = None,
+) -> None:
+    resume_attempts_by_image_id = resume_attempts_by_image_id or {}
     await asyncio.gather(
-        *(generate_single_final_image(task_id, result_set_id, image_id) for image_id in image_ids),
+        *(
+            generate_single_final_image(
+                task_id,
+                result_set_id,
+                image_id,
+                attempt_id=resume_attempts_by_image_id.get(image_id),
+            )
+            for image_id in image_ids
+        ),
         return_exceptions=True,
     )
     with get_db() as db:
@@ -6020,18 +6040,16 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
     prompt = build_taxonomy_tagging_prompt(garment)
     request_snapshot = build_taxonomy_tagging_request_snapshot(garment, prompt)
     if not settings.gemini_api_key:
-        tagging_result = fallback_taxonomy_tagging_result(garment)
-        attempt_id = create_attempt("styling_garment_tagging", garment_id, "fallback", request_snapshot)
-        finish_attempt(attempt_id, "SUCCEEDED", {"reason": "gemini_api_key_missing", "normalized": tagging_result})
-        return tagging_result
+        attempt_id = create_attempt("styling_garment_tagging", garment_id, "gemini", request_snapshot)
+        finish_attempt(attempt_id, "FAILED", {"error": "gemini_api_key_missing"}, error_message="Gemini API 未配置，AI 打标不能生成替代标签。")
+        raise RuntimeError("Gemini API 未配置，AI 打标不能生成替代标签。")
     try:
         from google import genai
         from google.genai import types
-    except Exception:
-        tagging_result = fallback_taxonomy_tagging_result(garment)
-        attempt_id = create_attempt("styling_garment_tagging", garment_id, "fallback", request_snapshot)
-        finish_attempt(attempt_id, "SUCCEEDED", {"reason": "google_genai_import_failed", "normalized": tagging_result})
-        return tagging_result
+    except Exception as exc:
+        attempt_id = create_attempt("styling_garment_tagging", garment_id, "gemini", request_snapshot)
+        finish_attempt(attempt_id, "FAILED", {"error": "google_genai_import_failed"}, error_message="google-genai SDK 不可用，AI 打标不能生成替代标签。")
+        raise RuntimeError("google-genai SDK 不可用，AI 打标不能生成替代标签。") from exc
     attempt_id = create_attempt("styling_garment_tagging", garment_id, "gemini", request_snapshot)
     contents: list[Any] = [prompt]
     for image in garment.get("images", [])[:6]:
@@ -6054,9 +6072,9 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
     except Exception as exc:
         finish_attempt(attempt_id, "FAILED", {"raw_text": text}, error_message=f"Gemini 返回内容不是合法 JSON：{exc}")
         raise
-    normalized = normalize_prompt_tagging_result(raw, garment)
-    finish_attempt(attempt_id, "SUCCEEDED", {"raw_text": text, "raw_json": raw, "normalized": normalized})
-    return normalized
+    tagging_result = normalize_prompt_tagging_result(raw, garment)
+    finish_attempt(attempt_id, "SUCCEEDED", {"raw_text": text, "raw_json": raw})
+    return tagging_result
 
 
 def build_taxonomy_tagging_request_snapshot(garment: dict[str, Any], prompt: str, taxonomy_context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -6153,17 +6171,12 @@ def normalize_prompt_tagging_result(
     warnings: list[str] | None = None,
     review_reasons: list[str] | None = None,
 ) -> dict[str, Any]:
-    if isinstance(raw, dict) and isinstance(raw.get("tags"), list):
-        try:
-            return normalize_taxonomy_tagging_result(raw, garment, build_active_taxonomy_context())
-        except Exception:
-            pass
     ai_tags = raw if isinstance(raw, dict) else {"raw_result": raw}
     tag_meta = build_prompt_tag_meta(ai_tags, garment, provider=provider, warnings=warnings, review_reasons=review_reasons)
     return {
-        "schema_version": PROMPT_TAGGING_RESULT_VERSION,
+        "schema_version": str(ai_tags.get("schema_version") or ai_tags.get("schemaVersion") or PROMPT_TAGGING_RESULT_VERSION),
         "ai_tags": ai_tags,
-        "official_title_tags": {},
+        "official_title_tags": ai_tags.get("official_title_tags") if isinstance(ai_tags.get("official_title_tags"), dict) else {},
         "tag_meta": tag_meta,
     }
 
@@ -6176,6 +6189,7 @@ def build_prompt_tag_meta(
     warnings: list[str] | None = None,
     review_reasons: list[str] | None = None,
 ) -> dict[str, Any]:
+    source_meta = ai_tags.get("tag_meta") if isinstance(ai_tags.get("tag_meta"), dict) else {}
     confidence = extract_prompt_confidence(ai_tags)
     reasons = ensure_string_list(review_reasons)
     if not has_meaningful_prompt_result(ai_tags):
@@ -6186,9 +6200,9 @@ def build_prompt_tag_meta(
         reasons.append("fallback_tags")
     reasons = list(dict.fromkeys(reasons))
     return {
-        "tagger_provider": provider,
-        "tagger_model": "fallback" if provider == "fallback" else settings.gemini_model,
-        "result_format": "prompt_configured_json",
+        "tagger_provider": str(source_meta.get("tagger_provider") or provider),
+        "tagger_model": str(source_meta.get("tagger_model") or ("fallback" if provider == "fallback" else settings.gemini_model)),
+        "result_format": str(source_meta.get("result_format") or "prompt_configured_json"),
         "overall_confidence": confidence if confidence is not None else 0.5,
         "needs_review": bool(reasons),
         "review_reasons": reasons,
@@ -6560,127 +6574,7 @@ def apply_tag_review_policy(ai_tags: dict[str, Any], tag_meta: dict[str, Any]) -
 
 
 def build_effective_tags(ai_tags: dict[str, Any], official_title_tags: dict[str, Any], manual_tags: dict[str, Any]) -> dict[str, Any]:
-    tag_entries = ai_tags.get("tags") if isinstance(ai_tags.get("tags"), list) else []
-    if tag_entries:
-        taxonomy_context = build_active_taxonomy_context()
-        by_dimension = group_taxonomy_tags_by_dimension(tag_entries if isinstance(tag_entries, list) else [])
-        category, sub_category = derive_effective_category(by_dimension.get("category", []), taxonomy_context)
-        visual_profile = ai_tags.get("visual_profile") if isinstance(ai_tags.get("visual_profile"), dict) else {}
-        label_summary = taxonomy_label_summary(tag_entries if isinstance(tag_entries, list) else [], taxonomy_context)
-        lily_style = {
-            item["tag_code"]: item.get("score")
-            for item in by_dimension.get("lily_style_score", [])
-            if item.get("value_type") == "score"
-        }
-        wearability = {
-            item["tag_code"]: item.get("value_bool")
-            for item in by_dimension.get("wearability", [])
-            if item.get("value_type") == "boolean"
-        }
-        wearing_methods = [item["tag_code"] for item in by_dimension.get("wearing_method", [])]
-        coverage_risk = first_taxonomy_code(by_dimension.get("coverage_risk", []), "unknown")
-        if wearing_methods:
-            wearability["recommended_wearing_methods"] = wearing_methods
-        if coverage_risk:
-            wearability["coverage_risk"] = coverage_risk
-        return {
-            "schema_version": TAXONOMY_TAGGING_SCHEMA_VERSION,
-            "result_format": "taxonomy_tags",
-            "category": category,
-            "sub_category": sub_category,
-            "colors": taxonomy_codes(by_dimension.get("color", [])),
-            "color_attributes": taxonomy_codes(by_dimension.get("color_attribute", [])),
-            "fit": first_taxonomy_code(by_dimension.get("fit", []), "unknown"),
-            "silhouette": taxonomy_codes(by_dimension.get("silhouette", [])),
-            "structure": taxonomy_codes(by_dimension.get("structure", [])),
-            "length": derive_effective_lengths(by_dimension.get("length", [])),
-            "materials_visual": taxonomy_codes(by_dimension.get("material_visual", [])),
-            "surface_texture": taxonomy_codes(by_dimension.get("surface_texture", [])),
-            "details": taxonomy_codes(by_dimension.get("design_detail", [])),
-            "patterns": taxonomy_codes(by_dimension.get("pattern", [])),
-            "pattern_scale": first_taxonomy_code(by_dimension.get("pattern_scale", []), ""),
-            "neckline": taxonomy_codes(by_dimension.get("neckline", [])),
-            "closure": taxonomy_codes(by_dimension.get("closure", [])),
-            "occasion": taxonomy_codes(by_dimension.get("occasion", [])),
-            "season": taxonomy_codes(by_dimension.get("season", [])),
-            "wearability": wearability,
-            "lily_style": lily_style,
-            "formality": first_taxonomy_code(by_dimension.get("formality", []), "unknown"),
-            "styling_compatibility": {
-                "pairing_logic": taxonomy_codes(by_dimension.get("pairing_logic", [])),
-                "style_risk": taxonomy_codes(by_dimension.get("style_risk", [])),
-            },
-            "visual_profile": visual_profile,
-            "label_summary": label_summary,
-            "unmapped_observations": ai_tags.get("unmapped_observations", []),
-            "suggested_new_tags": ai_tags.get("suggested_new_tags", []),
-            "official": official_title_tags,
-            "manual": manual_tags,
-            "pairing_brief": str(visual_profile.get("pairing_suggestion_text") or visual_profile.get("styling_interpretation") or visual_profile.get("overall_summary") or "")[:160],
-            "risk": taxonomy_codes(by_dimension.get("style_risk", [])),
-        }
-
-    visual_profile = {
-        "overall_summary": prompt_text_value(prompt_field_value(ai_tags, "overall_summary")),
-        "structure_summary": prompt_text_value(prompt_field_value(ai_tags, "structure_summary")),
-        "material_summary": prompt_text_value(prompt_field_value(ai_tags, "material_summary")),
-        "color_summary": prompt_text_value(prompt_field_value(ai_tags, "color_summary")),
-        "style_summary": prompt_text_value(prompt_field_value(ai_tags, "style_summary")),
-    }
-    visual_profile = {key: value for key, value in visual_profile.items() if value}
-    category = first_prompt_code(prompt_field_value(ai_tags, "category"), "未知")
-    sub_category = first_prompt_value(prompt_field_value(ai_tags, "sub_category"), "other")
-    wearing_methods = prompt_code_values(prompt_field_value(ai_tags, "wearing_methods"))
-    wearability_values = prompt_value_list(prompt_field_value(ai_tags, "wearability"))
-    wearability: dict[str, Any] = {}
-    if wearability_values:
-        wearability["values"] = wearability_values
-    if wearing_methods:
-        wearability["recommended_wearing_methods"] = wearing_methods
-    label_summary = {
-        "category": prompt_value_list(prompt_field_value(ai_tags, "category")),
-        "sub_category": prompt_value_list(prompt_field_value(ai_tags, "sub_category")),
-        "colors": prompt_value_list(prompt_field_value(ai_tags, "colors")),
-        "season": prompt_value_list(prompt_field_value(ai_tags, "season")),
-    }
-    label_summary = {key: value for key, value in label_summary.items() if value}
-    pairing_brief = (
-        visual_profile.get("style_summary")
-        or visual_profile.get("overall_summary")
-        or visual_profile.get("structure_summary")
-        or "，".join(label_summary.get("category", []) + label_summary.get("colors", []))
-    )[:160]
-    return {
-        "schema_version": PROMPT_TAGGING_RESULT_VERSION,
-        "result_format": "prompt_configured_json",
-        "category": category,
-        "sub_category": sub_category,
-        "category_label": first_prompt_value(prompt_field_value(ai_tags, "category")),
-        "colors": prompt_code_values(prompt_field_value(ai_tags, "colors")),
-        "color_labels": prompt_value_list(prompt_field_value(ai_tags, "colors")),
-        "color_attributes": prompt_value_list(prompt_field_value(ai_tags, "color_attributes")),
-        "fit": first_prompt_value(prompt_field_value(ai_tags, "fit")),
-        "silhouette": prompt_value_list(prompt_field_value(ai_tags, "silhouette")),
-        "structure": prompt_value_list(prompt_field_value(ai_tags, "structure")),
-        "length": {"values": prompt_code_values(prompt_field_value(ai_tags, "length")), "labels": prompt_value_list(prompt_field_value(ai_tags, "length"))},
-        "materials_visual": prompt_code_values(prompt_field_value(ai_tags, "materials_visual")),
-        "material_labels": prompt_value_list(prompt_field_value(ai_tags, "materials_visual")),
-        "surface_texture": prompt_value_list(prompt_field_value(ai_tags, "surface_texture")),
-        "details": prompt_code_values(prompt_field_value(ai_tags, "details")),
-        "detail_labels": prompt_value_list(prompt_field_value(ai_tags, "details")),
-        "patterns": prompt_value_list(prompt_field_value(ai_tags, "patterns")),
-        "neckline": prompt_value_list(prompt_field_value(ai_tags, "neckline")),
-        "closure": prompt_code_values(prompt_field_value(ai_tags, "closure")),
-        "occasion": prompt_value_list(prompt_field_value(ai_tags, "occasion")),
-        "season": prompt_value_list(prompt_field_value(ai_tags, "season")),
-        "wearability": wearability,
-        "visual_profile": visual_profile,
-        "label_summary": label_summary,
-        "manual": manual_tags,
-        "official": official_title_tags,
-        "pairing_brief": pairing_brief,
-        "risk": prompt_value_list(prompt_field_value(ai_tags, "risk")),
-    }
+    return ai_tags if isinstance(ai_tags, dict) else {}
 
 
 def taxonomy_codes_for_dimension(ai_tags: dict[str, Any], dimension_code: str) -> list[str]:
@@ -6842,33 +6736,11 @@ def compress_tags_for_styling(row: Any) -> dict[str, Any]:
     effective = loads(row["effective_tags_json"], {}) if "effective_tags_json" in row.keys() else {}
     if not effective:
         effective = build_effective_tags(ai_tags, official_title_tags, manual_tags)
-    manual = effective.get("manual") if isinstance(effective.get("manual"), dict) else {}
-    wearability = effective.get("wearability") if isinstance(effective.get("wearability"), dict) else {}
-    length = effective.get("length") if isinstance(effective.get("length"), dict) else {}
     cover_asset = serialize_cover_asset(row) if "cover_key" in row.keys() else None
     return {
         "id": row["id"],
         "code": row["code"],
-        "category": effective.get("category", "未知"),
-        "sub_category": effective.get("sub_category", "other"),
-        "colors": effective.get("colors", []),
-        "fit": effective.get("fit", "unknown"),
-        "silhouette": effective.get("silhouette", []),
-        "length": {
-            "top_length": length.get("top_length", "unknown"),
-            "sleeve_length": length.get("sleeve_length", "unknown"),
-            "bottom_length": length.get("bottom_length", "unknown"),
-        },
-        "materials_visual": effective.get("materials_visual", []),
-        "details": effective.get("details", []),
-        "occasion": effective.get("occasion", []),
-        "season": effective.get("season", []),
-        "wearability": wearability,
-        "manual": {
-            "season_year": manual.get("season_year"),
-            "series": manual.get("series", []),
-            "do_not_use_for_styling": bool(manual.get("do_not_use_for_styling")),
-        },
+        "manual": manual_tags,
         "tag_facts": {
             "ai_tags": ai_tags,
             "manual_tags": manual_tags,
@@ -6876,9 +6748,6 @@ def compress_tags_for_styling(row: Any) -> dict[str, Any]:
             "effective_tags": effective,
             "tag_meta": tag_meta,
         },
-        "pairing_brief": effective.get("pairing_brief", ""),
-        "risk": effective.get("risk", []),
-        "visual_caption": build_phase_one_visual_caption(effective),
         "cover_asset": cover_asset,
     }
 
@@ -7115,16 +6984,58 @@ def finish_attempt(
 
 
 def persist_attempt_provider_request_id(attempt_id: int, provider_response: dict[str, Any] | None) -> None:
-    if not isinstance(provider_response, dict):
+    persist_attempt_provider_progress(attempt_id, provider_response)
+
+
+def persist_attempt_provider_progress(attempt_id: int | None, provider_response: dict[str, Any] | None) -> None:
+    if not attempt_id or not isinstance(provider_response, dict):
         return
     provider_request_id = provider_response.get("providerRequestId")
-    if not provider_request_id:
-        return
+    timestamp = now_iso()
     with get_db() as db:
+        if provider_request_id:
+            db.execute(
+                """
+                UPDATE generation_attempts
+                SET provider_request_id = ?, response_snapshot_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (str(provider_request_id), dumps(provider_response), timestamp, attempt_id),
+            )
+            return
         db.execute(
-            "UPDATE generation_attempts SET provider_request_id = ?, updated_at = ? WHERE id = ?",
-            (str(provider_request_id), now_iso(), attempt_id),
+            """
+            UPDATE generation_attempts
+            SET response_snapshot_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (dumps(provider_response), timestamp, attempt_id),
         )
+
+
+def attempt_has_provider_request_id(attempt_id: int | None) -> bool:
+    if not attempt_id:
+        return False
+    with get_db() as db:
+        row = db.execute("SELECT provider_request_id FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
+    return bool(row and row["provider_request_id"])
+
+
+def get_attempt_provider_resume_snapshot(attempt_id: int | None) -> dict[str, Any] | None:
+    if not attempt_id:
+        return None
+    with get_db() as db:
+        row = db.execute(
+            "SELECT provider_request_id, response_snapshot_json FROM generation_attempts WHERE id = ?",
+            (attempt_id,),
+        ).fetchone()
+    if not row or not row["provider_request_id"]:
+        return None
+    snapshot = loads(row["response_snapshot_json"], {})
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    snapshot["providerRequestId"] = row["provider_request_id"]
+    return snapshot
 
 
 def fail_stale_attempt(attempt_id: int | None, message: str) -> None:
@@ -7204,7 +7115,9 @@ async def select_styling_with_gemini(input_row: Any, candidate_snapshot: dict[st
         raw = loads(extract_json_text(getattr(response, "text", "") or "{}"), {})
     except Exception as exc:
         raise RuntimeError(f"Gemini AI Stylist 调用失败：{exc}") from exc
-    return normalize_styling_plan(raw, candidate_snapshot)
+    styling_plan = normalize_styling_plan(raw, candidate_snapshot)
+    styling_plan["model_raw_output"] = raw
+    return styling_plan
 
 
 def attach_ai_stylist_prompt_snapshot(request_snapshot: dict[str, Any], candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -7225,21 +7138,7 @@ def candidate_retrieval_for_prompt(candidate_snapshot: dict[str, Any]) -> list[d
 def styling_garment_card_for_prompt(card: dict[str, Any]) -> dict[str, Any]:
     return {
         "code": str(card.get("code") or ""),
-        "category": card.get("category"),
-        "sub_category": card.get("sub_category"),
-        "colors": card.get("colors") or [],
-        "fit": card.get("fit"),
-        "silhouette": card.get("silhouette") or [],
-        "length": card.get("length") or {},
-        "materials_visual": card.get("materials_visual") or [],
-        "details": card.get("details") or [],
-        "occasion": card.get("occasion") or [],
-        "season": card.get("season") or [],
-        "wearability": card.get("wearability") or {},
         "manual": card.get("manual") or {},
-        "pairing_brief": card.get("pairing_brief") or "",
-        "risk": card.get("risk") or [],
-        "visual_caption": card.get("visual_caption") or "",
         "tag_facts": card.get("tag_facts") or {},
     }
 
@@ -7248,7 +7147,7 @@ def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict
     library_tag_cards = [library_tag_card_for_prompt(card) for card in material_cards]
     return {
         "schema_version": "candidate-retrieval-v2",
-        "strategy": "prompt_managed_business_context_v1",
+        "strategy": "prompt_config_raw_tag_facts_v1",
         "input_version_id": int(input_row["id"]),
         "library_scope": {
             "status": "READY",
@@ -7261,26 +7160,11 @@ def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict
         "candidate_pool_size": len(material_cards),
         "candidate_limit": len(material_cards),
         "candidate_image_limit": 0,
-        "hero_context": {
-            "source": "prompt_managed",
-            "name_snapshot": str(input_row["name_snapshot"] if "name_snapshot" in input_row.keys() else ""),
-            "image_snapshot": loads(input_row["image_snapshot_json"], []) if "image_snapshot_json" in input_row.keys() else [],
-            "instruction": "主推款理解、品类判断、卖点、遮挡风险和拍摄要求全部由 AI Stylist Prompt 根据图片和全量标签事实完成。",
-        },
         "library_tag_cards": library_tag_cards,
         "material_cards": library_tag_cards,
         "outfit_drafts": [],
-        "library_adequacy": build_library_context_report(material_cards),
         "filtered_out": [],
-        "brand_style_evidence": build_phase_one_brand_style_evidence(ai_policy_config),
-        "accessory_boundary": build_accessory_boundary(ai_policy_config),
         "prompt_rule_source": AI_STYLING_PROMPT_CONFIG_KEY,
-        "notes": [
-            "后端只提供未归档 READY 搭配库全量标签事实和 ID 白名单。",
-            "AI 选搭原则、品类策略、质量信号、配饰边界和库充足性口径维护在 assembly.ai_styling Prompt 正文中。",
-            "AI Stylist 阶段不追加候选服饰图片，避免后端因图片预算变相裁剪候选；搭配库侧以全量标签事实进入 Prompt。",
-            "主推款理解、候选选择、映射、评分、质量信号、库充足性和 outfit 决策全部由 AI Stylist Prompt 完成。",
-        ],
     }
 
 
@@ -7338,9 +7222,7 @@ def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[s
             "imageSnapshot": loads(input_row["image_snapshot_json"], []),
         },
         "candidate_retrieval": candidate_snapshot,
-        "brand_info": get_current_brand_info() or {},
         "prompt_rule_source": AI_STYLING_PROMPT_CONFIG_KEY,
-        "output_schema": "styling-plan-v1",
     }
 
 
@@ -7680,6 +7562,7 @@ def strip_internal_prompt_fields(value: Any) -> Any:
         "model",
         "prompt",
         "promptConfigKey",
+        "model_raw_output",
         "createdAt",
         "updatedAt",
         "created_at",
@@ -7698,34 +7581,13 @@ def strip_internal_prompt_fields(value: Any) -> Any:
 
 
 def styling_result_for_prompt(styling_plan: dict[str, Any], selected_material_snapshot: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    plan = strip_internal_prompt_fields(styling_plan if isinstance(styling_plan, dict) else {})
-    if selected_material_snapshot is not None:
-        plan["selected_material_tag_cards"] = [
-            styling_garment_card_for_prompt(compress_selected_material_for_prompt(item))
-            for item in selected_material_snapshot
-            if isinstance(item, dict)
-        ]
-    return plan
+    return strip_internal_prompt_fields(styling_plan if isinstance(styling_plan, dict) else {})
 
 
 def compress_selected_material_for_prompt(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "code": item.get("code"),
-        "category": item.get("category"),
-        "sub_category": item.get("subCategory") or item.get("sub_category"),
-        "colors": item.get("colors") or [],
-        "fit": item.get("fit"),
-        "silhouette": item.get("silhouette") or [],
-        "length": item.get("length") or {},
-        "materials_visual": item.get("materialsVisual") or item.get("materials_visual") or [],
-        "details": item.get("details") or [],
-        "occasion": item.get("occasion") or [],
-        "season": item.get("season") or [],
-        "wearability": item.get("wearability") or {},
         "manual": item.get("manual") or {},
-        "pairing_brief": item.get("pairingBrief") or item.get("pairing_brief") or "",
-        "risk": item.get("risk") or [],
-        "visual_caption": item.get("visualCaption") or item.get("visual_caption") or "",
         "tag_facts": item.get("tagFacts") or item.get("tag_facts") or {},
     }
 
@@ -9404,22 +9266,7 @@ def final_image_prompt_template_v2() -> str:
 
 
 def repair_prompt_config_placeholders() -> None:
-    try:
-        with get_db() as db:
-            for key in DEPRECATED_PROMPT_CONFIG_KEYS:
-                db.execute("DELETE FROM prompt_configs WHERE key = ?", (key,))
-            existing_rows = db.execute("SELECT key, content FROM prompt_configs").fetchall()
-            for row in existing_rows:
-                key = str(row["key"])
-                content = str(row["content"] or "")
-                repaired = repair_prompt_placeholder_text(content)
-                if key == AI_STYLING_PROMPT_CONFIG_KEY:
-                    repaired = merge_legacy_ai_policy_placeholders(repaired)
-                repaired = migrate_prompt_runtime_placeholders(key, repaired)
-                if repaired != content:
-                    db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?", (repaired, now_iso(), key))
-    except sqlite3.OperationalError:
-        return
+    return
 
 
 def get_prompt_config_rows() -> dict[str, Any]:
@@ -9634,8 +9481,12 @@ def refresh_pending_new_generation_jobs() -> None:
         key = preview_job_key(int(row["id"]))
         if key in active_background_generation_jobs:
             continue
-        fail_stale_attempt(row["active_attempt_id"], "预览生成任务锁过期，已由后台恢复重试。")
-        attempt_id = create_attempt("generation_preview", int(row["id"]), "image-2")
+        active_attempt_id = int(row["active_attempt_id"]) if row["active_attempt_id"] else None
+        if attempt_has_provider_request_id(active_attempt_id):
+            attempt_id = int(active_attempt_id)
+        else:
+            fail_stale_attempt(active_attempt_id, "预览生成任务锁过期，已由后台恢复重试。")
+            attempt_id = create_attempt("generation_preview", int(row["id"]), "image-2")
         lease_generation_preview(int(row["id"]), attempt_id)
         shoot_script_id = int(row["shoot_script_id"]) if "shoot_script_id" in row.keys() and row["shoot_script_id"] else 0
         shot_plans = get_task_shot_plans_by_script(shoot_script_id)
@@ -9661,9 +9512,17 @@ def refresh_pending_new_generation_jobs() -> None:
             ).fetchall()
         image_ids = [int(image["id"]) for image in image_rows]
         if image_ids:
+            resume_attempts_by_image_id: dict[int, int] = {}
             for image in image_rows:
-                fail_stale_attempt(image["active_attempt_id"] if "active_attempt_id" in image.keys() else None, "成片生成任务锁过期，已由后台恢复重试。")
-            schedule_background_generation(run_final_generation(int(row["task_id"]), int(row["id"]), image_ids), job_key=key)
+                active_attempt_id = int(image["active_attempt_id"]) if "active_attempt_id" in image.keys() and image["active_attempt_id"] else None
+                if attempt_has_provider_request_id(active_attempt_id):
+                    resume_attempts_by_image_id[int(image["id"])] = int(active_attempt_id)
+                else:
+                    fail_stale_attempt(active_attempt_id, "成片生成任务锁过期，已由后台恢复重试。")
+            schedule_background_generation(
+                run_final_generation(int(row["task_id"]), int(row["id"]), image_ids, resume_attempts_by_image_id=resume_attempts_by_image_id),
+                job_key=key,
+            )
 
     for row in terminal_result_sets:
         with get_db() as db:
@@ -9693,10 +9552,31 @@ def schedule_background_generation(coro: Any, job_key: str | None = None) -> Non
     task.add_done_callback(report_failure)
 
 
-async def generate_image_asset(task_package: dict[str, Any], output_key: str) -> tuple[int, dict[str, Any]]:
+async def generate_image_asset(task_package: dict[str, Any], output_key: str, attempt_id: int | None = None) -> tuple[int, dict[str, Any]]:
     if not settings.is_image_provider_configured():
         raise RuntimeError(image_provider_missing_message())
-    payload = await asyncio.to_thread(run_image_provider_generate, task_package, output_key)
+    payload = get_attempt_provider_resume_snapshot(attempt_id)
+    if payload is None:
+        payload = await asyncio.to_thread(run_image_provider_submit, task_package, output_key)
+        persist_attempt_provider_progress(attempt_id, payload)
+
+    if payload.get("status") != "SUCCEEDED" or not payload.get("outputPath"):
+        deadline = time.time() + settings.generation_image_timeout_seconds
+        while time.time() < deadline:
+            await asyncio.sleep(3)
+            try:
+                latest = await asyncio.to_thread(run_image_provider_refresh, payload, output_key)
+            except Exception as exc:
+                raise ImageProviderError(f"图片生成状态查询失败，providerRequestId={payload.get('providerRequestId')}: {exc}", payload) from exc
+            payload = {**payload, **latest}
+            persist_attempt_provider_progress(attempt_id, payload)
+            if payload.get("status") in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                break
+        if payload.get("status") != "SUCCEEDED":
+            raise ImageProviderError(f"图片生成未成功，providerRequestId={payload.get('providerRequestId')}: {payload}", payload)
+        payload = {**payload, "submissionMode": "completed"}
+        persist_attempt_provider_progress(attempt_id, payload)
+
     if payload.get("provider") == "placeholder":
         raise RuntimeError("Image-2 provider 返回占位图，拒绝将占位图记为生成成功。")
     content = get_bytes(payload["outputPath"])
@@ -9719,6 +9599,25 @@ def run_image_provider_generate(task_package: dict[str, Any], output_key: str) -
     return asyncio.run(get_image_provider().generate(task_package, output_key))
 
 
+def run_image_provider_submit(task_package: dict[str, Any], output_key: str) -> dict[str, Any]:
+    return asyncio.run(get_image_provider().submit(task_package, output_key))
+
+
+def run_image_provider_refresh(provider_response: dict[str, Any], output_key: str) -> dict[str, Any]:
+    return asyncio.run(get_image_provider().refresh(provider_refresh_row(provider_response, output_key)))
+
+
+def provider_refresh_row(provider_response: dict[str, Any], output_key: str) -> dict[str, Any]:
+    provider_urls = provider_response.get("providerUrls") if isinstance(provider_response.get("providerUrls"), dict) else {}
+    return {
+        "provider_request_id": provider_response.get("providerRequestId"),
+        "provider_urls_json": dumps(provider_urls),
+        "output_path": str(provider_response.get("outputPath") or output_key),
+        "status": provider_response.get("status"),
+        "provider_status": provider_response.get("providerStatus"),
+    }
+
+
 def image_provider_missing_message() -> str:
     if settings.image_provider == "toapis":
         return "Image-2 provider 未配置：当前使用 toapis，请设置 TOAPIS_API_KEY，或将 GPT_IMAGE2_PROVIDER=fal 并设置 FAL_KEY。"
@@ -9727,8 +9626,9 @@ def image_provider_missing_message() -> str:
     return f"Image-2 provider 未配置：不支持的 provider {settings.image_provider}。"
 
 
-async def generate_single_final_image(task_id: int, result_set_id: int, image_id: int) -> int:
-    attempt_id = create_attempt("generation_result_image", image_id, "image-2")
+async def generate_single_final_image(task_id: int, result_set_id: int, image_id: int, attempt_id: int | None = None) -> int:
+    if attempt_id is None:
+        attempt_id = create_attempt("generation_result_image", image_id, "image-2")
     lease_generation_result_image(image_id, attempt_id)
     with get_db() as db:
         row = db.execute("SELECT status FROM generation_result_images_new WHERE id = ?", (image_id,)).fetchone()
@@ -9745,11 +9645,12 @@ async def generate_single_final_image(task_id: int, result_set_id: int, image_id
         )
     try:
         task_package = build_new_final_task_package(task_id, image_id)
-        update_attempt_request_snapshot(attempt_id, task_package)
+        if not attempt_has_provider_request_id(attempt_id):
+            update_attempt_request_snapshot(attempt_id, task_package)
         with get_db() as db:
             sort_order = db.execute("SELECT sort_order FROM generation_result_images_new WHERE id = ?", (image_id,)).fetchone()["sort_order"]
         output_key = join_key("generation-tasks", str(task_id), "final", f"{result_set_id}-{sort_order}.png")
-        asset_id, provider_response = await generate_image_asset(task_package, output_key)
+        asset_id, provider_response = await generate_image_asset(task_package, output_key, attempt_id=attempt_id)
     except Exception as exc:
         provider_response = getattr(exc, "provider_response", None)
         with get_db() as db:
@@ -10020,6 +9921,51 @@ def get_generation_result_set(result_set_id: int | None) -> dict[str, Any] | Non
     }
 
 
+def actual_model_input_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {}
+    result: dict[str, Any] = {}
+    prompt = snapshot.get("prompt")
+    if prompt is not None:
+        result["prompt"] = prompt
+    if isinstance(snapshot.get("imageInputs"), list):
+        result["imageInputs"] = snapshot.get("imageInputs")
+    elif isinstance(snapshot.get("images"), list):
+        result["images"] = snapshot.get("images")
+    else:
+        input_version = snapshot.get("input_version") if isinstance(snapshot.get("input_version"), dict) else {}
+        image_snapshot = input_version.get("imageSnapshot") or input_version.get("image_snapshot")
+        if isinstance(image_snapshot, list):
+            result["images"] = image_snapshot
+        selected = snapshot.get("selected_material_snapshot")
+        if isinstance(selected, list):
+            result["selectedMaterialImages"] = [
+                {
+                    "code": item.get("code"),
+                    "images": item.get("images"),
+                }
+                for item in selected
+                if isinstance(item, dict)
+            ]
+    if not result:
+        return snapshot
+    return result
+
+
+def actual_model_output_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {}
+    if "raw_json" in snapshot or "raw_text" in snapshot:
+        return {
+            key: snapshot[key]
+            for key in ("raw_text", "raw_json")
+            if key in snapshot
+        }
+    if isinstance(snapshot.get("model_raw_output"), dict):
+        return snapshot["model_raw_output"]
+    return snapshot
+
+
 def get_task_attempts(task_id: int) -> list[dict[str, Any]]:
     with get_db() as db:
         rows = db.execute(
@@ -10041,22 +9987,23 @@ def get_task_attempts(task_id: int) -> list[dict[str, Any]]:
             """,
             (task_id, task_id, task_id, task_id),
         ).fetchall()
-    return [
-        {
-            "id": row["id"],
-            "ownerType": row["owner_type"],
-            "ownerId": row["owner_id"],
-            "provider": row["provider"],
-            "status": row["status"],
-            "startedAt": row["started_at"],
-            "completedAt": row["completed_at"],
-            "failedAt": row["failed_at"],
-            "errorMessage": row["error_message"],
-            "requestSnapshot": loads(row["request_snapshot_json"], {}),
-            "responseSnapshot": loads(row["response_snapshot_json"], {}),
-        }
-        for row in rows
-    ]
+    records = []
+    for row in rows:
+        request_snapshot = loads(row["request_snapshot_json"], {})
+        response_snapshot = loads(row["response_snapshot_json"], {})
+        records.append(
+            {
+                "id": row["id"],
+                "ownerType": row["owner_type"],
+                "ownerId": row["owner_id"],
+                "provider": row["provider"],
+                "status": row["status"],
+                "errorMessage": row["error_message"],
+                "modelInput": actual_model_input_from_snapshot(request_snapshot),
+                "modelOutput": actual_model_output_from_snapshot(response_snapshot),
+            }
+        )
+    return records
 
 
 def get_attempt_summary(attempt_id: int | None) -> dict[str, Any] | None:

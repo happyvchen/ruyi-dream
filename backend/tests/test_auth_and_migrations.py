@@ -585,8 +585,10 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         item = response.json()["items"][0]
         self.assertEqual(item["ownerType"], "generation_styling")
-        self.assertEqual(item["requestSnapshot"]["prompt"], "input snapshot")
-        self.assertEqual(item["responseSnapshot"]["stylingPlan"]["selected_outfit_id"], "candidate_a")
+        self.assertEqual(item["modelInput"]["prompt"], "input snapshot")
+        self.assertEqual(item["modelOutput"]["stylingPlan"]["selected_outfit_id"], "candidate_a")
+        self.assertNotIn("requestSnapshot", item)
+        self.assertNotIn("responseSnapshot", item)
 
     def test_ai_styling_prompt_snapshot_uses_prompt_config(self) -> None:
         config = importlib.import_module("app.config")
@@ -618,7 +620,8 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertEqual(snapshot["promptConfigKey"], "assembly.ai_styling")
         self.assertIn('"code": "LOOK-A"', snapshot["prompt"])
-        self.assertIn('"category": "上装"', snapshot["prompt"])
+        self.assertIn('"effective_tags": {"colors": ["白色"]}', snapshot["prompt"])
+        self.assertNotIn('"category": "上装"', snapshot["prompt"])
         self.assertNotIn("candidate_material_ids", snapshot["prompt"])
         self.assertNotIn('"id": 1', snapshot["prompt"])
         self.assertNotIn("runtime.ai_policy", snapshot["prompt"])
@@ -727,7 +730,7 @@ class BackendSmokeTests(unittest.TestCase):
         snapshot = main.build_candidate_retrieval_snapshot(input_row, material_cards)
 
         self.assertEqual(snapshot["schema_version"], "candidate-retrieval-v2")
-        self.assertEqual(snapshot["strategy"], "prompt_managed_business_context_v1")
+        self.assertEqual(snapshot["strategy"], "prompt_config_raw_tag_facts_v1")
         self.assertEqual(snapshot["candidate_material_ids"], [item["id"] for item in material_cards])
         self.assertEqual(len(snapshot["library_tag_cards"]), len(material_cards))
         self.assertEqual(len(snapshot["material_cards"]), len(material_cards))
@@ -767,7 +770,9 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertEqual(snapshot["prompt_rule_source"], "assembly.ai_styling")
         self.assertNotIn("ai_policy_config", snapshot)
-        self.assertIn("ID 白名单", " ".join(snapshot["notes"]))
+        self.assertNotIn("notes", snapshot)
+        self.assertNotIn("library_adequacy", snapshot)
+        self.assertNotIn("brand_style_evidence", snapshot)
 
     def test_schema_migrations_are_recorded(self) -> None:
         config = importlib.import_module("app.config")
@@ -2299,10 +2304,8 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertEqual(normalized["ai_tags"]["一级品类"], ["上装"])
         self.assertEqual(normalized["tag_meta"]["overall_confidence"], 0.88)
-        self.assertEqual(effective["category"], "上装")
-        self.assertEqual(effective["category_label"], "上装")
-        self.assertEqual(effective["colors"], ["白色"])
-        self.assertEqual(effective["pairing_brief"], "白色衬衫，视觉干净利落。")
+        self.assertEqual(effective, normalized["ai_tags"])
+        self.assertNotIn("recommended_wearing_methods", str(effective))
 
     def test_prompt_tagging_result_derives_from_nested_freeform_json(self) -> None:
         main = importlib.import_module("app.main")
@@ -2320,10 +2323,8 @@ class BackendSmokeTests(unittest.TestCase):
         )
         effective = main.build_effective_tags(normalized["ai_tags"], {}, {})
 
-        self.assertEqual(effective["category"], "外套类")
-        self.assertEqual(effective["sub_category"], "西装")
-        self.assertEqual(effective["colors"], ["藏青色"])
-        self.assertEqual(effective["pairing_brief"], "藏青色西装外套，结构清楚，适合通勤搭配。")
+        self.assertEqual(effective, normalized["ai_tags"])
+        self.assertEqual(effective["服装标签卡"]["基础信息"]["一级品类"], ["外套类"])
 
     def test_lily_tagging_json_parser_wraps_non_object_json(self) -> None:
         main = importlib.import_module("app.main")
@@ -2684,6 +2685,261 @@ class BackendSmokeTests(unittest.TestCase):
             self.assertEqual(image["status"], "QUEUED")
             self.assertIsNone(image["active_attempt_id"])
             self.assertIsNone(image["locked_until"])
+
+    def test_image_asset_generation_persists_provider_request_id_before_refresh_failure(self) -> None:
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        image_provider = importlib.import_module("app.image_provider")
+        main = importlib.import_module("app.main")
+
+        class FakeSettings:
+            image_provider = "toapis"
+            generation_image_timeout_seconds = 1
+            gpt_image2_output_format = "png"
+
+            def is_image_provider_configured(self) -> bool:
+                return True
+
+        class FailingRefreshProvider:
+            async def submit(self, task_package: dict[str, object], output_key: str) -> dict[str, object]:
+                del task_package
+                return {
+                    "provider": "toapis",
+                    "submissionMode": "queued",
+                    "status": "SUBMITTED",
+                    "providerRequestId": "provider-new",
+                    "providerUrls": {"statusUrl": "https://example.test/status/provider-new"},
+                    "outputPath": output_key,
+                    "providerStatusResponse": {"id": "provider-new", "status": "queued"},
+                }
+
+            async def refresh(self, image_row: dict[str, object]) -> dict[str, object]:
+                del image_row
+                raise RuntimeError("poll boom")
+
+        async def no_sleep(_seconds: float) -> None:
+            return None
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            with db_module.get_db() as db:
+                attempt_id = db.execute(
+                    """
+                    INSERT INTO generation_attempts
+                      (owner_type, owner_id, provider, status, started_at, created_at, updated_at)
+                    VALUES ('generation_preview', 1, 'image-2', 'RUNNING', ?, ?, ?)
+                    """,
+                    (timestamp, timestamp, timestamp),
+                ).lastrowid
+
+            with (
+                patch.object(main, "settings", FakeSettings()),
+                patch.object(main, "get_image_provider", return_value=FailingRefreshProvider()),
+                patch.object(main.asyncio, "sleep", new=no_sleep),
+            ):
+                with self.assertRaises(image_provider.ImageProviderError):
+                    asyncio.run(main.generate_image_asset({"prompt": "render", "imageInputs": []}, "generation-tasks/1/preview.png", attempt_id=attempt_id))
+
+            with db_module.get_db() as db:
+                attempt = db.execute(
+                    "SELECT provider_request_id, response_snapshot_json FROM generation_attempts WHERE id = ?",
+                    (attempt_id,),
+                ).fetchone()
+
+        self.assertEqual(attempt["provider_request_id"], "provider-new")
+        self.assertEqual(db_module.loads(attempt["response_snapshot_json"], {})["providerRequestId"], "provider-new")
+
+    def test_image_asset_generation_resumes_existing_provider_request_without_submit(self) -> None:
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        class FakeSettings:
+            image_provider = "toapis"
+            generation_image_timeout_seconds = 1
+            gpt_image2_output_format = "png"
+
+            def is_image_provider_configured(self) -> bool:
+                return True
+
+        class ResumeProvider:
+            def __init__(self) -> None:
+                self.submit_calls = 0
+                self.refresh_rows: list[dict[str, object]] = []
+
+            async def submit(self, task_package: dict[str, object], output_key: str) -> dict[str, object]:
+                del task_package, output_key
+                self.submit_calls += 1
+                raise AssertionError("resumed generation must not submit a new provider task")
+
+            async def refresh(self, image_row: dict[str, object]) -> dict[str, object]:
+                self.refresh_rows.append(dict(image_row))
+                return {
+                    "status": "SUCCEEDED",
+                    "providerStatus": "succeeded",
+                    "providerRequestId": image_row["provider_request_id"],
+                    "providerResponse": {"status": "succeeded"},
+                    "providerStatusResponse": {"status": "succeeded"},
+                    "outputPath": image_row["output_path"],
+                    "thumbPath": "generation-tasks/1/thumb.png",
+                    "previewPath": "generation-tasks/1/preview-small.png",
+                }
+
+        async def no_sleep(_seconds: float) -> None:
+            return None
+
+        provider = ResumeProvider()
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            with db_module.get_db() as db:
+                attempt_id = db.execute(
+                    """
+                    INSERT INTO generation_attempts
+                      (owner_type, owner_id, provider, provider_request_id, status, started_at,
+                       response_snapshot_json, created_at, updated_at)
+                    VALUES ('generation_preview', 1, 'image-2', 'provider-existing', 'RUNNING', ?, ?, ?, ?)
+                    """,
+                    (
+                        timestamp,
+                        db_module.dumps(
+                            {
+                                "provider": "toapis",
+                                "submissionMode": "queued",
+                                "status": "SUBMITTED",
+                                "providerRequestId": "provider-existing",
+                                "providerUrls": {"statusUrl": "https://example.test/status/provider-existing"},
+                                "outputPath": "generation-tasks/1/preview.png",
+                            }
+                        ),
+                        timestamp,
+                        timestamp,
+                    ),
+                ).lastrowid
+
+            with (
+                patch.object(main, "settings", FakeSettings()),
+                patch.object(main, "get_image_provider", return_value=provider),
+                patch.object(main.asyncio, "sleep", new=no_sleep),
+                patch.object(main, "get_bytes", return_value=b"PNG"),
+                patch.object(main, "insert_generated_media_asset", return_value=123),
+            ):
+                asset_id, provider_response = asyncio.run(
+                    main.generate_image_asset({"prompt": "render", "imageInputs": []}, "generation-tasks/1/preview.png", attempt_id=attempt_id)
+                )
+
+            with db_module.get_db() as db:
+                attempt = db.execute(
+                    "SELECT provider_request_id, response_snapshot_json FROM generation_attempts WHERE id = ?",
+                    (attempt_id,),
+                ).fetchone()
+
+        self.assertEqual(asset_id, 123)
+        self.assertEqual(provider.submit_calls, 0)
+        self.assertEqual(provider.refresh_rows[0]["provider_request_id"], "provider-existing")
+        self.assertEqual(provider_response["status"], "SUCCEEDED")
+        self.assertEqual(attempt["provider_request_id"], "provider-existing")
+        self.assertEqual(db_module.loads(attempt["response_snapshot_json"], {})["status"], "SUCCEEDED")
+
+    def test_new_generation_recovery_resumes_preview_attempt_with_provider_request_id(self) -> None:
+        config = importlib.import_module("app.config")
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            os.environ["APP_DATABASE_PATH"] = db_file.name
+            config.get_settings.cache_clear()
+            db_module.init_db()
+            timestamp = db_module.now_iso()
+            stale_lock = "2000-01-01T00:00:00Z"
+            with db_module.get_db() as db:
+                task_id = db.execute(
+                    "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('preview recovery', 'PREVIEW_RUNNING', ?, ?)",
+                    (timestamp, timestamp),
+                ).lastrowid
+                input_id = db.execute(
+                    """
+                    INSERT INTO generation_task_input_versions (task_id, version_number, name_snapshot, image_snapshot_json, created_at)
+                    VALUES (?, 1, 'preview recovery', '[]', ?)
+                    """,
+                    (task_id, timestamp),
+                ).lastrowid
+                styling_id = db.execute(
+                    """
+                    INSERT INTO generation_stylings
+                      (task_id, input_version_id, source_material_ids_json, selected_material_ids_json,
+                       selected_material_snapshot_json, status, created_at, updated_at)
+                    VALUES (?, ?, '[]', '[]', '[]', 'SUCCEEDED', ?, ?)
+                    """,
+                    (task_id, input_id, timestamp, timestamp),
+                ).lastrowid
+                shoot_script_id = db.execute(
+                    """
+                    INSERT INTO generation_shoot_scripts
+                      (task_id, input_version_id, styling_id, status, script_json, created_at, updated_at)
+                    VALUES (?, ?, ?, 'SUCCEEDED', '{}', ?, ?)
+                    """,
+                    (task_id, input_id, styling_id, timestamp, timestamp),
+                ).lastrowid
+                preview_id = db.execute(
+                    """
+                    INSERT INTO generation_previews
+                      (task_id, styling_id, shoot_script_id, input_version_id, status, locked_by, locked_until, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'RUNNING', 'old-worker', ?, ?, ?)
+                    """,
+                    (task_id, styling_id, shoot_script_id, input_id, stale_lock, timestamp, timestamp),
+                ).lastrowid
+                attempt_id = db.execute(
+                    """
+                    INSERT INTO generation_attempts
+                      (owner_type, owner_id, provider, provider_request_id, status, started_at,
+                       response_snapshot_json, created_at, updated_at)
+                    VALUES ('generation_preview', ?, 'image-2', 'provider-existing', 'RUNNING', ?, ?, ?, ?)
+                    """,
+                    (
+                        preview_id,
+                        timestamp,
+                        db_module.dumps({"providerRequestId": "provider-existing", "status": "SUBMITTED"}),
+                        timestamp,
+                        timestamp,
+                    ),
+                ).lastrowid
+                db.execute(
+                    "UPDATE generation_previews SET active_attempt_id = ? WHERE id = ?",
+                    (attempt_id, preview_id),
+                )
+
+            def close_background_coroutine(coro: object, job_key: str | None = None) -> None:
+                del job_key
+                coro.close()
+
+            with patch.object(main, "schedule_background_generation", side_effect=close_background_coroutine) as schedule:
+                main.refresh_pending_new_generation_jobs()
+
+            with db_module.get_db() as db:
+                attempts = db.execute(
+                    "SELECT id, status, error_code FROM generation_attempts WHERE owner_type = 'generation_preview' AND owner_id = ?",
+                    (preview_id,),
+                ).fetchall()
+                preview = db.execute(
+                    "SELECT status, active_attempt_id, locked_until, run_attempts FROM generation_previews WHERE id = ?",
+                    (preview_id,),
+                ).fetchone()
+
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["id"], attempt_id)
+        self.assertEqual(attempts[0]["status"], "RUNNING")
+        self.assertIsNone(attempts[0]["error_code"])
+        self.assertEqual(preview["status"], "RUNNING")
+        self.assertEqual(preview["active_attempt_id"], attempt_id)
+        self.assertNotEqual(preview["locked_until"], stale_lock)
+        self.assertEqual(preview["run_attempts"], 1)
+        self.assertEqual(schedule.call_args.kwargs["job_key"], main.preview_job_key(preview_id))
 
     def test_new_generation_recovery_reconciles_running_result_sets_with_terminal_children(self) -> None:
         config = importlib.import_module("app.config")

@@ -728,6 +728,7 @@ function StylingPlanSummary({ task }: { task: GenerationTask }) {
           })}
         </div>
       )}
+      <JsonOutputPanel title="模型原始输出" data={modelRawOutput(plan)} defaultOpen />
     </div>
   )
 }
@@ -940,6 +941,7 @@ function ShootScriptSummary({ task }: { task: GenerationTask }) {
           </div>
         ))}
       </div>
+      <JsonOutputPanel title="模型原始输出" data={modelRawOutput(script)} defaultOpen />
     </div>
   )
 }
@@ -3764,6 +3766,20 @@ function TagObjectPanel({ title, data, defaultOpen = false }: { title: string; d
   )
 }
 
+function modelRawOutput(data: Record<string, unknown>) {
+  const raw = data.model_raw_output
+  return raw && typeof raw === 'object' ? raw as Record<string, unknown> : data
+}
+
+function JsonOutputPanel({ title, data, defaultOpen = false }: { title: string; data: unknown; defaultOpen?: boolean }) {
+  return (
+    <details className="model-output-panel" open={defaultOpen}>
+      <summary>{title}</summary>
+      <pre>{formatDebugJson(data)}</pre>
+    </details>
+  )
+}
+
 function AICallLogDialog({ dialog, onClose }: {
   dialog: { title: string; ownerTypes: string[]; records: AICallRecord[]; loading: boolean; error?: string }
   onClose: () => void
@@ -3775,7 +3791,7 @@ function AICallLogDialog({ dialog, onClose }: {
         <div className="confirm-head">
           <div>
             <h2>{dialog.title}</h2>
-            <p>仅管理员可见，用于排查本阶段 AI/provider 调用的输入、输出和错误。</p>
+            <p>仅显示实际传给大模型的输入和实际输出。</p>
           </div>
           <button className="ghost-icon" type="button" onClick={onClose} title="关闭"><X size={18} /></button>
         </div>
@@ -3790,25 +3806,18 @@ function AICallLogDialog({ dialog, onClose }: {
                 <summary>
                   <div>
                     <strong>{operationLabel(record, index)}</strong>
-                    <span>{record.provider} · {statusText(record.status)}{record.providerRequestId ? ` · ${record.providerRequestId}` : ''}</span>
+                    <span>{statusText(record.status)}</span>
                   </div>
-                  <time>{record.startedAt ? dateText(record.startedAt) : dateText(record.createdAt)}</time>
                 </summary>
-                <div className="ai-log-meta">
-                  <Meta label="开始" value={dateText(record.startedAt)} />
-                  <Meta label="完成" value={dateText(record.completedAt)} />
-                  <Meta label="失败" value={dateText(record.failedAt)} />
-                  <Meta label="输出资产" value={record.outputAssetId ? String(record.outputAssetId) : '无'} />
-                </div>
                 {record.errorMessage && <div className="inline-error">{record.errorMessage}</div>}
                 <div className="ai-log-json-grid">
                   <div>
                     <span>输入</span>
-                    <pre>{formatDebugJson(record.requestSnapshot)}</pre>
+                    <pre>{formatDebugJson(record.modelInput)}</pre>
                   </div>
                   <div>
                     <span>输出</span>
-                    <pre>{formatDebugJson(record.responseSnapshot)}</pre>
+                    <pre>{formatDebugJson(record.modelOutput)}</pre>
                   </div>
                 </div>
               </details>
