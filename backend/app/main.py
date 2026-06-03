@@ -4515,7 +4515,7 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
             contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
     client = genai.Client(api_key=settings.gemini_api_key)
     try:
-        config = types.GenerateContentConfig(response_mime_type="application/json")
+        config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema={"type": "object"})
         response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents, config=config)
     except TypeError:
         response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents)
@@ -5308,19 +5308,55 @@ def extract_json_text(text: str) -> str:
         stripped = stripped.strip("`")
         if stripped.lower().startswith("json"):
             stripped = stripped[4:]
-    start = stripped.find("{")
-    end = stripped.rfind("}")
-    if start >= 0 and end >= start:
-        return stripped[start : end + 1]
+    extracted = extract_first_complete_json_value(stripped)
+    if extracted:
+        return extracted
     return stripped or "{}"
 
 
-def parse_lily_tagging_json(text: str) -> dict[str, Any]:
+def extract_first_complete_json_value(text: str) -> str:
+    start = next((index for index, char in enumerate(text) if char in "{["), -1)
+    if start < 0:
+        return ""
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char in "{[":
+            stack.append("}" if char == "{" else "]")
+            continue
+        if char in "}]":
+            if not stack or char != stack[-1]:
+                break
+            stack.pop()
+            if not stack:
+                return text[start : index + 1]
+    end = text.rfind("}")
+    if text[start] == "[":
+        end = text.rfind("]")
+    if end >= start:
+        return text[start : end + 1]
+    return text[start:]
+
+
+def parse_gemini_json_object(text: str) -> dict[str, Any]:
     json_text = extract_json_text(text)
     try:
         parsed = loads(json_text, {})
     except json.JSONDecodeError as strict_error:
-        relaxed_json_text = repair_jsonish_tagging_text(json_text)
+        relaxed_json_text = repair_jsonish_model_text(json_text)
         if relaxed_json_text != json_text:
             try:
                 parsed = loads(relaxed_json_text, {})
@@ -5331,15 +5367,19 @@ def parse_lily_tagging_json(text: str) -> dict[str, Any]:
                     return parsed
         decoder = json.JSONDecoder()
         try:
-            parsed, end_index = decoder.raw_decode(json_text)
+            parsed, end_index = decoder.raw_decode(relaxed_json_text if relaxed_json_text != json_text else json_text)
         except json.JSONDecodeError:
             raise strict_error from None
-        trailing = json_text[end_index:].strip()
+        trailing = (relaxed_json_text if relaxed_json_text != json_text else json_text)[end_index:].strip()
         if trailing and not is_recoverable_json_trailing_noise(trailing):
             raise strict_error from None
     if not isinstance(parsed, dict):
         return {"raw_result": parsed}
     return parsed
+
+
+def parse_lily_tagging_json(text: str) -> dict[str, Any]:
+    return parse_gemini_json_object(text)
 
 
 def remove_json_trailing_commas(value: str) -> str:
@@ -5351,7 +5391,7 @@ def remove_json_trailing_commas(value: str) -> str:
         previous = next_value
 
 
-def repair_jsonish_tagging_text(value: str) -> str:
+def repair_jsonish_model_text(value: str) -> str:
     return remove_dangling_json_object_tail(
         insert_missing_json_property_commas(remove_json_trailing_commas(value))
     )
@@ -5665,9 +5705,10 @@ async def select_styling_with_gemini(input_row: Any, candidate_snapshot: dict[st
         config = types.GenerateContentConfig(
             system_instruction=str(request_snapshot.get("systemInstruction") or AI_STYLIST_SYSTEM_INSTRUCTION),
             response_mime_type="application/json",
+            response_json_schema={"type": "object"},
         )
         response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents, config=config)
-        raw = loads(extract_json_text(getattr(response, "text", "") or "{}"), {})
+        raw = parse_gemini_json_object(getattr(response, "text", "") or "{}")
     except Exception as exc:
         raise RuntimeError(f"Gemini AI Stylist 调用失败：{exc}") from exc
     styling_plan = normalize_styling_plan(raw, candidate_snapshot)
@@ -6695,9 +6736,10 @@ async def generate_shoot_script_with_gemini(request_snapshot: dict[str, Any]) ->
         config = types.GenerateContentConfig(
             system_instruction=str(request_snapshot.get("systemInstruction") or AI_DIRECTOR_SYSTEM_INSTRUCTION),
             response_mime_type="application/json",
+            response_json_schema={"type": "object"},
         )
         response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents, config=config)
-        return loads(extract_json_text(getattr(response, "text", "") or "{}"), {})
+        return parse_gemini_json_object(getattr(response, "text", "") or "{}")
     except Exception as exc:
         raise RuntimeError(f"Gemini 拍摄剧本调用失败：{exc}") from exc
 
