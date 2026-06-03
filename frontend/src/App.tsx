@@ -224,8 +224,11 @@ export function App() {
     return next
   }
 
-  function clearLocalOperationsFor(ownerTypes: string[]) {
-    setLocalOperations((items) => items.filter((item) => !ownerTypes.includes(item.ownerType)))
+  function clearLocalOperationsFor(ownerTypes: string[], taskId?: number | null) {
+    setLocalOperations((items) => items.filter((item) => {
+      if (!ownerTypes.includes(item.ownerType)) return true
+      return taskId != null && item.taskId !== taskId
+    }))
   }
 
   if (!checked) return <BootScreen />
@@ -338,7 +341,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   run: <T>(label: string, action: () => Promise<T>, after?: (value: T) => void, options?: RunOptions) => Promise<T | undefined>
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
-  clearLocalOperationsFor: (ownerTypes: string[]) => void
+  clearLocalOperationsFor: (ownerTypes: string[], taskId?: number | null) => void
 }) {
   const [step, setStep] = useState<StudioStep>(0)
   const [taskItems, setTaskItems] = useState<GenerationTask[]>(records.slice(0, 10))
@@ -351,6 +354,10 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
   const isAdmin = role === 'admin'
+  function applyTaskUpdate(nextTask: GenerationTask) {
+    setTask(nextTask)
+    setTaskItems((current) => upsertRecentTaskItem(current, nextTask))
+  }
   function openAICallLogs(title: string, ownerTypes: string[]) {
     if (!task || !isAdmin) return
     setAiLogDialog({ title, ownerTypes, records: [], loading: true })
@@ -366,15 +373,15 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     if (!task || !isTaskRunning(task)) return
     if (!window.confirm('确定取消本次生成吗？已提交给生成服务的图片可能仍会完成并产生费用；系统会停止后续生成，并保留已完成结果。')) return
     void run('取消生成中...', () => api.cancelTask(task.id), (r: { item: GenerationTask }) => {
-      clearLocalOperationsFor(['generation_styling', 'generation_shoot_script', 'generation_preview', 'generation_result_image'])
-      setTask(r.item)
+      clearLocalOperationsFor(['generation_styling', 'generation_shoot_script', 'generation_preview', 'generation_result_image'], task.id)
+      applyTaskUpdate(r.item)
     }, { refresh: 'background' })
   }
   function startOneClickFinal() {
     if (!task || !canStartOneClickFinal(task)) return
     if (!window.confirm('将自动完成后续步骤，并复用已有选搭、拍摄剧本和分镜预览。生成过程可能产生多次 AI 调用。')) return
     void run('启动一键成片中...', () => api.autoRunFinal(task.id), (r: { item: GenerationTask }) => {
-      setTask(r.item)
+      applyTaskUpdate(r.item)
     }, { refresh: 'background' })
   }
   useEffect(() => setStep(currentStep), [task?.id, task?.status])
@@ -394,10 +401,14 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   useEffect(() => {
     if (!task || (!['STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status) && !task.autoRunTarget)) return
     const timer = window.setInterval(() => {
-      void api.getTask(task.id, isAdmin).then((result) => setTask(result.item)).catch(() => undefined)
+      void api.getTask(task.id, isAdmin).then((result) => applyTaskUpdate(result.item)).catch(() => undefined)
     }, 1500)
     return () => window.clearInterval(timer)
   }, [task?.id, task?.status, task?.autoRunTarget, setTask])
+  useEffect(() => {
+    if (!task || isTaskLockedForGeneration(task)) return
+    clearLocalOperationsFor(['generation_styling', 'generation_shoot_script', 'generation_preview', 'generation_result_image'], task.id)
+  }, [task?.id, task?.status, task?.autoRunTarget, task?.resultSet?.status])
   return (
     <section className="page">
       <PageTitle
@@ -416,11 +427,11 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
         <div className="panel studio-main">
           {task && <AutoRunProgress task={task} />}
           <StepRail active={visibleStep} max={currentStep} onSelect={setStep} />
-          {visibleStep === 0 && <UploadHeroStep task={task} setTask={setTask} run={run} heroProductInfo={heroProductInfo} />}
-          {visibleStep === 1 && <StylingStep task={task} setTask={setTask} run={run} userInstruction={aiStylingInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
-          {visibleStep === 2 && <ShootScriptStep task={task} setTask={setTask} run={run} userInstruction={shootScriptInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
-          {visibleStep === 3 && <PreviewStep task={task} setTask={setTask} run={run} userInstruction={storyboardInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
-          {visibleStep === 4 && <FinalStep task={task} setTask={setTask} run={run} userInstruction={finalImageInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+          {visibleStep === 0 && <UploadHeroStep task={task} setTask={applyTaskUpdate} run={run} heroProductInfo={heroProductInfo} />}
+          {visibleStep === 1 && <StylingStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={aiStylingInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+          {visibleStep === 2 && <ShootScriptStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={shootScriptInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+          {visibleStep === 3 && <PreviewStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={storyboardInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+          {visibleStep === 4 && <FinalStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={finalImageInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
         </div>
         <aside className="panel task-rail">
           <h3>任务摘要</h3>
@@ -437,7 +448,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
                 value={stageInputValue(visibleStep, { heroProductInfo, aiStylingInstruction, shootScriptInstruction, storyboardInstruction, finalImageInstruction })}
                 savedValue={savedStageInputValue(visibleStep, task)}
                 onChange={(value) => updateStageInput(visibleStep, value, { setHeroProductInfo, setAiStylingInstruction, setShootScriptInstruction, setStoryboardInstruction, setFinalImageInstruction })}
-                onSave={() => void run('保存用户输入中...', () => api.updateTask(task.id, stageInputSavePayload(visibleStep, stageInputValue(visibleStep, { heroProductInfo, aiStylingInstruction, shootScriptInstruction, storyboardInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}
+                onSave={() => void run('保存用户输入中...', () => api.updateTask(task.id, stageInputSavePayload(visibleStep, stageInputValue(visibleStep, { heroProductInfo, aiStylingInstruction, shootScriptInstruction, storyboardInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => applyTaskUpdate(r.item), { refresh: 'background' })}
                 disabled={isTaskRunning(task) || !!task.autoRunTarget}
               />
               {isTaskRunning(task) && (
@@ -464,9 +475,9 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
             {taskItems.map((item) => (
               <div key={item.id} className={`mini-row view-only ${task?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
                 <button onClick={() => {
-                  setTask(item)
+                  applyTaskUpdate(item)
                   window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
-                  void api.getRecord(item.id, isAdmin).then((r) => setTask(r.item)).catch(() => undefined)
+                  void api.getRecord(item.id, isAdmin).then((r) => applyTaskUpdate(r.item)).catch(() => undefined)
                 }}>
                   <span>{item.name}</span><em>{item.archivedAt ? '已归档' : statusText(item.status)}</em>
                 </button>
@@ -476,8 +487,8 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
                     onClick={() => {
                       if (!window.confirm('确定取消本次生成吗？已提交给生成服务的图片可能仍会完成并产生费用；系统会停止后续生成，并保留已完成结果。')) return
                       void run('取消生成中...', () => api.cancelTask(item.id), (r: { item: GenerationTask }) => {
-                        clearLocalOperationsFor(['generation_styling', 'generation_shoot_script', 'generation_preview', 'generation_result_image'])
-                        if (task?.id === item.id) setTask(r.item)
+                        clearLocalOperationsFor(['generation_styling', 'generation_shoot_script', 'generation_preview', 'generation_result_image'], item.id)
+                        if (task?.id === item.id) applyTaskUpdate(r.item)
                         setTaskItems((current) => current.map((entry) => entry.id === item.id ? r.item : entry))
                       }, { refresh: 'background' })
                     }}
@@ -540,6 +551,12 @@ function AutoRunProgress({ task }: { task: GenerationTask }) {
       </div>
     </div>
   )
+}
+
+function upsertRecentTaskItem(items: GenerationTask[], task: GenerationTask) {
+  const next = items.map((item) => item.id === task.id ? { ...item, ...task } : item)
+  if (next.some((item) => item.id === task.id)) return next
+  return [task, ...next].slice(0, 10)
 }
 
 function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any; heroProductInfo: string }) {
@@ -810,7 +827,7 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
   userInstruction: string
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
-  clearLocalOperationsFor: (ownerTypes: string[]) => void
+  clearLocalOperationsFor: (ownerTypes: string[], taskId?: number | null) => void
   isAdmin: boolean
   onOpenAICallLogs: (title: string, ownerTypes: string[]) => void
 }) {
@@ -826,7 +843,7 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
         <StylingPlanSummary task={task} isAdmin={isAdmin} />
       ) : <EmptyState title="等待智能选搭" text="点击按钮后会冻结当前主推款输入版本。" />}
       <button className="primary" disabled={!canSelect} onClick={() => task && void run(hasStyling ? '重新选搭中...' : '智能选搭中...', () => {
-        startLocalOperation({ ownerType: 'generation_styling', ownerId: task.id, provider: 'gemini' })
+        startLocalOperation({ taskId: task.id, ownerType: 'generation_styling', ownerId: task.id, provider: 'gemini' })
         const previousTask = task
         setTask({
           ...task,
@@ -846,7 +863,7 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
           throw error
         })
       }, (r: { item: GenerationTask }) => {
-        clearLocalOperationsFor(['generation_styling'])
+        clearLocalOperationsFor(['generation_styling'], task.id)
         setTask(r.item)
       }, { refresh: false })}>
         <WandSparkles size={16} /> {hasStyling ? '重新选搭' : 'AI 智能选搭'}
@@ -1028,7 +1045,7 @@ function ShootScriptStep({ task, setTask, run, userInstruction, localOperations,
   userInstruction: string
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
-  clearLocalOperationsFor: (ownerTypes: string[]) => void
+  clearLocalOperationsFor: (ownerTypes: string[], taskId?: number | null) => void
   isAdmin: boolean
   onOpenAICallLogs: (title: string, ownerTypes: string[]) => void
 }) {
@@ -1043,7 +1060,7 @@ function ShootScriptStep({ task, setTask, run, userInstruction, localOperations,
       <AIOperationList operations={operations} />
       {task?.shootScript ? <ShootScriptSummary task={task} isAdmin={isAdmin} /> : <EmptyState title="尚未生成拍摄剧本" text="点击生成后，系统会把选搭方案转成拍摄前可执行的分镜剧本。" />}
       <button className="primary" disabled={!canGenerate} onClick={() => task && void run(hasScript ? '重新生成拍摄剧本中...' : '生成拍摄剧本中...', () => {
-        startLocalOperation({ ownerType: 'generation_shoot_script', ownerId: task.id, provider: 'gemini' })
+        startLocalOperation({ taskId: task.id, ownerType: 'generation_shoot_script', ownerId: task.id, provider: 'gemini' })
         setTask({
           ...task,
           status: 'SCRIPT_RUNNING',
@@ -1057,7 +1074,7 @@ function ShootScriptStep({ task, setTask, run, userInstruction, localOperations,
         })
         return api.createShootScript(task.id, userInstruction)
       }, (r: { item: GenerationTask }) => {
-        clearLocalOperationsFor(['generation_shoot_script'])
+        clearLocalOperationsFor(['generation_shoot_script'], task.id)
         setTask(r.item)
       }, { refresh: false })}>
         <FileText size={16} /> {hasScript ? '重新生成拍摄剧本' : '生成拍摄剧本'}
@@ -1153,7 +1170,7 @@ function PreviewStep({ task, setTask, run, userInstruction, localOperations, sta
   userInstruction: string
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
-  clearLocalOperationsFor: (ownerTypes: string[]) => void
+  clearLocalOperationsFor: (ownerTypes: string[], taskId?: number | null) => void
   isAdmin: boolean
   onOpenAICallLogs: (title: string, ownerTypes: string[]) => void
 }) {
@@ -1174,11 +1191,11 @@ function PreviewStep({ task, setTask, run, userInstruction, localOperations, sta
         </button>
       ) : <EmptyState title="尚未生成分镜预览" text="点击生成预览后，系统会根据拍摄剧本输出一张 3x2 分镜预览图。" />}
       <button className="primary" disabled={!canPreview} onClick={() => task && void run(hasPreview ? '重新生成分镜预览中...' : '生成分镜预览中...', () => {
-        startLocalOperation({ ownerType: 'generation_preview', ownerId: task.id, provider: 'image-2' })
+        startLocalOperation({ taskId: task.id, ownerType: 'generation_preview', ownerId: task.id, provider: 'image-2' })
         setTask({ ...task, status: 'PREVIEW_RUNNING', resultSet: null, activeResultSetId: null })
         return api.previewTask(task.id, userInstruction)
       }, (r: { item: GenerationTask }) => {
-        clearLocalOperationsFor(['generation_preview'])
+        clearLocalOperationsFor(['generation_preview'], task.id)
         setTask(r.item)
       }, { refresh: false })}>
         <GalleryVerticalEnd size={16} /> {hasPreview ? '重新生成分镜预览' : '生成预览'}
@@ -1195,7 +1212,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   userInstruction: string
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
-  clearLocalOperationsFor: (ownerTypes: string[]) => void
+  clearLocalOperationsFor: (ownerTypes: string[], taskId?: number | null) => void
   isAdmin: boolean
   onOpenAICallLogs: (title: string, ownerTypes: string[]) => void
 }) {
@@ -1224,12 +1241,12 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
       </div>
       <button className="primary" disabled={!canGenerate} onClick={() => task && void run(hasFinalImages ? '重新生成最终成片中...' : '生成最终成片中...', () => {
         for (let index = 1; index <= 5; index += 1) {
-          startLocalOperation({ ownerType: 'generation_result_image', ownerId: index, provider: 'image-2' })
+          startLocalOperation({ taskId: task.id, ownerType: 'generation_result_image', ownerId: index, provider: 'image-2' })
         }
         setTask({ ...task, status: 'FINAL_RUNNING' })
         return api.generateFinal(task.id, userInstruction)
       }, (r: { item: GenerationTask }) => {
-        clearLocalOperationsFor(['generation_result_image'])
+        clearLocalOperationsFor(['generation_result_image'], task.id)
         setTask(r.item)
       }, { refresh: false })}>
         <Sparkles size={16} /> {hasFinalImages ? '重新生成成片' : '生成成片'}
@@ -4155,7 +4172,7 @@ function operationFallbacks(task: GenerationTask, localOperations: AIOperation[]
 
 function finalImageOperations(task: GenerationTask, localOperations: AIOperation[]) {
   const imageAttempts = (task.resultSet?.images ?? []).map((image) => image.activeAttempt).filter(Boolean) as AIOperation[]
-  const local = localOperations.filter((operation) => operation.ownerType === 'generation_result_image')
+  const local = localOperations.filter((operation) => operation.ownerType === 'generation_result_image' && operationBelongsToTask(operation, task))
   if (imageAttempts.length) return mergeOperations([...imageAttempts, ...local])
   if (local.length) return local
   if (task.status === 'FINAL_RUNNING') {
@@ -4185,8 +4202,12 @@ function latestRunningTagAttempt(item: StylingGarment): AIOperation | null {
 
 function visibleTaskOperations(task: GenerationTask, localOperations: AIOperation[]) {
   const activeRemote = (task.aiOperations ?? []).filter((operation) => isAttemptRunning(operation))
-  const activeLocal = localOperations.filter(isAttemptRunning)
+  const activeLocal = localOperations.filter((operation) => isAttemptRunning(operation) && operationBelongsToTask(operation, task))
   return mergeOperations([...activeRemote, ...activeLocal])
+}
+
+function operationBelongsToTask(operation: AIOperation, task: GenerationTask) {
+  return operation.taskId === task.id
 }
 
 function mergeOperations(operations: AIOperation[]) {

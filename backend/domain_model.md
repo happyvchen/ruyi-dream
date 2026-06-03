@@ -83,6 +83,8 @@ AI Director 基于当前 StylingPlan 生成 ShootScript。ShootScript 负责把�
 
 `一键成片` 在最终阶段复用当前 active result set。若当前结果为 `FINAL_PARTIAL`，自动续跑只把失败或缺失的单图重新排队，不覆盖已经成功的最终图；手动 `生成成片 / 重新生成成片` 仍创建新的结果集。
 
+创建新的最终图结果集、重新选搭、重新生成拍摄剧本或重新生成分镜预览时，旧 `GenerationResultSet` 会进入 `SUPERSEDED`。旧结果集中仍处于 `QUEUED` / `RUNNING` 的单图和 attempt 必须同步收口为 `CANCELLED`，避免被当前任务摘要误认为仍在生成。
+
 ## GenerationAttempt
 
 所有 AI/provider 调用都以 attempt 记录：
@@ -94,6 +96,8 @@ AI Director 基于当前 StylingPlan 生成 ShootScript。ShootScript 负责把�
 - `generation_result_image`
 
 attempt 保存 provider、状态、请求快照、响应快照、错误、provider request id 和输出资产。技术详情默认不返回给普通前台，只在 debug 场景查看。
+
+普通任务详情中的 `aiOperations` 是当前 active 链路的轻量运行摘要，不是完整历史流水。它只包含当前 active StylingPlan、ShootScript、分镜预览和 active result set 的 attempts；旧版本、旧结果集和 superseded artifacts 的 attempts 只在技术详情或审计读取中展示。
 
 ## Prompt DTO
 

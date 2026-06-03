@@ -57,6 +57,8 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。旧 `/a
 - 已有当前有效 `StylingPlan`、`ShootScript` 或分镜预览时复用。
 - `FINAL_PARTIAL` 断点续跑只补失败或缺失的最终图。
 - 任一运行中状态下，所有生成入口都应返回 409 或在前端禁用；只允许取消生成。
+- 任务详情中的 `aiOperations` 只返回当前 active 链路的运行摘要。被新结果替代的旧结果集、旧分镜、旧剧本和旧选搭 attempt 不进入普通任务摘要；完整历史仅用于技术详情和审计。
+- 新最终图结果集替代旧结果集时，旧结果集中仍处于 `QUEUED` / `RUNNING` 的单图和 attempt 必须收口为 `CANCELLED`。
 
 ## 配置
 

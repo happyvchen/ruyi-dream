@@ -75,6 +75,7 @@ export type StylingGarment = {
 
 export type AIOperation = {
   id: number
+  taskId?: number | null
   ownerType: string
   ownerId: number
   provider: string

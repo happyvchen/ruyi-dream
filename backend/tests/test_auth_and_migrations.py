@@ -444,6 +444,204 @@ class BackendCurrentFlowTests(unittest.TestCase):
         ])
         self.assertEqual(task["status"], "FINAL_RUNNING")
 
+    def test_task_ai_operations_ignore_superseded_final_attempts(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        db_module.init_db()
+        timestamp = "2026-06-03T04:00:00Z"
+        with db_module.get_db() as db:
+            db.execute(
+                """
+                INSERT INTO generation_tasks
+                  (id, name, status, active_result_set_id, created_at, updated_at)
+                VALUES (1, 'T', 'COMPLETED', 20, ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_task_input_versions (id, task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, created_at) VALUES (2, 1, 1, 'T', '[]', '{}', ?)",
+                (timestamp,),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_stylings
+                  (id, task_id, input_version_id, source_material_ids_json, selected_material_ids_json, selected_material_snapshot_json,
+                   reason_summary, warnings_json, status, created_at, updated_at)
+                VALUES (3, 1, 2, '[]', '[]', '[]', '', '[]', 'SUCCEEDED', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_shoot_scripts (id, task_id, input_version_id, styling_id, status, script_json, created_at, updated_at) VALUES (4, 1, 2, 3, 'SUCCEEDED', '{}', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_previews (id, task_id, styling_id, shoot_script_id, input_version_id, status, created_at, updated_at) VALUES (5, 1, 3, 4, 2, 'SUCCEEDED', ?, ?)",
+                (timestamp, timestamp),
+            )
+            for index in range(1, 6):
+                db.execute(
+                    "INSERT INTO generation_shot_plans (id, task_id, styling_id, shoot_script_id, sort_order, plan_json, created_at, updated_at) VALUES (?, 1, 3, 4, ?, '{}', ?, ?)",
+                    (index, index, timestamp, timestamp),
+                )
+            db.execute(
+                """
+                INSERT INTO generation_result_sets
+                  (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
+                VALUES (10, 1, 2, 3, 4, 5, 'SUPERSEDED', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_result_sets
+                  (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
+                VALUES (20, 1, 2, 3, 4, 5, 'SUCCEEDED', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            for index in range(1, 6):
+                db.execute(
+                    """
+                    INSERT INTO generation_result_images_new
+                      (id, result_set_id, shot_plan_id, sort_order, status, active_attempt_id, created_at, updated_at)
+                    VALUES (?, 10, ?, ?, 'RUNNING', ?, ?, ?)
+                    """,
+                    (index, index, index, index, timestamp, timestamp),
+                )
+                db.execute(
+                    """
+                    INSERT INTO generation_attempts
+                      (id, owner_type, owner_id, provider, status, started_at, created_at, updated_at)
+                    VALUES (?, 'generation_result_image', ?, 'image-2', 'RUNNING', ?, ?, ?)
+                    """,
+                    (index, index, timestamp, timestamp, timestamp),
+                )
+                current_id = index + 10
+                db.execute(
+                    """
+                    INSERT INTO generation_result_images_new
+                      (id, result_set_id, shot_plan_id, sort_order, status, active_attempt_id, created_at, updated_at)
+                    VALUES (?, 20, ?, ?, 'SUCCEEDED', ?, ?, ?)
+                    """,
+                    (current_id, index, index, current_id, timestamp, timestamp),
+                )
+                db.execute(
+                    """
+                    INSERT INTO generation_attempts
+                      (id, owner_type, owner_id, provider, status, started_at, completed_at, created_at, updated_at)
+                    VALUES (?, 'generation_result_image', ?, 'image-2', 'SUCCEEDED', ?, ?, ?, ?)
+                    """,
+                    (current_id, current_id, timestamp, timestamp, timestamp, timestamp),
+                )
+
+        task = main.get_generation_task_by_id(1)
+
+        self.assertEqual(task["status"], "COMPLETED")
+        self.assertEqual(task["resultSet"]["status"], "SUCCEEDED")
+        self.assertEqual({item["status"] for item in task["aiOperations"]}, {"SUCCEEDED"})
+        self.assertEqual({item["ownerId"] for item in task["aiOperations"]}, {11, 12, 13, 14, 15})
+
+    def test_superseding_result_set_cancels_running_images_and_attempts(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        db_module.init_db()
+        timestamp = "2026-06-03T04:00:00Z"
+        with db_module.get_db() as db:
+            db.execute(
+                "INSERT INTO generation_tasks (id, name, status, active_result_set_id, created_at, updated_at) VALUES (1, 'T', 'FINAL_RUNNING', 20, ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_task_input_versions (id, task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, created_at) VALUES (2, 1, 1, 'T', '[]', '{}', ?)",
+                (timestamp,),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_stylings
+                  (id, task_id, input_version_id, source_material_ids_json, selected_material_ids_json, selected_material_snapshot_json,
+                   reason_summary, warnings_json, status, created_at, updated_at)
+                VALUES (3, 1, 2, '[]', '[]', '[]', '', '[]', 'SUCCEEDED', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_shoot_scripts (id, task_id, input_version_id, styling_id, status, script_json, created_at, updated_at) VALUES (4, 1, 2, 3, 'SUCCEEDED', '{}', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_previews (id, task_id, styling_id, shoot_script_id, input_version_id, status, created_at, updated_at) VALUES (5, 1, 3, 4, 2, 'SUCCEEDED', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_shot_plans (id, task_id, styling_id, shoot_script_id, sort_order, plan_json, created_at, updated_at) VALUES (1, 1, 3, 4, 1, '{}', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_result_sets
+                  (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
+                VALUES (10, 1, 2, 3, 4, 5, 'RUNNING', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_result_sets
+                  (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
+                VALUES (20, 1, 2, 3, 4, 5, 'RUNNING', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_result_images_new
+                  (id, result_set_id, shot_plan_id, sort_order, status, active_attempt_id, created_at, updated_at)
+                VALUES (1, 10, 1, 1, 'RUNNING', 1, ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_attempts
+                  (id, owner_type, owner_id, provider, status, started_at, created_at, updated_at)
+                VALUES (1, 'generation_result_image', 1, 'image-2', 'RUNNING', ?, ?, ?)
+                """,
+                (timestamp, timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_result_images_new
+                  (id, result_set_id, shot_plan_id, sort_order, status, active_attempt_id, created_at, updated_at)
+                VALUES (2, 20, 1, 1, 'RUNNING', 2, ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_attempts
+                  (id, owner_type, owner_id, provider, status, started_at, created_at, updated_at)
+                VALUES (2, 'generation_result_image', 2, 'image-2', 'RUNNING', ?, ?, ?)
+                """,
+                (timestamp, timestamp, timestamp),
+            )
+
+            main.supersede_generation_result_sets(db, 1, timestamp, keep_result_set_id=20)
+            old_set = db.execute("SELECT status FROM generation_result_sets WHERE id = 10").fetchone()
+            kept_set = db.execute("SELECT status FROM generation_result_sets WHERE id = 20").fetchone()
+            old_image = db.execute("SELECT status FROM generation_result_images_new WHERE id = 1").fetchone()
+            kept_image = db.execute("SELECT status FROM generation_result_images_new WHERE id = 2").fetchone()
+            old_attempt = db.execute("SELECT status, cancelled_at FROM generation_attempts WHERE id = 1").fetchone()
+            kept_attempt = db.execute("SELECT status FROM generation_attempts WHERE id = 2").fetchone()
+
+        self.assertEqual(old_set["status"], "SUPERSEDED")
+        self.assertEqual(kept_set["status"], "RUNNING")
+        self.assertEqual(old_image["status"], "CANCELLED")
+        self.assertEqual(kept_image["status"], "RUNNING")
+        self.assertEqual(old_attempt["status"], "CANCELLED")
+        self.assertEqual(old_attempt["cancelled_at"], timestamp)
+        self.assertEqual(kept_attempt["status"], "RUNNING")
+
     def test_retry_final_image_rejects_when_task_is_running(self) -> None:
         db_module = importlib.import_module("app.db")
         main = importlib.import_module("app.main")

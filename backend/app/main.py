@@ -1698,14 +1698,7 @@ def mark_generation_task_input_changed(db: Any, task_id: int, timestamp: str, re
         """,
         (timestamp, task_id),
     )
-    db.execute(
-        """
-        UPDATE generation_result_sets
-        SET status = 'SUPERSEDED', updated_at = ?
-        WHERE task_id = ? AND status IN ('RUNNING', 'SUCCEEDED', 'PARTIAL', 'FAILED')
-        """,
-        (timestamp, task_id),
-    )
+    supersede_generation_result_sets(db, task_id, timestamp)
     db.execute(
         """
         UPDATE generation_tasks
@@ -1773,6 +1766,63 @@ def cancel_running_task_attempts(db: Any, task_id: int, timestamp: str) -> None:
           )
         """,
         (timestamp, timestamp, task_id, task_id, task_id, task_id),
+    )
+
+
+def supersede_generation_result_sets(db: Any, task_id: int, timestamp: str, keep_result_set_id: int | None = None) -> None:
+    params: list[Any] = [timestamp, task_id]
+    keep_clause = ""
+    aliased_keep_clause = ""
+    if keep_result_set_id is not None:
+        keep_clause = "AND id <> ?"
+        aliased_keep_clause = "AND grs.id <> ?"
+        params.append(keep_result_set_id)
+    db.execute(
+        f"""
+        UPDATE generation_result_sets
+        SET status = 'SUPERSEDED', updated_at = ?
+        WHERE task_id = ?
+          {keep_clause}
+          AND status IN ('RUNNING', 'SUCCEEDED', 'PARTIAL', 'FAILED')
+        """,
+        params,
+    )
+    image_params: list[Any] = [timestamp, task_id]
+    if keep_result_set_id is not None:
+        image_params.append(keep_result_set_id)
+    db.execute(
+        f"""
+        UPDATE generation_result_images_new
+        SET status = 'CANCELLED', locked_by = NULL, locked_until = NULL, updated_at = ?
+        WHERE result_set_id IN (
+          SELECT id FROM generation_result_sets
+          WHERE task_id = ?
+            {keep_clause}
+            AND status = 'SUPERSEDED'
+        )
+          AND status IN ('QUEUED', 'RUNNING')
+        """,
+        image_params,
+    )
+    attempt_params: list[Any] = [timestamp, timestamp, task_id]
+    if keep_result_set_id is not None:
+        attempt_params.append(keep_result_set_id)
+    db.execute(
+        f"""
+        UPDATE generation_attempts
+        SET status = 'CANCELLED', cancelled_at = COALESCE(cancelled_at, ?), updated_at = ?
+        WHERE status IN ('RUNNING', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS')
+          AND owner_type = 'generation_result_image'
+          AND owner_id IN (
+            SELECT gri.id
+            FROM generation_result_images_new gri
+            JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+            WHERE grs.task_id = ?
+              {aliased_keep_clause}
+              AND grs.status = 'SUPERSEDED'
+          )
+        """,
+        attempt_params,
     )
 
 
@@ -2127,14 +2177,7 @@ async def run_select_generation_styling(
             """,
             (timestamp, task_id),
         )
-        db.execute(
-            """
-            UPDATE generation_result_sets
-            SET status = 'SUPERSEDED', updated_at = ?
-            WHERE task_id = ? AND status IN ('RUNNING', 'SUCCEEDED', 'PARTIAL', 'FAILED')
-            """,
-            (timestamp, task_id),
-        )
+        supersede_generation_result_sets(db, task_id, timestamp)
         db.execute(
             """
             UPDATE generation_tasks
@@ -2371,14 +2414,7 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
                 """,
                 (timestamp, task_id),
             )
-            db.execute(
-                """
-                UPDATE generation_result_sets
-                SET status = 'SUPERSEDED', updated_at = ?
-                WHERE task_id = ? AND status IN ('RUNNING', 'SUCCEEDED', 'PARTIAL', 'FAILED')
-                """,
-                (timestamp, task_id),
-            )
+            supersede_generation_result_sets(db, task_id, timestamp)
             for plan in shot_plans:
                 db.execute(
                     """
@@ -2556,14 +2592,7 @@ async def run_preview_generation(
             """,
             (timestamp, task_id, preview_id),
         )
-        db.execute(
-            """
-            UPDATE generation_result_sets
-            SET status = 'SUPERSEDED', updated_at = ?
-            WHERE task_id = ? AND status IN ('RUNNING', 'SUCCEEDED', 'PARTIAL', 'FAILED')
-            """,
-            (timestamp, task_id),
-        )
+        supersede_generation_result_sets(db, task_id, timestamp)
         db.execute(
             """
             UPDATE generation_tasks
@@ -2665,14 +2694,7 @@ async def run_generate_final_images(
             (task_id, input_version_id, styling_id, shoot_script_id, preview_id, dumps(user_instruction_context), timestamp, timestamp),
         )
         result_set_id = int(cursor.lastrowid)
-        db.execute(
-            """
-            UPDATE generation_result_sets
-            SET status = 'SUPERSEDED', updated_at = ?
-            WHERE task_id = ? AND id <> ? AND status IN ('SUCCEEDED', 'PARTIAL', 'FAILED')
-            """,
-            (timestamp, task_id, result_set_id),
-        )
+        supersede_generation_result_sets(db, task_id, timestamp, keep_result_set_id=result_set_id)
         db.execute("UPDATE generation_tasks SET active_result_set_id = ?, updated_at = ? WHERE id = ?", (result_set_id, timestamp, task_id))
         shot_rows = db.execute(
             "SELECT * FROM generation_shot_plans WHERE shoot_script_id = ? AND sort_order <= 5 ORDER BY sort_order",
@@ -8279,25 +8301,38 @@ def serialize_attempt_summary(row: Any) -> dict[str, Any]:
 
 def get_task_ai_operations(task_id: int) -> list[dict[str, Any]]:
     with get_db() as db:
+        task = db.execute("SELECT * FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
+        if not task:
+            return []
         rows = db.execute(
             """
             SELECT ga.* FROM generation_attempts ga
-            WHERE (ga.owner_type = 'generation_styling' AND ga.owner_id = ?)
-               OR (ga.owner_type = 'generation_shoot_script' AND ga.owner_id IN (
-                    SELECT id FROM generation_shoot_scripts WHERE task_id = ?
-                  ))
-               OR (ga.owner_type = 'generation_preview' AND ga.owner_id IN (
-                    SELECT id FROM generation_previews WHERE task_id = ?
-                  ))
+            WHERE (ga.owner_type = 'generation_styling'
+                    AND ga.owner_id = ?
+                    AND (
+                      (? = 'STYLING_RUNNING' AND ga.status IN ('RUNNING', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS'))
+                      OR ga.id IN (
+                        SELECT attempt_id FROM generation_stylings
+                        WHERE id = ? AND attempt_id IS NOT NULL
+                      )
+                    ))
+               OR (ga.owner_type = 'generation_shoot_script' AND ga.owner_id = ?)
+               OR (ga.owner_type = 'generation_preview' AND ga.owner_id = ?)
                OR (ga.owner_type = 'generation_result_image' AND ga.owner_id IN (
                     SELECT gri.id FROM generation_result_images_new gri
-                    JOIN generation_result_sets grs ON grs.id = gri.result_set_id
-                    WHERE grs.task_id = ?
+                    WHERE gri.result_set_id = ?
                   ))
             ORDER BY ga.created_at DESC, ga.id DESC
             LIMIT 30
             """,
-            (task_id, task_id, task_id, task_id),
+            (
+                task_id,
+                task["status"],
+                task["active_styling_id"],
+                task["active_shoot_script_id"],
+                task["active_storyboard_preview_id"] if "active_storyboard_preview_id" in task.keys() and task["active_storyboard_preview_id"] else task["active_preview_id"],
+                task["active_result_set_id"],
+            ),
         ).fetchall()
     return [serialize_attempt_summary(row) for row in rows]
 
