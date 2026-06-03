@@ -7438,6 +7438,8 @@ def get_generation_styling(styling_id: int | None, include_debug: bool = False) 
     if include_debug:
         item["candidateRetrievalSnapshot"] = loads(row["candidate_retrieval_snapshot_json"], {}) if "candidate_retrieval_snapshot_json" in row.keys() else {}
         item["libraryAdequacySnapshot"] = item["libraryAdequacy"]
+    else:
+        item = strip_debug_response_fields(item)
     return item
 
 
@@ -7485,6 +7487,8 @@ def get_generation_shoot_script(shoot_script_id: int | None, include_debug: bool
     }
     if include_debug:
         item["scriptJson"] = script
+    else:
+        item = strip_debug_response_fields(item)
     return item
 
 
