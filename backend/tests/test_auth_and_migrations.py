@@ -119,6 +119,43 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertNotIn("official_title_tags", prompt_text)
         self.assertLess(len(prompt_text), 600)
 
+    def test_candidate_retrieval_prompt_reads_current_chinese_tag_schema(self) -> None:
+        main = importlib.import_module("app.main")
+        material_cards = [
+            {
+                "id": 24,
+                "code": "125309C7948510",
+                "manual": {},
+                "tag_facts": {
+                    "ai_tags": {},
+                    "effective_tags": {
+                        "一级品类": ["连衣裙"],
+                        "色彩": ["黑色", "蓝色", "白色"],
+                        "面料材质": ["棉感", "挺括面料"],
+                        "版型": ["合体", "微宽松"],
+                        "廓形": ["A字型"],
+                        "长度": ["及膝"],
+                        "穿着能力": ["可单穿", "可作内搭"],
+                        "风格语义": "摩登通勤，克制利落，适合职场场景。",
+                        "风险点": "外搭可能遮挡袖口和裙摆拼接。",
+                    },
+                    "tag_meta": {"overall_confidence": 0.95, "needs_review": False},
+                },
+            }
+        ]
+
+        snapshot = main.build_candidate_retrieval_snapshot({"id": 7}, material_cards)
+        prompt_card = main.candidate_retrieval_for_prompt(snapshot)[0]
+
+        self.assertEqual(prompt_card["category"], "连衣裙")
+        self.assertEqual(prompt_card["colors"], ["黑色", "蓝色", "白色"])
+        self.assertEqual(prompt_card["materials"], ["棉感", "挺括面料"])
+        self.assertEqual(prompt_card["silhouette"], "A字型")
+        self.assertEqual(prompt_card["length"], "及膝")
+        self.assertEqual(prompt_card["wearing_capabilities"], ["可单穿", "可作内搭"])
+        self.assertIn("摩登通勤", prompt_card["style_summary"])
+        self.assertEqual(prompt_card["review"]["confidence"], 0.95)
+
     def test_downstream_prompt_dtos_do_not_carry_full_history(self) -> None:
         main = importlib.import_module("app.main")
         styling_plan = {

@@ -4633,15 +4633,34 @@ def compact_styling_library_card(card: dict[str, Any], include_internal: bool = 
 
     result: dict[str, Any] = {
         "code": str(card.get("code") or ""),
-        "category": first_tag_value(effective, ai_tags, ("category", "product_category", "category_l1", "category_l2")),
-        "colors": first_tag_list(effective, ai_tags, ("colors", "color", "main_colors", "palette"), 4),
-        "materials": first_tag_list(effective, ai_tags, ("materials_visual", "materials", "material", "fabric", "fabric_texture"), 4),
+        "category": first_tag_value(
+            effective,
+            ai_tags,
+            ("category", "product_category", "category_l1", "category_l2", "一级品类", "二级品类"),
+        ),
+        "colors": first_tag_list(effective, ai_tags, ("colors", "color", "main_colors", "palette", "色彩", "色调"), 4),
+        "materials": first_tag_list(
+            effective,
+            ai_tags,
+            ("materials_visual", "materials", "material", "fabric", "fabric_texture", "面料材质", "表面肌理", "面料厚度"),
+            4,
+        ),
         "fit": first_tag_value(effective, ai_tags, ("fit", "fit_type", "版型")),
-        "silhouette": first_tag_value(effective, ai_tags, ("silhouette", "profile", "shape")),
-        "length": first_tag_value(effective, ai_tags, ("length", "top_length", "bottom_length", "skirt_length", "pants_length")),
-        "wearing_capabilities": first_tag_list(effective, ai_tags, ("wearing_capabilities", "wearing_methods", "wearing_method", "can_style_as"), 5),
-        "style_summary": first_tag_text(effective, ai_tags, ("pairing_brief", "style_summary", "style_keywords", "occasion", "season"), 180),
-        "pairing_risks": first_tag_list(effective, ai_tags, ("pairing_risks", "risk_tags", "avoid_with", "visibility_risks"), 5),
+        "silhouette": first_tag_value(effective, ai_tags, ("silhouette", "profile", "shape", "廓形", "结构/廓形语义")),
+        "length": first_tag_value(effective, ai_tags, ("length", "top_length", "bottom_length", "skirt_length", "pants_length", "长度")),
+        "wearing_capabilities": first_tag_list(
+            effective,
+            ai_tags,
+            ("wearing_capabilities", "wearing_methods", "wearing_method", "can_style_as", "穿着能力"),
+            5,
+        ),
+        "style_summary": first_tag_text(
+            effective,
+            ai_tags,
+            ("pairing_brief", "style_summary", "style_keywords", "occasion", "season", "风格语义", "整体视觉语义", "颜色/氛围语义"),
+            220,
+        ),
+        "pairing_risks": first_tag_list(effective, ai_tags, ("pairing_risks", "risk_tags", "avoid_with", "visibility_risks", "风险点"), 5),
         "manual_flags": compact_manual_prompt_flags(manual),
         "review": compact_tag_review_meta(tag_meta),
     }
@@ -4692,7 +4711,7 @@ def compact_manual_prompt_flags(manual: dict[str, Any]) -> dict[str, Any]:
 
 
 def compact_tag_review_meta(tag_meta: dict[str, Any]) -> dict[str, Any]:
-    confidence = tag_meta.get("confidence")
+    confidence = tag_meta.get("confidence", tag_meta.get("overall_confidence"))
     reasons = ensure_string_list(tag_meta.get("review_reasons") or tag_meta.get("reasons"))[:4]
     result: dict[str, Any] = {}
     if confidence is not None:
