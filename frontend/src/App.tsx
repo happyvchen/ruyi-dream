@@ -4152,7 +4152,7 @@ function useTicker(enabled: boolean) {
 
 function operationFallbacks(task: GenerationTask, localOperations: AIOperation[], ownerType: string) {
   const remote = (task.aiOperations ?? []).filter((operation) => operation.ownerType === ownerType)
-  const local = localOperations.filter((operation) => operation.ownerType === ownerType)
+  const local = localOperations.filter((operation) => operation.ownerType === ownerType && operationBelongsToTask(operation, task))
   const runningRemote = remote.filter(isAttemptRunning)
   const runningLocal = local.filter(isAttemptRunning)
   if (runningRemote.length || runningLocal.length) return mergeOperations([...runningRemote, ...runningLocal])
