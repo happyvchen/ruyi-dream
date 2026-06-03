@@ -31,6 +31,8 @@
 
 `generation_tasks` 是用户任务根节点。草稿阶段可维护 `generation_task_images`；进入 AI 后创建 `generation_task_input_versions`，冻结主推款图片、任务名和默认数字模特快照。
 
+一键成片自动推进由 `generation_tasks.auto_run_target` 和 `auto_run_requested_at` 表达。当前唯一目标值为 `FINAL`。该字段只表示“继续自动推进到成片”的意图，不替代 `status`、阶段 artifact 状态或 active 指针；失败、完成、取消后清空。
+
 AI Stylist 写入 `generation_stylings`：
 
 - `candidate_retrieval_snapshot_json` 保存本次 READY 搭配库的紧凑候选卡和 code/id 映射。
@@ -64,5 +66,6 @@ Image-2 阶段写入：
 | 版本 | 名称 | 动作 |
 |---|---|---|
 | `027` | `drop_legacy_generation_tables` | 删除旧货号、旧 planner、旧 generation run/image、旧品牌模板、旧 AI policy 表 |
+| `028` | `add_generation_task_auto_run` | 为 `generation_tasks` 增加一键成片自动推进字段 |
 
 新库直接创建当前 schema；旧库执行 `027` 后只保留新版表。旧数据不做兼容读取。

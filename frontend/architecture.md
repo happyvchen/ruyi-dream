@@ -10,6 +10,8 @@
 AI 摄影棚上传主推款 -> AI 智能选搭 -> 生成拍摄剧本 -> 生成分镜预览 -> 生成前 5 个镜头成片 -> 生成记录复盘
 ```
 
+`一键成片` 是工作台顶部主操作，用于把上述步骤自动串联到最终成片。它不引入新的前端状态模型：页面仍通过 `GenerationTask.status`、active 指针和各阶段 artifact 渲染，自动流程只显示一条轻量进度。
+
 ## 当前代码结构
 
 | 路径 | 职责 |
@@ -75,7 +77,7 @@ AI 摄影棚“最近任务”、生成记录和搭配服饰库默认按创建�
 
 后端返回的是稳定 `/api/media?...` 路径，组件不应在轮询中主动替换未变化图片的 `src`。如果同一对象 key 没变，应保留现有 URL，避免浏览器重复解码和重绘。
 
-AI 摄影棚在 `STYLING_RUNNING`、`PREVIEW_RUNNING`、`FINAL_RUNNING` 状态定时刷新当前 `GenerationTask`，从而展示阶段推进和逐张结果。旧版生成批次继续使用其轻量状态接口。
+AI 摄影棚在 `STYLING_RUNNING`、`SCRIPT_RUNNING`、`PREVIEW_RUNNING`、`FINAL_RUNNING` 状态定时刷新当前 `GenerationTask`，从而展示阶段推进和逐张结果。若任务带有 `autoRunTarget`，即使短暂处于非运行中状态也继续刷新，等待后端自动推进下一步。
 
 ## API 分层
 

@@ -130,9 +130,17 @@ h1, h2, h3, p { margin: 0; }
   align-items: flex-end;
   justify-content: space-between;
   min-height: 58px;
+  gap: 18px;
 }
 .page-title h1 { font-size: 28px; line-height: 1.05; letter-spacing: 0; color: #111827; }
 .page-title p { margin-top: 8px; color: #667085; font-size: 14px; }
+.studio-title-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
 
 .panel {
   border: 1px solid rgba(17, 24, 39, .08);
@@ -345,6 +353,55 @@ h1, h2, h3, p { margin: 0; }
 .step-rail button:disabled { cursor: not-allowed; opacity: .42; }
 
 .step-panel { display: grid; gap: 18px; }
+.auto-run-progress {
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) 1fr;
+  gap: 16px;
+  align-items: center;
+  padding: 14px 16px;
+  border: 1px solid rgba(15, 124, 255, .18);
+  border-radius: 8px;
+  background: #f8fbff;
+}
+.auto-run-progress > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+.auto-run-progress span {
+  color: #667085;
+  font-size: 12px;
+}
+.auto-run-progress strong {
+  color: #111827;
+  font-size: 14px;
+}
+.auto-run-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.auto-run-steps span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid #d8e0ea;
+  border-radius: 999px;
+  background: #fff;
+  color: #475467;
+  white-space: nowrap;
+}
+.auto-run-steps span.done {
+  border-color: rgba(17, 183, 200, .28);
+  background: #eefbfc;
+  color: #0f7180;
+}
+.auto-run-steps span.active {
+  border-color: rgba(15, 124, 255, .36);
+  background: #eff6ff;
+  color: #0f5fc0;
+}
 .step-copy { display: grid; gap: 8px; }
 .step-copy h2 { font-size: 22px; }
 .step-copy p { color: #667085; font-size: 14px; }
@@ -2521,6 +2578,20 @@ input:focus, select:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0
     max-height: none;
   }
   .step-rail {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .page-title {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .studio-title-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .auto-run-progress {
+    grid-template-columns: 1fr;
+  }
+  .auto-run-steps {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .styling-plan-head {

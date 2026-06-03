@@ -35,17 +35,19 @@ AI 摄影棚主推款任务。草稿阶段可上传和排序主推款图片；�
 
 - `DRAFT`
 - `READY_FOR_STYLING`
-- `STYLING`
+- `STYLING_RUNNING`
 - `STYLING_READY`
-- `SHOOT_SCRIPTING`
-- `SHOOT_SCRIPT_READY`
-- `PREVIEWING`
+- `SCRIPT_RUNNING`
+- `SCRIPT_READY`
+- `PREVIEW_RUNNING`
 - `PREVIEW_READY`
-- `FINAL_GENERATING`
-- `FINAL_READY`
+- `FINAL_RUNNING`
 - `FINAL_PARTIAL`
+- `COMPLETED`
 - `FAILED`
 - `CANCELLED`
+
+`auto_run_target = FINAL` 表示用户触发了 `一键成片` 自动推进。它不是独立流程状态；系统仍依赖当前 active 指针和阶段 artifact 判断下一步。自动推进失败或取消时清除该字段，任务停留在原阶段失败或取消语义。
 
 ## GenerationStyling / StylingPlan
 
@@ -77,6 +79,8 @@ AI Director 基于当前 StylingPlan 生成 ShootScript。ShootScript 负责把�
 `GenerationResultSet` 保存一次最终图生成批次。`GenerationResultImageNew` 保存前 5 张单图状态、当前资产、锁和重试 attempt。
 
 最终单图 prompt 只读取 `current_shot_context`，不读取完整 StylingPlan、完整 ShootScript、候选池或 rejected candidates。
+
+`一键成片` 在最终阶段复用当前 active result set。若当前结果为 `FINAL_PARTIAL`，自动续跑只把失败或缺失的单图重新排队，不覆盖已经成功的最终图；手动 `生成成片 / 重新生成成片` 仍创建新的结果集。
 
 ## GenerationAttempt
 

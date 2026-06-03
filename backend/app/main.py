@@ -50,6 +50,7 @@ SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES = {"未知", "不支持入库配饰", "unkn
 PROMPT_PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-zA-Z0-9_.-]+)\s*}}")
 AI_STYLING_PROMPT_CONFIG_KEY = "assembly.ai_styling"
 SHOOT_SCRIPT_PROMPT_CONFIG_KEY = "assembly.shoot_script"
+AUTO_RUN_TARGET_FINAL = "FINAL"
 
 
 def is_request_authenticated(request: Request) -> bool:
@@ -1510,9 +1511,24 @@ def cancel_generation_task(task_id: int) -> dict[str, Any]:
         cancel_running_task_attempts(db, task_id, timestamp)
         if row["status"] == "FINAL_RUNNING" and row["active_result_set_id"]:
             reconcile_final_result_set(db, int(row["active_result_set_id"]), task_id)
+            db.execute(
+                """
+                UPDATE generation_tasks
+                SET auto_run_target = NULL, auto_run_requested_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, task_id),
+            )
         else:
             db.execute(
-                "UPDATE generation_tasks SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
+                """
+                UPDATE generation_tasks
+                SET status = 'CANCELLED',
+                    auto_run_target = NULL,
+                    auto_run_requested_at = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
                 (timestamp, task_id),
             )
         log_event(
@@ -1824,6 +1840,10 @@ def ready_generation_task(task_id: int) -> dict[str, Any]:
 
 @app.post("/api/generation-tasks/{task_id}/select-styling")
 async def select_generation_styling(task_id: int, request: Request) -> dict[str, Any]:
+    return await run_select_generation_styling(task_id, include_debug=admin_debug_for_request(request), trigger="manual_step")
+
+
+async def run_select_generation_styling(task_id: int, include_debug: bool = False, trigger: str = "manual_step") -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     if task["status"] not in {
         "READY_FOR_STYLING",
@@ -1842,6 +1862,7 @@ async def select_generation_styling(task_id: int, request: Request) -> dict[str,
     attempt_id = create_attempt("generation_styling", task_id, "gemini")
     try:
         input_row, candidate_snapshot, request_snapshot = build_ai_stylist_context(input_version_id)
+        request_snapshot["invocation"] = {"mode": trigger, "target": "styling"}
         update_attempt_request_snapshot(attempt_id, request_snapshot)
         if generation_task_or_attempt_cancelled(task_id, attempt_id):
             finish_attempt(attempt_id, "CANCELLED")
@@ -1860,7 +1881,17 @@ async def select_generation_styling(task_id: int, request: Request) -> dict[str,
         if attempt_id:
             finish_attempt(attempt_id, "FAILED", error_message=str(exc))
         with get_db() as db:
-            db.execute("UPDATE generation_tasks SET status = 'FAILED', updated_at = ? WHERE id = ?", (now_iso(), task_id))
+            db.execute(
+                """
+                UPDATE generation_tasks
+                SET status = 'FAILED',
+                    auto_run_target = NULL,
+                    auto_run_requested_at = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (now_iso(), task_id),
+            )
         raise HTTPException(status_code=502, detail=f"智能选搭失败：{exc}") from exc
     with get_db() as db:
         current = db.execute("SELECT status FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
@@ -1945,11 +1976,15 @@ async def select_generation_styling(task_id: int, request: Request) -> dict[str,
             (input_version_id, styling_id, timestamp, task_id),
         )
     finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=styling_plan)
-    return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
+    return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
 
 
 @app.post("/api/generation-tasks/{task_id}/shoot-script")
 async def create_generation_shoot_script(task_id: int, request: Request) -> dict[str, Any]:
+    return await run_create_generation_shoot_script(task_id, include_debug=admin_debug_for_request(request), trigger="manual_step")
+
+
+async def run_create_generation_shoot_script(task_id: int, include_debug: bool = False, trigger: str = "manual_step") -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     styling_id = task["active_styling_id"]
     input_version_id = task["current_input_version_id"]
@@ -2007,6 +2042,7 @@ async def create_generation_shoot_script(task_id: int, request: Request) -> dict
             request_snapshot = attach_shoot_script_prompt_snapshot(request_snapshot)
         except RuntimeError:
             pass
+        request_snapshot["invocation"] = {"mode": trigger, "target": "shoot_script"}
         update_attempt_request_snapshot(attempt_id, request_snapshot)
         raw_shoot_script = await generate_shoot_script_with_gemini(request_snapshot)
         shoot_script = normalize_shoot_script(raw_shoot_script, request_snapshot)
@@ -2017,7 +2053,7 @@ async def create_generation_shoot_script(task_id: int, request: Request) -> dict
         if shoot_script_generation_cancelled(task_id, shoot_script_id, attempt_id):
             finish_attempt(attempt_id, "CANCELLED", error_message="拍摄剧本生成已取消")
             mark_shoot_script_generation_cancelled(shoot_script_id)
-            return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
+            return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
         finish_attempt(attempt_id, "FAILED", error_message=str(exc))
         with get_db() as db:
             previous_active = db.execute("SELECT active_shoot_script_id FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
@@ -2031,11 +2067,19 @@ async def create_generation_shoot_script(task_id: int, request: Request) -> dict
                 (now_iso(), shoot_script_id),
             )
             db.execute("UPDATE generation_tasks SET status = ?, updated_at = ? WHERE id = ?", (fallback_status, now_iso(), task_id))
+            db.execute(
+                """
+                UPDATE generation_tasks
+                SET auto_run_target = NULL, auto_run_requested_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (now_iso(), task_id),
+            )
         raise HTTPException(status_code=502, detail=f"拍摄剧本生成失败：{exc}") from exc
     if shoot_script_generation_cancelled(task_id, shoot_script_id, attempt_id):
         finish_attempt(attempt_id, "CANCELLED", error_message="拍摄剧本生成已取消")
         mark_shoot_script_generation_cancelled(shoot_script_id)
-        return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
+        return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
     cancelled_after_provider_return = False
     status_changed_after_provider_return = False
     with get_db() as db:
@@ -2182,15 +2226,19 @@ async def create_generation_shoot_script(task_id: int, request: Request) -> dict
                 (shoot_script_id, timestamp, task_id),
             )
     if cancelled_after_provider_return:
-        return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
+        return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
     if status_changed_after_provider_return:
         raise HTTPException(status_code=409, detail="拍摄剧本生成状态已变更，请刷新后重试")
     finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=shoot_script)
-    return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
+    return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
 
 
 @app.post("/api/generation-tasks/{task_id}/preview")
 async def create_generation_preview(task_id: int, request: Request) -> dict[str, Any]:
+    return await run_create_generation_preview(task_id, include_debug=admin_debug_for_request(request), trigger="manual_step")
+
+
+async def run_create_generation_preview(task_id: int, include_debug: bool = False, trigger: str = "manual_step") -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     styling_id = task["active_styling_id"]
     shoot_script_id = task["active_shoot_script_id"] if "active_shoot_script_id" in task.keys() else None
@@ -2216,15 +2264,24 @@ async def create_generation_preview(task_id: int, request: Request) -> dict[str,
     attempt_id = create_attempt("generation_preview", preview_id, "image-2")
     lease_generation_preview(preview_id, attempt_id)
     schedule_background_generation(
-        run_preview_generation(task_id, int(styling_id), int(shoot_script_id), shot_plans, preview_id, attempt_id),
+        run_preview_generation(task_id, int(styling_id), int(shoot_script_id), shot_plans, preview_id, attempt_id, trigger=trigger),
         job_key=preview_job_key(preview_id),
     )
-    return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
+    return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
 
 
-async def run_preview_generation(task_id: int, styling_id: int, shoot_script_id: int, shot_plans: list[Any], preview_id: int, attempt_id: int) -> None:
+async def run_preview_generation(
+    task_id: int,
+    styling_id: int,
+    shoot_script_id: int,
+    shot_plans: list[Any],
+    preview_id: int,
+    attempt_id: int,
+    trigger: str = "manual_step",
+) -> None:
     try:
         task_package = build_new_preview_task_package(task_id, styling_id, shoot_script_id, shot_plans)
+        task_package["invocation"] = {"mode": trigger, "target": "storyboard_preview"}
         if not attempt_has_provider_request_id(attempt_id):
             update_attempt_request_snapshot(attempt_id, task_package)
         asset_id, provider_response = await generate_image_asset(
@@ -2261,6 +2318,14 @@ async def run_preview_generation(task_id: int, styling_id: int, shoot_script_id:
                 (attempt_id, timestamp, preview_id),
             )
             db.execute("UPDATE generation_tasks SET status = 'FAILED', updated_at = ? WHERE id = ?", (timestamp, task_id))
+            db.execute(
+                """
+                UPDATE generation_tasks
+                SET auto_run_target = NULL, auto_run_requested_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, task_id),
+            )
         return
     with get_db() as db:
         current = db.execute(
@@ -2317,10 +2382,43 @@ async def run_preview_generation(task_id: int, styling_id: int, shoot_script_id:
             """,
             (preview_id, preview_id, timestamp, task_id),
         )
+    maybe_schedule_auto_run_for_task(task_id)
 
 
 @app.post("/api/generation-tasks/{task_id}/generate-final")
 async def generate_final_images(task_id: int, request: Request) -> dict[str, Any]:
+    return await run_generate_final_images(task_id, include_debug=admin_debug_for_request(request), trigger="manual_step", continue_existing=False)
+
+
+@app.post("/api/generation-tasks/{task_id}/auto-run-final")
+async def auto_run_final_images(task_id: int, request: Request) -> dict[str, Any]:
+    task = get_generation_task_row(task_id)
+    if task["status"] in RUNNING_GENERATION_TASK_STATUSES:
+        raise HTTPException(status_code=409, detail="当前任务正在生成中，请先取消或等待完成")
+    if task["status"] in {"CANCELLED", "ABANDONED"}:
+        raise HTTPException(status_code=409, detail="当前任务已取消，不能一键成片")
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE generation_tasks
+            SET auto_run_target = ?,
+                auto_run_requested_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (AUTO_RUN_TARGET_FINAL, timestamp, timestamp, task_id),
+        )
+    schedule_auto_run_for_task(task_id)
+    return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
+
+
+async def run_generate_final_images(
+    task_id: int,
+    include_debug: bool = False,
+    trigger: str = "manual_step",
+    continue_existing: bool = False,
+) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     if (
         task["status"] not in {"PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
@@ -2334,6 +2432,22 @@ async def generate_final_images(task_id: int, request: Request) -> dict[str, Any
     styling_id = int(task["active_styling_id"])
     shoot_script_id = int(task["active_shoot_script_id"])
     input_version_id = int(task["current_input_version_id"])
+    if continue_existing and task["active_result_set_id"]:
+        image_ids = continue_active_final_result_set(
+            task_id,
+            int(task["active_result_set_id"]),
+            input_version_id,
+            styling_id,
+            shoot_script_id,
+            preview_id,
+        )
+        if image_ids is not None:
+            if image_ids:
+                schedule_background_generation(
+                    run_final_generation(task_id, int(task["active_result_set_id"]), image_ids, trigger=trigger),
+                    job_key=final_set_job_key(int(task["active_result_set_id"])),
+                )
+            return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
     timestamp = now_iso()
     with get_db() as db:
         db.execute("UPDATE generation_tasks SET status = 'FINAL_RUNNING', updated_at = ? WHERE id = ?", (timestamp, task_id))
@@ -2370,10 +2484,88 @@ async def generate_final_images(task_id: int, request: Request) -> dict[str, Any
             )
             image_ids.append(int(image_cursor.lastrowid))
     schedule_background_generation(
-        run_final_generation(task_id, result_set_id, image_ids),
+        run_final_generation(task_id, result_set_id, image_ids, trigger=trigger),
         job_key=final_set_job_key(result_set_id),
     )
-    return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
+    return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
+
+
+def continue_active_final_result_set(
+    task_id: int,
+    result_set_id: int,
+    input_version_id: int,
+    styling_id: int,
+    shoot_script_id: int,
+    preview_id: int,
+) -> list[int] | None:
+    timestamp = now_iso()
+    with get_db() as db:
+        result_set = db.execute(
+            """
+            SELECT * FROM generation_result_sets
+            WHERE id = ? AND task_id = ?
+            """,
+            (result_set_id, task_id),
+        ).fetchone()
+        if not result_set or result_set["status"] == "RUNNING":
+            raise HTTPException(status_code=409, detail="成片已在生成中，请勿重复提交")
+        if (
+            int(result_set["input_version_id"]) != input_version_id
+            or int(result_set["styling_id"]) != styling_id
+            or int(result_set["shoot_script_id"]) != shoot_script_id
+            or int(result_set["preview_id"]) != preview_id
+        ):
+            return None
+        existing_rows = db.execute(
+            "SELECT * FROM generation_result_images_new WHERE result_set_id = ? ORDER BY sort_order",
+            (result_set_id,),
+        ).fetchall()
+        existing_by_sort = {int(row["sort_order"]): row for row in existing_rows}
+        image_ids: list[int] = []
+        shot_rows = db.execute(
+            "SELECT * FROM generation_shot_plans WHERE shoot_script_id = ? AND sort_order <= 5 ORDER BY sort_order",
+            (shoot_script_id,),
+        ).fetchall()
+        for shot in shot_rows:
+            sort_order = int(shot["sort_order"])
+            existing = existing_by_sort.get(sort_order)
+            if existing and existing["status"] == "SUCCEEDED":
+                continue
+            if existing and existing["status"] in {"QUEUED", "RUNNING"}:
+                raise HTTPException(status_code=409, detail="成片已在生成中，请勿重复提交")
+            if existing:
+                db.execute(
+                    """
+                    UPDATE generation_result_images_new
+                    SET status = 'QUEUED',
+                        active_attempt_id = NULL,
+                        locked_by = NULL,
+                        locked_until = NULL,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (timestamp, int(existing["id"])),
+                )
+                image_ids.append(int(existing["id"]))
+                continue
+            cursor = db.execute(
+                """
+                INSERT INTO generation_result_images_new
+                  (result_set_id, shot_plan_id, sort_order, status, created_at, updated_at)
+                VALUES (?, ?, ?, 'QUEUED', ?, ?)
+                """,
+                (result_set_id, int(shot["id"]), sort_order, timestamp, timestamp),
+            )
+            image_ids.append(int(cursor.lastrowid))
+        if image_ids:
+            db.execute("UPDATE generation_result_sets SET status = 'RUNNING', updated_at = ? WHERE id = ?", (timestamp, result_set_id))
+            db.execute(
+                "UPDATE generation_tasks SET status = 'FINAL_RUNNING', active_result_set_id = ?, updated_at = ? WHERE id = ?",
+                (result_set_id, timestamp, task_id),
+            )
+        else:
+            reconcile_final_result_set(db, result_set_id, task_id)
+    return image_ids
 
 
 async def run_final_generation(
@@ -2381,6 +2573,7 @@ async def run_final_generation(
     result_set_id: int,
     image_ids: list[int],
     resume_attempts_by_image_id: dict[int, int] | None = None,
+    trigger: str = "manual_step",
 ) -> None:
     resume_attempts_by_image_id = resume_attempts_by_image_id or {}
     await asyncio.gather(
@@ -2390,13 +2583,24 @@ async def run_final_generation(
                 result_set_id,
                 image_id,
                 attempt_id=resume_attempts_by_image_id.get(image_id),
+                trigger=trigger,
             )
             for image_id in image_ids
         ),
         return_exceptions=True,
     )
     with get_db() as db:
-        reconcile_final_result_set(db, result_set_id, task_id)
+        _, task_status = reconcile_final_result_set(db, result_set_id, task_id)
+        if task_status in {"COMPLETED", "FINAL_PARTIAL", "FAILED", "CANCELLED"}:
+            db.execute(
+                """
+                UPDATE generation_tasks
+                SET auto_run_target = NULL, auto_run_requested_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (now_iso(), task_id),
+            )
+    maybe_schedule_auto_run_for_task(task_id)
 
 
 def reconcile_final_result_set(db: Any, result_set_id: int, task_id: int | None = None) -> tuple[str, str]:
@@ -2438,15 +2642,18 @@ async def retry_new_result_image(image_id: int, request: Request) -> dict[str, A
     with get_db() as db:
         row = db.execute(
             """
-            SELECT gri.*, grs.task_id, grs.id AS result_set_id
+            SELECT gri.*, grs.task_id, grs.id AS result_set_id, gt.status AS task_status
             FROM generation_result_images_new gri
             JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+            JOIN generation_tasks gt ON gt.id = grs.task_id
             WHERE gri.id = ?
             """,
             (image_id,),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="结果图不存在")
+        if row["task_status"] in RUNNING_GENERATION_TASK_STATUSES:
+            raise HTTPException(status_code=409, detail="当前任务正在生成中，请先取消或等待完成")
         if row["status"] in {"QUEUED", "RUNNING"}:
             raise HTTPException(status_code=409, detail="当前结果图仍在生成中")
         timestamp = now_iso()
@@ -2465,7 +2672,7 @@ async def retry_new_result_image(image_id: int, request: Request) -> dict[str, A
             (row["result_set_id"], timestamp, row["task_id"]),
         )
     schedule_background_generation(
-        run_final_generation(int(row["task_id"]), int(row["result_set_id"]), [image_id]),
+        run_final_generation(int(row["task_id"]), int(row["result_set_id"]), [image_id], trigger="manual_step"),
         job_key=final_set_job_key(int(row["result_set_id"])),
     )
     return {"item": get_generation_task_by_id(int(row["task_id"]), include_debug=admin_debug_for_request(request))}
@@ -7005,6 +7212,103 @@ def final_set_job_key(result_set_id: int) -> str:
     return f"generation_result_set:{result_set_id}"
 
 
+def auto_run_job_key(task_id: int) -> str:
+    return f"generation_auto_run:{task_id}"
+
+
+def schedule_auto_run_for_task(task_id: int) -> None:
+    schedule_background_generation(run_auto_final_generation(task_id), job_key=auto_run_job_key(task_id))
+
+
+def maybe_schedule_auto_run_for_task(task_id: int) -> None:
+    row = get_generation_task_row(task_id)
+    if row_value(row, "auto_run_target") == AUTO_RUN_TARGET_FINAL and row["status"] not in RUNNING_GENERATION_TASK_STATUSES:
+        schedule_auto_run_for_task(task_id)
+
+
+def clear_task_auto_run(task_id: int) -> None:
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE generation_tasks
+            SET auto_run_target = NULL, auto_run_requested_at = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (now_iso(), task_id),
+        )
+
+
+async def run_auto_final_generation(task_id: int) -> None:
+    try:
+        while True:
+            task = get_generation_task_row(task_id)
+            if row_value(task, "auto_run_target") != AUTO_RUN_TARGET_FINAL:
+                return
+            if task["status"] in RUNNING_GENERATION_TASK_STATUSES:
+                return
+            if task["status"] in {"CANCELLED", "ABANDONED"}:
+                clear_task_auto_run(task_id)
+                return
+            step = next_auto_final_step(task)
+            if step == "complete":
+                clear_task_auto_run(task_id)
+                return
+            if step == "ready":
+                ready_generation_task(task_id)
+                continue
+            if step == "styling":
+                await run_select_generation_styling(task_id, trigger="auto_run")
+                continue
+            if step == "shoot_script":
+                await run_create_generation_shoot_script(task_id, trigger="auto_run")
+                continue
+            if step == "preview":
+                await run_create_generation_preview(task_id, trigger="auto_run")
+                return
+            if step == "final":
+                await run_generate_final_images(task_id, trigger="auto_run", continue_existing=True)
+                return
+            return
+    except HTTPException:
+        clear_task_auto_run(task_id)
+        raise
+    except Exception:
+        clear_task_auto_run(task_id)
+        raise
+
+
+def next_auto_final_step(task: Any) -> str:
+    if task["status"] == "DRAFT":
+        return "ready"
+    if not task["active_styling_id"]:
+        return "styling"
+    if not row_value(task, "active_shoot_script_id"):
+        return "shoot_script"
+    preview_id = row_value(task, "active_storyboard_preview_id") or row_value(task, "active_preview_id")
+    if not preview_id or not generation_preview_has_asset(int(preview_id)):
+        return "preview"
+    result_set_id = row_value(task, "active_result_set_id")
+    if result_set_id and generation_result_set_is_complete(int(result_set_id)):
+        return "complete"
+    return "final"
+
+
+def generation_preview_has_asset(preview_id: int) -> bool:
+    with get_db() as db:
+        row = db.execute("SELECT preview_asset_id, status FROM generation_previews WHERE id = ?", (preview_id,)).fetchone()
+    return bool(row and row["preview_asset_id"] and row["status"] == "SUCCEEDED")
+
+
+def generation_result_set_is_complete(result_set_id: int) -> bool:
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT status FROM generation_result_images_new WHERE result_set_id = ? ORDER BY sort_order",
+            (result_set_id,),
+        ).fetchall()
+    statuses = [row["status"] for row in rows]
+    return len(statuses) >= 5 and all(status == "SUCCEEDED" for status in statuses[:5])
+
+
 def lease_generation_preview(preview_id: int, attempt_id: int) -> None:
     timestamp = now_iso()
     with get_db() as db:
@@ -7086,6 +7390,17 @@ def refresh_pending_new_generation_jobs() -> None:
             LIMIT 10
             """
         ).fetchall()
+        auto_rows = db.execute(
+            """
+            SELECT id FROM generation_tasks
+            WHERE deleted_at IS NULL
+              AND auto_run_target = ?
+              AND status NOT IN ('STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'CANCELLED', 'ABANDONED')
+            ORDER BY updated_at, id
+            LIMIT 5
+            """,
+            (AUTO_RUN_TARGET_FINAL,),
+        ).fetchall()
 
     for row in preview_rows:
         key = preview_job_key(int(row["id"]))
@@ -7141,6 +7456,13 @@ def refresh_pending_new_generation_jobs() -> None:
     for row in terminal_result_sets:
         with get_db() as db:
             reconcile_final_result_set(db, int(row["id"]), int(row["task_id"]))
+        maybe_schedule_auto_run_for_task(int(row["task_id"]))
+
+    for row in auto_rows:
+        key = auto_run_job_key(int(row["id"]))
+        if key in active_background_generation_jobs:
+            continue
+        schedule_auto_run_for_task(int(row["id"]))
 
 
 def schedule_background_generation(coro: Any, job_key: str | None = None) -> None:
@@ -7240,7 +7562,13 @@ def image_provider_missing_message() -> str:
     return f"Image-2 provider 未配置：不支持的 provider {settings.image_provider}。"
 
 
-async def generate_single_final_image(task_id: int, result_set_id: int, image_id: int, attempt_id: int | None = None) -> int:
+async def generate_single_final_image(
+    task_id: int,
+    result_set_id: int,
+    image_id: int,
+    attempt_id: int | None = None,
+    trigger: str = "manual_step",
+) -> int:
     if attempt_id is None:
         attempt_id = create_attempt("generation_result_image", image_id, "image-2")
     lease_generation_result_image(image_id, attempt_id)
@@ -7259,6 +7587,7 @@ async def generate_single_final_image(task_id: int, result_set_id: int, image_id
         )
     try:
         task_package = build_new_final_task_package(task_id, image_id)
+        task_package["invocation"] = {"mode": trigger, "target": "final_image"}
         if not attempt_has_provider_request_id(attempt_id):
             update_attempt_request_snapshot(attempt_id, task_package)
         with get_db() as db:
@@ -7335,6 +7664,8 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
         "activePreviewId": row["active_preview_id"],
         "activeStoryboardPreviewId": row["active_storyboard_preview_id"] if "active_storyboard_preview_id" in row.keys() else row["active_preview_id"],
         "activeResultSetId": row["active_result_set_id"],
+        "autoRunTarget": row_value(row, "auto_run_target"),
+        "autoRunRequestedAt": row_value(row, "auto_run_requested_at"),
         "archivedAt": row["archived_at"] if "archived_at" in row.keys() else None,
         "archiveReason": row["archive_reason"] if "archive_reason" in row.keys() else None,
         "createdAt": row["created_at"],

@@ -45,10 +45,18 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。旧 `/a
 | `/api/generation-tasks/{id}/shoot-script` | POST | 调用 AI Director |
 | `/api/generation-tasks/{id}/preview` | POST | 生成 3x2 分镜预览 |
 | `/api/generation-tasks/{id}/generate-final` | POST | 并发生成前 5 张成片 |
+| `/api/generation-tasks/{id}/auto-run-final` | POST | 一键成片：复用已有有效中间结果并自动完成后续步骤 |
 | `/api/generation-result-images/{image_id}/regenerate` | POST | 重生单张最终图 |
 | `/api/generation-records` | GET | 生成记录列表 |
 
-所有会调用外部 AI/provider 的端点都必须由用户动作触发；本地验证和测试不得调用外部 AI/provider。
+所有会调用外部 AI/provider 的端点都必须由用户动作触发；本地验证和测试不得调用外部 AI/provider。`auto-run-final` 由一次用户动作触发，但内部仍按现有阶段创建独立 attempt，并在 request snapshot 中记录 `invocation.mode = auto_run`。
+
+一键成片规则：
+
+- 不新增独立业务状态；失败、取消和部分完成沿用原阶段状态。
+- 已有当前有效 `StylingPlan`、`ShootScript` 或分镜预览时复用。
+- `FINAL_PARTIAL` 断点续跑只补失败或缺失的最终图。
+- 任一运行中状态下，所有生成入口都应返回 409 或在前端禁用；只允许取消生成。
 
 ## 配置
 
