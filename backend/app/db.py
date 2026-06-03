@@ -12,6 +12,7 @@ from .config import get_settings
 MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("027", "drop_legacy_generation_tables", "migration_drop_legacy_generation_tables"),
     ("028", "add_generation_task_auto_run", "migration_add_generation_task_auto_run"),
+    ("029", "add_generation_user_requirements", "migration_add_generation_user_requirements"),
 )
 
 
@@ -132,6 +133,7 @@ def init_db() -> None:
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               name TEXT NOT NULL,
               status TEXT NOT NULL DEFAULT 'DRAFT',
+              user_requirement_text TEXT,
               current_input_version_id INTEGER,
               active_styling_id INTEGER,
               active_shoot_script_id INTEGER,
@@ -154,6 +156,7 @@ def init_db() -> None:
               name_snapshot TEXT NOT NULL,
               image_snapshot_json TEXT NOT NULL,
               model_snapshot_json TEXT,
+              user_requirement_json TEXT,
               hero_visual_summary TEXT,
               created_at TEXT NOT NULL,
               UNIQUE(task_id, version_number)
@@ -177,6 +180,7 @@ def init_db() -> None:
               source_material_ids_json TEXT NOT NULL,
               candidate_material_ids_json TEXT,
               candidate_retrieval_snapshot_json TEXT,
+              user_requirement_json TEXT,
               library_adequacy_snapshot_json TEXT,
               selected_material_ids_json TEXT NOT NULL,
               selected_material_snapshot_json TEXT NOT NULL,
@@ -332,6 +336,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
     migration_functions = {
         "migration_drop_legacy_generation_tables": migration_drop_legacy_generation_tables,
         "migration_add_generation_task_auto_run": migration_add_generation_task_auto_run,
+        "migration_add_generation_user_requirements": migration_add_generation_user_requirements,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -365,6 +370,15 @@ def migration_add_generation_task_auto_run(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE generation_tasks ADD COLUMN auto_run_target TEXT")
     if not table_has_column(db, "generation_tasks", "auto_run_requested_at"):
         db.execute("ALTER TABLE generation_tasks ADD COLUMN auto_run_requested_at TEXT")
+
+
+def migration_add_generation_user_requirements(db: sqlite3.Connection) -> None:
+    if not table_has_column(db, "generation_tasks", "user_requirement_text"):
+        db.execute("ALTER TABLE generation_tasks ADD COLUMN user_requirement_text TEXT")
+    if not table_has_column(db, "generation_task_input_versions", "user_requirement_json"):
+        db.execute("ALTER TABLE generation_task_input_versions ADD COLUMN user_requirement_json TEXT")
+    if not table_has_column(db, "generation_stylings", "user_requirement_json"):
+        db.execute("ALTER TABLE generation_stylings ADD COLUMN user_requirement_json TEXT")
 
 
 def table_has_column(db: sqlite3.Connection, table: str, column: str) -> bool:

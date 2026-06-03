@@ -1,6 +1,6 @@
 # Backend Database Schema
 
-当前数据库为 SQLite，初始化入口是 `backend/app/db.py:init_db()`。新版只保留 AI 摄影棚主流程、搭配服饰库、数字模特、品牌资料、Prompt 配置、拍摄配置、媒体资产和审计 attempt。旧版 `garment_skus`、`garment_images`、`shot_plans`、`shot_plan_shots`、`generation_runs`、`generation_images`、`brand_template_versions`、`ai_policy_configs` 已删除；迁移 `027` 会在旧库上 drop 这些表。
+当前数据库为 SQLite，初始化入口是 `backend/app/db.py:init_db()`。新版只保留 AI 摄影棚主流程、搭配服饰库、数字模特、品牌资料、Prompt 配置、拍摄配置、媒体资产和审计 attempt。旧版 `garment_skus`、`garment_images`、`shot_plans`、`shot_plan_shots`、`generation_runs`、`generation_images`、`brand_template_versions`、`ai_policy_configs` 已删除；迁移 `027` 会在旧库上 drop 这些表，后续迁移继续为当前新版链路追加字段。
 
 ## 表总览
 
@@ -29,13 +29,14 @@
 
 ## 生成主链路
 
-`generation_tasks` 是用户任务根节点。草稿阶段可维护 `generation_task_images`；进入 AI 后创建 `generation_task_input_versions`，冻结主推款图片、任务名和默认数字模特快照。
+`generation_tasks` 是用户任务根节点。草稿阶段可维护 `generation_task_images` 和 `user_requirement_text`；进入 AI 后创建 `generation_task_input_versions`，冻结主推款图片、任务名、默认数字模特快照和本次用户要求。
 
 一键成片自动推进由 `generation_tasks.auto_run_target` 和 `auto_run_requested_at` 表达。当前唯一目标值为 `FINAL`。该字段只表示“继续自动推进到成片”的意图，不替代 `status`、阶段 artifact 状态或 active 指针；失败、完成、取消后清空。
 
 AI Stylist 写入 `generation_stylings`：
 
 - `candidate_retrieval_snapshot_json` 保存本次 READY 搭配库的紧凑候选卡和 code/id 映射。
+- `user_requirement_json` 保存本次 AI Stylist 实际读取的上传补充要求、微调要求和冲突处理策略。
 - `styling_plan_json` 保存完整 StylingPlan，包括候选方案、被拒方案、Aesthetic Critic 诊断、质量信号和选中 outfit。
 - `selected_material_snapshot_json` 保存被选中搭配服饰的商品快照和图片快照。
 
@@ -53,6 +54,7 @@ Image-2 阶段写入：
 `prompt_configs` 只保存模板正文和分段。运行时占位符由后端提供：
 
 - `runtime.candidate_retrieval`：AI Stylist 使用的搭配库紧凑候选卡。
+- `runtime.user_requirement`：AI Stylist 使用的本次用户要求和冲突处理策略。
 - `runtime.styling_result`：AI Director 使用的 StylingPlan 导演上下文。
 - `runtime.shoot_script_result`：分镜预览使用的 ShootScript 上下文。
 - `runtime.current_shot_context`：单张最终成片上下文。
@@ -61,11 +63,12 @@ Image-2 阶段写入：
 
 ## 迁移
 
-当前迁移链只保留新版清理迁移：
+当前迁移链只保留新版 schema 演进：
 
 | 版本 | 名称 | 动作 |
 |---|---|---|
 | `027` | `drop_legacy_generation_tables` | 删除旧货号、旧 planner、旧 generation run/image、旧品牌模板、旧 AI policy 表 |
 | `028` | `add_generation_task_auto_run` | 为 `generation_tasks` 增加一键成片自动推进字段 |
+| `029` | `add_generation_user_requirements` | 为 `generation_tasks`、`generation_task_input_versions` 和 `generation_stylings` 增加用户要求字段 |
 
-新库直接创建当前 schema；旧库执行 `027` 后只保留新版表。旧数据不做兼容读取。
+新库直接创建当前 schema；旧库执行迁移链后只保留新版表并追加当前字段。旧业务数据不做兼容读取。

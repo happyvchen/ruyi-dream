@@ -33,15 +33,15 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。旧 `/a
 | 路径 | 方法 | 说明 |
 |---|---|---|
 | `/api/generation-tasks` | GET | 任务列表 |
-| `/api/generation-tasks` | POST | 创建草稿任务 |
+| `/api/generation-tasks` | POST | 创建草稿任务，可携带上传阶段补充服装信息或拍摄要求 |
 | `/api/generation-tasks/{id}` | GET | 任务详情 |
-| `/api/generation-tasks/{id}` | PATCH | 编辑草稿 |
+| `/api/generation-tasks/{id}` | PATCH | 编辑草稿任务名和补充要求 |
 | `/api/generation-tasks/{id}` | DELETE | 归档或删除任务 |
 | `/api/generation-tasks/{id}/images` | POST | 上传主推款图片 |
 | `/api/generation-task-images/{image_id}` | PATCH | 调整主推款图片 |
 | `/api/generation-task-images/{image_id}` | DELETE | 删除主推款图片 |
 | `/api/generation-tasks/{id}/ready` | POST | 冻结草稿，进入选搭 |
-| `/api/generation-tasks/{id}/select-styling` | POST | 调用 AI Stylist |
+| `/api/generation-tasks/{id}/select-styling` | POST | 调用 AI Stylist，可携带本次微调要求 |
 | `/api/generation-tasks/{id}/shoot-script` | POST | 调用 AI Director |
 | `/api/generation-tasks/{id}/preview` | POST | 生成 3x2 分镜预览 |
 | `/api/generation-tasks/{id}/generate-final` | POST | 并发生成前 5 张成片 |
@@ -76,6 +76,7 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。旧 `/a
 Prompt 配置可使用以下 runtime：
 
 - `runtime.candidate_retrieval`：AI Stylist 候选服饰紧凑卡片。
+- `runtime.user_requirement`：上传阶段补充要求、本次选搭微调要求和冲突处理规则。
 - `runtime.styling_result`：AI Director 使用的选搭导演上下文。
 - `runtime.model_identity_context`：AI Director 使用的数字模特身份契约和参考图上下文。
 - `runtime.shoot_script_result`：分镜预览使用的拍摄剧本上下文。
@@ -115,3 +116,11 @@ Prompt 配置可使用以下 runtime：
 - ShootScript、分镜预览、品牌妆发和 provider 默认审美不得覆盖数字模特的脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。
 - Image-2 prompt 只给当前阶段必要结构；最终单张图只给当前镜头上下文。
 - 第 6 个 ShotPlan 只用于分镜预览，不进入最终成片。
+
+## 用户要求输入原则
+
+- 用户要求不是自由长 prompt，而是业务语言中的服装事实补充、拍摄要求或选搭微调。
+- 用户要求优先于默认搭配偏好；不得覆盖商品图片事实、搭配库 READY 范围、数字模特身份契约、品牌硬边界、输出 schema 和安全规则。
+- 进入 AI Stylist 前，后端把上传阶段补充要求和本次微调要求合成为 `runtime.user_requirement` 并冻结到输入版本快照。
+- AI Stylist 输出必须包含 `user_requirement_resolution`，说明已满足项、未满足项、冲突项和替代处理。
+- AI Director 不重新选择搭配服饰，只承接 StylingPlan 中已解析的用户要求和选搭结论。
