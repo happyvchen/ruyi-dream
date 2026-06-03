@@ -2,7 +2,7 @@
 
 ## 职责 (Scope)
 
-ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + SQLite + S3 兼容对象存储的 MVP，实现搭配服饰打标与调用快照、主推款任务流、AI Stylist / StylingPlan、拍摄剧本 / ShootScript、Image-2 分镜预览/成片生成、结果复盘，并保留旧版组图接口兼容能力。
+ruyi-dream MVP 的后端实现目录。当前后端是 FastAPI + SQLite + S3 兼容对象存储的新版 AI 摄影棚实现，覆盖搭配服饰打标、主推款任务流、AI Stylist / StylingPlan、拍摄剧本 / ShootScript、Image-2 分镜预览/成片生成、结果复盘。旧版货号组图、旧 planner、旧生成批次和旧表不再兼容。
 
 设计层面的产品范围、生成职责和技术路线在 `../design/`，本目录只管“代码怎么写”和“后端契约怎么落地”。
 
@@ -16,7 +16,7 @@ ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + 
 | API | FastAPI + Uvicorn |
 | Storage | S3 兼容对象存储，私有化默认 RustFS |
 | Metadata | SQLite：`backend/data/app.sqlite3` |
-| Planner | Gemini API；失败直接返回错误并记录事件日志 |
+| AI Stylist / Director | Gemini API；失败直接返回错误并记录事件日志 |
 | Image Provider | `app/image_provider.py`，GPT Image-2 provider 适配；默认 toapis，保留 fal queue 提交、状态查询、结果下载 |
 
 直接依赖见 `requirements.txt`，传递依赖约束见 `requirements.constraints.txt`。不要预先引入复杂 SaaS 权限、多租户、计费、队列集群。
@@ -39,16 +39,16 @@ ruyi-dream MVP 的后端实现目录。当前后端已经初始化为 FastAPI + 
 
 ## 核心后端职责
 
-- 保存和管理服装货号图包对象
+- 保存和管理主推款任务图片、搭配服饰库图片和媒体资产
 - 维护数字模特档案和素材引用
 - 维护 admin-only 单一品牌资料，供后续选搭、拍摄剧本和 ShotPlan 作为结构化品牌参考
 - 维护 admin-only Prompt 配置；AI 选搭原则、品类策略、质量信号、配饰边界和库充足性口径直接写入 `AI 选搭` Prompt 正文，后端不解释其中业务规则
 - 管理 AI 摄影棚主推款任务、输入版本和状态机
-- 对未归档 READY 搭配服饰做全量标签事实快照；不做候选漏斗、排序、评分、映射、质量判断或 outfit 草案
+- 对未归档 READY 搭配服饰生成紧凑候选卡；不把完整 `ai_tags_json` / `effective_tags_json` / `manual_tags_json` / `tag_meta_json` 整包塞入 prompt
 - 调用 AI Stylist 生成带 Aesthetic Critic 诊断的 `StylingPlan`，保存完整 request/response 快照
 - 基于 `StylingPlan` 生成 ShootScript / ShotPlan 和 Image-2 任务包
 - 管理生成任务状态、单张重试、结果下载和记录复盘
-- 保存实验/生产结果、全量标签事实快照、StylingPlan 和 provider attempts 元数据
+- 保存实验/生产结果、紧凑候选快照、完整 StylingPlan 和 provider attempts 元数据
 
 ## 本地规则 (Local Rules)
 

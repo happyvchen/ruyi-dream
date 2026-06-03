@@ -27,7 +27,7 @@ flowchart TD
 
 - `AI Stylist` 负责主推款理解、造型方向探索、候选 outfit 组合、审美与商品可见性自评，并输出 `StylingPlan`。
 - `Aesthetic Critic` 是 AI Stylist 的必经质量信号，负责记录逻辑可穿但视觉难看、比例失衡、色块沉重、品牌感不足或模板化的 outfit 风险，并供系统改选、客户审核和后续流程优化使用。
-- MVP 阶段不做后端候选漏斗、召回排序、兼容性评分、outfit 草案或后端质量判断；未归档 READY 搭配服饰库的全量标签事实直接进入 AI Stylist Prompt。
+- MVP 阶段不做后端候选漏斗、召回排序、兼容性评分、outfit 草案或后端质量判断；未归档 READY 搭配服饰库经紧凑候选卡进入 AI Stylist Prompt，完整标签 JSON 只用于审计和详情。
 - 搭配库充足性诊断由 AI Stylist 基于全量标签事实输出，用于区分选搭逻辑失败与库内供给不足。
 - `StylingPlan` 是选搭阶段的结构化产物，记录造型意图、候选方案、选中 outfit、拒绝理由、评分和警告。
 - `ShootScript` / 拍摄剧本承接 `StylingPlan`，一次性生成整组全局导演设定和 6 条 `ShotPlan`，负责穿着关系、图位、景别、姿势、身位、走位、环境、光影、镜头、构图、主推款展示重点、搭配服饰风险、生成配饰调整和最终配饰方案。
@@ -86,7 +86,7 @@ DELETED
 ### 4.1 输入
 
 - 当前输入版本的主推款图片。
-- `runtime.candidate_retrieval`：当前未归档 READY 搭配服饰的全量标签事实，只暴露搭配服饰 `code` 和标签事实，不暴露系统内部 ID、版本或候选排序。
+- `runtime.candidate_retrieval`：当前未归档 READY 搭配服饰的紧凑候选卡，只暴露搭配服饰 `code` 和选搭决策字段，不暴露系统内部 ID、完整标签 JSON 或候选排序。
 - Prompt 维护中的 AI 选搭业务规则、品牌边界、配饰边界和 Aesthetic Critic 维度。
 - 与本次主推款和候选最相关的 Lily 官方品牌样本摘要。阶段 1 可用品牌边界文本占位，阶段 2 必须使用 `Lily Brand Style Index`。
 - Lily 品牌边界、商品主角原则和生产验收维度。

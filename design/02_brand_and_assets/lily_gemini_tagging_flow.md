@@ -220,20 +220,22 @@ ai_tags_json 原始返回
 
 ## 10. 选搭压缩
 
-智能选搭不直接读取完整 `ai_tags_json`。后端把 `effective_tags_json` 压缩成候选卡片：
+智能选搭不直接读取完整 `ai_tags_json`。后端把 `effective_tags_json`、人工标记和复核信息压缩成候选卡片；进入 prompt 的卡片不暴露内部 id：
 
 ```json
 {
-  "id": 123,
   "code": "126239C5959601",
   "category": "外套类",
-  "sub_category": "西装",
   "colors": ["藏青色"],
+  "materials": ["羊毛感"],
   "fit": "合体",
-  "materials_visual": ["羊毛感"],
-  "wearability": {},
-  "pairing_brief": "藏青色西装外套，结构清楚，适合通勤搭配。",
-  "risk": []
+  "silhouette": "西装外套",
+  "length": "常规",
+  "wearing_capabilities": ["可敞开外搭"],
+  "style_summary": "藏青色西装外套，结构清楚，适合通勤搭配。",
+  "pairing_risks": [],
+  "manual_flags": {},
+  "review": {"confidence": 0.86}
 }
 ```
 
