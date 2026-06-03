@@ -2210,8 +2210,7 @@ async def create_generation_shoot_script(task_id: int, request: Request, payload
 async def run_create_generation_shoot_script(task_id: int, include_debug: bool = False, trigger: str = "manual_step", user_instruction: str | None = None) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     styling_id = task["active_styling_id"]
-    input_version_id = task["current_input_version_id"]
-    if not styling_id or not input_version_id or task["status"] not in {
+    if not styling_id or task["status"] not in {
         "STYLING_READY",
         "SCRIPT_READY",
         "PREVIEW_READY",
@@ -2221,6 +2220,7 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
         "CANCELLED",
     }:
         raise HTTPException(status_code=409, detail="请先完成 AI 智能选搭")
+    input_version_id = create_generation_input_version(task_id, build_hero_product_info_context(task))
     timestamp = now_iso()
     effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "shoot_script")
     user_instruction_context = build_stage_user_instruction_context("shoot_script", effective_user_instruction)
@@ -2232,11 +2232,10 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
             UPDATE generation_tasks
             SET status = 'SCRIPT_RUNNING', updated_at = ?
             WHERE id = ?
-              AND current_input_version_id = ?
               AND active_styling_id = ?
               AND status IN ('STYLING_READY', 'SCRIPT_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED')
             """,
-            (timestamp, task_id, input_version_id, styling_id),
+            (timestamp, task_id, styling_id),
         )
         if int(transition.rowcount or 0) == 0:
             raise HTTPException(status_code=409, detail="拍摄剧本已在生成中，请勿重复提交")
@@ -2437,6 +2436,7 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
                 """
                 UPDATE generation_tasks
                 SET status = 'SCRIPT_READY',
+                    current_input_version_id = ?,
                     active_shoot_script_id = ?,
                     active_storyboard_preview_id = NULL,
                     active_preview_id = NULL,
@@ -2444,7 +2444,7 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
                     updated_at = ?
                 WHERE id = ?
                 """,
-                (shoot_script_id, timestamp, task_id),
+                (input_version_id, shoot_script_id, timestamp, task_id),
             )
     if cancelled_after_provider_return:
         return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
@@ -2468,12 +2468,12 @@ async def run_create_generation_preview(task_id: int, include_debug: bool = Fals
     task = get_generation_task_row(task_id)
     styling_id = task["active_styling_id"]
     shoot_script_id = task["active_shoot_script_id"] if "active_shoot_script_id" in task.keys() else None
-    input_version_id = task["current_input_version_id"]
-    if not styling_id or not shoot_script_id or not input_version_id or (
+    if not styling_id or not shoot_script_id or (
         task["status"] not in {"SCRIPT_READY", "PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
         and not (task["status"] == "FAILED" and not task["active_storyboard_preview_id"])
     ):
         raise HTTPException(status_code=409, detail="请先生成拍摄剧本")
+    input_version_id = create_generation_input_version(task_id, build_hero_product_info_context(task))
     with get_db() as db:
         db.execute("UPDATE generation_tasks SET status = 'PREVIEW_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
     shot_plans = get_task_shot_plans_by_script(int(shoot_script_id))
@@ -2510,7 +2510,9 @@ async def run_preview_generation(
     trigger: str = "manual_step",
 ) -> None:
     try:
-        task_package = build_new_preview_task_package(task_id, styling_id, shoot_script_id, shot_plans)
+        task_package = build_new_preview_task_package(task_id, styling_id, shoot_script_id, shot_plans, preview_id=preview_id)
+        if not task_package.get("inputVersionId"):
+            raise RuntimeError("分镜预览缺少输入版本快照")
         task_package["invocation"] = {"mode": trigger, "target": "storyboard_preview"}
         if not attempt_has_provider_request_id(attempt_id):
             update_attempt_request_snapshot(attempt_id, task_package)
@@ -2599,11 +2601,12 @@ async def run_preview_generation(
             SET status = 'PREVIEW_READY',
                 active_preview_id = ?,
                 active_storyboard_preview_id = ?,
+                current_input_version_id = ?,
                 active_result_set_id = NULL,
                 updated_at = ?
             WHERE id = ?
             """,
-            (preview_id, preview_id, timestamp, task_id),
+            (preview_id, preview_id, task_package.get("inputVersionId"), timestamp, task_id),
         )
     maybe_schedule_auto_run_for_task(task_id)
 
@@ -2655,20 +2658,26 @@ async def run_generate_final_images(
         or not task["active_storyboard_preview_id"]
         or not task["active_styling_id"]
         or not task["active_shoot_script_id"]
-        or not task["current_input_version_id"]
     ):
         raise HTTPException(status_code=409, detail="请先生成分镜预览")
     preview_id = int(task["active_storyboard_preview_id"])
     styling_id = int(task["active_styling_id"])
     shoot_script_id = int(task["active_shoot_script_id"])
-    input_version_id = int(task["current_input_version_id"])
+    with get_db() as db:
+        preview_row = db.execute(
+            "SELECT input_version_id FROM generation_previews WHERE id = ? AND task_id = ?",
+            (preview_id, task_id),
+        ).fetchone()
+    if not preview_row or not preview_row["input_version_id"]:
+        raise HTTPException(status_code=409, detail="请先生成分镜预览")
+    preview_input_version_id = int(preview_row["input_version_id"])
     effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "final_image")
     user_instruction_context = build_stage_user_instruction_context("final_image", effective_user_instruction)
     if continue_existing and task["active_result_set_id"]:
         image_ids = continue_active_final_result_set(
             task_id,
             int(task["active_result_set_id"]),
-            input_version_id,
+            preview_input_version_id,
             styling_id,
             shoot_script_id,
             preview_id,
@@ -2681,6 +2690,7 @@ async def run_generate_final_images(
                     job_key=final_set_job_key(int(task["active_result_set_id"])),
                 )
             return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
+    input_version_id = create_generation_input_version(task_id, build_hero_product_info_context(task))
     timestamp = now_iso()
     with get_db() as db:
         if user_instruction is not None:
@@ -2695,7 +2705,10 @@ async def run_generate_final_images(
         )
         result_set_id = int(cursor.lastrowid)
         supersede_generation_result_sets(db, task_id, timestamp, keep_result_set_id=result_set_id)
-        db.execute("UPDATE generation_tasks SET active_result_set_id = ?, updated_at = ? WHERE id = ?", (result_set_id, timestamp, task_id))
+        db.execute(
+            "UPDATE generation_tasks SET current_input_version_id = ?, active_result_set_id = ?, updated_at = ? WHERE id = ?",
+            (input_version_id, result_set_id, timestamp, task_id),
+        )
         shot_rows = db.execute(
             "SELECT * FROM generation_shot_plans WHERE shoot_script_id = ? AND sort_order <= 5 ORDER BY sort_order",
             (shoot_script_id,),
@@ -2900,11 +2913,15 @@ async def retry_new_result_image(image_id: int, request: Request, payload: Gener
             raise HTTPException(status_code=409, detail="当前任务正在生成中，请先取消或等待完成")
         if row["status"] in {"QUEUED", "RUNNING"}:
             raise HTTPException(status_code=409, detail="当前结果图仍在生成中")
-        timestamp = now_iso()
         effective_user_instruction = payload.userInstruction if payload and payload.userInstruction is not None else pending_generation_task_stage_instruction(row, "final_image")
-        user_instruction_context = build_stage_user_instruction_context("final_image", effective_user_instruction)
+    task_id = int(row["task_id"])
+    result_set_id = int(row["result_set_id"])
+    input_version_id = create_generation_input_version(task_id, build_hero_product_info_context(get_generation_task_row(task_id)))
+    timestamp = now_iso()
+    user_instruction_context = build_stage_user_instruction_context("final_image", effective_user_instruction)
+    with get_db() as db:
         if payload and payload.userInstruction is not None:
-            persist_generation_task_stage_instruction(db, int(row["task_id"]), "final_image", effective_user_instruction, timestamp)
+            persist_generation_task_stage_instruction(db, task_id, "final_image", effective_user_instruction, timestamp)
         db.execute(
             """
             UPDATE generation_result_images_new
@@ -2916,16 +2933,19 @@ async def retry_new_result_image(image_id: int, request: Request, payload: Gener
             """,
             (dumps(user_instruction_context), timestamp, image_id),
         )
-        db.execute("UPDATE generation_result_sets SET status = 'RUNNING', updated_at = ? WHERE id = ?", (timestamp, row["result_set_id"]))
         db.execute(
-            "UPDATE generation_tasks SET status = 'FINAL_RUNNING', active_result_set_id = ?, updated_at = ? WHERE id = ?",
-            (row["result_set_id"], timestamp, row["task_id"]),
+            "UPDATE generation_result_sets SET status = 'RUNNING', input_version_id = ?, user_instruction_json = ?, updated_at = ? WHERE id = ?",
+            (input_version_id, dumps(user_instruction_context), timestamp, result_set_id),
+        )
+        db.execute(
+            "UPDATE generation_tasks SET status = 'FINAL_RUNNING', current_input_version_id = ?, active_result_set_id = ?, updated_at = ? WHERE id = ?",
+            (input_version_id, result_set_id, timestamp, task_id),
         )
     schedule_background_generation(
-        run_final_generation(int(row["task_id"]), int(row["result_set_id"]), [image_id], trigger="manual_step"),
-        job_key=final_set_job_key(int(row["result_set_id"])),
+        run_final_generation(task_id, result_set_id, [image_id], trigger="manual_step"),
+        job_key=final_set_job_key(result_set_id),
     )
-    return {"item": get_generation_task_by_id(int(row["task_id"]), include_debug=admin_debug_for_request(request))}
+    return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
 
 @app.get("/api/generation-records")
 def list_new_generation_records(
@@ -7157,25 +7177,51 @@ def append_image_reference_manifest(prompt: str, image_inputs: list[dict[str, An
     )
 
 
-def build_new_preview_task_package(task_id: int, styling_id: int, shoot_script_id: int, shot_plans: list[dict[str, Any]]) -> dict[str, Any]:
+def build_new_preview_task_package(
+    task_id: int,
+    styling_id: int,
+    shoot_script_id: int,
+    shot_plans: list[dict[str, Any]],
+    preview_id: int | None = None,
+) -> dict[str, Any]:
     styling_plan = get_styling_plan_by_id(styling_id)
     shoot_script = get_shoot_script_json_by_id(shoot_script_id)
-    image_inputs = build_new_image_inputs(task_id, styling_id, include_preview=False)
     with get_db() as db:
+        if preview_id is not None:
+            preview_row = db.execute(
+                """
+                SELECT input_version_id, user_instruction_json
+                FROM generation_previews
+                WHERE id = ? AND task_id = ? AND styling_id = ? AND shoot_script_id = ?
+                """,
+                (preview_id, task_id, styling_id, shoot_script_id),
+            ).fetchone()
+        else:
+            preview_row = db.execute(
+                """
+                SELECT input_version_id, user_instruction_json
+                FROM generation_previews
+                WHERE task_id = ? AND styling_id = ? AND shoot_script_id = ?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (task_id, styling_id, shoot_script_id),
+            ).fetchone()
+        input_version_id = int(preview_row["input_version_id"]) if preview_row and preview_row["input_version_id"] else None
+        if input_version_id is None:
+            styling_row = db.execute("SELECT input_version_id FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
+            input_version_id = int(styling_row["input_version_id"]) if styling_row and styling_row["input_version_id"] else None
         input_row = db.execute(
-            "SELECT gtiv.* FROM generation_task_input_versions gtiv JOIN generation_stylings gs ON gs.input_version_id = gtiv.id WHERE gs.id = ?",
-            (styling_id,),
-        ).fetchone()
-        preview_row = db.execute(
-            "SELECT user_instruction_json FROM generation_previews WHERE task_id = ? AND styling_id = ? AND shoot_script_id = ? ORDER BY id DESC LIMIT 1",
-            (task_id, styling_id, shoot_script_id),
-        ).fetchone()
+            "SELECT * FROM generation_task_input_versions WHERE id = ?",
+            (input_version_id,),
+        ).fetchone() if input_version_id is not None else None
+    image_inputs = build_new_image_inputs(task_id, styling_id, include_preview=False, input_version_id=input_version_id)
     hero_product_info = loads(row_value(input_row, "hero_product_info_json"), build_hero_product_info_context({}))
     storyboard_preview_user_instruction = loads(row_value(preview_row, "user_instruction_json"), build_stage_user_instruction_context("storyboard_preview"))
     return {
         "generation": {"stage": "preview_grid"},
         "prompt": build_new_preview_prompt(shot_plans, styling_plan, shoot_script, image_inputs, hero_product_info, storyboard_preview_user_instruction),
         "imageInputs": image_inputs,
+        "inputVersionId": input_version_id,
         "heroProductInfo": hero_product_info,
         "storyboardPreviewUserInstruction": storyboard_preview_user_instruction,
         "stylingPlan": styling_plan,
@@ -7223,7 +7269,13 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
     shot_plan = loads(row["plan_json"], {})
     styling_plan = get_styling_plan_by_id(int(row["styling_id"]))
     shoot_script = get_shoot_script_json_by_id(int(row["shoot_script_id"])) if row["shoot_script_id"] else {}
-    image_inputs = build_new_image_inputs(task_id, int(row["styling_id"]), include_preview=True, preview_asset_id=row["preview_asset_id"])
+    image_inputs = build_new_image_inputs(
+        task_id,
+        int(row["styling_id"]),
+        include_preview=True,
+        preview_asset_id=row["preview_asset_id"],
+        input_version_id=int(row["input_version_id"]),
+    )
     with get_db() as db:
         input_row = db.execute("SELECT hero_product_info_json FROM generation_task_input_versions WHERE id = ?", (row["input_version_id"],)).fetchone()
     hero_product_info = loads(row_value(input_row, "hero_product_info_json"), build_hero_product_info_context({}))
@@ -7282,17 +7334,24 @@ def get_shoot_script_json_by_id(shoot_script_id: int) -> dict[str, Any]:
     return loads(row["script_json"], {})
 
 
-def build_new_image_inputs(task_id: int, styling_id: int, include_preview: bool, preview_asset_id: int | None = None) -> list[dict[str, Any]]:
+def build_new_image_inputs(
+    task_id: int,
+    styling_id: int,
+    include_preview: bool,
+    preview_asset_id: int | None = None,
+    input_version_id: int | None = None,
+) -> list[dict[str, Any]]:
     inputs: list[dict[str, Any]] = []
     with get_db() as db:
         styling = db.execute(
             "SELECT selected_material_snapshot_json, input_version_id FROM generation_stylings WHERE id = ?",
             (styling_id,),
         ).fetchone()
+        effective_input_version_id = input_version_id or (int(styling["input_version_id"]) if styling and styling["input_version_id"] else None)
         input_version = db.execute(
             "SELECT image_snapshot_json, model_snapshot_json FROM generation_task_input_versions WHERE id = ?",
-            (styling["input_version_id"],),
-        ).fetchone() if styling else None
+            (effective_input_version_id,),
+        ).fetchone() if effective_input_version_id is not None else None
     model_snapshot = loads(input_version["model_snapshot_json"], {}) if input_version else {}
     model_inputs = model_snapshot.get("imageInputs", []) if isinstance(model_snapshot, dict) else []
     if not model_inputs:
