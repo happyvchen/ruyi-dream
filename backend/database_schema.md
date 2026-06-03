@@ -29,7 +29,7 @@
 
 ## 生成主链路
 
-`generation_tasks` 是用户任务根节点。上传主推款阶段可维护 `generation_task_images` 和 `hero_product_info_text`；进入 AI 后创建 `generation_task_input_versions`，冻结主推款图片、任务名、默认数字模特快照和商品信息。任务进入 AI 阶段后仍允许用户返回上传页调整主推款图片或商品信息；一旦调整，旧阶段 artifact 和 attempt 继续保留，但当前 active 指针清空，任务回到待选搭状态。
+`generation_tasks` 是用户任务根节点。上传主推款阶段可维护 `generation_task_images` 和当前编辑中的 `hero_product_info_text`；进入 AI 后创建 `generation_task_input_versions`，冻结主推款图片、任务名、默认数字模特快照和本次实际使用的商品信息。任务进入 AI 阶段后仍允许用户返回上传页调整主推款图片或商品信息；修改图片或排序时，旧阶段 artifact 和 attempt 继续保留，但当前 active 指针清空，任务回到待选搭状态。单独保存商品信息不隐藏已生成结果，只影响下一次阶段执行。
 
 一键成片自动推进由 `generation_tasks.auto_run_target` 和 `auto_run_requested_at` 表达。当前唯一目标值为 `FINAL`。该字段只表示“继续自动推进到成片”的意图，不替代 `status`、阶段 artifact 状态或 active 指针；失败、完成、取消后清空。
 

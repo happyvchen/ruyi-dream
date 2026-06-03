@@ -35,7 +35,7 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。旧 `/a
 | `/api/generation-tasks` | GET | 任务列表 |
 | `/api/generation-tasks` | POST | 创建草稿任务，可携带商品信息 |
 | `/api/generation-tasks/{id}` | GET | 任务详情 |
-| `/api/generation-tasks/{id}` | PATCH | 编辑任务名和商品信息；修改商品信息会让非草稿任务回到待选搭 |
+| `/api/generation-tasks/{id}` | PATCH | 编辑任务名和商品信息；商品信息只影响下一次阶段执行 |
 | `/api/generation-tasks/{id}` | DELETE | 归档或删除任务 |
 | `/api/generation-tasks/{id}/images` | POST | 上传主推款图片 |
 | `/api/generation-task-images/{image_id}` | PATCH | 调整主推款图片 |
@@ -131,4 +131,4 @@ Prompt 配置可使用以下 runtime：
 - 用户要求优先于默认搭配偏好和导演偏好；不得覆盖商品图片事实、搭配库 READY 范围、数字模特身份契约、品牌硬边界、输出 schema 和安全规则。
 - AI Stylist 输出必须包含 `user_requirement_resolution`，说明已满足项、未满足项、冲突项和替代处理。
 - AI Director 不重新选择搭配服饰，只承接 StylingPlan 中已解析的用户要求和选搭结论。
-- 上传页允许在非运行中状态继续 CRUD 主推款图片；修改主推款输入会保留旧过程记录，但清空当前 active artifact 并让任务回到待选搭。
+- 上传页允许在非运行中状态继续 CRUD 主推款图片；修改主推款图片或排序会保留旧过程记录，但清空当前 active artifact 并让任务回到待选搭。单独保存商品信息不会隐藏已生成结果，只影响下一次阶段执行。

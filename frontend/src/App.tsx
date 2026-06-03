@@ -429,7 +429,6 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
               <ThumbGrid assets={(task.images ?? []).map((item) => item.asset)} compact />
               <Meta label="任务" value={task.name} />
               <Meta label="状态" value={statusText(task.status)} />
-              {task.heroProductInfo && <Meta label="商品信息" value={task.heroProductInfo} />}
               <StageUserInputModule
                 step={visibleStep}
                 task={task}
@@ -4255,7 +4254,7 @@ function formatDuration(seconds: number) {
 }
 
 function CurrentTaskCard({ task }: { task: GenerationTask }) {
-  return <div className="current-task"><ThumbGrid assets={(task.images ?? []).map((item) => item.asset)} /><Meta label="当前任务" value={task.name} /><Meta label="状态" value={statusText(task.status)} />{task.heroProductInfo && <Meta label="商品信息" value={task.heroProductInfo} />}</div>
+  return <div className="current-task"><ThumbGrid assets={(task.images ?? []).map((item) => item.asset)} /><Meta label="当前任务" value={task.name} /><Meta label="状态" value={statusText(task.status)} /></div>
 }
 
 function ThumbGrid({ assets, compact = false }: { assets: MediaAsset[]; compact?: boolean }) {

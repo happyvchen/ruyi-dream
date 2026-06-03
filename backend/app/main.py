@@ -1622,7 +1622,6 @@ def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -
         ensure_generation_task_editable(row)
         updates: list[str] = []
         values: list[Any] = []
-        affects_input = False
         if payload.name is not None:
             updates.append("name = ?")
             values.append(payload.name.strip() or "未命名任务")
@@ -1633,14 +1632,11 @@ def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -
             values.append(normalized)
             updates.append("user_requirement_text = ?")
             values.append(normalized)
-            affects_input = row["status"] != "DRAFT"
         updates.append("updated_at = ?")
         timestamp = now_iso()
         values.append(timestamp)
         values.append(task_id)
         db.execute(f"UPDATE generation_tasks SET {', '.join(updates)} WHERE id = ?", values)
-        if affects_input:
-            mark_generation_task_input_changed(db, task_id, timestamp, "hero_product_input_updated")
     return {"item": get_generation_task_by_id(task_id)}
 
 
