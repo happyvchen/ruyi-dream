@@ -323,14 +323,11 @@ h1, h2, h3, p { margin: 0; }
 .task-rail { padding: 18px; display: grid; align-content: start; gap: 16px; }
 .side-input-module {
   display: grid;
-  grid-template-columns: 82px minmax(0, 1fr);
-  gap: 10px;
-  align-items: start;
+  gap: 8px;
   font-size: 13px;
 }
 .side-input-title {
   color: #7b8797;
-  padding-top: 10px;
 }
 .side-input-control { min-width: 0; }
 .side-input-module textarea {
