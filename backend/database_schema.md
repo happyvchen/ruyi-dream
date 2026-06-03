@@ -1,6 +1,6 @@
 # Backend Database Schema
 
-当前数据库为 SQLite，初始化入口是 `backend/app/db.py:init_db()`。新版只保留 AI 摄影棚主流程、搭配服饰库、数字模特、品牌资料、Prompt 配置、拍摄配置、媒体资产和审计 attempt。旧版 `garment_skus`、`garment_images`、`shot_plans`、`shot_plan_shots`、`generation_runs`、`generation_images`、`brand_template_versions`、`ai_policy_configs` 已删除；迁移 `027` 会在旧库上 drop 这些表。
+当前数据库为 SQLite，初始化入口是 `backend/app/db.py:init_db()`。新版只保留 AI 摄影棚主流程、搭配服饰库、数字模特、品牌资料、Prompt 配置、拍摄配置、媒体资产和审计 attempt。旧版 `garment_skus`、`garment_images`、`shot_plans`、`shot_plan_shots`、`generation_runs`、`generation_images`、`brand_template_versions`、`ai_policy_configs` 已删除；迁移 `027` 会在旧库上 drop 这些表，后续迁移继续为当前新版链路追加字段。
 
 ## 表总览
 
@@ -63,11 +63,12 @@ Image-2 阶段写入：
 
 ## 迁移
 
-当前迁移链只保留新版清理迁移：
+当前迁移链只保留新版 schema 演进：
 
 | 版本 | 名称 | 动作 |
 |---|---|---|
 | `027` | `drop_legacy_generation_tables` | 删除旧货号、旧 planner、旧 generation run/image、旧品牌模板、旧 AI policy 表 |
 | `028` | `add_generation_task_auto_run` | 为 `generation_tasks` 增加一键成片自动推进字段 |
+| `029` | `add_generation_user_requirements` | 为 `generation_tasks`、`generation_task_input_versions` 和 `generation_stylings` 增加用户要求字段 |
 
-新库直接创建当前 schema；旧库执行 `027` 后只保留新版表。旧数据不做兼容读取。
+新库直接创建当前 schema；旧库执行迁移链后只保留新版表并追加当前字段。旧业务数据不做兼容读取。
