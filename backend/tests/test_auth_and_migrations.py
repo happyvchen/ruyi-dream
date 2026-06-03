@@ -27,6 +27,8 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 "APP_USER_PASSWORD": "letmein-123456",
                 "APP_ADMIN_PASSWORD": "admin-letmein-123456",
                 "APP_SESSION_SECRET": "session-secret-123",
+                "APP_S3_ACCESS_KEY_ID": "ci-test-access-key",
+                "APP_S3_SECRET_ACCESS_KEY": "ci-test-secret-key",
             }
         )
         self._reload_settings()
