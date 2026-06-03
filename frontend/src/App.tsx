@@ -131,7 +131,7 @@ export function App() {
       setPage(route.page)
       if (route.page === 'studio' && !route.taskId) setTask(null)
       if (route.page === 'studio' && route.taskId) {
-        void api.getTask(route.taskId).then((result) => setTask(result.item)).catch(() => undefined)
+        void api.getTask(route.taskId, role === 'admin').then((result) => setTask(result.item)).catch(() => undefined)
       }
       if (route.page === 'records' && !route.recordId) setRecordDetail(null)
       if (route.page === 'records' && route.recordId) {
@@ -140,7 +140,7 @@ export function App() {
     }
     window.addEventListener('popstate', handlePopState)
     return () => window.removeEventListener('popstate', handlePopState)
-  }, [])
+  }, [role])
 
   useEffect(() => {
     if (page === 'records' && recordDetail?.id) window.history.replaceState(null, '', routeToUrl({ page, recordId: recordDetail.id }))
@@ -177,7 +177,7 @@ export function App() {
     const route = parseRoute()
     const requestedTaskId = route.page === 'studio' ? route.taskId : undefined
     if (requestedTaskId && (!task || task.id !== requestedTaskId)) {
-      const detail = await api.getTask(requestedTaskId).then((r) => r.item).catch(() => null)
+      const detail = await api.getTask(requestedTaskId, role === 'admin').then((r) => r.item).catch(() => null)
       if (detail) setTask(detail)
     }
     if (route.page === 'records' && route.recordId && !recordDetail) {
@@ -377,7 +377,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   useEffect(() => {
     if (!task || !['STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)) return
     const timer = window.setInterval(() => {
-      void api.getTask(task.id).then((result) => setTask(result.item)).catch(() => undefined)
+      void api.getTask(task.id, isAdmin).then((result) => setTask(result.item)).catch(() => undefined)
     }, 1500)
     return () => window.clearInterval(timer)
   }, [task?.id, task?.status, setTask])
@@ -421,7 +421,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
                 <button onClick={() => {
                   setTask(item)
                   window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
-                  void api.getRecord(item.id).then((r) => setTask(r.item)).catch(() => undefined)
+                  void api.getRecord(item.id, isAdmin).then((r) => setTask(r.item)).catch(() => undefined)
                 }}>
                   <span>{item.name}</span><em>{item.archivedAt ? '已归档' : statusText(item.status)}</em>
                 </button>
@@ -646,7 +646,7 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
       <StageHeader title="AI 智能选搭" text="AI Stylist 会先理解主推款，再生成推荐造型方案；搭配服饰必须服务主推款展示。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('AI 智能选搭调用记录', ['generation_styling'])} />
       <AIOperationList operations={operations} />
       {task?.styling ? (
-        <StylingPlanSummary task={task} />
+        <StylingPlanSummary task={task} isAdmin={isAdmin} />
       ) : <EmptyState title="等待智能选搭" text="点击按钮后会冻结当前主推款输入版本。" />}
       <button className="primary" disabled={!canSelect} onClick={() => task && void run(hasStyling ? '重新选搭中...' : '智能选搭中...', () => {
         startLocalOperation({ ownerType: 'generation_styling', ownerId: task.id, provider: 'gemini' })
@@ -678,7 +678,7 @@ function StylingStep({ task, setTask, run, localOperations, startLocalOperation,
   )
 }
 
-function StylingPlanSummary({ task }: { task: GenerationTask }) {
+function StylingPlanSummary({ task, isAdmin }: { task: GenerationTask; isAdmin: boolean }) {
   const styling = task.styling
   if (!styling) return null
   const plan = styling.stylingPlan ?? {}
@@ -728,7 +728,7 @@ function StylingPlanSummary({ task }: { task: GenerationTask }) {
           })}
         </div>
       )}
-      <JsonOutputPanel title="模型原始输出" data={modelRawOutput(plan)} defaultOpen />
+      {isAdmin && <JsonOutputPanel title="模型原始输出" data={modelRawOutput(plan)} defaultOpen />}
     </div>
   )
 }
@@ -847,7 +847,7 @@ function ShootScriptStep({ task, setTask, run, localOperations, startLocalOperat
     <div className="step-panel">
       <StageHeader title="生成拍摄剧本" text="AI Director 会一次性生成 6 个镜头的景别、取景、姿势、走位、背景光线和商品展示要求。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成拍摄剧本调用记录', ['generation_shoot_script'])} />
       <AIOperationList operations={operations} />
-      {task?.shootScript ? <ShootScriptSummary task={task} /> : <EmptyState title="尚未生成拍摄剧本" text="点击生成后，系统会把选搭方案转成拍摄前可执行的分镜剧本。" />}
+      {task?.shootScript ? <ShootScriptSummary task={task} isAdmin={isAdmin} /> : <EmptyState title="尚未生成拍摄剧本" text="点击生成后，系统会把选搭方案转成拍摄前可执行的分镜剧本。" />}
       <button className="primary" disabled={!canGenerate} onClick={() => task && void run(hasScript ? '重新生成拍摄剧本中...' : '生成拍摄剧本中...', () => {
         startLocalOperation({ ownerType: 'generation_shoot_script', ownerId: task.id, provider: 'gemini' })
         setTask({
@@ -872,7 +872,7 @@ function ShootScriptStep({ task, setTask, run, localOperations, startLocalOperat
   )
 }
 
-function ShootScriptSummary({ task }: { task: GenerationTask }) {
+function ShootScriptSummary({ task, isAdmin }: { task: GenerationTask; isAdmin: boolean }) {
   const shootScript = task.shootScript
   if (!shootScript) return null
   const script = shootScript.script ?? {}
@@ -941,7 +941,7 @@ function ShootScriptSummary({ task }: { task: GenerationTask }) {
           </div>
         ))}
       </div>
-      <JsonOutputPanel title="模型原始输出" data={modelRawOutput(script)} defaultOpen />
+      {isAdmin && <JsonOutputPanel title="模型原始输出" data={modelRawOutput(script)} defaultOpen />}
     </div>
   )
 }

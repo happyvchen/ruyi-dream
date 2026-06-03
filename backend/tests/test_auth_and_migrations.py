@@ -54,6 +54,128 @@ class BackendCurrentFlowTests(unittest.TestCase):
     def test_legacy_planner_module_is_removed(self) -> None:
         self.assertFalse((BACKEND_DIR / "app" / "planner.py").exists())
 
+    def assert_no_model_raw_output(self, value: object) -> None:
+        if isinstance(value, dict):
+            self.assertNotIn("model_raw_output", value)
+            for item in value.values():
+                self.assert_no_model_raw_output(item)
+        if isinstance(value, list):
+            for item in value:
+                self.assert_no_model_raw_output(item)
+
+    def test_generation_debug_payloads_are_admin_only(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+
+        db_module.init_db()
+        timestamp = "2026-06-03T04:00:00Z"
+        with db_module.get_db() as db:
+            db.execute(
+                """
+                INSERT INTO generation_tasks
+                  (id, name, status, current_input_version_id, active_styling_id, active_shoot_script_id, created_at, updated_at)
+                VALUES (1, 'Debug task', 'SCRIPT_READY', 2, 3, 5, ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_task_input_versions (id, task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, created_at) VALUES (2, 1, 1, 'Debug task', '[]', '{}', ?)",
+                (timestamp,),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_stylings
+                  (id, task_id, input_version_id, source_material_ids_json, selected_material_ids_json, selected_material_snapshot_json,
+                   styling_plan_json, hero_understanding_json, outfit_candidates_json, rejected_candidates_json,
+                   reason_summary, warnings_json, status, created_at, updated_at)
+                VALUES (3, 1, 2, '[]', '[]', '[]', ?, ?, ?, ?, '已选搭', '[]', 'SUCCEEDED', ?, ?)
+                """,
+                (
+                    db_module.dumps({
+                        "schema_version": "styling-plan-v1",
+                        "reason_summary": "已选搭",
+                        "model_raw_output": {"secret": "styling raw"},
+                    }),
+                    db_module.dumps({"summary": "hero", "nested": {"model_raw_output": {"secret": "hero raw"}}}),
+                    db_module.dumps([{"title": "candidate", "model_raw_output": {"secret": "candidate raw"}}]),
+                    db_module.dumps([{"reason": "rejected", "nested": [{"model_raw_output": {"secret": "rejected raw"}}]}]),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_shoot_scripts
+                  (id, task_id, input_version_id, styling_id, status, script_json, summary_json,
+                   styling_risks_json, accessory_adjustments_json, created_at, updated_at)
+                VALUES (5, 1, 2, 3, 'SUCCEEDED', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    db_module.dumps({
+                        "schema_version": "shoot-script-v1",
+                        "user_visible_summary": {"title": "拍摄剧本"},
+                        "model_raw_output": {"secret": "script raw"},
+                    }),
+                    db_module.dumps({"title": "拍摄剧本", "model_raw_output": {"secret": "summary raw"}}),
+                    db_module.dumps([{"risk": "risk", "model_raw_output": {"secret": "risk raw"}}]),
+                    db_module.dumps([{"item_type": "bag", "nested": {"model_raw_output": {"secret": "accessory raw"}}}]),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_attempts
+                  (id, owner_type, owner_id, provider, status, request_snapshot_json, response_snapshot_json, created_at, updated_at)
+                VALUES (20, 'generation_styling', 1, 'gemini', 'SUCCEEDED', ?, ?, ?, ?)
+                """,
+                (
+                    db_module.dumps({"prompt": "debug prompt"}),
+                    db_module.dumps({"model_raw_output": {"secret": "attempt raw"}}),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+        client = TestClient(main.app)
+        try:
+            user_login = client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"})
+            self.assertEqual(user_login.status_code, 200)
+
+            public_detail = client.get("/api/generation-tasks/1")
+            self.assertEqual(public_detail.status_code, 200)
+            public_item = public_detail.json()["item"]
+            self.assertNotIn("attempts", public_item)
+            self.assert_no_model_raw_output(public_item["styling"])
+            self.assert_no_model_raw_output(public_item["shootScript"])
+
+            self.assertEqual(client.get("/api/generation-tasks/1?includeDebug=true").status_code, 403)
+            self.assertEqual(client.get("/api/generation-records/1?includeDebug=true").status_code, 403)
+            self.assertEqual(client.get("/api/generation-tasks/1/ai-invocations").status_code, 403)
+
+            admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(admin_login.status_code, 200)
+
+            debug_detail = client.get("/api/generation-tasks/1?includeDebug=true")
+            self.assertEqual(debug_detail.status_code, 200)
+            debug_item = debug_detail.json()["item"]
+            self.assertIn("attempts", debug_item)
+            self.assertEqual(debug_item["styling"]["stylingPlan"]["model_raw_output"]["secret"], "styling raw")
+            self.assertEqual(debug_item["styling"]["heroUnderstanding"]["nested"]["model_raw_output"]["secret"], "hero raw")
+            self.assertEqual(debug_item["styling"]["outfitCandidates"][0]["model_raw_output"]["secret"], "candidate raw")
+            self.assertEqual(debug_item["styling"]["rejectedCandidates"][0]["nested"][0]["model_raw_output"]["secret"], "rejected raw")
+            self.assertEqual(debug_item["shootScript"]["script"]["model_raw_output"]["secret"], "script raw")
+            self.assertEqual(debug_item["shootScript"]["summary"]["model_raw_output"]["secret"], "summary raw")
+            self.assertEqual(debug_item["shootScript"]["stylingRisks"][0]["model_raw_output"]["secret"], "risk raw")
+            self.assertEqual(debug_item["shootScript"]["accessoryAdjustments"][0]["nested"]["model_raw_output"]["secret"], "accessory raw")
+
+            invocations = client.get("/api/generation-tasks/1/ai-invocations")
+            self.assertEqual(invocations.status_code, 200)
+            self.assertEqual(invocations.json()["items"][0]["modelOutput"]["secret"], "attempt raw")
+        finally:
+            client.close()
+
     def test_poller_resumes_running_final_image_with_provider_request_before_lease_expires(self) -> None:
         db_module = importlib.import_module("app.db")
         main = importlib.import_module("app.main")
