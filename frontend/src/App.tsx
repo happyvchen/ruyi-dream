@@ -379,10 +379,10 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   }
   useEffect(() => setStep(currentStep), [task?.id, task?.status])
   useEffect(() => setHeroProductInfo(task?.heroProductInfo ?? task?.userRequirement ?? ''), [task?.id, task?.heroProductInfo, task?.userRequirement])
-  useEffect(() => setAiStylingInstruction(stageInstructionText(task?.styling?.userInstruction)), [task?.id, task?.styling?.id])
-  useEffect(() => setShootScriptInstruction(stageInstructionText(task?.shootScript?.userInstruction)), [task?.id, task?.shootScript?.id])
-  useEffect(() => setStoryboardInstruction(stageInstructionText((task?.storyboardPreview ?? task?.preview)?.userInstruction)), [task?.id, (task?.storyboardPreview ?? task?.preview)?.id])
-  useEffect(() => setFinalImageInstruction(stageInstructionText(task?.resultSet?.userInstruction)), [task?.id, task?.resultSet?.id])
+  useEffect(() => setAiStylingInstruction(task?.stageUserInputs?.aiStyling ?? stageInstructionText(task?.styling?.userInstruction)), [task?.id, task?.stageUserInputs?.aiStyling, task?.styling?.id])
+  useEffect(() => setShootScriptInstruction(task?.stageUserInputs?.shootScript ?? stageInstructionText(task?.shootScript?.userInstruction)), [task?.id, task?.stageUserInputs?.shootScript, task?.shootScript?.id])
+  useEffect(() => setStoryboardInstruction(task?.stageUserInputs?.storyboardPreview ?? stageInstructionText((task?.storyboardPreview ?? task?.preview)?.userInstruction)), [task?.id, task?.stageUserInputs?.storyboardPreview, (task?.storyboardPreview ?? task?.preview)?.id])
+  useEffect(() => setFinalImageInstruction(task?.stageUserInputs?.finalImage ?? stageInstructionText(task?.resultSet?.userInstruction)), [task?.id, task?.stageUserInputs?.finalImage, task?.resultSet?.id])
   useEffect(() => {
     let cancelled = false
     void api.listRecords({ limit: 10, offset: 0 }).then((result) => {
@@ -429,16 +429,17 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
               <ThumbGrid assets={(task.images ?? []).map((item) => item.asset)} compact />
               <Meta label="任务" value={task.name} />
               <Meta label="状态" value={statusText(task.status)} />
+              <Meta label="搭配服饰" value={`${task.styling?.selectedMaterials?.length ?? 0} 件`} />
+              <Meta label="最终图" value={`${task.resultSet?.images?.filter((i) => i.status === 'SUCCEEDED').length ?? 0}/5`} />
               <StageUserInputModule
                 step={visibleStep}
                 task={task}
                 value={stageInputValue(visibleStep, { heroProductInfo, aiStylingInstruction, shootScriptInstruction, storyboardInstruction, finalImageInstruction })}
+                savedValue={savedStageInputValue(visibleStep, task)}
                 onChange={(value) => updateStageInput(visibleStep, value, { setHeroProductInfo, setAiStylingInstruction, setShootScriptInstruction, setStoryboardInstruction, setFinalImageInstruction })}
-                onSaveHeroInfo={() => void run('保存商品信息中...', () => api.updateTask(task.id, { heroProductInfo }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}
+                onSave={() => void run('保存用户输入中...', () => api.updateTask(task.id, stageInputSavePayload(visibleStep, stageInputValue(visibleStep, { heroProductInfo, aiStylingInstruction, shootScriptInstruction, storyboardInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}
                 disabled={isTaskRunning(task) || !!task.autoRunTarget}
               />
-              <Meta label="搭配服饰" value={`${task.styling?.selectedMaterials?.length ?? 0} 件`} />
-              <Meta label="最终图" value={`${task.resultSet?.images?.filter((i) => i.status === 'SUCCEEDED').length ?? 0}/5`} />
               {isTaskRunning(task) && (
                 <button className="secondary wide" onClick={cancelCurrentTask}>
                   <CircleStop size={16} /> 取消生成
@@ -731,19 +732,36 @@ function updateStageInput(step: StudioStep, value: string, setters: StudioStageI
   else setters.setFinalImageInstruction(value)
 }
 
+function savedStageInputValue(step: StudioStep, task: GenerationTask | null) {
+  if (!task) return ''
+  if (step === 0) return task.heroProductInfo ?? task.userRequirement ?? ''
+  if (step === 1) return task.stageUserInputs?.aiStyling ?? ''
+  if (step === 2) return task.stageUserInputs?.shootScript ?? ''
+  if (step === 3) return task.stageUserInputs?.storyboardPreview ?? ''
+  return task.stageUserInputs?.finalImage ?? ''
+}
+
+function stageInputSavePayload(step: StudioStep, value: string) {
+  if (step === 0) return { heroProductInfo: value }
+  if (step === 1) return { aiStylingUserInstruction: value }
+  if (step === 2) return { shootScriptUserInstruction: value }
+  if (step === 3) return { storyboardPreviewUserInstruction: value }
+  return { finalImageUserInstruction: value }
+}
+
 function stageInstructionText(value?: Record<string, unknown> | null) {
   return stringValue(value?.instruction)
 }
 
-function StageUserInputModule({ step, task, value, onChange, onSaveHeroInfo, disabled = false }: {
+function StageUserInputModule({ step, task, value, savedValue = '', onChange, onSave, disabled = false }: {
   step: StudioStep
   task: GenerationTask | null
   value: string
+  savedValue?: string
   onChange: (value: string) => void
-  onSaveHeroInfo?: () => void
+  onSave?: () => void
   disabled?: boolean
 }) {
-  const isHeroInfo = step === 0
   const labels = [
     { title: '商品信息', hint: '跟随主推款输入版本，后续步骤会把它作为商品事实补充。', placeholder: '例如：夏季主推阔腿裤，重点展示腰头、垂坠裤腿和裤脚，避免厚重外套。' },
     { title: '智能选搭要求', hint: '执行 AI 智能选搭时生效。', placeholder: '例如：不要厚重外套，改成更轻盈的通勤搭配。' },
@@ -751,7 +769,7 @@ function StageUserInputModule({ step, task, value, onChange, onSaveHeroInfo, dis
     { title: '分镜预览要求', hint: '生成或重生分镜预览时生效。', placeholder: '例如：分镜姿态更舒展，背景保持简洁。' },
     { title: '成片生成要求', hint: '整组成片或单张重生时生效。', placeholder: '例如：整体更干净，减少配饰存在感，保持棚拍电商质感。' },
   ][step]
-  const latestText = isHeroInfo ? (task?.heroProductInfo ?? task?.userRequirement ?? '') : value
+  const saveDisabled = disabled || !task || value.trim() === savedValue.trim()
   return (
     <div className="side-input-module">
       <div>
@@ -761,9 +779,7 @@ function StageUserInputModule({ step, task, value, onChange, onSaveHeroInfo, dis
       <textarea value={value} maxLength={800} disabled={disabled} onChange={(event) => onChange(event.target.value)} placeholder={labels.placeholder} />
       <div className="side-input-actions">
         <em>{value.length}/800</em>
-        {isHeroInfo && task && (
-          <button className="secondary" type="button" disabled={disabled || value.trim() === latestText.trim()} onClick={onSaveHeroInfo}>保存</button>
-        )}
+        {task && <button className="secondary" type="button" disabled={saveDisabled} onClick={onSave}>保存</button>}
       </div>
     </div>
   )

@@ -14,6 +14,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("028", "add_generation_task_auto_run", "migration_add_generation_task_auto_run"),
     ("029", "add_generation_user_requirements", "migration_add_generation_user_requirements"),
     ("030", "split_generation_user_inputs", "migration_split_generation_user_inputs"),
+    ("031", "add_generation_pending_stage_inputs", "migration_add_generation_pending_stage_inputs"),
 )
 
 
@@ -136,6 +137,10 @@ def init_db() -> None:
               status TEXT NOT NULL DEFAULT 'DRAFT',
               user_requirement_text TEXT,
               hero_product_info_text TEXT,
+              ai_styling_user_instruction_text TEXT,
+              shoot_script_user_instruction_text TEXT,
+              storyboard_preview_user_instruction_text TEXT,
+              final_image_user_instruction_text TEXT,
               current_input_version_id INTEGER,
               active_styling_id INTEGER,
               active_shoot_script_id INTEGER,
@@ -346,6 +351,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_generation_task_auto_run": migration_add_generation_task_auto_run,
         "migration_add_generation_user_requirements": migration_add_generation_user_requirements,
         "migration_split_generation_user_inputs": migration_split_generation_user_inputs,
+        "migration_add_generation_pending_stage_inputs": migration_add_generation_pending_stage_inputs,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -408,6 +414,17 @@ def migration_split_generation_user_inputs(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE generation_result_sets ADD COLUMN user_instruction_json TEXT")
     if not table_has_column(db, "generation_result_images_new", "user_instruction_json"):
         db.execute("ALTER TABLE generation_result_images_new ADD COLUMN user_instruction_json TEXT")
+
+
+def migration_add_generation_pending_stage_inputs(db: sqlite3.Connection) -> None:
+    for column in (
+        "ai_styling_user_instruction_text",
+        "shoot_script_user_instruction_text",
+        "storyboard_preview_user_instruction_text",
+        "final_image_user_instruction_text",
+    ):
+        if not table_has_column(db, "generation_tasks", column):
+            db.execute(f"ALTER TABLE generation_tasks ADD COLUMN {column} TEXT")
 
 
 def table_has_column(db: sqlite3.Connection, table: str, column: str) -> bool:

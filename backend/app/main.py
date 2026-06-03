@@ -224,6 +224,10 @@ class StylingGarmentImageUpdateRequest(BaseModel):
 class GenerationTaskUpdateRequest(BaseModel):
     name: str | None = None
     heroProductInfo: str | None = None
+    aiStylingUserInstruction: str | None = None
+    shootScriptUserInstruction: str | None = None
+    storyboardPreviewUserInstruction: str | None = None
+    finalImageUserInstruction: str | None = None
     userRequirement: str | None = None
 
 
@@ -1613,7 +1617,18 @@ def get_generation_tasks_delete_impact(payload: DeleteImpactRequest) -> dict[str
 
 @app.patch("/api/generation-tasks/{task_id}")
 def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -> dict[str, Any]:
-    if payload.name is None and not payload_has_field(payload, "heroProductInfo") and not payload_has_field(payload, "userRequirement"):
+    instruction_fields = {
+        "aiStylingUserInstruction": "ai_styling_user_instruction_text",
+        "shootScriptUserInstruction": "shoot_script_user_instruction_text",
+        "storyboardPreviewUserInstruction": "storyboard_preview_user_instruction_text",
+        "finalImageUserInstruction": "final_image_user_instruction_text",
+    }
+    if (
+        payload.name is None
+        and not payload_has_field(payload, "heroProductInfo")
+        and not payload_has_field(payload, "userRequirement")
+        and not any(payload_has_field(payload, field) for field in instruction_fields)
+    ):
         return {"item": get_generation_task_by_id(task_id)}
     with get_db() as db:
         row = db.execute("SELECT * FROM generation_tasks WHERE id = ? AND deleted_at IS NULL", (task_id,)).fetchone()
@@ -1632,6 +1647,10 @@ def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -
             values.append(normalized)
             updates.append("user_requirement_text = ?")
             values.append(normalized)
+        for field, column in instruction_fields.items():
+            if payload_has_field(payload, field):
+                updates.append(f"{column} = ?")
+                values.append(normalize_user_input_text(getattr(payload, field)))
         updates.append("updated_at = ?")
         timestamp = now_iso()
         values.append(timestamp)
@@ -1705,6 +1724,25 @@ def mark_generation_task_input_changed(db: Any, task_id: int, timestamp: str, re
         (timestamp, task_id),
     )
     log_event(db, "generation_task", task_id, "input_changed", {"reason": reason})
+
+
+def generation_task_stage_instruction_column(stage: str) -> str | None:
+    return {
+        "ai_styling": "ai_styling_user_instruction_text",
+        "shoot_script": "shoot_script_user_instruction_text",
+        "storyboard_preview": "storyboard_preview_user_instruction_text",
+        "final_image": "final_image_user_instruction_text",
+    }.get(stage)
+
+
+def persist_generation_task_stage_instruction(db: Any, task_id: int, stage: str, instruction: str | None, timestamp: str) -> None:
+    column = generation_task_stage_instruction_column(stage)
+    if not column:
+        return
+    db.execute(
+        f"UPDATE generation_tasks SET {column} = ?, updated_at = ? WHERE id = ?",
+        (normalize_user_input_text(instruction), timestamp, task_id),
+    )
 
 
 def cancel_running_task_attempts(db: Any, task_id: int, timestamp: str) -> None:
@@ -1982,7 +2020,10 @@ async def run_select_generation_styling(
     user_requirement_context = build_user_requirement_context(task, user_instruction)
     input_version_id = create_generation_input_version(task_id, hero_product_info_context)
     with get_db() as db:
-        db.execute("UPDATE generation_tasks SET status = 'STYLING_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
+        timestamp = now_iso()
+        if user_instruction is not None:
+            persist_generation_task_stage_instruction(db, task_id, "ai_styling", user_instruction, timestamp)
+        db.execute("UPDATE generation_tasks SET status = 'STYLING_RUNNING', updated_at = ? WHERE id = ?", (timestamp, task_id))
     attempt_id = create_attempt("generation_styling", task_id, "gemini")
     try:
         input_row, candidate_snapshot, request_snapshot = build_ai_stylist_context(input_version_id)
@@ -2134,6 +2175,8 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
     timestamp = now_iso()
     user_instruction_context = build_stage_user_instruction_context("shoot_script", user_instruction)
     with get_db() as db:
+        if user_instruction is not None:
+            persist_generation_task_stage_instruction(db, task_id, "shoot_script", user_instruction, timestamp)
         transition = db.execute(
             """
             UPDATE generation_tasks
@@ -2394,6 +2437,8 @@ async def run_create_generation_preview(task_id: int, include_debug: bool = Fals
     timestamp = now_iso()
     user_instruction_context = build_stage_user_instruction_context("storyboard_preview", user_instruction)
     with get_db() as db:
+        if user_instruction is not None:
+            persist_generation_task_stage_instruction(db, task_id, "storyboard_preview", user_instruction, timestamp)
         cursor = db.execute(
             """
             INSERT INTO generation_previews (task_id, styling_id, shoot_script_id, input_version_id, user_instruction_json, status, created_at, updated_at)
@@ -2599,6 +2644,8 @@ async def run_generate_final_images(
     timestamp = now_iso()
     user_instruction_context = build_stage_user_instruction_context("final_image", user_instruction)
     with get_db() as db:
+        if user_instruction is not None:
+            persist_generation_task_stage_instruction(db, task_id, "final_image", user_instruction, timestamp)
         db.execute("UPDATE generation_tasks SET status = 'FINAL_RUNNING', updated_at = ? WHERE id = ?", (timestamp, task_id))
         cursor = db.execute(
             """
@@ -2807,6 +2854,8 @@ async def retry_new_result_image(image_id: int, request: Request, payload: Gener
             raise HTTPException(status_code=409, detail="当前结果图仍在生成中")
         timestamp = now_iso()
         user_instruction_context = build_stage_user_instruction_context("final_image", payload.userInstruction if payload else None)
+        if payload and payload.userInstruction is not None:
+            persist_generation_task_stage_instruction(db, int(row["task_id"]), "final_image", payload.userInstruction, timestamp)
         db.execute(
             """
             UPDATE generation_result_images_new
@@ -7869,6 +7918,12 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
         "status": row["status"],
         "heroProductInfo": row_value(row, "hero_product_info_text") or row_value(row, "user_requirement_text", ""),
         "userRequirement": row_value(row, "user_requirement_text", ""),
+        "stageUserInputs": {
+            "aiStyling": row_value(row, "ai_styling_user_instruction_text", ""),
+            "shootScript": row_value(row, "shoot_script_user_instruction_text", ""),
+            "storyboardPreview": row_value(row, "storyboard_preview_user_instruction_text", ""),
+            "finalImage": row_value(row, "final_image_user_instruction_text", ""),
+        },
         "currentInputVersionId": row["current_input_version_id"],
         "activeStylingId": row["active_styling_id"],
         "activeShootScriptId": row["active_shoot_script_id"] if "active_shoot_script_id" in row.keys() else None,

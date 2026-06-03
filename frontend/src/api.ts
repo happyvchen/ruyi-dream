@@ -100,6 +100,12 @@ export type GenerationTask = {
   status: string
   heroProductInfo?: string | null
   userRequirement?: string | null
+  stageUserInputs?: {
+    aiStyling?: string | null
+    shootScript?: string | null
+    storyboardPreview?: string | null
+    finalImage?: string | null
+  }
   currentInputVersionId?: number | null
   activeStylingId?: number | null
   activeShootScriptId?: number | null
@@ -564,7 +570,14 @@ export const api = {
     files.forEach((file) => form.append('files', file))
     return request<{ item: GenerationTask }>('/api/generation-tasks', { method: 'POST', body: form })
   },
-  updateTask: (id: number, payload: { name?: string; heroProductInfo?: string }) =>
+  updateTask: (id: number, payload: {
+    name?: string
+    heroProductInfo?: string
+    aiStylingUserInstruction?: string
+    shootScriptUserInstruction?: string
+    storyboardPreviewUserInstruction?: string
+    finalImageUserInstruction?: string
+  }) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   addTaskImages: (id: number, files: File[]) => {
     const form = new FormData()

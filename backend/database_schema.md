@@ -29,7 +29,7 @@
 
 ## 生成主链路
 
-`generation_tasks` 是用户任务根节点。上传主推款阶段可维护 `generation_task_images` 和当前编辑中的 `hero_product_info_text`；进入 AI 后创建 `generation_task_input_versions`，冻结主推款图片、任务名、默认数字模特快照和本次实际使用的商品信息。任务进入 AI 阶段后仍允许用户返回上传页调整主推款图片或商品信息；修改图片或排序时，旧阶段 artifact 和 attempt 继续保留，但当前 active 指针清空，任务回到待选搭状态。单独保存商品信息不隐藏已生成结果，只影响下一次阶段执行。
+`generation_tasks` 是用户任务根节点。上传主推款阶段可维护 `generation_task_images` 和当前编辑中的 `hero_product_info_text`；四个阶段用户输入草稿保存为 `*_user_instruction_text`。这些任务级用户输入只影响下一次执行，不改变任务状态、不隐藏当前 active artifact。进入 AI 后创建 `generation_task_input_versions`，冻结主推款图片、任务名、默认数字模特快照和本次实际使用的商品信息。任务进入 AI 阶段后仍允许用户返回上传页调整主推款图片或商品信息；修改图片或排序时，旧阶段 artifact 和 attempt 继续保留，但当前 active 指针清空，任务回到待选搭状态。
 
 一键成片自动推进由 `generation_tasks.auto_run_target` 和 `auto_run_requested_at` 表达。当前唯一目标值为 `FINAL`。该字段只表示“继续自动推进到成片”的意图，不替代 `status`、阶段 artifact 状态或 active 指针；失败、完成、取消后清空。
 
@@ -79,5 +79,6 @@ Image-2 阶段写入：
 | `028` | `add_generation_task_auto_run` | 为 `generation_tasks` 增加一键成片自动推进字段 |
 | `029` | `add_generation_user_requirements` | 为 `generation_tasks`、`generation_task_input_versions` 和 `generation_stylings` 增加用户要求字段 |
 | `030` | `split_generation_user_inputs` | 增加商品信息和各阶段用户介入要求字段，并从旧用户要求字段做一次性回填 |
+| `031` | `add_generation_pending_stage_inputs` | 为 `generation_tasks` 增加各阶段待执行用户输入草稿字段 |
 
 新库直接创建当前 schema；旧库执行迁移链后只保留新版表并追加当前字段。旧业务数据不做兼容读取。
