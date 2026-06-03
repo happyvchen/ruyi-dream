@@ -69,8 +69,10 @@ Prompt 配置可使用以下 runtime：
 
 - `runtime.candidate_retrieval`：AI Stylist 候选服饰紧凑卡片。
 - `runtime.styling_result`：AI Director 使用的选搭导演上下文。
+- `runtime.model_identity_context`：AI Director 使用的数字模特身份契约和参考图上下文。
 - `runtime.shoot_script_result`：分镜预览使用的拍摄剧本上下文。
 - `runtime.current_shot_context`：最终成片单镜头上下文。
+- `runtime.image_reference_manifest`：Image-2 输入参考图序号、角色和事实源优先级。
 
 不再支持 `runtime.ai_policy`、`runtime.ai_policy_card`、旧 `runtime.styling_plan`、旧 `runtime.shot_plans` 等兼容占位符。相关规则应直接写入当前 Prompt 正文或品牌/拍摄配置。
 
@@ -100,6 +102,8 @@ Prompt 配置可使用以下 runtime：
 ## 生成输入原则
 
 - 主推款和选中搭配服饰图片是商品事实来源。
-- 分镜预览是构图参考，不是商品事实来源。
+- 数字模特参考图是人物身份事实来源，必须作为 `model_identity` 前置输入并写入 `image_reference_manifest`。
+- 分镜预览是构图参考，不是商品事实来源，也不是模特身份事实来源。
+- ShootScript、分镜预览、品牌妆发和 provider 默认审美不得覆盖数字模特的脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。
 - Image-2 prompt 只给当前阶段必要结构；最终单张图只给当前镜头上下文。
 - 第 6 个 ShotPlan 只用于分镜预览，不进入最终成片。

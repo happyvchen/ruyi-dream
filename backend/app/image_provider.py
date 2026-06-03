@@ -287,15 +287,35 @@ def build_toapis_request_snapshot(task_package: dict[str, Any], image_urls: list
     prompt = str(task_package.get("prompt") or "").strip()
     if not prompt:
         raise RuntimeError("图片生成缺少 Prompt 维护渲染出的 prompt。")
+    image_inputs = task_package.get("imageInputs") if isinstance(task_package.get("imageInputs"), list) else []
     return {
         "model": settings.gpt_image2_model_id,
         "prompt": prompt,
         "reference_images": image_urls,
+        "reference_image_manifest": build_provider_reference_image_manifest(image_inputs, image_urls),
         "n": 1,
         "size": "1:1" if stage == "preview_grid" else settings.gpt_image2_size,
         "resolution": settings.gpt_image2_resolution,
         "response_format": "url",
     }
+
+
+def build_provider_reference_image_manifest(image_inputs: list[dict[str, Any]], image_urls: list[str]) -> list[dict[str, Any]]:
+    manifest: list[dict[str, Any]] = []
+    for index, url in enumerate(image_urls, start=1):
+        item = image_inputs[index - 1] if index - 1 < len(image_inputs) and isinstance(image_inputs[index - 1], dict) else {}
+        manifest.append(
+            {
+                "reference_index": index,
+                "role": str(item.get("role") or ""),
+                "assetId": item.get("assetId"),
+                "objectKey": item.get("objectKey"),
+                "filename": item.get("filename"),
+                "angle": item.get("angle"),
+                "url": url,
+            }
+        )
+    return manifest
 
 
 def upload_image_inputs(image_inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
