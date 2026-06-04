@@ -27,8 +27,6 @@
 | `StylingGarmentImage` 搭配服装单图 | 移除图片 | 不使用归档；从当前服饰图包移除 | 删除图片关系；若媒体无其它引用则释放 `MediaAsset` | 无引用时删除原图、thumb、preview |
 | `GenerationTask` / 生成记录 | 归档 | AI 摄影棚最近任务和生成记录默认隐藏，历史数据保留 | 删除任务、输入版本、主推款图片关系、StylingPlan、ShotPlan、预览、结果集、结果图、attempts | 主推款图、预览图、最终图、attempt 输出 |
 | `GenerationTaskImage` 草稿主推款单图 | 移除图片 | 不使用归档；仅草稿期允许 | 删除图片关系；若媒体无其它引用则释放 `MediaAsset` | 无引用时删除原图、thumb、preview |
-| `GarmentSku` 旧版货号 | 归档 | 旧版素材列表默认隐藏，保留方案和生成记录 | 删除货号、素材、方案、旧版生成记录 | 上传 prefix 和输出目录 |
-| `GenerationRun` 旧版生成批次 | 归档 | 旧版生成记录默认隐藏 | MVP 暂不开放 purge | 不删除 |
 | `ModelProfile` 数字模特 | 不开放普通删除 | 前台只读；如开放应优先归档 | 无历史引用且至少保留一个时才允许删除 | 模特头像目录 |
 
 ## API 契约
@@ -52,4 +50,4 @@
 
 ## 实现备注
 
-当前 MVP 同步执行对象清理，并通过幂等 `delete_object` / `delete_prefix` 容忍对象已不存在。后续如果删除量变大，应升级为 `deletion_pending` 状态和后台清理 job，但用户可见语义保持不变。
+当前 0.1.0 同步执行对象清理，并通过幂等 `delete_object` / `delete_prefix` 容忍对象已不存在。后续如果删除量变大，应升级为 `deletion_pending` 状态和后台清理 job，但用户可见语义保持不变。

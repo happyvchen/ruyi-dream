@@ -2,21 +2,20 @@
 
 ## 职责 (Scope)
 
-本目录存放 ruyi-dream MVP 的权威设计文档：产品范围、生成流程、搭配服装与媒体规则、UX、技术生产路线。
+本目录存放 ruyi-dream 0.1.0 的权威设计文档：产品范围、生成流程、搭配服装与媒体规则、UX、技术生产路线。
 
-新版形态是 B2B AI 数字化摄影棚：用户上传主推款，系统通过 AI Stylist 工作流理解主推款、探索多套造型方案、用 Aesthetic Critic 判断搭配是否真正好看、符合品牌并服务主推款，再从搭配服装库选择真实可见的配角服饰或判断无需库内配角，生成结构化拍摄剧本（ShootScript + 6 个 ShotPlan）、3x2 分镜预览，并按前 5 个镜头生成电商棚拍成片。旧版 demo 已封存为 `demo-20260518`，只复用其中有效工程手段，不延续旧版产品形态作为主流程。
+0.1.0 形态是 B2B AI 数字化摄影棚：用户上传主推款，系统通过 AI Stylist 工作流理解主推款、探索多套造型方案、用 Aesthetic Critic 判断搭配是否真正好看、符合品牌并服务主推款，再从搭配服装库选择真实可见的配角服饰或判断无需库内配角，生成结构化拍摄剧本（ShootScript + 6 个 ShotPlan）、3x2 分镜预览，并按前 5 个镜头生成电商棚拍成片。旧“单货号默认组图方案”不是 0.1.0 产品或实现依据。
 
 ## 文档索引 (Index)
 
 | 路径 | 内容 | 何时需要读 |
 |---|---|---|
-| `domain.md` | 新版 MVP 领域模型设计：模块边界、核心术语、对象定义、状态流转、职责约束和当前实现映射 | 设计领域对象、API、数据库、状态机、Prompt DTO 或跨模块流程前 |
-| `00_product_overview/CLAUDE.md` | 产品定位、MVP 范围、PRD | **任何**产品/功能设计前 |
+| `domain.md` | 0.1.0 领域模型设计：模块边界、核心术语、对象定义、状态流转、职责约束和当前实现映射 | 设计领域对象、API、数据库、状态机、Prompt DTO 或跨模块流程前 |
+| `00_product_overview/CLAUDE.md` | 产品定位、0.1.0 范围、产品需求 | **任何**产品/功能设计前 |
 | `01_generation_flow/CLAUDE.md` | 生成主流程、Image-2 输入策略、生成要素职责拆分 | 设计生成链路、任务包、prompt 策略时 |
 | `01_generation_flow/shoot_script_workflow.md` | 拍摄剧本工作流最终设计：AI 智能选搭后生成 ShootScript、分镜预览、成片、状态机、重生/失效和迁移规则 | 设计或实现拍摄剧本、分镜预览、成片重生和状态恢复时 |
-| `01_generation_flow/brand_style_retrieval_workflow.md` | Lily 官方样本库、全量标签直投、Prompt 选搭质量、穿法质量信号、受控配饰和阶段性实施计划 | 设计搭配库选搭、品牌风格证据、穿法/配饰边界时 |
+| `01_generation_flow/brand_style_retrieval_workflow.md` | Lily 品牌风格证据、全量标签直投、Prompt 选搭质量、穿法质量信号和受控配饰 | 设计搭配库选搭、品牌风格证据、穿法/配饰边界时 |
 | `02_brand_and_assets/CLAUDE.md` | 搭配服装、标签、媒体资产、数字模特、ShootScript / ShotPlan 字段 | 处理素材、标签、媒体、图位规则时 |
-| `02_brand_and_assets/lily_tagging_research_raw.md` | Lily 标签体系资料备份：官方公开信息、天猫店铺采集、本地素材盘点、甄别规则 | 追溯 Lily 标签体系设计依据时 |
 | `02_brand_and_assets/lily_tagging_system.md` | Lily 服装视觉生产标签体系：AI 标签、人工标签、官方标题标签、选搭压缩格式 | 实现或评审 Lily 标签体系时 |
 | `02_brand_and_assets/lily_gemini_tagging_flow.md` | Lily Gemini 打标流程：输入、输出、校验、effective_tags 合成和选搭压缩 | 实现或排查 Gemini 打标时 |
 | `03_ux_guide/CLAUDE.md` | 普通用户视角 UI/UX、页面信息层级、交互边界 | 设计或实现前端页面时 |
@@ -26,7 +25,7 @@
 ## 权威边界 (Authority)
 
 - **领域模型源头**：`domain.md`
-- **产品范围源头**：`00_product_overview/product_overview.md`、`00_product_overview/mvp_prd.md`
+- **产品范围源头**：`00_product_overview/product_overview.md`、`00_product_overview/product_requirements.md`
 - **生成主流程源头**：`01_generation_flow/generation_flow.md`
 - **Image-2 输入策略源头**：`01_generation_flow/image2_input_strategy.md`
 - **生成职责拆分源头**：`01_generation_flow/generation_responsibility_matrix.md`

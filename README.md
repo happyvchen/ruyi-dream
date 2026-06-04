@@ -1,10 +1,8 @@
-# ruyi-dream MVP
+# ruyi-dream 0.1.0
 
-Ruyi-Dream 是面向服饰品牌视觉生产团队的 B2B AI 数字化摄影棚。当前阶段服务单一试点客户和单一工作空间，但工程设计保留后续 SaaS 化、多客户、多租户、权限和计费扩展空间。
+Ruyi-Dream 是面向服饰品牌视觉生产团队的 B2B AI 数字化摄影棚。0.1.0 面向单一客户和单一工作空间交付，工程设计保留后续 SaaS 化、多客户、多租户、权限和计费扩展空间。
 
-新版 MVP 的核心链路是：用户在 `AI 摄影棚` 上传本次主推款，系统通过 AI Stylist 工作流理解主推款、探索并批判多套造型方案，从提前维护的 `搭配服装库` 中选择真实可见且服务主推款的配角服饰，生成只读拍摄剧本和 3x2 分镜预览，并按前 5 个镜头并发生成电商棚拍成片。
-
-旧版 demo 已封存为 `demo-20260518`。后续只复用其中仍有效的工程手段，例如 S3/RustFS 对象存储、原图/预览图/缩略图三层媒体结构、后台任务轮询、provider 调试快照等；不要让旧版“单货号默认组图方案”形态继续主导新版设计。
+0.1.0 的核心链路是：用户在 `AI 摄影棚` 上传本次主推款，系统通过 AI Stylist 工作流理解主推款、探索并批判多套造型方案，从提前维护的 `搭配服装库` 中选择真实可见且服务主推款的配角服饰，生成只读拍摄剧本和 3x2 分镜预览，并按前 5 个镜头并发生成电商棚拍成片。
 
 ## Agent 入口
 
@@ -20,16 +18,16 @@ README 面向人类快速了解项目；agent 的权威入口始终是 `AGENTS.m
 
 ## 当前范围
 
-- 服务对象：单一试点客户，单一工作空间
-- 产品阶段：MVP
+- 服务对象：单一客户，单一工作空间
+- 产品版本：0.1.0
 - 主生产入口：`AI 摄影棚`
 - 素材准备入口：`搭配服装库`、`数字模特`
 - 输出目标：每个主推款任务生成 1 份拍摄剧本、1 张 3x2 分镜预览和前 5 个镜头最终棚拍成片
-- 默认视觉生成器：`Image-2`，当前默认 provider 为 `toapis`，保留 `fal` 兼容配置
+- 默认视觉生成器：`Image-2`，当前默认 provider 为 `toapis`，支持 `fal` provider 配置
 - 对象存储：统一使用 S3 兼容对象存储；私有化默认 RustFS
 - 暂不包含：复杂多租户权限、计费、自动质量检测、视频生成、鞋包饰品商品级入库
 
-## 新版 MVP 流程
+## 0.1.0 流程
 
 ```text
 搭配服装库维护真实服饰素材与标签
@@ -189,13 +187,13 @@ RustFS/MinIO 常用 `APP_S3_FORCE_PATH_STYLE=true`；阿里 OSS 等要求 virtua
 └── docker-compose.yml
 ```
 
-当前 `frontend/` 是 React + Vite + TypeScript 单页 MVP；`backend/` 是 FastAPI + SQLite + S3 兼容对象存储 MVP。
+当前 `frontend/` 是 React + Vite + TypeScript 单页应用；`backend/` 是 FastAPI + SQLite + S3 兼容对象存储服务。
 
 ## 文档目录
 
 - [设计总索引](design/CLAUDE.md)
 - [产品总览](design/00_product_overview/product_overview.md)
-- [MVP PRD](design/00_product_overview/mvp_prd.md)
+- [0.1.0 产品需求](design/00_product_overview/product_requirements.md)
 - [生成流程](design/01_generation_flow/generation_flow.md)
 - [Image-2 输入职责拆分与提示词策略](design/01_generation_flow/image2_input_strategy.md)
 - [生成要素职责拆分总表](design/01_generation_flow/generation_responsibility_matrix.md)

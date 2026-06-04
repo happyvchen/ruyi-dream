@@ -11,7 +11,7 @@ GenerationTask
   -> GenerationResultSet / 5 x GenerationResultImage
 ```
 
-旧货号、旧 planner、旧生成批次和旧单图记录已经从领域模型中删除。当前系统只有 AI 摄影棚新版任务链路。
+0.1.0 之前的货号、planner、生成批次和单图记录已经从领域模型中删除。当前系统只有 AI 摄影棚任务链路。
 
 ## StylingGarment
 
@@ -60,7 +60,7 @@ AI Stylist 的职责是理解主推款、探索多套 outfit、批判审美与�
 - `styling_plan_json`：完整 StylingPlan，包含候选方案、选中方案、被拒方案、诊断、评分、质量信号和 warnings。
 - `selected_material_snapshot_json`：选中搭配服装的商品与图片快照。
 
-面向 prompt 的 `runtime.candidate_retrieval` 只包含业务 `code`、`ai_tags` 和必要人工/复核事实，不包含内部 id、图片快照、旧 prompt、完整历史快照或后端排序/评分结果。
+面向 prompt 的 `runtime.candidate_retrieval` 只包含业务 `code`、`ai_tags` 和必要人工/复核事实，不包含内部 id、图片快照、历史 prompt、完整历史快照或后端排序/评分结果。
 
 ## GenerationShootScript / ShotPlan
 
@@ -83,7 +83,7 @@ AI Director 基于当前 StylingPlan 生成 ShootScript。ShootScript 负责把�
 
 `一键成片` 在最终阶段复用当前 active result set。若当前结果为 `FINAL_PARTIAL`，自动续跑只把失败或缺失的单图重新排队，不覆盖已经成功的最终图；手动 `生成成片 / 重新生成成片` 仍创建新的结果集。
 
-创建新的最终图结果集、重新选搭、重新生成拍摄剧本或重新生成分镜预览时，旧 `GenerationResultSet` 会进入 `SUPERSEDED`。旧结果集中仍处于 `QUEUED` / `RUNNING` 的单图和 attempt 必须同步收口为 `CANCELLED`，避免被当前任务摘要误认为仍在生成。若旧后台 job 晚于新结果集完成，旧结果集的单图落库和 reconcile 必须视为 no-op 或取消收口，不得回写 `GenerationTask.active_result_set_id`。
+创建新的最终图结果集、重新选搭、重新生成拍摄剧本或重新生成分镜预览时，历史 `GenerationResultSet` 会进入 `SUPERSEDED`。旧结果集中仍处于 `QUEUED` / `RUNNING` 的单图和 attempt 必须同步收口为 `CANCELLED`，避免被当前任务摘要误认为仍在生成。若旧后台 job 晚于新结果集完成，旧结果集的单图落库和 reconcile 必须视为 no-op 或取消收口，不得回写 `GenerationTask.active_result_set_id`。
 
 ## GenerationAttempt
 
@@ -97,7 +97,7 @@ AI Director 基于当前 StylingPlan 生成 ShootScript。ShootScript 负责把�
 
 attempt 保存 provider、状态、请求快照、响应快照、错误、provider request id 和输出资产。技术详情默认不返回给普通前台，只在 debug 场景查看。
 
-普通任务详情中的 `aiOperations` 是当前 active 链路的轻量运行摘要，不是完整历史流水。它只包含当前 active StylingPlan、ShootScript、分镜预览和 active result set 的 attempts；旧版本、旧结果集和 superseded artifacts 的 attempts 只在技术详情或审计读取中展示。
+普通任务详情中的 `aiOperations` 是当前 active 链路的轻量运行摘要，不是完整历史流水。它只包含当前 active StylingPlan、ShootScript、分镜预览和 active result set 的 attempts；历史版本、旧结果集和 superseded artifacts 的 attempts 只在技术详情或审计读取中展示。
 
 ## Prompt DTO
 
@@ -111,6 +111,6 @@ attempt 保存 provider、状态、请求快照、响应快照、错误、provid
 | 分镜预览 | `shoot_script_result` | 全局导演、配饰、风险和 6 个镜头 |
 | 最终成片 | `current_shot_context` | 当前镜头、当前格子、选中 outfit、本镜头配饰和禁止项 |
 
-这套模型只在 AI Stylist 阶段提供搭配库 `ai_tags` 标签事实卡，避免把内部 id、旧 candidate snapshots、旧 AI Styling prompt 或完整上游对象重复塞入下游 prompt。
+这套模型只在 AI Stylist 阶段提供搭配库 `ai_tags` 标签事实卡，避免把内部 id、历史 candidate snapshots、历史 AI Styling prompt 或完整上游对象重复塞入下游 prompt。
 
 Prompt 正文只来自 `prompt_configs.content`。后端只初始化空正文的可维护 Prompt 槽位，不内置 Prompt 默认正文，也不在缺配置或空正文时使用代码字符串 fallback；缺失配置或空正文应作为配置错误处理。

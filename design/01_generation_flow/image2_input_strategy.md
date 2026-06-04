@@ -4,13 +4,13 @@
 
 Image-2 的职责是最终视觉生成。它不负责选搭、不负责标签体系、不负责历史记录，也不应临场决定整套拍摄方案。
 
-新版输入原则：
+0.1.0 输入原则：
 
 ```text
 商品图片负责商品事实，数字模特参考图负责人物身份事实，StylingPlan 负责造型意图，ShootScript 负责整组导演，ShotPlan 负责单镜头任务，文本负责边界，产品负责组装。
 ```
 
-主推款和被选中的搭配服装都是真实商品事实源，必须商品级保真。数字模特参考图是人物身份事实源，必须保持同一人的脸、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。鞋、包、饰品在 MVP 阶段由文字边界生成，只作为画面辅助，不作为商品事实源。
+主推款和被选中的搭配服装都是真实商品事实源，必须商品级保真。数字模特参考图是人物身份事实源，必须保持同一人的脸、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。鞋、包、饰品在 0.1.0 阶段由文字边界生成，只作为画面辅助，不作为商品事实源。
 
 ## 2. 10 张图片限制
 
@@ -25,9 +25,9 @@ Image-2 单次最多输入 10 张图，因此产品必须区分：
 - 单套搭配服装：最多 6 张，推荐 1-3 张。
 - 数字模特：后台可维护多张，调用时选 2 张。
 
-MVP 不做图片内容识别，选图器按已知业务角色、排序和固定优先级取图。每次 Image-2 调用必须同时写入 `image_reference_manifest`，声明 provider `reference_images` 的序号、角色和事实源，避免 provider 只收到扁平 URL 后丢失语义。
+0.1.0 不做图片内容识别，选图器按已知业务角色、排序和固定优先级取图。每次 Image-2 调用必须同时写入 `image_reference_manifest`，声明 provider `reference_images` 的序号、角色和事实源，避免 provider 只收到扁平 URL 后丢失语义。
 
-## 3. MVP 选图器规则
+## 3. 0.1.0 选图器规则
 
 预览阶段建议：
 
@@ -43,7 +43,7 @@ MVP 不做图片内容识别，选图器按已知业务角色、排序和固定�
 - 主推款按排序取前 3 张，role=`hero_garment`。
 - 选中搭配服装每套至少取第 1 张，搭配服装总计最多 4 张，role=`styling_garment`。
 
-如果超过 10 张，MVP 暂记 TODO：设计降级优先级。当前实现可先使用固定截断策略，但必须记录实际传入的 asset 列表，方便排查。
+如果超过 10 张，0.1.0 暂记 TODO：设计降级优先级。当前实现可先使用固定截断策略，但必须记录实际传入的 asset 列表，方便排查。
 
 ## 4. 图片角色
 
@@ -99,7 +99,7 @@ ShootScript 可以描述“干净自然妆容”“自信克制气质”等导�
 
 ### 4.5 生成配饰
 
-鞋、包、首饰等 MVP 阶段不作为真实商品入库。它们可以由 StylingPlan 给出初始建议，但进入分镜预览和最终成片时，必须以 ShootScript 的 `resolved_accessories` 和单镜头 `accessory_instructions` 为最终执行口径。若 `ShootScript.accessory_adjustments` 与 `StylingPlan.generated_accessories` 冲突，以 ShootScript 为准。
+鞋、包、首饰等 0.1.0 阶段不作为真实商品入库。它们可以由 StylingPlan 给出初始建议，但进入分镜预览和最终成片时，必须以 ShootScript 的 `resolved_accessories` 和单镜头 `accessory_instructions` 为最终执行口径。若 `ShootScript.accessory_adjustments` 与 `StylingPlan.generated_accessories` 冲突，以 ShootScript 为准。
 
 生成配饰必须遵守：
 

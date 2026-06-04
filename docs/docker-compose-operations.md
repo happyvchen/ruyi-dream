@@ -1,6 +1,6 @@
 # Docker Compose 部署与管理
 
-本文是单机 Docker Compose 部署的通用入口，适用于本地完整联调、客户内网试点、有公网 IP 的云服务器试点。即使部署在 AWS、阿里云或其它云主机，也优先按本文操作；云厂商差异主要体现在安全组/防火墙、数据盘挂载和公网 URL。
+本文是单机 Docker Compose 部署的通用入口，适用于本地完整联调、客户内网部署、有公网 IP 的云服务器部署。即使部署在 AWS、阿里云或其它云主机，也优先按本文操作；云厂商差异主要体现在安全组/防火墙、数据盘挂载和公网 URL。
 
 ## 适用边界
 
@@ -16,8 +16,8 @@
 | 端口 | 用途 | 建议 |
 |---|---|---|
 | `22` | SSH | 只允许运维 IP |
-| `5173` | 前端 | 试点可公网开放 |
-| `8000` 或自定义 `BACKEND_PORT` | 后端 API | 试点可公网开放，需 app gate |
+| `5173` | 前端 | 按部署策略开放 |
+| `8000` 或自定义 `BACKEND_PORT` | 后端 API | 按部署策略开放，需 app gate |
 | `9000` | RustFS S3 API | 仅默认 RustFS 部署需要；预签名图片需要浏览器可访问；优先限制来源 |
 | `9001` | RustFS Console | 仅默认 RustFS 部署需要；不建议公网开放 |
 
@@ -152,7 +152,7 @@ http://<server-ip-or-domain>:5173
 
 ## 更正式的数据盘布局
 
-仓库内 `deployment/rustfs/data` 适合试点和验收。更正式的生产部署建议使用独立 EBS/NVMe 数据盘，按 RustFS 官方建议格式化为 XFS 后挂载到固定路径，例如 `/data/rustfs0`，再把 Compose volume 从：
+仓库内 `deployment/rustfs/data` 适合本地联调和小规模单机部署。更正式的生产部署建议使用独立 EBS/NVMe 数据盘，按 RustFS 官方建议格式化为 XFS 后挂载到固定路径，例如 `/data/rustfs0`，再把 Compose volume 从：
 
 ```yaml
 ./deployment/rustfs/data:/data
@@ -284,7 +284,7 @@ docker compose logs --tail=200 rustfs
 - `.env` 中对象存储 endpoint、bucket、region、addressing style 或账号密码不匹配；默认 RustFS 部署还要确认账号密码与已有数据目录一致。
 - RustFS bind mount 目录未授权给 UID `10001`，日志包含 `Permission denied`。
 - `deployment/app-data/backend` 未授权给后端容器的 `app` 用户，日志包含无法创建 `/app/data/logs`。
-- RustFS 尚未 ready，等待后端自动重启。
+- RustFS 未 ready，等待后端自动重启。
 - 服务器时间不准，S3 签名报 `RequestTimeTooSkewed`。
 - `APP_S3_PUBLIC_ENDPOINT_URL` 或兼容的 `PUBLIC_S3_URL` 不是浏览器可访问地址，导致图片预览失败。
 - `RUSTFS_SERVER_DOMAINS` 被误用于 path-style 部署，后端创建 bucket 时报 `InvalidBucketName`。
@@ -336,7 +336,7 @@ curl http://127.0.0.1:8000/api/health
 
 ## 安全和暴露面
 
-- 内网试点可以直接暴露 `5173/8000/9000/9001`，但生产环境至少启用固定账号 app gate 或由反向代理完成访问控制。
+- 内网部署可以直接暴露 `5173/8000/9000/9001`，但生产环境至少启用固定账号 app gate 或由反向代理完成访问控制。
 - 对公网开放时，应放到 HTTPS 反向代理后面，并限制 RustFS Console 访问。
 - 不要公开 RustFS bucket。
 - 不要把 `.env`、数据库、对象数据目录提交到 Git。

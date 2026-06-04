@@ -16,6 +16,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("030", "split_generation_user_inputs", "migration_split_generation_user_inputs"),
     ("031", "add_generation_pending_stage_inputs", "migration_add_generation_pending_stage_inputs"),
     ("032", "add_shoot_script_runtime_columns", "migration_add_shoot_script_runtime_columns"),
+    ("033", "cleanup_legacy_tables_and_attempt_provider_request_ids", "migration_cleanup_legacy_tables_and_attempt_provider_request_ids"),
 )
 
 PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
@@ -364,6 +365,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_split_generation_user_inputs": migration_split_generation_user_inputs,
         "migration_add_generation_pending_stage_inputs": migration_add_generation_pending_stage_inputs,
         "migration_add_shoot_script_runtime_columns": migration_add_shoot_script_runtime_columns,
+        "migration_cleanup_legacy_tables_and_attempt_provider_request_ids": migration_cleanup_legacy_tables_and_attempt_provider_request_ids,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -390,6 +392,12 @@ def migration_drop_legacy_generation_tables(db: sqlite3.Connection) -> None:
         "ai_policy_configs",
     ):
         db.execute(f"DROP TABLE IF EXISTS {table}")
+
+
+def migration_cleanup_legacy_tables_and_attempt_provider_request_ids(db: sqlite3.Connection) -> None:
+    migration_drop_legacy_generation_tables(db)
+    if not table_has_column(db, "generation_attempts", "provider_request_id"):
+        db.execute("ALTER TABLE generation_attempts ADD COLUMN provider_request_id TEXT")
 
 
 def migration_add_generation_task_auto_run(db: sqlite3.Connection) -> None:

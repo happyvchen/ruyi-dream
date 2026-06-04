@@ -2,7 +2,7 @@
 
 ## 1. 核心架构
 
-新版 MVP 的工程链路：
+0.1.0 的工程链路：
 
 ```text
 MediaAsset
@@ -18,7 +18,7 @@ MediaAsset
 -> 生成记录复盘
 ```
 
-保留旧 demo 中可复用的工程手段：
+0.1.0 生产链路统一采用以下工程手段：
 
 - S3 兼容对象存储，私有化默认 RustFS。
 - 原图 / preview / thumb 三层媒体结构。
@@ -26,7 +26,7 @@ MediaAsset
 - provider request/response 快照。
 - 前端稳定媒体读取路径，不直接依赖短期预签名 URL。
 
-不延续旧版“货号默认组图方案”作为主流程。
+不把“货号默认组图方案”作为主流程。
 
 ## 2. 建议数据模型
 
@@ -120,7 +120,7 @@ ABANDONED
 - hero_visual_summary
 - created_at
 
-主推款图片可另建 `GenerationTaskInputImage`，也可在 MVP 用 JSON 快照引用 `MediaAsset`。
+主推款图片可另建 `GenerationTaskInputImage`，也可在 0.1.0 用 JSON 快照引用 `MediaAsset`。
 
 ### 2.6 GenerationStyling
 
@@ -280,7 +280,7 @@ Lily 官方和客户确认的品牌样本：
 - active_attempt_id
 - created_at / updated_at
 
-MVP 只保存一张分镜预览总图，不裁 frame。支持重新生成分镜预览；新预览成功后旧成片失效但保留。
+0.1.0 只保存一张分镜预览总图，不裁 frame。支持重新生成分镜预览；新预览成功后旧成片失效但保留。
 
 ### 2.10 GenerationResultSet
 
@@ -365,7 +365,7 @@ HeroUnderstanding
 
 ### 4.2 全量标签事实输入
 
-MVP 明确不做后端预筛选。AI Stylist 阶段的输入为：
+0.1.0 明确不做后端预筛选。AI Stylist 阶段的输入为：
 
 - 主推款输入版本图片和任务名。
 - 未归档、未删除、`READY` 搭配服装库全量标签事实 `library_tag_cards`。
@@ -509,93 +509,21 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 
 ### 5.4 Image-2 分镜预览
 
-输出一张 3x2 分镜预览总图。MVP 不裁切 frame。
+输出一张 3x2 分镜预览总图。0.1.0 不裁切 frame。
 
 ### 5.5 Image-2 最终图
 
 并发生成前 5 张。每张传同一张分镜预览图，并在 prompt 中指定参考第 N 格。分镜预览只提供姿势、身位、景别、构图、背景和光影方向，不作为商品事实来源。
 
-### 5.6 阶段性实施计划
+### 5.6 0.1.0 运行边界
 
-#### 当前实现状态（2026-06-02）
+0.1.0 采用 Prompt 业务脑模式。后端不做候选预筛选、排序、评分、审美改选或 ShotPlan 默认图位规划；后端负责 READY 范围过滤、全量标签事实快照、ID 白名单、状态机、schema 校验和 provider attempt 记录。
 
-MVP 已收敛为 Prompt 业务脑模式。后端不做预筛选、排序、评分、品类映射、质量判断或 ShotPlan 默认图位规划。
+AI Stylist 读取主推款图片、Prompt 正文、品牌信息和全量标签事实卡，输出 StylingPlan、候选比较、拒绝理由、质量信号和选中 outfit。ShootScript 承接 StylingPlan 并生成 6 个 ShotPlan。Image-2 生成一张 3x2 分镜预览和前 5 张最终成片。
 
-已实现：
+不属于 0.1.0 运行路径的能力统一记录在 `tasks.md`，不在权威实现指南中作为当前设计前提。
 
-- `candidate_retrieval_snapshot` 保存未归档 READY 搭配服装库全量标签事实和 ID 白名单。
-- `assembly.ai_styling` Prompt 明确由 AI Stylist 完成主推款理解、全量标签阅读、空库内搭配比较、搭配选择、Aesthetic Critic 和质量信号输出。
-- 后端只校验 `selected_outfit_key` 是否存在、`selected_material_ids` 是否来自 ID 白名单且不重复，并保存模型输出。
-- 选搭阶段不追加候选服饰图片，避免后端因图片预算变相裁剪候选。
-- 前端 API 类型已取消 `libraryAdequacy` 暴露，选搭质量复盘读取 `StylingPlan` 候选比较和质量信号。
-
-尚未实现：
-
-- 独立视觉 `HeroUnderstanding` provider 调用。
-- `category = unknown` 的完整复核/安全 fallback 状态机。
-- Lily 官方样本库表、样本导入、样本检索。
-- 基于官方样本的姿势/取景参考检索。
-- 多模态 embedding、向量检索和 compatibility ranker。
-- 反馈闭环与品牌偏好学习。
-- 前台展示 `StylingPlan` 的候选比较、被拒原因、质量信号和补充素材建议。
-- 使用新代码重新跑 335-338 并形成端到端回归记录。
-
-#### 阶段 1：修正主推款理解、穿法质量信号和品类 ShotPlan
-
-不引入新基础设施，先识别当前白色高腰阔腿裤案例中的明确风险，并避免内部质量判断让普通用户停在失败页：
-
-- 新增或固化 `HeroUnderstanding` 步骤，以图片识别主推品类、卖点、不可遮挡区域和图位需求。
-- 将 `HeroUnderstanding` 作为 AI Stylist 和 ShotPlan 的共同输入，删除任务名启发式作为主来源的旧口径。
-- 主推品类为 `unknown` 时不得进入正常选搭通过状态；低置信度进入复核或安全 fallback。
-- 排除当前主推款同 `code`、同输入素材或同商品身份的候选。
-- 强化 `StylingPlan` 空库内搭配比较，区分“应单穿/空库内搭配”和“库内配角确实优于空库内搭配”。
-- 扩展搭配服装穿法能力和穿法禁忌字段，区分 `tucked`、`half_tucked`、`untucked`、`open`、`buttoned`、`layered`。
-- 增加穿法合法性质量信号，未支持 `tucked` 的开衫/外套/厚针织若被要求全塞，应记录为审核风险和后续优化依据。
-- 扩展 Aesthetic Critic：`wearing_method_validity`、`tuck_quality`、`official_style_evidence`、`shotplan_readiness`。
-- ShotPlan 生成读取主推品类矩阵；裤装必须覆盖全身、腰脚、腰膝/腰胯、侧身/动态和标准正面颜色图。
-- 第 6 格备用姿态若优于前 5 格，前 5 格重排。
-
-验收：
-
-- 白色高腰阔腿裤不再默认把镂空开衫强行全塞。
-- 选搭快照中的主推品类不得为 `unknown`，且来源不能只依赖任务名启发式。
-- 当前主推款自己不会出现在可选搭配候选中。
-- 四个不同主推品类任务不会得到同一组模板化候选解释。
-- 搭配不好时可从 `StylingPlan` 判断是否错误地跳过空库内搭配或错选库内配角。
-- 裤装分镜预览不再出现 4 张以上重复全身图。
-- AI Stylist 不允许在缺少穿法证据或官方样本证据时给四项满分。
-
-#### 阶段 2：Lily 官方样本库
-
-继续沿用现有数据库和对象存储：
-
-- 新增品牌样本数据结构。
-- 导入 Lily 中国官网、官方天猫/淘宝、海外官方店、官方社媒和客户 lookbook 的可验证样本。
-- 为品牌样本生成品类、图位、取景、姿势、穿法、鞋包、背景、style tags 和人工复核状态。
-- AI Stylist 输入携带 3-5 个相关品牌样本摘要。
-- ShotPlan 生成按主推品类检索同品类同图位样本。
-
-验收：
-
-- 方案能说明“像哪类 Lily 官方造型”，而不是泛泛写“符合 Lily”。
-- 配饰建议能对齐官方样本，不再默认公文包化。
-
-#### 阶段 3：多模态 embedding 和向量检索
-
-当搭配服装库和品牌样本规模扩大到几百或上千件时引入：
-
-- 多模态 embedding 模型。
-- 向量存储，可从数据库 JSON/内存计算起步，后续迁移到 pgvector、Qdrant、Milvus 或 Vertex AI Vector Search。
-- 图像相似度、品牌样本相似度和主推款视觉兼容度排序。
-- embedding 版本管理和召回快照。
-
-#### 阶段 4：反馈闭环与品牌偏好学习
-
-- 记录用户接受、拒绝、重选、下载、复拍和人工否决原因。
-- 维护 compatibility ranker 或可配置排序规则。
-- 对不同系列、季节、品类维护品牌偏好 profile。
-
-## 6. API 草案
+## 6. API 契约
 
 仅作为实现方向：
 
@@ -625,7 +553,7 @@ GET    /api/generation-records/{taskId}?includeDebug=true
 
 - 所有状态推进由后端服务完成，前端不直接写阶段状态。
 - 成功后的“重新搭配 / 重新预览 / 整组换版”策略待产品拍板；当前代码暂时允许整阶段重跑，若决定禁止需同步前后端状态机。
-- 失败重试必须保留旧 attempt。
+- 失败重试必须保留历史 attempt。
 - `ImageCount` 不作为强字段，界面需要时统计。
 - 生成记录默认隐藏技术详情。
 - 搭配服装详情展示完整分层标签；Gemini 打标请求/返回属于默认折叠的技术详情。

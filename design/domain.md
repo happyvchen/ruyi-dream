@@ -1,8 +1,8 @@
 # Ruyi-Dream 领域模型设计 - v1.0
 
-本文档是 Ruyi-Dream 新版 MVP 的领域语言源头。产品流程、API、数据库、Prompt DTO、前端页面和后续服务拆分都应从这里延伸出去。
+本文档是 Ruyi-Dream 0.1.0 的领域语言源头。产品流程、API、数据库、Prompt DTO 和前端页面都应从这里延伸出去。
 
-Ruyi-Dream 是面向服饰品牌视觉生产团队的 B2B AI 数字化摄影棚。当前服务单一试点客户和单一工作空间，但领域模型保留后续 SaaS 化、多客户、多租户、权限和计费扩展空间。新版主流程不是旧版“货号默认组图方案”，而是：
+Ruyi-Dream 是面向服饰品牌视觉生产团队的 B2B AI 数字化摄影棚。0.1.0 服务单一客户和单一工作空间，领域模型保留 SaaS 化、多客户、多租户、权限和计费扩展语义。0.1.0 主流程是：
 
 ```text
 上传主推款
@@ -52,16 +52,16 @@ frontend/src/api.ts   前端 API 契约和领域类型
 5. `current_xxx_id` 表示当前输入版本指针；`active_xxx_id` 表示当前工作流主线上的成功 artifact 指针。
 6. `attempt` 表示一次外部 provider 或 AI 调用。耗时、错误、provider request id、request/response 都记录在 attempt，不用业务对象 `created_at` 充当模型耗时。
 7. 用户侧命名优先中文产品语言：`AI 智能选搭`、`拍摄剧本`、`分镜预览`、`成片`。系统侧命名使用 `StylingPlan`、`ShootScript`、`ShotPlan`、`GenerationResultImage`。
-8. 避免把旧版词汇重新带回主流程：旧“六宫格预览”用户侧统一称为“分镜预览”；旧 `garment_skus`、旧 planner、旧 generation run/image 不是新版领域对象。
+8. 避免把非 0.1.0 词汇带回主流程：“六宫格预览”用户侧统一称为“分镜预览”；`garment_skus`、planner、generation run/image 不是 0.1.0 领域对象。
 
 ## 核心术语区分
 
 ### 主推款 vs 搭配服装
 
-- **主推款**：本次拍摄的核心商品，只属于某个 `GenerationTaskInputVersion`，MVP 不建立长期主推款商品库。
+- **主推款**：本次拍摄的核心商品，只属于某个 `GenerationTaskInputVersion`，0.1.0 不建立长期主推款商品库。
 - **搭配服装**：搭配服装库中的真实配角商品，即 `StylingGarment`。只有 `READY` 且未归档、未删除的搭配服装可进入 AI Stylist 候选范围。
 
-最终图里主推款和被选中搭配服装都需要商品级保真。鞋、包、首饰和帽子在 MVP 不入库，只能作为生成配饰文字边界，不作为商品事实源，也不做特写验收。
+最终图里主推款和被选中搭配服装都需要商品级保真。鞋、包、首饰和帽子在 0.1.0 不入库，只能作为生成配饰文字边界，不作为商品事实源，也不做特写验收。
 
 ### StylingPlan vs ShootScript vs ShotPlan
 
@@ -100,7 +100,7 @@ ShootScript 不重新选择库内搭配服装；它只能基于已选 StylingPla
 
 ### session / role（会话与角色）
 
-当前 MVP 不实现注册、邀请、复杂 RBAC、多租户或计费。系统只有固定 `user` / `admin` 两类账号：
+当前 0.1.0 不实现注册、邀请、复杂 RBAC、多租户或计费。系统只有固定 `user` / `admin` 两类账号：
 
 - `user`：使用 AI 摄影棚、搭配服装库、数字模特只读页、生成记录。
 - `admin`：必须拥有 user 的完整工作流，并额外看到品牌信息、标签规则、拍摄配置、Prompt 维护等配置能力。
@@ -174,7 +174,7 @@ ShootScript 不重新选择库内搭配服装；它只能基于已选 StylingPla
 
 ### BrandStyleSample（品牌样本，后续对象）
 
-`BrandStyleSample` 保存 Lily 官方或客户确认的风格证据，不是商品事实源。当前代码尚未实现独立表，设计上应作为后续品牌风格检索和配饰边界的基础。
+`BrandStyleSample` 保存 Lily 官方或客户确认的风格证据，不是商品事实源。0.1.0 不提供独立品牌样本表；品牌边界由 `brand_profiles` 与 Prompt 正文承载。
 
 建议字段：
 
@@ -214,7 +214,7 @@ ShootScript 不重新选择库内搭配服装；它只能基于已选 StylingPla
 
 规则：
 
-- MVP 只读展示当前默认数字模特。
+- 0.1.0 只读展示当前默认数字模特。
 - 生成时保存数字模特快照，历史再次生成默认使用当时快照。
 - Image-2 输入中数字模特图是身份事实源，文本只能补充身体、发型、妆发和负向边界。
 - `ModelIdentityContract` 是从模特快照派生的强制契约；ShootScript、分镜预览、品牌妆发和 provider 默认审美不得覆盖脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。
@@ -303,7 +303,7 @@ DELETED
 - `ai_tags_json` 是 Gemini 打标原始事实账本，必须完整保存。
 - `effective_tags_json` 是后端合成后的生效标签，用于压缩候选卡。
 - AI Stylist prompt 使用 `code` 识别候选；后端执行关联时必须映射回内部 `id`。
-- 鞋、包、首饰、帽子等在 MVP 不应成为 StylingGarment。
+- 鞋、包、首饰、帽子等在 0.1.0 不应成为 StylingGarment。
 
 ### StylingGarmentImage（搭配服装图片）
 
@@ -343,7 +343,7 @@ DELETED
 - 标签事实是选搭输入，不是审美结论。
 - 人工业务标签只补充业务上下文，不改写图片可见事实。
 
-长期统一服装资产模型可以演进为 `GarmentAsset`，让同一服装在不同任务里扮演 `hero`、`styling`、`brand_reference` 或 `production_reference`。当前 MVP 落地对象仍是 `StylingGarment` 和任务内主推款输入版本，不应把未来统一资产模型误当成已实现表。
+长期统一服装资产模型可以演进为 `GarmentAsset`，让同一服装在不同任务里扮演 `hero`、`styling`、`brand_reference` 或 `production_reference`。当前 0.1.0 落地对象仍是 `StylingGarment` 和任务内主推款输入版本，不应把未来统一资产模型误当成已实现表。
 
 ## generation 模块
 
@@ -736,7 +736,7 @@ DRAFT
 
 ## Image-2 输入预算
 
-Image-2 单次最多 10 张输入图。MVP 选图策略：
+Image-2 单次最多 10 张输入图。0.1.0 选图策略：
 
 | 角色 | 数量 |
 |---|---:|
@@ -763,23 +763,8 @@ Image-2 单次最多 10 张输入图。MVP 选图策略：
 - 不用当前素材库、品牌资料或数字模特最新状态覆盖历史快照。
 - 不把第 6 格纳入最终成片。
 
-## 当前实现与后续演进
+## 当前实现
 
-当前已实现：
+0.1.0 已实现 FastAPI + SQLite + React/Vite 单体应用、S3 兼容对象存储、三层媒体资产、搭配服装库、Gemini 打标、标签规则、Prompt 维护、AI 摄影棚五步工作流、输入版本冻结、StylingPlan、ShootScript、ShotPlan、分镜预览、最终结果集、单张重试、provider attempt 快照和生成记录复盘。
 
-- FastAPI + SQLite + React/Vite 单体 MVP。
-- S3/RustFS 对象存储和三层媒体资产。
-- 搭配服装库、Gemini 打标、标签规则、Prompt 维护。
-- AI 摄影棚五步工作流。
-- `GenerationTaskInputVersion` 输入冻结。
-- `GenerationStyling`、`GenerationShootScript`、`GenerationShotPlan`、`GenerationStoryboardPreview`、`GenerationResultSet` 和单张重试。
-- provider attempt 快照和生成记录复盘。
-
-仍需收敛或后续实现：
-
-- 独立 HeroUnderstanding provider，替代任务名或同 code 启发式 fallback。
-- Lily Brand Style Index 独立对象、样本导入和检索。
-- 前台展示 `StylingPlan` 候选比较、候选排除原因、质量信号和补充素材建议。
-- 多模态 embedding、向量检索和反馈闭环。
-- 单张重生版本与当前成功图更清晰地分离，避免失败重生覆盖已成功结果。
-- 生产级错误码、事件等级、可恢复操作指引和日志检索。
+不属于 0.1.0 运行路径的能力统一记录在 `tasks.md`，不得在当前领域模型中作为已实现对象引用。

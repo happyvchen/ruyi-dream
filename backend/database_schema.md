@@ -1,6 +1,6 @@
 # Backend Database Schema
 
-当前数据库为 SQLite，初始化入口是 `backend/app/db.py:init_db()`。新版只保留 AI 摄影棚主流程、搭配服装库、数字模特、品牌资料、Prompt 配置、拍摄配置、媒体资产和审计 attempt。旧版 `garment_skus`、`garment_images`、`shot_plans`、`shot_plan_shots`、`generation_runs`、`generation_images`、`brand_template_versions`、`ai_policy_configs` 已删除；迁移 `027` 会在旧库上 drop 这些表，后续迁移继续为当前新版链路追加字段。
+当前数据库为 SQLite，初始化入口是 `backend/app/db.py:init_db()`。0.1.0 只保留 AI 摄影棚主流程、搭配服装库、数字模特、品牌资料、Prompt 配置、拍摄配置、媒体资产和审计 attempt。0.1.0 之前的 `garment_skus`、`garment_images`、`shot_plans`、`shot_plan_shots`、`generation_runs`、`generation_images`、`brand_template_versions`、`ai_policy_configs` 已删除；迁移 `027` 会在历史库上 drop 这些表，后续迁移继续为当前链路追加字段。
 
 ## 表总览
 
@@ -37,7 +37,7 @@ AI Stylist 写入 `generation_stylings`：
 
 - `candidate_retrieval_snapshot_json` 保存本次 READY 搭配库的全量标签事实卡和 code/id 映射。
 - `user_instruction_json` 保存本次 AI Stylist 实际读取的用户介入要求和冲突处理策略。
-- `user_requirement_json` 保留为旧合成用户要求兼容字段。
+- `user_requirement_json` 保存历史任务的合成用户要求快照；新执行链路以 `hero_product_info_json` 和各阶段 `user_instruction_json` 为准。
 - `styling_plan_json` 保存完整 StylingPlan，包括候选方案、被拒方案、Aesthetic Critic 诊断、质量信号和选中 outfit。
 - `selected_material_snapshot_json` 保存被选中搭配服装的商品快照和图片快照。
 
@@ -58,29 +58,29 @@ Image-2 阶段写入：
 
 - `runtime.styling_garment`：AI 打标使用的当前搭配服装 code 和图片输入摘要。
 - `runtime.candidate_retrieval`：AI Stylist 使用的未归档 READY 搭配库全量标签事实卡，只暴露业务 `code`、`ai_tags` 和必要复核/人工标记。
-- `runtime.hero_product_info`：跟随本阶段实际使用的主推款输入版本冻结的商品信息和业务事实补充；重新执行拍摄剧本、分镜预览、成片或单张重生时会冻结最新任务商品信息。
+- `runtime.hero_product_info`：跟随当前执行实际使用的主推款输入版本冻结的商品信息和业务事实补充；重新执行拍摄剧本、分镜预览、成片或单张重生时会冻结最新任务商品信息。
 - `runtime.ai_styling_user_instruction`：AI 智能选搭本次执行的用户介入要求。
 - `runtime.shoot_script_user_instruction`：拍摄剧本本次执行的用户介入要求。
 - `runtime.storyboard_preview_user_instruction`：分镜预览本次执行的用户介入要求。
 - `runtime.final_image_user_instruction`：最终成片或单张重生本次执行的用户介入要求。
-- `runtime.user_requirement`：兼容旧模板的合成用户要求上下文。
 - `runtime.styling_result`：AI Director 使用的 StylingPlan 导演上下文。
 - `runtime.shoot_script_result`：分镜预览使用的 ShootScript 上下文。
 - `runtime.current_shot_context`：单张最终成片上下文。
 
-旧 `ai_policy_configs` 表已删除。AI 选搭规则、质量信号、配饰边界和品牌口径直接维护在 `assembly.ai_styling` Prompt 正文中；拍摄剧本、分镜预览和最终成片文字也必须来自对应 Prompt 配置。
+历史 `ai_policy_configs` 表已删除。AI 选搭规则、质量信号、配饰边界和品牌口径直接维护在 `assembly.ai_styling` Prompt 正文中；拍摄剧本、分镜预览和最终成片文字也必须来自对应 Prompt 配置。
 
 ## 迁移
 
-当前迁移链只保留新版 schema 演进：
+当前迁移链只保留 0.1.0 schema 演进：
 
 | 版本 | 名称 | 动作 |
 |---|---|---|
-| `027` | `drop_legacy_generation_tables` | 删除旧货号、旧 planner、旧 generation run/image、旧品牌模板、旧 AI policy 表 |
+| `027` | `drop_legacy_generation_tables` | 删除 0.1.0 之前的货号、planner、generation run/image、品牌模板和 AI policy 表 |
 | `028` | `add_generation_task_auto_run` | 为 `generation_tasks` 增加一键成片自动推进字段 |
 | `029` | `add_generation_user_requirements` | 为 `generation_tasks`、`generation_task_input_versions` 和 `generation_stylings` 增加用户要求字段 |
 | `030` | `split_generation_user_inputs` | 增加商品信息和各阶段用户介入要求字段，并从旧用户要求字段做一次性回填 |
 | `031` | `add_generation_pending_stage_inputs` | 为 `generation_tasks` 增加各阶段待执行用户输入草稿字段 |
 | `032` | `add_shoot_script_runtime_columns` | 为旧库补齐拍摄剧本、分镜预览和成片复盘所需的运行时列，并将 `generation_shot_plans` 唯一约束迁到 `(shoot_script_id, sort_order)` |
+| `033` | `cleanup_legacy_tables_and_attempt_provider_request_ids` | 确保 attempt provider 请求 ID 列存在，并再次清理 0.1.0 之前的空表残留 |
 
-新库直接创建当前 schema；旧库执行迁移链后只保留新版表并追加当前字段。旧业务数据不做兼容读取。
+新库直接创建当前 schema；已有库执行迁移链后只保留 0.1.0 表并追加当前字段。0.1.0 之前的业务表不作为运行时读取路径。

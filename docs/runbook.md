@@ -2,7 +2,7 @@
 
 ## Scope
 
-This runbook is for MVP single-machine private deployments using Docker Compose, FastAPI, SQLite, RustFS, Gemini, and the configured Image-2 provider.
+This runbook is for 0.1.0 single-machine private deployments using Docker Compose, FastAPI, SQLite, RustFS, Gemini, and the configured Image-2 provider.
 
 Use it to decide whether an incident is configuration, storage, provider, data, or application code related.
 

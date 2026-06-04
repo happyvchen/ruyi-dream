@@ -13,7 +13,6 @@ COPY requirements.txt requirements.constraints.txt ./
 RUN pip install --no-cache-dir -r requirements.txt -c requirements.constraints.txt
 
 COPY app ./app
-COPY ref ./ref
 
 RUN groupadd --system app \
   && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app \

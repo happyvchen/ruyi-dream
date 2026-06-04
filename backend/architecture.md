@@ -13,7 +13,7 @@
 | `app/object_storage.py` | S3/RustFS 对象访问、预签名 URL、删除和读取 |
 | `app/config.py` | 环境变量和运行配置 |
 
-旧 `app/planner.py` 已删除。后端不再提供旧货号组图规划器、旧 `garment-skus`、旧 `shot-plans` 或旧 `generation-runs` 主流程。
+历史 `app/planner.py` 已删除。后端不再提供旧货号组图规划器、历史 `garment-skus`、历史 `shot-plans` 或历史 `generation-runs` 主流程。
 
 ## 业务模块
 
@@ -75,7 +75,7 @@ POST /api/generation-tasks/{id}/auto-run-final
 后端区分“审计快照”和“进入模型的 prompt DTO”：
 
 - `generation_attempts.request_snapshot_json` 可以保存技术排查需要的 request/response 快照。
-- 传给模型的 runtime 只给当前阶段必需信息，不透传完整历史阶段、完整候选池或旧 prompt。
+- 传给模型的 runtime 只给当前步骤必需信息，不透传完整历史阶段、完整候选池或历史 prompt。
 - AI Stylist 输入是未归档 READY 搭配库全量标签事实卡和 `user_requirement`。用户要求优先于默认搭配偏好，但不能覆盖商品事实、搭配库事实、品牌硬边界、输出 schema 和安全规则。
 - AI Director 输入是 `styling_result_for_prompt` + `model_identity_context_for_prompt`，只包含主推款理解、选中 outfit、选中服饰紧凑标签、理由、质量信号、warnings 和数字模特身份契约。
 - 分镜预览输入是 `shoot_script_result_for_prompt` + `image_reference_manifest_for_prompt`，只包含全局导演、配饰、风险、6 个镜头、输入参考图序号和事实源。
@@ -83,7 +83,7 @@ POST /api/generation-tasks/{id}/auto-run-final
 
 数字模特参考图是人物身份事实源。后端必须把 `model_identity` 参考图前置进 Image-2 输入，并在 prompt 中声明它们覆盖 ShootScript、分镜预览和品牌妆发文字；分镜预览只允许作为构图、姿势和光影参考。
 
-不实现独立 prompt 长度预算监控；本轮优化通过结构化 DTO 和删除旧兼容注入来控制上下文体量。
+不实现独立 prompt 长度预算监控；0.1.0 通过结构化 DTO 和删除历史注入来控制上下文体量。
 
 Prompt 正文只来自 `prompt_configs.content`。后端只初始化空正文的可维护 Prompt 槽位，不在代码、迁移或初始化中保存 Prompt 默认正文；缺少 Prompt 配置或正文为空时应暴露配置错误，而不是使用代码字符串 fallback。
 
@@ -91,10 +91,10 @@ Prompt 正文只来自 `prompt_configs.content`。后端只初始化空正文的
 
 对象存储保存原图，应用层登记 `thumb`、`preview`、`original` 三层媒体结构。前端访问稳定 `/api/media?key=...&variant=...`，后端校验 key 后跳转对象存储短期 URL。
 
-`generation_previews` 和 `generation_result_images_new` 使用 `locked_by` / `locked_until` / `run_attempts` 做单实例恢复。后端重启后，poller 扫描锁过期任务，标记旧 attempt 失败并重建 attempt 继续执行。带有 `auto_run_target = FINAL` 的任务会在非运行中状态下重新调度自动推进。
+`generation_previews` 和 `generation_result_images_new` 使用 `locked_by` / `locked_until` / `run_attempts` 做单实例恢复。后端重启后，poller 扫描锁过期任务，标记历史 attempt 失败并重建 attempt 继续执行。带有 `auto_run_target = FINAL` 的任务会在非运行中状态下重新调度自动推进。
 
 ## 约束
 
 - Image-2 只负责视觉生成，不承担标签、选搭、历史状态或业务策略。
 - 用户不写长 prompt；用户可填写简短业务要求，并确认拍摄信息、造型方案、分镜预览和结果。
-- 旧逻辑、旧表和旧数据不再兼容读取。
+- 0.1.0 之前的逻辑、库表和数据不作为运行时读取路径。
