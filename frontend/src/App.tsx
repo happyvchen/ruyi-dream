@@ -508,10 +508,12 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
               <div key={item.id} className={`mini-row view-only ${task?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
                 <button onClick={() => openRecentTask(item)} title="恢复拍摄任务">
                   <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
-                  <span>
+                  <span className="recent-task-copy">
                     <strong>{item.name}</strong>
-                    <em>{item.archivedAt ? '已归档' : statusText(item.status)} · {dateText(item.createdAt)}</em>
-                    <small>最终图 {taskFinalImageCount(item)}/5</small>
+                    <span className="recent-task-meta">
+                      <em>{item.archivedAt ? '已归档' : statusText(item.status)}</em>
+                      <time dateTime={item.createdAt}>{dateText(item.createdAt)}</time>
+                    </span>
                   </span>
                 </button>
                 {isTaskRunning(item) && (
@@ -615,10 +617,6 @@ function taskResumeActionLabel(task: GenerationTask) {
   if (isTaskRunning(task)) return '查看进度'
   if (task.status === 'COMPLETED') return '再次生成'
   return '继续生成'
-}
-
-function taskFinalImageCount(task: GenerationTask) {
-  return task.resultSet?.images?.filter((image) => image.status === 'SUCCEEDED').length ?? task.summary?.finalImages?.length ?? 0
 }
 
 function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any; heroProductInfo: string }) {
