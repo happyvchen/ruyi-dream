@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { DragEvent, FormEvent, ReactNode } from 'react'
+import type { DragEvent, FormEvent, ReactNode, UIEvent } from 'react'
 import {
   Bot,
   ArrowDown,
@@ -82,6 +82,7 @@ const adminPages = new Set<Page>(['brand', 'shoot-config', 'tag-rules', 'prompt-
 
 const defaultPageSizeOptions = [20, 50, 100] as const
 const densePageSizeOptions = [12, 50, 100] as const
+const recentTaskPageSize = 10
 
 export function App() {
   const [checked, setChecked] = useState(false)
@@ -193,6 +194,13 @@ export function App() {
     window.history.pushState(null, '', routeToUrl({ page: next }))
   }
 
+  function openTaskInStudio(item: GenerationTask) {
+    setPage('studio')
+    setTask(item)
+    window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
+    void api.getTask(item.id, role === 'admin').then((result) => setTask(result.item)).catch(() => undefined)
+  }
+
   async function run<T>(label: string, action: () => Promise<T>, after?: (value: T) => void, options: RunOptions = {}) {
     setBusy(label)
     setError('')
@@ -286,7 +294,7 @@ export function App() {
         {page === 'model' && <ModelPage models={models} />}
         {page === 'brand' && role === 'admin' && <BrandInfoPage initialBrandInfo={brandInfo} setBrandInfo={setBrandInfo} run={run} />}
         {page === 'prompt-maintenance' && role === 'admin' && <PromptMaintenancePage run={run} />}
-        {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} run={run} />}
+        {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} openTaskInStudio={openTaskInStudio} run={run} />}
       </main>
     </div>
   )
@@ -344,7 +352,10 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   clearLocalOperationsFor: (ownerTypes: string[], taskId?: number | null) => void
 }) {
   const [step, setStep] = useState<StudioStep>(0)
-  const [taskItems, setTaskItems] = useState<GenerationTask[]>(records.slice(0, 10))
+  const [taskItems, setTaskItems] = useState<GenerationTask[]>(records.slice(0, recentTaskPageSize))
+  const [recentTaskTotal, setRecentTaskTotal] = useState(records.length)
+  const [recentTaskHasMore, setRecentTaskHasMore] = useState(records.length > recentTaskPageSize)
+  const [recentTaskLoading, setRecentTaskLoading] = useState(false)
   const [aiLogDialog, setAiLogDialog] = useState<{ title: string; ownerTypes: string[]; records: AICallRecord[]; loading: boolean; error?: string } | null>(null)
   const [heroProductInfo, setHeroProductInfo] = useState('')
   const [aiStylingInstruction, setAiStylingInstruction] = useState('')
@@ -357,6 +368,27 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   function applyTaskUpdate(nextTask: GenerationTask) {
     setTask(nextTask)
     setTaskItems((current) => upsertRecentTaskItem(current, nextTask))
+  }
+  function openRecentTask(item: GenerationTask) {
+    applyTaskUpdate(item)
+    window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
+    void api.getRecord(item.id, isAdmin).then((r) => applyTaskUpdate(r.item)).catch(() => undefined)
+  }
+  function loadRecentTasks(offset = 0, append = false) {
+    if (recentTaskLoading) return
+    setRecentTaskLoading(true)
+    void api.listRecords({ limit: recentTaskPageSize, offset }).then((result) => {
+      setRecentTaskTotal(result.total)
+      setRecentTaskHasMore(result.hasMore)
+      setTaskItems((current) => append ? mergeRecentTaskItems(current, result.items) : result.items)
+    }).catch(() => undefined).finally(() => setRecentTaskLoading(false))
+  }
+  function handleRecentTaskScroll(event: UIEvent<HTMLDivElement>) {
+    const element = event.currentTarget
+    if (!recentTaskHasMore || recentTaskLoading) return
+    if (element.scrollHeight - element.scrollTop - element.clientHeight < 80) {
+      loadRecentTasks(taskItems.length, true)
+    }
   }
   function openAICallLogs(title: string, ownerTypes: string[]) {
     if (!task || !isAdmin) return
@@ -391,12 +423,10 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   useEffect(() => setStoryboardInstruction(task?.stageUserInputs?.storyboardPreview ?? stageInstructionText((task?.storyboardPreview ?? task?.preview)?.userInstruction)), [task?.id, task?.stageUserInputs?.storyboardPreview, (task?.storyboardPreview ?? task?.preview)?.id])
   useEffect(() => setFinalImageInstruction(task?.stageUserInputs?.finalImage ?? stageInstructionText(task?.resultSet?.userInstruction)), [task?.id, task?.stageUserInputs?.finalImage, task?.resultSet?.id])
   useEffect(() => {
-    let cancelled = false
-    void api.listRecords({ limit: 10, offset: 0 }).then((result) => {
-      if (cancelled) return
-      setTaskItems(result.items)
-    }).catch(() => undefined)
-    return () => { cancelled = true }
+    setTaskItems(records.slice(0, recentTaskPageSize))
+    setRecentTaskTotal(records.length)
+    setRecentTaskHasMore(records.length > recentTaskPageSize)
+    loadRecentTasks(0)
   }, [records])
   useEffect(() => {
     if (!task || (!['STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status) && !task.autoRunTarget)) return
@@ -471,15 +501,16 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
             </>
           )}
           <h3>最近任务</h3>
-          <div className="mini-list">
+          <div className="mini-list recent-task-list" onScroll={handleRecentTaskScroll}>
             {taskItems.map((item) => (
               <div key={item.id} className={`mini-row view-only ${task?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
-                <button onClick={() => {
-                  applyTaskUpdate(item)
-                  window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
-                  void api.getRecord(item.id, isAdmin).then((r) => applyTaskUpdate(r.item)).catch(() => undefined)
-                }}>
-                  <span>{item.name}</span><em>{item.archivedAt ? '已归档' : statusText(item.status)}</em>
+                <button onClick={() => openRecentTask(item)} title="恢复拍摄任务">
+                  <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
+                  <span>
+                    <strong>{item.name}</strong>
+                    <em>{item.archivedAt ? '已归档' : statusText(item.status)} · {dateText(item.createdAt)}</em>
+                    <small>最终图 {taskFinalImageCount(item)}/5</small>
+                  </span>
                 </button>
                 {isTaskRunning(item) && (
                   <button
@@ -499,6 +530,11 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
               </div>
             ))}
             {!taskItems.length && <EmptyState title="暂无任务" text="创建拍摄任务后会出现在这里。" />}
+            {!!taskItems.length && (
+              <div className="recent-task-footer">
+                {recentTaskLoading ? '正在加载更多...' : recentTaskHasMore ? `已显示 ${taskItems.length} / 共 ${recentTaskTotal} 条` : `已触底，共 ${recentTaskTotal} 条`}
+              </div>
+            )}
           </div>
         </aside>
       </div>
@@ -556,7 +592,31 @@ function AutoRunProgress({ task }: { task: GenerationTask }) {
 function upsertRecentTaskItem(items: GenerationTask[], task: GenerationTask) {
   const next = items.map((item) => item.id === task.id ? { ...item, ...task } : item)
   if (next.some((item) => item.id === task.id)) return next
-  return [task, ...next].slice(0, 10)
+  return [task, ...next]
+}
+
+function mergeRecentTaskItems(current: GenerationTask[], incoming: GenerationTask[]) {
+  const seen = new Set<number>()
+  return [...current, ...incoming].filter((item) => {
+    if (seen.has(item.id)) return false
+    seen.add(item.id)
+    return true
+  })
+}
+
+function taskCoverAsset(task: GenerationTask) {
+  return task.summary?.cover ?? task.images?.[0]?.asset ?? null
+}
+
+function taskResumeActionLabel(task: GenerationTask) {
+  if (task.archivedAt) return '查看任务'
+  if (isTaskRunning(task)) return '查看进度'
+  if (task.status === 'COMPLETED') return '再次生成'
+  return '继续生成'
+}
+
+function taskFinalImageCount(task: GenerationTask) {
+  return task.resultSet?.images?.filter((image) => image.status === 'SUCCEEDED').length ?? task.summary?.finalImages?.length ?? 0
 }
 
 function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any; heroProductInfo: string }) {
@@ -3302,7 +3362,13 @@ function TaxonomyCategoryPicker({ label, dimensions, draftDimensionCode, draftTa
   )
 }
 
-function RecordsPage({ records, detail, setDetail, run }: { records: GenerationTask[]; detail: GenerationTask | null; setDetail: (task: GenerationTask | null) => void; run: any }) {
+function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
+  records: GenerationTask[]
+  detail: GenerationTask | null
+  setDetail: (task: GenerationTask | null) => void
+  openTaskInStudio: (task: GenerationTask) => void
+  run: any
+}) {
   const [items, setItems] = useState<GenerationTask[]>(records)
   const [offset, setOffset] = useState(0)
   const [total, setTotal] = useState(0)
@@ -3457,10 +3523,16 @@ function RecordsPage({ records, detail, setDetail, run }: { records: GenerationT
                 aria-label={`选择 ${item.name}`}
               />
               <button className="record-open" aria-current={detail?.id === item.id ? 'true' : undefined} title="查看记录详情" onClick={() => openRecord(item)}>
-                <AssetThumb asset={item.summary?.cover ?? null} interactive={false} />
+                <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
                 <div><strong>{item.name}</strong><span>{item.archivedAt ? '已归档' : statusText(item.status)} · {dateText(item.createdAt)}</span></div>
                 <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
-                <span className="record-eye" aria-hidden="true"><Eye size={16} /></span>
+              </button>
+              <button
+                className="primary record-action-button"
+                onClick={() => openTaskInStudio(item)}
+                title="回到 AI 摄影棚恢复该任务"
+              >
+                {taskResumeActionLabel(item)}
               </button>
               <button
                 className="secondary record-action-button"
