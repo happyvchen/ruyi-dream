@@ -1,6 +1,6 @@
 # Backend Database Schema
 
-当前数据库为 SQLite，初始化入口是 `backend/app/db.py:init_db()`。新版只保留 AI 摄影棚主流程、搭配服饰库、数字模特、品牌资料、Prompt 配置、拍摄配置、媒体资产和审计 attempt。旧版 `garment_skus`、`garment_images`、`shot_plans`、`shot_plan_shots`、`generation_runs`、`generation_images`、`brand_template_versions`、`ai_policy_configs` 已删除；迁移 `027` 会在旧库上 drop 这些表，后续迁移继续为当前新版链路追加字段。
+当前数据库为 SQLite，初始化入口是 `backend/app/db.py:init_db()`。新版只保留 AI 摄影棚主流程、搭配服装库、数字模特、品牌资料、Prompt 配置、拍摄配置、媒体资产和审计 attempt。旧版 `garment_skus`、`garment_images`、`shot_plans`、`shot_plan_shots`、`generation_runs`、`generation_images`、`brand_template_versions`、`ai_policy_configs` 已删除；迁移 `027` 会在旧库上 drop 这些表，后续迁移继续为当前新版链路追加字段。
 
 ## 表总览
 
@@ -9,7 +9,7 @@
 | `model_profiles` | `ModelProfile` | 数字模特档案和头部参考图 |
 | `brand_profiles` | `BrandProfile` | 单一品牌资料 |
 | `media_assets` | `MediaAsset` | S3/RustFS 对象索引和衍生图 key |
-| `styling_garments` | `StylingGarment` | 搭配服饰库商品 |
+| `styling_garments` | `StylingGarment` | 搭配服装库商品 |
 | `styling_garment_images` | `StylingGarmentImage` | 搭配服饰图片链接 |
 | `generation_tasks` | `GenerationTask` | AI 摄影棚主推款任务 |
 | `generation_task_images` | `GenerationTaskImage` | 主推款图片链接 |

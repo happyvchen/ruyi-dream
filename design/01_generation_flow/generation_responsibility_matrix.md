@@ -22,7 +22,7 @@ MVP 阶段 Gemini 在 `AI Stylist` 阶段是唯一选搭业务脑。它基于主
 | 穿法合法性 | 判断搭配服饰是否支持塞腰、半塞、敞开、扣合、自然下摆等真实穿法 |
 | 搭配服饰事实 | 被选中的配角服饰也必须商品级保真 |
 | 数字模特身份 | 保持同一位默认数字模特，脸、五官、头型、发长、发型轮廓、刘海和气质不可被剧本或分镜覆盖 |
-| 全量标签事实 | 将未归档 READY 搭配服饰库标签事实完整交给 AI Stylist |
+| 全量标签事实 | 将未归档 READY 搭配服装库标签事实完整交给 AI Stylist |
 | 品牌样本库 | 保存 Lily 官方和客户确认的风格证据、配饰边界和未来 embedding |
 | Prompt 业务规则 | 维护选搭、质量、配饰、品牌和空库内搭配规则，并直接影响 AI 打标与 AI 摄影棚 |
 | AI Stylist | 探索造型方向、生成多套 outfit、做审美和商品可见性自评 |
@@ -54,7 +54,7 @@ MVP 阶段 Gemini 在 `AI Stylist` 阶段是唯一选搭业务脑。它基于主
 | ShotPlan | ShootScript 的单镜头结构 | 主推品类、镜头用途、商品卖点、不可遮挡区域 | 通用全身图模板、分镜预览像素反推 |
 | 分镜预览 | Image-2 | StylingPlan、ShootScript、ShotPlan、商品图片、模特身份图、输入参考图角色清单 | 业务状态机、商品事实源、模特身份事实源 |
 | 最终成片 | Image-2 | 分镜预览第 N 格、StylingPlan、ShootScript、ShotPlan、商品图片、模特身份图、输入参考图角色清单 | Gemini 选图或替换商品、根据分镜覆盖商品或模特身份 |
-| 生成配饰 | StylingPlan/ShootScript/ShotPlan 文本边界 | 品牌模板参考 | 搭配服饰库商品事实 |
+| 生成配饰 | StylingPlan/ShootScript/ShotPlan 文本边界 | 品牌模板参考 | 搭配服装库商品事实 |
 | 历史复盘 | 快照和 attempt | provider request/response | 当前素材库最新状态 |
 
 ## 4. 分层架构
@@ -127,7 +127,7 @@ ID / CODE 边界：
 
 - 不把用户训练成 prompt 工程师。
 - 不让 Image-2 从全库选择搭配服饰。
-- 不把全量搭配服饰库图片直接喂给 Gemini；可以给 AI Stylist 提供未归档搭配库的全量标签事实。
+- 不把全量搭配服装库图片直接喂给 Gemini；可以给 AI Stylist 提供未归档搭配库的全量标签事实。
 - 不把 AI Stylist 降级成一次性 `selected_material_ids` 分类器。
 - 不把任务名启发式当作主推品类和卖点的权威来源。
 - 不让 `category = unknown` 的主推款直接进入正常选搭通过状态。

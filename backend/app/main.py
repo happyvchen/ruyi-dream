@@ -56,7 +56,7 @@ MAX_USER_INPUT_CHARS = 800
 
 
 AI_STYLIST_SYSTEM_INSTRUCTION = """你是 Lily 品牌 AI 摄影棚的 AI Stylist。
-你必须遵守不可覆盖的生产边界：商品事实以主推款图片和搭配服饰库事实为准；搭配服饰只能来自 READY 候选 code；不得编造商品级服饰；必须返回合法 JSON。
+你必须遵守不可覆盖的生产边界：商品事实以主推款图片和搭配服装库事实为准；搭配服饰只能来自 READY 候选 code；不得编造商品级服饰；必须返回合法 JSON。
 用户要求是本次任务的高优先级业务输入，高于默认搭配偏好；但不得覆盖商品图片事实、搭配库事实、Lily 品牌硬边界、输出 schema 和安全规则。
 当用户要求与硬边界冲突时，不要强行满足；请在 user_requirement_resolution 中说明冲突原因、未满足项和替代处理。"""
 
@@ -4116,7 +4116,7 @@ def build_hero_product_info_context(task: Any) -> dict[str, Any]:
             "fact_role": "用户补充的商品事实和业务要求，可贯穿后续工作流。",
             "cannot_override": [
                 "主推款图片可见商品事实",
-                "搭配服饰库 READY 候选事实",
+                "搭配服装库 READY 候选事实",
                 "数字模特身份契约",
                 "Lily 品牌硬边界",
                 "输出 schema",
@@ -4138,7 +4138,7 @@ def build_stage_user_instruction_context(stage: str, instruction: str | None = N
             "cannot_override": [
                 "主推款图片商品事实",
                 "商品信息事实",
-                "搭配服饰库 READY 候选事实",
+                "搭配服装库 READY 候选事实",
                 "数字模特身份契约",
                 "Lily 品牌硬边界",
                 "输出 schema",
@@ -4162,7 +4162,7 @@ def build_user_requirement_context(task: Any, styling_adjustment: str | None = N
             "user_requirement_priority": "用户要求高于默认搭配偏好和默认导演偏好。",
             "cannot_override": [
                 "主推款图片商品事实",
-                "搭配服饰库 READY 候选事实",
+                "搭配服装库 READY 候选事实",
                 "数字模特身份契约",
                 "Lily 品牌硬边界",
                 "输出 schema",
@@ -7644,7 +7644,7 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
     return [
         {"name": "segment.brand_info", "scope": "segment", "description": "品牌信息分段 Prompt"},
         {"name": "runtime.styling_garment", "scope": "runtime", "description": "AI 打标使用的当前搭配服饰 code 和图片输入摘要"},
-        {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服饰库 READY 服饰的全量 AI 标签事实卡"},
+        {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服装库 READY 服饰的全量 AI 标签事实卡"},
         {"name": "runtime.hero_product_info", "scope": "runtime", "description": "跟随主推款输入版本冻结的商品信息和业务事实补充"},
         {"name": "runtime.ai_styling_user_instruction", "scope": "runtime", "description": "AI 智能选搭本次执行的用户介入要求"},
         {"name": "runtime.shoot_script_user_instruction", "scope": "runtime", "description": "拍摄剧本本次执行的用户介入要求"},

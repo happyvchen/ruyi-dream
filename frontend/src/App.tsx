@@ -247,7 +247,7 @@ export function App() {
 
   const nav = [
     { id: 'studio' as const, label: 'AI 摄影棚', icon: Bot },
-    { id: 'library' as const, label: '搭配服饰库', icon: Library },
+    { id: 'library' as const, label: '搭配服装库', icon: Library },
     { id: 'model' as const, label: '数字模特', icon: UserRound },
     ...(role === 'admin' ? [{ id: 'prompt-maintenance' as const, label: 'Prompt 维护', icon: FileText }] : []),
     { id: 'records' as const, label: '生成记录', icon: History },
@@ -1449,7 +1449,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
   return (
     <section className="page">
       <div className="library-title-row">
-        <PageTitle title="搭配服饰库" subtitle="真实会出现在最终图里的配角服装。当前不支持鞋、包、饰品入库。" />
+        <PageTitle title="搭配服装库" subtitle="真实会出现在最终图里的配角服装。当前不支持鞋、包、饰品入库。" />
         <button className="primary" onClick={() => setShowImport((value) => !value)}>
           <ImagePlus size={16} /> {showImport ? '收起导入' : '导入搭配服饰'}
         </button>

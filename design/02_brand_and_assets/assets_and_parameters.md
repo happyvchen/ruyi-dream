@@ -40,7 +40,7 @@
 
 ## 3. 搭配服饰
 
-搭配服饰库保存可被真实生成到最终图里的配角服装。当前只支持服装，不支持鞋、包、首饰、配饰入库。
+搭配服装库保存可被真实生成到最终图里的配角服装。当前只支持服装，不支持鞋、包、首饰、配饰入库。
 
 支持品类：
 
@@ -114,7 +114,7 @@ DELETED
 - `candidate_retrieval_snapshot`：本次任务进入 AI Stylist 前的未归档 READY 搭配库全量 AI 标签事实卡、source ids 和 code/id 映射。
 - `StylingPlan`：AI Stylist 对主推款和候选服饰做造型判断后的结构化方案。
 
-全量搭配服饰库图片不直接输入 Gemini。后端只完成未归档 READY 状态过滤和人工禁用过滤，把可用服饰组装为 `library_tag_cards` 标签事实卡；审美选择、空库内搭配判断、outfit 探索和拒绝理由由 AI Stylist 在 Prompt 中完成。
+全量搭配服装库图片不直接输入 Gemini。后端只完成未归档 READY 状态过滤和人工禁用过滤，把可用服饰组装为 `library_tag_cards` 标签事实卡；审美选择、空库内搭配判断、outfit 探索和拒绝理由由 AI Stylist 在 Prompt 中完成。
 
 ### 5.1 品牌信息
 

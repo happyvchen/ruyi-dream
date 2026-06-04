@@ -30,7 +30,7 @@ Image-2 不是选搭大脑、标签系统、历史记录系统或状态机。用
 | 1 | **workspace** | session, user role, workspace boundary | 当前固定 user/admin 双账号和单工作空间边界；为后续组织、租户、权限扩展预留语义 |
 | 2 | **media** | MediaAsset | 所有输入图、数字模特图、分镜预览图、最终图和导出资产的统一媒体索引 |
 | 3 | **brand** | BrandProfile, BrandStyleSample, ModelProfile, PromptConfig, ShootConfig | 品牌资料、品牌样本证据、默认数字模特、Prompt 模板和拍摄规则 |
-| 4 | **styling** | StylingGarment, StylingGarmentImage, tag taxonomy, garment tag assignment | 搭配服饰库、服饰图片、AI 打标、标签体系和选搭候选事实 |
+| 4 | **styling** | StylingGarment, StylingGarmentImage, tag taxonomy, garment tag assignment | 搭配服装库、服饰图片、AI 打标、标签体系和选搭候选事实 |
 | 5 | **generation** | GenerationTask, GenerationTaskInputVersion, GenerationStyling, StylingPlan, GenerationShootScript, ShootScript, GenerationShotPlan, GenerationStoryboardPreview, GenerationResultSet, GenerationResultImage | AI 摄影棚主流程、输入冻结、造型方案、拍摄剧本、分镜预览和最终成片 |
 | 6 | **operations** | GenerationAttempt, EventLog, DeleteImpact | provider 调用审计、状态恢复、错误复盘、业务事件和删除影响预检 |
 
@@ -39,7 +39,7 @@ Image-2 不是选搭大脑、标签系统、历史记录系统或状态机。用
 ```text
 backend/app/main.py   API 路由、生成编排、Prompt DTO、序列化
 backend/app/db.py     SQLite schema、迁移、默认模特、事件日志
-frontend/src/App.tsx  AI 摄影棚、搭配服饰库、数字模特、生成记录
+frontend/src/App.tsx  AI 摄影棚、搭配服装库、数字模特、生成记录
 frontend/src/api.ts   前端 API 契约和领域类型
 ```
 
@@ -59,7 +59,7 @@ frontend/src/api.ts   前端 API 契约和领域类型
 ### 主推款 vs 搭配服饰
 
 - **主推款**：本次拍摄的核心商品，只属于某个 `GenerationTaskInputVersion`，MVP 不建立长期主推款商品库。
-- **搭配服饰**：搭配服饰库中的真实配角商品，即 `StylingGarment`。只有 `READY` 且未归档、未删除的搭配服饰可进入 AI Stylist 候选范围。
+- **搭配服饰**：搭配服装库中的真实配角商品，即 `StylingGarment`。只有 `READY` 且未归档、未删除的搭配服饰可进入 AI Stylist 候选范围。
 
 最终图里主推款和被选中搭配服饰都需要商品级保真。鞋、包、首饰和帽子在 MVP 不入库，只能作为生成配饰文字边界，不作为商品事实源，也不做特写验收。
 
@@ -102,7 +102,7 @@ ShootScript 不重新选择库内搭配服饰；它只能基于已选 StylingPla
 
 当前 MVP 不实现注册、邀请、复杂 RBAC、多租户或计费。系统只有固定 `user` / `admin` 两类账号：
 
-- `user`：使用 AI 摄影棚、搭配服饰库、数字模特只读页、生成记录。
+- `user`：使用 AI 摄影棚、搭配服装库、数字模特只读页、生成记录。
 - `admin`：必须拥有 user 的完整工作流，并额外看到品牌信息、标签规则、拍摄配置、Prompt 维护等配置能力。
 
 说明：
@@ -266,7 +266,7 @@ ShootScript 不重新选择库内搭配服饰；它只能基于已选 StylingPla
 
 ### StylingGarment（搭配服饰）
 
-`StylingGarment` 是搭配服饰库中的真实配角服装。它是可被选中进入最终图的商品事实源。
+`StylingGarment` 是搭配服装库中的真实配角服装。它是可被选中进入最终图的商品事实源。
 
 当前字段：
 
@@ -751,7 +751,7 @@ Image-2 单次最多 10 张输入图。MVP 选图策略：
 
 - 不把用户训练成 prompt 工程师。
 - 不把 Image-2 当成选搭策略、标签体系、历史状态机或商品事实判断器。
-- 不把全量搭配服饰库图片直接喂给 Gemini。
+- 不把全量搭配服装库图片直接喂给 Gemini。
 - 搭配库 `ai_tags` 标签事实只进入 AI Stylist 阶段；不把历史 prompt、旧候选快照和 provider response 透传到下游 prompt。
 - 不把 `selected_material_ids` 当成 StylingPlan 的全部内容。
 - 不让 `category = unknown` 的主推款直接进入正常品类 ShotPlan。
@@ -769,7 +769,7 @@ Image-2 单次最多 10 张输入图。MVP 选图策略：
 
 - FastAPI + SQLite + React/Vite 单体 MVP。
 - S3/RustFS 对象存储和三层媒体资产。
-- 搭配服饰库、Gemini 打标、标签规则、Prompt 维护。
+- 搭配服装库、Gemini 打标、标签规则、Prompt 维护。
 - AI 摄影棚五步工作流。
 - `GenerationTaskInputVersion` 输入冻结。
 - `GenerationStyling`、`GenerationShootScript`、`GenerationShotPlan`、`GenerationStoryboardPreview`、`GenerationResultSet` 和单张重试。

@@ -50,7 +50,7 @@ MediaAsset
 
 ### 2.2 StylingGarment
 
-搭配服饰库对象：
+搭配服装库对象：
 
 - id
 - code
@@ -337,7 +337,7 @@ MVP 只保存一张分镜预览总图，不裁 frame。支持重新生成分镜�
 - `styling garment service`：搭配服饰草稿、保存、打标、状态推进。
 - `generation task service`：任务草稿、输入版本、状态机。
 - `brand style service`：维护 Lily 官方样本、客户 lookbook、品牌 caption、配饰边界和未来 embedding。
-- `library tag snapshot service`：读取未归档 READY 搭配服饰库全量标签事实；Prompt 只接收 `code` 和标签事实，内部 ID 仅用于持久化映射和 request snapshot；不做预筛选、排序、评分、映射或质量判断。
+- `library tag snapshot service`：读取未归档 READY 搭配服装库全量标签事实；Prompt 只接收 `code` 和标签事实，内部 ID 仅用于持久化映射和 request snapshot；不做预筛选、排序、评分、映射或质量判断。
 - `Prompt policy service`：维护 AI 打标、AI 选搭和拍摄剧本使用的 Prompt 业务规则；后端只渲染和保存，不解释为 Python 业务逻辑。
 - `AI Stylist service`：组装主推款图片、搭配库全量标签事实、品牌证据和 Prompt 业务规则，调用 Gemini 生成 `StylingPlan`、候选比较、拒绝理由和质量信号。
 - `aesthetic critic`：由 AI Stylist Prompt 内部完成；后端不再另设业务质检服务。
@@ -368,7 +368,7 @@ HeroUnderstanding
 MVP 明确不做后端预筛选。AI Stylist 阶段的输入为：
 
 - 主推款输入版本图片和任务名。
-- 未归档、未删除、`READY` 搭配服饰库全量标签事实 `library_tag_cards`。
+- 未归档、未删除、`READY` 搭配服装库全量标签事实 `library_tag_cards`。
 - 提示词输入只包含搭配服饰 `code` 和全量标签事实；内部 ID 映射仅用于后端持久化。
 - Prompt 维护中的 AI 选搭业务规则、品牌边界和配饰边界。
 
@@ -461,7 +461,7 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 输入：
 
 - 主推款图片。
-- 未归档 READY 搭配服饰库全量标签事实快照。
+- 未归档 READY 搭配服装库全量标签事实快照。
 - Prompt 维护中的 AI 选搭业务规则。
 - 与本次任务相关的 Lily 品牌样本证据。
 - Lily 品牌边界。
@@ -523,7 +523,7 @@ MVP 已收敛为 Prompt 业务脑模式。后端不做预筛选、排序、评�
 
 已实现：
 
-- `candidate_retrieval_snapshot` 保存未归档 READY 搭配服饰库全量标签事实和 ID 白名单。
+- `candidate_retrieval_snapshot` 保存未归档 READY 搭配服装库全量标签事实和 ID 白名单。
 - `assembly.ai_styling` Prompt 明确由 AI Stylist 完成主推款理解、全量标签阅读、空库内搭配比较、搭配选择、Aesthetic Critic 和质量信号输出。
 - 后端只校验 `selected_outfit_key` 是否存在、`selected_material_ids` 是否来自 ID 白名单且不重复，并保存模型输出。
 - 选搭阶段不追加候选服饰图片，避免后端因图片预算变相裁剪候选。
@@ -582,7 +582,7 @@ MVP 已收敛为 Prompt 业务脑模式。后端不做预筛选、排序、评�
 
 #### 阶段 3：多模态 embedding 和向量检索
 
-当搭配服饰库和品牌样本规模扩大到几百或上千件时引入：
+当搭配服装库和品牌样本规模扩大到几百或上千件时引入：
 
 - 多模态 embedding 模型。
 - 向量存储，可从数据库 JSON/内存计算起步，后续迁移到 pgvector、Qdrant、Milvus 或 Vertex AI Vector Search。

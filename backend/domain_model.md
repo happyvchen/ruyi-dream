@@ -15,7 +15,7 @@ GenerationTask
 
 ## StylingGarment
 
-搭配服饰库中的真实商品。只有 `status = READY` 且未归档、未删除的服饰进入 AI Stylist 候选范围。
+搭配服装库中的真实商品。只有 `status = READY` 且未归档、未删除的服饰进入 AI Stylist 候选范围。
 
 关键事实：
 
