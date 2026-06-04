@@ -109,24 +109,16 @@ DELETED
 
 - `effective_tags`：素材事实和搭配约束，用于列表摘要、局部展示和后续上下文压缩。
 - `visual_caption` / `retrieval_features`：每件搭配服装的短视觉摘要、衣长体量、遮挡风险、可塞腰/可敞开等辅助字段。
-- `brand_profile`：admin 维护的单一品牌生产准则资料，包括品牌名称、标语、品牌核心、风格 DNA、选搭准则、拍摄准则和负向约束；初始为空，不做双语结构。
+- `segment.brand_info`：admin 在 `Prompt 维护` 中维护的品牌分段 Prompt，承载品牌边界、选搭准则、拍摄准则和负向约束。
 - `brand_style_samples`：Lily 官方或客户确认的品牌样本，作为品牌风格和配饰边界证据。
 - `candidate_retrieval_snapshot`：本次任务进入 AI Stylist 前的未归档 READY 搭配库全量 AI 标签事实卡、source ids 和 code/id 映射。
 - `StylingPlan`：AI Stylist 对主推款和候选服饰做造型判断后的结构化方案。
 
 全量搭配服装库图片不直接输入 Gemini。后端只完成未归档 READY 状态过滤和人工禁用过滤，把可用服饰组装为 `library_tag_cards` 标签事实卡；审美选择、空库内搭配判断、outfit 探索和拒绝理由由 AI Stylist 在 Prompt 中完成。
 
-### 5.1 品牌信息
+### 5.1 品牌分段 Prompt
 
-`brand_profile` 是 admin 在前台维护的单一品牌资料，不替代官方样本库，也不是品牌模板版本系统。0.1.0 当前字段为：
-
-- `name`：品牌名称
-- `tagline`：品牌标语
-- `brand_core`：品牌核心
-- `style_dna`：风格 DNA
-- `styling_guidelines`：选搭准则
-- `shooting_guidelines`：拍摄准则
-- `negative_constraints`：负向约束
+品牌信息不再作为独立资料表维护。admin 在 `Prompt 维护` 的 `segment.brand_info` 中维护品牌边界，并由各阶段 Prompt 显式引用。
 
 规则：
 

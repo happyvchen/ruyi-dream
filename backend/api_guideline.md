@@ -69,8 +69,6 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。`/api/g
 | `/api/model-profiles` | GET/POST | 数字模特列表和创建 |
 | `/api/model-profiles/{id}` | PATCH/DELETE | 编辑或删除数字模特 |
 | `/api/model-profiles/{id}/head-references` | POST | 上传头部参考图 |
-| `/api/brand-info` | GET/PATCH | 品牌资料 |
-| `/api/shoot-config` | GET/PATCH | 拍摄规则 |
 | `/api/prompt-configs` | GET | Prompt 配置列表 |
 | `/api/prompt-configs/{key}/preview` | GET | 本地渲染预览，不调用模型 |
 | `/api/prompt-configs/{key}` | PATCH | 保存 Prompt |
@@ -92,7 +90,7 @@ Prompt 配置可使用以下 runtime：
 - `runtime.current_shot_context`：最终成片单镜头上下文。
 - `runtime.image_reference_manifest`：Image-2 输入参考图序号、角色和事实源优先级。
 
-不再支持 `runtime.ai_policy`、`runtime.ai_policy_card`、历史 `runtime.styling_plan`、历史 `runtime.shot_plans` 等兼容占位符。相关规则应直接写入当前 Prompt 正文或品牌/拍摄配置。
+不再支持 `runtime.ai_policy`、`runtime.ai_policy_card`、历史 `runtime.styling_plan`、历史 `runtime.shot_plans` 等兼容占位符。相关规则应直接写入当前 Prompt 正文。
 
 ## 选搭输入 DTO
 
