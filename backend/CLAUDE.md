@@ -41,8 +41,7 @@ ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 �
 
 - 保存和管理主推款任务图片、搭配服装库图片和媒体资产
 - 维护数字模特档案和素材引用
-- 维护 admin-only 单一品牌资料，供后续选搭、拍摄剧本和 ShotPlan 作为结构化品牌参考
-- 维护 admin-only Prompt 配置；系统初始化可创建空正文的可维护 Prompt 槽位，AI 选搭原则、品类策略、质量信号、配饰边界和空库内搭配取舍直接写入 `AI 选搭` Prompt 正文，后端不解释其中业务规则，也不内置或 fallback 任何 Prompt 默认正文
+- 维护 admin-only Prompt 配置；系统初始化可创建空正文的可维护 Prompt 槽位，品牌边界通过 `segment.brand_info` Prompt 分段承载，AI 选搭原则、品类策略、质量信号、配饰边界和空库内搭配取舍直接写入 `AI 选搭` Prompt 正文，后端不解释其中业务规则，也不内置或 fallback 任何 Prompt 默认正文
 - 管理 AI 摄影棚主推款任务、输入版本和状态机
 - 对未归档 READY 搭配服装生成全量标签事实卡；Prompt 只接收业务 `code` 和 `ai_tags` 等必要事实，不接收内部 ID、图片快照或后端排序/评分结果
 - 调用 AI Stylist 生成带 Aesthetic Critic 诊断的 `StylingPlan`，保存完整 request/response 快照
