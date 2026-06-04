@@ -5065,7 +5065,7 @@ def resolve_selected_outfit_candidate(
         )
         if selected:
             return selected
-    return normalized_candidates[0]
+    return {}
 
 
 def normalize_user_requirement_resolution(value: Any) -> dict[str, Any]:

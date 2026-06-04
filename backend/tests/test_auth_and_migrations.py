@@ -99,6 +99,30 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertIn("selected_outfit_key_auto_normalized", plan["warnings"])
         main.validate_styling_plan(plan, candidate_snapshot)
 
+    def test_normalize_styling_plan_does_not_select_first_candidate_without_explicit_choice(self) -> None:
+        main = importlib.import_module("app.main")
+        candidate_snapshot = {
+            "candidate_material_ids": [24],
+            "library_tag_cards": [{"id": 24, "code": "125309C7948510"}],
+        }
+        raw_plan = {
+            "outfit_candidates": [
+                {
+                    "outfit_key": "candidate_a",
+                    "selected_material_ids": [24],
+                }
+            ],
+        }
+
+        plan = main.normalize_styling_plan(raw_plan, candidate_snapshot)
+        plan["model_raw_output"] = raw_plan
+
+        self.assertEqual(plan["selected_outfit_key"], "")
+        self.assertEqual(plan["selected_material_ids"], [])
+        self.assertNotIn("selected_outfit_key_auto_normalized", plan["warnings"])
+        with self.assertRaisesRegex(RuntimeError, "selected_outfit_key"):
+            main.validate_styling_plan(plan, candidate_snapshot)
+
     def test_prompt_replaced_config_tables_are_dropped_by_migration(self) -> None:
         db_module = importlib.import_module("app.db")
         legacy_tables = [
