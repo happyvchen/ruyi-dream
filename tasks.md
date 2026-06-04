@@ -1,4 +1,4 @@
-# ruyi-dream MVP — Project Tasks
+# ruyi-dream 0.1.0 — Project Tasks
 
 > 项目级任务跟踪。设计源头见 `design/CLAUDE.md`；前后端实现规范见 `frontend/CLAUDE.md` 和 `backend/CLAUDE.md`。
 

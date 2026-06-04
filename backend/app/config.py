@@ -29,7 +29,7 @@ MIN_PRODUCTION_CREDENTIAL_LENGTH = 12
 
 
 class Settings:
-    app_name = os.getenv("APP_NAME", "AI Model Image MVP")
+    app_name = os.getenv("APP_NAME", "Ruyi-Dream")
     app_env = os.getenv("APP_ENV", "development").lower()
     data_dir = Path(os.getenv("APP_DATA_DIR", BASE_DIR / "data"))
     database_path = Path(os.getenv("APP_DATABASE_PATH", data_dir / "app.sqlite3"))

@@ -2,7 +2,7 @@
 
 ## 1. 设计目标
 
-Lily 标签体系是 Ruyi-Dream 的核心生产资产，不是临时 MVP 辅助字段。它要长期支撑同一件服装在不同任务中承担不同角色：
+Lily 标签体系是 Ruyi-Dream 的核心生产资产，不是临时 0.1.0 辅助字段。它要长期支撑同一件服装在不同任务中承担不同角色：
 
 ```text
 服装资产 -> 可作为主推款 / 搭配服装 / 历史成片参考 / 品牌视觉参考
@@ -554,7 +554,7 @@ garment_assets.tagged_at
 garment_assets.review_status
 ```
 
-如果当前实现仍沿用旧 `garment_skus`，可先通过新增 JSON 字段或新增标签表过渡，但领域命名应逐步收敛到 `GarmentAsset`。
+如果当前实现仍沿用历史 `garment_skus`，可先通过新增 JSON 字段或新增标签表过渡，但领域命名应逐步收敛到 `GarmentAsset`。
 
 每次 Gemini 打标调用还应保存 attempt 快照；当前实现可复用通用 `generation_attempts` 表，以 `owner_type = styling_garment_tagging`、`owner_id = styling_garment_id` 关联搭配服装。
 
@@ -565,7 +565,7 @@ garment_assets.review_status
 - 新字段必须可为空或有默认值。
 - 枚举新增可以兼容；枚举重命名必须保留别名映射。
 - 删除字段必须至少经历一个版本的 deprecated。
-- 大规模重打标前必须保存旧版本标签快照。
+- 大规模重打标前必须保存历史版本标签快照。
 - 历史生成记录永远引用当时的标签快照。
 
 ## 15. 设计结论

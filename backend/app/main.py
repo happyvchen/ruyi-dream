@@ -7650,7 +7650,6 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.shoot_script_user_instruction", "scope": "runtime", "description": "拍摄剧本本次执行的用户介入要求"},
         {"name": "runtime.storyboard_preview_user_instruction", "scope": "runtime", "description": "分镜预览本次执行的用户介入要求"},
         {"name": "runtime.final_image_user_instruction", "scope": "runtime", "description": "最终成片或单张重生本次执行的用户介入要求"},
-        {"name": "runtime.user_requirement", "scope": "runtime", "description": "兼容旧模板的合成用户要求上下文"},
         {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭导演上下文，使用搭配服装 code 标识"},
         {"name": "runtime.model_identity_context", "scope": "runtime", "description": "AI Director 使用的数字模特身份契约和参考图上下文"},
         {"name": "runtime.image_reference_manifest", "scope": "runtime", "description": "Image-2 输入参考图序号、角色和事实源优先级"},

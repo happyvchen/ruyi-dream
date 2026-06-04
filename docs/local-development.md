@@ -5,7 +5,7 @@
 日常开发推荐前后端裸跑，只用 Docker Compose 启动 RustFS。这样前端热更新、后端 reload 和调试都更轻。
 
 ```bash
-cd /Users/fushuai/GitRepository/ruyi-dream
+cd /path/to/ruyi-dream
 cp .env.example .env
 # 编辑根目录 .env，至少设置 APP_S3_ACCESS_KEY_ID / APP_S3_SECRET_ACCESS_KEY
 docker compose up -d rustfs
@@ -21,7 +21,7 @@ RustFS 默认地址：
 先确保项目根目录已经有 `.env`。后端裸跑会读取这份主配置，不再维护单独的 `backend/.env`。
 
 ```bash
-cd /Users/fushuai/GitRepository/ruyi-dream/backend
+cd /path/to/ruyi-dream/backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt -c requirements.constraints.txt
@@ -31,7 +31,7 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 如果已经创建过虚拟环境，后续启动只需要：
 
 ```bash
-cd /Users/fushuai/GitRepository/ruyi-dream/backend
+cd /path/to/ruyi-dream/backend
 source .venv/bin/activate
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
@@ -93,7 +93,7 @@ curl http://127.0.0.1:8000/api/health
 另开一个终端：
 
 ```bash
-cd /Users/fushuai/GitRepository/ruyi-dream/frontend
+cd /path/to/ruyi-dream/frontend
 npm install
 npm run dev
 ```
@@ -117,7 +117,7 @@ VITE_API_BASE_URL=http://127.0.0.1:8000
 第一次本地开发可以按这个顺序跑：
 
 ```bash
-cd /Users/fushuai/GitRepository/ruyi-dream
+cd /path/to/ruyi-dream
 cp .env.example .env
 
 # 1. 启动对象存储
@@ -134,7 +134,7 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 再开一个终端：
 
 ```bash
-cd /Users/fushuai/GitRepository/ruyi-dream/frontend
+cd /path/to/ruyi-dream/frontend
 npm install
 npm run dev
 ```
@@ -144,7 +144,7 @@ npm run dev
 如果要模拟交付环境，可以直接跑完整 Compose：
 
 ```bash
-cd /Users/fushuai/GitRepository/ruyi-dream
+cd /path/to/ruyi-dream
 cp .env.example .env
 # 编辑 .env，设置对象存储密钥、PUBLIC_BACKEND_URL、PUBLIC_S3_URL、GEMINI_API_KEY、TOAPIS_API_KEY
 docker compose up -d --build

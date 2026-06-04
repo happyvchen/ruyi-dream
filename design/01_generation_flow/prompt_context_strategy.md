@@ -2,15 +2,15 @@
 
 ## 背景
 
-搭配服装打标结果本身并不长。`styling_garments.ai_tags_json` 是 AI 打标的原始事实账本，应完整保存用于审计和详情展示。但生成链路过去把 `ai_tags_json`、`effective_tags_json`、`manual_tags_json`、`official_title_tags_json`、`tag_meta_json`、旧候选快照和旧 prompt 一起拼进下游请求，导致 prompt 体量被历史上下文和重复字段放大。
+搭配服装打标结果本身并不长。`styling_garments.ai_tags_json` 是 AI 打标的原始事实账本，应完整保存用于审计和详情展示。但生成链路过去把 `ai_tags_json`、`effective_tags_json`、`manual_tags_json`、`official_title_tags_json`、`tag_meta_json`、旧候选快照和历史 prompt 一起拼进下游请求，导致 prompt 体量被历史上下文和重复字段放大。
 
-新版原则：每个阶段只接收完成本阶段判断所需的结构化 DTO，不直接透传上游完整对象或历史 prompt。AI Stylist 阶段例外地接收未归档 READY 搭配库的完整 `ai_tags_json` 标签事实，因为这部分本身就是选搭判断所需的业务输入，而不是历史上下文。
+0.1.0 原则：每个生成步骤只接收完成当前判断所需的结构化 DTO，不直接透传上游完整对象或历史 prompt。AI Stylist 例外地接收未归档 READY 搭配库的完整 `ai_tags_json` 标签事实，因为这部分本身就是选搭判断所需的业务输入，而不是历史上下文。
 
 ## 阶段输入
 
 | 阶段 | Runtime | 输入内容 | 明确不传 |
 |---|---|---|---|
-| AI Stylist | `candidate_retrieval` | READY 搭配库 `code` + 完整 `ai_tags_json` 标签事实卡 | 内部 id、图片快照、旧 prompt、`effective_tags_json` 派生摘要 |
+| AI Stylist | `candidate_retrieval` | READY 搭配库 `code` + 完整 `ai_tags_json` 标签事实卡 | 内部 id、图片快照、历史 prompt、`effective_tags_json` 派生摘要 |
 | AI Stylist | `user_requirement` | 上传阶段补充服装信息、拍摄要求、本次选搭微调要求和冲突处理规则 | 长篇自由 prompt、可覆盖商品事实的模型指令 |
 | AI Director | `styling_result` | 主推款理解、选中 outfit、选中服饰 `ai_tags` 标签事实、质量信号 | 全部 outfit 候选池、rejected 全文、AI Stylist prompt、未选中的全库候选 |
 | 分镜预览 | `shoot_script_result` | 全局导演、风险、配饰、6 个镜头 | 完整 StylingPlan、候选池、原始标签 |

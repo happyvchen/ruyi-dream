@@ -2,12 +2,12 @@
 
 ## 目标
 
-本项目以 Docker Compose 作为 MVP 阶段的标准部署和管理方式。Compose 负责启动前端、后端和对象存储，让单机私有化交付具备稳定的启动、停止、查看日志、备份和升级路径。
+本项目以 Docker Compose 作为 0.1.0 阶段的标准部署和管理方式。Compose 负责启动前端、后端和对象存储，让单机私有化交付具备稳定的启动、停止、查看日志、备份和升级路径。
 
 Compose 部署适用于：
 
 - 本地完整联调
-- 客户内网单机试点
+- 客户内网单机部署
 - 小规模私有化验收环境
 
 暂不把 Compose 设计成多租户 SaaS、Kubernetes 或高可用集群方案。后续如果并发、容量或隔离要求提高，再拆分独立 worker、外部数据库、托管对象存储和反向代理。
@@ -115,7 +115,7 @@ APP_S3_FORCE_PATH_STYLE=false
 4. 启动 generation poller。
 5. 启动 planner poller。
 
-如果本机 RustFS 尚未完全 ready，后端可能短暂启动失败，Compose 会按 `restart: unless-stopped` 自动重启。使用外部 S3 兼容服务时，应确认 endpoint、bucket、region、addressing style 和凭证均已生效。运维侧应以 `docker compose ps` 和 `/api/health` 为最终状态判断。
+如果本机 RustFS 未完全 ready，后端可能短暂启动失败，Compose 会按 `restart: unless-stopped` 自动重启。使用外部 S3 兼容服务时，应确认 endpoint、bucket、region、addressing style 和凭证均已生效。运维侧应以 `docker compose ps` 和 `/api/health` 为最终状态判断。
 
 ## 生产边界
 
@@ -131,5 +131,5 @@ APP_S3_FORCE_PATH_STYLE=false
 - 对象存储 bucket 保持私有，浏览器只通过后端生成的短期预签名 URL 访问对象。
 - `APP_S3_BUCKET` 必须符合 S3 bucket 命名规则：3-63 个字符，只用小写字母、数字、短横线和点号；`APP_STORAGE_BUCKET` 仅作为旧配置别名保留。
 - 对公网开放时必须接入 HTTPS 反向代理，并把 public URL 改为 HTTPS。
-- 当前 SQLite 适合 MVP 单机部署；多人高并发或多副本后端需要迁移到外部数据库。
+- 当前 SQLite 适合 0.1.0 单机部署；多人高并发或多副本后端需要迁移到外部数据库。
 - 当前 planner/generation poller 运行在后端进程内；多后端副本会造成重复扫描风险，扩展前应拆成单独 worker 或加分布式锁。

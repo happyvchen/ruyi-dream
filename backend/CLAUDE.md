@@ -2,7 +2,7 @@
 
 ## 职责 (Scope)
 
-ruyi-dream MVP 的后端实现目录。当前后端是 FastAPI + SQLite + S3 兼容对象存储的新版 AI 摄影棚实现，覆盖搭配服装打标、主推款任务流、AI Stylist / StylingPlan、拍摄剧本 / ShootScript、Image-2 分镜预览/成片生成、结果复盘。旧版货号组图、旧 planner、旧生成批次和旧表不再兼容。
+ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 兼容对象存储的 AI 摄影棚实现，覆盖搭配服装打标、主推款任务流、AI Stylist / StylingPlan、拍摄剧本 / ShootScript、Image-2 分镜预览/成片生成、结果复盘。
 
 设计层面的产品范围、生成职责和技术路线在 `../design/`，本目录只管“代码怎么写”和“后端契约怎么落地”。
 
@@ -21,7 +21,7 @@ ruyi-dream MVP 的后端实现目录。当前后端是 FastAPI + SQLite + S3 兼
 
 直接依赖见 `requirements.txt`，传递依赖约束见 `requirements.constraints.txt`。不要预先引入复杂 SaaS 权限、多租户、计费、队列集群。
 
-访问控制当前使用固定 `user` / `admin` 双账号框架，不建立用户表、权限组或租户模型。本阶段两个角色访问同一套普通拍摄工作台；新增 admin 能力必须以“admin UI/UX 大于等于 user”为前提，并在后端按 session role 做权限判断。
+访问控制当前使用固定 `user` / `admin` 双账号框架，不建立用户表、权限组或租户模型。两个角色访问同一套普通拍摄工作台；admin 增量能力必须以“admin UI/UX 大于等于 user”为前提，并在后端按 session role 做权限判断。
 
 ## 文档索引 (Index)
 
@@ -29,7 +29,7 @@ ruyi-dream MVP 的后端实现目录。当前后端是 FastAPI + SQLite + S3 兼
 |---|---|---|
 | `architecture.md` | 当前后端架构：模块边界、代码位置、服务分层、生成任务编排 | 修改后端代码前 |
 | `api_guideline.md` | 当前 API 契约：路由、资源、任务状态、错误处理 | 设计接口或前后端联调前 |
-| `domain_model.md` | 当前 MVP 实际业务对象、Domain 边界、对象关系、对象存储布局 | 理解业务建模或新增后端模块前 |
+| `domain_model.md` | 当前 0.1.0 实际业务对象、Domain 边界、对象关系、对象存储布局 | 理解业务建模或新增后端模块前 |
 | `database_schema.md` | 当前 SQLite 表结构、字段说明、关系图、后续候选表 | 修改数据库、写迁移或排查数据问题前 |
 | `../design/04_implementation_guide/archive_purge_policy.md` | 归档、彻底删除、媒体引用计数和 OSS 清理策略 | 修改删除、归档、批量清理、媒体替换时 |
 | `requirements.txt` / `requirements.constraints.txt` | Python 直接依赖与传递依赖约束 | 安装、升级依赖时 |
@@ -60,7 +60,7 @@ ruyi-dream MVP 的后端实现目录。当前后端是 FastAPI + SQLite + S3 兼
 - 不把品牌策略、选搭权重、品类互斥/降权、质量信号阈值、配饰边界、Pose 选择、图位规划写死在不可维护的代码字符串里；这些业务口径进入 Prompt 维护，主要由对应 Prompt 正文表达，不作为 Python 执行逻辑。
 - 不擅自删除、覆盖、移动用户素材和生成结果。
 - 删除/归档实现必须遵守 `../design/04_implementation_guide/archive_purge_policy.md`：默认归档，彻底删除先做影响预检，媒体文件按引用计数释放。
-- MVP 不做多租户、复杂权限、计费、模板市场。
+- 0.1.0 不做多租户、复杂权限、计费、模板市场。
 - 不把固定双账号框架扩展成注册、邀请、成员管理或复杂 RBAC，除非产品范围明确升级。
 - 不把 `.venv/`、`__pycache__/`、`data/`、`storage/` 运行产物当作业务源码或设计依据。
 - 新增后端文档或目录时更新本文件索引。
