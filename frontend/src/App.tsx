@@ -1,10 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { DragEvent, FormEvent, ReactNode, UIEvent } from 'react'
 import {
   Bot,
-  ArrowDown,
-  ArrowUp,
   ChevronLeft,
   ChevronRight,
   CircleStop,
@@ -24,6 +22,7 @@ import {
   LogOut,
   PanelLeftClose,
   PanelLeftOpen,
+  RefreshCw,
   RotateCcw,
   Save,
   Search,
@@ -70,6 +69,7 @@ const NON_SHOOT_CONFIG_CATEGORY_CODES = new Set(['未知', '不支持入库配�
 type LightboxImageItem = Omit<LightboxImage, 'items' | 'initialIndex'>
 type DeleteDialogTarget = Pick<GenerationTask, 'id' | 'name'>
 type RunOptions = { refresh?: boolean | 'background' }
+type PageSizeOption = number | { value: number; label: string; key?: string }
 
 const steps = [
   { title: '上传主推款', icon: Upload },
@@ -282,7 +282,12 @@ export function App() {
     { id: 'studio' as const, label: 'AI 摄影棚', icon: Bot },
     { id: 'library' as const, label: '搭配服装库', icon: Library },
     { id: 'model' as const, label: '数字模特', icon: UserRound },
-    ...(role === 'admin' ? [{ id: 'prompt-maintenance' as const, label: 'Prompt 维护', icon: FileText }] : []),
+    ...(role === 'admin' ? [
+      { id: 'brand' as const, label: '品牌信息', icon: Sparkles },
+      { id: 'prompt-maintenance' as const, label: 'Prompt 维护', icon: FileText },
+      { id: 'shoot-config' as const, label: '拍摄配置', icon: FileImage },
+      { id: 'tag-rules' as const, label: '标签规则', icon: Layers3 },
+    ] : []),
     { id: 'records' as const, label: '生成记录', icon: History },
   ]
 
@@ -329,6 +334,8 @@ export function App() {
         {page === 'model' && <ModelPage models={models} />}
         {page === 'brand' && role === 'admin' && <BrandInfoPage initialBrandInfo={brandInfo} setBrandInfo={setBrandInfo} run={run} />}
         {page === 'prompt-maintenance' && role === 'admin' && <PromptMaintenancePage run={run} />}
+        {page === 'shoot-config' && role === 'admin' && <ShootConfigPage run={run} />}
+        {page === 'tag-rules' && role === 'admin' && <TagRulesPage run={run} />}
         {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} openTaskInStudio={openTaskInStudio} run={run} />}
       </main>
     </div>
@@ -481,7 +488,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     <section className="page studio-page">
       <PageTitle
         title="AI 摄影棚"
-        subtitle="上传主推款，让系统选搭配角服饰并生成电商棚拍成片。"
+        subtitle="上传主推款，让系统选搭配角服装并生成电商棚拍成片。"
         actions={task ? (
           <div className="studio-title-actions">
             <button className="primary" disabled={!canStartOneClickFinal(task)} onClick={startOneClickFinal}>
@@ -599,7 +606,14 @@ function StepRail({ active, max, onSelect }: { active: StudioStep; max: StudioSt
         const Icon = step.icon
         const enabled = index <= max
         return (
-          <button key={step.title} className={active === index ? 'active' : ''} disabled={!enabled} onClick={() => onSelect(index as StudioStep)}>
+          <button
+            key={step.title}
+            className={`${active === index ? 'active' : ''} ${index < max ? 'done' : ''}`}
+            disabled={!enabled}
+            onClick={() => onSelect(index as StudioStep)}
+            aria-current={active === index ? 'step' : undefined}
+          >
+            <strong>{index + 1}</strong>
             <Icon size={18} />
             <span>{step.title}</span>
           </button>
@@ -738,16 +752,20 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
 function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask: (task: GenerationTask) => void; run: any }) {
   const [name, setName] = useState(task.name)
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
+  const [dragIndex, setDragIndex] = useState<number | null>(null)
 
   useEffect(() => setName(task.name), [task.id, task.name])
 
-  async function move(index: number, direction: -1 | 1) {
+  async function moveTo(from: number, to: number) {
     const images = task.images ?? []
-    const other = images[index + direction]
-    if (!other) return
+    if (from === to || from < 0 || to < 0 || from >= images.length || to >= images.length) return
+    const next = [...images]
+    const [item] = next.splice(from, 1)
+    next.splice(to, 0, item)
+    const sortOrders = images.map((image) => image.sortOrder)
     await run('调整主推款顺序中...', async () => {
-      await api.updateTaskImage(images[index].id, other.sortOrder)
-      return api.updateTaskImage(other.id, images[index].sortOrder)
+      const results = await Promise.all(next.map((image, index) => api.updateTaskImage(image.id, sortOrders[index])))
+      return results[results.length - 1]
     }, (result: { item: GenerationTask }) => setTask(result.item), { refresh: 'background' })
   }
 
@@ -767,17 +785,24 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
       </div>
       <div className="draft-image-grid">
         {(task.images ?? []).map((image, index) => (
-          <div className="saved-image-card" key={image.id}>
+          <div
+            className="saved-image-card"
+            key={image.id}
+            draggable={(task.images?.length ?? 0) > 1}
+            onDragStart={() => setDragIndex(index)}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={() => {
+              if (dragIndex !== null) void moveTo(dragIndex, index)
+              setDragIndex(null)
+            }}
+          >
             <button className="image-open" onClick={() => setViewer(assetLightboxImage(image.asset, (task.images ?? []).map((item) => item.asset)))} title="放大查看">
-              <img src={mediaUrl(assetThumbSrc(image.asset))} alt={image.asset.filename} />
+              <img src={mediaUrl(assetThumbSrc(image.asset))} alt={image.asset.filename} loading="lazy" />
             </button>
             <span>{image.asset.filename}<small>{assetMeta(image.asset)}</small></span>
             <div className="thumb-actions">
-              <button onClick={() => setViewer(assetLightboxImage(image.asset, (task.images ?? []).map((item) => item.asset)))} title="放大查看"><Eye size={14} /></button>
-              <button disabled={index === 0} onClick={() => void move(index, -1)} title="前移"><ArrowUp size={14} /></button>
-              <button disabled={index === (task.images?.length ?? 0) - 1} onClick={() => void move(index, 1)} title="后移"><ArrowDown size={14} /></button>
               <label title="替换图片">
-                <ImagePlus size={14} />
+                <RefreshCw size={14} />
                 <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
                   const replacement = event.target.files?.[0]
                   if (replacement) void run('替换主推款图片中...', () => api.replaceTaskImage(image.id, replacement), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })
@@ -1113,7 +1138,7 @@ function userFacingMaterialText(text: string, codesById: Map<string, string>) {
     result = result.replace(new RegExp(`\\b(?:material[_\\s-]*id|服饰ID|商品ID|ID)\\s*[:：#-]?\\s*${escapedId}(?![A-Za-z0-9])`, 'gi'), code)
     result = result.replace(new RegExp(`(库内(?:针织衫|衬衫|外套|西装|上衣|下装|裤装|半裙|连衣裙|搭配服装|服饰|单品)|皮革马甲)\\s*${escapedId}(?![A-Za-z0-9])`, 'g'), `$1 ${code} `)
   }
-  result = result.replace(/\b(?:material[_\s-]*id|服饰ID|商品ID|ID)\s*[:：#-]?\s*\d+(?![A-Za-z0-9])/gi, '该服饰')
+  result = result.replace(/\b(?:material[_\s-]*id|服饰ID|商品ID|ID)\s*[:：#-]?\s*\d+(?![A-Za-z0-9])/gi, '该服装')
   result = result.replace(/(库内(?:针织衫|衬衫|外套|西装|上衣|下装|裤装|半裙|连衣裙|搭配服装|服饰|单品)|皮革马甲)\s*\d+(?![A-Za-z0-9])/g, '$1')
   return result
 }
@@ -1306,7 +1331,7 @@ function PreviewStep({ task, setTask, run, userInstruction, localOperations, sta
         <AIOperationList operations={operations} />
         {preview?.asset ? (
           <button className="preview-board-open" onClick={() => preview.asset && setViewer(assetLightboxImage(preview.asset))} title="放大查看">
-            <img className="preview-board" src={mediaUrl(assetPreviewSrc(preview.asset))} />
+            <img className="preview-board" src={mediaUrl(assetPreviewSrc(preview.asset))} loading="lazy" alt="分镜预览" />
           </button>
         ) : <EmptyState title="尚未生成分镜预览" text="点击生成预览后，系统会根据拍摄剧本输出一张 3x2 分镜预览图。" />}
       </div>
@@ -1359,7 +1384,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
             <div className="result-card" key={image.id}>
               {image.asset ? (
                 <button className="result-image-open" onClick={() => image.asset && setViewer(assetLightboxImage(image.asset, finalAssets))} title="放大查看">
-                  <img src={mediaUrl(assetPreviewSrc(image.asset))} />
+                  <img src={mediaUrl(assetPreviewSrc(image.asset))} loading="lazy" alt={`最终成片 ${image.sortOrder}`} />
                 </button>
               ) : <div className="image-placeholder">{statusText(image.status)}{image.activeAttempt && isAttemptRunning(image.activeAttempt) && <small>{formatDuration(elapsedSeconds(image.activeAttempt.startedAt || image.updatedAt))}</small>}</div>}
               <div><span>#{image.sortOrder}</span>{image.asset && <a href={mediaUrl(assetOriginalSrc(image.asset))} target="_blank" rel="noreferrer"><Download size={15} /></a>}{!['QUEUED', 'RUNNING'].includes(image.status) && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id, userInstruction), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成"><RotateCcw size={14} /></button>}</div>
@@ -1391,6 +1416,8 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
 }
 
 function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }) {
+  const libraryResultsRef = useRef<HTMLDivElement | null>(null)
+  const autoPageSize = useAutoGarmentPageSize(libraryResultsRef)
   const [query, setQuery] = useState('')
   const [detail, setDetail] = useState<StylingGarment | null>(null)
   const [items, setItems] = useState<StylingGarment[]>([])
@@ -1398,7 +1425,8 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
   const [offset, setOffset] = useState(0)
   const [total, setTotal] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
-  const [pageSize, setPageSize] = useState(12)
+  const [pageSizeMode, setPageSizeMode] = useState<'auto' | 'fixed'>('auto')
+  const [pageSize, setPageSize] = useState(() => estimateAutoGarmentPageSize())
   const [searching, setSearching] = useState(true)
   const [includeArchived, setIncludeArchived] = useState(false)
   const [selectedGarmentIds, setSelectedGarmentIds] = useState<Set<number>>(() => new Set())
@@ -1432,6 +1460,12 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
   useEffect(() => {
     setOffset(0)
   }, [query])
+
+  useEffect(() => {
+    if (pageSizeMode !== 'auto' || pageSize === autoPageSize) return
+    setPageSize(autoPageSize)
+    setOffset(0)
+  }, [autoPageSize, pageSize, pageSizeMode])
 
   useEffect(() => {
     const keyword = query.trim()
@@ -1518,7 +1552,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
   }
 
   return (
-    <section className="page">
+    <section className="page workbench-page library-page">
       <div className="library-title-row">
         <PageTitle title="搭配服装库" subtitle="真实会出现在最终图里的配角服装。当前不支持鞋、包、饰品入库。" />
         <button className="primary" onClick={() => setShowImport((value) => !value)}>
@@ -1549,7 +1583,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
             <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 套` : '0 套'}</span>
           </div>
         </div>
-        <div className={`library-results ${searching ? 'is-loading' : ''}`}>
+        <div ref={libraryResultsRef} className={`library-results ${searching ? 'is-loading' : ''}`}>
         {items.length ? (
           <div className="garment-grid">{items.map((item) => (
             <GarmentCard
@@ -1568,11 +1602,14 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
           disabled={searching}
           offset={offset}
           pageSize={pageSize}
-          pageSizeOptions={densePageSizeOptions}
+          pageSizeOptions={[{ value: autoPageSize, label: `${autoPageSize} 套`, key: 'auto' }, 50, 100]}
+          pageSizeOptionKey={pageSizeMode === 'auto' ? 'auto' : String(pageSize)}
+          pageSizeUnit="套"
           total={total}
           totalPages={totalPages}
           onOffsetChange={setOffset}
-          onPageSizeChange={(value) => {
+          onPageSizeChange={(value, optionKey) => {
+            setPageSizeMode(optionKey === 'auto' ? 'auto' : 'fixed')
             setPageSize(value)
             setOffset(0)
           }}
@@ -1591,6 +1628,57 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
       )}
     </section>
   )
+}
+
+function estimateAutoGarmentPageSize() {
+  if (typeof window === 'undefined') return 12
+  const sidebarWidth = window.innerWidth > 900 ? 248 : 0
+  const horizontalChrome = window.innerWidth > 900 ? 80 : 24
+  const availableWidth = Math.max(320, window.innerWidth - sidebarWidth - horizontalChrome)
+  const availableHeight = Math.max(360, window.innerHeight - (window.innerWidth > 900 ? 260 : 280))
+  return calculateAutoGarmentPageSize(availableWidth, availableHeight)
+}
+
+function calculateAutoGarmentPageSize(width: number, height: number, cardHeight = 350, columnWidth = 230, gap = 14) {
+  const columns = Math.max(1, Math.floor((Math.max(width, columnWidth) + gap) / (columnWidth + gap)))
+  const rows = Math.max(1, Math.round((Math.max(height, cardHeight) + gap) / (cardHeight + gap)))
+  return Math.max(1, Math.min(100, columns * rows))
+}
+
+function useAutoGarmentPageSize(resultsRef: { current: HTMLDivElement | null }) {
+  const [pageSize, setPageSize] = useState(() => estimateAutoGarmentPageSize())
+
+  useEffect(() => {
+    let frame = 0
+    const measure = () => {
+      window.cancelAnimationFrame(frame)
+      frame = window.requestAnimationFrame(() => {
+        const results = resultsRef.current
+        const grid = results?.querySelector<HTMLElement>('.garment-grid') ?? null
+        const card = results?.querySelector<HTMLElement>('.garment-card') ?? null
+        const gridStyle = grid ? window.getComputedStyle(grid) : null
+        const columnGap = gridStyle ? Number.parseFloat(gridStyle.columnGap) || 14 : 14
+        const rowGap = gridStyle ? Number.parseFloat(gridStyle.rowGap) || columnGap : columnGap
+        const width = grid?.clientWidth || results?.clientWidth || Math.max(320, window.innerWidth - 328)
+        const height = results?.clientHeight || Math.max(360, window.innerHeight - 260)
+        const measuredCardHeight = card?.getBoundingClientRect().height ?? 0
+        const cardHeight = measuredCardHeight > 120 ? measuredCardHeight : 350
+        setPageSize(calculateAutoGarmentPageSize(width, height, cardHeight, 230, Math.max(columnGap, rowGap)))
+      })
+    }
+
+    measure()
+    window.addEventListener('resize', measure)
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null
+    if (resultsRef.current) observer?.observe(resultsRef.current)
+    return () => {
+      window.cancelAnimationFrame(frame)
+      window.removeEventListener('resize', measure)
+      observer?.disconnect()
+    }
+  }, [resultsRef])
+
+  return pageSize
 }
 
 type ImportBatch = {
@@ -1676,7 +1764,7 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
     })
     setBatches(blocked)
     if (!ready.length) {
-      setLocalError(blocked.length ? '没有可导入的新服饰，请先处理标红项' : '请先选择图片或文件夹')
+      setLocalError(blocked.length ? '没有可导入的新服装，请先处理标红项' : '请先选择图片或文件夹')
       return
     }
     setLocalError(blocked.length ? '已开始导入非重复项，标红项处理后可再次导入' : '')
@@ -1899,11 +1987,8 @@ function FileThumbList({ files, onChange }: { files: File[]; onChange: (files: F
           />
           <span>{file.name}<small>{fileMeta(file, dimensions[fileKey(file)])}</small></span>
           <div className="thumb-actions">
-            <FilePreviewAction file={file} dimensions={dimensions[fileKey(file)]} onOpen={(image) => setViewer(image)} />
-            <button onClick={() => move(index, index - 1)} title="前移"><ArrowUp size={14} /></button>
-            <button onClick={() => move(index, index + 1)} title="后移"><ArrowDown size={14} /></button>
             <label title="替换图片">
-              <ImagePlus size={14} />
+              <RefreshCw size={14} />
               <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
                 const replacement = event.target.files?.[0]
                 if (!replacement) return
@@ -1955,20 +2040,11 @@ function FilePreviewButton({ file, dimensions, onDimensions, onOpen }: {
   )
 }
 
-function FilePreviewAction({ file, dimensions, onOpen }: {
-  file: File
-  dimensions?: { width: number; height: number }
-  onOpen: (image: LightboxImage) => void
-}) {
-  const url = useObjectUrl(file)
-  return <button onClick={() => onOpen(fileLightboxImage(file, url, dimensions))} title="放大查看"><Eye size={14} /></button>
-}
-
 function ModelPage({ models }: { models: ModelProfile[] }) {
   const model = models.find((item) => item.isDefault) ?? models[0]
   const refs = model?.profile?.headReferenceEntries ?? []
   return (
-    <section className="page">
+    <section className="page workbench-page model-shell-page">
       <PageTitle title="数字模特" subtitle="当前只读展示默认模特的多角度头部参考图，没有身体图。" />
       <div className="panel model-page">
         <div className="model-meta">
@@ -1980,7 +2056,7 @@ function ModelPage({ models }: { models: ModelProfile[] }) {
         <div className="head-grid">
           {(refs.length ? refs : fallbackHeadRefs()).map((ref) => (
             <div className="head-card" key={ref.id}>
-              {ref.previewUrl ? <img src={mediaUrl(ref.previewUrl)} /> : <div className="head-placeholder"><UserRound /></div>}
+              {ref.previewUrl ? <img src={mediaUrl(ref.previewUrl)} loading="lazy" alt={angleLabel(ref.angle ?? ref.id)} /> : <div className="head-placeholder"><UserRound /></div>}
               <span>{angleLabel(ref.angle ?? ref.id)}</span>
             </div>
           ))}
@@ -2056,7 +2132,7 @@ function PromptMaintenancePage({ run }: { run: any }) {
   }
 
   return (
-    <section className="page">
+    <section className="page workbench-page prompt-page">
       <PageTitle
         title="Prompt 维护"
         subtitle="维护分段 Prompt 和组装 Prompt；AI 选搭原则直接写入 AI 选搭 Prompt 正文。"
@@ -2232,7 +2308,7 @@ function BrandInfoPage({ initialBrandInfo, setBrandInfo, run }: {
   }
 
   return (
-    <section className="page">
+    <section className="page workbench-page brand-page">
       <PageTitle
         title="品牌信息"
         subtitle="维护用于 AI Stylist 和棚拍生成的单一品牌资料。"
@@ -2507,7 +2583,7 @@ function ShootConfigPage({ run }: { run: any }) {
   }
 
   return (
-    <section className="page">
+    <section className="page workbench-page shoot-config-page">
       <PageTitle
         title="拍摄配置"
         subtitle="维护默认 6 镜头和品类图位兜底数据；拍摄剧本 Prompt 在 Prompt 维护中统一配置。"
@@ -3059,7 +3135,7 @@ function TagRulesPage({ run }: { run: any }) {
   }
 
   return (
-    <section className="page">
+    <section className="page workbench-page tag-rules-page">
       <PageTitle
         title="标签规则"
         subtitle="维护服装标签字典、层级树、标签关系和商品打标投影。"
@@ -3078,7 +3154,7 @@ function TagRulesPage({ run }: { run: any }) {
         <MetricCard label="标准标签" value={rules?.summary.tagCount ?? 0} />
         <MetricCard label="标签关系" value={rules?.summary.relationCount ?? 0} />
         <MetricCard label="适用规则" value={rules?.summary.applicabilityRuleCount ?? 0} />
-        <MetricCard label="已投影服饰" value={rules?.summary.taggedGarmentCount ?? 0} />
+        <MetricCard label="已投影服装" value={rules?.summary.taggedGarmentCount ?? 0} />
       </div>
       <div className="taxonomy-layout">
         <aside className="panel taxonomy-dimensions">
@@ -3562,7 +3638,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   }
 
   return (
-    <section className="page">
+    <section className="page workbench-page records-page">
       <PageTitle title="生成记录" subtitle="查看历史拍摄任务、分镜预览和最终成片。" />
       <div className="records-layout">
         <div className="panel record-list">
@@ -3584,39 +3660,41 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
               <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 条` : '0 条'}</span>
             </div>
           </div>
-          {items.map((item) => (
-            <div
-              key={item.id}
-              className={`record-row ${detail?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}
-            >
-              <input
-                type="checkbox"
-                checked={selectedRecordIds.has(item.id)}
-                disabled={isTaskRunning(item)}
-                onChange={(event) => toggleRecordSelection(item.id, event.target.checked)}
-                aria-label={`选择 ${item.name}`}
-              />
-              <button className="record-open" aria-current={detail?.id === item.id ? 'true' : undefined} title="查看记录详情" onClick={() => openRecord(item)}>
-                <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
-                <div><strong>{item.name}</strong><span>{item.archivedAt ? '已归档' : statusText(item.status)} · {dateText(item.createdAt)}</span></div>
-                <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
-              </button>
-              <button
-                className="primary record-action-button"
-                onClick={() => openTaskInStudio(item)}
-                title="回到 AI 摄影棚恢复该任务"
+          <div className="record-list-body">
+            {items.map((item) => (
+              <div
+                key={item.id}
+                className={`record-row ${detail?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}
               >
-                {taskResumeActionLabel(item)}
-              </button>
-              <button
-                className="secondary record-action-button"
-                onClick={() => isTaskRunning(item) ? cancelRecordTask(item) : openRecordDeleteDialog(item)}
-              >
-                {isTaskRunning(item) ? '取消生成' : '归档'}
-              </button>
-            </div>
-          ))}
-          {!items.length && <EmptyState title="暂无生成记录" text="创建拍摄任务后会出现在这里。" />}
+                <input
+                  type="checkbox"
+                  checked={selectedRecordIds.has(item.id)}
+                  disabled={isTaskRunning(item)}
+                  onChange={(event) => toggleRecordSelection(item.id, event.target.checked)}
+                  aria-label={`选择 ${item.name}`}
+                />
+                <button className="record-open" aria-current={detail?.id === item.id ? 'true' : undefined} title="查看记录详情" onClick={() => openRecord(item)}>
+                  <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
+                  <div><strong>{item.name}</strong><span>{item.archivedAt ? '已归档' : statusText(item.status)} · {dateText(item.createdAt)}</span></div>
+                  <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
+                </button>
+                <button
+                  className="primary record-action-button"
+                  onClick={() => openTaskInStudio(item)}
+                  title="回到 AI 摄影棚恢复该任务"
+                >
+                  {taskResumeActionLabel(item)}
+                </button>
+                <button
+                  className="secondary record-action-button"
+                  onClick={() => isTaskRunning(item) ? cancelRecordTask(item) : openRecordDeleteDialog(item)}
+                >
+                  {isTaskRunning(item) ? '取消生成' : '归档'}
+                </button>
+              </div>
+            ))}
+            {!items.length && <EmptyState title="暂无生成记录" text="创建拍摄任务后会出现在这里。" />}
+          </div>
           <PaginationControls
             disabled={loading}
             offset={offset}
@@ -3639,8 +3717,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
               <Meta label="选中搭配" value={`${detail.styling?.selectedMaterials?.length ?? 0} 件`} />
               <Meta label="拍摄剧本" value={detail.shootScript ? '已生成' : '未生成'} />
               {detail.shootScript?.summary?.summary && <p className="record-script-summary">{String(detail.shootScript.summary.summary)}</p>}
-              {(detail.storyboardPreview?.asset ?? detail.preview?.asset) && <img className="detail-preview" src={mediaUrl(assetPreviewSrc((detail.storyboardPreview?.asset ?? detail.preview?.asset) as MediaAsset))} />}
-              <FinalImageStrip images={detail.resultSet?.images ?? []} />
+              <RecordImagePreview task={detail} />
             </>
           ) : <EmptyState title="选择一条记录" text="查看分镜预览、搭配服装和最终成片。" />}
         </div>
@@ -3735,17 +3812,21 @@ function DeleteConfirmDialog({ title, items, onClose, onConfirm, impact = null, 
   )
 }
 
-function PaginationControls({ offset, pageSize, pageSizeOptions = defaultPageSizeOptions, total, totalPages, disabled, compact = false, onOffsetChange, onPageSizeChange }: {
+function PaginationControls({ offset, pageSize, pageSizeOptions = defaultPageSizeOptions, pageSizeOptionKey, pageSizeUnit = '行', total, totalPages, disabled, compact = false, onOffsetChange, onPageSizeChange }: {
   offset: number
   pageSize: number
-  pageSizeOptions?: readonly number[]
+  pageSizeOptions?: readonly PageSizeOption[]
+  pageSizeOptionKey?: string
+  pageSizeUnit?: string
   total: number
   totalPages: number
   disabled?: boolean
   compact?: boolean
   onOffsetChange: (offset: number) => void
-  onPageSizeChange: (pageSize: number) => void
+  onPageSizeChange: (pageSize: number, optionKey?: string) => void
 }) {
+  const normalizedPageSizeOptions = normalizePageSizeOptions(pageSizeOptions, pageSizeUnit)
+  const selectedPageSizeKey = pageSizeOptionKey ?? String(pageSize)
   const currentPage = total > 0 ? Math.floor(offset / pageSize) + 1 : 0
   const firstItem = total > 0 ? offset + 1 : 0
   const lastItem = Math.min(offset + pageSize, total)
@@ -3801,13 +3882,32 @@ function PaginationControls({ offset, pageSize, pageSizeOptions = defaultPageSiz
         <span>共 {total} 条</span>
         <span>{total > 0 ? `${firstItem}-${lastItem} 条` : '当前 0 条'}</span>
         <label>每页
-          <select value={pageSize} disabled={disabled} onChange={(event) => onPageSizeChange(Number(event.target.value))}>
-            {pageSizeOptions.map((value) => <option key={value} value={value}>{value} 行</option>)}
+          <select
+            value={selectedPageSizeKey}
+            disabled={disabled}
+            onChange={(event) => {
+              const selected = normalizedPageSizeOptions.find((option) => option.key === event.target.value)
+              if (selected) onPageSizeChange(selected.value, selected.key)
+            }}
+          >
+            {normalizedPageSizeOptions.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}
           </select>
         </label>
       </div>
     </div>
   )
+}
+
+function normalizePageSizeOptions(options: readonly PageSizeOption[], unit: string) {
+  const seen = new Set<string>()
+  return options.map((option) => {
+    if (typeof option === 'number') return { value: option, label: `${option} ${unit}`, key: String(option) }
+    return { value: option.value, label: option.label, key: option.key ?? String(option.value) }
+  }).filter((option) => {
+    if (seen.has(option.key)) return false
+    seen.add(option.key)
+    return true
+  })
 }
 
 function PageTitle({ title, subtitle, actions }: { title: string; subtitle: string; actions?: ReactNode }) {
@@ -3857,7 +3957,7 @@ function GarmentCard({ item, onTag, onOpen, onDelete, selected, onSelect }: {
       </div>
       <div className="garment-card-head"><strong title={item.code}>{item.code}</strong><span className={`status ${item.status.toLowerCase()}`}>{garmentStatus(item.status)}</span></div>
       {failed && item.tagError && <span className="inline-error">{item.tagError}</span>}
-      <p>{tagging ? '正在识别服饰信息，完成后可进入智能选搭。' : failed ? '打标未完成，可查看详情或重新打标。' : brief || '待识别搭配信息'}</p>
+      <p>{tagging ? '正在识别服装信息，完成后可进入智能选搭。' : failed ? '打标未完成，可查看详情或重新打标。' : brief || '待识别搭配信息'}</p>
       {tagging && runningTagAttempt && <AIOperationList operations={[runningTagAttempt]} compact />}
       <div className="tag-summary">
         {showTagResult && chips.map((chip) => <span key={chip}>{chip}</span>)}
@@ -4007,20 +4107,13 @@ function GarmentDetailDrawer({ item, run, onClose, onChange, onDelete }: {
                     />
                   ) : (
                     <button className="image-open" onClick={() => setViewer(assetLightboxImage(image.asset, working.map((itemImage) => itemImage.asset)))} title="放大查看">
-                      <img src={mediaUrl(assetThumbSrc(image.asset))} alt={image.asset.filename} />
+                      <img src={mediaUrl(assetThumbSrc(image.asset))} alt={image.asset.filename} loading="lazy" />
                     </button>
                   )}
                   <span>{replacement?.name ?? image.asset.filename}<small>{replacement ? fileMeta(replacement, replacementDimensions[image.id]) : assetMeta(image.asset)}</small></span>
                   <div className="thumb-actions">
-                    {replacement ? (
-                      <FilePreviewAction file={replacement} dimensions={replacementDimensions[image.id]} onOpen={(nextImage) => setViewer(nextImage)} />
-                    ) : (
-                      <button onClick={() => setViewer(assetLightboxImage(image.asset, working.map((itemImage) => itemImage.asset)))} title="放大查看"><Eye size={14} /></button>
-                    )}
-                    <button disabled={tagging} onClick={() => move(index, index - 1)} title="前移"><ArrowUp size={14} /></button>
-                    <button disabled={tagging} onClick={() => move(index, index + 1)} title="后移"><ArrowDown size={14} /></button>
                     <label className={tagging ? 'is-disabled' : ''} title="替换图片">
-                      <ImagePlus size={14} />
+                      <RefreshCw size={14} />
                       <input disabled={tagging} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
                         const nextReplacement = event.target.files?.[0]
                         if (!nextReplacement) return
@@ -4047,7 +4140,6 @@ function GarmentDetailDrawer({ item, run, onClose, onChange, onDelete }: {
                 />
                 <span>{file.name}<small>{fileMeta(file, pendingDimensions[fileKey(file)])}</small></span>
                 <div className="thumb-actions">
-                  <FilePreviewAction file={file} dimensions={pendingDimensions[fileKey(file)]} onOpen={(image) => setViewer(image)} />
                   <button onClick={() => setPendingFiles((files) => files.filter((_, fileIndex) => fileIndex !== index))} title="删除图片"><Trash2 size={14} /></button>
                 </div>
               </div>
@@ -4411,7 +4503,7 @@ function isAttemptRunning(operation: AIOperation) {
 
 function operationLabel(operation: AIOperation, index = 0) {
   if (operation.ownerType === 'styling_garment_upload') return '搭配服装上传'
-  if (operation.ownerType === 'styling_garment_tagging') return '服饰标签识别'
+  if (operation.ownerType === 'styling_garment_tagging') return '服装标签识别'
   if (operation.ownerType === 'generation_styling') return '智能选搭'
   if (operation.ownerType === 'generation_shoot_script') return '拍摄剧本'
   if (operation.ownerType === 'generation_preview') return '分镜预览'
@@ -4452,7 +4544,7 @@ function AssetThumb({ asset, large = false, interactive = true }: { asset?: Medi
   const [failed, setFailed] = useState(false)
   const src = asset ? assetThumbSrc(asset) : ''
   useEffect(() => setFailed(false), [asset?.id, src])
-  const image = asset && src && !failed ? <img src={mediaUrl(src)} alt={asset.filename} onError={() => setFailed(true)} /> : null
+  const image = asset && src && !failed ? <img src={mediaUrl(src)} alt={asset.filename} loading="lazy" onError={() => setFailed(true)} /> : null
   return (
     <>
       <div className={`asset-thumb ${large ? 'large' : ''} ${failed ? 'is-broken' : ''}`}>
@@ -4471,6 +4563,43 @@ function AssetThumb({ asset, large = false, interactive = true }: { asset?: Medi
 
 function FinalImageStrip({ images }: { images: { id: number; sortOrder: number; status: string; asset?: MediaAsset | null }[] }) {
   return <div className="final-strip">{images.map((image) => <AssetThumb key={image.id} asset={image.asset} />)}</div>
+}
+
+function RecordImagePreview({ task }: { task: GenerationTask }) {
+  const [viewer, setViewer] = useState<LightboxImage | null>(null)
+  const previewAsset = (task.storyboardPreview?.asset ?? task.preview?.asset) ?? null
+  const finalAssets = (task.resultSet?.images ?? [])
+    .slice()
+    .sort((left, right) => left.sortOrder - right.sortOrder)
+    .map((image) => image.asset)
+    .filter((asset): asset is MediaAsset => Boolean(asset))
+  const galleryAssets = [previewAsset, ...finalAssets].filter((asset): asset is MediaAsset => Boolean(asset))
+
+  function openAsset(asset: MediaAsset) {
+    setViewer(assetLightboxImage(asset, galleryAssets))
+  }
+
+  if (!galleryAssets.length) return <FinalImageStrip images={task.resultSet?.images ?? []} />
+
+  return (
+    <div className="record-image-preview">
+      {previewAsset && (
+        <button className="detail-preview-open" onClick={() => openAsset(previewAsset)} title="放大查看分镜预览">
+          <img className="detail-preview" src={mediaUrl(assetPreviewSrc(previewAsset))} loading="lazy" alt="分镜预览" />
+        </button>
+      )}
+      {!!finalAssets.length && (
+        <div className="final-strip">
+          {finalAssets.map((asset) => (
+            <button className="asset-thumb record-thumb" key={asset.id} onClick={() => openAsset(asset)} title="放大查看成片">
+              <img src={mediaUrl(assetThumbSrc(asset))} alt={asset.filename} loading="lazy" />
+            </button>
+          ))}
+        </div>
+      )}
+      {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
+    </div>
+  )
 }
 
 function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () => void }) {
@@ -4607,7 +4736,7 @@ function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () =
                 setIndex(itemIndex)
                 setZoom('fit')
               }} title={item.title}>
-                <img src={item.thumbSrc ?? item.src} alt={item.title} />
+                <img src={item.thumbSrc ?? item.src} alt={item.title} loading="lazy" />
               </button>
             ))}
           </div>
@@ -4832,7 +4961,7 @@ function deleteImpactText(impact?: DeleteImpact | null) {
   if (!impact) return '影响范围暂时无法计算。彻底删除会移除关联表单数据和已登记的存储文件，且不可恢复。'
   const parts: string[] = []
   if (impact.garmentCount) parts.push(`${impact.garmentCount} 套搭配服装`)
-  if (impact.garmentImageCount) parts.push(`${impact.garmentImageCount} 张服饰图`)
+  if (impact.garmentImageCount) parts.push(`${impact.garmentImageCount} 张服装图`)
   const taskCount = impact.dependentTaskCount ?? impact.taskCount ?? 0
   if (taskCount) parts.push(`${taskCount} 条生成记录`)
   if (impact.shootScriptCount) parts.push(`${impact.shootScriptCount} 份拍摄剧本`)

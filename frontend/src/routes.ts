@@ -16,9 +16,9 @@ export function parseRoute(): AppRoute {
   const params = new URLSearchParams(window.location.search)
   if (path === '/library') return { page: 'library' }
   if (path === '/model') return { page: 'model' }
-  if (path === '/brand') return { page: 'prompt-maintenance' }
-  if (path === '/shoot-config') return { page: 'prompt-maintenance' }
-  if (path === '/tag-rules') return { page: 'prompt-maintenance' }
+  if (path === '/brand') return { page: 'brand' }
+  if (path === '/shoot-config') return { page: 'shoot-config' }
+  if (path === '/tag-rules') return { page: 'tag-rules' }
   if (path === '/prompt-maintenance') return { page: 'prompt-maintenance' }
   if (path === '/records') return { page: 'records', recordId: positiveId(params.get('task')) }
   return { page: 'studio', taskId: positiveId(params.get('task')) }
