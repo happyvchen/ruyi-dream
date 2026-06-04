@@ -203,6 +203,22 @@ export type GenerationTask = {
   attempts?: unknown[]
 }
 
+type DirectUploadItem = {
+  objectKey: string
+  uploadUrl: string
+  method: 'PUT'
+  headers?: Record<string, string>
+  filename: string
+  mimeType: string
+}
+
+type UploadedMedia = {
+  objectKey: string
+  filename: string
+  mimeType: string
+  sizeBytes: number
+}
+
 export type DeleteImpact = {
   garmentCount?: number
   garmentImageCount?: number
@@ -307,6 +323,41 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
+async function uploadFilesDirect(scope: string, files: File[]): Promise<UploadedMedia[]> {
+  const presigned = await request<{ items: DirectUploadItem[] }>('/api/uploads/presign', {
+    method: 'POST',
+    body: JSON.stringify({
+      scope,
+      files: files.map((file) => ({
+        filename: file.name,
+        mimeType: file.type,
+        sizeBytes: file.size,
+      })),
+    }),
+  })
+  if (presigned.items.length !== files.length) throw new ApiError('上传地址数量不匹配', 500)
+  await Promise.all(presigned.items.map(async (item, index) => {
+    const file = files[index]!
+    let response: Response
+    try {
+      response = await fetch(item.uploadUrl, {
+        method: item.method,
+        headers: item.headers ?? { 'Content-Type': item.mimeType || file.type },
+        body: file,
+      })
+    } catch {
+      throw new ApiError('浏览器直传对象存储失败，请检查对象存储 CORS 是否允许当前前端域名。', 0)
+    }
+    if (!response.ok) throw new ApiError(`${file.name} 上传失败`, response.status)
+  }))
+  return presigned.items.map((item, index) => ({
+    objectKey: item.objectKey,
+    filename: files[index]!.name,
+    mimeType: item.mimeType || files[index]!.type,
+    sizeBytes: files[index]!.size,
+  }))
+}
+
 function params(path: string, values: Record<string, string | number | boolean | undefined | null>) {
   const search = new URLSearchParams()
   Object.entries(values).forEach(([key, value]) => {
@@ -390,12 +441,12 @@ export const api = {
     request<{ ok: boolean; purged: boolean; deletedTaskIds: number[] }>('/api/generation-tasks/batch-purge', { method: 'POST', body: JSON.stringify({ purge: true, ids, confirmPhrase }) }),
   getTaskDeleteImpact: (ids: number[]) =>
     request<{ impact: DeleteImpact }>('/api/generation-tasks/delete-impact', { method: 'POST', body: JSON.stringify({ ids }) }),
-  createTask: (name: string, files: File[], heroProductInfo?: string) => {
-    const form = new FormData()
-    if (name) form.append('name', name)
-    if (heroProductInfo) form.append('heroProductInfo', heroProductInfo)
-    files.forEach((file) => form.append('files', file))
-    return request<{ item: GenerationTask }>('/api/generation-tasks', { method: 'POST', body: form })
+  createTask: async (name: string, files: File[], heroProductInfo?: string) => {
+    const uploads = await uploadFilesDirect('generation_task', files)
+    return request<{ item: GenerationTask }>('/api/generation-tasks/from-uploads', {
+      method: 'POST',
+      body: JSON.stringify({ name, heroProductInfo, uploads }),
+    })
   },
   updateTask: (id: number, payload: {
     name?: string
@@ -406,10 +457,12 @@ export const api = {
     finalImageUserInstruction?: string
   }) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
-  addTaskImages: (id: number, files: File[]) => {
-    const form = new FormData()
-    files.forEach((file) => form.append('files', file))
-    return request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/images`, { method: 'POST', body: form })
+  addTaskImages: async (id: number, files: File[]) => {
+    const uploads = await uploadFilesDirect('generation_task', files)
+    return request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/images/from-uploads`, {
+      method: 'POST',
+      body: JSON.stringify({ uploads }),
+    })
   },
   replaceTaskImage: (id: number, file: File) => {
     const form = new FormData()

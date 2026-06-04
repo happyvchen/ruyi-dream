@@ -26,6 +26,7 @@ PLACEHOLDER_SECRET_VALUES = {
     "DQugmV9crHkkYYjG",
 }
 MIN_PRODUCTION_CREDENTIAL_LENGTH = 12
+DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174"
 
 
 class Settings:
@@ -42,6 +43,11 @@ class Settings:
     s3_secret_access_key = os.getenv("APP_S3_SECRET_ACCESS_KEY", "")
     s3_force_path_style = os.getenv("APP_S3_FORCE_PATH_STYLE", "true").lower() in {"1", "true", "yes", "on"}
     s3_presign_expires_seconds = int(os.getenv("APP_S3_PRESIGN_EXPIRES_SECONDS", "900"))
+    direct_upload_cors_origins = [
+        origin.strip().rstrip("/")
+        for origin in os.getenv("APP_DIRECT_UPLOAD_CORS_ORIGINS", os.getenv("BACKEND_CORS_ORIGINS", DEFAULT_CORS_ORIGINS)).split(",")
+        if origin.strip()
+    ]
     max_upload_image_bytes = int(os.getenv("APP_MAX_UPLOAD_IMAGE_BYTES", str(15 * 1024 * 1024)))
     max_upload_image_pixels = int(os.getenv("APP_MAX_UPLOAD_IMAGE_PIXELS", str(25_000_000)))
     max_head_references_per_profile = int(os.getenv("APP_MAX_HEAD_REFERENCES_PER_PROFILE", "20"))
@@ -78,7 +84,7 @@ class Settings:
         origin.strip()
         for origin in os.getenv(
             "BACKEND_CORS_ORIGINS",
-            "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174",
+            DEFAULT_CORS_ORIGINS,
         ).split(",")
         if origin.strip()
     ]

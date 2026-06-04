@@ -32,10 +32,13 @@ from .object_storage import (
     delete_object,
     delete_prefix,
     ensure_bucket,
+    ensure_direct_upload_cors,
     get_bytes,
     join_key,
+    object_head,
     object_exists,
     presigned_get_url,
+    presigned_put_url,
     put_bytes,
     put_fileobj,
     unique_key,
@@ -231,6 +234,31 @@ class GenerationTaskUpdateRequest(BaseModel):
     userRequirement: str | None = None
 
 
+class DirectUploadFileRequest(BaseModel):
+    filename: str
+    mimeType: str | None = None
+    sizeBytes: int | None = None
+
+
+class DirectUploadRequest(BaseModel):
+    scope: str = "generation_task"
+    files: list[DirectUploadFileRequest] = Field(default_factory=list)
+
+
+class UploadedMediaRequest(BaseModel):
+    objectKey: str
+    filename: str | None = None
+    mimeType: str | None = None
+    sizeBytes: int | None = None
+
+
+class GenerationTaskFromUploadsRequest(BaseModel):
+    name: str | None = None
+    heroProductInfo: str | None = None
+    userRequirement: str | None = None
+    uploads: list[UploadedMediaRequest] = Field(default_factory=list)
+
+
 class GenerationStylingRequest(BaseModel):
     userInstruction: str | None = None
     userRequirement: str | None = None
@@ -303,6 +331,7 @@ active_background_generation_jobs: set[str] = set()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> Any:
     ensure_bucket()
+    ensure_direct_upload_cors()
     init_db()
     app.state.generation_poller = asyncio.create_task(generation_poller_loop())
     try:
@@ -388,11 +417,58 @@ def logout() -> JSONResponse:
     return response
 
 
+@app.post("/api/uploads/presign")
+def create_direct_uploads(payload: DirectUploadRequest) -> dict[str, Any]:
+    if not payload.files:
+        raise HTTPException(status_code=400, detail="至少选择一张图片")
+    if len(payload.files) > 20:
+        raise HTTPException(status_code=400, detail="单次最多申请 20 张图片上传")
+    ensure_direct_upload_cors()
+    scope_prefix = direct_upload_scope_prefix(payload.scope)
+    batch = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    items: list[dict[str, Any]] = []
+    for index, item in enumerate(payload.files, start=1):
+        filename = sanitize_filename(item.filename or f"image-{index}")
+        if item.sizeBytes is not None and item.sizeBytes > settings.max_upload_image_bytes:
+            max_mb = settings.max_upload_image_bytes / (1024 * 1024)
+            raise HTTPException(status_code=400, detail=f"{filename} 超过 {max_mb:.0f}MB 大小限制")
+        content_type = direct_upload_content_type(item.mimeType, filename)
+        object_key = join_key("direct-uploads", scope_prefix, batch, f"{index:03d}-{filename}")
+        upload_url = presigned_put_url(object_key, content_type)
+        if not upload_url:
+            raise HTTPException(status_code=500, detail="无法创建上传地址")
+        items.append(
+            {
+                "objectKey": object_key,
+                "uploadUrl": upload_url,
+                "method": "PUT",
+                "headers": {"Content-Type": content_type},
+                "expiresIn": settings.s3_presign_expires_seconds,
+                "filename": filename,
+                "mimeType": content_type,
+                "maxSizeBytes": settings.max_upload_image_bytes,
+            }
+        )
+    return {"items": items}
+
+
 async def validate_upload_image(upload: UploadFile) -> tuple[bytes, str]:
     filename = upload.filename or "image"
 
     content = await upload.read(settings.max_upload_image_bytes + 1)
     await upload.seek(0)
+    content_type, _, _ = validate_image_content(content, filename, upload.content_type)
+    return content, content_type
+
+
+def detected_image_content_type(image_format: str, declared_type: str | None) -> str:
+    canonical_type = Image.MIME.get(image_format.upper())
+    if canonical_type:
+        return canonical_type
+    return f"image/{image_format.lower() or 'unknown'}"
+
+
+def validate_image_content(content: bytes, filename: str, declared_type: str | None = None) -> tuple[str, int, int]:
     if not content:
         raise HTTPException(status_code=400, detail=f"{filename} 是空文件")
     if len(content) > settings.max_upload_image_bytes:
@@ -413,15 +489,35 @@ async def validate_upload_image(upload: UploadFile) -> tuple[bytes, str]:
     if width <= 0 or height <= 0 or width * height > settings.max_upload_image_pixels:
         max_mp = settings.max_upload_image_pixels / 1_000_000
         raise HTTPException(status_code=400, detail=f"{filename} 超过 {max_mp:.0f}MP 像素限制")
+    return detected_image_content_type(image_format, declared_type), width, height
 
-    return content, detected_image_content_type(image_format, upload.content_type)
+
+def direct_upload_content_type(mime_type: str | None, filename: str) -> str:
+    declared = (mime_type or "").split(";", 1)[0].strip().lower()
+    if declared in {"image/jpeg", "image/png", "image/webp"}:
+        return declared
+    suffix = Path(filename).suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".png":
+        return "image/png"
+    if suffix == ".webp":
+        return "image/webp"
+    raise HTTPException(status_code=400, detail=f"{filename} 仅支持 JPG、PNG 或 WebP 图片")
 
 
-def detected_image_content_type(image_format: str, declared_type: str | None) -> str:
-    canonical_type = Image.MIME.get(image_format.upper())
-    if canonical_type:
-        return canonical_type
-    return f"image/{image_format.lower() or 'unknown'}"
+def direct_upload_scope_prefix(scope: str) -> str:
+    normalized = scope.strip().replace("-", "_")
+    if normalized not in {"generation_task", "styling_garment", "model_profile"}:
+        raise HTTPException(status_code=400, detail="上传用途不合法")
+    return normalized.replace("_", "-")
+
+
+def ensure_direct_upload_key(object_key: str) -> str:
+    key = clean_key(object_key)
+    if not key.startswith("direct-uploads/"):
+        raise HTTPException(status_code=400, detail="上传对象不属于本次直传路径")
+    return key
 
 
 def cleanup_objects(keys: list[str]) -> None:
@@ -453,7 +549,7 @@ def media_cleanup_prefixes(object_keys: list[str]) -> list[str]:
     prefixes: list[str] = []
     for object_key in object_keys:
         parts = clean_key(object_key).split("/")
-        if len(parts) >= 2 and parts[0] in {"generation-tasks", "styling-garments", "uploads", "outputs"}:
+        if len(parts) >= 2 and parts[0] in {"generation-tasks", "styling-garments", "uploads", "direct-uploads", "outputs"}:
             prefixes.append("/".join(parts[:2]))
     return list(dict.fromkeys(prefixes))
 
@@ -501,6 +597,19 @@ def release_media_asset_if_unreferenced(db: Any, asset_id: int | None) -> bool:
     cleanup_objects(image_object_keys(object_key))
     db.execute("DELETE FROM media_assets WHERE id = ?", (asset_id,))
     return True
+
+
+def cleanup_created_media_assets(assets: list[dict[str, Any]]) -> None:
+    asset_ids = [int(asset["id"]) for asset in assets if asset.get("id")]
+    object_keys = [str(asset["objectKey"]) for asset in assets if asset.get("objectKey")]
+    if asset_ids:
+        with suppress(Exception):
+            with get_db() as db:
+                db.execute(
+                    f"DELETE FROM media_assets WHERE id IN ({','.join('?' for _ in asset_ids)})",
+                    asset_ids,
+                )
+    cleanup_objects([key for object_key in object_keys for key in image_object_keys(object_key)])
 
 
 def media_asset_rows_for_ids(db: Any, asset_ids: list[int]) -> list[Any]:
@@ -1275,6 +1384,40 @@ async def create_generation_task(
     return {"item": get_generation_task_by_id(task_id)}
 
 
+@app.post("/api/generation-tasks/from-uploads")
+async def create_generation_task_from_uploads(payload: GenerationTaskFromUploadsRequest) -> dict[str, Any]:
+    if not payload.uploads:
+        raise HTTPException(status_code=400, detail="至少上传一张主推款图片")
+    if len(payload.uploads) > 8:
+        raise HTTPException(status_code=400, detail="主推款最多上传 8 张图片")
+    task_name = (payload.name or datetime.now().strftime("%Y%m%d%H%M%S")).strip()
+    assets = await save_uploaded_objects_as_media_assets(payload.uploads)
+    timestamp = now_iso()
+    hero_product_info_text = normalize_user_input_text(
+        payload.heroProductInfo if payload.heroProductInfo is not None else payload.userRequirement
+    )
+    try:
+        with get_db() as db:
+            cursor = db.execute(
+                "INSERT INTO generation_tasks (name, hero_product_info_text, user_requirement_text, status, created_at, updated_at) VALUES (?, ?, ?, 'DRAFT', ?, ?)",
+                (task_name, hero_product_info_text, hero_product_info_text, timestamp, timestamp),
+            )
+            task_id = int(cursor.lastrowid)
+            for index, asset in enumerate(assets):
+                db.execute(
+                    """
+                    INSERT INTO generation_task_images (task_id, media_asset_id, sort_order, status, created_at, updated_at)
+                    VALUES (?, ?, ?, 'READY', ?, ?)
+                    """,
+                    (task_id, asset["id"], index, timestamp, timestamp),
+                )
+            log_event(db, "generation_task", task_id, "created", {"name": task_name, "fileCount": len(assets), "uploadMode": "direct"})
+    except Exception:
+        cleanup_created_media_assets(assets)
+        raise
+    return {"item": get_generation_task_by_id(task_id)}
+
+
 @app.get("/api/generation-tasks")
 def list_generation_tasks(
     include_archived: bool = Query(False, alias="includeArchived"),
@@ -1806,6 +1949,42 @@ async def add_generation_task_images(task_id: int, files: list[UploadFile] = Fil
         db.execute("UPDATE generation_tasks SET updated_at = ? WHERE id = ?", (timestamp, task_id))
         if task["status"] != "DRAFT":
             mark_generation_task_input_changed(db, task_id, timestamp, "hero_product_images_added")
+    return {"item": get_generation_task_by_id(task_id)}
+
+
+@app.post("/api/generation-tasks/{task_id}/images/from-uploads")
+async def add_generation_task_images_from_uploads(task_id: int, payload: GenerationTaskFromUploadsRequest) -> dict[str, Any]:
+    task = get_generation_task_row(task_id)
+    ensure_generation_task_editable(task)
+    with get_db() as db:
+        count = int(db.execute(
+            "SELECT COUNT(*) AS count FROM generation_task_images WHERE task_id = ? AND deleted_at IS NULL",
+            (task_id,),
+        ).fetchone()["count"])
+        max_sort = int(db.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) AS max_sort FROM generation_task_images WHERE task_id = ? AND deleted_at IS NULL",
+            (task_id,),
+        ).fetchone()["max_sort"])
+    if not payload.uploads or count + len(payload.uploads) > 8:
+        raise HTTPException(status_code=400, detail="主推款最多上传 8 张图片")
+    assets = await save_uploaded_objects_as_media_assets(payload.uploads)
+    timestamp = now_iso()
+    try:
+        with get_db() as db:
+            for offset, asset in enumerate(assets, start=1):
+                db.execute(
+                    """
+                    INSERT INTO generation_task_images (task_id, media_asset_id, sort_order, status, created_at, updated_at)
+                    VALUES (?, ?, ?, 'READY', ?, ?)
+                    """,
+                    (task_id, asset["id"], max_sort + offset, timestamp, timestamp),
+                )
+            db.execute("UPDATE generation_tasks SET updated_at = ? WHERE id = ?", (timestamp, task_id))
+            if task["status"] != "DRAFT":
+                mark_generation_task_input_changed(db, task_id, timestamp, "hero_product_images_added")
+    except Exception:
+        cleanup_created_media_assets(assets)
+        raise
     return {"item": get_generation_task_by_id(task_id)}
 
 
@@ -3472,6 +3651,74 @@ def stable_media_url(key: str | Path | None, variant: str = "original") -> str |
     return f"/api/media?{urlencode({'key': clean_key(key), 'variant': variant})}"
 
 
+def insert_media_asset_record(asset: dict[str, Any], timestamp: str | None = None) -> int:
+    timestamp = timestamp or now_iso()
+    with get_db() as db:
+        cursor = db.execute(
+            """
+            INSERT INTO media_assets
+              (object_key, thumb_key, preview_key, original_filename, mime_type, width, height,
+               size_bytes, thumb_size_bytes, preview_size_bytes, hash, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'READY', ?, ?)
+            """,
+            (
+                asset["objectKey"],
+                asset["thumbKey"],
+                asset["previewKey"],
+                asset["originalFilename"],
+                asset["mimeType"],
+                asset["width"],
+                asset["height"],
+                asset["sizeBytes"],
+                asset["thumbSizeBytes"],
+                asset["previewSizeBytes"],
+                asset["hash"],
+                timestamp,
+                timestamp,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
+def process_uploaded_content_as_media_asset(content: bytes, content_type: str, filename: str, key: str, timestamp: str) -> dict[str, Any]:
+    derivative = generate_image_derivatives(key, content)
+    width = height = None
+    with Image.open(BytesIO(content)) as image:
+        width, height = image.size
+    asset = {
+        "objectKey": key,
+        "thumbKey": derivative.get("thumb"),
+        "previewKey": derivative.get("preview"),
+        "originalFilename": filename,
+        "mimeType": content_type,
+        "width": width,
+        "height": height,
+        "sizeBytes": len(content),
+        "thumbSizeBytes": derivative.get("thumbSize"),
+        "previewSizeBytes": derivative.get("previewSize"),
+        "hash": hashlib.sha256(content).hexdigest(),
+    }
+    asset["id"] = insert_media_asset_record(asset, timestamp)
+    return asset
+
+
+def process_uploaded_object_as_media_asset(upload: UploadedMediaRequest, timestamp: str) -> dict[str, Any]:
+    object_key = ensure_direct_upload_key(upload.objectKey)
+    filename = sanitize_filename(upload.filename or Path(object_key).name or "image")
+    head = object_head(object_key)
+    if not head:
+        raise HTTPException(status_code=400, detail=f"{filename} 尚未上传完成")
+    object_size_bytes = int(head.get("contentLength") or 0)
+    if object_size_bytes <= 0:
+        raise HTTPException(status_code=400, detail=f"{filename} 是空文件")
+    if object_size_bytes > settings.max_upload_image_bytes:
+        max_mb = settings.max_upload_image_bytes / (1024 * 1024)
+        raise HTTPException(status_code=400, detail=f"{filename} 超过 {max_mb:.0f}MB 大小限制")
+    content = get_bytes(object_key)
+    content_type, _, _ = validate_image_content(content, filename, upload.mimeType or str(head.get("contentType") or ""))
+    return process_uploaded_content_as_media_asset(content, content_type, filename, object_key, timestamp)
+
+
 async def save_uploads_as_media_assets(files: list[UploadFile], prefix: str) -> list[dict[str, Any]]:
     timestamp = now_iso()
     saved: list[dict[str, Any]] = []
@@ -3482,51 +3729,36 @@ async def save_uploads_as_media_assets(files: list[UploadFile], prefix: str) -> 
             content, content_type = await validate_upload_image(upload)
             filename = sanitize_filename(upload.filename or "image")
             key = unique_key(join_key(prefix, f"{index + 1:03d}-{filename}"))
-            put_fileobj(key, BytesIO(content), content_type)
+            await asyncio.to_thread(put_fileobj, key, BytesIO(content), content_type)
             saved_object_keys.append(key)
-            derivative = generate_image_derivatives(key, content)
-            saved_object_keys.extend([item for item in (derivative.get("thumb"), derivative.get("preview")) if item])
-            width = height = None
-            with Image.open(BytesIO(content)) as image:
-                width, height = image.size
-            asset = {
-                "objectKey": key,
-                "thumbKey": derivative.get("thumb"),
-                "previewKey": derivative.get("preview"),
-                "originalFilename": upload.filename or filename,
-                "mimeType": content_type,
-                "width": width,
-                "height": height,
-                "sizeBytes": len(content),
-                "thumbSizeBytes": derivative.get("thumbSize"),
-                "previewSizeBytes": derivative.get("previewSize"),
-                "hash": hashlib.sha256(content).hexdigest(),
-            }
-            with get_db() as db:
-                cursor = db.execute(
-                    """
-                    INSERT INTO media_assets
-                      (object_key, thumb_key, preview_key, original_filename, mime_type, width, height,
-                       size_bytes, thumb_size_bytes, preview_size_bytes, hash, status, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'READY', ?, ?)
-                    """,
-                    (
-                        asset["objectKey"],
-                        asset["thumbKey"],
-                        asset["previewKey"],
-                        asset["originalFilename"],
-                        asset["mimeType"],
-                        asset["width"],
-                        asset["height"],
-                        asset["sizeBytes"],
-                        asset["thumbSizeBytes"],
-                        asset["previewSizeBytes"],
-                        asset["hash"],
-                        timestamp,
-                        timestamp,
-                    ),
-                )
-                asset["id"] = int(cursor.lastrowid)
+            asset = await asyncio.to_thread(process_uploaded_content_as_media_asset, content, content_type, upload.filename or filename, key, timestamp)
+            saved_object_keys.extend([item for item in (asset.get("thumbKey"), asset.get("previewKey")) if item])
+            saved_asset_ids.append(int(asset["id"]))
+            saved.append(asset)
+    except Exception:
+        if saved_asset_ids:
+            with suppress(Exception):
+                with get_db() as db:
+                    db.execute(
+                        f"DELETE FROM media_assets WHERE id IN ({','.join('?' for _ in saved_asset_ids)})",
+                        saved_asset_ids,
+                    )
+        cleanup_objects(saved_object_keys)
+        raise
+    return saved
+
+
+async def save_uploaded_objects_as_media_assets(uploads: list[UploadedMediaRequest]) -> list[dict[str, Any]]:
+    timestamp = now_iso()
+    saved: list[dict[str, Any]] = []
+    saved_object_keys: list[str] = []
+    saved_asset_ids: list[int] = []
+    try:
+        for upload in uploads:
+            object_key = ensure_direct_upload_key(upload.objectKey)
+            saved_object_keys.append(object_key)
+            asset = await asyncio.to_thread(process_uploaded_object_as_media_asset, upload, timestamp)
+            saved_object_keys.extend([item for item in (asset.get("thumbKey"), asset.get("previewKey")) if item])
             saved_asset_ids.append(int(asset["id"]))
             saved.append(asset)
     except Exception:
