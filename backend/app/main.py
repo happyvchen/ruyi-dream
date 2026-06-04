@@ -2127,6 +2127,7 @@ async def run_select_generation_styling(
             persist_generation_task_stage_instruction(db, task_id, "ai_styling", effective_user_instruction, timestamp)
         db.execute("UPDATE generation_tasks SET status = 'STYLING_RUNNING', updated_at = ? WHERE id = ?", (timestamp, task_id))
     attempt_id = create_attempt("generation_styling", task_id, "gemini")
+    styling_plan: dict[str, Any] | None = None
     try:
         input_row, candidate_snapshot, request_snapshot = build_ai_stylist_context(input_version_id)
         request_snapshot["invocation"] = {"mode": trigger, "target": "styling"}
@@ -2138,6 +2139,7 @@ async def run_select_generation_styling(
             finish_attempt(attempt_id, "CANCELLED")
             return {"item": get_generation_task_by_id(task_id)}
         styling_plan = await select_styling_with_gemini(input_row, candidate_snapshot, request_snapshot, attempt_id=attempt_id)
+        persist_attempt_provider_progress(attempt_id, styling_plan)
         validate_styling_plan(styling_plan, candidate_snapshot)
         selected_ids = [int(item) for item in styling_plan.get("selected_material_ids", [])]
         source_ids, selected_snapshot = get_styling_source_and_selected_snapshots(selected_ids)
@@ -2149,7 +2151,7 @@ async def run_select_generation_styling(
                     finish_attempt(attempt_id, "CANCELLED", error_message=str(exc))
                 return {"item": get_generation_task_by_id(task_id)}
         if attempt_id:
-            finish_attempt(attempt_id, "FAILED", error_message=str(exc))
+            finish_attempt(attempt_id, "FAILED", response_snapshot=styling_plan, error_message=str(exc))
         with get_db() as db:
             db.execute(
                 """
@@ -3984,7 +3986,7 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
             contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
     client = genai.Client(api_key=settings.gemini_api_key)
     try:
-        config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema={"type": "object"})
+        config = types.GenerateContentConfig(response_mime_type="application/json")
         response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents, config=config)
     except TypeError:
         response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents)
@@ -4801,7 +4803,6 @@ async def select_styling_with_gemini(input_row: Any, candidate_snapshot: dict[st
         config = types.GenerateContentConfig(
             system_instruction=str(request_snapshot.get("systemInstruction") or AI_STYLIST_SYSTEM_INSTRUCTION),
             response_mime_type="application/json",
-            response_json_schema={"type": "object"},
         )
         response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents, config=config)
         raw = parse_gemini_json_object(getattr(response, "text", "") or "{}")
@@ -4962,17 +4963,19 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
         for index, item in enumerate(candidates, start=1)
         if isinstance(item, dict)
     ]
-    if not normalized_candidates:
+    if not normalized_candidates and plan_source_mode == "fallback":
         normalized_candidates = [normalize_outfit_candidate({}, candidate_ids, candidate_cards, candidate_cards_by_code_map, 1)]
-    selected_outfit_id = str(source.get("selected_outfit_key") or source.get("selected_outfit_id") or "")
-    selected = next((item for item in normalized_candidates if item["id"] == selected_outfit_id), {})
+    requested_selected_outfit_id = str(source.get("selected_outfit_key") or source.get("selected_outfit_id") or "")
     selected_codes = normalize_selected_material_codes(source.get("selected_material_codes") or source.get("selected_materials"), candidate_cards_by_code_map)
     selected_ids = selected_material_ids_for_codes(selected_codes, candidate_cards_by_code_map)
     selected_ids_source = source.get("selected_material_ids")
     if not isinstance(selected_ids_source, list):
-        selected_ids_source = selected["selected_material_ids"] if isinstance(selected.get("selected_material_ids"), list) else []
+        selected_ids_source = []
     if not selected_ids:
         selected_ids = normalize_selected_material_ids(selected_ids_source, candidate_ids)
+    selected = resolve_selected_outfit_candidate(normalized_candidates, requested_selected_outfit_id, selected_ids, selected_codes)
+    selected_outfit_id = str(selected.get("outfit_key") or selected.get("id") or "") if selected else requested_selected_outfit_id
+    selected_key_normalized = bool(normalized_candidates) and selected_outfit_id != requested_selected_outfit_id
     if not selected_ids:
         selected_ids = selected.get("selected_material_ids") if isinstance(selected.get("selected_material_ids"), list) else []
     selected_refs = normalize_selected_material_refs(source.get("selected_materials"), selected_ids, candidate_cards, candidate_cards_by_code_map)
@@ -4980,6 +4983,8 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
         selected_refs = normalize_selected_material_refs(selected.get("selected_materials"), selected_ids, candidate_cards, candidate_cards_by_code_map)
     selected_codes = [item["material_code"] for item in selected_refs if item.get("material_code")]
     warnings = ensure_string_list(source.get("warnings"))
+    if selected_key_normalized:
+        warnings.append("selected_outfit_key_auto_normalized")
     rejected_source = source.get("rejected_candidates") if isinstance(source.get("rejected_candidates"), list) else []
     return {
         "schema_version": "styling-plan-v1",
@@ -5015,6 +5020,52 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
         "quality_signals": normalize_model_quality_signals(source.get("quality_signals")),
         "warnings": warnings[:8],
     }
+
+
+def resolve_selected_outfit_candidate(
+    normalized_candidates: list[dict[str, Any]],
+    requested_selected_outfit_id: str,
+    selected_ids: list[int],
+    selected_codes: list[str],
+) -> dict[str, Any]:
+    if not normalized_candidates:
+        return {}
+    if requested_selected_outfit_id:
+        selected = next(
+            (
+                item
+                for item in normalized_candidates
+                if str(item.get("outfit_key") or item.get("id") or "") == requested_selected_outfit_id
+            ),
+            {},
+        )
+        if selected:
+            return selected
+    selected_id_set = set(selected_ids)
+    if selected_id_set:
+        selected = next(
+            (
+                item
+                for item in normalized_candidates
+                if set(item.get("selected_material_ids") if isinstance(item.get("selected_material_ids"), list) else []) == selected_id_set
+            ),
+            {},
+        )
+        if selected:
+            return selected
+    selected_code_set = set(selected_codes)
+    if selected_code_set:
+        selected = next(
+            (
+                item
+                for item in normalized_candidates
+                if set(item.get("selected_material_codes") if isinstance(item.get("selected_material_codes"), list) else []) == selected_code_set
+            ),
+            {},
+        )
+        if selected:
+            return selected
+    return {}
 
 
 def normalize_user_requirement_resolution(value: Any) -> dict[str, Any]:
@@ -5425,6 +5476,8 @@ def normalize_selected_material_refs(value: Any, selected_ids: list[int], candid
 
 
 def validate_styling_plan(plan: dict[str, Any], candidate_snapshot: dict[str, Any]) -> None:
+    if plan.get("plan_source_mode") != "fallback" and not plan.get("model_raw_output"):
+        raise RuntimeError("AI Stylist 返回空 JSON，未生成有效 StylingPlan")
     candidate_ids = {int(item) for item in candidate_snapshot.get("candidate_material_ids", [])}
     selected_ids = plan.get("selected_material_ids") if isinstance(plan.get("selected_material_ids"), list) else []
     selected_key = str(plan.get("selected_outfit_key") or plan.get("selected_outfit_id") or "")
@@ -5578,7 +5631,6 @@ async def generate_shoot_script_with_gemini(request_snapshot: dict[str, Any]) ->
         config = types.GenerateContentConfig(
             system_instruction=str(request_snapshot.get("systemInstruction") or AI_DIRECTOR_SYSTEM_INSTRUCTION),
             response_mime_type="application/json",
-            response_json_schema={"type": "object"},
         )
         response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents, config=config)
         return parse_gemini_json_object(getattr(response, "text", "") or "{}")

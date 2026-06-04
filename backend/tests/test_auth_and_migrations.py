@@ -54,6 +54,75 @@ class BackendCurrentFlowTests(unittest.TestCase):
     def test_legacy_planner_module_is_removed(self) -> None:
         self.assertFalse((BACKEND_DIR / "app" / "planner.py").exists())
 
+    def test_validate_styling_plan_rejects_empty_production_model_output(self) -> None:
+        main = importlib.import_module("app.main")
+
+        plan = main.normalize_styling_plan({}, {"candidate_material_ids": [], "library_tag_cards": []})
+        plan["model_raw_output"] = {}
+
+        self.assertEqual(plan["outfit_candidates"], [])
+        with self.assertRaisesRegex(RuntimeError, "返回空 JSON"):
+            main.validate_styling_plan(plan, {"candidate_material_ids": []})
+
+    def test_fallback_styling_plan_keeps_synthesized_candidate(self) -> None:
+        main = importlib.import_module("app.main")
+
+        plan = main.fallback_styling_plan({"image_snapshot_json": "[]"}, {"candidate_material_ids": [], "library_tag_cards": []}, "provider down")
+
+        self.assertEqual(plan["selected_outfit_key"], "candidate_a")
+        self.assertEqual([item["outfit_key"] for item in plan["outfit_candidates"]], ["candidate_a"])
+        with self.assertRaisesRegex(RuntimeError, "fallback"):
+            main.validate_styling_plan(plan, {"candidate_material_ids": []})
+
+    def test_normalize_styling_plan_repairs_mismatched_selected_outfit_key_from_material_codes(self) -> None:
+        main = importlib.import_module("app.main")
+        candidate_snapshot = {
+            "candidate_material_ids": [24],
+            "library_tag_cards": [{"id": 24, "code": "125309C7948510"}],
+        }
+        raw_plan = {
+            "selected_outfit_key": "missing_candidate",
+            "selected_material_codes": ["125309C7948510"],
+            "outfit_candidates": [
+                {
+                    "outfit_key": "candidate_a",
+                    "selected_material_codes": ["125309C7948510"],
+                }
+            ],
+        }
+
+        plan = main.normalize_styling_plan(raw_plan, candidate_snapshot)
+        plan["model_raw_output"] = raw_plan
+
+        self.assertEqual(plan["selected_outfit_key"], "candidate_a")
+        self.assertEqual(plan["selected_material_ids"], [24])
+        self.assertIn("selected_outfit_key_auto_normalized", plan["warnings"])
+        main.validate_styling_plan(plan, candidate_snapshot)
+
+    def test_normalize_styling_plan_does_not_select_first_candidate_without_explicit_choice(self) -> None:
+        main = importlib.import_module("app.main")
+        candidate_snapshot = {
+            "candidate_material_ids": [24],
+            "library_tag_cards": [{"id": 24, "code": "125309C7948510"}],
+        }
+        raw_plan = {
+            "outfit_candidates": [
+                {
+                    "outfit_key": "candidate_a",
+                    "selected_material_ids": [24],
+                }
+            ],
+        }
+
+        plan = main.normalize_styling_plan(raw_plan, candidate_snapshot)
+        plan["model_raw_output"] = raw_plan
+
+        self.assertEqual(plan["selected_outfit_key"], "")
+        self.assertEqual(plan["selected_material_ids"], [])
+        self.assertNotIn("selected_outfit_key_auto_normalized", plan["warnings"])
+        with self.assertRaisesRegex(RuntimeError, "selected_outfit_key"):
+            main.validate_styling_plan(plan, candidate_snapshot)
+
     def test_prompt_replaced_config_tables_are_dropped_by_migration(self) -> None:
         db_module = importlib.import_module("app.db")
         legacy_tables = [
