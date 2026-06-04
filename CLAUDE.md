@@ -14,14 +14,14 @@ Ruyi-Dream 是面向服饰品牌视觉生产团队的 B2B AI 数字化摄影棚�
 
 1. 用户不写长 prompt，用户确认拍摄信息和生成结果。
 2. 系统生成的是一组电商棚拍成片，不是单张自由创作图。
-3. 主推款和被选中的搭配服饰都是真实商品，最终图中需要商品级保真；搭配服饰必须服务主推款，而不是让主推款服务整套造型。
+3. 主推款和被选中的搭配服装都是真实商品，最终图中需要商品级保真；搭配服装必须服务主推款，而不是让主推款服务整套造型。
 4. `AI 智能选搭` 是 AI Stylist 工作流：先理解主推款和商品卖点，再探索多套造型方向、生成候选 outfit，用 Aesthetic Critic 批判审美成立性、品牌成立性和商品成立性，最后输出可追溯的 `StylingPlan`。
 5. 商品可见性只是底线，不是充分条件；主推款露出但整套搭配沉闷、笨重、廉价、比例失衡或不符合品牌时，选搭仍视为失败。
 6. `拍摄剧本` / `ShootScript` 承接选中的 `StylingPlan`，负责把造型意图落到全局导演设定、图位、穿着关系、镜头、姿势、身姿走位、背景光线、商品展示重点、搭配风险和生成配饰边界。
 7. 最终成片固定使用分镜预览前 5 格对应的 5 个镜头并发生成，第 6 格直接忽略。
 8. 鞋、包、饰品在 MVP 阶段不进入搭配服装库，可由模型文字生成作为风格辅助，但不作为商品级验收对象。
 9. `Image-2` 是最终视觉生成器，不承担标签体系、选搭策略、历史追溯和业务状态管理。
-10. 前台 UI 面向普通业务用户，默认展示主推款、推荐造型方案、搭配服饰、拍摄剧本、分镜预览、最终结果和生成记录；AI 任务包、prompt、provider 请求等复杂细节默认隐藏。
+10. 前台 UI 面向普通业务用户，默认展示主推款、推荐造型方案、搭配服装、拍摄剧本、分镜预览、最终结果和生成记录；AI 任务包、prompt、provider 请求等复杂细节默认隐藏。
 
 ## 文档地图
 
@@ -31,7 +31,7 @@ Ruyi-Dream 是面向服饰品牌视觉生产团队的 B2B AI 数字化摄影棚�
 | `design/00_product_overview/CLAUDE.md` | 产品定位、MVP 范围、PRD | 判断产品边界和功能范围时 |
 | `design/01_generation_flow/CLAUDE.md` | 生成主流程、Image-2 输入策略、职责拆分 | 设计生成链路、任务包、prompt 策略时 |
 | `design/01_generation_flow/shoot_script_workflow.md` | 拍摄剧本工作流最终设计：状态机、ShootScript schema、重生/失效规则、分镜预览和成片一致性策略 | 设计或实现拍摄剧本、分镜预览、成片重生和状态恢复时 |
-| `design/02_brand_and_assets/CLAUDE.md` | 搭配服饰、标签、媒体资产、数字模特、ShotPlan 字段 | 处理素材、标签、媒体、图位规则时 |
+| `design/02_brand_and_assets/CLAUDE.md` | 搭配服装、标签、媒体资产、数字模特、ShotPlan 字段 | 处理素材、标签、媒体、图位规则时 |
 | `design/03_ux_guide/CLAUDE.md` | 普通用户视角 UI/UX | 设计或实现前端页面时 |
 | `design/04_implementation_guide/CLAUDE.md` | 技术路线与生产实操 | 工程拆分或落地实现时 |
 | `frontend/CLAUDE.md` | 前端实现入口：架构、UI 规则、建议技术栈 | 写前端代码或初始化前端工程时 |
@@ -45,7 +45,7 @@ agent 在本仓库做任何任务时，必须遵守：
 
 1. **任何产品/流程/实现设计前先读 `design/CLAUDE.md`**，再按任务读取对应子目录。
 2. **任何生成链路相关任务先读 `design/01_generation_flow/generation_responsibility_matrix.md`**，建立“商品图片 / StylingPlan / ShootScript / ShotPlan / 文本边界 / 产品组装”的职责拆分。
-3. **权威产品范围以 `design/00_product_overview/` 为准**；生成链路和 Image-2 策略以 `design/01_generation_flow/` 为准；搭配服饰、标签、媒体和模特规则以 `design/02_brand_and_assets/` 为准。
+3. **权威产品范围以 `design/00_product_overview/` 为准**；生成链路和 Image-2 策略以 `design/01_generation_flow/` 为准；搭配服装、标签、媒体和模特规则以 `design/02_brand_and_assets/` 为准。
 4. **不要把用户训练成 prompt 工程师**。面向用户的产品语言应是摄影、电商、图位和商品语言，而不是长 prompt。
 5. **不要把所有要求塞进 Image-2 prompt**。先判断问题属于商品事实、选搭、拍摄剧本、ShotPlan、生成配饰、数字模特、媒体输入预算、同组一致性还是导出规格。
 6. **媒体存储统一使用 S3 兼容对象存储**。私有化默认 RustFS；不要重新引入并行存储或实验资产分支。

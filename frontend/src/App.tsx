@@ -472,7 +472,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
               <ThumbGrid assets={(task.images ?? []).map((item) => item.asset)} compact />
               <Meta label="任务" value={task.name} />
               <Meta label="状态" value={statusText(task.status)} />
-              <Meta label="搭配服饰" value={`${task.styling?.selectedMaterials?.length ?? 0} 件`} />
+              <Meta label="搭配服装" value={`${task.styling?.selectedMaterials?.length ?? 0} 件`} />
               <Meta label="最终图" value={`${task.resultSet?.images?.filter((i) => i.status === 'SUCCEEDED').length ?? 0}/5`} />
               <StageUserInputModule
                 step={visibleStep}
@@ -899,7 +899,7 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
   const operations = task ? operationFallbacks(task, localOperations, 'generation_styling') : []
   return (
     <div className="step-panel">
-      <StageHeader title="AI 智能选搭" text="AI Stylist 会先理解主推款，再生成推荐造型方案；搭配服饰必须服务主推款展示。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('AI 智能选搭调用记录', ['generation_styling'])} />
+      <StageHeader title="AI 智能选搭" text="AI Stylist 会先理解主推款，再生成推荐造型方案；搭配服装必须服务主推款展示。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('AI 智能选搭调用记录', ['generation_styling'])} />
       <AIOperationList operations={operations} />
       {task?.styling ? (
         <StylingPlanSummary task={task} isAdmin={isAdmin} />
@@ -987,7 +987,7 @@ function StylingPlanSummary({ task, isAdmin }: { task: GenerationTask; isAdmin: 
         <InfoBlock title="风险提示" items={[...stringList(hero.hero_visibility_risks), ...(styling.warnings ?? [])].filter(Boolean)} empty="暂无明显风险" />
       </div>
       <div className="selected-strip">
-        {styling.selectedMaterials.length ? styling.selectedMaterials.map((item) => <GarmentCard key={item.id} item={item} />) : <EmptyState title="无需库内搭配服饰" text="AI Stylist 判断本次以主推款单穿或生成配饰辅助更合适。" />}
+        {styling.selectedMaterials.length ? styling.selectedMaterials.map((item) => <GarmentCard key={item.id} item={item} />) : <EmptyState title="无需库内搭配服装" text="AI Stylist 判断本次以主推款单穿或生成配饰辅助更合适。" />}
       </div>
       {rejected.length > 0 && (
         <div className="rejected-list">
@@ -1063,10 +1063,10 @@ function userFacingMaterialText(text: string, codesById: Map<string, string>) {
   for (const [id, code] of codesById.entries()) {
     const escapedId = escapeRegExp(id)
     result = result.replace(new RegExp(`\\b(?:material[_\\s-]*id|服饰ID|商品ID|ID)\\s*[:：#-]?\\s*${escapedId}(?![A-Za-z0-9])`, 'gi'), code)
-    result = result.replace(new RegExp(`(库内(?:针织衫|衬衫|外套|西装|上衣|下装|裤装|半裙|连衣裙|搭配服饰|服饰|单品)|皮革马甲)\\s*${escapedId}(?![A-Za-z0-9])`, 'g'), `$1 ${code} `)
+    result = result.replace(new RegExp(`(库内(?:针织衫|衬衫|外套|西装|上衣|下装|裤装|半裙|连衣裙|搭配服装|服饰|单品)|皮革马甲)\\s*${escapedId}(?![A-Za-z0-9])`, 'g'), `$1 ${code} `)
   }
   result = result.replace(/\b(?:material[_\s-]*id|服饰ID|商品ID|ID)\s*[:：#-]?\s*\d+(?![A-Za-z0-9])/gi, '该服饰')
-  result = result.replace(/(库内(?:针织衫|衬衫|外套|西装|上衣|下装|裤装|半裙|连衣裙|搭配服饰|服饰|单品)|皮革马甲)\s*\d+(?![A-Za-z0-9])/g, '$1')
+  result = result.replace(/(库内(?:针织衫|衬衫|外套|西装|上衣|下装|裤装|半裙|连衣裙|搭配服装|服饰|单品)|皮革马甲)\s*\d+(?![A-Za-z0-9])/g, '$1')
   return result
 }
 
@@ -1422,7 +1422,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
     setDeleteGarmentDialog(null)
     setDeleteGarmentImpact(null)
     setItems((current) => current.filter((item) => !ids.includes(item.id)))
-    void run(purge ? '彻底删除搭配服饰中...' : '归档搭配服饰中...', action, () => {
+    void run(purge ? '彻底删除搭配服装中...' : '归档搭配服装中...', action, () => {
       if (detail && ids.includes(detail.id)) setDetail(null)
       setSelectedGarmentIds(new Set())
       void refreshLibraryPage().catch(() => undefined)
@@ -1450,7 +1450,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
       <div className="library-title-row">
         <PageTitle title="搭配服装库" subtitle="真实会出现在最终图里的配角服装。当前不支持鞋、包、饰品入库。" />
         <button className="primary" onClick={() => setShowImport((value) => !value)}>
-          <ImagePlus size={16} /> {showImport ? '收起导入' : '导入搭配服饰'}
+          <ImagePlus size={16} /> {showImport ? '收起导入' : '导入搭配服装'}
         </button>
       </div>
       {showImport && <BatchImportPanel onImported={() => void refreshFirstLibraryPage().catch(() => undefined)} />}
@@ -1490,7 +1490,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
               onDelete={() => openGarmentDeleteDialog([item])}
             />
           ))}</div>
-        ) : searching ? null : <EmptyState title={query ? '没有匹配的搭配服饰' : '暂无搭配服饰'} text={query ? '换一个货号或标签关键词试试。' : '点击右上角导入搭配服饰。'} />}
+        ) : searching ? null : <EmptyState title={query ? '没有匹配的搭配服装' : '暂无搭配服装'} text={query ? '换一个货号或标签关键词试试。' : '点击右上角导入搭配服装。'} />}
         </div>
         <PaginationControls
           disabled={searching}
@@ -1509,7 +1509,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
       {detail && <GarmentDetailDrawer item={detail} run={run} onClose={() => setDetail(null)} onChange={updateGarmentInView} onDelete={() => openGarmentDeleteDialog([detail])} />}
       {deleteGarmentDialog && (
         <DeleteConfirmDialog
-          title={deleteGarmentDialog.length === 1 ? '归档搭配服饰' : `归档 ${deleteGarmentDialog.length} 套搭配服饰`}
+          title={deleteGarmentDialog.length === 1 ? '归档搭配服装' : `归档 ${deleteGarmentDialog.length} 套搭配服装`}
           items={deleteGarmentDialog.map((item) => ({ id: item.id, name: item.code }))}
           onClose={() => setDeleteGarmentDialog(null)}
           onConfirm={confirmGarmentDelete}
@@ -1588,7 +1588,7 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
     batches.forEach((batch) => {
       const code = sanitizeClientName(batch.code)
       if (!code) {
-        blocked.push({ ...batch, error: '每套搭配服饰都需要一个有效货号' })
+        blocked.push({ ...batch, error: '每套搭配服装都需要一个有效货号' })
         return
       }
       if (batch.files.length > 6) {
@@ -1636,7 +1636,7 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
     }))
     const nextJob: ImportJob = {
       id: jobId,
-      title: `${jobBatches.length} 套搭配服饰`,
+      title: `${jobBatches.length} 套搭配服装`,
       status: 'RUNNING',
       total: jobBatches.length,
       uploaded: 0,
@@ -1667,7 +1667,7 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
       } catch (err) {
         const message = err instanceof Error ? err.message : '导入失败'
         skipped += 1
-        addSkippedBatch(batch, message === '搭配服饰代码已存在' ? '代码已存在，已跳过' : message)
+        addSkippedBatch(batch, message === '搭配服装代码已存在' ? '代码已存在，已跳过' : message)
         updateJob(jobId, (job) => ({
           ...job,
           skipped,
@@ -1721,7 +1721,7 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
     <div className="panel import-panel">
       <div className="import-head">
         <div>
-          <h3>导入搭配服饰</h3>
+          <h3>导入搭配服装</h3>
           <p>散图会合并为一套；单文件夹是一套；拖入多个一级文件夹会拆成多套。导入后系统会自动识别标签，单套最多 6 张。</p>
         </div>
         <button className="primary" disabled={!batches.length} onClick={saveDrafts}>导入</button>
@@ -1782,7 +1782,7 @@ function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
     <div className={`batch-card ${batch.files.length > 6 || batch.error ? 'has-error' : ''}`}>
       <div className="batch-card-head">
         <div className="batch-icon"><Layers3 size={18} /></div>
-        <input value={batch.code} onChange={(event) => onCode(event.target.value)} aria-label="搭配服饰货号" />
+        <input value={batch.code} onChange={(event) => onCode(event.target.value)} aria-label="搭配服装货号" />
         <button className="secondary icon-button" onClick={onRemove} title="移除整套"><Trash2 size={16} /></button>
       </div>
       <div className="batch-note">
@@ -3570,7 +3570,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
               {(detail.storyboardPreview?.asset ?? detail.preview?.asset) && <img className="detail-preview" src={mediaUrl(assetPreviewSrc((detail.storyboardPreview?.asset ?? detail.preview?.asset) as MediaAsset))} />}
               <FinalImageStrip images={detail.resultSet?.images ?? []} />
             </>
-          ) : <EmptyState title="选择一条记录" text="查看分镜预览、搭配服饰和最终成片。" />}
+          ) : <EmptyState title="选择一条记录" text="查看分镜预览、搭配服装和最终成片。" />}
         </div>
       </div>
       {deleteRecordDialog && (
@@ -3858,8 +3858,8 @@ function GarmentDetailDrawer({ item, run, onClose, onChange, onDelete }: {
 
   async function save(retag: boolean) {
     const visibleCount = working.length + pendingFiles.length
-    if (visibleCount > 6) throw new Error('单套搭配服饰最多保存 6 张图片')
-    await run(retag ? '保存并重新识别标签中...' : '保存搭配服饰中...', async () => {
+    if (visibleCount > 6) throw new Error('单套搭配服装最多保存 6 张图片')
+    await run(retag ? '保存并重新识别标签中...' : '保存搭配服装中...', async () => {
       await Promise.all(Object.entries(replacementFiles).map(([id, file]) => api.replaceStylingGarmentImage(Number(id), file)))
       const addBeforeDelete = working.length === 0 && pendingFiles.length > 0
       if (addBeforeDelete) await api.addStylingGarmentImages(item.id, pendingFiles)
@@ -4338,7 +4338,7 @@ function isAttemptRunning(operation: AIOperation) {
 }
 
 function operationLabel(operation: AIOperation, index = 0) {
-  if (operation.ownerType === 'styling_garment_upload') return '搭配服饰上传'
+  if (operation.ownerType === 'styling_garment_upload') return '搭配服装上传'
   if (operation.ownerType === 'styling_garment_tagging') return '服饰标签识别'
   if (operation.ownerType === 'generation_styling') return '智能选搭'
   if (operation.ownerType === 'generation_shoot_script') return '拍摄剧本'
@@ -4738,7 +4738,7 @@ function formatBytes(value?: number | null) {
 function deleteImpactText(impact?: DeleteImpact | null) {
   if (!impact) return '影响范围暂时无法计算。彻底删除会移除关联表单数据和已登记的存储文件，且不可恢复。'
   const parts: string[] = []
-  if (impact.garmentCount) parts.push(`${impact.garmentCount} 套搭配服饰`)
+  if (impact.garmentCount) parts.push(`${impact.garmentCount} 套搭配服装`)
   if (impact.garmentImageCount) parts.push(`${impact.garmentImageCount} 张服饰图`)
   const taskCount = impact.dependentTaskCount ?? impact.taskCount ?? 0
   if (taskCount) parts.push(`${taskCount} 条生成记录`)

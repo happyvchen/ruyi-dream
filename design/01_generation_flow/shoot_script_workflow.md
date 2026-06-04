@@ -17,7 +17,7 @@
 
 `一键成片` 是现有主流程的自动推进入口，不引入新的业务产物或新的失败状态。它从当前任务的第一个未完成阶段开始，复用当前 active 指针上的有效 StylingPlan、ShootScript、分镜预览和已成功成片，自动执行后续步骤直到前 5 张成片完成。用户仍可随时回到具体阶段查看或单独重新生成。
 
-`ShootScript` 是从 AI 选搭到实际拍摄之间的导演层产物：它一次性生成整组拍摄所需的全局导演设定和 6 个镜头 `ShotPlan`，承接主推款、选中搭配服饰、生成配饰边界、品牌规则、品类图位规则、镜头景别、取景范围、模特姿势、身姿走位、背景和光线。用户可以查看拍摄剧本，但 MVP 不允许编辑。
+`ShootScript` 是从 AI 选搭到实际拍摄之间的导演层产物：它一次性生成整组拍摄所需的全局导演设定和 6 个镜头 `ShotPlan`，承接主推款、选中搭配服装、生成配饰边界、品牌规则、品类图位规则、镜头景别、取景范围、模特姿势、身姿走位、背景和光线。用户可以查看拍摄剧本，但 MVP 不允许编辑。
 
 `分镜预览` 是拍摄剧本的可视化结果，即原“六宫格预览”。最终成片阶段每次只生成一个镜头，并传入分镜预览图作为一致性参考。
 
@@ -37,7 +37,7 @@
 
 1. 用户不写长 prompt，用户确认拍摄信息和生成结果。
 2. `AI 智能选搭` 负责造型判断，不负责拍摄导演。
-3. `拍摄剧本` 负责导演判断，不重新选择库内搭配服饰。
+3. `拍摄剧本` 负责导演判断，不重新选择库内搭配服装。
 4. `分镜预览` 是拍摄剧本的视觉样片，不是商品事实来源。
 5. `生成成片` 使用当前最新主推款输入版本、AI 选搭、拍摄剧本、分镜预览和对应镜头生成单张图。
 6. 每个用户动作都必须由后端持久化记录，刷新浏览器后不丢失状态、结果、失败原因和可恢复操作。
@@ -89,7 +89,7 @@
 
 - 当前最新 `GenerationTaskInputVersion`。
 - 当前最新成功 `GenerationStyling` / `StylingPlan`。
-- 选中搭配服饰图片快照。
+- 选中搭配服装图片快照。
 - 默认数字模特快照。
 - 默认数字模特身份参考图和 `ModelIdentityContract`。
 - 品牌信息和 Lily 默认拍摄模板。
@@ -101,7 +101,7 @@
 
 - 1 个全局导演设定。
 - 6 个 `ShotPlan`。
-- 库内搭配服饰风险与建议。
+- 库内搭配服装风险与建议。
 - 生成配饰调整说明。
 - `model_identity_contract`，声明模特身份事实来自数字模特参考图。
 - 用户可见摘要。
@@ -124,7 +124,7 @@
 
 - 数字模特身份图，固定作为 `model_identity` 最高优先级输入。
 - 主推款图片，作为 `hero_garment` 商品事实输入。
-- 选中搭配服饰图片，作为 `styling_garment` 商品事实输入。
+- 选中搭配服装图片，作为 `styling_garment` 商品事实输入。
 - 当前最新成功 `ShootScript`。
 - `image_reference_manifest`，逐张声明 provider reference image 的序号、角色和事实源。
 
@@ -152,7 +152,7 @@
 - 数字模特身份图，固定作为 `model_identity` 最高优先级输入。
 - 当前最新分镜预览图，作为 `preview_grid` 构图参考输入。
 - 主推款图片，作为 `hero_garment` 商品事实输入。
-- 选中搭配服饰图片，作为 `styling_garment` 商品事实输入。
+- 选中搭配服装图片，作为 `styling_garment` 商品事实输入。
 - 当前镜头 `ShotPlan`。
 - `image_reference_manifest`，逐张声明 provider reference image 的序号、角色和事实源。
 
@@ -161,7 +161,7 @@
 - 每次 Image-2 调用只生成一个镜头。
 - 分镜预览图只用于参考对应格的姿势、身位、景别、构图、背景光线和整组风格。
 - 分镜预览图不是商品事实来源，也不是模特身份事实来源。
-- 商品事实始终来自主推款原图和选中搭配服饰原图。
+- 商品事实始终来自主推款原图和选中搭配服装原图。
 - 模特身份事实始终来自数字模特参考图和 `ModelIdentityContract`；不得根据拍摄剧本、分镜预览或品牌妆发文字改变模特脸、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。
 - 支持整组重新生成。
 - 支持单张成片重生，单张重生不影响其他成功成片。
@@ -380,7 +380,7 @@ active_result_set_id
 | `script_source_mode` | 是 | `production` / `fallback` / `manual_import` |
 | `input_refs` | 是 | 生成剧本时使用的输入引用 |
 | `global_directing` | 是 | 整组拍摄导演设定 |
-| `styling_risks` | 是 | 库内搭配服饰风险和建议 |
+| `styling_risks` | 是 | 库内搭配服装风险和建议 |
 | `accessory_adjustments` | 是 | 生成类鞋包饰品调整说明 |
 | `resolved_accessories` | 是 | 最终进入分镜预览和成片的配饰方案 |
 | `shots` | 是 | 6 个镜头 |
@@ -403,7 +403,7 @@ active_result_set_id
   ],
   "product_fidelity_rules": [
     "主推款图片是主角商品事实来源。",
-    "选中搭配服饰图片是配角商品事实来源。",
+    "选中搭配服装图片是配角商品事实来源。",
     "不得改款、换色、改变长度、比例、结构和关键细节。"
   ],
   "negative_constraints": [
@@ -416,7 +416,7 @@ active_result_set_id
 
 ### 7.3 styling_risks
 
-库内搭配服饰不合适时，AI 导演不能替换库内服饰，仍需正常输出拍摄剧本，并披露风险和建议。
+库内搭配服装不合适时，AI 导演不能替换库内服饰，仍需正常输出拍摄剧本，并披露风险和建议。
 
 ```json
 [
@@ -506,7 +506,7 @@ blocking
 
 禁止：
 
-- 把库内真实搭配服饰当作可随意调整对象。
+- 把库内真实搭配服装当作可随意调整对象。
 - 生成抢主体的大 logo 包、大体量托特、公文包、厚底鞋、运动鞋、宴会感高跟或夸张首饰。
 
 ### 7.5 shots
@@ -533,7 +533,7 @@ blocking
   "composition_notes": "商品居中但不僵硬，浅灰白棚拍，留白干净。",
   "acceptance_criteria": [
     "主推款品类、颜色、版型和长度清楚。",
-    "搭配服饰服务主推款，不抢视觉中心。",
+    "搭配服装服务主推款，不抢视觉中心。",
     "姿势符合 Lily 克制通勤棚拍。"
   ],
   "negative_constraints": [
@@ -727,7 +727,7 @@ Business Fashion、Modern Corporate Chic、Contemporary Women’s Workwear、Pro
     { "label": "妆发边界", "value": "保持数字模特原有脸型、五官、头型、发型和气质。", "enabled": true, "sortOrder": 50 },
     { "label": "配饰边界", "value": "鞋包首饰低存在感，可省略；不得遮挡主推款卖点。", "enabled": true, "sortOrder": 60 },
     { "label": "一致性规则", "value": "6 个镜头必须是同一位模特、同一套造型、同一背景光线体系。", "enabled": true, "sortOrder": 70 },
-    { "label": "商品保真规则", "value": "主推款图片是主角商品事实来源。选中搭配服饰图片是配角商品事实来源。", "enabled": true, "sortOrder": 80 },
+    { "label": "商品保真规则", "value": "主推款图片是主角商品事实来源。选中搭配服装图片是配角商品事实来源。", "enabled": true, "sortOrder": 80 },
     { "label": "负向约束", "value": "不要文字、水印、logo、编号和边框说明。不要改款换色。不要让生成配饰成为视觉中心。", "enabled": true, "sortOrder": 90 }
   ],
   "defaultShotRule": { "shots": "固定 6 条，作为未命中品类规则时的基础图位" },
@@ -1004,7 +1004,7 @@ GET /api/generation-tasks/{id}/status
 
 - 数字模特参考图，固定前置 2 张，role=`model_identity`。
 - 主推款原图，按输入排序选前 3 张，role=`hero_garment`。
-- 选中搭配服饰原图，每套至少 1 张，总计按预算截断，role=`styling_garment`。
+- 选中搭配服装原图，每套至少 1 张，总计按预算截断，role=`styling_garment`。
 - `ShootScript` 文本化任务包。
 - `image_reference_manifest` 文本化角色清单。
 
@@ -1020,7 +1020,7 @@ GET /api/generation-tasks/{id}/status
 - 数字模特参考图，固定前置 2 张，role=`model_identity`。
 - 当前分镜预览图，role=`preview_grid`。
 - 主推款原图，role=`hero_garment`。
-- 选中搭配服饰原图，role=`styling_garment`。
+- 选中搭配服装原图，role=`styling_garment`。
 - 当前镜头 `ShotPlan`。
 - `image_reference_manifest` 文本化角色清单。
 
@@ -1029,7 +1029,7 @@ GET /api/generation-tasks/{id}/status
 ```text
 1. 数字模特图：人物身份事实，覆盖剧本文字、分镜和 provider 默认人物想象。
 2. 主推款原图：主角商品事实。
-3. 选中搭配服饰原图：配角商品事实。
+3. 选中搭配服装原图：配角商品事实。
 4. 当前 ShotPlan：景别、取景、姿势、走位、构图。
 5. 分镜预览图：一致性参考，不覆盖商品事实或模特身份事实。
 ```
@@ -1054,7 +1054,7 @@ GET /api/generation-tasks/{id}/status
 - 自动判断姿势好不好看。
 - 自动判断每个镜头是否挡住主推款。
 - 自动打回选搭。
-- 自动替换库内搭配服饰。
+- 自动替换库内搭配服装。
 
 ## 15. 旧数据迁移计划
 
@@ -1106,7 +1106,7 @@ GET /api/generation-tasks/{id}/status
 
 ### 17.3 风险披露
 
-- 库内搭配服饰风险以用户可读形式展示。
+- 库内搭配服装风险以用户可读形式展示。
 - AI 导演不得替换库内服饰。
 - 生成配饰调整必须展示调整前、调整后和原因。
 
@@ -1136,7 +1136,7 @@ GET /api/generation-tasks/{id}/status
 - 不做用户编辑拍摄剧本。
 - 不做自动分镜业务质检。
 - 不做 AI 自动打回选搭。
-- 不做库内搭配服饰自动替换。
+- 不做库内搭配服装自动替换。
 - 不做多品牌、多租户、计费和复杂权限。
 - 不把用户训练成 prompt 工程师。
 

@@ -10,7 +10,7 @@
 | `brand_profiles` | `BrandProfile` | 单一品牌资料 |
 | `media_assets` | `MediaAsset` | S3/RustFS 对象索引和衍生图 key |
 | `styling_garments` | `StylingGarment` | 搭配服装库商品 |
-| `styling_garment_images` | `StylingGarmentImage` | 搭配服饰图片链接 |
+| `styling_garment_images` | `StylingGarmentImage` | 搭配服装图片链接 |
 | `generation_tasks` | `GenerationTask` | AI 摄影棚主推款任务 |
 | `generation_task_images` | `GenerationTaskImage` | 主推款图片链接 |
 | `generation_task_input_versions` | `GenerationTaskInputVersion` | 冻结输入版本 |
@@ -39,7 +39,7 @@ AI Stylist 写入 `generation_stylings`：
 - `user_instruction_json` 保存本次 AI Stylist 实际读取的用户介入要求和冲突处理策略。
 - `user_requirement_json` 保留为旧合成用户要求兼容字段。
 - `styling_plan_json` 保存完整 StylingPlan，包括候选方案、被拒方案、Aesthetic Critic 诊断、质量信号和选中 outfit。
-- `selected_material_snapshot_json` 保存被选中搭配服饰的商品快照和图片快照。
+- `selected_material_snapshot_json` 保存被选中搭配服装的商品快照和图片快照。
 
 AI Director 写入 `generation_shoot_scripts`，并派生 6 条 `generation_shot_plans`。第 6 条只用于分镜预览参考，不进入最终成片。
 
@@ -56,7 +56,7 @@ Image-2 阶段写入：
 
 `prompt_configs` 保存可维护 Prompt 槽位和由 Prompt 维护写入的模板正文。后端会初始化空正文的固定槽位，保证 UI 可维护；但不会存储、seed 或 fallback 任何 Prompt 默认正文。缺配置或空正文在真实生成时都作为配置错误处理。运行时占位符由后端提供：
 
-- `runtime.styling_garment`：AI 打标使用的当前搭配服饰 code 和图片输入摘要。
+- `runtime.styling_garment`：AI 打标使用的当前搭配服装 code 和图片输入摘要。
 - `runtime.candidate_retrieval`：AI Stylist 使用的未归档 READY 搭配库全量标签事实卡，只暴露业务 `code`、`ai_tags` 和必要复核/人工标记。
 - `runtime.hero_product_info`：跟随本阶段实际使用的主推款输入版本冻结的商品信息和业务事实补充；重新执行拍摄剧本、分镜预览、成片或单张重生时会冻结最新任务商品信息。
 - `runtime.ai_styling_user_instruction`：AI 智能选搭本次执行的用户介入要求。

@@ -334,7 +334,7 @@ MVP 只保存一张分镜预览总图，不裁 frame。支持重新生成分镜�
 建议拆分：
 
 - `media service`：上传、衍生图、预签名、稳定读取路径。
-- `styling garment service`：搭配服饰草稿、保存、打标、状态推进。
+- `styling garment service`：搭配服装草稿、保存、打标、状态推进。
 - `generation task service`：任务草稿、输入版本、状态机。
 - `brand style service`：维护 Lily 官方样本、客户 lookbook、品牌 caption、配饰边界和未来 embedding。
 - `library tag snapshot service`：读取未归档 READY 搭配服装库全量标签事实；Prompt 只接收 `code` 和标签事实，内部 ID 仅用于持久化映射和 request snapshot；不做预筛选、排序、评分、映射或质量判断。
@@ -369,7 +369,7 @@ MVP 明确不做后端预筛选。AI Stylist 阶段的输入为：
 
 - 主推款输入版本图片和任务名。
 - 未归档、未删除、`READY` 搭配服装库全量标签事实 `library_tag_cards`。
-- 提示词输入只包含搭配服饰 `code` 和全量标签事实；内部 ID 映射仅用于后端持久化。
+- 提示词输入只包含搭配服装 `code` 和全量标签事实；内部 ID 映射仅用于后端持久化。
 - Prompt 维护中的 AI 选搭业务规则、品牌边界和配饰边界。
 
 后端不得执行：
@@ -397,7 +397,7 @@ AI Stylist Prompt 必须自行完成主推款理解、全量标签阅读、空�
 - 不允许重复 ID。
 - 空选中合法。
 - 明显互斥穿搭应在 `wearing_notes` 中解释；缺少解释时记录质量信号。
-- `wearing_notes` 中的穿法应被搭配服饰 `wearing_affordance` 支持；模型新增穿法应说明结构依据并进入风险提示。
+- `wearing_notes` 中的穿法应被搭配服装 `wearing_affordance` 支持；模型新增穿法应说明结构依据并进入风险提示。
 - 推荐穿法不包含 `tucked` 的开衫、外套、厚针织、明显门襟/纽扣/镂空下摆上衣若被要求全塞，记录穿法风险信号。
 - `aesthetic_score`、`brand_fit_score`、`hero_visibility_score` 和 `commercial_readiness_score` 任一低于阈值时，记录低分质量信号。
 - 满分评分但缺少 `aesthetic_diagnosis` 或风险解释时，记录低可信模型输出信号。
@@ -437,7 +437,7 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 
 输入：
 
-- 一套搭配服饰的前 3-6 张图片及图片元数据。
+- 一套搭配服装的前 3-6 张图片及图片元数据。
 - 可选官方标题或商品信息。
 - Lily 品牌边界。
 - `lily-garment-tags-v1` 的完整枚举、字段判定规则、复核条件和 JSON 输出模板。
@@ -494,7 +494,7 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 
 - `HeroUnderstanding` 和必要主推款图片。
 - `StylingPlan`。
-- 选中的搭配服饰快照。
+- 选中的搭配服装快照。
 - 数字模特快照。
 - 品牌棚拍边界。
 - 主推品类对应的 `category_shot_rules.md` 图位矩阵。
@@ -504,7 +504,7 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 校验：
 
 - 前 5 条必须覆盖主推品类的核心图位，不得大量重复全身图。
-- 每条 `main_focus` 必须服务主推款卖点，不能让搭配服饰成为默认主角。
+- 每条 `main_focus` 必须服务主推款卖点，不能让搭配服装成为默认主角。
 - 裤装、半裙、短裤等下装必须包含腰脚或腰膝近景；上衣必须包含臀上/胸腰近景；连衣裙必须保留完整比例和腰线/裙摆说明。
 
 ### 5.4 Image-2 分镜预览
@@ -549,7 +549,7 @@ MVP 已收敛为 Prompt 业务脑模式。后端不做预筛选、排序、评�
 - 主推品类为 `unknown` 时不得进入正常选搭通过状态；低置信度进入复核或安全 fallback。
 - 排除当前主推款同 `code`、同输入素材或同商品身份的候选。
 - 强化 `StylingPlan` 空库内搭配比较，区分“应单穿/空库内搭配”和“库内配角确实优于空库内搭配”。
-- 扩展搭配服饰穿法能力和穿法禁忌字段，区分 `tucked`、`half_tucked`、`untucked`、`open`、`buttoned`、`layered`。
+- 扩展搭配服装穿法能力和穿法禁忌字段，区分 `tucked`、`half_tucked`、`untucked`、`open`、`buttoned`、`layered`。
 - 增加穿法合法性质量信号，未支持 `tucked` 的开衫/外套/厚针织若被要求全塞，应记录为审核风险和后续优化依据。
 - 扩展 Aesthetic Critic：`wearing_method_validity`、`tuck_quality`、`official_style_evidence`、`shotplan_readiness`。
 - ShotPlan 生成读取主推品类矩阵；裤装必须覆盖全身、腰脚、腰膝/腰胯、侧身/动态和标准正面颜色图。
@@ -628,6 +628,6 @@ GET    /api/generation-records/{taskId}?includeDebug=true
 - 失败重试必须保留旧 attempt。
 - `ImageCount` 不作为强字段，界面需要时统计。
 - 生成记录默认隐藏技术详情。
-- 搭配服饰详情展示完整分层标签；Gemini 打标请求/返回属于默认折叠的技术详情。
-- 主推款、全量标签事实、StylingPlan、搭配服饰、数字模特、ShotPlan 和 provider 调用都要快照。
+- 搭配服装详情展示完整分层标签；Gemini 打标请求/返回属于默认折叠的技术详情。
+- 主推款、全量标签事实、StylingPlan、搭配服装、数字模特、ShotPlan 和 provider 调用都要快照。
 - 选搭复盘必须同时读取全量标签事实快照、Prompt 快照、StylingPlan 和 provider 响应，不能只看最终图片或模型理由。

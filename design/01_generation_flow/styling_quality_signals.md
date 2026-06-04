@@ -31,7 +31,7 @@
   "code": "unsupported_tuck_method",
   "category": "wearing_method",
   "severity": "review",
-  "message": "方案使用了搭配服饰或主推款不支持的塞腰/半塞穿法，建议审核上衣下摆处理。"
+  "message": "方案使用了搭配服装或主推款不支持的塞腰/半塞穿法，建议审核上衣下摆处理。"
 }
 ```
 

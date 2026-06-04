@@ -2,7 +2,7 @@
 
 ## 背景
 
-搭配服饰打标结果本身并不长。`styling_garments.ai_tags_json` 是 AI 打标的原始事实账本，应完整保存用于审计和详情展示。但生成链路过去把 `ai_tags_json`、`effective_tags_json`、`manual_tags_json`、`official_title_tags_json`、`tag_meta_json`、旧候选快照和旧 prompt 一起拼进下游请求，导致 prompt 体量被历史上下文和重复字段放大。
+搭配服装打标结果本身并不长。`styling_garments.ai_tags_json` 是 AI 打标的原始事实账本，应完整保存用于审计和详情展示。但生成链路过去把 `ai_tags_json`、`effective_tags_json`、`manual_tags_json`、`official_title_tags_json`、`tag_meta_json`、旧候选快照和旧 prompt 一起拼进下游请求，导致 prompt 体量被历史上下文和重复字段放大。
 
 新版原则：每个阶段只接收完成本阶段判断所需的结构化 DTO，不直接透传上游完整对象或历史 prompt。AI Stylist 阶段例外地接收未归档 READY 搭配库的完整 `ai_tags_json` 标签事实，因为这部分本身就是选搭判断所需的业务输入，而不是历史上下文。
 
@@ -18,7 +18,7 @@
 
 ## 搭配库标签事实卡
 
-AI Stylist 的候选卡以搭配服饰 `code` 为唯一模型可见标识，并直接携带 `styling_garments.ai_tags_json` 的解析结果。后端不得把标签字段写死成品类、颜色、材质等白名单摘要；AI 打标 Prompt 新增字段后，应自然进入 `ai_tags` 对象。
+AI Stylist 的候选卡以搭配服装 `code` 为唯一模型可见标识，并直接携带 `styling_garments.ai_tags_json` 的解析结果。后端不得把标签字段写死成品类、颜色、材质等白名单摘要；AI 打标 Prompt 新增字段后，应自然进入 `ai_tags` 对象。
 
 ```json
 {
@@ -51,7 +51,7 @@ AI Director 只需要“已选方案如何导演”，不需要重新看到整�
 - `warnings`
 - `user_requirement_resolution`
 
-用户要求会作为本次输入版本的一部分冻结，并随 StylingPlan 快照进入下游。AI Director 不重新解释用户要求，只读取 AI Stylist 已解析后的 `user_requirement_resolution` 和选中造型结论；如果用户需要改变造型，应重新选搭，而不是在拍摄剧本阶段临时替换库内搭配服饰。
+用户要求会作为本次输入版本的一部分冻结，并随 StylingPlan 快照进入下游。AI Director 不重新解释用户要求，只读取 AI Stylist 已解析后的 `user_requirement_resolution` 和选中造型结论；如果用户需要改变造型，应重新选搭，而不是在拍摄剧本阶段临时替换库内搭配服装。
 
 分镜预览只读取 ShootScript 级别的导演信息和 6 个镜头。最终成片只读取当前镜头上下文，避免 5 张最终图重复携带整组剧本和完整选搭历史。
 

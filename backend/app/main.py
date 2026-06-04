@@ -56,14 +56,14 @@ MAX_USER_INPUT_CHARS = 800
 
 
 AI_STYLIST_SYSTEM_INSTRUCTION = """你是 Lily 品牌 AI 摄影棚的 AI Stylist。
-你必须遵守不可覆盖的生产边界：商品事实以主推款图片和搭配服装库事实为准；搭配服饰只能来自 READY 候选 code；不得编造商品级服饰；必须返回合法 JSON。
+你必须遵守不可覆盖的生产边界：商品事实以主推款图片和搭配服装库事实为准；搭配服装只能来自 READY 候选 code；不得编造商品级服饰；必须返回合法 JSON。
 用户要求是本次任务的高优先级业务输入，高于默认搭配偏好；但不得覆盖商品图片事实、搭配库事实、Lily 品牌硬边界、输出 schema 和安全规则。
 当用户要求与硬边界冲突时，不要强行满足；请在 user_requirement_resolution 中说明冲突原因、未满足项和替代处理。"""
 
 
 AI_DIRECTOR_SYSTEM_INSTRUCTION = """你是 Lily 品牌 AI 摄影棚的 AI Director。
-你必须承接已完成的 StylingPlan 和其中的 user_requirement_resolution，不得重新选择库内搭配服饰。
-用户要求高于默认导演偏好；但不得覆盖商品事实、数字模特身份契约、已选搭配服饰、输出 schema 和安全规则。
+你必须承接已完成的 StylingPlan 和其中的 user_requirement_resolution，不得重新选择库内搭配服装。
+用户要求高于默认导演偏好；但不得覆盖商品事实、数字模特身份契约、已选搭配服装、输出 schema 和安全规则。
 请只返回合法 JSON。"""
 
 
@@ -702,7 +702,7 @@ def get_styling_garment(garment_id: int) -> dict[str, Any]:
 
 def ensure_styling_garment_not_tagging(row: Any) -> None:
     if row["status"] == "TAGGING_RUNNING":
-        raise HTTPException(status_code=409, detail="正在打标，完成后才能修改或删除搭配服饰")
+        raise HTTPException(status_code=409, detail="正在打标，完成后才能修改或删除搭配服装")
 
 
 def expire_stale_styling_garment_tagging() -> None:
@@ -756,15 +756,15 @@ async def create_styling_garment(
 ) -> dict[str, Any]:
     clean_code = sanitize_name(code)
     if not clean_code:
-        raise HTTPException(status_code=400, detail="搭配服饰代码不能为空")
+        raise HTTPException(status_code=400, detail="搭配服装代码不能为空")
     if not files:
         raise HTTPException(status_code=400, detail="至少上传一张图片")
     if len(files) > 6:
-        raise HTTPException(status_code=400, detail="单套搭配服饰最多上传 6 张图片")
+        raise HTTPException(status_code=400, detail="单套搭配服装最多上传 6 张图片")
     with get_db() as db:
         duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
         if duplicate:
-            raise HTTPException(status_code=409, detail="搭配服饰代码已存在")
+            raise HTTPException(status_code=409, detail="搭配服装代码已存在")
     timestamp = now_iso()
     prefix = join_key("styling-garments", f"{clean_code}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}")
     assets = await save_uploads_as_media_assets(files, prefix)
@@ -772,7 +772,7 @@ async def create_styling_garment(
         duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
         if duplicate:
             cleanup_objects([key for asset in assets for key in image_object_keys(asset["objectKey"])])
-            raise HTTPException(status_code=409, detail="搭配服饰代码已存在")
+            raise HTTPException(status_code=409, detail="搭配服装代码已存在")
         cursor = db.execute(
             """
             INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, tag_schema_version, created_at, updated_at)
@@ -800,7 +800,7 @@ def update_styling_garment(garment_id: int, payload: StylingGarmentUpdateRequest
     if payload.code is not None:
         clean_code = sanitize_name(payload.code)
         if not clean_code:
-            raise HTTPException(status_code=400, detail="搭配服饰代码不能为空")
+            raise HTTPException(status_code=400, detail="搭配服装代码不能为空")
         updates["code"] = clean_code
     if payload.manualTags is not None:
         updates["manual_tags_json"] = dumps(normalize_manual_business_tags(payload.manualTags))
@@ -809,7 +809,7 @@ def update_styling_garment(garment_id: int, payload: StylingGarmentUpdateRequest
     with get_db() as db:
         row = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail="搭配服饰不存在")
+            raise HTTPException(status_code=404, detail="搭配服装不存在")
         ensure_styling_garment_not_tagging(row)
         if "code" in updates:
             duplicate = db.execute(
@@ -817,7 +817,7 @@ def update_styling_garment(garment_id: int, payload: StylingGarmentUpdateRequest
                 (updates["code"], garment_id),
             ).fetchone()
             if duplicate:
-                raise HTTPException(status_code=409, detail="搭配服饰代码已存在")
+                raise HTTPException(status_code=409, detail="搭配服装代码已存在")
         manual_tags = loads(updates.get("manual_tags_json") if "manual_tags_json" in updates else row["manual_tags_json"], {})
         effective_tags = build_effective_tags(
             loads(row["ai_tags_json"], {}),
@@ -844,7 +844,7 @@ async def save_and_tag_styling_garment(garment_id: int, background_tasks: Backgr
     with get_db() as db:
         row = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail="搭配服饰不存在")
+            raise HTTPException(status_code=404, detail="搭配服装不存在")
         ensure_styling_garment_not_tagging(row)
         timestamp = now_iso()
         db.execute("UPDATE styling_garments SET status = 'TAGGING_RUNNING', tag_error = NULL, updated_at = ? WHERE id = ?", (timestamp, garment_id))
@@ -856,7 +856,7 @@ async def save_and_tag_styling_garment(garment_id: int, background_tasks: Backgr
 async def batch_save_and_tag_styling_garments(payload: StylingGarmentBatchTagRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
     garment_ids = list(dict.fromkeys(payload.ids))
     if not garment_ids:
-        raise HTTPException(status_code=400, detail="至少选择一套搭配服饰")
+        raise HTTPException(status_code=400, detail="至少选择一套搭配服装")
     timestamp = now_iso()
     with get_db() as db:
         placeholders = ",".join("?" for _ in garment_ids)
@@ -867,7 +867,7 @@ async def batch_save_and_tag_styling_garments(payload: StylingGarmentBatchTagReq
         rows_by_id = {int(row["id"]): row for row in rows}
         missing = [garment_id for garment_id in garment_ids if garment_id not in rows_by_id]
         if missing:
-            raise HTTPException(status_code=404, detail="搭配服饰不存在")
+            raise HTTPException(status_code=404, detail="搭配服装不存在")
         for garment_id in garment_ids:
             ensure_styling_garment_not_tagging(rows_by_id[garment_id])
         db.execute(
@@ -940,14 +940,14 @@ async def add_styling_garment_images(
     with get_db() as db:
         row = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail="搭配服饰不存在")
+            raise HTTPException(status_code=404, detail="搭配服装不存在")
         ensure_styling_garment_not_tagging(row)
         existing_count = db.execute(
             "SELECT COUNT(*) AS count FROM styling_garment_images WHERE styling_garment_id = ? AND deleted_at IS NULL",
             (garment_id,),
         ).fetchone()["count"]
         if int(existing_count) + len(files) > 6:
-            raise HTTPException(status_code=400, detail="单套搭配服饰最多保存 6 张图片")
+            raise HTTPException(status_code=400, detail="单套搭配服装最多保存 6 张图片")
         max_sort = db.execute(
             "SELECT COALESCE(MAX(sort_order), -1) AS max_sort FROM styling_garment_images WHERE styling_garment_id = ? AND deleted_at IS NULL",
             (garment_id,),
@@ -959,7 +959,7 @@ async def add_styling_garment_images(
         current = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
         if not current:
             cleanup_objects([key for asset in assets for key in image_object_keys(asset["objectKey"])])
-            raise HTTPException(status_code=404, detail="搭配服饰不存在")
+            raise HTTPException(status_code=404, detail="搭配服装不存在")
         try:
             ensure_styling_garment_not_tagging(current)
         except HTTPException:
@@ -995,7 +995,7 @@ async def replace_styling_garment_image(image_id: int, file: UploadFile = File(.
             (image_id,),
         ).fetchone()
     if not row or row["garment_deleted_at"] is not None:
-        raise HTTPException(status_code=404, detail="搭配服饰图片不存在")
+        raise HTTPException(status_code=404, detail="搭配服装图片不存在")
     ensure_styling_garment_not_tagging({"status": row["garment_status"]})
     prefix = join_key("styling-garments", f"{sanitize_name(row['code'])}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}")
     assets = await save_uploads_as_media_assets([file], prefix)
@@ -1006,7 +1006,7 @@ async def replace_styling_garment_image(image_id: int, file: UploadFile = File(.
         current = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
         if not current:
             cleanup_objects(image_object_keys(replacement["objectKey"]))
-            raise HTTPException(status_code=404, detail="搭配服饰不存在")
+            raise HTTPException(status_code=404, detail="搭配服装不存在")
         try:
             ensure_styling_garment_not_tagging(current)
         except HTTPException:
@@ -1031,7 +1031,7 @@ def update_styling_garment_image(image_id: int, payload: StylingGarmentImageUpda
                 (image_id,),
             ).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail="搭配服饰图片不存在")
+            raise HTTPException(status_code=404, detail="搭配服装图片不存在")
         ensure_styling_garment_not_tagging(row)
         return {"item": get_styling_garment_by_id(int(row["styling_garment_id"]))}
     if payload.sortOrder < 0:
@@ -1043,7 +1043,7 @@ def update_styling_garment_image(image_id: int, payload: StylingGarmentImageUpda
             (image_id,),
         ).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail="搭配服饰图片不存在")
+            raise HTTPException(status_code=404, detail="搭配服装图片不存在")
         ensure_styling_garment_not_tagging(row)
         garment_id = int(row["styling_garment_id"])
         db.execute(
@@ -1068,7 +1068,7 @@ def delete_styling_garment_image(image_id: int) -> dict[str, Any]:
             (image_id,),
         ).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail="搭配服饰图片不存在")
+            raise HTTPException(status_code=404, detail="搭配服装图片不存在")
         ensure_styling_garment_not_tagging({"status": row["garment_status"]})
         garment_id = int(row["styling_garment_id"])
         remaining = db.execute(
@@ -1076,7 +1076,7 @@ def delete_styling_garment_image(image_id: int) -> dict[str, Any]:
             (garment_id, image_id),
         ).fetchone()["count"]
         if int(remaining) < 1:
-            raise HTTPException(status_code=409, detail="每套搭配服饰至少保留一张图片")
+            raise HTTPException(status_code=409, detail="每套搭配服装至少保留一张图片")
         media_asset_id = int(row["media_asset_id"])
         db.execute("DELETE FROM styling_garment_images WHERE id = ?", (image_id,))
         release_media_asset_if_unreferenced(db, media_asset_id)
@@ -1094,7 +1094,7 @@ def delete_styling_garment(
     with get_db() as db:
         row = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail="搭配服饰不存在")
+            raise HTTPException(status_code=404, detail="搭配服装不存在")
         ensure_styling_garment_not_tagging(row)
         if purge and confirm_code != row["code"]:
             raise HTTPException(status_code=400, detail="请输入完整 code 以确认删除关联记录和文件")
@@ -1140,9 +1140,9 @@ def delete_styling_garments(payload: StylingGarmentDeleteRequest) -> dict[str, A
 def normalized_styling_garment_ids(ids: list[int]) -> list[int]:
     normalized = list(dict.fromkeys(int(garment_id) for garment_id in ids if int(garment_id) > 0))
     if not normalized:
-        raise HTTPException(status_code=400, detail="请选择至少一套搭配服饰")
+        raise HTTPException(status_code=400, detail="请选择至少一套搭配服装")
     if len(normalized) > 100:
-        raise HTTPException(status_code=400, detail="单次最多处理 100 套搭配服饰")
+        raise HTTPException(status_code=400, detail="单次最多处理 100 套搭配服装")
     return normalized
 
 
@@ -1153,7 +1153,7 @@ def get_styling_garment_rows_for_mutation(db: Any, garment_ids: list[int]) -> li
         garment_ids,
     ).fetchall()
     if len(rows) != len(garment_ids):
-        raise HTTPException(status_code=404, detail="部分搭配服饰不存在")
+        raise HTTPException(status_code=404, detail="部分搭配服装不存在")
     return rows
 
 
@@ -2150,7 +2150,7 @@ async def run_select_generation_styling(
                 dumps(styling_plan.get("outfit_candidates") or []),
                 dumps(get_selected_outfit_scores(styling_plan)),
                 dumps(styling_plan.get("rejected_candidates") or []),
-                str(styling_plan.get("reason_summary") or "已根据主推款和搭配服饰标签完成 AI Stylist 造型方案。"),
+                str(styling_plan.get("reason_summary") or "已根据主推款和搭配服装标签完成 AI Stylist 造型方案。"),
                 dumps(styling_plan.get("warnings") or []),
                 attempt_id,
                 timestamp,
@@ -4487,7 +4487,7 @@ def get_styling_garment_by_id(garment_id: int) -> dict[str, Any]:
             (garment_id,),
         ).fetchone()
     if not row:
-        raise HTTPException(status_code=404, detail="搭配服饰不存在")
+        raise HTTPException(status_code=404, detail="搭配服装不存在")
     return serialize_styling_garment(row, include_images=True)
 
 
@@ -5913,7 +5913,7 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
         "selected_material_codes": selected_codes,
         "selected_materials": selected_refs,
         "brand_evidence": normalize_brand_evidence(source.get("brand_evidence"), candidate_snapshot),
-        "reason_summary": str(source.get("reason_summary") or "已根据主推款和搭配服饰标签完成 AI Stylist 造型方案。")[:180],
+        "reason_summary": str(source.get("reason_summary") or "已根据主推款和搭配服装标签完成 AI Stylist 造型方案。")[:180],
         "user_requirement_resolution": normalize_user_requirement_resolution(source.get("user_requirement_resolution")),
         "rejected_candidates": normalize_rejected_candidates(rejected_source, normalized_candidates, candidate_cards),
         "quality_signals": normalize_model_quality_signals(source.get("quality_signals")),
@@ -6124,12 +6124,12 @@ def replace_material_ids_with_codes(text: str, candidate_cards: dict[int, dict[s
         escaped_id = re.escape(str(material_id))
         result = re.sub(rf"\b(?:material[_\s-]*id|服饰ID|商品ID|ID)\s*[:：#-]?\s*{escaped_id}(?![A-Za-z0-9])", code, result, flags=re.IGNORECASE)
         result = re.sub(
-            rf"(库内(?:针织衫|衬衫|外套|西装|上衣|下装|裤装|半裙|连衣裙|搭配服饰|服饰|单品)|皮革马甲)\s*{escaped_id}(?![A-Za-z0-9])",
+            rf"(库内(?:针织衫|衬衫|外套|西装|上衣|下装|裤装|半裙|连衣裙|搭配服装|服饰|单品)|皮革马甲)\s*{escaped_id}(?![A-Za-z0-9])",
             rf"\1 {code} ",
             result,
         )
     result = re.sub(r"\b(?:material[_\s-]*id|服饰ID|商品ID|ID)\s*[:：#-]?\s*\d+(?![A-Za-z0-9])", "该服饰", result, flags=re.IGNORECASE)
-    result = re.sub(r"(库内(?:针织衫|衬衫|外套|西装|上衣|下装|裤装|半裙|连衣裙|搭配服饰|服饰|单品)|皮革马甲)\s*\d+(?![A-Za-z0-9])", r"\1", result)
+    result = re.sub(r"(库内(?:针织衫|衬衫|外套|西装|上衣|下装|裤装|半裙|连衣裙|搭配服装|服饰|单品)|皮革马甲)\s*\d+(?![A-Za-z0-9])", r"\1", result)
     return result
 
 
@@ -6341,9 +6341,9 @@ def validate_styling_plan(plan: dict[str, Any], candidate_snapshot: dict[str, An
         raise RuntimeError("AI Stylist 返回的 selected_outfit_key 不存在于 outfit_candidates")
     invalid = set(int(item) for item in selected_ids) - candidate_ids
     if invalid:
-        raise RuntimeError(f"AI Stylist 返回了非法搭配服饰 ID：{sorted(invalid)}")
+        raise RuntimeError(f"AI Stylist 返回了非法搭配服装 ID：{sorted(invalid)}")
     if len(selected_ids) != len(set(selected_ids)):
-        raise RuntimeError("AI Stylist 返回了重复搭配服饰 ID")
+        raise RuntimeError("AI Stylist 返回了重复搭配服装 ID")
     if plan.get("plan_source_mode") == "fallback":
         raise RuntimeError("AI Stylist 工程 fallback 方案不能进入生产链路")
 
@@ -6373,7 +6373,7 @@ def get_styling_source_and_selected_snapshots(selected_ids: list[int]) -> tuple[
     selected_set = set(selected_ids)
     invalid = selected_set - set(source_ids)
     if invalid:
-        raise RuntimeError(f"Gemini 返回了非法搭配服饰 ID：{sorted(invalid)}")
+        raise RuntimeError(f"Gemini 返回了非法搭配服装 ID：{sorted(invalid)}")
     return source_ids, [get_styling_garment_by_id(item_id) for item_id in selected_ids]
 
 
@@ -6402,7 +6402,7 @@ def default_shoot_config() -> dict[str, Any]:
             {"id": "hair_makeup", "label": "妆发边界", "value": "保持数字模特原有脸型、五官、头型、发型和气质。", "enabled": True, "sortOrder": 50},
             {"id": "accessory", "label": "配饰边界", "value": "鞋包首饰低存在感，可省略；不得遮挡主推款卖点。", "enabled": True, "sortOrder": 60},
             {"id": "consistency", "label": "一致性规则", "value": "6 个镜头必须是同一位模特、同一套造型、同一背景光线体系。", "enabled": True, "sortOrder": 70},
-            {"id": "product_fidelity", "label": "商品保真规则", "value": "主推款图片是主角商品事实来源。选中搭配服饰图片是配角商品事实来源。", "enabled": True, "sortOrder": 80},
+            {"id": "product_fidelity", "label": "商品保真规则", "value": "主推款图片是主角商品事实来源。选中搭配服装图片是配角商品事实来源。", "enabled": True, "sortOrder": 80},
             {"id": "negative", "label": "负向约束", "value": "不要文字、水印、logo、编号和边框说明。不要改款换色。不要让生成配饰成为视觉中心。", "enabled": True, "sortOrder": 90},
         ],
         "defaultShotRule": {"shots": shot_template_to_config_rules(build_builtin_category_shot_template("other_garment"))},
@@ -6993,7 +6993,7 @@ def accessory_instructions_for_shot(index: int, resolved_accessories: list[dict[
             instructions.append(f"{item.get('item_type')}: {direction}")
         else:
             instructions.append(f"{item.get('item_type')}: {direction}，低存在感，不做特写。")
-    return instructions[:6] or ["生成配饰低存在感，可省略，不做特写，不遮挡主推款和搭配服饰。"]
+    return instructions[:6] or ["生成配饰低存在感，可省略，不做特写，不遮挡主推款和搭配服装。"]
 
 
 def normalize_shoot_script_shots(value: Any, base_plans: list[Any], hero: dict[str, Any], resolved_accessories: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -7026,7 +7026,7 @@ def normalize_shoot_script_shot(source: dict[str, Any], base: dict[str, Any], he
         "forbidden_occlusion_zones": ensure_string_list(source.get("forbidden_occlusion_zones") or source.get("forbiddenOcclusionZones") or hero.get("forbidden_occlusion_zones") or hero.get("hero_visibility_risks")),
         "composition_notes": str(source.get("composition_notes") or source.get("compositionNotes") or base.get("compositionNotes") or ""),
         "accessory_instructions": ensure_string_list(source.get("accessory_instructions") or source.get("accessoryInstructions")) or accessory_instructions_for_shot(index, resolved_accessories),
-        "acceptance_criteria": ensure_string_list(source.get("acceptance_criteria") or source.get("acceptanceCriteria")) or ["主推款品类、颜色、版型和长度清楚。", "搭配服饰服务主推款，不抢视觉中心。"],
+        "acceptance_criteria": ensure_string_list(source.get("acceptance_criteria") or source.get("acceptanceCriteria")) or ["主推款品类、颜色、版型和长度清楚。", "搭配服装服务主推款，不抢视觉中心。"],
         "negative_constraints": ensure_string_list(source.get("negative_constraints") or source.get("negativeConstraints") or base.get("negativeConstraints")),
     }
 
@@ -7150,7 +7150,7 @@ def build_builtin_category_shot_template(hero_category: str) -> list[tuple[str, 
             ("reference", "备用姿态", "轻斜正替代姿态", "自然", "参考，不进入最终生成"),
         ]
     return [
-        ("hero", "正面全身主视觉", "轻微重心变化，避免站军姿", "正面或轻斜正", "主推款完整轮廓，搭配服饰自然可见"),
+        ("hero", "正面全身主视觉", "轻微重心变化，避免站军姿", "正面或轻斜正", "主推款完整轮廓，搭配服装自然可见"),
         ("core", "品类核心展示", "自然克制姿态", "正面或 3/4", "主推款核心结构和比例"),
         ("detail", "设计细节近景", "局部近景，可不露脸", "局部", "主推款关键设计点"),
         ("side", "侧身或动态补充", "侧身轻走动感", "侧面或 3/4", "主推款侧面轮廓和动态"),
@@ -7229,7 +7229,7 @@ def image_reference_manifest_for_prompt(image_inputs: list[dict[str, Any]]) -> d
         fact_source = {
             "model_identity": "模特身份事实源，最高身份优先级",
             "hero_garment": "主推款商品事实源",
-            "styling_garment": "搭配服饰商品事实源",
+            "styling_garment": "搭配服装商品事实源",
             "preview_grid": "分镜姿势、构图、景别、背景和光线参考，不是模特或商品事实源",
         }.get(role, "辅助参考图")
         entries.append(
@@ -7643,7 +7643,7 @@ def sample_prompt_runtime() -> dict[str, Any]:
 def available_prompt_placeholders() -> list[dict[str, str]]:
     return [
         {"name": "segment.brand_info", "scope": "segment", "description": "品牌信息分段 Prompt"},
-        {"name": "runtime.styling_garment", "scope": "runtime", "description": "AI 打标使用的当前搭配服饰 code 和图片输入摘要"},
+        {"name": "runtime.styling_garment", "scope": "runtime", "description": "AI 打标使用的当前搭配服装 code 和图片输入摘要"},
         {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服装库 READY 服饰的全量 AI 标签事实卡"},
         {"name": "runtime.hero_product_info", "scope": "runtime", "description": "跟随主推款输入版本冻结的商品信息和业务事实补充"},
         {"name": "runtime.ai_styling_user_instruction", "scope": "runtime", "description": "AI 智能选搭本次执行的用户介入要求"},
@@ -7651,7 +7651,7 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.storyboard_preview_user_instruction", "scope": "runtime", "description": "分镜预览本次执行的用户介入要求"},
         {"name": "runtime.final_image_user_instruction", "scope": "runtime", "description": "最终成片或单张重生本次执行的用户介入要求"},
         {"name": "runtime.user_requirement", "scope": "runtime", "description": "兼容旧模板的合成用户要求上下文"},
-        {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭导演上下文，使用搭配服饰 code 标识"},
+        {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭导演上下文，使用搭配服装 code 标识"},
         {"name": "runtime.model_identity_context", "scope": "runtime", "description": "AI Director 使用的数字模特身份契约和参考图上下文"},
         {"name": "runtime.image_reference_manifest", "scope": "runtime", "description": "Image-2 输入参考图序号、角色和事实源优先级"},
         {"name": "runtime.shoot_script_result", "scope": "runtime", "description": "拍摄剧本结果，用于分镜预览"},

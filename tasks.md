@@ -39,7 +39,7 @@
 - 媒体衍生图：上传素材、数字模特头像和生成结果保留原图，并生成 `thumb` / `preview` WebP 衍生图；路径和文件大小落库。
 - 历史媒体修复：`backend/scripts/repair_media_metadata.py` 可补齐旧素材和旧生成结果的衍生图与文件大小。
 - 生成：生成任务的输出写入 `outputs/{sku}/{timestamp}/`，完成后生成对应缩略图和预览图；生成中轮询走轻量状态接口。
-- AI 摄影棚：`GenerationTask` 草稿确认后进入选搭；进入 AI 后使用冻结主推款/搭配服饰/数字模特快照推进六宫格和前 5 张成片。
+- AI 摄影棚：`GenerationTask` 草稿确认后进入选搭；进入 AI 后使用冻结主推款/搭配服装/数字模特快照推进六宫格和前 5 张成片。
 - AI Stylist 阶段 1 第一版：未归档 READY 搭配服装库以全量标签事实卡进入 `assembly.ai_styling` Prompt；后端不做候选漏斗、库充足性判断、排序、评分或 Prompt 默认值 fallback。空库内搭配、库内配角取舍、被拒方案和补充素材建议由 StylingPlan 表达，前台尚未完整展示。
 - 导出：ZIP 写入 `exports/{sku}/`，同时通过接口流式返回给前端。
 - 日志：业务事件写入 SQLite，并双写 `backend/data/logs/*.jsonl`。
