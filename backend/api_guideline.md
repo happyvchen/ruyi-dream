@@ -11,6 +11,7 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。`/api/g
 | `/api/auth/logout` | POST | 登出 |
 | `/api/auth/session` | GET | 当前会话 |
 | `/api/media` | GET | 稳定媒体访问入口 |
+| `/api/uploads/presign` | POST | 为浏览器直传对象存储创建短期 PUT 签名 |
 | `/api/logs` | GET | 事件日志 |
 
 ## 搭配服装库
@@ -34,11 +35,11 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。`/api/g
 | 路径 | 方法 | 说明 |
 |---|---|---|
 | `/api/generation-tasks` | GET | 任务列表 |
-| `/api/generation-tasks` | POST | 创建草稿任务，可携带商品信息 |
+| `/api/generation-tasks/from-uploads` | POST | 使用已直传到对象存储的主推款图片创建草稿任务 |
 | `/api/generation-tasks/{id}` | GET | 任务详情 |
 | `/api/generation-tasks/{id}` | PATCH | 编辑任务名、商品信息和各阶段用户输入草稿；用户输入只影响下一次阶段执行 |
 | `/api/generation-tasks/{id}` | DELETE | 归档或删除任务 |
-| `/api/generation-tasks/{id}/images` | POST | 上传主推款图片 |
+| `/api/generation-tasks/{id}/images/from-uploads` | POST | 使用已直传到对象存储的图片追加主推款图片 |
 | `/api/generation-task-images/{image_id}` | PATCH | 调整主推款图片 |
 | `/api/generation-task-images/{image_id}` | DELETE | 删除主推款图片 |
 | `/api/generation-tasks/{id}/ready` | POST | 冻结草稿，进入选搭 |
@@ -51,6 +52,12 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。`/api/g
 | `/api/generation-records` | GET | 生成记录列表 |
 
 所有会调用外部 AI/provider 的端点都必须由用户动作触发；本地验证和测试不得调用外部 AI/provider。`auto-run-final` 由一次用户动作触发，但内部仍按现有阶段创建独立 attempt，并在 request snapshot 中记录 `invocation.mode = auto_run`。
+
+主推款图片上传契约：
+
+- 前端必须先调用 `/api/uploads/presign` 获取短期 PUT URL，再由浏览器直接 PUT 到 S3 兼容对象存储，最后调用 `/api/generation-tasks/from-uploads` 或 `/api/generation-tasks/{id}/images/from-uploads` 登记已上传对象。
+- 主推款图片不得通过前端上传到后端再由后端中转到对象存储；这会把大文件流量压回应用服务器，并掩盖 bucket CORS 或签名配置问题。
+- 后端启动和签名前会确保对象存储 bucket 存在直传 CORS 规则；默认使用 `BACKEND_CORS_ORIGINS`，也可用 `APP_DIRECT_UPLOAD_CORS_ORIGINS` 单独配置。
 
 一键成片规则：
 

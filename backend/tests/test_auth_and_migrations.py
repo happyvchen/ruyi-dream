@@ -307,6 +307,205 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertEqual(parsed["selected_outfit"]["title"], "轻商务针织搭配")
         self.assertNotIn("extra", parsed)
 
+    def test_direct_upload_presign_returns_scoped_put_urls(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+
+        db_module.init_db()
+        original_presigned_put_url = main.presigned_put_url
+        original_ensure_direct_upload_cors = main.ensure_direct_upload_cors
+        main.presigned_put_url = lambda key, content_type=None: f"https://oss.example.test/{key}?content-type={content_type}"
+        main.ensure_direct_upload_cors = lambda: None
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            response = client.post(
+                "/api/uploads/presign",
+                json={"scope": "generation_task", "files": [{"filename": "look.jpg", "mimeType": "image/jpeg", "sizeBytes": 1234}]},
+            )
+            self.assertEqual(response.status_code, 200)
+            item = response.json()["items"][0]
+            self.assertEqual(item["method"], "PUT")
+            self.assertEqual(item["headers"]["Content-Type"], "image/jpeg")
+            self.assertTrue(item["objectKey"].startswith("direct-uploads/generation-task/"))
+            self.assertIn(item["objectKey"], item["uploadUrl"])
+        finally:
+            main.presigned_put_url = original_presigned_put_url
+            main.ensure_direct_upload_cors = original_ensure_direct_upload_cors
+            client.close()
+
+    def test_put_fileobj_uses_plain_put_object_for_s3_compatibility(self) -> None:
+        object_storage = importlib.import_module("app.object_storage")
+        from io import BytesIO
+
+        calls = []
+
+        class FakeS3Client:
+            def put_object(self, **kwargs):
+                calls.append(("put_object", kwargs))
+
+            def upload_fileobj(self, *args, **kwargs):
+                raise AssertionError("upload_fileobj should not be used for S3-compatible uploads")
+
+        original_s3_client = object_storage.s3_client
+        object_storage.s3_client = lambda: FakeS3Client()
+        try:
+            object_storage.put_fileobj("uploads/example.jpg", BytesIO(b"image-bytes"), "image/jpeg")
+        finally:
+            object_storage.s3_client = original_s3_client
+
+        self.assertEqual(calls[0][0], "put_object")
+        self.assertEqual(calls[0][1]["Key"], "uploads/example.jpg")
+        self.assertEqual(calls[0][1]["Body"], b"image-bytes")
+        self.assertEqual(calls[0][1]["ContentType"], "image/jpeg")
+
+    def test_direct_upload_cors_is_created_when_bucket_has_no_cors(self) -> None:
+        object_storage = importlib.import_module("app.object_storage")
+        from botocore.exceptions import ClientError
+
+        calls = []
+
+        class FakeS3Client:
+            def get_bucket_cors(self, **kwargs):
+                raise ClientError(
+                    {
+                        "Error": {"Code": "NoSuchCORSConfiguration"},
+                        "ResponseMetadata": {"HTTPStatusCode": 404},
+                    },
+                    "GetBucketCors",
+                )
+
+            def put_bucket_cors(self, **kwargs):
+                calls.append(kwargs)
+
+        original_s3_client = object_storage.s3_client
+        object_storage.s3_client = lambda: FakeS3Client()
+        try:
+            object_storage.ensure_direct_upload_cors()
+        finally:
+            object_storage.s3_client = original_s3_client
+
+        self.assertEqual(len(calls), 1)
+        rules = calls[0]["CORSConfiguration"]["CORSRules"]
+        self.assertEqual(rules[0]["ID"], object_storage.DIRECT_UPLOAD_CORS_RULE_ID)
+        self.assertIn("http://127.0.0.1:5173", rules[0]["AllowedOrigins"])
+        self.assertIn("PUT", rules[0]["AllowedMethods"])
+        self.assertEqual(rules[0]["AllowedHeaders"], ["*"])
+
+    def test_direct_upload_cors_preserves_existing_bucket_rules(self) -> None:
+        object_storage = importlib.import_module("app.object_storage")
+
+        existing_rule = {
+            "ID": "existing-read-rule",
+            "AllowedMethods": ["GET"],
+            "AllowedOrigins": ["https://assets.example.test"],
+            "AllowedHeaders": ["*"],
+        }
+        calls = []
+
+        class FakeS3Client:
+            def get_bucket_cors(self, **kwargs):
+                return {"CORSRules": [existing_rule]}
+
+            def put_bucket_cors(self, **kwargs):
+                calls.append(kwargs)
+
+        original_s3_client = object_storage.s3_client
+        object_storage.s3_client = lambda: FakeS3Client()
+        try:
+            object_storage.ensure_direct_upload_cors()
+        finally:
+            object_storage.s3_client = original_s3_client
+
+        rules = calls[0]["CORSConfiguration"]["CORSRules"]
+        self.assertEqual(rules[0], existing_rule)
+        self.assertEqual(rules[1]["ID"], object_storage.DIRECT_UPLOAD_CORS_RULE_ID)
+
+    def test_direct_upload_cors_deduplicates_aliyun_rules_without_ids(self) -> None:
+        object_storage = importlib.import_module("app.object_storage")
+        allowed_origins = object_storage.get_settings().direct_upload_cors_origins
+
+        aliyun_returned_rule = {
+            "AllowedMethods": ["PUT", "GET", "HEAD"],
+            "AllowedOrigins": allowed_origins,
+            "AllowedHeaders": ["*"],
+            "ExposeHeaders": ["ETag"],
+            "MaxAgeSeconds": 3600,
+        }
+        calls = []
+
+        class FakeS3Client:
+            def get_bucket_cors(self, **kwargs):
+                return {"CORSRules": [aliyun_returned_rule, dict(aliyun_returned_rule)]}
+
+            def put_bucket_cors(self, **kwargs):
+                calls.append(kwargs)
+
+        original_s3_client = object_storage.s3_client
+        object_storage.s3_client = lambda: FakeS3Client()
+        try:
+            object_storage.ensure_direct_upload_cors()
+        finally:
+            object_storage.s3_client = original_s3_client
+
+        rules = calls[0]["CORSConfiguration"]["CORSRules"]
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0]["ID"], object_storage.DIRECT_UPLOAD_CORS_RULE_ID)
+
+    def test_create_generation_task_from_direct_uploads_registers_media_asset(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+        from io import BytesIO
+        from PIL import Image
+
+        db_module.init_db()
+        output = BytesIO()
+        Image.new("RGB", (32, 48), color=(128, 160, 192)).save(output, format="JPEG")
+        image_bytes = output.getvalue()
+        object_key = "direct-uploads/generation-task/test-batch/001-look.jpg"
+        original_object_head = main.object_head
+        original_get_bytes = main.get_bytes
+        original_generate_image_derivatives = main.generate_image_derivatives
+        main.object_head = lambda key: {"contentLength": len(image_bytes), "contentType": "image/jpeg"} if key == object_key else None
+        main.get_bytes = lambda key: image_bytes if key == object_key else b""
+        main.generate_image_derivatives = lambda key, content: {
+            "thumb": f"{key}.thumb.webp",
+            "preview": f"{key}.preview.webp",
+            "thumbSize": 12,
+            "previewSize": 34,
+        }
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            response = client.post(
+                "/api/generation-tasks/from-uploads",
+                json={
+                    "name": "Direct Upload Task",
+                    "heroProductInfo": "格纹连衣裙",
+                    "uploads": [{"objectKey": object_key, "filename": "look.jpg", "mimeType": "image/jpeg", "sizeBytes": len(image_bytes)}],
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            item = response.json()["item"]
+            self.assertEqual(item["name"], "Direct Upload Task")
+            self.assertEqual(item["images"][0]["asset"]["objectKey"], object_key)
+            self.assertEqual(item["images"][0]["asset"]["width"], 32)
+            self.assertEqual(item["images"][0]["asset"]["height"], 48)
+            with db_module.get_db() as db:
+                row = db.execute("SELECT object_key, thumb_key, preview_key FROM media_assets WHERE object_key = ?", (object_key,)).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["thumb_key"], f"{object_key}.thumb.webp")
+            self.assertEqual(row["preview_key"], f"{object_key}.preview.webp")
+        finally:
+            main.object_head = original_object_head
+            main.get_bytes = original_get_bytes
+            main.generate_image_derivatives = original_generate_image_derivatives
+            client.close()
+
     def test_generation_debug_payloads_are_admin_only(self) -> None:
         db_module = importlib.import_module("app.db")
         main = importlib.import_module("app.main")
