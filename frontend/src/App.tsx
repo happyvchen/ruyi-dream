@@ -331,7 +331,6 @@ function LoginPage({ onAuthed }: { onAuthed: (session: { role?: SessionRole | nu
       <form className="login-card" onSubmit={submit}>
         <div className="login-logo"><Sparkles size={22} /> Ruyi-Dream</div>
         <h1>AI 数字化摄影棚</h1>
-        <p>请输入管理员提供的访问凭据。</p>
         <label>用户名<input autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} /></label>
         <label>密码<input autoComplete="current-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} /></label>
         {error && <div className="form-error">{error}</div>}
