@@ -355,6 +355,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   const [taskItems, setTaskItems] = useState<GenerationTask[]>(records.slice(0, recentTaskPageSize))
   const [recentTaskTotal, setRecentTaskTotal] = useState(records.length)
   const [recentTaskHasMore, setRecentTaskHasMore] = useState(records.length > recentTaskPageSize)
+  const [recentTaskNextOffset, setRecentTaskNextOffset] = useState<number | null>(records.length > recentTaskPageSize ? recentTaskPageSize : null)
   const [recentTaskLoading, setRecentTaskLoading] = useState(false)
   const [aiLogDialog, setAiLogDialog] = useState<{ title: string; ownerTypes: string[]; records: AICallRecord[]; loading: boolean; error?: string } | null>(null)
   const [heroProductInfo, setHeroProductInfo] = useState('')
@@ -380,14 +381,15 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     void api.listRecords({ limit: recentTaskPageSize, offset }).then((result) => {
       setRecentTaskTotal(result.total)
       setRecentTaskHasMore(result.hasMore)
+      setRecentTaskNextOffset(result.nextOffset)
       setTaskItems((current) => append ? mergeRecentTaskItems(current, result.items) : result.items)
     }).catch(() => undefined).finally(() => setRecentTaskLoading(false))
   }
   function handleRecentTaskScroll(event: UIEvent<HTMLDivElement>) {
     const element = event.currentTarget
-    if (!recentTaskHasMore || recentTaskLoading) return
+    if (!recentTaskHasMore || recentTaskLoading || recentTaskNextOffset == null) return
     if (element.scrollHeight - element.scrollTop - element.clientHeight < 80) {
-      loadRecentTasks(taskItems.length, true)
+      loadRecentTasks(recentTaskNextOffset, true)
     }
   }
   function openAICallLogs(title: string, ownerTypes: string[]) {
@@ -426,6 +428,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     setTaskItems(records.slice(0, recentTaskPageSize))
     setRecentTaskTotal(records.length)
     setRecentTaskHasMore(records.length > recentTaskPageSize)
+    setRecentTaskNextOffset(records.length > recentTaskPageSize ? recentTaskPageSize : null)
     loadRecentTasks(0)
   }, [records])
   useEffect(() => {
