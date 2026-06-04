@@ -1994,6 +1994,11 @@ input:focus, select:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0
   accent-color: #0f7cff;
 }
 .mini-list { display: grid; gap: 8px; }
+.recent-task-list {
+  max-height: min(520px, 46vh);
+  overflow-y: auto;
+  padding-right: 4px;
+}
 .mini-row {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) auto;
@@ -2019,7 +2024,9 @@ input:focus, select:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0
 }
 .mini-row > button:not(.mini-action) {
   display: grid;
-  gap: 4px;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
   min-width: 0;
   padding: 0;
   border: 0;
@@ -2037,7 +2044,26 @@ input:focus, select:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.mini-list em { color: #64748b; font-style: normal; font-size: 12px; }
+.mini-row strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mini-list em,
+.mini-list small {
+  display: block;
+  margin-top: 3px;
+  color: #64748b;
+  font-style: normal;
+  font-size: 12px;
+}
+.recent-task-footer {
+  padding: 8px 4px 2px;
+  color: #64748b;
+  font-size: 12px;
+  text-align: center;
+}
 
 .model-page {
   display: grid;
@@ -2429,7 +2455,7 @@ input:focus, select:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0
 }
 .record-row {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
+  grid-template-columns: 18px minmax(0, 1fr) auto auto;
   gap: 10px;
   align-items: center;
   padding: 0 10px;
@@ -2441,7 +2467,7 @@ input:focus, select:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0
 }
 .record-open {
   display: grid;
-  grid-template-columns: 50px minmax(180px, 1fr) 220px 28px;
+  grid-template-columns: 50px minmax(180px, 1fr) 220px;
   gap: 12px;
   align-items: center;
   min-width: 0;
@@ -2463,11 +2489,6 @@ input:focus, select:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0
   background: #f8fafc;
 }
 .record-row span { display: block; margin-top: 4px; color: #64748b; font-size: 12px; }
-.record-eye {
-  display: grid;
-  place-items: center;
-  color: #0f7cff;
-}
 .record-action-button {
   height: 34px;
   min-width: 84px;
@@ -2702,7 +2723,7 @@ input:focus, select:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0
     grid-template-columns: 1fr;
   }
   .record-open {
-    grid-template-columns: 44px minmax(0, 1fr) 28px;
+    grid-template-columns: 44px minmax(0, 1fr);
   }
   .record-open .strip {
     display: none;
@@ -2717,8 +2738,14 @@ input:focus, select:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0
   .mini-row {
     grid-template-columns: 18px minmax(0, 1fr);
   }
+  .mini-row.view-only {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .mini-row.view-only:has(.mini-action) {
+    grid-template-columns: minmax(0, 1fr);
+  }
   .mini-action {
-    grid-column: 2;
+    grid-column: 1;
     justify-self: start;
   }
   .lightbox-head {
