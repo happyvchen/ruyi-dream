@@ -173,7 +173,6 @@ RustFS/MinIO 常用 `APP_S3_FORCE_PATH_STYLE=true`；阿里 OSS 等要求 virtua
 ├── AGENTS.md
 ├── CLAUDE.md
 ├── README.md
-├── tasks.md
 ├── design/
 │   ├── 00_product_overview/
 │   ├── 01_generation_flow/
@@ -184,6 +183,7 @@ RustFS/MinIO 常用 `APP_S3_FORCE_PATH_STYLE=true`；阿里 OSS 等要求 virtua
 ├── backend/
 ├── deployment/
 ├── docs/
+│   └── implementation-samples/
 └── docker-compose.yml
 ```
 
@@ -205,6 +205,7 @@ RustFS/MinIO 常用 `APP_S3_FORCE_PATH_STYLE=true`；阿里 OSS 等要求 virtua
 - [本地开发说明](docs/local-development.md)
 - [Docker Compose 部署与管理](docs/docker-compose-operations.md)
 - [生产故障 Runbook](docs/runbook.md)
+- [实施样例](docs/implementation-samples/README.md)
 - [后端领域模型](backend/domain_model.md)
 - [后端数据库结构](backend/database_schema.md)
 - [RustFS 对象存储部署](deployment/rustfs/README.md)

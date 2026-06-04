@@ -254,7 +254,7 @@ Lily 官方和客户确认的品牌样本：
 - created_at / updated_at
 - superseded_at
 
-拍摄剧本一次性包含全局导演设定和 6 条 ShotPlan。用户可查看，不可编辑。拍摄剧本正文规则由 `Prompt 维护` 中的 `拍摄剧本` Prompt 统一配置；运行时只注入 AI 选搭结果，不再单独拼接标签规则卡或导演规则卡。`ShootConfig` 仅保留为默认 6 镜头和历史状态恢复的兜底数据。完整 schema 见 `../01_generation_flow/shoot_script_workflow.md`。
+拍摄剧本一次性包含全局导演设定和 6 条 ShotPlan。用户可查看，不可编辑。拍摄剧本正文规则由 `Prompt 维护` 中的 `拍摄剧本` Prompt 统一配置；运行时只注入 AI 选搭结果，不再单独拼接标签规则卡、导演规则卡或旧配置兜底数据。完整 schema 见 `../01_generation_flow/shoot_script_workflow.md`。
 
 ### 2.8 GenerationShotPlan
 
@@ -519,9 +519,9 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 
 0.1.0 采用 Prompt 业务脑模式。后端不做候选预筛选、排序、评分、审美改选或 ShotPlan 默认图位规划；后端负责 READY 范围过滤、全量标签事实快照、ID 白名单、状态机、schema 校验和 provider attempt 记录。
 
-AI Stylist 读取主推款图片、Prompt 正文、品牌信息和全量标签事实卡，输出 StylingPlan、候选比较、拒绝理由、质量信号和选中 outfit。ShootScript 承接 StylingPlan 并生成 6 个 ShotPlan。Image-2 生成一张 3x2 分镜预览和前 5 张最终成片。
+AI Stylist 读取主推款图片、Prompt 正文、品牌分段 Prompt 和全量标签事实卡，输出 StylingPlan、候选比较、拒绝理由、质量信号和选中 outfit。ShootScript 承接 StylingPlan 并生成 6 个 ShotPlan。Image-2 生成一张 3x2 分镜预览和前 5 张最终成片。
 
-不属于 0.1.0 运行路径的能力统一记录在 `tasks.md`，不在权威实现指南中作为当前设计前提。
+不属于 0.1.0 运行路径的能力不在权威实现指南中作为当前设计前提；若进入产品，必须先更新权威设计、领域模型和数据库 schema。
 
 ## 6. API 契约
 

@@ -29,8 +29,8 @@ Image-2 不是选搭大脑、标签系统、历史记录系统或状态机。用
 |---|---|---|---|
 | 1 | **workspace** | session, user role, workspace boundary | 当前固定 user/admin 双账号和单工作空间边界；为后续组织、租户、权限扩展预留语义 |
 | 2 | **media** | MediaAsset | 所有输入图、数字模特图、分镜预览图、最终图和导出资产的统一媒体索引 |
-| 3 | **brand** | BrandProfile, BrandStyleSample, ModelProfile, PromptConfig, ShootConfig | 品牌资料、品牌样本证据、默认数字模特、Prompt 模板和拍摄规则 |
-| 4 | **styling** | StylingGarment, StylingGarmentImage, tag taxonomy, garment tag assignment | 搭配服装库、服饰图片、AI 打标、标签体系和选搭候选事实 |
+| 3 | **brand** | ModelProfile, PromptConfig | 默认数字模特、品牌分段 Prompt、生成规则 Prompt |
+| 4 | **styling** | StylingGarment, StylingGarmentImage | 搭配服装库、服饰图片、AI 打标 JSON 和选搭候选事实 |
 | 5 | **generation** | GenerationTask, GenerationTaskInputVersion, GenerationStyling, StylingPlan, GenerationShootScript, ShootScript, GenerationShotPlan, GenerationStoryboardPreview, GenerationResultSet, GenerationResultImage | AI 摄影棚主流程、输入冻结、造型方案、拍摄剧本、分镜预览和最终成片 |
 | 6 | **operations** | GenerationAttempt, EventLog, DeleteImpact | provider 调用审计、状态恢复、错误复盘、业务事件和删除影响预检 |
 
@@ -103,7 +103,7 @@ ShootScript 不重新选择库内搭配服装；它只能基于已选 StylingPla
 当前 0.1.0 不实现注册、邀请、复杂 RBAC、多租户或计费。系统只有固定 `user` / `admin` 两类账号：
 
 - `user`：使用 AI 摄影棚、搭配服装库、数字模特只读页、生成记录。
-- `admin`：必须拥有 user 的完整工作流，并额外看到品牌信息、标签规则、拍摄配置、Prompt 维护等配置能力。
+- `admin`：必须拥有 user 的完整工作流，并额外看到 `Prompt 维护` 配置能力。
 
 说明：
 
@@ -149,32 +149,19 @@ ShootScript 不重新选择库内搭配服装；它只能基于已选 StylingPla
 
 ## brand 模块
 
-### BrandProfile（品牌资料）
+### 品牌分段 Prompt
 
-`BrandProfile` 是 admin 维护的单一品牌资料，用于约束选搭和拍摄判断，不是品牌百科或营销话术库。
-
-当前字段：
-
-- `id`：固定为 1
-- `name`：品牌名称
-- `tagline`：品牌标语
-- `brand_core`：品牌核心
-- `style_dna`：风格 DNA
-- `styling_guidelines`：选搭准则
-- `shooting_guidelines`：拍摄准则
-- `negative_constraints`：负向约束
-- `created_at` / `updated_at`
+品牌边界由 `segment.brand_info` 和相关阶段 Prompt 正文承载。它用于约束选搭和拍摄判断，不是品牌百科或营销话术库；后端只保存 Prompt 正文，不再维护独立品牌资料表。
 
 规则：
 
 - 初始为空，不 seed 默认品牌文案。
-- 字段均为字符串，不做双语 key/value 结构。
-- 删除后恢复为空状态，不影响已有历史任务快照。
-- 进入生成链路时必须写入任务或 planner 快照，历史任务不读最新品牌资料覆盖旧结果。
+- admin 通过 `Prompt 维护` 编辑。
+- 历史任务以当次 request snapshot 和生成产物为准，不读取最新 Prompt 覆盖旧结果。
 
-### BrandStyleSample（品牌样本，后续对象）
+### BrandStyleSample（品牌样本，规划对象）
 
-`BrandStyleSample` 保存 Lily 官方或客户确认的风格证据，不是商品事实源。0.1.0 不提供独立品牌样本表；品牌边界由 `brand_profiles` 与 Prompt 正文承载。
+`BrandStyleSample` 保存 Lily 官方或客户确认的风格证据，不是商品事实源。0.1.0 不提供独立品牌样本表；品牌边界由 `segment.brand_info` 和相关阶段 Prompt 正文承载。
 
 建议字段：
 
@@ -246,21 +233,9 @@ ShootScript 不重新选择库内搭配服装；它只能基于已选 StylingPla
 - 不恢复旧 `ai_policy_configs`。
 - 不把业务审美规则散落成大量 Python if/else；硬编码只保留真实性、状态、可执行关联和安全边界。
 
-### ShootConfig（拍摄配置）
+### 拍摄导演规则
 
-`ShootConfig` 保存 AI Director 的全局规则、默认 6 镜头规则和按品类覆盖的 6 镜头规则。
-
-当前字段：
-
-- `id`：固定为 1
-- `config_json`
-- `created_at` / `updated_at`
-
-规则：
-
-- ShootConfig 用于拍摄剧本 prompt 摘要、结构兜底和状态恢复。
-- 真正的拍摄剧本产物是 `ShootScript`，不是配置模板本身。
-- 品类 ShotPlan 规则必须服务主推款品类，不允许所有品类套同一组通用全身图。
+拍摄导演规则不再使用独立数据库对象。全局导演设定、图位规则、品类策略、商品保真约束和负向约束都由 `assembly.shoot_script` Prompt 正文承载；真正的拍摄剧本产物是 `ShootScript`，不是配置模板本身。
 
 ## styling 模块
 
@@ -326,20 +301,12 @@ DELETED
 - 图片排序、替换、删除或追加会影响打标，保存时应提示是否重新打标。
 - 选搭完成后，预览与成片使用已冻结图片快照，而不是当前库记录。
 
-### Tag Taxonomy（标签体系）
-
-标签体系用于管理可维护标签、标签关系、品类适用规则和服饰标签赋值。当前实现包含：
-
-- `tag_dimensions`
-- `tag_defs`
-- `tag_relations`
-- `tag_applicability_rules`
-- `garment_tag_assignments`
+### AI 打标 JSON
 
 规则：
 
 - `ai_tags_json` 允许随 Prompt 演进完整保存原始结构。
-- 后端对常见字段做最佳努力归一化，形成 `effective_tags_json` 和标签赋值。
+- 后端对常见字段做最佳努力派生，形成 `effective_tags_json`，但不维护固定标签规则表或标签赋值表。
 - 标签事实是选搭输入，不是审美结论。
 - 人工业务标签只补充业务上下文，不改写图片可见事实。
 
@@ -765,6 +732,6 @@ Image-2 单次最多 10 张输入图。0.1.0 选图策略：
 
 ## 当前实现
 
-0.1.0 已实现 FastAPI + SQLite + React/Vite 单体应用、S3 兼容对象存储、三层媒体资产、搭配服装库、Gemini 打标、标签规则、Prompt 维护、AI 摄影棚五步工作流、输入版本冻结、StylingPlan、ShootScript、ShotPlan、分镜预览、最终结果集、单张重试、provider attempt 快照和生成记录复盘。
+0.1.0 已实现 FastAPI + SQLite + React/Vite 单体应用、S3 兼容对象存储、三层媒体资产、搭配服装库、Gemini 打标、Prompt 维护、AI 摄影棚五步工作流、输入版本冻结、StylingPlan、ShootScript、ShotPlan、分镜预览、最终结果集、单张重试、provider attempt 快照和生成记录复盘。
 
-不属于 0.1.0 运行路径的能力统一记录在 `tasks.md`，不得在当前领域模型中作为已实现对象引用。
+不属于 0.1.0 运行路径的能力不得在当前领域模型中作为已实现对象引用；若进入产品，必须先更新权威设计、领域模型和数据库 schema。

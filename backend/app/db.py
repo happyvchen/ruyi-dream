@@ -17,6 +17,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("031", "add_generation_pending_stage_inputs", "migration_add_generation_pending_stage_inputs"),
     ("032", "add_shoot_script_runtime_columns", "migration_add_shoot_script_runtime_columns"),
     ("033", "cleanup_legacy_tables_and_attempt_provider_request_ids", "migration_cleanup_legacy_tables_and_attempt_provider_request_ids"),
+    ("034", "drop_prompt_replaced_config_tables", "migration_drop_prompt_replaced_config_tables"),
 )
 
 PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
@@ -72,18 +73,6 @@ def init_db() -> None:
               updated_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS brand_profiles (
-              id INTEGER PRIMARY KEY CHECK (id = 1),
-              name TEXT NOT NULL DEFAULT '',
-              tagline TEXT NOT NULL DEFAULT '',
-              brand_core TEXT NOT NULL DEFAULT '',
-              style_dna TEXT NOT NULL DEFAULT '',
-              styling_guidelines TEXT NOT NULL DEFAULT '',
-              shooting_guidelines TEXT NOT NULL DEFAULT '',
-              negative_constraints TEXT NOT NULL DEFAULT '',
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
             CREATE TABLE IF NOT EXISTS event_logs (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               entity_type TEXT NOT NULL,
@@ -237,13 +226,6 @@ def init_db() -> None:
               superseded_at TEXT
             );
 
-            CREATE TABLE IF NOT EXISTS shoot_configs (
-              id INTEGER PRIMARY KEY CHECK (id = 1),
-              config_json TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS prompt_configs (
               key TEXT PRIMARY KEY,
               group_type TEXT NOT NULL,
@@ -338,7 +320,6 @@ def init_db() -> None:
         run_migrations(db)
         seed_default_model(db)
         ensure_prompt_config_catalog(db)
-        create_taxonomy_tables(db)
 
 
 def ensure_migration_table(db: sqlite3.Connection) -> None:
@@ -366,6 +347,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_generation_pending_stage_inputs": migration_add_generation_pending_stage_inputs,
         "migration_add_shoot_script_runtime_columns": migration_add_shoot_script_runtime_columns,
         "migration_cleanup_legacy_tables_and_attempt_provider_request_ids": migration_cleanup_legacy_tables_and_attempt_provider_request_ids,
+        "migration_drop_prompt_replaced_config_tables": migration_drop_prompt_replaced_config_tables,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -398,6 +380,19 @@ def migration_cleanup_legacy_tables_and_attempt_provider_request_ids(db: sqlite3
     migration_drop_legacy_generation_tables(db)
     if not table_has_column(db, "generation_attempts", "provider_request_id"):
         db.execute("ALTER TABLE generation_attempts ADD COLUMN provider_request_id TEXT")
+
+
+def migration_drop_prompt_replaced_config_tables(db: sqlite3.Connection) -> None:
+    for table in (
+        "garment_tag_assignments",
+        "tag_applicability_rules",
+        "tag_relations",
+        "tag_defs",
+        "tag_dimensions",
+        "shoot_configs",
+        "brand_profiles",
+    ):
+        db.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 def migration_add_generation_task_auto_run(db: sqlite3.Connection) -> None:
@@ -525,18 +520,6 @@ def table_unique_column_sets(db: sqlite3.Connection, table: str) -> set[tuple[st
     return unique_columns
 
 
-def create_shoot_config_table(db: sqlite3.Connection) -> None:
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS shoot_configs (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          config_json TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        )
-        """
-    )
-
 
 def create_prompt_config_table(db: sqlite3.Connection) -> None:
     db.execute(
@@ -597,101 +580,6 @@ def create_generation_shoot_script_tables(db: sqlite3.Connection) -> None:
         """
     )
 
-
-def create_taxonomy_tables(db: sqlite3.Connection) -> None:
-    db.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS tag_dimensions (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          code TEXT NOT NULL UNIQUE,
-          label_zh TEXT NOT NULL,
-          description_zh TEXT,
-          sort_order INTEGER NOT NULL DEFAULT 0,
-          is_active INTEGER NOT NULL DEFAULT 1,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS tag_defs (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          dimension_code TEXT NOT NULL REFERENCES tag_dimensions(code),
-          code TEXT NOT NULL,
-          label_zh TEXT NOT NULL,
-          description_zh TEXT,
-          parent_code TEXT,
-          level INTEGER NOT NULL DEFAULT 1,
-          value_kind TEXT NOT NULL DEFAULT 'tag',
-          is_selectable INTEGER NOT NULL DEFAULT 1,
-          is_active INTEGER NOT NULL DEFAULT 1,
-          sort_order INTEGER NOT NULL DEFAULT 0,
-          metadata_json TEXT,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          UNIQUE(dimension_code, code),
-          FOREIGN KEY (dimension_code, parent_code) REFERENCES tag_defs(dimension_code, code)
-        );
-
-        CREATE TABLE IF NOT EXISTS tag_relations (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          from_dimension_code TEXT NOT NULL,
-          from_tag_code TEXT NOT NULL,
-          relation_type TEXT NOT NULL,
-          to_dimension_code TEXT NOT NULL,
-          to_tag_code TEXT NOT NULL,
-          weight REAL NOT NULL DEFAULT 1.0,
-          description_zh TEXT,
-          is_active INTEGER NOT NULL DEFAULT 1,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          UNIQUE(from_dimension_code, from_tag_code, relation_type, to_dimension_code, to_tag_code),
-          FOREIGN KEY (from_dimension_code, from_tag_code) REFERENCES tag_defs(dimension_code, code),
-          FOREIGN KEY (to_dimension_code, to_tag_code) REFERENCES tag_defs(dimension_code, code)
-        );
-
-        CREATE TABLE IF NOT EXISTS tag_applicability_rules (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          category_dimension_code TEXT NOT NULL DEFAULT 'category',
-          category_tag_code TEXT NOT NULL,
-          target_dimension_code TEXT NOT NULL,
-          target_tag_code TEXT NOT NULL,
-          mode TEXT NOT NULL DEFAULT 'allowed',
-          applies_to_descendants INTEGER NOT NULL DEFAULT 1,
-          note TEXT,
-          is_active INTEGER NOT NULL DEFAULT 1,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          UNIQUE(category_dimension_code, category_tag_code, target_dimension_code, target_tag_code),
-          FOREIGN KEY (category_dimension_code, category_tag_code) REFERENCES tag_defs(dimension_code, code),
-          FOREIGN KEY (target_dimension_code, target_tag_code) REFERENCES tag_defs(dimension_code, code)
-        );
-
-        CREATE TABLE IF NOT EXISTS garment_tag_assignments (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          garment_id INTEGER NOT NULL REFERENCES styling_garments(id) ON DELETE CASCADE,
-          dimension_code TEXT NOT NULL,
-          tag_code TEXT NOT NULL,
-          value_kind TEXT NOT NULL DEFAULT 'tag',
-          value_number REAL,
-          value_text TEXT,
-          value_bool INTEGER,
-          confidence REAL,
-          source TEXT NOT NULL DEFAULT 'system',
-          status TEXT NOT NULL DEFAULT 'confirmed',
-          evidence_json TEXT,
-          note TEXT,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          UNIQUE(garment_id, dimension_code, tag_code, source),
-          FOREIGN KEY (dimension_code, tag_code) REFERENCES tag_defs(dimension_code, code)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_tag_defs_dimension ON tag_defs(dimension_code, sort_order, id);
-        CREATE INDEX IF NOT EXISTS idx_tag_applicability_category ON tag_applicability_rules(category_dimension_code, category_tag_code, is_active);
-        CREATE INDEX IF NOT EXISTS idx_tag_applicability_target ON tag_applicability_rules(target_dimension_code, target_tag_code, is_active);
-        CREATE INDEX IF NOT EXISTS idx_garment_tag_assignments_garment ON garment_tag_assignments(garment_id);
-        CREATE INDEX IF NOT EXISTS idx_garment_tag_assignments_tag ON garment_tag_assignments(dimension_code, tag_code, status);
-        """
-    )
 
 
 def seed_default_model(db: sqlite3.Connection) -> None:

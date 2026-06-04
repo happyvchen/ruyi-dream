@@ -78,8 +78,8 @@ FAL_KEY=
 如确实需要只对后端裸跑做临时覆盖，可以创建 `backend/.env.local`。它不应存放共享密钥，常见用途是覆盖本地数据库或日志路径：
 
 ```env
-APP_DATABASE_PATH=/tmp/ruyi-dream-dev.sqlite3
-APP_LOG_DIR=/tmp/ruyi-dream-logs
+APP_DATABASE_PATH=backend/data/app.sqlite3
+APP_LOG_DIR=backend/data/logs
 ```
 
 健康检查：

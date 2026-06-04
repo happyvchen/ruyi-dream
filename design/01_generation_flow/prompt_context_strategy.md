@@ -59,8 +59,8 @@ AI Director 只需要“已选方案如何导演”，不需要重新看到整�
 
 - AI 选搭业务规则写在 `assembly.ai_styling` Prompt 正文。
 - 用户要求优先级写在 AI Stylist 的 system instruction 和 `assembly.ai_styling` Prompt 正文：用户要求高于默认搭配偏好，但低于商品事实、搭配库事实、品牌硬边界、输出 schema 和安全规则。
-- 拍摄导演规则写在 `assembly.shoot_script` Prompt 正文和 `shoot_configs`。
-- 品牌资料来自 `brand_profiles` 和 Prompt 分段。
+- 拍摄导演规则写在 `assembly.shoot_script` Prompt 正文。
+- 品牌资料来自 `segment.brand_info` Prompt 分段和相关阶段 Prompt 正文。
 - 不再使用独立 `ai_policy_configs` 表。
 
 ## 非目标

@@ -36,7 +36,6 @@ Ruyi-Dream 是面向服饰品牌视觉生产团队的 B2B AI 数字化摄影棚�
 | `design/04_implementation_guide/CLAUDE.md` | 技术路线与生产实操 | 工程拆分或落地实现时 |
 | `frontend/CLAUDE.md` | 前端实现入口：架构、UI 规则、建议技术栈 | 写前端代码或初始化前端工程时 |
 | `backend/CLAUDE.md` | 后端实现入口：架构、API 契约、建议技术栈 | 写后端代码或初始化后端工程时 |
-| `tasks.md` | 项目级任务进度 | 接手任务、判断下一步时 |
 | `README.md` | 面向人的项目介绍 | 人类了解项目时；agent 不需要优先读 |
 
 ## 全局规则

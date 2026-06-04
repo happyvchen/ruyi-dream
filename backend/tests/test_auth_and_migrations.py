@@ -54,6 +54,34 @@ class BackendCurrentFlowTests(unittest.TestCase):
     def test_legacy_planner_module_is_removed(self) -> None:
         self.assertFalse((BACKEND_DIR / "app" / "planner.py").exists())
 
+    def test_prompt_replaced_config_tables_are_dropped_by_migration(self) -> None:
+        db_module = importlib.import_module("app.db")
+        legacy_tables = [
+            "brand_profiles",
+            "shoot_configs",
+            "tag_dimensions",
+            "tag_defs",
+            "tag_relations",
+            "tag_applicability_rules",
+            "garment_tag_assignments",
+        ]
+        with db_module.get_db() as db:
+            for table in legacy_tables:
+                db.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
+
+        db_module.init_db()
+
+        with db_module.get_db() as db:
+            rows = db.execute(
+                f"SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ({','.join('?' for _ in legacy_tables)})",
+                tuple(legacy_tables),
+            ).fetchall()
+            migration = db.execute(
+                "SELECT version FROM schema_migrations WHERE version = '034' AND name = 'drop_prompt_replaced_config_tables'"
+            ).fetchone()
+        self.assertEqual([row["name"] for row in rows], [])
+        self.assertIsNotNone(migration)
+
     def assert_no_model_raw_output(self, value: object) -> None:
         if isinstance(value, dict):
             self.assertNotIn("model_raw_output", value)

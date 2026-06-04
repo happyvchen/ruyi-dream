@@ -68,7 +68,7 @@ Gemini 不得：
 
 ## 5. 输出结构
 
-Gemini 必须返回严格 JSON，但 JSON 字段结构由 `AI 打标` Prompt 决定，不再固定为 `lily-garment-tags-v1` 或 `ruyi-taxonomy-tagging-v1`。
+Gemini 必须返回严格 JSON，但 JSON 字段结构由 `AI 打标` Prompt 决定，不再固定为历史打标 schema。
 
 允许的返回形态：
 
@@ -120,7 +120,7 @@ Gemini 必须返回严格 JSON，但 JSON 字段结构由 `AI 打标` Prompt 决
 - 生成系统 `tag_meta_json`，记录 provider、model、result_format、overall_confidence、needs_review、review_reasons、source_image_ids 和 warnings。
 - 从任意层级最佳努力读取常见字段别名，例如 `一级品类/category`、`色彩/color/colors`、`面料材质/material_visual`、`整体视觉语义/overall_summary`、`置信度/confidence`。
 - 置信度支持 0-1 或 0-100；低于阈值进入复核。
-- 后端不强制固定 taxonomy 枚举；分类口径以当前 `AI 打标` Prompt 为准。
+- 后端不强制固定标签枚举；分类口径以当前 `AI 打标` Prompt 为准。
 
 provider 调用失败或返回内容无法解析为 JSON 时：
 

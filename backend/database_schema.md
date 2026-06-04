@@ -1,13 +1,12 @@
 # Backend Database Schema
 
-当前数据库为 SQLite，初始化入口是 `backend/app/db.py:init_db()`。0.1.0 只保留 AI 摄影棚主流程、搭配服装库、数字模特、品牌资料、Prompt 配置、拍摄配置、媒体资产和审计 attempt。0.1.0 之前的 `garment_skus`、`garment_images`、`shot_plans`、`shot_plan_shots`、`generation_runs`、`generation_images`、`brand_template_versions`、`ai_policy_configs` 已删除；迁移 `027` 会在历史库上 drop 这些表，后续迁移继续为当前链路追加字段。
+当前数据库为 SQLite，初始化入口是 `backend/app/db.py:init_db()`。0.1.0 只保留 AI 摄影棚主流程、搭配服装库、数字模特、Prompt 配置、媒体资产和审计 attempt。旧货号、planner、AI policy、独立品牌资料、独立拍摄配置和固定标签规则表均已删除；迁移 `027` 与 `034` 会在历史库上 drop 这些表，后续迁移继续为当前链路追加字段。
 
 ## 表总览
 
 | 表名 | 业务对象 | 说明 |
 |---|---|---|
 | `model_profiles` | `ModelProfile` | 数字模特档案和头部参考图 |
-| `brand_profiles` | `BrandProfile` | 单一品牌资料 |
 | `media_assets` | `MediaAsset` | S3/RustFS 对象索引和衍生图 key |
 | `styling_garments` | `StylingGarment` | 搭配服装库商品 |
 | `styling_garment_images` | `StylingGarmentImage` | 搭配服装图片链接 |
@@ -21,9 +20,7 @@
 | `generation_result_sets` | `GenerationResultSet` | 最终成片集合 |
 | `generation_result_images_new` | `GenerationResultImage` | 前 5 张最终图 |
 | `generation_attempts` | `GenerationAttempt` | AI/provider 请求响应快照 |
-| `shoot_configs` | `ShootConfig` | AI Director 拍摄规则 |
 | `prompt_configs` | `PromptConfig` | 可维护 Prompt 模板 |
-| `tag_dimensions` / `tag_defs` / `tag_relations` / `tag_applicability_rules` / `garment_tag_assignments` | Tag Taxonomy | 标签体系 |
 | `event_logs` | `EventLog` | 业务事件 |
 | `schema_migrations` | SchemaVersion | 已执行迁移 |
 
@@ -67,7 +64,7 @@ Image-2 阶段写入：
 - `runtime.shoot_script_result`：分镜预览使用的 ShootScript 上下文。
 - `runtime.current_shot_context`：单张最终成片上下文。
 
-历史 `ai_policy_configs` 表已删除。AI 选搭规则、质量信号、配饰边界和品牌口径直接维护在 `assembly.ai_styling` Prompt 正文中；拍摄剧本、分镜预览和最终成片文字也必须来自对应 Prompt 配置。
+历史 `ai_policy_configs`、`brand_profiles`、`shoot_configs` 和固定标签规则表已删除。AI 选搭规则、质量信号、配饰边界、品牌口径和拍摄导演规则直接维护在对应 Prompt 正文中。
 
 ## 迁移
 
@@ -82,5 +79,6 @@ Image-2 阶段写入：
 | `031` | `add_generation_pending_stage_inputs` | 为 `generation_tasks` 增加各阶段待执行用户输入草稿字段 |
 | `032` | `add_shoot_script_runtime_columns` | 为旧库补齐拍摄剧本、分镜预览和成片复盘所需的运行时列，并将 `generation_shot_plans` 唯一约束迁到 `(shoot_script_id, sort_order)` |
 | `033` | `cleanup_legacy_tables_and_attempt_provider_request_ids` | 确保 attempt provider 请求 ID 列存在，并再次清理 0.1.0 之前的空表残留 |
+| `034` | `drop_prompt_replaced_config_tables` | 删除已由 Prompt 维护替代的品牌资料、拍摄配置和固定标签规则表 |
 
 新库直接创建当前 schema；已有库执行迁移链后只保留 0.1.0 表并追加当前字段。0.1.0 之前的业务表不作为运行时读取路径。
