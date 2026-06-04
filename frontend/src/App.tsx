@@ -1259,13 +1259,13 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
 function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }) {
   const [query, setQuery] = useState('')
   const [detail, setDetail] = useState<StylingGarment | null>(null)
-  const [items, setItems] = useState<StylingGarment[]>(garments)
+  const [items, setItems] = useState<StylingGarment[]>([])
   const [showImport, setShowImport] = useState(false)
   const [offset, setOffset] = useState(0)
   const [total, setTotal] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
   const [pageSize, setPageSize] = useState(12)
-  const [searching, setSearching] = useState(false)
+  const [searching, setSearching] = useState(true)
   const [includeArchived, setIncludeArchived] = useState(false)
   const [selectedGarmentIds, setSelectedGarmentIds] = useState<Set<number>>(() => new Set())
   const [deleteGarmentDialog, setDeleteGarmentDialog] = useState<StylingGarment[] | null>(null)
@@ -1428,7 +1428,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
               onDelete={() => openGarmentDeleteDialog([item])}
             />
           ))}</div>
-        ) : <EmptyState title={query ? '没有匹配的搭配服饰' : '暂无搭配服饰'} text={query ? '换一个货号或标签关键词试试。' : '点击右上角导入搭配服饰。'} />}
+        ) : searching ? null : <EmptyState title={query ? '没有匹配的搭配服饰' : '暂无搭配服饰'} text={query ? '换一个货号或标签关键词试试。' : '点击右上角导入搭配服饰。'} />}
         </div>
         <PaginationControls
           disabled={searching}
