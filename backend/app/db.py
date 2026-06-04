@@ -20,7 +20,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
 
 PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
     ("segment.brand_info", "segment", "品牌信息", "品牌信息分段 Prompt，可被组装 Prompt 引用。", 10),
-    ("assembly.ai_tagging", "assembly", "AI 打标", "搭配服饰入库后的图片理解和标签识别 Prompt。", 100),
+    ("assembly.ai_tagging", "assembly", "AI 打标", "搭配服装入库后的图片理解和标签识别 Prompt。", 100),
     ("assembly.ai_styling", "assembly", "AI 选搭", "AI Stylist 选搭 Prompt，包含主推款理解、搭配选择和质量判断。", 110),
     ("assembly.shoot_script", "assembly", "拍摄剧本", "AI Director 拍摄剧本 Prompt，生成 ShootScript 和 6 个镜头。", 120),
     ("assembly.storyboard_preview", "assembly", "分镜预览", "Image-2 分镜预览 Prompt，生成 3x2 分镜图。", 130),

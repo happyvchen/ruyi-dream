@@ -1,6 +1,6 @@
 # Backend Architecture
 
-后端负责把主推款、搭配服饰库、数字模特、品牌资料、Prompt 配置和生成任务组织成可追踪的 AI 摄影棚生产链路。当前实现为 FastAPI 单体应用，SQLite 存储元数据，媒体统一进入 S3 兼容对象存储。
+后端负责把主推款、搭配服装库、数字模特、品牌资料、Prompt 配置和生成任务组织成可追踪的 AI 摄影棚生产链路。当前实现为 FastAPI 单体应用，SQLite 存储元数据，媒体统一进入 S3 兼容对象存储。
 
 ## 代码结构
 
@@ -19,7 +19,7 @@
 
 | 模块 | 职责 |
 |---|---|
-| `styling-garment` | 搭配服饰库、图片、Gemini 打标、生效标签和 READY 状态 |
+| `styling-garment` | 搭配服装库、图片、Gemini 打标、生效标签和 READY 状态 |
 | `generation-task` | 主推款任务、输入版本、StylingPlan、ShootScript、ShotPlan、预览和成片 |
 | `model-profile` | 数字模特身份图、身体参数和默认模特 |
 | `brand-profile` | 单一品牌资料 |
@@ -41,7 +41,7 @@ POST /api/generation-tasks/{id}/ready
 POST /api/generation-tasks/{id}/select-styling
   -> 创建 GenerationTaskInputVersion
   -> 冻结上传补充要求和本次微调要求
-  -> 读取 READY 搭配服饰库
+  -> 读取 READY 搭配服装库
   -> 构造全量标签事实 candidate_retrieval prompt DTO
   -> 构造 user_requirement prompt DTO
   -> 调用 AI Stylist 生成 StylingPlan

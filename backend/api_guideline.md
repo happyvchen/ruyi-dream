@@ -13,12 +13,12 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。旧 `/a
 | `/api/media` | GET | 稳定媒体访问入口 |
 | `/api/logs` | GET | 事件日志 |
 
-## 搭配服饰库
+## 搭配服装库
 
 | 路径 | 方法 | 说明 |
 |---|---|---|
 | `/api/styling-garments` | GET | 列表 |
-| `/api/styling-garments` | POST | 创建搭配服饰并上传图片 |
+| `/api/styling-garments` | POST | 创建搭配服装并上传图片 |
 | `/api/styling-garments/{id}` | GET | 详情 |
 | `/api/styling-garments/{id}` | PATCH | 编辑状态、人工标签和归档信息 |
 | `/api/styling-garments/{id}/images` | POST | 追加图片 |
@@ -78,7 +78,7 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。旧 `/a
 
 Prompt 配置可使用以下 runtime：
 
-- `runtime.styling_garment`：AI 打标使用的当前搭配服饰 code 和图片输入摘要。
+- `runtime.styling_garment`：AI 打标使用的当前搭配服装 code 和图片输入摘要。
 - `runtime.candidate_retrieval`：AI Stylist 候选服饰紧凑卡片。
 - `runtime.hero_product_info`：跟随本阶段实际使用的主推款输入版本冻结的商品信息和业务事实补充；重新执行拍摄剧本、分镜预览、成片或单张重生时会冻结最新任务商品信息。
 - `runtime.ai_styling_user_instruction`：AI 智能选搭本次执行的用户介入要求。
@@ -119,7 +119,7 @@ Prompt 配置可使用以下 runtime：
 
 ## 生成输入原则
 
-- 主推款和选中搭配服饰图片是商品事实来源。
+- 主推款和选中搭配服装图片是商品事实来源。
 - 数字模特参考图是人物身份事实来源，必须作为 `model_identity` 前置输入并写入 `image_reference_manifest`。
 - 分镜预览是构图参考，不是商品事实来源，也不是模特身份事实来源。
 - ShootScript、分镜预览、品牌妆发和 provider 默认审美不得覆盖数字模特的脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。
@@ -136,5 +136,5 @@ Prompt 配置可使用以下 runtime：
 - `auto-run-final` 自动推进各阶段时必须读取同一份任务级用户输入草稿，不能静默忽略已保存的阶段要求。
 - 用户要求优先于默认搭配偏好和导演偏好；不得覆盖商品图片事实、搭配库 READY 范围、数字模特身份契约、品牌硬边界、输出 schema 和安全规则。
 - AI Stylist 输出必须包含 `user_requirement_resolution`，说明已满足项、未满足项、冲突项和替代处理。
-- AI Director 不重新选择搭配服饰，只承接 StylingPlan 中已解析的用户要求和选搭结论。
+- AI Director 不重新选择搭配服装，只承接 StylingPlan 中已解析的用户要求和选搭结论。
 - 上传页允许在非运行中状态继续 CRUD 主推款图片；修改主推款图片或排序会保留旧过程记录，但清空当前 active artifact 并让任务回到待选搭。单独保存商品信息或阶段用户输入不会隐藏已生成结果，只影响下一次阶段执行。

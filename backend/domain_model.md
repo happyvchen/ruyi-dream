@@ -15,7 +15,7 @@ GenerationTask
 
 ## StylingGarment
 
-搭配服饰库中的真实商品。只有 `status = READY` 且未归档、未删除的服饰进入 AI Stylist 候选范围。
+搭配服装库中的真实商品。只有 `status = READY` 且未归档、未删除的服饰进入 AI Stylist 候选范围。
 
 关键事实：
 
@@ -25,7 +25,7 @@ GenerationTask
 - `effective_tags_json`：最新生效标签。
 - `tag_meta_json`：置信度、复核原因和 schema 信息。
 
-AI Stylist 接收未归档 READY 搭配库的全量标签事实卡。后端只做状态范围过滤和结构化组装，使用搭配服饰 `code` 作为 prompt 输入输出标识，不做预筛选、排序、评分或审美判断。
+AI Stylist 接收未归档 READY 搭配库的全量标签事实卡。后端只做状态范围过滤和结构化组装，使用搭配服装 `code` 作为 prompt 输入输出标识，不做预筛选、排序、评分或审美判断。
 
 ## GenerationTask
 
@@ -58,7 +58,7 @@ AI Stylist 的职责是理解主推款、探索多套 outfit、批判审美与�
 - `candidate_retrieval_snapshot_json`：本次 READY 搭配库全量标签事实卡、source ids、candidate ids 和 code/id 映射。
 - `user_requirement_json`：上传补充要求、本次选搭微调要求和冲突处理策略。
 - `styling_plan_json`：完整 StylingPlan，包含候选方案、选中方案、被拒方案、诊断、评分、质量信号和 warnings。
-- `selected_material_snapshot_json`：选中搭配服饰的商品与图片快照。
+- `selected_material_snapshot_json`：选中搭配服装的商品与图片快照。
 
 面向 prompt 的 `runtime.candidate_retrieval` 只包含业务 `code`、`ai_tags` 和必要人工/复核事实，不包含内部 id、图片快照、旧 prompt、完整历史快照或后端排序/评分结果。
 

@@ -2,12 +2,12 @@
 
 ## 1. 背景
 
-`AI 智能选搭` 的业务目标不是让后端替 Gemini 做审美筛选，也不是只让主推款“露出来”。MVP 固定采用“全量标签事实直接输入 Gemini”的工作方式：后端负责冻结主推款图片、组装未归档 READY 搭配服饰的全量标签事实和生产硬边界；Gemini 在 AI Stylist Prompt 约束下像品牌造型师一样完成主推款理解、方案探索、候选比较、拒绝和最终选择。
+`AI 智能选搭` 的业务目标不是让后端替 Gemini 做审美筛选，也不是只让主推款“露出来”。MVP 固定采用“全量标签事实直接输入 Gemini”的工作方式：后端负责冻结主推款图片、组装未归档 READY 搭配服装的全量标签事实和生产硬边界；Gemini 在 AI Stylist Prompt 约束下像品牌造型师一样完成主推款理解、方案探索、候选比较、拒绝和最终选择。
 
 白色高腰阔腿裤案例暴露了新的核心问题：
 
 - 任务快照一开始把主推款品类识别为 `unknown`，因为只用任务名启发式，没有先做主推款视觉理解。
-- AI Stylist 为了露出裤腰，把镂空针织开衫强行“全塞进裤腰”，但该搭配服饰的标签推荐穿法只有 `buttoned/open`，没有 `tucked`。
+- AI Stylist 为了露出裤腰，把镂空针织开衫强行“全塞进裤腰”，但该搭配服装的标签推荐穿法只有 `buttoned/open`，没有 `tucked`。
 - Aesthetic Critic 把“腰线可见”误判为“穿法好看”，给了四项满分，没有检查开衫结构、厚薄、门襟和下摆塞入后的臃肿风险。
 - ShotPlan 仍使用通用模板，裤装主推款却生成了多张全身图和上衣半身近景，导致图位在服务搭配上衣，而不是服务裤子。
 
@@ -39,7 +39,7 @@
 
 生产链路必须避免三种误区：
 
-- 不把几百上千件搭配服饰的图片或缩略图一次性塞进 Gemini；MVP 只直投标签事实。
+- 不把几百上千件搭配服装的图片或缩略图一次性塞进 Gemini；MVP 只直投标签事实。
 - 不把 AI Stylist 降级成后端规则选 ID 后让 Gemini 写理由。
 - 不把“商品可见”当成“造型成立”。商品露出但穿法别扭、比例僵硬、色块沉闷、品牌感不足，仍然是失败。
 
@@ -84,9 +84,9 @@ Lily 参考样本必须来自可验证渠道：
 - request snapshot 中的主推款理解来源不得长期停留在任务名启发式；任务名、SKU 和文件名只可作为辅助证据。
 - `HeroUnderstanding` 中的品类、卖点、不可遮挡区域和图位需求必须在 `StylingPlan` 候选比较、拒绝理由和 ShotPlan 中可追溯。
 
-### 4.2 搭配服饰资产理解层
+### 4.2 搭配服装资产理解层
 
-每件搭配服饰入库并打标时，除 `lily-garment-tags-v1` 外，还应沉淀可检索字段：
+每件搭配服装入库并打标时，除 `lily-garment-tags-v1` 外，还应沉淀可检索字段：
 
 - 商品视觉摘要：颜色、衣长、体量、材质观感、主要设计点。
 - 风险摘要：遮腰、过长、厚重、深色大面积、强视觉故事、与常见品类互斥。
@@ -101,10 +101,10 @@ Lily 参考样本必须来自可验证渠道：
 
 后端只做生产硬边界，不做审美筛选：
 
-- 只读取未归档、未删除、`READY` 的搭配服饰。
-- 排除当前主推款同 `code`、同输入素材或同商品身份的搭配服饰，避免把主推款自己再次作为配角候选。
-- 为每件搭配服饰组装标签事实卡：`code`、完整 `ai_tags_json`、必要人工业务标记、复核信息和可选风险摘要。
-- 不传搭配服饰图片、缩略图、后端排序、兼容性分数或 outfit 草案。
+- 只读取未归档、未删除、`READY` 的搭配服装。
+- 排除当前主推款同 `code`、同输入素材或同商品身份的搭配服装，避免把主推款自己再次作为配角候选。
+- 为每件搭配服装组装标签事实卡：`code`、完整 `ai_tags_json`、必要人工业务标记、复核信息和可选风险摘要。
+- 不传搭配服装图片、缩略图、后端排序、兼容性分数或 outfit 草案。
 - 后端只保存全量标签事实快照、prompt 快照、provider request/response 和 code 到内部 ID 的持久化映射。
 
 标签事实卡中的 `ai_tags` 必须保持完整对象。后端不能只摘取颜色、品类、材质等少数字段来替代完整标签事实，也不能因为某件服饰“看起来可能合适”而调整顺序或写入隐性优先级。
@@ -125,7 +125,7 @@ AI 选搭 Prompt 必须把以下判断交给 Gemini，但要明确判定口径�
 Gemini 接收：
 
 - 主推款图片和结构化主推款理解要求。
-- 当前未归档 READY 搭配服饰库全量标签事实卡。
+- 当前未归档 READY 搭配服装库全量标签事实卡。
 - Lily 官方风格证据或品牌边界文本。
 - Prompt 业务规则、Aesthetic Critic 维度和生成配饰边界。
 
@@ -146,7 +146,7 @@ Gemini 输出 `StylingPlan`，并必须说明：
 
 当 AI Stylist 输出 `tucked`、`half_tucked`、`open`、`buttoned` 等穿法时，后端必须校验：
 
-- 输出穿法是否存在于搭配服饰 `recommended_wearing_methods` 或 `wearing_affordance`。
+- 输出穿法是否存在于搭配服装 `recommended_wearing_methods` 或 `wearing_affordance`。
 - 若模型要新增穿法，必须说明基于图片结构为什么成立，并进入风险提示。
 - 开衫、外套、厚针织、硬挺夹克、有明显门襟/纽扣/镂空下摆的上衣默认禁止全塞。
 - 高腰裤可以要求“腰头可见”，但不能默认推导为“上衣全塞”。
@@ -163,9 +163,9 @@ Aesthetic Critic 除原有维度外，必须新增：
 
 以下情况不得满分：
 
-- 穿法不在搭配服饰允许范围内。
+- 穿法不在搭配服装允许范围内。
 - 只为露出腰头而牺牲穿着自然度。
-- 主推款可见但搭配服饰成为局部近景主角。
+- 主推款可见但搭配服装成为局部近景主角。
 - 没有官方样本证据支撑，却声称“高度符合 Lily”。
 - 第 6 格备用姿态明显优于前 5 格，说明 ShotPlan 不成立。
 
@@ -190,7 +190,7 @@ Aesthetic Critic 除原有维度外，必须新增：
 - `embedding`、`embedding_model`、`embedding_version`。
 - `confidence`、`reviewed_by`、`reviewed_at`。
 
-`Lily Brand Style Index` 是选搭和 ShotPlan 的品牌证据层，不是商品事实源。最终生成的商品事实仍来自主推款图片和被选中搭配服饰图片。
+`Lily Brand Style Index` 是选搭和 ShotPlan 的品牌证据层，不是商品事实源。最终生成的商品事实仍来自主推款图片和被选中搭配服装图片。
 
 ## 7. 生成配饰边界
 
@@ -242,7 +242,7 @@ Aesthetic Critic 除原有维度外，必须新增：
 
 - 将主推款理解从任务名启发式升级为视觉理解步骤，输出结构化 `HeroUnderstanding`。
 - 将 `HeroUnderstanding` 作为 AI Stylist 和 ShotPlan 的共同输入。
-- 扩展搭配服饰穿法字段，区分 `tucked`、`half_tucked`、`untucked`、`open`、`buttoned`、`layered`。
+- 扩展搭配服装穿法字段，区分 `tucked`、`half_tucked`、`untucked`、`open`、`buttoned`、`layered`。
 - 增加穿法合法性信号：推荐穿法不支持 `tucked` 的开衫/外套/厚针织若被要求全塞，记录为审核风险并进入后续优化。
 - 增加 Aesthetic Critic 维度：`wearing_method_validity`、`tuck_quality`、`official_style_evidence`、`shotplan_readiness`。
 - 重写 ShotPlan 生成：按主推款品类读取 `category_shot_rules.md`，裤装必须覆盖全身、腰脚、腰膝/腰胯、侧身/动态和正面颜色图。
@@ -283,7 +283,7 @@ Aesthetic Critic 除原有维度外，必须新增：
 
 范围：
 
-- 为搭配服饰图、品牌样本图和文本摘要生成多模态 embedding。
+- 为搭配服装图、品牌样本图和文本摘要生成多模态 embedding。
 - 早期可在数据库中保存向量并用内存计算；规模扩大后迁移到 pgvector、Qdrant、Milvus 或 Vertex AI Vector Search。
 - 可选引入图像相似度、品牌样本相似度和主推款视觉兼容度，作为超大库场景下的上下文压缩依据。
 - 保留硬过滤和穿法质量信号；embedding 只负责压缩上下文，不直接决定最终选搭。
@@ -317,7 +317,7 @@ Aesthetic Critic 除原有维度外，必须新增：
 需要新增或强化的数据结构：
 
 - 结构化 `HeroUnderstanding`。
-- 搭配服饰穿法能力与穿法禁忌。
+- 搭配服装穿法能力与穿法禁忌。
 - 全量标签事实快照。
 - `StylingPlan` 候选比较、空库内搭配比较、拒绝理由和质量信号。
 - 品牌样本表或 JSON 快照。

@@ -8,6 +8,20 @@ export type AuthSession = {
   role?: SessionRole | null
 }
 
+export class ApiError extends Error {
+  status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
+export function isAuthExpiredError(error: unknown) {
+  return error instanceof ApiError && error.status === 401
+}
+
 export type Paginated<T> = {
   items: T[]
   limit: number
@@ -476,7 +490,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!response.ok) {
     const detail = await response.json().catch(() => ({ detail: response.statusText }))
-    throw new Error(typeof detail.detail === 'string' ? detail.detail : '请求失败')
+    const message = typeof detail.detail === 'string' ? detail.detail : '请求失败'
+    if (typeof window !== 'undefined' && response.status === 401 && !path.startsWith('/api/auth/login') && !path.startsWith('/api/auth/session')) {
+      window.dispatchEvent(new CustomEvent('ruyi-auth-expired', { detail: { message } }))
+    }
+    throw new ApiError(message, response.status)
   }
   return response.json() as Promise<T>
 }
