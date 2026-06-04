@@ -82,6 +82,122 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertEqual([row["name"] for row in rows], [])
         self.assertIsNotNone(migration)
 
+    def test_legacy_preview_tasks_recover_shoot_script_pointers(self) -> None:
+        db_module = importlib.import_module("app.db")
+
+        db_module.init_db()
+        timestamp = "2026-06-04T08:00:00Z"
+        styling_plan = {
+            "schema_version": "styling-plan-v1",
+            "hero_understanding": {
+                "hero_visual_summary": "淡蓝色印花半裙",
+                "category": "bottom",
+                "hero_selling_points": ["高腰线", "印花裙摆"],
+                "hero_visibility_risks": ["上衣不要遮挡腰头"],
+            },
+            "outfit_candidates": [
+                {
+                    "id": "candidate_13",
+                    "selected_material_ids": [13],
+                    "generated_accessories": ["低存在感米色鞋"],
+                    "scores": {"aesthetic_score": 1},
+                }
+            ],
+            "selected_outfit_id": "candidate_13",
+            "selected_material_ids": [13],
+            "reason_summary": "历史选搭成功。",
+        }
+        with db_module.get_db() as db:
+            db.execute(
+                """
+                INSERT INTO media_assets
+                  (id, object_key, original_filename, mime_type, status, created_at, updated_at)
+                VALUES (296, 'generation-tasks/8/preview/preview-13.png', 'preview-13.png', 'image/png', 'READY', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_tasks
+                  (id, name, status, current_input_version_id, active_styling_id, active_preview_id,
+                   created_at, updated_at)
+                VALUES (8, '20260527132852', 'FAILED', 11, 11, 13, ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_task_input_versions
+                  (id, task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, created_at)
+                VALUES (11, 8, 1, '20260527132852', '[]', '{}', ?)
+                """,
+                (timestamp,),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_stylings
+                  (id, task_id, input_version_id, source_material_ids_json, selected_material_ids_json,
+                   selected_material_snapshot_json, styling_plan_json, hero_understanding_json,
+                   outfit_candidates_json, rejected_candidates_json, reason_summary, warnings_json,
+                   status, created_at, updated_at)
+                VALUES (11, 8, 11, '[]', '[13]', '[]', ?, '{}', '[]', '[]',
+                        '历史选搭成功。', '[]', 'SUCCEEDED', ?, ?)
+                """,
+                (db_module.dumps(styling_plan), timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_previews
+                  (id, task_id, styling_id, input_version_id, preview_asset_id, status, created_at, updated_at)
+                VALUES (13, 8, 11, 11, 296, 'SUCCEEDED', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            for sort_order in range(1, 7):
+                db.execute(
+                    """
+                    INSERT INTO generation_shot_plans
+                      (task_id, styling_id, sort_order, shot_type, plan_json, created_at, updated_at)
+                    VALUES (8, 11, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sort_order,
+                        "reference" if sort_order == 6 else "legacy_shot",
+                        db_module.dumps({
+                            "sortOrder": sort_order,
+                            "shotType": "reference" if sort_order == 6 else "legacy_shot",
+                            "framing": "全身或近全身",
+                            "pose": "自然站姿",
+                            "cameraAngle": "正面",
+                            "mainFocus": "主推款",
+                            "visibleGarments": ["hero", "styling:13"],
+                        }),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+
+        with db_module.get_db() as db:
+            db_module.migration_recover_legacy_shoot_scripts(db)
+            db_module.migration_recover_legacy_shoot_scripts(db)
+
+        with db_module.get_db() as db:
+            task = db.execute("SELECT * FROM generation_tasks WHERE id = 8").fetchone()
+            scripts = db.execute("SELECT * FROM generation_shoot_scripts WHERE task_id = 8").fetchall()
+            preview = db.execute("SELECT * FROM generation_previews WHERE id = 13").fetchone()
+            shot_plan_count = db.execute(
+                "SELECT COUNT(*) AS count FROM generation_shot_plans WHERE task_id = 8 AND shoot_script_id = ?",
+                (task["active_shoot_script_id"],),
+            ).fetchone()["count"]
+
+        self.assertEqual(task["status"], "PREVIEW_READY")
+        self.assertEqual(task["active_storyboard_preview_id"], 13)
+        self.assertIsNotNone(task["active_shoot_script_id"])
+        self.assertEqual(len(scripts), 1)
+        self.assertEqual(preview["shoot_script_id"], task["active_shoot_script_id"])
+        self.assertEqual(shot_plan_count, 6)
+        self.assertEqual(db_module.loads(scripts[0]["script_json"])["script_source_mode"], "legacy_recovered")
+
     def assert_no_model_raw_output(self, value: object) -> None:
         if isinstance(value, dict):
             self.assertNotIn("model_raw_output", value)

@@ -18,6 +18,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("032", "add_shoot_script_runtime_columns", "migration_add_shoot_script_runtime_columns"),
     ("033", "cleanup_legacy_tables_and_attempt_provider_request_ids", "migration_cleanup_legacy_tables_and_attempt_provider_request_ids"),
     ("034", "drop_prompt_replaced_config_tables", "migration_drop_prompt_replaced_config_tables"),
+    ("035", "recover_legacy_shoot_scripts", "migration_recover_legacy_shoot_scripts"),
 )
 
 PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
@@ -348,6 +349,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_shoot_script_runtime_columns": migration_add_shoot_script_runtime_columns,
         "migration_cleanup_legacy_tables_and_attempt_provider_request_ids": migration_cleanup_legacy_tables_and_attempt_provider_request_ids,
         "migration_drop_prompt_replaced_config_tables": migration_drop_prompt_replaced_config_tables,
+        "migration_recover_legacy_shoot_scripts": migration_recover_legacy_shoot_scripts,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -454,6 +456,333 @@ def migration_add_shoot_script_runtime_columns(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE generation_previews ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id)")
     if not table_has_column(db, "generation_result_sets", "shoot_script_id"):
         db.execute("ALTER TABLE generation_result_sets ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id)")
+
+
+def migration_recover_legacy_shoot_scripts(db: sqlite3.Connection) -> None:
+    ensure_legacy_shoot_script_recovery_columns(db)
+    rows = db.execute(
+        """
+        SELECT gt.*,
+               gp.id AS recover_preview_id,
+               gp.input_version_id AS recover_input_version_id,
+               gp.user_instruction_json AS recover_preview_user_instruction_json
+        FROM generation_tasks gt
+        JOIN generation_previews gp
+          ON gp.id = COALESCE(gt.active_storyboard_preview_id, gt.active_preview_id)
+        WHERE gt.deleted_at IS NULL
+          AND gt.active_styling_id IS NOT NULL
+          AND gt.active_shoot_script_id IS NULL
+          AND gt.status NOT IN ('STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING')
+          AND gp.status = 'SUCCEEDED'
+          AND gp.preview_asset_id IS NOT NULL
+        ORDER BY gt.id
+        """
+    ).fetchall()
+    for row in rows:
+        recover_legacy_shoot_script_for_task(db, row)
+
+
+def ensure_legacy_shoot_script_recovery_columns(db: sqlite3.Connection) -> None:
+    if not table_has_column(db, "generation_tasks", "active_shoot_script_id"):
+        db.execute("ALTER TABLE generation_tasks ADD COLUMN active_shoot_script_id INTEGER")
+    if not table_has_column(db, "generation_tasks", "active_storyboard_preview_id"):
+        db.execute("ALTER TABLE generation_tasks ADD COLUMN active_storyboard_preview_id INTEGER")
+    if not table_has_column(db, "generation_shoot_scripts", "user_instruction_json"):
+        db.execute("ALTER TABLE generation_shoot_scripts ADD COLUMN user_instruction_json TEXT")
+    if not table_has_column(db, "generation_shot_plans", "shoot_script_id"):
+        db.execute("ALTER TABLE generation_shot_plans ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id) ON DELETE CASCADE")
+    if generation_shot_plans_needs_constraint_rebuild(db):
+        rebuild_generation_shot_plans_for_shoot_script_unique(db)
+    if not table_has_column(db, "generation_previews", "shoot_script_id"):
+        db.execute("ALTER TABLE generation_previews ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id)")
+    if not table_has_column(db, "generation_previews", "user_instruction_json"):
+        db.execute("ALTER TABLE generation_previews ADD COLUMN user_instruction_json TEXT")
+    if not table_has_column(db, "generation_result_sets", "shoot_script_id"):
+        db.execute("ALTER TABLE generation_result_sets ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id)")
+    if not table_has_column(db, "generation_result_sets", "user_instruction_json"):
+        db.execute("ALTER TABLE generation_result_sets ADD COLUMN user_instruction_json TEXT")
+    if not table_has_column(db, "generation_result_images_new", "user_instruction_json"):
+        db.execute("ALTER TABLE generation_result_images_new ADD COLUMN user_instruction_json TEXT")
+
+
+def recover_legacy_shoot_script_for_task(db: sqlite3.Connection, task_row: sqlite3.Row) -> None:
+    task_id = int(task_row["id"])
+    styling_id = int(task_row["active_styling_id"])
+    preview_id = int(task_row["recover_preview_id"])
+    input_version_id = int(task_row["recover_input_version_id"] or task_row["current_input_version_id"] or 0)
+    if input_version_id <= 0:
+        styling_input = db.execute("SELECT input_version_id FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
+        if not styling_input or not styling_input["input_version_id"]:
+            return
+        input_version_id = int(styling_input["input_version_id"])
+
+    existing_script = db.execute(
+        """
+        SELECT * FROM generation_shoot_scripts
+        WHERE task_id = ? AND styling_id = ? AND status = 'SUCCEEDED'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (task_id, styling_id),
+    ).fetchone()
+    timestamp = now_iso()
+    styling_row = db.execute("SELECT * FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
+    if not styling_row:
+        return
+    styling_plan = loads(styling_row["styling_plan_json"], {}) if "styling_plan_json" in styling_row.keys() else {}
+    shot_rows = db.execute(
+        """
+        SELECT * FROM generation_shot_plans
+        WHERE task_id = ? AND styling_id = ? AND shoot_script_id IS NULL
+        ORDER BY sort_order
+        """,
+        (task_id, styling_id),
+    ).fetchall()
+
+    if existing_script:
+        shoot_script_id = int(existing_script["id"])
+        script_json = loads(existing_script["script_json"], {})
+    else:
+        script_json = build_legacy_recovered_shoot_script(task_id, input_version_id, styling_id, styling_plan, shot_rows)
+        cursor = db.execute(
+            """
+            INSERT INTO generation_shoot_scripts
+              (task_id, input_version_id, styling_id, status, script_json, summary_json,
+               styling_risks_json, accessory_adjustments_json, user_instruction_json, created_at, updated_at)
+            VALUES (?, ?, ?, 'SUCCEEDED', ?, ?, '[]', '[]', ?, ?, ?)
+            """,
+            (
+                task_id,
+                input_version_id,
+                styling_id,
+                dumps(script_json),
+                dumps(script_json.get("user_visible_summary") or {}),
+                task_row["recover_preview_user_instruction_json"] or "{}",
+                timestamp,
+                timestamp,
+            ),
+        )
+        shoot_script_id = int(cursor.lastrowid)
+
+    if shot_rows:
+        db.execute(
+            """
+            UPDATE generation_shot_plans
+            SET shoot_script_id = ?, updated_at = ?
+            WHERE task_id = ? AND styling_id = ? AND shoot_script_id IS NULL
+            """,
+            (shoot_script_id, timestamp, task_id, styling_id),
+        )
+    else:
+        for shot in script_json.get("shots", []) if isinstance(script_json.get("shots"), list) else []:
+            if not isinstance(shot, dict):
+                continue
+            sort_order = int(shot.get("shot_index") or 0)
+            if sort_order <= 0:
+                continue
+            db.execute(
+                """
+                INSERT OR IGNORE INTO generation_shot_plans
+                  (task_id, styling_id, shoot_script_id, sort_order, shot_type, plan_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    styling_id,
+                    shoot_script_id,
+                    sort_order,
+                    str(shot.get("shot_role") or "reference"),
+                    dumps(shot),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+    db.execute(
+        """
+        UPDATE generation_previews
+        SET shoot_script_id = ?, updated_at = ?
+        WHERE task_id = ? AND styling_id = ? AND shoot_script_id IS NULL
+        """,
+        (shoot_script_id, timestamp, task_id, styling_id),
+    )
+    db.execute(
+        """
+        UPDATE generation_result_sets
+        SET shoot_script_id = ?, updated_at = ?
+        WHERE task_id = ? AND styling_id = ? AND shoot_script_id IS NULL
+        """,
+        (shoot_script_id, timestamp, task_id, styling_id),
+    )
+    db.execute(
+        """
+        UPDATE generation_tasks
+        SET active_shoot_script_id = ?,
+            active_storyboard_preview_id = COALESCE(active_storyboard_preview_id, active_preview_id),
+            status = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (shoot_script_id, recovered_legacy_task_status(db, task_row, preview_id), timestamp, task_id),
+    )
+
+
+def build_legacy_recovered_shoot_script(
+    task_id: int,
+    input_version_id: int,
+    styling_id: int,
+    styling_plan: dict[str, Any],
+    shot_rows: list[sqlite3.Row],
+) -> dict[str, Any]:
+    hero = styling_plan.get("hero_understanding") if isinstance(styling_plan.get("hero_understanding"), dict) else {}
+    shots = [legacy_shot_from_row(row, hero) for row in shot_rows]
+    if not shots:
+        shots = [legacy_fallback_shot(index, hero) for index in range(1, 7)]
+    shots = sorted(shots, key=lambda item: int(item.get("shot_index") or 0))[:6]
+    while len(shots) < 6:
+        shots.append(legacy_fallback_shot(len(shots) + 1, hero))
+    return {
+        "schema_version": "shoot-script-v1",
+        "script_source_mode": "legacy_recovered",
+        "input_refs": {
+            "task_id": task_id,
+            "input_version_id": input_version_id,
+            "styling_id": styling_id,
+            "styling_plan_version": str(styling_plan.get("schema_version") or "styling-plan-v1"),
+        },
+        "model_identity_contract": {},
+        "global_directing": {
+            "rules": [{"label": "历史恢复", "value": "从旧版分镜 ShotPlan 恢复 ShootScript，不重新调用 AI。"}],
+            "brand_tone": "Lily 商务时装电商棚拍，商品优先，干净克制。",
+            "background": "白/浅灰棚拍背景或旧 ShotPlan 指定背景。",
+            "lighting": "柔和均匀光线，真实肤色，轻微落地阴影。",
+            "model_direction": "自然、自信、从容，保持数字模特身份一致。",
+            "hair_makeup_boundary": "沿用数字模特身份契约，不改变脸型、五官和发型轮廓。",
+            "accessory_boundary": "生成配饰低存在感，可省略，不做商品级验收。",
+            "consistency_rules": ["复用同一 StylingPlan、旧分镜和镜头计划。"],
+            "product_fidelity_rules": ["主推款和选中搭配服装以参考图为商品事实源。"],
+            "negative_constraints": ["不要文字水印", "不要改款换色", "不要让配饰成为视觉中心"],
+        },
+        "styling_risks": [],
+        "accessory_adjustments": [],
+        "resolved_accessories": legacy_resolved_accessories(styling_plan),
+        "shots": shots,
+        "user_visible_summary": {
+            "title": "历史分镜恢复剧本",
+            "summary": "系统从旧版分镜镜头计划恢复拍摄剧本，用于继续生成前 5 张成片。",
+            "key_points": hero.get("shot_requirements") if isinstance(hero.get("shot_requirements"), list) else [],
+            "risk_summary": "该剧本为历史数据恢复产物，未重新调用 AI Director。",
+        },
+        "warnings": ["legacy_recovered_shoot_script"],
+    }
+
+
+def legacy_shot_from_row(row: sqlite3.Row, hero: dict[str, Any]) -> dict[str, Any]:
+    plan = loads(row["plan_json"], {})
+    index = int(plan.get("shot_index") or plan.get("sortOrder") or row["sort_order"] or 1)
+    shot_role = str(plan.get("shot_role") or plan.get("shotType") or row["shot_type"] or "reference")
+    return {
+        "shot_index": index,
+        "shot_role": shot_role,
+        "shot_role_label": str(plan.get("shot_role_label") or plan.get("shotType") or shot_role),
+        "framing": str(plan.get("framing") or ""),
+        "crop_range": str(plan.get("crop_range") or plan.get("cropRange") or plan.get("framing") or ""),
+        "model_scale": str(plan.get("model_scale") or plan.get("modelScale") or ""),
+        "camera_angle": str(plan.get("camera_angle") or plan.get("cameraAngle") or ""),
+        "body_position": str(plan.get("body_position") or plan.get("bodyPosition") or plan.get("cameraAngle") or ""),
+        "pose": str(plan.get("pose") or ""),
+        "movement": str(plan.get("movement") or ""),
+        "hand_position": str(plan.get("hand_position") or plan.get("handPosition") or ""),
+        "main_focus": str(plan.get("main_focus") or plan.get("mainFocus") or ""),
+        "visible_garments": ensure_list(plan.get("visible_garments") or plan.get("visibleGarments")),
+        "hero_selling_points": ensure_list(plan.get("hero_selling_points") or plan.get("heroSellingPoints") or hero.get("hero_selling_points")),
+        "forbidden_occlusion_zones": ensure_list(plan.get("forbidden_occlusion_zones") or plan.get("forbiddenOcclusionZones") or hero.get("hero_visibility_risks")),
+        "composition_notes": str(plan.get("composition_notes") or plan.get("compositionNotes") or ""),
+        "accessory_instructions": ensure_list(plan.get("accessory_instructions") or plan.get("accessoryInstructions")) or ["生成配饰低存在感，可省略，不遮挡商品。"],
+        "acceptance_criteria": ensure_list(plan.get("acceptance_criteria") or plan.get("acceptanceCriteria")) or ["主推款商品事实清楚。"],
+        "negative_constraints": ensure_list(plan.get("negative_constraints") or plan.get("negativeConstraints")),
+    }
+
+
+def legacy_fallback_shot(index: int, hero: dict[str, Any]) -> dict[str, Any]:
+    roles = ["hero", "core", "detail", "side_motion", "front_fit", "reference"]
+    focuses = ensure_list(hero.get("hero_selling_points")) or ["主推款整体轮廓", "主推款关键细节"]
+    return {
+        "shot_index": index,
+        "shot_role": roles[index - 1],
+        "shot_role_label": roles[index - 1],
+        "framing": "全身或近全身" if index in {1, 4, 5, 6} else "中近景或细节图",
+        "crop_range": "按历史恢复镜头执行",
+        "model_scale": "",
+        "camera_angle": "正面或轻斜正",
+        "body_position": "自然站姿",
+        "pose": "自然、自信、克制",
+        "movement": "",
+        "hand_position": "",
+        "main_focus": focuses[min(index - 1, len(focuses) - 1)],
+        "visible_garments": ["hero"],
+        "hero_selling_points": focuses,
+        "forbidden_occlusion_zones": ensure_list(hero.get("hero_visibility_risks")),
+        "composition_notes": "历史任务恢复镜头，商品优先，构图干净。",
+        "accessory_instructions": ["生成配饰低存在感，可省略，不遮挡商品。"],
+        "acceptance_criteria": ["主推款商品事实清楚。"],
+        "negative_constraints": ["不要文字水印", "不要改款换色"],
+    }
+
+
+def legacy_resolved_accessories(styling_plan: dict[str, Any]) -> list[dict[str, Any]]:
+    selected_key = str(styling_plan.get("selected_outfit_key") or styling_plan.get("selected_outfit_id") or "")
+    selected = {}
+    for item in styling_plan.get("outfit_candidates", []) if isinstance(styling_plan.get("outfit_candidates"), list) else []:
+        if isinstance(item, dict) and str(item.get("outfit_key") or item.get("id") or "") == selected_key:
+            selected = item
+            break
+    accessories = ensure_list(selected.get("generated_accessories") if selected else [])
+    return [
+        {
+            "item_type": "other",
+            "final_direction": str(item)[:180],
+            "source": "styling_plan",
+            "visibility": "low",
+            "applies_to_shots": [],
+            "reason": "来自历史 StylingPlan，AI Director 未重新调整。",
+        }
+        for item in accessories[:8]
+    ]
+
+
+def recovered_legacy_task_status(db: sqlite3.Connection, task_row: sqlite3.Row, preview_id: int) -> str:
+    current_status = str(task_row["status"])
+    if current_status != "FAILED":
+        return current_status
+    result_set_id = task_row["active_result_set_id"]
+    if result_set_id:
+        counts = db.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN status = 'SUCCEEDED' THEN 1 ELSE 0 END) AS succeeded
+            FROM generation_result_images_new
+            WHERE result_set_id = ?
+            """,
+            (result_set_id,),
+        ).fetchone()
+        total = int(counts["total"] or 0)
+        succeeded = int(counts["succeeded"] or 0)
+        if total >= 5 and succeeded >= 5:
+            return "COMPLETED"
+        if succeeded > 0:
+            return "FINAL_PARTIAL"
+    preview = db.execute(
+        "SELECT id FROM generation_previews WHERE id = ? AND status = 'SUCCEEDED' AND preview_asset_id IS NOT NULL",
+        (preview_id,),
+    ).fetchone()
+    return "PREVIEW_READY" if preview else current_status
+
+
+def ensure_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item or "").strip()]
 
 
 def generation_shot_plans_needs_constraint_rebuild(db: sqlite3.Connection) -> bool:

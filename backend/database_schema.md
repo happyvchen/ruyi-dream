@@ -80,5 +80,6 @@ Image-2 阶段写入：
 | `032` | `add_shoot_script_runtime_columns` | 为旧库补齐拍摄剧本、分镜预览和成片复盘所需的运行时列，并将 `generation_shot_plans` 唯一约束迁到 `(shoot_script_id, sort_order)` |
 | `033` | `cleanup_legacy_tables_and_attempt_provider_request_ids` | 确保 attempt provider 请求 ID 列存在，并再次清理 0.1.0 之前的空表残留 |
 | `034` | `drop_prompt_replaced_config_tables` | 删除已由 Prompt 维护替代的品牌资料、拍摄配置和固定标签规则表 |
+| `035` | `recover_legacy_shoot_scripts` | 从已有成功分镜预览/旧版 preview 恢复历史任务缺失的 ShootScript、ShotPlan 关联和 active 指针 |
 
 新库直接创建当前 schema；已有库执行迁移链后只保留 0.1.0 表并追加当前字段。0.1.0 之前的业务表不作为运行时读取路径。
