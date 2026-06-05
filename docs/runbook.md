@@ -125,7 +125,7 @@ Current limits:
 - JPG / PNG / WebP only.
 - Default max size: `APP_MAX_UPLOAD_IMAGE_BYTES=15728640`.
 - Default max pixels: `APP_MAX_UPLOAD_IMAGE_PIXELS=25000000`.
-- Default max garment images per SKU: `APP_MAX_GARMENT_IMAGES_PER_SKU=20`.
+- Default max images per styling garment: `APP_MAX_GARMENT_IMAGES_PER_SKU=20`.
 - Default max head references per model: `APP_MAX_HEAD_REFERENCES_PER_PROFILE=20`.
 
 Recovery:
@@ -134,12 +134,12 @@ Recovery:
 2. If limits need adjustment, update `.env` and restart backend.
 3. If DB or storage errors occur during upload, backend should clean up newly written objects; check logs if orphan cleanup failed.
 
-## Gemini Planning Fails
+## Gemini Workflow Fails
 
 Symptoms:
 
-- Shot plan remains `FAILED`.
-- UI says default plan generation failed.
+- AI Stylist, tagging, or shoot script step remains `FAILED`.
+- UI says AI intelligent styling, tagging, or shoot script generation failed.
 - `/api/health` shows `geminiConfigured=false`.
 
 Checks:
@@ -152,15 +152,15 @@ Recovery:
 
 1. Confirm `GEMINI_API_KEY` is present in `.env`.
 2. Confirm outbound network access to Gemini.
-3. Retry plan creation from the UI.
-4. If repeated, preserve the SKU id and backend logs for engineering.
+3. Retry the failed step from the UI.
+4. If repeated, preserve the affected generation task id or styling garment id and backend logs for engineering.
 
 ## Image-2 Generation Fails
 
 Symptoms:
 
 - Preview or final image status becomes `FAILED`.
-- AI Studio tasks stay in active status for too long.
+- AI photography studio tasks stay in active status for too long.
 - `/api/health` shows `imageProviderConfigured=false`.
 
 Checks:
@@ -276,7 +276,7 @@ Restore both from the same point in time. Restoring only one side can produce br
 When escalating, include:
 
 - Incident severity and start time.
-- Exact SKU id, shot plan id, generation run id, or image id.
+- Exact generation task id, styling garment id, shoot script id, preview id, result set id, or result image id.
 - The last 300 backend log lines.
 - The last 200 RustFS log lines if media is involved.
 - Current `.env` with secrets redacted.

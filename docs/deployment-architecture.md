@@ -28,7 +28,7 @@ Browser
 | Compose service | 容器名 | 镜像来源 | 职责 | 对外端口 |
 |---|---|---|---|---|
 | `frontend` | `ruyi-dream-frontend` | `frontend/Dockerfile` | 构建 React/Vite 静态资源，用非 root Nginx 提供 SPA fallback | `5173 -> 8080` |
-| `backend` | `ruyi-dream-backend` | `backend/Dockerfile` | FastAPI API、SQLite、后台 planner/generation poller | `8000 -> 8000` |
+| `backend` | `ruyi-dream-backend` | `backend/Dockerfile` | FastAPI API、SQLite、后台生成状态轮询 | `8000 -> 8000` |
 | `rustfs` | `ruyi-dream-rustfs` | `rustfs/rustfs` | 可选本机 S3 兼容对象存储，保存素材、生成结果和导出 ZIP；默认通过 `COMPOSE_FILE=docker-compose.yml:docker-compose.rustfs.yml` 启用，使用外部 S3 兼容服务时不启用 | `9000 -> 9000`, `9001 -> 9001` |
 
 ## 数据持久化
@@ -112,8 +112,7 @@ APP_S3_FORCE_PATH_STYLE=false
 1. 读取环境变量。
 2. 连接 S3 兼容对象存储并确保 bucket 存在。
 3. 初始化 SQLite schema 和默认模特数据。
-4. 启动 generation poller。
-5. 启动 planner poller。
+4. 启动生成状态轮询。
 
 如果本机 RustFS 未完全 ready，后端可能短暂启动失败，Compose 会按 `restart: unless-stopped` 自动重启。使用外部 S3 兼容服务时，应确认 endpoint、bucket、region、addressing style 和凭证均已生效。运维侧应以 `docker compose ps` 和 `/api/health` 为最终状态判断。
 
@@ -132,4 +131,4 @@ APP_S3_FORCE_PATH_STYLE=false
 - `APP_S3_BUCKET` 必须符合 S3 bucket 命名规则：3-63 个字符，只用小写字母、数字、短横线和点号；`APP_STORAGE_BUCKET` 仅作为旧配置别名保留。
 - 对公网开放时必须接入 HTTPS 反向代理，并把 public URL 改为 HTTPS。
 - 当前 SQLite 适合 0.1.0 单机部署；多人高并发或多副本后端需要迁移到外部数据库。
-- 当前 planner/generation poller 运行在后端进程内；多后端副本会造成重复扫描风险，扩展前应拆成单独 worker 或加分布式锁。
+- 当前生成状态轮询运行在后端进程内；多后端副本会造成重复扫描风险，扩展前应拆成单独 worker 或加分布式锁。

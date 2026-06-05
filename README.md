@@ -197,7 +197,7 @@ RustFS/MinIO 常用 `APP_S3_FORCE_PATH_STYLE=true`；阿里 OSS 等要求 virtua
 - [生成流程](design/01_generation_flow/generation_flow.md)
 - [Image-2 输入职责拆分与提示词策略](design/01_generation_flow/image2_input_strategy.md)
 - [生成要素职责拆分总表](design/01_generation_flow/generation_responsibility_matrix.md)
-- [品类组图规则](design/02_brand_and_assets/category_shot_rules.md)
+- [品类图位规则](design/02_brand_and_assets/category_shot_rules.md)
 - [素材与参数规范](design/02_brand_and_assets/assets_and_parameters.md)
 - [普通用户视角 UI/UX 设计](design/03_ux_guide/user_uiux.md)
 - [技术路线与生产实操](design/04_implementation_guide/technical_route_and_operations.md)
