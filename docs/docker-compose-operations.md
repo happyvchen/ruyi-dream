@@ -9,6 +9,72 @@
 - 单客户、单工作空间、单后端进程。
 - 暂不覆盖 Kubernetes、多副本后端或外部数据库。对象存储默认随 Compose 启动 RustFS；也支持切换到外部 S3 兼容服务。
 
+## 服务拓扑
+
+```text
+Browser
+  -> frontend: Nginx static SPA, port 5173
+  -> backend: FastAPI API, port 8000
+       -> SQLite metadata, deployment/app-data/backend/app.sqlite3
+       -> S3 compatible object storage, RustFS container endpoint http://rustfs:9000 when full Compose is enabled
+       -> Gemini AI Stylist / tagging / shoot script
+       -> Image-2 provider, default toapis, optional fal
+  -> S3 compatible public presigned URL, default RustFS port 9000
+```
+
+| Compose service | 容器名 | 职责 | 对外端口 |
+|---|---|---|---|
+| `frontend` | `ruyi-dream-frontend` | 构建 React/Vite 静态资源，用非 root Nginx 提供 SPA fallback | `5173 -> 8080` |
+| `backend` | `ruyi-dream-backend` | FastAPI API、SQLite、后台生成状态轮询 | `8000 -> 8000` |
+| `rustfs` | `ruyi-dream-rustfs` | 可选本机 S3 兼容对象存储，保存素材、生成结果和导出 ZIP；默认通过 `COMPOSE_FILE=docker-compose.yml:docker-compose.rustfs.yml` 启用 | `9000 -> 9000`, `9001 -> 9001` |
+
+## 数据持久化
+
+| 宿主机路径 | 容器路径 | 内容 | 备份等级 |
+|---|---|---|---|
+| `deployment/app-data/backend` | `/app/data` | SQLite、应用事件日志 | 必须备份 |
+| `deployment/rustfs/data` | `/data` | 原始素材、模特图、生成图、导出 ZIP | 必须备份 |
+| `deployment/rustfs/config` | `/etc/rustfs` | RustFS 配置和运维备注 | 建议备份 |
+| `deployment/rustfs/logs` | `/var/log/rustfs` | RustFS 文件日志 | 可按需保留 |
+
+应用元数据和对象数据必须一起备份。同一个时间点的 `app.sqlite3` 和对象存储 bucket 应保持一致，否则可能出现数据库记录存在但对象丢失，或对象存在但 UI 不可见。使用外部 S3 兼容服务时，按云厂商 bucket 备份、版本控制或跨区域复制策略执行。
+
+## URL 与对象存储
+
+后端访问对象存储使用 `APP_S3_ENDPOINT_URL`。根目录 `.env` 默认写宿主机可达地址，供本地裸跑后端使用：
+
+```env
+APP_S3_ENDPOINT_URL=http://127.0.0.1:9000
+```
+
+完整 Compose 部署启用 `docker-compose.rustfs.yml` 时，后端容器会使用 Compose 内部地址：
+
+```env
+APP_S3_ENDPOINT_URL=http://rustfs:9000
+```
+
+浏览器访问图片预签名 URL 使用外部可达地址：
+
+```env
+APP_S3_PUBLIC_ENDPOINT_URL=${PUBLIC_S3_URL}
+```
+
+前端静态包在构建时写入 API 地址：
+
+```env
+VITE_API_BASE_URL=${PUBLIC_BACKEND_URL}
+```
+
+因此生产或内网部署时，`.env` 中至少要确认：
+
+```env
+PUBLIC_BACKEND_URL=http://<server-ip-or-domain>:8000
+PUBLIC_S3_URL=http://<server-ip-or-domain>:9000
+BACKEND_CORS_ORIGINS=http://<server-ip-or-domain>:5173
+```
+
+如果前端、后端、RustFS 通过反向代理统一到一个域名，仍然保持这些 public URL 与浏览器实际访问地址一致。
+
 ## 防火墙和安全组
 
 需要放通的端口取决于 `.env` 中的端口配置。默认：
@@ -49,10 +115,10 @@ APP_API_ACCESS_TOKEN=<optional-ops-script-token>
 PUBLIC_BACKEND_URL=http://<server-ip-or-domain>:8000
 PUBLIC_S3_URL=http://<server-ip-or-domain>:9000
 BACKEND_CORS_ORIGINS=http://<server-ip-or-domain>:5173
-    GEMINI_API_KEY=<required-for-ai-stylist-and-tagging>
-    GPT_IMAGE2_PROVIDER=toapis
-    TOAPIS_API_KEY=<required-for-default-real-image-generation>
-    FAL_KEY=<required-only-when-GPT_IMAGE2_PROVIDER=fal>
+GEMINI_API_KEY=<required-for-ai-stylist-and-tagging>
+GPT_IMAGE2_PROVIDER=toapis
+TOAPIS_API_KEY=<required-for-default-real-image-generation>
+FAL_KEY=<required-only-when-GPT_IMAGE2_PROVIDER=fal>
 ```
 
 根目录 `.env` 是 Compose、后端裸跑和本地联调共同使用的主配置源。不要再维护一份 `backend/.env`；如需后端本机临时覆盖，使用不提交 Git 的 `backend/.env.local`。

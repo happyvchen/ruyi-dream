@@ -141,7 +141,6 @@ RustFS/MinIO 常用 `APP_S3_FORCE_PATH_STYLE=true`；阿里 OSS 等要求 virtua
 
 部署设计、日常运维、备份恢复见：
 
-- [Docker Compose 部署设计](docs/deployment-architecture.md)
 - [Docker Compose 部署与管理](docs/docker-compose-operations.md)
 - [生产故障 Runbook](docs/runbook.md)
 - [本地开发说明](docs/local-development.md)
@@ -183,6 +182,11 @@ RustFS/MinIO 常用 `APP_S3_FORCE_PATH_STYLE=true`；阿里 OSS 等要求 virtua
 ├── backend/
 ├── deployment/
 ├── docs/
+│   ├── CLAUDE.md
+│   ├── user-guide.md
+│   ├── local-development.md
+│   ├── docker-compose-operations.md
+│   ├── runbook.md
 │   └── implementation-samples/
 └── docker-compose.yml
 ```
@@ -192,6 +196,7 @@ RustFS/MinIO 常用 `APP_S3_FORCE_PATH_STYLE=true`；阿里 OSS 等要求 virtua
 ## 文档目录
 
 - [设计总索引](design/CLAUDE.md)
+- [用户使用教程](docs/user-guide.md)
 - [产品总览](design/00_product_overview/product_overview.md)
 - [0.1.0 产品需求](design/00_product_overview/product_requirements.md)
 - [生成流程](design/01_generation_flow/generation_flow.md)
@@ -201,7 +206,6 @@ RustFS/MinIO 常用 `APP_S3_FORCE_PATH_STYLE=true`；阿里 OSS 等要求 virtua
 - [素材与参数规范](design/02_brand_and_assets/assets_and_parameters.md)
 - [普通用户视角 UI/UX 设计](design/03_ux_guide/user_uiux.md)
 - [技术路线与生产实操](design/04_implementation_guide/technical_route_and_operations.md)
-- [Docker Compose 部署设计](docs/deployment-architecture.md)
 - [本地开发说明](docs/local-development.md)
 - [Docker Compose 部署与管理](docs/docker-compose-operations.md)
 - [生产故障 Runbook](docs/runbook.md)
