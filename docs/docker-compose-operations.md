@@ -115,7 +115,8 @@ APP_API_ACCESS_TOKEN=<optional-ops-script-token>
 PUBLIC_BACKEND_URL=http://<server-ip-or-domain>:8000
 PUBLIC_S3_URL=http://<server-ip-or-domain>:9000
 BACKEND_CORS_ORIGINS=http://<server-ip-or-domain>:5173
-GEMINI_API_KEY=<required-for-ai-stylist-and-tagging>
+GEMINI_PROVIDER=toapis
+GEMINI_API_KEY=<required-only-when-GEMINI_PROVIDER=direct>
 GPT_IMAGE2_PROVIDER=toapis
 TOAPIS_API_KEY=<required-for-default-real-image-generation>
 FAL_KEY=<required-only-when-GPT_IMAGE2_PROVIDER=fal>
@@ -356,7 +357,7 @@ docker compose logs --tail=200 rustfs
 - `RUSTFS_SERVER_DOMAINS` 被误用于 path-style 部署，后端创建 bucket 时报 `InvalidBucketName`。
 - 默认 provider 为 `toapis` 时，`TOAPIS_API_KEY` 未配置会导致真实生图任务失败。
 - provider 切到 `fal` 时，`FAL_KEY` 未配置会导致真实生图任务失败。
-- `GEMINI_API_KEY` 未配置，AI Stylist 选搭和搭配服装打标会失败。
+- Gemini 通道未配置（`toapis` 通道缺 `TOAPIS_API_KEY`，或 `direct` 通道缺 `GEMINI_API_KEY`），AI Stylist 选搭和搭配服装打标会失败。
 - `APP_ENV=production` 但没有设置固定账号密码/hash，且没有显式设置 `APP_TRUST_REVERSE_PROXY_AUTH=true`。
 - 启用内置门禁但没有设置 `APP_SESSION_SECRET`。
 

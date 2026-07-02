@@ -150,8 +150,8 @@ docker compose logs --tail=200 backend | grep -i gemini
 
 Recovery:
 
-1. Confirm `GEMINI_API_KEY` is present in `.env`.
-2. Confirm outbound network access to Gemini.
+1. Check `GEMINI_PROVIDER` in `.env`: `toapis` requires `TOAPIS_API_KEY`; `direct` requires `GEMINI_API_KEY`.
+2. Confirm outbound network access to the active channel (toapis.com for `toapis`, googleapis.com for `direct`).
 3. Retry the failed step from the UI.
 4. If repeated, preserve the affected generation task id or styling garment id and backend logs for engineering.
 

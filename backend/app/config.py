@@ -64,6 +64,11 @@ class Settings:
     trust_reverse_proxy_auth = os.getenv("APP_TRUST_REVERSE_PROXY_AUTH", "false").lower() in {"1", "true", "yes", "on"}
     gemini_api_key = os.getenv("GEMINI_API_KEY", "")
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+    # Gemini 调用通道：direct=google-genai 直连；toapis=ToAPIs OpenAI 兼容中转。
+    gemini_provider = (os.getenv("GEMINI_PROVIDER") or "direct").strip().lower() or "direct"
+    # ToAPIs 通道使用的模型 ID；留空则复用 GEMINI_MODEL。
+    gemini_toapis_model = (os.getenv("GEMINI_TOAPIS_MODEL") or "").strip()
+    gemini_toapis_timeout_seconds = int(os.getenv("GEMINI_TOAPIS_TIMEOUT_SECONDS") or "300")
     image_provider = os.getenv("GPT_IMAGE2_PROVIDER", "toapis").lower()
     gpt_image2_model_id = os.getenv("GPT_IMAGE2_MODEL_ID", "gpt-image-2")
     gpt_image2_api_base_url = os.getenv("GPT_IMAGE2_API_BASE_URL", "https://fal.run/openai/gpt-image-2/edit")
@@ -108,6 +113,10 @@ class Settings:
             raise RuntimeError("GENERATION_SUBMIT_RETRY_LIMIT must be greater than 0.")
         if self.generation_status_retry_limit <= 0:
             raise RuntimeError("GENERATION_STATUS_RETRY_LIMIT must be greater than 0.")
+        if self.gemini_provider not in {"direct", "toapis"}:
+            raise RuntimeError("GEMINI_PROVIDER must be one of: direct, toapis.")
+        if self.gemini_toapis_timeout_seconds <= 0:
+            raise RuntimeError("GEMINI_TOAPIS_TIMEOUT_SECONDS must be greater than 0.")
 
         if self.app_env in {"prod", "production"}:
             self._validate_production_credential("access key", self.s3_access_key_id)
