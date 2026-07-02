@@ -22,9 +22,12 @@ class GeminiProviderTests(unittest.TestCase):
         self._old_env = dict(os.environ)
 
     def tearDown(self) -> None:
+        # 先恢复原始环境,再按恢复后的环境重载模块,避免向同进程后续测试泄漏空值。
         os.environ.clear()
         os.environ.update(self._old_env)
-        self._reload()
+        config = importlib.reload(importlib.import_module("app.config"))
+        config.get_settings.cache_clear()
+        importlib.reload(importlib.import_module("app.gemini_provider"))
 
     def _reload(self, **env: str):
         # 显式置空所有相关变量，防止真实 .env 通过 load_dotenv 泄漏进测试。

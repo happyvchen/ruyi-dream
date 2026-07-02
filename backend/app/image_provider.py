@@ -481,9 +481,10 @@ def post_json(
     timeout: int | None = 300,
     auth_scheme: str = "Key",
     error_label: str = "GPT Image-2 fal 请求失败",
+    attempts: int = 3,
 ) -> dict[str, Any]:
     if auth_scheme == "Bearer":
-        return request_json("POST", url, api_key, timeout, auth_scheme, error_label, payload)
+        return request_json("POST", url, api_key, timeout, auth_scheme, error_label, payload, attempts=attempts)
 
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = Request(
@@ -534,6 +535,7 @@ def request_json(
     auth_scheme: str,
     error_label: str,
     payload: dict[str, Any] | None = None,
+    attempts: int = 3,
 ) -> dict[str, Any]:
     try:
         import requests
@@ -548,6 +550,7 @@ def request_json(
             headers={"Authorization": f"{auth_scheme} {api_key}"},
             json=payload,
             timeout=timeout,
+            attempts=attempts,
         )
     except requests.RequestException as exc:
         raise RuntimeError(f"{error_label}: {exc}") from exc

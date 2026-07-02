@@ -106,6 +106,10 @@ async def _generate_via_google(
         )
     except TypeError:
         # 旧版 SDK 不支持部分 config 字段时退化为无 config 调用。
+        # 仅在没有 system_instruction 时允许降级(只丢 response_mime_type);
+        # 带 system_instruction 的调用绝不能静默丢掉角色设定,必须显式失败。
+        if system_instruction:
+            raise
         response = await client.aio.models.generate_content(
             model=settings.gemini_model, contents=contents
         )
@@ -153,6 +157,7 @@ def _post_toapis_chat(payload: dict[str, Any]) -> dict[str, Any]:
     from .image_provider import post_json, toapis_url
 
     settings = get_settings()
+    # chat completions 非幂等且按 token 计费,读超时重试可能重复扣费,固定单次调用。
     return post_json(
         toapis_url("/v1/chat/completions"),
         payload,
@@ -160,6 +165,7 @@ def _post_toapis_chat(payload: dict[str, Any]) -> dict[str, Any]:
         timeout=settings.gemini_toapis_timeout_seconds,
         auth_scheme="Bearer",
         error_label="Gemini(ToAPIs 通道) 请求失败",
+        attempts=1,
     )
 
 
