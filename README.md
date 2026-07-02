@@ -77,6 +77,7 @@ cp .env.example .env
 关键环境变量：
 
 ```env
+GEMINI_PROVIDER=toapis
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-3-flash-preview
 

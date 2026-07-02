@@ -25,6 +25,14 @@ from pydantic import BaseModel, Field
 
 from .config import get_settings
 from .db import dumps, get_db, init_db, loads, log_event, now_iso
+from .gemini_provider import (
+    effective_gemini_model,
+    generate_gemini_json_text,
+    gemini_channel,
+    gemini_not_configured_message,
+    gemini_request_meta,
+    is_gemini_configured,
+)
 from .image_derivatives import derivative_key, existing_derivative_or_original, generate_image_derivatives
 from .image_provider import ImageProviderError, get_image_provider
 from .object_storage import (
@@ -371,7 +379,8 @@ def health() -> dict[str, Any]:
     return {
         "ok": True,
         "storage": "configured" if settings.s3_access_key_id and settings.s3_secret_access_key else "missing_credentials",
-        "geminiConfigured": bool(settings.gemini_api_key),
+        "geminiConfigured": is_gemini_configured(),
+        "geminiProvider": gemini_channel(),
         "imageProviderConfigured": settings.is_image_provider_configured(),
     }
 
@@ -3966,34 +3975,23 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
     garment = get_styling_garment_by_id(garment_id)
     prompt = build_prompt_tagging_prompt(garment)
     request_snapshot = build_prompt_tagging_request_snapshot(garment, prompt)
-    if not settings.gemini_api_key:
+    if not is_gemini_configured():
+        message = f"{gemini_not_configured_message()}AI 打标不能生成替代标签。"
         attempt_id = create_attempt("styling_garment_tagging", garment_id, "gemini", request_snapshot)
-        finish_attempt(attempt_id, "FAILED", {"error": "gemini_api_key_missing"}, error_message="Gemini API 未配置，AI 打标不能生成替代标签。")
-        raise RuntimeError("Gemini API 未配置，AI 打标不能生成替代标签。")
-    try:
-        from google import genai
-        from google.genai import types
-    except Exception as exc:
-        attempt_id = create_attempt("styling_garment_tagging", garment_id, "gemini", request_snapshot)
-        finish_attempt(attempt_id, "FAILED", {"error": "google_genai_import_failed"}, error_message="google-genai SDK 不可用，AI 打标不能生成替代标签。")
-        raise RuntimeError("google-genai SDK 不可用，AI 打标不能生成替代标签。") from exc
+        finish_attempt(attempt_id, "FAILED", {"error": "gemini_not_configured"}, error_message=message)
+        raise RuntimeError(message)
     attempt_id = create_attempt("styling_garment_tagging", garment_id, "gemini", request_snapshot)
-    contents: list[Any] = [prompt]
+    images: list[dict[str, Any]] = []
     for image in garment.get("images", [])[:6]:
         asset = image.get("asset") or {}
         object_key = asset.get("objectKey")
         if object_key and object_exists(object_key):
-            contents.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
-    client = genai.Client(api_key=settings.gemini_api_key)
+            images.append({"data": get_bytes(object_key), "mime_type": asset.get("mimeType") or "image/png"})
     try:
-        config = types.GenerateContentConfig(response_mime_type="application/json")
-        response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents, config=config)
-    except TypeError:
-        response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents)
+        text = await generate_gemini_json_text(prompt, images)
     except Exception as exc:
         finish_attempt(attempt_id, "FAILED", error_message=str(exc))
         raise
-    text = getattr(response, "text", "") or "{}"
     try:
         raw = parse_lily_tagging_json(text)
     except Exception as exc:
@@ -4007,7 +4005,7 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
 def build_prompt_tagging_request_snapshot(garment: dict[str, Any], prompt: str) -> dict[str, Any]:
     return {
         "schema_version": PROMPT_TAGGING_RESULT_VERSION,
-        "model": settings.gemini_model,
+        **gemini_request_meta(),
         "prompt": prompt,
         "images": [
             {
@@ -4140,7 +4138,7 @@ def build_prompt_tag_meta(
     reasons = list(dict.fromkeys(reasons))
     return {
         "tagger_provider": str(source_meta.get("tagger_provider") or provider),
-        "tagger_model": str(source_meta.get("tagger_model") or ("fallback" if provider == "fallback" else settings.gemini_model)),
+        "tagger_model": str(source_meta.get("tagger_model") or ("fallback" if provider == "fallback" else effective_gemini_model())),
         "result_format": str(source_meta.get("result_format") or "prompt_configured_json"),
         "overall_confidence": confidence if confidence is not None else 0.5,
         "needs_review": bool(reasons),
@@ -4779,33 +4777,26 @@ def build_ai_stylist_context(input_version_id: int) -> tuple[Any, dict[str, Any]
 
 
 async def select_styling_with_gemini(input_row: Any, candidate_snapshot: dict[str, Any], request_snapshot: dict[str, Any], attempt_id: int | None = None) -> dict[str, Any]:
-    if not settings.gemini_api_key:
-        raise RuntimeError("Gemini API 未配置，AI Stylist 不能进入生产选搭。")
-    try:
-        from google import genai
-        from google.genai import types
-    except Exception as exc:
-        raise RuntimeError("google-genai SDK 不可用，AI Stylist 不能进入生产选搭。") from exc
+    if not is_gemini_configured():
+        raise RuntimeError(f"{gemini_not_configured_message()}AI Stylist 不能进入生产选搭。")
     if not request_snapshot.get("prompt"):
         request_snapshot = attach_ai_stylist_prompt_snapshot(request_snapshot, candidate_snapshot)
     if attempt_id:
         update_attempt_request_snapshot(attempt_id, request_snapshot)
     prompt = str(request_snapshot.get("prompt") or "")
-    user_parts: list[Any] = [types.Part.from_text(text=prompt)]
+    images: list[dict[str, Any]] = []
     for item in loads(input_row["image_snapshot_json"], [])[:8]:
         asset = (item.get("asset") or {})
         object_key = asset.get("objectKey")
         if object_key and object_exists(object_key):
-            user_parts.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
-    contents: list[Any] = [types.Content(role="user", parts=user_parts)]
+            images.append({"data": get_bytes(object_key), "mime_type": asset.get("mimeType") or "image/png"})
     try:
-        client = genai.Client(api_key=settings.gemini_api_key)
-        config = types.GenerateContentConfig(
+        text = await generate_gemini_json_text(
+            prompt,
+            images,
             system_instruction=str(request_snapshot.get("systemInstruction") or AI_STYLIST_SYSTEM_INSTRUCTION),
-            response_mime_type="application/json",
         )
-        response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents, config=config)
-        raw = parse_gemini_json_object(getattr(response, "text", "") or "{}")
+        raw = parse_gemini_json_object(text)
     except Exception as exc:
         raise RuntimeError(f"Gemini AI Stylist 调用失败：{exc}") from exc
     styling_plan = normalize_styling_plan(raw, candidate_snapshot)
@@ -4880,7 +4871,7 @@ def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[s
     hero_product_info = loads(row_value(input_row, "hero_product_info_json"), build_hero_product_info_context({}))
     return {
         "schema_version": "ai-stylist-request-v1",
-        "model": settings.gemini_model,
+        **gemini_request_meta(),
         "systemInstruction": AI_STYLIST_SYSTEM_INSTRUCTION,
         "input_version": {
             "id": input_row["id"],
@@ -5556,7 +5547,7 @@ def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_ver
     shoot_script_user_instruction = user_instruction_context or build_stage_user_instruction_context("shoot_script")
     return {
         "schema_version": "shoot-script-request-v1",
-        "model": settings.gemini_model,
+        **gemini_request_meta(),
         "systemInstruction": AI_DIRECTOR_SYSTEM_INSTRUCTION,
         "task_id": task_id,
         "input_version": {
@@ -5597,43 +5588,36 @@ def selected_material_image_refs_for_request(selected_snapshot: list[dict[str, A
 
 
 async def generate_shoot_script_with_gemini(request_snapshot: dict[str, Any]) -> dict[str, Any]:
-    if not settings.gemini_api_key:
-        raise RuntimeError("Gemini API 未配置，拍摄剧本不能进入生产生成。")
-    try:
-        from google import genai
-        from google.genai import types
-    except Exception as exc:
-        raise RuntimeError("google-genai SDK 不可用，拍摄剧本不能进入生产生成。") from exc
+    if not is_gemini_configured():
+        raise RuntimeError(f"{gemini_not_configured_message()}拍摄剧本不能进入生产生成。")
     if not request_snapshot.get("prompt"):
         request_snapshot = attach_shoot_script_prompt_snapshot(request_snapshot)
     prompt = str(request_snapshot.get("prompt") or "")
-    user_parts: list[Any] = [types.Part.from_text(text=prompt)]
+    image_inputs: list[dict[str, Any]] = []
     model_snapshot = ((request_snapshot.get("input_version") or {}).get("model_snapshot") or {}) if isinstance(request_snapshot.get("input_version"), dict) else {}
     for item in (model_snapshot.get("imageInputs") if isinstance(model_snapshot, dict) else []) or []:
         object_key = item.get("objectKey") if isinstance(item, dict) else None
         if object_key and object_exists(object_key):
-            user_parts.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type="image/png"))
+            image_inputs.append({"data": get_bytes(object_key), "mime_type": "image/png"})
     for item in ((request_snapshot.get("input_version") or {}).get("image_snapshot") or [])[:6]:
         asset = item.get("asset") if isinstance(item, dict) else {}
         object_key = asset.get("objectKey") if isinstance(asset, dict) else None
         if object_key and object_exists(object_key):
-            user_parts.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
+            image_inputs.append({"data": get_bytes(object_key), "mime_type": asset.get("mimeType") or "image/png"})
     for material in request_snapshot.get("selected_material_snapshot", [])[:4]:
         images = material.get("images") if isinstance(material, dict) else []
         first = images[0] if images else {}
         asset = first.get("asset") if isinstance(first, dict) else {}
         object_key = asset.get("objectKey") if isinstance(asset, dict) else None
         if object_key and object_exists(object_key):
-            user_parts.append(types.Part.from_bytes(data=get_bytes(object_key), mime_type=asset.get("mimeType") or "image/png"))
-    contents: list[Any] = [types.Content(role="user", parts=user_parts)]
+            image_inputs.append({"data": get_bytes(object_key), "mime_type": asset.get("mimeType") or "image/png"})
     try:
-        client = genai.Client(api_key=settings.gemini_api_key)
-        config = types.GenerateContentConfig(
+        text = await generate_gemini_json_text(
+            prompt,
+            image_inputs,
             system_instruction=str(request_snapshot.get("systemInstruction") or AI_DIRECTOR_SYSTEM_INSTRUCTION),
-            response_mime_type="application/json",
         )
-        response = await client.aio.models.generate_content(model=settings.gemini_model, contents=contents, config=config)
-        return parse_gemini_json_object(getattr(response, "text", "") or "{}")
+        return parse_gemini_json_object(text)
     except Exception as exc:
         raise RuntimeError(f"Gemini 拍摄剧本调用失败：{exc}") from exc
 
