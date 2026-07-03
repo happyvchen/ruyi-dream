@@ -59,9 +59,12 @@ ping 10.16.34.11                  # 延迟基线
 用 MinIO 的 warp(S3 兼容)在服务器本机压:
 
 ```bash
-wget https://github.com/minio/warp/releases/latest/download/warp_Linux_x86_64.tar.gz -O - | tar xz
-./warp mixed --host 127.0.0.1:9000 --access-key <AK> --secret-key <SK> \
+# warp v1.4+ 不再发布二进制,用 docker 镜像跑(--network host 直连本机 9000)
+docker run --rm --network host minio/warp mixed \
+  --host 127.0.0.1:9000 --access-key <AK> --secret-key <SK> \
   --duration 2m --objects 500 --obj.size 512KiB
+# 无 docker 环境可用最后一个二进制版本:
+# wget https://github.com/minio/warp/releases/download/v1.3.1/warp_Linux_x86_64.tar.gz -O - | tar xz
 ```
 
 关注 GET/PUT 吞吐与 p99。单机 NVMe 一般远超业务需要;若 %util 高且吞吐低,检查磁盘类型和 Docker 存储驱动。
