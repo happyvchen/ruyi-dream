@@ -110,7 +110,7 @@ class GeminiProviderTests(unittest.TestCase):
             system_instruction="你是造型师",
         )
         self.assertEqual(payload["model"], "gemini-2.5-flash")
-        self.assertFalse(payload["stream"])
+        self.assertTrue(payload["stream"])  # 必须流式,避免 Cloudflare 100s 超时(HTTP 524)
         self.assertEqual(payload["messages"][0], {"role": "system", "content": "你是造型师"})
         user = payload["messages"][1]
         self.assertEqual(user["role"], "user")
@@ -149,6 +149,33 @@ class GeminiProviderTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             gp.extract_toapis_chat_text({"choices": [{"message": {"content": "   "}}]})
 
+    # ---- SSE 流式组装 ----
+
+    def test_assemble_stream_text_joins_deltas(self) -> None:
+        gp = self._reload(GEMINI_PROVIDER="toapis", TOAPIS_API_KEY="tk")
+        lines = [
+            'data: {"choices":[{"delta":{"role":"assistant"}}]}',
+            'data: {"choices":[{"delta":{"content":"{\\"a\\":"}}]}',
+            "",
+            ": keep-alive comment",
+            'data: {"choices":[{"delta":{"content":" 1}"}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ]
+        self.assertEqual(gp.assemble_toapis_stream_text(lines), '{"a": 1}')
+
+    def test_assemble_stream_text_raises_on_error_chunk(self) -> None:
+        gp = self._reload(GEMINI_PROVIDER="toapis", TOAPIS_API_KEY="tk")
+        lines = ['data: {"error":{"message":"quota exceeded"}}']
+        with self.assertRaises(RuntimeError) as ctx:
+            gp.assemble_toapis_stream_text(lines)
+        self.assertIn("quota exceeded", str(ctx.exception))
+
+    def test_assemble_stream_text_raises_on_empty(self) -> None:
+        gp = self._reload(GEMINI_PROVIDER="toapis", TOAPIS_API_KEY="tk")
+        with self.assertRaises(RuntimeError):
+            gp.assemble_toapis_stream_text(["data: [DONE]"])
+
     # ---- 通道分流 ----
 
     def test_generate_raises_when_not_configured(self) -> None:
@@ -167,7 +194,7 @@ class GeminiProviderTests(unittest.TestCase):
 
         def fake_post(payload):
             captured.update(payload)
-            return {"choices": [{"message": {"content": '```json\n{"ok": 1}\n```'}}]}
+            return '```json\n{"ok": 1}\n```'
 
         with mock.patch.object(gp, "_post_toapis_chat", side_effect=fake_post):
             text = asyncio.run(

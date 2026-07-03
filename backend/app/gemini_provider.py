@@ -121,10 +121,8 @@ def _generate_via_toapis(
     images: list[dict[str, Any]],
     system_instruction: str | None,
 ) -> str:
-    settings = get_settings()
     payload = build_toapis_chat_payload(prompt, images, system_instruction)
-    response_payload = _post_toapis_chat(payload)
-    return extract_toapis_chat_text(response_payload)
+    return _post_toapis_chat(payload)
 
 
 def build_toapis_chat_payload(
@@ -146,27 +144,81 @@ def build_toapis_chat_payload(
     if system_instruction:
         messages.append({"role": "system", "content": system_instruction})
     messages.append({"role": "user", "content": user_content})
+    # 必须流式:ToAPIs 在 Cloudflare 后面,非流式长请求(如拍摄剧本)会在
+    # ~100s 被 CF 以 HTTP 524 掐断,而服务端仍完成生成并计费。
     return {
         "model": effective_gemini_model(),
         "messages": messages,
-        "stream": False,
+        "stream": True,
     }
 
 
-def _post_toapis_chat(payload: dict[str, Any]) -> dict[str, Any]:
-    from .image_provider import post_json, toapis_url
+def _post_toapis_chat(payload: dict[str, Any]) -> str:
+    """流式调用 ToAPIs chat completions,返回组装后的完整文本。
+
+    chat completions 非幂等且按 token 计费,不做重试;timeout 作用于
+    相邻数据块之间的读等待,而不是整个响应时长。
+    """
+    try:
+        import requests
+    except ImportError as exc:
+        raise RuntimeError("requests 导入失败,无法调用 ToAPIs 接口:请安装 requests") from exc
+
+    from .image_provider import toapis_url
 
     settings = get_settings()
-    # chat completions 非幂等且按 token 计费,读超时重试可能重复扣费,固定单次调用。
-    return post_json(
-        toapis_url("/v1/chat/completions"),
-        payload,
-        settings.toapis_api_key,
-        timeout=settings.gemini_toapis_timeout_seconds,
-        auth_scheme="Bearer",
-        error_label="Gemini(ToAPIs 通道) 请求失败",
-        attempts=1,
-    )
+    try:
+        response = requests.post(
+            toapis_url("/v1/chat/completions"),
+            headers={"Authorization": f"Bearer {settings.toapis_api_key}"},
+            json=payload,
+            stream=True,
+            timeout=(15, settings.gemini_toapis_timeout_seconds),
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Gemini(ToAPIs 通道) 请求失败: {exc}") from exc
+    with response:
+        if not response.ok:
+            body = (response.text or "")[:500]
+            raise RuntimeError(f"Gemini(ToAPIs 通道) 请求失败: HTTP {response.status_code} {body}")
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        if "text/event-stream" not in content_type:
+            # 服务端未按流式返回时,退化按普通 JSON 响应解析。
+            try:
+                return extract_toapis_chat_text(response.json())
+            except ValueError as exc:
+                raise RuntimeError(f"Gemini(ToAPIs 通道) 响应不是合法 JSON: {(response.text or '')[:500]}") from exc
+        return assemble_toapis_stream_text(response.iter_lines(decode_unicode=True))
+
+
+def assemble_toapis_stream_text(lines: Any) -> str:
+    """把 OpenAI 兼容 SSE 数据流组装为完整文本。"""
+    parts: list[str] = []
+    for line in lines:
+        if not line or not str(line).startswith("data:"):
+            continue
+        data = str(line)[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(chunk, dict):
+            continue
+        if chunk.get("error"):
+            raise RuntimeError(f"Gemini(ToAPIs 通道) 流式响应错误: {json.dumps(chunk['error'], ensure_ascii=False)[:500]}")
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+        content = delta.get("content") if isinstance(delta, dict) else None
+        if isinstance(content, str):
+            parts.append(content)
+    text = "".join(parts)
+    if not text.strip():
+        raise RuntimeError("Gemini(ToAPIs 通道) 流式响应未包含文本内容。")
+    return text
 
 
 def extract_toapis_chat_text(response_payload: dict[str, Any]) -> str:
