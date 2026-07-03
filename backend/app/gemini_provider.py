@@ -13,9 +13,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
+import re
 from typing import Any
 
 from . import config
+
+
+logger = logging.getLogger(__name__)
 
 
 VALID_GEMINI_PROVIDERS = {"direct", "toapis"}
@@ -179,8 +184,12 @@ def _post_toapis_chat(payload: dict[str, Any]) -> str:
         raise RuntimeError(f"Gemini(ToAPIs 通道) 请求失败: {exc}") from exc
     with response:
         if not response.ok:
-            body = (response.text or "")[:500]
-            raise RuntimeError(f"Gemini(ToAPIs 通道) 请求失败: HTTP {response.status_code} {body}")
+            raw_body = response.text or ""
+            # attempt 记录只存下方摘要;原始错误体在此落日志供排查。
+            logger.warning("ToAPIs 上游错误 HTTP %s: %s", response.status_code, raw_body[:2000])
+            raise RuntimeError(
+                f"Gemini(ToAPIs 通道) 请求失败: {summarize_upstream_http_error(response.status_code, raw_body)}"
+            )
         content_type = (response.headers.get("Content-Type") or "").lower()
         if "text/event-stream" not in content_type:
             # 服务端未按流式返回时,退化按普通 JSON 响应解析。
@@ -189,6 +198,32 @@ def _post_toapis_chat(payload: dict[str, Any]) -> str:
             except ValueError as exc:
                 raise RuntimeError(f"Gemini(ToAPIs 通道) 响应不是合法 JSON: {(response.text or '')[:500]}") from exc
         return assemble_toapis_stream_text(response.iter_lines(decode_unicode=True))
+
+
+def summarize_upstream_http_error(status_code: int, body: str) -> str:
+    """把上游 HTTP 错误(可能是整页 HTML)摘要成用户可读的短消息。
+
+    面向 UI 展示与 attempt 记录;原始错误体由调用方落应用日志供排查。
+    """
+    snippet = (body or "").strip()[:4000]
+    lowered = snippet.lower()
+    if lowered.startswith(("<!doctype", "<html")):
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", snippet, re.I | re.S)
+        text = title_match.group(1) if title_match else re.sub(r"<[^>]+>", " ", snippet)
+        snippet = re.sub(r"\s+", " ", text).strip()
+    snippet = snippet[:200]
+    if status_code in {502, 503, 504, 520, 521, 522, 523, 524}:
+        hint = "上游网关错误或超时,可直接重试;反复出现时请检查 ToAPIs 服务状态。"
+    elif status_code == 429:
+        hint = "请求被限流或额度不足,请稍后重试或检查 ToAPIs 余额。"
+    elif status_code in {401, 403}:
+        hint = "API Key 无效或无权限,请检查 TOAPIS_API_KEY 配置。"
+    else:
+        hint = ""
+    parts = [f"HTTP {status_code}", hint]
+    if snippet:
+        parts.append(f"(响应摘要: {snippet})")
+    return " ".join(part for part in parts if part)
 
 
 def assemble_toapis_stream_text(lines: Any) -> str:

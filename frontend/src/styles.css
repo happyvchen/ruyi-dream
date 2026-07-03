@@ -2667,8 +2667,9 @@ pre {
   border-radius: 8px;
   box-shadow: 0 14px 40px rgba(15,23,42,.18);
 }
-.toast { background: #fff1f2; color: #be123c; border: 1px solid #fecdd3; }
-.busy { background: #eefbff; color: #0369a1; border: 1px solid #bae6fd; }
+.toast { background: #fff1f2; color: #be123c; border: 1px solid #fecdd3; max-width: 420px; word-break: break-word; }
+.busy { background: #eefbff; color: #0369a1; border: 1px solid #bae6fd; flex-wrap: wrap; max-width: 420px; }
+.busy-hint { flex-basis: 100%; font-size: 12px; color: #0284c7; opacity: .85; }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 

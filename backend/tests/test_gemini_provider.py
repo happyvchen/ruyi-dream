@@ -176,6 +176,25 @@ class GeminiProviderTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             gp.assemble_toapis_stream_text(["data: [DONE]"])
 
+    # ---- 上游错误摘要 ----
+
+    def test_summarize_http_error_extracts_html_title(self) -> None:
+        gp = self._reload(GEMINI_PROVIDER="toapis", TOAPIS_API_KEY="tk")
+        html = "<!DOCTYPE html><html><head><title>toapis.com | 524: A timeout occurred</title></head><body>" + "x" * 2000 + "</body></html>"
+        message = gp.summarize_upstream_http_error(524, html)
+        self.assertIn("HTTP 524", message)
+        self.assertIn("上游网关错误或超时", message)
+        self.assertIn("524: A timeout occurred", message)
+        self.assertNotIn("<", message)
+        self.assertLess(len(message), 400)
+
+    def test_summarize_http_error_plain_body_truncated(self) -> None:
+        gp = self._reload(GEMINI_PROVIDER="toapis", TOAPIS_API_KEY="tk")
+        message = gp.summarize_upstream_http_error(429, "quota exceeded " * 50)
+        self.assertIn("HTTP 429", message)
+        self.assertIn("限流或额度不足", message)
+        self.assertLess(len(message), 400)
+
     # ---- 通道分流 ----
 
     def test_generate_raises_when_not_configured(self) -> None:

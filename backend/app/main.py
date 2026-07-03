@@ -62,6 +62,8 @@ PROMPT_PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-zA-Z0-9_.-]+)\s*}}")
 AI_STYLING_PROMPT_CONFIG_KEY = "assembly.ai_styling"
 SHOOT_SCRIPT_PROMPT_CONFIG_KEY = "assembly.shoot_script"
 AUTO_RUN_TARGET_FINAL = "FINAL"
+# /api/media 重定向的浏览器缓存时长:必须显著小于 presign 有效期,避免缓存过期签名。
+MEDIA_REDIRECT_CACHE_SECONDS = max(0, min(300, settings.s3_presign_expires_seconds - 120))
 MAX_USER_REQUIREMENT_CHARS = 800
 MAX_USER_INPUT_CHARS = 800
 
@@ -3446,11 +3448,15 @@ def get_media(key: str = Query(...), variant: str = Query("original")) -> Redire
     url = presigned_get_url(target_key)
     if not url:
         raise HTTPException(status_code=404, detail="图片不存在")
+    # 302 + 短时私有缓存:5 分钟内重定向目标(presigned URL)保持稳定,
+    # 浏览器才能对最终图片做缓存,避免每次进页面全量回源。
+    # max-age 必须小于 presign 有效期(APP_S3_PRESIGN_EXPIRES_SECONDS,默认 900s)。
+    # 部分浏览器不缓存 307,故使用 302。对象按 objectKey 不可变,无脏缓存风险。
     return RedirectResponse(
         url,
+        status_code=302,
         headers={
-            "Cache-Control": "private, no-store, max-age=0",
-            "Pragma": "no-cache",
+            "Cache-Control": f"private, max-age={MEDIA_REDIRECT_CACHE_SECONDS}",
         },
     )
 

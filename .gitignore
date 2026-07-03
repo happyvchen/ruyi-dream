@@ -26,3 +26,8 @@ deployment/rustfs/config/*
 deployment/rustfs/certs/*
 !deployment/rustfs/certs/.gitkeep
 .DS_Store
+
+# 各环境配置副本与本地备份(可能含密钥/数据),一律不入库
+.env.*
+!.env.example
+backup-*.tgz

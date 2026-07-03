@@ -316,8 +316,8 @@ export function App() {
         </div>
       </aside>
       <main className="workspace">
-        {error && <div className="toast">{error}</div>}
-        {busy && <div className="busy"><Loader2 size={16} className="spin" />{busy}</div>}
+        {error && <div className="toast">{error.length > 300 ? `${error.slice(0, 300)}…` : error}</div>}
+        {busy && <BusyPill label={busy} />}
         {page === 'studio' && <StudioPage task={task} setTask={setTask} records={records} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
         {page === 'library' && <LibraryPage garments={garments} run={run} />}
         {page === 'model' && <ModelPage models={models} />}
@@ -365,6 +365,33 @@ function LoginPage({ notice, onAuthed }: { notice?: string; onAuthed: (session: 
         {error && <div className="form-error">{error}</div>}
         <button className="primary wide" disabled={busy}>{busy ? <Loader2 className="spin" size={16} /> : <Shield size={16} />} 登录</button>
       </form>
+    </div>
+  )
+}
+
+const LONG_AI_OPERATION_PATTERN = /选搭|智能选择|拍摄剧本|打标|分镜|成片|预览/
+
+function formatElapsedSeconds(totalSeconds: number): string {
+  if (totalSeconds < 60) return `${totalSeconds} 秒`
+  return `${Math.floor(totalSeconds / 60)} 分 ${totalSeconds % 60} 秒`
+}
+
+function BusyPill({ label }: { label: string }) {
+  const [elapsed, setElapsed] = useState(0)
+  useEffect(() => {
+    setElapsed(0)
+    const timer = window.setInterval(() => setElapsed((value) => value + 1), 1000)
+    return () => window.clearInterval(timer)
+  }, [label])
+  const isLongAIOperation = LONG_AI_OPERATION_PATTERN.test(label)
+  return (
+    <div className="busy">
+      <Loader2 size={16} className="spin" />
+      <span>
+        {label}
+        {elapsed >= 3 ? `(已等待 ${formatElapsedSeconds(elapsed)})` : ''}
+      </span>
+      {isLongAIOperation && elapsed >= 5 && <span className="busy-hint">AI 生成通常需要 1-3 分钟,请保持页面打开</span>}
     </div>
   )
 }
