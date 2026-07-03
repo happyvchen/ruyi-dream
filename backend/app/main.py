@@ -4452,16 +4452,25 @@ def parse_gemini_json_object(text: str) -> dict[str, Any]:
     try:
         parsed = loads(json_text, {})
     except json.JSONDecodeError as strict_error:
+        # OpenAI 兼容通道(ToAPIs)没有原生 JSON 模式,模型手写 JSON 的字符串值内
+        # 可能包含未转义的换行等控制字符;strict=False 允许这类字符。
+        try:
+            parsed = json.loads(json_text, strict=False)
+        except json.JSONDecodeError:
+            parsed = None
+        else:
+            if isinstance(parsed, dict):
+                return parsed
         relaxed_json_text = repair_jsonish_model_text(json_text)
         if relaxed_json_text != json_text:
             try:
-                parsed = loads(relaxed_json_text, {})
+                parsed = json.loads(relaxed_json_text, strict=False)
             except json.JSONDecodeError:
                 parsed = None
             else:
                 if isinstance(parsed, dict):
                     return parsed
-        decoder = json.JSONDecoder()
+        decoder = json.JSONDecoder(strict=False)
         try:
             parsed, end_index = decoder.raw_decode(relaxed_json_text if relaxed_json_text != json_text else json_text)
         except json.JSONDecodeError:

@@ -54,6 +54,15 @@ class BackendCurrentFlowTests(unittest.TestCase):
     def test_legacy_planner_module_is_removed(self) -> None:
         self.assertFalse((BACKEND_DIR / "app" / "planner.py").exists())
 
+    def test_parse_gemini_json_object_accepts_control_characters_in_strings(self) -> None:
+        # ToAPIs OpenAI 兼容通道无原生 JSON 模式,模型输出的字符串值可能含未转义换行。
+        main = importlib.import_module("app.main")
+
+        text = '```json\n{\n  "镜头": "全身",\n  "备注": "第一行\n第二行"\n}\n```'
+        parsed = main.parse_gemini_json_object(text)
+        self.assertEqual(parsed["镜头"], "全身")
+        self.assertEqual(parsed["备注"], "第一行\n第二行")
+
     def test_validate_styling_plan_rejects_empty_production_model_output(self) -> None:
         main = importlib.import_module("app.main")
 
