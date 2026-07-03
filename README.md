@@ -58,7 +58,7 @@ README 面向人类快速了解项目；agent 的权威入口始终是 `AGENTS.m
 本项目支持两种本地运行方式：
 
 - 日常开发：RustFS 用 Docker Compose 启动，前端和后端本机裸跑，见 [本地开发说明](docs/local-development.md)。
-- 完整部署模拟：前端、后端、RustFS 全部由 Docker Compose 管理，见 [Docker Compose 部署与管理](docs/docker-compose-operations.md)。
+- 完整部署模拟：前端、后端、RustFS 全部由 Docker Compose 管理，见 [部署手册](docs/deployment.md)。
 
 配置采用单一主配置源：
 
@@ -142,8 +142,7 @@ RustFS/MinIO 常用 `APP_S3_FORCE_PATH_STYLE=true`；阿里 OSS 等要求 virtua
 
 部署设计、日常运维、备份恢复见：
 
-- [Docker Compose 部署与管理](docs/docker-compose-operations.md)
-- [生产故障 Runbook](docs/runbook.md)
+- [部署手册](docs/deployment.md)
 - [本地开发说明](docs/local-development.md)
 
 ## 前端路由
@@ -186,8 +185,8 @@ RustFS/MinIO 常用 `APP_S3_FORCE_PATH_STYLE=true`；阿里 OSS 等要求 virtua
 │   ├── CLAUDE.md
 │   ├── user-guide.md
 │   ├── local-development.md
-│   ├── docker-compose-operations.md
-│   ├── runbook.md
+│   ├── deployment.md
+│   ├── loadtest.md
 │   └── implementation-samples/
 └── docker-compose.yml
 ```
@@ -208,8 +207,8 @@ RustFS/MinIO 常用 `APP_S3_FORCE_PATH_STYLE=true`；阿里 OSS 等要求 virtua
 - [普通用户视角 UI/UX 设计](design/03_ux_guide/user_uiux.md)
 - [技术路线与生产实操](design/04_implementation_guide/technical_route_and_operations.md)
 - [本地开发说明](docs/local-development.md)
-- [Docker Compose 部署与管理](docs/docker-compose-operations.md)
-- [生产故障 Runbook](docs/runbook.md)
+- [部署手册](docs/deployment.md)
+- [压测与体验评估](docs/loadtest.md)
 - [实施样例](docs/implementation-samples/README.md)
 - [后端领域模型](backend/domain_model.md)
 - [后端数据库结构](backend/database_schema.md)

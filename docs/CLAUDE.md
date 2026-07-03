@@ -10,8 +10,8 @@
 |---|---|---|
 | `user-guide.md` | 普通 user 用户视角的 Ruyi-Dream 使用教程：AI 摄影棚、搭配服装库、数字模特、生成记录、重试和版本限制 | 编写用户培训材料、客服说明、演示脚本，或确认普通用户操作口径时 |
 | `local-development.md` | 本地开发环境配置和运行说明 | 本地开发、启动前后端和 RustFS 时 |
-| `docker-compose-operations.md` | Docker Compose 部署架构、首次部署、日常管理、备份恢复和故障排查 | 使用 Compose 部署、更新、查看服务状态，或确认单机部署边界时 |
-| `runbook.md` | 生产故障排查 Runbook | 处理线上故障、排查服务状态和恢复流程时 |
+| `deployment.md` | 部署手册:首次部署、数据迁移、日常运维、备份恢复、故障排查、安全要点 | 部署、迁移、升级、处理线上故障时 |
+| `loadtest.md` | 单机部署压测与体验评估 Runbook,配套 `scripts/loadtest/` k6 脚本 | 评估网络/存储/并发瓶颈、执行压测或分析用户体验问题时 |
 | `implementation-samples/README.md` | 实施样例索引 | 查看 Prompt 和实现样例时 |
 
 ## 本地规则 (Local Rules)
