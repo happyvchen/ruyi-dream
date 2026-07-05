@@ -126,6 +126,15 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(len(payload["messages"]), 1)
         self.assertEqual(payload["messages"][0]["role"], "user")
 
+    def test_build_toapis_chat_payload_requests_usage_in_stream(self) -> None:
+        # include_usage 用于截断检测与失败诊断;max_tokens/response_format 实测被
+        # ToAPIs 忽略,不应出现在 payload 中制造虚假安全感。
+        gp = self._reload(GEMINI_PROVIDER="toapis", TOAPIS_API_KEY="tk")
+        payload = gp.build_toapis_chat_payload("hi", [], None)
+        self.assertEqual(payload["stream_options"], {"include_usage": True})
+        self.assertNotIn("max_tokens", payload)
+        self.assertNotIn("response_format", payload)
+
     # ---- ToAPIs 响应解析 ----
 
     def test_extract_text_from_string_content(self) -> None:
@@ -175,6 +184,60 @@ class GeminiProviderTests(unittest.TestCase):
         gp = self._reload(GEMINI_PROVIDER="toapis", TOAPIS_API_KEY="tk")
         with self.assertRaises(RuntimeError):
             gp.assemble_toapis_stream_text(["data: [DONE]"])
+
+    def test_assemble_stream_text_tolerates_usage_only_chunk(self) -> None:
+        # include_usage 时最后一个数据块 choices 为空、只带 usage,不能影响正文组装。
+        gp = self._reload(GEMINI_PROVIDER="toapis", TOAPIS_API_KEY="tk")
+        lines = [
+            'data: {"choices":[{"delta":{"content":"{\\"a\\": 1}"}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            'data: {"choices":[],"usage":{"completion_tokens":3,"prompt_tokens":7}}',
+            "data: [DONE]",
+        ]
+        self.assertEqual(gp.assemble_toapis_stream_text(lines), '{"a": 1}')
+
+    def test_assemble_stream_text_raises_explicit_error_on_length_truncation(self) -> None:
+        # finish_reason=length 意味着正文被输出上限截断,必须显式失败,
+        # 不能把不完整文本交给 JSON 解析产生费解的语法错误。
+        gp = self._reload(GEMINI_PROVIDER="toapis", TOAPIS_API_KEY="tk")
+        lines = [
+            'data: {"choices":[{"delta":{"reasoning_content":"想一想"}}]}',
+            'data: {"choices":[{"delta":{"content":"{"}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+            'data: {"choices":[],"usage":{"completion_tokens":3698}}',
+            "data: [DONE]",
+        ]
+        with self.assertRaises(RuntimeError) as ctx:
+            gp.assemble_toapis_stream_text(lines)
+        message = str(ctx.exception)
+        self.assertIn("finish_reason=length", message)
+        self.assertIn("3698", message)
+
+    def test_iter_sse_lines_survives_utf8_bytes_on_unicode_line_boundaries(self) -> None:
+        # 根因回归(2026-07-05)：中文 UTF-8 续字节命中 0x85(NEL) 等 Unicode 行界时,
+        # iter_lines(decode_unicode=True)+ISO-8859-1 回退会把 data: 行打碎;
+        # iter_sse_lines 必须按 b"\n" 切行并整行 UTF-8 解码,内容一字不差。
+        import io
+        import json as jsonlib
+
+        import requests
+        import urllib3
+
+        gp = self._reload(GEMINI_PROVIDER="toapis", TOAPIS_API_KEY="tk")
+        # "展" 的 UTF-8 编码为 e5 b1 95,含 0x95;样本中多字覆盖 0x85 等行界字节。
+        deltas = ['{"summary": "展现轻松高级', '感，强调腰线利落。"}']
+        body = b""
+        for delta in deltas:
+            chunk = {"choices": [{"delta": {"content": delta}}]}
+            body += b"data: " + jsonlib.dumps(chunk, ensure_ascii=False).encode("utf-8") + b"\r\n\r\n"
+        body += b"data: [DONE]\n"
+        response = requests.Response()
+        response.status_code = 200
+        response.headers["Content-Type"] = "text/event-stream"  # 无 charset,复现 ISO-8859-1 回退条件
+        response.raw = urllib3.HTTPResponse(body=io.BytesIO(body), preload_content=False)
+
+        text = gp.assemble_toapis_stream_text(gp.iter_sse_lines(response))
+        self.assertEqual(text, "".join(deltas))
 
     # ---- 上游错误摘要 ----
 

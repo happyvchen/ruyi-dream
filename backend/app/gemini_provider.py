@@ -151,10 +151,14 @@ def build_toapis_chat_payload(
     messages.append({"role": "user", "content": user_content})
     # 必须流式:ToAPIs 在 Cloudflare 后面,非流式长请求(如拍摄剧本)会在
     # ~100s 被 CF 以 HTTP 524 掐断,而服务端仍完成生成并计费。
+    # stream_options.include_usage: 让最后一个数据块携带 usage(含
+    # reasoning_tokens 明细),用于截断检测和失败诊断(2026-07-03 实测可用;
+    # 注意 max_tokens/response_format 实测被 ToAPIs 忽略,不要依赖)。
     return {
         "model": effective_gemini_model(),
         "messages": messages,
         "stream": True,
+        "stream_options": {"include_usage": True},
     }
 
 
@@ -197,7 +201,26 @@ def _post_toapis_chat(payload: dict[str, Any]) -> str:
                 return extract_toapis_chat_text(response.json())
             except ValueError as exc:
                 raise RuntimeError(f"Gemini(ToAPIs 通道) 响应不是合法 JSON: {(response.text or '')[:500]}") from exc
-        return assemble_toapis_stream_text(response.iter_lines(decode_unicode=True))
+        return assemble_toapis_stream_text(iter_sse_lines(response))
+
+
+def iter_sse_lines(response: Any) -> Any:
+    """按 SSE 规范把响应体切成 UTF-8 文本行。
+
+    根因说明(2026-07-05 线上事故)：SSE 规范(WHATWG)强制 UTF-8，但 ToAPIs 的
+    Content-Type: text/event-stream 不带 charset，requests 按 RFC2616 遗留规则
+    回退 ISO-8859-1；iter_lines(decode_unicode=True) 先把 UTF-8 字节流按单字节
+    解成乱码，再用 str.splitlines() 切行——而中文 UTF-8 的续字节会频繁命中
+    0x85(NEL)、0x0b、0x0c 等 Unicode 行界，把 "data: {...}" 行打碎成非法 JSON
+    碎片被静默丢弃，导致组装文本结构性缺损、解析必败且形态随机。
+    因此必须：只按 b"\\n" 切行(UTF-8 多字节序列不含 0x0A，行界安全)，
+    整行显式 UTF-8 解码。
+    """
+    for raw in response.iter_lines(delimiter=b"\n"):
+        if isinstance(raw, bytes):
+            yield raw.decode("utf-8", errors="replace").rstrip("\r")
+        elif raw is not None:
+            yield str(raw).rstrip("\r")
 
 
 def summarize_upstream_http_error(status_code: int, body: str) -> str:
@@ -227,8 +250,17 @@ def summarize_upstream_http_error(status_code: int, body: str) -> str:
 
 
 def assemble_toapis_stream_text(lines: Any) -> str:
-    """把 OpenAI 兼容 SSE 数据流组装为完整文本。"""
+    """把 OpenAI 兼容 SSE 数据流组装为完整文本。
+
+    同时捕获 finish_reason 和 usage：finish_reason=length 说明正文被输出上限
+    截断,任何 JSON 修复都救不了,必须显式失败而不是让调用方看到一个费解的
+    JSON 语法错误(2026-07-03 排障结论)。
+    """
     parts: list[str] = []
+    finish_reason: str | None = None
+    usage: dict[str, Any] = {}
+    reasoning_chars = 0
+    dropped_data_lines = 0
     for line in lines:
         if not line or not str(line).startswith("data:"):
             continue
@@ -238,21 +270,47 @@ def assemble_toapis_stream_text(lines: Any) -> str:
         try:
             chunk = json.loads(data)
         except json.JSONDecodeError:
+            # data: 行不是合法 JSON 说明流被腐蚀(本次事故正因静默丢弃而难查),
+            # 记录数量并告警,空文本错误里也会带上。
+            dropped_data_lines += 1
             continue
         if not isinstance(chunk, dict):
             continue
         if chunk.get("error"):
             raise RuntimeError(f"Gemini(ToAPIs 通道) 流式响应错误: {json.dumps(chunk['error'], ensure_ascii=False)[:500]}")
+        if isinstance(chunk.get("usage"), dict):
+            usage = chunk["usage"]
         choices = chunk.get("choices")
         if not isinstance(choices, list) or not choices:
             continue
-        delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
-        content = delta.get("content") if isinstance(delta, dict) else None
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        if first.get("finish_reason"):
+            finish_reason = str(first["finish_reason"])
+        delta = first.get("delta") if isinstance(first.get("delta"), dict) else {}
+        reasoning = delta.get("reasoning_content")
+        if isinstance(reasoning, str):
+            reasoning_chars += len(reasoning)
+        content = delta.get("content")
         if isinstance(content, str):
             parts.append(content)
     text = "".join(parts)
+    if dropped_data_lines:
+        logger.warning(
+            "Gemini(ToAPIs 通道) 流中有 %d 条 data 行不是合法 JSON 被丢弃(可能存在流腐蚀)",
+            dropped_data_lines,
+        )
+    if finish_reason == "length":
+        raise RuntimeError(
+            "Gemini(ToAPIs 通道) 输出被截断(finish_reason=length): "
+            f"completion_tokens={usage.get('completion_tokens', '?')}, "
+            f"已收到正文 {len(text)} 字符(思考约 {reasoning_chars} 字符)。请直接重试。"
+        )
     if not text.strip():
-        raise RuntimeError("Gemini(ToAPIs 通道) 流式响应未包含文本内容。")
+        raise RuntimeError(
+            "Gemini(ToAPIs 通道) 流式响应未包含文本内容"
+            f"(finish_reason={finish_reason or '?'}, 思考约 {reasoning_chars} 字符, "
+            f"丢弃非法 data 行 {dropped_data_lines} 条)。"
+        )
     return text
 
 

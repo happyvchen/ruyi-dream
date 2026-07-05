@@ -14,6 +14,10 @@ RUN pip install --no-cache-dir -r requirements.txt -c requirements.constraints.t
 
 COPY app ./app
 
+# 构建时注入 git commit，供 /api/version 做部署校验（缺省为空不影响运行）。
+ARG GIT_COMMIT=""
+ENV APP_GIT_COMMIT=${GIT_COMMIT}
+
 RUN groupadd --system app \
   && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app \
   && mkdir -p /app/data/logs \

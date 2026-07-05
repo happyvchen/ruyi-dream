@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
@@ -68,16 +70,29 @@ MAX_USER_REQUIREMENT_CHARS = 800
 MAX_USER_INPUT_CHARS = 800
 
 
+# ToAPIs OpenAI 兼容通道没有原生 JSON 模式，模型手写 JSON 的输出形态存在方差
+# （markdown 围栏 / 单引号 dict / 字符串内裸换行）。此纪律用于压低方差；
+# 解析端的 parse_gemini_json_object 仍保留对应兜底，两层缺一不可。
+GEMINI_JSON_OUTPUT_DISCIPLINE = (
+    "输出纪律（必须遵守）：直接输出 JSON 本体，第一个字符必须是 {；"
+    "不要 markdown 代码围栏，不要任何解释文字；"
+    "只允许双引号，禁止单引号和 Python 字典风格；"
+    "字符串值内的换行必须写成 \\n 转义，不得输出裸换行。"
+)
+
+
 AI_STYLIST_SYSTEM_INSTRUCTION = """你是 Lily 品牌 AI 摄影棚的 AI Stylist。
 你必须遵守不可覆盖的生产边界：商品事实以主推款图片和搭配服装库事实为准；搭配服装只能来自 READY 候选 code；不得编造商品级服饰；必须返回合法 JSON。
 用户要求是本次任务的高优先级业务输入，高于默认搭配偏好；但不得覆盖商品图片事实、搭配库事实、Lily 品牌硬边界、输出 schema 和安全规则。
-当用户要求与硬边界冲突时，不要强行满足；请在 user_requirement_resolution 中说明冲突原因、未满足项和替代处理。"""
+当用户要求与硬边界冲突时，不要强行满足；请在 user_requirement_resolution 中说明冲突原因、未满足项和替代处理。
+""" + GEMINI_JSON_OUTPUT_DISCIPLINE
 
 
 AI_DIRECTOR_SYSTEM_INSTRUCTION = """你是 Lily 品牌 AI 摄影棚的 AI Director。
 你必须承接已完成的 StylingPlan 和其中的 user_requirement_resolution，不得重新选择库内搭配服装。
 用户要求高于默认导演偏好；但不得覆盖商品事实、数字模特身份契约、已选搭配服装、输出 schema 和安全规则。
-请只返回合法 JSON。"""
+请只返回合法 JSON。
+""" + GEMINI_JSON_OUTPUT_DISCIPLINE
 
 
 def is_request_authenticated(request: Request) -> bool:
@@ -366,7 +381,7 @@ app.add_middleware(
 
 @app.middleware("http")
 async def require_api_session(request: Request, call_next: Any) -> Any:
-    public_paths = {"/api/health", "/api/auth/login", "/api/auth/logout", "/api/auth/session"}
+    public_paths = {"/api/health", "/api/version", "/api/auth/login", "/api/auth/logout", "/api/auth/session"}
     if request.method == "OPTIONS" or request.url.path in public_paths:
         return await call_next(request)
     if request.url.path.startswith("/api/") and request.method in {"POST", "PATCH", "DELETE"} and not is_write_origin_allowed(request):
@@ -384,6 +399,24 @@ def health() -> dict[str, Any]:
         "geminiConfigured": is_gemini_configured(),
         "geminiProvider": gemini_channel(),
         "imageProviderConfigured": settings.is_image_provider_configured(),
+    }
+
+
+# 部署校验入口：确认线上容器实际运行的代码版本，避免"以为修了其实没上线"。
+# commit 由镜像构建时的 GIT_COMMIT build-arg 注入；parserFeatures 是代码级能力
+# 标记，即使 commit 为空也能判断解析链是否包含关键修复。
+@app.get("/api/version")
+def get_version() -> dict[str, Any]:
+    return {
+        "commit": os.getenv("APP_GIT_COMMIT", ""),
+        "parserFeatures": [
+            "json_strict_false",
+            "jsonish_repair",
+            "pythonish_fallback",
+            "double_brace_unwrap",
+            "parse_failure_excerpt",
+            "utf8_sse_decode",
+        ],
     }
 
 
@@ -4480,13 +4513,60 @@ def parse_gemini_json_object(text: str) -> dict[str, Any]:
         try:
             parsed, end_index = decoder.raw_decode(relaxed_json_text if relaxed_json_text != json_text else json_text)
         except json.JSONDecodeError:
-            raise strict_error from None
+            fallback = parse_pythonish_model_object(json_text)
+            if fallback is not None:
+                return fallback
+            raise json_parse_failure_with_excerpt(strict_error, text) from strict_error
         trailing = (relaxed_json_text if relaxed_json_text != json_text else json_text)[end_index:].strip()
         if trailing and not is_recoverable_json_trailing_noise(trailing):
-            raise strict_error from None
+            fallback = parse_pythonish_model_object(json_text)
+            if fallback is not None:
+                return fallback
+            raise json_parse_failure_with_excerpt(strict_error, text) from strict_error
     if not isinstance(parsed, dict):
         return {"raw_result": parsed}
     return parsed
+
+
+def parse_pythonish_model_object(json_text: str) -> dict[str, Any] | None:
+    """兜底解析模型手写 JSON 的两种实测异形（2026-07-03 线上复现）：
+
+    1. 单引号 Python dict 风格（json.loads 报 Expecting property name ... char 1）；
+    2. 双花括号 {{...}} 包裹（同上报错）。
+    仅在标准链路（strict / strict=False / repair / raw_decode）全部失败后调用。
+    """
+    # TypeError: {{...}} 会被当作含 dict 的 set 字面量（dict 不可哈希）。
+    try:
+        value = ast.literal_eval(json_text)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        value = None
+    if isinstance(value, dict):
+        return value
+    stripped = json_text.strip()
+    if stripped.startswith("{{") and stripped.endswith("}}"):
+        inner = stripped[1:-1]
+        try:
+            parsed = json.loads(inner, strict=False)
+        except json.JSONDecodeError:
+            try:
+                value = ast.literal_eval(inner)
+            except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+                value = None
+            return value if isinstance(value, dict) else None
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def json_parse_failure_with_excerpt(strict_error: json.JSONDecodeError, raw_text: str) -> RuntimeError:
+    """解析失败时把模型原文头尾带进异常，随 attempt.error_message 落库，杜绝盲修。"""
+    head = raw_text[:400]
+    # max(400, ...) 保证 401-800 字符时头尾不重叠重复。
+    tail = raw_text[max(400, len(raw_text) - 400):] if len(raw_text) > 400 else ""
+    message = f"JSON 解析失败（{strict_error}）；模型原文 {len(raw_text)} 字符，头部片段: {head!r}"
+    if tail:
+        message += f" …… 尾部片段: {tail!r}"
+    return RuntimeError(message)
 
 
 def parse_lily_tagging_json(text: str) -> dict[str, Any]:

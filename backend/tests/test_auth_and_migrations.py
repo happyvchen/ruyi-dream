@@ -63,6 +63,35 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertEqual(parsed["镜头"], "全身")
         self.assertEqual(parsed["备注"], "第一行\n第二行")
 
+    def test_parse_gemini_json_object_accepts_single_quoted_python_dict(self) -> None:
+        # 2026-07-03 线上实测形态:模型偶发输出 Python dict 风格(单引号),
+        # json.loads 报 "Expecting property name ... (char 1)"。
+        main = importlib.import_module("app.main")
+
+        text = "```json\n{'镜头': '全身', 'shots': [{'shot_index': 1}]}\n```"
+        parsed = main.parse_gemini_json_object(text)
+        self.assertEqual(parsed["镜头"], "全身")
+        self.assertEqual(parsed["shots"][0]["shot_index"], 1)
+
+    def test_parse_gemini_json_object_unwraps_double_braces(self) -> None:
+        main = importlib.import_module("app.main")
+
+        text = '{{\n  "镜头": "全身"\n}}'
+        parsed = main.parse_gemini_json_object(text)
+        self.assertEqual(parsed["镜头"], "全身")
+
+    def test_parse_gemini_json_object_failure_carries_raw_excerpt(self) -> None:
+        # 解析彻底失败时,错误必须携带模型原文头尾,随 attempt.error_message 落库。
+        main = importlib.import_module("app.main")
+
+        text = "{千疮百孔 not json at all" + "x" * 500
+        with self.assertRaises(RuntimeError) as ctx:
+            main.parse_gemini_json_object(text)
+        message = str(ctx.exception)
+        self.assertIn("JSON 解析失败", message)
+        self.assertIn("千疮百孔", message)
+        self.assertIn(str(len(text)), message)
+
     def test_validate_styling_plan_rejects_empty_production_model_output(self) -> None:
         main = importlib.import_module("app.main")
 

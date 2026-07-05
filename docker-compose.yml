@@ -3,6 +3,9 @@ services:
     container_name: ruyi-dream-backend
     build:
       context: ./backend
+      args:
+        # 部署校验：GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build
+        GIT_COMMIT: ${GIT_COMMIT:-}
     restart: unless-stopped
     environment:
       APP_ENV: ${APP_ENV:-development}
