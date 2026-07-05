@@ -6,6 +6,7 @@ import importlib
 import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -40,6 +41,13 @@ class GeminiProviderTests(unittest.TestCase):
             "TOAPIS_API_KEY",
         ]:
             os.environ[key] = ""
+        # 测试必须自带完整隔离配置,不依赖本地 .env 或 CI 工作流注入:
+        # Settings.validate() 硬性要求对象存储凭据,这里给单测哑值;
+        # load_dotenv 不覆盖已存在的环境变量,因此本地 .env 也不会泄漏进来。
+        os.environ["APP_S3_ACCESS_KEY_ID"] = "unit-dummy-access-key"
+        os.environ["APP_S3_SECRET_ACCESS_KEY"] = "unit-dummy-secret-key"
+        # get_settings() 会创建数据目录,指向临时目录避免污染仓库内 data/。
+        os.environ["APP_DATA_DIR"] = os.path.join(tempfile.gettempdir(), "ruyi-gemini-unittest")
         os.environ.update(env)
         config = importlib.reload(importlib.import_module("app.config"))
         config.get_settings.cache_clear()
