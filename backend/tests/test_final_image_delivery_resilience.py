@@ -216,6 +216,39 @@ class CheckDeliverSplitTests(TempEnvTestCase):
         self.assertEqual(result["thumbPath"], "k/t.png")
 
 
+class ProviderSubmitContractTests(TempEnvTestCase):
+    """submit 响应契约：不得携带 outputPath。
+
+    outputPath 只能由回传成功（store_delivered_image）产生；编排层用
+    "payload 是否有 outputPath" 判断是否还需要执行回传阶段。submit 提前
+    返回预期路径会导致轮询成功后跳过回传，读取不存在的 key 报 NoSuchKey。
+    """
+
+    def test_toapis_submit_response_has_no_output_path(self) -> None:
+        image_provider = importlib.import_module("app.image_provider")
+        provider = image_provider.GPTImage2ToapisProvider()
+        with mock.patch.object(image_provider, "prepare_toapis_image_inputs", return_value=([], [])):
+            with mock.patch.object(image_provider, "build_toapis_request_snapshot", return_value={"model": "gpt-image-2"}):
+                with mock.patch.object(image_provider, "post_json", return_value={"id": "tsk_1", "status": "submitted"}):
+                    result = asyncio.run(provider.submit({"prompt": "p", "imageInputs": []}, "k/out.png"))
+        self.assertNotIn("outputPath", result)
+        self.assertEqual(result["providerRequestId"], "tsk_1")
+        self.assertEqual(result["status"], "SUBMITTED")
+
+    def test_fal_submit_response_has_no_output_path(self) -> None:
+        os.environ["FAL_KEY"] = "test-fal-key"
+        self._reload_settings()
+        image_provider = importlib.import_module("app.image_provider")
+        provider = image_provider.GPTImage2FalProvider()
+        submit_response = {"request_id": "req_1", "status_url": "s", "response_url": "r", "cancel_url": "c"}
+        with mock.patch.object(image_provider, "prepare_fal_image_inputs", return_value=([], [])):
+            with mock.patch.object(image_provider, "build_fal_request_snapshot", return_value={}):
+                with mock.patch.object(image_provider, "post_json", return_value=submit_response):
+                    result = asyncio.run(provider.submit({"prompt": "p", "imageInputs": []}, "k/out.png"))
+        self.assertNotIn("outputPath", result)
+        self.assertEqual(result["providerRequestId"], "req_1")
+
+
 try:  # app.main 依赖 fastapi/pydantic；不可用时跳过相关用例（沙箱环境）。
     import fastapi  # noqa: F401
 
@@ -294,6 +327,51 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
             with mock.patch("asyncio.sleep", new=instant_sleep):
                 result = asyncio.run(self.main.deliver_with_retries(payload, "k/out.png", attempt_id, recorder))
         self.assertEqual(result["outputPath"], "k/out.png")
+
+    def test_pipeline_runs_delivery_after_provider_success(self) -> None:
+        """NoSuchKey 回归用例：提交→轮询成功后必须执行回传，再读取回传后的 key。
+
+        此前 submit 响应携带预期 outputPath，导致编排层误判"已回传"而跳过
+        deliver，直接 get_bytes 一个从未写入的 key 报 NoSuchKey。
+        """
+        attempt_id = self._insert_attempt()
+        submit_payload = {
+            "provider": "toapis",
+            "providerRequestId": "tsk_x",
+            "status": "SUBMITTED",
+            "providerStatus": "submitted",
+            "providerUrls": {},
+            "providerStatusResponse": {"status": "submitted"},
+        }
+        check_payload = {
+            "status": "SUCCEEDED",
+            "providerStatus": "completed",
+            "providerRequestId": "tsk_x",
+            "providerStatusResponse": {"status": "completed"},
+        }
+        deliver_payload = {"outputPath": "k/out.png", "fileSize": 3, "thumbPath": None, "previewPath": None}
+        deliver_calls: list[str] = []
+
+        def fake_deliver(_payload: dict, output_key: str) -> dict:
+            deliver_calls.append(output_key)
+            return deliver_payload
+
+        async def instant_sleep(_seconds: float) -> None:
+            return None
+
+        with mock.patch.object(self.main, "run_image_provider_submit", return_value=submit_payload):
+            with mock.patch.object(self.main, "run_image_provider_check", return_value=check_payload):
+                with mock.patch.object(self.main, "run_image_provider_deliver", side_effect=fake_deliver):
+                    with mock.patch.object(self.main, "get_bytes", return_value=b"img") as get_bytes_mock:
+                        with mock.patch.object(self.main, "insert_generated_media_asset", return_value=4242):
+                            with mock.patch("asyncio.sleep", new=instant_sleep):
+                                asset_id, payload = asyncio.run(
+                                    self.main.generate_image_asset({"imageInputs": []}, "k/out.png", attempt_id)
+                                )
+        self.assertEqual(asset_id, 4242)
+        self.assertEqual(deliver_calls, ["k/out.png"])
+        get_bytes_mock.assert_called_once_with("k/out.png")
+        self.assertEqual(payload["outputPath"], "k/out.png")
 
 
 @unittest.skipIf(not HAS_MAIN_DEPS, "app.main 依赖不可用")
