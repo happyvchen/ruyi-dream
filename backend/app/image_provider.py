@@ -5,6 +5,7 @@ import mimetypes
 import os
 import tempfile
 import time
+from io import BytesIO
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import urlparse
@@ -447,10 +448,74 @@ def upload_bytes_to_fal(content: bytes, filename: str, content_type: str | None 
         return fal_client.upload_file(handle.name)
 
 
+# toapis 单文件上传上限 10MB；留出安全余量，只压超限大图，小图原样上传。
+TOAPIS_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+TOAPIS_TARGET_UPLOAD_BYTES = TOAPIS_MAX_UPLOAD_BYTES - 512 * 1024
+FIT_QUALITY_STEPS = (95, 92, 88, 85)
+FIT_SCALE_STEP = 0.85
+FIT_MIN_EDGE = 768
+
+
+def fit_image_bytes_under_limit(
+    content: bytes,
+    filename: str,
+    content_type: str | None,
+    target_bytes: int = TOAPIS_TARGET_UPLOAD_BYTES,
+) -> tuple[bytes, str, str | None]:
+    """超过 target_bytes 的图片压到刚好过线为止；未超限的原样返回。
+
+    压缩策略：优先保留原分辨率、只降编码质量；仍超限才逐档缩小边长。
+    目标是"压得越少越好"，保证参考图清晰度，避免把大图压得远小于其他输入图。
+    """
+    if len(content) <= target_bytes:
+        return content, filename, content_type
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return content, filename, content_type
+    try:
+        with Image.open(BytesIO(content)) as image:
+            image = ImageOps.exif_transpose(image)
+            if image.mode in {"RGBA", "LA", "P"}:
+                base = image.convert("RGBA")
+                flattened = Image.new("RGB", base.size, (255, 255, 255))
+                flattened.paste(base, mask=base.getchannel("A"))
+                image = flattened
+            elif image.mode != "RGB":
+                image = image.convert("RGB")
+
+            best: bytes | None = None
+            scale = 1.0
+            while True:
+                if scale >= 1.0:
+                    resized = image
+                else:
+                    width = max(1, round(image.width * scale))
+                    height = max(1, round(image.height * scale))
+                    resized = image.resize((width, height), Image.Resampling.LANCZOS)
+                for quality in FIT_QUALITY_STEPS:
+                    output = BytesIO()
+                    resized.save(output, "JPEG", quality=quality, optimize=True)
+                    best = output.getvalue()
+                    if len(best) <= target_bytes:
+                        stem = os.path.splitext(filename)[0] or "reference-image"
+                        return best, f"{stem}.jpg", "image/jpeg"
+                if min(resized.width, resized.height) <= FIT_MIN_EDGE:
+                    break
+                scale *= FIT_SCALE_STEP
+    except OSError:
+        return content, filename, content_type
+    if best is not None:
+        stem = os.path.splitext(filename)[0] or "reference-image"
+        return best, f"{stem}.jpg", "image/jpeg"
+    return content, filename, content_type
+
+
 def upload_bytes_to_toapis(content: bytes, filename: str, content_type: str | None = None) -> str:
     settings = get_settings()
     if not settings.toapis_api_key:
         raise RuntimeError("TOAPIS_API_KEY 未配置，无法上传参考图到 toapis")
+    content, filename, content_type = fit_image_bytes_under_limit(content, filename, content_type)
     upload_response = post_multipart_file(
         toapis_url("/v1/uploads/images"),
         "file",
@@ -599,7 +664,9 @@ def post_multipart_file(
     except ImportError as exc:
         raise RuntimeError("requests 导入失败，无法按 toapis 官方方式上传参考图：请安装 requests") from exc
 
-    files = {field_name: (os.path.basename(filename) or "image.png", content, content_type)}
+    upload_name = os.path.basename(filename) or "image.png"
+    file_label = f"{upload_name}, {len(content) / 1048576:.2f}MB"
+    files = {field_name: (upload_name, content, content_type)}
     try:
         response = requests_call_with_retries(
             requests.post,
@@ -609,7 +676,7 @@ def post_multipart_file(
             timeout=timeout,
         )
     except requests.RequestException as exc:
-        raise RuntimeError(f"toapis 图片上传失败: {exc}") from exc
+        raise RuntimeError(f"toapis 图片上传失败({file_label}): {exc}") from exc
     try:
         payload = response.json()
     except ValueError:
@@ -618,7 +685,7 @@ def post_multipart_file(
         message = payload.get("message") or payload.get("error") or payload
         if isinstance(message, dict):
             message = message.get("message") or str(message)
-        raise RuntimeError(f"toapis 图片上传失败: HTTP {response.status_code} {message}")
+        raise RuntimeError(f"toapis 图片上传失败({file_label}): HTTP {response.status_code} {message}")
     return payload
 
 
