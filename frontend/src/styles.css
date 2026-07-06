@@ -990,6 +990,7 @@ label.secondary:focus-within {
 .danger:disabled { opacity: .45; cursor: not-allowed; }
 .icon-button { width: 42px; padding: 0; }
 .wide { width: 100%; }
+a.button-link { text-decoration: none; cursor: pointer; }
 
 .current-task, .selected-strip, .result-grid {
   display: grid;
@@ -1800,6 +1801,21 @@ label.secondary:focus-within {
   color: #7f1d1d;
   font-size: 13px;
   font-weight: 700;
+}
+.download-issue-list {
+  max-height: 280px;
+  overflow-y: auto;
+}
+.download-issue-item {
+  display: grid;
+  gap: 2px;
+  padding: 6px 0;
+  border-bottom: 1px dashed #e2e8f0;
+}
+.download-issue-item:last-child { border-bottom: 0; }
+.download-issue-item span {
+  color: #b45309;
+  font-size: 12.5px;
 }
 .confirm-actions {
   display: flex;

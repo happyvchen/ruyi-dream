@@ -15,13 +15,14 @@ from pathlib import Path
 import secrets
 import sqlite3
 import time
+import zipfile
 from uuid import uuid4
 from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
 
@@ -3204,6 +3205,274 @@ def list_new_generation_records(
 @app.get("/api/generation-records/{task_id}")
 def get_new_generation_record(task_id: int, request: Request, include_debug: bool = Query(False, alias="includeDebug")) -> dict[str, Any]:
     return {"item": get_generation_task_by_id(task_id, include_debug=require_admin_debug(request, include_debug))}
+
+
+# ---------------------------------------------------------------------------
+# 成片批量下载：预检 + 按任务名分文件夹流式打包
+# ---------------------------------------------------------------------------
+
+FINAL_IMAGE_EXPORT_MAX_TASKS = 50
+FINAL_IMAGE_EXPORT_EXTENSIONS = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+FINAL_IMAGE_EXPORT_STATUS_TEXT = {
+    "FAILED": "生成失败",
+    "RUNNING": "生成中",
+    "QUEUED": "排队中",
+    "CANCELLED": "已取消",
+    "MISSING_ASSET": "缺少成片文件",
+}
+
+
+class FinalImageExportPrecheckRequest(BaseModel):
+    ids: list[int] = Field(default_factory=list)
+
+
+def normalize_final_image_export_ids(raw_ids: list[int]) -> list[int]:
+    ids: list[int] = []
+    for value in raw_ids:
+        task_id = int(value)
+        if task_id > 0 and task_id not in ids:
+            ids.append(task_id)
+    if not ids:
+        raise HTTPException(status_code=400, detail="请先选择要下载的任务")
+    if len(ids) > FINAL_IMAGE_EXPORT_MAX_TASKS:
+        raise HTTPException(status_code=400, detail=f"单次最多下载 {FINAL_IMAGE_EXPORT_MAX_TASKS} 个任务")
+    return ids
+
+
+def final_image_export_shot_label(plan_json: str | None, shot_type: str | None) -> str:
+    plan = loads(plan_json, {}) if plan_json else {}
+    label = plan.get("shot_role_label") or plan.get("shot_role") or shot_type or ""
+    return str(label).strip()
+
+
+def get_final_image_export_overview(db: Any, task_id: int) -> dict[str, Any] | None:
+    """收集单个任务当前 active 结果集的可下载成片和缺失/失败明细。"""
+    task = db.execute(
+        "SELECT id, name, status, active_result_set_id FROM generation_tasks WHERE id = ? AND deleted_at IS NULL",
+        (task_id,),
+    ).fetchone()
+    if not task:
+        return None
+    downloadable: list[dict[str, Any]] = []
+    issues: list[dict[str, Any]] = []
+    total_count = 0
+    if task["active_result_set_id"]:
+        rows = db.execute(
+            """
+            SELECT gri.sort_order, gri.status,
+                   gsp.plan_json, gsp.shot_type,
+                   ma.object_key, ma.mime_type, ma.original_filename, ma.size_bytes
+            FROM generation_result_images_new gri
+            LEFT JOIN generation_shot_plans gsp ON gsp.id = gri.shot_plan_id
+            LEFT JOIN media_assets ma ON ma.id = gri.current_asset_id AND ma.deleted_at IS NULL
+            WHERE gri.result_set_id = ?
+            ORDER BY gri.sort_order
+            """,
+            (int(task["active_result_set_id"]),),
+        ).fetchall()
+        total_count = len(rows)
+        for row in rows:
+            label = final_image_export_shot_label(row["plan_json"], row["shot_type"])
+            if row["status"] == "SUCCEEDED" and row["object_key"]:
+                downloadable.append(
+                    {
+                        "sortOrder": int(row["sort_order"]),
+                        "shotLabel": label,
+                        "objectKey": row["object_key"],
+                        "mimeType": row["mime_type"],
+                        "originalFilename": row["original_filename"],
+                        "sizeBytes": int(row["size_bytes"] or 0),
+                    }
+                )
+            else:
+                issues.append(
+                    {
+                        "sortOrder": int(row["sort_order"]),
+                        "shotLabel": label,
+                        "status": "MISSING_ASSET" if row["status"] == "SUCCEEDED" else str(row["status"]),
+                    }
+                )
+    return {
+        "taskId": int(task["id"]),
+        "taskName": task["name"],
+        "taskStatus": task["status"],
+        "hasResultSet": bool(task["active_result_set_id"]),
+        "downloadable": downloadable,
+        "issues": issues,
+        "totalCount": total_count,
+    }
+
+
+def collect_final_image_export_overviews(task_ids: list[int]) -> list[dict[str, Any]]:
+    overviews: list[dict[str, Any]] = []
+    with get_db() as db:
+        for task_id in task_ids:
+            overview = get_final_image_export_overview(db, task_id)
+            if not overview:
+                raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
+            overviews.append(overview)
+    return overviews
+
+
+@app.post("/api/generation-task-exports/precheck")
+def precheck_final_image_export(payload: FinalImageExportPrecheckRequest) -> dict[str, Any]:
+    task_ids = normalize_final_image_export_ids(payload.ids)
+    overviews = collect_final_image_export_overviews(task_ids)
+    items = [
+        {
+            "taskId": item["taskId"],
+            "taskName": item["taskName"],
+            "taskStatus": item["taskStatus"],
+            "hasResultSet": item["hasResultSet"],
+            "downloadableCount": len(item["downloadable"]),
+            "totalCount": item["totalCount"],
+            "totalBytes": sum(entry["sizeBytes"] for entry in item["downloadable"]),
+            "issues": item["issues"],
+        }
+        for item in overviews
+    ]
+    return {
+        "items": items,
+        "downloadableTaskIds": [item["taskId"] for item in items if item["downloadableCount"] > 0],
+        "completeTaskIds": [item["taskId"] for item in items if item["downloadableCount"] > 0 and not item["issues"]],
+        "totalImages": sum(item["downloadableCount"] for item in items),
+        "totalBytes": sum(item["totalBytes"] for item in items),
+    }
+
+
+def final_image_export_extension(mime_type: str | None, original_filename: str | None) -> str:
+    if mime_type and mime_type in FINAL_IMAGE_EXPORT_EXTENSIONS:
+        return FINAL_IMAGE_EXPORT_EXTENSIONS[mime_type]
+    suffix = Path(original_filename or "").suffix.lower()
+    if suffix in {".jpg", ".jpeg", ".png", ".webp"}:
+        return suffix
+    return ".jpg"
+
+
+FINAL_IMAGE_EXPORT_INVALID_CHARS = set('\\/:*?"<>|')
+
+
+def final_image_export_safe_component(value: str | None) -> str:
+    """保留任务名原貌，只把文件系统非法字符替换为下划线；去掉尾部空格和点（Windows 限制）。"""
+    cleaned = "".join(
+        "_" if ch in FINAL_IMAGE_EXPORT_INVALID_CHARS or ord(ch) < 32 else ch
+        for ch in str(value or "").strip()
+    )
+    return cleaned.rstrip(" .")
+
+
+def assign_final_image_export_folders(tasks: list[dict[str, Any]]) -> None:
+    """文件夹名与任务名保持一致；同名任务全部保留，从第二个起追加 (2)、(3) 序号。"""
+    used: set[str] = {"清单.txt"}
+    for task in tasks:
+        base = final_image_export_safe_component(task["taskName"]) or f"任务{task['taskId']}"
+        folder = base
+        serial = 1
+        while folder in used:
+            serial += 1
+            folder = f"{base}({serial})"
+        used.add(folder)
+        task["folder"] = folder
+
+
+class _ZipStreamBuffer:
+    """给 zipfile 的只写缓冲：writestr 写入的字节被 drain 成 HTTP chunk 流出。"""
+
+    def __init__(self) -> None:
+        self._chunks: list[bytes] = []
+
+    def write(self, data: bytes) -> int:
+        if data:
+            self._chunks.append(bytes(data))
+        return len(data)
+
+    def flush(self) -> None:
+        return None
+
+    def drain(self) -> list[bytes]:
+        chunks, self._chunks = self._chunks, []
+        return chunks
+
+
+def iter_final_image_export_zip(tasks: list[dict[str, Any]], exported_at: str) -> Any:
+    """流式生成 zip：图片用 STORE 不再压缩，单文件读取失败跳过并写入清单。"""
+    buffer = _ZipStreamBuffer()
+    date_time = datetime.now().timetuple()[:6]
+    manifest: list[str] = [
+        "Ruyi-Dream 成片批量下载清单",
+        f"导出时间：{exported_at}",
+        f"任务数：{len(tasks)}",
+        "",
+    ]
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        for task in tasks:
+            folder = task["folder"]
+            included = 0
+            notes: list[str] = []
+            for entry in task["downloadable"]:
+                try:
+                    content = get_bytes(entry["objectKey"])
+                except Exception:  # noqa: BLE001 - 单张读取失败不应中断整个压缩包
+                    logger.exception("批量下载读取成片失败 object_key=%s", entry["objectKey"])
+                    notes.append(f"  - #{entry['sortOrder']} {entry['shotLabel']}：读取成片文件失败，未包含在压缩包中")
+                    continue
+                label = final_image_export_safe_component(entry["shotLabel"]) or "镜头"
+                filename = f"{entry['sortOrder']:02d}_{label}{final_image_export_extension(entry['mimeType'], entry['originalFilename'])}"
+                info = zipfile.ZipInfo(f"{folder}/{filename}", date_time=date_time)
+                archive.writestr(info, content)
+                included += 1
+                yield from buffer.drain()
+            manifest.append(f"{task['taskName']}（任务 ID {task['taskId']}）")
+            manifest.append(f"  已包含成片：{included} 张，文件夹：{folder}/")
+            if not task["hasResultSet"]:
+                manifest.append("  - 该任务尚未生成成片")
+            for issue in task["issues"]:
+                status_text = FINAL_IMAGE_EXPORT_STATUS_TEXT.get(str(issue["status"]), str(issue["status"]))
+                manifest.append(f"  - #{issue['sortOrder']} {issue['shotLabel']}：{status_text}，未包含在压缩包中")
+            manifest.extend(notes)
+            manifest.append("")
+        info = zipfile.ZipInfo("清单.txt", date_time=date_time)
+        archive.writestr(info, "\n".join(manifest).encode("utf-8"))
+    yield from buffer.drain()
+
+
+@app.get("/api/generation-task-exports/archive")
+def download_final_image_archive(ids: str = Query(...)) -> StreamingResponse:
+    raw_ids: list[int] = []
+    for part in ids.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            raw_ids.append(int(part))
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="任务 ID 格式不正确") from error
+    task_ids = normalize_final_image_export_ids(raw_ids)
+    tasks = collect_final_image_export_overviews(task_ids)
+    total_images = sum(len(task["downloadable"]) for task in tasks)
+    if not total_images:
+        raise HTTPException(status_code=400, detail="所选任务没有可下载的成片")
+    assign_final_image_export_folders(tasks)
+    with get_db() as db:
+        log_event(
+            db,
+            "generation_task_export",
+            None,
+            "final_images_exported",
+            {"taskIds": task_ids, "imageCount": total_images},
+        )
+    exported_at = now_iso()
+    timestamp = exported_at[:19].replace("-", "").replace(":", "").replace("T", "-")
+    filename = f"final-images-{timestamp}.zip"
+    return StreamingResponse(
+        iter_final_image_export_zip(tasks, exported_at),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/prompt-configs")

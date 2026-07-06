@@ -37,8 +37,8 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react'
-import { api, isAuthExpiredError, mediaUrl } from './api'
-import type { AICallRecord, AIOperation, AttemptPhase, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptPlaceholder, SessionRole, StylingGarment } from './api'
+import { api, finalImageArchiveUrl, isAuthExpiredError, mediaUrl } from './api'
+import type { AICallRecord, AIOperation, AttemptPhase, DeleteImpact, FinalImageExportPrecheck, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptPlaceholder, SessionRole, StylingGarment } from './api'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 
@@ -1423,6 +1423,11 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
           <span>当前阶段</span>
           <strong>{hasFinalImages ? '最终成片已生成' : '等待生成最终成片'}</strong>
         </div>
+        {hasFinalImages && task && (
+          <a className="secondary button-link" href={finalImageArchiveUrl([task.id])} rel="noreferrer" title="打包下载本任务全部成片，未完成项记录在清单.txt">
+            <Download size={16} /> 下载全部成片
+          </a>
+        )}
         <button className="primary" disabled={!canGenerate} onClick={() => task && void run(hasFinalImages ? '重新生成最终成片中...' : '生成最终成片中...', () => {
           for (let index = 1; index <= 5; index += 1) {
             startLocalOperation({ taskId: task.id, ownerType: 'generation_result_image', ownerId: index, provider: 'image-2' })
@@ -2245,6 +2250,8 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   const [deleteRecordDialog, setDeleteRecordDialog] = useState<GenerationTask[] | null>(null)
   const [deleteRecordImpact, setDeleteRecordImpact] = useState<DeleteImpact | null>(null)
   const [deleteRecordImpactLoading, setDeleteRecordImpactLoading] = useState(false)
+  const [downloadPrecheck, setDownloadPrecheck] = useState<FinalImageExportPrecheck | null>(null)
+  const [downloadChecking, setDownloadChecking] = useState(false)
   const [pageSize, setPageSize] = useState(12)
   const selectableRecordIds = items.filter((item) => !isTaskRunning(item)).map((item) => item.id)
   const selectedVisibleRecords = items.filter((item) => selectedRecordIds.has(item.id) && selectableRecordIds.includes(item.id))
@@ -2345,6 +2352,33 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
     }, { refresh: 'background' })
   }
 
+  function triggerFinalImageDownload(ids: number[]) {
+    if (!ids.length) return
+    const anchor = document.createElement('a')
+    anchor.href = finalImageArchiveUrl(ids)
+    anchor.rel = 'noreferrer'
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    setDownloadPrecheck(null)
+    setSelectedRecordIds(new Set())
+  }
+
+  function startBatchDownload() {
+    if (!selectedVisibleRecords.length || downloadChecking) return
+    const ids = selectedVisibleRecords.map((item) => item.id)
+    setDownloadChecking(true)
+    void api.precheckFinalImageExport(ids)
+      .then((result) => {
+        const allComplete = result.downloadableTaskIds.length > 0
+          && result.items.every((item) => item.downloadableCount > 0 && !item.issues.length)
+        if (allComplete) triggerFinalImageDownload(result.downloadableTaskIds)
+        else setDownloadPrecheck(result)
+      })
+      .catch(() => setDownloadPrecheck(null))
+      .finally(() => setDownloadChecking(false))
+  }
+
   function cancelRecordTask(item: GenerationTask) {
     if (!window.confirm('确定取消本次生成吗？已提交给生成服务的图片可能仍会完成并产生费用；系统会停止后续生成，并保留已完成结果。')) return
     void run('取消生成中...', () => api.cancelTask(item.id), (r: { item: GenerationTask }) => {
@@ -2368,6 +2402,11 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
               <label><input type="checkbox" checked={allVisibleRecordsSelected} disabled={!selectableRecordIds.length} onChange={(event) => toggleVisibleRecordSelection(event.target.checked)} /> 全选本页</label>
             </div>
             <div className="record-list-meta">
+              {selectedVisibleRecords.length > 0 && (
+                <button className="secondary" disabled={downloadChecking} onClick={startBatchDownload} title="打包下载所选任务的最终成片，按任务名分文件夹">
+                  <Download size={14} /> {downloadChecking ? '检查成片中...' : `下载成片 ${selectedVisibleRecords.length} 项`}
+                </button>
+              )}
               {selectedVisibleRecords.length > 0 && (
                 <button className="secondary" onClick={runRecordBatchAction}>
                   归档 {selectedVisibleRecords.length} 项
@@ -2448,7 +2487,82 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
           impactLoading={deleteRecordImpactLoading}
         />
       )}
+      {downloadPrecheck && (
+        <FinalImageDownloadDialog
+          precheck={downloadPrecheck}
+          onClose={() => setDownloadPrecheck(null)}
+          onDownload={triggerFinalImageDownload}
+        />
+      )}
     </section>
+  )
+}
+
+const finalImageIssueStatusText: Record<string, string> = {
+  FAILED: '生成失败',
+  RUNNING: '生成中',
+  QUEUED: '排队中',
+  CANCELLED: '已取消',
+  MISSING_ASSET: '缺少成片文件',
+}
+
+function FinalImageDownloadDialog({ precheck, onClose, onDownload }: {
+  precheck: FinalImageExportPrecheck
+  onClose: () => void
+  onDownload: (ids: number[]) => void
+}) {
+  const incompleteItems = precheck.items.filter((item) => item.downloadableCount === 0 || item.issues.length > 0)
+  const hasDownloadable = precheck.downloadableTaskIds.length > 0
+  const hasComplete = precheck.completeTaskIds.length > 0
+  return createPortal(
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <div className="confirm-modal" role="dialog" aria-modal="true" aria-label="批量下载成片" onClick={(event) => event.stopPropagation()}>
+        <div className="confirm-head">
+          <h2>批量下载成片</h2>
+          <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
+        </div>
+        <p className="confirm-copy">
+          {hasDownloadable
+            ? `可下载 ${precheck.totalImages} 张成片（约 ${formatBytes(precheck.totalBytes)}），以下任务的部分成片未完成或失败：`
+            : '所选任务当前没有可下载的成片。'}
+        </p>
+        <div className="confirm-items download-issue-list">
+          {incompleteItems.map((item) => (
+            <div key={item.taskId} className="download-issue-item">
+              <strong>{item.taskName}</strong>
+              {!item.hasResultSet && <span>尚未生成成片</span>}
+              {item.hasResultSet && item.downloadableCount === 0 && !item.issues.length && <span>没有可下载的成片</span>}
+              {item.issues.map((issue) => (
+                <span key={`${item.taskId}-${issue.sortOrder}`}>
+                  #{issue.sortOrder} {issue.shotLabel || '镜头'}：{finalImageIssueStatusText[issue.status] ?? issue.status}
+                </span>
+              ))}
+            </div>
+          ))}
+        </div>
+        <p className="confirm-copy">继续下载时，未完成项会记录在压缩包内的“清单.txt”。</p>
+        <div className="confirm-actions">
+          <button type="button" className="secondary" onClick={onClose}>取消</button>
+          <button
+            type="button"
+            className="secondary"
+            disabled={!hasDownloadable}
+            onClick={() => onDownload(precheck.downloadableTaskIds)}
+          >
+            全部下载
+          </button>
+          <button
+            type="button"
+            className="primary"
+            disabled={!hasComplete}
+            onClick={() => onDownload(precheck.completeTaskIds)}
+          >
+            仅下载完整任务{hasComplete ? ` ${precheck.completeTaskIds.length} 项` : ''}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   )
 }
 

@@ -252,6 +252,31 @@ export type DeleteImpact = {
   dependentTaskImpact?: DeleteImpact
 }
 
+export type FinalImageExportIssue = {
+  sortOrder: number
+  shotLabel: string
+  status: string
+}
+
+export type FinalImageExportTask = {
+  taskId: number
+  taskName: string
+  taskStatus: string
+  hasResultSet: boolean
+  downloadableCount: number
+  totalCount: number
+  totalBytes: number
+  issues: FinalImageExportIssue[]
+}
+
+export type FinalImageExportPrecheck = {
+  items: FinalImageExportTask[]
+  downloadableTaskIds: number[]
+  completeTaskIds: number[]
+  totalImages: number
+  totalBytes: number
+}
+
 export type ModelProfile = {
   id: number
   modelId: string
@@ -387,6 +412,10 @@ export function mediaUrl(url?: string | null) {
   return /^(https?:|blob:|data:)/i.test(url) ? url : `${API_BASE}${url}`
 }
 
+export function finalImageArchiveUrl(ids: number[]) {
+  return `${API_BASE}/api/generation-task-exports/archive?ids=${ids.join(',')}`
+}
+
 export const api = {
   session: () => request<AuthSession>('/api/auth/session'),
   login: (username: string, password: string) =>
@@ -503,6 +532,8 @@ export const api = {
     request<{ item: GenerationTask }>(`/api/generation-result-images-new/${id}/retry`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
   redeliverResultImage: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-result-images-new/${id}/redeliver`, { method: 'POST' }),
+  precheckFinalImageExport: (ids: number[]) =>
+    request<FinalImageExportPrecheck>('/api/generation-task-exports/precheck', { method: 'POST', body: JSON.stringify({ ids }) }),
   listRecords: (options?: { limit?: number; offset?: number; includeArchived?: boolean }) =>
     request<Paginated<GenerationTask>>(params('/api/generation-records', options ?? {})),
   getRecord: (id: number, includeDebug = false) =>
