@@ -192,14 +192,38 @@ class FinalImageExportTestCase(unittest.TestCase):
             archive = zipfile.ZipFile(io.BytesIO(response.content))
             self.assertIsNone(archive.testzip())
             names = archive.namelist()
-            self.assertIn("秋季风衣主推_1/01_首图.png", names)
-            self.assertIn("秋季风衣主推_1/02_全身.png", names)
-            self.assertIn("连衣裙B款_2/01_首图.png", names)
+            self.assertIn("秋季风衣主推/01_首图.png", names)
+            self.assertIn("秋季风衣主推/02_全身.png", names)
+            self.assertIn("连衣裙B款/01_首图.png", names)
             self.assertIn("清单.txt", names)
-            self.assertEqual(archive.read("秋季风衣主推_1/01_首图.png"), b"binary:results/1-1.png")
+            self.assertEqual(archive.read("秋季风衣主推/01_首图.png"), b"binary:results/1-1.png")
             manifest = archive.read("清单.txt").decode("utf-8")
             self.assertIn("连衣裙B款", manifest)
             self.assertIn("生成失败", manifest)
+        finally:
+            main.get_bytes = original_get_bytes
+            client.close()
+
+    def test_archive_keeps_duplicate_task_names_and_illegal_chars(self) -> None:
+        self._seed_task_with_results(1, "2026-05-27 18:10:22", [(1, "SUCCEEDED", "results/1-1.png")])
+        self._seed_task_with_results(2, "2026-05-27 18:10:22", [(1, "SUCCEEDED", "results/2-1.png")])
+        main = importlib.import_module("app.main")
+        original_get_bytes = main.get_bytes
+        main.get_bytes = lambda key: f"binary:{key}".encode("utf-8")
+        client = self._client()
+        try:
+            response = client.get("/api/generation-task-exports/archive", params={"ids": "1,2"})
+            self.assertEqual(response.status_code, 200)
+            archive = zipfile.ZipFile(io.BytesIO(response.content))
+            names = archive.namelist()
+            # 任务名保持原貌，仅替换文件系统非法字符（冒号）；同名任务追加 (2) 序号，两个都保留
+            self.assertIn("2026-05-27 18_10_22/01_首图.png", names)
+            self.assertIn("2026-05-27 18_10_22(2)/01_首图.png", names)
+            self.assertEqual(archive.read("2026-05-27 18_10_22/01_首图.png"), b"binary:results/1-1.png")
+            self.assertEqual(archive.read("2026-05-27 18_10_22(2)/01_首图.png"), b"binary:results/2-1.png")
+            manifest = archive.read("清单.txt").decode("utf-8")
+            self.assertIn("任务 ID 1", manifest)
+            self.assertIn("任务 ID 2", manifest)
         finally:
             main.get_bytes = original_get_bytes
             client.close()

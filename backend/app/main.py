@@ -3353,8 +3353,30 @@ def final_image_export_extension(mime_type: str | None, original_filename: str |
     return ".jpg"
 
 
-def final_image_export_folder(task: dict[str, Any]) -> str:
-    return f"{sanitize_name(str(task['taskName'] or '')) or '任务'}_{task['taskId']}"
+FINAL_IMAGE_EXPORT_INVALID_CHARS = set('\\/:*?"<>|')
+
+
+def final_image_export_safe_component(value: str | None) -> str:
+    """保留任务名原貌，只把文件系统非法字符替换为下划线；去掉尾部空格和点（Windows 限制）。"""
+    cleaned = "".join(
+        "_" if ch in FINAL_IMAGE_EXPORT_INVALID_CHARS or ord(ch) < 32 else ch
+        for ch in str(value or "").strip()
+    )
+    return cleaned.rstrip(" .")
+
+
+def assign_final_image_export_folders(tasks: list[dict[str, Any]]) -> None:
+    """文件夹名与任务名保持一致；同名任务全部保留，从第二个起追加 (2)、(3) 序号。"""
+    used: set[str] = {"清单.txt"}
+    for task in tasks:
+        base = final_image_export_safe_component(task["taskName"]) or f"任务{task['taskId']}"
+        folder = base
+        serial = 1
+        while folder in used:
+            serial += 1
+            folder = f"{base}({serial})"
+        used.add(folder)
+        task["folder"] = folder
 
 
 class _ZipStreamBuffer:
@@ -3388,7 +3410,7 @@ def iter_final_image_export_zip(tasks: list[dict[str, Any]], exported_at: str) -
     ]
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
         for task in tasks:
-            folder = final_image_export_folder(task)
+            folder = task["folder"]
             included = 0
             notes: list[str] = []
             for entry in task["downloadable"]:
@@ -3398,7 +3420,7 @@ def iter_final_image_export_zip(tasks: list[dict[str, Any]], exported_at: str) -
                     logger.exception("批量下载读取成片失败 object_key=%s", entry["objectKey"])
                     notes.append(f"  - #{entry['sortOrder']} {entry['shotLabel']}：读取成片文件失败，未包含在压缩包中")
                     continue
-                label = sanitize_name(str(entry["shotLabel"] or "")) or "镜头"
+                label = final_image_export_safe_component(entry["shotLabel"]) or "镜头"
                 filename = f"{entry['sortOrder']:02d}_{label}{final_image_export_extension(entry['mimeType'], entry['originalFilename'])}"
                 info = zipfile.ZipInfo(f"{folder}/{filename}", date_time=date_time)
                 archive.writestr(info, content)
@@ -3434,6 +3456,7 @@ def download_final_image_archive(ids: str = Query(...)) -> StreamingResponse:
     total_images = sum(len(task["downloadable"]) for task in tasks)
     if not total_images:
         raise HTTPException(status_code=400, detail="所选任务没有可下载的成片")
+    assign_final_image_export_folders(tasks)
     with get_db() as db:
         log_event(
             db,
