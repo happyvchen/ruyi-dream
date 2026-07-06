@@ -41,6 +41,19 @@ from .image_derivatives import (
     existing_derivative_or_original,
     generate_image_derivatives,
 )
+from .generation_progress import (
+    ERROR_DELIVERY_FAILED,
+    ERROR_PROVIDER_FAILED,
+    ERROR_PROVIDER_TIMEOUT,
+    PHASE_DELIVER,
+    PHASE_GENERATE,
+    PHASE_PREPARE,
+    PHASE_QUEUE,
+    PHASE_UPLOAD,
+    AttemptProgressRecorder,
+    GenerationPhaseError,
+    classify_attempt_error,
+)
 from .image_provider import ImageProviderError, get_image_provider
 from .object_storage import (
     clean_key,
@@ -2650,7 +2663,7 @@ async def run_preview_generation(
                 finish_attempt(attempt_id, "CANCELLED", response_snapshot=provider_response, error_message=str(exc))
                 persist_attempt_provider_request_id(attempt_id, provider_response)
                 return
-        finish_attempt(attempt_id, "FAILED", response_snapshot=provider_response, error_message=str(exc))
+        finish_attempt(attempt_id, "FAILED", response_snapshot=provider_response, error_message=str(exc), error_code=classify_attempt_error(exc))
         persist_attempt_provider_request_id(attempt_id, provider_response)
         with get_db() as db:
             timestamp = now_iso()
@@ -3059,6 +3072,97 @@ async def retry_new_result_image(image_id: int, request: Request, payload: Gener
         job_key=final_set_job_key(result_set_id),
     )
     return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
+
+
+@app.post("/api/generation-result-images-new/{image_id}/redeliver")
+async def redeliver_new_result_image(image_id: int, request: Request) -> dict[str, Any]:
+    """重新回传：provider 已生成成功、仅回传失败的成片，零成本重新拉取结果。
+
+    与 /retry（重新生成）的区别：不创建新的 provider 任务、不消耗生成额度。
+    新 attempt 复制上一次的 providerRequestId 和响应快照，直接走恢复路径——
+    先确认 provider 状态，再执行回传。
+    """
+    task_id, result_set_id, attempt_id = queue_result_image_redelivery(image_id)
+    schedule_background_generation(
+        run_final_generation(
+            task_id,
+            result_set_id,
+            [image_id],
+            resume_attempts_by_image_id={image_id: attempt_id},
+            trigger="manual_redeliver",
+        ),
+        job_key=final_set_job_key(result_set_id),
+    )
+    return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
+
+
+def queue_result_image_redelivery(image_id: int) -> tuple[int, int, int]:
+    """校验并把回传失败的成片重新排队；返回 (task_id, result_set_id, attempt_id)。"""
+    with get_db() as db:
+        row = db.execute(
+            """
+            SELECT gri.*, grs.task_id, grs.id AS result_set_id, gt.status AS task_status
+            FROM generation_result_images_new gri
+            JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+            JOIN generation_tasks gt ON gt.id = grs.task_id
+            WHERE gri.id = ?
+            """,
+            (image_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="结果图不存在")
+        if row["task_status"] in RUNNING_GENERATION_TASK_STATUSES:
+            raise HTTPException(status_code=409, detail="当前任务正在生成中，请先取消或等待完成")
+        if row["status"] in {"QUEUED", "RUNNING"}:
+            raise HTTPException(status_code=409, detail="当前结果图仍在生成中")
+        if row["status"] != "FAILED":
+            raise HTTPException(status_code=409, detail="只有失败的成片才能重新回传")
+        last_attempt = (
+            db.execute("SELECT * FROM generation_attempts WHERE id = ?", (row["active_attempt_id"],)).fetchone()
+            if row["active_attempt_id"]
+            else None
+        )
+    if not last_attempt or not last_attempt["provider_request_id"]:
+        raise HTTPException(status_code=409, detail="该成片没有可回传的 provider 任务，请使用重新生成")
+    task_id = int(row["task_id"])
+    result_set_id = int(row["result_set_id"])
+    attempt_id = create_attempt(
+        "generation_result_image",
+        image_id,
+        str(last_attempt["provider"]),
+        request_snapshot=loads(last_attempt["request_snapshot_json"], {}),
+    )
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE generation_attempts
+            SET provider_request_id = ?, response_snapshot_json = ?, retry_of_attempt_id = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                last_attempt["provider_request_id"],
+                last_attempt["response_snapshot_json"],
+                int(last_attempt["id"]),
+                timestamp,
+                attempt_id,
+            ),
+        )
+        db.execute(
+            """
+            UPDATE generation_result_images_new
+            SET status = 'QUEUED', active_attempt_id = ?, locked_by = NULL, locked_until = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (attempt_id, timestamp, image_id),
+        )
+        db.execute("UPDATE generation_result_sets SET status = 'RUNNING', updated_at = ? WHERE id = ?", (timestamp, result_set_id))
+        db.execute(
+            "UPDATE generation_tasks SET status = 'FINAL_RUNNING', active_result_set_id = ?, updated_at = ? WHERE id = ?",
+            (result_set_id, timestamp, task_id),
+        )
+    return task_id, result_set_id, attempt_id
+
 
 @app.get("/api/generation-records")
 def list_new_generation_records(
@@ -4760,6 +4864,7 @@ def finish_attempt(
     response_snapshot: dict[str, Any] | None = None,
     output_asset_id: int | None = None,
     error_message: str | None = None,
+    error_code: str | None = None,
 ) -> None:
     timestamp = now_iso()
     with get_db() as db:
@@ -4767,7 +4872,7 @@ def finish_attempt(
             """
             UPDATE generation_attempts
             SET status = ?, completed_at = ?, failed_at = ?, cancelled_at = ?, response_snapshot_json = ?, output_asset_id = ?,
-                error_code = CASE WHEN ? = 'SUCCEEDED' THEN NULL ELSE error_code END,
+                error_code = CASE WHEN ? = 'SUCCEEDED' THEN NULL ELSE COALESCE(?, error_code) END,
                 error_message = ?, updated_at = ?
             WHERE id = ?
             """,
@@ -4779,6 +4884,7 @@ def finish_attempt(
                 dumps(response_snapshot or {}),
                 output_asset_id,
                 status,
+                error_code,
                 error_message,
                 timestamp,
                 attempt_id,
@@ -6890,28 +6996,51 @@ def schedule_background_generation(coro: Any, job_key: str | None = None) -> Non
     task.add_done_callback(report_failure)
 
 
+# 成片回传的退避重试间隔（秒）；总时长由 GENERATION_DELIVERY_TIMEOUT_SECONDS 限定。
+DELIVERY_RETRY_BACKOFF_SECONDS: tuple[int, ...] = (5, 15, 30, 60, 120, 300)
+
+# 状态查询连续失败时的退避上限（秒）：查询失败不判死，只放慢节奏。
+STATUS_CHECK_ERROR_BACKOFF_CAP_SECONDS = 30
+
+
 async def generate_image_asset(task_package: dict[str, Any], output_key: str, attempt_id: int | None = None) -> tuple[int, dict[str, Any]]:
+    """完整生成一张图：上传参考图 → 提交 → 轮询 → 成片回传。
+
+    健壮性契约（成功 > 慢 > 失败）：
+
+    - 状态查询失败绝不判死本张图，退避后继续轮询，直到生成阶段预算耗尽。
+    - provider 成功后进入回传阶段；回传失败在回传预算内自动退避重试，
+      耗尽后以 DELIVERY_FAILED 落败——providerRequestId 保留，可零成本重新回传。
+    - 阶段进度（上传张数、排队、生成、回传重试次数）持久化在 attempt 上，
+      前端轮询任务详情即可看到实时阶段和分段耗时。
+    """
     if not settings.is_image_provider_configured():
         raise RuntimeError(image_provider_missing_message())
+    progress = AttemptProgressRecorder(attempt_id)
     payload = get_attempt_provider_resume_snapshot(attempt_id)
     if payload is None:
-        payload = await asyncio.to_thread(run_image_provider_submit, task_package, output_key)
+        progress.begin(PHASE_PREPARE)
+        image_input_total = len(task_package.get("imageInputs") or [])
+        progress.begin(PHASE_UPLOAD, completed=0, total=image_input_total)
+
+        def report_upload(completed: int, total: int) -> None:
+            progress.update(PHASE_UPLOAD, completed=completed, total=total)
+
+        payload = await asyncio.to_thread(run_image_provider_submit, task_package, output_key, report_upload)
         persist_attempt_provider_progress(attempt_id, payload)
 
     if payload.get("status") != "SUCCEEDED" or not payload.get("outputPath"):
-        deadline = time.time() + settings.generation_image_timeout_seconds
-        while time.time() < deadline:
-            await asyncio.sleep(3)
-            try:
-                latest = await asyncio.to_thread(run_image_provider_refresh, payload, output_key)
-            except Exception as exc:
-                raise ImageProviderError(f"图片生成状态查询失败，providerRequestId={payload.get('providerRequestId')}: {exc}", payload) from exc
-            payload = {**payload, **latest}
-            persist_attempt_provider_progress(attempt_id, payload)
-            if payload.get("status") in {"SUCCEEDED", "FAILED", "CANCELLED"}:
-                break
+        if payload.get("status") not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+            payload = await poll_provider_until_terminal(payload, output_key, attempt_id, progress)
         if payload.get("status") != "SUCCEEDED":
-            raise ImageProviderError(f"图片生成未成功，providerRequestId={payload.get('providerRequestId')}: {payload}", payload)
+            error_code = ERROR_PROVIDER_FAILED if payload.get("status") in {"FAILED", "CANCELLED"} else ERROR_PROVIDER_TIMEOUT
+            raise ImageProviderError(
+                f"图片生成未成功，providerRequestId={payload.get('providerRequestId')}: {payload}",
+                payload,
+                error_code=error_code,
+            )
+        if not payload.get("outputPath"):
+            payload = await deliver_with_retries(payload, output_key, attempt_id, progress)
         payload = {**payload, "submissionMode": "completed"}
         persist_attempt_provider_progress(attempt_id, payload)
 
@@ -6930,19 +7059,90 @@ async def generate_image_asset(task_package: dict[str, Any], output_key: str, at
             "previewSize": payload.get("previewFileSize"),
         },
     )
+    progress.finish()
     return asset_id, payload
 
 
-def run_image_provider_generate(task_package: dict[str, Any], output_key: str) -> dict[str, Any]:
-    return asyncio.run(get_image_provider().generate(task_package, output_key))
+async def poll_provider_until_terminal(
+    payload: dict[str, Any],
+    output_key: str,
+    attempt_id: int | None,
+    progress: AttemptProgressRecorder,
+) -> dict[str, Any]:
+    """轮询 provider 直到终态或生成预算耗尽；单次查询失败只退避、不判死。"""
+    if progress.snapshot.get("current") != PHASE_GENERATE:
+        progress.begin(PHASE_QUEUE)
+    deadline = time.time() + settings.generation_image_timeout_seconds
+    consecutive_errors = 0
+    while time.time() < deadline:
+        await asyncio.sleep(min(3 * (2 ** min(consecutive_errors, 4)), STATUS_CHECK_ERROR_BACKOFF_CAP_SECONDS) if consecutive_errors else 3)
+        try:
+            latest = await asyncio.to_thread(run_image_provider_check, payload, output_key)
+        except Exception as exc:
+            consecutive_errors += 1
+            current_phase = PHASE_GENERATE if progress.snapshot.get("current") == PHASE_GENERATE else PHASE_QUEUE
+            progress.update(current_phase, statusCheckErrors=consecutive_errors, lastStatusCheckError=str(exc)[:500])
+            continue
+        consecutive_errors = 0
+        payload = {**payload, **latest}
+        persist_attempt_provider_progress(attempt_id, payload)
+        provider_status = str(payload.get("providerStatus") or "").upper()
+        if provider_status in {"IN_PROGRESS", "PROCESSING", "RUNNING"}:
+            progress.begin(PHASE_GENERATE)
+        if payload.get("status") in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+            break
+    return payload
 
 
-def run_image_provider_submit(task_package: dict[str, Any], output_key: str) -> dict[str, Any]:
-    return asyncio.run(get_image_provider().submit(task_package, output_key))
+async def deliver_with_retries(
+    payload: dict[str, Any],
+    output_key: str,
+    attempt_id: int | None,
+    progress: AttemptProgressRecorder,
+) -> dict[str, Any]:
+    """provider 已成功，把成片回传到对象存储；回传预算内自动退避重试。"""
+    progress.begin(PHASE_DELIVER, retries=0)
+    deadline = time.time() + settings.generation_delivery_timeout_seconds
+    retries = 0
+    last_error: Exception | None = None
+    while True:
+        try:
+            delivery = await asyncio.to_thread(run_image_provider_deliver, payload, output_key)
+            payload = {**payload, **delivery}
+            persist_attempt_provider_progress(attempt_id, payload)
+            return payload
+        except Exception as exc:
+            last_error = exc
+            wait = DELIVERY_RETRY_BACKOFF_SECONDS[min(retries, len(DELIVERY_RETRY_BACKOFF_SECONDS) - 1)]
+            retries += 1
+            progress.update(PHASE_DELIVER, retries=retries, lastError=str(exc)[:500])
+            if time.time() + wait > deadline:
+                break
+            await asyncio.sleep(wait)
+    raise ImageProviderError(
+        f"成片生成已在 provider 侧完成，但回传失败（已重试 {retries} 次），"
+        f"providerRequestId={payload.get('providerRequestId')}: {last_error}",
+        payload,
+        error_code=ERROR_DELIVERY_FAILED,
+    )
 
 
-def run_image_provider_refresh(provider_response: dict[str, Any], output_key: str) -> dict[str, Any]:
-    return asyncio.run(get_image_provider().refresh(provider_refresh_row(provider_response, output_key)))
+def run_image_provider_submit(task_package: dict[str, Any], output_key: str, on_progress: Any = None) -> dict[str, Any]:
+    return asyncio.run(get_image_provider().submit(task_package, output_key, on_progress))
+
+
+def run_image_provider_check(provider_response: dict[str, Any], output_key: str) -> dict[str, Any]:
+    return asyncio.run(get_image_provider().check(provider_refresh_row(provider_response, output_key)))
+
+
+def run_image_provider_deliver(provider_response: dict[str, Any], output_key: str) -> dict[str, Any]:
+    status_response = provider_response.get("providerStatusResponse")
+    return asyncio.run(
+        get_image_provider().deliver(
+            provider_refresh_row(provider_response, output_key),
+            status_response if isinstance(status_response, dict) else {},
+        )
+    )
 
 
 def provider_refresh_row(provider_response: dict[str, Any], output_key: str) -> dict[str, Any]:
@@ -7007,7 +7207,7 @@ async def generate_single_final_image(
                 finish_attempt(attempt_id, "CANCELLED", response_snapshot=provider_response, error_message=str(exc))
                 persist_attempt_provider_request_id(attempt_id, provider_response)
                 return 0
-        finish_attempt(attempt_id, "FAILED", response_snapshot=provider_response, error_message=str(exc))
+        finish_attempt(attempt_id, "FAILED", response_snapshot=provider_response, error_message=str(exc), error_code=classify_attempt_error(exc))
         persist_attempt_provider_request_id(attempt_id, provider_response)
         with get_db() as db:
             db.execute(
@@ -7414,7 +7614,9 @@ def serialize_attempt_summary(row: Any) -> dict[str, Any]:
         "startedAt": row["started_at"],
         "completedAt": row["completed_at"],
         "failedAt": row["failed_at"],
+        "errorCode": row_value(row, "error_code"),
         "errorMessage": row["error_message"],
+        "progress": loads(row_value(row, "progress_json"), None),
         "outputAssetId": row["output_asset_id"],
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],

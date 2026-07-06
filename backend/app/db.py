@@ -19,6 +19,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("033", "cleanup_legacy_tables_and_attempt_provider_request_ids", "migration_cleanup_legacy_tables_and_attempt_provider_request_ids"),
     ("034", "drop_prompt_replaced_config_tables", "migration_drop_prompt_replaced_config_tables"),
     ("035", "recover_legacy_shoot_scripts", "migration_recover_legacy_shoot_scripts"),
+    ("036", "add_attempt_progress_and_upload_cache", "migration_add_attempt_progress_and_upload_cache"),
 )
 
 PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
@@ -350,6 +351,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_cleanup_legacy_tables_and_attempt_provider_request_ids": migration_cleanup_legacy_tables_and_attempt_provider_request_ids,
         "migration_drop_prompt_replaced_config_tables": migration_drop_prompt_replaced_config_tables,
         "migration_recover_legacy_shoot_scripts": migration_recover_legacy_shoot_scripts,
+        "migration_add_attempt_progress_and_upload_cache": migration_add_attempt_progress_and_upload_cache,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -362,6 +364,28 @@ def run_migrations(db: sqlite3.Connection) -> None:
             """,
             (version, name, now_iso()),
         )
+
+
+def migration_add_attempt_progress_and_upload_cache(db: sqlite3.Connection) -> None:
+    """attempt 阶段进度 + provider 参考图上传缓存。
+
+    - generation_attempts.progress_json：阶段进度展示元数据（不是新的业务状态）。
+    - provider_upload_cache：同一 objectKey 的参考图在 TTL 内复用 provider URL，
+      避免 5 张成片并发时重复上传同一批参考图。
+    """
+    if not table_has_column(db, "generation_attempts", "progress_json"):
+        db.execute("ALTER TABLE generation_attempts ADD COLUMN progress_json TEXT")
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS provider_upload_cache (
+          provider TEXT NOT NULL,
+          object_key TEXT NOT NULL,
+          provider_url TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (provider, object_key)
+        )
+        """
+    )
 
 
 def migration_drop_legacy_generation_tables(db: sqlite3.Connection) -> None:

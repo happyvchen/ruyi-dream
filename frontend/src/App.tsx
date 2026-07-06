@@ -38,7 +38,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, isAuthExpiredError, mediaUrl } from './api'
-import type { AICallRecord, AIOperation, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptPlaceholder, SessionRole, StylingGarment } from './api'
+import type { AICallRecord, AIOperation, AttemptPhase, DeleteImpact, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptPlaceholder, SessionRole, StylingGarment } from './api'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 
@@ -1399,8 +1399,21 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
                 <button className="result-image-open" onClick={() => image.asset && setViewer(assetLightboxImage(image.asset, finalAssets))} title="放大查看">
                   <img src={mediaUrl(assetPreviewSrc(image.asset))} loading="lazy" alt={`最终成片 ${image.sortOrder}`} />
                 </button>
-              ) : <div className="image-placeholder">{statusText(image.status)}{image.activeAttempt && isAttemptRunning(image.activeAttempt) && <small>{formatDuration(elapsedSeconds(image.activeAttempt.startedAt || image.updatedAt))}</small>}</div>}
-              <div><span>#{image.sortOrder}</span>{image.asset && <a href={mediaUrl(assetOriginalSrc(image.asset))} target="_blank" rel="noreferrer"><Download size={15} /></a>}{!['QUEUED', 'RUNNING'].includes(image.status) && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id, userInstruction), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成"><RotateCcw size={14} /></button>}</div>
+              ) : (
+                <div className="image-placeholder">
+                  {image.activeAttempt ? attemptStatusText(image.activeAttempt) : statusText(image.status)}
+                  {image.activeAttempt && isAttemptRunning(image.activeAttempt) && (
+                    <small>
+                      {(() => {
+                        const phase = currentAttemptPhase(image.activeAttempt)
+                        const total = formatDuration(elapsedSeconds(image.activeAttempt.startedAt || image.updatedAt))
+                        return phase ? `${attemptPhaseText(phase)} · ${total}` : total
+                      })()}
+                    </small>
+                  )}
+                </div>
+              )}
+              <div><span>#{image.sortOrder}</span>{image.asset && <a href={mediaUrl(assetOriginalSrc(image.asset))} target="_blank" rel="noreferrer"><Download size={15} /></a>}{image.status === 'FAILED' && image.activeAttempt?.errorCode === 'DELIVERY_FAILED' && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('重新回传成片中...', () => api.redeliverResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新回传（图已生成，仅重新拉取，不消耗生成额度）"><RefreshCw size={14} /></button>}{!['QUEUED', 'RUNNING'].includes(image.status) && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id, userInstruction), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成"><RotateCcw size={14} /></button>}</div>
             </div>
           )) : <EmptyState title="尚未生成最终图" text="点击生成成片后会生成前 5 个镜头。" />}
         </div>
@@ -3073,16 +3086,76 @@ function AIOperationList({ operations, compact = false }: { operations: AIOperat
 function AIOperationCard({ operation, now, compact, index }: { operation: AIOperation; now: number; compact?: boolean; index: number }) {
   const running = isAttemptRunning(operation)
   const seconds = elapsedSeconds(operation.startedAt || operation.createdAt, now, operation.completedAt || operation.failedAt)
+  const phase = running ? currentAttemptPhase(operation) : null
+  const breakdown = !running ? attemptPhaseBreakdown(operation) : ''
   return (
     <div className={`ai-operation-card ${running ? 'is-running' : ''} ${compact ? 'compact' : ''}`}>
       <div className="ai-operation-icon">{running ? <Loader2 size={15} className="spin" /> : <Clock3 size={15} />}</div>
       <div>
         <strong>{operationLabel(operation, index)}</strong>
-        <span>{statusText(operation.status)}</span>
+        <span>
+          {attemptStatusText(operation)}
+          {phase ? ` · ${attemptPhaseText(phase)} ${formatDuration(elapsedSeconds(phase.startedAt, now))}` : ''}
+        </span>
+        {!compact && breakdown && <span className="operation-breakdown">{breakdown}</span>}
       </div>
       <time>{formatDuration(seconds)}</time>
     </div>
   )
+}
+
+const ATTEMPT_PHASE_LABELS: Record<string, string> = {
+  prepare: '准备输入',
+  upload: '参考图上传',
+  queue: '排队中',
+  generate: 'AI 生成中',
+  deliver: '成片回传中',
+}
+
+function attemptStatusText(operation: AIOperation) {
+  if (operation.status === 'FAILED' && operation.errorCode === 'DELIVERY_FAILED') return '已生成，回传失败'
+  if (operation.status === 'FAILED' && operation.errorCode === 'PROVIDER_TIMEOUT') return '生成超时'
+  return statusText(operation.status)
+}
+
+function attemptPhaseText(entry: AttemptPhase) {
+  const base = ATTEMPT_PHASE_LABELS[entry.phase] ?? entry.phase
+  const detail = (entry.detail ?? {}) as Record<string, unknown>
+  if (entry.phase === 'upload') {
+    const completed = Number(detail.completed)
+    const total = Number(detail.total)
+    if (Number.isFinite(completed) && Number.isFinite(total) && total > 0) {
+      return `${base} ${Math.min(completed, total)}/${total}`
+    }
+  }
+  if (entry.phase === 'deliver') {
+    const retries = Number(detail.retries)
+    if (Number.isFinite(retries) && retries > 0) return `${base}（第 ${retries} 次重试）`
+  }
+  const statusCheckErrors = Number(detail.statusCheckErrors)
+  if (Number.isFinite(statusCheckErrors) && statusCheckErrors > 0) return `${base}（网络波动，重试 ${statusCheckErrors} 次）`
+  return base
+}
+
+function currentAttemptPhase(operation: AIOperation): AttemptPhase | null {
+  const progress = operation.progress
+  if (!progress?.current || !progress.phases?.length) return null
+  for (let index = progress.phases.length - 1; index >= 0; index -= 1) {
+    if (progress.phases[index].phase === progress.current) return progress.phases[index]
+  }
+  return null
+}
+
+function attemptPhaseBreakdown(operation: AIOperation) {
+  const phases = operation.progress?.phases ?? []
+  return phases
+    .filter((entry) => entry.phase !== 'prepare' && entry.startedAt)
+    .map((entry) => {
+      const seconds = elapsedSeconds(entry.startedAt, Date.now(), entry.endedAt || operation.completedAt || operation.failedAt)
+      return `${ATTEMPT_PHASE_LABELS[entry.phase] ?? entry.phase} ${formatDuration(seconds)}`
+    })
+    .filter(Boolean)
+    .join(' · ')
 }
 
 function useTicker(enabled: boolean) {

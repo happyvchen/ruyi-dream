@@ -87,6 +87,18 @@ export type StylingGarment = {
   updatedAt: string
 }
 
+export type AttemptPhase = {
+  phase: string
+  startedAt?: string | null
+  endedAt?: string | null
+  detail?: Record<string, unknown>
+}
+
+export type AttemptProgress = {
+  current?: string | null
+  phases?: AttemptPhase[]
+}
+
 export type AIOperation = {
   id: number
   taskId?: number | null
@@ -98,7 +110,9 @@ export type AIOperation = {
   startedAt?: string | null
   completedAt?: string | null
   failedAt?: string | null
+  errorCode?: string | null
   errorMessage?: string | null
+  progress?: AttemptProgress | null
   outputAssetId?: number | null
   createdAt?: string | null
   updatedAt?: string | null
@@ -487,6 +501,8 @@ export const api = {
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/auto-run-final`, { method: 'POST' }),
   retryResultImage: (id: number, userInstruction?: string) =>
     request<{ item: GenerationTask }>(`/api/generation-result-images-new/${id}/retry`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
+  redeliverResultImage: (id: number) =>
+    request<{ item: GenerationTask }>(`/api/generation-result-images-new/${id}/redeliver`, { method: 'POST' }),
   listRecords: (options?: { limit?: number; offset?: number; includeArchived?: boolean }) =>
     request<Paginated<GenerationTask>>(params('/api/generation-records', options ?? {})),
   getRecord: (id: number, includeDebug = false) =>
