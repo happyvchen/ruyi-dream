@@ -20,6 +20,7 @@
 | `generation_result_sets` | `GenerationResultSet` | 最终成片集合 |
 | `generation_result_images_new` | `GenerationResultImage` | 前 5 张最终图 |
 | `generation_attempts` | `GenerationAttempt` | AI/provider 请求响应快照 |
+| `provider_upload_cache` | - | 参考图 provider 上传缓存（objectKey → provider URL，TTL 复用） |
 | `prompt_configs` | `PromptConfig` | 可维护 Prompt 模板 |
 | `event_logs` | `EventLog` | 业务事件 |
 | `schema_migrations` | SchemaVersion | 已执行迁移 |
@@ -47,7 +48,8 @@ Image-2 阶段写入：
 - `generation_previews`：一张 3x2 分镜预览总图。
 - `generation_result_sets`：一次最终图生成批次。
 - `generation_result_images_new`：前 5 张最终图状态和当前资产。
-- `generation_attempts`：每次 AI/provider 调用的 request/response、provider id、错误和输出资产。
+- `generation_attempts`：每次 AI/provider 调用的 request/response、provider id、错误和输出资产。`progress_json` 保存阶段进度（准备/上传/排队/生成/回传及分段起止时间），仅作展示元数据，不是业务状态；`error_code` 保存失败分类（`UPLOAD_FAILED`/`PROVIDER_FAILED`/`PROVIDER_TIMEOUT`/`DELIVERY_FAILED`）。`DELIVERY_FAILED` 表示 provider 已生成成功、仅结果回传失败，可通过 redeliver 零成本重新拉取。
+- `provider_upload_cache`：同一 objectKey 的参考图在 TTL 内复用 provider 上传 URL，避免同组成片并发时重复上传。
 
 ## Prompt 配置
 

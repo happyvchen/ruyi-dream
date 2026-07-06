@@ -1077,6 +1077,17 @@ GET /api/generation-tasks/{id}/status
 - 支持整组重新生成。
 - 支持单张重生，不影响其他成片。
 
+### 16.6 成片阶段进度与回传健壮性
+
+阶段进度只是 attempt 上的展示元数据（`generation_attempts.progress_json`），不是新的业务状态；`GenerationResultImage.status` 仍然只有 QUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED。
+
+- 单张成片执行拆为固定阶段：准备输入 → 参考图上传（含 n/m 进度）→ 排队 → AI 生成 → 成片回传。前端展示当前阶段、当前阶段耗时、完成后的总耗时与分段耗时。
+- 失败必须分类落库（`generation_attempts.error_code`）：`UPLOAD_FAILED` / `PROVIDER_FAILED` / `PROVIDER_TIMEOUT` / `DELIVERY_FAILED`。
+- 健壮性原则是成功 > 慢 > 失败：provider 状态查询失败绝不判死单张图，退避后继续轮询直到生成预算耗尽；provider 已成功但回传（下载成片、写对象存储、生成缩略图）失败时，在回传预算内自动退避重试。
+- 回传彻底失败以 `DELIVERY_FAILED` 落败，providerRequestId 与 provider 响应快照必须保留；用户可"重新回传"（不创建新的 provider 任务、不消耗生成额度），与"重新生成"是两个不同动作。
+- 参考图上传按 objectKey 在 provider 侧缓存复用（TTL 内），避免同组 5 张成片重复上传同一批参考图。
+- 各阶段有独立超时预算（上传 / 生成 / 回传），由环境变量配置。
+
 ## 17. 不做范围
 
 - 不做品牌样本库 / Brand Style Index。

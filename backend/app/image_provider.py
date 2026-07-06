@@ -4,16 +4,22 @@ import json
 import mimetypes
 import os
 import tempfile
+import threading
 import time
 from io import BytesIO
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from . import config
+from .db import get_db, now_iso
+from .generation_progress import ERROR_DELIVERY_FAILED, ERROR_UPLOAD_FAILED, GenerationPhaseError
 from .image_derivatives import generate_image_derivatives
 from .object_storage import get_bytes, object_exists, put_bytes
+
+# 上传进度回调：on_progress(completed, total)
+UploadProgressCallback = Callable[[int, int], None]
 
 
 def get_settings() -> config.Settings:
@@ -21,13 +27,31 @@ def get_settings() -> config.Settings:
 
 
 class ImageGenerationProvider:
+    """图片生成 provider 的步骤化接口。
+
+    生命周期被拆成三个独立步骤，失败语义各不相同：
+
+    - ``submit``：上传参考图并创建 provider 任务（失败=UPLOAD/PROVIDER 问题）。
+    - ``check``：只查询任务状态，绝不下载结果（失败=瞬时网络问题，可无限容忍到超时）。
+    - ``deliver``：把已成功的结果图下载回对象存储并生成缩略图
+      （失败=回传问题，provider 已成功且已计费，必须可零成本重试）。
+
+    重试/退避/超时策略统一由调用方（main.generate_image_asset）持有，
+    provider 只做单次动作。
+    """
+
     def output_suffix(self) -> str:
         return ".png"
 
     async def generate(self, task_package: dict[str, Any], output_path: str) -> dict[str, Any]:
         raise NotImplementedError
 
-    async def submit(self, task_package: dict[str, Any], output_path: str) -> dict[str, Any]:
+    async def submit(
+        self,
+        task_package: dict[str, Any],
+        output_path: str,
+        on_progress: UploadProgressCallback | None = None,
+    ) -> dict[str, Any]:
         response = await self.generate(task_package, output_path)
         return {
             **response,
@@ -39,14 +63,18 @@ class ImageGenerationProvider:
             "providerStatusResponse": response.get("providerResponse"),
         }
 
-    async def refresh(self, image_row: Any) -> dict[str, Any]:
+    async def check(self, image_row: Any) -> dict[str, Any]:
         return {"status": image_row["status"], "providerStatus": image_row["provider_status"] if "provider_status" in image_row.keys() else None}
+
+    async def deliver(self, image_row: Any, status_response: dict[str, Any]) -> dict[str, Any]:
+        raise NotImplementedError
 
 
 class ImageProviderError(RuntimeError):
-    def __init__(self, message: str, provider_response: dict[str, Any] | None = None):
+    def __init__(self, message: str, provider_response: dict[str, Any] | None = None, error_code: str | None = None):
         super().__init__(message)
         self.provider_response = provider_response or {}
+        self.error_code = error_code
 
 
 class GPTImage2FalProvider(ImageGenerationProvider):
@@ -67,23 +95,30 @@ class GPTImage2FalProvider(ImageGenerationProvider):
         }
         while time.time() < deadline:
             time.sleep(3)
-            latest = await self.refresh(image_row)
+            latest = await self.check(image_row)
             if latest.get("status") in {"SUCCEEDED", "FAILED", "CANCELLED"}:
                 break
         if latest.get("status") != "SUCCEEDED":
             raise RuntimeError(f"fal 生成未成功: {latest}")
+        delivery = await self.deliver(image_row, latest.get("providerStatusResponse") or {})
         return {
             **submit_response,
             **latest,
+            **delivery,
             "submissionMode": "completed",
         }
 
-    async def submit(self, task_package: dict[str, Any], output_path: str) -> dict[str, Any]:
+    async def submit(
+        self,
+        task_package: dict[str, Any],
+        output_path: str,
+        on_progress: UploadProgressCallback | None = None,
+    ) -> dict[str, Any]:
         settings = get_settings()
         if not settings.fal_key:
             raise RuntimeError("FAL_KEY 未配置，无法调用 GPT Image-2 fal 接口")
 
-        uploaded_inputs, image_urls = prepare_fal_image_inputs(task_package.get("imageInputs", []))
+        uploaded_inputs, image_urls = prepare_fal_image_inputs(task_package.get("imageInputs", []), on_progress)
 
         provider_request = build_fal_request_snapshot(task_package, image_urls)
         submit_response = post_json(settings.gpt_image2_queue_url, provider_request, settings.fal_key, timeout=60)
@@ -108,11 +143,10 @@ class GPTImage2FalProvider(ImageGenerationProvider):
             "providerStatusResponse": submit_response,
         }
 
-    async def refresh(self, image_row: Any) -> dict[str, Any]:
+    async def check(self, image_row: Any) -> dict[str, Any]:
         settings = get_settings()
         provider_urls = json.loads(image_row["provider_urls_json"] or "{}")
         status_url = provider_urls.get("statusUrl")
-        response_url = provider_urls.get("responseUrl")
         if not status_url:
             return {"status": "FAILED", "providerStatus": "MISSING_STATUS_URL", "error": "缺少 fal status_url"}
 
@@ -124,32 +158,25 @@ class GPTImage2FalProvider(ImageGenerationProvider):
             "providerStatus": provider_status,
             "providerStatusResponse": status_response,
         }
-        if next_status == "SUCCEEDED":
-            if not response_url:
-                result.update({"status": "FAILED", "providerStatus": "MISSING_RESPONSE_URL", "error": "缺少 fal response_url"})
-                return result
-            response = get_json(response_url, settings.fal_key, timeout=60)
-            images = response.get("images") if isinstance(response, dict) else None
-            output_url = images[0].get("url") if images else None
-            if not output_url:
-                result.update({"status": "FAILED", "error": f"fal response 缺少图片 URL: {response}", "providerResponse": response})
-                return result
-            output_key = str(image_row["output_path"])
-            content, content_type = download_bytes(output_url)
-            put_bytes(output_key, content, content_type or f"image/{settings.gpt_image2_output_format}")
-            derivative = generate_image_derivatives(output_key, content)
-            result.update({
-                "providerResponse": response,
-                "outputPath": output_key,
-                "fileSize": len(content),
-                "thumbPath": derivative.get("thumb"),
-                "previewPath": derivative.get("preview"),
-                "thumbFileSize": derivative.get("thumbSize"),
-                "previewFileSize": derivative.get("previewSize"),
-            })
-        elif next_status == "FAILED":
+        if next_status == "FAILED":
             result["error"] = status_response.get("error") or status_response.get("message") or "fal 生成失败"
         return result
+
+    async def deliver(self, image_row: Any, status_response: dict[str, Any]) -> dict[str, Any]:
+        settings = get_settings()
+        provider_urls = json.loads(image_row["provider_urls_json"] or "{}")
+        response_url = provider_urls.get("responseUrl")
+        if not response_url:
+            raise GenerationPhaseError("缺少 fal response_url，无法回传成片", ERROR_DELIVERY_FAILED)
+        try:
+            response = get_json(response_url, settings.fal_key, timeout=60)
+        except Exception as exc:
+            raise GenerationPhaseError(f"fal 结果查询失败: {exc}", ERROR_DELIVERY_FAILED) from exc
+        images = response.get("images") if isinstance(response, dict) else None
+        output_url = images[0].get("url") if images else None
+        if not output_url:
+            raise GenerationPhaseError(f"fal response 缺少图片 URL: {response}", ERROR_DELIVERY_FAILED)
+        return store_delivered_image(str(image_row["output_path"]), str(output_url), response)
 
 
 class GPTImage2ToapisProvider(ImageGenerationProvider):
@@ -163,32 +190,37 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
             raise RuntimeError(f"toapis 创建任务响应缺少 id: {submit_response}")
 
         deadline = time.time() + get_settings().generation_image_timeout_seconds
+        image_row = {"provider_request_id": task_id, "output_path": output_path}
         latest: dict[str, Any] = submit_response
         while time.time() < deadline:
             time.sleep(3)
             try:
-                latest = await self.refresh({"provider_request_id": task_id, "output_path": output_path})
-            except Exception as exc:
-                raise ImageProviderError(
-                    f"toapis 状态查询失败，providerRequestId={task_id}: {exc}",
-                    {**submit_response, "providerStatusResponse": latest},
-                ) from exc
+                latest = await self.check(image_row)
+            except Exception:
+                continue
             if latest.get("status") in {"SUCCEEDED", "FAILED", "CANCELLED"}:
                 break
         if latest.get("status") != "SUCCEEDED":
             raise ImageProviderError(f"toapis 生成未成功，providerRequestId={task_id}: {latest}", {**submit_response, **latest})
+        delivery = await self.deliver(image_row, latest.get("providerStatusResponse") or {})
         return {
             **submit_response,
             **latest,
+            **delivery,
             "submissionMode": "completed",
         }
 
-    async def submit(self, task_package: dict[str, Any], output_path: str) -> dict[str, Any]:
+    async def submit(
+        self,
+        task_package: dict[str, Any],
+        output_path: str,
+        on_progress: UploadProgressCallback | None = None,
+    ) -> dict[str, Any]:
         settings = get_settings()
         if not settings.toapis_api_key:
             raise RuntimeError("TOAPIS_API_KEY 未配置，无法调用 GPT Image-2 toapis 接口")
 
-        uploaded_inputs, image_urls = prepare_toapis_image_inputs(task_package.get("imageInputs", []))
+        uploaded_inputs, image_urls = prepare_toapis_image_inputs(task_package.get("imageInputs", []), on_progress)
         provider_request = build_toapis_request_snapshot(task_package, image_urls)
         submit_response = post_json(
             toapis_url("/v1/images/generations"),
@@ -214,7 +246,7 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
             "providerStatusResponse": submit_response,
         }
 
-    async def refresh(self, image_row: Any) -> dict[str, Any]:
+    async def check(self, image_row: Any) -> dict[str, Any]:
         settings = get_settings()
         task_id = image_row["provider_request_id"]
         if not task_id:
@@ -235,32 +267,112 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
             "providerRequestId": task_id,
             "providerStatusResponse": status_response,
         }
-        if next_status == "SUCCEEDED":
-            output_url = extract_toapis_output_url(status_response)
-            if not output_url:
-                result.update({"status": "FAILED", "error": f"toapis response 缺少图片 URL: {status_response}", "providerResponse": status_response})
-                return result
-            output_key = str(image_row["output_path"])
-            try:
-                content, content_type = download_bytes(output_url)
-                put_bytes(output_key, content, content_type or f"image/{settings.gpt_image2_output_format}")
-                derivative = generate_image_derivatives(output_key, content)
-            except Exception as exc:
-                result.update({"status": "FAILED", "error": f"toapis 结果图下载失败: {exc}", "providerResponse": status_response})
-                return result
-            result.update({
-                "providerResponse": status_response,
-                "outputPath": output_key,
-                "fileSize": len(content),
-                "thumbPath": derivative.get("thumb"),
-                "previewPath": derivative.get("preview"),
-                "thumbFileSize": derivative.get("thumbSize"),
-                "previewFileSize": derivative.get("previewSize"),
-            })
-        elif next_status == "FAILED":
+        if next_status == "FAILED":
             error = status_response.get("error") if isinstance(status_response.get("error"), dict) else {}
             result["error"] = error.get("message") or status_response.get("fail_reason") or status_response.get("message") or "toapis 生成失败"
         return result
+
+    async def deliver(self, image_row: Any, status_response: dict[str, Any]) -> dict[str, Any]:
+        output_url = extract_toapis_output_url(status_response)
+        if not output_url:
+            # 状态快照里没有 URL 时（如恢复现场），重新查询一次最新状态。
+            refreshed = await self.check(image_row)
+            status_response = refreshed.get("providerStatusResponse") or {}
+            output_url = extract_toapis_output_url(status_response)
+        if not output_url:
+            raise GenerationPhaseError(f"toapis response 缺少图片 URL: {status_response}", ERROR_DELIVERY_FAILED)
+        return store_delivered_image(str(image_row["output_path"]), str(output_url), status_response)
+
+
+def store_delivered_image(output_key: str, output_url: str, provider_response: dict[str, Any]) -> dict[str, Any]:
+    """单次成片回传动作：下载→写对象存储→生成缩略图。
+
+    只做一次尝试（单次下载请求超时较短），退避重试由调用方统一控制；
+    任何失败都抛 GenerationPhaseError(DELIVERY_FAILED)，provider 侧成功的事实不丢。
+    """
+    settings = get_settings()
+    try:
+        content, content_type = download_bytes(
+            output_url,
+            timeout=settings.generation_download_request_timeout_seconds,
+            attempts=1,
+        )
+        put_bytes(output_key, content, content_type or f"image/{settings.gpt_image2_output_format}")
+        derivative = generate_image_derivatives(output_key, content)
+    except GenerationPhaseError:
+        raise
+    except Exception as exc:
+        raise GenerationPhaseError(f"成片回传失败: {exc}", ERROR_DELIVERY_FAILED) from exc
+    return {
+        "providerResponse": provider_response,
+        "outputPath": output_key,
+        "fileSize": len(content),
+        "thumbPath": derivative.get("thumb"),
+        "previewPath": derivative.get("preview"),
+        "thumbFileSize": derivative.get("thumbSize"),
+        "previewFileSize": derivative.get("previewSize"),
+    }
+
+
+# -- provider 参考图上传缓存 -------------------------------------------------
+#
+# 同一 objectKey 的参考图（主推款、搭配服装、模特参考图、分镜预览）在 5 张成片
+# 并发生成时会被重复上传 5 次。缓存 + 进程内按 key 加锁：第一个上传，其余复用。
+
+_upload_key_locks: dict[tuple[str, str], threading.Lock] = {}
+_upload_key_locks_guard = threading.Lock()
+
+
+def _upload_lock_for(provider: str, object_key: str) -> threading.Lock:
+    with _upload_key_locks_guard:
+        return _upload_key_locks.setdefault((provider, object_key), threading.Lock())
+
+
+def get_cached_provider_upload_url(provider: str, object_key: str) -> str | None:
+    ttl = get_settings().provider_upload_cache_ttl_seconds
+    with get_db() as db:
+        row = db.execute(
+            "SELECT provider_url, created_at FROM provider_upload_cache WHERE provider = ? AND object_key = ?",
+            (provider, object_key),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            from datetime import datetime, timezone
+
+            created = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+            age = (datetime.now(timezone.utc) - created).total_seconds()
+        except ValueError:
+            age = ttl + 1
+        if age > ttl:
+            db.execute(
+                "DELETE FROM provider_upload_cache WHERE provider = ? AND object_key = ?",
+                (provider, object_key),
+            )
+            return None
+        return str(row["provider_url"])
+
+
+def store_provider_upload_url(provider: str, object_key: str, provider_url: str) -> None:
+    with get_db() as db:
+        db.execute(
+            """
+            INSERT INTO provider_upload_cache (provider, object_key, provider_url, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(provider, object_key) DO UPDATE SET provider_url = excluded.provider_url, created_at = excluded.created_at
+            """,
+            (provider, object_key, provider_url, now_iso()),
+        )
+
+
+def upload_object_with_cache(provider: str, object_key: str, uploader: Callable[[], str]) -> str:
+    with _upload_lock_for(provider, object_key):
+        cached = get_cached_provider_upload_url(provider, object_key)
+        if cached:
+            return cached
+        provider_url = uploader()
+        store_provider_upload_url(provider, object_key, provider_url)
+        return provider_url
 
 
 def build_fal_request_snapshot(task_package: dict[str, Any], image_urls: list[str]) -> dict[str, Any]:
@@ -319,9 +431,17 @@ def build_provider_reference_image_manifest(image_inputs: list[dict[str, Any]], 
     return manifest
 
 
-def upload_image_inputs(image_inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def upload_image_inputs(
+    image_inputs: list[dict[str, Any]],
+    on_progress: UploadProgressCallback | None = None,
+) -> list[dict[str, Any]]:
     uploaded: list[dict[str, Any]] = []
-    for item in image_inputs:
+    total = len(image_inputs)
+    deadline = time.time() + get_settings().generation_upload_timeout_seconds
+    for index, item in enumerate(image_inputs):
+        if on_progress:
+            on_progress(index, total)
+        ensure_upload_deadline(deadline, item)
         object_key = item.get("objectKey")
         source_url = item.get("providerUrl") or item.get("url")
         next_item = dict(item)
@@ -331,7 +451,11 @@ def upload_image_inputs(image_inputs: list[dict[str, Any]]) -> list[dict[str, An
             continue
         if object_key and object_exists(str(object_key)):
             next_item["sourceObjectKey"] = str(object_key)
-            next_item["providerUrl"] = upload_object_to_fal(str(object_key), str(item.get("filename") or object_key))
+            next_item["providerUrl"] = upload_object_with_cache(
+                "fal",
+                str(object_key),
+                lambda key=str(object_key), name=str(item.get("filename") or object_key): upload_object_to_fal(key, name),
+            )
             uploaded.append(next_item)
             continue
         if source_url and str(source_url).startswith(("http://", "https://")):
@@ -340,11 +464,25 @@ def upload_image_inputs(image_inputs: list[dict[str, Any]]) -> list[dict[str, An
             uploaded.append(next_item)
             continue
         uploaded.append(next_item)
+    if on_progress:
+        on_progress(total, total)
     return uploaded
 
 
-def prepare_fal_image_inputs(image_inputs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
-    uploaded_inputs = upload_image_inputs(image_inputs)
+def ensure_upload_deadline(deadline: float, item: dict[str, Any]) -> None:
+    if time.time() > deadline:
+        label = str(item.get("role") or item.get("filename") or item.get("objectKey") or "reference-image")
+        raise GenerationPhaseError(
+            f"参考图上传超出总预算（{get_settings().generation_upload_timeout_seconds}s），未完成：{label}",
+            ERROR_UPLOAD_FAILED,
+        )
+
+
+def prepare_fal_image_inputs(
+    image_inputs: list[dict[str, Any]],
+    on_progress: UploadProgressCallback | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    uploaded_inputs = upload_image_inputs(image_inputs, on_progress)
     missing_roles = [
         str(item.get("role") or item.get("filename") or index)
         for index, item in enumerate(uploaded_inputs, start=1)
@@ -362,8 +500,11 @@ def prepare_fal_image_inputs(image_inputs: list[dict[str, Any]]) -> tuple[list[d
     return uploaded_inputs, image_urls
 
 
-def prepare_toapis_image_inputs(image_inputs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
-    uploaded_inputs = upload_toapis_image_inputs(image_inputs)
+def prepare_toapis_image_inputs(
+    image_inputs: list[dict[str, Any]],
+    on_progress: UploadProgressCallback | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    uploaded_inputs = upload_toapis_image_inputs(image_inputs, on_progress)
     missing_roles = [
         str(item.get("role") or item.get("filename") or index)
         for index, item in enumerate(uploaded_inputs, start=1)
@@ -377,9 +518,17 @@ def prepare_toapis_image_inputs(image_inputs: list[dict[str, Any]]) -> tuple[lis
     return uploaded_inputs, image_urls
 
 
-def upload_toapis_image_inputs(image_inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def upload_toapis_image_inputs(
+    image_inputs: list[dict[str, Any]],
+    on_progress: UploadProgressCallback | None = None,
+) -> list[dict[str, Any]]:
     uploaded: list[dict[str, Any]] = []
-    for item in image_inputs:
+    total = len(image_inputs)
+    deadline = time.time() + get_settings().generation_upload_timeout_seconds
+    for index, item in enumerate(image_inputs):
+        if on_progress:
+            on_progress(index, total)
+        ensure_upload_deadline(deadline, item)
         object_key = item.get("objectKey")
         source_url = item.get("providerUrl") or item.get("url")
         next_item = dict(item)
@@ -389,7 +538,11 @@ def upload_toapis_image_inputs(image_inputs: list[dict[str, Any]]) -> list[dict[
             continue
         if object_key and object_exists(str(object_key)):
             next_item["sourceObjectKey"] = str(object_key)
-            next_item["providerUrl"] = upload_object_to_toapis(str(object_key), str(item.get("filename") or object_key))
+            next_item["providerUrl"] = upload_object_with_cache(
+                "toapis",
+                str(object_key),
+                lambda key=str(object_key), name=str(item.get("filename") or object_key): upload_object_to_toapis(key, name),
+            )
             uploaded.append(next_item)
             continue
         if source_url and str(source_url).startswith(("http://", "https://")):
@@ -398,6 +551,8 @@ def upload_toapis_image_inputs(image_inputs: list[dict[str, Any]]) -> list[dict[
             uploaded.append(next_item)
             continue
         uploaded.append(next_item)
+    if on_progress:
+        on_progress(total, total)
     return uploaded
 
 
@@ -689,7 +844,7 @@ def post_multipart_file(
     return payload
 
 
-def download_bytes(url: str) -> tuple[bytes, str | None]:
+def download_bytes(url: str, timeout: int = 300, attempts: int = 3) -> tuple[bytes, str | None]:
     if url.startswith(("http://", "https://")):
         try:
             import requests
@@ -697,18 +852,19 @@ def download_bytes(url: str) -> tuple[bytes, str | None]:
             pass
         else:
             last_error: Exception | None = None
-            for _ in range(3):
+            for index in range(max(1, attempts)):
                 try:
-                    response = requests_call_with_retries(requests.get, url, timeout=300)
+                    response = requests.get(url, timeout=timeout)
                     response.raise_for_status()
                     return response.content, response.headers.get("content-type")
                 except requests.RequestException as exc:
                     last_error = exc
-                    time.sleep(1)
+                    if index < attempts - 1:
+                        time.sleep(1 + index)
             if last_error:
                 raise last_error
     request = Request(url, method="GET")
-    with urlopen(request, timeout=300) as response:
+    with urlopen(request, timeout=timeout) as response:
         return response.read(), response.headers.get_content_type()
 
 

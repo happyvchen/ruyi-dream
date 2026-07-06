@@ -49,6 +49,7 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。`/api/g
 | `/api/generation-tasks/{id}/generate-final` | POST | 并发生成前 5 张成片，可携带本次用户介入要求 |
 | `/api/generation-tasks/{id}/auto-run-final` | POST | 一键成片：复用已有有效中间结果并自动完成后续步骤 |
 | `/api/generation-result-images-new/{image_id}/retry` | POST | 重生单张最终图，可携带本次用户介入要求 |
+| `/api/generation-result-images-new/{image_id}/redeliver` | POST | 重新回传单张最终图：provider 已成功、仅回传失败时零成本重新拉取结果，不创建新的 provider 任务 |
 | `/api/generation-records` | GET | 生成记录列表 |
 
 所有会调用外部 AI/provider 的端点都必须由用户动作触发；本地验证和测试不得调用外部 AI/provider。`auto-run-final` 由一次用户动作触发，但内部仍按现有阶段创建独立 attempt，并在 request snapshot 中记录 `invocation.mode = auto_run`。

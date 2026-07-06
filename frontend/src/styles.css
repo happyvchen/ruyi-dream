@@ -805,6 +805,13 @@ h1, h2, h3, p { margin: 0; }
   color: #64748b;
   font-size: 12px;
 }
+.ai-operation-card .operation-breakdown {
+  overflow: hidden;
+  color: #94a3b8;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .ai-operation-card time {
   min-width: 48px;
   color: #0369a1;

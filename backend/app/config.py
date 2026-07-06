@@ -89,6 +89,14 @@ class Settings:
     generation_image_timeout_seconds = int(os.getenv("GENERATION_IMAGE_TIMEOUT_SECONDS", str(30 * 60)))
     generation_submit_retry_limit = int(os.getenv("GENERATION_SUBMIT_RETRY_LIMIT", "3"))
     generation_status_retry_limit = int(os.getenv("GENERATION_STATUS_RETRY_LIMIT", "6"))
+    # 参考图上传阶段总预算（不含单文件请求自身的超时）。
+    generation_upload_timeout_seconds = int(os.getenv("GENERATION_UPLOAD_TIMEOUT_SECONDS", str(5 * 60)))
+    # 成片回传（下载+入库+缩略图）阶段总预算；provider 已成功，此阶段内自动退避重试。
+    generation_delivery_timeout_seconds = int(os.getenv("GENERATION_DELIVERY_TIMEOUT_SECONDS", str(15 * 60)))
+    # 成片单次下载请求超时。低带宽环境下宁可"较短超时+多次重试"，避免单次 300s 挂死。
+    generation_download_request_timeout_seconds = int(os.getenv("GENERATION_DOWNLOAD_REQUEST_TIMEOUT_SECONDS", "120"))
+    # 参考图 provider 上传缓存 TTL：同一 objectKey 在 TTL 内复用已上传 URL。
+    provider_upload_cache_ttl_seconds = int(os.getenv("PROVIDER_UPLOAD_CACHE_TTL_SECONDS", str(6 * 60 * 60)))
     cors_origins = [
         origin.strip()
         for origin in os.getenv(
@@ -117,6 +125,14 @@ class Settings:
             raise RuntimeError("GENERATION_SUBMIT_RETRY_LIMIT must be greater than 0.")
         if self.generation_status_retry_limit <= 0:
             raise RuntimeError("GENERATION_STATUS_RETRY_LIMIT must be greater than 0.")
+        if self.generation_upload_timeout_seconds <= 0:
+            raise RuntimeError("GENERATION_UPLOAD_TIMEOUT_SECONDS must be greater than 0.")
+        if self.generation_delivery_timeout_seconds <= 0:
+            raise RuntimeError("GENERATION_DELIVERY_TIMEOUT_SECONDS must be greater than 0.")
+        if self.generation_download_request_timeout_seconds <= 0:
+            raise RuntimeError("GENERATION_DOWNLOAD_REQUEST_TIMEOUT_SECONDS must be greater than 0.")
+        if self.provider_upload_cache_ttl_seconds <= 0:
+            raise RuntimeError("PROVIDER_UPLOAD_CACHE_TTL_SECONDS must be greater than 0.")
         if self.gemini_provider not in {"direct", "toapis"}:
             raise RuntimeError("GEMINI_PROVIDER must be one of: direct, toapis.")
         if self.gemini_toapis_timeout_seconds <= 0:
