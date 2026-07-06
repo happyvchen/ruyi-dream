@@ -128,6 +128,9 @@ class GPTImage2FalProvider(ImageGenerationProvider):
             "responseUrl": submit_response.get("response_url"),
             "cancelUrl": submit_response.get("cancel_url"),
         }
+        # 注意：submit 响应不携带 outputPath。outputPath 的语义是"成片已回传到
+        # 对象存储的实际位置"，只能由 store_delivered_image 在回传成功后写入；
+        # 编排层依赖"payload 是否有 outputPath"判断是否还需要执行回传阶段。
         return {
             "provider": "fal",
             "model": settings.gpt_image2_model_id,
@@ -136,7 +139,6 @@ class GPTImage2FalProvider(ImageGenerationProvider):
             "providerStatus": "SUBMITTED",
             "providerRequestId": request_id,
             "providerUrls": provider_urls,
-            "outputPath": str(output_path),
             "imageInputs": uploaded_inputs,
             "providerRequest": provider_request,
             "providerResponse": submit_response,
@@ -231,6 +233,11 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
             error_label="GPT Image-2 toapis 请求失败",
         )
         task_id = submit_response.get("id") or submit_response.get("task_id")
+        # 注意：submit 响应不携带 outputPath。outputPath 的语义是"成片已回传到
+        # 对象存储的实际位置"，只能由 store_delivered_image 在回传成功后写入；
+        # 编排层依赖"payload 是否有 outputPath"判断是否还需要执行回传阶段。
+        # 若在这里提前返回预期路径，轮询成功后会跳过回传、直接读一个不存在的
+        # key，导致 NoSuchKey。
         return {
             "provider": "toapis",
             "model": provider_request.get("model"),
@@ -239,7 +246,6 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
             "providerStatus": submit_response.get("status", "submitted"),
             "providerRequestId": task_id,
             "providerUrls": {"statusUrl": toapis_url(f"/v1/images/generations/{task_id}") if task_id else None},
-            "outputPath": str(output_path),
             "imageInputs": uploaded_inputs,
             "providerRequest": provider_request,
             "providerResponse": submit_response,
