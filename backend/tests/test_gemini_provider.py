@@ -38,6 +38,7 @@ class GeminiProviderTests(unittest.TestCase):
             "GEMINI_MODEL",
             "GEMINI_TOAPIS_MODEL",
             "GEMINI_TOAPIS_TIMEOUT_SECONDS",
+            "GEMINI_TOAPIS_CONNECT_TIMEOUT_SECONDS",
             "TOAPIS_API_KEY",
         ]:
             os.environ[key] = ""

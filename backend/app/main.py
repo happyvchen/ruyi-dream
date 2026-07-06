@@ -35,7 +35,12 @@ from .gemini_provider import (
     gemini_request_meta,
     is_gemini_configured,
 )
-from .image_derivatives import derivative_key, existing_derivative_or_original, generate_image_derivatives
+from .image_derivatives import (
+    DERIVATIVE_CONTENT_TYPE,
+    derivative_key,
+    existing_derivative_or_original,
+    generate_image_derivatives,
+)
 from .image_provider import ImageProviderError, get_image_provider
 from .object_storage import (
     clean_key,
@@ -577,6 +582,22 @@ def image_object_keys(original_key: str | Path | None) -> list[str]:
         clean_key(original_key),
         *(key for key in [derivative_key(original_key, "thumb"), derivative_key(original_key, "preview")] if key),
     ]
+
+
+def gemini_vision_input(object_key: str | None, fallback_mime: str | None = None) -> dict[str, Any] | None:
+    """取 Gemini 理解类调用(打标/选搭/拍摄剧本)的图片输入,优先 preview 派生图。
+
+    原图 base64 后单张可达数 MB,多张叠加会让 ToAPIs 请求体在上行带宽有限的
+    部署环境发送超时("The write operation timed out")。文本理解不需要原图
+    分辨率,preview(webp,长边 ≤1280)足够且体积小一个数量级。
+    派生图缺失且无法生成时回退原图。最终成片生成不走此函数,仍用原图保真。
+    """
+    if not object_key or not object_exists(object_key):
+        return None
+    key = existing_derivative_or_original(object_key, "preview")
+    if key and key != clean_key(object_key):
+        return {"data": get_bytes(key), "mime_type": DERIVATIVE_CONTENT_TYPE}
+    return {"data": get_bytes(object_key), "mime_type": fallback_mime or "image/png"}
 
 
 def cleanup_prefixes(prefixes: list[str]) -> list[dict[str, str]]:
@@ -4023,9 +4044,9 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
     images: list[dict[str, Any]] = []
     for image in garment.get("images", [])[:6]:
         asset = image.get("asset") or {}
-        object_key = asset.get("objectKey")
-        if object_key and object_exists(object_key):
-            images.append({"data": get_bytes(object_key), "mime_type": asset.get("mimeType") or "image/png"})
+        image_input = gemini_vision_input(asset.get("objectKey"), asset.get("mimeType"))
+        if image_input:
+            images.append(image_input)
     try:
         text = await generate_gemini_json_text(prompt, images)
     except Exception as exc:
@@ -4882,9 +4903,9 @@ async def select_styling_with_gemini(input_row: Any, candidate_snapshot: dict[st
     images: list[dict[str, Any]] = []
     for item in loads(input_row["image_snapshot_json"], [])[:8]:
         asset = (item.get("asset") or {})
-        object_key = asset.get("objectKey")
-        if object_key and object_exists(object_key):
-            images.append({"data": get_bytes(object_key), "mime_type": asset.get("mimeType") or "image/png"})
+        image_input = gemini_vision_input(asset.get("objectKey"), asset.get("mimeType"))
+        if image_input:
+            images.append(image_input)
     try:
         text = await generate_gemini_json_text(
             prompt,
@@ -5692,20 +5713,21 @@ async def generate_shoot_script_with_gemini(request_snapshot: dict[str, Any]) ->
     model_snapshot = ((request_snapshot.get("input_version") or {}).get("model_snapshot") or {}) if isinstance(request_snapshot.get("input_version"), dict) else {}
     for item in (model_snapshot.get("imageInputs") if isinstance(model_snapshot, dict) else []) or []:
         object_key = item.get("objectKey") if isinstance(item, dict) else None
-        if object_key and object_exists(object_key):
-            image_inputs.append({"data": get_bytes(object_key), "mime_type": "image/png"})
+        image_input = gemini_vision_input(object_key, "image/png")
+        if image_input:
+            image_inputs.append(image_input)
     for item in ((request_snapshot.get("input_version") or {}).get("image_snapshot") or [])[:6]:
         asset = item.get("asset") if isinstance(item, dict) else {}
-        object_key = asset.get("objectKey") if isinstance(asset, dict) else None
-        if object_key and object_exists(object_key):
-            image_inputs.append({"data": get_bytes(object_key), "mime_type": asset.get("mimeType") or "image/png"})
+        image_input = gemini_vision_input(asset.get("objectKey") if isinstance(asset, dict) else None, asset.get("mimeType") if isinstance(asset, dict) else None)
+        if image_input:
+            image_inputs.append(image_input)
     for material in request_snapshot.get("selected_material_snapshot", [])[:4]:
         images = material.get("images") if isinstance(material, dict) else []
         first = images[0] if images else {}
         asset = first.get("asset") if isinstance(first, dict) else {}
-        object_key = asset.get("objectKey") if isinstance(asset, dict) else None
-        if object_key and object_exists(object_key):
-            image_inputs.append({"data": get_bytes(object_key), "mime_type": asset.get("mimeType") or "image/png"})
+        image_input = gemini_vision_input(asset.get("objectKey") if isinstance(asset, dict) else None, asset.get("mimeType") if isinstance(asset, dict) else None)
+        if image_input:
+            image_inputs.append(image_input)
     try:
         text = await generate_gemini_json_text(
             prompt,

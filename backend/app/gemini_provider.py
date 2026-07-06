@@ -167,6 +167,11 @@ def _post_toapis_chat(payload: dict[str, Any]) -> str:
 
     chat completions 非幂等且按 token 计费,不做重试;timeout 作用于
     相邻数据块之间的读等待,而不是整个响应时长。
+
+    注意:timeout 元组第一个值(connect)在 urllib3 中同时是发送请求体阶段的
+    socket 超时;请求体内嵌 base64 图片可达数 MB,部署环境上行慢时过小的值
+    会触发 "The write operation timed out"(此时请求未到达 ToAPIs、不计费,
+    ToAPIs 后台也查不到这笔调用)。故该值独立可配,默认 60s。
     """
     try:
         import requests
@@ -182,7 +187,7 @@ def _post_toapis_chat(payload: dict[str, Any]) -> str:
             headers={"Authorization": f"Bearer {settings.toapis_api_key}"},
             json=payload,
             stream=True,
-            timeout=(15, settings.gemini_toapis_timeout_seconds),
+            timeout=(settings.gemini_toapis_connect_timeout_seconds, settings.gemini_toapis_timeout_seconds),
         )
     except requests.RequestException as exc:
         raise RuntimeError(f"Gemini(ToAPIs 通道) 请求失败: {exc}") from exc

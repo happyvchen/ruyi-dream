@@ -69,6 +69,10 @@ class Settings:
     # ToAPIs 通道使用的模型 ID；留空则复用 GEMINI_MODEL。
     gemini_toapis_model = (os.getenv("GEMINI_TOAPIS_MODEL") or "").strip()
     gemini_toapis_timeout_seconds = int(os.getenv("GEMINI_TOAPIS_TIMEOUT_SECONDS") or "300")
+    # requests 超时元组第一个值不只是连接超时:urllib3 在发送请求体阶段也沿用它。
+    # 请求体含 base64 图片可达数 MB,部署环境上行慢时过小的值会触发
+    # "The write operation timed out",且请求未到达 ToAPIs、不计费。
+    gemini_toapis_connect_timeout_seconds = int(os.getenv("GEMINI_TOAPIS_CONNECT_TIMEOUT_SECONDS") or "60")
     image_provider = os.getenv("GPT_IMAGE2_PROVIDER", "toapis").lower()
     gpt_image2_model_id = os.getenv("GPT_IMAGE2_MODEL_ID", "gpt-image-2")
     gpt_image2_api_base_url = os.getenv("GPT_IMAGE2_API_BASE_URL", "https://fal.run/openai/gpt-image-2/edit")
@@ -117,6 +121,8 @@ class Settings:
             raise RuntimeError("GEMINI_PROVIDER must be one of: direct, toapis.")
         if self.gemini_toapis_timeout_seconds <= 0:
             raise RuntimeError("GEMINI_TOAPIS_TIMEOUT_SECONDS must be greater than 0.")
+        if self.gemini_toapis_connect_timeout_seconds <= 0:
+            raise RuntimeError("GEMINI_TOAPIS_CONNECT_TIMEOUT_SECONDS must be greater than 0.")
 
         if self.app_env in {"prod", "production"}:
             self._validate_production_credential("access key", self.s3_access_key_id)
