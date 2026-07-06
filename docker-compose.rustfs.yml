@@ -21,10 +21,10 @@ services:
       - "${RUSTFS_API_PORT:-9000}:9000"
       - "${RUSTFS_CONSOLE_PORT:-9001}:9001"
     volumes:
-      - ./deployment/rustfs/data:/data
-      - ./deployment/rustfs/config:/etc/rustfs
-      - ./deployment/rustfs/certs:/certs:ro
-      - ./deployment/rustfs/logs:/var/log/rustfs
+      - ${DATA_ROOT:-./deployment}/rustfs/data:/data
+      - ${DATA_ROOT:-./deployment}/rustfs/config:/etc/rustfs
+      - ${DATA_ROOT:-./deployment}/rustfs/certs:/certs:ro
+      - ${DATA_ROOT:-./deployment}/rustfs/logs:/var/log/rustfs
     logging:
       driver: json-file
       options:

@@ -60,7 +60,7 @@ services:
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:
-      - ./deployment/app-data/backend:/app/data
+      - ${DATA_ROOT:-./deployment}/app-data/backend:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).read()"]
       interval: 30s
