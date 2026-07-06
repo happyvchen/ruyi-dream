@@ -412,6 +412,10 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   const [recentTaskHasMore, setRecentTaskHasMore] = useState(records.length > recentTaskPageSize)
   const [recentTaskNextOffset, setRecentTaskNextOffset] = useState<number | null>(records.length > recentTaskPageSize ? recentTaskPageSize : null)
   const [recentTaskLoading, setRecentTaskLoading] = useState(false)
+  const [recentSelectMode, setRecentSelectMode] = useState(false)
+  const [recentSelectedIds, setRecentSelectedIds] = useState<Set<number>>(() => new Set())
+  const [recentDownloadPrecheck, setRecentDownloadPrecheck] = useState<FinalImageExportPrecheck | null>(null)
+  const [recentDownloadChecking, setRecentDownloadChecking] = useState(false)
   const [aiLogDialog, setAiLogDialog] = useState<{ title: string; ownerTypes: string[]; records: AICallRecord[]; loading: boolean; error?: string } | null>(null)
   const [heroProductInfo, setHeroProductInfo] = useState('')
   const [aiStylingInstruction, setAiStylingInstruction] = useState('')
@@ -446,6 +450,44 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     if (element.scrollHeight - element.scrollTop - element.clientHeight < 80) {
       loadRecentTasks(recentTaskNextOffset, true)
     }
+  }
+  function toggleRecentSelectMode() {
+    setRecentSelectMode((current) => !current)
+    setRecentSelectedIds(new Set())
+  }
+  function toggleRecentTaskSelection(id: number, checked: boolean) {
+    setRecentSelectedIds((current) => {
+      const next = new Set(current)
+      if (checked) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+  function triggerRecentFinalImageDownload(ids: number[]) {
+    if (!ids.length) return
+    const anchor = document.createElement('a')
+    anchor.href = finalImageArchiveUrl(ids)
+    anchor.rel = 'noreferrer'
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    setRecentDownloadPrecheck(null)
+    setRecentSelectMode(false)
+    setRecentSelectedIds(new Set())
+  }
+  function startRecentBatchDownload() {
+    if (!recentSelectedIds.size || recentDownloadChecking) return
+    const ids = [...recentSelectedIds]
+    setRecentDownloadChecking(true)
+    void api.precheckFinalImageExport(ids)
+      .then((result) => {
+        const allComplete = result.downloadableTaskIds.length > 0
+          && result.items.every((item) => item.downloadableCount > 0 && !item.issues.length)
+        if (allComplete) triggerRecentFinalImageDownload(result.downloadableTaskIds)
+        else setRecentDownloadPrecheck(result)
+      })
+      .catch(() => setRecentDownloadPrecheck(null))
+      .finally(() => setRecentDownloadChecking(false))
   }
   function openAICallLogs(title: string, ownerTypes: string[]) {
     if (!task || !isAdmin) return
@@ -562,11 +604,39 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
               <EmptyState title="暂无任务" text="上传主推款后会在这里形成拍摄任务。" />
             </>
           )}
-          <h3>最近任务</h3>
+          <div className="recent-task-head">
+            <h3>最近任务</h3>
+            <button className="ghost-icon recent-task-select-toggle" onClick={toggleRecentSelectMode} title={recentSelectMode ? '退出批量下载' : '批量下载多个任务的成片'}>
+              {recentSelectMode ? '退出批量' : <><Download size={14} /> 批量下载</>}
+            </button>
+          </div>
+          {recentSelectMode && (
+            <div className="recent-task-select-bar">
+              <span>已选 {recentSelectedIds.size} 项</span>
+              <button className="secondary" disabled={!recentSelectedIds.size || recentDownloadChecking} onClick={startRecentBatchDownload}>
+                {recentDownloadChecking ? '检查成片中...' : '下载成片'}
+              </button>
+            </div>
+          )}
           <div className="mini-list recent-task-list" onScroll={handleRecentTaskScroll}>
             {taskItems.map((item) => (
               <div key={item.id} className={`mini-row view-only ${task?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
-                <button onClick={() => openRecentTask(item)} title="恢复拍摄任务">
+                {recentSelectMode && (
+                  <input
+                    type="checkbox"
+                    className="recent-task-checkbox"
+                    checked={recentSelectedIds.has(item.id)}
+                    disabled={isTaskRunning(item)}
+                    onChange={(event) => toggleRecentTaskSelection(item.id, event.target.checked)}
+                    aria-label={`选择 ${item.name}`}
+                  />
+                )}
+                <button
+                  onClick={() => recentSelectMode
+                    ? !isTaskRunning(item) && toggleRecentTaskSelection(item.id, !recentSelectedIds.has(item.id))
+                    : openRecentTask(item)}
+                  title={recentSelectMode ? (isTaskRunning(item) ? '生成中的任务不可选' : '选择任务') : '恢复拍摄任务'}
+                >
                   <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
                   <span className="recent-task-copy">
                     <strong>{item.name}</strong>
@@ -606,6 +676,13 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
         <AICallLogDialog
           dialog={aiLogDialog}
           onClose={() => setAiLogDialog(null)}
+        />
+      )}
+      {recentDownloadPrecheck && (
+        <FinalImageDownloadDialog
+          precheck={recentDownloadPrecheck}
+          onClose={() => setRecentDownloadPrecheck(null)}
+          onDownload={triggerRecentFinalImageDownload}
         />
       )}
     </section>
