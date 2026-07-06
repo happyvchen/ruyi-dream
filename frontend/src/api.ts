@@ -141,8 +141,11 @@ export type GenerationTask = {
   activeStoryboardPreviewId?: number | null
   activePreviewId?: number | null
   activeResultSetId?: number | null
+  batchId?: string | null
   autoRunTarget?: string | null
   autoRunRequestedAt?: string | null
+  autoRunQueued?: boolean
+  autoRunQueuePosition?: number | null
   archivedAt?: string | null
   archiveReason?: string | null
   createdAt: string
@@ -484,13 +487,17 @@ export const api = {
     request<{ ok: boolean; purged: boolean; deletedTaskIds: number[] }>('/api/generation-tasks/batch-purge', { method: 'POST', body: JSON.stringify({ purge: true, ids, confirmPhrase }) }),
   getTaskDeleteImpact: (ids: number[]) =>
     request<{ impact: DeleteImpact }>('/api/generation-tasks/delete-impact', { method: 'POST', body: JSON.stringify({ ids }) }),
-  createTask: async (name: string, files: File[], heroProductInfo?: string) => {
+  createTask: async (name: string, files: File[], heroProductInfo?: string, batchId?: string) => {
     const uploads = await uploadFilesDirect('generation_task', files)
     return request<{ item: GenerationTask }>('/api/generation-tasks/from-uploads', {
       method: 'POST',
-      body: JSON.stringify({ name, heroProductInfo, uploads }),
+      body: JSON.stringify({ name, heroProductInfo, batchId, uploads }),
     })
   },
+  listBatchTasks: (batchId: string) =>
+    request<{ items: GenerationTask[] }>(`/api/generation-batches/${encodeURIComponent(batchId)}/tasks`),
+  autoRunBatch: (batchId: string) =>
+    request<{ startedTaskIds: number[]; items: GenerationTask[] }>(`/api/generation-batches/${encodeURIComponent(batchId)}/auto-run-final`, { method: 'POST' }),
   updateTask: (id: number, payload: {
     name?: string
     heroProductInfo?: string
@@ -516,8 +523,6 @@ export const api = {
     request<{ item: GenerationTask }>(`/api/generation-task-images/${id}`, { method: 'PATCH', body: JSON.stringify({ sortOrder }) }),
   deleteTaskImage: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-task-images/${id}`, { method: 'DELETE' }),
-  readyTask: (id: number) =>
-    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/ready`, { method: 'POST' }),
   selectStyling: (id: number, userInstruction?: string) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/select-styling`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
   createShootScript: (id: number, userInstruction?: string) =>
@@ -528,6 +533,8 @@ export const api = {
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/generate-final`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
   autoRunFinal: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/auto-run-final`, { method: 'POST' }),
+  cancelAutoRun: (id: number) =>
+    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/cancel-auto-run`, { method: 'POST' }),
   retryResultImage: (id: number, userInstruction?: string) =>
     request<{ item: GenerationTask }>(`/api/generation-result-images-new/${id}/retry`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
   redeliverResultImage: (id: number) =>

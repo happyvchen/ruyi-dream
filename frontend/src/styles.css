@@ -1233,6 +1233,54 @@ a.button-link { text-decoration: none; cursor: pointer; }
 }
 .batch-note { display: flex; justify-content: space-between; gap: 10px; color: #64748b; font-size: 12px; }
 .batch-note strong { color: #be123c; }
+.batch-detect-title { font-size: 14px; color: #111827; flex: 1; }
+.batch-info-input { width: 100%; height: 34px; font-size: 13px; }
+.batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: nowrap;
+  height: 56px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  overflow: hidden;
+}
+.studio-page:has(.batch-bar) .studio-grid { height: calc(100vh - 128px - 70px); }
+.batch-bar-title { color: #64748b; font-size: 13px; flex: none; white-space: nowrap; }
+.batch-bar-chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: nowrap;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.batch-chip { flex: none; }
+.batch-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid #d8e0ea;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 12px;
+  cursor: pointer;
+}
+.batch-chip strong { font-weight: 600; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.batch-chip span { color: #64748b; }
+.batch-chip.active { border-color: #0f7cff; box-shadow: 0 0 0 2px rgba(15,124,255,.12); }
+.batch-chip.is-running { border-color: #7dd3fc; background: #f0f9ff; }
+.batch-chip.is-running span { color: #0369a1; }
+.batch-chip.is-queued { border-color: #fed7aa; background: #fff7ed; }
+.batch-chip.is-queued span { color: #92400e; }
+.batch-chip.is-done { border-color: #a7f3d0; background: #ecfdf5; }
+.batch-chip.is-done span { color: #047857; }
+.batch-chip.is-failed { border-color: #fecdd3; background: #fff7f8; }
+.batch-chip.is-failed span { color: #be123c; }
+.batch-bar-actions { display: flex; gap: 8px; flex: none; }
 .batch-icon {
   width: 38px;
   height: 38px;
@@ -2598,6 +2646,9 @@ a.button-link { text-decoration: none; cursor: pointer; }
     grid-template-columns: 1fr;
     height: auto;
     min-height: 0;
+  }
+  .studio-page:has(.batch-bar) .studio-grid {
+    height: auto;
   }
   .studio-main {
     height: auto;

@@ -29,7 +29,9 @@
 
 `generation_tasks` 是用户任务根节点。上传主推款阶段可维护 `generation_task_images` 和当前编辑中的 `hero_product_info_text`；四个阶段用户输入草稿保存为 `*_user_instruction_text`。这些任务级用户输入只影响下一次执行，不改变任务状态、不隐藏当前 active artifact。进入 AI 后创建 `generation_task_input_versions`，冻结主推款图片、任务名、默认数字模特快照和本次实际使用的商品信息。任务进入 AI 阶段后仍允许用户返回上传页调整主推款图片或商品信息；修改图片或排序时，旧阶段 artifact 和 attempt 继续保留，但当前 active 指针清空，任务回到待选搭状态。只修改商品信息时不清空 active artifact；重新执行拍摄剧本、分镜预览、成片或单张重生都会创建新的输入版本，保留可复用的当前前序产物，并让最新商品信息进入接下来执行的阶段。
 
-一键成片自动推进由 `generation_tasks.auto_run_target` 和 `auto_run_requested_at` 表达。当前唯一目标值为 `FINAL`。该字段只表示“继续自动推进到成片”的意图，不替代 `status`、阶段 artifact 状态或 active 指针；失败、完成、取消后清空。
+一键成片自动推进由 `generation_tasks.auto_run_target` 和 `auto_run_requested_at` 表达。当前唯一目标值为 `FINAL`。该字段只表示“继续自动推进到成片”的意图，不替代 `status`、阶段 artifact 状态或 active 指针；失败、完成、取消后清空。自动推进受并发闸门限制（`GENERATION_AUTO_RUN_MAX_CONCURRENCY`，默认 2）：同时推进的任务数达到上限时，其余任务按 `auto_run_requested_at` 排队，"排队中"只是展示态，不是新的任务状态。
+
+批量成片批次由 `generation_tasks.batch_id` 表达：同一批次创建的任务共享一个客户端生成的不透明字符串，用于前端批次条按批次恢复和批量触发一键成片。批次不是独立业务对象，没有批次表和批次状态机。
 
 AI Stylist 写入 `generation_stylings`：
 
@@ -83,5 +85,7 @@ Image-2 阶段写入：
 | `033` | `cleanup_legacy_tables_and_attempt_provider_request_ids` | 确保 attempt provider 请求 ID 列存在，并再次清理 0.1.0 之前的空表残留 |
 | `034` | `drop_prompt_replaced_config_tables` | 删除已由 Prompt 维护替代的品牌资料、拍摄配置和固定标签规则表 |
 | `035` | `recover_legacy_shoot_scripts` | 从已有成功分镜预览/旧版 preview 恢复历史任务缺失的 ShootScript、ShotPlan 关联和 active 指针 |
+| `036` | `add_attempt_progress_and_upload_cache` | 为 `generation_attempts` 增加阶段进度列，并创建 `provider_upload_cache` 表 |
+| `037` | `add_generation_task_batch_id` | 为 `generation_tasks` 增加批量成片批次字段 `batch_id` 及索引 |
 
 新库直接创建当前 schema；已有库执行迁移链后只保留 0.1.0 表并追加当前字段。0.1.0 之前的业务表不作为运行时读取路径。

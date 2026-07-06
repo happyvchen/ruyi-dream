@@ -669,6 +669,8 @@ owner 类型：
 
 任务主线：
 
+`DRAFT -> READY_FOR_STYLING` 不需要单独的用户确认动作：上传即创建草稿，首次执行 AI 智能选搭或一键成片时系统自动完成该流转。`DRAFT` 仍用于区分"未进入 AI 阶段"的任务（生成记录默认不展示）。
+
 ```text
 DRAFT
 -> READY_FOR_STYLING

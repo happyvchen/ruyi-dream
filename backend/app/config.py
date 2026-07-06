@@ -88,6 +88,8 @@ class Settings:
     generation_lock_ttl_seconds = int(os.getenv("GENERATION_LOCK_TTL_SECONDS", "120"))
     generation_image_timeout_seconds = int(os.getenv("GENERATION_IMAGE_TIMEOUT_SECONDS", str(30 * 60)))
     generation_submit_retry_limit = int(os.getenv("GENERATION_SUBMIT_RETRY_LIMIT", "3"))
+    # 一键成片（auto-run）并发闸门：同时自动推进的任务数上限，超出的任务按请求时间排队。
+    generation_auto_run_max_concurrency = int(os.getenv("GENERATION_AUTO_RUN_MAX_CONCURRENCY", "2"))
     generation_status_retry_limit = int(os.getenv("GENERATION_STATUS_RETRY_LIMIT", "6"))
     # 参考图上传阶段总预算（不含单文件请求自身的超时）。
     generation_upload_timeout_seconds = int(os.getenv("GENERATION_UPLOAD_TIMEOUT_SECONDS", str(5 * 60)))
@@ -125,6 +127,8 @@ class Settings:
             raise RuntimeError("GENERATION_SUBMIT_RETRY_LIMIT must be greater than 0.")
         if self.generation_status_retry_limit <= 0:
             raise RuntimeError("GENERATION_STATUS_RETRY_LIMIT must be greater than 0.")
+        if self.generation_auto_run_max_concurrency <= 0:
+            raise RuntimeError("GENERATION_AUTO_RUN_MAX_CONCURRENCY must be greater than 0.")
         if self.generation_upload_timeout_seconds <= 0:
             raise RuntimeError("GENERATION_UPLOAD_TIMEOUT_SECONDS must be greater than 0.")
         if self.generation_delivery_timeout_seconds <= 0:

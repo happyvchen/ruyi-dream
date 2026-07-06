@@ -20,6 +20,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("034", "drop_prompt_replaced_config_tables", "migration_drop_prompt_replaced_config_tables"),
     ("035", "recover_legacy_shoot_scripts", "migration_recover_legacy_shoot_scripts"),
     ("036", "add_attempt_progress_and_upload_cache", "migration_add_attempt_progress_and_upload_cache"),
+    ("037", "add_generation_task_batch_id", "migration_add_generation_task_batch_id"),
 )
 
 PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
@@ -352,6 +353,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_drop_prompt_replaced_config_tables": migration_drop_prompt_replaced_config_tables,
         "migration_recover_legacy_shoot_scripts": migration_recover_legacy_shoot_scripts,
         "migration_add_attempt_progress_and_upload_cache": migration_add_attempt_progress_and_upload_cache,
+        "migration_add_generation_task_batch_id": migration_add_generation_task_batch_id,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -419,6 +421,13 @@ def migration_drop_prompt_replaced_config_tables(db: sqlite3.Connection) -> None
         "brand_profiles",
     ):
         db.execute(f"DROP TABLE IF EXISTS {table}")
+
+
+def migration_add_generation_task_batch_id(db: sqlite3.Connection) -> None:
+    """批量成片批次：同一批次创建的任务共享 batch_id（客户端生成的不透明字符串）。"""
+    if not table_has_column(db, "generation_tasks", "batch_id"):
+        db.execute("ALTER TABLE generation_tasks ADD COLUMN batch_id TEXT")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_generation_tasks_batch_id ON generation_tasks(batch_id)")
 
 
 def migration_add_generation_task_auto_run(db: sqlite3.Connection) -> None:
