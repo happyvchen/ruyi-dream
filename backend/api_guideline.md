@@ -51,8 +51,18 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。`/api/g
 | `/api/generation-result-images-new/{image_id}/retry` | POST | 重生单张最终图，可携带本次用户介入要求 |
 | `/api/generation-result-images-new/{image_id}/redeliver` | POST | 重新回传单张最终图：provider 已成功、仅回传失败时零成本重新拉取结果，不创建新的 provider 任务 |
 | `/api/generation-records` | GET | 生成记录列表 |
+| `/api/generation-task-exports/precheck` | POST | 成片批量下载预检：返回每个任务可下载张数、总大小和未完成/失败镜头明细 |
+| `/api/generation-task-exports/archive` | GET | 按任务名分文件夹流式打包下载最终成片 zip，`ids` 为逗号分隔任务 ID |
 
 所有会调用外部 AI/provider 的端点都必须由用户动作触发；本地验证和测试不得调用外部 AI/provider。`auto-run-final` 由一次用户动作触发，但内部仍按现有阶段创建独立 attempt，并在 request snapshot 中记录 `invocation.mode = auto_run`。
+
+成片批量下载规则：
+
+- 下载范围只包含每个任务**当前 active 结果集**中 `SUCCEEDED` 且有资产的最终成片原图；被替代的旧结果集不进入导出。
+- 前端应先调用 `precheck`，任务全部完整时直接触发下载；存在未完成/失败镜头时展示明细弹窗，由用户选择"全部下载"（缺失项写入压缩包内 `清单.txt`）、"仅下载完整任务"或取消。该交互与彻底删除的"影响预检"模式一致。
+- zip 内结构为 `任务名_任务ID/序号_图位.扩展名`，图位名称来自 ShotPlan 的 `shot_role_label`；压缩包使用 STORE 不重复压缩图片，流式输出。
+- 单次最多 50 个任务；单张成片读取失败会跳过并写入 `清单.txt`，不中断整包下载。导出动作写入 `event_logs`（`generation_task_export` / `final_images_exported`）。
+- 该链路纯读媒体，不触发任何外部 AI/provider 调用。
 
 主推款图片上传契约：
 
