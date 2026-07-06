@@ -434,6 +434,11 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
     void api.getRecord(item.id, isAdmin).then((r) => applyTaskUpdate(r.item)).catch(() => undefined)
   }
+  function openBatchTask(item: GenerationTask) {
+    applyTaskUpdate(item)
+    window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
+    void api.getTask(item.id, isAdmin).then((r) => applyTaskUpdate(r.item)).catch(() => undefined)
+  }
   function loadRecentTasks(offset = 0, append = false) {
     if (recentTaskLoading) return
     setRecentTaskLoading(true)
@@ -508,6 +513,13 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
       applyTaskUpdate(r.item)
     }, { refresh: 'background' })
   }
+  function cancelAutoRunQueue(item: GenerationTask) {
+    if (!window.confirm('确定取消排队吗？任务会退出自动成片队列，已完成的步骤和结果保留，之后可随时再次一键成片。')) return
+    void run('取消排队中...', () => api.cancelAutoRun(item.id), (r: { item: GenerationTask }) => {
+      if (task?.id === item.id) applyTaskUpdate(r.item)
+      setTaskItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, ...r.item } : entry))
+    }, { refresh: 'background' })
+  }
   function startOneClickFinal() {
     if (!task || !canStartOneClickFinal(task)) return
     if (!window.confirm('将自动完成后续步骤，并复用已有选搭、拍摄剧本和分镜预览。生成过程可能产生多次 AI 调用。')) return
@@ -539,6 +551,26 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     if (!task || isTaskLockedForGeneration(task)) return
     clearLocalOperationsFor(['generation_styling', 'generation_shoot_script', 'generation_preview', 'generation_result_image'], task.id)
   }, [task?.id, task?.status, task?.autoRunTarget, task?.resultSet?.status])
+  const hasActiveRecentTasks = taskItems.some((item) => isTaskRunning(item) || isTaskQueuedForAutoRun(item))
+  useEffect(() => {
+    if (!hasActiveRecentTasks) return
+    const timer = window.setInterval(() => {
+      void api.listRecords({ limit: recentTaskPageSize, offset: 0 }).then((result) => {
+        setRecentTaskTotal(result.total)
+        setTaskItems((current) => {
+          const byId = new Map(result.items.map((item) => [item.id, item] as const))
+          const known = new Set(current.map((item) => item.id))
+          const merged = current.map((item) => {
+            const next = byId.get(item.id)
+            return next ? { ...item, ...next } : item
+          })
+          const fresh = result.items.filter((item) => !known.has(item.id))
+          return fresh.length ? [...fresh, ...merged] : merged
+        })
+      }).catch(() => undefined)
+    }, 4000)
+    return () => window.clearInterval(timer)
+  }, [hasActiveRecentTasks])
   return (
     <section className="page studio-page">
       <PageTitle
@@ -553,6 +585,9 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
           </div>
         ) : undefined}
       />
+      {task?.batchId && (
+        <BatchBar batchId={task.batchId} currentTaskId={task.id} onOpenTask={openBatchTask} run={run} />
+      )}
       <div className="studio-grid">
         <div className="panel studio-main">
           <div className="studio-main-top">
@@ -588,6 +623,11 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
               {isTaskRunning(task) && (
                 <button className="secondary wide" onClick={cancelCurrentTask}>
                   <CircleStop size={16} /> 取消生成
+                </button>
+              )}
+              {!isTaskRunning(task) && isTaskQueuedForAutoRun(task) && (
+                <button className="secondary wide" onClick={() => cancelAutoRunQueue(task)}>
+                  <CircleStop size={16} /> 取消排队
                 </button>
               )}
               <AIOperationList operations={visibleTaskOperations(task, localOperations)} compact />
@@ -641,7 +681,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
                   <span className="recent-task-copy">
                     <strong>{item.name}</strong>
                     <span className="recent-task-meta">
-                      <em>{item.archivedAt ? '已归档' : statusText(item.status)}</em>
+                      <em>{item.archivedAt ? '已归档' : taskListStatusLabel(item)}</em>
                       <time dateTime={item.createdAt}>{dateText(item.createdAt)}</time>
                     </span>
                   </span>
@@ -659,6 +699,11 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
                     }}
                   >
                     取消
+                  </button>
+                )}
+                {!recentSelectMode && !isTaskRunning(item) && isTaskQueuedForAutoRun(item) && (
+                  <button className="secondary mini-action" onClick={() => cancelAutoRunQueue(item)}>
+                    取消排队
                   </button>
                 )}
               </div>
@@ -726,7 +771,7 @@ function AutoRunProgress({ task }: { task: GenerationTask }) {
     <div className="auto-run-progress">
       <div>
         <span>一键成片</span>
-        <strong>{isTaskRunning(task) ? `正在生成：${activeLabel}` : '正在准备后续步骤'}</strong>
+        <strong>{isTaskRunning(task) ? `正在生成：${activeLabel}` : isTaskQueuedForAutoRun(task) ? '排队中，等待其他任务完成后自动开始' : '正在准备后续步骤'}</strong>
       </div>
       <div className="auto-run-steps">
         {stages.map((stage) => (
@@ -763,18 +808,239 @@ function taskResumeActionLabel(task: GenerationTask) {
   return '继续生成'
 }
 
+function batchChipStatus(item: GenerationTask) {
+  if (item.status === 'COMPLETED') return '完成'
+  if (item.status === 'FINAL_RUNNING') return `成片 ${item.summary?.finalImages?.length ?? 0}/5`
+  if (isTaskQueuedForAutoRun(item)) {
+    return item.autoRunQueuePosition && item.autoRunQueuePosition > 0 ? `排队第 ${item.autoRunQueuePosition} 位` : '排队中'
+  }
+  return statusText(item.status)
+}
+
+function batchChipTone(item: GenerationTask) {
+  if (item.status === 'COMPLETED') return 'is-done'
+  if (item.status === 'FAILED') return 'is-failed'
+  if (isTaskRunning(item)) return 'is-running'
+  if (isTaskQueuedForAutoRun(item)) return 'is-queued'
+  return ''
+}
+
+function BatchBar({ batchId, currentTaskId, onOpenTask, run }: {
+  batchId: string
+  currentTaskId: number | null
+  onOpenTask: (task: GenerationTask) => void
+  run: <T>(label: string, action: () => Promise<T>, after?: (value: T) => void, options?: RunOptions) => Promise<T | undefined>
+}) {
+  const [items, setItems] = useState<GenerationTask[]>([])
+  const [downloadPrecheck, setDownloadPrecheck] = useState<FinalImageExportPrecheck | null>(null)
+  const [downloadChecking, setDownloadChecking] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    function refresh() {
+      void api.listBatchTasks(batchId).then((result) => {
+        if (!cancelled) setItems(result.items)
+      }).catch(() => undefined)
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 4000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [batchId])
+
+  const eligibleCount = items.filter((item) => canStartOneClickFinal(item)).length
+  const downloadableCount = items.filter((item) => ['COMPLETED', 'FINAL_PARTIAL'].includes(item.status)).length
+
+  function startBatchAutoRun() {
+    if (!eligibleCount) return
+    if (!window.confirm(`将为 ${eligibleCount} 个任务自动完成智能选搭、拍摄剧本、分镜预览和成片，生成过程会产生多次 AI 调用；同时只有少量任务并发生成，其余排队等待。确定开始吗？`)) return
+    void run('启动批量成片中...', () => api.autoRunBatch(batchId), (result: { items: GenerationTask[] }) => setItems(result.items), { refresh: 'background' })
+  }
+
+  function triggerBatchDownload(ids: number[]) {
+    if (!ids.length) return
+    const anchor = document.createElement('a')
+    anchor.href = finalImageArchiveUrl(ids)
+    anchor.rel = 'noreferrer'
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    setDownloadPrecheck(null)
+  }
+
+  function startBatchDownload() {
+    if (!downloadableCount || downloadChecking) return
+    const ids = items.filter((item) => !isTaskRunning(item)).map((item) => item.id)
+    setDownloadChecking(true)
+    void api.precheckFinalImageExport(ids)
+      .then((result) => {
+        const allComplete = result.downloadableTaskIds.length > 0
+          && result.items.every((item) => item.downloadableCount > 0 && !item.issues.length)
+        if (allComplete) triggerBatchDownload(result.downloadableTaskIds)
+        else setDownloadPrecheck(result)
+      })
+      .catch(() => setDownloadPrecheck(null))
+      .finally(() => setDownloadChecking(false))
+  }
+
+  return (
+    <div className="panel batch-bar">
+      <span className="batch-bar-title">本批次 {items.length} 个任务</span>
+      <div className="batch-bar-chips">
+        {items.map((item) => (
+          <button
+            key={item.id}
+            className={`batch-chip ${batchChipTone(item)} ${item.id === currentTaskId ? 'active' : ''}`}
+            onClick={() => onOpenTask(item)}
+            title={`切换到 ${item.name}`}
+          >
+            <strong>{item.name}</strong>
+            <span>{batchChipStatus(item)}</span>
+          </button>
+        ))}
+      </div>
+      <div className="batch-bar-actions">
+        <button className="secondary" disabled={!downloadableCount || downloadChecking} onClick={startBatchDownload}>
+          <Download size={14} /> {downloadChecking ? '检查成片中...' : '下载本批次成片'}
+        </button>
+        <button className="primary" disabled={!eligibleCount} onClick={startBatchAutoRun}>
+          <Sparkles size={14} /> 全部一键成片
+        </button>
+      </div>
+      {downloadPrecheck && (
+        <FinalImageDownloadDialog
+          precheck={downloadPrecheck}
+          onClose={() => setDownloadPrecheck(null)}
+          onDownload={triggerBatchDownload}
+        />
+      )}
+    </div>
+  )
+}
+
+type PendingBatchGroup = {
+  id: string
+  name: string
+  info: string
+  files: File[]
+  error?: string
+}
+
 function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any; heroProductInfo: string }) {
   const [files, setFiles] = useState<File[]>([])
   const [name, setName] = useState('')
+  const [batchGroups, setBatchGroups] = useState<PendingBatchGroup[]>([])
+  const [batchCreating, setBatchCreating] = useState<{ current: number; total: number } | null>(null)
+  const [batchError, setBatchError] = useState('')
+  const [existingTaskNames, setExistingTaskNames] = useState<Set<string> | null>(null)
+  const batchIdRef = useRef('')
+  const firstCreatedTaskRef = useRef<GenerationTask | null>(null)
+
+  useEffect(() => {
+    if (!batchGroups.length || existingTaskNames) return
+    void api.listTasks({ limit: 100, includeArchived: true })
+      .then((result) => setExistingTaskNames(new Set(result.items.map((item) => item.name))))
+      .catch(() => setExistingTaskNames(new Set()))
+  }, [batchGroups.length, existingTaskNames])
+
+  function applySingleFiles(imageFiles: File[]) {
+    setFiles(imageFiles)
+    const firstPath = imageFiles[0] ? importPath(imageFiles[0]) : ''
+    const defaultName = firstPath.includes('/') ? sanitizeClientName(firstPath.split('/')[0]) : timestampName()
+    setName(defaultName)
+  }
 
   function addHeroFiles(nextFiles: File[]) {
     const imageFiles = nextFiles
       .filter((file) => file.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(file.name))
       .sort((a, b) => importPath(a).localeCompare(importPath(b), 'zh-CN', { numeric: true }))
-    setFiles(imageFiles)
-    const firstPath = imageFiles[0] ? importPath(imageFiles[0]) : ''
-    const defaultName = firstPath.includes('/') ? sanitizeClientName(firstPath.split('/')[0]) : timestampName()
-    setName(defaultName)
+    const folderFiles = imageFiles.filter((file) => importPath(file).includes('/'))
+    const groups = groupImportFiles(folderFiles)
+    if (groups.length > 1) {
+      setBatchGroups(groups.map((group, index) => ({ id: `${group.id}-${index}`, name: group.code, info: '', files: group.files })))
+      setBatchError('')
+      setFiles([])
+      setName('')
+      batchIdRef.current = ''
+      firstCreatedTaskRef.current = null
+      return
+    }
+    setBatchGroups([])
+    setBatchError('')
+    applySingleFiles(imageFiles)
+  }
+
+  function updateBatchGroup(id: string, patch: Partial<PendingBatchGroup>) {
+    setBatchGroups((items) => items.map((item) => item.id === id ? { ...item, ...patch, error: undefined } : item))
+  }
+
+  async function createBatchTasks() {
+    if (!batchGroups.length || batchCreating) return
+    const seen = new Set<string>()
+    const ready: PendingBatchGroup[] = []
+    const blocked: PendingBatchGroup[] = []
+    batchGroups.forEach((group) => {
+      const groupName = sanitizeClientName(group.name)
+      if (!groupName) {
+        blocked.push({ ...group, error: '每个任务都需要一个有效名称' })
+        return
+      }
+      if (!group.files.length) {
+        blocked.push({ ...group, name: groupName, error: '没有可用图片' })
+        return
+      }
+      if (group.files.length > 8) {
+        blocked.push({ ...group, name: groupName, error: '超过 8 张，需删除后才能提交' })
+        return
+      }
+      if (seen.has(groupName)) {
+        blocked.push({ ...group, name: groupName, error: '本批次任务名重复' })
+        return
+      }
+      seen.add(groupName)
+      ready.push({ ...group, name: groupName, error: undefined })
+    })
+    if (!ready.length) {
+      setBatchGroups(blocked)
+      setBatchError('没有可创建的任务，请先处理标红项')
+      return
+    }
+    setBatchGroups([...blocked, ...ready])
+    setBatchError(blocked.length ? '标红项不会创建，处理后可再次提交' : '')
+    if (!batchIdRef.current) batchIdRef.current = `b-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    const created: GenerationTask[] = []
+    let lastError = ''
+    let failedCount = 0
+    for (let index = 0; index < ready.length; index += 1) {
+      const group = ready[index]
+      setBatchCreating({ current: index + 1, total: ready.length })
+      try {
+        const result = await api.createTask(group.name, group.files, group.info.trim() || undefined, batchIdRef.current)
+        created.push(result.item)
+        if (!firstCreatedTaskRef.current) firstCreatedTaskRef.current = result.item
+        setBatchGroups((current) => current.filter((item) => item.id !== group.id))
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : '创建任务失败'
+        failedCount += 1
+        setBatchGroups((current) => current.map((item) => item.id === group.id ? { ...item, error: lastError } : item))
+      }
+    }
+    setBatchCreating(null)
+    if (blocked.length || failedCount) {
+      const parts = []
+      if (created.length) parts.push(`已创建 ${created.length} 个任务`)
+      if (failedCount) parts.push(`${failedCount} 个创建失败${lastError ? `：${lastError}` : ''}`)
+      if (blocked.length) parts.push('标红项处理后可再次提交，会并入同一批次')
+      setBatchError(parts.join('；'))
+      return
+    }
+    const firstTask = firstCreatedTaskRef.current
+    if (firstTask) {
+      setTask(firstTask)
+      window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: firstTask.id }))
+    }
   }
 
   async function handleDrop(event: DragEvent<HTMLDivElement>) {
@@ -786,7 +1052,7 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><h2>上传主推款</h2><p>支持多张图片或一个文件夹。推荐 3-5 张，最多 8 张，排序越靠前越重要。</p></div>
+        <div className="step-copy"><h2>上传主推款</h2><p>支持多张图片或一个文件夹。推荐 3-5 张，最多 8 张，排序越靠前越重要。拖入多个货号文件夹可批量创建任务并批量成片。</p></div>
         {task?.status === 'DRAFT' && <HeroDraftEditor task={task} setTask={setTask} run={run} />}
         {!task && (
           <>
@@ -794,7 +1060,7 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
               <div>
                 <Images size={22} />
                 <strong>拖入主推款图片或文件夹</strong>
-                <span>{files.length ? `已选择 ${files.length} 张，可拖动排序` : '支持多张图片或一个文件夹'}</span>
+                <span>{files.length ? `已选择 ${files.length} 张，可拖动排序` : '支持多张图片、一个文件夹，或多个货号文件夹（批量成片）'}</span>
               </div>
               <div className="import-actions">
                 <label className="secondary">
@@ -807,6 +1073,73 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                 </label>
               </div>
             </div>
+            {batchGroups.length > 0 && (() => {
+              const nameCounts = new Map<string, number>()
+              batchGroups.forEach((group) => {
+                const groupName = sanitizeClientName(group.name)
+                if (groupName) nameCounts.set(groupName, (nameCounts.get(groupName) ?? 0) + 1)
+              })
+              return (
+                <div className="upload-review">
+                  <div className="batch-card-head">
+                    <div className="batch-icon"><FolderOpen size={18} /></div>
+                    <strong className="batch-detect-title">检测到 {batchGroups.length} 个货号文件夹</strong>
+                    <span className="count-pill">{batchGroups.reduce((sum, group) => sum + group.files.length, 0)} 张图</span>
+                  </div>
+                  <div className="batch-note">
+                    <span>每个文件夹对应一个拍摄任务，可在下方逐个调整任务名、图片和商品信息；创建后还可在任务里继续修改，并从顶部批次条一键批量成片。</span>
+                  </div>
+                  <div className="batch-list">
+                    {batchGroups.map((group) => {
+                      const groupName = sanitizeClientName(group.name)
+                      const dupInBatch = !!groupName && (nameCounts.get(groupName) ?? 0) > 1
+                      const overLimit = group.files.length > 8
+                      const hasError = overLimit || !group.files.length || dupInBatch || !!group.error
+                      const existsHint = !!groupName && !dupInBatch && !!existingTaskNames?.has(groupName)
+                      return (
+                        <div className={`batch-card ${hasError ? 'has-error' : ''}`} key={group.id}>
+                          <div className="batch-card-head">
+                            <div className="batch-icon"><Layers3 size={18} /></div>
+                            <input value={group.name} onChange={(event) => updateBatchGroup(group.id, { name: event.target.value })} aria-label="任务名称" disabled={!!batchCreating} />
+                            <span className={`count-pill ${overLimit ? 'is-over' : ''}`}>{group.files.length}/8 张</span>
+                            <button className="secondary icon-button" onClick={() => setBatchGroups((current) => current.filter((item) => item.id !== group.id))} title="移除该任务" disabled={!!batchCreating}><Trash2 size={16} /></button>
+                          </div>
+                          <div className="batch-note">
+                            <span>推荐 3-5 张，排序越靠前越重要。{existsHint ? ' 与已有任务重名，将共存（任务名不要求唯一）。' : ''}</span>
+                            {hasError && <strong>{group.error ?? (overLimit ? '超过 8 张，需删除后才能提交' : !group.files.length ? '没有可用图片' : '本批次任务名重复')}</strong>}
+                          </div>
+                          <FileThumbList files={group.files} onChange={(nextFiles) => updateBatchGroup(group.id, { files: nextFiles })} />
+                          <input
+                            className="batch-info-input"
+                            value={group.info}
+                            onChange={(event) => updateBatchGroup(group.id, { info: event.target.value })}
+                            placeholder="商品信息（选填）：例如 夏季主推阔腿裤，重点展示腰头和裤脚"
+                            aria-label="商品信息"
+                            disabled={!!batchCreating}
+                          />
+                        </div>
+                      )
+                    })}
+                  </div>
+                  {batchError && <span className="inline-error">{batchError}</span>}
+                  {batchCreating ? (
+                    <p className="edit-hint">正在创建第 {batchCreating.current}/{batchCreating.total} 个任务，请勿刷新或离开页面...</p>
+                  ) : (
+                    <div className="inline-form">
+                      <button className="primary" onClick={() => void createBatchTasks()}>
+                        <ImagePlus size={16} /> 批量创建 {batchGroups.length} 个任务
+                      </button>
+                      <button className="secondary" title="不再拆分任务，把全部图片作为同一个任务的主推款" onClick={() => {
+                        const merged = batchGroups.flatMap((group) => group.files)
+                        setBatchGroups([])
+                        applySingleFiles(merged)
+                      }}>合并为 1 个任务</button>
+                      <button className="secondary" onClick={() => setBatchGroups([])}>取消</button>
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
             {files.length > 0 && (
               <div className="upload-review">
                 <div className="batch-card-head">
@@ -861,7 +1194,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
 
   return (
     <div className="hero-draft">
-      <div className="section-head"><strong>主推款图片</strong><span className="status draft">{task.status === 'DRAFT' ? '待确认' : '可调整'}</span></div>
+      <div className="section-head"><strong>主推款图片</strong><span className="status draft">{task.status === 'DRAFT' ? '待选搭' : '可调整'}</span></div>
       <div className="inline-form">
         <input value={name} onChange={(event) => setName(event.target.value)} placeholder="任务名称" />
         <button className="secondary" disabled={name.trim() === task.name} onClick={() => void run('保存任务名称中...', () => api.updateTask(task.id, { name }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>保存名称</button>
@@ -903,12 +1236,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
           </div>
         ))}
       </div>
-      <p className="edit-hint">{task.status === 'DRAFT' ? '确认后可进入智能选搭；系统会保留本次主推款和默认数字模特信息用于后续生成。' : '调整图片会保留旧过程记录，并让当前任务回到待选搭状态。'}</p>
-      {task.status === 'DRAFT' && (
-        <button className="primary" onClick={() => void run('确认主推款输入中...', () => api.readyTask(task.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>
-          确认并进入智能选搭
-        </button>
-      )}
+      <p className="edit-hint">{task.status === 'DRAFT' ? '图片就绪后可直接进入 AI 智能选搭；系统会保留本次主推款和默认数字模特信息用于后续生成。' : '调整图片会保留旧过程记录，并让当前任务回到待选搭状态。'}</p>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </div>
   )
@@ -3737,7 +4065,7 @@ function getTaskStep(task: GenerationTask | null): StudioStep {
     if (task.styling) return 2
     return 1
   }
-  if (['READY_FOR_STYLING', 'STYLING_RUNNING'].includes(task.status)) return 1
+  if (['DRAFT', 'READY_FOR_STYLING', 'STYLING_RUNNING'].includes(task.status)) return 1
   if (['STYLING_READY', 'SCRIPT_RUNNING'].includes(task.status)) return 2
   if (['SCRIPT_READY', 'PREVIEW_RUNNING'].includes(task.status)) return 3
   if (['PREVIEW_READY', 'FINAL_RUNNING', 'FINAL_PARTIAL', 'COMPLETED'].includes(task.status)) return 4
@@ -3747,10 +4075,12 @@ function getTaskStep(task: GenerationTask | null): StudioStep {
 function canStartOneClickFinal(task: GenerationTask) {
   if (isTaskRunning(task) || task.autoRunTarget) return false
   if (['CANCELLED', 'ABANDONED', 'COMPLETED'].includes(task.status)) return false
-  return (task.images?.length ?? 0) > 0
+  // 详情序列化看 images；批次条/最近任务等轻量序列化没有 images，用 summary.cover 判断有无主推款图。
+  return (task.images?.length ?? 0) > 0 || !!task.summary?.cover
 }
 
 function oneClickFinalLabel(task: GenerationTask) {
+  if (isTaskQueuedForAutoRun(task)) return '排队中'
   if (task.autoRunTarget === 'FINAL' || isTaskRunning(task)) return '自动生成中'
   if (task.status === 'FINAL_PARTIAL' || task.status === 'FAILED') return '继续一键成片'
   return '一键成片'
@@ -3764,13 +4094,25 @@ function isTaskLockedForGeneration(task: GenerationTask) {
   return isTaskRunning(task) || !!task.autoRunTarget
 }
 
+function isTaskQueuedForAutoRun(task: GenerationTask) {
+  if (task.autoRunQueued) return true
+  return task.autoRunTarget === 'FINAL' && !isTaskRunning(task) && !['CANCELLED', 'ABANDONED', 'COMPLETED'].includes(task.status)
+}
+
+function taskListStatusLabel(task: GenerationTask) {
+  if (isTaskQueuedForAutoRun(task)) {
+    return task.autoRunQueuePosition && task.autoRunQueuePosition > 0 ? `排队中 · 第 ${task.autoRunQueuePosition} 位` : '排队中'
+  }
+  return statusText(task.status)
+}
+
 function finalSucceededCount(task: GenerationTask) {
   return task.resultSet?.images?.filter((image) => image.status === 'SUCCEEDED').length ?? 0
 }
 
 function statusText(status: string) {
   const map: Record<string, string> = {
-    DRAFT: '待确认',
+    DRAFT: '待选搭',
     READY_FOR_STYLING: '待选搭',
     STYLING_RUNNING: '选搭中',
     STYLING_READY: '已选搭',
@@ -3798,6 +4140,7 @@ function statusText(status: string) {
 }
 
 function garmentStatus(status: string) {
+  if (status === 'DRAFT') return '草稿'
   return statusText(status)
 }
 

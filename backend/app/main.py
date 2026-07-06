@@ -300,6 +300,7 @@ class GenerationTaskFromUploadsRequest(BaseModel):
     name: str | None = None
     heroProductInfo: str | None = None
     userRequirement: str | None = None
+    batchId: str | None = None
     uploads: list[UploadedMediaRequest] = Field(default_factory=list)
 
 
@@ -1477,9 +1478,10 @@ async def create_generation_task_from_uploads(payload: GenerationTaskFromUploads
     )
     try:
         with get_db() as db:
+            batch_id = (payload.batchId or "").strip()[:64] or None
             cursor = db.execute(
-                "INSERT INTO generation_tasks (name, hero_product_info_text, user_requirement_text, status, created_at, updated_at) VALUES (?, ?, ?, 'DRAFT', ?, ?)",
-                (task_name, hero_product_info_text, hero_product_info_text, timestamp, timestamp),
+                "INSERT INTO generation_tasks (name, hero_product_info_text, user_requirement_text, batch_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'DRAFT', ?, ?)",
+                (task_name, hero_product_info_text, hero_product_info_text, batch_id, timestamp, timestamp),
             )
             task_id = int(cursor.lastrowid)
             for index, asset in enumerate(assets):
@@ -2184,6 +2186,10 @@ async def run_select_generation_styling(
     user_instruction: str | None = None,
 ) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
+    if task["status"] == "DRAFT":
+        # 上传即草稿；首次选搭时自动进入待选搭，用户无需单独“确认”步骤。
+        ready_generation_task(task_id)
+        task = get_generation_task_row(task_id)
     if task["status"] not in {
         "READY_FOR_STYLING",
         "STYLING_READY",
@@ -2768,8 +2774,70 @@ async def auto_run_final_images(task_id: int, request: Request) -> dict[str, Any
             """,
             (AUTO_RUN_TARGET_FINAL, timestamp, timestamp, task_id),
         )
-    schedule_auto_run_for_task(task_id)
+    pump_auto_run_queue()
     return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
+
+
+@app.post("/api/generation-tasks/{task_id}/cancel-auto-run")
+async def cancel_auto_run_final_images(task_id: int, request: Request) -> dict[str, Any]:
+    task = get_generation_task_row(task_id)
+    if row_value(task, "auto_run_target") != AUTO_RUN_TARGET_FINAL:
+        raise HTTPException(status_code=409, detail="当前任务不在一键成片队列中")
+    if task["status"] in RUNNING_GENERATION_TASK_STATUSES:
+        raise HTTPException(status_code=409, detail="当前任务正在生成中，请使用取消生成")
+    clear_task_auto_run(task_id)
+    pump_auto_run_queue()
+    return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
+
+
+def get_batch_task_rows(batch_id: str) -> list[Any]:
+    with get_db() as db:
+        return db.execute(
+            """
+            SELECT * FROM generation_tasks
+            WHERE deleted_at IS NULL AND batch_id = ?
+            ORDER BY id
+            """,
+            (batch_id,),
+        ).fetchall()
+
+
+@app.get("/api/generation-batches/{batch_id}/tasks")
+def list_generation_batch_tasks(batch_id: str) -> dict[str, Any]:
+    rows = get_batch_task_rows(batch_id)
+    return {"items": [serialize_generation_task(row, include_detail=False) for row in rows]}
+
+
+@app.post("/api/generation-batches/{batch_id}/auto-run-final")
+async def auto_run_generation_batch(batch_id: str) -> dict[str, Any]:
+    rows = get_batch_task_rows(batch_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="批次不存在或没有任务")
+    timestamp = now_iso()
+    started_ids: list[int] = []
+    with get_db() as db:
+        for row in rows:
+            if row["status"] in RUNNING_GENERATION_TASK_STATUSES:
+                continue
+            if row["status"] in {"CANCELLED", "ABANDONED", "COMPLETED"}:
+                continue
+            if row_value(row, "auto_run_target") == AUTO_RUN_TARGET_FINAL:
+                continue
+            db.execute(
+                """
+                UPDATE generation_tasks
+                SET auto_run_target = ?, auto_run_requested_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (AUTO_RUN_TARGET_FINAL, timestamp, timestamp, int(row["id"])),
+            )
+            started_ids.append(int(row["id"]))
+    pump_auto_run_queue()
+    refreshed = get_batch_task_rows(batch_id)
+    return {
+        "startedTaskIds": started_ids,
+        "items": [serialize_generation_task(row, include_detail=False) for row in refreshed],
+    }
 
 
 async def run_generate_final_images(
@@ -6997,10 +7065,79 @@ def schedule_auto_run_for_task(task_id: int) -> None:
     schedule_background_generation(run_auto_final_generation(task_id), job_key=auto_run_job_key(task_id))
 
 
-def maybe_schedule_auto_run_for_task(task_id: int) -> None:
-    row = get_generation_task_row(task_id)
-    if row_value(row, "auto_run_target") == AUTO_RUN_TARGET_FINAL and row["status"] not in RUNNING_GENERATION_TASK_STATUSES:
+AUTO_RUN_JOB_KEY_PREFIX = "generation_auto_run:"
+AUTO_RUN_TERMINAL_TASK_STATUSES = {"CANCELLED", "ABANDONED"}
+
+
+def auto_run_active_task_ids() -> set[int]:
+    """当前占用 auto-run 并发额度的任务：状态运行中，或后台正在推进其 auto-run 协程。"""
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT id FROM generation_tasks
+            WHERE deleted_at IS NULL
+              AND auto_run_target = ?
+              AND status IN ('STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING')
+            """,
+            (AUTO_RUN_TARGET_FINAL,),
+        ).fetchall()
+    ids = {int(row["id"]) for row in rows}
+    for key in list(active_background_generation_jobs):
+        if key.startswith(AUTO_RUN_JOB_KEY_PREFIX):
+            with suppress(ValueError):
+                ids.add(int(key[len(AUTO_RUN_JOB_KEY_PREFIX):]))
+    return ids
+
+
+def pump_auto_run_queue() -> None:
+    """并发闸门：按 auto_run_requested_at 顺序推进排队中的一键成片任务，超出上限的继续等待。"""
+    active_ids = auto_run_active_task_ids()
+    slots = settings.generation_auto_run_max_concurrency - len(active_ids)
+    if slots <= 0:
+        return
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT id FROM generation_tasks
+            WHERE deleted_at IS NULL
+              AND auto_run_target = ?
+              AND status NOT IN ('STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'CANCELLED', 'ABANDONED')
+            ORDER BY COALESCE(auto_run_requested_at, updated_at), id
+            """,
+            (AUTO_RUN_TARGET_FINAL,),
+        ).fetchall()
+    for row in rows:
+        if slots <= 0:
+            return
+        task_id = int(row["id"])
+        if task_id in active_ids:
+            continue
         schedule_auto_run_for_task(task_id)
+        slots -= 1
+
+
+def auto_run_queue_position(task_id: int, requested_at: str | None) -> int | None:
+    """任务在一键成片队列中的近似位置（1 起）。"""
+    with get_db() as db:
+        row = db.execute(
+            """
+            SELECT COUNT(*) AS ahead FROM generation_tasks
+            WHERE deleted_at IS NULL
+              AND auto_run_target = ?
+              AND status NOT IN ('STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'CANCELLED', 'ABANDONED')
+              AND id != ?
+              AND (
+                COALESCE(auto_run_requested_at, updated_at) < COALESCE(?, '')
+                OR (COALESCE(auto_run_requested_at, updated_at) = COALESCE(?, '') AND id < ?)
+              )
+            """,
+            (AUTO_RUN_TARGET_FINAL, task_id, requested_at, requested_at, task_id),
+        ).fetchone()
+    return int(row["ahead"]) + 1 if row else None
+
+
+def maybe_schedule_auto_run_for_task(task_id: int) -> None:
+    pump_auto_run_queue()
 
 
 def clear_task_auto_run(task_id: int) -> None:
@@ -7167,17 +7304,6 @@ def refresh_pending_new_generation_jobs() -> None:
             LIMIT 10
             """
         ).fetchall()
-        auto_rows = db.execute(
-            """
-            SELECT id FROM generation_tasks
-            WHERE deleted_at IS NULL
-              AND auto_run_target = ?
-              AND status NOT IN ('STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'CANCELLED', 'ABANDONED')
-            ORDER BY updated_at, id
-            LIMIT 5
-            """,
-            (AUTO_RUN_TARGET_FINAL,),
-        ).fetchall()
 
     for row in preview_rows:
         key = preview_job_key(int(row["id"]))
@@ -7233,13 +7359,7 @@ def refresh_pending_new_generation_jobs() -> None:
     for row in terminal_result_sets:
         with get_db() as db:
             reconcile_final_result_set(db, int(row["id"]), int(row["task_id"]))
-        maybe_schedule_auto_run_for_task(int(row["task_id"]))
-
-    for row in auto_rows:
-        key = auto_run_job_key(int(row["id"]))
-        if key in active_background_generation_jobs:
-            continue
-        schedule_auto_run_for_task(int(row["id"]))
+    pump_auto_run_queue()
 
 
 def schedule_background_generation(coro: Any, job_key: str | None = None) -> None:
@@ -7560,13 +7680,24 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
         "activePreviewId": row["active_preview_id"],
         "activeStoryboardPreviewId": row["active_storyboard_preview_id"] if "active_storyboard_preview_id" in row.keys() else row["active_preview_id"],
         "activeResultSetId": row["active_result_set_id"],
+        "batchId": row_value(row, "batch_id"),
         "autoRunTarget": row_value(row, "auto_run_target"),
         "autoRunRequestedAt": row_value(row, "auto_run_requested_at"),
+        "autoRunQueued": False,
+        "autoRunQueuePosition": None,
         "archivedAt": row["archived_at"] if "archived_at" in row.keys() else None,
         "archiveReason": row["archive_reason"] if "archive_reason" in row.keys() else None,
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
+    if (
+        row_value(row, "auto_run_target") == AUTO_RUN_TARGET_FINAL
+        and row["status"] not in RUNNING_GENERATION_TASK_STATUSES
+        and row["status"] not in AUTO_RUN_TERMINAL_TASK_STATUSES
+        and int(row["id"]) not in auto_run_active_task_ids()
+    ):
+        item["autoRunQueued"] = True
+        item["autoRunQueuePosition"] = auto_run_queue_position(int(row["id"]), row_value(row, "auto_run_requested_at"))
     if not include_detail:
         item["summary"] = get_generation_task_summary(row["id"])
         return item
@@ -7910,7 +8041,13 @@ def get_task_ai_operations(task_id: int) -> list[dict[str, Any]]:
                       )
                     ))
                OR (ga.owner_type = 'generation_shoot_script' AND ga.owner_id = ?)
+               OR (ga.owner_type = 'generation_shoot_script'
+                    AND ga.status IN ('RUNNING', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS')
+                    AND ga.owner_id IN (SELECT id FROM generation_shoot_scripts WHERE task_id = ?))
                OR (ga.owner_type = 'generation_preview' AND ga.owner_id = ?)
+               OR (ga.owner_type = 'generation_preview'
+                    AND ga.status IN ('RUNNING', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS')
+                    AND ga.owner_id IN (SELECT id FROM generation_previews WHERE task_id = ?))
                OR (ga.owner_type = 'generation_result_image' AND ga.owner_id IN (
                     SELECT gri.id FROM generation_result_images_new gri
                     WHERE gri.result_set_id = ?
@@ -7923,7 +8060,9 @@ def get_task_ai_operations(task_id: int) -> list[dict[str, Any]]:
                 task["status"],
                 task["active_styling_id"],
                 row_value(task, "active_shoot_script_id"),
+                task_id,
                 row_value(task, "active_storyboard_preview_id") or task["active_preview_id"],
+                task_id,
                 task["active_result_set_id"],
             ),
         ).fetchall()
