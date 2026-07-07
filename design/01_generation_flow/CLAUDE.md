@@ -14,6 +14,7 @@
 | `styling_quality_signals.md` | AI Stylist 质量信号与客户审核闭环：避免业务质量问题变成用户可见报错 | 设计或排查智能选搭质量问题时 |
 | `image2_input_strategy.md` | 10 图输入限制、图片角色、预览/最终 prompt 策略 | 设计任务包、prompt、图片输入优先级时 |
 | `prompt_context_strategy.md` | Prompt 上下文 DTO 策略：搭配库 AI 标签事实卡、跨阶段压缩、旧兼容注入删除 | 评估 prompt 过长、调整 runtime 占位符或生成请求快照时 |
+| `prompt_rendering_refactor.md` | Prompt 渲染层重构设计：快照模型与 prompt 视图解耦、生图阶段去 JSON 治理元数据、参考图自然语言化、迁移阶段与本地渲染对比验收 | 修正 prompt 组装偏离 spec、去除 schema_version/priority_policy 噪音、实现 renderer 层时 |
 | `generation_responsibility_matrix.md` | 商品、模特、ShootScript、ShotPlan、生成配饰、导出等要素由谁负责 | 分析生成问题归因和修复方案时 |
 
 ## 本地规则 (Local Rules)
