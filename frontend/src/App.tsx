@@ -521,9 +521,14 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     }, { refresh: 'background' })
   }
   function startOneClickFinal() {
-    if (!task || !canStartOneClickFinal(task)) return
-    if (!window.confirm('将自动完成后续步骤，并复用已有选搭、拍摄剧本和分镜预览。生成过程可能产生多次 AI 调用。')) return
-    void run('启动一键成片中...', () => api.autoRunFinal(task.id), (r: { item: GenerationTask }) => {
+    if (!task) return
+    const restart = canRestartOneClickFinal(task)
+    if (!restart && !canStartOneClickFinal(task)) return
+    const confirmText = restart
+      ? '将重新走完整流程：重新智能选搭、拍摄剧本、分镜预览和成片，产出一套全新方案。已有成片会保留在历史记录里可追溯。整条重跑会产生较多 AI 调用，确定重新一键成片吗？'
+      : '将自动完成后续步骤，并复用已有选搭、拍摄剧本和分镜预览。生成过程可能产生多次 AI 调用。'
+    if (!window.confirm(confirmText)) return
+    void run(restart ? '重新一键成片启动中...' : '启动一键成片中...', () => api.autoRunFinal(task.id, restart), (r: { item: GenerationTask }) => {
       applyTaskUpdate(r.item)
     }, { refresh: 'background' })
   }
@@ -578,7 +583,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
         subtitle="上传主推款，让系统选搭配角服装并生成电商棚拍成片。"
         actions={task ? (
           <div className="studio-title-actions">
-            <button className="primary" disabled={!canStartOneClickFinal(task)} onClick={startOneClickFinal}>
+            <button className="primary" disabled={!canStartOneClickFinal(task) && !canRestartOneClickFinal(task)} onClick={startOneClickFinal}>
               <Sparkles size={16} />{oneClickFinalLabel(task)}
             </button>
             <button className="secondary" onClick={startNewTask}><ImagePlus size={16} />新建拍摄任务</button>
@@ -4072,16 +4077,27 @@ function getTaskStep(task: GenerationTask | null): StudioStep {
   return 0
 }
 
+function taskHasHeroImage(task: GenerationTask) {
+  // 详情序列化看 images；批次条/最近任务等轻量序列化没有 images，用 summary.cover 判断有无主推款图。
+  return (task.images?.length ?? 0) > 0 || !!task.summary?.cover
+}
+
 function canStartOneClickFinal(task: GenerationTask) {
   if (isTaskRunning(task) || task.autoRunTarget) return false
   if (['CANCELLED', 'ABANDONED', 'COMPLETED'].includes(task.status)) return false
-  // 详情序列化看 images；批次条/最近任务等轻量序列化没有 images，用 summary.cover 判断有无主推款图。
-  return (task.images?.length ?? 0) > 0 || !!task.summary?.cover
+  return taskHasHeroImage(task)
+}
+
+// 已完成任务可「重新一键成片」：整条重跑出全新方案，旧成片保留为历史。仅单任务提供，批次不参与。
+function canRestartOneClickFinal(task: GenerationTask) {
+  if (isTaskRunning(task) || task.autoRunTarget) return false
+  return task.status === 'COMPLETED' && taskHasHeroImage(task)
 }
 
 function oneClickFinalLabel(task: GenerationTask) {
   if (isTaskQueuedForAutoRun(task)) return '排队中'
   if (task.autoRunTarget === 'FINAL' || isTaskRunning(task)) return '自动生成中'
+  if (task.status === 'COMPLETED') return '重新一键成片'
   if (task.status === 'FINAL_PARTIAL' || task.status === 'FAILED') return '继续一键成片'
   return '一键成片'
 }
