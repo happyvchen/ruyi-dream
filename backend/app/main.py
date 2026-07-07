@@ -313,6 +313,11 @@ class GenerationStageInstructionRequest(BaseModel):
     userInstruction: str | None = None
 
 
+class AutoRunFinalRequest(BaseModel):
+    # restart=True：已完成任务「重新一键成片」，把当前方案整条置为历史后从头重跑。
+    restart: bool = False
+
+
 class GenerationTaskImageUpdateRequest(BaseModel):
     sortOrder: int | None = None
 
@@ -1810,6 +1815,53 @@ def mark_generation_task_input_changed(db: Any, task_id: int, timestamp: str, re
     log_event(db, "generation_task", task_id, "input_changed", {"reason": reason})
 
 
+def reset_generation_task_for_rerun(db: Any, task_id: int, timestamp: str) -> None:
+    """「重新一键成片」：主推款输入不变，把当前 active 的选搭/剧本/预览/成片整条置为 SUPERSEDED 历史，
+    任务回到 READY_FOR_STYLING，使自动推进从智能选搭重新开始。旧结果保留可追溯，不删除。"""
+    db.execute(
+        """
+        UPDATE generation_stylings
+        SET status = 'SUPERSEDED', updated_at = ?
+        WHERE task_id = ? AND status = 'SUCCEEDED'
+        """,
+        (timestamp, task_id),
+    )
+    db.execute(
+        """
+        UPDATE generation_shoot_scripts
+        SET status = 'SUPERSEDED', superseded_at = COALESCE(superseded_at, ?), updated_at = ?
+        WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
+        """,
+        (timestamp, timestamp, task_id),
+    )
+    db.execute(
+        """
+        UPDATE generation_previews
+        SET status = 'SUPERSEDED', updated_at = ?
+        WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
+        """,
+        (timestamp, task_id),
+    )
+    supersede_generation_result_sets(db, task_id, timestamp)
+    db.execute(
+        """
+        UPDATE generation_tasks
+        SET status = 'READY_FOR_STYLING',
+            active_styling_id = NULL,
+            active_shoot_script_id = NULL,
+            active_preview_id = NULL,
+            active_storyboard_preview_id = NULL,
+            active_result_set_id = NULL,
+            auto_run_target = NULL,
+            auto_run_requested_at = NULL,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (timestamp, task_id),
+    )
+    log_event(db, "generation_task", task_id, "restarted", {"reason": "rerun_from_scratch"})
+
+
 def generation_task_stage_instruction_column(stage: str) -> str | None:
     return {
         "ai_styling": "ai_styling_user_instruction_text",
@@ -2756,14 +2808,19 @@ async def generate_final_images(task_id: int, request: Request, payload: Generat
 
 
 @app.post("/api/generation-tasks/{task_id}/auto-run-final")
-async def auto_run_final_images(task_id: int, request: Request) -> dict[str, Any]:
+async def auto_run_final_images(task_id: int, request: Request, payload: AutoRunFinalRequest | None = None) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     if task["status"] in RUNNING_GENERATION_TASK_STATUSES:
         raise HTTPException(status_code=409, detail="当前任务正在生成中，请先取消或等待完成")
     if task["status"] in {"CANCELLED", "ABANDONED"}:
         raise HTTPException(status_code=409, detail="当前任务已取消，不能一键成片")
+    restart = bool(payload and payload.restart)
+    if restart and task["status"] != "COMPLETED":
+        raise HTTPException(status_code=409, detail="仅已完成的任务可以重新一键成片")
     timestamp = now_iso()
     with get_db() as db:
+        if restart:
+            reset_generation_task_for_rerun(db, task_id, timestamp)
         db.execute(
             """
             UPDATE generation_tasks

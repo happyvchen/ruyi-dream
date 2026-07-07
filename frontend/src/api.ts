@@ -531,8 +531,8 @@ export const api = {
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/preview`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
   generateFinal: (id: number, userInstruction?: string) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/generate-final`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
-  autoRunFinal: (id: number) =>
-    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/auto-run-final`, { method: 'POST' }),
+  autoRunFinal: (id: number, restart = false) =>
+    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/auto-run-final`, { method: 'POST', body: JSON.stringify({ restart }) }),
   cancelAutoRun: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/cancel-auto-run`, { method: 'POST' }),
   retryResultImage: (id: number, userInstruction?: string) =>
