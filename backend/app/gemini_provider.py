@@ -14,16 +14,41 @@ import asyncio
 import base64
 import json
 import logging
+import random
 import re
-from typing import Any
+import time
+from typing import Any, Callable
 
 from . import config
+from .generation_progress import (
+    ERROR_CONN_RESET,
+    ERROR_MALFORMED_OUTPUT,
+    ERROR_RATE_LIMITED,
+    ERROR_WAF_BLOCK,
+    classify_provider_error,
+    is_zero_output_transient,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
 VALID_GEMINI_PROVIDERS = {"direct", "toapis"}
+
+
+class GeminiProviderError(RuntimeError):
+    """带 error_code 的 Gemini 通道错误。
+
+    error_code 取 generation_progress 的 ERROR_* 常量（由 classify_provider_error 判定），
+    让上层 finish_attempt(error_code=...) 和重试策略据此决策：
+    - 只有 is_zero_output_transient(error_code) 且当前尝试零文本产出时才重发整个请求；
+    - MALFORMED_OUTPUT / 截断 一定已产出并计费，绝不在 provider 层重发。
+    """
+
+    def __init__(self, message: str, error_code: str, *, retry_after: float | None = None):
+        super().__init__(message)
+        self.error_code = error_code
+        self.retry_after = retry_after
 
 
 def get_settings() -> config.Settings:
@@ -127,7 +152,81 @@ def _generate_via_toapis(
     system_instruction: str | None,
 ) -> str:
     payload = build_toapis_chat_payload(prompt, images, system_instruction)
-    return _post_toapis_chat(payload)
+    return _post_toapis_chat_with_retry(payload)
+
+
+def _post_toapis_chat_with_retry(
+    payload: dict[str, Any],
+    should_cancel: Callable[[], bool] | None = None,
+) -> str:
+    """在"零产出瞬时错误"前提下安全重发整个 chat completions 请求。
+
+    ==== 安全边界（务必读懂再改）====
+    聊天类按 token 计费且非幂等,重发整个请求只有在"上一次尝试零 token 产出"时才安全。
+    本函数只在 is_zero_output_transient(error_code) 为真时重试,该集合仅含:
+      - GATEWAY_5XX:502/503/504/520-524。Cloudflare 边缘层错误,请求根本没到 ToAPIs
+        应用层,不进 Consume(计费),零产出。
+      - CONN_RESET:连接关闭/重置/SSL EOF/write timeout。请求未成功送达或响应未开始,
+        零产出、不计费。
+      - RATE_LIMITED:429。请求被前置限流拒绝,未进入生成,零产出。
+    这三类都发生在"产生任何输出之前",_post_toapis_chat 在拿到流式正文前就抛出,
+    因此重发不会重复计费。
+    反例(绝不重试):MALFORMED_OUTPUT(含 finish_reason=length 截断、流腐蚀)——正文已
+    产出并计费;AUTH_FAILED / INSUFFICIENT_BALANCE / WAF_BLOCK 由外层策略处理,重发无用
+    (余额类还会继续烧钱)。这些 error_code 不在 zero-output 集合里,本函数直接抛出不重试。
+
+    退避:指数退避 + 抖动,base/cap/次数由 settings 控制;429 若带 Retry-After 则尊重之。
+    should_cancel 若提供,退避期间命中即中断重试并抛出最后一次错误。
+    """
+    settings = get_settings()
+    retry_limit = max(0, settings.gemini_retry_limit)
+    base = max(0.0, float(settings.gemini_retry_backoff_base_seconds))
+    cap = max(0.0, float(settings.gemini_retry_backoff_cap_seconds))
+    waf_limit = max(0, settings.gemini_waf_retry_limit)
+
+    attempt = 0
+    waf_attempts = 0
+    while True:
+        try:
+            return _post_toapis_chat(payload)
+        except GeminiProviderError as exc:
+            error_code = exc.error_code
+            # WAF 熔断:有限重试后放弃(1010 是指纹封禁,盲目重发没用但短暂退避偶尔能过)。
+            if error_code == ERROR_WAF_BLOCK:
+                if waf_attempts >= waf_limit:
+                    raise
+                waf_attempts += 1
+            elif is_zero_output_transient(error_code):
+                if attempt >= retry_limit:
+                    raise
+                attempt += 1
+            else:
+                # AUTH/BALANCE/MALFORMED 等:重发无用或会重复计费,直接抛出。
+                raise
+
+            if should_cancel is not None and should_cancel():
+                raise
+            wait = _retry_backoff_seconds(attempt, base, cap)
+            if error_code == ERROR_RATE_LIMITED and exc.retry_after is not None:
+                wait = max(wait, exc.retry_after)
+            logger.warning(
+                "Gemini(ToAPIs 通道) 零产出瞬时错误(%s),第 %d 次重试,退避 %.1fs: %s",
+                error_code,
+                attempt + waf_attempts,
+                wait,
+                str(exc)[:200],
+            )
+            if wait > 0:
+                time.sleep(wait)
+
+
+def _retry_backoff_seconds(attempt: int, base: float, cap: float) -> float:
+    """指数退避 + 满抖动(full jitter)。attempt 从 1 开始。"""
+    if base <= 0:
+        return 0.0
+    raw = base * (2 ** max(0, attempt - 1))
+    ceiling = min(raw, cap) if cap > 0 else raw
+    return random.uniform(0, ceiling)
 
 
 def build_toapis_chat_payload(
@@ -165,8 +264,18 @@ def build_toapis_chat_payload(
 def _post_toapis_chat(payload: dict[str, Any]) -> str:
     """流式调用 ToAPIs chat completions,返回组装后的完整文本。
 
-    chat completions 非幂等且按 token 计费,不做重试;timeout 作用于
-    相邻数据块之间的读等待,而不是整个响应时长。
+    单次调用不做重试;重试由上层 _post_toapis_chat_with_retry 在"零产出"前提下
+    安全地重发整个请求(见其 docstring 的安全边界)。timeout 作用于相邻数据块之间的
+    读等待,而不是整个响应时长。
+
+    失败一律抛 GeminiProviderError(error_code=...)（由 classify_provider_error 判定）：
+    - HTTP 非 ok → 按状态码 + 错误体分类（502→GATEWAY_5XX、429→RATE_LIMITED、
+      401/403→AUTH_FAILED、余额→INSUFFICIENT_BALANCE 等）。这些都是"请求未产出
+      任何正文"的失败,天然零计费,可安全重发。
+    - 连接异常(requests.RequestException) → CONN_RESET(含 write timeout,请求未到达
+      ToAPIs、不计费)。
+    - 流截断/腐蚀 → MALFORMED_OUTPUT(由 assemble_toapis_stream_text 抛出,已产出并
+      计费,绝不重发)。
 
     注意:timeout 元组第一个值(connect)在 urllib3 中同时是发送请求体阶段的
     socket 超时;请求体内嵌 base64 图片可达数 MB,部署环境上行慢时过小的值
@@ -190,14 +299,20 @@ def _post_toapis_chat(payload: dict[str, Any]) -> str:
             timeout=(settings.gemini_toapis_connect_timeout_seconds, settings.gemini_toapis_timeout_seconds),
         )
     except requests.RequestException as exc:
-        raise RuntimeError(f"Gemini(ToAPIs 通道) 请求失败: {exc}") from exc
+        # 连接/写超时:请求未到达 ToAPIs 应用层,零产出、不计费,归 CONN_RESET 可安全重发。
+        message = f"Gemini(ToAPIs 通道) 请求失败: {exc}"
+        raise GeminiProviderError(message, classify_provider_error(message=str(exc))) from exc
     with response:
         if not response.ok:
             raw_body = response.text or ""
             # attempt 记录只存下方摘要;原始错误体在此落日志供排查。
             logger.warning("ToAPIs 上游错误 HTTP %s: %s", response.status_code, raw_body[:2000])
-            raise RuntimeError(
-                f"Gemini(ToAPIs 通道) 请求失败: {summarize_upstream_http_error(response.status_code, raw_body)}"
+            retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+            error_code = classify_provider_error(status_code=response.status_code, body=raw_body)
+            raise GeminiProviderError(
+                f"Gemini(ToAPIs 通道) 请求失败: {summarize_upstream_http_error(response.status_code, raw_body)}",
+                error_code,
+                retry_after=retry_after,
             )
         content_type = (response.headers.get("Content-Type") or "").lower()
         if "text/event-stream" not in content_type:
@@ -205,8 +320,22 @@ def _post_toapis_chat(payload: dict[str, Any]) -> str:
             try:
                 return extract_toapis_chat_text(response.json())
             except ValueError as exc:
-                raise RuntimeError(f"Gemini(ToAPIs 通道) 响应不是合法 JSON: {(response.text or '')[:500]}") from exc
+                raise GeminiProviderError(
+                    f"Gemini(ToAPIs 通道) 响应不是合法 JSON: {(response.text or '')[:500]}",
+                    ERROR_MALFORMED_OUTPUT,
+                ) from exc
         return assemble_toapis_stream_text(iter_sse_lines(response))
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """解析 429 响应的 Retry-After 头（仅支持秒数形式；HTTP-date 略过）。"""
+    if not value:
+        return None
+    try:
+        seconds = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
 
 
 def iter_sse_lines(response: Any) -> Any:
@@ -282,7 +411,13 @@ def assemble_toapis_stream_text(lines: Any) -> str:
         if not isinstance(chunk, dict):
             continue
         if chunk.get("error"):
-            raise RuntimeError(f"Gemini(ToAPIs 通道) 流式响应错误: {json.dumps(chunk['error'], ensure_ascii=False)[:500]}")
+            error_body = json.dumps(chunk["error"], ensure_ascii=False)[:500]
+            # 流内 error 块可能携带余额/限流/鉴权语义,按文案分类而不是一律当畸形。
+            # 已收到过正文与否不影响这类"provider 明确报错"的定性。
+            raise GeminiProviderError(
+                f"Gemini(ToAPIs 通道) 流式响应错误: {error_body}",
+                classify_provider_error(body=error_body),
+            )
         if isinstance(chunk.get("usage"), dict):
             usage = chunk["usage"]
         choices = chunk.get("choices")
@@ -305,16 +440,22 @@ def assemble_toapis_stream_text(lines: Any) -> str:
             dropped_data_lines,
         )
     if finish_reason == "length":
-        raise RuntimeError(
+        # 截断=正文已产出并计费,任何 JSON 修复都救不了。归 MALFORMED_OUTPUT:
+        # 绝不在 provider 层重发(会重复计费),交由上层"修复+重问一次"处理。
+        raise GeminiProviderError(
             "Gemini(ToAPIs 通道) 输出被截断(finish_reason=length): "
             f"completion_tokens={usage.get('completion_tokens', '?')}, "
-            f"已收到正文 {len(text)} 字符(思考约 {reasoning_chars} 字符)。请直接重试。"
+            f"已收到正文 {len(text)} 字符(思考约 {reasoning_chars} 字符)。",
+            ERROR_MALFORMED_OUTPUT,
         )
     if not text.strip():
-        raise RuntimeError(
+        # 流已建立但没组装出正文:可能被腐蚀(dropped_data_lines>0)或只有思考。
+        # 归 MALFORMED_OUTPUT——流已开始产出、不能盲目重发。
+        raise GeminiProviderError(
             "Gemini(ToAPIs 通道) 流式响应未包含文本内容"
             f"(finish_reason={finish_reason or '?'}, 思考约 {reasoning_chars} 字符, "
-            f"丢弃非法 data 行 {dropped_data_lines} 条)。"
+            f"丢弃非法 data 行 {dropped_data_lines} 条)。",
+            ERROR_MALFORMED_OUTPUT,
         )
     return text
 

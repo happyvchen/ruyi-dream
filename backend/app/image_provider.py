@@ -14,7 +14,13 @@ from urllib.request import Request, urlopen
 
 from . import config
 from .db import get_db, now_iso
-from .generation_progress import ERROR_DELIVERY_FAILED, ERROR_UPLOAD_FAILED, GenerationPhaseError
+from .generation_progress import (
+    ERROR_DELIVERY_FAILED,
+    ERROR_UPLOAD_FAILED,
+    GenerationPhaseError,
+    classify_provider_error,
+    is_retryable_error,
+)
 from .image_derivatives import generate_image_derivatives
 from .object_storage import get_bytes, object_exists, put_bytes
 
@@ -322,7 +328,7 @@ def store_delivered_image(output_key: str, output_url: str, provider_response: d
 
 # -- provider 参考图上传缓存 -------------------------------------------------
 #
-# 同一 objectKey 的参考图（主推款、搭配服装、模特参考图、分镜预览）在 5 张成片
+# 同一 objectKey 的参考图（主推款、搭配服装、模特参考图）在 5 张成片
 # 并发生成时会被重复上传 5 次。缓存 + 进程内按 key 加锁：第一个上传，其余复用。
 
 _upload_key_locks: dict[tuple[str, str], threading.Lock] = {}
@@ -383,16 +389,14 @@ def upload_object_with_cache(provider: str, object_key: str, uploader: Callable[
 
 def build_fal_request_snapshot(task_package: dict[str, Any], image_urls: list[str]) -> dict[str, Any]:
     settings = get_settings()
-    generation = task_package.get("generation", {}) if isinstance(task_package.get("generation"), dict) else {}
-    stage = generation.get("stage")
     prompt = str(task_package.get("prompt") or "").strip()
     if not prompt:
         raise RuntimeError("图片生成缺少 Prompt 维护渲染出的 prompt。")
     return {
         "prompt": prompt,
         "image_urls": image_urls,
-        "image_size": "square_hd" if stage == "preview_grid" else "auto",
-        "quality": "high" if stage == "preview_grid" else settings.gpt_image2_quality,
+        "image_size": "auto",
+        "quality": settings.gpt_image2_quality,
         "num_images": 1,
         "output_format": settings.gpt_image2_output_format,
         "sync_mode": False,
@@ -401,8 +405,6 @@ def build_fal_request_snapshot(task_package: dict[str, Any], image_urls: list[st
 
 def build_toapis_request_snapshot(task_package: dict[str, Any], image_urls: list[str]) -> dict[str, Any]:
     settings = get_settings()
-    generation = task_package.get("generation", {}) if isinstance(task_package.get("generation"), dict) else {}
-    stage = generation.get("stage")
     prompt = str(task_package.get("prompt") or "").strip()
     if not prompt:
         raise RuntimeError("图片生成缺少 Prompt 维护渲染出的 prompt。")
@@ -413,7 +415,7 @@ def build_toapis_request_snapshot(task_package: dict[str, Any], image_urls: list
         "reference_images": image_urls,
         "reference_image_manifest": build_provider_reference_image_manifest(image_inputs, image_urls),
         "n": 1,
-        "size": "1:1" if stage == "preview_grid" else settings.gpt_image2_size,
+        "size": settings.gpt_image2_size,
         "resolution": settings.gpt_image2_resolution,
         "response_format": "url",
     }
@@ -779,7 +781,8 @@ def request_json(
             attempts=attempts,
         )
     except requests.RequestException as exc:
-        raise RuntimeError(f"{error_label}: {exc}") from exc
+        # 网络异常（连接重置/写超时等）→ CONN_RESET，图片路径可幂等重试。
+        raise ImageProviderError(f"{error_label}: {exc}", error_code=classify_provider_error(message=str(exc))) from exc
     try:
         response_payload = response.json()
     except ValueError:
@@ -788,7 +791,10 @@ def request_json(
         message = response_payload.get("message") or response_payload.get("error") or response_payload
         if isinstance(message, dict):
             message = message.get("message") or str(message)
-        raise RuntimeError(f"{error_label}: HTTP {response.status_code} {message}")
+        # HTTP 错误按状态码 + 文案分类：401/403→AUTH_FAILED、402/余额→INSUFFICIENT_BALANCE、
+        # 1010→WAF_BLOCK、429→RATE_LIMITED、5xx→GATEWAY_5XX。上层据此早停或退避。
+        error_code = classify_provider_error(status_code=response.status_code, body=str(message))
+        raise ImageProviderError(f"{error_label}: HTTP {response.status_code} {message}", error_code=error_code)
     return response_payload
 
 

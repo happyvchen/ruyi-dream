@@ -2,7 +2,7 @@
 
 ## 职责 (Scope)
 
-ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 兼容对象存储的 AI 摄影棚实现，覆盖搭配服装打标、主推款任务流、AI Stylist / StylingPlan、拍摄剧本 / ShootScript、Image-2 分镜预览/成片生成、结果复盘。
+ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 兼容对象存储的 AI 摄影棚实现，覆盖搭配服装打标、主推款任务流、AI Stylist / StylingPlan、拍摄剧本 / ShootScript、Image-2 成片生成、结果复盘。
 
 设计层面的产品范围、生成职责和技术路线在 `../design/`，本目录只管“代码怎么写”和“后端契约怎么落地”。
 

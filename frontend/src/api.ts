@@ -132,14 +132,11 @@ export type GenerationTask = {
   stageUserInputs?: {
     aiStyling?: string | null
     shootScript?: string | null
-    storyboardPreview?: string | null
     finalImage?: string | null
   }
   currentInputVersionId?: number | null
   activeStylingId?: number | null
   activeShootScriptId?: number | null
-  activeStoryboardPreviewId?: number | null
-  activePreviewId?: number | null
   activeResultSetId?: number | null
   batchId?: string | null
   autoRunTarget?: string | null
@@ -190,13 +187,10 @@ export type GenerationTask = {
     updatedAt?: string
   } | null
   shotPlans?: { id: number; sortOrder: number; shotType: string; plan: Record<string, unknown> }[]
-  preview?: { id: number; status: string; asset?: MediaAsset | null; shootScriptId?: number | null; userInstruction?: Record<string, unknown>; createdAt?: string; updatedAt?: string } | null
-  storyboardPreview?: { id: number; status: string; asset?: MediaAsset | null; shootScriptId?: number | null; userInstruction?: Record<string, unknown>; createdAt?: string; updatedAt?: string } | null
   resultSet?: {
     id: number
     status: string
     shootScriptId?: number | null
-    previewId?: number | null
     userInstruction?: Record<string, unknown>
     images: {
       id: number
@@ -212,7 +206,6 @@ export type GenerationTask = {
   } | null
   summary?: {
     cover?: MediaAsset | null
-    preview?: MediaAsset | null
     finalImages?: MediaAsset[]
     selectedGarments?: StylingGarment[]
   }
@@ -247,7 +240,6 @@ export type DeleteImpact = {
   stylingCount?: number
   shootScriptCount?: number
   shotPlanCount?: number
-  previewCount?: number
   resultSetCount?: number
   resultImageCount?: number
   mediaAssetCount?: number
@@ -503,7 +495,6 @@ export const api = {
     heroProductInfo?: string
     aiStylingUserInstruction?: string
     shootScriptUserInstruction?: string
-    storyboardPreviewUserInstruction?: string
     finalImageUserInstruction?: string
   }) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
@@ -527,8 +518,6 @@ export const api = {
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/select-styling`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
   createShootScript: (id: number, userInstruction?: string) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/shoot-script`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
-  previewTask: (id: number, userInstruction?: string) =>
-    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/preview`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
   generateFinal: (id: number, userInstruction?: string) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/generate-final`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
   autoRunFinal: (id: number, restart = false) =>

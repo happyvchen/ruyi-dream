@@ -21,7 +21,6 @@ from app.prompt_render import (  # noqa: E402
     render_hero_product_info_line,
     render_image_reference_line,
     render_model_identity_line,
-    render_shoot_script_body,
     render_shot_context_body,
     render_user_instruction_line,
     render_user_requirement_line,
@@ -62,7 +61,7 @@ def _sample_shot(idx: int) -> dict:
 
 def _sample_shoot_script_context() -> dict:
     return {
-        "schema_version": "shoot-script-storyboard-context-v1",
+        "schema_version": "final-image-shot-context-v1",
         "global_directing": {
             "brand_tone": "轻松高级、智性优雅",
             "background": "浅灰白纯色棚拍背景",
@@ -90,7 +89,6 @@ def _sample_shoot_script_context() -> dict:
 def _sample_shot_context() -> dict:
     return {
         "schema_version": "final-image-shot-context-v1",
-        "preview_grid_cell": 5,
         "styling": {
             "hero_understanding": {"category": "连衣裙"},
             "selected_outfit": {
@@ -108,35 +106,6 @@ def _sample_shot_context() -> dict:
     }
 
 
-class RenderShootScriptBodyTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.out = render_shoot_script_body(_sample_shoot_script_context())
-
-    def test_no_governance_metadata(self) -> None:
-        for key in GOVERNANCE_KEYS:
-            self.assertNotIn(key, self.out, f"治理元数据 {key} 泄漏进 prompt")
-
-    def test_no_json_braces(self) -> None:
-        self.assertNotIn("{", self.out)
-        self.assertNotIn("}", self.out)
-
-    def test_all_six_shots_present(self) -> None:
-        for i in range(1, 7):
-            self.assertIn(f"格{i}", self.out)
-
-    def test_directing_fields_preserved(self) -> None:
-        # §4A「不丢」字段：机位/取景范围/占比/构图 必须出现
-        for token in ["平视", "头顶至脚底", "占比约85%", "居中留白", "核心焦点1"]:
-            self.assertIn(token, self.out, f"导演字段 {token} 丢失")
-
-    def test_risk_and_accessory_rendered(self) -> None:
-        self.assertIn("短发 Bob", self.out)
-        self.assertIn("燕麦色细带凉鞋", self.out)
-
-    def test_static_movement_omitted(self) -> None:
-        self.assertNotIn("动势", self.out)
-
-
 class RenderShotContextBodyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.out = render_shot_context_body(_sample_shot_context())
@@ -149,8 +118,7 @@ class RenderShotContextBodyTests(unittest.TestCase):
         self.assertNotIn("{", self.out)
         self.assertNotIn("}", self.out)
 
-    def test_preview_cell_and_styling(self) -> None:
-        self.assertIn("第 5 格", self.out)
+    def test_styling_rendered(self) -> None:
         self.assertIn("吊带裙配同色飘带", self.out)
         self.assertIn("LOOK-A", self.out)
 
@@ -205,11 +173,11 @@ class RenderImageReferenceLineTests(unittest.TestCase):
         )
         self.assertEqual(out, "图1-2=数字模特身份；图3-5=主推款")
 
-    def test_final_stage_with_preview_grid(self) -> None:
+    def test_final_stage_roles(self) -> None:
         out = render_image_reference_line(
-            self._inputs("model_identity", "model_identity", "preview_grid", "hero_garment")
+            self._inputs("model_identity", "model_identity", "hero_garment", "styling_garment")
         )
-        self.assertEqual(out, "图1-2=数字模特身份；图3=分镜预览（构图参考）；图4=主推款")
+        self.assertEqual(out, "图1-2=数字模特身份；图3=主推款；图4=搭配服装")
 
     def test_styling_garment_and_unknown(self) -> None:
         out = render_image_reference_line(self._inputs("styling_garment", "mystery"))

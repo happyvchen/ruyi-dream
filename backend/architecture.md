@@ -6,7 +6,7 @@
 
 | 路径 | 职责 |
 |---|---|
-| `app/main.py` | API 路由、AI Stylist、ShootScript、分镜预览、最终图和后台 poller 编排 |
+| `app/main.py` | API 路由、AI Stylist、ShootScript、最终图和后台 poller 编排 |
 | `app/db.py` | SQLite 初始化、默认模特 seed、迁移、事件日志 |
 | `app/image_provider.py` | Image-2 provider adapter；默认 toapis，保留 fal adapter |
 | `app/image_derivatives.py` | thumb / preview WebP 衍生图 |
@@ -20,7 +20,7 @@
 | 模块 | 职责 |
 |---|---|
 | `styling-garment` | 搭配服装库、图片、Gemini 打标、生效标签和 READY 状态 |
-| `generation-task` | 主推款任务、输入版本、StylingPlan、ShootScript、ShotPlan、预览和成片 |
+| `generation-task` | 主推款任务、输入版本、StylingPlan、ShootScript、ShotPlan 和成片 |
 | `model-profile` | 数字模特身份图、身体参数和默认模特 |
 | `prompt-config` | 可维护 Prompt 模板、品牌分段、生成规则和运行时占位符 |
 | `generation` | Image-2 任务提交、状态恢复、单张重试和结果下载 |
@@ -50,10 +50,6 @@ POST /api/generation-tasks/{id}/shoot-script
   -> 调用 AI Director 生成 ShootScript
   -> 派生 6 条 GenerationShotPlan
 
-POST /api/generation-tasks/{id}/preview
-  -> 读取 ShootScript 上下文
-  -> Image-2 生成 3x2 分镜预览
-
 POST /api/generation-tasks/{id}/generate-final
   -> 固定读取前 5 个 ShotPlan
   -> 每张图只传当前单镜头上下文
@@ -62,7 +58,7 @@ POST /api/generation-tasks/{id}/generate-final
 POST /api/generation-tasks/{id}/auto-run-final
   -> 记录 auto_run_target = FINAL
   -> 从当前第一个未完成阶段自动推进到成片
-  -> 复用当前 active StylingPlan / ShootScript / 分镜预览
+  -> 复用当前 active StylingPlan / ShootScript
   -> FINAL_PARTIAL 时只补失败或缺失的最终图
 ```
 
@@ -76,10 +72,9 @@ POST /api/generation-tasks/{id}/auto-run-final
 - 传给模型的 runtime 只给当前步骤必需信息，不透传完整历史阶段、完整候选池或历史 prompt。
 - AI Stylist 输入是未归档 READY 搭配库全量标签事实卡和 `user_requirement`。用户要求优先于默认搭配偏好，但不能覆盖商品事实、搭配库事实、品牌硬边界、输出 schema 和安全规则。
 - AI Director 输入是 `styling_result_for_prompt` + `model_identity_context_for_prompt`，只包含主推款理解、选中 outfit、选中服饰紧凑标签、理由、质量信号、warnings 和数字模特身份契约。
-- 分镜预览输入是 `shoot_script_result_for_prompt` + `image_reference_manifest_for_prompt`，只包含全局导演、配饰、风险、6 个镜头、输入参考图序号和事实源。
 - 最终成片输入是 `current_shot_context_for_prompt` + `image_reference_manifest_for_prompt`，只包含当前格子、当前镜头、全局导演、选中 outfit、本镜头配饰、输入参考图序号和事实源。
 
-数字模特参考图是人物身份事实源。后端必须把 `model_identity` 参考图前置进 Image-2 输入，并在 prompt 中声明它们覆盖 ShootScript、分镜预览和品牌妆发文字；分镜预览只允许作为构图、姿势和光影参考。
+数字模特参考图是人物身份事实源。后端必须把 `model_identity` 参考图前置进 Image-2 输入，并在 prompt 中声明它们覆盖 ShootScript 和品牌妆发文字。
 
 不实现独立 prompt 长度预算监控；0.1.0 通过结构化 DTO 和删除历史注入来控制上下文体量。
 
@@ -89,10 +84,10 @@ Prompt 正文只来自 `prompt_configs.content`。后端只初始化空正文的
 
 对象存储保存原图，应用层登记 `thumb`、`preview`、`original` 三层媒体结构。前端访问稳定 `/api/media?key=...&variant=...`，后端校验 key 后跳转对象存储短期 URL。
 
-`generation_previews` 和 `generation_result_images_new` 使用 `locked_by` / `locked_until` / `run_attempts` 做单实例恢复。后端重启后，poller 扫描锁过期任务，标记历史 attempt 失败并重建 attempt 继续执行。带有 `auto_run_target = FINAL` 的任务会在非运行中状态下重新调度自动推进。
+`generation_result_images_new` 使用 `locked_by` / `locked_until` / `run_attempts` 做单实例恢复。后端重启后，poller 扫描锁过期任务，标记历史 attempt 失败并重建 attempt 继续执行。带有 `auto_run_target = FINAL` 的任务会在非运行中状态下重新调度自动推进。
 
 ## 约束
 
 - Image-2 只负责视觉生成，不承担标签、选搭、历史状态或业务策略。
-- 用户不写长 prompt；用户可填写简短业务要求，并确认拍摄信息、造型方案、分镜预览和结果。
+- 用户不写长 prompt；用户可填写简短业务要求，并确认拍摄信息、造型方案和结果。
 - 0.1.0 之前的逻辑、库表和数据不作为运行时读取路径。
