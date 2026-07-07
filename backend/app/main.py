@@ -3488,8 +3488,7 @@ def iter_final_image_export_zip(tasks: list[dict[str, Any]], exported_at: str) -
                     logger.exception("批量下载读取成片失败 object_key=%s", entry["objectKey"])
                     notes.append(f"  - #{entry['sortOrder']} {entry['shotLabel']}：读取成片文件失败，未包含在压缩包中")
                     continue
-                label = final_image_export_safe_component(entry["shotLabel"]) or "镜头"
-                filename = f"{entry['sortOrder']:02d}_{label}{final_image_export_extension(entry['mimeType'], entry['originalFilename'])}"
+                filename = f"z({entry['sortOrder']}){final_image_export_extension(entry['mimeType'], entry['originalFilename'])}"
                 info = zipfile.ZipInfo(f"{folder}/{filename}", date_time=date_time)
                 archive.writestr(info, content)
                 included += 1
