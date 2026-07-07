@@ -28,6 +28,15 @@ from pydantic import BaseModel, Field
 
 from .config import get_settings
 from .db import dumps, get_db, init_db, loads, log_event, now_iso
+from .prompt_render import (
+    render_hero_product_info_line,
+    render_image_reference_line,
+    render_model_identity_line,
+    render_shoot_script_body,
+    render_shot_context_body,
+    render_user_instruction_line,
+    render_user_requirement_line,
+)
 from .gemini_provider import (
     effective_gemini_model,
     generate_gemini_json_text,
@@ -4163,26 +4172,6 @@ def build_user_requirement_context(task: Any, styling_adjustment: str | None = N
     }
 
 
-def has_user_requirement(context: dict[str, Any] | None) -> bool:
-    return bool((context or {}).get("combined_requirement"))
-
-
-def append_user_requirement_block(prompt: str, context: dict[str, Any] | None) -> str:
-    if not has_user_requirement(context) or "【本次用户要求】" in prompt:
-        return prompt
-    return f"{prompt.rstrip()}\n\n【本次用户要求】\n{dumps(context)}\n"
-
-
-def has_user_input(context: dict[str, Any] | None) -> bool:
-    if not context:
-        return False
-    return bool(context.get("info") or context.get("instruction") or context.get("combined_requirement"))
-
-
-def append_runtime_input_block(prompt: str, title: str, context: dict[str, Any] | None) -> str:
-    if not has_user_input(context) or title in prompt:
-        return prompt
-    return f"{prompt.rstrip()}\n\n【{title}】\n{dumps(context)}\n"
 
 
 async def generation_poller_loop() -> None:
@@ -4592,7 +4581,6 @@ def build_prompt_tagging_prompt(garment: dict[str, Any] | None = None) -> str:
 def styling_garment_prompt_context(garment: dict[str, Any]) -> dict[str, Any]:
     images = garment.get("images") if isinstance(garment.get("images"), list) else []
     return {
-        "schema_version": "styling-garment-tagging-context-v1",
         "code": garment.get("code"),
         "image_count": len(images),
         "image_inputs": [
@@ -5420,17 +5408,19 @@ async def select_styling_with_gemini(input_row: Any, candidate_snapshot: dict[st
 
 
 def attach_ai_stylist_prompt_snapshot(request_snapshot: dict[str, Any], candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
+    # P3：商品信息/用户要求/本步骤介入要求以自然语言文本填充占位符，去掉重复的
+    # priority_policy / cannot_override 治理元数据——优先级与冲突处理已由
+    # AI_STYLIST_SYSTEM_INSTRUCTION 和模板正文声明一次。candidate_retrieval 是
+    # 结构化标签事实业务输入，保持 JSON。
     prompt = render_prompt_template(
         AI_STYLING_PROMPT_CONFIG_KEY,
         {
             "candidate_retrieval": dumps(candidate_retrieval_for_prompt(candidate_snapshot)),
-            "hero_product_info": dumps(request_snapshot.get("hero_product_info") or {}),
-            "ai_styling_user_instruction": dumps(request_snapshot.get("ai_styling_user_instruction") or {}),
-            "user_requirement": dumps(request_snapshot.get("user_requirement") or {}),
+            "hero_product_info": render_hero_product_info_line(request_snapshot.get("hero_product_info") or {}),
+            "ai_styling_user_instruction": render_user_instruction_line(request_snapshot.get("ai_styling_user_instruction") or {}),
+            "user_requirement": render_user_requirement_line(request_snapshot.get("user_requirement") or {}),
         },
     )
-    prompt = append_runtime_input_block(prompt, "runtime.hero_product_info", request_snapshot.get("hero_product_info") if isinstance(request_snapshot.get("hero_product_info"), dict) else {})
-    prompt = append_runtime_input_block(prompt, "runtime.ai_styling_user_instruction", request_snapshot.get("ai_styling_user_instruction") if isinstance(request_snapshot.get("ai_styling_user_instruction"), dict) else {})
     return {**request_snapshot, "promptConfigKey": AI_STYLING_PROMPT_CONFIG_KEY, "prompt": prompt}
 
 
@@ -6242,18 +6232,19 @@ def attach_shoot_script_prompt_snapshot(request_snapshot: dict[str, Any]) -> dic
     input_version = request_snapshot.get("input_version") if isinstance(request_snapshot.get("input_version"), dict) else {}
     model_snapshot = input_version.get("model_snapshot") if isinstance(input_version.get("model_snapshot"), dict) else {}
     model_identity_context = model_identity_context_for_prompt(model_snapshot)
+    # P3：商品信息/用户要求以自然语言文本填充占位符，去治理元数据（优先级已由
+    # AI_DIRECTOR_SYSTEM_INSTRUCTION 和模板正文声明）。styling_result（导演上下文）与
+    # model_identity_context（模特身份契约）是结构化业务/身份事实，保持 JSON。
     prompt = render_prompt_template(
         SHOOT_SCRIPT_PROMPT_CONFIG_KEY,
         {
             "styling_result": dumps(request_snapshot.get("styling_result") or styling_result_for_prompt(request_snapshot.get("styling_plan") if isinstance(request_snapshot.get("styling_plan"), dict) else {})),
-            "hero_product_info": dumps(request_snapshot.get("hero_product_info") or {}),
-            "shoot_script_user_instruction": dumps(request_snapshot.get("shoot_script_user_instruction") or {}),
-            "user_requirement": dumps(request_snapshot.get("user_requirement") or {}),
-            "model_identity_context": dumps(model_identity_context),
+            "hero_product_info": render_hero_product_info_line(request_snapshot.get("hero_product_info") or {}),
+            "shoot_script_user_instruction": render_user_instruction_line(request_snapshot.get("shoot_script_user_instruction") or {}),
+            "user_requirement": render_user_requirement_line(request_snapshot.get("user_requirement") or {}),
+            "model_identity_context": render_model_identity_line(model_identity_context),
         },
     )
-    prompt = append_runtime_input_block(prompt, "runtime.hero_product_info", request_snapshot.get("hero_product_info") if isinstance(request_snapshot.get("hero_product_info"), dict) else {})
-    prompt = append_runtime_input_block(prompt, "runtime.shoot_script_user_instruction", request_snapshot.get("shoot_script_user_instruction") if isinstance(request_snapshot.get("shoot_script_user_instruction"), dict) else {})
     prompt = append_model_identity_contract(prompt, model_identity_context)
     return {**request_snapshot, "promptConfigKey": SHOOT_SCRIPT_PROMPT_CONFIG_KEY, "prompt": prompt}
 
@@ -6657,53 +6648,34 @@ def model_identity_context_for_prompt(model_snapshot: dict[str, Any] | None) -> 
 
 
 def append_model_identity_contract(prompt: str, model_identity_context: dict[str, Any]) -> str:
+    # P5：模特身份契约从英文 JSON dump 改为中文自然语言块（must_preserve/forbidden 语义
+    # 已由中文 hair_makeup_boundary 承载）。身份事实仍以模特参考图为准，此处只作文字边界。
+    body = render_model_identity_line(model_identity_context)
+    if not body:
+        return prompt
     return (
         prompt.rstrip()
         + "\n\n【强制模特身份契约】\n"
-        + dumps(model_identity_context)
+        + body
         + "\n模特身份契约优先级高于任何品牌妆发、姿态或剧本想象；只能改变服装、姿势、机位和光线，不得改变模特本人身份、脸型、五官、头型、发长、发型轮廓和刘海形态。\n"
     )
 
 
-def image_reference_manifest_for_prompt(image_inputs: list[dict[str, Any]]) -> dict[str, Any]:
-    entries: list[dict[str, Any]] = []
-    for index, item in enumerate(image_inputs, start=1):
-        role = str(item.get("role") or "")
-        fact_source = {
-            "model_identity": "模特身份事实源，最高身份优先级",
-            "hero_garment": "主推款商品事实源",
-            "styling_garment": "搭配服装商品事实源",
-            "preview_grid": "分镜姿势、构图、景别、背景和光线参考，不是模特或商品事实源",
-        }.get(role, "辅助参考图")
-        entries.append(
-            {
-                "reference_index": index,
-                "role": role,
-                "fact_source": fact_source,
-                "filename": str(item.get("filename") or ""),
-                "objectKey": str(item.get("objectKey") or ""),
-                "angle": str(item.get("angle") or ""),
-            }
-        )
-    return {
-        "schema_version": "image-reference-manifest-v1",
-        "priority_rules": [
-            "model_identity references define the person identity and override storyboard or style text",
-            "preview_grid is composition-only and must never override model_identity, hero_garment, or styling_garment facts",
-            "hero_garment and styling_garment references define product facts",
-        ],
-        "references": entries,
-    }
-
-
 def append_image_reference_manifest(prompt: str, image_inputs: list[dict[str, Any]]) -> str:
-    return (
-        prompt.rstrip()
-        + "\n\n【输入参考图角色清单】\n"
-        + dumps(image_reference_manifest_for_prompt(image_inputs))
-        + "\n必须按 reference_index 理解 provider reference_images 的顺序。模特身份参考图不是风格参考，而是人物身份事实源。"
-        + "不得根据拍摄剧本、分镜预览或品牌妆发文字改变模特脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。\n"
+    # P2：参考图清单从 JSON dump 改为自然语言顺序说明 + 事实源约束。
+    # provider 侧的结构化 reference_image_manifest 仍由 image_provider 单独承载，不受影响。
+    order_line = render_image_reference_line(image_inputs)
+    if not order_line:
+        return prompt
+    roles = {str((item or {}).get("role") or "") for item in (image_inputs or [])}
+    constraint = (
+        "模特身份参考图是唯一人物身份事实源（非风格参考），主推款与搭配服装参考图是商品事实源；"
+        "请严格保持图中人物身份与商品事实，文字不得覆盖——"
+        "不得改变模特脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质，不得改款、换色或替换商品。"
     )
+    if "preview_grid" in roles:
+        constraint += "分镜预览图只作构图、姿势与光影参考，不是身份或商品事实来源。"
+    return prompt.rstrip() + "\n\n【输入参考图】\n" + f"参考图顺序：{order_line}。\n" + constraint + "\n"
 
 
 def build_new_preview_task_package(
@@ -6767,17 +6739,18 @@ def build_new_preview_prompt(
     hero_product_info: dict[str, Any] | None = None,
     storyboard_preview_user_instruction: dict[str, Any] | None = None,
 ) -> str:
+    # P1 渲染层：拍摄剧本/商品信息/用户要求以自然语言文本填充模板占位符，
+    # 不再 dumps 结构化上下文（去 schema_version / priority_policy 等治理元数据噪音）。
+    # image_reference_manifest 的自然语言化属 P2，暂保持结构化追加。
     prompt = render_prompt_template(
         "assembly.storyboard_preview",
         {
-            "shoot_script_result": dumps(shoot_script_result_for_prompt(shoot_script)),
-            "image_reference_manifest": dumps(image_reference_manifest_for_prompt(image_inputs or [])),
-            "hero_product_info": dumps(hero_product_info or {}),
-            "storyboard_preview_user_instruction": dumps(storyboard_preview_user_instruction or {}),
+            "shoot_script_result": render_shoot_script_body(shoot_script_result_for_prompt(shoot_script)),
+            "image_reference_manifest": render_image_reference_line(image_inputs or []),
+            "hero_product_info": render_hero_product_info_line(hero_product_info or {}),
+            "storyboard_preview_user_instruction": render_user_instruction_line(storyboard_preview_user_instruction or {}),
         },
     )
-    prompt = append_runtime_input_block(prompt, "runtime.hero_product_info", hero_product_info or {})
-    prompt = append_runtime_input_block(prompt, "runtime.storyboard_preview_user_instruction", storyboard_preview_user_instruction or {})
     return append_image_reference_manifest(prompt, image_inputs or [])
 
 
@@ -6833,17 +6806,19 @@ def build_new_final_prompt(
     hero_product_info: dict[str, Any] | None = None,
     final_image_user_instruction: dict[str, Any] | None = None,
 ) -> str:
+    # P1 渲染层：当前镜头/商品信息/用户要求以自然语言文本填充模板占位符，
+    # 不再 dumps 结构化上下文。image_reference_manifest 自然语言化属 P2。
     prompt = render_prompt_template(
         "assembly.final_image",
         {
-            "current_shot_context": dumps(current_shot_context_for_prompt(shot_index, shot_plan, styling_plan, shoot_script)),
-            "image_reference_manifest": dumps(image_reference_manifest_for_prompt(image_inputs or [])),
-            "hero_product_info": dumps(hero_product_info or {}),
-            "final_image_user_instruction": dumps(final_image_user_instruction or {}),
+            "current_shot_context": render_shot_context_body(
+                current_shot_context_for_prompt(shot_index, shot_plan, styling_plan, shoot_script)
+            ),
+            "image_reference_manifest": render_image_reference_line(image_inputs or []),
+            "hero_product_info": render_hero_product_info_line(hero_product_info or {}),
+            "final_image_user_instruction": render_user_instruction_line(final_image_user_instruction or {}),
         },
     )
-    prompt = append_runtime_input_block(prompt, "runtime.hero_product_info", hero_product_info or {})
-    prompt = append_runtime_input_block(prompt, "runtime.final_image_user_instruction", final_image_user_instruction or {})
     return append_image_reference_manifest(prompt, image_inputs or [])
 
 
