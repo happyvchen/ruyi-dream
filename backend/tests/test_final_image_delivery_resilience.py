@@ -393,8 +393,8 @@ class RedeliverEndpointTests(TempEnvTestCase):
             ).lastrowid
             result_set_id = conn.execute(
                 """
-                INSERT INTO generation_result_sets (task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at)
-                VALUES (?, 1, 1, 1, 'PARTIAL', ?, ?)
+                INSERT INTO generation_result_sets (task_id, input_version_id, styling_id, status, created_at, updated_at)
+                VALUES (?, 1, 1, 'PARTIAL', ?, ?)
                 """,
                 (task_id, timestamp, timestamp),
             ).lastrowid

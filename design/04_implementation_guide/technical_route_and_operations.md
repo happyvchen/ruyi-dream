@@ -13,7 +13,6 @@ MediaAsset
 -> Prompt 业务规则
 -> AI Stylist / StylingPlan
 -> ShootScript / ShotPlan
--> Image-2 分镜预览
 -> Image-2 前 5 张并发生成
 -> 生成记录复盘
 ```
@@ -85,7 +84,6 @@ AI 摄影棚任务外壳：
 - current_input_version_id
 - active_styling_id
 - active_shoot_script_id
-- active_storyboard_preview_id
 - active_result_set_id
 - created_at / updated_at
 
@@ -98,8 +96,6 @@ STYLING_RUNNING
 STYLING_READY
 SCRIPT_RUNNING
 SCRIPT_READY
-PREVIEW_RUNNING
-PREVIEW_READY
 FINAL_RUNNING
 FINAL_PARTIAL
 COMPLETED
@@ -148,7 +144,7 @@ AI Stylist 造型方案结果：
 
 `selected_material_ids_json` 只是从 `StylingPlan` 派生出的关系索引，用于素材快照、查询和前端卡片展示，不是选搭阶段的完整结果。生产排查和后续 ShootScript / ShotPlan 必须读取 `styling_plan_json`。
 
-支持重新选搭；新 `StylingPlan` 成功后成为当前方案，并使旧拍摄剧本、旧分镜预览和旧成片失效但保留。失败重试可以新增 attempt 并更新当前 styling 状态。
+支持重新选搭；新 `StylingPlan` 成功后成为当前方案，并使旧拍摄剧本和旧成片失效但保留。失败重试可以新增 attempt 并更新当前 styling 状态。
 
 ### 2.6.1 StylingGarmentTagFacts
 
@@ -268,32 +264,17 @@ Lily 官方和客户确认的品牌样本：
 
 固定 6 条，最终只用前 5 条。
 
-### 2.9 GenerationStoryboardPreview
-
-- id
-- task_id
-- styling_id
-- shoot_script_id
-- input_version_id
-- preview_asset_id
-- status
-- active_attempt_id
-- created_at / updated_at
-
-0.1.0 只保存一张分镜预览总图，不裁 frame。支持重新生成分镜预览；新预览成功后旧成片失效但保留。
-
-### 2.10 GenerationResultSet
+### 2.9 GenerationResultSet
 
 - id
 - task_id
 - input_version_id
 - styling_id
 - shoot_script_id
-- storyboard_preview_id
 - status
 - created_at / updated_at
 
-### 2.11 GenerationResultImage
+### 2.10 GenerationResultImage
 
 - id
 - result_set_id
@@ -305,7 +286,7 @@ Lily 官方和客户确认的品牌样本：
 
 固定 5 条，对应前 5 个 ShotPlan。
 
-### 2.12 GenerationAttempt
+### 2.11 GenerationAttempt
 
 可统一承载 Gemini 和 Image-2 调用：
 
@@ -343,7 +324,7 @@ Lily 官方和客户确认的品牌样本：
 - `aesthetic critic`：由 AI Stylist Prompt 内部完成；后端不再另设业务质检服务。
 - `shoot script service`：基于 `StylingPlan`、品牌规则、品类图位规则、数字模特和搭配风险生成 ShootScript 与 6 条 ShotPlan。
 - `image input selector`：按阶段选择最多 10 张 Image-2 输入图。
-- `image generation service`：分镜预览和最终图生成。
+- `image generation service`：最终图生成。
 - `attempt service`：provider 调用、重试、耗时、错误和快照。
 - `history service`：生成记录列表、详情、技术详情。
 
@@ -507,19 +488,15 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 - 每条 `main_focus` 必须服务主推款卖点，不能让搭配服装成为默认主角。
 - 裤装、半裙、短裤等下装必须包含腰脚或腰膝近景；上衣必须包含臀上/胸腰近景；连衣裙必须保留完整比例和腰线/裙摆说明。
 
-### 5.4 Image-2 分镜预览
+### 5.4 Image-2 最终图
 
-输出一张 3x2 分镜预览总图。0.1.0 不裁切 frame。
+并发生成前 5 张，每张对应拍摄剧本前 5 个 ShotPlan。同组一致性依赖同一输入快照、同一 ShootScript 和同一模特快照。
 
-### 5.5 Image-2 最终图
-
-并发生成前 5 张。每张传同一张分镜预览图，并在 prompt 中指定参考第 N 格。分镜预览只提供姿势、身位、景别、构图、背景和光影方向，不作为商品事实来源。
-
-### 5.6 0.1.0 运行边界
+### 5.5 0.1.0 运行边界
 
 0.1.0 采用 Prompt 业务脑模式。后端不做候选预筛选、排序、评分、审美改选或 ShotPlan 默认图位规划；后端负责 READY 范围过滤、全量标签事实快照、ID 白名单、状态机、schema 校验和 provider attempt 记录。
 
-AI Stylist 读取主推款图片、Prompt 正文、品牌分段 Prompt 和全量标签事实卡，输出 StylingPlan、候选比较、拒绝理由、质量信号和选中 outfit。ShootScript 承接 StylingPlan 并生成 6 个 ShotPlan。Image-2 生成一张 3x2 分镜预览和前 5 张最终成片。
+AI Stylist 读取主推款图片、Prompt 正文、品牌分段 Prompt 和全量标签事实卡，输出 StylingPlan、候选比较、拒绝理由、质量信号和选中 outfit。ShootScript 承接 StylingPlan 并生成 6 个 ShotPlan。Image-2 生成前 5 张最终成片。
 
 不属于 0.1.0 运行路径的能力不在权威实现指南中作为当前设计前提；若进入产品，必须先更新权威设计、领域模型和数据库 schema。
 
@@ -540,7 +517,6 @@ POST   /api/generation-tasks
 PATCH  /api/generation-tasks/{id}
 POST   /api/generation-tasks/{id}/input-versions
 POST   /api/generation-tasks/{id}/select-styling
-POST   /api/generation-tasks/{id}/preview
 POST   /api/generation-tasks/{id}/generate-final
 POST   /api/generation-result-images/{id}/retry
 
@@ -552,7 +528,7 @@ GET    /api/generation-records/{taskId}?includeDebug=true
 ## 7. 实现注意
 
 - 所有状态推进由后端服务完成，前端不直接写阶段状态。
-- 成功后的“重新搭配 / 重新预览 / 整组换版”策略待产品拍板；当前代码暂时允许整阶段重跑，若决定禁止需同步前后端状态机。
+- 成功后的“重新搭配 / 重新生成剧本 / 整组换版”策略待产品拍板；当前代码暂时允许整阶段重跑，若决定禁止需同步前后端状态机。
 - 失败重试必须保留历史 attempt。
 - `ImageCount` 不作为强字段，界面需要时统计。
 - 生成记录默认隐藏技术详情。

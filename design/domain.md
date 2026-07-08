@@ -8,7 +8,6 @@ Ruyi-Dream 是面向服饰品牌视觉生产团队的 B2B AI 数字化摄影棚�
 上传主推款
 -> AI Stylist 生成 StylingPlan
 -> AI Director 生成 ShootScript + 6 个 ShotPlan
--> Image-2 生成 3x2 分镜预览
 -> Image-2 并发生成前 5 张成片
 -> 下载与生成记录复盘
 ```
@@ -28,10 +27,10 @@ Image-2 不是选搭大脑、标签系统、历史记录系统或状态机。用
 | # | 模块 | 领域对象 | 职责 |
 |---|---|---|---|
 | 1 | **workspace** | session, user role, workspace boundary | 当前固定 user/admin 双账号和单工作空间边界；为后续组织、租户、权限扩展预留语义 |
-| 2 | **media** | MediaAsset | 所有输入图、数字模特图、分镜预览图、最终图和导出资产的统一媒体索引 |
+| 2 | **media** | MediaAsset | 所有输入图、数字模特图、最终图和导出资产的统一媒体索引 |
 | 3 | **brand** | ModelProfile, PromptConfig | 默认数字模特、品牌分段 Prompt、生成规则 Prompt |
 | 4 | **styling** | StylingGarment, StylingGarmentImage | 搭配服装库、服饰图片、AI 打标 JSON 和选搭候选事实 |
-| 5 | **generation** | GenerationTask, GenerationTaskInputVersion, GenerationStyling, StylingPlan, GenerationShootScript, ShootScript, GenerationShotPlan, GenerationStoryboardPreview, GenerationResultSet, GenerationResultImage | AI 摄影棚主流程、输入冻结、造型方案、拍摄剧本、分镜预览和最终成片 |
+| 5 | **generation** | GenerationTask, GenerationTaskInputVersion, GenerationStyling, StylingPlan, GenerationShootScript, ShootScript, GenerationShotPlan, GenerationResultSet, GenerationResultImage | AI 摄影棚主流程、输入冻结、造型方案、拍摄剧本和最终成片 |
 | 6 | **operations** | GenerationAttempt, EventLog, DeleteImpact | provider 调用审计、状态恢复、错误复盘、业务事件和删除影响预检 |
 
 当前后端仍是 FastAPI 单体，SQLite 保存元数据，媒体走 S3 兼容对象存储；模块划分是领域边界，不要求当前代码按包物理拆分。
@@ -51,8 +50,8 @@ frontend/src/api.ts   前端 API 契约和领域类型
 4. `snapshot` 表示“当时版本事实”。历史再次生成默认读快照，不读素材库、品牌资料或数字模特最新状态。
 5. `current_xxx_id` 表示当前输入版本指针；`active_xxx_id` 表示当前工作流主线上的成功 artifact 指针。
 6. `attempt` 表示一次外部 provider 或 AI 调用。耗时、错误、provider request id、request/response 都记录在 attempt，不用业务对象 `created_at` 充当模型耗时。
-7. 用户侧命名优先中文产品语言：`AI 智能选搭`、`拍摄剧本`、`分镜预览`、`成片`。系统侧命名使用 `StylingPlan`、`ShootScript`、`ShotPlan`、`GenerationResultImage`。
-8. 避免把非 0.1.0 词汇带回主流程：“六宫格预览”用户侧统一称为“分镜预览”；`garment_skus`、planner、generation run/image 不是 0.1.0 领域对象。
+7. 用户侧命名优先中文产品语言：`AI 智能选搭`、`拍摄剧本`、`成片`。系统侧命名使用 `StylingPlan`、`ShootScript`、`ShotPlan`、`GenerationResultImage`。
+8. 避免把非 0.1.0 词汇带回主流程：`garment_skus`、planner、generation run/image 不是 0.1.0 领域对象。
 
 ## 核心术语区分
 
@@ -71,12 +70,11 @@ frontend/src/api.ts   前端 API 契约和领域类型
 
 ShootScript 不重新选择库内搭配服装；它只能基于已选 StylingPlan 披露风险、调整生成配饰和安排镜头。
 
-### 分镜预览 vs 成片
+### 成片
 
-- **分镜预览**：Image-2 根据当前 ShootScript 生成的一张 3x2 总图，是导演、姿势、构图、光线和同组风格参考。
 - **成片**：Image-2 按前 5 个 ShotPlan 逐张生成的最终电商棚拍图。
 
-分镜预览不是商品事实来源，也不是模特身份事实来源。成片中的商品事实始终来自主推款原图和选中搭配服装原图；模特身份事实始终来自数字模特参考图和 `ModelIdentityContract`。
+成片中的商品事实始终来自主推款原图和选中搭配服装原图；模特身份事实始终来自数字模特参考图和 `ModelIdentityContract`。同组一致性依赖同一输入快照、同一 ShootScript 和同一模特快照。
 
 ### Prompt DTO vs 审计快照
 
@@ -86,7 +84,6 @@ ShootScript 不重新选择库内搭配服装；它只能基于已选 StylingPla
 |---|---|---|
 | AI Stylist | `candidate_retrieval` | 未归档 READY 搭配库全量标签事实卡 |
 | AI Director | `styling_result` + `model_identity_context` | 主推款理解、选中 outfit、选中服饰紧凑标签、质量信号、模特身份契约 |
-| 分镜预览 | `shoot_script_result` + `image_reference_manifest` | 全局导演、风险、配饰、6 个镜头、参考图角色和事实源 |
 | 最终成片 | `current_shot_context` + `image_reference_manifest` | 当前镜头、当前格子、选中 outfit、本镜头配饰、禁止项、参考图角色和事实源 |
 
 审计快照可以保存完整 request/response、素材快照和 provider 调试信息，但下游 prompt 不应透传完整上游 JSON、旧 prompt 或历史 response。Prompt 正文只来自 `prompt_configs`；后端不内置、seed 或 fallback Prompt 默认值。
@@ -204,7 +201,7 @@ ShootScript 不重新选择库内搭配服装；它只能基于已选 StylingPla
 - 0.1.0 只读展示当前默认数字模特。
 - 生成时保存数字模特快照，历史再次生成默认使用当时快照。
 - Image-2 输入中数字模特图是身份事实源，文本只能补充身体、发型、妆发和负向边界。
-- `ModelIdentityContract` 是从模特快照派生的强制契约；ShootScript、分镜预览、品牌妆发和 provider 默认审美不得覆盖脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。
+- `ModelIdentityContract` 是从模特快照派生的强制契约；ShootScript、品牌妆发和 provider 默认审美不得覆盖脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。
 
 ### PromptConfig（Prompt 配置）
 
@@ -224,7 +221,6 @@ ShootScript 不重新选择库内搭配服装；它只能基于已选 StylingPla
 
 - `assembly.ai_styling`：AI Stylist 选搭规则、质量信号、配饰边界和输出要求。
 - `assembly.shoot_script`：AI Director 拍摄剧本规则和输出要求。
-- `assembly.storyboard_preview`：分镜预览 Image-2 输入文本。
 - `assembly.final_image`：单张成片 Image-2 输入文本。
 
 规则：
@@ -299,7 +295,7 @@ DELETED
 - 单套最多 6 张，推荐 1-3 张。
 - 不做正面、背面、细节角色识别；排序越靠前越重要，第一张默认主视图。
 - 图片排序、替换、删除或追加会影响打标，保存时应提示是否重新打标。
-- 选搭完成后，预览与成片使用已冻结图片快照，而不是当前库记录。
+- 选搭完成后，成片使用已冻结图片快照，而不是当前库记录。
 
 ### AI 打标 JSON
 
@@ -326,8 +322,6 @@ DELETED
 - `current_input_version_id`
 - `active_styling_id`
 - `active_shoot_script_id`
-- `active_preview_id`：历史兼容字段，新增语义优先使用 storyboard preview
-- `active_storyboard_preview_id`
 - `active_result_set_id`
 - `archived_at` / `archive_reason`
 - `deleted_at`
@@ -342,8 +336,6 @@ STYLING_RUNNING
 STYLING_READY
 SCRIPT_RUNNING
 SCRIPT_READY
-PREVIEW_RUNNING
-PREVIEW_READY
 FINAL_RUNNING
 FINAL_PARTIAL
 COMPLETED
@@ -397,7 +389,7 @@ ABANDONED
 规则：
 
 - 主推款事实来自 `image_snapshot_json` 中的媒体资产引用。
-- 用户返回上一步修改主推款图片时，应创建新输入版本，并使下游选搭、拍摄剧本、分镜预览和成片需要重新生成。
+- 用户返回上一步修改主推款图片时，应创建新输入版本，并使下游选搭、拍摄剧本和成片需要重新生成。
 - 历史版本保留，不被当前素材库最新状态覆盖。
 
 ### GenerationStyling / StylingPlan（智能选搭）
@@ -508,34 +500,9 @@ ShootScript 顶层结构：
 规则：
 
 - 每个 ShootScript 固定 6 条 ShotPlan。
-- 前 5 条进入最终成片，第 6 条只用于分镜预览参考。
+- 前 5 条进入最终成片，第 6 条只作备用参考，不进入最终成片。
 - ShotPlan 必须服务主推款品类和卖点，不能所有品类使用同一套全身图模板。
 - 单镜头至少应表达取景、姿态、身位、镜头角度、主展示重点、可见服饰、穿着关系、配饰边界、构图和负向约束。
-
-### GenerationStoryboardPreview（分镜预览）
-
-当前数据库表名为 `generation_previews`，领域语义是 `GenerationStoryboardPreview`。
-
-字段：
-
-- `id`
-- `task_id`
-- `styling_id`
-- `shoot_script_id`
-- `input_version_id`
-- `preview_asset_id`
-- `status`
-- `active_attempt_id`
-- `locked_by` / `locked_until`
-- `run_attempts`
-- `created_at` / `updated_at`
-
-规则：
-
-- 只保存一张 3x2 分镜预览总图，不裁切 6 个 frame。
-- 读取当前最新成功 ShootScript。
-- 分镜预览失败不影响拍摄剧本。
-- 成功重新生成预览后，旧成片标记失效或被新 active 结果集替代。
 
 ### GenerationResultSet / GenerationResultImage（最终成片）
 
@@ -548,7 +515,6 @@ ResultSet 字段：
 - `input_version_id`
 - `styling_id`
 - `shoot_script_id`
-- `preview_id`
 - `status`
 - `created_at` / `updated_at`
 
@@ -569,7 +535,7 @@ ResultImage 字段：
 
 - 固定生成前 5 个 ShotPlan。
 - 5 张图可并发生成。
-- 每张图只传当前单镜头上下文和分镜预览对应第 N 格参考。
+- 每张图只传当前单镜头上下文；同组一致性依赖同一输入快照、同一 ShootScript 和同一模特快照。
 - 支持整组重新生成。
 - 支持单张成片重生；单张重生不应影响其他已成功成片。
 
@@ -598,7 +564,6 @@ owner 类型：
 - `styling_garment_tagging`
 - `generation_styling`
 - `generation_shoot_script`
-- `generation_preview`
 - `generation_result_image`
 
 字段：
@@ -655,7 +620,6 @@ owner 类型：
 - `estimatedBytes`
 - `stylingCount`
 - `shootScriptCount`
-- `previewCount`
 - `resultSetCount`
 - `resultImageCount`
 
@@ -678,8 +642,6 @@ DRAFT
 -> STYLING_READY
 -> SCRIPT_RUNNING
 -> SCRIPT_READY
--> PREVIEW_RUNNING
--> PREVIEW_READY
 -> FINAL_RUNNING
 -> FINAL_PARTIAL
 -> COMPLETED
@@ -697,9 +659,8 @@ DRAFT
 
 | 动作 | 新建 artifact | 成功后失效 |
 |---|---|---|
-| 重新选搭 | GenerationStyling | 旧 ShootScript、旧分镜预览、旧结果集 |
-| 重新生成拍摄剧本 | GenerationShootScript | 旧分镜预览、旧结果集 |
-| 重新生成分镜预览 | GenerationStoryboardPreview | 旧结果集 |
+| 重新选搭 | GenerationStyling | 旧 ShootScript、旧结果集 |
+| 重新生成拍摄剧本 | GenerationShootScript | 旧结果集 |
 | 重新生成成片 | GenerationResultSet | 旧结果集从当前主线移除 |
 | 单张重生 | GenerationResultImage attempt 或单图版本 | 不影响同组其他成功图 |
 
@@ -709,7 +670,6 @@ Image-2 单次最多 10 张输入图。0.1.0 选图策略：
 
 | 角色 | 数量 |
 |---|---:|
-| 分镜预览图 | 最终成片时 1 张，位于数字模特之后 |
 | 主推款 | 按排序最多 3 张 |
 | 搭配服装 | 每套至少第 1 张，总计最多 4 张 |
 | 数字模特 | 最多 2 张，固定作为 `reference_images` 前 2 位 |
@@ -734,6 +694,6 @@ Image-2 单次最多 10 张输入图。0.1.0 选图策略：
 
 ## 当前实现
 
-0.1.0 已实现 FastAPI + SQLite + React/Vite 单体应用、S3 兼容对象存储、三层媒体资产、搭配服装库、Gemini 打标、Prompt 维护、AI 摄影棚五步工作流、输入版本冻结、StylingPlan、ShootScript、ShotPlan、分镜预览、最终结果集、单张重试、provider attempt 快照和生成记录复盘。
+0.1.0 已实现 FastAPI + SQLite + React/Vite 单体应用、S3 兼容对象存储、三层媒体资产、搭配服装库、Gemini 打标、Prompt 维护、AI 摄影棚四步工作流、输入版本冻结、StylingPlan、ShootScript、ShotPlan、最终结果集、单张重试、provider attempt 快照和生成记录复盘。
 
 不属于 0.1.0 运行路径的能力不得在当前领域模型中作为已实现对象引用；若进入产品，必须先更新权威设计、领域模型和数据库 schema。

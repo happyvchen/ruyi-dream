@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import re
 import threading
 from typing import Any
 
@@ -31,6 +32,167 @@ ERROR_UPLOAD_FAILED = "UPLOAD_FAILED"
 ERROR_PROVIDER_FAILED = "PROVIDER_FAILED"
 ERROR_PROVIDER_TIMEOUT = "PROVIDER_TIMEOUT"
 ERROR_DELIVERY_FAILED = "DELIVERY_FAILED"
+
+# ToAPIs 报错分类（方案 A–G）。这些 error_code 稳定落到 generation_attempts.error_code，
+# 前端据此给不同文案与动作；重试策略由 is_retryable_error / is_zero_output_transient 决定。
+ERROR_GATEWAY_5XX = "GATEWAY_5XX"                    # 502/503/504/520-524、上游网关错误 → 可安全重试
+ERROR_CONN_RESET = "CONN_RESET"                      # 连接关闭/重置/SSL EOF/write timeout → 可安全重试
+ERROR_RATE_LIMITED = "RATE_LIMITED"                  # 429 → 退避重试（尊重 Retry-After）
+ERROR_INSUFFICIENT_BALANCE = "INSUFFICIENT_BALANCE"  # 余额不足/剩余额度负 → 不重试、硬停
+ERROR_AUTH_FAILED = "AUTH_FAILED"                    # 401/403/不支持指定渠道 → 不重试
+ERROR_WAF_BLOCK = "WAF_BLOCK"                        # 403 Cloudflare error code 1010 → 有限重试后熔断
+ERROR_MALFORMED_OUTPUT = "MALFORMED_OUTPUT"          # 非法 JSON/Extra data/控制字符/finish_reason=length 截断 → 上层修复+重问一次
+ERROR_POLL_TIMEOUT = "POLL_TIMEOUT"                  # 打标/长任务轮询预算耗尽 → 自动排队重试
+ERROR_BUSINESS_REJECT = "BUSINESS_REJECT"            # 我方业务/穿法校验否决（非 provider 错误）→ 不重试
+
+# 连接类关键字（网络层异常文案）：命中即归 CONN_RESET，可安全重试。
+_CONN_RESET_KEYWORDS = (
+    "max retries exceeded",
+    "response ended prematurely",
+    "remote end closed",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "connection error",
+    "connectionerror",
+    "connectionreseterror",
+    "unexpected_eof",
+    "unexpected eof",
+    "ssl eof",
+    "eof occurred",
+    "write operation timed out",
+    "write timed out",
+    "read timed out",
+    "broken pipe",
+    "server disconnected",
+    "peer closed connection",
+)
+
+# 网关类关键字（应用/边缘网关错误文案）。
+_GATEWAY_KEYWORDS = (
+    "bad gateway",
+    "do request failed",
+    "upstream error",
+    "gateway timeout",
+    "service unavailable",
+    "a timeout occurred",
+)
+
+# 余额/额度类关键字。命中即 INSUFFICIENT_BALANCE，绝不重试。
+_BALANCE_KEYWORDS = (
+    "余额不足",
+    "额度不足",
+    "剩余额度",
+    "insufficient",
+    "insufficient_quota",
+    "quota exceeded",
+    "no balance",
+    "out of credit",
+)
+
+# 输出畸形关键字。
+_MALFORMED_KEYWORDS = (
+    "finish_reason=length",
+    "被截断",
+    "截断",
+    "不是合法 json",
+    "不是合法json",
+    "not valid json",
+    "invalid json",
+    "extra data",
+    "jsondecodeerror",
+    "控制字符",
+    "control character",
+    "expecting value",
+    "expecting property name",
+    "未包含文本内容",
+    "流腐蚀",
+)
+
+
+def _has_negative_balance(text: str) -> bool:
+    """匹配 "剩余额度 $ -2.25" 之类的负额度文案。"""
+    return bool(re.search(r"-\s*\d", text))
+
+
+def classify_provider_error(*, status_code: int | None = None, message: str = "", body: str = "") -> str:
+    """把 provider（ToAPIs/Gemini/Image-2）报错归类成稳定的 error_code。
+
+    分类优先级（先命中先返回，越"硬"越靠前，避免误判成可重试）：
+      1. 余额/额度不足（含负额度）→ INSUFFICIENT_BALANCE（硬停）
+      2. 403 + Cloudflare error code 1010 → WAF_BLOCK
+      3. 401/403 或"不支持指定渠道"→ AUTH_FAILED
+      4. 429 或 rate limit → RATE_LIMITED
+      5. 502/503/504/520-524 或网关关键字 → GATEWAY_5XX
+      6. 连接类关键字 → CONN_RESET
+      7. 输出畸形/截断关键字 → MALFORMED_OUTPUT
+      8. 兜底 → PROVIDER_FAILED
+    """
+    text = f"{message} {body}".lower()
+
+    # 1. 余额优先：余额类文案即使伴随 429/403 也必须硬停，不能被限流/鉴权分支吞掉。
+    if any(keyword in text for keyword in _BALANCE_KEYWORDS):
+        return ERROR_INSUFFICIENT_BALANCE
+    if "剩余额度" in text and _has_negative_balance(text):
+        return ERROR_INSUFFICIENT_BALANCE
+
+    # 2. Cloudflare WAF 指纹封禁（403 + error code 1010）。
+    if "1010" in text and ("cloudflare" in text or "error code" in text or status_code == 403):
+        return ERROR_WAF_BLOCK
+
+    # 3. 鉴权/渠道：401/403、无效 key、无权限、指定渠道。
+    if status_code in {401, 403} or "不支持指定渠道" in text or "指定渠道" in text \
+            or "无权限" in text or "invalid api key" in text or "invalid key" in text \
+            or "unauthorized" in text or "permission" in text:
+        return ERROR_AUTH_FAILED
+
+    # 4. 限流。
+    if status_code == 429 or "rate limit" in text or "too many requests" in text or "限流" in text:
+        return ERROR_RATE_LIMITED
+
+    # 5. 网关 5xx。
+    if status_code in {502, 503, 504, 520, 521, 522, 523, 524}:
+        return ERROR_GATEWAY_5XX
+    if any(keyword in text for keyword in _GATEWAY_KEYWORDS):
+        return ERROR_GATEWAY_5XX
+
+    # 6. 连接类。
+    if any(keyword in text for keyword in _CONN_RESET_KEYWORDS):
+        return ERROR_CONN_RESET
+
+    # 7. 输出畸形/截断。
+    if any(keyword in text for keyword in _MALFORMED_KEYWORDS):
+        return ERROR_MALFORMED_OUTPUT
+
+    return ERROR_PROVIDER_FAILED
+
+
+# 可重试的 error_code：网关/连接/限流是瞬时问题；WAF 有限重试；provider/轮询超时可续跑。
+_RETRYABLE_CODES = frozenset(
+    {ERROR_GATEWAY_5XX, ERROR_CONN_RESET, ERROR_RATE_LIMITED, ERROR_WAF_BLOCK, ERROR_PROVIDER_TIMEOUT, ERROR_POLL_TIMEOUT}
+)
+
+# 聊天类（Gemini）"零 token 产出"时可安全重发整个请求、绝不重复计费的 error_code。
+# 关键：只有在请求"产生任何输出前"就失败（502/连接错/限流）才在这个集合里；
+# MALFORMED_OUTPUT / 截断 一定已产出并计费，绝不放进来。
+_ZERO_OUTPUT_TRANSIENT_CODES = frozenset({ERROR_GATEWAY_5XX, ERROR_CONN_RESET, ERROR_RATE_LIMITED})
+
+
+def is_retryable_error(error_code: str | None) -> bool:
+    """该 error_code 是否可重试（对幂等的图片路径）。
+
+    AUTH_FAILED / INSUFFICIENT_BALANCE / BUSINESS_REJECT / MALFORMED_OUTPUT 不可重试。
+    """
+    return bool(error_code) and error_code in _RETRYABLE_CODES
+
+
+def is_zero_output_transient(error_code: str | None) -> bool:
+    """该 error_code 是否属于"零产出瞬时错误"——聊天类可安全重发整个请求不重复计费。"""
+    return bool(error_code) and error_code in _ZERO_OUTPUT_TRANSIENT_CODES
+
+
+def is_balance_error(error_code: str | None) -> bool:
+    return error_code == ERROR_INSUFFICIENT_BALANCE
 
 
 class GenerationPhaseError(RuntimeError):
