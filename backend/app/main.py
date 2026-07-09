@@ -676,10 +676,11 @@ def media_asset_direct_reference_count(db: Any, asset_id: int) -> int:
           (SELECT COUNT(*) FROM styling_garment_images WHERE media_asset_id = ?) +
           (SELECT COUNT(*) FROM generation_task_images WHERE media_asset_id = ?) +
           (SELECT COUNT(*) FROM generation_previews WHERE preview_asset_id = ?) +
+          (SELECT COUNT(*) FROM generation_previews WHERE environment_asset_id = ?) +
           (SELECT COUNT(*) FROM generation_result_images_new WHERE current_asset_id = ?) +
           (SELECT COUNT(*) FROM generation_attempts WHERE output_asset_id = ?) AS count
         """,
-        (asset_id, asset_id, asset_id, asset_id, asset_id),
+        (asset_id, asset_id, asset_id, asset_id, asset_id, asset_id),
     ).fetchone()
     return int(row["count"] or 0)
 
@@ -2712,15 +2713,17 @@ async def run_create_generation_preview(task_id: int, include_debug: bool = Fals
     timestamp = now_iso()
     effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "storyboard_preview")
     user_instruction_context = build_stage_user_instruction_context("storyboard_preview", effective_user_instruction)
+    # 环境信息只在分镜预览这一步进入并锁定：自动引用当前维护好的「拍摄环境参考图」（0..1 张）。
+    environment_asset_id = get_current_shoot_environment_asset_id()
     with get_db() as db:
         if user_instruction is not None:
             persist_generation_task_stage_instruction(db, task_id, "storyboard_preview", effective_user_instruction, timestamp)
         cursor = db.execute(
             """
-            INSERT INTO generation_previews (task_id, styling_id, shoot_script_id, input_version_id, user_instruction_json, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'RUNNING', ?, ?)
+            INSERT INTO generation_previews (task_id, styling_id, shoot_script_id, input_version_id, user_instruction_json, environment_asset_id, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'RUNNING', ?, ?)
             """,
-            (task_id, styling_id, shoot_script_id, input_version_id, dumps(user_instruction_context), timestamp, timestamp),
+            (task_id, styling_id, shoot_script_id, input_version_id, dumps(user_instruction_context), environment_asset_id, timestamp, timestamp),
         )
         preview_id = int(cursor.lastrowid)
     attempt_id = create_attempt("generation_preview", preview_id, "image-2")
@@ -3729,7 +3732,8 @@ def list_model_profiles(
 
 
 @app.post("/api/model-profiles")
-def create_model_profile(payload: ModelProfileUpsertRequest) -> dict[str, Any]:
+def create_model_profile(request: Request, payload: ModelProfileUpsertRequest) -> dict[str, Any]:
+    require_admin(request)
     clean_model_id = sanitize_name(payload.modelId or "")
     if not clean_model_id:
         raise HTTPException(status_code=400, detail="模特 ID 不能为空")
@@ -3769,7 +3773,8 @@ def create_model_profile(payload: ModelProfileUpsertRequest) -> dict[str, Any]:
 
 
 @app.patch("/api/model-profiles/{model_profile_id}")
-def update_model_profile(model_profile_id: int, payload: ModelProfileUpsertRequest) -> dict[str, Any]:
+def update_model_profile(model_profile_id: int, request: Request, payload: ModelProfileUpsertRequest) -> dict[str, Any]:
+    require_admin(request)
     updates: dict[str, Any] = {}
     with get_db() as db:
         row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (model_profile_id,)).fetchone()
@@ -3812,7 +3817,8 @@ def update_model_profile(model_profile_id: int, payload: ModelProfileUpsertReque
 
 
 @app.delete("/api/model-profiles/{model_profile_id}")
-def delete_model_profile(model_profile_id: int) -> dict[str, Any]:
+def delete_model_profile(model_profile_id: int, request: Request) -> dict[str, Any]:
+    require_admin(request)
     with get_db() as db:
         row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (model_profile_id,)).fetchone()
         if not row:
@@ -3846,10 +3852,12 @@ def delete_model_profile(model_profile_id: int) -> dict[str, Any]:
 @app.post("/api/model-profiles/{model_profile_id}/head-references")
 async def add_model_head_reference(
     model_profile_id: int,
+    request: Request,
     angle: str | None = Form(None),
     files: list[UploadFile] = File(default=[]),
     file: UploadFile | None = File(None),
 ) -> dict[str, Any]:
+    require_admin(request)
     uploads = files or ([file] if file else [])
     if not uploads:
         raise HTTPException(status_code=400, detail="至少上传一张头像")
@@ -3932,7 +3940,8 @@ async def add_model_head_reference(
 
 
 @app.patch("/api/model-profiles/{model_profile_id}/head-references/{reference_id}")
-def update_model_head_reference(model_profile_id: int, reference_id: str, payload: HeadReferenceUpdateRequest) -> dict[str, Any]:
+def update_model_head_reference(model_profile_id: int, reference_id: str, request: Request, payload: HeadReferenceUpdateRequest) -> dict[str, Any]:
+    require_admin(request)
     clean_reference_id = sanitize_reference_id(reference_id)
     new_angle = sanitize_reference_key(payload.angle or "") if payload.angle is not None and payload.angle != "" else ""
     if new_angle and new_angle not in HEAD_REFERENCE_ANGLES:
@@ -3990,7 +3999,8 @@ def update_model_head_reference(model_profile_id: int, reference_id: str, payloa
 
 
 @app.delete("/api/model-profiles/{model_profile_id}/head-references/{reference_id}")
-def delete_model_head_reference(model_profile_id: int, reference_id: str) -> dict[str, Any]:
+def delete_model_head_reference(model_profile_id: int, reference_id: str, request: Request) -> dict[str, Any]:
+    require_admin(request)
     clean_reference_id = sanitize_reference_id(reference_id)
     if not clean_reference_id:
         raise HTTPException(status_code=400, detail="头像角度不能为空")
@@ -4016,6 +4026,47 @@ def delete_model_head_reference(model_profile_id: int, reference_id: str) -> dic
     return {"item": get_model_profile_by_id(model_profile_id)}
 
 
+@app.post("/api/model-profiles/{model_profile_id}/head-references/{reference_id}/replace")
+async def replace_model_head_reference(
+    model_profile_id: int,
+    reference_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    require_admin(request)
+    clean_reference_id = sanitize_reference_id(reference_id)
+    if not clean_reference_id:
+        raise HTTPException(status_code=400, detail="头像标识不能为空")
+    content, content_type = await validate_upload_image(file)
+    with get_db() as db:
+        row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (model_profile_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="数字模特不存在")
+        asset_dir = clean_key(row["asset_dir"])
+        profile = loads(row["profile_json"], {})
+        references = dict(profile.get("headReferences") or {})
+        if clean_reference_id not in references:
+            raise HTTPException(status_code=404, detail="头像不存在")
+        old_filename = references.get(clean_reference_id)
+        safe_name = sanitize_filename(file.filename or "head-reference")
+        key = unique_key(join_key(asset_dir, safe_name))
+        try:
+            put_fileobj(key, BytesIO(content), content_type)
+            generate_image_derivatives(key, content)
+            references[clean_reference_id] = Path(key).name
+            profile["headReferences"] = references
+            db.execute(
+                "UPDATE model_profiles SET profile_json = ?, updated_at = ? WHERE id = ?",
+                (dumps(normalize_model_profile(profile)), now_iso(), model_profile_id),
+            )
+            log_event(db, "model_profile", model_profile_id, "head_reference_replaced", {"referenceId": clean_reference_id, "filename": Path(key).name})
+        except Exception:
+            cleanup_objects(image_object_keys(key))
+            raise
+    remove_model_asset_file(asset_dir, old_filename)
+    return {"item": get_model_profile_by_id(model_profile_id)}
+
+
 @app.get("/api/model-profiles/{model_profile_id}/assets/{filename}")
 def get_model_asset(model_profile_id: int, filename: str) -> RedirectResponse:
     with get_db() as db:
@@ -4027,6 +4078,56 @@ def get_model_asset(model_profile_id: int, filename: str) -> RedirectResponse:
     if not url:
         raise HTTPException(status_code=404, detail="头像文件不存在")
     return RedirectResponse(url)
+
+
+def get_current_shoot_environment_asset_id() -> int | None:
+    with get_db() as db:
+        row = db.execute(
+            "SELECT media_asset_id FROM shoot_environment_references ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return int(row["media_asset_id"]) if row else None
+
+
+def serialize_shoot_environment() -> dict[str, Any]:
+    asset_id = get_current_shoot_environment_asset_id()
+    return {"asset": get_media_asset_by_id(asset_id) if asset_id else None}
+
+
+@app.get("/api/shoot-environment")
+def get_shoot_environment() -> dict[str, Any]:
+    return serialize_shoot_environment()
+
+
+@app.post("/api/shoot-environment")
+async def set_shoot_environment(request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
+    require_admin(request)
+    assets = await save_uploads_as_media_assets([file], join_key("shoot-environment", uuid4().hex[:8]))
+    if not assets:
+        raise HTTPException(status_code=400, detail="拍摄环境参考图上传失败")
+    new_asset_id = int(assets[0]["id"])
+    timestamp = now_iso()
+    with get_db() as db:
+        old_ids = [int(r["media_asset_id"]) for r in db.execute("SELECT media_asset_id FROM shoot_environment_references").fetchall()]
+        db.execute("DELETE FROM shoot_environment_references")
+        db.execute(
+            "INSERT INTO shoot_environment_references (media_asset_id, created_at, updated_at) VALUES (?, ?, ?)",
+            (new_asset_id, timestamp, timestamp),
+        )
+        for old_id in old_ids:
+            if old_id != new_asset_id:
+                release_media_asset_if_unreferenced(db, old_id)
+    return serialize_shoot_environment()
+
+
+@app.delete("/api/shoot-environment")
+def clear_shoot_environment(request: Request) -> dict[str, Any]:
+    require_admin(request)
+    with get_db() as db:
+        old_ids = [int(r["media_asset_id"]) for r in db.execute("SELECT media_asset_id FROM shoot_environment_references").fetchall()]
+        db.execute("DELETE FROM shoot_environment_references")
+        for old_id in old_ids:
+            release_media_asset_if_unreferenced(db, old_id)
+    return serialize_shoot_environment()
 
 
 @app.get("/api/media")
@@ -6817,7 +6918,7 @@ def build_new_preview_task_package(
         if preview_id is not None:
             preview_row = db.execute(
                 """
-                SELECT input_version_id, user_instruction_json
+                SELECT input_version_id, user_instruction_json, environment_asset_id
                 FROM generation_previews
                 WHERE id = ? AND task_id = ? AND styling_id = ? AND shoot_script_id = ?
                 """,
@@ -6826,7 +6927,7 @@ def build_new_preview_task_package(
         else:
             preview_row = db.execute(
                 """
-                SELECT input_version_id, user_instruction_json
+                SELECT input_version_id, user_instruction_json, environment_asset_id
                 FROM generation_previews
                 WHERE task_id = ? AND styling_id = ? AND shoot_script_id = ?
                 ORDER BY id DESC LIMIT 1
@@ -6841,7 +6942,8 @@ def build_new_preview_task_package(
             "SELECT * FROM generation_task_input_versions WHERE id = ?",
             (input_version_id,),
         ).fetchone() if input_version_id is not None else None
-    image_inputs = build_new_image_inputs(task_id, styling_id, include_preview=False, input_version_id=input_version_id)
+    environment_asset_id = row_value(preview_row, "environment_asset_id")
+    image_inputs = build_new_image_inputs(task_id, styling_id, include_preview=False, input_version_id=input_version_id, environment_asset_id=environment_asset_id)
     hero_product_info = loads(row_value(input_row, "hero_product_info_json"), build_hero_product_info_context({}))
     storyboard_preview_user_instruction = loads(row_value(preview_row, "user_instruction_json"), build_stage_user_instruction_context("storyboard_preview"))
     return {
@@ -6970,8 +7072,11 @@ def build_new_image_inputs(
     include_preview: bool,
     preview_asset_id: int | None = None,
     input_version_id: int | None = None,
+    environment_asset_id: int | None = None,
 ) -> list[dict[str, Any]]:
     inputs: list[dict[str, Any]] = []
+    # 环境参考图（验证阶段，仅分镜预览）固定放在参考图最后一格，需预留 1 个额度。
+    reserve_env = 1 if environment_asset_id else 0
     with get_db() as db:
         styling = db.execute(
             "SELECT selected_material_snapshot_json, input_version_id FROM generation_stylings WHERE id = ?",
@@ -6994,7 +7099,7 @@ def build_new_image_inputs(
     hero_snapshot = loads(input_version["image_snapshot_json"], []) if input_version else []
     inputs.extend(image_input_from_asset(item.get("asset"), "hero_garment") for item in hero_snapshot[:3])
     selected_materials = loads(styling["selected_material_snapshot_json"], []) if styling else []
-    remaining = max(0, 10 - len(inputs))
+    remaining = max(0, 10 - len(inputs) - reserve_env)
     for garment in selected_materials:
         if remaining <= 0:
             break
@@ -7002,6 +7107,10 @@ def build_new_image_inputs(
         if images:
             inputs.append(image_input_from_asset(images[0]["asset"], "styling_garment"))
             remaining -= 1
+    if environment_asset_id:
+        env_asset = get_media_asset_by_id(environment_asset_id)
+        if env_asset:
+            inputs.append(image_input_from_asset(env_asset, "shoot_environment"))
     return inputs[:10]
 
 
@@ -7027,7 +7136,9 @@ def get_default_model_image_inputs(limit: int = 2) -> list[dict[str, Any]]:
     for angle, filename in refs.items():
         key = join_key(row["asset_dir"], filename)
         if filename and object_exists(key):
-            inputs.append({"role": "model_identity", "objectKey": key, "filename": filename, "angle": angle})
+            # 未指定角度的图不要把内部键（__unassigned__xxx）当作 angle 传给生图模型。
+            clean_angle = None if is_unassigned_head_reference_id(angle) else angle
+            inputs.append({"role": "model_identity", "objectKey": key, "filename": filename, "angle": clean_angle})
         if len(inputs) >= limit:
             break
     return inputs

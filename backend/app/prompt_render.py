@@ -36,6 +36,7 @@ _REFERENCE_ROLE_LABELS = {
     "hero_garment": "主推款",
     "styling_garment": "搭配服装",
     "preview_grid": "分镜预览（构图参考）",
+    "shoot_environment": "拍摄环境参考",
 }
 
 

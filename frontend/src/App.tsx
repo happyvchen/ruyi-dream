@@ -277,7 +277,7 @@ export function App() {
   const nav = [
     { id: 'studio' as const, label: 'AI 摄影棚', icon: Bot },
     { id: 'library' as const, label: '搭配服装库', icon: Library },
-    { id: 'model' as const, label: '数字模特', icon: UserRound },
+    { id: 'model' as const, label: '模特与背景', icon: UserRound },
     ...(role === 'admin' ? [
       { id: 'prompt-maintenance' as const, label: 'Prompt 维护', icon: FileText },
     ] : []),
@@ -324,7 +324,7 @@ export function App() {
         {busy && <BusyPill label={busy} />}
         {page === 'studio' && <StudioPage task={task} setTask={setTask} records={records} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
         {page === 'library' && <LibraryPage garments={garments} run={run} />}
-        {page === 'model' && <ModelPage models={models} />}
+        {page === 'model' && <ModelPage models={models} role={role} run={run} />}
         {page === 'prompt-maintenance' && role === 'admin' && <PromptMaintenancePage run={run} />}
         {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} openTaskInStudio={openTaskInStudio} run={run} />}
       </main>
@@ -2489,26 +2489,146 @@ function FilePreviewButton({ file, dimensions, onDimensions, onOpen }: {
   )
 }
 
-function ModelPage({ models }: { models: ModelProfile[] }) {
+function ModelPage({ models, role, run }: { models: ModelProfile[]; role: SessionRole | null; run: any }) {
+  const isAdmin = role === 'admin'
   const model = models.find((item) => item.isDefault) ?? models[0]
+  const editable = isAdmin && !!model
   const refs = model?.profile?.headReferenceEntries ?? []
+  const coverThumb = refs.find((ref) => ref.angle === 'front')?.previewUrl ?? refs[0]?.previewUrl ?? null
+  const displayRefs = refs.length || editable ? refs : fallbackHeadRefs()
+  const takenAngles = new Set(refs.map((ref) => ref.angle).filter((angle): angle is string => !!angle))
+  const [env, setEnv] = useState<MediaAsset | null | undefined>(undefined)
+  const [dragIndex, setDragIndex] = useState<number | null>(null)
+
+  useEffect(() => {
+    void api.getShootEnvironment().then((r) => setEnv(r.asset)).catch(() => setEnv(null))
+  }, [])
+
   return (
     <section className="page workbench-page model-shell-page">
-      <PageTitle title="数字模特" subtitle="当前只读展示默认模特的多角度头部参考图，没有身体图。" />
+      <PageTitle title="模特与背景" subtitle={isAdmin ? '维护数字模特的多角度头部参考图，以及一张全局拍摄背景参考图。' : '查看默认模特的多角度头部参考图与拍摄背景参考图。'} />
       <div className="panel model-page">
         <div className="model-meta">
-          <span className="chip">只读</span>
-          <h2>{model?.name ?? 'Face-01 默认模特'}</h2>
-          <Meta label="发型/气质" value={model?.profile?.notes ?? '短发、自然淡妆、克制通勤气质'} />
+          <div className="model-cover">
+            {coverThumb ? <img src={mediaUrl(coverThumb)} loading="lazy" alt={model?.name ?? '数字模特'} /> : <div className="image-placeholder"><UserRound size={40} /></div>}
+          </div>
+          <div className="model-meta-head">
+            <h2>{model?.name ?? 'Face-01 默认模特'}</h2>
+            <span className={`chip ${isAdmin ? 'chip-admin' : ''}`}>{isAdmin ? '可维护' : '只读'}</span>
+          </div>
+          <Meta label="发型 / 气质" value={model?.profile?.notes ?? '短发、自然淡妆、克制通勤气质'} />
           <Meta label="身型参数" value={`${model?.profile?.height ?? '170cm'} · ${model?.profile?.bodyShape ?? 'H型'}`} />
+          <Meta label="头部参考图" value={`${refs.length} 张`} />
         </div>
-        <div className="head-grid">
-          {(refs.length ? refs : fallbackHeadRefs()).map((ref) => (
-            <div className="head-card" key={ref.id}>
-              {ref.previewUrl ? <img src={mediaUrl(ref.previewUrl)} loading="lazy" alt={angleLabel(ref.angle ?? ref.id)} /> : <div className="head-placeholder"><UserRound /></div>}
-              <span>{angleLabel(ref.angle ?? ref.id)}</span>
+
+        <div className="model-main">
+          <section className="model-block">
+            <div className="section-head">
+              <strong>数字模特头部参考图</strong>
+              {editable && (
+                <label className="secondary">
+                  <ImagePlus size={16} /> 追加图片
+                  <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => {
+                    const next = Array.from(event.target.files ?? [])
+                    event.currentTarget.value = ''
+                    if (next.length) void run('追加模特图片中...', () => api.addModelHeadReferences(model.id, next), undefined, { refresh: 'background' })
+                  }} />
+                </label>
+              )}
             </div>
-          ))}
+            <p className="edit-hint">{editable ? '拖拽卡片调整顺序，靠前的图片优先用于生成（当前取前 2 张）。身份以这些图为准，表情与角度可变。' : '多角度头部参考图，身份以这些图为准。'}</p>
+            <div className="saved-image-grid">
+              {displayRefs.map((ref, index) => {
+                const thumb = ('thumbUrl' in ref ? ref.thumbUrl : null) ?? ref.previewUrl ?? null
+                return (
+                  <div
+                    className="saved-image-card"
+                    key={ref.id}
+                    draggable={editable && refs.length > 1}
+                    onDragStart={editable ? () => setDragIndex(index) : undefined}
+                    onDragOver={editable ? (event) => event.preventDefault() : undefined}
+                    onDrop={editable ? () => {
+                      if (dragIndex !== null && dragIndex !== index) void run('调整模特图片顺序中...', () => api.reorderModelHeadReference(model.id, refs[dragIndex].id, index), undefined, { refresh: 'background' })
+                      setDragIndex(null)
+                    } : undefined}
+                  >
+                    {thumb ? <img src={mediaUrl(thumb)} loading="lazy" alt={angleLabel(ref.angle ?? ref.id)} /> : <div className="image-placeholder"><UserRound size={28} /></div>}
+                    {editable ? (
+                      <span className="has-angle">
+                        <select className="angle-select" value={ref.angle ?? ''} onChange={(event) => {
+                          const angle = event.target.value
+                          if (model) void run('设置模特图片角度中...', () => api.setModelHeadReferenceAngle(model.id, ref.id, angle), undefined, { refresh: 'background' })
+                        }}>
+                          <option value="">未设置</option>
+                          {HEAD_ANGLE_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value} disabled={takenAngles.has(option.value) && option.value !== ref.angle}>{option.label}</option>
+                          ))}
+                        </select>
+                        <small>{`第 ${index + 1} 张`}</small>
+                      </span>
+                    ) : (
+                      <span>{angleLabel(ref.angle ?? ref.id)}</span>
+                    )}
+                    {editable && (
+                      <div className="thumb-actions">
+                        <label title="替换图片">
+                          <RefreshCw size={14} />
+                          <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
+                            const replacement = event.target.files?.[0]
+                            event.currentTarget.value = ''
+                            if (replacement) void run('替换模特图片中...', () => api.replaceModelHeadReference(model.id, ref.id, replacement), undefined, { refresh: 'background' })
+                          }} />
+                        </label>
+                        <button disabled={refs.length <= 1} onClick={() => void run('删除模特图片中...', () => api.deleteModelHeadReference(model.id, ref.id), undefined, { refresh: 'background' })} title="删除图片"><Trash2 size={14} /></button>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </section>
+
+          <section className="model-block">
+            <div className="section-head">
+              <strong>拍摄背景参考图</strong>
+              {isAdmin && (
+                <label className="secondary">
+                  <ImagePlus size={16} /> {env ? '更换' : '上传'}
+                  <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
+                    const file = event.target.files?.[0]
+                    event.currentTarget.value = ''
+                    if (file) void run('上传拍摄背景参考图中...', () => api.setShootEnvironment(file), (r: { asset: MediaAsset | null }) => setEnv(r.asset), { refresh: false })
+                  }} />
+                </label>
+              )}
+            </div>
+            <p className="edit-hint">全局只保留 0 或 1 张。生成分镜预览时只参考它的背景、空间与光线；模特和服装以各自参考图为准，为空则不引用背景参考图。</p>
+            {env === undefined ? (
+              <div className="model-empty">加载中…</div>
+            ) : env ? (
+              <div className="saved-image-grid">
+                <div className="saved-image-card">
+                  <img src={mediaUrl(assetPreviewSrc(env))} loading="lazy" alt="拍摄背景参考图" />
+                  <span>拍摄背景参考图<small>{assetMeta(env)}</small></span>
+                  {isAdmin && (
+                    <div className="thumb-actions">
+                      <label title="更换图片">
+                        <RefreshCw size={14} />
+                        <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
+                          const file = event.target.files?.[0]
+                          event.currentTarget.value = ''
+                          if (file) void run('更换拍摄背景参考图中...', () => api.setShootEnvironment(file), (r: { asset: MediaAsset | null }) => setEnv(r.asset), { refresh: false })
+                        }} />
+                      </label>
+                      <button onClick={() => void run('移除拍摄背景参考图中...', () => api.clearShootEnvironment(), (r: { asset: MediaAsset | null }) => setEnv(r.asset), { refresh: false })} title="移除图片"><Trash2 size={14} /></button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="model-empty">尚未设置拍摄背景参考图{isAdmin ? '，点击上方「上传」添加一张。' : '。'}</div>
+            )}
+          </section>
         </div>
       </div>
     </section>
@@ -4425,9 +4545,21 @@ function readEntry(entry: FileSystemEntry, parentPath: string): Promise<File[]> 
   })
 }
 
+const HEAD_ANGLE_OPTIONS: { value: string; label: string }[] = [
+  { value: 'front', label: '正脸' },
+  { value: 'left45', label: '左45度' },
+  { value: 'right45', label: '右45度' },
+  { value: 'left90', label: '左侧脸' },
+  { value: 'right90', label: '右侧脸' },
+  { value: 'up45', label: '抬头45度' },
+  { value: 'down45', label: '低头' },
+  { value: 'back', label: '背面' },
+  { value: 'backTurnLeft45', label: '背面左回头' },
+  { value: 'backTurnRight45', label: '背面右回头' },
+]
+
 function angleLabel(angle?: string | null) {
-  const map: Record<string, string> = { front: '正脸', left45: '左45度', right45: '右45度', right90: '右侧脸', left90: '左侧脸', back: '背面', backTurnLeft45: '背面回头', down45: '低头' }
-  return map[angle ?? ''] ?? '未设置'
+  return HEAD_ANGLE_OPTIONS.find((option) => option.value === angle)?.label ?? '未设置'
 }
 
 function fallbackHeadRefs() {
