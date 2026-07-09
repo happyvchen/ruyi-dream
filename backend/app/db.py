@@ -21,7 +21,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("035", "recover_legacy_shoot_scripts", "migration_recover_legacy_shoot_scripts"),
     ("036", "add_attempt_progress_and_upload_cache", "migration_add_attempt_progress_and_upload_cache"),
     ("037", "add_generation_task_batch_id", "migration_add_generation_task_batch_id"),
-    ("038", "drop_storyboard_preview", "migration_drop_storyboard_preview"),
+    ("039", "restore_storyboard_preview", "migration_restore_storyboard_preview"),
 )
 
 PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
@@ -29,6 +29,7 @@ PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
     ("assembly.ai_tagging", "assembly", "AI 打标", "搭配服装入库后的图片理解和标签识别 Prompt。", 100),
     ("assembly.ai_styling", "assembly", "AI 选搭", "AI Stylist 选搭 Prompt，包含主推款理解、搭配选择和质量判断。", 110),
     ("assembly.shoot_script", "assembly", "拍摄剧本", "AI Director 拍摄剧本 Prompt，生成 ShootScript 和 6 个镜头。", 120),
+    ("assembly.storyboard_preview", "assembly", "分镜预览", "Image-2 分镜预览 Prompt，生成 3x2 分镜图。", 130),
     ("assembly.final_image", "assembly", "生成成片", "Image-2 单张成片 Prompt，按前 5 个镜头生成最终图。", 140),
 )
 
@@ -142,10 +143,13 @@ def init_db() -> None:
               hero_product_info_text TEXT,
               ai_styling_user_instruction_text TEXT,
               shoot_script_user_instruction_text TEXT,
+              storyboard_preview_user_instruction_text TEXT,
               final_image_user_instruction_text TEXT,
               current_input_version_id INTEGER,
               active_styling_id INTEGER,
               active_shoot_script_id INTEGER,
+              active_preview_id INTEGER,
+              active_storyboard_preview_id INTEGER,
               active_result_set_id INTEGER,
               auto_run_target TEXT,
               auto_run_requested_at TEXT,
@@ -248,12 +252,30 @@ def init_db() -> None:
               UNIQUE(shoot_script_id, sort_order)
             );
 
+            CREATE TABLE IF NOT EXISTS generation_previews (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+              styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
+              shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id),
+              input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
+              user_instruction_json TEXT,
+              preview_asset_id INTEGER REFERENCES media_assets(id),
+              status TEXT NOT NULL DEFAULT 'QUEUED',
+              active_attempt_id INTEGER,
+              locked_by TEXT,
+              locked_until TEXT,
+              run_attempts INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS generation_result_sets (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
               input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
               styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
               shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id),
+              preview_id INTEGER NOT NULL REFERENCES generation_previews(id),
               user_instruction_json TEXT,
               status TEXT NOT NULL DEFAULT 'RUNNING',
               created_at TEXT NOT NULL,
@@ -333,7 +355,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_recover_legacy_shoot_scripts": migration_recover_legacy_shoot_scripts,
         "migration_add_attempt_progress_and_upload_cache": migration_add_attempt_progress_and_upload_cache,
         "migration_add_generation_task_batch_id": migration_add_generation_task_batch_id,
-        "migration_drop_storyboard_preview": migration_drop_storyboard_preview,
+        "migration_restore_storyboard_preview": migration_restore_storyboard_preview,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -403,148 +425,64 @@ def migration_drop_prompt_replaced_config_tables(db: sqlite3.Connection) -> None
         db.execute(f"DROP TABLE IF EXISTS {table}")
 
 
-def migration_drop_storyboard_preview(db: sqlite3.Connection) -> None:
-    """彻底移除分镜预览：删表、删列、迁移状态、清理组装 Prompt。
-
-    - 老库里 status 为 PREVIEW_READY / PREVIEW_RUNNING 的任务迁移为 SCRIPT_READY。
-    - generation_tasks 删列 active_storyboard_preview_id / active_preview_id /
-      storyboard_preview_user_instruction_text（表重建）。
-    - generation_result_sets 删列 preview_id（NOT NULL 外键，表重建）。
-    - 删表 generation_previews。
-    - 删除 prompt_configs 中 key 为 assembly.storyboard_preview 的行。
-    """
-    if table_exists(db, "generation_tasks"):
-        db.execute(
-            "UPDATE generation_tasks SET status = 'SCRIPT_READY', updated_at = ? "
-            "WHERE status IN ('PREVIEW_READY', 'PREVIEW_RUNNING')",
-            (now_iso(),),
-        )
-    drop_preview_id_from_result_sets(db)
-    drop_storyboard_columns_from_generation_tasks(db)
-    db.execute("DROP TABLE IF EXISTS generation_previews")
-    db.execute("DELETE FROM prompt_configs WHERE key = 'assembly.storyboard_preview'")
-
-
-def drop_preview_id_from_result_sets(db: sqlite3.Connection) -> None:
-    if not table_exists(db, "generation_result_sets") or not table_has_column(db, "generation_result_sets", "preview_id"):
-        return
-    foreign_keys_enabled = db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-    db.commit()
-    if foreign_keys_enabled:
-        db.execute("PRAGMA foreign_keys = OFF")
-    try:
-        db.executescript(
-            """
-            CREATE TABLE generation_result_sets_new (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
-              input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
-              styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
-              shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id),
-              user_instruction_json TEXT,
-              status TEXT NOT NULL DEFAULT 'RUNNING',
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            INSERT INTO generation_result_sets_new
-              (id, task_id, input_version_id, styling_id, shoot_script_id, user_instruction_json, status, created_at, updated_at)
-            SELECT
-              id, task_id, input_version_id, styling_id, shoot_script_id, user_instruction_json, status, created_at, updated_at
-            FROM generation_result_sets;
-
-            DROP TABLE generation_result_sets;
-            ALTER TABLE generation_result_sets_new RENAME TO generation_result_sets;
-            """
-        )
-        db.execute("DELETE FROM sqlite_sequence WHERE name = 'generation_result_sets'")
-        db.execute(
-            """
-            INSERT INTO sqlite_sequence (name, seq)
-            SELECT 'generation_result_sets', COALESCE(MAX(id), 0)
-            FROM generation_result_sets
-            """
-        )
-        db.commit()
-    finally:
-        if foreign_keys_enabled:
-            db.execute("PRAGMA foreign_keys = ON")
-
-
-DROPPED_GENERATION_TASK_COLUMNS = (
-    "active_storyboard_preview_id",
-    "active_preview_id",
-    "storyboard_preview_user_instruction_text",
-)
-
-
-def drop_storyboard_columns_from_generation_tasks(db: sqlite3.Connection) -> None:
-    if not table_exists(db, "generation_tasks"):
-        return
-    if not any(table_has_column(db, "generation_tasks", column) for column in DROPPED_GENERATION_TASK_COLUMNS):
-        return
-    existing = [row["name"] for row in db.execute("PRAGMA table_info(generation_tasks)").fetchall()]
-    kept = [name for name in existing if name not in DROPPED_GENERATION_TASK_COLUMNS]
-    kept_sql = ", ".join(kept)
-    foreign_keys_enabled = db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-    db.commit()
-    if foreign_keys_enabled:
-        db.execute("PRAGMA foreign_keys = OFF")
-    try:
-        db.executescript(
-            """
-            CREATE TABLE generation_tasks_new (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              name TEXT NOT NULL,
-              status TEXT NOT NULL DEFAULT 'DRAFT',
-              user_requirement_text TEXT,
-              hero_product_info_text TEXT,
-              ai_styling_user_instruction_text TEXT,
-              shoot_script_user_instruction_text TEXT,
-              final_image_user_instruction_text TEXT,
-              current_input_version_id INTEGER,
-              active_styling_id INTEGER,
-              active_shoot_script_id INTEGER,
-              active_result_set_id INTEGER,
-              auto_run_target TEXT,
-              auto_run_requested_at TEXT,
-              batch_id TEXT,
-              archived_at TEXT,
-              archive_reason TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              deleted_at TEXT
-            );
-            """
-        )
-        new_columns = [row["name"] for row in db.execute("PRAGMA table_info(generation_tasks_new)").fetchall()]
-        shared = [name for name in kept if name in new_columns]
-        shared_sql = ", ".join(shared)
-        db.execute(
-            f"INSERT INTO generation_tasks_new ({shared_sql}) SELECT {shared_sql} FROM generation_tasks"
-        )
-        db.execute("DROP TABLE generation_tasks")
-        db.execute("ALTER TABLE generation_tasks_new RENAME TO generation_tasks")
-        db.execute("CREATE INDEX IF NOT EXISTS idx_generation_tasks_batch_id ON generation_tasks(batch_id)")
-        db.execute("DELETE FROM sqlite_sequence WHERE name = 'generation_tasks'")
-        db.execute(
-            """
-            INSERT INTO sqlite_sequence (name, seq)
-            SELECT 'generation_tasks', COALESCE(MAX(id), 0)
-            FROM generation_tasks
-            """
-        )
-        db.commit()
-    finally:
-        if foreign_keys_enabled:
-            db.execute("PRAGMA foreign_keys = ON")
-
-
 def migration_add_generation_task_batch_id(db: sqlite3.Connection) -> None:
     """批量成片批次：同一批次创建的任务共享 batch_id（客户端生成的不透明字符串）。"""
     if not table_has_column(db, "generation_tasks", "batch_id"):
         db.execute("ALTER TABLE generation_tasks ADD COLUMN batch_id TEXT")
         db.execute("CREATE INDEX IF NOT EXISTS idx_generation_tasks_batch_id ON generation_tasks(batch_id)")
+
+
+def migration_restore_storyboard_preview(db: sqlite3.Connection) -> None:
+    """恢复分镜预览 schema（回滚旧迁移 038 的破坏性删除，幂等）。
+
+    038 曾删掉 generation_tasks 的 active_preview_id / active_storyboard_preview_id /
+    storyboard_preview_user_instruction_text 三列、generation_result_sets 的 preview_id 列，
+    并 DROP generation_previews 表。恢复分镜预览步骤后需要把这些补回：
+
+    - 三个任务列按可空补回（ALTER ADD COLUMN；历史行留 NULL，不影响读取）。
+    - generation_result_sets.preview_id 按可空补回（历史结果集无预览留 NULL；
+      新一轮成片会正常写入 preview_id）。
+    - generation_previews 表缺失则按原结构重建。
+
+    对全新库（init_db 已建全量 schema）本迁移为无操作。
+    """
+    def _table_exists(name: str) -> bool:
+        return db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+        ).fetchone() is not None
+
+    if _table_exists("generation_tasks"):
+        for column, ddl in (
+            ("storyboard_preview_user_instruction_text", "TEXT"),
+            ("active_preview_id", "INTEGER"),
+            ("active_storyboard_preview_id", "INTEGER"),
+        ):
+            if not table_has_column(db, "generation_tasks", column):
+                db.execute(f"ALTER TABLE generation_tasks ADD COLUMN {column} {ddl}")
+
+    if _table_exists("generation_result_sets") and not table_has_column(db, "generation_result_sets", "preview_id"):
+        db.execute("ALTER TABLE generation_result_sets ADD COLUMN preview_id INTEGER")
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS generation_previews (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+          styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
+          shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id),
+          input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
+          user_instruction_json TEXT,
+          preview_asset_id INTEGER REFERENCES media_assets(id),
+          status TEXT NOT NULL DEFAULT 'QUEUED',
+          active_attempt_id INTEGER,
+          locked_by TEXT,
+          locked_until TEXT,
+          run_attempts INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
 
 
 def migration_add_generation_task_auto_run(db: sqlite3.Connection) -> None:
@@ -575,7 +513,7 @@ def migration_split_generation_user_inputs(db: sqlite3.Connection) -> None:
         db.execute("UPDATE generation_stylings SET user_instruction_json = user_requirement_json WHERE user_instruction_json IS NULL AND user_requirement_json IS NOT NULL")
     if not table_has_column(db, "generation_shoot_scripts", "user_instruction_json"):
         db.execute("ALTER TABLE generation_shoot_scripts ADD COLUMN user_instruction_json TEXT")
-    if table_exists(db, "generation_previews") and not table_has_column(db, "generation_previews", "user_instruction_json"):
+    if not table_has_column(db, "generation_previews", "user_instruction_json"):
         db.execute("ALTER TABLE generation_previews ADD COLUMN user_instruction_json TEXT")
     if not table_has_column(db, "generation_result_sets", "user_instruction_json"):
         db.execute("ALTER TABLE generation_result_sets ADD COLUMN user_instruction_json TEXT")
@@ -602,15 +540,13 @@ def migration_add_shoot_script_runtime_columns(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE generation_shot_plans ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id) ON DELETE CASCADE")
     if generation_shot_plans_needs_constraint_rebuild(db):
         rebuild_generation_shot_plans_for_shoot_script_unique(db)
-    if table_exists(db, "generation_previews") and not table_has_column(db, "generation_previews", "shoot_script_id"):
+    if not table_has_column(db, "generation_previews", "shoot_script_id"):
         db.execute("ALTER TABLE generation_previews ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id)")
     if not table_has_column(db, "generation_result_sets", "shoot_script_id"):
         db.execute("ALTER TABLE generation_result_sets ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id)")
 
 
 def migration_recover_legacy_shoot_scripts(db: sqlite3.Connection) -> None:
-    if not table_exists(db, "generation_previews"):
-        return
     ensure_legacy_shoot_script_recovery_columns(db)
     rows = db.execute(
         """
@@ -987,17 +923,7 @@ def rebuild_generation_shot_plans_for_shoot_script_unique(db: sqlite3.Connection
             db.execute("PRAGMA foreign_keys = ON")
 
 
-def table_exists(db: sqlite3.Connection, table: str) -> bool:
-    row = db.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (table,),
-    ).fetchone()
-    return row is not None
-
-
 def table_has_column(db: sqlite3.Connection, table: str, column: str) -> bool:
-    if not table_exists(db, table):
-        return False
     return any(row["name"] == column for row in db.execute(f"PRAGMA table_info({table})").fetchall())
 
 

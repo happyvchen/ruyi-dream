@@ -189,73 +189,121 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertEqual([row["name"] for row in rows], [])
         self.assertIsNotNone(migration)
 
-    def test_migration_038_drops_storyboard_preview(self) -> None:
+    def test_legacy_preview_tasks_recover_shoot_script_pointers(self) -> None:
         db_module = importlib.import_module("app.db")
-        timestamp = "2026-06-04T08:00:00Z"
-        # 构造一个已应用到 037、仍带分镜预览产物的老库，随后 init_db 执行 038。
-        with db_module.get_db() as db:
-            db.executescript(
-                """
-                CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL);
-                INSERT INTO schema_migrations (version, name, applied_at) VALUES
-                  ('027','x','t'),('028','x','t'),('029','x','t'),('030','x','t'),('031','x','t'),
-                  ('032','x','t'),('033','x','t'),('034','x','t'),('035','x','t'),('036','x','t'),('037','x','t');
-
-                CREATE TABLE media_assets (id INTEGER PRIMARY KEY, object_key TEXT, created_at TEXT, updated_at TEXT);
-                CREATE TABLE generation_tasks (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'DRAFT',
-                  user_requirement_text TEXT, hero_product_info_text TEXT,
-                  ai_styling_user_instruction_text TEXT, shoot_script_user_instruction_text TEXT,
-                  storyboard_preview_user_instruction_text TEXT, final_image_user_instruction_text TEXT,
-                  current_input_version_id INTEGER, active_styling_id INTEGER, active_shoot_script_id INTEGER,
-                  active_preview_id INTEGER, active_storyboard_preview_id INTEGER, active_result_set_id INTEGER,
-                  auto_run_target TEXT, auto_run_requested_at TEXT, batch_id TEXT,
-                  archived_at TEXT, archive_reason TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT
-                );
-                CREATE TABLE generation_task_input_versions (id INTEGER PRIMARY KEY, task_id INTEGER, version_number INTEGER, name_snapshot TEXT, image_snapshot_json TEXT, created_at TEXT);
-                CREATE TABLE generation_stylings (id INTEGER PRIMARY KEY, task_id INTEGER, input_version_id INTEGER, source_material_ids_json TEXT, selected_material_ids_json TEXT, selected_material_snapshot_json TEXT, status TEXT, created_at TEXT, updated_at TEXT);
-                CREATE TABLE generation_shoot_scripts (id INTEGER PRIMARY KEY, task_id INTEGER, input_version_id INTEGER, styling_id INTEGER, status TEXT, script_json TEXT, created_at TEXT, updated_at TEXT);
-                CREATE TABLE generation_shot_plans (id INTEGER PRIMARY KEY, task_id INTEGER, styling_id INTEGER, shoot_script_id INTEGER, sort_order INTEGER, shot_type TEXT, plan_json TEXT, created_at TEXT, updated_at TEXT, UNIQUE(shoot_script_id, sort_order));
-                CREATE TABLE generation_previews (id INTEGER PRIMARY KEY, task_id INTEGER, styling_id INTEGER, shoot_script_id INTEGER, input_version_id INTEGER, user_instruction_json TEXT, preview_asset_id INTEGER, status TEXT, created_at TEXT, updated_at TEXT);
-                CREATE TABLE generation_result_sets (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, input_version_id INTEGER, styling_id INTEGER, shoot_script_id INTEGER, preview_id INTEGER NOT NULL, user_instruction_json TEXT, status TEXT, created_at TEXT, updated_at TEXT);
-                CREATE TABLE generation_result_images_new (id INTEGER PRIMARY KEY, result_set_id INTEGER, shot_plan_id INTEGER, sort_order INTEGER, status TEXT, created_at TEXT, updated_at TEXT);
-                CREATE TABLE generation_attempts (id INTEGER PRIMARY KEY, owner_type TEXT, owner_id INTEGER, provider TEXT, status TEXT, created_at TEXT, updated_at TEXT);
-                CREATE TABLE prompt_configs (key TEXT PRIMARY KEY, group_type TEXT, title TEXT, description TEXT DEFAULT '', content TEXT DEFAULT '', sort_order INTEGER DEFAULT 0, updated_at TEXT);
-                CREATE TABLE model_profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, model_id TEXT UNIQUE, name TEXT, asset_dir TEXT, profile_json TEXT, is_default INTEGER DEFAULT 0, created_at TEXT, updated_at TEXT);
-
-                INSERT INTO prompt_configs (key, group_type, title, updated_at) VALUES ('assembly.storyboard_preview','assembly','分镜预览','t');
-                INSERT INTO generation_tasks (id, name, status, active_storyboard_preview_id, active_preview_id, storyboard_preview_user_instruction_text, created_at, updated_at)
-                  VALUES (1, 'ReadyTask', 'PREVIEW_READY', 5, 5, '分镜姿态更舒展', 't', 't');
-                INSERT INTO generation_tasks (id, name, status, created_at, updated_at) VALUES (2, 'RunningTask', 'PREVIEW_RUNNING', 't', 't');
-                INSERT INTO generation_previews (id, task_id, styling_id, input_version_id, status, created_at, updated_at) VALUES (5, 1, 1, 1, 'SUCCEEDED', 't', 't');
-                INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 1, 1, NULL, 5, 'SUCCEEDED', 't', 't');
-                """
-            )
 
         db_module.init_db()
+        timestamp = "2026-06-04T08:00:00Z"
+        styling_plan = {
+            "schema_version": "styling-plan-v1",
+            "hero_understanding": {
+                "hero_visual_summary": "淡蓝色印花半裙",
+                "category": "bottom",
+                "hero_selling_points": ["高腰线", "印花裙摆"],
+                "hero_visibility_risks": ["上衣不要遮挡腰头"],
+            },
+            "outfit_candidates": [
+                {
+                    "id": "candidate_13",
+                    "selected_material_ids": [13],
+                    "generated_accessories": ["低存在感米色鞋"],
+                    "scores": {"aesthetic_score": 1},
+                }
+            ],
+            "selected_outfit_id": "candidate_13",
+            "selected_material_ids": [13],
+            "reason_summary": "历史选搭成功。",
+        }
+        with db_module.get_db() as db:
+            db.execute(
+                """
+                INSERT INTO media_assets
+                  (id, object_key, original_filename, mime_type, status, created_at, updated_at)
+                VALUES (296, 'generation-tasks/8/preview/preview-13.png', 'preview-13.png', 'image/png', 'READY', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_tasks
+                  (id, name, status, current_input_version_id, active_styling_id, active_preview_id,
+                   created_at, updated_at)
+                VALUES (8, '20260527132852', 'FAILED', 11, 11, 13, ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_task_input_versions
+                  (id, task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, created_at)
+                VALUES (11, 8, 1, '20260527132852', '[]', '{}', ?)
+                """,
+                (timestamp,),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_stylings
+                  (id, task_id, input_version_id, source_material_ids_json, selected_material_ids_json,
+                   selected_material_snapshot_json, styling_plan_json, hero_understanding_json,
+                   outfit_candidates_json, rejected_candidates_json, reason_summary, warnings_json,
+                   status, created_at, updated_at)
+                VALUES (11, 8, 11, '[]', '[13]', '[]', ?, '{}', '[]', '[]',
+                        '历史选搭成功。', '[]', 'SUCCEEDED', ?, ?)
+                """,
+                (db_module.dumps(styling_plan), timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_previews
+                  (id, task_id, styling_id, input_version_id, preview_asset_id, status, created_at, updated_at)
+                VALUES (13, 8, 11, 11, 296, 'SUCCEEDED', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            for sort_order in range(1, 7):
+                db.execute(
+                    """
+                    INSERT INTO generation_shot_plans
+                      (task_id, styling_id, sort_order, shot_type, plan_json, created_at, updated_at)
+                    VALUES (8, 11, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sort_order,
+                        "reference" if sort_order == 6 else "legacy_shot",
+                        db_module.dumps({
+                            "sortOrder": sort_order,
+                            "shotType": "reference" if sort_order == 6 else "legacy_shot",
+                            "framing": "全身或近全身",
+                            "pose": "自然站姿",
+                            "cameraAngle": "正面",
+                            "mainFocus": "主推款",
+                            "visibleGarments": ["hero", "styling:13"],
+                        }),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
 
         with db_module.get_db() as db:
-            self.assertFalse(db_module.table_exists(db, "generation_previews"))
-            for column in ("active_storyboard_preview_id", "active_preview_id", "storyboard_preview_user_instruction_text"):
-                self.assertFalse(db_module.table_has_column(db, "generation_tasks", column))
-            self.assertFalse(db_module.table_has_column(db, "generation_result_sets", "preview_id"))
-            statuses = {
-                int(row["id"]): row["status"]
-                for row in db.execute("SELECT id, status FROM generation_tasks").fetchall()
-            }
-            self.assertEqual(statuses[1], "SCRIPT_READY")
-            self.assertEqual(statuses[2], "SCRIPT_READY")
-            result_set = db.execute("SELECT * FROM generation_result_sets WHERE id = 10").fetchone()
-            self.assertIsNotNone(result_set)
-            self.assertEqual(result_set["status"], "SUCCEEDED")
-            preview_config = db.execute(
-                "SELECT COUNT(*) AS count FROM prompt_configs WHERE key = 'assembly.storyboard_preview'"
+            db_module.migration_recover_legacy_shoot_scripts(db)
+            db_module.migration_recover_legacy_shoot_scripts(db)
+
+        with db_module.get_db() as db:
+            task = db.execute("SELECT * FROM generation_tasks WHERE id = 8").fetchone()
+            scripts = db.execute("SELECT * FROM generation_shoot_scripts WHERE task_id = 8").fetchall()
+            preview = db.execute("SELECT * FROM generation_previews WHERE id = 13").fetchone()
+            shot_plan_count = db.execute(
+                "SELECT COUNT(*) AS count FROM generation_shot_plans WHERE task_id = 8 AND shoot_script_id = ?",
+                (task["active_shoot_script_id"],),
             ).fetchone()["count"]
-            self.assertEqual(preview_config, 0)
-            migration = db.execute(
-                "SELECT version FROM schema_migrations WHERE version = '038' AND name = 'drop_storyboard_preview'"
-            ).fetchone()
-            self.assertIsNotNone(migration)
+
+        self.assertEqual(task["status"], "PREVIEW_READY")
+        self.assertEqual(task["active_storyboard_preview_id"], 13)
+        self.assertIsNotNone(task["active_shoot_script_id"])
+        self.assertEqual(len(scripts), 1)
+        self.assertEqual(preview["shoot_script_id"], task["active_shoot_script_id"])
+        self.assertEqual(shot_plan_count, 6)
+        self.assertEqual(db_module.loads(scripts[0]["script_json"])["script_source_mode"], "legacy_recovered")
 
     def assert_no_model_raw_output(self, value: object) -> None:
         if isinstance(value, dict):
@@ -298,6 +346,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 "assembly.ai_tagging",
                 "assembly.ai_styling",
                 "assembly.shoot_script",
+                "assembly.storyboard_preview",
                 "assembly.final_image",
             },
         )
@@ -803,8 +852,8 @@ class BackendCurrentFlowTests(unittest.TestCase):
         db_module.init_db()
         with db_module.get_db() as db:
             self.assertTrue(db_module.table_has_column(db, "generation_tasks", "active_shoot_script_id"))
-            self.assertFalse(db_module.table_has_column(db, "generation_tasks", "active_storyboard_preview_id"))
-            self.assertFalse(db_module.table_exists(db, "generation_previews"))
+            self.assertTrue(db_module.table_has_column(db, "generation_tasks", "active_storyboard_preview_id"))
+            self.assertTrue(db_module.table_has_column(db, "generation_previews", "shoot_script_id"))
             self.assertTrue(db_module.table_has_column(db, "generation_result_sets", "shoot_script_id"))
             self.assertTrue(db_module.table_has_column(db, "generation_shot_plans", "shoot_script_id"))
             unique_columns = db_module.table_unique_column_sets(db, "generation_shot_plans")
@@ -822,7 +871,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (timestamp, timestamp, timestamp, timestamp, timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_tasks (id, name, status, current_input_version_id, active_styling_id, active_result_set_id, created_at, updated_at) VALUES (1, 'Old task', 'COMPLETED', 2, 3, 10, ?, ?)",
+                "INSERT INTO generation_tasks (id, name, status, current_input_version_id, active_styling_id, active_preview_id, active_result_set_id, created_at, updated_at) VALUES (1, 'Old task', 'COMPLETED', 2, 3, 4, 10, ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
@@ -861,7 +910,11 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 5, 'SUCCEEDED', ?, ?)",
+                "INSERT INTO generation_previews (id, task_id, styling_id, input_version_id, preview_asset_id, status, created_at, updated_at) VALUES (4, 1, 3, 2, 102, 'SUCCEEDED', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 4, 'SUCCEEDED', ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
@@ -907,6 +960,10 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (timestamp, timestamp),
             )
             db.execute(
+                "INSERT INTO generation_previews (id, task_id, styling_id, input_version_id, status, created_at, updated_at) VALUES (4, 1, 3, 2, 'SUCCEEDED', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
                 "INSERT INTO generation_shoot_scripts (id, task_id, input_version_id, styling_id, status, script_json, created_at, updated_at) VALUES (5, 1, 2, 3, 'SUCCEEDED', '{}', ?, ?)",
                 (timestamp, timestamp),
             )
@@ -915,7 +972,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 5, 'RUNNING', ?, ?)",
+                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 5, 4, 'RUNNING', ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
@@ -977,6 +1034,10 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (timestamp, timestamp),
             )
             db.execute(
+                "INSERT INTO generation_previews (id, task_id, styling_id, input_version_id, status, created_at, updated_at) VALUES (4, 1, 3, 2, 'SUCCEEDED', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
                 "INSERT INTO generation_shoot_scripts (id, task_id, input_version_id, styling_id, status, script_json, created_at, updated_at) VALUES (5, 1, 2, 3, 'SUCCEEDED', '{}', ?, ?)",
                 (timestamp, timestamp),
             )
@@ -985,7 +1046,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 5, 'RUNNING', ?, ?)",
+                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 5, 4, 'RUNNING', ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
@@ -1060,8 +1121,8 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 """
                 INSERT INTO generation_tasks
                   (id, name, status, current_input_version_id, active_styling_id, active_shoot_script_id,
-                   active_result_set_id, created_at, updated_at)
-                VALUES (1, 'T', 'FINAL_PARTIAL', 2, 3, 5, 10, ?, ?)
+                   active_storyboard_preview_id, active_result_set_id, created_at, updated_at)
+                VALUES (1, 'T', 'FINAL_PARTIAL', 2, 3, 5, 4, 10, ?, ?)
                 """,
                 (timestamp, timestamp),
             )
@@ -1082,13 +1143,17 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 "INSERT INTO generation_shoot_scripts (id, task_id, input_version_id, styling_id, status, script_json, created_at, updated_at) VALUES (5, 1, 2, 3, 'SUCCEEDED', '{}', ?, ?)",
                 (timestamp, timestamp),
             )
+            db.execute(
+                "INSERT INTO generation_previews (id, task_id, styling_id, shoot_script_id, input_version_id, status, created_at, updated_at) VALUES (4, 1, 3, 5, 2, 'SUCCEEDED', ?, ?)",
+                (timestamp, timestamp),
+            )
             for index in range(1, 6):
                 db.execute(
                     "INSERT INTO generation_shot_plans (id, task_id, styling_id, shoot_script_id, sort_order, plan_json, created_at, updated_at) VALUES (?, 1, 3, 5, ?, '{}', ?, ?)",
                     (index + 5, index, timestamp, timestamp),
                 )
             db.execute(
-                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 5, 'PARTIAL', ?, ?)",
+                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 5, 4, 'PARTIAL', ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
@@ -1146,6 +1211,10 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 "INSERT INTO generation_shoot_scripts (id, task_id, input_version_id, styling_id, status, script_json, created_at, updated_at) VALUES (4, 1, 2, 3, 'SUCCEEDED', '{}', ?, ?)",
                 (timestamp, timestamp),
             )
+            db.execute(
+                "INSERT INTO generation_previews (id, task_id, styling_id, shoot_script_id, input_version_id, status, created_at, updated_at) VALUES (5, 1, 3, 4, 2, 'SUCCEEDED', ?, ?)",
+                (timestamp, timestamp),
+            )
             for index in range(1, 6):
                 db.execute(
                     "INSERT INTO generation_shot_plans (id, task_id, styling_id, shoot_script_id, sort_order, plan_json, created_at, updated_at) VALUES (?, 1, 3, 4, ?, '{}', ?, ?)",
@@ -1154,16 +1223,16 @@ class BackendCurrentFlowTests(unittest.TestCase):
             db.execute(
                 """
                 INSERT INTO generation_result_sets
-                  (id, task_id, input_version_id, styling_id, shoot_script_id, status, created_at, updated_at)
-                VALUES (10, 1, 2, 3, 4, 'SUPERSEDED', ?, ?)
+                  (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
+                VALUES (10, 1, 2, 3, 4, 5, 'SUPERSEDED', ?, ?)
                 """,
                 (timestamp, timestamp),
             )
             db.execute(
                 """
                 INSERT INTO generation_result_sets
-                  (id, task_id, input_version_id, styling_id, shoot_script_id, status, created_at, updated_at)
-                VALUES (20, 1, 2, 3, 4, 'SUCCEEDED', ?, ?)
+                  (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
+                VALUES (20, 1, 2, 3, 4, 5, 'SUCCEEDED', ?, ?)
                 """,
                 (timestamp, timestamp),
             )
@@ -1237,22 +1306,26 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (timestamp, timestamp),
             )
             db.execute(
+                "INSERT INTO generation_previews (id, task_id, styling_id, shoot_script_id, input_version_id, status, created_at, updated_at) VALUES (5, 1, 3, 4, 2, 'SUCCEEDED', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
                 "INSERT INTO generation_shot_plans (id, task_id, styling_id, shoot_script_id, sort_order, plan_json, created_at, updated_at) VALUES (1, 1, 3, 4, 1, '{}', ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
                 """
                 INSERT INTO generation_result_sets
-                  (id, task_id, input_version_id, styling_id, shoot_script_id, status, created_at, updated_at)
-                VALUES (10, 1, 2, 3, 4, 'RUNNING', ?, ?)
+                  (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
+                VALUES (10, 1, 2, 3, 4, 5, 'RUNNING', ?, ?)
                 """,
                 (timestamp, timestamp),
             )
             db.execute(
                 """
                 INSERT INTO generation_result_sets
-                  (id, task_id, input_version_id, styling_id, shoot_script_id, status, created_at, updated_at)
-                VALUES (20, 1, 2, 3, 4, 'RUNNING', ?, ?)
+                  (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
+                VALUES (20, 1, 2, 3, 4, 5, 'RUNNING', ?, ?)
                 """,
                 (timestamp, timestamp),
             )
@@ -1315,8 +1388,8 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 """
                 INSERT INTO generation_tasks
                   (id, name, status, current_input_version_id, active_styling_id, active_shoot_script_id,
-                   active_result_set_id, created_at, updated_at)
-                VALUES (1, 'T', 'FINAL_RUNNING', 2, 3, 4, 20, ?, ?)
+                   active_storyboard_preview_id, active_result_set_id, created_at, updated_at)
+                VALUES (1, 'T', 'FINAL_RUNNING', 2, 3, 4, 5, 20, ?, ?)
                 """,
                 (timestamp, timestamp),
             )
@@ -1337,6 +1410,10 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 "INSERT INTO generation_shoot_scripts (id, task_id, input_version_id, styling_id, status, script_json, created_at, updated_at) VALUES (4, 1, 2, 3, 'SUCCEEDED', '{}', ?, ?)",
                 (timestamp, timestamp),
             )
+            db.execute(
+                "INSERT INTO generation_previews (id, task_id, styling_id, shoot_script_id, input_version_id, status, created_at, updated_at) VALUES (5, 1, 3, 4, 2, 'SUCCEEDED', ?, ?)",
+                (timestamp, timestamp),
+            )
             for index in range(1, 6):
                 db.execute(
                     "INSERT INTO generation_shot_plans (id, task_id, styling_id, shoot_script_id, sort_order, plan_json, created_at, updated_at) VALUES (?, 1, 3, 4, ?, '{}', ?, ?)",
@@ -1345,16 +1422,16 @@ class BackendCurrentFlowTests(unittest.TestCase):
             db.execute(
                 """
                 INSERT INTO generation_result_sets
-                  (id, task_id, input_version_id, styling_id, shoot_script_id, status, created_at, updated_at)
-                VALUES (10, 1, 2, 3, 4, 'SUPERSEDED', ?, ?)
+                  (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
+                VALUES (10, 1, 2, 3, 4, 5, 'SUPERSEDED', ?, ?)
                 """,
                 (timestamp, timestamp),
             )
             db.execute(
                 """
                 INSERT INTO generation_result_sets
-                  (id, task_id, input_version_id, styling_id, shoot_script_id, status, created_at, updated_at)
-                VALUES (20, 1, 2, 3, 4, 'RUNNING', ?, ?)
+                  (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
+                VALUES (20, 1, 2, 3, 4, 5, 'RUNNING', ?, ?)
                 """,
                 (timestamp, timestamp),
             )
@@ -1405,6 +1482,10 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (timestamp, timestamp),
             )
             db.execute(
+                "INSERT INTO generation_previews (id, task_id, styling_id, input_version_id, status, created_at, updated_at) VALUES (4, 1, 3, 2, 'SUCCEEDED', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
                 "INSERT INTO generation_shoot_scripts (id, task_id, input_version_id, styling_id, status, script_json, created_at, updated_at) VALUES (5, 1, 2, 3, 'SUCCEEDED', '{}', ?, ?)",
                 (timestamp, timestamp),
             )
@@ -1413,7 +1494,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 5, 'RUNNING', ?, ?)",
+                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 5, 4, 'RUNNING', ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
@@ -1482,6 +1563,13 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.insert_prompt_config(db_module, "segment.brand_info", "segment", "Lily 品牌信息", 10)
         self.insert_prompt_config(
             db_module,
+            "assembly.storyboard_preview",
+            "assembly",
+            "生成分镜预览。\n\n{{segment.brand_info}}\n\n【输入参考图角色清单】\n{{runtime.image_reference_manifest}}\n\n【拍摄剧本结果】\n{{runtime.shoot_script_result}}\n\n按拍摄剧本生成 3x2 分镜预览。",
+            140,
+        )
+        self.insert_prompt_config(
+            db_module,
             "assembly.final_image",
             "assembly",
             "生成一张电商棚拍成片。\n\n分镜预览不是模特或商品事实来源。模特参考图是模特身份事实来源。\n不得根据拍摄剧本、品牌妆发或分镜构图把模特改成另一张脸、低马尾、盘发、长发或参考图中不存在的发型。\n\n【输入参考图角色清单】\n{{runtime.image_reference_manifest}}\n\n{{segment.brand_info}}\n\n【当前单张成片上下文】\n{{runtime.current_shot_context}}",
@@ -1489,7 +1577,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
         )
         with db_module.get_db() as db:
             db.execute(
-                "INSERT INTO generation_tasks (id, name, status, current_input_version_id, active_styling_id, active_shoot_script_id, active_result_set_id, created_at, updated_at) VALUES (1, 'T', 'SCRIPT_READY', 7, 3, 5, 10, ?, ?)",
+                "INSERT INTO generation_tasks (id, name, status, current_input_version_id, active_styling_id, active_shoot_script_id, active_storyboard_preview_id, active_result_set_id, created_at, updated_at) VALUES (1, 'T', 'PREVIEW_READY', 7, 3, 5, 4, 10, ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
@@ -1534,11 +1622,15 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (db_module.dumps(shoot_script), timestamp, timestamp),
             )
             db.execute(
+                "INSERT INTO generation_previews (id, task_id, styling_id, shoot_script_id, input_version_id, preview_asset_id, status, created_at, updated_at) VALUES (4, 1, 3, 5, 7, 103, 'SUCCEEDED', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
                 "INSERT INTO generation_shot_plans (id, task_id, styling_id, shoot_script_id, sort_order, plan_json, created_at, updated_at) VALUES (6, 1, 3, 5, 1, ?, ?, ?)",
                 (db_module.dumps({"shot_index": 1, "shot_role": "hero", "main_focus": "主推款"}), timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, status, created_at, updated_at) VALUES (10, 1, 7, 3, 5, 'RUNNING', ?, ?)",
+                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 7, 3, 5, 4, 'RUNNING', ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
@@ -1552,14 +1644,21 @@ class BackendCurrentFlowTests(unittest.TestCase):
             7,
             main.build_stage_user_instruction_context("shoot_script", "突出裙摆长度"),
         )
+        preview_package = main.build_new_preview_task_package(1, 3, 5, [{"sortOrder": 1, "plan": {"shot_index": 1}}])
         final_package = main.build_new_final_task_package(1, 30)
 
-        self.assertEqual([item["role"] for item in final_package["imageInputs"][:3]], ["model_identity", "model_identity", "hero_garment"])
+        self.assertEqual([item["role"] for item in preview_package["imageInputs"][:2]], ["model_identity", "model_identity"])
+        self.assertEqual([item["role"] for item in final_package["imageInputs"][:3]], ["model_identity", "model_identity", "preview_grid"])
         self.assertEqual(shoot_script_request["input_version"]["id"], 7)
         self.assertEqual(shoot_script_request["hero_product_info"]["info"], "中短裙，裙摆刚过膝")
         self.assertEqual(shoot_script_request["shoot_script_user_instruction"]["instruction"], "突出裙摆长度")
+        self.assertIn("输入参考图角色清单", preview_package["prompt"])
+        self.assertIn("model_identity", preview_package["prompt"])
+        self.assertEqual(preview_package["inputVersionId"], 7)
+        self.assertEqual(preview_package["heroProductInfo"]["info"], "中短裙，裙摆刚过膝")
         self.assertEqual(final_package["heroProductInfo"]["info"], "中短裙，裙摆刚过膝")
         self.assertIn("模特身份事实来源", final_package["prompt"])
+        self.assertIn("preview_grid is composition-only", final_package["prompt"])
         self.assertIn("低马尾", final_package["prompt"])
         self.assertIn("不得根据拍摄剧本", final_package["prompt"])
 
@@ -1583,16 +1682,16 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 "prompt": "生成成片",
                 "imageInputs": [
                     {"role": "model_identity", "assetId": 1, "objectKey": "model/front.png", "filename": "front.png", "angle": "front"},
-                    {"role": "styling_garment", "assetId": 2, "objectKey": "styling/look.png", "filename": "look.png"},
+                    {"role": "preview_grid", "assetId": 2, "objectKey": "preview/grid.png", "filename": "grid.png"},
                 ],
             },
-            ["https://example.com/model.png", "https://example.com/look.png"],
+            ["https://example.com/model.png", "https://example.com/grid.png"],
         )
 
-        self.assertEqual(provider_request["reference_images"], ["https://example.com/model.png", "https://example.com/look.png"])
+        self.assertEqual(provider_request["reference_images"], ["https://example.com/model.png", "https://example.com/grid.png"])
         self.assertEqual(
             [(item["reference_index"], item["role"]) for item in provider_request["reference_image_manifest"]],
-            [(1, "model_identity"), (2, "styling_garment")],
+            [(1, "model_identity"), (2, "preview_grid")],
         )
 
 

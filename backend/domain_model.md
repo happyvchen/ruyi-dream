@@ -7,6 +7,7 @@ GenerationTask
   -> GenerationTaskInputVersion
   -> GenerationStyling / StylingPlan
   -> GenerationShootScript / 6 x GenerationShotPlan
+  -> GenerationPreview
   -> GenerationResultSet / 5 x GenerationResultImage
 ```
 
@@ -38,6 +39,8 @@ AI 摄影棚主推款任务。草稿阶段可上传和排序主推款图片，�
 - `STYLING_READY`
 - `SCRIPT_RUNNING`
 - `SCRIPT_READY`
+- `PREVIEW_RUNNING`
+- `PREVIEW_READY`
 - `FINAL_RUNNING`
 - `FINAL_PARTIAL`
 - `COMPLETED`
@@ -68,9 +71,11 @@ AI Director 基于当前 StylingPlan 生成 ShootScript。ShootScript 负责把�
 - 生成类配饰的最终执行方案。
 - 6 个镜头的图位、景别、姿势、走位、取景、可见商品和验收标准。
 
-`generation_shot_plans` 从 ShootScript 派生，前 5 个镜头进入最终成片，第 6 个不进入最终成片。
+`generation_shot_plans` 从 ShootScript 派生，前 5 个镜头进入最终成片，第 6 个只在分镜预览中参考。
 
-## GenerationResult
+## GenerationPreview / GenerationResult
+
+`GenerationPreview` 保存 3x2 分镜预览总图。它是导演和构图参考，不是商品事实来源。
 
 `GenerationResultSet` 保存一次最终图生成批次。`GenerationResultImageNew` 保存前 5 张单图状态、当前资产、锁和重试 attempt。
 
@@ -78,7 +83,7 @@ AI Director 基于当前 StylingPlan 生成 ShootScript。ShootScript 负责把�
 
 `一键成片` 在最终阶段复用当前 active result set。若当前结果为 `FINAL_PARTIAL`，自动续跑只把失败或缺失的单图重新排队，不覆盖已经成功的最终图；手动 `生成成片 / 重新生成成片` 仍创建新的结果集。
 
-创建新的最终图结果集、重新选搭或重新生成拍摄剧本时，历史 `GenerationResultSet` 会进入 `SUPERSEDED`。旧结果集中仍处于 `QUEUED` / `RUNNING` 的单图和 attempt 必须同步收口为 `CANCELLED`，避免被当前任务摘要误认为仍在生成。若旧后台 job 晚于新结果集完成，旧结果集的单图落库和 reconcile 必须视为 no-op 或取消收口，不得回写 `GenerationTask.active_result_set_id`。
+创建新的最终图结果集、重新选搭、重新生成拍摄剧本或重新生成分镜预览时，历史 `GenerationResultSet` 会进入 `SUPERSEDED`。旧结果集中仍处于 `QUEUED` / `RUNNING` 的单图和 attempt 必须同步收口为 `CANCELLED`，避免被当前任务摘要误认为仍在生成。若旧后台 job 晚于新结果集完成，旧结果集的单图落库和 reconcile 必须视为 no-op 或取消收口，不得回写 `GenerationTask.active_result_set_id`。
 
 ## GenerationAttempt
 
@@ -87,11 +92,12 @@ AI Director 基于当前 StylingPlan 生成 ShootScript。ShootScript 负责把�
 - `styling_garment_tagging`
 - `generation_styling`
 - `generation_shoot_script`
+- `generation_preview`
 - `generation_result_image`
 
 attempt 保存 provider、状态、请求快照、响应快照、错误、provider request id 和输出资产。技术详情默认不返回给普通前台，只在 debug 场景查看。
 
-普通任务详情中的 `aiOperations` 是当前 active 链路的轻量运行摘要，不是完整历史流水。它只包含当前 active StylingPlan、ShootScript 和 active result set 的 attempts；历史版本、旧结果集和 superseded artifacts 的 attempts 只在技术详情或审计读取中展示。
+普通任务详情中的 `aiOperations` 是当前 active 链路的轻量运行摘要，不是完整历史流水。它只包含当前 active StylingPlan、ShootScript、分镜预览和 active result set 的 attempts；历史版本、旧结果集和 superseded artifacts 的 attempts 只在技术详情或审计读取中展示。
 
 ## Prompt DTO
 
@@ -102,7 +108,7 @@ attempt 保存 provider、状态、请求快照、响应快照、错误、provid
 | AI Stylist | `candidate_retrieval` | READY 搭配库全量标签事实卡 |
 | AI Stylist | `user_requirement` | 上传补充要求、本次微调要求和冲突处理策略 |
 | AI Director | `styling_result` | 主推款理解、选中 outfit、选中服饰紧凑标签、质量信号 |
-| 最终成片 | `shoot_script_result` | 全局导演、配饰、风险和 6 个镜头 |
+| 分镜预览 | `shoot_script_result` | 全局导演、配饰、风险和 6 个镜头 |
 | 最终成片 | `current_shot_context` | 当前镜头、当前格子、选中 outfit、本镜头配饰和禁止项 |
 
 这套模型只在 AI Stylist 阶段提供搭配库 `ai_tags` 标签事实卡，避免把内部 id、历史 candidate snapshots、历史 AI Styling prompt 或完整上游对象重复塞入下游 prompt。

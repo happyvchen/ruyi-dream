@@ -1007,6 +1007,15 @@ a.button-link { text-decoration: none; cursor: pointer; }
   gap: 14px;
 }
 .selected-strip { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+.preview-board {
+  width: 100%;
+  max-height: 560px;
+  object-fit: contain;
+  border-radius: 10px;
+  border: 1px solid #d8e0ea;
+  background: #fff;
+}
+.preview-board-open,
 .result-image-open {
   display: block;
   width: 100%;
@@ -2308,12 +2317,21 @@ a.button-link { text-decoration: none; cursor: pointer; }
   display: grid;
   gap: 10px;
 }
+.detail-preview-open {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: zoom-in;
+}
 .record-thumb {
   padding: 0;
   border: 0;
   cursor: zoom-in;
 }
-.record-thumb:hover {
+.record-thumb:hover,
+.detail-preview-open:hover .detail-preview {
   box-shadow: 0 0 0 3px rgba(14, 165, 233, .14);
 }
 .record-detail {
@@ -2323,6 +2341,11 @@ a.button-link { text-decoration: none; cursor: pointer; }
   min-height: 0;
   max-height: 100%;
   overflow: auto;
+}
+.detail-preview {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid #d8e0ea;
 }
 .lightbox {
   position: fixed;

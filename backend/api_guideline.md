@@ -45,6 +45,7 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。`/api/g
 | `/api/generation-tasks/{id}/ready` | POST | 冻结草稿，进入选搭 |
 | `/api/generation-tasks/{id}/select-styling` | POST | 调用 AI Stylist，可携带本次用户介入要求 |
 | `/api/generation-tasks/{id}/shoot-script` | POST | 调用 AI Director，可携带本次用户介入要求 |
+| `/api/generation-tasks/{id}/preview` | POST | 生成 3x2 分镜预览，可携带本次用户介入要求 |
 | `/api/generation-tasks/{id}/generate-final` | POST | 并发生成前 5 张成片，可携带本次用户介入要求 |
 | `/api/generation-tasks/{id}/auto-run-final` | POST | 一键成片：复用已有有效中间结果并自动完成后续步骤 |
 | `/api/generation-result-images-new/{image_id}/retry` | POST | 重生单张最终图，可携带本次用户介入要求 |
@@ -72,10 +73,10 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。`/api/g
 一键成片规则：
 
 - 不新增独立业务状态；失败、取消和部分完成沿用原阶段状态。
-- 已有当前有效 `StylingPlan` 或 `ShootScript` 时复用。
+- 已有当前有效 `StylingPlan`、`ShootScript` 或分镜预览时复用。
 - `FINAL_PARTIAL` 断点续跑只补失败或缺失的最终图。
 - 任一运行中状态下，所有生成入口都应返回 409 或在前端禁用；只允许取消生成。
-- 任务详情中的 `aiOperations` 只返回当前 active 链路的运行摘要。被新结果替代的旧结果集、旧剧本和旧选搭 attempt 不进入普通任务摘要；完整历史仅用于技术详情和审计。
+- 任务详情中的 `aiOperations` 只返回当前 active 链路的运行摘要。被新结果替代的旧结果集、旧分镜、旧剧本和旧选搭 attempt 不进入普通任务摘要；完整历史仅用于技术详情和审计。
 - 新最终图结果集替代旧结果集时，旧结果集中仍处于 `QUEUED` / `RUNNING` 的单图和 attempt 必须收口为 `CANCELLED`。
 - 已被替代的旧最终图后台任务即使晚于新结果集完成，也不得通过单图回写或 result set reconcile 恢复为当前 active 结果集。
 
@@ -96,13 +97,14 @@ Prompt 配置可使用以下 runtime：
 
 - `runtime.styling_garment`：AI 打标使用的当前搭配服装 code 和图片输入摘要。
 - `runtime.candidate_retrieval`：AI Stylist 候选服饰全量标签事实卡。
-- `runtime.hero_product_info`：跟随当前执行实际使用的主推款输入版本冻结的商品信息和业务事实补充；重新执行拍摄剧本、成片或单张重生时会冻结最新任务商品信息。
+- `runtime.hero_product_info`：跟随当前执行实际使用的主推款输入版本冻结的商品信息和业务事实补充；重新执行拍摄剧本、分镜预览、成片或单张重生时会冻结最新任务商品信息。
 - `runtime.ai_styling_user_instruction`：AI 智能选搭本次执行的用户介入要求。
 - `runtime.shoot_script_user_instruction`：拍摄剧本本次执行的用户介入要求。
+- `runtime.storyboard_preview_user_instruction`：分镜预览本次执行的用户介入要求。
 - `runtime.final_image_user_instruction`：最终成片或单张重生本次执行的用户介入要求。
 - `runtime.styling_result`：AI Director 使用的选搭导演上下文。
 - `runtime.model_identity_context`：AI Director 使用的数字模特身份契约和参考图上下文。
-- `runtime.shoot_script_result`：最终成片使用的拍摄剧本上下文。
+- `runtime.shoot_script_result`：分镜预览使用的拍摄剧本上下文。
 - `runtime.current_shot_context`：最终成片单镜头上下文。
 - `runtime.image_reference_manifest`：Image-2 输入参考图序号、角色和事实源优先级。
 
@@ -134,15 +136,16 @@ Prompt 配置可使用以下 runtime：
 
 - 主推款和选中搭配服装图片是商品事实来源。
 - 数字模特参考图是人物身份事实来源，必须作为 `model_identity` 前置输入并写入 `image_reference_manifest`。
-- ShootScript、品牌妆发和 provider 默认审美不得覆盖数字模特的脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。
+- 分镜预览是构图参考，不是商品事实来源，也不是模特身份事实来源。
+- ShootScript、分镜预览、品牌妆发和 provider 默认审美不得覆盖数字模特的脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。
 - Image-2 prompt 只给当前步骤必要结构；最终单张图只给当前镜头上下文。
-- 第 6 个 ShotPlan 不进入最终成片。
+- 第 6 个 ShotPlan 只用于分镜预览，不进入最终成片。
 
 ## 用户输入原则
 
 - 用户输入不是自由长 prompt，而是业务语言中的服装事实补充、拍摄要求或选搭微调。
 - 用户输入分为两类：跟随主推款输入版本的 `heroProductInfo`，以及每个阶段本次执行的 `userInstruction`。
-- `heroProductInfo` 在创建/更新任务时保存到 `generation_tasks.hero_product_info_text`；进入 AI Stylist 前会冻结到 `generation_task_input_versions.hero_product_info_json`，重新执行拍摄剧本、成片或单张重生时也会冻结最新商品信息，允许用户跳过前序阶段，直接让新商品信息影响接下来执行的阶段。
+- `heroProductInfo` 在创建/更新任务时保存到 `generation_tasks.hero_product_info_text`；进入 AI Stylist 前会冻结到 `generation_task_input_versions.hero_product_info_json`，重新执行拍摄剧本、分镜预览、成片或单张重生时也会冻结最新商品信息，允许用户跳过前序阶段，直接让新商品信息影响接下来执行的阶段。
 - 每个阶段的用户输入草稿保存到 `generation_tasks.*_user_instruction_text`，保存动作不改变任务状态、不清空 active artifact。
 - `userInstruction` 在每次阶段执行时分别保存到阶段 artifact 的 `user_instruction_json`，并同步写入 `generation_attempts.request_snapshot_json`，用于追溯多次重生过程。
 - `auto-run-final` 自动推进各阶段时必须读取同一份任务级用户输入草稿，不能静默忽略已保存的阶段要求。

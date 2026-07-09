@@ -33,7 +33,7 @@
 
 ### 1.3 真实快照证据（本地渲染，未调用任何 provider）
 
-取库内最近一条成片 attempt（`generation_attempts` owner_type=`generation_result`）的 `request_snapshot_json.prompt`，与按本方案渲染的 prompt 对比：
+取库内最近一条分镜预览 attempt（`generation_attempts` owner_type=`generation_preview`）的 `request_snapshot_json.prompt`，与按本方案渲染的 prompt 对比：
 
 > 注：下表 1279 字符是 §5 原型（漏了导演字段）的数字，仅用于说明「去 JSON 治理元数据」这一项的量级。补回 §4A 全部「不丢」字段后，实际数字会更高——去噪音是真的，激进删内容不是本方案主张。
 
@@ -54,7 +54,7 @@
 | 类别 | 调用 | 输入形态 | 结论 |
 |---|---|---|---|
 | **策划（Gemini）** | `assembly.ai_tagging`、`assembly.ai_styling`、`assembly.shoot_script` | 结构化 JSON I/O | **保留** JSON 输入输出（模型要返回结构化结果，这是最佳实践）；但去掉每个对象里重复的 `priority_policy`，优先级只在 system instruction / prompt 正文声明一次 |
-| **生图（Image-2）** | `assembly.final_image` | 自然语言 prompt | **重构**为 prompt view：干净分节文本，去掉全部治理元数据 |
+| **生图（Image-2）** | `assembly.storyboard_preview`、`assembly.final_image` | 自然语言 prompt | **重构**为 prompt view：干净分节文本，去掉全部治理元数据 |
 
 即：Gemini 阶段的 JSON 是**契约**（合理），Image-2 阶段的 JSON 是**噪音**（要去）。两者都要把「优先级策略」从「每个数据对象重复」改为「正文声明一次」。
 
@@ -73,10 +73,11 @@
 
 1. **保留**现有富上下文对象与其 `schema_version`/`priority_policy`——它们仍写进 `request_snapshot_json` 与业务快照，审计与回溯不受影响。
 2. **新增渲染层**（建议 `backend/app/prompt_render.py`，纯函数、无 I/O、无 DB），每个阶段一个 renderer：
+   - `render_storyboard_prompt(shoot_script, image_inputs, hero_info, user_instruction) -> str`
    - `render_final_prompt(shot_index, shot_plan, styling_result, shoot_script, image_inputs, hero_info, user_instruction) -> str`
    - Gemini 侧：`gemini_view(context) -> dict`（drop 治理键，保留内容键）
 3. **优先级策略集中化**：`cannot_override` / `conflict_handling` 这类规则，从「每个 runtime 对象重复」改为在对应 `assembly.*` prompt 正文（或 Gemini system instruction）声明一次。用户要求为空时整段省略，不再出现 `"info": ""` 这种空壳 JSON。
-4. **模板改造**：`assembly.final_image` 的占位符不再接收 `dumps(...)`，而是接收 renderer 产出的纯文本段落。
+4. **模板改造**：`assembly.storyboard_preview` / `assembly.final_image` 的占位符不再接收 `dumps(...)`，而是接收 renderer 产出的纯文本段落。
 
 ### 3.1 renderer 的 Python 边界（已决策）
 
@@ -84,7 +85,7 @@
 
 | 内容 | 归属 | 谁能改 |
 |---|---|---|
-| 固定脚手架（`任务：`、`当前镜头：`、`禁止：` 段头） | 可编辑模板 | 业务用户 |
+| 固定脚手架（`任务：`、`六格镜头：`、`禁止：` 段头） | 可编辑模板 | 业务用户 |
 | 优先级/边界规则（事实源以图为准、`cannot_override` 语义、配饰不抢镜） | 可编辑模板正文 / system instruction | 业务用户 |
 | 品牌口径固定话术 | 可编辑模板 / `segment.brand_info` | 业务用户 |
 | 每次运行的**数据**（6 格 shot 字段、品牌 tone 快照值、参考图角色分组、一致性规则值） | renderer 渲染为文本行，填进模板占位符 | 由上游 ShootScript/StylingPlan 决定 |
@@ -112,7 +113,7 @@ renderer 工程约束：
 
 **重要更正**：§5 的原型渲染为了展示，**丢掉了若干真实导演字段**（`camera_angle`、`crop_range`、`model_scale`、`movement`、`composition_notes`），所以那 85% 的缩减里**有一部分不是去噪音，是漏内容**。生产实现**不能**照抄原型。落地前必须先审定下面这张「每字段：渲染 / 合并 / 丢弃」映射表——它才是等价性的依据，不是字符数。
 
-ShotPlan 字段（`shoot_script_result_for_prompt` 的每个 shot，字段见 `main.py:5925-5937`）：
+分镜预览（`shoot_script_result_for_prompt` 的每个 shot，字段见 `main.py:5925-5937`）：
 
 | 字段 | 处理 | 说明 |
 |---|---|---|
@@ -120,7 +121,7 @@ ShotPlan 字段（`shoot_script_result_for_prompt` 的每个 shot，字段见 `m
 | `shot_role_label` | 渲染 | 格标签 |
 | `framing` | 渲染 | 景别 |
 | `crop_range` | 渲染（合并进景别行） | 取景范围，导演信息，**不丢** |
-| `model_scale` | 渲染（合并进构图行） | 人物占比，影响成片构图，**不丢** |
+| `model_scale` | 渲染（合并进构图行） | 人物占比，影响 3x2 构图，**不丢** |
 | `camera_angle` | 渲染 | 机位，导演信息，**不丢** |
 | `body_position` | 渲染（合并进姿态） | |
 | `pose` | 渲染 | 姿态 |
@@ -135,22 +136,22 @@ ShotPlan 字段（`shoot_script_result_for_prompt` 的每个 shot，字段见 `m
 
 治理元数据（`schema_version`、`priority_policy`、`cannot_override`、`priority_rules`、`conflict_handling`）：**一律丢弃**，规则改由模板正文声明一次。
 
-最终成片（`current_shot_context_for_prompt`，`main.py:5946`）：`current_shot`（完整 ShotPlan，同上字段规则）+ `resolved_accessories_for_this_shot` 渲染，`styling.selected_outfit` 只取 `selected_material_codes` + `wearing_notes`，其余 drop。
+最终成片（`current_shot_context_for_prompt`，`main.py:5946`）：`current_shot`（完整 ShotPlan，同上字段规则）+ `resolved_accessories_for_this_shot` 渲染，`preview_grid_cell` 渲染为「参考分镜第 N 格」，`styling.selected_outfit` 只取 `selected_material_codes` + `wearing_notes`，其余 drop。
 
 结论：真实缩减幅度会**小于 85%**（保留全部导演字段后）。方案的价值是**去治理元数据 + 去 JSON 语法 + 空值省略**，不是激进删内容。审这张表时，任一「丢弃」项都需要产品/导演确认。
 
 ## 5. Before / After（真实数据，仅示意去 JSON 效果，非最终字段集）
 
-**Before**（现状，节选，`generation_result` attempt，8395 字符）：
+**Before**（现状，节选，`generation_preview` attempt，8395 字符）：
 
 ```text
-生成一张电商棚拍成片，当前生成第 1 张
+生成一张 3x2 电商棚拍分镜预览图
 【核心原则】...
 【本次用户要求】
 商品信息：{"schema_version": "hero-product-info-v1", "info": "", "priority_policy": {"fact_role": "...", "cannot_override": ["主推款图片可见商品事实", ...], "conflict_handling": "..."}}
-用户要求：{"schema_version": "stage-user-instruction-v1", "stage": "final_image", "instruction": "", "priority_policy": {...}}
+用户要求：{"schema_version": "stage-user-instruction-v1", "stage": "storyboard_preview", "instruction": "", "priority_policy": {...}}
 【拍摄剧本结果】
-{"schema_version": "shoot-script-context-v1", "global_directing": {...}, "current_shot": {"shot_index": 1, ...}}
+{"schema_version": "shoot-script-storyboard-context-v1", "global_directing": {...}, "shots": [{"shot_index": 1, ...}, ...]}
 ...
 【输入参考图角色清单】
 {"schema_version": "image-reference-manifest-v1", "priority_rules": [...], "references": [{"reference_index": 1, "role": "model_identity", ...}, ...]}
@@ -159,17 +160,22 @@ ShotPlan 字段（`shoot_script_result_for_prompt` 的每个 shot，字段见 `m
 **After**（本方案渲染，1279 字符，同一份数据）：
 
 ```text
-任务：生成一张电商棚拍成片，当前生成第 1 张（全身主视觉·近全身景），只生成单张图，不要拼图。
+任务：生成一张 3x2 电商棚拍分镜预览图，六格对应下方 6 个镜头。
 
 事实源（以参考图为准，不可改款/换色/换脸）：主推款与搭配服装参考图=真实商品事实源，保持品类/颜色/面料/版型/结构/比例与可见细节；数字模特参考图=唯一身份事实源，保持同一人脸型/五官/头型/发长/发型轮廓/刘海碎发/肤色/气质。
 参考图顺序：图1-2=数字模特身份，图3-5=主推款；文字不得覆盖图片事实。
 
 品牌与画面：Lily商务时装，轻松高级、智性优雅，都市女性从容不费力的现代通勤状态。背景：极简暖灰色棚拍，弱化地面交界线，保留极轻微自然投影。光线：柔和均匀无影罩面光，低反差，真实还原肤色与针织/棉麻材质细节。
 配饰：饰品体量小巧精致不夺眼球；鞋包色彩与整体呼应，携带姿势不可遮挡主推款核心渐变设计。
-一致性：Face-01 短发刘海与面部特征与同组各镜头绝对一致；针织衫竖向坑条间距与横向米褐-乳白-深咖渐变比例一致；搭配下装暖白色相、棉麻肌理及细腰带形态一致。
+一致性：Face-01 短发刘海与面部特征所有镜头绝对一致；针织衫竖向坑条间距与横向米褐-乳白-深咖渐变比例各焦段一致；搭配下装暖白色相、棉麻肌理及细腰带形态一致。
 
-当前镜头：
-全身主视觉·近全身景：上紧下松通勤廓形，针织衫渐变与暖白阔腿裤清爽衔接。姿态：双腿前后错落，重心微偏后脚。配饰：露出米白法式单鞋鞋尖；手提袋右侧偏后自然下垂。不可遮挡：前襟纽扣区；高腰裤细皮带与褶裥结合处。
+六格镜头：
+格1（全身主视觉·近全身景）：上紧下松通勤廓形，针织衫渐变与暖白阔腿裤清爽衔接。姿态：双腿前后错落，重心微偏后脚。配饰：露出米白法式单鞋鞋尖；手提袋右侧偏后自然下垂。不可遮挡：前襟纽扣区；高腰裤细皮带与褶裥结合处。
+格2（背面中景·中景）：背面落肩过渡与背部横向渐变色条完整性。姿态：背部挺拔，双肩放松下沉。配饰：不出现手提袋。不可遮挡：后背及肩线过渡带。
+格3（切脸半身近景·近景）：圆领罗纹工艺、开衫纽扣及胸前色彩过渡。姿态：放松正面通勤站姿。配饰：香槟金极细项链露于领口中央。不可遮挡：圆领下方 5cm 前襟区。
+格4（非对称局部特写·特写）：竖向坑条精细质感、下摆开叉与裤装细腰带材质对比。姿态：微动势停顿瞬间。配饰：无饰品干扰。不可遮挡：下摆纽扣与开叉细节。
+格5（全身正反双拼图·全身景）：渐变针织衫配暖白阔腿裤的正反版型对比。姿态：双脚微张，站姿端正自然。配饰：两侧皆米白粗跟法式单鞋，不带包袋。不可遮挡：拼图中央垂直对齐线；下摆前后水平高度线。
+格6（走动备用全身姿态·全身景）：阔腿裤行进垂坠感，针织衫与高腰裤动态衔接。姿态：一脚前迈，裤腿自然摆动。配饰：单鞋与白色包袋动态中清晰可见。不可遮挡：前襟纽扣与渐变带核心区。
 
 禁止：不用办公桌/文件夹等传统道具；不摆僵硬军姿或过度张腿扭腰等网红姿势；不遮挡领口至前襟关键渐变与纽扣；不生成文字/水印/logo/边框；生成配饰只作低存在感辅助，不特写、不抢主推款视觉中心。
 ```
@@ -179,7 +185,7 @@ ShotPlan 字段（`shoot_script_result_for_prompt` 的每个 shot，字段见 `m
 分阶段落地，每阶段独立可验、可回滚。**当前状态：P0–P5 全部落地并通过第一道验收（本地渲染对比 + 单测，共 25 个 renderer 单测全绿）；第二道受控出图 A/B 待用户授权后执行。**
 
 - **P0（本文档）✅**：评审设计与 before/after，确认范围。
-- **P1｜生图阶段 ✅**：新增 `prompt_render.py`，实现 `render_shot_context_body` + hero/instruction 行渲染；改 `build_new_final_prompt` 用 renderer 填充占位符。**未改 DB 模板**（脚手架/规则留可编辑模板），因此无需改 `available_prompt_placeholders` / `sample_prompt_runtime`。快照写入不变。
+- **P1｜生图阶段 ✅**：新增 `prompt_render.py`，实现 `render_shoot_script_body` / `render_shot_context_body` + hero/instruction 行渲染；改 `build_new_preview_prompt` / `build_new_final_prompt` 用 renderer 填充占位符。**未改 DB 模板**（脚手架/规则留可编辑模板），因此无需改 `available_prompt_placeholders` / `sample_prompt_runtime`。快照写入不变。
 - **P2｜参考图 ✅**：`append_image_reference_manifest` 改为「参考图顺序：图N=角色」自然语言 + 事实源约束；删除废弃的 `image_reference_manifest_for_prompt`；provider 侧 `build_provider_reference_image_manifest` 保持结构化不变。（`append_model_identity_contract` 见下方残留项。）
 - **P3｜Gemini 阶段 ✅（等价性依据已确认）**：`ai_styling`/`shoot_script` 的 hero/用户要求/介入要求自然语言化，去掉重复的 `priority_policy`/`cannot_override`。**关键**：该优先级与冲突处理规则**已完整写在 `AI_STYLIST_SYSTEM_INSTRUCTION`（`main.py:110`）与 `AI_DIRECTOR_SYSTEM_INSTRUCTION`（`main.py:117`）**，删除运行时重复不丢规则——这是行为等价的依据。`candidate_retrieval`（标签事实）、`styling_result`（导演上下文）、`model_identity_context`（身份契约）保持结构化 JSON。仍建议受控 A/B 复核。
 - **P4｜清理 ✅**：删除因上游改造而失效的死代码 `append_user_requirement_block` / `has_user_requirement` / `append_runtime_input_block` / `has_user_input`；prompt 出口统一走 renderer，空值由 `render_*_line` 返回「（无）」、`_block` 省略空行，杜绝空壳 JSON。
