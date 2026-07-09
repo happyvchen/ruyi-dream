@@ -202,7 +202,7 @@ Aesthetic Critic 除原有维度外，必须新增：
 
 ## 8. 0.1.0 技术边界
 
-0.1.0 在现有 FastAPI、SQLite、S3 兼容对象存储、Prompt 维护和外部 provider 架构内运行。系统固定采用全量标签事实直投 AI Stylist 的方式：后端负责 READY 范围、快照、code 到内部 ID 映射、schema 校验和状态机；Gemini 负责候选理解、空库内搭配比较、审美判断、拒绝理由和最终选择；Image-2 负责最终单图生成。
+0.1.0 在现有 FastAPI、SQLite、S3 兼容对象存储、Prompt 维护和外部 provider 架构内运行。系统固定采用全量标签事实直投 AI Stylist 的方式：后端负责 READY 范围、快照、code 到内部 ID 映射、schema 校验和状态机；Gemini 负责候选理解、空库内搭配比较、审美判断、拒绝理由和最终选择；Image-2 负责分镜预览和最终单图生成。
 
 品牌样本证据、向量检索、反馈学习和更细的上下文压缩不属于当前运行路径。若这些能力进入产品，应先更新权威设计、领域模型和数据库 schema，再实现代码。
 

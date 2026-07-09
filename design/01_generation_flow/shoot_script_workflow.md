@@ -8,16 +8,18 @@ AI 摄影棚的 0.1.0 主流程：
 上传主推款
 -> AI 智能选搭
 -> 生成拍摄剧本
+   -> 生成拍摄剧本
+   -> 生成分镜预览
 -> 生成成片
 ```
 
 用户侧使用“拍摄剧本”作为产品语言。系统侧使用 `ShootScript` 作为核心结构化产物。
 
-`一键成片` 是现有主流程的自动推进入口，不引入新的业务产物或新的失败状态。它从当前任务的第一个未完成阶段开始，复用当前 active 指针上的有效 StylingPlan、ShootScript 和已成功成片，自动执行后续步骤直到前 5 张成片完成。用户仍可随时回到具体阶段查看或单独重新生成。
+`一键成片` 是现有主流程的自动推进入口，不引入新的业务产物或新的失败状态。它从当前任务的第一个未完成阶段开始，复用当前 active 指针上的有效 StylingPlan、ShootScript、分镜预览和已成功成片，自动执行后续步骤直到前 5 张成片完成。用户仍可随时回到具体阶段查看或单独重新生成。
 
 `ShootScript` 是从 AI 选搭到实际拍摄之间的导演层产物：它一次性生成整组拍摄所需的全局导演设定和 6 个镜头 `ShotPlan`，承接主推款、选中搭配服装、生成配饰边界、品牌规则、品类图位规则、镜头景别、取景范围、模特姿势、身姿走位、背景和光线。用户可以查看拍摄剧本，但 0.1.0 不允许编辑。
 
-最终成片阶段每次只生成一个镜头，前 5 个镜头并发生成 5 张成片。
+`分镜预览` 是拍摄剧本的可视化结果，即原“六宫格预览”。最终成片阶段每次只生成一个镜头，并传入分镜预览图作为一致性参考。
 
 ## 2. 命名规范
 
@@ -26,17 +28,21 @@ AI 摄影棚的 0.1.0 主流程：
 | 造型阶段 | AI 智能选搭 | `GenerationStyling` / `StylingPlan` | 决定穿什么、怎么穿、为什么成立 |
 | 导演阶段 | 拍摄剧本 | `GenerationShootScript` / `ShootScript` | 决定整组怎么拍 |
 | 单镜头分镜 | 镜头方案 | `ShotPlan` | 6 个镜头的结构化导演说明 |
+| 可视化预览 | 分镜预览 | `GenerationStoryboardPreview` | 3x2 分镜预览图 |
 | 最终输出 | 成片 | `GenerationResultSet` / `GenerationResultImage` | 前 5 个镜头逐张生成 |
+
+用户侧统一使用“分镜预览”。技术字段可以保留 `preview` 命名，但用户界面、设计文档和新增业务对象应使用“分镜预览 / storyboard preview”。
 
 ## 3. 产品原则
 
 1. 用户不写长 prompt，用户确认拍摄信息和生成结果。
 2. `AI 智能选搭` 负责造型判断，不负责拍摄导演。
 3. `拍摄剧本` 负责导演判断，不重新选择库内搭配服装。
-4. `生成成片` 使用当前最新主推款输入版本、AI 选搭、拍摄剧本和对应镜头生成单张图。
-5. 每个用户动作都必须由后端持久化记录，刷新浏览器后不丢失状态、结果、失败原因和可恢复操作。
-6. 每个阶段都支持重新生成；重新生成创建新版本，历史版本保留但从当前工作流失效。
-7. 0.1.0 生产链路只读取当前对象模型，历史数据如需保留应通过一次性迁移进入当前对象模型或归档记录。
+4. `分镜预览` 是拍摄剧本的视觉样片，不是商品事实来源。
+5. `生成成片` 使用当前最新主推款输入版本、AI 选搭、拍摄剧本、分镜预览和对应镜头生成单张图。
+6. 每个用户动作都必须由后端持久化记录，刷新浏览器后不丢失状态、结果、失败原因和可恢复操作。
+7. 每个阶段都支持重新生成；重新生成创建新版本，历史版本保留但从当前工作流失效。
+8. 0.1.0 生产链路只读取当前对象模型，历史数据如需保留应通过一次性迁移进入当前对象模型或归档记录。
 
 ## 4. 阶段职责
 
@@ -110,13 +116,41 @@ AI 摄影棚的 0.1.0 主流程：
 - 不做独立分镜质量质检；0.1.0 把灵活度和判断权交给用户。
 - 仍需做最小结构校验：JSON 可解析、字段存在、6 个镜头齐全、镜头序号唯一、第 6 格不进入最终成片。
 
-### 4.4 生成成片
+### 4.4 生成分镜预览
+
+用户点击“生成分镜预览”后，系统读取当前最新成功 `ShootScript`，调用 Image-2 生成一张 3x2 分镜预览图。
+
+输入：
+
+- 数字模特身份图，固定作为 `model_identity` 最高优先级输入。
+- 主推款图片，作为 `hero_garment` 商品事实输入。
+- 选中搭配服装图片，作为 `styling_garment` 商品事实输入。
+- 当前最新成功 `ShootScript`。
+- `image_reference_manifest`，逐张声明 provider reference image 的序号、角色和事实源。
+
+输出：
+
+- `GenerationStoryboardPreview`。
+- 一张 3x2 分镜预览图。
+- attempt 请求/响应快照。
+
+规则：
+
+- 前 5 格对应最终 5 张成片。
+- 第 6 格仅备用参考，不进入最终生成。
+- 分镜预览只能表达姿势、身位、景别、构图、背景光线和整组风格，不得成为商品事实源或模特身份事实源。
+- 预览阶段如果 ShootScript 文本与 `model_identity` 参考图冲突，以模特参考图和身份契约为准。
+- 预览失败不影响拍摄剧本。
+- 重新生成预览时创建新的预览版本，并使旧成片失效。
+
+### 4.5 生成成片
 
 用户点击“生成成片”后，系统创建新的 `GenerationResultSet`，按当前最新成功 `ShootScript` 的前 5 个 `ShotPlan` 并发生成 5 张单图。
 
 每张成片输入：
 
 - 数字模特身份图，固定作为 `model_identity` 最高优先级输入。
+- 当前最新分镜预览图，作为 `preview_grid` 构图参考输入。
 - 主推款图片，作为 `hero_garment` 商品事实输入。
 - 选中搭配服装图片，作为 `styling_garment` 商品事实输入。
 - 当前镜头 `ShotPlan`。
@@ -125,25 +159,27 @@ AI 摄影棚的 0.1.0 主流程：
 规则：
 
 - 每次 Image-2 调用只生成一个镜头。
+- 分镜预览图只用于参考对应格的姿势、身位、景别、构图、背景光线和整组风格。
+- 分镜预览图不是商品事实来源，也不是模特身份事实来源。
 - 商品事实始终来自主推款原图和选中搭配服装原图。
-- 模特身份事实始终来自数字模特参考图和 `ModelIdentityContract`；不得根据拍摄剧本或品牌妆发文字改变模特脸、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。
-- 同组一致性依赖同一输入快照、同一 `ShootScript` 和同一模特快照。
+- 模特身份事实始终来自数字模特参考图和 `ModelIdentityContract`；不得根据拍摄剧本、分镜预览或品牌妆发文字改变模特脸、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。
 - 支持整组重新生成。
 - 支持单张成片重生，单张重生不影响其他成功成片。
 
-### 4.5 一键成片
+### 4.6 一键成片
 
 用户点击 `一键成片` 后，系统记录自动推进意图，并按现有阶段状态机继续执行：
 
 - `DRAFT`：等价于确认当前主推款输入，进入智能选搭。
 - 无当前有效 `StylingPlan`：执行 AI 智能选搭。
 - 有 `StylingPlan` 但无当前有效 `ShootScript`：生成拍摄剧本。
-- 有 `ShootScript` 但无完整 5 张成片：生成成片。
+- 有 `ShootScript` 但无当前有效分镜预览图：生成分镜预览。
+- 有分镜预览但无完整 5 张成片：生成成片。
 - `FINAL_PARTIAL`：只补当前结果集中失败或缺失的最终图，不重生已成功图。
 
 `COMPLETED` 任务提供 `重新一键成片`（`auto-run-final` 携带 `restart=true`），语义与上面的断点续跑相反——它是整条重跑：
 
-- 先把当前 active 的 `StylingPlan` / `ShootScript` / 成片结果集统一置为 `SUPERSEDED` 历史版本（不删除，保留可追溯），并清空对应 active 指针，任务回到 `READY_FOR_STYLING`；主推款输入版本不变。
+- 先把当前 active 的 `StylingPlan` / `ShootScript` / 分镜预览 / 成片结果集统一置为 `SUPERSEDED` 历史版本（不删除，保留可追溯），并清空对应 active 指针，任务回到 `READY_FOR_STYLING`；主推款输入版本不变。
 - 随后记录自动推进意图（`auto_run_target=FINAL`），由既有队列从智能选搭开始重跑，产出一套全新方案。
 - 复用现有的重置逻辑（与「重新选搭」的历史化语义一致），不引入新的业务产物或失败状态。
 - 该动作仅在单任务入口提供；批次 `全部一键成片` 始终跳过 `COMPLETED`，不做整条重跑。
@@ -179,6 +215,8 @@ STYLING_RUNNING
 STYLING_READY
 SCRIPT_RUNNING
 SCRIPT_READY
+PREVIEW_RUNNING
+PREVIEW_READY
 FINAL_RUNNING
 FINAL_PARTIAL
 COMPLETED
@@ -196,7 +234,9 @@ ABANDONED
 | `STYLING_RUNNING` | AI 智能选搭运行中 |
 | `STYLING_READY` | 当前选搭成功，可生成拍摄剧本 |
 | `SCRIPT_RUNNING` | 拍摄剧本生成中 |
-| `SCRIPT_READY` | 当前拍摄剧本成功，可生成成片 |
+| `SCRIPT_READY` | 当前拍摄剧本成功，可生成分镜预览 |
+| `PREVIEW_RUNNING` | 分镜预览生成中 |
+| `PREVIEW_READY` | 当前分镜预览成功，可生成成片 |
 | `FINAL_RUNNING` | 成片整组生成中 |
 | `FINAL_PARTIAL` | 部分成片成功，部分失败或运行中 |
 | `COMPLETED` | 当前结果集前 5 张全部成功 |
@@ -222,6 +262,7 @@ SUPERSEDED
 
 - `GenerationStyling`
 - `GenerationShootScript`
+- `GenerationStoryboardPreview`
 - `GenerationResultSet`
 - `GenerationResultImage`
 
@@ -235,6 +276,7 @@ SUPERSEDED
 current_input_version_id
 active_styling_id
 active_shoot_script_id
+active_storyboard_preview_id
 active_result_set_id
 ```
 
@@ -250,12 +292,12 @@ active_result_set_id
 
 - 新建 `GenerationStyling`。
 - 新选搭成功后更新 `active_styling_id`。
-- 历史 `GenerationShootScript`、历史 `GenerationResultSet` 全部标记 `SUPERSEDED`。
+- 历史 `GenerationShootScript`、历史 `GenerationStoryboardPreview`、历史 `GenerationResultSet` 全部标记 `SUPERSEDED`。
 - 数据库和 OSS 文件保留。
 
 原因：
 
-选搭改变后，下游拍摄剧本和成片都不再代表当前造型。
+选搭改变后，下游拍摄剧本、预览和成片都不再代表当前造型。
 
 ### 6.2 重新生成拍摄剧本
 
@@ -265,7 +307,7 @@ active_result_set_id
 
 - 新建 `GenerationShootScript`。
 - 成功后更新 `active_shoot_script_id`。
-- 旧成片标记 `SUPERSEDED`。
+- 旧分镜预览和旧成片标记 `SUPERSEDED`。
 - 旧拍摄剧本保留在历史中。
 
 失败：
@@ -274,26 +316,42 @@ active_result_set_id
 - 新失败 attempt 可查看错误。
 - 用户可再次重试。
 
-### 6.3 重新生成成片
+### 6.3 重新生成分镜预览
+
+动作：用户点击“重新生成预览”。
+
+结果：
+
+- 新建 `GenerationStoryboardPreview`。
+- 成功后更新 `active_storyboard_preview_id`。
+- 旧成片标记 `SUPERSEDED`。
+- 当前拍摄剧本不变。
+
+失败：
+
+- 保留当前拍摄剧本。
+- 若存在旧成功预览，可继续显示但标记不是当前最新尝试。
+
+### 6.4 重新生成成片
 
 动作：用户点击“重新生成成片”。
 
 结果：
 
 - 新建 `GenerationResultSet`。
-- 使用当前最新主推款输入版本、AI 选搭和拍摄剧本。
+- 使用当前最新主推款输入版本、AI 选搭、拍摄剧本和分镜预览。
 - 前 5 个镜头并发生成。
 - 成功后更新 `active_result_set_id`。
 - 旧结果集标记 `SUPERSEDED`。
 
-### 6.4 单张成片重生
+### 6.5 单张成片重生
 
 动作：用户在某张成片上点击“重生”。
 
 结果：
 
 - 对当前 `GenerationResultImage` 新增 attempt，或创建该单图的新版本记录。
-- 复用当前最新主推款输入版本、AI 选搭、拍摄剧本和对应 `ShotPlan`。
+- 复用当前最新主推款输入版本、AI 选搭、拍摄剧本、分镜预览和对应 `ShotPlan`。
 - 不影响同组其他已成功成片。
 
 ## 7. ShootScript Schema
@@ -331,7 +389,7 @@ active_result_set_id
 | `global_directing` | 是 | 整组拍摄导演设定 |
 | `styling_risks` | 是 | 库内搭配服装风险和建议 |
 | `accessory_adjustments` | 是 | 生成类鞋包饰品调整说明 |
-| `resolved_accessories` | 是 | 最终进入成片的配饰方案 |
+| `resolved_accessories` | 是 | 最终进入分镜预览和成片的配饰方案 |
 | `shots` | 是 | 6 个镜头 |
 | `user_visible_summary` | 是 | 前端可展示摘要 |
 | `warnings` | 是 | 系统警告 |
@@ -377,7 +435,7 @@ active_result_set_id
     "risk": "外套在裤装腰脚图中可能遮挡主推款腰头和门襟。",
     "affected_shots": [2, 3],
     "director_strategy": "保持外套敞开并让手部避开腰头，图 2 和图 3 强制露出裤腰。",
-    "user_visible_recommendation": "当前搭配可以继续拍摄，但腰头展示镜头需要特别避免外套遮挡。若成片仍遮挡，建议回到 AI 智能选搭重新选择更轻量上装。"
+    "user_visible_recommendation": "当前搭配可以继续拍摄，但腰头展示镜头需要特别避免外套遮挡。若预览仍遮挡，建议回到 AI 智能选搭重新选择更轻量上装。"
   }
 ]
 ```
@@ -411,7 +469,7 @@ blocking
 
 ### 7.5 resolved_accessories
 
-`resolved_accessories` 是最终配饰执行方案。`StylingPlan.generated_accessories` 只是 AI Stylist 的初始建议；如果 `ShootScript.accessory_adjustments` 对配饰做了保留、弱化、替换、取消或新增，最终成片必须以 `resolved_accessories` 为准。
+`resolved_accessories` 是最终配饰执行方案。`StylingPlan.generated_accessories` 只是 AI Stylist 的初始建议；如果 `ShootScript.accessory_adjustments` 对配饰做了保留、弱化、替换、取消或新增，分镜预览和最终成片必须以 `resolved_accessories` 为准。
 
 ```json
 [
@@ -513,7 +571,7 @@ blocking
 | `hero_selling_points` | 是 | 主推款卖点 |
 | `forbidden_occlusion_zones` | 是 | 不可遮挡区域 |
 | `composition_notes` | 是 | 构图说明 |
-| `acceptance_criteria` | 是 | 用户判断成片是否可用的验收点 |
+| `acceptance_criteria` | 是 | 用户判断预览和成片是否可用的验收点 |
 | `negative_constraints` | 是 | 当前镜头禁止项 |
 
 ### 7.6 user_visible_summary
@@ -550,7 +608,7 @@ blocking
 | 3 | 设计细节近景 | 展示卖点、结构、面料或工艺 |
 | 4 | 身位 / 动态补充 | 展示侧面、背面、走动或动态 |
 | 5 | 标准正面颜色图 | 平台友好、颜色和版型稳定展示 |
-| 6 | 备用姿态 | 只作备用参考，不进入最终成片 |
+| 6 | 备用姿态 | 只作预览参考，不进入最终成片 |
 
 ### 8.2 支持品类
 
@@ -750,10 +808,11 @@ Business Fashion、Modern Corporate Chic、Contemporary Women’s Workwear、Pro
 1. 上传主推款
 2. AI 智能选搭
 3. 生成拍摄剧本
-4. 生成成片
+4. 生成分镜预览
+5. 生成成片
 ```
 
-当前测试验证阶段，`生成拍摄剧本` 暴露为独立按钮。
+当前测试验证阶段，`生成拍摄剧本` 和 `生成分镜预览` 都暴露为独立按钮。
 
 ### 10.2 按钮规则
 
@@ -761,7 +820,8 @@ Business Fashion、Modern Corporate Chic、Contemporary Women’s Workwear、Pro
 |---|---|---|
 | `READY_FOR_STYLING` | AI 智能选搭 | 无 |
 | `STYLING_READY` | 生成拍摄剧本 | 重新选搭 |
-| `SCRIPT_READY` | 生成成片 | 重新生成剧本 |
+| `SCRIPT_READY` | 生成分镜预览 | 重新生成剧本 |
+| `PREVIEW_READY` | 生成成片 | 重新生成预览 |
 | `COMPLETED` / `FINAL_PARTIAL` | 无或继续查看 | 重新生成成片、单张重生 |
 
 运行中按钮应展示运行状态并禁用重复点击。刷新后继续显示后端记录的运行状态。
@@ -796,6 +856,7 @@ Business Fashion、Modern Corporate Chic、Contemporary Women’s Workwear、Pro
 
 ```text
 active_shoot_script_id
+active_storyboard_preview_id
 ```
 
 保留：
@@ -854,7 +915,32 @@ updated_at
 
 迁移期可保留 `styling_id` 作为冗余查询字段，但新增业务应以 `shoot_script_id` 为权威归属。
 
-### 11.4 GenerationResultSet / GenerationResultImage
+### 11.4 GenerationStoryboardPreview
+
+现有 `generation_previews` 可改名或语义迁移为 `generation_storyboard_previews`。
+
+字段：
+
+```text
+id
+task_id
+input_version_id
+styling_id
+shoot_script_id
+preview_asset_id
+status
+active_attempt_id
+locked_by
+locked_until
+run_attempts
+created_at
+updated_at
+superseded_at
+```
+
+如果短期不改表名，API 和前端文案仍应使用“分镜预览”。
+
+### 11.5 GenerationResultSet / GenerationResultImage
 
 结果集必须引用：
 
@@ -862,6 +948,7 @@ updated_at
 input_version_id
 styling_id
 shoot_script_id
+storyboard_preview_id
 ```
 
 单张结果必须引用：
@@ -882,6 +969,7 @@ run_attempts
 ```text
 POST /api/generation-tasks/{id}/style
 POST /api/generation-tasks/{id}/shoot-script
+POST /api/generation-tasks/{id}/storyboard-preview
 POST /api/generation-tasks/{id}/final-results
 POST /api/generation-result-images/{id}/regenerate
 ```
@@ -902,30 +990,41 @@ GET /api/generation-tasks/{id}/status
 
 ## 13. Image-2 输入策略
 
-### 13.1 成片单图
+### 13.1 分镜预览
 
 输入：
 
 - 数字模特参考图，固定前置 2 张，role=`model_identity`。
+- 主推款原图，按输入排序选前 3 张，role=`hero_garment`。
+- 选中搭配服装原图，每套至少 1 张，总计按预算截断，role=`styling_garment`。
+- `ShootScript` 文本化任务包。
+- `image_reference_manifest` 文本化角色清单。
+
+不输入：
+
+- 旧分镜预览。
+- 旧成片。
+
+### 13.2 成片单图
+
+输入：
+
+- 数字模特参考图，固定前置 2 张，role=`model_identity`。
+- 当前分镜预览图，role=`preview_grid`。
 - 主推款原图，role=`hero_garment`。
 - 选中搭配服装原图，role=`styling_garment`。
 - 当前镜头 `ShotPlan`。
 - `image_reference_manifest` 文本化角色清单。
 
-不输入：
-
-- 旧成片。
-
 优先级：
 
 ```text
-1. 数字模特图：人物身份事实，覆盖剧本文字和 provider 默认人物想象。
+1. 数字模特图：人物身份事实，覆盖剧本文字、分镜和 provider 默认人物想象。
 2. 主推款原图：主角商品事实。
 3. 选中搭配服装原图：配角商品事实。
 4. 当前 ShotPlan：景别、取景、姿势、走位、构图。
+5. 分镜预览图：一致性参考，不覆盖商品事实或模特身份事实。
 ```
-
-同组一致性由同一输入快照、同一 `ShootScript` 和同一模特快照保证，不依赖跨镜头锚图。
 
 ## 14. 分镜质检策略
 
@@ -951,7 +1050,7 @@ GET /api/generation-tasks/{id}/status
 
 ## 15. 历史数据原则
 
-0.1.0 生产链路只把当前对象模型作为运行依据。历史数据如需保留，应通过一次性迁移进入 `GenerationShootScript`、`GenerationResultSet` 等当前对象，或作为归档记录留存；迁移脚本不属于长期标准功能。
+0.1.0 生产链路只把当前对象模型作为运行依据。历史数据如需保留，应通过一次性迁移进入 `GenerationShootScript`、`GenerationStoryboardPreview`、`GenerationResultSet` 等当前对象，或作为归档记录留存；迁移脚本不属于长期标准功能。
 
 ## 16. 验收标准
 
@@ -973,15 +1072,21 @@ GET /api/generation-tasks/{id}/status
 - AI 导演不得替换库内服饰。
 - 生成配饰调整必须展示调整前、调整后和原因。
 
-### 16.4 成片
+### 16.4 分镜预览
+
+- 分镜预览读取当前最新成功拍摄剧本。
+- 预览失败不影响拍摄剧本。
+- 重新生成预览会使旧成片失效但保留数据。
+
+### 16.5 成片
 
 - 成片按前 5 个镜头逐张生成。
-- 同组一致性依赖同一输入快照、同一拍摄剧本和同一模特快照。
-- 商品事实来自主推款原图和选中搭配服装原图。
+- 每张成片传入当前分镜预览图作为一致性参考。
+- 分镜预览不作为商品事实来源。
 - 支持整组重新生成。
 - 支持单张重生，不影响其他成片。
 
-### 16.5 成片阶段进度与回传健壮性
+### 16.6 成片阶段进度与回传健壮性
 
 阶段进度只是 attempt 上的展示元数据（`generation_attempts.progress_json`），不是新的业务状态；`GenerationResultImage.status` 仍然只有 QUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED。
 

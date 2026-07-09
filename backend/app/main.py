@@ -32,6 +32,7 @@ from .prompt_render import (
     render_hero_product_info_line,
     render_image_reference_line,
     render_model_identity_line,
+    render_shoot_script_body,
     render_shot_context_body,
     render_user_instruction_line,
     render_user_requirement_line,
@@ -288,6 +289,7 @@ class GenerationTaskUpdateRequest(BaseModel):
     heroProductInfo: str | None = None
     aiStylingUserInstruction: str | None = None
     shootScriptUserInstruction: str | None = None
+    storyboardPreviewUserInstruction: str | None = None
     finalImageUserInstruction: str | None = None
     userRequirement: str | None = None
 
@@ -381,7 +383,7 @@ UNASSIGNED_HEAD_REFERENCE_PREFIX = "__unassigned__"
 
 ACTIVE_IMAGE_STATUSES = {"QUEUED", "SUBMITTED", "IN_QUEUE", "IN_PROGRESS", "RUNNING"}
 TERMINAL_IMAGE_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
-RUNNING_GENERATION_TASK_STATUSES = {"STYLING_RUNNING", "SCRIPT_RUNNING", "FINAL_RUNNING"}
+RUNNING_GENERATION_TASK_STATUSES = {"STYLING_RUNNING", "SCRIPT_RUNNING", "PREVIEW_RUNNING", "FINAL_RUNNING"}
 PLANNING_STATUSES = {"PLANNING"}
 REVIEW_STATUSES = {"candidate", "approved", "needs_regen", "needs_retouch", "delivered"}
 PROMPT_TAGGING_RESULT_VERSION = "prompt-configured-json-v1"
@@ -673,10 +675,11 @@ def media_asset_direct_reference_count(db: Any, asset_id: int) -> int:
         SELECT
           (SELECT COUNT(*) FROM styling_garment_images WHERE media_asset_id = ?) +
           (SELECT COUNT(*) FROM generation_task_images WHERE media_asset_id = ?) +
+          (SELECT COUNT(*) FROM generation_previews WHERE preview_asset_id = ?) +
           (SELECT COUNT(*) FROM generation_result_images_new WHERE current_asset_id = ?) +
           (SELECT COUNT(*) FROM generation_attempts WHERE output_asset_id = ?) AS count
         """,
-        (asset_id, asset_id, asset_id, asset_id),
+        (asset_id, asset_id, asset_id, asset_id, asset_id),
     ).fetchone()
     return int(row["count"] or 0)
 
@@ -1282,14 +1285,17 @@ def generation_task_delete_impact(db: Any, task_ids: list[int]) -> dict[str, Any
           (SELECT COUNT(*) FROM generation_stylings WHERE task_id IN ({placeholders})) AS styling_count,
           (SELECT COUNT(*) FROM generation_shoot_scripts WHERE task_id IN ({placeholders})) AS shoot_script_count,
           (SELECT COUNT(*) FROM generation_shot_plans WHERE task_id IN ({placeholders})) AS shot_plan_count,
+          (SELECT COUNT(*) FROM generation_previews WHERE task_id IN ({placeholders})) AS preview_count,
           (SELECT COUNT(*) FROM generation_result_sets WHERE task_id IN ({placeholders})) AS result_set_count,
           (SELECT COUNT(*) FROM generation_result_images_new gri JOIN generation_result_sets grs ON grs.id = gri.result_set_id WHERE grs.task_id IN ({placeholders})) AS result_image_count
         """,
-        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
+        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
     ).fetchone()
     asset_rows = db.execute(
         f"""
         SELECT media_asset_id AS asset_id FROM generation_task_images WHERE task_id IN ({placeholders})
+        UNION
+        SELECT preview_asset_id AS asset_id FROM generation_previews WHERE task_id IN ({placeholders}) AND preview_asset_id IS NOT NULL
         UNION
         SELECT gri.current_asset_id AS asset_id FROM generation_result_images_new gri
         JOIN generation_result_sets grs ON grs.id = gri.result_set_id
@@ -1301,6 +1307,9 @@ def generation_task_delete_impact(db: Any, task_ids: list[int]) -> dict[str, Any
              OR (owner_type = 'generation_shoot_script' AND owner_id IN (
                   SELECT id FROM generation_shoot_scripts WHERE task_id IN ({placeholders})
                 ))
+             OR (owner_type = 'generation_preview' AND owner_id IN (
+                  SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
+                ))
              OR (owner_type = 'generation_result_image' AND owner_id IN (
                   SELECT gri.id FROM generation_result_images_new gri
                   JOIN generation_result_sets grs ON grs.id = gri.result_set_id
@@ -1308,7 +1317,7 @@ def generation_task_delete_impact(db: Any, task_ids: list[int]) -> dict[str, Any
                 ))
         )
         """,
-        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
+        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
     ).fetchall()
     asset_ids = list(dict.fromkeys(int(asset["asset_id"]) for asset in asset_rows if asset["asset_id"] is not None))
     media_rows = media_asset_rows_for_ids(db, asset_ids)
@@ -1320,6 +1329,7 @@ def generation_task_delete_impact(db: Any, task_ids: list[int]) -> dict[str, Any
         "stylingCount": int(row["styling_count"] or 0),
         "shootScriptCount": int(row["shoot_script_count"] or 0),
         "shotPlanCount": int(row["shot_plan_count"] or 0),
+        "previewCount": int(row["preview_count"] or 0),
         "resultSetCount": int(row["result_set_count"] or 0),
         "resultImageCount": int(row["result_image_count"] or 0),
         "mediaAssetCount": len(media_rows),
@@ -1347,6 +1357,7 @@ def styling_garment_delete_impact(db: Any, garment_ids: list[int]) -> dict[str, 
         "inputVersionCount": 0,
         "stylingCount": 0,
         "shotPlanCount": 0,
+        "previewCount": 0,
         "resultSetCount": 0,
         "resultImageCount": 0,
         "mediaAssetCount": 0,
@@ -1403,6 +1414,8 @@ def purge_styling_garment(db: Any, garment_id: int, code: str) -> tuple[list[int
             f"""
             SELECT media_asset_id AS asset_id FROM generation_task_images WHERE task_id IN ({placeholders})
             UNION
+            SELECT preview_asset_id AS asset_id FROM generation_previews WHERE task_id IN ({placeholders}) AND preview_asset_id IS NOT NULL
+            UNION
             SELECT gri.current_asset_id AS asset_id FROM generation_result_images_new gri
             JOIN generation_result_sets grs ON grs.id = gri.result_set_id
             WHERE grs.task_id IN ({placeholders}) AND gri.current_asset_id IS NOT NULL
@@ -1410,6 +1423,9 @@ def purge_styling_garment(db: Any, garment_id: int, code: str) -> tuple[list[int
             SELECT ga.output_asset_id AS asset_id FROM generation_attempts ga
             WHERE ga.output_asset_id IS NOT NULL AND (
                  (ga.owner_type = 'generation_styling' AND ga.owner_id IN ({placeholders}))
+                 OR (ga.owner_type = 'generation_preview' AND ga.owner_id IN (
+                      SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
+                    ))
                  OR (ga.owner_type = 'generation_result_image' AND ga.owner_id IN (
                       SELECT gri.id FROM generation_result_images_new gri
                       JOIN generation_result_sets grs ON grs.id = gri.result_set_id
@@ -1418,21 +1434,24 @@ def purge_styling_garment(db: Any, garment_id: int, code: str) -> tuple[list[int
             )
             """,
             (
-                *dependent_task_ids, *dependent_task_ids,
-                *dependent_task_ids, *dependent_task_ids,
+                *dependent_task_ids, *dependent_task_ids, *dependent_task_ids,
+                *dependent_task_ids, *dependent_task_ids, *dependent_task_ids,
             ),
         ).fetchall()
         dependent_asset_ids = [int(asset["asset_id"]) for asset in dependent_assets]
         db.execute(
             f"""
             DELETE FROM generation_attempts
-            WHERE (owner_type = 'generation_result_image' AND owner_id IN (
+            WHERE (owner_type = 'generation_preview' AND owner_id IN (
+                    SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
+                  ))
+               OR (owner_type = 'generation_result_image' AND owner_id IN (
                     SELECT gri.id FROM generation_result_images_new gri
                     JOIN generation_result_sets grs ON grs.id = gri.result_set_id
                     WHERE grs.task_id IN ({placeholders})
                   ))
             """,
-            (*dependent_task_ids,),
+            (*dependent_task_ids, *dependent_task_ids),
         )
         db.execute(
             f"DELETE FROM generation_attempts WHERE owner_type = 'generation_styling' AND owner_id IN ({placeholders})",
@@ -1630,6 +1649,7 @@ def cancel_generation_task(task_id: int) -> dict[str, Any]:
         if row["status"] not in RUNNING_GENERATION_TASK_STATUSES:
             raise HTTPException(status_code=409, detail="只有生成中的任务可以取消")
 
+        cancelled_preview_count = 0
         cancelled_image_count = 0
         if row["status"] == "SCRIPT_RUNNING":
             db.execute(
@@ -1640,6 +1660,16 @@ def cancel_generation_task(task_id: int) -> dict[str, Any]:
                 """,
                 (timestamp, task_id),
             )
+        elif row["status"] == "PREVIEW_RUNNING":
+            preview_cursor = db.execute(
+                """
+                UPDATE generation_previews
+                SET status = 'CANCELLED', locked_by = NULL, locked_until = NULL, updated_at = ?
+                WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING')
+                """,
+                (timestamp, task_id),
+            )
+            cancelled_preview_count = int(preview_cursor.rowcount or 0)
         elif row["status"] == "FINAL_RUNNING" and row["active_result_set_id"]:
             image_cursor = db.execute(
                 """
@@ -1681,6 +1711,7 @@ def cancel_generation_task(task_id: int) -> dict[str, Any]:
             "cancelled",
             {
                 "previousStatus": row["status"],
+                "cancelledPreviewCount": cancelled_preview_count,
                 "cancelledImageCount": cancelled_image_count,
             },
         )
@@ -1730,6 +1761,7 @@ def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -
     instruction_fields = {
         "aiStylingUserInstruction": "ai_styling_user_instruction_text",
         "shootScriptUserInstruction": "shoot_script_user_instruction_text",
+        "storyboardPreviewUserInstruction": "storyboard_preview_user_instruction_text",
         "finalImageUserInstruction": "final_image_user_instruction_text",
     }
     if (
@@ -1799,6 +1831,14 @@ def mark_generation_task_input_changed(db: Any, task_id: int, timestamp: str, re
         """,
         (timestamp, timestamp, task_id),
     )
+    db.execute(
+        """
+        UPDATE generation_previews
+        SET status = 'SUPERSEDED', updated_at = ?
+        WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
+        """,
+        (timestamp, task_id),
+    )
     supersede_generation_result_sets(db, task_id, timestamp)
     db.execute(
         """
@@ -1807,6 +1847,8 @@ def mark_generation_task_input_changed(db: Any, task_id: int, timestamp: str, re
             current_input_version_id = NULL,
             active_styling_id = NULL,
             active_shoot_script_id = NULL,
+            active_preview_id = NULL,
+            active_storyboard_preview_id = NULL,
             active_result_set_id = NULL,
             auto_run_target = NULL,
             auto_run_requested_at = NULL,
@@ -1837,6 +1879,14 @@ def reset_generation_task_for_rerun(db: Any, task_id: int, timestamp: str) -> No
         """,
         (timestamp, timestamp, task_id),
     )
+    db.execute(
+        """
+        UPDATE generation_previews
+        SET status = 'SUPERSEDED', updated_at = ?
+        WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
+        """,
+        (timestamp, task_id),
+    )
     supersede_generation_result_sets(db, task_id, timestamp)
     db.execute(
         """
@@ -1844,6 +1894,8 @@ def reset_generation_task_for_rerun(db: Any, task_id: int, timestamp: str) -> No
         SET status = 'READY_FOR_STYLING',
             active_styling_id = NULL,
             active_shoot_script_id = NULL,
+            active_preview_id = NULL,
+            active_storyboard_preview_id = NULL,
             active_result_set_id = NULL,
             auto_run_target = NULL,
             auto_run_requested_at = NULL,
@@ -1859,6 +1911,7 @@ def generation_task_stage_instruction_column(stage: str) -> str | None:
     return {
         "ai_styling": "ai_styling_user_instruction_text",
         "shoot_script": "shoot_script_user_instruction_text",
+        "storyboard_preview": "storyboard_preview_user_instruction_text",
         "final_image": "final_image_user_instruction_text",
     }.get(stage)
 
@@ -1889,6 +1942,9 @@ def cancel_running_task_attempts(db: Any, task_id: int, timestamp: str) -> None:
             OR (owner_type = 'generation_shoot_script' AND owner_id IN (
               SELECT id FROM generation_shoot_scripts WHERE task_id = ?
             ))
+            OR (owner_type = 'generation_preview' AND owner_id IN (
+              SELECT id FROM generation_previews WHERE task_id = ?
+            ))
             OR (owner_type = 'generation_result_image' AND owner_id IN (
               SELECT gri.id
               FROM generation_result_images_new gri
@@ -1897,7 +1953,7 @@ def cancel_running_task_attempts(db: Any, task_id: int, timestamp: str) -> None:
             ))
           )
         """,
-        (timestamp, timestamp, task_id, task_id, task_id),
+        (timestamp, timestamp, task_id, task_id, task_id, task_id),
     )
 
 
@@ -1985,6 +2041,8 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[di
         f"""
         SELECT media_asset_id AS asset_id FROM generation_task_images WHERE task_id IN ({placeholders})
         UNION
+        SELECT preview_asset_id AS asset_id FROM generation_previews WHERE task_id IN ({placeholders}) AND preview_asset_id IS NOT NULL
+        UNION
         SELECT gri.current_asset_id AS asset_id FROM generation_result_images_new gri
         JOIN generation_result_sets grs ON grs.id = gri.result_set_id
         WHERE grs.task_id IN ({placeholders}) AND gri.current_asset_id IS NOT NULL
@@ -1995,6 +2053,9 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[di
              OR (owner_type = 'generation_shoot_script' AND owner_id IN (
                   SELECT id FROM generation_shoot_scripts WHERE task_id IN ({placeholders})
                 ))
+             OR (owner_type = 'generation_preview' AND owner_id IN (
+                  SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
+                ))
              OR (owner_type = 'generation_result_image' AND owner_id IN (
                   SELECT gri.id FROM generation_result_images_new gri
                   JOIN generation_result_sets grs ON grs.id = gri.result_set_id
@@ -2002,7 +2063,7 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[di
                 ))
         )
         """,
-        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
+        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
     ).fetchall()
     asset_ids = list(dict.fromkeys(int(row["asset_id"]) for row in asset_rows if row["asset_id"] is not None))
     media_rows = media_asset_rows_for_ids(db, asset_ids)
@@ -2015,13 +2076,16 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[di
            OR (owner_type = 'generation_shoot_script' AND owner_id IN (
                 SELECT id FROM generation_shoot_scripts WHERE task_id IN ({placeholders})
               ))
+           OR (owner_type = 'generation_preview' AND owner_id IN (
+                SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
+              ))
            OR (owner_type = 'generation_result_image' AND owner_id IN (
                 SELECT gri.id FROM generation_result_images_new gri
                 JOIN generation_result_sets grs ON grs.id = gri.result_set_id
                 WHERE grs.task_id IN ({placeholders})
               ))
         """,
-        (*task_ids, *task_ids, *task_ids),
+        (*task_ids, *task_ids, *task_ids, *task_ids),
     )
     rows = get_generation_task_rows_for_mutation(db, task_ids)
     db.execute(f"DELETE FROM generation_tasks WHERE id IN ({placeholders})", task_ids)
@@ -2227,6 +2291,7 @@ async def run_select_generation_styling(
         "READY_FOR_STYLING",
         "STYLING_READY",
         "SCRIPT_READY",
+        "PREVIEW_READY",
         "COMPLETED",
         "FINAL_PARTIAL",
         "FAILED",
@@ -2335,6 +2400,14 @@ async def run_select_generation_styling(
             """,
             (timestamp, timestamp, task_id),
         )
+        db.execute(
+            """
+            UPDATE generation_previews
+            SET status = 'SUPERSEDED', updated_at = ?
+            WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
+            """,
+            (timestamp, task_id),
+        )
         supersede_generation_result_sets(db, task_id, timestamp)
         db.execute(
             """
@@ -2343,6 +2416,8 @@ async def run_select_generation_styling(
                 current_input_version_id = ?,
                 active_styling_id = ?,
                 active_shoot_script_id = NULL,
+                active_storyboard_preview_id = NULL,
+                active_preview_id = NULL,
                 active_result_set_id = NULL,
                 updated_at = ?
             WHERE id = ?
@@ -2369,6 +2444,7 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
     if not styling_id or task["status"] not in {
         "STYLING_READY",
         "SCRIPT_READY",
+        "PREVIEW_READY",
         "COMPLETED",
         "FINAL_PARTIAL",
         "FAILED",
@@ -2388,7 +2464,7 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
             SET status = 'SCRIPT_RUNNING', updated_at = ?
             WHERE id = ?
               AND active_styling_id = ?
-              AND status IN ('STYLING_READY', 'SCRIPT_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED')
+              AND status IN ('STYLING_READY', 'SCRIPT_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED')
             """,
             (timestamp, task_id, styling_id),
         )
@@ -2561,6 +2637,14 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
                 """,
                 (timestamp, timestamp, task_id, shoot_script_id),
             )
+            db.execute(
+                """
+                UPDATE generation_previews
+                SET status = 'SUPERSEDED', updated_at = ?
+                WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
+                """,
+                (timestamp, task_id),
+            )
             supersede_generation_result_sets(db, task_id, timestamp)
             for plan in shot_plans:
                 db.execute(
@@ -2586,6 +2670,8 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
                 SET status = 'SCRIPT_READY',
                     current_input_version_id = ?,
                     active_shoot_script_id = ?,
+                    active_storyboard_preview_id = NULL,
+                    active_preview_id = NULL,
                     active_result_set_id = NULL,
                     updated_at = ?
                 WHERE id = ?
@@ -2598,6 +2684,163 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
         raise HTTPException(status_code=409, detail="拍摄剧本生成状态已变更，请刷新后重试")
     finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=shoot_script)
     return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
+
+
+@app.post("/api/generation-tasks/{task_id}/preview")
+async def create_generation_preview(task_id: int, request: Request, payload: GenerationStageInstructionRequest | None = None) -> dict[str, Any]:
+    return await run_create_generation_preview(
+        task_id,
+        include_debug=admin_debug_for_request(request),
+        trigger="manual_step",
+        user_instruction=payload.userInstruction if payload else None,
+    )
+
+
+async def run_create_generation_preview(task_id: int, include_debug: bool = False, trigger: str = "manual_step", user_instruction: str | None = None) -> dict[str, Any]:
+    task = get_generation_task_row(task_id)
+    styling_id = task["active_styling_id"]
+    shoot_script_id = task["active_shoot_script_id"] if "active_shoot_script_id" in task.keys() else None
+    if not styling_id or not shoot_script_id or (
+        task["status"] not in {"SCRIPT_READY", "PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
+        and not (task["status"] == "FAILED" and not task["active_storyboard_preview_id"])
+    ):
+        raise HTTPException(status_code=409, detail="请先生成拍摄剧本")
+    input_version_id = create_generation_input_version(task_id, build_hero_product_info_context(task))
+    with get_db() as db:
+        db.execute("UPDATE generation_tasks SET status = 'PREVIEW_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
+    shot_plans = get_task_shot_plans_by_script(int(shoot_script_id))
+    timestamp = now_iso()
+    effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "storyboard_preview")
+    user_instruction_context = build_stage_user_instruction_context("storyboard_preview", effective_user_instruction)
+    with get_db() as db:
+        if user_instruction is not None:
+            persist_generation_task_stage_instruction(db, task_id, "storyboard_preview", effective_user_instruction, timestamp)
+        cursor = db.execute(
+            """
+            INSERT INTO generation_previews (task_id, styling_id, shoot_script_id, input_version_id, user_instruction_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'RUNNING', ?, ?)
+            """,
+            (task_id, styling_id, shoot_script_id, input_version_id, dumps(user_instruction_context), timestamp, timestamp),
+        )
+        preview_id = int(cursor.lastrowid)
+    attempt_id = create_attempt("generation_preview", preview_id, "image-2")
+    lease_generation_preview(preview_id, attempt_id)
+    schedule_background_generation(
+        run_preview_generation(task_id, int(styling_id), int(shoot_script_id), shot_plans, preview_id, attempt_id, trigger=trigger),
+        job_key=preview_job_key(preview_id),
+    )
+    return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
+
+
+async def run_preview_generation(
+    task_id: int,
+    styling_id: int,
+    shoot_script_id: int,
+    shot_plans: list[Any],
+    preview_id: int,
+    attempt_id: int,
+    trigger: str = "manual_step",
+) -> None:
+    try:
+        task_package = build_new_preview_task_package(task_id, styling_id, shoot_script_id, shot_plans, preview_id=preview_id)
+        if not task_package.get("inputVersionId"):
+            raise RuntimeError("分镜预览缺少输入版本快照")
+        task_package["invocation"] = {"mode": trigger, "target": "storyboard_preview"}
+        if not attempt_has_provider_request_id(attempt_id):
+            update_attempt_request_snapshot(attempt_id, task_package)
+        asset_id, provider_response = await generate_image_asset(
+            task_package,
+            join_key("generation-tasks", str(task_id), "preview", f"preview-{preview_id}.png"),
+            attempt_id=attempt_id,
+        )
+    except Exception as exc:
+        provider_response = getattr(exc, "provider_response", None)
+        with get_db() as db:
+            current = db.execute(
+                """
+                SELECT gp.status AS preview_status, gt.status AS task_status
+                FROM generation_previews gp
+                JOIN generation_tasks gt ON gt.id = gp.task_id
+                WHERE gp.id = ?
+                """,
+                (preview_id,),
+            ).fetchone()
+            if current and (current["preview_status"] == "CANCELLED" or current["task_status"] == "CANCELLED"):
+                finish_attempt(attempt_id, "CANCELLED", response_snapshot=provider_response, error_message=str(exc))
+                persist_attempt_provider_request_id(attempt_id, provider_response)
+                return
+        finish_attempt(attempt_id, "FAILED", response_snapshot=provider_response, error_message=str(exc), error_code=classify_attempt_error(exc))
+        persist_attempt_provider_request_id(attempt_id, provider_response)
+        with get_db() as db:
+            timestamp = now_iso()
+            db.execute(
+                """
+                UPDATE generation_previews
+                SET status = 'FAILED', active_attempt_id = ?, locked_by = NULL, locked_until = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (attempt_id, timestamp, preview_id),
+            )
+            db.execute("UPDATE generation_tasks SET status = 'FAILED', updated_at = ? WHERE id = ?", (timestamp, task_id))
+            db.execute(
+                """
+                UPDATE generation_tasks
+                SET auto_run_target = NULL, auto_run_requested_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, task_id),
+            )
+        return
+    with get_db() as db:
+        current = db.execute(
+            """
+            SELECT gp.status AS preview_status, gt.status AS task_status
+            FROM generation_previews gp
+            JOIN generation_tasks gt ON gt.id = gp.task_id
+            WHERE gp.id = ?
+            """,
+            (preview_id,),
+        ).fetchone()
+        if current and (current["preview_status"] == "CANCELLED" or current["task_status"] == "CANCELLED"):
+            finish_attempt(attempt_id, "CANCELLED", response_snapshot=provider_response, output_asset_id=asset_id)
+            persist_attempt_provider_request_id(attempt_id, provider_response)
+            return
+    finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=provider_response, output_asset_id=asset_id)
+    persist_attempt_provider_request_id(attempt_id, provider_response)
+    with get_db() as db:
+        timestamp = now_iso()
+        db.execute(
+            """
+            UPDATE generation_previews
+            SET status = 'SUCCEEDED', preview_asset_id = ?, active_attempt_id = ?,
+                locked_by = NULL, locked_until = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (asset_id, attempt_id, timestamp, preview_id),
+        )
+        db.execute(
+            """
+            UPDATE generation_previews
+            SET status = 'SUPERSEDED', updated_at = ?
+            WHERE task_id = ? AND id <> ? AND status = 'SUCCEEDED'
+            """,
+            (timestamp, task_id, preview_id),
+        )
+        supersede_generation_result_sets(db, task_id, timestamp)
+        db.execute(
+            """
+            UPDATE generation_tasks
+            SET status = 'PREVIEW_READY',
+                active_preview_id = ?,
+                active_storyboard_preview_id = ?,
+                current_input_version_id = ?,
+                active_result_set_id = NULL,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (preview_id, preview_id, task_package.get("inputVersionId"), timestamp, task_id),
+        )
+    maybe_schedule_auto_run_for_task(task_id)
 
 
 @app.post("/api/generation-tasks/{task_id}/generate-final")
@@ -2710,30 +2953,33 @@ async def run_generate_final_images(
 ) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     if (
-        task["status"] not in {"SCRIPT_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
+        task["status"] not in {"PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
+        or not task["active_storyboard_preview_id"]
         or not task["active_styling_id"]
         or not task["active_shoot_script_id"]
     ):
-        raise HTTPException(status_code=409, detail="请先生成拍摄剧本")
+        raise HTTPException(status_code=409, detail="请先生成分镜预览")
+    preview_id = int(task["active_storyboard_preview_id"])
     styling_id = int(task["active_styling_id"])
     shoot_script_id = int(task["active_shoot_script_id"])
     with get_db() as db:
-        script_row = db.execute(
-            "SELECT input_version_id FROM generation_shoot_scripts WHERE id = ? AND task_id = ?",
-            (shoot_script_id, task_id),
+        preview_row = db.execute(
+            "SELECT input_version_id FROM generation_previews WHERE id = ? AND task_id = ?",
+            (preview_id, task_id),
         ).fetchone()
-    if not script_row or not script_row["input_version_id"]:
-        raise HTTPException(status_code=409, detail="请先生成拍摄剧本")
-    script_input_version_id = int(script_row["input_version_id"])
+    if not preview_row or not preview_row["input_version_id"]:
+        raise HTTPException(status_code=409, detail="请先生成分镜预览")
+    preview_input_version_id = int(preview_row["input_version_id"])
     effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "final_image")
     user_instruction_context = build_stage_user_instruction_context("final_image", effective_user_instruction)
     if continue_existing and task["active_result_set_id"]:
         image_ids = continue_active_final_result_set(
             task_id,
             int(task["active_result_set_id"]),
-            script_input_version_id,
+            preview_input_version_id,
             styling_id,
             shoot_script_id,
+            preview_id,
             user_instruction_context,
         )
         if image_ids is not None:
@@ -2751,10 +2997,10 @@ async def run_generate_final_images(
         db.execute("UPDATE generation_tasks SET status = 'FINAL_RUNNING', updated_at = ? WHERE id = ?", (timestamp, task_id))
         cursor = db.execute(
             """
-            INSERT INTO generation_result_sets (task_id, input_version_id, styling_id, shoot_script_id, user_instruction_json, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'RUNNING', ?, ?)
+            INSERT INTO generation_result_sets (task_id, input_version_id, styling_id, shoot_script_id, preview_id, user_instruction_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'RUNNING', ?, ?)
             """,
-            (task_id, input_version_id, styling_id, shoot_script_id, dumps(user_instruction_context), timestamp, timestamp),
+            (task_id, input_version_id, styling_id, shoot_script_id, preview_id, dumps(user_instruction_context), timestamp, timestamp),
         )
         result_set_id = int(cursor.lastrowid)
         supersede_generation_result_sets(db, task_id, timestamp, keep_result_set_id=result_set_id)
@@ -2790,6 +3036,7 @@ def continue_active_final_result_set(
     input_version_id: int,
     styling_id: int,
     shoot_script_id: int,
+    preview_id: int,
     user_instruction_context: dict[str, Any] | None = None,
 ) -> list[int] | None:
     timestamp = now_iso()
@@ -2807,6 +3054,7 @@ def continue_active_final_result_set(
             int(result_set["input_version_id"]) != input_version_id
             or int(result_set["styling_id"]) != styling_id
             or int(result_set["shoot_script_id"]) != shoot_script_id
+            or int(result_set["preview_id"]) != preview_id
         ):
             return None
         existing_rows = db.execute(
@@ -5835,6 +6083,40 @@ def compress_selected_material_for_prompt(item: dict[str, Any]) -> dict[str, Any
     return styling_library_tag_card_for_prompt(item)
 
 
+def shoot_script_result_for_prompt(shoot_script: dict[str, Any]) -> dict[str, Any]:
+    script = shoot_script if isinstance(shoot_script, dict) else {}
+    shots = script.get("shots") if isinstance(script.get("shots"), list) else []
+    return {
+        "schema_version": "shoot-script-storyboard-context-v1",
+        "global_directing": strip_internal_prompt_fields(script.get("global_directing") if isinstance(script.get("global_directing"), dict) else {}),
+        "styling_risks": strip_internal_prompt_fields(script.get("styling_risks") if isinstance(script.get("styling_risks"), list) else []),
+        "resolved_accessories": strip_internal_prompt_fields(script.get("resolved_accessories") if isinstance(script.get("resolved_accessories"), list) else []),
+        "shots": [
+            strip_internal_prompt_fields({
+                "shot_index": shot.get("shot_index"),
+                "shot_role": shot.get("shot_role"),
+                "shot_role_label": shot.get("shot_role_label"),
+                "framing": shot.get("framing"),
+                "crop_range": shot.get("crop_range"),
+                "model_scale": shot.get("model_scale"),
+                "camera_angle": shot.get("camera_angle"),
+                "body_position": shot.get("body_position"),
+                "pose": shot.get("pose"),
+                "movement": shot.get("movement"),
+                "main_focus": shot.get("main_focus"),
+                "visible_garments": shot.get("visible_garments"),
+                "forbidden_occlusion_zones": shot.get("forbidden_occlusion_zones"),
+                "composition_notes": shot.get("composition_notes"),
+                "accessory_instructions": shot.get("accessory_instructions"),
+                "negative_constraints": shot.get("negative_constraints"),
+            })
+            for shot in shots[:6]
+            if isinstance(shot, dict)
+        ],
+        "user_visible_summary": strip_internal_prompt_fields(script.get("user_visible_summary") if isinstance(script.get("user_visible_summary"), dict) else {}),
+    }
+
+
 def current_shot_context_for_prompt(shot_index: int, shot_plan: dict[str, Any], styling_plan: dict[str, Any], shoot_script: dict[str, Any]) -> dict[str, Any]:
     script = shoot_script if isinstance(shoot_script, dict) else {}
     shot = strip_internal_prompt_fields(shot_plan if isinstance(shot_plan, dict) else {})
@@ -5847,6 +6129,7 @@ def current_shot_context_for_prompt(shot_index: int, shot_plan: dict[str, Any], 
             accessories.append(strip_internal_prompt_fields(item))
     return {
         "schema_version": "final-image-shot-context-v1",
+        "preview_grid_cell": shot_index,
         "styling": {
             "hero_understanding": styling_result_for_prompt(styling_plan).get("hero_understanding") or {},
             "selected_outfit": styling_result_for_prompt(styling_plan).get("selected_outfit") or {},
@@ -6510,22 +6793,102 @@ def append_image_reference_manifest(prompt: str, image_inputs: list[dict[str, An
     order_line = render_image_reference_line(image_inputs)
     if not order_line:
         return prompt
+    roles = {str((item or {}).get("role") or "") for item in (image_inputs or [])}
     constraint = (
         "模特身份参考图是唯一人物身份事实源（非风格参考），主推款与搭配服装参考图是商品事实源；"
         "请严格保持图中人物身份与商品事实，文字不得覆盖——"
         "不得改变模特脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质，不得改款、换色或替换商品。"
     )
+    if "preview_grid" in roles:
+        constraint += "分镜预览图只作构图、姿势与光影参考，不是身份或商品事实来源。"
     return prompt.rstrip() + "\n\n【输入参考图】\n" + f"参考图顺序：{order_line}。\n" + constraint + "\n"
+
+
+def build_new_preview_task_package(
+    task_id: int,
+    styling_id: int,
+    shoot_script_id: int,
+    shot_plans: list[dict[str, Any]],
+    preview_id: int | None = None,
+) -> dict[str, Any]:
+    styling_plan = get_styling_plan_by_id(styling_id)
+    shoot_script = get_shoot_script_json_by_id(shoot_script_id)
+    with get_db() as db:
+        if preview_id is not None:
+            preview_row = db.execute(
+                """
+                SELECT input_version_id, user_instruction_json
+                FROM generation_previews
+                WHERE id = ? AND task_id = ? AND styling_id = ? AND shoot_script_id = ?
+                """,
+                (preview_id, task_id, styling_id, shoot_script_id),
+            ).fetchone()
+        else:
+            preview_row = db.execute(
+                """
+                SELECT input_version_id, user_instruction_json
+                FROM generation_previews
+                WHERE task_id = ? AND styling_id = ? AND shoot_script_id = ?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (task_id, styling_id, shoot_script_id),
+            ).fetchone()
+        input_version_id = int(preview_row["input_version_id"]) if preview_row and preview_row["input_version_id"] else None
+        if input_version_id is None:
+            styling_row = db.execute("SELECT input_version_id FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
+            input_version_id = int(styling_row["input_version_id"]) if styling_row and styling_row["input_version_id"] else None
+        input_row = db.execute(
+            "SELECT * FROM generation_task_input_versions WHERE id = ?",
+            (input_version_id,),
+        ).fetchone() if input_version_id is not None else None
+    image_inputs = build_new_image_inputs(task_id, styling_id, include_preview=False, input_version_id=input_version_id)
+    hero_product_info = loads(row_value(input_row, "hero_product_info_json"), build_hero_product_info_context({}))
+    storyboard_preview_user_instruction = loads(row_value(preview_row, "user_instruction_json"), build_stage_user_instruction_context("storyboard_preview"))
+    return {
+        "generation": {"stage": "preview_grid"},
+        "prompt": build_new_preview_prompt(shot_plans, styling_plan, shoot_script, image_inputs, hero_product_info, storyboard_preview_user_instruction),
+        "imageInputs": image_inputs,
+        "inputVersionId": input_version_id,
+        "heroProductInfo": hero_product_info,
+        "storyboardPreviewUserInstruction": storyboard_preview_user_instruction,
+        "stylingPlan": styling_plan,
+        "shootScript": shoot_script,
+        "shotPlans": shot_plans,
+    }
+
+
+def build_new_preview_prompt(
+    shot_plans: list[dict[str, Any]],
+    styling_plan: dict[str, Any],
+    shoot_script: dict[str, Any],
+    image_inputs: list[dict[str, Any]] | None = None,
+    hero_product_info: dict[str, Any] | None = None,
+    storyboard_preview_user_instruction: dict[str, Any] | None = None,
+) -> str:
+    # P1 渲染层：拍摄剧本/商品信息/用户要求以自然语言文本填充模板占位符，
+    # 不再 dumps 结构化上下文（去 schema_version / priority_policy 等治理元数据噪音）。
+    # image_reference_manifest 的自然语言化属 P2，暂保持结构化追加。
+    prompt = render_prompt_template(
+        "assembly.storyboard_preview",
+        {
+            "shoot_script_result": render_shoot_script_body(shoot_script_result_for_prompt(shoot_script)),
+            "image_reference_manifest": render_image_reference_line(image_inputs or []),
+            "hero_product_info": render_hero_product_info_line(hero_product_info or {}),
+            "storyboard_preview_user_instruction": render_user_instruction_line(storyboard_preview_user_instruction or {}),
+        },
+    )
+    return append_image_reference_manifest(prompt, image_inputs or [])
 
 
 def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str, Any]:
     with get_db() as db:
         row = db.execute(
             """
-            SELECT gri.*, gsp.plan_json, grs.styling_id, grs.shoot_script_id,
+            SELECT gri.*, gsp.plan_json, gp.preview_asset_id, grs.styling_id, grs.shoot_script_id,
                    grs.input_version_id, grs.user_instruction_json AS result_set_user_instruction_json
             FROM generation_result_images_new gri
             JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+            JOIN generation_previews gp ON gp.id = grs.preview_id
             JOIN generation_shot_plans gsp ON gsp.id = gri.shot_plan_id
             WHERE gri.id = ?
             """,
@@ -6537,6 +6900,8 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
     image_inputs = build_new_image_inputs(
         task_id,
         int(row["styling_id"]),
+        include_preview=True,
+        preview_asset_id=row["preview_asset_id"],
         input_version_id=int(row["input_version_id"]),
     )
     with get_db() as db:
@@ -6602,6 +6967,8 @@ def get_shoot_script_json_by_id(shoot_script_id: int) -> dict[str, Any]:
 def build_new_image_inputs(
     task_id: int,
     styling_id: int,
+    include_preview: bool,
+    preview_asset_id: int | None = None,
     input_version_id: int | None = None,
 ) -> list[dict[str, Any]]:
     inputs: list[dict[str, Any]] = []
@@ -6620,6 +6987,10 @@ def build_new_image_inputs(
     if not model_inputs:
         model_inputs = get_default_model_image_inputs(limit=2)
     inputs.extend({**item, "role": "model_identity"} for item in model_inputs[:2] if isinstance(item, dict))
+    if include_preview and preview_asset_id:
+        asset = get_media_asset_by_id(preview_asset_id)
+        if asset:
+            inputs.append(image_input_from_asset(asset, "preview_grid"))
     hero_snapshot = loads(input_version["image_snapshot_json"], []) if input_version else []
     inputs.extend(image_input_from_asset(item.get("asset"), "hero_garment") for item in hero_snapshot[:3])
     selected_materials = loads(styling["selected_material_snapshot_json"], []) if styling else []
@@ -6802,12 +7173,14 @@ def sample_prompt_runtime() -> dict[str, Any]:
         "hero_product_info": dumps({"info": "夏季主推裤装，重点展示腰头和裤脚。"}),
         "ai_styling_user_instruction": dumps({"stage": "ai_styling", "instruction": "不要厚重外套，优先轻盈通勤。"}),
         "shoot_script_user_instruction": dumps({"stage": "shoot_script", "instruction": "腰线相关镜头要更明确。"}),
+        "storyboard_preview_user_instruction": dumps({"stage": "storyboard_preview", "instruction": "分镜姿态更舒展。"}),
         "final_image_user_instruction": dumps({"stage": "final_image", "instruction": "成片整体更干净，减少配饰存在感。"}),
         "user_requirement": dumps({"combined_requirement": "重点展示腰线，避免厚重外套。", "priority_policy": {"conflict_handling": "无法满足时说明原因。"}}),
         "styling_result": dumps({"hero_understanding": {"category": "裤装"}, "selected_material_codes": ["LOOK-A"], "reason_summary": "轻量上装服务主推裤装。"}),
         "model_identity_context": dumps({"identity_contract": {"model_id": "Face-01", "must_preserve": ["same face", "same hair"]}}),
         "image_reference_manifest": dumps({"references": [{"reference_index": 1, "role": "model_identity"}, {"reference_index": 2, "role": "hero_garment"}]}),
-        "current_shot_context": dumps({"current_shot": {"shot_role": "hero_full_body", "main_focus": "主推款整体比例"}, "styling": {"selected_material_codes": ["LOOK-A"]}}),
+        "shoot_script_result": dumps({"global_directing": {"background": "浅灰棚拍"}, "shots": [{"shot_index": 1, "shot_role": "hero_full_body", "main_focus": "主推款整体比例"}]}),
+        "current_shot_context": dumps({"preview_grid_cell": 1, "current_shot": {"shot_role": "hero_full_body", "main_focus": "主推款整体比例"}, "styling": {"selected_material_codes": ["LOOK-A"]}}),
     }
 
 
@@ -6819,16 +7192,22 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.hero_product_info", "scope": "runtime", "description": "跟随主推款输入版本冻结的商品信息和业务事实补充"},
         {"name": "runtime.ai_styling_user_instruction", "scope": "runtime", "description": "AI 智能选搭本次执行的用户介入要求"},
         {"name": "runtime.shoot_script_user_instruction", "scope": "runtime", "description": "拍摄剧本本次执行的用户介入要求"},
+        {"name": "runtime.storyboard_preview_user_instruction", "scope": "runtime", "description": "分镜预览本次执行的用户介入要求"},
         {"name": "runtime.final_image_user_instruction", "scope": "runtime", "description": "最终成片或单张重生本次执行的用户介入要求"},
         {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭导演上下文，使用搭配服装 code 标识"},
         {"name": "runtime.model_identity_context", "scope": "runtime", "description": "AI Director 使用的数字模特身份契约和参考图上下文"},
         {"name": "runtime.image_reference_manifest", "scope": "runtime", "description": "Image-2 输入参考图序号、角色和事实源优先级"},
-        {"name": "runtime.current_shot_context", "scope": "runtime", "description": "当前成片单镜头所需的选搭和剧本信息"},
+        {"name": "runtime.shoot_script_result", "scope": "runtime", "description": "拍摄剧本结果，用于分镜预览"},
+        {"name": "runtime.current_shot_context", "scope": "runtime", "description": "当前成片单镜头所需的选搭、剧本和分镜信息"},
     ]
 
 
 def job_lease_until() -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=settings.generation_image_timeout_seconds)).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def preview_job_key(preview_id: int) -> str:
+    return f"generation_preview:{preview_id}"
 
 
 def final_set_job_key(result_set_id: int) -> str:
@@ -6855,7 +7234,7 @@ def auto_run_active_task_ids() -> set[int]:
             SELECT id FROM generation_tasks
             WHERE deleted_at IS NULL
               AND auto_run_target = ?
-              AND status IN ('STYLING_RUNNING', 'SCRIPT_RUNNING', 'FINAL_RUNNING')
+              AND status IN ('STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING')
             """,
             (AUTO_RUN_TARGET_FINAL,),
         ).fetchall()
@@ -6879,7 +7258,7 @@ def pump_auto_run_queue() -> None:
             SELECT id FROM generation_tasks
             WHERE deleted_at IS NULL
               AND auto_run_target = ?
-              AND status NOT IN ('STYLING_RUNNING', 'SCRIPT_RUNNING', 'FINAL_RUNNING', 'CANCELLED', 'ABANDONED')
+              AND status NOT IN ('STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'CANCELLED', 'ABANDONED')
             ORDER BY COALESCE(auto_run_requested_at, updated_at), id
             """,
             (AUTO_RUN_TARGET_FINAL,),
@@ -6902,7 +7281,7 @@ def auto_run_queue_position(task_id: int, requested_at: str | None) -> int | Non
             SELECT COUNT(*) AS ahead FROM generation_tasks
             WHERE deleted_at IS NULL
               AND auto_run_target = ?
-              AND status NOT IN ('STYLING_RUNNING', 'SCRIPT_RUNNING', 'FINAL_RUNNING', 'CANCELLED', 'ABANDONED')
+              AND status NOT IN ('STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'CANCELLED', 'ABANDONED')
               AND id != ?
               AND (
                 COALESCE(auto_run_requested_at, updated_at) < COALESCE(?, '')
@@ -6954,6 +7333,9 @@ async def run_auto_final_generation(task_id: int) -> None:
             if step == "shoot_script":
                 await run_create_generation_shoot_script(task_id, trigger="auto_run")
                 continue
+            if step == "preview":
+                await run_create_generation_preview(task_id, trigger="auto_run")
+                return
             if step == "final":
                 await run_generate_final_images(task_id, trigger="auto_run", continue_existing=True)
                 return
@@ -6973,10 +7355,19 @@ def next_auto_final_step(task: Any) -> str:
         return "styling"
     if not row_value(task, "active_shoot_script_id"):
         return "shoot_script"
+    preview_id = row_value(task, "active_storyboard_preview_id") or row_value(task, "active_preview_id")
+    if not preview_id or not generation_preview_has_asset(int(preview_id)):
+        return "preview"
     result_set_id = row_value(task, "active_result_set_id")
     if result_set_id and generation_result_set_is_complete(int(result_set_id)):
         return "complete"
     return "final"
+
+
+def generation_preview_has_asset(preview_id: int) -> bool:
+    with get_db() as db:
+        row = db.execute("SELECT preview_asset_id, status FROM generation_previews WHERE id = ?", (preview_id,)).fetchone()
+    return bool(row and row["preview_asset_id"] and row["status"] == "SUCCEEDED")
 
 
 def generation_result_set_is_complete(result_set_id: int) -> bool:
@@ -6987,6 +7378,20 @@ def generation_result_set_is_complete(result_set_id: int) -> bool:
         ).fetchall()
     statuses = [row["status"] for row in rows]
     return len(statuses) >= 5 and all(status == "SUCCEEDED" for status in statuses[:5])
+
+
+def lease_generation_preview(preview_id: int, attempt_id: int) -> None:
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE generation_previews
+            SET status = 'RUNNING', active_attempt_id = ?, locked_by = ?, locked_until = ?,
+                run_attempts = COALESCE(run_attempts, 0) + 1, updated_at = ?
+            WHERE id = ? AND status IN ('QUEUED', 'RUNNING')
+            """,
+            (attempt_id, f"worker-{uuid4()}", job_lease_until(), timestamp, preview_id),
+        )
 
 
 def lease_generation_result_image(image_id: int, attempt_id: int) -> None:
@@ -7006,6 +7411,20 @@ def lease_generation_result_image(image_id: int, attempt_id: int) -> None:
 def refresh_pending_new_generation_jobs() -> None:
     timestamp = now_iso()
     with get_db() as db:
+        preview_rows = db.execute(
+            """
+            SELECT gp.* FROM generation_previews gp
+            LEFT JOIN generation_attempts ga ON ga.id = gp.active_attempt_id
+            WHERE gp.status IN ('QUEUED', 'RUNNING')
+              AND (
+                gp.locked_until IS NULL OR gp.locked_until < ?
+                OR (gp.status = 'RUNNING' AND ga.provider_request_id IS NOT NULL)
+              )
+            ORDER BY gp.updated_at, gp.id
+            LIMIT 3
+            """,
+            (timestamp,),
+        ).fetchall()
         result_sets = db.execute(
             """
             SELECT DISTINCT grs.id, grs.task_id
@@ -7042,6 +7461,24 @@ def refresh_pending_new_generation_jobs() -> None:
             LIMIT 10
             """
         ).fetchall()
+
+    for row in preview_rows:
+        key = preview_job_key(int(row["id"]))
+        if key in active_background_generation_jobs:
+            continue
+        active_attempt_id = int(row["active_attempt_id"]) if row["active_attempt_id"] else None
+        if attempt_has_provider_request_id(active_attempt_id):
+            attempt_id = int(active_attempt_id)
+        else:
+            fail_stale_attempt(active_attempt_id, "预览生成任务锁过期，已由后台恢复重试。")
+            attempt_id = create_attempt("generation_preview", int(row["id"]), "image-2")
+        lease_generation_preview(int(row["id"]), attempt_id)
+        shoot_script_id = int(row["shoot_script_id"]) if "shoot_script_id" in row.keys() and row["shoot_script_id"] else 0
+        shot_plans = get_task_shot_plans_by_script(shoot_script_id)
+        schedule_background_generation(
+            run_preview_generation(int(row["task_id"]), int(row["styling_id"]), shoot_script_id, shot_plans, int(row["id"]), attempt_id),
+            job_key=key,
+        )
 
     for row in result_sets:
         key = final_set_job_key(int(row["id"]))
@@ -7419,11 +7856,14 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
         "stageUserInputs": {
             "aiStyling": row_value(row, "ai_styling_user_instruction_text", ""),
             "shootScript": row_value(row, "shoot_script_user_instruction_text", ""),
+            "storyboardPreview": row_value(row, "storyboard_preview_user_instruction_text", ""),
             "finalImage": row_value(row, "final_image_user_instruction_text", ""),
         },
         "currentInputVersionId": row["current_input_version_id"],
         "activeStylingId": row["active_styling_id"],
         "activeShootScriptId": row["active_shoot_script_id"] if "active_shoot_script_id" in row.keys() else None,
+        "activePreviewId": row["active_preview_id"],
+        "activeStoryboardPreviewId": row["active_storyboard_preview_id"] if "active_storyboard_preview_id" in row.keys() else row["active_preview_id"],
         "activeResultSetId": row["active_result_set_id"],
         "batchId": row_value(row, "batch_id"),
         "autoRunTarget": row_value(row, "auto_run_target"),
@@ -7461,6 +7901,9 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
     item["styling"] = get_generation_styling(row["active_styling_id"], include_debug=include_debug)
     item["shootScript"] = get_generation_shoot_script(row["active_shoot_script_id"] if "active_shoot_script_id" in row.keys() else None, include_debug=include_debug)
     item["shotPlans"] = get_task_shot_plans_by_script(row["active_shoot_script_id"] if "active_shoot_script_id" in row.keys() else None)
+    preview_id = row["active_storyboard_preview_id"] if "active_storyboard_preview_id" in row.keys() and row["active_storyboard_preview_id"] else row["active_preview_id"]
+    item["preview"] = get_generation_preview(preview_id)
+    item["storyboardPreview"] = item["preview"]
     item["resultSet"] = get_generation_result_set(row["active_result_set_id"])
     item["aiOperations"] = get_task_ai_operations(row["id"])
     if include_debug:
@@ -7479,6 +7922,7 @@ def get_generation_task_summary(task_id: int) -> dict[str, Any]:
     result_images = ((task.get("resultSet") or {}).get("images") or [])
     return {
         "cover": images[0]["asset"] if images else None,
+        "preview": (task.get("preview") or {}).get("asset"),
         "finalImages": [image.get("asset") for image in result_images if image.get("asset")],
         "selectedGarments": ((task.get("styling") or {}).get("selectedMaterials") or []),
     }
@@ -7595,6 +8039,24 @@ def get_generation_shoot_script(shoot_script_id: int | None, include_debug: bool
     return item
 
 
+def get_generation_preview(preview_id: int | None) -> dict[str, Any] | None:
+    if not preview_id:
+        return None
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_previews WHERE id = ?", (preview_id,)).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "status": row["status"],
+        "shootScriptId": row["shoot_script_id"] if "shoot_script_id" in row.keys() else None,
+        "userInstruction": loads(row_value(row, "user_instruction_json"), {}),
+        "asset": get_media_asset_by_id(row["preview_asset_id"]),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
 def get_generation_result_set(result_set_id: int | None) -> dict[str, Any] | None:
     if not result_set_id:
         return None
@@ -7610,6 +8072,7 @@ def get_generation_result_set(result_set_id: int | None) -> dict[str, Any] | Non
         "id": row["id"],
         "status": row["status"],
         "shootScriptId": row["shoot_script_id"] if "shoot_script_id" in row.keys() else None,
+        "previewId": row["preview_id"] if "preview_id" in row.keys() else None,
         "userInstruction": loads(row_value(row, "user_instruction_json"), {}),
         "images": [
             {
@@ -7684,6 +8147,9 @@ def get_task_attempts(task_id: int) -> list[dict[str, Any]]:
                OR (ga.owner_type = 'generation_shoot_script' AND ga.owner_id IN (
                     SELECT id FROM generation_shoot_scripts WHERE task_id = ?
                   ))
+               OR (ga.owner_type = 'generation_preview' AND ga.owner_id IN (
+                    SELECT id FROM generation_previews WHERE task_id = ?
+                  ))
                OR (ga.owner_type = 'generation_result_image' AND ga.owner_id IN (
                     SELECT gri.id FROM generation_result_images_new gri
                     JOIN generation_result_sets grs ON grs.id = gri.result_set_id
@@ -7691,7 +8157,7 @@ def get_task_attempts(task_id: int) -> list[dict[str, Any]]:
                   ))
             ORDER BY ga.created_at DESC
             """,
-            (task_id, task_id, task_id),
+            (task_id, task_id, task_id, task_id),
         ).fetchall()
     records = []
     for row in rows:
@@ -7763,6 +8229,10 @@ def get_task_ai_operations(task_id: int) -> list[dict[str, Any]]:
                OR (ga.owner_type = 'generation_shoot_script'
                     AND ga.status IN ('RUNNING', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS')
                     AND ga.owner_id IN (SELECT id FROM generation_shoot_scripts WHERE task_id = ?))
+               OR (ga.owner_type = 'generation_preview' AND ga.owner_id = ?)
+               OR (ga.owner_type = 'generation_preview'
+                    AND ga.status IN ('RUNNING', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS')
+                    AND ga.owner_id IN (SELECT id FROM generation_previews WHERE task_id = ?))
                OR (ga.owner_type = 'generation_result_image' AND ga.owner_id IN (
                     SELECT gri.id FROM generation_result_images_new gri
                     WHERE gri.result_set_id = ?
@@ -7775,6 +8245,8 @@ def get_task_ai_operations(task_id: int) -> list[dict[str, Any]]:
                 task["status"],
                 task["active_styling_id"],
                 row_value(task, "active_shoot_script_id"),
+                task_id,
+                row_value(task, "active_storyboard_preview_id") or task["active_preview_id"],
                 task_id,
                 task["active_result_set_id"],
             ),

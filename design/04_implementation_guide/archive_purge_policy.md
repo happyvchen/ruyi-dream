@@ -23,9 +23,9 @@
 
 | 对象 | 默认操作 | 归档行为 | 彻底删除范围 | OSS 清理 |
 |---|---|---|---|---|
-| `StylingGarment` 搭配服装 | 归档 | 默认列表隐藏，不进入智能选搭，保留标签和历史快照 | 删除服饰、图片关系、标签、依赖该服饰的生成任务和 attempts | 服饰图、依赖任务输入、结果和 attempt 输出 |
+| `StylingGarment` 搭配服装 | 归档 | 默认列表隐藏，不进入智能选搭，保留标签和历史快照 | 删除服饰、图片关系、标签、依赖该服饰的生成任务和 attempts | 服饰图、依赖任务输入、预览、结果和 attempt 输出 |
 | `StylingGarmentImage` 搭配服装单图 | 移除图片 | 不使用归档；从当前服饰图包移除 | 删除图片关系；若媒体无其它引用则释放 `MediaAsset` | 无引用时删除原图、thumb、preview |
-| `GenerationTask` / 生成记录 | 归档 | AI 摄影棚最近任务和生成记录默认隐藏，历史数据保留 | 删除任务、输入版本、主推款图片关系、StylingPlan、ShotPlan、结果集、结果图、attempts | 主推款图、最终图、attempt 输出 |
+| `GenerationTask` / 生成记录 | 归档 | AI 摄影棚最近任务和生成记录默认隐藏，历史数据保留 | 删除任务、输入版本、主推款图片关系、StylingPlan、ShotPlan、预览、结果集、结果图、attempts | 主推款图、预览图、最终图、attempt 输出 |
 | `GenerationTaskImage` 草稿主推款单图 | 移除图片 | 不使用归档；仅草稿期允许 | 删除图片关系；若媒体无其它引用则释放 `MediaAsset` | 无引用时删除原图、thumb、preview |
 | `ModelProfile` 数字模特 | 不开放普通删除 | 前台只读；如开放应优先归档 | 无历史引用且至少保留一个时才允许删除 | 模特头像目录 |
 

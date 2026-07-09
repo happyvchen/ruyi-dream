@@ -8,6 +8,7 @@
 | [AI 打标 Prompt 实施样例](ai-tagging-prompt.md) | `assembly.ai_tagging` |
 | [AI 选搭 Prompt 实施样例](ai-styling-prompt.md) | `assembly.ai_styling` |
 | [拍摄剧本 Prompt 实施样例](shoot-script-prompt.md) | `assembly.shoot_script` |
+| [分镜预览 Prompt 实施样例](storyboard-preview-prompt.md) | `assembly.storyboard_preview` |
 | [生成成片 Prompt 实施样例](final-image-prompt.md) | `assembly.final_image` |
 
 实施规则：

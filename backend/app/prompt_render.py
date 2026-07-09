@@ -1,8 +1,8 @@
 """生图阶段 prompt 渲染层（P1）。
 
-职责：把上游已组装好的结构化上下文（``current_shot_context_for_prompt`` /
-hero 信息 / 用户要求）渲染成**干净的自然语言文本**，
-供 ``assembly.final_image`` 模板占位符填充。
+职责：把上游已组装好的结构化上下文（``shoot_script_result_for_prompt`` /
+``current_shot_context_for_prompt`` / hero 信息 / 用户要求）渲染成**干净的自然语言文本**，
+供 ``assembly.storyboard_preview`` / ``assembly.final_image`` 模板占位符填充。
 
 设计边界（见 design/01_generation_flow/prompt_rendering_refactor.md §3.1）：
 
@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
+    "render_shoot_script_body",
     "render_shot_context_body",
     "render_hero_product_info_line",
     "render_user_instruction_line",
@@ -34,6 +35,7 @@ _REFERENCE_ROLE_LABELS = {
     "model_identity": "数字模特身份",
     "hero_garment": "主推款",
     "styling_garment": "搭配服装",
+    "preview_grid": "分镜预览（构图参考）",
 }
 
 
@@ -89,7 +91,7 @@ def _as_dict(value: Any) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# 全局导演 / 镜头
+# 全局导演 / 镜头（storyboard 与 final 共用）
 # --------------------------------------------------------------------------- #
 def _global_directing_lines(gd: dict[str, Any]) -> list[str | None]:
     return [
@@ -143,6 +145,15 @@ def _shot_lines(shot: dict[str, Any], *, indent: str = "  ") -> str:
     return _block(lines)
 
 
+def _styling_risk_lines(risks: Any) -> list[str]:
+    lines: list[str] = []
+    for risk in risks if isinstance(risks, list) else []:
+        strategy = _clean_text(_as_dict(risk).get("director_strategy"))
+        if strategy:
+            lines.append(f"- {strategy}")
+    return lines
+
+
 def _resolved_accessory_lines(items: Any) -> list[str]:
     lines: list[str] = []
     for item in items if isinstance(items, list) else []:
@@ -161,6 +172,36 @@ def _resolved_accessory_lines(items: Any) -> list[str]:
 # --------------------------------------------------------------------------- #
 # 对外渲染函数
 # --------------------------------------------------------------------------- #
+def render_shoot_script_body(context: dict[str, Any]) -> str:
+    """渲染分镜预览用的拍摄剧本正文。
+
+    ``context`` 为 ``shoot_script_result_for_prompt`` 的输出（含 6 个 shots）。
+    """
+    context = _as_dict(context)
+    gd = _as_dict(context.get("global_directing"))
+    shots = [s for s in (context.get("shots") or []) if isinstance(s, dict)]
+
+    sections: list[str] = []
+
+    directing = _block(_global_directing_lines(gd))
+    if directing:
+        sections.append("【全局导演】\n" + directing)
+
+    risk_lines = _styling_risk_lines(context.get("styling_risks"))
+    if risk_lines:
+        sections.append("【搭配风险处理】\n" + "\n".join(risk_lines))
+
+    accessory_lines = _resolved_accessory_lines(context.get("resolved_accessories"))
+    if accessory_lines:
+        sections.append("【本次配饰】\n" + "\n".join(accessory_lines))
+
+    if shots:
+        shot_texts = [_shot_lines(shot) for shot in shots]
+        sections.append("【六格镜头】\n" + "\n".join(shot_texts))
+
+    return "\n\n".join(sections)
+
+
 def render_shot_context_body(context: dict[str, Any]) -> str:
     """渲染最终单张成片用的当前镜头正文。
 
@@ -168,6 +209,13 @@ def render_shot_context_body(context: dict[str, Any]) -> str:
     """
     context = _as_dict(context)
     sections: list[str] = []
+
+    cell = context.get("preview_grid_cell")
+    if cell is not None:
+        sections.append(
+            f"【分镜参考】\n参考分镜预览第 {cell} 格，只借用姿势、身位、景别、构图、背景与光影方向；"
+            "分镜预览不是模特身份或商品事实来源。"
+        )
 
     selected = _as_dict(_as_dict(context.get("styling")).get("selected_outfit"))
     styling_lines = [
