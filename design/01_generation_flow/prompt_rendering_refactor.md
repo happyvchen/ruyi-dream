@@ -1,6 +1,6 @@
 # Prompt 渲染层重构设计
 
-> 状态：设计方案（未动实现）。目标是修正当前 prompt 组装偏离 `image2_input_strategy.md` §5/§6 与 `prompt_context_strategy.md` 的问题，把「快照模型」与「prompt 视图」解耦。本文件先评审，再决定实现范围。
+> 状态：P0–P5 已落地；**P6（占位变量化重构）已落地**，见 §10。目标是修正当前 prompt 组装偏离 `image2_input_strategy.md` §5/§6 与 `prompt_context_strategy.md` 的问题，把「快照模型」与「prompt 视图」解耦，并把所有固定 prompt 文本收敛到「Prompt 维护」页。
 
 ## 1. 问题
 
@@ -185,13 +185,13 @@ renderer 工程约束：
 分阶段落地，每阶段独立可验、可回滚。**当前状态：P0–P5 全部落地并通过第一道验收（本地渲染对比 + 单测，共 25 个 renderer 单测全绿）；第二道受控出图 A/B 待用户授权后执行。**
 
 - **P0（本文档）✅**：评审设计与 before/after，确认范围。
-- **P1｜生图阶段 ✅**：新增 `prompt_render.py`，实现 `render_shoot_script_body` / `render_shot_context_body` + hero/instruction 行渲染；改 `build_new_preview_prompt` / `build_new_final_prompt` 用 renderer 填充占位符。**未改 DB 模板**（脚手架/规则留可编辑模板），因此无需改 `available_prompt_placeholders` / `sample_prompt_runtime`。快照写入不变。
+- **P1｜生图阶段 ✅**：新增 `prompt_render.py`，实现 `render_shoot_script_body` / `render_shot_context_body` + hero/instruction 行渲染；改 `build_new_preview_prompt` / `build_new_final_prompt` 用 renderer 填充占位符。（注：P1 当时把段头 `【全局导演】` 等留在 renderer 代码里、未改 DB 模板；此点**已被 P6 取代**——段头与固定话术已移入模板正文，`render_shoot_script_body` / `render_shot_context_body` 被拆成粒度渲染函数并删除，`available_prompt_placeholders` / `sample_prompt_runtime` 同步更新。）快照写入不变。
 - **P2｜参考图 ✅**：`append_image_reference_manifest` 改为「参考图顺序：图N=角色」自然语言 + 事实源约束；删除废弃的 `image_reference_manifest_for_prompt`；provider 侧 `build_provider_reference_image_manifest` 保持结构化不变。（`append_model_identity_contract` 见下方残留项。）
 - **P3｜Gemini 阶段 ✅（等价性依据已确认）**：`ai_styling`/`shoot_script` 的 hero/用户要求/介入要求自然语言化，去掉重复的 `priority_policy`/`cannot_override`。**关键**：该优先级与冲突处理规则**已完整写在 `AI_STYLIST_SYSTEM_INSTRUCTION`（`main.py:110`）与 `AI_DIRECTOR_SYSTEM_INSTRUCTION`（`main.py:117`）**，删除运行时重复不丢规则——这是行为等价的依据。`candidate_retrieval`（标签事实）、`styling_result`（导演上下文）、`model_identity_context`（身份契约）保持结构化 JSON。仍建议受控 A/B 复核。
 - **P4｜清理 ✅**：删除因上游改造而失效的死代码 `append_user_requirement_block` / `has_user_requirement` / `append_runtime_input_block` / `has_user_input`；prompt 出口统一走 renderer，空值由 `render_*_line` 返回「（无）」、`_block` 省略空行，杜绝空壳 JSON。
 
 - **P5｜残留清理 ✅**：
-  - 模特身份契约 `append_model_identity_contract` 从英文 JSON dump 改为中文自然语言块（`render_model_identity_line`）：身份编号 + 模特备注 + 额外禁止 + 参考图角度；去掉 `schema_version`/`objectKey`/英文数组。身份事实仍以模特参考图为准。（注：`hair_makeup_boundary` 妆发边界后续已从各链路移除，改由 `Prompt 维护` 模板正文承载。）
+  - 模特身份契约 `append_model_identity_contract` 从英文 JSON dump 改为中文自然语言块（`render_model_identity_line`）：身份编号 + 模特备注 + 额外禁止 + 参考图角度；去掉 `schema_version`/`objectKey`/英文数组。身份事实仍以模特参考图为准。（注：`hair_makeup_boundary` 妆发边界后续已从各链路移除，改由 `Prompt 维护` 模板正文承载。**`append_model_identity_contract` 本身已在 P6 删除**——其 `【强制模特身份契约】` 表头与优先级话术移入 `assembly.shoot_script` 模板正文，代码只经 `{{runtime.model_identity_context}}` 提供身份数据。）
   - 删除 `styling_garment_prompt_context`（ai_tagging）顶层 `schema_version`（实为未被模板引用的死运行时键，不影响任何 prompt 输出，顺手清理）。
 
 至此生成链路上所有会进入 prompt 的上下文均已按「快照留结构化、prompt 走自然语言/去治理元数据」完成改造。
@@ -224,3 +224,55 @@ renderer 工程约束：
 - `image2_input_strategy.md` §5/§6：Image-2 推荐 prompt 结构（本方案回归的 spec）
 - `prompt_context_strategy.md`：阶段输入 DTO 切分与旧兼容注入删除
 - `generation_responsibility_matrix.md`：Image-2 只做视觉生成，不承担业务语义
+
+## 10. P6：占位变量化重构（会变 / 不变 彻底分离）✅
+
+P1–P5 把 prompt 从「dump JSON」改成了「自然语言」，但仍有两类**固定文本残留在代码里**：段头（`【全局导演】`/`【六格镜头】`/`【分镜参考】`…）由 renderer 拼接；模特身份优先级话术由 `append_model_identity_contract` 在模板渲染**之后**追加；参考图职能标签（`数字模特身份`/`主推款`…）写死在 `render_image_reference_line` 里。这些都绕过了「Prompt 维护」页，业务用户改不到。
+
+P6 的判定边界收敛为一条：**「是否会变」**。
+
+| 类型 | 例子 | 归属 |
+|---|---|---|
+| **会变** | 图号区间（随图片数量变的 `图N-M`）、镜头格号、6 格镜头字段值、各分段正文、模型输出 | **代码**：以变量渲染，暴露为 `{{runtime.*}}` 占位 |
+| **不变** | 段头、职能描述、事实源约束、身份优先级话术、背景/光线/品牌口径 | **Prompt 维护**：写在 `assembly.*` 模板正文 |
+
+### 10.1 渲染引擎：条件段
+
+`render_prompt_config` 新增 Mustache 风格条件段，让模板在「有内容才显示表头/话术」的前提下完全托管固定文本：
+
+- `{{#runtime.x}}…{{/runtime.x}}`：占位 `x` 非空才渲染内段（含表头）。
+- `{{^runtime.x}}…{{/runtime.x}}`：占位为空才渲染（如「本次无环境图」兜底）。
+- 空 runtime 占位（`""`）合法、不再算缺失；渲染末尾折叠 3+ 连续空行为 2，避免省略段留下空洞。
+- 真正**未提供**的 runtime key 仍报缺失（防拼写错误）。
+
+### 10.2 renderer 拆分：只出「可变数据正文」（无表头）
+
+删除带表头的合成函数 `render_shoot_script_body` / `render_shot_context_body`，拆为粒度函数：
+
+- 拍摄剧本 → `render_shoot_script_global_directing` / `_styling_risks` / `_resolved_accessories` / `_shots`
+- 成片 → `render_preview_grid_cell`（纯格号数字）/ `render_shot_styling` / `render_shot_global_directing` / `render_shot_current` / `render_shot_accessories`
+
+每个函数**无表头、无话术**，空数据返回空串，模板用条件段决定是否显示该段的表头。写死的 `【分镜参考】"只借用姿势…分镜预览不是事实来源"` 整句删除，改由 `assembly.final_image` 模板正文承载（`{{runtime.preview_grid_cell}}` 只提供格号）。
+
+> **边界**：单条镜头/配饰内部的字段标签（`核心`/`构图`/`机位`…）属于「变长记录的序列化格式」，简单占位引擎无法用循环表达，保留在 renderer；它们是数据格式，不是可调话术。
+
+### 10.3 参考图：按职能输出图号区间
+
+`render_image_reference_line`（把图号 + 职能标签捆在一起）→ `render_image_reference_spans`：**只按职能输出会变的图号区间**（`model_identity`/`preview_grid`/`hero_garment`/`styling_garment`/`shoot_environment`，外加 `subject`=模特+主推款+搭配的合并区间，供「模特与服装以图X为准」的动态交叉引用）。职能描述与事实源约束全部移入模板正文，例如：
+
+```
+{{runtime.ref_model_identity}} 为数字模特身份参考图，是唯一人物身份事实源…身份特征不得改变。
+{{runtime.ref_shoot_environment}} 为拍摄环境参考图，只参考环境、背景、光线；模特与服装以 {{runtime.ref_subject}} 为准。
+```
+
+### 10.4 死元数据清理
+
+`build_hero_product_info_context` / `build_stage_user_instruction_context` / `build_user_requirement_context` 顶层的 `priority_policy`（`user_*_priority` / `cannot_override` / `conflict_handling`）删除——它们从不进模型（`render_*_line` 只取 `info`/`instruction`/`combined_requirement`），优先级规则由各 `assembly.*` 模板正文声明。`build_accessory_boundary` 的 `bag_rule`/`jewelry_rule` 经核实未进任何模型 prompt（业务默认值），保留。
+
+### 10.5 新占位与模板
+
+`available_prompt_placeholders` / `sample_prompt_runtime` 同步登记 §10.2/§10.3 的新 `{{runtime.*}}` 占位（前端 Prompt 维护页数据驱动，自动展示）。开发库 `assembly.shoot_script` / `storyboard_preview` / `final_image` 三个模板正文迁移：把搬出的段头/规则/职能描述并入，改用新粒度占位与条件段，保留原有措辞、仅重定位（迁移前整库备份）。
+
+### 10.6 验收
+
+沿用 §7 第一道（本地渲染 + 单测，不消耗额度）：引擎条件段/空省略单测、粒度 renderer 单测、图号区间单测、「渲染层不得含表头/话术」回归断言，及三阶段用样例 runtime 渲染无缺失占位、无残留旧占位。第二道受控出图 A/B 仍需用户显式授权。

@@ -13,8 +13,10 @@
 | AI Stylist | `candidate_retrieval` | READY 搭配库 `code` + 完整 `ai_tags_json` 标签事实卡 | 内部 id、图片快照、历史 prompt、`effective_tags_json` 派生摘要 |
 | AI Stylist | `user_requirement` | 上传阶段补充服装信息、拍摄要求、本次选搭微调要求和冲突处理规则 | 长篇自由 prompt、可覆盖商品事实的模型指令 |
 | AI Director | `styling_result` | 主推款理解、选中 outfit、选中服饰 `ai_tags` 标签事实、质量信号 | 全部 outfit 候选池、rejected 全文、AI Stylist prompt、未选中的全库候选 |
-| 分镜预览 | `shoot_script_result` | 全局导演、风险、配饰、6 个镜头 | 完整 StylingPlan、候选池、原始标签 |
-| 最终成片 | `current_shot_context` | 当前镜头、当前格子、全局导演、选中 outfit、本镜头配饰 | 完整 ShootScript、全部镜头外细节、候选池 |
+| 分镜预览 | `shoot_script_global_directing` / `shoot_script_styling_risks` / `shoot_script_resolved_accessories` / `shoot_script_shots` + `ref_*` 图号区间 | 全局导演、风险、配饰、6 个镜头（各为无表头正文）；参考图各职能图号区间 | 完整 StylingPlan、候选池、原始标签 |
+| 最终成片 | `preview_grid_cell` / `shot_styling` / `shot_global_directing` / `shot_current` / `shot_accessories` + `ref_*` 图号区间 | 当前镜头、当前格号、全局导演、选中 outfit、本镜头配饰（各为无表头正文） | 完整 ShootScript、全部镜头外细节、候选池 |
+
+> P6 起，分镜预览/成片的合成占位（`shoot_script_result` / `current_shot_context` / `image_reference_manifest`）已拆成上表的粒度占位：代码只出「会变的数据/图号」，段头与固定话术由 `assembly.*` 模板正文托管（配合条件段 `{{#runtime.x}}…{{/runtime.x}}`）。详见 `prompt_rendering_refactor.md` §10。
 
 ## 搭配库标签事实卡
 

@@ -1565,14 +1565,24 @@ class BackendCurrentFlowTests(unittest.TestCase):
             db_module,
             "assembly.storyboard_preview",
             "assembly",
-            "生成分镜预览。\n\n{{segment.brand_info}}\n\n【输入参考图角色清单】\n{{runtime.image_reference_manifest}}\n\n【拍摄剧本结果】\n{{runtime.shoot_script_result}}\n\n按拍摄剧本生成 3x2 分镜预览。",
+            "生成分镜预览。\n\n{{segment.brand_info}}\n\n【输入参考图角色清单】\n"
+            "{{#runtime.ref_model_identity}}{{runtime.ref_model_identity}} 为数字模特身份参考图。\n{{/runtime.ref_model_identity}}"
+            "{{#runtime.ref_hero_garment}}{{runtime.ref_hero_garment}} 为主推款参考图。\n{{/runtime.ref_hero_garment}}"
+            "\n【拍摄剧本结果】\n【全局导演】\n{{runtime.shoot_script_global_directing}}\n【六格镜头】\n{{runtime.shoot_script_shots}}\n\n按拍摄剧本生成 3x2 分镜预览。",
             140,
         )
         self.insert_prompt_config(
             db_module,
             "assembly.final_image",
             "assembly",
-            "生成一张电商棚拍成片。\n\n分镜预览不是模特或商品事实来源。模特参考图是模特身份事实来源。\n不得根据拍摄剧本、品牌妆发或分镜构图把模特改成另一张脸、低马尾、盘发、长发或参考图中不存在的发型。\n\n【输入参考图角色清单】\n{{runtime.image_reference_manifest}}\n\n{{segment.brand_info}}\n\n【当前单张成片上下文】\n{{runtime.current_shot_context}}",
+            "生成一张电商棚拍成片。\n\n分镜预览不是模特或商品事实来源。模特参考图是模特身份事实来源。\n"
+            "不得根据拍摄剧本、品牌妆发或分镜构图把模特改成另一张脸、低马尾、盘发、长发或参考图中不存在的发型。\n\n"
+            "【输入参考图角色清单】\n"
+            "{{#runtime.ref_model_identity}}{{runtime.ref_model_identity}} 为模特身份参考图。\n{{/runtime.ref_model_identity}}"
+            "{{#runtime.ref_preview_grid}}{{runtime.ref_preview_grid}} 为分镜预览参考图，仅作构图参考。\n{{/runtime.ref_preview_grid}}"
+            "\n{{segment.brand_info}}\n\n【当前单张成片上下文】\n"
+            "{{#runtime.preview_grid_cell}}参考分镜预览第 {{runtime.preview_grid_cell}} 格。\n{{/runtime.preview_grid_cell}}"
+            "{{#runtime.shot_current}}【当前镜头】\n{{runtime.shot_current}}\n{{/runtime.shot_current}}",
             150,
         )
         with db_module.get_db() as db:
@@ -1653,12 +1663,20 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertEqual(shoot_script_request["hero_product_info"]["info"], "中短裙，裙摆刚过膝")
         self.assertEqual(shoot_script_request["shoot_script_user_instruction"]["instruction"], "突出裙摆长度")
         self.assertIn("输入参考图角色清单", preview_package["prompt"])
-        self.assertIn("model_identity", preview_package["prompt"])
+        # 参考图职能描述来自模板正文；会变的图号区间由代码填充（模特图占前两位 → 图1-2）。
+        self.assertIn("数字模特身份参考图", preview_package["prompt"])
+        self.assertIn("图1-2", preview_package["prompt"])
+        # 旧的合成占位（image_reference_manifest / shoot_script_result / current_shot_context）已下线。
+        self.assertNotIn("{{runtime.image_reference_manifest}}", preview_package["prompt"])
+        self.assertNotIn("{{runtime.shoot_script_result}}", preview_package["prompt"])
         self.assertEqual(preview_package["inputVersionId"], 7)
         self.assertEqual(preview_package["heroProductInfo"]["info"], "中短裙，裙摆刚过膝")
         self.assertEqual(final_package["heroProductInfo"]["info"], "中短裙，裙摆刚过膝")
         self.assertIn("模特身份事实来源", final_package["prompt"])
-        self.assertIn("preview_grid is composition-only", final_package["prompt"])
+        # 成片阶段参考图顺序为 模特×2 + 分镜预览 → 分镜预览参考图落在图3。
+        self.assertIn("分镜预览参考图", final_package["prompt"])
+        self.assertIn("图3", final_package["prompt"])
+        self.assertNotIn("{{runtime.current_shot_context}}", final_package["prompt"])
         self.assertIn("低马尾", final_package["prompt"])
         self.assertIn("不得根据拍摄剧本", final_package["prompt"])
 

@@ -30,10 +30,17 @@ from .config import get_settings
 from .db import dumps, get_db, init_db, loads, log_event, now_iso
 from .prompt_render import (
     render_hero_product_info_line,
-    render_image_reference_line,
+    render_image_reference_spans,
     render_model_identity_line,
-    render_shoot_script_body,
-    render_shot_context_body,
+    render_preview_grid_cell,
+    render_shoot_script_global_directing,
+    render_shoot_script_resolved_accessories,
+    render_shoot_script_shots,
+    render_shoot_script_styling_risks,
+    render_shot_accessories,
+    render_shot_current,
+    render_shot_global_directing,
+    render_shot_styling,
     render_user_instruction_line,
     render_user_requirement_line,
 )
@@ -96,6 +103,12 @@ Image.MAX_IMAGE_PIXELS = settings.max_upload_image_pixels
 SESSION_ROLES = {"user", "admin"}
 SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES = {"未知", "不支持入库配饰", "unknown", "unsupported_accessory"}
 PROMPT_PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-zA-Z0-9_.-]+)\s*}}")
+# 条件段：{{#runtime.x}}...{{/runtime.x}}（占位真值才保留）/ {{^runtime.x}}...{{/runtime.x}}（为空才保留）。
+# 让模板在"有内容才显示表头/话术"的前提下完全托管固定文本，代码只提供可变占位值。
+PROMPT_SECTION_PATTERN = re.compile(
+    r"{{\s*([#^])\s*((?:segment|runtime)\.[a-zA-Z0-9_.-]+)\s*}}(.*?){{\s*/\s*\2\s*}}",
+    re.DOTALL,
+)
 AI_STYLING_PROMPT_CONFIG_KEY = "assembly.ai_styling"
 SHOOT_SCRIPT_PROMPT_CONFIG_KEY = "assembly.shoot_script"
 AUTO_RUN_TARGET_FINAL = "FINAL"
@@ -4234,43 +4247,20 @@ def build_hero_product_info_context(task: Any) -> dict[str, Any]:
         if row_value(task, "hero_product_info_text", None) is not None
         else row_value(task, "user_requirement_text", "")
     )
+    # 只保留可变数据（info）。优先级/不可覆盖边界等固定规则由 Prompt 维护模板正文声明。
     return {
         "schema_version": "hero-product-info-v1",
         "info": text,
-        "priority_policy": {
-            "fact_role": "用户补充的商品事实和业务要求，可贯穿后续工作流。",
-            "cannot_override": [
-                "主推款图片可见商品事实",
-                "搭配服装库 READY 候选事实",
-                "数字模特身份契约",
-                "Lily 品牌硬边界",
-                "输出 schema",
-                "安全规则",
-            ],
-            "conflict_handling": "与不可覆盖边界冲突时，以边界为准并说明处理。",
-        },
     }
 
 
 def build_stage_user_instruction_context(stage: str, instruction: str | None = None) -> dict[str, Any]:
     text = normalize_user_input_text(instruction)
+    # 只保留可变数据（instruction）。优先级/不可覆盖边界由 Prompt 维护模板正文声明。
     return {
         "schema_version": "stage-user-instruction-v1",
         "stage": stage,
         "instruction": text,
-        "priority_policy": {
-            "user_instruction_priority": "本步骤用户介入要求高于默认阶段偏好。",
-            "cannot_override": [
-                "主推款图片商品事实",
-                "商品信息事实",
-                "搭配服装库 READY 候选事实",
-                "数字模特身份契约",
-                "Lily 品牌硬边界",
-                "输出 schema",
-                "安全规则",
-            ],
-            "conflict_handling": "无法满足时必须说明冲突原因、未满足项和替代处理。",
-        },
     }
 
 
@@ -4278,23 +4268,12 @@ def build_user_requirement_context(task: Any, styling_adjustment: str | None = N
     upload_requirement = normalize_user_input_text(row_value(task, "hero_product_info_text", None) or row_value(task, "user_requirement_text", ""))
     adjustment = normalize_user_input_text(styling_adjustment)
     combined_parts = [part for part in (upload_requirement, adjustment) if part]
+    # 只保留可变数据（合并后的用户要求）。优先级/不可覆盖边界由 Prompt 维护模板正文声明。
     return {
         "schema_version": "user-requirement-v1",
         "upload_requirement": upload_requirement,
         "styling_adjustment": adjustment,
         "combined_requirement": "；".join(combined_parts),
-        "priority_policy": {
-            "user_requirement_priority": "用户要求高于默认搭配偏好和默认导演偏好。",
-            "cannot_override": [
-                "主推款图片商品事实",
-                "搭配服装库 READY 候选事实",
-                "数字模特身份契约",
-                "Lily 品牌硬边界",
-                "输出 schema",
-                "安全规则",
-            ],
-            "conflict_handling": "无法满足时必须说明冲突原因、未满足项和替代处理。",
-        },
     }
 
 
@@ -6445,6 +6424,8 @@ def attach_shoot_script_prompt_snapshot(request_snapshot: dict[str, Any]) -> dic
     # P3：商品信息/用户要求以自然语言文本填充占位符，去治理元数据（优先级已由
     # 拍摄剧本 Prompt 正文（含开头系统指令段）声明）。styling_result（导演上下文）与
     # model_identity_context（模特身份契约）是结构化业务/身份事实，保持 JSON。
+    # 模特身份契约以 {{runtime.model_identity_context}} 占位；【强制模特身份契约】表头与
+    # "身份优先级/不得改变五官发型"这类固定话术由 Prompt 维护正文托管，代码不再事后追加。
     prompt = render_prompt_template(
         SHOOT_SCRIPT_PROMPT_CONFIG_KEY,
         {
@@ -6455,7 +6436,6 @@ def attach_shoot_script_prompt_snapshot(request_snapshot: dict[str, Any]) -> dic
             "model_identity_context": render_model_identity_line(model_identity_context),
         },
     )
-    prompt = append_model_identity_contract(prompt, model_identity_context)
     return {**request_snapshot, "promptConfigKey": SHOOT_SCRIPT_PROMPT_CONFIG_KEY, "prompt": prompt}
 
 
@@ -6846,20 +6826,6 @@ def model_identity_context_for_prompt(model_snapshot: dict[str, Any] | None) -> 
     }
 
 
-def append_model_identity_contract(prompt: str, model_identity_context: dict[str, Any]) -> str:
-    # 模特身份契约渲染为中文自然语言块（身份编号 + 模特备注 + 额外禁止 + 参考图角度）。
-    # 身份事实仍以模特参考图为准；具体妆发边界话术由 Prompt 维护 模板正文承载。
-    body = render_model_identity_line(model_identity_context)
-    if not body:
-        return prompt
-    return (
-        prompt.rstrip()
-        + "\n\n【强制模特身份契约】\n"
-        + body
-        + "\n模特身份契约优先级高于任何品牌妆发、姿态或剧本想象；只能改变服装、姿势、机位和光线，不得改变模特本人身份、脸型、五官、头型、发长、发型轮廓和刘海形态。\n"
-    )
-
-
 def build_new_preview_task_package(
     task_id: int,
     styling_id: int,
@@ -6922,14 +6888,22 @@ def build_new_preview_prompt(
     hero_product_info: dict[str, Any] | None = None,
     storyboard_preview_user_instruction: dict[str, Any] | None = None,
 ) -> str:
-    # P1 渲染层：拍摄剧本/商品信息/用户要求以自然语言文本填充模板占位符。
-    # 参考图顺序（image_reference_manifest）与事实源约束由 Prompt 维护正文承接，
-    # 正文用 {{runtime.image_reference_manifest}} 占位；代码不再事后追加约束话术。
+    # 渲染层只输出「可变数据」：拍摄剧本各分段正文、参考图各职能图号区间、商品信息、用户要求。
+    # 表头（【全局导演】等）、职能描述与事实源约束由 Prompt 维护模板正文托管（配合条件段）。
+    ctx = shoot_script_result_for_prompt(shoot_script)
+    spans = render_image_reference_spans(image_inputs or [])
     return render_prompt_template(
         "assembly.storyboard_preview",
         {
-            "shoot_script_result": render_shoot_script_body(shoot_script_result_for_prompt(shoot_script)),
-            "image_reference_manifest": render_image_reference_line(image_inputs or []),
+            "shoot_script_global_directing": render_shoot_script_global_directing(ctx),
+            "shoot_script_styling_risks": render_shoot_script_styling_risks(ctx),
+            "shoot_script_resolved_accessories": render_shoot_script_resolved_accessories(ctx),
+            "shoot_script_shots": render_shoot_script_shots(ctx),
+            "ref_model_identity": spans["model_identity"],
+            "ref_hero_garment": spans["hero_garment"],
+            "ref_styling_garment": spans["styling_garment"],
+            "ref_shoot_environment": spans["shoot_environment"],
+            "ref_subject": spans["subject"],
             "hero_product_info": render_hero_product_info_line(hero_product_info or {}),
             "storyboard_preview_user_instruction": render_user_instruction_line(storyboard_preview_user_instruction or {}),
         },
@@ -6988,16 +6962,23 @@ def build_new_final_prompt(
     hero_product_info: dict[str, Any] | None = None,
     final_image_user_instruction: dict[str, Any] | None = None,
 ) -> str:
-    # P1 渲染层：当前镜头/商品信息/用户要求以自然语言文本填充模板占位符。
-    # 参考图顺序与事实源约束（含分镜预览参考补充）由 Prompt 维护正文承接，
-    # 正文用 {{runtime.image_reference_manifest}} 占位；代码不再事后追加约束话术。
+    # 渲染层只输出「可变数据」：当前镜头各分段正文、分镜预览格号、参考图各职能图号区间、
+    # 商品信息、用户要求。表头、分镜参考话术与事实源约束由 Prompt 维护模板正文托管。
+    ctx = current_shot_context_for_prompt(shot_index, shot_plan, styling_plan, shoot_script)
+    spans = render_image_reference_spans(image_inputs or [])
     return render_prompt_template(
         "assembly.final_image",
         {
-            "current_shot_context": render_shot_context_body(
-                current_shot_context_for_prompt(shot_index, shot_plan, styling_plan, shoot_script)
-            ),
-            "image_reference_manifest": render_image_reference_line(image_inputs or []),
+            "preview_grid_cell": render_preview_grid_cell(ctx),
+            "shot_styling": render_shot_styling(ctx),
+            "shot_global_directing": render_shot_global_directing(ctx),
+            "shot_current": render_shot_current(ctx),
+            "shot_accessories": render_shot_accessories(ctx),
+            "ref_model_identity": spans["model_identity"],
+            "ref_preview_grid": spans["preview_grid"],
+            "ref_hero_garment": spans["hero_garment"],
+            "ref_styling_garment": spans["styling_garment"],
+            "ref_subject": spans["subject"],
             "hero_product_info": render_hero_product_info_line(hero_product_info or {}),
             "final_image_user_instruction": render_user_instruction_line(final_image_user_instruction or {}),
         },
@@ -7209,7 +7190,33 @@ def render_prompt_config(key: str, runtime: dict[str, Any] | None = None, rows: 
         diagnostics["missingPlaceholders"].append(name)
         return f"[[未知占位符:{name}]]"
 
+    def placeholder_truthy(name: str) -> bool:
+        # 条件段真值判定：不写诊断（缺失/空不是错误，只表示"不显示这段"）。
+        if name.startswith("segment."):
+            return bool((prompt_config_content(name, rows) or "").strip())
+        if name.startswith("runtime."):
+            value = runtime.get(name.removeprefix("runtime."))
+            if value is None:
+                return False
+            if isinstance(value, str):
+                return bool(value.strip())
+            return bool(value)
+        return False
+
+    def render_conditionals(text: str) -> str:
+        def repl(match: "re.Match[str]") -> str:
+            marker, name, inner = match.group(1), match.group(2), match.group(3)
+            keep = placeholder_truthy(name) if marker == "#" else not placeholder_truthy(name)
+            return inner if keep else ""
+
+        previous = None
+        while previous != text:  # 反复展开以支持嵌套条件段。
+            previous = text
+            text = PROMPT_SECTION_PATTERN.sub(repl, text)
+        return text
+
     def render_text(text: str, stack: list[str]) -> str:
+        text = render_conditionals(text)
         return PROMPT_PLACEHOLDER_PATTERN.sub(lambda match: resolve_placeholder(match.group(1), stack), text)
 
     source = prompt_config_content(key, rows)
@@ -7218,7 +7225,7 @@ def render_prompt_config(key: str, runtime: dict[str, Any] | None = None, rows: 
         source = ""
     elif not source.strip():
         diagnostics["missingPlaceholders"].append(f"{key} (空内容)")
-    rendered = render_text(source, [key]).strip() + "\n"
+    rendered = re.sub(r"\n{3,}", "\n\n", render_text(source, [key])).strip() + "\n"
     for field in ("usedSegments", "missingPlaceholders", "referencedPlaceholders"):
         diagnostics[field] = sorted(set(diagnostics[field]))
     return rendered, diagnostics
@@ -7232,20 +7239,40 @@ def render_prompt_template(key: str, runtime: dict[str, Any] | None = None) -> s
 
 
 def sample_prompt_runtime() -> dict[str, Any]:
+    # 结构化业务输入（选搭/标签）保持 JSON；面向模型的文本占位给出「已渲染」的样例文本，
+    # 与运行时各 render_* 函数产物同形，便于「Prompt 维护」页预览真实效果。
     return {
+        # AI 打标 / AI 选搭
         "styling_garment": dumps({"code": "LOOK-A", "image_count": 3, "image_roles": ["primary", "reference", "reference"]}),
         "candidate_retrieval": dumps([{"code": "LOOK-A", "ai_tags": {"一级品类": ["上装"], "色彩": ["白色"], "版型": ["合体"], "风格语义": "轻量上装服务主推裤装。"}}]),
-        "hero_product_info": dumps({"info": "夏季主推裤装，重点展示腰头和裤脚。"}),
-        "ai_styling_user_instruction": dumps({"stage": "ai_styling", "instruction": "不要厚重外套，优先轻盈通勤。"}),
-        "shoot_script_user_instruction": dumps({"stage": "shoot_script", "instruction": "腰线相关镜头要更明确。"}),
-        "storyboard_preview_user_instruction": dumps({"stage": "storyboard_preview", "instruction": "分镜姿态更舒展。"}),
-        "final_image_user_instruction": dumps({"stage": "final_image", "instruction": "成片整体更干净，减少配饰存在感。"}),
-        "user_requirement": dumps({"combined_requirement": "重点展示腰线，避免厚重外套。", "priority_policy": {"conflict_handling": "无法满足时说明原因。"}}),
         "styling_result": dumps({"hero_understanding": {"category": "裤装"}, "selected_material_codes": ["LOOK-A"], "reason_summary": "轻量上装服务主推裤装。"}),
-        "model_identity_context": dumps({"identity_contract": {"model_id": "Face-01", "must_preserve": ["same face", "same hair"]}}),
-        "image_reference_manifest": "图1=数字模特身份；图2=主推款；图3=搭配服装",
-        "shoot_script_result": dumps({"global_directing": {"accessory_boundary": "生成配饰低存在感"}, "shots": [{"shot_index": 1, "shot_role": "hero_full_body", "main_focus": "主推款整体比例"}]}),
-        "current_shot_context": dumps({"preview_grid_cell": 1, "current_shot": {"shot_role": "hero_full_body", "main_focus": "主推款整体比例"}, "styling": {"selected_material_codes": ["LOOK-A"]}}),
+        # 商品信息 / 各阶段用户要求（已渲染为一句话）
+        "hero_product_info": "夏季主推裤装，重点展示腰头和裤脚。",
+        "user_requirement": "重点展示腰线，避免厚重外套。",
+        "ai_styling_user_instruction": "不要厚重外套，优先轻盈通勤。",
+        "shoot_script_user_instruction": "腰线相关镜头要更明确。",
+        "storyboard_preview_user_instruction": "分镜姿态更舒展。",
+        "final_image_user_instruction": "成片整体更干净，减少配饰存在感。",
+        # 模特身份契约（已渲染文本）
+        "model_identity_context": "数字模特身份：Face-01（默认模特）\n参考图角度：front、left45",
+        # 拍摄剧本各分段（分镜预览用；无表头）
+        "shoot_script_global_directing": "配饰边界：生成配饰低存在感\n一致性：同一模特同一造型",
+        "shoot_script_styling_risks": "- 放弃盘发，保留短发塞耳后",
+        "shoot_script_resolved_accessories": "- footwear：燕麦色细带凉鞋（适用格 1、4）",
+        "shoot_script_shots": "格1（全身主视觉·全景）：\n  核心：主推款整体比例",
+        # 当前成片各分段（成片用；无表头）
+        "preview_grid_cell": "1",
+        "shot_styling": "造型：吊带裙配同色飘带\n穿法：单穿吊带裙",
+        "shot_global_directing": "配饰边界：生成配饰低存在感",
+        "shot_current": "格1（全身主视觉·全景）：\n  核心：主推款整体比例",
+        "shot_accessories": "- jewelry：极简金色小耳圈",
+        # 参考图各职能图号区间（只出会变的图号）
+        "ref_model_identity": "图1-2",
+        "ref_preview_grid": "图3",
+        "ref_hero_garment": "图4-5",
+        "ref_styling_garment": "图6",
+        "ref_shoot_environment": "图7",
+        "ref_subject": "图1-6",
     }
 
 
@@ -7260,10 +7287,25 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.storyboard_preview_user_instruction", "scope": "runtime", "description": "分镜预览本次执行的用户介入要求"},
         {"name": "runtime.final_image_user_instruction", "scope": "runtime", "description": "最终成片或单张重生本次执行的用户介入要求"},
         {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭导演上下文，使用搭配服装 code 标识"},
-        {"name": "runtime.model_identity_context", "scope": "runtime", "description": "AI Director 使用的数字模特身份契约和参考图上下文"},
-        {"name": "runtime.image_reference_manifest", "scope": "runtime", "description": "Image-2 输入参考图序号、角色和事实源优先级"},
-        {"name": "runtime.shoot_script_result", "scope": "runtime", "description": "拍摄剧本结果，用于分镜预览"},
-        {"name": "runtime.current_shot_context", "scope": "runtime", "description": "当前成片单镜头所需的选搭、剧本和分镜信息"},
+        {"name": "runtime.model_identity_context", "scope": "runtime", "description": "拍摄剧本用：已渲染的数字模特身份契约文本（身份编号/备注/额外禁止/参考图角度）"},
+        # 拍摄剧本 → 分镜预览：各分段只出可变数据正文（无表头），表头用条件段在正文托管
+        {"name": "runtime.shoot_script_global_directing", "scope": "runtime", "description": "拍摄剧本全局导演正文（配饰边界/一致性/全局禁止），无表头"},
+        {"name": "runtime.shoot_script_styling_risks", "scope": "runtime", "description": "拍摄剧本搭配风险处理正文，无表头；为空则条件段省略"},
+        {"name": "runtime.shoot_script_resolved_accessories", "scope": "runtime", "description": "拍摄剧本本次配饰正文，无表头；为空则条件段省略"},
+        {"name": "runtime.shoot_script_shots", "scope": "runtime", "description": "拍摄剧本六格镜头正文，无表头"},
+        # 成片：当前镜头各分段
+        {"name": "runtime.preview_grid_cell", "scope": "runtime", "description": "当前成片对应分镜预览的格号（纯数字）"},
+        {"name": "runtime.shot_styling", "scope": "runtime", "description": "当前成片造型正文（造型/穿法/选中搭配 code），无表头"},
+        {"name": "runtime.shot_global_directing", "scope": "runtime", "description": "当前成片全局导演正文，无表头"},
+        {"name": "runtime.shot_current", "scope": "runtime", "description": "当前成片单镜头正文，无表头"},
+        {"name": "runtime.shot_accessories", "scope": "runtime", "description": "当前成片本镜头配饰正文，无表头；为空则条件段省略"},
+        # 参考图各职能图号区间：只出会变的图号，职能描述在模板正文托管
+        {"name": "runtime.ref_model_identity", "scope": "runtime", "description": "模特身份参考图图号区间，如「图1-2」；无则空"},
+        {"name": "runtime.ref_preview_grid", "scope": "runtime", "description": "分镜预览参考图图号（仅成片阶段），如「图3」；无则空"},
+        {"name": "runtime.ref_hero_garment", "scope": "runtime", "description": "主推款参考图图号区间，如「图4-5」；无则空"},
+        {"name": "runtime.ref_styling_garment", "scope": "runtime", "description": "搭配服装参考图图号区间；无则空"},
+        {"name": "runtime.ref_shoot_environment", "scope": "runtime", "description": "拍摄环境参考图图号（仅分镜预览阶段）；无则空"},
+        {"name": "runtime.ref_subject", "scope": "runtime", "description": "模特+主推款+搭配服装的合并图号区间，供「模特与服装以X为准」交叉引用"},
     ]
 
 

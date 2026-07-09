@@ -19,25 +19,23 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
-    "render_shoot_script_body",
-    "render_shot_context_body",
+    "render_shoot_script_global_directing",
+    "render_shoot_script_styling_risks",
+    "render_shoot_script_resolved_accessories",
+    "render_shoot_script_shots",
+    "render_preview_grid_cell",
+    "render_shot_styling",
+    "render_shot_global_directing",
+    "render_shot_current",
+    "render_shot_accessories",
     "render_hero_product_info_line",
     "render_user_instruction_line",
     "render_user_requirement_line",
-    "render_image_reference_line",
+    "render_image_reference_spans",
     "render_model_identity_line",
 ]
 
 EMPTY_PLACEHOLDER = "（无）"
-
-# 参考图角色 -> 面向模型的中文短标签（顺序说明用）。
-_REFERENCE_ROLE_LABELS = {
-    "model_identity": "数字模特身份",
-    "hero_garment": "主推款",
-    "styling_garment": "搭配服装",
-    "preview_grid": "分镜预览（构图参考）",
-    "shoot_environment": "拍摄环境参考",
-}
 
 
 # --------------------------------------------------------------------------- #
@@ -167,74 +165,63 @@ def _resolved_accessory_lines(items: Any) -> list[str]:
 # --------------------------------------------------------------------------- #
 # 对外渲染函数
 # --------------------------------------------------------------------------- #
-def render_shoot_script_body(context: dict[str, Any]) -> str:
-    """渲染分镜预览用的拍摄剧本正文。
-
-    ``context`` 为 ``shoot_script_result_for_prompt`` 的输出（含 6 个 shots）。
-    """
-    context = _as_dict(context)
-    gd = _as_dict(context.get("global_directing"))
-    shots = [s for s in (context.get("shots") or []) if isinstance(s, dict)]
-
-    sections: list[str] = []
-
-    directing = _block(_global_directing_lines(gd))
-    if directing:
-        sections.append("【全局导演】\n" + directing)
-
-    risk_lines = _styling_risk_lines(context.get("styling_risks"))
-    if risk_lines:
-        sections.append("【搭配风险处理】\n" + "\n".join(risk_lines))
-
-    accessory_lines = _resolved_accessory_lines(context.get("resolved_accessories"))
-    if accessory_lines:
-        sections.append("【本次配饰】\n" + "\n".join(accessory_lines))
-
-    if shots:
-        shot_texts = [_shot_lines(shot) for shot in shots]
-        sections.append("【六格镜头】\n" + "\n".join(shot_texts))
-
-    return "\n\n".join(sections)
+# 说明：以下渲染函数只输出「可变数据正文」，不带任何表头（【全局导演】等）、规则话术或
+# 事实源约束——那些固定文本一律由「Prompt 维护」页的模板正文托管，配合条件段
+# {{#runtime.x}}...{{/runtime.x}} 决定"有内容才显示表头"。空数据一律返回空串，模板据此省略整段。
+#
+# 边界：单条镜头/配饰内部的字段标签（核心/构图/机位…）属于「变长记录的序列化格式」，
+# 简单占位引擎无法用循环表达，故保留在代码里；它们是数据格式，不是可调话术。
+def render_shoot_script_global_directing(context: dict[str, Any]) -> str:
+    """拍摄剧本全局导演正文（无表头）。``context``=``shoot_script_result_for_prompt`` 输出。"""
+    return _block(_global_directing_lines(_as_dict(_as_dict(context).get("global_directing"))))
 
 
-def render_shot_context_body(context: dict[str, Any]) -> str:
-    """渲染最终单张成片用的当前镜头正文。
+def render_shoot_script_styling_risks(context: dict[str, Any]) -> str:
+    """拍摄剧本搭配风险处理正文（无表头）。"""
+    return "\n".join(_styling_risk_lines(_as_dict(context).get("styling_risks")))
 
-    ``context`` 为 ``current_shot_context_for_prompt`` 的输出。
-    """
-    context = _as_dict(context)
-    sections: list[str] = []
 
-    cell = context.get("preview_grid_cell")
-    if cell is not None:
-        sections.append(
-            f"【分镜参考】\n参考分镜预览第 {cell} 格；该格本身即 1:1 构图，画幅与本张成片一致，"
-            "只借用姿势、身位、景别、构图、背景与光影方向；分镜预览不是模特身份或商品事实来源。"
-        )
+def render_shoot_script_resolved_accessories(context: dict[str, Any]) -> str:
+    """拍摄剧本本次配饰正文（无表头）。"""
+    return "\n".join(_resolved_accessory_lines(_as_dict(context).get("resolved_accessories")))
 
-    selected = _as_dict(_as_dict(context.get("styling")).get("selected_outfit"))
-    styling_lines = [
+
+def render_shoot_script_shots(context: dict[str, Any]) -> str:
+    """拍摄剧本六格镜头正文（无表头）。"""
+    shots = [s for s in (_as_dict(context).get("shots") or []) if isinstance(s, dict)]
+    return "\n".join(_shot_lines(shot) for shot in shots)
+
+
+def render_preview_grid_cell(context: dict[str, Any]) -> str:
+    """当前成片对应分镜预览格号（纯数字文本，如 ``5``）；无则空串。"""
+    cell = _as_dict(context).get("preview_grid_cell")
+    return "" if cell is None else _clean_text(cell)
+
+
+def render_shot_styling(context: dict[str, Any]) -> str:
+    """当前成片造型正文（无表头）。"""
+    selected = _as_dict(_as_dict(_as_dict(context).get("styling")).get("selected_outfit"))
+    return _block([
         _kv_line("造型", selected.get("title")),
         _kv_line("穿法", selected.get("wearing_notes")),
         _list_line("选中搭配 code", selected.get("selected_material_codes"), sep="、"),
-    ]
-    styling_block = _block(styling_lines)
-    if styling_block:
-        sections.append("【造型】\n" + styling_block)
+    ])
 
-    directing = _block(_global_directing_lines(_as_dict(context.get("global_directing"))))
-    if directing:
-        sections.append("【全局导演】\n" + directing)
 
-    current_shot = _as_dict(context.get("current_shot"))
-    if current_shot:
-        sections.append("【当前镜头】\n" + _shot_lines(current_shot))
+def render_shot_global_directing(context: dict[str, Any]) -> str:
+    """当前成片全局导演正文（无表头）。"""
+    return _block(_global_directing_lines(_as_dict(_as_dict(context).get("global_directing"))))
 
-    accessory_lines = _resolved_accessory_lines(context.get("resolved_accessories_for_this_shot"))
-    if accessory_lines:
-        sections.append("【本镜头配饰】\n" + "\n".join(accessory_lines))
 
-    return "\n\n".join(sections)
+def render_shot_current(context: dict[str, Any]) -> str:
+    """当前成片单镜头正文（无表头）。"""
+    current_shot = _as_dict(_as_dict(context).get("current_shot"))
+    return _shot_lines(current_shot) if current_shot else ""
+
+
+def render_shot_accessories(context: dict[str, Any]) -> str:
+    """当前成片本镜头配饰正文（无表头）。"""
+    return "\n".join(_resolved_accessory_lines(_as_dict(context).get("resolved_accessories_for_this_shot")))
 
 
 def render_hero_product_info_line(context: dict[str, Any]) -> str:
@@ -292,24 +279,37 @@ def render_model_identity_line(context: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def render_image_reference_line(image_inputs: list[dict[str, Any]] | None) -> str:
-    """把参考图列表渲染成一句「图N=角色」的顺序说明（数据，不含规则/优先级话术）。
+def _span_text(start: int, end: int) -> str:
+    return f"图{start}" if start == end else f"图{start}-{end}"
 
-    顺序严格对应 provider ``reference_images`` 的传入顺序（由选图器决定），
-    连续同角色合并为「图a-b」。角色 → 中文标签见 ``_REFERENCE_ROLE_LABELS``。
-    列表为空返回空串，调用方据此省略整段。
+
+def render_image_reference_spans(image_inputs: list[dict[str, Any]] | None) -> dict[str, str]:
+    """按「职能」输出参考图图号区间（**只出会变的图号**，职能描述由模板正文托管）。
+
+    图号严格对应 provider ``reference_images`` 传入顺序（由选图器决定）。每个职能取该角色
+    出现的最小到最大图号，合并成「图a」或「图a-b」；不存在的职能返回空串，模板据此省略整段。
+
+    返回键：``model_identity`` / ``preview_grid`` / ``hero_garment`` / ``styling_garment`` /
+    ``shoot_environment``，外加 ``subject`` = 模特+主推款+搭配服装的合并区间
+    （供模板写「其中模特、服装以{subject}为准」这类交叉引用，避免在模板里写死图号）。
     """
-    groups: list[list[Any]] = []  # [role, start, end]
+    ranges: dict[str, list[int]] = {}
     for index, item in enumerate(image_inputs or [], start=1):
         role = str(_as_dict(item).get("role") or "")
-        if groups and groups[-1][0] == role:
-            groups[-1][2] = index
+        if not role:
+            continue
+        if role in ranges:
+            ranges[role][1] = index
         else:
-            groups.append([role, index, index])
+            ranges[role] = [index, index]
 
-    parts: list[str] = []
-    for role, start, end in groups:
-        label = _REFERENCE_ROLE_LABELS.get(role, "辅助参考")
-        span = f"图{start}" if start == end else f"图{start}-{end}"
-        parts.append(f"{span}={label}")
-    return "；".join(parts)
+    result: dict[str, str] = {}
+    for role in ("model_identity", "preview_grid", "hero_garment", "styling_garment", "shoot_environment"):
+        result[role] = _span_text(*ranges[role]) if role in ranges else ""
+
+    subject = [ranges[r] for r in ("model_identity", "hero_garment", "styling_garment") if r in ranges]
+    if subject:
+        result["subject"] = _span_text(min(s for s, _ in subject), max(e for _, e in subject))
+    else:
+        result["subject"] = ""
+    return result

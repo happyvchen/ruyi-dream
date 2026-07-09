@@ -98,11 +98,14 @@ class PreviewCanvasTest(unittest.TestCase):
         self.assertEqual(parse(mock.Mock(gpt_image2_preview_fal_image_size="800x600")), {"width": 800, "height": 600})
         self.assertEqual(parse(mock.Mock(gpt_image2_preview_fal_image_size="")), "square_hd")
 
-    def test_final_shot_context_declares_square_cell(self) -> None:
+    def test_final_shot_context_cell_is_number_only(self) -> None:
+        # 重构后：代码只输出「会变的格号」，「第 N 格即 1:1 构图/只借用姿势…」这类固定话术
+        # 已移入 assembly.final_image 的 Prompt 维护模板正文（用 {{runtime.preview_grid_cell}} 占位）。
         prompt_render = importlib.reload(importlib.import_module("app.prompt_render"))
-        body = prompt_render.render_shot_context_body({"preview_grid_cell": 3})
-        self.assertIn("第 3 格", body)
-        self.assertIn("1:1 构图", body)
+        self.assertEqual(prompt_render.render_preview_grid_cell({"preview_grid_cell": 3}), "3")
+        self.assertEqual(prompt_render.render_preview_grid_cell({}), "")
+        # 规则话术不得再由渲染层产出。
+        self.assertNotIn("1:1 构图", prompt_render.render_preview_grid_cell({"preview_grid_cell": 3}))
 
 
 if __name__ == "__main__":
