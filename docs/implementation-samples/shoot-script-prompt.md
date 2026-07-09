@@ -65,14 +65,8 @@
 【输出结构】
 {
   "global_directing": {
-    "brand_tone": "string",
-    "background": "string",
-    "lighting": "string",
-    "model_direction": "string",
-    "hair_makeup_boundary": "string",
     "accessory_boundary": "string",
     "consistency_rules": ["string"],
-    "product_fidelity_rules": ["string"],
     "negative_constraints": ["string"]
   },
   "styling_risks": [{"risk_id": "string", "severity": "low | medium | high | blocking", "material_code": "string", "risk": "string", "affected_shots": [1], "director_strategy": "string", "user_visible_recommendation": "string"}],

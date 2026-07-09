@@ -45,7 +45,7 @@
 | `cannot_override` 出现 | 2 | 0 |
 | JSON `{` 出现 | 24 | 0 |
 
-内容零损失：品牌调性、背景、光线、6 格镜头的 `main_focus`/姿态/配饰/不可遮挡区、一致性规则、禁止项全部保留，只是从 JSON 变成导演语言。
+内容零损失：6 格镜头的 `main_focus`/姿态/配饰/不可遮挡区、一致性规则、禁止项全部保留，只是从 JSON 变成导演语言。（注：品牌调性、背景光线、模特导演和商品保真后续已从拍摄剧本 `global_directing` 移除，改由 `Prompt 维护` 模板正文静态承载，renderer 不再输出这些字段。）
 
 ## 2. 一个必须尊重的区分：两类调用
 
@@ -94,7 +94,7 @@ renderer 工程约束：
 
 - 只做**数据 → 文本行 / 精简 dict**，不碰 DB、不发请求、不改状态——可纯单测。
 - 空值优雅省略：字段为空则不输出该行，杜绝 `""`、`[]`、`{}` 空壳。
-- 去掉源数据末尾重复标点（如品牌调性以「。」结尾时不再补「。」）。
+- 去掉源数据末尾重复标点（如配饰边界以「。」结尾时不再补「。」）。
 - 文本拼接用小的具名 helper（`_shot_line`、`_fact_source_line`），不写巨型 f-string；便于逐段测试。
 - renderer 不重新实现事实优先级判断，也不硬编码规则话术——那是内容/规则，来自上游或模板；renderer 只负责把数据摆成可读文本。
 
@@ -191,7 +191,7 @@ renderer 工程约束：
 - **P4｜清理 ✅**：删除因上游改造而失效的死代码 `append_user_requirement_block` / `has_user_requirement` / `append_runtime_input_block` / `has_user_input`；prompt 出口统一走 renderer，空值由 `render_*_line` 返回「（无）」、`_block` 省略空行，杜绝空壳 JSON。
 
 - **P5｜残留清理 ✅**：
-  - 模特身份契约 `append_model_identity_contract` 从英文 JSON dump 改为中文自然语言块（`render_model_identity_line`）：身份编号 + 中文 `hair_makeup_boundary`（已承载 `must_preserve`/`must_not_change` 语义）+ 模特备注 + 额外禁止 + 参考图角度；去掉 `schema_version`/`objectKey`/英文数组。身份事实仍以模特参考图为准。
+  - 模特身份契约 `append_model_identity_contract` 从英文 JSON dump 改为中文自然语言块（`render_model_identity_line`）：身份编号 + 模特备注 + 额外禁止 + 参考图角度；去掉 `schema_version`/`objectKey`/英文数组。身份事实仍以模特参考图为准。（注：`hair_makeup_boundary` 妆发边界后续已从各链路移除，改由 `Prompt 维护` 模板正文承载。）
   - 删除 `styling_garment_prompt_context`（ai_tagging）顶层 `schema_version`（实为未被模板引用的死运行时键，不影响任何 prompt 输出，顺手清理）。
 
 至此生成链路上所有会进入 prompt 的上下文均已按「快照留结构化、prompt 走自然语言/去治理元数据」完成改造。

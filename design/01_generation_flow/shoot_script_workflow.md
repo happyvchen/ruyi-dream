@@ -112,7 +112,7 @@ AI 摄影棚的 0.1.0 主流程：
 - 整个拍摄剧本包括 6 个 `ShotPlan`，由 AI 一次性生成。
 - 用户可查看，不可编辑。
 - AI 导演可以安排姿势、景别、光线、表情气质和干净自然妆容，但不得发明与数字模特参考图冲突的脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色或重妆。
-- `global_directing.hair_makeup_boundary` 必须以 `ModelIdentityContract` 为最高优先级；品牌妆发只能在不改变模特身份的范围内生效。
+- 模特身份和妆发边界不再作为 `global_directing` 字段由拍摄剧本逐次生成；身份事实以模特参考图和 `ModelIdentityContract` 为最高优先级，具体妆发边界话术由 `Prompt 维护` 模板正文承载。品牌妆发只能在不改变模特身份的范围内生效。
 - 不做独立分镜质量质检；0.1.0 把灵活度和判断权交给用户。
 - 仍需做最小结构校验：JSON 可解析、字段存在、6 个镜头齐全、镜头序号唯一、第 6 格不进入最终成片。
 
@@ -398,22 +398,14 @@ active_result_set_id
 
 ### 7.2 global_directing
 
+> 品牌调性、背景光线、模特导演和商品保真规则不再由拍摄剧本逐次生成，改由 `Prompt 维护` 中的模板正文（`assembly.shoot_script` / `assembly.storyboard_preview` / `assembly.final_image`）静态承载；模特身份事实仍以模特参考图和 `ModelIdentityContract` 为准。`global_directing` 只保留导演在本次剧本内需要动态表达的字段。
+
 ```json
 {
-  "brand_tone": "Lily 商务时装，现代、干净、轻熟、自信、克制，商品优先。",
-  "background": "白色或浅灰棚拍背景，少量极简都市空间感，背景不抢服装主体。",
-  "lighting": "柔和均匀、低反差、真实肤色，轻微落地阴影，面料边缘和结构清楚。",
-  "model_direction": "同一位数字模特，自然、自信、从容、克制，姿态有轻微生活感。",
-  "hair_makeup_boundary": "保持数字模特原有脸型、五官、头型、发型、刘海和气质；妆容干净自然。",
   "accessory_boundary": "鞋包首饰低存在感，可省略；不得遮挡主推款卖点，不做配饰特写。",
   "consistency_rules": [
     "6 个镜头必须是同一位模特、同一套造型、同一背景光线体系。",
     "只允许改变景别、取景范围、身位、姿势和轻微走位。"
-  ],
-  "product_fidelity_rules": [
-    "主推款图片是主角商品事实来源。",
-    "选中搭配服装图片是配角商品事实来源。",
-    "不得改款、换色、改变长度、比例、结构和关键细节。"
   ],
   "negative_constraints": [
     "不要文字、水印、logo、编号和边框说明。",

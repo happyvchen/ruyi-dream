@@ -1658,7 +1658,6 @@ function ShootScriptSummary({ task, isAdmin }: { task: GenerationTask; isAdmin: 
   if (!shootScript) return null
   const script = shootScript.script ?? {}
   const summary = (shootScript.summary && Object.keys(shootScript.summary).length ? shootScript.summary : planValue<Record<string, unknown>>(script, 'user_visible_summary') ?? {}) as Record<string, unknown>
-  const directing = (planValue<Record<string, unknown>>(script, 'global_directing') ?? {}) as Record<string, unknown>
   const shots = shootScriptShots(task)
   const risks = shootScript.stylingRisks?.length ? shootScript.stylingRisks : arrayValue<Record<string, unknown>>(script, 'styling_risks')
   const adjustments = shootScript.accessoryAdjustments?.length ? shootScript.accessoryAdjustments : arrayValue<Record<string, unknown>>(script, 'accessory_adjustments')
@@ -1677,12 +1676,6 @@ function ShootScriptSummary({ task, isAdmin }: { task: GenerationTask; isAdmin: 
         </div>
       </div>
       <p>{stringValue(summary.summary) || '本组拍摄以主推款商品表达为核心，覆盖完整比例、品类核心、设计细节、动态补充和标准正面图。'}</p>
-      <div className="styling-plan-grid script-directing-grid">
-        <InfoBlock title="品牌调性" items={[stringValue(directing.brand_tone)]} />
-        <InfoBlock title="背景光线" items={[stringValue(directing.background), stringValue(directing.lighting)].filter(Boolean)} />
-        <InfoBlock title="模特导演" items={[stringValue(directing.model_direction), stringValue(directing.hair_makeup_boundary)].filter(Boolean)} />
-        <InfoBlock title="商品保真" items={stringList(directing.product_fidelity_rules)} />
-      </div>
       {risks.length > 0 && (
         <div className="rejected-list">
           <strong>选搭风险与建议</strong>

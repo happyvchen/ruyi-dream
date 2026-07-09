@@ -6486,7 +6486,6 @@ def normalize_shoot_script(raw: dict[str, Any], request_snapshot: dict[str, Any]
     model_identity_context = model_identity_context_for_prompt(model_snapshot)
     global_directing = source.get("global_directing") if isinstance(source.get("global_directing"), dict) else {}
     fallback_consistency_rules: list[str] = []
-    fallback_product_fidelity_rules: list[str] = []
     fallback_negative_constraints: list[str] = []
     selected_outfit = selected_outfit_from_plan(styling_plan)
     accessory_adjustments = normalize_accessory_adjustments(source.get("accessory_adjustments"))
@@ -6504,14 +6503,8 @@ def normalize_shoot_script(raw: dict[str, Any], request_snapshot: dict[str, Any]
         "model_identity_contract": model_identity_context.get("identity_contract", {}),
         "global_directing": {
             "rules": normalize_shoot_script_global_rules(global_directing.get("rules")),
-            "brand_tone": str(global_directing.get("brand_tone") or ""),
-            "background": str(global_directing.get("background") or ""),
-            "lighting": str(global_directing.get("lighting") or ""),
-            "model_direction": str(global_directing.get("model_direction") or ""),
-            "hair_makeup_boundary": str(model_identity_context.get("hair_makeup_boundary") or global_directing.get("hair_makeup_boundary") or ""),
             "accessory_boundary": str(global_directing.get("accessory_boundary") or ""),
             "consistency_rules": ensure_string_list(global_directing.get("consistency_rules")) or fallback_consistency_rules,
-            "product_fidelity_rules": ensure_string_list(global_directing.get("product_fidelity_rules")) or fallback_product_fidelity_rules,
             "negative_constraints": ensure_string_list(global_directing.get("negative_constraints")) or fallback_negative_constraints,
         },
         "styling_risks": normalize_styling_risks(source.get("styling_risks")),
@@ -6867,16 +6860,12 @@ def model_identity_context_for_prompt(model_snapshot: dict[str, Any] | None) -> 
     return {
         "schema_version": "model-identity-context-v1",
         "identity_contract": contract,
-        "hair_makeup_boundary": (
-            "以数字模特参考图为唯一模特身份事实源；保持同一人的脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。"
-            "不得根据品牌妆发想象改成低马尾、盘发、长发、浓妆或任何参考图中不存在的造型。"
-        ),
     }
 
 
 def append_model_identity_contract(prompt: str, model_identity_context: dict[str, Any]) -> str:
-    # P5：模特身份契约从英文 JSON dump 改为中文自然语言块（must_preserve/forbidden 语义
-    # 已由中文 hair_makeup_boundary 承载）。身份事实仍以模特参考图为准，此处只作文字边界。
+    # 模特身份契约渲染为中文自然语言块（身份编号 + 模特备注 + 额外禁止 + 参考图角度）。
+    # 身份事实仍以模特参考图为准；具体妆发边界话术由 Prompt 维护 模板正文承载。
     body = render_model_identity_line(model_identity_context)
     if not body:
         return prompt
@@ -7290,7 +7279,7 @@ def sample_prompt_runtime() -> dict[str, Any]:
         "styling_result": dumps({"hero_understanding": {"category": "裤装"}, "selected_material_codes": ["LOOK-A"], "reason_summary": "轻量上装服务主推裤装。"}),
         "model_identity_context": dumps({"identity_contract": {"model_id": "Face-01", "must_preserve": ["same face", "same hair"]}}),
         "image_reference_manifest": dumps({"references": [{"reference_index": 1, "role": "model_identity"}, {"reference_index": 2, "role": "hero_garment"}]}),
-        "shoot_script_result": dumps({"global_directing": {"background": "浅灰棚拍"}, "shots": [{"shot_index": 1, "shot_role": "hero_full_body", "main_focus": "主推款整体比例"}]}),
+        "shoot_script_result": dumps({"global_directing": {"accessory_boundary": "生成配饰低存在感"}, "shots": [{"shot_index": 1, "shot_role": "hero_full_body", "main_focus": "主推款整体比例"}]}),
         "current_shot_context": dumps({"preview_grid_cell": 1, "current_shot": {"shot_role": "hero_full_body", "main_focus": "主推款整体比例"}, "styling": {"selected_material_codes": ["LOOK-A"]}}),
     }
 

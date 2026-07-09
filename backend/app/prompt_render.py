@@ -96,14 +96,8 @@ def _as_dict(value: Any) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 def _global_directing_lines(gd: dict[str, Any]) -> list[str | None]:
     return [
-        _kv_line("品牌调性", gd.get("brand_tone")),
-        _kv_line("背景", gd.get("background")),
-        _kv_line("光线", gd.get("lighting")),
-        _kv_line("模特方向", gd.get("model_direction")),
-        _kv_line("妆发边界", gd.get("hair_makeup_boundary")),
         _kv_line("配饰边界", gd.get("accessory_boundary")),
         _list_line("一致性", gd.get("consistency_rules")),
-        _list_line("商品保真", gd.get("product_fidelity_rules")),
         _list_line("全局禁止", gd.get("negative_constraints")),
     ]
 
@@ -269,9 +263,8 @@ def render_user_requirement_line(context: dict[str, Any]) -> str:
 def render_model_identity_line(context: dict[str, Any]) -> str:
     """把模特身份契约渲染成中文自然语言块（替代英文 JSON dump）。
 
-    ``context`` 为 ``model_identity_context_for_prompt`` 的输出。核心身份约束来自
-    已是中文的 ``hair_makeup_boundary``；``identity_contract`` 里的英文
-    ``must_preserve`` / ``must_not_change`` 与之语义等价，不再逐条重复。
+    ``context`` 为 ``model_identity_context_for_prompt`` 的输出。身份事实以模特参考图
+    和 ``identity_contract`` 为准；具体身份边界话术由可编辑模板正文（Prompt 维护）声明。
     """
     ctx = _as_dict(context)
     contract = _as_dict(ctx.get("identity_contract"))
@@ -281,10 +274,6 @@ def render_model_identity_line(context: dict[str, Any]) -> str:
     name = _clean_text(contract.get("name"))
     if model_id:
         lines.append(f"数字模特身份：{model_id}" + (f"（{name}）" if name else ""))
-
-    boundary = _clean_text(ctx.get("hair_makeup_boundary"))
-    if boundary:
-        lines.append(f"身份边界：{boundary}")
 
     notes = _clean_text(contract.get("profile_notes"))
     if notes:

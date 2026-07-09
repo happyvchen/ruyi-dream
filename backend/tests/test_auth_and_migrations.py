@@ -1555,8 +1555,8 @@ class BackendCurrentFlowTests(unittest.TestCase):
         shoot_script = {
             "schema_version": "shoot-script-v1",
             "global_directing": {
-                "hair_makeup_boundary": "错误示例：改成低马尾",
-                "background": "浅灰棚拍",
+                "accessory_boundary": "生成配饰低存在感",
+                "consistency_rules": ["同一模特同一造型"],
             },
             "shots": [{"shot_index": 1, "shot_role": "hero", "main_focus": "主推款"}],
         }
@@ -1663,7 +1663,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertIn("不得根据拍摄剧本", final_package["prompt"])
 
         normalized = main.normalize_shoot_script(
-            {"global_directing": {"hair_makeup_boundary": "错误示例：改成低马尾"}, "shots": []},
+            {"global_directing": {"accessory_boundary": "生成配饰低存在感"}, "shots": []},
             {
                 "task_id": 1,
                 "styling_id": 3,
@@ -1672,7 +1672,9 @@ class BackendCurrentFlowTests(unittest.TestCase):
             },
         )
         self.assertIn("model_identity_contract", normalized)
-        self.assertIn("不得根据品牌妆发想象改成低马尾", normalized["global_directing"]["hair_makeup_boundary"])
+        # 品牌调性/背景光线/模特导演/商品保真 字段已从拍摄剧本 global_directing 移除
+        for removed in ("brand_tone", "background", "lighting", "model_direction", "hair_makeup_boundary", "product_fidelity_rules"):
+            self.assertNotIn(removed, normalized["global_directing"])
 
     def test_toapis_request_snapshot_keeps_reference_manifest_roles(self) -> None:
         image_provider = importlib.import_module("app.image_provider")

@@ -64,14 +64,8 @@ def _sample_shoot_script_context() -> dict:
     return {
         "schema_version": "shoot-script-storyboard-context-v1",
         "global_directing": {
-            "brand_tone": "轻松高级、智性优雅",
-            "background": "浅灰白纯色棚拍背景",
-            "lighting": "柔光箱低反差",
-            "model_direction": "从容自信",
-            "hair_makeup_boundary": "以模特参考图为唯一身份源",
             "accessory_boundary": "克制精致不抢镜",
             "consistency_rules": ["面部一致", "印花一致"],
-            "product_fidelity_rules": ["V领工艺清晰"],
             "negative_constraints": ["避免职业装沉闷"],
         },
         "styling_risks": [
@@ -245,7 +239,6 @@ class RenderModelIdentityLineTests(unittest.TestCase):
         return {
             "schema_version": "model-identity-context-v1",
             "identity_contract": contract,
-            "hair_makeup_boundary": "以数字模特参考图为唯一模特身份事实源；保持同一人的脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质。",
         }
 
     def setUp(self) -> None:
@@ -260,7 +253,6 @@ class RenderModelIdentityLineTests(unittest.TestCase):
     def test_core_content_present(self) -> None:
         self.assertIn("Face-01", self.out)
         self.assertIn("默认模特", self.out)
-        self.assertIn("发型轮廓", self.out)  # from hair_makeup_boundary
         self.assertIn("冷静克制气质", self.out)  # profile_notes
         self.assertIn("低马尾", self.out)  # forbidden
         self.assertIn("front", self.out)  # reference angle
@@ -270,7 +262,7 @@ class RenderModelIdentityLineTests(unittest.TestCase):
 
     def test_partial_context_omits_missing(self) -> None:
         out = render_model_identity_line(
-            {"identity_contract": {"model_id": "Face-02"}, "hair_makeup_boundary": ""}
+            {"identity_contract": {"model_id": "Face-02"}}
         )
         self.assertIn("Face-02", out)
         self.assertNotIn("模特备注", out)
