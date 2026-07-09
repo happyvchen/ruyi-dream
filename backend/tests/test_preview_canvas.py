@@ -51,6 +51,11 @@ PREVIEW_ENV = {
     "GPT_IMAGE2_SIZE": "1:1",
     "GPT_IMAGE2_PREVIEW_SIZE": "3:2",
     "GPT_IMAGE2_PREVIEW_FAL_IMAGE_SIZE": "1536x1024",
+    # 被测的是纯画布尺寸逻辑，本身不碰对象存储；但它经由共享的 get_settings()，
+    # 而 get_settings() 会校验整个应用配置（含 S3 凭证）。沿用 test_auth_and_migrations
+    # 的约定注入哑元 CI 凭证，让校验通过而不真正触达 S3。
+    "APP_S3_ACCESS_KEY_ID": "ci-test-access-key",
+    "APP_S3_SECRET_ACCESS_KEY": "ci-test-secret-key",
 }
 
 
