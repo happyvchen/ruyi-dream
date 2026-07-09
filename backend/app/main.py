@@ -105,29 +105,12 @@ MAX_USER_REQUIREMENT_CHARS = 800
 MAX_USER_INPUT_CHARS = 800
 
 
-# ToAPIs OpenAI 兼容通道没有原生 JSON 模式，模型手写 JSON 的输出形态存在方差
-# （markdown 围栏 / 单引号 dict / 字符串内裸换行）。此纪律用于压低方差；
-# 解析端的 parse_gemini_json_object 仍保留对应兜底，两层缺一不可。
-GEMINI_JSON_OUTPUT_DISCIPLINE = (
-    "输出纪律（必须遵守）：直接输出 JSON 本体，第一个字符必须是 {；"
-    "不要 markdown 代码围栏，不要任何解释文字；"
-    "只允许双引号，禁止单引号和 Python 字典风格；"
-    "字符串值内的换行必须写成 \\n 转义，不得输出裸换行。"
-)
-
-
-AI_STYLIST_SYSTEM_INSTRUCTION = """你是 Lily 品牌 AI 摄影棚的 AI Stylist。
-你必须遵守不可覆盖的生产边界：商品事实以主推款图片和搭配服装库事实为准；搭配服装只能来自 READY 候选 code；不得编造商品级服饰；必须返回合法 JSON。
-用户要求是本次任务的高优先级业务输入，高于默认搭配偏好；但不得覆盖商品图片事实、搭配库事实、Lily 品牌硬边界、输出 schema 和安全规则。
-当用户要求与硬边界冲突时，不要强行满足；请在 user_requirement_resolution 中说明冲突原因、未满足项和替代处理。
-""" + GEMINI_JSON_OUTPUT_DISCIPLINE
-
-
-AI_DIRECTOR_SYSTEM_INSTRUCTION = """你是 Lily 品牌 AI 摄影棚的 AI Director。
-你必须承接已完成的 StylingPlan 和其中的 user_requirement_resolution，不得重新选择库内搭配服装。
-用户要求高于默认导演偏好；但不得覆盖商品事实、数字模特身份契约、已选搭配服装、输出 schema 和安全规则。
-请只返回合法 JSON。
-""" + GEMINI_JSON_OUTPUT_DISCIPLINE
+# 所有 Prompt 正文均由「Prompt 维护」页维护，代码不写死。系统指令、JSON 输出纪律、
+# 重问约束、参考图事实源约束等已分别合并进对应的组装 Prompt 正文：
+#   - AI 选搭 / 拍摄剧本：正文开头含角色系统指令与 JSON 输出纪律，结尾含 JSON 重问约束，
+#     整段作为 user prompt 下发（不再单独走 Gemini system_instruction）。
+#   - 分镜预览 / 生成成片：正文内用 {{runtime.image_reference_manifest}} 承接参考图顺序，
+#     并在正文写明参考图身份/商品事实源约束（成片额外含分镜预览参考补充）。
 
 
 def is_request_authenticated(request: Request) -> bool:
@@ -5141,12 +5124,6 @@ def extract_first_complete_json_value(text: str) -> str:
     return text[start:]
 
 
-# MALFORMED_OUTPUT 重问时追加的约束句：促使模型只吐合法 JSON，不带解释/围栏/思考。
-GEMINI_JSON_ONLY_REASK_HINT = (
-    "\n\n严格要求：只输出一个合法的 JSON 对象，不要任何解释文字、Markdown 代码围栏或多余内容。"
-)
-
-
 async def generate_gemini_json_object_with_reask(
     prompt: str,
     images: list[dict[str, Any]] | None = None,
@@ -5183,7 +5160,9 @@ async def generate_gemini_json_object_with_reask(
                     ERROR_MALFORMED_OUTPUT,
                 ) from parse_error
             attempt += 1
-            reask_prompt = f"{prompt}{GEMINI_JSON_ONLY_REASK_HINT}"
+            # JSON 输出纪律与重问约束已写入各 stage 的 Prompt 维护正文（每次都随 prompt 下发），
+            # 故重问直接重发原 prompt；模型随机性使二次多半成功。
+            reask_prompt = prompt
             logger.warning("Gemini 返回 JSON 解析失败，自动重问第 %d 次：%s", attempt, str(parse_error)[:200])
 
 
@@ -5626,7 +5605,8 @@ async def select_styling_with_gemini(input_row: Any, candidate_snapshot: dict[st
         raw = await generate_gemini_json_object_with_reask(
             prompt,
             images,
-            system_instruction=str(request_snapshot.get("systemInstruction") or AI_STYLIST_SYSTEM_INSTRUCTION),
+            # 系统指令已并入 AI 选搭 Prompt 正文（prompt 内），不再单独下发 system_instruction。
+            system_instruction=request_snapshot.get("systemInstruction"),
         )
     except Exception as exc:
         raise wrap_gemini_call_error("Gemini AI Stylist 调用失败", exc) from exc
@@ -5638,7 +5618,7 @@ async def select_styling_with_gemini(input_row: Any, candidate_snapshot: dict[st
 def attach_ai_stylist_prompt_snapshot(request_snapshot: dict[str, Any], candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
     # P3：商品信息/用户要求/本步骤介入要求以自然语言文本填充占位符，去掉重复的
     # priority_policy / cannot_override 治理元数据——优先级与冲突处理已由
-    # AI_STYLIST_SYSTEM_INSTRUCTION 和模板正文声明一次。candidate_retrieval 是
+    # AI 选搭 Prompt 正文（含开头系统指令段）声明一次。candidate_retrieval 是
     # 结构化标签事实业务输入，保持 JSON。
     prompt = render_prompt_template(
         AI_STYLING_PROMPT_CONFIG_KEY,
@@ -5705,7 +5685,8 @@ def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[s
     return {
         "schema_version": "ai-stylist-request-v1",
         **gemini_request_meta(),
-        "systemInstruction": AI_STYLIST_SYSTEM_INSTRUCTION,
+        # 系统指令已并入 AI 选搭 Prompt 正文，不再单独快照 systemInstruction。
+        "systemInstruction": None,
         "input_version": {
             "id": input_row["id"],
             "taskId": input_row["task_id"],
@@ -6381,7 +6362,8 @@ def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_ver
     return {
         "schema_version": "shoot-script-request-v1",
         **gemini_request_meta(),
-        "systemInstruction": AI_DIRECTOR_SYSTEM_INSTRUCTION,
+        # 系统指令已并入拍摄剧本 Prompt 正文，不再单独快照 systemInstruction。
+        "systemInstruction": None,
         "task_id": task_id,
         "input_version": {
             "id": input_version_id,
@@ -6449,7 +6431,8 @@ async def generate_shoot_script_with_gemini(request_snapshot: dict[str, Any]) ->
         return await generate_gemini_json_object_with_reask(
             prompt,
             image_inputs,
-            system_instruction=str(request_snapshot.get("systemInstruction") or AI_DIRECTOR_SYSTEM_INSTRUCTION),
+            # 系统指令已并入拍摄剧本 Prompt 正文（prompt 内），不再单独下发 system_instruction。
+            system_instruction=request_snapshot.get("systemInstruction"),
         )
     except Exception as exc:
         raise wrap_gemini_call_error("Gemini 拍摄剧本调用失败", exc) from exc
@@ -6460,7 +6443,7 @@ def attach_shoot_script_prompt_snapshot(request_snapshot: dict[str, Any]) -> dic
     model_snapshot = input_version.get("model_snapshot") if isinstance(input_version.get("model_snapshot"), dict) else {}
     model_identity_context = model_identity_context_for_prompt(model_snapshot)
     # P3：商品信息/用户要求以自然语言文本填充占位符，去治理元数据（优先级已由
-    # AI_DIRECTOR_SYSTEM_INSTRUCTION 和模板正文声明）。styling_result（导演上下文）与
+    # 拍摄剧本 Prompt 正文（含开头系统指令段）声明）。styling_result（导演上下文）与
     # model_identity_context（模特身份契约）是结构化业务/身份事实，保持 JSON。
     prompt = render_prompt_template(
         SHOOT_SCRIPT_PROMPT_CONFIG_KEY,
@@ -6877,23 +6860,6 @@ def append_model_identity_contract(prompt: str, model_identity_context: dict[str
     )
 
 
-def append_image_reference_manifest(prompt: str, image_inputs: list[dict[str, Any]]) -> str:
-    # P2：参考图清单从 JSON dump 改为自然语言顺序说明 + 事实源约束。
-    # provider 侧的结构化 reference_image_manifest 仍由 image_provider 单独承载，不受影响。
-    order_line = render_image_reference_line(image_inputs)
-    if not order_line:
-        return prompt
-    roles = {str((item or {}).get("role") or "") for item in (image_inputs or [])}
-    constraint = (
-        "模特身份参考图是唯一人物身份事实源（非风格参考），主推款与搭配服装参考图是商品事实源；"
-        "请严格保持图中人物身份与商品事实，文字不得覆盖——"
-        "不得改变模特脸型、五官、头型、发长、发型轮廓、刘海/碎发形态、肤色和气质，不得改款、换色或替换商品。"
-    )
-    if "preview_grid" in roles:
-        constraint += "分镜预览图只作构图、姿势与光影参考，不是身份或商品事实来源。"
-    return prompt.rstrip() + "\n\n【输入参考图】\n" + f"参考图顺序：{order_line}。\n" + constraint + "\n"
-
-
 def build_new_preview_task_package(
     task_id: int,
     styling_id: int,
@@ -6956,10 +6922,10 @@ def build_new_preview_prompt(
     hero_product_info: dict[str, Any] | None = None,
     storyboard_preview_user_instruction: dict[str, Any] | None = None,
 ) -> str:
-    # P1 渲染层：拍摄剧本/商品信息/用户要求以自然语言文本填充模板占位符，
-    # 不再 dumps 结构化上下文（去 schema_version / priority_policy 等治理元数据噪音）。
-    # image_reference_manifest 的自然语言化属 P2，暂保持结构化追加。
-    prompt = render_prompt_template(
+    # P1 渲染层：拍摄剧本/商品信息/用户要求以自然语言文本填充模板占位符。
+    # 参考图顺序（image_reference_manifest）与事实源约束由 Prompt 维护正文承接，
+    # 正文用 {{runtime.image_reference_manifest}} 占位；代码不再事后追加约束话术。
+    return render_prompt_template(
         "assembly.storyboard_preview",
         {
             "shoot_script_result": render_shoot_script_body(shoot_script_result_for_prompt(shoot_script)),
@@ -6968,7 +6934,6 @@ def build_new_preview_prompt(
             "storyboard_preview_user_instruction": render_user_instruction_line(storyboard_preview_user_instruction or {}),
         },
     )
-    return append_image_reference_manifest(prompt, image_inputs or [])
 
 
 def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str, Any]:
@@ -7023,9 +6988,10 @@ def build_new_final_prompt(
     hero_product_info: dict[str, Any] | None = None,
     final_image_user_instruction: dict[str, Any] | None = None,
 ) -> str:
-    # P1 渲染层：当前镜头/商品信息/用户要求以自然语言文本填充模板占位符，
-    # 不再 dumps 结构化上下文。image_reference_manifest 自然语言化属 P2。
-    prompt = render_prompt_template(
+    # P1 渲染层：当前镜头/商品信息/用户要求以自然语言文本填充模板占位符。
+    # 参考图顺序与事实源约束（含分镜预览参考补充）由 Prompt 维护正文承接，
+    # 正文用 {{runtime.image_reference_manifest}} 占位；代码不再事后追加约束话术。
+    return render_prompt_template(
         "assembly.final_image",
         {
             "current_shot_context": render_shot_context_body(
@@ -7036,7 +7002,6 @@ def build_new_final_prompt(
             "final_image_user_instruction": render_user_instruction_line(final_image_user_instruction or {}),
         },
     )
-    return append_image_reference_manifest(prompt, image_inputs or [])
 
 
 def get_styling_plan_by_id(styling_id: int) -> dict[str, Any]:
@@ -7278,7 +7243,7 @@ def sample_prompt_runtime() -> dict[str, Any]:
         "user_requirement": dumps({"combined_requirement": "重点展示腰线，避免厚重外套。", "priority_policy": {"conflict_handling": "无法满足时说明原因。"}}),
         "styling_result": dumps({"hero_understanding": {"category": "裤装"}, "selected_material_codes": ["LOOK-A"], "reason_summary": "轻量上装服务主推裤装。"}),
         "model_identity_context": dumps({"identity_contract": {"model_id": "Face-01", "must_preserve": ["same face", "same hair"]}}),
-        "image_reference_manifest": dumps({"references": [{"reference_index": 1, "role": "model_identity"}, {"reference_index": 2, "role": "hero_garment"}]}),
+        "image_reference_manifest": "图1=数字模特身份；图2=主推款；图3=搭配服装",
         "shoot_script_result": dumps({"global_directing": {"accessory_boundary": "生成配饰低存在感"}, "shots": [{"shot_index": 1, "shot_role": "hero_full_body", "main_focus": "主推款整体比例"}]}),
         "current_shot_context": dumps({"preview_grid_cell": 1, "current_shot": {"shot_role": "hero_full_body", "main_focus": "主推款整体比例"}, "styling": {"selected_material_codes": ["LOOK-A"]}}),
     }

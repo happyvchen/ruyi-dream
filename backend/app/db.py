@@ -24,15 +24,33 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("039", "restore_storyboard_preview", "migration_restore_storyboard_preview"),
     ("040", "add_preview_environment_asset", "migration_add_preview_environment_asset"),
     ("041", "add_shoot_environment_reference", "migration_add_shoot_environment_reference"),
+    ("042", "drop_merged_prompt_config_keys", "migration_drop_merged_prompt_config_keys"),
 )
 
+# prompt_configs 只登记「Prompt 维护」页的配置槽（键 / 分组 / 标题 / 说明 / 排序），
+# 内容一律为空，由「Prompt 维护」页维护——代码里绝不写死任何 Prompt 正文。
+# 运行时统一从 prompt_configs.content 读取；页面上最新的内容为准。
+#
+# 系统指令、JSON 输出纪律、JSON 重问约束、参考图事实源约束等原独立配置槽已合并进
+# 对应的组装 Prompt 正文（AI 选搭 / 拍摄剧本 / 分镜预览 / 生成成片），故不再单列；
+# 历史遗留的这些孤儿键由 migration_drop_merged_prompt_config_keys 清理。
 PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
     ("segment.brand_info", "segment", "品牌信息", "品牌信息分段 Prompt，可被组装 Prompt 引用。", 10),
     ("assembly.ai_tagging", "assembly", "AI 打标", "搭配服装入库后的图片理解和标签识别 Prompt。", 100),
-    ("assembly.ai_styling", "assembly", "AI 选搭", "AI Stylist 选搭 Prompt，包含主推款理解、搭配选择和质量判断。", 110),
-    ("assembly.shoot_script", "assembly", "拍摄剧本", "AI Director 拍摄剧本 Prompt，生成 ShootScript 和 6 个镜头。", 120),
+    ("assembly.ai_styling", "assembly", "AI 选搭", "AI Stylist 选搭 Prompt，含角色系统指令、主推款理解、搭配选择和质量判断。", 110),
+    ("assembly.shoot_script", "assembly", "拍摄剧本", "AI Director 拍摄剧本 Prompt，含角色系统指令，生成 ShootScript 和 6 个镜头。", 120),
     ("assembly.storyboard_preview", "assembly", "分镜预览", "Image-2 分镜预览 Prompt，生成 3:2 横版、3 列 × 2 行共 6 个 1:1 方格的分镜图。", 130),
     ("assembly.final_image", "assembly", "生成成片", "Image-2 单张成片 Prompt，按前 5 个镜头生成最终图。", 140),
+)
+
+# 合并进组装 Prompt 正文后需从库里清除的孤儿配置键。
+MERGED_PROMPT_CONFIG_KEYS: tuple[str, ...] = (
+    "segment.json_output_discipline",
+    "segment.json_only_reask_hint",
+    "segment.image_reference_constraint",
+    "segment.image_reference_preview_note",
+    "assembly.ai_styling_system",
+    "assembly.shoot_script_system",
 )
 
 
@@ -368,6 +386,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_restore_storyboard_preview": migration_restore_storyboard_preview,
         "migration_add_preview_environment_asset": migration_add_preview_environment_asset,
         "migration_add_shoot_environment_reference": migration_add_shoot_environment_reference,
+        "migration_drop_merged_prompt_config_keys": migration_drop_merged_prompt_config_keys,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -989,10 +1008,28 @@ def create_prompt_config_table(db: sqlite3.Connection) -> None:
     )
 
 
+def migration_drop_merged_prompt_config_keys(db: sqlite3.Connection) -> None:
+    """删除已合并进组装 Prompt 正文的孤儿配置键。
+
+    系统指令 / JSON 输出纪律 / JSON 重问约束 / 参考图事实源约束等原独立 prompt_configs
+    条目，已合并到 AI 选搭 / 拍摄剧本 / 分镜预览 / 生成成片 的正文里，这里清除旧键，
+    使「Prompt 维护」页只保留合并后的组装 Prompt。表不存在时静默跳过。
+    """
+    exists = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prompt_configs'"
+    ).fetchone()
+    if not exists:
+        return
+    for key in MERGED_PROMPT_CONFIG_KEYS:
+        db.execute("DELETE FROM prompt_configs WHERE key = ?", (key,))
+
+
 def ensure_prompt_config_catalog(db: sqlite3.Connection) -> None:
     create_prompt_config_table(db)
     timestamp = now_iso()
     for key, group_type, title, description, sort_order in PROMPT_CONFIG_CATALOG:
+        # 只登记配置槽，content 首次以空插入；已存在的键 ON CONFLICT 不动 content，
+        # 保证「Prompt 维护」页上最新编辑的内容始终为准（代码不写死 Prompt 正文）。
         db.execute(
             """
             INSERT INTO prompt_configs
