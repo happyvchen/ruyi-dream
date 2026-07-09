@@ -29,7 +29,7 @@ PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
     ("assembly.ai_tagging", "assembly", "AI 打标", "搭配服装入库后的图片理解和标签识别 Prompt。", 100),
     ("assembly.ai_styling", "assembly", "AI 选搭", "AI Stylist 选搭 Prompt，包含主推款理解、搭配选择和质量判断。", 110),
     ("assembly.shoot_script", "assembly", "拍摄剧本", "AI Director 拍摄剧本 Prompt，生成 ShootScript 和 6 个镜头。", 120),
-    ("assembly.storyboard_preview", "assembly", "分镜预览", "Image-2 分镜预览 Prompt，生成 3x2 分镜图。", 130),
+    ("assembly.storyboard_preview", "assembly", "分镜预览", "Image-2 分镜预览 Prompt，生成 3:2 横版、3 列 × 2 行共 6 个 1:1 方格的分镜图。", 130),
     ("assembly.final_image", "assembly", "生成成片", "Image-2 单张成片 Prompt，按前 5 个镜头生成最终图。", 140),
 )
 

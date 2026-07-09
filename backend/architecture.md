@@ -52,7 +52,7 @@ POST /api/generation-tasks/{id}/shoot-script
 
 POST /api/generation-tasks/{id}/preview
   -> 读取 ShootScript 上下文
-  -> Image-2 生成 3x2 分镜预览
+  -> Image-2 生成 3:2 分镜预览
 
 POST /api/generation-tasks/{id}/generate-final
   -> 固定读取前 5 个 ShotPlan

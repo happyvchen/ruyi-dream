@@ -1754,13 +1754,13 @@ function PreviewStep({ task, setTask, run, userInstruction, localOperations, sta
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <StageHeader title="生成分镜预览" text="按拍摄剧本生成一张 3x2 分镜预览图。最终固定生成前 5 个镜头，第 6 个镜头忽略。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成分镜预览调用记录', ['generation_preview'])} />
+        <StageHeader title="生成分镜预览" text="按拍摄剧本生成一张 3:2 横版分镜预览图（3 列 × 2 行、6 个 1:1 方格）。最终固定生成前 5 个镜头，第 6 个镜头忽略。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成分镜预览调用记录', ['generation_preview'])} />
         <AIOperationList operations={operations} />
         {preview?.asset ? (
           <button className="preview-board-open" onClick={() => preview.asset && setViewer(assetLightboxImage(preview.asset))} title="放大查看">
             <img className="preview-board" src={mediaUrl(assetPreviewSrc(preview.asset))} loading="lazy" alt="分镜预览" />
           </button>
-        ) : <EmptyState title="尚未生成分镜预览" text="点击生成预览后，系统会根据拍摄剧本输出一张 3x2 分镜预览图。" />}
+        ) : <EmptyState title="尚未生成分镜预览" text="点击生成预览后，系统会根据拍摄剧本输出一张 3:2 横版分镜预览图。" />}
       </div>
       <div className="stage-action-bar">
         <div>

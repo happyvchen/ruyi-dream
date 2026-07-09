@@ -213,8 +213,8 @@ def render_shot_context_body(context: dict[str, Any]) -> str:
     cell = context.get("preview_grid_cell")
     if cell is not None:
         sections.append(
-            f"【分镜参考】\n参考分镜预览第 {cell} 格，只借用姿势、身位、景别、构图、背景与光影方向；"
-            "分镜预览不是模特身份或商品事实来源。"
+            f"【分镜参考】\n参考分镜预览第 {cell} 格；该格本身即 1:1 构图，画幅与本张成片一致，"
+            "只借用姿势、身位、景别、构图、背景与光影方向；分镜预览不是模特身份或商品事实来源。"
         )
 
     selected = _as_dict(_as_dict(context.get("styling")).get("selected_outfit"))

@@ -75,7 +75,7 @@ AI Director 基于当前 StylingPlan 生成 ShootScript。ShootScript 负责把�
 
 ## GenerationPreview / GenerationResult
 
-`GenerationPreview` 保存 3x2 分镜预览总图。它是导演和构图参考，不是商品事实来源。
+`GenerationPreview` 保存 3:2 分镜预览总图。它是导演和构图参考，不是商品事实来源。
 
 `GenerationResultSet` 保存一次最终图生成批次。`GenerationResultImageNew` 保存前 5 张单图状态、当前资产、锁和重试 attempt。
 
