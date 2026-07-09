@@ -22,6 +22,8 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("036", "add_attempt_progress_and_upload_cache", "migration_add_attempt_progress_and_upload_cache"),
     ("037", "add_generation_task_batch_id", "migration_add_generation_task_batch_id"),
     ("039", "restore_storyboard_preview", "migration_restore_storyboard_preview"),
+    ("040", "add_preview_environment_asset", "migration_add_preview_environment_asset"),
+    ("041", "add_shoot_environment_reference", "migration_add_shoot_environment_reference"),
 )
 
 PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
@@ -73,6 +75,13 @@ def init_db() -> None:
               asset_dir TEXT NOT NULL,
               profile_json TEXT NOT NULL,
               is_default INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS shoot_environment_references (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              media_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
@@ -260,6 +269,7 @@ def init_db() -> None:
               input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
               user_instruction_json TEXT,
               preview_asset_id INTEGER REFERENCES media_assets(id),
+              environment_asset_id INTEGER REFERENCES media_assets(id),
               status TEXT NOT NULL DEFAULT 'QUEUED',
               active_attempt_id INTEGER,
               locked_by TEXT,
@@ -356,6 +366,8 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_attempt_progress_and_upload_cache": migration_add_attempt_progress_and_upload_cache,
         "migration_add_generation_task_batch_id": migration_add_generation_task_batch_id,
         "migration_restore_storyboard_preview": migration_restore_storyboard_preview,
+        "migration_add_preview_environment_asset": migration_add_preview_environment_asset,
+        "migration_add_shoot_environment_reference": migration_add_shoot_environment_reference,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -478,6 +490,35 @@ def migration_restore_storyboard_preview(db: sqlite3.Connection) -> None:
           locked_by TEXT,
           locked_until TEXT,
           run_attempts INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def migration_add_preview_environment_asset(db: sqlite3.Connection) -> None:
+    """分镜预览新增可选的「拍摄环境参考图」引用（验证阶段手动上传，幂等）。
+
+    环境信息只在分镜预览这一步进入并锁定，成片经分镜预览图继承；
+    因此环境参考图只挂在 generation_previews 上，成片链路不引用。
+    对全新库（init_db 已含该列）本迁移为无操作。
+    """
+    if not table_has_column(db, "generation_previews", "environment_asset_id"):
+        db.execute("ALTER TABLE generation_previews ADD COLUMN environment_asset_id INTEGER REFERENCES media_assets(id)")
+
+
+def migration_add_shoot_environment_reference(db: sqlite3.Connection) -> None:
+    """全局单例「拍摄环境参考图」资源（0..1 张，admin 维护，幂等）。
+
+    环境信息在分镜预览步骤自动引用这张维护好的图；成片经分镜预览图继承。
+    对全新库（init_db 已建该表）本迁移为无操作。
+    """
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shoot_environment_references (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          media_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         )

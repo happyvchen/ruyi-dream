@@ -551,4 +551,27 @@ export const api = {
     request<{ item: PromptConfig; preview: PromptConfigPreview }>(`/api/prompt-configs/${encodeURIComponent(key)}`, { method: 'PATCH', body: JSON.stringify({ content }) }),
   previewPromptConfig: (key: string) =>
     request<PromptConfigPreview>(`/api/prompt-configs/${encodeURIComponent(key)}/preview`),
+  addModelHeadReferences: (modelId: number, files: File[]) => {
+    const form = new FormData()
+    files.forEach((file) => form.append('files', file))
+    return request<{ item: ModelProfile }>(`/api/model-profiles/${modelId}/head-references`, { method: 'POST', body: form })
+  },
+  replaceModelHeadReference: (modelId: number, referenceId: string, file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<{ item: ModelProfile }>(`/api/model-profiles/${modelId}/head-references/${encodeURIComponent(referenceId)}/replace`, { method: 'POST', body: form })
+  },
+  deleteModelHeadReference: (modelId: number, referenceId: string) =>
+    request<{ item: ModelProfile }>(`/api/model-profiles/${modelId}/head-references/${encodeURIComponent(referenceId)}`, { method: 'DELETE' }),
+  reorderModelHeadReference: (modelId: number, referenceId: string, orderIndex: number) =>
+    request<{ item: ModelProfile }>(`/api/model-profiles/${modelId}/head-references/${encodeURIComponent(referenceId)}`, { method: 'PATCH', body: JSON.stringify({ orderIndex }) }),
+  setModelHeadReferenceAngle: (modelId: number, referenceId: string, angle: string) =>
+    request<{ item: ModelProfile }>(`/api/model-profiles/${modelId}/head-references/${encodeURIComponent(referenceId)}`, { method: 'PATCH', body: JSON.stringify({ angle }) }),
+  getShootEnvironment: () => request<{ asset: MediaAsset | null }>('/api/shoot-environment'),
+  setShootEnvironment: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<{ asset: MediaAsset | null }>('/api/shoot-environment', { method: 'POST', body: form })
+  },
+  clearShootEnvironment: () => request<{ asset: MediaAsset | null }>('/api/shoot-environment', { method: 'DELETE' }),
 }

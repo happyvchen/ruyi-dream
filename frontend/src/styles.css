@@ -1016,6 +1016,18 @@ a.button-link { text-decoration: none; cursor: pointer; }
   border: 1px solid #d8e0ea;
   background: #fff;
 }
+.env-ref-thumb {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.env-ref-thumb img {
+  width: 96px;
+  height: 96px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid #d8e0ea;
+}
 .preview-board-open,
 .result-image-open {
   display: block;
@@ -2217,28 +2229,63 @@ a.button-link { text-decoration: none; cursor: pointer; }
   padding: 22px;
   min-height: calc(100vh - 136px);
 }
-.model-meta { display: grid; align-content: start; gap: 16px; }
-.head-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
-}
-.head-card {
+.model-meta { display: grid; align-content: start; gap: 14px; }
+.model-cover {
   overflow: hidden;
   border: 1px solid #d8e0ea;
-  border-radius: 10px;
-  background: #fff;
+  border-radius: 12px;
+  background: #edf2f7;
 }
-.head-card img, .head-placeholder {
+.model-cover img, .model-cover .image-placeholder {
   width: 100%;
-  aspect-ratio: 1;
+  aspect-ratio: 3 / 4;
   display: grid;
   place-items: center;
   object-fit: cover;
+  color: #94a3b8;
   background: linear-gradient(135deg, #f8fbff, #e5eef9);
-  color: #64748b;
 }
-.head-card span { display: block; padding: 10px; font-size: 13px; color: #475569; }
+.model-meta-head { display: flex; align-items: center; gap: 10px; }
+.model-meta-head h2 { margin: 0; font-size: 18px; }
+.chip-admin { background: #e6f4ea; color: #15803d; }
+.model-main { display: grid; align-content: start; gap: 22px; }
+.model-block { display: grid; gap: 10px; }
+.model-block .section-head { margin-bottom: 0; }
+.saved-image-card .image-placeholder {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1;
+  color: #94a3b8;
+  background: #edf2f7;
+}
+.saved-image-card span.has-angle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  white-space: normal;
+  overflow: visible;
+}
+.saved-image-card span.has-angle small { margin-top: 0; flex: none; }
+.angle-select {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid #d8e0ea;
+  border-radius: 6px;
+  background: #fff;
+  color: #334155;
+  font-size: 12px;
+}
+.model-empty {
+  padding: 22px;
+  border: 1px dashed #cdd6e2;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #94a3b8;
+  font-size: 13px;
+  text-align: center;
+}
 
 .record-list {
   min-height: 0;
