@@ -45,7 +45,7 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。`/api/g
 | `/api/generation-tasks/{id}/ready` | POST | 冻结草稿，进入选搭 |
 | `/api/generation-tasks/{id}/select-styling` | POST | 调用 AI Stylist，可携带本次用户介入要求 |
 | `/api/generation-tasks/{id}/shoot-script` | POST | 调用 AI Director，可携带本次用户介入要求 |
-| `/api/generation-tasks/{id}/preview` | POST | 生成 3x2 分镜预览，可携带本次用户介入要求 |
+| `/api/generation-tasks/{id}/preview` | POST | 生成 3:2 分镜预览，可携带本次用户介入要求 |
 | `/api/generation-tasks/{id}/generate-final` | POST | 并发生成前 5 张成片，可携带本次用户介入要求 |
 | `/api/generation-tasks/{id}/auto-run-final` | POST | 一键成片：复用已有有效中间结果并自动完成后续步骤 |
 | `/api/generation-result-images-new/{image_id}/retry` | POST | 重生单张最终图，可携带本次用户介入要求 |

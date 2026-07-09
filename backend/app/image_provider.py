@@ -387,6 +387,25 @@ def upload_object_with_cache(provider: str, object_key: str, uploader: Callable[
         return provider_url
 
 
+def _fal_preview_image_size(settings: Any) -> Any:
+    """分镜预览在 fal 路径的画布尺寸。
+
+    fal 的 image_size 枚举没有 3:2，用显式宽高对象表达 3:2 横版，
+    让 3 列 × 2 行的 6 个分格各自为 1:1。配置形如 "1536x1024"。
+    """
+    raw = str(getattr(settings, "gpt_image2_preview_fal_image_size", "") or "").strip().lower()
+    if "x" in raw:
+        width_str, _, height_str = raw.partition("x")
+        try:
+            width = int(width_str)
+            height = int(height_str)
+        except ValueError:
+            width = height = 0
+        if width > 0 and height > 0:
+            return {"width": width, "height": height}
+    return raw or "square_hd"
+
+
 def build_fal_request_snapshot(task_package: dict[str, Any], image_urls: list[str]) -> dict[str, Any]:
     settings = get_settings()
     generation = task_package.get("generation", {}) if isinstance(task_package.get("generation"), dict) else {}
@@ -397,7 +416,7 @@ def build_fal_request_snapshot(task_package: dict[str, Any], image_urls: list[st
     return {
         "prompt": prompt,
         "image_urls": image_urls,
-        "image_size": "square_hd" if stage == "preview_grid" else "auto",
+        "image_size": _fal_preview_image_size(settings) if stage == "preview_grid" else "auto",
         "quality": "high" if stage == "preview_grid" else settings.gpt_image2_quality,
         "num_images": 1,
         "output_format": settings.gpt_image2_output_format,
@@ -419,7 +438,7 @@ def build_toapis_request_snapshot(task_package: dict[str, Any], image_urls: list
         "reference_images": image_urls,
         "reference_image_manifest": build_provider_reference_image_manifest(image_inputs, image_urls),
         "n": 1,
-        "size": "1:1" if stage == "preview_grid" else settings.gpt_image2_size,
+        "size": settings.gpt_image2_preview_size if stage == "preview_grid" else settings.gpt_image2_size,
         "resolution": settings.gpt_image2_resolution,
         "response_format": "url",
     }

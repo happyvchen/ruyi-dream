@@ -16,7 +16,7 @@
 | `generation_stylings` | `GenerationStyling` | AI Stylist 输出和选搭快照 |
 | `generation_shoot_scripts` | `GenerationShootScript` | 拍摄剧本 |
 | `generation_shot_plans` | `GenerationShotPlan` | ShootScript 派生 6 个镜头 |
-| `generation_previews` | `GenerationPreview` | 3x2 分镜预览 |
+| `generation_previews` | `GenerationPreview` | 3:2 分镜预览 |
 | `generation_result_sets` | `GenerationResultSet` | 最终成片集合 |
 | `generation_result_images_new` | `GenerationResultImage` | 前 5 张最终图 |
 | `generation_attempts` | `GenerationAttempt` | AI/provider 请求响应快照 |
@@ -47,7 +47,7 @@ AI Director 写入 `generation_shoot_scripts`，并派生 6 条 `generation_shot
 
 Image-2 阶段写入：
 
-- `generation_previews`：一张 3x2 分镜预览总图。
+- `generation_previews`：一张 3:2 分镜预览总图。
 - `generation_result_sets`：一次最终图生成批次。
 - `generation_result_images_new`：前 5 张最终图状态和当前资产。
 - `generation_attempts`：每次 AI/provider 调用的 request/response、provider id、错误和输出资产。`progress_json` 保存阶段进度（准备/上传/排队/生成/回传及分段起止时间），仅作展示元数据，不是业务状态；`error_code` 保存失败分类（`UPLOAD_FAILED`/`PROVIDER_FAILED`/`PROVIDER_TIMEOUT`/`DELIVERY_FAILED`）。`DELIVERY_FAILED` 表示 provider 已生成成功、仅结果回传失败，可通过 redeliver 零成本重新拉取。

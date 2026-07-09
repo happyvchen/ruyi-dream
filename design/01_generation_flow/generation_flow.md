@@ -18,7 +18,7 @@ flowchart TD
   J --> K["Aesthetic Critic<br/>审美 / 品牌 / 商品质量信号"]
   K --> L["选中 StylingPlan<br/>保留审核信号"]
   L --> M["生成拍摄剧本<br/>ShootScript + 6 条 ShotPlan"]
-  M --> N["Image-2 生成 3x2 分镜预览"]
+  M --> N["Image-2 生成 3:2 分镜预览"]
   N --> O["并发生成前 5 张成片"]
   O --> P["单张下载 / 生成记录复盘 / 反馈沉淀"]
 ```
@@ -287,7 +287,7 @@ ShotPlan 必须读取选中的 `StylingPlan`，尤其是：
 
 ## 7. 分镜预览
 
-分镜预览阶段调用 Image-2，输出一张 3x2 分镜预览总图。
+分镜预览阶段调用 Image-2，输出一张 3:2 分镜预览总图。
 
 输入包括：
 

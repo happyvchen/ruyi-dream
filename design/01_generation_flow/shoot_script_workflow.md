@@ -28,7 +28,7 @@ AI 摄影棚的 0.1.0 主流程：
 | 造型阶段 | AI 智能选搭 | `GenerationStyling` / `StylingPlan` | 决定穿什么、怎么穿、为什么成立 |
 | 导演阶段 | 拍摄剧本 | `GenerationShootScript` / `ShootScript` | 决定整组怎么拍 |
 | 单镜头分镜 | 镜头方案 | `ShotPlan` | 6 个镜头的结构化导演说明 |
-| 可视化预览 | 分镜预览 | `GenerationStoryboardPreview` | 3x2 分镜预览图 |
+| 可视化预览 | 分镜预览 | `GenerationStoryboardPreview` | 3:2 分镜预览图 |
 | 最终输出 | 成片 | `GenerationResultSet` / `GenerationResultImage` | 前 5 个镜头逐张生成 |
 
 用户侧统一使用“分镜预览”。技术字段可以保留 `preview` 命名，但用户界面、设计文档和新增业务对象应使用“分镜预览 / storyboard preview”。
@@ -118,7 +118,7 @@ AI 摄影棚的 0.1.0 主流程：
 
 ### 4.4 生成分镜预览
 
-用户点击“生成分镜预览”后，系统读取当前最新成功 `ShootScript`，调用 Image-2 生成一张 3x2 分镜预览图。
+用户点击“生成分镜预览”后，系统读取当前最新成功 `ShootScript`，调用 Image-2 生成一张 3:2 横版分镜预览图（3 列 × 2 行、6 个等大 1:1 方格）。
 
 输入：
 
@@ -131,11 +131,13 @@ AI 摄影棚的 0.1.0 主流程：
 输出：
 
 - `GenerationStoryboardPreview`。
-- 一张 3x2 分镜预览图。
+- 一张 3:2 分镜预览图。
 - attempt 请求/响应快照。
 
 规则：
 
+- 画布固定 3:2 横版，等分为 3 列 × 2 行、共 6 个完全等大的方格；每格为 1:1，与最终成片画幅一致，避免非方格预览拉伸导致成片构图失真。
+- 编号从左到右、从上到下：上排 1、2、3，下排 4、5、6。
 - 前 5 格对应最终 5 张成片。
 - 第 6 格仅备用参考，不进入最终生成。
 - 分镜预览只能表达姿势、身位、景别、构图、背景光线和整组风格，不得成为商品事实源或模特身份事实源。
@@ -991,6 +993,8 @@ GET /api/generation-tasks/{id}/status
 ## 13. Image-2 输入策略
 
 ### 13.1 分镜预览
+
+画布：3:2 横版，3 列 × 2 行、6 个 1:1 方格。provider 尺寸由 `GPT_IMAGE2_PREVIEW_SIZE`（toapis 比例串，默认 `3:2`）和 `GPT_IMAGE2_PREVIEW_FAL_IMAGE_SIZE`（fal 显式宽高，默认 `1536x1024`）配置；成片仍走 `GPT_IMAGE2_SIZE`（1:1）。
 
 输入：
 

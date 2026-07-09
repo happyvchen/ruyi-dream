@@ -8,7 +8,7 @@ Ruyi-Dream 是面向服饰品牌视觉生产团队的 B2B AI 数字化摄影棚�
 上传主推款
 -> AI Stylist 生成 StylingPlan
 -> AI Director 生成 ShootScript + 6 个 ShotPlan
--> Image-2 生成 3x2 分镜预览
+-> Image-2 生成 3:2 分镜预览
 -> Image-2 并发生成前 5 张成片
 -> 下载与生成记录复盘
 ```
@@ -73,7 +73,7 @@ ShootScript 不重新选择库内搭配服装；它只能基于已选 StylingPla
 
 ### 分镜预览 vs 成片
 
-- **分镜预览**：Image-2 根据当前 ShootScript 生成的一张 3x2 总图，是导演、姿势、构图、光线和同组风格参考。
+- **分镜预览**：Image-2 根据当前 ShootScript 生成的一张 3:2 总图，是导演、姿势、构图、光线和同组风格参考。
 - **成片**：Image-2 按前 5 个 ShotPlan 逐张生成的最终电商棚拍图。
 
 分镜预览不是商品事实来源，也不是模特身份事实来源。成片中的商品事实始终来自主推款原图和选中搭配服装原图；模特身份事实始终来自数字模特参考图和 `ModelIdentityContract`。
@@ -532,7 +532,7 @@ ShootScript 顶层结构：
 
 规则：
 
-- 只保存一张 3x2 分镜预览总图，不裁切 6 个 frame。
+- 只保存一张 3:2 分镜预览总图，不裁切 6 个 frame。
 - 读取当前最新成功 ShootScript。
 - 分镜预览失败不影响拍摄剧本。
 - 成功重新生成预览后，旧成片标记失效或被新 active 结果集替代。

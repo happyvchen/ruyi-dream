@@ -95,6 +95,10 @@ class Settings:
     gpt_image2_quality = os.getenv("GPT_IMAGE2_QUALITY", "high")
     gpt_image2_output_format = os.getenv("GPT_IMAGE2_OUTPUT_FORMAT", "png")
     gpt_image2_size = os.getenv("GPT_IMAGE2_SIZE", "1:1")
+    # 分镜预览画布比例：3:2 横版，让 3 列 × 2 行的 6 个分格各自为 1:1，与成片画幅对齐。
+    # toapis 路径直接用比例串；fal 路径没有 3:2 枚举，使用显式宽高（见 gpt_image2_preview_fal_image_size）。
+    gpt_image2_preview_size = os.getenv("GPT_IMAGE2_PREVIEW_SIZE", "3:2")
+    gpt_image2_preview_fal_image_size = os.getenv("GPT_IMAGE2_PREVIEW_FAL_IMAGE_SIZE", "1536x1024")
     gpt_image2_resolution = os.getenv("GPT_IMAGE2_RESOLUTION", "1K")
     generation_poll_interval_seconds = float(os.getenv("GENERATION_POLL_INTERVAL_SECONDS", "5"))
     generation_lock_ttl_seconds = int(os.getenv("GENERATION_LOCK_TTL_SECONDS", "120"))

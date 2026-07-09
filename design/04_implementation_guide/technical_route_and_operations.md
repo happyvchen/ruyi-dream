@@ -509,7 +509,7 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 
 ### 5.4 Image-2 分镜预览
 
-输出一张 3x2 分镜预览总图。0.1.0 不裁切 frame。
+输出一张 3:2 分镜预览总图。0.1.0 不裁切 frame。
 
 ### 5.5 Image-2 最终图
 
@@ -519,7 +519,7 @@ ShotPlan 不能使用一套通用模板服务所有品类。裤装必须至少�
 
 0.1.0 采用 Prompt 业务脑模式。后端不做候选预筛选、排序、评分、审美改选或 ShotPlan 默认图位规划；后端负责 READY 范围过滤、全量标签事实快照、ID 白名单、状态机、schema 校验和 provider attempt 记录。
 
-AI Stylist 读取主推款图片、Prompt 正文、品牌分段 Prompt 和全量标签事实卡，输出 StylingPlan、候选比较、拒绝理由、质量信号和选中 outfit。ShootScript 承接 StylingPlan 并生成 6 个 ShotPlan。Image-2 生成一张 3x2 分镜预览和前 5 张最终成片。
+AI Stylist 读取主推款图片、Prompt 正文、品牌分段 Prompt 和全量标签事实卡，输出 StylingPlan、候选比较、拒绝理由、质量信号和选中 outfit。ShootScript 承接 StylingPlan 并生成 6 个 ShotPlan。Image-2 生成一张 3:2 分镜预览和前 5 张最终成片。
 
 不属于 0.1.0 运行路径的能力不在权威实现指南中作为当前设计前提；若进入产品，必须先更新权威设计、领域模型和数据库 schema。
 
