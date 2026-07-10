@@ -2729,6 +2729,7 @@ function PromptMaintenancePage({ run }: { run: any }) {
                 <div className="prompt-status">
                   <span className={dirty ? 'status-badge warning' : 'status-badge ok'}>{dirty ? '未保存' : '已保存'}</span>
                   {activeItem.updatedAt && <small>更新于 {dateText(activeItem.updatedAt)}</small>}
+                  <small>版本 {activeItem.contentHash.slice(0, 12)}</small>
                 </div>
               </div>
               <textarea className="prompt-editor-textarea" value={draft} onChange={(event) => setDraft(event.target.value)} spellCheck={false} />

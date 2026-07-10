@@ -326,6 +326,7 @@ export type PromptConfig = {
   title: string
   description: string
   content: string
+  contentHash: string
   sortOrder: number
   updatedAt?: string | null
   usedSegments: string[]

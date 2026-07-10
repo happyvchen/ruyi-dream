@@ -70,6 +70,8 @@ Image-2 阶段写入：
 
 历史 `ai_policy_configs`、`brand_profiles`、`shoot_configs` 和固定标签规则表已删除。AI 选搭规则、质量信号、配饰边界、品牌口径和拍摄导演规则直接维护在对应 Prompt 正文中。
 
+Prompt 不复制版本正文快照。每次调用过程事实记录 `promptConfigKey`、配置内容 SHA-256、最终渲染 SHA-256 和本次动态 runtime；`prompt_configs.updated_at` 与内容 hash 共同标识维护版本。
+
 ## 迁移
 
 当前迁移链只保留 0.1.0 schema 演进：

@@ -4704,10 +4704,12 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
 
 
 def build_prompt_tagging_request_snapshot(garment: dict[str, Any], prompt: str) -> dict[str, Any]:
+    prompt_runtime = {"styling_garment": dumps(styling_garment_prompt_context(garment))}
     return {
         "schema_version": PROMPT_TAGGING_RESULT_VERSION,
         **gemini_request_meta(),
         "prompt": prompt,
+        **prompt_execution_facts("assembly.ai_tagging", prompt, prompt_runtime),
         "images": [
             {
                 "image_id": image.get("id"),
@@ -5653,16 +5655,14 @@ def attach_ai_stylist_prompt_snapshot(request_snapshot: dict[str, Any], candidat
     # priority_policy / cannot_override 治理元数据——优先级与冲突处理已由
     # AI 选搭 Prompt 正文（含开头系统指令段）声明一次。candidate_retrieval 是
     # 结构化标签事实业务输入，保持 JSON。
-    prompt = render_prompt_template(
-        AI_STYLING_PROMPT_CONFIG_KEY,
-        {
+    prompt_runtime = {
             "candidate_retrieval": dumps(candidate_retrieval_for_prompt(candidate_snapshot)),
             "hero_product_info": render_hero_product_info_line(request_snapshot.get("hero_product_info") or {}),
             "ai_styling_user_instruction": render_user_instruction_line(request_snapshot.get("ai_styling_user_instruction") or {}),
             "user_requirement": render_user_requirement_line(request_snapshot.get("user_requirement") or {}),
-        },
-    )
-    return {**request_snapshot, "promptConfigKey": AI_STYLING_PROMPT_CONFIG_KEY, "prompt": prompt}
+    }
+    prompt = render_prompt_template(AI_STYLING_PROMPT_CONFIG_KEY, prompt_runtime)
+    return {**request_snapshot, "prompt": prompt, **prompt_execution_facts(AI_STYLING_PROMPT_CONFIG_KEY, prompt, prompt_runtime)}
 
 
 def candidate_retrieval_for_prompt(candidate_snapshot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -6418,17 +6418,15 @@ def attach_shoot_script_prompt_snapshot(request_snapshot: dict[str, Any]) -> dic
     # model_identity_context（模特身份契约）是结构化业务/身份事实，保持 JSON。
     # 模特身份契约以 {{runtime.model_identity_context}} 占位；【强制模特身份契约】表头与
     # "身份优先级/不得改变五官发型"这类固定话术由 Prompt 维护正文托管，代码不再事后追加。
-    prompt = render_prompt_template(
-        SHOOT_SCRIPT_PROMPT_CONFIG_KEY,
-        {
+    prompt_runtime = {
             "styling_result": dumps(request_snapshot.get("styling_result") or styling_result_for_prompt(request_snapshot.get("styling_plan") if isinstance(request_snapshot.get("styling_plan"), dict) else {})),
             "hero_product_info": render_hero_product_info_line(request_snapshot.get("hero_product_info") or {}),
             "shoot_script_user_instruction": render_user_instruction_line(request_snapshot.get("shoot_script_user_instruction") or {}),
             "user_requirement": render_user_requirement_line(request_snapshot.get("user_requirement") or {}),
             "model_identity_context": render_model_identity_line(model_identity_context),
-        },
-    )
-    return {**request_snapshot, "promptConfigKey": SHOOT_SCRIPT_PROMPT_CONFIG_KEY, "prompt": prompt}
+    }
+    prompt = render_prompt_template(SHOOT_SCRIPT_PROMPT_CONFIG_KEY, prompt_runtime)
+    return {**request_snapshot, "prompt": prompt, **prompt_execution_facts(SHOOT_SCRIPT_PROMPT_CONFIG_KEY, prompt, prompt_runtime)}
 
 
 def normalize_shoot_script(raw: dict[str, Any], request_snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -6859,9 +6857,12 @@ def build_new_preview_task_package(
     image_inputs = build_new_image_inputs(task_id, styling_id, include_preview=False, input_version_id=input_version_id, environment_asset_id=environment_asset_id)
     hero_product_info = loads(row_value(input_row, "hero_product_info_json"), build_hero_product_info_context({}))
     storyboard_preview_user_instruction = loads(row_value(preview_row, "user_instruction_json"), build_stage_user_instruction_context("storyboard_preview"))
+    prompt_runtime = build_preview_prompt_runtime(shot_plans, shoot_script, image_inputs, hero_product_info, storyboard_preview_user_instruction)
+    prompt = render_prompt_template("assembly.storyboard_preview", prompt_runtime)
     return {
         "generation": {"stage": "preview_grid"},
-        "prompt": build_new_preview_prompt(shot_plans, styling_plan, shoot_script, image_inputs, hero_product_info, storyboard_preview_user_instruction),
+        "prompt": prompt,
+        **prompt_execution_facts("assembly.storyboard_preview", prompt, prompt_runtime),
         "imageInputs": image_inputs,
         "inputVersionId": input_version_id,
         "heroProductInfo": hero_product_info,
@@ -6882,11 +6883,20 @@ def build_new_preview_prompt(
 ) -> str:
     # 渲染层只输出「可变数据」：拍摄剧本各分段正文、参考图各职能图号区间、商品信息、用户要求。
     # 表头（【全局导演】等）、职能描述与事实源约束由 Prompt 维护模板正文托管（配合条件段）。
+    runtime = build_preview_prompt_runtime(shot_plans, shoot_script, image_inputs or [], hero_product_info or {}, storyboard_preview_user_instruction or {})
+    return render_prompt_template("assembly.storyboard_preview", runtime)
+
+
+def build_preview_prompt_runtime(
+    shot_plans: list[dict[str, Any]],
+    shoot_script: dict[str, Any],
+    image_inputs: list[dict[str, Any]],
+    hero_product_info: dict[str, Any],
+    storyboard_preview_user_instruction: dict[str, Any],
+) -> dict[str, Any]:
     ctx = shoot_script_result_for_prompt(shoot_script)
     spans = render_image_reference_spans(image_inputs or [])
-    return render_prompt_template(
-        "assembly.storyboard_preview",
-        {
+    return {
             "shoot_script_global_directing": render_shoot_script_global_directing(ctx),
             "shoot_script_styling_risks": render_shoot_script_styling_risks(ctx),
             "shoot_script_resolved_accessories": render_shoot_script_resolved_accessories(ctx),
@@ -6898,8 +6908,7 @@ def build_new_preview_prompt(
             "ref_subject": spans["subject"],
             "hero_product_info": render_hero_product_info_line(hero_product_info or {}),
             "storyboard_preview_user_instruction": render_user_instruction_line(storyboard_preview_user_instruction or {}),
-        },
-    )
+    }
 
 
 def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str, Any]:
@@ -6933,9 +6942,12 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         row_value(row, "user_instruction_json"),
         loads(row_value(row, "result_set_user_instruction_json"), build_stage_user_instruction_context("final_image")),
     )
+    prompt_runtime = build_final_prompt_runtime(int(row["sort_order"]), shot_plan, styling_plan, shoot_script, image_inputs, hero_product_info, final_image_user_instruction)
+    prompt = render_prompt_template("assembly.final_image", prompt_runtime)
     return {
         "generation": {"stage": "final_image"},
-        "prompt": build_new_final_prompt(int(row["sort_order"]), shot_plan, styling_plan, shoot_script, image_inputs, hero_product_info, final_image_user_instruction),
+        "prompt": prompt,
+        **prompt_execution_facts("assembly.final_image", prompt, prompt_runtime),
         "imageInputs": image_inputs,
         "heroProductInfo": hero_product_info,
         "finalImageUserInstruction": final_image_user_instruction,
@@ -6956,11 +6968,22 @@ def build_new_final_prompt(
 ) -> str:
     # 渲染层只输出「可变数据」：当前镜头各分段正文、分镜预览格号、参考图各职能图号区间、
     # 商品信息、用户要求。表头、分镜参考话术与事实源约束由 Prompt 维护模板正文托管。
+    runtime = build_final_prompt_runtime(shot_index, shot_plan, styling_plan, shoot_script, image_inputs or [], hero_product_info or {}, final_image_user_instruction or {})
+    return render_prompt_template("assembly.final_image", runtime)
+
+
+def build_final_prompt_runtime(
+    shot_index: int,
+    shot_plan: dict[str, Any],
+    styling_plan: dict[str, Any],
+    shoot_script: dict[str, Any],
+    image_inputs: list[dict[str, Any]],
+    hero_product_info: dict[str, Any],
+    final_image_user_instruction: dict[str, Any],
+) -> dict[str, Any]:
     ctx = current_shot_context_for_prompt(shot_index, shot_plan, styling_plan, shoot_script)
     spans = render_image_reference_spans(image_inputs or [])
-    return render_prompt_template(
-        "assembly.final_image",
-        {
+    return {
             "preview_grid_cell": render_preview_grid_cell(ctx),
             "shot_styling": render_shot_styling(ctx),
             "shot_global_directing": render_shot_global_directing(ctx),
@@ -6973,8 +6996,7 @@ def build_new_final_prompt(
             "ref_subject": spans["subject"],
             "hero_product_info": render_hero_product_info_line(hero_product_info or {}),
             "final_image_user_instruction": render_user_instruction_line(final_image_user_instruction or {}),
-        },
-    )
+    }
 
 
 def get_styling_plan_by_id(styling_id: int) -> dict[str, Any]:
@@ -7105,12 +7127,14 @@ def get_prompt_config_rows() -> dict[str, Any]:
 
 def serialize_prompt_config_row(row: Any, rows: dict[str, Any]) -> dict[str, Any]:
     rendered, diagnostics = render_prompt_config(str(row["key"]), sample_prompt_runtime(), rows=rows)
+    content = str(row["content"] or "")
     return {
         "key": str(row["key"]),
         "groupType": str(row["group_type"] or "assembly"),
         "title": str(row["title"] or row["key"]),
         "description": str(row["description"] or ""),
-        "content": str(row["content"] or ""),
+        "content": content,
+        "contentHash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
         "sortOrder": int(row["sort_order"] or 0),
         "updatedAt": row["updated_at"],
         "usedSegments": diagnostics.get("usedSegments", []),
@@ -7239,6 +7263,17 @@ def render_prompt_template(key: str, runtime: dict[str, Any] | None = None) -> s
     if diagnostics.get("missingPlaceholders"):
         raise RuntimeError(f"Prompt 配置缺失或占位符未填充：{', '.join(diagnostics['missingPlaceholders'])}")
     return rendered
+
+
+def prompt_execution_facts(key: str, prompt: str, runtime: dict[str, Any]) -> dict[str, Any]:
+    """记录本次渲染真实使用的版本标识与动态事实，不复制 Prompt 正文。"""
+    content = prompt_config_content(key) or ""
+    return {
+        "promptConfigKey": key,
+        "promptContentHash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "renderedPromptHash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "promptRuntime": runtime,
+    }
 
 
 def sample_prompt_runtime() -> dict[str, Any]:
