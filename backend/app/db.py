@@ -27,6 +27,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("041", "add_shoot_environment_reference", "migration_add_shoot_environment_reference"),
     ("042", "drop_merged_prompt_config_keys", "migration_drop_merged_prompt_config_keys"),
     ("043", "drop_model_identity_prompt_runtime", "migration_drop_model_identity_prompt_runtime"),
+    ("044", "merge_garment_reference_prompt_runtime", "migration_merge_garment_reference_prompt_runtime"),
 )
 
 # prompt_configs 只登记「Prompt 维护」页的配置槽（键 / 分组 / 标题 / 说明 / 排序），
@@ -390,6 +391,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_shoot_environment_reference": migration_add_shoot_environment_reference,
         "migration_drop_merged_prompt_config_keys": migration_drop_merged_prompt_config_keys,
         "migration_drop_model_identity_prompt_runtime": migration_drop_model_identity_prompt_runtime,
+        "migration_merge_garment_reference_prompt_runtime": migration_merge_garment_reference_prompt_runtime,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -1057,6 +1059,26 @@ def migration_drop_model_identity_prompt_runtime(db: sqlite3.Connection) -> None
         db.execute(
             "UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = 'assembly.shoot_script'",
             (cleaned, now_iso()),
+        )
+
+
+def migration_merge_garment_reference_prompt_runtime(db: sqlite3.Connection) -> None:
+    """将既有模板的两类服装图号占位统一为 runtime.ref_garment。"""
+    exists = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prompt_configs'"
+    ).fetchone()
+    if not exists:
+        return
+    rows = db.execute(
+        "SELECT key, content FROM prompt_configs WHERE content LIKE '%runtime.ref_hero_garment%' OR content LIKE '%runtime.ref_styling_garment%'"
+    ).fetchall()
+    for row in rows:
+        content = str(row["content"] or "")
+        merged = content.replace("runtime.ref_hero_garment", "runtime.ref_garment")
+        merged = merged.replace("runtime.ref_styling_garment", "runtime.ref_garment")
+        db.execute(
+            "UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?",
+            (merged, now_iso(), row["key"]),
         )
 
 

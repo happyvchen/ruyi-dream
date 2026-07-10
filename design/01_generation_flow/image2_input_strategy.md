@@ -27,7 +27,7 @@ Image-2 单次最多输入 10 张图，因此产品必须区分：
 
 0.1.0 不做图片内容识别，选图器按已知业务角色、排序和固定优先级取图。provider `reference_images` 随请求携带结构化角色清单，避免 provider 只收到扁平 URL 后丢失语义。
 
-> P6 更新：prompt 正文里原来的整体 `image_reference_manifest`（把图号 + 职能标签捆在一起）已拆为**按职能的图号区间占位** `{{runtime.ref_model_identity}}` / `ref_hero_garment` / `ref_styling_garment` / `ref_preview_grid` / `ref_shoot_environment` / `ref_subject`——代码只出会变的图号区间，职能描述与事实源约束写在 `assembly.*` 模板正文（配合条件段）。下文原型里的 `{image_reference_manifest}` 即对应这组按职能占位。详见 `prompt_rendering_refactor.md` §10.3。
+> P6 更新：prompt 正文里原来的整体 `image_reference_manifest`（把图号 + 职能标签捆在一起）已拆为**按职能的图号区间占位** `{{runtime.ref_model_identity}}` / `ref_garment` / `ref_preview_grid` / `ref_shoot_environment` / `ref_subject`——代码只出会变的图号区间，职能描述与事实源约束写在 `assembly.*` 模板正文（配合条件段）。下文原型里的 `{image_reference_manifest}` 即对应这组按职能占位。详见 `prompt_rendering_refactor.md` §10.3。
 
 ## 3. 0.1.0 选图器规则
 

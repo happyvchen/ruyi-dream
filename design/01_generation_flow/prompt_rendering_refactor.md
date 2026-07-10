@@ -258,7 +258,7 @@ P6 的判定边界收敛为一条：**「是否会变」**。
 
 ### 10.3 参考图：按职能输出图号区间
 
-`render_image_reference_line`（把图号 + 职能标签捆在一起）→ `render_image_reference_spans`：**只按职能输出会变的图号区间**（`model_identity`/`preview_grid`/`hero_garment`/`styling_garment`/`shoot_environment`，外加 `subject`=模特+主推款+搭配的合并区间，供「模特与服装以图X为准」的动态交叉引用）。职能描述与事实源约束全部移入模板正文，例如：
+`render_image_reference_line`（把图号 + 职能标签捆在一起）→ `render_image_reference_spans`：**只按职能输出会变的图号区间**（`model_identity`/`preview_grid`/`garment`/`shoot_environment`，外加 `subject`=模特+全部服装的合并区间，供「模特与服装以图X为准」的动态交叉引用）。职能描述与事实源约束全部移入模板正文，例如：
 
 ```
 {{runtime.ref_model_identity}} 为数字模特身份参考图，是唯一人物身份事实源…身份特征不得改变。

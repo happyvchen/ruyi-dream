@@ -6889,8 +6889,7 @@ def build_preview_prompt_runtime(
             "shoot_script_resolved_accessories": render_shoot_script_resolved_accessories(ctx),
             "shoot_script_shots": render_shoot_script_shots(ctx),
             "ref_model_identity": spans["model_identity"],
-            "ref_hero_garment": spans["hero_garment"],
-            "ref_styling_garment": spans["styling_garment"],
+            "ref_garment": spans["garment"],
             "ref_shoot_environment": spans["shoot_environment"],
             "ref_subject": spans["subject"],
             "hero_product_info": render_hero_product_info_line(hero_product_info or {}),
@@ -6978,8 +6977,7 @@ def build_final_prompt_runtime(
             "shot_accessories": render_shot_accessories(ctx),
             "ref_model_identity": spans["model_identity"],
             "ref_preview_grid": spans["preview_grid"],
-            "ref_hero_garment": spans["hero_garment"],
-            "ref_styling_garment": spans["styling_garment"],
+            "ref_garment": spans["garment"],
             "ref_subject": spans["subject"],
             "hero_product_info": render_hero_product_info_line(hero_product_info or {}),
             "final_image_user_instruction": render_user_instruction_line(final_image_user_instruction or {}),
@@ -7292,8 +7290,7 @@ def sample_prompt_runtime() -> dict[str, Any]:
         # 参考图各职能图号区间（只出会变的图号）
         "ref_model_identity": "图1-2",
         "ref_preview_grid": "图3",
-        "ref_hero_garment": "图4-5",
-        "ref_styling_garment": "图6",
+        "ref_garment": "图4-6",
         "ref_shoot_environment": "图7",
         "ref_subject": "图1-6",
     }
@@ -7324,8 +7321,7 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         # 参考图各职能图号区间：只出会变的图号，职能描述在模板正文托管
         {"name": "runtime.ref_model_identity", "scope": "runtime", "description": "模特身份参考图图号区间，如「图1-2」；无则空"},
         {"name": "runtime.ref_preview_grid", "scope": "runtime", "description": "分镜预览参考图图号（仅成片阶段），如「图3」；无则空"},
-        {"name": "runtime.ref_hero_garment", "scope": "runtime", "description": "主推款参考图图号区间，如「图4-5」；无则空"},
-        {"name": "runtime.ref_styling_garment", "scope": "runtime", "description": "搭配服装参考图图号区间；无则空"},
+        {"name": "runtime.ref_garment", "scope": "runtime", "description": "主推款与搭配服装参考图的总图号区间，如「图4-6」；无则空"},
         {"name": "runtime.ref_shoot_environment", "scope": "runtime", "description": "拍摄环境参考图图号（仅分镜预览阶段）；无则空"},
         {"name": "runtime.ref_subject", "scope": "runtime", "description": "模特+主推款+搭配服装的合并图号区间，供「模特与服装以X为准」交叉引用"},
     ]

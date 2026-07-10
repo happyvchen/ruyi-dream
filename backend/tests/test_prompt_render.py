@@ -237,8 +237,7 @@ class RenderImageReferenceSpansTests(unittest.TestCase):
             )
         )
         self.assertEqual(spans["model_identity"], "图1-2")
-        self.assertEqual(spans["hero_garment"], "图3-5")
-        self.assertEqual(spans["styling_garment"], "图6")
+        self.assertEqual(spans["garment"], "图3-6")
         self.assertEqual(spans["shoot_environment"], "图7")
         self.assertEqual(spans["preview_grid"], "")
         # subject = 模特+主推款+搭配服装 的合并区间，供模板交叉引用（不含环境图）。
@@ -255,8 +254,7 @@ class RenderImageReferenceSpansTests(unittest.TestCase):
         )
         self.assertEqual(spans["model_identity"], "图1-2")
         self.assertEqual(spans["preview_grid"], "图3")
-        self.assertEqual(spans["hero_garment"], "图4-5")
-        self.assertEqual(spans["styling_garment"], "图6")
+        self.assertEqual(spans["garment"], "图4-6")
         self.assertEqual(spans["shoot_environment"], "")
 
     def test_single_image_role(self) -> None:
@@ -267,7 +265,7 @@ class RenderImageReferenceSpansTests(unittest.TestCase):
         spans = render_image_reference_spans([])
         self.assertEqual(spans["model_identity"], "")
         self.assertEqual(spans["subject"], "")
-        self.assertEqual(render_image_reference_spans(None)["hero_garment"], "")
+        self.assertEqual(render_image_reference_spans(None)["garment"], "")
 
     def test_only_numbers_no_role_labels(self) -> None:
         # 关键：渲染层不再输出「数字模特身份/主推款」等职能标签（那些归模板正文）。
