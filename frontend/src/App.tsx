@@ -38,7 +38,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, finalImageArchiveUrl, isAuthExpiredError, mediaUrl } from './api'
-import type { AICallRecord, AIOperation, AttemptPhase, DeleteImpact, FinalImageExportPrecheck, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptPlaceholder, SessionRole, StylingGarment } from './api'
+import type { AICallRecord, AIOperation, AttemptPhase, DeleteImpact, FinalImageExportPrecheck, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment } from './api'
 import { friendlyErrorText } from './lib/errorMessages'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
@@ -2636,6 +2636,9 @@ function PromptMaintenancePage({ run }: { run: any }) {
   const [rendered, setRendered] = useState('')
   const [missing, setMissing] = useState<string[]>([])
   const [usedSegments, setUsedSegments] = useState<string[]>([])
+  const [invocations, setInvocations] = useState<PromptInvocationOption[]>([])
+  const [attemptId, setAttemptId] = useState<number | undefined>()
+  const [historicalPrompt, setHistoricalPrompt] = useState('')
 
   function loadConfigs(selectKey?: string) {
     return api.listPromptConfigs().then((result) => {
@@ -2655,6 +2658,11 @@ function PromptMaintenancePage({ run }: { run: any }) {
     void loadConfigs().catch(() => undefined)
   }, [])
 
+  useEffect(() => {
+    if (!activeKey) return
+    void api.listPromptInvocations(activeKey).then((result) => setInvocations(result.items)).catch(() => setInvocations([]))
+  }, [activeKey])
+
   const activeItem = items.find((item) => item.key === activeKey) || items[0]
   const dirty = Boolean(activeItem && draft !== activeItem.content)
   const segments = items.filter((item) => item.groupType === 'segment')
@@ -2668,12 +2676,16 @@ function PromptMaintenancePage({ run }: { run: any }) {
     setRendered(next.renderedPreview)
     setMissing(next.missingPlaceholders)
     setUsedSegments(next.usedSegments)
+    setAttemptId(undefined)
+    setHistoricalPrompt('')
+    void api.listPromptInvocations(key).then((result) => setInvocations(result.items)).catch(() => setInvocations([]))
   }
 
   function refreshPreview() {
     if (!activeItem) return
-    void run('渲染 Prompt 预览中...', () => api.previewPromptConfig(activeItem.key, draft), (result: { rendered: string; diagnostics: { missingPlaceholders: string[]; usedSegments: string[] } }) => {
+    void run('渲染 Prompt 预览中...', () => api.previewPromptConfig(activeItem.key, draft, attemptId), (result: { rendered: string; historicalPrompt?: string | null; diagnostics: { missingPlaceholders: string[]; usedSegments: string[] } }) => {
       setRendered(result.rendered)
+      setHistoricalPrompt(result.historicalPrompt ?? '')
       setMissing(result.diagnostics.missingPlaceholders)
       setUsedSegments(result.diagnostics.usedSegments)
     }, { refresh: false })
@@ -2725,9 +2737,17 @@ function PromptMaintenancePage({ run }: { run: any }) {
         </section>
         <aside className="panel prompt-preview-panel">
           <div className="prompt-side-section">
-            <h3>预览</h3>
+            <h3>历史调用上下文</h3>
+            <select value={attemptId ?? ''} onChange={(event) => setAttemptId(event.target.value ? Number(event.target.value) : undefined)}>
+              <option value="">样例数据</option>
+              {invocations.map((item) => <option key={item.id} value={item.id}>#{item.id} · {item.ownerType} · {dateText(item.createdAt)}</option>)}
+            </select>
+          </div>
+          <div className="prompt-side-section">
+            <h3>{attemptId ? '当前草稿按历史事实重新渲染' : '预览'}</h3>
             <div className="prompt-rendered-section"><pre>{rendered}</pre></div>
           </div>
+          {historicalPrompt && <div className="prompt-side-section"><h3>当时实际发送</h3><div className="prompt-rendered-section"><pre>{historicalPrompt}</pre></div></div>}
           <div className="prompt-side-section">
             <h3>校验</h3>
             <Meta label="引用分段" value={usedSegments.length ? usedSegments.join('、') : '无'} />

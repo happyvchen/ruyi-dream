@@ -89,6 +89,7 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。`/api/g
 | `/api/model-profiles/{id}/head-references` | POST | 上传头部参考图 |
 | `/api/prompt-configs` | GET | Prompt 配置列表 |
 | `/api/prompt-configs/{key}/preview` | GET/POST | 本地渲染已保存内容或 POST 中的未保存草稿，不调用模型 |
+| `/api/prompt-configs/{key}/invocations` | GET | admin 查询使用该 Prompt 的最近调用事实，用于历史上下文重渲染 |
 | `/api/prompt-configs/{key}` | PATCH | 保存 Prompt |
 
 ## Prompt Runtime

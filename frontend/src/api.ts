@@ -341,8 +341,11 @@ export type PromptConfigList = {
 
 export type PromptConfigPreview = {
   rendered: string
+  historicalPrompt?: string | null
   diagnostics: PromptConfigDiagnostics
 }
+
+export type PromptInvocationOption = { id: number; ownerType: string; provider: string; status: string; createdAt?: string | null }
 
 function headers(init?: RequestInit) {
   const h = new Headers(init?.headers)
@@ -551,10 +554,12 @@ export const api = {
   listPromptConfigs: () => request<PromptConfigList>('/api/prompt-configs'),
   updatePromptConfig: (key: string, content: string) =>
     request<{ item: PromptConfig; preview: PromptConfigPreview }>(`/api/prompt-configs/${encodeURIComponent(key)}`, { method: 'PATCH', body: JSON.stringify({ content }) }),
-  previewPromptConfig: (key: string, content?: string) =>
+  previewPromptConfig: (key: string, content?: string, attemptId?: number) =>
     content === undefined
       ? request<PromptConfigPreview>(`/api/prompt-configs/${encodeURIComponent(key)}/preview`)
-      : request<PromptConfigPreview>(`/api/prompt-configs/${encodeURIComponent(key)}/preview`, { method: 'POST', body: JSON.stringify({ content }) }),
+      : request<PromptConfigPreview>(`/api/prompt-configs/${encodeURIComponent(key)}/preview`, { method: 'POST', body: JSON.stringify({ content, attemptId }) }),
+  listPromptInvocations: (key: string) =>
+    request<{ items: PromptInvocationOption[] }>(`/api/prompt-configs/${encodeURIComponent(key)}/invocations`),
   addModelHeadReferences: (modelId: number, files: File[]) => {
     const form = new FormData()
     files.forEach((file) => form.append('files', file))

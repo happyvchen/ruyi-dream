@@ -359,6 +359,7 @@ class PromptConfigUpdateRequest(BaseModel):
 
 class PromptConfigPreviewRequest(BaseModel):
     content: str
+    attemptId: int | None = None
 
 
 class HeadReferenceUpdateRequest(BaseModel):
@@ -3679,12 +3680,37 @@ def preview_prompt_config_draft(config_key: str, payload: PromptConfigPreviewReq
     key = normalize_prompt_config_key(config_key)
     if key not in get_prompt_config_rows():
         raise HTTPException(status_code=404, detail="Prompt 配置不存在")
+    runtime = sample_prompt_runtime()
+    historical_prompt = None
+    if payload.attemptId:
+        with get_db() as db:
+            attempt = db.execute("SELECT request_snapshot_json FROM generation_attempts WHERE id = ?", (payload.attemptId,)).fetchone()
+        if not attempt:
+            raise HTTPException(status_code=404, detail="调用记录不存在")
+        facts = loads(attempt["request_snapshot_json"], {})
+        if facts.get("promptConfigKey") != key:
+            raise HTTPException(status_code=400, detail="调用记录与 Prompt 配置不匹配")
+        if isinstance(facts.get("promptRuntime"), dict):
+            runtime = facts["promptRuntime"]
+        historical_prompt = facts.get("prompt")
     rendered, diagnostics = render_prompt_config(
         key,
-        sample_prompt_runtime(),
+        runtime,
         content_overrides={key: payload.content[:120000]},
     )
-    return {"rendered": rendered, "diagnostics": diagnostics}
+    return {"rendered": rendered, "historicalPrompt": historical_prompt, "diagnostics": diagnostics}
+
+
+@app.get("/api/prompt-configs/{config_key}/invocations")
+def list_prompt_config_invocations(config_key: str, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    key = normalize_prompt_config_key(config_key)
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT id, owner_type, provider, status, created_at FROM generation_attempts WHERE request_snapshot_json LIKE ? ORDER BY created_at DESC LIMIT 30",
+            (f'%"promptConfigKey":"{key}"%',),
+        ).fetchall()
+    return {"items": [{"id": row["id"], "ownerType": row["owner_type"], "provider": row["provider"], "status": row["status"], "createdAt": row["created_at"]} for row in rows]}
 
 
 @app.patch("/api/prompt-configs/{config_key}")
