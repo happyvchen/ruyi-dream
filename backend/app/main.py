@@ -783,9 +783,9 @@ def list_styling_garments(
 
 
 @app.get("/api/styling-garments/{garment_id}")
-def get_styling_garment(garment_id: int) -> dict[str, Any]:
+def get_styling_garment(garment_id: int, request: Request) -> dict[str, Any]:
     expire_stale_styling_garment_tagging()
-    return {"item": get_styling_garment_by_id(garment_id)}
+    return {"item": get_styling_garment_by_id(garment_id, include_debug=get_request_role(request) == "admin")}
 
 
 def ensure_styling_garment_not_tagging(row: Any) -> None:
@@ -4547,7 +4547,7 @@ def get_media_asset_by_id(asset_id: int | None) -> dict[str, Any] | None:
     return serialize_media_asset(row)
 
 
-def serialize_styling_garment(row: Any, include_images: bool = True) -> dict[str, Any]:
+def serialize_styling_garment(row: Any, include_images: bool = True, include_debug: bool = False) -> dict[str, Any]:
     ai_tags = loads(row["ai_tags_json"], {})
     manual_tags = loads(row["manual_tags_json"], {})
     official_title_tags = loads(row["official_title_tags_json"], {}) if "official_title_tags_json" in row.keys() else {}
@@ -4563,7 +4563,7 @@ def serialize_styling_garment(row: Any, include_images: bool = True) -> dict[str
         "officialTitleTags": official_title_tags,
         "effectiveTags": effective_tags,
         "tagMeta": loads(row["tag_meta_json"], {}) if "tag_meta_json" in row.keys() else {},
-        "tagAttempts": get_styling_garment_tag_attempts(row["id"]) if include_images else [],
+        "tagAttempts": get_styling_garment_tag_attempts(row["id"]) if include_images and include_debug else [],
         "tagSchemaVersion": row["tag_schema_version"],
         "tagCompletedAt": row["tag_completed_at"],
         "tagError": row["tag_error"],
@@ -4648,7 +4648,7 @@ def get_styling_garment_tag_attempts(garment_id: int) -> list[dict[str, Any]]:
     ]
 
 
-def get_styling_garment_by_id(garment_id: int) -> dict[str, Any]:
+def get_styling_garment_by_id(garment_id: int, include_debug: bool = False) -> dict[str, Any]:
     with get_db() as db:
         row = db.execute(
             """
@@ -4663,7 +4663,7 @@ def get_styling_garment_by_id(garment_id: int) -> dict[str, Any]:
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="搭配服装不存在")
-    return serialize_styling_garment(row, include_images=True)
+    return serialize_styling_garment(row, include_images=True, include_debug=include_debug)
 
 
 async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:

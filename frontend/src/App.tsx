@@ -323,7 +323,7 @@ export function App() {
         {error && <div className="toast">{error.length > 300 ? `${error.slice(0, 300)}…` : error}</div>}
         {busy && <BusyPill label={busy} />}
         {page === 'studio' && <StudioPage task={task} setTask={setTask} records={records} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
-        {page === 'library' && <LibraryPage garments={garments} run={run} />}
+        {page === 'library' && <LibraryPage garments={garments} run={run} role={role} />}
         {page === 'model' && <ModelPage models={models} role={role} run={run} />}
         {page === 'prompt-maintenance' && role === 'admin' && <PromptMaintenancePage run={run} />}
         {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} openTaskInStudio={openTaskInStudio} run={run} />}
@@ -1857,7 +1857,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   )
 }
 
-function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }) {
+function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run: any; role: SessionRole | null }) {
   const libraryResultsRef = useRef<HTMLDivElement | null>(null)
   const autoPageSize = useAutoGarmentPageSize(libraryResultsRef)
   const [query, setQuery] = useState('')
@@ -2057,7 +2057,7 @@ function LibraryPage({ garments, run }: { garments: StylingGarment[]; run: any }
           }}
         />
       </div>
-      {detail && <GarmentDetailDrawer item={detail} run={run} onClose={() => setDetail(null)} onChange={updateGarmentInView} onDelete={() => openGarmentDeleteDialog([detail])} />}
+      {detail && <GarmentDetailDrawer item={detail} run={run} isAdmin={role === 'admin'} onClose={() => setDetail(null)} onChange={updateGarmentInView} onDelete={() => openGarmentDeleteDialog([detail])} />}
       {deleteGarmentDialog && (
         <DeleteConfirmDialog
           title={deleteGarmentDialog.length === 1 ? '归档搭配服装' : `归档 ${deleteGarmentDialog.length} 套搭配服装`}
@@ -3355,9 +3355,10 @@ function GarmentCard({ item, onTag, onOpen, onDelete, selected, onSelect }: {
   )
 }
 
-function GarmentDetailDrawer({ item, run, onClose, onChange, onDelete }: {
+function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete }: {
   item: StylingGarment
   run: any
+  isAdmin: boolean
   onClose: () => void
   onChange: (item: StylingGarment) => void
   onDelete: () => void
@@ -3533,6 +3534,9 @@ function GarmentDetailDrawer({ item, run, onClose, onChange, onDelete }: {
           <div className="section-head"><strong>标签</strong></div>
           <TagObjectPanel title={hasTaggingFailure ? '上次 AI 打标返回' : 'AI 打标返回'} data={item.aiTags ?? {}} defaultOpen />
           <TagObjectPanel title="人工业务标签" data={item.manualTags ?? {}} />
+          {isAdmin && (item.tagAttempts ?? []).length > 0 && (
+            <JsonOutputPanel title="Gemini 调用过程事实" data={item.tagAttempts} />
+          )}
         </div>
         <div className="drawer-actions">
           <button className="secondary" disabled={tagging} onClick={retag}>重新打标</button>
