@@ -23,7 +23,7 @@
 - `build_user_requirement_context`（`main.py:4085`）→ 同上
 - `shoot_script_result_for_prompt`（`main.py:5912`）→ 顶层 `schema_version`
 - `image_reference_manifest_for_prompt`（`main.py:6611`）→ 顶层 `schema_version` + `priority_rules`
-- `append_user_requirement_block` / `append_runtime_input_block`（`main.py:4113/4125`）、`append_model_identity_contract`（`main.py:6602`）、`append_image_reference_manifest`（`main.py:6642`）→ 一律 `dumps(context)` 追加
+- `append_user_requirement_block` / `append_runtime_input_block`（`main.py:4113/4125`）、`append_image_reference_manifest`（`main.py:6642`）→ 一律 `dumps(context)` 追加
 
 已存在的 `strip_internal_prompt_fields`（`main.py:5832`）会剥掉**嵌套**的 `schema_version`，但上述函数在**顶层**重新加回来并 `dumps`，等于剥了个寂寞。
 
@@ -186,12 +186,12 @@ renderer 工程约束：
 
 - **P0（本文档）✅**：评审设计与 before/after，确认范围。
 - **P1｜生图阶段 ✅**：新增 `prompt_render.py`，实现 `render_shoot_script_body` / `render_shot_context_body` + hero/instruction 行渲染；改 `build_new_preview_prompt` / `build_new_final_prompt` 用 renderer 填充占位符。（注：P1 当时把段头 `【全局导演】` 等留在 renderer 代码里、未改 DB 模板；此点**已被 P6 取代**——段头与固定话术已移入模板正文，`render_shoot_script_body` / `render_shot_context_body` 被拆成粒度渲染函数并删除，`available_prompt_placeholders` / `sample_prompt_runtime` 同步更新。）快照写入不变。
-- **P2｜参考图 ✅**：`append_image_reference_manifest` 改为「参考图顺序：图N=角色」自然语言 + 事实源约束；删除废弃的 `image_reference_manifest_for_prompt`；provider 侧 `build_provider_reference_image_manifest` 保持结构化不变。（`append_model_identity_contract` 见下方残留项。）
-- **P3｜Gemini 阶段 ✅（等价性依据已确认）**：`ai_styling`/`shoot_script` 的 hero/用户要求/介入要求自然语言化，去掉重复的 `priority_policy`/`cannot_override`。**关键**：该优先级与冲突处理规则**已完整写在 `AI_STYLIST_SYSTEM_INSTRUCTION`（`main.py:110`）与 `AI_DIRECTOR_SYSTEM_INSTRUCTION`（`main.py:117`）**，删除运行时重复不丢规则——这是行为等价的依据。`candidate_retrieval`（标签事实）、`styling_result`（导演上下文）、`model_identity_context`（身份契约）保持结构化 JSON。仍建议受控 A/B 复核。
+- **P2｜参考图 ✅**：`append_image_reference_manifest` 改为「参考图顺序：图N=角色」自然语言 + 事实源约束；删除废弃的 `image_reference_manifest_for_prompt`；provider 侧 `build_provider_reference_image_manifest` 保持结构化不变。
+- **P3｜Gemini 阶段 ✅（等价性依据已确认）**：`ai_styling`/`shoot_script` 的 hero/用户要求/介入要求自然语言化，去掉重复的 `priority_policy`/`cannot_override`。**关键**：该优先级与冲突处理规则**已完整写在对应组装 Prompt 正文中**，删除运行时重复不丢规则——这是行为等价的依据。`candidate_retrieval`（标签事实）和 `styling_result`（导演上下文）保持结构化 JSON。仍建议受控 A/B 复核。
 - **P4｜清理 ✅**：删除因上游改造而失效的死代码 `append_user_requirement_block` / `has_user_requirement` / `append_runtime_input_block` / `has_user_input`；prompt 出口统一走 renderer，空值由 `render_*_line` 返回「（无）」、`_block` 省略空行，杜绝空壳 JSON。
 
 - **P5｜残留清理 ✅**：
-  - 模特身份契约 `append_model_identity_contract` 从英文 JSON dump 改为中文自然语言块（`render_model_identity_line`）：身份编号 + 模特备注 + 额外禁止 + 参考图角度；去掉 `schema_version`/`objectKey`/英文数组。身份事实仍以模特参考图为准。（注：`hair_makeup_boundary` 妆发边界后续已从各链路移除，改由 `Prompt 维护` 模板正文承载。**`append_model_identity_contract` 本身已在 P6 删除**——其 `【强制模特身份契约】` 表头与优先级话术移入 `assembly.shoot_script` 模板正文，代码只经 `{{runtime.model_identity_context}}` 提供身份数据。）
+  - 模特身份事实仍以模特参考图为准；AI Director 不再接收额外的模特身份 runtime。
   - 删除 `styling_garment_prompt_context`（ai_tagging）顶层 `schema_version`（实为未被模板引用的死运行时键，不影响任何 prompt 输出，顺手清理）。
 
 至此生成链路上所有会进入 prompt 的上下文均已按「快照留结构化、prompt 走自然语言/去治理元数据」完成改造。
@@ -227,7 +227,7 @@ renderer 工程约束：
 
 ## 10. P6：占位变量化重构（会变 / 不变 彻底分离）✅
 
-P1–P5 把 prompt 从「dump JSON」改成了「自然语言」，但仍有两类**固定文本残留在代码里**：段头（`【全局导演】`/`【六格镜头】`/`【分镜参考】`…）由 renderer 拼接；模特身份优先级话术由 `append_model_identity_contract` 在模板渲染**之后**追加；参考图职能标签（`数字模特身份`/`主推款`…）写死在 `render_image_reference_line` 里。这些都绕过了「Prompt 维护」页，业务用户改不到。
+P1–P5 把 prompt 从「dump JSON」改成了「自然语言」，但仍有两类**固定文本残留在代码里**：段头（`【全局导演】`/`【六格镜头】`/`【分镜参考】`…）由 renderer 拼接；参考图职能标签（`数字模特身份`/`主推款`…）写死在 `render_image_reference_line` 里。这些都绕过了「Prompt 维护」页，业务用户改不到。
 
 P6 的判定边界收敛为一条：**「是否会变」**。
 

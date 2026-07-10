@@ -20,7 +20,6 @@ if str(BACKEND_DIR) not in sys.path:
 from app.prompt_render import (  # noqa: E402
     render_hero_product_info_line,
     render_image_reference_spans,
-    render_model_identity_line,
     render_preview_grid_cell,
     render_shoot_script_global_directing,
     render_shoot_script_resolved_accessories,
@@ -53,7 +52,6 @@ FORBIDDEN_TEMPLATE_TOKENS = [
     "【造型】",
     "【当前镜头】",
     "【本镜头配饰】",
-    "【强制模特身份契约】",
     "分镜预览不是模特身份或商品事实来源",
     "只借用姿势",
 ]
@@ -278,50 +276,6 @@ class RenderImageReferenceSpansTests(unittest.TestCase):
         self.assertNotIn("数字模特身份", blob)
         self.assertNotIn("主推款", blob)
         self.assertNotIn("{", blob)
-
-
-class RenderModelIdentityLineTests(unittest.TestCase):
-    def _context(self, **overrides) -> dict:
-        contract = {
-            "model_id": "Face-01",
-            "name": "默认模特",
-            "fact_source": "model_identity_reference_images",
-            "must_preserve": ["same person identity", "face shape"],
-            "must_not_change": ["do not invent a different face"],
-            "profile_notes": "冷静克制气质",
-            "forbidden": ["低马尾", "浓妆"],
-            "reference_images": [
-                {"role": "model_identity", "angle": "front", "objectKey": "k/1"},
-                {"role": "model_identity", "angle": "left45", "objectKey": "k/2"},
-            ],
-        }
-        contract.update(overrides)
-        return {"schema_version": "model-identity-context-v1", "identity_contract": contract}
-
-    def setUp(self) -> None:
-        self.out = render_model_identity_line(self._context())
-
-    def test_no_json_or_english_arrays(self) -> None:
-        self.assertNotIn("{", self.out)
-        self.assertNotIn("must_preserve", self.out)
-        self.assertNotIn("schema_version", self.out)
-        self.assertNotIn("objectKey", self.out)
-
-    def test_core_content_present(self) -> None:
-        self.assertIn("Face-01", self.out)
-        self.assertIn("默认模特", self.out)
-        self.assertIn("冷静克制气质", self.out)
-        self.assertIn("低马尾", self.out)
-        self.assertIn("front", self.out)
-
-    def test_empty_context(self) -> None:
-        self.assertEqual(render_model_identity_line({}), "")
-
-    def test_partial_context_omits_missing(self) -> None:
-        out = render_model_identity_line({"identity_contract": {"model_id": "Face-02"}})
-        self.assertIn("Face-02", out)
-        self.assertNotIn("模特备注", out)
-        self.assertNotIn("额外禁止", out)
 
 
 if __name__ == "__main__":

@@ -345,6 +345,25 @@ class BackendCurrentFlowTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Prompt 配置缺失或占位符未填充"):
             main.render_prompt_template("assembly.ai_styling", main.sample_prompt_runtime())
 
+    def test_model_identity_prompt_runtime_migration_removes_placeholder_and_block(self) -> None:
+        db_module = importlib.import_module("app.db")
+        content = """【用户要求】
+商品信息：{{runtime.hero_product_info}}
+【强制模特身份契约】
+{{runtime.model_identity_context}}
+不得改变五官发型。
+【AI 选搭结果】
+{{runtime.styling_result}}
+"""
+
+        cleaned = db_module.remove_model_identity_prompt_runtime(content)
+
+        self.assertNotIn("model_identity_context", cleaned)
+        self.assertNotIn("强制模特身份契约", cleaned)
+        self.assertNotIn("不得改变五官发型", cleaned)
+        self.assertIn("runtime.hero_product_info", cleaned)
+        self.assertIn("runtime.styling_result", cleaned)
+
     def test_ai_tagging_parser_repairs_missing_property_commas(self) -> None:
         main = importlib.import_module("app.main")
 

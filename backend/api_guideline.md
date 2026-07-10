@@ -104,7 +104,6 @@ Prompt 配置可使用以下 runtime：
 - `runtime.storyboard_preview_user_instruction`：分镜预览本次执行的用户介入要求。
 - `runtime.final_image_user_instruction`：最终成片或单张重生本次执行的用户介入要求。
 - `runtime.styling_result`：AI Director 使用的选搭导演上下文。
-- `runtime.model_identity_context`：AI Director 使用的数字模特身份契约和参考图上下文。
 - `runtime.shoot_script_result`：分镜预览使用的拍摄剧本上下文。
 - `runtime.current_shot_context`：最终成片单镜头上下文。
 - `runtime.image_reference_manifest`：Image-2 输入参考图序号、角色和事实源优先级。
@@ -150,7 +149,7 @@ Prompt 配置可使用以下 runtime：
 - 每个阶段的用户输入草稿保存到 `generation_tasks.*_user_instruction_text`，保存动作不改变任务状态、不清空 active artifact。
 - `userInstruction` 在每次阶段执行时分别保存到阶段 artifact 的 `user_instruction_json`，并同步写入 `generation_attempts.request_snapshot_json`，用于追溯多次重生过程。
 - `auto-run-final` 自动推进各阶段时必须读取同一份任务级用户输入草稿，不能静默忽略已保存的阶段要求。
-- 用户要求优先于默认搭配偏好和导演偏好；不得覆盖商品图片事实、搭配库 READY 范围、数字模特身份契约、品牌硬边界、输出 schema 和安全规则。
+- 用户要求优先于默认搭配偏好和导演偏好；不得覆盖商品图片事实、搭配库 READY 范围、品牌硬边界、输出 schema 和安全规则。
 - AI Stylist 输出必须包含 `user_requirement_resolution`，说明已满足项、未满足项、冲突项和替代处理。
 - AI Director 不重新选择搭配服装，只承接 StylingPlan 中已解析的用户要求和选搭结论。
 - 上传页允许在非运行中状态继续 CRUD 主推款图片；修改主推款图片或排序会保留旧过程记录，但清空当前 active artifact 并让任务回到待选搭。单独保存商品信息或阶段用户输入不会隐藏已生成结果，只影响下一次阶段执行。

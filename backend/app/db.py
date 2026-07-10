@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
+import re
 import sqlite3
 from typing import Any, Iterator
 
@@ -25,6 +26,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("040", "add_preview_environment_asset", "migration_add_preview_environment_asset"),
     ("041", "add_shoot_environment_reference", "migration_add_shoot_environment_reference"),
     ("042", "drop_merged_prompt_config_keys", "migration_drop_merged_prompt_config_keys"),
+    ("043", "drop_model_identity_prompt_runtime", "migration_drop_model_identity_prompt_runtime"),
 )
 
 # prompt_configs 只登记「Prompt 维护」页的配置槽（键 / 分组 / 标题 / 说明 / 排序），
@@ -387,6 +389,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_add_preview_environment_asset": migration_add_preview_environment_asset,
         "migration_add_shoot_environment_reference": migration_add_shoot_environment_reference,
         "migration_drop_merged_prompt_config_keys": migration_drop_merged_prompt_config_keys,
+        "migration_drop_model_identity_prompt_runtime": migration_drop_model_identity_prompt_runtime,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -1022,6 +1025,39 @@ def migration_drop_merged_prompt_config_keys(db: sqlite3.Connection) -> None:
         return
     for key in MERGED_PROMPT_CONFIG_KEYS:
         db.execute("DELETE FROM prompt_configs WHERE key = ?", (key,))
+
+
+def remove_model_identity_prompt_runtime(content: str) -> str:
+    """移除拍摄剧本 Prompt 中已下线的模特身份 runtime 及其专属段落。"""
+    cleaned = re.sub(
+        r"(?m)^[ \t]*【强制模特身份契约】[^\n]*(?:\n(?![ \t]*【)[^\n]*)*\n?",
+        "",
+        content,
+    )
+    cleaned = re.sub(r"(?m)^.*\{\{\s*runtime\.model_identity_context\s*\}\}.*\n?", "", cleaned)
+    cleaned = cleaned.replace("数字模特身份契约、", "").replace("、数字模特身份契约", "")
+    return cleaned
+
+
+def migration_drop_model_identity_prompt_runtime(db: sqlite3.Connection) -> None:
+    """清理既有拍摄剧本 Prompt，不改写历史 generation attempt 快照。"""
+    exists = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prompt_configs'"
+    ).fetchone()
+    if not exists:
+        return
+    row = db.execute(
+        "SELECT content FROM prompt_configs WHERE key = 'assembly.shoot_script'"
+    ).fetchone()
+    if not row:
+        return
+    content = str(row["content"] or "")
+    cleaned = remove_model_identity_prompt_runtime(content)
+    if cleaned != content:
+        db.execute(
+            "UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = 'assembly.shoot_script'",
+            (cleaned, now_iso()),
+        )
 
 
 def ensure_prompt_config_catalog(db: sqlite3.Connection) -> None:

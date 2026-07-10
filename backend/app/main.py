@@ -31,7 +31,6 @@ from .db import dumps, get_db, init_db, loads, log_event, now_iso
 from .prompt_render import (
     render_hero_product_info_line,
     render_image_reference_spans,
-    render_model_identity_line,
     render_preview_grid_cell,
     render_shoot_script_global_directing,
     render_shoot_script_resolved_accessories,
@@ -6410,20 +6409,12 @@ async def generate_shoot_script_with_gemini(request_snapshot: dict[str, Any]) ->
 
 
 def attach_shoot_script_prompt_snapshot(request_snapshot: dict[str, Any]) -> dict[str, Any]:
-    input_version = request_snapshot.get("input_version") if isinstance(request_snapshot.get("input_version"), dict) else {}
-    model_snapshot = input_version.get("model_snapshot") if isinstance(input_version.get("model_snapshot"), dict) else {}
-    model_identity_context = model_identity_context_for_prompt(model_snapshot)
-    # P3：商品信息/用户要求以自然语言文本填充占位符，去治理元数据（优先级已由
-    # 拍摄剧本 Prompt 正文（含开头系统指令段）声明）。styling_result（导演上下文）与
-    # model_identity_context（模特身份契约）是结构化业务/身份事实，保持 JSON。
-    # 模特身份契约以 {{runtime.model_identity_context}} 占位；【强制模特身份契约】表头与
-    # "身份优先级/不得改变五官发型"这类固定话术由 Prompt 维护正文托管，代码不再事后追加。
+    # AI Director 只接收本阶段需要的选搭导演上下文，不再注入数字模特身份上下文。
     prompt_runtime = {
-            "styling_result": dumps(request_snapshot.get("styling_result") or styling_result_for_prompt(request_snapshot.get("styling_plan") if isinstance(request_snapshot.get("styling_plan"), dict) else {})),
-            "hero_product_info": render_hero_product_info_line(request_snapshot.get("hero_product_info") or {}),
-            "shoot_script_user_instruction": render_user_instruction_line(request_snapshot.get("shoot_script_user_instruction") or {}),
-            "user_requirement": render_user_requirement_line(request_snapshot.get("user_requirement") or {}),
-            "model_identity_context": render_model_identity_line(model_identity_context),
+        "styling_result": dumps(request_snapshot.get("styling_result") or styling_result_for_prompt(request_snapshot.get("styling_plan") if isinstance(request_snapshot.get("styling_plan"), dict) else {})),
+        "hero_product_info": render_hero_product_info_line(request_snapshot.get("hero_product_info") or {}),
+        "shoot_script_user_instruction": render_user_instruction_line(request_snapshot.get("shoot_script_user_instruction") or {}),
+        "user_requirement": render_user_requirement_line(request_snapshot.get("user_requirement") or {}),
     }
     prompt = render_prompt_template(SHOOT_SCRIPT_PROMPT_CONFIG_KEY, prompt_runtime)
     return {**request_snapshot, "prompt": prompt, **prompt_execution_facts(SHOOT_SCRIPT_PROMPT_CONFIG_KEY, prompt, prompt_runtime)}
@@ -6436,7 +6427,7 @@ def normalize_shoot_script(raw: dict[str, Any], request_snapshot: dict[str, Any]
     source = raw if isinstance(raw, dict) else {}
     input_version = request_snapshot.get("input_version") if isinstance(request_snapshot.get("input_version"), dict) else {}
     model_snapshot = input_version.get("model_snapshot") if isinstance(input_version.get("model_snapshot"), dict) else {}
-    model_identity_context = model_identity_context_for_prompt(model_snapshot)
+    model_identity_contract = model_identity_contract_from_snapshot(model_snapshot)
     global_directing = source.get("global_directing") if isinstance(source.get("global_directing"), dict) else {}
     fallback_consistency_rules: list[str] = []
     fallback_negative_constraints: list[str] = []
@@ -6453,7 +6444,7 @@ def normalize_shoot_script(raw: dict[str, Any], request_snapshot: dict[str, Any]
             "styling_plan_version": str((styling_plan.get("schema_version") if isinstance(styling_plan, dict) else "") or "styling-plan-v1"),
             "model_snapshot_id": str(((input_version.get("model_snapshot") or {}).get("modelId") if isinstance(input_version.get("model_snapshot"), dict) else "") or "Face-01"),
         },
-        "model_identity_contract": model_identity_context.get("identity_contract", {}),
+        "model_identity_contract": model_identity_contract,
         "global_directing": {
             "rules": normalize_shoot_script_global_rules(global_directing.get("rules")),
             "accessory_boundary": str(global_directing.get("accessory_boundary") or ""),
@@ -6771,11 +6762,11 @@ def serialize_new_shot_plan(row: Any) -> dict[str, Any]:
     return {"id": row["id"], "sortOrder": row["sort_order"], "shotType": row["shot_type"], "plan": plan}
 
 
-def model_identity_context_for_prompt(model_snapshot: dict[str, Any] | None) -> dict[str, Any]:
+def model_identity_contract_from_snapshot(model_snapshot: dict[str, Any] | None) -> dict[str, Any]:
     snapshot = model_snapshot if isinstance(model_snapshot, dict) else {}
     profile = snapshot.get("profile") if isinstance(snapshot.get("profile"), dict) else {}
     image_inputs = snapshot.get("imageInputs") if isinstance(snapshot.get("imageInputs"), list) else []
-    contract = {
+    return {
         "model_id": str(snapshot.get("modelId") or snapshot.get("model_id") or "Face-01"),
         "name": str(snapshot.get("name") or ""),
         "fact_source": "model_identity_reference_images",
@@ -6809,10 +6800,6 @@ def model_identity_context_for_prompt(model_snapshot: dict[str, Any] | None) -> 
             for item in image_inputs[:6]
             if isinstance(item, dict)
         ],
-    }
-    return {
-        "schema_version": "model-identity-context-v1",
-        "identity_contract": contract,
     }
 
 
@@ -7291,8 +7278,6 @@ def sample_prompt_runtime() -> dict[str, Any]:
         "shoot_script_user_instruction": "腰线相关镜头要更明确。",
         "storyboard_preview_user_instruction": "分镜姿态更舒展。",
         "final_image_user_instruction": "成片整体更干净，减少配饰存在感。",
-        # 模特身份契约（已渲染文本）
-        "model_identity_context": "数字模特身份：Face-01（默认模特）\n参考图角度：front、left45",
         # 拍摄剧本各分段（分镜预览用；无表头）
         "shoot_script_global_directing": "配饰边界：生成配饰低存在感\n一致性：同一模特同一造型",
         "shoot_script_styling_risks": "- 放弃盘发，保留短发塞耳后",
@@ -7325,7 +7310,6 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.storyboard_preview_user_instruction", "scope": "runtime", "description": "分镜预览本次执行的用户介入要求"},
         {"name": "runtime.final_image_user_instruction", "scope": "runtime", "description": "最终成片或单张重生本次执行的用户介入要求"},
         {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭导演上下文，使用搭配服装 code 标识"},
-        {"name": "runtime.model_identity_context", "scope": "runtime", "description": "拍摄剧本用：已渲染的数字模特身份契约文本（身份编号/备注/额外禁止/参考图角度）"},
         # 拍摄剧本 → 分镜预览：各分段只出可变数据正文（无表头），表头用条件段在正文托管
         {"name": "runtime.shoot_script_global_directing", "scope": "runtime", "description": "拍摄剧本全局导演正文（配饰边界/一致性/全局禁止），无表头"},
         {"name": "runtime.shoot_script_styling_risks", "scope": "runtime", "description": "拍摄剧本搭配风险处理正文，无表头；为空则条件段省略"},

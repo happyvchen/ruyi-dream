@@ -75,7 +75,7 @@ POST /api/generation-tasks/{id}/auto-run-final
 - `generation_attempts.request_snapshot_json` 可以保存技术排查需要的 request/response 快照。
 - 传给模型的 runtime 只给当前步骤必需信息，不透传完整历史阶段、完整候选池或历史 prompt。
 - AI Stylist 输入是未归档 READY 搭配库全量标签事实卡和 `user_requirement`。用户要求优先于默认搭配偏好，但不能覆盖商品事实、搭配库事实、品牌硬边界、输出 schema 和安全规则。
-- AI Director 输入是 `styling_result_for_prompt` + `model_identity_context_for_prompt`，只包含主推款理解、选中 outfit、选中服饰紧凑标签、理由、质量信号、warnings 和数字模特身份契约。
+- AI Director 输入是 `styling_result_for_prompt`，只包含主推款理解、选中 outfit、选中服饰紧凑标签、理由、质量信号和 warnings。
 - 分镜预览输入是 `shoot_script_result_for_prompt` + `image_reference_manifest_for_prompt`，只包含全局导演、配饰、风险、6 个镜头、输入参考图序号和事实源。
 - 最终成片输入是 `current_shot_context_for_prompt` + `image_reference_manifest_for_prompt`，只包含当前格子、当前镜头、全局导演、选中 outfit、本镜头配饰、输入参考图序号和事实源。
 

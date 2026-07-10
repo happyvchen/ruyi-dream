@@ -32,7 +32,6 @@ __all__ = [
     "render_user_instruction_line",
     "render_user_requirement_line",
     "render_image_reference_spans",
-    "render_model_identity_line",
 ]
 
 EMPTY_PLACEHOLDER = "（无）"
@@ -245,38 +244,6 @@ def render_user_requirement_line(context: dict[str, Any]) -> str:
     ctx = _as_dict(context)
     text = _clean_text(ctx.get("combined_requirement")) or _clean_text(ctx.get("upload_requirement"))
     return text or EMPTY_PLACEHOLDER
-
-
-def render_model_identity_line(context: dict[str, Any]) -> str:
-    """把模特身份契约渲染成中文自然语言块（替代英文 JSON dump）。
-
-    ``context`` 为 ``model_identity_context_for_prompt`` 的输出。身份事实以模特参考图
-    和 ``identity_contract`` 为准；具体身份边界话术由可编辑模板正文（Prompt 维护）声明。
-    """
-    ctx = _as_dict(context)
-    contract = _as_dict(ctx.get("identity_contract"))
-    lines: list[str] = []
-
-    model_id = _clean_text(contract.get("model_id"))
-    name = _clean_text(contract.get("name"))
-    if model_id:
-        lines.append(f"数字模特身份：{model_id}" + (f"（{name}）" if name else ""))
-
-    notes = _clean_text(contract.get("profile_notes"))
-    if notes:
-        lines.append(f"模特备注：{notes}")
-
-    forbidden = _clean_list(contract.get("forbidden"))
-    if forbidden:
-        lines.append("额外禁止：" + "；".join(forbidden))
-
-    angles = _clean_list(
-        [_as_dict(img).get("angle") for img in (contract.get("reference_images") or []) if isinstance(img, dict)]
-    )
-    if angles:
-        lines.append("参考图角度：" + "、".join(angles))
-
-    return "\n".join(lines)
 
 
 def _span_text(start: int, end: int) -> str:

@@ -85,7 +85,7 @@ ShootScript 不重新选择库内搭配服装；它只能基于已选 StylingPla
 | 阶段 | Runtime | 只传什么 |
 |---|---|---|
 | AI Stylist | `candidate_retrieval` | 未归档 READY 搭配库全量标签事实卡 |
-| AI Director | `styling_result` + `model_identity_context` | 主推款理解、选中 outfit、选中服饰紧凑标签、质量信号、模特身份契约 |
+| AI Director | `styling_result` | 主推款理解、选中 outfit、选中服饰紧凑标签、质量信号 |
 | 分镜预览 | `shoot_script_result` + `image_reference_manifest` | 全局导演、风险、配饰、6 个镜头、参考图角色和事实源 |
 | 最终成片 | `current_shot_context` + `image_reference_manifest` | 当前镜头、当前格子、选中 outfit、本镜头配饰、禁止项、参考图角色和事实源 |
 
