@@ -5698,16 +5698,6 @@ def build_candidate_retrieval_snapshot(input_row: Any, material_cards: list[dict
     }
 
 
-def build_accessory_boundary() -> dict[str, Any]:
-    return {
-        "allow_empty": True,
-        "default": ["低存在感简洁鞋，可省略包和首饰"],
-        "avoid_default": ["夸张首饰", "传统公文包模板", "遮挡主推款卖点的配饰"],
-        "bag_rule": "包可省略；如出现，保持低存在感且不得遮挡主推款。",
-        "jewelry_rule": "首饰可省略；如出现，只作轻微风格辅助，不做特写。",
-    }
-
-
 def build_phase_one_brand_style_evidence() -> list[dict[str, Any]]:
     return []
 
@@ -5734,58 +5724,6 @@ def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[s
         "user_requirement": user_requirement,
         "prompt_rule_source": AI_STYLING_PROMPT_CONFIG_KEY,
     }
-
-
-def fallback_styling_plan(input_row: Any, candidate_snapshot: dict[str, Any], reason: str) -> dict[str, Any]:
-    plan = {
-        "schema_version": "styling-plan-v1",
-        "plan_source_mode": "fallback",
-        "hero_understanding": {
-            "hero_visual_summary": "主推款图片已作为商品事实源。",
-            "hero_selling_points": ["主推款整体轮廓", "主推款关键细节"],
-            "hero_visibility_risks": ["AI Stylist 未完成真实审美判断"],
-        },
-        "styling_intents": [
-            {
-                "id": "hero_first_single_piece",
-                "title": "主推款优先",
-                "reason": "模型不可用时采用最保守的商品优先方案。",
-                "risk": "未进行真实智能选搭。",
-            },
-        ],
-        "outfit_candidates": [
-            {
-                "id": "candidate_a",
-                "mode": "hero_first_single_piece",
-                "selected_material_ids": [],
-                "generated_accessories": ["低存在感裸色或米色简洁鞋"],
-                "wearing_notes": "主推款作为画面唯一商品级服饰。",
-                "hero_focus": ["主推款整体轮廓", "主推款关键细节"],
-                "aesthetic_diagnosis": {
-                    "color_weight": "模型不可用，未完成真实色彩重量判断。",
-                    "silhouette_balance": "模型不可用，采用主推款单穿以避免配角体量干扰。",
-                    "waistline_proportion": "模型不可用，优先保留主推款比例。",
-                    "season_material_fit": "模型不可用，未完成季节材质判断。",
-                    "template_risk": "模型不可用，避免套用完整 outfit 模板。",
-                    "brand_read": "模型不可用，无法确认 Lily 品牌采用可能性。",
-                },
-                "scores": {
-                    "aesthetic_score": 0.45,
-                    "brand_fit_score": 0.45,
-                    "hero_visibility_score": 0.95,
-                    "commercial_readiness_score": 0.55,
-                },
-                "risk_notes": [reason],
-            },
-        ],
-        "selected_outfit_key": "candidate_a",
-        "selected_outfit_id": "candidate_a",
-        "selected_material_ids": [],
-        "reason_summary": "AI Stylist 不可用，采用主推款优先的保守方案。",
-        "rejected_candidates": [],
-        "warnings": ["fallback_styling_plan", reason],
-    }
-    return normalize_styling_plan(plan, candidate_snapshot, plan_source_mode="fallback")
 
 
 def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, Any], plan_source_mode: str = "production") -> dict[str, Any]:
@@ -6413,7 +6351,7 @@ def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_ver
         "styling_result": styling_result_for_prompt(styling_plan, selected_snapshot),
         "selected_material_snapshot": selected_material_image_refs,
         "base_shot_rules": [],
-        "accessory_boundary": candidate_snapshot.get("accessory_boundary") if isinstance(candidate_snapshot, dict) else build_accessory_boundary(),
+        "accessory_boundary": candidate_snapshot.get("accessory_boundary") if isinstance(candidate_snapshot, dict) else {},
         "output_schema": "shoot-script-v1",
     }
 
@@ -6742,8 +6680,8 @@ def normalize_shoot_script_shot(source: dict[str, Any], base: dict[str, Any], he
 def normalize_shoot_script_summary(value: Any, hero: dict[str, Any]) -> dict[str, Any]:
     source = value if isinstance(value, dict) else {}
     return {
-        "title": str(source.get("title") or "Lily 电商棚拍拍摄剧本"),
-        "summary": str(source.get("summary") or "本组拍摄以主推款商品表达为核心，覆盖完整比例、品类核心、设计细节、动态补充和标准正面图。"),
+        "title": str(source.get("title") or ""),
+        "summary": str(source.get("summary") or ""),
         "key_points": ensure_string_list(source.get("key_points")) or ensure_string_list(hero.get("shot_requirements")),
         "risk_summary": str(source.get("risk_summary") or ""),
     }

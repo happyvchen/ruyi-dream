@@ -102,16 +102,6 @@ class BackendCurrentFlowTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "返回空 JSON"):
             main.validate_styling_plan(plan, {"candidate_material_ids": []})
 
-    def test_fallback_styling_plan_keeps_synthesized_candidate(self) -> None:
-        main = importlib.import_module("app.main")
-
-        plan = main.fallback_styling_plan({"image_snapshot_json": "[]"}, {"candidate_material_ids": [], "library_tag_cards": []}, "provider down")
-
-        self.assertEqual(plan["selected_outfit_key"], "candidate_a")
-        self.assertEqual([item["outfit_key"] for item in plan["outfit_candidates"]], ["candidate_a"])
-        with self.assertRaisesRegex(RuntimeError, "fallback"):
-            main.validate_styling_plan(plan, {"candidate_material_ids": []})
-
     def test_normalize_styling_plan_repairs_mismatched_selected_outfit_key_from_material_codes(self) -> None:
         main = importlib.import_module("app.main")
         candidate_snapshot = {

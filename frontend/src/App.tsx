@@ -1667,7 +1667,7 @@ function ShootScriptSummary({ task, isAdmin }: { task: GenerationTask; isAdmin: 
       <div className="styling-plan-head">
         <div>
           <span>拍摄剧本</span>
-          <h3>{stringValue(summary.title) || 'Lily 电商棚拍拍摄剧本'}</h3>
+          <h3>{stringValue(summary.title) || '拍摄剧本'}</h3>
         </div>
         <div className="score-strip script-strip">
           <span><b>{shots.length || 6}</b>镜头</span>
@@ -1675,7 +1675,7 @@ function ShootScriptSummary({ task, isAdmin }: { task: GenerationTask; isAdmin: 
           <span><b>{resolvedAccessories.length || adjustments.length}</b>配饰</span>
         </div>
       </div>
-      <p>{stringValue(summary.summary) || '本组拍摄以主推款商品表达为核心，覆盖完整比例、品类核心、设计细节、动态补充和标准正面图。'}</p>
+      <p>{stringValue(summary.summary) || '模型未返回剧本摘要，请查看下方镜头明细。'}</p>
       {risks.length > 0 && (
         <div className="rejected-list">
           <strong>选搭风险与建议</strong>
