@@ -3608,7 +3608,7 @@ function AICallLogDialog({ dialog, onClose }: {
         <div className="confirm-head">
           <div>
             <h2>{dialog.title}</h2>
-            <p>仅显示实际传给大模型的输入和实际输出。</p>
+            <p>展示本次调用真实发生的请求、响应、解析和时间事实；不用于重放任务。</p>
           </div>
           <button className="ghost-icon" type="button" onClick={onClose} title="关闭"><X size={18} /></button>
         </div>
@@ -3626,15 +3626,31 @@ function AICallLogDialog({ dialog, onClose }: {
                     <span>{statusText(record.status)}</span>
                   </div>
                 </summary>
+                <div className="ai-log-meta">
+                  <span>Attempt #{record.id}</span>
+                  <span>{record.provider}</span>
+                  {record.providerRequestId && <span>Request ID: {record.providerRequestId}</span>}
+                  {record.errorCode && <span>错误码: {record.errorCode}</span>}
+                  <span>开始: {dateText(record.startedAt ?? record.createdAt)}</span>
+                  {(record.completedAt || record.failedAt) && <span>结束: {dateText(record.completedAt ?? record.failedAt)}</span>}
+                </div>
                 {record.errorMessage && <div className="inline-error">{record.errorMessage}</div>}
                 <div className="ai-log-json-grid">
                   <div>
-                    <span>输入</span>
+                    <span>实际模型输入</span>
                     <pre>{formatDebugJson(record.modelInput)}</pre>
                   </div>
                   <div>
-                    <span>输出</span>
+                    <span>实际模型输出</span>
                     <pre>{formatDebugJson(record.modelOutput)}</pre>
+                  </div>
+                  <div>
+                    <span>请求过程事实</span>
+                    <pre>{formatDebugJson(record.requestFacts)}</pre>
+                  </div>
+                  <div>
+                    <span>响应过程事实</span>
+                    <pre>{formatDebugJson(record.responseFacts)}</pre>
                   </div>
                 </div>
               </details>

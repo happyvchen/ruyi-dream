@@ -1732,6 +1732,14 @@ a.button-link { text-decoration: none; cursor: pointer; }
   color: #64748b;
   font-size: 12px;
 }
+.ai-log-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 10px;
+  color: #64748b;
+  font-size: 12px;
+}
 .ai-log-json-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
