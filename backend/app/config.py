@@ -48,8 +48,10 @@ class Settings:
         for origin in os.getenv("APP_DIRECT_UPLOAD_CORS_ORIGINS", os.getenv("BACKEND_CORS_ORIGINS", DEFAULT_CORS_ORIGINS)).split(",")
         if origin.strip()
     ]
-    max_upload_image_bytes = int(os.getenv("APP_MAX_UPLOAD_IMAGE_BYTES", str(15 * 1024 * 1024)))
-    max_upload_image_pixels = int(os.getenv("APP_MAX_UPLOAD_IMAGE_PIXELS", str(25_000_000)))
+    max_upload_image_bytes = int(os.getenv("APP_MAX_UPLOAD_IMAGE_BYTES", str(50 * 1024 * 1024)))
+    max_upload_image_pixels = int(os.getenv("APP_MAX_UPLOAD_IMAGE_PIXELS", str(100_000_000)))
+    image_decode_safety_pixels = int(os.getenv("APP_IMAGE_DECODE_SAFETY_PIXELS", str(200_000_000)))
+    normalized_image_max_edge = int(os.getenv("APP_NORMALIZED_IMAGE_MAX_EDGE", "8000"))
     max_head_references_per_profile = int(os.getenv("APP_MAX_HEAD_REFERENCES_PER_PROFILE", "20"))
     api_access_token = os.getenv("APP_API_ACCESS_TOKEN", os.getenv("APP_ACCESS_TOKEN", ""))
     user_username = os.getenv("APP_USER_USERNAME", "user")
@@ -153,6 +155,12 @@ class Settings:
             raise RuntimeError("GENERATION_DOWNLOAD_REQUEST_TIMEOUT_SECONDS must be greater than 0.")
         if self.provider_upload_cache_ttl_seconds <= 0:
             raise RuntimeError("PROVIDER_UPLOAD_CACHE_TTL_SECONDS must be greater than 0.")
+        if self.max_upload_image_bytes <= 0 or self.max_upload_image_pixels <= 0:
+            raise RuntimeError("Image upload byte and pixel limits must be greater than 0.")
+        if self.image_decode_safety_pixels < self.max_upload_image_pixels:
+            raise RuntimeError("APP_IMAGE_DECODE_SAFETY_PIXELS must be greater than or equal to APP_MAX_UPLOAD_IMAGE_PIXELS.")
+        if self.normalized_image_max_edge <= 0:
+            raise RuntimeError("APP_NORMALIZED_IMAGE_MAX_EDGE must be greater than 0.")
         if self.gemini_provider not in {"direct", "toapis"}:
             raise RuntimeError("GEMINI_PROVIDER must be one of: direct, toapis.")
         if self.gemini_toapis_timeout_seconds <= 0:

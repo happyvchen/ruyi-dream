@@ -24,6 +24,7 @@ httpx-sse==0.4.3
 idna==3.14
 jmespath==1.1.0
 pillow==12.0.0
+pillow-heif==1.4.0
 pyasn1==0.6.3
 pyasn1-modules==0.4.2
 pycparser==3.0

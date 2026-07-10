@@ -23,7 +23,7 @@ from urllib.parse import urlencode
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 from pydantic import BaseModel, Field
 
 from .config import get_settings
@@ -57,6 +57,14 @@ from .image_derivatives import (
     derivative_key,
     existing_derivative_or_original,
     generate_image_derivatives,
+)
+from .image_ingestion import (
+    ImageIngestionError,
+    declared_upload_content_type,
+    inspect_image,
+    normalize_image,
+    normalized_image_candidates,
+    normalized_image_key,
 )
 from .generation_progress import (
     ERROR_BUSINESS_REJECT,
@@ -98,7 +106,7 @@ from .object_storage import (
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
-Image.MAX_IMAGE_PIXELS = settings.max_upload_image_pixels
+Image.MAX_IMAGE_PIXELS = settings.image_decode_safety_pixels
 SESSION_ROLES = {"user", "admin"}
 SHOOT_CONFIG_EXCLUDED_CATEGORY_CODES = {"未知", "不支持入库配饰", "unknown", "unsupported_accessory"}
 PROMPT_PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-zA-Z0-9_.-]+)\s*}}")
@@ -391,7 +399,6 @@ TAG_REVIEW_CONFIDENCE_THRESHOLD = 0.72
 LOGIN_FAILURE_WINDOW_SECONDS = 300
 LOGIN_FAILURE_LIMIT = 8
 login_failures_by_client: dict[str, list[float]] = {}
-ALLOWED_UPLOAD_FORMATS = {"JPEG", "PNG", "WEBP"}
 active_background_generation_jobs: set[str] = set()
 
 @asynccontextmanager
@@ -546,13 +553,6 @@ async def validate_upload_image(upload: UploadFile) -> tuple[bytes, str]:
     return content, content_type
 
 
-def detected_image_content_type(image_format: str, declared_type: str | None) -> str:
-    canonical_type = Image.MIME.get(image_format.upper())
-    if canonical_type:
-        return canonical_type
-    return f"image/{image_format.lower() or 'unknown'}"
-
-
 def validate_image_content(content: bytes, filename: str, declared_type: str | None = None) -> tuple[str, int, int]:
     if not content:
         raise HTTPException(status_code=400, detail=f"{filename} 是空文件")
@@ -561,34 +561,17 @@ def validate_image_content(content: bytes, filename: str, declared_type: str | N
         raise HTTPException(status_code=400, detail=f"{filename} 超过 {max_mb:.0f}MB 大小限制")
 
     try:
-        with Image.open(BytesIO(content)) as image:
-            image.verify()
-        with Image.open(BytesIO(content)) as image:
-            image_format = (image.format or "").upper()
-            width, height = image.size
-    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
-        raise HTTPException(status_code=400, detail=f"{filename} 无法解码为有效图片") from exc
-
-    if image_format not in ALLOWED_UPLOAD_FORMATS:
-        raise HTTPException(status_code=400, detail=f"{filename} 仅支持 JPG、PNG 或 WebP 图片")
-    if width <= 0 or height <= 0 or width * height > settings.max_upload_image_pixels:
-        max_mp = settings.max_upload_image_pixels / 1_000_000
-        raise HTTPException(status_code=400, detail=f"{filename} 超过 {max_mp:.0f}MP 像素限制")
-    return detected_image_content_type(image_format, declared_type), width, height
+        inspected = inspect_image(content, filename, settings.max_upload_image_pixels)
+    except ImageIngestionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return inspected.content_type, inspected.width, inspected.height
 
 
 def direct_upload_content_type(mime_type: str | None, filename: str) -> str:
-    declared = (mime_type or "").split(";", 1)[0].strip().lower()
-    if declared in {"image/jpeg", "image/png", "image/webp"}:
-        return declared
-    suffix = Path(filename).suffix.lower()
-    if suffix in {".jpg", ".jpeg"}:
-        return "image/jpeg"
-    if suffix == ".png":
-        return "image/png"
-    if suffix == ".webp":
-        return "image/webp"
-    raise HTTPException(status_code=400, detail=f"{filename} 仅支持 JPG、PNG 或 WebP 图片")
+    try:
+        return declared_upload_content_type(mime_type, filename)
+    except ImageIngestionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def direct_upload_scope_prefix(scope: str) -> str:
@@ -617,7 +600,19 @@ def image_object_keys(original_key: str | Path | None) -> list[str]:
     return [
         clean_key(original_key),
         *(key for key in [derivative_key(original_key, "thumb"), derivative_key(original_key, "preview")] if key),
+        *normalized_image_candidates(original_key),
     ]
+
+
+def create_normalized_image_derivatives(original_key: str, content: bytes) -> tuple[str, dict[str, Any]]:
+    normalized = normalize_image(content, settings.normalized_image_max_edge)
+    normalized_key = normalized_image_key(original_key, normalized.suffix)
+    put_bytes(normalized_key, normalized.content, normalized.content_type)
+    try:
+        return normalized_key, generate_image_derivatives(original_key, normalized.content)
+    except Exception:
+        cleanup_objects([normalized_key, derivative_key(original_key, "thumb"), derivative_key(original_key, "preview")])
+        raise
 
 
 def gemini_vision_input(object_key: str | None, fallback_mime: str | None = None) -> dict[str, Any] | None:
@@ -3941,7 +3936,7 @@ async def add_model_head_reference(
                 safe_name = sanitize_filename(upload.filename or "head-reference")
                 key = unique_key(join_key(asset_dir, safe_name))
                 put_fileobj(key, BytesIO(content), content_type)
-                generate_image_derivatives(key, content)
+                create_normalized_image_derivatives(key, content)
                 saved_keys.append(key)
                 old_filename = references.get(assigned_key)
                 if old_filename:
@@ -4091,7 +4086,7 @@ async def replace_model_head_reference(
         key = unique_key(join_key(asset_dir, safe_name))
         try:
             put_fileobj(key, BytesIO(content), content_type)
-            generate_image_derivatives(key, content)
+            create_normalized_image_derivatives(key, content)
             references[clean_reference_id] = Path(key).name
             profile["headReferences"] = references
             db.execute(
@@ -4386,25 +4381,29 @@ def insert_media_asset_record(asset: dict[str, Any], timestamp: str | None = Non
 
 
 def process_uploaded_content_as_media_asset(content: bytes, content_type: str, filename: str, key: str, timestamp: str) -> dict[str, Any]:
-    derivative = generate_image_derivatives(key, content)
-    width = height = None
-    with Image.open(BytesIO(content)) as image:
-        width, height = image.size
-    asset = {
-        "objectKey": key,
-        "thumbKey": derivative.get("thumb"),
-        "previewKey": derivative.get("preview"),
-        "originalFilename": filename,
-        "mimeType": content_type,
-        "width": width,
-        "height": height,
-        "sizeBytes": len(content),
-        "thumbSizeBytes": derivative.get("thumbSize"),
-        "previewSizeBytes": derivative.get("previewSize"),
-        "hash": hashlib.sha256(content).hexdigest(),
-    }
-    asset["id"] = insert_media_asset_record(asset, timestamp)
-    return asset
+    inspected = inspect_image(content, filename, settings.max_upload_image_pixels)
+    try:
+        normalized_key, derivative = create_normalized_image_derivatives(key, content)
+        width, height = inspected.width, inspected.height
+        asset = {
+            "objectKey": key,
+            "normalizedKey": normalized_key,
+            "thumbKey": derivative.get("thumb"),
+            "previewKey": derivative.get("preview"),
+            "originalFilename": filename,
+            "mimeType": content_type,
+            "width": width,
+            "height": height,
+            "sizeBytes": len(content),
+            "thumbSizeBytes": derivative.get("thumbSize"),
+            "previewSizeBytes": derivative.get("previewSize"),
+            "hash": hashlib.sha256(content).hexdigest(),
+        }
+        asset["id"] = insert_media_asset_record(asset, timestamp)
+        return asset
+    except Exception:
+        cleanup_objects(image_object_keys(key))
+        raise
 
 
 def process_uploaded_object_as_media_asset(upload: UploadedMediaRequest, timestamp: str) -> dict[str, Any]:
@@ -4438,6 +4437,7 @@ async def save_uploads_as_media_assets(files: list[UploadFile], prefix: str) -> 
             saved_object_keys.append(key)
             asset = await asyncio.to_thread(process_uploaded_content_as_media_asset, content, content_type, upload.filename or filename, key, timestamp)
             saved_object_keys.extend([item for item in (asset.get("thumbKey"), asset.get("previewKey")) if item])
+            saved_object_keys.extend([item for item in (asset.get("normalizedKey"),) if item])
             saved_asset_ids.append(int(asset["id"]))
             saved.append(asset)
     except Exception:
@@ -4464,6 +4464,7 @@ async def save_uploaded_objects_as_media_assets(uploads: list[UploadedMediaReque
             saved_object_keys.append(object_key)
             asset = await asyncio.to_thread(process_uploaded_object_as_media_asset, upload, timestamp)
             saved_object_keys.extend([item for item in (asset.get("thumbKey"), asset.get("previewKey")) if item])
+            saved_object_keys.extend([item for item in (asset.get("normalizedKey"),) if item])
             saved_asset_ids.append(int(asset["id"]))
             saved.append(asset)
     except Exception:

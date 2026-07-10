@@ -9,6 +9,7 @@
 | `app/main.py` | API 路由、AI Stylist、ShootScript、分镜预览、最终图和后台 poller 编排 |
 | `app/db.py` | SQLite 初始化、默认模特 seed、迁移、事件日志 |
 | `app/image_provider.py` | Image-2 provider adapter；默认 toapis，保留 fal adapter |
+| `app/image_ingestion.py` | 上传图片格式探测、限制校验、方向/色彩标准化和 normalized 母版 |
 | `app/image_derivatives.py` | thumb / preview WebP 衍生图 |
 | `app/object_storage.py` | S3/RustFS 对象访问、预签名 URL、删除和读取 |
 | `app/config.py` | 环境变量和运行配置 |
@@ -87,7 +88,7 @@ Prompt 正文只来自 `prompt_configs.content`。后端只初始化空正文的
 
 ## 媒体与恢复
 
-对象存储保存原图，应用层登记 `thumb`、`preview`、`original` 三层媒体结构。前端访问稳定 `/api/media?key=...&variant=...`，后端校验 key 后跳转对象存储短期 URL。
+对象存储保存原图，并为新上传图片生成确定性路径的 `normalized` sRGB 母版及 `thumb`、`preview`。AI/provider 优先使用 normalized，下载和审计使用 original。前端访问稳定 `/api/media?key=...&variant=...`，后端校验 key 后跳转对象存储短期 URL。
 
 `generation_previews` 和 `generation_result_images_new` 使用 `locked_by` / `locked_until` / `run_attempts` 做单实例恢复。后端重启后，poller 扫描锁过期任务，标记历史 attempt 失败并重建 attempt 继续执行。带有 `auto_run_target = FINAL` 的任务会在非运行中状态下重新调度自动推进。
 

@@ -21,7 +21,7 @@ MediaAsset
 0.1.0 生产链路统一采用以下工程手段：
 
 - S3 兼容对象存储，私有化默认 RustFS。
-- 原图 / preview / thumb 三层媒体结构。
+- 原图 / normalized / preview / thumb 媒体结构；原图用于审计与下载，normalized 用于 AI/provider 输入。
 - 后台任务与状态轮询。
 - provider request/response 快照。
 - 前端稳定媒体读取路径，不直接依赖短期预签名 URL。
@@ -38,6 +38,7 @@ MediaAsset
 - object_key
 - thumb_key
 - preview_key
+- normalized_key（实现可由 object_key 确定性推导，不强制单独落列）
 - original_filename
 - mime_type
 - width

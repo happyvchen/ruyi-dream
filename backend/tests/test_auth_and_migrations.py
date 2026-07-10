@@ -604,9 +604,11 @@ class BackendCurrentFlowTests(unittest.TestCase):
         object_key = "direct-uploads/generation-task/test-batch/001-look.jpg"
         original_object_head = main.object_head
         original_get_bytes = main.get_bytes
+        original_put_bytes = main.put_bytes
         original_generate_image_derivatives = main.generate_image_derivatives
         main.object_head = lambda key: {"contentLength": len(image_bytes), "contentType": "image/jpeg"} if key == object_key else None
         main.get_bytes = lambda key: image_bytes if key == object_key else b""
+        main.put_bytes = lambda key, content, content_type: None
         main.generate_image_derivatives = lambda key, content: {
             "thumb": f"{key}.thumb.webp",
             "preview": f"{key}.preview.webp",
@@ -639,6 +641,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
         finally:
             main.object_head = original_object_head
             main.get_bytes = original_get_bytes
+            main.put_bytes = original_put_bytes
             main.generate_image_derivatives = original_generate_image_derivatives
             client.close()
 

@@ -22,10 +22,15 @@ from .generation_progress import (
     is_retryable_error,
 )
 from .image_derivatives import generate_image_derivatives
+from .image_ingestion import normalized_image_candidates
 from .object_storage import get_bytes, object_exists, put_bytes
 
 # 上传进度回调：on_progress(completed, total)
 UploadProgressCallback = Callable[[int, int], None]
+
+
+def normalized_or_original_key(object_key: str) -> str:
+    return next((key for key in normalized_image_candidates(object_key) if object_exists(key)), object_key)
 
 
 def get_settings() -> config.Settings:
@@ -481,11 +486,12 @@ def upload_image_inputs(
             uploaded.append(next_item)
             continue
         if object_key and object_exists(str(object_key)):
-            next_item["sourceObjectKey"] = str(object_key)
+            source_key = normalized_or_original_key(str(object_key))
+            next_item["sourceObjectKey"] = source_key
             next_item["providerUrl"] = upload_object_with_cache(
                 "fal",
-                str(object_key),
-                lambda key=str(object_key), name=str(item.get("filename") or object_key): upload_object_to_fal(key, name),
+                source_key,
+                lambda key=source_key: upload_object_to_fal(key, os.path.basename(key)),
             )
             uploaded.append(next_item)
             continue
@@ -568,11 +574,12 @@ def upload_toapis_image_inputs(
             uploaded.append(next_item)
             continue
         if object_key and object_exists(str(object_key)):
-            next_item["sourceObjectKey"] = str(object_key)
+            source_key = normalized_or_original_key(str(object_key))
+            next_item["sourceObjectKey"] = source_key
             next_item["providerUrl"] = upload_object_with_cache(
                 "toapis",
-                str(object_key),
-                lambda key=str(object_key), name=str(item.get("filename") or object_key): upload_object_to_toapis(key, name),
+                source_key,
+                lambda key=source_key: upload_object_to_toapis(key, os.path.basename(key)),
             )
             uploaded.append(next_item)
             continue

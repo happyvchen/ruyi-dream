@@ -66,6 +66,9 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。`/api/g
 
 主推款图片上传契约：
 
+- 所有图片上传入口统一支持静态 JPG/JPEG、PNG、WebP、HEIC/HEIF 和 AVIF；默认单文件上限 50MB、像素上限 100MP。
+- 后端按实际内容而非扩展名完成解码校验，拒绝动态图、损坏文件及 RAW、PSD、SVG 等不支持格式，并返回明确错误原因。
+- 原文件保留用于下载和审计；入库时生成方向正确、sRGB、长边不超过 8000px 的 JPEG/PNG 标准化母版供下游使用。
 - 前端必须先调用 `/api/uploads/presign` 获取短期 PUT URL，再由浏览器直接 PUT 到 S3 兼容对象存储，最后调用 `/api/generation-tasks/from-uploads` 或 `/api/generation-tasks/{id}/images/from-uploads` 登记已上传对象。
 - 主推款图片不得通过前端上传到后端再由后端中转到对象存储；这会把大文件流量压回应用服务器，并掩盖 bucket CORS 或签名配置问题。
 - 后端启动和签名前会确保对象存储 bucket 存在直传 CORS 规则；默认使用 `BACKEND_CORS_ORIGINS`，也可用 `APP_DIRECT_UPLOAD_CORS_ORIGINS` 单独配置。

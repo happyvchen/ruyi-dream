@@ -85,6 +85,13 @@ const densePageSizeOptions = [12, 50, 100] as const
 const recentTaskPageSize = 10
 const authSeenStorageKey = 'ruyi-auth-seen'
 const authExpiredMessage = '登录状态已过期，请重新登录后继续。'
+const SUPPORTED_IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/heic,image/heif,image/avif,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif'
+const SUPPORTED_IMAGE_FILE_PATTERN = /\.(jpe?g|png|webp|heic|heif|avif)$/i
+const SUPPORTED_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'image/avif'])
+
+function isSupportedImageFile(file: File) {
+  return SUPPORTED_IMAGE_MIME_TYPES.has(file.type.toLowerCase()) || SUPPORTED_IMAGE_FILE_PATTERN.test(file.name)
+}
 
 export function App() {
   const [checked, setChecked] = useState(false)
@@ -963,7 +970,7 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
 
   function addHeroFiles(nextFiles: File[]) {
     const imageFiles = nextFiles
-      .filter((file) => file.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(file.name))
+      .filter(isSupportedImageFile)
       .sort((a, b) => importPath(a).localeCompare(importPath(b), 'zh-CN', { numeric: true }))
     const folderFiles = imageFiles.filter((file) => importPath(file).includes('/'))
     const groups = groupImportFiles(folderFiles)
@@ -1074,7 +1081,7 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
               <div className="import-actions">
                 <label className="secondary">
                   <ImagePlus size={16} /> 选择图片
-                  <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => addHeroFiles(Array.from(event.target.files ?? []))} />
+                  <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => addHeroFiles(Array.from(event.target.files ?? []))} />
                 </label>
                 <label className="secondary">
                   <FolderOpen size={16} /> 选择文件夹
@@ -1209,7 +1216,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
         <button className="secondary" disabled={name.trim() === task.name} onClick={() => void run('保存任务名称中...', () => api.updateTask(task.id, { name }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>保存名称</button>
         <label className="secondary">
           <ImagePlus size={16} /> 追加图片
-          <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => {
+          <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => {
             const next = Array.from(event.target.files ?? [])
             if (next.length) void run('追加主推款图片中...', () => api.addTaskImages(task.id, next), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })
           }} />
@@ -1235,7 +1242,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
             <div className="thumb-actions">
               <label title="替换图片">
                 <RefreshCw size={14} />
-                <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
+                <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
                   const replacement = event.target.files?.[0]
                   if (replacement) void run('替换主推款图片中...', () => api.replaceTaskImage(image.id, replacement), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })
                 }} />
@@ -2335,7 +2342,7 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
         <div className="import-actions">
           <label className="secondary">
             <ImagePlus size={16} /> 选择图片
-            <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
+            <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
           </label>
           <label className="secondary">
             <FolderOpen size={16} /> 选择文件夹
@@ -2431,7 +2438,7 @@ function FileThumbList({ files, onChange }: { files: File[]; onChange: (files: F
           <div className="thumb-actions">
             <label title="替换图片">
               <RefreshCw size={14} />
-              <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
+              <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
                 const replacement = event.target.files?.[0]
                 if (!replacement) return
                 const next = [...files]
@@ -2448,7 +2455,7 @@ function FileThumbList({ files, onChange }: { files: File[]; onChange: (files: F
           <ImagePlus size={24} />
         </div>
         <span>新增图片</span>
-        <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => {
+        <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => {
           const added = Array.from(event.target.files ?? [])
           if (added.length) {
             onChange([...files, ...added])
@@ -2521,7 +2528,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
               {editable && (
                 <label className="secondary">
                   <ImagePlus size={16} /> 追加图片
-                  <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => {
+                  <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => {
                     const next = Array.from(event.target.files ?? [])
                     event.currentTarget.value = ''
                     if (next.length) void run('追加模特图片中...', () => api.addModelHeadReferences(model.id, next), undefined, { refresh: 'background' })
@@ -2566,7 +2573,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
                       <div className="thumb-actions">
                         <label title="替换图片">
                           <RefreshCw size={14} />
-                          <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
+                          <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
                             const replacement = event.target.files?.[0]
                             event.currentTarget.value = ''
                             if (replacement) void run('替换模特图片中...', () => api.replaceModelHeadReference(model.id, ref.id, replacement), undefined, { refresh: 'background' })
@@ -2587,7 +2594,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
               {isAdmin && (
                 <label className="secondary">
                   <ImagePlus size={16} /> {env ? '更换' : '上传'}
-                  <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
+                  <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
                     const file = event.target.files?.[0]
                     event.currentTarget.value = ''
                     if (file) void run('上传拍摄背景参考图中...', () => api.setShootEnvironment(file), (r: { asset: MediaAsset | null }) => setEnv(r.asset), { refresh: false })
@@ -2607,7 +2614,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
                     <div className="thumb-actions">
                       <label title="更换图片">
                         <RefreshCw size={14} />
-                        <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
+                        <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
                           const file = event.target.files?.[0]
                           event.currentTarget.value = ''
                           if (file) void run('更换拍摄背景参考图中...', () => api.setShootEnvironment(file), (r: { asset: MediaAsset | null }) => setEnv(r.asset), { refresh: false })
@@ -3299,7 +3306,7 @@ function PageTitle({ title, subtitle, actions }: { title: string; subtitle: stri
 function UploadBox({ files, setFiles, max, compact = false }: { files: File[]; setFiles: (files: File[]) => void; max: number; compact?: boolean }) {
   return (
     <label className={`upload-box ${compact ? 'compact' : ''}`}>
-      <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(e) => setFiles(Array.from(e.target.files ?? []).slice(0, max))} />
+      <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(e) => setFiles(Array.from(e.target.files ?? []).filter(isSupportedImageFile).slice(0, max))} />
       <Upload size={22} />
       <strong>上传图片</strong>
       <span>已选择 {files.length}/{max} 张</span>
@@ -3459,7 +3466,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete }
             <strong>图片</strong>
             <label className={`secondary ${tagging ? 'is-disabled' : ''}`}>
               <ImagePlus size={16} /> 追加
-              <input disabled={tagging} type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => {
+              <input disabled={tagging} type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => {
                 setPendingFiles((current) => [...current, ...Array.from(event.target.files ?? [])])
                 setDirty(true)
               }} />
@@ -3498,7 +3505,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete }
                   <div className="thumb-actions">
                     <label className={tagging ? 'is-disabled' : ''} title="替换图片">
                       <RefreshCw size={14} />
-                      <input disabled={tagging} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
+                      <input disabled={tagging} type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
                         const nextReplacement = event.target.files?.[0]
                         if (!nextReplacement) return
                         setReplacementFiles((current) => ({ ...current, [image.id]: nextReplacement }))
@@ -4399,7 +4406,7 @@ function compactTagLine(value: Record<string, unknown>) {
 
 function groupImportFiles(files: File[]): ImportBatch[] {
   const imageFiles = files
-    .filter((file) => file.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(file.name))
+    .filter(isSupportedImageFile)
     .sort((a, b) => importPath(a).localeCompare(importPath(b), 'zh-CN', { numeric: true }))
   if (!imageFiles.length) return []
 
