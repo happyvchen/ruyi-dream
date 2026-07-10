@@ -2672,7 +2672,7 @@ function PromptMaintenancePage({ run }: { run: any }) {
 
   function refreshPreview() {
     if (!activeItem) return
-    void run('渲染 Prompt 预览中...', () => api.previewPromptConfig(activeItem.key), (result: { rendered: string; diagnostics: { missingPlaceholders: string[]; usedSegments: string[] } }) => {
+    void run('渲染 Prompt 预览中...', () => api.previewPromptConfig(activeItem.key, draft), (result: { rendered: string; diagnostics: { missingPlaceholders: string[]; usedSegments: string[] } }) => {
       setRendered(result.rendered)
       setMissing(result.diagnostics.missingPlaceholders)
       setUsedSegments(result.diagnostics.usedSegments)

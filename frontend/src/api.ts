@@ -549,8 +549,10 @@ export const api = {
   listPromptConfigs: () => request<PromptConfigList>('/api/prompt-configs'),
   updatePromptConfig: (key: string, content: string) =>
     request<{ item: PromptConfig; preview: PromptConfigPreview }>(`/api/prompt-configs/${encodeURIComponent(key)}`, { method: 'PATCH', body: JSON.stringify({ content }) }),
-  previewPromptConfig: (key: string) =>
-    request<PromptConfigPreview>(`/api/prompt-configs/${encodeURIComponent(key)}/preview`),
+  previewPromptConfig: (key: string, content?: string) =>
+    content === undefined
+      ? request<PromptConfigPreview>(`/api/prompt-configs/${encodeURIComponent(key)}/preview`)
+      : request<PromptConfigPreview>(`/api/prompt-configs/${encodeURIComponent(key)}/preview`, { method: 'POST', body: JSON.stringify({ content }) }),
   addModelHeadReferences: (modelId: number, files: File[]) => {
     const form = new FormData()
     files.forEach((file) => form.append('files', file))

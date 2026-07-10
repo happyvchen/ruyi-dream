@@ -357,6 +357,10 @@ class PromptConfigUpdateRequest(BaseModel):
     content: str
 
 
+class PromptConfigPreviewRequest(BaseModel):
+    content: str
+
+
 class HeadReferenceUpdateRequest(BaseModel):
     angle: str | None = None
     orderIndex: int | None = None
@@ -3666,6 +3670,20 @@ def preview_prompt_config(config_key: str, request: Request) -> dict[str, Any]:
     if key not in get_prompt_config_rows():
         raise HTTPException(status_code=404, detail="Prompt 配置不存在")
     rendered, diagnostics = render_prompt_config(key, sample_prompt_runtime())
+    return {"rendered": rendered, "diagnostics": diagnostics}
+
+
+@app.post("/api/prompt-configs/{config_key}/preview")
+def preview_prompt_config_draft(config_key: str, payload: PromptConfigPreviewRequest, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    key = normalize_prompt_config_key(config_key)
+    if key not in get_prompt_config_rows():
+        raise HTTPException(status_code=404, detail="Prompt 配置不存在")
+    rendered, diagnostics = render_prompt_config(
+        key,
+        sample_prompt_runtime(),
+        content_overrides={key: payload.content[:120000]},
+    )
     return {"rendered": rendered, "diagnostics": diagnostics}
 
 
@@ -7152,7 +7170,12 @@ def prompt_config_content(key: str, rows: dict[str, Any] | None = None) -> str |
     return None
 
 
-def render_prompt_config(key: str, runtime: dict[str, Any] | None = None, rows: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
+def render_prompt_config(
+    key: str,
+    runtime: dict[str, Any] | None = None,
+    rows: dict[str, Any] | None = None,
+    content_overrides: dict[str, str] | None = None,
+) -> tuple[str, dict[str, Any]]:
     diagnostics: dict[str, Any] = {
         "usedSegments": [],
         "missingPlaceholders": [],
@@ -7160,6 +7183,12 @@ def render_prompt_config(key: str, runtime: dict[str, Any] | None = None, rows: 
     }
     rows = rows if rows is not None else get_prompt_config_rows()
     runtime = runtime or {}
+    content_overrides = content_overrides or {}
+
+    def content_for(name: str) -> str | None:
+        if name in content_overrides:
+            return content_overrides[name]
+        return prompt_config_content(name, rows)
 
     def resolve_placeholder(name: str, stack: list[str]) -> str:
         diagnostics["referencedPlaceholders"].append(name)
@@ -7175,7 +7204,7 @@ def render_prompt_config(key: str, runtime: dict[str, Any] | None = None, rows: 
                 return f"[[缺失分段:{name}]]"
             if name not in diagnostics["usedSegments"]:
                 diagnostics["usedSegments"].append(name)
-            segment_content = prompt_config_content(name, rows) or ""
+            segment_content = content_for(name) or ""
             if not segment_content.strip():
                 diagnostics["missingPlaceholders"].append(f"{name} (空内容)")
             return render_text(segment_content, [*stack, name])
@@ -7193,7 +7222,7 @@ def render_prompt_config(key: str, runtime: dict[str, Any] | None = None, rows: 
     def placeholder_truthy(name: str) -> bool:
         # 条件段真值判定：不写诊断（缺失/空不是错误，只表示"不显示这段"）。
         if name.startswith("segment."):
-            return bool((prompt_config_content(name, rows) or "").strip())
+            return bool((content_for(name) or "").strip())
         if name.startswith("runtime."):
             value = runtime.get(name.removeprefix("runtime."))
             if value is None:
@@ -7219,7 +7248,7 @@ def render_prompt_config(key: str, runtime: dict[str, Any] | None = None, rows: 
         text = render_conditionals(text)
         return PROMPT_PLACEHOLDER_PATTERN.sub(lambda match: resolve_placeholder(match.group(1), stack), text)
 
-    source = prompt_config_content(key, rows)
+    source = content_for(key)
     if source is None:
         diagnostics["missingPlaceholders"].append(key)
         source = ""
