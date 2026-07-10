@@ -126,7 +126,7 @@ AI 摄影棚的 0.1.0 主流程：
 - 主推款图片，作为 `hero_garment` 商品事实输入。
 - 选中搭配服装图片，作为 `styling_garment` 商品事实输入。
 - 当前最新成功 `ShootScript`。
-- 参考图各职能图号区间 `ref_*`（`ref_model_identity` / `ref_garment` / `ref_preview_grid` / `ref_shoot_environment` / `ref_subject`）：代码只出会变的图号，职能与事实源说明由模板正文托管（P6，见 `prompt_rendering_refactor.md` §10）。provider `reference_images` 仍随请求携带结构化角色清单。
+- 参考图各职能图号区间 `ref_*`（`ref_model_identity` / `ref_garment` / `ref_preview_grid` / `ref_shoot_environment`）：代码只出会变的图号，职能与事实源说明由模板正文托管（P6，见 `prompt_rendering_refactor.md` §10）。provider `reference_images` 仍随请求携带结构化角色清单。
 
 输出：
 
@@ -156,7 +156,7 @@ AI 摄影棚的 0.1.0 主流程：
 - 主推款图片，作为 `hero_garment` 商品事实输入。
 - 选中搭配服装图片，作为 `styling_garment` 商品事实输入。
 - 当前镜头 `ShotPlan`。
-- 参考图各职能图号区间 `ref_*`（`ref_model_identity` / `ref_garment` / `ref_preview_grid` / `ref_shoot_environment` / `ref_subject`）：代码只出会变的图号，职能与事实源说明由模板正文托管（P6，见 `prompt_rendering_refactor.md` §10）。provider `reference_images` 仍随请求携带结构化角色清单。
+- 参考图各职能图号区间 `ref_*`（`ref_model_identity` / `ref_garment` / `ref_preview_grid` / `ref_shoot_environment`）：代码只出会变的图号，职能与事实源说明由模板正文托管（P6，见 `prompt_rendering_refactor.md` §10）。provider `reference_images` 仍随请求携带结构化角色清单。
 
 规则：
 

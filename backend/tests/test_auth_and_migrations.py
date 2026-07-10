@@ -364,6 +364,26 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertIn("runtime.hero_product_info", cleaned)
         self.assertIn("runtime.styling_result", cleaned)
 
+    def test_subject_reference_prompt_runtime_migration_uses_explicit_fact_sources(self) -> None:
+        db_module = importlib.import_module("app.db")
+        db_module.init_db()
+        self.insert_prompt_config(
+            db_module,
+            "assembly.storyboard_preview",
+            "assembly",
+            "环境只参考背景；模特与服装以 {{runtime.ref_subject}} 为准。",
+            130,
+        )
+        with db_module.get_db() as db:
+            db_module.migration_drop_subject_reference_prompt_runtime(db)
+            row = db.execute(
+                "SELECT content FROM prompt_configs WHERE key = 'assembly.storyboard_preview'"
+            ).fetchone()
+
+        self.assertNotIn("runtime.ref_subject", row["content"])
+        self.assertIn("runtime.ref_model_identity", row["content"])
+        self.assertIn("runtime.ref_garment", row["content"])
+
     def test_ai_tagging_parser_repairs_missing_property_commas(self) -> None:
         main = importlib.import_module("app.main")
 

@@ -6891,7 +6891,6 @@ def build_preview_prompt_runtime(
             "ref_model_identity": spans["model_identity"],
             "ref_garment": spans["garment"],
             "ref_shoot_environment": spans["shoot_environment"],
-            "ref_subject": spans["subject"],
             "hero_product_info": render_hero_product_info_line(hero_product_info or {}),
             "storyboard_preview_user_instruction": render_user_instruction_line(storyboard_preview_user_instruction or {}),
     }
@@ -6978,7 +6977,6 @@ def build_final_prompt_runtime(
             "ref_model_identity": spans["model_identity"],
             "ref_preview_grid": spans["preview_grid"],
             "ref_garment": spans["garment"],
-            "ref_subject": spans["subject"],
             "hero_product_info": render_hero_product_info_line(hero_product_info or {}),
             "final_image_user_instruction": render_user_instruction_line(final_image_user_instruction or {}),
     }
@@ -7292,7 +7290,6 @@ def sample_prompt_runtime() -> dict[str, Any]:
         "ref_preview_grid": "图3",
         "ref_garment": "图4-6",
         "ref_shoot_environment": "图7",
-        "ref_subject": "图1-6",
     }
 
 
@@ -7323,7 +7320,6 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.ref_preview_grid", "scope": "runtime", "description": "分镜预览参考图图号（仅成片阶段），如「图3」；无则空"},
         {"name": "runtime.ref_garment", "scope": "runtime", "description": "主推款与搭配服装参考图的总图号区间，如「图4-6」；无则空"},
         {"name": "runtime.ref_shoot_environment", "scope": "runtime", "description": "拍摄环境参考图图号（仅分镜预览阶段）；无则空"},
-        {"name": "runtime.ref_subject", "scope": "runtime", "description": "模特+主推款+搭配服装的合并图号区间，供「模特与服装以X为准」交叉引用"},
     ]
 
 

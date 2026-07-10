@@ -240,8 +240,6 @@ class RenderImageReferenceSpansTests(unittest.TestCase):
         self.assertEqual(spans["garment"], "图3-6")
         self.assertEqual(spans["shoot_environment"], "图7")
         self.assertEqual(spans["preview_grid"], "")
-        # subject = 模特+主推款+搭配服装 的合并区间，供模板交叉引用（不含环境图）。
-        self.assertEqual(spans["subject"], "图1-6")
 
     def test_final_stage_spans_with_preview_grid(self) -> None:
         spans = render_image_reference_spans(
@@ -264,7 +262,6 @@ class RenderImageReferenceSpansTests(unittest.TestCase):
     def test_empty(self) -> None:
         spans = render_image_reference_spans([])
         self.assertEqual(spans["model_identity"], "")
-        self.assertEqual(spans["subject"], "")
         self.assertEqual(render_image_reference_spans(None)["garment"], "")
 
     def test_only_numbers_no_role_labels(self) -> None:

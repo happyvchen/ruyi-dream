@@ -28,6 +28,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("042", "drop_merged_prompt_config_keys", "migration_drop_merged_prompt_config_keys"),
     ("043", "drop_model_identity_prompt_runtime", "migration_drop_model_identity_prompt_runtime"),
     ("044", "merge_garment_reference_prompt_runtime", "migration_merge_garment_reference_prompt_runtime"),
+    ("045", "drop_subject_reference_prompt_runtime", "migration_drop_subject_reference_prompt_runtime"),
 )
 
 # prompt_configs 只登记「Prompt 维护」页的配置槽（键 / 分组 / 标题 / 说明 / 排序），
@@ -392,6 +393,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_drop_merged_prompt_config_keys": migration_drop_merged_prompt_config_keys,
         "migration_drop_model_identity_prompt_runtime": migration_drop_model_identity_prompt_runtime,
         "migration_merge_garment_reference_prompt_runtime": migration_merge_garment_reference_prompt_runtime,
+        "migration_drop_subject_reference_prompt_runtime": migration_drop_subject_reference_prompt_runtime,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -1079,6 +1081,28 @@ def migration_merge_garment_reference_prompt_runtime(db: sqlite3.Connection) -> 
         db.execute(
             "UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?",
             (merged, now_iso(), row["key"]),
+        )
+
+
+def migration_drop_subject_reference_prompt_runtime(db: sqlite3.Connection) -> None:
+    """用明确的模特与服装图号占位替换已下线的合并主体占位。"""
+    exists = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prompt_configs'"
+    ).fetchone()
+    if not exists:
+        return
+    rows = db.execute(
+        "SELECT key, content FROM prompt_configs WHERE content LIKE '%runtime.ref_subject%'"
+    ).fetchall()
+    for row in rows:
+        content = str(row["content"] or "")
+        cleaned = content.replace(
+            "{{runtime.ref_subject}}",
+            "{{runtime.ref_model_identity}} 与 {{runtime.ref_garment}}",
+        )
+        db.execute(
+            "UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?",
+            (cleaned, now_iso(), row["key"]),
         )
 
 

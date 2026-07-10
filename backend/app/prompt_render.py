@@ -256,9 +256,7 @@ def render_image_reference_spans(image_inputs: list[dict[str, Any]] | None) -> d
     图号严格对应 provider ``reference_images`` 传入顺序（由选图器决定）。每个职能取该角色
     出现的最小到最大图号，合并成「图a」或「图a-b」；不存在的职能返回空串，模板据此省略整段。
 
-    返回键：``model_identity`` / ``preview_grid`` / ``garment`` / ``shoot_environment``，
-    外加 ``subject`` = 模特+全部服装的合并区间
-    （供模板写「其中模特、服装以{subject}为准」这类交叉引用，避免在模板里写死图号）。
+    返回键：``model_identity`` / ``preview_grid`` / ``garment`` / ``shoot_environment``。
     """
     ranges: dict[str, list[int]] = {}
     for index, item in enumerate(image_inputs or [], start=1):
@@ -279,9 +277,4 @@ def render_image_reference_spans(image_inputs: list[dict[str, Any]] | None) -> d
         _span_text(min(s for s, _ in garments), max(e for _, e in garments)) if garments else ""
     )
 
-    subject = [ranges[r] for r in ("model_identity", "hero_garment", "styling_garment") if r in ranges]
-    if subject:
-        result["subject"] = _span_text(min(s for s, _ in subject), max(e for _, e in subject))
-    else:
-        result["subject"] = ""
     return result
