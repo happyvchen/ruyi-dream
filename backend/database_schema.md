@@ -19,7 +19,7 @@
 | `generation_previews` | `GenerationPreview` | 3:2 分镜预览 |
 | `generation_result_sets` | `GenerationResultSet` | 最终成片集合 |
 | `generation_result_images_new` | `GenerationResultImage` | 前 5 张最终图 |
-| `generation_attempts` | `GenerationAttempt` | AI/provider 请求响应快照 |
+| `generation_attempts` | `GenerationAttempt` | AI/provider 调用过程事实；历史 JSON 列名保持兼容，不表达业务快照语义 |
 | `provider_upload_cache` | - | 参考图 provider 上传缓存（objectKey → provider URL，TTL 复用） |
 | `prompt_configs` | `PromptConfig` | 可维护 Prompt 模板 |
 | `event_logs` | `EventLog` | 业务事件 |

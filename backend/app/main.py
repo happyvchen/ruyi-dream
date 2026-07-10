@@ -8306,9 +8306,20 @@ def get_task_attempts(task_id: int) -> list[dict[str, Any]]:
                 "ownerId": row["owner_id"],
                 "provider": row["provider"],
                 "status": row["status"],
+                "providerRequestId": row_value(row, "provider_request_id"),
+                "startedAt": row["started_at"],
+                "completedAt": row["completed_at"],
+                "failedAt": row["failed_at"],
+                "errorCode": row_value(row, "error_code"),
                 "errorMessage": row["error_message"],
+                # 兼容数据库历史列名；对外语义是本次调用实际发生的过程事实，
+                # 不是供未来重放使用的业务对象快照。
+                "requestFacts": request_snapshot,
+                "responseFacts": response_snapshot,
                 "modelInput": actual_model_input_from_snapshot(request_snapshot),
                 "modelOutput": actual_model_output_from_snapshot(response_snapshot),
+                "createdAt": row["created_at"],
+                "updatedAt": row["updated_at"],
             }
         )
     return records

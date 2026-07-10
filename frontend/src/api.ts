@@ -119,6 +119,8 @@ export type AIOperation = {
 }
 
 export type AICallRecord = AIOperation & {
+  requestFacts?: Record<string, unknown>
+  responseFacts?: Record<string, unknown>
   modelInput?: Record<string, unknown>
   modelOutput?: Record<string, unknown>
 }

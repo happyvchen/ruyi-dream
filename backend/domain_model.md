@@ -95,7 +95,7 @@ AI Director 基于当前 StylingPlan 生成 ShootScript。ShootScript 负责把�
 - `generation_preview`
 - `generation_result_image`
 
-attempt 保存 provider、状态、请求快照、响应快照、错误、provider request id 和输出资产。技术详情默认不返回给普通前台，只在 debug 场景查看。
+attempt 保存 provider、状态、实际请求过程事实、实际响应过程事实、错误、provider request id 和输出资产。它不是业务对象快照，也不承担未来重放；历史列名 `request_snapshot_json` / `response_snapshot_json` 仅作为兼容存储载体。技术详情默认不返回给普通前台，只在 debug 场景查看。
 
 普通任务详情中的 `aiOperations` 是当前 active 链路的轻量运行摘要，不是完整历史流水。它只包含当前 active StylingPlan、ShootScript、分镜预览和 active result set 的 attempts；历史版本、旧结果集和 superseded artifacts 的 attempts 只在技术详情或审计读取中展示。
 

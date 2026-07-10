@@ -54,7 +54,7 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。`/api/g
 | `/api/generation-task-exports/precheck` | POST | 成片批量下载预检：返回每个任务可下载张数、总大小和未完成/失败镜头明细 |
 | `/api/generation-task-exports/archive` | GET | 按任务名分文件夹流式打包下载最终成片 zip，`ids` 为逗号分隔任务 ID |
 
-所有会调用外部 AI/provider 的端点都必须由用户动作触发；本地验证和测试不得调用外部 AI/provider。`auto-run-final` 由一次用户动作触发，但内部仍按现有阶段创建独立 attempt，并在 request snapshot 中记录 `invocation.mode = auto_run`。
+所有会调用外部 AI/provider 的端点都必须由用户动作触发；本地验证和测试不得调用外部 AI/provider。`auto-run-final` 由一次用户动作触发，但内部仍按现有阶段创建独立 attempt，并在请求过程事实中记录 `invocation.mode = auto_run`。attempt 只记录真实发生的输入、请求、响应、解析、错误和时间事实，不复制业务对象快照，也不承担未来重放。
 
 成片批量下载规则：
 
