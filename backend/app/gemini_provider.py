@@ -45,10 +45,18 @@ class GeminiProviderError(RuntimeError):
     - MALFORMED_OUTPUT / 截断 一定已产出并计费，绝不在 provider 层重发。
     """
 
-    def __init__(self, message: str, error_code: str, *, retry_after: float | None = None):
+    def __init__(
+        self,
+        message: str,
+        error_code: str,
+        *,
+        retry_after: float | None = None,
+        provider_response: dict[str, Any] | None = None,
+    ):
         super().__init__(message)
         self.error_code = error_code
         self.retry_after = retry_after
+        self.provider_response = provider_response or {}
 
 
 def get_settings() -> config.Settings:
@@ -313,6 +321,13 @@ def _post_toapis_chat(payload: dict[str, Any]) -> str:
                 f"Gemini(ToAPIs 通道) 请求失败: {summarize_upstream_http_error(response.status_code, raw_body)}",
                 error_code,
                 retry_after=retry_after,
+                provider_response={
+                    "httpStatus": response.status_code,
+                    "contentType": response.headers.get("Content-Type"),
+                    "retryAfter": response.headers.get("Retry-After"),
+                    "rawBody": redact_provider_text(raw_body)[:16000],
+                    "rawBodyTruncated": len(raw_body) > 16000,
+                },
             )
         content_type = (response.headers.get("Content-Type") or "").lower()
         if "text/event-stream" not in content_type:
@@ -355,6 +370,14 @@ def iter_sse_lines(response: Any) -> Any:
             yield raw.decode("utf-8", errors="replace").rstrip("\r")
         elif raw is not None:
             yield str(raw).rstrip("\r")
+
+
+def redact_provider_text(value: str) -> str:
+    """保留上游原始错误事实，同时移除常见凭据形态。"""
+    text = value or ""
+    text = re.sub(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s\"']+", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)(api[_-]?key\s*[:=]\s*[\"']?)[^\s\"',}]+", r"\1[REDACTED]", text)
+    return text
 
 
 def summarize_upstream_http_error(status_code: int, body: str) -> str:

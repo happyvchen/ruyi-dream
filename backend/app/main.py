@@ -2335,7 +2335,7 @@ async def run_select_generation_styling(
                 return {"item": get_generation_task_by_id(task_id)}
         error_code = classify_attempt_error(exc) or classify_styling_business_reject(exc)
         if attempt_id:
-            finish_attempt(attempt_id, "FAILED", response_snapshot=styling_plan, error_message=str(exc), error_code=error_code)
+            finish_attempt(attempt_id, "FAILED", response_snapshot=styling_plan or exception_process_facts(exc), error_message=str(exc), error_code=error_code)
         with get_db() as db:
             db.execute(
                 """
@@ -2514,7 +2514,7 @@ async def run_create_generation_shoot_script(task_id: int, include_debug: bool =
             mark_shoot_script_generation_cancelled(shoot_script_id)
             return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
         error_code = classify_attempt_error(exc)
-        finish_attempt(attempt_id, "FAILED", error_message=str(exc), error_code=error_code)
+        finish_attempt(attempt_id, "FAILED", response_snapshot=exception_process_facts(exc), error_message=str(exc), error_code=error_code)
         with get_db() as db:
             previous_active = db.execute("SELECT active_shoot_script_id FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
             fallback_status = "SCRIPT_READY" if previous_active and previous_active["active_shoot_script_id"] else "FAILED"
@@ -4659,7 +4659,7 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
     try:
         text = await generate_gemini_json_text(prompt, images)
     except Exception as exc:
-        finish_attempt(attempt_id, "FAILED", error_message=str(exc), error_code=classify_attempt_error(exc))
+        finish_attempt(attempt_id, "FAILED", response_snapshot=exception_process_facts(exc), error_message=str(exc), error_code=classify_attempt_error(exc))
         raise
     try:
         raw = parse_lily_tagging_json(text)
@@ -5183,8 +5183,18 @@ def wrap_gemini_call_error(label: str, exc: BaseException) -> RuntimeError:
     """把 Gemini 调用异常包一层可读前缀，但保留 error_code，方便上层 finish_attempt 分类。"""
     error_code = classify_attempt_error(exc)
     if error_code:
-        return GeminiProviderError(f"{label}：{exc}", error_code)
+        return GeminiProviderError(
+            f"{label}：{exc}",
+            error_code,
+            retry_after=getattr(exc, "retry_after", None),
+            provider_response=getattr(exc, "provider_response", None),
+        )
     return RuntimeError(f"{label}：{exc}")
+
+
+def exception_process_facts(exc: BaseException) -> dict[str, Any]:
+    facts = getattr(exc, "provider_response", None)
+    return facts if isinstance(facts, dict) else {}
 
 
 def user_facing_provider_error_message(label: str, exc: BaseException, error_code: str | None) -> str:
