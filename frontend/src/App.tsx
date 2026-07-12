@@ -418,6 +418,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   clearLocalOperationsFor: (ownerTypes: string[], taskId?: number | null) => void
 }) {
   const [step, setStep] = useState<StudioStep>(0)
+  const [taskRailTab, setTaskRailTab] = useState<'summary' | 'recent'>('summary')
   const [taskItems, setTaskItems] = useState<GenerationTask[]>(records.slice(0, recentTaskPageSize))
   const [recentTaskTotal, setRecentTaskTotal] = useState(records.length)
   const [recentTaskHasMore, setRecentTaskHasMore] = useState(records.length > recentTaskPageSize)
@@ -450,11 +451,13 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     setTaskItems((current) => upsertRecentTaskItem(current, nextTask))
   }
   function openRecentTask(item: GenerationTask) {
+    setTaskRailTab('summary')
     applyTaskUpdate(item)
     window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
     void api.getRecord(item.id, isAdmin).then((r) => applyTaskUpdate(r.item)).catch(() => undefined)
   }
   function openBatchTask(item: GenerationTask) {
+    setTaskRailTab('summary')
     applyTaskUpdate(item)
     window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
     void api.getTask(item.id, isAdmin).then((r) => applyTaskUpdate(r.item)).catch(() => undefined)
@@ -497,6 +500,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     window.setTimeout(() => technicalDetailTriggerRef.current?.focus(), 0)
   }
   function startNewTask() {
+    setTaskRailTab('summary')
     setTask(null)
     window.history.pushState(null, '', routeToUrl({ page: 'studio' }))
   }
@@ -649,6 +653,25 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
       window.clearInterval(timer)
     }
   }, [task?.batchId])
+  const batchTaskIndex = task?.batchId ? visibleBatchItems.findIndex((item) => item.id === task.id) : -1
+  const batchContextLabel = batchContextLoading
+    ? '读取中'
+    : batchTaskIndex >= 0
+      ? `第 ${batchTaskIndex + 1}/${visibleBatchItems.length}`
+      : visibleBatchItems.length
+        ? `共 ${visibleBatchItems.length} 个任务`
+        : '暂无批次数据'
+  const handleTaskRailTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+    event.preventDefault()
+    const nextTab = event.key === 'Home'
+      ? 'summary'
+      : event.key === 'End'
+        ? 'recent'
+        : taskRailTab === 'summary' ? 'recent' : 'summary'
+    setTaskRailTab(nextTab)
+    window.requestAnimationFrame(() => document.getElementById(`task-rail-${nextTab}-tab`)?.focus())
+  }
   return (
     <section className="page studio-page">
       <PageTitle
@@ -677,85 +700,65 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
           </div>
         </div>
         <aside className="panel task-rail">
-          <h3>任务摘要</h3>
-          {task ? (
-            <>
-              <ThumbGrid assets={(task.images ?? []).map((item) => item.asset)} compact />
-              <Meta label="任务" value={task.name} />
-              <Meta label="状态" value={studioView?.statusLabel ?? statusText(task.status)} />
-              <Meta label="当前进度" value={studioView?.progressLabel ?? '等待开始'} />
-              <Meta label="当前步骤" value={studioView?.currentStageLabel ?? '上传主推款'} />
-              <Meta label="搭配服装" value={`${task.styling?.selectedMaterials?.length ?? 0} 件`} />
-              <Meta label="最终图" value={`${task.resultSet?.images?.filter((i) => i.status === 'SUCCEEDED').length ?? 0}/5`} />
-              {(canStartOneClickFinal(task) || canRestartOneClickFinal(task)) && (
-                <div className="task-primary-actions">
-                  <span>任务操作</span>
-                  <button className="primary wide" disabled={!canStartOneClickFinal(task) && !canRestartOneClickFinal(task)} onClick={startOneClickFinal}>
-                    <Sparkles size={16} />{oneClickFinalLabel(task)}
-                  </button>
-                  {task.status === 'COMPLETED' && <p>重新执行智能选搭、拍摄剧本、分镜预览和成片，已有结果保留在历史记录中。</p>}
-                </div>
-              )}
-              {task.batchId && <BatchTaskSummary task={task} items={visibleBatchItems} loading={batchContextLoading} downloadChecking={batchDownloadChecking} onAutoRun={startBatchAutoRun} onDownload={startBatchDownload} />}
-              <StageUserInputModule
-                step={visibleStep}
-                task={task}
-                value={stageInputValue(visibleStep, { heroProductInfo, aiStylingInstruction, shootScriptInstruction, storyboardInstruction, finalImageInstruction })}
-                savedValue={savedStageInputValue(visibleStep, task)}
-                onChange={(value) => updateStageInput(visibleStep, value, { setHeroProductInfo, setAiStylingInstruction, setShootScriptInstruction, setStoryboardInstruction, setFinalImageInstruction })}
-                onSave={() => void run('保存用户输入中...', () => api.updateTask(task.id, stageInputSavePayload(visibleStep, stageInputValue(visibleStep, { heroProductInfo, aiStylingInstruction, shootScriptInstruction, storyboardInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => applyTaskUpdate(r.item), { refresh: 'background' })}
-                disabled={isTaskRunning(task) || !!task.autoRunTarget}
-              />
-              {isTaskRunning(task) && (
-                <button className="secondary wide" onClick={cancelCurrentTask}>
-                  <CircleStop size={16} /> 取消生成
-                </button>
-              )}
-              {!isTaskRunning(task) && isTaskQueuedForAutoRun(task) && (
-                <button className="secondary wide" onClick={() => cancelAutoRunQueue(task)}>
-                  <CircleStop size={16} /> 取消排队
-                </button>
-              )}
-            </>
-          ) : (
-            <>
-              <StageUserInputModule
-                step={0}
-                task={null}
-                value={heroProductInfo}
-                onChange={setHeroProductInfo}
-                disabled={false}
-              />
-              <EmptyState title="暂无任务" text="上传主推款后会在这里形成拍摄任务。" />
-            </>
-          )}
-          <div className="recent-task-head">
-            <h3>最近任务</h3>
+          <div className="task-rail-tabs" role="tablist" aria-label="任务侧栏">
+            <button id="task-rail-summary-tab" role="tab" aria-selected={taskRailTab === 'summary'} aria-controls="task-summary-panel" tabIndex={taskRailTab === 'summary' ? 0 : -1} className={taskRailTab === 'summary' ? 'active' : ''} onClick={() => setTaskRailTab('summary')} onKeyDown={handleTaskRailTabKeyDown}>任务摘要</button>
+            <button id="task-rail-recent-tab" role="tab" aria-selected={taskRailTab === 'recent'} aria-controls="recent-tasks-panel" tabIndex={taskRailTab === 'recent' ? 0 : -1} className={taskRailTab === 'recent' ? 'active' : ''} onClick={() => setTaskRailTab('recent')} onKeyDown={handleTaskRailTabKeyDown}>最近任务 <span>{recentTaskTotal}</span></button>
           </div>
-          <div className="mini-list recent-task-list" onScroll={handleRecentTaskScroll}>
-            {taskItems.map((item) => (
-              <div key={item.id} className={`mini-row view-only ${task?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
-                <button
-                  onClick={() => openRecentTask(item)}
-                  title="恢复拍摄任务"
-                >
-                  <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
-                  <span className="recent-task-copy">
-                    <strong>{item.name}</strong>
-                    <span className="recent-task-meta">
-                      <em>{item.archivedAt ? '已归档' : taskListStatusLabel(item)}</em>
-                      <time dateTime={item.createdAt}>{dateText(item.createdAt)}</time>
-                    </span>
-                  </span>
-                </button>
-              </div>
-            ))}
-            {!taskItems.length && <EmptyState title="暂无任务" text="创建拍摄任务后会出现在这里。" />}
-            {!!taskItems.length && (
-              <div className="recent-task-footer">
-                {recentTaskLoading ? '正在加载更多...' : recentTaskHasMore ? `已显示 ${taskItems.length} / 共 ${recentTaskTotal} 条` : `已触底，共 ${recentTaskTotal} 条`}
-              </div>
+          <div id="task-summary-panel" role="tabpanel" aria-labelledby="task-rail-summary-tab" className="task-rail-panel task-summary-panel" hidden={taskRailTab !== 'summary'}>
+            {task ? (
+              <>
+                <div className="task-summary-identity">
+                  <AssetThumb asset={taskCoverAsset(task)} interactive={false} />
+                  <div><strong>{task.name}</strong><span>{studioView?.statusLabel ?? statusText(task.status)}</span><em>主推款 {task.images?.length ?? 0} 张</em></div>
+                </div>
+                <div className="task-summary-progress">
+                  <Meta label="当前步骤" value={studioView?.currentStageLabel ?? '上传主推款'} />
+                  <Meta label="总体进度" value={studioView?.progressLabel ?? '等待开始'} />
+                  <Meta label="最终成片" value={`${task.resultSet?.images?.filter((i) => i.status === 'SUCCEEDED').length ?? 0}/5`} />
+                  {!!task.styling?.selectedMaterials?.length && <Meta label="搭配服装" value={`${task.styling.selectedMaterials.length} 件`} />}
+                </div>
+                <div className="task-action-row">
+                  {isTaskRunning(task) ? (
+                    <button className="secondary" onClick={cancelCurrentTask}><CircleStop size={15} />取消生成</button>
+                  ) : isTaskQueuedForAutoRun(task) ? (
+                    <button className="secondary" onClick={() => cancelAutoRunQueue(task)}><CircleStop size={15} />取消排队</button>
+                  ) : (canStartOneClickFinal(task) || canRestartOneClickFinal(task)) ? (
+                    <button className={canRestartOneClickFinal(task) ? 'secondary' : 'primary'} onClick={startOneClickFinal}><Sparkles size={15} />{oneClickFinalLabel(task)}</button>
+                  ) : null}
+                </div>
+                {task.batchId && (
+                  <details className="task-batch-details">
+                    <summary>批次任务 · {batchContextLabel}</summary>
+                    <BatchTaskSummary task={task} items={visibleBatchItems} loading={batchContextLoading} downloadChecking={batchDownloadChecking} onAutoRun={startBatchAutoRun} onDownload={startBatchDownload} />
+                  </details>
+                )}
+                <StageUserInputModule
+                  step={visibleStep}
+                  task={task}
+                  value={stageInputValue(visibleStep, { heroProductInfo, aiStylingInstruction, shootScriptInstruction, storyboardInstruction, finalImageInstruction })}
+                  savedValue={savedStageInputValue(visibleStep, task)}
+                  onChange={(value) => updateStageInput(visibleStep, value, { setHeroProductInfo, setAiStylingInstruction, setShootScriptInstruction, setStoryboardInstruction, setFinalImageInstruction })}
+                  onSave={() => void run('保存用户输入中...', () => api.updateTask(task.id, stageInputSavePayload(visibleStep, stageInputValue(visibleStep, { heroProductInfo, aiStylingInstruction, shootScriptInstruction, storyboardInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => applyTaskUpdate(r.item), { refresh: 'background' })}
+                  disabled={isTaskRunning(task) || !!task.autoRunTarget}
+                />
+              </>
+            ) : (
+              <><StageUserInputModule step={0} task={null} value={heroProductInfo} onChange={setHeroProductInfo} disabled={false} /><EmptyState title="暂无任务" text="上传主推款后会在这里形成拍摄任务。" /></>
             )}
+          </div>
+          <div id="recent-tasks-panel" role="tabpanel" aria-labelledby="task-rail-recent-tab" className="task-rail-panel recent-tasks-panel" hidden={taskRailTab !== 'recent'}>
+            <div className="mini-list recent-task-list" onScroll={handleRecentTaskScroll}>
+              {taskItems.map((item) => (
+                <div key={item.id} className={`mini-row view-only ${task?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
+                  <button onClick={() => openRecentTask(item)} title="恢复拍摄任务">
+                    <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
+                    <span className="recent-task-copy"><strong>{item.name}</strong><span className="recent-task-meta"><em>{item.archivedAt ? '已归档' : taskListStatusLabel(item)}</em><time dateTime={item.createdAt}>{dateText(item.createdAt)}</time></span></span>
+                  </button>
+                </div>
+              ))}
+              {!taskItems.length && <EmptyState title="暂无任务" text="创建拍摄任务后会出现在这里。" />}
+              {!!taskItems.length && <div className="recent-task-footer">{recentTaskLoading ? '正在加载更多...' : recentTaskHasMore ? `已显示 ${taskItems.length} / 共 ${recentTaskTotal} 条` : `已触底，共 ${recentTaskTotal} 条`}</div>}
+            </div>
           </div>
         </aside>
       </div>
