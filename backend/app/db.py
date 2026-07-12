@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
+from pathlib import Path
 import re
 import sqlite3
 from typing import Any, Iterator
@@ -29,6 +30,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("043", "drop_model_identity_prompt_runtime", "migration_drop_model_identity_prompt_runtime"),
     ("044", "merge_garment_reference_prompt_runtime", "migration_merge_garment_reference_prompt_runtime"),
     ("045", "drop_subject_reference_prompt_runtime", "migration_drop_subject_reference_prompt_runtime"),
+    ("046", "install_category_storyboard_prompts", "migration_install_category_storyboard_prompts"),
 )
 
 # prompt_configs 只登记「Prompt 维护」页的配置槽（键 / 分组 / 标题 / 说明 / 排序），
@@ -42,9 +44,10 @@ PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
     ("segment.brand_info", "segment", "品牌信息", "品牌信息分段 Prompt，可被组装 Prompt 引用。", 10),
     ("assembly.ai_tagging", "assembly", "AI 打标", "搭配服装入库后的图片理解和标签识别 Prompt。", 100),
     ("assembly.ai_styling", "assembly", "AI 选搭", "AI Stylist 选搭 Prompt，含角色系统指令、主推款理解、搭配选择和质量判断。", 110),
-    ("assembly.shoot_script", "assembly", "拍摄剧本", "AI Director 拍摄剧本 Prompt，含角色系统指令，生成 ShootScript 和 6 个镜头。", 120),
-    ("assembly.storyboard_preview", "assembly", "分镜预览", "Image-2 分镜预览 Prompt，生成 3:2 横版、3 列 × 2 行共 6 个 1:1 方格的分镜图。", 130),
-    ("assembly.final_image", "assembly", "生成成片", "Image-2 单张成片 Prompt，按前 5 个镜头生成最终图。", 140),
+    ("assembly.storyboard_preview_top", "assembly", "分镜预览 · 上装/针织/外套", "Image-2 上装类固定六镜头分镜 Prompt。", 120),
+    ("assembly.storyboard_preview_bottom", "assembly", "分镜预览 · 裤装/半身裙", "Image-2 下装类固定六镜头分镜 Prompt。", 130),
+    ("assembly.storyboard_preview_one_piece", "assembly", "分镜预览 · 连衣裙/连体/套装", "Image-2 连衣裙/连体/套装固定六镜头分镜 Prompt。", 140),
+    ("assembly.final_image", "assembly", "生成成片", "Image-2 单张成片 Prompt，按分镜前 5 格生成最终图。", 150),
 )
 
 # 合并进组装 Prompt 正文后需从库里清除的孤儿配置键。
@@ -394,6 +397,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_drop_model_identity_prompt_runtime": migration_drop_model_identity_prompt_runtime,
         "migration_merge_garment_reference_prompt_runtime": migration_merge_garment_reference_prompt_runtime,
         "migration_drop_subject_reference_prompt_runtime": migration_drop_subject_reference_prompt_runtime,
+        "migration_install_category_storyboard_prompts": migration_install_category_storyboard_prompts,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -1125,6 +1129,30 @@ def ensure_prompt_config_catalog(db: sqlite3.Connection) -> None:
             """,
             (key, group_type, title, description, sort_order, timestamp),
         )
+
+
+def migration_install_category_storyboard_prompts(db: sqlite3.Connection) -> None:
+    create_prompt_config_table(db)
+    template_dir = Path(__file__).resolve().parent.parent / "prompt_templates"
+    templates = {
+        "assembly.storyboard_preview_top": "storyboard_preview_top.txt",
+        "assembly.storyboard_preview_bottom": "storyboard_preview_bottom.txt",
+        "assembly.storyboard_preview_one_piece": "storyboard_preview_one_piece.txt",
+    }
+    timestamp = now_iso()
+    for key, filename in templates.items():
+        content = (template_dir / filename).read_text(encoding="utf-8").strip()
+        meta = next(item for item in PROMPT_CONFIG_CATALOG if item[0] == key)
+        db.execute(
+            """
+            INSERT INTO prompt_configs
+              (key, group_type, title, description, content, sort_order, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at
+            """,
+            (key, meta[1], meta[2], meta[3], content, meta[4], timestamp),
+        )
+    db.execute("DELETE FROM prompt_configs WHERE key IN ('assembly.shoot_script', 'assembly.storyboard_preview')")
 
 
 def create_generation_shoot_script_tables(db: sqlite3.Connection) -> None:

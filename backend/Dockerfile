@@ -13,6 +13,7 @@ COPY requirements.txt requirements.constraints.txt ./
 RUN pip install --no-cache-dir -r requirements.txt -c requirements.constraints.txt
 
 COPY app ./app
+COPY prompt_templates ./prompt_templates
 
 # 构建时注入 git commit，供 /api/version 做部署校验（缺省为空不影响运行）。
 ARG GIT_COMMIT=""

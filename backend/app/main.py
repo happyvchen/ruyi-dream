@@ -116,6 +116,11 @@ PROMPT_SECTION_PATTERN = re.compile(
 )
 AI_STYLING_PROMPT_CONFIG_KEY = "assembly.ai_styling"
 SHOOT_SCRIPT_PROMPT_CONFIG_KEY = "assembly.shoot_script"
+STORYBOARD_PROMPT_CONFIG_KEYS = {
+    "top": "assembly.storyboard_preview_top",
+    "bottom": "assembly.storyboard_preview_bottom",
+    "one_piece": "assembly.storyboard_preview_one_piece",
+}
 AUTO_RUN_TARGET_FINAL = "FINAL"
 # /api/media 重定向的浏览器缓存时长:必须显著小于 presign 有效期,避免缓存过期签名。
 MEDIA_REDIRECT_CACHE_SECONDS = max(0, min(300, settings.s3_presign_expires_seconds - 120))
@@ -2783,16 +2788,14 @@ async def create_generation_preview(task_id: int, request: Request, payload: Gen
 async def run_create_generation_preview(task_id: int, include_debug: bool = False, trigger: str = "manual_step", user_instruction: str | None = None) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     styling_id = task["active_styling_id"]
-    shoot_script_id = task["active_shoot_script_id"] if "active_shoot_script_id" in task.keys() else None
-    if not styling_id or not shoot_script_id or (
-        task["status"] not in {"SCRIPT_READY", "PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
+    if not styling_id or (
+        task["status"] not in {"STYLING_READY", "PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
         and not (task["status"] == "FAILED" and not task["active_storyboard_preview_id"])
     ):
-        raise HTTPException(status_code=409, detail="请先生成拍摄剧本")
+        raise HTTPException(status_code=409, detail="请先完成 AI 智能选搭")
     input_version_id = create_generation_input_version(task_id, build_hero_product_info_context(task))
     with get_db() as db:
         db.execute("UPDATE generation_tasks SET status = 'PREVIEW_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
-    shot_plans = get_task_shot_plans_by_script(int(shoot_script_id))
     timestamp = now_iso()
     effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "storyboard_preview")
     user_instruction_context = build_stage_user_instruction_context("storyboard_preview", effective_user_instruction)
@@ -2803,16 +2806,16 @@ async def run_create_generation_preview(task_id: int, include_debug: bool = Fals
             persist_generation_task_stage_instruction(db, task_id, "storyboard_preview", effective_user_instruction, timestamp)
         cursor = db.execute(
             """
-            INSERT INTO generation_previews (task_id, styling_id, shoot_script_id, input_version_id, user_instruction_json, environment_asset_id, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'RUNNING', ?, ?)
+            INSERT INTO generation_previews (task_id, styling_id, input_version_id, user_instruction_json, environment_asset_id, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'RUNNING', ?, ?)
             """,
-            (task_id, styling_id, shoot_script_id, input_version_id, dumps(user_instruction_context), environment_asset_id, timestamp, timestamp),
+            (task_id, styling_id, input_version_id, dumps(user_instruction_context), environment_asset_id, timestamp, timestamp),
         )
         preview_id = int(cursor.lastrowid)
     attempt_id = create_attempt("generation_preview", preview_id, "image-2")
     lease_generation_preview(preview_id, attempt_id)
     schedule_background_generation(
-        run_preview_generation(task_id, int(styling_id), int(shoot_script_id), shot_plans, preview_id, attempt_id, trigger=trigger),
+        run_preview_generation(task_id, int(styling_id), preview_id, attempt_id, trigger=trigger),
         job_key=preview_job_key(preview_id),
     )
     return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
@@ -2821,14 +2824,12 @@ async def run_create_generation_preview(task_id: int, include_debug: bool = Fals
 async def run_preview_generation(
     task_id: int,
     styling_id: int,
-    shoot_script_id: int,
-    shot_plans: list[Any],
     preview_id: int,
     attempt_id: int,
     trigger: str = "manual_step",
 ) -> None:
     try:
-        task_package = build_new_preview_task_package(task_id, styling_id, shoot_script_id, shot_plans, preview_id=preview_id)
+        task_package = build_new_preview_task_package(task_id, styling_id, preview_id=preview_id)
         if not task_package.get("inputVersionId"):
             raise RuntimeError("分镜预览缺少输入版本快照")
         task_package["invocation"] = {"mode": trigger, "target": "storyboard_preview"}
@@ -6819,6 +6820,24 @@ def build_category_shot_template(hero_category: str) -> list[tuple[str, str, str
     return build_builtin_category_shot_template(hero_category)
 
 
+def storyboard_category_family(styling_plan: dict[str, Any]) -> str:
+    hero = styling_plan.get("hero_understanding") if isinstance(styling_plan.get("hero_understanding"), dict) else {}
+    category = str(hero.get("category") or "").strip().lower()
+    if not category:
+        raise RuntimeError("AI 选搭结果缺少主推款品类，无法选择分镜 Prompt")
+    if any(token in category for token in ("连衣", "连体", "套装", "dress", "jumpsuit", "one_piece", "one-piece", "suit")):
+        return "one_piece"
+    if any(token in category for token in ("裤", "半身裙", "半裙", "裙装", "bottom", "pants", "trousers", "skirt", "shorts")):
+        return "bottom"
+    if any(token in category for token in ("上装", "上衣", "针织", "外套", "衬衫", "t恤", "top", "shirt", "blouse", "knit", "jacket", "coat")):
+        return "top"
+    raise RuntimeError(f"暂不支持主推款品类：{hero.get('category')}")
+
+
+def storyboard_prompt_config_key(styling_plan: dict[str, Any]) -> str:
+    return STORYBOARD_PROMPT_CONFIG_KEYS[storyboard_category_family(styling_plan)]
+
+
 def build_builtin_category_shot_template(hero_category: str) -> list[tuple[str, str, str, str, str]]:
     if hero_category == "裤装":
         return [
@@ -6915,31 +6934,30 @@ def model_identity_contract_from_snapshot(model_snapshot: dict[str, Any] | None)
 def build_new_preview_task_package(
     task_id: int,
     styling_id: int,
-    shoot_script_id: int,
-    shot_plans: list[dict[str, Any]],
     preview_id: int | None = None,
 ) -> dict[str, Any]:
     styling_plan = get_styling_plan_by_id(styling_id)
-    shoot_script = get_shoot_script_json_by_id(shoot_script_id)
+    category_family = storyboard_category_family(styling_plan)
+    prompt_config_key = STORYBOARD_PROMPT_CONFIG_KEYS[category_family]
     with get_db() as db:
         if preview_id is not None:
             preview_row = db.execute(
                 """
                 SELECT input_version_id, user_instruction_json, environment_asset_id
                 FROM generation_previews
-                WHERE id = ? AND task_id = ? AND styling_id = ? AND shoot_script_id = ?
+                WHERE id = ? AND task_id = ? AND styling_id = ?
                 """,
-                (preview_id, task_id, styling_id, shoot_script_id),
+                (preview_id, task_id, styling_id),
             ).fetchone()
         else:
             preview_row = db.execute(
                 """
                 SELECT input_version_id, user_instruction_json, environment_asset_id
                 FROM generation_previews
-                WHERE task_id = ? AND styling_id = ? AND shoot_script_id = ?
+                WHERE task_id = ? AND styling_id = ?
                 ORDER BY id DESC LIMIT 1
                 """,
-                (task_id, styling_id, shoot_script_id),
+                (task_id, styling_id),
             ).fetchone()
         input_version_id = int(preview_row["input_version_id"]) if preview_row and preview_row["input_version_id"] else None
         if input_version_id is None:
@@ -6953,48 +6971,52 @@ def build_new_preview_task_package(
     image_inputs = build_new_image_inputs(task_id, styling_id, include_preview=False, input_version_id=input_version_id, environment_asset_id=environment_asset_id)
     hero_product_info = loads(row_value(input_row, "hero_product_info_json"), build_hero_product_info_context({}))
     storyboard_preview_user_instruction = loads(row_value(preview_row, "user_instruction_json"), build_stage_user_instruction_context("storyboard_preview"))
-    prompt_runtime = build_preview_prompt_runtime(shot_plans, shoot_script, image_inputs, hero_product_info, storyboard_preview_user_instruction)
-    prompt = render_prompt_template("assembly.storyboard_preview", prompt_runtime)
+    prompt_runtime = build_preview_prompt_runtime(styling_plan, image_inputs, hero_product_info, storyboard_preview_user_instruction)
+    prompt = render_prompt_template(prompt_config_key, prompt_runtime)
     return {
         "generation": {"stage": "preview_grid"},
         "prompt": prompt,
-        **prompt_execution_facts("assembly.storyboard_preview", prompt, prompt_runtime),
+        "categoryFamily": category_family,
+        **prompt_execution_facts(prompt_config_key, prompt, prompt_runtime),
         "imageInputs": image_inputs,
         "inputVersionId": input_version_id,
         "heroProductInfo": hero_product_info,
         "storyboardPreviewUserInstruction": storyboard_preview_user_instruction,
         "stylingPlan": styling_plan,
-        "shootScript": shoot_script,
-        "shotPlans": shot_plans,
     }
 
 
 def build_new_preview_prompt(
-    shot_plans: list[dict[str, Any]],
     styling_plan: dict[str, Any],
-    shoot_script: dict[str, Any],
     image_inputs: list[dict[str, Any]] | None = None,
     hero_product_info: dict[str, Any] | None = None,
     storyboard_preview_user_instruction: dict[str, Any] | None = None,
 ) -> str:
     # 渲染层只输出「可变数据」：拍摄剧本各分段正文、参考图各职能图号区间、商品信息、用户要求。
     # 表头（【全局导演】等）、职能描述与事实源约束由 Prompt 维护模板正文托管（配合条件段）。
-    runtime = build_preview_prompt_runtime(shot_plans, shoot_script, image_inputs or [], hero_product_info or {}, storyboard_preview_user_instruction or {})
-    return render_prompt_template("assembly.storyboard_preview", runtime)
+    runtime = build_preview_prompt_runtime(styling_plan, image_inputs or [], hero_product_info or {}, storyboard_preview_user_instruction or {})
+    return render_prompt_template(storyboard_prompt_config_key(styling_plan), runtime)
 
 
 def build_preview_prompt_runtime(
-    shot_plans: list[dict[str, Any]],
-    shoot_script: dict[str, Any],
+    styling_plan: dict[str, Any],
     image_inputs: list[dict[str, Any]],
     hero_product_info: dict[str, Any],
     storyboard_preview_user_instruction: dict[str, Any],
 ) -> dict[str, Any]:
-    ctx = shoot_script_result_for_prompt(shoot_script)
     spans = render_image_reference_spans(image_inputs or [])
+    selected = selected_outfit_from_plan(styling_plan)
+    selected_codes = ensure_string_list(styling_plan.get("selected_material_codes"))
+    wearing = str(selected.get("wearing_notes") or selected.get("styling_notes") or "按参考商品的真实结构自然穿着，主推款始终是视觉核心。")
+    accessories = selected.get("generated_accessories")
+    if isinstance(accessories, list):
+        accessory_text = "、".join(str(item) for item in accessories if item) or "仅允许低存在感鞋、包、首饰，不遮挡主推款。"
+    else:
+        accessory_text = str(accessories or "仅允许低存在感鞋、包、首饰，不遮挡主推款。")
     return {
-            "shoot_script_resolved_accessories": render_shoot_script_resolved_accessories(ctx),
-            "shoot_script_shots": render_shoot_script_shots(ctx),
+            "category_family": storyboard_category_family(styling_plan),
+            "styling_outfit": f"选中搭配服装：{'、'.join(selected_codes) if selected_codes else '无库内配角'}。穿着关系：{wearing}",
+            "resolved_accessories": accessory_text,
             "ref_model_identity": spans["model_identity"],
             "ref_garment": spans["garment"],
             "ref_shoot_environment": spans["shoot_environment"],
@@ -7378,12 +7400,12 @@ def sample_prompt_runtime() -> dict[str, Any]:
         "hero_product_info": "夏季主推裤装，重点展示腰头和裤脚。",
         "user_requirement": "重点展示腰线，避免厚重外套。",
         "ai_styling_user_instruction": "不要厚重外套，优先轻盈通勤。",
-        "shoot_script_user_instruction": "腰线相关镜头要更明确。",
         "storyboard_preview_user_instruction": "分镜姿态更舒展。",
         "final_image_user_instruction": "成片整体更干净，减少配饰存在感。",
-        # 拍摄剧本各分段（分镜预览用；无表头）
-        "shoot_script_resolved_accessories": "- footwear：燕麦色细带凉鞋（适用格 1、4）",
-        "shoot_script_shots": "格1（全身主视觉·全景）：\n  核心：主推款整体比例",
+        # 固定品类分镜 Prompt 的少量动态事实（自然语言，不传拍摄剧本 JSON）
+        "category_family": "bottom",
+        "styling_outfit": "选中搭配服装：LOOK-A。穿着关系：轻量上装服务主推裤装。",
+        "resolved_accessories": "低存在感黑色鞋履，不遮挡主推款。",
         # 当前成片各分段（成片用；无表头）
         "preview_grid_cell": "1",
         "shot_styling": "造型：吊带裙配同色飘带\n穿法：单穿吊带裙",
@@ -7405,13 +7427,12 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服装库 READY 服饰的全量 AI 标签事实卡"},
         {"name": "runtime.hero_product_info", "scope": "runtime", "description": "跟随主推款输入版本冻结的商品信息和业务事实补充"},
         {"name": "runtime.ai_styling_user_instruction", "scope": "runtime", "description": "AI 智能选搭本次执行的用户介入要求"},
-        {"name": "runtime.shoot_script_user_instruction", "scope": "runtime", "description": "拍摄剧本本次执行的用户介入要求"},
         {"name": "runtime.storyboard_preview_user_instruction", "scope": "runtime", "description": "分镜预览本次执行的用户介入要求"},
         {"name": "runtime.final_image_user_instruction", "scope": "runtime", "description": "最终成片或单张重生本次执行的用户介入要求"},
         {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭导演上下文，使用搭配服装 code 标识"},
-        # 拍摄剧本 → 分镜预览：各分段只出可变数据正文（无表头），表头用条件段在正文托管
-        {"name": "runtime.shoot_script_resolved_accessories", "scope": "runtime", "description": "拍摄剧本本次配饰正文，无表头；为空则条件段省略"},
-        {"name": "runtime.shoot_script_shots", "scope": "runtime", "description": "拍摄剧本六格镜头正文，无表头"},
+        {"name": "runtime.category_family", "scope": "runtime", "description": "代码判定的分镜品类族：top / bottom / one_piece"},
+        {"name": "runtime.styling_outfit", "scope": "runtime", "description": "选中搭配服装与穿着关系的自然语言摘要"},
+        {"name": "runtime.resolved_accessories", "scope": "runtime", "description": "低存在感生成配饰边界的自然语言摘要"},
         # 成片：当前镜头各分段
         {"name": "runtime.preview_grid_cell", "scope": "runtime", "description": "当前成片对应分镜预览的格号（纯数字）"},
         {"name": "runtime.shot_styling", "scope": "runtime", "description": "当前成片造型正文（造型/穿法/选中搭配 code），无表头"},
@@ -7554,9 +7575,6 @@ async def run_auto_final_generation(task_id: int) -> None:
             if step == "styling":
                 await run_select_generation_styling(task_id, trigger="auto_run")
                 continue
-            if step == "shoot_script":
-                await run_create_generation_shoot_script(task_id, trigger="auto_run")
-                continue
             if step == "preview":
                 await run_create_generation_preview(task_id, trigger="auto_run")
                 return
@@ -7577,8 +7595,6 @@ def next_auto_final_step(task: Any) -> str:
         return "ready"
     if not task["active_styling_id"]:
         return "styling"
-    if not row_value(task, "active_shoot_script_id"):
-        return "shoot_script"
     preview_id = row_value(task, "active_storyboard_preview_id") or row_value(task, "active_preview_id")
     if not preview_id or not generation_preview_has_asset(int(preview_id)):
         return "preview"
@@ -7697,10 +7713,8 @@ def refresh_pending_new_generation_jobs() -> None:
             fail_stale_attempt(active_attempt_id, "预览生成任务锁过期，已由后台恢复重试。")
             attempt_id = create_attempt("generation_preview", int(row["id"]), "image-2")
         lease_generation_preview(int(row["id"]), attempt_id)
-        shoot_script_id = int(row["shoot_script_id"]) if "shoot_script_id" in row.keys() and row["shoot_script_id"] else 0
-        shot_plans = get_task_shot_plans_by_script(shoot_script_id)
         schedule_background_generation(
-            run_preview_generation(int(row["task_id"]), int(row["styling_id"]), shoot_script_id, shot_plans, int(row["id"]), attempt_id),
+            run_preview_generation(int(row["task_id"]), int(row["styling_id"]), int(row["id"]), attempt_id),
             job_key=key,
         )
 

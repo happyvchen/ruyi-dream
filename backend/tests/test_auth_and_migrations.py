@@ -322,7 +322,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (key, group_type, key, content, sort_order, timestamp),
             )
 
-    def test_prompt_config_slots_are_seeded_empty_without_default_prompt_text(self) -> None:
+    def test_category_storyboard_prompt_slots_are_installed(self) -> None:
         db_module = importlib.import_module("app.db")
         main = importlib.import_module("app.main")
 
@@ -335,15 +335,28 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 "segment.brand_info",
                 "assembly.ai_tagging",
                 "assembly.ai_styling",
-                "assembly.shoot_script",
-                "assembly.storyboard_preview",
+                "assembly.storyboard_preview_top",
+                "assembly.storyboard_preview_bottom",
+                "assembly.storyboard_preview_one_piece",
                 "assembly.final_image",
             },
         )
         self.assertEqual(main.prompt_config_content("assembly.ai_styling"), "")
         self.assertEqual(main.prompt_config_content("segment.brand_info"), "")
+        self.assertIn("中央 2:3 安全裁切区", main.prompt_config_content("assembly.storyboard_preview_one_piece"))
+        self.assertNotIn("assembly.shoot_script", rows)
         with self.assertRaisesRegex(RuntimeError, "Prompt 配置缺失或占位符未填充"):
             main.render_prompt_template("assembly.ai_styling", main.sample_prompt_runtime())
+
+    def test_storyboard_category_family_routes_supported_categories(self) -> None:
+        main = importlib.import_module("app.main")
+        cases = {
+            "针织上衣": "top", "外套": "top", "裤装": "bottom", "半身裙": "bottom",
+            "连衣裙": "one_piece", "连体裤": "one_piece", "套装": "one_piece",
+        }
+        for category, expected in cases.items():
+            with self.subTest(category=category):
+                self.assertEqual(main.storyboard_category_family({"hero_understanding": {"category": category}}), expected)
 
     def test_model_identity_prompt_runtime_migration_removes_placeholder_and_block(self) -> None:
         db_module = importlib.import_module("app.db")
@@ -1680,7 +1693,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 """,
                 (
                     db_module.dumps(selected_material_snapshot),
-                    db_module.dumps({"schema_version": "styling-plan-v1", "selected_material_codes": ["LOOK-A"]}),
+                    db_module.dumps({"schema_version": "styling-plan-v1", "hero_understanding": {"category": "连衣裙"}, "selected_material_codes": ["LOOK-A"]}),
                     timestamp,
                     timestamp,
                 ),
@@ -1712,7 +1725,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
             7,
             main.build_stage_user_instruction_context("shoot_script", "突出裙摆长度"),
         )
-        preview_package = main.build_new_preview_task_package(1, 3, 5, [{"sortOrder": 1, "plan": {"shot_index": 1}}])
+        preview_package = main.build_new_preview_task_package(1, 3, 4)
         final_package = main.build_new_final_task_package(1, 30)
 
         self.assertEqual([item["role"] for item in preview_package["imageInputs"][:2]], ["model_identity", "model_identity"])
@@ -1720,9 +1733,10 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertEqual(shoot_script_request["input_version"]["id"], 7)
         self.assertEqual(shoot_script_request["hero_product_info"]["info"], "中短裙，裙摆刚过膝")
         self.assertEqual(shoot_script_request["shoot_script_user_instruction"]["instruction"], "突出裙摆长度")
-        self.assertIn("输入参考图角色清单", preview_package["prompt"])
+        self.assertEqual(preview_package["categoryFamily"], "one_piece")
+        self.assertIn("参考图职责", preview_package["prompt"])
         # 参考图职能描述来自模板正文；会变的图号区间由代码填充（模特图占前两位 → 图1-2）。
-        self.assertIn("数字模特身份参考图", preview_package["prompt"])
+        self.assertIn("图1-2 只决定同一位成年女模特", preview_package["prompt"])
         self.assertIn("图1-2", preview_package["prompt"])
         # 旧的合成占位（image_reference_manifest / shoot_script_result / current_shot_context）已下线。
         self.assertNotIn("{{runtime.image_reference_manifest}}", preview_package["prompt"])
