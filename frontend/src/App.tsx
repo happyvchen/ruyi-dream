@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import type { DragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode, UIEvent } from 'react'
 import {
   Bot,
+  Check,
   ChevronLeft,
   ChevronRight,
   CircleStop,
@@ -676,7 +677,6 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     <section className="page studio-page">
       <PageTitle
         title="AI 摄影棚"
-        subtitle="上传主推款，让系统选搭配角服装并生成电商棚拍成片。"
         actions={task ? (
           <div className="studio-title-actions">
             <button className="secondary" onClick={startNewTask}><ImagePlus size={16} />新建拍摄任务</button>
@@ -709,11 +709,10 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
               <>
                 <div className="task-summary-identity">
                   <AssetThumb asset={taskCoverAsset(task)} interactive={false} />
-                  <div><strong>{task.name}</strong><span>{studioView?.statusLabel ?? statusText(task.status)}</span><em>主推款 {task.images?.length ?? 0} 张</em></div>
+                  <div><strong>{task.name}</strong><span>{studioView?.statusLabel ?? statusText(task.status)}</span><em>{studioView?.progressLabel ?? '等待开始'}</em></div>
                 </div>
                 <div className="task-summary-progress">
                   <Meta label="当前步骤" value={studioView?.currentStageLabel ?? '上传主推款'} />
-                  <Meta label="总体进度" value={studioView?.progressLabel ?? '等待开始'} />
                   <Meta label="最终成片" value={`${task.resultSet?.images?.filter((i) => i.status === 'SUCCEEDED').length ?? 0}/5`} />
                   {!!task.styling?.selectedMaterials?.length && <Meta label="搭配服装" value={`${task.styling.selectedMaterials.length} 件`} />}
                 </div>
@@ -783,9 +782,9 @@ function StepRail({ active, executing, max, onSelect }: { active: StudioStep; ex
   return (
     <div className="step-rail">
       {steps.map((step, index) => {
-        const Icon = step.icon
         const enabled = index <= max
         const isExecuting = executing === index
+        const isDone = index < max
         return (
           <button
             key={step.title}
@@ -795,10 +794,8 @@ function StepRail({ active, executing, max, onSelect }: { active: StudioStep; ex
             aria-current={active === index ? 'step' : undefined}
             aria-label={`${step.title}${isExecuting ? '，正在执行' : ''}`}
           >
-            <strong>{index + 1}</strong>
-            <Icon size={18} />
+            <strong>{isExecuting ? <Loader2 size={14} className="spin" /> : isDone ? <Check size={14} /> : index + 1}</strong>
             <span>{step.title}</span>
-            {isExecuting && <span className="step-executing-mark" aria-hidden="true"><Loader2 size={13} className="spin" /></span>}
           </button>
         )
       })}
@@ -1322,28 +1319,20 @@ function StageUserInputModule({ step, task, value, savedValue = '', onChange, on
     { title: '成片生成要求', placeholder: '例如：整体更干净，减少配饰存在感，保持棚拍电商质感。' },
   ][step]
   const saveDisabled = disabled || !task || value.trim() === savedValue.trim()
+  const hasValue = Boolean(value.trim())
+  const [expanded, setExpanded] = useState(!task || hasValue)
   return (
-    <div className="side-input-module">
-      <span className="side-input-title">{labels.title}</span>
+    <details className="side-input-module" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
+      <summary><span>{labels.title}</span><em>{hasValue ? '已填写' : '选填'}</em></summary>
       <div className="side-input-control">
         <textarea value={value} maxLength={800} disabled={disabled} onChange={(event) => onChange(event.target.value)} placeholder={labels.placeholder} />
+        {task && <p>保存后用于下一次执行，不会改变当前结果。</p>}
         <div className="side-input-actions">
           <em>{value.length}/800</em>
           {task && <button className="secondary" type="button" disabled={saveDisabled} onClick={onSave}>保存</button>}
         </div>
       </div>
-    </div>
-  )
-}
-
-function StageHeader({ title, text }: {
-  title: string
-  text: string
-}) {
-  return (
-    <div className="step-head">
-      <div className="step-copy"><h2>{title}</h2><p>{text}</p></div>
-    </div>
+    </details>
   )
 }
 
@@ -1365,7 +1354,6 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <StageHeader title="AI 智能选搭" text="AI Stylist 会先理解主推款，再生成推荐造型方案；搭配服装必须服务主推款展示。" />
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_styling" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`AI 智能选搭 · Attempt #${operation.id}`, ['generation_styling'], operation.id) : undefined} /></div>
         ) : (
@@ -1590,7 +1578,6 @@ function ShootScriptStep({ task, setTask, run, userInstruction, localOperations,
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <StageHeader title="生成拍摄剧本" text="AI Director 会一次性生成 6 个镜头的景别、取景、姿势、走位、背景光线和商品展示要求。" />
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_shoot_script" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成拍摄剧本 · Attempt #${operation.id}`, ['generation_shoot_script'], operation.id) : undefined} /></div>
         ) : (
@@ -1716,7 +1703,6 @@ function PreviewStep({ task, setTask, run, userInstruction, localOperations, sta
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <StageHeader title="生成分镜预览" text="按拍摄剧本生成一张 3:2 横版分镜预览图（3 列 × 2 行、6 个 1:1 方格）。最终固定生成前 5 个镜头，第 6 个镜头忽略。" />
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_preview" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成分镜预览 · Attempt #${operation.id}`, ['generation_preview'], operation.id) : undefined} /></div>
         ) : (
@@ -1765,7 +1751,6 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <StageHeader title="生成成片" text="并发生成前 5 个镜头。每张图可单独下载，也可单张重新生成。" />
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status">
             <AIOperationList operations={finalHistoryOperations} taskId={task?.id} ownerType="generation_result_image" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成成片 · Attempt #${operation.id}`, ['generation_result_image'], operation.id) : undefined} />
@@ -3261,8 +3246,8 @@ function normalizePageSizeOptions(options: readonly PageSizeOption[], unit: stri
   })
 }
 
-function PageTitle({ title, subtitle, actions }: { title: string; subtitle: string; actions?: ReactNode }) {
-  return <div className="page-title"><div><h1>{title}</h1><p>{subtitle}</p></div>{actions}</div>
+function PageTitle({ title, subtitle, actions }: { title: string; subtitle?: string; actions?: ReactNode }) {
+  return <div className="page-title"><div><h1>{title}</h1>{subtitle && <p>{subtitle}</p>}</div>{actions}</div>
 }
 
 function UploadBox({ files, setFiles, max, compact = false }: { files: File[]; setFiles: (files: File[]) => void; max: number; compact?: boolean }) {
