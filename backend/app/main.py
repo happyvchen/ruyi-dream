@@ -18,7 +18,7 @@ import time
 import zipfile
 from uuid import uuid4
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -4253,7 +4253,7 @@ def clear_shoot_environment(request: Request) -> dict[str, Any]:
 
 
 @app.get("/api/media")
-def get_media(key: str = Query(...), variant: str = Query("original")) -> RedirectResponse:
+def get_media(key: str = Query(...), variant: str = Query("original"), download: bool = Query(False)) -> RedirectResponse:
     object_key = clean_key(key)
     if variant not in {"thumb", "preview", "original"}:
         raise HTTPException(status_code=400, detail="图片规格不合法")
@@ -4262,7 +4262,7 @@ def get_media(key: str = Query(...), variant: str = Query("original")) -> Redire
         raise HTTPException(status_code=404, detail="图片不存在")
     object_key = media_keys["object_key"]
     target_key = object_key
-    if variant in {"thumb", "preview"}:
+    if not download and variant in {"thumb", "preview"}:
         registered_variant_key = media_keys.get(f"{variant}_key")
         if registered_variant_key and object_exists(registered_variant_key):
             target_key = registered_variant_key
@@ -4270,7 +4270,12 @@ def get_media(key: str = Query(...), variant: str = Query("original")) -> Redire
             target_key = existing_derivative_or_original(object_key, variant) or object_key
     if not object_exists(target_key):
         raise HTTPException(status_code=404, detail="图片不存在")
-    url = presigned_get_url(target_key)
+    disposition = media_attachment_disposition(media_keys.get("original_filename"), object_key) if download else None
+    url = presigned_get_url(
+        target_key,
+        response_content_disposition=disposition,
+        response_content_type=media_keys.get("mime_type") if download else None,
+    )
     if not url:
         raise HTTPException(status_code=404, detail="图片不存在")
     # 302 + 短时私有缓存:5 分钟内重定向目标(presigned URL)保持稳定,
@@ -4281,16 +4286,24 @@ def get_media(key: str = Query(...), variant: str = Query("original")) -> Redire
         url,
         status_code=302,
         headers={
-            "Cache-Control": f"private, max-age={MEDIA_REDIRECT_CACHE_SECONDS}",
+            "Cache-Control": "private, no-store" if download else f"private, max-age={MEDIA_REDIRECT_CACHE_SECONDS}",
         },
     )
+
+
+def media_attachment_disposition(original_filename: str | None, object_key: str) -> str:
+    filename = sanitize_filename(original_filename or Path(object_key).name or "image")
+    suffix = Path(filename).suffix
+    ascii_stem = Path(filename).stem.encode("ascii", "ignore").decode().strip("-_") or "image"
+    ascii_filename = f"{ascii_stem}{suffix}"
+    return f'attachment; filename="{ascii_filename}"; filename*=UTF-8\'\'{quote(filename, safe="")}'
 
 
 def registered_media_keys(object_key: str) -> dict[str, str | None] | None:
     with get_db() as db:
         asset = db.execute(
             """
-            SELECT object_key, thumb_key, preview_key FROM media_assets
+            SELECT object_key, thumb_key, preview_key, original_filename, mime_type FROM media_assets
             WHERE object_key = ? OR thumb_key = ? OR preview_key = ?
             """,
             (object_key, object_key, object_key),
@@ -4300,6 +4313,8 @@ def registered_media_keys(object_key: str) -> dict[str, str | None] | None:
                 "object_key": clean_key(asset["object_key"]),
                 "thumb_key": clean_key(asset["thumb_key"]) if asset["thumb_key"] else None,
                 "preview_key": clean_key(asset["preview_key"]) if asset["preview_key"] else None,
+                "original_filename": asset["original_filename"],
+                "mime_type": asset["mime_type"],
             }
         model_reference = registered_model_reference_keys(db, object_key)
         if model_reference:
@@ -4323,6 +4338,8 @@ def registered_model_reference_keys(db: Any, object_key: str) -> dict[str, str |
                     "object_key": original_key,
                     "thumb_key": thumb_key,
                     "preview_key": preview_key,
+                    "original_filename": str(filename),
+                    "mime_type": None,
                 }
     return None
 

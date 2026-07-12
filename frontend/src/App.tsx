@@ -38,7 +38,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react'
-import { api, finalImageArchiveUrl, isAuthExpiredError, mediaUrl } from './api'
+import { api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl } from './api'
 import type { AICallRecord, AIOperation, AttemptPhase, DeleteImpact, FinalImageExportPrecheck, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment } from './api'
 import { friendlyErrorText } from './lib/errorMessages'
 import { parseRoute, routeToUrl } from './routes'
@@ -1780,7 +1780,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
                   })()}
                 </div>
               )}
-              {(() => { const shot = shotLabels.find((item) => numberValue(item.shot_index) === index + 1); return <div><span><b>#{index + 1}</b>{stringValue(shot?.shot_role_label) || stringValue(shot?.shot_role) || '镜头'}</span>{image?.asset && <a href={mediaUrl(assetOriginalSrc(image.asset))} target="_blank" rel="noreferrer" aria-label={`下载镜头 ${index + 1}`}><Download size={15} /></a>}{image?.status === 'FAILED' && image.activeAttempt?.errorCode === 'DELIVERY_FAILED' && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('重新回传成片中...', () => api.redeliverResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新回传（图已生成，仅重新拉取，不消耗生成额度）" aria-label={`重新回传镜头 ${index + 1}`}><RefreshCw size={14} /></button>}{image && !['QUEUED', 'RUNNING'].includes(image.status) && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id, userInstruction), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成" aria-label={`重新生成镜头 ${index + 1}`}><RotateCcw size={14} /></button>}</div> })()}
+              {(() => { const shot = shotLabels.find((item) => numberValue(item.shot_index) === index + 1); return <div><span><b>#{index + 1}</b>{stringValue(shot?.shot_role_label) || stringValue(shot?.shot_role) || '镜头'}</span>{image?.asset && <a href={mediaDownloadUrl(assetOriginalSrc(image.asset))} aria-label={`下载镜头 ${index + 1}`}><Download size={15} /></a>}{image?.status === 'FAILED' && image.activeAttempt?.errorCode === 'DELIVERY_FAILED' && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('重新回传成片中...', () => api.redeliverResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新回传（图已生成，仅重新拉取，不消耗生成额度）" aria-label={`重新回传镜头 ${index + 1}`}><RefreshCw size={14} /></button>}{image && !['QUEUED', 'RUNNING'].includes(image.status) && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id, userInstruction), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成" aria-label={`重新生成镜头 ${index + 1}`}><RotateCcw size={14} /></button>}</div> })()}
             </div>
           ))}
           </div></div>
@@ -4228,7 +4228,7 @@ function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () =
             <button className="text-action" onClick={() => setZoom('fit')} title="适应窗口">{zoomLabel}</button>
             <button onClick={() => adjustZoom(1)} title="放大"><ZoomIn size={16} /></button>
             <button onClick={() => setZoom(1)} title="原始尺寸">1:1</button>
-            {current.downloadUrl && <a href={current.downloadUrl} target="_blank" rel="noreferrer" title="打开原图"><Download size={16} /></a>}
+            {current.downloadUrl && <a href={current.downloadUrl} title="下载原图"><Download size={16} /></a>}
             <button onClick={() => setNext()} disabled={!canStep} title="下一张"><ChevronRight size={16} /></button>
             <button onClick={onClose} title="关闭"><X size={16} /></button>
           </div>
@@ -4603,7 +4603,7 @@ function assetLightboxImage(asset: MediaAsset, group?: MediaAsset[]): LightboxIm
   return {
     ...assetLightboxItem(asset),
     src,
-    downloadUrl: src,
+    downloadUrl: mediaDownloadUrl(assetOriginalSrc(asset)),
     items,
     initialIndex: Math.max(0, group?.findIndex((item) => item.id === asset.id) ?? 0),
   }
@@ -4616,7 +4616,7 @@ function assetLightboxItem(asset: MediaAsset): LightboxImageItem {
     thumbSrc: mediaUrl(assetThumbSrc(asset)),
     title: asset.originalFilename ?? asset.filename,
     meta: assetMeta(asset),
-    downloadUrl: src,
+    downloadUrl: mediaDownloadUrl(assetOriginalSrc(asset)),
     details: {
       文件名: asset.originalFilename ?? asset.filename,
       尺寸: dimensionText({ width: asset.originalWidth ?? asset.width, height: asset.originalHeight ?? asset.height }),

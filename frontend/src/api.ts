@@ -422,6 +422,15 @@ export function mediaUrl(url?: string | null) {
   return /^(https?:|blob:|data:)/i.test(url) ? url : `${API_BASE}${url}`
 }
 
+export function mediaDownloadUrl(url?: string | null) {
+  const resolved = mediaUrl(url)
+  if (!resolved) return ''
+  const downloadUrl = new URL(resolved, window.location.origin)
+  downloadUrl.searchParams.set('variant', 'original')
+  downloadUrl.searchParams.set('download', '1')
+  return downloadUrl.toString()
+}
+
 export function finalImageArchiveUrl(ids: number[]) {
   return `${API_BASE}/api/generation-task-exports/archive?ids=${ids.join(',')}`
 }

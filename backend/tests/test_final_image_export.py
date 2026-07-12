@@ -241,6 +241,39 @@ class FinalImageExportTestCase(unittest.TestCase):
         finally:
             client.close()
 
+    def test_media_download_forces_original_and_attachment_response(self) -> None:
+        self._seed_task_with_results(4, "下载测试", [(1, "SUCCEEDED", "results/原图.png")])
+        main = importlib.import_module("app.main")
+        original_exists = main.object_exists
+        original_presign = main.presigned_get_url
+        calls: list[tuple[str, dict[str, str | None]]] = []
+        main.object_exists = lambda key: True
+
+        def fake_presign(key, **kwargs):
+            calls.append((str(key), kwargs))
+            return "https://storage.example/download"
+
+        main.presigned_get_url = fake_presign
+        client = self._client()
+        try:
+            response = client.get(
+                "/api/media",
+                params={"key": "results/原图.png", "variant": "thumb", "download": "1"},
+                follow_redirects=False,
+            )
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers["location"], "https://storage.example/download")
+            self.assertEqual(response.headers["cache-control"], "private, no-store")
+            self.assertEqual(calls[0][0], "results/原图.png")
+            self.assertEqual(calls[0][1]["response_content_type"], "image/png")
+            disposition = calls[0][1]["response_content_disposition"]
+            self.assertIn("attachment", disposition)
+            self.assertIn("filename*=UTF-8''", disposition)
+        finally:
+            main.object_exists = original_exists
+            main.presigned_get_url = original_presign
+            client.close()
+
 
 if __name__ == "__main__":
     unittest.main()

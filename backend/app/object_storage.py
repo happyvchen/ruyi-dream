@@ -293,13 +293,23 @@ def object_head(key: str | Path | None) -> dict[str, object] | None:
     }
 
 
-def presigned_get_url(key: str | Path | None) -> str | None:
+def presigned_get_url(
+    key: str | Path | None,
+    *,
+    response_content_disposition: str | None = None,
+    response_content_type: str | None = None,
+) -> str | None:
     if not key:
         return None
     settings = get_settings()
+    params = {"Bucket": settings.s3_bucket, "Key": clean_key(key)}
+    if response_content_disposition:
+        params["ResponseContentDisposition"] = response_content_disposition
+    if response_content_type:
+        params["ResponseContentType"] = response_content_type
     return presign_s3_client().generate_presigned_url(
         "get_object",
-        Params={"Bucket": settings.s3_bucket, "Key": clean_key(key)},
+        Params=params,
         ExpiresIn=settings.s3_presign_expires_seconds,
     )
 
