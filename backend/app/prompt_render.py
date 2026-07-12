@@ -224,26 +224,23 @@ def render_shot_accessories(context: dict[str, Any]) -> str:
 
 
 def render_hero_product_info_line(context: dict[str, Any]) -> str:
-    """渲染商品信息为一句话；无内容时返回「（无）」。"""
-    text = _clean_text(_as_dict(context).get("info"))
-    return text or EMPTY_PLACEHOLDER
+    """渲染商品信息为一句话；无内容时返回空串，交由模板条件段省略整行。"""
+    return _clean_text(_as_dict(context).get("info"))
 
 
 def render_user_instruction_line(context: dict[str, Any]) -> str:
-    """渲染本步骤用户要求为一句话；无内容时返回「（无）」。"""
-    text = _clean_text(_as_dict(context).get("instruction"))
-    return text or EMPTY_PLACEHOLDER
+    """渲染本步骤用户要求为一句话；无内容时返回空串，交由模板条件段省略整行。"""
+    return _clean_text(_as_dict(context).get("instruction"))
 
 
 def render_user_requirement_line(context: dict[str, Any]) -> str:
-    """渲染 AI Stylist 用的用户要求为一句话；无内容时返回「（无）」。
+    """渲染 AI Stylist 用的用户要求为一句话；无内容时返回空串。
 
     优先取 ``combined_requirement``（上传要求 + 本次微调合并后），回退 ``upload_requirement``。
     优先级/冲突处理规则不在此渲染——它由 system instruction 与模板正文声明。
     """
     ctx = _as_dict(context)
-    text = _clean_text(ctx.get("combined_requirement")) or _clean_text(ctx.get("upload_requirement"))
-    return text or EMPTY_PLACEHOLDER
+    return _clean_text(ctx.get("combined_requirement")) or _clean_text(ctx.get("upload_requirement"))
 
 
 def _span_text(start: int, end: int) -> str:

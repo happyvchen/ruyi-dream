@@ -17,9 +17,9 @@
 【品牌信息】
 {{segment.brand_info}}
 
-【本次用户要求】
-商品信息：{{runtime.hero_product_info}}
-用户要求：{{runtime.shoot_script_user_instruction}}
+{{#runtime.hero_product_info}}服装信息：{{runtime.hero_product_info}}
+{{/runtime.hero_product_info}}{{#runtime.shoot_script_user_instruction}}用户要求：{{runtime.shoot_script_user_instruction}}
+{{/runtime.shoot_script_user_instruction}}
 
 【导演规则】
 - 背景：米白、浅灰、纯净棚拍或极简都市空间；背景不抢服装主体

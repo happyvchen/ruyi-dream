@@ -194,12 +194,12 @@ class RenderUserLineTests(unittest.TestCase):
         self.assertEqual(render_hero_product_info_line({"info": "夏季主推裙装"}), "夏季主推裙装")
 
     def test_hero_info_empty(self) -> None:
-        self.assertEqual(render_hero_product_info_line({"info": ""}), "（无）")
-        self.assertEqual(render_hero_product_info_line({}), "（无）")
+        self.assertEqual(render_hero_product_info_line({"info": ""}), "")
+        self.assertEqual(render_hero_product_info_line({}), "")
 
     def test_instruction_present_and_empty(self) -> None:
         self.assertEqual(render_user_instruction_line({"instruction": "姿态更舒展"}), "姿态更舒展")
-        self.assertEqual(render_user_instruction_line({"instruction": ""}), "（无）")
+        self.assertEqual(render_user_instruction_line({"instruction": ""}), "")
 
     def test_double_period_cleaned(self) -> None:
         self.assertEqual(render_hero_product_info_line({"info": "重点展示腰线。。"}), "重点展示腰线。")
@@ -213,7 +213,7 @@ class RenderUserLineTests(unittest.TestCase):
             render_user_requirement_line({"combined_requirement": "", "upload_requirement": "夏季主推"}),
             "夏季主推",
         )
-        self.assertEqual(render_user_requirement_line({}), "（无）")
+        self.assertEqual(render_user_requirement_line({}), "")
 
     def test_user_requirement_drops_governance(self) -> None:
         out = render_user_requirement_line(

@@ -18,9 +18,9 @@
 - 不要改款、换色、替换商品；不要添加文字、水印、logo
 - 本次用户要求：若存在，优先满足；若冲突，说明取舍
 
-【本次用户要求】
-商品信息：{{runtime.hero_product_info}}
-用户要求：{{runtime.final_image_user_instruction}}
+{{#runtime.hero_product_info}}服装信息：{{runtime.hero_product_info}}
+{{/runtime.hero_product_info}}{{#runtime.final_image_user_instruction}}用户要求：{{runtime.final_image_user_instruction}}
+{{/runtime.final_image_user_instruction}}
 
 【选搭、剧本和分镜信息】
 {{runtime.current_shot_context}}

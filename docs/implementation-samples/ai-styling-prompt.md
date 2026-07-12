@@ -14,9 +14,9 @@
 【品牌信息】
 {{segment.brand_info}}
 
-【本次用户要求】
-商品信息：{{runtime.hero_product_info}}
-用户要求：{{runtime.user_requirement}}
+{{#runtime.hero_product_info}}服装信息：{{runtime.hero_product_info}}
+{{/runtime.hero_product_info}}{{#runtime.user_requirement}}用户要求：{{runtime.user_requirement}}
+{{/runtime.user_requirement}}
 
 【决策原则】
 1. 审美与品牌调性优先；商品可识别是底线，不是主叙事；可接受自然层次关系，除非会严重破坏商品辨识

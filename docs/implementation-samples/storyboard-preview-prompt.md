@@ -12,9 +12,9 @@
 数字模特参考图用于保持同一身份、发型和气质
 本次用户要求：若存在，优先满足；若冲突，说明取舍
 
-【本次用户要求】
-商品信息：{{runtime.hero_product_info}}
-用户要求：{{runtime.storyboard_preview_user_instruction}}
+{{#runtime.hero_product_info}}服装信息：{{runtime.hero_product_info}}
+{{/runtime.hero_product_info}}{{#runtime.storyboard_preview_user_instruction}}用户要求：{{runtime.storyboard_preview_user_instruction}}
+{{/runtime.storyboard_preview_user_instruction}}
 
 【拍摄剧本结果】
 {{runtime.shoot_script_result}}

@@ -348,7 +348,8 @@ class BackendCurrentFlowTests(unittest.TestCase):
     def test_model_identity_prompt_runtime_migration_removes_placeholder_and_block(self) -> None:
         db_module = importlib.import_module("app.db")
         content = """【用户要求】
-商品信息：{{runtime.hero_product_info}}
+{{#runtime.hero_product_info}}服装信息：{{runtime.hero_product_info}}
+{{/runtime.hero_product_info}}
 【强制模特身份契约】
 {{runtime.model_identity_context}}
 不得改变五官发型。
