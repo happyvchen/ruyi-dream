@@ -609,7 +609,6 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
                   <CircleStop size={16} /> 取消排队
                 </button>
               )}
-              <AIOperationList operations={visibleTaskOperations(task, localOperations)} compact />
             </>
           ) : (
             <>
@@ -3627,8 +3626,9 @@ function formatTagPrimitive(value: unknown) {
 function AIOperationList({ operations, compact = false }: { operations: AIOperation[]; compact?: boolean }) {
   const [expanded, setExpanded] = useState(false)
   const merged = mergeOperations(operations.filter(Boolean))
-  const maxVisible = compact ? 4 : expanded ? merged.length : 3
-  const active = merged.slice(0, maxVisible)
+  const maxVisible = compact ? 1 : expanded ? merged.length : 1
+  const running = merged.filter(isAttemptRunning)
+  const active = expanded ? merged : (running.length ? running : merged).slice(0, maxVisible)
   const now = useTicker(active.some(isAttemptRunning))
   if (!active.length) return null
   return (
@@ -3641,7 +3641,7 @@ function AIOperationList({ operations, compact = false }: { operations: AIOperat
           展开其余 {merged.length - maxVisible} 项进度
         </button>
       )}
-      {!compact && expanded && merged.length > 3 && (
+      {!compact && expanded && merged.length > 1 && (
         <button className="operation-more" onClick={() => setExpanded(false)}>
           收起进度
         </button>
@@ -3791,12 +3791,6 @@ function latestRunningTagAttempt(item: StylingGarment): AIOperation | null {
   }
   if (item.status === 'TAGGING_RUNNING') return syntheticOperation('styling_garment_tagging', item.id, 'gemini', item.updatedAt)
   return null
-}
-
-function visibleTaskOperations(task: GenerationTask, localOperations: AIOperation[]) {
-  const activeRemote = (task.aiOperations ?? []).filter((operation) => isAttemptRunning(operation))
-  const activeLocal = localOperations.filter((operation) => isAttemptRunning(operation) && operationBelongsToTask(operation, task))
-  return mergeOperations([...activeRemote, ...activeLocal])
 }
 
 function operationBelongsToTask(operation: AIOperation, task: GenerationTask) {
