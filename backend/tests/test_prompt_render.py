@@ -21,10 +21,8 @@ from app.prompt_render import (  # noqa: E402
     render_hero_product_info_line,
     render_image_reference_spans,
     render_preview_grid_cell,
-    render_shoot_script_global_directing,
     render_shoot_script_resolved_accessories,
     render_shoot_script_shots,
-    render_shoot_script_styling_risks,
     render_shot_accessories,
     render_shot_current,
     render_shot_global_directing,
@@ -69,12 +67,15 @@ def _sample_shot(idx: int) -> dict:
         "body_position": "3/4 斜朝镜头",
         "pose": "单腿承重",
         "movement": "静态",
+        "hand_position": "单手轻扶腰，不遮挡门襟",
         "main_focus": f"核心焦点{idx}",
+        "hero_selling_points": ["门襟", "腰线"],
         "visible_garments": ["hero"],
         "forbidden_occlusion_zones": ["前胸V领"],
         "composition_notes": "居中留白",
         "accessory_instructions": ["金色小耳圈"],
         "negative_constraints": ["禁止僵硬立正"],
+        "acceptance_criteria": ["门襟和真实衣长清楚"],
         "schema_version": "shot-vX",  # 治理噪音：应被丢弃
     }
 
@@ -122,8 +123,6 @@ class ShootScriptSectionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.ctx = _sample_shoot_script_context()
         self.parts = {
-            "gd": render_shoot_script_global_directing(self.ctx),
-            "risks": render_shoot_script_styling_risks(self.ctx),
             "acc": render_shoot_script_resolved_accessories(self.ctx),
             "shots": render_shoot_script_shots(self.ctx),
         }
@@ -140,19 +139,15 @@ class ShootScriptSectionTests(unittest.TestCase):
                 self.assertNotIn(key, text)
 
     def test_bodies_content(self) -> None:
-        self.assertIn("配饰边界：克制精致不抢镜", self.parts["gd"])
-        self.assertIn("短发 Bob", self.parts["risks"])
         self.assertIn("燕麦色细带凉鞋", self.parts["acc"])
         for i in range(1, 7):
             self.assertIn(f"格{i}", self.parts["shots"])
-        for token in ["平视", "头顶至脚底", "占比约85%", "居中留白", "核心焦点1"]:
+        for token in ["平视", "头顶至脚底", "占比约85%", "居中留白", "核心焦点1", "单手轻扶腰", "门襟", "真实衣长清楚"]:
             self.assertIn(token, self.parts["shots"])
 
     def test_empty_sections_return_empty_string(self) -> None:
         empty = {"global_directing": {}, "shots": []}
-        self.assertEqual(render_shoot_script_styling_risks(empty), "")
         self.assertEqual(render_shoot_script_resolved_accessories(empty), "")
-        self.assertEqual(render_shoot_script_global_directing(empty), "")
         self.assertEqual(render_shoot_script_shots(empty), "")
 
 

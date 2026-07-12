@@ -1601,7 +1601,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
             "生成分镜预览。\n\n{{segment.brand_info}}\n\n【输入参考图角色清单】\n"
             "{{#runtime.ref_model_identity}}{{runtime.ref_model_identity}} 为数字模特身份参考图。\n{{/runtime.ref_model_identity}}"
             "{{#runtime.ref_garment}}{{runtime.ref_garment}} 为主推款与搭配服装参考图。\n{{/runtime.ref_garment}}"
-            "\n【拍摄剧本结果】\n【全局导演】\n{{runtime.shoot_script_global_directing}}\n【六格镜头】\n{{runtime.shoot_script_shots}}\n\n按拍摄剧本生成 3x2 分镜预览。",
+            "\n【拍摄剧本结果】\n【六格镜头】\n{{runtime.shoot_script_shots}}\n\n按拍摄剧本生成 3x2 分镜预览。",
             140,
         )
         self.insert_prompt_config(

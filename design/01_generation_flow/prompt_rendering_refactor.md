@@ -249,7 +249,7 @@ P6 的判定边界收敛为一条：**「是否会变」**。
 
 删除带表头的合成函数 `render_shoot_script_body` / `render_shot_context_body`，拆为粒度函数：
 
-- 拍摄剧本 → `render_shoot_script_global_directing` / `_styling_risks` / `_resolved_accessories` / `_shots`
+- 拍摄剧本 → `render_shoot_script_resolved_accessories` / `render_shoot_script_shots`
 - 成片 → `render_preview_grid_cell`（纯格号数字）/ `render_shot_styling` / `render_shot_global_directing` / `render_shot_current` / `render_shot_accessories`
 
 每个函数**无表头、无话术**，空数据返回空串，模板用条件段决定是否显示该段的表头。写死的 `【分镜参考】"只借用姿势…分镜预览不是事实来源"` 整句删除，改由 `assembly.final_image` 模板正文承载（`{{runtime.preview_grid_cell}}` 只提供格号）。

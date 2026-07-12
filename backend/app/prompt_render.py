@@ -19,8 +19,6 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
-    "render_shoot_script_global_directing",
-    "render_shoot_script_styling_risks",
     "render_shoot_script_resolved_accessories",
     "render_shoot_script_shots",
     "render_preview_grid_cell",
@@ -129,21 +127,15 @@ def _shot_lines(shot: dict[str, Any], *, indent: str = "  ") -> str:
         header + "：",
         _kv_line(f"{indent}核心", shot.get("main_focus")),
         (indent + "｜".join(pose_bits)) if pose_bits else None,
+        _kv_line(f"{indent}手部", shot.get("hand_position")),
+        _list_line(f"{indent}商品重点", shot.get("hero_selling_points")),
         _kv_line(f"{indent}构图", shot.get("composition_notes")),
         _list_line(f"{indent}配饰", shot.get("accessory_instructions")),
         _list_line(f"{indent}不可遮挡", shot.get("forbidden_occlusion_zones")),
         _list_line(f"{indent}本格禁止", shot.get("negative_constraints")),
+        _list_line(f"{indent}验收", shot.get("acceptance_criteria")),
     ]
     return _block(lines)
-
-
-def _styling_risk_lines(risks: Any) -> list[str]:
-    lines: list[str] = []
-    for risk in risks if isinstance(risks, list) else []:
-        strategy = _clean_text(_as_dict(risk).get("director_strategy"))
-        if strategy:
-            lines.append(f"- {strategy}")
-    return lines
 
 
 def _resolved_accessory_lines(items: Any) -> list[str]:
@@ -170,16 +162,6 @@ def _resolved_accessory_lines(items: Any) -> list[str]:
 #
 # 边界：单条镜头/配饰内部的字段标签（核心/构图/机位…）属于「变长记录的序列化格式」，
 # 简单占位引擎无法用循环表达，故保留在代码里；它们是数据格式，不是可调话术。
-def render_shoot_script_global_directing(context: dict[str, Any]) -> str:
-    """拍摄剧本全局导演正文（无表头）。``context``=``shoot_script_result_for_prompt`` 输出。"""
-    return _block(_global_directing_lines(_as_dict(_as_dict(context).get("global_directing"))))
-
-
-def render_shoot_script_styling_risks(context: dict[str, Any]) -> str:
-    """拍摄剧本搭配风险处理正文（无表头）。"""
-    return "\n".join(_styling_risk_lines(_as_dict(context).get("styling_risks")))
-
-
 def render_shoot_script_resolved_accessories(context: dict[str, Any]) -> str:
     """拍摄剧本本次配饰正文（无表头）。"""
     return "\n".join(_resolved_accessory_lines(_as_dict(context).get("resolved_accessories")))

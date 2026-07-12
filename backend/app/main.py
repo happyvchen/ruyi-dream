@@ -32,10 +32,8 @@ from .prompt_render import (
     render_hero_product_info_line,
     render_image_reference_spans,
     render_preview_grid_cell,
-    render_shoot_script_global_directing,
     render_shoot_script_resolved_accessories,
     render_shoot_script_shots,
-    render_shoot_script_styling_risks,
     render_shot_accessories,
     render_shot_current,
     render_shot_global_directing,
@@ -6156,12 +6154,15 @@ def shoot_script_result_for_prompt(shoot_script: dict[str, Any]) -> dict[str, An
                 "body_position": shot.get("body_position"),
                 "pose": shot.get("pose"),
                 "movement": shot.get("movement"),
+                "hand_position": shot.get("hand_position"),
                 "main_focus": shot.get("main_focus"),
+                "hero_selling_points": shot.get("hero_selling_points"),
                 "visible_garments": shot.get("visible_garments"),
                 "forbidden_occlusion_zones": shot.get("forbidden_occlusion_zones"),
                 "composition_notes": shot.get("composition_notes"),
                 "accessory_instructions": shot.get("accessory_instructions"),
                 "negative_constraints": shot.get("negative_constraints"),
+                "acceptance_criteria": shot.get("acceptance_criteria"),
             })
             for shot in shots[:6]
             if isinstance(shot, dict)
@@ -6885,8 +6886,6 @@ def build_preview_prompt_runtime(
     ctx = shoot_script_result_for_prompt(shoot_script)
     spans = render_image_reference_spans(image_inputs or [])
     return {
-            "shoot_script_global_directing": render_shoot_script_global_directing(ctx),
-            "shoot_script_styling_risks": render_shoot_script_styling_risks(ctx),
             "shoot_script_resolved_accessories": render_shoot_script_resolved_accessories(ctx),
             "shoot_script_shots": render_shoot_script_shots(ctx),
             "ref_model_identity": spans["model_identity"],
@@ -7276,8 +7275,6 @@ def sample_prompt_runtime() -> dict[str, Any]:
         "storyboard_preview_user_instruction": "分镜姿态更舒展。",
         "final_image_user_instruction": "成片整体更干净，减少配饰存在感。",
         # 拍摄剧本各分段（分镜预览用；无表头）
-        "shoot_script_global_directing": "配饰边界：生成配饰低存在感\n一致性：同一模特同一造型",
-        "shoot_script_styling_risks": "- 放弃盘发，保留短发塞耳后",
         "shoot_script_resolved_accessories": "- footwear：燕麦色细带凉鞋（适用格 1、4）",
         "shoot_script_shots": "格1（全身主视觉·全景）：\n  核心：主推款整体比例",
         # 当前成片各分段（成片用；无表头）
@@ -7306,8 +7303,6 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.final_image_user_instruction", "scope": "runtime", "description": "最终成片或单张重生本次执行的用户介入要求"},
         {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭导演上下文，使用搭配服装 code 标识"},
         # 拍摄剧本 → 分镜预览：各分段只出可变数据正文（无表头），表头用条件段在正文托管
-        {"name": "runtime.shoot_script_global_directing", "scope": "runtime", "description": "拍摄剧本全局导演正文（配饰边界/一致性/全局禁止），无表头"},
-        {"name": "runtime.shoot_script_styling_risks", "scope": "runtime", "description": "拍摄剧本搭配风险处理正文，无表头；为空则条件段省略"},
         {"name": "runtime.shoot_script_resolved_accessories", "scope": "runtime", "description": "拍摄剧本本次配饰正文，无表头；为空则条件段省略"},
         {"name": "runtime.shoot_script_shots", "scope": "runtime", "description": "拍摄剧本六格镜头正文，无表头"},
         # 成片：当前镜头各分段
