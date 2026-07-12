@@ -5,6 +5,8 @@ import {
   Bot,
   ChevronLeft,
   ChevronRight,
+  CircleAlert,
+  CircleCheck,
   CircleStop,
   Clock3,
   Download,
@@ -1685,7 +1687,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
     <div className="step-panel">
       <div className="step-scroll-content">
         <StageHeader title="生成成片" text="并发生成前 5 个镜头。每张图可单独下载，也可单张重新生成。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成成片技术详情', ['generation_result_image'])} />
-        <AIOperationList operations={finalOperations} />
+        <FinalOperationSummary operations={finalOperations} />
         <div className="result-grid">
           {images.length ? images.map((image) => (
             <div className="result-card" key={image.id}>
@@ -3649,6 +3651,50 @@ function AIOperationList({ operations, compact = false }: { operations: AIOperat
   )
 }
 
+function FinalOperationSummary({ operations }: { operations: AIOperation[] }) {
+  const [expanded, setExpanded] = useState(false)
+  const merged = mergeOperations(operations.filter(Boolean)).sort((left, right) => left.ownerId - right.ownerId)
+  const runningCount = merged.filter((operation) => isAttemptRunning(operation) && operation.status !== 'QUEUED').length
+  const queuedCount = merged.filter((operation) => operation.status === 'QUEUED').length
+  const succeededCount = merged.filter((operation) => operation.status === 'SUCCEEDED').length
+  const failedCount = merged.filter((operation) => operation.status === 'FAILED').length
+  const cancelledCount = merged.filter((operation) => operation.status === 'CANCELLED').length
+  const unknownCount = Math.max(0, merged.length - runningCount - queuedCount - succeededCount - failedCount - cancelledCount)
+  const now = useTicker(runningCount + queuedCount > 0)
+  if (!merged.length) return null
+  const total = 5
+  const summary = [
+    `成功 ${succeededCount}/${total}`,
+    runningCount ? `生成中 ${runningCount}` : '',
+    queuedCount ? `排队 ${queuedCount}` : '',
+    failedCount ? `失败 ${failedCount}` : '',
+    cancelledCount ? `已取消 ${cancelledCount}` : '',
+    unknownCount ? `待处理 ${unknownCount}` : '',
+  ].filter(Boolean).join(' · ')
+  const pending = runningCount + queuedCount > 0
+  return (
+    <div className={`final-operation-summary ${pending ? 'is-running' : failedCount || cancelledCount || unknownCount ? 'is-failed' : 'is-complete'}`}>
+      <div className="final-operation-overview">
+        <div>
+          {pending ? <Loader2 size={16} className="spin" /> : failedCount || cancelledCount || unknownCount ? <CircleAlert size={16} /> : <CircleCheck size={16} />}
+          <span>成片生成进度</span>
+        </div>
+        <strong aria-live="polite" aria-atomic="true">{summary}</strong>
+        <button className="operation-more" type="button" aria-expanded={expanded} aria-controls="final-operation-details" onClick={() => setExpanded((current) => !current)}>
+          {expanded ? '收起镜头明细' : '查看镜头明细'}
+        </button>
+      </div>
+      {expanded && (
+        <div className="final-operation-details" id="final-operation-details">
+          {merged.map((operation, index) => (
+            <AIOperationCard key={`${operation.id}-${operation.ownerId}-${index}`} operation={operation} now={now} compact={false} index={index} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AIOperationCard({ operation, now, compact, index }: { operation: AIOperation; now: number; compact?: boolean; index: number }) {
   const running = isAttemptRunning(operation)
   const seconds = elapsedSeconds(operation.startedAt || operation.createdAt, now, operation.completedAt || operation.failedAt)
@@ -3763,9 +3809,17 @@ function operationFallbacks(task: GenerationTask, localOperations: AIOperation[]
 }
 
 function finalImageOperations(task: GenerationTask, localOperations: AIOperation[]) {
-  const imageAttempts = (task.resultSet?.images ?? []).map((image) => image.activeAttempt).filter(Boolean) as AIOperation[]
   const local = localOperations.filter((operation) => operation.ownerType === 'generation_result_image' && operationBelongsToTask(operation, task))
-  if (imageAttempts.length) return mergeOperations([...imageAttempts, ...local])
+  const imageOperations = (task.resultSet?.images ?? []).map((image) => {
+    const operation = image.activeAttempt ?? local.find((entry) => entry.ownerId === image.sortOrder)
+    return operation ? { ...operation, ownerId: image.sortOrder } : null
+  }).filter(Boolean) as AIOperation[]
+  if (imageOperations.length) {
+    const representedShots = new Set(imageOperations.map((operation) => operation.ownerId))
+    return [...imageOperations, ...local.filter((operation) => !representedShots.has(operation.ownerId))]
+      .sort((left, right) => left.ownerId - right.ownerId)
+      .slice(0, 5)
+  }
   if (local.length) return local
   if (task.status === 'FINAL_RUNNING') {
     return Array.from({ length: 5 }, (_, index) => syntheticOperation('generation_result_image', index + 1, 'image-2', task.updatedAt))
@@ -3842,7 +3896,7 @@ function syntheticOperation(ownerType: string, ownerId: number, provider: string
 }
 
 function isAttemptRunning(operation: AIOperation) {
-  return ['RUNNING', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS'].includes(operation.status)
+  return ['QUEUED', 'RUNNING', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS'].includes(operation.status)
 }
 
 function operationLabel(operation: AIOperation, index = 0) {

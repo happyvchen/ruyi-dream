@@ -780,6 +780,32 @@ h1, h2, h3, p { margin: 0; }
   font-weight: 800;
   text-align: right;
 }
+.final-operation-summary {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid #d8e0ea;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.final-operation-summary.is-running { border-color: #7dd3fc; background: #f0f9ff; }
+.final-operation-summary.is-failed { border-color: #fecaca; background: #fff7f7; }
+.final-operation-overview {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+}
+.final-operation-overview > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 700;
+}
+.final-operation-overview strong { color: #0f172a; font-size: 13px; }
+.final-operation-details { display: grid; gap: 8px; }
 .operation-more {
   justify-self: start;
   height: 28px;
@@ -2657,6 +2683,13 @@ a.button-link { text-decoration: none; cursor: pointer; }
   .stage-action-bar .primary {
     width: 100%;
     min-width: 0;
+  }
+  .final-operation-overview {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+  .final-operation-overview .operation-more {
+    justify-self: start;
   }
   .task-rail {
     position: static;
