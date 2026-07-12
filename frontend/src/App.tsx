@@ -594,9 +594,6 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
         subtitle="上传主推款，让系统选搭配角服装并生成电商棚拍成片。"
         actions={task ? (
           <div className="studio-title-actions">
-            <button className="primary" disabled={!canStartOneClickFinal(task) && !canRestartOneClickFinal(task)} onClick={startOneClickFinal}>
-              <Sparkles size={16} />{oneClickFinalLabel(task)}
-            </button>
             <button className="secondary" onClick={startNewTask}><ImagePlus size={16} />新建拍摄任务</button>
           </div>
         ) : undefined}
@@ -627,6 +624,15 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
               <Meta label="状态" value={statusText(task.status)} />
               <Meta label="搭配服装" value={`${task.styling?.selectedMaterials?.length ?? 0} 件`} />
               <Meta label="最终图" value={`${task.resultSet?.images?.filter((i) => i.status === 'SUCCEEDED').length ?? 0}/5`} />
+              {(canStartOneClickFinal(task) || canRestartOneClickFinal(task)) && (
+                <div className="task-primary-actions">
+                  <span>任务操作</span>
+                  <button className="primary wide" disabled={!canStartOneClickFinal(task) && !canRestartOneClickFinal(task)} onClick={startOneClickFinal}>
+                    <Sparkles size={16} />{oneClickFinalLabel(task)}
+                  </button>
+                  {task.status === 'COMPLETED' && <p>重新执行智能选搭、拍摄剧本、分镜预览和成片，已有结果保留在历史记录中。</p>}
+                </div>
+              )}
               <StageUserInputModule
                 step={visibleStep}
                 task={task}

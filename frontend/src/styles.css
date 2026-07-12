@@ -388,6 +388,28 @@ h1, h2, h3, p { margin: 0; }
   gap: 8px;
   font-size: 13px;
 }
+.task-primary-actions {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #d8e0ea;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+.task-primary-actions > span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+.task-primary-actions .primary {
+  justify-content: center;
+}
+.task-primary-actions p {
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
 .side-input-title {
   color: #7b8797;
 }
