@@ -562,7 +562,6 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
       <div className="studio-grid">
         <div className="panel studio-main">
           <div className="studio-main-top">
-            {task && <AutoRunProgress task={task} />}
             <StepRail active={visibleStep} max={currentStep} onSelect={setStep} />
           </div>
           <div className="studio-stage-viewport">
@@ -684,30 +683,6 @@ function StepRail({ active, max, onSelect }: { active: StudioStep; max: StudioSt
           </button>
         )
       })}
-    </div>
-  )
-}
-
-function AutoRunProgress({ task }: { task: GenerationTask }) {
-  if (task.autoRunTarget !== 'FINAL') return null
-  const stages = [
-    { key: 'styling', label: '智能选搭', done: !!task.activeStylingId || !!task.styling, active: task.status === 'STYLING_RUNNING' },
-    { key: 'script', label: '拍摄剧本', done: !!task.activeShootScriptId || !!task.shootScript, active: task.status === 'SCRIPT_RUNNING' },
-    { key: 'preview', label: '分镜预览', done: !!((task.storyboardPreview ?? task.preview)?.asset), active: task.status === 'PREVIEW_RUNNING' },
-    { key: 'final', label: '成片', done: finalSucceededCount(task) >= 5, active: task.status === 'FINAL_RUNNING' },
-  ]
-  const activeLabel = stages.find((stage) => stage.active)?.label ?? '准备中'
-  return (
-    <div className="auto-run-progress">
-      <div>
-        <span>一键成片</span>
-        <strong>{isTaskRunning(task) ? `正在生成：${activeLabel}` : isTaskQueuedForAutoRun(task) ? '排队中，等待其他任务完成后自动开始' : '正在准备后续步骤'}</strong>
-      </div>
-      <div className="auto-run-steps">
-        {stages.map((stage) => (
-          <span key={stage.key} className={stage.done ? 'done' : stage.active ? 'active' : ''}>{stage.label}</span>
-        ))}
-      </div>
     </div>
   )
 }
@@ -1320,10 +1295,6 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
         ) : <EmptyState title="等待智能选搭" text="点击按钮后会冻结当前主推款输入版本。" />}
       </div>
       <div className="stage-action-bar">
-        <div>
-          <span>当前阶段</span>
-          <strong>{hasStyling ? '已生成推荐造型方案' : '等待 AI Stylist 选搭'}</strong>
-        </div>
         <button className="primary" disabled={!canSelect} onClick={() => task && void run(hasStyling ? '重新选搭中...' : '智能选搭中...', () => {
           startLocalOperation({ taskId: task.id, ownerType: 'generation_styling', ownerId: task.id, provider: 'gemini' })
           const previousTask = task
@@ -1545,10 +1516,6 @@ function ShootScriptStep({ task, setTask, run, userInstruction, localOperations,
         {task?.shootScript ? <ShootScriptSummary task={task} isAdmin={isAdmin} /> : <EmptyState title="尚未生成拍摄剧本" text="点击生成后，系统会把选搭方案转成拍摄前可执行的分镜剧本。" />}
       </div>
       <div className="stage-action-bar">
-        <div>
-          <span>当前阶段</span>
-          <strong>{hasScript ? '拍摄剧本已生成' : '等待生成拍摄剧本'}</strong>
-        </div>
         <button className="primary" disabled={!canGenerate} onClick={() => task && void run(hasScript ? '重新生成拍摄剧本中...' : '生成拍摄剧本中...', () => {
           startLocalOperation({ taskId: task.id, ownerType: 'generation_shoot_script', ownerId: task.id, provider: 'gemini' })
           setTask({
@@ -1677,10 +1644,6 @@ function PreviewStep({ task, setTask, run, userInstruction, localOperations, sta
         ) : <EmptyState title="尚未生成分镜预览" text="点击生成预览后，系统会根据拍摄剧本输出一张 3:2 横版分镜预览图。" />}
       </div>
       <div className="stage-action-bar">
-        <div>
-          <span>当前阶段</span>
-          <strong>{hasPreview ? '分镜预览已生成' : '等待生成分镜预览'}</strong>
-        </div>
         <button className="primary" disabled={!canPreview} onClick={() => task && void run(hasPreview ? '重新生成分镜预览中...' : '生成分镜预览中...', () => {
           startLocalOperation({ taskId: task.id, ownerType: 'generation_preview', ownerId: task.id, provider: 'image-2' })
           setTask({ ...task, status: 'PREVIEW_RUNNING', resultSet: null, activeResultSetId: null })
@@ -1751,10 +1714,6 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
         </div>
       </div>
       <div className="stage-action-bar">
-        <div>
-          <span>当前阶段</span>
-          <strong>{hasFinalImages ? '最终成片已生成' : '等待生成最终成片'}</strong>
-        </div>
         {hasFinalImages && task && (
           <a className="secondary button-link" href={finalImageArchiveUrl([task.id])} rel="noreferrer" title="打包下载本任务全部成片，未完成项记录在清单.txt">
             <Download size={16} /> 下载全部成片
