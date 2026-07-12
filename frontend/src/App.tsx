@@ -431,6 +431,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   const [finalImageInstruction, setFinalImageInstruction] = useState('')
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
+  const studioView = task ? studioTaskPresentation(task) : null
   const isAdmin = role === 'admin'
   function applyTaskUpdate(nextTask: GenerationTask) {
     setTask(nextTask)
@@ -578,7 +579,9 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
             <>
               <ThumbGrid assets={(task.images ?? []).map((item) => item.asset)} compact />
               <Meta label="任务" value={task.name} />
-              <Meta label="状态" value={statusText(task.status)} />
+              <Meta label="状态" value={studioView?.statusLabel ?? statusText(task.status)} />
+              <Meta label="当前进度" value={studioView?.progressLabel ?? '等待开始'} />
+              <Meta label="当前步骤" value={studioView?.currentStageLabel ?? '上传主推款'} />
               <Meta label="搭配服装" value={`${task.styling?.selectedMaterials?.length ?? 0} 件`} />
               <Meta label="最终图" value={`${task.resultSet?.images?.filter((i) => i.status === 'SUCCEEDED').length ?? 0}/5`} />
               {(canStartOneClickFinal(task) || canRestartOneClickFinal(task)) && (
@@ -4138,6 +4141,46 @@ function oneClickFinalLabel(task: GenerationTask) {
   if (task.status === 'COMPLETED') return '重新一键成片'
   if (task.status === 'FINAL_PARTIAL' || task.status === 'FAILED') return '继续一键成片'
   return '一键成片'
+}
+
+type StudioTaskPresentation = {
+  statusLabel: string
+  currentStageLabel: string
+  progressLabel: string
+}
+
+function studioTaskPresentation(task: GenerationTask): StudioTaskPresentation {
+  const completedStageCount = completedStudioStageCount(task)
+  const runningStage = runningStudioStage(task)
+  const currentStageLabel = runningStage != null
+    ? steps[runningStage].title
+    : task.status === 'COMPLETED'
+      ? '全部完成'
+      : steps[getTaskStep(task)].title
+  return {
+    statusLabel: taskListStatusLabel(task),
+    currentStageLabel,
+    progressLabel: `已完成 ${completedStageCount}/5 步`,
+  }
+}
+
+function runningStudioStage(task: GenerationTask): StudioStep | null {
+  const map: Record<string, StudioStep> = {
+    STYLING_RUNNING: 1,
+    SCRIPT_RUNNING: 2,
+    PREVIEW_RUNNING: 3,
+    FINAL_RUNNING: 4,
+  }
+  return map[task.status] ?? null
+}
+
+function completedStudioStageCount(task: GenerationTask) {
+  let count = taskHasHeroImage(task) ? 1 : 0
+  if (task.activeStylingId || task.styling) count += 1
+  if (task.activeShootScriptId || task.shootScript) count += 1
+  if ((task.storyboardPreview ?? task.preview)?.asset) count += 1
+  if (finalSucceededCount(task) >= 5) count += 1
+  return count
 }
 
 function isTaskRunning(task: GenerationTask) {
