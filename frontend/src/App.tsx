@@ -1262,7 +1262,7 @@ function StageHeader({ title, text, isAdmin, disabled, onOpenLogs }: {
       <div className="step-copy"><h2>{title}</h2><p>{text}</p></div>
       {isAdmin && (
         <button className="secondary" type="button" disabled={disabled} onClick={onOpenLogs}>
-          <Eye size={16} />调用记录
+          <Eye size={16} />技术详情
         </button>
       )}
     </div>
@@ -1287,10 +1287,10 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <StageHeader title="AI 智能选搭" text="AI Stylist 会先理解主推款，再生成推荐造型方案；搭配服装必须服务主推款展示。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('AI 智能选搭调用记录', ['generation_styling'])} />
+        <StageHeader title="AI 智能选搭" text="AI Stylist 会先理解主推款，再生成推荐造型方案；搭配服装必须服务主推款展示。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('AI 智能选搭技术详情', ['generation_styling'])} />
         <AIOperationList operations={operations} />
         {task?.styling ? (
-          <StylingPlanSummary task={task} isAdmin={isAdmin} />
+          <StylingPlanSummary task={task} />
         ) : <EmptyState title="等待智能选搭" text="点击按钮后会冻结当前主推款输入版本。" />}
       </div>
       <div className="stage-action-bar">
@@ -1325,7 +1325,7 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
   )
 }
 
-function StylingPlanSummary({ task, isAdmin }: { task: GenerationTask; isAdmin: boolean }) {
+function StylingPlanSummary({ task }: { task: GenerationTask }) {
   const styling = task.styling
   if (!styling) return null
   const plan = styling.stylingPlan ?? {}
@@ -1391,7 +1391,6 @@ function StylingPlanSummary({ task, isAdmin }: { task: GenerationTask; isAdmin: 
           })}
         </div>
       )}
-      {isAdmin && <JsonOutputPanel title="模型原始输出" data={modelRawOutput(plan)} defaultOpen />}
     </div>
   )
 }
@@ -1510,9 +1509,9 @@ function ShootScriptStep({ task, setTask, run, userInstruction, localOperations,
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <StageHeader title="生成拍摄剧本" text="AI Director 会一次性生成 6 个镜头的景别、取景、姿势、走位、背景光线和商品展示要求。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成拍摄剧本调用记录', ['generation_shoot_script'])} />
+        <StageHeader title="生成拍摄剧本" text="AI Director 会一次性生成 6 个镜头的景别、取景、姿势、走位、背景光线和商品展示要求。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成拍摄剧本技术详情', ['generation_shoot_script'])} />
         <AIOperationList operations={operations} />
-        {task?.shootScript ? <ShootScriptSummary task={task} isAdmin={isAdmin} /> : <EmptyState title="尚未生成拍摄剧本" text="点击生成后，系统会把选搭方案转成拍摄前可执行的分镜剧本。" />}
+        {task?.shootScript ? <ShootScriptSummary task={task} /> : <EmptyState title="尚未生成拍摄剧本" text="点击生成后，系统会把选搭方案转成拍摄前可执行的分镜剧本。" />}
       </div>
       <div className="stage-action-bar">
         <button className="primary" disabled={!canGenerate} onClick={() => task && void run(hasScript ? '重新生成拍摄剧本中...' : '生成拍摄剧本中...', () => {
@@ -1540,7 +1539,7 @@ function ShootScriptStep({ task, setTask, run, userInstruction, localOperations,
   )
 }
 
-function ShootScriptSummary({ task, isAdmin }: { task: GenerationTask; isAdmin: boolean }) {
+function ShootScriptSummary({ task }: { task: GenerationTask }) {
   const shootScript = task.shootScript
   if (!shootScript) return null
   const script = shootScript.script ?? {}
@@ -1602,7 +1601,6 @@ function ShootScriptSummary({ task, isAdmin }: { task: GenerationTask; isAdmin: 
           </div>
         ))}
       </div>
-      {isAdmin && <JsonOutputPanel title="模型原始输出" data={modelRawOutput(script)} defaultOpen />}
     </div>
   )
 }
@@ -1634,7 +1632,7 @@ function PreviewStep({ task, setTask, run, userInstruction, localOperations, sta
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <StageHeader title="生成分镜预览" text="按拍摄剧本生成一张 3:2 横版分镜预览图（3 列 × 2 行、6 个 1:1 方格）。最终固定生成前 5 个镜头，第 6 个镜头忽略。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成分镜预览调用记录', ['generation_preview'])} />
+        <StageHeader title="生成分镜预览" text="按拍摄剧本生成一张 3:2 横版分镜预览图（3 列 × 2 行、6 个 1:1 方格）。最终固定生成前 5 个镜头，第 6 个镜头忽略。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成分镜预览技术详情', ['generation_preview'])} />
         <AIOperationList operations={operations} />
         {preview?.asset ? (
           <button className="preview-board-open" onClick={() => preview.asset && setViewer(assetLightboxImage(preview.asset))} title="放大查看">
@@ -1680,7 +1678,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <StageHeader title="生成成片" text="并发生成前 5 个镜头。每张图可单独下载，也可单张重新生成。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成成片调用记录', ['generation_result_image'])} />
+        <StageHeader title="生成成片" text="并发生成前 5 个镜头。每张图可单独下载，也可单张重新生成。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成成片技术详情', ['generation_result_image'])} />
         <AIOperationList operations={finalOperations} />
         <div className="result-grid">
           {images.length ? images.map((image) => (
@@ -3485,11 +3483,6 @@ function TagObjectPanel({ title, data, defaultOpen = false }: { title: string; d
       ) : <p className="empty-inline">暂无</p>}
     </details>
   )
-}
-
-function modelRawOutput(data: Record<string, unknown>) {
-  const raw = data.model_raw_output
-  return raw && typeof raw === 'object' ? raw as Record<string, unknown> : data
 }
 
 function JsonOutputPanel({ title, data, defaultOpen = false }: { title: string; data: unknown; defaultOpen?: boolean }) {
