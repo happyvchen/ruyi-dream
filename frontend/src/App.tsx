@@ -563,7 +563,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
       <div className="studio-grid">
         <div className="panel studio-main">
           <div className="studio-main-top">
-            <StepRail active={visibleStep} max={currentStep} onSelect={setStep} />
+            <StepRail active={visibleStep} executing={studioView?.executingStage ?? null} max={currentStep} onSelect={setStep} />
           </div>
           <div className="studio-stage-viewport">
             {visibleStep === 0 && <UploadHeroStep task={task} setTask={applyTaskUpdate} run={run} heroProductInfo={heroProductInfo} />}
@@ -665,23 +665,26 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   )
 }
 
-function StepRail({ active, max, onSelect }: { active: StudioStep; max: StudioStep; onSelect: (step: StudioStep) => void }) {
+function StepRail({ active, executing, max, onSelect }: { active: StudioStep; executing: StudioStep | null; max: StudioStep; onSelect: (step: StudioStep) => void }) {
   return (
     <div className="step-rail">
       {steps.map((step, index) => {
         const Icon = step.icon
         const enabled = index <= max
+        const isExecuting = executing === index
         return (
           <button
             key={step.title}
-            className={`${active === index ? 'active' : ''} ${index < max ? 'done' : ''}`}
+            className={`${active === index ? 'active' : ''} ${index < max ? 'done' : ''} ${isExecuting ? 'executing' : ''}`}
             disabled={!enabled}
             onClick={() => onSelect(index as StudioStep)}
             aria-current={active === index ? 'step' : undefined}
+            aria-label={`${step.title}${isExecuting ? '，正在执行' : ''}`}
           >
             <strong>{index + 1}</strong>
             <Icon size={18} />
             <span>{step.title}</span>
+            {isExecuting && <span className="step-executing-mark" aria-hidden="true"><Loader2 size={13} className="spin" /></span>}
           </button>
         )
       })}
@@ -4147,6 +4150,7 @@ type StudioTaskPresentation = {
   statusLabel: string
   currentStageLabel: string
   progressLabel: string
+  executingStage: StudioStep | null
 }
 
 function studioTaskPresentation(task: GenerationTask): StudioTaskPresentation {
@@ -4161,6 +4165,7 @@ function studioTaskPresentation(task: GenerationTask): StudioTaskPresentation {
     statusLabel: taskListStatusLabel(task),
     currentStageLabel,
     progressLabel: `已完成 ${completedStageCount}/5 步`,
+    executingStage: runningStage,
   }
 }
 

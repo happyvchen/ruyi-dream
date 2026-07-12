@@ -493,6 +493,21 @@ h1, h2, h3, p { margin: 0; }
   background: linear-gradient(135deg, var(--blue), var(--cyan));
   color: #fff;
 }
+.step-rail button.executing {
+  border-color: #38bdf8;
+}
+.step-executing-mark {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: #e0f2fe;
+  color: #0369a1;
+}
 .step-rail button:disabled { cursor: not-allowed; opacity: .42; }
 
 .step-panel {
