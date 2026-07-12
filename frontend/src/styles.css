@@ -548,6 +548,12 @@ h1, h2, h3, p { margin: 0; }
 .step-copy { display: grid; gap: 8px; }
 .step-copy h2 { font-size: 22px; }
 .step-copy p { color: #667085; font-size: 14px; }
+.stage-priority-content {
+  display: grid;
+  gap: 16px;
+}
+.stage-operation-status:empty { display: none; }
+.stage-business-result { min-width: 0; }
 
 .styling-plan {
   display: grid;

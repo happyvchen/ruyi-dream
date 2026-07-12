@@ -1292,14 +1292,18 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
   const canSelect = !!task && !locked && ['READY_FOR_STYLING', 'STYLING_READY', 'SCRIPT_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task.status)
   const hasStyling = !!task?.styling
   const operations = task ? operationFallbacks(task, localOperations, 'generation_styling') : []
+  const statusFirst = operationStatusHasPriority(operations)
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
         <StageHeader title="AI 智能选搭" text="AI Stylist 会先理解主推款，再生成推荐造型方案；搭配服装必须服务主推款展示。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('AI 智能选搭技术详情', ['generation_styling'])} />
-        <AIOperationList operations={operations} />
-        {task?.styling ? (
-          <StylingPlanSummary task={task} />
-        ) : <EmptyState title="等待智能选搭" text="点击按钮后会冻结当前主推款输入版本。" />}
+        <div className="stage-priority-content">{(statusFirst ? ['status', 'result'] : ['result', 'status']).map((section) => section === 'status' ? (
+          <div className="stage-operation-status" key="status"><AIOperationList operations={operations} /></div>
+        ) : (
+          <div className="stage-business-result" key="result">{task?.styling ? (
+            <StylingPlanSummary task={task} />
+          ) : <EmptyState title="等待智能选搭" text="点击按钮后会冻结当前主推款输入版本。" />}</div>
+        ))}</div>
       </div>
       <div className="stage-action-bar">
         <button className="primary" disabled={!canSelect} onClick={() => task && void run(hasStyling ? '重新选搭中...' : '智能选搭中...', () => {
@@ -1514,12 +1518,16 @@ function ShootScriptStep({ task, setTask, run, userInstruction, localOperations,
   )
   const hasScript = !!task?.shootScript?.script
   const operations = task ? operationFallbacks(task, localOperations, 'generation_shoot_script') : []
+  const statusFirst = operationStatusHasPriority(operations)
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
         <StageHeader title="生成拍摄剧本" text="AI Director 会一次性生成 6 个镜头的景别、取景、姿势、走位、背景光线和商品展示要求。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成拍摄剧本技术详情', ['generation_shoot_script'])} />
-        <AIOperationList operations={operations} />
-        {task?.shootScript ? <ShootScriptSummary task={task} /> : <EmptyState title="尚未生成拍摄剧本" text="点击生成后，系统会把选搭方案转成拍摄前可执行的分镜剧本。" />}
+        <div className="stage-priority-content">{(statusFirst ? ['status', 'result'] : ['result', 'status']).map((section) => section === 'status' ? (
+          <div className="stage-operation-status" key="status"><AIOperationList operations={operations} /></div>
+        ) : (
+          <div className="stage-business-result" key="result">{task?.shootScript ? <ShootScriptSummary task={task} /> : <EmptyState title="尚未生成拍摄剧本" text="点击生成后，系统会把选搭方案转成拍摄前可执行的分镜剧本。" />}</div>
+        ))}</div>
       </div>
       <div className="stage-action-bar">
         <button className="primary" disabled={!canGenerate} onClick={() => task && void run(hasScript ? '重新生成拍摄剧本中...' : '生成拍摄剧本中...', () => {
@@ -1637,16 +1645,20 @@ function PreviewStep({ task, setTask, run, userInstruction, localOperations, sta
   ) || (!!task && !isTaskLockedForGeneration(task) && task.status === 'FAILED' && !!task.shootScript && !preview?.asset)
   const hasPreview = !!preview?.asset
   const operations = task ? operationFallbacks(task, localOperations, 'generation_preview') : []
+  const statusFirst = operationStatusHasPriority(operations)
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
         <StageHeader title="生成分镜预览" text="按拍摄剧本生成一张 3:2 横版分镜预览图（3 列 × 2 行、6 个 1:1 方格）。最终固定生成前 5 个镜头，第 6 个镜头忽略。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成分镜预览技术详情', ['generation_preview'])} />
-        <AIOperationList operations={operations} />
-        {preview?.asset ? (
-          <button className="preview-board-open" onClick={() => preview.asset && setViewer(assetLightboxImage(preview.asset))} title="放大查看">
-            <img className="preview-board" src={mediaUrl(assetPreviewSrc(preview.asset))} loading="lazy" alt="分镜预览" />
-          </button>
-        ) : <EmptyState title="尚未生成分镜预览" text="点击生成预览后，系统会根据拍摄剧本输出一张 3:2 横版分镜预览图。" />}
+        <div className="stage-priority-content">{(statusFirst ? ['status', 'result'] : ['result', 'status']).map((section) => section === 'status' ? (
+          <div className="stage-operation-status" key="status"><AIOperationList operations={operations} /></div>
+        ) : (
+          <div className="stage-business-result" key="result">{preview?.asset ? (
+            <button className="preview-board-open" onClick={() => preview.asset && setViewer(assetLightboxImage(preview.asset))} title="放大查看">
+              <img className="preview-board" src={mediaUrl(assetPreviewSrc(preview.asset))} loading="lazy" alt="分镜预览" />
+            </button>
+          ) : <EmptyState title="尚未生成分镜预览" text="点击生成预览后，系统会根据拍摄剧本输出一张 3:2 横版分镜预览图。" />}</div>
+        ))}</div>
       </div>
       <div className="stage-action-bar">
         <button className="primary" disabled={!canPreview} onClick={() => task && void run(hasPreview ? '重新生成分镜预览中...' : '生成分镜预览中...', () => {
@@ -1683,12 +1695,15 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   const canGenerate = !!preview?.asset && !!task && !isTaskLockedForGeneration(task) && ['PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'CANCELLED'].includes(task?.status ?? '')
   const hasFinalImages = images.some((image) => !!image.asset)
   const finalOperations = task ? finalImageOperations(task, localOperations) : []
+  const statusFirst = operationStatusHasPriority(finalOperations)
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
         <StageHeader title="生成成片" text="并发生成前 5 个镜头。每张图可单独下载，也可单张重新生成。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成成片技术详情', ['generation_result_image'])} />
-        <FinalOperationSummary operations={finalOperations} />
-        <div className="result-grid">
+        <div className="stage-priority-content">{(statusFirst ? ['status', 'result'] : ['result', 'status']).map((section) => section === 'status' ? (
+          <div className="stage-operation-status" key="status"><FinalOperationSummary operations={finalOperations} /></div>
+        ) : (
+          <div className="stage-business-result" key="result"><div className="result-grid">
           {images.length ? images.map((image) => (
             <div className="result-card" key={image.id}>
               {image.asset ? (
@@ -1716,7 +1731,8 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
               <div><span>#{image.sortOrder}</span>{image.asset && <a href={mediaUrl(assetOriginalSrc(image.asset))} target="_blank" rel="noreferrer"><Download size={15} /></a>}{image.status === 'FAILED' && image.activeAttempt?.errorCode === 'DELIVERY_FAILED' && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('重新回传成片中...', () => api.redeliverResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新回传（图已生成，仅重新拉取，不消耗生成额度）"><RefreshCw size={14} /></button>}{!['QUEUED', 'RUNNING'].includes(image.status) && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id, userInstruction), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成"><RotateCcw size={14} /></button>}</div>
             </div>
           )) : <EmptyState title="尚未生成最终图" text="点击生成成片后会生成前 5 个镜头。" />}
-        </div>
+          </div></div>
+        ))}</div>
       </div>
       <div className="stage-action-bar">
         {hasFinalImages && task && (
@@ -3649,6 +3665,10 @@ function AIOperationList({ operations, compact = false }: { operations: AIOperat
       )}
     </div>
   )
+}
+
+function operationStatusHasPriority(operations: AIOperation[]) {
+  return operations.some((operation) => isAttemptRunning(operation) || ['FAILED', 'CANCELLED'].includes(operation.status))
 }
 
 function FinalOperationSummary({ operations }: { operations: AIOperation[] }) {
