@@ -19,7 +19,7 @@ ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 �
 | AI Stylist / Director | Gemini（`app/gemini_provider.py`，`GEMINI_PROVIDER` 切换：`toapis` 走 ToAPIs OpenAI 兼容中转，`direct` 走 google-genai 直连；代码缺省 `direct` 兼容存量部署，`.env.example` 和本项目部署配置为 `toapis`）；失败直接返回错误并记录事件日志 |
 | Image Provider | `app/image_provider.py`，GPT Image-2 provider 适配；默认 toapis，保留 fal queue 提交、状态查询、结果下载 |
 
-直接依赖见 `requirements.txt`，传递依赖约束见 `requirements.constraints.txt`。不要预先引入复杂 SaaS 权限、多租户、计费、队列集群。
+生产直接依赖见 `requirements.txt`，测试依赖入口见 `requirements-dev.txt`，传递依赖约束见 `requirements.constraints.txt`。不要预先引入复杂 SaaS 权限、多租户、计费、队列集群。
 
 访问控制当前使用固定 `user` / `admin` 双账号框架，不建立用户表、权限组或租户模型。两个角色访问同一套普通拍摄工作台；admin 增量能力必须以“admin UI/UX 大于等于 user”为前提，并在后端按 session role 做权限判断。
 
@@ -32,7 +32,7 @@ ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 �
 | `domain_model.md` | 当前 0.1.0 实际业务对象、Domain 边界、对象关系、对象存储布局 | 理解业务建模或新增后端模块前 |
 | `database_schema.md` | 当前 SQLite 表结构、字段说明、关系图、后续候选表 | 修改数据库、写迁移或排查数据问题前 |
 | `../design/04_implementation_guide/archive_purge_policy.md` | 归档、彻底删除、媒体引用计数和 OSS 清理策略 | 修改删除、归档、批量清理、媒体替换时 |
-| `requirements.txt` / `requirements.constraints.txt` | Python 直接依赖与传递依赖约束 | 安装、升级依赖时 |
+| `requirements.txt` / `requirements-dev.txt` / `requirements.constraints.txt` | Python 生产直接依赖、测试依赖入口与传递依赖约束 | 安装、升级依赖时 |
 | `app/` | FastAPI 后端源码 | 修改后端实现时 |
 | `scripts/` | 一次性维护脚本，如媒体衍生图元数据补齐 | 修复历史数据或运维补数时 |
 | `tests/` | 后端 smoke tests | 修改鉴权、迁移、任务状态时 |
