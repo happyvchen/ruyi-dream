@@ -8299,6 +8299,7 @@ def get_generation_result_set(result_set_id: int | None) -> dict[str, Any] | Non
             {
                 "id": image["id"],
                 "sortOrder": image["sort_order"],
+                "shotRole": image["shot_role"],
                 "status": image["status"],
                 "userInstruction": loads(row_value(image, "user_instruction_json"), {}),
                 "asset": get_media_asset_by_id(image["current_asset_id"]),

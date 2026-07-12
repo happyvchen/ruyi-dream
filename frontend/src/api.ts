@@ -134,13 +134,11 @@ export type GenerationTask = {
   userRequirement?: string | null
   stageUserInputs?: {
     aiStyling?: string | null
-    shootScript?: string | null
     storyboardPreview?: string | null
     finalImage?: string | null
   }
   currentInputVersionId?: number | null
   activeStylingId?: number | null
-  activeShootScriptId?: number | null
   activeStoryboardPreviewId?: number | null
   activePreviewId?: number | null
   activeResultSetId?: number | null
@@ -178,32 +176,17 @@ export type GenerationTask = {
     reasonSummary?: string
     warnings?: string[]
   } | null
-  shootScript?: {
-    id: number
-    status: string
-    script?: Record<string, unknown>
-    summary?: Record<string, unknown>
-    userInstruction?: Record<string, unknown>
-    stylingRisks?: Record<string, unknown>[]
-    accessoryAdjustments?: Record<string, unknown>[]
-    resolvedAccessories?: Record<string, unknown>[]
-    activeAttemptId?: number | null
-    activeAttempt?: AIOperation | null
-    createdAt?: string
-    updatedAt?: string
-  } | null
-  shotPlans?: { id: number; sortOrder: number; shotType: string; plan: Record<string, unknown> }[]
-  preview?: { id: number; status: string; asset?: MediaAsset | null; shootScriptId?: number | null; userInstruction?: Record<string, unknown>; createdAt?: string; updatedAt?: string } | null
-  storyboardPreview?: { id: number; status: string; asset?: MediaAsset | null; shootScriptId?: number | null; userInstruction?: Record<string, unknown>; createdAt?: string; updatedAt?: string } | null
+  preview?: { id: number; status: string; asset?: MediaAsset | null; userInstruction?: Record<string, unknown>; createdAt?: string; updatedAt?: string } | null
+  storyboardPreview?: { id: number; status: string; asset?: MediaAsset | null; userInstruction?: Record<string, unknown>; createdAt?: string; updatedAt?: string } | null
   resultSet?: {
     id: number
     status: string
-    shootScriptId?: number | null
     previewId?: number | null
     userInstruction?: Record<string, unknown>
     images: {
       id: number
       sortOrder: number
+      shotRole: string
       status: string
       userInstruction?: Record<string, unknown>
       asset?: MediaAsset | null
@@ -248,7 +231,6 @@ export type DeleteImpact = {
   taskImageCount?: number
   inputVersionCount?: number
   stylingCount?: number
-  shootScriptCount?: number
   shotPlanCount?: number
   previewCount?: number
   resultSetCount?: number
@@ -530,7 +512,6 @@ export const api = {
     name?: string
     heroProductInfo?: string
     aiStylingUserInstruction?: string
-    shootScriptUserInstruction?: string
     storyboardPreviewUserInstruction?: string
     finalImageUserInstruction?: string
   }) =>
@@ -553,8 +534,6 @@ export const api = {
     request<{ item: GenerationTask }>(`/api/generation-task-images/${id}`, { method: 'DELETE' }),
   selectStyling: (id: number, userInstruction?: string) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/select-styling`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
-  createShootScript: (id: number, userInstruction?: string) =>
-    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/shoot-script`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
   previewTask: (id: number, userInstruction?: string) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/preview`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
   generateFinal: (id: number, userInstruction?: string) =>

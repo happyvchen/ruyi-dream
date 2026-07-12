@@ -44,7 +44,7 @@ import { friendlyErrorText } from './lib/errorMessages'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 
-type StudioStep = 0 | 1 | 2 | 3 | 4
+type StudioStep = 0 | 1 | 2 | 3
 type FileSystemEntry = {
   name: string
   isFile: boolean
@@ -75,7 +75,6 @@ type PageSizeOption = number | { value: number; label: string; key?: string }
 const steps = [
   { title: '上传主推款', icon: Upload },
   { title: 'AI 智能选搭', icon: WandSparkles },
-  { title: '生成拍摄剧本', icon: FileText },
   { title: '生成分镜预览', icon: GalleryVerticalEnd },
   { title: '生成成片', icon: Sparkles },
 ] as const
@@ -382,7 +381,7 @@ function LoginPage({ notice, onAuthed }: { notice?: string; onAuthed: (session: 
   )
 }
 
-const LONG_AI_OPERATION_PATTERN = /选搭|智能选择|拍摄剧本|打标|分镜|成片|预览/
+const LONG_AI_OPERATION_PATTERN = /选搭|智能选择|打标|分镜|成片|预览/
 
 function formatElapsedSeconds(totalSeconds: number): string {
   if (totalSeconds < 60) return `${totalSeconds} 秒`
@@ -438,7 +437,6 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   const [aiLogDialog, setAiLogDialog] = useState<{ title: string; ownerTypes: string[]; attemptId: number; records: AICallRecord[]; loading: boolean; error?: string } | null>(null)
   const [heroProductInfo, setHeroProductInfo] = useState('')
   const [aiStylingInstruction, setAiStylingInstruction] = useState('')
-  const [shootScriptInstruction, setShootScriptInstruction] = useState('')
   const [storyboardInstruction, setStoryboardInstruction] = useState('')
   const [finalImageInstruction, setFinalImageInstruction] = useState('')
   const currentStep = getTaskStep(task)
@@ -510,7 +508,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     if (!task || !isTaskRunning(task)) return
     if (!window.confirm('确定取消本次生成吗？已提交给生成服务的图片可能仍会完成并产生费用；系统会停止后续生成，并保留已完成结果。')) return
     void run('取消生成中...', () => api.cancelTask(task.id), (r: { item: GenerationTask }) => {
-      clearLocalOperationsFor(['generation_styling', 'generation_shoot_script', 'generation_preview', 'generation_result_image'], task.id)
+      clearLocalOperationsFor(['generation_styling', 'generation_preview', 'generation_result_image'], task.id)
       applyTaskUpdate(r.item)
     }, { refresh: 'background' })
   }
@@ -526,8 +524,8 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     const restart = canRestartOneClickFinal(task)
     if (!restart && !canStartOneClickFinal(task)) return
     const confirmText = restart
-      ? '将重新走完整流程：重新智能选搭、拍摄剧本、分镜预览和成片，产出一套全新方案。已有成片会保留在历史记录里可追溯。整条重跑会产生较多 AI 调用，确定重新一键成片吗？'
-      : '将自动完成后续步骤，并复用已有选搭、拍摄剧本和分镜预览。生成过程可能产生多次 AI 调用。'
+      ? '将重新走完整流程：重新智能选搭、分镜预览和成片，产出一套全新方案。已有成片会保留在历史记录里可追溯。确定重新一键成片吗？'
+      : '将自动完成后续步骤，并复用已有选搭和分镜预览。生成过程可能产生多次 AI 调用。'
     if (!window.confirm(confirmText)) return
     void run(restart ? '重新一键成片启动中...' : '启动一键成片中...', () => api.autoRunFinal(task.id, restart), (r: { item: GenerationTask }) => {
       applyTaskUpdate(r.item)
@@ -538,7 +536,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     if (!batchId || activeBatchIdRef.current !== batchId) return
     const eligibleCount = batchItems.filter((item) => canStartOneClickFinal(item)).length
     if (!eligibleCount) return
-    if (!window.confirm(`将为 ${eligibleCount} 个任务自动完成智能选搭、拍摄剧本、分镜预览和成片，生成过程会产生多次 AI 调用；同时只有少量任务并发生成，其余排队等待。确定开始吗？`)) return
+    if (!window.confirm(`将为 ${eligibleCount} 个任务自动完成智能选搭、分镜预览和成片；同时只有少量任务并发生成，其余排队等待。确定开始吗？`)) return
     const requestId = batchAutoRunRequestRef.current + 1
     batchAutoRunRequestRef.current = requestId
     void run('启动批量成片中...', () => api.autoRunBatch(batchId), (result: { items: GenerationTask[] }) => {
@@ -586,7 +584,6 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   }, [task?.id])
   useEffect(() => setHeroProductInfo(task?.heroProductInfo ?? task?.userRequirement ?? ''), [task?.id, task?.heroProductInfo, task?.userRequirement])
   useEffect(() => setAiStylingInstruction(task?.stageUserInputs?.aiStyling ?? stageInstructionText(task?.styling?.userInstruction)), [task?.id, task?.stageUserInputs?.aiStyling, task?.styling?.id])
-  useEffect(() => setShootScriptInstruction(task?.stageUserInputs?.shootScript ?? stageInstructionText(task?.shootScript?.userInstruction)), [task?.id, task?.stageUserInputs?.shootScript, task?.shootScript?.id])
   useEffect(() => setStoryboardInstruction(task?.stageUserInputs?.storyboardPreview ?? stageInstructionText((task?.storyboardPreview ?? task?.preview)?.userInstruction)), [task?.id, task?.stageUserInputs?.storyboardPreview, (task?.storyboardPreview ?? task?.preview)?.id])
   useEffect(() => setFinalImageInstruction(task?.stageUserInputs?.finalImage ?? stageInstructionText(task?.resultSet?.userInstruction)), [task?.id, task?.stageUserInputs?.finalImage, task?.resultSet?.id])
   useEffect(() => {
@@ -597,7 +594,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     loadRecentTasks(0)
   }, [records])
   useEffect(() => {
-    if (!task || (!['STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status) && !task.autoRunTarget)) return
+    if (!task || (!['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status) && !task.autoRunTarget)) return
     const timer = window.setInterval(() => {
       void api.getTask(task.id, isAdmin).then((result) => applyTaskUpdate(result.item)).catch(() => undefined)
     }, 1500)
@@ -605,7 +602,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   }, [task?.id, task?.status, task?.autoRunTarget, setTask])
   useEffect(() => {
     if (!task || isTaskLockedForGeneration(task)) return
-    clearLocalOperationsFor(['generation_styling', 'generation_shoot_script', 'generation_preview', 'generation_result_image'], task.id)
+    clearLocalOperationsFor(['generation_styling', 'generation_preview', 'generation_result_image'], task.id)
   }, [task?.id, task?.status, task?.autoRunTarget, task?.resultSet?.status])
   const hasActiveRecentTasks = taskItems.some((item) => isTaskRunning(item) || isTaskQueuedForAutoRun(item))
   useEffect(() => {
@@ -695,9 +692,8 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
           <div className="studio-stage-viewport">
             {visibleStep === 0 && <UploadHeroStep task={task} setTask={applyTaskUpdate} run={run} heroProductInfo={heroProductInfo} />}
             {visibleStep === 1 && <StylingStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={aiStylingInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
-            {visibleStep === 2 && <ShootScriptStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={shootScriptInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
-            {visibleStep === 3 && <PreviewStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={storyboardInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
-            {visibleStep === 4 && <FinalStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={finalImageInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+            {visibleStep === 2 && <PreviewStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={storyboardInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+            {visibleStep === 3 && <FinalStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={finalImageInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
           </div>
         </div>
         <aside className="panel task-rail">
@@ -735,10 +731,10 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
                 <StageUserInputModule
                   step={visibleStep}
                   task={task}
-                  value={stageInputValue(visibleStep, { heroProductInfo, aiStylingInstruction, shootScriptInstruction, storyboardInstruction, finalImageInstruction })}
+                  value={stageInputValue(visibleStep, { heroProductInfo, aiStylingInstruction, storyboardInstruction, finalImageInstruction })}
                   savedValue={savedStageInputValue(visibleStep, task)}
-                  onChange={(value) => updateStageInput(visibleStep, value, { setHeroProductInfo, setAiStylingInstruction, setShootScriptInstruction, setStoryboardInstruction, setFinalImageInstruction })}
-                  onSave={() => void run('保存用户输入中...', () => api.updateTask(task.id, stageInputSavePayload(visibleStep, stageInputValue(visibleStep, { heroProductInfo, aiStylingInstruction, shootScriptInstruction, storyboardInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => applyTaskUpdate(r.item), { refresh: 'background' })}
+                  onChange={(value) => updateStageInput(visibleStep, value, { setHeroProductInfo, setAiStylingInstruction, setStoryboardInstruction, setFinalImageInstruction })}
+                  onSave={() => void run('保存用户输入中...', () => api.updateTask(task.id, stageInputSavePayload(visibleStep, stageInputValue(visibleStep, { heroProductInfo, aiStylingInstruction, storyboardInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => applyTaskUpdate(r.item), { refresh: 'background' })}
                   disabled={isTaskRunning(task) || !!task.autoRunTarget}
                 />
               </>
@@ -1253,7 +1249,6 @@ function RequirementEditor({ value, onChange, title, placeholder }: { value: str
 type StudioStageInputState = {
   heroProductInfo: string
   aiStylingInstruction: string
-  shootScriptInstruction: string
   storyboardInstruction: string
   finalImageInstruction: string
 }
@@ -1261,7 +1256,6 @@ type StudioStageInputState = {
 type StudioStageInputSetters = {
   setHeroProductInfo: (value: string) => void
   setAiStylingInstruction: (value: string) => void
-  setShootScriptInstruction: (value: string) => void
   setStoryboardInstruction: (value: string) => void
   setFinalImageInstruction: (value: string) => void
 }
@@ -1269,16 +1263,14 @@ type StudioStageInputSetters = {
 function stageInputValue(step: StudioStep, state: StudioStageInputState) {
   if (step === 0) return state.heroProductInfo
   if (step === 1) return state.aiStylingInstruction
-  if (step === 2) return state.shootScriptInstruction
-  if (step === 3) return state.storyboardInstruction
+  if (step === 2) return state.storyboardInstruction
   return state.finalImageInstruction
 }
 
 function updateStageInput(step: StudioStep, value: string, setters: StudioStageInputSetters) {
   if (step === 0) setters.setHeroProductInfo(value)
   else if (step === 1) setters.setAiStylingInstruction(value)
-  else if (step === 2) setters.setShootScriptInstruction(value)
-  else if (step === 3) setters.setStoryboardInstruction(value)
+  else if (step === 2) setters.setStoryboardInstruction(value)
   else setters.setFinalImageInstruction(value)
 }
 
@@ -1286,16 +1278,14 @@ function savedStageInputValue(step: StudioStep, task: GenerationTask | null) {
   if (!task) return ''
   if (step === 0) return task.heroProductInfo ?? task.userRequirement ?? ''
   if (step === 1) return task.stageUserInputs?.aiStyling ?? ''
-  if (step === 2) return task.stageUserInputs?.shootScript ?? ''
-  if (step === 3) return task.stageUserInputs?.storyboardPreview ?? ''
+  if (step === 2) return task.stageUserInputs?.storyboardPreview ?? ''
   return task.stageUserInputs?.finalImage ?? ''
 }
 
 function stageInputSavePayload(step: StudioStep, value: string) {
   if (step === 0) return { heroProductInfo: value }
   if (step === 1) return { aiStylingUserInstruction: value }
-  if (step === 2) return { shootScriptUserInstruction: value }
-  if (step === 3) return { storyboardPreviewUserInstruction: value }
+  if (step === 2) return { storyboardPreviewUserInstruction: value }
   return { finalImageUserInstruction: value }
 }
 
@@ -1315,7 +1305,6 @@ function StageUserInputModule({ step, task, value, savedValue = '', onChange, on
   const labels = [
     { title: '商品信息', placeholder: '例如：夏季主推阔腿裤，重点展示腰头、垂坠裤腿和裤脚，避免厚重外套。' },
     { title: '智能选搭要求', placeholder: '例如：不要厚重外套，改成更轻盈的通勤搭配。' },
-    { title: '拍摄剧本要求', placeholder: '例如：增加腰线和裤脚展示，动作更利落。' },
     { title: '分镜预览要求', placeholder: '例如：分镜姿态更舒展，背景保持简洁。' },
     { title: '成片生成要求', placeholder: '例如：整体更干净，减少配饰存在感，保持棚拍电商质感。' },
   ][step]
@@ -1349,7 +1338,7 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
   onOpenAICallLogs: (title: string, ownerTypes: string[], attemptId: number) => void
 }) {
   const locked = !!task && (isTaskRunning(task) || !!task.autoRunTarget)
-  const canSelect = !!task && !locked && ['READY_FOR_STYLING', 'STYLING_READY', 'SCRIPT_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task.status)
+  const canSelect = !!task && !locked && ['READY_FOR_STYLING', 'STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task.status)
   const hasStyling = !!task?.styling
   const operations = task ? operationFallbacks(task, localOperations, 'generation_styling') : []
   return (
@@ -1370,12 +1359,9 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
           setTask({
             ...task,
             status: 'STYLING_RUNNING',
-            shootScript: null,
-            shotPlans: [],
             preview: null,
             storyboardPreview: null,
             resultSet: null,
-            activeShootScriptId: null,
             activeStoryboardPreviewId: null,
             activePreviewId: null,
             activeResultSetId: null,
@@ -1560,128 +1546,7 @@ function diagnosisItems(value: Record<string, unknown>): string[] {
   }).filter(Boolean)
 }
 
-function ShootScriptStep({ task, setTask, run, userInstruction, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
-  task: GenerationTask | null
-  setTask: (task: GenerationTask) => void
-  run: any
-  userInstruction: string
-  localOperations: AIOperation[]
-  startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
-  clearLocalOperationsFor: (ownerTypes: string[], taskId?: number | null) => void
-  isAdmin: boolean
-  onOpenAICallLogs: (title: string, ownerTypes: string[], attemptId: number) => void
-}) {
-  const canGenerate = (
-    !!task?.styling && !isTaskLockedForGeneration(task) && ['STYLING_READY', 'SCRIPT_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task?.status ?? '')
-  )
-  const hasScript = !!task?.shootScript?.script
-  const operations = task ? operationFallbacks(task, localOperations, 'generation_shoot_script') : []
-  return (
-    <div className="step-panel">
-      <div className="step-scroll-content">
-        <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
-          <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_shoot_script" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成拍摄剧本 · Attempt #${operation.id}`, ['generation_shoot_script'], operation.id) : undefined} /></div>
-        ) : (
-          <div className="stage-business-result" key="result">{task?.shootScript ? <ShootScriptSummary task={task} /> : <EmptyState title="尚未生成拍摄剧本" text="点击生成后，系统会把选搭方案转成拍摄前可执行的分镜剧本。" />}</div>
-        ))}</div>
-      </div>
-      <div className="stage-action-bar">
-        <button className="primary" disabled={!canGenerate} onClick={() => task && void run(hasScript ? '重新生成拍摄剧本中...' : '生成拍摄剧本中...', () => {
-          startLocalOperation({ taskId: task.id, ownerType: 'generation_shoot_script', ownerId: task.id, provider: 'gemini' })
-          setTask({
-            ...task,
-            status: 'SCRIPT_RUNNING',
-            shootScript: task.shootScript ? { ...task.shootScript, status: 'RUNNING' } : null,
-            preview: null,
-            storyboardPreview: null,
-            resultSet: null,
-            activeStoryboardPreviewId: null,
-            activePreviewId: null,
-            activeResultSetId: null,
-          })
-          return api.createShootScript(task.id, userInstruction)
-        }, (r: { item: GenerationTask }) => {
-          clearLocalOperationsFor(['generation_shoot_script'], task.id)
-          setTask(r.item)
-        }, { refresh: false })}>
-          <FileText size={16} /> {hasScript ? '重新生成拍摄剧本' : '生成拍摄剧本'}
-        </button>
-      </div>
-    </div>
-  )
-}
-
-function ShootScriptSummary({ task }: { task: GenerationTask }) {
-  const shootScript = task.shootScript
-  if (!shootScript) return null
-  const script = shootScript.script ?? {}
-  const summary = (shootScript.summary && Object.keys(shootScript.summary).length ? shootScript.summary : planValue<Record<string, unknown>>(script, 'user_visible_summary') ?? {}) as Record<string, unknown>
-  const shots = shootScriptShots(task)
-  const risks = shootScript.stylingRisks?.length ? shootScript.stylingRisks : arrayValue<Record<string, unknown>>(script, 'styling_risks')
-  const adjustments = shootScript.accessoryAdjustments?.length ? shootScript.accessoryAdjustments : arrayValue<Record<string, unknown>>(script, 'accessory_adjustments')
-  const resolvedAccessories = shootScript.resolvedAccessories?.length ? shootScript.resolvedAccessories : arrayValue<Record<string, unknown>>(script, 'resolved_accessories')
-  return (
-    <div className="styling-plan shoot-script-plan">
-      <div className="styling-plan-head">
-        <div>
-          <span>拍摄剧本</span>
-          <h3>{stringValue(summary.title) || '拍摄剧本'}</h3>
-        </div>
-        <div className="score-strip script-strip">
-          <span><b>{shots.length || 6}</b>镜头</span>
-          <span><b>{risks.length}</b>风险</span>
-          <span><b>{resolvedAccessories.length || adjustments.length}</b>配饰</span>
-        </div>
-      </div>
-      {risks.length > 0 && (
-        <div className="rejected-list review-warning">
-          <strong>选搭风险与建议</strong>
-          {risks.map((item, index) => (
-            <span key={`${stringValue(item.risk_id)}-${index}`}>{[riskSeverityLabel(stringValue(item.severity)), stringValue(item.risk), stringValue(item.user_visible_recommendation)].filter(Boolean).join(' · ')}</span>
-          ))}
-        </div>
-      )}
-      <div className="shot-card-grid">
-        {shots.map((shot, index) => (
-          <div className="shot-card" key={`${numberValue(shot.shot_index) || index + 1}-${stringValue(shot.shot_role)}`}>
-            <div><span>#{numberValue(shot.shot_index) || index + 1}</span><strong>{stringValue(shot.shot_role_label) || stringValue(shot.shot_role) || '镜头'}</strong></div>
-            <p>{stringValue(shot.main_focus) || stringValue(shot.mainFocus)}</p>
-            <dl>
-              <dt>景别</dt><dd>{stringValue(shot.framing) || '未指定'}</dd>
-              <dt>取景</dt><dd>{stringValue(shot.crop_range) || stringValue(shot.cropRange) || '未指定'}</dd>
-              <dt>姿势</dt><dd>{stringValue(shot.pose) || '未指定'}</dd>
-              <dt>走位</dt><dd>{stringValue(shot.movement) || stringValue(shot.body_position) || stringValue(shot.bodyPosition) || '未指定'}</dd>
-              <dt>配饰</dt><dd>{stringList(shot.accessory_instructions ?? shot.accessoryInstructions).join('；') || '低存在感，不做特写'}</dd>
-            </dl>
-          </div>
-        ))}
-      </div>
-      <details className="result-details">
-        <summary>查看完整导演说明与配饰方案</summary>
-        <p>{stringValue(summary.summary) || '模型未返回剧本摘要，请查看镜头明细。'}</p>
-        {adjustments.length > 0 && <div className="rejected-list"><strong>生成配饰调整</strong>{adjustments.map((item, index) => <span key={`${stringValue(item.item_type)}-${index}`}>{[accessoryTypeLabel(stringValue(item.item_type)), stringValue(item.adjusted_direction), stringValue(item.reason)].filter(Boolean).join(' · ')}</span>)}</div>}
-        {resolvedAccessories.length > 0 && <div className="rejected-list"><strong>最终配饰方案</strong>{resolvedAccessories.map((item, index) => <span key={`${stringValue(item.item_type)}-${index}`}>{[accessoryTypeLabel(stringValue(item.item_type)), stringValue(item.final_direction), stringValue(item.visibility)].filter(Boolean).join(' · ')}</span>)}</div>}
-      </details>
-    </div>
-  )
-}
-
-function accessoryTypeLabel(value: string) {
-  return ({ bag: '包', jewelry: '首饰', shoes: '鞋', hat: '帽子' } as Record<string, string>)[value.toLowerCase()] ?? value
-}
-
-function riskSeverityLabel(value: string) {
-  return ({ low: '低风险', medium: '中风险', high: '高风险' } as Record<string, string>)[value.toLowerCase()] ?? value
-}
-
-function shootScriptShots(task: GenerationTask | null): Record<string, unknown>[] {
-  if (!task) return []
-  const scriptShots = arrayValue<Record<string, unknown>>(task.shootScript?.script ?? {}, 'shots')
-  if (scriptShots.length) return scriptShots
-  return (task.shotPlans ?? []).map((item) => ({ shot_index: item.sortOrder, shot_role: item.shotType, ...(item.plan ?? {}) } as Record<string, unknown>))
-}
-
-function PreviewStep({ task, setTask, run, userInstruction, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
+ function PreviewStep({ task, setTask, run, userInstruction, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask) => void
   run: any
@@ -1695,8 +1560,8 @@ function PreviewStep({ task, setTask, run, userInstruction, localOperations, sta
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const preview = task?.storyboardPreview ?? task?.preview ?? null
   const canPreview = (
-    !!task?.shootScript && !isTaskLockedForGeneration(task) && ['SCRIPT_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'CANCELLED'].includes(task?.status ?? '')
-  ) || (!!task && !isTaskLockedForGeneration(task) && task.status === 'FAILED' && !!task.shootScript && !preview?.asset)
+    !!task?.styling && !isTaskLockedForGeneration(task) && ['STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'CANCELLED'].includes(task?.status ?? '')
+  ) || (!!task && !isTaskLockedForGeneration(task) && task.status === 'FAILED' && !!task.styling && !preview?.asset)
   const hasPreview = !!preview?.asset
   const operations = task ? operationFallbacks(task, localOperations, 'generation_preview') : []
   return (
@@ -1707,7 +1572,7 @@ function PreviewStep({ task, setTask, run, userInstruction, localOperations, sta
         ) : (
           <div className="stage-business-result" key="result">{preview?.asset ? (
             <div className="storyboard-review"><button className="preview-board-open" onClick={() => preview.asset && setViewer(assetLightboxImage(preview.asset))} title="放大查看"><img className="preview-board" src={mediaUrl(assetPreviewSrc(preview.asset))} loading="lazy" alt="分镜预览" /></button><div className="storyboard-legend"><span><strong>1–5</strong>生成成片</span><span><strong>6</strong>备用参考，不生成</span><em>点击图片放大检查姿势、构图与光线</em></div></div>
-          ) : <EmptyState title="尚未生成分镜预览" text="点击生成预览后，系统会根据拍摄剧本输出一张 3:2 横版分镜预览图。" />}</div>
+          ) : <EmptyState title="尚未生成分镜预览" text="点击生成预览后，系统会根据主推款品类与选搭方案输出一张 3:2 横版分镜预览图。" />}</div>
         ))}</div>
       </div>
       <div className="stage-action-bar">
@@ -1745,7 +1610,6 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   const canGenerate = !!preview?.asset && !!task && !isTaskLockedForGeneration(task) && ['PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'CANCELLED'].includes(task?.status ?? '')
   const hasFinalImages = images.some((image) => !!image.asset)
   const finalHistoryOperations = task ? operationFallbacks(task, localOperations, 'generation_result_image') : []
-  const shotLabels = shootScriptShots(task)
   const finalSlots = Array.from({ length: 5 }, (_, index) => images.find((image) => image.sortOrder === index + 1) ?? null)
   return (
     <div className="step-panel">
@@ -1780,7 +1644,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
                   })()}
                 </div>
               )}
-              {(() => { const shot = shotLabels.find((item) => numberValue(item.shot_index) === index + 1); return <div><span><b>#{index + 1}</b>{stringValue(shot?.shot_role_label) || stringValue(shot?.shot_role) || '镜头'}</span>{image?.asset && <a href={mediaDownloadUrl(assetOriginalSrc(image.asset))} aria-label={`下载镜头 ${index + 1}`}><Download size={15} /></a>}{image?.status === 'FAILED' && image.activeAttempt?.errorCode === 'DELIVERY_FAILED' && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('重新回传成片中...', () => api.redeliverResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新回传（图已生成，仅重新拉取，不消耗生成额度）" aria-label={`重新回传镜头 ${index + 1}`}><RefreshCw size={14} /></button>}{image && !['QUEUED', 'RUNNING'].includes(image.status) && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id, userInstruction), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成" aria-label={`重新生成镜头 ${index + 1}`}><RotateCcw size={14} /></button>}</div> })()}
+              <div><span><b>#{index + 1}</b>{image?.shotRole || '镜头'}</span>{image?.asset && <a href={mediaDownloadUrl(assetOriginalSrc(image.asset))} aria-label={`下载镜头 ${index + 1}`}><Download size={15} /></a>}{image?.status === 'FAILED' && image.activeAttempt?.errorCode === 'DELIVERY_FAILED' && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('重新回传成片中...', () => api.redeliverResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新回传（图已生成，仅重新拉取，不消耗生成额度）" aria-label={`重新回传镜头 ${index + 1}`}><RefreshCw size={14} /></button>}{image && !['QUEUED', 'RUNNING'].includes(image.status) && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id, userInstruction), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成" aria-label={`重新生成镜头 ${index + 1}`}><RotateCcw size={14} /></button>}</div>
             </div>
           ))}
           </div></div>
@@ -3015,8 +2879,6 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
               <h3>{detail.name}</h3>
               <Meta label="状态" value={statusText(detail.status)} />
               <Meta label="选中搭配" value={`${detail.styling?.selectedMaterials?.length ?? 0} 件`} />
-              <Meta label="拍摄剧本" value={detail.shootScript ? '已生成' : '未生成'} />
-              {detail.shootScript?.summary?.summary && <details className="record-script-details"><summary>查看拍摄剧本摘要</summary><p className="record-script-summary">{String(detail.shootScript.summary.summary)}</p></details>}
               <RecordImagePreview task={detail} />
               {detail.archivedAt && <button className="secondary" onClick={() => restoreRecords([detail])}>恢复归档</button>}
             </>
@@ -3948,9 +3810,6 @@ function operationFallbacks(task: GenerationTask, localOperations: AIOperation[]
   if (ownerType === 'generation_styling' && task.status === 'STYLING_RUNNING') {
     return [syntheticOperation(ownerType, task.id, 'gemini', task.updatedAt)]
   }
-  if (ownerType === 'generation_shoot_script' && task.status === 'SCRIPT_RUNNING') {
-    return [syntheticOperation(ownerType, task.activeShootScriptId ?? task.id, 'gemini', task.shootScript?.createdAt || task.updatedAt)]
-  }
   if (ownerType === 'generation_preview' && task.status === 'PREVIEW_RUNNING') {
     return [syntheticOperation(ownerType, task.activeStoryboardPreviewId ?? task.activePreviewId ?? task.id, 'image-2', task.storyboardPreview?.createdAt || task.preview?.createdAt || task.updatedAt)]
   }
@@ -4003,7 +3862,7 @@ function operationKey(operation: AIOperation) {
 }
 
 function isStageOperation(ownerType: string) {
-  return ['generation_styling', 'generation_shoot_script', 'generation_preview'].includes(ownerType)
+  return ['generation_styling', 'generation_preview'].includes(ownerType)
 }
 
 function operationRank(operation: AIOperation) {
@@ -4033,7 +3892,6 @@ function operationLabel(operation: AIOperation, index = 0) {
   if (operation.ownerType === 'styling_garment_upload') return '搭配服装上传'
   if (operation.ownerType === 'styling_garment_tagging') return '服装标签识别'
   if (operation.ownerType === 'generation_styling') return '智能选搭'
-  if (operation.ownerType === 'generation_shoot_script') return '拍摄剧本'
   if (operation.ownerType === 'generation_preview') return '分镜预览'
   if (operation.ownerType === 'generation_result_image') {
     const shot = operation.shotSortOrder ?? (operation.id < 0 && operation.ownerId > 0 ? operation.ownerId : null)
@@ -4288,23 +4146,20 @@ function EmptyState({ title, text }: { title: string; text: string }) {
 function getTaskStep(task: GenerationTask | null): StudioStep {
   if (!task) return 0
   if (task.status === 'CANCELLED') {
-    if (task.resultSet?.images?.length) return 4
-    if ((task.storyboardPreview ?? task.preview)?.asset) return 4
-    if (task.shootScript) return 3
+    if (task.resultSet?.images?.length) return 3
+    if ((task.storyboardPreview ?? task.preview)?.asset) return 3
     if (task.styling) return 2
     return 1
   }
   if (task.status === 'FAILED') {
-    if (task.resultSet?.images?.length) return 4
-    if ((task.storyboardPreview ?? task.preview)?.asset) return 4
-    if (task.shootScript) return 3
+    if (task.resultSet?.images?.length) return 3
+    if ((task.storyboardPreview ?? task.preview)?.asset) return 3
     if (task.styling) return 2
     return 1
   }
   if (['DRAFT', 'READY_FOR_STYLING', 'STYLING_RUNNING'].includes(task.status)) return 1
-  if (['STYLING_READY', 'SCRIPT_RUNNING'].includes(task.status)) return 2
-  if (['SCRIPT_READY', 'PREVIEW_RUNNING'].includes(task.status)) return 3
-  if (['PREVIEW_READY', 'FINAL_RUNNING', 'FINAL_PARTIAL', 'COMPLETED'].includes(task.status)) return 4
+  if (['STYLING_READY', 'PREVIEW_RUNNING'].includes(task.status)) return 2
+  if (['PREVIEW_READY', 'FINAL_RUNNING', 'FINAL_PARTIAL', 'COMPLETED'].includes(task.status)) return 3
   return 0
 }
 
@@ -4351,7 +4206,7 @@ function studioTaskPresentation(task: GenerationTask): StudioTaskPresentation {
   return {
     statusLabel: taskListStatusLabel(task),
     currentStageLabel,
-    progressLabel: `已完成 ${completedStageCount}/5 步`,
+    progressLabel: `已完成 ${completedStageCount}/4 步`,
     executingStage: runningStage,
   }
 }
@@ -4359,9 +4214,8 @@ function studioTaskPresentation(task: GenerationTask): StudioTaskPresentation {
 function runningStudioStage(task: GenerationTask): StudioStep | null {
   const map: Record<string, StudioStep> = {
     STYLING_RUNNING: 1,
-    SCRIPT_RUNNING: 2,
-    PREVIEW_RUNNING: 3,
-    FINAL_RUNNING: 4,
+    PREVIEW_RUNNING: 2,
+    FINAL_RUNNING: 3,
   }
   return map[task.status] ?? null
 }
@@ -4369,14 +4223,13 @@ function runningStudioStage(task: GenerationTask): StudioStep | null {
 function completedStudioStageCount(task: GenerationTask) {
   let count = taskHasHeroImage(task) ? 1 : 0
   if (task.activeStylingId || task.styling) count += 1
-  if (task.activeShootScriptId || task.shootScript) count += 1
   if ((task.storyboardPreview ?? task.preview)?.asset) count += 1
   if (finalSucceededCount(task) >= 5) count += 1
   return count
 }
 
 function isTaskRunning(task: GenerationTask) {
-  return ['STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)
+  return ['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)
 }
 
 function isTaskLockedForGeneration(task: GenerationTask) {
@@ -4405,8 +4258,6 @@ function statusText(status: string) {
     READY_FOR_STYLING: '待选搭',
     STYLING_RUNNING: '选搭中',
     STYLING_READY: '已选搭',
-    SCRIPT_RUNNING: '剧本生成中',
-    SCRIPT_READY: '剧本完成',
     PREVIEW_RUNNING: '分镜预览中',
     PREVIEW_READY: '分镜预览完成',
     FINAL_RUNNING: '生成中',
@@ -4563,7 +4414,6 @@ function deleteImpactText(impact?: DeleteImpact | null) {
   if (impact.garmentImageCount) parts.push(`${impact.garmentImageCount} 张服装图`)
   const taskCount = impact.dependentTaskCount ?? impact.taskCount ?? 0
   if (taskCount) parts.push(`${taskCount} 条生成记录`)
-  if (impact.shootScriptCount) parts.push(`${impact.shootScriptCount} 份拍摄剧本`)
   if (impact.resultImageCount) parts.push(`${impact.resultImageCount} 张结果图记录`)
   if (impact.mediaAssetCount) parts.push(`${impact.mediaAssetCount} 个存储文件`)
   const scope = parts.length ? parts.join('、') : '当前选中项'
