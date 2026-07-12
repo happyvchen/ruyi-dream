@@ -183,6 +183,7 @@ h1, h2, h3, p { margin: 0; }
   min-height: 560px;
   overflow: hidden;
 }
+.prompt-maintenance-layout.tools-collapsed { grid-template-columns: 240px minmax(560px, 1fr); }
 .prompt-nav-panel,
 .prompt-preview-panel {
   min-height: 0;
@@ -1149,7 +1150,7 @@ a.button-link { text-decoration: none; cursor: pointer; }
   grid-template-columns: minmax(0, 1fr) 320px;
   gap: 18px;
   align-items: stretch;
-  height: calc(100vh - 136px);
+  height: calc(100vh - 112px);
   min-height: 620px;
   overflow: hidden;
 }
@@ -1159,6 +1160,10 @@ a.button-link { text-decoration: none; cursor: pointer; }
   font-size: 13px;
   line-height: 1.55;
 }
+.record-script-details { padding: 0; background: #f8fafc; }
+.record-script-details summary { padding: 9px 10px; color: #475569; font-size: 12px; font-weight: 700; cursor: pointer; }
+.record-script-details[open] { padding: 0 10px 10px; }
+.record-script-details[open] summary { margin: 0 -10px 8px; border-bottom: 1px solid #e2e8f0; }
 .library-title-row {
   display: flex;
   align-items: flex-end;
@@ -1171,7 +1176,7 @@ a.button-link { text-decoration: none; cursor: pointer; }
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  height: calc(100vh - 136px);
+  height: calc(100vh - 112px);
   overflow: hidden;
 }
 .library-page:has(.import-panel) .library-panel {
@@ -1547,8 +1552,8 @@ a.button-link { text-decoration: none; cursor: pointer; }
 .garment-card:hover {
   border-color: #cbd5e1;
   box-shadow: 0 14px 36px rgba(15, 23, 42, .08);
-  transform: translateY(-1px);
 }
+.compact-control { height: 32px; padding: 0 10px; font-size: 12px; }
 .garment-cover {
   position: relative;
   overflow: hidden;
@@ -2282,7 +2287,7 @@ a.button-link { text-decoration: none; cursor: pointer; }
   grid-template-columns: 300px 1fr;
   gap: 24px;
   padding: 22px;
-  min-height: calc(100vh - 136px);
+  min-height: calc(100vh - 112px);
 }
 .model-meta { display: grid; align-content: start; gap: 14px; }
 .model-cover {
@@ -2373,7 +2378,7 @@ a.button-link { text-decoration: none; cursor: pointer; }
 }
 .record-row {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 10px;
   align-items: center;
   padding: 0 10px;
@@ -2384,6 +2389,7 @@ a.button-link { text-decoration: none; cursor: pointer; }
   text-align: left;
   transition: border-color .18s ease, box-shadow .18s ease, background .18s ease;
 }
+.records-page:has(.record-row > input) .record-row { grid-template-columns: 18px minmax(0, 1fr) auto auto; }
 .record-open {
   display: grid;
   grid-template-columns: 50px minmax(180px, 1fr) 220px;
@@ -2824,13 +2830,13 @@ a.button-link { text-decoration: none; cursor: pointer; }
   .record-open .strip {
     display: none;
   }
-  .record-row {
-    grid-template-columns: 18px minmax(0, 1fr);
-  }
+  .record-row { grid-template-columns: minmax(0, 1fr); }
+  .records-page:has(.record-row > input) .record-row { grid-template-columns: 18px minmax(0, 1fr); }
   .record-action-button {
-    grid-column: 2;
+    grid-column: 1;
     justify-self: start;
   }
+  .records-page:has(.record-row > input) .record-action-button { grid-column: 2; }
   .mini-row {
     grid-template-columns: 18px minmax(0, 1fr);
   }

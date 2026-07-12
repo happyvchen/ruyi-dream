@@ -207,6 +207,7 @@ export function App() {
   }
 
   function navigate(next: Page) {
+    if (next !== page && document.body.dataset.promptDirty === 'true' && !window.confirm('Prompt 有未保存修改，确定离开并放弃这些修改吗？')) return
     setPage(next)
     if (next === 'studio') setTask(null)
     if (next === 'records') setRecordDetail(null)
@@ -1823,6 +1824,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
   const [pageSize, setPageSize] = useState(() => estimateAutoGarmentPageSize())
   const [searching, setSearching] = useState(true)
   const [includeArchived, setIncludeArchived] = useState(false)
+  const [bulkMode, setBulkMode] = useState(false)
   const [selectedGarmentIds, setSelectedGarmentIds] = useState<Set<number>>(() => new Set())
   const [deleteGarmentDialog, setDeleteGarmentDialog] = useState<StylingGarment[] | null>(null)
   const [deleteGarmentImpact, setDeleteGarmentImpact] = useState<DeleteImpact | null>(null)
@@ -1948,7 +1950,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
   return (
     <section className="page workbench-page library-page">
       <div className="library-title-row">
-        <PageTitle title="搭配服装库" subtitle="真实会出现在最终图里的配角服装。当前不支持鞋、包、饰品入库。" />
+        <PageTitle title="搭配服装库" />
         <button className="primary" onClick={() => setShowImport((value) => !value)}>
           <ImagePlus size={16} /> {showImport ? '收起导入' : '导入搭配服装'}
         </button>
@@ -1966,7 +1968,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
               setOffset(0)
               setIncludeArchived(event.target.checked)
             }} /> 查看已归档</label>
-            <label><input type="checkbox" checked={allVisibleGarmentsSelected} disabled={!selectableGarmentIds.length} onChange={(event) => toggleVisibleGarmentSelection(event.target.checked)} /> 全选本页</label>
+            {bulkMode && <label><input type="checkbox" checked={allVisibleGarmentsSelected} disabled={!selectableGarmentIds.length} onChange={(event) => toggleVisibleGarmentSelection(event.target.checked)} /> 全选本页</label>}
           </div>
           <div className="record-list-meta">
             {selectedVisibleGarments.length > 0 && (
@@ -1974,6 +1976,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
                 归档 {selectedVisibleGarments.length} 项
               </button>
             )}
+            <button className="secondary compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
             <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 套` : '0 套'}</span>
           </div>
         </div>
@@ -1985,8 +1988,8 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
               item={item}
               onOpen={() => void openDetail(item)}
               onTag={['DRAFT', 'TAGGING_FAILED', 'TAGGING_READY'].includes(item.status) ? () => void run('重新识别标签中...', () => api.tagStylingGarment(item.id), (r: { item: StylingGarment }) => updateGarmentInView(r.item), { refresh: 'background' }) : undefined}
-              selected={selectedGarmentIds.has(item.id)}
-              onSelect={(checked) => toggleGarmentSelection(item.id, checked)}
+              selected={bulkMode && selectedGarmentIds.has(item.id)}
+              onSelect={bulkMode ? (checked) => toggleGarmentSelection(item.id, checked) : undefined}
               onDelete={() => openGarmentDeleteDialog([item])}
             />
           ))}</div>
@@ -2451,7 +2454,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
 
   return (
     <section className="page workbench-page model-shell-page">
-      <PageTitle title="模特与背景" subtitle={isAdmin ? '维护数字模特的多角度头部参考图，以及一张全局拍摄背景参考图。' : '查看默认模特的多角度头部参考图与拍摄背景参考图。'} />
+      <PageTitle title="模特与背景" />
       <div className="panel model-page">
         <div className="model-meta">
           <div className="model-cover">
@@ -2591,6 +2594,7 @@ function PromptMaintenancePage({ run }: { run: any }) {
   const [invocations, setInvocations] = useState<PromptInvocationOption[]>([])
   const [attemptId, setAttemptId] = useState<number | undefined>()
   const [historicalPrompt, setHistoricalPrompt] = useState('')
+  const [showTools, setShowTools] = useState(false)
 
   function loadConfigs(selectKey?: string) {
     return api.listPromptConfigs().then((result) => {
@@ -2620,9 +2624,21 @@ function PromptMaintenancePage({ run }: { run: any }) {
   const segments = items.filter((item) => item.groupType === 'segment')
   const assemblies = items.filter((item) => item.groupType === 'assembly')
 
+  useEffect(() => {
+    document.body.dataset.promptDirty = dirty ? 'true' : 'false'
+    if (!dirty) return () => { delete document.body.dataset.promptDirty }
+    const warnUnsaved = (event: BeforeUnloadEvent) => event.preventDefault()
+    window.addEventListener('beforeunload', warnUnsaved)
+    return () => {
+      window.removeEventListener('beforeunload', warnUnsaved)
+      delete document.body.dataset.promptDirty
+    }
+  }, [dirty])
+
   function selectItem(key: string) {
     const next = items.find((item) => item.key === key)
     if (!next) return
+    if (dirty && !window.confirm('当前 Prompt 有未保存修改，确定切换并放弃这些修改吗？')) return
     setActiveKey(key)
     setDraft(next.content)
     setRendered(next.renderedPreview)
@@ -2635,6 +2651,7 @@ function PromptMaintenancePage({ run }: { run: any }) {
 
   function refreshPreview() {
     if (!activeItem) return
+    setShowTools(true)
     void run('渲染 Prompt 预览中...', () => api.previewPromptConfig(activeItem.key, draft, attemptId), (result: { rendered: string; historicalPrompt?: string | null; diagnostics: { missingPlaceholders: string[]; usedSegments: string[] } }) => {
       setRendered(result.rendered)
       setHistoricalPrompt(result.historicalPrompt ?? '')
@@ -2661,10 +2678,9 @@ function PromptMaintenancePage({ run }: { run: any }) {
     <section className="page workbench-page prompt-page">
       <PageTitle
         title="Prompt 维护"
-        subtitle="维护分段 Prompt 和组装 Prompt；AI 选搭原则直接写入 AI 选搭 Prompt 正文。"
-        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={refreshPreview} disabled={!activeItem}><Eye size={16} />预览</button><button className="primary" onClick={save} disabled={!activeItem || !dirty}><Save size={16} />保存</button></div>}
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={() => setShowTools((value) => !value)}><Eye size={16} />{showTools ? '收起预览工具' : '预览工具'}</button>{showTools && <button className="secondary" onClick={refreshPreview} disabled={!activeItem}><RefreshCw size={16} />刷新预览</button>}<button className="primary" onClick={save} disabled={!activeItem || !dirty}><Save size={16} />保存</button></div>}
       />
-      <div className="prompt-maintenance-layout">
+      <div className={`prompt-maintenance-layout ${showTools ? '' : 'tools-collapsed'}`}>
         <aside className="panel prompt-nav-panel">
           <PromptNavGroup title="分段 Prompt" items={segments} activeKey={activeKey} onSelect={selectItem} />
           <PromptNavGroup title="组装 Prompt" items={assemblies} activeKey={activeKey} onSelect={selectItem} />
@@ -2688,7 +2704,7 @@ function PromptMaintenancePage({ run }: { run: any }) {
             </>
           ) : <EmptyState title="暂无 Prompt 配置" text="后端还没有返回可维护的 Prompt 配置。" />}
         </section>
-        <aside className="panel prompt-preview-panel">
+        {showTools && <aside className="panel prompt-preview-panel">
           <div className="prompt-side-section">
             <h3>历史调用上下文</h3>
             <select value={attemptId ?? ''} onChange={(event) => setAttemptId(event.target.value ? Number(event.target.value) : undefined)}>
@@ -2717,7 +2733,7 @@ function PromptMaintenancePage({ run }: { run: any }) {
               ))}
             </div>
           </div>
-        </aside>
+        </aside>}
       </div>
     </section>
   )
@@ -2757,6 +2773,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   const [downloadPrecheck, setDownloadPrecheck] = useState<FinalImageExportPrecheck | null>(null)
   const [downloadChecking, setDownloadChecking] = useState(false)
   const [pageSize, setPageSize] = useState(12)
+  const [bulkMode, setBulkMode] = useState(false)
   const selectableRecordIds = items.filter((item) => !isTaskRunning(item)).map((item) => item.id)
   const selectedVisibleRecords = items.filter((item) => selectedRecordIds.has(item.id) && selectableRecordIds.includes(item.id))
   const allVisibleRecordsSelected = selectableRecordIds.length > 0 && selectableRecordIds.every((id) => selectedRecordIds.has(id))
@@ -2893,7 +2910,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
 
   return (
     <section className="page workbench-page records-page">
-      <PageTitle title="生成记录" subtitle="查看历史拍摄任务、分镜预览和最终成片。" />
+      <PageTitle title="生成记录" />
       <div className="records-layout">
         <div className="panel record-list">
           <div className="record-list-head">
@@ -2903,7 +2920,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
                 setIncludeArchived(event.target.checked)
                 setSelectedRecordIds(new Set())
               }} /> 查看已归档</label>
-              <label><input type="checkbox" checked={allVisibleRecordsSelected} disabled={!selectableRecordIds.length} onChange={(event) => toggleVisibleRecordSelection(event.target.checked)} /> 全选本页</label>
+              {bulkMode && <label><input type="checkbox" checked={allVisibleRecordsSelected} disabled={!selectableRecordIds.length} onChange={(event) => toggleVisibleRecordSelection(event.target.checked)} /> 全选本页</label>}
             </div>
             <div className="record-list-meta">
               {selectedVisibleRecords.length > 0 && (
@@ -2911,6 +2928,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
                   <Download size={14} /> {downloadChecking ? '检查成片中...' : `下载成片 ${selectedVisibleRecords.length} 项`}
                 </button>
               )}
+              <button className="secondary compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedRecordIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
               {selectedVisibleRecords.length > 0 && (
                 <button className="secondary" onClick={runRecordBatchAction}>
                   归档 {selectedVisibleRecords.length} 项
@@ -2925,20 +2943,20 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
                 key={item.id}
                 className={`record-row ${detail?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}
               >
-                <input
+                {bulkMode && <input
                   type="checkbox"
                   checked={selectedRecordIds.has(item.id)}
                   disabled={isTaskRunning(item)}
                   onChange={(event) => toggleRecordSelection(item.id, event.target.checked)}
                   aria-label={`选择 ${item.name}`}
-                />
+                />}
                 <button className="record-open" aria-current={detail?.id === item.id ? 'true' : undefined} title="查看记录详情" onClick={() => openRecord(item)}>
                   <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
                   <div><strong>{item.name}</strong><span>{item.archivedAt ? '已归档' : statusText(item.status)} · {dateText(item.createdAt)}</span></div>
                   <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
                 </button>
                 <button
-                  className="primary record-action-button"
+                  className="secondary record-action-button"
                   onClick={() => openTaskInStudio(item)}
                   title="回到 AI 摄影棚恢复该任务"
                 >
@@ -2975,7 +2993,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
               <Meta label="状态" value={statusText(detail.status)} />
               <Meta label="选中搭配" value={`${detail.styling?.selectedMaterials?.length ?? 0} 件`} />
               <Meta label="拍摄剧本" value={detail.shootScript ? '已生成' : '未生成'} />
-              {detail.shootScript?.summary?.summary && <p className="record-script-summary">{String(detail.shootScript.summary.summary)}</p>}
+              {detail.shootScript?.summary?.summary && <details className="record-script-details"><summary>查看拍摄剧本摘要</summary><p className="record-script-summary">{String(detail.shootScript.summary.summary)}</p></details>}
               <RecordImagePreview task={detail} />
             </>
           ) : <EmptyState title="选择一条记录" text="查看分镜预览、搭配服装和最终成片。" />}
