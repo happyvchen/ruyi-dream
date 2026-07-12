@@ -1421,7 +1421,7 @@ function StylingPlanSummary({ task }: { task: GenerationTask }) {
     <div className="styling-plan">
       <div className="styling-plan-head">
         <div>
-          <span>推荐造型方案</span>
+          <span className="result-verdict"><Check size={14} />推荐造型方案</span>
           <h3>{stringValue(planValue(selected ?? {}, 'title')) || stringValue(planValue(selected ?? {}, 'mode')) || '主推款优先'}</h3>
         </div>
         <div className="score-strip">
@@ -1432,6 +1432,9 @@ function StylingPlanSummary({ task }: { task: GenerationTask }) {
         </div>
       </div>
       <p>{styling.reasonSummary || stringValue(planValue(plan, 'reason_summary'))}</p>
+      <div className="selected-strip">
+        {styling.selectedMaterials.length ? styling.selectedMaterials.map((item) => <GarmentCard key={item.id} item={item} />) : <EmptyState title="无需库内搭配服装" text="AI Stylist 判断本次以主推款单穿或生成配饰辅助更合适。" />}
+      </div>
       {requirementText && (
         <div className="requirement-summary">
           <span>用户介入要求</span>
@@ -1439,27 +1442,24 @@ function StylingPlanSummary({ task }: { task: GenerationTask }) {
           {requirementItems.length > 0 && requirementItems.slice(0, 5).map((item, index) => <em key={`${item}-${index}`}>{item}</em>)}
         </div>
       )}
-      <div className="styling-plan-grid">
+      <div className="styling-plan-grid primary-review-grid">
         <InfoBlock title="主推款理解" items={[stringValue(hero.hero_visual_summary), ...stringList(hero.hero_selling_points)].filter(Boolean)} />
-        <InfoBlock title="审美诊断" items={aestheticDiagnosis} empty="暂无审美诊断" />
         <InfoBlock title="图位重点" items={heroFocus.length ? heroFocus : stringList(hero.hero_selling_points)} />
-        <InfoBlock title="生成配饰" items={generatedAccessories.length ? generatedAccessories : ['低存在感鞋包饰品']} />
         <InfoBlock title="风险提示" items={[...stringList(hero.hero_visibility_risks), ...(styling.warnings ?? [])].filter(Boolean)} empty="暂无明显风险" />
       </div>
-      <div className="selected-strip">
-        {styling.selectedMaterials.length ? styling.selectedMaterials.map((item) => <GarmentCard key={item.id} item={item} />) : <EmptyState title="无需库内搭配服装" text="AI Stylist 判断本次以主推款单穿或生成配饰辅助更合适。" />}
-      </div>
-      {rejected.length > 0 && (
-        <div className="rejected-list">
-          <strong>未采用方案</strong>
-          {rejected.slice(0, 3).map((item, index) => {
-            const reason = userFacingMaterialText(stringValue(item.reason), materialCodesById)
-            const codes = rejectedMaterialCodes(item, materialCodesById)
-            const prefix = codes.length && !codes.some((code) => reason.includes(code)) ? codes.join('、') : ''
-            return <span key={`${stringValue(item.outfit_key) || stringValue(item.id)}-${index}`}>{[prefix, reason].filter(Boolean).join(' · ')}</span>
-          })}
+      <details className="result-details">
+        <summary>查看审美诊断、生成配饰与未采用方案</summary>
+        <div className="styling-plan-grid secondary-review-grid">
+          <InfoBlock title="审美诊断" items={aestheticDiagnosis} empty="暂无审美诊断" />
+          <InfoBlock title="生成配饰" items={generatedAccessories.length ? generatedAccessories : ['低存在感鞋包饰品']} />
         </div>
-      )}
+        {rejected.length > 0 && <div className="rejected-list"><strong>未采用方案</strong>{rejected.slice(0, 3).map((item, index) => {
+          const reason = userFacingMaterialText(stringValue(item.reason), materialCodesById)
+          const codes = rejectedMaterialCodes(item, materialCodesById)
+          const prefix = codes.length && !codes.some((code) => reason.includes(code)) ? codes.join('、') : ''
+          return <span key={`${stringValue(item.outfit_key) || stringValue(item.id)}-${index}`}>{[prefix, reason].filter(Boolean).join(' · ')}</span>
+        })}</div>}
+      </details>
     </div>
   )
 }
@@ -1632,28 +1632,11 @@ function ShootScriptSummary({ task }: { task: GenerationTask }) {
           <span><b>{resolvedAccessories.length || adjustments.length}</b>配饰</span>
         </div>
       </div>
-      <p>{stringValue(summary.summary) || '模型未返回剧本摘要，请查看下方镜头明细。'}</p>
       {risks.length > 0 && (
-        <div className="rejected-list">
+        <div className="rejected-list review-warning">
           <strong>选搭风险与建议</strong>
           {risks.map((item, index) => (
-            <span key={`${stringValue(item.risk_id)}-${index}`}>{[stringValue(item.severity), stringValue(item.risk), stringValue(item.user_visible_recommendation)].filter(Boolean).join(' · ')}</span>
-          ))}
-        </div>
-      )}
-      {adjustments.length > 0 && (
-        <div className="rejected-list">
-          <strong>生成配饰调整</strong>
-          {adjustments.map((item, index) => (
-            <span key={`${stringValue(item.item_type)}-${index}`}>{[stringValue(item.item_type), stringValue(item.adjusted_direction), stringValue(item.reason)].filter(Boolean).join(' · ')}</span>
-          ))}
-        </div>
-      )}
-      {resolvedAccessories.length > 0 && (
-        <div className="rejected-list">
-          <strong>最终配饰方案</strong>
-          {resolvedAccessories.map((item, index) => (
-            <span key={`${stringValue(item.item_type)}-${index}`}>{[stringValue(item.item_type), stringValue(item.final_direction), stringValue(item.visibility)].filter(Boolean).join(' · ')}</span>
+            <span key={`${stringValue(item.risk_id)}-${index}`}>{[riskSeverityLabel(stringValue(item.severity)), stringValue(item.risk), stringValue(item.user_visible_recommendation)].filter(Boolean).join(' · ')}</span>
           ))}
         </div>
       )}
@@ -1672,11 +1655,26 @@ function ShootScriptSummary({ task }: { task: GenerationTask }) {
           </div>
         ))}
       </div>
+      <details className="result-details">
+        <summary>查看完整导演说明与配饰方案</summary>
+        <p>{stringValue(summary.summary) || '模型未返回剧本摘要，请查看镜头明细。'}</p>
+        {adjustments.length > 0 && <div className="rejected-list"><strong>生成配饰调整</strong>{adjustments.map((item, index) => <span key={`${stringValue(item.item_type)}-${index}`}>{[accessoryTypeLabel(stringValue(item.item_type)), stringValue(item.adjusted_direction), stringValue(item.reason)].filter(Boolean).join(' · ')}</span>)}</div>}
+        {resolvedAccessories.length > 0 && <div className="rejected-list"><strong>最终配饰方案</strong>{resolvedAccessories.map((item, index) => <span key={`${stringValue(item.item_type)}-${index}`}>{[accessoryTypeLabel(stringValue(item.item_type)), stringValue(item.final_direction), stringValue(item.visibility)].filter(Boolean).join(' · ')}</span>)}</div>}
+      </details>
     </div>
   )
 }
 
-function shootScriptShots(task: GenerationTask): Record<string, unknown>[] {
+function accessoryTypeLabel(value: string) {
+  return ({ bag: '包', jewelry: '首饰', shoes: '鞋', hat: '帽子' } as Record<string, string>)[value.toLowerCase()] ?? value
+}
+
+function riskSeverityLabel(value: string) {
+  return ({ low: '低风险', medium: '中风险', high: '高风险' } as Record<string, string>)[value.toLowerCase()] ?? value
+}
+
+function shootScriptShots(task: GenerationTask | null): Record<string, unknown>[] {
+  if (!task) return []
   const scriptShots = arrayValue<Record<string, unknown>>(task.shootScript?.script ?? {}, 'shots')
   if (scriptShots.length) return scriptShots
   return (task.shotPlans ?? []).map((item) => ({ shot_index: item.sortOrder, shot_role: item.shotType, ...(item.plan ?? {}) } as Record<string, unknown>))
@@ -1707,9 +1705,7 @@ function PreviewStep({ task, setTask, run, userInstruction, localOperations, sta
           <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_preview" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成分镜预览 · Attempt #${operation.id}`, ['generation_preview'], operation.id) : undefined} /></div>
         ) : (
           <div className="stage-business-result" key="result">{preview?.asset ? (
-            <button className="preview-board-open" onClick={() => preview.asset && setViewer(assetLightboxImage(preview.asset))} title="放大查看">
-              <img className="preview-board" src={mediaUrl(assetPreviewSrc(preview.asset))} loading="lazy" alt="分镜预览" />
-            </button>
+            <div className="storyboard-review"><button className="preview-board-open" onClick={() => preview.asset && setViewer(assetLightboxImage(preview.asset))} title="放大查看"><img className="preview-board" src={mediaUrl(assetPreviewSrc(preview.asset))} loading="lazy" alt="分镜预览" /></button><div className="storyboard-legend"><span><strong>1–5</strong>生成成片</span><span><strong>6</strong>备用参考，不生成</span><em>点击图片放大检查姿势、构图与光线</em></div></div>
           ) : <EmptyState title="尚未生成分镜预览" text="点击生成预览后，系统会根据拍摄剧本输出一张 3:2 横版分镜预览图。" />}</div>
         ))}</div>
       </div>
@@ -1748,6 +1744,8 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   const canGenerate = !!preview?.asset && !!task && !isTaskLockedForGeneration(task) && ['PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'CANCELLED'].includes(task?.status ?? '')
   const hasFinalImages = images.some((image) => !!image.asset)
   const finalHistoryOperations = task ? operationFallbacks(task, localOperations, 'generation_result_image') : []
+  const shotLabels = shootScriptShots(task)
+  const finalSlots = Array.from({ length: 5 }, (_, index) => images.find((image) => image.sortOrder === index + 1) ?? null)
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
@@ -1757,16 +1755,16 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
           </div>
         ) : (
           <div className="stage-business-result" key="result"><div className="result-grid">
-          {images.length ? images.map((image) => (
-            <div className="result-card" key={image.id}>
-              {image.asset ? (
+          {finalSlots.map((image, index) => (
+            <div className="result-card" key={image?.id ?? `slot-${index + 1}`}>
+              {image?.asset ? (
                 <button className="result-image-open" onClick={() => image.asset && setViewer(assetLightboxImage(image.asset, finalAssets))} title="放大查看">
                   <img src={mediaUrl(assetPreviewSrc(image.asset))} loading="lazy" alt={`最终成片 ${image.sortOrder}`} />
                 </button>
               ) : (
                 <div className="image-placeholder">
-                  {image.activeAttempt ? attemptStatusText(image.activeAttempt) : statusText(image.status)}
-                  {image.activeAttempt && isAttemptRunning(image.activeAttempt) && (
+                  {image ? (image.activeAttempt ? attemptStatusText(image.activeAttempt) : statusText(image.status)) : '等待生成'}
+                  {image?.activeAttempt && isAttemptRunning(image.activeAttempt) && (
                     <small>
                       {(() => {
                         const phase = currentAttemptPhase(image.activeAttempt)
@@ -1775,15 +1773,15 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
                       })()}
                     </small>
                   )}
-                  {image.activeAttempt && !isAttemptRunning(image.activeAttempt) && (() => {
+                  {image?.activeAttempt && !isAttemptRunning(image.activeAttempt) && (() => {
                     const note = attemptFriendlyFailure(image.activeAttempt)
                     return note ? <small className="image-placeholder-failure">{note}</small> : null
                   })()}
                 </div>
               )}
-              <div><span>#{image.sortOrder}</span>{image.asset && <a href={mediaUrl(assetOriginalSrc(image.asset))} target="_blank" rel="noreferrer"><Download size={15} /></a>}{image.status === 'FAILED' && image.activeAttempt?.errorCode === 'DELIVERY_FAILED' && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('重新回传成片中...', () => api.redeliverResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新回传（图已生成，仅重新拉取，不消耗生成额度）"><RefreshCw size={14} /></button>}{!['QUEUED', 'RUNNING'].includes(image.status) && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id, userInstruction), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成"><RotateCcw size={14} /></button>}</div>
+              {(() => { const shot = shotLabels.find((item) => numberValue(item.shot_index) === index + 1); return <div><span><b>#{index + 1}</b>{stringValue(shot?.shot_role_label) || stringValue(shot?.shot_role) || '镜头'}</span>{image?.asset && <a href={mediaUrl(assetOriginalSrc(image.asset))} target="_blank" rel="noreferrer" aria-label={`下载镜头 ${index + 1}`}><Download size={15} /></a>}{image?.status === 'FAILED' && image.activeAttempt?.errorCode === 'DELIVERY_FAILED' && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('重新回传成片中...', () => api.redeliverResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新回传（图已生成，仅重新拉取，不消耗生成额度）" aria-label={`重新回传镜头 ${index + 1}`}><RefreshCw size={14} /></button>}{image && !['QUEUED', 'RUNNING'].includes(image.status) && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id, userInstruction), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成" aria-label={`重新生成镜头 ${index + 1}`}><RotateCcw size={14} /></button>}</div> })()}
             </div>
-          )) : <EmptyState title="尚未生成最终图" text="点击生成成片后会生成前 5 个镜头。" />}
+          ))}
           </div></div>
         ))}</div>
       </div>
