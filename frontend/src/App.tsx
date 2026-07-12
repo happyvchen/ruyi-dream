@@ -1,12 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { DragEvent, FormEvent, ReactNode, UIEvent } from 'react'
+import type { DragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode, UIEvent } from 'react'
 import {
   Bot,
   ChevronLeft,
   ChevronRight,
-  CircleAlert,
-  CircleCheck,
   CircleStop,
   Clock3,
   Download,
@@ -432,7 +430,9 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   const activeBatchIdRef = useRef<string | null>(null)
   const batchAutoRunRequestRef = useRef(0)
   const batchDownloadRequestRef = useRef(0)
-  const [aiLogDialog, setAiLogDialog] = useState<{ title: string; ownerTypes: string[]; records: AICallRecord[]; loading: boolean; error?: string } | null>(null)
+  const technicalDetailTriggerRef = useRef<HTMLElement | null>(null)
+  const technicalDetailRequestRef = useRef(0)
+  const [aiLogDialog, setAiLogDialog] = useState<{ title: string; ownerTypes: string[]; attemptId: number; records: AICallRecord[]; loading: boolean; error?: string } | null>(null)
   const [heroProductInfo, setHeroProductInfo] = useState('')
   const [aiStylingInstruction, setAiStylingInstruction] = useState('')
   const [shootScriptInstruction, setShootScriptInstruction] = useState('')
@@ -476,12 +476,25 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
       loadRecentTasks(recentTaskNextOffset, true)
     }
   }
-  function openAICallLogs(title: string, ownerTypes: string[]) {
+  function openAICallLogs(title: string, ownerTypes: string[], attemptId: number) {
     if (!task || !isAdmin) return
-    setAiLogDialog({ title, ownerTypes, records: [], loading: true })
-    void api.getTaskAiInvocations(task.id)
-      .then((result) => setAiLogDialog({ title, ownerTypes, records: result.items, loading: false }))
-      .catch((error) => setAiLogDialog({ title, ownerTypes, records: [], loading: false, error: error instanceof Error ? error.message : '调用记录读取失败。' }))
+    const taskId = task.id
+    const requestId = technicalDetailRequestRef.current + 1
+    technicalDetailRequestRef.current = requestId
+    technicalDetailTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setAiLogDialog({ title, ownerTypes, attemptId, records: [], loading: true })
+    void api.getTaskAiInvocation(taskId, attemptId)
+      .then((result) => {
+        if (technicalDetailRequestRef.current === requestId && task?.id === taskId) setAiLogDialog({ title, ownerTypes, attemptId, records: [result.item], loading: false })
+      })
+      .catch((error) => {
+        if (technicalDetailRequestRef.current === requestId && task?.id === taskId) setAiLogDialog({ title, ownerTypes, attemptId, records: [], loading: false, error: error instanceof Error ? error.message : '调用记录读取失败。' })
+      })
+  }
+  function closeAICallLogs() {
+    technicalDetailRequestRef.current += 1
+    setAiLogDialog(null)
+    window.setTimeout(() => technicalDetailTriggerRef.current?.focus(), 0)
   }
   function startNewTask() {
     setTask(null)
@@ -561,6 +574,10 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
       })
   }
   useEffect(() => setStep(currentStep), [task?.id, task?.status])
+  useEffect(() => {
+    technicalDetailRequestRef.current += 1
+    setAiLogDialog(null)
+  }, [task?.id])
   useEffect(() => setHeroProductInfo(task?.heroProductInfo ?? task?.userRequirement ?? ''), [task?.id, task?.heroProductInfo, task?.userRequirement])
   useEffect(() => setAiStylingInstruction(task?.stageUserInputs?.aiStyling ?? stageInstructionText(task?.styling?.userInstruction)), [task?.id, task?.stageUserInputs?.aiStyling, task?.styling?.id])
   useEffect(() => setShootScriptInstruction(task?.stageUserInputs?.shootScript ?? stageInstructionText(task?.shootScript?.userInstruction)), [task?.id, task?.stageUserInputs?.shootScript, task?.shootScript?.id])
@@ -745,7 +762,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
       {aiLogDialog && (
         <AICallLogDialog
           dialog={aiLogDialog}
-          onClose={() => setAiLogDialog(null)}
+          onClose={closeAICallLogs}
         />
       )}
       {batchDownloadPrecheck && (
@@ -1316,21 +1333,13 @@ function StageUserInputModule({ step, task, value, savedValue = '', onChange, on
   )
 }
 
-function StageHeader({ title, text, isAdmin, disabled, onOpenLogs }: {
+function StageHeader({ title, text }: {
   title: string
   text: string
-  isAdmin: boolean
-  disabled?: boolean
-  onOpenLogs: () => void
 }) {
   return (
     <div className="step-head">
       <div className="step-copy"><h2>{title}</h2><p>{text}</p></div>
-      {isAdmin && (
-        <button className="secondary" type="button" disabled={disabled} onClick={onOpenLogs}>
-          <Eye size={16} />技术详情
-        </button>
-      )}
     </div>
   )
 }
@@ -1344,19 +1353,18 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[], taskId?: number | null) => void
   isAdmin: boolean
-  onOpenAICallLogs: (title: string, ownerTypes: string[]) => void
+  onOpenAICallLogs: (title: string, ownerTypes: string[], attemptId: number) => void
 }) {
   const locked = !!task && (isTaskRunning(task) || !!task.autoRunTarget)
   const canSelect = !!task && !locked && ['READY_FOR_STYLING', 'STYLING_READY', 'SCRIPT_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task.status)
   const hasStyling = !!task?.styling
   const operations = task ? operationFallbacks(task, localOperations, 'generation_styling') : []
-  const statusFirst = operationStatusHasPriority(operations)
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <StageHeader title="AI 智能选搭" text="AI Stylist 会先理解主推款，再生成推荐造型方案；搭配服装必须服务主推款展示。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('AI 智能选搭技术详情', ['generation_styling'])} />
-        <div className="stage-priority-content">{(statusFirst ? ['status', 'result'] : ['result', 'status']).map((section) => section === 'status' ? (
-          <div className="stage-operation-status" key="status"><AIOperationList operations={operations} /></div>
+        <StageHeader title="AI 智能选搭" text="AI Stylist 会先理解主推款，再生成推荐造型方案；搭配服装必须服务主推款展示。" />
+        <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
+          <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_styling" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`AI 智能选搭 · Attempt #${operation.id}`, ['generation_styling'], operation.id) : undefined} /></div>
         ) : (
           <div className="stage-business-result" key="result">{task?.styling ? (
             <StylingPlanSummary task={task} />
@@ -1569,20 +1577,19 @@ function ShootScriptStep({ task, setTask, run, userInstruction, localOperations,
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[], taskId?: number | null) => void
   isAdmin: boolean
-  onOpenAICallLogs: (title: string, ownerTypes: string[]) => void
+  onOpenAICallLogs: (title: string, ownerTypes: string[], attemptId: number) => void
 }) {
   const canGenerate = (
     !!task?.styling && !isTaskLockedForGeneration(task) && ['STYLING_READY', 'SCRIPT_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task?.status ?? '')
   )
   const hasScript = !!task?.shootScript?.script
   const operations = task ? operationFallbacks(task, localOperations, 'generation_shoot_script') : []
-  const statusFirst = operationStatusHasPriority(operations)
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <StageHeader title="生成拍摄剧本" text="AI Director 会一次性生成 6 个镜头的景别、取景、姿势、走位、背景光线和商品展示要求。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成拍摄剧本技术详情', ['generation_shoot_script'])} />
-        <div className="stage-priority-content">{(statusFirst ? ['status', 'result'] : ['result', 'status']).map((section) => section === 'status' ? (
-          <div className="stage-operation-status" key="status"><AIOperationList operations={operations} /></div>
+        <StageHeader title="生成拍摄剧本" text="AI Director 会一次性生成 6 个镜头的景别、取景、姿势、走位、背景光线和商品展示要求。" />
+        <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
+          <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_shoot_script" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成拍摄剧本 · Attempt #${operation.id}`, ['generation_shoot_script'], operation.id) : undefined} /></div>
         ) : (
           <div className="stage-business-result" key="result">{task?.shootScript ? <ShootScriptSummary task={task} /> : <EmptyState title="尚未生成拍摄剧本" text="点击生成后，系统会把选搭方案转成拍摄前可执行的分镜剧本。" />}</div>
         ))}</div>
@@ -1694,7 +1701,7 @@ function PreviewStep({ task, setTask, run, userInstruction, localOperations, sta
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[], taskId?: number | null) => void
   isAdmin: boolean
-  onOpenAICallLogs: (title: string, ownerTypes: string[]) => void
+  onOpenAICallLogs: (title: string, ownerTypes: string[], attemptId: number) => void
 }) {
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const preview = task?.storyboardPreview ?? task?.preview ?? null
@@ -1703,13 +1710,12 @@ function PreviewStep({ task, setTask, run, userInstruction, localOperations, sta
   ) || (!!task && !isTaskLockedForGeneration(task) && task.status === 'FAILED' && !!task.shootScript && !preview?.asset)
   const hasPreview = !!preview?.asset
   const operations = task ? operationFallbacks(task, localOperations, 'generation_preview') : []
-  const statusFirst = operationStatusHasPriority(operations)
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <StageHeader title="生成分镜预览" text="按拍摄剧本生成一张 3:2 横版分镜预览图（3 列 × 2 行、6 个 1:1 方格）。最终固定生成前 5 个镜头，第 6 个镜头忽略。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成分镜预览技术详情', ['generation_preview'])} />
-        <div className="stage-priority-content">{(statusFirst ? ['status', 'result'] : ['result', 'status']).map((section) => section === 'status' ? (
-          <div className="stage-operation-status" key="status"><AIOperationList operations={operations} /></div>
+        <StageHeader title="生成分镜预览" text="按拍摄剧本生成一张 3:2 横版分镜预览图（3 列 × 2 行、6 个 1:1 方格）。最终固定生成前 5 个镜头，第 6 个镜头忽略。" />
+        <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
+          <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_preview" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成分镜预览 · Attempt #${operation.id}`, ['generation_preview'], operation.id) : undefined} /></div>
         ) : (
           <div className="stage-business-result" key="result">{preview?.asset ? (
             <button className="preview-board-open" onClick={() => preview.asset && setViewer(assetLightboxImage(preview.asset))} title="放大查看">
@@ -1744,7 +1750,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[], taskId?: number | null) => void
   isAdmin: boolean
-  onOpenAICallLogs: (title: string, ownerTypes: string[]) => void
+  onOpenAICallLogs: (title: string, ownerTypes: string[], attemptId: number) => void
 }) {
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const images = task?.resultSet?.images ?? []
@@ -1752,14 +1758,15 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   const preview = task?.storyboardPreview ?? task?.preview ?? null
   const canGenerate = !!preview?.asset && !!task && !isTaskLockedForGeneration(task) && ['PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'CANCELLED'].includes(task?.status ?? '')
   const hasFinalImages = images.some((image) => !!image.asset)
-  const finalOperations = task ? finalImageOperations(task, localOperations) : []
-  const statusFirst = operationStatusHasPriority(finalOperations)
+  const finalHistoryOperations = task ? operationFallbacks(task, localOperations, 'generation_result_image') : []
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <StageHeader title="生成成片" text="并发生成前 5 个镜头。每张图可单独下载，也可单张重新生成。" isAdmin={isAdmin} disabled={!task} onOpenLogs={() => onOpenAICallLogs('生成成片技术详情', ['generation_result_image'])} />
-        <div className="stage-priority-content">{(statusFirst ? ['status', 'result'] : ['result', 'status']).map((section) => section === 'status' ? (
-          <div className="stage-operation-status" key="status"><FinalOperationSummary operations={finalOperations} /></div>
+        <StageHeader title="生成成片" text="并发生成前 5 个镜头。每张图可单独下载，也可单张重新生成。" />
+        <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
+          <div className="stage-operation-status" key="status">
+            <AIOperationList operations={finalHistoryOperations} taskId={task?.id} ownerType="generation_result_image" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成成片 · Attempt #${operation.id}`, ['generation_result_image'], operation.id) : undefined} />
+          </div>
         ) : (
           <div className="stage-business-result" key="result"><div className="result-grid">
           {images.length ? images.map((image) => (
@@ -3577,19 +3584,41 @@ function JsonOutputPanel({ title, data, defaultOpen = false }: { title: string; 
 }
 
 function AICallLogDialog({ dialog, onClose }: {
-  dialog: { title: string; ownerTypes: string[]; records: AICallRecord[]; loading: boolean; error?: string }
+  dialog: { title: string; ownerTypes: string[]; attemptId: number; records: AICallRecord[]; loading: boolean; error?: string }
   onClose: () => void
 }) {
-  const records = dialog.records.filter((record) => dialog.ownerTypes.includes(record.ownerType))
+  const dialogRef = useRef<HTMLElement | null>(null)
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => closeButtonRef.current?.focus(), [])
+  function trapDialogFocus(event: ReactKeyboardEvent<HTMLElement>) {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      onClose()
+      return
+    }
+    if (event.key !== 'Tab' || !dialogRef.current) return
+    const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>('button:not([disabled]), summary, [href], input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+    if (!focusable.length) return
+    const first = focusable[0]
+    const last = focusable[focusable.length - 1]
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault()
+      first.focus()
+    }
+  }
+  const records = dialog.records.filter((record) => dialog.ownerTypes.includes(record.ownerType) && record.id === dialog.attemptId)
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <section className="confirm-modal ai-log-modal" role="dialog" aria-modal="true" aria-label={dialog.title} onClick={(event) => event.stopPropagation()}>
+      <section ref={dialogRef} className="confirm-modal ai-log-modal" role="dialog" aria-modal="true" aria-label={dialog.title} onKeyDown={trapDialogFocus} onClick={(event) => event.stopPropagation()}>
         <div className="confirm-head">
           <div>
             <h2>{dialog.title}</h2>
             <p>展示本次调用真实发生的请求、响应、解析和时间事实；不用于重放任务。</p>
           </div>
-          <button className="ghost-icon" type="button" onClick={onClose} title="关闭"><X size={18} /></button>
+          <button ref={closeButtonRef} className="ghost-icon" type="button" onClick={onClose} title="关闭"><X size={18} /></button>
         </div>
         {dialog.loading ? (
           <EmptyState title="读取调用记录中" text="正在加载本任务的 AI 调用快照。" />
@@ -3598,7 +3627,7 @@ function AICallLogDialog({ dialog, onClose }: {
         ) : records.length ? (
           <div className="ai-log-list">
             {records.map((record, index) => (
-              <details className="ai-log-entry" key={record.id} open={index === 0}>
+              <details className="ai-log-entry" key={record.id} open>
                 <summary>
                   <div>
                     <strong>{operationLabel(record, index)}</strong>
@@ -3698,82 +3727,91 @@ function formatTagPrimitive(value: unknown) {
   return String(value)
 }
 
-function AIOperationList({ operations, compact = false }: { operations: AIOperation[]; compact?: boolean }) {
+function AIOperationList({ operations, compact = false, taskId, ownerType, onOpenTechnicalDetails }: {
+  operations: AIOperation[]
+  compact?: boolean
+  taskId?: number | null
+  ownerType?: string
+  onOpenTechnicalDetails?: (operation: AIOperation) => void
+}) {
   const [expanded, setExpanded] = useState(false)
-  const merged = mergeOperations(operations.filter(Boolean))
-  const maxVisible = compact ? 1 : expanded ? merged.length : 1
-  const running = merged.filter(isAttemptRunning)
-  const active = expanded ? merged : (running.length ? running : merged).slice(0, maxVisible)
+  const [historyItems, setHistoryItems] = useState<AIOperation[] | null>(null)
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyTotal, setHistoryTotal] = useState(0)
+  const [historyNextCursor, setHistoryNextCursor] = useState<{ beforeCreatedAt: string; beforeId: number } | null>(null)
+  const [historyError, setHistoryError] = useState('')
+  const historyRequestRef = useRef(0)
+  useEffect(() => {
+    historyRequestRef.current += 1
+    setExpanded(false)
+    setHistoryItems(null)
+    setHistoryLoading(false)
+    setHistoryTotal(0)
+    setHistoryNextCursor(null)
+    setHistoryError('')
+  }, [taskId, ownerType])
+  const combined = historyItems ? [...historyItems, ...operations] : operations
+  const actualById = new Map(combined.filter((operation) => operation && operation.id > 0).map((operation) => [operation.id, operation]))
+  const actual = Array.from(actualById.values())
+  const history = (actual.length ? actual : combined.filter(Boolean)).sort((left, right) => operationTime(right) - operationTime(left))
+  const maxVisible = compact ? 1 : expanded ? history.length : 1
+  const active = expanded ? history : history.slice(0, maxVisible)
   const now = useTicker(active.some(isAttemptRunning))
+  function loadHistory(cursor: { beforeCreatedAt: string; beforeId: number } | null, append: boolean) {
+    if (!taskId || !ownerType || historyLoading) return
+    const requestId = historyRequestRef.current + 1
+    historyRequestRef.current = requestId
+    setHistoryLoading(true)
+    setHistoryError('')
+    void api.listTaskAttempts(taskId, ownerType, { limit: 20, ...(cursor ?? {}) })
+      .then((result) => {
+        if (historyRequestRef.current !== requestId) return
+        setHistoryItems((current) => append && current ? [...current, ...result.items] : result.items)
+        setHistoryTotal(result.total)
+        setHistoryNextCursor(result.nextCursor)
+      })
+      .catch((error) => {
+        if (historyRequestRef.current === requestId) setHistoryError(error instanceof Error ? error.message : '调用记录读取失败')
+      })
+      .finally(() => {
+        if (historyRequestRef.current === requestId) setHistoryLoading(false)
+      })
+  }
+  function expandHistory() {
+    setExpanded(true)
+    if (historyItems == null && taskId && ownerType) loadHistory(null, false)
+  }
   if (!active.length) return null
   return (
     <div className={`ai-operation-list ${compact ? 'compact' : ''}`}>
       {active.map((operation, index) => (
-        <AIOperationCard key={`${operation.id}-${operation.ownerType}-${operation.ownerId}-${index}`} operation={operation} now={now} compact={compact} index={index} />
+        <AIOperationCard key={`${operation.id}-${operation.ownerType}-${operation.ownerId}-${index}`} operation={operation} now={now} compact={compact} index={index} onOpenTechnicalDetails={onOpenTechnicalDetails} />
       ))}
-      {!compact && !expanded && merged.length > maxVisible && (
-        <button className="operation-more" onClick={() => setExpanded(true)}>
-          展开其余 {merged.length - maxVisible} 项进度
+      {!compact && !expanded && history.length > maxVisible && (
+        <button className="operation-more" onClick={expandHistory}>
+          展开历史调用记录
         </button>
       )}
-      {!compact && expanded && merged.length > 1 && (
+      {!compact && !expanded && history.length === 1 && taskId && ownerType && (
+        <button className="operation-more" onClick={expandHistory}>展开历史调用记录</button>
+      )}
+      {!compact && expanded && historyLoading && <span className="operation-history-note">正在读取调用记录...</span>}
+      {!compact && expanded && historyError && (
+        <div className="operation-history-error"><span>{historyError}</span><button className="operation-more" type="button" onClick={() => loadHistory(historyNextCursor, historyItems != null)}>重试</button></div>
+      )}
+      {!compact && expanded && historyNextCursor != null && !historyLoading && (
+        <button className="operation-more" onClick={() => loadHistory(historyNextCursor, true)}>加载更多（已显示 {history.length}/{historyTotal}）</button>
+      )}
+      {!compact && expanded && history.length > 0 && (
         <button className="operation-more" onClick={() => setExpanded(false)}>
-          收起进度
+          收起调用记录
         </button>
       )}
     </div>
   )
 }
 
-function operationStatusHasPriority(operations: AIOperation[]) {
-  return operations.some((operation) => isAttemptRunning(operation) || ['FAILED', 'CANCELLED'].includes(operation.status))
-}
-
-function FinalOperationSummary({ operations }: { operations: AIOperation[] }) {
-  const [expanded, setExpanded] = useState(false)
-  const merged = mergeOperations(operations.filter(Boolean)).sort((left, right) => left.ownerId - right.ownerId)
-  const runningCount = merged.filter((operation) => isAttemptRunning(operation) && operation.status !== 'QUEUED').length
-  const queuedCount = merged.filter((operation) => operation.status === 'QUEUED').length
-  const succeededCount = merged.filter((operation) => operation.status === 'SUCCEEDED').length
-  const failedCount = merged.filter((operation) => operation.status === 'FAILED').length
-  const cancelledCount = merged.filter((operation) => operation.status === 'CANCELLED').length
-  const unknownCount = Math.max(0, merged.length - runningCount - queuedCount - succeededCount - failedCount - cancelledCount)
-  const now = useTicker(runningCount + queuedCount > 0)
-  if (!merged.length) return null
-  const total = 5
-  const summary = [
-    `成功 ${succeededCount}/${total}`,
-    runningCount ? `生成中 ${runningCount}` : '',
-    queuedCount ? `排队 ${queuedCount}` : '',
-    failedCount ? `失败 ${failedCount}` : '',
-    cancelledCount ? `已取消 ${cancelledCount}` : '',
-    unknownCount ? `待处理 ${unknownCount}` : '',
-  ].filter(Boolean).join(' · ')
-  const pending = runningCount + queuedCount > 0
-  return (
-    <div className={`final-operation-summary ${pending ? 'is-running' : failedCount || cancelledCount || unknownCount ? 'is-failed' : 'is-complete'}`}>
-      <div className="final-operation-overview">
-        <div>
-          {pending ? <Loader2 size={16} className="spin" /> : failedCount || cancelledCount || unknownCount ? <CircleAlert size={16} /> : <CircleCheck size={16} />}
-          <span>成片生成进度</span>
-        </div>
-        <strong aria-live="polite" aria-atomic="true">{summary}</strong>
-        <button className="operation-more" type="button" aria-expanded={expanded} aria-controls="final-operation-details" onClick={() => setExpanded((current) => !current)}>
-          {expanded ? '收起镜头明细' : '查看镜头明细'}
-        </button>
-      </div>
-      {expanded && (
-        <div className="final-operation-details" id="final-operation-details">
-          {merged.map((operation, index) => (
-            <AIOperationCard key={`${operation.id}-${operation.ownerId}-${index}`} operation={operation} now={now} compact={false} index={index} />
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function AIOperationCard({ operation, now, compact, index }: { operation: AIOperation; now: number; compact?: boolean; index: number }) {
+function AIOperationCard({ operation, now, compact, index, onOpenTechnicalDetails }: { operation: AIOperation; now: number; compact?: boolean; index: number; onOpenTechnicalDetails?: (operation: AIOperation) => void }) {
   const running = isAttemptRunning(operation)
   const seconds = elapsedSeconds(operation.startedAt || operation.createdAt, now, operation.completedAt || operation.failedAt)
   const phase = running ? currentAttemptPhase(operation) : null
@@ -3782,16 +3820,18 @@ function AIOperationCard({ operation, now, compact, index }: { operation: AIOper
   return (
     <div className={`ai-operation-card ${running ? 'is-running' : ''} ${compact ? 'compact' : ''}`}>
       <div className="ai-operation-icon">{running ? <Loader2 size={15} className="spin" /> : <Clock3 size={15} />}</div>
-      <div>
+      <div className="ai-operation-copy">
         <strong>{operationLabel(operation, index)}</strong>
-        <span>
-          {attemptStatusText(operation)}
-          {phase ? ` · ${attemptPhaseText(phase)} ${formatDuration(elapsedSeconds(phase.startedAt, now))}` : ''}
-        </span>
+        {phase && <span>{attemptPhaseText(phase)}</span>}
         {failureNote && <span className="operation-failure">{failureNote}</span>}
         {!compact && breakdown && <span className="operation-breakdown">{breakdown}</span>}
       </div>
-      <time>{formatDuration(seconds)}</time>
+      <div className="ai-operation-meta">
+        <span className={`operation-status status-${operation.status.toLowerCase()}`}>{attemptStatusText(operation)}</span>
+        <time dateTime={operation.startedAt ?? operation.createdAt ?? undefined} title={fullDateTimeText(operation.startedAt ?? operation.createdAt)}>{dateText(operation.startedAt ?? operation.createdAt)}</time>
+        <b>{formatDuration(seconds)}</b>
+        {onOpenTechnicalDetails && operation.id > 0 && <button className="operation-technical-button" type="button" onClick={() => onOpenTechnicalDetails(operation)}><Eye size={13} />技术详情</button>}
+      </div>
     </div>
   )
 }
@@ -3869,10 +3909,7 @@ function useTicker(enabled: boolean) {
 function operationFallbacks(task: GenerationTask, localOperations: AIOperation[], ownerType: string) {
   const remote = (task.aiOperations ?? []).filter((operation) => operation.ownerType === ownerType)
   const local = localOperations.filter((operation) => operation.ownerType === ownerType && operationBelongsToTask(operation, task))
-  const runningRemote = remote.filter(isAttemptRunning)
-  const runningLocal = local.filter(isAttemptRunning)
-  if (runningRemote.length || runningLocal.length) return mergeOperations([...runningRemote, ...runningLocal])
-  if (remote.length) return mergeOperations([...remote, ...local])
+  if (remote.length) return remote.sort((left, right) => operationTime(right) - operationTime(left))
   if (local.length) return local
   if (ownerType === 'generation_styling' && task.status === 'STYLING_RUNNING') {
     return [syntheticOperation(ownerType, task.id, 'gemini', task.updatedAt)]
@@ -3882,25 +3919,6 @@ function operationFallbacks(task: GenerationTask, localOperations: AIOperation[]
   }
   if (ownerType === 'generation_preview' && task.status === 'PREVIEW_RUNNING') {
     return [syntheticOperation(ownerType, task.activeStoryboardPreviewId ?? task.activePreviewId ?? task.id, 'image-2', task.storyboardPreview?.createdAt || task.preview?.createdAt || task.updatedAt)]
-  }
-  return []
-}
-
-function finalImageOperations(task: GenerationTask, localOperations: AIOperation[]) {
-  const local = localOperations.filter((operation) => operation.ownerType === 'generation_result_image' && operationBelongsToTask(operation, task))
-  const imageOperations = (task.resultSet?.images ?? []).map((image) => {
-    const operation = image.activeAttempt ?? local.find((entry) => entry.ownerId === image.sortOrder)
-    return operation ? { ...operation, ownerId: image.sortOrder } : null
-  }).filter(Boolean) as AIOperation[]
-  if (imageOperations.length) {
-    const representedShots = new Set(imageOperations.map((operation) => operation.ownerId))
-    return [...imageOperations, ...local.filter((operation) => !representedShots.has(operation.ownerId))]
-      .sort((left, right) => left.ownerId - right.ownerId)
-      .slice(0, 5)
-  }
-  if (local.length) return local
-  if (task.status === 'FINAL_RUNNING') {
-    return Array.from({ length: 5 }, (_, index) => syntheticOperation('generation_result_image', index + 1, 'image-2', task.updatedAt))
   }
   return []
 }
@@ -3983,7 +4001,10 @@ function operationLabel(operation: AIOperation, index = 0) {
   if (operation.ownerType === 'generation_styling') return '智能选搭'
   if (operation.ownerType === 'generation_shoot_script') return '拍摄剧本'
   if (operation.ownerType === 'generation_preview') return '分镜预览'
-  if (operation.ownerType === 'generation_result_image') return `最终图 ${operation.ownerId > 0 && operation.id < 0 ? operation.ownerId : index + 1}`
+  if (operation.ownerType === 'generation_result_image') {
+    const shot = operation.shotSortOrder ?? (operation.id < 0 && operation.ownerId > 0 ? operation.ownerId : null)
+    return shot ? `镜头 ${shot} · Attempt #${operation.id}` : `成片调用 · Attempt #${operation.id || index + 1}`
+  }
   return '系统处理中'
 }
 
@@ -4661,4 +4682,11 @@ function timestampName() {
 function dateText(value?: string | null) {
   if (!value) return '无'
   return new Date(parseRuyiTime(value)).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+function fullDateTimeText(value?: string | null) {
+  if (!value) return '无时间记录'
+  return new Date(parseRuyiTime(value)).toLocaleString('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
+  })
 }

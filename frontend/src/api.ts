@@ -114,6 +114,7 @@ export type AIOperation = {
   errorMessage?: string | null
   progress?: AttemptProgress | null
   outputAssetId?: number | null
+  shotSortOrder?: number | null
   createdAt?: string | null
   updatedAt?: string | null
 }
@@ -479,8 +480,12 @@ export const api = {
     request<Paginated<GenerationTask>>(params('/api/generation-tasks', options ?? {})),
   getTask: (id: number, includeDebug = false) =>
     request<{ item: GenerationTask }>(params(`/api/generation-tasks/${id}`, { includeDebug })),
-  getTaskAiInvocations: (id: number) =>
-    request<{ items: AICallRecord[] }>(`/api/generation-tasks/${id}/ai-invocations`),
+  listTaskAttempts: (id: number, ownerType: string, options?: { limit?: number; beforeCreatedAt?: string; beforeId?: number }) =>
+    request<{ items: AIOperation[]; total: number; limit: number; hasMore: boolean; nextCursor: { beforeCreatedAt: string; beforeId: number } | null }>(
+      params(`/api/generation-tasks/${id}/attempts`, { ownerType, ...(options ?? {}) }),
+    ),
+  getTaskAiInvocation: (id: number, attemptId: number) =>
+    request<{ item: AICallRecord }>(`/api/generation-tasks/${id}/ai-invocations/${attemptId}`),
   archiveTask: (id: number) =>
     request<{ ok: boolean; archived: boolean; item: GenerationTask }>(`/api/generation-tasks/${id}/archive`, { method: 'POST' }),
   archiveTasks: (ids: number[]) =>

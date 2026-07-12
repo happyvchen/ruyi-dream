@@ -48,6 +48,8 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。`/api/g
 | `/api/generation-tasks/{id}/preview` | POST | 生成 3:2 分镜预览，可携带本次用户介入要求 |
 | `/api/generation-tasks/{id}/generate-final` | POST | 并发生成前 5 张成片，可携带本次用户介入要求 |
 | `/api/generation-tasks/{id}/auto-run-final` | POST | 一键成片：复用已有有效中间结果并自动完成后续步骤 |
+| `/api/generation-tasks/{id}/attempts` | GET | 按 `ownerType` 和稳定 `(created_at, id)` 游标分页读取步骤调用摘要，避免运行中新调用或状态变化造成 offset 重复/漏项；不返回技术快照 |
+| `/api/generation-tasks/{id}/ai-invocations/{attempt_id}` | GET | admin 精确读取属于该任务的单条 attempt 技术详情 |
 | `/api/generation-result-images-new/{image_id}/retry` | POST | 重生单张最终图，可携带本次用户介入要求 |
 | `/api/generation-result-images-new/{image_id}/redeliver` | POST | 重新回传单张最终图：provider 已成功、仅回传失败时零成本重新拉取结果，不创建新的 provider 任务 |
 | `/api/generation-records` | GET | 生成记录列表 |
@@ -79,7 +81,7 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。`/api/g
 - 已有当前有效 `StylingPlan`、`ShootScript` 或分镜预览时复用。
 - `FINAL_PARTIAL` 断点续跑只补失败或缺失的最终图。
 - 任一运行中状态下，所有生成入口都应返回 409 或在前端禁用；只允许取消生成。
-- 任务详情中的 `aiOperations` 只返回当前 active 链路的运行摘要。被新结果替代的旧结果集、旧分镜、旧剧本和旧选搭 attempt 不进入普通任务摘要；完整历史仅用于技术详情和审计。
+- 任务详情中的 `aiOperations` 只返回四个生成步骤各自最新一条调用摘要，用于首屏状态条；展开历史时前端通过 `/attempts` 按步骤分页读取，不存在全任务 100 条截断。摘要不包含模型输入输出、provider request/response 等调试快照；admin 点击某条状态条时通过 attempt 精确接口只读取该条技术事实。
 - 新最终图结果集替代旧结果集时，旧结果集中仍处于 `QUEUED` / `RUNNING` 的单图和 attempt 必须收口为 `CANCELLED`。
 - 已被替代的旧最终图后台任务即使晚于新结果集完成，也不得通过单图回写或 result set reconcile 恢复为当前 active 结果集。
 

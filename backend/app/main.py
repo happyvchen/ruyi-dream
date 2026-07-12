@@ -1592,6 +1592,32 @@ def get_generation_task_ai_invocations(task_id: int, request: Request) -> dict[s
     return {"items": get_task_attempts(task_id)}
 
 
+@app.get("/api/generation-tasks/{task_id}/attempts")
+def get_generation_task_attempt_summaries(
+    task_id: int,
+    owner_type: str = Query(..., alias="ownerType"),
+    limit: int = Query(20, ge=1, le=100),
+    before_created_at: str | None = Query(None, alias="beforeCreatedAt"),
+    before_id: int | None = Query(None, ge=1, alias="beforeId"),
+) -> dict[str, Any]:
+    get_generation_task_row(task_id)
+    if owner_type not in GENERATION_ATTEMPT_OWNER_TYPES:
+        raise HTTPException(status_code=400, detail="不支持的调用步骤")
+    if (before_created_at is None) != (before_id is None):
+        raise HTTPException(status_code=400, detail="分页游标不完整")
+    return get_task_attempt_summary_page(task_id, owner_type, limit, before_created_at, before_id)
+
+
+@app.get("/api/generation-tasks/{task_id}/ai-invocations/{attempt_id}")
+def get_generation_task_ai_invocation(task_id: int, attempt_id: int, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    get_generation_task_row(task_id)
+    record = get_task_attempt_detail(task_id, attempt_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="调用记录不存在")
+    return {"item": record}
+
+
 @app.post("/api/generation-tasks/{task_id}/archive")
 def archive_generation_task(task_id: int) -> dict[str, Any]:
     with get_db() as db:
@@ -8255,6 +8281,38 @@ def actual_model_output_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any
     return snapshot
 
 
+GENERATION_ATTEMPT_OWNER_TYPES = (
+    "generation_styling",
+    "generation_shoot_script",
+    "generation_preview",
+    "generation_result_image",
+)
+
+
+def serialize_attempt_detail(row: Any) -> dict[str, Any]:
+    request_snapshot = loads(row["request_snapshot_json"], {})
+    response_snapshot = loads(row["response_snapshot_json"], {})
+    return {
+        "id": row["id"],
+        "ownerType": row["owner_type"],
+        "ownerId": row["owner_id"],
+        "provider": row["provider"],
+        "status": row["status"],
+        "providerRequestId": row_value(row, "provider_request_id"),
+        "startedAt": row["started_at"],
+        "completedAt": row["completed_at"],
+        "failedAt": row["failed_at"],
+        "errorCode": row_value(row, "error_code"),
+        "errorMessage": row["error_message"],
+        "requestFacts": request_snapshot,
+        "responseFacts": response_snapshot,
+        "modelInput": actual_model_input_from_snapshot(request_snapshot),
+        "modelOutput": actual_model_output_from_snapshot(response_snapshot),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
 def get_task_attempts(task_id: int) -> list[dict[str, Any]]:
     with get_db() as db:
         rows = db.execute(
@@ -8276,34 +8334,7 @@ def get_task_attempts(task_id: int) -> list[dict[str, Any]]:
             """,
             (task_id, task_id, task_id, task_id),
         ).fetchall()
-    records = []
-    for row in rows:
-        request_snapshot = loads(row["request_snapshot_json"], {})
-        response_snapshot = loads(row["response_snapshot_json"], {})
-        records.append(
-            {
-                "id": row["id"],
-                "ownerType": row["owner_type"],
-                "ownerId": row["owner_id"],
-                "provider": row["provider"],
-                "status": row["status"],
-                "providerRequestId": row_value(row, "provider_request_id"),
-                "startedAt": row["started_at"],
-                "completedAt": row["completed_at"],
-                "failedAt": row["failed_at"],
-                "errorCode": row_value(row, "error_code"),
-                "errorMessage": row["error_message"],
-                # 兼容数据库历史列名；对外语义是本次调用实际发生的过程事实，
-                # 不是供未来重放使用的业务对象快照。
-                "requestFacts": request_snapshot,
-                "responseFacts": response_snapshot,
-                "modelInput": actual_model_input_from_snapshot(request_snapshot),
-                "modelOutput": actual_model_output_from_snapshot(response_snapshot),
-                "createdAt": row["created_at"],
-                "updatedAt": row["updated_at"],
-            }
-        )
-    return records
+    return [serialize_attempt_detail(row) for row in rows]
 
 
 def get_attempt_summary(attempt_id: int | None) -> dict[str, Any] | None:
@@ -8336,50 +8367,98 @@ def serialize_attempt_summary(row: Any) -> dict[str, Any]:
     }
 
 
-def get_task_ai_operations(task_id: int) -> list[dict[str, Any]]:
+def task_attempt_scope(task: Any, owner_type: str) -> tuple[str, tuple[Any, ...]]:
+    active_statuses = "('QUEUED', 'RUNNING', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS')"
+    task_id = int(task["id"])
+    if owner_type == "generation_styling":
+        return "ga.owner_type = 'generation_styling' AND ga.owner_id = ?", (task_id,)
+    if owner_type == "generation_shoot_script":
+        return (
+            f"ga.owner_type = 'generation_shoot_script' AND ga.owner_id IN (SELECT id FROM generation_shoot_scripts WHERE task_id = ?) "
+            f"AND (ga.status NOT IN {active_statuses} OR ga.owner_id = ?)",
+            (task_id, row_value(task, "active_shoot_script_id")),
+        )
+    if owner_type == "generation_preview":
+        return (
+            f"ga.owner_type = 'generation_preview' AND ga.owner_id IN (SELECT id FROM generation_previews WHERE task_id = ?) "
+            f"AND (ga.status NOT IN {active_statuses} OR ga.owner_id = ?)",
+            (task_id, row_value(task, "active_storyboard_preview_id") or task["active_preview_id"]),
+        )
+    if owner_type == "generation_result_image":
+        return (
+            f"ga.owner_type = 'generation_result_image' AND ga.owner_id IN ("
+            "SELECT gri.id FROM generation_result_images_new gri "
+            "JOIN generation_result_sets grs ON grs.id = gri.result_set_id "
+            f"WHERE grs.task_id = ? AND (ga.status NOT IN {active_statuses} OR grs.id = ?))",
+            (task_id, task["active_result_set_id"]),
+        )
+    raise ValueError(f"Unsupported owner type: {owner_type}")
+
+
+def get_task_attempt_summary_page(task_id: int, owner_type: str, limit: int, before_created_at: str | None = None, before_id: int | None = None) -> dict[str, Any]:
     with get_db() as db:
         task = db.execute("SELECT * FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
         if not task:
-            return []
+            return {"items": [], "total": 0, "limit": limit, "hasMore": False, "nextCursor": None}
+        scope, params = task_attempt_scope(task, owner_type)
+        cursor_scope = f"({scope}) AND (ga.created_at < ? OR (ga.created_at = ? AND ga.id < ?))" if before_created_at is not None and before_id is not None else scope
+        cursor_params = (*params, before_created_at, before_created_at, before_id) if before_created_at is not None and before_id is not None else params
+        total = int(db.execute(f"SELECT COUNT(*) AS total FROM generation_attempts ga WHERE {scope}", params).fetchone()["total"])
         rows = db.execute(
-            """
-            SELECT ga.* FROM generation_attempts ga
-            WHERE (ga.owner_type = 'generation_styling'
-                    AND ga.owner_id = ?
-                    AND (
-                      (? = 'STYLING_RUNNING' AND ga.status IN ('RUNNING', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS'))
-                      OR ga.id IN (
-                        SELECT attempt_id FROM generation_stylings
-                        WHERE id = ? AND attempt_id IS NOT NULL
-                      )
-                    ))
-               OR (ga.owner_type = 'generation_shoot_script' AND ga.owner_id = ?)
-               OR (ga.owner_type = 'generation_shoot_script'
-                    AND ga.status IN ('RUNNING', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS')
-                    AND ga.owner_id IN (SELECT id FROM generation_shoot_scripts WHERE task_id = ?))
-               OR (ga.owner_type = 'generation_preview' AND ga.owner_id = ?)
-               OR (ga.owner_type = 'generation_preview'
-                    AND ga.status IN ('RUNNING', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS')
-                    AND ga.owner_id IN (SELECT id FROM generation_previews WHERE task_id = ?))
-               OR (ga.owner_type = 'generation_result_image' AND ga.owner_id IN (
-                    SELECT gri.id FROM generation_result_images_new gri
-                    WHERE gri.result_set_id = ?
-                  ))
+            f"""
+            SELECT ga.*,
+                   CASE WHEN ga.owner_type = 'generation_result_image'
+                        THEN (SELECT sort_order FROM generation_result_images_new WHERE id = ga.owner_id)
+                        ELSE NULL END AS shot_sort_order
+            FROM generation_attempts ga
+            WHERE {cursor_scope}
             ORDER BY ga.created_at DESC, ga.id DESC
-            LIMIT 30
+            LIMIT ?
             """,
-            (
-                task_id,
-                task["status"],
-                task["active_styling_id"],
-                row_value(task, "active_shoot_script_id"),
-                task_id,
-                row_value(task, "active_storyboard_preview_id") or task["active_preview_id"],
-                task_id,
-                task["active_result_set_id"],
-            ),
+            (*cursor_params, limit + 1),
         ).fetchall()
-    return [serialize_attempt_summary(row) for row in rows]
+    page_rows = rows[:limit]
+    items = []
+    for row in page_rows:
+        item = serialize_attempt_summary(row)
+        item["shotSortOrder"] = row_value(row, "shot_sort_order")
+        items.append(item)
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "hasMore": len(rows) > limit,
+        "nextCursor": {
+            "beforeCreatedAt": page_rows[-1]["created_at"],
+            "beforeId": page_rows[-1]["id"],
+        } if len(rows) > limit and page_rows else None,
+    }
+
+
+def get_task_attempt_detail(task_id: int, attempt_id: int) -> dict[str, Any] | None:
+    with get_db() as db:
+        task = db.execute("SELECT * FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
+        if not task:
+            return None
+        clauses = []
+        params: list[Any] = []
+        for owner_type in GENERATION_ATTEMPT_OWNER_TYPES:
+            scope, scope_params = task_attempt_scope(task, owner_type)
+            clauses.append(f"({scope})")
+            params.extend(scope_params)
+        row = db.execute(
+            f"SELECT ga.* FROM generation_attempts ga WHERE ga.id = ? AND ({' OR '.join(clauses)})",
+            (attempt_id, *params),
+        ).fetchone()
+    return serialize_attempt_detail(row) if row else None
+
+
+def get_task_ai_operations(task_id: int) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for owner_type in GENERATION_ATTEMPT_OWNER_TYPES:
+        page = get_task_attempt_summary_page(task_id, owner_type, 1)
+        items.extend(page["items"])
+    return sorted(items, key=lambda item: (item.get("createdAt") or "", item["id"]), reverse=True)
 
 
 def serialize_model(row: Any) -> dict[str, Any]:

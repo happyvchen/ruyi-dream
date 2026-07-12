@@ -689,6 +689,13 @@ class BackendCurrentFlowTests(unittest.TestCase):
             )
             db.execute(
                 """
+                INSERT INTO generation_attempts
+                  (id, owner_type, owner_id, provider, status, request_snapshot_json, response_snapshot_json, created_at, updated_at)
+                VALUES (21, 'generation_styling', 1, 'gemini', 'FAILED', '{}', '{}', '2026-06-03T03:00:00Z', '2026-06-03T03:00:00Z')
+                """
+            )
+            db.execute(
+                """
                 INSERT INTO generation_shoot_scripts
                   (id, task_id, input_version_id, styling_id, status, script_json, summary_json,
                    styling_risks_json, accessory_adjustments_json, created_at, updated_at)
@@ -730,12 +737,24 @@ class BackendCurrentFlowTests(unittest.TestCase):
             self.assertEqual(public_detail.status_code, 200)
             public_item = public_detail.json()["item"]
             self.assertNotIn("attempts", public_item)
+            self.assertEqual([item["id"] for item in public_item["aiOperations"]], [20])
             self.assert_no_model_raw_output(public_item["styling"])
             self.assert_no_model_raw_output(public_item["shootScript"])
+
+            attempt_page = client.get("/api/generation-tasks/1/attempts", params={"ownerType": "generation_styling", "limit": 1})
+            self.assertEqual(attempt_page.status_code, 200)
+            self.assertEqual(attempt_page.json()["total"], 2)
+            self.assertEqual([item["id"] for item in attempt_page.json()["items"]], [20])
+            self.assertTrue(attempt_page.json()["hasMore"])
+            cursor = attempt_page.json()["nextCursor"]
+            self.assertEqual(cursor["beforeId"], 20)
+            second_page = client.get("/api/generation-tasks/1/attempts", params={"ownerType": "generation_styling", "limit": 1, **cursor})
+            self.assertEqual([item["id"] for item in second_page.json()["items"]], [21])
 
             self.assertEqual(client.get("/api/generation-tasks/1?includeDebug=true").status_code, 403)
             self.assertEqual(client.get("/api/generation-records/1?includeDebug=true").status_code, 403)
             self.assertEqual(client.get("/api/generation-tasks/1/ai-invocations").status_code, 403)
+            self.assertEqual(client.get("/api/generation-tasks/1/ai-invocations/20").status_code, 403)
 
             admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
             self.assertEqual(admin_login.status_code, 200)
@@ -756,6 +775,11 @@ class BackendCurrentFlowTests(unittest.TestCase):
             invocations = client.get("/api/generation-tasks/1/ai-invocations")
             self.assertEqual(invocations.status_code, 200)
             self.assertEqual(invocations.json()["items"][0]["modelOutput"]["secret"], "attempt raw")
+            invocation = client.get("/api/generation-tasks/1/ai-invocations/20")
+            self.assertEqual(invocation.status_code, 200)
+            self.assertEqual(invocation.json()["item"]["id"], 20)
+            self.assertEqual(invocation.json()["item"]["modelOutput"]["secret"], "attempt raw")
+            self.assertEqual(client.get("/api/generation-tasks/1/ai-invocations/999").status_code, 404)
         finally:
             client.close()
 
@@ -1309,7 +1333,8 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertEqual(task["status"], "COMPLETED")
         self.assertEqual(task["resultSet"]["status"], "SUCCEEDED")
         self.assertEqual({item["status"] for item in task["aiOperations"]}, {"SUCCEEDED"})
-        self.assertEqual({item["ownerId"] for item in task["aiOperations"]}, {11, 12, 13, 14, 15})
+        self.assertEqual([item["ownerId"] for item in task["aiOperations"]], [15])
+        self.assertEqual(task["aiOperations"][0]["shotSortOrder"], 5)
 
     def test_superseding_result_set_cancels_running_images_and_attempts(self) -> None:
         db_module = importlib.import_module("app.db")
