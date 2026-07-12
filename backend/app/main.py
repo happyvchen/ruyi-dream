@@ -1237,6 +1237,29 @@ def delete_styling_garments(payload: StylingGarmentDeleteRequest) -> dict[str, A
     return {"ok": True, "archived": True, "ids": garment_ids}
 
 
+@app.post("/api/styling-garments/{garment_id}/restore")
+def restore_styling_garment(garment_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        rows = get_styling_garment_rows_for_mutation(db, [garment_id])
+        row = rows[0]
+        restore_styling_garments(db, [garment_id])
+        if row["archived_at"] is not None:
+            log_event(db, "styling_garment", garment_id, "restored", {"code": row["code"]})
+    return {"ok": True, "restored": True, "item": get_styling_garment_by_id(garment_id)}
+
+
+@app.post("/api/styling-garments/batch-restore")
+def restore_styling_garment_batch(payload: StylingGarmentDeleteRequest) -> dict[str, Any]:
+    garment_ids = normalized_styling_garment_ids(payload.ids or [])
+    with get_db() as db:
+        rows = get_styling_garment_rows_for_mutation(db, garment_ids)
+        restore_styling_garments(db, garment_ids)
+        for row in rows:
+            if row["archived_at"] is not None:
+                log_event(db, "styling_garment", int(row["id"]), "restored", {"code": row["code"], "batch": True})
+    return {"ok": True, "restored": True, "ids": garment_ids}
+
+
 def normalized_styling_garment_ids(ids: list[int]) -> list[int]:
     normalized = list(dict.fromkeys(int(garment_id) for garment_id in ids if int(garment_id) > 0))
     if not normalized:
@@ -1388,6 +1411,15 @@ def archive_styling_garments(db: Any, garment_ids: list[int], reason: str) -> No
         WHERE id IN ({placeholders})
         """,
         (timestamp, reason, timestamp, *garment_ids),
+    )
+
+
+def restore_styling_garments(db: Any, garment_ids: list[int]) -> None:
+    garment_ids = normalized_styling_garment_ids(garment_ids)
+    placeholders = ", ".join("?" for _ in garment_ids)
+    db.execute(
+        f"UPDATE styling_garments SET archived_at = NULL, archive_reason = NULL, updated_at = ? WHERE id IN ({placeholders})",
+        (now_iso(), *garment_ids),
     )
 
 
@@ -1657,6 +1689,38 @@ def archive_generation_tasks(payload: GenerationTaskDeleteRequest) -> dict[str, 
         for row in rows:
             log_event(db, "generation_task", int(row["id"]), "archived", {"name": row["name"], "batch": True})
     return {"ok": True, "archived": True, "ids": task_ids}
+
+
+@app.post("/api/generation-tasks/{task_id}/restore")
+def restore_generation_task(task_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        rows = get_generation_task_rows_for_mutation(db, [task_id])
+        row = rows[0]
+        timestamp = now_iso()
+        db.execute(
+            "UPDATE generation_tasks SET archived_at = NULL, archive_reason = NULL, updated_at = ? WHERE id = ?",
+            (timestamp, task_id),
+        )
+        if row["archived_at"] is not None:
+            log_event(db, "generation_task", task_id, "restored", {"name": row["name"]})
+    return {"ok": True, "restored": True, "item": get_generation_task_by_id(task_id)}
+
+
+@app.post("/api/generation-tasks/batch-restore")
+def restore_generation_tasks(payload: GenerationTaskDeleteRequest) -> dict[str, Any]:
+    task_ids = normalized_task_ids(payload.ids or [])
+    with get_db() as db:
+        rows = get_generation_task_rows_for_mutation(db, task_ids)
+        timestamp = now_iso()
+        placeholders = ", ".join("?" for _ in task_ids)
+        db.execute(
+            f"UPDATE generation_tasks SET archived_at = NULL, archive_reason = NULL, updated_at = ? WHERE id IN ({placeholders})",
+            (timestamp, *task_ids),
+        )
+        for row in rows:
+            if row["archived_at"] is not None:
+                log_event(db, "generation_task", int(row["id"]), "restored", {"name": row["name"], "batch": True})
+    return {"ok": True, "restored": True, "ids": task_ids}
 
 
 @app.post("/api/generation-tasks/{task_id}/cancel")

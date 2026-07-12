@@ -474,6 +474,10 @@ export const api = {
       '/api/styling-garments/batch-delete',
       { method: 'POST', body: JSON.stringify({ ids, purge: options?.purge, confirmPhrase: options?.confirmPhrase }) },
     ),
+  restoreStylingGarment: (id: number) =>
+    request<{ ok: boolean; restored: boolean; item: StylingGarment }>(`/api/styling-garments/${id}/restore`, { method: 'POST' }),
+  restoreStylingGarments: (ids: number[]) =>
+    request<{ ok: boolean; restored: boolean; ids: number[] }>('/api/styling-garments/batch-restore', { method: 'POST', body: JSON.stringify({ ids }) }),
   getStylingGarmentDeleteImpact: (ids: number[]) =>
     request<{ impact: DeleteImpact }>('/api/styling-garments/delete-impact', { method: 'POST', body: JSON.stringify({ ids }) }),
   listTasks: (options?: { limit?: number; offset?: number; includeArchived?: boolean }) =>
@@ -490,6 +494,10 @@ export const api = {
     request<{ ok: boolean; archived: boolean; item: GenerationTask }>(`/api/generation-tasks/${id}/archive`, { method: 'POST' }),
   archiveTasks: (ids: number[]) =>
     request<{ ok: boolean; archived: boolean; ids: number[] }>('/api/generation-tasks/batch-archive', { method: 'POST', body: JSON.stringify({ ids }) }),
+  restoreTask: (id: number) =>
+    request<{ ok: boolean; restored: boolean; item: GenerationTask }>(`/api/generation-tasks/${id}/restore`, { method: 'POST' }),
+  restoreTasks: (ids: number[]) =>
+    request<{ ok: boolean; restored: boolean; ids: number[] }>('/api/generation-tasks/batch-restore', { method: 'POST', body: JSON.stringify({ ids }) }),
   cancelTask: (id: number) =>
     request<{ ok: boolean; cancelled: boolean; item: GenerationTask }>(`/api/generation-tasks/${id}/cancel`, { method: 'POST' }),
   deleteTask: (id: number, confirmName: string) =>

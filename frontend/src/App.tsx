@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { DragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode, UIEvent } from 'react'
+import type { Dispatch, DragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode, SetStateAction, UIEvent } from 'react'
 import {
   Bot,
   Check,
@@ -1831,6 +1831,8 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
   const [deleteGarmentImpactLoading, setDeleteGarmentImpactLoading] = useState(false)
   const selectableGarmentIds = items.filter((item) => item.status !== 'TAGGING_RUNNING').map((item) => item.id)
   const selectedVisibleGarments = items.filter((item) => selectedGarmentIds.has(item.id) && selectableGarmentIds.includes(item.id))
+  const selectedArchivedGarments = selectedVisibleGarments.filter((item) => item.archivedAt)
+  const selectedActiveGarments = selectedVisibleGarments.filter((item) => !item.archivedAt)
   const allVisibleGarmentsSelected = selectableGarmentIds.length > 0 && selectableGarmentIds.every((id) => selectedGarmentIds.has(id))
 
   async function openDetail(item: StylingGarment) {
@@ -1931,6 +1933,15 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
     }, { refresh: 'background' })
   }
 
+  function restoreGarments(targets: StylingGarment[]) {
+    const ids = targets.map((item) => item.id)
+    void run(ids.length === 1 ? '恢复搭配服装中...' : `恢复 ${ids.length} 套搭配服装中...`, () => api.restoreStylingGarments(ids), () => {
+      setDetail((current) => current && ids.includes(current.id) ? { ...current, archivedAt: null, archiveReason: null } : current)
+      setSelectedGarmentIds(new Set())
+      void refreshLibraryPage().catch(() => undefined)
+    }, { refresh: 'background' })
+  }
+
   function updateGarmentInView(next: StylingGarment) {
     setItems((current) => current.map((item) => item.id === next.id ? next : item))
     if (detail?.id === next.id) setDetail(next)
@@ -1972,9 +1983,9 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
           </div>
           <div className="record-list-meta">
             {selectedVisibleGarments.length > 0 && (
-              <button className="secondary" onClick={() => openGarmentDeleteDialog(selectedVisibleGarments)}>
-                归档 {selectedVisibleGarments.length} 项
-              </button>
+              selectedArchivedGarments.length === selectedVisibleGarments.length
+                ? <button className="secondary" onClick={() => restoreGarments(selectedArchivedGarments)}>恢复 {selectedArchivedGarments.length} 项</button>
+                : <button className="secondary" disabled={selectedArchivedGarments.length > 0} title={selectedArchivedGarments.length ? '请分别选择已归档和未归档服装' : undefined} onClick={() => openGarmentDeleteDialog(selectedActiveGarments)}>归档 {selectedActiveGarments.length} 项</button>
             )}
             <button className="secondary compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
             <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 套` : '0 套'}</span>
@@ -1991,6 +2002,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
               selected={bulkMode && selectedGarmentIds.has(item.id)}
               onSelect={bulkMode ? (checked) => toggleGarmentSelection(item.id, checked) : undefined}
               onDelete={() => openGarmentDeleteDialog([item])}
+              onRestore={() => restoreGarments([item])}
             />
           ))}</div>
         ) : searching ? null : <EmptyState title={query ? '没有匹配的搭配服装' : '暂无搭配服装'} text={query ? '换一个货号或标签关键词试试。' : '点击右上角导入搭配服装。'} />}
@@ -2012,7 +2024,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
           }}
         />
       </div>
-      {detail && <GarmentDetailDrawer item={detail} run={run} isAdmin={role === 'admin'} onClose={() => setDetail(null)} onChange={updateGarmentInView} onDelete={() => openGarmentDeleteDialog([detail])} />}
+      {detail && <GarmentDetailDrawer item={detail} run={run} isAdmin={role === 'admin'} onClose={() => setDetail(null)} onChange={updateGarmentInView} onDelete={() => openGarmentDeleteDialog([detail])} onRestore={() => restoreGarments([detail])} />}
       {deleteGarmentDialog && (
         <DeleteConfirmDialog
           title={deleteGarmentDialog.length === 1 ? '归档搭配服装' : `归档 ${deleteGarmentDialog.length} 套搭配服装`}
@@ -2756,7 +2768,7 @@ function PromptNavGroup({ title, items, activeKey, onSelect }: { title: string; 
 function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   records: GenerationTask[]
   detail: GenerationTask | null
-  setDetail: (task: GenerationTask | null) => void
+  setDetail: Dispatch<SetStateAction<GenerationTask | null>>
   openTaskInStudio: (task: GenerationTask) => void
   run: any
 }) {
@@ -2776,6 +2788,8 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   const [bulkMode, setBulkMode] = useState(false)
   const selectableRecordIds = items.filter((item) => !isTaskRunning(item)).map((item) => item.id)
   const selectedVisibleRecords = items.filter((item) => selectedRecordIds.has(item.id) && selectableRecordIds.includes(item.id))
+  const selectedArchivedRecords = selectedVisibleRecords.filter((item) => item.archivedAt)
+  const selectedActiveRecords = selectedVisibleRecords.filter((item) => !item.archivedAt)
   const allVisibleRecordsSelected = selectableRecordIds.length > 0 && selectableRecordIds.every((id) => selectedRecordIds.has(id))
 
   function refreshRecordPage(targetOffset = offset) {
@@ -2873,6 +2887,15 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
     }, { refresh: 'background' })
   }
 
+  function restoreRecords(targets: GenerationTask[]) {
+    const ids = targets.map((item) => item.id)
+    void run(ids.length === 1 ? '恢复生成记录中...' : `恢复 ${ids.length} 条生成记录中...`, () => api.restoreTasks(ids), () => {
+      setDetail((current) => current && ids.includes(current.id) ? { ...current, archivedAt: null, archiveReason: null } : current)
+      setSelectedRecordIds(new Set())
+      void refreshRecordPage().catch(() => undefined)
+    }, { refresh: 'background' })
+  }
+
   function triggerFinalImageDownload(ids: number[]) {
     if (!ids.length) return
     const anchor = document.createElement('a')
@@ -2930,9 +2953,9 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
               )}
               <button className="secondary compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedRecordIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
               {selectedVisibleRecords.length > 0 && (
-                <button className="secondary" onClick={runRecordBatchAction}>
-                  归档 {selectedVisibleRecords.length} 项
-                </button>
+                selectedArchivedRecords.length === selectedVisibleRecords.length
+                  ? <button className="secondary" onClick={() => restoreRecords(selectedArchivedRecords)}>恢复 {selectedArchivedRecords.length} 项</button>
+                  : <button className="secondary" disabled={selectedArchivedRecords.length > 0} title={selectedArchivedRecords.length ? '请分别选择已归档和未归档记录' : undefined} onClick={runRecordBatchAction}>归档 {selectedActiveRecords.length} 项</button>
               )}
               <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 条` : '0 条'}</span>
             </div>
@@ -2964,9 +2987,9 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
                 </button>
                 <button
                   className="secondary record-action-button"
-                  onClick={() => isTaskRunning(item) ? cancelRecordTask(item) : openRecordDeleteDialog(item)}
+                  onClick={() => isTaskRunning(item) ? cancelRecordTask(item) : item.archivedAt ? restoreRecords([item]) : openRecordDeleteDialog(item)}
                 >
-                  {isTaskRunning(item) ? '取消生成' : '归档'}
+                  {isTaskRunning(item) ? '取消生成' : item.archivedAt ? '恢复归档' : '归档'}
                 </button>
               </div>
             ))}
@@ -2995,6 +3018,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
               <Meta label="拍摄剧本" value={detail.shootScript ? '已生成' : '未生成'} />
               {detail.shootScript?.summary?.summary && <details className="record-script-details"><summary>查看拍摄剧本摘要</summary><p className="record-script-summary">{String(detail.shootScript.summary.summary)}</p></details>}
               <RecordImagePreview task={detail} />
+              {detail.archivedAt && <button className="secondary" onClick={() => restoreRecords([detail])}>恢复归档</button>}
             </>
           ) : <EmptyState title="选择一条记录" text="查看分镜预览、搭配服装和最终成片。" />}
         </div>
@@ -3277,11 +3301,12 @@ function UploadBox({ files, setFiles, max, compact = false }: { files: File[]; s
   )
 }
 
-function GarmentCard({ item, onTag, onOpen, onDelete, selected, onSelect }: {
+function GarmentCard({ item, onTag, onOpen, onDelete, onRestore, selected, onSelect }: {
   item: StylingGarment
   onTag?: () => void
   onOpen?: () => void
   onDelete?: () => void
+  onRestore?: () => void
   selected?: boolean
   onSelect?: (checked: boolean) => void
 }) {
@@ -3320,19 +3345,20 @@ function GarmentCard({ item, onTag, onOpen, onDelete, selected, onSelect }: {
       <div className="card-actions">
         {onOpen && <button className="secondary" onClick={onOpen}><Eye size={16} /> 详情</button>}
         {onTag && <button className="secondary" disabled={tagging} onClick={onTag}>重新识别标签</button>}
-        {onDelete && <button className="secondary" disabled={tagging} onClick={onDelete}><Trash2 size={16} /> 归档</button>}
+        {item.archivedAt ? onRestore && <button className="secondary" disabled={tagging} onClick={onRestore}><RefreshCw size={16} /> 恢复归档</button> : onDelete && <button className="secondary" disabled={tagging} onClick={onDelete}><Trash2 size={16} /> 归档</button>}
       </div>
     </div>
   )
 }
 
-function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete }: {
+function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, onRestore }: {
   item: StylingGarment
   run: any
   isAdmin: boolean
   onClose: () => void
   onChange: (item: StylingGarment) => void
   onDelete: () => void
+  onRestore: () => void
 }) {
   const [working, setWorking] = useState(item.images ?? [])
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
@@ -3515,11 +3541,15 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete }
           <button className="primary" disabled={tagging || !dirty || working.length + pendingFiles.length > 6} onClick={() => void save(true)}>保存并重新识别标签</button>
         </div>
         <div className="danger-zone">
-          <strong>归档</strong>
+          <strong>{item.archivedAt ? '恢复归档' : '归档'}</strong>
           <button className="secondary" disabled={tagging} onClick={() => {
-            onDelete()
-            onClose()
-          }}>归档</button>
+            if (item.archivedAt) {
+              onRestore()
+            } else {
+              onDelete()
+              onClose()
+            }
+          }}>{item.archivedAt ? '恢复归档' : '归档'}</button>
         </div>
       </aside>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}

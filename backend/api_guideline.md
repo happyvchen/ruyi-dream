@@ -22,6 +22,8 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。`/api/g
 | `/api/styling-garments` | POST | 创建搭配服装并上传图片 |
 | `/api/styling-garments/{id}` | GET | 详情 |
 | `/api/styling-garments/{id}` | PATCH | 编辑状态、人工标签和归档信息 |
+| `/api/styling-garments/{id}/restore` | POST | 恢复单套已归档搭配服装 |
+| `/api/styling-garments/batch-restore` | POST | 批量恢复已归档搭配服装 |
 | `/api/styling-garments/{id}/images` | POST | 追加图片 |
 | `/api/styling-garment-images/{image_id}` | PATCH | 调整图片 |
 | `/api/styling-garment-images/{image_id}` | DELETE | 删除图片链接 |
@@ -39,6 +41,8 @@ API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。`/api/g
 | `/api/generation-tasks/{id}` | GET | 任务详情 |
 | `/api/generation-tasks/{id}` | PATCH | 编辑任务名、商品信息和各阶段用户输入草稿；用户输入只影响下一次阶段执行 |
 | `/api/generation-tasks/{id}` | DELETE | 归档或删除任务 |
+| `/api/generation-tasks/{id}/restore` | POST | 恢复单条已归档任务 |
+| `/api/generation-tasks/batch-restore` | POST | 批量恢复已归档任务 |
 | `/api/generation-tasks/{id}/images/from-uploads` | POST | 使用已直传到对象存储的图片追加主推款图片 |
 | `/api/generation-task-images/{image_id}` | PATCH | 调整主推款图片 |
 | `/api/generation-task-images/{image_id}` | DELETE | 删除主推款图片 |
