@@ -3043,12 +3043,10 @@ async def run_generate_final_images(
         task["status"] not in {"PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
         or not task["active_storyboard_preview_id"]
         or not task["active_styling_id"]
-        or not task["active_shoot_script_id"]
     ):
         raise HTTPException(status_code=409, detail="请先生成分镜预览")
     preview_id = int(task["active_storyboard_preview_id"])
     styling_id = int(task["active_styling_id"])
-    shoot_script_id = int(task["active_shoot_script_id"])
     with get_db() as db:
         preview_row = db.execute(
             "SELECT input_version_id FROM generation_previews WHERE id = ? AND task_id = ?",
@@ -3065,7 +3063,6 @@ async def run_generate_final_images(
             int(task["active_result_set_id"]),
             preview_input_version_id,
             styling_id,
-            shoot_script_id,
             preview_id,
             user_instruction_context,
         )
@@ -3084,10 +3081,10 @@ async def run_generate_final_images(
         db.execute("UPDATE generation_tasks SET status = 'FINAL_RUNNING', updated_at = ? WHERE id = ?", (timestamp, task_id))
         cursor = db.execute(
             """
-            INSERT INTO generation_result_sets (task_id, input_version_id, styling_id, shoot_script_id, preview_id, user_instruction_json, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'RUNNING', ?, ?)
+            INSERT INTO generation_result_sets (task_id, input_version_id, styling_id, preview_id, user_instruction_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'RUNNING', ?, ?)
             """,
-            (task_id, input_version_id, styling_id, shoot_script_id, preview_id, dumps(user_instruction_context), timestamp, timestamp),
+            (task_id, input_version_id, styling_id, preview_id, dumps(user_instruction_context), timestamp, timestamp),
         )
         result_set_id = int(cursor.lastrowid)
         supersede_generation_result_sets(db, task_id, timestamp, keep_result_set_id=result_set_id)
@@ -3095,19 +3092,15 @@ async def run_generate_final_images(
             "UPDATE generation_tasks SET current_input_version_id = ?, active_result_set_id = ?, updated_at = ? WHERE id = ?",
             (input_version_id, result_set_id, timestamp, task_id),
         )
-        shot_rows = db.execute(
-            "SELECT * FROM generation_shot_plans WHERE shoot_script_id = ? AND sort_order <= 5 ORDER BY sort_order",
-            (shoot_script_id,),
-        ).fetchall()
         image_ids: list[int] = []
-        for shot in shot_rows:
+        for sort_order, shot_role in enumerate(final_image_slot_roles(get_styling_plan_by_id(styling_id)), start=1):
             image_cursor = db.execute(
                 """
                 INSERT INTO generation_result_images_new
-                  (result_set_id, shot_plan_id, sort_order, user_instruction_json, status, created_at, updated_at)
+                  (result_set_id, shot_role, sort_order, user_instruction_json, status, created_at, updated_at)
                 VALUES (?, ?, ?, ?, 'QUEUED', ?, ?)
                 """,
-                (result_set_id, shot["id"], shot["sort_order"], dumps(user_instruction_context), timestamp, timestamp),
+                (result_set_id, shot_role, sort_order, dumps(user_instruction_context), timestamp, timestamp),
             )
             image_ids.append(int(image_cursor.lastrowid))
     schedule_background_generation(
@@ -3122,7 +3115,6 @@ def continue_active_final_result_set(
     result_set_id: int,
     input_version_id: int,
     styling_id: int,
-    shoot_script_id: int,
     preview_id: int,
     user_instruction_context: dict[str, Any] | None = None,
 ) -> list[int] | None:
@@ -3140,7 +3132,6 @@ def continue_active_final_result_set(
         if (
             int(result_set["input_version_id"]) != input_version_id
             or int(result_set["styling_id"]) != styling_id
-            or int(result_set["shoot_script_id"]) != shoot_script_id
             or int(result_set["preview_id"]) != preview_id
         ):
             return None
@@ -3150,12 +3141,7 @@ def continue_active_final_result_set(
         ).fetchall()
         existing_by_sort = {int(row["sort_order"]): row for row in existing_rows}
         image_ids: list[int] = []
-        shot_rows = db.execute(
-            "SELECT * FROM generation_shot_plans WHERE shoot_script_id = ? AND sort_order <= 5 ORDER BY sort_order",
-            (shoot_script_id,),
-        ).fetchall()
-        for shot in shot_rows:
-            sort_order = int(shot["sort_order"])
+        for sort_order, shot_role in enumerate(final_image_slot_roles(get_styling_plan_by_id(styling_id)), start=1):
             existing = existing_by_sort.get(sort_order)
             if existing and existing["status"] == "SUCCEEDED":
                 continue
@@ -3166,6 +3152,7 @@ def continue_active_final_result_set(
                     """
                     UPDATE generation_result_images_new
                     SET status = 'QUEUED',
+                        shot_role = ?,
                         active_attempt_id = NULL,
                         locked_by = NULL,
                         locked_until = NULL,
@@ -3173,17 +3160,17 @@ def continue_active_final_result_set(
                         updated_at = ?
                     WHERE id = ?
                     """,
-                    (dumps(user_instruction_context or {}), timestamp, int(existing["id"])),
+                    (shot_role, dumps(user_instruction_context or {}), timestamp, int(existing["id"])),
                 )
                 image_ids.append(int(existing["id"]))
                 continue
             cursor = db.execute(
                 """
                 INSERT INTO generation_result_images_new
-                  (result_set_id, shot_plan_id, sort_order, user_instruction_json, status, created_at, updated_at)
+                  (result_set_id, shot_role, sort_order, user_instruction_json, status, created_at, updated_at)
                 VALUES (?, ?, ?, ?, 'QUEUED', ?, ?)
                 """,
-                (result_set_id, int(shot["id"]), sort_order, dumps(user_instruction_context or {}), timestamp, timestamp),
+                (result_set_id, shot_role, sort_order, dumps(user_instruction_context or {}), timestamp, timestamp),
             )
             image_ids.append(int(cursor.lastrowid))
         if image_ids:
@@ -3506,10 +3493,8 @@ def normalize_final_image_export_ids(raw_ids: list[int]) -> list[int]:
     return ids
 
 
-def final_image_export_shot_label(plan_json: str | None, shot_type: str | None) -> str:
-    plan = loads(plan_json, {}) if plan_json else {}
-    label = plan.get("shot_role_label") or plan.get("shot_role") or shot_type or ""
-    return str(label).strip()
+def final_image_export_shot_label(shot_role: str | None) -> str:
+    return str(shot_role or "").strip()
 
 
 def get_final_image_export_overview(db: Any, task_id: int) -> dict[str, Any] | None:
@@ -3526,11 +3511,9 @@ def get_final_image_export_overview(db: Any, task_id: int) -> dict[str, Any] | N
     if task["active_result_set_id"]:
         rows = db.execute(
             """
-            SELECT gri.sort_order, gri.status,
-                   gsp.plan_json, gsp.shot_type,
+            SELECT gri.sort_order, gri.status, gri.shot_role,
                    ma.object_key, ma.mime_type, ma.original_filename, ma.size_bytes
             FROM generation_result_images_new gri
-            LEFT JOIN generation_shot_plans gsp ON gsp.id = gri.shot_plan_id
             LEFT JOIN media_assets ma ON ma.id = gri.current_asset_id AND ma.deleted_at IS NULL
             WHERE gri.result_set_id = ?
             ORDER BY gri.sort_order
@@ -3539,7 +3522,7 @@ def get_final_image_export_overview(db: Any, task_id: int) -> dict[str, Any] | N
         ).fetchall()
         total_count = len(rows)
         for row in rows:
-            label = final_image_export_shot_label(row["plan_json"], row["shot_type"])
+            label = final_image_export_shot_label(row["shot_role"])
             if row["status"] == "SUCCEEDED" and row["object_key"]:
                 downloadable.append(
                     {
@@ -6838,6 +6821,11 @@ def storyboard_prompt_config_key(styling_plan: dict[str, Any]) -> str:
     return STORYBOARD_PROMPT_CONFIG_KEYS[storyboard_category_family(styling_plan)]
 
 
+def final_image_slot_roles(styling_plan: dict[str, Any]) -> list[str]:
+    family = storyboard_category_family(styling_plan)
+    return [f"{family}_grid_{index}" for index in range(1, 6)]
+
+
 def build_builtin_category_shot_template(hero_category: str) -> list[tuple[str, str, str, str, str]]:
     if hero_category == "裤装":
         return [
@@ -7029,19 +7017,16 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
     with get_db() as db:
         row = db.execute(
             """
-            SELECT gri.*, gsp.plan_json, gp.preview_asset_id, grs.styling_id, grs.shoot_script_id,
+            SELECT gri.*, gp.preview_asset_id, grs.styling_id,
                    grs.input_version_id, grs.user_instruction_json AS result_set_user_instruction_json
             FROM generation_result_images_new gri
             JOIN generation_result_sets grs ON grs.id = gri.result_set_id
             JOIN generation_previews gp ON gp.id = grs.preview_id
-            JOIN generation_shot_plans gsp ON gsp.id = gri.shot_plan_id
             WHERE gri.id = ?
             """,
             (result_image_id,),
         ).fetchone()
-    shot_plan = loads(row["plan_json"], {})
     styling_plan = get_styling_plan_by_id(int(row["styling_id"]))
-    shoot_script = get_shoot_script_json_by_id(int(row["shoot_script_id"])) if row["shoot_script_id"] else {}
     image_inputs = build_new_image_inputs(
         task_id,
         int(row["styling_id"]),
@@ -7056,7 +7041,7 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         row_value(row, "user_instruction_json"),
         loads(row_value(row, "result_set_user_instruction_json"), build_stage_user_instruction_context("final_image")),
     )
-    prompt_runtime = build_final_prompt_runtime(int(row["sort_order"]), shot_plan, styling_plan, shoot_script, image_inputs, hero_product_info, final_image_user_instruction)
+    prompt_runtime = build_final_prompt_runtime(int(row["sort_order"]), str(row["shot_role"]), styling_plan, image_inputs, hero_product_info, final_image_user_instruction)
     prompt = render_prompt_template("assembly.final_image", prompt_runtime)
     return {
         "generation": {"stage": "final_image"},
@@ -7066,43 +7051,41 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         "heroProductInfo": hero_product_info,
         "finalImageUserInstruction": final_image_user_instruction,
         "stylingPlan": styling_plan,
-        "shootScript": shoot_script,
-        "shotPlan": shot_plan,
+        "shotRole": row["shot_role"],
     }
 
 
 def build_new_final_prompt(
     shot_index: int,
-    shot_plan: dict[str, Any],
+    shot_role: str,
     styling_plan: dict[str, Any],
-    shoot_script: dict[str, Any],
     image_inputs: list[dict[str, Any]] | None = None,
     hero_product_info: dict[str, Any] | None = None,
     final_image_user_instruction: dict[str, Any] | None = None,
 ) -> str:
     # 渲染层只输出「可变数据」：当前镜头各分段正文、分镜预览格号、参考图各职能图号区间、
     # 商品信息、用户要求。表头、分镜参考话术与事实源约束由 Prompt 维护模板正文托管。
-    runtime = build_final_prompt_runtime(shot_index, shot_plan, styling_plan, shoot_script, image_inputs or [], hero_product_info or {}, final_image_user_instruction or {})
+    runtime = build_final_prompt_runtime(shot_index, shot_role, styling_plan, image_inputs or [], hero_product_info or {}, final_image_user_instruction or {})
     return render_prompt_template("assembly.final_image", runtime)
 
 
 def build_final_prompt_runtime(
     shot_index: int,
-    shot_plan: dict[str, Any],
+    shot_role: str,
     styling_plan: dict[str, Any],
-    shoot_script: dict[str, Any],
     image_inputs: list[dict[str, Any]],
     hero_product_info: dict[str, Any],
     final_image_user_instruction: dict[str, Any],
 ) -> dict[str, Any]:
-    ctx = current_shot_context_for_prompt(shot_index, shot_plan, styling_plan, shoot_script)
     spans = render_image_reference_spans(image_inputs or [])
+    selected = selected_outfit_from_plan(styling_plan)
+    selected_codes = ensure_string_list(styling_plan.get("selected_material_codes"))
     return {
-            "preview_grid_cell": render_preview_grid_cell(ctx),
-            "shot_styling": render_shot_styling(ctx),
-            "shot_global_directing": render_shot_global_directing(ctx),
-            "shot_current": render_shot_current(ctx),
-            "shot_accessories": render_shot_accessories(ctx),
+            "preview_grid_cell": str(shot_index),
+            "shot_styling": f"选中搭配服装：{'、'.join(selected_codes) if selected_codes else '无库内配角'}。{str(selected.get('wearing_notes') or '')}",
+            "shot_global_directing": "严格复现对应分镜格的构图、角度、裁切与姿势，并保持商品和人物一致。",
+            "shot_current": f"分镜第 {shot_index} 格，镜头角色 {shot_role}。",
+            "shot_accessories": "仅保留分镜中已有的低存在感配饰，不新增遮挡商品的配饰。",
             "ref_model_identity": spans["model_identity"],
             "ref_preview_grid": spans["preview_grid"],
             "ref_garment": spans["garment"],

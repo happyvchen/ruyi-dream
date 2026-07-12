@@ -905,7 +905,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 CREATE TABLE generation_result_images_new (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   result_set_id INTEGER NOT NULL REFERENCES generation_result_sets(id) ON DELETE CASCADE,
-                  shot_plan_id INTEGER NOT NULL REFERENCES generation_shot_plans(id),
+                  shot_role INTEGER NOT NULL REFERENCES generation_shot_plans(id),
                   sort_order INTEGER NOT NULL,
                   status TEXT NOT NULL DEFAULT 'QUEUED',
                   current_asset_id INTEGER REFERENCES media_assets(id),
@@ -924,7 +924,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
             self.assertTrue(db_module.table_has_column(db, "generation_tasks", "active_shoot_script_id"))
             self.assertTrue(db_module.table_has_column(db, "generation_tasks", "active_storyboard_preview_id"))
             self.assertTrue(db_module.table_has_column(db, "generation_previews", "shoot_script_id"))
-            self.assertTrue(db_module.table_has_column(db, "generation_result_sets", "shoot_script_id"))
+            self.assertFalse(db_module.table_has_column(db, "generation_result_sets", "shoot_script_id"))
             self.assertTrue(db_module.table_has_column(db, "generation_shot_plans", "shoot_script_id"))
             unique_columns = db_module.table_unique_column_sets(db, "generation_shot_plans")
             self.assertIn(("shoot_script_id", "sort_order"), unique_columns)
@@ -988,7 +988,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_result_images_new (id, result_set_id, shot_plan_id, sort_order, status, current_asset_id, created_at, updated_at) VALUES (30, 10, 6, 1, 'SUCCEEDED', 103, ?, ?)",
+                "INSERT INTO generation_result_images_new (id, result_set_id, shot_role, sort_order, status, current_asset_id, created_at, updated_at) VALUES (30, 10, 'top_grid_1', 1, 'SUCCEEDED', 103, ?, ?)",
                 (timestamp, timestamp),
             )
 
@@ -1023,9 +1023,9 @@ class BackendCurrentFlowTests(unittest.TestCase):
             db.execute(
                 """
                 INSERT INTO generation_stylings
-                  (id, task_id, input_version_id, source_material_ids_json, selected_material_ids_json, selected_material_snapshot_json,
+                  (id, task_id, input_version_id, source_material_ids_json, selected_material_ids_json, selected_material_snapshot_json, styling_plan_json,
                    reason_summary, warnings_json, status, created_at, updated_at)
-                VALUES (3, 1, 2, '[]', '[]', '[]', '', '[]', 'SUCCEEDED', ?, ?)
+                VALUES (3, 1, 2, '[]', '[]', '[]', '{"hero_understanding":{"category":"上装"}}', '', '[]', 'SUCCEEDED', ?, ?)
                 """,
                 (timestamp, timestamp),
             )
@@ -1042,7 +1042,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 5, 4, 'RUNNING', ?, ?)",
+                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 4, 'RUNNING', ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
@@ -1056,8 +1056,8 @@ class BackendCurrentFlowTests(unittest.TestCase):
             db.execute(
                 """
                 INSERT INTO generation_result_images_new
-                  (id, result_set_id, shot_plan_id, sort_order, status, active_attempt_id, locked_by, locked_until, run_attempts, created_at, updated_at)
-                VALUES (30, 10, 6, 1, 'RUNNING', 20, 'dead-worker', ?, 1, ?, ?)
+                  (id, result_set_id, shot_role, sort_order, status, active_attempt_id, locked_by, locked_until, run_attempts, created_at, updated_at)
+                VALUES (30, 10, 'top_grid_1', 1, 'RUNNING', 20, 'dead-worker', ?, 1, ?, ?)
                 """,
                 (future_lock, timestamp, timestamp),
             )
@@ -1098,8 +1098,8 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 """
                 INSERT INTO generation_stylings
                   (id, task_id, input_version_id, source_material_ids_json, selected_material_ids_json, selected_material_snapshot_json,
-                   reason_summary, warnings_json, status, created_at, updated_at)
-                VALUES (3, 1, 2, '[]', '[]', '[]', '', '[]', 'SUCCEEDED', ?, ?)
+                   styling_plan_json, reason_summary, warnings_json, status, created_at, updated_at)
+                VALUES (3, 1, 2, '[]', '[]', '[]', '{"hero_understanding":{"category":"上装"}}', '', '[]', 'SUCCEEDED', ?, ?)
                 """,
                 (timestamp, timestamp),
             )
@@ -1116,14 +1116,14 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 5, 4, 'RUNNING', ?, ?)",
+                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 4, 'RUNNING', ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
                 """
                 INSERT INTO generation_result_images_new
-                  (id, result_set_id, shot_plan_id, sort_order, status, active_attempt_id, locked_by, locked_until, run_attempts, created_at, updated_at)
-                VALUES (30, 10, 6, 1, 'RUNNING', NULL, 'live-worker', ?, 1, ?, ?)
+                  (id, result_set_id, shot_role, sort_order, status, active_attempt_id, locked_by, locked_until, run_attempts, created_at, updated_at)
+                VALUES (30, 10, 'top_grid_1', 1, 'RUNNING', NULL, 'live-worker', ?, 1, ?, ?)
                 """,
                 (future_lock, timestamp, timestamp),
             )
@@ -1204,8 +1204,8 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 """
                 INSERT INTO generation_stylings
                   (id, task_id, input_version_id, source_material_ids_json, selected_material_ids_json, selected_material_snapshot_json,
-                   reason_summary, warnings_json, status, created_at, updated_at)
-                VALUES (3, 1, 2, '[]', '[]', '[]', '', '[]', 'SUCCEEDED', ?, ?)
+                   styling_plan_json, reason_summary, warnings_json, status, created_at, updated_at)
+                VALUES (3, 1, 2, '[]', '[]', '[]', '{"hero_understanding":{"category":"上装"}}', '', '[]', 'SUCCEEDED', ?, ?)
                 """,
                 (timestamp, timestamp),
             )
@@ -1223,19 +1223,19 @@ class BackendCurrentFlowTests(unittest.TestCase):
                     (index + 5, index, timestamp, timestamp),
                 )
             db.execute(
-                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 5, 4, 'PARTIAL', ?, ?)",
+                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 4, 'PARTIAL', ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_result_images_new (id, result_set_id, shot_plan_id, sort_order, status, created_at, updated_at) VALUES (30, 10, 6, 1, 'SUCCEEDED', ?, ?)",
+                "INSERT INTO generation_result_images_new (id, result_set_id, shot_role, sort_order, status, created_at, updated_at) VALUES (30, 10, 'top_grid_1', 1, 'SUCCEEDED', ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_result_images_new (id, result_set_id, shot_plan_id, sort_order, status, created_at, updated_at) VALUES (31, 10, 7, 2, 'FAILED', ?, ?)",
+                "INSERT INTO generation_result_images_new (id, result_set_id, shot_role, sort_order, status, created_at, updated_at) VALUES (31, 10, 'top_grid_2', 2, 'FAILED', ?, ?)",
                 (timestamp, timestamp),
             )
 
-        image_ids = main.continue_active_final_result_set(1, 10, 2, 3, 5, 4)
+        image_ids = main.continue_active_final_result_set(1, 10, 2, 3, 4)
 
         self.assertEqual(image_ids, [31, 32, 33, 34])
         with db_module.get_db() as db:
@@ -1293,16 +1293,16 @@ class BackendCurrentFlowTests(unittest.TestCase):
             db.execute(
                 """
                 INSERT INTO generation_result_sets
-                  (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
-                VALUES (10, 1, 2, 3, 4, 5, 'SUPERSEDED', ?, ?)
+                  (id, task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at)
+                VALUES (10, 1, 2, 3, 5, 'SUPERSEDED', ?, ?)
                 """,
                 (timestamp, timestamp),
             )
             db.execute(
                 """
                 INSERT INTO generation_result_sets
-                  (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
-                VALUES (20, 1, 2, 3, 4, 5, 'SUCCEEDED', ?, ?)
+                  (id, task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at)
+                VALUES (20, 1, 2, 3, 5, 'SUCCEEDED', ?, ?)
                 """,
                 (timestamp, timestamp),
             )
@@ -1310,7 +1310,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 db.execute(
                     """
                     INSERT INTO generation_result_images_new
-                      (id, result_set_id, shot_plan_id, sort_order, status, active_attempt_id, created_at, updated_at)
+                      (id, result_set_id, shot_role, sort_order, status, active_attempt_id, created_at, updated_at)
                     VALUES (?, 10, ?, ?, 'RUNNING', ?, ?, ?)
                     """,
                     (index, index, index, index, timestamp, timestamp),
@@ -1327,7 +1327,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 db.execute(
                     """
                     INSERT INTO generation_result_images_new
-                      (id, result_set_id, shot_plan_id, sort_order, status, active_attempt_id, created_at, updated_at)
+                      (id, result_set_id, shot_role, sort_order, status, active_attempt_id, created_at, updated_at)
                     VALUES (?, 20, ?, ?, 'SUCCEEDED', ?, ?, ?)
                     """,
                     (current_id, index, index, current_id, timestamp, timestamp),
@@ -1387,23 +1387,23 @@ class BackendCurrentFlowTests(unittest.TestCase):
             db.execute(
                 """
                 INSERT INTO generation_result_sets
-                  (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
-                VALUES (10, 1, 2, 3, 4, 5, 'RUNNING', ?, ?)
+                  (id, task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at)
+                VALUES (10, 1, 2, 3, 5, 'RUNNING', ?, ?)
                 """,
                 (timestamp, timestamp),
             )
             db.execute(
                 """
                 INSERT INTO generation_result_sets
-                  (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
-                VALUES (20, 1, 2, 3, 4, 5, 'RUNNING', ?, ?)
+                  (id, task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at)
+                VALUES (20, 1, 2, 3, 5, 'RUNNING', ?, ?)
                 """,
                 (timestamp, timestamp),
             )
             db.execute(
                 """
                 INSERT INTO generation_result_images_new
-                  (id, result_set_id, shot_plan_id, sort_order, status, active_attempt_id, created_at, updated_at)
+                  (id, result_set_id, shot_role, sort_order, status, active_attempt_id, created_at, updated_at)
                 VALUES (1, 10, 1, 1, 'RUNNING', 1, ?, ?)
                 """,
                 (timestamp, timestamp),
@@ -1419,7 +1419,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
             db.execute(
                 """
                 INSERT INTO generation_result_images_new
-                  (id, result_set_id, shot_plan_id, sort_order, status, active_attempt_id, created_at, updated_at)
+                  (id, result_set_id, shot_role, sort_order, status, active_attempt_id, created_at, updated_at)
                 VALUES (2, 20, 1, 1, 'RUNNING', 2, ?, ?)
                 """,
                 (timestamp, timestamp),
@@ -1493,16 +1493,16 @@ class BackendCurrentFlowTests(unittest.TestCase):
             db.execute(
                 """
                 INSERT INTO generation_result_sets
-                  (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
-                VALUES (10, 1, 2, 3, 4, 5, 'SUPERSEDED', ?, ?)
+                  (id, task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at)
+                VALUES (10, 1, 2, 3, 5, 'SUPERSEDED', ?, ?)
                 """,
                 (timestamp, timestamp),
             )
             db.execute(
                 """
                 INSERT INTO generation_result_sets
-                  (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at)
-                VALUES (20, 1, 2, 3, 4, 5, 'RUNNING', ?, ?)
+                  (id, task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at)
+                VALUES (20, 1, 2, 3, 5, 'RUNNING', ?, ?)
                 """,
                 (timestamp, timestamp),
             )
@@ -1510,7 +1510,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 db.execute(
                     """
                     INSERT INTO generation_result_images_new
-                      (id, result_set_id, shot_plan_id, sort_order, status, created_at, updated_at)
+                      (id, result_set_id, shot_role, sort_order, status, created_at, updated_at)
                     VALUES (?, 10, ?, ?, 'SUCCEEDED', ?, ?)
                     """,
                     (index, index, index, timestamp, timestamp),
@@ -1565,11 +1565,11 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 5, 4, 'RUNNING', ?, ?)",
+                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 2, 3, 4, 'RUNNING', ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_result_images_new (id, result_set_id, shot_plan_id, sort_order, status, created_at, updated_at) VALUES (30, 10, 6, 1, 'FAILED', ?, ?)",
+                "INSERT INTO generation_result_images_new (id, result_set_id, shot_role, sort_order, status, created_at, updated_at) VALUES (30, 10, 'top_grid_1', 1, 'FAILED', ?, ?)",
                 (timestamp, timestamp),
             )
 
@@ -1711,11 +1711,11 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (db_module.dumps({"shot_index": 1, "shot_role": "hero", "main_focus": "主推款"}), timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 7, 3, 5, 4, 'RUNNING', ?, ?)",
+                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at) VALUES (10, 1, 7, 3, 4, 'RUNNING', ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_result_images_new (id, result_set_id, shot_plan_id, sort_order, status, created_at, updated_at) VALUES (30, 10, 6, 1, 'QUEUED', ?, ?)",
+                "INSERT INTO generation_result_images_new (id, result_set_id, shot_role, sort_order, status, created_at, updated_at) VALUES (30, 10, 'top_grid_1', 1, 'QUEUED', ?, ?)",
                 (timestamp, timestamp),
             )
 

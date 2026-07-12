@@ -417,8 +417,8 @@ class RedeliverEndpointTests(TempEnvTestCase):
             ).lastrowid
             image_id = conn.execute(
                 """
-                INSERT INTO generation_result_images_new (result_set_id, shot_plan_id, sort_order, status, active_attempt_id, created_at, updated_at)
-                VALUES (?, 1, 1, 'FAILED', ?, ?, ?)
+                INSERT INTO generation_result_images_new (result_set_id, shot_role, sort_order, status, active_attempt_id, created_at, updated_at)
+                VALUES (?, 'top_grid_1', 1, 'FAILED', ?, ?, ?)
                 """,
                 (result_set_id, failed_attempt_id, timestamp, timestamp),
             ).lastrowid

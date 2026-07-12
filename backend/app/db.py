@@ -31,6 +31,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("044", "merge_garment_reference_prompt_runtime", "migration_merge_garment_reference_prompt_runtime"),
     ("045", "drop_subject_reference_prompt_runtime", "migration_drop_subject_reference_prompt_runtime"),
     ("046", "install_category_storyboard_prompts", "migration_install_category_storyboard_prompts"),
+    ("047", "simplify_final_image_slots", "migration_simplify_final_image_slots"),
 )
 
 # prompt_configs 只登记「Prompt 维护」页的配置槽（键 / 分组 / 标题 / 说明 / 排序），
@@ -309,7 +310,6 @@ def init_db() -> None:
               task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
               input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
               styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
-              shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id),
               preview_id INTEGER NOT NULL REFERENCES generation_previews(id),
               user_instruction_json TEXT,
               status TEXT NOT NULL DEFAULT 'RUNNING',
@@ -320,7 +320,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS generation_result_images_new (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               result_set_id INTEGER NOT NULL REFERENCES generation_result_sets(id) ON DELETE CASCADE,
-              shot_plan_id INTEGER NOT NULL REFERENCES generation_shot_plans(id),
+              shot_role TEXT NOT NULL DEFAULT '',
               sort_order INTEGER NOT NULL,
               status TEXT NOT NULL DEFAULT 'QUEUED',
               current_asset_id INTEGER REFERENCES media_assets(id),
@@ -398,6 +398,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_merge_garment_reference_prompt_runtime": migration_merge_garment_reference_prompt_runtime,
         "migration_drop_subject_reference_prompt_runtime": migration_drop_subject_reference_prompt_runtime,
         "migration_install_category_storyboard_prompts": migration_install_category_storyboard_prompts,
+        "migration_simplify_final_image_slots": migration_simplify_final_image_slots,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -1153,6 +1154,44 @@ def migration_install_category_storyboard_prompts(db: sqlite3.Connection) -> Non
             (key, meta[1], meta[2], meta[3], content, meta[4], timestamp),
         )
     db.execute("DELETE FROM prompt_configs WHERE key IN ('assembly.shoot_script', 'assembly.storyboard_preview')")
+
+
+def migration_simplify_final_image_slots(db: sqlite3.Connection) -> None:
+    # 不兼容旧成片结果：旧结果依赖 ShootScript/ShotPlan，直接清除并建立简单五格槽位表。
+    db.execute("DELETE FROM generation_attempts WHERE owner_type IN ('generation_result_image', 'generation_result_set')")
+    db.execute("UPDATE generation_tasks SET active_result_set_id = NULL, status = CASE WHEN active_storyboard_preview_id IS NOT NULL THEN 'PREVIEW_READY' ELSE status END")
+    db.execute("DROP TABLE IF EXISTS generation_result_images_new")
+    db.execute("DROP TABLE IF EXISTS generation_result_sets")
+    db.executescript(
+        """
+        CREATE TABLE generation_result_sets (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+          input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
+          styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
+          preview_id INTEGER NOT NULL REFERENCES generation_previews(id),
+          user_instruction_json TEXT,
+          status TEXT NOT NULL DEFAULT 'RUNNING',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE generation_result_images_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          result_set_id INTEGER NOT NULL REFERENCES generation_result_sets(id) ON DELETE CASCADE,
+          shot_role TEXT NOT NULL,
+          sort_order INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'QUEUED',
+          current_asset_id INTEGER REFERENCES media_assets(id),
+          user_instruction_json TEXT,
+          active_attempt_id INTEGER,
+          locked_by TEXT,
+          locked_until TEXT,
+          run_attempts INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        """
+    )
 
 
 def create_generation_shoot_script_tables(db: sqlite3.Connection) -> None:

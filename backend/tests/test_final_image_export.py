@@ -95,8 +95,8 @@ class FinalImageExportTestCase(unittest.TestCase):
                 (task_id, task_id, task_id, task_id, task_id, now, now),
             )
             db.execute(
-                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, shoot_script_id, preview_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'SUCCEEDED', ?, ?)",
-                (task_id, task_id, task_id, task_id, task_id, task_id, now, now),
+                "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'SUCCEEDED', ?, ?)",
+                (task_id, task_id, task_id, task_id, task_id, now, now),
             )
             db.execute(
                 "UPDATE generation_tasks SET active_result_set_id = ? WHERE id = ?",
@@ -104,20 +104,6 @@ class FinalImageExportTestCase(unittest.TestCase):
             )
             labels = {1: "首图", 2: "全身", 3: "半身", 4: "背面", 5: "局部"}
             for sort_order, status, object_key in image_specs:
-                shot_plan_id = task_id * 100 + sort_order
-                db.execute(
-                    "INSERT INTO generation_shot_plans (id, task_id, styling_id, shoot_script_id, sort_order, shot_type, plan_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'hero', ?, ?, ?)",
-                    (
-                        shot_plan_id,
-                        task_id,
-                        task_id,
-                        task_id,
-                        sort_order,
-                        json.dumps({"shot_role_label": labels.get(sort_order, "镜头")}),
-                        now,
-                        now,
-                    ),
-                )
                 asset_id = None
                 if object_key:
                     cursor = db.execute(
@@ -126,8 +112,8 @@ class FinalImageExportTestCase(unittest.TestCase):
                     )
                     asset_id = cursor.lastrowid
                 db.execute(
-                    "INSERT INTO generation_result_images_new (result_set_id, shot_plan_id, sort_order, status, current_asset_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (task_id, shot_plan_id, sort_order, status, asset_id, now, now),
+                    "INSERT INTO generation_result_images_new (result_set_id, shot_role, sort_order, status, current_asset_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (task_id, labels.get(sort_order, "镜头"), sort_order, status, asset_id, now, now),
                 )
 
     def _client(self):
