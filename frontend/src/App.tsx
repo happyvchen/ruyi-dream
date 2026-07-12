@@ -425,6 +425,13 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   const [recentTaskHasMore, setRecentTaskHasMore] = useState(records.length > recentTaskPageSize)
   const [recentTaskNextOffset, setRecentTaskNextOffset] = useState<number | null>(records.length > recentTaskPageSize ? recentTaskPageSize : null)
   const [recentTaskLoading, setRecentTaskLoading] = useState(false)
+  const [batchItems, setBatchItems] = useState<GenerationTask[]>([])
+  const [batchItemsLoading, setBatchItemsLoading] = useState(false)
+  const [batchDownloadPrecheck, setBatchDownloadPrecheck] = useState<FinalImageExportPrecheck | null>(null)
+  const [batchDownloadChecking, setBatchDownloadChecking] = useState(false)
+  const activeBatchIdRef = useRef<string | null>(null)
+  const batchAutoRunRequestRef = useRef(0)
+  const batchDownloadRequestRef = useRef(0)
   const [aiLogDialog, setAiLogDialog] = useState<{ title: string; ownerTypes: string[]; records: AICallRecord[]; loading: boolean; error?: string } | null>(null)
   const [heroProductInfo, setHeroProductInfo] = useState('')
   const [aiStylingInstruction, setAiStylingInstruction] = useState('')
@@ -434,6 +441,9 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
   const studioView = task ? studioTaskPresentation(task) : null
+  const batchContextMatches = !!task?.batchId && activeBatchIdRef.current === task.batchId
+  const visibleBatchItems = batchContextMatches ? batchItems : []
+  const batchContextLoading = !!task?.batchId && (!batchContextMatches || batchItemsLoading)
   const isAdmin = role === 'admin'
   function applyTaskUpdate(nextTask: GenerationTask) {
     setTask(nextTask)
@@ -504,6 +514,52 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
       applyTaskUpdate(r.item)
     }, { refresh: 'background' })
   }
+  function startBatchAutoRun() {
+    const batchId = task?.batchId
+    if (!batchId || activeBatchIdRef.current !== batchId) return
+    const eligibleCount = batchItems.filter((item) => canStartOneClickFinal(item)).length
+    if (!eligibleCount) return
+    if (!window.confirm(`将为 ${eligibleCount} 个任务自动完成智能选搭、拍摄剧本、分镜预览和成片，生成过程会产生多次 AI 调用；同时只有少量任务并发生成，其余排队等待。确定开始吗？`)) return
+    const requestId = batchAutoRunRequestRef.current + 1
+    batchAutoRunRequestRef.current = requestId
+    void run('启动批量成片中...', () => api.autoRunBatch(batchId), (result: { items: GenerationTask[] }) => {
+      if (activeBatchIdRef.current === batchId && batchAutoRunRequestRef.current === requestId) setBatchItems(result.items)
+    }, { refresh: 'background' })
+  }
+  function triggerBatchDownload(ids: number[]) {
+    if (!ids.length) return
+    const anchor = document.createElement('a')
+    anchor.href = finalImageArchiveUrl(ids)
+    anchor.rel = 'noreferrer'
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    setBatchDownloadPrecheck(null)
+  }
+  function startBatchDownload() {
+    const batchId = task?.batchId
+    if (!batchId || activeBatchIdRef.current !== batchId) return
+    const downloadableCount = batchItems.filter((item) => ['COMPLETED', 'FINAL_PARTIAL'].includes(item.status)).length
+    if (!downloadableCount || batchDownloadChecking) return
+    const ids = batchItems.filter((item) => !isTaskRunning(item)).map((item) => item.id)
+    const requestId = batchDownloadRequestRef.current + 1
+    batchDownloadRequestRef.current = requestId
+    setBatchDownloadChecking(true)
+    void api.precheckFinalImageExport(ids)
+      .then((result) => {
+        if (activeBatchIdRef.current !== batchId || batchDownloadRequestRef.current !== requestId) return
+        const allComplete = result.downloadableTaskIds.length > 0
+          && result.items.every((item) => item.downloadableCount > 0 && !item.issues.length)
+        if (allComplete) triggerBatchDownload(result.downloadableTaskIds)
+        else setBatchDownloadPrecheck(result)
+      })
+      .catch(() => {
+        if (activeBatchIdRef.current === batchId && batchDownloadRequestRef.current === requestId) setBatchDownloadPrecheck(null)
+      })
+      .finally(() => {
+        if (activeBatchIdRef.current === batchId && batchDownloadRequestRef.current === requestId) setBatchDownloadChecking(false)
+      })
+  }
   useEffect(() => setStep(currentStep), [task?.id, task?.status])
   useEffect(() => setHeroProductInfo(task?.heroProductInfo ?? task?.userRequirement ?? ''), [task?.id, task?.heroProductInfo, task?.userRequirement])
   useEffect(() => setAiStylingInstruction(task?.stageUserInputs?.aiStyling ?? stageInstructionText(task?.styling?.userInstruction)), [task?.id, task?.stageUserInputs?.aiStyling, task?.styling?.id])
@@ -548,6 +604,34 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     }, 4000)
     return () => window.clearInterval(timer)
   }, [hasActiveRecentTasks])
+  useEffect(() => {
+    const batchId = task?.batchId
+    activeBatchIdRef.current = batchId ?? null
+    batchAutoRunRequestRef.current += 1
+    batchDownloadRequestRef.current += 1
+    setBatchItems([])
+    setBatchDownloadPrecheck(null)
+    setBatchDownloadChecking(false)
+    if (!batchId) {
+      setBatchItemsLoading(false)
+      return
+    }
+    setBatchItemsLoading(true)
+    let cancelled = false
+    function refresh() {
+      void api.listBatchTasks(batchId as string).then((result) => {
+        if (!cancelled && activeBatchIdRef.current === batchId) setBatchItems(result.items)
+      }).catch(() => undefined).finally(() => {
+        if (!cancelled && activeBatchIdRef.current === batchId) setBatchItemsLoading(false)
+      })
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 4000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [task?.batchId])
   return (
     <section className="page studio-page">
       <PageTitle
@@ -560,7 +644,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
         ) : undefined}
       />
       {task?.batchId && (
-        <BatchBar batchId={task.batchId} currentTaskId={task.id} onOpenTask={openBatchTask} run={run} />
+        <BatchBar items={visibleBatchItems} loading={batchContextLoading} currentTaskId={task.id} onOpenTask={openBatchTask} />
       )}
       <div className="studio-grid">
         <div className="panel studio-main">
@@ -595,6 +679,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
                   {task.status === 'COMPLETED' && <p>重新执行智能选搭、拍摄剧本、分镜预览和成片，已有结果保留在历史记录中。</p>}
                 </div>
               )}
+              {task.batchId && <BatchTaskSummary task={task} items={visibleBatchItems} loading={batchContextLoading} downloadChecking={batchDownloadChecking} onAutoRun={startBatchAutoRun} onDownload={startBatchDownload} />}
               <StageUserInputModule
                 step={visibleStep}
                 task={task}
@@ -661,6 +746,13 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
         <AICallLogDialog
           dialog={aiLogDialog}
           onClose={() => setAiLogDialog(null)}
+        />
+      )}
+      {batchDownloadPrecheck && (
+        <FinalImageDownloadDialog
+          precheck={batchDownloadPrecheck}
+          onClose={() => setBatchDownloadPrecheck(null)}
+          onDownload={triggerBatchDownload}
         />
       )}
     </section>
@@ -737,69 +829,15 @@ function batchChipTone(item: GenerationTask) {
   return ''
 }
 
-function BatchBar({ batchId, currentTaskId, onOpenTask, run }: {
-  batchId: string
+function BatchBar({ items, loading, currentTaskId, onOpenTask }: {
+  items: GenerationTask[]
+  loading: boolean
   currentTaskId: number | null
   onOpenTask: (task: GenerationTask) => void
-  run: <T>(label: string, action: () => Promise<T>, after?: (value: T) => void, options?: RunOptions) => Promise<T | undefined>
 }) {
-  const [items, setItems] = useState<GenerationTask[]>([])
-  const [downloadPrecheck, setDownloadPrecheck] = useState<FinalImageExportPrecheck | null>(null)
-  const [downloadChecking, setDownloadChecking] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    function refresh() {
-      void api.listBatchTasks(batchId).then((result) => {
-        if (!cancelled) setItems(result.items)
-      }).catch(() => undefined)
-    }
-    refresh()
-    const timer = window.setInterval(refresh, 4000)
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-    }
-  }, [batchId])
-
-  const eligibleCount = items.filter((item) => canStartOneClickFinal(item)).length
-  const downloadableCount = items.filter((item) => ['COMPLETED', 'FINAL_PARTIAL'].includes(item.status)).length
-
-  function startBatchAutoRun() {
-    if (!eligibleCount) return
-    if (!window.confirm(`将为 ${eligibleCount} 个任务自动完成智能选搭、拍摄剧本、分镜预览和成片，生成过程会产生多次 AI 调用；同时只有少量任务并发生成，其余排队等待。确定开始吗？`)) return
-    void run('启动批量成片中...', () => api.autoRunBatch(batchId), (result: { items: GenerationTask[] }) => setItems(result.items), { refresh: 'background' })
-  }
-
-  function triggerBatchDownload(ids: number[]) {
-    if (!ids.length) return
-    const anchor = document.createElement('a')
-    anchor.href = finalImageArchiveUrl(ids)
-    anchor.rel = 'noreferrer'
-    document.body.appendChild(anchor)
-    anchor.click()
-    anchor.remove()
-    setDownloadPrecheck(null)
-  }
-
-  function startBatchDownload() {
-    if (!downloadableCount || downloadChecking) return
-    const ids = items.filter((item) => !isTaskRunning(item)).map((item) => item.id)
-    setDownloadChecking(true)
-    void api.precheckFinalImageExport(ids)
-      .then((result) => {
-        const allComplete = result.downloadableTaskIds.length > 0
-          && result.items.every((item) => item.downloadableCount > 0 && !item.issues.length)
-        if (allComplete) triggerBatchDownload(result.downloadableTaskIds)
-        else setDownloadPrecheck(result)
-      })
-      .catch(() => setDownloadPrecheck(null))
-      .finally(() => setDownloadChecking(false))
-  }
-
   return (
     <div className="panel batch-bar">
-      <span className="batch-bar-title">本批次 {items.length} 个任务</span>
+      <span className="batch-bar-title">{loading ? '正在读取批次...' : `本批次 ${items.length} 个任务`}</span>
       <div className="batch-bar-chips">
         {items.map((item) => (
           <button
@@ -813,22 +851,42 @@ function BatchBar({ batchId, currentTaskId, onOpenTask, run }: {
           </button>
         ))}
       </div>
-      <div className="batch-bar-actions">
-        <button className="secondary" disabled={!downloadableCount || downloadChecking} onClick={startBatchDownload}>
-          <Download size={14} /> {downloadChecking ? '检查成片中...' : '下载本批次成片'}
-        </button>
-        <button className="primary" disabled={!eligibleCount} onClick={startBatchAutoRun}>
-          <Sparkles size={14} /> 全部一键成片
-        </button>
-      </div>
-      {downloadPrecheck && (
-        <FinalImageDownloadDialog
-          precheck={downloadPrecheck}
-          onClose={() => setDownloadPrecheck(null)}
-          onDownload={triggerBatchDownload}
-        />
-      )}
     </div>
+  )
+}
+
+function BatchTaskSummary({ task, items, loading, downloadChecking, onAutoRun, onDownload }: {
+  task: GenerationTask
+  items: GenerationTask[]
+  loading: boolean
+  downloadChecking: boolean
+  onAutoRun: () => void
+  onDownload: () => void
+}) {
+  const currentIndex = items.findIndex((item) => item.id === task.id)
+  const completed = items.filter((item) => item.status === 'COMPLETED').length
+  const running = items.filter((item) => isTaskRunning(item) || isTaskQueuedForAutoRun(item)).length
+  const failed = items.filter((item) => item.status === 'FAILED' || item.status === 'FINAL_PARTIAL').length
+  const pending = Math.max(0, items.length - completed - running - failed)
+  const eligibleCount = items.filter((item) => canStartOneClickFinal(item)).length
+  const downloadableCount = items.filter((item) => ['COMPLETED', 'FINAL_PARTIAL'].includes(item.status)).length
+  return (
+    <section className="task-batch-summary" aria-label="批次任务摘要">
+      <div className="task-batch-heading">
+        <span>所属批次</span>
+        <strong>{loading ? '读取中' : currentIndex >= 0 ? `第 ${currentIndex + 1}/${items.length} 个任务` : `共 ${items.length} 个任务`}</strong>
+      </div>
+      <div className="task-batch-counts">
+        <span>完成 {completed}</span>
+        <span>生成中 {running}</span>
+        <span>失败 {failed}</span>
+        <span>待处理 {pending}</span>
+      </div>
+      <div className="task-batch-actions">
+        <button className="primary" type="button" disabled={loading || !eligibleCount} onClick={onAutoRun}><Sparkles size={14} />全部一键成片</button>
+        <button className="secondary" type="button" disabled={loading || !downloadableCount || downloadChecking} onClick={onDownload}><Download size={14} />{downloadChecking ? '检查成片中...' : '下载本批次成片'}</button>
+      </div>
+    </section>
   )
 }
 
