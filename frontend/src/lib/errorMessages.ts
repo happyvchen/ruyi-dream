@@ -24,6 +24,12 @@ const ERROR_MESSAGE_MAP: Record<string, FriendlyError> = {
   CONN_RESET: BUSY_RETRY,
   RATE_LIMITED: BUSY_RETRY,
   PROVIDER_TIMEOUT: BUSY_RETRY,
+  PROVIDER_INTERNAL_ERROR: BUSY_RETRY,
+  PROVIDER_GENERATION_FAILED: {
+    title: '图片生成服务处理失败',
+    hint: '系统已自动重试，仍失败时可再次生成。',
+    tone: 'error',
+  },
   DELIVERY_FAILED: BUSY_RETRY,
 
   // —— 额度不足 ——
@@ -50,6 +56,26 @@ const ERROR_MESSAGE_MAP: Record<string, FriendlyError> = {
     title: 'AI 返回结果异常，请重试',
     hint: '多次失败可稍后再试。',
     tone: 'error',
+  },
+  INVALID_REQUEST: {
+    title: '生成输入不符合服务要求',
+    hint: '请调整输入后重试。',
+    tone: 'warning',
+  },
+  CONTENT_POLICY_VIOLATION: {
+    title: '素材或生成要求未通过安全检查',
+    hint: '请调整相关图片或文字要求后重试。',
+    tone: 'warning',
+  },
+  TASK_NOT_FOUND: {
+    title: '生成任务已失效',
+    hint: '请重新生成。',
+    tone: 'warning',
+  },
+  SUBMISSION_UNKNOWN: {
+    title: '未能确认生成任务是否提交成功',
+    hint: '系统已停止继续提交，避免重复计费。',
+    tone: 'warning',
   },
 
   // —— 任务耗时过长超时（新码 POLL_TIMEOUT 与旧打标超时码 TIMEOUT 走同一文案）——

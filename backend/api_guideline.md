@@ -20,6 +20,8 @@
 - `POST /api/generation-tasks/{task_id}/generate-final`：按分镜前 5 格并发生成最终成片。
 - `POST /api/generation-tasks/{task_id}/auto-run-final`：从当前第一个未完成阶段自动推进到成片。
 - `POST /api/generation-tasks/{task_id}/cancel`：取消当前运行中的选搭、分镜或成片。
+- `POST /api/generation-batches/{batch_id}/auto-run-final`：批次开始/继续一键成片；整批完成后可传 `restart=true` 重新生成。
+- `POST /api/generation-batches/{batch_id}/cancel`：取消批次内所有生成中或排队中的任务，保留已完成成果。
 
 `CANCELLED` 是可恢复的中断态，不是归档或终止态。再次调用单任务 `auto-run-final` 或批次 `auto-run-final` 时，应把任务恢复到最近被取消的阶段并继续；已成功的阶段和成片槽位保持不变。
 
@@ -43,6 +45,28 @@ ABANDONED
 ```
 
 不存在 `SCRIPT_RUNNING` / `SCRIPT_READY`。
+
+## Attempt 错误响应
+
+任务详情和 attempt 分页中的失败摘要统一返回：
+
+```json
+{
+  "errorCode": "INVALID_REQUEST",
+  "errorMessage": "参考图最多支持 6 张",
+  "error": {
+    "code": "INVALID_REQUEST",
+    "title": "生成输入不符合服务要求",
+    "message": "参考图最多支持 6 张",
+    "action": "调整输入后重试",
+    "retryable": false
+  }
+}
+```
+
+`error` 是普通用户契约，前端不得自行解析 provider 原始字符串。admin-only attempt 技术详情额外返回 `technicalMessage`、`requestFacts`、`responseFacts`；其中可包含 ToAPIs 顶层错误、内嵌上游错误和 providerRequestId，但不得进入普通任务列表。
+
+重试必须按错误类别和阶段决策：参数、鉴权、余额、内容策略与业务拒绝不重试；提交结果未知先按 `client_business_id` 对账；状态查询只容忍网络/网关/限流类瞬时错误；明确的 provider 内部生成失败最多重建一次；回传失败只重新下载，不重新生成。
 
 ## Prompt 维护槽位
 

@@ -99,6 +99,14 @@ export type AttemptProgress = {
   phases?: AttemptPhase[]
 }
 
+export type AttemptError = {
+  code: string
+  title: string
+  message: string
+  action: string
+  retryable: boolean
+}
+
 export type AIOperation = {
   id: number
   taskId?: number | null
@@ -112,6 +120,7 @@ export type AIOperation = {
   failedAt?: string | null
   errorCode?: string | null
   errorMessage?: string | null
+  error?: AttemptError | null
   progress?: AttemptProgress | null
   outputAssetId?: number | null
   shotSortOrder?: number | null
@@ -120,6 +129,7 @@ export type AIOperation = {
 }
 
 export type AICallRecord = AIOperation & {
+  technicalMessage?: string | null
   requestFacts?: Record<string, unknown>
   responseFacts?: Record<string, unknown>
   modelInput?: Record<string, unknown>
@@ -505,8 +515,10 @@ export const api = {
   },
   listBatchTasks: (batchId: string) =>
     request<{ items: GenerationTask[] }>(`/api/generation-batches/${encodeURIComponent(batchId)}/tasks`),
-  autoRunBatch: (batchId: string) =>
-    request<{ startedTaskIds: number[]; items: GenerationTask[] }>(`/api/generation-batches/${encodeURIComponent(batchId)}/auto-run-final`, { method: 'POST' }),
+  autoRunBatch: (batchId: string, restart = false) =>
+    request<{ startedTaskIds: number[]; items: GenerationTask[] }>(`/api/generation-batches/${encodeURIComponent(batchId)}/auto-run-final`, { method: 'POST', body: JSON.stringify({ restart }) }),
+  cancelBatch: (batchId: string) =>
+    request<{ cancelledTaskIds: number[]; items: GenerationTask[] }>(`/api/generation-batches/${encodeURIComponent(batchId)}/cancel`, { method: 'POST' }),
   updateTask: (id: number, payload: {
     name?: string
     heroProductInfo?: string

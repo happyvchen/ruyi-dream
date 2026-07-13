@@ -22,6 +22,7 @@ from .generation_progress import (
     GenerationPhaseError,
     classify_provider_error,
     is_retryable_error,
+    normalize_toapis_error,
 )
 from .image_derivatives import generate_image_derivatives
 from .image_ingestion import normalized_image_candidates
@@ -347,16 +348,21 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
             error_label="GPT Image-2 toapis 状态查询失败",
         )
         provider_status = str(status_response.get("status") or "").lower()
+        resolved_task_id = status_response.get("id") or task_id
         next_status = map_toapis_status(provider_status)
         result: dict[str, Any] = {
             "status": next_status,
             "providerStatus": provider_status,
-            "providerRequestId": task_id,
+            "providerRequestId": resolved_task_id,
             "providerStatusResponse": status_response,
         }
         if next_status == "FAILED":
             error = status_response.get("error") if isinstance(status_response.get("error"), dict) else {}
             result["error"] = error.get("message") or status_response.get("fail_reason") or status_response.get("message") or "toapis 生成失败"
+            result["providerError"] = normalize_toapis_error(
+                status_response,
+                fallback_message=str(result["error"]),
+            )
         return result
 
     async def deliver(self, image_row: Any, status_response: dict[str, Any]) -> dict[str, Any]:
@@ -520,7 +526,7 @@ def build_toapis_request_snapshot(task_package: dict[str, Any], image_urls: list
     if not prompt:
         raise RuntimeError("图片生成缺少 Prompt 维护渲染出的 prompt。")
     image_inputs = task_package.get("imageInputs") if isinstance(task_package.get("imageInputs"), list) else []
-    return {
+    request = {
         "model": settings.gpt_image2_model_id,
         "prompt": prompt,
         "reference_images": image_urls,
@@ -530,6 +536,10 @@ def build_toapis_request_snapshot(task_package: dict[str, Any], image_urls: list
         "resolution": settings.gpt_image2_resolution,
         "response_format": "url",
     }
+    client_business_id = str(task_package.get("clientBusinessId") or "").strip()
+    if client_business_id:
+        request["client_business_id"] = client_business_id
+    return request
 
 
 def build_provider_reference_image_manifest(image_inputs: list[dict[str, Any]], image_urls: list[str]) -> list[dict[str, Any]]:
@@ -908,12 +918,19 @@ def request_json(
         message = response_payload.get("message") or response_payload.get("error") or response_payload
         if isinstance(message, dict):
             message = message.get("message") or str(message)
-        # HTTP 错误按状态码 + 文案分类：401/403→AUTH_FAILED、402/余额→INSUFFICIENT_BALANCE、
-        # 1010→WAF_BLOCK、429→RATE_LIMITED、5xx→GATEWAY_5XX。上层据此早停或退避。
-        error_code = classify_provider_error(status_code=response.status_code, body=str(message))
+        provider_error = normalize_toapis_error(
+            response_payload,
+            status_code=response.status_code,
+            fallback_message=str(message),
+        )
         raise ImageProviderError(
             f"{error_label}: HTTP {response.status_code} {message}",
-            error_code=error_code,
+            provider_response={
+                "httpStatus": response.status_code,
+                "providerError": provider_error,
+                "providerResponse": response_payload,
+            },
+            error_code=str(provider_error["code"]),
             response_received=True,
         )
     return response_payload
@@ -976,9 +993,19 @@ def post_multipart_file(
         message = payload.get("message") or payload.get("error") or payload
         if isinstance(message, dict):
             message = message.get("message") or str(message)
+        provider_error = normalize_toapis_error(
+            payload,
+            status_code=response.status_code,
+            fallback_message=str(message),
+        )
         raise GenerationPhaseError(
             f"toapis 图片上传失败({file_label}): HTTP {response.status_code} {message}",
-            ERROR_UPLOAD_FAILED,
+            str(provider_error["code"]),
+            provider_response={
+                "httpStatus": response.status_code,
+                "providerError": provider_error,
+                "providerResponse": payload,
+            },
         )
     return payload
 

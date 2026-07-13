@@ -531,17 +531,41 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
       applyTaskUpdate(r.item)
     }, { refresh: 'background' })
   }
-  function startBatchAutoRun() {
+  function startBatchAutoRun(restart = false) {
     const batchId = task?.batchId
     if (!batchId || activeBatchIdRef.current !== batchId) return
-    const eligibleCount = batchItems.filter((item) => canStartOneClickFinal(item)).length
+    const eligibleCount = restart
+      ? batchItems.filter((item) => !item.archivedAt && item.status === 'COMPLETED').length
+      : batchItems.filter((item) => canStartOneClickFinal(item)).length
     if (!eligibleCount) return
-    if (!window.confirm(`将为 ${eligibleCount} 个任务自动完成智能选搭、分镜预览和成片；同时只有少量任务并发生成，其余排队等待。确定开始吗？`)) return
+    const confirmText = restart
+      ? `将为本批次 ${eligibleCount} 个已完成任务重新执行智能选搭、分镜预览和成片；已有成果保留在历史记录中。确定重新生成吗？`
+      : `将为 ${eligibleCount} 个任务自动完成后续步骤；已成功成果保持不变，同时只有少量任务并发生成，其余排队等待。确定开始吗？`
+    if (!window.confirm(confirmText)) return
     const requestId = batchAutoRunRequestRef.current + 1
     batchAutoRunRequestRef.current = requestId
-    void run('启动批量成片中...', () => api.autoRunBatch(batchId), (result: { items: GenerationTask[] }) => {
+    void run(restart ? '重新启动批量成片中...' : '启动批量成片中...', () => api.autoRunBatch(batchId, restart), (result: { items: GenerationTask[] }) => {
       if (activeBatchIdRef.current === batchId && batchAutoRunRequestRef.current === requestId) setBatchItems(result.items)
     }, { refresh: 'background' })
+  }
+  function cancelBatchAutoRun() {
+    const batchId = task?.batchId
+    if (!batchId || activeBatchIdRef.current !== batchId) return
+    const activeCount = batchItems.filter((item) => isTaskRunning(item) || !!item.autoRunTarget).length
+    if (!activeCount) return
+    if (!window.confirm(`确定取消本批次 ${activeCount} 个生成中或排队中的任务吗？已完成成果会保留，之后可继续一键成片。`)) return
+    const requestId = batchAutoRunRequestRef.current + 1
+    batchAutoRunRequestRef.current = requestId
+    void run('取消批量成片中...', () => api.cancelBatch(batchId), (result: { cancelledTaskIds: number[]; items: GenerationTask[] }) => {
+      if (activeBatchIdRef.current !== batchId || batchAutoRunRequestRef.current !== requestId) return
+      setBatchItems(result.items)
+      result.cancelledTaskIds.forEach((taskId) => clearLocalOperationsFor(['generation_styling', 'generation_preview', 'generation_result_image'], taskId))
+    }, { refresh: 'background' })
+  }
+  function handleBatchPrimaryAction(action: BatchPrimaryAction) {
+    if (action === 'cancel') cancelBatchAutoRun()
+    else if (action === 'restart') startBatchAutoRun(true)
+    else if (action === 'start' || action === 'continue') startBatchAutoRun(false)
   }
   function triggerBatchDownload(ids: number[]) {
     if (!ids.length) return
@@ -681,7 +705,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
           downloadChecking={batchDownloadChecking}
           currentTaskId={task.id}
           onOpenTask={openBatchTask}
-          onAutoRun={startBatchAutoRun}
+          onPrimaryAction={handleBatchPrimaryAction}
           onDownload={startBatchDownload}
         />
       )}
@@ -839,13 +863,13 @@ function batchChipTone(item: GenerationTask) {
   return ''
 }
 
-function BatchBar({ items, loading, downloadChecking, currentTaskId, onOpenTask, onAutoRun, onDownload }: {
+function BatchBar({ items, loading, downloadChecking, currentTaskId, onOpenTask, onPrimaryAction, onDownload }: {
   items: GenerationTask[]
   loading: boolean
   downloadChecking: boolean
   currentTaskId: number | null
   onOpenTask: (task: GenerationTask) => void
-  onAutoRun: () => void
+  onPrimaryAction: (action: BatchPrimaryAction) => void
   onDownload: () => void
 }) {
   return (
@@ -866,29 +890,49 @@ function BatchBar({ items, loading, downloadChecking, currentTaskId, onOpenTask,
           ))}
         </div>
       </div>
-      <BatchTaskSummary currentTaskId={currentTaskId} items={items} loading={loading} downloadChecking={downloadChecking} onAutoRun={onAutoRun} onDownload={onDownload} />
+      <BatchTaskSummary currentTaskId={currentTaskId} items={items} loading={loading} downloadChecking={downloadChecking} onPrimaryAction={onPrimaryAction} onDownload={onDownload} />
     </div>
   )
 }
 
-function BatchTaskSummary({ currentTaskId, items, loading, downloadChecking, onAutoRun, onDownload }: {
+type BatchPrimaryAction = 'start' | 'continue' | 'cancel' | 'restart' | 'none'
+
+function batchPrimaryAction(items: GenerationTask[]): BatchPrimaryAction {
+  const activeItems = items.filter((item) => !item.archivedAt && item.status !== 'ABANDONED')
+  if (activeItems.some((item) => isTaskRunning(item) || !!item.autoRunTarget)) return 'cancel'
+  if (activeItems.length > 0 && activeItems.every((item) => item.status === 'COMPLETED')) return 'restart'
+  const eligibleItems = activeItems.filter((item) => canStartOneClickFinal(item))
+  if (!eligibleItems.length) return 'none'
+  const isFreshBatch = activeItems.every((item) => ['DRAFT', 'READY_FOR_STYLING'].includes(item.status))
+  return isFreshBatch ? 'start' : 'continue'
+}
+
+function BatchTaskSummary({ currentTaskId, items, loading, downloadChecking, onPrimaryAction, onDownload }: {
   currentTaskId: number | null
   items: GenerationTask[]
   loading: boolean
   downloadChecking: boolean
-  onAutoRun: () => void
+  onPrimaryAction: (action: BatchPrimaryAction) => void
   onDownload: () => void
 }) {
   const currentIndex = items.findIndex((item) => item.id === currentTaskId)
-  const eligibleCount = items.filter((item) => canStartOneClickFinal(item)).length
+  const primaryAction = batchPrimaryAction(items)
   const downloadableCount = items.filter((item) => ['COMPLETED', 'FINAL_PARTIAL'].includes(item.status)).length
+  const actionPresentation = {
+    start: { label: '全部一键成片', icon: Sparkles, className: 'primary' },
+    continue: { label: '继续一键成片', icon: Sparkles, className: 'primary' },
+    cancel: { label: '全部取消', icon: CircleStop, className: 'secondary' },
+    restart: { label: '重新一键成片', icon: RotateCcw, className: 'secondary' },
+    none: { label: '全部一键成片', icon: Sparkles, className: 'primary' },
+  }[primaryAction]
+  const ActionIcon = actionPresentation.icon
   return (
     <section className="task-batch-summary" aria-label="批次操作">
       <span className="task-batch-label">
         所属批次 · {loading ? '读取中' : currentIndex >= 0 ? `第 ${currentIndex + 1}/${items.length} 个任务` : `共 ${items.length} 个任务`}
       </span>
-      <div className="task-batch-actions">
-        <button className="primary" type="button" disabled={loading || !eligibleCount} onClick={onAutoRun}><Sparkles size={14} />全部一键成片</button>
+      <div className="task-batch-actions" aria-live="polite">
+        <button className={actionPresentation.className} type="button" disabled={loading || primaryAction === 'none'} onClick={() => onPrimaryAction(primaryAction)}><ActionIcon size={14} />{actionPresentation.label}</button>
         <button className="secondary" type="button" disabled={loading || !downloadableCount || downloadChecking} onClick={onDownload}><Download size={14} />{downloadChecking ? '检查成片中...' : '下载本批次成片'}</button>
       </div>
     </section>
@@ -3532,7 +3576,7 @@ function AICallLogDialog({ dialog, onClose }: {
                   <span>开始: {dateText(record.startedAt ?? record.createdAt)}</span>
                   {(record.completedAt || record.failedAt) && <span>结束: {dateText(record.completedAt ?? record.failedAt)}</span>}
                 </div>
-                {record.errorMessage && <div className="inline-error">{record.errorMessage}</div>}
+                {(record.technicalMessage || record.errorMessage) && <div className="inline-error">{record.technicalMessage || record.errorMessage}</div>}
                 <div className="ai-log-json-grid">
                   <div>
                     <span>实际模型输入</span>
@@ -3743,6 +3787,11 @@ function attemptStatusText(operation: AIOperation) {
 // 失败 attempt 的一行友好文案（按 error_code 归类），技术码仍保留在“调用记录”里。
 function attemptFriendlyFailure(operation: AIOperation): string | null {
   if (operation.status !== 'FAILED') return null
+  if (operation.error) {
+    return operation.error.message && operation.error.message !== operation.error.title
+      ? `${operation.error.title}：${operation.error.message}`
+      : operation.error.title
+  }
   return friendlyErrorText(operation.errorCode, operation.errorMessage)
 }
 

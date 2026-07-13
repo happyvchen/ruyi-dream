@@ -150,6 +150,51 @@ class MigrationAndProgressTests(TempEnvTestCase):
             progress_module.ERROR_SYSTEM_ERROR,
         )
 
+    def test_normalize_toapis_nested_invalid_request(self) -> None:
+        progress_module = importlib.import_module("app.generation_progress")
+        payload = {
+            "error": {
+                "code": "generation_failed",
+                "message": (
+                    'call upstream API failed: W8X API returned 400: '
+                    '{"error":{"message":"参考图最多支持 6 张","type":"invalid_request_error",'
+                    '"param":null,"code":null}}'
+                ),
+            }
+        }
+        normalized = progress_module.normalize_toapis_error(payload)
+        self.assertEqual(normalized["code"], progress_module.ERROR_INVALID_REQUEST)
+        self.assertEqual(normalized["providerCode"], "generation_failed")
+        self.assertEqual(normalized["upstreamType"], "invalid_request_error")
+        self.assertEqual(normalized["upstreamMessage"], "参考图最多支持 6 张")
+        presentation = progress_module.provider_error_presentation(
+            normalized["code"],
+            normalized["upstreamMessage"],
+        )
+        self.assertEqual(presentation["title"], "生成输入不符合服务要求")
+        self.assertEqual(presentation["message"], "参考图最多支持 6 张")
+        self.assertFalse(presentation["retryable"])
+
+    def test_normalize_toapis_official_http_error_matrix(self) -> None:
+        progress_module = importlib.import_module("app.generation_progress")
+        cases = [
+            (400, "invalid_request", progress_module.ERROR_INVALID_REQUEST, False),
+            (401, "unauthorized", progress_module.ERROR_AUTH_FAILED, False),
+            (402, "insufficient_quota", progress_module.ERROR_INSUFFICIENT_BALANCE, False),
+            (404, "task_not_found", progress_module.ERROR_TASK_NOT_FOUND, True),
+            (422, "content_policy_violation", progress_module.ERROR_CONTENT_POLICY, False),
+            (429, "rate_limit_exceeded", progress_module.ERROR_RATE_LIMITED, True),
+            (500, "internal_error", progress_module.ERROR_PROVIDER_INTERNAL, True),
+        ]
+        for status, provider_code, expected, retryable in cases:
+            with self.subTest(status=status, provider_code=provider_code):
+                normalized = progress_module.normalize_toapis_error(
+                    {"error": {"code": provider_code, "message": "provider message"}},
+                    status_code=status,
+                )
+                self.assertEqual(normalized["code"], expected)
+                self.assertEqual(progress_module.provider_error_presentation(expected)["retryable"], retryable)
+
 
 @unittest.skipIf(not HAS_MAIN_DEPS, "app.main 依赖不可用")
 class ContinueFinalResultSetTests(TempEnvTestCase):
@@ -599,6 +644,97 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
             [{"role": "hero", "providerUrl": "https://files.toapis.com/ref.jpg"}],
         )
 
+    def test_explicit_generation_failed_retries_generation_once(self) -> None:
+        attempt_id = self._insert_attempt()
+        submits = [
+            {
+                "provider": "toapis",
+                "providerRequestId": "tsk_failed",
+                "status": "SUBMITTED",
+                "providerStatus": "submitted",
+                "imageInputs": [{"role": "hero", "providerUrl": "https://files.toapis.com/ref.jpg"}],
+            },
+            {
+                "provider": "toapis",
+                "providerRequestId": "tsk_retry",
+                "status": "SUBMITTED",
+                "providerStatus": "submitted",
+                "imageInputs": [{"role": "hero", "providerUrl": "https://files.toapis.com/ref.jpg"}],
+            },
+        ]
+        checks = [
+            {
+                "status": "FAILED",
+                "providerStatus": "failed",
+                "providerRequestId": "tsk_failed",
+                "error": "生成失败：任务处理失败",
+                "providerStatusResponse": {
+                    "status": "failed",
+                    "error": {"code": "generation_failed", "message": "生成失败：任务处理失败"},
+                },
+            },
+            {
+                "status": "SUCCEEDED",
+                "providerStatus": "completed",
+                "providerRequestId": "tsk_retry",
+                "providerStatusResponse": {"status": "completed"},
+            },
+        ]
+
+        async def instant_sleep(_seconds: float) -> None:
+            return None
+
+        with mock.patch.object(self.main, "run_image_provider_submit", side_effect=submits) as submit:
+            with mock.patch.object(self.main, "run_image_provider_check", side_effect=checks):
+                with mock.patch.object(self.main, "run_image_provider_deliver", return_value={"outputPath": "k/out.png"}):
+                    with mock.patch.object(self.main, "get_bytes", return_value=b"img"):
+                        with mock.patch.object(self.main, "insert_generated_media_asset", return_value=101):
+                            with mock.patch("asyncio.sleep", new=instant_sleep):
+                                asset_id, payload = asyncio.run(
+                                    self.main.generate_image_asset(
+                                        {"imageInputs": [{"role": "hero", "url": "https://source.example/ref.jpg"}]},
+                                        "k/out.png",
+                                        attempt_id,
+                                    )
+                                )
+
+        self.assertEqual(asset_id, 101)
+        self.assertEqual(submit.call_count, 2)
+        self.assertEqual(payload["providerRequestHistory"], ["tsk_failed", "tsk_retry"])
+        self.assertEqual(payload["generationRetries"], 1)
+
+    def test_nested_invalid_request_does_not_retry_generation(self) -> None:
+        attempt_id = self._insert_attempt()
+        submitted = {
+            "provider": "toapis",
+            "providerRequestId": "tsk_invalid",
+            "status": "SUBMITTED",
+            "providerStatus": "submitted",
+        }
+        failed = {
+            "status": "FAILED",
+            "providerStatus": "failed",
+            "providerRequestId": "tsk_invalid",
+            "error": "所有渠道都失败",
+            "providerStatusResponse": {
+                "status": "failed",
+                "error": {
+                    "code": "generation_failed",
+                    "message": (
+                        'W8X API returned 400: {"error":{"message":"参考图最多支持 6 张",'
+                        '"type":"invalid_request_error","param":null,"code":null}}'
+                    ),
+                },
+            },
+        }
+        with mock.patch.object(self.main, "run_image_provider_submit", return_value=submitted) as submit:
+            with mock.patch.object(self.main, "run_image_provider_check", return_value=failed):
+                with self.assertRaises(self.main.ImageProviderError) as ctx:
+                    asyncio.run(self.main.generate_image_asset({"imageInputs": []}, "k/out.png", attempt_id))
+        self.assertEqual(ctx.exception.error_code, self.progress_module.ERROR_INVALID_REQUEST)
+        self.assertEqual(submit.call_count, 1)
+        self.assertEqual(ctx.exception.provider_response["providerError"]["upstreamMessage"], "参考图最多支持 6 张")
+
     def test_poll_local_error_is_system_error_without_retry(self) -> None:
         attempt_id = self._insert_attempt()
         recorder = self.progress_module.AttemptProgressRecorder(attempt_id)
@@ -652,7 +788,7 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
                         asyncio.run(self.main.generate_image_asset({"imageInputs": []}, "k/out.png", attempt_id))
         submit.assert_not_called()
 
-    def test_unknown_submission_retries_once_and_reuses_uploaded_inputs(self) -> None:
+    def test_unknown_submission_recovers_by_business_id_without_second_post(self) -> None:
         os.environ["GENERATION_UNKNOWN_SUBMISSION_RETRY_DELAY_SECONDS"] = "0"
         self._reload_settings()
         attempt_id = self._insert_attempt()
@@ -688,9 +824,10 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
                                 )
                             )
         self.assertEqual(asset_id, 77)
-        self.assertEqual(submit.call_count, 2)
-        self.assertEqual(submit.call_args_list[1].args[0]["imageInputs"], uploaded)
+        self.assertEqual(submit.call_count, 1)
+        self.assertEqual(submit.call_args.args[0]["clientBusinessId"], f"ruyi_img_a{attempt_id}_r0")
         self.assertEqual(payload["unknownSubmissionRetries"], 1)
+        self.assertEqual(payload["providerRequestId"], "tsk_retry")
 
     def test_unknown_submission_retry_budget_exhaustion_stops_after_two_posts(self) -> None:
         os.environ["GENERATION_UNKNOWN_SUBMISSION_RETRY_DELAY_SECONDS"] = "0"
@@ -705,9 +842,15 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
                 error_code=self.progress_module.ERROR_SUBMISSION_UNKNOWN,
             )
 
+        task_not_found = self.main.ImageProviderError(
+            "HTTP 404 task not found",
+            error_code=self.progress_module.ERROR_TASK_NOT_FOUND,
+            response_received=True,
+        )
         with mock.patch.object(self.main, "run_image_provider_submit", side_effect=[unknown(), unknown()]) as submit:
-            with self.assertRaises(self.main.ImageProviderError) as ctx:
-                asyncio.run(self.main.generate_image_asset({"imageInputs": [{"role": "hero"}]}, "k/out.png", attempt_id))
+            with mock.patch.object(self.main, "run_image_provider_check", side_effect=task_not_found):
+                with self.assertRaises(self.main.ImageProviderError) as ctx:
+                    asyncio.run(self.main.generate_image_asset({"imageInputs": [{"role": "hero"}]}, "k/out.png", attempt_id))
         self.assertEqual(ctx.exception.error_code, self.progress_module.ERROR_SUBMISSION_UNKNOWN)
         self.assertEqual(ctx.exception.provider_response["unknownSubmissionRetries"], 1)
         self.assertEqual(submit.call_count, 2)

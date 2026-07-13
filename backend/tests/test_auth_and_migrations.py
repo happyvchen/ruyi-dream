@@ -622,6 +622,69 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertIsNone(items[3]["autoRunTarget"])
         self.assertEqual(scheduled, [1, 2])
 
+    def test_completed_batch_can_restart_all_tasks(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+
+        db_module.init_db()
+        timestamp = "2026-07-13T05:00:00Z"
+        with db_module.get_db() as db:
+            db.executemany(
+                "INSERT INTO generation_tasks (id, name, batch_id, status, created_at, updated_at) VALUES (?, ?, 'batch-restart', 'COMPLETED', ?, ?)",
+                [(1, "Done 1", timestamp, timestamp), (2, "Done 2", timestamp, timestamp)],
+            )
+
+        scheduled: list[int] = []
+        original_schedule = main.schedule_auto_run_for_task
+        main.schedule_auto_run_for_task = scheduled.append
+        client = TestClient(main.app)
+        try:
+            self.assertEqual(client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"}).status_code, 200)
+            response = client.post("/api/generation-batches/batch-restart/auto-run-final", json={"restart": True})
+        finally:
+            client.close()
+            main.schedule_auto_run_for_task = original_schedule
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["startedTaskIds"], [1, 2])
+        self.assertEqual(scheduled, [1, 2])
+        self.assertTrue(all(item["status"] == "READY_FOR_STYLING" for item in response.json()["items"]))
+        self.assertTrue(all(item["autoRunTarget"] == "FINAL" for item in response.json()["items"]))
+
+    def test_batch_cancel_stops_running_and_dequeues_waiting_tasks(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+
+        db_module.init_db()
+        timestamp = "2026-07-13T05:00:00Z"
+        with db_module.get_db() as db:
+            db.executemany(
+                """INSERT INTO generation_tasks
+                   (id, name, batch_id, status, auto_run_target, auto_run_requested_at, created_at, updated_at)
+                   VALUES (?, ?, 'batch-cancel', ?, 'FINAL', ?, ?, ?)""",
+                [
+                    (1, "Running", "STYLING_RUNNING", timestamp, timestamp, timestamp),
+                    (2, "Queued", "READY_FOR_STYLING", timestamp, timestamp, timestamp),
+                ],
+            )
+
+        client = TestClient(main.app)
+        try:
+            self.assertEqual(client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"}).status_code, 200)
+            response = client.post("/api/generation-batches/batch-cancel/cancel")
+        finally:
+            client.close()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["cancelledTaskIds"], [1, 2])
+        items = {item["id"]: item for item in response.json()["items"]}
+        self.assertEqual(items[1]["status"], "CANCELLED")
+        self.assertIsNone(items[1]["autoRunTarget"])
+        self.assertEqual(items[2]["status"], "READY_FOR_STYLING")
+        self.assertIsNone(items[2]["autoRunTarget"])
+
     def test_cancelled_regeneration_resumes_the_cancelled_stage_not_old_active_artifacts(self) -> None:
         db_module = importlib.import_module("app.db")
         main = importlib.import_module("app.main")

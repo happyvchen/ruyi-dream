@@ -67,6 +67,7 @@ from .generation_progress import (
     ERROR_PROVIDER_TIMEOUT,
     ERROR_SUBMISSION_UNKNOWN,
     ERROR_SYSTEM_ERROR,
+    ERROR_TASK_NOT_FOUND,
     PHASE_DELIVER,
     PHASE_GENERATE,
     PHASE_PREPARE,
@@ -80,7 +81,11 @@ from .generation_progress import (
     classify_generation_attempt_error,
     classify_provider_error,
     is_balance_error,
+    is_generation_retryable_error,
     is_retryable_error,
+    is_status_check_retryable_error,
+    normalize_toapis_error,
+    provider_error_presentation,
 )
 from .image_provider import ImageProviderError, get_image_provider
 from .object_storage import (
@@ -2787,21 +2792,27 @@ def list_generation_batch_tasks(batch_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/generation-batches/{batch_id}/auto-run-final")
-async def auto_run_generation_batch(batch_id: str) -> dict[str, Any]:
+async def auto_run_generation_batch(batch_id: str, payload: AutoRunFinalRequest | None = None) -> dict[str, Any]:
     rows = get_batch_task_rows(batch_id)
     if not rows:
         raise HTTPException(status_code=404, detail="批次不存在或没有任务")
+    active_rows = [row for row in rows if not row_value(row, "archived_at") and row["status"] != "ABANDONED"]
+    restart = bool(payload and payload.restart)
+    if restart and (not active_rows or any(row["status"] != "COMPLETED" for row in active_rows)):
+        raise HTTPException(status_code=409, detail="仅整批任务全部完成后可以重新一键成片")
     timestamp = now_iso()
     started_ids: list[int] = []
     with get_db() as db:
-        for row in rows:
+        for row in active_rows:
             if row["status"] in RUNNING_GENERATION_TASK_STATUSES:
                 continue
-            if row["status"] in {"ABANDONED", "COMPLETED"}:
+            if not restart and row["status"] == "COMPLETED":
                 continue
             if row_value(row, "auto_run_target") == AUTO_RUN_TARGET_FINAL:
                 continue
-            if row["status"] == "CANCELLED":
+            if restart:
+                reset_generation_task_for_rerun(db, int(row["id"]), timestamp)
+            elif row["status"] == "CANCELLED":
                 resume_cancelled_generation_task(db, int(row["id"]), timestamp)
             elif row["status"] == "FAILED":
                 resume_failed_generation_task(db, int(row["id"]), timestamp)
@@ -2818,6 +2829,29 @@ async def auto_run_generation_batch(batch_id: str) -> dict[str, Any]:
     refreshed = get_batch_task_rows(batch_id)
     return {
         "startedTaskIds": started_ids,
+        "items": [serialize_generation_task(row, include_detail=False) for row in refreshed],
+    }
+
+
+@app.post("/api/generation-batches/{batch_id}/cancel")
+def cancel_generation_batch(batch_id: str) -> dict[str, Any]:
+    rows = get_batch_task_rows(batch_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="批次不存在或没有任务")
+    cancelled_ids: list[int] = []
+    for row in rows:
+        task_id = int(row["id"])
+        current = get_generation_task_row(task_id)
+        if current["status"] in RUNNING_GENERATION_TASK_STATUSES:
+            cancel_generation_task(task_id)
+            cancelled_ids.append(task_id)
+        elif row_value(current, "auto_run_target") == AUTO_RUN_TARGET_FINAL:
+            clear_task_auto_run(task_id)
+            cancelled_ids.append(task_id)
+    pump_auto_run_queue()
+    refreshed = get_batch_task_rows(batch_id)
+    return {
+        "cancelledTaskIds": cancelled_ids,
         "items": [serialize_generation_task(row, include_detail=False) for row in refreshed],
     }
 
@@ -5110,9 +5144,11 @@ def user_facing_provider_error_message(label: str, exc: BaseException, error_cod
 
     余额类必须明确提示充值，绝不表现成"生成失败请重试"（会让用户白等、继续烧额度）。
     """
-    if is_balance_error(error_code):
-        return "ToAPIs 余额不足，请联系管理员充值后重试。"
-    return f"{label}：{exc}"
+    response = getattr(exc, "provider_response", None)
+    provider_error = response.get("providerError") if isinstance(response, dict) else None
+    reason = provider_error.get("upstreamMessage") if isinstance(provider_error, dict) else None
+    presentation = provider_error_presentation(error_code, str(reason or ""))
+    return f"{label}：{presentation['title']}。{presentation['message']}"
 
 
 def parse_gemini_json_object(text: str) -> dict[str, Any]:
@@ -7518,7 +7554,7 @@ async def generate_image_asset(
     )
     if payload and payload.get("providerRequestId") and str(payload["providerRequestId"]) not in provider_request_history:
         provider_request_history.append(str(payload["providerRequestId"]))
-    submit_task_package = task_package
+    submit_task_package = dict(task_package)
 
     def report_upload(completed: int, total: int) -> None:
         progress.update(PHASE_UPLOAD, completed=completed, total=total)
@@ -7527,6 +7563,8 @@ async def generate_image_asset(
 
     while True:
         if payload is None:
+            client_business_id = f"ruyi_img_a{attempt_id or 0}_r{generation_retries}"
+            submit_task_package = {**submit_task_package, "clientBusinessId": client_business_id}
             progress.begin(PHASE_PREPARE)
             progress.begin(PHASE_UPLOAD, completed=0, total=image_input_total, generationRetry=generation_retries)
             try:
@@ -7539,7 +7577,7 @@ async def generate_image_asset(
                     unknown_snapshot = {}
                 uploaded_inputs = unknown_snapshot.get("imageInputs")
                 if isinstance(uploaded_inputs, list) and uploaded_inputs:
-                    submit_task_package = {**task_package, "imageInputs": uploaded_inputs}
+                    submit_task_package = {**submit_task_package, "imageInputs": uploaded_inputs}
                 batch_retry_allowed = (
                     unknown_retry_guard.allow_retry()
                     if unknown_retry_guard is not None
@@ -7574,8 +7612,25 @@ async def generate_image_asset(
                 )
                 prepare_attempt_provider_resubmission(attempt_id, snapshot)
                 await asyncio.sleep(settings.generation_unknown_submission_retry_delay_seconds)
-                payload = None
-                continue
+                # 官方支持用 client_business_id 走同一个状态接口查询。先确认原任务，
+                # 只有明确 404 才补提；查询本身仍不确定时停止，避免重复任务/重复计费。
+                lookup_snapshot = {
+                    **snapshot,
+                    "providerRequestId": client_business_id,
+                    "clientBusinessId": client_business_id,
+                }
+                try:
+                    recovered = await asyncio.to_thread(run_image_provider_check, lookup_snapshot, output_key)
+                except ImageProviderError as lookup_exc:
+                    if classify_attempt_error(lookup_exc) == ERROR_TASK_NOT_FOUND:
+                        payload = None
+                        continue
+                    snapshot["status"] = "SUBMISSION_UNKNOWN"
+                    snapshot["reconciliationError"] = str(lookup_exc)[:500]
+                    persist_attempt_provider_progress(attempt_id, snapshot)
+                    exc.provider_response = snapshot
+                    raise exc from lookup_exc
+                payload = {**snapshot, **recovered, "clientBusinessId": client_business_id}
             if payload.get("providerRequestId"):
                 provider_request_history.append(str(payload["providerRequestId"]))
             payload = {
@@ -7593,12 +7648,19 @@ async def generate_image_asset(
 
         if payload.get("status") in {"FAILED", "CANCELLED"}:
             terminal_error = str(payload.get("error") or payload.get("message") or payload.get("providerStatus") or "")
-            error_code = classify_provider_error(message=terminal_error)
+            provider_error = payload.get("providerError")
+            if not isinstance(provider_error, dict):
+                provider_error = normalize_toapis_error(
+                    payload.get("providerStatusResponse") if isinstance(payload.get("providerStatusResponse"), dict) else {},
+                    fallback_message=terminal_error,
+                )
+                payload["providerError"] = provider_error
+            error_code = str(provider_error.get("code") or ERROR_PROVIDER_FAILED)
         else:
             error_code = ERROR_PROVIDER_TIMEOUT
         if (
             payload.get("status") == "FAILED"
-            and is_retryable_error(error_code)
+            and is_generation_retryable_error(error_code)
             and generation_retries < PROVIDER_GENERATION_RETRY_LIMIT
         ):
             uploaded_inputs = payload.get("imageInputs")
@@ -7690,7 +7752,7 @@ async def poll_provider_until_terminal(
                     payload,
                     error_code=ERROR_SYSTEM_ERROR,
                 ) from exc
-            if not is_retryable_error(status_error_code):
+            if not is_status_check_retryable_error(status_error_code):
                 raise ImageProviderError(str(exc), payload, error_code=status_error_code) from exc
             consecutive_errors += 1
             current_phase = PHASE_GENERATE if progress.snapshot.get("current") == PHASE_GENERATE else PHASE_QUEUE
@@ -8168,6 +8230,16 @@ GENERATION_ATTEMPT_OWNER_TYPES = (
 def serialize_attempt_detail(row: Any) -> dict[str, Any]:
     request_snapshot = loads(row["request_snapshot_json"], {})
     response_snapshot = loads(row["response_snapshot_json"], {})
+    provider_error = response_snapshot.get("providerError") if isinstance(response_snapshot, dict) else None
+    if not isinstance(provider_error, dict) and isinstance(response_snapshot, dict):
+        provider_error = normalize_toapis_error(
+            response_snapshot.get("providerStatusResponse")
+            if isinstance(response_snapshot.get("providerStatusResponse"), dict)
+            else {},
+            fallback_message=str(row["error_message"] or ""),
+        )
+    reason = provider_error.get("upstreamMessage") if isinstance(provider_error, dict) else None
+    error = provider_error_presentation(row_value(row, "error_code"), str(reason or "")) if row["status"] == "FAILED" else None
     return {
         "id": row["id"],
         "ownerType": row["owner_type"],
@@ -8179,7 +8251,9 @@ def serialize_attempt_detail(row: Any) -> dict[str, Any]:
         "completedAt": row["completed_at"],
         "failedAt": row["failed_at"],
         "errorCode": row_value(row, "error_code"),
-        "errorMessage": row["error_message"],
+        "errorMessage": error["message"] if error else row["error_message"],
+        "technicalMessage": row["error_message"],
+        "error": error,
         "requestFacts": request_snapshot,
         "responseFacts": response_snapshot,
         "modelInput": actual_model_input_from_snapshot(request_snapshot),
@@ -8221,6 +8295,17 @@ def get_attempt_summary(attempt_id: int | None) -> dict[str, Any] | None:
 
 
 def serialize_attempt_summary(row: Any) -> dict[str, Any]:
+    response_snapshot = loads(row_value(row, "response_snapshot_json"), {})
+    provider_error = response_snapshot.get("providerError") if isinstance(response_snapshot, dict) else None
+    if not isinstance(provider_error, dict) and isinstance(response_snapshot, dict):
+        provider_error = normalize_toapis_error(
+            response_snapshot.get("providerStatusResponse")
+            if isinstance(response_snapshot.get("providerStatusResponse"), dict)
+            else {},
+            fallback_message=str(row["error_message"] or ""),
+        )
+    reason = provider_error.get("upstreamMessage") if isinstance(provider_error, dict) else None
+    error = provider_error_presentation(row_value(row, "error_code"), str(reason or "")) if row["status"] == "FAILED" else None
     return {
         "id": row["id"],
         "ownerType": row["owner_type"],
@@ -8232,7 +8317,8 @@ def serialize_attempt_summary(row: Any) -> dict[str, Any]:
         "completedAt": row["completed_at"],
         "failedAt": row["failed_at"],
         "errorCode": row_value(row, "error_code"),
-        "errorMessage": row["error_message"],
+        "errorMessage": error["message"] if error else row["error_message"],
+        "error": error,
         "progress": loads(row_value(row, "progress_json"), None),
         "outputAssetId": row["output_asset_id"],
         "createdAt": row["created_at"],

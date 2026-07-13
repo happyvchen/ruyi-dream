@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 import threading
 from typing import Any
@@ -53,6 +54,11 @@ ERROR_RATE_LIMITED = "RATE_LIMITED"                  # 429 → 退避重试（�
 ERROR_INSUFFICIENT_BALANCE = "INSUFFICIENT_BALANCE"  # 余额不足/剩余额度负 → 不重试、硬停
 ERROR_AUTH_FAILED = "AUTH_FAILED"                    # 401/403/不支持指定渠道 → 不重试
 ERROR_WAF_BLOCK = "WAF_BLOCK"                        # 403 Cloudflare error code 1010 → 有限重试后熔断
+ERROR_PROVIDER_GENERATION_FAILED = "PROVIDER_GENERATION_FAILED"  # provider 已建任务但生成阶段失败 → 有限重试
+ERROR_INVALID_REQUEST = "INVALID_REQUEST"            # 请求参数/参考图不符合 provider 要求 → 修正输入后再试
+ERROR_CONTENT_POLICY = "CONTENT_POLICY_VIOLATION"    # 内容安全策略拒绝 → 调整素材或要求
+ERROR_TASK_NOT_FOUND = "TASK_NOT_FOUND"              # provider 任务不存在/已失效 → 重新创建任务
+ERROR_PROVIDER_INTERNAL = "PROVIDER_INTERNAL_ERROR"  # provider 内部错误 → 有限重试
 ERROR_MALFORMED_OUTPUT = "MALFORMED_OUTPUT"          # 非法 JSON/Extra data/控制字符/finish_reason=length 截断 → 上层修复+重问一次
 ERROR_POLL_TIMEOUT = "POLL_TIMEOUT"                  # 打标/长任务轮询预算耗尽 → 自动排队重试
 ERROR_BUSINESS_REJECT = "BUSINESS_REJECT"            # 我方业务/穿法校验否决（非 provider 错误）→ 不重试
@@ -127,7 +133,137 @@ def _has_negative_balance(text: str) -> bool:
     return bool(re.search(r"-\s*\d", text))
 
 
-def classify_provider_error(*, status_code: int | None = None, message: str = "", body: str = "") -> str:
+def _embedded_json_objects(text: str) -> list[dict[str, Any]]:
+    """提取 ToAPIs error.message 中嵌套的上游 JSON 错误信封。
+
+    ToAPIs 的异步失败有时顶层仅给 ``generation_failed``，实际原因形如
+    ``W8X API returned 400: {\"error\": {...}}`` 嵌在 message 中。
+    """
+    decoder = json.JSONDecoder()
+    items: list[dict[str, Any]] = []
+    for index, char in enumerate(text or ""):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            items.append(value)
+    return items
+
+
+def _error_fields(value: Any) -> list[dict[str, str]]:
+    fields: list[dict[str, str]] = []
+    if not isinstance(value, dict):
+        return fields
+    error = value.get("error") if isinstance(value.get("error"), dict) else value
+    if isinstance(error, dict):
+        item = {
+            "code": str(error.get("code") or "").strip(),
+            "type": str(error.get("type") or "").strip(),
+            "message": str(error.get("message") or "").strip(),
+            "param": str(error.get("param") or "").strip(),
+        }
+        if any(item.values()):
+            fields.append(item)
+        for embedded in _embedded_json_objects(item["message"]):
+            fields.extend(_error_fields(embedded))
+    return fields
+
+
+def normalize_toapis_error(
+    payload: dict[str, Any] | None,
+    *,
+    status_code: int | None = None,
+    fallback_message: str = "",
+) -> dict[str, Any]:
+    """把 ToAPIs HTTP/异步失败归一成稳定、可展示、可决策的错误事实。"""
+    payload = payload if isinstance(payload, dict) else {}
+    layers = _error_fields(payload)
+    top = layers[0] if layers else {}
+    actionable = next(
+        (
+            layer
+            for layer in reversed(layers)
+            if layer.get("code") or layer.get("type") or layer.get("message")
+        ),
+        top,
+    )
+    messages = [fallback_message, *(layer.get("message", "") for layer in layers)]
+    combined = " ".join(item for item in messages if item)
+    codes = {str(layer.get("code") or "").lower() for layer in layers}
+    types = {str(layer.get("type") or "").lower() for layer in layers}
+
+    if codes & {"insufficient_quota"} or status_code == 402:
+        internal_code = ERROR_INSUFFICIENT_BALANCE
+    elif codes & {"invalid_request"} or types & {"invalid_request", "invalid_request_error"} or status_code == 400:
+        internal_code = ERROR_INVALID_REQUEST
+    elif codes & {"content_policy_violation"} or status_code == 422:
+        internal_code = ERROR_CONTENT_POLICY
+    elif codes & {"task_not_found"} or status_code == 404:
+        internal_code = ERROR_TASK_NOT_FOUND
+    elif codes & {"unauthorized"} or status_code == 401:
+        internal_code = ERROR_AUTH_FAILED
+    elif codes & {"rate_limit_exceeded"} or status_code == 429:
+        internal_code = ERROR_RATE_LIMITED
+    elif codes & {"internal_error"} or status_code == 500:
+        internal_code = ERROR_PROVIDER_INTERNAL
+    elif codes & {"generation_failed"}:
+        internal_code = ERROR_PROVIDER_GENERATION_FAILED
+    else:
+        internal_code = classify_provider_error(status_code=status_code, message=combined)
+
+    return {
+        "code": internal_code,
+        "providerCode": top.get("code") or None,
+        "providerType": top.get("type") or None,
+        "providerMessage": top.get("message") or fallback_message or None,
+        "upstreamCode": actionable.get("code") or None,
+        "upstreamType": actionable.get("type") or None,
+        "upstreamMessage": actionable.get("message") or top.get("message") or fallback_message or None,
+        "param": actionable.get("param") or None,
+        "httpStatus": status_code,
+    }
+
+
+def provider_error_presentation(error_code: str | None, reason: str | None = None) -> dict[str, Any]:
+    """稳定的普通用户错误契约；原始 provider JSON 只留在技术详情。"""
+    code = str(error_code or ERROR_SYSTEM_ERROR)
+    reason = re.sub(r"\s+", " ", str(reason or "")).strip()[:240] or None
+    catalog: dict[str, tuple[str, str, str, bool]] = {
+        ERROR_INVALID_REQUEST: ("生成输入不符合服务要求", reason or "请检查参考图数量、格式和生成要求后重试。", "调整输入后重试", False),
+        ERROR_CONTENT_POLICY: ("素材或生成要求未通过安全检查", "请调整相关图片或文字要求后重试。", "调整内容后重试", False),
+        ERROR_INSUFFICIENT_BALANCE: ("AI 服务额度不足", "请联系管理员充值后重试。", "联系管理员", False),
+        ERROR_AUTH_FAILED: ("AI 服务配置异常", "请联系管理员检查服务密钥或渠道权限。", "联系管理员", False),
+        ERROR_RATE_LIMITED: ("AI 服务请求过于频繁", "系统已按策略退避；仍失败时请稍后重试。", "稍后重试", True),
+        ERROR_GATEWAY_5XX: ("AI 服务暂时不可用", "系统已自动重试；仍失败时请稍后再试。", "稍后重试", True),
+        ERROR_CONN_RESET: ("AI 服务连接中断", "系统已自动重试；仍失败时请稍后再试。", "稍后重试", True),
+        ERROR_PROVIDER_INTERNAL: ("AI 服务内部异常", "系统已自动重试；仍失败时可再次生成。", "再次生成", True),
+        ERROR_PROVIDER_GENERATION_FAILED: ("图片生成服务处理失败", "系统已自动重试；仍失败时可再次生成。", "再次生成", True),
+        ERROR_TASK_NOT_FOUND: ("生成任务已失效", "系统无法继续查询原任务，请重新生成。", "重新生成", True),
+        ERROR_PROVIDER_TIMEOUT: ("图片生成等待超时", "可稍后继续生成，系统会保留已有进度。", "继续生成", True),
+        ERROR_POLL_TIMEOUT: ("AI 任务等待超时", "可稍后重试。", "重试", True),
+        ERROR_SUBMISSION_UNKNOWN: ("未能确认生成任务是否提交成功", "系统已停止继续提交，避免重复计费。", "稍后重试", False),
+        ERROR_DELIVERY_FAILED: ("图片已生成，但回传失败", "可重新回传，不会再次消耗生成额度。", "重新回传", True),
+        ERROR_UPLOAD_FAILED: ("参考图上传失败", "请检查网络后重试。", "重试", True),
+        ERROR_MALFORMED_OUTPUT: ("AI 返回结果不完整", "请重新生成。", "重新生成", False),
+        ERROR_BUSINESS_REJECT: (reason or "当前方案不成立", "请调整要求后重试。", "调整后重试", False),
+        ERROR_SYSTEM_ERROR: ("系统处理异常", "错误已记录，请稍后重试。", "稍后重试", False),
+        ERROR_WAF_BLOCK: ("AI 服务访问受限", "请联系管理员检查服务访问配置。", "联系管理员", False),
+        ERROR_PROVIDER_FAILED: ("图片生成未成功", "请稍后重试。", "重新生成", False),
+    }
+    title, message, action, retryable = catalog.get(code, catalog[ERROR_SYSTEM_ERROR])
+    return {"code": code, "title": title, "message": message, "action": action, "retryable": retryable}
+
+
+def classify_provider_error(
+    *,
+    status_code: int | None = None,
+    message: str = "",
+    body: str = "",
+    provider_error_code: str = "",
+) -> str:
     """把 provider（ToAPIs/Gemini/Image-2）报错归类成稳定的 error_code。
 
     分类优先级（先命中先返回，越"硬"越靠前，避免误判成可重试）：
@@ -158,6 +294,11 @@ def classify_provider_error(*, status_code: int | None = None, message: str = ""
             or "unauthorized" in text or "permission" in text:
         return ERROR_AUTH_FAILED
 
+    # provider 已返回任务 ID，随后在生成阶段明确失败。此时不存在重复提交未知，
+    # 可以由编排层按既有 PROVIDER_GENERATION_RETRY_LIMIT 有限重建任务。
+    if provider_error_code.strip().lower() == "generation_failed":
+        return ERROR_PROVIDER_GENERATION_FAILED
+
     # 4. 限流。
     if status_code == 429 or "rate limit" in text or "too many requests" in text or "限流" in text:
         return ERROR_RATE_LIMITED
@@ -181,7 +322,17 @@ def classify_provider_error(*, status_code: int | None = None, message: str = ""
 
 # 可重试的 error_code：网关/连接/限流是瞬时问题；WAF 有限重试；provider/轮询超时可续跑。
 _RETRYABLE_CODES = frozenset(
-    {ERROR_GATEWAY_5XX, ERROR_CONN_RESET, ERROR_RATE_LIMITED, ERROR_WAF_BLOCK, ERROR_PROVIDER_TIMEOUT, ERROR_POLL_TIMEOUT}
+    {
+        ERROR_GATEWAY_5XX,
+        ERROR_CONN_RESET,
+        ERROR_RATE_LIMITED,
+        ERROR_WAF_BLOCK,
+        ERROR_PROVIDER_GENERATION_FAILED,
+        ERROR_PROVIDER_INTERNAL,
+        ERROR_TASK_NOT_FOUND,
+        ERROR_PROVIDER_TIMEOUT,
+        ERROR_POLL_TIMEOUT,
+    }
 )
 
 # 聊天类（Gemini）"零 token 产出"时可安全重发整个请求、绝不重复计费的 error_code。
@@ -196,6 +347,23 @@ def is_retryable_error(error_code: str | None) -> bool:
     AUTH_FAILED / INSUFFICIENT_BALANCE / BUSINESS_REJECT / MALFORMED_OUTPUT 不可重试。
     """
     return bool(error_code) and error_code in _RETRYABLE_CODES
+
+
+def is_generation_retryable_error(error_code: str | None) -> bool:
+    """已拿到 task ID 后，哪些失败允许重建一次生成任务。"""
+    return error_code in {
+        ERROR_PROVIDER_GENERATION_FAILED,
+        ERROR_PROVIDER_INTERNAL,
+        ERROR_GATEWAY_5XX,
+        ERROR_CONN_RESET,
+        ERROR_RATE_LIMITED,
+        ERROR_PROVIDER_TIMEOUT,
+    }
+
+
+def is_status_check_retryable_error(error_code: str | None) -> bool:
+    """状态查询本身的瞬时失败；参数/鉴权/任务不存在不能靠重复查询恢复。"""
+    return error_code in {ERROR_GATEWAY_5XX, ERROR_CONN_RESET, ERROR_RATE_LIMITED, ERROR_WAF_BLOCK}
 
 
 def is_zero_output_transient(error_code: str | None) -> bool:

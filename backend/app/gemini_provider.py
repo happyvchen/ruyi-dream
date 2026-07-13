@@ -27,6 +27,7 @@ from .generation_progress import (
     ERROR_WAF_BLOCK,
     classify_provider_error,
     is_zero_output_transient,
+    normalize_toapis_error,
 )
 
 
@@ -316,15 +317,24 @@ def _post_toapis_chat(payload: dict[str, Any]) -> str:
             # attempt 记录只存下方摘要;原始错误体在此落日志供排查。
             logger.warning("ToAPIs 上游错误 HTTP %s: %s", response.status_code, raw_body[:2000])
             retry_after = _parse_retry_after(response.headers.get("Retry-After"))
-            error_code = classify_provider_error(status_code=response.status_code, body=raw_body)
+            try:
+                response_payload = response.json()
+            except ValueError:
+                response_payload = {"message": raw_body}
+            provider_error = normalize_toapis_error(
+                response_payload,
+                status_code=response.status_code,
+                fallback_message=raw_body,
+            )
             raise GeminiProviderError(
                 f"Gemini(ToAPIs 通道) 请求失败: {summarize_upstream_http_error(response.status_code, raw_body)}",
-                error_code,
+                str(provider_error["code"]),
                 retry_after=retry_after,
                 provider_response={
                     "httpStatus": response.status_code,
                     "contentType": response.headers.get("Content-Type"),
                     "retryAfter": response.headers.get("Retry-After"),
+                    "providerError": provider_error,
                     "rawBody": redact_provider_text(raw_body)[:16000],
                     "rawBodyTruncated": len(raw_body) > 16000,
                 },
