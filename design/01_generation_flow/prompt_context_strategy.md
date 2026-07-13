@@ -1,72 +1,22 @@
-# Prompt Context Strategy
+# Prompt 上下文策略
 
-> **当前第一阶段设计（2026-07-13）**：运行链路已统一为“上传主推款 → AI 智能选搭 → 三类固定 Prompt 生成分镜预览 → 分镜前 5 格生成成片”。不再提供“生成拍摄剧本”步骤或对外 API；下文若仍出现 ShootScript/ShotPlan，属于待第二阶段删除的旧实现背景，不得作为当前产品或实现依据。当前权威设计见 `design/01_generation_flow/shoot_script_workflow.md` 与 `generation_responsibility_matrix.md`。
+Prompt 维护页托管稳定业务规则；代码只注入会随任务变化的动态事实。不要把用户训练成 prompt 工程师，也不要让 Gemini 动态生成分镜或成片 Prompt。
 
-## 背景
+## Runtime 占位
 
-搭配服装打标结果本身并不长。`styling_garments.ai_tags_json` 是 AI 打标的原始事实账本，应完整保存用于审计和详情展示。但生成链路过去把 `ai_tags_json`、`effective_tags_json`、`manual_tags_json`、`official_title_tags_json`、`tag_meta_json`、旧候选快照和历史 prompt 一起拼进下游请求，导致 prompt 体量被历史上下文和重复字段放大。
+| 阶段 | 动态占位 | 说明 |
+|---|---|---|
+| AI 选搭 | `candidate_retrieval`, `hero_product_info`, `ai_styling_user_instruction`, `user_requirement` | 给 Gemini 的选搭事实与用户要求 |
+| 分镜预览 | `category_family`, `styling_outfit`, `resolved_accessories`, `ref_model_identity`, `ref_garment`, `ref_shoot_environment`, `hero_product_info`, `storyboard_preview_user_instruction` | 给三类固定分镜 Prompt 的少量动态事实 |
+| 最终成片 | `preview_grid_cell`, `shot_styling`, `shot_global_directing`, `shot_current`, `shot_accessories`, `ref_model_identity`, `ref_preview_grid`, `ref_garment`, `ref_shoot_environment`, `hero_product_info`, `final_image_user_instruction`, `is_shot_1..5` | 给三类固定成片 Prompt 的当前格动态事实 |
 
-0.1.0 原则：每个生成步骤只接收完成当前判断所需的结构化 DTO，不直接透传上游完整对象或历史 prompt。AI Stylist 例外地接收未归档 READY 搭配库的完整 `ai_tags_json` 标签事实，因为这部分本身就是选搭判断所需的业务输入，而不是历史上下文。
+## 禁止
 
-## 阶段输入
+- 不传完整候选池给分镜或成片。
+- 不传动态剧本 JSON。
+- 不传镜头计划 JSON。
+- 不把 schema、优先级治理元数据、provider 参数混入面向 Image-2 的自然语言 Prompt。
 
-| 阶段 | Runtime | 输入内容 | 明确不传 |
-|---|---|---|---|
-| AI Stylist | `candidate_retrieval` | READY 搭配库 `code` + 完整 `ai_tags_json` 标签事实卡 | 内部 id、图片快照、历史 prompt、`effective_tags_json` 派生摘要 |
-| AI Stylist | `user_requirement` | 上传阶段补充服装信息、拍摄要求、本次选搭微调要求和冲突处理规则 | 长篇自由 prompt、可覆盖商品事实的模型指令 |
-| AI Director | `styling_result` | 主推款理解、选中 outfit、选中服饰 `ai_tags` 标签事实、质量信号 | 全部 outfit 候选池、rejected 全文、AI Stylist prompt、未选中的全库候选 |
-| 分镜预览 | `shoot_script_resolved_accessories` / `shoot_script_shots` + `ref_*` 图号区间 | 最终配饰、6 个镜头（各为无表头正文）；参考图各职能图号区间 | 全局导演包装、搭配风险、完整 StylingPlan、候选池、原始标签 |
-| 最终成片 | `preview_grid_cell` / `shot_styling` / `shot_global_directing` / `shot_current` / `shot_accessories` + `ref_*` 图号区间 | 当前镜头、当前格号、全局导演、选中 outfit、本镜头配饰（各为无表头正文） | 完整 ShootScript、全部镜头外细节、候选池 |
+## 用户要求
 
-> P6 起，分镜预览/成片的合成占位（`shoot_script_result` / `current_shot_context` / `image_reference_manifest`）已拆成上表的粒度占位：代码只出「会变的数据/图号」，段头与固定话术由 `assembly.*` 模板正文托管（配合条件段 `{{#runtime.x}}…{{/runtime.x}}`）。详见 `prompt_rendering_refactor.md` §10。
-
-## 搭配库标签事实卡
-
-AI Stylist 的候选卡以搭配服装 `code` 为唯一模型可见标识，并直接携带 `styling_garments.ai_tags_json` 的解析结果。后端不得把标签字段写死成品类、颜色、材质等白名单摘要；AI 打标 Prompt 新增字段后，应自然进入 `ai_tags` 对象。
-
-```json
-{
-  "code": "LOOK-A",
-  "ai_tags": {
-    "一级品类": ["上装"],
-    "色彩": ["白色"],
-    "面料材质": ["梭织"],
-    "穿着能力": ["可塞腰"],
-    "风格语义": "通勤、清爽、轻量",
-    "风险点": ["可能遮挡腰线"]
-  },
-  "manual_flags": {},
-  "review": {"confidence": 0.86}
-}
-```
-
-后端内部仍可在快照中保存 code/id 映射用于持久化，但 prompt 输入输出不暴露系统内部 ID。最新实现只认 `ai_tags_json`；如果 READY 服饰缺少 `ai_tags_json`，应视为数据或打标状态问题处理，而不是用派生摘要替代。
-
-## 下游压缩
-
-AI Director 只需要“已选方案如何导演”，不需要重新看到整个搭配库。`styling_result` 保留：
-
-- `hero_understanding`
-- `styling_intents`
-- `selected_outfit`
-- `selected_material_tag_cards`
-- `reason_summary`
-- `quality_signals`
-- `warnings`
-- `user_requirement_resolution`
-
-用户要求会作为本次输入版本的一部分冻结，并随 StylingPlan 快照进入下游。AI Director 不重新解释用户要求，只读取 AI Stylist 已解析后的 `user_requirement_resolution` 和选中造型结论；如果用户需要改变造型，应重新选搭，而不是在拍摄剧本阶段临时替换库内搭配服装。
-
-分镜预览只读取 ShootScript 级别的导演信息和 6 个镜头。最终成片只读取当前镜头上下文，避免 5 张最终图重复携带整组剧本和完整选搭历史。
-
-## 规则归属
-
-- AI 选搭业务规则写在 `assembly.ai_styling` Prompt 正文。
-- 用户要求优先级写在 AI Stylist 的 system instruction 和 `assembly.ai_styling` Prompt 正文：用户要求高于默认搭配偏好，但低于商品事实、搭配库事实、品牌硬边界、输出 schema 和安全规则。
-- 拍摄导演规则写在 `assembly.shoot_script` Prompt 正文。
-- 品牌资料来自 `segment.brand_info` Prompt 分段和相关阶段 Prompt 正文。
-- 不再使用独立 `ai_policy_configs` 表。
-
-## 非目标
-
-本轮不实现 prompt 长度阈值、预算监控或自动截断告警。优化目标是通过正确 DTO 切分和删除旧兼容注入，从结构上减少上下文体量。
+用户要求保存为任务级草稿，只影响下一次执行：商品信息、智能选搭要求、分镜预览要求、成片要求。

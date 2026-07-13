@@ -1,6 +1,6 @@
 """生成 attempt 的阶段进度与失败分类。
 
-设计要点（对应 shoot_script_workflow.md 状态机约束）：
+设计要点（对应当前四步生成工作流状态机约束）：
 
 - 阶段进度只是 attempt 上的展示元数据，不是新的业务状态。
   `generation_result_images_new.status` / `generation_attempts.status`

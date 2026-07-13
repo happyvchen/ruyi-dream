@@ -9,12 +9,12 @@
 - 主推款视觉理解不得长期停留在任务名启发式或 `unknown` 品类。
 - AI Stylist 不得为了露出主推款而安排不符合搭配服装结构的穿法，例如把厚外套、开衫或明显门襟下摆强行塞腰。
 - Aesthetic Critic 必须同时判断商品可见、穿法成立、品牌成立和整体审美，而不是只看主推款是否露出。
-- ShotPlan 必须服务主推款品类和商品卖点，不能用通用全身图模板替代品类图位规则。
+- 固定分镜/成片 Prompt 必须服务主推款品类和商品卖点，不能用通用全身图模板替代品类图位规则。
 
 0.1.0 方案采用：
 
 ```text
-主推款图片 + Lily 官方样本证据 + 全量标签事实 + Prompt 业务规则 -> AI Stylist / Aesthetic Critic -> StylingPlan -> 按主推品类生成 ShotPlan
+主推款图片 + Lily 官方样本证据 + 全量标签事实 + Prompt 业务规则 -> AI Stylist / Aesthetic Critic -> StylingPlan -> 按主推品类路由固定分镜/成片 Prompt
 ```
 
 ## 2. 核心原则
@@ -69,13 +69,13 @@ Lily 参考样本必须来自可验证渠道：
 - 视觉气质：轻盈、挺括、柔软、通勤、春夏、秋冬、强设计等。
 - 图位需求：该品类必须覆盖哪些景别、取景范围和角度。
 
-主推款理解结果必须进入 `StylingPlan` 和 `ShotPlan`，不能只存在于 Gemini 临场文字里。
+主推款理解结果必须进入 `StylingPlan`，并通过品类路由影响固定分镜/成片 Prompt，不能只存在于 Gemini 临场文字里。
 
 硬验收：
 
 - 正常生产任务不得以 `category = unknown` 进入正常选搭通过状态；若视觉理解低置信度，应进入复核或安全 fallback，而不是继续按未知品类生成通用方案。
 - request snapshot 中的主推款理解来源不得长期停留在任务名启发式；任务名、SKU 和文件名只可作为辅助证据。
-- `HeroUnderstanding` 中的品类、卖点、不可遮挡区域和图位需求必须在 `StylingPlan` 候选比较、拒绝理由和 ShotPlan 中可追溯。
+- `HeroUnderstanding` 中的品类、卖点、不可遮挡区域和图位需求必须在 `StylingPlan` 候选比较、拒绝理由和后续 Prompt 路由中可追溯。
 
 ### 4.2 搭配服装资产理解层
 
@@ -160,7 +160,7 @@ Aesthetic Critic 除原有维度外，必须新增：
 - 只为露出腰头而牺牲穿着自然度。
 - 主推款可见但搭配服装成为局部近景主角。
 - 没有官方样本证据支撑，却声称“高度符合 Lily”。
-- 第 6 格备用姿态明显优于前 5 格，说明 ShotPlan 不成立。
+- 第 6 格备用姿态明显优于前 5 格，说明分镜 Prompt 的六镜头策略不成立。
 
 ## 6. Lily Brand Style Index
 
@@ -183,7 +183,7 @@ Aesthetic Critic 除原有维度外，必须新增：
 - `embedding`、`embedding_model`、`embedding_version`。
 - `confidence`、`reviewed_by`、`reviewed_at`。
 
-`Lily Brand Style Index` 是选搭和 ShotPlan 的品牌证据层，不是商品事实源。最终生成的商品事实仍来自主推款图片和被选中搭配服装图片。
+`Lily Brand Style Index` 是选搭和品类 Prompt 的品牌证据层，不是商品事实源。最终生成的商品事实仍来自主推款图片和被选中搭配服装图片。
 
 ## 7. 生成配饰边界
 

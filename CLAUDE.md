@@ -30,7 +30,7 @@ Ruyi-Dream 是面向服饰品牌视觉生产团队的 B2B AI 数字化摄影棚�
 | `design/CLAUDE.md` | 产品设计总索引：范围、生成流程、品牌素材、UX、实现指南 | **任何**产品/流程/实现设计前 |
 | `design/00_product_overview/CLAUDE.md` | 产品定位、0.1.0 范围、产品需求 | 判断产品边界和功能范围时 |
 | `design/01_generation_flow/CLAUDE.md` | 生成主流程、Image-2 输入策略、职责拆分 | 设计生成链路、任务包、prompt 策略时 |
-| `design/01_generation_flow/shoot_script_workflow.md` | 当前四步工作流、三类 Prompt 路由、失效规则和成片一致性 | 设计或实现分镜预览、成片重生和状态恢复时 |
+| `design/01_generation_flow/current_generation_workflow.md` | 当前四步工作流、三类 Prompt 路由、失效规则和成片一致性 | 设计或实现分镜预览、成片重生和状态恢复时 |
 | `design/02_brand_and_assets/CLAUDE.md` | 搭配服装、标签、媒体资产、数字模特与品类图位规则 | 处理素材、标签、媒体、模特和图位规则时 |
 | `design/03_ux_guide/CLAUDE.md` | 普通用户视角 UI/UX | 设计或实现前端页面时 |
 | `design/04_implementation_guide/CLAUDE.md` | 技术路线与生产实操 | 工程拆分或落地实现时 |
@@ -59,5 +59,5 @@ agent 在本仓库做任何任务时，必须遵守：
 - 复杂任务先拆分步骤并说明将读取哪些权威文档。
 - 不创建未被要求的功能、模板、目录或抽象。
 - 不顺手重构无关文档。
-- 产出生成方案时，优先给结构化 `StylingPlan`、图位方案、输入职责拆分和验收维度，而不是直接给一段长 prompt。
+- 产出生成方案时，优先给结构化 `StylingPlan`、品类图位方案、输入职责拆分和验收维度，而不是直接给一段长 prompt。
 - 提交前确认是否需要 commit；除非用户明确要求，否则只完成文件改动不提交。

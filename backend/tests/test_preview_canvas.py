@@ -99,13 +99,24 @@ class PreviewCanvasTest(unittest.TestCase):
         self.assertEqual(parse(mock.Mock(gpt_image2_preview_fal_image_size="")), "square_hd")
 
     def test_final_shot_context_cell_is_number_only(self) -> None:
-        # 重构后：代码只输出「会变的格号」，「第 N 格即 1:1 构图/只借用姿势…」这类固定话术
-        # 已移入三类 assembly.final_image_* 的 Prompt 维护模板正文（用 {{runtime.preview_grid_cell}} 占位）。
-        prompt_render = importlib.reload(importlib.import_module("app.prompt_render"))
-        self.assertEqual(prompt_render.render_preview_grid_cell({"preview_grid_cell": 3}), "3")
-        self.assertEqual(prompt_render.render_preview_grid_cell({}), "")
-        # 规则话术不得再由渲染层产出。
-        self.assertNotIn("1:1 构图", prompt_render.render_preview_grid_cell({"preview_grid_cell": 3}))
+        # 代码只输出「会变的格号」；“第 N 格即 1:1 构图/只借用姿势”等固定话术
+        # 已移入三类 assembly.final_image_* 的 Prompt 维护模板正文。
+        main = importlib.reload(importlib.import_module("app.main"))
+        runtime = main.build_final_prompt_runtime(
+            3,
+            "bottom_grid_3",
+            {
+                "hero_understanding": {"category": "裤装"},
+                "selected_material_codes": ["LOOK-A"],
+                "outfit_candidates": [{"outfit_key": "A", "selected_material_ids": [], "wearing_notes": "轻量通勤"}],
+                "selected_outfit_key": "A",
+            },
+            [],
+            {},
+            {},
+        )
+        self.assertEqual(runtime["preview_grid_cell"], "3")
+        self.assertNotIn("1:1 构图", runtime["preview_grid_cell"])
 
 
 if __name__ == "__main__":

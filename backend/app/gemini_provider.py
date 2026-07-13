@@ -256,7 +256,7 @@ def build_toapis_chat_payload(
     if system_instruction:
         messages.append({"role": "system", "content": system_instruction})
     messages.append({"role": "user", "content": user_content})
-    # 必须流式:ToAPIs 在 Cloudflare 后面,非流式长请求(如拍摄剧本)会在
+    # 必须流式:ToAPIs 在 Cloudflare 后面,非流式长请求会在
     # ~100s 被 CF 以 HTTP 524 掐断,而服务端仍完成生成并计费。
     # stream_options.include_usage: 让最后一个数据块携带 usage(含
     # reasoning_tokens 明细),用于截断检测和失败诊断(2026-07-03 实测可用;

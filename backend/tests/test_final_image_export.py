@@ -87,12 +87,8 @@ class FinalImageExportTestCase(unittest.TestCase):
                 (task_id, task_id, task_id, now, now),
             )
             db.execute(
-                "INSERT INTO generation_shoot_scripts (id, task_id, styling_id, input_version_id, script_json, created_at, updated_at) VALUES (?, ?, ?, ?, '{}', ?, ?)",
+                "INSERT INTO generation_previews (id, task_id, styling_id, input_version_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'SUCCEEDED', ?, ?)",
                 (task_id, task_id, task_id, task_id, now, now),
-            )
-            db.execute(
-                "INSERT INTO generation_previews (id, task_id, styling_id, shoot_script_id, input_version_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'SUCCEEDED', ?, ?)",
-                (task_id, task_id, task_id, task_id, task_id, now, now),
             )
             db.execute(
                 "INSERT INTO generation_result_sets (id, task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'SUCCEEDED', ?, ?)",

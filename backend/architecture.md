@@ -1,101 +1,40 @@
 # Backend Architecture
 
-> **当前第一阶段设计（2026-07-13）**：运行链路已统一为“上传主推款 → AI 智能选搭 → 三类固定 Prompt 生成分镜预览 → 分镜前 5 格生成成片”。不再提供“生成拍摄剧本”步骤或对外 API；下文若仍出现 ShootScript/ShotPlan，属于待第二阶段删除的旧实现背景，不得作为当前产品或实现依据。当前权威设计见 `design/01_generation_flow/shoot_script_workflow.md` 与 `generation_responsibility_matrix.md`。
+## 职责
 
-后端负责把主推款、搭配服装库、数字模特、Prompt 配置和生成任务组织成可追踪的 AI 摄影棚生产链路。当前实现为 FastAPI 单体应用，SQLite 存储元数据，媒体统一进入 S3 兼容对象存储。
+后端是 FastAPI + SQLite + S3 兼容对象存储的一体化服务，负责：
 
-## 代码结构
+- 素材与媒体资产管理；
+- Gemini 打标和 AI 智能选搭；
+- Prompt 维护槽位读取与 runtime 占位渲染；
+- Image-2 分镜预览和最终成片任务包组装；
+- provider attempt 快照、进度、错误分类和轮询恢复；
+- 生成记录、归档、删除和导出。
 
-| 路径 | 职责 |
-|---|---|
-| `app/main.py` | API 路由、AI Stylist、ShootScript、分镜预览、最终图和后台 poller 编排 |
-| `app/db.py` | SQLite 初始化、默认模特 seed、迁移、事件日志 |
-| `app/image_provider.py` | Image-2 provider adapter；默认 toapis，保留 fal adapter |
-| `app/image_ingestion.py` | 上传图片格式探测、限制校验、方向/色彩标准化和 normalized 母版 |
-| `app/image_derivatives.py` | thumb / preview WebP 衍生图 |
-| `app/object_storage.py` | S3/RustFS 对象访问、预签名 URL、删除和读取 |
-| `app/config.py` | 环境变量和运行配置 |
-
-历史 `app/planner.py` 已删除。后端不再提供旧货号组图规划器、历史 `garment-skus`、历史 `shot-plans` 或历史 `generation-runs` 主流程。
-
-## 业务模块
-
-| 模块 | 职责 |
-|---|---|
-| `styling-garment` | 搭配服装库、图片、Gemini 打标、生效标签和 READY 状态 |
-| `generation-task` | 主推款任务、输入版本、StylingPlan、ShootScript、ShotPlan、预览和成片 |
-| `model-profile` | 数字模特身份图、身体参数和默认模特 |
-| `prompt-config` | 可维护 Prompt 模板、品牌分段、生成规则和运行时占位符 |
-| `generation` | Image-2 任务提交、状态恢复、单张重试和结果下载 |
-
-## 主流程
+## 当前生成链路
 
 ```text
-POST /api/generation-tasks
-  -> 创建草稿任务
-  -> 上传主推款图片到 media_assets
-  -> 保存可选的补充服装信息或拍摄要求
-
-POST /api/generation-tasks/{id}/ready
-  -> 冻结草稿，进入 READY_FOR_STYLING
-
-POST /api/generation-tasks/{id}/select-styling
-  -> 创建 GenerationTaskInputVersion
-  -> 冻结上传补充要求和本次微调要求
-  -> 读取 READY 搭配服装库
-  -> 构造全量标签事实 candidate_retrieval prompt DTO
-  -> 构造 user_requirement prompt DTO
-  -> 调用 AI Stylist 生成 StylingPlan
-  -> 保存完整 StylingPlan、选中服饰快照和 attempt
-
-POST /api/generation-tasks/{id}/shoot-script
-  -> 构造 StylingPlan 导演上下文
-  -> 调用 AI Director 生成 ShootScript
-  -> 派生 6 条 GenerationShotPlan
-
-POST /api/generation-tasks/{id}/preview
-  -> 读取 ShootScript 上下文
-  -> Image-2 生成 3:2 分镜预览
-
-POST /api/generation-tasks/{id}/generate-final
-  -> 固定读取前 5 个 ShotPlan
-  -> 每张图只传当前单镜头上下文
-  -> 并发调用 Image-2
-
-POST /api/generation-tasks/{id}/auto-run-final
-  -> 记录 auto_run_target = FINAL
-  -> 从当前第一个未完成阶段自动推进到成片
-  -> 复用当前 active StylingPlan / ShootScript / 分镜预览
-  -> FINAL_PARTIAL 时只补失败或缺失的最终图
+上传主推款
+-> AI 智能选搭
+-> 三类固定 Prompt 生成分镜预览
+-> 分镜前 5 格生成成片
 ```
 
-`一键成片` 只是一层自动编排壳。手动按钮和自动推进共用相同阶段实现、artifact 表、attempt 表、active 指针和失败语义。任一阶段失败或用户取消时，自动推进标记会清除；再次点击 `一键成片` 会根据当前 active 产物断点续跑。
+后端不再包含动态剧本服务。`app/main.py` 中的生成相关代码只围绕 `StylingPlan`、`GenerationPreview` 和 `GenerationResultImage` 编排。
 
-## Prompt Context
+## 主要模块
 
-后端区分“审计快照”和“进入模型的 prompt DTO”：
+| 文件 | 职责 |
+|---|---|
+| `app/main.py` | API 路由、AI Stylist、分镜预览、最终图和后台 poller 编排 |
+| `app/db.py` | 最终 schema、Prompt 配置槽登记、清理迁移 |
+| `app/prompt_render.py` | 动态占位文本和参考图图号区间渲染 |
+| `app/image_provider.py` | ToApis / fal 请求快照和图片生成适配 |
+| `app/generation_progress.py` | attempt 阶段进度和错误分类 |
 
-- `generation_attempts.request_snapshot_json` 可以保存技术排查需要的 request/response 快照。
-- 传给模型的 runtime 只给当前步骤必需信息，不透传完整历史阶段、完整候选池或历史 prompt。
-- AI Stylist 输入是未归档 READY 搭配库全量标签事实卡和 `user_requirement`。用户要求优先于默认搭配偏好，但不能覆盖商品事实、搭配库事实、品牌硬边界、输出 schema 和安全规则。
-- AI Director 输入是 `styling_result_for_prompt`，只包含主推款理解、选中 outfit、选中服饰紧凑标签、理由、质量信号和 warnings。
-- 分镜预览输入是 `shoot_script_result_for_prompt` + `image_reference_manifest_for_prompt`，只包含全局导演、配饰、风险、6 个镜头、输入参考图序号和事实源。
-- 最终成片输入是 `current_shot_context_for_prompt` + `image_reference_manifest_for_prompt`，只包含当前格子、当前镜头、全局导演、选中 outfit、本镜头配饰、输入参考图序号和事实源。
+## 图片事实源
 
-数字模特参考图是人物身份事实源。后端必须把 `model_identity` 参考图前置进 Image-2 输入，并在 prompt 中声明它们覆盖 ShootScript、分镜预览和品牌妆发文字；分镜预览只允许作为构图、姿势和光影参考。
-
-不实现独立 prompt 长度预算监控；0.1.0 通过结构化 DTO 和删除历史注入来控制上下文体量。
-
-Prompt 正文只来自 `prompt_configs.content`。后端只初始化空正文的可维护 Prompt 槽位，不在代码、迁移或初始化中保存 Prompt 默认正文；缺少 Prompt 配置或正文为空时应暴露配置错误，而不是使用代码字符串 fallback。
-
-## 媒体与恢复
-
-对象存储保存原图，并为新上传图片生成确定性路径的 `normalized` sRGB 母版及 `thumb`、`preview`。AI/provider 优先使用 normalized，下载和审计使用 original。前端访问稳定 `/api/media?key=...&variant=...`，后端校验 key 后跳转对象存储短期 URL。
-
-`generation_previews` 和 `generation_result_images_new` 使用 `locked_by` / `locked_until` / `run_attempts` 做单实例恢复。后端重启后，poller 扫描锁过期任务，标记历史 attempt 失败并重建 attempt 继续执行。带有 `auto_run_target = FINAL` 的任务会在非运行中状态下重新调度自动推进。
-
-## 约束
-
-- Image-2 只负责视觉生成，不承担标签、选搭、历史状态或业务策略。
-- 用户不写长 prompt；用户可填写简短业务要求，并确认拍摄信息、造型方案、分镜预览和结果。
-- 0.1.0 之前的逻辑、库表和数据不作为运行时读取路径。
+- 数字模特参考图负责人物身份事实。
+- 主推款和搭配服装图片负责商品事实。
+- 分镜预览只负责构图、姿态、裁切、背景和组图一致性。
+- 最终成片必须回看商品图和模特图，不能只复刻分镜预览。

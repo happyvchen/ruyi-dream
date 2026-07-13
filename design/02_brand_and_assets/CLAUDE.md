@@ -1,31 +1,21 @@
 # design/02_brand_and_assets/ — Agent Guide
 
-> **当前第一阶段设计（2026-07-13）**：运行链路已统一为“上传主推款 → AI 智能选搭 → 三类固定 Prompt 生成分镜预览 → 分镜前 5 格生成成片”。不再提供“生成拍摄剧本”步骤或对外 API；下文若仍出现 ShootScript/ShotPlan，属于待第二阶段删除的旧实现背景，不得作为当前产品或实现依据。当前权威设计见 `design/01_generation_flow/shoot_script_workflow.md` 与 `generation_responsibility_matrix.md`。
+## 职责
 
-## 职责 (Scope)
+搭配服装库、标签 schema、媒体资产、数字模特、Image-2 输入图片预算和品类图位规则。这里回答“生成依据从哪里来、商品事实如何保存、模型最多 10 张图时怎么选”。
 
-搭配服装库、标签 schema、媒体资产、数字模特、Image-2 输入图片预算、ShootScript 和 ShotPlan 字段。这里回答“生成依据从哪里来、商品事实如何保存、模型最多 10 张图时怎么选”。
-
-## 文档索引 (Index)
+## 文档索引
 
 | 文件 | 内容 | 何时需要读 |
 |---|---|---|
-| `assets_and_parameters.md` | 媒体资产、主推款、搭配服装、标签、数字模特、ShootScript / ShotPlan 字段 | 处理素材、标签、图片输入、模特和参数时 |
-| `lily_tagging_system.md` | Lily 服装视觉生产标签体系：来源分层、AI 标签、人工标签、选搭压缩格式、前台展示规则 | 实现或评审标签体系、智能选搭输入、标签展示/治理时 |
-| `lily_gemini_tagging_flow.md` | Gemini 实际打标流水线：输入、判断步骤、输出、后端校验、effective_tags 合成 | 实现打标服务、排查打标质量或联调标签展示时 |
-| `category_shot_rules.md` | Lily 主推品类 ShotPlan 图位矩阵、取景、姿态和展示重点 | 生成或评审拍摄剧本和 ShotPlan 时 |
-| `brand_style_templates.md` | Lily 官方样本驱动的背景、光线、Pose、鞋包、配饰和穿法边界 | 设计品牌边界、生成配饰或官方样本检索时 |
-| `optional_measurement_enhancement.md` | 模特尺寸、服装尺寸、品类尺寸字段 | 解决衣长、裙长、裤长、下摆比例等问题时 |
+| `assets_and_parameters.md` | 媒体资产、主推款、搭配服装、标签、数字模特和当前生图输入参数 | 处理素材、标签、图片输入、模特和参数时 |
+| `category_shot_rules.md` | Lily 主推品类固定分镜/成片图位矩阵、取景、姿态和展示重点 | 维护或评审三类分镜/成片 Prompt 时 |
+| `brand_style_templates.md` | Lily 品牌视觉语法、造型和棚拍语言 | 维护品牌调性或 Prompt 时 |
+| `lily_tagging_system.md` | Lily 服装视觉生产标签体系 | 实现或评审标签体系时 |
+| `lily_gemini_tagging_flow.md` | Gemini 打标流程 | 实现或排查打标时 |
 
-## 本地规则 (Local Rules)
+## 本地规则
 
-- 搭配服装库当前只支持真实服装，不支持鞋、包、饰品入库。
-- 鞋、包、饰品可作为生成配饰出现，但不作为商品级验收对象。
-- 图片决定商品事实，ShootScript / ShotPlan 决定拍摄任务，文本决定边界。
-- ShotPlan 必须按主推款品类生成，不能把通用全身图模板套给所有品类。
-- 尺寸增强是可选模块，0.1.0 不强制用户填写。
-
-## 相关 (See Also)
-
-- 父级：`../CLAUDE.md`
-- 生成职责：`../01_generation_flow/CLAUDE.md`
+- 图片决定商品事实，数字模特图决定人物事实，三类固定 Prompt 决定分镜和成片任务。
+- 品类图位规则必须进入 Prompt 维护模板；不要依赖大模型动态生成镜头计划。
+- 最终成片固定生成分镜前 5 格。

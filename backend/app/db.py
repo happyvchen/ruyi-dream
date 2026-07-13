@@ -4,7 +4,6 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-import re
 import sqlite3
 from typing import Any, Iterator
 
@@ -12,40 +11,15 @@ from .config import get_settings
 
 
 MIGRATIONS: tuple[tuple[str, str, str], ...] = (
-    ("027", "drop_legacy_generation_tables", "migration_drop_legacy_generation_tables"),
-    ("028", "add_generation_task_auto_run", "migration_add_generation_task_auto_run"),
-    ("029", "add_generation_user_requirements", "migration_add_generation_user_requirements"),
-    ("030", "split_generation_user_inputs", "migration_split_generation_user_inputs"),
-    ("031", "add_generation_pending_stage_inputs", "migration_add_generation_pending_stage_inputs"),
-    ("032", "add_shoot_script_runtime_columns", "migration_add_shoot_script_runtime_columns"),
-    ("033", "cleanup_legacy_tables_and_attempt_provider_request_ids", "migration_cleanup_legacy_tables_and_attempt_provider_request_ids"),
-    ("034", "drop_prompt_replaced_config_tables", "migration_drop_prompt_replaced_config_tables"),
-    ("035", "recover_legacy_shoot_scripts", "migration_recover_legacy_shoot_scripts"),
-    ("036", "add_attempt_progress_and_upload_cache", "migration_add_attempt_progress_and_upload_cache"),
-    ("037", "add_generation_task_batch_id", "migration_add_generation_task_batch_id"),
-    ("039", "restore_storyboard_preview", "migration_restore_storyboard_preview"),
-    ("040", "add_preview_environment_asset", "migration_add_preview_environment_asset"),
-    ("041", "add_shoot_environment_reference", "migration_add_shoot_environment_reference"),
-    ("042", "drop_merged_prompt_config_keys", "migration_drop_merged_prompt_config_keys"),
-    ("043", "drop_model_identity_prompt_runtime", "migration_drop_model_identity_prompt_runtime"),
-    ("044", "merge_garment_reference_prompt_runtime", "migration_merge_garment_reference_prompt_runtime"),
-    ("045", "drop_subject_reference_prompt_runtime", "migration_drop_subject_reference_prompt_runtime"),
-    ("047", "simplify_final_image_slots", "migration_simplify_final_image_slots"),
-    ("048", "install_category_storyboard_prompts", "migration_install_category_storyboard_prompts"),
-    ("049", "install_category_final_image_prompts", "migration_install_category_final_image_prompts"),
+    ("050", "finalize_direct_prompt_generation_workflow", "migration_finalize_direct_prompt_generation_workflow"),
 )
 
-# prompt_configs 只登记「Prompt 维护」页的配置槽（键 / 分组 / 标题 / 说明 / 排序），
-# 内容一律为空，由「Prompt 维护」页维护——代码里绝不写死任何 Prompt 正文。
-# 运行时统一从 prompt_configs.content 读取；页面上最新的内容为准。
-#
-# 系统指令、JSON 输出纪律、JSON 重问约束、参考图事实源约束等原独立配置槽已合并进
-# 对应的组装 Prompt 正文（AI 选搭 / 拍摄剧本 / 分镜预览 / 生成成片），故不再单列；
-# 历史遗留的这些孤儿键由 migration_drop_merged_prompt_config_keys 清理。
+# Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
+# 代码只登记槽位、品类路由和动态事实占位，真正的黄金 Prompt 由页面维护。
 PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
     ("segment.brand_info", "segment", "品牌信息", "品牌信息分段 Prompt，可被组装 Prompt 引用。", 10),
     ("assembly.ai_tagging", "assembly", "AI 打标", "搭配服装入库后的图片理解和标签识别 Prompt。", 100),
-    ("assembly.ai_styling", "assembly", "AI 选搭", "AI Stylist 选搭 Prompt，含角色系统指令、主推款理解、搭配选择和质量判断。", 110),
+    ("assembly.ai_styling", "assembly", "AI 选搭", "AI Stylist 选搭 Prompt，含主推款理解、搭配选择和质量判断。", 110),
     ("assembly.storyboard_preview_top", "assembly", "分镜预览 · 上装/针织/外套", "Image-2 上装类固定六镜头分镜 Prompt。", 120),
     ("assembly.storyboard_preview_bottom", "assembly", "分镜预览 · 裤装/半身裙", "Image-2 下装类固定六镜头分镜 Prompt。", 130),
     ("assembly.storyboard_preview_one_piece", "assembly", "分镜预览 · 连衣裙/连体/套装", "Image-2 连衣裙/连体/套装固定六镜头分镜 Prompt。", 140),
@@ -54,14 +28,16 @@ PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
     ("assembly.final_image_one_piece", "assembly", "生成成片 · 连衣裙/连体/套装", "Image-2 连衣裙/连体/套装固定五镜头成片 Prompt。", 170),
 )
 
-# 合并进组装 Prompt 正文后需从库里清除的孤儿配置键。
-MERGED_PROMPT_CONFIG_KEYS: tuple[str, ...] = (
+REMOVED_PROMPT_CONFIG_KEYS: tuple[str, ...] = (
+    "assembly.shoot_script",
+    "assembly.shoot_script_system",
+    "assembly.storyboard_preview",
+    "assembly.final_image",
     "segment.json_output_discipline",
     "segment.json_only_reask_hint",
     "segment.image_reference_constraint",
     "segment.image_reference_preview_note",
     "assembly.ai_styling_system",
-    "assembly.shoot_script_system",
 )
 
 
@@ -180,17 +156,16 @@ def init_db() -> None:
               user_requirement_text TEXT,
               hero_product_info_text TEXT,
               ai_styling_user_instruction_text TEXT,
-              shoot_script_user_instruction_text TEXT,
               storyboard_preview_user_instruction_text TEXT,
               final_image_user_instruction_text TEXT,
               current_input_version_id INTEGER,
               active_styling_id INTEGER,
-              active_shoot_script_id INTEGER,
               active_preview_id INTEGER,
               active_storyboard_preview_id INTEGER,
               active_result_set_id INTEGER,
               auto_run_target TEXT,
               auto_run_requested_at TEXT,
+              batch_id TEXT,
               archived_at TEXT,
               archive_reason TEXT,
               created_at TEXT NOT NULL,
@@ -248,53 +223,10 @@ def init_db() -> None:
               updated_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS generation_shoot_scripts (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
-              input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
-              styling_id INTEGER NOT NULL REFERENCES generation_stylings(id) ON DELETE CASCADE,
-              status TEXT NOT NULL DEFAULT 'SUCCEEDED',
-              script_json TEXT NOT NULL,
-              summary_json TEXT,
-              styling_risks_json TEXT,
-              accessory_adjustments_json TEXT,
-              user_instruction_json TEXT,
-              active_attempt_id INTEGER,
-              locked_by TEXT,
-              locked_until TEXT,
-              run_attempts INTEGER NOT NULL DEFAULT 0,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              superseded_at TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS prompt_configs (
-              key TEXT PRIMARY KEY,
-              group_type TEXT NOT NULL,
-              title TEXT NOT NULL,
-              description TEXT NOT NULL DEFAULT '',
-              content TEXT NOT NULL DEFAULT '',
-              sort_order INTEGER NOT NULL DEFAULT 0,
-              updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS generation_shot_plans (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
-              styling_id INTEGER NOT NULL REFERENCES generation_stylings(id) ON DELETE CASCADE,
-              shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id) ON DELETE CASCADE,
-              sort_order INTEGER NOT NULL,
-              shot_type TEXT,
-              plan_json TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              UNIQUE(shoot_script_id, sort_order)
-            );
-
             CREATE TABLE IF NOT EXISTS generation_previews (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
               styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
-              shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id),
               input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
               user_instruction_json TEXT,
               preview_asset_id INTEGER REFERENCES media_assets(id),
@@ -353,7 +285,26 @@ def init_db() -> None:
               response_snapshot_json TEXT,
               output_asset_id INTEGER REFERENCES media_assets(id),
               retry_of_attempt_id INTEGER REFERENCES generation_attempts(id),
+              progress_json TEXT,
               created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS provider_upload_cache (
+              provider TEXT NOT NULL,
+              object_key TEXT NOT NULL,
+              provider_url TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (provider, object_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS prompt_configs (
+              key TEXT PRIMARY KEY,
+              group_type TEXT NOT NULL,
+              title TEXT NOT NULL,
+              description TEXT NOT NULL DEFAULT '',
+              content TEXT NOT NULL DEFAULT '',
+              sort_order INTEGER NOT NULL DEFAULT 0,
               updated_at TEXT NOT NULL
             );
             """
@@ -382,27 +333,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         for row in db.execute("SELECT version FROM schema_migrations").fetchall()
     }
     migration_functions = {
-        "migration_drop_legacy_generation_tables": migration_drop_legacy_generation_tables,
-        "migration_add_generation_task_auto_run": migration_add_generation_task_auto_run,
-        "migration_add_generation_user_requirements": migration_add_generation_user_requirements,
-        "migration_split_generation_user_inputs": migration_split_generation_user_inputs,
-        "migration_add_generation_pending_stage_inputs": migration_add_generation_pending_stage_inputs,
-        "migration_add_shoot_script_runtime_columns": migration_add_shoot_script_runtime_columns,
-        "migration_cleanup_legacy_tables_and_attempt_provider_request_ids": migration_cleanup_legacy_tables_and_attempt_provider_request_ids,
-        "migration_drop_prompt_replaced_config_tables": migration_drop_prompt_replaced_config_tables,
-        "migration_recover_legacy_shoot_scripts": migration_recover_legacy_shoot_scripts,
-        "migration_add_attempt_progress_and_upload_cache": migration_add_attempt_progress_and_upload_cache,
-        "migration_add_generation_task_batch_id": migration_add_generation_task_batch_id,
-        "migration_restore_storyboard_preview": migration_restore_storyboard_preview,
-        "migration_add_preview_environment_asset": migration_add_preview_environment_asset,
-        "migration_add_shoot_environment_reference": migration_add_shoot_environment_reference,
-        "migration_drop_merged_prompt_config_keys": migration_drop_merged_prompt_config_keys,
-        "migration_drop_model_identity_prompt_runtime": migration_drop_model_identity_prompt_runtime,
-        "migration_merge_garment_reference_prompt_runtime": migration_merge_garment_reference_prompt_runtime,
-        "migration_drop_subject_reference_prompt_runtime": migration_drop_subject_reference_prompt_runtime,
-        "migration_install_category_storyboard_prompts": migration_install_category_storyboard_prompts,
-        "migration_install_category_final_image_prompts": migration_install_category_final_image_prompts,
-        "migration_simplify_final_image_slots": migration_simplify_final_image_slots,
+        "migration_finalize_direct_prompt_generation_workflow": migration_finalize_direct_prompt_generation_workflow,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -417,710 +348,332 @@ def run_migrations(db: sqlite3.Connection) -> None:
         )
 
 
-def migration_add_attempt_progress_and_upload_cache(db: sqlite3.Connection) -> None:
-    """attempt 阶段进度 + provider 参考图上传缓存。
+def migration_finalize_direct_prompt_generation_workflow(db: sqlite3.Connection) -> None:
+    """最终工作流清理：移除动态拍摄剧本 / ShotPlan 运行依赖。
 
-    - generation_attempts.progress_json：阶段进度展示元数据（不是新的业务状态）。
-    - provider_upload_cache：同一 objectKey 的参考图在 TTL 内复用 provider URL，
-      避免 5 张成片并发时重复上传同一批参考图。
+    本迁移不兼容旧运行态：旧的拍摄剧本、镜头计划、相关 attempt 以及依赖旧结构的
+    成片结果会被清理。当前权威链路是：
+    上传主推款 -> AI 智能选搭 -> 三类固定 Prompt 生成分镜预览 -> 前 5 格生成成片。
     """
-    if not table_has_column(db, "generation_attempts", "progress_json"):
-        db.execute("ALTER TABLE generation_attempts ADD COLUMN progress_json TEXT")
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS provider_upload_cache (
-          provider TEXT NOT NULL,
-          object_key TEXT NOT NULL,
-          provider_url TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          PRIMARY KEY (provider, object_key)
-        )
-        """
-    )
-
-
-def migration_drop_legacy_generation_tables(db: sqlite3.Connection) -> None:
+    if table_exists(db, "generation_attempts"):
+        db.execute("DELETE FROM generation_attempts WHERE owner_type = 'generation_shoot_script'")
+    if table_exists(db, "prompt_configs"):
+        placeholders = ", ".join("?" for _ in REMOVED_PROMPT_CONFIG_KEYS)
+        db.execute(f"DELETE FROM prompt_configs WHERE key IN ({placeholders})", REMOVED_PROMPT_CONFIG_KEYS)
     for table in (
-        "generation_images",
-        "generation_runs",
-        "shot_plan_shots",
-        "shot_plans",
-        "garment_images",
-        "garment_skus",
-        "brand_template_versions",
-        "ai_policy_configs",
-    ):
-        db.execute(f"DROP TABLE IF EXISTS {table}")
-
-
-def migration_cleanup_legacy_tables_and_attempt_provider_request_ids(db: sqlite3.Connection) -> None:
-    migration_drop_legacy_generation_tables(db)
-    if not table_has_column(db, "generation_attempts", "provider_request_id"):
-        db.execute("ALTER TABLE generation_attempts ADD COLUMN provider_request_id TEXT")
-
-
-def migration_drop_prompt_replaced_config_tables(db: sqlite3.Connection) -> None:
-    for table in (
-        "garment_tag_assignments",
-        "tag_applicability_rules",
-        "tag_relations",
-        "tag_defs",
-        "tag_dimensions",
-        "shoot_configs",
         "brand_profiles",
+        "shoot_configs",
+        "tag_dimensions",
+        "tag_defs",
+        "tag_relations",
+        "tag_applicability_rules",
+        "garment_tag_assignments",
     ):
         db.execute(f"DROP TABLE IF EXISTS {table}")
-
-
-def migration_add_generation_task_batch_id(db: sqlite3.Connection) -> None:
-    """批量成片批次：同一批次创建的任务共享 batch_id（客户端生成的不透明字符串）。"""
-    if not table_has_column(db, "generation_tasks", "batch_id"):
-        db.execute("ALTER TABLE generation_tasks ADD COLUMN batch_id TEXT")
-        db.execute("CREATE INDEX IF NOT EXISTS idx_generation_tasks_batch_id ON generation_tasks(batch_id)")
-
-
-def migration_restore_storyboard_preview(db: sqlite3.Connection) -> None:
-    """恢复分镜预览 schema（回滚旧迁移 038 的破坏性删除，幂等）。
-
-    038 曾删掉 generation_tasks 的 active_preview_id / active_storyboard_preview_id /
-    storyboard_preview_user_instruction_text 三列、generation_result_sets 的 preview_id 列，
-    并 DROP generation_previews 表。恢复分镜预览步骤后需要把这些补回：
-
-    - 三个任务列按可空补回（ALTER ADD COLUMN；历史行留 NULL，不影响读取）。
-    - generation_result_sets.preview_id 按可空补回（历史结果集无预览留 NULL；
-      新一轮成片会正常写入 preview_id）。
-    - generation_previews 表缺失则按原结构重建。
-
-    对全新库（init_db 已建全量 schema）本迁移为无操作。
-    """
-    def _table_exists(name: str) -> bool:
-        return db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
-        ).fetchone() is not None
-
-    if _table_exists("generation_tasks"):
-        for column, ddl in (
-            ("storyboard_preview_user_instruction_text", "TEXT"),
-            ("active_preview_id", "INTEGER"),
-            ("active_storyboard_preview_id", "INTEGER"),
-        ):
-            if not table_has_column(db, "generation_tasks", column):
-                db.execute(f"ALTER TABLE generation_tasks ADD COLUMN {column} {ddl}")
-
-    if _table_exists("generation_result_sets") and not table_has_column(db, "generation_result_sets", "preview_id"):
-        db.execute("ALTER TABLE generation_result_sets ADD COLUMN preview_id INTEGER")
-
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS generation_previews (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
-          styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
-          shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id),
-          input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
-          user_instruction_json TEXT,
-          preview_asset_id INTEGER REFERENCES media_assets(id),
-          status TEXT NOT NULL DEFAULT 'QUEUED',
-          active_attempt_id INTEGER,
-          locked_by TEXT,
-          locked_until TEXT,
-          run_attempts INTEGER NOT NULL DEFAULT 0,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        )
-        """
-    )
-
-
-def migration_add_preview_environment_asset(db: sqlite3.Connection) -> None:
-    """分镜预览新增可选的「拍摄环境参考图」引用（验证阶段手动上传，幂等）。
-
-    环境信息只在分镜预览这一步进入并锁定，成片经分镜预览图继承；
-    因此环境参考图只挂在 generation_previews 上，成片链路不引用。
-    对全新库（init_db 已含该列）本迁移为无操作。
-    """
-    if not table_has_column(db, "generation_previews", "environment_asset_id"):
-        db.execute("ALTER TABLE generation_previews ADD COLUMN environment_asset_id INTEGER REFERENCES media_assets(id)")
-
-
-def migration_add_shoot_environment_reference(db: sqlite3.Connection) -> None:
-    """全局单例「拍摄环境参考图」资源（0..1 张，admin 维护，幂等）。
-
-    环境信息在分镜预览步骤自动引用这张维护好的图；成片经分镜预览图继承。
-    对全新库（init_db 已建该表）本迁移为无操作。
-    """
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS shoot_environment_references (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          media_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        )
-        """
-    )
-
-
-def migration_add_generation_task_auto_run(db: sqlite3.Connection) -> None:
-    if not table_has_column(db, "generation_tasks", "auto_run_target"):
-        db.execute("ALTER TABLE generation_tasks ADD COLUMN auto_run_target TEXT")
-    if not table_has_column(db, "generation_tasks", "auto_run_requested_at"):
-        db.execute("ALTER TABLE generation_tasks ADD COLUMN auto_run_requested_at TEXT")
-
-
-def migration_add_generation_user_requirements(db: sqlite3.Connection) -> None:
-    if not table_has_column(db, "generation_tasks", "user_requirement_text"):
-        db.execute("ALTER TABLE generation_tasks ADD COLUMN user_requirement_text TEXT")
-    if not table_has_column(db, "generation_task_input_versions", "user_requirement_json"):
-        db.execute("ALTER TABLE generation_task_input_versions ADD COLUMN user_requirement_json TEXT")
-    if not table_has_column(db, "generation_stylings", "user_requirement_json"):
-        db.execute("ALTER TABLE generation_stylings ADD COLUMN user_requirement_json TEXT")
-
-
-def migration_split_generation_user_inputs(db: sqlite3.Connection) -> None:
-    if not table_has_column(db, "generation_tasks", "hero_product_info_text"):
-        db.execute("ALTER TABLE generation_tasks ADD COLUMN hero_product_info_text TEXT")
-        db.execute("UPDATE generation_tasks SET hero_product_info_text = user_requirement_text WHERE hero_product_info_text IS NULL AND user_requirement_text IS NOT NULL")
-    if not table_has_column(db, "generation_task_input_versions", "hero_product_info_json"):
-        db.execute("ALTER TABLE generation_task_input_versions ADD COLUMN hero_product_info_json TEXT")
-        db.execute("UPDATE generation_task_input_versions SET hero_product_info_json = user_requirement_json WHERE hero_product_info_json IS NULL AND user_requirement_json IS NOT NULL")
-    if not table_has_column(db, "generation_stylings", "user_instruction_json"):
-        db.execute("ALTER TABLE generation_stylings ADD COLUMN user_instruction_json TEXT")
-        db.execute("UPDATE generation_stylings SET user_instruction_json = user_requirement_json WHERE user_instruction_json IS NULL AND user_requirement_json IS NOT NULL")
-    if not table_has_column(db, "generation_shoot_scripts", "user_instruction_json"):
-        db.execute("ALTER TABLE generation_shoot_scripts ADD COLUMN user_instruction_json TEXT")
-    if not table_has_column(db, "generation_previews", "user_instruction_json"):
-        db.execute("ALTER TABLE generation_previews ADD COLUMN user_instruction_json TEXT")
-    if not table_has_column(db, "generation_result_sets", "user_instruction_json"):
-        db.execute("ALTER TABLE generation_result_sets ADD COLUMN user_instruction_json TEXT")
-    if not table_has_column(db, "generation_result_images_new", "user_instruction_json"):
-        db.execute("ALTER TABLE generation_result_images_new ADD COLUMN user_instruction_json TEXT")
-
-
-def migration_add_generation_pending_stage_inputs(db: sqlite3.Connection) -> None:
-    for column in (
-        "ai_styling_user_instruction_text",
-        "shoot_script_user_instruction_text",
-        "storyboard_preview_user_instruction_text",
-        "final_image_user_instruction_text",
-    ):
-        if not table_has_column(db, "generation_tasks", column):
-            db.execute(f"ALTER TABLE generation_tasks ADD COLUMN {column} TEXT")
-
-
-def migration_add_shoot_script_runtime_columns(db: sqlite3.Connection) -> None:
-    for column in ("active_shoot_script_id", "active_storyboard_preview_id"):
-        if not table_has_column(db, "generation_tasks", column):
-            db.execute(f"ALTER TABLE generation_tasks ADD COLUMN {column} INTEGER")
-    if not table_has_column(db, "generation_shot_plans", "shoot_script_id"):
-        db.execute("ALTER TABLE generation_shot_plans ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id) ON DELETE CASCADE")
-    if generation_shot_plans_needs_constraint_rebuild(db):
-        rebuild_generation_shot_plans_for_shoot_script_unique(db)
-    if not table_has_column(db, "generation_previews", "shoot_script_id"):
-        db.execute("ALTER TABLE generation_previews ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id)")
-    if not table_has_column(db, "generation_result_sets", "shoot_script_id"):
-        db.execute("ALTER TABLE generation_result_sets ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id)")
-
-
-def migration_recover_legacy_shoot_scripts(db: sqlite3.Connection) -> None:
-    ensure_legacy_shoot_script_recovery_columns(db)
-    rows = db.execute(
-        """
-        SELECT gt.*,
-               gp.id AS recover_preview_id,
-               gp.input_version_id AS recover_input_version_id,
-               gp.user_instruction_json AS recover_preview_user_instruction_json
-        FROM generation_tasks gt
-        JOIN generation_previews gp
-          ON gp.id = COALESCE(gt.active_storyboard_preview_id, gt.active_preview_id)
-        WHERE gt.deleted_at IS NULL
-          AND gt.active_styling_id IS NOT NULL
-          AND gt.active_shoot_script_id IS NULL
-          AND gt.status NOT IN ('STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING')
-          AND gp.status = 'SUCCEEDED'
-          AND gp.preview_asset_id IS NOT NULL
-        ORDER BY gt.id
-        """
-    ).fetchall()
-    for row in rows:
-        recover_legacy_shoot_script_for_task(db, row)
-
-
-def ensure_legacy_shoot_script_recovery_columns(db: sqlite3.Connection) -> None:
-    if not table_has_column(db, "generation_tasks", "active_shoot_script_id"):
-        db.execute("ALTER TABLE generation_tasks ADD COLUMN active_shoot_script_id INTEGER")
-    if not table_has_column(db, "generation_tasks", "active_storyboard_preview_id"):
-        db.execute("ALTER TABLE generation_tasks ADD COLUMN active_storyboard_preview_id INTEGER")
-    if not table_has_column(db, "generation_shoot_scripts", "user_instruction_json"):
-        db.execute("ALTER TABLE generation_shoot_scripts ADD COLUMN user_instruction_json TEXT")
-    if not table_has_column(db, "generation_shot_plans", "shoot_script_id"):
-        db.execute("ALTER TABLE generation_shot_plans ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id) ON DELETE CASCADE")
-    if generation_shot_plans_needs_constraint_rebuild(db):
-        rebuild_generation_shot_plans_for_shoot_script_unique(db)
-    if not table_has_column(db, "generation_previews", "shoot_script_id"):
-        db.execute("ALTER TABLE generation_previews ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id)")
-    if not table_has_column(db, "generation_previews", "user_instruction_json"):
-        db.execute("ALTER TABLE generation_previews ADD COLUMN user_instruction_json TEXT")
-    if not table_has_column(db, "generation_result_sets", "shoot_script_id"):
-        db.execute("ALTER TABLE generation_result_sets ADD COLUMN shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id)")
-    if not table_has_column(db, "generation_result_sets", "user_instruction_json"):
-        db.execute("ALTER TABLE generation_result_sets ADD COLUMN user_instruction_json TEXT")
-    if not table_has_column(db, "generation_result_images_new", "user_instruction_json"):
-        db.execute("ALTER TABLE generation_result_images_new ADD COLUMN user_instruction_json TEXT")
-
-
-def recover_legacy_shoot_script_for_task(db: sqlite3.Connection, task_row: sqlite3.Row) -> None:
-    task_id = int(task_row["id"])
-    styling_id = int(task_row["active_styling_id"])
-    preview_id = int(task_row["recover_preview_id"])
-    input_version_id = int(task_row["recover_input_version_id"] or task_row["current_input_version_id"] or 0)
-    if input_version_id <= 0:
-        styling_input = db.execute("SELECT input_version_id FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
-        if not styling_input or not styling_input["input_version_id"]:
-            return
-        input_version_id = int(styling_input["input_version_id"])
-
-    existing_script = db.execute(
-        """
-        SELECT * FROM generation_shoot_scripts
-        WHERE task_id = ? AND styling_id = ? AND status = 'SUCCEEDED'
-        ORDER BY id DESC
-        LIMIT 1
-        """,
-        (task_id, styling_id),
-    ).fetchone()
-    timestamp = now_iso()
-    styling_row = db.execute("SELECT * FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
-    if not styling_row:
-        return
-    styling_plan = loads(styling_row["styling_plan_json"], {}) if "styling_plan_json" in styling_row.keys() else {}
-    shot_rows = db.execute(
-        """
-        SELECT * FROM generation_shot_plans
-        WHERE task_id = ? AND styling_id = ? AND shoot_script_id IS NULL
-        ORDER BY sort_order
-        """,
-        (task_id, styling_id),
-    ).fetchall()
-
-    if existing_script:
-        shoot_script_id = int(existing_script["id"])
-        script_json = loads(existing_script["script_json"], {})
-    else:
-        script_json = build_legacy_recovered_shoot_script(task_id, input_version_id, styling_id, styling_plan, shot_rows)
-        cursor = db.execute(
-            """
-            INSERT INTO generation_shoot_scripts
-              (task_id, input_version_id, styling_id, status, script_json, summary_json,
-               styling_risks_json, accessory_adjustments_json, user_instruction_json, created_at, updated_at)
-            VALUES (?, ?, ?, 'SUCCEEDED', ?, ?, '[]', '[]', ?, ?, ?)
-            """,
-            (
-                task_id,
-                input_version_id,
-                styling_id,
-                dumps(script_json),
-                dumps(script_json.get("user_visible_summary") or {}),
-                task_row["recover_preview_user_instruction_json"] or "{}",
-                timestamp,
-                timestamp,
-            ),
-        )
-        shoot_script_id = int(cursor.lastrowid)
-
-    if shot_rows:
-        db.execute(
-            """
-            UPDATE generation_shot_plans
-            SET shoot_script_id = ?, updated_at = ?
-            WHERE task_id = ? AND styling_id = ? AND shoot_script_id IS NULL
-            """,
-            (shoot_script_id, timestamp, task_id, styling_id),
-        )
-    else:
-        for shot in script_json.get("shots", []) if isinstance(script_json.get("shots"), list) else []:
-            if not isinstance(shot, dict):
-                continue
-            sort_order = int(shot.get("shot_index") or 0)
-            if sort_order <= 0:
-                continue
-            db.execute(
-                """
-                INSERT OR IGNORE INTO generation_shot_plans
-                  (task_id, styling_id, shoot_script_id, sort_order, shot_type, plan_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task_id,
-                    styling_id,
-                    shoot_script_id,
-                    sort_order,
-                    str(shot.get("shot_role") or "reference"),
-                    dumps(shot),
-                    timestamp,
-                    timestamp,
-                ),
-            )
-
-    db.execute(
-        """
-        UPDATE generation_previews
-        SET shoot_script_id = ?, updated_at = ?
-        WHERE task_id = ? AND styling_id = ? AND shoot_script_id IS NULL
-        """,
-        (shoot_script_id, timestamp, task_id, styling_id),
-    )
-    db.execute(
-        """
-        UPDATE generation_result_sets
-        SET shoot_script_id = ?, updated_at = ?
-        WHERE task_id = ? AND styling_id = ? AND shoot_script_id IS NULL
-        """,
-        (shoot_script_id, timestamp, task_id, styling_id),
-    )
+    rebuild_generation_tasks_final(db)
+    rebuild_generation_previews_final(db)
+    rebuild_generation_result_sets_final(db)
+    rebuild_generation_result_images_final(db)
+    db.execute("DROP TABLE IF EXISTS generation_shot_plans")
+    db.execute("DROP TABLE IF EXISTS generation_shoot_scripts")
     db.execute(
         """
         UPDATE generation_tasks
-        SET active_shoot_script_id = ?,
-            active_storyboard_preview_id = COALESCE(active_storyboard_preview_id, active_preview_id),
-            status = ?,
+        SET status = CASE
+              WHEN status = 'SCRIPT_RUNNING' THEN 'STYLING_READY'
+              WHEN status = 'SCRIPT_READY' THEN 'STYLING_READY'
+              ELSE status
+            END,
             updated_at = ?
-        WHERE id = ?
+        WHERE status IN ('SCRIPT_RUNNING', 'SCRIPT_READY')
         """,
-        (shoot_script_id, recovered_legacy_task_status(db, task_row, preview_id), timestamp, task_id),
+        (now_iso(),),
     )
 
 
-def build_legacy_recovered_shoot_script(
-    task_id: int,
-    input_version_id: int,
-    styling_id: int,
-    styling_plan: dict[str, Any],
-    shot_rows: list[sqlite3.Row],
-) -> dict[str, Any]:
-    hero = styling_plan.get("hero_understanding") if isinstance(styling_plan.get("hero_understanding"), dict) else {}
-    shots = [legacy_shot_from_row(row, hero) for row in shot_rows]
-    if not shots:
-        shots = [legacy_fallback_shot(index, hero) for index in range(1, 7)]
-    shots = sorted(shots, key=lambda item: int(item.get("shot_index") or 0))[:6]
-    while len(shots) < 6:
-        shots.append(legacy_fallback_shot(len(shots) + 1, hero))
-    return {
-        "schema_version": "shoot-script-v1",
-        "script_source_mode": "legacy_recovered",
-        "input_refs": {
-            "task_id": task_id,
-            "input_version_id": input_version_id,
-            "styling_id": styling_id,
-            "styling_plan_version": str(styling_plan.get("schema_version") or "styling-plan-v1"),
-        },
-        "model_identity_contract": {},
-        "global_directing": {
-            "rules": [{"label": "历史恢复", "value": "从旧版分镜 ShotPlan 恢复 ShootScript，不重新调用 AI。"}],
-            "accessory_boundary": "生成配饰低存在感，可省略，不做商品级验收。",
-            "consistency_rules": ["复用同一 StylingPlan、旧分镜和镜头计划。"],
-            "negative_constraints": ["不要文字水印", "不要改款换色", "不要让配饰成为视觉中心"],
-        },
-        "styling_risks": [],
-        "accessory_adjustments": [],
-        "resolved_accessories": legacy_resolved_accessories(styling_plan),
-        "shots": shots,
-        "user_visible_summary": {
-            "title": "历史分镜恢复剧本",
-            "summary": "系统从旧版分镜镜头计划恢复拍摄剧本，用于继续生成前 5 张成片。",
-            "key_points": hero.get("shot_requirements") if isinstance(hero.get("shot_requirements"), list) else [],
-            "risk_summary": "该剧本为历史数据恢复产物，未重新调用 AI Director。",
-        },
-        "warnings": ["legacy_recovered_shoot_script"],
-    }
-
-
-def legacy_shot_from_row(row: sqlite3.Row, hero: dict[str, Any]) -> dict[str, Any]:
-    plan = loads(row["plan_json"], {})
-    index = int(plan.get("shot_index") or plan.get("sortOrder") or row["sort_order"] or 1)
-    shot_role = str(plan.get("shot_role") or plan.get("shotType") or row["shot_type"] or "reference")
-    return {
-        "shot_index": index,
-        "shot_role": shot_role,
-        "shot_role_label": str(plan.get("shot_role_label") or plan.get("shotType") or shot_role),
-        "framing": str(plan.get("framing") or ""),
-        "crop_range": str(plan.get("crop_range") or plan.get("cropRange") or plan.get("framing") or ""),
-        "model_scale": str(plan.get("model_scale") or plan.get("modelScale") or ""),
-        "camera_angle": str(plan.get("camera_angle") or plan.get("cameraAngle") or ""),
-        "body_position": str(plan.get("body_position") or plan.get("bodyPosition") or plan.get("cameraAngle") or ""),
-        "pose": str(plan.get("pose") or ""),
-        "movement": str(plan.get("movement") or ""),
-        "hand_position": str(plan.get("hand_position") or plan.get("handPosition") or ""),
-        "main_focus": str(plan.get("main_focus") or plan.get("mainFocus") or ""),
-        "visible_garments": ensure_list(plan.get("visible_garments") or plan.get("visibleGarments")),
-        "hero_selling_points": ensure_list(plan.get("hero_selling_points") or plan.get("heroSellingPoints") or hero.get("hero_selling_points")),
-        "forbidden_occlusion_zones": ensure_list(plan.get("forbidden_occlusion_zones") or plan.get("forbiddenOcclusionZones") or hero.get("hero_visibility_risks")),
-        "composition_notes": str(plan.get("composition_notes") or plan.get("compositionNotes") or ""),
-        "accessory_instructions": ensure_list(plan.get("accessory_instructions") or plan.get("accessoryInstructions")) or ["生成配饰低存在感，可省略，不遮挡商品。"],
-        "acceptance_criteria": ensure_list(plan.get("acceptance_criteria") or plan.get("acceptanceCriteria")) or ["主推款商品事实清楚。"],
-        "negative_constraints": ensure_list(plan.get("negative_constraints") or plan.get("negativeConstraints")),
-    }
-
-
-def legacy_fallback_shot(index: int, hero: dict[str, Any]) -> dict[str, Any]:
-    roles = ["hero", "core", "detail", "side_motion", "front_fit", "reference"]
-    focuses = ensure_list(hero.get("hero_selling_points")) or ["主推款整体轮廓", "主推款关键细节"]
-    return {
-        "shot_index": index,
-        "shot_role": roles[index - 1],
-        "shot_role_label": roles[index - 1],
-        "framing": "全身或近全身" if index in {1, 4, 5, 6} else "中近景或细节图",
-        "crop_range": "按历史恢复镜头执行",
-        "model_scale": "",
-        "camera_angle": "正面或轻斜正",
-        "body_position": "自然站姿",
-        "pose": "自然、自信、克制",
-        "movement": "",
-        "hand_position": "",
-        "main_focus": focuses[min(index - 1, len(focuses) - 1)],
-        "visible_garments": ["hero"],
-        "hero_selling_points": focuses,
-        "forbidden_occlusion_zones": ensure_list(hero.get("hero_visibility_risks")),
-        "composition_notes": "历史任务恢复镜头，商品优先，构图干净。",
-        "accessory_instructions": ["生成配饰低存在感，可省略，不遮挡商品。"],
-        "acceptance_criteria": ["主推款商品事实清楚。"],
-        "negative_constraints": ["不要文字水印", "不要改款换色"],
-    }
-
-
-def legacy_resolved_accessories(styling_plan: dict[str, Any]) -> list[dict[str, Any]]:
-    selected_key = str(styling_plan.get("selected_outfit_key") or styling_plan.get("selected_outfit_id") or "")
-    selected = {}
-    for item in styling_plan.get("outfit_candidates", []) if isinstance(styling_plan.get("outfit_candidates"), list) else []:
-        if isinstance(item, dict) and str(item.get("outfit_key") or item.get("id") or "") == selected_key:
-            selected = item
-            break
-    accessories = ensure_list(selected.get("generated_accessories") if selected else [])
-    return [
-        {
-            "item_type": "other",
-            "final_direction": str(item)[:180],
-            "source": "styling_plan",
-            "visibility": "low",
-            "applies_to_shots": [],
-            "reason": "来自历史 StylingPlan，AI Director 未重新调整。",
-        }
-        for item in accessories[:8]
+def rebuild_generation_tasks_final(db: sqlite3.Connection) -> None:
+    if not table_exists(db, "generation_tasks"):
+        return
+    columns = table_columns(db, "generation_tasks")
+    removed = {"shoot_script_user_instruction_text", "active_shoot_script_id"}
+    required = {"storyboard_preview_user_instruction_text", "final_image_user_instruction_text", "active_storyboard_preview_id", "batch_id"}
+    if not removed.intersection(columns) and required.issubset(columns):
+        return
+    source_columns = [
+        "id", "name", "status", "user_requirement_text", "hero_product_info_text",
+        "ai_styling_user_instruction_text", "storyboard_preview_user_instruction_text",
+        "final_image_user_instruction_text", "current_input_version_id", "active_styling_id",
+        "active_preview_id", "active_storyboard_preview_id", "active_result_set_id",
+        "auto_run_target", "auto_run_requested_at", "batch_id", "archived_at", "archive_reason",
+        "created_at", "updated_at", "deleted_at",
     ]
+    select_exprs = [column if column in columns else default_sql_for_generation_task_column(column) for column in source_columns]
 
-
-def recovered_legacy_task_status(db: sqlite3.Connection, task_row: sqlite3.Row, preview_id: int) -> str:
-    current_status = str(task_row["status"])
-    if current_status != "FAILED":
-        return current_status
-    result_set_id = task_row["active_result_set_id"]
-    if result_set_id:
-        counts = db.execute(
-            """
-            SELECT COUNT(*) AS total,
-                   SUM(CASE WHEN status = 'SUCCEEDED' THEN 1 ELSE 0 END) AS succeeded
-            FROM generation_result_images_new
-            WHERE result_set_id = ?
-            """,
-            (result_set_id,),
-        ).fetchone()
-        total = int(counts["total"] or 0)
-        succeeded = int(counts["succeeded"] or 0)
-        if total >= 5 and succeeded >= 5:
-            return "COMPLETED"
-        if succeeded > 0:
-            return "FINAL_PARTIAL"
-    preview = db.execute(
-        "SELECT id FROM generation_previews WHERE id = ? AND status = 'SUCCEEDED' AND preview_asset_id IS NOT NULL",
-        (preview_id,),
-    ).fetchone()
-    return "PREVIEW_READY" if preview else current_status
-
-
-def ensure_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item) for item in value if str(item or "").strip()]
-
-
-def generation_shot_plans_needs_constraint_rebuild(db: sqlite3.Connection) -> bool:
-    unique_columns = table_unique_column_sets(db, "generation_shot_plans")
-    return ("shoot_script_id", "sort_order") not in unique_columns or ("styling_id", "sort_order") in unique_columns
-
-
-def rebuild_generation_shot_plans_for_shoot_script_unique(db: sqlite3.Connection) -> None:
-    foreign_keys_enabled = db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-    db.commit()
-    if foreign_keys_enabled:
-        db.execute("PRAGMA foreign_keys = OFF")
-    try:
+    def rebuild() -> None:
         db.executescript(
             """
-            CREATE TABLE generation_shot_plans_new (
+            CREATE TABLE generation_tasks_new (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
-              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
-              styling_id INTEGER NOT NULL REFERENCES generation_stylings(id) ON DELETE CASCADE,
-              shoot_script_id INTEGER REFERENCES generation_shoot_scripts(id) ON DELETE CASCADE,
-              sort_order INTEGER NOT NULL,
-              shot_type TEXT,
-              plan_json TEXT NOT NULL,
+              name TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'DRAFT',
+              user_requirement_text TEXT,
+              hero_product_info_text TEXT,
+              ai_styling_user_instruction_text TEXT,
+              storyboard_preview_user_instruction_text TEXT,
+              final_image_user_instruction_text TEXT,
+              current_input_version_id INTEGER,
+              active_styling_id INTEGER,
+              active_preview_id INTEGER,
+              active_storyboard_preview_id INTEGER,
+              active_result_set_id INTEGER,
+              auto_run_target TEXT,
+              auto_run_requested_at TEXT,
+              batch_id TEXT,
+              archived_at TEXT,
+              archive_reason TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
-              UNIQUE(shoot_script_id, sort_order)
+              deleted_at TEXT
             );
-
-            INSERT INTO generation_shot_plans_new
-              (id, task_id, styling_id, shoot_script_id, sort_order, shot_type, plan_json, created_at, updated_at)
-            SELECT
-              id, task_id, styling_id, shoot_script_id, sort_order, shot_type, plan_json, created_at, updated_at
-            FROM generation_shot_plans;
-
-            DROP TABLE generation_shot_plans;
-            ALTER TABLE generation_shot_plans_new RENAME TO generation_shot_plans;
             """
         )
-        db.execute("DELETE FROM sqlite_sequence WHERE name = 'generation_shot_plans'")
         db.execute(
-            """
-            INSERT INTO sqlite_sequence (name, seq)
-            SELECT 'generation_shot_plans', COALESCE(MAX(id), 0)
-            FROM generation_shot_plans
+            f"""
+            INSERT INTO generation_tasks_new ({", ".join(source_columns)})
+            SELECT {", ".join(select_exprs)}
+            FROM generation_tasks
             """
         )
-        db.commit()
-    finally:
-        if foreign_keys_enabled:
-            db.execute("PRAGMA foreign_keys = ON")
-
-
-def table_has_column(db: sqlite3.Connection, table: str, column: str) -> bool:
-    return any(row["name"] == column for row in db.execute(f"PRAGMA table_info({table})").fetchall())
-
-
-def table_unique_column_sets(db: sqlite3.Connection, table: str) -> set[tuple[str, ...]]:
-    unique_columns: set[tuple[str, ...]] = set()
-    for index in db.execute(f"PRAGMA index_list({table})").fetchall():
-        if not index["unique"]:
-            continue
-        columns = tuple(row["name"] for row in db.execute(f"PRAGMA index_info({index['name']})").fetchall())
-        unique_columns.add(columns)
-    return unique_columns
-
-
-
-def create_prompt_config_table(db: sqlite3.Connection) -> None:
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS prompt_configs (
-          key TEXT PRIMARY KEY,
-          group_type TEXT NOT NULL,
-          title TEXT NOT NULL,
-          description TEXT NOT NULL DEFAULT '',
-          content TEXT NOT NULL DEFAULT '',
-          sort_order INTEGER NOT NULL DEFAULT 0,
-          updated_at TEXT NOT NULL
+        db.executescript(
+            """
+            DROP TABLE generation_tasks;
+            ALTER TABLE generation_tasks_new RENAME TO generation_tasks;
+            CREATE INDEX IF NOT EXISTS idx_generation_tasks_batch_id ON generation_tasks(batch_id);
+            """
         )
-        """
-    )
+
+    run_schema_rebuild_with_foreign_keys_disabled(db, rebuild)
 
 
-def migration_drop_merged_prompt_config_keys(db: sqlite3.Connection) -> None:
-    """删除已合并进组装 Prompt 正文的孤儿配置键。
+def default_sql_for_generation_task_column(column: str) -> str:
+    if column in {"name"}:
+        return "''"
+    if column in {"status"}:
+        return "'DRAFT'"
+    if column in {"created_at", "updated_at"}:
+        return f"'{now_iso()}'"
+    return "NULL"
 
-    系统指令 / JSON 输出纪律 / JSON 重问约束 / 参考图事实源约束等原独立 prompt_configs
-    条目，已合并到 AI 选搭 / 拍摄剧本 / 分镜预览 / 生成成片 的正文里，这里清除旧键，
-    使「Prompt 维护」页只保留合并后的组装 Prompt。表不存在时静默跳过。
+
+def rebuild_generation_previews_final(db: sqlite3.Connection) -> None:
+    if not table_exists(db, "generation_previews"):
+        return
+    columns = table_columns(db, "generation_previews")
+    if "shoot_script_id" not in columns and "environment_asset_id" in columns:
+        return
+    source_columns = [
+        "id", "task_id", "styling_id", "input_version_id", "user_instruction_json",
+        "preview_asset_id", "environment_asset_id", "status", "active_attempt_id",
+        "locked_by", "locked_until", "run_attempts", "created_at", "updated_at",
+    ]
+    select_exprs = [column if column in columns else default_sql_for_preview_column(column) for column in source_columns]
+
+    def rebuild() -> None:
+        db.executescript(
+            """
+            CREATE TABLE generation_previews_new (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+              styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
+              input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
+              user_instruction_json TEXT,
+              preview_asset_id INTEGER REFERENCES media_assets(id),
+              environment_asset_id INTEGER REFERENCES media_assets(id),
+              status TEXT NOT NULL DEFAULT 'QUEUED',
+              active_attempt_id INTEGER,
+              locked_by TEXT,
+              locked_until TEXT,
+              run_attempts INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            """
+        )
+        db.execute(
+            f"""
+            INSERT INTO generation_previews_new ({", ".join(source_columns)})
+            SELECT {", ".join(select_exprs)}
+            FROM generation_previews
+            """
+        )
+        db.executescript(
+            """
+            DROP TABLE generation_previews;
+            ALTER TABLE generation_previews_new RENAME TO generation_previews;
+            """
+        )
+
+    run_schema_rebuild_with_foreign_keys_disabled(db, rebuild)
+
+
+def default_sql_for_preview_column(column: str) -> str:
+    if column == "status":
+        return "'QUEUED'"
+    if column == "run_attempts":
+        return "0"
+    if column in {"created_at", "updated_at"}:
+        return f"'{now_iso()}'"
+    if column == "user_instruction_json":
+        return "'{}'"
+    return "NULL"
+
+
+def rebuild_generation_result_sets_final(db: sqlite3.Connection) -> None:
+    if not table_exists(db, "generation_result_sets"):
+        return
+    columns = table_columns(db, "generation_result_sets")
+    if "shoot_script_id" not in columns and "preview_id" in columns:
+        return
+    def rebuild() -> None:
+        db.executescript(
+            """
+            CREATE TABLE generation_result_sets_new (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+              input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
+              styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
+              preview_id INTEGER NOT NULL REFERENCES generation_previews(id),
+              user_instruction_json TEXT,
+              status TEXT NOT NULL DEFAULT 'RUNNING',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            """
+        )
+        if "preview_id" in columns:
+            source_columns = [
+                "id", "task_id", "input_version_id", "styling_id", "preview_id",
+                "user_instruction_json", "status", "created_at", "updated_at",
+            ]
+            select_exprs = [column if column in columns else default_sql_for_result_set_column(column) for column in source_columns]
+            db.execute(
+                f"""
+                INSERT INTO generation_result_sets_new ({", ".join(source_columns)})
+                SELECT {", ".join(select_exprs)}
+                FROM generation_result_sets
+                WHERE preview_id IS NOT NULL
+                """
+            )
+        db.executescript(
+            """
+            DROP TABLE generation_result_sets;
+            ALTER TABLE generation_result_sets_new RENAME TO generation_result_sets;
+            """
+        )
+
+    run_schema_rebuild_with_foreign_keys_disabled(db, rebuild)
+
+
+def run_schema_rebuild_with_foreign_keys_disabled(db: sqlite3.Connection, rebuild: Any) -> None:
+    """Run SQLite table rebuilds without triggering child-table cascade deletes.
+
+    SQLite only allows PRAGMA foreign_keys to change outside an active transaction.
+    The final-workflow migration rebuilds parent tables, so disabling foreign keys
+    inside the already-open migration transaction is unsafe: the subsequent
+    DROP TABLE can cascade-delete generation history rows. Commit first, rebuild
+    with enforcement disabled, then re-enable enforcement for normal runtime.
     """
-    exists = db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prompt_configs'"
-    ).fetchone()
-    if not exists:
+    db.commit()
+    db.execute("PRAGMA foreign_keys = OFF")
+    try:
+        rebuild()
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.execute("PRAGMA foreign_keys = ON")
+
+
+def default_sql_for_result_set_column(column: str) -> str:
+    if column == "status":
+        return "'RUNNING'"
+    if column in {"created_at", "updated_at"}:
+        return f"'{now_iso()}'"
+    if column == "user_instruction_json":
+        return "'{}'"
+    return "NULL"
+
+
+def rebuild_generation_result_images_final(db: sqlite3.Connection) -> None:
+    if not table_exists(db, "generation_result_images_new"):
         return
-    for key in MERGED_PROMPT_CONFIG_KEYS:
-        db.execute("DELETE FROM prompt_configs WHERE key = ?", (key,))
-
-
-def remove_model_identity_prompt_runtime(content: str) -> str:
-    """移除拍摄剧本 Prompt 中已下线的模特身份 runtime 及其专属段落。"""
-    cleaned = re.sub(
-        r"(?m)^[ \t]*【强制模特身份契约】[^\n]*(?:\n(?![ \t]*【)[^\n]*)*\n?",
-        "",
-        content,
-    )
-    cleaned = re.sub(r"(?m)^.*\{\{\s*runtime\.model_identity_context\s*\}\}.*\n?", "", cleaned)
-    cleaned = cleaned.replace("数字模特身份契约、", "").replace("、数字模特身份契约", "")
-    return cleaned
-
-
-def migration_drop_model_identity_prompt_runtime(db: sqlite3.Connection) -> None:
-    """清理既有拍摄剧本 Prompt，不改写历史 generation attempt 快照。"""
-    exists = db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prompt_configs'"
-    ).fetchone()
-    if not exists:
+    columns = table_columns(db, "generation_result_images_new")
+    removed = {"shot_plan_id"}
+    required = {"shot_role", "user_instruction_json"}
+    if not removed.intersection(columns) and required.issubset(columns):
         return
-    row = db.execute(
-        "SELECT content FROM prompt_configs WHERE key = 'assembly.shoot_script'"
-    ).fetchone()
-    if not row:
-        return
-    content = str(row["content"] or "")
-    cleaned = remove_model_identity_prompt_runtime(content)
-    if cleaned != content:
-        db.execute(
-            "UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = 'assembly.shoot_script'",
-            (cleaned, now_iso()),
-        )
+    source_columns = [
+        "id", "result_set_id", "shot_role", "sort_order", "status", "current_asset_id",
+        "user_instruction_json", "active_attempt_id", "locked_by", "locked_until",
+        "run_attempts", "created_at", "updated_at",
+    ]
+    select_exprs = [column if column in columns else default_sql_for_result_image_column(column) for column in source_columns]
 
-
-def migration_merge_garment_reference_prompt_runtime(db: sqlite3.Connection) -> None:
-    """将既有模板的两类服装图号占位统一为 runtime.ref_garment。"""
-    exists = db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prompt_configs'"
-    ).fetchone()
-    if not exists:
-        return
-    rows = db.execute(
-        "SELECT key, content FROM prompt_configs WHERE content LIKE '%runtime.ref_hero_garment%' OR content LIKE '%runtime.ref_styling_garment%'"
-    ).fetchall()
-    for row in rows:
-        content = str(row["content"] or "")
-        merged = content.replace("runtime.ref_hero_garment", "runtime.ref_garment")
-        merged = merged.replace("runtime.ref_styling_garment", "runtime.ref_garment")
-        db.execute(
-            "UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?",
-            (merged, now_iso(), row["key"]),
-        )
-
-
-def migration_drop_subject_reference_prompt_runtime(db: sqlite3.Connection) -> None:
-    """用明确的模特与服装图号占位替换已下线的合并主体占位。"""
-    exists = db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prompt_configs'"
-    ).fetchone()
-    if not exists:
-        return
-    rows = db.execute(
-        "SELECT key, content FROM prompt_configs WHERE content LIKE '%runtime.ref_subject%'"
-    ).fetchall()
-    for row in rows:
-        content = str(row["content"] or "")
-        cleaned = content.replace(
-            "{{runtime.ref_subject}}",
-            "{{runtime.ref_model_identity}} 与 {{runtime.ref_garment}}",
+    def rebuild() -> None:
+        db.executescript(
+            """
+            CREATE TABLE generation_result_images_new_final (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              result_set_id INTEGER NOT NULL REFERENCES generation_result_sets(id) ON DELETE CASCADE,
+              shot_role TEXT NOT NULL DEFAULT '',
+              sort_order INTEGER NOT NULL,
+              status TEXT NOT NULL DEFAULT 'QUEUED',
+              current_asset_id INTEGER REFERENCES media_assets(id),
+              user_instruction_json TEXT,
+              active_attempt_id INTEGER,
+              locked_by TEXT,
+              locked_until TEXT,
+              run_attempts INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            """
         )
         db.execute(
-            "UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?",
-            (cleaned, now_iso(), row["key"]),
+            f"""
+            INSERT INTO generation_result_images_new_final ({", ".join(source_columns)})
+            SELECT {", ".join(select_exprs)}
+            FROM generation_result_images_new
+            """
         )
+        db.executescript(
+            """
+            DROP TABLE generation_result_images_new;
+            ALTER TABLE generation_result_images_new_final RENAME TO generation_result_images_new;
+            """
+        )
+
+    run_schema_rebuild_with_foreign_keys_disabled(db, rebuild)
+
+
+def default_sql_for_result_image_column(column: str) -> str:
+    if column == "shot_role":
+        return "('legacy_grid_' || sort_order)"
+    if column == "status":
+        return "'QUEUED'"
+    if column == "run_attempts":
+        return "0"
+    if column in {"created_at", "updated_at"}:
+        return f"'{now_iso()}'"
+    if column == "user_instruction_json":
+        return "'{}'"
+    return "NULL"
 
 
 def ensure_prompt_config_catalog(db: sqlite3.Connection) -> None:
-    create_prompt_config_table(db)
     timestamp = now_iso()
     for key, group_type, title, description, sort_order in PROMPT_CONFIG_CATALOG:
-        # 只登记配置槽，content 首次以空插入；已存在的键 ON CONFLICT 不动 content，
-        # 保证「Prompt 维护」页上最新编辑的内容始终为准（代码不写死 Prompt 正文）。
         db.execute(
             """
             INSERT INTO prompt_configs
@@ -1134,124 +687,34 @@ def ensure_prompt_config_catalog(db: sqlite3.Connection) -> None:
             """,
             (key, group_type, title, description, sort_order, timestamp),
         )
+    placeholders = ", ".join("?" for _ in REMOVED_PROMPT_CONFIG_KEYS)
+    db.execute(f"DELETE FROM prompt_configs WHERE key IN ({placeholders})", REMOVED_PROMPT_CONFIG_KEYS)
 
 
-def migration_install_category_storyboard_prompts(db: sqlite3.Connection) -> None:
-    create_prompt_config_table(db)
-    template_dir = Path(__file__).resolve().parent.parent / "prompt_templates"
-    templates = {
-        "assembly.storyboard_preview_top": "storyboard_preview_top.txt",
-        "assembly.storyboard_preview_bottom": "storyboard_preview_bottom.txt",
-        "assembly.storyboard_preview_one_piece": "storyboard_preview_one_piece.txt",
-    }
-    timestamp = now_iso()
-    for key, filename in templates.items():
-        content = (template_dir / filename).read_text(encoding="utf-8").strip()
-        meta = next(item for item in PROMPT_CONFIG_CATALOG if item[0] == key)
-        db.execute(
-            """
-            INSERT INTO prompt_configs
-              (key, group_type, title, description, content, sort_order, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at
-            """,
-            (key, meta[1], meta[2], meta[3], content, meta[4], timestamp),
-        )
-    db.execute("DELETE FROM prompt_configs WHERE key IN ('assembly.shoot_script', 'assembly.storyboard_preview')")
+def table_exists(db: sqlite3.Connection, table: str) -> bool:
+    return db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone() is not None
 
 
-def migration_install_category_final_image_prompts(db: sqlite3.Connection) -> None:
-    create_prompt_config_table(db)
-    template_dir = Path(__file__).resolve().parent.parent / "prompt_templates"
-    templates = {
-        "assembly.final_image_top": "final_image_top.txt",
-        "assembly.final_image_bottom": "final_image_bottom.txt",
-        "assembly.final_image_one_piece": "final_image_one_piece.txt",
-    }
-    timestamp = now_iso()
-    for key, filename in templates.items():
-        content = (template_dir / filename).read_text(encoding="utf-8").strip()
-        meta = next(item for item in PROMPT_CONFIG_CATALOG if item[0] == key)
-        db.execute(
-            """
-            INSERT INTO prompt_configs
-              (key, group_type, title, description, content, sort_order, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET
-              group_type = excluded.group_type,
-              title = excluded.title,
-              description = excluded.description,
-              content = excluded.content,
-              sort_order = excluded.sort_order,
-              updated_at = excluded.updated_at
-            """,
-            (key, meta[1], meta[2], meta[3], content, meta[4], timestamp),
-        )
-    db.execute("DELETE FROM prompt_configs WHERE key = 'assembly.final_image'")
+def table_columns(db: sqlite3.Connection, table: str) -> set[str]:
+    if not table_exists(db, table):
+        return set()
+    return {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
-def migration_simplify_final_image_slots(db: sqlite3.Connection) -> None:
-    # 不兼容旧成片结果：旧结果依赖 ShootScript/ShotPlan，直接清除并建立简单五格槽位表。
-    db.execute("DELETE FROM generation_attempts WHERE owner_type IN ('generation_result_image', 'generation_result_set')")
-    db.execute("UPDATE generation_tasks SET active_result_set_id = NULL, status = CASE WHEN active_storyboard_preview_id IS NOT NULL THEN 'PREVIEW_READY' ELSE status END")
-    db.execute("DROP TABLE IF EXISTS generation_result_images_new")
-    db.execute("DROP TABLE IF EXISTS generation_result_sets")
-    db.executescript(
-        """
-        CREATE TABLE generation_result_sets (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
-          input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
-          styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
-          preview_id INTEGER NOT NULL REFERENCES generation_previews(id),
-          user_instruction_json TEXT,
-          status TEXT NOT NULL DEFAULT 'RUNNING',
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        CREATE TABLE generation_result_images_new (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          result_set_id INTEGER NOT NULL REFERENCES generation_result_sets(id) ON DELETE CASCADE,
-          shot_role TEXT NOT NULL,
-          sort_order INTEGER NOT NULL,
-          status TEXT NOT NULL DEFAULT 'QUEUED',
-          current_asset_id INTEGER REFERENCES media_assets(id),
-          user_instruction_json TEXT,
-          active_attempt_id INTEGER,
-          locked_by TEXT,
-          locked_until TEXT,
-          run_attempts INTEGER NOT NULL DEFAULT 0,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        """
-    )
+def table_has_column(db: sqlite3.Connection, table: str, column: str) -> bool:
+    return column in table_columns(db, table)
 
 
-def create_generation_shoot_script_tables(db: sqlite3.Connection) -> None:
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS generation_shoot_scripts (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
-          input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
-          styling_id INTEGER NOT NULL REFERENCES generation_stylings(id) ON DELETE CASCADE,
-          status TEXT NOT NULL DEFAULT 'SUCCEEDED',
-          script_json TEXT NOT NULL,
-          summary_json TEXT,
-          styling_risks_json TEXT,
-          accessory_adjustments_json TEXT,
-          active_attempt_id INTEGER,
-          locked_by TEXT,
-          locked_until TEXT,
-          run_attempts INTEGER NOT NULL DEFAULT 0,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          superseded_at TEXT
-        )
-        """
-    )
-
+def table_unique_column_sets(db: sqlite3.Connection, table: str) -> set[tuple[str, ...]]:
+    if not table_exists(db, table):
+        return set()
+    unique_columns: set[tuple[str, ...]] = set()
+    for index in db.execute(f"PRAGMA index_list({table})").fetchall():
+        if not index["unique"]:
+            continue
+        columns = tuple(row["name"] for row in db.execute(f"PRAGMA index_info({index['name']})").fetchall())
+        unique_columns.add(columns)
+    return unique_columns
 
 
 def seed_default_model(db: sqlite3.Connection) -> None:
@@ -1320,6 +783,7 @@ def log_event(
     )
 
     settings = get_settings()
+    settings.log_dir.mkdir(parents=True, exist_ok=True)
     log_path = settings.log_dir / f"{timestamp[:10]}.jsonl"
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(

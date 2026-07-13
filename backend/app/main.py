@@ -31,13 +31,6 @@ from .db import dumps, get_db, init_db, loads, log_event, now_iso
 from .prompt_render import (
     render_hero_product_info_line,
     render_image_reference_spans,
-    render_preview_grid_cell,
-    render_shoot_script_resolved_accessories,
-    render_shoot_script_shots,
-    render_shot_accessories,
-    render_shot_current,
-    render_shot_global_directing,
-    render_shot_styling,
     render_user_instruction_line,
     render_user_requirement_line,
 )
@@ -115,7 +108,6 @@ PROMPT_SECTION_PATTERN = re.compile(
     re.DOTALL,
 )
 AI_STYLING_PROMPT_CONFIG_KEY = "assembly.ai_styling"
-SHOOT_SCRIPT_PROMPT_CONFIG_KEY = "assembly.shoot_script"
 STORYBOARD_PROMPT_CONFIG_KEYS = {
     "top": "assembly.storyboard_preview_top",
     "bottom": "assembly.storyboard_preview_bottom",
@@ -135,7 +127,7 @@ MAX_USER_INPUT_CHARS = 800
 
 # 所有 Prompt 正文均由「Prompt 维护」页维护，代码不写死。系统指令、JSON 输出纪律、
 # 重问约束、参考图事实源约束等已分别合并进对应的组装 Prompt 正文：
-#   - AI 选搭 / 拍摄剧本：正文开头含角色系统指令与 JSON 输出纪律，结尾含 JSON 重问约束，
+#   - AI 选搭：正文开头含角色系统指令与 JSON 输出纪律，结尾含 JSON 重问约束，
 #     整段作为 user prompt 下发（不再单独走 Gemini system_instruction）。
 #   - 分镜预览 / 三类生成成片：正文内用按职能拆分的参考图图号占位承接参考图顺序，
 #     并在正文写明参考图身份、商品、分镜单格和环境事实源约束。
@@ -299,7 +291,6 @@ class GenerationTaskUpdateRequest(BaseModel):
     name: str | None = None
     heroProductInfo: str | None = None
     aiStylingUserInstruction: str | None = None
-    shootScriptUserInstruction: str | None = None
     storyboardPreviewUserInstruction: str | None = None
     finalImageUserInstruction: str | None = None
     userRequirement: str | None = None
@@ -399,7 +390,7 @@ UNASSIGNED_HEAD_REFERENCE_PREFIX = "__unassigned__"
 
 ACTIVE_IMAGE_STATUSES = {"QUEUED", "SUBMITTED", "IN_QUEUE", "IN_PROGRESS", "RUNNING"}
 TERMINAL_IMAGE_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
-RUNNING_GENERATION_TASK_STATUSES = {"STYLING_RUNNING", "SCRIPT_RUNNING", "PREVIEW_RUNNING", "FINAL_RUNNING"}
+RUNNING_GENERATION_TASK_STATUSES = {"STYLING_RUNNING", "PREVIEW_RUNNING", "FINAL_RUNNING"}
 PLANNING_STATUSES = {"PLANNING"}
 REVIEW_STATUSES = {"candidate", "approved", "needs_regen", "needs_retouch", "delivered"}
 PROMPT_TAGGING_RESULT_VERSION = "prompt-configured-json-v1"
@@ -624,7 +615,7 @@ def create_normalized_image_derivatives(original_key: str, content: bytes) -> tu
 
 
 def gemini_vision_input(object_key: str | None, fallback_mime: str | None = None) -> dict[str, Any] | None:
-    """取 Gemini 理解类调用(打标/选搭/拍摄剧本)的图片输入,优先 preview 派生图。
+    """取 Gemini 理解类调用（打标/选搭）的图片输入，优先 preview 派生图。
 
     原图 base64 后单张可达数 MB,多张叠加会让 ToAPIs 请求体在上行带宽有限的
     部署环境发送超时("The write operation timed out")。文本理解不需要原图
@@ -1310,13 +1301,11 @@ def generation_task_delete_impact(db: Any, task_ids: list[int]) -> dict[str, Any
           (SELECT COUNT(*) FROM generation_task_images WHERE task_id IN ({placeholders})) AS task_image_count,
           (SELECT COUNT(*) FROM generation_task_input_versions WHERE task_id IN ({placeholders})) AS input_version_count,
           (SELECT COUNT(*) FROM generation_stylings WHERE task_id IN ({placeholders})) AS styling_count,
-          (SELECT COUNT(*) FROM generation_shoot_scripts WHERE task_id IN ({placeholders})) AS shoot_script_count,
-          (SELECT COUNT(*) FROM generation_shot_plans WHERE task_id IN ({placeholders})) AS shot_plan_count,
           (SELECT COUNT(*) FROM generation_previews WHERE task_id IN ({placeholders})) AS preview_count,
           (SELECT COUNT(*) FROM generation_result_sets WHERE task_id IN ({placeholders})) AS result_set_count,
           (SELECT COUNT(*) FROM generation_result_images_new gri JOIN generation_result_sets grs ON grs.id = gri.result_set_id WHERE grs.task_id IN ({placeholders})) AS result_image_count
         """,
-        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
+        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
     ).fetchone()
     asset_rows = db.execute(
         f"""
@@ -1331,9 +1320,6 @@ def generation_task_delete_impact(db: Any, task_ids: list[int]) -> dict[str, Any
         SELECT output_asset_id AS asset_id FROM generation_attempts
         WHERE output_asset_id IS NOT NULL AND (
              (owner_type = 'generation_styling' AND owner_id IN ({placeholders}))
-             OR (owner_type = 'generation_shoot_script' AND owner_id IN (
-                  SELECT id FROM generation_shoot_scripts WHERE task_id IN ({placeholders})
-                ))
              OR (owner_type = 'generation_preview' AND owner_id IN (
                   SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
                 ))
@@ -1344,7 +1330,7 @@ def generation_task_delete_impact(db: Any, task_ids: list[int]) -> dict[str, Any
                 ))
         )
         """,
-        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
+        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
     ).fetchall()
     asset_ids = list(dict.fromkeys(int(asset["asset_id"]) for asset in asset_rows if asset["asset_id"] is not None))
     media_rows = media_asset_rows_for_ids(db, asset_ids)
@@ -1354,8 +1340,6 @@ def generation_task_delete_impact(db: Any, task_ids: list[int]) -> dict[str, Any
         "taskImageCount": int(row["task_image_count"] or 0),
         "inputVersionCount": int(row["input_version_count"] or 0),
         "stylingCount": int(row["styling_count"] or 0),
-        "shootScriptCount": int(row["shoot_script_count"] or 0),
-        "shotPlanCount": int(row["shot_plan_count"] or 0),
         "previewCount": int(row["preview_count"] or 0),
         "resultSetCount": int(row["result_set_count"] or 0),
         "resultImageCount": int(row["result_image_count"] or 0),
@@ -1383,7 +1367,6 @@ def styling_garment_delete_impact(db: Any, garment_ids: list[int]) -> dict[str, 
         "taskImageCount": 0,
         "inputVersionCount": 0,
         "stylingCount": 0,
-        "shotPlanCount": 0,
         "previewCount": 0,
         "resultSetCount": 0,
         "resultImageCount": 0,
@@ -1745,16 +1728,7 @@ def cancel_generation_task(task_id: int) -> dict[str, Any]:
 
         cancelled_preview_count = 0
         cancelled_image_count = 0
-        if row["status"] == "SCRIPT_RUNNING":
-            db.execute(
-                """
-                UPDATE generation_shoot_scripts
-                SET status = 'CANCELLED', locked_by = NULL, locked_until = NULL, updated_at = ?
-                WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING')
-                """,
-                (timestamp, task_id),
-            )
-        elif row["status"] == "PREVIEW_RUNNING":
+        if row["status"] == "PREVIEW_RUNNING":
             preview_cursor = db.execute(
                 """
                 UPDATE generation_previews
@@ -1854,7 +1828,6 @@ def get_generation_tasks_delete_impact(payload: DeleteImpactRequest) -> dict[str
 def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -> dict[str, Any]:
     instruction_fields = {
         "aiStylingUserInstruction": "ai_styling_user_instruction_text",
-        "shootScriptUserInstruction": "shoot_script_user_instruction_text",
         "storyboardPreviewUserInstruction": "storyboard_preview_user_instruction_text",
         "finalImageUserInstruction": "final_image_user_instruction_text",
     }
@@ -1919,14 +1892,6 @@ def mark_generation_task_input_changed(db: Any, task_id: int, timestamp: str, re
     )
     db.execute(
         """
-        UPDATE generation_shoot_scripts
-        SET status = 'SUPERSEDED', superseded_at = COALESCE(superseded_at, ?), updated_at = ?
-        WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
-        """,
-        (timestamp, timestamp, task_id),
-    )
-    db.execute(
-        """
         UPDATE generation_previews
         SET status = 'SUPERSEDED', updated_at = ?
         WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
@@ -1940,7 +1905,6 @@ def mark_generation_task_input_changed(db: Any, task_id: int, timestamp: str, re
         SET status = 'READY_FOR_STYLING',
             current_input_version_id = NULL,
             active_styling_id = NULL,
-            active_shoot_script_id = NULL,
             active_preview_id = NULL,
             active_storyboard_preview_id = NULL,
             active_result_set_id = NULL,
@@ -1955,7 +1919,7 @@ def mark_generation_task_input_changed(db: Any, task_id: int, timestamp: str, re
 
 
 def reset_generation_task_for_rerun(db: Any, task_id: int, timestamp: str) -> None:
-    """「重新一键成片」：主推款输入不变，把当前 active 的选搭/剧本/预览/成片整条置为 SUPERSEDED 历史，
+    """「重新一键成片」：主推款输入不变，把当前 active 的选搭/预览/成片整条置为 SUPERSEDED 历史，
     任务回到 READY_FOR_STYLING，使自动推进从智能选搭重新开始。旧结果保留可追溯，不删除。"""
     db.execute(
         """
@@ -1964,14 +1928,6 @@ def reset_generation_task_for_rerun(db: Any, task_id: int, timestamp: str) -> No
         WHERE task_id = ? AND status = 'SUCCEEDED'
         """,
         (timestamp, task_id),
-    )
-    db.execute(
-        """
-        UPDATE generation_shoot_scripts
-        SET status = 'SUPERSEDED', superseded_at = COALESCE(superseded_at, ?), updated_at = ?
-        WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
-        """,
-        (timestamp, timestamp, task_id),
     )
     db.execute(
         """
@@ -1987,7 +1943,6 @@ def reset_generation_task_for_rerun(db: Any, task_id: int, timestamp: str) -> No
         UPDATE generation_tasks
         SET status = 'READY_FOR_STYLING',
             active_styling_id = NULL,
-            active_shoot_script_id = NULL,
             active_preview_id = NULL,
             active_storyboard_preview_id = NULL,
             active_result_set_id = NULL,
@@ -2004,7 +1959,6 @@ def reset_generation_task_for_rerun(db: Any, task_id: int, timestamp: str) -> No
 def generation_task_stage_instruction_column(stage: str) -> str | None:
     return {
         "ai_styling": "ai_styling_user_instruction_text",
-        "shoot_script": "shoot_script_user_instruction_text",
         "storyboard_preview": "storyboard_preview_user_instruction_text",
         "final_image": "final_image_user_instruction_text",
     }.get(stage)
@@ -2033,9 +1987,6 @@ def cancel_running_task_attempts(db: Any, task_id: int, timestamp: str) -> None:
         WHERE status = 'RUNNING'
           AND (
             (owner_type = 'generation_styling' AND owner_id = ?)
-            OR (owner_type = 'generation_shoot_script' AND owner_id IN (
-              SELECT id FROM generation_shoot_scripts WHERE task_id = ?
-            ))
             OR (owner_type = 'generation_preview' AND owner_id IN (
               SELECT id FROM generation_previews WHERE task_id = ?
             ))
@@ -2047,7 +1998,7 @@ def cancel_running_task_attempts(db: Any, task_id: int, timestamp: str) -> None:
             ))
           )
         """,
-        (timestamp, timestamp, task_id, task_id, task_id, task_id),
+        (timestamp, timestamp, task_id, task_id, task_id),
     )
 
 
@@ -2144,9 +2095,6 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[di
         SELECT output_asset_id AS asset_id FROM generation_attempts
         WHERE output_asset_id IS NOT NULL AND (
              (owner_type = 'generation_styling' AND owner_id IN ({placeholders}))
-             OR (owner_type = 'generation_shoot_script' AND owner_id IN (
-                  SELECT id FROM generation_shoot_scripts WHERE task_id IN ({placeholders})
-                ))
              OR (owner_type = 'generation_preview' AND owner_id IN (
                   SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
                 ))
@@ -2157,7 +2105,7 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[di
                 ))
         )
         """,
-        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
+        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
     ).fetchall()
     asset_ids = list(dict.fromkeys(int(row["asset_id"]) for row in asset_rows if row["asset_id"] is not None))
     media_rows = media_asset_rows_for_ids(db, asset_ids)
@@ -2167,9 +2115,6 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[di
         f"""
         DELETE FROM generation_attempts
         WHERE (owner_type = 'generation_styling' AND owner_id IN ({placeholders}))
-           OR (owner_type = 'generation_shoot_script' AND owner_id IN (
-                SELECT id FROM generation_shoot_scripts WHERE task_id IN ({placeholders})
-              ))
            OR (owner_type = 'generation_preview' AND owner_id IN (
                 SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
               ))
@@ -2179,7 +2124,7 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[di
                 WHERE grs.task_id IN ({placeholders})
               ))
         """,
-        (*task_ids, *task_ids, *task_ids, *task_ids),
+        (*task_ids, *task_ids, *task_ids),
     )
     rows = get_generation_task_rows_for_mutation(db, task_ids)
     db.execute(f"DELETE FROM generation_tasks WHERE id IN ({placeholders})", task_ids)
@@ -2384,7 +2329,6 @@ async def run_select_generation_styling(
     if task["status"] not in {
         "READY_FOR_STYLING",
         "STYLING_READY",
-        "SCRIPT_READY",
         "PREVIEW_READY",
         "COMPLETED",
         "FINAL_PARTIAL",
@@ -2488,14 +2432,6 @@ async def run_select_generation_styling(
             db.execute("UPDATE generation_task_input_versions SET hero_visual_summary = ? WHERE id = ?", (hero_summary, input_version_id))
         db.execute(
             """
-            UPDATE generation_shoot_scripts
-            SET status = 'SUPERSEDED', superseded_at = ?, updated_at = ?
-            WHERE task_id = ? AND status = 'SUCCEEDED'
-            """,
-            (timestamp, timestamp, task_id),
-        )
-        db.execute(
-            """
             UPDATE generation_previews
             SET status = 'SUPERSEDED', updated_at = ?
             WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
@@ -2509,7 +2445,6 @@ async def run_select_generation_styling(
             SET status = 'STYLING_READY',
                 current_input_version_id = ?,
                 active_styling_id = ?,
-                active_shoot_script_id = NULL,
                 active_storyboard_preview_id = NULL,
                 active_preview_id = NULL,
                 active_result_set_id = NULL,
@@ -2519,254 +2454,6 @@ async def run_select_generation_styling(
             (input_version_id, styling_id, timestamp, task_id),
         )
     finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=styling_plan)
-    return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
-
-
-async def run_create_generation_shoot_script(task_id: int, include_debug: bool = False, trigger: str = "manual_step", user_instruction: str | None = None) -> dict[str, Any]:
-    task = get_generation_task_row(task_id)
-    styling_id = task["active_styling_id"]
-    if not styling_id or task["status"] not in {
-        "STYLING_READY",
-        "SCRIPT_READY",
-        "PREVIEW_READY",
-        "COMPLETED",
-        "FINAL_PARTIAL",
-        "FAILED",
-        "CANCELLED",
-    }:
-        raise HTTPException(status_code=409, detail="请先完成 AI 智能选搭")
-    input_version_id = create_generation_input_version(task_id, build_hero_product_info_context(task))
-    timestamp = now_iso()
-    effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "shoot_script")
-    user_instruction_context = build_stage_user_instruction_context("shoot_script", effective_user_instruction)
-    with get_db() as db:
-        if user_instruction is not None:
-            persist_generation_task_stage_instruction(db, task_id, "shoot_script", effective_user_instruction, timestamp)
-        transition = db.execute(
-            """
-            UPDATE generation_tasks
-            SET status = 'SCRIPT_RUNNING', updated_at = ?
-            WHERE id = ?
-              AND active_styling_id = ?
-              AND status IN ('STYLING_READY', 'SCRIPT_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED')
-            """,
-            (timestamp, task_id, styling_id),
-        )
-        if int(transition.rowcount or 0) == 0:
-            raise HTTPException(status_code=409, detail="拍摄剧本已在生成中，请勿重复提交")
-        cursor = db.execute(
-            """
-            INSERT INTO generation_shoot_scripts
-              (task_id, input_version_id, styling_id, status, script_json, summary_json,
-               styling_risks_json, accessory_adjustments_json, user_instruction_json, created_at, updated_at)
-            VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                task_id,
-                input_version_id,
-                styling_id,
-                dumps({}),
-                dumps({}),
-                dumps([]),
-                dumps([]),
-                dumps(user_instruction_context),
-                timestamp,
-                timestamp,
-            ),
-        )
-        shoot_script_id = int(cursor.lastrowid)
-    attempt_id = create_attempt("generation_shoot_script", shoot_script_id, "gemini")
-    with get_db() as db:
-        db.execute("UPDATE generation_shoot_scripts SET active_attempt_id = ? WHERE id = ?", (attempt_id, shoot_script_id))
-    try:
-        request_snapshot = build_shoot_script_request_snapshot(task_id, int(styling_id), int(input_version_id), user_instruction_context)
-        try:
-            request_snapshot = attach_shoot_script_prompt_snapshot(request_snapshot)
-        except RuntimeError:
-            pass
-        request_snapshot["invocation"] = {"mode": trigger, "target": "shoot_script"}
-        update_attempt_request_snapshot(attempt_id, request_snapshot)
-        raw_shoot_script = await generate_shoot_script_with_gemini(request_snapshot)
-        shoot_script = normalize_shoot_script(raw_shoot_script, request_snapshot)
-        shoot_script["model_raw_output"] = raw_shoot_script
-        validate_shoot_script(shoot_script)
-        shot_plans = shoot_script_to_generation_shot_plans(shoot_script)
-    except Exception as exc:
-        if shoot_script_generation_cancelled(task_id, shoot_script_id, attempt_id):
-            finish_attempt(attempt_id, "CANCELLED", error_message="拍摄剧本生成已取消")
-            mark_shoot_script_generation_cancelled(shoot_script_id)
-            return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
-        error_code = classify_attempt_error(exc)
-        finish_attempt(attempt_id, "FAILED", response_snapshot=exception_process_facts(exc), error_message=str(exc), error_code=error_code)
-        with get_db() as db:
-            previous_active = db.execute("SELECT active_shoot_script_id FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
-            fallback_status = "SCRIPT_READY" if previous_active and previous_active["active_shoot_script_id"] else "FAILED"
-            db.execute(
-                """
-                UPDATE generation_shoot_scripts
-                SET status = 'FAILED', updated_at = ?
-                WHERE id = ?
-                """,
-                (now_iso(), shoot_script_id),
-            )
-            db.execute("UPDATE generation_tasks SET status = ?, updated_at = ? WHERE id = ?", (fallback_status, now_iso(), task_id))
-            db.execute(
-                """
-                UPDATE generation_tasks
-                SET auto_run_target = NULL, auto_run_requested_at = NULL, updated_at = ?
-                WHERE id = ?
-                """,
-                (now_iso(), task_id),
-            )
-        raise HTTPException(status_code=502, detail=user_facing_provider_error_message("拍摄剧本生成失败", exc, error_code)) from exc
-    if shoot_script_generation_cancelled(task_id, shoot_script_id, attempt_id):
-        finish_attempt(attempt_id, "CANCELLED", error_message="拍摄剧本生成已取消")
-        mark_shoot_script_generation_cancelled(shoot_script_id)
-        return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
-    cancelled_after_provider_return = False
-    status_changed_after_provider_return = False
-    with get_db() as db:
-        timestamp = now_iso()
-        success_cursor = db.execute(
-            """
-            UPDATE generation_shoot_scripts
-            SET status = 'SUCCEEDED',
-                script_json = ?,
-                summary_json = ?,
-                styling_risks_json = ?,
-                accessory_adjustments_json = ?,
-                active_attempt_id = ?,
-                updated_at = ?
-            WHERE id = ?
-              AND status = 'RUNNING'
-              AND NOT EXISTS (
-                SELECT 1 FROM generation_tasks
-                WHERE id = ? AND status = 'CANCELLED'
-              )
-              AND NOT EXISTS (
-                SELECT 1 FROM generation_attempts
-                WHERE id = ? AND status = 'CANCELLED'
-              )
-            """,
-            (
-                dumps(shoot_script),
-                dumps(shoot_script.get("user_visible_summary") or {}),
-                dumps(shoot_script.get("styling_risks") or []),
-                dumps(shoot_script.get("accessory_adjustments") or []),
-                attempt_id,
-                timestamp,
-                shoot_script_id,
-                task_id,
-                attempt_id,
-            ),
-        )
-        if int(success_cursor.rowcount or 0) == 0:
-            current = db.execute(
-                """
-                SELECT gt.status AS task_status,
-                       gss.status AS shoot_script_status,
-                       ga.status AS attempt_status
-                FROM generation_tasks gt
-                LEFT JOIN generation_shoot_scripts gss ON gss.id = ?
-                LEFT JOIN generation_attempts ga ON ga.id = ?
-                WHERE gt.id = ?
-                """,
-                (shoot_script_id, attempt_id, task_id),
-            ).fetchone()
-            if (
-                not current
-                or current["task_status"] == "CANCELLED"
-                or current["shoot_script_status"] == "CANCELLED"
-                or current["attempt_status"] == "CANCELLED"
-            ):
-                cancelled_after_provider_return = True
-                db.execute(
-                    """
-                    UPDATE generation_attempts
-                    SET status = 'CANCELLED',
-                        cancelled_at = COALESCE(cancelled_at, ?),
-                        error_message = ?,
-                        updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (timestamp, "拍摄剧本生成已取消", timestamp, attempt_id),
-                )
-                db.execute(
-                    """
-                    UPDATE generation_shoot_scripts
-                    SET status = 'CANCELLED', locked_by = NULL, locked_until = NULL, updated_at = ?
-                    WHERE id = ? AND status IN ('QUEUED', 'RUNNING', 'CANCELLED')
-                    """,
-                    (timestamp, shoot_script_id),
-                )
-            else:
-                status_changed_after_provider_return = True
-                db.execute(
-                    """
-                    UPDATE generation_attempts
-                    SET status = 'FAILED',
-                        failed_at = COALESCE(failed_at, ?),
-                        error_message = ?,
-                        updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (timestamp, "拍摄剧本生成状态已变更", timestamp, attempt_id),
-                )
-        else:
-            db.execute(
-                """
-                UPDATE generation_shoot_scripts
-                SET status = 'SUPERSEDED', superseded_at = ?, updated_at = ?
-                WHERE task_id = ? AND id <> ? AND status = 'SUCCEEDED'
-                """,
-                (timestamp, timestamp, task_id, shoot_script_id),
-            )
-            db.execute(
-                """
-                UPDATE generation_previews
-                SET status = 'SUPERSEDED', updated_at = ?
-                WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
-                """,
-                (timestamp, task_id),
-            )
-            supersede_generation_result_sets(db, task_id, timestamp)
-            for plan in shot_plans:
-                db.execute(
-                    """
-                    INSERT INTO generation_shot_plans
-                      (task_id, styling_id, shoot_script_id, sort_order, shot_type, plan_json, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        task_id,
-                        styling_id,
-                        shoot_script_id,
-                        plan["sortOrder"],
-                        plan["shotType"],
-                        dumps(plan),
-                        timestamp,
-                        timestamp,
-                    ),
-                )
-            db.execute(
-                """
-                UPDATE generation_tasks
-                SET status = 'SCRIPT_READY',
-                    current_input_version_id = ?,
-                    active_shoot_script_id = ?,
-                    active_storyboard_preview_id = NULL,
-                    active_preview_id = NULL,
-                    active_result_set_id = NULL,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (input_version_id, shoot_script_id, timestamp, task_id),
-            )
-    if cancelled_after_provider_return:
-        return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
-    if status_changed_after_provider_return:
-        raise HTTPException(status_code=409, detail="拍摄剧本生成状态已变更，请刷新后重试")
-    finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=shoot_script)
     return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
 
 
@@ -5532,40 +5219,6 @@ def generation_task_or_attempt_cancelled(task_id: int, attempt_id: int) -> bool:
     return not row or row["task_status"] == "CANCELLED" or row["attempt_status"] == "CANCELLED"
 
 
-def shoot_script_generation_cancelled(task_id: int, shoot_script_id: int, attempt_id: int) -> bool:
-    with get_db() as db:
-        row = db.execute(
-            """
-            SELECT gt.status AS task_status,
-                   gss.status AS shoot_script_status,
-                   ga.status AS attempt_status
-            FROM generation_tasks gt
-            LEFT JOIN generation_shoot_scripts gss ON gss.id = ?
-            LEFT JOIN generation_attempts ga ON ga.id = ?
-            WHERE gt.id = ?
-            """,
-            (shoot_script_id, attempt_id, task_id),
-        ).fetchone()
-    return (
-        not row
-        or row["task_status"] == "CANCELLED"
-        or row["shoot_script_status"] == "CANCELLED"
-        or row["attempt_status"] == "CANCELLED"
-    )
-
-
-def mark_shoot_script_generation_cancelled(shoot_script_id: int) -> None:
-    with get_db() as db:
-        db.execute(
-            """
-            UPDATE generation_shoot_scripts
-            SET status = 'CANCELLED', locked_by = NULL, locked_until = NULL, updated_at = ?
-            WHERE id = ? AND status IN ('QUEUED', 'RUNNING', 'CANCELLED')
-            """,
-            (now_iso(), shoot_script_id),
-        )
-
-
 def finish_attempt(
     attempt_id: int,
     status: str,
@@ -6220,67 +5873,6 @@ def compress_selected_material_for_prompt(item: dict[str, Any]) -> dict[str, Any
     return styling_library_tag_card_for_prompt(item)
 
 
-def shoot_script_result_for_prompt(shoot_script: dict[str, Any]) -> dict[str, Any]:
-    script = shoot_script if isinstance(shoot_script, dict) else {}
-    shots = script.get("shots") if isinstance(script.get("shots"), list) else []
-    return {
-        "schema_version": "shoot-script-storyboard-context-v1",
-        "global_directing": strip_internal_prompt_fields(script.get("global_directing") if isinstance(script.get("global_directing"), dict) else {}),
-        "styling_risks": strip_internal_prompt_fields(script.get("styling_risks") if isinstance(script.get("styling_risks"), list) else []),
-        "resolved_accessories": strip_internal_prompt_fields(script.get("resolved_accessories") if isinstance(script.get("resolved_accessories"), list) else []),
-        "shots": [
-            strip_internal_prompt_fields({
-                "shot_index": shot.get("shot_index"),
-                "shot_role": shot.get("shot_role"),
-                "shot_role_label": shot.get("shot_role_label"),
-                "framing": shot.get("framing"),
-                "crop_range": shot.get("crop_range"),
-                "model_scale": shot.get("model_scale"),
-                "camera_angle": shot.get("camera_angle"),
-                "body_position": shot.get("body_position"),
-                "pose": shot.get("pose"),
-                "movement": shot.get("movement"),
-                "hand_position": shot.get("hand_position"),
-                "main_focus": shot.get("main_focus"),
-                "hero_selling_points": shot.get("hero_selling_points"),
-                "visible_garments": shot.get("visible_garments"),
-                "forbidden_occlusion_zones": shot.get("forbidden_occlusion_zones"),
-                "composition_notes": shot.get("composition_notes"),
-                "accessory_instructions": shot.get("accessory_instructions"),
-                "negative_constraints": shot.get("negative_constraints"),
-                "acceptance_criteria": shot.get("acceptance_criteria"),
-            })
-            for shot in shots[:6]
-            if isinstance(shot, dict)
-        ],
-        "user_visible_summary": strip_internal_prompt_fields(script.get("user_visible_summary") if isinstance(script.get("user_visible_summary"), dict) else {}),
-    }
-
-
-def current_shot_context_for_prompt(shot_index: int, shot_plan: dict[str, Any], styling_plan: dict[str, Any], shoot_script: dict[str, Any]) -> dict[str, Any]:
-    script = shoot_script if isinstance(shoot_script, dict) else {}
-    shot = strip_internal_prompt_fields(shot_plan if isinstance(shot_plan, dict) else {})
-    accessories = []
-    for item in script.get("resolved_accessories", []) if isinstance(script.get("resolved_accessories"), list) else []:
-        if not isinstance(item, dict):
-            continue
-        applies = item.get("applies_to_shots") if isinstance(item.get("applies_to_shots"), list) else []
-        if not applies or shot_index in [int(value) for value in applies if str(value).isdigit()]:
-            accessories.append(strip_internal_prompt_fields(item))
-    return {
-        "schema_version": "final-image-shot-context-v1",
-        "preview_grid_cell": shot_index,
-        "styling": {
-            "hero_understanding": styling_result_for_prompt(styling_plan).get("hero_understanding") or {},
-            "selected_outfit": styling_result_for_prompt(styling_plan).get("selected_outfit") or {},
-        },
-        "global_directing": strip_internal_prompt_fields(script.get("global_directing") if isinstance(script.get("global_directing"), dict) else {}),
-        "current_shot": shot,
-        "resolved_accessories_for_this_shot": accessories,
-        "negative_constraints": strip_internal_prompt_fields((script.get("global_directing") or {}).get("negative_constraints") if isinstance(script.get("global_directing"), dict) else []),
-    }
-
-
 def normalize_selected_material_ids(value: Any, candidate_ids: set[int]) -> list[int]:
     if not isinstance(value, list):
         return []
@@ -6389,60 +5981,6 @@ def get_styling_source_and_selected_snapshots(selected_ids: list[int]) -> tuple[
     return source_ids, [get_styling_garment_by_id(item_id) for item_id in selected_ids]
 
 
-def ensure_generation_shot_plans(task_id: int, styling_id: int) -> list[dict[str, Any]]:
-    with get_db() as db:
-        existing = db.execute(
-            "SELECT * FROM generation_shot_plans WHERE styling_id = ? ORDER BY sort_order",
-            (styling_id,),
-        ).fetchall()
-        if existing:
-            return [serialize_new_shot_plan(row) for row in existing]
-        styling = db.execute("SELECT * FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
-        selected_snapshot = loads(styling["selected_material_snapshot_json"], [])
-        styling_plan = loads(styling["styling_plan_json"], {}) if "styling_plan_json" in styling.keys() else {}
-    return []
-
-
-def build_shoot_script_request_snapshot(task_id: int, styling_id: int, input_version_id: int, user_instruction_context: dict[str, Any] | None = None) -> dict[str, Any]:
-    styling_plan = get_styling_plan_by_id(styling_id)
-    with get_db() as db:
-        input_row = db.execute("SELECT * FROM generation_task_input_versions WHERE id = ?", (input_version_id,)).fetchone()
-        styling_row = db.execute("SELECT * FROM generation_stylings WHERE id = ?", (styling_id,)).fetchone()
-    selected_snapshot = loads(styling_row["selected_material_snapshot_json"], []) if styling_row else []
-    selected_material_image_refs = selected_material_image_refs_for_request(selected_snapshot)
-    candidate_snapshot = loads(styling_row["candidate_retrieval_snapshot_json"], {}) if styling_row and "candidate_retrieval_snapshot_json" in styling_row.keys() else {}
-    user_requirement = loads(
-        row_value(styling_row, "user_requirement_json"),
-        loads(row_value(input_row, "user_requirement_json"), build_user_requirement_context({})),
-    )
-    hero_product_info = loads(row_value(input_row, "hero_product_info_json"), build_hero_product_info_context({}))
-    shoot_script_user_instruction = user_instruction_context or build_stage_user_instruction_context("shoot_script")
-    return {
-        "schema_version": "shoot-script-request-v1",
-        **gemini_request_meta(),
-        # 系统指令已并入拍摄剧本 Prompt 正文，不再单独快照 systemInstruction。
-        "systemInstruction": None,
-        "task_id": task_id,
-        "input_version": {
-            "id": input_version_id,
-            "name_snapshot": input_row["name_snapshot"] if input_row else "",
-            "image_snapshot": loads(input_row["image_snapshot_json"], []) if input_row else [],
-            "model_snapshot": loads(input_row["model_snapshot_json"], {}) if input_row and "model_snapshot_json" in input_row.keys() else {},
-            "hero_product_info": hero_product_info,
-        },
-        "styling_id": styling_id,
-        "hero_product_info": hero_product_info,
-        "shoot_script_user_instruction": shoot_script_user_instruction,
-        "user_requirement": user_requirement,
-        "styling_plan": styling_plan,
-        "styling_result": styling_result_for_prompt(styling_plan, selected_snapshot),
-        "selected_material_snapshot": selected_material_image_refs,
-        "base_shot_rules": [],
-        "accessory_boundary": candidate_snapshot.get("accessory_boundary") if isinstance(candidate_snapshot, dict) else {},
-        "output_schema": "shoot-script-v1",
-    }
-
-
 def selected_material_image_refs_for_request(selected_snapshot: list[dict[str, Any]]) -> list[dict[str, Any]]:
     refs: list[dict[str, Any]] = []
     for item in selected_snapshot[:4]:
@@ -6458,95 +5996,6 @@ def selected_material_image_refs_for_request(selected_snapshot: list[dict[str, A
             ],
         })
     return refs
-
-
-async def generate_shoot_script_with_gemini(request_snapshot: dict[str, Any]) -> dict[str, Any]:
-    if not is_gemini_configured():
-        raise RuntimeError(f"{gemini_not_configured_message()}拍摄剧本不能进入生产生成。")
-    if not request_snapshot.get("prompt"):
-        request_snapshot = attach_shoot_script_prompt_snapshot(request_snapshot)
-    prompt = str(request_snapshot.get("prompt") or "")
-    image_inputs: list[dict[str, Any]] = []
-    model_snapshot = ((request_snapshot.get("input_version") or {}).get("model_snapshot") or {}) if isinstance(request_snapshot.get("input_version"), dict) else {}
-    for item in (model_snapshot.get("imageInputs") if isinstance(model_snapshot, dict) else []) or []:
-        object_key = item.get("objectKey") if isinstance(item, dict) else None
-        image_input = gemini_vision_input(object_key, "image/png")
-        if image_input:
-            image_inputs.append(image_input)
-    for item in ((request_snapshot.get("input_version") or {}).get("image_snapshot") or [])[:6]:
-        asset = item.get("asset") if isinstance(item, dict) else {}
-        image_input = gemini_vision_input(asset.get("objectKey") if isinstance(asset, dict) else None, asset.get("mimeType") if isinstance(asset, dict) else None)
-        if image_input:
-            image_inputs.append(image_input)
-    for material in request_snapshot.get("selected_material_snapshot", [])[:4]:
-        images = material.get("images") if isinstance(material, dict) else []
-        first = images[0] if images else {}
-        asset = first.get("asset") if isinstance(first, dict) else {}
-        image_input = gemini_vision_input(asset.get("objectKey") if isinstance(asset, dict) else None, asset.get("mimeType") if isinstance(asset, dict) else None)
-        if image_input:
-            image_inputs.append(image_input)
-    try:
-        return await generate_gemini_json_object_with_reask(
-            prompt,
-            image_inputs,
-            # 系统指令已并入拍摄剧本 Prompt 正文（prompt 内），不再单独下发 system_instruction。
-            system_instruction=request_snapshot.get("systemInstruction"),
-        )
-    except Exception as exc:
-        raise wrap_gemini_call_error("Gemini 拍摄剧本调用失败", exc) from exc
-
-
-def attach_shoot_script_prompt_snapshot(request_snapshot: dict[str, Any]) -> dict[str, Any]:
-    # AI Director 只接收本阶段需要的选搭导演上下文，不再注入数字模特身份上下文。
-    prompt_runtime = {
-        "styling_result": dumps(request_snapshot.get("styling_result") or styling_result_for_prompt(request_snapshot.get("styling_plan") if isinstance(request_snapshot.get("styling_plan"), dict) else {})),
-        "hero_product_info": render_hero_product_info_line(request_snapshot.get("hero_product_info") or {}),
-        "shoot_script_user_instruction": render_user_instruction_line(request_snapshot.get("shoot_script_user_instruction") or {}),
-        "user_requirement": render_user_requirement_line(request_snapshot.get("user_requirement") or {}),
-    }
-    prompt = render_prompt_template(SHOOT_SCRIPT_PROMPT_CONFIG_KEY, prompt_runtime)
-    return {**request_snapshot, "prompt": prompt, **prompt_execution_facts(SHOOT_SCRIPT_PROMPT_CONFIG_KEY, prompt, prompt_runtime)}
-
-
-def normalize_shoot_script(raw: dict[str, Any], request_snapshot: dict[str, Any]) -> dict[str, Any]:
-    styling_plan = request_snapshot.get("styling_plan") if isinstance(request_snapshot.get("styling_plan"), dict) else {}
-    base_plans = request_snapshot.get("base_shot_rules") if isinstance(request_snapshot.get("base_shot_rules"), list) else []
-    hero = styling_plan.get("hero_understanding") if isinstance(styling_plan.get("hero_understanding"), dict) else {}
-    source = raw if isinstance(raw, dict) else {}
-    input_version = request_snapshot.get("input_version") if isinstance(request_snapshot.get("input_version"), dict) else {}
-    model_snapshot = input_version.get("model_snapshot") if isinstance(input_version.get("model_snapshot"), dict) else {}
-    model_identity_contract = model_identity_contract_from_snapshot(model_snapshot)
-    global_directing = source.get("global_directing") if isinstance(source.get("global_directing"), dict) else {}
-    fallback_consistency_rules: list[str] = []
-    fallback_negative_constraints: list[str] = []
-    selected_outfit = selected_outfit_from_plan(styling_plan)
-    accessory_adjustments = normalize_accessory_adjustments(source.get("accessory_adjustments"))
-    resolved_accessories = normalize_resolved_accessories(source.get("resolved_accessories"), accessory_adjustments, selected_outfit)
-    normalized = {
-        "schema_version": "shoot-script-v1",
-        "script_source_mode": str(source.get("script_source_mode") or "production"),
-        "input_refs": {
-            "task_id": int(request_snapshot.get("task_id") or 0),
-            "input_version_id": int(input_version.get("id") or 0),
-            "styling_id": int(request_snapshot.get("styling_id") or 0),
-            "styling_plan_version": str((styling_plan.get("schema_version") if isinstance(styling_plan, dict) else "") or "styling-plan-v1"),
-            "model_snapshot_id": str(((input_version.get("model_snapshot") or {}).get("modelId") if isinstance(input_version.get("model_snapshot"), dict) else "") or "Face-01"),
-        },
-        "model_identity_contract": model_identity_contract,
-        "global_directing": {
-            "rules": normalize_shoot_script_global_rules(global_directing.get("rules")),
-            "accessory_boundary": str(global_directing.get("accessory_boundary") or ""),
-            "consistency_rules": ensure_string_list(global_directing.get("consistency_rules")) or fallback_consistency_rules,
-            "negative_constraints": ensure_string_list(global_directing.get("negative_constraints")) or fallback_negative_constraints,
-        },
-        "styling_risks": normalize_styling_risks(source.get("styling_risks")),
-        "accessory_adjustments": accessory_adjustments,
-        "resolved_accessories": resolved_accessories,
-        "shots": normalize_shoot_script_shots(source.get("shots"), base_plans, hero, resolved_accessories),
-        "user_visible_summary": normalize_shoot_script_summary(source.get("user_visible_summary"), hero),
-        "warnings": ensure_string_list(source.get("warnings")),
-    }
-    return normalized
 
 
 def normalize_styling_risks(value: Any) -> list[dict[str, Any]]:
@@ -6569,18 +6018,6 @@ def normalize_styling_risks(value: Any) -> list[dict[str, Any]]:
             }
         )
     return risks
-
-
-def normalize_shoot_script_global_rules(value: Any) -> list[dict[str, str]]:
-    if isinstance(value, list):
-        rules = [
-            {"label": str(item.get("label") or ""), "value": str(item.get("value") or "")}
-            for item in value
-            if isinstance(item, dict) and str(item.get("label") or "").strip() and str(item.get("value") or "").strip()
-        ]
-        if rules:
-            return rules[:40]
-    return []
 
 
 def normalize_accessory_adjustments(value: Any) -> list[dict[str, Any]]:
@@ -6719,81 +6156,6 @@ def accessory_instructions_for_shot(index: int, resolved_accessories: list[dict[
     return instructions[:6] or ["生成配饰低存在感，可省略，不做特写，不遮挡主推款和搭配服装。"]
 
 
-def normalize_shoot_script_shots(value: Any, base_plans: list[Any], hero: dict[str, Any], resolved_accessories: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    source_shots = value if isinstance(value, list) and value else []
-    shots: list[dict[str, Any]] = []
-    for index in range(1, 7):
-        source = next((item for item in source_shots if isinstance(item, dict) and int(item.get("shot_index") or 0) == index), None)
-        base = base_plans[index - 1] if len(base_plans) >= index and isinstance(base_plans[index - 1], dict) else {}
-        shots.append(normalize_shoot_script_shot(source or {}, base, hero, index, resolved_accessories))
-    return shots
-
-
-def normalize_shoot_script_shot(source: dict[str, Any], base: dict[str, Any], hero: dict[str, Any], index: int, resolved_accessories: list[dict[str, Any]]) -> dict[str, Any]:
-    shot_type = str(source.get("shot_role") or base.get("shotType") or "reference")
-    return {
-        "shot_index": index,
-        "shot_role": shot_type,
-        "shot_role_label": str(source.get("shot_role_label") or shot_type),
-        "framing": str(source.get("framing") or base.get("framing") or ""),
-        "crop_range": str(source.get("crop_range") or source.get("cropRange") or base.get("framing") or ""),
-        "model_scale": str(source.get("model_scale") or source.get("modelScale") or ""),
-        "camera_angle": str(source.get("camera_angle") or source.get("cameraAngle") or base.get("cameraAngle") or ""),
-        "body_position": str(source.get("body_position") or source.get("bodyPosition") or base.get("cameraAngle") or ""),
-        "pose": str(source.get("pose") or base.get("pose") or ""),
-        "movement": str(source.get("movement") or ""),
-        "hand_position": str(source.get("hand_position") or source.get("handPosition") or ""),
-        "main_focus": str(source.get("main_focus") or source.get("mainFocus") or base.get("mainFocus") or ""),
-        "visible_garments": ensure_string_list(source.get("visible_garments") or source.get("visibleGarments") or base.get("visibleGarments")),
-        "hero_selling_points": ensure_string_list(source.get("hero_selling_points") or source.get("heroSellingPoints") or base.get("heroSellingPoints") or hero.get("hero_selling_points")),
-        "forbidden_occlusion_zones": ensure_string_list(source.get("forbidden_occlusion_zones") or source.get("forbiddenOcclusionZones") or hero.get("forbidden_occlusion_zones") or hero.get("hero_visibility_risks")),
-        "composition_notes": str(source.get("composition_notes") or source.get("compositionNotes") or base.get("compositionNotes") or ""),
-        "accessory_instructions": ensure_string_list(source.get("accessory_instructions") or source.get("accessoryInstructions")) or accessory_instructions_for_shot(index, resolved_accessories),
-        "acceptance_criteria": ensure_string_list(source.get("acceptance_criteria") or source.get("acceptanceCriteria")) or ["主推款品类、颜色、版型和长度清楚。", "搭配服装服务主推款，不抢视觉中心。"],
-        "negative_constraints": ensure_string_list(source.get("negative_constraints") or source.get("negativeConstraints") or base.get("negativeConstraints")),
-    }
-
-
-def normalize_shoot_script_summary(value: Any, hero: dict[str, Any]) -> dict[str, Any]:
-    source = value if isinstance(value, dict) else {}
-    return {
-        "title": str(source.get("title") or ""),
-        "summary": str(source.get("summary") or ""),
-        "key_points": ensure_string_list(source.get("key_points")) or ensure_string_list(hero.get("shot_requirements")),
-        "risk_summary": str(source.get("risk_summary") or ""),
-    }
-
-
-def validate_shoot_script(script: dict[str, Any]) -> None:
-    if script.get("schema_version") != "shoot-script-v1":
-        raise RuntimeError("ShootScript schema_version 无效")
-    shots = script.get("shots")
-    if not isinstance(shots, list) or len(shots) != 6:
-        raise RuntimeError("ShootScript 必须包含 6 个镜头")
-    indexes = [int(item.get("shot_index") or 0) for item in shots if isinstance(item, dict)]
-    if sorted(indexes) != [1, 2, 3, 4, 5, 6]:
-        raise RuntimeError("ShootScript 镜头序号必须为 1-6 且不重复")
-
-
-def shoot_script_to_generation_shot_plans(script: dict[str, Any]) -> list[dict[str, Any]]:
-    plans = []
-    for shot in script.get("shots", []):
-        index = int(shot.get("shot_index") or len(plans) + 1)
-        plans.append(
-            {
-                "sortOrder": index,
-                "shotType": str(shot.get("shot_role") or "reference"),
-                "framing": str(shot.get("framing") or ""),
-                "pose": str(shot.get("pose") or ""),
-                "cameraAngle": str(shot.get("camera_angle") or ""),
-                "mainFocus": str(shot.get("main_focus") or ""),
-                "plan": shot,
-                **shot,
-            }
-        )
-    return plans
-
-
 def build_category_shot_template(hero_category: str) -> list[tuple[str, str, str, str, str]]:
     return build_builtin_category_shot_template(hero_category)
 
@@ -6870,11 +6232,6 @@ def build_builtin_category_shot_template(hero_category: str) -> list[tuple[str, 
         ("front_fit", "标准正面颜色图", "稳定克制", "正面", "颜色、版型、平台友好"),
         ("reference", "参考格", "备用姿态", "自然", "参考，不进入最终生成"),
     ]
-
-
-def serialize_new_shot_plan(row: Any) -> dict[str, Any]:
-    plan = loads(row["plan_json"], {})
-    return {"id": row["id"], "sortOrder": row["sort_order"], "shotType": row["shot_type"], "plan": plan}
 
 
 def model_identity_contract_from_snapshot(model_snapshot: dict[str, Any] | None) -> dict[str, Any]:
@@ -6979,8 +6336,8 @@ def build_new_preview_prompt(
     hero_product_info: dict[str, Any] | None = None,
     storyboard_preview_user_instruction: dict[str, Any] | None = None,
 ) -> str:
-    # 渲染层只输出「可变数据」：拍摄剧本各分段正文、参考图各职能图号区间、商品信息、用户要求。
-    # 表头（【全局导演】等）、职能描述与事实源约束由 Prompt 维护模板正文托管（配合条件段）。
+    # 渲染层只输出「可变数据」：参考图职能图号区间、商品信息、用户要求和选中造型摘要。
+    # 六镜头策略、职能描述与事实源约束由 Prompt 维护模板正文托管（配合条件段）。
     runtime = build_preview_prompt_runtime(styling_plan, image_inputs or [], hero_product_info or {}, storyboard_preview_user_instruction or {})
     return render_prompt_template(storyboard_prompt_config_key(styling_plan), runtime)
 
@@ -7107,14 +6464,6 @@ def get_styling_plan_by_id(styling_id: int) -> dict[str, Any]:
     if not row:
         return {}
     return loads(row["styling_plan_json"], {})
-
-
-def get_shoot_script_json_by_id(shoot_script_id: int) -> dict[str, Any]:
-    with get_db() as db:
-        row = db.execute("SELECT script_json FROM generation_shoot_scripts WHERE id = ?", (shoot_script_id,)).fetchone()
-    if not row:
-        return {}
-    return loads(row["script_json"], {})
 
 
 def build_new_image_inputs(
@@ -7440,7 +6789,7 @@ def sample_prompt_runtime() -> dict[str, Any]:
         "ai_styling_user_instruction": "不要厚重外套，优先轻盈通勤。",
         "storyboard_preview_user_instruction": "分镜姿态更舒展。",
         "final_image_user_instruction": "成片整体更干净，减少配饰存在感。",
-        # 固定品类分镜 Prompt 的少量动态事实（自然语言，不传拍摄剧本 JSON）
+        # 固定品类分镜 Prompt 的少量动态事实（自然语言，不传中间剧本 JSON）
         "category_family": "bottom",
         "styling_outfit": "选中搭配服装：LOOK-A。穿着关系：轻量上装服务主推裤装。",
         "resolved_accessories": "低存在感黑色鞋履，不遮挡主推款。",
@@ -7527,7 +6876,7 @@ def auto_run_active_task_ids() -> set[int]:
             SELECT id FROM generation_tasks
             WHERE deleted_at IS NULL
               AND auto_run_target = ?
-              AND status IN ('STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING')
+              AND status IN ('STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING')
             """,
             (AUTO_RUN_TARGET_FINAL,),
         ).fetchall()
@@ -7551,7 +6900,7 @@ def pump_auto_run_queue() -> None:
             SELECT id FROM generation_tasks
             WHERE deleted_at IS NULL
               AND auto_run_target = ?
-              AND status NOT IN ('STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'CANCELLED', 'ABANDONED')
+              AND status NOT IN ('STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'CANCELLED', 'ABANDONED')
             ORDER BY COALESCE(auto_run_requested_at, updated_at), id
             """,
             (AUTO_RUN_TARGET_FINAL,),
@@ -7574,7 +6923,7 @@ def auto_run_queue_position(task_id: int, requested_at: str | None) -> int | Non
             SELECT COUNT(*) AS ahead FROM generation_tasks
             WHERE deleted_at IS NULL
               AND auto_run_target = ?
-              AND status NOT IN ('STYLING_RUNNING', 'SCRIPT_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'CANCELLED', 'ABANDONED')
+              AND status NOT IN ('STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'CANCELLED', 'ABANDONED')
               AND id != ?
               AND (
                 COALESCE(auto_run_requested_at, updated_at) < COALESCE(?, '')
@@ -8266,56 +7615,6 @@ def get_generation_styling(styling_id: int | None, include_debug: bool = False) 
     }
     if include_debug:
         item["candidateRetrievalSnapshot"] = loads(row["candidate_retrieval_snapshot_json"], {}) if "candidate_retrieval_snapshot_json" in row.keys() else {}
-    else:
-        item = strip_debug_response_fields(item)
-    return item
-
-
-def get_task_shot_plans(styling_id: int | None) -> list[dict[str, Any]]:
-    if not styling_id:
-        return []
-    with get_db() as db:
-        rows = db.execute("SELECT * FROM generation_shot_plans WHERE styling_id = ? ORDER BY sort_order", (styling_id,)).fetchall()
-    return [serialize_new_shot_plan(row) for row in rows]
-
-
-def get_task_shot_plans_by_script(shoot_script_id: int | None) -> list[dict[str, Any]]:
-    if not shoot_script_id:
-        return []
-    with get_db() as db:
-        rows = db.execute("SELECT * FROM generation_shot_plans WHERE shoot_script_id = ? ORDER BY sort_order", (shoot_script_id,)).fetchall()
-    return [serialize_new_shot_plan(row) for row in rows]
-
-
-def get_generation_shoot_script(shoot_script_id: int | None, include_debug: bool = False) -> dict[str, Any] | None:
-    if not shoot_script_id:
-        return None
-    with get_db() as db:
-        row = db.execute("SELECT * FROM generation_shoot_scripts WHERE id = ?", (shoot_script_id,)).fetchone()
-    if not row:
-        return None
-    script = loads(row["script_json"], {})
-    if not include_debug:
-        script = strip_debug_response_fields(script)
-    item = {
-        "id": row["id"],
-        "taskId": row["task_id"],
-        "inputVersionId": row["input_version_id"],
-        "stylingId": row["styling_id"],
-        "status": row["status"],
-        "script": script,
-        "summary": loads(row["summary_json"], {}) if "summary_json" in row.keys() else script.get("user_visible_summary", {}),
-        "userInstruction": loads(row_value(row, "user_instruction_json"), {}),
-        "stylingRisks": loads(row["styling_risks_json"], []) if "styling_risks_json" in row.keys() else script.get("styling_risks", []),
-        "accessoryAdjustments": loads(row["accessory_adjustments_json"], []) if "accessory_adjustments_json" in row.keys() else script.get("accessory_adjustments", []),
-        "resolvedAccessories": script.get("resolved_accessories", []),
-        "activeAttemptId": row["active_attempt_id"],
-        "activeAttempt": get_attempt_summary(row["active_attempt_id"]),
-        "createdAt": row["created_at"],
-        "updatedAt": row["updated_at"],
-    }
-    if include_debug:
-        item["scriptJson"] = script
     else:
         item = strip_debug_response_fields(item)
     return item

@@ -231,7 +231,6 @@ export type DeleteImpact = {
   taskImageCount?: number
   inputVersionCount?: number
   stylingCount?: number
-  shotPlanCount?: number
   previewCount?: number
   resultSetCount?: number
   resultImageCount?: number
