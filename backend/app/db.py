@@ -30,8 +30,8 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("043", "drop_model_identity_prompt_runtime", "migration_drop_model_identity_prompt_runtime"),
     ("044", "merge_garment_reference_prompt_runtime", "migration_merge_garment_reference_prompt_runtime"),
     ("045", "drop_subject_reference_prompt_runtime", "migration_drop_subject_reference_prompt_runtime"),
-    ("046", "install_category_storyboard_prompts", "migration_install_category_storyboard_prompts"),
     ("047", "simplify_final_image_slots", "migration_simplify_final_image_slots"),
+    ("048", "install_category_storyboard_prompts", "migration_install_category_storyboard_prompts"),
 )
 
 # prompt_configs 只登记「Prompt 维护」页的配置槽（键 / 分组 / 标题 / 说明 / 排序），

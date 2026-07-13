@@ -376,6 +376,34 @@ class BackendCurrentFlowTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Prompt 配置缺失或占位符未填充"):
             main.render_prompt_template("assembly.ai_styling", main.sample_prompt_runtime())
 
+    def test_category_prompt_migration_runs_after_legacy_046_database(self) -> None:
+        db_module = importlib.import_module("app.db")
+        db_module.init_db()
+        with db_module.get_db() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO schema_migrations (version, name, applied_at) VALUES ('046', 'hide_empty_preview_user_inputs', ?)",
+                ("2026-07-12T00:00:00Z",),
+            )
+            db.execute("DELETE FROM schema_migrations WHERE version = '048'")
+            db.execute(
+                "INSERT INTO prompt_configs (key, group_type, title, description, content, sort_order, updated_at) VALUES ('assembly.shoot_script', 'assembly', '拍摄剧本', '', 'legacy', 115, ?) ON CONFLICT(key) DO UPDATE SET content = 'legacy'",
+                ("2026-07-12T00:00:00Z",),
+            )
+            db.execute(
+                "INSERT INTO prompt_configs (key, group_type, title, description, content, sort_order, updated_at) VALUES ('assembly.storyboard_preview', 'assembly', '分镜预览', '', 'legacy', 116, ?) ON CONFLICT(key) DO UPDATE SET content = 'legacy'",
+                ("2026-07-12T00:00:00Z",),
+            )
+
+        db_module.init_db()
+
+        with db_module.get_db() as db:
+            applied = db.execute("SELECT name FROM schema_migrations WHERE version = '048'").fetchone()
+            legacy = db.execute("SELECT key FROM prompt_configs WHERE key IN ('assembly.shoot_script', 'assembly.storyboard_preview')").fetchall()
+            golden = db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.storyboard_preview_one_piece'").fetchone()
+        self.assertEqual(applied["name"], "install_category_storyboard_prompts")
+        self.assertEqual(legacy, [])
+        self.assertIn("76%–80%", golden["content"])
+
     def test_storyboard_category_family_routes_supported_categories(self) -> None:
         main = importlib.import_module("app.main")
         cases = {
