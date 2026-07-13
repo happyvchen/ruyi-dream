@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import os
+from io import BytesIO
 from pathlib import Path
 import sys
 import tempfile
@@ -382,7 +383,6 @@ class BackendCurrentFlowTests(unittest.TestCase):
             self.assertIn("16.7%–49%", content)
             self.assertIn("51%–83.3%", content)
             self.assertIn("不额外制造不对称大留白", content)
-        self.assertIsNone(main.prompt_config_content("assembly.final_image"))
         self.assertIn("完整保留裤脚/裙摆和双脚", bottom)
         one_piece = main.prompt_config_content("assembly.storyboard_preview_one_piece")
         self.assertIn("眼睛、眉毛和鼻子不得出现", one_piece)
@@ -390,6 +390,54 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertNotIn("assembly.shoot_script", rows)
         with self.assertRaisesRegex(RuntimeError, "Prompt 配置缺失或占位符未填充"):
             main.render_prompt_template("assembly.ai_styling", main.sample_prompt_runtime())
+        self.assertIsNone(main.prompt_config_content("assembly.final_image"))
+
+    def test_preview_grid_cell_input_crops_current_cell(self) -> None:
+        main = importlib.import_module("app.main")
+        from PIL import Image
+
+        cell_colors = {
+            1: (255, 0, 0),
+            2: (0, 255, 0),
+            3: (0, 0, 255),
+            4: (255, 255, 0),
+            5: (255, 0, 255),
+            6: (0, 255, 255),
+        }
+        grid = Image.new("RGB", (300, 200), "white")
+        for cell, color in cell_colors.items():
+            col = (cell - 1) % 3
+            row = (cell - 1) // 3
+            block = Image.new("RGB", (100, 100), color)
+            grid.paste(block, (col * 100, row * 100))
+        buffer = BytesIO()
+        grid.save(buffer, format="PNG")
+        source_bytes = buffer.getvalue()
+
+        stored: dict[str, bytes] = {}
+        original_object_exists = main.object_exists
+        original_get_bytes = main.get_bytes
+        original_put_bytes = main.put_bytes
+        try:
+            main.object_exists = lambda key: key == "preview/grid.png" or key in stored
+            main.get_bytes = lambda key: source_bytes if key == "preview/grid.png" else stored[key]
+            main.put_bytes = lambda key, content, content_type: stored.setdefault(key, content)
+            result = main.preview_grid_cell_image_input(
+                {"id": 103, "objectKey": "preview/grid.png", "filename": "grid.png", "originalUrl": "/api/media?key=preview/grid.png"},
+                5,
+            )
+        finally:
+            main.object_exists = original_object_exists
+            main.get_bytes = original_get_bytes
+            main.put_bytes = original_put_bytes
+
+        self.assertEqual(result["role"], "preview_grid")
+        self.assertEqual(result["sourceObjectKey"], "preview/grid.png")
+        self.assertEqual(result["objectKey"], "preview/_derived/final-cells/grid-shot5.png")
+        self.assertIn(result["objectKey"], stored)
+        with Image.open(BytesIO(stored[result["objectKey"]])) as cropped:
+            self.assertEqual(cropped.size, (100, 100))
+            self.assertEqual(cropped.getpixel((50, 50)), cell_colors[5])
 
     def test_category_prompt_migration_runs_after_legacy_046_database(self) -> None:
         db_module = importlib.import_module("app.db")

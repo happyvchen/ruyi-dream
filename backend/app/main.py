@@ -23,7 +23,7 @@ from urllib.parse import quote, urlencode
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
-from PIL import Image
+from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
 
 from .config import get_settings
@@ -7031,6 +7031,7 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         int(row["styling_id"]),
         include_preview=True,
         preview_asset_id=row["preview_asset_id"],
+        preview_grid_cell=int(row["sort_order"]),
         input_version_id=int(row["input_version_id"]),
         environment_asset_id=row["environment_asset_id"],
     )
@@ -7121,6 +7122,7 @@ def build_new_image_inputs(
     styling_id: int,
     include_preview: bool,
     preview_asset_id: int | None = None,
+    preview_grid_cell: int | None = None,
     input_version_id: int | None = None,
     environment_asset_id: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -7145,7 +7147,7 @@ def build_new_image_inputs(
     if include_preview and preview_asset_id:
         asset = get_media_asset_by_id(preview_asset_id)
         if asset:
-            inputs.append(image_input_from_asset(asset, "preview_grid"))
+            inputs.append(preview_grid_cell_image_input(asset, preview_grid_cell))
     hero_snapshot = loads(input_version["image_snapshot_json"], []) if input_version else []
     inputs.extend(image_input_from_asset(item.get("asset"), "hero_garment") for item in hero_snapshot[:3])
     selected_materials = loads(styling["selected_material_snapshot_json"], []) if styling else []
@@ -7173,6 +7175,53 @@ def image_input_from_asset(asset: dict[str, Any] | None, role: str) -> dict[str,
         "filename": asset.get("filename"),
         "url": asset.get("originalUrl"),
     }
+
+
+def preview_grid_cell_image_input(asset: dict[str, Any], cell: int | None) -> dict[str, Any]:
+    if cell is None:
+        return image_input_from_asset(asset, "preview_grid")
+    source_key = str(asset.get("objectKey") or "")
+    if not source_key or not object_exists(source_key):
+        return image_input_from_asset(asset, "preview_grid")
+    cell_key = preview_grid_cell_object_key(source_key, int(cell))
+    if not object_exists(cell_key):
+        content = crop_preview_grid_cell(get_bytes(source_key), int(cell))
+        put_bytes(cell_key, content, "image/png")
+    return {
+        "role": "preview_grid",
+        "assetId": asset.get("id"),
+        "objectKey": cell_key,
+        "sourceObjectKey": source_key,
+        "filename": f"{Path(source_key).stem}-shot{int(cell)}.png",
+        "url": asset.get("originalUrl"),
+    }
+
+
+def preview_grid_cell_object_key(source_key: str, cell: int) -> str:
+    if cell < 1 or cell > 6:
+        raise ValueError(f"Invalid preview grid cell: {cell}")
+    path = Path(clean_key(source_key))
+    return join_key(path.parent.as_posix(), "_derived", "final-cells", f"{path.stem}-shot{cell}.png")
+
+
+def crop_preview_grid_cell(content: bytes, cell: int) -> bytes:
+    if cell < 1 or cell > 6:
+        raise ValueError(f"Invalid preview grid cell: {cell}")
+    with Image.open(BytesIO(content)) as image:
+        image = ImageOps.exif_transpose(image)
+        width, height = image.size
+        col = (cell - 1) % 3
+        row = (cell - 1) // 3
+        left = round(width * col / 3)
+        right = round(width * (col + 1) / 3)
+        top = round(height * row / 2)
+        bottom = round(height * (row + 1) / 2)
+        cropped = image.crop((left, top, right, bottom))
+        if cropped.mode not in {"RGB", "RGBA"}:
+            cropped = cropped.convert("RGBA" if "A" in cropped.getbands() else "RGB")
+        output = BytesIO()
+        cropped.save(output, format="PNG")
+        return output.getvalue()
 
 
 def get_default_model_image_inputs(limit: int = 2) -> list[dict[str, Any]]:
