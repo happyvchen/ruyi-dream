@@ -2984,6 +2984,9 @@ async def run_final_generation(
     # 余额硬停：任一并发成片检测到 INSUFFICIENT_BALANCE 时置位，尚未提交的兄弟图
     # 直接跳过 provider 提交（余额不足重试/继续提交只会继续报错、浪费轮询预算）。
     balance_stop = asyncio.Event()
+    unknown_retry_guard = SubmissionUnknownRetryGuard(
+        settings.generation_unknown_submission_batch_circuit_breaker
+    )
     await asyncio.gather(
         *(
             generate_single_final_image(
@@ -2993,6 +2996,7 @@ async def run_final_generation(
                 attempt_id=resume_attempts_by_image_id.get(image_id),
                 trigger=trigger,
                 balance_stop=balance_stop,
+                unknown_retry_guard=unknown_retry_guard,
             )
             for image_id in image_ids
         ),
@@ -7438,7 +7442,24 @@ STATUS_CHECK_ERROR_BACKOFF_CAP_SECONDS = 30
 PROVIDER_GENERATION_RETRY_LIMIT = 1
 
 
-async def generate_image_asset(task_package: dict[str, Any], output_key: str, attempt_id: int | None = None) -> tuple[int, dict[str, Any]]:
+class SubmissionUnknownRetryGuard:
+    """同批提交未知熔断器：达到阈值后，剩余镜头不再放大自动重提。"""
+
+    def __init__(self, threshold: int):
+        self.threshold = max(1, int(threshold))
+        self.unknown_count = 0
+
+    def allow_retry(self) -> bool:
+        self.unknown_count += 1
+        return self.unknown_count < self.threshold
+
+
+async def generate_image_asset(
+    task_package: dict[str, Any],
+    output_key: str,
+    attempt_id: int | None = None,
+    unknown_retry_guard: SubmissionUnknownRetryGuard | None = None,
+) -> tuple[int, dict[str, Any]]:
     """完整生成一张图：上传参考图 → 提交 → 轮询 → 成片回传。
 
     健壮性契约（成功 > 慢 > 失败）：
@@ -7455,6 +7476,7 @@ async def generate_image_asset(task_package: dict[str, Any], output_key: str, at
     payload = get_attempt_provider_resume_snapshot(attempt_id)
     image_input_total = len(task_package.get("imageInputs") or [])
     generation_retries = int(payload.get("generationRetries") or 0) if payload else 0
+    unknown_submission_retries = int(payload.get("unknownSubmissionRetries") or 0) if payload else 0
     existing_history = payload.get("providerRequestHistory") if payload else None
     provider_request_history: list[str] = (
         [str(item) for item in existing_history if item]
@@ -7474,13 +7496,60 @@ async def generate_image_asset(task_package: dict[str, Any], output_key: str, at
         if payload is None:
             progress.begin(PHASE_PREPARE)
             progress.begin(PHASE_UPLOAD, completed=0, total=image_input_total, generationRetry=generation_retries)
-            payload = await asyncio.to_thread(run_image_provider_submit, submit_task_package, output_key, report_upload)
+            try:
+                payload = await asyncio.to_thread(run_image_provider_submit, submit_task_package, output_key, report_upload)
+            except ImageProviderError as exc:
+                if classify_attempt_error(exc) != ERROR_SUBMISSION_UNKNOWN:
+                    raise
+                unknown_snapshot = getattr(exc, "provider_response", None)
+                if not isinstance(unknown_snapshot, dict):
+                    unknown_snapshot = {}
+                uploaded_inputs = unknown_snapshot.get("imageInputs")
+                if isinstance(uploaded_inputs, list) and uploaded_inputs:
+                    submit_task_package = {**task_package, "imageInputs": uploaded_inputs}
+                batch_retry_allowed = (
+                    unknown_retry_guard.allow_retry()
+                    if unknown_retry_guard is not None
+                    else True
+                )
+                retry_allowed = (
+                    unknown_submission_retries < settings.generation_unknown_submission_retry_limit
+                    and batch_retry_allowed
+                )
+                snapshot = {
+                    **unknown_snapshot,
+                    "providerRequestHistory": provider_request_history,
+                    "generationRetries": generation_retries,
+                    "unknownSubmissionRetries": unknown_submission_retries,
+                }
+                if not retry_allowed:
+                    snapshot["status"] = "SUBMISSION_UNKNOWN"
+                    persist_attempt_provider_progress(attempt_id, snapshot)
+                    exc.provider_response = snapshot
+                    raise
+                unknown_submission_retries += 1
+                snapshot.update(
+                    {
+                        "status": "SUBMISSION_RETRY_WAIT",
+                        "unknownSubmissionRetries": unknown_submission_retries,
+                    }
+                )
+                progress.begin(
+                    PHASE_SUBMIT,
+                    unknownSubmissionRetry=unknown_submission_retries,
+                    retryDelaySeconds=settings.generation_unknown_submission_retry_delay_seconds,
+                )
+                prepare_attempt_provider_resubmission(attempt_id, snapshot)
+                await asyncio.sleep(settings.generation_unknown_submission_retry_delay_seconds)
+                payload = None
+                continue
             if payload.get("providerRequestId"):
                 provider_request_history.append(str(payload["providerRequestId"]))
             payload = {
                 **payload,
                 "providerRequestHistory": provider_request_history,
                 "generationRetries": generation_retries,
+                "unknownSubmissionRetries": unknown_submission_retries,
             }
             persist_attempt_provider_progress(attempt_id, payload)
 
@@ -7532,6 +7601,7 @@ async def generate_image_asset(task_package: dict[str, Any], output_key: str, at
         "submissionMode": "completed",
         "providerRequestHistory": provider_request_history,
         "generationRetries": generation_retries,
+        "unknownSubmissionRetries": unknown_submission_retries,
     }
     persist_attempt_provider_progress(attempt_id, payload)
 
@@ -7688,6 +7758,7 @@ async def generate_single_final_image(
     attempt_id: int | None = None,
     trigger: str = "manual_step",
     balance_stop: asyncio.Event | None = None,
+    unknown_retry_guard: SubmissionUnknownRetryGuard | None = None,
 ) -> int:
     if balance_stop is not None and balance_stop.is_set():
         # 同批已有成片撞到余额不足，本图直接落 FAILED(INSUFFICIENT_BALANCE)，不再提交 provider。
@@ -7732,7 +7803,12 @@ async def generate_single_final_image(
         with get_db() as db:
             sort_order = db.execute("SELECT sort_order FROM generation_result_images_new WHERE id = ?", (image_id,)).fetchone()["sort_order"]
         output_key = join_key("generation-tasks", str(task_id), "final", f"{result_set_id}-{sort_order}.png")
-        asset_id, provider_response = await generate_image_asset(task_package, output_key, attempt_id=attempt_id)
+        asset_id, provider_response = await generate_image_asset(
+            task_package,
+            output_key,
+            attempt_id=attempt_id,
+            unknown_retry_guard=unknown_retry_guard,
+        )
     except Exception as exc:
         provider_response = getattr(exc, "provider_response", None)
         with get_db() as db:

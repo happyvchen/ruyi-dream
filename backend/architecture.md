@@ -22,6 +22,15 @@
 
 后端不再包含动态剧本服务。`app/main.py` 中的生成相关代码只围绕 `StylingPlan`、`GenerationPreview` 和 `GenerationResultImage` 编排。
 
+## Image-2 分阶段恢复
+
+- 参考图上传失败只重试失败上传，已成功上传的 provider URL 通过缓存或 attempt 快照复用。
+- 创建任务遇到连接中断、`ReadTimeout` 或 TLS EOF 时，内部标记为 `SUBMISSION_UNKNOWN`；默认等待 15 秒后仅重提当前镜头 1 次。
+- 同批成片累计 2 次提交未知后触发熔断，后续镜头不再放大自动重提；阈值可通过环境变量调整。
+- 已取得 provider task ID 后只恢复状态查询；provider 明确瞬时生成失败时仅重试生成阶段。
+- provider 成功后的下载失败只重试下载；本地对象存储、数据或代码错误标记为 `SYSTEM_ERROR`，不自动重试。
+- 提交未知、生成重试次数和 provider ID 历史均持久化在 attempt 快照中，自动恢复预算耗尽后才向用户呈现部分失败。
+
 ## 主要模块
 
 | 文件 | 职责 |

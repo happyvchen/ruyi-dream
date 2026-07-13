@@ -410,6 +410,20 @@ class ProviderSubmitContractTests(TempEnvTestCase):
         self.assertEqual(result["id"], "tsk_ok")
         self.assertEqual(post.call_count, 2)
         self.assertTrue(all(call.kwargs["attempts"] == 1 for call in post.call_args_list))
+        self.assertTrue(all(call.kwargs["timeout"] == 180 for call in post.call_args_list))
+
+    def test_toapis_unknown_submission_preserves_uploaded_inputs_for_retry(self) -> None:
+        image_provider = importlib.import_module("app.image_provider")
+        uploaded = [{"role": "hero", "providerUrl": "https://files.toapis.com/ref.jpg"}]
+        unknown = image_provider.ProviderSubmissionUnknownError("tls eof")
+        provider = image_provider.GPTImage2ToapisProvider()
+        with mock.patch.object(image_provider, "prepare_toapis_image_inputs", return_value=(uploaded, [uploaded[0]["providerUrl"]])):
+            with mock.patch.object(image_provider, "build_toapis_request_snapshot", return_value={"model": "gpt-image-2"}):
+                with mock.patch.object(image_provider, "post_generation_task_with_confirmed_failure_retries", side_effect=unknown):
+                    with self.assertRaises(image_provider.ProviderSubmissionUnknownError) as ctx:
+                        asyncio.run(provider.submit({"imageInputs": [{"role": "hero"}]}, "k/out.png"))
+        self.assertEqual(ctx.exception.provider_response["imageInputs"], uploaded)
+        self.assertEqual(ctx.exception.provider_response["status"], "SUBMISSION_UNKNOWN")
 
     def test_fal_submit_response_has_no_output_path(self) -> None:
         os.environ["FAL_KEY"] = "test-fal-key"
@@ -637,6 +651,72 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
                     with self.assertRaises(self.main.ImageProviderError):
                         asyncio.run(self.main.generate_image_asset({"imageInputs": []}, "k/out.png", attempt_id))
         submit.assert_not_called()
+
+    def test_unknown_submission_retries_once_and_reuses_uploaded_inputs(self) -> None:
+        os.environ["GENERATION_UNKNOWN_SUBMISSION_RETRY_DELAY_SECONDS"] = "0"
+        self._reload_settings()
+        attempt_id = self._insert_attempt()
+        uploaded = [{"role": "hero", "providerUrl": "https://files.toapis.com/ref.jpg"}]
+        unknown = self.main.ImageProviderError(
+            "tls eof",
+            provider_response={"provider": "toapis", "status": "SUBMISSION_UNKNOWN", "imageInputs": uploaded},
+            error_code=self.progress_module.ERROR_SUBMISSION_UNKNOWN,
+        )
+        submitted = {
+            "provider": "toapis",
+            "providerRequestId": "tsk_retry",
+            "status": "SUBMITTED",
+            "providerStatus": "submitted",
+            "imageInputs": uploaded,
+        }
+        succeeded = {
+            "status": "SUCCEEDED",
+            "providerStatus": "completed",
+            "providerRequestId": "tsk_retry",
+            "providerStatusResponse": {"status": "completed"},
+        }
+        with mock.patch.object(self.main, "run_image_provider_submit", side_effect=[unknown, submitted]) as submit:
+            with mock.patch.object(self.main, "run_image_provider_check", return_value=succeeded):
+                with mock.patch.object(self.main, "run_image_provider_deliver", return_value={"outputPath": "k/out.png"}):
+                    with mock.patch.object(self.main, "get_bytes", return_value=b"img"):
+                        with mock.patch.object(self.main, "insert_generated_media_asset", return_value=77):
+                            asset_id, payload = asyncio.run(
+                                self.main.generate_image_asset(
+                                    {"imageInputs": [{"role": "hero", "url": "https://source.example/ref.jpg"}]},
+                                    "k/out.png",
+                                    attempt_id,
+                                )
+                            )
+        self.assertEqual(asset_id, 77)
+        self.assertEqual(submit.call_count, 2)
+        self.assertEqual(submit.call_args_list[1].args[0]["imageInputs"], uploaded)
+        self.assertEqual(payload["unknownSubmissionRetries"], 1)
+
+    def test_unknown_submission_retry_budget_exhaustion_stops_after_two_posts(self) -> None:
+        os.environ["GENERATION_UNKNOWN_SUBMISSION_RETRY_DELAY_SECONDS"] = "0"
+        self._reload_settings()
+        attempt_id = self._insert_attempt()
+        uploaded = [{"role": "hero", "providerUrl": "https://files.toapis.com/ref.jpg"}]
+
+        def unknown() -> Exception:
+            return self.main.ImageProviderError(
+                "read timeout",
+                provider_response={"provider": "toapis", "status": "SUBMISSION_UNKNOWN", "imageInputs": uploaded},
+                error_code=self.progress_module.ERROR_SUBMISSION_UNKNOWN,
+            )
+
+        with mock.patch.object(self.main, "run_image_provider_submit", side_effect=[unknown(), unknown()]) as submit:
+            with self.assertRaises(self.main.ImageProviderError) as ctx:
+                asyncio.run(self.main.generate_image_asset({"imageInputs": [{"role": "hero"}]}, "k/out.png", attempt_id))
+        self.assertEqual(ctx.exception.error_code, self.progress_module.ERROR_SUBMISSION_UNKNOWN)
+        self.assertEqual(ctx.exception.provider_response["unknownSubmissionRetries"], 1)
+        self.assertEqual(submit.call_count, 2)
+
+    def test_submission_unknown_batch_guard_breaks_on_second_unknown(self) -> None:
+        guard = self.main.SubmissionUnknownRetryGuard(2)
+        self.assertTrue(guard.allow_retry())
+        self.assertFalse(guard.allow_retry())
+        self.assertFalse(guard.allow_retry())
 
     def test_resubmission_clears_old_provider_id_before_new_post(self) -> None:
         attempt_id = self._insert_attempt(provider_request_id="tsk_old")

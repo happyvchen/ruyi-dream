@@ -101,8 +101,13 @@ class ImageProviderError(RuntimeError):
 class ProviderSubmissionUnknownError(ImageProviderError):
     """创建任务请求已发出，但连接中断导致无法确认 provider 是否已创建任务。"""
 
-    def __init__(self, message: str):
-        super().__init__(message, error_code=ERROR_SUBMISSION_UNKNOWN, response_received=False)
+    def __init__(self, message: str, provider_response: dict[str, Any] | None = None):
+        super().__init__(
+            message,
+            provider_response=provider_response,
+            error_code=ERROR_SUBMISSION_UNKNOWN,
+            response_received=False,
+        )
 
 
 def post_generation_task_with_confirmed_failure_retries(
@@ -112,6 +117,7 @@ def post_generation_task_with_confirmed_failure_retries(
     *,
     auth_scheme: str,
     error_label: str,
+    timeout_seconds: int = 180,
     max_attempts: int = 2,
 ) -> dict[str, Any]:
     """创建 provider 任务。
@@ -125,7 +131,7 @@ def post_generation_task_with_confirmed_failure_retries(
                 url,
                 payload,
                 api_key,
-                timeout=60,
+                timeout=timeout_seconds,
                 auth_scheme=auth_scheme,
                 error_label=error_label,
                 attempts=1,
@@ -286,13 +292,27 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
 
         uploaded_inputs, image_urls = prepare_toapis_image_inputs(task_package.get("imageInputs", []), on_progress)
         provider_request = build_toapis_request_snapshot(task_package, image_urls)
-        submit_response = post_generation_task_with_confirmed_failure_retries(
-            toapis_url("/v1/images/generations"),
-            provider_request,
-            settings.toapis_api_key,
-            auth_scheme="Bearer",
-            error_label="GPT Image-2 toapis 请求失败",
-        )
+        try:
+            submit_response = post_generation_task_with_confirmed_failure_retries(
+                toapis_url("/v1/images/generations"),
+                provider_request,
+                settings.toapis_api_key,
+                auth_scheme="Bearer",
+                error_label="GPT Image-2 toapis 请求失败",
+                timeout_seconds=settings.toapis_image_submit_timeout_seconds,
+            )
+        except ProviderSubmissionUnknownError as exc:
+            exc.provider_response = {
+                "provider": "toapis",
+                "model": provider_request.get("model"),
+                "submissionMode": "queued",
+                "status": "SUBMISSION_UNKNOWN",
+                "providerStatus": "submission_unknown",
+                "providerRequestId": None,
+                "imageInputs": uploaded_inputs,
+                "providerRequest": provider_request,
+            }
+            raise
         task_id = submit_response.get("id") or submit_response.get("task_id")
         # 注意：submit 响应不携带 outputPath。outputPath 的语义是"成片已回传到
         # 对象存储的实际位置"，只能由 store_delivered_image 在回传成功后写入；

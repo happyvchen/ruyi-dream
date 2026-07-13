@@ -94,6 +94,14 @@ class Settings:
     fal_key = os.getenv("FAL_KEY", "")
     toapis_api_key = os.getenv("TOAPIS_API_KEY", "")
     toapis_base_url = os.getenv("TOAPIS_BASE_URL", "https://toapis.com")
+    # Image-2 创建任务单次请求超时；独立于生成轮询总预算。
+    toapis_image_submit_timeout_seconds = int(os.getenv("TOAPIS_IMAGE_SUBMIT_TIMEOUT_SECONDS", "180"))
+    # 创建请求响应未知时的用户无感自动恢复：单镜头重试次数、退避和同批熔断阈值。
+    generation_unknown_submission_retry_limit = int(os.getenv("GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT", "1"))
+    generation_unknown_submission_retry_delay_seconds = float(os.getenv("GENERATION_UNKNOWN_SUBMISSION_RETRY_DELAY_SECONDS", "15"))
+    generation_unknown_submission_batch_circuit_breaker = int(
+        os.getenv("GENERATION_UNKNOWN_SUBMISSION_BATCH_CIRCUIT_BREAKER", "2")
+    )
     gpt_image2_quality = os.getenv("GPT_IMAGE2_QUALITY", "high")
     gpt_image2_output_format = os.getenv("GPT_IMAGE2_OUTPUT_FORMAT", "png")
     gpt_image2_size = os.getenv("GPT_IMAGE2_SIZE", "1:1")
@@ -141,6 +149,14 @@ class Settings:
             raise RuntimeError("GENERATION_LOCK_TTL_SECONDS must be greater than 0.")
         if self.generation_image_timeout_seconds <= 0:
             raise RuntimeError("GENERATION_IMAGE_TIMEOUT_SECONDS must be greater than 0.")
+        if self.toapis_image_submit_timeout_seconds <= 0:
+            raise RuntimeError("TOAPIS_IMAGE_SUBMIT_TIMEOUT_SECONDS must be greater than 0.")
+        if self.generation_unknown_submission_retry_limit < 0:
+            raise RuntimeError("GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT must be greater than or equal to 0.")
+        if self.generation_unknown_submission_retry_delay_seconds < 0:
+            raise RuntimeError("GENERATION_UNKNOWN_SUBMISSION_RETRY_DELAY_SECONDS must be greater than or equal to 0.")
+        if self.generation_unknown_submission_batch_circuit_breaker <= 0:
+            raise RuntimeError("GENERATION_UNKNOWN_SUBMISSION_BATCH_CIRCUIT_BREAKER must be greater than 0.")
         if self.generation_submit_retry_limit <= 0:
             raise RuntimeError("GENERATION_SUBMIT_RETRY_LIMIT must be greater than 0.")
         if self.generation_status_retry_limit <= 0:
