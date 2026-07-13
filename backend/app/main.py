@@ -1962,17 +1962,19 @@ def reset_generation_task_for_rerun(db: Any, task_id: int, timestamp: str) -> No
     log_event(db, "generation_task", task_id, "restarted", {"reason": "rerun_from_scratch"})
 
 
-def cancelled_generation_resume_status(db: Any, task_id: int) -> str:
-    """Map the most recently cancelled generation attempt back to its resumable task state.
+def interrupted_generation_resume_status(db: Any, task_id: int, terminal_status: str) -> str:
+    """Map the most recent failed/cancelled attempt back to its resumable task state.
 
     Active pointers deliberately keep the last successful artifacts until a replacement succeeds,
     so they cannot identify which in-flight regeneration the user cancelled.
     """
+    if terminal_status not in {"FAILED", "CANCELLED"}:
+        raise ValueError(f"不支持的中断状态：{terminal_status}")
     attempt = db.execute(
         """
         SELECT owner_type
         FROM generation_attempts
-        WHERE status = 'CANCELLED'
+        WHERE status = ?
           AND (
             (owner_type = 'generation_styling' AND owner_id = ?)
             OR (owner_type = 'generation_preview' AND owner_id IN (
@@ -1985,10 +1987,10 @@ def cancelled_generation_resume_status(db: Any, task_id: int) -> str:
               WHERE grs.task_id = ?
             ))
           )
-        ORDER BY COALESCE(cancelled_at, updated_at, created_at) DESC, id DESC
+        ORDER BY COALESCE(failed_at, cancelled_at, updated_at, created_at) DESC, id DESC
         LIMIT 1
         """,
-        (task_id, task_id, task_id),
+        (terminal_status, task_id, task_id, task_id),
     ).fetchone()
     owner_type = attempt["owner_type"] if attempt else None
     if owner_type == "generation_result_image":
@@ -1998,31 +2000,35 @@ def cancelled_generation_resume_status(db: Any, task_id: int) -> str:
     if owner_type == "generation_styling":
         return "READY_FOR_STYLING"
 
-    # A queued preview/final-image operation may be cancelled before its attempt is created.
-    # Compare both artifact types by time instead of letting an older final cancellation win.
-    cancelled_artifact = db.execute(
+    # A queued preview/final-image operation may end before its attempt is created.
+    # Compare both artifact types by time instead of letting an older final interruption win.
+    interrupted_artifact = db.execute(
         """
         SELECT stage
         FROM (
-          SELECT 'final' AS stage, gri.updated_at AS cancelled_at, gri.id AS artifact_id
+          SELECT 'final' AS stage, gri.updated_at AS interrupted_at, gri.id AS artifact_id
           FROM generation_result_images_new gri
           JOIN generation_result_sets grs ON grs.id = gri.result_set_id
-          WHERE grs.task_id = ? AND gri.status = 'CANCELLED'
+          WHERE grs.task_id = ? AND gri.status = ?
           UNION ALL
-          SELECT 'preview' AS stage, gp.updated_at AS cancelled_at, gp.id AS artifact_id
+          SELECT 'preview' AS stage, gp.updated_at AS interrupted_at, gp.id AS artifact_id
           FROM generation_previews gp
-          WHERE gp.task_id = ? AND gp.status = 'CANCELLED'
-        ) cancelled_artifacts
-        ORDER BY cancelled_at DESC, artifact_id DESC
+          WHERE gp.task_id = ? AND gp.status = ?
+        ) interrupted_artifacts
+        ORDER BY interrupted_at DESC, artifact_id DESC
         LIMIT 1
         """,
-        (task_id, task_id),
+        (task_id, terminal_status, task_id, terminal_status),
     ).fetchone()
-    if cancelled_artifact and cancelled_artifact["stage"] == "final":
+    if interrupted_artifact and interrupted_artifact["stage"] == "final":
         return "PREVIEW_READY"
-    if cancelled_artifact and cancelled_artifact["stage"] == "preview":
+    if interrupted_artifact and interrupted_artifact["stage"] == "preview":
         return "STYLING_READY"
     return "READY_FOR_STYLING"
+
+
+def cancelled_generation_resume_status(db: Any, task_id: int) -> str:
+    return interrupted_generation_resume_status(db, task_id, "CANCELLED")
 
 
 def resume_cancelled_generation_task(db: Any, task_id: int, timestamp: str) -> str:
@@ -2032,6 +2038,16 @@ def resume_cancelled_generation_task(db: Any, task_id: int, timestamp: str) -> s
         (resume_status, timestamp, task_id),
     )
     log_event(db, "generation_task", task_id, "resumed", {"resumeStatus": resume_status})
+    return resume_status
+
+
+def resume_failed_generation_task(db: Any, task_id: int, timestamp: str) -> str:
+    resume_status = interrupted_generation_resume_status(db, task_id, "FAILED")
+    db.execute(
+        "UPDATE generation_tasks SET status = ?, updated_at = ? WHERE id = ? AND status = 'FAILED'",
+        (resume_status, timestamp, task_id),
+    )
+    log_event(db, "generation_task", task_id, "resumed", {"resumeStatus": resume_status, "previousStatus": "FAILED"})
     return resume_status
 
 
@@ -2724,6 +2740,8 @@ async def auto_run_final_images(task_id: int, request: Request, payload: AutoRun
             reset_generation_task_for_rerun(db, task_id, timestamp)
         elif task["status"] == "CANCELLED":
             resume_cancelled_generation_task(db, task_id, timestamp)
+        elif task["status"] == "FAILED":
+            resume_failed_generation_task(db, task_id, timestamp)
         db.execute(
             """
             UPDATE generation_tasks
@@ -2785,6 +2803,8 @@ async def auto_run_generation_batch(batch_id: str) -> dict[str, Any]:
                 continue
             if row["status"] == "CANCELLED":
                 resume_cancelled_generation_task(db, int(row["id"]), timestamp)
+            elif row["status"] == "FAILED":
+                resume_failed_generation_task(db, int(row["id"]), timestamp)
             db.execute(
                 """
                 UPDATE generation_tasks
@@ -2820,19 +2840,17 @@ async def run_generate_final_images(
     styling_id = int(task["active_styling_id"])
     with get_db() as db:
         preview_row = db.execute(
-            "SELECT input_version_id FROM generation_previews WHERE id = ? AND task_id = ?",
+            "SELECT id FROM generation_previews WHERE id = ? AND task_id = ?",
             (preview_id, task_id),
         ).fetchone()
-    if not preview_row or not preview_row["input_version_id"]:
+    if not preview_row:
         raise HTTPException(status_code=409, detail="请先生成分镜预览")
-    preview_input_version_id = int(preview_row["input_version_id"])
     effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "final_image")
     user_instruction_context = build_stage_user_instruction_context("final_image", effective_user_instruction)
     if continue_existing and task["active_result_set_id"]:
         image_ids = continue_active_final_result_set(
             task_id,
             int(task["active_result_set_id"]),
-            preview_input_version_id,
             styling_id,
             preview_id,
             user_instruction_context,
@@ -2884,7 +2902,6 @@ async def run_generate_final_images(
 def continue_active_final_result_set(
     task_id: int,
     result_set_id: int,
-    input_version_id: int,
     styling_id: int,
     preview_id: int,
     user_instruction_context: dict[str, Any] | None = None,
@@ -2900,11 +2917,9 @@ def continue_active_final_result_set(
         ).fetchone()
         if not result_set or result_set["status"] == "RUNNING":
             raise HTTPException(status_code=409, detail="成片已在生成中，请勿重复提交")
-        if (
-            int(result_set["input_version_id"]) != input_version_id
-            or int(result_set["styling_id"]) != styling_id
-            or int(result_set["preview_id"]) != preview_id
-        ):
+        # 结果集自己的 input_version_id 是成片阶段快照，本来就不会等于分镜阶段快照。
+        # 是否可续跑只由当前选搭和分镜身份决定；匹配后复用原结果集并跳过成功槽位。
+        if int(result_set["styling_id"]) != styling_id or int(result_set["preview_id"]) != preview_id:
             return None
         existing_rows = db.execute(
             "SELECT * FROM generation_result_images_new WHERE result_set_id = ? ORDER BY sort_order",

@@ -16,6 +16,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+try:  # app.main 依赖 fastapi/pydantic；不可用时跳过相关用例（沙箱环境）。
+    import fastapi  # noqa: F401
+
+    HAS_MAIN_DEPS = True
+except ImportError:  # pragma: no cover
+    HAS_MAIN_DEPS = False
+
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
@@ -142,6 +149,130 @@ class MigrationAndProgressTests(TempEnvTestCase):
             progress_module.classify_generation_attempt_error(RuntimeError("local bug")),
             progress_module.ERROR_SYSTEM_ERROR,
         )
+
+
+@unittest.skipIf(not HAS_MAIN_DEPS, "app.main 依赖不可用")
+class ContinueFinalResultSetTests(TempEnvTestCase):
+    def test_failed_preview_regeneration_resumes_preview_even_with_old_active_artifacts(self) -> None:
+        main = importlib.import_module("app.main")
+        db_module = importlib.import_module("app.db")
+        timestamp = "2026-07-13T07:00:00Z"
+        conn = sqlite3.connect(os.environ["APP_DATABASE_PATH"])
+        conn.row_factory = sqlite3.Row
+        try:
+            task_id = int(conn.execute(
+                """INSERT INTO generation_tasks
+                   (name, status, active_styling_id, active_storyboard_preview_id, created_at, updated_at)
+                   VALUES ('failed preview', 'FAILED', 22, 88, ?, ?)""",
+                (timestamp, timestamp),
+            ).lastrowid)
+            preview_id = int(conn.execute(
+                """INSERT INTO generation_previews
+                   (task_id, styling_id, input_version_id, status, created_at, updated_at)
+                   VALUES (?, 22, 77, 'FAILED', ?, ?)""",
+                (task_id, timestamp, timestamp),
+            ).lastrowid)
+            conn.execute(
+                """INSERT INTO generation_attempts
+                   (owner_type, owner_id, provider, status, failed_at, created_at, updated_at)
+                   VALUES ('generation_preview', ?, 'image-2', 'FAILED', ?, ?, ?)""",
+                (preview_id, timestamp, timestamp, timestamp),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with db_module.get_db() as db:
+            resume_status = main.resume_failed_generation_task(db, task_id, timestamp)
+        self.assertEqual(resume_status, "STYLING_READY")
+        with db_module.get_db() as db:
+            task = db.execute("SELECT * FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
+        self.assertEqual(task["status"], "STYLING_READY")
+        self.assertEqual(main.next_auto_final_step(task), "preview")
+
+    def test_continue_keeps_succeeded_image_and_queues_only_incomplete_slots(self) -> None:
+        main = importlib.import_module("app.main")
+        db_module = importlib.import_module("app.db")
+        timestamp = "2026-07-13T08:00:00Z"
+        conn = sqlite3.connect(os.environ["APP_DATABASE_PATH"])
+        conn.row_factory = sqlite3.Row
+        try:
+            task_id = int(conn.execute(
+                "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES ('continue', 'FAILED', ?, ?)",
+                (timestamp, timestamp),
+            ).lastrowid)
+            result_set_id = int(conn.execute(
+                """INSERT INTO generation_result_sets
+                   (task_id, input_version_id, styling_id, preview_id, status, created_at, updated_at)
+                   VALUES (?, 77, 22, 33, 'PARTIAL', ?, ?)""",
+                (task_id, timestamp, timestamp),
+            ).lastrowid)
+            conn.execute("UPDATE generation_tasks SET active_result_set_id = ? WHERE id = ?", (result_set_id, task_id))
+            succeeded_id = int(conn.execute(
+                """INSERT INTO generation_result_images_new
+                   (result_set_id, shot_role, sort_order, status, current_asset_id, active_attempt_id, user_instruction_json, created_at, updated_at)
+                   VALUES (?, 'top_grid_1', 1, 'SUCCEEDED', 501, 101, '{\"kept\": true}', ?, ?)""",
+                (result_set_id, timestamp, timestamp),
+            ).lastrowid)
+            failed_id = int(conn.execute(
+                """INSERT INTO generation_result_images_new
+                   (result_set_id, shot_role, sort_order, status, active_attempt_id, created_at, updated_at)
+                   VALUES (?, 'top_grid_2', 2, 'FAILED', 102, ?, ?)""",
+                (result_set_id, timestamp, timestamp),
+            ).lastrowid)
+            cancelled_id = int(conn.execute(
+                """INSERT INTO generation_result_images_new
+                   (result_set_id, shot_role, sort_order, status, active_attempt_id, created_at, updated_at)
+                   VALUES (?, 'top_grid_3', 3, 'CANCELLED', 103, ?, ?)""",
+                (result_set_id, timestamp, timestamp),
+            ).lastrowid)
+            conn.commit()
+        finally:
+            conn.close()
+
+        roles = [f"top_grid_{index}" for index in range(1, 6)]
+        with mock.patch.object(main, "get_styling_plan_by_id", return_value={}):
+            with mock.patch.object(main, "final_image_slot_roles", return_value=roles):
+                queued_ids = main.continue_active_final_result_set(
+                    task_id,
+                    result_set_id,
+                    22,
+                    33,
+                    {"final_image_user_instruction": "继续未完成槽位"},
+                )
+                from fastapi import HTTPException
+
+                with self.assertRaises(HTTPException) as duplicate:
+                    main.continue_active_final_result_set(
+                        task_id,
+                        result_set_id,
+                        22,
+                        33,
+                        {"final_image_user_instruction": "重复继续"},
+                    )
+
+        self.assertIsNotNone(queued_ids)
+        self.assertEqual(duplicate.exception.status_code, 409)
+        self.assertEqual(set(queued_ids or []) & {succeeded_id}, set())
+        self.assertTrue({failed_id, cancelled_id}.issubset(set(queued_ids or [])))
+        with db_module.get_db() as db:
+            result_sets = db.execute("SELECT id, status, input_version_id FROM generation_result_sets WHERE task_id = ?", (task_id,)).fetchall()
+            images = db.execute(
+                "SELECT sort_order, status, current_asset_id, active_attempt_id, user_instruction_json, updated_at FROM generation_result_images_new WHERE result_set_id = ? ORDER BY sort_order",
+                (result_set_id,),
+            ).fetchall()
+            task = db.execute("SELECT status, active_result_set_id FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
+
+        self.assertEqual([(row["id"], row["input_version_id"]) for row in result_sets], [(result_set_id, 77)])
+        self.assertEqual(len(images), 5)
+        self.assertEqual(images[0]["status"], "SUCCEEDED")
+        self.assertEqual(images[0]["current_asset_id"], 501)
+        self.assertEqual(images[0]["active_attempt_id"], 101)
+        self.assertEqual(images[0]["user_instruction_json"], '{"kept": true}')
+        self.assertEqual(images[0]["updated_at"], timestamp)
+        self.assertEqual([row["status"] for row in images[1:]], ["QUEUED", "QUEUED", "QUEUED", "QUEUED"])
+        self.assertEqual(task["status"], "FINAL_RUNNING")
+        self.assertEqual(task["active_result_set_id"], result_set_id)
 
 
 class UploadCacheTests(TempEnvTestCase):
@@ -292,14 +423,6 @@ class ProviderSubmitContractTests(TempEnvTestCase):
                     result = asyncio.run(provider.submit({"prompt": "p", "imageInputs": []}, "k/out.png"))
         self.assertNotIn("outputPath", result)
         self.assertEqual(result["providerRequestId"], "req_1")
-
-
-try:  # app.main 依赖 fastapi/pydantic；不可用时跳过相关用例（沙箱环境）。
-    import fastapi  # noqa: F401
-
-    HAS_MAIN_DEPS = True
-except ImportError:  # pragma: no cover
-    HAS_MAIN_DEPS = False
 
 
 @unittest.skipIf(not HAS_MAIN_DEPS, "app.main 依赖不可用")
