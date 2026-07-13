@@ -15,6 +15,7 @@
 | `01_generation_flow/CLAUDE.md` | 生成主流程、Image-2 输入策略、生成要素职责拆分 | 设计生成链路、任务包、prompt 策略时 |
 | `01_generation_flow/shoot_script_workflow.md` | 当前四步工作流：三类固定分镜 Prompt、成片槽位、状态机和失效规则 | 设计或实现分镜预览、成片重生和状态恢复时 |
 | `01_generation_flow/storyboard_preview_business_intent.md` | 分镜预览原始业务意图：时尚高级姿态、按品类六镜头、镜头 5 中央 2:3 安全裁切和业务验收 | 设计或评审分镜 Prompt、姿态、图位和裁切策略时 |
+| `01_generation_flow/final_image_business_intent.md` | 生成成片原始业务意图：前 5 格逐格兑现、事实源边界、组图一致性和业务验收 | 设计、研究或评审成片 Prompt、参考图策略和成片质量时 |
 | `01_generation_flow/storyboard_prompt_research_task_1440.md` | 任务 1440 分镜 Prompt 调研：方法、逐轮结果、有效/无效写法和最终 Prompt | 复盘分镜 Prompt 实验或决定后续生成手段时 |
 | `01_generation_flow/storyboard_workflow_simplification_proposal.md` | 删除拍摄剧本步骤、三类固定分镜 Prompt、代码注入动态事实、直接生图的简化方案 | 评审或实施分镜/成片工作流简化时 |
 | `01_generation_flow/brand_style_retrieval_workflow.md` | Lily 品牌风格证据、全量标签直投、Prompt 选搭质量、穿法质量信号和受控配饰 | 设计搭配库选搭、品牌风格证据、穿法/配饰边界时 |
@@ -33,6 +34,7 @@
 - **Image-2 输入策略源头**：`01_generation_flow/image2_input_strategy.md`
 - **生成职责拆分源头**：`01_generation_flow/generation_responsibility_matrix.md`
 - **分镜预览业务意图源头**：`01_generation_flow/storyboard_preview_business_intent.md`
+- **生成成片业务意图源头**：`01_generation_flow/final_image_business_intent.md`
 - **素材/标签/媒体源头**：`02_brand_and_assets/assets_and_parameters.md`
 - **品类图位规则**：`02_brand_and_assets/category_shot_rules.md`
 - **品牌调性参考**：`02_brand_and_assets/brand_style_templates.md`
