@@ -675,6 +675,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
     <section className="page studio-page">
       <PageTitle
         title="AI 摄影棚"
+        subtitle="上传主推款，让系统完成智能选搭、分镜预览并生成电商棚拍成片。"
         actions={task ? (
           <div className="studio-title-actions">
             <button className="secondary" onClick={startNewTask}><ImagePlus size={16} />新建拍摄任务</button>
@@ -706,10 +707,11 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
               <>
                 <div className="task-summary-identity">
                   <AssetThumb asset={taskCoverAsset(task)} interactive={false} />
-                  <div><strong>{task.name}</strong><span>{studioView?.statusLabel ?? statusText(task.status)}</span><em>{studioView?.progressLabel ?? '等待开始'}</em></div>
+                  <div><strong>{task.name}</strong><span>{studioView?.statusLabel ?? statusText(task.status)}</span><em>主推款 {task.images?.length ?? 0} 张</em></div>
                 </div>
                 <div className="task-summary-progress">
                   <Meta label="当前步骤" value={studioView?.currentStageLabel ?? '上传主推款'} />
+                  <Meta label="总体进度" value={studioView?.progressLabel ?? '等待开始'} />
                   <Meta label="最终成片" value={`${task.resultSet?.images?.filter((i) => i.status === 'SUCCEEDED').length ?? 0}/5`} />
                   {!!task.styling?.selectedMaterials?.length && <Meta label="搭配服装" value={`${task.styling.selectedMaterials.length} 件`} />}
                 </div>
@@ -1344,6 +1346,7 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
+        <div className="step-copy"><h2>AI 智能选搭</h2><p>理解主推款与商品卖点，评估多套造型方向，并选择最能突出主推款的搭配方案。</p></div>
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_styling" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`AI 智能选搭 · Attempt #${operation.id}`, ['generation_styling'], operation.id) : undefined} /></div>
         ) : (
@@ -1567,6 +1570,7 @@ function diagnosisItems(value: Record<string, unknown>): string[] {
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
+        <div className="step-copy"><h2>生成分镜预览</h2><p>按主推款品类与选搭方案生成 3:2 六格分镜；前 5 格用于生成成片，第 6 格仅作备用参考。</p></div>
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_preview" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成分镜预览 · Attempt #${operation.id}`, ['generation_preview'], operation.id) : undefined} /></div>
         ) : (
@@ -1614,6 +1618,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
+        <div className="step-copy"><h2>生成成片</h2><p>并发生成分镜前 5 个镜头；可逐张检查、下载或重新生成，也可打包下载全部成片。</p></div>
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status">
             <AIOperationList operations={finalHistoryOperations} taskId={task?.id} ownerType="generation_result_image" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成成片 · Attempt #${operation.id}`, ['generation_result_image'], operation.id) : undefined} />

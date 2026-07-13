@@ -2183,11 +2183,49 @@ a.button-link { text-decoration: none; cursor: pointer; }
 .mini-list { display: grid; gap: 8px; }
 .recent-task-list {
   flex: 1 1 auto;
+  align-content: start;
   min-height: 160px;
   max-height: none;
   overflow-y: auto;
-  padding-right: 4px;
+  gap: 4px;
+  padding-right: 2px;
 }
+.recent-task-list .mini-row {
+  padding: 7px 8px;
+  border-color: transparent;
+  border-radius: 6px;
+  background: transparent;
+}
+.recent-task-list .mini-row:hover { background: #f8fafc; }
+.recent-task-list .mini-row.active {
+  border-color: #bae6fd;
+  background: #f0f9ff;
+}
+.recent-task-list .mini-row.is-archived { background: #f8fafc; opacity: .8; }
+.recent-task-list .mini-row > button:not(.mini-action) {
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 10px;
+  width: 100%;
+}
+.recent-task-list .asset-thumb {
+  width: 42px;
+  min-width: 42px;
+  border-radius: 6px;
+}
+.recent-task-list .recent-task-copy { gap: 2px; }
+.recent-task-list .recent-task-copy > strong {
+  color: #1e293b;
+  font-size: 13px;
+  line-height: 1.3;
+}
+.recent-task-list .recent-task-meta { gap: 6px; }
+.recent-task-list .recent-task-meta em,
+.recent-task-list .recent-task-meta time {
+  font-size: 12px;
+  line-height: 1.25;
+}
+.recent-task-list .recent-task-meta em { color: #0284c7; font-weight: 700; }
+.recent-task-list .recent-task-meta time { color: #94a3b8; }
 .mini-row {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) auto;
