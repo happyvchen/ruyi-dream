@@ -1570,7 +1570,7 @@ function diagnosisItems(value: Record<string, unknown>): string[] {
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><h2>生成分镜预览</h2><p>按主推款品类与选搭方案生成 3:2 六格分镜；前 5 格用于生成成片，第 6 格仅作备用参考。</p></div>
+        <div className="step-copy"><h2>生成分镜预览</h2><p>按主推款类型与选搭方案生成 3:2 六格分镜；前 5 格用于生成成片，第 6 格仅作备用参考。</p></div>
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_preview" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成分镜预览 · Attempt #${operation.id}`, ['generation_preview'], operation.id) : undefined} /></div>
         ) : (
@@ -4175,7 +4175,7 @@ function taskHasHeroImage(task: GenerationTask) {
 
 function canStartOneClickFinal(task: GenerationTask) {
   if (isTaskRunning(task) || task.autoRunTarget) return false
-  if (['CANCELLED', 'ABANDONED', 'COMPLETED'].includes(task.status)) return false
+  if (['ABANDONED', 'COMPLETED'].includes(task.status)) return false
   return taskHasHeroImage(task)
 }
 
@@ -4189,7 +4189,7 @@ function oneClickFinalLabel(task: GenerationTask) {
   if (isTaskQueuedForAutoRun(task)) return '排队中'
   if (task.autoRunTarget === 'FINAL' || isTaskRunning(task)) return '自动生成中'
   if (task.status === 'COMPLETED') return '重新一键成片'
-  if (task.status === 'FINAL_PARTIAL' || task.status === 'FAILED') return '继续一键成片'
+  if (['FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task.status)) return '继续一键成片'
   return '一键成片'
 }
 

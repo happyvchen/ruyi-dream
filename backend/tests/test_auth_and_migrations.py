@@ -226,12 +226,39 @@ class BackendCurrentFlowTests(unittest.TestCase):
     def test_storyboard_category_family_routes_supported_categories(self) -> None:
         main = importlib.import_module("app.main")
         cases = {
-            "针织上衣": "top", "外套": "top", "裤装": "bottom", "半身裙": "bottom",
+            "针织上衣": "top", "外套": "top", "西装马甲": "top", "吊带背心": "top",
+            "裤装": "bottom", "半身裙": "bottom",
             "连衣裙": "one_piece", "连体裤": "one_piece", "套装": "one_piece",
         }
         for category, expected in cases.items():
             with self.subTest(category=category):
                 self.assertEqual(main.storyboard_category_family({"hero_understanding": {"category": category}}), expected)
+
+    def test_storyboard_category_family_prefers_explicit_shot_family(self) -> None:
+        main = importlib.import_module("app.main")
+
+        self.assertEqual(
+            main.storyboard_category_family(
+                {
+                    "hero_understanding": {
+                        "category": "西装马甲",
+                        "sub_category": "suit_vest",
+                        "shot_category_family": "top",
+                    }
+                }
+            ),
+            "top",
+        )
+
+    def test_storyboard_category_family_uses_sub_category_fallback(self) -> None:
+        main = importlib.import_module("app.main")
+
+        self.assertEqual(
+            main.storyboard_category_family(
+                {"hero_understanding": {"category": "西装马甲", "sub_category": "suit_vest"}}
+            ),
+            "top",
+        )
 
     def test_ai_tagging_parser_repairs_missing_property_commas(self) -> None:
         main = importlib.import_module("app.main")
@@ -529,6 +556,110 @@ class BackendCurrentFlowTests(unittest.TestCase):
         with db_module.get_db() as db:
             row = db.execute("SELECT auto_run_target FROM generation_tasks WHERE id = 1").fetchone()
         self.assertEqual(row["auto_run_target"], "FINAL")
+
+    def test_cancelled_task_can_continue_one_click_final(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+
+        db_module.init_db()
+        timestamp = "2026-07-13T04:00:00Z"
+        with db_module.get_db() as db:
+            db.execute(
+                "INSERT INTO generation_tasks (id, name, status, created_at, updated_at) VALUES (1, 'Cancelled', 'CANCELLED', ?, ?)",
+                (timestamp, timestamp),
+            )
+
+        scheduled: list[int] = []
+        original_schedule = main.schedule_auto_run_for_task
+        main.schedule_auto_run_for_task = scheduled.append
+        client = TestClient(main.app)
+        try:
+            self.assertEqual(client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"}).status_code, 200)
+            response = client.post("/api/generation-tasks/1/auto-run-final")
+        finally:
+            client.close()
+            main.schedule_auto_run_for_task = original_schedule
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["item"]["status"], "READY_FOR_STYLING")
+        self.assertEqual(response.json()["item"]["autoRunTarget"], "FINAL")
+        self.assertEqual(scheduled, [1])
+
+    def test_batch_one_click_final_includes_cancelled_and_skips_completed(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+
+        db_module.init_db()
+        timestamp = "2026-07-13T04:00:00Z"
+        with db_module.get_db() as db:
+            db.executemany(
+                "INSERT INTO generation_tasks (id, name, batch_id, status, created_at, updated_at) VALUES (?, ?, 'batch-1', ?, ?, ?)",
+                [
+                    (1, "Cancelled", "CANCELLED", timestamp, timestamp),
+                    (2, "Pending", "READY_FOR_STYLING", timestamp, timestamp),
+                    (3, "Done", "COMPLETED", timestamp, timestamp),
+                ],
+            )
+
+        scheduled: list[int] = []
+        original_schedule = main.schedule_auto_run_for_task
+        main.schedule_auto_run_for_task = scheduled.append
+        client = TestClient(main.app)
+        try:
+            self.assertEqual(client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"}).status_code, 200)
+            response = client.post("/api/generation-batches/batch-1/auto-run-final")
+        finally:
+            client.close()
+            main.schedule_auto_run_for_task = original_schedule
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["startedTaskIds"], [1, 2])
+        items = {item["id"]: item for item in response.json()["items"]}
+        self.assertEqual(items[1]["status"], "READY_FOR_STYLING")
+        self.assertEqual(items[1]["autoRunTarget"], "FINAL")
+        self.assertIsNone(items[3]["autoRunTarget"])
+        self.assertEqual(scheduled, [1, 2])
+
+    def test_cancelled_regeneration_resumes_the_cancelled_stage_not_old_active_artifacts(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        db_module.init_db()
+        old_timestamp = "2026-07-13T03:00:00Z"
+        cancelled_at = "2026-07-13T04:00:00Z"
+        with db_module.get_db() as db:
+            db.execute(
+                "INSERT INTO generation_tasks (id, name, status, active_styling_id, active_preview_id, active_storyboard_preview_id, created_at, updated_at) VALUES (1, 'Cancelled preview', 'CANCELLED', NULL, NULL, NULL, ?, ?)",
+                (old_timestamp, cancelled_at),
+            )
+            input_version_id = int(db.execute(
+                "INSERT INTO generation_task_input_versions (task_id, version_number, name_snapshot, image_snapshot_json, created_at) VALUES (1, 1, 'Cancelled preview', '[]', ?)",
+                (old_timestamp,),
+            ).lastrowid)
+            styling_id = int(db.execute(
+                """INSERT INTO generation_stylings
+                   (task_id, input_version_id, source_material_ids_json, selected_material_ids_json,
+                    selected_material_snapshot_json, status, created_at, updated_at)
+                   VALUES (1, ?, '[]', '[]', '[]', 'SUCCEEDED', ?, ?)""",
+                (input_version_id, old_timestamp, old_timestamp),
+            ).lastrowid)
+            preview_id = int(db.execute(
+                "INSERT INTO generation_previews (task_id, styling_id, input_version_id, status, created_at, updated_at) VALUES (1, ?, ?, 'CANCELLED', ?, ?)",
+                (styling_id, input_version_id, cancelled_at, cancelled_at),
+            ).lastrowid)
+            db.execute(
+                "INSERT INTO generation_attempts (owner_type, owner_id, provider, status, cancelled_at, created_at, updated_at) VALUES ('generation_preview', ?, 'image-2', 'CANCELLED', ?, ?, ?)",
+                (preview_id, cancelled_at, cancelled_at, cancelled_at),
+            )
+            resume_status = main.resume_cancelled_generation_task(db, 1, cancelled_at)
+
+        self.assertEqual(resume_status, "STYLING_READY")
+        with db_module.get_db() as db:
+            row = db.execute("SELECT status FROM generation_tasks WHERE id = 1").fetchone()
+        self.assertEqual(row["status"], "STYLING_READY")
+        self.assertEqual(main.next_auto_final_step({"status": "STYLING_READY", "active_styling_id": 99}), "preview")
 
     def test_toapis_request_snapshot_keeps_reference_manifest_roles(self) -> None:
         image_provider = importlib.import_module("app.image_provider")

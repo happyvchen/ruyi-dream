@@ -5,7 +5,7 @@
 ```text
 上传主推款
 → AI 智能选搭 / StylingPlan
-→ Image-2 分镜预览（按品类选择固定 Prompt）
+→ Image-2 分镜预览（按拍摄图位族选择固定 Prompt）
 → Image-2 最终成片（分镜前 5 格）
 ```
 
@@ -15,7 +15,13 @@
 
 Gemini 只负责理解主推款、探索候选 outfit、判断品牌与商品成立性并输出 `StylingPlan`。选中的搭配服装必须来自搭配服装库，鞋、包和首饰只作为低存在感文字边界。
 
-`StylingPlan.hero_understanding.category` 必须提供可路由品类。后端确定性映射到 `top`、`bottom` 或 `one_piece`，不再调用大模型生成镜头描述。
+`StylingPlan.hero_understanding` 必须区分商品真实品类与拍摄图位族：
+
+- `category`：商品真实品类，例如 `西装马甲`、`半身裙`、`连衣裙`。
+- `sub_category`：规范子类，例如 `suit_vest`、`skirt`、`dress`。
+- `shot_category_family`：拍摄图位族，只允许 `top`、`bottom`、`one_piece`，直接决定分镜/成片 Prompt 路由。
+
+后端优先读取 `shot_category_family`，缺失时根据 `category`、`sub_category` 和官方品类候选做确定性 fallback 映射；不再调用大模型生成镜头描述。`西装马甲`、`马甲`、`vest` 等归入 `top`。
 
 ## 3. 分镜预览
 

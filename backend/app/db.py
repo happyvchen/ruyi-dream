@@ -15,7 +15,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
-# 代码只登记槽位、品类路由和动态事实占位，真正的黄金 Prompt 由页面维护。
+# 代码只登记槽位、拍摄图位族路由和动态事实占位，真正的黄金 Prompt 由页面维护。
 PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
     ("segment.brand_info", "segment", "品牌信息", "品牌信息分段 Prompt，可被组装 Prompt 引用。", 10),
     ("assembly.ai_tagging", "assembly", "AI 打标", "搭配服装入库后的图片理解和标签识别 Prompt。", 100),

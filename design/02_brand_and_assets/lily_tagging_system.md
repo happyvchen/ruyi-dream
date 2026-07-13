@@ -186,7 +186,7 @@ DELETED
 ```json
 {
   "category": "top | bottom | dress | jumpsuit | outerwear | knitwear | suit_set | other_garment | unsupported_accessory | unknown",
-  "sub_category": "shirt | blouse | t_shirt | vest | camisole | cardigan | blazer | jacket | trench | coat | down_jacket | trousers | jeans | shorts | skirt | dress | other",
+  "sub_category": "shirt | blouse | t_shirt | vest | suit_vest | camisole | cardigan | blazer | jacket | trench | coat | down_jacket | trousers | jeans | shorts | skirt | dress | other",
   "official_category_candidates": ["string"],
   "is_set": false
 }
@@ -197,6 +197,7 @@ DELETED
 - `category` 是系统稳定大类。
 - `sub_category` 是规范子类。
 - `official_category_candidates` 保存天猫/标题原始分类，例如 `衬衫/雪纺衫`、`经典小黑裤系列`。
+- 主推款进入 AI 选搭后，还必须在 `StylingPlan.hero_understanding` 输出 `shot_category_family`，只允许 `top | bottom | one_piece`，用于分镜/成片 Prompt 路由；例如 `西装马甲` 的 `sub_category` 可为 `suit_vest`，`shot_category_family` 应为 `top`。
 
 ### 5.2 颜色
 

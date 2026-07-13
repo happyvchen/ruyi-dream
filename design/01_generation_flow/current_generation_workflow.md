@@ -5,27 +5,27 @@
 ```text
 上传主推款
 → AI 智能选搭（Gemini，输出 StylingPlan）
-→ 分镜预览（Image-2，按主推款品类选择固定 Prompt）
+→ 分镜预览（Image-2，按拍摄图位族选择固定 Prompt）
 → 最终成片（Image-2，并发生成分镜前 5 格）
 ```
 
-0.1.0 当前主流程不再生成动态拍摄剧本，也不存在 `ShootScript` / `ShotPlan` 运行 artifact。分镜与成片的稳定规则集中维护在 Prompt 维护页；代码只负责品类路由、参考图顺序、当前镜头标记、商品信息、选中造型摘要和用户补充要求等动态事实。
+0.1.0 当前主流程不再生成动态拍摄剧本，也不存在 `ShootScript` / `ShotPlan` 运行 artifact。分镜与成片的稳定规则集中维护在 Prompt 维护页；代码只负责拍摄图位族路由、参考图顺序、当前镜头标记、商品信息、选中造型摘要和用户补充要求等动态事实。
 
 ## Prompt 槽位
 
-分镜预览按主推款品类族选择三类固定 Prompt：
+分镜预览按 `StylingPlan.hero_understanding.shot_category_family` 选择三类固定 Prompt；该字段缺失时，后端根据商品 `category` / `sub_category` / 官方品类候选做确定性 fallback。商品品类不等于拍摄图位族，例如 `西装马甲` 的商品品类仍是西装马甲，但拍摄图位族是 `top`。
 
 | 品类族 | Prompt 维护键 |
 |---|---|
-| 上装、针织、外套 | `assembly.storyboard_preview_top` |
+| 上装、针织、外套、马甲、西装马甲 | `assembly.storyboard_preview_top` |
 | 裤装、半身裙 | `assembly.storyboard_preview_bottom` |
 | 连衣裙、连体、套装 | `assembly.storyboard_preview_one_piece` |
 
-最终成片按相同品类族选择三类固定 Prompt：
+最终成片按相同拍摄图位族选择三类固定 Prompt：
 
 | 品类族 | Prompt 维护键 |
 |---|---|
-| 上装、针织、外套 | `assembly.final_image_top` |
+| 上装、针织、外套、马甲、西装马甲 | `assembly.final_image_top` |
 | 裤装、半身裙 | `assembly.final_image_bottom` |
 | 连衣裙、连体、套装 | `assembly.final_image_one_piece` |
 

@@ -16,10 +16,12 @@
 - `POST /api/generation-tasks/from-uploads`：基于已上传对象创建任务。
 - `PATCH /api/generation-tasks/{task_id}`：保存任务名、商品信息和各阶段用户补充要求草稿。
 - `POST /api/generation-tasks/{task_id}/styling`：运行 AI 智能选搭，输出当前 `StylingPlan`。
-- `POST /api/generation-tasks/{task_id}/preview`：按主推款品类选择三类固定分镜 Prompt，调用 Image-2 生成 3:2 六格分镜预览。
+- `POST /api/generation-tasks/{task_id}/preview`：按拍摄图位族选择三类固定分镜 Prompt，调用 Image-2 生成 3:2 六格分镜预览。
 - `POST /api/generation-tasks/{task_id}/generate-final`：按分镜前 5 格并发生成最终成片。
 - `POST /api/generation-tasks/{task_id}/auto-run-final`：从当前第一个未完成阶段自动推进到成片。
 - `POST /api/generation-tasks/{task_id}/cancel`：取消当前运行中的选搭、分镜或成片。
+
+`CANCELLED` 是可恢复的中断态，不是归档或终止态。再次调用单任务 `auto-run-final` 或批次 `auto-run-final` 时，应把任务恢复到最近被取消的阶段并继续；已成功的阶段和成片槽位保持不变。
 
 ## 状态
 

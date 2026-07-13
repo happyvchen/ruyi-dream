@@ -220,7 +220,7 @@ provider 成功后，系统下载返回文件并原样写入对象存储；随�
 按优先级建议：
 
 1. 将 `storyboard_preview_business_intent.md` 的品类六镜头矩阵写入三类固定分镜 Prompt。
-2. 后端根据 `StylingPlan.hero_understanding.category` 确定性路由品类族。
+2. 后端根据 `StylingPlan.hero_understanding.shot_category_family` 确定性路由拍摄图位族；缺失时再由 `category` / `sub_category` fallback。
 3. 动态注入商品事实、参考图编号、选中造型摘要和用户补充要求。
 4. 不增加自动质检、自动切格或自动重试默认链路；由用户人工确认分镜质量。
 

@@ -45,7 +45,7 @@ ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 �
 - 管理 AI 摄影棚主推款任务、输入版本和状态机
 - 对未归档 READY 搭配服装生成全量标签事实卡；Prompt 只接收业务 `code` 和 `ai_tags` 等必要事实，不接收内部 ID、图片快照或后端排序/评分结果
 - 调用 AI Stylist 生成带 Aesthetic Critic 诊断的 `StylingPlan`，保存完整 request/response 快照
-- 基于 `StylingPlan.hero_understanding.category` 确定性选择三类分镜 Prompt，并组装 Image-2 任务包
+- 基于 `StylingPlan.hero_understanding.shot_category_family` 确定性选择三类分镜 Prompt；缺失时由商品品类/子类 fallback，并组装 Image-2 任务包
 - 管理生成任务状态、单张重试、结果下载和记录复盘
 - 保存实验/生产结果、紧凑候选快照、完整 StylingPlan 和 provider attempts 元数据
 

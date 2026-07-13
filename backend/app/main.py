@@ -1956,6 +1956,79 @@ def reset_generation_task_for_rerun(db: Any, task_id: int, timestamp: str) -> No
     log_event(db, "generation_task", task_id, "restarted", {"reason": "rerun_from_scratch"})
 
 
+def cancelled_generation_resume_status(db: Any, task_id: int) -> str:
+    """Map the most recently cancelled generation attempt back to its resumable task state.
+
+    Active pointers deliberately keep the last successful artifacts until a replacement succeeds,
+    so they cannot identify which in-flight regeneration the user cancelled.
+    """
+    attempt = db.execute(
+        """
+        SELECT owner_type
+        FROM generation_attempts
+        WHERE status = 'CANCELLED'
+          AND (
+            (owner_type = 'generation_styling' AND owner_id = ?)
+            OR (owner_type = 'generation_preview' AND owner_id IN (
+              SELECT id FROM generation_previews WHERE task_id = ?
+            ))
+            OR (owner_type = 'generation_result_image' AND owner_id IN (
+              SELECT gri.id
+              FROM generation_result_images_new gri
+              JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+              WHERE grs.task_id = ?
+            ))
+          )
+        ORDER BY COALESCE(cancelled_at, updated_at, created_at) DESC, id DESC
+        LIMIT 1
+        """,
+        (task_id, task_id, task_id),
+    ).fetchone()
+    owner_type = attempt["owner_type"] if attempt else None
+    if owner_type == "generation_result_image":
+        return "PREVIEW_READY"
+    if owner_type == "generation_preview":
+        return "STYLING_READY"
+    if owner_type == "generation_styling":
+        return "READY_FOR_STYLING"
+
+    # A queued preview/final-image operation may be cancelled before its attempt is created.
+    # Compare both artifact types by time instead of letting an older final cancellation win.
+    cancelled_artifact = db.execute(
+        """
+        SELECT stage
+        FROM (
+          SELECT 'final' AS stage, gri.updated_at AS cancelled_at, gri.id AS artifact_id
+          FROM generation_result_images_new gri
+          JOIN generation_result_sets grs ON grs.id = gri.result_set_id
+          WHERE grs.task_id = ? AND gri.status = 'CANCELLED'
+          UNION ALL
+          SELECT 'preview' AS stage, gp.updated_at AS cancelled_at, gp.id AS artifact_id
+          FROM generation_previews gp
+          WHERE gp.task_id = ? AND gp.status = 'CANCELLED'
+        ) cancelled_artifacts
+        ORDER BY cancelled_at DESC, artifact_id DESC
+        LIMIT 1
+        """,
+        (task_id, task_id),
+    ).fetchone()
+    if cancelled_artifact and cancelled_artifact["stage"] == "final":
+        return "PREVIEW_READY"
+    if cancelled_artifact and cancelled_artifact["stage"] == "preview":
+        return "STYLING_READY"
+    return "READY_FOR_STYLING"
+
+
+def resume_cancelled_generation_task(db: Any, task_id: int, timestamp: str) -> str:
+    resume_status = cancelled_generation_resume_status(db, task_id)
+    db.execute(
+        "UPDATE generation_tasks SET status = ?, updated_at = ? WHERE id = ? AND status = 'CANCELLED'",
+        (resume_status, timestamp, task_id),
+    )
+    log_event(db, "generation_task", task_id, "resumed", {"resumeStatus": resume_status})
+    return resume_status
+
+
 def generation_task_stage_instruction_column(stage: str) -> str | None:
     return {
         "ai_styling": "ai_styling_user_instruction_text",
@@ -2628,8 +2701,8 @@ async def auto_run_final_images(task_id: int, request: Request, payload: AutoRun
     task = get_generation_task_row(task_id)
     if task["status"] in RUNNING_GENERATION_TASK_STATUSES:
         raise HTTPException(status_code=409, detail="当前任务正在生成中，请先取消或等待完成")
-    if task["status"] in {"CANCELLED", "ABANDONED"}:
-        raise HTTPException(status_code=409, detail="当前任务已取消，不能一键成片")
+    if task["status"] == "ABANDONED":
+        raise HTTPException(status_code=409, detail="当前任务已归档，不能一键成片")
     restart = bool(payload and payload.restart)
     if restart and task["status"] != "COMPLETED":
         raise HTTPException(status_code=409, detail="仅已完成的任务可以重新一键成片")
@@ -2637,6 +2710,8 @@ async def auto_run_final_images(task_id: int, request: Request, payload: AutoRun
     with get_db() as db:
         if restart:
             reset_generation_task_for_rerun(db, task_id, timestamp)
+        elif task["status"] == "CANCELLED":
+            resume_cancelled_generation_task(db, task_id, timestamp)
         db.execute(
             """
             UPDATE generation_tasks
@@ -2692,10 +2767,12 @@ async def auto_run_generation_batch(batch_id: str) -> dict[str, Any]:
         for row in rows:
             if row["status"] in RUNNING_GENERATION_TASK_STATUSES:
                 continue
-            if row["status"] in {"CANCELLED", "ABANDONED", "COMPLETED"}:
+            if row["status"] in {"ABANDONED", "COMPLETED"}:
                 continue
             if row_value(row, "auto_run_target") == AUTO_RUN_TARGET_FINAL:
                 continue
+            if row["status"] == "CANCELLED":
+                resume_cancelled_generation_task(db, int(row["id"]), timestamp)
             db.execute(
                 """
                 UPDATE generation_tasks
@@ -5505,6 +5582,8 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
         "hero_understanding": {
             "hero_visual_summary": str(hero.get("hero_visual_summary") or source.get("hero_visual_summary") or "主推款图片已作为商品事实源。")[:120],
             "category": str(hero.get("category") or "")[:80],
+            "sub_category": str(hero.get("sub_category") or hero.get("subcategory") or "")[:80],
+            "shot_category_family": resolve_storyboard_category_family(hero, strict=False) or "",
             "shot_requirements": ensure_string_list(hero.get("shot_requirements"))[:8],
             "hero_selling_points": ensure_string_list(hero.get("hero_selling_points"))[:8],
             "hero_visibility_risks": ensure_string_list(hero.get("hero_visibility_risks"))[:8],
@@ -6162,16 +6241,78 @@ def build_category_shot_template(hero_category: str) -> list[tuple[str, str, str
 
 def storyboard_category_family(styling_plan: dict[str, Any]) -> str:
     hero = styling_plan.get("hero_understanding") if isinstance(styling_plan.get("hero_understanding"), dict) else {}
-    category = str(hero.get("category") or "").strip().lower()
-    if not category:
-        raise RuntimeError("AI 选搭结果缺少主推款品类，无法选择分镜 Prompt")
-    if any(token in category for token in ("连衣", "连体", "套装", "dress", "jumpsuit", "one_piece", "one-piece", "suit")):
+    return resolve_storyboard_category_family(hero, strict=True) or ""
+
+
+def resolve_storyboard_category_family(hero: dict[str, Any], strict: bool = True) -> str | None:
+    explicit = normalize_shot_category_family(hero.get("shot_category_family") or hero.get("category_family"))
+    if explicit:
+        return explicit
+
+    category_terms = category_route_terms(hero)
+    if not category_terms:
+        if strict:
+            raise RuntimeError("AI 选搭结果缺少主推款品类，无法选择分镜 Prompt")
+        return None
+
+    category_text = " ".join(category_terms).strip().lower()
+    if any(token in category_text for token in ("连衣", "连体", "套装", "dress", "jumpsuit", "one_piece", "one-piece", "suit_set", "set suit")):
         return "one_piece"
-    if any(token in category for token in ("裤", "半身裙", "半裙", "裙装", "bottom", "pants", "trousers", "skirt", "shorts")):
+    if any(token in category_text for token in ("裤", "半身裙", "半裙", "裙装", "bottom", "pants", "trousers", "skirt", "shorts")):
         return "bottom"
-    if any(token in category for token in ("上装", "上衣", "针织", "外套", "衬衫", "t恤", "top", "shirt", "blouse", "knit", "jacket", "coat")):
+    if any(token in category_text for token in ("上装", "上衣", "针织", "外套", "衬衫", "t恤", "t-shirt", "马甲", "背心", "吊带", "top", "shirt", "blouse", "knit", "jacket", "coat", "vest", "camisole")):
         return "top"
-    raise RuntimeError(f"暂不支持主推款品类：{hero.get('category')}")
+    if strict:
+        raise RuntimeError(f"暂不支持主推款品类：{hero.get('category')}")
+    return None
+
+
+def normalize_shot_category_family(value: Any) -> str | None:
+    text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not text:
+        return None
+    aliases = {
+        "top": "top",
+        "tops": "top",
+        "upper": "top",
+        "upper_body": "top",
+        "上装": "top",
+        "上衣": "top",
+        "外套": "top",
+        "针织": "top",
+        "bottom": "bottom",
+        "bottoms": "bottom",
+        "lower": "bottom",
+        "lower_body": "bottom",
+        "下装": "bottom",
+        "裤装": "bottom",
+        "半身裙": "bottom",
+        "one_piece": "one_piece",
+        "onepiece": "one_piece",
+        "dress": "one_piece",
+        "jumpsuit": "one_piece",
+        "set": "one_piece",
+        "suit_set": "one_piece",
+        "连衣裙": "one_piece",
+        "连体": "one_piece",
+        "套装": "one_piece",
+    }
+    return aliases.get(text)
+
+
+def category_route_terms(hero: dict[str, Any]) -> list[str]:
+    terms: list[str] = []
+    for key in ("category", "sub_category", "subcategory"):
+        value = hero.get(key)
+        if value:
+            terms.append(str(value))
+    for key in ("official_category_candidates", "official_category_terms", "category_candidates"):
+        value = hero.get(key)
+        if isinstance(value, list):
+            terms.extend(str(item) for item in value if item)
+        elif value:
+            terms.append(str(value))
+    return terms
 
 
 def storyboard_prompt_config_key(styling_plan: dict[str, Any]) -> str:
@@ -6782,7 +6923,7 @@ def sample_prompt_runtime() -> dict[str, Any]:
         # AI 打标 / AI 选搭
         "styling_garment": dumps({"code": "LOOK-A", "image_count": 3, "image_roles": ["primary", "reference", "reference"]}),
         "candidate_retrieval": dumps([{"code": "LOOK-A", "ai_tags": {"一级品类": ["上装"], "色彩": ["白色"], "版型": ["合体"], "风格语义": "轻量上装服务主推裤装。"}}]),
-        "styling_result": dumps({"hero_understanding": {"category": "裤装"}, "selected_material_codes": ["LOOK-A"], "reason_summary": "轻量上装服务主推裤装。"}),
+        "styling_result": dumps({"hero_understanding": {"category": "裤装", "sub_category": "trousers", "shot_category_family": "bottom"}, "selected_material_codes": ["LOOK-A"], "reason_summary": "轻量上装服务主推裤装。"}),
         # 商品信息 / 各阶段用户要求（已渲染为一句话）
         "hero_product_info": "夏季主推裤装，重点展示腰头和裤脚。",
         "user_requirement": "重点展示腰线，避免厚重外套。",
@@ -6822,7 +6963,7 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.storyboard_preview_user_instruction", "scope": "runtime", "description": "分镜预览本次执行的用户介入要求"},
         {"name": "runtime.final_image_user_instruction", "scope": "runtime", "description": "最终成片或单张重生本次执行的用户介入要求"},
         {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭导演上下文，使用搭配服装 code 标识"},
-        {"name": "runtime.category_family", "scope": "runtime", "description": "代码判定的分镜品类族：top / bottom / one_piece"},
+        {"name": "runtime.category_family", "scope": "runtime", "description": "代码判定的拍摄图位族：top / bottom / one_piece"},
         {"name": "runtime.styling_outfit", "scope": "runtime", "description": "选中搭配服装与穿着关系的自然语言摘要"},
         {"name": "runtime.resolved_accessories", "scope": "runtime", "description": "低存在感生成配饰边界的自然语言摘要"},
         # 成片：当前镜头各分段
@@ -6865,7 +7006,7 @@ def schedule_auto_run_for_task(task_id: int) -> None:
 
 
 AUTO_RUN_JOB_KEY_PREFIX = "generation_auto_run:"
-AUTO_RUN_TERMINAL_TASK_STATUSES = {"CANCELLED", "ABANDONED"}
+AUTO_RUN_TERMINAL_TASK_STATUSES = {"ABANDONED"}
 
 
 def auto_run_active_task_ids() -> set[int]:
@@ -6900,7 +7041,7 @@ def pump_auto_run_queue() -> None:
             SELECT id FROM generation_tasks
             WHERE deleted_at IS NULL
               AND auto_run_target = ?
-              AND status NOT IN ('STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'CANCELLED', 'ABANDONED')
+              AND status NOT IN ('STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'ABANDONED')
             ORDER BY COALESCE(auto_run_requested_at, updated_at), id
             """,
             (AUTO_RUN_TARGET_FINAL,),
@@ -6923,7 +7064,7 @@ def auto_run_queue_position(task_id: int, requested_at: str | None) -> int | Non
             SELECT COUNT(*) AS ahead FROM generation_tasks
             WHERE deleted_at IS NULL
               AND auto_run_target = ?
-              AND status NOT IN ('STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'CANCELLED', 'ABANDONED')
+              AND status NOT IN ('STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'ABANDONED')
               AND id != ?
               AND (
                 COALESCE(auto_run_requested_at, updated_at) < COALESCE(?, '')
@@ -6959,7 +7100,7 @@ async def run_auto_final_generation(task_id: int) -> None:
                 return
             if task["status"] in RUNNING_GENERATION_TASK_STATUSES:
                 return
-            if task["status"] in {"CANCELLED", "ABANDONED"}:
+            if task["status"] == "ABANDONED":
                 clear_task_auto_run(task_id)
                 return
             step = next_auto_final_step(task)
@@ -6990,6 +7131,14 @@ async def run_auto_final_generation(task_id: int) -> None:
 def next_auto_final_step(task: Any) -> str:
     if task["status"] == "DRAFT":
         return "ready"
+    if task["status"] == "READY_FOR_STYLING":
+        return "styling"
+    if task["status"] == "STYLING_READY":
+        return "preview"
+    if task["status"] in {"PREVIEW_READY", "FINAL_PARTIAL"}:
+        return "final"
+    if task["status"] == "COMPLETED":
+        return "complete"
     if not task["active_styling_id"]:
         return "styling"
     preview_id = row_value(task, "active_storyboard_preview_id") or row_value(task, "active_preview_id")

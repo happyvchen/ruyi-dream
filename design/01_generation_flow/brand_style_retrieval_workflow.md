@@ -14,7 +14,7 @@
 0.1.0 方案采用：
 
 ```text
-主推款图片 + Lily 官方样本证据 + 全量标签事实 + Prompt 业务规则 -> AI Stylist / Aesthetic Critic -> StylingPlan -> 按主推品类路由固定分镜/成片 Prompt
+主推款图片 + Lily 官方样本证据 + 全量标签事实 + Prompt 业务规则 -> AI Stylist / Aesthetic Critic -> StylingPlan -> 按拍摄图位族路由固定分镜/成片 Prompt
 ```
 
 ## 2. 核心原则
@@ -69,7 +69,7 @@ Lily 参考样本必须来自可验证渠道：
 - 视觉气质：轻盈、挺括、柔软、通勤、春夏、秋冬、强设计等。
 - 图位需求：该品类必须覆盖哪些景别、取景范围和角度。
 
-主推款理解结果必须进入 `StylingPlan`，并通过品类路由影响固定分镜/成片 Prompt，不能只存在于 Gemini 临场文字里。
+主推款理解结果必须进入 `StylingPlan`，并通过拍摄图位族路由影响固定分镜/成片 Prompt，不能只存在于 Gemini 临场文字里。
 
 硬验收：
 
