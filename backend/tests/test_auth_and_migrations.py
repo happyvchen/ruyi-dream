@@ -722,6 +722,18 @@ class BackendCurrentFlowTests(unittest.TestCase):
             "model-profiles/Face-01/left45-1.png",
         ])
 
+    def test_seed_default_model_does_not_hardcode_head_reference_files(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        db_module.init_db()
+
+        with db_module.get_db() as db:
+            row = db.execute("SELECT profile_json FROM model_profiles WHERE model_id = 'Face-01'").fetchone()
+        profile = main.loads(row["profile_json"], {})
+
+        self.assertEqual(profile["headReferences"], {})
+        self.assertEqual(profile["headReferenceOrder"], [])
+
     def test_explicit_model_snapshot_missing_profile_does_not_fall_back_to_default_model(self) -> None:
         db_module = importlib.import_module("app.db")
         main = importlib.import_module("app.main")

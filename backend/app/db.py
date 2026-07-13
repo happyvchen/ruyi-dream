@@ -732,12 +732,8 @@ def seed_default_model(db: sqlite3.Connection) -> None:
         "waist": "59cm",
         "hips": "89cm",
         "notes": "都市、通勤、轻熟、自然、克制；短棕色 bob，轻薄刘海",
-        "headReferences": {
-            "front": "front-1.png",
-            "left45": "left45-1.png",
-            "back": "back-1.png",
-        },
-        "headReferenceOrder": ["front", "left45", "back"],
+        "headReferences": {},
+        "headReferenceOrder": [],
         "forbidden": [
             "不改变发型长度",
             "不改变刘海形态",
