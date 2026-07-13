@@ -1,0 +1,196 @@
+{
+  "provider": "toapis",
+  "model": "gpt-image-2",
+  "submissionMode": "completed",
+  "status": "SUCCEEDED",
+  "providerStatus": "completed",
+  "providerRequestId": "tsk_img_01KXCRVB80YFPBG4TPMNTSWW8M",
+  "providerUrls": {
+    "statusUrl": "https://toapis.com/v1/images/generations/tsk_img_01KXCRVB80YFPBG4TPMNTSWW8M"
+  },
+  "imageInputs": [
+    {
+      "role": "model_identity",
+      "objectKey": "model-profiles/Face-01/front.png",
+      "filename": "front.png",
+      "angle": "front",
+      "sourceObjectKey": "model-profiles/Face-01/front.png",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783910699_98c2bed6.png"
+    },
+    {
+      "role": "model_identity",
+      "objectKey": "model-profiles/Face-01/left45.png",
+      "filename": "left45.png",
+      "angle": "left45",
+      "sourceObjectKey": "model-profiles/Face-01/left45.png",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783910703_6c8b0088.png"
+    },
+    {
+      "role": "preview_grid",
+      "assetId": 1559,
+      "objectKey": "research/task-1457/p07-single-cell-shot4-preview.png",
+      "filename": "input-cell-4.png",
+      "url": "/api/media?key=generation-tasks%2F1457%2Fpreview%2Fpreview-9.png&variant=original",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783913883_bd57176f.png",
+      "sourceObjectKey": "research/task-1457/p07-single-cell-shot4-preview.png"
+    },
+    {
+      "role": "hero_garment",
+      "assetId": 1553,
+      "objectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/001-001-126209V7906716_3d_00.jpg",
+      "filename": "001-126209V7906716_3d_00.jpg",
+      "url": "/api/media?key=direct-uploads%2Fgeneration-task%2F20260713101402-3af6be8a%2F001-001-126209V7906716_3d_00.jpg&variant=original",
+      "sourceObjectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/_derived/normalized/001-001-126209V7906716_3d_00.jpg",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783910704_179e63fa.jpg"
+    },
+    {
+      "role": "hero_garment",
+      "assetId": 1554,
+      "objectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/002-002-126209V7906716_3d_01.jpg",
+      "filename": "002-126209V7906716_3d_01.jpg",
+      "url": "/api/media?key=direct-uploads%2Fgeneration-task%2F20260713101402-3af6be8a%2F002-002-126209V7906716_3d_01.jpg&variant=original",
+      "sourceObjectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/_derived/normalized/002-002-126209V7906716_3d_01.jpg",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783910707_ce4907c8.jpg"
+    },
+    {
+      "role": "hero_garment",
+      "assetId": 1555,
+      "objectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/003-008-yf-1.jpg",
+      "filename": "008-yf-1.jpg",
+      "url": "/api/media?key=direct-uploads%2Fgeneration-task%2F20260713101402-3af6be8a%2F003-008-yf-1.jpg&variant=original",
+      "sourceObjectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/_derived/normalized/003-008-yf-1.jpg",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783910709_e00b7c78.jpg"
+    },
+    {
+      "role": "shoot_environment",
+      "objectKey": "shoot-environment/31543839/001-bg.png",
+      "filename": "001-bg.png",
+      "sourceObjectKey": "shoot-environment/31543839/_derived/normalized/001-bg.jpg",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783910711_bd32eb8f.jpg"
+    }
+  ],
+  "providerRequest": {
+    "model": "gpt-image-2",
+    "prompt": "生成一张 1:1 方形高端女装电商棚拍成片，只输出单张图片，不要拼图、文字、编号、水印或边框。\n\n参考图职责：图1-2只决定同一位成年女模特的身份、脸型、五官、短发轮廓、刘海、肤色和身体比例；图3是已确认分镜第4格的独立单格图，只决定景别、裁切、侧正角度、人物大小与位置、轻走动姿势、手位，以及背景元素的位置、比例和光影导演关系；图4-6只决定棕色连衣裙的真实颜色、长度、版型、材质、腰侧金色环扣、抽褶和结构；图7只决定墙面与地面的颜色、材质、接缝外观和基础光线。不得互换职责。\n\n本张必须直接兑现图3，不得重新导演：约20°–30°侧正面的全身动态构图，完整显示头、手、连衣裙和双脚；保持图3中的身体朝向、迈步方向、前后脚关系、手位、低位持包、裙摆动态、人物尺度、偏左身位和右侧大面积留白。禁止转回普通正面站姿，禁止双脚并排，禁止把人物重新居中，禁止裁掉头脚或放大成中景。\n\n用图1-2恢复正确人物身份，用图4-6恢复商品级服装细节。保持同一棕色连衣裙单穿和真实裙长，浅金配饰低存在感。商品和人物身份 > 分镜镜头、姿势与构图 > 商业画质提升。",
+    "reference_images": [
+      "https://files.toapis.com/uploads/30502/1783910699_98c2bed6.png",
+      "https://files.toapis.com/uploads/30502/1783910703_6c8b0088.png",
+      "https://files.toapis.com/uploads/30502/1783913883_bd57176f.png",
+      "https://files.toapis.com/uploads/30502/1783910704_179e63fa.jpg",
+      "https://files.toapis.com/uploads/30502/1783910707_ce4907c8.jpg",
+      "https://files.toapis.com/uploads/30502/1783910709_e00b7c78.jpg",
+      "https://files.toapis.com/uploads/30502/1783910711_bd32eb8f.jpg"
+    ],
+    "reference_image_manifest": [
+      {
+        "reference_index": 1,
+        "role": "model_identity",
+        "assetId": null,
+        "objectKey": "model-profiles/Face-01/front.png",
+        "filename": "front.png",
+        "angle": "front",
+        "url": "https://files.toapis.com/uploads/30502/1783910699_98c2bed6.png"
+      },
+      {
+        "reference_index": 2,
+        "role": "model_identity",
+        "assetId": null,
+        "objectKey": "model-profiles/Face-01/left45.png",
+        "filename": "left45.png",
+        "angle": "left45",
+        "url": "https://files.toapis.com/uploads/30502/1783910703_6c8b0088.png"
+      },
+      {
+        "reference_index": 3,
+        "role": "preview_grid",
+        "assetId": 1559,
+        "objectKey": "research/task-1457/p07-single-cell-shot4-preview.png",
+        "filename": "input-cell-4.png",
+        "angle": null,
+        "url": "https://files.toapis.com/uploads/30502/1783913883_bd57176f.png"
+      },
+      {
+        "reference_index": 4,
+        "role": "hero_garment",
+        "assetId": 1553,
+        "objectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/001-001-126209V7906716_3d_00.jpg",
+        "filename": "001-126209V7906716_3d_00.jpg",
+        "angle": null,
+        "url": "https://files.toapis.com/uploads/30502/1783910704_179e63fa.jpg"
+      },
+      {
+        "reference_index": 5,
+        "role": "hero_garment",
+        "assetId": 1554,
+        "objectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/002-002-126209V7906716_3d_01.jpg",
+        "filename": "002-126209V7906716_3d_01.jpg",
+        "angle": null,
+        "url": "https://files.toapis.com/uploads/30502/1783910707_ce4907c8.jpg"
+      },
+      {
+        "reference_index": 6,
+        "role": "hero_garment",
+        "assetId": 1555,
+        "objectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/003-008-yf-1.jpg",
+        "filename": "008-yf-1.jpg",
+        "angle": null,
+        "url": "https://files.toapis.com/uploads/30502/1783910709_e00b7c78.jpg"
+      },
+      {
+        "reference_index": 7,
+        "role": "shoot_environment",
+        "assetId": null,
+        "objectKey": "shoot-environment/31543839/001-bg.png",
+        "filename": "001-bg.png",
+        "angle": null,
+        "url": "https://files.toapis.com/uploads/30502/1783910711_bd32eb8f.jpg"
+      }
+    ],
+    "n": 1,
+    "size": "1:1",
+    "resolution": "2K",
+    "response_format": "url"
+  },
+  "providerResponse": {
+    "completed_at": 1783914018,
+    "created_at": 1783913884,
+    "expires_at": 1784000418,
+    "id": "tsk_img_01KXCRVB80YFPBG4TPMNTSWW8M",
+    "model": "gpt-image-2",
+    "object": "generation.task",
+    "progress": 100,
+    "result": {
+      "data": [
+        {
+          "url": "https://files.toapis.com/images/tsk_img_01KXCRVB80YFPBG4TPMNTSWW8M/1783914015_1525791b.png"
+        }
+      ],
+      "type": "image"
+    },
+    "status": "completed"
+  },
+  "providerStatusResponse": {
+    "completed_at": 1783914018,
+    "created_at": 1783913884,
+    "expires_at": 1784000418,
+    "id": "tsk_img_01KXCRVB80YFPBG4TPMNTSWW8M",
+    "model": "gpt-image-2",
+    "object": "generation.task",
+    "progress": 100,
+    "result": {
+      "data": [
+        {
+          "url": "https://files.toapis.com/images/tsk_img_01KXCRVB80YFPBG4TPMNTSWW8M/1783914015_1525791b.png"
+        }
+      ],
+      "type": "image"
+    },
+    "status": "completed"
+  },
+  "outputPath": "research/task-1457/p07-single-cell-shot4.png",
+  "fileSize": 11200557,
+  "thumbPath": "research/task-1457/_derived/thumb/p07-single-cell-shot4.webp",
+  "previewPath": "research/task-1457/_derived/preview/p07-single-cell-shot4.webp",
+  "thumbFileSize": 2700,
+  "previewFileSize": 29978
+}

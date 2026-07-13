@@ -1,0 +1,196 @@
+{
+  "provider": "toapis",
+  "model": "gpt-image-2",
+  "submissionMode": "completed",
+  "status": "SUCCEEDED",
+  "providerStatus": "completed",
+  "providerRequestId": "tsk_img_01KXCQSAHBBB7EGCJX4T7RWEKW",
+  "providerUrls": {
+    "statusUrl": "https://toapis.com/v1/images/generations/tsk_img_01KXCQSAHBBB7EGCJX4T7RWEKW"
+  },
+  "imageInputs": [
+    {
+      "role": "model_identity",
+      "objectKey": "model-profiles/Face-01/front.png",
+      "filename": "front.png",
+      "angle": "front",
+      "sourceObjectKey": "model-profiles/Face-01/front.png",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783910699_98c2bed6.png"
+    },
+    {
+      "role": "model_identity",
+      "objectKey": "model-profiles/Face-01/left45.png",
+      "filename": "left45.png",
+      "angle": "left45",
+      "sourceObjectKey": "model-profiles/Face-01/left45.png",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783910703_6c8b0088.png"
+    },
+    {
+      "role": "preview_grid",
+      "assetId": 1559,
+      "objectKey": "generation-tasks/1457/preview/preview-9.png",
+      "filename": "preview-9.png",
+      "url": "/api/media?key=generation-tasks%2F1457%2Fpreview%2Fpreview-9.png&variant=original",
+      "sourceObjectKey": "generation-tasks/1457/preview/preview-9.png",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783910824_14b6cfdc.jpg"
+    },
+    {
+      "role": "hero_garment",
+      "assetId": 1553,
+      "objectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/001-001-126209V7906716_3d_00.jpg",
+      "filename": "001-126209V7906716_3d_00.jpg",
+      "url": "/api/media?key=direct-uploads%2Fgeneration-task%2F20260713101402-3af6be8a%2F001-001-126209V7906716_3d_00.jpg&variant=original",
+      "sourceObjectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/_derived/normalized/001-001-126209V7906716_3d_00.jpg",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783910704_179e63fa.jpg"
+    },
+    {
+      "role": "hero_garment",
+      "assetId": 1554,
+      "objectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/002-002-126209V7906716_3d_01.jpg",
+      "filename": "002-126209V7906716_3d_01.jpg",
+      "url": "/api/media?key=direct-uploads%2Fgeneration-task%2F20260713101402-3af6be8a%2F002-002-126209V7906716_3d_01.jpg&variant=original",
+      "sourceObjectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/_derived/normalized/002-002-126209V7906716_3d_01.jpg",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783910707_ce4907c8.jpg"
+    },
+    {
+      "role": "hero_garment",
+      "assetId": 1555,
+      "objectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/003-008-yf-1.jpg",
+      "filename": "008-yf-1.jpg",
+      "url": "/api/media?key=direct-uploads%2Fgeneration-task%2F20260713101402-3af6be8a%2F003-008-yf-1.jpg&variant=original",
+      "sourceObjectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/_derived/normalized/003-008-yf-1.jpg",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783910709_e00b7c78.jpg"
+    },
+    {
+      "role": "shoot_environment",
+      "objectKey": "shoot-environment/31543839/001-bg.png",
+      "filename": "001-bg.png",
+      "sourceObjectKey": "shoot-environment/31543839/_derived/normalized/001-bg.jpg",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783910711_bd32eb8f.jpg"
+    }
+  ],
+  "providerRequest": {
+    "model": "gpt-image-2",
+    "prompt": "生成一张 1:1 方形高端女装电商棚拍成片，只输出单张图片，不要拼图、文字、编号、水印或边框。\n\n参考图职责：图1-2只决定同一位成年女模特的身份、脸型、五官、短发轮廓、刘海、肤色和身体比例；图3是完整六宫格分镜，只使用第一行中间的第2格决定本张成片的景别、裁切、角度、人物大小、姿势、手位，以及背景元素的位置、比例和光影导演关系，完全忽略图3其余五格；图4-6只决定棕色连衣裙的真实颜色、长度、版型、材质、腰侧金色环扣、抽褶和结构；图7只决定墙面与地面的颜色、材质、接缝外观和基础光线。不得互换职责。\n\n本张必须直接兑现分镜第2格，不得重新导演：侧正面七分身中近景，画面上缘位于嘴唇至下巴之间，眼睛、眉毛和鼻子不得出现；画面下缘在小腿中部并低于真实裙摆，鞋和脚不得出现；保持分镜中的身体方向、双手位置、人物尺度、对应侧腰在画面中的朝向与可见性，以及背景墙地构图。腰侧金色环扣的真实结构、服装侧位和细节以图4-6恢复。禁止出现完整头脸，禁止退成全身图，禁止改成普通正面站姿。\n\n在上述镜头边界内，用图1-2恢复正确人物身份，用图4-6恢复商品级服装细节。保持同一棕色连衣裙单穿，浅金配饰低存在感。商品和人物身份 > 分镜镜头裁切与姿势 > 商业画质提升。",
+    "reference_images": [
+      "https://files.toapis.com/uploads/30502/1783910699_98c2bed6.png",
+      "https://files.toapis.com/uploads/30502/1783910703_6c8b0088.png",
+      "https://files.toapis.com/uploads/30502/1783910824_14b6cfdc.jpg",
+      "https://files.toapis.com/uploads/30502/1783910704_179e63fa.jpg",
+      "https://files.toapis.com/uploads/30502/1783910707_ce4907c8.jpg",
+      "https://files.toapis.com/uploads/30502/1783910709_e00b7c78.jpg",
+      "https://files.toapis.com/uploads/30502/1783910711_bd32eb8f.jpg"
+    ],
+    "reference_image_manifest": [
+      {
+        "reference_index": 1,
+        "role": "model_identity",
+        "assetId": null,
+        "objectKey": "model-profiles/Face-01/front.png",
+        "filename": "front.png",
+        "angle": "front",
+        "url": "https://files.toapis.com/uploads/30502/1783910699_98c2bed6.png"
+      },
+      {
+        "reference_index": 2,
+        "role": "model_identity",
+        "assetId": null,
+        "objectKey": "model-profiles/Face-01/left45.png",
+        "filename": "left45.png",
+        "angle": "left45",
+        "url": "https://files.toapis.com/uploads/30502/1783910703_6c8b0088.png"
+      },
+      {
+        "reference_index": 3,
+        "role": "preview_grid",
+        "assetId": 1559,
+        "objectKey": "generation-tasks/1457/preview/preview-9.png",
+        "filename": "preview-9.png",
+        "angle": null,
+        "url": "https://files.toapis.com/uploads/30502/1783910824_14b6cfdc.jpg"
+      },
+      {
+        "reference_index": 4,
+        "role": "hero_garment",
+        "assetId": 1553,
+        "objectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/001-001-126209V7906716_3d_00.jpg",
+        "filename": "001-126209V7906716_3d_00.jpg",
+        "angle": null,
+        "url": "https://files.toapis.com/uploads/30502/1783910704_179e63fa.jpg"
+      },
+      {
+        "reference_index": 5,
+        "role": "hero_garment",
+        "assetId": 1554,
+        "objectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/002-002-126209V7906716_3d_01.jpg",
+        "filename": "002-126209V7906716_3d_01.jpg",
+        "angle": null,
+        "url": "https://files.toapis.com/uploads/30502/1783910707_ce4907c8.jpg"
+      },
+      {
+        "reference_index": 6,
+        "role": "hero_garment",
+        "assetId": 1555,
+        "objectKey": "direct-uploads/generation-task/20260713101402-3af6be8a/003-008-yf-1.jpg",
+        "filename": "008-yf-1.jpg",
+        "angle": null,
+        "url": "https://files.toapis.com/uploads/30502/1783910709_e00b7c78.jpg"
+      },
+      {
+        "reference_index": 7,
+        "role": "shoot_environment",
+        "assetId": null,
+        "objectKey": "shoot-environment/31543839/001-bg.png",
+        "filename": "001-bg.png",
+        "angle": null,
+        "url": "https://files.toapis.com/uploads/30502/1783910711_bd32eb8f.jpg"
+      }
+    ],
+    "n": 1,
+    "size": "1:1",
+    "resolution": "2K",
+    "response_format": "url"
+  },
+  "providerResponse": {
+    "completed_at": 1783912940,
+    "created_at": 1783912770,
+    "expires_at": 1783999340,
+    "id": "tsk_img_01KXCQSAHBBB7EGCJX4T7RWEKW",
+    "model": "gpt-image-2",
+    "object": "generation.task",
+    "progress": 100,
+    "result": {
+      "data": [
+        {
+          "url": "https://files.toapis.com/images/tsk_img_01KXCQSAHBBB7EGCJX4T7RWEKW/1783912936_cc58f7a7.png"
+        }
+      ],
+      "type": "image"
+    },
+    "status": "completed"
+  },
+  "providerStatusResponse": {
+    "completed_at": 1783912940,
+    "created_at": 1783912770,
+    "expires_at": 1783999340,
+    "id": "tsk_img_01KXCQSAHBBB7EGCJX4T7RWEKW",
+    "model": "gpt-image-2",
+    "object": "generation.task",
+    "progress": 100,
+    "result": {
+      "data": [
+        {
+          "url": "https://files.toapis.com/images/tsk_img_01KXCQSAHBBB7EGCJX4T7RWEKW/1783912936_cc58f7a7.png"
+        }
+      ],
+      "type": "image"
+    },
+    "status": "completed"
+  },
+  "outputPath": "research/task-1457/p01-full-grid-shot2.png",
+  "fileSize": 11971305,
+  "thumbPath": "research/task-1457/_derived/thumb/p01-full-grid-shot2.webp",
+  "previewPath": "research/task-1457/_derived/preview/p01-full-grid-shot2.webp",
+  "thumbFileSize": 3182,
+  "previewFileSize": 44028
+}

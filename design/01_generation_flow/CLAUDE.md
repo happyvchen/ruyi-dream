@@ -12,6 +12,7 @@
 | `shoot_script_workflow.md` | 当前四步工作流、三类 Prompt 路由、失效规则和成片槽位 | 设计或实现分镜预览 / 成片时 |
 | `storyboard_preview_business_intent.md` | 分镜预览原始业务意图：时尚高级姿态、按品类六镜头、镜头 5 中央 2:3 安全裁切和业务验收 | 设计或评审分镜 Prompt、参考图和分镜质量时 |
 | `final_image_business_intent.md` | 生成成片原始业务意图：逐格兑现分镜导演意图、人物/商品事实源、五张组图与失败判定 | 设计、研究或评审成片 Prompt、参考图策略和成片质量时 |
+| `final_image_prompt_research_task_1457.md` | 任务 1457 成片 Prompt 调研：10 次 A/B 与稳定性验证、有效/无效写法和黄金链路 | 复盘或实现成片 Prompt、单格输入和三类固定成片模板时 |
 | `storyboard_prompt_research_task_1440.md` | 任务 1440 分镜 Prompt 调研：验收表、A/B 变量、逐轮 ToApis 结果和有效/无效写法 | 复盘或继续分镜 Prompt 实验时 |
 | `storyboard_workflow_simplification_proposal.md` | 删除拍摄剧本步骤、三类固定分镜 Prompt、代码注入动态事实、直接生图的简化方案 | 决定或实现分镜/成片新工作流时 |
 | `brand_style_retrieval_workflow.md` | Lily 品牌样本库、全量标签直投、Prompt 选搭质量、受控配饰和0.1.0 技术边界 | 设计或实现搭配库选搭、品牌风格证据、配饰边界时 |
