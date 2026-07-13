@@ -681,6 +681,153 @@ class BackendCurrentFlowTests(unittest.TestCase):
             [(1, "model_identity"), (2, "preview_grid")],
         )
 
+    def test_model_snapshot_missing_head_reference_falls_back_to_current_profile(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        db_module.init_db()
+        with db_module.get_db() as db:
+            db.execute(
+                """
+                UPDATE model_profiles
+                SET profile_json = ?
+                WHERE model_id = 'Face-01'
+                """,
+                (
+                    main.dumps(main.normalize_model_profile({
+                        "headReferences": {"front": "front-1.png", "left45": "left45-1.png"},
+                        "headReferenceOrder": ["front", "left45"],
+                    })),
+                ),
+            )
+
+        original_object_exists = main.object_exists
+        try:
+            main.object_exists = lambda key: str(key).endswith(("front-1.png", "left45-1.png"))
+            resolved = main.resolve_model_snapshot_image_inputs(
+                {
+                    "id": 1,
+                    "modelId": "Face-01",
+                    "imageInputs": [
+                        {"role": "model_identity", "objectKey": "model-profiles/Face-01/front.png", "filename": "front.png", "angle": "front"},
+                        {"role": "model_identity", "objectKey": "model-profiles/Face-01/left45.png", "filename": "left45.png", "angle": "left45"},
+                    ],
+                },
+                limit=2,
+            )
+        finally:
+            main.object_exists = original_object_exists
+
+        self.assertEqual([item["objectKey"] for item in resolved], [
+            "model-profiles/Face-01/front-1.png",
+            "model-profiles/Face-01/left45-1.png",
+        ])
+
+    def test_explicit_model_snapshot_missing_profile_does_not_fall_back_to_default_model(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        db_module.init_db()
+
+        original_object_exists = main.object_exists
+        try:
+            main.object_exists = lambda key: False
+            with self.assertRaisesRegex(RuntimeError, "模特参考图缺失"):
+                main.resolve_model_snapshot_image_inputs(
+                    {
+                        "id": 999,
+                        "modelId": "Deleted-Model",
+                        "imageInputs": [
+                            {"role": "model_identity", "objectKey": "model-profiles/Deleted-Model/front.png", "filename": "front.png", "angle": "front"},
+                        ],
+                    },
+                    limit=2,
+                )
+        finally:
+            main.object_exists = original_object_exists
+
+    def test_referenced_model_asset_file_is_not_removed(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        db_module.init_db()
+        timestamp = "2026-07-13T08:00:00Z"
+        old_key = "model-profiles/Face-01/front.png"
+        with db_module.get_db() as db:
+            db.execute(
+                "INSERT INTO generation_tasks (id, name, status, created_at, updated_at) VALUES (1, 'Model snapshot', 'DRAFT', ?, ?)",
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_task_input_versions
+                  (task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, created_at)
+                VALUES (1, 1, 'Model snapshot', '[]', ?, ?)
+                """,
+                (
+                    main.dumps({"imageInputs": [{"role": "model_identity", "objectKey": old_key, "filename": "front.png"}]}),
+                    timestamp,
+                ),
+            )
+
+        removed: list[list[str]] = []
+        original_cleanup = main.cleanup_objects
+        try:
+            main.cleanup_objects = lambda keys: removed.append(list(keys))
+            main.remove_model_asset_file("model-profiles/Face-01", "front.png")
+        finally:
+            main.cleanup_objects = original_cleanup
+
+        self.assertEqual(removed, [])
+
+    def test_response_snapshot_model_asset_reference_is_not_removed(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        db_module.init_db()
+        timestamp = "2026-07-13T08:10:00Z"
+        old_key = "model-profiles/Face-01/left45.png"
+        with db_module.get_db() as db:
+            db.execute(
+                """
+                INSERT INTO generation_attempts
+                  (owner_type, owner_id, provider, status, response_snapshot_json, created_at, updated_at)
+                VALUES ('generation_task', 1, 'image-2', 'SUCCEEDED', ?, ?, ?)
+                """,
+                (
+                    main.dumps({"imageInputs": [{"role": "model_identity", "objectKey": old_key}]}),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+        removed: list[list[str]] = []
+        original_cleanup = main.cleanup_objects
+        try:
+            main.cleanup_objects = lambda keys: removed.append(list(keys))
+            main.remove_model_asset_file("model-profiles/Face-01", "left45.png")
+        finally:
+            main.cleanup_objects = original_cleanup
+
+        self.assertEqual(removed, [])
+
+    def test_referenced_model_asset_dir_is_not_deleted(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        db_module.init_db()
+        timestamp = "2026-07-13T08:20:00Z"
+        with db_module.get_db() as db:
+            db.execute(
+                """
+                INSERT INTO generation_attempts
+                  (owner_type, owner_id, provider, status, request_snapshot_json, created_at, updated_at)
+                VALUES ('generation_task', 1, 'image-2', 'SUCCEEDED', ?, ?, ?)
+                """,
+                (
+                    main.dumps({"imageInputs": [{"role": "model_identity", "objectKey": "model-profiles/Face-01/front.png"}]}),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+        self.assertTrue(main.model_asset_dir_is_referenced("model-profiles/Face-01"))
+
     def test_final_schema_has_no_dynamic_shoot_script_runtime(self) -> None:
         db_module = importlib.import_module("app.db")
         db_module.init_db()

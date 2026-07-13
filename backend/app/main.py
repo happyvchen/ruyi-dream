@@ -3741,7 +3741,8 @@ def delete_model_profile(model_profile_id: int, request: Request) -> dict[str, A
                 db.execute("UPDATE model_profiles SET is_default = 1 WHERE id = ?", (fallback["id"],))
         log_event(db, "model_profile", model_profile_id, "deleted", {"modelId": row["model_id"], "assetDir": asset_dir})
 
-    delete_prefix(asset_dir)
+    if not model_asset_dir_is_referenced(asset_dir):
+        delete_prefix(asset_dir)
     return {"ok": True}
 
 
@@ -6703,9 +6704,7 @@ def build_new_image_inputs(
             (effective_input_version_id,),
         ).fetchone() if effective_input_version_id is not None else None
     model_snapshot = loads(input_version["model_snapshot_json"], {}) if input_version else {}
-    model_inputs = model_snapshot.get("imageInputs", []) if isinstance(model_snapshot, dict) else []
-    if not model_inputs:
-        model_inputs = get_default_model_image_inputs(limit=2)
+    model_inputs = resolve_model_snapshot_image_inputs(model_snapshot, limit=2)
     inputs.extend({**item, "role": "model_identity"} for item in model_inputs[:2] if isinstance(item, dict))
     if include_preview and preview_asset_id:
         asset = get_media_asset_by_id(preview_asset_id)
@@ -6790,6 +6789,10 @@ def crop_preview_grid_cell(content: bytes, cell: int) -> bytes:
 def get_default_model_image_inputs(limit: int = 2) -> list[dict[str, Any]]:
     with get_db() as db:
         row = db.execute("SELECT * FROM model_profiles ORDER BY is_default DESC, id LIMIT 1").fetchone()
+    return model_image_inputs_from_row(row, limit=limit)
+
+
+def model_image_inputs_from_row(row: Any, limit: int = 2) -> list[dict[str, Any]]:
     if not row:
         return []
     profile = loads(row["profile_json"], {})
@@ -6804,6 +6807,36 @@ def get_default_model_image_inputs(limit: int = 2) -> list[dict[str, Any]]:
         if len(inputs) >= limit:
             break
     return inputs
+
+
+def resolve_model_snapshot_image_inputs(model_snapshot: dict[str, Any] | None, limit: int = 2) -> list[dict[str, Any]]:
+    snapshot = model_snapshot if isinstance(model_snapshot, dict) else {}
+    raw_inputs = snapshot.get("imageInputs") if isinstance(snapshot.get("imageInputs"), list) else []
+    expected = [item for item in raw_inputs[:limit] if isinstance(item, dict)]
+    existing = [
+        {**item, "role": "model_identity"}
+        for item in expected
+        if item.get("objectKey") and object_exists(str(item.get("objectKey")))
+    ]
+    if expected and len(existing) == len(expected):
+        return existing[:limit]
+
+    with get_db() as db:
+        row = None
+        snapshot_id = snapshot.get("id")
+        if snapshot_id is not None:
+            row = db.execute("SELECT * FROM model_profiles WHERE id = ?", (snapshot_id,)).fetchone()
+        if row is None:
+            model_id = str(snapshot.get("modelId") or snapshot.get("model_id") or "").strip()
+            if model_id:
+                row = db.execute("SELECT * FROM model_profiles WHERE model_id = ?", (model_id,)).fetchone()
+    fallback = model_image_inputs_from_row(row, limit=limit)
+    if fallback:
+        return fallback
+    has_explicit_snapshot = bool(expected or snapshot.get("id") is not None or snapshot.get("modelId") or snapshot.get("model_id"))
+    if has_explicit_snapshot:
+        raise RuntimeError("模特参考图缺失或已被删除，请重新确认数字模特后再生成。")
+    return get_default_model_image_inputs(limit=limit)
 
 
 def snapshot_default_model() -> dict[str, Any]:
@@ -8395,6 +8428,8 @@ def payload_has_field(payload: BaseModel, field: str) -> bool:
 
 def normalize_model_profile(profile: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(profile)
+    for derived_key in ("headReferenceUrls", "headReferenceMeta", "headReferenceEntries"):
+        normalized.pop(derived_key, None)
     normalized["headReferences"] = dict(normalized.get("headReferences") or {})
     normalized["headReferenceOrder"] = normalize_head_reference_order(normalized, normalized["headReferences"])
     forbidden = normalized.get("forbidden")
@@ -8442,4 +8477,61 @@ def model_asset_url(model_profile_id: int, asset_dir: str, filename: str | None,
 def remove_model_asset_file(asset_dir: str, filename: str | None) -> None:
     if not filename:
         return
-    cleanup_objects(image_object_keys(join_key(asset_dir, sanitize_filename(filename))))
+    key = join_key(asset_dir, sanitize_filename(filename))
+    if model_asset_file_is_referenced(key):
+        return
+    cleanup_objects(image_object_keys(key))
+
+
+def model_asset_file_is_referenced(object_key: str) -> bool:
+    clean = clean_key(object_key)
+    if not clean:
+        return False
+    pattern = f"%{clean}%"
+    with get_db() as db:
+        input_version = db.execute(
+            """
+            SELECT 1 FROM generation_task_input_versions
+            WHERE model_snapshot_json LIKE ?
+            LIMIT 1
+            """,
+            (pattern,),
+        ).fetchone()
+        if input_version:
+            return True
+        attempt = db.execute(
+            """
+            SELECT 1 FROM generation_attempts
+            WHERE request_snapshot_json LIKE ? OR response_snapshot_json LIKE ?
+            LIMIT 1
+            """,
+            (pattern, pattern),
+        ).fetchone()
+    return bool(attempt)
+
+
+def model_asset_dir_is_referenced(asset_dir: str) -> bool:
+    clean = clean_key(asset_dir)
+    if not clean:
+        return False
+    pattern = f"%{clean}/%"
+    with get_db() as db:
+        input_version = db.execute(
+            """
+            SELECT 1 FROM generation_task_input_versions
+            WHERE model_snapshot_json LIKE ?
+            LIMIT 1
+            """,
+            (pattern,),
+        ).fetchone()
+        if input_version:
+            return True
+        attempt = db.execute(
+            """
+            SELECT 1 FROM generation_attempts
+            WHERE request_snapshot_json LIKE ? OR response_snapshot_json LIKE ?
+            LIMIT 1
+            """,
+            (pattern, pattern),
+        ).fetchone()
+    return bool(attempt)
