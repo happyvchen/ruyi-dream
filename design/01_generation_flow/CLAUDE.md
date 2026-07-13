@@ -10,7 +10,7 @@
 |---|---|---|
 | `generation_flow.md` | 主推款输入版本 -> AI Stylist / StylingPlan -> 三类固定 Prompt 分镜预览 -> 前 5 张最终图 | 实现或调整生成主流程时 |
 | `shoot_script_workflow.md` | 当前四步工作流、三类 Prompt 路由、失效规则和成片槽位 | 设计或实现分镜预览 / 成片时 |
-| `storyboard_preview_business_intent.md` | 分镜预览原始业务意图：时尚高级姿态、按品类六镜头、镜头 5 中央 2:3 安全裁切和业务验收 | 设计或评审 ShootScript、ShotPlan、分镜 Prompt、参考图和分镜质量时 |
+| `storyboard_preview_business_intent.md` | 分镜预览原始业务意图：时尚高级姿态、按品类六镜头、镜头 5 中央 2:3 安全裁切和业务验收 | 设计或评审分镜 Prompt、参考图和分镜质量时 |
 | `storyboard_prompt_research_task_1440.md` | 任务 1440 分镜 Prompt 调研：验收表、A/B 变量、逐轮 ToApis 结果和有效/无效写法 | 复盘或继续分镜 Prompt 实验时 |
 | `storyboard_workflow_simplification_proposal.md` | 删除拍摄剧本步骤、三类固定分镜 Prompt、代码注入动态事实、直接生图的简化方案 | 决定或实现分镜/成片新工作流时 |
 | `brand_style_retrieval_workflow.md` | Lily 品牌样本库、全量标签直投、Prompt 选搭质量、受控配饰和0.1.0 技术边界 | 设计或实现搭配库选搭、品牌风格证据、配饰边界时 |
@@ -18,7 +18,7 @@
 | `image2_input_strategy.md` | 10 图输入限制、图片角色、预览/最终 prompt 策略 | 设计任务包、prompt、图片输入优先级时 |
 | `prompt_context_strategy.md` | Prompt 上下文 DTO 策略：搭配库 AI 标签事实卡、跨阶段压缩、旧兼容注入删除 | 评估 prompt 过长、调整 runtime 占位符或生成请求快照时 |
 | `prompt_rendering_refactor.md` | Prompt 渲染层重构设计：快照模型与 prompt 视图解耦、生图阶段去 JSON 治理元数据、参考图自然语言化、迁移阶段与本地渲染对比验收 | 修正 prompt 组装偏离 spec、去除 schema_version/priority_policy 噪音、实现 renderer 层时 |
-| `generation_responsibility_matrix.md` | 商品、模特、ShootScript、ShotPlan、生成配饰、导出等要素由谁负责 | 分析生成问题归因和修复方案时 |
+| `generation_responsibility_matrix.md` | 商品、模特、StylingPlan、三类固定 Prompt、动态事实、生成配饰和导出等要素由谁负责 | 分析生成问题归因和修复方案时 |
 
 ## 本地规则 (Local Rules)
 

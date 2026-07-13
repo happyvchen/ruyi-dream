@@ -31,7 +31,7 @@ Ruyi-Dream 是面向服饰品牌视觉生产团队的 B2B AI 数字化摄影棚�
 | `design/00_product_overview/CLAUDE.md` | 产品定位、0.1.0 范围、产品需求 | 判断产品边界和功能范围时 |
 | `design/01_generation_flow/CLAUDE.md` | 生成主流程、Image-2 输入策略、职责拆分 | 设计生成链路、任务包、prompt 策略时 |
 | `design/01_generation_flow/shoot_script_workflow.md` | 当前四步工作流、三类 Prompt 路由、失效规则和成片一致性 | 设计或实现分镜预览、成片重生和状态恢复时 |
-| `design/02_brand_and_assets/CLAUDE.md` | 搭配服装、标签、媒体资产、数字模特、ShotPlan 字段 | 处理素材、标签、媒体、图位规则时 |
+| `design/02_brand_and_assets/CLAUDE.md` | 搭配服装、标签、媒体资产、数字模特与品类图位规则 | 处理素材、标签、媒体、模特和图位规则时 |
 | `design/03_ux_guide/CLAUDE.md` | 普通用户视角 UI/UX | 设计或实现前端页面时 |
 | `design/04_implementation_guide/CLAUDE.md` | 技术路线与生产实操 | 工程拆分或落地实现时 |
 | `frontend/CLAUDE.md` | 前端实现入口：架构、UI 规则、建议技术栈 | 写前端代码或初始化前端工程时 |
