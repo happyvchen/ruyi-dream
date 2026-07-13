@@ -49,4 +49,4 @@ Gemini 只负责理解主推款、探索候选 outfit、判断品牌与商品成
 
 ## 6. 第一阶段范围
 
-第一阶段只验证稳定达到原始业务意图的最短链路。明确不加入自动评分、自动验收、自动切格、基于评分的自动重试或额外后处理。Prompt 的有效规则与实验记录见 [storyboard_prompt_research_task_1440.md](storyboard_prompt_research_task_1440.md)。
+第一阶段只验证稳定达到原始业务意图的最短链路。明确不加入自动评分、自动验收、自动切格、基于评分的自动重试或额外后处理。Prompt 的有效规则与研究结论见 [storyboard_prompt_research_task_1440.md](storyboard_prompt_research_task_1440.md)。
