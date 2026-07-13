@@ -1,0 +1,171 @@
+{
+  "provider": "toapis",
+  "model": "gpt-image-2",
+  "submissionMode": "completed",
+  "status": "SUCCEEDED",
+  "providerStatus": "completed",
+  "providerRequestId": "tsk_img_01KXBB1HVDMRKDHD20YKT1Z017",
+  "providerUrls": {
+    "statusUrl": "https://toapis.com/v1/images/generations/tsk_img_01KXBB1HVDMRKDHD20YKT1Z017"
+  },
+  "imageInputs": [
+    {
+      "role": "model_identity",
+      "objectKey": "model-profiles/Face-01/front.png",
+      "filename": "front.png",
+      "angle": "front",
+      "sourceObjectKey": "model-profiles/Face-01/front.png",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783862645_6e062e07.png"
+    },
+    {
+      "role": "model_identity",
+      "objectKey": "model-profiles/Face-01/left45.png",
+      "filename": "left45.png",
+      "angle": "left45",
+      "sourceObjectKey": "model-profiles/Face-01/left45.png",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783862647_707d9bd4.png"
+    },
+    {
+      "role": "hero_garment",
+      "objectKey": "generation-tasks/20260527131539-0f835e48/001-001-77d3defcfbc143cdad4f3f0e99505a93.jpg",
+      "filename": "hero-front.jpg",
+      "sourceObjectKey": "generation-tasks/20260527131539-0f835e48/001-001-77d3defcfbc143cdad4f3f0e99505a93.jpg",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783862650_6dc9bcdb.jpg"
+    },
+    {
+      "role": "hero_garment",
+      "objectKey": "generation-tasks/20260527131539-0f835e48/002-002-96c92be1d62843b6a55ce51d84ac00d5.jpg",
+      "filename": "hero-side.jpg",
+      "sourceObjectKey": "generation-tasks/20260527131539-0f835e48/002-002-96c92be1d62843b6a55ce51d84ac00d5.jpg",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783862651_c1f48150.jpg"
+    },
+    {
+      "role": "hero_garment",
+      "objectKey": "generation-tasks/20260527131539-0f835e48/003-003-fbc6b03d230c4f54a8718cde0545398c.jpg",
+      "filename": "hero-detail.jpg",
+      "sourceObjectKey": "generation-tasks/20260527131539-0f835e48/003-003-fbc6b03d230c4f54a8718cde0545398c.jpg",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783862652_c4a70fb6.jpg"
+    },
+    {
+      "role": "shoot_environment",
+      "objectKey": "generation-tasks/1440/preview-environment/001-bg.png",
+      "filename": "environment.png",
+      "sourceObjectKey": "generation-tasks/1440/preview-environment/001-bg.png",
+      "providerUrl": "https://files.toapis.com/uploads/30502/1783862666_8d5330c2.png"
+    }
+  ],
+  "providerRequest": {
+    "model": "gpt-image-2",
+    "prompt": "生成一张 photorealistic professional fashion catalog contact sheet，用于女装电商成片的拍摄分镜审核。\n\n【输出】\n一张严格 3:2 横图，3 列 × 2 行，6 个完全等大的 1:1 方格。上排从左到右是镜头 1、2、3；下排是镜头 4、5、6。格间只有细白线。不要文字、数字、Logo、水印或跨格内容。除镜头 5 外，每格只有一位模特。\n\n【参考图职责】\n图 1–2：Face-01 身份事实。六格保持同一张脸、肤色、齐下巴深棕短直波波头和碎刘海。\n图 3–5：同一件主推裙的商品事实。严格保持黑色、细肩带肩部系结、V 领、胸前中央纵向抽褶、贴合腰身、A 字垂坠裙摆和稀疏细小黑色烫钻。\n图 6：环境事实。六格都使用图 6 的冷白墙面和冷白地面；墙与地之间有一条细、柔和、连续的水平接缝，接缝位于画面下部并可见。不要把它改成没有接缝的无限白底。\n\n【跨格不变量】\n同一模特、同一件裙、同一妆发、同一鞋履、同一影棚和同一光线。裙子单穿，不加外套、腰带、包或其他服装。穿极简银灰细带低跟凉鞋。裙摆在所有可见镜头中都明确覆盖膝盖，底边位于膝盖下方少许、但高于小腿中部。黑色面料有暗部层次，烫钻只是细小克制微光。\n\n姿态呈现时尚、高级、自信、冷静、现代的 Lily Catalog。高级感来自受控的不对称：单腿承重、错腿、轻微高低肩、重心偏移、轻转体、自然手势和视线变化。肩颈放松。不要双臂僵直贴腿的军姿，也不要夸张扭腰、网红摆拍或时装秀动作。手不得遮挡领口、抽褶、肩带、腰身和裙摆。\n\n【六个镜头】\n\n镜头 1｜正面全身主图\n从头到鞋完整入画，人物约占格高 84%，留足四周空间。商品正面清楚。模特单腿承重、双腿轻微交叉，一侧肩略低；一只手自然移到侧腰后方，另一只手放松垂落并与裙身留出空隙。冷静直视镜头。不要立正姿势。\n\n镜头 2｜切头侧正七分身商品镜头\n这是无脸商品裁切，不是肖像：眼睛、眉毛、鼻子、额头和头发都不得出现在画面中；画面上缘从嘴唇与下巴附近开始。画面下缘在小腿中部，完整裙摆位于画面内并明确过膝。身体轻微侧正，手离开胸前。突出 V 领、肩带系结、中央抽褶、腰身和烫钻面料。\n\n镜头 3｜切半头侧背七分身结构镜头\n这是中景/近景，不是全身图：鞋和脚不得出现在画面中。画面上缘横切头部，只保留后脑下半部、短发轮廓和少量回望侧脸；画面下缘在小腿中部，低于完整裙摆。身体侧背，双臂错开。突出肩带背侧连接、后背、腰部、侧缝和 A 字裙摆后片。\n\n镜头 4｜侧正全身轻走动\n从头到鞋完整入画，人物约占格高 84%。身体侧正，表现克制的轻走动：前腿轻迈、后腿承重，一只手随步态自然摆动。裙摆只有真实轻微摆动，仍清楚过膝。神态冷静，像时尚 Catalog 抓拍。\n\n镜头 5｜中央 2:3 安全区内的正背双视图\n在这一个 1:1 方格内，同一 Face-01 出现两次：左为正面全身，右为背面微侧转全身。两个人物均从头到鞋完整、同高、同裙长、同地面基线。中央有极细白色竖缝。\n关键版式：方格最左 1/6 和最右 1/6 只能是空白背景。两个人物缩小并靠近中央竖缝，头发、肩、手、完整裙摆和鞋全部收进方格中央 2/3；即使从左右各裁掉 1/6，两个人物仍完整。宁可人物较小，也不得越出中央安全区或互相重叠。\n\n镜头 6｜镜头 1 的姿态候选\n与镜头 1 相同的正面全身商品任务和人物尺度，但换另一套姿态：另一腿承重，一手轻扶侧腰，另一臂自然形成弧线；身体轻偏另一侧，微抬下颚，目光偏离镜头。完整展示头、鞋和过膝裙摆，不得与镜头 1 同姿势。\n\n【最终检查】\n六格职责必须依次正确。镜头 2 不出现眼鼻；镜头 3 不出现鞋脚；镜头 5 的两个人物完整位于中央 2/3；六格都有图 6 的墙地水平接缝。人物身份和商品结构跨格一致。",
+    "reference_images": [
+      "https://files.toapis.com/uploads/30502/1783862645_6e062e07.png",
+      "https://files.toapis.com/uploads/30502/1783862647_707d9bd4.png",
+      "https://files.toapis.com/uploads/30502/1783862650_6dc9bcdb.jpg",
+      "https://files.toapis.com/uploads/30502/1783862651_c1f48150.jpg",
+      "https://files.toapis.com/uploads/30502/1783862652_c4a70fb6.jpg",
+      "https://files.toapis.com/uploads/30502/1783862666_8d5330c2.png"
+    ],
+    "reference_image_manifest": [
+      {
+        "reference_index": 1,
+        "role": "model_identity",
+        "assetId": null,
+        "objectKey": "model-profiles/Face-01/front.png",
+        "filename": "front.png",
+        "angle": "front",
+        "url": "https://files.toapis.com/uploads/30502/1783862645_6e062e07.png"
+      },
+      {
+        "reference_index": 2,
+        "role": "model_identity",
+        "assetId": null,
+        "objectKey": "model-profiles/Face-01/left45.png",
+        "filename": "left45.png",
+        "angle": "left45",
+        "url": "https://files.toapis.com/uploads/30502/1783862647_707d9bd4.png"
+      },
+      {
+        "reference_index": 3,
+        "role": "hero_garment",
+        "assetId": null,
+        "objectKey": "generation-tasks/20260527131539-0f835e48/001-001-77d3defcfbc143cdad4f3f0e99505a93.jpg",
+        "filename": "hero-front.jpg",
+        "angle": null,
+        "url": "https://files.toapis.com/uploads/30502/1783862650_6dc9bcdb.jpg"
+      },
+      {
+        "reference_index": 4,
+        "role": "hero_garment",
+        "assetId": null,
+        "objectKey": "generation-tasks/20260527131539-0f835e48/002-002-96c92be1d62843b6a55ce51d84ac00d5.jpg",
+        "filename": "hero-side.jpg",
+        "angle": null,
+        "url": "https://files.toapis.com/uploads/30502/1783862651_c1f48150.jpg"
+      },
+      {
+        "reference_index": 5,
+        "role": "hero_garment",
+        "assetId": null,
+        "objectKey": "generation-tasks/20260527131539-0f835e48/003-003-fbc6b03d230c4f54a8718cde0545398c.jpg",
+        "filename": "hero-detail.jpg",
+        "angle": null,
+        "url": "https://files.toapis.com/uploads/30502/1783862652_c4a70fb6.jpg"
+      },
+      {
+        "reference_index": 6,
+        "role": "shoot_environment",
+        "assetId": null,
+        "objectKey": "generation-tasks/1440/preview-environment/001-bg.png",
+        "filename": "environment.png",
+        "angle": null,
+        "url": "https://files.toapis.com/uploads/30502/1783862666_8d5330c2.png"
+      }
+    ],
+    "n": 1,
+    "size": "3:2",
+    "resolution": "2K",
+    "response_format": "url"
+  },
+  "providerResponse": {
+    "completed_at": 1783865942,
+    "created_at": 1783865853,
+    "expires_at": 1783952342,
+    "id": "tsk_img_01KXBB1HVDMRKDHD20YKT1Z017",
+    "model": "gpt-image-2",
+    "object": "generation.task",
+    "progress": 100,
+    "result": {
+      "data": [
+        {
+          "url": "https://files.toapis.com/images/tsk_img_01KXBB1HVDMRKDHD20YKT1Z017/1783865940_ea1dcd0d.png"
+        }
+      ],
+      "type": "image"
+    },
+    "status": "completed"
+  },
+  "providerStatusResponse": {
+    "completed_at": 1783865942,
+    "created_at": 1783865853,
+    "expires_at": 1783952342,
+    "id": "tsk_img_01KXBB1HVDMRKDHD20YKT1Z017",
+    "model": "gpt-image-2",
+    "object": "generation.task",
+    "progress": 100,
+    "result": {
+      "data": [
+        {
+          "url": "https://files.toapis.com/images/tsk_img_01KXBB1HVDMRKDHD20YKT1Z017/1783865940_ea1dcd0d.png"
+        }
+      ],
+      "type": "image"
+    },
+    "status": "completed"
+  },
+  "outputPath": "experiments/task-1440/research-p01-20260712.png",
+  "fileSize": 11404819,
+  "thumbPath": "experiments/task-1440/_derived/thumb/research-p01-20260712.webp",
+  "previewPath": "experiments/task-1440/_derived/preview/research-p01-20260712.webp",
+  "thumbFileSize": 4454,
+  "previewFileSize": 43916
+}

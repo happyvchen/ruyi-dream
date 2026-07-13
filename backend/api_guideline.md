@@ -1,5 +1,7 @@
 # Backend API Guideline
 
+> **当前第一阶段设计（2026-07-13）**：运行链路已统一为“上传主推款 → AI 智能选搭 → 三类固定 Prompt 生成分镜预览 → 分镜前 5 格生成成片”。不再提供“生成拍摄剧本”步骤或对外 API；下文若仍出现 ShootScript/ShotPlan，属于待第二阶段删除的旧实现背景，不得作为当前产品或实现依据。当前权威设计见 `design/01_generation_flow/shoot_script_workflow.md` 与 `generation_responsibility_matrix.md`。
+
 API 面向前台 AI 摄影棚工作台，不暴露 prompt 工程细节。`/api/garment-skus`、`/api/shot-plans`、`/api/generation-runs`、`/api/generation-images` 和 `/api/ai-policy-config` 不属于 0.1.0 API。
 
 ## 认证与基础

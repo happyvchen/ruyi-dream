@@ -2,14 +2,17 @@
 
 ## 职责 (Scope)
 
-生成链路、任务包、Image-2 输入职责、生成要素责任边界。这里回答“系统如何从主推款、AI Stylist 造型方案和搭配服装走到拍摄剧本、分镜预览与 5 张最终成片”。
+生成链路、任务包、Image-2 输入职责、生成要素责任边界。这里回答“系统如何从主推款、AI Stylist 造型方案和搭配服装直接走到分镜预览与 5 张最终成片”。
 
 ## 文档索引 (Index)
 
 | 文件 | 内容 | 何时需要读 |
 |---|---|---|
-| `generation_flow.md` | 主推款输入版本 -> 搭配库全量 AI 标签事实卡 -> AI Stylist / StylingPlan -> ShootScript / ShotPlan -> 分镜预览 -> 前 5 张最终图 | 实现或调整生成主流程时 |
-| `shoot_script_workflow.md` | 拍摄剧本工作流最终设计：状态机、ShootScript schema、重生/失效规则、分镜预览和成片一致性策略 | 设计或实现“生成拍摄剧本 / 分镜预览 / 成片重生”时 |
+| `generation_flow.md` | 主推款输入版本 -> AI Stylist / StylingPlan -> 三类固定 Prompt 分镜预览 -> 前 5 张最终图 | 实现或调整生成主流程时 |
+| `shoot_script_workflow.md` | 当前四步工作流、三类 Prompt 路由、失效规则和成片槽位 | 设计或实现分镜预览 / 成片时 |
+| `storyboard_preview_business_intent.md` | 分镜预览原始业务意图：时尚高级姿态、按品类六镜头、镜头 5 中央 2:3 安全裁切和业务验收 | 设计或评审 ShootScript、ShotPlan、分镜 Prompt、参考图和分镜质量时 |
+| `storyboard_prompt_research_task_1440.md` | 任务 1440 分镜 Prompt 调研：验收表、A/B 变量、逐轮 ToApis 结果和有效/无效写法 | 复盘或继续分镜 Prompt 实验时 |
+| `storyboard_workflow_simplification_proposal.md` | 删除拍摄剧本步骤、三类固定分镜 Prompt、代码注入动态事实、直接生图的简化方案 | 决定或实现分镜/成片新工作流时 |
 | `brand_style_retrieval_workflow.md` | Lily 品牌样本库、全量标签直投、Prompt 选搭质量、受控配饰和0.1.0 技术边界 | 设计或实现搭配库选搭、品牌风格证据、配饰边界时 |
 | `styling_quality_signals.md` | AI Stylist 质量信号与客户审核闭环：避免业务质量问题变成用户可见报错 | 设计或排查智能选搭质量问题时 |
 | `image2_input_strategy.md` | 10 图输入限制、图片角色、预览/最终 prompt 策略 | 设计任务包、prompt、图片输入优先级时 |
@@ -22,7 +25,7 @@
 - AI Stylist 负责主推款理解、造型方向探索、多套 outfit 候选、Aesthetic Critic 质量判断和 `StylingPlan` 输出，不是一次性 ID 分类器。
 - 0.1.0 阶段不做后端预筛选/排序/评分/质量判断；Prompt + 大模型读取未归档 READY 搭配服装库的全量 AI 标签事实卡并全权选搭，`ai_tags_json` 是 AI Stylist 的业务输入。
 - 选搭质量必须同时满足审美成立、Lily 品牌成立、主推款商品表达成立；只露出主推款但造型难看仍视为失败。
-- ShootScript 负责把 `StylingPlan` 落到全局导演设定、搭配风险、配饰调整和 6 个 ShotPlan；ShotPlan 负责单镜头图位、穿着关系、姿态、景别、构图、光影和生成配饰边界。
+- 分镜的六镜头、姿势、裁切与构图规则由三类固定 Prompt 负责；代码只注入商品、选搭、模特和环境等动态事实。
 - Image-2 负责生成分镜预览和最终单图，不负责选择商品、导演决策或维护状态。
 - 最终图固定生成分镜预览前 5 格对应的 5 个镜头，第 6 格直接忽略。
 

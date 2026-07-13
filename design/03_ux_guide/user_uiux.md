@@ -1,5 +1,7 @@
 # 普通用户视角 UI/UX 设计
 
+> **当前第一阶段设计（2026-07-13）**：运行链路已统一为“上传主推款 → AI 智能选搭 → 三类固定 Prompt 生成分镜预览 → 分镜前 5 格生成成片”。不再提供“生成拍摄剧本”步骤或对外 API；下文若仍出现 ShootScript/ShotPlan，属于待第二阶段删除的旧实现背景，不得作为当前产品或实现依据。当前权威设计见 `design/01_generation_flow/shoot_script_workflow.md` 与 `generation_responsibility_matrix.md`。
+
 ## 1. 核心判断
 
 前台应像一个安静、专业的 B2B 摄影工作台，不像 AI 参数控制台。普通用户看到的是主推款、推荐造型方案、搭配服装、拍摄剧本、分镜预览、最终成片和生成记录；prompt、provider 请求、StylingPlan JSON、ShootScript / ShotPlan JSON 和输入选图器默认隐藏。

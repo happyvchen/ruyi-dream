@@ -750,9 +750,10 @@ class BackendCurrentFlowTests(unittest.TestCase):
             self.assertEqual(public_detail.status_code, 200)
             public_item = public_detail.json()["item"]
             self.assertNotIn("attempts", public_item)
+            self.assertNotIn("shootScript", public_item)
+            self.assertNotIn("shotPlans", public_item)
             self.assertEqual([item["id"] for item in public_item["aiOperations"]], [20])
             self.assert_no_model_raw_output(public_item["styling"])
-            self.assert_no_model_raw_output(public_item["shootScript"])
 
             attempt_page = client.get("/api/generation-tasks/1/attempts", params={"ownerType": "generation_styling", "limit": 1})
             self.assertEqual(attempt_page.status_code, 200)
@@ -780,10 +781,6 @@ class BackendCurrentFlowTests(unittest.TestCase):
             self.assertEqual(debug_item["styling"]["heroUnderstanding"]["nested"]["model_raw_output"]["secret"], "hero raw")
             self.assertEqual(debug_item["styling"]["outfitCandidates"][0]["model_raw_output"]["secret"], "candidate raw")
             self.assertEqual(debug_item["styling"]["rejectedCandidates"][0]["nested"][0]["model_raw_output"]["secret"], "rejected raw")
-            self.assertEqual(debug_item["shootScript"]["script"]["model_raw_output"]["secret"], "script raw")
-            self.assertEqual(debug_item["shootScript"]["summary"]["model_raw_output"]["secret"], "summary raw")
-            self.assertEqual(debug_item["shootScript"]["stylingRisks"][0]["model_raw_output"]["secret"], "risk raw")
-            self.assertEqual(debug_item["shootScript"]["accessoryAdjustments"][0]["nested"]["model_raw_output"]["secret"], "accessory raw")
 
             invocations = client.get("/api/generation-tasks/1/ai-invocations")
             self.assertEqual(invocations.status_code, 200)

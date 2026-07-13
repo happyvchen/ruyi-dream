@@ -1,5 +1,7 @@
 # 产品总览
 
+> **当前第一阶段设计（2026-07-13）**：运行链路已统一为“上传主推款 → AI 智能选搭 → 三类固定 Prompt 生成分镜预览 → 分镜前 5 格生成成片”。不再提供“生成拍摄剧本”步骤或对外 API；下文若仍出现 ShootScript/ShotPlan，属于待第二阶段删除的旧实现背景，不得作为当前产品或实现依据。当前权威设计见 `design/01_generation_flow/shoot_script_workflow.md` 与 `generation_responsibility_matrix.md`。
+
 ## 一句话定义
 
 Ruyi-Dream 是一个面向服饰品牌视觉生产团队的 B2B AI 数字化摄影棚。用户在 `AI 摄影棚` 上传本次主推款，系统把主推款图片、Lily 品牌边界、Prompt 维护中的业务规则和 `搭配服装库` 全量标签事实直接交给 AI Stylist；AI Stylist 理解主推款、探索多套造型方案、用 Aesthetic Critic 判断搭配是否真正好看、符合 Lily 并服务主推款，最终选择真实可见的配角服饰或判断无需库内配角，基于数字模特、结构化拍摄剧本、分镜预览和 Image-2 生成一组电商棚拍成片。

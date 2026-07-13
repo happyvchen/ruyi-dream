@@ -1,5 +1,7 @@
 # frontend/ — Agent Guide
 
+> **当前第一阶段设计（2026-07-13）**：运行链路已统一为“上传主推款 → AI 智能选搭 → 三类固定 Prompt 生成分镜预览 → 分镜前 5 格生成成片”。不再提供“生成拍摄剧本”步骤或对外 API；下文若仍出现 ShootScript/ShotPlan，属于待第二阶段删除的旧实现背景，不得作为当前产品或实现依据。当前权威设计见 `design/01_generation_flow/shoot_script_workflow.md` 与 `generation_responsibility_matrix.md`。
+
 ## 职责 (Scope)
 
 ruyi-dream 0.1.0 的前端实现目录。当前前端是 React + Vite + TypeScript 单页应用，用于承载普通用户的“AI 摄影棚”：上传主推款、展示带审美诊断的 AI Stylist 推荐造型方案、从搭配服装库自动选搭或判断无需库内配角、生成只读拍摄剧本、生成分镜预览、生成前 5 个镜头成片、复盘生成记录。

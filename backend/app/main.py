@@ -2517,16 +2517,6 @@ async def run_select_generation_styling(
     return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
 
 
-@app.post("/api/generation-tasks/{task_id}/shoot-script")
-async def create_generation_shoot_script(task_id: int, request: Request, payload: GenerationStageInstructionRequest | None = None) -> dict[str, Any]:
-    return await run_create_generation_shoot_script(
-        task_id,
-        include_debug=admin_debug_for_request(request),
-        trigger="manual_step",
-        user_instruction=payload.userInstruction if payload else None,
-    )
-
-
 async def run_create_generation_shoot_script(task_id: int, include_debug: bool = False, trigger: str = "manual_step", user_instruction: str | None = None) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     styling_id = task["active_styling_id"]
@@ -8076,13 +8066,11 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
         "userRequirement": row_value(row, "user_requirement_text", ""),
         "stageUserInputs": {
             "aiStyling": row_value(row, "ai_styling_user_instruction_text", ""),
-            "shootScript": row_value(row, "shoot_script_user_instruction_text", ""),
             "storyboardPreview": row_value(row, "storyboard_preview_user_instruction_text", ""),
             "finalImage": row_value(row, "final_image_user_instruction_text", ""),
         },
         "currentInputVersionId": row["current_input_version_id"],
         "activeStylingId": row["active_styling_id"],
-        "activeShootScriptId": row["active_shoot_script_id"] if "active_shoot_script_id" in row.keys() else None,
         "activePreviewId": row["active_preview_id"],
         "activeStoryboardPreviewId": row["active_storyboard_preview_id"] if "active_storyboard_preview_id" in row.keys() else row["active_preview_id"],
         "activeResultSetId": row["active_result_set_id"],
@@ -8120,8 +8108,6 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
     item["images"] = [{"id": image["link_id"], "sortOrder": image["link_sort_order"], "asset": serialize_media_asset(image)} for image in image_rows]
     item["inputVersion"] = get_input_version(row["current_input_version_id"])
     item["styling"] = get_generation_styling(row["active_styling_id"], include_debug=include_debug)
-    item["shootScript"] = get_generation_shoot_script(row["active_shoot_script_id"] if "active_shoot_script_id" in row.keys() else None, include_debug=include_debug)
-    item["shotPlans"] = get_task_shot_plans_by_script(row["active_shoot_script_id"] if "active_shoot_script_id" in row.keys() else None)
     preview_id = row["active_storyboard_preview_id"] if "active_storyboard_preview_id" in row.keys() and row["active_storyboard_preview_id"] else row["active_preview_id"]
     item["preview"] = get_generation_preview(preview_id)
     item["storyboardPreview"] = item["preview"]
@@ -8270,7 +8256,6 @@ def get_generation_preview(preview_id: int | None) -> dict[str, Any] | None:
     return {
         "id": row["id"],
         "status": row["status"],
-        "shootScriptId": row["shoot_script_id"] if "shoot_script_id" in row.keys() else None,
         "userInstruction": loads(row_value(row, "user_instruction_json"), {}),
         "asset": get_media_asset_by_id(row["preview_asset_id"]),
         "createdAt": row["created_at"],
@@ -8292,7 +8277,6 @@ def get_generation_result_set(result_set_id: int | None) -> dict[str, Any] | Non
     return {
         "id": row["id"],
         "status": row["status"],
-        "shootScriptId": row["shoot_script_id"] if "shoot_script_id" in row.keys() else None,
         "previewId": row["preview_id"] if "preview_id" in row.keys() else None,
         "userInstruction": loads(row_value(row, "user_instruction_json"), {}),
         "images": [
@@ -8362,7 +8346,6 @@ def actual_model_output_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any
 
 GENERATION_ATTEMPT_OWNER_TYPES = (
     "generation_styling",
-    "generation_shoot_script",
     "generation_preview",
     "generation_result_image",
 )
@@ -8398,9 +8381,6 @@ def get_task_attempts(task_id: int) -> list[dict[str, Any]]:
             """
             SELECT ga.* FROM generation_attempts ga
             WHERE (ga.owner_type = 'generation_styling' AND ga.owner_id = ?)
-               OR (ga.owner_type = 'generation_shoot_script' AND ga.owner_id IN (
-                    SELECT id FROM generation_shoot_scripts WHERE task_id = ?
-                  ))
                OR (ga.owner_type = 'generation_preview' AND ga.owner_id IN (
                     SELECT id FROM generation_previews WHERE task_id = ?
                   ))
@@ -8411,7 +8391,7 @@ def get_task_attempts(task_id: int) -> list[dict[str, Any]]:
                   ))
             ORDER BY ga.created_at DESC
             """,
-            (task_id, task_id, task_id, task_id),
+            (task_id, task_id, task_id),
         ).fetchall()
     return [serialize_attempt_detail(row) for row in rows]
 
@@ -8451,12 +8431,6 @@ def task_attempt_scope(task: Any, owner_type: str) -> tuple[str, tuple[Any, ...]
     task_id = int(task["id"])
     if owner_type == "generation_styling":
         return "ga.owner_type = 'generation_styling' AND ga.owner_id = ?", (task_id,)
-    if owner_type == "generation_shoot_script":
-        return (
-            f"ga.owner_type = 'generation_shoot_script' AND ga.owner_id IN (SELECT id FROM generation_shoot_scripts WHERE task_id = ?) "
-            f"AND (ga.status NOT IN {active_statuses} OR ga.owner_id = ?)",
-            (task_id, row_value(task, "active_shoot_script_id")),
-        )
     if owner_type == "generation_preview":
         return (
             f"ga.owner_type = 'generation_preview' AND ga.owner_id IN (SELECT id FROM generation_previews WHERE task_id = ?) "

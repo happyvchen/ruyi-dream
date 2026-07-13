@@ -1,5 +1,7 @@
 # Frontend Architecture
 
+> **当前第一阶段设计（2026-07-13）**：运行链路已统一为“上传主推款 → AI 智能选搭 → 三类固定 Prompt 生成分镜预览 → 分镜前 5 格生成成片”。不再提供“生成拍摄剧本”步骤或对外 API；下文若仍出现 ShootScript/ShotPlan，属于待第二阶段删除的旧实现背景，不得作为当前产品或实现依据。当前权威设计见 `design/01_generation_flow/shoot_script_workflow.md` 与 `generation_responsibility_matrix.md`。
+
 ## 产品形态
 
 前端默认是一个面向普通业务用户的“拍摄任务工作台”，不是 AI 参数控制台。当前 `user` 和 `admin` 登录后展示同一套工作台；后续 admin 增量模块必须建立在完整 user 工作台之上，保证 admin UI/UX 大于等于 user。

@@ -1,5 +1,7 @@
 # design/03_ux_guide/ — Agent Guide
 
+> **当前第一阶段设计（2026-07-13）**：运行链路已统一为“上传主推款 → AI 智能选搭 → 三类固定 Prompt 生成分镜预览 → 分镜前 5 格生成成片”。不再提供“生成拍摄剧本”步骤或对外 API；下文若仍出现 ShootScript/ShotPlan，属于待第二阶段删除的旧实现背景，不得作为当前产品或实现依据。当前权威设计见 `design/01_generation_flow/shoot_script_workflow.md` 与 `generation_responsibility_matrix.md`。
+
 ## 职责 (Scope)
 
 普通用户视角 UI/UX、页面信息层级、主流程交互、默认隐藏的 AI 复杂性。这里回答“用户应该看到什么、确认什么、怎么完成一次 AI 摄影棚生产”。

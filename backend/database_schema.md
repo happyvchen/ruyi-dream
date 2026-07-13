@@ -1,5 +1,7 @@
 # Backend Database Schema
 
+> **当前第一阶段设计（2026-07-13）**：运行链路已统一为“上传主推款 → AI 智能选搭 → 三类固定 Prompt 生成分镜预览 → 分镜前 5 格生成成片”。不再提供“生成拍摄剧本”步骤或对外 API；下文若仍出现 ShootScript/ShotPlan，属于待第二阶段删除的旧实现背景，不得作为当前产品或实现依据。当前权威设计见 `design/01_generation_flow/shoot_script_workflow.md` 与 `generation_responsibility_matrix.md`。
+
 当前数据库为 SQLite，初始化入口是 `backend/app/db.py:init_db()`。0.1.0 只保留 AI 摄影棚主流程、搭配服装库、数字模特、Prompt 配置、媒体资产和审计 attempt。旧货号、planner、AI policy、独立品牌资料、独立拍摄配置和固定标签规则表均已删除；迁移 `027` 与 `034` 会在历史库上 drop 这些表，后续迁移继续为当前链路追加字段。
 
 ## 表总览
