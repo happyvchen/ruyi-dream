@@ -21,17 +21,29 @@ from .db import dumps, get_db, loads, now_iso
 # 阶段常量：按业务顺序排列。
 PHASE_PREPARE = "prepare"
 PHASE_UPLOAD = "upload"
+PHASE_SUBMIT = "submit"
 PHASE_QUEUE = "queue"
 PHASE_GENERATE = "generate"
 PHASE_DELIVER = "deliver"
+PHASE_STORE = "store"
 
-PHASE_ORDER: tuple[str, ...] = (PHASE_PREPARE, PHASE_UPLOAD, PHASE_QUEUE, PHASE_GENERATE, PHASE_DELIVER)
+PHASE_ORDER: tuple[str, ...] = (
+    PHASE_PREPARE,
+    PHASE_UPLOAD,
+    PHASE_SUBMIT,
+    PHASE_QUEUE,
+    PHASE_GENERATE,
+    PHASE_DELIVER,
+    PHASE_STORE,
+)
 
 # 失败分类常量，落到 generation_attempts.error_code。
 ERROR_UPLOAD_FAILED = "UPLOAD_FAILED"
 ERROR_PROVIDER_FAILED = "PROVIDER_FAILED"
 ERROR_PROVIDER_TIMEOUT = "PROVIDER_TIMEOUT"
 ERROR_DELIVERY_FAILED = "DELIVERY_FAILED"
+ERROR_SUBMISSION_UNKNOWN = "SUBMISSION_UNKNOWN"
+ERROR_SYSTEM_ERROR = "SYSTEM_ERROR"
 
 # ToAPIs 报错分类（方案 A–G）。这些 error_code 稳定落到 generation_attempts.error_code，
 # 前端据此给不同文案与动作；重试策略由 is_retryable_error / is_zero_output_transient 决定。
@@ -212,6 +224,11 @@ def classify_attempt_error(exc: BaseException) -> str | None:
     """从异常上提取失败分类；没有分类信息时返回 None（保持既有行为）。"""
     code = getattr(exc, "error_code", None)
     return str(code) if code else None
+
+
+def classify_generation_attempt_error(exc: BaseException) -> str:
+    """生成图片边界的最终分类：未携带 provider 分类的异常属于本地系统问题。"""
+    return classify_attempt_error(exc) or ERROR_SYSTEM_ERROR
 
 
 class AttemptProgressRecorder:

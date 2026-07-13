@@ -65,14 +65,20 @@ from .generation_progress import (
     ERROR_POLL_TIMEOUT,
     ERROR_PROVIDER_FAILED,
     ERROR_PROVIDER_TIMEOUT,
+    ERROR_SUBMISSION_UNKNOWN,
+    ERROR_SYSTEM_ERROR,
     PHASE_DELIVER,
     PHASE_GENERATE,
     PHASE_PREPARE,
     PHASE_QUEUE,
+    PHASE_STORE,
+    PHASE_SUBMIT,
     PHASE_UPLOAD,
     AttemptProgressRecorder,
     GenerationPhaseError,
     classify_attempt_error,
+    classify_generation_attempt_error,
+    classify_provider_error,
     is_balance_error,
     is_retryable_error,
 )
@@ -2611,7 +2617,13 @@ async def run_preview_generation(
                 finish_attempt(attempt_id, "CANCELLED", response_snapshot=provider_response, error_message=str(exc))
                 persist_attempt_provider_request_id(attempt_id, provider_response)
                 return
-        finish_attempt(attempt_id, "FAILED", response_snapshot=provider_response, error_message=str(exc), error_code=classify_attempt_error(exc))
+        finish_attempt(
+            attempt_id,
+            "FAILED",
+            response_snapshot=provider_response,
+            error_message=str(exc),
+            error_code=classify_generation_attempt_error(exc),
+        )
         persist_attempt_provider_request_id(attempt_id, provider_response)
         with get_db() as db:
             timestamp = now_iso()
@@ -5309,7 +5321,8 @@ def finish_attempt(
         db.execute(
             """
             UPDATE generation_attempts
-            SET status = ?, completed_at = ?, failed_at = ?, cancelled_at = ?, response_snapshot_json = ?, output_asset_id = ?,
+            SET status = ?, completed_at = ?, failed_at = ?, cancelled_at = ?,
+                response_snapshot_json = COALESCE(?, response_snapshot_json), output_asset_id = ?,
                 error_code = CASE WHEN ? = 'SUCCEEDED' THEN NULL ELSE COALESCE(?, error_code) END,
                 error_message = ?, updated_at = ?
             WHERE id = ?
@@ -5319,7 +5332,7 @@ def finish_attempt(
                 timestamp if status == "SUCCEEDED" else None,
                 timestamp if status == "FAILED" else None,
                 timestamp if status == "CANCELLED" else None,
-                dumps(response_snapshot or {}),
+                dumps(response_snapshot) if response_snapshot is not None else None,
                 output_asset_id,
                 status,
                 error_code,
@@ -5360,6 +5373,30 @@ def persist_attempt_provider_progress(attempt_id: int | None, provider_response:
         )
 
 
+def prepare_attempt_provider_resubmission(
+    attempt_id: int | None,
+    snapshot: dict[str, Any],
+) -> None:
+    """重新创建 provider 任务前原子切换当前代次。
+
+    旧 provider id 只保留在 history/snapshot；当前 id 必须清空。这样从清空到新
+    id 落库之间若进程退出，恢复逻辑会安全地标记 SUBMISSION_UNKNOWN，而不会把
+    上一代已经失败的 provider 任务误当作当前任务继续轮询。
+    """
+    if not attempt_id:
+        return
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE generation_attempts
+            SET provider_request_id = NULL, response_snapshot_json = ?, updated_at = ?
+            WHERE id = ? AND status = 'RUNNING'
+            """,
+            (dumps({**snapshot, "status": "SUBMITTING", "providerRequestId": None}), timestamp, attempt_id),
+        )
+
+
 def attempt_has_provider_request_id(attempt_id: int | None) -> bool:
     if not attempt_id:
         return False
@@ -5385,7 +5422,11 @@ def get_attempt_provider_resume_snapshot(attempt_id: int | None) -> dict[str, An
     return snapshot
 
 
-def fail_stale_attempt(attempt_id: int | None, message: str) -> None:
+def fail_stale_attempt(
+    attempt_id: int | None,
+    message: str,
+    error_code: str = ERROR_SYSTEM_ERROR,
+) -> None:
     if not attempt_id:
         return
     timestamp = now_iso()
@@ -5393,12 +5434,25 @@ def fail_stale_attempt(attempt_id: int | None, message: str) -> None:
         db.execute(
             """
             UPDATE generation_attempts
-            SET status = 'FAILED', failed_at = ?, error_code = 'STALE_JOB_RECOVERED',
+            SET status = 'FAILED', failed_at = ?, error_code = ?,
                 error_message = ?, updated_at = ?
             WHERE id = ? AND status = 'RUNNING'
             """,
-            (timestamp, message, timestamp, attempt_id),
+            (timestamp, error_code, message, timestamp, attempt_id),
         )
+
+
+def stale_attempt_error(attempt_id: int | None) -> tuple[str, str]:
+    """锁过期且没有 provider id 时，区分提交未知与本地执行中断。"""
+    if not attempt_id:
+        return ERROR_SYSTEM_ERROR, "生成任务未建立有效执行记录，需要人工检查。"
+    with get_db() as db:
+        row = db.execute("SELECT progress_json FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
+    progress = loads(row["progress_json"], {}) if row else {}
+    current = progress.get("current") if isinstance(progress, dict) else None
+    if current == PHASE_SUBMIT:
+        return ERROR_SUBMISSION_UNKNOWN, "创建 provider 任务时执行中断，无法确认是否已经创建；已停止自动重提。"
+    return ERROR_SYSTEM_ERROR, f"本地生成任务在 {current or 'unknown'} 阶段执行中断；已停止自动重试。"
 
 
 def build_ai_stylist_context(input_version_id: int) -> tuple[Any, dict[str, Any], dict[str, Any]]:
@@ -7255,8 +7309,24 @@ def refresh_pending_new_generation_jobs() -> None:
         active_attempt_id = int(row["active_attempt_id"]) if row["active_attempt_id"] else None
         if attempt_has_provider_request_id(active_attempt_id):
             attempt_id = int(active_attempt_id)
+        elif active_attempt_id:
+            error_code, message = stale_attempt_error(active_attempt_id)
+            fail_stale_attempt(active_attempt_id, message, error_code)
+            with get_db() as db:
+                db.execute(
+                    """
+                    UPDATE generation_previews
+                    SET status = 'FAILED', locked_by = NULL, locked_until = NULL, updated_at = ?
+                    WHERE id = ? AND status IN ('QUEUED', 'RUNNING')
+                    """,
+                    (now_iso(), int(row["id"])),
+                )
+                db.execute(
+                    "UPDATE generation_tasks SET status = 'FAILED', auto_run_target = NULL, updated_at = ? WHERE id = ?",
+                    (now_iso(), int(row["task_id"])),
+                )
+            continue
         else:
-            fail_stale_attempt(active_attempt_id, "预览生成任务锁过期，已由后台恢复重试。")
             attempt_id = create_attempt("generation_preview", int(row["id"]), "image-2")
         lease_generation_preview(int(row["id"]), attempt_id)
         schedule_background_generation(
@@ -7283,19 +7353,36 @@ def refresh_pending_new_generation_jobs() -> None:
                 """,
                 (row["id"], timestamp),
             ).fetchall()
-        image_ids = [int(image["id"]) for image in image_rows]
-        if image_ids:
+        image_ids: list[int] = []
+        if image_rows:
             resume_attempts_by_image_id: dict[int, int] = {}
             for image in image_rows:
                 active_attempt_id = int(image["active_attempt_id"]) if "active_attempt_id" in image.keys() and image["active_attempt_id"] else None
                 if attempt_has_provider_request_id(active_attempt_id):
                     resume_attempts_by_image_id[int(image["id"])] = int(active_attempt_id)
+                    image_ids.append(int(image["id"]))
+                elif active_attempt_id:
+                    error_code, message = stale_attempt_error(active_attempt_id)
+                    fail_stale_attempt(active_attempt_id, message, error_code)
+                    with get_db() as db:
+                        db.execute(
+                            """
+                            UPDATE generation_result_images_new
+                            SET status = 'FAILED', locked_by = NULL, locked_until = NULL, updated_at = ?
+                            WHERE id = ? AND status IN ('QUEUED', 'RUNNING')
+                            """,
+                            (now_iso(), int(image["id"])),
+                        )
                 else:
-                    fail_stale_attempt(active_attempt_id, "成片生成任务锁过期，已由后台恢复重试。")
-            schedule_background_generation(
-                run_final_generation(int(row["task_id"]), int(row["id"]), image_ids, resume_attempts_by_image_id=resume_attempts_by_image_id),
-                job_key=key,
-            )
+                    image_ids.append(int(image["id"]))
+            if image_ids:
+                schedule_background_generation(
+                    run_final_generation(int(row["task_id"]), int(row["id"]), image_ids, resume_attempts_by_image_id=resume_attempts_by_image_id),
+                    job_key=key,
+                )
+            else:
+                with get_db() as db:
+                    reconcile_final_result_set(db, int(row["id"]), int(row["task_id"]))
 
     for row in terminal_result_sets:
         with get_db() as db:
@@ -7332,6 +7419,9 @@ DELIVERY_RETRY_BACKOFF_SECONDS: tuple[int, ...] = (5, 15, 30, 60, 120, 300)
 # 状态查询连续失败时的退避上限（秒）：查询失败不判死，只放慢节奏。
 STATUS_CHECK_ERROR_BACKOFF_CAP_SECONDS = 30
 
+# provider 明确返回瞬时生成失败时，允许重新创建一次生成任务。提交结果未知不在此列。
+PROVIDER_GENERATION_RETRY_LIMIT = 1
+
 
 async def generate_image_asset(task_package: dict[str, Any], output_key: str, attempt_id: int | None = None) -> tuple[int, dict[str, Any]]:
     """完整生成一张图：上传参考图 → 提交 → 轮询 → 成片回传。
@@ -7348,47 +7438,111 @@ async def generate_image_asset(task_package: dict[str, Any], output_key: str, at
         raise RuntimeError(image_provider_missing_message())
     progress = AttemptProgressRecorder(attempt_id)
     payload = get_attempt_provider_resume_snapshot(attempt_id)
-    if payload is None:
-        progress.begin(PHASE_PREPARE)
-        image_input_total = len(task_package.get("imageInputs") or [])
-        progress.begin(PHASE_UPLOAD, completed=0, total=image_input_total)
+    image_input_total = len(task_package.get("imageInputs") or [])
+    generation_retries = int(payload.get("generationRetries") or 0) if payload else 0
+    existing_history = payload.get("providerRequestHistory") if payload else None
+    provider_request_history: list[str] = (
+        [str(item) for item in existing_history if item]
+        if isinstance(existing_history, list)
+        else []
+    )
+    if payload and payload.get("providerRequestId") and str(payload["providerRequestId"]) not in provider_request_history:
+        provider_request_history.append(str(payload["providerRequestId"]))
+    submit_task_package = task_package
 
-        def report_upload(completed: int, total: int) -> None:
-            progress.update(PHASE_UPLOAD, completed=completed, total=total)
+    def report_upload(completed: int, total: int) -> None:
+        progress.update(PHASE_UPLOAD, completed=completed, total=total)
+        if completed >= total:
+            progress.begin(PHASE_SUBMIT, generationRetry=generation_retries)
 
-        payload = await asyncio.to_thread(run_image_provider_submit, task_package, output_key, report_upload)
-        persist_attempt_provider_progress(attempt_id, payload)
+    while True:
+        if payload is None:
+            progress.begin(PHASE_PREPARE)
+            progress.begin(PHASE_UPLOAD, completed=0, total=image_input_total, generationRetry=generation_retries)
+            payload = await asyncio.to_thread(run_image_provider_submit, submit_task_package, output_key, report_upload)
+            if payload.get("providerRequestId"):
+                provider_request_history.append(str(payload["providerRequestId"]))
+            payload = {
+                **payload,
+                "providerRequestHistory": provider_request_history,
+                "generationRetries": generation_retries,
+            }
+            persist_attempt_provider_progress(attempt_id, payload)
 
-    if payload.get("status") != "SUCCEEDED" or not payload.get("outputPath"):
         if payload.get("status") not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
             payload = await poll_provider_until_terminal(payload, output_key, attempt_id, progress)
-        if payload.get("status") != "SUCCEEDED":
-            error_code = ERROR_PROVIDER_FAILED if payload.get("status") in {"FAILED", "CANCELLED"} else ERROR_PROVIDER_TIMEOUT
-            raise ImageProviderError(
-                f"图片生成未成功，providerRequestId={payload.get('providerRequestId')}: {payload}",
-                payload,
-                error_code=error_code,
+        if payload.get("status") == "SUCCEEDED":
+            break
+
+        if payload.get("status") in {"FAILED", "CANCELLED"}:
+            terminal_error = str(payload.get("error") or payload.get("message") or payload.get("providerStatus") or "")
+            error_code = classify_provider_error(message=terminal_error)
+        else:
+            error_code = ERROR_PROVIDER_TIMEOUT
+        if (
+            payload.get("status") == "FAILED"
+            and is_retryable_error(error_code)
+            and generation_retries < PROVIDER_GENERATION_RETRY_LIMIT
+        ):
+            uploaded_inputs = payload.get("imageInputs")
+            if isinstance(uploaded_inputs, list) and uploaded_inputs:
+                submit_task_package = {**task_package, "imageInputs": uploaded_inputs}
+            generation_retries += 1
+            progress.begin(
+                PHASE_SUBMIT,
+                generationRetry=generation_retries,
+                previousProviderRequestIds=provider_request_history,
+                previousError=terminal_error[:500],
             )
-        if not payload.get("outputPath"):
-            payload = await deliver_with_retries(payload, output_key, attempt_id, progress)
-        payload = {**payload, "submissionMode": "completed"}
-        persist_attempt_provider_progress(attempt_id, payload)
+            prepare_attempt_provider_resubmission(
+                attempt_id,
+                {
+                    **payload,
+                    "providerRequestHistory": provider_request_history,
+                    "generationRetries": generation_retries,
+                },
+            )
+            payload = None
+            continue
+        raise ImageProviderError(
+            f"图片生成未成功，providerRequestId={payload.get('providerRequestId')}: {payload}",
+            payload,
+            error_code=error_code,
+        )
+
+    if not payload.get("outputPath"):
+        payload = await deliver_with_retries(payload, output_key, attempt_id, progress)
+    payload = {
+        **payload,
+        "submissionMode": "completed",
+        "providerRequestHistory": provider_request_history,
+        "generationRetries": generation_retries,
+    }
+    persist_attempt_provider_progress(attempt_id, payload)
 
     if payload.get("provider") == "placeholder":
         raise RuntimeError("Image-2 provider 返回占位图，拒绝将占位图记为生成成功。")
-    content = get_bytes(payload["outputPath"])
-    asset_id = insert_generated_media_asset(
-        payload["outputPath"],
-        Path(payload["outputPath"]).name,
-        content,
-        f"image/{settings.gpt_image2_output_format}",
-        {
-            "thumb": payload.get("thumbPath"),
-            "preview": payload.get("previewPath"),
-            "thumbSize": payload.get("thumbFileSize"),
-            "previewSize": payload.get("previewFileSize"),
-        },
-    )
+    progress.begin(PHASE_STORE)
+    try:
+        content = get_bytes(payload["outputPath"])
+        asset_id = insert_generated_media_asset(
+            payload["outputPath"],
+            Path(payload["outputPath"]).name,
+            content,
+            f"image/{settings.gpt_image2_output_format}",
+            {
+                "thumb": payload.get("thumbPath"),
+                "preview": payload.get("previewPath"),
+                "thumbSize": payload.get("thumbFileSize"),
+                "previewSize": payload.get("previewFileSize"),
+            },
+        )
+    except Exception as exc:
+        raise GenerationPhaseError(
+            f"provider 已完成，但本地成片登记失败: {exc}",
+            ERROR_SYSTEM_ERROR,
+            provider_response=payload,
+        ) from exc
     progress.finish()
     return asset_id, payload
 
@@ -7412,7 +7566,13 @@ async def poll_provider_until_terminal(
             # 鉴权/余额类错误重试无用（余额还会继续烧），立即抛出停止轮询；
             # 网关/连接/限流等瞬时错误只退避、不判死，续查到生成预算耗尽。
             status_error_code = classify_attempt_error(exc)
-            if status_error_code and not is_retryable_error(status_error_code):
+            if not status_error_code:
+                raise ImageProviderError(
+                    f"provider 状态查询发生本地系统错误: {exc}",
+                    payload,
+                    error_code=ERROR_SYSTEM_ERROR,
+                ) from exc
+            if not is_retryable_error(status_error_code):
                 raise ImageProviderError(str(exc), payload, error_code=status_error_code) from exc
             consecutive_errors += 1
             current_phase = PHASE_GENERATE if progress.snapshot.get("current") == PHASE_GENERATE else PHASE_QUEUE
@@ -7448,6 +7608,13 @@ async def deliver_with_retries(
             return payload
         except Exception as exc:
             last_error = exc
+            delivery_error_code = classify_generation_attempt_error(exc)
+            if delivery_error_code != ERROR_DELIVERY_FAILED:
+                raise ImageProviderError(
+                    f"provider 已完成，但本地交付阶段失败: {exc}",
+                    getattr(exc, "provider_response", None) or payload,
+                    error_code=delivery_error_code,
+                ) from exc
             wait = DELIVERY_RETRY_BACKOFF_SECONDS[min(retries, len(DELIVERY_RETRY_BACKOFF_SECONDS) - 1)]
             retries += 1
             progress.update(PHASE_DELIVER, retries=retries, lastError=str(exc)[:500])
@@ -7562,7 +7729,7 @@ async def generate_single_final_image(
                 finish_attempt(attempt_id, "CANCELLED", response_snapshot=provider_response, error_message=str(exc))
                 persist_attempt_provider_request_id(attempt_id, provider_response)
                 return 0
-        final_error_code = classify_attempt_error(exc)
+        final_error_code = classify_generation_attempt_error(exc)
         if balance_stop is not None and is_balance_error(final_error_code):
             balance_stop.set()
         finish_attempt(attempt_id, "FAILED", response_snapshot=provider_response, error_message=str(exc), error_code=final_error_code)

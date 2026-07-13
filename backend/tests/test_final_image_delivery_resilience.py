@@ -138,6 +138,10 @@ class MigrationAndProgressTests(TempEnvTestCase):
         error = progress_module.GenerationPhaseError("x", progress_module.ERROR_DELIVERY_FAILED)
         self.assertEqual(progress_module.classify_attempt_error(error), "DELIVERY_FAILED")
         self.assertIsNone(progress_module.classify_attempt_error(RuntimeError("x")))
+        self.assertEqual(
+            progress_module.classify_generation_attempt_error(RuntimeError("local bug")),
+            progress_module.ERROR_SYSTEM_ERROR,
+        )
 
 
 class UploadCacheTests(TempEnvTestCase):
@@ -235,6 +239,47 @@ class ProviderSubmitContractTests(TempEnvTestCase):
         self.assertEqual(result["providerRequestId"], "tsk_1")
         self.assertEqual(result["status"], "SUBMITTED")
 
+    def test_create_task_connection_failure_is_unknown_and_never_retried(self) -> None:
+        image_provider = importlib.import_module("app.image_provider")
+        progress_module = importlib.import_module("app.generation_progress")
+        uncertain = image_provider.ImageProviderError(
+            "read timed out",
+            error_code=progress_module.ERROR_CONN_RESET,
+            response_received=False,
+        )
+        with mock.patch.object(image_provider, "post_json", side_effect=uncertain) as post:
+            with self.assertRaises(image_provider.ProviderSubmissionUnknownError) as ctx:
+                image_provider.post_generation_task_with_confirmed_failure_retries(
+                    "https://toapis.test/v1/images/generations",
+                    {"model": "gpt-image-2"},
+                    "key",
+                    auth_scheme="Bearer",
+                    error_label="submit failed",
+                )
+        self.assertEqual(ctx.exception.error_code, progress_module.ERROR_SUBMISSION_UNKNOWN)
+        self.assertEqual(post.call_count, 1)
+
+    def test_create_task_retries_only_confirmed_transient_http_failure(self) -> None:
+        image_provider = importlib.import_module("app.image_provider")
+        progress_module = importlib.import_module("app.generation_progress")
+        confirmed = image_provider.ImageProviderError(
+            "HTTP 502",
+            error_code=progress_module.ERROR_GATEWAY_5XX,
+            response_received=True,
+        )
+        with mock.patch.object(image_provider, "post_json", side_effect=[confirmed, {"id": "tsk_ok"}]) as post:
+            with mock.patch.object(image_provider.time, "sleep"):
+                result = image_provider.post_generation_task_with_confirmed_failure_retries(
+                    "https://toapis.test/v1/images/generations",
+                    {"model": "gpt-image-2"},
+                    "key",
+                    auth_scheme="Bearer",
+                    error_label="submit failed",
+                )
+        self.assertEqual(result["id"], "tsk_ok")
+        self.assertEqual(post.call_count, 2)
+        self.assertTrue(all(call.kwargs["attempts"] == 1 for call in post.call_args_list))
+
     def test_fal_submit_response_has_no_output_path(self) -> None:
         os.environ["FAL_KEY"] = "test-fal-key"
         self._reload_settings()
@@ -269,8 +314,8 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
         attempt_id = self._insert_attempt()
         recorder = self.progress_module.AttemptProgressRecorder(attempt_id)
         responses: list[object] = [
-            RuntimeError("HTTP 502 bad gateway"),
-            RuntimeError("timed out"),
+            self.main.ImageProviderError("HTTP 502 bad gateway", error_code=self.progress_module.ERROR_GATEWAY_5XX),
+            self.main.ImageProviderError("timed out", error_code=self.progress_module.ERROR_CONN_RESET),
             {"status": "SUCCEEDED", "providerStatus": "completed", "providerStatusResponse": {"status": "completed"}},
         ]
 
@@ -301,7 +346,11 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
         async def instant_sleep(_seconds: float) -> None:
             return None
 
-        with mock.patch.object(self.main, "run_image_provider_deliver", side_effect=RuntimeError("download stalled")):
+        delivery_error = self.progress_module.GenerationPhaseError(
+            "download stalled",
+            self.progress_module.ERROR_DELIVERY_FAILED,
+        )
+        with mock.patch.object(self.main, "run_image_provider_deliver", side_effect=delivery_error):
             with mock.patch("asyncio.sleep", new=instant_sleep):
                 with self.assertRaises(self.main.ImageProviderError) as ctx:
                     asyncio.run(self.main.deliver_with_retries(payload, "k/out.png", attempt_id, recorder))
@@ -312,7 +361,10 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
         attempt_id = self._insert_attempt()
         recorder = self.progress_module.AttemptProgressRecorder(attempt_id)
         payload = {"providerRequestId": "tsk_2", "status": "SUCCEEDED", "providerStatus": "completed", "providerUrls": {}}
-        responses: list[object] = [RuntimeError("reset"), {"outputPath": "k/out.png", "fileSize": 9}]
+        responses: list[object] = [
+            self.progress_module.GenerationPhaseError("reset", self.progress_module.ERROR_DELIVERY_FAILED),
+            {"outputPath": "k/out.png", "fileSize": 9},
+        ]
 
         def fake_deliver(_payload: dict, _output_key: str) -> dict:
             step = responses.pop(0)
@@ -372,6 +424,167 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
         self.assertEqual(deliver_calls, ["k/out.png"])
         get_bytes_mock.assert_called_once_with("k/out.png")
         self.assertEqual(payload["outputPath"], "k/out.png")
+
+    def test_explicit_transient_provider_failure_retries_generation_only(self) -> None:
+        attempt_id = self._insert_attempt()
+        submits = [
+            {"provider": "toapis", "providerRequestId": "tsk_1", "status": "SUBMITTED", "providerStatus": "submitted", "providerUrls": {}, "imageInputs": [{"role": "hero", "providerUrl": "https://files.toapis.com/ref.jpg"}]},
+            {"provider": "toapis", "providerRequestId": "tsk_2", "status": "SUBMITTED", "providerStatus": "submitted", "providerUrls": {}, "imageInputs": [{"role": "hero", "providerUrl": "https://files.toapis.com/ref.jpg"}]},
+        ]
+        checks = [
+            {"status": "FAILED", "providerStatus": "failed", "providerRequestId": "tsk_1", "error": "502 bad gateway"},
+            {"status": "SUCCEEDED", "providerStatus": "completed", "providerRequestId": "tsk_2", "providerStatusResponse": {"status": "completed"}},
+        ]
+
+        async def instant_sleep(_seconds: float) -> None:
+            return None
+
+        with mock.patch.object(self.main, "run_image_provider_submit", side_effect=submits) as submit:
+            with mock.patch.object(self.main, "run_image_provider_check", side_effect=checks):
+                with mock.patch.object(self.main, "run_image_provider_deliver", return_value={"outputPath": "k/out.png"}):
+                    with mock.patch.object(self.main, "get_bytes", return_value=b"img"):
+                        with mock.patch.object(self.main, "insert_generated_media_asset", return_value=99):
+                            with mock.patch("asyncio.sleep", new=instant_sleep):
+                                asset_id, payload = asyncio.run(
+                                    self.main.generate_image_asset(
+                                        {"imageInputs": [{"role": "hero", "url": "https://source.example/ref.jpg"}]},
+                                        "k/out.png",
+                                        attempt_id,
+                                    )
+                                )
+        self.assertEqual(asset_id, 99)
+        self.assertEqual(submit.call_count, 2)
+        self.assertEqual(payload["providerRequestHistory"], ["tsk_1", "tsk_2"])
+        self.assertEqual(payload["generationRetries"], 1)
+        second_task_package = submit.call_args_list[1].args[0]
+        self.assertEqual(
+            second_task_package["imageInputs"],
+            [{"role": "hero", "providerUrl": "https://files.toapis.com/ref.jpg"}],
+        )
+
+    def test_poll_local_error_is_system_error_without_retry(self) -> None:
+        attempt_id = self._insert_attempt()
+        recorder = self.progress_module.AttemptProgressRecorder(attempt_id)
+        payload = {"providerRequestId": "tsk_1", "status": "SUBMITTED", "providerStatus": "submitted"}
+
+        async def instant_sleep(_seconds: float) -> None:
+            return None
+
+        with mock.patch.object(self.main, "run_image_provider_check", side_effect=KeyError("bad local shape")) as check:
+            with mock.patch("asyncio.sleep", new=instant_sleep):
+                with self.assertRaises(self.main.ImageProviderError) as ctx:
+                    asyncio.run(self.main.poll_provider_until_terminal(payload, "k/out.png", attempt_id, recorder))
+        self.assertEqual(ctx.exception.error_code, self.progress_module.ERROR_SYSTEM_ERROR)
+        self.assertEqual(check.call_count, 1)
+
+    def test_delivery_local_error_is_system_error_without_retry(self) -> None:
+        attempt_id = self._insert_attempt()
+        recorder = self.progress_module.AttemptProgressRecorder(attempt_id)
+        payload = {"providerRequestId": "tsk_1", "status": "SUCCEEDED", "providerStatus": "completed"}
+        with mock.patch.object(self.main, "run_image_provider_deliver", side_effect=TypeError("local bug")) as deliver:
+            with self.assertRaises(self.main.ImageProviderError) as ctx:
+                asyncio.run(self.main.deliver_with_retries(payload, "k/out.png", attempt_id, recorder))
+        self.assertEqual(ctx.exception.error_code, self.progress_module.ERROR_SYSTEM_ERROR)
+        self.assertEqual(deliver.call_count, 1)
+
+    def test_resumed_generation_keeps_retry_budget(self) -> None:
+        attempt_id = self._insert_attempt(provider_request_id="tsk_2")
+        resume = {
+            "provider": "toapis",
+            "providerRequestId": "tsk_2",
+            "providerRequestHistory": ["tsk_1", "tsk_2"],
+            "generationRetries": 1,
+            "status": "SUBMITTED",
+            "providerStatus": "submitted",
+        }
+        db_module = importlib.import_module("app.db")
+        with db_module.get_db() as db:
+            db.execute(
+                "UPDATE generation_attempts SET response_snapshot_json = ? WHERE id = ?",
+                (json.dumps(resume), attempt_id),
+            )
+
+        async def instant_sleep(_seconds: float) -> None:
+            return None
+
+        failed = {"status": "FAILED", "providerStatus": "failed", "providerRequestId": "tsk_2", "error": "502 bad gateway"}
+        with mock.patch.object(self.main, "run_image_provider_submit") as submit:
+            with mock.patch.object(self.main, "run_image_provider_check", return_value=failed):
+                with mock.patch("asyncio.sleep", new=instant_sleep):
+                    with self.assertRaises(self.main.ImageProviderError):
+                        asyncio.run(self.main.generate_image_asset({"imageInputs": []}, "k/out.png", attempt_id))
+        submit.assert_not_called()
+
+    def test_resubmission_clears_old_provider_id_before_new_post(self) -> None:
+        attempt_id = self._insert_attempt(provider_request_id="tsk_old")
+        recorder = self.progress_module.AttemptProgressRecorder(attempt_id)
+        recorder.begin(self.progress_module.PHASE_SUBMIT, generationRetry=1)
+        self.main.prepare_attempt_provider_resubmission(
+            attempt_id,
+            {
+                "providerRequestId": "tsk_old",
+                "providerRequestHistory": ["tsk_old"],
+                "generationRetries": 1,
+                "status": "FAILED",
+            },
+        )
+        db_module = importlib.import_module("app.db")
+        with db_module.get_db() as db:
+            row = db.execute(
+                "SELECT provider_request_id, response_snapshot_json FROM generation_attempts WHERE id = ?",
+                (attempt_id,),
+            ).fetchone()
+        snapshot = json.loads(row["response_snapshot_json"])
+        self.assertIsNone(row["provider_request_id"])
+        self.assertIsNone(snapshot["providerRequestId"])
+        self.assertEqual(snapshot["providerRequestHistory"], ["tsk_old"])
+        self.assertEqual(snapshot["status"], "SUBMITTING")
+        code, _message = self.main.stale_attempt_error(attempt_id)
+        self.assertEqual(code, self.progress_module.ERROR_SUBMISSION_UNKNOWN)
+        self.assertFalse(self.main.attempt_has_provider_request_id(attempt_id))
+
+        # 外层收到无 provider_response 的未知提交异常时，失败落库不能清空审计现场。
+        self.main.finish_attempt(
+            attempt_id,
+            "FAILED",
+            response_snapshot=None,
+            error_code=self.progress_module.ERROR_SUBMISSION_UNKNOWN,
+            error_message="submission result unknown",
+        )
+        with db_module.get_db() as db:
+            failed = db.execute(
+                "SELECT status, error_code, response_snapshot_json FROM generation_attempts WHERE id = ?",
+                (attempt_id,),
+            ).fetchone()
+        failed_snapshot = json.loads(failed["response_snapshot_json"])
+        self.assertEqual(failed["status"], "FAILED")
+        self.assertEqual(failed["error_code"], self.progress_module.ERROR_SUBMISSION_UNKNOWN)
+        self.assertEqual(failed_snapshot["providerRequestHistory"], ["tsk_old"])
+        self.assertEqual(failed_snapshot["generationRetries"], 1)
+
+    def test_local_store_failure_is_system_error_and_preserves_provider_snapshot(self) -> None:
+        attempt_id = self._insert_attempt()
+        submit_payload = {
+            "provider": "toapis",
+            "providerRequestId": "tsk_paid",
+            "status": "SUCCEEDED",
+            "providerStatus": "completed",
+            "outputPath": "k/out.png",
+        }
+        with mock.patch.object(self.main, "run_image_provider_submit", return_value=submit_payload):
+            with mock.patch.object(self.main, "get_bytes", side_effect=RuntimeError("RustFS unavailable")):
+                with self.assertRaises(self.progress_module.GenerationPhaseError) as ctx:
+                    asyncio.run(self.main.generate_image_asset({"imageInputs": []}, "k/out.png", attempt_id))
+        self.assertEqual(ctx.exception.error_code, self.progress_module.ERROR_SYSTEM_ERROR)
+        self.assertEqual(ctx.exception.provider_response["providerRequestId"], "tsk_paid")
+
+    def test_stale_submit_without_provider_id_is_submission_unknown(self) -> None:
+        attempt_id = self._insert_attempt()
+        recorder = self.progress_module.AttemptProgressRecorder(attempt_id)
+        recorder.begin(self.progress_module.PHASE_SUBMIT)
+        code, message = self.main.stale_attempt_error(attempt_id)
+        self.assertEqual(code, self.progress_module.ERROR_SUBMISSION_UNKNOWN)
+        self.assertIn("停止自动重提", message)
 
 
 @unittest.skipIf(not HAS_MAIN_DEPS, "app.main 依赖不可用")

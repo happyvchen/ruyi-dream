@@ -16,6 +16,8 @@ from . import config
 from .db import get_db, now_iso
 from .generation_progress import (
     ERROR_DELIVERY_FAILED,
+    ERROR_SUBMISSION_UNKNOWN,
+    ERROR_SYSTEM_ERROR,
     ERROR_UPLOAD_FAILED,
     GenerationPhaseError,
     classify_provider_error,
@@ -82,10 +84,59 @@ class ImageGenerationProvider:
 
 
 class ImageProviderError(RuntimeError):
-    def __init__(self, message: str, provider_response: dict[str, Any] | None = None, error_code: str | None = None):
+    def __init__(
+        self,
+        message: str,
+        provider_response: dict[str, Any] | None = None,
+        error_code: str | None = None,
+        *,
+        response_received: bool | None = None,
+    ):
         super().__init__(message)
         self.provider_response = provider_response or {}
         self.error_code = error_code
+        self.response_received = response_received
+
+
+class ProviderSubmissionUnknownError(ImageProviderError):
+    """创建任务请求已发出，但连接中断导致无法确认 provider 是否已创建任务。"""
+
+    def __init__(self, message: str):
+        super().__init__(message, error_code=ERROR_SUBMISSION_UNKNOWN, response_received=False)
+
+
+def post_generation_task_with_confirmed_failure_retries(
+    url: str,
+    payload: dict[str, Any],
+    api_key: str,
+    *,
+    auth_scheme: str,
+    error_label: str,
+    max_attempts: int = 2,
+) -> dict[str, Any]:
+    """创建 provider 任务。
+
+    仅在 provider 明确返回可重试 HTTP 错误时重试；连接异常/读超时的执行
+    结果未知，必须停止，避免创建重复计费任务。
+    """
+    for index in range(max_attempts):
+        try:
+            return post_json(
+                url,
+                payload,
+                api_key,
+                timeout=60,
+                auth_scheme=auth_scheme,
+                error_label=error_label,
+                attempts=1,
+            )
+        except ImageProviderError as exc:
+            if exc.response_received is not True:
+                raise ProviderSubmissionUnknownError(f"{error_label}，提交结果未知: {exc}") from exc
+            if not is_retryable_error(exc.error_code) or index >= max_attempts - 1:
+                raise
+            time.sleep(1 + index)
+    raise RuntimeError(f"{error_label}: 创建任务重试流程异常结束")
 
 
 class GPTImage2FalProvider(ImageGenerationProvider):
@@ -235,11 +286,10 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
 
         uploaded_inputs, image_urls = prepare_toapis_image_inputs(task_package.get("imageInputs", []), on_progress)
         provider_request = build_toapis_request_snapshot(task_package, image_urls)
-        submit_response = post_json(
+        submit_response = post_generation_task_with_confirmed_failure_retries(
             toapis_url("/v1/images/generations"),
             provider_request,
             settings.toapis_api_key,
-            timeout=60,
             auth_scheme="Bearer",
             error_label="GPT Image-2 toapis 请求失败",
         )
@@ -314,12 +364,25 @@ def store_delivered_image(output_key: str, output_url: str, provider_response: d
             timeout=settings.generation_download_request_timeout_seconds,
             attempts=1,
         )
+    except GenerationPhaseError:
+        raise
+    except Exception as exc:
+        raise GenerationPhaseError(
+            f"成片下载失败: {exc}",
+            ERROR_DELIVERY_FAILED,
+            provider_response=provider_response,
+        ) from exc
+    try:
         put_bytes(output_key, content, content_type or f"image/{settings.gpt_image2_output_format}")
         derivative = generate_image_derivatives(output_key, content)
     except GenerationPhaseError:
         raise
     except Exception as exc:
-        raise GenerationPhaseError(f"成片回传失败: {exc}", ERROR_DELIVERY_FAILED) from exc
+        raise GenerationPhaseError(
+            f"本地对象存储或衍生图处理失败: {exc}",
+            ERROR_SYSTEM_ERROR,
+            provider_response=provider_response,
+        ) from exc
     return {
         "providerResponse": provider_response,
         "outputPath": output_key,
@@ -812,7 +875,11 @@ def request_json(
         )
     except requests.RequestException as exc:
         # 网络异常（连接重置/写超时等）→ CONN_RESET，图片路径可幂等重试。
-        raise ImageProviderError(f"{error_label}: {exc}", error_code=classify_provider_error(message=str(exc))) from exc
+        raise ImageProviderError(
+            f"{error_label}: {exc}",
+            error_code=classify_provider_error(message=str(exc)),
+            response_received=False,
+        ) from exc
     try:
         response_payload = response.json()
     except ValueError:
@@ -824,7 +891,11 @@ def request_json(
         # HTTP 错误按状态码 + 文案分类：401/403→AUTH_FAILED、402/余额→INSUFFICIENT_BALANCE、
         # 1010→WAF_BLOCK、429→RATE_LIMITED、5xx→GATEWAY_5XX。上层据此早停或退避。
         error_code = classify_provider_error(status_code=response.status_code, body=str(message))
-        raise ImageProviderError(f"{error_label}: HTTP {response.status_code} {message}", error_code=error_code)
+        raise ImageProviderError(
+            f"{error_label}: HTTP {response.status_code} {message}",
+            error_code=error_code,
+            response_received=True,
+        )
     return response_payload
 
 
@@ -873,7 +944,10 @@ def post_multipart_file(
             timeout=timeout,
         )
     except requests.RequestException as exc:
-        raise RuntimeError(f"toapis 图片上传失败({file_label}): {exc}") from exc
+        raise GenerationPhaseError(
+            f"toapis 图片上传失败({file_label}): {exc}",
+            ERROR_UPLOAD_FAILED,
+        ) from exc
     try:
         payload = response.json()
     except ValueError:
@@ -882,7 +956,10 @@ def post_multipart_file(
         message = payload.get("message") or payload.get("error") or payload
         if isinstance(message, dict):
             message = message.get("message") or str(message)
-        raise RuntimeError(f"toapis 图片上传失败({file_label}): HTTP {response.status_code} {message}")
+        raise GenerationPhaseError(
+            f"toapis 图片上传失败({file_label}): HTTP {response.status_code} {message}",
+            ERROR_UPLOAD_FAILED,
+        )
     return payload
 
 
