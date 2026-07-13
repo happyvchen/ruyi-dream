@@ -652,14 +652,6 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
       window.clearInterval(timer)
     }
   }, [task?.batchId])
-  const batchTaskIndex = task?.batchId ? visibleBatchItems.findIndex((item) => item.id === task.id) : -1
-  const batchContextLabel = batchContextLoading
-    ? '读取中'
-    : batchTaskIndex >= 0
-      ? `第 ${batchTaskIndex + 1}/${visibleBatchItems.length}`
-      : visibleBatchItems.length
-        ? `共 ${visibleBatchItems.length} 个任务`
-        : '暂无批次数据'
   const handleTaskRailTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
     event.preventDefault()
@@ -683,7 +675,15 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
         ) : undefined}
       />
       {task?.batchId && (
-        <BatchBar items={visibleBatchItems} loading={batchContextLoading} currentTaskId={task.id} onOpenTask={openBatchTask} />
+        <BatchBar
+          items={visibleBatchItems}
+          loading={batchContextLoading}
+          downloadChecking={batchDownloadChecking}
+          currentTaskId={task.id}
+          onOpenTask={openBatchTask}
+          onAutoRun={startBatchAutoRun}
+          onDownload={startBatchDownload}
+        />
       )}
       <div className="studio-grid">
         <div className="panel studio-main">
@@ -724,12 +724,6 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
                     <button className={canRestartOneClickFinal(task) ? 'secondary' : 'primary'} onClick={startOneClickFinal}><Sparkles size={15} />{oneClickFinalLabel(task)}</button>
                   ) : null}
                 </div>
-                {task.batchId && (
-                  <details className="task-batch-details">
-                    <summary>批次任务 · {batchContextLabel}</summary>
-                    <BatchTaskSummary task={task} items={visibleBatchItems} loading={batchContextLoading} downloadChecking={batchDownloadChecking} onAutoRun={startBatchAutoRun} onDownload={startBatchDownload} />
-                  </details>
-                )}
                 <StageUserInputModule
                   step={visibleStep}
                   task={task}
@@ -845,59 +839,54 @@ function batchChipTone(item: GenerationTask) {
   return ''
 }
 
-function BatchBar({ items, loading, currentTaskId, onOpenTask }: {
+function BatchBar({ items, loading, downloadChecking, currentTaskId, onOpenTask, onAutoRun, onDownload }: {
   items: GenerationTask[]
   loading: boolean
+  downloadChecking: boolean
   currentTaskId: number | null
   onOpenTask: (task: GenerationTask) => void
+  onAutoRun: () => void
+  onDownload: () => void
 }) {
   return (
     <div className="panel batch-bar">
-      <span className="batch-bar-title">{loading ? '正在读取批次...' : `本批次 ${items.length} 个任务`}</span>
-      <div className="batch-bar-chips">
-        {items.map((item) => (
-          <button
-            key={item.id}
-            className={`batch-chip ${batchChipTone(item)} ${item.id === currentTaskId ? 'active' : ''}`}
-            onClick={() => onOpenTask(item)}
-            title={`切换到 ${item.name}`}
-          >
-            <strong>{item.name}</strong>
-            <span>{batchChipStatus(item)}</span>
-          </button>
-        ))}
+      <div className="batch-bar-main">
+        <span className="batch-bar-title">{loading ? '正在读取批次...' : `本批次 ${items.length} 个任务`}</span>
+        <div className="batch-bar-chips">
+          {items.map((item) => (
+            <button
+              key={item.id}
+              className={`batch-chip ${batchChipTone(item)} ${item.id === currentTaskId ? 'active' : ''}`}
+              onClick={() => onOpenTask(item)}
+              title={`切换到 ${item.name}`}
+            >
+              <strong>{item.name}</strong>
+              <span>{batchChipStatus(item)}</span>
+            </button>
+          ))}
+        </div>
       </div>
+      <BatchTaskSummary currentTaskId={currentTaskId} items={items} loading={loading} downloadChecking={downloadChecking} onAutoRun={onAutoRun} onDownload={onDownload} />
     </div>
   )
 }
 
-function BatchTaskSummary({ task, items, loading, downloadChecking, onAutoRun, onDownload }: {
-  task: GenerationTask
+function BatchTaskSummary({ currentTaskId, items, loading, downloadChecking, onAutoRun, onDownload }: {
+  currentTaskId: number | null
   items: GenerationTask[]
   loading: boolean
   downloadChecking: boolean
   onAutoRun: () => void
   onDownload: () => void
 }) {
-  const currentIndex = items.findIndex((item) => item.id === task.id)
-  const completed = items.filter((item) => item.status === 'COMPLETED').length
-  const running = items.filter((item) => isTaskRunning(item) || isTaskQueuedForAutoRun(item)).length
-  const failed = items.filter((item) => item.status === 'FAILED' || item.status === 'FINAL_PARTIAL').length
-  const pending = Math.max(0, items.length - completed - running - failed)
+  const currentIndex = items.findIndex((item) => item.id === currentTaskId)
   const eligibleCount = items.filter((item) => canStartOneClickFinal(item)).length
   const downloadableCount = items.filter((item) => ['COMPLETED', 'FINAL_PARTIAL'].includes(item.status)).length
   return (
-    <section className="task-batch-summary" aria-label="批次任务摘要">
-      <div className="task-batch-heading">
-        <span>所属批次</span>
-        <strong>{loading ? '读取中' : currentIndex >= 0 ? `第 ${currentIndex + 1}/${items.length} 个任务` : `共 ${items.length} 个任务`}</strong>
-      </div>
-      <div className="task-batch-counts">
-        <span>完成 {completed}</span>
-        <span>生成中 {running}</span>
-        <span>失败 {failed}</span>
-        <span>待处理 {pending}</span>
-      </div>
+    <section className="task-batch-summary" aria-label="批次操作">
+      <span className="task-batch-label">
+        所属批次 · {loading ? '读取中' : currentIndex >= 0 ? `第 ${currentIndex + 1}/${items.length} 个任务` : `共 ${items.length} 个任务`}
+      </span>
       <div className="task-batch-actions">
         <button className="primary" type="button" disabled={loading || !eligibleCount} onClick={onAutoRun}><Sparkles size={14} />全部一键成片</button>
         <button className="secondary" type="button" disabled={loading || !downloadableCount || downloadChecking} onClick={onDownload}><Download size={14} />{downloadChecking ? '检查成片中...' : '下载本批次成片'}</button>
