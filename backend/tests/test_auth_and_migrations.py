@@ -343,7 +343,35 @@ class BackendCurrentFlowTests(unittest.TestCase):
         )
         self.assertEqual(main.prompt_config_content("assembly.ai_styling"), "")
         self.assertEqual(main.prompt_config_content("segment.brand_info"), "")
-        self.assertIn("中央 2:3 安全裁切区", main.prompt_config_content("assembly.storyboard_preview_one_piece"))
+        for key in (
+            "assembly.storyboard_preview_top",
+            "assembly.storyboard_preview_bottom",
+            "assembly.storyboard_preview_one_piece",
+        ):
+            content = main.prompt_config_content(key)
+            self.assertIn("76%–80%", content)
+            self.assertIn("头顶距上沿约", content)
+            self.assertIn("鞋底距下沿约", content)
+            self.assertIn("中央", content)
+            self.assertIn("2:3", content)
+            self.assertIn("最左侧", content)
+            self.assertIn("最右侧", content)
+            self.assertIn("内侧肩膀靠近中央", content)
+            self.assertIn("背景严格沿用环境参考图", content)
+            self.assertIn("环境图可见墙地交界缝时", content)
+            self.assertNotIn("84%–90%", content)
+            self.assertNotIn("左右外侧三分之一区域", content)
+            self.assertNotIn("内侧肩膀紧靠中央", content)
+        top = main.prompt_config_content("assembly.storyboard_preview_top")
+        self.assertIn("眼睛、眉毛和鼻子不得出现", top)
+        self.assertIn("鞋和脚不得出现", top)
+        bottom = main.prompt_config_content("assembly.storyboard_preview_bottom")
+        self.assertIn("完整头脸不得出现", bottom)
+        self.assertIn("头脸不得出现", bottom)
+        self.assertIn("完整保留裤脚/裙摆和双脚", bottom)
+        one_piece = main.prompt_config_content("assembly.storyboard_preview_one_piece")
+        self.assertIn("眼睛、眉毛和鼻子不得出现", one_piece)
+        self.assertIn("鞋和脚不得出现", one_piece)
         self.assertNotIn("assembly.shoot_script", rows)
         with self.assertRaisesRegex(RuntimeError, "Prompt 配置缺失或占位符未填充"):
             main.render_prompt_template("assembly.ai_styling", main.sample_prompt_runtime())
