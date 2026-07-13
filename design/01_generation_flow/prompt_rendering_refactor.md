@@ -53,8 +53,8 @@
 
 | 类别 | 调用 | 输入形态 | 结论 |
 |---|---|---|---|
-| **策划（Gemini）** | `assembly.ai_tagging`、`assembly.ai_styling`、`assembly.shoot_script` | 结构化 JSON I/O | **保留** JSON 输入输出（模型要返回结构化结果，这是最佳实践）；但去掉每个对象里重复的 `priority_policy`，优先级只在 system instruction / prompt 正文声明一次 |
-| **生图（Image-2）** | `assembly.storyboard_preview`、`assembly.final_image` | 自然语言 prompt | **重构**为 prompt view：干净分节文本，去掉全部治理元数据 |
+| **策划（Gemini）** | `assembly.ai_tagging`、`assembly.ai_styling` | 结构化 JSON I/O | **保留** JSON 输入输出（模型要返回结构化结果，这是最佳实践）；但去掉每个对象里重复的 `priority_policy`，优先级只在 prompt 正文声明一次 |
+| **生图（Image-2）** | `assembly.storyboard_preview_*`、`assembly.final_image_*` | 自然语言 prompt | **重构**为 prompt view：干净分节文本，去掉全部治理元数据 |
 
 即：Gemini 阶段的 JSON 是**契约**（合理），Image-2 阶段的 JSON 是**噪音**（要去）。两者都要把「优先级策略」从「每个数据对象重复」改为「正文声明一次」。
 
@@ -77,11 +77,11 @@
    - `render_final_prompt(shot_index, shot_plan, styling_result, shoot_script, image_inputs, hero_info, user_instruction) -> str`
    - Gemini 侧：`gemini_view(context) -> dict`（drop 治理键，保留内容键）
 3. **优先级策略集中化**：`cannot_override` / `conflict_handling` 这类规则，从「每个 runtime 对象重复」改为在对应 `assembly.*` prompt 正文（或 Gemini system instruction）声明一次。用户要求为空时整段省略，不再出现 `"info": ""` 这种空壳 JSON。
-4. **模板改造**：`assembly.storyboard_preview` / `assembly.final_image` 的占位符不再接收 `dumps(...)`，而是接收 renderer 产出的纯文本段落。
+4. **模板改造**：`assembly.storyboard_preview_*` / `assembly.final_image_*` 的占位符不再接收 `dumps(...)`，而是接收 renderer 产出的纯文本段落。
 
 ### 3.1 renderer 的 Python 边界（已决策）
 
-**决策：renderer 只渲染数据，规则留在可编辑模板。** 这样既符合 `prompt_context_strategy.md` §规则归属（"导演规则写在 `assembly.shoot_script` 正文、选搭规则写在 `assembly.ai_styling` 正文"），又保留业务用户在 Prompt 维护 UI 里调 prompt 的能力。
+**决策：renderer 只渲染数据，规则留在可编辑模板。** 这样既符合 `prompt_context_strategy.md` §规则归属（分镜和成片摄影规则写在三类 `assembly.storyboard_preview_*` / `assembly.final_image_*` 正文，选搭规则写在 `assembly.ai_styling` 正文），又保留业务用户在 Prompt 维护 UI 里调 prompt 的能力。
 
 | 内容 | 归属 | 谁能改 |
 |---|---|---|
@@ -252,7 +252,7 @@ P6 的判定边界收敛为一条：**「是否会变」**。
 - 拍摄剧本 → `render_shoot_script_resolved_accessories` / `render_shoot_script_shots`
 - 成片 → `render_preview_grid_cell`（纯格号数字）/ `render_shot_styling` / `render_shot_global_directing` / `render_shot_current` / `render_shot_accessories`
 
-每个函数**无表头、无话术**，空数据返回空串，模板用条件段决定是否显示该段的表头。写死的 `【分镜参考】"只借用姿势…分镜预览不是事实来源"` 整句删除，改由 `assembly.final_image` 模板正文承载（`{{runtime.preview_grid_cell}}` 只提供格号）。
+每个函数**无表头、无话术**，空数据返回空串，模板用条件段决定是否显示该段的表头。写死的 `【分镜参考】"只借用姿势…分镜预览不是事实来源"` 整句删除，改由三类 `assembly.final_image_*` 模板正文承载（`{{runtime.preview_grid_cell}}` 只提供格号）。
 
 > **边界**：单条镜头/配饰内部的字段标签（`核心`/`构图`/`机位`…）属于「变长记录的序列化格式」，简单占位引擎无法用循环表达，保留在 renderer；它们是数据格式，不是可调话术。
 
@@ -271,7 +271,7 @@ P6 的判定边界收敛为一条：**「是否会变」**。
 
 ### 10.5 新占位与模板
 
-`available_prompt_placeholders` / `sample_prompt_runtime` 同步登记 §10.2/§10.3 的新 `{{runtime.*}}` 占位（前端 Prompt 维护页数据驱动，自动展示）。开发库 `assembly.shoot_script` / `storyboard_preview` / `final_image` 三个模板正文迁移：把搬出的段头/规则/职能描述并入，改用新粒度占位与条件段，保留原有措辞、仅重定位（迁移前整库备份）。
+`available_prompt_placeholders` / `sample_prompt_runtime` 同步登记 §10.2/§10.3 的新 `{{runtime.*}}` 占位（前端 Prompt 维护页数据驱动，自动展示）。开发库三类 `storyboard_preview_*` / 三类 `final_image_*` 模板正文迁移：把搬出的段头/规则/职能描述并入，改用新粒度占位与条件段。
 
 ### 10.6 验收
 

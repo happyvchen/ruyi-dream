@@ -223,9 +223,12 @@ ShootScript 不重新选择库内搭配服装；它只能基于已选 StylingPla
 关键 assembly：
 
 - `assembly.ai_styling`：AI Stylist 选搭规则、质量信号、配饰边界和输出要求。
-- `assembly.shoot_script`：AI Director 拍摄剧本规则和输出要求。
-- `assembly.storyboard_preview`：分镜预览 Image-2 输入文本。
-- `assembly.final_image`：单张成片 Image-2 输入文本。
+- `assembly.storyboard_preview_top`：上装、针织、外套类分镜预览 Image-2 输入文本。
+- `assembly.storyboard_preview_bottom`：裤装、半身裙类分镜预览 Image-2 输入文本。
+- `assembly.storyboard_preview_one_piece`：连衣裙、连体、套装类分镜预览 Image-2 输入文本。
+- `assembly.final_image_top`：上装、针织、外套类单张成片 Image-2 输入文本。
+- `assembly.final_image_bottom`：裤装、半身裙类单张成片 Image-2 输入文本。
+- `assembly.final_image_one_piece`：连衣裙、连体、套装类单张成片 Image-2 输入文本。
 
 规则：
 
@@ -233,9 +236,9 @@ ShootScript 不重新选择库内搭配服装；它只能基于已选 StylingPla
 - 不恢复旧 `ai_policy_configs`。
 - 不把业务审美规则散落成大量 Python if/else；硬编码只保留真实性、状态、可执行关联和安全边界。
 
-### 拍摄导演规则
+### 摄影规则
 
-拍摄导演规则不再使用独立数据库对象。全局导演设定、图位规则、品类策略、商品保真约束和负向约束都由 `assembly.shoot_script` Prompt 正文承载；真正的拍摄剧本产物是 `ShootScript`，不是配置模板本身。
+当前主流程不再使用 `assembly.shoot_script`、动态 `ShootScript` 或 `ShotPlan` 作为运行依赖。分镜六镜头规则由三类 `assembly.storyboard_preview_*` Prompt 承载；最终成片逐格兑现规则由三类 `assembly.final_image_*` Prompt 承载。代码只负责品类路由、参考图顺序、当前镜头标记和动态事实注入。
 
 ## styling 模块
 

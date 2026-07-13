@@ -67,14 +67,21 @@ assembly.storyboard_preview_one_piece
 - 自动分析结果图。
 - 自动切格、自动验收或自动重试。
 
-### 2.4 最终成片使用一个公共 Prompt
+### 2.4 最终成片使用三类固定 Prompt
 
-三类分镜 Prompt 生成固定前 5 格。最终成片继续逐张生成，但只需要一个公共 `assembly.final_image` Prompt：
+三类分镜 Prompt 生成固定前 5 格。最终成片继续逐张生成，并按同一品类族选择三类固定成片 Prompt：
 
-- 输入对应分镜格作为构图、姿势、身位、背景和光线参考。
+- `assembly.final_image_top`
+- `assembly.final_image_bottom`
+- `assembly.final_image_one_piece`
+
+每张成片的输入与职责：
+
+- 输入对应分镜单格作为构图、姿势、身位、背景比例和光影导演关系参考。
 - 输入模特图作为身份事实。
 - 输入商品图作为商品事实。
-- 代码注入当前格号和简单的格子职责标签。
+- 输入拍摄环境图作为墙面、地面、墙地接缝和基础光线事实。
+- 代码注入当前格号、当前镜头布尔标记和少量动态事实，不让 Gemini 动态生成成片 Prompt。
 
 最终成片不再读取 ShootScript，只读取：
 
@@ -82,6 +89,7 @@ assembly.storyboard_preview_one_piece
 category_family
 + shot_index
 + static_shot_role
++ current shot marker
 + selected outfit facts
 + image references
 + user instruction
@@ -194,7 +202,9 @@ active_shoot_script_id 运行依赖
 - 分镜预览 · 上装/针织/外套。
 - 分镜预览 · 裤装/半身裙。
 - 分镜预览 · 连衣裙/连体/套装。
-- 生成成片 · 公共 Prompt。
+- 生成成片 · 上装/针织/外套。
+- 生成成片 · 裤装/半身裙。
+- 生成成片 · 连衣裙/连体/套装。
 
 每份分镜 Prompt 是完整、可直接阅读的摄影说明，不把业务关键规则拆散到代码常量。
 
@@ -204,10 +214,13 @@ active_shoot_script_id 运行依赖
 runtime.ref_model_identity
 runtime.ref_garment
 runtime.ref_shoot_environment
+runtime.ref_preview_grid
 runtime.hero_product_info
 runtime.styling_outfit
 runtime.resolved_accessories
 runtime.storyboard_preview_user_instruction
+runtime.final_image_user_instruction
+runtime.is_shot_1 ... runtime.is_shot_5
 ```
 
 ## 8. 不引入的能力
@@ -244,4 +257,3 @@ runtime.storyboard_preview_user_instruction
 - 三类模板覆盖当前主要商品图位，代码路由简单。
 - 保留 AI Stylist 只解决选搭问题，不让它扩张到摄影 Prompt。
 - 不增加生成后的复杂链路，用户仍保有重新生成的直接控制权。
-

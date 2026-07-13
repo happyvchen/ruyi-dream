@@ -100,7 +100,7 @@ class PreviewCanvasTest(unittest.TestCase):
 
     def test_final_shot_context_cell_is_number_only(self) -> None:
         # 重构后：代码只输出「会变的格号」，「第 N 格即 1:1 构图/只借用姿势…」这类固定话术
-        # 已移入 assembly.final_image 的 Prompt 维护模板正文（用 {{runtime.preview_grid_cell}} 占位）。
+        # 已移入三类 assembly.final_image_* 的 Prompt 维护模板正文（用 {{runtime.preview_grid_cell}} 占位）。
         prompt_render = importlib.reload(importlib.import_module("app.prompt_render"))
         self.assertEqual(prompt_render.render_preview_grid_cell({"preview_grid_cell": 3}), "3")
         self.assertEqual(prompt_render.render_preview_grid_cell({}), "")

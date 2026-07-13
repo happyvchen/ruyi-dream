@@ -338,7 +338,9 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 "assembly.storyboard_preview_top",
                 "assembly.storyboard_preview_bottom",
                 "assembly.storyboard_preview_one_piece",
-                "assembly.final_image",
+                "assembly.final_image_top",
+                "assembly.final_image_bottom",
+                "assembly.final_image_one_piece",
             },
         )
         self.assertEqual(main.prompt_config_content("assembly.ai_styling"), "")
@@ -368,6 +370,19 @@ class BackendCurrentFlowTests(unittest.TestCase):
         bottom = main.prompt_config_content("assembly.storyboard_preview_bottom")
         self.assertIn("完整头脸不得出现", bottom)
         self.assertIn("头脸不得出现", bottom)
+        for key in (
+            "assembly.final_image_top",
+            "assembly.final_image_bottom",
+            "assembly.final_image_one_piece",
+        ):
+            content = main.prompt_config_content(key)
+            self.assertIn("当前独立单格", content)
+            self.assertIn("ref_shoot_environment", content)
+            self.assertIn("is_shot_5", content)
+            self.assertIn("16.7%–49%", content)
+            self.assertIn("51%–83.3%", content)
+            self.assertIn("不额外制造不对称大留白", content)
+        self.assertIsNone(main.prompt_config_content("assembly.final_image"))
         self.assertIn("完整保留裤脚/裙摆和双脚", bottom)
         one_piece = main.prompt_config_content("assembly.storyboard_preview_one_piece")
         self.assertIn("眼睛、眉毛和鼻子不得出现", one_piece)
@@ -1685,38 +1700,14 @@ class BackendCurrentFlowTests(unittest.TestCase):
             "shots": [{"shot_index": 1, "shot_role": "hero", "main_focus": "主推款"}],
         }
         self.insert_prompt_config(db_module, "segment.brand_info", "segment", "Lily 品牌信息", 10)
-        self.insert_prompt_config(
-            db_module,
-            "assembly.storyboard_preview",
-            "assembly",
-            "生成分镜预览。\n\n{{segment.brand_info}}\n\n【输入参考图角色清单】\n"
-            "{{#runtime.ref_model_identity}}{{runtime.ref_model_identity}} 为数字模特身份参考图。\n{{/runtime.ref_model_identity}}"
-            "{{#runtime.ref_garment}}{{runtime.ref_garment}} 为主推款与搭配服装参考图。\n{{/runtime.ref_garment}}"
-            "\n【拍摄剧本结果】\n【六格镜头】\n{{runtime.shoot_script_shots}}\n\n按拍摄剧本生成 3x2 分镜预览。",
-            140,
-        )
-        self.insert_prompt_config(
-            db_module,
-            "assembly.final_image",
-            "assembly",
-            "生成一张电商棚拍成片。\n\n分镜预览不是模特或商品事实来源。模特参考图是模特身份事实来源。\n"
-            "不得根据拍摄剧本、品牌妆发或分镜构图把模特改成另一张脸、低马尾、盘发、长发或参考图中不存在的发型。\n\n"
-            "【输入参考图角色清单】\n"
-            "{{#runtime.ref_model_identity}}{{runtime.ref_model_identity}} 为模特身份参考图。\n{{/runtime.ref_model_identity}}"
-            "{{#runtime.ref_preview_grid}}{{runtime.ref_preview_grid}} 为分镜预览参考图，仅作构图参考。\n{{/runtime.ref_preview_grid}}"
-            "\n{{segment.brand_info}}\n\n【当前单张成片上下文】\n"
-            "{{#runtime.preview_grid_cell}}参考分镜预览第 {{runtime.preview_grid_cell}} 格。\n{{/runtime.preview_grid_cell}}"
-            "{{#runtime.shot_current}}【当前镜头】\n{{runtime.shot_current}}\n{{/runtime.shot_current}}",
-            150,
-        )
         with db_module.get_db() as db:
             db.execute(
                 "INSERT INTO generation_tasks (id, name, status, current_input_version_id, active_styling_id, active_shoot_script_id, active_storyboard_preview_id, active_result_set_id, created_at, updated_at) VALUES (1, 'T', 'PREVIEW_READY', 7, 3, 5, 4, 10, ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO media_assets (id, object_key, original_filename, mime_type, created_at, updated_at) VALUES (101, 'hero/front.jpg', 'front.jpg', 'image/jpeg', ?, ?), (102, 'styling/look-a.jpg', 'look-a.jpg', 'image/jpeg', ?, ?), (103, 'preview/grid.png', 'grid.png', 'image/png', ?, ?)",
-                (timestamp, timestamp, timestamp, timestamp, timestamp, timestamp),
+                "INSERT INTO media_assets (id, object_key, original_filename, mime_type, created_at, updated_at) VALUES (101, 'hero/front.jpg', 'front.jpg', 'image/jpeg', ?, ?), (102, 'styling/look-a.jpg', 'look-a.jpg', 'image/jpeg', ?, ?), (103, 'preview/grid.png', 'grid.png', 'image/png', ?, ?), (104, 'environment/studio.png', 'studio.png', 'image/png', ?, ?)",
+                (timestamp, timestamp, timestamp, timestamp, timestamp, timestamp, timestamp, timestamp),
             )
             db.execute(
                 """
@@ -1756,7 +1747,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 (db_module.dumps(shoot_script), timestamp, timestamp),
             )
             db.execute(
-                "INSERT INTO generation_previews (id, task_id, styling_id, shoot_script_id, input_version_id, preview_asset_id, status, created_at, updated_at) VALUES (4, 1, 3, 5, 7, 103, 'SUCCEEDED', ?, ?)",
+                "INSERT INTO generation_previews (id, task_id, styling_id, shoot_script_id, input_version_id, preview_asset_id, environment_asset_id, status, created_at, updated_at) VALUES (4, 1, 3, 5, 7, 103, 104, 'SUCCEEDED', ?, ?)",
                 (timestamp, timestamp),
             )
             db.execute(
@@ -1783,6 +1774,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
 
         self.assertEqual([item["role"] for item in preview_package["imageInputs"][:2]], ["model_identity", "model_identity"])
         self.assertEqual([item["role"] for item in final_package["imageInputs"][:3]], ["model_identity", "model_identity", "preview_grid"])
+        self.assertIn("shoot_environment", [item["role"] for item in final_package["imageInputs"]])
         self.assertEqual(shoot_script_request["input_version"]["id"], 7)
         self.assertEqual(shoot_script_request["hero_product_info"]["info"], "中短裙，裙摆刚过膝")
         self.assertEqual(shoot_script_request["shoot_script_user_instruction"]["instruction"], "突出裙摆长度")
@@ -1797,13 +1789,18 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertEqual(preview_package["inputVersionId"], 7)
         self.assertEqual(preview_package["heroProductInfo"]["info"], "中短裙，裙摆刚过膝")
         self.assertEqual(final_package["heroProductInfo"]["info"], "中短裙，裙摆刚过膝")
-        self.assertIn("模特身份事实来源", final_package["prompt"])
+        self.assertEqual(final_package["promptConfigKey"], "assembly.final_image_one_piece")
+        self.assertIn("当前独立单格", final_package["prompt"])
+        self.assertIn("只决定同一位成年女模特", final_package["prompt"])
         # 成片阶段参考图顺序为 模特×2 + 分镜预览 → 分镜预览参考图落在图3。
-        self.assertIn("分镜预览参考图", final_package["prompt"])
+        self.assertIn("已确认分镜的当前独立单格", final_package["prompt"])
         self.assertIn("图3", final_package["prompt"])
+        self.assertIn("只决定墙面、地面、墙地接缝和基础光线", final_package["prompt"])
+        self.assertIn("镜头 1｜正面全身主展示", final_package["prompt"])
+        self.assertIn("is_shot_1", final_package["promptRuntime"])
         self.assertNotIn("{{runtime.current_shot_context}}", final_package["prompt"])
-        self.assertIn("低马尾", final_package["prompt"])
-        self.assertIn("不得根据拍摄剧本", final_package["prompt"])
+        self.assertNotIn("低马尾", final_package["prompt"])
+        self.assertNotIn("不得根据拍摄剧本", final_package["prompt"])
 
         normalized = main.normalize_shoot_script(
             {"global_directing": {"accessory_boundary": "生成配饰低存在感"}, "shots": []},

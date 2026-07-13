@@ -2,7 +2,7 @@
 
 职责：把上游已组装好的结构化上下文（``shoot_script_result_for_prompt`` /
 ``current_shot_context_for_prompt`` / hero 信息 / 用户要求）渲染成**干净的自然语言文本**，
-供 ``assembly.storyboard_preview`` / ``assembly.final_image`` 模板占位符填充。
+供三类 ``assembly.storyboard_preview_*`` / ``assembly.final_image_*`` 模板占位符填充。
 
 设计边界（见 design/01_generation_flow/prompt_rendering_refactor.md §3.1）：
 

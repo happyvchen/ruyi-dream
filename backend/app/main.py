@@ -121,6 +121,11 @@ STORYBOARD_PROMPT_CONFIG_KEYS = {
     "bottom": "assembly.storyboard_preview_bottom",
     "one_piece": "assembly.storyboard_preview_one_piece",
 }
+FINAL_IMAGE_PROMPT_CONFIG_KEYS = {
+    "top": "assembly.final_image_top",
+    "bottom": "assembly.final_image_bottom",
+    "one_piece": "assembly.final_image_one_piece",
+}
 AUTO_RUN_TARGET_FINAL = "FINAL"
 # /api/media 重定向的浏览器缓存时长:必须显著小于 presign 有效期,避免缓存过期签名。
 MEDIA_REDIRECT_CACHE_SECONDS = max(0, min(300, settings.s3_presign_expires_seconds - 120))
@@ -132,8 +137,8 @@ MAX_USER_INPUT_CHARS = 800
 # 重问约束、参考图事实源约束等已分别合并进对应的组装 Prompt 正文：
 #   - AI 选搭 / 拍摄剧本：正文开头含角色系统指令与 JSON 输出纪律，结尾含 JSON 重问约束，
 #     整段作为 user prompt 下发（不再单独走 Gemini system_instruction）。
-#   - 分镜预览 / 生成成片：正文内用 {{runtime.image_reference_manifest}} 承接参考图顺序，
-#     并在正文写明参考图身份/商品事实源约束（成片额外含分镜预览参考补充）。
+#   - 分镜预览 / 三类生成成片：正文内用按职能拆分的参考图图号占位承接参考图顺序，
+#     并在正文写明参考图身份、商品、分镜单格和环境事实源约束。
 
 
 def is_request_authenticated(request: Request) -> bool:
@@ -6811,6 +6816,10 @@ def storyboard_prompt_config_key(styling_plan: dict[str, Any]) -> str:
     return STORYBOARD_PROMPT_CONFIG_KEYS[storyboard_category_family(styling_plan)]
 
 
+def final_image_prompt_config_key(styling_plan: dict[str, Any]) -> str:
+    return FINAL_IMAGE_PROMPT_CONFIG_KEYS[storyboard_category_family(styling_plan)]
+
+
 def final_image_slot_roles(styling_plan: dict[str, Any]) -> list[str]:
     family = storyboard_category_family(styling_plan)
     return [f"{family}_grid_{index}" for index in range(1, 6)]
@@ -7007,7 +7016,7 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
     with get_db() as db:
         row = db.execute(
             """
-            SELECT gri.*, gp.preview_asset_id, grs.styling_id,
+            SELECT gri.*, gp.preview_asset_id, gp.environment_asset_id, grs.styling_id,
                    grs.input_version_id, grs.user_instruction_json AS result_set_user_instruction_json
             FROM generation_result_images_new gri
             JOIN generation_result_sets grs ON grs.id = gri.result_set_id
@@ -7023,6 +7032,7 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         include_preview=True,
         preview_asset_id=row["preview_asset_id"],
         input_version_id=int(row["input_version_id"]),
+        environment_asset_id=row["environment_asset_id"],
     )
     with get_db() as db:
         input_row = db.execute("SELECT hero_product_info_json FROM generation_task_input_versions WHERE id = ?", (row["input_version_id"],)).fetchone()
@@ -7031,12 +7041,14 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         row_value(row, "user_instruction_json"),
         loads(row_value(row, "result_set_user_instruction_json"), build_stage_user_instruction_context("final_image")),
     )
+    prompt_config_key = final_image_prompt_config_key(styling_plan)
     prompt_runtime = build_final_prompt_runtime(int(row["sort_order"]), str(row["shot_role"]), styling_plan, image_inputs, hero_product_info, final_image_user_instruction)
-    prompt = render_prompt_template("assembly.final_image", prompt_runtime)
+    prompt = render_prompt_template(prompt_config_key, prompt_runtime)
     return {
         "generation": {"stage": "final_image"},
         "prompt": prompt,
-        **prompt_execution_facts("assembly.final_image", prompt, prompt_runtime),
+        "categoryFamily": storyboard_category_family(styling_plan),
+        **prompt_execution_facts(prompt_config_key, prompt, prompt_runtime),
         "imageInputs": image_inputs,
         "heroProductInfo": hero_product_info,
         "finalImageUserInstruction": final_image_user_instruction,
@@ -7056,7 +7068,7 @@ def build_new_final_prompt(
     # 渲染层只输出「可变数据」：当前镜头各分段正文、分镜预览格号、参考图各职能图号区间、
     # 商品信息、用户要求。表头、分镜参考话术与事实源约束由 Prompt 维护模板正文托管。
     runtime = build_final_prompt_runtime(shot_index, shot_role, styling_plan, image_inputs or [], hero_product_info or {}, final_image_user_instruction or {})
-    return render_prompt_template("assembly.final_image", runtime)
+    return render_prompt_template(final_image_prompt_config_key(styling_plan), runtime)
 
 
 def build_final_prompt_runtime(
@@ -7070,18 +7082,22 @@ def build_final_prompt_runtime(
     spans = render_image_reference_spans(image_inputs or [])
     selected = selected_outfit_from_plan(styling_plan)
     selected_codes = ensure_string_list(styling_plan.get("selected_material_codes"))
-    return {
-            "preview_grid_cell": str(shot_index),
-            "shot_styling": f"选中搭配服装：{'、'.join(selected_codes) if selected_codes else '无库内配角'}。{str(selected.get('wearing_notes') or '')}",
-            "shot_global_directing": "严格复现对应分镜格的构图、角度、裁切与姿势，并保持商品和人物一致。",
-            "shot_current": f"分镜第 {shot_index} 格，镜头角色 {shot_role}。",
-            "shot_accessories": "仅保留分镜中已有的低存在感配饰，不新增遮挡商品的配饰。",
-            "ref_model_identity": spans["model_identity"],
-            "ref_preview_grid": spans["preview_grid"],
-            "ref_garment": spans["garment"],
-            "hero_product_info": render_hero_product_info_line(hero_product_info or {}),
-            "final_image_user_instruction": render_user_instruction_line(final_image_user_instruction or {}),
+    runtime = {
+        "preview_grid_cell": str(shot_index),
+        "shot_styling": f"选中搭配服装：{'、'.join(selected_codes) if selected_codes else '无库内配角'}。{str(selected.get('wearing_notes') or '')}",
+        "shot_global_directing": "严格复现对应分镜格的构图、角度、裁切与姿势，并保持商品和人物一致。",
+        "shot_current": f"分镜第 {shot_index} 格，镜头角色 {shot_role}。",
+        "shot_accessories": "仅保留分镜中已有的低存在感配饰，不新增遮挡商品的配饰。",
+        "ref_model_identity": spans["model_identity"],
+        "ref_preview_grid": spans["preview_grid"],
+        "ref_garment": spans["garment"],
+        "ref_shoot_environment": spans["shoot_environment"],
+        "hero_product_info": render_hero_product_info_line(hero_product_info or {}),
+        "final_image_user_instruction": render_user_instruction_line(final_image_user_instruction or {}),
     }
+    for index in range(1, 6):
+        runtime[f"is_shot_{index}"] = "1" if int(shot_index) == index else ""
+    return runtime
 
 
 def get_styling_plan_by_id(styling_id: int) -> dict[str, Any]:
@@ -7385,6 +7401,11 @@ def sample_prompt_runtime() -> dict[str, Any]:
         "shot_global_directing": "配饰边界：生成配饰低存在感",
         "shot_current": "格1（全身主视觉·全景）：\n  核心：主推款整体比例",
         "shot_accessories": "- jewelry：极简金色小耳圈",
+        "is_shot_1": "1",
+        "is_shot_2": "",
+        "is_shot_3": "",
+        "is_shot_4": "",
+        "is_shot_5": "",
         # 参考图各职能图号区间（只出会变的图号）
         "ref_model_identity": "图1-2",
         "ref_preview_grid": "图3",
@@ -7412,11 +7433,16 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.shot_global_directing", "scope": "runtime", "description": "当前成片全局导演正文，无表头"},
         {"name": "runtime.shot_current", "scope": "runtime", "description": "当前成片单镜头正文，无表头"},
         {"name": "runtime.shot_accessories", "scope": "runtime", "description": "当前成片本镜头配饰正文，无表头；为空则条件段省略"},
+        {"name": "runtime.is_shot_1", "scope": "runtime", "description": "当前成片为镜头 1 时有值，用于条件段"},
+        {"name": "runtime.is_shot_2", "scope": "runtime", "description": "当前成片为镜头 2 时有值，用于条件段"},
+        {"name": "runtime.is_shot_3", "scope": "runtime", "description": "当前成片为镜头 3 时有值，用于条件段"},
+        {"name": "runtime.is_shot_4", "scope": "runtime", "description": "当前成片为镜头 4 时有值，用于条件段"},
+        {"name": "runtime.is_shot_5", "scope": "runtime", "description": "当前成片为镜头 5 时有值，用于条件段"},
         # 参考图各职能图号区间：只出会变的图号，职能描述在模板正文托管
         {"name": "runtime.ref_model_identity", "scope": "runtime", "description": "模特身份参考图图号区间，如「图1-2」；无则空"},
         {"name": "runtime.ref_preview_grid", "scope": "runtime", "description": "分镜预览参考图图号（仅成片阶段），如「图3」；无则空"},
         {"name": "runtime.ref_garment", "scope": "runtime", "description": "主推款与搭配服装参考图的总图号区间，如「图4-6」；无则空"},
-        {"name": "runtime.ref_shoot_environment", "scope": "runtime", "description": "拍摄环境参考图图号（仅分镜预览阶段）；无则空"},
+        {"name": "runtime.ref_shoot_environment", "scope": "runtime", "description": "拍摄环境参考图图号；无则空"},
     ]
 
 

@@ -32,6 +32,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("045", "drop_subject_reference_prompt_runtime", "migration_drop_subject_reference_prompt_runtime"),
     ("047", "simplify_final_image_slots", "migration_simplify_final_image_slots"),
     ("048", "install_category_storyboard_prompts", "migration_install_category_storyboard_prompts"),
+    ("049", "install_category_final_image_prompts", "migration_install_category_final_image_prompts"),
 )
 
 # prompt_configs 只登记「Prompt 维护」页的配置槽（键 / 分组 / 标题 / 说明 / 排序），
@@ -48,7 +49,9 @@ PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
     ("assembly.storyboard_preview_top", "assembly", "分镜预览 · 上装/针织/外套", "Image-2 上装类固定六镜头分镜 Prompt。", 120),
     ("assembly.storyboard_preview_bottom", "assembly", "分镜预览 · 裤装/半身裙", "Image-2 下装类固定六镜头分镜 Prompt。", 130),
     ("assembly.storyboard_preview_one_piece", "assembly", "分镜预览 · 连衣裙/连体/套装", "Image-2 连衣裙/连体/套装固定六镜头分镜 Prompt。", 140),
-    ("assembly.final_image", "assembly", "生成成片", "Image-2 单张成片 Prompt，按分镜前 5 格生成最终图。", 150),
+    ("assembly.final_image_top", "assembly", "生成成片 · 上装/针织/外套", "Image-2 上装类固定五镜头成片 Prompt。", 150),
+    ("assembly.final_image_bottom", "assembly", "生成成片 · 裤装/半身裙", "Image-2 下装类固定五镜头成片 Prompt。", 160),
+    ("assembly.final_image_one_piece", "assembly", "生成成片 · 连衣裙/连体/套装", "Image-2 连衣裙/连体/套装固定五镜头成片 Prompt。", 170),
 )
 
 # 合并进组装 Prompt 正文后需从库里清除的孤儿配置键。
@@ -398,6 +401,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_merge_garment_reference_prompt_runtime": migration_merge_garment_reference_prompt_runtime,
         "migration_drop_subject_reference_prompt_runtime": migration_drop_subject_reference_prompt_runtime,
         "migration_install_category_storyboard_prompts": migration_install_category_storyboard_prompts,
+        "migration_install_category_final_image_prompts": migration_install_category_final_image_prompts,
         "migration_simplify_final_image_slots": migration_simplify_final_image_slots,
     }
     for version, name, function_name in MIGRATIONS:
@@ -1154,6 +1158,36 @@ def migration_install_category_storyboard_prompts(db: sqlite3.Connection) -> Non
             (key, meta[1], meta[2], meta[3], content, meta[4], timestamp),
         )
     db.execute("DELETE FROM prompt_configs WHERE key IN ('assembly.shoot_script', 'assembly.storyboard_preview')")
+
+
+def migration_install_category_final_image_prompts(db: sqlite3.Connection) -> None:
+    create_prompt_config_table(db)
+    template_dir = Path(__file__).resolve().parent.parent / "prompt_templates"
+    templates = {
+        "assembly.final_image_top": "final_image_top.txt",
+        "assembly.final_image_bottom": "final_image_bottom.txt",
+        "assembly.final_image_one_piece": "final_image_one_piece.txt",
+    }
+    timestamp = now_iso()
+    for key, filename in templates.items():
+        content = (template_dir / filename).read_text(encoding="utf-8").strip()
+        meta = next(item for item in PROMPT_CONFIG_CATALOG if item[0] == key)
+        db.execute(
+            """
+            INSERT INTO prompt_configs
+              (key, group_type, title, description, content, sort_order, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+              group_type = excluded.group_type,
+              title = excluded.title,
+              description = excluded.description,
+              content = excluded.content,
+              sort_order = excluded.sort_order,
+              updated_at = excluded.updated_at
+            """,
+            (key, meta[1], meta[2], meta[3], content, meta[4], timestamp),
+        )
+    db.execute("DELETE FROM prompt_configs WHERE key = 'assembly.final_image'")
 
 
 def migration_simplify_final_image_slots(db: sqlite3.Connection) -> None:
