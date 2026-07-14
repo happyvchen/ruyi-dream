@@ -118,6 +118,7 @@ PROMPT_SECTION_PATTERN = re.compile(
     r"{{\s*([#^])\s*((?:segment|runtime)\.[a-zA-Z0-9_.-]+)\s*}}(.*?){{\s*/\s*\2\s*}}",
     re.DOTALL,
 )
+LEGACY_EMPTY_RUNTIME_PLACEHOLDERS = {"styling_outfit", "resolved_accessories"}
 AI_STYLING_PROMPT_CONFIG_KEY = "assembly.ai_styling"
 STORYBOARD_PROMPT_CONFIG_KEYS = {
     "top": "assembly.storyboard_preview_top",
@@ -6600,23 +6601,13 @@ def build_preview_prompt_runtime(
     storyboard_preview_user_instruction: dict[str, Any],
 ) -> dict[str, Any]:
     spans = render_image_reference_spans(image_inputs or [])
-    selected = selected_outfit_from_plan(styling_plan)
-    selected_codes = ensure_string_list(styling_plan.get("selected_material_codes"))
-    wearing = str(selected.get("wearing_notes") or selected.get("styling_notes") or "按参考商品的真实结构自然穿着，主推款始终是视觉核心。")
-    accessories = selected.get("generated_accessories")
-    if isinstance(accessories, list):
-        accessory_text = "、".join(str(item) for item in accessories if item) or "仅允许低存在感鞋、包、首饰，不遮挡主推款。"
-    else:
-        accessory_text = str(accessories or "仅允许低存在感鞋、包、首饰，不遮挡主推款。")
     return {
-            "category_family": storyboard_category_family(styling_plan),
-            "styling_outfit": f"选中搭配服装：{'、'.join(selected_codes) if selected_codes else '无库内配角'}。穿着关系：{wearing}",
-            "resolved_accessories": accessory_text,
-            "ref_model_identity": spans["model_identity"],
-            "ref_garment": spans["garment"],
-            "ref_shoot_environment": spans["shoot_environment"],
-            "hero_product_info": render_hero_product_info_line(hero_product_info or {}),
-            "storyboard_preview_user_instruction": render_user_instruction_line(storyboard_preview_user_instruction or {}),
+        "category_family": storyboard_category_family(styling_plan),
+        "ref_model_identity": spans["model_identity"],
+        "ref_garment": spans["garment"],
+        "ref_shoot_environment": spans["shoot_environment"],
+        "hero_product_info": render_hero_product_info_line(hero_product_info or {}),
+        "storyboard_preview_user_instruction": render_user_instruction_line(storyboard_preview_user_instruction or {}),
     }
 
 
@@ -6989,7 +6980,10 @@ def render_prompt_config(
                 diagnostics["missingPlaceholders"].append(f"{name} (空内容)")
             return render_text(segment_content, [*stack, name])
         if name.startswith("runtime."):
-            value = runtime.get(name.removeprefix("runtime."))
+            runtime_name = name.removeprefix("runtime.")
+            if runtime_name in LEGACY_EMPTY_RUNTIME_PLACEHOLDERS and runtime_name not in runtime:
+                return ""
+            value = runtime.get(runtime_name)
             if value is None:
                 diagnostics["missingPlaceholders"].append(name)
                 return f"[[缺失运行时:{name}]]"
@@ -7074,8 +7068,6 @@ def sample_prompt_runtime() -> dict[str, Any]:
         "final_image_user_instruction": "成片整体更干净，减少配饰存在感。",
         # 固定品类分镜 Prompt 的少量动态事实（自然语言，不传中间剧本 JSON）
         "category_family": "bottom",
-        "styling_outfit": "选中搭配服装：LOOK-A。穿着关系：轻量上装服务主推裤装。",
-        "resolved_accessories": "低存在感黑色鞋履，不遮挡主推款。",
         # 当前成片各分段（成片用；无表头）
         "preview_grid_cell": "1",
         "shot_styling": "造型：吊带裙配同色飘带\n穿法：单穿吊带裙",
@@ -7106,8 +7098,6 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.final_image_user_instruction", "scope": "runtime", "description": "最终成片或单张重生本次执行的用户介入要求"},
         {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭导演上下文，使用搭配服装 code 标识"},
         {"name": "runtime.category_family", "scope": "runtime", "description": "代码判定的拍摄图位族：top / bottom / one_piece"},
-        {"name": "runtime.styling_outfit", "scope": "runtime", "description": "选中搭配服装与穿着关系的自然语言摘要"},
-        {"name": "runtime.resolved_accessories", "scope": "runtime", "description": "低存在感生成配饰边界的自然语言摘要"},
         # 成片：当前镜头各分段
         {"name": "runtime.preview_grid_cell", "scope": "runtime", "description": "当前成片对应分镜预览的格号（纯数字）"},
         {"name": "runtime.shot_styling", "scope": "runtime", "description": "当前成片造型正文（造型/穿法/选中搭配 code），无表头"},

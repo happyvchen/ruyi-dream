@@ -2,9 +2,7 @@
 
 参考图职责：{{runtime.ref_model_identity}} 只决定同一位成年女模特的身份、脸、发型和气质；{{runtime.ref_garment}} 只决定主推款与已选搭配服装的真实颜色、长度、廓形、材质和结构；{{runtime.ref_shoot_environment}} 只决定影棚背景、光线、墙面与地面。不得互换参考图职责。六格必须保持同一人物、同一服装、同一穿法和同一比例，商品级保真，不增删或改造服装。
 
-商品与造型：{{runtime.hero_product_info}}
-{{runtime.styling_outfit}}
-配饰边界：{{runtime.resolved_accessories}}
+商品信息：{{runtime.hero_product_info}}
 本次补充要求：{{runtime.storyboard_preview_user_instruction}}
 
 整体风格：高级、时尚、自信、冷静、现代、精致、优雅的品牌 Catalog 棚拍。表情克制冷酷，肩颈放松；通过轻微抬颚或收颚、高低肩、重心偏移、单腿承重、错腿、轻斜正或轻侧身、自然扶腰或门襟、低存在感包袋、轻走动或回望形成变化。避免立正军姿、双臂僵直贴腿、六格重复姿势、夸张扭腰张腿、T 台 pose、网红摆拍和情绪化表演。背景严格沿用环境参考图的墙面、地面、色调和光线；环境图可见墙地交界缝时，六格都保留同一条真实、细而清楚的墙地交界缝，并保持柔和棚拍光和轻微接地阴影。

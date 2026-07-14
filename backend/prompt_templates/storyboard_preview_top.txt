@@ -1,5 +1,5 @@
 生成一张 3:2 横向、三列两行、六格等大的高端女装电商分镜预览。只输出完整六宫格，不要标题、编号、文字、水印、边框。{{runtime.ref_model_identity}} 只决定同一位成年女模特；{{runtime.ref_garment}} 只决定服装真实事实；{{runtime.ref_shoot_environment}} 只决定背景和光线。六格同一人物、同一服装、同一穿法，商品级保真。
-商品与造型：{{runtime.hero_product_info}} {{runtime.styling_outfit}} 配饰：{{runtime.resolved_accessories}} 补充要求：{{runtime.storyboard_preview_user_instruction}}
+商品信息：{{runtime.hero_product_info}} 补充要求：{{runtime.storyboard_preview_user_instruction}}
 高级、时尚、自信、冷静、现代的 Catalog 棚拍；冷酷克制表情、肩颈放松、重心偏移、错腿、高低肩、轻侧身、插袋或轻扶门襟，六格姿态有变化。禁止立正军姿、僵直贴腿、夸张网红 pose。背景严格沿用环境参考图；环境图可见墙地交界缝时，六格都保留同一条清楚但克制的墙地交界缝。
 格1：七分身正面中景，从头顶到大腿上部，上衣领口至下摆完整，模特居中。
 格2：服装细节近景，画面上缘位于嘴唇至下巴之间或完全无头，眼睛、眉毛和鼻子不得出现；服装填满画面，聚焦领口、门襟、扣子、袖口和面料。

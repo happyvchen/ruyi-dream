@@ -94,8 +94,6 @@ ABANDONED
 - `runtime.hero_product_info`
 - `runtime.storyboard_preview_user_instruction`
 - `runtime.category_family`
-- `runtime.styling_outfit`
-- `runtime.resolved_accessories`
 
 成片动态事实：
 

@@ -7,9 +7,9 @@
 | [品牌信息 Prompt 实施样例](brand-info-prompt.md) | `segment.brand_info` |
 | [AI 打标 Prompt 实施样例](ai-tagging-prompt.md) | `assembly.ai_tagging` |
 | [AI 选搭 Prompt 实施样例](ai-styling-prompt.md) | `assembly.ai_styling` |
-| [拍摄剧本 Prompt 实施样例](shoot-script-prompt.md) | `assembly.shoot_script` |
-| [分镜预览 Prompt 实施样例](storyboard-preview-prompt.md) | `assembly.storyboard_preview` |
-| [生成成片 Prompt 实施样例](final-image-prompt.md) | `assembly.final_image` |
+| [拍摄剧本 Prompt 实施样例（已废弃）](shoot-script-prompt.md) | 当前主流程不使用 |
+| [分镜预览 Prompt 实施样例](storyboard-preview-prompt.md) | `assembly.storyboard_preview_top` / `assembly.storyboard_preview_bottom` / `assembly.storyboard_preview_one_piece` |
+| [生成成片 Prompt 实施样例](final-image-prompt.md) | `assembly.final_image_top` / `assembly.final_image_bottom` / `assembly.final_image_one_piece` |
 
 实施规则：
 

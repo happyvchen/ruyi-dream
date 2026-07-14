@@ -7,7 +7,7 @@ Prompt 维护页托管稳定业务规则；代码只注入会随任务变化的�
 | 阶段 | 动态占位 | 说明 |
 |---|---|---|
 | AI 选搭 | `candidate_retrieval`, `hero_product_info`, `ai_styling_user_instruction`, `user_requirement` | 给 Gemini 的选搭事实与用户要求 |
-| 分镜预览 | `category_family`, `styling_outfit`, `resolved_accessories`, `ref_model_identity`, `ref_garment`, `ref_shoot_environment`, `hero_product_info`, `storyboard_preview_user_instruction` | 给三类固定分镜 Prompt 的少量动态事实 |
+| 分镜预览 | `category_family`, `ref_model_identity`, `ref_garment`, `ref_shoot_environment`, `hero_product_info`, `storyboard_preview_user_instruction` | 给三类固定分镜 Prompt 的少量动态事实 |
 | 最终成片 | `preview_grid_cell`, `shot_styling`, `shot_global_directing`, `shot_current`, `shot_accessories`, `ref_model_identity`, `ref_preview_grid`, `ref_garment`, `ref_shoot_environment`, `hero_product_info`, `final_image_user_instruction`, `is_shot_1..5` | 给三类固定成片 Prompt 的当前格动态事实 |
 
 ## 禁止
