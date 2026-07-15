@@ -3237,7 +3237,6 @@ function PromptMaintenancePage({ run }: { run: any }) {
   const [invocations, setInvocations] = useState<PromptInvocationOption[]>([])
   const [attemptId, setAttemptId] = useState<number | undefined>()
   const [historicalPrompt, setHistoricalPrompt] = useState('')
-  const [showTools, setShowTools] = useState(false)
 
   function loadConfigs(selectKey?: string) {
     return api.listPromptConfigs().then((result) => {
@@ -3294,7 +3293,6 @@ function PromptMaintenancePage({ run }: { run: any }) {
 
   function refreshPreview() {
     if (!activeItem) return
-    setShowTools(true)
     void run('渲染 Prompt 预览中...', () => api.previewPromptConfig(activeItem.key, draft, attemptId), (result: { rendered: string; historicalPrompt?: string | null; diagnostics: { missingPlaceholders: string[]; usedSegments: string[] } }) => {
       setRendered(result.rendered)
       setHistoricalPrompt(result.historicalPrompt ?? '')
@@ -3321,9 +3319,9 @@ function PromptMaintenancePage({ run }: { run: any }) {
     <section className="page workbench-page prompt-page">
       <PageTitle
         title="Prompt 维护"
-        actions={<div className="toolbar"><span className="chip">Admin</span><button className="management-action" onClick={() => setShowTools((value) => !value)}><Eye size={16} />{showTools ? '收起预览工具' : '预览工具'}</button>{showTools && <button className="management-action" onClick={refreshPreview} disabled={!activeItem}><RefreshCw size={16} />刷新预览</button>}<button className="management-action" onClick={save} disabled={!activeItem || !dirty}><Save size={16} />保存</button></div>}
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="management-action" onClick={refreshPreview} disabled={!activeItem}><RefreshCw size={16} />刷新预览</button><button className="management-action" onClick={save} disabled={!activeItem || !dirty}><Save size={16} />保存</button></div>}
       />
-      <div className={`prompt-maintenance-layout ${showTools ? '' : 'tools-collapsed'}`}>
+      <div className="prompt-maintenance-layout">
         <aside className="panel prompt-nav-panel">
           <PromptNavGroup title="分段 Prompt" items={segments} activeKey={activeKey} onSelect={selectItem} />
           <PromptNavGroup title="组装 Prompt" items={assemblies} activeKey={activeKey} onSelect={selectItem} />
@@ -3347,7 +3345,7 @@ function PromptMaintenancePage({ run }: { run: any }) {
             </>
           ) : <EmptyState title="暂无 Prompt 配置" text="后端还没有返回可维护的 Prompt 配置。" />}
         </section>
-        {showTools && <aside className="panel prompt-preview-panel">
+        <aside className="panel prompt-preview-panel">
           <div className="prompt-side-section">
             <h3>历史调用上下文</h3>
             <select value={attemptId ?? ''} onChange={(event) => setAttemptId(event.target.value ? Number(event.target.value) : undefined)}>
@@ -3376,7 +3374,7 @@ function PromptMaintenancePage({ run }: { run: any }) {
               ))}
             </div>
           </div>
-        </aside>}
+        </aside>
       </div>
     </section>
   )

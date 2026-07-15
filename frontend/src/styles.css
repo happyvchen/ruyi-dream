@@ -183,7 +183,6 @@ h1, h2, h3, p { margin: 0; }
   min-height: 560px;
   overflow: hidden;
 }
-.prompt-maintenance-layout.tools-collapsed { grid-template-columns: 240px minmax(560px, 1fr); }
 .prompt-nav-panel,
 .prompt-preview-panel {
   min-height: 0;
