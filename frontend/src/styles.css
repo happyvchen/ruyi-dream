@@ -2874,6 +2874,30 @@ a.button-link { text-decoration: none; cursor: pointer; }
   flex-wrap: wrap;
   margin-bottom: 4px;
 }
+.record-view-tabs {
+  display: inline-flex;
+  align-items: center;
+  height: 36px;
+  padding: 3px;
+  border: 1px solid #d8e0ea;
+  border-radius: 999px;
+  background: #f8fafc;
+}
+.record-view-tabs button {
+  height: 28px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 700;
+}
+.record-view-tabs button.active {
+  background: #fff;
+  color: #0f172a;
+  box-shadow: 0 1px 6px rgba(15, 23, 42, .08);
+}
 .record-filter-pills,
 .record-list-meta {
   display: inline-flex;
@@ -2938,6 +2962,43 @@ a.button-link { text-decoration: none; cursor: pointer; }
   background: transparent;
   text-align: left;
 }
+.batch-record-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.batch-record-open {
+  grid-template-columns: 56px minmax(180px, 1fr) 280px;
+}
+.batch-cover-stack {
+  width: 54px;
+  height: 54px;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 3px;
+}
+.batch-cover-stack .asset-thumb {
+  width: 100%;
+  min-width: 0;
+  border-radius: 6px;
+}
+.batch-progress-strip {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.batch-progress-strip span {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  margin: 0;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+}
 .record-row:hover,
 .record-row:has(.record-open:focus-visible) {
   border-color: #9bd7ff;
@@ -2988,6 +3049,33 @@ a.button-link { text-decoration: none; cursor: pointer; }
   min-height: 0;
   max-height: 100%;
   overflow: auto;
+}
+.batch-detail-head {
+  display: grid;
+  gap: 6px;
+}
+.batch-detail-head h3 {
+  margin: 0;
+}
+.batch-detail-head p {
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
+}
+.batch-detail-stats,
+.batch-detail-task-list {
+  display: grid;
+  gap: 10px;
+}
+.batch-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.management-action.is-disabled {
+  pointer-events: none;
+  opacity: .55;
 }
 .detail-preview {
   width: 100%;
@@ -3447,6 +3535,17 @@ a.button-link { text-decoration: none; cursor: pointer; }
   }
   .record-open .strip {
     display: none;
+  }
+  .batch-record-open {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+  .batch-cover-stack {
+    width: 44px;
+    height: 44px;
+  }
+  .batch-progress-strip {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
   }
   .record-row { grid-template-columns: minmax(0, 1fr); }
   .records-page:has(.record-row > input) .record-row { grid-template-columns: 18px minmax(0, 1fr); }

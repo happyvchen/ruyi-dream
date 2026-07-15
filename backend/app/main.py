@@ -3723,7 +3723,7 @@ def list_generation_record_batches(
         if created_to_dt and created_at and created_at > created_to_dt:
             continue
         if keyword_text:
-            haystack = " ".join([batch_id, batch["name"], *batch["sampleTaskNames"], *(batch.get("statusCounts") or {}).keys()]).casefold()
+            haystack = " ".join([batch_id, batch["name"], *(str(row["name"]) for row in batch_rows), *(batch.get("statusCounts") or {}).keys()]).casefold()
             if keyword_text not in haystack:
                 continue
         if not generation_batch_matches_status(batch, status_values):
@@ -3754,6 +3754,120 @@ def list_generation_record_batches(
         "totalPages": (total + limit - 1) // limit if total else 0,
         "facets": {"status": facet_options(batch["status"] for batch in batches)},
         "stableFacets": {"status": facet_options(batch["status"] for batch in stable_batches)},
+    }
+
+
+@app.get("/api/generation-record-workspace")
+def list_generation_record_workspace(
+    include_archived: bool = Query(False, alias="includeArchived"),
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    keyword: str | None = Query(None),
+    status: list[str] | None = Query(None),
+    created_from: str | None = Query(None, alias="createdFrom"),
+    created_to: str | None = Query(None, alias="createdTo"),
+    sort_by: str = Query("createdAt", alias="sortBy"),
+    sort_dir: str = Query("desc", alias="sortDir"),
+) -> dict[str, Any]:
+    status_values = split_filter_values(status)
+    created_from_dt = parse_filter_datetime(created_from, end_of_day=False)
+    created_to_dt = parse_filter_datetime(created_to, end_of_day=True)
+    keyword_text = str(keyword or "").strip().casefold()
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT * FROM generation_tasks
+            WHERE deleted_at IS NULL
+            ORDER BY created_at, id
+            """
+        ).fetchall()
+    grouped: dict[str, list[Any]] = {}
+    unbatched_rows = []
+    for row in rows:
+        batch_id = str(row_value(row, "batch_id") or "").strip()
+        if batch_id:
+            grouped.setdefault(batch_id, []).append(row)
+        else:
+            unbatched_rows.append(row)
+    stable_statuses: list[str] = []
+    for batch_id, batch_rows in grouped.items():
+        batch = serialize_generation_batch_record(batch_id, batch_rows)
+        if include_archived or batch["status"] != "ARCHIVED":
+            stable_statuses.append(str(batch["status"]))
+    for row in unbatched_rows:
+        archived = bool(row_value(row, "archived_at") or row["status"] == "ABANDONED")
+        if include_archived or not archived:
+            stable_statuses.append(str(row["status"]))
+    items: list[dict[str, Any]] = []
+    for batch_id, batch_rows in grouped.items():
+        batch = serialize_generation_batch_record(batch_id, batch_rows)
+        if not include_archived and batch["status"] == "ARCHIVED":
+            continue
+        created_at = parse_filter_datetime(str(batch["createdAt"]), end_of_day=False)
+        if created_from_dt and created_at and created_at < created_from_dt:
+            continue
+        if created_to_dt and created_at and created_at > created_to_dt:
+            continue
+        if keyword_text:
+            haystack = " ".join([batch_id, batch["name"], *(str(row["name"]) for row in batch_rows), *(batch.get("statusCounts") or {}).keys()]).casefold()
+            if keyword_text not in haystack:
+                continue
+        if not generation_batch_matches_status(batch, status_values):
+            continue
+        items.append({
+            "kind": "batch",
+            "id": f"batch:{batch_id}",
+            "status": batch["status"],
+            "name": batch["name"],
+            "createdAt": batch["createdAt"],
+            "updatedAt": batch["updatedAt"],
+            "batch": batch,
+        })
+    for row in unbatched_rows:
+        archived = bool(row_value(row, "archived_at") or row["status"] == "ABANDONED")
+        if not include_archived and archived:
+            continue
+        created_at = parse_filter_datetime(str(row["created_at"]), end_of_day=False)
+        if created_from_dt and created_at and created_at < created_from_dt:
+            continue
+        if created_to_dt and created_at and created_at > created_to_dt:
+            continue
+        if keyword_text:
+            haystack = " ".join([str(row["name"]), str(row["status"]), str(row_value(row, "batch_id") or "")]).casefold()
+            if keyword_text not in haystack:
+                continue
+        if status_values and str(row["status"]).casefold() not in status_values:
+            continue
+        task = serialize_generation_task(row, include_detail=False)
+        items.append({
+            "kind": "task",
+            "id": f"task:{row['id']}",
+            "status": str(row["status"]),
+            "name": str(row["name"]),
+            "createdAt": str(row["created_at"]),
+            "updatedAt": str(row["updated_at"]),
+            "task": task,
+        })
+    sort_key = {
+        "createdAt": lambda item: str(item["createdAt"]),
+        "updatedAt": lambda item: str(item["updatedAt"]),
+        "name": lambda item: str(item["name"]).casefold(),
+        "status": lambda item: BATCH_RECORD_STATUS_ORDER.index(item["status"]) if item["status"] in BATCH_RECORD_STATUS_ORDER else len(BATCH_RECORD_STATUS_ORDER),
+    }.get(sort_by, lambda item: str(item["createdAt"]))
+    reverse = sort_dir != "asc"
+    items = sorted(items, key=lambda item: (sort_key(item), str(item["id"])), reverse=reverse)
+    total = len(items)
+    page_items = items[offset:offset + limit]
+    return {
+        "items": page_items,
+        "limit": limit,
+        "offset": offset,
+        "nextOffset": offset + limit if offset + limit < total else None,
+        "hasMore": offset + limit < total,
+        "total": total,
+        "totalPages": (total + limit - 1) // limit if total else 0,
+        "facets": {"status": facet_options(item["status"] for item in items)},
+        "stableFacets": {"status": facet_options(stable_statuses)},
     }
 
 

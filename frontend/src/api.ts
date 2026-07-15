@@ -69,6 +69,42 @@ export type GenerationRecordListResponse = Paginated<GenerationTask> & {
   stableFacets?: GenerationRecordFacets
 }
 
+export type GenerationRecordBatch = {
+  id: string
+  batchId: string
+  name: string
+  status: string
+  taskCount: number
+  activeTaskCount: number
+  archivedTaskCount: number
+  completedTaskCount: number
+  failedTaskCount: number
+  cancelledTaskCount: number
+  runningTaskCount: number
+  queuedTaskCount: number
+  downloadableTaskCount: number
+  statusCounts: Record<string, number>
+  createdAt: string
+  updatedAt: string
+  coverTasks: GenerationTask[]
+  sampleTaskNames: string[]
+  firstTaskId: number
+}
+
+export type GenerationWorkspaceRecord =
+  | { kind: 'batch'; id: string; status: string; name: string; createdAt: string; updatedAt: string; batch: GenerationRecordBatch }
+  | { kind: 'task'; id: string; status: string; name: string; createdAt: string; updatedAt: string; task: GenerationTask }
+
+export type GenerationRecordBatchListResponse = Paginated<GenerationRecordBatch> & {
+  facets?: GenerationRecordFacets
+  stableFacets?: GenerationRecordFacets
+}
+
+export type GenerationRecordWorkspaceResponse = Paginated<GenerationWorkspaceRecord> & {
+  facets?: GenerationRecordFacets
+  stableFacets?: GenerationRecordFacets
+}
+
 export type MediaAsset = {
   id: number
   objectKey: string
@@ -622,6 +658,30 @@ export const api = {
     sortDir?: string
   }) =>
     request<GenerationRecordListResponse>(params('/api/generation-records', options ?? {})),
+  listRecordBatches: (options?: {
+    limit?: number
+    offset?: number
+    keyword?: string
+    includeArchived?: boolean
+    status?: string[]
+    createdFrom?: string
+    createdTo?: string
+    sortBy?: string
+    sortDir?: string
+  }) =>
+    request<GenerationRecordBatchListResponse>(params('/api/generation-record-batches', options ?? {})),
+  listRecordWorkspace: (options?: {
+    limit?: number
+    offset?: number
+    keyword?: string
+    includeArchived?: boolean
+    status?: string[]
+    createdFrom?: string
+    createdTo?: string
+    sortBy?: string
+    sortDir?: string
+  }) =>
+    request<GenerationRecordWorkspaceResponse>(params('/api/generation-record-workspace', options ?? {})),
   getRecord: (id: number, includeDebug = false) =>
     request<{ item: GenerationTask }>(params(`/api/generation-records/${id}`, { includeDebug })),
   listModels: () => request<Paginated<ModelProfile>>('/api/model-profiles?limit=30'),

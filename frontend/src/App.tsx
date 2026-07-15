@@ -40,7 +40,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl } from './api'
-import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, FacetOption, FinalImageExportPrecheck, GenerationRecordFacets, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse } from './api'
+import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse } from './api'
 import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { friendlyErrorText } from './lib/errorMessages'
@@ -2477,13 +2477,28 @@ const generationRecordStatuses = [
   'ABANDONED',
 ]
 
+const generationBatchRecordStatuses = ['ARCHIVED', 'RUNNING', 'FAILED', 'PARTIAL', 'CANCELLED', 'COMPLETED', 'PENDING']
+const workspaceRecordStatuses = [...generationBatchRecordStatuses, ...generationRecordStatuses.filter((status) => !generationBatchRecordStatuses.includes(status))]
+
 function generationRecordStatusOptions(options: FacetOption[] | undefined, stableOptions: FacetOption[] | undefined, selected: string) {
+  return orderedStatusOptions(generationRecordStatuses, options, stableOptions, selected)
+}
+
+function generationBatchStatusOptions(options: FacetOption[] | undefined, stableOptions: FacetOption[] | undefined, selected: string) {
+  return orderedStatusOptions(generationBatchRecordStatuses, options, stableOptions, selected)
+}
+
+function generationWorkspaceStatusOptions(options: FacetOption[] | undefined, stableOptions: FacetOption[] | undefined, selected: string) {
+  return orderedStatusOptions(workspaceRecordStatuses, options, stableOptions, selected)
+}
+
+function orderedStatusOptions(order: string[], options: FacetOption[] | undefined, stableOptions: FacetOption[] | undefined, selected: string) {
   const byValue = new Map((stableOptions ?? []).map((option) => [option.value, { ...option, count: 0 }]))
   for (const option of options ?? []) byValue.set(option.value, option)
   if (selected && !byValue.has(selected)) byValue.set(selected, { value: selected, label: selected, count: 0 })
   return [
-    ...generationRecordStatuses.map((status) => byValue.get(status) ?? { value: status, label: status, count: 0 }),
-    ...Array.from(byValue.values()).filter((option) => !generationRecordStatuses.includes(option.value)),
+    ...order.map((status) => byValue.get(status) ?? { value: status, label: status, count: 0 }),
+    ...Array.from(byValue.values()).filter((option) => !order.includes(option.value)),
   ]
 }
 
@@ -3532,6 +3547,8 @@ function PromptNavGroup({ title, items, activeKey, onSelect }: { title: string; 
   )
 }
 
+type RecordViewMode = 'all' | 'batches' | 'tasks'
+
 function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   records: GenerationTask[]
   detail: GenerationTask | null
@@ -3541,6 +3558,13 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
 }) {
   const recordListBodyRef = useRef<HTMLDivElement | null>(null)
   const autoPageSize = useAutoRecordPageSize(recordListBodyRef)
+  const [viewMode, setViewMode] = useState<RecordViewMode>('all')
+  const [workspaceItems, setWorkspaceItems] = useState<GenerationWorkspaceRecord[]>([])
+  const [batchRecords, setBatchRecords] = useState<GenerationRecordBatch[]>([])
+  const [batchDetail, setBatchDetail] = useState<GenerationRecordBatch | null>(null)
+  const [batchDetailTasks, setBatchDetailTasks] = useState<GenerationTask[]>([])
+  const [batchDetailLoading, setBatchDetailLoading] = useState(false)
+  const batchDetailRequestRef = useRef('')
   const [items, setItems] = useState<GenerationTask[]>(records)
   const [query, setQuery] = useState('')
   const [offset, setOffset] = useState(0)
@@ -3565,8 +3589,9 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   const [pageSizeMode, setPageSizeMode] = useState<'auto' | 'fixed'>('auto')
   const [pageSize, setPageSize] = useState(() => estimateAutoRecordPageSize())
   const [bulkMode, setBulkMode] = useState(false)
-  const selectableRecordIds = items.filter((item) => !isTaskRunning(item)).map((item) => item.id)
-  const selectedVisibleRecords = items.filter((item) => selectedRecordIds.has(item.id) && selectableRecordIds.includes(item.id))
+  const taskListItems = viewMode === 'tasks' ? items : []
+  const selectableRecordIds = taskListItems.filter((item) => !isTaskRunning(item)).map((item) => item.id)
+  const selectedVisibleRecords = taskListItems.filter((item) => selectedRecordIds.has(item.id) && selectableRecordIds.includes(item.id))
   const selectedArchivedRecords = selectedVisibleRecords.filter((item) => item.archivedAt)
   const selectedActiveRecords = selectedVisibleRecords.filter((item) => !item.archivedAt)
   const allVisibleRecordsSelected = selectableRecordIds.length > 0 && selectableRecordIds.every((id) => selectedRecordIds.has(id))
@@ -3586,29 +3611,61 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
     }
   }
 
+  function applyRecordListResult(result: { items: GenerationTask[]; total: number; totalPages: number; facets?: GenerationRecordFacets; stableFacets?: GenerationRecordFacets }, targetOffset: number) {
+    setItems(result.items)
+    setWorkspaceItems([])
+    setBatchRecords([])
+    setTotal(result.total)
+    setTotalPages(result.totalPages)
+    setFacets(result.facets ?? {})
+    setStableFacets(result.stableFacets ?? result.facets ?? {})
+    if (!result.items.length && targetOffset > 0) setOffset(Math.max(0, targetOffset - pageSize))
+  }
+
+  function applyWorkspaceResult(result: { items: GenerationWorkspaceRecord[]; total: number; totalPages: number; facets?: GenerationRecordFacets; stableFacets?: GenerationRecordFacets }, targetOffset: number) {
+    setWorkspaceItems(result.items)
+    setItems([])
+    setBatchRecords([])
+    setTotal(result.total)
+    setTotalPages(result.totalPages)
+    setFacets(result.facets ?? {})
+    setStableFacets(result.stableFacets ?? result.facets ?? {})
+    if (!result.items.length && targetOffset > 0) setOffset(Math.max(0, targetOffset - pageSize))
+  }
+
+  function applyBatchListResult(result: { items: GenerationRecordBatch[]; total: number; totalPages: number; facets?: GenerationRecordFacets; stableFacets?: GenerationRecordFacets }, targetOffset: number) {
+    setBatchRecords(result.items)
+    setWorkspaceItems([])
+    setItems([])
+    setTotal(result.total)
+    setTotalPages(result.totalPages)
+    setFacets(result.facets ?? {})
+    setStableFacets(result.stableFacets ?? result.facets ?? {})
+    if (!result.items.length && targetOffset > 0) setOffset(Math.max(0, targetOffset - pageSize))
+  }
+
   function refreshRecordPage(targetOffset = offset) {
-    return api.listRecords(recordQueryOptions(targetOffset)).then((result) => {
-      setItems(result.items)
-      setTotal(result.total)
-      setTotalPages(result.totalPages)
-      setFacets(result.facets ?? {})
-      setStableFacets(result.stableFacets ?? result.facets ?? {})
-      if (!result.items.length && targetOffset > 0) setOffset(Math.max(0, targetOffset - pageSize))
-    })
+    if (viewMode === 'all') return api.listRecordWorkspace(recordQueryOptions(targetOffset)).then((result) => applyWorkspaceResult(result, targetOffset))
+    if (viewMode === 'batches') return api.listRecordBatches(recordQueryOptions(targetOffset)).then((result) => applyBatchListResult(result, targetOffset))
+    return api.listRecords(recordQueryOptions(targetOffset)).then((result) => applyRecordListResult(result, targetOffset))
   }
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     const timer = window.setTimeout(() => {
-      void api.listRecords(recordQueryOptions(offset)).then((result) => {
-        if (cancelled) return
-        setItems(result.items)
-        setTotal(result.total)
-        setTotalPages(result.totalPages)
-        setFacets(result.facets ?? {})
-        setStableFacets(result.stableFacets ?? result.facets ?? {})
-      }).catch(() => undefined).finally(() => {
+      const request = viewMode === 'all'
+        ? api.listRecordWorkspace(recordQueryOptions(offset)).then((result) => {
+          if (!cancelled) applyWorkspaceResult(result, offset)
+        })
+        : viewMode === 'batches'
+          ? api.listRecordBatches(recordQueryOptions(offset)).then((result) => {
+            if (!cancelled) applyBatchListResult(result, offset)
+          })
+          : api.listRecords(recordQueryOptions(offset)).then((result) => {
+            if (!cancelled) applyRecordListResult(result, offset)
+          })
+      void request.catch(() => undefined).finally(() => {
         if (!cancelled) setLoading(false)
       })
     }, 250)
@@ -3616,11 +3673,11 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [records, offset, query, includeArchived, statusFilter, createdFrom, createdTo, sortBy, sortDir, pageSize])
+  }, [records, viewMode, offset, query, includeArchived, statusFilter, createdFrom, createdTo, sortBy, sortDir, pageSize])
 
   useEffect(() => {
     setOffset(0)
-  }, [query, includeArchived, statusFilter, createdFrom, createdTo, sortBy, sortDir])
+  }, [viewMode, query, includeArchived, statusFilter, createdFrom, createdTo, sortBy, sortDir])
 
   useEffect(() => {
     if (pageSizeMode !== 'auto' || pageSize === autoPageSize) return
@@ -3628,14 +3685,38 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
     setOffset(0)
   }, [autoPageSize, pageSize, pageSizeMode])
 
-  useEffect(() => setSelectedRecordIds(new Set()), [offset, includeArchived, query, statusFilter, createdFrom, createdTo, sortBy, sortDir, pageSize])
+  useEffect(() => setSelectedRecordIds(new Set()), [viewMode, offset, includeArchived, query, statusFilter, createdFrom, createdTo, sortBy, sortDir, pageSize])
+
+  useEffect(() => {
+    if (viewMode !== 'tasks') setBulkMode(false)
+  }, [viewMode])
 
   function openRecord(item: GenerationTask) {
+    batchDetailRequestRef.current = ''
+    setBatchDetail(null)
     setDetail(item)
     window.history.replaceState(null, '', routeToUrl({ page: 'records', recordId: item.id }))
     void api.getRecord(item.id, false)
       .then((r) => setDetail(r.item))
       .catch(() => undefined)
+  }
+
+  function openBatchRecord(item: GenerationRecordBatch) {
+    batchDetailRequestRef.current = item.batchId
+    setDetail(null)
+    setBatchDetail(item)
+    setBatchDetailTasks([])
+    setBatchDetailLoading(true)
+    void api.listBatchTasks(item.batchId)
+      .then((result) => {
+        if (batchDetailRequestRef.current === item.batchId) setBatchDetailTasks(result.items)
+      })
+      .catch(() => {
+        if (batchDetailRequestRef.current === item.batchId) setBatchDetailTasks([])
+      })
+      .finally(() => {
+        if (batchDetailRequestRef.current === item.batchId) setBatchDetailLoading(false)
+      })
   }
 
   function toggleRecordSelection(id: number, checked: boolean) {
@@ -3755,6 +3836,13 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   }
 
   const hasActiveFilters = Boolean(query.trim() || statusFilter || createdFrom || createdTo || includeArchived || sortBy !== 'createdAt' || sortDir !== 'desc')
+  const statusOptions = viewMode === 'tasks'
+    ? generationRecordStatusOptions(facets.status, stableFacets.status, statusFilter)
+    : viewMode === 'batches'
+      ? generationBatchStatusOptions(facets.status, stableFacets.status, statusFilter)
+      : generationWorkspaceStatusOptions(facets.status, stableFacets.status, statusFilter)
+  const formatRecordStatus = (value: string) => viewMode === 'tasks' ? statusText(value) : recordStatusText(value)
+  const showTaskBulkControls = viewMode === 'tasks'
 
   return (
     <section className="page workbench-page records-page">
@@ -3762,9 +3850,29 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
       <div className="records-layout">
         <div className="panel record-list">
           <div className="record-list-head">
+            <div className="record-view-tabs" role="tablist" aria-label="记录视角">
+              {[
+                ['all', '全部记录'],
+                ['batches', '批次任务'],
+                ['tasks', '单次任务'],
+              ].map(([value, label]) => (
+                <button
+                  key={value}
+                  className={viewMode === value ? 'active' : ''}
+                  type="button"
+                  onClick={() => {
+                    setViewMode(value as RecordViewMode)
+                    batchDetailRequestRef.current = ''
+                    setBatchDetail(null)
+                    setDetail(null)
+                    setStatusFilter('')
+                  }}
+                >{label}</button>
+              ))}
+            </div>
             <div className={`search ${loading ? 'is-searching' : ''}`}>
               <Search size={16} />
-              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索任务名 / 状态" />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索任务名 / 货号 / 批次" />
               {loading && <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span>}
             </div>
             <div className="record-filter-pills">
@@ -3792,8 +3900,8 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
                 open={openFilter === 'status'}
                 onOpen={(open) => setOpenFilter(open ? 'status' : null)}
                 value={statusFilter}
-                options={generationRecordStatusOptions(facets.status, stableFacets.status, statusFilter)}
-                formatLabel={statusText}
+                options={statusOptions}
+                formatLabel={formatRecordStatus}
                 onChange={setStatusFilter}
               />
               <button className={`filter-pill checkbox-pill ${includeArchived ? 'is-active' : ''}`} type="button" onClick={() => {
@@ -3804,54 +3912,53 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
               {hasActiveFilters && <button className="filter-pill reset-filter-pill" type="button" onClick={clearRecordFilters}><span>清空筛选</span></button>}
             </div>
             <div className="record-list-meta">
-              {selectedVisibleRecords.length > 0 && (
+              {showTaskBulkControls && selectedVisibleRecords.length > 0 && (
                 <button className="management-action" disabled={downloadChecking} onClick={startBatchDownload} title="打包下载所选任务的最终成片，按任务名分文件夹">
                   <Download size={14} /> {downloadChecking ? '检查成片中...' : `下载成片 ${selectedVisibleRecords.length} 项`}
                 </button>
               )}
-              {selectedVisibleRecords.length > 0 && (
+              {showTaskBulkControls && selectedVisibleRecords.length > 0 && (
                 selectedArchivedRecords.length === selectedVisibleRecords.length
                   ? <button className="management-action" onClick={() => restoreRecords(selectedArchivedRecords)}>恢复 {selectedArchivedRecords.length} 项</button>
                   : <button className="management-action" disabled={selectedArchivedRecords.length > 0} title={selectedArchivedRecords.length ? '请分别选择已归档和未归档记录' : undefined} onClick={runRecordBatchAction}>归档 {selectedActiveRecords.length} 项</button>
               )}
-              {bulkMode && <button className={`management-action management-check-action ${allVisibleRecordsSelected ? 'is-active' : ''}`} disabled={!selectableRecordIds.length} onClick={() => toggleVisibleRecordSelection(!allVisibleRecordsSelected)}><Check size={15} /> 全选本页</button>}
-              <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedRecordIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
+              {showTaskBulkControls && bulkMode && <button className={`management-action management-check-action ${allVisibleRecordsSelected ? 'is-active' : ''}`} disabled={!selectableRecordIds.length} onClick={() => toggleVisibleRecordSelection(!allVisibleRecordsSelected)}><Check size={15} /> 全选本页</button>}
+              {showTaskBulkControls && <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedRecordIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>}
             </div>
           </div>
           <div className="record-list-body" ref={recordListBodyRef}>
-            {items.map((item) => (
-              <div
-                key={item.id}
-                className={`record-row ${detail?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}
-              >
-                {bulkMode && <input
-                  type="checkbox"
-                  checked={selectedRecordIds.has(item.id)}
-                  disabled={isTaskRunning(item)}
-                  onChange={(event) => toggleRecordSelection(item.id, event.target.checked)}
-                  aria-label={`选择 ${item.name}`}
-                />}
-                <button className="record-open" aria-current={detail?.id === item.id ? 'true' : undefined} title="查看记录详情" onClick={() => openRecord(item)}>
-                  <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
-                  <div><strong>{item.name}</strong><span>{item.archivedAt ? '已归档' : statusText(item.status)} · {dateText(item.createdAt)}</span></div>
-                  <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
-                </button>
-                <button
-                  className="task-action record-action-button"
-                  onClick={() => openTaskInStudio(item)}
-                  title="回到 AI 摄影棚恢复该任务"
-                >
-                  <TaskResumeActionContent task={item} />
-                </button>
-                <button
-                  className="management-action record-action-button"
-                  onClick={() => isTaskRunning(item) ? cancelRecordTask(item) : item.archivedAt ? restoreRecords([item]) : openRecordDeleteDialog(item)}
-                >
-                  {isTaskRunning(item) ? '取消生成' : item.archivedAt ? '恢复归档' : '归档'}
-                </button>
-              </div>
+            {viewMode === 'all' && workspaceItems.map((entry) => entry.kind === 'batch' ? (
+              <BatchRecordRow key={entry.id} item={entry.batch} active={batchDetail?.batchId === entry.batch.batchId} onOpen={openBatchRecord} />
+            ) : (
+              <TaskRecordRow
+                key={entry.id}
+                item={entry.task}
+                active={detail?.id === entry.task.id}
+                bulkMode={false}
+                selected={false}
+                onSelect={toggleRecordSelection}
+                onOpen={openRecord}
+                onOpenStudio={openTaskInStudio}
+                onManage={(item) => isTaskRunning(item) ? cancelRecordTask(item) : item.archivedAt ? restoreRecords([item]) : openRecordDeleteDialog(item)}
+              />
             ))}
-            {!items.length && <EmptyState title="暂无生成记录" text="创建拍摄任务后会出现在这里。" />}
+            {viewMode === 'batches' && batchRecords.map((item) => (
+              <BatchRecordRow key={item.batchId} item={item} active={batchDetail?.batchId === item.batchId} onOpen={openBatchRecord} />
+            ))}
+            {viewMode === 'tasks' && items.map((item) => (
+              <TaskRecordRow
+                key={item.id}
+                item={item}
+                active={detail?.id === item.id}
+                bulkMode={bulkMode}
+                selected={selectedRecordIds.has(item.id)}
+                onSelect={toggleRecordSelection}
+                onOpen={openRecord}
+                onOpenStudio={openTaskInStudio}
+                onManage={(item) => isTaskRunning(item) ? cancelRecordTask(item) : item.archivedAt ? restoreRecords([item]) : openRecordDeleteDialog(item)}
+              />
+            ))}
+            {((viewMode === 'all' && !workspaceItems.length) || (viewMode === 'batches' && !batchRecords.length) || (viewMode === 'tasks' && !items.length)) && <EmptyState title="暂无生成记录" text="创建拍摄任务后会出现在这里。" />}
           </div>
           <div className="record-pagination-stick">
             <PaginationControls
@@ -3872,7 +3979,9 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
           </div>
         </div>
         <div className="panel record-detail">
-          {detail ? (
+          {batchDetail ? (
+            <BatchRecordDetail item={batchDetail} tasks={batchDetailTasks} loading={batchDetailLoading} onOpenTask={openRecord} onOpenStudio={openTaskInStudio} />
+          ) : detail ? (
             <>
               <h3>{detail.name}</h3>
               <Meta label="状态" value={statusText(detail.status)} />
@@ -3901,6 +4010,108 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
         />
       )}
     </section>
+  )
+}
+
+function TaskRecordRow({ item, active, bulkMode, selected, onSelect, onOpen, onOpenStudio, onManage }: {
+  item: GenerationTask
+  active: boolean
+  bulkMode: boolean
+  selected: boolean
+  onSelect: (id: number, checked: boolean) => void
+  onOpen: (item: GenerationTask) => void
+  onOpenStudio: (task: GenerationTask) => void
+  onManage: (item: GenerationTask) => void
+}) {
+  return (
+    <div className={`record-row ${active ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
+      {bulkMode && <input
+        type="checkbox"
+        checked={selected}
+        disabled={isTaskRunning(item)}
+        onChange={(event) => onSelect(item.id, event.target.checked)}
+        aria-label={`选择 ${item.name}`}
+      />}
+      <button className="record-open" aria-current={active ? 'true' : undefined} title="查看记录详情" onClick={() => onOpen(item)}>
+        <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
+        <div><strong>{item.name}</strong><span>{item.archivedAt ? '已归档' : statusText(item.status)} · {dateText(item.createdAt)}</span></div>
+        <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
+      </button>
+      <button className="task-action record-action-button" onClick={() => onOpenStudio(item)} title="回到 AI 摄影棚恢复该任务">
+        <TaskResumeActionContent task={item} />
+      </button>
+      <button className="management-action record-action-button" onClick={() => onManage(item)}>
+        {isTaskRunning(item) ? '取消生成' : item.archivedAt ? '恢复归档' : '归档'}
+      </button>
+    </div>
+  )
+}
+
+function BatchRecordRow({ item, active, onOpen }: {
+  item: GenerationRecordBatch
+  active: boolean
+  onOpen: (item: GenerationRecordBatch) => void
+}) {
+  return (
+    <div className={`record-row batch-record-row ${active ? 'active' : ''} ${item.status === 'ARCHIVED' ? 'is-archived' : ''}`}>
+      <button className="record-open batch-record-open" aria-current={active ? 'true' : undefined} title="查看批次详情" onClick={() => onOpen(item)}>
+        <div className="batch-cover-stack">
+          {item.coverTasks.slice(0, 4).map((task) => <AssetThumb key={task.id} asset={taskCoverAsset(task)} interactive={false} />)}
+        </div>
+        <div>
+          <strong>{item.name}</strong>
+          <span>{recordStatusText(item.status)} · {item.taskCount} 个任务 · {dateText(item.createdAt)}</span>
+        </div>
+        <div className="batch-progress-strip">
+          <span>{item.completedTaskCount} 完成</span>
+          {item.failedTaskCount > 0 && <span>{item.failedTaskCount} 失败</span>}
+          {(item.runningTaskCount + item.queuedTaskCount) > 0 && <span>{item.runningTaskCount + item.queuedTaskCount} 进行中</span>}
+          {item.downloadableTaskCount > 0 && <span>{item.downloadableTaskCount} 可下载</span>}
+        </div>
+      </button>
+      <button className="management-action record-action-button" onClick={() => onOpen(item)}>查看批次</button>
+    </div>
+  )
+}
+
+function BatchRecordDetail({ item, tasks, loading, onOpenTask, onOpenStudio }: {
+  item: GenerationRecordBatch
+  tasks: GenerationTask[]
+  loading: boolean
+  onOpenTask: (item: GenerationTask) => void
+  onOpenStudio: (task: GenerationTask) => void
+}) {
+  const downloadableIds = tasks.filter((task) => ['COMPLETED', 'FINAL_PARTIAL'].includes(task.status)).map((task) => task.id)
+  return (
+    <>
+      <div className="batch-detail-head">
+        <span className="status-badge">{recordStatusText(item.status)}</span>
+        <h3>{item.name}</h3>
+        <p>{item.taskCount} 个任务 · {item.completedTaskCount} 完成 · {item.failedTaskCount} 失败 · {item.downloadableTaskCount} 可下载</p>
+      </div>
+      <div className="batch-detail-stats">
+        <Meta label="创建时间" value={dateText(item.createdAt)} />
+        <Meta label="更新时间" value={dateText(item.updatedAt)} />
+        <Meta label="进行中/排队" value={`${item.runningTaskCount + item.queuedTaskCount} 个`} />
+      </div>
+      <div className="batch-detail-actions">
+        <a className={`management-action ${downloadableIds.length ? '' : 'is-disabled'}`} href={downloadableIds.length ? finalImageArchiveUrl(downloadableIds) : undefined} aria-disabled={!downloadableIds.length} onClick={(event) => { if (!downloadableIds.length) event.preventDefault() }}>
+          <Download size={14} /> 下载可用成片
+        </a>
+      </div>
+      <div className="batch-detail-task-list">
+        {loading && <EmptyState title="正在读取批次" text="正在加载批次内任务。" />}
+        {!loading && tasks.map((task) => (
+          <div className="mini-row view-only" key={task.id}>
+            <button onClick={() => onOpenTask(task)}>
+              <AssetThumb asset={taskCoverAsset(task)} interactive={false} />
+              <span><strong>{task.name}</strong><small>{statusText(task.status)}</small></span>
+            </button>
+            <button className="management-action mini-action" onClick={() => onOpenStudio(task)}>进入任务</button>
+          </div>
+        ))}
+      </div>
+    </>
   )
 }
 
@@ -5383,6 +5594,19 @@ function statusText(status: string) {
     SUCCEEDED: '成功',
   }
   return map[status] ?? status
+}
+
+function recordStatusText(status: string) {
+  const map: Record<string, string> = {
+    ARCHIVED: '已归档',
+    RUNNING: '进行中',
+    FAILED: '存在失败',
+    PARTIAL: '部分完成',
+    CANCELLED: '已取消',
+    COMPLETED: '全部完成',
+    PENDING: '待处理',
+  }
+  return map[status] ?? statusText(status)
 }
 
 function garmentStatus(status: string) {

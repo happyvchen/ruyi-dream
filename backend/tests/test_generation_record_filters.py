@@ -54,6 +54,7 @@ class GenerationRecordFilterTests(unittest.TestCase):
         rows = [
             (1, "夏季连衣裙", "COMPLETED", "batch-a", None, "2026-07-01T09:00:00", "2026-07-03T09:00:00"),
             (2, "通勤衬衫", "FAILED", "batch-a", None, "2026-07-10T09:00:00", "2026-07-11T09:00:00"),
+            (14, "隐藏第四款", "DRAFT", "batch-a", None, "2026-07-10T09:10:00", "2026-07-11T09:10:00"),
             (3, "西装外套", "FINAL_RUNNING", "batch-b", None, "2026-07-12T09:00:00", "2026-07-12T10:00:00"),
             (4, "归档旧任务", "COMPLETED", "batch-old", "2026-07-13T09:00:00", "2026-06-20T09:00:00", "2026-06-21T09:00:00"),
             (5, "单独任务", "COMPLETED", None, None, "2026-07-14T09:00:00", "2026-07-14T10:00:00"),
@@ -101,7 +102,7 @@ class GenerationRecordFilterTests(unittest.TestCase):
         )
         self.assertEqual(
             {item["value"]: item["count"] for item in body["stableFacets"]["status"]},
-            {"CANCELLED": 1, "COMPLETED": 5, "DRAFT": 1, "FAILED": 1, "FINAL_PARTIAL": 1, "FINAL_RUNNING": 2},
+            {"CANCELLED": 1, "COMPLETED": 5, "DRAFT": 2, "FAILED": 1, "FINAL_PARTIAL": 1, "FINAL_RUNNING": 2},
         )
 
     def test_archive_visibility_and_name_sort(self) -> None:
@@ -124,7 +125,7 @@ class GenerationRecordFilterTests(unittest.TestCase):
         )
         batch_a = next(item for item in body["items"] if item["batchId"] == "batch-a")
         self.assertEqual(batch_a["status"], "FAILED")
-        self.assertEqual(batch_a["taskCount"], 2)
+        self.assertEqual(batch_a["taskCount"], 3)
         self.assertEqual(batch_a["completedTaskCount"], 1)
         self.assertEqual(batch_a["failedTaskCount"], 1)
         batch_b = next(item for item in body["items"] if item["batchId"] == "batch-b")
@@ -142,6 +143,10 @@ class GenerationRecordFilterTests(unittest.TestCase):
         self.assertEqual(search_response.status_code, 200)
         self.assertEqual([item["batchId"] for item in search_response.json()["items"]], ["batch-done"])
 
+        hidden_search_response = self.client.get("/api/generation-record-batches?keyword=隐藏第四款&limit=20")
+        self.assertEqual(hidden_search_response.status_code, 200)
+        self.assertEqual([item["batchId"] for item in hidden_search_response.json()["items"]], ["batch-a"])
+
         status_response = self.client.get("/api/generation-record-batches?status=COMPLETED&limit=20")
         self.assertEqual(status_response.status_code, 200)
         self.assertEqual([item["batchId"] for item in status_response.json()["items"]], ["batch-done"])
@@ -149,6 +154,29 @@ class GenerationRecordFilterTests(unittest.TestCase):
         archived_response = self.client.get("/api/generation-record-batches?includeArchived=true&status=ARCHIVED&limit=20")
         self.assertEqual(archived_response.status_code, 200)
         self.assertEqual({item["batchId"] for item in archived_response.json()["items"]}, {"batch-old", "batch-archived-mixed"})
+
+    def test_workspace_records_mix_batches_and_unbatched_tasks(self) -> None:
+        response = self.client.get("/api/generation-record-workspace?sortBy=createdAt&sortDir=asc&limit=20")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+
+        self.assertEqual(
+            [(item["kind"], item["id"]) for item in body["items"]],
+            [
+                ("batch", "batch:batch-a"),
+                ("batch", "batch:batch-done"),
+                ("batch", "batch:batch-cancel-mixed"),
+                ("batch", "batch:batch-partial"),
+                ("batch", "batch:batch-b"),
+                ("task", "task:5"),
+            ],
+        )
+        self.assertNotIn("task:1", [item["id"] for item in body["items"]])
+        self.assertEqual(body["total"], 6)
+
+        hidden_search_response = self.client.get("/api/generation-record-workspace?keyword=隐藏第四款&limit=20")
+        self.assertEqual(hidden_search_response.status_code, 200)
+        self.assertEqual([item["id"] for item in hidden_search_response.json()["items"]], ["batch:batch-a"])
 
 
 if __name__ == "__main__":
