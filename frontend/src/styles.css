@@ -95,6 +95,19 @@ h1, h2, h3, p { margin: 0; }
 .brand-mark span { color: #8b9aae; font-size: 12px; }
 
 .side-nav { display: grid; gap: 6px; }
+.side-nav,
+.step-rail,
+.record-view-tabs,
+.task-rail-tabs {
+  overflow: visible;
+  scrollbar-width: none;
+}
+.side-nav::-webkit-scrollbar,
+.step-rail::-webkit-scrollbar,
+.record-view-tabs::-webkit-scrollbar,
+.task-rail-tabs::-webkit-scrollbar {
+  display: none;
+}
 .side-nav button, .collapse-btn {
   display: flex;
   align-items: center;
@@ -3409,10 +3422,9 @@ a.button-link { text-decoration: none; cursor: pointer; }
     display: none;
   }
   .side-nav {
-    display: flex;
+    display: grid;
     min-width: 0;
     gap: 6px;
-    overflow-x: auto;
     padding-bottom: 2px;
   }
   .side-nav button,
@@ -3534,13 +3546,12 @@ a.button-link { text-decoration: none; cursor: pointer; }
     overflow: visible;
   }
   .step-rail {
-    display: flex;
-    overflow-x: auto;
-    scrollbar-width: thin;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    overflow: visible;
   }
   .step-rail button {
-    flex: 0 0 auto;
-    min-width: 132px;
+    min-width: 0;
   }
   .page-title {
     align-items: flex-start;
