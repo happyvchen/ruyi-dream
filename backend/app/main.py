@@ -856,8 +856,8 @@ async def create_styling_garment(
         raise HTTPException(status_code=400, detail="搭配服装代码不能为空")
     if not files:
         raise HTTPException(status_code=400, detail="至少上传一张图片")
-    if len(files) > 6:
-        raise HTTPException(status_code=400, detail="单套搭配服装最多上传 6 张图片")
+    if len(files) > MAX_GARMENT_IMAGE_INPUTS:
+        raise HTTPException(status_code=400, detail=f"单套搭配服装最多上传 {MAX_GARMENT_IMAGE_INPUTS} 张图片")
     with get_db() as db:
         duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
         if duplicate:
@@ -1011,6 +1011,12 @@ async def _run_styling_garment_tagging_guarded(garment_id: int) -> None:
         timestamp = now_iso()
         row = db.execute("SELECT manual_tags_json FROM styling_garments WHERE id = ?", (garment_id,)).fetchone()
         manual_tags = loads(row["manual_tags_json"], {}) if row else {}
+        apply_styling_garment_selected_image_order(
+            db,
+            garment_id,
+            [int(image_id) for image_id in tagging_result.get("selected_image_ids", [])],
+            timestamp,
+        )
         ai_tags = tagging_result.get("ai_tags") if isinstance(tagging_result.get("ai_tags"), dict) else tagging_result
         official_title_tags = tagging_result.get("official_title_tags", {}) if isinstance(tagging_result.get("official_title_tags"), dict) else {}
         tag_meta = apply_tag_review_policy(ai_tags, tagging_result.get("tag_meta", {}))
@@ -1063,8 +1069,8 @@ async def add_styling_garment_images(
             "SELECT COUNT(*) AS count FROM styling_garment_images WHERE styling_garment_id = ? AND deleted_at IS NULL",
             (garment_id,),
         ).fetchone()["count"]
-        if int(existing_count) + len(files) > 6:
-            raise HTTPException(status_code=400, detail="单套搭配服装最多保存 6 张图片")
+        if int(existing_count) + len(files) > MAX_GARMENT_IMAGE_INPUTS:
+            raise HTTPException(status_code=400, detail=f"单套搭配服装最多保存 {MAX_GARMENT_IMAGE_INPUTS} 张图片")
         max_sort = db.execute(
             "SELECT COALESCE(MAX(sort_order), -1) AS max_sort FROM styling_garment_images WHERE styling_garment_id = ? AND deleted_at IS NULL",
             (garment_id,),
@@ -3616,7 +3622,8 @@ def preview_prompt_config_draft(config_key: str, payload: PromptConfigPreviewReq
         if not attempt:
             raise HTTPException(status_code=404, detail="调用记录不存在")
         facts = loads(attempt["request_snapshot_json"], {})
-        if facts.get("promptConfigKey") != key:
+        prompt_keys = facts.get("promptConfigKeys") if isinstance(facts.get("promptConfigKeys"), list) else []
+        if facts.get("promptConfigKey") != key and key not in prompt_keys:
             raise HTTPException(status_code=400, detail="调用记录与 Prompt 配置不匹配")
         if isinstance(facts.get("promptRuntime"), dict):
             runtime = facts["promptRuntime"]
@@ -3636,7 +3643,7 @@ def list_prompt_config_invocations(config_key: str, request: Request) -> dict[st
     with get_db() as db:
         rows = db.execute(
             "SELECT id, owner_type, provider, status, created_at FROM generation_attempts WHERE request_snapshot_json LIKE ? ORDER BY created_at DESC LIMIT 30",
-            (f'%"promptConfigKey":"{key}"%',),
+            (f'%"{key}"%',),
         ).fetchall()
     return {"items": [{"id": row["id"], "ownerType": row["owner_type"], "provider": row["provider"], "status": row["status"], "createdAt": row["created_at"]} for row in rows]}
 
@@ -4629,7 +4636,7 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
         raise RuntimeError(message)
     attempt_id = create_attempt("styling_garment_tagging", garment_id, "gemini", request_snapshot)
     images: list[dict[str, Any]] = []
-    for image in garment.get("images", [])[:6]:
+    for image in garment.get("images", [])[:MAX_GARMENT_IMAGE_INPUTS]:
         asset = image.get("asset") or {}
         image_input = gemini_vision_input(asset.get("objectKey"), asset.get("mimeType"))
         if image_input:
@@ -4650,18 +4657,31 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
             error_code=ERROR_MALFORMED_OUTPUT,
         )
         raise GeminiProviderError(f"Gemini 返回内容不是合法 JSON：{exc}", ERROR_MALFORMED_OUTPUT) from exc
-    tagging_result = normalize_prompt_tagging_result(raw, garment)
+    try:
+        tagging_result = normalize_prompt_tagging_result(raw, garment)
+    except Exception as exc:
+        finish_attempt(
+            attempt_id,
+            "FAILED",
+            {"raw_text": text, "raw_json": raw},
+            error_message=f"Gemini 打标结果不符合契约：{exc}",
+            error_code=ERROR_MALFORMED_OUTPUT,
+        )
+        raise GeminiProviderError(f"Gemini 打标结果不符合契约：{exc}", ERROR_MALFORMED_OUTPUT) from exc
     finish_attempt(attempt_id, "SUCCEEDED", {"raw_text": text, "raw_json": raw})
     return tagging_result
 
 
 def build_prompt_tagging_request_snapshot(garment: dict[str, Any], prompt: str) -> dict[str, Any]:
-    prompt_runtime = {"styling_garment": dumps(styling_garment_prompt_context(garment))}
+    prompt_runtime = prompt_tagging_runtime(garment)
     return {
         "schema_version": PROMPT_TAGGING_RESULT_VERSION,
         **gemini_request_meta(),
         "prompt": prompt,
-        **prompt_execution_facts("assembly.ai_tagging", prompt, prompt_runtime),
+        "promptConfigKey": "assembly.ai_tagging",
+        "promptConfigKeys": [GARMENT_IMAGE_SELECTION_PROMPT_CONFIG_KEY, "assembly.ai_tagging"],
+        "promptRuntime": prompt_runtime,
+        "renderedPromptHash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "images": [
             {
                 "image_id": image.get("id"),
@@ -4676,15 +4696,23 @@ def build_prompt_tagging_request_snapshot(garment: dict[str, Any], prompt: str) 
                     "height": ((image.get("asset") or {}).get("height")),
                 },
             }
-            for index, image in enumerate(garment.get("images", [])[:6])
+            for index, image in enumerate(garment.get("images", [])[:MAX_GARMENT_IMAGE_INPUTS])
         ],
     }
 
 
 def build_prompt_tagging_prompt(garment: dict[str, Any] | None = None) -> str:
-    return render_prompt_template("assembly.ai_tagging", {
-        "styling_garment": dumps(styling_garment_prompt_context(garment or {})),
-    })
+    runtime = prompt_tagging_runtime(garment or {})
+    selection_prompt = render_prompt_template(GARMENT_IMAGE_SELECTION_PROMPT_CONFIG_KEY, runtime)
+    tagging_prompt = render_prompt_template("assembly.ai_tagging", runtime)
+    return f"{selection_prompt.rstrip()}\n\n{tagging_prompt.rstrip()}\n"
+
+
+def prompt_tagging_runtime(garment: dict[str, Any]) -> dict[str, str]:
+    return {
+        "styling_garment": dumps(styling_garment_prompt_context(garment)),
+        "garment_image_files": dumps(image_selection_prompt_files(garment.get("images") or [], MAX_GARMENT_IMAGE_INPUTS)),
+    }
 
 
 def styling_garment_prompt_context(garment: dict[str, Any]) -> dict[str, Any]:
@@ -4699,7 +4727,7 @@ def styling_garment_prompt_context(garment: dict[str, Any]) -> dict[str, Any]:
                 "filename": ((image.get("asset") or {}).get("filename")) if isinstance(image, dict) else None,
                 "mime_type": ((image.get("asset") or {}).get("mimeType")) if isinstance(image, dict) else None,
             }
-            for index, image in enumerate(images[:6])
+            for index, image in enumerate(images[:MAX_GARMENT_IMAGE_INPUTS])
             if isinstance(image, dict)
         ],
     }
@@ -4772,19 +4800,27 @@ def selected_image_ids_from_files(selected_files: Any, images: list[dict[str, An
     return selected_ids
 
 
-def fallback_prompt_tagging_result(garment: dict[str, Any]) -> dict[str, Any]:
-    return normalize_prompt_tagging_result(
-        {
-            "一级品类": ["未知"],
-            "整体视觉语义": f"{garment.get('code', '该服饰')} 待重新识别。",
-            "置信度": 50,
-            "风险点": "Gemini 未配置或不可用，无法完成图片判断。",
-        },
-        garment,
-        provider="fallback",
-        warnings=["Gemini 未配置或不可用，未生成完整标签"],
-        review_reasons=["fallback_tags"],
-    )
+def apply_styling_garment_selected_image_order(db: Any, garment_id: int, selected_image_ids: list[int], timestamp: str) -> None:
+    rows = db.execute(
+        """
+        SELECT id, sort_order
+        FROM styling_garment_images
+        WHERE styling_garment_id = ? AND deleted_at IS NULL
+        ORDER BY sort_order, id
+        """,
+        (garment_id,),
+    ).fetchall()
+    existing_ids = [int(row["id"]) for row in rows]
+    selected_set = set(selected_image_ids)
+    if not selected_image_ids or not selected_set.issubset(set(existing_ids)):
+        raise ValueError("selected_files 对应的图片不属于当前搭配服装")
+    ordered_ids = [image_id for image_id in selected_image_ids if image_id in existing_ids]
+    ordered_ids.extend(image_id for image_id in existing_ids if image_id not in selected_set)
+    for sort_order, image_id in enumerate(ordered_ids):
+        db.execute(
+            "UPDATE styling_garment_images SET sort_order = ?, updated_at = ? WHERE id = ?",
+            (sort_order, timestamp, image_id),
+        )
 
 
 TAG_PROMPT_FIELD_ALIASES = {
@@ -4829,10 +4865,18 @@ def normalize_prompt_tagging_result(
     warnings: list[str] | None = None,
     review_reasons: list[str] | None = None,
 ) -> dict[str, Any]:
-    ai_tags = raw if isinstance(raw, dict) else {"raw_result": raw}
+    if not isinstance(raw, dict):
+        raise ValueError("Gemini 打标结果必须是 JSON 对象")
+    selected_files = raw.get("selected_files")
+    selected_image_ids = selected_image_ids_from_files(selected_files, garment.get("images") or [], MAX_GARMENT_IMAGE_INPUTS)
+    ai_tags = raw.get("ai_tags")
+    if not isinstance(ai_tags, dict):
+        raise ValueError("Gemini 打标结果缺少 ai_tags 对象")
     tag_meta = build_prompt_tag_meta(ai_tags, garment, provider=provider, warnings=warnings, review_reasons=review_reasons)
     return {
         "schema_version": str(ai_tags.get("schema_version") or ai_tags.get("schemaVersion") or PROMPT_TAGGING_RESULT_VERSION),
+        "selected_files": selected_files,
+        "selected_image_ids": selected_image_ids,
         "ai_tags": ai_tags,
         "official_title_tags": ai_tags.get("official_title_tags") if isinstance(ai_tags.get("official_title_tags"), dict) else {},
         "tag_meta": tag_meta,
@@ -4854,12 +4898,10 @@ def build_prompt_tag_meta(
         reasons.append("empty_result")
     if confidence is not None and confidence < TAG_REVIEW_CONFIDENCE_THRESHOLD:
         reasons.append("low_confidence")
-    if provider == "fallback" and "fallback_tags" not in reasons:
-        reasons.append("fallback_tags")
     reasons = list(dict.fromkeys(reasons))
     return {
         "tagger_provider": str(source_meta.get("tagger_provider") or provider),
-        "tagger_model": str(source_meta.get("tagger_model") or ("fallback" if provider == "fallback" else effective_gemini_model())),
+        "tagger_model": str(source_meta.get("tagger_model") or effective_gemini_model()),
         "result_format": str(source_meta.get("result_format") or "prompt_configured_json"),
         "overall_confidence": confidence if confidence is not None else 0.5,
         "needs_review": bool(reasons),

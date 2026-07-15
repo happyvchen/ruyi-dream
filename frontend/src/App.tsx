@@ -88,6 +88,7 @@ const authSeenStorageKey = 'ruyi-auth-seen'
 const authExpiredMessage = '登录状态已过期，请重新登录后继续。'
 const SUPPORTED_IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/heic,image/heif,image/avif,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif'
 const SUPPORTED_IMAGE_FILE_PATTERN = /\.(jpe?g|png|webp|heic|heif|avif)$/i
+const STYLING_GARMENT_MAX_IMAGES = 15
 const SUPPORTED_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'image/avif'])
 
 function isSupportedImageFile(file: File) {
@@ -2082,8 +2083,8 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
         blocked.push({ ...batch, error: '每套搭配服装都需要一个有效货号' })
         return
       }
-      if (batch.files.length > 6) {
-        blocked.push({ ...batch, code, error: '超过 6 张，需删除后才能导入' })
+      if (batch.files.length > STYLING_GARMENT_MAX_IMAGES) {
+        blocked.push({ ...batch, code, error: `超过 ${STYLING_GARMENT_MAX_IMAGES} 张，需删除后才能导入` })
         return
       }
       if (seen.has(code)) {
@@ -2213,7 +2214,7 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
       <div className="import-head">
         <div>
           <h3>导入搭配服装</h3>
-          <p>散图会合并为一套；单文件夹是一套；拖入多个一级文件夹会拆成多套。导入后系统会自动识别标签，单套最多 6 张。</p>
+          <p>散图会合并为一套；单文件夹是一套；拖入多个一级文件夹会拆成多套。导入后系统会自动识别标签，单套最多 15 张。</p>
         </div>
         <button className="primary" disabled={!batches.length} onClick={saveDrafts}>导入</button>
       </div>
@@ -2270,7 +2271,7 @@ function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
   onRemove: () => void
 }) {
   return (
-    <div className={`batch-card ${batch.files.length > 6 || batch.error ? 'has-error' : ''}`}>
+    <div className={`batch-card ${batch.files.length > STYLING_GARMENT_MAX_IMAGES || batch.error ? 'has-error' : ''}`}>
       <div className="batch-card-head">
         <div className="batch-icon"><Layers3 size={18} /></div>
         <input value={batch.code} onChange={(event) => onCode(event.target.value)} aria-label="搭配服装货号" />
@@ -2278,7 +2279,7 @@ function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
       </div>
       <div className="batch-note">
         <span>{batch.files.length} 张图片</span>
-        {(batch.error || batch.files.length > 6) && <strong>{batch.error ?? '超过 6 张，需删除后才能导入'}</strong>}
+        {(batch.error || batch.files.length > STYLING_GARMENT_MAX_IMAGES) && <strong>{batch.error ?? `超过 ${STYLING_GARMENT_MAX_IMAGES} 张，需删除后才能导入`}</strong>}
       </div>
       <FileThumbList files={batch.files} onChange={onFiles} />
     </div>
@@ -3330,7 +3331,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
 
   async function save(retag: boolean) {
     const visibleCount = working.length + pendingFiles.length
-    if (visibleCount > 6) throw new Error('单套搭配服装最多保存 6 张图片')
+    if (visibleCount > STYLING_GARMENT_MAX_IMAGES) throw new Error(`单套搭配服装最多保存 ${STYLING_GARMENT_MAX_IMAGES} 张图片`)
     await run(retag ? '保存并重新识别标签中...' : '保存搭配服装中...', async () => {
       await Promise.all(Object.entries(replacementFiles).map(([id, file]) => api.replaceStylingGarmentImage(Number(id), file)))
       const addBeforeDelete = working.length === 0 && pendingFiles.length > 0
@@ -3359,7 +3360,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
         </div>
         <div className="drawer-section">
           <Meta label="更新时间" value={dateText(item.updatedAt)} />
-          <Meta label="图片" value={`${working.length + pendingFiles.length}/6 张`} />
+          <Meta label="图片" value={`${working.length + pendingFiles.length}/${STYLING_GARMENT_MAX_IMAGES} 张`} />
           {hasTaggingFailure && (
             <TagObjectPanel
               title="识别错误"
@@ -3445,7 +3446,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
               </div>
             ))}
           </div>
-          {working.length + pendingFiles.length > 6 && <span className="inline-error">超过 6 张，需删除后才能保存</span>}
+          {working.length + pendingFiles.length > STYLING_GARMENT_MAX_IMAGES && <span className="inline-error">{`超过 ${STYLING_GARMENT_MAX_IMAGES} 张，需删除后才能保存`}</span>}
         </div>
         <div className="drawer-section">
           <div className="section-head"><strong>标签</strong></div>
@@ -3457,8 +3458,8 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
         </div>
         <div className="drawer-actions">
           <button className="secondary" disabled={tagging} onClick={retag}>重新打标</button>
-          <button className="secondary" disabled={tagging || !dirty || working.length + pendingFiles.length > 6} onClick={() => void save(false)}>仅保存</button>
-          <button className="primary" disabled={tagging || !dirty || working.length + pendingFiles.length > 6} onClick={() => void save(true)}>保存并重新识别标签</button>
+          <button className="secondary" disabled={tagging || !dirty || working.length + pendingFiles.length > STYLING_GARMENT_MAX_IMAGES} onClick={() => void save(false)}>仅保存</button>
+          <button className="primary" disabled={tagging || !dirty || working.length + pendingFiles.length > STYLING_GARMENT_MAX_IMAGES} onClick={() => void save(true)}>保存并重新识别标签</button>
         </div>
         <div className="danger-zone">
           <strong>{item.archivedAt ? '恢复归档' : '归档'}</strong>

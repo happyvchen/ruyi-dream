@@ -957,6 +957,31 @@ class BackendCurrentFlowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "重复"):
             main.selected_image_ids_from_files(["image:11:same.jpg", "11"], images, 15)
 
+    def test_ai_tagging_normalizer_requires_selected_files_and_ai_tags(self) -> None:
+        main = importlib.import_module("app.main")
+        garment = {
+            "images": [
+                {"id": 11, "sortOrder": 0, "asset": {"filename": "front.jpg"}},
+                {"id": 12, "sortOrder": 1, "asset": {"filename": "back.jpg"}},
+            ]
+        }
+
+        result = main.normalize_prompt_tagging_result(
+            {
+                "selected_files": ["back.jpg", "front.jpg"],
+                "ai_tags": {"一级品类": ["连衣裙"], "置信度": 92},
+            },
+            garment,
+        )
+
+        self.assertEqual(result["selected_image_ids"], [12, 11])
+        self.assertEqual(result["ai_tags"]["一级品类"], ["连衣裙"])
+
+        with self.assertRaisesRegex(ValueError, "selected_files"):
+            main.normalize_prompt_tagging_result({"ai_tags": {}}, garment)
+        with self.assertRaisesRegex(ValueError, "ai_tags"):
+            main.normalize_prompt_tagging_result({"selected_files": ["front.jpg"]}, garment)
+
 
 if __name__ == "__main__":
     unittest.main()
