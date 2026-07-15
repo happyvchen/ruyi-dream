@@ -4,13 +4,28 @@
 
 所有上传图片统一入 `media_assets`，对象存储使用 S3 兼容接口。后端生成 `thumb` 和 `preview` 派生图用于列表和弹窗，AI 输入和下载保留原图。
 
+每套服装的正式图片包最多保留 15 张。上传暂存阶段可以接收超过 15 张，但保存为业务资产前必须完成确定性预处理并自动剔除超出上限的图片；超出上限的图片不进入正式 `media_assets` / 业务关系。预处理优先剔除解码失败、格式不支持、重复、明显低质量和非真实商品事实图。
+
 ## 主推款
 
 主推款图片挂在 `generation_task_images`。进入 AI 阶段时创建 `generation_task_input_versions`，冻结当前图片顺序、任务名、商品信息和默认数字模特快照。
 
+AI 摄影棚主推款上传也遵守每套最多 15 张的上限。点击 `AI 智能选搭` 时，Gemini 必须在同一次调用中完成主推款图片挑选/排序与 `styling_plan` 输出；后端保存 Gemini 返回的 `selected_files` 作为本次主推款输入版本的推荐参考图顺序，并保存完整 request / response 快照用于追溯。
+
 ## 搭配服装
 
 搭配服装挂在 `styling_garments` / `styling_garment_images`。Gemini 打标只负责把图片转成可追溯标签事实；AI 智能选搭读取 READY 且未归档的搭配服装标签事实。
+
+搭配服装库必须采用一次 Gemini 调用完成图片挑选/排序与 AI 打标。Gemini 返回仅要求包含：
+
+```json
+{
+  "selected_files": ["front.jpg", "back.jpg", "fabric.jpg"],
+  "ai_tags": {}
+}
+```
+
+`selected_files` 按推荐入库/参考顺序排列，文件标识可以是后端提供的稳定临时文件名、上传项 id 或二者组合；原则是简洁、唯一、便于后端映射。后端只接受当前请求中真实存在的文件标识，不做失败兜底：Gemini 调用失败、JSON 不可解析、缺少 `selected_files` / `ai_tags` 或引用不存在文件时，本次打标失败。
 
 ## 数字模特
 

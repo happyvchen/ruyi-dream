@@ -50,14 +50,18 @@ ABANDONED
 Prompt 配置槽：
 
 - 品牌信息；
+- 搭配服装图片挑选/排序；
 - AI 打标；
+- 主推款图片挑选/排序；
 - AI 选搭；
 - 三类分镜预览；
 - 三类成片。
 
 代码负责：
 
-- 从 `StylingPlan.hero_understanding.shot_category_family` 路由拍摄图位族；缺失时由商品 `category` / `sub_category` fallback；
+- 对搭配服装和主推款图片执行每套最多 15 张的硬上限；
+- 校验 Gemini 返回的 `selected_files` 是否存在且可唯一映射；
+- 从 `styling_plan.hero_understanding.shot_category_family` 路由拍摄图位族；缺失、非法或无法映射时直接失败，不由商品 `category` / `sub_category` fallback；
 - 按顺序组装数字模特图、商品图、分镜图、环境图；
 - 渲染图号区间；
 - 注入商品信息、用户本次补充要求、选中造型摘要、当前格号和五个条件段标记；

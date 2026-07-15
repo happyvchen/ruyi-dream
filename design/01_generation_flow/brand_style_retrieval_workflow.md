@@ -59,7 +59,7 @@ Lily 参考样本必须来自可验证渠道：
 
 ### 4.1 主推款视觉理解层
 
-用户点击 `AI 智能选搭` 后，系统必须先冻结主推款输入版本并做视觉理解，任务名只能作为辅助证据，不能作为品类主来源。
+用户点击 `AI 智能选搭` 后，系统必须冻结主推款输入版本并做视觉理解，任务名只能作为辅助证据，不能作为品类主来源。主推款图片挑选/排序必须与 AI 选搭合并为一次 Gemini 调用；Gemini 顶层返回 `selected_files` 与 `styling_plan`，其中 `selected_files` 只负责确定本次参考图顺序，主推款理解仍必须进入 `styling_plan.hero_understanding`。
 
 输出 `HeroUnderstanding`：
 
@@ -73,7 +73,7 @@ Lily 参考样本必须来自可验证渠道：
 
 硬验收：
 
-- 正常生产任务不得以 `category = unknown` 进入正常选搭通过状态；若视觉理解低置信度，应进入复核或安全 fallback，而不是继续按未知品类生成通用方案。
+- 正常生产任务不得以 `category = unknown` 进入正常选搭通过状态；若视觉理解低置信度，应进入复核或失败，而不是继续按未知品类生成通用方案。
 - request snapshot 中的主推款理解来源不得长期停留在任务名启发式；任务名、SKU 和文件名只可作为辅助证据。
 - `HeroUnderstanding` 中的品类、卖点、不可遮挡区域和图位需求必须在 `StylingPlan` 候选比较、拒绝理由和后续 Prompt 路由中可追溯。
 
@@ -117,12 +117,12 @@ AI 选搭 Prompt 必须把以下判断交给 Gemini，但要明确判定口径�
 
 Gemini 接收：
 
-- 主推款图片和结构化主推款理解要求。
+- 主推款图片、文件标识、图片挑选/排序要求和结构化主推款理解要求。
 - 当前未归档 READY 搭配服装库全量标签事实卡。
 - Lily 官方风格证据或品牌边界文本。
 - Prompt 业务规则、Aesthetic Critic 维度和生成配饰边界。
 
-Gemini 输出 `StylingPlan`，并必须说明：
+Gemini 输出 `selected_files` 与 `styling_plan`，其中 `styling_plan` 必须说明：
 
 - 为什么选择这套，而不是其它候选。
 - 为什么它比空库内搭配更能服务主推款；若不成立，应选择空库内搭配。

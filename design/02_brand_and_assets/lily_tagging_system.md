@@ -20,8 +20,8 @@ Lily 标签体系是 Ruyi-Dream 的核心生产资产，不是临时 0.1.0 辅�
 
 当前实现说明：
 
-- `AI 打标` Prompt 是打标规则和输出结构的唯一维护入口；`segment.tag_rules` 已废弃。
-- Gemini 返回的 JSON 结构允许随 `AI 打标` Prompt 变化，后端必须完整保存原始 `ai_tags_json`。
+- `图片挑选/排序` Prompt 与 `AI 打标` Prompt 是搭配服装入库识别规则的维护入口；运行时必须合并为一次 Gemini 调用，`segment.tag_rules` 已废弃。
+- Gemini 顶层返回结构固定为 `selected_files` + `ai_tags`；`ai_tags` 内部结构允许随 `AI 打标` Prompt 变化，后端必须完整保存原始 `ai_tags_json`。
 - 后端只对常见字段做最佳努力派生，形成 `effective_tags_json` 供列表摘要和局部展示使用；智能选搭候选卡必须直接携带完整 `ai_tags_json` 标签事实，不能依赖固定字段白名单摘要。派生失败不应丢失原始返回。
 - 本文中固定字段和枚举可作为长期标签治理参考，不再要求当前打标结果必须按固定标签 schema 输出。
 
@@ -177,7 +177,7 @@ DISABLED
 DELETED
 ```
 
-只有 `READY` 进入智能选搭候选。`TAGGING_READY` 表示 AI 标签已生成，但存在低置信度、配饰误入、品类不明确、fallback 或其它复核原因；当前界面允许重新打标，暂不将该资产送入选搭。
+只有 `READY` 进入智能选搭候选。`TAGGING_READY` 表示 AI 标签已生成，但存在低置信度、配饰误入、品类不明确或其它复核原因；当前界面允许重新打标，暂不将该资产送入选搭。
 
 ## 5. AI 标签字段
 
@@ -197,7 +197,7 @@ DELETED
 - `category` 是系统稳定大类。
 - `sub_category` 是规范子类。
 - `official_category_candidates` 保存天猫/标题原始分类，例如 `衬衫/雪纺衫`、`经典小黑裤系列`。
-- 主推款进入 AI 选搭后，还必须在 `StylingPlan.hero_understanding` 输出 `shot_category_family`，只允许 `top | bottom | one_piece`，用于分镜/成片 Prompt 路由；例如 `西装马甲` 的 `sub_category` 可为 `suit_vest`，`shot_category_family` 应为 `top`。
+- 主推款进入 AI 选搭后，还必须在 `styling_plan.hero_understanding` 输出 `shot_category_family`，只允许 `top | bottom | one_piece`，用于分镜/成片 Prompt 路由；例如 `西装马甲` 的 `sub_category` 可为 `suit_vest`，`shot_category_family` 应为 `top`。
 
 ### 5.2 颜色
 
@@ -498,6 +498,7 @@ DELETED
 Gemini 输出必须：
 
 - 严格 JSON。
+- 顶层包含 `selected_files` 和 `ai_tags`，其它字段暂不要求。
 - 字段缺失时返回 `unknown` 或空数组，不编造。
 - 不把官方标题当作图片事实。
 - 不把鞋、包、饰品打成可售服装资产。

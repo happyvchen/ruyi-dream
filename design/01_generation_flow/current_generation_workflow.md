@@ -4,7 +4,7 @@
 
 ```text
 上传主推款
-→ AI 智能选搭（Gemini，输出 StylingPlan）
+→ AI 智能选搭（Gemini，输出 selected_files + styling_plan）
 → 分镜预览（Image-2，按拍摄图位族选择固定 Prompt）
 → 最终成片（Image-2，并发生成分镜前 5 格）
 ```
@@ -13,7 +13,7 @@
 
 ## Prompt 槽位
 
-分镜预览按 `StylingPlan.hero_understanding.shot_category_family` 选择三类固定 Prompt；该字段缺失时，后端根据商品 `category` / `sub_category` / 官方品类候选做确定性 fallback。商品品类不等于拍摄图位族，例如 `西装马甲` 的商品品类仍是西装马甲，但拍摄图位族是 `top`。
+分镜预览按 `styling_plan.hero_understanding.shot_category_family` 选择三类固定 Prompt；该字段缺失、非法或无法映射时，当前 AI 智能选搭结果视为契约失败，不做本地 fallback。商品品类不等于拍摄图位族，例如 `西装马甲` 的商品品类仍是西装马甲，但拍摄图位族必须由 `shot_category_family = top` 明确给出。
 
 | 品类族 | Prompt 维护键 |
 |---|---|
@@ -30,6 +30,16 @@
 | 连衣裙、连体、套装 | `assembly.final_image_one_piece` |
 
 ## 动态事实输入
+
+AI 智能选搭输入包括：
+
+- 主推款候选图片，最多 15 张；
+- 主推款图片文件标识；
+- 商品信息；
+- READY 且未归档的搭配服装标签事实；
+- AI 选搭用户补充要求。
+
+Gemini 返回 `selected_files` 与 `styling_plan`。`selected_files` 仅用于冻结本次主推款参考图顺序，不替代 `styling_plan.hero_understanding`。
 
 分镜预览只注入：
 
