@@ -2860,12 +2860,35 @@ a.button-link { text-decoration: none; cursor: pointer; }
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+  margin-bottom: 4px;
 }
+.record-filter-pills,
 .record-list-meta {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
+}
+.record-filter-pills {
+  min-width: 0;
+}
+.record-list-meta {
   margin-left: auto;
+}
+.record-list-meta .management-action {
+  min-width: 104px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  text-align: center;
+  white-space: nowrap;
+}
+.record-list-meta .compact-control {
+  min-width: 84px;
+  height: 34px;
+  padding: 0 12px;
+  font-size: 13px;
 }
 .record-list-body {
   min-height: 0;
@@ -2874,6 +2897,9 @@ a.button-link { text-decoration: none; cursor: pointer; }
   gap: 10px;
   overflow-y: auto;
   padding-right: 4px;
+}
+.record-pagination-stick .pagination-bar {
+  margin-top: 0;
 }
 .record-row {
   display: grid;

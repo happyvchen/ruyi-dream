@@ -3502,25 +3502,55 @@ def list_new_generation_records(
     include_archived: bool = Query(False, alias="includeArchived"),
     limit: int = Query(30, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    keyword: str | None = Query(None),
+    status: list[str] | None = Query(None),
+    created_from: str | None = Query(None, alias="createdFrom"),
+    created_to: str | None = Query(None, alias="createdTo"),
+    sort_by: str = Query("createdAt", alias="sortBy"),
+    sort_dir: str = Query("desc", alias="sortDir"),
 ) -> dict[str, Any]:
+    status_values = split_filter_values(status)
+    created_from_dt = parse_filter_datetime(created_from, end_of_day=False)
+    created_to_dt = parse_filter_datetime(created_to, end_of_day=True)
+    where_clauses = ["gt.deleted_at IS NULL", "(? OR gt.archived_at IS NULL)"]
+    query_params: list[Any] = [include_archived]
+    keyword_search = f"%{keyword.strip()}%" if keyword and keyword.strip() else None
+    if keyword_search:
+        where_clauses.append("(gt.name LIKE ? OR gt.status LIKE ? OR gt.batch_id LIKE ?)")
+        query_params.extend([keyword_search] * 3)
+    if status_values:
+        placeholders = ", ".join("?" for _ in status_values)
+        where_clauses.append(f"LOWER(gt.status) IN ({placeholders})")
+        query_params.extend(sorted(status_values))
+    if created_from_dt:
+        where_clauses.append("gt.created_at >= ?")
+        query_params.append(created_from_dt.isoformat())
+    if created_to_dt:
+        where_clauses.append("gt.created_at <= ?")
+        query_params.append(created_to_dt.isoformat())
+    sort_column = {
+        "createdAt": "gt.created_at",
+        "updatedAt": "gt.updated_at",
+        "name": "gt.name",
+        "status": "gt.status",
+    }.get(sort_by, "gt.created_at")
+    direction = "ASC" if sort_dir == "asc" else "DESC"
     with get_db() as db:
         rows = db.execute(
-            """
+            f"""
             SELECT * FROM generation_tasks gt
-            WHERE gt.deleted_at IS NULL
-              AND (? OR gt.archived_at IS NULL)
-            ORDER BY gt.created_at DESC, gt.id DESC
+            WHERE {" AND ".join(where_clauses)}
+            ORDER BY {sort_column} {direction}, gt.id {direction}
             LIMIT ? OFFSET ?
             """,
-            (include_archived, limit + 1, offset),
+            [*query_params, limit + 1, offset],
         ).fetchall()
         total = int(db.execute(
-            """
+            f"""
             SELECT COUNT(*) AS total FROM generation_tasks gt
-            WHERE gt.deleted_at IS NULL
-              AND (? OR gt.archived_at IS NULL)
+            WHERE {" AND ".join(where_clauses)}
             """,
-            (include_archived,),
+            query_params,
         ).fetchone()["total"])
         items = rows[:limit]
         return {
@@ -4964,16 +4994,10 @@ def image_selection_prompt_files(images: list[dict[str, Any]], limit: int) -> li
     for index, image in enumerate(images[:limit]):
         if not isinstance(image, dict):
             continue
-        asset = image.get("asset") if isinstance(image.get("asset"), dict) else {}
         files.append(
             {
                 "file": image_selection_file_ref(image),
-                "sort_order": image.get("sortOrder"),
-                "filename": asset.get("filename") or asset.get("originalFilename"),
-                "mime_type": asset.get("mimeType"),
-                "width": asset.get("width"),
-                "height": asset.get("height"),
-                "role_hint": "primary" if index == 0 else "reference",
+                "order": index + 1,
             }
         )
     return files
@@ -7478,13 +7502,13 @@ def sample_prompt_runtime() -> dict[str, Any]:
         # AI 打标 / AI 选搭
         "styling_garment": dumps({"code": "LOOK-A", "image_count": 3, "image_roles": ["primary", "reference", "reference"]}),
         "garment_image_files": dumps([
-            {"file": "image:101:front.jpg", "sort_order": 0, "filename": "front.jpg", "role_hint": "primary"},
-            {"file": "image:102:back.jpg", "sort_order": 1, "filename": "back.jpg", "role_hint": "reference"},
-            {"file": "image:103:fabric.jpg", "sort_order": 2, "filename": "fabric.jpg", "role_hint": "reference"},
+            {"file": "image:101:front.jpg", "order": 1},
+            {"file": "image:102:back.jpg", "order": 2},
+            {"file": "image:103:fabric.jpg", "order": 3},
         ]),
         "hero_image_files": dumps([
-            {"file": "image:201:hero-front.jpg", "sort_order": 0, "filename": "hero-front.jpg", "role_hint": "primary"},
-            {"file": "image:202:hero-detail.jpg", "sort_order": 1, "filename": "hero-detail.jpg", "role_hint": "reference"},
+            {"file": "image:201:hero-front.jpg", "order": 1},
+            {"file": "image:202:hero-detail.jpg", "order": 2},
         ]),
         "candidate_retrieval": dumps([{"code": "LOOK-A", "ai_tags": {"一级品类": ["上装"], "色彩": ["白色"], "版型": ["合体"], "风格语义": "轻量上装服务主推裤装。"}}]),
         "styling_result": dumps({"hero_understanding": {"category": "裤装", "sub_category": "trousers", "shot_category_family": "bottom"}, "selected_material_codes": ["LOOK-A"], "reason_summary": "轻量上装服务主推裤装。"}),
@@ -7517,9 +7541,9 @@ def sample_prompt_runtime() -> dict[str, Any]:
 def available_prompt_placeholders() -> list[dict[str, str]]:
     return [
         {"name": "segment.brand_info", "scope": "segment", "description": "品牌信息分段 Prompt"},
-        {"name": "runtime.garment_image_files", "scope": "runtime", "description": "搭配服装图片挑选/排序使用的文件标识、原始文件名和基础元数据"},
+        {"name": "runtime.garment_image_files", "scope": "runtime", "description": "搭配服装图片挑选/排序使用的文件标识与候选顺序"},
         {"name": "runtime.styling_garment", "scope": "runtime", "description": "AI 打标使用的当前搭配服装 code 和图片输入摘要"},
-        {"name": "runtime.hero_image_files", "scope": "runtime", "description": "主推款图片挑选/排序使用的文件标识、原始文件名和基础元数据"},
+        {"name": "runtime.hero_image_files", "scope": "runtime", "description": "主推款图片挑选/排序使用的文件标识与候选顺序"},
         {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服装库 READY 服饰的全量 AI 标签事实卡"},
         {"name": "runtime.ai_styling_user_instruction", "scope": "runtime", "description": "AI 智能选搭本次执行的用户介入要求"},
         {"name": "runtime.storyboard_preview_user_instruction", "scope": "runtime", "description": "分镜预览本次执行的用户介入要求"},

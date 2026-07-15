@@ -2183,9 +2183,10 @@ function CategoryTreeFilter({ open, onOpen, options, selectedPrimary, selectedSe
   )
 }
 
-function DateRangeFilter({ open, onOpen, from, to, onFrom, onTo }: {
+function DateRangeFilter({ open, onOpen, label: emptyLabel = '上传时间', from, to, onFrom, onTo }: {
   open: boolean
   onOpen: (open: boolean) => void
+  label?: string
   from: string
   to: string
   onFrom: (value: string) => void
@@ -2196,7 +2197,7 @@ function DateRangeFilter({ open, onOpen, from, to, onFrom, onTo }: {
   const [draftFrom, setDraftFrom] = useState('')
   const [draftTo, setDraftTo] = useState('')
   const pendingRange = draftFrom && !draftTo ? `${draftFrom} 至 ...` : ''
-  const label = from && to ? `${from} 至 ${to}` : '上传时间'
+  const label = from && to ? `${from} 至 ${to}` : emptyLabel
   useOutsideClose(open, wrapRef, () => onOpen(false))
 
   useEffect(() => {
@@ -2257,16 +2258,17 @@ function DateRangeFilter({ open, onOpen, from, to, onFrom, onTo }: {
   )
 }
 
-function SortFilter({ open, onOpen, sortBy, sortDir, onChange }: {
+function SortFilter({ open, onOpen, sortBy, sortDir, options = sortOptions, onChange }: {
   open: boolean
   onOpen: (open: boolean) => void
   sortBy: string
   sortDir: 'asc' | 'desc'
+  options?: { value: string; label: string }[]
   onChange: (sortBy: string, sortDir: 'asc' | 'desc') => void
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const current = `${sortBy}:${sortDir}`
-  const currentLabel = sortOptions.find((option) => option.value === current)?.label ?? '排序'
+  const currentLabel = options.find((option) => option.value === current)?.label ?? '排序'
   useOutsideClose(open, wrapRef, () => onOpen(false))
   return (
     <div className="filter-popover-wrap" ref={wrapRef}>
@@ -2276,7 +2278,7 @@ function SortFilter({ open, onOpen, sortBy, sortDir, onChange }: {
       </button>
       {open && (
         <div className="filter-popover sort-popover">
-          {sortOptions.map((option) => (
+          {options.map((option) => (
             <button className={option.value === current ? 'is-selected' : ''} type="button" key={option.value} onClick={() => {
               const [nextSortBy, nextSortDir] = option.value.split(':')
               onChange(nextSortBy, nextSortDir === 'asc' ? 'asc' : 'desc')
@@ -2303,6 +2305,16 @@ const sortOptions = [
   { value: 'code:desc', label: '货号 Z-A' },
 ]
 
+const recordSortOptions = [
+  { value: 'createdAt:desc', label: '最新创建' },
+  { value: 'createdAt:asc', label: '最早创建' },
+  { value: 'updatedAt:desc', label: '最近更新' },
+  { value: 'updatedAt:asc', label: '最早更新' },
+  { value: 'name:asc', label: '任务名 A-Z' },
+  { value: 'name:desc', label: '任务名 Z-A' },
+  { value: 'status:asc', label: '状态 A-Z' },
+]
+
 const stylingGarmentStatusOrder = ['DRAFT', 'TAGGING_RUNNING', 'TAGGING_READY', 'TAGGING_FAILED', 'READY']
 
 function stylingGarmentStatusOptions(options: FacetOption[] | undefined, stableOptions: FacetOption[] | undefined, selected: string) {
@@ -2315,11 +2327,32 @@ function stylingGarmentStatusOptions(options: FacetOption[] | undefined, stableO
   ]
 }
 
-function StatusFilter({ open, onOpen, value, options, onChange }: {
+const generationRecordStatuses = [
+  'DRAFT',
+  'READY_FOR_STYLING',
+  'STYLING_RUNNING',
+  'STYLING_READY',
+  'PREVIEW_RUNNING',
+  'PREVIEW_READY',
+  'FINAL_RUNNING',
+  'FINAL_PARTIAL',
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+  'ABANDONED',
+]
+
+function generationRecordStatusOptions() {
+  return generationRecordStatuses.map((status) => ({ value: status, label: status, count: 0 }))
+}
+
+function StatusFilter({ open, onOpen, value, options, showCounts = true, formatLabel = garmentStatus, onChange }: {
   open: boolean
   onOpen: (open: boolean) => void
   value: string
   options: FacetOption[]
+  showCounts?: boolean
+  formatLabel?: (value: string) => string
   onChange: (value: string) => void
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null)
@@ -2327,7 +2360,7 @@ function StatusFilter({ open, onOpen, value, options, onChange }: {
   return (
     <div className="filter-popover-wrap" ref={wrapRef}>
       <button className={`filter-pill ${value ? 'is-active' : ''}`} type="button" onClick={() => onOpen(!open)}>
-        <span>{value ? garmentStatus(value) : '全部状态'}</span>
+        <span>{value ? formatLabel(value) : '全部状态'}</span>
         <ChevronDown size={15} />
       </button>
       {open && (
@@ -2341,8 +2374,8 @@ function StatusFilter({ open, onOpen, value, options, onChange }: {
               onChange(option.value)
               onOpen(false)
             }}>
-              {garmentStatus(option.value)}
-              <small>{option.count}</small>
+              {formatLabel(option.value)}
+              {showCounts && <small>{option.count}</small>}
               {option.value === value && <Check size={15} />}
             </button>
           ))}
@@ -2589,10 +2622,20 @@ function estimateAutoGarmentPageSize() {
   return calculateAutoGarmentPageSize(availableWidth, availableHeight)
 }
 
+function estimateAutoRecordPageSize() {
+  if (typeof window === 'undefined') return 12
+  const availableHeight = Math.max(360, window.innerHeight - 260)
+  return calculateAutoRecordPageSize(availableHeight)
+}
+
 function calculateAutoGarmentPageSize(width: number, height: number, cardHeight = 386, columnWidth = 230, gap = 14) {
   const columns = Math.max(1, Math.floor((Math.max(width, columnWidth) + gap) / (columnWidth + gap)))
   const rows = Math.max(1, Math.floor((Math.max(height, cardHeight) + gap) / (cardHeight + gap)))
   return Math.max(1, Math.min(100, columns * rows))
+}
+
+function calculateAutoRecordPageSize(height: number, rowHeight = 78, gap = 10) {
+  return Math.max(5, Math.min(100, Math.floor((Math.max(height, rowHeight) + gap) / (rowHeight + gap))))
 }
 
 function useAutoGarmentPageSize(resultsRef: { current: HTMLDivElement | null }) {
@@ -2627,6 +2670,37 @@ function useAutoGarmentPageSize(resultsRef: { current: HTMLDivElement | null }) 
       observer?.disconnect()
     }
   }, [resultsRef])
+
+  return pageSize
+}
+
+function useAutoRecordPageSize(listRef: { current: HTMLDivElement | null }) {
+  const [pageSize, setPageSize] = useState(() => estimateAutoRecordPageSize())
+
+  useEffect(() => {
+    let frame = 0
+    const measure = () => {
+      window.cancelAnimationFrame(frame)
+      frame = window.requestAnimationFrame(() => {
+        const list = listRef.current
+        const row = list?.querySelector<HTMLElement>('.record-row') ?? null
+        const listStyle = list ? window.getComputedStyle(list) : null
+        const gap = listStyle ? Number.parseFloat(listStyle.rowGap) || 10 : 10
+        const height = list?.clientHeight || Math.max(360, window.innerHeight - 260)
+        const rowHeight = row?.getBoundingClientRect().height ?? 0
+        setPageSize(calculateAutoRecordPageSize(height, rowHeight > 40 ? rowHeight : 78, gap))
+      })
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    const observer = typeof ResizeObserver !== 'undefined' && listRef.current ? new ResizeObserver(measure) : null
+    if (listRef.current) observer?.observe(listRef.current)
+    return () => {
+      window.cancelAnimationFrame(frame)
+      window.removeEventListener('resize', measure)
+      observer?.disconnect()
+    }
+  }, [listRef])
 
   return pageSize
 }
@@ -3326,19 +3400,29 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   openTaskInStudio: (task: GenerationTask) => void
   run: any
 }) {
+  const recordListBodyRef = useRef<HTMLDivElement | null>(null)
+  const autoPageSize = useAutoRecordPageSize(recordListBodyRef)
   const [items, setItems] = useState<GenerationTask[]>(records)
+  const [query, setQuery] = useState('')
   const [offset, setOffset] = useState(0)
   const [total, setTotal] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
   const [loading, setLoading] = useState(false)
   const [includeArchived, setIncludeArchived] = useState(false)
+  const [statusFilter, setStatusFilter] = useState('')
+  const [createdFrom, setCreatedFrom] = useState('')
+  const [createdTo, setCreatedTo] = useState('')
+  const [sortBy, setSortBy] = useState('createdAt')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+  const [openFilter, setOpenFilter] = useState<'status' | 'date' | 'sort' | null>(null)
   const [selectedRecordIds, setSelectedRecordIds] = useState<Set<number>>(() => new Set())
   const [deleteRecordDialog, setDeleteRecordDialog] = useState<GenerationTask[] | null>(null)
   const [deleteRecordImpact, setDeleteRecordImpact] = useState<DeleteImpact | null>(null)
   const [deleteRecordImpactLoading, setDeleteRecordImpactLoading] = useState(false)
   const [downloadPrecheck, setDownloadPrecheck] = useState<FinalImageExportPrecheck | null>(null)
   const [downloadChecking, setDownloadChecking] = useState(false)
-  const [pageSize, setPageSize] = useState(12)
+  const [pageSizeMode, setPageSizeMode] = useState<'auto' | 'fixed'>('auto')
+  const [pageSize, setPageSize] = useState(() => estimateAutoRecordPageSize())
   const [bulkMode, setBulkMode] = useState(false)
   const selectableRecordIds = items.filter((item) => !isTaskRunning(item)).map((item) => item.id)
   const selectedVisibleRecords = items.filter((item) => selectedRecordIds.has(item.id) && selectableRecordIds.includes(item.id))
@@ -3346,8 +3430,23 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   const selectedActiveRecords = selectedVisibleRecords.filter((item) => !item.archivedAt)
   const allVisibleRecordsSelected = selectableRecordIds.length > 0 && selectableRecordIds.every((id) => selectedRecordIds.has(id))
 
+  function recordQueryOptions(targetOffset = offset) {
+    const keyword = query.trim()
+    return {
+      limit: pageSize,
+      offset: targetOffset,
+      keyword: keyword || undefined,
+      includeArchived,
+      status: statusFilter ? [statusFilter] : undefined,
+      createdFrom: createdFrom || undefined,
+      createdTo: createdTo || undefined,
+      sortBy,
+      sortDir,
+    }
+  }
+
   function refreshRecordPage(targetOffset = offset) {
-    return api.listRecords({ limit: pageSize, offset: targetOffset, includeArchived }).then((result) => {
+    return api.listRecords(recordQueryOptions(targetOffset)).then((result) => {
       setItems(result.items)
       setTotal(result.total)
       setTotalPages(result.totalPages)
@@ -3358,18 +3457,33 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   useEffect(() => {
     let cancelled = false
     setLoading(true)
-    void api.listRecords({ limit: pageSize, offset, includeArchived }).then((result) => {
-      if (cancelled) return
-      setItems(result.items)
-      setTotal(result.total)
-      setTotalPages(result.totalPages)
-    }).catch(() => undefined).finally(() => {
-      if (!cancelled) setLoading(false)
-    })
-    return () => { cancelled = true }
-  }, [records, offset, includeArchived, pageSize])
+    const timer = window.setTimeout(() => {
+      void api.listRecords(recordQueryOptions(offset)).then((result) => {
+        if (cancelled) return
+        setItems(result.items)
+        setTotal(result.total)
+        setTotalPages(result.totalPages)
+      }).catch(() => undefined).finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    }, 250)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [records, offset, query, includeArchived, statusFilter, createdFrom, createdTo, sortBy, sortDir, pageSize])
 
-  useEffect(() => setSelectedRecordIds(new Set()), [offset, includeArchived, pageSize])
+  useEffect(() => {
+    setOffset(0)
+  }, [query, includeArchived, statusFilter, createdFrom, createdTo, sortBy, sortDir])
+
+  useEffect(() => {
+    if (pageSizeMode !== 'auto' || pageSize === autoPageSize) return
+    setPageSize(autoPageSize)
+    setOffset(0)
+  }, [autoPageSize, pageSize, pageSizeMode])
+
+  useEffect(() => setSelectedRecordIds(new Set()), [offset, includeArchived, query, statusFilter, createdFrom, createdTo, sortBy, sortDir, pageSize])
 
   function openRecord(item: GenerationTask) {
     setDetail(item)
@@ -3485,19 +3599,65 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
     }, { refresh: 'background' })
   }
 
+  function clearRecordFilters() {
+    setQuery('')
+    setStatusFilter('')
+    setCreatedFrom('')
+    setCreatedTo('')
+    setSortBy('createdAt')
+    setSortDir('desc')
+    setIncludeArchived(false)
+  }
+
+  const hasActiveFilters = Boolean(query.trim() || statusFilter || createdFrom || createdTo || includeArchived || sortBy !== 'createdAt' || sortDir !== 'desc')
+
   return (
     <section className="page workbench-page records-page">
       <PageTitle title="生成记录" />
       <div className="records-layout">
         <div className="panel record-list">
           <div className="record-list-head">
-            <div className="archive-controls">
-              <label><input type="checkbox" checked={includeArchived} onChange={(event) => {
+            <div className={`search ${loading ? 'is-searching' : ''}`}>
+              <Search size={16} />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索任务名 / 状态" />
+              {loading && <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span>}
+            </div>
+            <div className="record-filter-pills">
+              <StatusFilter
+                open={openFilter === 'status'}
+                onOpen={(open) => setOpenFilter(open ? 'status' : null)}
+                value={statusFilter}
+                options={generationRecordStatusOptions()}
+                showCounts={false}
+                formatLabel={statusText}
+                onChange={setStatusFilter}
+              />
+              <DateRangeFilter
+                open={openFilter === 'date'}
+                onOpen={(open) => setOpenFilter(open ? 'date' : null)}
+                label="创建时间"
+                from={createdFrom}
+                to={createdTo}
+                onFrom={setCreatedFrom}
+                onTo={setCreatedTo}
+              />
+              <SortFilter
+                open={openFilter === 'sort'}
+                onOpen={(open) => setOpenFilter(open ? 'sort' : null)}
+                sortBy={sortBy}
+                sortDir={sortDir}
+                options={recordSortOptions}
+                onChange={(nextSortBy, nextSortDir) => {
+                  setSortBy(nextSortBy)
+                  setSortDir(nextSortDir)
+                }}
+              />
+              <button className={`filter-pill checkbox-pill ${includeArchived ? 'is-active' : ''}`} type="button" onClick={() => {
                 setOffset(0)
-                setIncludeArchived(event.target.checked)
+                setIncludeArchived(!includeArchived)
                 setSelectedRecordIds(new Set())
-              }} /> 查看已归档</label>
-              {bulkMode && <label><input type="checkbox" checked={allVisibleRecordsSelected} disabled={!selectableRecordIds.length} onChange={(event) => toggleVisibleRecordSelection(event.target.checked)} /> 全选本页</label>}
+              }}><Check size={15} /><span>查看已归档</span></button>
+              {hasActiveFilters && <button className="filter-pill reset-filter-pill" type="button" onClick={clearRecordFilters}><span>清空筛选</span></button>}
             </div>
             <div className="record-list-meta">
               {selectedVisibleRecords.length > 0 && (
@@ -3505,16 +3665,16 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
                   <Download size={14} /> {downloadChecking ? '检查成片中...' : `下载成片 ${selectedVisibleRecords.length} 项`}
                 </button>
               )}
-              <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedRecordIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
               {selectedVisibleRecords.length > 0 && (
                 selectedArchivedRecords.length === selectedVisibleRecords.length
                   ? <button className="management-action" onClick={() => restoreRecords(selectedArchivedRecords)}>恢复 {selectedArchivedRecords.length} 项</button>
                   : <button className="management-action" disabled={selectedArchivedRecords.length > 0} title={selectedArchivedRecords.length ? '请分别选择已归档和未归档记录' : undefined} onClick={runRecordBatchAction}>归档 {selectedActiveRecords.length} 项</button>
               )}
-              <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 条` : '0 条'}</span>
+              {bulkMode && <button className={`management-action management-check-action ${allVisibleRecordsSelected ? 'is-active' : ''}`} disabled={!selectableRecordIds.length} onClick={() => toggleVisibleRecordSelection(!allVisibleRecordsSelected)}><Check size={15} /> 全选本页</button>}
+              <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedRecordIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
             </div>
           </div>
-          <div className="record-list-body">
+          <div className="record-list-body" ref={recordListBodyRef}>
             {items.map((item) => (
               <div
                 key={item.id}
@@ -3549,19 +3709,23 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
             ))}
             {!items.length && <EmptyState title="暂无生成记录" text="创建拍摄任务后会出现在这里。" />}
           </div>
-          <PaginationControls
-            disabled={loading}
-            offset={offset}
-            pageSize={pageSize}
-            pageSizeOptions={densePageSizeOptions}
-            total={total}
-            totalPages={totalPages}
-            onOffsetChange={setOffset}
-            onPageSizeChange={(value) => {
-              setPageSize(value)
-              setOffset(0)
-            }}
-          />
+          <div className="record-pagination-stick">
+            <PaginationControls
+              disabled={loading}
+              offset={offset}
+              pageSize={pageSize}
+              pageSizeOptions={[{ value: autoPageSize, label: `${autoPageSize} 条`, key: 'auto' }, ...densePageSizeOptions]}
+              pageSizeOptionKey={pageSizeMode === 'auto' ? 'auto' : String(pageSize)}
+              total={total}
+              totalPages={totalPages}
+              onOffsetChange={setOffset}
+              onPageSizeChange={(value, optionKey) => {
+                setPageSizeMode(optionKey === 'auto' ? 'auto' : 'fixed')
+                setPageSize(value)
+                setOffset(0)
+              }}
+            />
+          </div>
         </div>
         <div className="panel record-detail">
           {detail ? (

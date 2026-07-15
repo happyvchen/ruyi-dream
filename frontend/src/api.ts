@@ -600,7 +600,17 @@ export const api = {
     request<{ item: GenerationTask }>(`/api/generation-result-images-new/${id}/redeliver`, { method: 'POST' }),
   precheckFinalImageExport: (ids: number[]) =>
     request<FinalImageExportPrecheck>('/api/generation-task-exports/precheck', { method: 'POST', body: JSON.stringify({ ids }) }),
-  listRecords: (options?: { limit?: number; offset?: number; includeArchived?: boolean }) =>
+  listRecords: (options?: {
+    limit?: number
+    offset?: number
+    keyword?: string
+    includeArchived?: boolean
+    status?: string[]
+    createdFrom?: string
+    createdTo?: string
+    sortBy?: string
+    sortDir?: string
+  }) =>
     request<Paginated<GenerationTask>>(params('/api/generation-records', options ?? {})),
   getRecord: (id: number, includeDebug = false) =>
     request<{ item: GenerationTask }>(params(`/api/generation-records/${id}`, { includeDebug })),
