@@ -473,13 +473,13 @@ class BackendCurrentFlowTests(unittest.TestCase):
         output = BytesIO()
         Image.new("RGB", (32, 48), color=(128, 160, 192)).save(output, format="JPEG")
         image_bytes = output.getvalue()
-        object_key = "direct-uploads/generation-task/test-batch/001-look.jpg"
+        object_keys = [f"direct-uploads/generation-task/test-batch/{index:03d}-look.jpg" for index in range(1, 17)]
         original_object_head = main.object_head
         original_get_bytes = main.get_bytes
         original_put_bytes = main.put_bytes
         original_generate_image_derivatives = main.generate_image_derivatives
-        main.object_head = lambda key: {"contentLength": len(image_bytes), "contentType": "image/jpeg"} if key == object_key else None
-        main.get_bytes = lambda key: image_bytes if key == object_key else b""
+        main.object_head = lambda key: {"contentLength": len(image_bytes), "contentType": "image/jpeg"} if key in object_keys else None
+        main.get_bytes = lambda key: image_bytes if key in object_keys else b""
         main.put_bytes = lambda key, content, content_type: None
         main.generate_image_derivatives = lambda key, content: {
             "thumb": f"{key}.thumb.webp",
@@ -496,23 +496,76 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 json={
                     "name": "Direct Upload Task",
                     "heroProductInfo": "格纹连衣裙",
-                    "uploads": [{"objectKey": object_key, "filename": "look.jpg", "mimeType": "image/jpeg", "sizeBytes": len(image_bytes)}],
+                    "uploads": [
+                        {"objectKey": object_key, "filename": f"look-{index:02d}.jpg", "mimeType": "image/jpeg", "sizeBytes": len(image_bytes)}
+                        for index, object_key in enumerate(object_keys, start=1)
+                    ],
                 },
             )
             self.assertEqual(response.status_code, 200)
             item = response.json()["item"]
             self.assertEqual(item["name"], "Direct Upload Task")
-            self.assertEqual(item["images"][0]["asset"]["objectKey"], object_key)
+            self.assertEqual(len(item["images"]), 15)
+            self.assertEqual(item["images"][0]["asset"]["objectKey"], object_keys[0])
+            self.assertEqual(item["images"][-1]["asset"]["objectKey"], object_keys[14])
             self.assertEqual(item["images"][0]["asset"]["width"], 32)
             self.assertEqual(item["images"][0]["asset"]["height"], 48)
             with db_module.get_db() as db:
-                row = db.execute("SELECT object_key, thumb_key, preview_key FROM media_assets WHERE object_key = ?", (object_key,)).fetchone()
+                row = db.execute("SELECT object_key, thumb_key, preview_key FROM media_assets WHERE object_key = ?", (object_keys[0],)).fetchone()
+                media_count = db.execute(
+                    "SELECT COUNT(*) AS count FROM media_assets WHERE object_key LIKE 'direct-uploads/generation-task/test-batch/%'"
+                ).fetchone()["count"]
             self.assertIsNotNone(row)
-            self.assertEqual(row["thumb_key"], f"{object_key}.thumb.webp")
-            self.assertEqual(row["preview_key"], f"{object_key}.preview.webp")
+            self.assertEqual(row["thumb_key"], f"{object_keys[0]}.thumb.webp")
+            self.assertEqual(row["preview_key"], f"{object_keys[0]}.preview.webp")
+            self.assertEqual(media_count, 15)
         finally:
             main.object_head = original_object_head
             main.get_bytes = original_get_bytes
+            main.put_bytes = original_put_bytes
+            main.generate_image_derivatives = original_generate_image_derivatives
+            client.close()
+
+    def test_create_styling_garment_trims_to_gemini_candidate_pool(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+        from PIL import Image
+
+        db_module.init_db()
+        output = BytesIO()
+        Image.new("RGB", (32, 48), color=(96, 128, 160)).save(output, format="JPEG")
+        image_bytes = output.getvalue()
+        original_put_fileobj = main.put_fileobj
+        original_put_bytes = main.put_bytes
+        original_generate_image_derivatives = main.generate_image_derivatives
+        main.put_fileobj = lambda key, fileobj, content_type=None: None
+        main.put_bytes = lambda key, content, content_type: None
+        main.generate_image_derivatives = lambda key, content: {
+            "thumb": f"{key}.thumb.webp",
+            "preview": f"{key}.preview.webp",
+            "thumbSize": 12,
+            "previewSize": 34,
+        }
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            response = client.post(
+                "/api/styling-garments",
+                data={"code": "POOL-15"},
+                files=[
+                    ("files", (f"garment-{index:02d}.jpg", image_bytes, "image/jpeg"))
+                    for index in range(1, 17)
+                ],
+            )
+            self.assertEqual(response.status_code, 200)
+            item = response.json()["item"]
+            self.assertEqual(len(item["images"]), 15)
+            self.assertEqual(item["images"][0]["asset"]["filename"], "garment-01.jpg")
+            self.assertEqual(item["images"][-1]["asset"]["filename"], "garment-15.jpg")
+        finally:
+            main.put_fileobj = original_put_fileobj
             main.put_bytes = original_put_bytes
             main.generate_image_derivatives = original_generate_image_derivatives
             client.close()
@@ -1023,6 +1076,25 @@ class BackendCurrentFlowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ai_tags"):
             main.normalize_prompt_tagging_result({"selected_files": ["front.jpg"]}, garment)
 
+    def test_ai_tagging_normalizer_keeps_first_six_selected_images(self) -> None:
+        main = importlib.import_module("app.main")
+        garment = {
+            "images": [
+                {"id": image_id, "sortOrder": index - 1, "asset": {"filename": f"garment-{index}.jpg"}}
+                for index, image_id in enumerate(range(11, 18), start=1)
+            ]
+        }
+
+        result = main.normalize_prompt_tagging_result(
+            {
+                "selected_files": [f"garment-{index}.jpg" for index in range(1, 8)],
+                "ai_tags": {"一级品类": ["半裙"]},
+            },
+            garment,
+        )
+
+        self.assertEqual(result["selected_image_ids"], [11, 12, 13, 14, 15, 16])
+
     def test_ai_stylist_normalizer_requires_selected_files_and_styling_plan(self) -> None:
         main = importlib.import_module("app.main")
         input_row = {
@@ -1054,15 +1126,42 @@ class BackendCurrentFlowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "styling_plan"):
             main.normalize_ai_stylist_result({"selected_files": ["hero-front.jpg"]}, input_row, candidate_snapshot)
 
+    def test_ai_stylist_normalizer_keeps_first_eight_selected_images(self) -> None:
+        main = importlib.import_module("app.main")
+        input_row = {
+            "image_snapshot_json": main.dumps([
+                {"id": image_id, "sortOrder": index - 1, "asset": {"filename": f"hero-{index}.jpg"}}
+                for index, image_id in enumerate(range(21, 30), start=1)
+            ])
+        }
+        candidate_snapshot = {"candidate_material_ids": [], "library_tag_cards": []}
+
+        result = main.normalize_ai_stylist_result(
+            {
+                "selected_files": [f"hero-{index}.jpg" for index in range(1, 10)],
+                "styling_plan": {
+                    "hero_understanding": {"shot_category_family": "one_piece"},
+                    "outfit_candidates": [{"outfit_key": "solo", "selected_material_ids": []}],
+                    "selected_outfit_key": "solo",
+                },
+            },
+            input_row,
+            candidate_snapshot,
+        )
+
+        self.assertEqual(result["selected_hero_image_ids"], [21, 22, 23, 24, 25, 26, 27, 28])
+
     def test_generation_input_selected_image_order_is_persisted(self) -> None:
         main = importlib.import_module("app.main")
         db = sqlite3.connect(":memory:")
         db.row_factory = sqlite3.Row
-        db.execute("CREATE TABLE generation_task_input_versions (id INTEGER PRIMARY KEY, image_snapshot_json TEXT)")
+        db.execute("CREATE TABLE generation_task_input_versions (id INTEGER PRIMARY KEY, task_id INTEGER, image_snapshot_json TEXT)")
+        db.execute("CREATE TABLE generation_task_images (id INTEGER PRIMARY KEY, task_id INTEGER, sort_order INTEGER, updated_at TEXT, deleted_at TEXT)")
         db.execute(
-            "INSERT INTO generation_task_input_versions (id, image_snapshot_json) VALUES (?, ?)",
+            "INSERT INTO generation_task_input_versions (id, task_id, image_snapshot_json) VALUES (?, ?, ?)",
             (
                 1,
+                9,
                 main.dumps([
                     {"id": 21, "sortOrder": 0, "asset": {"filename": "hero-front.jpg"}},
                     {"id": 22, "sortOrder": 1, "asset": {"filename": "hero-back.jpg"}},
@@ -1070,13 +1169,39 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 ]),
             ),
         )
+        db.executemany(
+            "INSERT INTO generation_task_images (id, task_id, sort_order, updated_at, deleted_at) VALUES (?, 9, ?, '', NULL)",
+            [(21, 0), (22, 1), (23, 2)],
+        )
 
         main.apply_generation_input_selected_image_order(db, 1, [22, 21])
 
         row = db.execute("SELECT image_snapshot_json FROM generation_task_input_versions WHERE id = 1").fetchone()
         snapshot = main.loads(row["image_snapshot_json"], [])
-        self.assertEqual([item["id"] for item in snapshot], [22, 21, 23])
-        self.assertEqual([item["sortOrder"] for item in snapshot], [0, 1, 2])
+        self.assertEqual([item["id"] for item in snapshot], [22, 21])
+        self.assertEqual([item["sortOrder"] for item in snapshot], [0, 1])
+        rows = db.execute("SELECT id, sort_order, deleted_at FROM generation_task_images ORDER BY id").fetchall()
+        self.assertEqual([(row["id"], row["sort_order"], bool(row["deleted_at"])) for row in rows], [(21, 1, False), (22, 0, False), (23, 2, True)])
+
+    def test_styling_garment_selected_image_order_removes_unselected(self) -> None:
+        main = importlib.import_module("app.main")
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.execute(
+            """
+            CREATE TABLE styling_garment_images
+              (id INTEGER PRIMARY KEY, styling_garment_id INTEGER, sort_order INTEGER, updated_at TEXT, deleted_at TEXT)
+            """
+        )
+        db.executemany(
+            "INSERT INTO styling_garment_images (id, styling_garment_id, sort_order, updated_at, deleted_at) VALUES (?, 7, ?, '', NULL)",
+            [(11, 0), (12, 1), (13, 2)],
+        )
+
+        main.apply_styling_garment_selected_image_order(db, 7, [12, 11], "2026-07-15T00:00:00Z")
+
+        rows = db.execute("SELECT id, sort_order, deleted_at FROM styling_garment_images ORDER BY id").fetchall()
+        self.assertEqual([(row["id"], row["sort_order"], bool(row["deleted_at"])) for row in rows], [(11, 1, False), (12, 0, False), (13, 2, True)])
 
     def test_garment_tagging_store_failure_marks_failed(self) -> None:
         db_module = importlib.import_module("app.db")

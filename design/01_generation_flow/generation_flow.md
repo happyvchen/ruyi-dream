@@ -15,7 +15,7 @@
 
 Gemini 只负责理解主推款、探索候选 outfit、判断品牌与商品成立性，并在顶层输出 `selected_files` + `styling_plan`；其中 `styling_plan` 承载 StylingPlan。选中的搭配服装必须来自搭配服装库，鞋、包和首饰只作为低存在感文字边界。
 
-AI 摄影棚主推款上传最多保留 15 张图片。点击 `AI 智能选搭` 时，主推款图片挑选/排序必须与 AI 选搭合并为一次 Gemini 调用。Prompt 维护页维护主推款图片挑选/排序规则和 `AI 选搭` 规则；代码只注入当前主推款图片文件标识、商品信息、搭配服装标签事实和用户本次补充要求。
+AI 摄影棚主推款最多取 15 张图片作为 Gemini 候选输入。点击 `AI 智能选搭` 时，主推款图片挑选/排序必须与 AI 选搭合并为一次 Gemini 调用。Prompt 维护页维护主推款图片挑选/排序规则和 `AI 选搭` 规则；代码只注入当前主推款图片文件标识、商品信息、搭配服装标签事实和用户本次补充要求。
 
 合并调用返回顶层包含：
 
@@ -26,7 +26,7 @@ AI 摄影棚主推款上传最多保留 15 张图片。点击 `AI 智能选搭` 
 }
 ```
 
-`selected_files` 按推荐参考图顺序排列，用于冻结本次 `generation_task_input_versions` 的主推款参考图顺序；`styling_plan` 保存为 `StylingPlan`。Gemini 调用失败、JSON 不可解析、缺少 `selected_files` / `styling_plan` 或引用不存在文件时，本次 AI 智能选搭失败，不做本地挑图 fallback。
+`selected_files` 按推荐参考图顺序排列，后端取前 8 张用于冻结本次 `generation_task_input_versions` 的主推款参考图顺序；`styling_plan` 保存为 `StylingPlan`。Gemini 调用失败、JSON 不可解析、缺少 `selected_files` / `styling_plan` 或引用不存在文件时，本次 AI 智能选搭失败，不做本地挑图 fallback。
 
 `styling_plan.hero_understanding` 必须区分商品真实品类与拍摄图位族：
 

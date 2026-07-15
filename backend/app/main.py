@@ -124,6 +124,8 @@ GARMENT_IMAGE_SELECTION_PROMPT_CONFIG_KEY = "assembly.garment_image_selection"
 HERO_IMAGE_SELECTION_PROMPT_CONFIG_KEY = "assembly.hero_image_selection"
 MAX_GARMENT_IMAGE_INPUTS = 15
 MAX_HERO_IMAGE_INPUTS = 15
+MAX_GARMENT_SELECTED_IMAGES = 6
+MAX_HERO_SELECTED_IMAGES = 8
 STORYBOARD_PROMPT_CONFIG_KEYS = {
     "top": "assembly.storyboard_preview_top",
     "bottom": "assembly.storyboard_preview_bottom",
@@ -859,8 +861,7 @@ async def create_styling_garment(
         raise HTTPException(status_code=400, detail="搭配服装代码不能为空")
     if not files:
         raise HTTPException(status_code=400, detail="至少上传一张图片")
-    if len(files) > MAX_GARMENT_IMAGE_INPUTS:
-        raise HTTPException(status_code=400, detail=f"单套搭配服装最多上传 {MAX_GARMENT_IMAGE_INPUTS} 张图片")
+    files = files[:MAX_GARMENT_IMAGE_INPUTS]
     with get_db() as db:
         duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
         if duplicate:
@@ -1512,8 +1513,7 @@ async def create_generation_task(
 ) -> dict[str, Any]:
     if not files:
         raise HTTPException(status_code=400, detail="至少上传一张主推款图片")
-    if len(files) > MAX_HERO_IMAGE_INPUTS:
-        raise HTTPException(status_code=400, detail=f"主推款最多上传 {MAX_HERO_IMAGE_INPUTS} 张图片")
+    files = files[:MAX_HERO_IMAGE_INPUTS]
     task_name = (name or datetime.now().strftime("%Y%m%d%H%M%S")).strip()
     prefix = join_key("generation-tasks", f"{sanitize_name(task_name) or 'task'}-{uuid4().hex[:8]}")
     assets = await save_uploads_as_media_assets(files, prefix)
@@ -1541,10 +1541,9 @@ async def create_generation_task(
 async def create_generation_task_from_uploads(payload: GenerationTaskFromUploadsRequest) -> dict[str, Any]:
     if not payload.uploads:
         raise HTTPException(status_code=400, detail="至少上传一张主推款图片")
-    if len(payload.uploads) > MAX_HERO_IMAGE_INPUTS:
-        raise HTTPException(status_code=400, detail=f"主推款最多上传 {MAX_HERO_IMAGE_INPUTS} 张图片")
+    uploads = payload.uploads[:MAX_HERO_IMAGE_INPUTS]
     task_name = (payload.name or datetime.now().strftime("%Y%m%d%H%M%S")).strip()
-    assets = await save_uploaded_objects_as_media_assets(payload.uploads)
+    assets = await save_uploaded_objects_as_media_assets(uploads)
     timestamp = now_iso()
     hero_product_info_text = normalize_user_input_text(
         payload.heroProductInfo if payload.heroProductInfo is not None else payload.userRequirement
@@ -4771,16 +4770,22 @@ def apply_styling_garment_selected_image_order(db: Any, garment_id: int, selecte
     if not selected_image_ids or not selected_set.issubset(set(existing_ids)):
         raise ValueError("selected_files 对应的图片不属于当前搭配服装")
     ordered_ids = [image_id for image_id in selected_image_ids if image_id in existing_ids]
-    ordered_ids.extend(image_id for image_id in existing_ids if image_id not in selected_set)
     for sort_order, image_id in enumerate(ordered_ids):
         db.execute(
             "UPDATE styling_garment_images SET sort_order = ?, updated_at = ? WHERE id = ?",
             (sort_order, timestamp, image_id),
         )
+    unselected_ids = [image_id for image_id in existing_ids if image_id not in selected_set]
+    if unselected_ids:
+        placeholders = ",".join("?" for _ in unselected_ids)
+        db.execute(
+            f"UPDATE styling_garment_images SET deleted_at = ?, updated_at = ? WHERE styling_garment_id = ? AND id IN ({placeholders})",
+            (timestamp, timestamp, garment_id, *unselected_ids),
+        )
 
 
 def apply_generation_input_selected_image_order(db: Any, input_version_id: int, selected_image_ids: list[int]) -> None:
-    row = db.execute("SELECT image_snapshot_json FROM generation_task_input_versions WHERE id = ?", (input_version_id,)).fetchone()
+    row = db.execute("SELECT task_id, image_snapshot_json FROM generation_task_input_versions WHERE id = ?", (input_version_id,)).fetchone()
     if not row:
         raise ValueError("输入版本不存在")
     snapshot = loads(row["image_snapshot_json"], [])
@@ -4792,7 +4797,6 @@ def apply_generation_input_selected_image_order(db: Any, input_version_id: int, 
         raise ValueError("selected_files 对应的主推款图片不属于当前输入版本")
     by_id = {int(item["id"]): item for item in snapshot if isinstance(item, dict) and item.get("id") is not None}
     ordered_ids = [image_id for image_id in selected_image_ids if image_id in by_id]
-    ordered_ids.extend(image_id for image_id in existing_ids if image_id not in selected_set)
     ordered_snapshot: list[dict[str, Any]] = []
     for sort_order, image_id in enumerate(ordered_ids):
         next_item = {**by_id[image_id], "sortOrder": sort_order}
@@ -4801,6 +4805,19 @@ def apply_generation_input_selected_image_order(db: Any, input_version_id: int, 
         "UPDATE generation_task_input_versions SET image_snapshot_json = ? WHERE id = ?",
         (dumps(ordered_snapshot), input_version_id),
     )
+    timestamp = now_iso()
+    for sort_order, image_id in enumerate(ordered_ids):
+        db.execute(
+            "UPDATE generation_task_images SET sort_order = ?, updated_at = ? WHERE id = ?",
+            (sort_order, timestamp, image_id),
+        )
+    unselected_ids = [image_id for image_id in existing_ids if image_id not in selected_set]
+    if unselected_ids:
+        placeholders = ",".join("?" for _ in unselected_ids)
+        db.execute(
+            f"UPDATE generation_task_images SET deleted_at = ?, updated_at = ? WHERE task_id = ? AND id IN ({placeholders})",
+            (timestamp, timestamp, int(row["task_id"]), *unselected_ids),
+        )
 
 
 TAG_PROMPT_FIELD_ALIASES = {
@@ -4848,7 +4865,7 @@ def normalize_prompt_tagging_result(
     if not isinstance(raw, dict):
         raise ValueError("Gemini 打标结果必须是 JSON 对象")
     selected_files = raw.get("selected_files")
-    selected_image_ids = selected_image_ids_from_files(selected_files, garment.get("images") or [], MAX_GARMENT_IMAGE_INPUTS)
+    selected_image_ids = selected_image_ids_from_files(selected_files, garment.get("images") or [], MAX_GARMENT_IMAGE_INPUTS)[:MAX_GARMENT_SELECTED_IMAGES]
     ai_tags = raw.get("ai_tags")
     if not isinstance(ai_tags, dict):
         raise ValueError("Gemini 打标结果缺少 ai_tags 对象")
@@ -5721,7 +5738,7 @@ def normalize_ai_stylist_result(raw: Any, input_row: Any, candidate_snapshot: di
         raw.get("selected_files"),
         loads(input_row["image_snapshot_json"], []),
         MAX_HERO_IMAGE_INPUTS,
-    )
+    )[:MAX_HERO_SELECTED_IMAGES]
     plan_source = raw.get("styling_plan")
     if not isinstance(plan_source, dict):
         raise ValueError("Gemini AI Stylist 结果缺少 styling_plan 对象")

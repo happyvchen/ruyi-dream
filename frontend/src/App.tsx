@@ -90,6 +90,8 @@ const authSeenStorageKey = 'ruyi-auth-seen'
 const authExpiredMessage = '登录状态已过期，请重新登录后继续。'
 const STYLING_GARMENT_MAX_IMAGES = 15
 const HERO_PRODUCT_MAX_IMAGES = 15
+const STYLING_GARMENT_SELECTED_IMAGES = 6
+const HERO_PRODUCT_SELECTED_IMAGES = 8
 
 export function App() {
   const [checked, setChecked] = useState(false)
@@ -1123,7 +1125,7 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><h2>上传主推款</h2><p>支持多张图片、一个货号文件夹或一个上级文件夹。推荐 3-5 张，正式创建保留当前排序前 15 张。拖入多个货号文件夹可批量创建任务并批量成片。</p></div>
+        <div className="step-copy"><h2>上传主推款</h2><p>支持多张图片、一个货号文件夹或一个上级文件夹。最多 15 张进入 Gemini 候选池，AI 智能选搭后保留挑选排序好的 8 张主推款参考图。</p></div>
         {task?.status === 'DRAFT' && <HeroDraftEditor task={task} setTask={setTask} run={run} />}
         {!task && (
           <>
@@ -1179,7 +1181,7 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                             <div className="batch-note">
                               <span>推荐 3-5 张，排序越靠前越重要。{existsHint ? ' 与已有任务重名，将共存（任务名不要求唯一）。' : ''}</span>
                               {hasBlockingError && <strong>{group.error ?? (!group.files.length ? '没有可用图片' : '本批次任务名重复')}</strong>}
-                              {overLimit && <strong>{`超过 ${HERO_PRODUCT_MAX_IMAGES} 张，创建时会自动保留当前排序前 ${HERO_PRODUCT_MAX_IMAGES} 张`}</strong>}
+                              {overLimit && <strong>{`超过 ${HERO_PRODUCT_MAX_IMAGES} 张，创建时会自动保留当前排序前 ${HERO_PRODUCT_MAX_IMAGES} 张进入 Gemini 候选池`}</strong>}
                               {group.issues?.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
                           </div>
                           <FileThumbList files={group.files} onChange={(nextFiles) => updateBatchGroup(group.id, { files: nextFiles })} />
@@ -1223,8 +1225,8 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                   <span className={`count-pill ${files.length > HERO_PRODUCT_MAX_IMAGES ? 'is-over' : ''}`}>{files.length}/${HERO_PRODUCT_MAX_IMAGES} 张</span>
                 </div>
                   <div className="batch-note">
-                    <span>推荐 3-5 张，正式创建保留当前排序前 15 张。</span>
-                    {files.length > HERO_PRODUCT_MAX_IMAGES && <strong>{`当前超过 ${HERO_PRODUCT_MAX_IMAGES} 张，创建时会自动保留当前排序前 ${HERO_PRODUCT_MAX_IMAGES} 张`}</strong>}
+                    <span>{`最多 ${HERO_PRODUCT_MAX_IMAGES} 张进入 Gemini 候选池，AI 智能选搭后保留 ${HERO_PRODUCT_SELECTED_IMAGES} 张参考图。`}</span>
+                    {files.length > HERO_PRODUCT_MAX_IMAGES && <strong>{`当前超过 ${HERO_PRODUCT_MAX_IMAGES} 张，创建时会自动保留当前排序前 ${HERO_PRODUCT_MAX_IMAGES} 张进入候选池`}</strong>}
                     {singleIssues.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
                   </div>
                 <FileThumbList files={files} onChange={setFiles} />
@@ -1253,6 +1255,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const imageCount = task.images?.length ?? 0
+  const imageLimit = task.status === 'DRAFT' ? HERO_PRODUCT_MAX_IMAGES : HERO_PRODUCT_SELECTED_IMAGES
 
   useEffect(() => setName(task.name), [task.id, task.name])
 
@@ -1271,7 +1274,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
 
   return (
     <div className="hero-draft">
-      <div className="section-head"><strong>主推款图片</strong><span className={`count-pill ${imageCount > HERO_PRODUCT_MAX_IMAGES ? 'is-over' : ''}`}>{imageCount}/{HERO_PRODUCT_MAX_IMAGES} 张</span><span className="status draft">{task.status === 'DRAFT' ? '待选搭' : '可调整'}</span></div>
+      <div className="section-head"><strong>主推款图片</strong><span className={`count-pill ${imageCount > imageLimit ? 'is-over' : ''}`}>{imageCount}/{imageLimit} 张</span><span className="status draft">{task.status === 'DRAFT' ? '待选搭' : '可调整'}</span></div>
       <div className="inline-form">
           <input value={name} onChange={(event) => setName(event.target.value)} placeholder="任务名称" />
           <button className="management-action" disabled={name.trim() === task.name} onClick={() => void run('保存任务名称中...', () => api.updateTask(task.id, { name }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>保存名称</button>
@@ -1306,7 +1309,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
           </div>
         ))}
       </div>
-      <p className="edit-hint">{task.status === 'DRAFT' ? '图片就绪后可直接进入 AI 智能选搭；系统会保留本次主推款和默认数字模特信息用于后续生成。' : '调整图片会保留旧过程记录，并让当前任务回到待选搭状态。'}</p>
+      <p className="edit-hint">{task.status === 'DRAFT' ? `最多 ${HERO_PRODUCT_MAX_IMAGES} 张进入 Gemini 候选池；AI 智能选搭后保留 ${HERO_PRODUCT_SELECTED_IMAGES} 张主推款参考图。` : `当前展示 AI 选搭后保留的主推款参考图，最多 ${HERO_PRODUCT_SELECTED_IMAGES} 张；调整图片会让当前任务回到待选搭状态。`}</p>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </div>
   )
@@ -2242,7 +2245,7 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
       <div className="import-head">
         <div>
           <h3>导入搭配服装</h3>
-          <p>散图会合并为一套；单货号文件夹是一套；上级文件夹会递归识别最底层图片目录。导入后系统会自动识别标签，单套正式保留前 15 张。</p>
+          <p>{`散图会合并为一套；单货号文件夹是一套；上级文件夹会递归识别最底层图片目录。最多 ${STYLING_GARMENT_MAX_IMAGES} 张进入 Gemini 候选池，AI 打标后只保留挑选排序好的 ${STYLING_GARMENT_SELECTED_IMAGES} 张纯服装参考图。`}</p>
         </div>
         <button className="management-action" disabled={!batches.length} onClick={saveDrafts}>导入</button>
       </div>
@@ -2309,7 +2312,7 @@ function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
         <span>{batch.files.length} 张图片</span>
         {batch.error && <strong>{batch.error}</strong>}
         {!batch.files.length && !batch.error && <strong>没有可用图片</strong>}
-        {batch.files.length > STYLING_GARMENT_MAX_IMAGES && <strong>{`超过 ${STYLING_GARMENT_MAX_IMAGES} 张，导入时会自动保留当前排序前 ${STYLING_GARMENT_MAX_IMAGES} 张`}</strong>}
+        {batch.files.length > STYLING_GARMENT_MAX_IMAGES && <strong>{`超过 ${STYLING_GARMENT_MAX_IMAGES} 张，导入时会自动保留当前排序前 ${STYLING_GARMENT_MAX_IMAGES} 张进入 Gemini 候选池`}</strong>}
         {batch.issues?.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
       </div>
       <FileThumbList files={batch.files} onChange={onFiles} />
