@@ -175,7 +175,13 @@ h1, h2, h3, p { margin: 0; }
 .workbench-page {
   align-content: start;
   width: 100%;
+  height: 100%;
+  min-height: 0;
   margin: 0;
+  overflow: hidden;
+}
+.workspace:has(.workbench-page) {
+  overflow: hidden;
 }
 .studio-page {
   width: 100%;
@@ -1244,8 +1250,8 @@ a.button-link { text-decoration: none; cursor: pointer; }
   grid-template-columns: minmax(0, 1fr) 336px;
   gap: 18px;
   align-items: stretch;
-  height: calc(100vh - 112px);
-  min-height: 620px;
+  height: auto;
+  min-height: 0;
   overflow: hidden;
 }
 .record-list, .record-detail, .side-editor { padding: 18px; }
@@ -1270,13 +1276,21 @@ a.button-link { text-decoration: none; cursor: pointer; }
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  height: calc(100vh - 112px);
+  height: auto;
   overflow: hidden;
   background: rgba(255,255,255,.9);
 }
 .library-page:has(.import-panel) .library-panel {
-  height: calc(100vh - 112px);
   min-height: 0;
+}
+.library-page,
+.records-page,
+.model-shell-page,
+.prompt-page {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.library-page:has(.import-panel) {
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 .search {
   position: relative;
@@ -2866,7 +2880,8 @@ a.button-link { text-decoration: none; cursor: pointer; }
   grid-template-columns: 304px minmax(0, 1fr);
   gap: 22px;
   padding: 20px;
-  min-height: calc(100vh - 112px);
+  min-height: 0;
+  overflow: hidden;
   background: rgba(255,255,255,.9);
 }
 .model-meta { display: grid; align-content: start; gap: 14px; }
@@ -2889,7 +2904,14 @@ a.button-link { text-decoration: none; cursor: pointer; }
 .model-meta-head { display: flex; align-items: center; gap: 10px; }
 .model-meta-head h2 { margin: 0; color: var(--text); font-size: 18px; }
 .chip-admin { background: #e9f8ef; color: var(--success); }
-.model-main { display: grid; align-content: start; gap: 22px; }
+.model-main {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 22px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
 .model-block {
   display: grid;
   gap: 10px;
