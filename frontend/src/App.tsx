@@ -3730,7 +3730,20 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
     void api.listBatchTasks(batchId)
       .then((result) => {
         if (expandedBatchRequestRef.current[batchId] === requestId) {
-          setExpandedBatchTasks((current) => ({ ...current, [batchId]: result.items }))
+          if (result.items.length) {
+            setExpandedBatchTasks((current) => ({ ...current, [batchId]: result.items }))
+          } else {
+            setExpandedBatchIds((current) => {
+              const next = new Set(current)
+              next.delete(batchId)
+              return next
+            })
+            setExpandedBatchTasks((current) => {
+              const next = { ...current }
+              delete next[batchId]
+              return next
+            })
+          }
         }
       })
       .catch(() => {
@@ -3756,16 +3769,6 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
     if (willExpand && !expandedBatchTasks[item.batchId]) loadExpandedBatchTasks(item.batchId)
   }
 
-  function expandBatchRecord(item: GenerationRecordBatch) {
-    setExpandedBatchIds((current) => {
-      if (current.has(item.batchId)) return current
-      const next = new Set(current)
-      next.add(item.batchId)
-      return next
-    })
-    if (!expandedBatchTasks[item.batchId]) loadExpandedBatchTasks(item.batchId)
-  }
-
   function refreshExpandedBatchTaskLists(targets: Array<{ batchId?: string | null }>) {
     const batchIds = Array.from(new Set(targets.map((item) => item.batchId).filter(Boolean) as string[]))
     batchIds.forEach((batchId) => {
@@ -3782,6 +3785,21 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
     void api.listBatchTasks(activeBatchId)
       .then((result) => {
         if (batchDetailRequestRef.current !== requestId) return
+        if (!result.items.length) {
+          setBatchDetailTasks([])
+          setBatchDetail((current) => current?.batchId === activeBatchId ? null : current)
+          setExpandedBatchIds((current) => {
+            const next = new Set(current)
+            next.delete(activeBatchId)
+            return next
+          })
+          setExpandedBatchTasks((current) => {
+            const next = { ...current }
+            delete next[activeBatchId]
+            return next
+          })
+          return
+        }
         setBatchDetailTasks(result.items)
         setBatchDetail((current) => current?.batchId === activeBatchId ? summarizeBatchRecordFromTasks(current, result.items) : current)
       })
@@ -4033,7 +4051,6 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
                 tasks={expandedBatchTasks[entry.batch.batchId] ?? []}
                 loading={!!expandedBatchLoading[entry.batch.batchId]}
                 onOpen={openBatchRecord}
-                onExpand={expandBatchRecord}
                 onToggle={toggleBatchExpansion}
                 onOpenTask={openRecord}
                 onOpenStudio={openTaskInStudio}
@@ -4062,7 +4079,6 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
                 tasks={expandedBatchTasks[item.batchId] ?? []}
                 loading={!!expandedBatchLoading[item.batchId]}
                 onOpen={openBatchRecord}
-                onExpand={expandBatchRecord}
                 onToggle={toggleBatchExpansion}
                 onOpenTask={openRecord}
                 onOpenStudio={openTaskInStudio}
@@ -4105,7 +4121,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
         </div>
         <div className="panel record-detail">
           {batchDetail ? (
-            <BatchRecordDetail item={batchDetail} tasks={batchDetailTasks} loading={batchDetailLoading} onOpenTask={openRecord} onOpenStudio={openTaskInStudio} />
+            <BatchRecordDetail item={batchDetail} tasks={batchDetailTasks} loading={batchDetailLoading} downloadChecking={downloadChecking} onDownload={triggerFinalImageDownload} />
           ) : detail ? (
             <>
               <h3>{detail.name}</h3>
@@ -4175,7 +4191,7 @@ function TaskRecordRow({ item, active, bulkMode, selected, onSelect, onOpen, onO
   )
 }
 
-function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, onOpen, onExpand, onToggle, onOpenTask, onOpenStudio, onManageTask }: {
+function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, onOpen, onToggle, onOpenTask, onOpenStudio, onManageTask }: {
   item: GenerationRecordBatch
   active: boolean
   expanded: boolean
@@ -4183,7 +4199,6 @@ function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, 
   loading: boolean
   activeTaskId: number | null
   onOpen: (item: GenerationRecordBatch) => void
-  onExpand: (item: GenerationRecordBatch) => void
   onToggle: (item: GenerationRecordBatch) => void
   onOpenTask: (item: GenerationTask) => void
   onOpenStudio: (task: GenerationTask) => void
@@ -4193,9 +4208,9 @@ function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, 
   return (
     <div className={`batch-record-shell ${expanded ? 'is-expanded' : ''}`}>
       <div className={`record-row batch-record-row ${active ? 'active' : ''} ${item.status === 'ARCHIVED' ? 'is-archived' : ''}`}>
-        <button className="record-open batch-record-open" aria-current={active ? 'true' : undefined} aria-expanded={expanded} aria-controls={panelId} title="查看并展开批次" onClick={() => {
+        <button className="record-open batch-record-open" aria-current={active ? 'true' : undefined} aria-expanded={expanded} aria-controls={panelId} title={expanded ? '查看并收起批次' : '查看并展开批次'} onClick={() => {
           onOpen(item)
-          onExpand(item)
+          onToggle(item)
         }}>
           <div className="batch-cover-stack">
             {item.coverTasks.slice(0, 4).map((task) => <AssetThumb key={task.id} asset={taskCoverAsset(task)} interactive={false} />)}
@@ -4240,12 +4255,12 @@ function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, 
   )
 }
 
-function BatchRecordDetail({ item, tasks, loading, onOpenTask, onOpenStudio }: {
+function BatchRecordDetail({ item, tasks, loading, downloadChecking, onDownload }: {
   item: GenerationRecordBatch
   tasks: GenerationTask[]
   loading: boolean
-  onOpenTask: (item: GenerationTask) => void
-  onOpenStudio: (task: GenerationTask) => void
+  downloadChecking: boolean
+  onDownload: (ids: number[]) => void
 }) {
   const downloadableIds = tasks.filter((task) => ['COMPLETED', 'FINAL_PARTIAL'].includes(task.status)).map((task) => task.id)
   return (
@@ -4261,21 +4276,9 @@ function BatchRecordDetail({ item, tasks, loading, onOpenTask, onOpenStudio }: {
         <Meta label="进行中/排队" value={`${item.runningTaskCount + item.queuedTaskCount} 个`} />
       </div>
       <div className="batch-detail-actions">
-        <a className={`management-action ${downloadableIds.length ? '' : 'is-disabled'}`} href={downloadableIds.length ? finalImageArchiveUrl(downloadableIds) : undefined} aria-disabled={!downloadableIds.length} onClick={(event) => { if (!downloadableIds.length) event.preventDefault() }}>
-          <Download size={14} /> 下载可用成片
-        </a>
-      </div>
-      <div className="batch-detail-task-list">
-        {loading && <EmptyState title="正在读取批次" text="正在加载批次内任务。" />}
-        {!loading && tasks.map((task) => (
-          <div className="mini-row view-only" key={task.id}>
-            <button onClick={() => onOpenTask(task)}>
-              <AssetThumb asset={taskCoverAsset(task)} interactive={false} />
-              <span><strong>{task.name}</strong><small>{statusText(task.status)}</small></span>
-            </button>
-            <button className="management-action mini-action" onClick={() => onOpenStudio(task)}>进入任务</button>
-          </div>
-        ))}
+        <button className="management-action" type="button" disabled={loading || downloadChecking || !downloadableIds.length} onClick={() => onDownload(downloadableIds)}>
+          <Download size={14} /> {loading || downloadChecking ? '检查成片中...' : '下载成片'}
+        </button>
       </div>
     </>
   )
