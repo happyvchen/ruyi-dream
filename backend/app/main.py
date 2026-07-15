@@ -1530,8 +1530,8 @@ async def create_generation_task(
 ) -> dict[str, Any]:
     if not files:
         raise HTTPException(status_code=400, detail="至少上传一张主推款图片")
-    if len(files) > 8:
-        raise HTTPException(status_code=400, detail="主推款最多上传 8 张图片")
+    if len(files) > MAX_HERO_IMAGE_INPUTS:
+        raise HTTPException(status_code=400, detail=f"主推款最多上传 {MAX_HERO_IMAGE_INPUTS} 张图片")
     task_name = (name or datetime.now().strftime("%Y%m%d%H%M%S")).strip()
     prefix = join_key("generation-tasks", f"{sanitize_name(task_name) or 'task'}-{uuid4().hex[:8]}")
     assets = await save_uploads_as_media_assets(files, prefix)
@@ -1559,8 +1559,8 @@ async def create_generation_task(
 async def create_generation_task_from_uploads(payload: GenerationTaskFromUploadsRequest) -> dict[str, Any]:
     if not payload.uploads:
         raise HTTPException(status_code=400, detail="至少上传一张主推款图片")
-    if len(payload.uploads) > 8:
-        raise HTTPException(status_code=400, detail="主推款最多上传 8 张图片")
+    if len(payload.uploads) > MAX_HERO_IMAGE_INPUTS:
+        raise HTTPException(status_code=400, detail=f"主推款最多上传 {MAX_HERO_IMAGE_INPUTS} 张图片")
     task_name = (payload.name or datetime.now().strftime("%Y%m%d%H%M%S")).strip()
     assets = await save_uploaded_objects_as_media_assets(payload.uploads)
     timestamp = now_iso()
@@ -2260,8 +2260,8 @@ async def add_generation_task_images(task_id: int, files: list[UploadFile] = Fil
             "SELECT COALESCE(MAX(sort_order), -1) AS max_sort FROM generation_task_images WHERE task_id = ? AND deleted_at IS NULL",
             (task_id,),
         ).fetchone()["max_sort"])
-    if not files or count + len(files) > 8:
-        raise HTTPException(status_code=400, detail="主推款最多上传 8 张图片")
+    if not files or count + len(files) > MAX_HERO_IMAGE_INPUTS:
+        raise HTTPException(status_code=400, detail=f"主推款最多上传 {MAX_HERO_IMAGE_INPUTS} 张图片")
     prefix = join_key("generation-tasks", f"{sanitize_name(task['name']) or 'task'}-{uuid4().hex[:8]}")
     assets = await save_uploads_as_media_assets(files, prefix)
     timestamp = now_iso()
@@ -2293,8 +2293,8 @@ async def add_generation_task_images_from_uploads(task_id: int, payload: Generat
             "SELECT COALESCE(MAX(sort_order), -1) AS max_sort FROM generation_task_images WHERE task_id = ? AND deleted_at IS NULL",
             (task_id,),
         ).fetchone()["max_sort"])
-    if not payload.uploads or count + len(payload.uploads) > 8:
-        raise HTTPException(status_code=400, detail="主推款最多上传 8 张图片")
+    if not payload.uploads or count + len(payload.uploads) > MAX_HERO_IMAGE_INPUTS:
+        raise HTTPException(status_code=400, detail=f"主推款最多上传 {MAX_HERO_IMAGE_INPUTS} 张图片")
     assets = await save_uploaded_objects_as_media_assets(payload.uploads)
     timestamp = now_iso()
     try:
@@ -2460,25 +2460,8 @@ async def run_select_generation_styling(
     attempt_id = create_attempt("generation_styling", task_id, "gemini")
     progress = AttemptProgressRecorder(attempt_id)
     styling_plan: dict[str, Any] | None = None
-    try:
-        progress.begin("styling_context")
-        input_row, candidate_snapshot, request_snapshot = build_ai_stylist_context(input_version_id)
-        request_snapshot["invocation"] = {"mode": trigger, "target": "styling"}
-        request_snapshot["hero_product_info"] = hero_product_info_context
-        request_snapshot["ai_styling_user_instruction"] = user_instruction_context
-        request_snapshot["user_requirement"] = user_requirement_context
-        update_attempt_request_snapshot(attempt_id, request_snapshot)
-        if generation_task_or_attempt_cancelled(task_id, attempt_id):
-            progress.finish()
-            finish_attempt(attempt_id, "CANCELLED")
-            return {"item": get_generation_task_by_id(task_id)}
-        styling_plan = await select_styling_with_gemini(input_row, candidate_snapshot, request_snapshot, attempt_id=attempt_id, progress=progress)
-        persist_attempt_provider_progress(attempt_id, styling_plan)
-        progress.begin("styling_validate")
-        validate_styling_plan(styling_plan, candidate_snapshot)
-        selected_ids = [int(item) for item in styling_plan.get("selected_material_ids", [])]
-        source_ids, selected_snapshot = get_styling_source_and_selected_snapshots(selected_ids)
-    except Exception as exc:
+
+    def fail_styling_attempt(exc: Exception) -> dict[str, Any]:
         progress.finish()
         with get_db() as db:
             current = db.execute("SELECT status FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
@@ -2502,75 +2485,105 @@ async def run_select_generation_styling(
                 (now_iso(), task_id),
             )
         raise HTTPException(status_code=502, detail=user_facing_provider_error_message("智能选搭失败", exc, error_code)) from exc
-    with get_db() as db:
-        current = db.execute("SELECT status FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
-        if current and current["status"] == "CANCELLED":
-            if attempt_id:
-                progress.finish()
-                finish_attempt(attempt_id, "CANCELLED", response_snapshot=styling_plan)
+
+    try:
+        progress.begin("styling_context")
+        input_row, candidate_snapshot, request_snapshot = build_ai_stylist_context(input_version_id)
+        request_snapshot["invocation"] = {"mode": trigger, "target": "styling"}
+        request_snapshot["hero_product_info"] = hero_product_info_context
+        request_snapshot["ai_styling_user_instruction"] = user_instruction_context
+        request_snapshot["user_requirement"] = user_requirement_context
+        request_snapshot = attach_ai_stylist_prompt_snapshot(request_snapshot, candidate_snapshot)
+        update_attempt_request_snapshot(attempt_id, request_snapshot)
+        if generation_task_or_attempt_cancelled(task_id, attempt_id):
+            progress.finish()
+            finish_attempt(attempt_id, "CANCELLED")
             return {"item": get_generation_task_by_id(task_id)}
-    progress.begin("styling_store")
-    with get_db() as db:
-        timestamp = now_iso()
-        cursor = db.execute(
-            """
-            INSERT INTO generation_stylings
-              (task_id, input_version_id, source_material_ids_json, candidate_material_ids_json,
-               candidate_retrieval_snapshot_json, user_requirement_json, user_instruction_json,
-               selected_material_ids_json, selected_material_snapshot_json,
-               styling_plan_json, hero_understanding_json, outfit_candidates_json, critic_scores_json,
-               rejected_candidates_json, reason_summary, warnings_json, status, attempt_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUCCEEDED', ?, ?, ?)
-            """,
-            (
-                task_id,
+        styling_plan = await select_styling_with_gemini(input_row, candidate_snapshot, request_snapshot, attempt_id=attempt_id, progress=progress)
+        persist_attempt_provider_progress(attempt_id, styling_plan)
+        progress.begin("styling_validate")
+        validate_styling_plan(styling_plan, candidate_snapshot)
+        selected_ids = [int(item) for item in styling_plan.get("selected_material_ids", [])]
+        source_ids, selected_snapshot = get_styling_source_and_selected_snapshots(selected_ids)
+    except Exception as exc:
+        return fail_styling_attempt(exc)
+    try:
+        with get_db() as db:
+            current = db.execute("SELECT status FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
+            if current and current["status"] == "CANCELLED":
+                if attempt_id:
+                    progress.finish()
+                    finish_attempt(attempt_id, "CANCELLED", response_snapshot=styling_plan)
+                return {"item": get_generation_task_by_id(task_id)}
+        progress.begin("styling_store")
+        with get_db() as db:
+            timestamp = now_iso()
+            apply_generation_input_selected_image_order(
+                db,
                 input_version_id,
-                dumps(source_ids),
-                dumps(candidate_snapshot.get("candidate_material_ids") or []),
-                dumps(candidate_snapshot),
-                dumps(user_requirement_context),
-                dumps(user_instruction_context),
-                dumps(selected_ids),
-                dumps(selected_snapshot),
-                dumps(styling_plan),
-                dumps(styling_plan.get("hero_understanding") or {}),
-                dumps(styling_plan.get("outfit_candidates") or []),
-                dumps(get_selected_outfit_scores(styling_plan)),
-                dumps(styling_plan.get("rejected_candidates") or []),
-                str(styling_plan.get("reason_summary") or "已根据主推款和搭配服装标签完成 AI Stylist 造型方案。"),
-                dumps(styling_plan.get("warnings") or []),
-                attempt_id,
-                timestamp,
-                timestamp,
-            ),
-        )
-        styling_id = int(cursor.lastrowid)
-        hero_summary = str((styling_plan.get("hero_understanding") or {}).get("hero_visual_summary") or "").strip()
-        if hero_summary:
-            db.execute("UPDATE generation_task_input_versions SET hero_visual_summary = ? WHERE id = ?", (hero_summary, input_version_id))
-        db.execute(
-            """
-            UPDATE generation_previews
-            SET status = 'SUPERSEDED', updated_at = ?
-            WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
-            """,
-            (timestamp, task_id),
-        )
-        supersede_generation_result_sets(db, task_id, timestamp)
-        db.execute(
-            """
-            UPDATE generation_tasks
-            SET status = 'STYLING_READY',
-                current_input_version_id = ?,
-                active_styling_id = ?,
-                active_storyboard_preview_id = NULL,
-                active_preview_id = NULL,
-                active_result_set_id = NULL,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (input_version_id, styling_id, timestamp, task_id),
-        )
+                [int(image_id) for image_id in styling_plan.get("selected_hero_image_ids", [])],
+            )
+            cursor = db.execute(
+                """
+                INSERT INTO generation_stylings
+                  (task_id, input_version_id, source_material_ids_json, candidate_material_ids_json,
+                   candidate_retrieval_snapshot_json, user_requirement_json, user_instruction_json,
+                   selected_material_ids_json, selected_material_snapshot_json,
+                   styling_plan_json, hero_understanding_json, outfit_candidates_json, critic_scores_json,
+                   rejected_candidates_json, reason_summary, warnings_json, status, attempt_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUCCEEDED', ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    input_version_id,
+                    dumps(source_ids),
+                    dumps(candidate_snapshot.get("candidate_material_ids") or []),
+                    dumps(candidate_snapshot),
+                    dumps(user_requirement_context),
+                    dumps(user_instruction_context),
+                    dumps(selected_ids),
+                    dumps(selected_snapshot),
+                    dumps(styling_plan),
+                    dumps(styling_plan.get("hero_understanding") or {}),
+                    dumps(styling_plan.get("outfit_candidates") or []),
+                    dumps(get_selected_outfit_scores(styling_plan)),
+                    dumps(styling_plan.get("rejected_candidates") or []),
+                    str(styling_plan.get("reason_summary") or "已根据主推款和搭配服装标签完成 AI Stylist 造型方案。"),
+                    dumps(styling_plan.get("warnings") or []),
+                    attempt_id,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            styling_id = int(cursor.lastrowid)
+            hero_summary = str((styling_plan.get("hero_understanding") or {}).get("hero_visual_summary") or "").strip()
+            if hero_summary:
+                db.execute("UPDATE generation_task_input_versions SET hero_visual_summary = ? WHERE id = ?", (hero_summary, input_version_id))
+            db.execute(
+                """
+                UPDATE generation_previews
+                SET status = 'SUPERSEDED', updated_at = ?
+                WHERE task_id = ? AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
+                """,
+                (timestamp, task_id),
+            )
+            supersede_generation_result_sets(db, task_id, timestamp)
+            db.execute(
+                """
+                UPDATE generation_tasks
+                SET status = 'STYLING_READY',
+                    current_input_version_id = ?,
+                    active_styling_id = ?,
+                    active_storyboard_preview_id = NULL,
+                    active_preview_id = NULL,
+                    active_result_set_id = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (input_version_id, styling_id, timestamp, task_id),
+            )
+    except Exception as exc:
+        return fail_styling_attempt(exc)
     progress.finish()
     finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=styling_plan)
     return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
@@ -4823,6 +4836,30 @@ def apply_styling_garment_selected_image_order(db: Any, garment_id: int, selecte
         )
 
 
+def apply_generation_input_selected_image_order(db: Any, input_version_id: int, selected_image_ids: list[int]) -> None:
+    row = db.execute("SELECT image_snapshot_json FROM generation_task_input_versions WHERE id = ?", (input_version_id,)).fetchone()
+    if not row:
+        raise ValueError("输入版本不存在")
+    snapshot = loads(row["image_snapshot_json"], [])
+    if not isinstance(snapshot, list):
+        raise ValueError("输入版本图片快照无效")
+    existing_ids = [int(item["id"]) for item in snapshot if isinstance(item, dict) and item.get("id") is not None]
+    selected_set = set(selected_image_ids)
+    if not selected_image_ids or not selected_set.issubset(set(existing_ids)):
+        raise ValueError("selected_files 对应的主推款图片不属于当前输入版本")
+    by_id = {int(item["id"]): item for item in snapshot if isinstance(item, dict) and item.get("id") is not None}
+    ordered_ids = [image_id for image_id in selected_image_ids if image_id in by_id]
+    ordered_ids.extend(image_id for image_id in existing_ids if image_id not in selected_set)
+    ordered_snapshot: list[dict[str, Any]] = []
+    for sort_order, image_id in enumerate(ordered_ids):
+        next_item = {**by_id[image_id], "sortOrder": sort_order}
+        ordered_snapshot.append(next_item)
+    db.execute(
+        "UPDATE generation_task_input_versions SET image_snapshot_json = ? WHERE id = ?",
+        (dumps(ordered_snapshot), input_version_id),
+    )
+
+
 TAG_PROMPT_FIELD_ALIASES = {
     "category": ["一级品类", "品类", "主品类", "category"],
     "sub_category": ["二级品类", "细分品类", "子品类", "sub_category", "subcategory"],
@@ -5436,7 +5473,7 @@ def create_generation_input_version(task_id: int, hero_product_info_context: dic
     with get_db() as db:
         image_rows = db.execute(
             """
-            SELECT gti.sort_order, ma.* FROM generation_task_images gti
+            SELECT gti.id AS link_id, gti.sort_order, ma.* FROM generation_task_images gti
             JOIN media_assets ma ON ma.id = gti.media_asset_id
             WHERE gti.task_id = ? AND gti.deleted_at IS NULL
             ORDER BY gti.sort_order, gti.id
@@ -5451,7 +5488,7 @@ def create_generation_input_version(task_id: int, hero_product_info_context: dic
         ).fetchone()["next_version"])
         timestamp = now_iso()
         snapshot = [
-            {"sortOrder": row["sort_order"], "asset": serialize_media_asset(row)}
+            {"id": row["link_id"], "sortOrder": row["sort_order"], "asset": serialize_media_asset(row)}
             for row in image_rows
         ]
         model_snapshot = snapshot_default_model()
@@ -5708,7 +5745,7 @@ async def select_styling_with_gemini(
         update_attempt_request_snapshot(attempt_id, request_snapshot)
     prompt = str(request_snapshot.get("prompt") or "")
     images: list[dict[str, Any]] = []
-    for item in loads(input_row["image_snapshot_json"], [])[:8]:
+    for item in loads(input_row["image_snapshot_json"], [])[:MAX_HERO_IMAGE_INPUTS]:
         asset = (item.get("asset") or {})
         image_input = gemini_vision_input(asset.get("objectKey"), asset.get("mimeType"))
         if image_input:
@@ -5724,7 +5761,22 @@ async def select_styling_with_gemini(
         )
     except Exception as exc:
         raise wrap_gemini_call_error("Gemini AI Stylist 调用失败", exc) from exc
-    styling_plan = normalize_styling_plan(raw, candidate_snapshot)
+    return normalize_ai_stylist_result(raw, input_row, candidate_snapshot)
+
+
+def normalize_ai_stylist_result(raw: Any, input_row: Any, candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("Gemini AI Stylist 结果必须是 JSON 对象")
+    selected_image_ids = selected_image_ids_from_files(
+        raw.get("selected_files"),
+        loads(input_row["image_snapshot_json"], []),
+        MAX_HERO_IMAGE_INPUTS,
+    )
+    plan_source = raw.get("styling_plan")
+    if not isinstance(plan_source, dict):
+        raise ValueError("Gemini AI Stylist 结果缺少 styling_plan 对象")
+    styling_plan = normalize_styling_plan(plan_source, candidate_snapshot)
+    styling_plan["selected_hero_image_ids"] = selected_image_ids
     styling_plan["model_raw_output"] = raw
     return styling_plan
 
@@ -5734,14 +5786,26 @@ def attach_ai_stylist_prompt_snapshot(request_snapshot: dict[str, Any], candidat
     # priority_policy / cannot_override 治理元数据——优先级与冲突处理已由
     # AI 选搭 Prompt 正文（含开头系统指令段）声明一次。candidate_retrieval 是
     # 结构化标签事实业务输入，保持 JSON。
+    input_version = request_snapshot.get("input_version") if isinstance(request_snapshot.get("input_version"), dict) else {}
+    hero_images = input_version.get("imageSnapshot") if isinstance(input_version.get("imageSnapshot"), list) else []
     prompt_runtime = {
-            "candidate_retrieval": dumps(candidate_retrieval_for_prompt(candidate_snapshot)),
-            "hero_product_info": render_hero_product_info_line(request_snapshot.get("hero_product_info") or {}),
-            "ai_styling_user_instruction": render_user_instruction_line(request_snapshot.get("ai_styling_user_instruction") or {}),
-            "user_requirement": render_user_requirement_line(request_snapshot.get("user_requirement") or {}),
+        "hero_image_files": dumps(image_selection_prompt_files(hero_images, MAX_HERO_IMAGE_INPUTS)),
+        "candidate_retrieval": dumps(candidate_retrieval_for_prompt(candidate_snapshot)),
+        "hero_product_info": render_hero_product_info_line(request_snapshot.get("hero_product_info") or {}),
+        "ai_styling_user_instruction": render_user_instruction_line(request_snapshot.get("ai_styling_user_instruction") or {}),
+        "user_requirement": render_user_requirement_line(request_snapshot.get("user_requirement") or {}),
     }
-    prompt = render_prompt_template(AI_STYLING_PROMPT_CONFIG_KEY, prompt_runtime)
-    return {**request_snapshot, "prompt": prompt, **prompt_execution_facts(AI_STYLING_PROMPT_CONFIG_KEY, prompt, prompt_runtime)}
+    selection_prompt = render_prompt_template(HERO_IMAGE_SELECTION_PROMPT_CONFIG_KEY, prompt_runtime)
+    styling_prompt = render_prompt_template(AI_STYLING_PROMPT_CONFIG_KEY, prompt_runtime)
+    prompt = f"{selection_prompt.rstrip()}\n\n{styling_prompt.rstrip()}\n"
+    return {
+        **request_snapshot,
+        "prompt": prompt,
+        "promptConfigKey": AI_STYLING_PROMPT_CONFIG_KEY,
+        "promptConfigKeys": [HERO_IMAGE_SELECTION_PROMPT_CONFIG_KEY, AI_STYLING_PROMPT_CONFIG_KEY],
+        "promptRuntime": prompt_runtime,
+        "renderedPromptHash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+    }
 
 
 def candidate_retrieval_for_prompt(candidate_snapshot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -5848,7 +5912,7 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
             "hero_visual_summary": str(hero.get("hero_visual_summary") or source.get("hero_visual_summary") or "主推款图片已作为商品事实源。")[:120],
             "category": str(hero.get("category") or "")[:80],
             "sub_category": str(hero.get("sub_category") or hero.get("subcategory") or "")[:80],
-            "shot_category_family": resolve_storyboard_category_family(hero, strict=False) or "",
+            "shot_category_family": normalize_shot_category_family(hero.get("shot_category_family") or hero.get("category_family")) or "",
             "shot_requirements": ensure_string_list(hero.get("shot_requirements"))[:8],
             "hero_selling_points": ensure_string_list(hero.get("hero_selling_points"))[:8],
             "hero_visibility_risks": ensure_string_list(hero.get("hero_visibility_risks"))[:8],
@@ -6294,6 +6358,7 @@ def validate_styling_plan(plan: dict[str, Any], candidate_snapshot: dict[str, An
         raise RuntimeError("AI Stylist 返回了重复搭配服装 ID")
     if plan.get("plan_source_mode") == "fallback":
         raise RuntimeError("AI Stylist 工程 fallback 方案不能进入生产链路")
+    storyboard_category_family(plan)
 
 
 def get_selected_outfit_scores(styling_plan: dict[str, Any]) -> dict[str, Any]:
@@ -6513,22 +6578,8 @@ def resolve_storyboard_category_family(hero: dict[str, Any], strict: bool = True
     explicit = normalize_shot_category_family(hero.get("shot_category_family") or hero.get("category_family"))
     if explicit:
         return explicit
-
-    category_terms = category_route_terms(hero)
-    if not category_terms:
-        if strict:
-            raise RuntimeError("AI 选搭结果缺少主推款品类，无法选择分镜 Prompt")
-        return None
-
-    category_text = " ".join(category_terms).strip().lower()
-    if any(token in category_text for token in ("连衣", "连体", "套装", "dress", "jumpsuit", "one_piece", "one-piece", "suit_set", "set suit")):
-        return "one_piece"
-    if any(token in category_text for token in ("裤", "半身裙", "半裙", "裙装", "bottom", "pants", "trousers", "skirt", "shorts")):
-        return "bottom"
-    if any(token in category_text for token in ("上装", "上衣", "针织", "外套", "衬衫", "t恤", "t-shirt", "马甲", "背心", "吊带", "top", "shirt", "blouse", "knit", "jacket", "coat", "vest", "camisole")):
-        return "top"
     if strict:
-        raise RuntimeError(f"暂不支持主推款品类：{hero.get('category')}")
+        raise RuntimeError("AI 选搭结果缺少或非法 shot_category_family，无法选择分镜 Prompt")
     return None
 
 

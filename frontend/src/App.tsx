@@ -89,6 +89,7 @@ const authExpiredMessage = '登录状态已过期，请重新登录后继续。'
 const SUPPORTED_IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/heic,image/heif,image/avif,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif'
 const SUPPORTED_IMAGE_FILE_PATTERN = /\.(jpe?g|png|webp|heic|heif|avif)$/i
 const STYLING_GARMENT_MAX_IMAGES = 15
+const HERO_PRODUCT_MAX_IMAGES = 15
 const SUPPORTED_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'image/avif'])
 
 function isSupportedImageFile(file: File) {
@@ -1029,8 +1030,8 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
         blocked.push({ ...group, name: groupName, error: '没有可用图片' })
         return
       }
-      if (group.files.length > 8) {
-        blocked.push({ ...group, name: groupName, error: '超过 8 张，需删除后才能提交' })
+      if (group.files.length > HERO_PRODUCT_MAX_IMAGES) {
+        blocked.push({ ...group, name: groupName, error: `超过 ${HERO_PRODUCT_MAX_IMAGES} 张，需删除后才能提交` })
         return
       }
       if (seen.has(groupName)) {
@@ -1090,7 +1091,7 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><h2>上传主推款</h2><p>支持多张图片或一个文件夹。推荐 3-5 张，最多 8 张，排序越靠前越重要。拖入多个货号文件夹可批量创建任务并批量成片。</p></div>
+        <div className="step-copy"><h2>上传主推款</h2><p>支持多张图片或一个文件夹。推荐 3-5 张，最多 15 张，排序越靠前越重要。拖入多个货号文件夹可批量创建任务并批量成片。</p></div>
         {task?.status === 'DRAFT' && <HeroDraftEditor task={task} setTask={setTask} run={run} />}
         {!task && (
           <>
@@ -1131,7 +1132,7 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                     {batchGroups.map((group) => {
                       const groupName = sanitizeClientName(group.name)
                       const dupInBatch = !!groupName && (nameCounts.get(groupName) ?? 0) > 1
-                      const overLimit = group.files.length > 8
+                      const overLimit = group.files.length > HERO_PRODUCT_MAX_IMAGES
                       const hasError = overLimit || !group.files.length || dupInBatch || !!group.error
                       const existsHint = !!groupName && !dupInBatch && !!existingTaskNames?.has(groupName)
                       return (
@@ -1139,12 +1140,12 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                           <div className="batch-card-head">
                             <div className="batch-icon"><Layers3 size={18} /></div>
                             <input value={group.name} onChange={(event) => updateBatchGroup(group.id, { name: event.target.value })} aria-label="任务名称" disabled={!!batchCreating} />
-                            <span className={`count-pill ${overLimit ? 'is-over' : ''}`}>{group.files.length}/8 张</span>
+                            <span className={`count-pill ${overLimit ? 'is-over' : ''}`}>{group.files.length}/${HERO_PRODUCT_MAX_IMAGES} 张</span>
                             <button className="secondary icon-button" onClick={() => setBatchGroups((current) => current.filter((item) => item.id !== group.id))} title="移除该任务" disabled={!!batchCreating}><Trash2 size={16} /></button>
                           </div>
                           <div className="batch-note">
                             <span>推荐 3-5 张，排序越靠前越重要。{existsHint ? ' 与已有任务重名，将共存（任务名不要求唯一）。' : ''}</span>
-                            {hasError && <strong>{group.error ?? (overLimit ? '超过 8 张，需删除后才能提交' : !group.files.length ? '没有可用图片' : '本批次任务名重复')}</strong>}
+                            {hasError && <strong>{group.error ?? (overLimit ? `超过 ${HERO_PRODUCT_MAX_IMAGES} 张，需删除后才能提交` : !group.files.length ? '没有可用图片' : '本批次任务名重复')}</strong>}
                           </div>
                           <FileThumbList files={group.files} onChange={(nextFiles) => updateBatchGroup(group.id, { files: nextFiles })} />
                           <input
@@ -1183,15 +1184,15 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                 <div className="batch-card-head">
                   <div className="batch-icon"><Layers3 size={18} /></div>
                   <input value={name} onChange={(e) => setName(e.target.value)} placeholder="任务名称" aria-label="任务名称" />
-                  <span className={`count-pill ${files.length > 8 ? 'is-over' : ''}`}>{files.length}/8 张</span>
+                  <span className={`count-pill ${files.length > HERO_PRODUCT_MAX_IMAGES ? 'is-over' : ''}`}>{files.length}/${HERO_PRODUCT_MAX_IMAGES} 张</span>
                 </div>
                 <div className="batch-note">
-                  <span>推荐 3-5 张，最多只允许 8 张用于创建任务。</span>
-                  {files.length > 8 && <strong>当前超过 8 张，请删除或调整后再创建</strong>}
+                  <span>推荐 3-5 张，最多只允许 15 张用于创建任务。</span>
+                  {files.length > HERO_PRODUCT_MAX_IMAGES && <strong>{`当前超过 ${HERO_PRODUCT_MAX_IMAGES} 张，请删除或调整后再创建`}</strong>}
                 </div>
                 <FileThumbList files={files} onChange={setFiles} />
                 <div className="inline-form">
-                  <button className="primary" disabled={!files.length || files.length > 8 || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, files, heroProductInfo), (r: { item: GenerationTask }) => {
+                  <button className="primary" disabled={!files.length || files.length > HERO_PRODUCT_MAX_IMAGES || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, files, heroProductInfo), (r: { item: GenerationTask }) => {
                     setTask(r.item)
                     setFiles([])
                     setName('')
@@ -1214,6 +1215,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
   const [name, setName] = useState(task.name)
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const [dragIndex, setDragIndex] = useState<number | null>(null)
+  const imageCount = task.images?.length ?? 0
 
   useEffect(() => setName(task.name), [task.id, task.name])
 
@@ -1232,7 +1234,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
 
   return (
     <div className="hero-draft">
-      <div className="section-head"><strong>主推款图片</strong><span className="status draft">{task.status === 'DRAFT' ? '待选搭' : '可调整'}</span></div>
+      <div className="section-head"><strong>主推款图片</strong><span className={`count-pill ${imageCount > HERO_PRODUCT_MAX_IMAGES ? 'is-over' : ''}`}>{imageCount}/{HERO_PRODUCT_MAX_IMAGES} 张</span><span className="status draft">{task.status === 'DRAFT' ? '待选搭' : '可调整'}</span></div>
       <div className="inline-form">
         <input value={name} onChange={(event) => setName(event.target.value)} placeholder="任务名称" />
         <button className="secondary" disabled={name.trim() === task.name} onClick={() => void run('保存任务名称中...', () => api.updateTask(task.id, { name }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>保存名称</button>
@@ -1240,7 +1242,13 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
           <ImagePlus size={16} /> 追加图片
           <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => {
             const next = Array.from(event.target.files ?? [])
-            if (next.length) void run('追加主推款图片中...', () => api.addTaskImages(task.id, next), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })
+            event.currentTarget.value = ''
+            if (next.length) void run('追加主推款图片中...', async () => {
+              if (imageCount + next.length > HERO_PRODUCT_MAX_IMAGES) {
+                throw new Error(`主推款最多上传 ${HERO_PRODUCT_MAX_IMAGES} 张图片`)
+              }
+              return api.addTaskImages(task.id, next)
+            }, (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })
           }} />
         </label>
       </div>

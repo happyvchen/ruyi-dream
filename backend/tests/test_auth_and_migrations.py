@@ -4,6 +4,7 @@ import importlib
 import os
 from io import BytesIO
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -110,6 +111,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
             "library_tag_cards": [{"id": 24, "code": "125309C7948510"}],
         }
         raw_plan = {
+            "hero_understanding": {"shot_category_family": "top"},
             "selected_outfit_key": "missing_candidate",
             "selected_material_codes": ["125309C7948510"],
             "outfit_candidates": [
@@ -223,16 +225,11 @@ class BackendCurrentFlowTests(unittest.TestCase):
             self.assertEqual(cropped.size, (100, 100))
             self.assertEqual(cropped.getpixel((50, 50)), cell_colors[5])
 
-    def test_storyboard_category_family_routes_supported_categories(self) -> None:
+    def test_storyboard_category_family_requires_explicit_shot_family(self) -> None:
         main = importlib.import_module("app.main")
-        cases = {
-            "针织上衣": "top", "外套": "top", "西装马甲": "top", "吊带背心": "top",
-            "裤装": "bottom", "半身裙": "bottom",
-            "连衣裙": "one_piece", "连体裤": "one_piece", "套装": "one_piece",
-        }
-        for category, expected in cases.items():
-            with self.subTest(category=category):
-                self.assertEqual(main.storyboard_category_family({"hero_understanding": {"category": category}}), expected)
+
+        with self.assertRaisesRegex(RuntimeError, "shot_category_family"):
+            main.storyboard_category_family({"hero_understanding": {"category": "西装马甲"}})
 
     def test_storyboard_category_family_prefers_explicit_shot_family(self) -> None:
         main = importlib.import_module("app.main")
@@ -250,15 +247,13 @@ class BackendCurrentFlowTests(unittest.TestCase):
             "top",
         )
 
-    def test_storyboard_category_family_uses_sub_category_fallback(self) -> None:
+    def test_storyboard_category_family_rejects_missing_sub_category_fallback(self) -> None:
         main = importlib.import_module("app.main")
 
-        self.assertEqual(
+        with self.assertRaisesRegex(RuntimeError, "shot_category_family"):
             main.storyboard_category_family(
                 {"hero_understanding": {"category": "西装马甲", "sub_category": "suit_vest"}}
-            ),
-            "top",
-        )
+            )
 
     def test_ai_tagging_parser_repairs_missing_property_commas(self) -> None:
         main = importlib.import_module("app.main")
@@ -981,6 +976,61 @@ class BackendCurrentFlowTests(unittest.TestCase):
             main.normalize_prompt_tagging_result({"ai_tags": {}}, garment)
         with self.assertRaisesRegex(ValueError, "ai_tags"):
             main.normalize_prompt_tagging_result({"selected_files": ["front.jpg"]}, garment)
+
+    def test_ai_stylist_normalizer_requires_selected_files_and_styling_plan(self) -> None:
+        main = importlib.import_module("app.main")
+        input_row = {
+            "image_snapshot_json": main.dumps([
+                {"id": 21, "sortOrder": 0, "asset": {"filename": "hero-front.jpg"}},
+                {"id": 22, "sortOrder": 1, "asset": {"filename": "hero-back.jpg"}},
+            ])
+        }
+        candidate_snapshot = {"candidate_material_ids": [], "library_tag_cards": []}
+
+        result = main.normalize_ai_stylist_result(
+            {
+                "selected_files": ["hero-back.jpg", "hero-front.jpg"],
+                "styling_plan": {
+                    "hero_understanding": {"shot_category_family": "top"},
+                    "outfit_candidates": [{"outfit_key": "solo", "selected_material_ids": []}],
+                    "selected_outfit_key": "solo",
+                },
+            },
+            input_row,
+            candidate_snapshot,
+        )
+
+        self.assertEqual(result["selected_hero_image_ids"], [22, 21])
+        self.assertEqual(result["hero_understanding"]["shot_category_family"], "top")
+
+        with self.assertRaisesRegex(ValueError, "selected_files"):
+            main.normalize_ai_stylist_result({"styling_plan": {}}, input_row, candidate_snapshot)
+        with self.assertRaisesRegex(ValueError, "styling_plan"):
+            main.normalize_ai_stylist_result({"selected_files": ["hero-front.jpg"]}, input_row, candidate_snapshot)
+
+    def test_generation_input_selected_image_order_is_persisted(self) -> None:
+        main = importlib.import_module("app.main")
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.execute("CREATE TABLE generation_task_input_versions (id INTEGER PRIMARY KEY, image_snapshot_json TEXT)")
+        db.execute(
+            "INSERT INTO generation_task_input_versions (id, image_snapshot_json) VALUES (?, ?)",
+            (
+                1,
+                main.dumps([
+                    {"id": 21, "sortOrder": 0, "asset": {"filename": "hero-front.jpg"}},
+                    {"id": 22, "sortOrder": 1, "asset": {"filename": "hero-back.jpg"}},
+                    {"id": 23, "sortOrder": 2, "asset": {"filename": "hero-detail.jpg"}},
+                ]),
+            ),
+        )
+
+        main.apply_generation_input_selected_image_order(db, 1, [22, 21])
+
+        row = db.execute("SELECT image_snapshot_json FROM generation_task_input_versions WHERE id = 1").fetchone()
+        snapshot = main.loads(row["image_snapshot_json"], [])
+        self.assertEqual([item["id"] for item in snapshot], [22, 21, 23])
+        self.assertEqual([item["sortOrder"] for item in snapshot], [0, 1, 2])
 
 
 if __name__ == "__main__":
