@@ -1424,6 +1424,7 @@ function HeroDraftImageCard({ image, draggable, canRemove, onOpen, onDragStart, 
   onRemove: () => void
 }) {
   const [replacementUrl, setReplacementUrl] = useState('')
+  const [assetSrcIndex, setAssetSrcIndex] = useState(0)
   useEffect(() => {
     if (!image.replacement) {
       setReplacementUrl('')
@@ -1433,6 +1434,9 @@ function HeroDraftImageCard({ image, draggable, canRemove, onOpen, onDragStart, 
     setReplacementUrl(nextUrl)
     return () => URL.revokeObjectURL(nextUrl)
   }, [image.replacement])
+  const assetSources = assetDisplaySources(image.asset, 'thumb')
+  const assetSrc = assetSources[assetSrcIndex] ?? ''
+  useEffect(() => setAssetSrcIndex(0), [image.asset.id, assetSources.join('|')])
   const filename = image.replacement?.name ?? image.asset.filename
   const meta = image.replacement ? fileMeta(image.replacement) : assetMeta(image.asset)
   const openImage = () => {
@@ -1451,7 +1455,16 @@ function HeroDraftImageCard({ image, draggable, canRemove, onOpen, onDragStart, 
       onDrop={onDrop}
     >
       <button className="image-open" onClick={openImage} title="放大查看">
-        <img src={replacementUrl || mediaUrl(assetThumbSrc(image.asset))} alt={filename} loading="lazy" />
+        <img
+          src={replacementUrl || mediaUrl(assetSrc)}
+          alt={filename}
+          loading="lazy"
+          onError={() => {
+            if (!replacementUrl && assetSrcIndex + 1 < assetSources.length) {
+              setAssetSrcIndex((index) => index + 1)
+            }
+          }}
+        />
       </button>
       {image.replacement && <em className="thumb-pending-badge">待替换</em>}
       <span>{filename}<small>{meta}</small></span>
@@ -5613,9 +5626,27 @@ function ThumbGrid({ assets, compact = false }: { assets: MediaAsset[]; compact?
 function AssetThumb({ asset, large = false, interactive = true }: { asset?: MediaAsset | null; large?: boolean; interactive?: boolean }) {
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const [failed, setFailed] = useState(false)
-  const src = asset ? assetThumbSrc(asset) : ''
-  useEffect(() => setFailed(false), [asset?.id, src])
-  const image = asset && src && !failed ? <img src={mediaUrl(src)} alt={asset.filename} loading="lazy" onError={() => setFailed(true)} /> : null
+  const [srcIndex, setSrcIndex] = useState(0)
+  const sources = asset ? assetDisplaySources(asset, 'thumb') : []
+  const src = sources[srcIndex] ?? ''
+  useEffect(() => {
+    setFailed(false)
+    setSrcIndex(0)
+  }, [asset?.id, sources.join('|')])
+  const image = asset && src && !failed ? (
+    <img
+      src={mediaUrl(src)}
+      alt={asset.filename}
+      loading="lazy"
+      onError={() => {
+        if (srcIndex + 1 < sources.length) {
+          setSrcIndex((index) => index + 1)
+          return
+        }
+        setFailed(true)
+      }}
+    />
+  ) : null
   return (
     <>
       <div className={`asset-thumb ${large ? 'large' : ''} ${failed ? 'is-broken' : ''}`}>
@@ -6148,6 +6179,15 @@ function assetOriginalSrc(asset: MediaAsset) {
   const direct = asset.originalUrl ?? asset.url ?? asset.previewUrl ?? asset.thumbUrl
   if (!direct) return ''
   return direct.replace(/([?&]variant=)(thumb|preview)(?=&|$)/, '$1original')
+}
+
+function assetDisplaySources(asset: MediaAsset, preferred: 'thumb' | 'preview' | 'original') {
+  const ordered = preferred === 'preview'
+    ? [assetPreviewSrc(asset), assetThumbSrc(asset), assetOriginalSrc(asset)]
+    : preferred === 'original'
+      ? [assetOriginalSrc(asset), assetPreviewSrc(asset), assetThumbSrc(asset)]
+      : [assetThumbSrc(asset), assetPreviewSrc(asset), assetOriginalSrc(asset)]
+  return Array.from(new Set(ordered.filter(Boolean)))
 }
 
 async function filesFromDataTransfer(dataTransfer: DataTransfer): Promise<File[]> {
