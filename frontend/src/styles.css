@@ -1020,11 +1020,13 @@ textarea {
 input:focus, select:focus, textarea:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.16); }
 button:focus-visible,
 a:focus-visible,
-label.secondary:focus-within {
+label.secondary:focus-within,
+label.management-action:focus-within {
   outline: 3px solid rgba(15, 124, 255, .24);
   outline-offset: 2px;
 }
-.primary, .secondary, .danger {
+.primary, .secondary, .danger,
+.task-action, .management-action, .danger-action {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1035,23 +1037,31 @@ label.secondary:focus-within {
   border: 0;
   transition: background .18s ease, border-color .18s ease, box-shadow .18s ease, color .18s ease, transform .18s ease, opacity .18s ease;
 }
-.primary {
+.primary,
+.task-action {
   color: #fff;
   background: linear-gradient(135deg, #0f7cff, #11b7c8);
   box-shadow: 0 4px 12px rgba(15, 124, 255, .18);
+  font-weight: 700;
 }
-.primary:not(:disabled):hover {
+.task-action { min-width: 132px; }
+.task-action.compact-action { min-width: 112px; height: 32px; padding: 0 10px; font-size: 12px; }
+.primary:not(:disabled):hover,
+.task-action:not(:disabled):hover {
   box-shadow: 0 6px 16px rgba(15, 124, 255, .24);
 }
-.primary:disabled { opacity: .45; cursor: not-allowed; }
-.secondary { border: 1px solid #d8e0ea; background: #fff; color: #334155; }
-.secondary:not(:disabled):hover {
+.primary:disabled, .task-action:disabled { opacity: .45; cursor: not-allowed; }
+.secondary,
+.management-action { border: 1px solid #d8e0ea; background: #fff; color: #334155; }
+.secondary:not(:disabled):hover,
+.management-action:not(:disabled):hover {
   border-color: #b8c7d9;
   background: #f8fafc;
 }
-.secondary:disabled { opacity: .45; cursor: not-allowed; }
-.danger { border: 0; background: #be123c; color: #fff; }
-.danger:disabled { opacity: .45; cursor: not-allowed; }
+.secondary:disabled, .management-action:disabled { opacity: .45; cursor: not-allowed; }
+.danger,
+.danger-action { border: 0; background: #be123c; color: #fff; }
+.danger:disabled, .danger-action:disabled { opacity: .45; cursor: not-allowed; }
 .icon-button { width: 42px; padding: 0; }
 .wide { width: 100%; }
 a.button-link { text-decoration: none; cursor: pointer; }
