@@ -40,7 +40,7 @@ import {
 } from 'lucide-react'
 import { api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl } from './api'
 import type { AICallRecord, AIOperation, AttemptPhase, DeleteImpact, FinalImageExportPrecheck, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment } from './api'
-import { groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
+import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { friendlyErrorText } from './lib/errorMessages'
 import { parseRoute, routeToUrl } from './routes'
@@ -988,6 +988,27 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
     setSingleIssues(issues)
   }
 
+  function pendingGroupFromSingle(): PendingBatchGroup | null {
+    if (!files.length) return null
+    return {
+      id: `single-${Date.now()}`,
+      name: sanitizeClientName(name) || timestampName(),
+      info: heroProductInfo,
+      files,
+      issues: singleIssues,
+    }
+  }
+
+  function pendingGroupsFromImports(groups: ImportBatch[]): PendingBatchGroup[] {
+    return groups.map((group, index) => ({
+      id: `${group.id}-${Date.now()}-${index}`,
+      name: group.code,
+      info: '',
+      files: group.files,
+      issues: group.issues,
+    }))
+  }
+
   function addHeroFiles(nextFiles: File[]) {
     const imageFiles = nextFiles
       .filter(isSupportedImageFile)
@@ -995,8 +1016,13 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
     const folderFiles = nextFiles.filter((file) => importPath(file).includes('/'))
     const grouping = groupImportFiles(folderFiles.length ? folderFiles : nextFiles)
     const groups = grouping.batches
-    if (groups.length > 1) {
-      setBatchGroups(groups.map((group, index) => ({ id: `${group.id}-${index}`, name: group.code, info: '', files: group.files, issues: group.issues })))
+    if (groups.length > 1 || batchGroups.length > 0) {
+      const existingSingle = pendingGroupFromSingle()
+      setBatchGroups((current) => [
+        ...current,
+        ...(current.length ? [] : existingSingle ? [existingSingle] : []),
+        ...pendingGroupsFromImports(groups),
+      ])
       setBatchError('')
       setFiles([])
       setName('')
@@ -1008,6 +1034,11 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
     setBatchGroups([])
     setBatchError('')
     const group = groups[0]
+    if (files.length > 0) {
+      const addedFiles = group && folderFiles.length ? group.files : imageFiles
+      applySingleFiles([...files, ...addedFiles], name, [...singleIssues, ...(group?.issues ?? [])])
+      return
+    }
     if (group && folderFiles.length) {
       applySingleFiles(group.files, group.code, group.issues)
     } else {
@@ -1034,10 +1065,6 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
         blocked.push({ ...group, name: groupName, error: '没有可用图片' })
         return
       }
-      if (group.files.length > HERO_PRODUCT_MAX_IMAGES) {
-        blocked.push({ ...group, name: groupName, error: `超过 ${HERO_PRODUCT_MAX_IMAGES} 张，需删除后才能提交` })
-        return
-      }
       if (seen.has(groupName)) {
         blocked.push({ ...group, name: groupName, error: '本批次任务名重复' })
         return
@@ -1060,7 +1087,8 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
       const group = ready[index]
       setBatchCreating({ current: index + 1, total: ready.length })
       try {
-        const result = await api.createTask(group.name, group.files, group.info.trim() || undefined, batchIdRef.current)
+        const uploadFiles = formalAssetFiles(group.files, HERO_PRODUCT_MAX_IMAGES)
+        const result = await api.createTask(group.name, uploadFiles, group.info.trim() || undefined, batchIdRef.current)
         created.push(result.item)
         if (!firstCreatedTaskRef.current) firstCreatedTaskRef.current = result.item
         setBatchGroups((current) => current.filter((item) => item.id !== group.id))
@@ -1095,7 +1123,7 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><h2>上传主推款</h2><p>支持多张图片或一个文件夹。推荐 3-5 张，最多 15 张，排序越靠前越重要。拖入多个货号文件夹可批量创建任务并批量成片。</p></div>
+        <div className="step-copy"><h2>上传主推款</h2><p>支持多张图片、一个货号文件夹或一个上级文件夹。推荐 3-5 张，正式创建保留当前排序前 15 张。拖入多个货号文件夹可批量创建任务并批量成片。</p></div>
         {task?.status === 'DRAFT' && <HeroDraftEditor task={task} setTask={setTask} run={run} />}
         {!task && (
           <>
@@ -1130,15 +1158,15 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                     <span className="count-pill">{batchGroups.reduce((sum, group) => sum + group.files.length, 0)} 张图</span>
                   </div>
                   <div className="batch-note">
-                    <span>每个文件夹对应一个拍摄任务，可在下方逐个调整任务名、图片和商品信息；创建后还可在任务里继续修改，并从顶部批次条一键批量成片。</span>
+                    <span>每个文件夹对应一个拍摄任务，可在下方逐个调整任务名、图片和商品信息；创建后可从顶部批次条一键批量成片。</span>
                   </div>
                   <div className="batch-list">
                     {batchGroups.map((group) => {
-	                      const groupName = sanitizeClientName(group.name)
-	                      const dupInBatch = !!groupName && (nameCounts.get(groupName) ?? 0) > 1
-	                      const overLimit = group.files.length > HERO_PRODUCT_MAX_IMAGES
-	                      const hasBlockingError = overLimit || !group.files.length || dupInBatch || !!group.error
-	                      const hasError = hasBlockingError || !!group.issues?.length
+                      const groupName = sanitizeClientName(group.name)
+                      const dupInBatch = !!groupName && (nameCounts.get(groupName) ?? 0) > 1
+                      const overLimit = group.files.length > HERO_PRODUCT_MAX_IMAGES
+                      const hasBlockingError = !group.files.length || dupInBatch || !!group.error
+                      const hasError = hasBlockingError || overLimit || !!group.issues?.length
                       const existsHint = !!groupName && !dupInBatch && !!existingTaskNames?.has(groupName)
                       return (
                         <div className={`batch-card ${hasError ? 'has-error' : ''}`} key={group.id}>
@@ -1148,10 +1176,11 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                             <span className={`count-pill ${overLimit ? 'is-over' : ''}`}>{group.files.length}/${HERO_PRODUCT_MAX_IMAGES} 张</span>
                             <button className="secondary icon-button" onClick={() => setBatchGroups((current) => current.filter((item) => item.id !== group.id))} title="移除该任务" disabled={!!batchCreating}><Trash2 size={16} /></button>
                           </div>
-                          <div className="batch-note">
-                            <span>推荐 3-5 张，排序越靠前越重要。{existsHint ? ' 与已有任务重名，将共存（任务名不要求唯一）。' : ''}</span>
-	                            {hasBlockingError && <strong>{group.error ?? (overLimit ? `超过 ${HERO_PRODUCT_MAX_IMAGES} 张，需删除后才能提交` : !group.files.length ? '没有可用图片' : '本批次任务名重复')}</strong>}
-                            {group.issues?.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
+                            <div className="batch-note">
+                              <span>推荐 3-5 张，排序越靠前越重要。{existsHint ? ' 与已有任务重名，将共存（任务名不要求唯一）。' : ''}</span>
+                              {hasBlockingError && <strong>{group.error ?? (!group.files.length ? '没有可用图片' : '本批次任务名重复')}</strong>}
+                              {overLimit && <strong>{`超过 ${HERO_PRODUCT_MAX_IMAGES} 张，创建时会自动保留当前排序前 ${HERO_PRODUCT_MAX_IMAGES} 张`}</strong>}
+                              {group.issues?.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
                           </div>
                           <FileThumbList files={group.files} onChange={(nextFiles) => updateBatchGroup(group.id, { files: nextFiles })} />
                           <input
@@ -1174,11 +1203,12 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                       <button className="primary" onClick={() => void createBatchTasks()}>
                         <ImagePlus size={16} /> 批量创建 {batchGroups.length} 个任务
                       </button>
-                      <button className="secondary" title="不再拆分任务，把全部图片作为同一个任务的主推款" onClick={() => {
-                        const merged = batchGroups.flatMap((group) => group.files)
-                        setBatchGroups([])
-                        applySingleFiles(merged)
-                      }}>合并为 1 个任务</button>
+                        <button className="secondary" title="不再拆分任务，把全部图片作为同一个任务的主推款" onClick={() => {
+                          const merged = batchGroups.flatMap((group) => group.files)
+                          const issues = batchGroups.flatMap((group) => group.issues ?? [])
+                          setBatchGroups([])
+                          applySingleFiles(merged, undefined, issues)
+                        }}>合并为 1 个任务</button>
                       <button className="secondary" onClick={() => setBatchGroups([])}>取消</button>
                     </div>
                   )}
@@ -1192,14 +1222,14 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                   <input value={name} onChange={(e) => setName(e.target.value)} placeholder="任务名称" aria-label="任务名称" />
                   <span className={`count-pill ${files.length > HERO_PRODUCT_MAX_IMAGES ? 'is-over' : ''}`}>{files.length}/${HERO_PRODUCT_MAX_IMAGES} 张</span>
                 </div>
-                <div className="batch-note">
-                  <span>推荐 3-5 张，最多只允许 15 张用于创建任务。</span>
-                  {files.length > HERO_PRODUCT_MAX_IMAGES && <strong>{`当前超过 ${HERO_PRODUCT_MAX_IMAGES} 张，请删除或调整后再创建`}</strong>}
-                  {singleIssues.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
-                </div>
+                  <div className="batch-note">
+                    <span>推荐 3-5 张，正式创建保留当前排序前 15 张。</span>
+                    {files.length > HERO_PRODUCT_MAX_IMAGES && <strong>{`当前超过 ${HERO_PRODUCT_MAX_IMAGES} 张，创建时会自动保留当前排序前 ${HERO_PRODUCT_MAX_IMAGES} 张`}</strong>}
+                    {singleIssues.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
+                  </div>
                 <FileThumbList files={files} onChange={setFiles} />
                 <div className="inline-form">
-                  <button className="primary" disabled={!files.length || files.length > HERO_PRODUCT_MAX_IMAGES || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, files, heroProductInfo), (r: { item: GenerationTask }) => {
+                    <button className="primary" disabled={!files.length || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, formalAssetFiles(files, HERO_PRODUCT_MAX_IMAGES), heroProductInfo), (r: { item: GenerationTask }) => {
                     setTask(r.item)
                     setFiles([])
                     setName('')
@@ -1243,21 +1273,8 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
     <div className="hero-draft">
       <div className="section-head"><strong>主推款图片</strong><span className={`count-pill ${imageCount > HERO_PRODUCT_MAX_IMAGES ? 'is-over' : ''}`}>{imageCount}/{HERO_PRODUCT_MAX_IMAGES} 张</span><span className="status draft">{task.status === 'DRAFT' ? '待选搭' : '可调整'}</span></div>
       <div className="inline-form">
-        <input value={name} onChange={(event) => setName(event.target.value)} placeholder="任务名称" />
-        <button className="secondary" disabled={name.trim() === task.name} onClick={() => void run('保存任务名称中...', () => api.updateTask(task.id, { name }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>保存名称</button>
-        <label className="secondary">
-          <ImagePlus size={16} /> 追加图片
-          <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => {
-            const next = Array.from(event.target.files ?? [])
-            event.currentTarget.value = ''
-            if (next.length) void run('追加主推款图片中...', async () => {
-              if (imageCount + next.length > HERO_PRODUCT_MAX_IMAGES) {
-                throw new Error(`主推款最多上传 ${HERO_PRODUCT_MAX_IMAGES} 张图片`)
-              }
-              return api.addTaskImages(task.id, next)
-            }, (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })
-          }} />
-        </label>
+          <input value={name} onChange={(event) => setName(event.target.value)} placeholder="任务名称" />
+          <button className="secondary" disabled={name.trim() === task.name} onClick={() => void run('保存任务名称中...', () => api.updateTask(task.id, { name }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>保存名称</button>
       </div>
       <div className="draft-image-grid">
         {(task.images ?? []).map((image, index) => (
@@ -2093,8 +2110,8 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
         blocked.push({ ...batch, error: '每套搭配服装都需要一个有效货号' })
         return
       }
-      if (batch.files.length > STYLING_GARMENT_MAX_IMAGES) {
-        blocked.push({ ...batch, code, error: `超过 ${STYLING_GARMENT_MAX_IMAGES} 张，需删除后才能导入` })
+      if (!batch.files.length) {
+        blocked.push({ ...batch, code, error: '没有可用图片' })
         return
       }
       if (seen.has(code)) {
@@ -2158,7 +2175,8 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
         operations: job.operations.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'RUNNING', startedAt: item.startedAt || new Date().toISOString() } : item),
       }))
       try {
-        const created = await api.createStylingGarment(batch.code, batch.files)
+        const uploadFiles = formalAssetFiles(batch.files, STYLING_GARMENT_MAX_IMAGES)
+        const created = await api.createStylingGarment(batch.code, uploadFiles)
         createdItems.push(created.item)
         updateJob(jobId, (job) => ({
           ...job,
@@ -2224,14 +2242,14 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
       <div className="import-head">
         <div>
           <h3>导入搭配服装</h3>
-          <p>散图会合并为一套；单文件夹是一套；拖入多个一级文件夹会拆成多套。导入后系统会自动识别标签，单套最多 15 张。</p>
+          <p>散图会合并为一套；单货号文件夹是一套；上级文件夹会递归识别最底层图片目录。导入后系统会自动识别标签，单套正式保留前 15 张。</p>
         </div>
         <button className="primary" disabled={!batches.length} onClick={saveDrafts}>导入</button>
       </div>
       <div className="import-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
         <Images size={22} />
         <strong>拖入图片或文件夹</strong>
-        <span>支持多张图片、一个文件夹、多个一级文件夹</span>
+        <span>支持多张图片、一个货号文件夹、一个上级文件夹，或拖入多个货号文件夹</span>
         <div className="import-actions">
           <label className="secondary">
             <ImagePlus size={16} /> 选择图片
@@ -2281,7 +2299,7 @@ function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
   onRemove: () => void
 }) {
   return (
-    <div className={`batch-card ${batch.files.length > STYLING_GARMENT_MAX_IMAGES || batch.error || batch.issues?.length ? 'has-error' : ''}`}>
+    <div className={`batch-card ${!batch.files.length || batch.files.length > STYLING_GARMENT_MAX_IMAGES || batch.error || batch.issues?.length ? 'has-error' : ''}`}>
       <div className="batch-card-head">
         <div className="batch-icon"><Layers3 size={18} /></div>
         <input value={batch.code} onChange={(event) => onCode(event.target.value)} aria-label="搭配服装货号" />
@@ -2289,7 +2307,9 @@ function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
       </div>
       <div className="batch-note">
         <span>{batch.files.length} 张图片</span>
-        {(batch.error || batch.files.length > STYLING_GARMENT_MAX_IMAGES) && <strong>{batch.error ?? `超过 ${STYLING_GARMENT_MAX_IMAGES} 张，需删除后才能导入`}</strong>}
+        {batch.error && <strong>{batch.error}</strong>}
+        {!batch.files.length && !batch.error && <strong>没有可用图片</strong>}
+        {batch.files.length > STYLING_GARMENT_MAX_IMAGES && <strong>{`超过 ${STYLING_GARMENT_MAX_IMAGES} 张，导入时会自动保留当前排序前 ${STYLING_GARMENT_MAX_IMAGES} 张`}</strong>}
         {batch.issues?.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
       </div>
       <FileThumbList files={batch.files} onChange={onFiles} />
