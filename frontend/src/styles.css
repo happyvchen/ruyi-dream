@@ -479,7 +479,7 @@ h1, h2, h3, p { margin: 0; }
   font-size: 12px;
   font-style: normal;
 }
-.side-input-actions .secondary {
+.side-input-actions .management-action {
   height: 30px;
   padding: 0 10px;
   border-radius: 7px;
@@ -571,8 +571,8 @@ h1, h2, h3, p { margin: 0; }
   border-top: 1px solid #e2e8f0;
   background: #fff;
 }
-.stage-action-bar .primary {
-  min-width: 0;
+.stage-action-bar .task-action {
+  min-width: 132px;
   height: 36px;
   padding: 0 14px;
   border-radius: 8px;
@@ -979,7 +979,7 @@ h1, h2, h3, p { margin: 0; }
   flex-wrap: wrap;
   gap: 6px;
 }
-.requirement-chips .secondary {
+.requirement-chips .management-action {
   height: 30px;
   padding: 0 10px;
   font-size: 12px;
@@ -1151,6 +1151,28 @@ a.button-link { text-decoration: none; cursor: pointer; }
 .result-card div:last-child > span { min-width: 0; display: flex; align-items: center; gap: 5px; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .result-card div:last-child > span b { color: #0369a1; font-size: 12px; }
 .result-card a, .result-card button { color: #0f7cff; border: 0; background: transparent; }
+.task-icon-action,
+.management-icon-action {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 7px;
+}
+.task-icon-action {
+  color: #fff !important;
+  background: linear-gradient(135deg, #0f7cff, #11b7c8) !important;
+  box-shadow: 0 3px 8px rgba(15, 124, 255, .18);
+}
+.task-icon-action:not(:disabled):hover { box-shadow: 0 5px 12px rgba(15, 124, 255, .24); }
+.management-icon-action {
+  color: #0f7cff;
+  background: #eef6ff !important;
+}
+.task-icon-action:disabled,
+.management-icon-action:disabled { opacity: .45; cursor: not-allowed; }
 .result-card .result-image-open { color: inherit; }
 
 .records-layout {
@@ -1914,7 +1936,7 @@ a.button-link { text-decoration: none; cursor: pointer; }
   gap: 8px;
   margin-top: auto;
 }
-.card-actions .secondary {
+.card-actions .management-action {
   min-width: 0;
   flex: 1;
   height: 38px;
@@ -2449,10 +2471,11 @@ a.button-link { text-decoration: none; cursor: pointer; }
 .record-row span { display: block; margin-top: 4px; color: #64748b; font-size: 12px; }
 .record-action-button {
   height: 34px;
-  min-width: 84px;
   padding: 0 12px;
   font-size: 13px;
 }
+.task-action.record-action-button { min-width: 132px; }
+.management-action.record-action-button { min-width: 84px; }
 .strip, .final-strip { display: flex; gap: 6px; }
 .strip .asset-thumb, .final-strip .asset-thumb { width: 36px; }
 .record-image-preview {
@@ -2839,7 +2862,7 @@ a.button-link { text-decoration: none; cursor: pointer; }
     align-items: stretch;
     flex-direction: column;
   }
-  .stage-action-bar .primary {
+  .stage-action-bar .task-action {
     width: 100%;
     min-width: 0;
   }

@@ -697,7 +697,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
         subtitle="上传主推款，让系统完成智能选搭、分镜预览并生成电商棚拍成片。"
         actions={task ? (
           <div className="studio-title-actions">
-            <button className="secondary" onClick={startNewTask}><ImagePlus size={16} />新建拍摄任务</button>
+            <button className="management-action" onClick={startNewTask}><ImagePlus size={16} />新建拍摄任务</button>
           </div>
         ) : undefined}
       />
@@ -744,11 +744,11 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
                 </div>
                 <div className="task-action-row">
                   {isTaskRunning(task) ? (
-                    <button className="secondary" onClick={cancelCurrentTask}><CircleStop size={15} />取消生成</button>
+                    <button className="management-action" onClick={cancelCurrentTask}><CircleStop size={15} />取消生成</button>
                   ) : isTaskQueuedForAutoRun(task) ? (
-                    <button className="secondary" onClick={() => cancelAutoRunQueue(task)}><CircleStop size={15} />取消排队</button>
+                    <button className="management-action" onClick={() => cancelAutoRunQueue(task)}><CircleStop size={15} />取消排队</button>
                   ) : (canStartOneClickFinal(task) || canRestartOneClickFinal(task)) ? (
-                    <button className={canRestartOneClickFinal(task) ? 'secondary' : 'primary'} onClick={startOneClickFinal}><Sparkles size={15} />{oneClickFinalLabel(task)}</button>
+                    <button className="task-action" onClick={startOneClickFinal}><Sparkles size={15} />{oneClickFinalLabel(task)}</button>
                   ) : null}
                 </div>
                 <StageUserInputModule
@@ -934,11 +934,11 @@ function BatchTaskSummary({ currentTaskId, items, loading, downloadChecking, onP
   const primaryAction = batchPrimaryAction(items)
   const downloadableCount = items.filter((item) => ['COMPLETED', 'FINAL_PARTIAL'].includes(item.status)).length
   const actionPresentation = {
-    start: { label: '全部一键成片', icon: Sparkles, className: 'primary' },
-    continue: { label: '继续一键成片', icon: Sparkles, className: 'primary' },
-    cancel: { label: '全部取消', icon: CircleStop, className: 'secondary' },
-    restart: { label: '重新一键成片', icon: RotateCcw, className: 'secondary' },
-    none: { label: '全部一键成片', icon: Sparkles, className: 'primary' },
+    start: { label: '全部一键成片', icon: Sparkles, className: 'task-action compact-action' },
+    continue: { label: '继续一键成片', icon: Sparkles, className: 'task-action compact-action' },
+    cancel: { label: '全部取消', icon: CircleStop, className: 'management-action compact-control' },
+    restart: { label: '重新一键成片', icon: RotateCcw, className: 'task-action compact-action' },
+    none: { label: '全部一键成片', icon: Sparkles, className: 'task-action compact-action' },
   }[primaryAction]
   const ActionIcon = actionPresentation.icon
   return (
@@ -948,7 +948,7 @@ function BatchTaskSummary({ currentTaskId, items, loading, downloadChecking, onP
       </span>
       <div className="task-batch-actions" aria-live="polite">
         <button className={actionPresentation.className} type="button" disabled={loading || primaryAction === 'none'} onClick={() => onPrimaryAction(primaryAction)}><ActionIcon size={14} />{actionPresentation.label}</button>
-        <button className="secondary" type="button" disabled={loading || !downloadableCount || downloadChecking} onClick={onDownload}><Download size={14} />{downloadChecking ? '检查成片中...' : '下载本批次成片'}</button>
+        <button className="management-action compact-control" type="button" disabled={loading || !downloadableCount || downloadChecking} onClick={onDownload}><Download size={14} />{downloadChecking ? '检查成片中...' : '下载本批次成片'}</button>
       </div>
     </section>
   )
@@ -1134,11 +1134,11 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                 <span>{files.length ? `已选择 ${files.length} 张，可拖动排序` : '支持多张图片、一个文件夹，或多个货号文件夹（批量成片）'}</span>
               </div>
               <div className="import-actions">
-                <label className="secondary">
+                <label className="management-action">
                   <ImagePlus size={16} /> 选择图片
                   <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => addHeroFiles(Array.from(event.target.files ?? []))} />
                 </label>
-                <label className="secondary">
+                <label className="management-action">
                   <FolderOpen size={16} /> 选择文件夹
                   <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} onChange={(event) => addHeroFiles(Array.from(event.target.files ?? []))} />
                 </label>
@@ -1174,7 +1174,7 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                             <div className="batch-icon"><Layers3 size={18} /></div>
                             <input value={group.name} onChange={(event) => updateBatchGroup(group.id, { name: event.target.value })} aria-label="任务名称" disabled={!!batchCreating} />
                             <span className={`count-pill ${overLimit ? 'is-over' : ''}`}>{group.files.length}/${HERO_PRODUCT_MAX_IMAGES} 张</span>
-                            <button className="secondary icon-button" onClick={() => setBatchGroups((current) => current.filter((item) => item.id !== group.id))} title="移除该任务" disabled={!!batchCreating}><Trash2 size={16} /></button>
+                            <button className="management-action icon-button" onClick={() => setBatchGroups((current) => current.filter((item) => item.id !== group.id))} title="移除该任务" disabled={!!batchCreating}><Trash2 size={16} /></button>
                           </div>
                             <div className="batch-note">
                               <span>推荐 3-5 张，排序越靠前越重要。{existsHint ? ' 与已有任务重名，将共存（任务名不要求唯一）。' : ''}</span>
@@ -1200,16 +1200,16 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                     <p className="edit-hint">正在创建第 {batchCreating.current}/{batchCreating.total} 个任务，请勿刷新或离开页面...</p>
                   ) : (
                     <div className="inline-form">
-                      <button className="primary" onClick={() => void createBatchTasks()}>
+                      <button className="management-action" onClick={() => void createBatchTasks()}>
                         <ImagePlus size={16} /> 批量创建 {batchGroups.length} 个任务
                       </button>
-                        <button className="secondary" title="不再拆分任务，把全部图片作为同一个任务的主推款" onClick={() => {
+                        <button className="management-action" title="不再拆分任务，把全部图片作为同一个任务的主推款" onClick={() => {
                           const merged = batchGroups.flatMap((group) => group.files)
                           const issues = batchGroups.flatMap((group) => group.issues ?? [])
                           setBatchGroups([])
                           applySingleFiles(merged, undefined, issues)
                         }}>合并为 1 个任务</button>
-                      <button className="secondary" onClick={() => setBatchGroups([])}>取消</button>
+                      <button className="management-action" onClick={() => setBatchGroups([])}>取消</button>
                     </div>
                   )}
                 </div>
@@ -1229,7 +1229,7 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                   </div>
                 <FileThumbList files={files} onChange={setFiles} />
                 <div className="inline-form">
-                    <button className="primary" disabled={!files.length || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, formalAssetFiles(files, HERO_PRODUCT_MAX_IMAGES), heroProductInfo), (r: { item: GenerationTask }) => {
+                    <button className="management-action" disabled={!files.length || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, formalAssetFiles(files, HERO_PRODUCT_MAX_IMAGES), heroProductInfo), (r: { item: GenerationTask }) => {
                     setTask(r.item)
                     setFiles([])
                     setName('')
@@ -1274,7 +1274,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
       <div className="section-head"><strong>主推款图片</strong><span className={`count-pill ${imageCount > HERO_PRODUCT_MAX_IMAGES ? 'is-over' : ''}`}>{imageCount}/{HERO_PRODUCT_MAX_IMAGES} 张</span><span className="status draft">{task.status === 'DRAFT' ? '待选搭' : '可调整'}</span></div>
       <div className="inline-form">
           <input value={name} onChange={(event) => setName(event.target.value)} placeholder="任务名称" />
-          <button className="secondary" disabled={name.trim() === task.name} onClick={() => void run('保存任务名称中...', () => api.updateTask(task.id, { name }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>保存名称</button>
+          <button className="management-action" disabled={name.trim() === task.name} onClick={() => void run('保存任务名称中...', () => api.updateTask(task.id, { name }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>保存名称</button>
       </div>
       <div className="draft-image-grid">
         {(task.images ?? []).map((image, index) => (
@@ -1325,7 +1325,7 @@ function RequirementEditor({ value, onChange, title, placeholder }: { value: str
         <textarea value={value} maxLength={800} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
       </label>
       <div className="requirement-chips">
-        {chips.map((chip) => <button key={chip} type="button" className="secondary" onClick={() => appendChip(chip)}>{chip}</button>)}
+        {chips.map((chip) => <button key={chip} type="button" className="management-action" onClick={() => appendChip(chip)}>{chip}</button>)}
       </div>
       <em>{value.length}/800</em>
     </div>
@@ -1405,7 +1405,7 @@ function StageUserInputModule({ step, task, value, savedValue = '', onChange, on
         {task && <p>保存后用于下一次执行，不会改变当前结果。</p>}
         <div className="side-input-actions">
           <em>{value.length}/800</em>
-          {task && <button className="secondary" type="button" disabled={saveDisabled} onClick={onSave}>保存</button>}
+          {task && <button className="management-action" type="button" disabled={saveDisabled} onClick={onSave}>保存</button>}
         </div>
       </div>
     </details>
@@ -1440,7 +1440,7 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
         ))}</div>
       </div>
       <div className="stage-action-bar">
-        <button className="primary" disabled={!canSelect} onClick={() => task && void run(hasStyling ? '重新选搭中...' : '智能选搭中...', () => {
+        <button className="task-action" disabled={!canSelect} onClick={() => task && void run(hasStyling ? '重新选搭中...' : '智能选搭中...', () => {
           startLocalOperation({ taskId: task.id, ownerType: 'generation_styling', ownerId: task.id, provider: 'gemini' })
           const previousTask = task
           setTask({
@@ -1664,7 +1664,7 @@ function diagnosisItems(value: Record<string, unknown>): string[] {
         ))}</div>
       </div>
       <div className="stage-action-bar">
-        <button className="primary" disabled={!canPreview} onClick={() => task && void run(hasPreview ? '重新生成分镜预览中...' : '生成分镜预览中...', () => {
+        <button className="task-action" disabled={!canPreview} onClick={() => task && void run(hasPreview ? '重新生成分镜预览中...' : '生成分镜预览中...', () => {
           startLocalOperation({ taskId: task.id, ownerType: 'generation_preview', ownerId: task.id, provider: 'image-2' })
           setTask({ ...task, status: 'PREVIEW_RUNNING', resultSet: null, activeResultSetId: null })
           return api.previewTask(task.id, userInstruction)
@@ -1735,7 +1735,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
                   })()}
                 </div>
               )}
-              <div><span><b>#{index + 1}</b>{image?.shotRole || '镜头'}</span>{image?.asset && <a href={mediaDownloadUrl(assetOriginalSrc(image.asset))} aria-label={`下载镜头 ${index + 1}`}><Download size={15} /></a>}{image?.status === 'FAILED' && image.activeAttempt?.errorCode === 'DELIVERY_FAILED' && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('重新回传成片中...', () => api.redeliverResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新回传（图已生成，仅重新拉取，不消耗生成额度）" aria-label={`重新回传镜头 ${index + 1}`}><RefreshCw size={14} /></button>}{image && !['QUEUED', 'RUNNING'].includes(image.status) && <button disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id, userInstruction), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成" aria-label={`重新生成镜头 ${index + 1}`}><RotateCcw size={14} /></button>}</div>
+              <div><span><b>#{index + 1}</b>{image?.shotRole || '镜头'}</span>{image?.asset && <a className="management-icon-action" href={mediaDownloadUrl(assetOriginalSrc(image.asset))} aria-label={`下载镜头 ${index + 1}`}><Download size={15} /></a>}{image?.status === 'FAILED' && image.activeAttempt?.errorCode === 'DELIVERY_FAILED' && <button className="management-icon-action" disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('重新回传成片中...', () => api.redeliverResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新回传（图已生成，仅重新拉取，不消耗生成额度）" aria-label={`重新回传镜头 ${index + 1}`}><RefreshCw size={14} /></button>}{image && !['QUEUED', 'RUNNING'].includes(image.status) && <button className="task-icon-action" disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id, userInstruction), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成" aria-label={`重新生成镜头 ${index + 1}`}><RotateCcw size={14} /></button>}</div>
             </div>
           ))}
           </div></div>
@@ -1743,11 +1743,11 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
       </div>
       <div className="stage-action-bar">
         {hasFinalImages && task && (
-          <a className="secondary button-link" href={finalImageArchiveUrl([task.id])} rel="noreferrer" title="打包下载本任务全部成片，未完成项记录在清单.txt">
+          <a className="management-action button-link" href={finalImageArchiveUrl([task.id])} rel="noreferrer" title="打包下载本任务全部成片，未完成项记录在清单.txt">
             <Download size={16} /> 下载全部成片
           </a>
         )}
-        <button className="primary" disabled={!canGenerate} onClick={() => task && void run(hasFinalImages ? '重新生成最终成片中...' : '生成最终成片中...', () => {
+        <button className="task-action" disabled={!canGenerate} onClick={() => task && void run(hasFinalImages ? '重新生成最终成片中...' : '生成最终成片中...', () => {
           for (let index = 1; index <= 5; index += 1) {
             startLocalOperation({ taskId: task.id, ownerType: 'generation_result_image', ownerId: index, provider: 'image-2' })
           }
@@ -1917,7 +1917,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
     <section className="page workbench-page library-page">
       <div className="library-title-row">
         <PageTitle title="搭配服装库" />
-        <button className="primary" onClick={() => setShowImport((value) => !value)}>
+        <button className="management-action" onClick={() => setShowImport((value) => !value)}>
           <ImagePlus size={16} /> {showImport ? '收起导入' : '导入搭配服装'}
         </button>
       </div>
@@ -1939,10 +1939,10 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
           <div className="record-list-meta">
             {selectedVisibleGarments.length > 0 && (
               selectedArchivedGarments.length === selectedVisibleGarments.length
-                ? <button className="secondary" onClick={() => restoreGarments(selectedArchivedGarments)}>恢复 {selectedArchivedGarments.length} 项</button>
-                : <button className="secondary" disabled={selectedArchivedGarments.length > 0} title={selectedArchivedGarments.length ? '请分别选择已归档和未归档服装' : undefined} onClick={() => openGarmentDeleteDialog(selectedActiveGarments)}>归档 {selectedActiveGarments.length} 项</button>
+                ? <button className="management-action" onClick={() => restoreGarments(selectedArchivedGarments)}>恢复 {selectedArchivedGarments.length} 项</button>
+                : <button className="management-action" disabled={selectedArchivedGarments.length > 0} title={selectedArchivedGarments.length ? '请分别选择已归档和未归档服装' : undefined} onClick={() => openGarmentDeleteDialog(selectedActiveGarments)}>归档 {selectedActiveGarments.length} 项</button>
             )}
-            <button className="secondary compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
+            <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
             <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 套` : '0 套'}</span>
           </div>
         </div>
@@ -2244,18 +2244,18 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
           <h3>导入搭配服装</h3>
           <p>散图会合并为一套；单货号文件夹是一套；上级文件夹会递归识别最底层图片目录。导入后系统会自动识别标签，单套正式保留前 15 张。</p>
         </div>
-        <button className="primary" disabled={!batches.length} onClick={saveDrafts}>导入</button>
+        <button className="management-action" disabled={!batches.length} onClick={saveDrafts}>导入</button>
       </div>
       <div className="import-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
         <Images size={22} />
         <strong>拖入图片或文件夹</strong>
         <span>支持多张图片、一个货号文件夹、一个上级文件夹，或拖入多个货号文件夹</span>
         <div className="import-actions">
-          <label className="secondary">
+          <label className="management-action">
             <ImagePlus size={16} /> 选择图片
             <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
           </label>
-          <label className="secondary">
+          <label className="management-action">
             <FolderOpen size={16} /> 选择文件夹
             <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
           </label>
@@ -2303,7 +2303,7 @@ function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
       <div className="batch-card-head">
         <div className="batch-icon"><Layers3 size={18} /></div>
         <input value={batch.code} onChange={(event) => onCode(event.target.value)} aria-label="搭配服装货号" />
-        <button className="secondary icon-button" onClick={onRemove} title="移除整套"><Trash2 size={16} /></button>
+        <button className="management-action icon-button" onClick={onRemove} title="移除整套"><Trash2 size={16} /></button>
       </div>
       <div className="batch-note">
         <span>{batch.files.length} 张图片</span>
@@ -2440,7 +2440,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
             <div className="section-head">
               <strong>数字模特头部参考图</strong>
               {editable && (
-                <label className="secondary">
+                <label className="management-action">
                   <ImagePlus size={16} /> 追加图片
                   <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => {
                     const next = Array.from(event.target.files ?? [])
@@ -2506,7 +2506,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
             <div className="section-head">
               <strong>拍摄背景参考图</strong>
               {isAdmin && (
-                <label className="secondary">
+                <label className="management-action">
                   <ImagePlus size={16} /> {env ? '更换' : '上传'}
                   <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
                     const file = event.target.files?.[0]
@@ -2644,7 +2644,7 @@ function PromptMaintenancePage({ run }: { run: any }) {
     <section className="page workbench-page prompt-page">
       <PageTitle
         title="Prompt 维护"
-        actions={<div className="toolbar"><span className="chip">Admin</span><button className="secondary" onClick={() => setShowTools((value) => !value)}><Eye size={16} />{showTools ? '收起预览工具' : '预览工具'}</button>{showTools && <button className="secondary" onClick={refreshPreview} disabled={!activeItem}><RefreshCw size={16} />刷新预览</button>}<button className="primary" onClick={save} disabled={!activeItem || !dirty}><Save size={16} />保存</button></div>}
+        actions={<div className="toolbar"><span className="chip">Admin</span><button className="management-action" onClick={() => setShowTools((value) => !value)}><Eye size={16} />{showTools ? '收起预览工具' : '预览工具'}</button>{showTools && <button className="management-action" onClick={refreshPreview} disabled={!activeItem}><RefreshCw size={16} />刷新预览</button>}<button className="management-action" onClick={save} disabled={!activeItem || !dirty}><Save size={16} />保存</button></div>}
       />
       <div className={`prompt-maintenance-layout ${showTools ? '' : 'tools-collapsed'}`}>
         <aside className="panel prompt-nav-panel">
@@ -2901,15 +2901,15 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
             </div>
             <div className="record-list-meta">
               {selectedVisibleRecords.length > 0 && (
-                <button className="secondary" disabled={downloadChecking} onClick={startBatchDownload} title="打包下载所选任务的最终成片，按任务名分文件夹">
+                <button className="management-action" disabled={downloadChecking} onClick={startBatchDownload} title="打包下载所选任务的最终成片，按任务名分文件夹">
                   <Download size={14} /> {downloadChecking ? '检查成片中...' : `下载成片 ${selectedVisibleRecords.length} 项`}
                 </button>
               )}
-              <button className="secondary compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedRecordIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
+              <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedRecordIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
               {selectedVisibleRecords.length > 0 && (
                 selectedArchivedRecords.length === selectedVisibleRecords.length
-                  ? <button className="secondary" onClick={() => restoreRecords(selectedArchivedRecords)}>恢复 {selectedArchivedRecords.length} 项</button>
-                  : <button className="secondary" disabled={selectedArchivedRecords.length > 0} title={selectedArchivedRecords.length ? '请分别选择已归档和未归档记录' : undefined} onClick={runRecordBatchAction}>归档 {selectedActiveRecords.length} 项</button>
+                  ? <button className="management-action" onClick={() => restoreRecords(selectedArchivedRecords)}>恢复 {selectedArchivedRecords.length} 项</button>
+                  : <button className="management-action" disabled={selectedArchivedRecords.length > 0} title={selectedArchivedRecords.length ? '请分别选择已归档和未归档记录' : undefined} onClick={runRecordBatchAction}>归档 {selectedActiveRecords.length} 项</button>
               )}
               <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 条` : '0 条'}</span>
             </div>
@@ -2933,14 +2933,14 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
                   <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
                 </button>
                 <button
-                  className="secondary record-action-button"
+                  className="task-action record-action-button"
                   onClick={() => openTaskInStudio(item)}
                   title="回到 AI 摄影棚恢复该任务"
                 >
                   {taskResumeActionLabel(item)}
                 </button>
                 <button
-                  className="secondary record-action-button"
+                  className="management-action record-action-button"
                   onClick={() => isTaskRunning(item) ? cancelRecordTask(item) : item.archivedAt ? restoreRecords([item]) : openRecordDeleteDialog(item)}
                 >
                   {isTaskRunning(item) ? '取消生成' : item.archivedAt ? '恢复归档' : '归档'}
@@ -2970,7 +2970,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
               <Meta label="状态" value={statusText(detail.status)} />
               <Meta label="选中搭配" value={`${detail.styling?.selectedMaterials?.length ?? 0} 件`} />
               <RecordImagePreview task={detail} />
-              {detail.archivedAt && <button className="secondary" onClick={() => restoreRecords([detail])}>恢复归档</button>}
+              {detail.archivedAt && <button className="management-action" onClick={() => restoreRecords([detail])}>恢复归档</button>}
             </>
           ) : <EmptyState title="选择一条记录" text="查看分镜预览、搭配服装和最终成片。" />}
         </div>
@@ -3040,10 +3040,10 @@ function FinalImageDownloadDialog({ precheck, onClose, onDownload }: {
         </div>
         <p className="confirm-copy">继续下载时，未完成项会记录在压缩包内的“清单.txt”。</p>
         <div className="confirm-actions">
-          <button type="button" className="secondary" onClick={onClose}>取消</button>
+          <button type="button" className="management-action" onClick={onClose}>取消</button>
           <button
             type="button"
-            className="secondary"
+            className="management-action"
             disabled={!hasDownloadable}
             onClick={() => onDownload(precheck.downloadableTaskIds)}
           >
@@ -3051,7 +3051,7 @@ function FinalImageDownloadDialog({ precheck, onClose, onDownload }: {
           </button>
           <button
             type="button"
-            className="primary"
+            className="management-action"
             disabled={!hasComplete}
             onClick={() => onDownload(precheck.completeTaskIds)}
           >
@@ -3129,8 +3129,8 @@ function DeleteConfirmDialog({ title, items, onClose, onConfirm, impact = null, 
           </>
         )}
         <div className="confirm-actions">
-          <button type="button" className="secondary" onClick={onClose}>取消</button>
-          <button className={purge ? 'danger' : 'primary'} disabled={!canConfirm}>
+          <button type="button" className="management-action" onClick={onClose}>取消</button>
+          <button className={purge ? 'danger-action' : 'management-action'} disabled={!canConfirm}>
             {submitting ? '处理中...' : '确认'}
           </button>
         </div>
@@ -3185,8 +3185,8 @@ function PaginationControls({ offset, pageSize, pageSizeOptions = defaultPageSiz
   return (
     <div className={`pagination-bar ${compact ? 'compact-pagination' : ''}`}>
       <div className="pagination-pages">
-        <button className="secondary" disabled={!canPrev} onClick={() => goToPage(1)}>首页</button>
-        <button className="secondary" disabled={!canPrev} onClick={() => goToPage(currentPage - 1)}><ChevronLeft size={16} />上一页</button>
+        <button className="management-action" disabled={!canPrev} onClick={() => goToPage(1)}>首页</button>
+        <button className="management-action" disabled={!canPrev} onClick={() => goToPage(currentPage - 1)}><ChevronLeft size={16} />上一页</button>
         <label className="page-jump">第
           <input
             type="number"
@@ -3203,8 +3203,8 @@ function PaginationControls({ offset, pageSize, pageSizeOptions = defaultPageSiz
           页
         </label>
         <span>共 {totalPages} 页</span>
-        <button className="secondary" disabled={!canNext} onClick={() => goToPage(currentPage + 1)}>下一页<ChevronRight size={16} /></button>
-        <button className="secondary" disabled={!canNext} onClick={() => onOffsetChange(lastOffset)}>尾页</button>
+        <button className="management-action" disabled={!canNext} onClick={() => goToPage(currentPage + 1)}>下一页<ChevronRight size={16} /></button>
+        <button className="management-action" disabled={!canNext} onClick={() => onOffsetChange(lastOffset)}>尾页</button>
       </div>
       <div className="pagination-meta">
         <span>共 {total} 条</span>
@@ -3295,9 +3295,9 @@ function GarmentCard({ item, onTag, onOpen, onDelete, onRestore, selected, onSel
       </div>
       {meta.overall_confidence !== undefined && showTagResult && <span className="confidence-text">AI 置信度 {formatConfidence(meta.overall_confidence)}</span>}
       <div className="card-actions">
-        {onOpen && <button className="secondary" onClick={onOpen}><Eye size={16} /> 详情</button>}
-        {onTag && <button className="secondary" disabled={tagging} onClick={onTag}>重新识别标签</button>}
-        {item.archivedAt ? onRestore && <button className="secondary" disabled={tagging} onClick={onRestore}><RefreshCw size={16} /> 恢复归档</button> : onDelete && <button className="secondary" disabled={tagging} onClick={onDelete}><Trash2 size={16} /> 归档</button>}
+        {onOpen && <button className="management-action" onClick={onOpen}><Eye size={16} /> 详情</button>}
+        {onTag && <button className="management-action" disabled={tagging} onClick={onTag}>重新识别标签</button>}
+        {item.archivedAt ? onRestore && <button className="management-action" disabled={tagging} onClick={onRestore}><RefreshCw size={16} /> 恢复归档</button> : onDelete && <button className="management-action" disabled={tagging} onClick={onDelete}><Trash2 size={16} /> 归档</button>}
       </div>
     </div>
   )
@@ -3380,7 +3380,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
             <h2>{item.code}</h2>
             <span className={`status ${item.status.toLowerCase()}`}>{garmentStatus(item.status)}</span>
           </div>
-          <button className="secondary icon-button" onClick={onClose} title="关闭"><X size={16} /></button>
+          <button className="management-action icon-button" onClick={onClose} title="关闭"><X size={16} /></button>
         </div>
         <div className="drawer-section">
           <Meta label="更新时间" value={dateText(item.updatedAt)} />
@@ -3460,13 +3460,13 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
           )}
         </div>
         <div className="drawer-actions">
-          <button className="secondary" disabled={tagging} onClick={retag}>重新打标</button>
-          <button className="secondary" disabled={tagging || !dirty || !working.length} onClick={() => void save(false)}>仅保存</button>
-          <button className="primary" disabled={tagging || !dirty || !working.length} onClick={() => void save(true)}>保存并重新识别标签</button>
+          <button className="management-action" disabled={tagging} onClick={retag}>重新打标</button>
+          <button className="management-action" disabled={tagging || !dirty || !working.length} onClick={() => void save(false)}>仅保存</button>
+          <button className="management-action" disabled={tagging || !dirty || !working.length} onClick={() => void save(true)}>保存并重新识别标签</button>
         </div>
         <div className="danger-zone">
           <strong>{item.archivedAt ? '恢复归档' : '归档'}</strong>
-          <button className="secondary" disabled={tagging} onClick={() => {
+          <button className="management-action" disabled={tagging} onClick={() => {
             if (item.archivedAt) {
               onRestore()
             } else {
@@ -3494,7 +3494,7 @@ function CodeEditor({ item, run, disabled = false }: { item: StylingGarment; run
       <label>货号</label>
       <div>
         <input disabled={disabled} value={value} onChange={(event) => setValue(event.target.value)} />
-        <button className="secondary" disabled={disabled || !changed} onClick={() => void run('保存货号中...', () => api.updateStylingGarment(item.id, { code: value }), undefined, { refresh: 'background' })}>保存</button>
+        <button className="management-action" disabled={disabled || !changed} onClick={() => void run('保存货号中...', () => api.updateStylingGarment(item.id, { code: value }), undefined, { refresh: 'background' })}>保存</button>
       </div>
     </div>
   )
