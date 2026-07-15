@@ -55,6 +55,15 @@ PUBLIC_BACKEND_URL=http://<服务器IP或域名>:8000
 PUBLIC_S3_URL=http://<服务器IP或域名>:9000
 BACKEND_CORS_ORIGINS=http://<服务器IP或域名>:5173
 
+# 媒体缓存:不影响直传和非媒体 presigned URL
+APP_S3_PRESIGN_EXPIRES_SECONDS=900
+APP_MEDIA_PRESIGN_EXPIRES_SECONDS=3600
+APP_MEDIA_THUMB_CACHE_SECONDS=2400
+APP_MEDIA_PREVIEW_CACHE_SECONDS=1800
+APP_MEDIA_ORIGINAL_CACHE_SECONDS=600
+APP_MEDIA_CACHE_JITTER_SECONDS=600
+APP_MEDIA_PRESIGN_SAFETY_MARGIN_SECONDS=120
+
 # AI 通道
 GEMINI_PROVIDER=toapis                 # 国内无需 VPN;direct 需 GEMINI_API_KEY 且能访问 googleapis.com
 GPT_IMAGE2_PROVIDER=toapis
@@ -67,6 +76,7 @@ TOAPIS_API_KEY=sk-...
 - `PUBLIC_BACKEND_URL` 会构建进前端静态包,改动后必须重建 frontend 镜像。
 - 端口冲突时只改宿主机映射:`BACKEND_PORT=18000` 并同步改 `PUBLIC_BACKEND_URL`。
 - `APP_S3_BUCKET` 保持默认 `ruyi-dream`(S3 命名规则:3-63 位小写字母/数字/短横线)。
+- 媒体图片通过 `/api/media` 返回 302 到对象存储。`APP_MEDIA_PRESIGN_EXPIRES_SECONDS` 控制媒体 GET 签名 URL 的有效期;`APP_MEDIA_*_CACHE_SECONDS` 控制浏览器缓存 TTL,且实际 TTL 会被媒体签名有效期减安全余量截断。`APP_S3_PRESIGN_EXPIRES_SECONDS` 继续控制直传和其它非媒体签名 URL。
 - 不要设置 `RUSTFS_SERVER_DOMAINS`(仅 virtual-host style 需要,误设会报 `InvalidBucketName`)。
 - 密码/hash 轮换后想强制所有浏览器重新登录,需同时轮换 `APP_SESSION_SECRET`。
 - 由外部网关做认证时:`APP_TRUST_REVERSE_PROXY_AUTH=true` 且清空账号密码项。
@@ -240,6 +250,7 @@ docker compose up -d && curl http://127.0.0.1:8000/api/health
 - `PUBLIC_S3_URL` / `APP_S3_PUBLIC_ENDPOINT_URL` 必须浏览器可达(最常见错因:留成 127.0.0.1)。
 - 服务器时钟偏移会报 `RequestTimeTooSkewed`,校时。
 - 对象缺失:从同一备份点同时恢复 SQLite 和对象数据。
+- 缓存异常:浏览器 Network 面板关闭 Disable cache 后,检查 `/api/media` 的 302 与最终 RustFS 图片响应是否都有 `Cache-Control`。非下载图片应是 `private, max-age=...`;下载应是 `private, no-store`。若图片短时间内仍全量回源,优先排查代理是否覆盖响应头或前端是否替换了未变化图片的 `src`。
 
 ### AI 链路失败
 

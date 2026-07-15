@@ -78,7 +78,7 @@ k6 run -e BASE_URL=http://127.0.0.1:8000 -e USERNAME=user -e PASSWORD=<密码> \
 
 模拟 5 → 20 → 50 并发用户浏览搭配库(列表 + 12 张封面缩略图)。阈值:列表 p95 < 800ms,缩略图 p95 < 1.5s,错误率 < 1%。
 
-**判读要点**:图片链路是 `GET /api/media` → 后端查库 + 对象 HEAD + presign → 302 重定向 → RustFS。非下载图片响应头是短时 `Cache-Control: private, max-age=...`,浏览器可在签名 URL 有效期内复用重定向和最终图片缓存;下载请求仍使用 `private, no-store`。并发上来后,首次进页面和缓存过期后的图片请求仍是后端 QPS 的主要来源。若 thumb p95 严重劣化而 warp 结果健康,瓶颈在后端(事件循环/SQLite 查询),不在存储。
+**判读要点**:图片链路是 `GET /api/media` → 后端查库 + 对象 HEAD + presign → 302 重定向 → RustFS。非下载图片响应头是 `Cache-Control: private, max-age=...`;默认 `thumb` 约 40-50 分钟、`preview` 约 30-40 分钟、非下载 `original` 约 10-20 分钟,且按 object key 稳定抖动以错开过期时间。下载请求仍使用 `private, no-store`。并发上来后,首次进页面、缓存过期和强制刷新后的图片请求仍是后端 QPS 的主要来源。若 thumb p95 严重劣化而 warp 结果健康,瓶颈在后端(事件循环/SQLite 查询),不在存储。
 
 ## 4. 写并发(SQLite 单写锁)
 
@@ -108,12 +108,13 @@ k6 run -e BASE_URL=http://127.0.0.1:8000 -e USERNAME=user -e PASSWORD=<密码> \
 你的电脑上:浏览器打开搭配库页面,DevTools Network 面板记录:
 
 - 列表接口耗时 vs 图片总加载耗时(定位是后端慢还是带宽慢);
-- 强刷两次对比:普通刷新应受短时浏览器缓存影响;若短时间内两次耗时接近且 `/api/media` 全量回源,检查前端是否替换了未变化图片的 `src`、是否触发了 DevTools 的 Disable cache,或响应头是否被代理覆盖。
+- 普通刷新两次对比:第二次应明显受浏览器缓存影响;若短时间内两次耗时接近且 `/api/media` 全量回源,检查前端是否替换了未变化图片的 `src`、是否触发了 DevTools 的 Disable cache,或响应头是否被代理覆盖。
+- Network 面板抽查图片响应头:`/api/media` 的 302 和最终 RustFS 图片响应都应带 `Cache-Control`;不同图片的 `max-age` 可不同,这是 TTL 抖动的预期行为。
 
 ## 已知架构因素(压测前心里有数)
 
 1. SQLite 单写锁 + 同步 DB 调用:写并发的天花板,读多写少场景影响有限。
-2. 图片短时私有缓存 + 每图两跳(后端 redirect + RustFS):首次加载、缓存过期和强制刷新仍是浏览类 QPS 放大器。
+2. 图片分档私有缓存 + 每图两跳(后端 redirect + RustFS):首次加载、缓存过期和强制刷新仍是浏览类 QPS 放大器;TTL 抖动用于降低同一批图片同时过期的尖峰。
 3. 衍生图生成(Pillow)是上传时同步 CPU 开销。
 4. GPT-Image-2 生成几十秒 + 5s 轮询:体验主导项,与服务器性能无关。
 5. 公网上行影响打标/选搭(base64 图片上行)与参考图上传;公网下行影响生成图回落。
