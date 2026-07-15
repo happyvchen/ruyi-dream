@@ -517,6 +517,119 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
         self.assertEqual(result["status"], "SUCCEEDED")
         self.assertEqual(responses, [])
 
+    def test_poll_keeps_zero_progress_toapis_waiting_in_queue_phase(self) -> None:
+        """ToAPIs in_progress 但 progress=0 时仍算排队，避免把后台等待误记为 AI 生成。"""
+        db_module = importlib.import_module("app.db")
+        attempt_id = self._insert_attempt()
+        recorder = self.progress_module.AttemptProgressRecorder(attempt_id)
+        responses: list[dict[str, object]] = [
+            {
+                "status": "IN_PROGRESS",
+                "providerStatus": "in_progress",
+                "providerStatusResponse": {"status": "in_progress", "progress": 0},
+            },
+            {
+                "status": "IN_PROGRESS",
+                "providerStatus": "in_progress",
+                "providerStatusResponse": {"status": "in_progress", "progress": 12},
+            },
+            {
+                "status": "SUCCEEDED",
+                "providerStatus": "completed",
+                "providerStatusResponse": {"status": "completed", "progress": 100},
+            },
+        ]
+
+        def fake_check(_payload: dict, _output_key: str) -> dict:
+            return responses.pop(0)
+
+        async def instant_sleep(_seconds: float) -> None:
+            return None
+
+        payload = {"providerRequestId": "tsk_1", "status": "SUBMITTED", "providerStatus": "submitted", "providerUrls": {}}
+        with mock.patch.object(self.main, "run_image_provider_check", side_effect=fake_check):
+            with mock.patch("asyncio.sleep", new=instant_sleep):
+                result = asyncio.run(self.main.poll_provider_until_terminal(payload, "k/out.png", attempt_id, recorder))
+
+        self.assertEqual(result["status"], "SUCCEEDED")
+        with db_module.get_db() as db:
+            row = db.execute("SELECT progress_json FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
+        progress = json.loads(row["progress_json"])
+        phases = progress["phases"]
+        self.assertEqual([entry["phase"] for entry in phases], ["queue", "generate"])
+        self.assertEqual(phases[0]["detail"]["providerProgress"], 0.0)
+        self.assertEqual(phases[1]["detail"]["providerProgress"], 12.0)
+
+    def test_poll_direct_completion_adds_generate_phase_with_provider_duration(self) -> None:
+        """ToAPIs 0% 后直接 completed 时，仍补齐生成阶段并采用 provider duration。"""
+        db_module = importlib.import_module("app.db")
+        attempt_id = self._insert_attempt()
+        recorder = self.progress_module.AttemptProgressRecorder(attempt_id)
+        responses: list[dict[str, object]] = [
+            {
+                "status": "IN_PROGRESS",
+                "providerStatus": "in_progress",
+                "providerStatusResponse": {"status": "in_progress", "progress": 0},
+            },
+            {
+                "status": "SUCCEEDED",
+                "providerStatus": "completed",
+                "providerStatusResponse": {
+                    "status": "completed",
+                    "progress": 100,
+                    "created_at": 1000,
+                    "completed_at": 1118,
+                },
+            },
+        ]
+
+        def fake_check(_payload: dict, _output_key: str) -> dict:
+            return responses.pop(0)
+
+        async def instant_sleep(_seconds: float) -> None:
+            return None
+
+        payload = {"providerRequestId": "tsk_1", "status": "SUBMITTED", "providerStatus": "submitted", "providerUrls": {}}
+        with mock.patch.object(self.main, "run_image_provider_check", side_effect=fake_check):
+            with mock.patch("asyncio.sleep", new=instant_sleep):
+                result = asyncio.run(self.main.poll_provider_until_terminal(payload, "k/out.png", attempt_id, recorder))
+
+        self.assertEqual(result["status"], "SUCCEEDED")
+        with db_module.get_db() as db:
+            row = db.execute("SELECT progress_json FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
+        progress = json.loads(row["progress_json"])
+        phases = progress["phases"]
+        self.assertEqual([entry["phase"] for entry in phases], ["queue", "generate"])
+        self.assertEqual(phases[1]["detail"]["durationSeconds"], 118)
+
+    def test_attempt_summary_exposes_manual_retry_mode_and_index(self) -> None:
+        db_module = importlib.import_module("app.db")
+        first_attempt_id = self._insert_attempt(owner_id=42)
+        retry_attempt_id = self._insert_attempt(
+            owner_id=42,
+            request_snapshot_json=json.dumps({"invocation": {"mode": "manual_retry", "target": "final_image"}}),
+        )
+        with db_module.get_db() as db:
+            db.execute(
+                "UPDATE generation_attempts SET retry_of_attempt_id = ? WHERE id = ?",
+                (first_attempt_id, retry_attempt_id),
+            )
+
+        summary = self.main.get_attempt_summary(retry_attempt_id)
+
+        self.assertEqual(summary["retryOfAttemptId"], first_attempt_id)
+        self.assertEqual(summary["retryMode"], "regenerate")
+        self.assertEqual(summary["retryIndex"], 1)
+
+    def test_preserves_manual_retry_invocation_for_precreated_attempt_resume(self) -> None:
+        attempt_id = self._insert_attempt(
+            request_snapshot_json=json.dumps({"invocation": {"mode": "manual_retry", "target": "final_image"}}),
+        )
+
+        mode = self.main.preserved_attempt_invocation_mode(attempt_id)
+
+        self.assertEqual(mode, "manual_retry")
+
     def test_deliver_with_retries_exhausts_to_delivery_failed(self) -> None:
         """回传预算耗尽后以 DELIVERY_FAILED 落败，providerRequestId 保留。"""
         os.environ["GENERATION_DELIVERY_TIMEOUT_SECONDS"] = "1"

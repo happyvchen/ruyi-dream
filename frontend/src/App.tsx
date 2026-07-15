@@ -82,7 +82,9 @@ const adminPages = new Set<Page>(['prompt-maintenance'])
 
 const defaultPageSizeOptions = [20, 50, 100] as const
 const densePageSizeOptions = [12, 50, 100] as const
-const recentTaskPageSize = 10
+const recentTaskRowHeight = 62
+const recentTaskMaxPageSize = 60
+const recentTaskRetainedPages = 4
 const authSeenStorageKey = 'ruyi-auth-seen'
 const authExpiredMessage = '登录状态已过期，请重新登录后继续。'
 const SUPPORTED_IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/heic,image/heif,image/avif,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif'
@@ -330,7 +332,7 @@ export function App() {
       <main className="workspace">
         {error && <div className="toast">{error.length > 300 ? `${error.slice(0, 300)}…` : error}</div>}
         {busy && <BusyPill label={busy} />}
-        {page === 'studio' && <StudioPage task={task} setTask={setTask} records={records} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
+        {page === 'studio' && <StudioPage task={task} setTask={setTask} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
         {page === 'library' && <LibraryPage garments={garments} run={run} role={role} />}
         {page === 'model' && <ModelPage models={models} role={role} run={run} />}
         {page === 'prompt-maintenance' && role === 'admin' && <PromptMaintenancePage run={run} />}
@@ -408,10 +410,9 @@ function BusyPill({ label }: { label: string }) {
   )
 }
 
-function StudioPage({ task, setTask, records, role, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
+function StudioPage({ task, setTask, role, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask | null) => void
-  records: GenerationTask[]
   role: SessionRole | null
   run: <T>(label: string, action: () => Promise<T>, after?: (value: T) => void, options?: RunOptions) => Promise<T | undefined>
   localOperations: AIOperation[]
@@ -420,11 +421,13 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
 }) {
   const [step, setStep] = useState<StudioStep>(0)
   const [taskRailTab, setTaskRailTab] = useState<'summary' | 'recent'>('summary')
-  const [taskItems, setTaskItems] = useState<GenerationTask[]>(records.slice(0, recentTaskPageSize))
-  const [recentTaskTotal, setRecentTaskTotal] = useState(records.length)
-  const [recentTaskHasMore, setRecentTaskHasMore] = useState(records.length > recentTaskPageSize)
-  const [recentTaskNextOffset, setRecentTaskNextOffset] = useState<number | null>(records.length > recentTaskPageSize ? recentTaskPageSize : null)
+  const [recentTaskPageSize, setRecentTaskPageSize] = useState(() => preferredRecentTaskPageSize())
+  const [taskItems, setTaskItems] = useState<GenerationTask[]>([])
+  const [recentTaskTotal, setRecentTaskTotal] = useState(0)
+  const [recentTaskHasMore, setRecentTaskHasMore] = useState(false)
+  const [recentTaskNextOffset, setRecentTaskNextOffset] = useState<number | null>(null)
   const [recentTaskLoading, setRecentTaskLoading] = useState(false)
+  const [recentTaskReleasedCount, setRecentTaskReleasedCount] = useState(0)
   const [batchItems, setBatchItems] = useState<GenerationTask[]>([])
   const [batchItemsLoading, setBatchItemsLoading] = useState(false)
   const [batchDownloadPrecheck, setBatchDownloadPrecheck] = useState<FinalImageExportPrecheck | null>(null)
@@ -434,6 +437,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   const batchDownloadRequestRef = useRef(0)
   const technicalDetailTriggerRef = useRef<HTMLElement | null>(null)
   const technicalDetailRequestRef = useRef(0)
+  const recentTaskRequestRef = useRef(0)
   const [aiLogDialog, setAiLogDialog] = useState<{ title: string; ownerTypes: string[]; attemptId: number; records: AICallRecord[]; loading: boolean; error?: string } | null>(null)
   const [heroProductInfo, setHeroProductInfo] = useState('')
   const [aiStylingInstruction, setAiStylingInstruction] = useState('')
@@ -464,13 +468,29 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   }
   function loadRecentTasks(offset = 0, append = false) {
     if (recentTaskLoading) return
+    const requestId = recentTaskRequestRef.current + 1
+    recentTaskRequestRef.current = requestId
     setRecentTaskLoading(true)
     void api.listRecords({ limit: recentTaskPageSize, offset }).then((result) => {
+      if (recentTaskRequestRef.current !== requestId) return
       setRecentTaskTotal(result.total)
       setRecentTaskHasMore(result.hasMore)
       setRecentTaskNextOffset(result.nextOffset)
-      setTaskItems((current) => append ? mergeRecentTaskItems(current, result.items) : result.items)
-    }).catch(() => undefined).finally(() => setRecentTaskLoading(false))
+      setTaskItems((current) => {
+        if (!append) {
+          setRecentTaskReleasedCount(0)
+          return result.items
+        }
+        const merged = mergeRecentTaskItems(current, result.items)
+        const maxItems = Math.max(recentTaskPageSize * recentTaskRetainedPages, recentTaskPageSize)
+        if (merged.length <= maxItems) return merged
+        const releaseCount = merged.length - maxItems
+        setRecentTaskReleasedCount((count) => count + releaseCount)
+        return merged.slice(releaseCount)
+      })
+    }).catch(() => undefined).finally(() => {
+      if (recentTaskRequestRef.current === requestId) setRecentTaskLoading(false)
+    })
   }
   function handleRecentTaskScroll(event: UIEvent<HTMLDivElement>) {
     const element = event.currentTarget
@@ -611,12 +631,13 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   useEffect(() => setStoryboardInstruction(task?.stageUserInputs?.storyboardPreview ?? stageInstructionText((task?.storyboardPreview ?? task?.preview)?.userInstruction)), [task?.id, task?.stageUserInputs?.storyboardPreview, (task?.storyboardPreview ?? task?.preview)?.id])
   useEffect(() => setFinalImageInstruction(task?.stageUserInputs?.finalImage ?? stageInstructionText(task?.resultSet?.userInstruction)), [task?.id, task?.stageUserInputs?.finalImage, task?.resultSet?.id])
   useEffect(() => {
-    setTaskItems(records.slice(0, recentTaskPageSize))
-    setRecentTaskTotal(records.length)
-    setRecentTaskHasMore(records.length > recentTaskPageSize)
-    setRecentTaskNextOffset(records.length > recentTaskPageSize ? recentTaskPageSize : null)
+    const handleResize = () => setRecentTaskPageSize(preferredRecentTaskPageSize())
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
+  useEffect(() => {
     loadRecentTasks(0)
-  }, [records])
+  }, [recentTaskPageSize])
   useEffect(() => {
     if (!task || (!['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status) && !task.autoRunTarget)) return
     const timer = window.setInterval(() => {
@@ -632,7 +653,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
   useEffect(() => {
     if (!hasActiveRecentTasks) return
     const timer = window.setInterval(() => {
-      void api.listRecords({ limit: recentTaskPageSize, offset: 0 }).then((result) => {
+      void api.listRecords({ limit: recentTaskPageSize, offset: recentTaskReleasedCount }).then((result) => {
         setRecentTaskTotal(result.total)
         setTaskItems((current) => {
           const byId = new Map(result.items.map((item) => [item.id, item] as const))
@@ -647,7 +668,7 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
       }).catch(() => undefined)
     }, 4000)
     return () => window.clearInterval(timer)
-  }, [hasActiveRecentTasks])
+  }, [hasActiveRecentTasks, recentTaskPageSize, recentTaskReleasedCount])
   useEffect(() => {
     const batchId = task?.batchId
     activeBatchIdRef.current = batchId ?? null
@@ -773,7 +794,16 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
                 </div>
               ))}
               {!taskItems.length && <EmptyState title="暂无任务" text="创建拍摄任务后会出现在这里。" />}
-              {!!taskItems.length && <div className="recent-task-footer">{recentTaskLoading ? '正在加载更多...' : recentTaskHasMore ? `已显示 ${taskItems.length} / 共 ${recentTaskTotal} 条` : `已触底，共 ${recentTaskTotal} 条`}</div>}
+              {!!taskItems.length && (
+                <div className="recent-task-footer">
+                  {recentTaskReleasedCount > 0 && (
+                    <button type="button" className="link-button" onClick={() => loadRecentTasks(0)}>
+                      已释放前面 {recentTaskReleasedCount} 条，回到最新任务
+                    </button>
+                  )}
+                  <span>{recentTaskLoading ? '正在加载更多...' : recentTaskHasMore ? `已显示 ${Math.min(recentTaskReleasedCount + taskItems.length, recentTaskTotal)} / 共 ${recentTaskTotal} 条` : `已触底，共 ${recentTaskTotal} 条`}</span>
+                </div>
+              )}
             </div>
           </div>
         </aside>
@@ -793,6 +823,14 @@ function StudioPage({ task, setTask, records, role, run, localOperations, startL
       )}
     </section>
   )
+}
+
+function preferredRecentTaskPageSize() {
+  if (typeof window === 'undefined') return 16
+  const availableHeight = Math.max(360, window.innerHeight - 260)
+  const visibleRows = Math.ceil(availableHeight / recentTaskRowHeight)
+  const bufferedRows = visibleRows * 2
+  return Math.min(recentTaskMaxPageSize, Math.max(12, bufferedRows))
 }
 
 function StepRail({ active, executing, max, onSelect }: { active: StudioStep; executing: StudioStep | null; max: StudioStep; onSelect: (step: StudioStep) => void }) {
@@ -1671,8 +1709,10 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
                     <small>
                       {(() => {
                         const phase = currentAttemptPhase(image.activeAttempt)
-                        const total = formatDuration(elapsedSeconds(image.activeAttempt.startedAt || image.updatedAt))
-                        return phase ? `${attemptPhaseText(phase)} · ${total}` : total
+                        const total = phase
+                          ? formatDuration(attemptPhaseDurationSeconds(phase, image.activeAttempt))
+                          : formatDuration(elapsedSeconds(image.activeAttempt.startedAt || image.updatedAt))
+                        return phase ? `${attemptPhaseText(phase, image.activeAttempt)} · ${total}` : total
                       })()}
                     </small>
                   )}
@@ -3749,14 +3789,14 @@ function AIOperationCard({ operation, now, compact, index, onOpenTechnicalDetail
   const running = isAttemptRunning(operation)
   const seconds = elapsedSeconds(operation.startedAt || operation.createdAt, now, operation.completedAt || operation.failedAt)
   const phase = running ? currentAttemptPhase(operation) : null
-  const breakdown = !running ? attemptPhaseBreakdown(operation) : ''
+  const breakdown = attemptPhaseBreakdown(operation, now)
   const failureNote = attemptFriendlyFailure(operation)
   return (
     <div className={`ai-operation-card ${running ? 'is-running' : ''} ${compact ? 'compact' : ''}`}>
       <div className="ai-operation-icon">{running ? <Loader2 size={15} className="spin" /> : <Clock3 size={15} />}</div>
       <div className="ai-operation-copy">
         <strong>{operationLabel(operation, index)}</strong>
-        {phase && <span>{attemptPhaseText(phase)}</span>}
+        {phase && <span>{attemptPhaseText(phase, operation)}</span>}
         {failureNote && <span className="operation-failure">{failureNote}</span>}
         {!compact && breakdown && <span className="operation-breakdown">{breakdown}</span>}
       </div>
@@ -3771,11 +3811,17 @@ function AIOperationCard({ operation, now, compact, index, onOpenTechnicalDetail
 }
 
 const ATTEMPT_PHASE_LABELS: Record<string, string> = {
-  prepare: '准备输入',
-  upload: '参考图上传',
-  queue: '排队中',
-  generate: 'AI 生成中',
-  deliver: '成片回传中',
+  prepare: '准备',
+  upload: '上传',
+  submit: '提交',
+  queue: '排队',
+  generate: '生成',
+  deliver: '回传',
+  store: '入库',
+  styling_context: '提交',
+  styling_gemini: '选搭',
+  styling_validate: '校验',
+  styling_store: '保存',
 }
 
 function attemptStatusText(operation: AIOperation) {
@@ -3795,9 +3841,14 @@ function attemptFriendlyFailure(operation: AIOperation): string | null {
   return friendlyErrorText(operation.errorCode, operation.errorMessage)
 }
 
-function attemptPhaseText(entry: AttemptPhase) {
+function attemptPhaseText(entry: AttemptPhase, operation?: AIOperation) {
   const base = ATTEMPT_PHASE_LABELS[entry.phase] ?? entry.phase
   const detail = (entry.detail ?? {}) as Record<string, unknown>
+  const retryIndex = Number(operation?.retryIndex)
+  if (Number.isFinite(retryIndex) && retryIndex > 0) {
+    if (operation?.retryMode === 'regenerate' && entry.phase === 'generate') return `${base}(重试${retryIndex})`
+    if (operation?.retryMode === 'redeliver' && entry.phase === 'deliver') return `${base}(重试${retryIndex})`
+  }
   if (entry.phase === 'upload') {
     const completed = Number(detail.completed)
     const total = Number(detail.total)
@@ -3807,10 +3858,10 @@ function attemptPhaseText(entry: AttemptPhase) {
   }
   if (entry.phase === 'deliver') {
     const retries = Number(detail.retries)
-    if (Number.isFinite(retries) && retries > 0) return `${base}（第 ${retries} 次重试）`
+    if (Number.isFinite(retries) && retries > 0) return `${base}(重试${retries})`
   }
   const statusCheckErrors = Number(detail.statusCheckErrors)
-  if (Number.isFinite(statusCheckErrors) && statusCheckErrors > 0) return `${base}（网络波动，重试 ${statusCheckErrors} 次）`
+  if (Number.isFinite(statusCheckErrors) && statusCheckErrors > 0) return `${base}(重试${statusCheckErrors})`
   return base
 }
 
@@ -3823,16 +3874,40 @@ function currentAttemptPhase(operation: AIOperation): AttemptPhase | null {
   return null
 }
 
-function attemptPhaseBreakdown(operation: AIOperation) {
+function attemptPhaseBreakdown(operation: AIOperation, now = Date.now()) {
   const phases = operation.progress?.phases ?? []
-  return phases
+  const retryPrefix = attemptRetryPrefix(phases)
+  const breakdown = phases
     .filter((entry) => entry.phase !== 'prepare' && entry.startedAt)
     .map((entry) => {
-      const seconds = elapsedSeconds(entry.startedAt, Date.now(), entry.endedAt || operation.completedAt || operation.failedAt)
-      return `${ATTEMPT_PHASE_LABELS[entry.phase] ?? entry.phase} ${formatDuration(seconds)}`
+      const seconds = attemptPhaseDurationSeconds(entry, operation, now)
+      return `${attemptPhaseText(entry, operation)} ${formatDuration(seconds)}`
     })
     .filter(Boolean)
     .join(' · ')
+  return breakdown ? `${retryPrefix}${breakdown}` : ''
+}
+
+function attemptPhaseDurationSeconds(entry: AttemptPhase, operation: AIOperation, now = Date.now()) {
+  const detail = (entry.detail ?? {}) as Record<string, unknown>
+  const rawDuration = detail.durationSeconds
+  const explicitDuration = Number(rawDuration)
+  if (rawDuration != null && Number.isFinite(explicitDuration) && explicitDuration >= 0) return Math.floor(explicitDuration)
+  return elapsedSeconds(entry.startedAt, now, entry.endedAt || operation.completedAt || operation.failedAt)
+}
+
+function attemptRetryPrefix(phases: AttemptPhase[]) {
+  const retryCount = phases.reduce((max, entry) => {
+    const detail = (entry.detail ?? {}) as Record<string, unknown>
+    const generationRetry = Number(detail.generationRetry)
+    const unknownSubmissionRetry = Number(detail.unknownSubmissionRetry)
+    return Math.max(
+      max,
+      Number.isFinite(generationRetry) ? generationRetry : 0,
+      Number.isFinite(unknownSubmissionRetry) ? unknownSubmissionRetry : 0,
+    )
+  }, 0)
+  return retryCount > 0 ? `(重试${retryCount}) ` : ''
 }
 
 function useTicker(enabled: boolean) {

@@ -2448,8 +2448,10 @@ async def run_select_generation_styling(
             persist_generation_task_stage_instruction(db, task_id, "ai_styling", effective_user_instruction, timestamp)
         db.execute("UPDATE generation_tasks SET status = 'STYLING_RUNNING', updated_at = ? WHERE id = ?", (timestamp, task_id))
     attempt_id = create_attempt("generation_styling", task_id, "gemini")
+    progress = AttemptProgressRecorder(attempt_id)
     styling_plan: dict[str, Any] | None = None
     try:
+        progress.begin("styling_context")
         input_row, candidate_snapshot, request_snapshot = build_ai_stylist_context(input_version_id)
         request_snapshot["invocation"] = {"mode": trigger, "target": "styling"}
         request_snapshot["hero_product_info"] = hero_product_info_context
@@ -2457,14 +2459,17 @@ async def run_select_generation_styling(
         request_snapshot["user_requirement"] = user_requirement_context
         update_attempt_request_snapshot(attempt_id, request_snapshot)
         if generation_task_or_attempt_cancelled(task_id, attempt_id):
+            progress.finish()
             finish_attempt(attempt_id, "CANCELLED")
             return {"item": get_generation_task_by_id(task_id)}
-        styling_plan = await select_styling_with_gemini(input_row, candidate_snapshot, request_snapshot, attempt_id=attempt_id)
+        styling_plan = await select_styling_with_gemini(input_row, candidate_snapshot, request_snapshot, attempt_id=attempt_id, progress=progress)
         persist_attempt_provider_progress(attempt_id, styling_plan)
+        progress.begin("styling_validate")
         validate_styling_plan(styling_plan, candidate_snapshot)
         selected_ids = [int(item) for item in styling_plan.get("selected_material_ids", [])]
         source_ids, selected_snapshot = get_styling_source_and_selected_snapshots(selected_ids)
     except Exception as exc:
+        progress.finish()
         with get_db() as db:
             current = db.execute("SELECT status FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
             if not current or current["status"] == "CANCELLED":
@@ -2491,8 +2496,10 @@ async def run_select_generation_styling(
         current = db.execute("SELECT status FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
         if current and current["status"] == "CANCELLED":
             if attempt_id:
+                progress.finish()
                 finish_attempt(attempt_id, "CANCELLED", response_snapshot=styling_plan)
             return {"item": get_generation_task_by_id(task_id)}
+    progress.begin("styling_store")
     with get_db() as db:
         timestamp = now_iso()
         cursor = db.execute(
@@ -2554,6 +2561,7 @@ async def run_select_generation_styling(
             """,
             (input_version_id, styling_id, timestamp, task_id),
         )
+    progress.finish()
     finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=styling_plan)
     return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
 
@@ -3116,24 +3124,36 @@ async def retry_new_result_image(image_id: int, request: Request, payload: Gener
         if row["status"] in {"QUEUED", "RUNNING"}:
             raise HTTPException(status_code=409, detail="当前结果图仍在生成中")
         effective_user_instruction = payload.userInstruction if payload and payload.userInstruction is not None else pending_generation_task_stage_instruction(row, "final_image")
+        previous_attempt_id = int(row["active_attempt_id"]) if row["active_attempt_id"] else None
     task_id = int(row["task_id"])
     result_set_id = int(row["result_set_id"])
     input_version_id = create_generation_input_version(task_id, build_hero_product_info_context(get_generation_task_row(task_id)))
     timestamp = now_iso()
     user_instruction_context = build_stage_user_instruction_context("final_image", effective_user_instruction)
+    attempt_id = create_attempt(
+        "generation_result_image",
+        image_id,
+        "image-2",
+        request_snapshot={"invocation": {"mode": "manual_retry", "target": "final_image"}},
+    )
     with get_db() as db:
+        if previous_attempt_id:
+            db.execute(
+                "UPDATE generation_attempts SET retry_of_attempt_id = ?, updated_at = ? WHERE id = ?",
+                (previous_attempt_id, timestamp, attempt_id),
+            )
         if payload and payload.userInstruction is not None:
             persist_generation_task_stage_instruction(db, task_id, "final_image", effective_user_instruction, timestamp)
         db.execute(
             """
             UPDATE generation_result_images_new
-            SET status = 'QUEUED', active_attempt_id = NULL,
+            SET status = 'QUEUED', active_attempt_id = ?,
                 locked_by = NULL, locked_until = NULL,
                 user_instruction_json = ?,
                 updated_at = ?
             WHERE id = ?
             """,
-            (dumps(user_instruction_context), timestamp, image_id),
+            (attempt_id, dumps(user_instruction_context), timestamp, image_id),
         )
         db.execute(
             "UPDATE generation_result_sets SET status = 'RUNNING', input_version_id = ?, user_instruction_json = ?, updated_at = ? WHERE id = ?",
@@ -3144,7 +3164,13 @@ async def retry_new_result_image(image_id: int, request: Request, payload: Gener
             (input_version_id, result_set_id, timestamp, task_id),
         )
     schedule_background_generation(
-        run_final_generation(task_id, result_set_id, [image_id], trigger="manual_step"),
+        run_final_generation(
+            task_id,
+            result_set_id,
+            [image_id],
+            resume_attempts_by_image_id={image_id: attempt_id},
+            trigger="manual_retry",
+        ),
         job_key=final_set_job_key(result_set_id),
     )
     return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
@@ -3210,6 +3236,9 @@ def queue_result_image_redelivery(image_id: int) -> tuple[int, int, int]:
     )
     timestamp = now_iso()
     with get_db() as db:
+        request_snapshot = loads(last_attempt["request_snapshot_json"], {})
+        if isinstance(request_snapshot, dict):
+            request_snapshot = {**request_snapshot, "invocation": {"mode": "manual_redeliver", "target": "final_image"}}
         db.execute(
             """
             UPDATE generation_attempts
@@ -3223,6 +3252,10 @@ def queue_result_image_redelivery(image_id: int) -> tuple[int, int, int]:
                 timestamp,
                 attempt_id,
             ),
+        )
+        db.execute(
+            "UPDATE generation_attempts SET request_snapshot_json = ? WHERE id = ?",
+            (dumps(request_snapshot), attempt_id),
         )
         db.execute(
             """
@@ -5547,7 +5580,13 @@ def build_ai_stylist_context(input_version_id: int) -> tuple[Any, dict[str, Any]
     return input_row, candidate_snapshot, request_snapshot
 
 
-async def select_styling_with_gemini(input_row: Any, candidate_snapshot: dict[str, Any], request_snapshot: dict[str, Any], attempt_id: int | None = None) -> dict[str, Any]:
+async def select_styling_with_gemini(
+    input_row: Any,
+    candidate_snapshot: dict[str, Any],
+    request_snapshot: dict[str, Any],
+    attempt_id: int | None = None,
+    progress: AttemptProgressRecorder | None = None,
+) -> dict[str, Any]:
     if not is_gemini_configured():
         raise RuntimeError(f"{gemini_not_configured_message()}AI Stylist 不能进入生产选搭。")
     if not request_snapshot.get("prompt"):
@@ -5562,6 +5601,8 @@ async def select_styling_with_gemini(input_row: Any, candidate_snapshot: dict[st
         if image_input:
             images.append(image_input)
     try:
+        if progress:
+            progress.begin("styling_gemini", imageCount=len(images), candidateCount=len(candidate_snapshot.get("candidate_material_ids") or []))
         raw = await generate_gemini_json_object_with_reask(
             prompt,
             images,
@@ -7419,7 +7460,7 @@ def refresh_pending_new_generation_jobs() -> None:
         with get_db() as db:
             image_rows = db.execute(
                 """
-                SELECT gri.id, gri.active_attempt_id FROM generation_result_images_new gri
+                SELECT gri.id, gri.status, gri.active_attempt_id FROM generation_result_images_new gri
                 LEFT JOIN generation_attempts ga ON ga.id = gri.active_attempt_id
                 WHERE gri.result_set_id = ?
                   AND gri.status IN ('QUEUED', 'RUNNING')
@@ -7437,6 +7478,9 @@ def refresh_pending_new_generation_jobs() -> None:
             for image in image_rows:
                 active_attempt_id = int(image["active_attempt_id"]) if "active_attempt_id" in image.keys() and image["active_attempt_id"] else None
                 if attempt_has_provider_request_id(active_attempt_id):
+                    resume_attempts_by_image_id[int(image["id"])] = int(active_attempt_id)
+                    image_ids.append(int(image["id"]))
+                elif active_attempt_id and image["status"] == "QUEUED":
                     resume_attempts_by_image_id[int(image["id"])] = int(active_attempt_id)
                     image_ids.append(int(image["id"]))
                 elif active_attempt_id:
@@ -7753,10 +7797,51 @@ async def poll_provider_until_terminal(
         persist_attempt_provider_progress(attempt_id, payload)
         provider_status = str(payload.get("providerStatus") or "").upper()
         if provider_status in {"IN_PROGRESS", "PROCESSING", "RUNNING"}:
-            progress.begin(PHASE_GENERATE)
+            provider_progress = provider_progress_percent(payload)
+            if provider_progress is None or provider_progress > 0:
+                progress.begin(PHASE_GENERATE, providerProgress=provider_progress)
+            else:
+                progress.update(PHASE_QUEUE, providerStatus=provider_status, providerProgress=provider_progress)
+        if payload.get("status") == "SUCCEEDED" and progress.snapshot.get("current") == PHASE_QUEUE:
+            duration_seconds = provider_completed_duration_seconds(payload)
+            detail = {"providerProgress": 100}
+            if duration_seconds is not None:
+                detail["durationSeconds"] = duration_seconds
+            progress.begin(PHASE_GENERATE, **detail)
         if payload.get("status") in {"SUCCEEDED", "FAILED", "CANCELLED"}:
             break
     return payload
+
+
+def provider_progress_percent(payload: dict[str, Any]) -> float | None:
+    """Return provider-reported progress when available.
+
+    ToAPIs can report ``status=in_progress`` while its dashboard still treats the
+    task as waiting/preparing. In that state ``progress`` is usually 0, so the UI
+    should keep charging that time to the queue phase rather than to AI
+    generation. Providers that do not expose progress keep the old behavior.
+    """
+    status_response = payload.get("providerStatusResponse")
+    raw = status_response.get("progress") if isinstance(status_response, dict) else payload.get("progress")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def provider_completed_duration_seconds(payload: dict[str, Any]) -> int | None:
+    status_response = payload.get("providerStatusResponse")
+    if not isinstance(status_response, dict):
+        return None
+    try:
+        created_at = int(status_response["created_at"])
+        completed_at = int(status_response["completed_at"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    duration = completed_at - created_at
+    return duration if duration >= 0 else None
 
 
 async def deliver_with_retries(
@@ -7882,6 +7967,7 @@ async def generate_single_final_image(
         )
     try:
         task_package = build_new_final_task_package(task_id, image_id)
+        trigger = preserved_attempt_invocation_mode(attempt_id) or trigger
         task_package["invocation"] = {"mode": trigger, "target": "final_image"}
         if not attempt_has_provider_request_id(attempt_id):
             update_attempt_request_snapshot(attempt_id, task_package)
@@ -7942,6 +8028,17 @@ async def generate_single_final_image(
             (asset_id, attempt_id, now_iso(), image_id),
         )
     return asset_id
+
+
+def preserved_attempt_invocation_mode(attempt_id: int | None) -> str | None:
+    if not attempt_id:
+        return None
+    with get_db() as db:
+        row = db.execute("SELECT request_snapshot_json FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
+    snapshot = loads(row["request_snapshot_json"], {}) if row else {}
+    invocation = snapshot.get("invocation") if isinstance(snapshot, dict) else None
+    mode = invocation.get("mode") if isinstance(invocation, dict) else None
+    return str(mode) if mode in {"manual_retry"} else None
 
 
 def final_image_generation_state_sql() -> str:
@@ -8248,6 +8345,9 @@ def serialize_attempt_detail(row: Any) -> dict[str, Any]:
         "responseFacts": response_snapshot,
         "modelInput": actual_model_input_from_snapshot(request_snapshot),
         "modelOutput": actual_model_output_from_snapshot(response_snapshot),
+        "retryOfAttemptId": row_value(row, "retry_of_attempt_id"),
+        "retryMode": attempt_retry_mode(row, request_snapshot),
+        "retryIndex": attempt_retry_index(row),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
@@ -8285,6 +8385,7 @@ def get_attempt_summary(attempt_id: int | None) -> dict[str, Any] | None:
 
 
 def serialize_attempt_summary(row: Any) -> dict[str, Any]:
+    request_snapshot = loads(row_value(row, "request_snapshot_json"), {})
     response_snapshot = loads(row_value(row, "response_snapshot_json"), {})
     provider_error = response_snapshot.get("providerError") if isinstance(response_snapshot, dict) else None
     if not isinstance(provider_error, dict) and isinstance(response_snapshot, dict):
@@ -8311,9 +8412,39 @@ def serialize_attempt_summary(row: Any) -> dict[str, Any]:
         "error": error,
         "progress": loads(row_value(row, "progress_json"), None),
         "outputAssetId": row["output_asset_id"],
+        "retryOfAttemptId": row_value(row, "retry_of_attempt_id"),
+        "retryMode": attempt_retry_mode(row, request_snapshot),
+        "retryIndex": attempt_retry_index(row),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
+
+
+def attempt_retry_mode(row: Any, request_snapshot: dict[str, Any]) -> str | None:
+    if not row_value(row, "retry_of_attempt_id"):
+        return None
+    invocation = request_snapshot.get("invocation") if isinstance(request_snapshot, dict) else None
+    mode = invocation.get("mode") if isinstance(invocation, dict) else None
+    if mode == "manual_redeliver":
+        return "redeliver"
+    if mode == "manual_retry":
+        return "regenerate"
+    return "retry"
+
+
+def attempt_retry_index(row: Any) -> int | None:
+    if not row_value(row, "retry_of_attempt_id"):
+        return None
+    with get_db() as db:
+        previous = db.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM generation_attempts
+            WHERE owner_type = ? AND owner_id = ? AND retry_of_attempt_id IS NOT NULL AND id <= ?
+            """,
+            (row["owner_type"], row["owner_id"], row["id"]),
+        ).fetchone()
+    return int(previous["count"] or 1)
 
 
 def task_attempt_scope(task: Any, owner_type: str) -> tuple[str, tuple[Any, ...]]:

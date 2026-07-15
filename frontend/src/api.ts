@@ -123,6 +123,9 @@ export type AIOperation = {
   error?: AttemptError | null
   progress?: AttemptProgress | null
   outputAssetId?: number | null
+  retryOfAttemptId?: number | null
+  retryMode?: string | null
+  retryIndex?: number | null
   shotSortOrder?: number | null
   createdAt?: string | null
   updatedAt?: string | null
