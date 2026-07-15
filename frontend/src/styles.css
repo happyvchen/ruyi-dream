@@ -1052,11 +1052,19 @@ label.management-action:focus-within {
 }
 .primary:disabled, .task-action:disabled { opacity: .45; cursor: not-allowed; }
 .secondary,
-.management-action { border: 1px solid #d8e0ea; background: #fff; color: #334155; }
+.management-action {
+  border: 1px solid #b7d7ff;
+  background: linear-gradient(180deg, #f5fbff, #eaf4ff);
+  color: #075985;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .06), 0 0 0 1px rgba(14, 165, 233, .04) inset;
+  font-weight: 700;
+}
 .secondary:not(:disabled):hover,
 .management-action:not(:disabled):hover {
-  border-color: #b8c7d9;
-  background: #f8fafc;
+  border-color: #7bbcff;
+  background: linear-gradient(180deg, #eef8ff, #dff0ff);
+  color: #0369a1;
+  box-shadow: 0 3px 10px rgba(3, 105, 161, .12), 0 0 0 1px rgba(14, 165, 233, .08) inset;
 }
 .secondary:disabled, .management-action:disabled { opacity: .45; cursor: not-allowed; }
 .danger,
