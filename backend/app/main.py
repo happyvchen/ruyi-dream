@@ -1081,48 +1081,7 @@ async def add_styling_garment_images(
     garment_id: int,
     files: list[UploadFile] = File(...),
 ) -> dict[str, Any]:
-    if not files:
-        raise HTTPException(status_code=400, detail="至少上传一张图片")
-    with get_db() as db:
-        row = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="搭配服装不存在")
-        ensure_styling_garment_not_tagging(row)
-        existing_count = db.execute(
-            "SELECT COUNT(*) AS count FROM styling_garment_images WHERE styling_garment_id = ? AND deleted_at IS NULL",
-            (garment_id,),
-        ).fetchone()["count"]
-        if int(existing_count) + len(files) > MAX_GARMENT_IMAGE_INPUTS:
-            raise HTTPException(status_code=400, detail=f"单套搭配服装最多保存 {MAX_GARMENT_IMAGE_INPUTS} 张图片")
-        max_sort = db.execute(
-            "SELECT COALESCE(MAX(sort_order), -1) AS max_sort FROM styling_garment_images WHERE styling_garment_id = ? AND deleted_at IS NULL",
-            (garment_id,),
-        ).fetchone()["max_sort"]
-    prefix = join_key("styling-garments", f"{sanitize_name(row['code'])}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}")
-    assets = await save_uploads_as_media_assets(files, prefix)
-    timestamp = now_iso()
-    with get_db() as db:
-        current = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
-        if not current:
-            cleanup_objects([key for asset in assets for key in image_object_keys(asset["objectKey"])])
-            raise HTTPException(status_code=404, detail="搭配服装不存在")
-        try:
-            ensure_styling_garment_not_tagging(current)
-        except HTTPException:
-            cleanup_objects([key for asset in assets for key in image_object_keys(asset["objectKey"])])
-            raise
-        for offset, asset in enumerate(assets, start=1):
-            db.execute(
-                """
-                INSERT INTO styling_garment_images
-                  (styling_garment_id, media_asset_id, sort_order, status, created_at, updated_at)
-                VALUES (?, ?, ?, 'READY', ?, ?)
-                """,
-                (garment_id, asset["id"], int(max_sort) + offset, timestamp, timestamp),
-            )
-        db.execute("UPDATE styling_garments SET updated_at = ? WHERE id = ?", (timestamp, garment_id))
-        log_event(db, "styling_garment", garment_id, "images_added", {"fileCount": len(assets)})
-    return {"item": get_styling_garment_by_id(garment_id)}
+    raise HTTPException(status_code=410, detail="创建后不支持继续添加图片，请重新导入一套素材")
 
 
 @app.post("/api/styling-garment-images/{image_id}/replace")
@@ -2272,71 +2231,12 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[di
 
 @app.post("/api/generation-tasks/{task_id}/images")
 async def add_generation_task_images(task_id: int, files: list[UploadFile] = File(...)) -> dict[str, Any]:
-    task = get_generation_task_row(task_id)
-    ensure_generation_task_editable(task)
-    with get_db() as db:
-        count = int(db.execute(
-            "SELECT COUNT(*) AS count FROM generation_task_images WHERE task_id = ? AND deleted_at IS NULL",
-            (task_id,),
-        ).fetchone()["count"])
-        max_sort = int(db.execute(
-            "SELECT COALESCE(MAX(sort_order), -1) AS max_sort FROM generation_task_images WHERE task_id = ? AND deleted_at IS NULL",
-            (task_id,),
-        ).fetchone()["max_sort"])
-    if not files or count + len(files) > MAX_HERO_IMAGE_INPUTS:
-        raise HTTPException(status_code=400, detail=f"主推款最多上传 {MAX_HERO_IMAGE_INPUTS} 张图片")
-    prefix = join_key("generation-tasks", f"{sanitize_name(task['name']) or 'task'}-{uuid4().hex[:8]}")
-    assets = await save_uploads_as_media_assets(files, prefix)
-    timestamp = now_iso()
-    with get_db() as db:
-        for offset, asset in enumerate(assets, start=1):
-            db.execute(
-                """
-                INSERT INTO generation_task_images (task_id, media_asset_id, sort_order, status, created_at, updated_at)
-                VALUES (?, ?, ?, 'READY', ?, ?)
-                """,
-                (task_id, asset["id"], max_sort + offset, timestamp, timestamp),
-            )
-        db.execute("UPDATE generation_tasks SET updated_at = ? WHERE id = ?", (timestamp, task_id))
-        if task["status"] != "DRAFT":
-            mark_generation_task_input_changed(db, task_id, timestamp, "hero_product_images_added")
-    return {"item": get_generation_task_by_id(task_id)}
+    raise HTTPException(status_code=410, detail="创建后不支持继续添加主推款图片，请重新创建拍摄任务")
 
 
 @app.post("/api/generation-tasks/{task_id}/images/from-uploads")
 async def add_generation_task_images_from_uploads(task_id: int, payload: GenerationTaskFromUploadsRequest) -> dict[str, Any]:
-    task = get_generation_task_row(task_id)
-    ensure_generation_task_editable(task)
-    with get_db() as db:
-        count = int(db.execute(
-            "SELECT COUNT(*) AS count FROM generation_task_images WHERE task_id = ? AND deleted_at IS NULL",
-            (task_id,),
-        ).fetchone()["count"])
-        max_sort = int(db.execute(
-            "SELECT COALESCE(MAX(sort_order), -1) AS max_sort FROM generation_task_images WHERE task_id = ? AND deleted_at IS NULL",
-            (task_id,),
-        ).fetchone()["max_sort"])
-    if not payload.uploads or count + len(payload.uploads) > MAX_HERO_IMAGE_INPUTS:
-        raise HTTPException(status_code=400, detail=f"主推款最多上传 {MAX_HERO_IMAGE_INPUTS} 张图片")
-    assets = await save_uploaded_objects_as_media_assets(payload.uploads)
-    timestamp = now_iso()
-    try:
-        with get_db() as db:
-            for offset, asset in enumerate(assets, start=1):
-                db.execute(
-                    """
-                    INSERT INTO generation_task_images (task_id, media_asset_id, sort_order, status, created_at, updated_at)
-                    VALUES (?, ?, ?, 'READY', ?, ?)
-                    """,
-                    (task_id, asset["id"], max_sort + offset, timestamp, timestamp),
-                )
-            db.execute("UPDATE generation_tasks SET updated_at = ? WHERE id = ?", (timestamp, task_id))
-            if task["status"] != "DRAFT":
-                mark_generation_task_input_changed(db, task_id, timestamp, "hero_product_images_added")
-    except Exception:
-        cleanup_created_media_assets(assets)
-        raise
-    return {"item": get_generation_task_by_id(task_id)}
+    raise HTTPException(status_code=410, detail="创建后不支持继续添加主推款图片，请重新创建拍摄任务")
 
 
 @app.post("/api/generation-task-images/{image_id}/replace")

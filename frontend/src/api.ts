@@ -453,11 +453,6 @@ export const api = {
     request<{ item: StylingGarment }>(`/api/styling-garments/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   getStylingGarment: (id: number) =>
     request<{ item: StylingGarment }>(`/api/styling-garments/${id}`),
-  addStylingGarmentImages: (id: number, files: File[]) => {
-    const form = new FormData()
-    files.forEach((file) => form.append('files', file))
-    return request<{ item: StylingGarment }>(`/api/styling-garments/${id}/images`, { method: 'POST', body: form })
-  },
   replaceStylingGarmentImage: (id: number, file: File) => {
     const form = new FormData()
     form.append('file', file)
@@ -530,13 +525,6 @@ export const api = {
     finalImageUserInstruction?: string
   }) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
-  addTaskImages: async (id: number, files: File[]) => {
-    const uploads = await uploadFilesDirect('generation_task', files)
-    return request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/images/from-uploads`, {
-      method: 'POST',
-      body: JSON.stringify({ uploads }),
-    })
-  },
   replaceTaskImage: (id: number, file: File) => {
     const form = new FormData()
     form.append('file', file)

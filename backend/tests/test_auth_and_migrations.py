@@ -517,6 +517,51 @@ class BackendCurrentFlowTests(unittest.TestCase):
             main.generate_image_derivatives = original_generate_image_derivatives
             client.close()
 
+    def test_created_generation_task_rejects_adding_images(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+
+        db_module.init_db()
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            response = client.post(
+                "/api/generation-tasks/1/images",
+                files={"files": ("look.jpg", b"not-used", "image/jpeg")},
+            )
+            self.assertEqual(response.status_code, 410)
+            self.assertIn("创建后不支持继续添加主推款图片", response.json()["detail"])
+
+            response = client.post(
+                "/api/generation-tasks/1/images/from-uploads",
+                json={"uploads": [{"objectKey": "direct-uploads/generation-task/a.jpg", "filename": "a.jpg"}]},
+            )
+            self.assertEqual(response.status_code, 410)
+            self.assertIn("创建后不支持继续添加主推款图片", response.json()["detail"])
+        finally:
+            client.close()
+
+    def test_created_styling_garment_rejects_adding_images(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+
+        db_module.init_db()
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            response = client.post(
+                "/api/styling-garments/1/images",
+                files={"files": ("look.jpg", b"not-used", "image/jpeg")},
+            )
+            self.assertEqual(response.status_code, 410)
+            self.assertIn("创建后不支持继续添加图片", response.json()["detail"])
+        finally:
+            client.close()
+
     def test_auto_run_final_sets_resume_marker_without_calling_provider(self) -> None:
         db_module = importlib.import_module("app.db")
         main = importlib.import_module("app.main")

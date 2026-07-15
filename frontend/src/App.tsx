@@ -3313,13 +3313,11 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
   onRestore: () => void
 }) {
   const [working, setWorking] = useState(item.images ?? [])
-  const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [replacementFiles, setReplacementFiles] = useState<Record<number, File>>({})
   const [removedIds, setRemovedIds] = useState<number[]>([])
   const [dirty, setDirty] = useState(false)
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
-  const [pendingDimensions, setPendingDimensions] = useState<Record<string, { width: number; height: number }>>({})
   const [replacementDimensions, setReplacementDimensions] = useState<Record<number, { width: number; height: number }>>({})
   const tagging = item.status === 'TAGGING_RUNNING'
   const runningTagAttempt = latestRunningTagAttempt(item)
@@ -3328,7 +3326,6 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
 
   useEffect(() => {
     setWorking(item.images ?? [])
-    setPendingFiles([])
     setReplacementFiles({})
     setReplacementDimensions({})
     setRemovedIds([])
@@ -3361,15 +3358,11 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
   }
 
   async function save(retag: boolean) {
-    const visibleCount = working.length + pendingFiles.length
-    if (visibleCount > STYLING_GARMENT_MAX_IMAGES) throw new Error(`单套搭配服装最多保存 ${STYLING_GARMENT_MAX_IMAGES} 张图片`)
+    if (!working.length) throw new Error('搭配服装至少需要保留一张图片')
     await run(retag ? '保存并重新识别标签中...' : '保存搭配服装中...', async () => {
       await Promise.all(Object.entries(replacementFiles).map(([id, file]) => api.replaceStylingGarmentImage(Number(id), file)))
-      const addBeforeDelete = working.length === 0 && pendingFiles.length > 0
-      if (addBeforeDelete) await api.addStylingGarmentImages(item.id, pendingFiles)
       await Promise.all(removedIds.map((id) => api.deleteStylingGarmentImage(id)))
       await Promise.all(working.map((image, index) => api.updateStylingGarmentImage(image.id, { sortOrder: index })))
-      if (pendingFiles.length && !addBeforeDelete) await api.addStylingGarmentImages(item.id, pendingFiles)
       return retag ? (await api.tagStylingGarment(item.id)).item : (await api.getStylingGarment(item.id)).item
     }, (latest: StylingGarment) => onChange(latest), { refresh: 'background' })
   }
@@ -3391,7 +3384,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
         </div>
         <div className="drawer-section">
           <Meta label="更新时间" value={dateText(item.updatedAt)} />
-          <Meta label="图片" value={`${working.length + pendingFiles.length}/${STYLING_GARMENT_MAX_IMAGES} 张`} />
+          <Meta label="图片" value={`${working.length}/${STYLING_GARMENT_MAX_IMAGES} 张`} />
           {hasTaggingFailure && (
             <TagObjectPanel
               title="识别错误"
@@ -3405,15 +3398,8 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
         <div className="drawer-section">
           <div className="section-head">
             <strong>图片</strong>
-            <label className={`secondary ${tagging ? 'is-disabled' : ''}`}>
-              <ImagePlus size={16} /> 追加
-              <input disabled={tagging} type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => {
-                setPendingFiles((current) => [...current, ...Array.from(event.target.files ?? [])])
-                setDirty(true)
-              }} />
-            </label>
           </div>
-          <p className="edit-hint">此次修改会影响标签识别。排序第一张会作为封面和主要参考图。</p>
+          <p className="edit-hint">此次修改会影响标签识别。排序第一张会作为封面和主要参考图；如需补充图片，请重新导入一套素材。</p>
           {tagging && <p className="edit-hint">正在识别标签，完成后可继续修改或删除。</p>}
           <div className="saved-image-grid">
             {working.map((image, index) => {
@@ -3462,22 +3448,8 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
                 </div>
               )
             })}
-            {pendingFiles.map((file, index) => (
-              <div className="saved-image-card is-pending" key={`${file.name}-${file.size}-${index}`}>
-                <FilePreviewButton
-                  file={file}
-                  dimensions={pendingDimensions[fileKey(file)]}
-                  onDimensions={(value) => setPendingDimensions((current) => ({ ...current, [fileKey(file)]: value }))}
-                  onOpen={(image) => setViewer(image)}
-                />
-                <span>{file.name}<small>{fileMeta(file, pendingDimensions[fileKey(file)])}</small></span>
-                <div className="thumb-actions">
-                  <button onClick={() => setPendingFiles((files) => files.filter((_, fileIndex) => fileIndex !== index))} title="删除图片"><Trash2 size={14} /></button>
-                </div>
-              </div>
-            ))}
           </div>
-          {working.length + pendingFiles.length > STYLING_GARMENT_MAX_IMAGES && <span className="inline-error">{`超过 ${STYLING_GARMENT_MAX_IMAGES} 张，需删除后才能保存`}</span>}
+          {!working.length && <span className="inline-error">搭配服装至少需要保留一张图片</span>}
         </div>
         <div className="drawer-section">
           <div className="section-head"><strong>标签</strong></div>
@@ -3489,8 +3461,8 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
         </div>
         <div className="drawer-actions">
           <button className="secondary" disabled={tagging} onClick={retag}>重新打标</button>
-          <button className="secondary" disabled={tagging || !dirty || working.length + pendingFiles.length > STYLING_GARMENT_MAX_IMAGES} onClick={() => void save(false)}>仅保存</button>
-          <button className="primary" disabled={tagging || !dirty || working.length + pendingFiles.length > STYLING_GARMENT_MAX_IMAGES} onClick={() => void save(true)}>保存并重新识别标签</button>
+          <button className="secondary" disabled={tagging || !dirty || !working.length} onClick={() => void save(false)}>仅保存</button>
+          <button className="primary" disabled={tagging || !dirty || !working.length} onClick={() => void save(true)}>保存并重新识别标签</button>
         </div>
         <div className="danger-zone">
           <strong>{item.archivedAt ? '恢复归档' : '归档'}</strong>
