@@ -71,7 +71,7 @@ type LightboxImage = {
 }
 
 type LightboxImageItem = Omit<LightboxImage, 'items' | 'initialIndex'>
-type DeleteDialogTarget = Pick<GenerationTask, 'id' | 'name'>
+type DeleteDialogTarget = Pick<GenerationTask, 'id' | 'name'> & { batchId?: string | null }
 type RunOptions = { refresh?: boolean | 'background' }
 type PageSizeOption = number | { value: number; label: string; key?: string }
 
@@ -3565,6 +3565,10 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   const [batchDetailTasks, setBatchDetailTasks] = useState<GenerationTask[]>([])
   const [batchDetailLoading, setBatchDetailLoading] = useState(false)
   const batchDetailRequestRef = useRef('')
+  const [expandedBatchIds, setExpandedBatchIds] = useState<Set<string>>(() => new Set())
+  const [expandedBatchTasks, setExpandedBatchTasks] = useState<Record<string, GenerationTask[]>>({})
+  const [expandedBatchLoading, setExpandedBatchLoading] = useState<Record<string, boolean>>({})
+  const expandedBatchRequestRef = useRef<Record<string, number>>({})
   const [items, setItems] = useState<GenerationTask[]>(records)
   const [query, setQuery] = useState('')
   const [offset, setOffset] = useState(0)
@@ -3719,6 +3723,81 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
       })
   }
 
+  function loadExpandedBatchTasks(batchId: string) {
+    const requestId = (expandedBatchRequestRef.current[batchId] ?? 0) + 1
+    expandedBatchRequestRef.current = { ...expandedBatchRequestRef.current, [batchId]: requestId }
+    setExpandedBatchLoading((current) => ({ ...current, [batchId]: true }))
+    void api.listBatchTasks(batchId)
+      .then((result) => {
+        if (expandedBatchRequestRef.current[batchId] === requestId) {
+          setExpandedBatchTasks((current) => ({ ...current, [batchId]: result.items }))
+        }
+      })
+      .catch(() => {
+        if (expandedBatchRequestRef.current[batchId] === requestId) {
+          setExpandedBatchTasks((current) => ({ ...current, [batchId]: [] }))
+        }
+      })
+      .finally(() => {
+        if (expandedBatchRequestRef.current[batchId] === requestId) {
+          setExpandedBatchLoading((current) => ({ ...current, [batchId]: false }))
+        }
+      })
+  }
+
+  function toggleBatchExpansion(item: GenerationRecordBatch) {
+    const willExpand = !expandedBatchIds.has(item.batchId)
+    setExpandedBatchIds((current) => {
+      const next = new Set(current)
+      if (next.has(item.batchId)) next.delete(item.batchId)
+      else next.add(item.batchId)
+      return next
+    })
+    if (willExpand && !expandedBatchTasks[item.batchId]) loadExpandedBatchTasks(item.batchId)
+  }
+
+  function expandBatchRecord(item: GenerationRecordBatch) {
+    setExpandedBatchIds((current) => {
+      if (current.has(item.batchId)) return current
+      const next = new Set(current)
+      next.add(item.batchId)
+      return next
+    })
+    if (!expandedBatchTasks[item.batchId]) loadExpandedBatchTasks(item.batchId)
+  }
+
+  function refreshExpandedBatchTaskLists(targets: Array<{ batchId?: string | null }>) {
+    const batchIds = Array.from(new Set(targets.map((item) => item.batchId).filter(Boolean) as string[]))
+    batchIds.forEach((batchId) => {
+      if (expandedBatchIds.has(batchId) || expandedBatchTasks[batchId]) loadExpandedBatchTasks(batchId)
+    })
+  }
+
+  function refreshActiveBatchDetail(targets: Array<{ batchId?: string | null }>) {
+    const activeBatchId = batchDetail?.batchId
+    if (!activeBatchId || !targets.some((item) => item.batchId === activeBatchId)) return
+    const requestId = activeBatchId
+    batchDetailRequestRef.current = requestId
+    setBatchDetailLoading(true)
+    void api.listBatchTasks(activeBatchId)
+      .then((result) => {
+        if (batchDetailRequestRef.current !== requestId) return
+        setBatchDetailTasks(result.items)
+        setBatchDetail((current) => current?.batchId === activeBatchId ? summarizeBatchRecordFromTasks(current, result.items) : current)
+      })
+      .catch(() => {
+        if (batchDetailRequestRef.current === requestId) setBatchDetailTasks([])
+      })
+      .finally(() => {
+        if (batchDetailRequestRef.current === requestId) setBatchDetailLoading(false)
+      })
+  }
+
+  function refreshAffectedBatchViews(targets: Array<{ batchId?: string | null }>) {
+    refreshExpandedBatchTaskLists(targets)
+    refreshActiveBatchDetail(targets)
+  }
+
   function toggleRecordSelection(id: number, checked: boolean) {
     setSelectedRecordIds((current) => {
       const next = new Set(current)
@@ -3777,6 +3856,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
     void run(purge ? '彻底删除记录中...' : '归档记录中...', action, () => {
       clearRecordDetailIfAffected(ids)
       setSelectedRecordIds(new Set())
+      refreshAffectedBatchViews(items)
       void refreshRecordPage().catch(() => undefined)
     }, { refresh: 'background' })
   }
@@ -3786,6 +3866,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
     void run(ids.length === 1 ? '恢复生成记录中...' : `恢复 ${ids.length} 条生成记录中...`, () => api.restoreTasks(ids), () => {
       setDetail((current) => current && ids.includes(current.id) ? { ...current, archivedAt: null, archiveReason: null } : current)
       setSelectedRecordIds(new Set())
+      refreshAffectedBatchViews(targets)
       void refreshRecordPage().catch(() => undefined)
     }, { refresh: 'background' })
   }
@@ -3817,11 +3898,26 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
       .finally(() => setDownloadChecking(false))
   }
 
+  function startSingleRecordDownload(item: GenerationTask) {
+    if (downloadChecking) return
+    setDownloadChecking(true)
+    void api.precheckFinalImageExport([item.id])
+      .then((result) => {
+        const allComplete = result.downloadableTaskIds.length > 0
+          && result.items.every((entry) => entry.downloadableCount > 0 && !entry.issues.length)
+        if (allComplete) triggerFinalImageDownload(result.downloadableTaskIds)
+        else setDownloadPrecheck(result)
+      })
+      .catch(() => setDownloadPrecheck(null))
+      .finally(() => setDownloadChecking(false))
+  }
+
   function cancelRecordTask(item: GenerationTask) {
     if (!window.confirm('确定取消本次生成吗？已提交给生成服务的图片可能仍会完成并产生费用；系统会停止后续生成，并保留已完成结果。')) return
     void run('取消生成中...', () => api.cancelTask(item.id), (r: { item: GenerationTask }) => {
       setItems((current) => current.map((entry) => entry.id === item.id ? r.item : entry))
       if (detail?.id === item.id) setDetail(r.item)
+      refreshAffectedBatchViews([r.item])
     }, { refresh: 'background' })
   }
 
@@ -3863,6 +3959,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
                   onClick={() => {
                     setViewMode(value as RecordViewMode)
                     batchDetailRequestRef.current = ''
+                    setExpandedBatchIds(new Set())
                     setBatchDetail(null)
                     setDetail(null)
                     setStatusFilter('')
@@ -3928,7 +4025,21 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
           </div>
           <div className="record-list-body" ref={recordListBodyRef}>
             {viewMode === 'all' && workspaceItems.map((entry) => entry.kind === 'batch' ? (
-              <BatchRecordRow key={entry.id} item={entry.batch} active={batchDetail?.batchId === entry.batch.batchId} onOpen={openBatchRecord} />
+              <BatchRecordRow
+                key={entry.id}
+                item={entry.batch}
+                active={batchDetail?.batchId === entry.batch.batchId}
+                expanded={expandedBatchIds.has(entry.batch.batchId)}
+                tasks={expandedBatchTasks[entry.batch.batchId] ?? []}
+                loading={!!expandedBatchLoading[entry.batch.batchId]}
+                onOpen={openBatchRecord}
+                onExpand={expandBatchRecord}
+                onToggle={toggleBatchExpansion}
+                onOpenTask={openRecord}
+                onOpenStudio={openTaskInStudio}
+                onManageTask={(item) => isTaskRunning(item) ? cancelRecordTask(item) : item.archivedAt ? restoreRecords([item]) : openRecordDeleteDialog(item)}
+                activeTaskId={detail?.id ?? null}
+              />
             ) : (
               <TaskRecordRow
                 key={entry.id}
@@ -3943,7 +4054,21 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
               />
             ))}
             {viewMode === 'batches' && batchRecords.map((item) => (
-              <BatchRecordRow key={item.batchId} item={item} active={batchDetail?.batchId === item.batchId} onOpen={openBatchRecord} />
+              <BatchRecordRow
+                key={item.batchId}
+                item={item}
+                active={batchDetail?.batchId === item.batchId}
+                expanded={expandedBatchIds.has(item.batchId)}
+                tasks={expandedBatchTasks[item.batchId] ?? []}
+                loading={!!expandedBatchLoading[item.batchId]}
+                onOpen={openBatchRecord}
+                onExpand={expandBatchRecord}
+                onToggle={toggleBatchExpansion}
+                onOpenTask={openRecord}
+                onOpenStudio={openTaskInStudio}
+                onManageTask={(item) => isTaskRunning(item) ? cancelRecordTask(item) : item.archivedAt ? restoreRecords([item]) : openRecordDeleteDialog(item)}
+                activeTaskId={detail?.id ?? null}
+              />
             ))}
             {viewMode === 'tasks' && items.map((item) => (
               <TaskRecordRow
@@ -3987,6 +4112,9 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
               <Meta label="状态" value={statusText(detail.status)} />
               <Meta label="选中搭配" value={`${detail.styling?.selectedMaterials?.length ?? 0} 件`} />
               <RecordImagePreview task={detail} />
+              <button className="management-action" type="button" disabled={downloadChecking} onClick={() => startSingleRecordDownload(detail)}>
+                <Download size={14} /> {downloadChecking ? '检查成片中...' : '下载成片'}
+              </button>
               {detail.archivedAt && <button className="management-action" onClick={() => restoreRecords([detail])}>恢复归档</button>}
             </>
           ) : <EmptyState title="选择一条记录" text="查看分镜预览、搭配服装和最终成片。" />}
@@ -4047,29 +4175,67 @@ function TaskRecordRow({ item, active, bulkMode, selected, onSelect, onOpen, onO
   )
 }
 
-function BatchRecordRow({ item, active, onOpen }: {
+function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, onOpen, onExpand, onToggle, onOpenTask, onOpenStudio, onManageTask }: {
   item: GenerationRecordBatch
   active: boolean
+  expanded: boolean
+  tasks: GenerationTask[]
+  loading: boolean
+  activeTaskId: number | null
   onOpen: (item: GenerationRecordBatch) => void
+  onExpand: (item: GenerationRecordBatch) => void
+  onToggle: (item: GenerationRecordBatch) => void
+  onOpenTask: (item: GenerationTask) => void
+  onOpenStudio: (task: GenerationTask) => void
+  onManageTask: (item: GenerationTask) => void
 }) {
+  const panelId = `batch-record-${item.batchId}-tasks`
   return (
-    <div className={`record-row batch-record-row ${active ? 'active' : ''} ${item.status === 'ARCHIVED' ? 'is-archived' : ''}`}>
-      <button className="record-open batch-record-open" aria-current={active ? 'true' : undefined} title="查看批次详情" onClick={() => onOpen(item)}>
-        <div className="batch-cover-stack">
-          {item.coverTasks.slice(0, 4).map((task) => <AssetThumb key={task.id} asset={taskCoverAsset(task)} interactive={false} />)}
+    <div className={`batch-record-shell ${expanded ? 'is-expanded' : ''}`}>
+      <div className={`record-row batch-record-row ${active ? 'active' : ''} ${item.status === 'ARCHIVED' ? 'is-archived' : ''}`}>
+        <button className="record-open batch-record-open" aria-current={active ? 'true' : undefined} aria-expanded={expanded} aria-controls={panelId} title="查看并展开批次" onClick={() => {
+          onOpen(item)
+          onExpand(item)
+        }}>
+          <div className="batch-cover-stack">
+            {item.coverTasks.slice(0, 4).map((task) => <AssetThumb key={task.id} asset={taskCoverAsset(task)} interactive={false} />)}
+          </div>
+          <div>
+            <strong>{item.name}</strong>
+            <span>{recordStatusText(item.status)} · {item.taskCount} 个任务 · {dateText(item.createdAt)}</span>
+          </div>
+          <div className="batch-progress-strip">
+            <span>{item.completedTaskCount} 完成</span>
+            {item.failedTaskCount > 0 && <span>{item.failedTaskCount} 失败</span>}
+            {(item.runningTaskCount + item.queuedTaskCount) > 0 && <span>{item.runningTaskCount + item.queuedTaskCount} 进行中</span>}
+            {item.downloadableTaskCount > 0 && <span>{item.downloadableTaskCount} 可下载</span>}
+          </div>
+        </button>
+        <button className="management-action record-action-button" aria-expanded={expanded} aria-controls={panelId} onClick={() => {
+          onOpen(item)
+          onToggle(item)
+        }}><ChevronDown size={14} className={expanded ? 'is-rotated' : ''} />{expanded ? '收起' : '展开'}</button>
+      </div>
+      {expanded && (
+        <div className="batch-expanded-list" id={panelId}>
+          {loading && <EmptyState title="正在读取批次" text="正在加载批次内任务。" />}
+          {!loading && tasks.map((task) => (
+            <div className="batch-child-record" key={task.id}>
+              <span className="batch-child-badge">批次内任务</span>
+              <TaskRecordRow
+                item={task}
+                active={activeTaskId === task.id}
+                bulkMode={false}
+                selected={false}
+                onSelect={() => undefined}
+                onOpen={onOpenTask}
+                onOpenStudio={onOpenStudio}
+                onManage={onManageTask}
+              />
+            </div>
+          ))}
         </div>
-        <div>
-          <strong>{item.name}</strong>
-          <span>{recordStatusText(item.status)} · {item.taskCount} 个任务 · {dateText(item.createdAt)}</span>
-        </div>
-        <div className="batch-progress-strip">
-          <span>{item.completedTaskCount} 完成</span>
-          {item.failedTaskCount > 0 && <span>{item.failedTaskCount} 失败</span>}
-          {(item.runningTaskCount + item.queuedTaskCount) > 0 && <span>{item.runningTaskCount + item.queuedTaskCount} 进行中</span>}
-          {item.downloadableTaskCount > 0 && <span>{item.downloadableTaskCount} 可下载</span>}
-        </div>
-      </button>
-      <button className="management-action record-action-button" onClick={() => onOpen(item)}>查看批次</button>
+      )}
     </div>
   )
 }
@@ -4113,6 +4279,55 @@ function BatchRecordDetail({ item, tasks, loading, onOpenTask, onOpenStudio }: {
       </div>
     </>
   )
+}
+
+function summarizeBatchRecordFromTasks(item: GenerationRecordBatch, tasks: GenerationTask[]): GenerationRecordBatch {
+  const statusCounts = tasks.reduce<Record<string, number>>((counts, task) => {
+    counts[task.status] = (counts[task.status] ?? 0) + 1
+    return counts
+  }, {})
+  const archivedTaskCount = tasks.filter((task) => task.archivedAt || task.status === 'ABANDONED').length
+  const runningTaskCount = tasks.filter((task) => isTaskRunning(task)).length
+  const queuedTaskCount = tasks.filter((task) => task.autoRunTarget).length
+  const completedTaskCount = tasks.filter((task) => task.status === 'COMPLETED').length
+  const failedTaskCount = tasks.filter((task) => task.status === 'FAILED').length
+  const cancelledTaskCount = tasks.filter((task) => task.status === 'CANCELLED').length
+  const downloadableTaskCount = tasks.filter((task) => ['COMPLETED', 'FINAL_PARTIAL'].includes(task.status)).length
+  const statuses = tasks.map((task) => task.status)
+  const status = tasks.some((task) => task.archivedAt || task.status === 'ABANDONED')
+    ? 'ARCHIVED'
+    : tasks.some((task) => isTaskRunning(task) || task.autoRunTarget)
+      ? 'RUNNING'
+      : statuses.includes('FAILED')
+        ? 'FAILED'
+        : statuses.includes('FINAL_PARTIAL') || (statuses.includes('COMPLETED') && statuses.some((value) => value !== 'COMPLETED'))
+          ? 'PARTIAL'
+          : statuses.includes('CANCELLED')
+            ? 'CANCELLED'
+            : statuses.length && statuses.every((value) => value === 'COMPLETED')
+              ? 'COMPLETED'
+              : 'PENDING'
+  const createdValues = tasks.map((task) => task.createdAt)
+  const updatedValues = tasks.map((task) => task.updatedAt)
+  return {
+    ...item,
+    status,
+    taskCount: tasks.length,
+    activeTaskCount: tasks.length - archivedTaskCount,
+    archivedTaskCount,
+    completedTaskCount,
+    failedTaskCount,
+    cancelledTaskCount,
+    runningTaskCount,
+    queuedTaskCount,
+    downloadableTaskCount,
+    statusCounts,
+    createdAt: createdValues.length ? createdValues.reduce((min, value) => value < min ? value : min) : item.createdAt,
+    updatedAt: updatedValues.length ? updatedValues.reduce((max, value) => value > max ? value : max) : item.updatedAt,
+    coverTasks: tasks.slice(0, 4),
+    sampleTaskNames: tasks.slice(0, 3).map((task) => task.name),
+    firstTaskId: tasks[0]?.id ?? item.firstTaskId,
+  }
 }
 
 const finalImageIssueStatusText: Record<string, string> = {

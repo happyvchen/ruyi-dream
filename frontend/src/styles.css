@@ -2950,6 +2950,14 @@ a.button-link { text-decoration: none; cursor: pointer; }
   text-align: left;
   transition: border-color .18s ease, box-shadow .18s ease, background .18s ease;
 }
+.batch-record-shell {
+  display: grid;
+  gap: 0;
+}
+.batch-record-shell.is-expanded .batch-record-row {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
 .records-page:has(.record-row > input) .record-row { grid-template-columns: 18px minmax(0, 1fr) auto auto; }
 .record-open {
   display: grid;
@@ -2998,6 +3006,59 @@ a.button-link { text-decoration: none; cursor: pointer; }
   color: #475569;
   font-size: 12px;
   font-weight: 700;
+}
+.batch-expanded-list {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px 12px 24px;
+  border: 1px solid #d8e0ea;
+  border-top: 0;
+  border-bottom-left-radius: 10px;
+  border-bottom-right-radius: 10px;
+  background: #fbfdff;
+}
+.batch-child-record {
+  position: relative;
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+.batch-child-record::before {
+  content: "";
+  position: absolute;
+  left: 42px;
+  top: -8px;
+  bottom: -8px;
+  width: 1px;
+  background: #d8e0ea;
+}
+.batch-child-record:first-of-type::before { top: 50%; }
+.batch-child-record:last-of-type::before { bottom: 50%; }
+.batch-child-badge {
+  position: relative;
+  z-index: 1;
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 78px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid #d8e0ea;
+  border-radius: 999px;
+  background: #fff;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.batch-child-record .record-row {
+  position: relative;
+  z-index: 1;
+}
+.record-action-button .is-rotated {
+  transform: rotate(180deg);
 }
 .record-row:hover,
 .record-row:has(.record-open:focus-visible) {
@@ -3546,6 +3607,19 @@ a.button-link { text-decoration: none; cursor: pointer; }
   .batch-progress-strip {
     grid-column: 1 / -1;
     justify-content: flex-start;
+  }
+  .batch-expanded-list {
+    padding-left: 12px;
+  }
+  .batch-child-record {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+  .batch-child-record::before {
+    display: none;
+  }
+  .batch-child-badge {
+    margin-left: 2px;
   }
   .record-row { grid-template-columns: minmax(0, 1fr); }
   .records-page:has(.record-row > input) .record-row { grid-template-columns: 18px minmax(0, 1fr); }
