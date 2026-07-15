@@ -292,10 +292,6 @@ class StylingGarmentUpdateRequest(BaseModel):
     manualTags: dict[str, Any] | None = None
 
 
-class StylingGarmentBatchTagRequest(BaseModel):
-    ids: list[int]
-
-
 class StylingGarmentBatchManualTagsRequest(BaseModel):
     ids: list[int]
     manualTags: dict[str, Any]
@@ -1240,33 +1236,6 @@ async def save_and_tag_styling_garment(garment_id: int, background_tasks: Backgr
         db.execute("UPDATE styling_garments SET status = 'TAGGING_RUNNING', tag_error = NULL, updated_at = ? WHERE id = ?", (timestamp, garment_id))
     background_tasks.add_task(run_styling_garment_tagging, garment_id)
     return {"item": get_styling_garment_by_id(garment_id)}
-
-
-@app.post("/api/styling-garments/batch-save-and-tag")
-async def batch_save_and_tag_styling_garments(payload: StylingGarmentBatchTagRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
-    garment_ids = list(dict.fromkeys(payload.ids))
-    if not garment_ids:
-        raise HTTPException(status_code=400, detail="至少选择一套搭配服装")
-    timestamp = now_iso()
-    with get_db() as db:
-        placeholders = ",".join("?" for _ in garment_ids)
-        rows = db.execute(
-            f"SELECT * FROM styling_garments WHERE id IN ({placeholders}) AND deleted_at IS NULL",
-            tuple(garment_ids),
-        ).fetchall()
-        rows_by_id = {int(row["id"]): row for row in rows}
-        missing = [garment_id for garment_id in garment_ids if garment_id not in rows_by_id]
-        if missing:
-            raise HTTPException(status_code=404, detail="搭配服装不存在")
-        for garment_id in garment_ids:
-            ensure_styling_garment_not_tagging(rows_by_id[garment_id])
-        db.execute(
-            f"UPDATE styling_garments SET status = 'TAGGING_RUNNING', tag_error = NULL, updated_at = ? WHERE id IN ({placeholders})",
-            (timestamp, *garment_ids),
-        )
-    for garment_id in garment_ids:
-        background_tasks.add_task(run_styling_garment_tagging, garment_id)
-    return {"items": [get_styling_garment_by_id(garment_id) for garment_id in garment_ids]}
 
 
 _tagging_semaphore: asyncio.Semaphore | None = None
