@@ -3613,7 +3613,11 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   const [pageSizeMode, setPageSizeMode] = useState<'auto' | 'fixed'>('auto')
   const [pageSize, setPageSize] = useState(() => estimateAutoRecordPageSize())
   const [bulkMode, setBulkMode] = useState(false)
-  const taskListItems = viewMode === 'tasks' ? items : []
+  const taskListItems = viewMode === 'tasks'
+    ? items
+    : viewMode === 'all'
+      ? workspaceItems.filter((entry) => entry.kind === 'task').map((entry) => entry.task)
+      : []
   const selectableRecordIds = taskListItems.filter((item) => !isTaskRunning(item)).map((item) => item.id)
   const selectedVisibleRecords = taskListItems.filter((item) => selectedRecordIds.has(item.id) && selectableRecordIds.includes(item.id))
   const selectedArchivedRecords = selectedVisibleRecords.filter((item) => item.archivedAt)
@@ -3712,7 +3716,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   useEffect(() => setSelectedRecordIds(new Set()), [viewMode, offset, includeArchived, query, statusFilter, createdFrom, createdTo, sortBy, sortDir, pageSize])
 
   useEffect(() => {
-    if (viewMode !== 'tasks') setBulkMode(false)
+    if (viewMode === 'batches') setBulkMode(false)
   }, [viewMode])
 
   function openRecord(item: GenerationTask) {
@@ -3990,7 +3994,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
       ? generationBatchStatusOptions(facets.status, stableFacets.status, statusFilter)
       : generationWorkspaceStatusOptions(facets.status, stableFacets.status, statusFilter)
   const formatRecordStatus = (value: string) => viewMode === 'tasks' ? statusText(value) : recordStatusText(value)
-  const showTaskBulkControls = viewMode === 'tasks'
+  const showTaskBulkControls = viewMode !== 'batches'
 
   return (
     <section className="page workbench-page records-page">
@@ -4099,8 +4103,8 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
                 key={entry.id}
                 item={entry.task}
                 active={detail?.id === entry.task.id}
-                bulkMode={false}
-                selected={false}
+                bulkMode={bulkMode}
+                selected={selectedRecordIds.has(entry.task.id)}
                 onSelect={toggleRecordSelection}
                 onOpen={openRecord}
                 onOpenStudio={openTaskInStudio}
