@@ -3603,6 +3603,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   const [expandedBatchTasks, setExpandedBatchTasks] = useState<Record<string, GenerationTask[]>>({})
   const [expandedBatchLoading, setExpandedBatchLoading] = useState<Record<string, boolean>>({})
   const expandedBatchRequestRef = useRef<Record<string, number>>({})
+  const batchBulkRequestRef = useRef(0)
   const [items, setItems] = useState<GenerationTask[]>(records)
   const [query, setQuery] = useState('')
   const [offset, setOffset] = useState(0)
@@ -3627,16 +3628,24 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   const [pageSizeMode, setPageSizeMode] = useState<'auto' | 'fixed'>('auto')
   const [pageSize, setPageSize] = useState(() => estimateAutoRecordPageSize())
   const [bulkMode, setBulkMode] = useState(false)
+  const [selectedBatchIds, setSelectedBatchIds] = useState<Set<string>>(() => new Set())
+  const [batchBulkLoading, setBatchBulkLoading] = useState(false)
   const taskListItems = viewMode === 'tasks'
     ? items
     : viewMode === 'all'
       ? workspaceItems.filter((entry) => entry.kind === 'task').map((entry) => entry.task)
       : []
+  const batchListItems = viewMode === 'batches' ? batchRecords : []
   const selectableRecordIds = taskListItems.filter((item) => !isTaskRunning(item)).map((item) => item.id)
   const selectedVisibleRecords = taskListItems.filter((item) => selectedRecordIds.has(item.id) && selectableRecordIds.includes(item.id))
   const selectedArchivedRecords = selectedVisibleRecords.filter((item) => item.archivedAt)
   const selectedActiveRecords = selectedVisibleRecords.filter((item) => !item.archivedAt)
   const allVisibleRecordsSelected = selectableRecordIds.length > 0 && selectableRecordIds.every((id) => selectedRecordIds.has(id))
+  const selectableBatchIds = batchListItems.filter((item) => item.status !== 'RUNNING').map((item) => item.batchId)
+  const selectedVisibleBatches = batchListItems.filter((item) => selectedBatchIds.has(item.batchId) && selectableBatchIds.includes(item.batchId))
+  const selectedArchivedBatches = selectedVisibleBatches.filter((item) => item.status === 'ARCHIVED')
+  const selectedActiveBatches = selectedVisibleBatches.filter((item) => item.status !== 'ARCHIVED')
+  const allVisibleBatchesSelected = selectableBatchIds.length > 0 && selectableBatchIds.every((id) => selectedBatchIds.has(id))
 
   function recordQueryOptions(targetOffset = offset) {
     const keyword = query.trim()
@@ -3727,10 +3736,15 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
     setOffset(0)
   }, [autoPageSize, pageSize, pageSizeMode])
 
-  useEffect(() => setSelectedRecordIds(new Set()), [viewMode, offset, includeArchived, query, statusFilter, createdFrom, createdTo, sortBy, sortDir, pageSize])
+  useEffect(() => {
+    batchBulkRequestRef.current += 1
+    setSelectedRecordIds(new Set())
+    setSelectedBatchIds(new Set())
+    setBatchBulkLoading(false)
+  }, [viewMode, offset, includeArchived, query, statusFilter, createdFrom, createdTo, sortBy, sortDir, pageSize])
 
   useEffect(() => {
-    if (viewMode === 'batches') setBulkMode(false)
+    setBulkMode(false)
   }, [viewMode])
 
   function openRecord(item: GenerationTask) {
@@ -3874,6 +3888,31 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
     })
   }
 
+  function toggleBatchSelection(batchId: string, checked: boolean) {
+    setSelectedBatchIds((current) => {
+      const next = new Set(current)
+      if (checked) next.add(batchId)
+      else next.delete(batchId)
+      return next
+    })
+  }
+
+  function toggleVisibleBatchSelection(checked: boolean) {
+    setSelectedBatchIds((current) => {
+      const next = new Set(current)
+      selectableBatchIds.forEach((id) => {
+        if (checked) next.add(id)
+        else next.delete(id)
+      })
+      return next
+    })
+  }
+
+  async function resolveBatchTasks(targets: GenerationRecordBatch[]) {
+    const groups = await Promise.all(targets.map((item) => api.listBatchTasks(item.batchId).then((result) => result.items).catch(() => [])))
+    return groups.flat()
+  }
+
   function clearRecordDetailIfAffected(ids: number[]) {
     if (detail && ids.includes(detail.id)) {
       setDetail(null)
@@ -3888,6 +3927,38 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   function runRecordBatchAction() {
     if (!selectedVisibleRecords.length) return
     openRecordDeleteDialogForItems(selectedVisibleRecords)
+  }
+
+  function runBatchRecordBulkArchive() {
+    if (!selectedActiveBatches.length || batchBulkLoading) return
+    const requestId = batchBulkRequestRef.current + 1
+    batchBulkRequestRef.current = requestId
+    setBatchBulkLoading(true)
+    void resolveBatchTasks(selectedActiveBatches)
+      .then((tasks) => {
+        if (batchBulkRequestRef.current !== requestId) return
+        const targets = tasks.filter((item) => !item.archivedAt && !isTaskRunning(item))
+        if (targets.length) openRecordDeleteDialogForItems(targets)
+      })
+      .finally(() => {
+        if (batchBulkRequestRef.current === requestId) setBatchBulkLoading(false)
+      })
+  }
+
+  function restoreSelectedBatches() {
+    if (!selectedArchivedBatches.length || batchBulkLoading) return
+    const requestId = batchBulkRequestRef.current + 1
+    batchBulkRequestRef.current = requestId
+    setBatchBulkLoading(true)
+    void resolveBatchTasks(selectedArchivedBatches)
+      .then((tasks) => {
+        if (batchBulkRequestRef.current !== requestId) return
+        const targets = tasks.filter((item) => item.archivedAt)
+        if (targets.length) restoreRecords(targets)
+      })
+      .finally(() => {
+        if (batchBulkRequestRef.current === requestId) setBatchBulkLoading(false)
+      })
   }
 
   function openRecordDeleteDialogForItems(targets: GenerationTask[]) {
@@ -3912,6 +3983,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
     void run(purge ? '彻底删除记录中...' : '归档记录中...', action, () => {
       clearRecordDetailIfAffected(ids)
       setSelectedRecordIds(new Set())
+      setSelectedBatchIds(new Set())
       refreshAffectedBatchViews(items)
       void refreshRecordPage().catch(() => undefined)
     }, { refresh: 'background' })
@@ -3922,6 +3994,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
     void run(ids.length === 1 ? '恢复生成记录中...' : `恢复 ${ids.length} 条生成记录中...`, () => api.restoreTasks(ids), () => {
       setDetail((current) => current && ids.includes(current.id) ? { ...current, archivedAt: null, archiveReason: null } : current)
       setSelectedRecordIds(new Set())
+      setSelectedBatchIds(new Set())
       refreshAffectedBatchViews(targets)
       void refreshRecordPage().catch(() => undefined)
     }, { refresh: 'background' })
@@ -4009,6 +4082,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
       : generationWorkspaceStatusOptions(facets.status, stableFacets.status, statusFilter)
   const formatRecordStatus = (value: string) => viewMode === 'tasks' ? statusText(value) : recordStatusText(value)
   const showTaskBulkControls = viewMode !== 'batches'
+  const showBatchBulkControls = viewMode === 'batches'
 
   return (
     <section className="page workbench-page records-page">
@@ -4094,6 +4168,13 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
               )}
               {showTaskBulkControls && bulkMode && <button className={`management-action management-check-action ${allVisibleRecordsSelected ? 'is-active' : ''}`} disabled={!selectableRecordIds.length} onClick={() => toggleVisibleRecordSelection(!allVisibleRecordsSelected)}><Check size={15} /> 全选本页</button>}
               {showTaskBulkControls && <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedRecordIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>}
+              {showBatchBulkControls && selectedVisibleBatches.length > 0 && (
+                selectedArchivedBatches.length === selectedVisibleBatches.length
+                  ? <button className="management-action" disabled={batchBulkLoading} onClick={restoreSelectedBatches}>恢复 {selectedArchivedBatches.length} 个批次</button>
+                  : <button className="management-action" disabled={batchBulkLoading || selectedArchivedBatches.length > 0} title={selectedArchivedBatches.length ? '请分别选择已归档和未归档批次' : undefined} onClick={runBatchRecordBulkArchive}>归档 {selectedActiveBatches.length} 个批次</button>
+              )}
+              {showBatchBulkControls && bulkMode && <button className={`management-action management-check-action ${allVisibleBatchesSelected ? 'is-active' : ''}`} disabled={!selectableBatchIds.length || batchBulkLoading} onClick={() => toggleVisibleBatchSelection(!allVisibleBatchesSelected)}><Check size={15} /> 全选本页</button>}
+              {showBatchBulkControls && <button className="management-action compact-control" disabled={batchBulkLoading} onClick={() => { setBulkMode((value) => !value); setSelectedBatchIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>}
             </div>
           </div>
           <div className="record-list-body" ref={recordListBodyRef}>
@@ -4133,6 +4214,10 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
                 expanded={expandedBatchIds.has(item.batchId)}
                 tasks={expandedBatchTasks[item.batchId] ?? []}
                 loading={!!expandedBatchLoading[item.batchId]}
+                bulkMode={bulkMode}
+                selected={selectedBatchIds.has(item.batchId)}
+                selectable={selectableBatchIds.includes(item.batchId)}
+                onSelect={toggleBatchSelection}
                 onOpen={openBatchRecord}
                 onToggle={toggleBatchExpansion}
                 onOpenTask={openRecord}
@@ -4246,13 +4331,17 @@ function TaskRecordRow({ item, active, bulkMode, selected, onSelect, onOpen, onO
   )
 }
 
-function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, onOpen, onToggle, onOpenTask, onOpenStudio, onManageTask }: {
+function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, bulkMode = false, selected = false, selectable = true, onSelect, onOpen, onToggle, onOpenTask, onOpenStudio, onManageTask }: {
   item: GenerationRecordBatch
   active: boolean
   expanded: boolean
   tasks: GenerationTask[]
   loading: boolean
   activeTaskId: number | null
+  bulkMode?: boolean
+  selected?: boolean
+  selectable?: boolean
+  onSelect?: (batchId: string, checked: boolean) => void
   onOpen: (item: GenerationRecordBatch) => void
   onToggle: (item: GenerationRecordBatch) => void
   onOpenTask: (item: GenerationTask) => void
@@ -4262,7 +4351,14 @@ function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, 
   const panelId = `batch-record-${item.batchId}-tasks`
   return (
     <div className={`batch-record-shell ${expanded ? 'is-expanded' : ''}`}>
-      <div className={`record-row batch-record-row ${active ? 'active' : ''} ${item.status === 'ARCHIVED' ? 'is-archived' : ''}`}>
+      <div className={`record-row batch-record-row ${bulkMode ? 'has-selection' : ''} ${active ? 'active' : ''} ${item.status === 'ARCHIVED' ? 'is-archived' : ''}`}>
+        {bulkMode && <input
+          type="checkbox"
+          checked={selected}
+          disabled={!selectable}
+          onChange={(event) => onSelect?.(item.batchId, event.target.checked)}
+          aria-label={`选择 ${item.name}`}
+        />}
         <button className="record-open batch-record-open" aria-current={active ? 'true' : undefined} aria-expanded={expanded} aria-controls={panelId} title={expanded ? '查看并收起批次' : '查看并展开批次'} onClick={() => {
           onOpen(item)
           onToggle(item)

@@ -3050,6 +3050,9 @@ a.button-link { text-decoration: none; cursor: pointer; }
 .batch-record-row {
   grid-template-columns: minmax(0, 1fr) auto;
 }
+.records-page:has(.record-row > input) .batch-record-row.has-selection {
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+}
 .batch-record-open {
   grid-template-columns: 58px minmax(180px, 1fr) 286px;
 }
@@ -3694,6 +3697,7 @@ a.button-link { text-decoration: none; cursor: pointer; }
   }
   .record-row { grid-template-columns: minmax(0, 1fr); }
   .records-page:has(.record-row > input) .record-row { grid-template-columns: 18px minmax(0, 1fr); }
+  .records-page:has(.record-row > input) .batch-record-row.has-selection { grid-template-columns: 18px minmax(0, 1fr); }
   .record-action-button {
     grid-column: 1;
     justify-self: start;
