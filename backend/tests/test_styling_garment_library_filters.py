@@ -146,12 +146,15 @@ class StylingGarmentLibraryFilterTests(unittest.TestCase):
         self.assertIn({"value": "needs_review", "label": "needs_review", "count": 1}, body["facets"]["reviewStatus"])
         self.assertNotIn("outerwear", {item["value"] for item in body["facets"]["category"]})
         top_node = next(item for item in body["facets"]["categoryTree"] if item["value"] == "top")
+        self.assertEqual(top_node["count"], 2)
         self.assertEqual(top_node["children"], [
             {"value": "shirt", "label": "shirt", "count": 1},
+            {"value": "skirt", "label": "skirt", "count": 1},
             {"value": "vest", "label": "vest", "count": 1},
         ])
         bottom_node = next(item for item in body["facets"]["categoryTree"] if item["value"] == "bottom")
-        self.assertNotIn("vest", {item["value"] for item in bottom_node["children"]})
+        self.assertEqual(bottom_node["count"], 2)
+        self.assertIn({"value": "vest", "label": "vest", "count": 1}, bottom_node["children"])
 
     def test_filters_by_status_multi_tag_values_and_uploaded_range(self) -> None:
         response = self.client.get(

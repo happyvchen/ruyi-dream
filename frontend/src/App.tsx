@@ -2271,68 +2271,150 @@ function CategoryTreeFilter({ open, onOpen, options, selectedPrimary, selectedSe
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const [activePrimary, setActivePrimary] = useState('')
-  const primary = options.find((item) => item.value === activePrimary) ?? options[0]
-  const selectedCount = selectedPrimary.length + selectedSecondary.length
+  const [categoryQuery, setCategoryQuery] = useState('')
+  const normalizedCategoryQuery = categoryQuery.trim().toLocaleLowerCase()
+  const visibleOptions = useMemo(() => {
+    if (!normalizedCategoryQuery) return options
+    return options.reduce<CategoryTreeOption[]>((result, option) => {
+      const parentMatches = option.label.toLocaleLowerCase().includes(normalizedCategoryQuery)
+      const children = option.children ?? []
+      const visibleChildren = parentMatches
+        ? children
+        : children.filter((child) => child.label.toLocaleLowerCase().includes(normalizedCategoryQuery))
+      if (parentMatches || visibleChildren.length) result.push({ ...option, children: visibleChildren })
+      return result
+    }, [])
+  }, [normalizedCategoryQuery, options])
+  const primary = visibleOptions.find((item) => item.value === activePrimary) ?? visibleOptions[0]
+  const selectedLabels = categorySelectionLabels(options, selectedPrimary, selectedSecondary)
+  const selectedCount = selectedLabels.length
+  const selectedLabel = selectedCount
+    ? selectedCount === 1 ? selectedLabels[0] : `${selectedLabels[0]} 等 ${selectedCount} 项`
+    : '品类'
   useOutsideClose(open, wrapRef, () => onOpen(false))
 
   useEffect(() => {
-    if (!open || activePrimary || !options.length) return
-    setActivePrimary(options[0].value)
-  }, [activePrimary, open, options])
+    if (!open) {
+      setCategoryQuery('')
+      return
+    }
+    if (!visibleOptions.length) return
+    if (!activePrimary || !visibleOptions.some((item) => item.value === activePrimary)) setActivePrimary(visibleOptions[0].value)
+  }, [activePrimary, open, visibleOptions])
 
-  function togglePrimary(value: string, checked: boolean) {
-    onPrimary(checked ? Array.from(new Set([...selectedPrimary, value])) : selectedPrimary.filter((item) => item !== value))
+  function childValues(option?: CategoryTreeOption) {
+    return (option?.children ?? []).map((item) => item.value)
+  }
+
+  function clearSecondaryValues(values: string[]) {
+    return selectedSecondary.filter((item) => !values.includes(item))
+  }
+
+  function optionState(option: CategoryTreeOption) {
+    const children = childValues(option)
+    const parentSelected = selectedPrimary.includes(option.value)
+    const selectedChildren = children.filter((value) => selectedSecondary.includes(value))
+    const checked = parentSelected || (children.length > 0 && selectedChildren.length === children.length)
+    const indeterminate = !checked && selectedChildren.length > 0
+    return { checked, indeterminate, children, selectedChildren }
+  }
+
+  function togglePrimary(option: CategoryTreeOption, checked: boolean) {
+    const children = childValues(option)
+    if (checked) {
+      onPrimary(Array.from(new Set([...selectedPrimary, option.value])))
+      onSecondary(clearSecondaryValues(children))
+      return
+    }
+    onPrimary(selectedPrimary.filter((item) => item !== option.value))
+    onSecondary(clearSecondaryValues(children))
   }
 
   function toggleSecondary(value: string, checked: boolean) {
-    onSecondary(checked ? Array.from(new Set([...selectedSecondary, value])) : selectedSecondary.filter((item) => item !== value))
+    if (!primary) return
+    const children = childValues(primary)
+    const siblingValues = children.filter((item) => item !== value)
+    const nextPrimary = selectedPrimary.filter((item) => item !== primary.value)
+    let nextSecondary = selectedPrimary.includes(primary.value)
+      ? Array.from(new Set([...selectedSecondary, ...siblingValues]))
+      : selectedSecondary
+    nextSecondary = checked
+      ? Array.from(new Set([...nextSecondary, value]))
+      : nextSecondary.filter((item) => item !== value)
+    const allChildrenSelected = children.length > 0 && children.every((item) => nextSecondary.includes(item))
+    onPrimary(allChildrenSelected ? Array.from(new Set([...nextPrimary, primary.value])) : nextPrimary)
+    onSecondary(allChildrenSelected ? nextSecondary.filter((item) => !children.includes(item)) : nextSecondary)
   }
 
-  const allPrimarySelected = options.length > 0 && options.every((item) => selectedPrimary.includes(item.value))
-  const allSecondarySelected = !!primary?.children?.length && primary.children.every((item) => selectedSecondary.includes(item.value))
+  function toggleAllPrimary(checked: boolean) {
+    if (checked) {
+      const allPrimary = visibleOptions.map((item) => item.value)
+      const allChildValues = visibleOptions.flatMap((item) => childValues(item))
+      onPrimary(allPrimary)
+      onSecondary(selectedSecondary.filter((item) => !allChildValues.includes(item)))
+      return
+    }
+    onPrimary([])
+    onSecondary([])
+  }
+
+  function toggleActiveChildren(checked: boolean) {
+    if (!primary) return
+    togglePrimary(primary, checked)
+  }
+
+  const primaryStates = visibleOptions.map((option) => optionState(option))
+  const allPrimarySelected = visibleOptions.length > 0 && primaryStates.every((state) => state.checked)
+  const anyPrimarySelected = primaryStates.some((state) => state.checked || state.indeterminate)
+  const activeState = primary ? optionState(primary) : { checked: false, indeterminate: false, children: [], selectedChildren: [] }
 
   return (
     <div className="filter-popover-wrap" ref={wrapRef}>
       <button className={`filter-pill ${selectedCount ? 'is-active' : ''}`} type="button" onClick={() => onOpen(!open)}>
-        <span>{selectedCount ? `品类 ${selectedCount}` : '品类'}</span>
+        <span>{selectedLabel}</span>
         <ChevronDown size={15} />
       </button>
       {open && (
         <div className="filter-popover category-popover">
-          <div className="popover-search"><Search size={15} /><span>按一级 / 二级品类筛选</span></div>
+          <label className="popover-search">
+            <Search size={15} />
+            <input value={categoryQuery} onChange={(event) => setCategoryQuery(event.target.value)} placeholder="搜索品类" autoFocus />
+          </label>
           <div className="category-tree">
             <div className="category-column">
-              <label className="tree-option">
-                <input type="checkbox" checked={allPrimarySelected} disabled={!options.length} onChange={(event) => onPrimary(event.target.checked ? options.map((item) => item.value) : [])} />
-                <span>选择全部一级品类</span>
-              </label>
-              {options.map((option) => (
+              <button className="tree-option" type="button" disabled={!visibleOptions.length} onClick={() => toggleAllPrimary(!allPrimarySelected)}>
+                <CascadeCheckbox checked={allPrimarySelected} indeterminate={!allPrimarySelected && anyPrimarySelected} />
+                <span>选择全部</span>
+              </button>
+              {visibleOptions.length ? visibleOptions.map((option) => (
                 <div className={`tree-row ${primary?.value === option.value ? 'is-current' : ''}`} role="button" tabIndex={0} key={option.value} onClick={() => setActivePrimary(option.value)} onKeyDown={(event) => {
                   if (event.key === 'Enter' || event.key === ' ') {
                     event.preventDefault()
                     setActivePrimary(option.value)
                   }
                 }}>
-                  <label onClick={(event) => event.stopPropagation()}>
-                    <input type="checkbox" checked={selectedPrimary.includes(option.value)} onChange={(event) => togglePrimary(option.value, event.target.checked)} />
-                    <span>{option.label}</span>
-                  </label>
-                  <small>{option.count}</small>
+                  <button className="cascade-check-hit" type="button" onClick={(event) => {
+                    event.stopPropagation()
+                    const state = optionState(option)
+                    togglePrimary(option, !state.checked)
+                  }}>
+                    <CascadeCheckbox checked={optionState(option).checked} indeterminate={optionState(option).indeterminate} />
+                  </button>
+                  <span title={option.label}>{option.label}</span>
                   <ChevronRight size={15} />
                 </div>
-              ))}
+              )) : <span className="facet-empty">没有匹配品类</span>}
             </div>
             <div className="category-column">
-              <label className="tree-option">
-                <input type="checkbox" checked={allSecondarySelected} disabled={!primary?.children?.length} onChange={(event) => onSecondary(event.target.checked ? Array.from(new Set([...selectedSecondary, ...(primary?.children ?? []).map((item) => item.value)])) : selectedSecondary.filter((item) => !(primary?.children ?? []).some((child) => child.value === item)))} />
-                <span>{primary ? `选择 ${primary.label} 下全部二级品类` : '选择全部二级品类'}</span>
-              </label>
+              <button className="tree-option" type="button" disabled={!primary?.children?.length} onClick={() => toggleActiveChildren(!activeState.checked)}>
+                <CascadeCheckbox checked={activeState.checked} indeterminate={activeState.indeterminate} />
+                <span>选择全部</span>
+              </button>
               {primary?.children?.length ? primary.children.map((child) => (
-                <label className="tree-option" key={child.value}>
-                  <input type="checkbox" checked={selectedSecondary.includes(child.value)} onChange={(event) => toggleSecondary(child.value, event.target.checked)} />
-                  <span>{child.label}</span>
-                  <small>{child.count}</small>
-                </label>
+                <button className="tree-option" type="button" key={child.value} onClick={() => toggleSecondary(child.value, !(selectedPrimary.includes(primary.value) || selectedSecondary.includes(child.value)))}>
+                  <CascadeCheckbox checked={selectedPrimary.includes(primary.value) || selectedSecondary.includes(child.value)} />
+                  <span title={child.label}>{child.label}</span>
+                </button>
               )) : <span className="facet-empty">暂无二级品类</span>}
             </div>
           </div>
@@ -2340,6 +2422,27 @@ function CategoryTreeFilter({ open, onOpen, options, selectedPrimary, selectedSe
       )}
     </div>
   )
+}
+
+function CascadeCheckbox({ checked, indeterminate = false }: { checked: boolean; indeterminate?: boolean }) {
+  return (
+    <span className={`cascade-checkbox ${checked ? 'is-checked' : ''} ${indeterminate ? 'is-indeterminate' : ''}`} aria-hidden="true">
+      {checked ? <Check size={12} strokeWidth={3} /> : indeterminate ? <span /> : null}
+    </span>
+  )
+}
+
+function categorySelectionLabels(options: CategoryTreeOption[], selectedPrimary: string[], selectedSecondary: string[]) {
+  const labels: string[] = []
+  const primaryLabels = new Map(options.map((item) => [item.value, item.label]))
+  const secondaryLabels = new Map(options.flatMap((item) => (item.children ?? []).map((child) => [child.value, child.label] as const)))
+  selectedPrimary.forEach((value) => labels.push(primaryLabels.get(value) ?? value))
+  selectedSecondary.forEach((value) => {
+    if (!selectedPrimary.some((primary) => (options.find((item) => item.value === primary)?.children ?? []).some((child) => child.value === value))) {
+      labels.push(secondaryLabels.get(value) ?? value)
+    }
+  })
+  return Array.from(new Set(labels))
 }
 
 function DateRangeFilter({ open, onOpen, label: emptyLabel = '上传时间', from, to, onFrom, onTo }: {

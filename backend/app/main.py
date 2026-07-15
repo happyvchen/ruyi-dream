@@ -926,8 +926,8 @@ def category_value_pairs(primary_values: list[str], secondary_values: list[str])
         return [("未分类", secondary) for secondary in secondary_values]
     if len(primary_values) == 1:
         return [(primary_values[0], secondary) for secondary in secondary_values] or [(primary_values[0], None)]
-    if len(primary_values) == len(secondary_values):
-        return list(zip(primary_values, secondary_values))
+    if secondary_values:
+        return [(primary, secondary) for primary in primary_values for secondary in secondary_values]
     return [(primary, None) for primary in primary_values]
 
 
@@ -961,16 +961,23 @@ def styling_garment_facets(contexts: list[dict[str, Any]]) -> dict[str, Any]:
 def category_tree_options(contexts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     tree: dict[str, dict[str, Any]] = {}
     for context in contexts:
+        counted_primary_keys: set[str] = set()
+        counted_child_keys: set[tuple[str, str]] = set()
         for primary, secondary in context["facts"]["categoryPairs"]:
             primary_text = str(primary)
             primary_key = primary_text.casefold()
             node = tree.setdefault(primary_key, {"value": primary_text, "label": primary_text, "count": 0, "children": {}})
-            node["count"] += 1
+            if primary_key not in counted_primary_keys:
+                node["count"] += 1
+                counted_primary_keys.add(primary_key)
             if secondary:
                 secondary_text = str(secondary)
                 child_key = secondary_text.casefold()
                 child = node["children"].setdefault(child_key, {"value": secondary_text, "label": secondary_text, "count": 0})
-                child["count"] += 1
+                child_count_key = (primary_key, child_key)
+                if child_count_key not in counted_child_keys:
+                    child["count"] += 1
+                    counted_child_keys.add(child_count_key)
     result: list[dict[str, Any]] = []
     for node in tree.values():
         children = sorted(node["children"].values(), key=lambda item: (-int(item["count"]), str(item["label"]).casefold()))
