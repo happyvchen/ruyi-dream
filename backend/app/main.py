@@ -743,12 +743,49 @@ def list_styling_garments(
     limit: int = Query(60, ge=1, le=200),
     offset: int = Query(0, ge=0),
     keyword: str | None = Query(None),
+    status: list[str] | None = Query(None),
+    category: list[str] | None = Query(None),
+    color: list[str] | None = Query(None),
+    season: list[str] | None = Query(None),
+    series: list[str] | None = Query(None),
+    channel: list[str] | None = Query(None),
+    review_status: list[str] | None = Query(None, alias="reviewStatus"),
+    uploaded_from: str | None = Query(None, alias="uploadedFrom"),
+    uploaded_to: str | None = Query(None, alias="uploadedTo"),
+    sort_by: str = Query("createdAt", alias="sortBy"),
+    sort_dir: str = Query("desc", alias="sortDir"),
 ) -> dict[str, Any]:
     expire_stale_styling_garment_tagging()
-    search = f"%{keyword.strip()}%" if keyword and keyword.strip() else None
+    status_values = split_filter_values(status)
+    uploaded_from_dt = parse_filter_datetime(uploaded_from, end_of_day=False)
+    uploaded_to_dt = parse_filter_datetime(uploaded_to, end_of_day=True)
+    where_clauses = ["sg.deleted_at IS NULL", "(? OR sg.archived_at IS NULL)"]
+    query_params: list[Any] = [include_archived]
+    keyword_search = f"%{keyword.strip()}%" if keyword and keyword.strip() else None
+    if keyword_search:
+        where_clauses.append(
+            """
+            (
+                sg.code LIKE ? OR sg.status LIKE ? OR sg.ai_tags_json LIKE ? OR
+                sg.manual_tags_json LIKE ? OR sg.official_title_tags_json LIKE ? OR
+                sg.effective_tags_json LIKE ? OR sg.tag_meta_json LIKE ?
+            )
+            """
+        )
+        query_params.extend([keyword_search] * 7)
+    if status_values:
+        placeholders = ", ".join("?" for _ in status_values)
+        where_clauses.append(f"LOWER(sg.status) IN ({placeholders})")
+        query_params.extend(sorted(status_values))
+    if uploaded_from_dt:
+        where_clauses.append("sg.created_at >= ?")
+        query_params.append(uploaded_from_dt.isoformat())
+    if uploaded_to_dt:
+        where_clauses.append("sg.created_at <= ?")
+        query_params.append(uploaded_to_dt.isoformat())
     with get_db() as db:
         rows = db.execute(
-            """
+            f"""
             SELECT sg.*,
               (SELECT ma.id FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
                WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_asset_id,
@@ -766,25 +803,29 @@ def list_styling_garments(
                WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_size_bytes,
               (SELECT COUNT(*) FROM styling_garment_images sgi WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL) AS image_count
             FROM styling_garments sg
-            WHERE sg.deleted_at IS NULL
-              AND (? OR sg.archived_at IS NULL)
-              AND (? IS NULL OR sg.code LIKE ? OR sg.status LIKE ? OR sg.ai_tags_json LIKE ?)
+            WHERE {" AND ".join(where_clauses)}
             ORDER BY sg.created_at DESC, sg.id DESC
-            LIMIT ? OFFSET ?
             """,
-            (include_archived, search, search, search, search, limit + 1, offset),
+            query_params,
         ).fetchall()
-        total = int(db.execute(
-            """
-            SELECT COUNT(*) AS total
-            FROM styling_garments sg
-            WHERE sg.deleted_at IS NULL
-              AND (? OR sg.archived_at IS NULL)
-              AND (? IS NULL OR sg.code LIKE ? OR sg.status LIKE ? OR sg.ai_tags_json LIKE ?)
-            """,
-            (include_archived, search, search, search, search),
-        ).fetchone()["total"])
-        items = rows[:limit]
+        contexts = [styling_garment_filter_context(row) for row in rows]
+        filters = {
+            "keyword": keyword,
+            "status": status_values,
+            "category": split_filter_values(category),
+            "color": split_filter_values(color),
+            "season": split_filter_values(season),
+            "series": split_filter_values(series),
+            "channel": split_filter_values(channel),
+            "reviewStatus": split_filter_values(review_status),
+            "uploadedFrom": uploaded_from,
+            "uploadedTo": uploaded_to,
+        }
+        filtered = [context for context in contexts if styling_garment_matches_filters(context, filters)]
+        facets = styling_garment_facets(filtered)
+        sorted_contexts = sorted_styling_garment_contexts(filtered, sort_by, sort_dir)
+        total = len(sorted_contexts)
+        items = [context["row"] for context in sorted_contexts[offset:offset + limit]]
         return {
             "items": [serialize_styling_garment(row, include_images=False) for row in items],
             "limit": limit,
@@ -793,7 +834,171 @@ def list_styling_garments(
             "hasMore": offset + limit < total,
             "total": total,
             "totalPages": (total + limit - 1) // limit if total else 0,
+            "facets": facets,
         }
+
+
+def split_filter_values(value: str | list[str] | None) -> set[str]:
+    if not value:
+        return set()
+    items = value if isinstance(value, list) else [value]
+    return {
+        part.strip().casefold()
+        for item in items
+        for part in re.split(r"[,，]", item)
+        if part.strip()
+    }
+
+
+def styling_garment_filter_context(row: Any) -> dict[str, Any]:
+    ai_tags = loads(row["ai_tags_json"], {}) if "ai_tags_json" in row.keys() else {}
+    manual_tags = loads(row["manual_tags_json"], {}) if "manual_tags_json" in row.keys() else {}
+    official_title_tags = loads(row["official_title_tags_json"], {}) if "official_title_tags_json" in row.keys() else {}
+    effective_tags = loads(row["effective_tags_json"], {}) if "effective_tags_json" in row.keys() else {}
+    if not effective_tags:
+        effective_tags = build_effective_tags(ai_tags, official_title_tags, manual_tags)
+    tag_meta = loads(row["tag_meta_json"], {}) if "tag_meta_json" in row.keys() else {}
+    facts = {
+        "category": fact_values(ai_tags, effective_tags, official_title_tags, "category", "category_label", "sub_category", "一级品类", "二级品类", "品类", "official_category_terms"),
+        "color": fact_values(ai_tags, effective_tags, official_title_tags, "colors", "color_labels", "色彩", "颜色"),
+        "season": fact_values(ai_tags, effective_tags, official_title_tags, manual_tags, "season", "季节", "season_text", "season_year", "season_drop"),
+        "series": fact_values(ai_tags, effective_tags, official_title_tags, manual_tags, "series", "official_series", "internal_collection", "collaboration"),
+        "channel": fact_values(manual_tags, "retail_channel"),
+    }
+    review_status = styling_garment_review_status(row["status"], tag_meta)
+    keyword_blob = " ".join(
+        str(part)
+        for part in (
+            row["code"],
+            row["status"],
+            dumps(ai_tags),
+            dumps(effective_tags),
+            dumps(manual_tags),
+            dumps(official_title_tags),
+            dumps(tag_meta),
+        )
+    ).casefold()
+    return {
+        "row": row,
+        "facts": facts,
+        "reviewStatus": review_status,
+        "keywordBlob": keyword_blob,
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+        "tagCompletedAt": row["tag_completed_at"],
+    }
+
+
+def fact_values(*sources_and_keys: Any) -> list[str]:
+    sources: list[Any] = []
+    keys: list[str] = []
+    for item in sources_and_keys:
+        if isinstance(item, dict):
+            sources.append(item)
+        elif isinstance(item, str):
+            keys.append(item)
+    values: list[str] = []
+    for source in sources:
+        for key in keys:
+            values.extend(prompt_value_list(source.get(key)))
+    return list(dict.fromkeys(value for value in values if value))
+
+
+def styling_garment_review_status(status: str, tag_meta: dict[str, Any]) -> str:
+    if status == "TAGGING_READY" or bool(tag_meta.get("needs_review")):
+        return "needs_review"
+    if status == "TAGGING_FAILED":
+        return "failed"
+    if status == "TAGGING_RUNNING":
+        return "running"
+    if status == "READY":
+        return "ready"
+    return "untagged"
+
+
+def styling_garment_facets(contexts: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "status": facet_options(context["row"]["status"] for context in contexts),
+        "category": facet_options(value for context in contexts for value in context["facts"]["category"]),
+        "color": facet_options(value for context in contexts for value in context["facts"]["color"]),
+        "season": facet_options(value for context in contexts for value in context["facts"]["season"]),
+        "series": facet_options(value for context in contexts for value in context["facts"]["series"]),
+        "channel": facet_options(value for context in contexts for value in context["facts"]["channel"]),
+        "reviewStatus": facet_options(context["reviewStatus"] for context in contexts),
+    }
+
+
+def facet_options(values: Any) -> list[dict[str, Any]]:
+    counts: dict[str, dict[str, Any]] = {}
+    for raw in values:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        key = text.casefold()
+        if key not in counts:
+            counts[key] = {"value": text, "label": text, "count": 0}
+        counts[key]["count"] += 1
+    return sorted(counts.values(), key=lambda item: (-int(item["count"]), str(item["label"]).casefold()))
+
+
+def styling_garment_matches_filters(context: dict[str, Any], filters: dict[str, Any]) -> bool:
+    keyword = str(filters.get("keyword") or "").strip().casefold()
+    if keyword and keyword not in context["keywordBlob"]:
+        return False
+    for name in ("category", "color", "season", "series", "channel"):
+        selected = filters.get(name) or set()
+        if selected and not selected.intersection(value.casefold() for value in context["facts"][name]):
+            return False
+    statuses = filters.get("status") or set()
+    if statuses and context["row"]["status"].casefold() not in statuses:
+        return False
+    review_statuses = filters.get("reviewStatus") or set()
+    if review_statuses and context["reviewStatus"].casefold() not in review_statuses:
+        return False
+    uploaded_from = parse_filter_datetime(filters.get("uploadedFrom"), end_of_day=False)
+    uploaded_to = parse_filter_datetime(filters.get("uploadedTo"), end_of_day=True)
+    created_at = parse_filter_datetime(context["createdAt"], end_of_day=False)
+    if uploaded_from and created_at and created_at < uploaded_from:
+        return False
+    if uploaded_to and created_at and created_at > uploaded_to:
+        return False
+    return True
+
+
+def parse_filter_datetime(value: Any, *, end_of_day: bool) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        text = f"{text}T23:59:59" if end_of_day else f"{text}T00:00:00"
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def sorted_styling_garment_contexts(contexts: list[dict[str, Any]], sort_by: str, sort_dir: str) -> list[dict[str, Any]]:
+    key_name = {
+        "createdAt": "createdAt",
+        "uploadedAt": "createdAt",
+        "updatedAt": "updatedAt",
+        "tagCompletedAt": "tagCompletedAt",
+        "code": "code",
+    }.get(sort_by, "createdAt")
+    reverse = sort_dir != "asc"
+
+    def sort_key(context: dict[str, Any]) -> tuple[Any, ...]:
+        if key_name == "code":
+            return (str(context["row"]["code"]).casefold(), int(context["row"]["id"]))
+        value = context.get(key_name) or ""
+        return (str(value), int(context["row"]["id"]))
+
+    return sorted(contexts, key=sort_key, reverse=reverse)
 
 
 @app.get("/api/styling-garments/{garment_id}")
