@@ -40,6 +40,8 @@ import {
 } from 'lucide-react'
 import { api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl } from './api'
 import type { AICallRecord, AIOperation, AttemptPhase, DeleteImpact, FinalImageExportPrecheck, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment } from './api'
+import { groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
+import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { friendlyErrorText } from './lib/errorMessages'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
@@ -86,15 +88,8 @@ const recentTaskRowHeight = 62
 const recentTaskMaxPageSize = 60
 const authSeenStorageKey = 'ruyi-auth-seen'
 const authExpiredMessage = '登录状态已过期，请重新登录后继续。'
-const SUPPORTED_IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/heic,image/heif,image/avif,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif'
-const SUPPORTED_IMAGE_FILE_PATTERN = /\.(jpe?g|png|webp|heic|heif|avif)$/i
 const STYLING_GARMENT_MAX_IMAGES = 15
 const HERO_PRODUCT_MAX_IMAGES = 15
-const SUPPORTED_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'image/avif'])
-
-function isSupportedImageFile(file: File) {
-  return SUPPORTED_IMAGE_MIME_TYPES.has(file.type.toLowerCase()) || SUPPORTED_IMAGE_FILE_PATTERN.test(file.name)
-}
 
 export function App() {
   const [checked, setChecked] = useState(false)
@@ -964,12 +959,14 @@ type PendingBatchGroup = {
   name: string
   info: string
   files: File[]
+  issues?: ImportIssue[]
   error?: string
 }
 
 function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any; heroProductInfo: string }) {
   const [files, setFiles] = useState<File[]>([])
   const [name, setName] = useState('')
+  const [singleIssues, setSingleIssues] = useState<ImportIssue[]>([])
   const [batchGroups, setBatchGroups] = useState<PendingBatchGroup[]>([])
   const [batchCreating, setBatchCreating] = useState<{ current: number; total: number } | null>(null)
   const [batchError, setBatchError] = useState('')
@@ -984,31 +981,38 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
       .catch(() => setExistingTaskNames(new Set()))
   }, [batchGroups.length, existingTaskNames])
 
-  function applySingleFiles(imageFiles: File[]) {
+  function applySingleFiles(imageFiles: File[], defaultName?: string, issues: ImportIssue[] = []) {
     setFiles(imageFiles)
     const firstPath = imageFiles[0] ? importPath(imageFiles[0]) : ''
-    const defaultName = firstPath.includes('/') ? sanitizeClientName(firstPath.split('/')[0]) : timestampName()
-    setName(defaultName)
+    setName(defaultName || (firstPath.includes('/') ? sanitizeClientName(firstPath.split('/')[0]) : timestampName()))
+    setSingleIssues(issues)
   }
 
   function addHeroFiles(nextFiles: File[]) {
     const imageFiles = nextFiles
       .filter(isSupportedImageFile)
       .sort((a, b) => importPath(a).localeCompare(importPath(b), 'zh-CN', { numeric: true }))
-    const folderFiles = imageFiles.filter((file) => importPath(file).includes('/'))
-    const groups = groupImportFiles(folderFiles)
+    const folderFiles = nextFiles.filter((file) => importPath(file).includes('/'))
+    const grouping = groupImportFiles(folderFiles.length ? folderFiles : nextFiles)
+    const groups = grouping.batches
     if (groups.length > 1) {
-      setBatchGroups(groups.map((group, index) => ({ id: `${group.id}-${index}`, name: group.code, info: '', files: group.files })))
+      setBatchGroups(groups.map((group, index) => ({ id: `${group.id}-${index}`, name: group.code, info: '', files: group.files, issues: group.issues })))
       setBatchError('')
       setFiles([])
       setName('')
+      setSingleIssues([])
       batchIdRef.current = ''
       firstCreatedTaskRef.current = null
       return
     }
     setBatchGroups([])
     setBatchError('')
-    applySingleFiles(imageFiles)
+    const group = groups[0]
+    if (group && folderFiles.length) {
+      applySingleFiles(group.files, group.code, group.issues)
+    } else {
+      applySingleFiles(imageFiles, undefined, group?.issues)
+    }
   }
 
   function updateBatchGroup(id: string, patch: Partial<PendingBatchGroup>) {
@@ -1130,10 +1134,11 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                   </div>
                   <div className="batch-list">
                     {batchGroups.map((group) => {
-                      const groupName = sanitizeClientName(group.name)
-                      const dupInBatch = !!groupName && (nameCounts.get(groupName) ?? 0) > 1
-                      const overLimit = group.files.length > HERO_PRODUCT_MAX_IMAGES
-                      const hasError = overLimit || !group.files.length || dupInBatch || !!group.error
+	                      const groupName = sanitizeClientName(group.name)
+	                      const dupInBatch = !!groupName && (nameCounts.get(groupName) ?? 0) > 1
+	                      const overLimit = group.files.length > HERO_PRODUCT_MAX_IMAGES
+	                      const hasBlockingError = overLimit || !group.files.length || dupInBatch || !!group.error
+	                      const hasError = hasBlockingError || !!group.issues?.length
                       const existsHint = !!groupName && !dupInBatch && !!existingTaskNames?.has(groupName)
                       return (
                         <div className={`batch-card ${hasError ? 'has-error' : ''}`} key={group.id}>
@@ -1145,7 +1150,8 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                           </div>
                           <div className="batch-note">
                             <span>推荐 3-5 张，排序越靠前越重要。{existsHint ? ' 与已有任务重名，将共存（任务名不要求唯一）。' : ''}</span>
-                            {hasError && <strong>{group.error ?? (overLimit ? `超过 ${HERO_PRODUCT_MAX_IMAGES} 张，需删除后才能提交` : !group.files.length ? '没有可用图片' : '本批次任务名重复')}</strong>}
+	                            {hasBlockingError && <strong>{group.error ?? (overLimit ? `超过 ${HERO_PRODUCT_MAX_IMAGES} 张，需删除后才能提交` : !group.files.length ? '没有可用图片' : '本批次任务名重复')}</strong>}
+                            {group.issues?.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
                           </div>
                           <FileThumbList files={group.files} onChange={(nextFiles) => updateBatchGroup(group.id, { files: nextFiles })} />
                           <input
@@ -1189,6 +1195,7 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                 <div className="batch-note">
                   <span>推荐 3-5 张，最多只允许 15 张用于创建任务。</span>
                   {files.length > HERO_PRODUCT_MAX_IMAGES && <strong>{`当前超过 ${HERO_PRODUCT_MAX_IMAGES} 张，请删除或调整后再创建`}</strong>}
+                  {singleIssues.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
                 </div>
                 <FileThumbList files={files} onChange={setFiles} />
                 <div className="inline-form">
@@ -2021,12 +2028,7 @@ function useAutoGarmentPageSize(resultsRef: { current: HTMLDivElement | null }) 
   return pageSize
 }
 
-type ImportBatch = {
-  id: string
-  code: string
-  files: File[]
-  error?: string
-}
+type StylingImportBatch = ImportBatch & { error?: string }
 
 type ImportJob = {
   id: string
@@ -2039,12 +2041,12 @@ type ImportJob = {
 }
 
 function BatchImportPanel({ onImported }: { onImported: () => void }) {
-  const [batches, setBatches] = useState<ImportBatch[]>([])
+  const [batches, setBatches] = useState<StylingImportBatch[]>([])
   const [localError, setLocalError] = useState('')
   const [importJobs, setImportJobs] = useState<ImportJob[]>([])
 
   function addFiles(files: File[]) {
-    const next = groupImportFiles(files)
+    const next = groupImportFiles(files).batches
     setLocalError('')
     setBatches((current) => {
       const existingCodes = new Set(current.map((item) => item.code))
@@ -2083,8 +2085,8 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
 
   function saveDrafts() {
     const seen = new Set<string>()
-    const ready: ImportBatch[] = []
-    const blocked: ImportBatch[] = []
+    const ready: StylingImportBatch[] = []
+    const blocked: StylingImportBatch[] = []
     batches.forEach((batch) => {
       const code = sanitizeClientName(batch.code)
       if (!code) {
@@ -2115,14 +2117,14 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
     setImportJobs((jobs) => jobs.map((job) => job.id === jobId ? updater(job) : job))
   }
 
-  function addSkippedBatch(batch: ImportBatch, error: string) {
+  function addSkippedBatch(batch: StylingImportBatch, error: string) {
     setBatches((items) => {
       if (items.some((item) => item.id === batch.id)) return items
       return [...items, { ...batch, error }]
     })
   }
 
-  function startImportJob(jobBatches: ImportBatch[]) {
+  function startImportJob(jobBatches: StylingImportBatch[]) {
     const jobId = `import-${Date.now()}-${Math.random().toString(36).slice(2)}`
     const startedAt = new Date().toISOString()
     const initialOperations: AIOperation[] = jobBatches.map((batch, index) => ({
@@ -2147,7 +2149,7 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
     void runImportJob(jobId, jobBatches)
   }
 
-  async function runImportJob(jobId: string, jobBatches: ImportBatch[]) {
+  async function runImportJob(jobId: string, jobBatches: StylingImportBatch[]) {
     const createdItems: StylingGarment[] = []
     let skipped = 0
     for (const batch of jobBatches) {
@@ -2273,13 +2275,13 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
 }
 
 function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
-  batch: ImportBatch
+  batch: StylingImportBatch
   onCode: (code: string) => void
   onFiles: (files: File[]) => void
   onRemove: () => void
 }) {
   return (
-    <div className={`batch-card ${batch.files.length > STYLING_GARMENT_MAX_IMAGES || batch.error ? 'has-error' : ''}`}>
+    <div className={`batch-card ${batch.files.length > STYLING_GARMENT_MAX_IMAGES || batch.error || batch.issues?.length ? 'has-error' : ''}`}>
       <div className="batch-card-head">
         <div className="batch-icon"><Layers3 size={18} /></div>
         <input value={batch.code} onChange={(event) => onCode(event.target.value)} aria-label="搭配服装货号" />
@@ -2288,6 +2290,7 @@ function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
       <div className="batch-note">
         <span>{batch.files.length} 张图片</span>
         {(batch.error || batch.files.length > STYLING_GARMENT_MAX_IMAGES) && <strong>{batch.error ?? `超过 ${STYLING_GARMENT_MAX_IMAGES} 张，需删除后才能导入`}</strong>}
+        {batch.issues?.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
       </div>
       <FileThumbList files={batch.files} onChange={onFiles} />
     </div>
@@ -4457,42 +4460,6 @@ function compactTagLine(value: Record<string, unknown>) {
   return parts.length ? parts.slice(0, 4).join(' · ') : '暂无'
 }
 
-function groupImportFiles(files: File[]): ImportBatch[] {
-  const imageFiles = files
-    .filter(isSupportedImageFile)
-    .sort((a, b) => importPath(a).localeCompare(importPath(b), 'zh-CN', { numeric: true }))
-  if (!imageFiles.length) return []
-
-  const paths = imageFiles.map(importPath)
-  const hasFolders = paths.some((path) => path.includes('/'))
-  if (!hasFolders) {
-    return [{ id: `loose-${Date.now()}`, code: timestampName(), files: imageFiles }]
-  }
-
-  const splitPaths = paths.map((path) => path.split('/').filter(Boolean))
-  const roots = new Set(splitPaths.map((parts) => parts[0]))
-  const root = roots.size === 1 ? splitPaths[0][0] : ''
-  const hasImagesAtRoot = Boolean(root) && splitPaths.some((parts) => parts.length === 2)
-  const hasNestedFolders = Boolean(root) && splitPaths.some((parts) => parts.length > 2)
-  const grouped = new Map<string, File[]>()
-
-  imageFiles.forEach((file) => {
-    const parts = importPath(file).split('/').filter(Boolean)
-    const key = roots.size === 1 && hasNestedFolders && !hasImagesAtRoot ? parts.slice(0, 2).join('/') : parts[0]
-    grouped.set(key, [...(grouped.get(key) ?? []), file])
-  })
-
-  return Array.from(grouped.entries()).map(([key, groupFiles], index) => ({
-    id: `${key}-${index}`,
-    code: sanitizeClientName(key.split('/').pop() || key || timestampName()),
-    files: groupFiles,
-  }))
-}
-
-function importPath(file: File) {
-  return ((file as File & { webkitRelativePath?: string; relativePath?: string }).webkitRelativePath || (file as File & { relativePath?: string }).relativePath || file.name).replace(/^\/+/, '')
-}
-
 function fileKey(file: File) {
   return `${file.name}-${file.size}-${file.lastModified}`
 }
@@ -4597,10 +4564,6 @@ function assetOriginalSrc(asset: MediaAsset) {
   return direct.replace(/([?&]variant=)(thumb|preview)(?=&|$)/, '$1original')
 }
 
-function sanitizeClientName(value: string) {
-  return value.trim().replace(/[^\u4e00-\u9fa5A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80)
-}
-
 async function filesFromDataTransfer(dataTransfer: DataTransfer): Promise<File[]> {
   const entries = Array.from(dataTransfer.items)
     .map((item) => (item as DataTransferItem & { webkitGetAsEntry?: () => FileSystemEntry | null }).webkitGetAsEntry?.())
@@ -4662,12 +4625,6 @@ function fallbackHeadRefs() {
     filename: id,
     previewUrl: null as string | null,
   }))
-}
-
-function timestampName() {
-  const date = new Date()
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
 }
 
 function dateText(value?: string | null) {
