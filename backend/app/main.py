@@ -298,6 +298,11 @@ class StylingGarmentBatchTagRequest(BaseModel):
     ids: list[int]
 
 
+class StylingGarmentBatchManualTagsRequest(BaseModel):
+    ids: list[int]
+    manualTags: dict[str, Any]
+
+
 class StylingGarmentDeleteRequest(BaseModel):
     ids: list[int] | None = None
     purge: bool = False
@@ -1103,14 +1108,13 @@ async def create_styling_garment(
 @app.patch("/api/styling-garments/{garment_id}")
 def update_styling_garment(garment_id: int, payload: StylingGarmentUpdateRequest) -> dict[str, Any]:
     updates: dict[str, Any] = {}
+    manual_patch = normalize_manual_business_tags(payload.manualTags) if payload.manualTags is not None else None
     if payload.code is not None:
         clean_code = sanitize_name(payload.code)
         if not clean_code:
             raise HTTPException(status_code=400, detail="搭配服装代码不能为空")
         updates["code"] = clean_code
-    if payload.manualTags is not None:
-        updates["manual_tags_json"] = dumps(normalize_manual_business_tags(payload.manualTags))
-    if not updates:
+    if manual_patch is None and not updates:
         return {"item": get_styling_garment_by_id(garment_id)}
     with get_db() as db:
         row = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
@@ -1124,6 +1128,9 @@ def update_styling_garment(garment_id: int, payload: StylingGarmentUpdateRequest
             ).fetchone()
             if duplicate:
                 raise HTTPException(status_code=409, detail="搭配服装代码已存在")
+        if manual_patch is not None:
+            current_manual = loads(row["manual_tags_json"], {})
+            updates["manual_tags_json"] = dumps(normalize_manual_business_tags({**current_manual, **manual_patch}))
         manual_tags = loads(updates.get("manual_tags_json") if "manual_tags_json" in updates else row["manual_tags_json"], {})
         effective_tags = build_effective_tags(
             loads(row["ai_tags_json"], {}),
@@ -1135,6 +1142,37 @@ def update_styling_garment(garment_id: int, payload: StylingGarmentUpdateRequest
         set_clause = ", ".join(f"{key} = ?" for key in updates)
         db.execute(f"UPDATE styling_garments SET {set_clause} WHERE id = ?", (*updates.values(), garment_id))
     return {"item": get_styling_garment_by_id(garment_id)}
+
+
+@app.post("/api/styling-garments/batch-manual-tags")
+def update_styling_garment_manual_tags_batch(payload: StylingGarmentBatchManualTagsRequest) -> dict[str, Any]:
+    garment_ids = normalized_styling_garment_ids(payload.ids or [])
+    manual_patch = normalize_manual_business_tags(payload.manualTags)
+    if not manual_patch:
+        raise HTTPException(status_code=400, detail="人工业务标签不能为空")
+    timestamp = now_iso()
+    with get_db() as db:
+        rows = get_styling_garment_rows_for_mutation(db, garment_ids)
+        for row in rows:
+            ensure_styling_garment_not_tagging(row)
+        for row in rows:
+            current_manual = loads(row["manual_tags_json"], {})
+            manual_tags = normalize_manual_business_tags({**current_manual, **manual_patch})
+            effective_tags = build_effective_tags(
+                loads(row["ai_tags_json"], {}),
+                loads(row["official_title_tags_json"], {}),
+                manual_tags,
+            )
+            db.execute(
+                """
+                UPDATE styling_garments
+                SET manual_tags_json = ?, effective_tags_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (dumps(manual_tags), dumps(effective_tags), timestamp, row["id"]),
+            )
+            log_event(db, "styling_garment", int(row["id"]), "manual_tags_updated", {"batch": True, "keys": sorted(manual_patch.keys())})
+    return {"items": [get_styling_garment_by_id(garment_id) for garment_id in garment_ids]}
 
 
 @app.post("/api/styling-garments/{garment_id}/save-and-tag")

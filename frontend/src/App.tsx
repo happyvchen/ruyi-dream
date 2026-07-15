@@ -1792,6 +1792,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
   const [bulkMode, setBulkMode] = useState(false)
   const [selectedGarmentIds, setSelectedGarmentIds] = useState<Set<number>>(() => new Set())
   const [deleteGarmentDialog, setDeleteGarmentDialog] = useState<StylingGarment[] | null>(null)
+  const [manualTagDialog, setManualTagDialog] = useState<StylingGarment[] | null>(null)
   const [deleteGarmentImpact, setDeleteGarmentImpact] = useState<DeleteImpact | null>(null)
   const [deleteGarmentImpactLoading, setDeleteGarmentImpactLoading] = useState(false)
   const selectableGarmentIds = items.filter((item) => item.status !== 'TAGGING_RUNNING').map((item) => item.id)
@@ -1937,6 +1938,12 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
     if (detail?.id === next.id) setDetail(next)
   }
 
+  function updateGarmentsInView(nextItems: StylingGarment[]) {
+    const byId = new Map(nextItems.map((item) => [item.id, item]))
+    setItems((current) => current.map((item) => byId.get(item.id) ?? item))
+    if (detail && byId.has(detail.id)) setDetail(byId.get(detail.id) ?? detail)
+  }
+
   function openGarmentDeleteDialog(targets: StylingGarment[]) {
     const ids = targets.map((item) => item.id)
     setDeleteGarmentDialog(targets)
@@ -1990,6 +1997,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
                 ? <button className="management-action" onClick={() => restoreGarments(selectedArchivedGarments)}>恢复 {selectedArchivedGarments.length} 项</button>
                 : <button className="management-action" disabled={selectedArchivedGarments.length > 0} title={selectedArchivedGarments.length ? '请分别选择已归档和未归档服装' : undefined} onClick={() => openGarmentDeleteDialog(selectedActiveGarments)}>归档 {selectedActiveGarments.length} 项</button>
             )}
+            {selectedVisibleGarments.length > 0 && <button className="management-action" onClick={() => setManualTagDialog(selectedVisibleGarments)}>批量标签 {selectedVisibleGarments.length} 项</button>}
             <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
             <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 套` : '0 套'}</span>
           </div>
@@ -2070,6 +2078,19 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
         />
       </div>
       {detail && <GarmentDetailDrawer item={detail} run={run} isAdmin={role === 'admin'} onClose={() => setDetail(null)} onChange={updateGarmentInView} onDelete={() => openGarmentDeleteDialog([detail])} onRestore={() => restoreGarments([detail])} />}
+      {manualTagDialog && (
+        <BatchManualTagsDialog
+          items={manualTagDialog}
+          run={run}
+          onClose={() => setManualTagDialog(null)}
+          onSaved={(nextItems) => {
+            updateGarmentsInView(nextItems)
+            setSelectedGarmentIds(new Set())
+            setManualTagDialog(null)
+            void refreshLibraryPage().catch(() => undefined)
+          }}
+        />
+      )}
       {deleteGarmentDialog && (
         <DeleteConfirmDialog
           title={deleteGarmentDialog.length === 1 ? '归档搭配服装' : `归档 ${deleteGarmentDialog.length} 套搭配服装`}
@@ -2110,6 +2131,132 @@ function FacetCheckboxGroup({ label, options, value, onChange }: {
       </div>
     </fieldset>
   )
+}
+
+function BatchManualTagsDialog({ items, run, onClose, onSaved }: {
+  items: StylingGarment[]
+  run: any
+  onClose: () => void
+  onSaved: (items: StylingGarment[]) => void
+}) {
+  const [launchBatch, setLaunchBatch] = useState('')
+  const [series, setSeries] = useState('')
+  const [retailChannel, setRetailChannel] = useState('')
+  const [internalCollection, setInternalCollection] = useState('')
+  const [stylingPriority, setStylingPriority] = useState('')
+  const [notes, setNotes] = useState('')
+  const [applyDoNotUse, setApplyDoNotUse] = useState(false)
+  const [doNotUse, setDoNotUse] = useState(false)
+
+  function save() {
+    const manualTags: Record<string, unknown> = {}
+    if (launchBatch.trim()) manualTags.launch_batch = launchBatch.trim()
+    if (series.trim()) manualTags.series = parseTagListInput(series)
+    if (retailChannel.trim()) manualTags.retail_channel = parseTagListInput(retailChannel)
+    if (internalCollection.trim()) manualTags.internal_collection = parseTagListInput(internalCollection)
+    if (stylingPriority) manualTags.styling_priority = stylingPriority
+    if (notes.trim()) manualTags.notes = notes.trim()
+    if (applyDoNotUse) manualTags.do_not_use_for_styling = doNotUse
+    if (!Object.keys(manualTags).length) return
+    const ids = items.map((item) => item.id)
+    void run(`批量保存 ${items.length} 套搭配服装标签中...`, () => api.updateStylingGarmentManualTags(ids, manualTags), (result: { items: StylingGarment[] }) => onSaved(result.items), { refresh: 'background' })
+  }
+
+  const canSave = Boolean(launchBatch.trim() || series.trim() || retailChannel.trim() || internalCollection.trim() || stylingPriority || notes.trim() || applyDoNotUse)
+
+  return (
+    <div className="drawer-backdrop" onClick={onClose}>
+      <aside className="modal-panel manual-tags-dialog" onClick={(event) => event.stopPropagation()}>
+        <div className="drawer-head">
+          <div>
+            <h2>批量维护人工标签</h2>
+            <p>{items.length} 套搭配服装</p>
+          </div>
+          <button className="management-action icon-button" onClick={onClose} title="关闭"><X size={16} /></button>
+        </div>
+        <ManualTagFields
+          launchBatch={launchBatch}
+          onLaunchBatch={setLaunchBatch}
+          series={series}
+          onSeries={setSeries}
+          retailChannel={retailChannel}
+          onRetailChannel={setRetailChannel}
+          internalCollection={internalCollection}
+          onInternalCollection={setInternalCollection}
+          stylingPriority={stylingPriority}
+          onStylingPriority={setStylingPriority}
+          notes={notes}
+          onNotes={setNotes}
+        />
+        <label className="manual-checkbox">
+          <input type="checkbox" checked={applyDoNotUse} onChange={(event) => setApplyDoNotUse(event.target.checked)} />
+          应用禁用选搭设置
+        </label>
+        {applyDoNotUse && (
+          <label className="manual-checkbox">
+            <input type="checkbox" checked={doNotUse} onChange={(event) => setDoNotUse(event.target.checked)} />
+            禁止进入智能选搭
+          </label>
+        )}
+        <div className="drawer-actions">
+          <button className="management-action" onClick={onClose}>取消</button>
+          <button className="management-action" disabled={!canSave} onClick={save}>保存标签</button>
+        </div>
+      </aside>
+    </div>
+  )
+}
+
+function ManualTagFields({
+  launchBatch,
+  onLaunchBatch,
+  series,
+  onSeries,
+  retailChannel,
+  onRetailChannel,
+  internalCollection,
+  onInternalCollection,
+  stylingPriority,
+  onStylingPriority,
+  notes,
+  onNotes,
+  disabled = false,
+}: {
+  launchBatch: string
+  onLaunchBatch: (value: string) => void
+  series: string
+  onSeries: (value: string) => void
+  retailChannel: string
+  onRetailChannel: (value: string) => void
+  internalCollection: string
+  onInternalCollection: (value: string) => void
+  stylingPriority: string
+  onStylingPriority: (value: string) => void
+  notes: string
+  onNotes: (value: string) => void
+  disabled?: boolean
+}) {
+  return (
+    <div className="manual-tags-form">
+      <label>上新批次<input value={launchBatch} disabled={disabled} onChange={(event) => onLaunchBatch(event.target.value)} /></label>
+      <label>系列<input value={series} disabled={disabled} onChange={(event) => onSeries(event.target.value)} placeholder="多个值用逗号分隔" /></label>
+      <label>渠道<input value={retailChannel} disabled={disabled} onChange={(event) => onRetailChannel(event.target.value)} placeholder="多个值用逗号分隔" /></label>
+      <label>内部分组<input value={internalCollection} disabled={disabled} onChange={(event) => onInternalCollection(event.target.value)} placeholder="多个值用逗号分隔" /></label>
+      <label>选搭优先级
+        <select value={stylingPriority} disabled={disabled} onChange={(event) => onStylingPriority(event.target.value)}>
+          <option value="">不调整</option>
+          <option value="preferred">优先</option>
+          <option value="normal">正常</option>
+          <option value="deprioritized">降权</option>
+        </select>
+      </label>
+      <label className="manual-tags-notes">备注<textarea value={notes} disabled={disabled} onChange={(event) => onNotes(event.target.value)} rows={3} /></label>
+    </div>
+  )
+}
+
+function parseTagListInput(value: string) {
+  return value.split(/[,，、/]/).map((item) => item.trim()).filter(Boolean)
 }
 
 function mergedFacetOptions(options: FacetOption[] | undefined, selected: string[]) {
@@ -3465,6 +3612,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
   const runningTagAttempt = latestRunningTagAttempt(item)
   const failedTagAttempt = latestFailedTagAttempt(item)
   const hasTaggingFailure = item.status === 'TAGGING_FAILED' || Boolean(item.tagError || failedTagAttempt)
+  const selectableText = item.status === 'READY' && !item.archivedAt ? '可进入智能选搭' : '不进入智能选搭'
 
   useEffect(() => {
     setWorking(item.images ?? [])
@@ -3472,7 +3620,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
     setReplacementDimensions({})
     setRemovedIds([])
     setDirty(false)
-  }, [item.id])
+  }, [item.id, item.updatedAt])
 
   useEffect(() => {
     if (item.status !== 'TAGGING_RUNNING') return
@@ -3525,7 +3673,11 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
           <button className="management-action icon-button" onClick={onClose} title="关闭"><X size={16} /></button>
         </div>
         <div className="drawer-section">
+          <div className="section-head"><strong>基础信息</strong></div>
+          <Meta label="上传时间" value={dateText(item.createdAt)} />
           <Meta label="更新时间" value={dateText(item.updatedAt)} />
+          <Meta label="打标时间" value={dateText(item.tagCompletedAt)} />
+          <Meta label="选搭状态" value={selectableText} />
           <Meta label="图片" value={`${working.length}/${STYLING_GARMENT_MAX_IMAGES} 张`} />
           {hasTaggingFailure && (
             <TagObjectPanel
@@ -3594,9 +3746,21 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
           {!working.length && <span className="inline-error">搭配服装至少需要保留一张图片</span>}
         </div>
         <div className="drawer-section">
-          <div className="section-head"><strong>标签</strong></div>
-          <TagObjectPanel title={hasTaggingFailure ? '上次 AI 打标返回' : 'AI 打标返回'} data={item.aiTags ?? {}} defaultOpen />
-          <TagObjectPanel title="人工业务标签" data={item.manualTags ?? {}} />
+          <div className="section-head"><strong>AI 识别标签</strong></div>
+          <TagObjectPanel title={hasTaggingFailure ? '上次 AI 打标返回' : 'AI 识别标签'} data={item.aiTags ?? {}} defaultOpen />
+          <TagObjectPanel title="生效标签" data={item.effectiveTags ?? {}} />
+        </div>
+        <div className="drawer-section">
+          <div className="section-head"><strong>人工业务标签</strong></div>
+          <ManualTagsEditor item={item} run={run} disabled={tagging} onChange={onChange} />
+        </div>
+        <div className="drawer-section">
+          <div className="section-head"><strong>官方标题信息</strong></div>
+          <TagObjectPanel title="官方标题信息" data={item.officialTitleTags ?? {}} defaultOpen={Boolean(Object.keys(item.officialTitleTags ?? {}).length)} />
+        </div>
+        <div className="drawer-section">
+          <div className="section-head"><strong>技术详情</strong></div>
+          <TagObjectPanel title="标签元信息" data={item.tagMeta ?? {}} />
           {isAdmin && (item.tagAttempts ?? []).length > 0 && (
             <JsonOutputPanel title="Gemini 调用过程事实" data={item.tagAttempts} />
           )}
@@ -3621,6 +3785,84 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </div>
   )
+}
+
+function ManualTagsEditor({ item, run, disabled = false, onChange }: { item: StylingGarment; run: any; disabled?: boolean; onChange: (item: StylingGarment) => void }) {
+  const [launchBatch, setLaunchBatch] = useState('')
+  const [series, setSeries] = useState('')
+  const [retailChannel, setRetailChannel] = useState('')
+  const [internalCollection, setInternalCollection] = useState('')
+  const [stylingPriority, setStylingPriority] = useState('')
+  const [notes, setNotes] = useState('')
+  const [doNotUse, setDoNotUse] = useState(false)
+
+  useEffect(() => {
+    const tags = item.manualTags ?? {}
+    setLaunchBatch(String(tags.launch_batch ?? ''))
+    setSeries(tagListInputValue(tags.series))
+    setRetailChannel(tagListInputValue(tags.retail_channel))
+    setInternalCollection(tagListInputValue(tags.internal_collection))
+    setStylingPriority(String(tags.styling_priority ?? ''))
+    setNotes(String(tags.notes ?? ''))
+    setDoNotUse(Boolean(tags.do_not_use_for_styling))
+  }, [item.id, item.manualTags])
+
+  function currentPayload() {
+    return {
+      launch_batch: launchBatch.trim(),
+      series: parseTagListInput(series),
+      retail_channel: parseTagListInput(retailChannel),
+      internal_collection: parseTagListInput(internalCollection),
+      styling_priority: stylingPriority,
+      notes: notes.trim(),
+      do_not_use_for_styling: doNotUse,
+    }
+  }
+
+  const changed = JSON.stringify(currentPayload()) !== JSON.stringify({
+    launch_batch: String(item.manualTags?.launch_batch ?? ''),
+    series: Array.isArray(item.manualTags?.series) ? item.manualTags?.series : parseTagListInput(String(item.manualTags?.series ?? '')),
+    retail_channel: Array.isArray(item.manualTags?.retail_channel) ? item.manualTags?.retail_channel : parseTagListInput(String(item.manualTags?.retail_channel ?? '')),
+    internal_collection: Array.isArray(item.manualTags?.internal_collection) ? item.manualTags?.internal_collection : parseTagListInput(String(item.manualTags?.internal_collection ?? '')),
+    styling_priority: String(item.manualTags?.styling_priority ?? ''),
+    notes: String(item.manualTags?.notes ?? ''),
+    do_not_use_for_styling: Boolean(item.manualTags?.do_not_use_for_styling),
+  })
+
+  function save() {
+    const manualTags = { ...(item.manualTags ?? {}), ...currentPayload() }
+    void run('保存人工业务标签中...', () => api.updateStylingGarment(item.id, { manualTags }), (result: { item: StylingGarment }) => onChange(result.item), { refresh: 'background' })
+  }
+
+  return (
+    <div className="manual-editor">
+      <ManualTagFields
+        launchBatch={launchBatch}
+        onLaunchBatch={setLaunchBatch}
+        series={series}
+        onSeries={setSeries}
+        retailChannel={retailChannel}
+        onRetailChannel={setRetailChannel}
+        internalCollection={internalCollection}
+        onInternalCollection={setInternalCollection}
+        stylingPriority={stylingPriority}
+        onStylingPriority={setStylingPriority}
+        notes={notes}
+        onNotes={setNotes}
+        disabled={disabled}
+      />
+      <label className="manual-checkbox">
+        <input type="checkbox" checked={doNotUse} disabled={disabled} onChange={(event) => setDoNotUse(event.target.checked)} />
+        禁止进入智能选搭
+      </label>
+      <button className="management-action" disabled={disabled || !changed} onClick={save}>保存人工标签</button>
+    </div>
+  )
+}
+
+function tagListInputValue(value: unknown) {
+  if (Array.isArray(value)) return value.map((item) => String(item)).filter(Boolean).join('，')
+  return String(value ?? '')
 }
 
 function CodeEditor({ item, run, disabled = false }: { item: StylingGarment; run: any; disabled?: boolean }) {

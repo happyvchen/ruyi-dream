@@ -192,6 +192,49 @@ class StylingGarmentLibraryFilterTests(unittest.TestCase):
         archived_response = self.client.get("/api/styling-garments?includeArchived=true")
         self.assertIn("LOOK-ARCHIVED-004", [item["code"] for item in archived_response.json()["items"]])
 
+    def test_batch_manual_tags_merges_existing_tags_and_logs(self) -> None:
+        response = self.client.post(
+            "/api/styling-garments/batch-manual-tags",
+            json={"ids": [1, 2], "manualTags": {"launch_batch": "7月第一波", "series": ["NEW"]}},
+        )
+        self.assertEqual(response.status_code, 200)
+        items = response.json()["items"]
+
+        self.assertEqual([item["manualTags"]["launch_batch"] for item in items], ["7月第一波", "7月第一波"])
+        self.assertEqual(items[0]["manualTags"]["retail_channel"], ["online"])
+        self.assertEqual(items[0]["manualTags"]["series"], ["NEW"])
+
+        db_module = importlib.import_module("app.db")
+        with db_module.get_db() as db:
+            count = db.execute("SELECT COUNT(*) AS count FROM event_logs WHERE event_type = 'manual_tags_updated'").fetchone()["count"]
+        self.assertEqual(count, 2)
+
+    def test_batch_manual_tags_rejects_tagging_rows(self) -> None:
+        db_module = importlib.import_module("app.db")
+        with db_module.get_db() as db:
+            db.execute("UPDATE styling_garments SET status = 'TAGGING_RUNNING' WHERE id = 2")
+
+        response = self.client.post(
+            "/api/styling-garments/batch-manual-tags",
+            json={"ids": [1, 2], "manualTags": {"launch_batch": "7月第一波"}},
+        )
+        self.assertEqual(response.status_code, 409)
+
+    def test_single_manual_tag_update_preserves_unsubmitted_fields(self) -> None:
+        db_module = importlib.import_module("app.db")
+        with db_module.get_db() as db:
+            db.execute(
+                "UPDATE styling_garments SET manual_tags_json = ? WHERE id = 1",
+                (db_module.dumps({"season_year": "2026", "collaboration": ["IP"], "notes": "旧备注"}),),
+            )
+
+        response = self.client.patch("/api/styling-garments/1", json={"manualTags": {"notes": "新备注"}})
+        self.assertEqual(response.status_code, 200)
+        manual = response.json()["item"]["manualTags"]
+        self.assertEqual(manual["season_year"], "2026")
+        self.assertEqual(manual["collaboration"], ["IP"])
+        self.assertEqual(manual["notes"], "新备注")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2113,6 +2113,22 @@ a.button-link { text-decoration: none; cursor: pointer; }
   background: #fff;
   box-shadow: -18px 0 56px rgba(15,23,42,.22);
 }
+.modal-panel {
+  width: min(620px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  overflow: auto;
+  padding: 22px;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 24px 80px rgba(15,23,42,.28);
+}
+.manual-tags-dialog {
+  align-self: center;
+  justify-self: center;
+}
 .drawer-head, .section-head, .drawer-actions {
   display: flex;
   align-items: center;
@@ -2183,6 +2199,45 @@ a.button-link { text-decoration: none; cursor: pointer; }
   line-height: 1.45;
   color: #334155;
   background: #fff;
+}
+.manual-editor {
+  display: grid;
+  gap: 12px;
+}
+.manual-tags-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.manual-tags-form label,
+.manual-checkbox {
+  display: grid;
+  gap: 6px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+.manual-tags-form input,
+.manual-tags-form select {
+  height: 34px;
+  background: #fff;
+}
+.manual-tags-form textarea {
+  min-height: 84px;
+  resize: vertical;
+  background: #fff;
+}
+.manual-tags-notes {
+  grid-column: 1 / -1;
+}
+.manual-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.manual-checkbox input {
+  width: auto;
+  height: auto;
 }
 .inline-error { color: #be123c; font-size: 12px; }
 .status, .chip {
