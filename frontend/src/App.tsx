@@ -3930,6 +3930,20 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
       .finally(() => setDownloadChecking(false))
   }
 
+  function startBatchDetailDownload(ids: number[]) {
+    if (!ids.length || downloadChecking) return
+    setDownloadChecking(true)
+    void api.precheckFinalImageExport(ids)
+      .then((result) => {
+        const allComplete = result.downloadableTaskIds.length > 0
+          && result.items.every((entry) => entry.downloadableCount > 0 && !entry.issues.length)
+        if (allComplete) triggerFinalImageDownload(result.downloadableTaskIds)
+        else setDownloadPrecheck(result)
+      })
+      .catch(() => setDownloadPrecheck(null))
+      .finally(() => setDownloadChecking(false))
+  }
+
   function cancelRecordTask(item: GenerationTask) {
     if (!window.confirm('确定取消本次生成吗？已提交给生成服务的图片可能仍会完成并产生费用；系统会停止后续生成，并保留已完成结果。')) return
     void run('取消生成中...', () => api.cancelTask(item.id), (r: { item: GenerationTask }) => {
@@ -4121,7 +4135,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
         </div>
         <div className="panel record-detail">
           {batchDetail ? (
-            <BatchRecordDetail item={batchDetail} tasks={batchDetailTasks} loading={batchDetailLoading} downloadChecking={downloadChecking} onDownload={triggerFinalImageDownload} />
+            <BatchRecordDetail item={batchDetail} tasks={batchDetailTasks} loading={batchDetailLoading} downloadChecking={downloadChecking} onDownload={startBatchDetailDownload} />
           ) : detail ? (
             <>
               <h3>{detail.name}</h3>
