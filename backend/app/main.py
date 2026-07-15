@@ -1007,6 +1007,26 @@ async def _run_styling_garment_tagging_guarded(garment_id: int) -> None:
                     (str(exc), now_iso(), garment_id),
                 )
             return
+    try:
+        persist_styling_garment_tagging_result(garment_id, tagging_result)
+    except Exception as exc:
+        attempt_id = tagging_result.get("attempt_id")
+        if attempt_id:
+            finish_attempt(
+                int(attempt_id),
+                "FAILED",
+                response_snapshot={**tagging_result, "error": str(exc)},
+                error_message=str(exc),
+                error_code=classify_attempt_error(exc) or ERROR_SYSTEM_ERROR,
+            )
+        with get_db() as db:
+            db.execute(
+                "UPDATE styling_garments SET status = 'TAGGING_FAILED', tag_error = ?, updated_at = ? WHERE id = ?",
+                (str(exc), now_iso(), garment_id),
+            )
+
+
+def persist_styling_garment_tagging_result(garment_id: int, tagging_result: dict[str, Any]) -> None:
     with get_db() as db:
         timestamp = now_iso()
         row = db.execute("SELECT manual_tags_json FROM styling_garments WHERE id = ?", (garment_id,)).fetchone()
@@ -4682,7 +4702,7 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
         )
         raise GeminiProviderError(f"Gemini 打标结果不符合契约：{exc}", ERROR_MALFORMED_OUTPUT) from exc
     finish_attempt(attempt_id, "SUCCEEDED", {"raw_text": text, "raw_json": raw})
-    return tagging_result
+    return {**tagging_result, "attempt_id": attempt_id}
 
 
 def build_prompt_tagging_request_snapshot(garment: dict[str, Any], prompt: str) -> dict[str, Any]:
@@ -5753,12 +5773,19 @@ async def select_styling_with_gemini(
     try:
         if progress:
             progress.begin("styling_gemini", imageCount=len(images), candidateCount=len(candidate_snapshot.get("candidate_material_ids") or []))
-        raw = await generate_gemini_json_object_with_reask(
+        text = await generate_gemini_json_text(
             prompt,
             images,
             # 系统指令已并入 AI 选搭 Prompt 正文（prompt 内），不再单独下发 system_instruction。
             system_instruction=request_snapshot.get("systemInstruction"),
         )
+        try:
+            raw = parse_gemini_json_object(text)
+        except Exception as parse_error:
+            raise GeminiProviderError(
+                f"Gemini 返回内容不是合法 JSON：{parse_error}",
+                ERROR_MALFORMED_OUTPUT,
+            ) from parse_error
     except Exception as exc:
         raise wrap_gemini_call_error("Gemini AI Stylist 调用失败", exc) from exc
     return normalize_ai_stylist_result(raw, input_row, candidate_snapshot)

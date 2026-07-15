@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import asyncio
 import os
 from io import BytesIO
 from pathlib import Path
@@ -1031,6 +1032,134 @@ class BackendCurrentFlowTests(unittest.TestCase):
         snapshot = main.loads(row["image_snapshot_json"], [])
         self.assertEqual([item["id"] for item in snapshot], [22, 21, 23])
         self.assertEqual([item["sortOrder"] for item in snapshot], [0, 1, 2])
+
+    def test_garment_tagging_store_failure_marks_failed(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+
+        db_module.init_db()
+        timestamp = "2026-07-15T00:00:00Z"
+        with db_module.get_db() as db:
+            db.execute(
+                """
+                INSERT INTO styling_garments
+                  (id, code, status, manual_tags_json, ai_tags_json, tag_schema_version, created_at, updated_at)
+                VALUES (1, 'LOOK-1', 'TAGGING_RUNNING', '{}', '{}', 'test', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_attempts
+                  (id, owner_type, owner_id, provider, status, response_snapshot_json, created_at, updated_at)
+                VALUES (41, 'styling_garment_tagging', 1, 'gemini', 'SUCCEEDED', '{}', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+
+        original_tag = main.tag_styling_garment_with_gemini
+
+        async def fake_tag(_garment_id: int) -> dict[str, object]:
+            return {
+                "selected_image_ids": [999],
+                "ai_tags": {"一级品类": ["上装"]},
+                "tag_meta": {"confidence": 95},
+                "attempt_id": 41,
+            }
+
+        main.tag_styling_garment_with_gemini = fake_tag
+        try:
+            asyncio.run(main._run_styling_garment_tagging_guarded(1))
+        finally:
+            main.tag_styling_garment_with_gemini = original_tag
+
+        with db_module.get_db() as db:
+            row = db.execute("SELECT status, tag_error FROM styling_garments WHERE id = 1").fetchone()
+            attempt = db.execute("SELECT status, error_message FROM generation_attempts WHERE id = 41").fetchone()
+        self.assertEqual(row["status"], "TAGGING_FAILED")
+        self.assertIn("selected_files", row["tag_error"])
+        self.assertEqual(attempt["status"], "FAILED")
+        self.assertIn("selected_files", attempt["error_message"])
+
+    def test_ai_stylist_uses_single_gemini_json_call_without_reask(self) -> None:
+        main = importlib.import_module("app.main")
+        input_row = {
+            "image_snapshot_json": main.dumps([
+                {"id": 21, "sortOrder": 0, "asset": {"filename": "hero-front.jpg"}},
+            ])
+        }
+        candidate_snapshot = {"candidate_material_ids": [], "library_tag_cards": []}
+        request_snapshot = {"prompt": "Return JSON.", "systemInstruction": None}
+        calls: list[str] = []
+
+        original_configured = main.is_gemini_configured
+        original_text = main.generate_gemini_json_text
+        original_reask = main.generate_gemini_json_object_with_reask
+
+        async def fake_text(*_args: object, **_kwargs: object) -> str:
+            calls.append("text")
+            return main.dumps({
+                "selected_files": ["hero-front.jpg"],
+                "styling_plan": {
+                    "hero_understanding": {"shot_category_family": "top"},
+                    "outfit_candidates": [{"outfit_key": "solo", "selected_material_ids": []}],
+                    "selected_outfit_key": "solo",
+                },
+            })
+
+        async def fake_reask(*_args: object, **_kwargs: object) -> dict[str, object]:
+            calls.append("reask")
+            raise AssertionError("AI Stylist should not use malformed-output reask")
+
+        main.is_gemini_configured = lambda: True
+        main.generate_gemini_json_text = fake_text
+        main.generate_gemini_json_object_with_reask = fake_reask
+        try:
+            result = asyncio.run(main.select_styling_with_gemini(input_row, candidate_snapshot, request_snapshot))
+        finally:
+            main.is_gemini_configured = original_configured
+            main.generate_gemini_json_text = original_text
+            main.generate_gemini_json_object_with_reask = original_reask
+
+        self.assertEqual(calls, ["text"])
+        self.assertEqual(result["selected_hero_image_ids"], [21])
+
+    def test_ai_stylist_malformed_json_fails_without_reask(self) -> None:
+        main = importlib.import_module("app.main")
+        input_row = {
+            "image_snapshot_json": main.dumps([
+                {"id": 21, "sortOrder": 0, "asset": {"filename": "hero-front.jpg"}},
+            ])
+        }
+        candidate_snapshot = {"candidate_material_ids": [], "library_tag_cards": []}
+        request_snapshot = {"prompt": "Return JSON.", "systemInstruction": None}
+        calls: list[str] = []
+
+        original_configured = main.is_gemini_configured
+        original_text = main.generate_gemini_json_text
+        original_reask = main.generate_gemini_json_object_with_reask
+
+        async def fake_text(*_args: object, **_kwargs: object) -> str:
+            calls.append("text")
+            return "not json"
+
+        async def fake_reask(*_args: object, **_kwargs: object) -> dict[str, object]:
+            calls.append("reask")
+            return {}
+
+        main.is_gemini_configured = lambda: True
+        main.generate_gemini_json_text = fake_text
+        main.generate_gemini_json_object_with_reask = fake_reask
+        try:
+            with self.assertRaisesRegex(Exception, "Gemini AI Stylist 调用失败") as raised:
+                asyncio.run(main.select_styling_with_gemini(input_row, candidate_snapshot, request_snapshot))
+        finally:
+            main.is_gemini_configured = original_configured
+            main.generate_gemini_json_text = original_text
+            main.generate_gemini_json_object_with_reask = original_reask
+
+        self.assertEqual(calls, ["text"])
+        self.assertEqual(main.classify_attempt_error(raised.exception), main.ERROR_MALFORMED_OUTPUT)
 
 
 if __name__ == "__main__":
