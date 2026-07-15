@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
-    "render_hero_product_info_line",
     "render_user_instruction_line",
     "render_user_requirement_line",
     "render_image_reference_spans",
@@ -27,11 +26,6 @@ def _clean_text(value: Any) -> str:
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
-
-
-def render_hero_product_info_line(context: dict[str, Any]) -> str:
-    """渲染商品信息为一句话；无内容时返回空串，交由模板条件段省略整行。"""
-    return _clean_text(_as_dict(context).get("info"))
 
 
 def render_user_instruction_line(context: dict[str, Any]) -> str:

@@ -17,9 +17,9 @@ GenerationTask
 
 | 表 | 语义 |
 |---|---|
-| `generation_tasks` | 拍摄任务根节点，保存任务名、商品信息、阶段用户补充要求草稿、active 指针和自动推进意图 |
+| `generation_tasks` | 拍摄任务根节点，保存任务名、阶段用户补充要求草稿、active 指针和自动推进意图 |
 | `generation_task_images` | 当前任务主推款图片 |
-| `generation_task_input_versions` | 进入 AI 阶段时冻结的输入版本：任务名、主推款图、数字模特快照、商品信息 |
+| `generation_task_input_versions` | 进入 AI 阶段时冻结的输入版本：任务名、主推款图、数字模特快照 |
 | `generation_stylings` | AI 智能选搭结果，保存 `StylingPlan`、候选、选中搭配和 attempt |
 | `generation_previews` | 分镜预览记录，保存预览图、环境参考图、用户要求和 attempt |
 | `generation_result_sets` | 一组成片结果，固定关联一个分镜预览 |
@@ -29,7 +29,6 @@ GenerationTask
 
 ## GenerationTask 关键字段
 
-- `hero_product_info_text`
 - `ai_styling_user_instruction_text`
 - `storyboard_preview_user_instruction_text`
 - `final_image_user_instruction_text`

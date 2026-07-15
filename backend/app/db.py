@@ -12,6 +12,7 @@ from .config import get_settings
 
 MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("050", "finalize_direct_prompt_generation_workflow", "migration_finalize_direct_prompt_generation_workflow"),
+    ("051", "remove_hero_product_info", "migration_remove_hero_product_info"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -156,7 +157,6 @@ def init_db() -> None:
               name TEXT NOT NULL,
               status TEXT NOT NULL DEFAULT 'DRAFT',
               user_requirement_text TEXT,
-              hero_product_info_text TEXT,
               ai_styling_user_instruction_text TEXT,
               storyboard_preview_user_instruction_text TEXT,
               final_image_user_instruction_text TEXT,
@@ -183,7 +183,6 @@ def init_db() -> None:
               image_snapshot_json TEXT NOT NULL,
               model_snapshot_json TEXT,
               user_requirement_json TEXT,
-              hero_product_info_json TEXT,
               hero_visual_summary TEXT,
               created_at TEXT NOT NULL,
               UNIQUE(task_id, version_number)
@@ -336,6 +335,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
     }
     migration_functions = {
         "migration_finalize_direct_prompt_generation_workflow": migration_finalize_direct_prompt_generation_workflow,
+        "migration_remove_hero_product_info": migration_remove_hero_product_info,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -393,16 +393,51 @@ def migration_finalize_direct_prompt_generation_workflow(db: sqlite3.Connection)
     )
 
 
+def migration_remove_hero_product_info(db: sqlite3.Connection) -> None:
+    """移除上传阶段历史补充文本字段和输入版本冻结字段。"""
+    rebuild_generation_tasks_final(db)
+    rebuild_generation_task_input_versions_without_hero_info(db)
+    scrub_prompt_config_hero_product_info(db)
+
+
+def scrub_prompt_config_hero_product_info(db: sqlite3.Connection) -> None:
+    if not table_exists(db, "prompt_configs"):
+        return
+    rows = db.execute("SELECT key, content FROM prompt_configs WHERE content LIKE '%hero_product_info%'").fetchall()
+    replacements = (
+        ("{{#runtime.hero_product_info}}服装信息：{{runtime.hero_product_info}}\n{{/runtime.hero_product_info}}", ""),
+        ("{{#runtime.hero_product_info}}服装信息：{{runtime.hero_product_info}}\r\n{{/runtime.hero_product_info}}", ""),
+        ("{{#runtime.hero_product_info}}商品信息：{{runtime.hero_product_info}}\n{{/runtime.hero_product_info}}", ""),
+        ("{{#runtime.hero_product_info}}商品信息：{{runtime.hero_product_info}}\r\n{{/runtime.hero_product_info}}", ""),
+        ("{{#runtime.hero_product_info}}- 服装信息：{{runtime.hero_product_info}}\n{{/runtime.hero_product_info}}", ""),
+        ("{{#runtime.hero_product_info}}- 服装信息：{{runtime.hero_product_info}}\r\n{{/runtime.hero_product_info}}", ""),
+        ("{{#runtime.hero_product_info}}{{runtime.hero_product_info}}{{/runtime.hero_product_info}}", ""),
+        ("商品信息：{{runtime.hero_product_info}} 补充要求：", "补充要求："),
+        ("商品与造型：{{runtime.hero_product_info}}\n", ""),
+        ("商品与造型：{{runtime.hero_product_info}}\r\n", ""),
+        ("商品信息：{{runtime.hero_product_info}}\n", ""),
+        ("商品信息：{{runtime.hero_product_info}}\r\n", ""),
+        ("商品信息", "商品事实"),
+    )
+    for row in rows:
+        content = row["content"] or ""
+        next_content = content
+        for old, new in replacements:
+            next_content = next_content.replace(old, new)
+        if next_content != content:
+            db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?", (next_content, now_iso(), row["key"]))
+
+
 def rebuild_generation_tasks_final(db: sqlite3.Connection) -> None:
     if not table_exists(db, "generation_tasks"):
         return
     columns = table_columns(db, "generation_tasks")
-    removed = {"shoot_script_user_instruction_text", "active_shoot_script_id"}
+    removed = {"shoot_script_user_instruction_text", "active_shoot_script_id", "hero_product_info_text"}
     required = {"storyboard_preview_user_instruction_text", "final_image_user_instruction_text", "active_storyboard_preview_id", "batch_id"}
     if not removed.intersection(columns) and required.issubset(columns):
         return
     source_columns = [
-        "id", "name", "status", "user_requirement_text", "hero_product_info_text",
+        "id", "name", "status", "user_requirement_text",
         "ai_styling_user_instruction_text", "storyboard_preview_user_instruction_text",
         "final_image_user_instruction_text", "current_input_version_id", "active_styling_id",
         "active_preview_id", "active_storyboard_preview_id", "active_result_set_id",
@@ -419,7 +454,6 @@ def rebuild_generation_tasks_final(db: sqlite3.Connection) -> None:
               name TEXT NOT NULL,
               status TEXT NOT NULL DEFAULT 'DRAFT',
               user_requirement_text TEXT,
-              hero_product_info_text TEXT,
               ai_styling_user_instruction_text TEXT,
               storyboard_preview_user_instruction_text TEXT,
               final_image_user_instruction_text TEXT,
@@ -455,6 +489,62 @@ def rebuild_generation_tasks_final(db: sqlite3.Connection) -> None:
         )
 
     run_schema_rebuild_with_foreign_keys_disabled(db, rebuild)
+
+
+def rebuild_generation_task_input_versions_without_hero_info(db: sqlite3.Connection) -> None:
+    if not table_exists(db, "generation_task_input_versions"):
+        return
+    columns = table_columns(db, "generation_task_input_versions")
+    if "hero_product_info_json" not in columns:
+        return
+    source_columns = [
+        "id", "task_id", "version_number", "name_snapshot", "image_snapshot_json",
+        "model_snapshot_json", "user_requirement_json", "hero_visual_summary", "created_at",
+    ]
+    select_exprs = [column if column in columns else default_sql_for_input_version_column(column) for column in source_columns]
+
+    def rebuild() -> None:
+        db.executescript(
+            """
+            CREATE TABLE generation_task_input_versions_new (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+              version_number INTEGER NOT NULL,
+              name_snapshot TEXT NOT NULL,
+              image_snapshot_json TEXT NOT NULL,
+              model_snapshot_json TEXT,
+              user_requirement_json TEXT,
+              hero_visual_summary TEXT,
+              created_at TEXT NOT NULL,
+              UNIQUE(task_id, version_number)
+            );
+            """
+        )
+        db.execute(
+            f"""
+            INSERT INTO generation_task_input_versions_new ({", ".join(source_columns)})
+            SELECT {", ".join(select_exprs)}
+            FROM generation_task_input_versions
+            """
+        )
+        db.executescript(
+            """
+            DROP TABLE generation_task_input_versions;
+            ALTER TABLE generation_task_input_versions_new RENAME TO generation_task_input_versions;
+            """
+        )
+
+    run_schema_rebuild_with_foreign_keys_disabled(db, rebuild)
+
+
+def default_sql_for_input_version_column(column: str) -> str:
+    if column in {"name_snapshot"}:
+        return "''"
+    if column in {"image_snapshot_json"}:
+        return "'[]'"
+    if column in {"created_at"}:
+        return f"'{now_iso()}'"
+    return "NULL"
 
 
 def default_sql_for_generation_task_column(column: str) -> str:

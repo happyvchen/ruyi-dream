@@ -142,7 +142,7 @@ Prompt 配置槽：
 - 从 `styling_plan.hero_understanding.shot_category_family` 路由拍摄图位族；缺失、非法或无法映射时直接失败，不由商品 `category` / `sub_category` fallback；
 - 按顺序组装数字模特图、商品图、分镜图、环境图；
 - 渲染图号区间；
-- 注入商品信息、用户本次补充要求、选中造型摘要、当前格号和五个条件段标记；
+- 注入用户本次补充要求、选中造型摘要、当前格号和五个条件段标记；
 - 记录 request / response / provider request id / output asset。
 
 代码不负责：

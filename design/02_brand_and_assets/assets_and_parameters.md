@@ -24,7 +24,7 @@
 
 ## 主推款
 
-主推款图片挂在 `generation_task_images`。进入 AI 阶段时创建 `generation_task_input_versions`，冻结当前图片顺序、任务名、商品信息和默认数字模特快照。
+主推款图片挂在 `generation_task_images`。进入 AI 阶段时创建 `generation_task_input_versions`，冻结当前图片顺序、任务名和默认数字模特快照。
 
 AI 摄影棚主推款上传最多取 15 张作为 Gemini 候选输入。点击 `AI 智能选搭` 时，Gemini 必须在同一次调用中完成主推款图片挑选/排序与 `styling_plan` 输出；后端保存 Gemini 返回的 `selected_files` 前 8 张作为本次主推款输入版本的推荐参考图顺序，并保存完整 request / response 快照用于追溯。
 

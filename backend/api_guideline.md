@@ -14,7 +14,7 @@
 
 - `POST /api/generation-tasks`：上传主推款并创建草稿任务。
 - `POST /api/generation-tasks/from-uploads`：基于已上传对象创建任务。
-- `PATCH /api/generation-tasks/{task_id}`：保存任务名、商品信息和各阶段用户补充要求草稿。
+- `PATCH /api/generation-tasks/{task_id}`：保存任务名和各阶段用户补充要求草稿。
 - `POST /api/generation-tasks/{task_id}/styling`：运行 AI 智能选搭，输出当前 `StylingPlan`。
 - `POST /api/generation-tasks/{task_id}/preview`：按拍摄图位族选择三类固定分镜 Prompt，调用 Image-2 生成 3:2 六格分镜预览。
 - `POST /api/generation-tasks/{task_id}/generate-final`：按分镜前 5 格并发生成最终成片。
@@ -91,7 +91,6 @@ ABANDONED
 - `runtime.ref_model_identity`
 - `runtime.ref_garment`
 - `runtime.ref_shoot_environment`
-- `runtime.hero_product_info`
 - `runtime.storyboard_preview_user_instruction`
 - `runtime.category_family`
 
@@ -102,7 +101,6 @@ ABANDONED
 - `runtime.ref_preview_grid`
 - `runtime.ref_garment`
 - `runtime.ref_shoot_environment`
-- `runtime.hero_product_info`
 - `runtime.final_image_user_instruction`
 - `runtime.shot_styling`
 - `runtime.shot_global_directing`

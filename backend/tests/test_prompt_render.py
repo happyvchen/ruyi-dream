@@ -14,7 +14,6 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app.prompt_render import (  # noqa: E402
-    render_hero_product_info_line,
     render_image_reference_spans,
     render_user_instruction_line,
     render_user_requirement_line,
@@ -22,19 +21,12 @@ from app.prompt_render import (  # noqa: E402
 
 
 class RenderUserLineTests(unittest.TestCase):
-    def test_hero_info_present(self) -> None:
-        self.assertEqual(render_hero_product_info_line({"info": "夏季主推裙装"}), "夏季主推裙装")
-
-    def test_hero_info_empty(self) -> None:
-        self.assertEqual(render_hero_product_info_line({"info": ""}), "")
-        self.assertEqual(render_hero_product_info_line({}), "")
-
     def test_instruction_present_and_empty(self) -> None:
         self.assertEqual(render_user_instruction_line({"instruction": "姿态更舒展"}), "姿态更舒展")
         self.assertEqual(render_user_instruction_line({"instruction": ""}), "")
 
     def test_double_period_cleaned(self) -> None:
-        self.assertEqual(render_hero_product_info_line({"info": "重点展示腰线。。"}), "重点展示腰线。")
+        self.assertEqual(render_user_instruction_line({"instruction": "重点展示腰线。。"}), "重点展示腰线。")
 
     def test_user_requirement_combined_and_fallback(self) -> None:
         self.assertEqual(
@@ -42,8 +34,8 @@ class RenderUserLineTests(unittest.TestCase):
             "重点腰线；避免厚外套",
         )
         self.assertEqual(
-            render_user_requirement_line({"combined_requirement": "", "upload_requirement": "夏季主推"}),
-            "夏季主推",
+            render_user_requirement_line({"combined_requirement": "", "styling_adjustment": "避免厚外套"}),
+            "",
         )
         self.assertEqual(render_user_requirement_line({}), "")
 

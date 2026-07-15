@@ -38,9 +38,16 @@ export type FacetOption = {
   count: number
 }
 
+export type CategoryTreeOption = FacetOption & {
+  children?: FacetOption[]
+}
+
 export type StylingGarmentFacets = {
   status?: FacetOption[]
   category?: FacetOption[]
+  primaryCategory?: FacetOption[]
+  secondaryCategory?: FacetOption[]
+  categoryTree?: CategoryTreeOption[]
   color?: FacetOption[]
   season?: FacetOption[]
   series?: FacetOption[]
@@ -50,6 +57,7 @@ export type StylingGarmentFacets = {
 
 export type StylingGarmentListResponse = Paginated<StylingGarment> & {
   facets?: StylingGarmentFacets
+  stableFacets?: StylingGarmentFacets
 }
 
 export type MediaAsset = {
@@ -163,7 +171,6 @@ export type GenerationTask = {
   id: number
   name: string
   status: string
-  heroProductInfo?: string | null
   userRequirement?: string | null
   stageUserInputs?: {
     aiStyling?: string | null
@@ -190,7 +197,6 @@ export type GenerationTask = {
     versionNumber: number
     imageSnapshot: { sortOrder: number; asset: MediaAsset }[]
     modelSnapshot?: Record<string, unknown>
-    heroProductInfo?: Record<string, unknown>
     userRequirement?: Record<string, unknown>
   } | null
   styling?: {
@@ -469,6 +475,8 @@ export const api = {
     includeArchived?: boolean
     status?: string[]
     category?: string[]
+    primaryCategory?: string[]
+    secondaryCategory?: string[]
     color?: string[]
     season?: string[]
     series?: string[]
@@ -547,11 +555,11 @@ export const api = {
     request<{ ok: boolean; purged: boolean; deletedTaskIds: number[] }>('/api/generation-tasks/batch-purge', { method: 'POST', body: JSON.stringify({ purge: true, ids, confirmPhrase }) }),
   getTaskDeleteImpact: (ids: number[]) =>
     request<{ impact: DeleteImpact }>('/api/generation-tasks/delete-impact', { method: 'POST', body: JSON.stringify({ ids }) }),
-  createTask: async (name: string, files: File[], heroProductInfo?: string, batchId?: string) => {
+  createTask: async (name: string, files: File[], batchId?: string) => {
     const uploads = await uploadFilesDirect('generation_task', files)
     return request<{ item: GenerationTask }>('/api/generation-tasks/from-uploads', {
       method: 'POST',
-      body: JSON.stringify({ name, heroProductInfo, batchId, uploads }),
+      body: JSON.stringify({ name, batchId, uploads }),
     })
   },
   listBatchTasks: (batchId: string) =>
@@ -562,7 +570,6 @@ export const api = {
     request<{ cancelledTaskIds: number[]; items: GenerationTask[] }>(`/api/generation-batches/${encodeURIComponent(batchId)}/cancel`, { method: 'POST' }),
   updateTask: (id: number, payload: {
     name?: string
-    heroProductInfo?: string
     aiStylingUserInstruction?: string
     storyboardPreviewUserInstruction?: string
     finalImageUserInstruction?: string

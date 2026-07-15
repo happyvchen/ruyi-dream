@@ -495,7 +495,6 @@ class BackendCurrentFlowTests(unittest.TestCase):
                 "/api/generation-tasks/from-uploads",
                 json={
                     "name": "Direct Upload Task",
-                    "heroProductInfo": "格纹连衣裙",
                     "uploads": [
                         {"objectKey": object_key, "filename": f"look-{index:02d}.jpg", "mimeType": "image/jpeg", "sizeBytes": len(image_bytes)}
                         for index, object_key in enumerate(object_keys, start=1)

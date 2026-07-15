@@ -14,8 +14,7 @@
 【品牌信息】
 {{segment.brand_info}}
 
-{{#runtime.hero_product_info}}服装信息：{{runtime.hero_product_info}}
-{{/runtime.hero_product_info}}{{#runtime.user_requirement}}用户要求：{{runtime.user_requirement}}
+{{#runtime.user_requirement}}用户要求：{{runtime.user_requirement}}
 {{/runtime.user_requirement}}
 
 【决策原则】

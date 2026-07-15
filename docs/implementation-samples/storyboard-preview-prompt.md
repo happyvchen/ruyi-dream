@@ -12,8 +12,7 @@
 数字模特参考图用于保持同一身份、发型和气质
 本次用户要求：若存在，优先满足；若冲突，说明取舍
 
-{{#runtime.hero_product_info}}服装信息：{{runtime.hero_product_info}}
-{{/runtime.hero_product_info}}{{#runtime.storyboard_preview_user_instruction}}用户要求：{{runtime.storyboard_preview_user_instruction}}
+{{#runtime.storyboard_preview_user_instruction}}用户要求：{{runtime.storyboard_preview_user_instruction}}
 {{/runtime.storyboard_preview_user_instruction}}
 
 【参考图职责】
@@ -21,6 +20,6 @@
 {{runtime.ref_garment}} 只决定主推款与已选搭配服装的真实颜色、长度、廓形、材质和结构
 {{runtime.ref_shoot_environment}} 只决定影棚背景、光线、墙面与地面
 
-按 `runtime.category_family` 对应的固定六镜头规则生成 3:2 横版分镜预览（3 列 × 2 行、6 个 1:1 方格）。六格规则、姿态、裁切、背景和镜头 5 安全区写在 Prompt 正文中；代码只注入商品信息、参考图图号和用户补充要求。
+按 `runtime.category_family` 对应的固定六镜头规则生成 3:2 横版分镜预览（3 列 × 2 行、6 个 1:1 方格）。六格规则、姿态、裁切、背景和镜头 5 安全区写在 Prompt 正文中；代码只注入参考图图号和用户补充要求。
 
 ```

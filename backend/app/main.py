@@ -29,7 +29,6 @@ from pydantic import BaseModel, Field
 from .config import get_settings
 from .db import dumps, get_db, init_db, loads, log_event, now_iso
 from .prompt_render import (
-    render_hero_product_info_line,
     render_image_reference_spans,
     render_user_instruction_line,
     render_user_requirement_line,
@@ -315,11 +314,9 @@ class StylingGarmentImageUpdateRequest(BaseModel):
 
 class GenerationTaskUpdateRequest(BaseModel):
     name: str | None = None
-    heroProductInfo: str | None = None
     aiStylingUserInstruction: str | None = None
     storyboardPreviewUserInstruction: str | None = None
     finalImageUserInstruction: str | None = None
-    userRequirement: str | None = None
 
 
 class DirectUploadFileRequest(BaseModel):
@@ -342,8 +339,6 @@ class UploadedMediaRequest(BaseModel):
 
 class GenerationTaskFromUploadsRequest(BaseModel):
     name: str | None = None
-    heroProductInfo: str | None = None
-    userRequirement: str | None = None
     batchId: str | None = None
     uploads: list[UploadedMediaRequest] = Field(default_factory=list)
 
@@ -750,6 +745,8 @@ def list_styling_garments(
     keyword: str | None = Query(None),
     status: list[str] | None = Query(None),
     category: list[str] | None = Query(None),
+    primary_category: list[str] | None = Query(None, alias="primaryCategory"),
+    secondary_category: list[str] | None = Query(None, alias="secondaryCategory"),
     color: list[str] | None = Query(None),
     season: list[str] | None = Query(None),
     series: list[str] | None = Query(None),
@@ -814,10 +811,22 @@ def list_styling_garments(
             query_params,
         ).fetchall()
         contexts = [styling_garment_filter_context(row) for row in rows]
+        facet_rows = db.execute(
+            """
+            SELECT sg.*
+            FROM styling_garments sg
+            WHERE sg.deleted_at IS NULL AND (? OR sg.archived_at IS NULL)
+            ORDER BY sg.created_at DESC, sg.id DESC
+            """,
+            (include_archived,),
+        ).fetchall()
+        stable_facets = styling_garment_facets([styling_garment_filter_context(row) for row in facet_rows])
         filters = {
             "keyword": keyword,
             "status": status_values,
             "category": split_filter_values(category),
+            "primaryCategory": split_filter_values(primary_category),
+            "secondaryCategory": split_filter_values(secondary_category),
             "color": split_filter_values(color),
             "season": split_filter_values(season),
             "series": split_filter_values(series),
@@ -840,6 +849,7 @@ def list_styling_garments(
             "total": total,
             "totalPages": (total + limit - 1) // limit if total else 0,
             "facets": facets,
+            "stableFacets": stable_facets,
         }
 
 
@@ -863,8 +873,13 @@ def styling_garment_filter_context(row: Any) -> dict[str, Any]:
     if not effective_tags:
         effective_tags = build_effective_tags(ai_tags, official_title_tags, manual_tags)
     tag_meta = loads(row["tag_meta_json"], {}) if "tag_meta_json" in row.keys() else {}
+    primary_category = fact_values(ai_tags, effective_tags, official_title_tags, "category", "category_label", "一级品类", "品类")
+    secondary_category = fact_values(ai_tags, effective_tags, official_title_tags, "sub_category", "二级品类", "official_category_terms")
     facts = {
-        "category": fact_values(ai_tags, effective_tags, official_title_tags, "category", "category_label", "sub_category", "一级品类", "二级品类", "品类", "official_category_terms"),
+        "primaryCategory": primary_category,
+        "secondaryCategory": secondary_category,
+        "category": list(dict.fromkeys([*primary_category, *secondary_category])),
+        "categoryPairs": category_value_pairs(primary_category, secondary_category),
         "color": fact_values(ai_tags, effective_tags, official_title_tags, "colors", "color_labels", "色彩", "颜色"),
         "season": fact_values(ai_tags, effective_tags, official_title_tags, manual_tags, "season", "季节", "season_text", "season_year", "season_drop"),
         "series": fact_values(ai_tags, effective_tags, official_title_tags, manual_tags, "series", "official_series", "internal_collection", "collaboration"),
@@ -909,6 +924,16 @@ def fact_values(*sources_and_keys: Any) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
 
 
+def category_value_pairs(primary_values: list[str], secondary_values: list[str]) -> list[tuple[str, str | None]]:
+    if not primary_values:
+        return [("未分类", secondary) for secondary in secondary_values]
+    if len(primary_values) == 1:
+        return [(primary_values[0], secondary) for secondary in secondary_values] or [(primary_values[0], None)]
+    if len(primary_values) == len(secondary_values):
+        return list(zip(primary_values, secondary_values))
+    return [(primary, None) for primary in primary_values]
+
+
 def styling_garment_review_status(status: str, tag_meta: dict[str, Any]) -> str:
     if status == "TAGGING_READY" or bool(tag_meta.get("needs_review")):
         return "needs_review"
@@ -925,12 +950,35 @@ def styling_garment_facets(contexts: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "status": facet_options(context["row"]["status"] for context in contexts),
         "category": facet_options(value for context in contexts for value in context["facts"]["category"]),
+        "primaryCategory": facet_options(value for context in contexts for value in context["facts"]["primaryCategory"]),
+        "secondaryCategory": facet_options(value for context in contexts for value in context["facts"]["secondaryCategory"]),
+        "categoryTree": category_tree_options(contexts),
         "color": facet_options(value for context in contexts for value in context["facts"]["color"]),
         "season": facet_options(value for context in contexts for value in context["facts"]["season"]),
         "series": facet_options(value for context in contexts for value in context["facts"]["series"]),
         "channel": facet_options(value for context in contexts for value in context["facts"]["channel"]),
         "reviewStatus": facet_options(context["reviewStatus"] for context in contexts),
     }
+
+
+def category_tree_options(contexts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tree: dict[str, dict[str, Any]] = {}
+    for context in contexts:
+        for primary, secondary in context["facts"]["categoryPairs"]:
+            primary_text = str(primary)
+            primary_key = primary_text.casefold()
+            node = tree.setdefault(primary_key, {"value": primary_text, "label": primary_text, "count": 0, "children": {}})
+            node["count"] += 1
+            if secondary:
+                secondary_text = str(secondary)
+                child_key = secondary_text.casefold()
+                child = node["children"].setdefault(child_key, {"value": secondary_text, "label": secondary_text, "count": 0})
+                child["count"] += 1
+    result: list[dict[str, Any]] = []
+    for node in tree.values():
+        children = sorted(node["children"].values(), key=lambda item: (-int(item["count"]), str(item["label"]).casefold()))
+        result.append({**node, "children": children})
+    return sorted(result, key=lambda item: (-int(item["count"]), str(item["label"]).casefold()))
 
 
 def facet_options(values: Any) -> list[dict[str, Any]]:
@@ -950,7 +998,12 @@ def styling_garment_matches_filters(context: dict[str, Any], filters: dict[str, 
     keyword = str(filters.get("keyword") or "").strip().casefold()
     if keyword and keyword not in context["keywordBlob"]:
         return False
-    for name in ("category", "color", "season", "series", "channel"):
+    category_terms = set(filters.get("category") or set())
+    category_terms.update(filters.get("primaryCategory") or set())
+    category_terms.update(filters.get("secondaryCategory") or set())
+    if category_terms and not category_terms.intersection(value.casefold() for value in context["facts"]["category"]):
+        return False
+    for name in ("color", "season", "series", "channel"):
         selected = filters.get(name) or set()
         if selected and not selected.intersection(value.casefold() for value in context["facts"][name]):
             return False
@@ -1750,8 +1803,6 @@ def purge_styling_garment(db: Any, garment_id: int, code: str) -> tuple[list[int
 @app.post("/api/generation-tasks")
 async def create_generation_task(
     name: str | None = Form(None),
-    heroProductInfo: str | None = Form(None),
-    userRequirement: str | None = Form(None),
     files: list[UploadFile] = File(...),
 ) -> dict[str, Any]:
     if not files:
@@ -1761,11 +1812,10 @@ async def create_generation_task(
     prefix = join_key("generation-tasks", f"{sanitize_name(task_name) or 'task'}-{uuid4().hex[:8]}")
     assets = await save_uploads_as_media_assets(files, prefix)
     timestamp = now_iso()
-    hero_product_info_text = normalize_user_input_text(heroProductInfo if heroProductInfo is not None else userRequirement)
     with get_db() as db:
         cursor = db.execute(
-            "INSERT INTO generation_tasks (name, hero_product_info_text, user_requirement_text, status, created_at, updated_at) VALUES (?, ?, ?, 'DRAFT', ?, ?)",
-            (task_name, hero_product_info_text, hero_product_info_text, timestamp, timestamp),
+            "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES (?, 'DRAFT', ?, ?)",
+            (task_name, timestamp, timestamp),
         )
         task_id = int(cursor.lastrowid)
         for index, asset in enumerate(assets):
@@ -1788,15 +1838,12 @@ async def create_generation_task_from_uploads(payload: GenerationTaskFromUploads
     task_name = (payload.name or datetime.now().strftime("%Y%m%d%H%M%S")).strip()
     assets = await save_uploaded_objects_as_media_assets(uploads)
     timestamp = now_iso()
-    hero_product_info_text = normalize_user_input_text(
-        payload.heroProductInfo if payload.heroProductInfo is not None else payload.userRequirement
-    )
     try:
         with get_db() as db:
             batch_id = (payload.batchId or "").strip()[:64] or None
             cursor = db.execute(
-                "INSERT INTO generation_tasks (name, hero_product_info_text, user_requirement_text, batch_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'DRAFT', ?, ?)",
-                (task_name, hero_product_info_text, hero_product_info_text, batch_id, timestamp, timestamp),
+                "INSERT INTO generation_tasks (name, batch_id, status, created_at, updated_at) VALUES (?, ?, 'DRAFT', ?, ?)",
+                (task_name, batch_id, timestamp, timestamp),
             )
             task_id = int(cursor.lastrowid)
             for index, asset in enumerate(assets):
@@ -2079,8 +2126,6 @@ def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -
     }
     if (
         payload.name is None
-        and not payload_has_field(payload, "heroProductInfo")
-        and not payload_has_field(payload, "userRequirement")
         and not any(payload_has_field(payload, field) for field in instruction_fields)
     ):
         return {"item": get_generation_task_by_id(task_id)}
@@ -2094,13 +2139,6 @@ def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -
         if payload.name is not None:
             updates.append("name = ?")
             values.append(payload.name.strip() or "未命名任务")
-        if payload_has_field(payload, "heroProductInfo") or payload_has_field(payload, "userRequirement"):
-            hero_info = payload.heroProductInfo if payload_has_field(payload, "heroProductInfo") else payload.userRequirement
-            normalized = normalize_user_input_text(hero_info)
-            updates.append("hero_product_info_text = ?")
-            values.append(normalized)
-            updates.append("user_requirement_text = ?")
-            values.append(normalized)
         for field, column in instruction_fields.items():
             if payload_has_field(payload, field):
                 updates.append(f"{column} = ?")
@@ -2613,10 +2651,9 @@ async def run_select_generation_styling(
     }:
         raise HTTPException(status_code=409, detail="当前任务状态不能智能选搭")
     effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "ai_styling")
-    hero_product_info_context = build_hero_product_info_context(task)
     user_instruction_context = build_stage_user_instruction_context("ai_styling", effective_user_instruction)
     user_requirement_context = build_user_requirement_context(task, effective_user_instruction)
-    input_version_id = create_generation_input_version(task_id, hero_product_info_context)
+    input_version_id = create_generation_input_version(task_id)
     with get_db() as db:
         timestamp = now_iso()
         if user_instruction is not None:
@@ -2655,7 +2692,6 @@ async def run_select_generation_styling(
         progress.begin("styling_context")
         input_row, candidate_snapshot, request_snapshot = build_ai_stylist_context(input_version_id)
         request_snapshot["invocation"] = {"mode": trigger, "target": "styling"}
-        request_snapshot["hero_product_info"] = hero_product_info_context
         request_snapshot["ai_styling_user_instruction"] = user_instruction_context
         request_snapshot["user_requirement"] = user_requirement_context
         request_snapshot = attach_ai_stylist_prompt_snapshot(request_snapshot, candidate_snapshot)
@@ -2772,7 +2808,7 @@ async def run_create_generation_preview(task_id: int, include_debug: bool = Fals
         and not (task["status"] == "FAILED" and not task["active_storyboard_preview_id"])
     ):
         raise HTTPException(status_code=409, detail="请先完成 AI 智能选搭")
-    input_version_id = create_generation_input_version(task_id, build_hero_product_info_context(task))
+    input_version_id = create_generation_input_version(task_id)
     with get_db() as db:
         db.execute("UPDATE generation_tasks SET status = 'PREVIEW_RUNNING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
     timestamp = now_iso()
@@ -3093,7 +3129,7 @@ async def run_generate_final_images(
                     job_key=final_set_job_key(int(task["active_result_set_id"])),
                 )
             return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
-    input_version_id = create_generation_input_version(task_id, build_hero_product_info_context(task))
+    input_version_id = create_generation_input_version(task_id)
     timestamp = now_iso()
     with get_db() as db:
         if user_instruction is not None:
@@ -3315,7 +3351,7 @@ async def retry_new_result_image(image_id: int, request: Request, payload: Gener
         previous_attempt_id = int(row["active_attempt_id"]) if row["active_attempt_id"] else None
     task_id = int(row["task_id"])
     result_set_id = int(row["result_set_id"])
-    input_version_id = create_generation_input_version(task_id, build_hero_product_info_context(get_generation_task_row(task_id)))
+    input_version_id = create_generation_input_version(task_id)
     timestamp = now_iso()
     user_instruction_context = build_stage_user_instruction_context("final_image", effective_user_instruction)
     attempt_id = create_attempt(
@@ -4436,19 +4472,6 @@ def normalize_user_requirement_text(value: str | None) -> str:
     return normalize_user_input_text(value)
 
 
-def build_hero_product_info_context(task: Any) -> dict[str, Any]:
-    text = normalize_user_input_text(
-        row_value(task, "hero_product_info_text", None)
-        if row_value(task, "hero_product_info_text", None) is not None
-        else row_value(task, "user_requirement_text", "")
-    )
-    # 只保留可变数据（info）。优先级/不可覆盖边界等固定规则由 Prompt 维护模板正文声明。
-    return {
-        "schema_version": "hero-product-info-v1",
-        "info": text,
-    }
-
-
 def build_stage_user_instruction_context(stage: str, instruction: str | None = None) -> dict[str, Any]:
     text = normalize_user_input_text(instruction)
     # 只保留可变数据（instruction）。优先级/不可覆盖边界由 Prompt 维护模板正文声明。
@@ -4460,13 +4483,11 @@ def build_stage_user_instruction_context(stage: str, instruction: str | None = N
 
 
 def build_user_requirement_context(task: Any, styling_adjustment: str | None = None) -> dict[str, Any]:
-    upload_requirement = normalize_user_input_text(row_value(task, "hero_product_info_text", None) or row_value(task, "user_requirement_text", ""))
     adjustment = normalize_user_input_text(styling_adjustment)
-    combined_parts = [part for part in (upload_requirement, adjustment) if part]
+    combined_parts = [part for part in (adjustment,) if part]
     # 只保留可变数据（合并后的用户要求）。优先级/不可覆盖边界由 Prompt 维护模板正文声明。
     return {
         "schema_version": "user-requirement-v1",
-        "upload_requirement": upload_requirement,
         "styling_adjustment": adjustment,
         "combined_requirement": "；".join(combined_parts),
     }
@@ -5671,7 +5692,7 @@ def get_generation_task_row(task_id: int) -> Any:
     return row
 
 
-def create_generation_input_version(task_id: int, hero_product_info_context: dict[str, Any] | None = None) -> int:
+def create_generation_input_version(task_id: int) -> int:
     task = get_generation_task_row(task_id)
     with get_db() as db:
         image_rows = db.execute(
@@ -5698,8 +5719,8 @@ def create_generation_input_version(task_id: int, hero_product_info_context: dic
         cursor = db.execute(
             """
             INSERT INTO generation_task_input_versions
-              (task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, user_requirement_json, hero_product_info_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              (task_id, version_number, name_snapshot, image_snapshot_json, model_snapshot_json, user_requirement_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -5708,7 +5729,6 @@ def create_generation_input_version(task_id: int, hero_product_info_context: dic
                 dumps(snapshot),
                 dumps(model_snapshot),
                 dumps(build_user_requirement_context(task)),
-                dumps(hero_product_info_context or build_hero_product_info_context(task)),
                 timestamp,
             ),
         )
@@ -5992,7 +6012,7 @@ def normalize_ai_stylist_result(raw: Any, input_row: Any, candidate_snapshot: di
 
 
 def attach_ai_stylist_prompt_snapshot(request_snapshot: dict[str, Any], candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
-    # P3：商品信息/用户要求/本步骤介入要求以自然语言文本填充占位符，去掉重复的
+    # P3：用户要求/本步骤介入要求以自然语言文本填充占位符，去掉重复的
     # priority_policy / cannot_override 治理元数据——优先级与冲突处理已由
     # AI 选搭 Prompt 正文（含开头系统指令段）声明一次。candidate_retrieval 是
     # 结构化标签事实业务输入，保持 JSON。
@@ -6001,7 +6021,6 @@ def attach_ai_stylist_prompt_snapshot(request_snapshot: dict[str, Any], candidat
     prompt_runtime = {
         "hero_image_files": dumps(image_selection_prompt_files(hero_images, MAX_HERO_IMAGE_INPUTS)),
         "candidate_retrieval": dumps(candidate_retrieval_for_prompt(candidate_snapshot)),
-        "hero_product_info": render_hero_product_info_line(request_snapshot.get("hero_product_info") or {}),
         "ai_styling_user_instruction": render_user_instruction_line(request_snapshot.get("ai_styling_user_instruction") or {}),
         "user_requirement": render_user_requirement_line(request_snapshot.get("user_requirement") or {}),
     }
@@ -6057,7 +6076,6 @@ def build_phase_one_brand_style_evidence() -> list[dict[str, Any]]:
 
 def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
     user_requirement = loads(row_value(input_row, "user_requirement_json"), build_user_requirement_context({}))
-    hero_product_info = loads(row_value(input_row, "hero_product_info_json"), build_hero_product_info_context({}))
     return {
         "schema_version": "ai-stylist-request-v1",
         **gemini_request_meta(),
@@ -6068,11 +6086,9 @@ def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[s
             "taskId": input_row["task_id"],
             "nameSnapshot": input_row["name_snapshot"],
             "imageSnapshot": loads(input_row["image_snapshot_json"], []),
-            "heroProductInfo": hero_product_info,
             "userRequirement": user_requirement,
         },
         "candidate_retrieval": candidate_snapshot,
-        "hero_product_info": hero_product_info,
         "ai_styling_user_instruction": {},
         "user_requirement": user_requirement,
         "prompt_rule_source": AI_STYLING_PROMPT_CONFIG_KEY,
@@ -6980,9 +6996,8 @@ def build_new_preview_task_package(
         ).fetchone() if input_version_id is not None else None
     environment_asset_id = row_value(preview_row, "environment_asset_id")
     image_inputs = build_new_image_inputs(task_id, styling_id, include_preview=False, input_version_id=input_version_id, environment_asset_id=environment_asset_id)
-    hero_product_info = loads(row_value(input_row, "hero_product_info_json"), build_hero_product_info_context({}))
     storyboard_preview_user_instruction = loads(row_value(preview_row, "user_instruction_json"), build_stage_user_instruction_context("storyboard_preview"))
-    prompt_runtime = build_preview_prompt_runtime(styling_plan, image_inputs, hero_product_info, storyboard_preview_user_instruction)
+    prompt_runtime = build_preview_prompt_runtime(styling_plan, image_inputs, storyboard_preview_user_instruction)
     prompt = render_prompt_template(prompt_config_key, prompt_runtime)
     return {
         "generation": {"stage": "preview_grid"},
@@ -6991,7 +7006,6 @@ def build_new_preview_task_package(
         **prompt_execution_facts(prompt_config_key, prompt, prompt_runtime),
         "imageInputs": image_inputs,
         "inputVersionId": input_version_id,
-        "heroProductInfo": hero_product_info,
         "storyboardPreviewUserInstruction": storyboard_preview_user_instruction,
         "stylingPlan": styling_plan,
     }
@@ -7000,19 +7014,17 @@ def build_new_preview_task_package(
 def build_new_preview_prompt(
     styling_plan: dict[str, Any],
     image_inputs: list[dict[str, Any]] | None = None,
-    hero_product_info: dict[str, Any] | None = None,
     storyboard_preview_user_instruction: dict[str, Any] | None = None,
 ) -> str:
-    # 渲染层只输出「可变数据」：参考图职能图号区间、商品信息、用户要求和选中造型摘要。
+    # 渲染层只输出「可变数据」：参考图职能图号区间、用户要求和选中造型摘要。
     # 六镜头策略、职能描述与事实源约束由 Prompt 维护模板正文托管（配合条件段）。
-    runtime = build_preview_prompt_runtime(styling_plan, image_inputs or [], hero_product_info or {}, storyboard_preview_user_instruction or {})
+    runtime = build_preview_prompt_runtime(styling_plan, image_inputs or [], storyboard_preview_user_instruction or {})
     return render_prompt_template(storyboard_prompt_config_key(styling_plan), runtime)
 
 
 def build_preview_prompt_runtime(
     styling_plan: dict[str, Any],
     image_inputs: list[dict[str, Any]],
-    hero_product_info: dict[str, Any],
     storyboard_preview_user_instruction: dict[str, Any],
 ) -> dict[str, Any]:
     spans = render_image_reference_spans(image_inputs or [])
@@ -7021,7 +7033,6 @@ def build_preview_prompt_runtime(
         "ref_model_identity": spans["model_identity"],
         "ref_garment": spans["garment"],
         "ref_shoot_environment": spans["shoot_environment"],
-        "hero_product_info": render_hero_product_info_line(hero_product_info or {}),
         "storyboard_preview_user_instruction": render_user_instruction_line(storyboard_preview_user_instruction or {}),
     }
 
@@ -7049,15 +7060,12 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         input_version_id=int(row["input_version_id"]),
         environment_asset_id=row["environment_asset_id"],
     )
-    with get_db() as db:
-        input_row = db.execute("SELECT hero_product_info_json FROM generation_task_input_versions WHERE id = ?", (row["input_version_id"],)).fetchone()
-    hero_product_info = loads(row_value(input_row, "hero_product_info_json"), build_hero_product_info_context({}))
     final_image_user_instruction = loads(
         row_value(row, "user_instruction_json"),
         loads(row_value(row, "result_set_user_instruction_json"), build_stage_user_instruction_context("final_image")),
     )
     prompt_config_key = final_image_prompt_config_key(styling_plan)
-    prompt_runtime = build_final_prompt_runtime(int(row["sort_order"]), str(row["shot_role"]), styling_plan, image_inputs, hero_product_info, final_image_user_instruction)
+    prompt_runtime = build_final_prompt_runtime(int(row["sort_order"]), str(row["shot_role"]), styling_plan, image_inputs, final_image_user_instruction)
     prompt = render_prompt_template(prompt_config_key, prompt_runtime)
     return {
         "generation": {"stage": "final_image"},
@@ -7065,7 +7073,6 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         "categoryFamily": storyboard_category_family(styling_plan),
         **prompt_execution_facts(prompt_config_key, prompt, prompt_runtime),
         "imageInputs": image_inputs,
-        "heroProductInfo": hero_product_info,
         "finalImageUserInstruction": final_image_user_instruction,
         "stylingPlan": styling_plan,
         "shotRole": row["shot_role"],
@@ -7077,12 +7084,11 @@ def build_new_final_prompt(
     shot_role: str,
     styling_plan: dict[str, Any],
     image_inputs: list[dict[str, Any]] | None = None,
-    hero_product_info: dict[str, Any] | None = None,
     final_image_user_instruction: dict[str, Any] | None = None,
 ) -> str:
     # 渲染层只输出「可变数据」：当前镜头各分段正文、分镜预览格号、参考图各职能图号区间、
-    # 商品信息、用户要求。表头、分镜参考话术与事实源约束由 Prompt 维护模板正文托管。
-    runtime = build_final_prompt_runtime(shot_index, shot_role, styling_plan, image_inputs or [], hero_product_info or {}, final_image_user_instruction or {})
+    # 用户要求。表头、分镜参考话术与事实源约束由 Prompt 维护模板正文托管。
+    runtime = build_final_prompt_runtime(shot_index, shot_role, styling_plan, image_inputs or [], final_image_user_instruction or {})
     return render_prompt_template(final_image_prompt_config_key(styling_plan), runtime)
 
 
@@ -7091,7 +7097,6 @@ def build_final_prompt_runtime(
     shot_role: str,
     styling_plan: dict[str, Any],
     image_inputs: list[dict[str, Any]],
-    hero_product_info: dict[str, Any],
     final_image_user_instruction: dict[str, Any],
 ) -> dict[str, Any]:
     spans = render_image_reference_spans(image_inputs or [])
@@ -7107,7 +7112,6 @@ def build_final_prompt_runtime(
         "ref_preview_grid": spans["preview_grid"],
         "ref_garment": spans["garment"],
         "ref_shoot_environment": spans["shoot_environment"],
-        "hero_product_info": render_hero_product_info_line(hero_product_info or {}),
         "final_image_user_instruction": render_user_instruction_line(final_image_user_instruction or {}),
     }
     for index in range(1, 6):
@@ -7484,8 +7488,7 @@ def sample_prompt_runtime() -> dict[str, Any]:
         ]),
         "candidate_retrieval": dumps([{"code": "LOOK-A", "ai_tags": {"一级品类": ["上装"], "色彩": ["白色"], "版型": ["合体"], "风格语义": "轻量上装服务主推裤装。"}}]),
         "styling_result": dumps({"hero_understanding": {"category": "裤装", "sub_category": "trousers", "shot_category_family": "bottom"}, "selected_material_codes": ["LOOK-A"], "reason_summary": "轻量上装服务主推裤装。"}),
-        # 商品信息 / 各阶段用户要求（已渲染为一句话）
-        "hero_product_info": "夏季主推裤装，重点展示腰头和裤脚。",
+        # 各阶段用户要求（已渲染为一句话）
         "user_requirement": "重点展示腰线，避免厚重外套。",
         "ai_styling_user_instruction": "不要厚重外套，优先轻盈通勤。",
         "storyboard_preview_user_instruction": "分镜姿态更舒展。",
@@ -7518,7 +7521,6 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.styling_garment", "scope": "runtime", "description": "AI 打标使用的当前搭配服装 code 和图片输入摘要"},
         {"name": "runtime.hero_image_files", "scope": "runtime", "description": "主推款图片挑选/排序使用的文件标识、原始文件名和基础元数据"},
         {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服装库 READY 服饰的全量 AI 标签事实卡"},
-        {"name": "runtime.hero_product_info", "scope": "runtime", "description": "跟随主推款输入版本冻结的商品信息和业务事实补充"},
         {"name": "runtime.ai_styling_user_instruction", "scope": "runtime", "description": "AI 智能选搭本次执行的用户介入要求"},
         {"name": "runtime.storyboard_preview_user_instruction", "scope": "runtime", "description": "分镜预览本次执行的用户介入要求"},
         {"name": "runtime.final_image_user_instruction", "scope": "runtime", "description": "最终成片或单张重生本次执行的用户介入要求"},
@@ -8460,7 +8462,6 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
         "id": row["id"],
         "name": row["name"],
         "status": row["status"],
-        "heroProductInfo": row_value(row, "hero_product_info_text") or row_value(row, "user_requirement_text", ""),
         "userRequirement": row_value(row, "user_requirement_text", ""),
         "stageUserInputs": {
             "aiStyling": row_value(row, "ai_styling_user_instruction_text", ""),
@@ -8547,7 +8548,6 @@ def get_input_version(input_version_id: int | None) -> dict[str, Any] | None:
         "nameSnapshot": row["name_snapshot"],
         "imageSnapshot": loads(row["image_snapshot_json"], []),
         "modelSnapshot": loads(row["model_snapshot_json"], {}) if "model_snapshot_json" in row.keys() else {},
-        "heroProductInfo": loads(row_value(row, "hero_product_info_json"), build_hero_product_info_context({})),
         "userRequirement": loads(row_value(row, "user_requirement_json"), build_user_requirement_context({})),
         "heroVisualSummary": row["hero_visual_summary"],
         "createdAt": row["created_at"],

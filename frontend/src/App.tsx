@@ -4,6 +4,7 @@ import type { Dispatch, DragEvent, FormEvent, KeyboardEvent as ReactKeyboardEven
 import {
   Bot,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   CircleStop,
@@ -39,7 +40,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl } from './api'
-import type { AICallRecord, AIOperation, AttemptPhase, DeleteImpact, FacetOption, FinalImageExportPrecheck, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse } from './api'
+import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, FacetOption, FinalImageExportPrecheck, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse } from './api'
 import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { friendlyErrorText } from './lib/errorMessages'
@@ -92,6 +93,11 @@ const STYLING_GARMENT_MAX_IMAGES = 15
 const HERO_PRODUCT_MAX_IMAGES = 15
 const STYLING_GARMENT_SELECTED_IMAGES = 6
 const HERO_PRODUCT_SELECTED_IMAGES = 8
+const PRODUCT_CODE_MAX_CHARS = 20
+
+function formatImageCount(count: number, limit: number) {
+  return `${count}/${limit} 张`
+}
 
 export function App() {
   const [checked, setChecked] = useState(false)
@@ -436,7 +442,6 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   const technicalDetailRequestRef = useRef(0)
   const recentTaskRequestRef = useRef(0)
   const [aiLogDialog, setAiLogDialog] = useState<{ title: string; ownerTypes: string[]; attemptId: number; records: AICallRecord[]; loading: boolean; error?: string } | null>(null)
-  const [heroProductInfo, setHeroProductInfo] = useState('')
   const [aiStylingInstruction, setAiStylingInstruction] = useState('')
   const [storyboardInstruction, setStoryboardInstruction] = useState('')
   const [finalImageInstruction, setFinalImageInstruction] = useState('')
@@ -615,7 +620,6 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     technicalDetailRequestRef.current += 1
     setAiLogDialog(null)
   }, [task?.id])
-  useEffect(() => setHeroProductInfo(task?.heroProductInfo ?? task?.userRequirement ?? ''), [task?.id, task?.heroProductInfo, task?.userRequirement])
   useEffect(() => setAiStylingInstruction(task?.stageUserInputs?.aiStyling ?? stageInstructionText(task?.styling?.userInstruction)), [task?.id, task?.stageUserInputs?.aiStyling, task?.styling?.id])
   useEffect(() => setStoryboardInstruction(task?.stageUserInputs?.storyboardPreview ?? stageInstructionText((task?.storyboardPreview ?? task?.preview)?.userInstruction)), [task?.id, task?.stageUserInputs?.storyboardPreview, (task?.storyboardPreview ?? task?.preview)?.id])
   useEffect(() => setFinalImageInstruction(task?.stageUserInputs?.finalImage ?? stageInstructionText(task?.resultSet?.userInstruction)), [task?.id, task?.stageUserInputs?.finalImage, task?.resultSet?.id])
@@ -720,7 +724,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
             <StepRail active={visibleStep} executing={studioView?.executingStage ?? null} max={currentStep} onSelect={setStep} />
           </div>
           <div className="studio-stage-viewport">
-            {visibleStep === 0 && <UploadHeroStep task={task} setTask={applyTaskUpdate} run={run} heroProductInfo={heroProductInfo} />}
+            {visibleStep === 0 && <UploadHeroStep task={task} setTask={applyTaskUpdate} run={run} />}
             {visibleStep === 1 && <StylingStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={aiStylingInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
             {visibleStep === 2 && <PreviewStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={storyboardInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
             {visibleStep === 3 && <FinalStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={finalImageInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
@@ -753,18 +757,20 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
                     <button className="task-action" onClick={startOneClickFinal}><Sparkles size={15} />{oneClickFinalLabel(task)}</button>
                   ) : null}
                 </div>
-                <StageUserInputModule
-                  step={visibleStep}
-                  task={task}
-                  value={stageInputValue(visibleStep, { heroProductInfo, aiStylingInstruction, storyboardInstruction, finalImageInstruction })}
-                  savedValue={savedStageInputValue(visibleStep, task)}
-                  onChange={(value) => updateStageInput(visibleStep, value, { setHeroProductInfo, setAiStylingInstruction, setStoryboardInstruction, setFinalImageInstruction })}
-                  onSave={() => void run('保存用户输入中...', () => api.updateTask(task.id, stageInputSavePayload(visibleStep, stageInputValue(visibleStep, { heroProductInfo, aiStylingInstruction, storyboardInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => applyTaskUpdate(r.item), { refresh: 'background' })}
-                  disabled={isTaskRunning(task) || !!task.autoRunTarget}
-                />
+                {visibleStep > 0 && (
+                  <StageUserInputModule
+                    step={visibleStep}
+                    task={task}
+                    value={stageInputValue(visibleStep, { aiStylingInstruction, storyboardInstruction, finalImageInstruction })}
+                    savedValue={savedStageInputValue(visibleStep, task)}
+                    onChange={(value) => updateStageInput(visibleStep, value, { setAiStylingInstruction, setStoryboardInstruction, setFinalImageInstruction })}
+                    onSave={() => void run('保存用户输入中...', () => api.updateTask(task.id, stageInputSavePayload(visibleStep, stageInputValue(visibleStep, { aiStylingInstruction, storyboardInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => applyTaskUpdate(r.item), { refresh: 'background' })}
+                    disabled={isTaskRunning(task) || !!task.autoRunTarget}
+                  />
+                )}
               </>
             ) : (
-              <><StageUserInputModule step={0} task={null} value={heroProductInfo} onChange={setHeroProductInfo} disabled={false} /><EmptyState title="暂无任务" text="上传主推款后会在这里形成拍摄任务。" /></>
+              <EmptyState title="暂无任务" text="上传主推款后会在这里形成拍摄任务。" />
             )}
           </div>
           <div id="recent-tasks-panel" role="tabpanel" aria-labelledby="task-rail-recent-tab" className="task-rail-panel recent-tasks-panel" hidden={taskRailTab !== 'recent'}>
@@ -959,13 +965,12 @@ function BatchTaskSummary({ currentTaskId, items, loading, downloadChecking, onP
 type PendingBatchGroup = {
   id: string
   name: string
-  info: string
   files: File[]
   issues?: ImportIssue[]
   error?: string
 }
 
-function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any; heroProductInfo: string }) {
+function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any }) {
   const [files, setFiles] = useState<File[]>([])
   const [name, setName] = useState('')
   const [singleIssues, setSingleIssues] = useState<ImportIssue[]>([])
@@ -995,7 +1000,6 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
     return {
       id: `single-${Date.now()}`,
       name: sanitizeClientName(name) || timestampName(),
-      info: heroProductInfo,
       files,
       issues: singleIssues,
     }
@@ -1005,7 +1009,6 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
     return groups.map((group, index) => ({
       id: `${group.id}-${Date.now()}-${index}`,
       name: group.code,
-      info: '',
       files: group.files,
       issues: group.issues,
     }))
@@ -1090,7 +1093,7 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
       setBatchCreating({ current: index + 1, total: ready.length })
       try {
         const uploadFiles = formalAssetFiles(group.files, HERO_PRODUCT_MAX_IMAGES)
-        const result = await api.createTask(group.name, uploadFiles, group.info.trim() || undefined, batchIdRef.current)
+        const result = await api.createTask(group.name, uploadFiles, batchIdRef.current)
         created.push(result.item)
         if (!firstCreatedTaskRef.current) firstCreatedTaskRef.current = result.item
         setBatchGroups((current) => current.filter((item) => item.id !== group.id))
@@ -1125,7 +1128,7 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><h2>上传主推款</h2><p>支持多张图片、一个货号文件夹或一个上级文件夹。最多 15 张进入 Gemini 候选池，AI 智能选搭后保留挑选排序好的 8 张主推款参考图。</p></div>
+        <div className="step-copy"><h2>上传主推款</h2><p>支持多张图片、一个货号文件夹或一个上级文件夹。每套最多 15 张进入候选池，AI 智能选搭后保留挑选排序好的 8 张主推款参考图。</p></div>
         {task?.status === 'DRAFT' && <HeroDraftEditor task={task} setTask={setTask} run={run} />}
         {!task && (
           <>
@@ -1160,7 +1163,7 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                     <span className="count-pill">{batchGroups.reduce((sum, group) => sum + group.files.length, 0)} 张图</span>
                   </div>
                   <div className="batch-note">
-                    <span>每个文件夹对应一个拍摄任务，可在下方逐个调整任务名、图片和商品信息；创建后可从顶部批次条一键批量成片。</span>
+                    <span>每个文件夹对应一个拍摄任务，可在下方逐个调整任务名和图片；创建后可从顶部批次条一键批量成片。</span>
                   </div>
                   <div className="batch-list">
                     {batchGroups.map((group) => {
@@ -1168,31 +1171,33 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                       const dupInBatch = !!groupName && (nameCounts.get(groupName) ?? 0) > 1
                       const overLimit = group.files.length > HERO_PRODUCT_MAX_IMAGES
                       const hasBlockingError = !group.files.length || dupInBatch || !!group.error
-                      const hasError = hasBlockingError || overLimit || !!group.issues?.length
+                      const hasError = hasBlockingError
                       const existsHint = !!groupName && !dupInBatch && !!existingTaskNames?.has(groupName)
                       return (
                         <div className={`batch-card ${hasError ? 'has-error' : ''}`} key={group.id}>
-                          <div className="batch-card-head">
+                          <div className="batch-card-form">
                             <div className="batch-icon"><Layers3 size={18} /></div>
-                            <input value={group.name} onChange={(event) => updateBatchGroup(group.id, { name: event.target.value })} aria-label="任务名称" disabled={!!batchCreating} />
-                            <span className={`count-pill ${overLimit ? 'is-over' : ''}`}>{group.files.length}/${HERO_PRODUCT_MAX_IMAGES} 张</span>
+                            <label className="batch-field batch-code-field">
+                              <span>货号</span>
+                              <input
+                                value={group.name}
+                                maxLength={PRODUCT_CODE_MAX_CHARS}
+                                onChange={(event) => updateBatchGroup(group.id, { name: event.target.value.slice(0, PRODUCT_CODE_MAX_CHARS) })}
+                                aria-label="任务名称"
+                                disabled={!!batchCreating}
+                              />
+                            </label>
+                            <span className="batch-form-spacer" />
+                            <span className={`count-pill ${overLimit ? 'is-over' : ''}`}>{formatImageCount(group.files.length, HERO_PRODUCT_MAX_IMAGES)}</span>
                             <button className="management-action icon-button" onClick={() => setBatchGroups((current) => current.filter((item) => item.id !== group.id))} title="移除该任务" disabled={!!batchCreating}><Trash2 size={16} /></button>
                           </div>
                             <div className="batch-note">
                               <span>推荐 3-5 张，排序越靠前越重要。{existsHint ? ' 与已有任务重名，将共存（任务名不要求唯一）。' : ''}</span>
                               {hasBlockingError && <strong>{group.error ?? (!group.files.length ? '没有可用图片' : '本批次任务名重复')}</strong>}
-                              {overLimit && <strong>{`超过 ${HERO_PRODUCT_MAX_IMAGES} 张，创建时会自动保留当前排序前 ${HERO_PRODUCT_MAX_IMAGES} 张进入 Gemini 候选池`}</strong>}
+                              {overLimit && <strong>{`超出 ${HERO_PRODUCT_MAX_IMAGES} 张，红框图片不会进入后续识别`}</strong>}
                               {group.issues?.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
                           </div>
-                          <FileThumbList files={group.files} onChange={(nextFiles) => updateBatchGroup(group.id, { files: nextFiles })} />
-                          <input
-                            className="batch-info-input"
-                            value={group.info}
-                            onChange={(event) => updateBatchGroup(group.id, { info: event.target.value })}
-                            placeholder="商品信息（选填）：例如 夏季主推阔腿裤，重点展示腰头和裤脚"
-                            aria-label="商品信息"
-                            disabled={!!batchCreating}
-                          />
+                          <FileThumbList files={group.files} onChange={(nextFiles) => updateBatchGroup(group.id, { files: nextFiles })} limit={HERO_PRODUCT_MAX_IMAGES} />
                         </div>
                       )
                     })}
@@ -1205,12 +1210,6 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
                       <button className="management-action" onClick={() => void createBatchTasks()}>
                         <ImagePlus size={16} /> 批量创建 {batchGroups.length} 个任务
                       </button>
-                        <button className="management-action" title="不再拆分任务，把全部图片作为同一个任务的主推款" onClick={() => {
-                          const merged = batchGroups.flatMap((group) => group.files)
-                          const issues = batchGroups.flatMap((group) => group.issues ?? [])
-                          setBatchGroups([])
-                          applySingleFiles(merged, undefined, issues)
-                        }}>合并为 1 个任务</button>
                       <button className="management-action" onClick={() => setBatchGroups([])}>取消</button>
                     </div>
                   )}
@@ -1221,17 +1220,17 @@ function UploadHeroStep({ task, setTask, run, heroProductInfo }: { task: Generat
               <div className="upload-review">
                 <div className="batch-card-head">
                   <div className="batch-icon"><Layers3 size={18} /></div>
-                  <input value={name} onChange={(e) => setName(e.target.value)} placeholder="任务名称" aria-label="任务名称" />
-                  <span className={`count-pill ${files.length > HERO_PRODUCT_MAX_IMAGES ? 'is-over' : ''}`}>{files.length}/${HERO_PRODUCT_MAX_IMAGES} 张</span>
+                  <input value={name} maxLength={PRODUCT_CODE_MAX_CHARS} onChange={(e) => setName(e.target.value.slice(0, PRODUCT_CODE_MAX_CHARS))} placeholder="任务名称" aria-label="任务名称" />
+                  <span className={`count-pill ${files.length > HERO_PRODUCT_MAX_IMAGES ? 'is-over' : ''}`}>{formatImageCount(files.length, HERO_PRODUCT_MAX_IMAGES)}</span>
                 </div>
                   <div className="batch-note">
-                    <span>{`最多 ${HERO_PRODUCT_MAX_IMAGES} 张进入 Gemini 候选池，AI 智能选搭后保留 ${HERO_PRODUCT_SELECTED_IMAGES} 张参考图。`}</span>
-                    {files.length > HERO_PRODUCT_MAX_IMAGES && <strong>{`当前超过 ${HERO_PRODUCT_MAX_IMAGES} 张，创建时会自动保留当前排序前 ${HERO_PRODUCT_MAX_IMAGES} 张进入候选池`}</strong>}
+                    <span>{`最多 ${HERO_PRODUCT_MAX_IMAGES} 张进入候选池，AI 智能选搭后保留 ${HERO_PRODUCT_SELECTED_IMAGES} 张参考图。`}</span>
+                    {files.length > HERO_PRODUCT_MAX_IMAGES && <strong>{`当前超过 ${HERO_PRODUCT_MAX_IMAGES} 张，红框图片不会进入后续识别`}</strong>}
                     {singleIssues.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
                   </div>
-                <FileThumbList files={files} onChange={setFiles} />
+                <FileThumbList files={files} onChange={setFiles} limit={HERO_PRODUCT_MAX_IMAGES} />
                 <div className="inline-form">
-                    <button className="management-action" disabled={!files.length || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, formalAssetFiles(files, HERO_PRODUCT_MAX_IMAGES), heroProductInfo), (r: { item: GenerationTask }) => {
+                    <button className="management-action" disabled={!files.length || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, formalAssetFiles(files, HERO_PRODUCT_MAX_IMAGES)), (r: { item: GenerationTask }) => {
                     setTask(r.item)
                     setFiles([])
                     setName('')
@@ -1274,9 +1273,9 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
 
   return (
     <div className="hero-draft">
-      <div className="section-head"><strong>主推款图片</strong><span className={`count-pill ${imageCount > imageLimit ? 'is-over' : ''}`}>{imageCount}/{imageLimit} 张</span><span className="status draft">{task.status === 'DRAFT' ? '待选搭' : '可调整'}</span></div>
+      <div className="section-head"><strong>主推款图片</strong><span className={`count-pill ${imageCount > imageLimit ? 'is-over' : ''}`}>{formatImageCount(imageCount, imageLimit)}</span><span className="status draft">{task.status === 'DRAFT' ? '待选搭' : '可调整'}</span></div>
       <div className="inline-form">
-          <input value={name} onChange={(event) => setName(event.target.value)} placeholder="任务名称" />
+          <input value={name} maxLength={PRODUCT_CODE_MAX_CHARS} onChange={(event) => setName(event.target.value.slice(0, PRODUCT_CODE_MAX_CHARS))} placeholder="任务名称" />
           <button className="management-action" disabled={name.trim() === task.name} onClick={() => void run('保存任务名称中...', () => api.updateTask(task.id, { name }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>保存名称</button>
       </div>
       <div className="draft-image-grid">
@@ -1309,7 +1308,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
           </div>
         ))}
       </div>
-      <p className="edit-hint">{task.status === 'DRAFT' ? `最多 ${HERO_PRODUCT_MAX_IMAGES} 张进入 Gemini 候选池；AI 智能选搭后保留 ${HERO_PRODUCT_SELECTED_IMAGES} 张主推款参考图。` : `当前展示 AI 选搭后保留的主推款参考图，最多 ${HERO_PRODUCT_SELECTED_IMAGES} 张；调整图片会让当前任务回到待选搭状态。`}</p>
+      <p className="edit-hint">{task.status === 'DRAFT' ? `最多 ${HERO_PRODUCT_MAX_IMAGES} 张进入候选池；AI 智能选搭后保留 ${HERO_PRODUCT_SELECTED_IMAGES} 张主推款参考图。` : `当前展示 AI 选搭后保留的主推款参考图，最多 ${HERO_PRODUCT_SELECTED_IMAGES} 张；调整图片会让当前任务回到待选搭状态。`}</p>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </div>
   )
@@ -1336,43 +1335,37 @@ function RequirementEditor({ value, onChange, title, placeholder }: { value: str
 }
 
 type StudioStageInputState = {
-  heroProductInfo: string
   aiStylingInstruction: string
   storyboardInstruction: string
   finalImageInstruction: string
 }
 
 type StudioStageInputSetters = {
-  setHeroProductInfo: (value: string) => void
   setAiStylingInstruction: (value: string) => void
   setStoryboardInstruction: (value: string) => void
   setFinalImageInstruction: (value: string) => void
 }
 
 function stageInputValue(step: StudioStep, state: StudioStageInputState) {
-  if (step === 0) return state.heroProductInfo
   if (step === 1) return state.aiStylingInstruction
   if (step === 2) return state.storyboardInstruction
   return state.finalImageInstruction
 }
 
 function updateStageInput(step: StudioStep, value: string, setters: StudioStageInputSetters) {
-  if (step === 0) setters.setHeroProductInfo(value)
-  else if (step === 1) setters.setAiStylingInstruction(value)
+  if (step === 1) setters.setAiStylingInstruction(value)
   else if (step === 2) setters.setStoryboardInstruction(value)
   else setters.setFinalImageInstruction(value)
 }
 
 function savedStageInputValue(step: StudioStep, task: GenerationTask | null) {
   if (!task) return ''
-  if (step === 0) return task.heroProductInfo ?? task.userRequirement ?? ''
   if (step === 1) return task.stageUserInputs?.aiStyling ?? ''
   if (step === 2) return task.stageUserInputs?.storyboardPreview ?? ''
   return task.stageUserInputs?.finalImage ?? ''
 }
 
 function stageInputSavePayload(step: StudioStep, value: string) {
-  if (step === 0) return { heroProductInfo: value }
   if (step === 1) return { aiStylingUserInstruction: value }
   if (step === 2) return { storyboardPreviewUserInstruction: value }
   return { finalImageUserInstruction: value }
@@ -1392,7 +1385,7 @@ function StageUserInputModule({ step, task, value, savedValue = '', onChange, on
   disabled?: boolean
 }) {
   const labels = [
-    { title: '商品信息', placeholder: '例如：夏季主推阔腿裤，重点展示腰头、垂坠裤腿和裤脚，避免厚重外套。' },
+    { title: '', placeholder: '' },
     { title: '智能选搭要求', placeholder: '例如：不要厚重外套，改成更轻盈的通勤搭配。' },
     { title: '分镜预览要求', placeholder: '例如：分镜姿态更舒展，背景保持简洁。' },
     { title: '成片生成要求', placeholder: '例如：整体更干净，减少配饰存在感，保持棚拍电商质感。' },
@@ -1779,12 +1772,15 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
   const [total, setTotal] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
   const [facets, setFacets] = useState<StylingGarmentFacets>({})
+  const [stableFacets, setStableFacets] = useState<StylingGarmentFacets>({})
   const [statusFilter, setStatusFilter] = useState('')
-  const [categoryFilter, setCategoryFilter] = useState<string[]>([])
+  const [primaryCategoryFilter, setPrimaryCategoryFilter] = useState<string[]>([])
+  const [secondaryCategoryFilter, setSecondaryCategoryFilter] = useState<string[]>([])
   const [uploadedFrom, setUploadedFrom] = useState('')
   const [uploadedTo, setUploadedTo] = useState('')
   const [sortBy, setSortBy] = useState('createdAt')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+  const [openFilter, setOpenFilter] = useState<'category' | 'date' | 'sort' | 'status' | null>(null)
   const [pageSizeMode, setPageSizeMode] = useState<'auto' | 'fixed'>('auto')
   const [pageSize, setPageSize] = useState(() => estimateAutoGarmentPageSize())
   const [searching, setSearching] = useState(true)
@@ -1815,7 +1811,8 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
       keyword: keyword || undefined,
       includeArchived,
       status: statusFilter ? [statusFilter] : undefined,
-      category: categoryFilter.length ? categoryFilter : undefined,
+      primaryCategory: primaryCategoryFilter.length ? primaryCategoryFilter : undefined,
+      secondaryCategory: secondaryCategoryFilter.length ? secondaryCategoryFilter : undefined,
       uploadedFrom: uploadedFrom || undefined,
       uploadedTo: uploadedTo || undefined,
       sortBy,
@@ -1839,6 +1836,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
     setTotal(result.total)
     setTotalPages(result.totalPages)
     setFacets(result.facets ?? {})
+    setStableFacets(result.stableFacets ?? result.facets ?? {})
   }
 
   function refreshFirstLibraryPage() {
@@ -1848,7 +1846,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
 
   useEffect(() => {
     setOffset(0)
-  }, [query, includeArchived, statusFilter, categoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir])
+  }, [query, includeArchived, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir])
 
   useEffect(() => {
     if (pageSizeMode !== 'auto' || pageSize === autoPageSize) return
@@ -1866,6 +1864,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
           setTotal(result.total)
           setTotalPages(result.totalPages)
           setFacets(result.facets ?? {})
+          setStableFacets(result.stableFacets ?? result.facets ?? {})
         }
       }).catch(() => undefined).finally(() => {
         if (!cancelled) setSearching(false)
@@ -1875,13 +1874,13 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [offset, query, includeArchived, statusFilter, categoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize])
+  }, [offset, query, includeArchived, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize])
 
   useEffect(() => {
     setItems((current) => current.map((item) => garments.find((latest) => latest.id === item.id) ?? item))
   }, [garments])
 
-  useEffect(() => setSelectedGarmentIds(new Set()), [offset, includeArchived, query, statusFilter, categoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize])
+  useEffect(() => setSelectedGarmentIds(new Set()), [offset, includeArchived, query, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize])
 
   useEffect(() => {
     if (!detail) return
@@ -1958,7 +1957,8 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
   function clearLibraryFilters() {
     setQuery('')
     setStatusFilter('')
-    setCategoryFilter([])
+    setPrimaryCategoryFilter([])
+    setSecondaryCategoryFilter([])
     setUploadedFrom('')
     setUploadedTo('')
     setSortBy('createdAt')
@@ -1966,7 +1966,9 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
     setIncludeArchived(false)
   }
 
-  const hasActiveFilters = Boolean(query.trim() || statusFilter || categoryFilter.length || uploadedFrom || uploadedTo || includeArchived || sortBy !== 'createdAt' || sortDir !== 'desc')
+  const categoryFilterCount = primaryCategoryFilter.length + secondaryCategoryFilter.length
+  const hasActiveFilters = Boolean(query.trim() || statusFilter || categoryFilterCount || uploadedFrom || uploadedTo || includeArchived || sortBy !== 'createdAt' || sortDir !== 'desc')
+  const stableCategoryTree = stableFacets.categoryTree ?? facets.categoryTree ?? []
 
   return (
     <section className="page workbench-page library-page">
@@ -1978,20 +1980,55 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
       </div>
       {showImport && <BatchImportPanel onImported={() => void refreshFirstLibraryPage().catch(() => undefined)} />}
       <div className="panel library-panel">
-        <div className="toolbar">
+        <div className="library-commandbar">
           <div className={`search ${searching ? 'is-searching' : ''}`}>
             <Search size={16} />
             <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索货号 / 标签" />
             {searching && <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span>}
           </div>
-          <div className="archive-controls">
-            <label><input type="checkbox" checked={includeArchived} onChange={(event) => {
+          <div className="library-filter-pills">
+            <CategoryTreeFilter
+              open={openFilter === 'category'}
+              onOpen={(open) => setOpenFilter(open ? 'category' : null)}
+              options={stableCategoryTree}
+              selectedPrimary={primaryCategoryFilter}
+              selectedSecondary={secondaryCategoryFilter}
+              onPrimary={setPrimaryCategoryFilter}
+              onSecondary={setSecondaryCategoryFilter}
+            />
+            <DateRangeFilter
+              open={openFilter === 'date'}
+              onOpen={(open) => setOpenFilter(open ? 'date' : null)}
+              from={uploadedFrom}
+              to={uploadedTo}
+              onFrom={setUploadedFrom}
+              onTo={setUploadedTo}
+            />
+            <SortFilter
+              open={openFilter === 'sort'}
+              onOpen={(open) => setOpenFilter(open ? 'sort' : null)}
+              sortBy={sortBy}
+              sortDir={sortDir}
+              onChange={(nextSortBy, nextSortDir) => {
+                setSortBy(nextSortBy)
+                setSortDir(nextSortDir)
+              }}
+            />
+            <StatusFilter
+              open={openFilter === 'status'}
+              onOpen={(open) => setOpenFilter(open ? 'status' : null)}
+              value={statusFilter}
+              options={mergedFacetOptions(facets.status, statusFilter ? [statusFilter] : [])}
+              onChange={setStatusFilter}
+            />
+            <button className={`filter-pill checkbox-pill ${includeArchived ? 'is-active' : ''}`} type="button" onClick={() => {
               setOffset(0)
-              setIncludeArchived(event.target.checked)
-            }} /> 查看已归档</label>
-            {bulkMode && <label><input type="checkbox" checked={allVisibleGarmentsSelected} disabled={!selectableGarmentIds.length} onChange={(event) => toggleVisibleGarmentSelection(event.target.checked)} /> 全选本页</label>}
+              setIncludeArchived(!includeArchived)
+            }}><Check size={15} /><span>已归档</span></button>
+            {hasActiveFilters && <button className="filter-pill reset-filter-pill" type="button" onClick={clearLibraryFilters}><span>清空筛选</span></button>}
           </div>
-          <div className="record-list-meta">
+          <div className="library-management-tools">
+            {bulkMode && <label className="quiet-check"><input type="checkbox" checked={allVisibleGarmentsSelected} disabled={!selectableGarmentIds.length} onChange={(event) => toggleVisibleGarmentSelection(event.target.checked)} /> 全选本页</label>}
             {selectedVisibleGarments.length > 0 && (
               selectedArchivedGarments.length === selectedVisibleGarments.length
                 ? <button className="management-action" onClick={() => restoreGarments(selectedArchivedGarments)}>恢复 {selectedArchivedGarments.length} 项</button>
@@ -1999,50 +2036,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
             )}
             {selectedVisibleGarments.length > 0 && <button className="management-action" onClick={() => setManualTagDialog(selectedVisibleGarments)}>批量标签 {selectedVisibleGarments.length} 项</button>}
             <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
-            <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 套` : '0 套'}</span>
           </div>
-        </div>
-        <div className="library-filterbar" aria-label="搭配服装筛选">
-          <label>
-            <span>状态</span>
-            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-              <option value="">全部状态</option>
-              {mergedFacetOptions(facets.status, statusFilter ? [statusFilter] : []).map((option) => (
-                <option key={option.value} value={option.value}>{garmentStatus(option.value)} ({option.count})</option>
-              ))}
-            </select>
-          </label>
-          <FacetCheckboxGroup
-            label="品类"
-            options={mergedFacetOptions(facets.category, categoryFilter)}
-            value={categoryFilter}
-            onChange={setCategoryFilter}
-          />
-          <div className="date-filter">
-            <span>上传时间</span>
-            <input type="date" value={uploadedFrom} onChange={(event) => setUploadedFrom(event.target.value)} aria-label="上传开始日期" />
-            <span className="date-separator">至</span>
-            <input type="date" value={uploadedTo} onChange={(event) => setUploadedTo(event.target.value)} aria-label="上传结束日期" />
-            <button className="management-action compact-control" type="button" onClick={() => setUploadedDateRange(7, setUploadedFrom, setUploadedTo)}>近 7 天</button>
-            <button className="management-action compact-control" type="button" onClick={() => setUploadedDateRange(30, setUploadedFrom, setUploadedTo)}>近 30 天</button>
-          </div>
-          <label>
-            <span>排序</span>
-            <select value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
-              <option value="createdAt">上传时间</option>
-              <option value="updatedAt">更新时间</option>
-              <option value="tagCompletedAt">打标时间</option>
-              <option value="code">货号</option>
-            </select>
-          </label>
-          <label>
-            <span>顺序</span>
-            <select value={sortDir} onChange={(event) => setSortDir(event.target.value === 'asc' ? 'asc' : 'desc')}>
-              <option value="desc">倒序</option>
-              <option value="asc">正序</option>
-            </select>
-          </label>
-          {hasActiveFilters && <button className="management-action compact-control" type="button" onClick={clearLibraryFilters}>清空筛选</button>}
         </div>
         <div ref={libraryResultsRef} className={`library-results ${searching ? 'is-loading' : ''}`}>
         {items.length ? (
@@ -2060,22 +2054,24 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
           ))}</div>
         ) : searching ? null : <EmptyState title={hasActiveFilters ? '没有匹配的搭配服装' : '暂无搭配服装'} text={hasActiveFilters ? '减少筛选条件或换一个货号关键词试试。' : '点击右上角导入搭配服装。'} />}
         </div>
-        <PaginationControls
-          disabled={searching}
-          offset={offset}
-          pageSize={pageSize}
-          pageSizeOptions={[{ value: autoPageSize, label: `${autoPageSize} 套`, key: 'auto' }, 50, 100]}
-          pageSizeOptionKey={pageSizeMode === 'auto' ? 'auto' : String(pageSize)}
-          pageSizeUnit="套"
-          total={total}
-          totalPages={totalPages}
-          onOffsetChange={setOffset}
-          onPageSizeChange={(value, optionKey) => {
-            setPageSizeMode(optionKey === 'auto' ? 'auto' : 'fixed')
-            setPageSize(value)
-            setOffset(0)
-          }}
-        />
+        <div className="library-pagination-stick">
+          <PaginationControls
+            disabled={searching}
+            offset={offset}
+            pageSize={pageSize}
+            pageSizeOptions={[{ value: autoPageSize, label: `${autoPageSize} 套`, key: 'auto' }, 50, 100]}
+            pageSizeOptionKey={pageSizeMode === 'auto' ? 'auto' : String(pageSize)}
+            pageSizeUnit="套"
+            total={total}
+            totalPages={totalPages}
+            onOffsetChange={setOffset}
+            onPageSizeChange={(value, optionKey) => {
+              setPageSizeMode(optionKey === 'auto' ? 'auto' : 'fixed')
+              setPageSize(value)
+              setOffset(0)
+            }}
+          />
+        </div>
       </div>
       {detail && <GarmentDetailDrawer item={detail} run={run} isAdmin={role === 'admin'} onClose={() => setDetail(null)} onChange={updateGarmentInView} onDelete={() => openGarmentDeleteDialog([detail])} onRestore={() => restoreGarments([detail])} />}
       {manualTagDialog && (
@@ -2105,31 +2101,254 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
   )
 }
 
-function FacetCheckboxGroup({ label, options, value, onChange }: {
-  label: string
-  options: FacetOption[]
-  value: string[]
-  onChange: (value: string[]) => void
+function CategoryTreeFilter({ open, onOpen, options, selectedPrimary, selectedSecondary, onPrimary, onSecondary }: {
+  open: boolean
+  onOpen: (open: boolean) => void
+  options: CategoryTreeOption[]
+  selectedPrimary: string[]
+  selectedSecondary: string[]
+  onPrimary: (value: string[]) => void
+  onSecondary: (value: string[]) => void
 }) {
-  const selectedOptions = value.map((item) => options.find((option) => option.value === item) ?? { value: item, label: item, count: 0 })
-  const unselectedOptions = options.filter((option) => !value.includes(option.value))
-  const visibleOptions = [...selectedOptions, ...unselectedOptions.slice(0, Math.max(8 - selectedOptions.length, 0))]
-  function toggle(nextValue: string, checked: boolean) {
-    onChange(checked ? Array.from(new Set([...value, nextValue])) : value.filter((item) => item !== nextValue))
+  const popoverRef = useRef<HTMLDivElement | null>(null)
+  const [activePrimary, setActivePrimary] = useState('')
+  const primary = options.find((item) => item.value === activePrimary) ?? options[0]
+  const selectedCount = selectedPrimary.length + selectedSecondary.length
+  useOutsideClose(open, popoverRef, () => onOpen(false))
+
+  useEffect(() => {
+    if (!open || activePrimary || !options.length) return
+    setActivePrimary(options[0].value)
+  }, [activePrimary, open, options])
+
+  function togglePrimary(value: string, checked: boolean) {
+    onPrimary(checked ? Array.from(new Set([...selectedPrimary, value])) : selectedPrimary.filter((item) => item !== value))
   }
+
+  function toggleSecondary(value: string, checked: boolean) {
+    onSecondary(checked ? Array.from(new Set([...selectedSecondary, value])) : selectedSecondary.filter((item) => item !== value))
+  }
+
+  const allPrimarySelected = options.length > 0 && options.every((item) => selectedPrimary.includes(item.value))
+  const allSecondarySelected = !!primary?.children?.length && primary.children.every((item) => selectedSecondary.includes(item.value))
+
   return (
-    <fieldset className="facet-group">
-      <legend>{label}</legend>
-      <div className="facet-options">
-        {visibleOptions.length ? visibleOptions.map((option) => (
-          <label key={option.value}>
-            <input type="checkbox" checked={value.includes(option.value)} onChange={(event) => toggle(option.value, event.target.checked)} />
-            <span>{option.label}</span>
-            <small>{option.count}</small>
-          </label>
-        )) : <span className="facet-empty">暂无选项</span>}
+    <div className="filter-popover-wrap">
+      <button className={`filter-pill ${selectedCount ? 'is-active' : ''}`} type="button" onClick={() => onOpen(!open)}>
+        <span>{selectedCount ? `品类 ${selectedCount}` : '品类'}</span>
+        <ChevronDown size={15} />
+      </button>
+      {open && (
+        <div className="filter-popover category-popover" ref={popoverRef}>
+          <div className="popover-search"><Search size={15} /><span>按一级 / 二级品类筛选</span></div>
+          <div className="category-tree">
+            <div className="category-column">
+              <label className="tree-option">
+                <input type="checkbox" checked={allPrimarySelected} disabled={!options.length} onChange={(event) => onPrimary(event.target.checked ? options.map((item) => item.value) : [])} />
+                <span>选择全部一级品类</span>
+              </label>
+              {options.map((option) => (
+                <div className={`tree-row ${primary?.value === option.value ? 'is-current' : ''}`} role="button" tabIndex={0} key={option.value} onClick={() => setActivePrimary(option.value)} onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    setActivePrimary(option.value)
+                  }
+                }}>
+                  <label onClick={(event) => event.stopPropagation()}>
+                    <input type="checkbox" checked={selectedPrimary.includes(option.value)} onChange={(event) => togglePrimary(option.value, event.target.checked)} />
+                    <span>{option.label}</span>
+                  </label>
+                  <small>{option.count}</small>
+                  <ChevronRight size={15} />
+                </div>
+              ))}
+            </div>
+            <div className="category-column">
+              <label className="tree-option">
+                <input type="checkbox" checked={allSecondarySelected} disabled={!primary?.children?.length} onChange={(event) => onSecondary(event.target.checked ? Array.from(new Set([...selectedSecondary, ...(primary?.children ?? []).map((item) => item.value)])) : selectedSecondary.filter((item) => !(primary?.children ?? []).some((child) => child.value === item)))} />
+                <span>{primary ? `选择 ${primary.label} 下全部二级品类` : '选择全部二级品类'}</span>
+              </label>
+              {primary?.children?.length ? primary.children.map((child) => (
+                <label className="tree-option" key={child.value}>
+                  <input type="checkbox" checked={selectedSecondary.includes(child.value)} onChange={(event) => toggleSecondary(child.value, event.target.checked)} />
+                  <span>{child.label}</span>
+                  <small>{child.count}</small>
+                </label>
+              )) : <span className="facet-empty">暂无二级品类</span>}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DateRangeFilter({ open, onOpen, from, to, onFrom, onTo }: {
+  open: boolean
+  onOpen: (open: boolean) => void
+  from: string
+  to: string
+  onFrom: (value: string) => void
+  onTo: (value: string) => void
+}) {
+  const popoverRef = useRef<HTMLDivElement | null>(null)
+  const [calendarMonth, setCalendarMonth] = useState(() => monthStart(from ? parseDateInput(from) ?? new Date() : new Date()))
+  const label = from || to ? `${from || '不限'} 至 ${to || '不限'}` : '上传时间'
+  useOutsideClose(open, popoverRef, () => onOpen(false))
+
+  useEffect(() => {
+    if (open && from) setCalendarMonth(monthStart(parseDateInput(from) ?? new Date()))
+  }, [from, open])
+
+  function selectDate(value: string) {
+    if (!from || (from && to)) {
+      onFrom(value)
+      onTo('')
+      return
+    }
+    if (value < from) {
+      onFrom(value)
+      onTo(from)
+      return
+    }
+    onTo(value)
+  }
+
+  return (
+    <div className="filter-popover-wrap">
+      <button className={`filter-pill ${from || to ? 'is-active' : ''}`} type="button" onClick={() => onOpen(!open)}>
+        <span>{label}</span>
+        <ChevronDown size={15} />
+      </button>
+      {open && (
+        <div className="filter-popover date-popover" ref={popoverRef}>
+          <button type="button" onClick={() => { setUploadedDateRange(7, onFrom, onTo); onOpen(false) }}>近 7 天</button>
+          <button type="button" onClick={() => { setUploadedDateRange(30, onFrom, onTo); onOpen(false) }}>近 30 天</button>
+          <CalendarRangePicker month={calendarMonth} from={from} to={to} onMonth={setCalendarMonth} onSelect={selectDate} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SortFilter({ open, onOpen, sortBy, sortDir, onChange }: {
+  open: boolean
+  onOpen: (open: boolean) => void
+  sortBy: string
+  sortDir: 'asc' | 'desc'
+  onChange: (sortBy: string, sortDir: 'asc' | 'desc') => void
+}) {
+  const popoverRef = useRef<HTMLDivElement | null>(null)
+  const current = `${sortBy}:${sortDir}`
+  const currentLabel = sortOptions.find((option) => option.value === current)?.label ?? '排序'
+  useOutsideClose(open, popoverRef, () => onOpen(false))
+  return (
+    <div className="filter-popover-wrap">
+      <button className={`filter-pill ${current !== 'createdAt:desc' ? 'is-active' : ''}`} type="button" onClick={() => onOpen(!open)}>
+        <span>{currentLabel}</span>
+        <ChevronDown size={15} />
+      </button>
+      {open && (
+        <div className="filter-popover sort-popover" ref={popoverRef}>
+          {sortOptions.map((option) => (
+            <button className={option.value === current ? 'is-selected' : ''} type="button" key={option.value} onClick={() => {
+              const [nextSortBy, nextSortDir] = option.value.split(':')
+              onChange(nextSortBy, nextSortDir === 'asc' ? 'asc' : 'desc')
+              onOpen(false)
+            }}>
+              {option.label}
+              {option.value === current && <Check size={15} />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const sortOptions = [
+  { value: 'createdAt:desc', label: '最新上传' },
+  { value: 'createdAt:asc', label: '最早上传' },
+  { value: 'updatedAt:desc', label: '最近更新' },
+  { value: 'updatedAt:asc', label: '最久未更新' },
+  { value: 'tagCompletedAt:desc', label: '最近识别' },
+  { value: 'tagCompletedAt:asc', label: '最早识别' },
+  { value: 'code:asc', label: '货号 A-Z' },
+  { value: 'code:desc', label: '货号 Z-A' },
+]
+
+function StatusFilter({ open, onOpen, value, options, onChange }: {
+  open: boolean
+  onOpen: (open: boolean) => void
+  value: string
+  options: FacetOption[]
+  onChange: (value: string) => void
+}) {
+  const popoverRef = useRef<HTMLDivElement | null>(null)
+  useOutsideClose(open, popoverRef, () => onOpen(false))
+  return (
+    <div className="filter-popover-wrap">
+      <button className={`filter-pill ${value ? 'is-active' : ''}`} type="button" onClick={() => onOpen(!open)}>
+        <span>{value ? garmentStatus(value) : '全部状态'}</span>
+        <ChevronDown size={15} />
+      </button>
+      {open && (
+        <div className="filter-popover sort-popover" ref={popoverRef}>
+          <button className={!value ? 'is-selected' : ''} type="button" onClick={() => { onChange(''); onOpen(false) }}>
+            全部状态
+            {!value && <Check size={15} />}
+          </button>
+          {options.map((option) => (
+            <button className={option.value === value ? 'is-selected' : ''} type="button" key={option.value} onClick={() => {
+              onChange(option.value)
+              onOpen(false)
+            }}>
+              {garmentStatus(option.value)}
+              <small>{option.count}</small>
+              {option.value === value && <Check size={15} />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CalendarRangePicker({ month, from, to, onMonth, onSelect }: {
+  month: Date
+  from: string
+  to: string
+  onMonth: (value: Date) => void
+  onSelect: (value: string) => void
+}) {
+  const days = calendarDays(month)
+  const monthLabel = `${month.getFullYear()} 年 ${month.getMonth() + 1} 月`
+  return (
+    <div className="calendar-range">
+      <div className="calendar-head">
+        <button type="button" onClick={() => onMonth(addMonths(month, -1))}><ChevronLeft size={15} /></button>
+        <strong>{monthLabel}</strong>
+        <button type="button" onClick={() => onMonth(addMonths(month, 1))}><ChevronRight size={15} /></button>
       </div>
-    </fieldset>
+      <div className="calendar-weekdays">{['一', '二', '三', '四', '五', '六', '日'].map((item) => <span key={item}>{item}</span>)}</div>
+      <div className="calendar-grid">
+        {days.map((day) => {
+          const value = dateInputValue(day.date)
+          const inRange = !!from && !!to && value >= from && value <= to
+          const isEdge = value === from || value === to
+          return (
+            <button
+              className={`${day.inMonth ? '' : 'is-muted'} ${inRange ? 'is-in-range' : ''} ${isEdge ? 'is-selected' : ''}`}
+              type="button"
+              key={value}
+              onClick={() => onSelect(value)}
+            >
+              {day.date.getDate()}
+            </button>
+          )
+        })}
+      </div>
+    </div>
   )
 }
 
@@ -2268,12 +2487,59 @@ function mergedFacetOptions(options: FacetOption[] | undefined, selected: string
   return Array.from(byValue.values())
 }
 
-function setUploadedDateRange(days: number, setFrom: Dispatch<SetStateAction<string>>, setTo: Dispatch<SetStateAction<string>>) {
+function setUploadedDateRange(days: number, setFrom: (value: string) => void, setTo: (value: string) => void) {
   const today = new Date()
   const from = new Date(today)
   from.setDate(today.getDate() - Math.max(days - 1, 0))
   setFrom(dateInputValue(from))
   setTo(dateInputValue(today))
+}
+
+function useOutsideClose(open: boolean, ref: { current: HTMLElement | null }, onClose: () => void) {
+  useEffect(() => {
+    if (!open) return
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target
+      if (target instanceof Node && ref.current?.contains(target)) return
+      onClose()
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    document.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [open, onClose, ref])
+}
+
+function parseDateInput(value: string) {
+  if (!value) return null
+  const [year, month, day] = value.split('-').map(Number)
+  if (!year || !month || !day) return null
+  return new Date(year, month - 1, day)
+}
+
+function monthStart(value: Date) {
+  return new Date(value.getFullYear(), value.getMonth(), 1)
+}
+
+function addMonths(value: Date, offset: number) {
+  return new Date(value.getFullYear(), value.getMonth() + offset, 1)
+}
+
+function calendarDays(month: Date) {
+  const first = monthStart(month)
+  const mondayOffset = (first.getDay() + 6) % 7
+  const start = new Date(first)
+  start.setDate(first.getDate() - mondayOffset)
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(start)
+    date.setDate(start.getDate() + index)
+    return { date, inMonth: date.getMonth() === month.getMonth() }
+  })
 }
 
 function dateInputValue(value: Date) {
@@ -2292,9 +2558,9 @@ function estimateAutoGarmentPageSize() {
   return calculateAutoGarmentPageSize(availableWidth, availableHeight)
 }
 
-function calculateAutoGarmentPageSize(width: number, height: number, cardHeight = 350, columnWidth = 230, gap = 14) {
+function calculateAutoGarmentPageSize(width: number, height: number, cardHeight = 386, columnWidth = 230, gap = 14) {
   const columns = Math.max(1, Math.floor((Math.max(width, columnWidth) + gap) / (columnWidth + gap)))
-  const rows = Math.max(1, Math.round((Math.max(height, cardHeight) + gap) / (cardHeight + gap)))
+  const rows = Math.max(1, Math.floor((Math.max(height, cardHeight) + gap) / (cardHeight + gap)))
   return Math.max(1, Math.min(100, columns * rows))
 }
 
@@ -2315,7 +2581,7 @@ function useAutoGarmentPageSize(resultsRef: { current: HTMLDivElement | null }) 
         const width = grid?.clientWidth || results?.clientWidth || Math.max(320, window.innerWidth - 328)
         const height = results?.clientHeight || Math.max(360, window.innerHeight - 260)
         const measuredCardHeight = card?.getBoundingClientRect().height ?? 0
-        const cardHeight = measuredCardHeight > 120 ? measuredCardHeight : 350
+        const cardHeight = measuredCardHeight > 120 ? measuredCardHeight : 386
         setPageSize(calculateAutoGarmentPageSize(width, height, cardHeight, 230, Math.max(columnGap, rowGap)))
       })
     }
@@ -2531,7 +2797,7 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
       <div className="import-head">
         <div>
           <h3>导入搭配服装</h3>
-          <p>{`散图会合并为一套；单货号文件夹是一套；上级文件夹会递归识别最底层图片目录。最多 ${STYLING_GARMENT_MAX_IMAGES} 张进入 Gemini 候选池，AI 打标后只保留挑选排序好的 ${STYLING_GARMENT_SELECTED_IMAGES} 张纯服装参考图。`}</p>
+          <p>{`散图会合并为一套；单货号文件夹是一套；上级文件夹会递归识别最底层图片目录。最多 ${STYLING_GARMENT_MAX_IMAGES} 张进入候选池，AI 打标后只保留挑选排序好的 ${STYLING_GARMENT_SELECTED_IMAGES} 张纯服装参考图。`}</p>
         </div>
         <button className="management-action" disabled={!batches.length} onClick={saveDrafts}>导入</button>
       </div>
@@ -2588,25 +2854,35 @@ function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
   onRemove: () => void
 }) {
   return (
-    <div className={`batch-card ${!batch.files.length || batch.files.length > STYLING_GARMENT_MAX_IMAGES || batch.error || batch.issues?.length ? 'has-error' : ''}`}>
-      <div className="batch-card-head">
+    <div className={`batch-card ${!batch.files.length || batch.error ? 'has-error' : ''}`}>
+      <div className="batch-card-form">
         <div className="batch-icon"><Layers3 size={18} /></div>
-        <input value={batch.code} onChange={(event) => onCode(event.target.value)} aria-label="搭配服装货号" />
+        <label className="batch-field batch-code-field">
+          <span>货号</span>
+          <input
+            value={batch.code}
+            maxLength={PRODUCT_CODE_MAX_CHARS}
+            onChange={(event) => onCode(event.target.value.slice(0, PRODUCT_CODE_MAX_CHARS))}
+            aria-label="搭配服装货号"
+          />
+        </label>
+        <span className="batch-form-spacer" />
+        <span className={`count-pill ${batch.files.length > STYLING_GARMENT_MAX_IMAGES ? 'is-over' : ''}`}>{formatImageCount(batch.files.length, STYLING_GARMENT_MAX_IMAGES)}</span>
         <button className="management-action icon-button" onClick={onRemove} title="移除整套"><Trash2 size={16} /></button>
       </div>
       <div className="batch-note">
-        <span>{batch.files.length} 张图片</span>
+        <span>推荐 3-5 张，排序越靠前越重要。</span>
         {batch.error && <strong>{batch.error}</strong>}
         {!batch.files.length && !batch.error && <strong>没有可用图片</strong>}
-        {batch.files.length > STYLING_GARMENT_MAX_IMAGES && <strong>{`超过 ${STYLING_GARMENT_MAX_IMAGES} 张，导入时会自动保留当前排序前 ${STYLING_GARMENT_MAX_IMAGES} 张进入 Gemini 候选池`}</strong>}
+        {batch.files.length > STYLING_GARMENT_MAX_IMAGES && <strong>{`超出 ${STYLING_GARMENT_MAX_IMAGES} 张，红框图片不会进入后续识别`}</strong>}
         {batch.issues?.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
       </div>
-      <FileThumbList files={batch.files} onChange={onFiles} />
+      <FileThumbList files={batch.files} onChange={onFiles} limit={STYLING_GARMENT_MAX_IMAGES} />
     </div>
   )
 }
 
-function FileThumbList({ files, onChange }: { files: File[]; onChange: (files: File[]) => void }) {
+function FileThumbList({ files, onChange, limit }: { files: File[]; onChange: (files: File[]) => void; limit?: number }) {
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const [dimensions, setDimensions] = useState<Record<string, { width: number; height: number }>>({})
@@ -2619,40 +2895,44 @@ function FileThumbList({ files, onChange }: { files: File[]; onChange: (files: F
   }
   return (
     <div className="file-thumb-grid">
-      {files.map((file, index) => (
-        <div
-          className="file-thumb"
-          key={`${file.name}-${file.size}-${index}`}
-          draggable
-          onDragStart={() => setDragIndex(index)}
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={() => {
-            if (dragIndex !== null) move(dragIndex, index)
-            setDragIndex(null)
-          }}
-        >
-          <FilePreviewButton
-            file={file}
-            dimensions={dimensions[fileKey(file)]}
-            onDimensions={(value) => setDimensions((current) => ({ ...current, [fileKey(file)]: value }))}
-            onOpen={(image) => setViewer(image)}
-          />
-          <span>{file.name}<small>{fileMeta(file, dimensions[fileKey(file)])}</small></span>
-          <div className="thumb-actions">
-            <label title="替换图片">
-              <RefreshCw size={14} />
-              <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
-                const replacement = event.target.files?.[0]
-                if (!replacement) return
-                const next = [...files]
-                next[index] = replacement
-                onChange(next)
-              }} />
-            </label>
-            <button onClick={() => onChange(files.filter((_, itemIndex) => itemIndex !== index))} title="删除图片"><X size={14} /></button>
+      {files.map((file, index) => {
+        const overLimit = typeof limit === 'number' && index >= limit
+        return (
+          <div
+            className={`file-thumb ${overLimit ? 'is-over-limit' : ''}`}
+            key={`${file.name}-${file.size}-${index}`}
+            draggable
+            onDragStart={() => setDragIndex(index)}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={() => {
+              if (dragIndex !== null) move(dragIndex, index)
+              setDragIndex(null)
+            }}
+          >
+            {overLimit && <em className="thumb-overflow-badge">超出</em>}
+            <FilePreviewButton
+              file={file}
+              dimensions={dimensions[fileKey(file)]}
+              onDimensions={(value) => setDimensions((current) => ({ ...current, [fileKey(file)]: value }))}
+              onOpen={(image) => setViewer(image)}
+            />
+            <span>{file.name}<small>{fileMeta(file, dimensions[fileKey(file)])}</small></span>
+            <div className="thumb-actions">
+              <label title="替换图片">
+                <RefreshCw size={14} />
+                <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
+                  const replacement = event.target.files?.[0]
+                  if (!replacement) return
+                  const next = [...files]
+                  next[index] = replacement
+                  onChange(next)
+                }} />
+              </label>
+              <button onClick={() => onChange(files.filter((_, itemIndex) => itemIndex !== index))} title="删除图片"><X size={14} /></button>
+            </div>
           </div>
-        </div>
-      ))}
+        )
+      })}
       <label className="file-thumb file-thumb-add" title="新增图片">
         <div className="add-icon-wrapper">
           <ImagePlus size={24} />
