@@ -1031,6 +1031,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
         files = main.image_selection_prompt_files(images, 15)
 
         self.assertEqual(files[0]["file"], "image:11:front.jpg")
+        self.assertEqual(files[0], {"file": "image:11:front.jpg", "order": 1})
         self.assertEqual(
             main.selected_image_ids_from_files(["image:12:back.jpg", "front.jpg"], images, 15),
             [12, 11],
