@@ -2018,7 +2018,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
               open={openFilter === 'status'}
               onOpen={(open) => setOpenFilter(open ? 'status' : null)}
               value={statusFilter}
-              options={mergedFacetOptions(facets.status, statusFilter ? [statusFilter] : [])}
+              options={stylingGarmentStatusOptions(facets.status, stableFacets.status, statusFilter)}
               onChange={setStatusFilter}
             />
             <button className={`filter-pill checkbox-pill ${includeArchived ? 'is-active' : ''}`} type="button" onClick={() => {
@@ -2302,6 +2302,18 @@ const sortOptions = [
   { value: 'code:asc', label: '货号 A-Z' },
   { value: 'code:desc', label: '货号 Z-A' },
 ]
+
+const stylingGarmentStatusOrder = ['DRAFT', 'TAGGING_RUNNING', 'TAGGING_READY', 'TAGGING_FAILED', 'READY']
+
+function stylingGarmentStatusOptions(options: FacetOption[] | undefined, stableOptions: FacetOption[] | undefined, selected: string) {
+  const byValue = new Map((stableOptions ?? []).map((option) => [option.value, { ...option, count: 0 }]))
+  for (const option of options ?? []) byValue.set(option.value, option)
+  if (selected && !byValue.has(selected)) byValue.set(selected, { value: selected, label: selected, count: 0 })
+  return [
+    ...stylingGarmentStatusOrder.map((status) => byValue.get(status) ?? { value: status, label: status, count: 0 }),
+    ...Array.from(byValue.values()).filter((option) => !stylingGarmentStatusOrder.includes(option.value)),
+  ]
+}
 
 function StatusFilter({ open, onOpen, value, options, onChange }: {
   open: boolean
