@@ -39,7 +39,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl } from './api'
-import type { AICallRecord, AIOperation, AttemptPhase, DeleteImpact, FinalImageExportPrecheck, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment } from './api'
+import type { AICallRecord, AIOperation, AttemptPhase, DeleteImpact, FacetOption, FinalImageExportPrecheck, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse } from './api'
 import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { friendlyErrorText } from './lib/errorMessages'
@@ -1778,6 +1778,13 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
   const [offset, setOffset] = useState(0)
   const [total, setTotal] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
+  const [facets, setFacets] = useState<StylingGarmentFacets>({})
+  const [statusFilter, setStatusFilter] = useState('')
+  const [categoryFilter, setCategoryFilter] = useState<string[]>([])
+  const [uploadedFrom, setUploadedFrom] = useState('')
+  const [uploadedTo, setUploadedTo] = useState('')
+  const [sortBy, setSortBy] = useState('createdAt')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
   const [pageSizeMode, setPageSizeMode] = useState<'auto' | 'fixed'>('auto')
   const [pageSize, setPageSize] = useState(() => estimateAutoGarmentPageSize())
   const [searching, setSearching] = useState(true)
@@ -1799,13 +1806,38 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
     setDetail(result.item)
   }
 
-  function refreshLibraryPage(targetOffset = offset) {
+  function libraryQueryOptions(targetOffset = offset) {
     const keyword = query.trim()
-    return api.listStylingGarments({ limit: pageSize, offset: targetOffset, keyword: keyword || undefined, includeArchived }).then((result) => {
-      setItems(result.items)
-      setTotal(result.total)
-      setTotalPages(result.totalPages)
+    return {
+      limit: pageSize,
+      offset: targetOffset,
+      keyword: keyword || undefined,
+      includeArchived,
+      status: statusFilter ? [statusFilter] : undefined,
+      category: categoryFilter.length ? categoryFilter : undefined,
+      uploadedFrom: uploadedFrom || undefined,
+      uploadedTo: uploadedTo || undefined,
+      sortBy,
+      sortDir,
+    }
+  }
+
+  function refreshLibraryPage(targetOffset = offset) {
+    return api.listStylingGarments(libraryQueryOptions(targetOffset)).then((result) => {
+      if (!result.items.length && result.total > 0 && targetOffset > 0) {
+        const fallbackOffset = Math.max(0, Math.floor((result.total - 1) / pageSize) * pageSize)
+        setOffset(fallbackOffset)
+        return api.listStylingGarments(libraryQueryOptions(fallbackOffset)).then(applyLibraryResult)
+      }
+      applyLibraryResult(result)
     })
+  }
+
+  function applyLibraryResult(result: StylingGarmentListResponse) {
+    setItems(result.items)
+    setTotal(result.total)
+    setTotalPages(result.totalPages)
+    setFacets(result.facets ?? {})
   }
 
   function refreshFirstLibraryPage() {
@@ -1815,7 +1847,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
 
   useEffect(() => {
     setOffset(0)
-  }, [query])
+  }, [query, includeArchived, statusFilter, categoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir])
 
   useEffect(() => {
     if (pageSizeMode !== 'auto' || pageSize === autoPageSize) return
@@ -1824,15 +1856,15 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
   }, [autoPageSize, pageSize, pageSizeMode])
 
   useEffect(() => {
-    const keyword = query.trim()
     let cancelled = false
     setSearching(true)
     const timer = window.setTimeout(() => {
-      void api.listStylingGarments({ limit: pageSize, offset, keyword: keyword || undefined, includeArchived }).then((result) => {
+      void api.listStylingGarments(libraryQueryOptions(offset)).then((result) => {
         if (!cancelled) {
           setItems(result.items)
           setTotal(result.total)
           setTotalPages(result.totalPages)
+          setFacets(result.facets ?? {})
         }
       }).catch(() => undefined).finally(() => {
         if (!cancelled) setSearching(false)
@@ -1842,13 +1874,13 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [offset, query, includeArchived, pageSize])
+  }, [offset, query, includeArchived, statusFilter, categoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize])
 
   useEffect(() => {
     setItems((current) => current.map((item) => garments.find((latest) => latest.id === item.id) ?? item))
   }, [garments])
 
-  useEffect(() => setSelectedGarmentIds(new Set()), [offset, includeArchived, query, pageSize])
+  useEffect(() => setSelectedGarmentIds(new Set()), [offset, includeArchived, query, statusFilter, categoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize])
 
   useEffect(() => {
     if (!detail) return
@@ -1916,6 +1948,19 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
       .finally(() => setDeleteGarmentImpactLoading(false))
   }
 
+  function clearLibraryFilters() {
+    setQuery('')
+    setStatusFilter('')
+    setCategoryFilter([])
+    setUploadedFrom('')
+    setUploadedTo('')
+    setSortBy('createdAt')
+    setSortDir('desc')
+    setIncludeArchived(false)
+  }
+
+  const hasActiveFilters = Boolean(query.trim() || statusFilter || categoryFilter.length || uploadedFrom || uploadedTo || includeArchived || sortBy !== 'createdAt' || sortDir !== 'desc')
+
   return (
     <section className="page workbench-page library-page">
       <div className="library-title-row">
@@ -1949,6 +1994,48 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
             <span className="muted-count">{total ? `${offset + 1}-${Math.min(offset + items.length, total)} 套` : '0 套'}</span>
           </div>
         </div>
+        <div className="library-filterbar" aria-label="搭配服装筛选">
+          <label>
+            <span>状态</span>
+            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+              <option value="">全部状态</option>
+              {mergedFacetOptions(facets.status, statusFilter ? [statusFilter] : []).map((option) => (
+                <option key={option.value} value={option.value}>{garmentStatus(option.value)} ({option.count})</option>
+              ))}
+            </select>
+          </label>
+          <FacetCheckboxGroup
+            label="品类"
+            options={mergedFacetOptions(facets.category, categoryFilter)}
+            value={categoryFilter}
+            onChange={setCategoryFilter}
+          />
+          <div className="date-filter">
+            <span>上传时间</span>
+            <input type="date" value={uploadedFrom} onChange={(event) => setUploadedFrom(event.target.value)} aria-label="上传开始日期" />
+            <span className="date-separator">至</span>
+            <input type="date" value={uploadedTo} onChange={(event) => setUploadedTo(event.target.value)} aria-label="上传结束日期" />
+            <button className="management-action compact-control" type="button" onClick={() => setUploadedDateRange(7, setUploadedFrom, setUploadedTo)}>近 7 天</button>
+            <button className="management-action compact-control" type="button" onClick={() => setUploadedDateRange(30, setUploadedFrom, setUploadedTo)}>近 30 天</button>
+          </div>
+          <label>
+            <span>排序</span>
+            <select value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
+              <option value="createdAt">上传时间</option>
+              <option value="updatedAt">更新时间</option>
+              <option value="tagCompletedAt">打标时间</option>
+              <option value="code">货号</option>
+            </select>
+          </label>
+          <label>
+            <span>顺序</span>
+            <select value={sortDir} onChange={(event) => setSortDir(event.target.value === 'asc' ? 'asc' : 'desc')}>
+              <option value="desc">倒序</option>
+              <option value="asc">正序</option>
+            </select>
+          </label>
+          {hasActiveFilters && <button className="management-action compact-control" type="button" onClick={clearLibraryFilters}>清空筛选</button>}
+        </div>
         <div ref={libraryResultsRef} className={`library-results ${searching ? 'is-loading' : ''}`}>
         {items.length ? (
           <div className="garment-grid">{items.map((item) => (
@@ -1963,7 +2050,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
               onRestore={() => restoreGarments([item])}
             />
           ))}</div>
-        ) : searching ? null : <EmptyState title={query ? '没有匹配的搭配服装' : '暂无搭配服装'} text={query ? '换一个货号或标签关键词试试。' : '点击右上角导入搭配服装。'} />}
+        ) : searching ? null : <EmptyState title={hasActiveFilters ? '没有匹配的搭配服装' : '暂无搭配服装'} text={hasActiveFilters ? '减少筛选条件或换一个货号关键词试试。' : '点击右上角导入搭配服装。'} />}
         </div>
         <PaginationControls
           disabled={searching}
@@ -1995,6 +2082,58 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
       )}
     </section>
   )
+}
+
+function FacetCheckboxGroup({ label, options, value, onChange }: {
+  label: string
+  options: FacetOption[]
+  value: string[]
+  onChange: (value: string[]) => void
+}) {
+  const selectedOptions = value.map((item) => options.find((option) => option.value === item) ?? { value: item, label: item, count: 0 })
+  const unselectedOptions = options.filter((option) => !value.includes(option.value))
+  const visibleOptions = [...selectedOptions, ...unselectedOptions.slice(0, Math.max(8 - selectedOptions.length, 0))]
+  function toggle(nextValue: string, checked: boolean) {
+    onChange(checked ? Array.from(new Set([...value, nextValue])) : value.filter((item) => item !== nextValue))
+  }
+  return (
+    <fieldset className="facet-group">
+      <legend>{label}</legend>
+      <div className="facet-options">
+        {visibleOptions.length ? visibleOptions.map((option) => (
+          <label key={option.value}>
+            <input type="checkbox" checked={value.includes(option.value)} onChange={(event) => toggle(option.value, event.target.checked)} />
+            <span>{option.label}</span>
+            <small>{option.count}</small>
+          </label>
+        )) : <span className="facet-empty">暂无选项</span>}
+      </div>
+    </fieldset>
+  )
+}
+
+function mergedFacetOptions(options: FacetOption[] | undefined, selected: string[]) {
+  const byValue = new Map<string, FacetOption>()
+  ;(options ?? []).forEach((option) => byValue.set(option.value, option))
+  selected.forEach((value) => {
+    if (!byValue.has(value)) byValue.set(value, { value, label: value, count: 0 })
+  })
+  return Array.from(byValue.values())
+}
+
+function setUploadedDateRange(days: number, setFrom: Dispatch<SetStateAction<string>>, setTo: Dispatch<SetStateAction<string>>) {
+  const today = new Date()
+  const from = new Date(today)
+  from.setDate(today.getDate() - Math.max(days - 1, 0))
+  setFrom(dateInputValue(from))
+  setTo(dateInputValue(today))
+}
+
+function dateInputValue(value: Date) {
+  const year = value.getFullYear()
+  const month = String(value.getMonth() + 1).padStart(2, '0')
+  const day = String(value.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
 }
 
 function estimateAutoGarmentPageSize() {

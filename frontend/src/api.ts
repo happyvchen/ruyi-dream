@@ -32,6 +32,26 @@ export type Paginated<T> = {
   totalPages: number
 }
 
+export type FacetOption = {
+  value: string
+  label: string
+  count: number
+}
+
+export type StylingGarmentFacets = {
+  status?: FacetOption[]
+  category?: FacetOption[]
+  color?: FacetOption[]
+  season?: FacetOption[]
+  series?: FacetOption[]
+  channel?: FacetOption[]
+  reviewStatus?: FacetOption[]
+}
+
+export type StylingGarmentListResponse = Paginated<StylingGarment> & {
+  facets?: StylingGarmentFacets
+}
+
 export type MediaAsset = {
   id: number
   objectKey: string
@@ -401,10 +421,15 @@ async function uploadFilesDirect(scope: string, files: File[]): Promise<Uploaded
   }))
 }
 
-function params(path: string, values: Record<string, string | number | boolean | undefined | null>) {
+function params(path: string, values: Record<string, string | number | boolean | string[] | undefined | null>) {
   const search = new URLSearchParams()
   Object.entries(values).forEach(([key, value]) => {
     if (value === undefined || value === null || value === false || value === '') return
+    if (Array.isArray(value)) {
+      const filtered = value.map((item) => String(item).trim()).filter(Boolean)
+      if (filtered.length) search.set(key, filtered.join(','))
+      return
+    }
     search.set(key, String(value))
   })
   const query = search.toString()
@@ -437,8 +462,24 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
-  listStylingGarments: (options?: { limit?: number; offset?: number; keyword?: string; includeArchived?: boolean }) =>
-    request<Paginated<StylingGarment>>(params('/api/styling-garments', options ?? {})),
+  listStylingGarments: (options?: {
+    limit?: number
+    offset?: number
+    keyword?: string
+    includeArchived?: boolean
+    status?: string[]
+    category?: string[]
+    color?: string[]
+    season?: string[]
+    series?: string[]
+    channel?: string[]
+    reviewStatus?: string[]
+    uploadedFrom?: string
+    uploadedTo?: string
+    sortBy?: string
+    sortDir?: string
+  }) =>
+    request<StylingGarmentListResponse>(params('/api/styling-garments', options ?? {})),
   createStylingGarment: (code: string, files: File[]) => {
     const form = new FormData()
     form.append('code', code)
