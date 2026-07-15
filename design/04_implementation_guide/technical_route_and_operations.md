@@ -137,7 +137,7 @@ Prompt 配置槽：
 
 代码负责：
 
-- 对搭配服装和主推款图片执行每套最多 15 张的硬上限；
+- 对搭配服装和主推款图片执行正式资产每套最多 15 张的确定性预处理；上传暂存阶段允许超过 15 张，前台标红提示，正式保存前自动剔除超出上限的图片；
 - 校验 Gemini 返回的 `selected_files` 是否存在且可唯一映射；
 - 从 `styling_plan.hero_understanding.shot_category_family` 路由拍摄图位族；缺失、非法或无法映射时直接失败，不由商品 `category` / `sub_category` fallback；
 - 按顺序组装数字模特图、商品图、分镜图、环境图；
