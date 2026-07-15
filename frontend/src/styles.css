@@ -435,29 +435,23 @@ h1, h2, h3, p { margin: 0; }
 .task-action-row button { width: auto; min-width: 132px; height: 36px; justify-content: center; padding: 0 14px; }
 .recent-tasks-panel { display: flex; flex-direction: column; }
 .side-input-module {
-  display: block;
-  padding: 0;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
   border-color: #e2e8f0;
   background: #fff;
   font-size: 13px;
 }
-.side-input-module > summary {
+.side-input-module > header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 9px 10px;
   color: #475569;
   font-weight: 700;
-  list-style: none;
-  cursor: pointer;
 }
-.side-input-module > summary::-webkit-details-marker { display: none; }
-.side-input-module > summary::after { content: '展开'; color: #64748b; font-size: 11px; font-weight: 500; }
-.side-input-module[open] > summary::after { content: '收起'; }
-.side-input-module > summary em { margin-left: auto; color: #94a3b8; font-size: 11px; font-style: normal; font-weight: 500; }
+.side-input-module > header em { margin-left: auto; color: #94a3b8; font-size: 11px; font-style: normal; font-weight: 500; }
 .side-input-control { min-width: 0; }
-.side-input-module[open] .side-input-control { padding: 0 10px 10px; }
 .side-input-module textarea {
   width: 100%;
   min-height: 76px;

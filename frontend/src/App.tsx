@@ -748,15 +748,6 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
                   <Meta label="最终成片" value={`${task.resultSet?.images?.filter((i) => i.status === 'SUCCEEDED').length ?? 0}/5`} />
                   {!!task.styling?.selectedMaterials?.length && <Meta label="搭配服装" value={`${task.styling.selectedMaterials.length} 件`} />}
                 </div>
-                <div className="task-action-row">
-                  {isTaskRunning(task) ? (
-                    <button className="management-action" onClick={cancelCurrentTask}><CircleStop size={15} />取消生成</button>
-                  ) : isTaskQueuedForAutoRun(task) ? (
-                    <button className="management-action" onClick={() => cancelAutoRunQueue(task)}><CircleStop size={15} />取消排队</button>
-                  ) : (canStartOneClickFinal(task) || canRestartOneClickFinal(task)) ? (
-                    <button className="task-action" onClick={startOneClickFinal}><Sparkles size={15} />{oneClickFinalLabel(task)}</button>
-                  ) : null}
-                </div>
                 {visibleStep > 0 && (
                   <StageUserInputModule
                     step={visibleStep}
@@ -768,6 +759,15 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
                     disabled={isTaskRunning(task) || !!task.autoRunTarget}
                   />
                 )}
+                <div className="task-action-row">
+                  {isTaskRunning(task) ? (
+                    <button className="management-action" onClick={cancelCurrentTask}><CircleStop size={15} />取消生成</button>
+                  ) : isTaskQueuedForAutoRun(task) ? (
+                    <button className="management-action" onClick={() => cancelAutoRunQueue(task)}><CircleStop size={15} />取消排队</button>
+                  ) : (canStartOneClickFinal(task) || canRestartOneClickFinal(task)) ? (
+                    <button className="task-action" onClick={startOneClickFinal}><Sparkles size={15} />{oneClickFinalLabel(task)}</button>
+                  ) : null}
+                </div>
               </>
             ) : (
               <EmptyState title="暂无任务" text="上传主推款后会在这里形成拍摄任务。" />
@@ -1392,19 +1392,18 @@ function StageUserInputModule({ step, task, value, savedValue = '', onChange, on
   ][step]
   const saveDisabled = disabled || !task || value.trim() === savedValue.trim()
   const hasValue = Boolean(value.trim())
-  const [expanded, setExpanded] = useState(!task || hasValue)
   return (
-    <details className="side-input-module" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
-      <summary><span>{labels.title}</span><em>{hasValue ? '已填写' : '选填'}</em></summary>
+    <section className="side-input-module" aria-label={labels.title}>
+      <header><span>{labels.title}</span><em>{hasValue ? '已填写' : '选填'}</em></header>
       <div className="side-input-control">
-        <textarea value={value} maxLength={800} disabled={disabled} onChange={(event) => onChange(event.target.value)} placeholder={labels.placeholder} />
+        <textarea aria-label={labels.title} value={value} maxLength={800} disabled={disabled} onChange={(event) => onChange(event.target.value)} placeholder={labels.placeholder} />
         {task && <p>保存后用于下一次执行，不会改变当前结果。</p>}
         <div className="side-input-actions">
           <em>{value.length}/800</em>
           {task && <button className="management-action" type="button" disabled={saveDisabled} onClick={onSave}>保存</button>}
         </div>
       </div>
-    </details>
+    </section>
   )
 }
 
