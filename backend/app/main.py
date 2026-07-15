@@ -120,6 +120,10 @@ PROMPT_SECTION_PATTERN = re.compile(
 )
 LEGACY_EMPTY_RUNTIME_PLACEHOLDERS = {"styling_outfit", "resolved_accessories"}
 AI_STYLING_PROMPT_CONFIG_KEY = "assembly.ai_styling"
+GARMENT_IMAGE_SELECTION_PROMPT_CONFIG_KEY = "assembly.garment_image_selection"
+HERO_IMAGE_SELECTION_PROMPT_CONFIG_KEY = "assembly.hero_image_selection"
+MAX_GARMENT_IMAGE_INPUTS = 15
+MAX_HERO_IMAGE_INPUTS = 15
 STORYBOARD_PROMPT_CONFIG_KEYS = {
     "top": "assembly.storyboard_preview_top",
     "bottom": "assembly.storyboard_preview_bottom",
@@ -4701,6 +4705,73 @@ def styling_garment_prompt_context(garment: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def image_selection_file_ref(image: dict[str, Any]) -> str:
+    asset = image.get("asset") if isinstance(image.get("asset"), dict) else {}
+    link_id = image.get("id")
+    filename = asset.get("filename") or asset.get("originalFilename") or f"image-{link_id}"
+    return f"image:{link_id}:{filename}"
+
+
+def image_selection_prompt_files(images: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    files: list[dict[str, Any]] = []
+    for index, image in enumerate(images[:limit]):
+        if not isinstance(image, dict):
+            continue
+        asset = image.get("asset") if isinstance(image.get("asset"), dict) else {}
+        files.append(
+            {
+                "file": image_selection_file_ref(image),
+                "sort_order": image.get("sortOrder"),
+                "filename": asset.get("filename") or asset.get("originalFilename"),
+                "mime_type": asset.get("mimeType"),
+                "width": asset.get("width"),
+                "height": asset.get("height"),
+                "role_hint": "primary" if index == 0 else "reference",
+            }
+        )
+    return files
+
+
+def selected_image_ids_from_files(selected_files: Any, images: list[dict[str, Any]], limit: int) -> list[int]:
+    if not isinstance(selected_files, list) or not selected_files:
+        raise ValueError("selected_files 必须是非空数组")
+    candidates = images[:limit]
+    file_to_id: dict[str, int] = {}
+    filename_to_ids: dict[str, list[int]] = {}
+    id_to_id: dict[str, int] = {}
+    for image in candidates:
+        if not isinstance(image, dict):
+            continue
+        link_id = image.get("id")
+        if link_id is None:
+            continue
+        image_id = int(link_id)
+        file_to_id[image_selection_file_ref(image)] = image_id
+        id_to_id[str(image_id)] = image_id
+        asset = image.get("asset") if isinstance(image.get("asset"), dict) else {}
+        filename = asset.get("filename") or asset.get("originalFilename")
+        if filename:
+            filename_to_ids.setdefault(str(filename), []).append(image_id)
+    selected_ids: list[int] = []
+    for raw_ref in selected_files:
+        if not isinstance(raw_ref, str) or not raw_ref.strip():
+            raise ValueError("selected_files 只能包含非空字符串")
+        ref = raw_ref.strip()
+        image_id = file_to_id.get(ref) or id_to_id.get(ref)
+        if image_id is None:
+            matches = filename_to_ids.get(ref) or []
+            if len(matches) == 1:
+                image_id = matches[0]
+            elif len(matches) > 1:
+                raise ValueError(f"selected_files 引用文件名不唯一：{ref}")
+        if image_id is None:
+            raise ValueError(f"selected_files 引用了不存在的文件：{ref}")
+        if image_id in selected_ids:
+            raise ValueError(f"selected_files 重复引用文件：{ref}")
+        selected_ids.append(image_id)
+    return selected_ids
+
+
 def fallback_prompt_tagging_result(garment: dict[str, Any]) -> dict[str, Any]:
     return normalize_prompt_tagging_result(
         {
@@ -7099,6 +7170,15 @@ def sample_prompt_runtime() -> dict[str, Any]:
     return {
         # AI 打标 / AI 选搭
         "styling_garment": dumps({"code": "LOOK-A", "image_count": 3, "image_roles": ["primary", "reference", "reference"]}),
+        "garment_image_files": dumps([
+            {"file": "image:101:front.jpg", "sort_order": 0, "filename": "front.jpg", "role_hint": "primary"},
+            {"file": "image:102:back.jpg", "sort_order": 1, "filename": "back.jpg", "role_hint": "reference"},
+            {"file": "image:103:fabric.jpg", "sort_order": 2, "filename": "fabric.jpg", "role_hint": "reference"},
+        ]),
+        "hero_image_files": dumps([
+            {"file": "image:201:hero-front.jpg", "sort_order": 0, "filename": "hero-front.jpg", "role_hint": "primary"},
+            {"file": "image:202:hero-detail.jpg", "sort_order": 1, "filename": "hero-detail.jpg", "role_hint": "reference"},
+        ]),
         "candidate_retrieval": dumps([{"code": "LOOK-A", "ai_tags": {"一级品类": ["上装"], "色彩": ["白色"], "版型": ["合体"], "风格语义": "轻量上装服务主推裤装。"}}]),
         "styling_result": dumps({"hero_understanding": {"category": "裤装", "sub_category": "trousers", "shot_category_family": "bottom"}, "selected_material_codes": ["LOOK-A"], "reason_summary": "轻量上装服务主推裤装。"}),
         # 商品信息 / 各阶段用户要求（已渲染为一句话）
@@ -7131,7 +7211,9 @@ def sample_prompt_runtime() -> dict[str, Any]:
 def available_prompt_placeholders() -> list[dict[str, str]]:
     return [
         {"name": "segment.brand_info", "scope": "segment", "description": "品牌信息分段 Prompt"},
+        {"name": "runtime.garment_image_files", "scope": "runtime", "description": "搭配服装图片挑选/排序使用的文件标识、原始文件名和基础元数据"},
         {"name": "runtime.styling_garment", "scope": "runtime", "description": "AI 打标使用的当前搭配服装 code 和图片输入摘要"},
+        {"name": "runtime.hero_image_files", "scope": "runtime", "description": "主推款图片挑选/排序使用的文件标识、原始文件名和基础元数据"},
         {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服装库 READY 服饰的全量 AI 标签事实卡"},
         {"name": "runtime.hero_product_info", "scope": "runtime", "description": "跟随主推款输入版本冻结的商品信息和业务事实补充"},
         {"name": "runtime.ai_styling_user_instruction", "scope": "runtime", "description": "AI 智能选搭本次执行的用户介入要求"},

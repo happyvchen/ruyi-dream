@@ -922,8 +922,40 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertNotIn("generation_shot_plans", tables)
         self.assertNotIn("assembly.shoot_script", prompt_keys)
         self.assertNotIn("assembly.final_image", prompt_keys)
+        self.assertIn("assembly.garment_image_selection", prompt_keys)
+        self.assertIn("assembly.hero_image_selection", prompt_keys)
         self.assertIn("assembly.storyboard_preview_top", prompt_keys)
         self.assertIn("assembly.final_image_top", prompt_keys)
+
+    def test_selected_files_helper_accepts_stable_refs_and_unique_filenames(self) -> None:
+        main = importlib.import_module("app.main")
+        images = [
+            {"id": 11, "sortOrder": 0, "asset": {"filename": "front.jpg"}},
+            {"id": 12, "sortOrder": 1, "asset": {"filename": "back.jpg"}},
+            {"id": 13, "sortOrder": 2, "asset": {"filename": "detail.jpg"}},
+        ]
+
+        files = main.image_selection_prompt_files(images, 15)
+
+        self.assertEqual(files[0]["file"], "image:11:front.jpg")
+        self.assertEqual(
+            main.selected_image_ids_from_files(["image:12:back.jpg", "front.jpg"], images, 15),
+            [12, 11],
+        )
+
+    def test_selected_files_helper_rejects_bad_refs(self) -> None:
+        main = importlib.import_module("app.main")
+        images = [
+            {"id": 11, "sortOrder": 0, "asset": {"filename": "same.jpg"}},
+            {"id": 12, "sortOrder": 1, "asset": {"filename": "same.jpg"}},
+        ]
+
+        with self.assertRaisesRegex(ValueError, "不唯一"):
+            main.selected_image_ids_from_files(["same.jpg"], images, 15)
+        with self.assertRaisesRegex(ValueError, "不存在"):
+            main.selected_image_ids_from_files(["missing.jpg"], images, 15)
+        with self.assertRaisesRegex(ValueError, "重复"):
+            main.selected_image_ids_from_files(["image:11:same.jpg", "11"], images, 15)
 
 
 if __name__ == "__main__":

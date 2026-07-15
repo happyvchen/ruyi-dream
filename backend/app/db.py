@@ -18,8 +18,10 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
 # 代码只登记槽位、拍摄图位族路由和动态事实占位，真正的黄金 Prompt 由页面维护。
 PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
     ("segment.brand_info", "segment", "品牌信息", "品牌信息分段 Prompt，可被组装 Prompt 引用。", 10),
-    ("assembly.ai_tagging", "assembly", "AI 打标", "搭配服装入库后的图片理解和标签识别 Prompt。", 100),
-    ("assembly.ai_styling", "assembly", "AI 选搭", "AI Stylist 选搭 Prompt，含主推款理解、搭配选择和质量判断。", 110),
+    ("assembly.garment_image_selection", "assembly", "搭配服装图片挑选/排序", "搭配服装入库时挑选真实商品参考图并排序的 Prompt；运行时与 AI 打标合并调用。", 90),
+    ("assembly.ai_tagging", "assembly", "AI 打标", "搭配服装入库后的图片理解和标签识别 Prompt；运行时与图片挑选/排序合并调用。", 100),
+    ("assembly.hero_image_selection", "assembly", "主推款图片挑选/排序", "AI 摄影棚主推款图片挑选和排序 Prompt；运行时与 AI 选搭合并调用。", 105),
+    ("assembly.ai_styling", "assembly", "AI 选搭", "AI Stylist 选搭 Prompt，含主推款理解、搭配选择和质量判断；运行时与主推款图片挑选/排序合并调用。", 110),
     ("assembly.storyboard_preview_top", "assembly", "分镜预览 · 上装/针织/外套", "Image-2 上装类固定六镜头分镜 Prompt。", 120),
     ("assembly.storyboard_preview_bottom", "assembly", "分镜预览 · 裤装/半身裙", "Image-2 下装类固定六镜头分镜 Prompt。", 130),
     ("assembly.storyboard_preview_one_piece", "assembly", "分镜预览 · 连衣裙/连体/套装", "Image-2 连衣裙/连体/套装固定六镜头分镜 Prompt。", 140),
