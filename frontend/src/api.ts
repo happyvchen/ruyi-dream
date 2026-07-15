@@ -564,11 +564,11 @@ export const api = {
     request<{ ok: boolean; purged: boolean; deletedTaskIds: number[] }>('/api/generation-tasks/batch-purge', { method: 'POST', body: JSON.stringify({ purge: true, ids, confirmPhrase }) }),
   getTaskDeleteImpact: (ids: number[]) =>
     request<{ impact: DeleteImpact }>('/api/generation-tasks/delete-impact', { method: 'POST', body: JSON.stringify({ ids }) }),
-  createTask: async (name: string, files: File[], batchId?: string) => {
+  createTask: async (name: string, files: File[], batchId?: string, userRequirement?: string) => {
     const uploads = await uploadFilesDirect('generation_task', files)
     return request<{ item: GenerationTask }>('/api/generation-tasks/from-uploads', {
       method: 'POST',
-      body: JSON.stringify({ name, batchId, uploads }),
+      body: JSON.stringify({ name, batchId, userRequirement, uploads }),
     })
   },
   listBatchTasks: (batchId: string) =>
@@ -579,6 +579,7 @@ export const api = {
     request<{ cancelledTaskIds: number[]; items: GenerationTask[] }>(`/api/generation-batches/${encodeURIComponent(batchId)}/cancel`, { method: 'POST' }),
   updateTask: (id: number, payload: {
     name?: string
+    userRequirement?: string
     aiStylingUserInstruction?: string
     storyboardPreviewUserInstruction?: string
     finalImageUserInstruction?: string

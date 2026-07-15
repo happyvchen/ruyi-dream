@@ -314,6 +314,7 @@ class StylingGarmentImageUpdateRequest(BaseModel):
 
 class GenerationTaskUpdateRequest(BaseModel):
     name: str | None = None
+    userRequirement: str | None = None
     aiStylingUserInstruction: str | None = None
     storyboardPreviewUserInstruction: str | None = None
     finalImageUserInstruction: str | None = None
@@ -340,6 +341,7 @@ class UploadedMediaRequest(BaseModel):
 class GenerationTaskFromUploadsRequest(BaseModel):
     name: str | None = None
     batchId: str | None = None
+    userRequirement: str | None = None
     uploads: list[UploadedMediaRequest] = Field(default_factory=list)
 
 
@@ -1803,6 +1805,7 @@ def purge_styling_garment(db: Any, garment_id: int, code: str) -> tuple[list[int
 @app.post("/api/generation-tasks")
 async def create_generation_task(
     name: str | None = Form(None),
+    user_requirement: str | None = Form(None, alias="userRequirement"),
     files: list[UploadFile] = File(...),
 ) -> dict[str, Any]:
     if not files:
@@ -1814,8 +1817,8 @@ async def create_generation_task(
     timestamp = now_iso()
     with get_db() as db:
         cursor = db.execute(
-            "INSERT INTO generation_tasks (name, status, created_at, updated_at) VALUES (?, 'DRAFT', ?, ?)",
-            (task_name, timestamp, timestamp),
+            "INSERT INTO generation_tasks (name, user_requirement_text, status, created_at, updated_at) VALUES (?, ?, 'DRAFT', ?, ?)",
+            (task_name, normalize_user_requirement_text(user_requirement), timestamp, timestamp),
         )
         task_id = int(cursor.lastrowid)
         for index, asset in enumerate(assets):
@@ -1842,8 +1845,8 @@ async def create_generation_task_from_uploads(payload: GenerationTaskFromUploads
         with get_db() as db:
             batch_id = (payload.batchId or "").strip()[:64] or None
             cursor = db.execute(
-                "INSERT INTO generation_tasks (name, batch_id, status, created_at, updated_at) VALUES (?, ?, 'DRAFT', ?, ?)",
-                (task_name, batch_id, timestamp, timestamp),
+                "INSERT INTO generation_tasks (name, user_requirement_text, batch_id, status, created_at, updated_at) VALUES (?, ?, ?, 'DRAFT', ?, ?)",
+                (task_name, normalize_user_requirement_text(payload.userRequirement), batch_id, timestamp, timestamp),
             )
             task_id = int(cursor.lastrowid)
             for index, asset in enumerate(assets):
@@ -2126,6 +2129,7 @@ def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -
     }
     if (
         payload.name is None
+        and not payload_has_field(payload, "userRequirement")
         and not any(payload_has_field(payload, field) for field in instruction_fields)
     ):
         return {"item": get_generation_task_by_id(task_id)}
@@ -2136,9 +2140,15 @@ def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -
         ensure_generation_task_editable(row)
         updates: list[str] = []
         values: list[Any] = []
+        user_requirement_changed = False
         if payload.name is not None:
             updates.append("name = ?")
             values.append(payload.name.strip() or "未命名任务")
+        if payload_has_field(payload, "userRequirement"):
+            next_user_requirement = normalize_user_requirement_text(payload.userRequirement)
+            user_requirement_changed = next_user_requirement != normalize_user_requirement_text(row_value(row, "user_requirement_text", ""))
+            updates.append("user_requirement_text = ?")
+            values.append(next_user_requirement)
         for field, column in instruction_fields.items():
             if payload_has_field(payload, field):
                 updates.append(f"{column} = ?")
@@ -2148,6 +2158,8 @@ def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -
         values.append(timestamp)
         values.append(task_id)
         db.execute(f"UPDATE generation_tasks SET {', '.join(updates)} WHERE id = ?", values)
+        if user_requirement_changed and row["status"] != "DRAFT":
+            mark_generation_task_input_changed(db, task_id, timestamp, "hero_product_info_changed")
     return {"item": get_generation_task_by_id(task_id)}
 
 
@@ -2553,7 +2565,7 @@ def update_generation_task_image(image_id: int, payload: GenerationTaskImageUpda
     with get_db() as db:
         row = db.execute(
             """
-            SELECT gti.task_id, gti.media_asset_id, gt.status FROM generation_task_images gti
+            SELECT gti.task_id, gti.media_asset_id, gti.sort_order, gt.status FROM generation_task_images gti
             JOIN generation_tasks gt ON gt.id = gti.task_id
             WHERE gti.id = ? AND gti.deleted_at IS NULL AND gt.deleted_at IS NULL
             """,
@@ -2563,6 +2575,8 @@ def update_generation_task_image(image_id: int, payload: GenerationTaskImageUpda
             raise HTTPException(status_code=404, detail="主推款图片不存在")
         ensure_generation_task_editable(row)
         if payload.sortOrder is not None:
+            if int(payload.sortOrder) == int(row["sort_order"]):
+                return {"item": get_generation_task_by_id(int(row["task_id"]))}
             timestamp = now_iso()
             db.execute(
                 "UPDATE generation_task_images SET sort_order = ?, updated_at = ? WHERE id = ?",
@@ -4535,11 +4549,13 @@ def build_stage_user_instruction_context(stage: str, instruction: str | None = N
 
 
 def build_user_requirement_context(task: Any, styling_adjustment: str | None = None) -> dict[str, Any]:
+    upload_requirement = normalize_user_requirement_text(row_value(task, "user_requirement_text", ""))
     adjustment = normalize_user_input_text(styling_adjustment)
-    combined_parts = [part for part in (adjustment,) if part]
+    combined_parts = [part for part in (upload_requirement, adjustment) if part]
     # 只保留可变数据（合并后的用户要求）。优先级/不可覆盖边界由 Prompt 维护模板正文声明。
     return {
         "schema_version": "user-requirement-v1",
+        "upload_requirement": upload_requirement,
         "styling_adjustment": adjustment,
         "combined_requirement": "；".join(combined_parts),
     }

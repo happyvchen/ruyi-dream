@@ -965,6 +965,7 @@ function BatchTaskSummary({ currentTaskId, items, loading, downloadChecking, onP
 type PendingBatchGroup = {
   id: string
   name: string
+  userRequirement?: string
   files: File[]
   issues?: ImportIssue[]
   error?: string
@@ -973,6 +974,7 @@ type PendingBatchGroup = {
 function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any }) {
   const [files, setFiles] = useState<File[]>([])
   const [name, setName] = useState('')
+  const [userRequirement, setUserRequirement] = useState('')
   const [singleIssues, setSingleIssues] = useState<ImportIssue[]>([])
   const [batchGroups, setBatchGroups] = useState<PendingBatchGroup[]>([])
   const [batchCreating, setBatchCreating] = useState<{ current: number; total: number } | null>(null)
@@ -992,6 +994,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
     setFiles(imageFiles)
     const firstPath = imageFiles[0] ? importPath(imageFiles[0]) : ''
     setName(defaultName || (firstPath.includes('/') ? sanitizeClientName(firstPath.split('/')[0]) : timestampName()))
+    setUserRequirement('')
     setSingleIssues(issues)
   }
 
@@ -1000,6 +1003,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
     return {
       id: `single-${Date.now()}`,
       name: sanitizeClientName(name) || timestampName(),
+      userRequirement,
       files,
       issues: singleIssues,
     }
@@ -1009,6 +1013,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
     return groups.map((group, index) => ({
       id: `${group.id}-${Date.now()}-${index}`,
       name: group.code,
+      userRequirement: '',
       files: group.files,
       issues: group.issues,
     }))
@@ -1031,6 +1036,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
       setBatchError('')
       setFiles([])
       setName('')
+      setUserRequirement('')
       setSingleIssues([])
       batchIdRef.current = ''
       firstCreatedTaskRef.current = null
@@ -1093,7 +1099,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
       setBatchCreating({ current: index + 1, total: ready.length })
       try {
         const uploadFiles = formalAssetFiles(group.files, HERO_PRODUCT_MAX_IMAGES)
-        const result = await api.createTask(group.name, uploadFiles, batchIdRef.current)
+        const result = await api.createTask(group.name, uploadFiles, batchIdRef.current, group.userRequirement ?? '')
         created.push(result.item)
         if (!firstCreatedTaskRef.current) firstCreatedTaskRef.current = result.item
         setBatchGroups((current) => current.filter((item) => item.id !== group.id))
@@ -1183,11 +1189,21 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
                                 value={group.name}
                                 maxLength={PRODUCT_CODE_MAX_CHARS}
                                 onChange={(event) => updateBatchGroup(group.id, { name: event.target.value.slice(0, PRODUCT_CODE_MAX_CHARS) })}
-                                aria-label="任务名称"
+                                aria-label="主推款货号"
                                 disabled={!!batchCreating}
                               />
                             </label>
-                            <span className="batch-form-spacer" />
+                            <label className="batch-field batch-info-field">
+                              <span>服装信息</span>
+                              <input
+                                value={group.userRequirement ?? ''}
+                                maxLength={800}
+                                onChange={(event) => updateBatchGroup(group.id, { userRequirement: event.target.value.slice(0, 800) })}
+                                placeholder="品类 / 颜色 / 面料 / 卖点 / 注意事项"
+                                aria-label="主推款服装信息"
+                                disabled={!!batchCreating}
+                              />
+                            </label>
                             <span className={`count-pill ${overLimit ? 'is-over' : ''}`}>{formatImageCount(group.files.length, HERO_PRODUCT_MAX_IMAGES)}</span>
                             <button className="management-action icon-button" onClick={() => setBatchGroups((current) => current.filter((item) => item.id !== group.id))} title="移除该任务" disabled={!!batchCreating}><Trash2 size={16} /></button>
                           </div>
@@ -1218,9 +1234,16 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
             })()}
             {files.length > 0 && (
               <div className="upload-review">
-                <div className="batch-card-head">
+                <div className="batch-card-form">
                   <div className="batch-icon"><Layers3 size={18} /></div>
-                  <input value={name} maxLength={PRODUCT_CODE_MAX_CHARS} onChange={(e) => setName(e.target.value.slice(0, PRODUCT_CODE_MAX_CHARS))} placeholder="任务名称" aria-label="任务名称" />
+                  <label className="batch-field batch-code-field">
+                    <span>货号</span>
+                    <input value={name} maxLength={PRODUCT_CODE_MAX_CHARS} onChange={(e) => setName(e.target.value.slice(0, PRODUCT_CODE_MAX_CHARS))} placeholder="主推款货号" aria-label="主推款货号" />
+                  </label>
+                  <label className="batch-field batch-info-field">
+                    <span>服装信息</span>
+                    <input value={userRequirement} maxLength={800} onChange={(event) => setUserRequirement(event.target.value.slice(0, 800))} placeholder="品类 / 颜色 / 面料 / 卖点 / 注意事项" aria-label="主推款服装信息" />
+                  </label>
                   <span className={`count-pill ${files.length > HERO_PRODUCT_MAX_IMAGES ? 'is-over' : ''}`}>{formatImageCount(files.length, HERO_PRODUCT_MAX_IMAGES)}</span>
                 </div>
                   <div className="batch-note">
@@ -1230,10 +1253,11 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
                   </div>
                 <FileThumbList files={files} onChange={setFiles} limit={HERO_PRODUCT_MAX_IMAGES} />
                 <div className="inline-form">
-                    <button className="management-action" disabled={!files.length || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, formalAssetFiles(files, HERO_PRODUCT_MAX_IMAGES)), (r: { item: GenerationTask }) => {
+                    <button className="management-action" disabled={!files.length || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, formalAssetFiles(files, HERO_PRODUCT_MAX_IMAGES), undefined, userRequirement), (r: { item: GenerationTask }) => {
                     setTask(r.item)
                     setFiles([])
                     setName('')
+                    setUserRequirement('')
                     window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: r.item.id }))
                   }, { refresh: 'background' })}>
                     <ImagePlus size={16} /> 创建任务
@@ -1249,67 +1273,182 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
   )
 }
 
+type HeroDraftImage = {
+  id: number
+  asset: MediaAsset
+  replacement?: File
+}
+
 function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask: (task: GenerationTask) => void; run: any }) {
   const [name, setName] = useState(task.name)
+  const [userRequirement, setUserRequirement] = useState(task.userRequirement ?? '')
+  const [draftImages, setDraftImages] = useState<HeroDraftImage[]>(() => (task.images ?? []).map((image) => ({ id: image.id, asset: image.asset })))
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const [dragIndex, setDragIndex] = useState<number | null>(null)
-  const imageCount = task.images?.length ?? 0
+  const imageCount = draftImages.length
   const imageLimit = task.status === 'DRAFT' ? HERO_PRODUCT_MAX_IMAGES : HERO_PRODUCT_SELECTED_IMAGES
+  const originalImages = task.images ?? []
+  const draftIds = draftImages.map((image) => image.id).join(',')
+  const originalIds = originalImages.map((image) => image.id).join(',')
+  const hasImageDraftChange = draftIds !== originalIds || draftImages.some((image) => image.replacement)
+  const hasInfoDraftChange = userRequirement.trim() !== (task.userRequirement ?? '').trim()
+  const hasPendingDraft = hasImageDraftChange || hasInfoDraftChange
 
-  useEffect(() => setName(task.name), [task.id, task.name])
+  useEffect(() => {
+    setName(task.name)
+    setUserRequirement(task.userRequirement ?? '')
+    setDraftImages((task.images ?? []).map((image) => ({ id: image.id, asset: image.asset })))
+  }, [task.id])
 
-  async function moveTo(from: number, to: number) {
-    const images = task.images ?? []
-    if (from === to || from < 0 || to < 0 || from >= images.length || to >= images.length) return
-    const next = [...images]
+  function resetDraft(nextTask = task) {
+    setUserRequirement(nextTask.userRequirement ?? '')
+    setDraftImages((nextTask.images ?? []).map((image) => ({ id: image.id, asset: image.asset })))
+  }
+
+  function moveTo(from: number, to: number) {
+    if (from === to || from < 0 || to < 0 || from >= draftImages.length || to >= draftImages.length) return
+    const next = [...draftImages]
     const [item] = next.splice(from, 1)
     next.splice(to, 0, item)
-    const sortOrders = images.map((image) => image.sortOrder)
-    await run('调整主推款顺序中...', async () => {
-      const results = await Promise.all(next.map((image, index) => api.updateTaskImage(image.id, sortOrders[index])))
-      return results[results.length - 1]
-    }, (result: { item: GenerationTask }) => setTask(result.item), { refresh: 'background' })
+    setDraftImages(next)
+  }
+
+  function replaceDraftImage(id: number, file: File) {
+    setDraftImages((items) => items.map((item) => item.id === id ? { ...item, replacement: file } : item))
+  }
+
+  function removeDraftImage(id: number) {
+    setDraftImages((items) => items.filter((item) => item.id !== id))
+  }
+
+  async function confirmDraftChanges() {
+    if (!hasPendingDraft) return
+    if (draftImages.length < 1) return
+    if (task.status !== 'DRAFT' && !window.confirm('确认修改主推款输入吗？确认后当前选搭、分镜预览和成片会失效，但历史记录会保留。')) return
+    await run(task.status === 'DRAFT' ? '保存主推款修改中...' : '确认主推款修改中...', async () => {
+      let result: { item: GenerationTask } = { item: task }
+      if (hasInfoDraftChange) {
+        result = await api.updateTask(task.id, { userRequirement })
+      }
+      for (const image of draftImages) {
+        if (image.replacement) result = await api.replaceTaskImage(image.id, image.replacement)
+      }
+      const keptIds = new Set(draftImages.map((image) => image.id))
+      for (const image of originalImages) {
+        if (!keptIds.has(image.id)) result = await api.deleteTaskImage(image.id)
+      }
+      for (let index = 0; index < draftImages.length; index += 1) {
+        const image = draftImages[index]
+        const originalIndex = originalImages.findIndex((item) => item.id === image.id)
+        if (originalIndex !== index || image.replacement) {
+          result = await api.updateTaskImage(image.id, index)
+        }
+      }
+      return result
+    }, (result: { item: GenerationTask }) => {
+      setTask(result.item)
+      resetDraft(result.item)
+    }, { refresh: 'background' })
   }
 
   return (
     <div className="hero-draft">
-      <div className="section-head"><strong>主推款图片</strong><span className={`count-pill ${imageCount > imageLimit ? 'is-over' : ''}`}>{formatImageCount(imageCount, imageLimit)}</span><span className="status draft">{task.status === 'DRAFT' ? '待选搭' : '可调整'}</span></div>
-      <div className="inline-form">
-          <input value={name} maxLength={PRODUCT_CODE_MAX_CHARS} onChange={(event) => setName(event.target.value.slice(0, PRODUCT_CODE_MAX_CHARS))} placeholder="任务名称" />
-          <button className="management-action" disabled={name.trim() === task.name} onClick={() => void run('保存任务名称中...', () => api.updateTask(task.id, { name }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>保存名称</button>
+      <div className="section-head"><strong>主推款图片</strong><span className={`count-pill ${imageCount > imageLimit ? 'is-over' : ''}`}>{formatImageCount(imageCount, imageLimit)}</span><span className="status draft">{hasPendingDraft ? '待确认修改' : task.status === 'DRAFT' ? '待选搭' : '当前生效'}</span></div>
+      <div className="batch-card-form hero-task-form">
+        <div className="batch-icon"><Layers3 size={18} /></div>
+        <label className="batch-field batch-code-field">
+          <span>货号</span>
+          <input value={name} maxLength={PRODUCT_CODE_MAX_CHARS} onChange={(event) => setName(event.target.value.slice(0, PRODUCT_CODE_MAX_CHARS))} placeholder="主推款货号" />
+        </label>
+        <label className="batch-field batch-info-field">
+          <span>服装信息</span>
+          <input value={userRequirement} maxLength={800} onChange={(event) => setUserRequirement(event.target.value.slice(0, 800))} placeholder="品类 / 颜色 / 面料 / 卖点 / 注意事项" />
+        </label>
+        <button className="management-action" disabled={name.trim() === task.name} onClick={() => void run('保存货号中...', () => api.updateTask(task.id, { name }), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })}>保存货号</button>
       </div>
+      {hasPendingDraft && <div className="batch-note"><span>当前生效素材和已有结果仍保留；下方为待确认草稿。</span></div>}
       <div className="draft-image-grid">
-        {(task.images ?? []).map((image, index) => (
-          <div
-            className="saved-image-card"
+        {draftImages.map((image, index) => (
+          <HeroDraftImageCard
             key={image.id}
-            draggable={(task.images?.length ?? 0) > 1}
+            image={image}
+            draggable={draftImages.length > 1}
+            canRemove={draftImages.length > 1}
+            onOpen={setViewer}
             onDragStart={() => setDragIndex(index)}
             onDragOver={(event) => event.preventDefault()}
             onDrop={() => {
-              if (dragIndex !== null) void moveTo(dragIndex, index)
+              if (dragIndex !== null) moveTo(dragIndex, index)
               setDragIndex(null)
             }}
-          >
-            <button className="image-open" onClick={() => setViewer(assetLightboxImage(image.asset, (task.images ?? []).map((item) => item.asset)))} title="放大查看">
-              <img src={mediaUrl(assetThumbSrc(image.asset))} alt={image.asset.filename} loading="lazy" />
-            </button>
-            <span>{image.asset.filename}<small>{assetMeta(image.asset)}</small></span>
-            <div className="thumb-actions">
-              <label title="替换图片">
-                <RefreshCw size={14} />
-                <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
-                  const replacement = event.target.files?.[0]
-                  if (replacement) void run('替换主推款图片中...', () => api.replaceTaskImage(image.id, replacement), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })
-                }} />
-              </label>
-              <button disabled={(task.images?.length ?? 0) <= 1} onClick={() => void run('移除主推款图片中...', () => api.deleteTaskImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="删除图片"><Trash2 size={14} /></button>
-            </div>
-          </div>
+            onReplace={(file) => replaceDraftImage(image.id, file)}
+            onRemove={() => removeDraftImage(image.id)}
+          />
         ))}
       </div>
-      <p className="edit-hint">{task.status === 'DRAFT' ? `最多 ${HERO_PRODUCT_MAX_IMAGES} 张进入候选池；AI 智能选搭后保留 ${HERO_PRODUCT_SELECTED_IMAGES} 张主推款参考图。` : `当前展示 AI 选搭后保留的主推款参考图，最多 ${HERO_PRODUCT_SELECTED_IMAGES} 张；调整图片会让当前任务回到待选搭状态。`}</p>
+      <p className="edit-hint">{task.status === 'DRAFT' ? `最多 ${HERO_PRODUCT_MAX_IMAGES} 张进入候选池；AI 智能选搭后保留 ${HERO_PRODUCT_SELECTED_IMAGES} 张主推款参考图。` : hasPendingDraft ? '修改尚未生效；确认前不会影响当前选搭、分镜预览和成片。' : `当前展示 AI 选搭后保留的主推款参考图，最多 ${HERO_PRODUCT_SELECTED_IMAGES} 张。`}</p>
+      <div className="inline-form">
+        <button className="management-action" disabled={!hasPendingDraft || draftImages.length < 1} onClick={() => void confirmDraftChanges()}><Check size={16} />确认修改</button>
+        <button className="management-action" disabled={!hasPendingDraft} onClick={() => resetDraft()}><RotateCcw size={16} />放弃修改</button>
+      </div>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
+    </div>
+  )
+}
+
+function HeroDraftImageCard({ image, draggable, canRemove, onOpen, onDragStart, onDragOver, onDrop, onReplace, onRemove }: {
+  image: HeroDraftImage
+  draggable: boolean
+  canRemove: boolean
+  onOpen: (image: LightboxImage) => void
+  onDragStart: () => void
+  onDragOver: (event: DragEvent<HTMLDivElement>) => void
+  onDrop: () => void
+  onReplace: (file: File) => void
+  onRemove: () => void
+}) {
+  const [replacementUrl, setReplacementUrl] = useState('')
+  useEffect(() => {
+    if (!image.replacement) {
+      setReplacementUrl('')
+      return
+    }
+    const nextUrl = URL.createObjectURL(image.replacement)
+    setReplacementUrl(nextUrl)
+    return () => URL.revokeObjectURL(nextUrl)
+  }, [image.replacement])
+  const filename = image.replacement?.name ?? image.asset.filename
+  const meta = image.replacement ? fileMeta(image.replacement) : assetMeta(image.asset)
+  const openImage = () => {
+    if (image.replacement && replacementUrl) {
+      onOpen(fileLightboxImage(image.replacement, replacementUrl))
+      return
+    }
+    onOpen(assetLightboxImage(image.asset))
+  }
+  return (
+    <div
+      className={`saved-image-card ${image.replacement ? 'is-pending' : ''}`}
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+    >
+      <button className="image-open" onClick={openImage} title="放大查看">
+        <img src={replacementUrl || mediaUrl(assetThumbSrc(image.asset))} alt={filename} loading="lazy" />
+      </button>
+      {image.replacement && <em className="thumb-pending-badge">待替换</em>}
+      <span>{filename}<small>{meta}</small></span>
+      <div className="thumb-actions">
+        <label title="替换图片">
+          <RefreshCw size={14} />
+          <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} aria-label="替换主推款图片" onChange={(event) => {
+            const replacement = event.target.files?.[0]
+            if (replacement) onReplace(replacement)
+          }} />
+        </label>
+        <button disabled={!canRemove} onClick={onRemove} title="移除图片"><Trash2 size={14} /></button>
+      </div>
     </div>
   )
 }
