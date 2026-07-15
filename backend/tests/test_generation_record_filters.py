@@ -56,6 +56,15 @@ class GenerationRecordFilterTests(unittest.TestCase):
             (2, "通勤衬衫", "FAILED", "batch-a", None, "2026-07-10T09:00:00", "2026-07-11T09:00:00"),
             (3, "西装外套", "FINAL_RUNNING", "batch-b", None, "2026-07-12T09:00:00", "2026-07-12T10:00:00"),
             (4, "归档旧任务", "COMPLETED", "batch-old", "2026-07-13T09:00:00", "2026-06-20T09:00:00", "2026-06-21T09:00:00"),
+            (5, "单独任务", "COMPLETED", None, None, "2026-07-14T09:00:00", "2026-07-14T10:00:00"),
+            (6, "秋季半裙", "COMPLETED", "batch-done", None, "2026-07-04T09:00:00", "2026-07-04T10:00:00"),
+            (7, "秋季针织", "COMPLETED", "batch-done", None, "2026-07-04T09:10:00", "2026-07-04T10:10:00"),
+            (8, "混合取消", "CANCELLED", "batch-cancel-mixed", None, "2026-07-05T09:00:00", "2026-07-05T10:00:00"),
+            (9, "混合草稿", "DRAFT", "batch-cancel-mixed", None, "2026-07-05T09:10:00", "2026-07-05T10:10:00"),
+            (10, "部分成片", "FINAL_PARTIAL", "batch-partial", None, "2026-07-06T09:00:00", "2026-07-06T10:00:00"),
+            (11, "部分完成", "COMPLETED", "batch-partial", None, "2026-07-06T09:10:00", "2026-07-06T10:10:00"),
+            (12, "混合归档", "FAILED", "batch-archived-mixed", "2026-07-07T09:00:00", "2026-07-07T09:00:00", "2026-07-07T10:00:00"),
+            (13, "混合未归档", "FINAL_RUNNING", "batch-archived-mixed", None, "2026-07-07T09:10:00", "2026-07-07T10:10:00"),
         ]
         with db_module.get_db() as db:
             for row in rows:
@@ -92,7 +101,7 @@ class GenerationRecordFilterTests(unittest.TestCase):
         )
         self.assertEqual(
             {item["value"]: item["count"] for item in body["stableFacets"]["status"]},
-            {"COMPLETED": 1, "FAILED": 1, "FINAL_RUNNING": 1},
+            {"CANCELLED": 1, "COMPLETED": 5, "DRAFT": 1, "FAILED": 1, "FINAL_PARTIAL": 1, "FINAL_RUNNING": 2},
         )
 
     def test_archive_visibility_and_name_sort(self) -> None:
@@ -103,6 +112,43 @@ class GenerationRecordFilterTests(unittest.TestCase):
         archived_response = self.client.get("/api/generation-records?includeArchived=true&sortBy=name&sortDir=asc&limit=20")
         self.assertEqual(archived_response.status_code, 200)
         self.assertIn("归档旧任务", [item["name"] for item in archived_response.json()["items"]])
+
+    def test_batch_records_group_tasks_and_status(self) -> None:
+        response = self.client.get("/api/generation-record-batches?sortBy=createdAt&sortDir=asc&limit=20")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+
+        self.assertEqual(
+            [item["batchId"] for item in body["items"]],
+            ["batch-a", "batch-done", "batch-cancel-mixed", "batch-partial", "batch-b"],
+        )
+        batch_a = next(item for item in body["items"] if item["batchId"] == "batch-a")
+        self.assertEqual(batch_a["status"], "FAILED")
+        self.assertEqual(batch_a["taskCount"], 2)
+        self.assertEqual(batch_a["completedTaskCount"], 1)
+        self.assertEqual(batch_a["failedTaskCount"], 1)
+        batch_b = next(item for item in body["items"] if item["batchId"] == "batch-b")
+        self.assertEqual(batch_b["status"], "RUNNING")
+        self.assertEqual(batch_b["runningTaskCount"], 1)
+        batch_cancelled = next(item for item in body["items"] if item["batchId"] == "batch-cancel-mixed")
+        self.assertEqual(batch_cancelled["status"], "CANCELLED")
+        batch_partial = next(item for item in body["items"] if item["batchId"] == "batch-partial")
+        self.assertEqual(batch_partial["status"], "PARTIAL")
+        self.assertNotIn("batch-old", [item["batchId"] for item in body["items"]])
+        self.assertNotIn("batch-archived-mixed", [item["batchId"] for item in body["items"]])
+
+    def test_batch_records_search_status_and_archived_visibility(self) -> None:
+        search_response = self.client.get("/api/generation-record-batches?keyword=针织&limit=20")
+        self.assertEqual(search_response.status_code, 200)
+        self.assertEqual([item["batchId"] for item in search_response.json()["items"]], ["batch-done"])
+
+        status_response = self.client.get("/api/generation-record-batches?status=COMPLETED&limit=20")
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual([item["batchId"] for item in status_response.json()["items"]], ["batch-done"])
+
+        archived_response = self.client.get("/api/generation-record-batches?includeArchived=true&status=ARCHIVED&limit=20")
+        self.assertEqual(archived_response.status_code, 200)
+        self.assertEqual({item["batchId"] for item in archived_response.json()["items"]}, {"batch-old", "batch-archived-mixed"})
 
 
 if __name__ == "__main__":

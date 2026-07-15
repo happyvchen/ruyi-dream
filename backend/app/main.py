@@ -3605,6 +3605,158 @@ def get_new_generation_record(task_id: int, request: Request, include_debug: boo
     return {"item": get_generation_task_by_id(task_id, include_debug=require_admin_debug(request, include_debug))}
 
 
+BATCH_RECORD_STATUS_ORDER = ["ARCHIVED", "RUNNING", "FAILED", "PARTIAL", "CANCELLED", "COMPLETED", "PENDING"]
+
+
+def generation_batch_record_status(rows: list[Any]) -> str:
+    if any(row_value(row, "archived_at") or row["status"] == "ABANDONED" for row in rows):
+        return "ARCHIVED"
+    statuses = [str(row["status"]) for row in rows]
+    if any(status in RUNNING_GENERATION_TASK_STATUSES for status in statuses) or any(row_value(row, "auto_run_target") for row in rows):
+        return "RUNNING"
+    if any(status == "FAILED" for status in statuses):
+        return "FAILED"
+    if any(status == "FINAL_PARTIAL" for status in statuses) or (any(status == "COMPLETED" for status in statuses) and any(status != "COMPLETED" for status in statuses)):
+        return "PARTIAL"
+    if any(status == "CANCELLED" for status in statuses):
+        return "CANCELLED"
+    if statuses and all(status == "COMPLETED" for status in statuses):
+        return "COMPLETED"
+    return "PENDING"
+
+
+def serialize_generation_batch_record(batch_id: str, rows: list[Any]) -> dict[str, Any]:
+    sorted_rows = sorted(rows, key=lambda row: (str(row["created_at"]), int(row["id"])))
+    status_counts: dict[str, int] = {}
+    archived_count = 0
+    queued_count = 0
+    running_count = 0
+    completed_count = 0
+    failed_count = 0
+    cancelled_count = 0
+    downloadable_count = 0
+    for row in sorted_rows:
+        status = str(row["status"])
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if row_value(row, "archived_at") or status == "ABANDONED":
+            archived_count += 1
+        if row_value(row, "auto_run_target"):
+            queued_count += 1
+        if status in RUNNING_GENERATION_TASK_STATUSES:
+            running_count += 1
+        if status == "COMPLETED":
+            completed_count += 1
+        if status == "FAILED":
+            failed_count += 1
+        if status == "CANCELLED":
+            cancelled_count += 1
+        if status in {"COMPLETED", "FINAL_PARTIAL"}:
+            downloadable_count += 1
+    created_values = [str(row["created_at"]) for row in sorted_rows]
+    updated_values = [str(row["updated_at"]) for row in sorted_rows]
+    first_row = sorted_rows[0]
+    title = f"批次 {str(batch_id)[-8:]}" if len(str(batch_id)) > 8 else f"批次 {batch_id}"
+    return {
+        "id": batch_id,
+        "batchId": batch_id,
+        "name": title,
+        "status": generation_batch_record_status(sorted_rows),
+        "taskCount": len(sorted_rows),
+        "activeTaskCount": len(sorted_rows) - archived_count,
+        "archivedTaskCount": archived_count,
+        "completedTaskCount": completed_count,
+        "failedTaskCount": failed_count,
+        "cancelledTaskCount": cancelled_count,
+        "runningTaskCount": running_count,
+        "queuedTaskCount": queued_count,
+        "downloadableTaskCount": downloadable_count,
+        "statusCounts": status_counts,
+        "createdAt": min(created_values),
+        "updatedAt": max(updated_values),
+        "coverTasks": [serialize_generation_task(row, include_detail=False) for row in sorted_rows[:4]],
+        "sampleTaskNames": [str(row["name"]) for row in sorted_rows[:3]],
+        "firstTaskId": int(first_row["id"]),
+    }
+
+
+def generation_batch_matches_status(batch: dict[str, Any], status_values: set[str]) -> bool:
+    if not status_values:
+        return True
+    return str(batch["status"]).casefold() in status_values
+
+
+@app.get("/api/generation-record-batches")
+def list_generation_record_batches(
+    include_archived: bool = Query(False, alias="includeArchived"),
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    keyword: str | None = Query(None),
+    status: list[str] | None = Query(None),
+    created_from: str | None = Query(None, alias="createdFrom"),
+    created_to: str | None = Query(None, alias="createdTo"),
+    sort_by: str = Query("createdAt", alias="sortBy"),
+    sort_dir: str = Query("desc", alias="sortDir"),
+) -> dict[str, Any]:
+    status_values = split_filter_values(status)
+    created_from_dt = parse_filter_datetime(created_from, end_of_day=False)
+    created_to_dt = parse_filter_datetime(created_to, end_of_day=True)
+    keyword_text = str(keyword or "").strip().casefold()
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT * FROM generation_tasks
+            WHERE deleted_at IS NULL AND batch_id IS NOT NULL AND TRIM(batch_id) != ''
+            ORDER BY batch_id, created_at, id
+            """
+        ).fetchall()
+    grouped: dict[str, list[Any]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["batch_id"]), []).append(row)
+    batches: list[dict[str, Any]] = []
+    for batch_id, batch_rows in grouped.items():
+        batch = serialize_generation_batch_record(batch_id, batch_rows)
+        if not include_archived and batch["status"] == "ARCHIVED":
+            continue
+        created_at = parse_filter_datetime(str(batch["createdAt"]), end_of_day=False)
+        if created_from_dt and created_at and created_at < created_from_dt:
+            continue
+        if created_to_dt and created_at and created_at > created_to_dt:
+            continue
+        if keyword_text:
+            haystack = " ".join([batch_id, batch["name"], *batch["sampleTaskNames"], *(batch.get("statusCounts") or {}).keys()]).casefold()
+            if keyword_text not in haystack:
+                continue
+        if not generation_batch_matches_status(batch, status_values):
+            continue
+        batches.append(batch)
+    sort_key = {
+        "createdAt": lambda item: str(item["createdAt"]),
+        "updatedAt": lambda item: str(item["updatedAt"]),
+        "name": lambda item: str(item["name"]).casefold(),
+        "status": lambda item: BATCH_RECORD_STATUS_ORDER.index(item["status"]) if item["status"] in BATCH_RECORD_STATUS_ORDER else len(BATCH_RECORD_STATUS_ORDER),
+    }.get(sort_by, lambda item: str(item["createdAt"]))
+    reverse = sort_dir != "asc"
+    batches = sorted(batches, key=lambda item: (sort_key(item), str(item["batchId"])), reverse=reverse)
+    total = len(batches)
+    items = batches[offset:offset + limit]
+    stable_batches = []
+    for batch_id, batch_rows in grouped.items():
+        batch = serialize_generation_batch_record(batch_id, batch_rows)
+        if include_archived or batch["status"] != "ARCHIVED":
+            stable_batches.append(batch)
+    return {
+        "items": items,
+        "limit": limit,
+        "offset": offset,
+        "nextOffset": offset + limit if offset + limit < total else None,
+        "hasMore": offset + limit < total,
+        "total": total,
+        "totalPages": (total + limit - 1) // limit if total else 0,
+        "facets": {"status": facet_options(batch["status"] for batch in batches)},
+        "stableFacets": {"status": facet_options(batch["status"] for batch in stable_batches)},
+    }
+
+
 # ---------------------------------------------------------------------------
 # 成片批量下载：预检 + 按任务名分文件夹流式打包
 # ---------------------------------------------------------------------------
