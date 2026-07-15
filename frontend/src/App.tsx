@@ -94,6 +94,9 @@ const HERO_PRODUCT_MAX_IMAGES = 15
 const STYLING_GARMENT_SELECTED_IMAGES = 6
 const HERO_PRODUCT_SELECTED_IMAGES = 8
 const PRODUCT_CODE_MAX_CHARS = 20
+const GARMENT_AUTO_CARD_WIDTH = 252
+const GARMENT_AUTO_CARD_HEIGHT = 404
+const GARMENT_AUTO_GRID_GAP = 16
 
 function formatImageCount(count: number, limit: number) {
   return `${count}/${limit} 张`
@@ -1935,6 +1938,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
   const [pageSizeMode, setPageSizeMode] = useState<'auto' | 'fixed'>('auto')
   const [pageSize, setPageSize] = useState(() => estimateAutoGarmentPageSize())
   const [searching, setSearching] = useState(true)
+  const [showSearchBusy, setShowSearchBusy] = useState(false)
   const [includeArchived, setIncludeArchived] = useState(false)
   const [bulkMode, setBulkMode] = useState(false)
   const [selectedGarmentIds, setSelectedGarmentIds] = useState<Set<number>>(() => new Set())
@@ -2004,6 +2008,15 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
     setPageSize(autoPageSize)
     setOffset(0)
   }, [autoPageSize, pageSize, pageSizeMode])
+
+  useEffect(() => {
+    if (!searching) {
+      setShowSearchBusy(false)
+      return
+    }
+    const timer = window.setTimeout(() => setShowSearchBusy(true), 350)
+    return () => window.clearTimeout(timer)
+  }, [searching])
 
   useEffect(() => {
     let cancelled = false
@@ -2135,10 +2148,10 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
       {showImport && <BatchImportPanel onImported={() => void refreshFirstLibraryPage().catch(() => undefined)} />}
       <div className="panel library-panel">
         <div className="library-commandbar">
-          <div className={`search ${searching ? 'is-searching' : ''}`}>
+          <div className={`search ${showSearchBusy ? 'is-searching' : ''}`}>
             <Search size={16} />
             <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索货号 / 标签" />
-            {searching && <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span>}
+            {showSearchBusy && <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span>}
           </div>
           <div className="library-filter-pills">
             <CategoryTreeFilter
@@ -2192,7 +2205,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
             <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
           </div>
         </div>
-        <div ref={libraryResultsRef} className={`library-results ${searching ? 'is-loading' : ''}`}>
+        <div ref={libraryResultsRef} className={`library-results ${showSearchBusy ? 'is-loading' : ''}`}>
         {items.length ? (
           <div className="garment-grid">{items.map((item) => (
             <GarmentCard
@@ -2800,7 +2813,7 @@ function estimateAutoRecordPageSize() {
   return calculateAutoRecordPageSize(availableHeight)
 }
 
-function calculateAutoGarmentPageSize(width: number, height: number, cardHeight = 386, columnWidth = 230, gap = 14) {
+function calculateAutoGarmentPageSize(width: number, height: number, cardHeight = GARMENT_AUTO_CARD_HEIGHT, columnWidth = GARMENT_AUTO_CARD_WIDTH, gap = GARMENT_AUTO_GRID_GAP) {
   const columns = Math.max(1, Math.floor((Math.max(width, columnWidth) + gap) / (columnWidth + gap)))
   const rows = Math.max(1, Math.floor((Math.max(height, cardHeight) + gap) / (cardHeight + gap)))
   return Math.max(1, Math.min(100, columns * rows))
@@ -2822,13 +2835,14 @@ function useAutoGarmentPageSize(resultsRef: { current: HTMLDivElement | null }) 
         const grid = results?.querySelector<HTMLElement>('.garment-grid') ?? null
         const card = results?.querySelector<HTMLElement>('.garment-card') ?? null
         const gridStyle = grid ? window.getComputedStyle(grid) : null
-        const columnGap = gridStyle ? Number.parseFloat(gridStyle.columnGap) || 14 : 14
+        const columnGap = gridStyle ? Number.parseFloat(gridStyle.columnGap) || GARMENT_AUTO_GRID_GAP : GARMENT_AUTO_GRID_GAP
         const rowGap = gridStyle ? Number.parseFloat(gridStyle.rowGap) || columnGap : columnGap
         const width = grid?.clientWidth || results?.clientWidth || Math.max(320, window.innerWidth - 328)
         const height = results?.clientHeight || Math.max(360, window.innerHeight - 260)
         const measuredCardHeight = card?.getBoundingClientRect().height ?? 0
-        const cardHeight = measuredCardHeight > 120 ? measuredCardHeight : 386
-        setPageSize(calculateAutoGarmentPageSize(width, height, cardHeight, 230, Math.max(columnGap, rowGap)))
+        const cardHeight = measuredCardHeight > 120 ? measuredCardHeight : GARMENT_AUTO_CARD_HEIGHT
+        const nextPageSize = calculateAutoGarmentPageSize(width, height, cardHeight, GARMENT_AUTO_CARD_WIDTH, Math.max(columnGap, rowGap))
+        setPageSize((current) => current === nextPageSize ? current : nextPageSize)
       })
     }
 
