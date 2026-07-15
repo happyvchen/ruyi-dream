@@ -1218,8 +1218,8 @@ a.button-link { text-decoration: none; cursor: pointer; }
   overflow: hidden;
 }
 .library-page:has(.import-panel) .library-panel {
-  height: auto;
-  min-height: 560px;
+  height: calc(100vh - 112px);
+  min-height: 0;
 }
 .search {
   position: relative;
@@ -3200,9 +3200,10 @@ a.button-link { text-decoration: none; cursor: pointer; }
     flex-direction: column;
   }
   .library-panel {
-    height: auto;
-    min-height: 0;
-    overflow: visible;
+    height: calc(100vh - 128px);
+    height: calc(100dvh - 128px);
+    min-height: 420px;
+    overflow: hidden;
   }
   .library-commandbar,
   .library-filter-pills,
@@ -3239,7 +3240,7 @@ a.button-link { text-decoration: none; cursor: pointer; }
     width: min(280px, calc(100vw - 36px));
   }
   .library-results {
-    overflow: visible;
+    overflow-y: auto;
   }
   .prompt-maintenance-layout,
   .model-page {

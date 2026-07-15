@@ -2110,11 +2110,11 @@ function CategoryTreeFilter({ open, onOpen, options, selectedPrimary, selectedSe
   onPrimary: (value: string[]) => void
   onSecondary: (value: string[]) => void
 }) {
-  const popoverRef = useRef<HTMLDivElement | null>(null)
+  const wrapRef = useRef<HTMLDivElement | null>(null)
   const [activePrimary, setActivePrimary] = useState('')
   const primary = options.find((item) => item.value === activePrimary) ?? options[0]
   const selectedCount = selectedPrimary.length + selectedSecondary.length
-  useOutsideClose(open, popoverRef, () => onOpen(false))
+  useOutsideClose(open, wrapRef, () => onOpen(false))
 
   useEffect(() => {
     if (!open || activePrimary || !options.length) return
@@ -2133,13 +2133,13 @@ function CategoryTreeFilter({ open, onOpen, options, selectedPrimary, selectedSe
   const allSecondarySelected = !!primary?.children?.length && primary.children.every((item) => selectedSecondary.includes(item.value))
 
   return (
-    <div className="filter-popover-wrap">
+    <div className="filter-popover-wrap" ref={wrapRef}>
       <button className={`filter-pill ${selectedCount ? 'is-active' : ''}`} type="button" onClick={() => onOpen(!open)}>
         <span>{selectedCount ? `品类 ${selectedCount}` : '品类'}</span>
         <ChevronDown size={15} />
       </button>
       {open && (
-        <div className="filter-popover category-popover" ref={popoverRef}>
+        <div className="filter-popover category-popover">
           <div className="popover-search"><Search size={15} /><span>按一级 / 二级品类筛选</span></div>
           <div className="category-tree">
             <div className="category-column">
@@ -2191,40 +2191,66 @@ function DateRangeFilter({ open, onOpen, from, to, onFrom, onTo }: {
   onFrom: (value: string) => void
   onTo: (value: string) => void
 }) {
-  const popoverRef = useRef<HTMLDivElement | null>(null)
+  const wrapRef = useRef<HTMLDivElement | null>(null)
   const [calendarMonth, setCalendarMonth] = useState(() => monthStart(from ? parseDateInput(from) ?? new Date() : new Date()))
-  const label = from || to ? `${from || '不限'} 至 ${to || '不限'}` : '上传时间'
-  useOutsideClose(open, popoverRef, () => onOpen(false))
+  const [draftFrom, setDraftFrom] = useState('')
+  const [draftTo, setDraftTo] = useState('')
+  const pendingRange = draftFrom && !draftTo ? `${draftFrom} 至 ...` : ''
+  const label = from && to ? `${from} 至 ${to}` : '上传时间'
+  useOutsideClose(open, wrapRef, () => onOpen(false))
 
   useEffect(() => {
-    if (open && from) setCalendarMonth(monthStart(parseDateInput(from) ?? new Date()))
-  }, [from, open])
+    if (!open) return
+    setDraftFrom(from)
+    setDraftTo(to)
+    if (from) setCalendarMonth(monthStart(parseDateInput(from) ?? new Date()))
+  }, [from, open, to])
 
   function selectDate(value: string) {
-    if (!from || (from && to)) {
-      onFrom(value)
-      onTo('')
+    if (!draftFrom || (draftFrom && draftTo)) {
+      setDraftFrom(value)
+      setDraftTo('')
       return
     }
-    if (value < from) {
-      onFrom(value)
-      onTo(from)
+    const nextFrom = value < draftFrom ? value : draftFrom
+    const nextTo = value < draftFrom ? draftFrom : value
+    setDraftFrom(nextFrom)
+    setDraftTo(nextTo)
+    onFrom(nextFrom)
+    onTo(nextTo)
+    onOpen(false)
+  }
+
+  function applyQuickRange(days: number) {
+    const today = new Date()
+    const nextFrom = new Date(today)
+    nextFrom.setDate(today.getDate() - Math.max(days - 1, 0))
+    onFrom(dateInputValue(nextFrom))
+    onTo(dateInputValue(today))
+    onOpen(false)
+  }
+
+  function toggleOpen() {
+    if (open) {
+      onOpen(false)
       return
     }
-    onTo(value)
+    setDraftFrom(from)
+    setDraftTo(to)
+    onOpen(true)
   }
 
   return (
-    <div className="filter-popover-wrap">
-      <button className={`filter-pill ${from || to ? 'is-active' : ''}`} type="button" onClick={() => onOpen(!open)}>
-        <span>{label}</span>
+    <div className="filter-popover-wrap" ref={wrapRef}>
+      <button className={`filter-pill ${from && to ? 'is-active' : ''}`} type="button" onClick={toggleOpen}>
+        <span>{pendingRange || label}</span>
         <ChevronDown size={15} />
       </button>
       {open && (
-        <div className="filter-popover date-popover" ref={popoverRef}>
-          <button type="button" onClick={() => { setUploadedDateRange(7, onFrom, onTo); onOpen(false) }}>近 7 天</button>
-          <button type="button" onClick={() => { setUploadedDateRange(30, onFrom, onTo); onOpen(false) }}>近 30 天</button>
-          <CalendarRangePicker month={calendarMonth} from={from} to={to} onMonth={setCalendarMonth} onSelect={selectDate} />
+        <div className="filter-popover date-popover">
+          <button type="button" onClick={() => applyQuickRange(7)}>近 7 天</button>
+          <button type="button" onClick={() => applyQuickRange(30)}>近 30 天</button>
+          <CalendarRangePicker month={calendarMonth} from={draftFrom} to={draftTo} onMonth={setCalendarMonth} onSelect={selectDate} />
         </div>
       )}
     </div>
@@ -2238,18 +2264,18 @@ function SortFilter({ open, onOpen, sortBy, sortDir, onChange }: {
   sortDir: 'asc' | 'desc'
   onChange: (sortBy: string, sortDir: 'asc' | 'desc') => void
 }) {
-  const popoverRef = useRef<HTMLDivElement | null>(null)
+  const wrapRef = useRef<HTMLDivElement | null>(null)
   const current = `${sortBy}:${sortDir}`
   const currentLabel = sortOptions.find((option) => option.value === current)?.label ?? '排序'
-  useOutsideClose(open, popoverRef, () => onOpen(false))
+  useOutsideClose(open, wrapRef, () => onOpen(false))
   return (
-    <div className="filter-popover-wrap">
+    <div className="filter-popover-wrap" ref={wrapRef}>
       <button className={`filter-pill ${current !== 'createdAt:desc' ? 'is-active' : ''}`} type="button" onClick={() => onOpen(!open)}>
         <span>{currentLabel}</span>
         <ChevronDown size={15} />
       </button>
       {open && (
-        <div className="filter-popover sort-popover" ref={popoverRef}>
+        <div className="filter-popover sort-popover">
           {sortOptions.map((option) => (
             <button className={option.value === current ? 'is-selected' : ''} type="button" key={option.value} onClick={() => {
               const [nextSortBy, nextSortDir] = option.value.split(':')
@@ -2284,16 +2310,16 @@ function StatusFilter({ open, onOpen, value, options, onChange }: {
   options: FacetOption[]
   onChange: (value: string) => void
 }) {
-  const popoverRef = useRef<HTMLDivElement | null>(null)
-  useOutsideClose(open, popoverRef, () => onOpen(false))
+  const wrapRef = useRef<HTMLDivElement | null>(null)
+  useOutsideClose(open, wrapRef, () => onOpen(false))
   return (
-    <div className="filter-popover-wrap">
+    <div className="filter-popover-wrap" ref={wrapRef}>
       <button className={`filter-pill ${value ? 'is-active' : ''}`} type="button" onClick={() => onOpen(!open)}>
         <span>{value ? garmentStatus(value) : '全部状态'}</span>
         <ChevronDown size={15} />
       </button>
       {open && (
-        <div className="filter-popover sort-popover" ref={popoverRef}>
+        <div className="filter-popover sort-popover">
           <button className={!value ? 'is-selected' : ''} type="button" onClick={() => { onChange(''); onOpen(false) }}>
             全部状态
             {!value && <Check size={15} />}
@@ -2485,14 +2511,6 @@ function mergedFacetOptions(options: FacetOption[] | undefined, selected: string
     if (!byValue.has(value)) byValue.set(value, { value, label: value, count: 0 })
   })
   return Array.from(byValue.values())
-}
-
-function setUploadedDateRange(days: number, setFrom: (value: string) => void, setTo: (value: string) => void) {
-  const today = new Date()
-  const from = new Date(today)
-  from.setDate(today.getDate() - Math.max(days - 1, 0))
-  setFrom(dateInputValue(from))
-  setTo(dateInputValue(today))
 }
 
 function useOutsideClose(open: boolean, ref: { current: HTMLElement | null }, onClose: () => void) {

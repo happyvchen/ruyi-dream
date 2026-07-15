@@ -56,7 +56,7 @@ class StylingGarmentLibraryFilterTests(unittest.TestCase):
                 "id": 1,
                 "code": "LOOK-TOP-001",
                 "status": "READY",
-                "ai": {"category": "top", "colors": ["ivory"], "season": "spring", "style_summary": "通勤上装"},
+                "ai": {"category": "top", "sub_category": "shirt", "colors": ["ivory"], "season": "spring", "style_summary": "通勤上装"},
                 "manual": {"series": ["ART"], "retail_channel": ["online"]},
                 "meta": {"overall_confidence": 0.95, "needs_review": False},
                 "created": "2026-07-01T09:00:00",
@@ -67,7 +67,7 @@ class StylingGarmentLibraryFilterTests(unittest.TestCase):
                 "id": 2,
                 "code": "LOOK-BOTTOM-002",
                 "status": "TAGGING_READY",
-                "ai": {"category": "bottom", "colors": ["black"], "season": "autumn"},
+                "ai": {"category": "bottom", "sub_category": "trousers", "colors": ["black"], "season": "autumn"},
                 "manual": {"series": ["CORE"], "retail_channel": ["offline"]},
                 "meta": {"overall_confidence": 0.41, "needs_review": True},
                 "created": "2026-07-10T09:00:00",
@@ -78,7 +78,7 @@ class StylingGarmentLibraryFilterTests(unittest.TestCase):
                 "id": 3,
                 "code": "LOOK-DRESS-003",
                 "status": "READY",
-                "ai": {"category": "one_piece", "colors": ["red"], "season": "summer"},
+                "ai": {"category": "one_piece", "sub_category": "dress", "colors": ["red"], "season": "summer"},
                 "manual": {"series": ["ART"], "retail_channel": ["online"]},
                 "meta": {"overall_confidence": 0.9, "needs_review": False},
                 "created": "2026-06-20T09:00:00",
@@ -89,13 +89,24 @@ class StylingGarmentLibraryFilterTests(unittest.TestCase):
                 "id": 4,
                 "code": "LOOK-ARCHIVED-004",
                 "status": "READY",
-                "ai": {"category": "outerwear", "colors": ["navy"], "season": "winter"},
+                "ai": {"category": "outerwear", "sub_category": "coat", "colors": ["navy"], "season": "winter"},
                 "manual": {"series": ["ARCHIVE"], "retail_channel": ["online"]},
                 "meta": {"overall_confidence": 0.88, "needs_review": False},
                 "created": "2026-07-12T09:00:00",
                 "updated": "2026-07-12T09:00:00",
                 "tagged": "2026-07-12T10:00:00",
                 "archived": "2026-07-13T09:00:00",
+            },
+            {
+                "id": 5,
+                "code": "LOOK-MULTI-005",
+                "status": "READY",
+                "ai": {"category": ["top", "bottom"], "sub_category": ["vest", "skirt"], "colors": ["gray"], "season": "summer"},
+                "manual": {"series": ["MIX"], "retail_channel": ["online"]},
+                "meta": {"overall_confidence": 0.86, "needs_review": False},
+                "created": "2026-07-14T09:00:00",
+                "updated": "2026-07-14T09:00:00",
+                "tagged": "2026-07-14T10:00:00",
             },
         ]
         with db_module.get_db() as db:
@@ -126,19 +137,29 @@ class StylingGarmentLibraryFilterTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
 
-        self.assertEqual(body["total"], 3)
-        self.assertIn({"value": "top", "label": "top", "count": 1}, body["facets"]["category"])
+        self.assertEqual(body["total"], 4)
+        self.assertIn({"value": "top", "label": "top", "count": 2}, body["facets"]["category"])
+        self.assertIn({"value": "top", "label": "top", "count": 2}, body["facets"]["primaryCategory"])
+        self.assertIn({"value": "shirt", "label": "shirt", "count": 1}, body["facets"]["secondaryCategory"])
         self.assertIn({"value": "ivory", "label": "ivory", "count": 1}, body["facets"]["color"])
         self.assertIn({"value": "ART", "label": "ART", "count": 2}, body["facets"]["series"])
         self.assertIn({"value": "needs_review", "label": "needs_review", "count": 1}, body["facets"]["reviewStatus"])
         self.assertNotIn("outerwear", {item["value"] for item in body["facets"]["category"]})
+        top_node = next(item for item in body["facets"]["categoryTree"] if item["value"] == "top")
+        self.assertEqual(top_node["children"], [
+            {"value": "shirt", "label": "shirt", "count": 1},
+            {"value": "vest", "label": "vest", "count": 1},
+        ])
+        bottom_node = next(item for item in body["facets"]["categoryTree"] if item["value"] == "bottom")
+        self.assertNotIn("vest", {item["value"] for item in bottom_node["children"]})
 
     def test_filters_by_status_multi_tag_values_and_uploaded_range(self) -> None:
         response = self.client.get(
             "/api/styling-garments",
             params={
                 "status": "READY",
-                "category": "top,one_piece",
+                "primaryCategory": "top,one_piece",
+                "secondaryCategory": "shirt,dress",
                 "series": "ART",
                 "channel": "online",
                 "uploadedFrom": "2026-06-30",
@@ -160,13 +181,30 @@ class StylingGarmentLibraryFilterTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
 
-        self.assertEqual([item["code"] for item in body["items"]], ["LOOK-BOTTOM-002", "LOOK-TOP-001"])
-        self.assertEqual({item["value"] for item in body["facets"]["category"]}, {"bottom", "top"})
+        self.assertEqual([item["code"] for item in body["items"]], ["LOOK-BOTTOM-002", "LOOK-MULTI-005", "LOOK-TOP-001"])
+        self.assertEqual({item["value"] for item in body["facets"]["primaryCategory"]}, {"bottom", "top"})
+        self.assertIn("one_piece", {item["value"] for item in body["stableFacets"]["categoryTree"]})
+
+    def test_category_tree_nodes_are_or_filters_across_branches(self) -> None:
+        response = self.client.get(
+            "/api/styling-garments",
+            params={
+                "primaryCategory": "top",
+                "secondaryCategory": "dress",
+                "sortBy": "code",
+                "sortDir": "asc",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+
+        self.assertEqual([item["code"] for item in body["items"]], ["LOOK-DRESS-003", "LOOK-MULTI-005", "LOOK-TOP-001"])
 
     def test_sorts_by_upload_time_descending_and_filters_review_status(self) -> None:
         sorted_response = self.client.get("/api/styling-garments?sortBy=createdAt&sortDir=desc")
         self.assertEqual(sorted_response.status_code, 200)
         self.assertEqual([item["code"] for item in sorted_response.json()["items"]], [
+            "LOOK-MULTI-005",
             "LOOK-BOTTOM-002",
             "LOOK-TOP-001",
             "LOOK-DRESS-003",
