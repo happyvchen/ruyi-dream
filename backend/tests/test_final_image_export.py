@@ -234,9 +234,11 @@ class FinalImageExportTestCase(unittest.TestCase):
         self._seed_task_with_results(4, "下载测试", [(1, "SUCCEEDED", "results/原图.png")])
         main = importlib.import_module("app.main")
         original_exists = main.object_exists
+        original_existing_derivative = main.existing_derivative_or_original
         original_presign = main.presigned_get_url
         calls = []
         main.object_exists = lambda key: True
+        main.existing_derivative_or_original = lambda key, variant: key
 
         def fake_presign(key, **kwargs):
             calls.append((str(key), kwargs))
@@ -262,6 +264,7 @@ class FinalImageExportTestCase(unittest.TestCase):
             self.assertIn("filename*=UTF-8''", disposition)
         finally:
             main.object_exists = original_exists
+            main.existing_derivative_or_original = original_existing_derivative
             main.presigned_get_url = original_presign
             client.close()
 
@@ -269,9 +272,11 @@ class FinalImageExportTestCase(unittest.TestCase):
         self._seed_task_with_results(5, "缓存测试", [(1, "SUCCEEDED", "results/cache.png")])
         main = importlib.import_module("app.main")
         original_exists = main.object_exists
+        original_existing_derivative = main.existing_derivative_or_original
         original_presign = main.presigned_get_url
         calls = []
         main.object_exists = lambda key: True
+        main.existing_derivative_or_original = lambda key, variant: key
 
         def fake_presign(key, **kwargs):
             calls.append((str(key), kwargs))
@@ -299,6 +304,7 @@ class FinalImageExportTestCase(unittest.TestCase):
             self.assertIsNone(calls[0][1]["response_content_disposition"])
         finally:
             main.object_exists = original_exists
+            main.existing_derivative_or_original = original_existing_derivative
             main.presigned_get_url = original_presign
             client.close()
 
@@ -306,8 +312,10 @@ class FinalImageExportTestCase(unittest.TestCase):
         self._seed_task_with_results(6, "缓存档位测试", [(1, "SUCCEEDED", "results/ranges.png")])
         main = importlib.import_module("app.main")
         original_exists = main.object_exists
+        original_existing_derivative = main.existing_derivative_or_original
         original_presign = main.presigned_get_url
         main.object_exists = lambda key: True
+        main.existing_derivative_or_original = lambda key, variant: key
         main.presigned_get_url = lambda key, **kwargs: f"https://storage.example/{key}"
         client = self._client()
         try:
@@ -329,6 +337,7 @@ class FinalImageExportTestCase(unittest.TestCase):
             self.assertLessEqual(original_max_age, 1200)
         finally:
             main.object_exists = original_exists
+            main.existing_derivative_or_original = original_existing_derivative
             main.presigned_get_url = original_presign
             client.close()
 

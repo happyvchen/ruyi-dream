@@ -537,9 +537,11 @@ class BackendCurrentFlowTests(unittest.TestCase):
         image_bytes = output.getvalue()
         original_put_fileobj = main.put_fileobj
         original_put_bytes = main.put_bytes
+        original_unique_key = main.unique_key
         original_generate_image_derivatives = main.generate_image_derivatives
         main.put_fileobj = lambda key, fileobj, content_type=None: None
         main.put_bytes = lambda key, content, content_type: None
+        main.unique_key = lambda key: main.clean_key(key)
         main.generate_image_derivatives = lambda key, content: {
             "thumb": f"{key}.thumb.webp",
             "preview": f"{key}.preview.webp",
@@ -566,6 +568,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
         finally:
             main.put_fileobj = original_put_fileobj
             main.put_bytes = original_put_bytes
+            main.unique_key = original_unique_key
             main.generate_image_derivatives = original_generate_image_derivatives
             client.close()
 
