@@ -2299,8 +2299,6 @@ const sortOptions = [
   { value: 'createdAt:asc', label: '最早上传' },
   { value: 'updatedAt:desc', label: '最近更新' },
   { value: 'updatedAt:asc', label: '最早更新' },
-  { value: 'tagCompletedAt:desc', label: '最近识别' },
-  { value: 'tagCompletedAt:asc', label: '最早识别' },
   { value: 'code:asc', label: '货号 A-Z' },
   { value: 'code:desc', label: '货号 Z-A' },
 ]
@@ -2312,7 +2310,6 @@ const recordSortOptions = [
   { value: 'updatedAt:asc', label: '最早更新' },
   { value: 'name:asc', label: '任务名 A-Z' },
   { value: 'name:desc', label: '任务名 Z-A' },
-  { value: 'status:asc', label: '状态 A-Z' },
 ]
 
 const stylingGarmentStatusOrder = ['DRAFT', 'TAGGING_RUNNING', 'TAGGING_READY', 'TAGGING_FAILED', 'READY']
@@ -3623,15 +3620,6 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
               {loading && <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span>}
             </div>
             <div className="record-filter-pills">
-              <StatusFilter
-                open={openFilter === 'status'}
-                onOpen={(open) => setOpenFilter(open ? 'status' : null)}
-                value={statusFilter}
-                options={generationRecordStatusOptions()}
-                showCounts={false}
-                formatLabel={statusText}
-                onChange={setStatusFilter}
-              />
               <DateRangeFilter
                 open={openFilter === 'date'}
                 onOpen={(open) => setOpenFilter(open ? 'date' : null)}
@@ -3651,6 +3639,15 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
                   setSortBy(nextSortBy)
                   setSortDir(nextSortDir)
                 }}
+              />
+              <StatusFilter
+                open={openFilter === 'status'}
+                onOpen={(open) => setOpenFilter(open ? 'status' : null)}
+                value={statusFilter}
+                options={generationRecordStatusOptions()}
+                showCounts={false}
+                formatLabel={statusText}
+                onChange={setStatusFilter}
               />
               <button className={`filter-pill checkbox-pill ${includeArchived ? 'is-active' : ''}`} type="button" onClick={() => {
                 setOffset(0)
@@ -5226,6 +5223,7 @@ function statusText(status: string) {
     COMPLETED: '已完成',
     FAILED: '失败',
     CANCELLED: '已取消',
+    ABANDONED: '已废弃',
     SUPERSEDED: '已失效',
     READY: '可用',
     TAGGING_READY: '待复核',
