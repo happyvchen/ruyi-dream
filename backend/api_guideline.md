@@ -86,8 +86,17 @@ ABANDONED
 
 ## Runtime 占位职责
 
+AI 选搭动态事实：
+
+- `runtime.user_requirement`
+- `runtime.ai_styling_user_instruction`
+- `runtime.hero_image_files`
+- `runtime.candidate_retrieval`
+
 分镜预览动态事实：
 
+- `runtime.user_requirement`
+- `runtime.shot_styling`
 - `runtime.ref_model_identity`
 - `runtime.ref_garment`
 - `runtime.ref_shoot_environment`
@@ -97,15 +106,15 @@ ABANDONED
 成片动态事实：
 
 - `runtime.preview_grid_cell`
+- `runtime.user_requirement`
 - `runtime.ref_model_identity`
 - `runtime.ref_preview_grid`
 - `runtime.ref_garment`
 - `runtime.ref_shoot_environment`
 - `runtime.final_image_user_instruction`
-- `runtime.shot_styling`
+- `runtime.shot_styling`（配饰与造型，单行，使用 `；` 分隔）
 - `runtime.shot_global_directing`
 - `runtime.shot_current`
-- `runtime.shot_accessories`
 - `runtime.is_shot_1` 到 `runtime.is_shot_5`
 
 ## 导出

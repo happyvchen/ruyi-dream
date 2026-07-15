@@ -2,9 +2,9 @@
 
 参考图职责：{{runtime.ref_model_identity}} 只决定同一位成年女模特的身份、脸型、五官、发型轮廓、肤色和身体比例；{{runtime.ref_preview_grid}} 是已确认分镜的当前独立单格，只决定本张的景别、裁切、角度、人物大小、人物位置、姿势、手位、背景比例和光影导演关系；{{runtime.ref_garment}} 只决定主推款与搭配服装的真实颜色、长度、版型、材质和结构{{#runtime.ref_shoot_environment}}；{{runtime.ref_shoot_environment}} 只决定墙面、地面、墙地接缝和基础光线{{/runtime.ref_shoot_environment}}。不得互换职责。
 
-{{runtime.shot_styling}}
-配饰边界：{{runtime.shot_accessories}}
-补充要求：{{runtime.final_image_user_instruction}}
+服装信息：{{runtime.user_requirement}}
+配饰与造型：{{runtime.shot_styling}}
+成片生成要求：{{runtime.final_image_user_instruction}}
 
 本张必须直接兑现当前分镜单格，不得重新导演。用最终画面可观察的边界执行对应镜头：
 

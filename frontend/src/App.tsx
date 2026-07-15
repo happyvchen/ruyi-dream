@@ -1617,7 +1617,7 @@ function StylingPlanSummary({ task }: { task: GenerationTask }) {
   const rejected = styling.rejectedCandidates?.length ? styling.rejectedCandidates : planValue<Record<string, unknown>[]>(plan, 'rejected_candidates') ?? []
   const materialCodesById = materialCodeMap(styling, candidates, plan)
   const requirement = (styling.userInstruction ?? styling.userRequirement ?? {}) as Record<string, unknown>
-  const requirementText = stringValue(requirement.instruction ?? requirement.combined_requirement)
+  const requirementText = stringValue(requirement.instruction ?? requirement.upload_requirement ?? requirement.combined_requirement)
   const requirementResolution = (styling.userRequirementResolution && Object.keys(styling.userRequirementResolution).length ? styling.userRequirementResolution : planValue<Record<string, unknown>>(plan, 'user_requirement_resolution') ?? {}) as Record<string, unknown>
   const requirementItems = [
     ...stringList(requirementResolution.satisfied).map((item) => `已满足：${item}`),

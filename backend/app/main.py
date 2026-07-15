@@ -117,7 +117,6 @@ PROMPT_SECTION_PATTERN = re.compile(
     r"{{\s*([#^])\s*((?:segment|runtime)\.[a-zA-Z0-9_.-]+)\s*}}(.*?){{\s*/\s*\2\s*}}",
     re.DOTALL,
 )
-LEGACY_EMPTY_RUNTIME_PLACEHOLDERS = {"styling_outfit", "resolved_accessories"}
 AI_STYLING_PROMPT_CONFIG_KEY = "assembly.ai_styling"
 GARMENT_IMAGE_SELECTION_PROMPT_CONFIG_KEY = "assembly.garment_image_selection"
 HERO_IMAGE_SELECTION_PROMPT_CONFIG_KEY = "assembly.hero_image_selection"
@@ -2666,7 +2665,7 @@ async def run_select_generation_styling(
         raise HTTPException(status_code=409, detail="当前任务状态不能智能选搭")
     effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "ai_styling")
     user_instruction_context = build_stage_user_instruction_context("ai_styling", effective_user_instruction)
-    user_requirement_context = build_user_requirement_context(task, effective_user_instruction)
+    user_requirement_context = build_user_requirement_context(task)
     input_version_id = create_generation_input_version(task_id)
     with get_db() as db:
         timestamp = now_iso()
@@ -4814,16 +4813,12 @@ def build_stage_user_instruction_context(stage: str, instruction: str | None = N
     }
 
 
-def build_user_requirement_context(task: Any, styling_adjustment: str | None = None) -> dict[str, Any]:
+def build_user_requirement_context(task: Any) -> dict[str, Any]:
     upload_requirement = normalize_user_requirement_text(row_value(task, "user_requirement_text", ""))
-    adjustment = normalize_user_input_text(styling_adjustment)
-    combined_parts = [part for part in (upload_requirement, adjustment) if part]
-    # 只保留可变数据（合并后的用户要求）。优先级/不可覆盖边界由 Prompt 维护模板正文声明。
+    # 只保留任务级服装信息；各步骤的临时介入要求使用独立 runtime.*_user_instruction。
     return {
         "schema_version": "user-requirement-v1",
         "upload_requirement": upload_requirement,
-        "styling_adjustment": adjustment,
-        "combined_requirement": "；".join(combined_parts),
     }
 
 
@@ -6933,6 +6928,24 @@ def selected_outfit_from_plan(styling_plan: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def compact_prompt_runtime_text(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text.strip("；;。 ")
+
+
+def build_shot_styling_line(styling_plan: dict[str, Any]) -> str:
+    selected = selected_outfit_from_plan(styling_plan)
+    selected_codes = ensure_string_list(styling_plan.get("selected_material_codes"))
+    generated_accessories = ensure_string_list(selected.get("generated_accessories"))
+    parts = [
+        f"选中搭配服装：{'、'.join(selected_codes) if selected_codes else '无库内配角'}",
+        selected.get("wearing_notes"),
+        f"生成类配饰：{'、'.join(generated_accessories)}" if generated_accessories else "",
+        "仅保留分镜中已有的低存在感配饰，不新增遮挡商品的配饰",
+    ]
+    return "；".join(part for part in (compact_prompt_runtime_text(item) for item in parts) if part)
+
+
 def get_styling_source_and_selected_snapshots(selected_ids: list[int]) -> tuple[list[int], list[dict[str, Any]]]:
     with get_db() as db:
         rows = db.execute("SELECT * FROM styling_garments WHERE deleted_at IS NULL AND status = 'READY' ORDER BY updated_at DESC, id DESC").fetchall()
@@ -7325,7 +7338,8 @@ def build_new_preview_task_package(
     environment_asset_id = row_value(preview_row, "environment_asset_id")
     image_inputs = build_new_image_inputs(task_id, styling_id, include_preview=False, input_version_id=input_version_id, environment_asset_id=environment_asset_id)
     storyboard_preview_user_instruction = loads(row_value(preview_row, "user_instruction_json"), build_stage_user_instruction_context("storyboard_preview"))
-    prompt_runtime = build_preview_prompt_runtime(styling_plan, image_inputs, storyboard_preview_user_instruction)
+    user_requirement = loads(row_value(input_row, "user_requirement_json"), build_user_requirement_context({}))
+    prompt_runtime = build_preview_prompt_runtime(styling_plan, image_inputs, storyboard_preview_user_instruction, user_requirement)
     prompt = render_prompt_template(prompt_config_key, prompt_runtime)
     return {
         "generation": {"stage": "preview_grid"},
@@ -7343,10 +7357,11 @@ def build_new_preview_prompt(
     styling_plan: dict[str, Any],
     image_inputs: list[dict[str, Any]] | None = None,
     storyboard_preview_user_instruction: dict[str, Any] | None = None,
+    user_requirement: dict[str, Any] | None = None,
 ) -> str:
     # 渲染层只输出「可变数据」：参考图职能图号区间、用户要求和选中造型摘要。
     # 六镜头策略、职能描述与事实源约束由 Prompt 维护模板正文托管（配合条件段）。
-    runtime = build_preview_prompt_runtime(styling_plan, image_inputs or [], storyboard_preview_user_instruction or {})
+    runtime = build_preview_prompt_runtime(styling_plan, image_inputs or [], storyboard_preview_user_instruction or {}, user_requirement or {})
     return render_prompt_template(storyboard_prompt_config_key(styling_plan), runtime)
 
 
@@ -7354,10 +7369,13 @@ def build_preview_prompt_runtime(
     styling_plan: dict[str, Any],
     image_inputs: list[dict[str, Any]],
     storyboard_preview_user_instruction: dict[str, Any],
+    user_requirement: dict[str, Any],
 ) -> dict[str, Any]:
     spans = render_image_reference_spans(image_inputs or [])
     return {
         "category_family": storyboard_category_family(styling_plan),
+        "user_requirement": render_user_requirement_line(user_requirement or {}),
+        "shot_styling": build_shot_styling_line(styling_plan),
         "ref_model_identity": spans["model_identity"],
         "ref_garment": spans["garment"],
         "ref_shoot_environment": spans["shoot_environment"],
@@ -7393,7 +7411,14 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         loads(row_value(row, "result_set_user_instruction_json"), build_stage_user_instruction_context("final_image")),
     )
     prompt_config_key = final_image_prompt_config_key(styling_plan)
-    prompt_runtime = build_final_prompt_runtime(int(row["sort_order"]), str(row["shot_role"]), styling_plan, image_inputs, final_image_user_instruction)
+    input_row = None
+    with get_db() as db:
+        input_row = db.execute(
+            "SELECT user_requirement_json FROM generation_task_input_versions WHERE id = ?",
+            (int(row["input_version_id"]),),
+        ).fetchone()
+    user_requirement = loads(row_value(input_row, "user_requirement_json"), build_user_requirement_context({}))
+    prompt_runtime = build_final_prompt_runtime(int(row["sort_order"]), str(row["shot_role"]), styling_plan, image_inputs, final_image_user_instruction, user_requirement)
     prompt = render_prompt_template(prompt_config_key, prompt_runtime)
     return {
         "generation": {"stage": "final_image"},
@@ -7413,10 +7438,11 @@ def build_new_final_prompt(
     styling_plan: dict[str, Any],
     image_inputs: list[dict[str, Any]] | None = None,
     final_image_user_instruction: dict[str, Any] | None = None,
+    user_requirement: dict[str, Any] | None = None,
 ) -> str:
     # 渲染层只输出「可变数据」：当前镜头各分段正文、分镜预览格号、参考图各职能图号区间、
     # 用户要求。表头、分镜参考话术与事实源约束由 Prompt 维护模板正文托管。
-    runtime = build_final_prompt_runtime(shot_index, shot_role, styling_plan, image_inputs or [], final_image_user_instruction or {})
+    runtime = build_final_prompt_runtime(shot_index, shot_role, styling_plan, image_inputs or [], final_image_user_instruction or {}, user_requirement or {})
     return render_prompt_template(final_image_prompt_config_key(styling_plan), runtime)
 
 
@@ -7426,16 +7452,15 @@ def build_final_prompt_runtime(
     styling_plan: dict[str, Any],
     image_inputs: list[dict[str, Any]],
     final_image_user_instruction: dict[str, Any],
+    user_requirement: dict[str, Any],
 ) -> dict[str, Any]:
     spans = render_image_reference_spans(image_inputs or [])
-    selected = selected_outfit_from_plan(styling_plan)
-    selected_codes = ensure_string_list(styling_plan.get("selected_material_codes"))
     runtime = {
         "preview_grid_cell": str(shot_index),
-        "shot_styling": f"选中搭配服装：{'、'.join(selected_codes) if selected_codes else '无库内配角'}。{str(selected.get('wearing_notes') or '')}",
+        "user_requirement": render_user_requirement_line(user_requirement or {}),
+        "shot_styling": build_shot_styling_line(styling_plan),
         "shot_global_directing": "严格复现对应分镜格的构图、角度、裁切与姿势，并保持商品和人物一致。",
         "shot_current": f"分镜第 {shot_index} 格，镜头角色 {shot_role}。",
-        "shot_accessories": "仅保留分镜中已有的低存在感配饰，不新增遮挡商品的配饰。",
         "ref_model_identity": spans["model_identity"],
         "ref_preview_grid": spans["preview_grid"],
         "ref_garment": spans["garment"],
@@ -7632,7 +7657,27 @@ def normalize_prompt_config_key(value: str) -> str:
 
 
 def repair_prompt_config_placeholders() -> None:
-    return
+    try:
+        with get_db() as db:
+            rows = db.execute("SELECT key, content FROM prompt_configs").fetchall()
+            timestamp = now_iso()
+            for row in rows:
+                content = str(row["content"] or "")
+                repaired = (
+                    content
+                    .replace("{{runtime.shot_accessories}}{{runtime.shot_styling}}", "{{runtime.shot_styling}}")
+                    .replace("{{runtime.shot_styling}}{{runtime.shot_accessories}}", "{{runtime.shot_styling}}")
+                    .replace("{{runtime.shot_accessories}}", "")
+                    .replace("{{runtime.styling_outfit}}", "")
+                    .replace("{{runtime.resolved_accessories}}", "")
+                )
+                if repaired != content:
+                    db.execute(
+                        "UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?",
+                        (repaired, timestamp, row["key"]),
+                    )
+    except sqlite3.OperationalError:
+        return
 
 
 def get_prompt_config_rows() -> dict[str, Any]:
@@ -7728,8 +7773,6 @@ def render_prompt_config(
             return render_text(segment_content, [*stack, name])
         if name.startswith("runtime."):
             runtime_name = name.removeprefix("runtime.")
-            if runtime_name in LEGACY_EMPTY_RUNTIME_PLACEHOLDERS and runtime_name not in runtime:
-                return ""
             value = runtime.get(runtime_name)
             if value is None:
                 diagnostics["missingPlaceholders"].append(name)
@@ -7825,10 +7868,9 @@ def sample_prompt_runtime() -> dict[str, Any]:
         "category_family": "bottom",
         # 当前成片各分段（成片用；无表头）
         "preview_grid_cell": "1",
-        "shot_styling": "造型：吊带裙配同色飘带\n穿法：单穿吊带裙",
+        "shot_styling": "选中搭配服装：LOOK-A；穿法：单穿吊带裙；生成类配饰：极简金色小耳圈；仅保留分镜中已有的低存在感配饰，不新增遮挡商品的配饰",
         "shot_global_directing": "配饰边界：生成配饰低存在感",
         "shot_current": "格1（全身主视觉·全景）：\n  核心：主推款整体比例",
-        "shot_accessories": "- jewelry：极简金色小耳圈",
         "is_shot_1": "1",
         "is_shot_2": "",
         "is_shot_3": "",
@@ -7849,6 +7891,7 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.styling_garment", "scope": "runtime", "description": "AI 打标使用的当前搭配服装 code 和图片输入摘要"},
         {"name": "runtime.hero_image_files", "scope": "runtime", "description": "主推款图片挑选/排序使用的文件标识与候选顺序"},
         {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服装库 READY 服饰的全量 AI 标签事实卡"},
+        {"name": "runtime.user_requirement", "scope": "runtime", "description": "任务级服装信息，来自 AI 摄影棚上传主推款时维护的服装信息"},
         {"name": "runtime.ai_styling_user_instruction", "scope": "runtime", "description": "AI 智能选搭本次执行的用户介入要求"},
         {"name": "runtime.storyboard_preview_user_instruction", "scope": "runtime", "description": "分镜预览本次执行的用户介入要求"},
         {"name": "runtime.final_image_user_instruction", "scope": "runtime", "description": "最终成片或单张重生本次执行的用户介入要求"},
@@ -7856,10 +7899,9 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.category_family", "scope": "runtime", "description": "代码判定的拍摄图位族：top / bottom / one_piece"},
         # 成片：当前镜头各分段
         {"name": "runtime.preview_grid_cell", "scope": "runtime", "description": "当前成片对应分镜预览的格号（纯数字）"},
-        {"name": "runtime.shot_styling", "scope": "runtime", "description": "当前成片造型正文（造型/穿法/选中搭配 code），无表头"},
+        {"name": "runtime.shot_styling", "scope": "runtime", "description": "配饰与造型正文，合并选中搭配、穿法和低存在感配饰边界，用中文分号连接为单行"},
         {"name": "runtime.shot_global_directing", "scope": "runtime", "description": "当前成片全局导演正文，无表头"},
         {"name": "runtime.shot_current", "scope": "runtime", "description": "当前成片单镜头正文，无表头"},
-        {"name": "runtime.shot_accessories", "scope": "runtime", "description": "当前成片本镜头配饰正文，无表头；为空则条件段省略"},
         {"name": "runtime.is_shot_1", "scope": "runtime", "description": "当前成片为镜头 1 时有值，用于条件段"},
         {"name": "runtime.is_shot_2", "scope": "runtime", "description": "当前成片为镜头 2 时有值，用于条件段"},
         {"name": "runtime.is_shot_3", "scope": "runtime", "description": "当前成片为镜头 3 时有值，用于条件段"},

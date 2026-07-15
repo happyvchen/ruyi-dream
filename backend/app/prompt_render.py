@@ -34,9 +34,9 @@ def render_user_instruction_line(context: dict[str, Any]) -> str:
 
 
 def render_user_requirement_line(context: dict[str, Any]) -> str:
-    """渲染 AI Stylist 用的用户要求为一句话；无内容时返回空串。"""
+    """渲染任务级服装信息为一句话；无内容时返回空串。"""
     ctx = _as_dict(context)
-    return _clean_text(ctx.get("combined_requirement")) or _clean_text(ctx.get("upload_requirement"))
+    return _clean_text(ctx.get("upload_requirement"))
 
 
 def _span_text(start: int, end: int) -> str:

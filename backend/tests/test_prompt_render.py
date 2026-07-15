@@ -28,20 +28,20 @@ class RenderUserLineTests(unittest.TestCase):
     def test_double_period_cleaned(self) -> None:
         self.assertEqual(render_user_instruction_line({"instruction": "重点展示腰线。。"}), "重点展示腰线。")
 
-    def test_user_requirement_combined_and_fallback(self) -> None:
+    def test_user_requirement_uses_upload_requirement_only(self) -> None:
         self.assertEqual(
-            render_user_requirement_line({"combined_requirement": "重点腰线；避免厚外套"}),
-            "重点腰线；避免厚外套",
+            render_user_requirement_line({"upload_requirement": "重点腰线", "combined_requirement": "重点腰线；避免厚外套"}),
+            "重点腰线",
         )
         self.assertEqual(
-            render_user_requirement_line({"combined_requirement": "", "styling_adjustment": "避免厚外套"}),
+            render_user_requirement_line({"combined_requirement": "避免厚外套", "styling_adjustment": "避免厚外套"}),
             "",
         )
         self.assertEqual(render_user_requirement_line({}), "")
 
     def test_user_requirement_drops_structured_noise(self) -> None:
         out = render_user_requirement_line(
-            {"combined_requirement": "重点腰线", "priority_policy": {"cannot_override": ["商品事实"]}}
+            {"upload_requirement": "重点腰线", "priority_policy": {"cannot_override": ["商品事实"]}}
         )
         self.assertEqual(out, "重点腰线")
         self.assertNotIn("cannot_override", out)
