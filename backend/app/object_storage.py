@@ -298,6 +298,8 @@ def presigned_get_url(
     *,
     response_content_disposition: str | None = None,
     response_content_type: str | None = None,
+    response_cache_control: str | None = None,
+    expires_seconds: int | None = None,
 ) -> str | None:
     if not key:
         return None
@@ -307,10 +309,12 @@ def presigned_get_url(
         params["ResponseContentDisposition"] = response_content_disposition
     if response_content_type:
         params["ResponseContentType"] = response_content_type
+    if response_cache_control:
+        params["ResponseCacheControl"] = response_cache_control
     return presign_s3_client().generate_presigned_url(
         "get_object",
         Params=params,
-        ExpiresIn=settings.s3_presign_expires_seconds,
+        ExpiresIn=expires_seconds or settings.s3_presign_expires_seconds,
     )
 
 

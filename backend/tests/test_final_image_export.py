@@ -38,6 +38,13 @@ class FinalImageExportTestCase(unittest.TestCase):
                 "APP_SESSION_SECRET": "session-secret-123",
                 "APP_S3_ACCESS_KEY_ID": "ci-test-access-key",
                 "APP_S3_SECRET_ACCESS_KEY": "ci-test-secret-key",
+                "APP_S3_PRESIGN_EXPIRES_SECONDS": "900",
+                "APP_MEDIA_PRESIGN_EXPIRES_SECONDS": "3600",
+                "APP_MEDIA_THUMB_CACHE_SECONDS": "2400",
+                "APP_MEDIA_PREVIEW_CACHE_SECONDS": "1800",
+                "APP_MEDIA_ORIGINAL_CACHE_SECONDS": "600",
+                "APP_MEDIA_CACHE_JITTER_SECONDS": "600",
+                "APP_MEDIA_PRESIGN_SAFETY_MARGIN_SECONDS": "120",
                 "TOAPIS_API_KEY": "test-toapis-key",
             }
         )
@@ -228,7 +235,7 @@ class FinalImageExportTestCase(unittest.TestCase):
         main = importlib.import_module("app.main")
         original_exists = main.object_exists
         original_presign = main.presigned_get_url
-        calls: list[tuple[str, dict[str, str | None]]] = []
+        calls = []
         main.object_exists = lambda key: True
 
         def fake_presign(key, **kwargs):
@@ -248,6 +255,8 @@ class FinalImageExportTestCase(unittest.TestCase):
             self.assertEqual(response.headers["cache-control"], "private, no-store")
             self.assertEqual(calls[0][0], "results/原图.png")
             self.assertEqual(calls[0][1]["response_content_type"], "image/png")
+            self.assertEqual(calls[0][1]["response_cache_control"], "private, no-store")
+            self.assertEqual(calls[0][1]["expires_seconds"], 3600)
             disposition = calls[0][1]["response_content_disposition"]
             self.assertIn("attachment", disposition)
             self.assertIn("filename*=UTF-8''", disposition)
@@ -255,6 +264,119 @@ class FinalImageExportTestCase(unittest.TestCase):
             main.object_exists = original_exists
             main.presigned_get_url = original_presign
             client.close()
+
+    def test_media_redirect_sets_private_cache_control_and_presign_override(self) -> None:
+        self._seed_task_with_results(5, "缓存测试", [(1, "SUCCEEDED", "results/cache.png")])
+        main = importlib.import_module("app.main")
+        original_exists = main.object_exists
+        original_presign = main.presigned_get_url
+        calls = []
+        main.object_exists = lambda key: True
+
+        def fake_presign(key, **kwargs):
+            calls.append((str(key), kwargs))
+            return "https://storage.example/cache"
+
+        main.presigned_get_url = fake_presign
+        client = self._client()
+        try:
+            response = client.get(
+                "/api/media",
+                params={"key": "results/cache.png", "variant": "thumb"},
+                follow_redirects=False,
+            )
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers["location"], "https://storage.example/cache")
+            cache_control = response.headers["cache-control"]
+            self.assertRegex(cache_control, r"^private, max-age=\d+$")
+            max_age = int(cache_control.rsplit("=", 1)[1])
+            self.assertGreaterEqual(max_age, 2400)
+            self.assertLessEqual(max_age, 3000)
+            self.assertEqual(calls[0][0], "results/cache.png")
+            self.assertEqual(calls[0][1]["response_cache_control"], cache_control)
+            self.assertEqual(calls[0][1]["expires_seconds"], 3600)
+            self.assertIsNone(calls[0][1]["response_content_type"])
+            self.assertIsNone(calls[0][1]["response_content_disposition"])
+        finally:
+            main.object_exists = original_exists
+            main.presigned_get_url = original_presign
+            client.close()
+
+    def test_media_redirect_cache_ranges_cover_preview_and_original(self) -> None:
+        self._seed_task_with_results(6, "缓存档位测试", [(1, "SUCCEEDED", "results/ranges.png")])
+        main = importlib.import_module("app.main")
+        original_exists = main.object_exists
+        original_presign = main.presigned_get_url
+        main.object_exists = lambda key: True
+        main.presigned_get_url = lambda key, **kwargs: f"https://storage.example/{key}"
+        client = self._client()
+        try:
+            preview = client.get(
+                "/api/media",
+                params={"key": "results/ranges.png", "variant": "preview"},
+                follow_redirects=False,
+            )
+            original = client.get(
+                "/api/media",
+                params={"key": "results/ranges.png", "variant": "original"},
+                follow_redirects=False,
+            )
+            preview_max_age = int(preview.headers["cache-control"].rsplit("=", 1)[1])
+            original_max_age = int(original.headers["cache-control"].rsplit("=", 1)[1])
+            self.assertGreaterEqual(preview_max_age, 1800)
+            self.assertLessEqual(preview_max_age, 2400)
+            self.assertGreaterEqual(original_max_age, 600)
+            self.assertLessEqual(original_max_age, 1200)
+        finally:
+            main.object_exists = original_exists
+            main.presigned_get_url = original_presign
+            client.close()
+
+    def test_plain_presigned_get_url_keeps_default_expiry_and_no_cache_override(self) -> None:
+        object_storage = importlib.import_module("app.object_storage")
+        original_presign_client = object_storage.presign_s3_client
+        calls = []
+
+        class FakePresignClient:
+            def generate_presigned_url(self, operation, *, Params, ExpiresIn):
+                calls.append({"operation": operation, "params": Params, "expires_in": ExpiresIn})
+                return "https://storage.example/plain"
+
+        object_storage.presign_s3_client = lambda: FakePresignClient()
+        try:
+            url = object_storage.presigned_get_url("plain/object.png")
+            self.assertEqual(url, "https://storage.example/plain")
+            self.assertEqual(calls[0]["operation"], "get_object")
+            self.assertEqual(calls[0]["expires_in"], 900)
+            self.assertNotIn("ResponseCacheControl", calls[0]["params"])
+        finally:
+            object_storage.presign_s3_client = original_presign_client
+
+    def test_media_cache_ttl_is_stable_jittered_and_capped_by_presign(self) -> None:
+        main = importlib.import_module("app.main")
+        first = main.media_cache_max_age("results/cache-a.png", "thumb")
+        second = main.media_cache_max_age("results/cache-a.png", "thumb")
+        self.assertEqual(first, second)
+        self.assertGreaterEqual(first, 2400)
+        self.assertLessEqual(first, 3000)
+
+        jittered_values = {
+            main.media_cache_max_age(f"results/cache-{index}.png", "thumb")
+            for index in range(30)
+        }
+        self.assertGreater(len(jittered_values), 1)
+
+        original_presign = main.settings.s3_presign_expires_seconds
+        original_media_presign = main.settings.media_presign_expires_seconds
+        original_margin = main.settings.media_presign_safety_margin_seconds
+        try:
+            main.settings.media_presign_expires_seconds = 700
+            main.settings.media_presign_safety_margin_seconds = 120
+            self.assertLessEqual(main.media_cache_max_age("results/cache-a.png", "thumb"), 580)
+        finally:
+            main.settings.s3_presign_expires_seconds = original_presign
+            main.settings.media_presign_expires_seconds = original_media_presign
+            main.settings.media_presign_safety_margin_seconds = original_margin
 
 
 if __name__ == "__main__":

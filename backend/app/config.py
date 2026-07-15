@@ -43,6 +43,12 @@ class Settings:
     s3_secret_access_key = os.getenv("APP_S3_SECRET_ACCESS_KEY", "")
     s3_force_path_style = os.getenv("APP_S3_FORCE_PATH_STYLE", "true").lower() in {"1", "true", "yes", "on"}
     s3_presign_expires_seconds = int(os.getenv("APP_S3_PRESIGN_EXPIRES_SECONDS", "900"))
+    media_presign_expires_seconds = int(os.getenv("APP_MEDIA_PRESIGN_EXPIRES_SECONDS", "3600"))
+    media_thumb_cache_seconds = int(os.getenv("APP_MEDIA_THUMB_CACHE_SECONDS", "2400"))
+    media_preview_cache_seconds = int(os.getenv("APP_MEDIA_PREVIEW_CACHE_SECONDS", "1800"))
+    media_original_cache_seconds = int(os.getenv("APP_MEDIA_ORIGINAL_CACHE_SECONDS", "600"))
+    media_cache_jitter_seconds = int(os.getenv("APP_MEDIA_CACHE_JITTER_SECONDS", "600"))
+    media_presign_safety_margin_seconds = int(os.getenv("APP_MEDIA_PRESIGN_SAFETY_MARGIN_SECONDS", "120"))
     direct_upload_cors_origins = [
         origin.strip().rstrip("/")
         for origin in os.getenv("APP_DIRECT_UPLOAD_CORS_ORIGINS", os.getenv("BACKEND_CORS_ORIGINS", DEFAULT_CORS_ORIGINS)).split(",")
