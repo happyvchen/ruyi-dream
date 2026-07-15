@@ -1974,6 +1974,10 @@ a.button-link { text-decoration: none; cursor: pointer; }
 .calendar-grid button.is-muted {
   color: #cbd5e1;
 }
+.calendar-grid button.is-today {
+  background: #fef3c7;
+  color: #92400e;
+}
 .calendar-grid button.is-in-range {
   background: #e0f2fe;
   color: #075985;

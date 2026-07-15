@@ -2024,7 +2024,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
             <button className={`filter-pill checkbox-pill ${includeArchived ? 'is-active' : ''}`} type="button" onClick={() => {
               setOffset(0)
               setIncludeArchived(!includeArchived)
-            }}><Check size={15} /><span>已归档</span></button>
+            }}><Check size={15} /><span>查看已归档</span></button>
             {hasActiveFilters && <button className="filter-pill reset-filter-pill" type="button" onClick={clearLibraryFilters}><span>清空筛选</span></button>}
           </div>
           <div className="library-management-tools">
@@ -2034,7 +2034,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
                 ? <button className="management-action" onClick={() => restoreGarments(selectedArchivedGarments)}>恢复 {selectedArchivedGarments.length} 项</button>
                 : <button className="management-action" disabled={selectedArchivedGarments.length > 0} title={selectedArchivedGarments.length ? '请分别选择已归档和未归档服装' : undefined} onClick={() => openGarmentDeleteDialog(selectedActiveGarments)}>归档 {selectedActiveGarments.length} 项</button>
             )}
-            {selectedVisibleGarments.length > 0 && <button className="management-action" onClick={() => setManualTagDialog(selectedVisibleGarments)}>批量标签 {selectedVisibleGarments.length} 项</button>}
+            {role === 'admin' && selectedVisibleGarments.length > 0 && <button className="management-action" onClick={() => setManualTagDialog(selectedVisibleGarments)}>批量重新打标</button>}
             <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
           </div>
         </div>
@@ -2296,7 +2296,7 @@ const sortOptions = [
   { value: 'createdAt:desc', label: '最新上传' },
   { value: 'createdAt:asc', label: '最早上传' },
   { value: 'updatedAt:desc', label: '最近更新' },
-  { value: 'updatedAt:asc', label: '最久未更新' },
+  { value: 'updatedAt:asc', label: '最早更新' },
   { value: 'tagCompletedAt:desc', label: '最近识别' },
   { value: 'tagCompletedAt:asc', label: '最早识别' },
   { value: 'code:asc', label: '货号 A-Z' },
@@ -2348,6 +2348,7 @@ function CalendarRangePicker({ month, from, to, onMonth, onSelect }: {
   onSelect: (value: string) => void
 }) {
   const days = calendarDays(month)
+  const todayValue = dateInputValue(new Date())
   const monthLabel = `${month.getFullYear()} 年 ${month.getMonth() + 1} 月`
   return (
     <div className="calendar-range">
@@ -2364,7 +2365,7 @@ function CalendarRangePicker({ month, from, to, onMonth, onSelect }: {
           const isEdge = value === from || value === to
           return (
             <button
-              className={`${day.inMonth ? '' : 'is-muted'} ${inRange ? 'is-in-range' : ''} ${isEdge ? 'is-selected' : ''}`}
+              className={`${day.inMonth ? '' : 'is-muted'} ${value === todayValue ? 'is-today' : ''} ${inRange ? 'is-in-range' : ''} ${isEdge ? 'is-selected' : ''}`}
               type="button"
               key={value}
               onClick={() => onSelect(value)}
