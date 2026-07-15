@@ -854,11 +854,11 @@ function taskCoverAsset(task: GenerationTask) {
   return task.summary?.cover ?? task.images?.[0]?.asset ?? null
 }
 
-function taskResumeActionLabel(task: GenerationTask) {
-  if (task.archivedAt) return '查看任务'
-  if (isTaskRunning(task)) return '查看进度'
-  if (task.status === 'COMPLETED') return '再次生成'
-  return '继续生成'
+function TaskResumeActionContent({ task }: { task: GenerationTask }) {
+  if (task.archivedAt) return <><Eye size={14} />查看任务</>
+  if (isTaskRunning(task)) return <><Loader2 className="spin" size={14} />查看进度</>
+  if (task.status === 'COMPLETED') return <><RotateCcw size={14} />再次生成</>
+  return <><Sparkles size={14} />继续生成</>
 }
 
 function batchChipStatus(item: GenerationTask) {
@@ -2937,7 +2937,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
                   onClick={() => openTaskInStudio(item)}
                   title="回到 AI 摄影棚恢复该任务"
                 >
-                  {taskResumeActionLabel(item)}
+                  <TaskResumeActionContent task={item} />
                 </button>
                 <button
                   className="management-action record-action-button"
