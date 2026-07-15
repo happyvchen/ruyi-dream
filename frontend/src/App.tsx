@@ -1026,7 +1026,25 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
     const folderFiles = nextFiles.filter((file) => importPath(file).includes('/'))
     const grouping = groupImportFiles(folderFiles.length ? folderFiles : nextFiles)
     const groups = grouping.batches
-    if (groups.length > 1 || batchGroups.length > 0) {
+    if (!groups.length) {
+      const ignoredCount = grouping.ignoredFiles.length
+      if (ignoredCount) {
+        const ignoredIssue: ImportIssue = {
+          code: 'ignored_non_image_files',
+          count: ignoredCount,
+          message: `已忽略 ${ignoredCount} 个非图片文件`,
+        }
+        if (batchGroups.length) {
+          setBatchError(ignoredIssue.message)
+        } else if (files.length) {
+          setSingleIssues((current) => [...current, ignoredIssue])
+        } else {
+          setBatchError(ignoredIssue.message)
+        }
+      }
+      return
+    }
+    if (groups.length > 1 || batchGroups.length > 0 || files.length > 0) {
       const existingSingle = pendingGroupFromSingle()
       setBatchGroups((current) => [
         ...current,
@@ -1045,11 +1063,6 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
     setBatchGroups([])
     setBatchError('')
     const group = groups[0]
-    if (files.length > 0) {
-      const addedFiles = group && folderFiles.length ? group.files : imageFiles
-      applySingleFiles([...files, ...addedFiles], name, [...singleIssues, ...(group?.issues ?? [])])
-      return
-    }
     if (group && folderFiles.length) {
       applySingleFiles(group.files, group.code, group.issues)
     } else {
@@ -1142,7 +1155,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
               <div>
                 <Images size={22} />
                 <strong>拖入主推款图片或文件夹</strong>
-                <span>{files.length ? `已选择 ${files.length} 张，可拖动排序` : '支持多张图片、一个文件夹，或多个货号文件夹（批量成片）'}</span>
+                <span>{files.length ? `当前待创建 ${files.length} 张；顶部继续选择会新增一款` : '支持多张图片、一个文件夹，或多个货号文件夹（批量成片）'}</span>
               </div>
               <div className="import-actions">
                 <label className="management-action">
@@ -1165,11 +1178,11 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
                 <div className="upload-review">
                   <div className="batch-card-head">
                     <div className="batch-icon"><FolderOpen size={18} /></div>
-                    <strong className="batch-detect-title">检测到 {batchGroups.length} 个货号文件夹</strong>
+                    <strong className="batch-detect-title">待创建 {batchGroups.length} 个拍摄任务</strong>
                     <span className="count-pill">{batchGroups.reduce((sum, group) => sum + group.files.length, 0)} 张图</span>
                   </div>
                   <div className="batch-note">
-                    <span>每个文件夹对应一个拍摄任务，可在下方逐个调整任务名和图片；创建后可从顶部批次条一键批量成片。</span>
+                    <span>顶部选择的散图或文件夹会新增为待创建任务；补充当前货号图片请使用卡片内的新增图片。创建后可从顶部批次条一键批量成片。</span>
                   </div>
                   <div className="batch-list">
                     {batchGroups.map((group) => {
