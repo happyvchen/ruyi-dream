@@ -4289,11 +4289,9 @@ function BatchRecordDetail({ item, tasks, loading, downloadChecking, onDownload 
         <Meta label="更新时间" value={dateText(item.updatedAt)} />
         <Meta label="进行中/排队" value={`${item.runningTaskCount + item.queuedTaskCount} 个`} />
       </div>
-      <div className="batch-detail-actions">
-        <button className="management-action" type="button" disabled={loading || downloadChecking || !downloadableIds.length} onClick={() => onDownload(downloadableIds)}>
-          <Download size={14} /> {loading || downloadChecking ? '检查成片中...' : '下载成片'}
-        </button>
-      </div>
+      <button className="management-action" type="button" disabled={loading || downloadChecking || !downloadableIds.length} onClick={() => onDownload(downloadableIds)}>
+        <Download size={14} /> {loading || downloadChecking ? '检查成片中...' : '下载成片'}
+      </button>
     </>
   )
 }
