@@ -1752,9 +1752,10 @@ a.button-link { text-decoration: none; cursor: pointer; }
   position: relative;
 }
 .filter-pill {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   gap: 10px;
   min-width: 132px;
   max-width: 240px;
@@ -1770,9 +1771,16 @@ a.button-link { text-decoration: none; cursor: pointer; }
   transition: border-color .18s ease, box-shadow .18s ease, background .18s ease;
 }
 .filter-pill span {
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-align: center;
   white-space: nowrap;
+}
+.filter-pill > svg {
+  position: absolute;
+  right: 14px;
+  flex: none;
 }
 .filter-pill:hover,
 .filter-pill.is-active {
@@ -1780,10 +1788,11 @@ a.button-link { text-decoration: none; cursor: pointer; }
   box-shadow: 0 6px 18px rgba(15,23,42,.08);
 }
 .checkbox-pill {
-  justify-content: flex-start;
-  min-width: 106px;
+  min-width: 132px;
 }
 .checkbox-pill svg {
+  left: 14px;
+  right: auto;
   opacity: 0;
 }
 .checkbox-pill.is-active svg {
@@ -1791,10 +1800,30 @@ a.button-link { text-decoration: none; cursor: pointer; }
 }
 .reset-filter-pill {
   justify-content: center;
-  min-width: 104px;
+  min-width: 132px;
   border-color: #e2e8f0;
   background: #f8fafc;
   color: #475569;
+}
+.library-management-tools .management-action {
+  min-width: 104px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  text-align: center;
+  white-space: nowrap;
+}
+.library-management-tools .compact-control {
+  min-width: 84px;
+  height: 34px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+.management-check-action.is-active {
+  border-color: #0f172a;
+  background: #0f172a;
+  color: #fff;
 }
 .filter-popover {
   position: absolute;
