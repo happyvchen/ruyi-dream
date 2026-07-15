@@ -90,6 +90,8 @@ AI 摄影棚右侧“最近任务”也支持批量下载：标题旁 `批量下
 
 后端返回的是稳定 `/api/media?...` 路径，组件不应在轮询中主动替换未变化图片的 `src`。如果同一对象 key 没变，应保留现有 URL，避免浏览器重复解码和重绘。
 
+图片缓存使用浏览器原生 HTTP cache，由后端通过 `/api/media` 的 302 响应和对象存储响应头控制。前端不实现 IndexedDB、Service Worker、Cache Storage 或 OPFS 图片缓存；这些机制会增加权限隔离、容量清理、Blob 生命周期和登出残留复杂度，不作为当前图片体验优化路径。前端不得为绕过缓存给图片 URL 添加时间戳、随机数或轮询版本参数；只有 object key 或 variant 变化时才更新 `src`。
+
 AI 摄影棚在 `STYLING_RUNNING`、`PREVIEW_RUNNING`、`FINAL_RUNNING` 状态定时刷新当前 `GenerationTask`，从而展示阶段推进和逐张结果。若任务带有 `autoRunTarget`，即使短暂处于非运行中状态也继续刷新，等待后端自动推进下一步。
 
 前端可用本地临时 `AIOperation` 补足用户刚点击后的即时反馈，但本地 operation 必须带当前 `taskId`，只能渲染到所属任务。任务从后端刷新到非运行中且无 `autoRunTarget` 后，应清理该任务的本地 operation。任务详情只携带各步骤最新一条摘要；展开时通过步骤分页接口按实际 attempt 数量和时间倒序读取历史，不按 owner 合并重试调用。每条 admin 技术详情入口通过 taskId + attemptId 精确读取对应 attempt，并在关闭弹窗后恢复触发按钮焦点。被替代链路的历史终态可以复盘，但其遗留运行态不得冒充当前任务仍在执行。
