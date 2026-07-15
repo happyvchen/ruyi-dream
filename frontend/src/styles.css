@@ -2299,23 +2299,10 @@ a.button-link { text-decoration: none; cursor: pointer; }
   white-space: nowrap;
 }
 .recent-task-footer {
-  display: grid;
-  gap: 4px;
   padding: 8px 4px 2px;
   color: #64748b;
   font-size: 12px;
   text-align: center;
-}
-.recent-task-footer .link-button {
-  justify-self: center;
-  height: auto;
-  min-height: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: #0f7cff;
-  font-size: 12px;
-  font-weight: 700;
 }
 
 .model-page {

@@ -84,7 +84,6 @@ const defaultPageSizeOptions = [20, 50, 100] as const
 const densePageSizeOptions = [12, 50, 100] as const
 const recentTaskRowHeight = 62
 const recentTaskMaxPageSize = 60
-const recentTaskRetainedPages = 4
 const authSeenStorageKey = 'ruyi-auth-seen'
 const authExpiredMessage = '登录状态已过期，请重新登录后继续。'
 const SUPPORTED_IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/heic,image/heif,image/avif,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif'
@@ -427,7 +426,6 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   const [recentTaskHasMore, setRecentTaskHasMore] = useState(false)
   const [recentTaskNextOffset, setRecentTaskNextOffset] = useState<number | null>(null)
   const [recentTaskLoading, setRecentTaskLoading] = useState(false)
-  const [recentTaskReleasedCount, setRecentTaskReleasedCount] = useState(0)
   const [batchItems, setBatchItems] = useState<GenerationTask[]>([])
   const [batchItemsLoading, setBatchItemsLoading] = useState(false)
   const [batchDownloadPrecheck, setBatchDownloadPrecheck] = useState<FinalImageExportPrecheck | null>(null)
@@ -477,16 +475,8 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
       setRecentTaskHasMore(result.hasMore)
       setRecentTaskNextOffset(result.nextOffset)
       setTaskItems((current) => {
-        if (!append) {
-          setRecentTaskReleasedCount(0)
-          return result.items
-        }
-        const merged = mergeRecentTaskItems(current, result.items)
-        const maxItems = Math.max(recentTaskPageSize * recentTaskRetainedPages, recentTaskPageSize)
-        if (merged.length <= maxItems) return merged
-        const releaseCount = merged.length - maxItems
-        setRecentTaskReleasedCount((count) => count + releaseCount)
-        return merged.slice(releaseCount)
+        if (!append) return result.items
+        return mergeRecentTaskItems(current, result.items)
       })
     }).catch(() => undefined).finally(() => {
       if (recentTaskRequestRef.current === requestId) setRecentTaskLoading(false)
@@ -631,11 +621,6 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   useEffect(() => setStoryboardInstruction(task?.stageUserInputs?.storyboardPreview ?? stageInstructionText((task?.storyboardPreview ?? task?.preview)?.userInstruction)), [task?.id, task?.stageUserInputs?.storyboardPreview, (task?.storyboardPreview ?? task?.preview)?.id])
   useEffect(() => setFinalImageInstruction(task?.stageUserInputs?.finalImage ?? stageInstructionText(task?.resultSet?.userInstruction)), [task?.id, task?.stageUserInputs?.finalImage, task?.resultSet?.id])
   useEffect(() => {
-    const handleResize = () => setRecentTaskPageSize(preferredRecentTaskPageSize())
-    window.addEventListener('resize', handleResize)
-    return () => window.removeEventListener('resize', handleResize)
-  }, [])
-  useEffect(() => {
     loadRecentTasks(0)
   }, [recentTaskPageSize])
   useEffect(() => {
@@ -653,7 +638,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   useEffect(() => {
     if (!hasActiveRecentTasks) return
     const timer = window.setInterval(() => {
-      void api.listRecords({ limit: recentTaskPageSize, offset: recentTaskReleasedCount }).then((result) => {
+      void api.listRecords({ limit: recentTaskPageSize, offset: 0 }).then((result) => {
         setRecentTaskTotal(result.total)
         setTaskItems((current) => {
           const byId = new Map(result.items.map((item) => [item.id, item] as const))
@@ -668,7 +653,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
       }).catch(() => undefined)
     }, 4000)
     return () => window.clearInterval(timer)
-  }, [hasActiveRecentTasks, recentTaskPageSize, recentTaskReleasedCount])
+  }, [hasActiveRecentTasks, recentTaskPageSize])
   useEffect(() => {
     const batchId = task?.batchId
     activeBatchIdRef.current = batchId ?? null
@@ -795,13 +780,8 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
               ))}
               {!taskItems.length && <EmptyState title="暂无任务" text="创建拍摄任务后会出现在这里。" />}
               {!!taskItems.length && (
-                <div className="recent-task-footer">
-                  {recentTaskReleasedCount > 0 && (
-                    <button type="button" className="link-button" onClick={() => loadRecentTasks(0)}>
-                      已释放前面 {recentTaskReleasedCount} 条，回到最新任务
-                    </button>
-                  )}
-                  <span>{recentTaskLoading ? '正在加载更多...' : recentTaskHasMore ? `已显示 ${Math.min(recentTaskReleasedCount + taskItems.length, recentTaskTotal)} / 共 ${recentTaskTotal} 条` : `已触底，共 ${recentTaskTotal} 条`}</span>
+                <div className="recent-task-footer" role="status" aria-live="polite">
+                  <span>{recentTaskLoading ? '正在加载更多...' : recentTaskHasMore ? `已显示 ${taskItems.length} / 共 ${recentTaskTotal} 条` : `已触底，共 ${recentTaskTotal} 条`}</span>
                 </div>
               )}
             </div>
