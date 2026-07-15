@@ -86,6 +86,14 @@ class GenerationRecordFilterTests(unittest.TestCase):
 
         self.assertEqual([item["name"] for item in body["items"]], ["夏季连衣裙", "通勤衬衫"])
         self.assertEqual(body["total"], 2)
+        self.assertEqual(
+            {item["value"]: item["count"] for item in body["facets"]["status"]},
+            {"COMPLETED": 1, "FAILED": 1},
+        )
+        self.assertEqual(
+            {item["value"]: item["count"] for item in body["stableFacets"]["status"]},
+            {"COMPLETED": 1, "FAILED": 1, "FINAL_RUNNING": 1},
+        )
 
     def test_archive_visibility_and_name_sort(self) -> None:
         default_response = self.client.get("/api/generation-records?limit=20")

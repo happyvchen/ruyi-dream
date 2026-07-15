@@ -3552,6 +3552,22 @@ def list_new_generation_records(
             """,
             query_params,
         ).fetchone()["total"])
+        status_rows = db.execute(
+            f"""
+            SELECT gt.status
+            FROM generation_tasks gt
+            WHERE {" AND ".join(where_clauses)}
+            """,
+            query_params,
+        ).fetchall()
+        stable_status_rows = db.execute(
+            """
+            SELECT gt.status
+            FROM generation_tasks gt
+            WHERE gt.deleted_at IS NULL AND (? OR gt.archived_at IS NULL)
+            """,
+            (include_archived,),
+        ).fetchall()
         items = rows[:limit]
         return {
             "items": [serialize_generation_task(row, include_detail=False) for row in items],
@@ -3561,6 +3577,12 @@ def list_new_generation_records(
             "hasMore": offset + limit < total,
             "total": total,
             "totalPages": (total + limit - 1) // limit if total else 0,
+            "facets": {
+                "status": facet_options(row["status"] for row in status_rows),
+            },
+            "stableFacets": {
+                "status": facet_options(row["status"] for row in stable_status_rows),
+            },
         }
 
 

@@ -60,6 +60,15 @@ export type StylingGarmentListResponse = Paginated<StylingGarment> & {
   stableFacets?: StylingGarmentFacets
 }
 
+export type GenerationRecordFacets = {
+  status?: FacetOption[]
+}
+
+export type GenerationRecordListResponse = Paginated<GenerationTask> & {
+  facets?: GenerationRecordFacets
+  stableFacets?: GenerationRecordFacets
+}
+
 export type MediaAsset = {
   id: number
   objectKey: string
@@ -611,7 +620,7 @@ export const api = {
     sortBy?: string
     sortDir?: string
   }) =>
-    request<Paginated<GenerationTask>>(params('/api/generation-records', options ?? {})),
+    request<GenerationRecordListResponse>(params('/api/generation-records', options ?? {})),
   getRecord: (id: number, includeDebug = false) =>
     request<{ item: GenerationTask }>(params(`/api/generation-records/${id}`, { includeDebug })),
   listModels: () => request<Paginated<ModelProfile>>('/api/model-profiles?limit=30'),

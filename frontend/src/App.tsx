@@ -40,7 +40,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl } from './api'
-import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, FacetOption, FinalImageExportPrecheck, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse } from './api'
+import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, FacetOption, FinalImageExportPrecheck, GenerationRecordFacets, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse } from './api'
 import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { friendlyErrorText } from './lib/errorMessages'
@@ -2339,8 +2339,14 @@ const generationRecordStatuses = [
   'ABANDONED',
 ]
 
-function generationRecordStatusOptions() {
-  return generationRecordStatuses.map((status) => ({ value: status, label: status, count: 0 }))
+function generationRecordStatusOptions(options: FacetOption[] | undefined, stableOptions: FacetOption[] | undefined, selected: string) {
+  const byValue = new Map((stableOptions ?? []).map((option) => [option.value, { ...option, count: 0 }]))
+  for (const option of options ?? []) byValue.set(option.value, option)
+  if (selected && !byValue.has(selected)) byValue.set(selected, { value: selected, label: selected, count: 0 })
+  return [
+    ...generationRecordStatuses.map((status) => byValue.get(status) ?? { value: status, label: status, count: 0 }),
+    ...Array.from(byValue.values()).filter((option) => !generationRecordStatuses.includes(option.value)),
+  ]
 }
 
 function StatusFilter({ open, onOpen, value, options, showCounts = true, formatLabel = garmentStatus, onChange }: {
@@ -3404,6 +3410,8 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
   const [offset, setOffset] = useState(0)
   const [total, setTotal] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
+  const [facets, setFacets] = useState<GenerationRecordFacets>({})
+  const [stableFacets, setStableFacets] = useState<GenerationRecordFacets>({})
   const [loading, setLoading] = useState(false)
   const [includeArchived, setIncludeArchived] = useState(false)
   const [statusFilter, setStatusFilter] = useState('')
@@ -3447,6 +3455,8 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
       setItems(result.items)
       setTotal(result.total)
       setTotalPages(result.totalPages)
+      setFacets(result.facets ?? {})
+      setStableFacets(result.stableFacets ?? result.facets ?? {})
       if (!result.items.length && targetOffset > 0) setOffset(Math.max(0, targetOffset - pageSize))
     })
   }
@@ -3460,6 +3470,8 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
         setItems(result.items)
         setTotal(result.total)
         setTotalPages(result.totalPages)
+        setFacets(result.facets ?? {})
+        setStableFacets(result.stableFacets ?? result.facets ?? {})
       }).catch(() => undefined).finally(() => {
         if (!cancelled) setLoading(false)
       })
@@ -3644,8 +3656,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
                 open={openFilter === 'status'}
                 onOpen={(open) => setOpenFilter(open ? 'status' : null)}
                 value={statusFilter}
-                options={generationRecordStatusOptions()}
-                showCounts={false}
+                options={generationRecordStatusOptions(facets.status, stableFacets.status, statusFilter)}
                 formatLabel={statusText}
                 onChange={setStatusFilter}
               />
