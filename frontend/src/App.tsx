@@ -303,7 +303,7 @@ export function App() {
       <aside className={`sidebar ${collapsed ? 'is-collapsed' : ''}`}>
         <div className="brand-mark">
           <div className="brand-orbit">R</div>
-          {!collapsed && <div><strong>Ruyi-Dream</strong><span>AI Photo Studio</span></div>}
+          {!collapsed && <div><strong>Ruyi-Dream</strong><span>AI 数字化摄影棚</span></div>}
         </div>
         <nav className="side-nav">
           {nav.map((item) => {
@@ -1654,7 +1654,7 @@ function StylingPlanSummary({ task }: { task: GenerationTask }) {
       </div>
       <p>{styling.reasonSummary || stringValue(planValue(plan, 'reason_summary'))}</p>
       <div className="selected-strip">
-        {styling.selectedMaterials.length ? styling.selectedMaterials.map((item) => <GarmentCard key={item.id} item={item} />) : <EmptyState title="无需库内搭配服装" text="AI Stylist 判断本次以主推款单穿或生成配饰辅助更合适。" />}
+        {styling.selectedMaterials.length ? styling.selectedMaterials.map((item) => <GarmentCard key={item.id} item={item} />) : <EmptyState title="无需库内搭配服装" text="智能选搭判断本次以主推款单穿或生成配饰辅助更合适。" />}
       </div>
       {requirementText && (
         <div className="requirement-summary">
@@ -2124,7 +2124,10 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
   return (
     <section className="page workbench-page library-page">
       <div className="library-title-row">
-        <PageTitle title="搭配服装库" />
+        <PageTitle
+          title="搭配服装库"
+          subtitle="管理真实会进入智能选搭的服装资产，优先看商品、品类和可用状态。"
+        />
         <button className="management-action" onClick={() => setShowImport((value) => !value)}>
           <ImagePlus size={16} /> {showImport ? '收起导入' : '导入搭配服装'}
         </button>
@@ -3263,7 +3266,10 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
 
   return (
     <section className="page workbench-page model-shell-page">
-      <PageTitle title="模特与背景" />
+      <PageTitle
+        title="模特与背景"
+        subtitle="维护全局数字模特身份和拍摄空间参考，保证每次成片稳定一致。"
+      />
       <div className="panel model-page">
         <div className="model-meta">
           <div className="model-cover">
@@ -3485,6 +3491,7 @@ function PromptMaintenancePage({ run }: { run: any }) {
     <section className="page workbench-page prompt-page">
       <PageTitle
         title="Prompt 维护"
+        subtitle="维护固定分镜和组装模板，普通用户无需接触这些底层配置。"
         actions={<div className="toolbar"><span className="chip">Admin</span><button className="management-action" onClick={refreshPreview} disabled={!activeItem}><RefreshCw size={16} />刷新预览</button><button className="management-action" onClick={save} disabled={!activeItem || !dirty}><Save size={16} />保存</button></div>}
       />
       <div className="prompt-maintenance-layout">
@@ -3987,7 +3994,10 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
 
   return (
     <section className="page workbench-page records-page">
-      <PageTitle title="生成记录" />
+      <PageTitle
+        title="生成记录"
+        subtitle="按批次或单次任务复盘拍摄流程、分镜预览和最终成片。"
+      />
       <div className="records-layout">
         <div className="panel record-list">
           <div className="record-list-head">
@@ -4655,7 +4665,6 @@ function GarmentCard({ item, onTag, onOpen, onDelete, onRestore, selected, onSel
         {showTagResult && chips.map((chip) => <span key={chip}>{chip}</span>)}
         {(!showTagResult || !chips.length) && <span>{tagging ? '识别中' : failed ? '待重新打标' : '待识别'}</span>}
       </div>
-      {meta.overall_confidence !== undefined && showTagResult && <span className="confidence-text">AI 置信度 {formatConfidence(meta.overall_confidence)}</span>}
       <div className="card-actions">
         {onOpen && <button className="management-action" onClick={onOpen}><Eye size={16} /> 详情</button>}
         {onTag && <button className="management-action" disabled={tagging} onClick={onTag}>重新识别标签</button>}

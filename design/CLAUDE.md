@@ -24,6 +24,7 @@
 | `02_brand_and_assets/lily_tagging_system.md` | Lily 服装视觉生产标签体系：AI 标签、人工标签、官方标题标签、选搭压缩格式 | 实现或评审 Lily 标签体系时 |
 | `02_brand_and_assets/lily_gemini_tagging_flow.md` | Lily Gemini 打标流程：输入、输出、校验、effective_tags 合成和选搭压缩 | 实现或排查 Gemini 打标时 |
 | `03_ux_guide/CLAUDE.md` | 普通用户视角 UI/UX、页面信息层级、交互边界 | 设计或实现前端页面时 |
+| `03_ux_guide/ui_ux_unification_plan.md` | UI/UX 统一优化方案：简约克制科技感、视觉系统、控件层级、PC 桌面页面改造和验收清单 | 做全局 UI/UX 统一、视觉系统或生产级体验优化时 |
 | `04_implementation_guide/CLAUDE.md` | 技术路线、生产实操、模型分工、任务包落地方式 | 工程实现、技术拆分、生产流程设计时 |
 | `04_implementation_guide/archive_purge_policy.md` | 归档、彻底删除、媒体引用计数、影响预检和 OSS 清理策略 | 设计或修改删除、归档、批量清理、媒体替换时 |
 
