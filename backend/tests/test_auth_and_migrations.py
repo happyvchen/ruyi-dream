@@ -525,6 +525,338 @@ class BackendCurrentFlowTests(unittest.TestCase):
             main.generate_image_derivatives = original_generate_image_derivatives
             client.close()
 
+    def test_generation_stops_when_hero_media_object_is_missing(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+        from PIL import Image
+
+        db_module.init_db()
+        output = BytesIO()
+        Image.new("RGB", (32, 48), color=(128, 160, 192)).save(output, format="JPEG")
+        image_bytes = output.getvalue()
+        object_key = "direct-uploads/generation-task/test-batch/001-look.jpg"
+        original_object_head = main.object_head
+        original_get_bytes = main.get_bytes
+        original_put_bytes = main.put_bytes
+        original_generate_image_derivatives = main.generate_image_derivatives
+        original_select_styling_with_gemini = main.select_styling_with_gemini
+        main.object_head = lambda key: {"contentLength": len(image_bytes), "contentType": "image/jpeg"} if key == object_key else None
+        main.get_bytes = lambda key: image_bytes if key == object_key else b""
+        main.put_bytes = lambda key, content, content_type: None
+        main.generate_image_derivatives = lambda key, content: {
+            "thumb": f"{key}.thumb.webp",
+            "preview": f"{key}.preview.webp",
+            "thumbSize": 12,
+            "previewSize": 34,
+        }
+
+        async def unexpected_gemini(*args, **kwargs):
+            raise AssertionError("Gemini should not be called when hero media is missing")
+
+        main.select_styling_with_gemini = unexpected_gemini
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            created = client.post(
+                "/api/generation-tasks/from-uploads",
+                json={
+                    "name": "Missing Media Task",
+                    "uploads": [{"objectKey": object_key, "filename": "look.jpg", "mimeType": "image/jpeg", "sizeBytes": len(image_bytes)}],
+                },
+            )
+            self.assertEqual(created.status_code, 200)
+            task_id = created.json()["item"]["id"]
+            main.object_head = lambda key: None
+            response = client.post(f"/api/generation-tasks/{task_id}/select-styling", json={})
+            self.assertEqual(response.status_code, 400)
+            payload = response.json()
+            self.assertEqual(payload["error"]["code"], "MEDIA_UNAVAILABLE")
+            self.assertIn("重新上传", payload["detail"])
+        finally:
+            main.object_head = original_object_head
+            main.get_bytes = original_get_bytes
+            main.put_bytes = original_put_bytes
+            main.generate_image_derivatives = original_generate_image_derivatives
+            main.select_styling_with_gemini = original_select_styling_with_gemini
+            client.close()
+
+    def test_generation_stops_when_hero_media_object_cannot_be_read(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+        from PIL import Image
+
+        db_module.init_db()
+        output = BytesIO()
+        Image.new("RGB", (32, 48), color=(128, 160, 192)).save(output, format="JPEG")
+        image_bytes = output.getvalue()
+        object_key = "direct-uploads/generation-task/test-batch/001-look.jpg"
+        original_object_head = main.object_head
+        original_get_bytes = main.get_bytes
+        original_put_bytes = main.put_bytes
+        original_generate_image_derivatives = main.generate_image_derivatives
+        main.object_head = lambda key: {"contentLength": len(image_bytes), "contentType": "image/jpeg"} if key == object_key else None
+        main.get_bytes = lambda key: image_bytes if key == object_key else b""
+        main.put_bytes = lambda key, content, content_type: None
+        main.generate_image_derivatives = lambda key, content: {
+            "thumb": f"{key}.thumb.webp",
+            "preview": f"{key}.preview.webp",
+            "thumbSize": 12,
+            "previewSize": 34,
+        }
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            created = client.post(
+                "/api/generation-tasks/from-uploads",
+                json={
+                    "name": "Unreadable Media Task",
+                    "uploads": [{"objectKey": object_key, "filename": "look.jpg", "mimeType": "image/jpeg", "sizeBytes": len(image_bytes)}],
+                },
+            )
+            self.assertEqual(created.status_code, 200)
+            task_id = created.json()["item"]["id"]
+
+            def raise_get_bytes(key):
+                raise RuntimeError("RustFS read failed")
+
+            main.get_bytes = raise_get_bytes
+            response = client.post(f"/api/generation-tasks/{task_id}/select-styling", json={})
+            self.assertEqual(response.status_code, 400)
+            payload = response.json()
+            self.assertEqual(payload["error"]["code"], "MEDIA_UNAVAILABLE")
+            self.assertIn("不可用", payload["error"]["title"])
+        finally:
+            main.object_head = original_object_head
+            main.get_bytes = original_get_bytes
+            main.put_bytes = original_put_bytes
+            main.generate_image_derivatives = original_generate_image_derivatives
+            client.close()
+
+    def test_upload_session_finalize_creates_generation_task(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+        from PIL import Image
+
+        db_module.init_db()
+        output = BytesIO()
+        Image.new("RGB", (32, 48), color=(128, 160, 192)).save(output, format="JPEG")
+        image_bytes = output.getvalue()
+        original_ensure_direct_upload_cors = main.ensure_direct_upload_cors
+        original_presigned_put_url = main.presigned_put_url
+        original_object_head = main.object_head
+        original_get_bytes = main.get_bytes
+        original_put_bytes = main.put_bytes
+        original_generate_image_derivatives = main.generate_image_derivatives
+        main.ensure_direct_upload_cors = lambda: None
+        main.presigned_put_url = lambda key, content_type=None: f"https://uploads.test/{key}"
+        main.put_bytes = lambda key, content, content_type: None
+        main.generate_image_derivatives = lambda key, content: {
+            "thumb": f"{key}.thumb.webp",
+            "preview": f"{key}.preview.webp",
+            "thumbSize": 12,
+            "previewSize": 34,
+        }
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            session_response = client.post(
+                "/api/upload-sessions",
+                json={
+                    "scope": "generation_task",
+                    "files": [
+                        {"filename": "look-1.jpg", "mimeType": "image/jpeg", "sizeBytes": len(image_bytes)},
+                        {"filename": "look-2.jpg", "mimeType": "image/jpeg", "sizeBytes": len(image_bytes)},
+                    ],
+                },
+            )
+            self.assertEqual(session_response.status_code, 200)
+            session_payload = session_response.json()
+            object_keys = [item["objectKey"] for item in session_payload["items"]]
+            main.object_head = lambda key: {"contentLength": len(image_bytes), "contentType": "image/jpeg"} if key in object_keys else None
+            main.get_bytes = lambda key: image_bytes if key in object_keys else b""
+            finalized = client.post(
+                f"/api/upload-sessions/{session_payload['session']['id']}/finalize-generation-task",
+                json={"name": "Session Task", "batchId": "batch-a", "batchName": "Batch A"},
+            )
+            self.assertEqual(finalized.status_code, 200)
+            payload = finalized.json()
+            self.assertEqual(payload["item"]["name"], "Session Task")
+            self.assertEqual(len(payload["item"]["images"]), 2)
+            self.assertEqual(payload["session"]["status"], "FINALIZED")
+            self.assertEqual(payload["session"]["targetId"], payload["item"]["id"])
+            finalized_again = client.post(
+                f"/api/upload-sessions/{session_payload['session']['id']}/finalize-generation-task",
+                json={"name": "Session Task Duplicate"},
+            )
+            self.assertEqual(finalized_again.status_code, 200)
+            self.assertEqual(finalized_again.json()["item"]["id"], payload["item"]["id"])
+            with db_module.get_db() as db:
+                task_count = db.execute("SELECT COUNT(*) AS count FROM generation_tasks WHERE name = 'Session Task'").fetchone()["count"]
+                session = db.execute("SELECT status, target_id FROM upload_sessions WHERE id = ?", (session_payload["session"]["id"],)).fetchone()
+            self.assertEqual(task_count, 1)
+            self.assertEqual(session["status"], "FINALIZED")
+            self.assertEqual(session["target_id"], payload["item"]["id"])
+        finally:
+            main.ensure_direct_upload_cors = original_ensure_direct_upload_cors
+            main.presigned_put_url = original_presigned_put_url
+            main.object_head = original_object_head
+            main.get_bytes = original_get_bytes
+            main.put_bytes = original_put_bytes
+            main.generate_image_derivatives = original_generate_image_derivatives
+            client.close()
+
+    def test_upload_session_finalize_failure_does_not_create_generation_task(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+
+        db_module.init_db()
+        original_ensure_direct_upload_cors = main.ensure_direct_upload_cors
+        original_presigned_put_url = main.presigned_put_url
+        original_object_head = main.object_head
+        main.ensure_direct_upload_cors = lambda: None
+        main.presigned_put_url = lambda key, content_type=None: f"https://uploads.test/{key}"
+        main.object_head = lambda key: None
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            session_response = client.post(
+                "/api/upload-sessions",
+                json={"scope": "generation_task", "files": [{"filename": "missing.jpg", "mimeType": "image/jpeg", "sizeBytes": 123}]},
+            )
+            self.assertEqual(session_response.status_code, 200)
+            session_id = session_response.json()["session"]["id"]
+            finalized = client.post(f"/api/upload-sessions/{session_id}/finalize-generation-task", json={"name": "Should Not Exist"})
+            self.assertEqual(finalized.status_code, 400)
+            with db_module.get_db() as db:
+                task_count = db.execute("SELECT COUNT(*) AS count FROM generation_tasks WHERE name = 'Should Not Exist'").fetchone()["count"]
+                session = db.execute("SELECT status, error_message FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
+                item = db.execute("SELECT status, error_message FROM upload_session_items WHERE session_id = ?", (session_id,)).fetchone()
+            self.assertEqual(task_count, 0)
+            self.assertEqual(session["status"], "FAILED")
+            self.assertIn("尚未上传完成", session["error_message"])
+            self.assertEqual(item["status"], "FAILED")
+            self.assertIn("尚未上传完成", item["error_message"])
+        finally:
+            main.ensure_direct_upload_cors = original_ensure_direct_upload_cors
+            main.presigned_put_url = original_presigned_put_url
+            main.object_head = original_object_head
+            client.close()
+
+    def test_upload_session_generation_task_rejects_more_than_hero_limit(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+
+        db_module.init_db()
+        original_ensure_direct_upload_cors = main.ensure_direct_upload_cors
+        original_presigned_put_url = main.presigned_put_url
+        main.ensure_direct_upload_cors = lambda: None
+        main.presigned_put_url = lambda key, content_type=None: f"https://uploads.test/{key}"
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            response = client.post(
+                "/api/upload-sessions",
+                json={
+                    "scope": "generation_task",
+                    "files": [
+                        {"filename": f"look-{index:02d}.jpg", "mimeType": "image/jpeg", "sizeBytes": 123}
+                        for index in range(16)
+                    ],
+                },
+            )
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("最多上传 15 张", response.json()["detail"])
+            with db_module.get_db() as db:
+                session_count = db.execute("SELECT COUNT(*) AS count FROM upload_sessions").fetchone()["count"]
+            self.assertEqual(session_count, 0)
+        finally:
+            main.ensure_direct_upload_cors = original_ensure_direct_upload_cors
+            main.presigned_put_url = original_presigned_put_url
+            client.close()
+
+    def test_storage_diagnostics_reports_missing_media_and_requires_admin(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+
+        db_module.init_db()
+        timestamp = "2000-01-01T00:00:00Z"
+        fresh_timestamp = db_module.now_iso()
+        with db_module.get_db() as db:
+            db.execute(
+                """
+                INSERT INTO media_assets
+                  (object_key, original_filename, mime_type, size_bytes, status, created_at, updated_at)
+                VALUES ('uploads/missing.jpg', 'missing.jpg', 'image/jpeg', 100, 'READY', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO upload_sessions (id, scope, status, total_count, uploaded_count, created_at, updated_at)
+                VALUES ('session-missing', 'generation-task', 'PENDING', 1, 0, ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO upload_session_items
+                  (session_id, sort_order, object_key, filename, mime_type, size_bytes, status, created_at, updated_at)
+                VALUES ('session-missing', 0, 'direct-uploads/generation-task/session-missing/001-missing.jpg',
+                        'missing.jpg', 'image/jpeg', 100, 'PENDING', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO upload_sessions (id, scope, status, total_count, uploaded_count, created_at, updated_at)
+                VALUES ('session-fresh', 'generation-task', 'PENDING', 1, 0, ?, ?)
+                """,
+                (fresh_timestamp, fresh_timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO upload_session_items
+                  (session_id, sort_order, object_key, filename, mime_type, size_bytes, status, created_at, updated_at)
+                VALUES ('session-fresh', 0, 'direct-uploads/generation-task/session-fresh/001-fresh.jpg',
+                        'fresh.jpg', 'image/jpeg', 100, 'PENDING', ?, ?)
+                """,
+                (fresh_timestamp, fresh_timestamp),
+            )
+        original_object_exists = main.object_exists
+        main.object_exists = lambda key: False
+        client = TestClient(main.app)
+        try:
+            user_login = client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"})
+            self.assertEqual(user_login.status_code, 200)
+            forbidden = client.get("/api/admin/storage-diagnostics")
+            self.assertEqual(forbidden.status_code, 403)
+            client.post("/api/auth/logout")
+            admin_login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(admin_login.status_code, 200)
+            response = client.get("/api/admin/storage-diagnostics")
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["summary"]["missingMediaAssets"], 1)
+            self.assertEqual(payload["summary"]["unavailableUploadItems"], 1)
+            self.assertEqual(payload["summary"]["minAgeMinutes"], 30)
+            self.assertFalse(payload["summary"]["mediaAssetsTruncated"])
+            self.assertEqual(payload["missingMediaAssets"][0]["objectKey"], "uploads/missing.jpg")
+            self.assertEqual(payload["unavailableUploadItems"][0]["sessionId"], "session-missing")
+        finally:
+            main.object_exists = original_object_exists
+            client.close()
+
     def test_create_styling_garment_trims_to_gemini_candidate_pool(self) -> None:
         db_module = importlib.import_module("app.db")
         main = importlib.import_module("app.main")

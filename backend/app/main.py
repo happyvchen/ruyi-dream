@@ -61,6 +61,7 @@ from .generation_progress import (
     ERROR_DELIVERY_FAILED,
     ERROR_INSUFFICIENT_BALANCE,
     ERROR_MALFORMED_OUTPUT,
+    ERROR_MEDIA_UNAVAILABLE,
     ERROR_POLL_TIMEOUT,
     ERROR_PROVIDER_FAILED,
     ERROR_PROVIDER_TIMEOUT,
@@ -330,6 +331,10 @@ class DirectUploadRequest(BaseModel):
     files: list[DirectUploadFileRequest] = Field(default_factory=list)
 
 
+class UploadSessionCreateRequest(DirectUploadRequest):
+    pass
+
+
 class UploadedMediaRequest(BaseModel):
     objectKey: str
     filename: str | None = None
@@ -343,6 +348,13 @@ class GenerationTaskFromUploadsRequest(BaseModel):
     batchName: str | None = None
     userRequirement: str | None = None
     uploads: list[UploadedMediaRequest] = Field(default_factory=list)
+
+
+class UploadSessionFinalizeGenerationTaskRequest(BaseModel):
+    name: str | None = None
+    batchId: str | None = None
+    batchName: str | None = None
+    userRequirement: str | None = None
 
 
 class GenerationStylingRequest(BaseModel):
@@ -449,6 +461,20 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(GenerationPhaseError)
+async def generation_phase_error_handler(request: Request, exc: GenerationPhaseError) -> JSONResponse:
+    error_code = getattr(exc, "error_code", None)
+    presentation = provider_error_presentation(error_code, str(exc))
+    status_code = 400 if error_code == ERROR_MEDIA_UNAVAILABLE else (500 if error_code == ERROR_SYSTEM_ERROR else 502)
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "detail": presentation["message"],
+            "error": presentation,
+        },
+    )
+
+
 @app.middleware("http")
 async def require_api_session(request: Request, call_next: Any) -> Any:
     public_paths = {"/api/health", "/api/version", "/api/auth/login", "/api/auth/logout", "/api/auth/session"}
@@ -469,6 +495,89 @@ def health() -> dict[str, Any]:
         "geminiConfigured": is_gemini_configured(),
         "geminiProvider": gemini_channel(),
         "imageProviderConfigured": settings.is_image_provider_configured(),
+    }
+
+
+@app.get("/api/admin/storage-diagnostics")
+def storage_diagnostics(
+    request: Request,
+    limit: int = Query(100, ge=1, le=500),
+    min_age_minutes: int = Query(30, ge=0, le=1440, alias="minAgeMinutes"),
+) -> dict[str, Any]:
+    require_admin(request)
+    stale_before = (datetime.now(timezone.utc) - timedelta(minutes=min_age_minutes)).isoformat(timespec="seconds").replace("+00:00", "Z")
+    with get_db() as db:
+        total_media_candidates = int(db.execute(
+            "SELECT COUNT(*) AS count FROM media_assets WHERE deleted_at IS NULL"
+        ).fetchone()["count"])
+        total_upload_candidates = int(db.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM upload_session_items usi
+            JOIN upload_sessions us ON us.id = usi.session_id
+            WHERE us.status IN ('PENDING', 'FAILED', 'FINALIZING') AND us.created_at <= ?
+            """,
+            (stale_before,),
+        ).fetchone()["count"])
+        media_rows = db.execute(
+            """
+            SELECT id, object_key, original_filename, created_at
+            FROM media_assets
+            WHERE deleted_at IS NULL
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        session_rows = db.execute(
+            """
+            SELECT usi.id, usi.session_id, usi.object_key, usi.filename, usi.status, us.created_at
+            FROM upload_session_items usi
+            JOIN upload_sessions us ON us.id = usi.session_id
+            WHERE us.status IN ('PENDING', 'FAILED', 'FINALIZING') AND us.created_at <= ?
+            ORDER BY us.created_at DESC, usi.sort_order, usi.id
+            LIMIT ?
+            """,
+            (stale_before, limit),
+        ).fetchall()
+    missing_media = [
+        {
+            "mediaAssetId": int(row["id"]),
+            "objectKey": row["object_key"],
+            "filename": row["original_filename"],
+            "createdAt": row["created_at"],
+        }
+        for row in media_rows
+        if not object_exists(row["object_key"])
+    ]
+    unavailable_upload_items = [
+        {
+            "itemId": int(row["id"]),
+            "sessionId": row["session_id"],
+            "objectKey": row["object_key"],
+            "filename": row["filename"],
+            "status": row["status"],
+            "createdAt": row["created_at"],
+        }
+        for row in session_rows
+        if not object_exists(row["object_key"])
+    ]
+    return {
+        "summary": {
+            "checkedMediaAssets": len(media_rows),
+            "totalMediaCandidates": total_media_candidates,
+            "mediaAssetsTruncated": total_media_candidates > len(media_rows),
+            "missingMediaAssets": len(missing_media),
+            "checkedUploadItems": len(session_rows),
+            "totalUploadItemCandidates": total_upload_candidates,
+            "uploadItemsTruncated": total_upload_candidates > len(session_rows),
+            "unavailableUploadItems": len(unavailable_upload_items),
+            "minAgeMinutes": min_age_minutes,
+            "staleBefore": stale_before,
+            "limit": limit,
+        },
+        "missingMediaAssets": missing_media,
+        "unavailableUploadItems": unavailable_upload_items,
     }
 
 
@@ -533,15 +642,19 @@ def logout() -> JSONResponse:
 
 @app.post("/api/uploads/presign")
 def create_direct_uploads(payload: DirectUploadRequest) -> dict[str, Any]:
-    if not payload.files:
+    return {"items": build_direct_upload_items(payload.scope, payload.files)}
+
+
+def build_direct_upload_items(scope: str, files: list[DirectUploadFileRequest], session_id: str | None = None) -> list[dict[str, Any]]:
+    if not files:
         raise HTTPException(status_code=400, detail="至少选择一张图片")
-    if len(payload.files) > 20:
+    if len(files) > 20:
         raise HTTPException(status_code=400, detail="单次最多申请 20 张图片上传")
     ensure_direct_upload_cors()
-    scope_prefix = direct_upload_scope_prefix(payload.scope)
-    batch = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    scope_prefix = direct_upload_scope_prefix(scope)
+    batch = session_id or f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
     items: list[dict[str, Any]] = []
-    for index, item in enumerate(payload.files, start=1):
+    for index, item in enumerate(files, start=1):
         filename = sanitize_filename(item.filename or f"image-{index}")
         if item.sizeBytes is not None and item.sizeBytes > settings.max_upload_image_bytes:
             max_mb = settings.max_upload_image_bytes / (1024 * 1024)
@@ -563,7 +676,85 @@ def create_direct_uploads(payload: DirectUploadRequest) -> dict[str, Any]:
                 "maxSizeBytes": settings.max_upload_image_bytes,
             }
         )
-    return {"items": items}
+    return items
+
+
+@app.post("/api/upload-sessions")
+def create_upload_session(payload: UploadSessionCreateRequest) -> dict[str, Any]:
+    scope_prefix = direct_upload_scope_prefix(payload.scope)
+    if scope_prefix == "generation-task" and len(payload.files) > MAX_HERO_IMAGE_INPUTS:
+        raise HTTPException(status_code=400, detail=f"每个拍摄任务最多上传 {MAX_HERO_IMAGE_INPUTS} 张主推款图片")
+    session_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    items = build_direct_upload_items(payload.scope, payload.files, session_id=session_id)
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute(
+            """
+            INSERT INTO upload_sessions (id, scope, status, total_count, uploaded_count, created_at, updated_at)
+            VALUES (?, ?, 'PENDING', ?, 0, ?, ?)
+            """,
+            (session_id, scope_prefix, len(items), timestamp, timestamp),
+        )
+        for index, item in enumerate(items):
+            requested_file = payload.files[index] if index < len(payload.files) else None
+            db.execute(
+                """
+                INSERT INTO upload_session_items
+                  (session_id, sort_order, object_key, filename, mime_type, size_bytes, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+                """,
+                (
+                    session_id,
+                    index,
+                    item["objectKey"],
+                    item["filename"],
+                    item["mimeType"],
+                    requested_file.sizeBytes if requested_file else None,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+    return {"session": get_upload_session(session_id), "items": items}
+
+
+def get_upload_session(session_id: str) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="上传批次不存在")
+        items = db.execute(
+            "SELECT * FROM upload_session_items WHERE session_id = ? ORDER BY sort_order, id",
+            (session_id,),
+        ).fetchall()
+    return serialize_upload_session(row, items)
+
+
+def serialize_upload_session(row: Any, items: list[Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "scope": row["scope"],
+        "status": row["status"],
+        "totalCount": int(row["total_count"] or 0),
+        "uploadedCount": int(row["uploaded_count"] or 0),
+        "targetType": row_value(row, "target_type"),
+        "targetId": row_value(row, "target_id"),
+        "errorMessage": row_value(row, "error_message"),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+        "items": [
+            {
+                "id": item["id"],
+                "objectKey": item["object_key"],
+                "filename": item["filename"],
+                "mimeType": item["mime_type"],
+                "sizeBytes": item["size_bytes"],
+                "status": item["status"],
+                "mediaAssetId": item["media_asset_id"],
+                "errorMessage": item["error_message"],
+            }
+            for item in items
+        ],
+    }
 
 
 async def validate_upload_image(upload: UploadFile) -> tuple[bytes, str]:
@@ -1870,6 +2061,124 @@ async def create_generation_task_from_uploads(payload: GenerationTaskFromUploads
         cleanup_created_media_assets(assets)
         raise
     return {"item": get_generation_task_by_id(task_id)}
+
+
+@app.post("/api/upload-sessions/{session_id}/finalize-generation-task")
+async def finalize_generation_task_upload_session(
+    session_id: str,
+    payload: UploadSessionFinalizeGenerationTaskRequest,
+) -> dict[str, Any]:
+    session_id = session_id.strip()
+    timestamp = now_iso()
+    with get_db() as db:
+        session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not session:
+            raise HTTPException(status_code=404, detail="上传批次不存在")
+        if session["scope"] != "generation-task":
+            raise HTTPException(status_code=400, detail="上传批次用途不匹配")
+        if session["status"] == "FINALIZED" and session["target_id"]:
+            return {"item": get_generation_task_by_id(int(session["target_id"])), "session": get_upload_session(session_id)}
+        if session["status"] == "FINALIZING":
+            raise HTTPException(status_code=409, detail="上传批次正在保存，请稍后")
+        rows = db.execute(
+            "SELECT * FROM upload_session_items WHERE session_id = ? ORDER BY sort_order, id",
+            (session_id,),
+        ).fetchall()
+        if not rows:
+            raise HTTPException(status_code=400, detail="上传批次没有图片")
+        claimed = db.execute(
+            """
+            UPDATE upload_sessions
+            SET status = 'FINALIZING', error_message = NULL, updated_at = ?
+            WHERE id = ? AND status IN ('PENDING', 'FAILED')
+            """,
+            (timestamp, session_id),
+        )
+        if claimed.rowcount != 1:
+            current = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
+            if current and current["status"] == "FINALIZED" and current["target_id"]:
+                return {"item": get_generation_task_by_id(int(current["target_id"])), "session": get_upload_session(session_id)}
+            raise HTTPException(status_code=409, detail="上传批次正在保存，请稍后")
+    uploads = [
+        UploadedMediaRequest(
+            objectKey=row["object_key"],
+            filename=row["filename"],
+            mimeType=row["mime_type"],
+            sizeBytes=row["size_bytes"],
+        )
+        for row in rows
+    ]
+    assets: list[dict[str, Any]] = []
+    task_id: int | None = None
+    try:
+        assets = await save_uploaded_objects_as_media_assets(uploads)
+        task_name = (payload.name or datetime.now().strftime("%Y%m%d%H%M%S")).strip()
+        with get_db() as db:
+            batch_id = (payload.batchId or "").strip()[:64] or None
+            if batch_id:
+                ensure_generation_batch(db, batch_id, payload.batchName, timestamp)
+            cursor = db.execute(
+                "INSERT INTO generation_tasks (name, user_requirement_text, batch_id, status, created_at, updated_at) VALUES (?, ?, ?, 'DRAFT', ?, ?)",
+                (task_name, normalize_user_requirement_text(payload.userRequirement), batch_id, timestamp, timestamp),
+            )
+            task_id = int(cursor.lastrowid)
+            for index, asset in enumerate(assets):
+                db.execute(
+                    """
+                    INSERT INTO generation_task_images (task_id, media_asset_id, sort_order, status, created_at, updated_at)
+                    VALUES (?, ?, ?, 'READY', ?, ?)
+                    """,
+                    (task_id, asset["id"], index, timestamp, timestamp),
+                )
+                db.execute(
+                    """
+                    UPDATE upload_session_items
+                    SET status = 'READY', media_asset_id = ?, error_message = NULL, updated_at = ?
+                    WHERE session_id = ? AND object_key = ?
+                    """,
+                    (asset["id"], timestamp, session_id, asset["objectKey"]),
+                )
+            db.execute(
+                """
+                UPDATE upload_sessions
+                SET status = 'FINALIZED', uploaded_count = ?, target_type = 'generation_task',
+                    target_id = ?, error_message = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (len(assets), task_id, timestamp, session_id),
+            )
+            log_event(
+                db,
+                "generation_task",
+                task_id,
+                "created",
+                {"name": task_name, "fileCount": len(assets), "uploadMode": "upload_session", "uploadSessionId": session_id},
+            )
+    except Exception as exc:
+        if assets:
+            cleanup_created_media_assets(assets)
+        with suppress(Exception):
+            with get_db() as db:
+                db.execute(
+                    """
+                    UPDATE upload_sessions
+                    SET status = 'FAILED', uploaded_count = 0, error_message = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (str(exc), now_iso(), session_id),
+                )
+                db.execute(
+                    """
+                    UPDATE upload_session_items
+                    SET status = 'FAILED', error_message = ?, updated_at = ?
+                    WHERE session_id = ? AND status <> 'READY'
+                    """,
+                    (str(exc), now_iso(), session_id),
+                )
+        raise
+    if task_id is None:
+        raise HTTPException(status_code=500, detail="上传批次保存失败")
+    return {"item": get_generation_task_by_id(task_id), "session": get_upload_session(session_id)}
 
 
 @app.get("/api/generation-tasks")
@@ -6094,6 +6403,7 @@ def create_generation_input_version(task_id: int) -> int:
         ).fetchall()
         if not image_rows:
             raise HTTPException(status_code=400, detail="请先上传主推款图片")
+        assert_media_assets_available(image_rows, label="主推款图片")
         version_number = int(db.execute(
             "SELECT COALESCE(MAX(version_number), 0) + 1 AS next_version FROM generation_task_input_versions WHERE task_id = ?",
             (task_id,),
@@ -6121,6 +6431,39 @@ def create_generation_input_version(task_id: int) -> int:
             ),
         )
         return int(cursor.lastrowid)
+
+
+def assert_media_assets_available(rows: list[Any], label: str = "图片") -> None:
+    broken: list[str] = []
+    for index, row in enumerate(rows, start=1):
+        object_key = row_value(row, "object_key")
+        filename = row_value(row, "original_filename") or row_value(row, "filename") or f"第 {index} 张"
+        if not object_key:
+            broken.append(f"{filename} 缺少存储路径")
+            continue
+        head = object_head(str(object_key))
+        if not head:
+            broken.append(f"{filename} 文件不存在")
+            continue
+        if int(head.get("contentLength") or 0) <= 0:
+            broken.append(f"{filename} 文件为空")
+            continue
+        try:
+            content = get_bytes(str(object_key))
+        except Exception:
+            broken.append(f"{filename} 文件无法读取")
+            continue
+        if not content:
+            broken.append(f"{filename} 文件为空")
+    if broken:
+        preview = "；".join(broken[:3])
+        if len(broken) > 3:
+            preview += f"；另有 {len(broken) - 3} 张"
+        raise GenerationPhaseError(
+            f"{label}不可用：{preview}。请重新上传这些图片后再生成。",
+            ERROR_MEDIA_UNAVAILABLE,
+            provider_response={"mediaHealth": {"label": label, "broken": broken}},
+        )
 
 
 def create_attempt(owner_type: str, owner_id: int, provider: str, request_snapshot: dict[str, Any] | None = None) -> int:

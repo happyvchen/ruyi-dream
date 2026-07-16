@@ -13,6 +13,7 @@ from .config import get_settings
 MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("050", "finalize_direct_prompt_generation_workflow", "migration_finalize_direct_prompt_generation_workflow"),
     ("051", "remove_hero_product_info", "migration_remove_hero_product_info"),
+    ("052", "upload_sessions", "migration_upload_sessions"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -306,6 +307,34 @@ def init_db() -> None:
               PRIMARY KEY (provider, object_key)
             );
 
+            CREATE TABLE IF NOT EXISTS upload_sessions (
+              id TEXT PRIMARY KEY,
+              scope TEXT NOT NULL,
+              status TEXT NOT NULL,
+              total_count INTEGER NOT NULL DEFAULT 0,
+              uploaded_count INTEGER NOT NULL DEFAULT 0,
+              target_type TEXT,
+              target_id INTEGER,
+              error_message TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS upload_session_items (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              session_id TEXT NOT NULL REFERENCES upload_sessions(id) ON DELETE CASCADE,
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              object_key TEXT NOT NULL UNIQUE,
+              filename TEXT NOT NULL,
+              mime_type TEXT NOT NULL,
+              size_bytes INTEGER,
+              status TEXT NOT NULL DEFAULT 'PENDING',
+              media_asset_id INTEGER REFERENCES media_assets(id),
+              error_message TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS prompt_configs (
               key TEXT PRIMARY KEY,
               group_type TEXT NOT NULL,
@@ -343,6 +372,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
     migration_functions = {
         "migration_finalize_direct_prompt_generation_workflow": migration_finalize_direct_prompt_generation_workflow,
         "migration_remove_hero_product_info": migration_remove_hero_product_info,
+        "migration_upload_sessions": migration_upload_sessions,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -405,6 +435,40 @@ def migration_remove_hero_product_info(db: sqlite3.Connection) -> None:
     rebuild_generation_tasks_final(db)
     rebuild_generation_task_input_versions_without_hero_info(db)
     scrub_prompt_config_hero_product_info(db)
+
+
+def migration_upload_sessions(db: sqlite3.Connection) -> None:
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS upload_sessions (
+          id TEXT PRIMARY KEY,
+          scope TEXT NOT NULL,
+          status TEXT NOT NULL,
+          total_count INTEGER NOT NULL DEFAULT 0,
+          uploaded_count INTEGER NOT NULL DEFAULT 0,
+          target_type TEXT,
+          target_id INTEGER,
+          error_message TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS upload_session_items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL REFERENCES upload_sessions(id) ON DELETE CASCADE,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          object_key TEXT NOT NULL UNIQUE,
+          filename TEXT NOT NULL,
+          mime_type TEXT NOT NULL,
+          size_bytes INTEGER,
+          status TEXT NOT NULL DEFAULT 'PENDING',
+          media_asset_id INTEGER REFERENCES media_assets(id),
+          error_message TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        """
+    )
 
 
 def scrub_prompt_config_hero_product_info(db: sqlite3.Connection) -> None:

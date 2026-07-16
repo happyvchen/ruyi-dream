@@ -40,7 +40,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl } from './api'
-import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse } from './api'
+import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot } from './api'
 import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { friendlyErrorText } from './lib/errorMessages'
@@ -1044,6 +1044,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
   const [batchGroups, setBatchGroups] = useState<PendingBatchGroup[]>([])
   const [batchName, setBatchName] = useState('')
   const [batchCreating, setBatchCreating] = useState<{ current: number; total: number } | null>(null)
+  const [uploadProgress, setUploadProgress] = useState<UploadProgressSnapshot | null>(null)
   const [batchError, setBatchError] = useState('')
   const [existingTaskNames, setExistingTaskNames] = useState<Set<string> | null>(null)
   const batchIdRef = useRef('')
@@ -1094,6 +1095,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
   }
 
   function addHeroFiles(nextFiles: File[]) {
+    if (uploadProgress) return
     const imageFiles = nextFiles
       .filter(isSupportedImageFile)
       .sort((a, b) => importPath(a).localeCompare(importPath(b), 'zh-CN', { numeric: true }))
@@ -1189,7 +1191,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
       setBatchCreating({ current: index + 1, total: ready.length })
       try {
         const uploadFiles = formalAssetFiles(group.files, HERO_PRODUCT_MAX_IMAGES)
-        const result = await api.createTask(group.name, uploadFiles, batchIdRef.current, group.userRequirement ?? '', effectiveBatchName)
+        const result = await api.createTask(group.name, uploadFiles, batchIdRef.current, group.userRequirement ?? '', effectiveBatchName, { onProgress: setUploadProgress })
         created.push(result.item)
         if (!firstCreatedTaskRef.current) firstCreatedTaskRef.current = result.item
         setBatchGroups((current) => current.filter((item) => item.id !== group.id))
@@ -1200,6 +1202,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
       }
     }
     setBatchCreating(null)
+    setUploadProgress(null)
     if (blocked.length || failedCount) {
       const parts = []
       if (created.length) parts.push(`已创建 ${created.length} 个任务`)
@@ -1217,6 +1220,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
 
   async function handleDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault()
+    if (uploadProgress) return
     const droppedFiles = await filesFromDataTransfer(event.dataTransfer)
     addHeroFiles(droppedFiles)
   }
@@ -1228,7 +1232,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
         {task?.status === 'DRAFT' && <HeroDraftEditor task={task} setTask={setTask} run={run} />}
         {!task && (
           <>
-            <div className="hero-upload" onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
+            <div className={`hero-upload ${uploadProgress ? 'is-disabled' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
               <div>
                 <Images size={22} />
                 <strong>拖入主推款图片或文件夹</strong>
@@ -1237,11 +1241,11 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
               <div className="import-actions">
                 <label className="management-action">
                   <ImagePlus size={16} /> 选择图片
-                  <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => addHeroFiles(Array.from(event.target.files ?? []))} />
+                  <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple disabled={!!uploadProgress} onChange={(event) => addHeroFiles(Array.from(event.target.files ?? []))} />
                 </label>
                 <label className="management-action">
                   <FolderOpen size={16} /> 选择文件夹
-                  <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} onChange={(event) => addHeroFiles(Array.from(event.target.files ?? []))} />
+                  <input type="file" multiple disabled={!!uploadProgress} {...{ webkitdirectory: '', directory: '' }} onChange={(event) => addHeroFiles(Array.from(event.target.files ?? []))} />
                 </label>
               </div>
             </div>
@@ -1295,7 +1299,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
                                 maxLength={PRODUCT_CODE_MAX_CHARS}
                                 onChange={(event) => updateBatchGroup(group.id, { name: event.target.value.slice(0, PRODUCT_CODE_MAX_CHARS) })}
                                 aria-label="主推款货号"
-                                disabled={!!batchCreating}
+                                disabled={!!batchCreating || !!uploadProgress}
                               />
                             </label>
                             <label className="batch-field batch-info-field">
@@ -1306,11 +1310,11 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
                                 onChange={(event) => updateBatchGroup(group.id, { userRequirement: event.target.value.slice(0, 800) })}
                                 placeholder="品类 / 颜色 / 面料 / 卖点 / 注意事项"
                                 aria-label="主推款服装信息"
-                                disabled={!!batchCreating}
+                                disabled={!!batchCreating || !!uploadProgress}
                               />
                             </label>
                             <span className={`count-pill ${overLimit ? 'is-over' : ''}`}>{formatImageCount(group.files.length, HERO_PRODUCT_MAX_IMAGES)}</span>
-                            <button className="management-action icon-button" onClick={() => setBatchGroups((current) => current.filter((item) => item.id !== group.id))} title="移除该任务" disabled={!!batchCreating}><Trash2 size={16} /></button>
+                            <button className="management-action icon-button" onClick={() => setBatchGroups((current) => current.filter((item) => item.id !== group.id))} title="移除该任务" disabled={!!batchCreating || !!uploadProgress}><Trash2 size={16} /></button>
                           </div>
                             <div className="batch-note">
                               <span>推荐 3-5 张，排序越靠前越重要。{existsHint ? ' 与已有任务重名，将共存（任务名不要求唯一）。' : ''}</span>
@@ -1318,20 +1322,21 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
                               {overLimit && <strong>{`超出 ${HERO_PRODUCT_MAX_IMAGES} 张，红框图片不会进入后续识别`}</strong>}
                               {group.issues?.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
                           </div>
-                          <FileThumbList files={group.files} onChange={(nextFiles) => updateBatchGroup(group.id, { files: nextFiles })} limit={HERO_PRODUCT_MAX_IMAGES} />
+                          <FileThumbList files={group.files} onChange={(nextFiles) => updateBatchGroup(group.id, { files: nextFiles })} limit={HERO_PRODUCT_MAX_IMAGES} disabled={!!uploadProgress} />
                         </div>
                       )
                     })}
                   </div>
                   {batchError && <span className="inline-error">{batchError}</span>}
+                  {uploadProgress && <UploadProgressPanel progress={uploadProgress} prefix={batchCreating ? `第 ${batchCreating.current}/${batchCreating.total} 个任务` : undefined} />}
                   {batchCreating ? (
                     <p className="edit-hint">正在创建第 {batchCreating.current}/{batchCreating.total} 个任务，请勿刷新或离开页面...</p>
                   ) : (
                     <div className="inline-form">
-                      <button className="management-action" onClick={() => void createBatchTasks()}>
+	                    <button className="management-action" disabled={!!uploadProgress} onClick={() => void createBatchTasks()}>
                         <ImagePlus size={16} /> 批量创建 {batchGroups.length} 个任务
                       </button>
-                      <button className="management-action" onClick={() => { setBatchGroups([]); setBatchName('') }}>取消</button>
+	                      <button className="management-action" disabled={!!uploadProgress} onClick={() => { setBatchGroups([]); setBatchName('') }}>取消</button>
                     </div>
                   )}
                 </div>
@@ -1343,11 +1348,11 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
                   <div className="batch-icon"><Layers3 size={18} /></div>
                   <label className="batch-field batch-code-field">
                     <span>货号</span>
-                    <input value={name} maxLength={PRODUCT_CODE_MAX_CHARS} onChange={(e) => setName(e.target.value.slice(0, PRODUCT_CODE_MAX_CHARS))} placeholder="主推款货号" aria-label="主推款货号" />
+                    <input value={name} maxLength={PRODUCT_CODE_MAX_CHARS} disabled={!!uploadProgress} onChange={(e) => setName(e.target.value.slice(0, PRODUCT_CODE_MAX_CHARS))} placeholder="主推款货号" aria-label="主推款货号" />
                   </label>
                   <label className="batch-field batch-info-field">
                     <span>服装信息</span>
-                    <input value={userRequirement} maxLength={800} onChange={(event) => setUserRequirement(event.target.value.slice(0, 800))} placeholder="品类 / 颜色 / 面料 / 卖点 / 注意事项" aria-label="主推款服装信息" />
+                    <input value={userRequirement} maxLength={800} disabled={!!uploadProgress} onChange={(event) => setUserRequirement(event.target.value.slice(0, 800))} placeholder="品类 / 颜色 / 面料 / 卖点 / 注意事项" aria-label="主推款服装信息" />
                   </label>
                   <span className={`count-pill ${files.length > HERO_PRODUCT_MAX_IMAGES ? 'is-over' : ''}`}>{formatImageCount(files.length, HERO_PRODUCT_MAX_IMAGES)}</span>
                 </div>
@@ -1356,24 +1361,46 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
                     {files.length > HERO_PRODUCT_MAX_IMAGES && <strong>{`当前超过 ${HERO_PRODUCT_MAX_IMAGES} 张，红框图片不会进入后续识别`}</strong>}
                     {singleIssues.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
                   </div>
-                <FileThumbList files={files} onChange={setFiles} limit={HERO_PRODUCT_MAX_IMAGES} />
+                <FileThumbList files={files} onChange={setFiles} limit={HERO_PRODUCT_MAX_IMAGES} disabled={!!uploadProgress} />
                 <div className="inline-form">
-                    <button className="management-action" disabled={!files.length || !sanitizeClientName(name)} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, formalAssetFiles(files, HERO_PRODUCT_MAX_IMAGES), undefined, userRequirement), (r: { item: GenerationTask }) => {
+                    <button className="management-action" disabled={!files.length || !sanitizeClientName(name) || !!uploadProgress} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, formalAssetFiles(files, HERO_PRODUCT_MAX_IMAGES), undefined, userRequirement, undefined, { onProgress: setUploadProgress }), (r: { item: GenerationTask }) => {
                     setTask(r.item)
                     setFiles([])
                     setName('')
                     setUserRequirement('')
+                    setUploadProgress(null)
                     window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: r.item.id }))
-                  }, { refresh: 'background' })}>
+                  }, { refresh: 'background' }).catch(() => setUploadProgress(null))}>
                     <ImagePlus size={16} /> 创建任务
                   </button>
                 </div>
+                {uploadProgress && <UploadProgressPanel progress={uploadProgress} />}
               </div>
             )}
           </>
         )}
         {task && task.status !== 'DRAFT' && <HeroDraftEditor task={task} setTask={setTask} run={run} />}
       </div>
+    </div>
+  )
+}
+
+function UploadProgressPanel({ progress, prefix }: { progress: UploadProgressSnapshot; prefix?: string }) {
+  const percent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0
+  const phaseLabel = progress.phase === 'preparing' ? '准备上传' : progress.phase === 'saving' ? '保存任务' : '上传图片'
+  const detail = progress.phase === 'saving'
+    ? '正在检查图片并创建拍摄任务'
+    : progress.phase === 'uploading'
+      ? `已上传 ${progress.completed}/${progress.total} 张`
+      : `${progress.completed}/${progress.total} 张`
+  return (
+    <div className="upload-progress-panel" role="status" aria-live="polite">
+      <div className="upload-progress-head">
+        <strong>{prefix ? `${prefix} · ${phaseLabel}` : phaseLabel}</strong>
+        <span>{progress.completed}/{progress.total}</span>
+      </div>
+      <div className="upload-progress-bar" aria-hidden="true"><span style={{ width: `${percent}%` }} /></div>
+      <p>{detail}</p>
     </div>
   )
 }
@@ -3346,11 +3373,12 @@ function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
   )
 }
 
-function FileThumbList({ files, onChange, limit }: { files: File[]; onChange: (files: File[]) => void; limit?: number }) {
+function FileThumbList({ files, onChange, limit, disabled = false }: { files: File[]; onChange: (files: File[]) => void; limit?: number; disabled?: boolean }) {
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const [dimensions, setDimensions] = useState<Record<string, { width: number; height: number }>>({})
   function move(from: number, to: number) {
+    if (disabled) return
     if (to < 0 || to >= files.length) return
     const next = [...files]
     const [item] = next.splice(from, 1)
@@ -3358,17 +3386,18 @@ function FileThumbList({ files, onChange, limit }: { files: File[]; onChange: (f
     onChange(next)
   }
   return (
-    <div className="file-thumb-grid">
+    <div className={`file-thumb-grid ${disabled ? 'is-disabled' : ''}`}>
       {files.map((file, index) => {
         const overLimit = typeof limit === 'number' && index >= limit
         return (
           <div
             className={`file-thumb ${overLimit ? 'is-over-limit' : ''}`}
             key={`${file.name}-${file.size}-${index}`}
-            draggable
-            onDragStart={() => setDragIndex(index)}
+            draggable={!disabled}
+            onDragStart={() => { if (!disabled) setDragIndex(index) }}
             onDragOver={(event) => event.preventDefault()}
             onDrop={() => {
+              if (disabled) return
               if (dragIndex !== null) move(dragIndex, index)
               setDragIndex(null)
             }}
@@ -3384,15 +3413,15 @@ function FileThumbList({ files, onChange, limit }: { files: File[]; onChange: (f
             <div className="thumb-actions">
               <label title="替换图片">
                 <RefreshCw size={14} />
-                <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
+                <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} disabled={disabled} onChange={(event) => {
                   const replacement = event.target.files?.[0]
-                  if (!replacement) return
+                  if (!replacement || disabled) return
                   const next = [...files]
                   next[index] = replacement
                   onChange(next)
                 }} />
               </label>
-              <button onClick={() => onChange(files.filter((_, itemIndex) => itemIndex !== index))} title="删除图片"><X size={14} /></button>
+              <button disabled={disabled} onClick={() => onChange(files.filter((_, itemIndex) => itemIndex !== index))} title="删除图片"><X size={14} /></button>
             </div>
           </div>
         )
@@ -3402,9 +3431,9 @@ function FileThumbList({ files, onChange, limit }: { files: File[]; onChange: (f
           <ImagePlus size={24} />
         </div>
         <span>新增图片</span>
-        <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => {
+        <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple disabled={disabled} onChange={(event) => {
           const added = Array.from(event.target.files ?? [])
-          if (added.length) {
+          if (added.length && !disabled) {
             onChange([...files, ...added])
           }
           event.target.value = ''

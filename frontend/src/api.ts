@@ -299,6 +299,21 @@ type DirectUploadItem = {
   mimeType: string
 }
 
+export type UploadProgressSnapshot = {
+  phase: 'preparing' | 'uploading' | 'saving'
+  completed: number
+  total: number
+  currentFile?: string
+}
+
+type UploadSession = {
+  id: string
+  status: string
+  totalCount: number
+  uploadedCount: number
+  errorMessage?: string | null
+}
+
 type UploadedMedia = {
   objectKey: string
   filename: string
@@ -472,6 +487,57 @@ async function uploadFilesDirect(scope: string, files: File[]): Promise<Uploaded
   }))
 }
 
+async function runWithConcurrency<T>(items: T[], limit: number, worker: (item: T, index: number) => Promise<void>) {
+  let cursor = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor
+      cursor += 1
+      await worker(items[index]!, index)
+    }
+  })
+  await Promise.all(workers)
+}
+
+async function uploadFilesViaSession(
+  scope: string,
+  files: File[],
+  onProgress?: (progress: UploadProgressSnapshot) => void,
+): Promise<{ session: UploadSession; items: DirectUploadItem[] }> {
+  onProgress?.({ phase: 'preparing', completed: 0, total: files.length })
+  const created = await request<{ session: UploadSession; items: DirectUploadItem[] }>('/api/upload-sessions', {
+    method: 'POST',
+    body: JSON.stringify({
+      scope,
+      files: files.map((file) => ({
+        filename: file.name,
+        mimeType: file.type,
+        sizeBytes: file.size,
+      })),
+    }),
+  })
+  if (created.items.length !== files.length) throw new ApiError('上传任务准备失败，请重新选择图片后再试。', 500)
+  let completed = 0
+  await runWithConcurrency(created.items, 4, async (item, index) => {
+    const file = files[index]!
+    let response: Response
+    try {
+      response = await fetch(item.uploadUrl, {
+        method: item.method,
+        headers: item.headers ?? { 'Content-Type': item.mimeType || file.type },
+        body: file,
+      })
+    } catch {
+      throw new ApiError('图片上传失败，请检查网络后重试。', 0)
+    }
+    if (!response.ok) throw new ApiError(`${file.name} 上传失败，请重新上传该图片。`, response.status)
+    completed += 1
+    onProgress?.({ phase: 'uploading', completed, total: files.length })
+  })
+  onProgress?.({ phase: 'saving', completed, total: files.length })
+  return created
+}
+
 function params(path: string, values: Record<string, string | number | boolean | string[] | undefined | null>) {
   const search = new URLSearchParams()
   Object.entries(values).forEach(([key, value]) => {
@@ -596,11 +662,18 @@ export const api = {
     request<{ ok: boolean; purged: boolean; deletedTaskIds: number[] }>('/api/generation-tasks/batch-purge', { method: 'POST', body: JSON.stringify({ purge: true, ids, confirmPhrase }) }),
   getTaskDeleteImpact: (ids: number[]) =>
     request<{ impact: DeleteImpact }>('/api/generation-tasks/delete-impact', { method: 'POST', body: JSON.stringify({ ids }) }),
-  createTask: async (name: string, files: File[], batchId?: string, userRequirement?: string, batchName?: string) => {
-    const uploads = await uploadFilesDirect('generation_task', files)
-    return request<{ item: GenerationTask }>('/api/generation-tasks/from-uploads', {
+  createTask: async (
+    name: string,
+    files: File[],
+    batchId?: string,
+    userRequirement?: string,
+    batchName?: string,
+    options?: { onProgress?: (progress: UploadProgressSnapshot) => void },
+  ) => {
+    const upload = await uploadFilesViaSession('generation_task', files, options?.onProgress)
+    return request<{ item: GenerationTask; session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(upload.session.id)}/finalize-generation-task`, {
       method: 'POST',
-      body: JSON.stringify({ name, batchId, batchName, userRequirement, uploads }),
+      body: JSON.stringify({ name, batchId, batchName, userRequirement }),
     })
   },
   listBatchTasks: (batchId: string) =>
