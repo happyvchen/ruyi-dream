@@ -1987,6 +1987,47 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertEqual(result["selected_hero_image_ids"], [21])
         self.assertEqual(result["hero_understanding"]["shot_category_family"], "top")
 
+    def test_ai_stylist_contract_failure_persists_raw_output_snapshot(self) -> None:
+        main = importlib.import_module("app.main")
+        db_module = importlib.import_module("app.db")
+        input_row = {
+            "image_snapshot_json": main.dumps([
+                {"id": 21, "sortOrder": 0, "asset": {"filename": "hero-front.jpg"}},
+            ])
+        }
+        candidate_snapshot = {"candidate_material_ids": [], "library_tag_cards": []}
+        request_snapshot = {"prompt": "Return JSON.", "systemInstruction": None}
+
+        original_configured = main.is_gemini_configured
+        original_text = main.generate_gemini_json_text
+        original_retry_limit = main.settings.ai_stylist_contract_retry_limit
+        original_retry_delay = main.settings.ai_stylist_contract_retry_delay_seconds
+
+        async def fake_text(*_args: object, **_kwargs: object) -> str:
+            return main.dumps({"selected_files": ["hero-front.jpg"]})
+
+        main.is_gemini_configured = lambda: True
+        main.generate_gemini_json_text = fake_text
+        main.settings.ai_stylist_contract_retry_limit = 0
+        main.settings.ai_stylist_contract_retry_delay_seconds = 0
+        db_module.init_db()
+        attempt_id = main.create_attempt("generation_styling", 55, "gemini")
+        try:
+            with self.assertRaisesRegex(Exception, "styling_plan"):
+                asyncio.run(main.select_styling_with_gemini(input_row, candidate_snapshot, request_snapshot, attempt_id=attempt_id))
+        finally:
+            main.is_gemini_configured = original_configured
+            main.generate_gemini_json_text = original_text
+            main.settings.ai_stylist_contract_retry_limit = original_retry_limit
+            main.settings.ai_stylist_contract_retry_delay_seconds = original_retry_delay
+
+        with db_module.get_db() as db:
+            row = db.execute("SELECT response_snapshot_json FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
+        snapshot = main.loads(row["response_snapshot_json"], {})
+        self.assertEqual(snapshot["stage"], "ai_stylist_response")
+        self.assertEqual(snapshot["raw_json"]["selected_files"], ["hero-front.jpg"])
+        self.assertIn("styling_plan", snapshot["contract_error"])
+
     def test_ai_stylist_malformed_json_retries_until_budget_exhausted(self) -> None:
         main = importlib.import_module("app.main")
         input_row = {

@@ -5827,6 +5827,30 @@ def is_ai_stylist_contract_retryable(exc: BaseException) -> bool:
     return classify_attempt_error(exc) == ERROR_MALFORMED_OUTPUT
 
 
+def ai_stylist_response_diagnostic(
+    *,
+    raw_text: str | None = None,
+    raw_json: Any = None,
+    parse_error: BaseException | str | None = None,
+    contract_error: BaseException | str | None = None,
+    contract_retries: int = 0,
+) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "stage": "ai_stylist_response",
+        "contractRetries": contract_retries,
+    }
+    if raw_text is not None:
+        snapshot["raw_text"] = raw_text
+        snapshot["rawTextTruncated"] = len(raw_text) > 200_000
+    if raw_json is not None:
+        snapshot["raw_json"] = raw_json
+    if parse_error is not None:
+        snapshot["parse_error"] = str(parse_error)[:1000]
+    if contract_error is not None:
+        snapshot["contract_error"] = str(contract_error)[:1000]
+    return snapshot
+
+
 def selected_image_ids_from_files(selected_files: Any, images: list[dict[str, Any]], limit: int) -> list[int]:
     if not isinstance(selected_files, list) or not selected_files:
         raise AIStylistContractError("selected_files 必须是非空数组")
@@ -6874,20 +6898,40 @@ async def select_styling_with_gemini(
                 # 系统指令已并入 AI 选搭 Prompt 正文（prompt 内），不再单独下发 system_instruction。
                 system_instruction=request_snapshot.get("systemInstruction"),
             )
+            latest_response = ai_stylist_response_diagnostic(raw_text=text, contract_retries=contract_retries)
+            persist_attempt_provider_progress(attempt_id, latest_response)
             try:
                 raw = parse_gemini_json_object(text)
             except Exception as parse_error:
+                latest_response = ai_stylist_response_diagnostic(
+                    raw_text=text,
+                    parse_error=parse_error,
+                    contract_retries=contract_retries,
+                )
+                persist_attempt_provider_progress(attempt_id, latest_response)
                 raise GeminiProviderError(
                     f"Gemini 返回内容不是合法 JSON：{parse_error}",
                     ERROR_MALFORMED_OUTPUT,
-                    provider_response=latest_response or {},
+                    provider_response=latest_response,
                 ) from parse_error
-            latest_response = raw if isinstance(raw, dict) else {"modelRawOutput": raw}
+            latest_response = ai_stylist_response_diagnostic(
+                raw_text=text,
+                raw_json=raw,
+                contract_retries=contract_retries,
+            )
+            persist_attempt_provider_progress(attempt_id, latest_response)
             try:
                 styling_plan = normalize_ai_stylist_result(raw, input_row, candidate_snapshot)
                 validate_styling_plan(styling_plan, candidate_snapshot)
                 return styling_plan
             except AIStylistContractError as contract_error:
+                latest_response = ai_stylist_response_diagnostic(
+                    raw_text=text,
+                    raw_json=raw,
+                    contract_error=contract_error,
+                    contract_retries=contract_retries,
+                )
+                persist_attempt_provider_progress(attempt_id, latest_response)
                 raise GeminiProviderError(
                     f"Gemini AI Stylist 结果不符合契约：{contract_error}",
                     ERROR_MALFORMED_OUTPUT,
