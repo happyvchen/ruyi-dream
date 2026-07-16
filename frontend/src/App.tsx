@@ -88,6 +88,8 @@ const densePageSizeOptions = [12, 50, 100] as const
 const recentTaskRowHeight = 62
 const recentTaskMaxPageSize = 60
 const authSeenStorageKey = 'ruyi-auth-seen'
+const sidebarCollapsedStorageKey = 'ruyi-sidebar-collapsed'
+const sidebarCompactQuery = '(max-width: 900px)'
 const authExpiredMessage = '登录状态已过期，请重新登录后继续。'
 const STYLING_GARMENT_MAX_IMAGES = 15
 const HERO_PRODUCT_MAX_IMAGES = 15
@@ -99,6 +101,31 @@ const GARMENT_AUTO_CARD_WIDTH = 292
 const GARMENT_AUTO_CARD_HEIGHT = 172
 const GARMENT_AUTO_GRID_GAP = 12
 
+function defaultSidebarCollapsed() {
+  return typeof window !== 'undefined' && window.matchMedia(sidebarCompactQuery).matches
+}
+
+function storedSidebarCollapsed() {
+  if (typeof window === 'undefined') return null
+  let value: string | null = null
+  try {
+    value = window.localStorage.getItem(sidebarCollapsedStorageKey)
+  } catch {
+    return null
+  }
+  if (value === 'collapsed') return true
+  if (value === 'expanded') return false
+  return null
+}
+
+function storeSidebarCollapsed(value: boolean) {
+  try {
+    window.localStorage.setItem(sidebarCollapsedStorageKey, value ? 'collapsed' : 'expanded')
+  } catch {
+    // Preference persistence is nice to have; keep the UI usable if storage is unavailable.
+  }
+}
+
 function formatImageCount(count: number, limit: number) {
   return `${count}/${limit} 张`
 }
@@ -108,7 +135,8 @@ export function App() {
   const [authenticated, setAuthenticated] = useState(false)
   const [role, setRole] = useState<SessionRole | null>(null)
   const [page, setPage] = useState<Page>(() => parseRoute().page)
-  const [collapsed, setCollapsed] = useState(false)
+  const [collapsed, setCollapsed] = useState(() => storedSidebarCollapsed() ?? defaultSidebarCollapsed())
+  const [sidebarPreferenceSet, setSidebarPreferenceSet] = useState(() => storedSidebarCollapsed() !== null)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [loginNotice, setLoginNotice] = useState('')
@@ -146,6 +174,15 @@ export function App() {
     window.addEventListener('ruyi-auth-expired', handleAuthExpired)
     return () => window.removeEventListener('ruyi-auth-expired', handleAuthExpired)
   }, [])
+
+  useEffect(() => {
+    if (sidebarPreferenceSet) return
+    const media = window.matchMedia(sidebarCompactQuery)
+    const syncSidebarDefault = () => setCollapsed(media.matches)
+    syncSidebarDefault()
+    media.addEventListener('change', syncSidebarDefault)
+    return () => media.removeEventListener('change', syncSidebarDefault)
+  }, [sidebarPreferenceSet])
 
   useEffect(() => {
     if (!authenticated) return
@@ -228,6 +265,15 @@ export function App() {
     setTask(item)
     window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
     void api.getTask(item.id, role === 'admin').then((result) => setTask(result.item)).catch(() => undefined)
+  }
+
+  function toggleSidebarCollapsed() {
+    setCollapsed((value) => {
+      const next = !value
+      storeSidebarCollapsed(next)
+      return next
+    })
+    setSidebarPreferenceSet(true)
   }
 
   async function run<T>(label: string, action: () => Promise<T>, after?: (value: T) => void, options: RunOptions = {}) {
@@ -321,7 +367,7 @@ export function App() {
           })}
         </nav>
         <div className="sidebar-bottom">
-          <button className="collapse-btn" onClick={() => setCollapsed(!collapsed)} title={collapsed ? '展开侧边栏' : '收起侧边栏'}>
+          <button className="collapse-btn" onClick={toggleSidebarCollapsed} title={collapsed ? '展开侧边栏' : '收起侧边栏'}>
             {collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
             {!collapsed && <span>{collapsed ? '展开' : '收起'}</span>}
           </button>

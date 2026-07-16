@@ -40,7 +40,9 @@ AI 摄影棚上传主推款 -> AI 智能选搭 -> 生成分镜预览 -> 生成�
 
 前端使用浏览器 History API 做轻量路由，不额外引入路由依赖。URL 用来表达可恢复位置，React state 继续承载临时交互状态。
 
-当前路由为 `/studio`、`/studio?task={taskId}`、`/library`、`/model`、admin-only 的 `/prompt-maintenance`、`/records?task={taskId}`。进入 `/studio` 默认显示空白拍摄任务页面，不自动恢复最近进度；只有新建任务后、或用户点选某个历史任务进入 `/studio?task={taskId}` 时，才按 URL 恢复任务。当前拍摄任务和记录详情写入 URL，可在刷新或分享后恢复；上传中未保存的本地文件和折叠状态仍只保存在 React state。
+当前路由为 `/studio`、`/studio?task={taskId}`、`/library`、`/model`、admin-only 的 `/prompt-maintenance`、`/records?task={taskId}`。进入 `/studio` 默认显示空白拍摄任务页面，不自动恢复最近进度；只有新建任务后、或用户点选某个历史任务进入 `/studio?task={taskId}` 时，才按 URL 恢复任务。当前拍摄任务和记录详情写入 URL，可在刷新或分享后恢复；上传中未保存的本地文件和临时面板状态仍只保存在 React state。
+
+左侧侧边栏的展开 / 收起是本机使用偏好，不进入 URL。首次访问且没有偏好记录时，桌面宽度默认展开，小屏宽度默认收起，并在没有用户偏好时随断点变化自动同步；用户手动展开或收起后写入 `localStorage`，刷新和切换路由都优先尊重该偏好。
 
 登录后前端读取 `/api/auth/session` 返回的 `role`。`admin` 在保留全部 user 路由和工作流的基础上额外看到 `Prompt 维护` 入口；普通 `user` 不展示配置入口。品牌边界、AI 打标字段、选搭规则、拍摄导演规则和下游生成规则都通过 Prompt 维护配置。
 
@@ -51,7 +53,8 @@ AI 摄影棚上传主推款 -> AI 智能选搭 -> 生成分镜预览 -> 生成�
 ## 状态分工
 
 - Server state：`StylingGarment`、`GenerationTask`、默认模特、生成 attempts。
-- Client state：当前页面、主推款上传草稿、搭配服装导入草稿、loading/error、折叠状态。
+- Client state：当前页面、主推款上传草稿、搭配服装导入草稿、loading/error。
+- Local preference：侧边栏展开 / 收起偏好存入 `localStorage`，由 React state 读取后驱动当前渲染。
 - 当前使用 React local state；后续数据流复杂后再考虑引入 React Query。
 
 ## 组件/区域
