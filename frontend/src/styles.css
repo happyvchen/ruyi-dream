@@ -1295,11 +1295,19 @@ a.button-link { text-decoration: none; cursor: pointer; }
 .library-content-scroll {
   min-height: 0;
   display: grid;
+  padding-right: 4px;
+  scrollbar-width: thin;
+}
+.library-content-scroll.is-list {
+  height: 100%;
+  grid-template-rows: minmax(0, 1fr);
+  align-content: stretch;
+  overflow: hidden;
+}
+.library-content-scroll.is-import {
   grid-auto-rows: max-content;
   gap: 18px;
   overflow: auto;
-  padding-right: 4px;
-  scrollbar-width: thin;
 }
 .search {
   position: relative;

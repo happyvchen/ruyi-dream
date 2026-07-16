@@ -2017,8 +2017,8 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
 }
 
 function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run: any; role: SessionRole | null }) {
-  const libraryResultsRef = useRef<HTMLDivElement | null>(null)
-  const autoPageSize = useAutoGarmentPageSize(libraryResultsRef)
+  const [libraryResultsElement, setLibraryResultsElement] = useState<HTMLDivElement | null>(null)
+  const autoPageSize = useAutoGarmentPageSize(libraryResultsElement)
   const [query, setQuery] = useState('')
   const [detail, setDetail] = useState<StylingGarment | null>(null)
   const [items, setItems] = useState<StylingGarment[]>([])
@@ -2247,7 +2247,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
           {showImport ? '返回服装库' : '导入搭配服装'}
         </button>
       </div>
-      <div className="library-content-scroll">
+      <div className={`library-content-scroll ${showImport ? 'is-import' : 'is-list'}`}>
         {showImport ? (
           <BatchImportPanel
             onClose={() => setShowImport(false)}
@@ -2313,7 +2313,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
               <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
             </div>
           </div>
-          <div ref={libraryResultsRef} className={`library-results ${showSearchBusy ? 'is-loading' : ''}`}>
+          <div ref={setLibraryResultsElement} className={`library-results ${showSearchBusy ? 'is-loading' : ''}`}>
             {items.length ? (
               <div className="garment-grid">{items.map((item) => (
                 <GarmentCard
@@ -2949,15 +2949,16 @@ function calculateAutoRecordPageSize(height: number, rowHeight = 48, gap = 5) {
   return Math.max(5, Math.min(100, Math.floor((Math.max(height, rowHeight) + gap) / (rowHeight + gap))))
 }
 
-function useAutoGarmentPageSize(resultsRef: { current: HTMLDivElement | null }) {
+function useAutoGarmentPageSize(results: HTMLDivElement | null) {
   const [pageSize, setPageSize] = useState(() => estimateAutoGarmentPageSize())
 
   useEffect(() => {
+    if (!results) return
+
     let frame = 0
     const measure = () => {
       window.cancelAnimationFrame(frame)
       frame = window.requestAnimationFrame(() => {
-        const results = resultsRef.current
         const grid = results?.querySelector<HTMLElement>('.garment-grid') ?? null
         const card = results?.querySelector<HTMLElement>('.garment-card') ?? null
         const gridStyle = grid ? window.getComputedStyle(grid) : null
@@ -2976,15 +2977,15 @@ function useAutoGarmentPageSize(resultsRef: { current: HTMLDivElement | null }) 
     window.addEventListener('resize', measure)
     const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null
     const mutationObserver = typeof MutationObserver !== 'undefined' ? new MutationObserver(measure) : null
-    if (resultsRef.current) observer?.observe(resultsRef.current)
-    if (resultsRef.current) mutationObserver?.observe(resultsRef.current, { childList: true, subtree: true })
+    observer?.observe(results)
+    mutationObserver?.observe(results, { childList: true, subtree: true })
     return () => {
       window.cancelAnimationFrame(frame)
       window.removeEventListener('resize', measure)
       observer?.disconnect()
       mutationObserver?.disconnect()
     }
-  }, [resultsRef])
+  }, [results])
 
   return pageSize
 }
