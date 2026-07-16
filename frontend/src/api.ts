@@ -599,11 +599,16 @@ export const api = {
     sortDir?: string
   }) =>
     request<StylingGarmentListResponse>(params('/api/styling-garments', options ?? {})),
-  createStylingGarment: (code: string, files: File[]) => {
-    const form = new FormData()
-    form.append('code', code)
-    files.forEach((file) => form.append('files', file))
-    return request<{ item: StylingGarment }>('/api/styling-garments', { method: 'POST', body: form })
+  createStylingGarment: async (
+    code: string,
+    files: File[],
+    options?: { onProgress?: (progress: UploadProgressSnapshot) => void },
+  ) => {
+    const upload = await uploadFilesViaSession('styling_garment', files, options?.onProgress)
+    return request<{ item: StylingGarment; session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(upload.session.id)}/finalize-styling-garment`, {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    })
   },
   tagStylingGarment: (id: number) =>
     request<{ item: StylingGarment }>(`/api/styling-garments/${id}/save-and-tag`, { method: 'POST' }),

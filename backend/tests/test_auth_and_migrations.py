@@ -784,6 +784,312 @@ class BackendCurrentFlowTests(unittest.TestCase):
             main.presigned_put_url = original_presigned_put_url
             client.close()
 
+    def test_upload_session_finalize_creates_styling_garment(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+        from PIL import Image
+
+        db_module.init_db()
+        output = BytesIO()
+        Image.new("RGB", (32, 48), color=(160, 128, 192)).save(output, format="JPEG")
+        image_bytes = output.getvalue()
+        original_ensure_direct_upload_cors = main.ensure_direct_upload_cors
+        original_presigned_put_url = main.presigned_put_url
+        original_object_head = main.object_head
+        original_get_bytes = main.get_bytes
+        original_put_bytes = main.put_bytes
+        original_generate_image_derivatives = main.generate_image_derivatives
+        main.ensure_direct_upload_cors = lambda: None
+        main.presigned_put_url = lambda key, content_type=None: f"https://uploads.test/{key}"
+        main.put_bytes = lambda key, content, content_type: None
+        main.generate_image_derivatives = lambda key, content: {
+            "thumb": f"{key}.thumb.webp",
+            "preview": f"{key}.preview.webp",
+            "thumbSize": 12,
+            "previewSize": 34,
+        }
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            session_response = client.post(
+                "/api/upload-sessions",
+                json={
+                    "scope": "styling_garment",
+                    "files": [
+                        {"filename": "skirt-1.jpg", "mimeType": "image/jpeg", "sizeBytes": len(image_bytes)},
+                        {"filename": "skirt-2.jpg", "mimeType": "image/jpeg", "sizeBytes": len(image_bytes)},
+                    ],
+                },
+            )
+            self.assertEqual(session_response.status_code, 200)
+            session_payload = session_response.json()
+            object_keys = [item["objectKey"] for item in session_payload["items"]]
+            main.object_head = lambda key: {"contentLength": len(image_bytes), "contentType": "image/jpeg"} if key in object_keys else None
+            main.get_bytes = lambda key: image_bytes if key in object_keys else b""
+            finalized = client.post(
+                f"/api/upload-sessions/{session_payload['session']['id']}/finalize-styling-garment",
+                json={"code": "STYLE-SESSION-1"},
+            )
+            self.assertEqual(finalized.status_code, 200)
+            payload = finalized.json()
+            self.assertEqual(payload["item"]["code"], "STYLE-SESSION-1")
+            self.assertEqual(len(payload["item"]["images"]), 2)
+            self.assertEqual(payload["session"]["status"], "FINALIZED")
+            self.assertEqual(payload["session"]["targetType"], "styling_garment")
+            self.assertEqual(payload["session"]["targetId"], payload["item"]["id"])
+            finalized_again = client.post(
+                f"/api/upload-sessions/{session_payload['session']['id']}/finalize-styling-garment",
+                json={"code": "STYLE-SESSION-1"},
+            )
+            self.assertEqual(finalized_again.status_code, 200)
+            self.assertEqual(finalized_again.json()["item"]["id"], payload["item"]["id"])
+            with db_module.get_db() as db:
+                garment_count = db.execute("SELECT COUNT(*) AS count FROM styling_garments WHERE code = 'STYLE-SESSION-1'").fetchone()["count"]
+                session = db.execute("SELECT status, target_type, target_id FROM upload_sessions WHERE id = ?", (session_payload["session"]["id"],)).fetchone()
+            self.assertEqual(garment_count, 1)
+            self.assertEqual(session["status"], "FINALIZED")
+            self.assertEqual(session["target_type"], "styling_garment")
+            self.assertEqual(session["target_id"], payload["item"]["id"])
+        finally:
+            main.ensure_direct_upload_cors = original_ensure_direct_upload_cors
+            main.presigned_put_url = original_presigned_put_url
+            main.object_head = original_object_head
+            main.get_bytes = original_get_bytes
+            main.put_bytes = original_put_bytes
+            main.generate_image_derivatives = original_generate_image_derivatives
+            client.close()
+
+    def test_upload_session_finalize_failure_does_not_create_styling_garment(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+
+        db_module.init_db()
+        original_ensure_direct_upload_cors = main.ensure_direct_upload_cors
+        original_presigned_put_url = main.presigned_put_url
+        original_object_head = main.object_head
+        main.ensure_direct_upload_cors = lambda: None
+        main.presigned_put_url = lambda key, content_type=None: f"https://uploads.test/{key}"
+        main.object_head = lambda key: None
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            session_response = client.post(
+                "/api/upload-sessions",
+                json={"scope": "styling_garment", "files": [{"filename": "missing.jpg", "mimeType": "image/jpeg", "sizeBytes": 123}]},
+            )
+            self.assertEqual(session_response.status_code, 200)
+            session_id = session_response.json()["session"]["id"]
+            finalized = client.post(f"/api/upload-sessions/{session_id}/finalize-styling-garment", json={"code": "STYLE-MISSING"})
+            self.assertEqual(finalized.status_code, 400)
+            with db_module.get_db() as db:
+                garment_count = db.execute("SELECT COUNT(*) AS count FROM styling_garments WHERE code = 'STYLE-MISSING'").fetchone()["count"]
+                session = db.execute("SELECT status, error_message FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
+                item = db.execute("SELECT status, error_message FROM upload_session_items WHERE session_id = ?", (session_id,)).fetchone()
+            self.assertEqual(garment_count, 0)
+            self.assertEqual(session["status"], "FAILED")
+            self.assertIn("尚未上传完成", session["error_message"])
+            self.assertEqual(item["status"], "FAILED")
+            self.assertIn("尚未上传完成", item["error_message"])
+        finally:
+            main.ensure_direct_upload_cors = original_ensure_direct_upload_cors
+            main.presigned_put_url = original_presigned_put_url
+            main.object_head = original_object_head
+            client.close()
+
+    def test_upload_session_styling_garment_trims_to_image_limit(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+
+        db_module.init_db()
+        original_ensure_direct_upload_cors = main.ensure_direct_upload_cors
+        original_presigned_put_url = main.presigned_put_url
+        main.ensure_direct_upload_cors = lambda: None
+        main.presigned_put_url = lambda key, content_type=None: f"https://uploads.test/{key}"
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            response = client.post(
+                "/api/upload-sessions",
+                json={
+                    "scope": "styling_garment",
+                    "files": [
+                        {"filename": f"garment-{index:02d}.jpg", "mimeType": "image/jpeg", "sizeBytes": 123}
+                        for index in range(16)
+                    ],
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["session"]["totalCount"], 15)
+            self.assertEqual(len(payload["items"]), 15)
+            self.assertEqual(payload["items"][-1]["filename"], "garment-14.jpg")
+            with db_module.get_db() as db:
+                session_count = db.execute("SELECT COUNT(*) AS count FROM upload_sessions").fetchone()["count"]
+                item_count = db.execute("SELECT COUNT(*) AS count FROM upload_session_items").fetchone()["count"]
+            self.assertEqual(session_count, 1)
+            self.assertEqual(item_count, 15)
+        finally:
+            main.ensure_direct_upload_cors = original_ensure_direct_upload_cors
+            main.presigned_put_url = original_presigned_put_url
+            client.close()
+
+    def test_upload_session_styling_garment_duplicate_after_assets_preserves_direct_uploads(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+        from PIL import Image
+
+        db_module.init_db()
+        output = BytesIO()
+        Image.new("RGB", (32, 48), color=(160, 96, 128)).save(output, format="JPEG")
+        image_bytes = output.getvalue()
+        original_ensure_direct_upload_cors = main.ensure_direct_upload_cors
+        original_presigned_put_url = main.presigned_put_url
+        original_object_head = main.object_head
+        original_get_bytes = main.get_bytes
+        original_put_bytes = main.put_bytes
+        original_cleanup_objects = main.cleanup_objects
+        original_generate_image_derivatives = main.generate_image_derivatives
+        original_save_uploaded_objects_as_media_assets = main.save_uploaded_objects_as_media_assets
+        deleted_keys: list[str] = []
+
+        main.ensure_direct_upload_cors = lambda: None
+        main.presigned_put_url = lambda key, content_type=None: f"https://uploads.test/{key}"
+        main.put_bytes = lambda key, content, content_type: None
+        main.cleanup_objects = lambda keys: deleted_keys.extend(keys)
+        main.generate_image_derivatives = lambda key, content: {
+            "thumb": f"{key}.thumb.webp",
+            "preview": f"{key}.preview.webp",
+            "thumbSize": 12,
+            "previewSize": 34,
+        }
+
+        async def save_and_create_duplicate(uploads, preserve_originals_on_failure=False):
+            assets = await original_save_uploaded_objects_as_media_assets(
+                uploads,
+                preserve_originals_on_failure=preserve_originals_on_failure,
+            )
+            timestamp = db_module.now_iso()
+            with db_module.get_db() as db:
+                db.execute(
+                    """
+                    INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, tag_schema_version, created_at, updated_at)
+                    VALUES ('STYLE-RACE', 'DRAFT', '{}', '{}', 'test', ?, ?)
+                    """,
+                    (timestamp, timestamp),
+                )
+            return assets
+
+        main.save_uploaded_objects_as_media_assets = save_and_create_duplicate
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            session_response = client.post(
+                "/api/upload-sessions",
+                json={"scope": "styling_garment", "files": [{"filename": "race.jpg", "mimeType": "image/jpeg", "sizeBytes": len(image_bytes)}]},
+            )
+            self.assertEqual(session_response.status_code, 200)
+            session_id = session_response.json()["session"]["id"]
+            object_key = session_response.json()["items"][0]["objectKey"]
+            main.object_head = lambda key: {"contentLength": len(image_bytes), "contentType": "image/jpeg"} if key == object_key else None
+            main.get_bytes = lambda key: image_bytes if key == object_key else b""
+            finalized = client.post(f"/api/upload-sessions/{session_id}/finalize-styling-garment", json={"code": "STYLE-RACE"})
+            self.assertEqual(finalized.status_code, 409)
+            with db_module.get_db() as db:
+                media_count = db.execute("SELECT COUNT(*) AS count FROM media_assets").fetchone()["count"]
+                session = db.execute("SELECT status, error_message FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
+            self.assertEqual(media_count, 0)
+            self.assertEqual(session["status"], "FAILED")
+            self.assertIn("搭配服装货号已存在", session["error_message"])
+            self.assertNotIn(object_key, deleted_keys)
+            self.assertIn(f"{object_key}.thumb.webp", deleted_keys)
+        finally:
+            main.ensure_direct_upload_cors = original_ensure_direct_upload_cors
+            main.presigned_put_url = original_presigned_put_url
+            main.object_head = original_object_head
+            main.get_bytes = original_get_bytes
+            main.put_bytes = original_put_bytes
+            main.cleanup_objects = original_cleanup_objects
+            main.generate_image_derivatives = original_generate_image_derivatives
+            main.save_uploaded_objects_as_media_assets = original_save_uploaded_objects_as_media_assets
+            client.close()
+
+    def test_upload_session_styling_garment_partial_failure_preserves_direct_uploads(self) -> None:
+        db_module = importlib.import_module("app.db")
+        main = importlib.import_module("app.main")
+        from fastapi.testclient import TestClient
+        from PIL import Image
+
+        db_module.init_db()
+        output = BytesIO()
+        Image.new("RGB", (32, 48), color=(128, 96, 160)).save(output, format="JPEG")
+        image_bytes = output.getvalue()
+        original_ensure_direct_upload_cors = main.ensure_direct_upload_cors
+        original_presigned_put_url = main.presigned_put_url
+        original_object_head = main.object_head
+        original_get_bytes = main.get_bytes
+        original_put_bytes = main.put_bytes
+        original_cleanup_objects = main.cleanup_objects
+        original_generate_image_derivatives = main.generate_image_derivatives
+        deleted_keys: list[str] = []
+
+        main.ensure_direct_upload_cors = lambda: None
+        main.presigned_put_url = lambda key, content_type=None: f"https://uploads.test/{key}"
+        main.put_bytes = lambda key, content, content_type: None
+        main.cleanup_objects = lambda keys: deleted_keys.extend(keys)
+        main.generate_image_derivatives = lambda key, content: {
+            "thumb": f"{key}.thumb.webp",
+            "preview": f"{key}.preview.webp",
+            "thumbSize": 12,
+            "previewSize": 34,
+        }
+        client = TestClient(main.app)
+        try:
+            login = client.post("/api/auth/login", json={"username": "admin", "password": "admin-letmein-123456"})
+            self.assertEqual(login.status_code, 200)
+            session_response = client.post(
+                "/api/upload-sessions",
+                json={
+                    "scope": "styling_garment",
+                    "files": [
+                        {"filename": "ok.jpg", "mimeType": "image/jpeg", "sizeBytes": len(image_bytes)},
+                        {"filename": "missing.jpg", "mimeType": "image/jpeg", "sizeBytes": 123},
+                    ],
+                },
+            )
+            self.assertEqual(session_response.status_code, 200)
+            session_id = session_response.json()["session"]["id"]
+            object_keys = [item["objectKey"] for item in session_response.json()["items"]]
+            main.object_head = lambda key: {"contentLength": len(image_bytes), "contentType": "image/jpeg"} if key == object_keys[0] else None
+            main.get_bytes = lambda key: image_bytes if key == object_keys[0] else b""
+            finalized = client.post(f"/api/upload-sessions/{session_id}/finalize-styling-garment", json={"code": "STYLE-PARTIAL"})
+            self.assertEqual(finalized.status_code, 400)
+            with db_module.get_db() as db:
+                media_count = db.execute("SELECT COUNT(*) AS count FROM media_assets").fetchone()["count"]
+                session = db.execute("SELECT status, error_message FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
+            self.assertEqual(media_count, 0)
+            self.assertEqual(session["status"], "FAILED")
+            self.assertIn("尚未上传完成", session["error_message"])
+            self.assertNotIn(object_keys[0], deleted_keys)
+            self.assertNotIn(object_keys[1], deleted_keys)
+            self.assertIn(f"{object_keys[0]}.thumb.webp", deleted_keys)
+        finally:
+            main.ensure_direct_upload_cors = original_ensure_direct_upload_cors
+            main.presigned_put_url = original_presigned_put_url
+            main.object_head = original_object_head
+            main.get_bytes = original_get_bytes
+            main.put_bytes = original_put_bytes
+            main.cleanup_objects = original_cleanup_objects
+            main.generate_image_derivatives = original_generate_image_derivatives
+            client.close()
+
     def test_storage_diagnostics_reports_missing_media_and_requires_admin(self) -> None:
         db_module = importlib.import_module("app.db")
         main = importlib.import_module("app.main")

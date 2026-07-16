@@ -357,6 +357,10 @@ class UploadSessionFinalizeGenerationTaskRequest(BaseModel):
     userRequirement: str | None = None
 
 
+class UploadSessionFinalizeStylingGarmentRequest(BaseModel):
+    code: str
+
+
 class GenerationStylingRequest(BaseModel):
     userInstruction: str | None = None
     userRequirement: str | None = None
@@ -684,8 +688,11 @@ def create_upload_session(payload: UploadSessionCreateRequest) -> dict[str, Any]
     scope_prefix = direct_upload_scope_prefix(payload.scope)
     if scope_prefix == "generation-task" and len(payload.files) > MAX_HERO_IMAGE_INPUTS:
         raise HTTPException(status_code=400, detail=f"每个拍摄任务最多上传 {MAX_HERO_IMAGE_INPUTS} 张主推款图片")
+    session_files = payload.files
+    if scope_prefix == "styling-garment":
+        session_files = payload.files[:MAX_GARMENT_IMAGE_INPUTS]
     session_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
-    items = build_direct_upload_items(payload.scope, payload.files, session_id=session_id)
+    items = build_direct_upload_items(payload.scope, session_files, session_id=session_id)
     timestamp = now_iso()
     with get_db() as db:
         db.execute(
@@ -696,7 +703,7 @@ def create_upload_session(payload: UploadSessionCreateRequest) -> dict[str, Any]
             (session_id, scope_prefix, len(items), timestamp, timestamp),
         )
         for index, item in enumerate(items):
-            requested_file = payload.files[index] if index < len(payload.files) else None
+            requested_file = session_files[index] if index < len(session_files) else None
             db.execute(
                 """
                 INSERT INTO upload_session_items
@@ -909,9 +916,10 @@ def release_media_asset_if_unreferenced(db: Any, asset_id: int | None) -> bool:
     return True
 
 
-def cleanup_created_media_assets(assets: list[dict[str, Any]]) -> None:
+def cleanup_created_media_assets(assets: list[dict[str, Any]], preserve_originals: bool = False) -> None:
     asset_ids = [int(asset["id"]) for asset in assets if asset.get("id")]
-    object_keys = [str(asset["objectKey"]) for asset in assets if asset.get("objectKey")]
+    object_keys = [] if preserve_originals else [str(asset["objectKey"]) for asset in assets if asset.get("objectKey")]
+    object_keys.extend(str(asset[key]) for asset in assets for key in ("normalizedKey", "thumbKey", "previewKey") if asset.get(key))
     if asset_ids:
         with suppress(Exception):
             with get_db() as db:
@@ -919,7 +927,7 @@ def cleanup_created_media_assets(assets: list[dict[str, Any]]) -> None:
                     f"DELETE FROM media_assets WHERE id IN ({','.join('?' for _ in asset_ids)})",
                     asset_ids,
                 )
-    cleanup_objects([key for object_key in object_keys for key in image_object_keys(object_key)])
+    cleanup_objects(list(dict.fromkeys(object_keys)))
 
 
 def media_asset_rows_for_ids(db: Any, asset_ids: list[int]) -> list[Any]:
@@ -1382,6 +1390,139 @@ async def create_styling_garment(
             )
         log_event(db, "styling_garment", garment_id, "created", {"code": clean_code, "fileCount": len(assets)})
     return {"item": get_styling_garment_by_id(garment_id)}
+
+
+@app.post("/api/upload-sessions/{session_id}/finalize-styling-garment")
+async def finalize_styling_garment_upload_session(
+    session_id: str,
+    payload: UploadSessionFinalizeStylingGarmentRequest,
+) -> dict[str, Any]:
+    session_id = session_id.strip()
+    clean_code = sanitize_name(payload.code)
+    if not clean_code:
+        raise HTTPException(status_code=400, detail="搭配服装货号不能为空")
+    timestamp = now_iso()
+    with get_db() as db:
+        session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not session:
+            raise HTTPException(status_code=404, detail="上传批次不存在")
+        if session["scope"] != "styling-garment":
+            raise HTTPException(status_code=400, detail="上传批次用途不匹配")
+        if session["status"] == "FINALIZED" and session["target_id"]:
+            return {"item": get_styling_garment_by_id(int(session["target_id"])), "session": get_upload_session(session_id)}
+        duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
+        if duplicate:
+            raise HTTPException(status_code=409, detail="搭配服装货号已存在")
+        if session["status"] == "FINALIZING":
+            raise HTTPException(status_code=409, detail="上传批次正在保存，请稍后")
+        rows = db.execute(
+            "SELECT * FROM upload_session_items WHERE session_id = ? ORDER BY sort_order, id",
+            (session_id,),
+        ).fetchall()
+        if not rows:
+            raise HTTPException(status_code=400, detail="上传批次没有图片")
+        if len(rows) > MAX_GARMENT_IMAGE_INPUTS:
+            raise HTTPException(status_code=400, detail=f"每个搭配服装最多上传 {MAX_GARMENT_IMAGE_INPUTS} 张图片")
+        claimed = db.execute(
+            """
+            UPDATE upload_sessions
+            SET status = 'FINALIZING', error_message = NULL, updated_at = ?
+            WHERE id = ? AND status IN ('PENDING', 'FAILED')
+            """,
+            (timestamp, session_id),
+        )
+        if claimed.rowcount != 1:
+            current = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
+            if current and current["status"] == "FINALIZED" and current["target_id"]:
+                return {"item": get_styling_garment_by_id(int(current["target_id"])), "session": get_upload_session(session_id)}
+            raise HTTPException(status_code=409, detail="上传批次正在保存，请稍后")
+    uploads = [
+        UploadedMediaRequest(
+            objectKey=row["object_key"],
+            filename=row["filename"],
+            mimeType=row["mime_type"],
+            sizeBytes=row["size_bytes"],
+        )
+        for row in rows
+    ]
+    assets: list[dict[str, Any]] = []
+    garment_id: int | None = None
+    try:
+        assets = await save_uploaded_objects_as_media_assets(uploads, preserve_originals_on_failure=True)
+        with get_db() as db:
+            duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
+            if duplicate:
+                raise HTTPException(status_code=409, detail="搭配服装货号已存在")
+            try:
+                cursor = db.execute(
+                    """
+                    INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, tag_schema_version, created_at, updated_at)
+                    VALUES (?, 'DRAFT', ?, ?, ?, ?, ?)
+                    """,
+                    (clean_code, dumps({}), dumps({}), PROMPT_TAGGING_RESULT_VERSION, timestamp, timestamp),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise HTTPException(status_code=409, detail="搭配服装货号已存在") from exc
+            garment_id = int(cursor.lastrowid)
+            for index, asset in enumerate(assets):
+                db.execute(
+                    """
+                    INSERT INTO styling_garment_images
+                      (styling_garment_id, media_asset_id, sort_order, status, created_at, updated_at)
+                    VALUES (?, ?, ?, 'READY', ?, ?)
+                    """,
+                    (garment_id, asset["id"], index, timestamp, timestamp),
+                )
+                db.execute(
+                    """
+                    UPDATE upload_session_items
+                    SET status = 'READY', media_asset_id = ?, error_message = NULL, updated_at = ?
+                    WHERE session_id = ? AND object_key = ?
+                    """,
+                    (asset["id"], timestamp, session_id, asset["objectKey"]),
+                )
+            db.execute(
+                """
+                UPDATE upload_sessions
+                SET status = 'FINALIZED', uploaded_count = ?, target_type = 'styling_garment',
+                    target_id = ?, error_message = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (len(assets), garment_id, timestamp, session_id),
+            )
+            log_event(
+                db,
+                "styling_garment",
+                garment_id,
+                "created",
+                {"code": clean_code, "fileCount": len(assets), "uploadMode": "upload_session", "uploadSessionId": session_id},
+            )
+    except Exception as exc:
+        if assets:
+            cleanup_created_media_assets(assets, preserve_originals=True)
+        with suppress(Exception):
+            error_message = str(exc)
+            with get_db() as db:
+                db.execute(
+                    """
+                    UPDATE upload_sessions
+                    SET status = 'FAILED', uploaded_count = 0, error_message = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (error_message, now_iso(), session_id),
+                )
+                db.execute(
+                    """
+                    UPDATE upload_session_items
+                    SET status = 'FAILED', error_message = ?, updated_at = ?
+                    WHERE session_id = ? AND status <> 'READY'
+                    """,
+                    (error_message, now_iso(), session_id),
+                )
+        raise
+    if garment_id is None:
+        raise HTTPException(status_code=500, detail="上传批次保存失败")
+    return {"item": get_styling_garment_by_id(garment_id), "session": get_upload_session(session_id)}
 
 
 @app.patch("/api/styling-garments/{garment_id}")
@@ -2111,7 +2252,7 @@ async def finalize_generation_task_upload_session(
     assets: list[dict[str, Any]] = []
     task_id: int | None = None
     try:
-        assets = await save_uploaded_objects_as_media_assets(uploads)
+        assets = await save_uploaded_objects_as_media_assets(uploads, preserve_originals_on_failure=True)
         task_name = (payload.name or datetime.now().strftime("%Y%m%d%H%M%S")).strip()
         with get_db() as db:
             batch_id = (payload.batchId or "").strip()[:64] or None
@@ -2156,7 +2297,7 @@ async def finalize_generation_task_upload_session(
             )
     except Exception as exc:
         if assets:
-            cleanup_created_media_assets(assets)
+            cleanup_created_media_assets(assets, preserve_originals=True)
         with suppress(Exception):
             with get_db() as db:
                 db.execute(
@@ -5334,7 +5475,7 @@ async def save_uploads_as_media_assets(files: list[UploadFile], prefix: str) -> 
     return saved
 
 
-async def save_uploaded_objects_as_media_assets(uploads: list[UploadedMediaRequest]) -> list[dict[str, Any]]:
+async def save_uploaded_objects_as_media_assets(uploads: list[UploadedMediaRequest], preserve_originals_on_failure: bool = False) -> list[dict[str, Any]]:
     timestamp = now_iso()
     saved: list[dict[str, Any]] = []
     saved_object_keys: list[str] = []
@@ -5342,7 +5483,8 @@ async def save_uploaded_objects_as_media_assets(uploads: list[UploadedMediaReque
     try:
         for upload in uploads:
             object_key = ensure_direct_upload_key(upload.objectKey)
-            saved_object_keys.append(object_key)
+            if not preserve_originals_on_failure:
+                saved_object_keys.append(object_key)
             asset = await asyncio.to_thread(process_uploaded_object_as_media_asset, upload, timestamp)
             saved_object_keys.extend([item for item in (asset.get("thumbKey"), asset.get("previewKey")) if item])
             saved_object_keys.extend([item for item in (asset.get("normalizedKey"),) if item])

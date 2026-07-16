@@ -1385,11 +1385,16 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
   )
 }
 
-function UploadProgressPanel({ progress, prefix }: { progress: UploadProgressSnapshot; prefix?: string }) {
+function UploadProgressPanel({ progress, prefix, savingLabel = '保存任务', savingDetail = '正在检查图片并创建拍摄任务' }: {
+  progress: UploadProgressSnapshot
+  prefix?: string
+  savingLabel?: string
+  savingDetail?: string
+}) {
   const percent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0
-  const phaseLabel = progress.phase === 'preparing' ? '准备上传' : progress.phase === 'saving' ? '保存任务' : '上传图片'
+  const phaseLabel = progress.phase === 'preparing' ? '准备上传' : progress.phase === 'saving' ? savingLabel : '上传图片'
   const detail = progress.phase === 'saving'
-    ? '正在检查图片并创建拍摄任务'
+    ? savingDetail
     : progress.phase === 'uploading'
       ? `已上传 ${progress.completed}/${progress.total} 张`
       : `${progress.completed}/${progress.total} 张`
@@ -3075,6 +3080,8 @@ type ImportJob = {
   total: number
   uploaded: number
   skipped: number
+  currentCode?: string
+  progress?: UploadProgressSnapshot | null
   operations: AIOperation[]
 }
 
@@ -3195,6 +3202,7 @@ function BatchImportPanel({
       total: jobBatches.length,
       uploaded: 0,
       skipped: 0,
+      progress: null,
       operations: initialOperations,
     }
     setImportJobs((jobs) => [nextJob, ...jobs].slice(0, 5))
@@ -3211,11 +3219,19 @@ function BatchImportPanel({
       }))
       try {
         const uploadFiles = formalAssetFiles(batch.files, STYLING_GARMENT_MAX_IMAGES)
-        const created = await api.createStylingGarment(batch.code, uploadFiles)
+        const created = await api.createStylingGarment(batch.code, uploadFiles, {
+          onProgress: (progress) => updateJob(jobId, (job) => ({
+            ...job,
+            currentCode: batch.code,
+            progress,
+          })),
+        })
         createdItems.push(created.item)
         updateJob(jobId, (job) => ({
           ...job,
           uploaded: createdItems.length,
+          currentCode: undefined,
+          progress: null,
           operations: job.operations.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'SUCCEEDED', completedAt: new Date().toISOString() } : item),
         }))
         onImported()
@@ -3226,6 +3242,8 @@ function BatchImportPanel({
         updateJob(jobId, (job) => ({
           ...job,
           skipped,
+          currentCode: undefined,
+          progress: null,
           operations: job.operations.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'FAILED', failedAt: new Date().toISOString(), errorMessage: message } : item),
         }))
       }
@@ -3317,6 +3335,14 @@ function BatchImportPanel({
                 <strong>{job.title}</strong>
                 <span>{job.uploaded}/{job.total} 已入库{job.skipped ? `，${job.skipped} 项跳过` : ''}</span>
               </div>
+              {job.progress && (
+                <UploadProgressPanel
+                  progress={job.progress}
+                  prefix={job.currentCode ? `货号 ${job.currentCode}` : undefined}
+                  savingLabel="保存服装"
+                  savingDetail="正在检查图片并创建搭配服装"
+                />
+              )}
               <AIOperationList operations={job.operations} />
             </div>
           ))}
