@@ -357,10 +357,10 @@ export function App() {
     { id: 'studio' as const, label: 'AI 摄影棚', icon: Bot },
     { id: 'library' as const, label: '搭配服装库', icon: Library },
     { id: 'model' as const, label: '模特与背景', icon: UserRound },
+    { id: 'records' as const, label: '生成记录', icon: History },
     ...(role === 'admin' ? [
       { id: 'prompt-maintenance' as const, label: 'Prompt 维护', icon: FileText },
     ] : []),
-    { id: 'records' as const, label: '生成记录', icon: History },
   ]
 
   return (
@@ -446,7 +446,7 @@ function LoginPage({ notice, onAuthed }: { notice?: string; onAuthed: (session: 
         <label>用户名<input autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} /></label>
         <label>密码<input autoComplete="current-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} /></label>
         {error && <div className="form-error">{error}</div>}
-        <button className="primary wide" disabled={busy}>{busy ? <Loader2 className="spin" size={16} /> : <Shield size={16} />} 登录</button>
+        <button className="task-action wide" disabled={busy}>{busy ? <Loader2 className="spin" size={16} /> : <Shield size={16} />} 登录</button>
       </form>
     </div>
   )
@@ -820,7 +820,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
                     value={stageInputValue(visibleStep, { aiStylingInstruction, storyboardInstruction, finalImageInstruction })}
                     savedValue={savedStageInputValue(visibleStep, task)}
                     onChange={(value) => updateStageInput(visibleStep, value, { setAiStylingInstruction, setStoryboardInstruction, setFinalImageInstruction })}
-                    onSave={() => void run('保存用户输入中...', () => api.updateTask(task.id, stageInputSavePayload(visibleStep, stageInputValue(visibleStep, { aiStylingInstruction, storyboardInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => applyTaskUpdate(r.item), { refresh: 'background' })}
+                    onSave={() => void run(`${stageInputSaveLabel(visibleStep)}中...`, () => api.updateTask(task.id, stageInputSavePayload(visibleStep, stageInputValue(visibleStep, { aiStylingInstruction, storyboardInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => applyTaskUpdate(r.item), { refresh: 'background' })}
                     disabled={isTaskRunning(task) || !!task.autoRunTarget}
                   />
                 )}
@@ -1628,6 +1628,12 @@ function stageInputSavePayload(step: StudioStep, value: string) {
   return { finalImageUserInstruction: value }
 }
 
+function stageInputSaveLabel(step: StudioStep) {
+  if (step === 1) return '保存选搭要求'
+  if (step === 2) return '保存分镜预览要求'
+  return '保存成片要求'
+}
+
 function stageInstructionText(value?: Record<string, unknown> | null) {
   return stringValue(value?.instruction)
 }
@@ -1645,7 +1651,7 @@ function StageUserInputModule({ step, task, value, savedValue = '', onChange, on
     { title: '', placeholder: '' },
     { title: '智能选搭要求', placeholder: '例如：不要厚重外套，改成更轻盈的通勤搭配。' },
     { title: '分镜预览要求', placeholder: '例如：分镜姿态更舒展，背景保持简洁。' },
-    { title: '成片生成要求', placeholder: '例如：整体更干净，减少配饰存在感，保持棚拍电商质感。' },
+    { title: '成片要求', placeholder: '例如：整体更干净，减少配饰存在感，保持棚拍电商质感。' },
   ][step]
   const saveDisabled = disabled || !task || value.trim() === savedValue.trim()
   const hasValue = Boolean(value.trim())
@@ -1657,7 +1663,7 @@ function StageUserInputModule({ step, task, value, savedValue = '', onChange, on
         {task && <p>保存后用于下一次执行，不会改变当前结果。</p>}
         <div className="side-input-actions">
           <em>{value.length}/800</em>
-          {task && <button className="management-action" type="button" disabled={saveDisabled} onClick={onSave}>保存</button>}
+          {task && <button className="management-action" type="button" disabled={saveDisabled} onClick={onSave}>{stageInputSaveLabel(step)}</button>}
         </div>
       </div>
     </section>
@@ -1797,8 +1803,15 @@ function InfoBlock({ title, items, empty = '暂无' }: { title: string; items: s
 
 function ScorePill({ label, value }: { label: string; value: unknown }) {
   const number = typeof value === 'number' ? value : Number(value)
-  const text = Number.isFinite(number) ? `${Math.round(number * 100)}` : '-'
-  return <span><b>{text}</b>{label}</span>
+  const verdict = scoreVerdict(number)
+  return <span><b>{verdict}</b>{label}</span>
+}
+
+function scoreVerdict(value: number) {
+  if (!Number.isFinite(value)) return '待看'
+  if (value >= 0.82) return '成立'
+  if (value >= 0.68) return '可用'
+  return '复核'
 }
 
 function planValue<T = unknown>(source: Record<string, unknown>, key: string): T | undefined {
@@ -1912,7 +1925,7 @@ function diagnosisItems(value: Record<string, unknown>): string[] {
         ) : (
           <div className="stage-business-result" key="result">{preview?.asset ? (
             <div className="storyboard-review"><button className="preview-board-open" onClick={() => preview.asset && setViewer(assetLightboxImage(preview.asset))} title="放大查看"><img className="preview-board" src={mediaUrl(assetPreviewSrc(preview.asset))} loading="lazy" alt="分镜预览" /></button><div className="storyboard-legend"><span><strong>1–5</strong>生成成片</span><span><strong>6</strong>备用参考，不生成</span><em>点击图片放大检查姿势、构图与光线</em></div></div>
-          ) : <EmptyState title="尚未生成分镜预览" text="点击生成预览后，系统会根据主推款品类与选搭方案输出一张 3:2 横版分镜预览图。" />}</div>
+          ) : <EmptyState title="尚未生成分镜预览" text="点击生成分镜预览后，系统会根据主推款品类与选搭方案输出一张 3:2 横版分镜预览图。" />}</div>
         ))}</div>
       </div>
       <div className="stage-action-bar">
@@ -1924,7 +1937,7 @@ function diagnosisItems(value: Record<string, unknown>): string[] {
           clearLocalOperationsFor(['generation_preview'], task.id)
           setTask(r.item)
         }, { refresh: false })}>
-          <GalleryVerticalEnd size={16} /> {hasPreview ? '重新生成分镜预览' : '生成预览'}
+          <GalleryVerticalEnd size={16} /> {hasPreview ? '重新生成分镜预览' : '生成分镜预览'}
         </button>
       </div>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
@@ -5656,7 +5669,7 @@ function AIOperationCard({ operation, now, compact, index, onOpenTechnicalDetail
     <div className={`ai-operation-card ${running ? 'is-running' : ''} ${compact ? 'compact' : ''}`}>
       <div className="ai-operation-icon">{running ? <Loader2 size={15} className="spin" /> : <Clock3 size={15} />}</div>
       <div className="ai-operation-copy">
-        <strong>{operationLabel(operation, index)}</strong>
+        <strong>{operationUserLabel(operation)}</strong>
         {phase && <span>{attemptPhaseText(phase, operation)}</span>}
         {failureNote && <span className="operation-failure">{failureNote}</span>}
         {!compact && breakdown && <span className="operation-breakdown">{breakdown}</span>}
@@ -5877,6 +5890,14 @@ function operationLabel(operation: AIOperation, index = 0) {
     return shot ? `镜头 ${shot} · Attempt #${operation.id}` : `成片调用 · Attempt #${operation.id || index + 1}`
   }
   return '系统处理中'
+}
+
+function operationUserLabel(operation: AIOperation) {
+  if (operation.ownerType === 'generation_result_image') {
+    const shot = operation.shotSortOrder ?? (operation.id < 0 && operation.ownerId > 0 ? operation.ownerId : null)
+    return shot ? `镜头 ${shot} 成片` : '成片生成'
+  }
+  return operationLabel(operation)
 }
 
 function elapsedSeconds(start?: string | null, now = Date.now(), end?: string | null) {

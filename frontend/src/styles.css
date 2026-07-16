@@ -1158,12 +1158,10 @@ textarea {
 input:focus, select:focus, textarea:focus { border-color: var(--focus); box-shadow: 0 0 0 3px rgba(14,165,233,.14); }
 button:focus-visible,
 a:focus-visible,
-label.secondary:focus-within,
 label.management-action:focus-within {
   outline: 3px solid rgba(14, 165, 233, .22);
   outline-offset: 2px;
 }
-.primary, .secondary, .danger,
 .task-action, .management-action, .danger-action {
   display: inline-flex;
   align-items: center;
@@ -1175,7 +1173,6 @@ label.management-action:focus-within {
   border: 0;
   transition: background .18s ease, border-color .18s ease, box-shadow .18s ease, color .18s ease, transform .18s ease, opacity .18s ease;
 }
-.primary,
 .task-action {
   color: #fff;
   background: linear-gradient(135deg, var(--blue), var(--cyan));
@@ -1184,12 +1181,10 @@ label.management-action:focus-within {
 }
 .task-action { min-width: 132px; }
 .task-action.compact-action { min-width: 112px; height: 32px; padding: 0 10px; font-size: 12px; }
-.primary:not(:disabled):hover,
 .task-action:not(:disabled):hover {
   box-shadow: 0 10px 22px rgba(11, 124, 255, .26);
 }
-.primary:disabled, .task-action:disabled { opacity: .45; cursor: not-allowed; }
-.secondary,
+.task-action:disabled { opacity: .45; cursor: not-allowed; }
 .management-action {
   border: 1px solid var(--line);
   background: linear-gradient(180deg, #fff, #f7fafd);
@@ -1197,18 +1192,16 @@ label.management-action:focus-within {
   box-shadow: 0 1px 2px rgba(15, 23, 42, .035);
   font-weight: 700;
 }
-.secondary:not(:disabled):hover,
 .management-action:not(:disabled):hover {
   border-color: var(--line-strong);
   background: linear-gradient(180deg, #ffffff, #eef3f8);
   color: var(--text);
   box-shadow: 0 6px 16px rgba(15, 23, 42, .07);
 }
-.secondary:disabled, .management-action:disabled { opacity: .45; cursor: not-allowed; }
-.danger,
+.management-action:disabled { opacity: .45; cursor: not-allowed; }
 .danger-action { border: 0; background: var(--danger); color: #fff; }
-.danger:disabled, .danger-action:disabled { opacity: .45; cursor: not-allowed; }
-.icon-button { width: 42px; padding: 0; }
+.danger-action:disabled { opacity: .45; cursor: not-allowed; }
+.icon-button { width: 36px; height: 36px; padding: 0; }
 .wide { width: 100%; }
 a.button-link { text-decoration: none; cursor: pointer; }
 
