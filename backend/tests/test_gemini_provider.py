@@ -40,6 +40,8 @@ class GeminiProviderTests(unittest.TestCase):
             "GEMINI_TOAPIS_TIMEOUT_SECONDS",
             "GEMINI_TOAPIS_CONNECT_TIMEOUT_SECONDS",
             "TOAPIS_API_KEY",
+            "TOAPIS_MAX_CONCURRENCY",
+            "GENERATION_AUTO_RUN_MAX_CONCURRENCY",
         ]:
             os.environ[key] = ""
         # 测试必须自带完整隔离配置,不依赖本地 .env 或 CI 工作流注入:
@@ -83,6 +85,19 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertFalse(gp.is_gemini_configured())
         gp = self._reload(GEMINI_PROVIDER="toapis", TOAPIS_API_KEY="tk")
         self.assertTrue(gp.is_gemini_configured())
+
+    def test_toapis_max_concurrency_defaults_and_legacy_fallback(self) -> None:
+        self._reload()
+        config = sys.modules["app.config"]
+        self.assertEqual(config.Settings().toapis_max_concurrency, 5)
+
+        self._reload(GENERATION_AUTO_RUN_MAX_CONCURRENCY="2")
+        config = sys.modules["app.config"]
+        self.assertEqual(config.Settings().toapis_max_concurrency, 2)
+
+        self._reload(TOAPIS_MAX_CONCURRENCY="7", GENERATION_AUTO_RUN_MAX_CONCURRENCY="2")
+        config = sys.modules["app.config"]
+        self.assertEqual(config.Settings().toapis_max_concurrency, 7)
 
     def test_effective_model_falls_back_to_gemini_model(self) -> None:
         gp = self._reload(GEMINI_PROVIDER="toapis", GEMINI_MODEL="gemini-2.5-flash", TOAPIS_API_KEY="tk")

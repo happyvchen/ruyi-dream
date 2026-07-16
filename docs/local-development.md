@@ -73,10 +73,13 @@ GEMINI_PROVIDER=toapis
 GEMINI_API_KEY=
 GPT_IMAGE2_PROVIDER=toapis
 TOAPIS_API_KEY=
+TOAPIS_MAX_CONCURRENCY=5
 FAL_KEY=
 ```
 
 `GEMINI_PROVIDER=toapis`（`.env.example` 与本项目部署的推荐值）时 Gemini 走 ToAPIs OpenAI 兼容中转，复用 `TOAPIS_API_KEY`，国内无需 VPN，`GEMINI_API_KEY` 可留空；`GEMINI_PROVIDER=direct` 时直连 Google，需要 `GEMINI_API_KEY` 且本机能访问 googleapis.com。注意：该变量缺省时代码回退 `direct`（兼容存量部署），因此 `.env` 中应显式设置。ToAPIs 通道模型 ID 可用 `GEMINI_TOAPIS_MODEL` 单独指定，留空则复用 `GEMINI_MODEL`。
+
+`TOAPIS_MAX_CONCURRENCY` 是 ToAPIs 全局并发预算，默认 `5`；Gemini(ToAPIs)、Image-2(ToAPIs) 的上传、任务创建和状态查询共享该闸门，批次一键成片也按这个值排队推进。旧 `GENERATION_AUTO_RUN_MAX_CONCURRENCY` 只作为过渡 fallback。
 
 如确实需要只对后端裸跑做临时覆盖，可以创建 `backend/.env.local`。它不应存放共享密钥，常见用途是覆盖本地数据库或日志路径：
 

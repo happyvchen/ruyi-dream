@@ -52,6 +52,12 @@ API 摘要返回稳定 `error={code,title,message,action,retryable}`；普通用
 
 官方依据：`https://docs.toapis.com/docs/cn/api-reference/tasks/image-status`、`https://docs.toapis.com/docs/cn/api-reference/images/gpt-image-2/official`、`https://docs.toapis.com/docs/cn/api-reference/uploads/images`。
 
+## ToAPIs 并发闸门
+
+ToAPIs 相关调用统一使用 `TOAPIS_MAX_CONCURRENCY` 控制最大并发，默认 `5`。该闸门覆盖 Gemini(ToAPIs) chat、Image-2(ToAPIs) 参考图上传、任务创建和状态查询；批次一键成片不再有独立并发参数，而是按同一 ToAPIs 预算推进排队任务。
+
+旧环境变量 `GENERATION_AUTO_RUN_MAX_CONCURRENCY` 仅作为过渡 fallback：未设置 `TOAPIS_MAX_CONCURRENCY` 时才读取。新部署和文档统一使用 `TOAPIS_MAX_CONCURRENCY`。
+
 ## 主要模块
 
 | 文件 | 职责 |
@@ -60,6 +66,7 @@ API 摘要返回稳定 `error={code,title,message,action,retryable}`；普通用
 | `app/db.py` | 最终 schema、Prompt 配置槽登记、清理迁移 |
 | `app/prompt_render.py` | 动态占位文本和参考图图号区间渲染 |
 | `app/image_provider.py` | ToApis / fal 请求快照和图片生成适配 |
+| `app/toapis_concurrency.py` | ToAPIs 全局并发闸门 |
 | `app/generation_progress.py` | attempt 阶段进度和错误分类 |
 
 ## 图片事实源

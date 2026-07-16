@@ -29,6 +29,7 @@ from .generation_progress import (
     is_zero_output_transient,
     normalize_toapis_error,
 )
+from .toapis_concurrency import toapis_concurrency_slot
 
 
 logger = logging.getLogger(__name__)
@@ -197,7 +198,8 @@ def _post_toapis_chat_with_retry(
     waf_attempts = 0
     while True:
         try:
-            return _post_toapis_chat(payload)
+            with toapis_concurrency_slot():
+                return _post_toapis_chat(payload)
         except GeminiProviderError as exc:
             error_code = exc.error_code
             # WAF 熔断:有限重试后放弃(1010 是指纹封禁,盲目重发没用但短暂退避偶尔能过)。

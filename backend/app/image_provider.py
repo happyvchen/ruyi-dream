@@ -24,6 +24,7 @@ from .generation_progress import (
     is_retryable_error,
     normalize_toapis_error,
 )
+from .toapis_concurrency import toapis_concurrency_slot
 from .image_derivatives import generate_image_derivatives
 from .image_ingestion import normalized_image_candidates
 from .object_storage import get_bytes, object_exists, put_bytes
@@ -128,15 +129,16 @@ def post_generation_task_with_confirmed_failure_retries(
     """
     for index in range(max_attempts):
         try:
-            return post_json(
-                url,
-                payload,
-                api_key,
-                timeout=timeout_seconds,
-                auth_scheme=auth_scheme,
-                error_label=error_label,
-                attempts=1,
-            )
+            with toapis_concurrency_slot():
+                return post_json(
+                    url,
+                    payload,
+                    api_key,
+                    timeout=timeout_seconds,
+                    auth_scheme=auth_scheme,
+                    error_label=error_label,
+                    attempts=1,
+                )
         except ImageProviderError as exc:
             if exc.response_received is not True:
                 raise ProviderSubmissionUnknownError(f"{error_label}，提交结果未知: {exc}") from exc
@@ -340,13 +342,14 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
         if not task_id:
             return {"status": "FAILED", "providerStatus": "MISSING_TASK_ID", "error": "缺少 toapis task id"}
 
-        status_response = get_json(
-            toapis_url(f"/v1/images/generations/{task_id}"),
-            settings.toapis_api_key,
-            timeout=60,
-            auth_scheme="Bearer",
-            error_label="GPT Image-2 toapis 状态查询失败",
-        )
+        with toapis_concurrency_slot():
+            status_response = get_json(
+                toapis_url(f"/v1/images/generations/{task_id}"),
+                settings.toapis_api_key,
+                timeout=60,
+                auth_scheme="Bearer",
+                error_label="GPT Image-2 toapis 状态查询失败",
+            )
         provider_status = str(status_response.get("status") or "").lower()
         resolved_task_id = status_response.get("id") or task_id
         next_status = map_toapis_status(provider_status)
@@ -802,14 +805,15 @@ def upload_bytes_to_toapis(content: bytes, filename: str, content_type: str | No
     if not settings.toapis_api_key:
         raise RuntimeError("TOAPIS_API_KEY 未配置，无法上传参考图到 toapis")
     content, filename, content_type = fit_image_bytes_under_limit(content, filename, content_type)
-    upload_response = post_multipart_file(
-        toapis_url("/v1/uploads/images"),
-        "file",
-        filename,
-        content,
-        content_type or mimetypes.guess_type(filename)[0] or "image/png",
-        settings.toapis_api_key,
-    )
+    with toapis_concurrency_slot():
+        upload_response = post_multipart_file(
+            toapis_url("/v1/uploads/images"),
+            "file",
+            filename,
+            content,
+            content_type or mimetypes.guess_type(filename)[0] or "image/png",
+            settings.toapis_api_key,
+        )
     data = upload_response.get("data") if isinstance(upload_response, dict) else None
     uploaded_url = data.get("url") if isinstance(data, dict) else None
     if not uploaded_url:

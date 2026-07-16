@@ -68,6 +68,7 @@ APP_MEDIA_PRESIGN_SAFETY_MARGIN_SECONDS=120
 GEMINI_PROVIDER=toapis                 # 国内无需 VPN;direct 需 GEMINI_API_KEY 且能访问 googleapis.com
 GPT_IMAGE2_PROVIDER=toapis
 TOAPIS_API_KEY=sk-...
+TOAPIS_MAX_CONCURRENCY=5              # ToAPIs 全局并发:Gemini/Image-2/API 上传与状态查询共享
 ```
 
 要点:
@@ -76,6 +77,7 @@ TOAPIS_API_KEY=sk-...
 - `PUBLIC_BACKEND_URL` 会构建进前端静态包,改动后必须重建 frontend 镜像。
 - 端口冲突时只改宿主机映射:`BACKEND_PORT=18000` 并同步改 `PUBLIC_BACKEND_URL`。
 - `APP_S3_BUCKET` 保持默认 `ruyi-dream`(S3 命名规则:3-63 位小写字母/数字/短横线)。
+- `TOAPIS_MAX_CONCURRENCY` 控制 ToAPIs 全局并发,默认 5;批次一键成片不再使用独立并发参数。旧 `GENERATION_AUTO_RUN_MAX_CONCURRENCY` 仅作为过渡 fallback。
 - 媒体图片通过 `/api/media` 返回 302 到对象存储。`APP_MEDIA_PRESIGN_EXPIRES_SECONDS` 控制媒体 GET 签名 URL 的有效期;`APP_MEDIA_*_CACHE_SECONDS` 控制浏览器缓存 TTL,且实际 TTL 会被媒体签名有效期减安全余量截断。`APP_S3_PRESIGN_EXPIRES_SECONDS` 继续控制直传和其它非媒体签名 URL。
 - 不要设置 `RUSTFS_SERVER_DOMAINS`(仅 virtual-host style 需要,误设会报 `InvalidBucketName`)。
 - 密码/hash 轮换后想强制所有浏览器重新登录,需同时轮换 `APP_SESSION_SECRET`。
@@ -256,6 +258,7 @@ docker compose up -d && curl http://127.0.0.1:8000/api/health
 
 - 打标/选搭/拍摄剧本失败或 `geminiConfigured:false`:`toapis` 通道查 `TOAPIS_API_KEY`,`direct` 通道查 `GEMINI_API_KEY` 与 googleapis.com 连通性;报"额度不足"时到 ToAPIs 控制台看余额(多图请求预扣费较高)。
 - 生图失败或 `imageProviderConfigured:false`:查 `GPT_IMAGE2_PROVIDER` 对应的 key(toapis→`TOAPIS_API_KEY`,fal→`FAL_KEY`)与出站网络。
+- 多任务批量生成遇到 429/超时:先降低 `TOAPIS_MAX_CONCURRENCY`;它同时影响 Gemini(ToAPIs)、Image-2(ToAPIs) 和批次一键成片推进。
 - UI 可对失败的单张成片重试;任务卡住时后端重启后 poller 会按租约(`GENERATION_IMAGE_TIMEOUT_SECONDS`)自动恢复。
 - 升级排障时保留:任务 id、失败图 id、backend 最后 300 行日志。
 

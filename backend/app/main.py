@@ -7998,7 +7998,7 @@ def auto_run_active_task_ids() -> set[int]:
 def pump_auto_run_queue() -> None:
     """并发闸门：按 auto_run_requested_at 顺序推进排队中的一键成片任务，超出上限的继续等待。"""
     active_ids = auto_run_active_task_ids()
-    slots = settings.generation_auto_run_max_concurrency - len(active_ids)
+    slots = settings.toapis_max_concurrency - len(active_ids)
     if slots <= 0:
         return
     with get_db() as db:

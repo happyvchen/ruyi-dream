@@ -100,6 +100,13 @@ class Settings:
     fal_key = os.getenv("FAL_KEY", "")
     toapis_api_key = os.getenv("TOAPIS_API_KEY", "")
     toapis_base_url = os.getenv("TOAPIS_BASE_URL", "https://toapis.com")
+    # ToApis 全局模型 API 并发闸门：Gemini(ToApis)、Image-2(ToApis) 和后续 ToApis
+    # 模型调用共享同一上限；批次 auto-run 队列也按这个上限推进。
+    toapis_max_concurrency = int(
+        os.getenv("TOAPIS_MAX_CONCURRENCY")
+        or os.getenv("GENERATION_AUTO_RUN_MAX_CONCURRENCY")
+        or "5"
+    )
     # Image-2 创建任务单次请求超时；独立于生成轮询总预算。
     toapis_image_submit_timeout_seconds = int(os.getenv("TOAPIS_IMAGE_SUBMIT_TIMEOUT_SECONDS", "180"))
     # 创建请求响应未知时的用户无感自动恢复：单镜头重试次数、退避和同批熔断阈值。
@@ -120,8 +127,7 @@ class Settings:
     generation_lock_ttl_seconds = int(os.getenv("GENERATION_LOCK_TTL_SECONDS", "120"))
     generation_image_timeout_seconds = int(os.getenv("GENERATION_IMAGE_TIMEOUT_SECONDS", str(30 * 60)))
     generation_submit_retry_limit = int(os.getenv("GENERATION_SUBMIT_RETRY_LIMIT", "3"))
-    # 一键成片（auto-run）并发闸门：同时自动推进的任务数上限，超出的任务按请求时间排队。
-    generation_auto_run_max_concurrency = int(os.getenv("GENERATION_AUTO_RUN_MAX_CONCURRENCY", "2"))
+    # 一键成片（auto-run）使用 TOAPIS_MAX_CONCURRENCY 作为外部模型并发预算，不再单独配置。
     generation_status_retry_limit = int(os.getenv("GENERATION_STATUS_RETRY_LIMIT", "6"))
     # 参考图上传阶段总预算（不含单文件请求自身的超时）。
     generation_upload_timeout_seconds = int(os.getenv("GENERATION_UPLOAD_TIMEOUT_SECONDS", str(5 * 60)))
@@ -167,8 +173,8 @@ class Settings:
             raise RuntimeError("GENERATION_SUBMIT_RETRY_LIMIT must be greater than 0.")
         if self.generation_status_retry_limit <= 0:
             raise RuntimeError("GENERATION_STATUS_RETRY_LIMIT must be greater than 0.")
-        if self.generation_auto_run_max_concurrency <= 0:
-            raise RuntimeError("GENERATION_AUTO_RUN_MAX_CONCURRENCY must be greater than 0.")
+        if self.toapis_max_concurrency <= 0:
+            raise RuntimeError("TOAPIS_MAX_CONCURRENCY must be greater than 0.")
         if self.generation_upload_timeout_seconds <= 0:
             raise RuntimeError("GENERATION_UPLOAD_TIMEOUT_SECONDS must be greater than 0.")
         if self.generation_delivery_timeout_seconds <= 0:

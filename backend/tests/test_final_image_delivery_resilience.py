@@ -14,6 +14,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from contextlib import contextmanager
 from unittest import mock
 
 try:  # app.main 依赖 fastapi/pydantic；不可用时跳过相关用例（沙箱环境）。
@@ -372,6 +373,44 @@ class CheckDeliverSplitTests(TempEnvTestCase):
                 result = asyncio.run(provider.check({"provider_request_id": "tsk_1", "output_path": "k/out.png"}))
         self.assertEqual(result["status"], "SUCCEEDED")
         self.assertEqual(result["providerRequestId"], "tsk_1")
+
+    def test_toapis_check_uses_shared_concurrency_slot(self) -> None:
+        image_provider = importlib.import_module("app.image_provider")
+        provider = image_provider.GPTImage2ToapisProvider()
+        completed_response = {"status": "completed", "result": {"data": [{"url": "https://files.toapis.com/out.png"}]}}
+        events: list[str] = []
+
+        @contextmanager
+        def slot():
+            events.append("enter")
+            try:
+                yield
+            finally:
+                events.append("exit")
+
+        with mock.patch.object(image_provider, "toapis_concurrency_slot", slot):
+            with mock.patch.object(image_provider, "get_json", return_value=completed_response):
+                asyncio.run(provider.check({"provider_request_id": "tsk_1", "output_path": "k/out.png"}))
+        self.assertEqual(events, ["enter", "exit"])
+
+    def test_toapis_upload_uses_shared_concurrency_slot(self) -> None:
+        image_provider = importlib.import_module("app.image_provider")
+        events: list[str] = []
+
+        @contextmanager
+        def slot():
+            events.append("enter")
+            try:
+                yield
+            finally:
+                events.append("exit")
+
+        with mock.patch.object(image_provider, "toapis_concurrency_slot", slot):
+            with mock.patch.object(image_provider, "fit_image_bytes_under_limit", side_effect=lambda content, filename, content_type: (content, filename, content_type)):
+                with mock.patch.object(image_provider, "post_multipart_file", return_value={"data": {"url": "https://files.toapis.com/u/ref.png"}}):
+                    result = image_provider.upload_bytes_to_toapis(b"png", "ref.png", "image/png")
+        self.assertEqual(result, "https://files.toapis.com/u/ref.png")
+        self.assertEqual(events, ["enter", "exit"])
 
     def test_toapis_deliver_download_failure_raises_delivery_failed(self) -> None:
         image_provider = importlib.import_module("app.image_provider")
