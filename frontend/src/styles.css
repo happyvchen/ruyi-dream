@@ -1398,6 +1398,14 @@ a.button-link { text-decoration: none; cursor: pointer; }
 .import-drop span { color: #64748b; font-size: 13px; }
 .import-actions { display: flex; gap: 10px; margin-top: 6px; }
 .import-actions input { display: none; }
+.import-footer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 2px;
+}
 .batch-list { display: grid; gap: 12px; }
 .import-job-list {
   display: grid;

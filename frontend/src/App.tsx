@@ -1963,6 +1963,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
   const [detail, setDetail] = useState<StylingGarment | null>(null)
   const [items, setItems] = useState<StylingGarment[]>([])
   const [showImport, setShowImport] = useState(false)
+  const [importBusy, setImportBusy] = useState(false)
   const [offset, setOffset] = useState(0)
   const [total, setTotal] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
@@ -2175,12 +2176,24 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
           title="搭配服装库"
           subtitle="管理真实会进入智能选搭的服装资产，优先看商品、品类和可用状态。"
         />
-        <button className="management-action" onClick={() => setShowImport((value) => !value)}>
-          <ImagePlus size={16} /> {showImport ? '收起导入' : '导入搭配服装'}
+        <button
+          className="management-action"
+          disabled={showImport && importBusy}
+          title={showImport && importBusy ? '导入任务完成后可返回服装库' : undefined}
+          onClick={() => setShowImport((value) => !value)}
+        >
+          {showImport ? <ChevronLeft size={16} /> : <ImagePlus size={16} />}
+          {showImport ? '返回服装库' : '导入搭配服装'}
         </button>
       </div>
       <div className="library-content-scroll">
-        {showImport && <BatchImportPanel onImported={() => void refreshFirstLibraryPage().catch(() => undefined)} />}
+        {showImport ? (
+          <BatchImportPanel
+            onClose={() => setShowImport(false)}
+            onImported={() => void refreshFirstLibraryPage().catch(() => undefined)}
+            onBusyChange={setImportBusy}
+          />
+        ) : (
         <div className="panel library-panel">
           <div className="library-commandbar">
             <div className={`search ${showSearchBusy ? 'is-searching' : ''}`}>
@@ -2274,6 +2287,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
             />
           </div>
         </div>
+        )}
       </div>
       {detail && <GarmentDetailDrawer item={detail} run={run} isAdmin={role === 'admin'} onClose={() => setDetail(null)} onChange={updateGarmentInView} onDelete={() => openGarmentDeleteDialog([detail])} onRestore={() => restoreGarments([detail])} />}
       {deleteGarmentDialog && (
@@ -2960,10 +2974,24 @@ type ImportJob = {
   operations: AIOperation[]
 }
 
-function BatchImportPanel({ onImported }: { onImported: () => void }) {
+function BatchImportPanel({
+  onClose,
+  onImported,
+  onBusyChange,
+}: {
+  onClose: () => void
+  onImported: () => void
+  onBusyChange: (busy: boolean) => void
+}) {
   const [batches, setBatches] = useState<StylingImportBatch[]>([])
   const [localError, setLocalError] = useState('')
   const [importJobs, setImportJobs] = useState<ImportJob[]>([])
+  const hasRunningImportJobs = importJobs.some((job) => job.status === 'RUNNING')
+
+  useEffect(() => {
+    onBusyChange(hasRunningImportJobs)
+    return () => onBusyChange(false)
+  }, [hasRunningImportJobs, onBusyChange])
 
   function addFiles(files: File[]) {
     const next = groupImportFiles(files).batches
@@ -3147,7 +3175,6 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
           <h3>导入搭配服装</h3>
           <p>{`散图会合并为一套；单货号文件夹是一套；上级文件夹会递归识别最底层图片目录。最多 ${STYLING_GARMENT_MAX_IMAGES} 张进入候选池，AI 打标后只保留挑选排序好的 ${STYLING_GARMENT_SELECTED_IMAGES} 张纯服装参考图。`}</p>
         </div>
-        <button className="management-action" disabled={!batches.length} onClick={saveDrafts}>导入</button>
       </div>
       <div className="import-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
         <Images size={22} />
@@ -3191,6 +3218,18 @@ function BatchImportPanel({ onImported }: { onImported: () => void }) {
           ))}
         </div>
       )}
+      <div className="import-footer-actions">
+        <button
+          className="management-action"
+          type="button"
+          disabled={hasRunningImportJobs}
+          title={hasRunningImportJobs ? '导入任务完成后可返回服装库' : undefined}
+          onClick={onClose}
+        >
+          <ChevronLeft size={16} />返回服装库
+        </button>
+        <button className="management-action" type="button" disabled={!batches.length} onClick={saveDrafts}><Upload size={16} />导入</button>
+      </div>
     </div>
   )
 }
