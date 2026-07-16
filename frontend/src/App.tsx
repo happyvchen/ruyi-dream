@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { Dispatch, DragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode, SetStateAction, UIEvent } from 'react'
+import type { CSSProperties, Dispatch, DragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode, SetStateAction, UIEvent } from 'react'
 import {
   Bot,
   Check,
@@ -100,6 +100,7 @@ const BATCH_NAME_MAX_CHARS = 80
 const GARMENT_AUTO_CARD_WIDTH = 292
 const GARMENT_AUTO_CARD_HEIGHT = 172
 const GARMENT_AUTO_GRID_GAP = 12
+const BULK_SEARCH_THRESHOLD = 5
 
 function splitSearchTerms(value: string) {
   const seen = new Set<string>()
@@ -2228,7 +2229,6 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
   const categoryFilterCount = primaryCategoryFilter.length + secondaryCategoryFilter.length
   const hasActiveFilters = Boolean(query.trim() || statusFilter || categoryFilterCount || uploadedFrom || uploadedTo || includeArchived || sortBy !== 'createdAt' || sortDir !== 'desc')
   const stableCategoryTree = stableFacets.categoryTree ?? facets.categoryTree ?? []
-  const searchTermCount = splitSearchTerms(query).length
 
   return (
     <section className="page workbench-page library-page">
@@ -2257,11 +2257,13 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
         ) : (
         <div className="panel library-panel">
           <div className="library-commandbar">
-            <div className={`search ${showSearchBusy ? 'is-searching' : ''}`}>
-              <Search size={16} />
-              <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索货号 / 标签，支持粘贴多个" />
-              {showSearchBusy ? <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span> : searchTermCount > 1 ? <span className="search-hint is-muted">{searchTermCount} 词</span> : null}
-            </div>
+            <SearchBox
+              value={query}
+              onChange={setQuery}
+              placeholder="搜索货号 / 标签，支持粘贴多个"
+              panelPlaceholder="每行一个货号，或用空格、逗号、句号、顿号分隔"
+              busy={showSearchBusy}
+            />
             <div className="library-filter-pills">
               <CategoryTreeFilter
                 open={openFilter === 'category'}
@@ -4269,7 +4271,6 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
       ? generationBatchStatusOptions(facets.status, stableFacets.status, statusFilter)
       : generationWorkspaceStatusOptions(facets.status, stableFacets.status, statusFilter)
   const formatRecordStatus = (value: string) => viewMode === 'tasks' ? statusText(value) : recordStatusText(value)
-  const searchTermCount = splitSearchTerms(query).length
 
   return (
     <section className="page workbench-page records-page">
@@ -4301,11 +4302,13 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
                 >{label}</button>
               ))}
             </div>
-            <div className={`search ${loading ? 'is-searching' : ''}`}>
-              <Search size={16} />
-              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索任务名 / 货号 / 批次，支持粘贴多个" />
-              {loading ? <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span> : searchTermCount > 1 ? <span className="search-hint is-muted">{searchTermCount} 词</span> : null}
-            </div>
+            <SearchBox
+              value={query}
+              onChange={setQuery}
+              placeholder="搜索任务名 / 货号 / 批次，支持粘贴多个"
+              panelPlaceholder="每行一个任务名、货号或批次，也可用空格、逗号、句号、顿号分隔"
+              busy={loading}
+            />
             <div className="record-filter-pills">
               <DateRangeFilter
                 open={openFilter === 'date'}
@@ -6072,6 +6075,159 @@ function Meta({ label, value }: { label: string; value: ReactNode }) {
 
 function EmptyState({ title, text }: { title: string; text: string }) {
   return <div className="empty"><Clock3 size={22} /><strong>{title}</strong><span>{text}</span></div>
+}
+
+function SearchBox({
+  value,
+  onChange,
+  placeholder,
+  panelPlaceholder,
+  busy,
+}: {
+  value: string
+  onChange: (value: string) => void
+  placeholder: string
+  panelPlaceholder: string
+  busy?: boolean
+}) {
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const panelRef = useRef<HTMLDivElement | null>(null)
+  const [open, setOpen] = useState(false)
+  const [draft, setDraft] = useState(value)
+  const [panelStyle, setPanelStyle] = useState<CSSProperties>({})
+  const terms = splitSearchTerms(value)
+  const draftTerms = splitSearchTerms(draft)
+  const isBulk = terms.length >= BULK_SEARCH_THRESHOLD
+
+  useEffect(() => {
+    if (open) setDraft(value)
+  }, [open, value])
+
+  useEffect(() => {
+    if (!open) return
+    const updatePanelPosition = () => {
+      const rect = rootRef.current?.getBoundingClientRect()
+      if (!rect) return
+      const viewportSafeWidth = Math.max(160, window.innerWidth - 24)
+      const width = Math.min(560, viewportSafeWidth, Math.max(Math.min(420, viewportSafeWidth), rect.width))
+      const left = Math.min(Math.max(12, rect.left), window.innerWidth - width - 12)
+      const availableBelow = window.innerHeight - rect.bottom - 20
+      const availableAbove = rect.top - 20
+      const placeAbove = availableBelow < 320 && availableAbove > availableBelow
+      const maxHeight = Math.max(260, Math.min(420, (placeAbove ? availableAbove : availableBelow) - 8))
+      const top = placeAbove
+        ? Math.max(12, rect.top - maxHeight - 8)
+        : Math.min(rect.bottom + 8, window.innerHeight - maxHeight - 12)
+      setPanelStyle({ left, top, width, maxHeight })
+    }
+    updatePanelPosition()
+    window.addEventListener('resize', updatePanelPosition)
+    window.addEventListener('scroll', updatePanelPosition, true)
+    return () => {
+      window.removeEventListener('resize', updatePanelPosition)
+      window.removeEventListener('scroll', updatePanelPosition, true)
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const handlePointer = (event: MouseEvent) => {
+      const target = event.target as Node
+      if (rootRef.current?.contains(target) || panelRef.current?.contains(target)) return
+      setOpen(false)
+    }
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', handlePointer)
+    document.addEventListener('keydown', handleKey)
+    return () => {
+      document.removeEventListener('mousedown', handlePointer)
+      document.removeEventListener('keydown', handleKey)
+    }
+  }, [open])
+
+  function applyDraft() {
+    onChange(draft)
+    setOpen(false)
+  }
+
+  function clearSearch() {
+    setDraft('')
+    onChange('')
+    setOpen(false)
+  }
+
+  const previewTerms = (isBulk ? terms : draftTerms).slice(0, 3)
+
+  return (
+    <div ref={rootRef} className={`search ${busy ? 'is-searching' : ''} ${open ? 'is-open' : ''} ${isBulk ? 'has-summary' : ''}`}>
+      <Search size={16} />
+      {isBulk ? (
+        <button className="search-summary" type="button" onClick={() => setOpen(true)} title="编辑批量搜索" aria-haspopup="dialog" aria-expanded={open}>
+          <span>批量搜索：{terms.length} 个关键词</span>
+          <small>{previewTerms.join(' / ')}{terms.length > previewTerms.length ? ` / +${terms.length - previewTerms.length}` : ''}</small>
+        </button>
+      ) : (
+        <input
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              setOpen(true)
+            }
+          }}
+          placeholder={placeholder}
+        />
+      )}
+      {busy ? (
+        <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span>
+      ) : isBulk ? null : terms.length > 1 ? (
+        <button className="search-hint is-muted as-button" type="button" onClick={() => setOpen(true)} aria-haspopup="dialog" aria-expanded={open}>{terms.length} 词</button>
+      ) : (
+        <button className="search-bulk-button" type="button" onClick={() => setOpen(true)} aria-haspopup="dialog" aria-expanded={open}>批量</button>
+      )}
+      {value.trim() && (
+        <button className="search-clear" type="button" onClick={clearSearch} title="清空搜索" aria-label="清空搜索">
+          <X size={14} />
+        </button>
+      )}
+      {open && createPortal(
+        <div ref={panelRef} className="search-popover" style={panelStyle} role="dialog" aria-modal="false" aria-label="批量搜索">
+          <div className="search-popover-head">
+            <strong>批量搜索</strong>
+            <span>换行粘贴多个货号或关键词</span>
+          </div>
+          <textarea
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') setOpen(false)
+              if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') applyDraft()
+            }}
+            placeholder={panelPlaceholder}
+            autoFocus
+          />
+          <div className="search-popover-meta">
+            <span>已识别 {draftTerms.length} 个关键词</span>
+            {draftTerms.length > 0 && (
+              <div className="search-term-preview">
+                {draftTerms.slice(0, 6).map((term) => <b key={term}>{term}</b>)}
+                {draftTerms.length > 6 && <b>+{draftTerms.length - 6}</b>}
+              </div>
+            )}
+          </div>
+          <div className="search-popover-actions">
+            <button className="management-action compact-control" type="button" onClick={() => setOpen(false)}>取消</button>
+            <button className="management-action compact-control" type="button" onClick={clearSearch}>清空</button>
+            <button className="task-action compact-control" type="button" onClick={applyDraft}>应用搜索</button>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </div>
+  )
 }
 
 function getTaskStep(task: GenerationTask | null): StudioStep {
