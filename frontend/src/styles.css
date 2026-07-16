@@ -1989,7 +1989,7 @@ a.button-link { text-decoration: none; cursor: pointer; }
 .garment-card {
   display: grid;
   grid-template-columns: 116px minmax(0, 1fr);
-  grid-template-rows: auto minmax(32px, 1fr) auto 32px;
+  grid-template-rows: auto auto minmax(30px, 1fr) auto auto;
   gap: 8px;
   min-height: 172px;
   padding: 10px;
@@ -2067,6 +2067,13 @@ a.button-link { text-decoration: none; cursor: pointer; }
   line-height: 1.42;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+.garment-card .inline-error {
+  display: block;
+  color: #be123c;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
 }
 .tag-summary {
   display: flex;
@@ -2749,18 +2756,21 @@ a.button-link { text-decoration: none; cursor: pointer; }
   accent-color: #0f7cff;
 }
 .card-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
   margin-top: 0;
 }
 .card-actions .management-action {
   min-width: 0;
-  flex: 1;
   height: 32px;
   padding: 0 8px;
   font-size: 12px;
+  justify-content: center;
+  white-space: nowrap;
+}
+.garment-card.is-failed .card-actions .management-action:nth-child(3) {
+  grid-column: 1 / -1;
 }
 .drawer-backdrop {
   position: fixed;

@@ -145,7 +145,7 @@ status = TAGGING_FAILED
 tag_error = 错误原因
 ```
 
-JSON 可解析但 `selected_files` 或 `ai_tags` 不符合契约时同样进入 `TAGGING_FAILED`，不启用本地默认挑图或 fallback 标签。
+JSON 可解析但 `selected_files` 或 `ai_tags` 不符合契约时同样进入 `TAGGING_FAILED`，不启用本地默认挑图或 fallback 标签。其中 `selected_files` 为空表示模型已识别但未找到符合上传要求、可作为纯服装参考图入库的图片；业务界面应呈现为 `未通过上传要求`，而不是把 Gemini、`selected_files` 或内部契约错误直接展示给业务用户。
 
 JSON 可解析但存在系统可识别风险时：
 
@@ -234,6 +234,15 @@ ai_tags_json 原始返回
 - 不重新调用 Gemini。
 - 后端重新合成 `effective_tags_json`。
 - 后续智能选搭读取新的 `ai_tags_json` 标签事实卡片。
+
+## 9.1 前台失败呈现
+
+搭配服装库的列表卡片和详情基础信息只展示业务可读失败原因和下一步动作：
+
+- `selected_files` 为空或无合格纯服装参考图：展示 `未通过上传要求`，提示更换清晰、同一件服装、以商品为主体的图片后重新识别。
+- 其它识别调用或返回处理异常：展示 `识别失败，请尝试重新识别或联系开发人员`。
+
+底层模型名称、`selected_files`、错误码、provider 原始返回、请求/响应快照和失败 attempt 只进入 admin 技术详情或日志。历史失败 attempt 不改变当前成功入库服装的 `READY` 展示状态。
 
 ## 10. 选搭标签事实卡
 

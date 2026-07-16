@@ -3110,7 +3110,7 @@ function BatchImportPanel({
         return
       }
       if (seen.has(code)) {
-        blocked.push({ ...batch, code, error: '本批次代码重复，已跳过' })
+        blocked.push({ ...batch, code, error: '本批次货号重复，已跳过' })
         return
       }
       seen.add(code)
@@ -3182,7 +3182,7 @@ function BatchImportPanel({
       } catch (err) {
         const message = err instanceof Error ? err.message : '导入失败'
         skipped += 1
-        addSkippedBatch(batch, message === '搭配服装代码已存在' ? '代码已存在，已跳过' : message)
+        addSkippedBatch(batch, ['搭配服装代码已存在', '搭配服装货号已存在'].includes(message) ? '货号已存在，已跳过' : message)
         updateJob(jobId, (job) => ({
           ...job,
           skipped,
@@ -3237,7 +3237,7 @@ function BatchImportPanel({
       <div className="import-head">
         <div>
           <h3>导入搭配服装</h3>
-          <p>{`散图会合并为一套；单货号文件夹是一套；上级文件夹会递归识别最底层图片目录。最多 ${STYLING_GARMENT_MAX_IMAGES} 张进入候选池，AI 打标后只保留挑选排序好的 ${STYLING_GARMENT_SELECTED_IMAGES} 张纯服装参考图。`}</p>
+          <p>{`散图会合并为一套；单货号文件夹是一套；上级文件夹会递归识别最底层图片目录。最多 ${STYLING_GARMENT_MAX_IMAGES} 张进入候选池，AI 识别后只保留挑选排序好的 ${STYLING_GARMENT_SELECTED_IMAGES} 张纯服装参考图。`}</p>
         </div>
       </div>
       <div className="import-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
@@ -5010,8 +5010,9 @@ function GarmentCard({ item, onTag, onOpen, onDelete, onRestore, selected, onSel
   const chips = garmentTagChips(item)
   const runningTagAttempt = latestRunningTagAttempt(item)
   const failedTagAttempt = failed ? latestFailedTagAttempt(item) : null
+  const taggingIssue = failed ? garmentTaggingIssue(item, failedTagAttempt) : null
   return (
-    <div className={`garment-card ${tagging ? 'is-tagging' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
+    <div className={`garment-card ${tagging ? 'is-tagging' : ''} ${failed ? 'is-failed' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
       {onSelect && (
         <label className="card-select" title="选择">
           <input type="checkbox" checked={!!selected} disabled={tagging} onChange={(event) => onSelect(event.target.checked)} />
@@ -5022,18 +5023,18 @@ function GarmentCard({ item, onTag, onOpen, onDelete, onRestore, selected, onSel
         {tagging && <span className="cover-badge">识别中</span>}
         {item.archivedAt && <span className="cover-badge">已归档</span>}
       </div>
-      <div className="garment-card-head"><strong title={item.code}>{item.code}</strong><span className={`status ${item.status.toLowerCase()}`}>{garmentStatus(item.status)}</span></div>
-      {failed && (item.tagError || failedTagAttempt) && <span className="inline-error">{friendlyErrorText(failedTagAttempt?.errorCode, failedTagAttempt?.errorMessage ?? item.tagError)}</span>}
-      <p>{tagging ? '正在识别服装信息，完成后可进入智能选搭。' : failed ? '打标未完成，可查看详情或重新打标。' : brief || '待识别搭配信息'}</p>
+      <div className="garment-card-head"><strong title={item.code}>{item.code}</strong><span className={`status ${item.status.toLowerCase()}`}>{taggingIssue?.badge ?? garmentStatus(item.status)}</span></div>
+      {taggingIssue && <span className="inline-error">{taggingIssue.title}</span>}
+      <p>{tagging ? '正在识别服装信息，完成后可进入智能选搭。' : taggingIssue ? taggingIssue.description : brief || '待识别搭配信息'}</p>
       {tagging && runningTagAttempt && <AIOperationList operations={[runningTagAttempt]} compact />}
       <div className="tag-summary">
         {showTagResult && chips.map((chip) => <span key={chip}>{chip}</span>)}
-        {(!showTagResult || !chips.length) && <span>{tagging ? '识别中' : failed ? '待重新打标' : '待识别'}</span>}
+        {(!showTagResult || !chips.length) && <span>{tagging ? '识别中' : failed ? '待重新识别' : '待识别'}</span>}
       </div>
       <div className="card-actions">
         {onOpen && <button className="management-action" onClick={onOpen}><Eye size={16} /> 详情</button>}
-        {onTag && <button className="management-action" disabled={tagging} onClick={onTag}>重新识别标签</button>}
         {item.archivedAt ? onRestore && <button className="management-action" disabled={tagging} onClick={onRestore}><RefreshCw size={16} /> 恢复归档</button> : onDelete && <button className="management-action" disabled={tagging} onClick={onDelete}><Trash2 size={16} /> 归档</button>}
+        {onTag && <button className="management-action" disabled={tagging} onClick={onTag}><RotateCcw size={16} /> 识别标签</button>}
       </div>
     </div>
   )
@@ -5058,7 +5059,8 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
   const tagging = item.status === 'TAGGING_RUNNING'
   const runningTagAttempt = latestRunningTagAttempt(item)
   const failedTagAttempt = latestFailedTagAttempt(item)
-  const hasTaggingFailure = item.status === 'TAGGING_FAILED' || Boolean(item.tagError || failedTagAttempt)
+  const hasCurrentTaggingFailure = item.status === 'TAGGING_FAILED' || Boolean(item.tagError)
+  const taggingIssue = hasCurrentTaggingFailure ? garmentTaggingIssue(item, failedTagAttempt) : null
   const selectableText = item.status === 'READY' && !item.archivedAt ? '可进入智能选搭' : '不进入智能选搭'
 
   useEffect(() => {
@@ -5105,8 +5107,8 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
   }
 
   function retag() {
-    if (dirty && !window.confirm('当前有未保存的图片修改，本次重新打标将基于已保存的图片。是否继续？')) return
-    void run('重新打标中...', () => api.tagStylingGarment(item.id), (result: { item: StylingGarment }) => onChange(result.item), { refresh: 'background' })
+    if (dirty && !window.confirm('当前有未保存的图片修改，本次重新识别将基于已保存的图片。是否继续？')) return
+    void run('重新识别中...', () => api.tagStylingGarment(item.id), (result: { item: StylingGarment }) => onChange(result.item), { refresh: 'background' })
   }
 
   return (
@@ -5115,7 +5117,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
         <div className="drawer-head">
           <div>
             <h2>{item.code}</h2>
-            <span className={`status ${item.status.toLowerCase()}`}>{garmentStatus(item.status)}</span>
+            <span className={`status ${item.status.toLowerCase()}`}>{taggingIssue?.badge ?? garmentStatus(item.status)}</span>
           </div>
           <button className="management-action icon-button" onClick={onClose} title="关闭"><X size={16} /></button>
         </div>
@@ -5123,12 +5125,12 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
           <div className="section-head"><strong>基础信息</strong></div>
           <Meta label="上传时间" value={dateText(item.createdAt)} />
           <Meta label="更新时间" value={dateText(item.updatedAt)} />
-          <Meta label="打标时间" value={dateText(item.tagCompletedAt)} />
+          <Meta label="识别时间" value={dateText(item.tagCompletedAt)} />
           <Meta label="选搭状态" value={selectableText} />
           <Meta label="图片" value={`${working.length}/${STYLING_GARMENT_MAX_IMAGES} 张`} />
-          {hasTaggingFailure && (
+          {taggingIssue && (
             <TagObjectPanel
-              title="识别错误"
+              title={taggingIssue.panelTitle}
               data={taggingErrorDisplay(item, failedTagAttempt)}
               defaultOpen
             />
@@ -5194,7 +5196,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
         </div>
         <div className="drawer-section">
           <div className="section-head"><strong>AI 识别标签</strong></div>
-          <TagObjectPanel title={hasTaggingFailure ? '上次 AI 打标返回' : 'AI 识别标签'} data={item.aiTags ?? {}} defaultOpen />
+          <TagObjectPanel title={hasCurrentTaggingFailure ? '上次识别返回' : 'AI 识别标签'} data={item.aiTags ?? {}} defaultOpen />
           <TagObjectPanel title="生效标签" data={item.effectiveTags ?? {}} />
         </div>
         <div className="drawer-section">
@@ -5205,15 +5207,17 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
           <div className="section-head"><strong>官方标题信息</strong></div>
           <TagObjectPanel title="官方标题信息" data={item.officialTitleTags ?? {}} defaultOpen={Boolean(Object.keys(item.officialTitleTags ?? {}).length)} />
         </div>
-        <div className="drawer-section">
-          <div className="section-head"><strong>技术详情</strong></div>
-          <TagObjectPanel title="标签元信息" data={item.tagMeta ?? {}} />
-          {isAdmin && (item.tagAttempts ?? []).length > 0 && (
-            <JsonOutputPanel title="Gemini 调用过程事实" data={item.tagAttempts} />
-          )}
-        </div>
+        {isAdmin && (
+          <div className="drawer-section">
+            <div className="section-head"><strong>技术详情</strong></div>
+            <TagObjectPanel title="标签元信息" data={item.tagMeta ?? {}} />
+            {(item.tagAttempts ?? []).length > 0 && (
+              <JsonOutputPanel title="Gemini 调用过程事实" data={item.tagAttempts} />
+            )}
+          </div>
+        )}
         <div className="drawer-actions">
-          <button className="management-action" disabled={tagging} onClick={retag}>重新打标</button>
+          <button className="management-action" disabled={tagging} onClick={retag}>重新识别</button>
           <button className="management-action" disabled={tagging || !dirty || !working.length} onClick={() => void save(false)}>仅保存</button>
           <button className="management-action" disabled={tagging || !dirty || !working.length} onClick={() => void save(true)}>保存并重新识别标签</button>
         </div>
@@ -5335,13 +5339,55 @@ function latestFailedTagAttempt(item: StylingGarment) {
   return (item.tagAttempts ?? []).find((entry) => entry.status === 'FAILED') ?? null
 }
 
-function taggingErrorDisplay(item: StylingGarment, attempt: NonNullable<StylingGarment['tagAttempts']>[number] | null): Record<string, unknown> {
-  const data: Record<string, unknown> = {
-    当前状态: garmentStatus(item.status),
+type GarmentTaggingIssue = {
+  badge: string
+  panelTitle: string
+  title: string
+  description: string
+  action: string
+}
+
+function rawTaggingErrorText(item: StylingGarment, attempt: NonNullable<StylingGarment['tagAttempts']>[number] | null) {
+  return [item.tagError, attempt?.errorMessage, attempt?.errorCode].filter(Boolean).join(' ')
+}
+
+function isUploadRequirementMiss(item: StylingGarment, attempt: NonNullable<StylingGarment['tagAttempts']>[number] | null) {
+  const text = rawTaggingErrorText(item, attempt).toLowerCase()
+  return text.includes('selected_files') && (
+    text.includes('非空') ||
+    text.includes('empty') ||
+    text.includes('no selected') ||
+    text.includes('至少') ||
+    text.includes('must not be empty')
+  )
+}
+
+function garmentTaggingIssue(item: StylingGarment, attempt: NonNullable<StylingGarment['tagAttempts']>[number] | null): GarmentTaggingIssue {
+  if (isUploadRequirementMiss(item, attempt)) {
+    return {
+      badge: '未通过上传要求',
+      panelTitle: '上传要求检查',
+      title: '未识别到符合上传要求的服装图',
+      description: '这组图片已完成识别，但没有适合作为搭配服装入库的纯服装参考图。',
+      action: '请更换为清晰、同一件服装、以商品为主体的图片后重新识别。',
+    }
   }
-  if (item.tagError || attempt?.errorMessage) data.错误信息 = item.tagError || attempt?.errorMessage
-  if (attempt?.errorCode) data.错误码 = attempt.errorCode
-  if (attempt?.provider) data.服务 = attempt.provider
+  return {
+    badge: '识别失败',
+    panelTitle: '识别状态',
+    title: '识别失败，请尝试重新识别或联系开发人员',
+    description: '识别未完成，可尝试重新识别；多次失败请联系开发人员处理。',
+    action: '可点击“识别标签”重试，或联系开发人员查看技术详情。',
+  }
+}
+
+function taggingErrorDisplay(item: StylingGarment, attempt: NonNullable<StylingGarment['tagAttempts']>[number] | null): Record<string, unknown> {
+  const issue = garmentTaggingIssue(item, attempt)
+  const data: Record<string, unknown> = {
+    当前状态: issue.badge,
+    说明: issue.description,
+    建议操作: issue.action,
+  }
   if (attempt?.startedAt) data.开始时间 = dateText(attempt.startedAt)
   if (attempt?.failedAt) data.失败时间 = dateText(attempt.failedAt)
   return data

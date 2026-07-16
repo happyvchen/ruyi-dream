@@ -1102,7 +1102,7 @@ def get_styling_garment(garment_id: int, request: Request) -> dict[str, Any]:
 
 def ensure_styling_garment_not_tagging(row: Any) -> None:
     if row["status"] == "TAGGING_RUNNING":
-        raise HTTPException(status_code=409, detail="正在打标，完成后才能修改或删除搭配服装")
+        raise HTTPException(status_code=409, detail="正在识别，完成后才能修改或删除搭配服装")
 
 
 def expire_stale_styling_garment_tagging() -> None:
@@ -1126,7 +1126,7 @@ def expire_stale_styling_garment_tagging() -> None:
             return
         ids = [int(row["id"]) for row in rows]
         placeholders = ",".join("?" for _ in ids)
-        message = "打标任务长时间未完成，已自动停止轮询，可手动重新打标。"
+        message = "识别任务长时间未完成，已自动停止轮询，可手动重新识别。"
         db.execute(
             f"""
             UPDATE styling_garments
@@ -1156,14 +1156,14 @@ async def create_styling_garment(
 ) -> dict[str, Any]:
     clean_code = sanitize_name(code)
     if not clean_code:
-        raise HTTPException(status_code=400, detail="搭配服装代码不能为空")
+        raise HTTPException(status_code=400, detail="搭配服装货号不能为空")
     if not files:
         raise HTTPException(status_code=400, detail="至少上传一张图片")
     files = files[:MAX_GARMENT_IMAGE_INPUTS]
     with get_db() as db:
         duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
         if duplicate:
-            raise HTTPException(status_code=409, detail="搭配服装代码已存在")
+            raise HTTPException(status_code=409, detail="搭配服装货号已存在")
     timestamp = now_iso()
     prefix = join_key("styling-garments", f"{clean_code}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}")
     assets = await save_uploads_as_media_assets(files, prefix)
@@ -1171,7 +1171,7 @@ async def create_styling_garment(
         duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
         if duplicate:
             cleanup_objects([key for asset in assets for key in image_object_keys(asset["objectKey"])])
-            raise HTTPException(status_code=409, detail="搭配服装代码已存在")
+            raise HTTPException(status_code=409, detail="搭配服装货号已存在")
         cursor = db.execute(
             """
             INSERT INTO styling_garments (code, status, manual_tags_json, ai_tags_json, tag_schema_version, created_at, updated_at)
@@ -1200,7 +1200,7 @@ def update_styling_garment(garment_id: int, payload: StylingGarmentUpdateRequest
     if payload.code is not None:
         clean_code = sanitize_name(payload.code)
         if not clean_code:
-            raise HTTPException(status_code=400, detail="搭配服装代码不能为空")
+            raise HTTPException(status_code=400, detail="搭配服装货号不能为空")
         updates["code"] = clean_code
     if manual_patch is None and not updates:
         return {"item": get_styling_garment_by_id(garment_id)}
@@ -1215,7 +1215,7 @@ def update_styling_garment(garment_id: int, payload: StylingGarmentUpdateRequest
                 (updates["code"], garment_id),
             ).fetchone()
             if duplicate:
-                raise HTTPException(status_code=409, detail="搭配服装代码已存在")
+                raise HTTPException(status_code=409, detail="搭配服装货号已存在")
         if manual_patch is not None:
             current_manual = loads(row["manual_tags_json"], {})
             updates["manual_tags_json"] = dumps(normalize_manual_business_tags({**current_manual, **manual_patch}))
@@ -5243,7 +5243,7 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
     prompt = build_prompt_tagging_prompt(garment)
     request_snapshot = build_prompt_tagging_request_snapshot(garment, prompt)
     if not is_gemini_configured():
-        message = f"{gemini_not_configured_message()}AI 打标不能生成替代标签。"
+        message = f"{gemini_not_configured_message()}AI 识别不能生成替代标签。"
         attempt_id = create_attempt("styling_garment_tagging", garment_id, "gemini", request_snapshot)
         finish_attempt(attempt_id, "FAILED", {"error": "gemini_not_configured"}, error_message=message)
         raise RuntimeError(message)
