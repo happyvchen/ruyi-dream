@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, Dispatch, DragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode, SetStateAction, UIEvent } from 'react'
 import {
@@ -4959,7 +4959,24 @@ function normalizePageSizeOptions(options: readonly PageSizeOption[], unit: stri
 }
 
 function PageTitle({ title, subtitle, actions }: { title: string; subtitle?: string; actions?: ReactNode }) {
-  return <div className="page-title"><div><h1>{title}</h1>{subtitle && <p>{subtitle}</p>}</div>{actions}</div>
+  const tooltipId = useId()
+  return (
+    <div className="page-title">
+      <div className="page-title-copy">
+        <div className="page-title-heading">
+          <h1
+            className={subtitle ? 'has-page-title-tooltip' : undefined}
+            tabIndex={subtitle ? 0 : undefined}
+            aria-describedby={subtitle ? tooltipId : undefined}
+          >
+            {title}
+          </h1>
+          {subtitle && <span id={tooltipId} className="page-title-tooltip" role="tooltip">{subtitle}</span>}
+        </div>
+      </div>
+      {actions}
+    </div>
+  )
 }
 
 function UploadBox({ files, setFiles, max, compact = false }: { files: File[]; setFiles: (files: File[]) => void; max: number; compact?: boolean }) {

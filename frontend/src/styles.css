@@ -200,13 +200,86 @@ h1, h2, h3, p { margin: 0; }
 .workspace:has(.studio-page) { overflow: hidden; }
 .page-title {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
-  min-height: 42px;
+  min-height: 34px;
   gap: 18px;
 }
-.page-title h1 { font-size: 30px; line-height: 1.12; letter-spacing: 0; color: var(--text); }
-.page-title p { margin-top: 8px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.page-title-copy { min-width: 0; }
+.page-title-heading {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+}
+.page-title h1 {
+  max-width: 100%;
+  font-size: 30px;
+  line-height: 1.12;
+  letter-spacing: 0;
+  color: var(--text);
+  outline: none;
+}
+.page-title h1.has-page-title-tooltip {
+  cursor: help;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 6px;
+  text-decoration-color: rgba(100, 116, 139, .45);
+}
+.page-title h1.has-page-title-tooltip:focus-visible {
+  border-radius: 6px;
+  box-shadow: 0 0 0 3px rgba(14, 165, 233, .18);
+}
+@media (forced-colors: active) {
+  .page-title h1 {
+    outline: revert;
+  }
+  .page-title h1.has-page-title-tooltip {
+    text-decoration-color: LinkText;
+  }
+  .page-title h1.has-page-title-tooltip:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 4px;
+    box-shadow: none;
+  }
+}
+.page-title-tooltip {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 10px);
+  z-index: 50;
+  width: max-content;
+  max-width: min(520px, calc(100vw - 260px));
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #f8fafc;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, .18);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity .16s ease, transform .16s ease;
+}
+.page-title-tooltip::before {
+  content: "";
+  position: absolute;
+  left: 18px;
+  top: -5px;
+  width: 10px;
+  height: 10px;
+  background: #0f172a;
+  transform: rotate(45deg);
+}
+.page-title-heading:hover .page-title-tooltip,
+.page-title-heading:focus-within .page-title-tooltip {
+  opacity: 1;
+  transform: translateY(0);
+}
 .studio-title-actions {
   display: flex;
   align-items: center;
@@ -3979,6 +4052,9 @@ a.button-link { text-decoration: none; cursor: pointer; }
   .page-title {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .page-title-tooltip {
+    max-width: calc(100vw - 32px);
   }
   .studio-title-actions {
     width: 100%;
