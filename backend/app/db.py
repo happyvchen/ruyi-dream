@@ -175,6 +175,13 @@ def init_db() -> None:
               deleted_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS generation_batches (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS generation_task_input_versions (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,

@@ -94,6 +94,7 @@ const HERO_PRODUCT_MAX_IMAGES = 15
 const STYLING_GARMENT_SELECTED_IMAGES = 6
 const HERO_PRODUCT_SELECTED_IMAGES = 8
 const PRODUCT_CODE_MAX_CHARS = 20
+const BATCH_NAME_MAX_CHARS = 80
 const GARMENT_AUTO_CARD_WIDTH = 292
 const GARMENT_AUTO_CARD_HEIGHT = 172
 const GARMENT_AUTO_GRID_GAP = 12
@@ -980,6 +981,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
   const [userRequirement, setUserRequirement] = useState('')
   const [singleIssues, setSingleIssues] = useState<ImportIssue[]>([])
   const [batchGroups, setBatchGroups] = useState<PendingBatchGroup[]>([])
+  const [batchName, setBatchName] = useState('')
   const [batchCreating, setBatchCreating] = useState<{ current: number; total: number } | null>(null)
   const [batchError, setBatchError] = useState('')
   const [existingTaskNames, setExistingTaskNames] = useState<Set<string> | null>(null)
@@ -1022,6 +1024,14 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
     }))
   }
 
+  function inferredBatchName(nextFiles: File[]) {
+    const folderNames = nextFiles
+      .map((file) => importPath(file).split('/').filter(Boolean)[0])
+      .filter(Boolean)
+    const uniqueNames = Array.from(new Set(folderNames))
+    return uniqueNames.length === 1 ? uniqueNames[0].slice(0, BATCH_NAME_MAX_CHARS) : timestampName()
+  }
+
   function addHeroFiles(nextFiles: File[]) {
     const imageFiles = nextFiles
       .filter(isSupportedImageFile)
@@ -1061,9 +1071,11 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
       setSingleIssues([])
       batchIdRef.current = ''
       firstCreatedTaskRef.current = null
+      if (!batchGroups.length) setBatchName(inferredBatchName(nextFiles))
       return
     }
     setBatchGroups([])
+    setBatchName('')
     setBatchError('')
     const group = groups[0]
     if (group && folderFiles.length) {
@@ -1107,6 +1119,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
     setBatchGroups([...blocked, ...ready])
     setBatchError(blocked.length ? '标红项不会创建，处理后可再次提交' : '')
     if (!batchIdRef.current) batchIdRef.current = `b-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    const effectiveBatchName = batchName.trim().slice(0, BATCH_NAME_MAX_CHARS) || timestampName()
     const created: GenerationTask[] = []
     let lastError = ''
     let failedCount = 0
@@ -1115,7 +1128,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
       setBatchCreating({ current: index + 1, total: ready.length })
       try {
         const uploadFiles = formalAssetFiles(group.files, HERO_PRODUCT_MAX_IMAGES)
-        const result = await api.createTask(group.name, uploadFiles, batchIdRef.current, group.userRequirement ?? '')
+        const result = await api.createTask(group.name, uploadFiles, batchIdRef.current, group.userRequirement ?? '', effectiveBatchName)
         created.push(result.item)
         if (!firstCreatedTaskRef.current) firstCreatedTaskRef.current = result.item
         setBatchGroups((current) => current.filter((item) => item.id !== group.id))
@@ -1184,6 +1197,21 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
                     <strong className="batch-detect-title">待创建 {batchGroups.length} 个拍摄任务</strong>
                     <span className="count-pill">{batchGroups.reduce((sum, group) => sum + group.files.length, 0)} 张图</span>
                   </div>
+                  <div className="batch-card-form">
+                    <div className="batch-icon"><Layers3 size={18} /></div>
+                    <label className="batch-field batch-info-field">
+                      <span>批次名</span>
+                      <input
+                        value={batchName}
+                        maxLength={BATCH_NAME_MAX_CHARS}
+                        onChange={(event) => setBatchName(event.target.value.slice(0, BATCH_NAME_MAX_CHARS))}
+                        placeholder="本批拍摄任务名称"
+                        aria-label="批次名"
+                        disabled={!!batchCreating}
+                      />
+                    </label>
+                    <span className="batch-form-spacer" />
+                  </div>
                   <div className="batch-note">
                     <span>顶部选择的散图或文件夹会新增为待创建任务；补充当前货号图片请使用卡片内的新增图片。创建后可从顶部批次条一键批量成片。</span>
                   </div>
@@ -1242,7 +1270,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
                       <button className="management-action" onClick={() => void createBatchTasks()}>
                         <ImagePlus size={16} /> 批量创建 {batchGroups.length} 个任务
                       </button>
-                      <button className="management-action" onClick={() => setBatchGroups([])}>取消</button>
+                      <button className="management-action" onClick={() => { setBatchGroups([]); setBatchName('') }}>取消</button>
                     </div>
                   )}
                 </div>
@@ -3916,6 +3944,19 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
     refreshActiveBatchDetail(targets)
   }
 
+  function renameBatchRecord(batchId: string, name: string) {
+    const cleanName = name.trim().slice(0, BATCH_NAME_MAX_CHARS)
+    if (!cleanName) return Promise.resolve(undefined)
+    return run('保存批次名中...', () => api.updateBatch(batchId, cleanName), (result: { item: GenerationRecordBatch }) => {
+      const nextBatch = result.item
+      setBatchDetail((current) => current?.batchId === batchId ? { ...nextBatch, coverTasks: current.coverTasks } : current)
+      setBatchRecords((current) => current.map((item) => item.batchId === batchId ? nextBatch : item))
+      setWorkspaceItems((current) => current.map((entry) => entry.kind === 'batch' && entry.batch.batchId === batchId
+        ? { ...entry, name: nextBatch.name, updatedAt: nextBatch.updatedAt, batch: nextBatch }
+        : entry))
+    }, { refresh: 'background' })
+  }
+
   function toggleRecordSelection(id: number, checked: boolean) {
     setSelectedRecordIds((current) => {
       const next = new Set(current)
@@ -4315,7 +4356,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
         </div>
         <div className="panel record-detail">
           {batchDetail ? (
-            <BatchRecordDetail item={batchDetail} tasks={batchDetailTasks} loading={batchDetailLoading} downloadChecking={downloadChecking} onDownload={startBatchDetailDownload} />
+            <BatchRecordDetail item={batchDetail} tasks={batchDetailTasks} loading={batchDetailLoading} downloadChecking={downloadChecking} onDownload={startBatchDetailDownload} onRename={renameBatchRecord} />
           ) : detail ? (
             <>
               <h3>{detail.name}</h3>
@@ -4476,19 +4517,32 @@ function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, 
   )
 }
 
-function BatchRecordDetail({ item, tasks, loading, downloadChecking, onDownload }: {
+function BatchRecordDetail({ item, tasks, loading, downloadChecking, onDownload, onRename }: {
   item: GenerationRecordBatch
   tasks: GenerationTask[]
   loading: boolean
   downloadChecking: boolean
   onDownload: (ids: number[]) => void
+  onRename: (batchId: string, name: string) => Promise<unknown>
 }) {
+  const [draftName, setDraftName] = useState(item.name)
+  useEffect(() => setDraftName(item.name), [item.batchId, item.name])
   const downloadableIds = tasks.filter((task) => ['COMPLETED', 'FINAL_PARTIAL'].includes(task.status)).map((task) => task.id)
+  const cleanDraftName = draftName.trim().slice(0, BATCH_NAME_MAX_CHARS)
+  const canSaveName = !!cleanDraftName && cleanDraftName !== item.name
   return (
     <>
       <div className="batch-detail-head">
         <span className="status-badge">{recordStatusText(item.status)}</span>
-        <h3>{item.name}</h3>
+        <label className="batch-field batch-info-field">
+          <span>批次名</span>
+          <input
+            value={draftName}
+            maxLength={BATCH_NAME_MAX_CHARS}
+            onChange={(event) => setDraftName(event.target.value.slice(0, BATCH_NAME_MAX_CHARS))}
+            aria-label="批次名"
+          />
+        </label>
         <p>{item.taskCount} 个任务 · {item.completedTaskCount} 完成 · {item.failedTaskCount} 失败 · {item.downloadableTaskCount} 可下载</p>
       </div>
       <div className="batch-detail-stats">
@@ -4496,6 +4550,9 @@ function BatchRecordDetail({ item, tasks, loading, downloadChecking, onDownload 
         <Meta label="更新时间" value={dateText(item.updatedAt)} />
         <Meta label="进行中/排队" value={`${item.runningTaskCount + item.queuedTaskCount} 个`} />
       </div>
+      <button className="management-action" type="button" disabled={!canSaveName} onClick={() => void onRename(item.batchId, cleanDraftName)}>
+        <Save size={14} /> 保存批次名
+      </button>
       <button className="management-action" type="button" disabled={loading || downloadChecking || !downloadableIds.length} onClick={() => onDownload(downloadableIds)}>
         <Download size={14} /> {loading || downloadChecking ? '检查成片中...' : '下载成片'}
       </button>

@@ -315,6 +315,10 @@ class GenerationTaskUpdateRequest(BaseModel):
     finalImageUserInstruction: str | None = None
 
 
+class GenerationBatchUpdateRequest(BaseModel):
+    name: str | None = None
+
+
 class DirectUploadFileRequest(BaseModel):
     filename: str
     mimeType: str | None = None
@@ -336,6 +340,7 @@ class UploadedMediaRequest(BaseModel):
 class GenerationTaskFromUploadsRequest(BaseModel):
     name: str | None = None
     batchId: str | None = None
+    batchName: str | None = None
     userRequirement: str | None = None
     uploads: list[UploadedMediaRequest] = Field(default_factory=list)
 
@@ -1819,6 +1824,8 @@ async def create_generation_task_from_uploads(payload: GenerationTaskFromUploads
     try:
         with get_db() as db:
             batch_id = (payload.batchId or "").strip()[:64] or None
+            if batch_id:
+                ensure_generation_batch(db, batch_id, payload.batchName, timestamp)
             cursor = db.execute(
                 "INSERT INTO generation_tasks (name, user_requirement_text, batch_id, status, created_at, updated_at) VALUES (?, ?, ?, 'DRAFT', ?, ?)",
                 (task_name, normalize_user_requirement_text(payload.userRequirement), batch_id, timestamp, timestamp),
@@ -3007,10 +3014,61 @@ def get_batch_task_rows(batch_id: str) -> list[Any]:
         ).fetchall()
 
 
+def fallback_generation_batch_title(batch_id: str) -> str:
+    return f"批次 {str(batch_id)[-8:]}" if len(str(batch_id)) > 8 else f"批次 {batch_id}"
+
+
+def normalize_generation_batch_name(name: str | None, batch_id: str) -> str:
+    value = str(name or "").strip()
+    return value[:80] if value else fallback_generation_batch_title(batch_id)
+
+
+def ensure_generation_batch(db: Any, batch_id: str, name: str | None, timestamp: str | None = None) -> None:
+    clean_batch_id = str(batch_id or "").strip()[:64]
+    if not clean_batch_id:
+        return
+    timestamp = timestamp or now_iso()
+    batch_name = normalize_generation_batch_name(name, clean_batch_id)
+    existing = db.execute("SELECT id FROM generation_batches WHERE id = ?", (clean_batch_id,)).fetchone()
+    if existing:
+        db.execute("UPDATE generation_batches SET updated_at = ? WHERE id = ?", (timestamp, clean_batch_id))
+        return
+    db.execute(
+        "INSERT INTO generation_batches (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        (clean_batch_id, batch_name, timestamp, timestamp),
+    )
+
+
+def generation_batch_metadata(batch_id: str) -> dict[str, str | None]:
+    with get_db() as db:
+        row = db.execute("SELECT name, updated_at FROM generation_batches WHERE id = ?", (batch_id,)).fetchone()
+    return {
+        "name": str(row["name"]) if row and str(row["name"]).strip() else fallback_generation_batch_title(batch_id),
+        "updatedAt": str(row["updated_at"]) if row and row["updated_at"] else None,
+    }
+
+
 @app.get("/api/generation-batches/{batch_id}/tasks")
 def list_generation_batch_tasks(batch_id: str) -> dict[str, Any]:
     rows = get_batch_task_rows(batch_id)
     return {"items": [serialize_generation_task(row, include_detail=False) for row in rows]}
+
+
+@app.patch("/api/generation-batches/{batch_id}")
+def update_generation_batch(batch_id: str, payload: GenerationBatchUpdateRequest) -> dict[str, Any]:
+    rows = get_batch_task_rows(batch_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="批次不存在或没有任务")
+    timestamp = now_iso()
+    with get_db() as db:
+        ensure_generation_batch(db, batch_id, payload.name, timestamp)
+        batch_name = normalize_generation_batch_name(payload.name, batch_id)
+        db.execute(
+            "UPDATE generation_batches SET name = ?, updated_at = ? WHERE id = ?",
+            (batch_name, timestamp, batch_id),
+        )
+    refreshed = get_batch_task_rows(batch_id)
+    return {"item": serialize_generation_batch_record(batch_id, refreshed)}
 
 
 @app.post("/api/generation-batches/{batch_id}/auto-run-final")
@@ -3628,13 +3686,15 @@ def serialize_generation_batch_record(batch_id: str, rows: list[Any]) -> dict[st
         if status in {"COMPLETED", "FINAL_PARTIAL"}:
             downloadable_count += 1
     created_values = [str(row["created_at"]) for row in sorted_rows]
+    metadata = generation_batch_metadata(batch_id)
     updated_values = [str(row["updated_at"]) for row in sorted_rows]
+    if metadata["updatedAt"]:
+        updated_values.append(str(metadata["updatedAt"]))
     first_row = sorted_rows[0]
-    title = f"批次 {str(batch_id)[-8:]}" if len(str(batch_id)) > 8 else f"批次 {batch_id}"
     return {
         "id": batch_id,
         "batchId": batch_id,
-        "name": title,
+        "name": metadata["name"],
         "status": generation_batch_record_status(sorted_rows),
         "taskCount": len(sorted_rows),
         "activeTaskCount": len(sorted_rows) - archived_count,

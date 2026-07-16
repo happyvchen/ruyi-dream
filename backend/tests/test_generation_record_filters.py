@@ -155,6 +155,16 @@ class GenerationRecordFilterTests(unittest.TestCase):
         self.assertEqual(archived_response.status_code, 200)
         self.assertEqual({item["batchId"] for item in archived_response.json()["items"]}, {"batch-old", "batch-archived-mixed"})
 
+    def test_batch_record_name_can_be_saved_and_searched(self) -> None:
+        update_response = self.client.patch("/api/generation-batches/batch-a", json={"name": "7月上新父文件夹"})
+        self.assertEqual(update_response.status_code, 200)
+        self.assertEqual(update_response.json()["item"]["name"], "7月上新父文件夹")
+        self.assertGreater(update_response.json()["item"]["updatedAt"], "2026-07-11T09:00:00")
+
+        list_response = self.client.get("/api/generation-record-batches?keyword=父文件夹&limit=20")
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual([(item["batchId"], item["name"]) for item in list_response.json()["items"]], [("batch-a", "7月上新父文件夹")])
+
     def test_workspace_records_mix_batches_and_unbatched_tasks(self) -> None:
         response = self.client.get("/api/generation-record-workspace?sortBy=createdAt&sortDir=asc&limit=20")
         self.assertEqual(response.status_code, 200)

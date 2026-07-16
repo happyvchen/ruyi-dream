@@ -20,6 +20,7 @@
 - `POST /api/generation-tasks/{task_id}/generate-final`：按分镜前 5 格并发生成最终成片。
 - `POST /api/generation-tasks/{task_id}/auto-run-final`：从当前第一个未完成阶段自动推进到成片。
 - `POST /api/generation-tasks/{task_id}/cancel`：取消当前运行中的选搭、分镜或成片。
+- `PATCH /api/generation-batches/{batch_id}`：保存批次名；批次任务归属仍由 `GenerationTask.batch_id` 决定。
 - `POST /api/generation-batches/{batch_id}/auto-run-final`：批次开始/继续一键成片；整批完成后可传 `restart=true` 重新生成。
 - `POST /api/generation-batches/{batch_id}/cancel`：取消批次内所有生成中或排队中的任务，保留已完成成果。
 

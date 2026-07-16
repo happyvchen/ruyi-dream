@@ -596,15 +596,17 @@ export const api = {
     request<{ ok: boolean; purged: boolean; deletedTaskIds: number[] }>('/api/generation-tasks/batch-purge', { method: 'POST', body: JSON.stringify({ purge: true, ids, confirmPhrase }) }),
   getTaskDeleteImpact: (ids: number[]) =>
     request<{ impact: DeleteImpact }>('/api/generation-tasks/delete-impact', { method: 'POST', body: JSON.stringify({ ids }) }),
-  createTask: async (name: string, files: File[], batchId?: string, userRequirement?: string) => {
+  createTask: async (name: string, files: File[], batchId?: string, userRequirement?: string, batchName?: string) => {
     const uploads = await uploadFilesDirect('generation_task', files)
     return request<{ item: GenerationTask }>('/api/generation-tasks/from-uploads', {
       method: 'POST',
-      body: JSON.stringify({ name, batchId, userRequirement, uploads }),
+      body: JSON.stringify({ name, batchId, batchName, userRequirement, uploads }),
     })
   },
   listBatchTasks: (batchId: string) =>
     request<{ items: GenerationTask[] }>(`/api/generation-batches/${encodeURIComponent(batchId)}/tasks`),
+  updateBatch: (batchId: string, name: string) =>
+    request<{ item: GenerationRecordBatch }>(`/api/generation-batches/${encodeURIComponent(batchId)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   autoRunBatch: (batchId: string, restart = false) =>
     request<{ startedTaskIds: number[]; items: GenerationTask[] }>(`/api/generation-batches/${encodeURIComponent(batchId)}/auto-run-final`, { method: 'POST', body: JSON.stringify({ restart }) }),
   cancelBatch: (batchId: string) =>
