@@ -2179,98 +2179,100 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
           <ImagePlus size={16} /> {showImport ? '收起导入' : '导入搭配服装'}
         </button>
       </div>
-      {showImport && <BatchImportPanel onImported={() => void refreshFirstLibraryPage().catch(() => undefined)} />}
-      <div className="panel library-panel">
-        <div className="library-commandbar">
-          <div className={`search ${showSearchBusy ? 'is-searching' : ''}`}>
-            <Search size={16} />
-            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索货号 / 标签" />
-            {showSearchBusy && <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span>}
+      <div className="library-content-scroll">
+        {showImport && <BatchImportPanel onImported={() => void refreshFirstLibraryPage().catch(() => undefined)} />}
+        <div className="panel library-panel">
+          <div className="library-commandbar">
+            <div className={`search ${showSearchBusy ? 'is-searching' : ''}`}>
+              <Search size={16} />
+              <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索货号 / 标签" />
+              {showSearchBusy && <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span>}
+            </div>
+            <div className="library-filter-pills">
+              <CategoryTreeFilter
+                open={openFilter === 'category'}
+                onOpen={(open) => setOpenFilter(open ? 'category' : null)}
+                options={stableCategoryTree}
+                selectedPrimary={primaryCategoryFilter}
+                selectedSecondary={secondaryCategoryFilter}
+                onPrimary={setPrimaryCategoryFilter}
+                onSecondary={setSecondaryCategoryFilter}
+              />
+              <DateRangeFilter
+                open={openFilter === 'date'}
+                onOpen={(open) => setOpenFilter(open ? 'date' : null)}
+                from={uploadedFrom}
+                to={uploadedTo}
+                onFrom={setUploadedFrom}
+                onTo={setUploadedTo}
+              />
+              <SortFilter
+                open={openFilter === 'sort'}
+                onOpen={(open) => setOpenFilter(open ? 'sort' : null)}
+                sortBy={sortBy}
+                sortDir={sortDir}
+                onChange={(nextSortBy, nextSortDir) => {
+                  setSortBy(nextSortBy)
+                  setSortDir(nextSortDir)
+                }}
+              />
+              <StatusFilter
+                open={openFilter === 'status'}
+                onOpen={(open) => setOpenFilter(open ? 'status' : null)}
+                value={statusFilter}
+                options={stylingGarmentStatusOptions(facets.status, stableFacets.status, statusFilter)}
+                onChange={setStatusFilter}
+              />
+              <button className={`filter-pill checkbox-pill ${includeArchived ? 'is-active' : ''}`} type="button" onClick={() => {
+                setOffset(0)
+                setIncludeArchived(!includeArchived)
+              }}><Check size={15} /><span>查看已归档</span></button>
+              {hasActiveFilters && <button className="filter-pill reset-filter-pill" type="button" onClick={clearLibraryFilters}><span>清空筛选</span></button>}
+            </div>
+            <div className="library-management-tools">
+              {selectedVisibleGarments.length > 0 && (
+                selectedArchivedGarments.length === selectedVisibleGarments.length
+                  ? <button className="management-action" onClick={() => restoreGarments(selectedArchivedGarments)}>恢复 {selectedArchivedGarments.length} 项</button>
+                  : <button className="management-action" disabled={selectedArchivedGarments.length > 0} title={selectedArchivedGarments.length ? '请分别选择已归档和未归档服装' : undefined} onClick={() => openGarmentDeleteDialog(selectedActiveGarments)}>归档 {selectedActiveGarments.length} 项</button>
+              )}
+              {bulkMode && <button className={`management-action management-check-action ${allVisibleGarmentsSelected ? 'is-active' : ''}`} disabled={!selectableGarmentIds.length} onClick={() => toggleVisibleGarmentSelection(!allVisibleGarmentsSelected)}><Check size={15} /> 全选本页</button>}
+              <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
+            </div>
           </div>
-          <div className="library-filter-pills">
-            <CategoryTreeFilter
-              open={openFilter === 'category'}
-              onOpen={(open) => setOpenFilter(open ? 'category' : null)}
-              options={stableCategoryTree}
-              selectedPrimary={primaryCategoryFilter}
-              selectedSecondary={secondaryCategoryFilter}
-              onPrimary={setPrimaryCategoryFilter}
-              onSecondary={setSecondaryCategoryFilter}
-            />
-            <DateRangeFilter
-              open={openFilter === 'date'}
-              onOpen={(open) => setOpenFilter(open ? 'date' : null)}
-              from={uploadedFrom}
-              to={uploadedTo}
-              onFrom={setUploadedFrom}
-              onTo={setUploadedTo}
-            />
-            <SortFilter
-              open={openFilter === 'sort'}
-              onOpen={(open) => setOpenFilter(open ? 'sort' : null)}
-              sortBy={sortBy}
-              sortDir={sortDir}
-              onChange={(nextSortBy, nextSortDir) => {
-                setSortBy(nextSortBy)
-                setSortDir(nextSortDir)
+          <div ref={libraryResultsRef} className={`library-results ${showSearchBusy ? 'is-loading' : ''}`}>
+            {items.length ? (
+              <div className="garment-grid">{items.map((item) => (
+                <GarmentCard
+                  key={item.id}
+                  item={item}
+                  onOpen={() => void openDetail(item)}
+                  onTag={['DRAFT', 'TAGGING_FAILED', 'TAGGING_READY'].includes(item.status) ? () => void run('重新识别标签中...', () => api.tagStylingGarment(item.id), (r: { item: StylingGarment }) => updateGarmentInView(r.item), { refresh: 'background' }) : undefined}
+                  selected={bulkMode && selectedGarmentIds.has(item.id)}
+                  onSelect={bulkMode ? (checked) => toggleGarmentSelection(item.id, checked) : undefined}
+                  onDelete={() => openGarmentDeleteDialog([item])}
+                  onRestore={() => restoreGarments([item])}
+                />
+              ))}</div>
+            ) : searching ? null : <EmptyState title={hasActiveFilters ? '没有匹配的搭配服装' : '暂无搭配服装'} text={hasActiveFilters ? '减少筛选条件或换一个货号关键词试试。' : '点击右上角导入搭配服装。'} />}
+          </div>
+          <div className="library-pagination-stick">
+            <PaginationControls
+              disabled={searching}
+              offset={offset}
+              pageSize={pageSize}
+              pageSizeOptions={[{ value: autoPageSize, label: `${autoPageSize} 套`, key: 'auto' }, 50, 100]}
+              pageSizeOptionKey={pageSizeMode === 'auto' ? 'auto' : String(pageSize)}
+              pageSizeUnit="套"
+              total={total}
+              totalPages={totalPages}
+              onOffsetChange={setOffset}
+              onPageSizeChange={(value, optionKey) => {
+                setPageSizeMode(optionKey === 'auto' ? 'auto' : 'fixed')
+                setPageSize(value)
+                setOffset(0)
               }}
             />
-            <StatusFilter
-              open={openFilter === 'status'}
-              onOpen={(open) => setOpenFilter(open ? 'status' : null)}
-              value={statusFilter}
-              options={stylingGarmentStatusOptions(facets.status, stableFacets.status, statusFilter)}
-              onChange={setStatusFilter}
-            />
-            <button className={`filter-pill checkbox-pill ${includeArchived ? 'is-active' : ''}`} type="button" onClick={() => {
-              setOffset(0)
-              setIncludeArchived(!includeArchived)
-            }}><Check size={15} /><span>查看已归档</span></button>
-            {hasActiveFilters && <button className="filter-pill reset-filter-pill" type="button" onClick={clearLibraryFilters}><span>清空筛选</span></button>}
           </div>
-          <div className="library-management-tools">
-            {selectedVisibleGarments.length > 0 && (
-              selectedArchivedGarments.length === selectedVisibleGarments.length
-                ? <button className="management-action" onClick={() => restoreGarments(selectedArchivedGarments)}>恢复 {selectedArchivedGarments.length} 项</button>
-                : <button className="management-action" disabled={selectedArchivedGarments.length > 0} title={selectedArchivedGarments.length ? '请分别选择已归档和未归档服装' : undefined} onClick={() => openGarmentDeleteDialog(selectedActiveGarments)}>归档 {selectedActiveGarments.length} 项</button>
-            )}
-            {bulkMode && <button className={`management-action management-check-action ${allVisibleGarmentsSelected ? 'is-active' : ''}`} disabled={!selectableGarmentIds.length} onClick={() => toggleVisibleGarmentSelection(!allVisibleGarmentsSelected)}><Check size={15} /> 全选本页</button>}
-            <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
-          </div>
-        </div>
-        <div ref={libraryResultsRef} className={`library-results ${showSearchBusy ? 'is-loading' : ''}`}>
-        {items.length ? (
-          <div className="garment-grid">{items.map((item) => (
-            <GarmentCard
-              key={item.id}
-              item={item}
-              onOpen={() => void openDetail(item)}
-              onTag={['DRAFT', 'TAGGING_FAILED', 'TAGGING_READY'].includes(item.status) ? () => void run('重新识别标签中...', () => api.tagStylingGarment(item.id), (r: { item: StylingGarment }) => updateGarmentInView(r.item), { refresh: 'background' }) : undefined}
-              selected={bulkMode && selectedGarmentIds.has(item.id)}
-              onSelect={bulkMode ? (checked) => toggleGarmentSelection(item.id, checked) : undefined}
-              onDelete={() => openGarmentDeleteDialog([item])}
-              onRestore={() => restoreGarments([item])}
-            />
-          ))}</div>
-        ) : searching ? null : <EmptyState title={hasActiveFilters ? '没有匹配的搭配服装' : '暂无搭配服装'} text={hasActiveFilters ? '减少筛选条件或换一个货号关键词试试。' : '点击右上角导入搭配服装。'} />}
-        </div>
-        <div className="library-pagination-stick">
-          <PaginationControls
-            disabled={searching}
-            offset={offset}
-            pageSize={pageSize}
-            pageSizeOptions={[{ value: autoPageSize, label: `${autoPageSize} 套`, key: 'auto' }, 50, 100]}
-            pageSizeOptionKey={pageSizeMode === 'auto' ? 'auto' : String(pageSize)}
-            pageSizeUnit="套"
-            total={total}
-            totalPages={totalPages}
-            onOffsetChange={setOffset}
-            onPageSizeChange={(value, optionKey) => {
-              setPageSizeMode(optionKey === 'auto' ? 'auto' : 'fixed')
-              setPageSize(value)
-              setOffset(0)
-            }}
-          />
         </div>
       </div>
       {detail && <GarmentDetailDrawer item={detail} run={run} isAdmin={role === 'admin'} onClose={() => setDetail(null)} onChange={updateGarmentInView} onDelete={() => openGarmentDeleteDialog([detail])} onRestore={() => restoreGarments([detail])} />}

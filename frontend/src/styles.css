@@ -1281,13 +1281,10 @@ a.button-link { text-decoration: none; cursor: pointer; }
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  height: auto;
+  height: 100%;
   overflow: hidden;
   background: rgba(255,255,255,.9);
   container-type: inline-size;
-}
-.library-page:has(.import-panel) .library-panel {
-  min-height: 0;
 }
 .library-page,
 .records-page,
@@ -1295,8 +1292,14 @@ a.button-link { text-decoration: none; cursor: pointer; }
 .prompt-page {
   grid-template-rows: auto minmax(0, 1fr);
 }
-.library-page:has(.import-panel) {
-  grid-template-rows: auto auto minmax(0, 1fr);
+.library-content-scroll {
+  min-height: 0;
+  display: grid;
+  grid-auto-rows: max-content;
+  gap: 18px;
+  overflow: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
 }
 .search {
   position: relative;
@@ -1848,11 +1851,9 @@ a.button-link { text-decoration: none; cursor: pointer; }
 }
 .library-commandbar {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-areas:
-    "search . actions"
-    "filters filters filters";
-  align-items: center;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr) auto;
+  grid-template-areas: "search filters actions";
+  align-items: start;
   gap: var(--compact-control-gap);
   margin-bottom: 14px;
   padding-bottom: 12px;
@@ -1860,8 +1861,8 @@ a.button-link { text-decoration: none; cursor: pointer; }
 }
 .library-commandbar .search {
   grid-area: search;
-  width: min(300px, 100%);
-  max-width: 300px;
+  width: 100%;
+  max-width: none;
 }
 .library-filter-pills,
 .library-management-tools {
@@ -1880,6 +1881,8 @@ a.button-link { text-decoration: none; cursor: pointer; }
 }
 .filter-popover-wrap {
   position: relative;
+  flex: 0 1 auto;
+  max-width: 100%;
 }
 .filter-pill {
   position: relative;
@@ -2228,9 +2231,9 @@ a.button-link { text-decoration: none; cursor: pointer; }
 }
 .library-results {
   position: relative;
-  min-height: 240px;
+  min-height: 0;
   min-width: 0;
-  overflow-y: auto;
+  overflow: auto;
   padding-right: 4px;
 }
 .library-results.is-loading {
@@ -3073,11 +3076,9 @@ a.button-link { text-decoration: none; cursor: pointer; }
 }
 .record-list-head {
   display: grid;
-  grid-template-columns: auto 300px minmax(0, 1fr) auto;
-  grid-template-areas:
-    "tabs search . actions"
-    "filters filters filters filters";
-  align-items: center;
+  grid-template-columns: auto minmax(200px, 280px) minmax(0, 1fr) auto;
+  grid-template-areas: "tabs search filters actions";
+  align-items: start;
   gap: var(--compact-control-gap);
   margin-bottom: 4px;
 }
@@ -3122,12 +3123,11 @@ a.button-link { text-decoration: none; cursor: pointer; }
 .record-list-meta {
   grid-area: actions;
   justify-content: flex-end;
-  flex-wrap: nowrap;
 }
 .record-list-head .search {
   grid-area: search;
-  width: min(300px, 100%);
-  max-width: 300px;
+  width: 100%;
+  max-width: none;
 }
 .record-list-body {
   min-height: 0;
@@ -3537,22 +3537,37 @@ a.button-link { text-decoration: none; cursor: pointer; }
   border-radius: 5px;
   object-fit: cover;
 }
-@container (max-width: 760px) {
+@container (max-width: 1120px) {
   .library-commandbar {
-    grid-template-columns: minmax(240px, 1fr) auto;
-  }
-  .record-list-head {
-    grid-template-columns: minmax(240px, 1fr) auto;
+    grid-template-columns: minmax(220px, 1fr) auto;
     grid-template-areas:
       "search actions"
+      "filters filters";
+  }
+}
+
+@container (max-width: 980px) {
+  .record-list-head {
+    grid-template-columns: auto minmax(220px, 1fr) auto;
+    grid-template-areas:
+      "tabs search actions"
+      "filters filters filters";
+  }
+  .record-list-head .search {
+    max-width: none;
+  }
+}
+
+@container (max-width: 820px) {
+  .record-list-head {
+    grid-template-columns: minmax(220px, 1fr) auto;
+    grid-template-areas:
       "tabs tabs"
+      "search actions"
       "filters filters";
   }
   .record-view-tabs {
     width: fit-content;
-  }
-  .record-list-head .search {
-    max-width: none;
   }
 }
 
@@ -3733,9 +3748,18 @@ a.button-link { text-decoration: none; cursor: pointer; }
   .record-view-tabs button {
     flex: 1;
   }
-  .filter-popover-wrap,
+  .filter-popover-wrap {
+    flex: 0 1 148px;
+    width: auto;
+  }
+  .library-filter-pills > .filter-pill,
+  .record-filter-pills > .filter-pill {
+    flex: 0 1 148px;
+    width: auto;
+  }
   .filter-pill {
     width: 100%;
+    max-width: none;
   }
   .category-popover {
     position: fixed;
