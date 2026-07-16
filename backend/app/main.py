@@ -89,6 +89,7 @@ from .generation_progress import (
     provider_error_presentation,
 )
 from .image_provider import ImageProviderError, get_image_provider
+from .toapis_concurrency import async_toapis_concurrency_slot
 from .object_storage import (
     clean_key,
     delete_object,
@@ -8983,6 +8984,18 @@ async def generate_image_asset(
     attempt_id: int | None = None,
     unknown_retry_guard: SubmissionUnknownRetryGuard | None = None,
 ) -> tuple[int, dict[str, Any]]:
+    if settings.image_provider == "toapis":
+        async with async_toapis_concurrency_slot():
+            return await _generate_image_asset_unlocked(task_package, output_key, attempt_id, unknown_retry_guard)
+    return await _generate_image_asset_unlocked(task_package, output_key, attempt_id, unknown_retry_guard)
+
+
+async def _generate_image_asset_unlocked(
+    task_package: dict[str, Any],
+    output_key: str,
+    attempt_id: int | None = None,
+    unknown_retry_guard: SubmissionUnknownRetryGuard | None = None,
+) -> tuple[int, dict[str, Any]]:
     """完整生成一张图：上传参考图 → 提交 → 轮询 → 成片回传。
 
     健壮性契约（成功 > 慢 > 失败）：
@@ -9342,6 +9355,37 @@ def image_provider_missing_message() -> str:
 
 
 async def generate_single_final_image(
+    task_id: int,
+    result_set_id: int,
+    image_id: int,
+    attempt_id: int | None = None,
+    trigger: str = "manual_step",
+    balance_stop: asyncio.Event | None = None,
+    unknown_retry_guard: SubmissionUnknownRetryGuard | None = None,
+) -> int:
+    if settings.image_provider == "toapis":
+        async with async_toapis_concurrency_slot():
+            return await _generate_single_final_image_unlocked(
+                task_id,
+                result_set_id,
+                image_id,
+                attempt_id=attempt_id,
+                trigger=trigger,
+                balance_stop=balance_stop,
+                unknown_retry_guard=unknown_retry_guard,
+            )
+    return await _generate_single_final_image_unlocked(
+        task_id,
+        result_set_id,
+        image_id,
+        attempt_id=attempt_id,
+        trigger=trigger,
+        balance_stop=balance_stop,
+        unknown_retry_guard=unknown_retry_guard,
+    )
+
+
+async def _generate_single_final_image_unlocked(
     task_id: int,
     result_set_id: int,
     image_id: int,

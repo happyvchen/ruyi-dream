@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from contextlib import contextmanager
@@ -758,6 +759,63 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
         self.assertEqual(deliver_calls, ["k/out.png"])
         get_bytes_mock.assert_called_once_with("k/out.png")
         self.assertEqual(payload["outputPath"], "k/out.png")
+
+    def test_toapis_image_asset_lifecycle_respects_global_concurrency_limit(self) -> None:
+        os.environ["TOAPIS_MAX_CONCURRENCY"] = "2"
+        os.environ["GPT_IMAGE2_PROVIDER"] = "toapis"
+        self._reload_settings()
+        attempt_ids = [self._insert_attempt(owner_id=index + 1) for index in range(4)]
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def fake_submit(_task_package: dict, output_key: str, _on_progress: object = None) -> dict:
+            nonlocal active, max_active
+
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            return {
+                "provider": "toapis",
+                "providerRequestId": f"tsk_{output_key}",
+                "status": "SUBMITTED",
+                "providerStatus": "submitted",
+            }
+
+        def fake_check(payload: dict, _output_key: str) -> dict:
+            time.sleep(0.05)
+            return {**payload, "status": "SUCCEEDED", "providerStatus": "completed"}
+
+        def fake_deliver(_payload: dict, _output_key: str) -> dict:
+            nonlocal active
+
+            with lock:
+                active -= 1
+            return {"outputPath": "k/out.png"}
+
+        async def run_all() -> None:
+            await asyncio.wait_for(
+                asyncio.gather(
+                    *(
+                        self.main.generate_image_asset({"imageInputs": []}, f"k/{index}.png", attempt_id)
+                        for index, attempt_id in enumerate(attempt_ids)
+                    )
+                ),
+                timeout=5,
+            )
+
+        async def instant_sleep(_seconds: float) -> None:
+            return None
+
+        with mock.patch.object(self.main, "run_image_provider_submit", side_effect=fake_submit):
+            with mock.patch.object(self.main, "run_image_provider_check", side_effect=fake_check):
+                with mock.patch.object(self.main, "run_image_provider_deliver", side_effect=fake_deliver):
+                    with mock.patch.object(self.main, "get_bytes", return_value=b"img"):
+                        with mock.patch.object(self.main, "insert_generated_media_asset", return_value=4242):
+                            with mock.patch("asyncio.sleep", new=instant_sleep):
+                                asyncio.run(run_all())
+
+        self.assertEqual(max_active, 2)
 
     def test_explicit_transient_provider_failure_retries_generation_only(self) -> None:
         attempt_id = self._insert_attempt()
