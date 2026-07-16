@@ -3159,7 +3159,7 @@ async def run_select_generation_styling(
                 """,
                 (now_iso(), task_id),
             )
-        raise HTTPException(status_code=502, detail=user_facing_provider_error_message("智能选搭失败", exc, error_code)) from exc
+        raise HTTPException(status_code=502, detail=user_facing_provider_error_detail("智能选搭失败", exc, error_code)) from exc
 
     try:
         progress.begin("styling_context")
@@ -6419,8 +6419,8 @@ def exception_process_facts(exc: BaseException) -> dict[str, Any]:
     return facts if isinstance(facts, dict) else {}
 
 
-def user_facing_provider_error_message(label: str, exc: BaseException, error_code: str | None) -> str:
-    """把技术报错翻译成面向普通用户的文案；技术码只在 detail 里保留一份。
+def user_facing_provider_error_detail(label: str, exc: BaseException, error_code: str | None) -> dict[str, Any]:
+    """把技术报错翻译成结构化用户文案；技术码和 provider 原文只留在 attempt 详情。
 
     余额类必须明确提示充值，绝不表现成"生成失败请重试"（会让用户白等、继续烧额度）。
     """
@@ -6428,7 +6428,16 @@ def user_facing_provider_error_message(label: str, exc: BaseException, error_cod
     provider_error = response.get("providerError") if isinstance(response, dict) else None
     reason = provider_error.get("upstreamMessage") if isinstance(provider_error, dict) else None
     presentation = provider_error_presentation(error_code, str(reason or ""))
-    return f"{label}：{presentation['title']}。{presentation['message']}"
+    return {
+        **presentation,
+        "stage": label,
+        "detail": f"{label}：{presentation['title']}。{presentation['message']}",
+    }
+
+
+def user_facing_provider_error_message(label: str, exc: BaseException, error_code: str | None) -> str:
+    detail = user_facing_provider_error_detail(label, exc, error_code)
+    return str(detail["detail"])
 
 
 def parse_gemini_json_object(text: str) -> dict[str, Any]:

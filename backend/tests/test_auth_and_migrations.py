@@ -2107,6 +2107,26 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertEqual(calls, ["text"])
         self.assertEqual(main.classify_attempt_error(raised.exception), main.ERROR_AUTH_FAILED)
 
+    def test_ai_stylist_balance_error_detail_is_user_actionable(self) -> None:
+        main = importlib.import_module("app.main")
+        exc = main.GeminiProviderError(
+            "Gemini(ToAPIs 通道) 请求失败",
+            main.ERROR_INSUFFICIENT_BALANCE,
+            provider_response={
+                "providerError": {
+                    "code": main.ERROR_INSUFFICIENT_BALANCE,
+                    "upstreamMessage": "预扣费额度失败, 用户剩余额度: ＄0.000054, 需要预扣费额度: ＄0.011194",
+                }
+            },
+        )
+
+        detail = main.user_facing_provider_error_detail("智能选搭失败", exc, main.ERROR_INSUFFICIENT_BALANCE)
+
+        self.assertEqual(detail["code"], main.ERROR_INSUFFICIENT_BALANCE)
+        self.assertEqual(detail["title"], "AI 服务额度不足")
+        self.assertIn("充值", detail["message"])
+        self.assertFalse(detail["retryable"])
+
     def test_ai_stylist_business_reject_does_not_contract_retry(self) -> None:
         main = importlib.import_module("app.main")
         input_row = {

@@ -10,11 +10,21 @@ export type AuthSession = {
 
 export class ApiError extends Error {
   status: number
+  errorCode?: string | null
+  errorTitle?: string | null
+  errorMessage?: string | null
+  action?: string | null
+  retryable?: boolean | null
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, options?: { errorCode?: string | null; errorTitle?: string | null; errorMessage?: string | null; action?: string | null; retryable?: boolean | null }) {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.errorCode = options?.errorCode
+    this.errorTitle = options?.errorTitle
+    this.errorMessage = options?.errorMessage
+    this.action = options?.action
+    this.retryable = options?.retryable
   }
 }
 
@@ -442,12 +452,23 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers: headers(init),
   })
   if (!response.ok) {
-    const detail = await response.json().catch(() => ({ detail: response.statusText }))
-    const message = typeof detail.detail === 'string' ? detail.detail : '请求失败'
+    const payload = await response.json().catch(() => ({ detail: response.statusText }))
+    const detail = payload?.detail
+    const structured = detail && typeof detail === 'object' && !Array.isArray(detail) ? detail as Record<string, unknown> : null
+    const title = typeof structured?.title === 'string' ? structured.title : null
+    const messageText = typeof structured?.message === 'string' ? structured.message : null
+    const detailText = typeof structured?.detail === 'string' ? structured.detail : null
+    const message = detailText || (title && messageText ? `${title}：${messageText}` : title || (typeof detail === 'string' ? detail : '请求失败'))
     if (typeof window !== 'undefined' && response.status === 401 && !path.startsWith('/api/auth/login') && !path.startsWith('/api/auth/session')) {
       window.dispatchEvent(new CustomEvent('ruyi-auth-expired', { detail: { message } }))
     }
-    throw new ApiError(message, response.status)
+    throw new ApiError(message, response.status, {
+      errorCode: typeof structured?.code === 'string' ? structured.code : null,
+      errorTitle: title,
+      errorMessage: messageText,
+      action: typeof structured?.action === 'string' ? structured.action : null,
+      retryable: typeof structured?.retryable === 'boolean' ? structured.retryable : null,
+    })
   }
   return response.json() as Promise<T>
 }

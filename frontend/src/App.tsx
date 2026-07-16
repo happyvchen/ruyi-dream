@@ -39,7 +39,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react'
-import { api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl } from './api'
+import { ApiError, api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl } from './api'
 import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot } from './api'
 import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
@@ -308,10 +308,7 @@ export function App() {
       }
       if (options.refresh === 'background') void refreshAll().catch(() => undefined)
       else if (options.refresh !== false) await refreshAll().catch(() => undefined)
-      // 接口同步失败体是 {detail: "..."}（HTTPException），不含 errorCode；
-      // 这里 fallback 到 detail 文案，能拿到 attempt errorCode 的展示点（如各阶段
-      // AIOperationCard、成片卡片）会优先用 friendlyError(errorCode) 显示友好文案。
-      setError(err instanceof Error ? friendlyErrorText(undefined, err.message) : '操作失败')
+      setError(err instanceof ApiError ? friendlyErrorText(err.errorCode, err.errorMessage || err.message) : err instanceof Error ? friendlyErrorText(undefined, err.message) : '操作失败')
       throw err
     } finally {
       setBusy('')
