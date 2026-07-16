@@ -1341,6 +1341,11 @@ a.button-link { text-decoration: none; cursor: pointer; }
   color: #0f7cff;
   font-size: 12px;
   font-weight: 700;
+  white-space: nowrap;
+}
+.search-hint.is-muted {
+  color: #64748b;
+  font-weight: 650;
 }
 .muted-count { color: #64748b; font-size: 13px; }
 .import-panel {

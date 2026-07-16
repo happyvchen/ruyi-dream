@@ -222,6 +222,20 @@ class StylingGarmentLibraryFilterTests(unittest.TestCase):
         self.assertEqual(keyword_response.status_code, 200)
         self.assertEqual([item["code"] for item in keyword_response.json()["items"]], ["LOOK-TOP-001"])
 
+        multi_keyword_response = self.client.get(
+            "/api/styling-garments",
+            params={
+                "keyword": "LOOK-TOP-001 LOOK-BOTTOM-002,LOOK-DRESS-003。LOOK-MULTI-005，NO-MATCH.ALSO-NO、TAIL\nEND",
+                "sortBy": "code",
+                "sortDir": "asc",
+            },
+        )
+        self.assertEqual(multi_keyword_response.status_code, 200)
+        self.assertEqual(
+            [item["code"] for item in multi_keyword_response.json()["items"]],
+            ["LOOK-BOTTOM-002", "LOOK-DRESS-003", "LOOK-MULTI-005", "LOOK-TOP-001"],
+        )
+
         end_of_day_response = self.client.get("/api/styling-garments?uploadedTo=2026-07-01")
         self.assertEqual(end_of_day_response.status_code, 200)
         self.assertIn("LOOK-TOP-001", [item["code"] for item in end_of_day_response.json()["items"]])

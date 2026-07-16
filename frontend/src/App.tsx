@@ -101,6 +101,20 @@ const GARMENT_AUTO_CARD_WIDTH = 292
 const GARMENT_AUTO_CARD_HEIGHT = 172
 const GARMENT_AUTO_GRID_GAP = 12
 
+function splitSearchTerms(value: string) {
+  const seen = new Set<string>()
+  return value
+    .split(/[\s,，.。、]+/)
+    .map((part) => part.trim())
+    .filter((part) => {
+      if (!part) return false
+      const key = part.toLocaleLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+}
+
 function defaultSidebarCollapsed() {
   return typeof window !== 'undefined' && window.matchMedia(sidebarCompactQuery).matches
 }
@@ -2214,6 +2228,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
   const categoryFilterCount = primaryCategoryFilter.length + secondaryCategoryFilter.length
   const hasActiveFilters = Boolean(query.trim() || statusFilter || categoryFilterCount || uploadedFrom || uploadedTo || includeArchived || sortBy !== 'createdAt' || sortDir !== 'desc')
   const stableCategoryTree = stableFacets.categoryTree ?? facets.categoryTree ?? []
+  const searchTermCount = splitSearchTerms(query).length
 
   return (
     <section className="page workbench-page library-page">
@@ -2244,8 +2259,8 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
           <div className="library-commandbar">
             <div className={`search ${showSearchBusy ? 'is-searching' : ''}`}>
               <Search size={16} />
-              <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索货号 / 标签" />
-              {showSearchBusy && <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span>}
+              <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索货号 / 标签，支持粘贴多个" />
+              {showSearchBusy ? <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span> : searchTermCount > 1 ? <span className="search-hint is-muted">{searchTermCount} 词</span> : null}
             </div>
             <div className="library-filter-pills">
               <CategoryTreeFilter
@@ -2312,7 +2327,7 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
                   onRestore={() => restoreGarments([item])}
                 />
               ))}</div>
-            ) : searching ? null : <EmptyState title={hasActiveFilters ? '没有匹配的搭配服装' : '暂无搭配服装'} text={hasActiveFilters ? '减少筛选条件或换一个货号关键词试试。' : '点击右上角导入搭配服装。'} />}
+            ) : searching ? null : <EmptyState title={hasActiveFilters ? '没有匹配的搭配服装' : '暂无搭配服装'} text={hasActiveFilters ? '减少筛选条件，或粘贴多个货号、标签再试。' : '点击右上角导入搭配服装。'} />}
           </div>
           <div className="library-pagination-stick">
             <PaginationControls
@@ -4253,6 +4268,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
       ? generationBatchStatusOptions(facets.status, stableFacets.status, statusFilter)
       : generationWorkspaceStatusOptions(facets.status, stableFacets.status, statusFilter)
   const formatRecordStatus = (value: string) => viewMode === 'tasks' ? statusText(value) : recordStatusText(value)
+  const searchTermCount = splitSearchTerms(query).length
 
   return (
     <section className="page workbench-page records-page">
@@ -4286,8 +4302,8 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
             </div>
             <div className={`search ${loading ? 'is-searching' : ''}`}>
               <Search size={16} />
-              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索任务名 / 货号 / 批次" />
-              {loading && <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span>}
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索任务名 / 货号 / 批次，支持粘贴多个" />
+              {loading ? <span className="search-hint"><Loader2 size={14} className="spin" />搜索中</span> : searchTermCount > 1 ? <span className="search-hint is-muted">{searchTermCount} 词</span> : null}
             </div>
             <div className="record-filter-pills">
               <DateRangeFilter

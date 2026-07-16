@@ -765,18 +765,23 @@ def list_styling_garments(
     uploaded_to_dt = parse_filter_datetime(uploaded_to, end_of_day=True)
     where_clauses = ["sg.deleted_at IS NULL", "(? OR sg.archived_at IS NULL)"]
     query_params: list[Any] = [include_archived]
-    keyword_search = f"%{keyword.strip()}%" if keyword and keyword.strip() else None
-    if keyword_search:
-        where_clauses.append(
-            """
-            (
-                sg.code LIKE ? OR sg.status LIKE ? OR sg.ai_tags_json LIKE ? OR
-                sg.manual_tags_json LIKE ? OR sg.official_title_tags_json LIKE ? OR
-                sg.effective_tags_json LIKE ? OR sg.tag_meta_json LIKE ?
+    keyword_terms = split_keyword_terms(keyword)
+    if keyword_terms:
+        term_clauses = []
+        for term in keyword_terms:
+            term_clauses.append(
+                """
+                (
+                    sg.code LIKE ? OR sg.status LIKE ? OR sg.ai_tags_json LIKE ? OR
+                    sg.manual_tags_json LIKE ? OR sg.official_title_tags_json LIKE ? OR
+                    sg.effective_tags_json LIKE ? OR sg.tag_meta_json LIKE ?
+                )
+                """
             )
-            """
+            query_params.extend([f"%{term}%"] * 7)
+        where_clauses.append(
+            "(" + " OR ".join(term_clauses) + ")"
         )
-        query_params.extend([keyword_search] * 7)
     if status_values:
         placeholders = ", ".join("?" for _ in status_values)
         where_clauses.append(f"LOWER(sg.status) IN ({placeholders})")
@@ -865,6 +870,27 @@ def split_filter_values(value: str | list[str] | None) -> set[str]:
         for part in re.split(r"[,，]", item)
         if part.strip()
     }
+
+
+def split_keyword_terms(value: Any) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    terms: list[str] = []
+    seen: set[str] = set()
+    for part in re.split(r"[\s,，.。、]+", text):
+        term = part.strip().casefold()
+        if term and term not in seen:
+            terms.append(term)
+            seen.add(term)
+    return terms
+
+
+def matches_any_keyword(haystack: Any, keyword_terms: list[str]) -> bool:
+    if not keyword_terms:
+        return True
+    text = str(haystack or "").casefold()
+    return any(term in text for term in keyword_terms)
 
 
 def styling_garment_filter_context(row: Any) -> dict[str, Any]:
@@ -1004,8 +1030,8 @@ def facet_options(values: Any) -> list[dict[str, Any]]:
 
 
 def styling_garment_matches_filters(context: dict[str, Any], filters: dict[str, Any]) -> bool:
-    keyword = str(filters.get("keyword") or "").strip().casefold()
-    if keyword and keyword not in context["keywordBlob"]:
+    keyword_terms = split_keyword_terms(filters.get("keyword"))
+    if not matches_any_keyword(context["keywordBlob"], keyword_terms):
         return False
     category_terms = set(filters.get("category") or set())
     category_terms.update(filters.get("primaryCategory") or set())
@@ -3561,10 +3587,13 @@ def list_new_generation_records(
     created_to_dt = parse_filter_datetime(created_to, end_of_day=True)
     where_clauses = ["gt.deleted_at IS NULL", "(? OR gt.archived_at IS NULL)"]
     query_params: list[Any] = [include_archived]
-    keyword_search = f"%{keyword.strip()}%" if keyword and keyword.strip() else None
-    if keyword_search:
-        where_clauses.append("(gt.name LIKE ? OR gt.status LIKE ? OR gt.batch_id LIKE ?)")
-        query_params.extend([keyword_search] * 3)
+    keyword_terms = split_keyword_terms(keyword)
+    if keyword_terms:
+        term_clauses = []
+        for term in keyword_terms:
+            term_clauses.append("(gt.name LIKE ? OR gt.status LIKE ? OR gt.batch_id LIKE ?)")
+            query_params.extend([f"%{term}%"] * 3)
+        where_clauses.append("(" + " OR ".join(term_clauses) + ")")
     if status_values:
         placeholders = ", ".join("?" for _ in status_values)
         where_clauses.append(f"LOWER(gt.status) IN ({placeholders})")
@@ -3735,7 +3764,7 @@ def list_generation_record_batches(
     status_values = split_filter_values(status)
     created_from_dt = parse_filter_datetime(created_from, end_of_day=False)
     created_to_dt = parse_filter_datetime(created_to, end_of_day=True)
-    keyword_text = str(keyword or "").strip().casefold()
+    keyword_terms = split_keyword_terms(keyword)
     with get_db() as db:
         rows = db.execute(
             """
@@ -3757,9 +3786,9 @@ def list_generation_record_batches(
             continue
         if created_to_dt and created_at and created_at > created_to_dt:
             continue
-        if keyword_text:
+        if keyword_terms:
             haystack = " ".join([batch_id, batch["name"], *(str(row["name"]) for row in batch_rows), *(batch.get("statusCounts") or {}).keys()]).casefold()
-            if keyword_text not in haystack:
+            if not matches_any_keyword(haystack, keyword_terms):
                 continue
         if not generation_batch_matches_status(batch, status_values):
             continue
@@ -3807,7 +3836,7 @@ def list_generation_record_workspace(
     status_values = split_filter_values(status)
     created_from_dt = parse_filter_datetime(created_from, end_of_day=False)
     created_to_dt = parse_filter_datetime(created_to, end_of_day=True)
-    keyword_text = str(keyword or "").strip().casefold()
+    keyword_terms = split_keyword_terms(keyword)
     with get_db() as db:
         rows = db.execute(
             """
@@ -3843,9 +3872,9 @@ def list_generation_record_workspace(
             continue
         if created_to_dt and created_at and created_at > created_to_dt:
             continue
-        if keyword_text:
+        if keyword_terms:
             haystack = " ".join([batch_id, batch["name"], *(str(row["name"]) for row in batch_rows), *(batch.get("statusCounts") or {}).keys()]).casefold()
-            if keyword_text not in haystack:
+            if not matches_any_keyword(haystack, keyword_terms):
                 continue
         if not generation_batch_matches_status(batch, status_values):
             continue
@@ -3867,9 +3896,9 @@ def list_generation_record_workspace(
             continue
         if created_to_dt and created_at and created_at > created_to_dt:
             continue
-        if keyword_text:
+        if keyword_terms:
             haystack = " ".join([str(row["name"]), str(row["status"]), str(row_value(row, "batch_id") or "")]).casefold()
-            if keyword_text not in haystack:
+            if not matches_any_keyword(haystack, keyword_terms):
                 continue
         if status_values and str(row["status"]).casefold() not in status_values:
             continue

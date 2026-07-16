@@ -114,6 +114,19 @@ class GenerationRecordFilterTests(unittest.TestCase):
         self.assertEqual(archived_response.status_code, 200)
         self.assertIn("归档旧任务", [item["name"] for item in archived_response.json()["items"]])
 
+    def test_task_records_search_multiple_keywords(self) -> None:
+        response = self.client.get(
+            "/api/generation-records",
+            params={
+                "keyword": "通勤 西装,单独。NO-MATCH.ALSO-NO、TAIL\nEND",
+                "sortBy": "createdAt",
+                "sortDir": "desc",
+                "limit": "20",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item["name"] for item in response.json()["items"]], ["单独任务", "西装外套", "通勤衬衫"])
+
     def test_batch_records_group_tasks_and_status(self) -> None:
         response = self.client.get("/api/generation-record-batches?sortBy=createdAt&sortDir=asc&limit=20")
         self.assertEqual(response.status_code, 200)
@@ -142,6 +155,13 @@ class GenerationRecordFilterTests(unittest.TestCase):
         search_response = self.client.get("/api/generation-record-batches?keyword=针织&limit=20")
         self.assertEqual(search_response.status_code, 200)
         self.assertEqual([item["batchId"] for item in search_response.json()["items"]], ["batch-done"])
+
+        multi_search_response = self.client.get(
+            "/api/generation-record-batches",
+            params={"keyword": "针织 西装,NO-MATCH。ALSO-NO.TAIL、END\nDONE", "limit": "20"},
+        )
+        self.assertEqual(multi_search_response.status_code, 200)
+        self.assertEqual([item["batchId"] for item in multi_search_response.json()["items"]], ["batch-b", "batch-done"])
 
         hidden_search_response = self.client.get("/api/generation-record-batches?keyword=隐藏第四款&limit=20")
         self.assertEqual(hidden_search_response.status_code, 200)
@@ -187,6 +207,13 @@ class GenerationRecordFilterTests(unittest.TestCase):
         hidden_search_response = self.client.get("/api/generation-record-workspace?keyword=隐藏第四款&limit=20")
         self.assertEqual(hidden_search_response.status_code, 200)
         self.assertEqual([item["id"] for item in hidden_search_response.json()["items"]], ["batch:batch-a"])
+
+        multi_search_response = self.client.get(
+            "/api/generation-record-workspace",
+            params={"keyword": "针织 单独,NO-MATCH。ALSO-NO.TAIL、END\nDONE", "limit": "20"},
+        )
+        self.assertEqual(multi_search_response.status_code, 200)
+        self.assertEqual([item["id"] for item in multi_search_response.json()["items"]], ["task:5", "batch:batch-done"])
 
 
 if __name__ == "__main__":
