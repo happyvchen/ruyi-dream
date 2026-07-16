@@ -90,6 +90,9 @@ class Settings:
     gemini_waf_retry_limit = int(os.getenv("GEMINI_WAF_RETRY_LIMIT") or "2")
     # 上层 JSON 解析失败(MALFORMED_OUTPUT)时自动重问 Gemini 的次数(0=不重问)。
     gemini_malformed_reask_limit = int(os.getenv("GEMINI_MALFORMED_REASK_LIMIT") or "1")
+    # AI Stylist 已产出但不符合 selected_files + styling_plan 契约时的用户无感重试。
+    ai_stylist_contract_retry_limit = int(os.getenv("AI_STYLIST_CONTRACT_RETRY_LIMIT", "3"))
+    ai_stylist_contract_retry_delay_seconds = float(os.getenv("AI_STYLIST_CONTRACT_RETRY_DELAY_SECONDS", "15"))
     # 打标并发闸门与瞬时错误自动重试次数。
     tagging_max_concurrency = int(os.getenv("TAGGING_MAX_CONCURRENCY") or "3")
     tagging_auto_retry_limit = int(os.getenv("TAGGING_AUTO_RETRY_LIMIT") or "1")
@@ -206,6 +209,10 @@ class Settings:
             raise RuntimeError("GEMINI_WAF_RETRY_LIMIT must be greater than or equal to 0.")
         if self.gemini_malformed_reask_limit < 0:
             raise RuntimeError("GEMINI_MALFORMED_REASK_LIMIT must be greater than or equal to 0.")
+        if self.ai_stylist_contract_retry_limit < 0:
+            raise RuntimeError("AI_STYLIST_CONTRACT_RETRY_LIMIT must be greater than or equal to 0.")
+        if self.ai_stylist_contract_retry_delay_seconds < 0:
+            raise RuntimeError("AI_STYLIST_CONTRACT_RETRY_DELAY_SECONDS must be greater than or equal to 0.")
         if self.tagging_max_concurrency <= 0:
             raise RuntimeError("TAGGING_MAX_CONCURRENCY must be greater than 0.")
         if self.tagging_auto_retry_limit < 0:

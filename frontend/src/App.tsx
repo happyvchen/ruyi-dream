@@ -5749,6 +5749,7 @@ const ATTEMPT_PHASE_LABELS: Record<string, string> = {
   store: '入库',
   styling_context: '提交',
   styling_gemini: '选搭',
+  styling_contract_retry_wait: '修正选搭结果',
   styling_validate: '校验',
   styling_store: '保存',
 }
@@ -5788,6 +5789,10 @@ function attemptPhaseText(entry: AttemptPhase, operation?: AIOperation) {
   if (entry.phase === 'deliver') {
     const retries = Number(detail.retries)
     if (Number.isFinite(retries) && retries > 0) return `${base}(重试${retries})`
+  }
+  if (entry.phase === 'styling_contract_retry_wait') {
+    const contractRetry = Number(detail.contractRetry)
+    if (Number.isFinite(contractRetry) && contractRetry > 0) return `${base}(重试${contractRetry})`
   }
   const statusCheckErrors = Number(detail.statusCheckErrors)
   if (Number.isFinite(statusCheckErrors) && statusCheckErrors > 0) return `${base}(重试${statusCheckErrors})`
@@ -5830,10 +5835,12 @@ function attemptRetryPrefix(phases: AttemptPhase[]) {
     const detail = (entry.detail ?? {}) as Record<string, unknown>
     const generationRetry = Number(detail.generationRetry)
     const unknownSubmissionRetry = Number(detail.unknownSubmissionRetry)
+    const contractRetry = Number(detail.contractRetry)
     return Math.max(
       max,
       Number.isFinite(generationRetry) ? generationRetry : 0,
       Number.isFinite(unknownSubmissionRetry) ? unknownSubmissionRetry : 0,
+      Number.isFinite(contractRetry) ? contractRetry : 0,
     )
   }, 0)
   return retryCount > 0 ? `(重试${retryCount}) ` : ''

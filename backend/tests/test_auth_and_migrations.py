@@ -1935,7 +1935,7 @@ class BackendCurrentFlowTests(unittest.TestCase):
         self.assertEqual(calls, ["text"])
         self.assertEqual(result["selected_hero_image_ids"], [21])
 
-    def test_ai_stylist_malformed_json_fails_without_reask(self) -> None:
+    def test_ai_stylist_contract_retry_recovers_missing_styling_plan(self) -> None:
         main = importlib.import_module("app.main")
         input_row = {
             "image_snapshot_json": main.dumps([
@@ -1949,6 +1949,60 @@ class BackendCurrentFlowTests(unittest.TestCase):
         original_configured = main.is_gemini_configured
         original_text = main.generate_gemini_json_text
         original_reask = main.generate_gemini_json_object_with_reask
+        original_retry_limit = main.settings.ai_stylist_contract_retry_limit
+        original_retry_delay = main.settings.ai_stylist_contract_retry_delay_seconds
+
+        async def fake_text(*_args: object, **_kwargs: object) -> str:
+            calls.append("text")
+            if len(calls) == 1:
+                return main.dumps({"selected_files": ["hero-front.jpg"]})
+            return main.dumps({
+                "selected_files": ["hero-front.jpg"],
+                "styling_plan": {
+                    "hero_understanding": {"shot_category_family": "top"},
+                    "outfit_candidates": [{"outfit_key": "solo", "selected_material_ids": []}],
+                    "selected_outfit_key": "solo",
+                },
+            })
+
+        async def fake_reask(*_args: object, **_kwargs: object) -> dict[str, object]:
+            calls.append("reask")
+            raise AssertionError("AI Stylist should use contract retry, not malformed-output reask")
+
+        main.is_gemini_configured = lambda: True
+        main.generate_gemini_json_text = fake_text
+        main.generate_gemini_json_object_with_reask = fake_reask
+        main.settings.ai_stylist_contract_retry_limit = 3
+        main.settings.ai_stylist_contract_retry_delay_seconds = 0
+        try:
+            result = asyncio.run(main.select_styling_with_gemini(input_row, candidate_snapshot, request_snapshot))
+        finally:
+            main.is_gemini_configured = original_configured
+            main.generate_gemini_json_text = original_text
+            main.generate_gemini_json_object_with_reask = original_reask
+            main.settings.ai_stylist_contract_retry_limit = original_retry_limit
+            main.settings.ai_stylist_contract_retry_delay_seconds = original_retry_delay
+
+        self.assertEqual(calls, ["text", "text"])
+        self.assertEqual(result["selected_hero_image_ids"], [21])
+        self.assertEqual(result["hero_understanding"]["shot_category_family"], "top")
+
+    def test_ai_stylist_malformed_json_retries_until_budget_exhausted(self) -> None:
+        main = importlib.import_module("app.main")
+        input_row = {
+            "image_snapshot_json": main.dumps([
+                {"id": 21, "sortOrder": 0, "asset": {"filename": "hero-front.jpg"}},
+            ])
+        }
+        candidate_snapshot = {"candidate_material_ids": [], "library_tag_cards": []}
+        request_snapshot = {"prompt": "Return JSON.", "systemInstruction": None}
+        calls: list[str] = []
+
+        original_configured = main.is_gemini_configured
+        original_text = main.generate_gemini_json_text
+        original_reask = main.generate_gemini_json_object_with_reask
+        original_retry_limit = main.settings.ai_stylist_contract_retry_limit
+        original_retry_delay = main.settings.ai_stylist_contract_retry_delay_seconds
 
         async def fake_text(*_args: object, **_kwargs: object) -> str:
             calls.append("text")
@@ -1961,6 +2015,8 @@ class BackendCurrentFlowTests(unittest.TestCase):
         main.is_gemini_configured = lambda: True
         main.generate_gemini_json_text = fake_text
         main.generate_gemini_json_object_with_reask = fake_reask
+        main.settings.ai_stylist_contract_retry_limit = 3
+        main.settings.ai_stylist_contract_retry_delay_seconds = 0
         try:
             with self.assertRaisesRegex(Exception, "Gemini AI Stylist 调用失败") as raised:
                 asyncio.run(main.select_styling_with_gemini(input_row, candidate_snapshot, request_snapshot))
@@ -1968,9 +2024,96 @@ class BackendCurrentFlowTests(unittest.TestCase):
             main.is_gemini_configured = original_configured
             main.generate_gemini_json_text = original_text
             main.generate_gemini_json_object_with_reask = original_reask
+            main.settings.ai_stylist_contract_retry_limit = original_retry_limit
+            main.settings.ai_stylist_contract_retry_delay_seconds = original_retry_delay
+
+        self.assertEqual(calls, ["text", "text", "text", "text"])
+        self.assertEqual(main.classify_attempt_error(raised.exception), main.ERROR_MALFORMED_OUTPUT)
+
+    def test_ai_stylist_auth_error_does_not_contract_retry(self) -> None:
+        main = importlib.import_module("app.main")
+        input_row = {
+            "image_snapshot_json": main.dumps([
+                {"id": 21, "sortOrder": 0, "asset": {"filename": "hero-front.jpg"}},
+            ])
+        }
+        candidate_snapshot = {"candidate_material_ids": [], "library_tag_cards": []}
+        request_snapshot = {"prompt": "Return JSON.", "systemInstruction": None}
+        calls: list[str] = []
+
+        original_configured = main.is_gemini_configured
+        original_text = main.generate_gemini_json_text
+        original_retry_limit = main.settings.ai_stylist_contract_retry_limit
+        original_retry_delay = main.settings.ai_stylist_contract_retry_delay_seconds
+
+        async def fake_text(*_args: object, **_kwargs: object) -> str:
+            calls.append("text")
+            raise main.GeminiProviderError("auth failed", main.ERROR_AUTH_FAILED)
+
+        main.is_gemini_configured = lambda: True
+        main.generate_gemini_json_text = fake_text
+        main.settings.ai_stylist_contract_retry_limit = 3
+        main.settings.ai_stylist_contract_retry_delay_seconds = 0
+        try:
+            with self.assertRaisesRegex(Exception, "Gemini AI Stylist 调用失败") as raised:
+                asyncio.run(main.select_styling_with_gemini(input_row, candidate_snapshot, request_snapshot))
+        finally:
+            main.is_gemini_configured = original_configured
+            main.generate_gemini_json_text = original_text
+            main.settings.ai_stylist_contract_retry_limit = original_retry_limit
+            main.settings.ai_stylist_contract_retry_delay_seconds = original_retry_delay
 
         self.assertEqual(calls, ["text"])
-        self.assertEqual(main.classify_attempt_error(raised.exception), main.ERROR_MALFORMED_OUTPUT)
+        self.assertEqual(main.classify_attempt_error(raised.exception), main.ERROR_AUTH_FAILED)
+
+    def test_ai_stylist_business_reject_does_not_contract_retry(self) -> None:
+        main = importlib.import_module("app.main")
+        input_row = {
+            "image_snapshot_json": main.dumps([
+                {"id": 21, "sortOrder": 0, "asset": {"filename": "hero-front.jpg"}},
+            ])
+        }
+        candidate_snapshot = {"candidate_material_ids": [], "library_tag_cards": []}
+        request_snapshot = {"prompt": "Return JSON.", "systemInstruction": None}
+        calls: list[str] = []
+
+        original_configured = main.is_gemini_configured
+        original_text = main.generate_gemini_json_text
+        original_validate = main.validate_styling_plan
+        original_retry_limit = main.settings.ai_stylist_contract_retry_limit
+        original_retry_delay = main.settings.ai_stylist_contract_retry_delay_seconds
+
+        async def fake_text(*_args: object, **_kwargs: object) -> str:
+            calls.append("text")
+            return main.dumps({
+                "selected_files": ["hero-front.jpg"],
+                "styling_plan": {
+                    "hero_understanding": {"shot_category_family": "top"},
+                    "outfit_candidates": [{"outfit_key": "solo", "selected_material_ids": []}],
+                    "selected_outfit_key": "solo",
+                },
+            })
+
+        def fake_validate(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("AI Stylist 方案使用了不支持的塞腰穿法")
+
+        main.is_gemini_configured = lambda: True
+        main.generate_gemini_json_text = fake_text
+        main.validate_styling_plan = fake_validate
+        main.settings.ai_stylist_contract_retry_limit = 3
+        main.settings.ai_stylist_contract_retry_delay_seconds = 0
+        try:
+            with self.assertRaisesRegex(Exception, "AI Stylist 方案使用了不支持的塞腰穿法") as raised:
+                asyncio.run(main.select_styling_with_gemini(input_row, candidate_snapshot, request_snapshot))
+        finally:
+            main.is_gemini_configured = original_configured
+            main.generate_gemini_json_text = original_text
+            main.validate_styling_plan = original_validate
+            main.settings.ai_stylist_contract_retry_limit = original_retry_limit
+            main.settings.ai_stylist_contract_retry_delay_seconds = original_retry_delay
+
+        self.assertEqual(calls, ["text"])
+        self.assertIsNone(main.classify_attempt_error(raised.exception))
 
 
 if __name__ == "__main__":

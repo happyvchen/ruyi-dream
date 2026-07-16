@@ -57,6 +57,7 @@ from .image_ingestion import (
     normalized_image_key,
 )
 from .generation_progress import (
+    ERROR_AUTH_FAILED,
     ERROR_BUSINESS_REJECT,
     ERROR_DELIVERY_FAILED,
     ERROR_INSUFFICIENT_BALANCE,
@@ -5818,9 +5819,17 @@ def image_selection_prompt_files(images: list[dict[str, Any]], limit: int) -> li
     return files
 
 
+class AIStylistContractError(ValueError, RuntimeError):
+    """Gemini AI Stylist returned JSON that does not match the production contract."""
+
+
+def is_ai_stylist_contract_retryable(exc: BaseException) -> bool:
+    return classify_attempt_error(exc) == ERROR_MALFORMED_OUTPUT
+
+
 def selected_image_ids_from_files(selected_files: Any, images: list[dict[str, Any]], limit: int) -> list[int]:
     if not isinstance(selected_files, list) or not selected_files:
-        raise ValueError("selected_files 必须是非空数组")
+        raise AIStylistContractError("selected_files 必须是非空数组")
     candidates = images[:limit]
     file_to_id: dict[str, int] = {}
     filename_to_ids: dict[str, list[int]] = {}
@@ -5841,7 +5850,7 @@ def selected_image_ids_from_files(selected_files: Any, images: list[dict[str, An
     selected_ids: list[int] = []
     for raw_ref in selected_files:
         if not isinstance(raw_ref, str) or not raw_ref.strip():
-            raise ValueError("selected_files 只能包含非空字符串")
+            raise AIStylistContractError("selected_files 只能包含非空字符串")
         ref = raw_ref.strip()
         image_id = file_to_id.get(ref) or id_to_id.get(ref)
         if image_id is None:
@@ -5849,11 +5858,11 @@ def selected_image_ids_from_files(selected_files: Any, images: list[dict[str, An
             if len(matches) == 1:
                 image_id = matches[0]
             elif len(matches) > 1:
-                raise ValueError(f"selected_files 引用文件名不唯一：{ref}")
+                raise AIStylistContractError(f"selected_files 引用文件名不唯一：{ref}")
         if image_id is None:
-            raise ValueError(f"selected_files 引用了不存在的文件：{ref}")
+            raise AIStylistContractError(f"selected_files 引用了不存在的文件：{ref}")
         if image_id in selected_ids:
-            raise ValueError(f"selected_files 重复引用文件：{ref}")
+            raise AIStylistContractError(f"selected_files 重复引用文件：{ref}")
         selected_ids.append(image_id)
     return selected_ids
 
@@ -6846,30 +6855,78 @@ async def select_styling_with_gemini(
         image_input = gemini_vision_input(asset.get("objectKey"), asset.get("mimeType"))
         if image_input:
             images.append(image_input)
-    try:
-        if progress:
-            progress.begin("styling_gemini", imageCount=len(images), candidateCount=len(candidate_snapshot.get("candidate_material_ids") or []))
-        text = await generate_gemini_json_text(
-            prompt,
-            images,
-            # 系统指令已并入 AI 选搭 Prompt 正文（prompt 内），不再单独下发 system_instruction。
-            system_instruction=request_snapshot.get("systemInstruction"),
-        )
+    retry_limit = max(0, settings.ai_stylist_contract_retry_limit)
+    retry_delay = max(0.0, float(settings.ai_stylist_contract_retry_delay_seconds))
+    contract_retries = 0
+    latest_response: dict[str, Any] | None = None
+    while True:
         try:
-            raw = parse_gemini_json_object(text)
-        except Exception as parse_error:
-            raise GeminiProviderError(
-                f"Gemini 返回内容不是合法 JSON：{parse_error}",
-                ERROR_MALFORMED_OUTPUT,
-            ) from parse_error
-    except Exception as exc:
-        raise wrap_gemini_call_error("Gemini AI Stylist 调用失败", exc) from exc
-    return normalize_ai_stylist_result(raw, input_row, candidate_snapshot)
+            if progress:
+                progress.begin(
+                    "styling_gemini",
+                    imageCount=len(images),
+                    candidateCount=len(candidate_snapshot.get("candidate_material_ids") or []),
+                    contractRetry=contract_retries,
+                )
+            text = await generate_gemini_json_text(
+                prompt,
+                images,
+                # 系统指令已并入 AI 选搭 Prompt 正文（prompt 内），不再单独下发 system_instruction。
+                system_instruction=request_snapshot.get("systemInstruction"),
+            )
+            try:
+                raw = parse_gemini_json_object(text)
+            except Exception as parse_error:
+                raise GeminiProviderError(
+                    f"Gemini 返回内容不是合法 JSON：{parse_error}",
+                    ERROR_MALFORMED_OUTPUT,
+                    provider_response=latest_response or {},
+                ) from parse_error
+            latest_response = raw if isinstance(raw, dict) else {"modelRawOutput": raw}
+            try:
+                styling_plan = normalize_ai_stylist_result(raw, input_row, candidate_snapshot)
+                validate_styling_plan(styling_plan, candidate_snapshot)
+                return styling_plan
+            except AIStylistContractError as contract_error:
+                raise GeminiProviderError(
+                    f"Gemini AI Stylist 结果不符合契约：{contract_error}",
+                    ERROR_MALFORMED_OUTPUT,
+                    provider_response=latest_response,
+                ) from contract_error
+        except Exception as exc:
+            if not is_ai_stylist_contract_retryable(exc):
+                raise wrap_gemini_call_error("Gemini AI Stylist 调用失败", exc) from exc
+            if contract_retries >= retry_limit:
+                raise wrap_gemini_call_error("Gemini AI Stylist 调用失败", exc) from exc
+            contract_retries += 1
+            retry_snapshot = {
+                **(latest_response or exception_process_facts(exc)),
+                "status": "STYLING_CONTRACT_RETRY_WAIT",
+                "contractRetries": contract_retries,
+                "retryDelaySeconds": retry_delay,
+                "error": str(exc)[:500],
+            }
+            if attempt_id:
+                persist_attempt_provider_progress(attempt_id, retry_snapshot)
+            if progress:
+                progress.begin(
+                    "styling_contract_retry_wait",
+                    contractRetry=contract_retries,
+                    retryDelaySeconds=retry_delay,
+                )
+            logger.warning(
+                "Gemini AI Stylist 契约输出异常，自动重试第 %d 次，退避 %.1fs：%s",
+                contract_retries,
+                retry_delay,
+                str(exc)[:200],
+            )
+            if retry_delay > 0:
+                await asyncio.sleep(retry_delay)
 
 
 def normalize_ai_stylist_result(raw: Any, input_row: Any, candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw, dict):
-        raise ValueError("Gemini AI Stylist 结果必须是 JSON 对象")
+        raise AIStylistContractError("Gemini AI Stylist 结果必须是 JSON 对象")
     selected_image_ids = selected_image_ids_from_files(
         raw.get("selected_files"),
         loads(input_row["image_snapshot_json"], []),
@@ -6877,7 +6934,7 @@ def normalize_ai_stylist_result(raw: Any, input_row: Any, candidate_snapshot: di
     )[:MAX_HERO_SELECTED_IMAGES]
     plan_source = raw.get("styling_plan")
     if not isinstance(plan_source, dict):
-        raise ValueError("Gemini AI Stylist 结果缺少 styling_plan 对象")
+        raise AIStylistContractError("Gemini AI Stylist 结果缺少 styling_plan 对象")
     styling_plan = normalize_styling_plan(plan_source, candidate_snapshot)
     styling_plan["selected_hero_image_ids"] = selected_image_ids
     styling_plan["model_raw_output"] = raw
@@ -7439,7 +7496,7 @@ def normalize_selected_material_refs(value: Any, selected_ids: list[int], candid
 
 def validate_styling_plan(plan: dict[str, Any], candidate_snapshot: dict[str, Any]) -> None:
     if plan.get("plan_source_mode") != "fallback" and not plan.get("model_raw_output"):
-        raise RuntimeError("AI Stylist 返回空 JSON，未生成有效 StylingPlan")
+        raise AIStylistContractError("AI Stylist 返回空 JSON，未生成有效 StylingPlan")
     candidate_ids = {int(item) for item in candidate_snapshot.get("candidate_material_ids", [])}
     selected_ids = plan.get("selected_material_ids") if isinstance(plan.get("selected_material_ids"), list) else []
     selected_key = str(plan.get("selected_outfit_key") or plan.get("selected_outfit_id") or "")
@@ -7449,15 +7506,18 @@ def validate_styling_plan(plan: dict[str, Any], candidate_snapshot: dict[str, An
         if isinstance(item, dict)
     }
     if not selected_key or selected_key not in outfit_keys:
-        raise RuntimeError("AI Stylist 返回的 selected_outfit_key 不存在于 outfit_candidates")
+        raise AIStylistContractError("AI Stylist 返回的 selected_outfit_key 不存在于 outfit_candidates")
     invalid = set(int(item) for item in selected_ids) - candidate_ids
     if invalid:
-        raise RuntimeError(f"AI Stylist 返回了非法搭配服装 ID：{sorted(invalid)}")
+        raise AIStylistContractError(f"AI Stylist 返回了非法搭配服装 ID：{sorted(invalid)}")
     if len(selected_ids) != len(set(selected_ids)):
-        raise RuntimeError("AI Stylist 返回了重复搭配服装 ID")
+        raise AIStylistContractError("AI Stylist 返回了重复搭配服装 ID")
     if plan.get("plan_source_mode") == "fallback":
-        raise RuntimeError("AI Stylist 工程 fallback 方案不能进入生产链路")
-    storyboard_category_family(plan)
+        raise AIStylistContractError("AI Stylist 工程 fallback 方案不能进入生产链路")
+    try:
+        storyboard_category_family(plan)
+    except RuntimeError as exc:
+        raise AIStylistContractError(str(exc)) from exc
 
 
 def get_selected_outfit_scores(styling_plan: dict[str, Any]) -> dict[str, Any]:
