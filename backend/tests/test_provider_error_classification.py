@@ -29,6 +29,7 @@ from app.generation_progress import (  # noqa: E402
     is_balance_error,
     is_retryable_error,
     is_zero_output_transient,
+    normalize_toapis_error,
 )
 
 
@@ -80,6 +81,28 @@ class ClassifyProviderErrorTests(unittest.TestCase):
             classify_provider_error(status_code=402, body="insufficient_quota: you have run out of credit"),
             ERROR_INSUFFICIENT_BALANCE,
         )
+
+    def test_quota_not_enough_403_is_balance_not_auth(self) -> None:
+        self.assertEqual(
+            classify_provider_error(status_code=403, body="user quota is not enough"),
+            ERROR_INSUFFICIENT_BALANCE,
+        )
+        self.assertEqual(
+            classify_provider_error(status_code=403, provider_error_code="quota_not_enough", body="user quota is not enough"),
+            ERROR_INSUFFICIENT_BALANCE,
+        )
+
+    def test_normalize_quota_not_enough_403_is_balance(self) -> None:
+        normalized = normalize_toapis_error(
+            {
+                "code": "quota_not_enough",
+                "message": "user quota is not enough",
+                "data": None,
+            },
+            status_code=403,
+        )
+        self.assertEqual(normalized["code"], ERROR_INSUFFICIENT_BALANCE)
+        self.assertEqual(normalized["providerCode"], "quota_not_enough")
 
     def test_balance_beats_rate_limit(self) -> None:
         # 余额类文案即便伴随 429 也必须硬停，不能被限流分支吞成可重试。

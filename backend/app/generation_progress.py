@@ -104,6 +104,10 @@ _BALANCE_KEYWORDS = (
     "剩余额度",
     "insufficient",
     "insufficient_quota",
+    "insufficient_user_quota",
+    "quota_not_enough",
+    "quota is not enough",
+    "quota not enough",
     "quota exceeded",
     "no balance",
     "out of credit",
@@ -196,7 +200,7 @@ def normalize_toapis_error(
     codes = {str(layer.get("code") or "").lower() for layer in layers}
     types = {str(layer.get("type") or "").lower() for layer in layers}
 
-    if codes & {"insufficient_quota"} or status_code == 402:
+    if codes & {"insufficient_quota", "insufficient_user_quota", "quota_not_enough"} or status_code == 402:
         internal_code = ERROR_INSUFFICIENT_BALANCE
     elif codes & {"invalid_request"} or types & {"invalid_request", "invalid_request_error"} or status_code == 400:
         internal_code = ERROR_INVALID_REQUEST
