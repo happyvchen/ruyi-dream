@@ -110,6 +110,66 @@ class ArchiveRestoreTests(unittest.TestCase):
         self.assertEqual(client.post("/api/styling-garments/batch-restore", json={"ids": []}).status_code, 400)
         self.assertEqual(client.post("/api/generation-tasks/batch-restore", json={"ids": []}).status_code, 400)
 
+    def test_purge_generation_task_detaches_upload_session_media_reference(self) -> None:
+        main = importlib.import_module("app.main")
+        db_module = importlib.import_module("app.db")
+        timestamp = db_module.now_iso()
+        with db_module.get_db() as db:
+            db.execute(
+                """
+                INSERT INTO media_assets
+                  (id, object_key, original_filename, mime_type, status, created_at, updated_at)
+                VALUES (1, 'direct-uploads/generation-task/session/001.png', '001.png', 'image/png', 'READY', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO upload_sessions
+                  (id, scope, status, total_count, uploaded_count, target_type, target_id, created_at, updated_at)
+                VALUES ('session', 'generation-task', 'FINALIZED', 1, 1, 'generation_task', 1, ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO upload_session_items
+                  (session_id, sort_order, object_key, filename, mime_type, status, media_asset_id, created_at, updated_at)
+                VALUES ('session', 0, 'direct-uploads/generation-task/session/001.png', '001.png', 'image/png', 'READY', 1, ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_tasks (id, name, status, created_at, updated_at)
+                VALUES (1, 'TASK-1', 'DRAFT', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            db.execute(
+                """
+                INSERT INTO generation_task_images
+                  (task_id, media_asset_id, sort_order, status, created_at, updated_at)
+                VALUES (1, 1, 0, 'READY', ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+
+        client = TestClient(main.app)
+        self.assertEqual(client.post("/api/auth/login", json={"username": "user", "password": "letmein-123456"}).status_code, 200)
+
+        response = client.request("DELETE", "/api/generation-tasks/1", json={"purge": True, "confirmName": "TASK-1"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["purged"])
+        with db_module.get_db() as db:
+            task_count = db.execute("SELECT COUNT(*) AS count FROM generation_tasks").fetchone()["count"]
+            media_count = db.execute("SELECT COUNT(*) AS count FROM media_assets").fetchone()["count"]
+            upload_item = db.execute("SELECT media_asset_id FROM upload_session_items WHERE session_id = 'session'").fetchone()
+        self.assertEqual(task_count, 0)
+        self.assertEqual(media_count, 0)
+        self.assertIsNone(upload_item["media_asset_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -902,6 +902,17 @@ def media_asset_direct_reference_count(db: Any, asset_id: int) -> int:
     return int(row["count"] or 0)
 
 
+def detach_upload_session_media_assets(db: Any, asset_ids: list[int]) -> None:
+    asset_ids = list(dict.fromkeys(int(asset_id) for asset_id in asset_ids if asset_id))
+    if not asset_ids:
+        return
+    placeholders = ", ".join("?" for _ in asset_ids)
+    db.execute(
+        f"UPDATE upload_session_items SET media_asset_id = NULL WHERE media_asset_id IN ({placeholders})",
+        asset_ids,
+    )
+
+
 def release_media_asset_if_unreferenced(db: Any, asset_id: int | None) -> bool:
     if not asset_id:
         return False
@@ -913,8 +924,9 @@ def release_media_asset_if_unreferenced(db: Any, asset_id: int | None) -> bool:
     object_key = clean_key(row["object_key"])
     if media_asset_snapshot_reference_count(db, object_key) > 0:
         return False
-    cleanup_objects(image_object_keys(object_key))
+    detach_upload_session_media_assets(db, [asset_id])
     db.execute("DELETE FROM media_assets WHERE id = ?", (asset_id,))
+    cleanup_objects(image_object_keys(object_key))
     return True
 
 
@@ -2129,15 +2141,16 @@ def purge_styling_garment(db: Any, garment_id: int, code: str) -> tuple[list[int
     asset_ids = [int(image["id"]) for image in image_rows] + dependent_asset_ids
     dependent_media_rows = media_asset_rows_for_ids(db, dependent_asset_ids)
     object_keys = [media["object_key"] for media in [*image_rows, *dependent_media_rows]]
+    db.execute("DELETE FROM styling_garments WHERE id = ?", (garment_id,))
+    if asset_ids:
+        placeholders = ", ".join("?" for _ in asset_ids)
+        detach_upload_session_media_assets(db, asset_ids)
+        db.execute(f"DELETE FROM media_assets WHERE id IN ({placeholders})", asset_ids)
     cleanup_objects([
         key
         for media in [*image_rows, *dependent_media_rows]
         for key in image_object_keys(media["object_key"])
     ])
-    db.execute("DELETE FROM styling_garments WHERE id = ?", (garment_id,))
-    if asset_ids:
-        placeholders = ", ".join("?" for _ in asset_ids)
-        db.execute(f"DELETE FROM media_assets WHERE id IN ({placeholders})", asset_ids)
     cleanup_errors = cleanup_prefixes(media_cleanup_prefixes(object_keys))
     return dependent_task_ids, cleanup_errors
 
@@ -2955,7 +2968,6 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[di
     asset_ids = list(dict.fromkeys(int(row["asset_id"]) for row in asset_rows if row["asset_id"] is not None))
     media_rows = media_asset_rows_for_ids(db, asset_ids)
     object_keys = [media["object_key"] for media in media_rows]
-    cleanup_objects([key for media in media_rows for key in image_object_keys(media["object_key"])])
     db.execute(
         f"""
         DELETE FROM generation_attempts
@@ -2975,9 +2987,11 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[di
     db.execute(f"DELETE FROM generation_tasks WHERE id IN ({placeholders})", task_ids)
     if asset_ids:
         asset_placeholders = ", ".join("?" for _ in asset_ids)
+        detach_upload_session_media_assets(db, asset_ids)
         db.execute(f"DELETE FROM media_assets WHERE id IN ({asset_placeholders})", asset_ids)
     for row in rows:
         log_event(db, "generation_task", int(row["id"]), "purged", {"name": row["name"], "reason": reason})
+    cleanup_objects([key for media in media_rows for key in image_object_keys(media["object_key"])])
     return cleanup_prefixes(media_cleanup_prefixes(object_keys))
 
 
