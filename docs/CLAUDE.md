@@ -11,6 +11,7 @@
 | `user-guide.md` | 普通 user 用户视角的 Ruyi-Dream 使用教程：AI 摄影棚、搭配服装库、数字模特、生成记录、重试和版本限制 | 编写用户培训材料、客服说明、演示脚本，或确认普通用户操作口径时 |
 | `local-development.md` | 本地开发环境配置和运行说明 | 本地开发、启动前后端和 RustFS 时 |
 | `deployment.md` | 部署手册:首次部署、数据迁移、日常运维、备份恢复、故障排查、安全要点 | 部署、迁移、升级、处理线上故障时 |
+| `testing-production-gate.md` | 上线前测试门禁：本地不耗额度测试入口、k6 压测开关和人工验收边界 | 准备上线前测试、CI 门禁或解释自动化覆盖边界时 |
 | `loadtest.md` | 单机部署压测与体验评估 Runbook,配套 `scripts/loadtest/` k6 脚本 | 评估网络/存储/并发瓶颈、执行压测或分析用户体验问题时 |
 | `implementation-samples/README.md` | 实施样例索引 | 查看 Prompt 和实现样例时 |
 

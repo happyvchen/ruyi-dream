@@ -359,7 +359,7 @@ export function App() {
   const nav = [
     { id: 'studio' as const, label: 'AI 摄影棚', icon: Bot },
     { id: 'library' as const, label: '搭配服装库', icon: Library },
-    { id: 'model' as const, label: '模特与背景', icon: UserRound },
+    { id: 'model' as const, label: '数字模特', icon: UserRound },
     { id: 'records' as const, label: '生成记录', icon: History },
     ...(role === 'admin' ? [
       { id: 'prompt-maintenance' as const, label: 'Prompt 维护', icon: FileText },
@@ -3513,7 +3513,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
   return (
     <section className="page workbench-page model-shell-page">
       <PageTitle
-        title="模特与背景"
+        title="数字模特"
         subtitle="维护全局数字模特身份和拍摄空间参考，保证每次成片稳定一致。"
       />
       <div className="panel model-page">
