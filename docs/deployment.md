@@ -66,9 +66,19 @@ APP_MEDIA_PRESIGN_SAFETY_MARGIN_SECONDS=120
 
 # AI 通道
 GEMINI_PROVIDER=toapis                 # 国内无需 VPN;direct 需 GEMINI_API_KEY 且能访问 googleapis.com
+GEMINI_TOAPIS_TIMEOUT_SECONDS=300      # Gemini(ToAPIs) 读取响应超时;慢请求可适当放大
+GEMINI_TOAPIS_CONNECT_TIMEOUT_SECONDS=60 # Gemini(ToAPIs) 连接/上传请求体超时;base64 图片上行慢时重点调它
+AI_STYLIST_CONTRACT_RETRY_LIMIT=3      # AI Stylist 结果缺契约字段时的自动重问次数
+AI_STYLIST_CONTRACT_RETRY_DELAY_SECONDS=15 # AI Stylist 契约重试前等待秒数
 GPT_IMAGE2_PROVIDER=toapis
 TOAPIS_API_KEY=sk-...
 TOAPIS_MAX_CONCURRENCY=5              # ToAPIs 全局并发:Gemini/Image-2/API 上传与状态查询共享
+TOAPIS_IMAGE_SUBMIT_TIMEOUT_SECONDS=180 # Image-2 创建任务单次提交请求超时
+GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT=3  # 提交结果未知时，每张图最多对账/补提次数
+GENERATION_UNKNOWN_SUBMISSION_RETRY_DELAY_SECONDS=15 # 提交结果未知重试前等待秒数
+GENERATION_POLL_INTERVAL_SECONDS=5     # Image-2 状态轮询基础间隔
+GENERATION_SUBMIT_RETRY_LIMIT=3       # Image-2 创建任务确认失败/生成失败后的重试次数
+GENERATION_STATUS_RETRY_LIMIT=15      # 状态查询连续瞬时失败重试次数
 ```
 
 要点:

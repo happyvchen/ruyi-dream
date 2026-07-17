@@ -510,6 +510,21 @@ class ProviderSubmitContractTests(TempEnvTestCase):
         self.assertEqual(ctx.exception.provider_response["imageInputs"], uploaded)
         self.assertEqual(ctx.exception.provider_response["status"], "SUBMISSION_UNKNOWN")
 
+    def test_toapis_submit_uses_configured_submit_retry_limit(self) -> None:
+        os.environ["GENERATION_SUBMIT_RETRY_LIMIT"] = "3"
+        self._reload_settings()
+        image_provider = importlib.import_module("app.image_provider")
+        provider = image_provider.GPTImage2ToapisProvider()
+        with mock.patch.object(image_provider, "prepare_toapis_image_inputs", return_value=([], [])):
+            with mock.patch.object(image_provider, "build_toapis_request_snapshot", return_value={"model": "gpt-image-2"}):
+                with mock.patch.object(
+                    image_provider,
+                    "post_generation_task_with_confirmed_failure_retries",
+                    return_value={"id": "tsk_1", "status": "submitted"},
+                ) as submit:
+                    asyncio.run(provider.submit({"imageInputs": []}, "k/out.png"))
+        self.assertEqual(submit.call_args.kwargs["max_attempts"], 4)
+
     def test_fal_submit_response_has_no_output_path(self) -> None:
         os.environ["FAL_KEY"] = "test-fal-key"
         self._reload_settings()
@@ -556,6 +571,27 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
                 result = asyncio.run(self.main.poll_provider_until_terminal(payload, "k/out.png", attempt_id, recorder))
         self.assertEqual(result["status"], "SUCCEEDED")
         self.assertEqual(responses, [])
+
+    def test_poll_stops_after_configured_status_retry_limit(self) -> None:
+        os.environ["GENERATION_STATUS_RETRY_LIMIT"] = "1"
+        self._reload_settings()
+        attempt_id = self._insert_attempt()
+        recorder = self.progress_module.AttemptProgressRecorder(attempt_id)
+        transient = self.main.ImageProviderError(
+            "HTTP 502 bad gateway",
+            error_code=self.progress_module.ERROR_GATEWAY_5XX,
+        )
+
+        async def instant_sleep(_seconds: float) -> None:
+            return None
+
+        payload = {"providerRequestId": "tsk_1", "status": "SUBMITTED", "providerStatus": "submitted", "providerUrls": {}}
+        with mock.patch.object(self.main, "run_image_provider_check", side_effect=[transient, transient]) as check:
+            with mock.patch("asyncio.sleep", new=instant_sleep):
+                with self.assertRaises(self.main.ImageProviderError) as ctx:
+                    asyncio.run(self.main.poll_provider_until_terminal(payload, "k/out.png", attempt_id, recorder))
+        self.assertEqual(ctx.exception.error_code, self.progress_module.ERROR_GATEWAY_5XX)
+        self.assertEqual(check.call_count, 2)
 
     def test_poll_keeps_zero_progress_toapis_waiting_in_queue_phase(self) -> None:
         """ToAPIs in_progress 但 progress=0 时仍算排队，避免把后台等待误记为 AI 生成。"""
@@ -854,19 +890,35 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
             [{"role": "hero", "providerUrl": "https://files.toapis.com/ref.jpg"}],
         )
 
-    def test_explicit_generation_failed_retries_generation_once(self) -> None:
+    def test_explicit_generation_failed_retries_generation_to_configured_limit(self) -> None:
+        os.environ["GENERATION_SUBMIT_RETRY_LIMIT"] = "3"
+        self._reload_settings()
         attempt_id = self._insert_attempt()
         submits = [
             {
                 "provider": "toapis",
-                "providerRequestId": "tsk_failed",
+                "providerRequestId": "tsk_failed_0",
                 "status": "SUBMITTED",
                 "providerStatus": "submitted",
                 "imageInputs": [{"role": "hero", "providerUrl": "https://files.toapis.com/ref.jpg"}],
             },
             {
                 "provider": "toapis",
-                "providerRequestId": "tsk_retry",
+                "providerRequestId": "tsk_failed_1",
+                "status": "SUBMITTED",
+                "providerStatus": "submitted",
+                "imageInputs": [{"role": "hero", "providerUrl": "https://files.toapis.com/ref.jpg"}],
+            },
+            {
+                "provider": "toapis",
+                "providerRequestId": "tsk_failed_2",
+                "status": "SUBMITTED",
+                "providerStatus": "submitted",
+                "imageInputs": [{"role": "hero", "providerUrl": "https://files.toapis.com/ref.jpg"}],
+            },
+            {
+                "provider": "toapis",
+                "providerRequestId": "tsk_retry_3",
                 "status": "SUBMITTED",
                 "providerStatus": "submitted",
                 "imageInputs": [{"role": "hero", "providerUrl": "https://files.toapis.com/ref.jpg"}],
@@ -876,7 +928,27 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
             {
                 "status": "FAILED",
                 "providerStatus": "failed",
-                "providerRequestId": "tsk_failed",
+                "providerRequestId": "tsk_failed_0",
+                "error": "生成失败：任务处理失败",
+                "providerStatusResponse": {
+                    "status": "failed",
+                    "error": {"code": "generation_failed", "message": "生成失败：任务处理失败"},
+                },
+            },
+            {
+                "status": "FAILED",
+                "providerStatus": "failed",
+                "providerRequestId": "tsk_failed_1",
+                "error": "生成失败：任务处理失败",
+                "providerStatusResponse": {
+                    "status": "failed",
+                    "error": {"code": "generation_failed", "message": "生成失败：任务处理失败"},
+                },
+            },
+            {
+                "status": "FAILED",
+                "providerStatus": "failed",
+                "providerRequestId": "tsk_failed_2",
                 "error": "生成失败：任务处理失败",
                 "providerStatusResponse": {
                     "status": "failed",
@@ -886,7 +958,7 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
             {
                 "status": "SUCCEEDED",
                 "providerStatus": "completed",
-                "providerRequestId": "tsk_retry",
+                "providerRequestId": "tsk_retry_3",
                 "providerStatusResponse": {"status": "completed"},
             },
         ]
@@ -909,9 +981,9 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
                                 )
 
         self.assertEqual(asset_id, 101)
-        self.assertEqual(submit.call_count, 2)
-        self.assertEqual(payload["providerRequestHistory"], ["tsk_failed", "tsk_retry"])
-        self.assertEqual(payload["generationRetries"], 1)
+        self.assertEqual(submit.call_count, 4)
+        self.assertEqual(payload["providerRequestHistory"], ["tsk_failed_0", "tsk_failed_1", "tsk_failed_2", "tsk_retry_3"])
+        self.assertEqual(payload["generationRetries"], 3)
 
     def test_nested_invalid_request_does_not_retry_generation(self) -> None:
         attempt_id = self._insert_attempt()
@@ -974,9 +1046,9 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
         attempt_id = self._insert_attempt(provider_request_id="tsk_2")
         resume = {
             "provider": "toapis",
-            "providerRequestId": "tsk_2",
-            "providerRequestHistory": ["tsk_1", "tsk_2"],
-            "generationRetries": 1,
+            "providerRequestId": "tsk_4",
+            "providerRequestHistory": ["tsk_1", "tsk_2", "tsk_3", "tsk_4"],
+            "generationRetries": 3,
             "status": "SUBMITTED",
             "providerStatus": "submitted",
         }
@@ -990,7 +1062,7 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
         async def instant_sleep(_seconds: float) -> None:
             return None
 
-        failed = {"status": "FAILED", "providerStatus": "failed", "providerRequestId": "tsk_2", "error": "502 bad gateway"}
+        failed = {"status": "FAILED", "providerStatus": "failed", "providerRequestId": "tsk_4", "error": "502 bad gateway"}
         with mock.patch.object(self.main, "run_image_provider_submit") as submit:
             with mock.patch.object(self.main, "run_image_provider_check", return_value=failed):
                 with mock.patch("asyncio.sleep", new=instant_sleep):
@@ -1040,6 +1112,7 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
         self.assertEqual(payload["providerRequestId"], "tsk_retry")
 
     def test_unknown_submission_retry_budget_exhaustion_stops_after_two_posts(self) -> None:
+        os.environ["GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT"] = "1"
         os.environ["GENERATION_UNKNOWN_SUBMISSION_RETRY_DELAY_SECONDS"] = "0"
         self._reload_settings()
         attempt_id = self._insert_attempt()
@@ -1064,12 +1137,6 @@ class GenerateImageAssetPipelineTests(TempEnvTestCase):
         self.assertEqual(ctx.exception.error_code, self.progress_module.ERROR_SUBMISSION_UNKNOWN)
         self.assertEqual(ctx.exception.provider_response["unknownSubmissionRetries"], 1)
         self.assertEqual(submit.call_count, 2)
-
-    def test_submission_unknown_batch_guard_breaks_on_second_unknown(self) -> None:
-        guard = self.main.SubmissionUnknownRetryGuard(2)
-        self.assertTrue(guard.allow_retry())
-        self.assertFalse(guard.allow_retry())
-        self.assertFalse(guard.allow_retry())
 
     def test_resubmission_clears_old_provider_id_before_new_post(self) -> None:
         attempt_id = self._insert_attempt(provider_request_id="tsk_old")

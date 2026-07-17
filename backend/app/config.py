@@ -112,12 +112,9 @@ class Settings:
     )
     # Image-2 创建任务单次请求超时；独立于生成轮询总预算。
     toapis_image_submit_timeout_seconds = int(os.getenv("TOAPIS_IMAGE_SUBMIT_TIMEOUT_SECONDS", "180"))
-    # 创建请求响应未知时的用户无感自动恢复：单镜头重试次数、退避和同批熔断阈值。
-    generation_unknown_submission_retry_limit = int(os.getenv("GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT", "1"))
+    # 创建请求响应未知时的用户无感自动恢复：单镜头重试次数和退避。
+    generation_unknown_submission_retry_limit = int(os.getenv("GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT", "3"))
     generation_unknown_submission_retry_delay_seconds = float(os.getenv("GENERATION_UNKNOWN_SUBMISSION_RETRY_DELAY_SECONDS", "15"))
-    generation_unknown_submission_batch_circuit_breaker = int(
-        os.getenv("GENERATION_UNKNOWN_SUBMISSION_BATCH_CIRCUIT_BREAKER", "2")
-    )
     gpt_image2_quality = os.getenv("GPT_IMAGE2_QUALITY", "high")
     gpt_image2_output_format = os.getenv("GPT_IMAGE2_OUTPUT_FORMAT", "png")
     gpt_image2_size = os.getenv("GPT_IMAGE2_SIZE", "1:1")
@@ -129,9 +126,11 @@ class Settings:
     generation_poll_interval_seconds = float(os.getenv("GENERATION_POLL_INTERVAL_SECONDS", "5"))
     generation_lock_ttl_seconds = int(os.getenv("GENERATION_LOCK_TTL_SECONDS", "120"))
     generation_image_timeout_seconds = int(os.getenv("GENERATION_IMAGE_TIMEOUT_SECONDS", str(30 * 60)))
+    # Image-2 任务提交/重建重试次数；0 表示只尝试原始提交，不自动重试。
     generation_submit_retry_limit = int(os.getenv("GENERATION_SUBMIT_RETRY_LIMIT", "3"))
     # 一键成片（auto-run）使用 TOAPIS_MAX_CONCURRENCY 作为外部模型并发预算，不再单独配置。
-    generation_status_retry_limit = int(os.getenv("GENERATION_STATUS_RETRY_LIMIT", "6"))
+    # 状态查询连续瞬时失败重试次数；0 表示首次状态查询失败即停止。
+    generation_status_retry_limit = int(os.getenv("GENERATION_STATUS_RETRY_LIMIT", "15"))
     # 参考图上传阶段总预算（不含单文件请求自身的超时）。
     generation_upload_timeout_seconds = int(os.getenv("GENERATION_UPLOAD_TIMEOUT_SECONDS", str(5 * 60)))
     # 成片回传（下载+入库+缩略图）阶段总预算；provider 已成功，此阶段内自动退避重试。
@@ -170,12 +169,10 @@ class Settings:
             raise RuntimeError("GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT must be greater than or equal to 0.")
         if self.generation_unknown_submission_retry_delay_seconds < 0:
             raise RuntimeError("GENERATION_UNKNOWN_SUBMISSION_RETRY_DELAY_SECONDS must be greater than or equal to 0.")
-        if self.generation_unknown_submission_batch_circuit_breaker <= 0:
-            raise RuntimeError("GENERATION_UNKNOWN_SUBMISSION_BATCH_CIRCUIT_BREAKER must be greater than 0.")
-        if self.generation_submit_retry_limit <= 0:
-            raise RuntimeError("GENERATION_SUBMIT_RETRY_LIMIT must be greater than 0.")
-        if self.generation_status_retry_limit <= 0:
-            raise RuntimeError("GENERATION_STATUS_RETRY_LIMIT must be greater than 0.")
+        if self.generation_submit_retry_limit < 0:
+            raise RuntimeError("GENERATION_SUBMIT_RETRY_LIMIT must be greater than or equal to 0.")
+        if self.generation_status_retry_limit < 0:
+            raise RuntimeError("GENERATION_STATUS_RETRY_LIMIT must be greater than or equal to 0.")
         if self.toapis_max_concurrency <= 0:
             raise RuntimeError("TOAPIS_MAX_CONCURRENCY must be greater than 0.")
         if self.generation_upload_timeout_seconds <= 0:

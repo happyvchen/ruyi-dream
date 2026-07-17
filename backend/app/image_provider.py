@@ -303,6 +303,7 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
                 auth_scheme="Bearer",
                 error_label="GPT Image-2 toapis 请求失败",
                 timeout_seconds=settings.toapis_image_submit_timeout_seconds,
+                max_attempts=settings.generation_submit_retry_limit + 1,
             )
         except ProviderSubmissionUnknownError as exc:
             exc.provider_response = {

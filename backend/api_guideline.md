@@ -69,7 +69,7 @@ ABANDONED
 
 `error` 是普通用户契约，前端不得自行解析 provider 原始字符串。admin-only attempt 技术详情额外返回 `technicalMessage`、`requestFacts`、`responseFacts`；其中可包含 ToAPIs 顶层错误、内嵌上游错误和 providerRequestId，但不得进入普通任务列表。
 
-重试必须按错误类别和阶段决策：参数、鉴权、余额、内容策略与业务拒绝不重试；提交结果未知先按 `client_business_id` 对账；状态查询只容忍网络/网关/限流类瞬时错误；明确的 provider 内部生成失败最多重建一次；回传失败只重新下载，不重新生成。
+重试必须按错误类别和阶段决策：参数、鉴权、余额、内容策略与业务拒绝不重试；提交结果未知先按 `client_business_id` 对账；状态查询只容忍网络/网关/限流类瞬时错误并受 `GENERATION_STATUS_RETRY_LIMIT` 约束；明确的 provider 内部生成失败按 `GENERATION_SUBMIT_RETRY_LIMIT` 有限重建；回传失败只重新下载，不重新生成。
 
 ## Prompt 维护槽位
 

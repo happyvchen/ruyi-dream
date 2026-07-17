@@ -26,8 +26,8 @@
 
 - 参考图上传失败只重试失败上传，已成功上传的 provider URL 通过缓存或 attempt 快照复用。
 - 每个图片 attempt / 生成重试轮次向 ToAPIs 传稳定 `client_business_id`。创建任务遇到连接中断、`ReadTimeout` 或 TLS EOF 时标记为 `SUBMISSION_UNKNOWN`，默认等待 15 秒后先按该业务 ID 查询原任务；查到即继续，明确 `task_not_found` 才补提，查询仍不确定时停止，避免重复任务和重复计费。
-- 同批成片累计 2 次提交未知后触发熔断，后续镜头不再放大自动重提；阈值可通过环境变量调整。
-- 已取得 provider task ID 后只恢复状态查询；provider 明确瞬时生成失败时仅重试生成阶段。
+- 提交结果未知按每张图自己的 `GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT` 预算恢复，不再设置同批提交未知熔断器。
+- 已取得 provider task ID 后只恢复状态查询；provider 明确瞬时生成失败时仅按 `GENERATION_SUBMIT_RETRY_LIMIT` 重建生成任务。
 - provider 成功后的下载失败只重试下载；本地对象存储、数据或代码错误标记为 `SYSTEM_ERROR`，不自动重试。
 - 提交未知、生成重试次数和 provider ID 历史均持久化在 attempt 快照中，自动恢复预算耗尽后才向用户呈现部分失败。
 
@@ -45,8 +45,8 @@ ToAPIs 图片任务是异步协议：创建接口返回任务 ID，状态接口�
 | `task_not_found` / HTTP 404 | `TASK_NOT_FOUND` | 重新创建任务 | 不重复查询；仅用于提交未知对账后补提 |
 | `content_policy_violation` / HTTP 422 | `CONTENT_POLICY_VIOLATION` | 调整素材或文字要求 | 不重试 |
 | `rate_limit_exceeded` / HTTP 429 | `RATE_LIMITED` | 等待 | 尊重 `Retry-After`，有限退避 |
-| `internal_error` / HTTP 500 | `PROVIDER_INTERNAL_ERROR` | 稍后再试 | 图片生成有限重建一次 |
-| 异步 `generation_failed`，且无更深层不可重试原因 | `PROVIDER_GENERATION_FAILED` | 再次生成 | 图片生成有限重建一次 |
+| `internal_error` / HTTP 500 | `PROVIDER_INTERNAL_ERROR` | 稍后再试 | 按 `GENERATION_SUBMIT_RETRY_LIMIT` 有限重建 |
+| 异步 `generation_failed`，且无更深层不可重试原因 | `PROVIDER_GENERATION_FAILED` | 再次生成 | 按 `GENERATION_SUBMIT_RETRY_LIMIT` 有限重建 |
 
 API 摘要返回稳定 `error={code,title,message,action,retryable}`；普通用户只看可读标题、具体原因和下一步。数据库与 admin 技术详情保留原始 `technicalMessage`、provider 快照、顶层/上游错误码和 providerRequestId。
 

@@ -301,7 +301,7 @@ def classify_provider_error(
         return ERROR_AUTH_FAILED
 
     # provider 已返回任务 ID，随后在生成阶段明确失败。此时不存在重复提交未知，
-    # 可以由编排层按既有 PROVIDER_GENERATION_RETRY_LIMIT 有限重建任务。
+    # 可以由编排层按 GENERATION_SUBMIT_RETRY_LIMIT 有限重建任务。
     if provider_error_code.strip().lower() == "generation_failed":
         return ERROR_PROVIDER_GENERATION_FAILED
 
@@ -356,7 +356,7 @@ def is_retryable_error(error_code: str | None) -> bool:
 
 
 def is_generation_retryable_error(error_code: str | None) -> bool:
-    """已拿到 task ID 后，哪些失败允许重建一次生成任务。"""
+    """已拿到 task ID 后，哪些失败允许按配置重建生成任务。"""
     return error_code in {
         ERROR_PROVIDER_GENERATION_FAILED,
         ERROR_PROVIDER_INTERNAL,
