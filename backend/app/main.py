@@ -6148,7 +6148,7 @@ def selected_image_ids_from_files(selected_files: Any, images: list[dict[str, An
 def apply_styling_garment_selected_image_order(db: Any, garment_id: int, selected_image_ids: list[int], timestamp: str) -> None:
     rows = db.execute(
         """
-        SELECT id, sort_order
+        SELECT id, media_asset_id, sort_order
         FROM styling_garment_images
         WHERE styling_garment_id = ? AND deleted_at IS NULL
         ORDER BY sort_order, id
@@ -6167,11 +6167,11 @@ def apply_styling_garment_selected_image_order(db: Any, garment_id: int, selecte
         )
     unselected_ids = [image_id for image_id in existing_ids if image_id not in selected_set]
     if unselected_ids:
+        asset_ids_by_image_id = {int(row["id"]): int(row["media_asset_id"]) for row in rows if row["media_asset_id"] is not None}
         placeholders = ",".join("?" for _ in unselected_ids)
-        db.execute(
-            f"UPDATE styling_garment_images SET deleted_at = ?, updated_at = ? WHERE styling_garment_id = ? AND id IN ({placeholders})",
-            (timestamp, timestamp, garment_id, *unselected_ids),
-        )
+        db.execute(f"DELETE FROM styling_garment_images WHERE styling_garment_id = ? AND id IN ({placeholders})", (garment_id, *unselected_ids))
+        for image_id in unselected_ids:
+            release_media_asset_if_unreferenced(db, asset_ids_by_image_id.get(image_id))
 
 
 def apply_generation_input_selected_image_order(db: Any, input_version_id: int, selected_image_ids: list[int]) -> None:
