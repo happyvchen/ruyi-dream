@@ -348,6 +348,22 @@ export type DeleteImpact = {
   dependentTaskImpact?: DeleteImpact
 }
 
+export type ObjectCleanupError = {
+  prefix?: string
+  key?: string
+  error: string
+}
+
+export type DeleteOperationResult = {
+  ok: boolean
+  archived?: boolean
+  purged?: boolean
+  ids?: number[]
+  deletedGarmentIds?: number[]
+  deletedTaskIds?: number[]
+  objectCleanupErrors?: ObjectCleanupError[]
+}
+
 export type FinalImageExportIssue = {
   sortOrder: number
   shotLabel: string
@@ -647,12 +663,12 @@ export const api = {
   deleteStylingGarmentImage: (id: number) =>
     request<{ item: StylingGarment }>(`/api/styling-garment-images/${id}`, { method: 'DELETE' }),
   deleteStylingGarment: (id: number, options?: { purge?: boolean; confirmCode?: string }) =>
-    request<{ ok: boolean; archived?: boolean; purged?: boolean }>(
+    request<DeleteOperationResult>(
       params(`/api/styling-garments/${id}`, { purge: options?.purge, confirmCode: options?.confirmCode }),
       { method: 'DELETE' },
     ),
   deleteStylingGarments: (ids: number[], options?: { purge?: boolean; confirmPhrase?: string }) =>
-    request<{ ok: boolean; archived?: boolean; purged?: boolean; ids?: number[]; deletedGarmentIds?: number[]; deletedTaskIds?: number[] }>(
+    request<DeleteOperationResult>(
       '/api/styling-garments/batch-delete',
       { method: 'POST', body: JSON.stringify({ ids, purge: options?.purge, confirmPhrase: options?.confirmPhrase }) },
     ),
@@ -683,9 +699,9 @@ export const api = {
   cancelTask: (id: number) =>
     request<{ ok: boolean; cancelled: boolean; item: GenerationTask }>(`/api/generation-tasks/${id}/cancel`, { method: 'POST' }),
   deleteTask: (id: number, confirmName: string) =>
-    request<{ ok: boolean; purged: boolean; deletedTaskIds: number[] }>(`/api/generation-tasks/${id}`, { method: 'DELETE', body: JSON.stringify({ purge: true, confirmName }) }),
+    request<DeleteOperationResult>(`/api/generation-tasks/${id}`, { method: 'DELETE', body: JSON.stringify({ purge: true, confirmName }) }),
   deleteTasks: (ids: number[], confirmPhrase: string) =>
-    request<{ ok: boolean; purged: boolean; deletedTaskIds: number[] }>('/api/generation-tasks/batch-purge', { method: 'POST', body: JSON.stringify({ purge: true, ids, confirmPhrase }) }),
+    request<DeleteOperationResult>('/api/generation-tasks/batch-purge', { method: 'POST', body: JSON.stringify({ purge: true, ids, confirmPhrase }) }),
   getTaskDeleteImpact: (ids: number[]) =>
     request<{ impact: DeleteImpact }>('/api/generation-tasks/delete-impact', { method: 'POST', body: JSON.stringify({ ids }) }),
   createTask: async (

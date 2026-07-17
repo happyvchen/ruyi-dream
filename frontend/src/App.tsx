@@ -40,7 +40,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { ApiError, api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl } from './api'
-import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot } from './api'
+import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot } from './api'
 import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { friendlyErrorText } from './lib/errorMessages'
@@ -315,6 +315,12 @@ export function App() {
     }
   }
 
+  function noteDeleteOperationResult(result: DeleteOperationResult) {
+    const cleanupErrors = result.objectCleanupErrors ?? []
+    if (!cleanupErrors.length) return
+    setError(`记录已删除，但有 ${cleanupErrors.length} 处对象存储文件未清理完成。请稍后重试清理或交由管理员处理。`)
+  }
+
   function markAuthExpired() {
     window.localStorage.setItem(authSeenStorageKey, '1')
     setLoginNotice(authExpiredMessage)
@@ -399,10 +405,10 @@ export function App() {
         {error && <div className="toast">{error.length > 300 ? `${error.slice(0, 300)}…` : error}</div>}
         {busy && <BusyPill label={busy} />}
         {page === 'studio' && <StudioPage task={task} setTask={setTask} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
-        {page === 'library' && <LibraryPage garments={garments} run={run} role={role} />}
+        {page === 'library' && <LibraryPage garments={garments} run={run} role={role} onDeleteResult={noteDeleteOperationResult} />}
         {page === 'model' && <ModelPage models={models} role={role} run={run} />}
         {page === 'prompt-maintenance' && role === 'admin' && <PromptMaintenancePage run={run} />}
-        {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} openTaskInStudio={openTaskInStudio} run={run} />}
+        {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} openTaskInStudio={openTaskInStudio} run={run} onDeleteResult={noteDeleteOperationResult} />}
       </main>
     </div>
   )
@@ -841,7 +847,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
                 <div key={item.id} className={`mini-row view-only ${task?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
                   <button onClick={() => openRecentTask(item)} title="恢复拍摄任务">
                     <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
-                    <span className="recent-task-copy"><strong>{item.name}</strong><span className="recent-task-meta"><em>{item.archivedAt ? '已归档' : taskListStatusLabel(item)}</em><time dateTime={item.createdAt}>{dateText(item.createdAt)}</time></span></span>
+                    <span className="recent-task-copy"><strong>{item.name}</strong><span className="recent-task-meta"><em>{item.archivedAt ? archiveStateText(item.archiveReason) : taskListStatusLabel(item)}</em><time dateTime={item.createdAt}>{dateText(item.createdAt)}</time></span></span>
                   </button>
                 </div>
               ))}
@@ -2059,7 +2065,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   )
 }
 
-function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run: any; role: SessionRole | null }) {
+function LibraryPage({ garments, run, role, onDeleteResult }: { garments: StylingGarment[]; run: any; role: SessionRole | null; onDeleteResult: (result: DeleteOperationResult) => void }) {
   const [libraryResultsElement, setLibraryResultsElement] = useState<HTMLDivElement | null>(null)
   const autoPageSize = useAutoGarmentPageSize(libraryResultsElement)
   const [query, setQuery] = useState('')
@@ -2224,7 +2230,8 @@ function LibraryPage({ garments, run, role }: { garments: StylingGarment[]; run:
     setDeleteGarmentDialog(null)
     setDeleteGarmentImpact(null)
     setItems((current) => current.filter((item) => !ids.includes(item.id)))
-    void run(purge ? '彻底删除搭配服装中...' : '归档搭配服装中...', action, () => {
+    void run(purge ? '彻底删除搭配服装中...' : '归档搭配服装中...', action, (result: DeleteOperationResult) => {
+      onDeleteResult(result)
       if (detail && ids.includes(detail.id)) setDetail(null)
       setSelectedGarmentIds(new Set())
       void refreshLibraryPage().catch(() => undefined)
@@ -3808,12 +3815,13 @@ function PromptNavGroup({ title, items, activeKey, onSelect }: { title: string; 
 
 type RecordViewMode = 'all' | 'batches' | 'tasks'
 
-function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
+function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDeleteResult }: {
   records: GenerationTask[]
   detail: GenerationTask | null
   setDetail: Dispatch<SetStateAction<GenerationTask | null>>
   openTaskInStudio: (task: GenerationTask) => void
   run: any
+  onDeleteResult: (result: DeleteOperationResult) => void
 }) {
   const recordListBodyRef = useRef<HTMLDivElement | null>(null)
   const autoPageSize = useAutoRecordPageSize(recordListBodyRef)
@@ -4237,7 +4245,8 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
     setDeleteRecordDialog(null)
     setDeleteRecordImpact(null)
     setItems((current) => current.filter((item) => !ids.includes(item.id)))
-    void run(purge ? '彻底删除记录中...' : '归档记录中...', action, () => {
+    void run(purge ? '彻底删除记录中...' : '归档记录中...', action, (result: DeleteOperationResult) => {
+      onDeleteResult(result)
       clearRecordDetailIfAffected(ids)
       setSelectedRecordIds(new Set())
       refreshAffectedBatchViews(items)
@@ -4538,7 +4547,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run }: {
               <button className="management-action" type="button" disabled={downloadChecking} onClick={() => startSingleRecordDownload(detail)}>
                 <Download size={14} /> {downloadChecking ? '检查成片中...' : '下载成片'}
               </button>
-              {detail.archivedAt && <button className="management-action" onClick={() => restoreRecords([detail])}>恢复归档</button>}
+              {detail.archivedAt && <button className="management-action" disabled={detail.archiveReason === 'deletion_pending'} onClick={() => restoreRecords([detail])}>{archivedRestoreText(detail.archiveReason)}</button>}
             </>
           ) : <EmptyState title="选择一条记录" text="查看分镜预览、搭配服装和最终成片。" />}
         </div>
@@ -4604,14 +4613,14 @@ function TaskRecordRow({ item, active, bulkMode, selected, onSelect, onOpen, onO
       {bulkMode && <BulkCheckbox checked={selected} disabled={isTaskRunning(item)} label={`选择 ${item.name}`} onChange={(checked) => onSelect(item.id, checked)} />}
       <button className="record-open" aria-current={active ? 'true' : undefined} title="查看记录详情" onClick={() => onOpen(item)}>
         <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
-        <div><strong>{item.name}</strong><span>{item.archivedAt ? '已归档' : statusText(item.status)} · {dateText(item.createdAt)}</span></div>
+        <div><strong>{item.name}</strong><span>{item.archivedAt ? archiveStateText(item.archiveReason) : statusText(item.status)} · {dateText(item.createdAt)}</span></div>
         <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
       </button>
       <button className="task-action record-action-button" onClick={() => onOpenStudio(item)} title="回到 AI 摄影棚恢复该任务">
         <TaskResumeActionContent task={item} />
       </button>
-      <button className="management-action record-action-button" onClick={() => onManage(item)}>
-        {isTaskRunning(item) ? '取消生成' : item.archivedAt ? '恢复归档' : '归档'}
+      <button className="management-action record-action-button" disabled={item.archiveReason === 'deletion_pending'} onClick={() => onManage(item)}>
+        {isTaskRunning(item) ? '取消生成' : item.archivedAt ? archivedRestoreText(item.archiveReason) : '归档'}
       </button>
     </div>
   )
@@ -5086,7 +5095,7 @@ function GarmentCard({ item, onTag, onOpen, onDelete, onRestore, selected, onSel
       <div className="garment-cover">
         <AssetThumb asset={item.images?.[0]?.asset ?? item.coverAsset ?? (item.coverUrl ? { id: item.id, objectKey: '', filename: item.code, mimeType: '', thumbUrl: item.coverUrl } : null)} large />
         {tagging && <span className="cover-badge">识别中</span>}
-        {item.archivedAt && <span className="cover-badge">已归档</span>}
+        {item.archivedAt && <span className="cover-badge">{archiveStateText(item.archiveReason)}</span>}
       </div>
       <div className="garment-card-head"><strong title={item.code}>{item.code}</strong><span className={`status ${item.status.toLowerCase()}`}>{taggingIssue?.badge ?? garmentStatus(item.status)}</span></div>
       {taggingIssue && <span className="inline-error">{taggingIssue.title}</span>}
@@ -5098,7 +5107,7 @@ function GarmentCard({ item, onTag, onOpen, onDelete, onRestore, selected, onSel
       </div>
       <div className="card-actions">
         {onOpen && <button className="management-action" onClick={onOpen}><Eye size={16} /> 详情</button>}
-        {item.archivedAt ? onRestore && <button className="management-action" disabled={tagging} onClick={onRestore}><RefreshCw size={16} /> 恢复归档</button> : onDelete && <button className="management-action" disabled={tagging} onClick={onDelete}><Trash2 size={16} /> 归档</button>}
+        {item.archivedAt ? onRestore && <button className="management-action" disabled={tagging || item.archiveReason === 'deletion_pending'} onClick={onRestore}><RefreshCw size={16} /> {archivedRestoreText(item.archiveReason)}</button> : onDelete && <button className="management-action" disabled={tagging} onClick={onDelete}><Trash2 size={16} /> 归档</button>}
         {onTag && <button className="management-action" disabled={tagging} onClick={onTag}><RotateCcw size={16} /> 识别标签</button>}
       </div>
     </div>
@@ -5287,15 +5296,15 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
           <button className="management-action" disabled={tagging || !dirty || !working.length} onClick={() => void save(true)}>保存并重新识别标签</button>
         </div>
         <div className="danger-zone">
-          <strong>{item.archivedAt ? '恢复归档' : '归档'}</strong>
-          <button className="management-action" disabled={tagging} onClick={() => {
+          <strong>{item.archivedAt ? archivedRestoreText(item.archiveReason) : '归档'}</strong>
+          <button className="management-action" disabled={tagging || item.archiveReason === 'deletion_pending'} onClick={() => {
             if (item.archivedAt) {
               onRestore()
             } else {
               onDelete()
               onClose()
             }
-          }}>{item.archivedAt ? '恢复归档' : '归档'}</button>
+          }}>{item.archivedAt ? archivedRestoreText(item.archiveReason) : '归档'}</button>
         </div>
       </aside>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
@@ -6508,6 +6517,17 @@ function statusText(status: string) {
     SUCCEEDED: '成功',
   }
   return map[status] ?? status
+}
+
+function archiveStateText(reason?: string | null) {
+  if (reason === 'deletion_pending') return '删除中'
+  if (reason === 'deletion_failed') return '删除失败'
+  return '已归档'
+}
+
+function archivedRestoreText(reason?: string | null) {
+  if (reason === 'deletion_failed') return '恢复后重试'
+  return '恢复归档'
 }
 
 function recordStatusText(status: string) {

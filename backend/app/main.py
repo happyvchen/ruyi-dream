@@ -1855,9 +1855,25 @@ def delete_styling_garment(
         if purge and confirm_code != row["code"]:
             raise HTTPException(status_code=400, detail="请输入完整 code 以确认删除关联记录和文件")
         if purge:
-            deleted_task_ids, cleanup_errors = purge_styling_garment(db, garment_id, row["code"])
-            log_event(db, "styling_garment", garment_id, "purged", {"code": row["code"], "deletedTaskIds": deleted_task_ids})
-            return {"ok": True, "purged": True, "deletedTaskIds": deleted_task_ids, "objectCleanupErrors": cleanup_errors}
+            dependent_task_ids = dependent_task_ids_for_styling_garments(db, [garment_id])
+            mark_styling_garments_deletion_state(db, [garment_id], "deletion_pending")
+            if dependent_task_ids:
+                mark_generation_tasks_deletion_state(db, dependent_task_ids, "deletion_pending")
+    if purge:
+        try:
+            with get_db() as db:
+                deleted_task_ids, object_keys = purge_styling_garment(db, garment_id, row["code"])
+                log_event(db, "styling_garment", garment_id, "purged", {"code": row["code"], "deletedTaskIds": deleted_task_ids})
+        except Exception as exc:
+            with suppress(Exception):
+                with get_db() as db:
+                    mark_styling_garments_deletion_state(db, [garment_id], "deletion_failed")
+                    if dependent_task_ids:
+                        mark_generation_tasks_deletion_state(db, dependent_task_ids, "deletion_failed")
+            raise HTTPException(status_code=409, detail="彻底删除未完成，记录已保留在已归档，可恢复后重试") from exc
+        cleanup_errors = cleanup_deleted_media_objects(object_keys)
+        return {"ok": True, "purged": True, "deletedTaskIds": deleted_task_ids, "objectCleanupErrors": cleanup_errors}
+    with get_db() as db:
         archive_styling_garments(db, [garment_id], "user_archived")
         log_event(db, "styling_garment", garment_id, "archived", {"code": row["code"]})
     return {"ok": True, "archived": True}
@@ -1873,20 +1889,36 @@ def delete_styling_garments(payload: StylingGarmentDeleteRequest) -> dict[str, A
         if payload.purge:
             if payload.confirmPhrase != "全部删除":
                 raise HTTPException(status_code=400, detail="请输入“全部删除”以确认批量删除")
+            dependent_task_ids = dependent_task_ids_for_styling_garments(db, garment_ids)
+            mark_styling_garments_deletion_state(db, garment_ids, "deletion_pending")
+            if dependent_task_ids:
+                mark_generation_tasks_deletion_state(db, dependent_task_ids, "deletion_pending")
+    if payload.purge:
+        try:
             deleted_task_ids: list[int] = []
-            cleanup_errors: list[dict[str, str]] = []
-            for row in rows:
-                task_ids, errors = purge_styling_garment(db, int(row["id"]), row["code"])
-                deleted_task_ids.extend(task_ids)
-                cleanup_errors.extend(errors)
-                log_event(db, "styling_garment", int(row["id"]), "purged", {"code": row["code"], "batch": True, "deletedTaskIds": task_ids})
-            return {
-                "ok": True,
-                "purged": True,
-                "deletedGarmentIds": garment_ids,
-                "deletedTaskIds": list(dict.fromkeys(deleted_task_ids)),
-                "objectCleanupErrors": cleanup_errors,
-            }
+            object_keys: list[str] = []
+            with get_db() as db:
+                for row in rows:
+                    task_ids, keys = purge_styling_garment(db, int(row["id"]), row["code"])
+                    deleted_task_ids.extend(task_ids)
+                    object_keys.extend(keys)
+                    log_event(db, "styling_garment", int(row["id"]), "purged", {"code": row["code"], "batch": True, "deletedTaskIds": task_ids})
+        except Exception as exc:
+            with suppress(Exception):
+                with get_db() as db:
+                    mark_styling_garments_deletion_state(db, garment_ids, "deletion_failed")
+                    if dependent_task_ids:
+                        mark_generation_tasks_deletion_state(db, dependent_task_ids, "deletion_failed")
+            raise HTTPException(status_code=409, detail="彻底删除未完成，记录已保留在已归档，可恢复后重试") from exc
+        cleanup_errors = cleanup_deleted_media_objects(object_keys)
+        return {
+            "ok": True,
+            "purged": True,
+            "deletedGarmentIds": garment_ids,
+            "deletedTaskIds": list(dict.fromkeys(deleted_task_ids)),
+            "objectCleanupErrors": cleanup_errors,
+        }
+    with get_db() as db:
         archive_styling_garments(db, garment_ids, "user_batch_archived")
         for row in rows:
             log_event(db, "styling_garment", int(row["id"]), "archived", {"code": row["code"], "batch": True})
@@ -2062,6 +2094,22 @@ def archive_styling_garments(db: Any, garment_ids: list[int], reason: str) -> No
     )
 
 
+def mark_styling_garments_deletion_state(db: Any, garment_ids: list[int], reason: str) -> None:
+    garment_ids = normalized_styling_garment_ids(garment_ids)
+    timestamp = now_iso()
+    placeholders = ", ".join("?" for _ in garment_ids)
+    db.execute(
+        f"""
+        UPDATE styling_garments
+        SET archived_at = COALESCE(archived_at, ?),
+            archive_reason = ?,
+            updated_at = ?
+        WHERE id IN ({placeholders}) AND deleted_at IS NULL
+        """,
+        (timestamp, reason, timestamp, *garment_ids),
+    )
+
+
 def restore_styling_garments(db: Any, garment_ids: list[int]) -> None:
     garment_ids = normalized_styling_garment_ids(garment_ids)
     placeholders = ", ".join("?" for _ in garment_ids)
@@ -2071,7 +2119,28 @@ def restore_styling_garments(db: Any, garment_ids: list[int]) -> None:
     )
 
 
-def purge_styling_garment(db: Any, garment_id: int, code: str) -> tuple[list[int], list[dict[str, str]]]:
+def mark_generation_tasks_deletion_state(db: Any, task_ids: list[int], reason: str) -> None:
+    task_ids = normalized_task_ids(task_ids)
+    timestamp = now_iso()
+    placeholders = ", ".join("?" for _ in task_ids)
+    db.execute(
+        f"""
+        UPDATE generation_tasks
+        SET archived_at = COALESCE(archived_at, ?),
+            archive_reason = ?,
+            updated_at = ?
+        WHERE id IN ({placeholders}) AND deleted_at IS NULL
+        """,
+        (timestamp, reason, timestamp, *task_ids),
+    )
+
+
+def cleanup_deleted_media_objects(object_keys: list[str]) -> list[dict[str, str]]:
+    cleanup_objects([key for object_key in object_keys for key in image_object_keys(object_key)])
+    return cleanup_prefixes(media_cleanup_prefixes(object_keys))
+
+
+def purge_styling_garment(db: Any, garment_id: int, code: str) -> tuple[list[int], list[str]]:
     image_rows = db.execute(
         """
         SELECT ma.id, ma.object_key FROM styling_garment_images sgi
@@ -2146,13 +2215,7 @@ def purge_styling_garment(db: Any, garment_id: int, code: str) -> tuple[list[int
         placeholders = ", ".join("?" for _ in asset_ids)
         detach_upload_session_media_assets(db, asset_ids)
         db.execute(f"DELETE FROM media_assets WHERE id IN ({placeholders})", asset_ids)
-    cleanup_objects([
-        key
-        for media in [*image_rows, *dependent_media_rows]
-        for key in image_object_keys(media["object_key"])
-    ])
-    cleanup_errors = cleanup_prefixes(media_cleanup_prefixes(object_keys))
-    return dependent_task_ids, cleanup_errors
+    return dependent_task_ids, object_keys
 
 
 @app.post("/api/generation-tasks")
@@ -2567,7 +2630,16 @@ def delete_generation_task(task_id: int, payload: GenerationTaskDeleteRequest | 
         ensure_generation_task_not_running(row)
         if confirm_name != row["name"]:
             raise HTTPException(status_code=400, detail="请输入完整任务名以确认彻底删除")
-        cleanup_errors = purge_generation_tasks(db, [task_id], "user_purged")
+        mark_generation_tasks_deletion_state(db, [task_id], "deletion_pending")
+    try:
+        with get_db() as db:
+            object_keys = purge_generation_tasks(db, [task_id], "user_purged")
+    except Exception as exc:
+        with suppress(Exception):
+            with get_db() as db:
+                mark_generation_tasks_deletion_state(db, [task_id], "deletion_failed")
+        raise HTTPException(status_code=409, detail="彻底删除未完成，记录已保留在已归档，可恢复后重试") from exc
+    cleanup_errors = cleanup_deleted_media_objects(object_keys)
     return {"ok": True, "purged": True, "deletedTaskIds": [task_id], "objectCleanupErrors": cleanup_errors}
 
 
@@ -2582,7 +2654,16 @@ def purge_generation_tasks_batch(payload: GenerationTaskDeleteRequest) -> dict[s
         rows = get_generation_task_rows_for_mutation(db, task_ids)
         for row in rows:
             ensure_generation_task_not_running(row)
-        cleanup_errors = purge_generation_tasks(db, task_ids, "user_batch_purged")
+        mark_generation_tasks_deletion_state(db, task_ids, "deletion_pending")
+    try:
+        with get_db() as db:
+            object_keys = purge_generation_tasks(db, task_ids, "user_batch_purged")
+    except Exception as exc:
+        with suppress(Exception):
+            with get_db() as db:
+                mark_generation_tasks_deletion_state(db, task_ids, "deletion_failed")
+        raise HTTPException(status_code=409, detail="彻底删除未完成，记录已保留在已归档，可恢复后重试") from exc
+    cleanup_errors = cleanup_deleted_media_objects(object_keys)
     return {"ok": True, "purged": True, "deletedTaskIds": task_ids, "objectCleanupErrors": cleanup_errors}
 
 
@@ -2937,7 +3018,7 @@ def get_generation_task_rows_for_mutation(db: Any, task_ids: list[int]) -> list[
     return rows
 
 
-def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[dict[str, str]]:
+def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[str]:
     task_ids = normalized_task_ids(task_ids)
     placeholders = ", ".join("?" for _ in task_ids)
     asset_rows = db.execute(
@@ -2991,8 +3072,7 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[di
         db.execute(f"DELETE FROM media_assets WHERE id IN ({asset_placeholders})", asset_ids)
     for row in rows:
         log_event(db, "generation_task", int(row["id"]), "purged", {"name": row["name"], "reason": reason})
-    cleanup_objects([key for media in media_rows for key in image_object_keys(media["object_key"])])
-    return cleanup_prefixes(media_cleanup_prefixes(object_keys))
+    return object_keys
 
 
 @app.post("/api/generation-tasks/{task_id}/images")
