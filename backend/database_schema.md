@@ -26,6 +26,8 @@ GenerationTask
 | `generation_result_sets` | 一组成片结果，固定关联一个分镜预览 |
 | `generation_result_images_new` | 单张最终成片，固定 5 条槽位 |
 | `generation_attempts` | provider 调用快照、进度、结果和错误分类 |
+| `upload_sessions` | 浏览器直传到对象存储的轻量上传任务，用于刷新 / 切页后恢复上传状态 |
+| `upload_session_items` | 上传任务内的图片条目，记录对象 key、文件信息、上传确认和业务媒体引用 |
 | `prompt_configs` | Prompt 维护配置槽 |
 
 ## GenerationTask 关键字段
@@ -46,6 +48,16 @@ GenerationTask
 ## Prompt 配置
 
 `prompt_configs` 只保留当前九个槽位：品牌信息、AI 打标、AI 选搭、三类分镜预览、三类成片。旧的动态剧本 Prompt 与旧通用分镜/成片 Prompt 会被迁移删除。
+
+## UploadSession 关键字段
+
+- `scope`：`generation-task` 或 `styling-garment`。
+- `status`：`PENDING`、`UPLOADING`、`UPLOADED`、`FINALIZING`、`FINALIZED`、`FAILED`、`ABANDONED`。
+- `total_count` / `uploaded_count`：用户可见上传进度。浏览器每张 PUT 成功后通过 API 回写条目状态，后端据此计算已上传数量。
+- `target_type` / `target_id`：上传完成并保存为业务对象后的引用。
+- `error_message`：业务可读失败摘要。
+
+`upload_session_items.object_key` 是对象存储直传 key；`status` 表示该条目是否已确认上传或已保存为 `MediaAsset`。搭配服装 AI 识别失败不回写为 upload session 失败，因为图片入库和 AI 识别是两个阶段。未 `FINALIZED` 的 session 可以由用户放弃或后台 TTL 清理；清理只处理未登记为 `MediaAsset` 的直传对象，已经创建业务对象后的文件释放继续走对应业务对象的归档 / 删除 / 媒体引用计数规则。
 
 ## 数据清理
 

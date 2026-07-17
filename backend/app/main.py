@@ -337,6 +337,10 @@ class UploadSessionCreateRequest(DirectUploadRequest):
     pass
 
 
+class UploadSessionCompleteItemsRequest(BaseModel):
+    objectKeys: list[str] = Field(default_factory=list)
+
+
 class UploadedMediaRequest(BaseModel):
     objectKey: str
     filename: str | None = None
@@ -726,6 +730,157 @@ def create_upload_session(payload: UploadSessionCreateRequest) -> dict[str, Any]
     return {"session": get_upload_session(session_id), "items": items}
 
 
+@app.get("/api/upload-sessions")
+def list_upload_sessions(
+    scope: str | None = None,
+    status: str | None = None,
+    limit: int = Query(20, ge=1, le=100),
+    includeAbandoned: bool = False,
+) -> dict[str, Any]:
+    filters: list[str] = []
+    values: list[Any] = []
+    if scope:
+        filters.append("scope = ?")
+        values.append(direct_upload_scope_prefix(scope))
+    if status:
+        requested_statuses = [item.strip().upper() for item in status.split(",") if item.strip()]
+        if requested_statuses:
+            placeholders = ", ".join("?" for _ in requested_statuses)
+            filters.append(f"status IN ({placeholders})")
+            values.extend(requested_statuses)
+    else:
+        default_statuses = ["PENDING", "UPLOADING", "UPLOADED", "FINALIZING", "FAILED", "FINALIZED"]
+        placeholders = ", ".join("?" for _ in default_statuses)
+        filters.append(f"status IN ({placeholders})")
+        values.extend(default_statuses)
+    if not includeAbandoned:
+        filters.append("status <> 'ABANDONED'")
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    with get_db() as db:
+        rows = db.execute(
+            f"""
+            SELECT * FROM upload_sessions
+            {where}
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT ?
+            """,
+            [*values, limit],
+        ).fetchall()
+        session_ids = [row["id"] for row in rows]
+        items_by_session: dict[str, list[Any]] = {session_id: [] for session_id in session_ids}
+        if session_ids:
+            placeholders = ", ".join("?" for _ in session_ids)
+            item_rows = db.execute(
+                f"""
+                SELECT * FROM upload_session_items
+                WHERE session_id IN ({placeholders})
+                ORDER BY sort_order, id
+                """,
+                session_ids,
+            ).fetchall()
+            for item in item_rows:
+                items_by_session.setdefault(item["session_id"], []).append(item)
+    return {"items": [serialize_upload_session(row, items_by_session.get(row["id"], [])) for row in rows]}
+
+
+@app.get("/api/upload-sessions/{session_id}")
+def get_upload_session_endpoint(session_id: str) -> dict[str, Any]:
+    return {"session": get_upload_session(session_id.strip())}
+
+
+@app.post("/api/upload-sessions/{session_id}/complete-items")
+def complete_upload_session_items(session_id: str, payload: UploadSessionCompleteItemsRequest) -> dict[str, Any]:
+    session_id = session_id.strip()
+    keys = list(dict.fromkeys(ensure_direct_upload_key(key) for key in payload.objectKeys if key.strip()))
+    if not keys:
+        raise HTTPException(status_code=400, detail="至少确认一张已上传图片")
+    timestamp = now_iso()
+    with get_db() as db:
+        session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not session:
+            raise HTTPException(status_code=404, detail="上传批次不存在")
+        if session["status"] in {"FINALIZING", "FINALIZED", "ABANDONED"}:
+            return {"session": get_upload_session(session_id)}
+        rows = db.execute(
+            "SELECT * FROM upload_session_items WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+        known_keys = {row["object_key"] for row in rows}
+        unknown_keys = [key for key in keys if key not in known_keys]
+        if unknown_keys:
+            raise HTTPException(status_code=400, detail="上传确认包含不属于该批次的图片")
+        placeholders = ", ".join("?" for _ in keys)
+        db.execute(
+            f"""
+            UPDATE upload_session_items
+            SET status = 'UPLOADED', error_message = NULL, updated_at = ?
+            WHERE session_id = ? AND object_key IN ({placeholders}) AND status IN ('PENDING', 'UPLOADING', 'FAILED')
+            """,
+            [timestamp, session_id, *keys],
+        )
+        uploaded_count = int(db.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM upload_session_items
+            WHERE session_id = ? AND status IN ('UPLOADED', 'READY')
+            """,
+            (session_id,),
+        ).fetchone()["count"] or 0)
+        total_count = int(session["total_count"] or 0)
+        next_status = "UPLOADED" if total_count > 0 and uploaded_count >= total_count else "UPLOADING"
+        db.execute(
+            """
+            UPDATE upload_sessions
+            SET status = ?, uploaded_count = ?, error_message = NULL, updated_at = ?
+            WHERE id = ? AND status IN ('PENDING', 'UPLOADING', 'UPLOADED', 'FAILED')
+            """,
+            (next_status, uploaded_count, timestamp, session_id),
+        )
+    return {"session": get_upload_session(session_id)}
+
+
+@app.post("/api/upload-sessions/{session_id}/abandon")
+def abandon_upload_session(session_id: str) -> dict[str, Any]:
+    session_id = session_id.strip()
+    timestamp = now_iso()
+    cleanup_keys: list[str] = []
+    with get_db() as db:
+        session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not session:
+            raise HTTPException(status_code=404, detail="上传批次不存在")
+        if session["status"] == "FINALIZED" and session["target_id"]:
+            raise HTTPException(status_code=409, detail="上传批次已保存，请在对应业务记录中处理")
+        if session["status"] == "FINALIZING":
+            raise HTTPException(status_code=409, detail="上传批次正在保存，请稍后")
+        rows = db.execute(
+            """
+            SELECT object_key
+            FROM upload_session_items
+            WHERE session_id = ? AND media_asset_id IS NULL
+            """,
+            (session_id,),
+        ).fetchall()
+        cleanup_keys = [row["object_key"] for row in rows]
+        db.execute(
+            """
+            UPDATE upload_session_items
+            SET status = 'ABANDONED', error_message = NULL, updated_at = ?
+            WHERE session_id = ? AND media_asset_id IS NULL
+            """,
+            (timestamp, session_id),
+        )
+        db.execute(
+            """
+            UPDATE upload_sessions
+            SET status = 'ABANDONED', error_message = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp, session_id),
+        )
+    cleanup_objects(cleanup_keys)
+    return {"session": get_upload_session(session_id)}
+
+
 def get_upload_session(session_id: str) -> dict[str, Any]:
     with get_db() as db:
         row = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
@@ -764,6 +919,12 @@ def serialize_upload_session(row: Any, items: list[Any]) -> dict[str, Any]:
             for item in items
         ],
     }
+
+
+def ensure_upload_session_items_uploaded(rows: list[Any]) -> None:
+    pending = [row["filename"] for row in rows if row["status"] not in {"UPLOADED", "READY"}]
+    if pending:
+        raise HTTPException(status_code=409, detail=f"还有 {len(pending)} 张图片未上传完成")
 
 
 async def validate_upload_image(upload: UploadFile) -> tuple[bytes, str]:
@@ -1437,11 +1598,12 @@ async def finalize_styling_garment_upload_session(
             raise HTTPException(status_code=400, detail="上传批次没有图片")
         if len(rows) > MAX_GARMENT_IMAGE_INPUTS:
             raise HTTPException(status_code=400, detail=f"每个搭配服装最多上传 {MAX_GARMENT_IMAGE_INPUTS} 张图片")
+        ensure_upload_session_items_uploaded(rows)
         claimed = db.execute(
             """
             UPDATE upload_sessions
             SET status = 'FINALIZING', error_message = NULL, updated_at = ?
-            WHERE id = ? AND status IN ('PENDING', 'FAILED')
+            WHERE id = ? AND status IN ('UPLOADED', 'FAILED')
             """,
             (timestamp, session_id),
         )
@@ -2305,11 +2467,12 @@ async def finalize_generation_task_upload_session(
         ).fetchall()
         if not rows:
             raise HTTPException(status_code=400, detail="上传批次没有图片")
+        ensure_upload_session_items_uploaded(rows)
         claimed = db.execute(
             """
             UPDATE upload_sessions
             SET status = 'FINALIZING', error_message = NULL, updated_at = ?
-            WHERE id = ? AND status IN ('PENDING', 'FAILED')
+            WHERE id = ? AND status IN ('UPLOADED', 'FAILED')
             """,
             (timestamp, session_id),
         )

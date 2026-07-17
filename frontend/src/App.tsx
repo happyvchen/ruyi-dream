@@ -40,7 +40,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { ApiError, api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl } from './api'
-import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot } from './api'
+import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot, UploadSession } from './api'
 import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { friendlyErrorText } from './lib/errorMessages'
@@ -162,6 +162,8 @@ export function App() {
   const [models, setModels] = useState<ModelProfile[]>([])
   const [recordDetail, setRecordDetail] = useState<GenerationTask | null>(null)
   const [localOperations, setLocalOperations] = useState<AIOperation[]>([])
+  const [uploadSessions, setUploadSessions] = useState<UploadSession[]>([])
+  const [browserUploadingCount, setBrowserUploadingCount] = useState(0)
 
   useEffect(() => {
     void api.session()
@@ -205,6 +207,29 @@ export function App() {
       if (isAuthExpiredError(err)) markAuthExpired()
     })
   }, [authenticated, role])
+
+  useEffect(() => {
+    if (!authenticated) return
+    void refreshUploadSessions().catch(() => undefined)
+  }, [authenticated])
+
+  useEffect(() => {
+    if (!authenticated || !pollingUploadSessions(uploadSessions).length) return
+    const timer = window.setInterval(() => {
+      void refreshUploadSessions().catch(() => undefined)
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [authenticated, uploadSessions])
+
+  useEffect(() => {
+    if (browserUploadingCount <= 0) return
+    const warnUploading = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = '图片还在上传，离开会导致本次上传中断。'
+    }
+    window.addEventListener('beforeunload', warnUploading)
+    return () => window.removeEventListener('beforeunload', warnUploading)
+  }, [browserUploadingCount])
 
   useEffect(() => {
     if (!authenticated || role === 'admin' || !adminPages.has(page)) return
@@ -267,12 +292,27 @@ export function App() {
     }
   }
 
+  async function refreshUploadSessions(scope?: string) {
+    const result = await api.listUploadSessions({ scope, limit: 20 })
+    setUploadSessions((current) => mergeUploadSessions(current, result.items, scope))
+    return result.items
+  }
+
   function navigate(next: Page) {
     if (next !== page && document.body.dataset.promptDirty === 'true' && !window.confirm('Prompt 有未保存修改，确定离开并放弃这些修改吗？')) return
     setPage(next)
     if (next === 'studio') setTask(null)
     if (next === 'records') setRecordDetail(null)
     window.history.pushState(null, '', routeToUrl({ page: next }))
+  }
+
+  function openUploadScope(scope?: string | null) {
+    if (scope === 'styling-garment') navigate('library')
+    else navigate('studio')
+  }
+
+  function markBrowserUploading(delta: 1 | -1) {
+    setBrowserUploadingCount((value) => Math.max(0, value + delta))
   }
 
   function openTaskInStudio(item: GenerationTask) {
@@ -404,8 +444,9 @@ export function App() {
       <main className="workspace">
         {error && <div className="toast">{error.length > 300 ? `${error.slice(0, 300)}…` : error}</div>}
         {busy && <BusyPill label={busy} />}
-        {page === 'studio' && <StudioPage task={task} setTask={setTask} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} />}
-        {page === 'library' && <LibraryPage garments={garments} run={run} role={role} onDeleteResult={noteDeleteOperationResult} />}
+        <GlobalUploadPill sessions={uploadSessions} onOpen={openUploadScope} />
+        {page === 'studio' && <StudioPage task={task} setTask={setTask} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} uploadSessions={uploadSessions.filter((item) => item.scope === 'generation-task')} refreshUploadSessions={() => refreshUploadSessions('generation_task')} markBrowserUploading={markBrowserUploading} />}
+        {page === 'library' && <LibraryPage garments={garments} run={run} role={role} onDeleteResult={noteDeleteOperationResult} uploadSessions={uploadSessions.filter((item) => item.scope === 'styling-garment')} refreshUploadSessions={() => refreshUploadSessions('styling_garment')} markBrowserUploading={markBrowserUploading} />}
         {page === 'model' && <ModelPage models={models} role={role} run={run} />}
         {page === 'prompt-maintenance' && role === 'admin' && <PromptMaintenancePage run={run} />}
         {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} openTaskInStudio={openTaskInStudio} run={run} onDeleteResult={noteDeleteOperationResult} />}
@@ -482,7 +523,54 @@ function BusyPill({ label }: { label: string }) {
   )
 }
 
-function StudioPage({ task, setTask, role, run, localOperations, startLocalOperation, clearLocalOperationsFor }: {
+function activeUploadSessions(items: UploadSession[]) {
+  return items.filter((item) => ['PENDING', 'UPLOADING', 'UPLOADED', 'FINALIZING', 'FAILED'].includes(item.status))
+}
+
+function pollingUploadSessions(items: UploadSession[]) {
+  return items.filter((item) => ['PENDING', 'UPLOADING', 'UPLOADED', 'FINALIZING'].includes(item.status))
+}
+
+function mergeUploadSessions(current: UploadSession[], incoming: UploadSession[], refreshedScope?: string) {
+  const normalizedScope = refreshedScope?.replaceAll('_', '-')
+  const retained = normalizedScope ? current.filter((item) => item.scope !== normalizedScope) : []
+  const byId = new Map<string, UploadSession>()
+  retained.forEach((item) => byId.set(item.id, item))
+  incoming.forEach((item) => byId.set(item.id, item))
+  return Array.from(byId.values()).sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')))
+}
+
+function uploadSessionScopeLabel(scope?: string | null) {
+  if (scope === 'styling-garment') return '搭配服装'
+  if (scope === 'generation-task') return '主推款'
+  return '上传'
+}
+
+function uploadSessionStatusLabel(status: string) {
+  if (status === 'PENDING') return '等待上传'
+  if (status === 'UPLOADING') return '上传图片中'
+  if (status === 'UPLOADED') return '等待保存'
+  if (status === 'FINALIZING') return '保存中'
+  if (status === 'FINALIZED') return '已保存'
+  if (status === 'FAILED') return '失败'
+  if (status === 'ABANDONED') return '已放弃'
+  return status
+}
+
+function GlobalUploadPill({ sessions, onOpen }: { sessions: UploadSession[]; onOpen: (scope?: string | null) => void }) {
+  const active = activeUploadSessions(sessions)
+  if (!active.length) return null
+  const first = active[0]
+  const failedCount = active.filter((item) => item.status === 'FAILED').length
+  return (
+    <button className={`upload-global-pill ${failedCount ? 'has-error' : ''}`} type="button" onClick={() => onOpen(first?.scope)}>
+      {failedCount ? <CircleStop size={15} /> : <Loader2 size={15} className="spin" />}
+      <span>{active.length} 个上传任务 · {uploadSessionScopeLabel(first?.scope)} {uploadSessionStatusLabel(first?.status ?? '')}</span>
+    </button>
+  )
+}
+
+function StudioPage({ task, setTask, role, run, localOperations, startLocalOperation, clearLocalOperationsFor, uploadSessions, refreshUploadSessions, markBrowserUploading }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask | null) => void
   role: SessionRole | null
@@ -490,6 +578,9 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   localOperations: AIOperation[]
   startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
   clearLocalOperationsFor: (ownerTypes: string[], taskId?: number | null) => void
+  uploadSessions: UploadSession[]
+  refreshUploadSessions: () => Promise<UploadSession[]>
+  markBrowserUploading: (delta: 1 | -1) => void
 }) {
   const [step, setStep] = useState<StudioStep>(0)
   const [taskRailTab, setTaskRailTab] = useState<'summary' | 'recent'>('summary')
@@ -792,7 +883,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
             <StepRail active={visibleStep} executing={studioView?.executingStage ?? null} max={currentStep} onSelect={setStep} />
           </div>
           <div className="studio-stage-viewport">
-            {visibleStep === 0 && <UploadHeroStep task={task} setTask={applyTaskUpdate} run={run} />}
+            {visibleStep === 0 && <UploadHeroStep task={task} setTask={applyTaskUpdate} run={run} uploadSessions={uploadSessions} refreshUploadSessions={refreshUploadSessions} markBrowserUploading={markBrowserUploading} />}
             {visibleStep === 1 && <StylingStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={aiStylingInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
             {visibleStep === 2 && <PreviewStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={storyboardInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
             {visibleStep === 3 && <FinalStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={finalImageInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
@@ -1039,7 +1130,14 @@ type PendingBatchGroup = {
   error?: string
 }
 
-function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any }) {
+function UploadHeroStep({ task, setTask, run, uploadSessions, refreshUploadSessions, markBrowserUploading }: {
+  task: GenerationTask | null
+  setTask: (task: GenerationTask) => void
+  run: any
+  uploadSessions: UploadSession[]
+  refreshUploadSessions: () => Promise<UploadSession[]>
+  markBrowserUploading: (delta: 1 | -1) => void
+}) {
   const [files, setFiles] = useState<File[]>([])
   const [name, setName] = useState('')
   const [userRequirement, setUserRequirement] = useState('')
@@ -1052,6 +1150,24 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
   const [existingTaskNames, setExistingTaskNames] = useState<Set<string> | null>(null)
   const batchIdRef = useRef('')
   const firstCreatedTaskRef = useRef<GenerationTask | null>(null)
+  const uploadWarningActiveRef = useRef(false)
+
+  function trackUploadProgress(progress: UploadProgressSnapshot) {
+    const shouldWarn = progress.phase === 'preparing' || progress.phase === 'uploading'
+    if (shouldWarn !== uploadWarningActiveRef.current) {
+      markBrowserUploading(shouldWarn ? 1 : -1)
+      uploadWarningActiveRef.current = shouldWarn
+    }
+    setUploadProgress(progress)
+  }
+
+  function clearUploadWarning() {
+    if (!uploadWarningActiveRef.current) return
+    markBrowserUploading(-1)
+    uploadWarningActiveRef.current = false
+  }
+
+  useEffect(() => () => clearUploadWarning(), [])
 
   useEffect(() => {
     if (!batchGroups.length || existingTaskNames) return
@@ -1194,11 +1310,15 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
       setBatchCreating({ current: index + 1, total: ready.length })
       try {
         const uploadFiles = formalAssetFiles(group.files, HERO_PRODUCT_MAX_IMAGES)
-        const result = await api.createTask(group.name, uploadFiles, batchIdRef.current, group.userRequirement ?? '', effectiveBatchName, { onProgress: setUploadProgress })
+        const result = await api.createTask(group.name, uploadFiles, batchIdRef.current, group.userRequirement ?? '', effectiveBatchName, { onProgress: trackUploadProgress })
+        clearUploadWarning()
+        void refreshUploadSessions().catch(() => undefined)
         created.push(result.item)
         if (!firstCreatedTaskRef.current) firstCreatedTaskRef.current = result.item
         setBatchGroups((current) => current.filter((item) => item.id !== group.id))
       } catch (err) {
+        clearUploadWarning()
+        void refreshUploadSessions().catch(() => undefined)
         lastError = err instanceof Error ? err.message : '创建任务失败'
         failedCount += 1
         setBatchGroups((current) => current.map((item) => item.id === group.id ? { ...item, error: lastError } : item))
@@ -1232,6 +1352,7 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
     <div className="step-panel">
       <div className="step-scroll-content">
         <div className="step-copy"><h2>上传主推款</h2><p>支持多张图片、一个货号文件夹或一个上级文件夹。每套最多 15 张进入候选池，AI 智能选搭后保留挑选排序好的 8 张主推款参考图。</p></div>
+        {!task && uploadSessions.length > 0 && <UploadSessionRecoveryList sessions={uploadSessions} emptyLabel="暂无主推款上传任务" onAbandon={(id) => api.abandonUploadSession(id).then(() => refreshUploadSessions())} />}
         {task?.status === 'DRAFT' && <HeroDraftEditor task={task} setTask={setTask} run={run} />}
         {!task && (
           <>
@@ -1366,14 +1487,20 @@ function UploadHeroStep({ task, setTask, run }: { task: GenerationTask | null; s
                   </div>
                 <FileThumbList files={files} onChange={setFiles} limit={HERO_PRODUCT_MAX_IMAGES} disabled={!!uploadProgress} />
                 <div className="inline-form">
-                    <button className="management-action" disabled={!files.length || !sanitizeClientName(name) || !!uploadProgress} onClick={() => void run('创建拍摄任务中...', () => api.createTask(name, formalAssetFiles(files, HERO_PRODUCT_MAX_IMAGES), undefined, userRequirement, undefined, { onProgress: setUploadProgress }), (r: { item: GenerationTask }) => {
+                    <button className="management-action" disabled={!files.length || !sanitizeClientName(name) || !!uploadProgress} onClick={() => {
+                      void run('创建拍摄任务中...', () => api.createTask(name, formalAssetFiles(files, HERO_PRODUCT_MAX_IMAGES), undefined, userRequirement, undefined, { onProgress: trackUploadProgress }), (r: { item: GenerationTask }) => {
                     setTask(r.item)
                     setFiles([])
                     setName('')
                     setUserRequirement('')
                     setUploadProgress(null)
                     window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: r.item.id }))
-                  }, { refresh: 'background' }).catch(() => setUploadProgress(null))}>
+                    void refreshUploadSessions().catch(() => undefined)
+                  }, { refresh: 'background' }).catch(() => setUploadProgress(null)).finally(() => {
+                    clearUploadWarning()
+                    void refreshUploadSessions().catch(() => undefined)
+                  })
+                    }}>
                     <ImagePlus size={16} /> 创建任务
                   </button>
                 </div>
@@ -1409,6 +1536,49 @@ function UploadProgressPanel({ progress, prefix, savingLabel = '保存任务', s
       </div>
       <div className="upload-progress-bar" aria-hidden="true"><span style={{ width: `${percent}%` }} /></div>
       <p>{detail}</p>
+    </div>
+  )
+}
+
+function UploadSessionRecoveryList({ sessions, emptyLabel, onAbandon }: { sessions: UploadSession[]; emptyLabel: string; onAbandon?: (id: string) => Promise<unknown> }) {
+  const [abandoningId, setAbandoningId] = useState<string | null>(null)
+  if (!sessions.length) return null
+  async function abandon(session: UploadSession) {
+    if (!onAbandon || abandoningId) return
+    setAbandoningId(session.id)
+    try {
+      await onAbandon(session.id)
+    } finally {
+      setAbandoningId(null)
+    }
+  }
+  return (
+    <div className="upload-recovery-list" aria-label="上传任务状态">
+      <div className="upload-recovery-head">
+        <strong>最近上传状态</strong>
+        <span>{sessions.length ? `${sessions.length} 个任务` : emptyLabel}</span>
+      </div>
+      {sessions.slice(0, 5).map((session) => {
+        const percent = session.totalCount > 0 ? Math.round((session.uploadedCount / session.totalCount) * 100) : 0
+        return (
+          <div className={`upload-recovery-item ${session.status === 'FAILED' ? 'has-error' : ''}`} key={session.id}>
+            <div className="upload-recovery-row">
+              <strong>{uploadSessionScopeLabel(session.scope)}</strong>
+              <span>{uploadSessionStatusLabel(session.status)}</span>
+            </div>
+            <div className="upload-progress-bar" aria-hidden="true"><span style={{ width: `${percent}%` }} /></div>
+            <p>
+              {session.status === 'FINALIZED' && session.targetId ? `已保存为${uploadSessionScopeLabel(session.scope)}记录` : `已上传 ${session.uploadedCount}/${session.totalCount} 张`}
+              {session.errorMessage ? `；${session.errorMessage}` : ''}
+            </p>
+            {onAbandon && !['FINALIZED', 'FINALIZING', 'ABANDONED'].includes(session.status) && (
+              <button className="management-action compact-control" type="button" disabled={abandoningId === session.id} onClick={() => void abandon(session)}>
+                {abandoningId === session.id ? '处理中...' : '放弃本次上传'}
+              </button>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -2065,7 +2235,15 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   )
 }
 
-function LibraryPage({ garments, run, role, onDeleteResult }: { garments: StylingGarment[]; run: any; role: SessionRole | null; onDeleteResult: (result: DeleteOperationResult) => void }) {
+function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refreshUploadSessions, markBrowserUploading }: {
+  garments: StylingGarment[]
+  run: any
+  role: SessionRole | null
+  onDeleteResult: (result: DeleteOperationResult) => void
+  uploadSessions: UploadSession[]
+  refreshUploadSessions: () => Promise<UploadSession[]>
+  markBrowserUploading: (delta: 1 | -1) => void
+}) {
   const [libraryResultsElement, setLibraryResultsElement] = useState<HTMLDivElement | null>(null)
   const autoPageSize = useAutoGarmentPageSize(libraryResultsElement)
   const [query, setQuery] = useState('')
@@ -2302,6 +2480,9 @@ function LibraryPage({ garments, run, role, onDeleteResult }: { garments: Stylin
             onClose={() => setShowImport(false)}
             onImported={() => void refreshFirstLibraryPage().catch(() => undefined)}
             onBusyChange={setImportBusy}
+            uploadSessions={uploadSessions}
+            refreshUploadSessions={refreshUploadSessions}
+            markBrowserUploading={markBrowserUploading}
           />
         ) : (
         <div className="panel library-panel">
@@ -3093,15 +3274,22 @@ function BatchImportPanel({
   onClose,
   onImported,
   onBusyChange,
+  uploadSessions,
+  refreshUploadSessions,
+  markBrowserUploading,
 }: {
   onClose: () => void
   onImported: () => void
   onBusyChange: (busy: boolean) => void
+  uploadSessions: UploadSession[]
+  refreshUploadSessions: () => Promise<UploadSession[]>
+  markBrowserUploading: (delta: 1 | -1) => void
 }) {
   const [batches, setBatches] = useState<StylingImportBatch[]>([])
   const [localError, setLocalError] = useState('')
   const [importJobs, setImportJobs] = useState<ImportJob[]>([])
   const hasRunningImportJobs = importJobs.some((job) => job.status === 'RUNNING')
+  const uploadWarningActiveRef = useRef(false)
 
   useEffect(() => {
     onBusyChange(hasRunningImportJobs)
@@ -3127,6 +3315,27 @@ function BatchImportPanel({
       ]
     })
   }
+
+  function trackImportProgress(jobId: string, code: string, progress: UploadProgressSnapshot) {
+    const shouldWarn = progress.phase === 'preparing' || progress.phase === 'uploading'
+    if (shouldWarn !== uploadWarningActiveRef.current) {
+      markBrowserUploading(shouldWarn ? 1 : -1)
+      uploadWarningActiveRef.current = shouldWarn
+    }
+    updateJob(jobId, (job) => ({
+      ...job,
+      currentCode: code,
+      progress,
+    }))
+  }
+
+  function clearImportUploadWarning() {
+    if (!uploadWarningActiveRef.current) return
+    markBrowserUploading(-1)
+    uploadWarningActiveRef.current = false
+  }
+
+  useEffect(() => () => clearImportUploadWarning(), [])
 
   async function handleDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault()
@@ -3224,12 +3433,10 @@ function BatchImportPanel({
       try {
         const uploadFiles = formalAssetFiles(batch.files, STYLING_GARMENT_MAX_IMAGES)
         const created = await api.createStylingGarment(batch.code, uploadFiles, {
-          onProgress: (progress) => updateJob(jobId, (job) => ({
-            ...job,
-            currentCode: batch.code,
-            progress,
-          })),
+          onProgress: (progress) => trackImportProgress(jobId, batch.code, progress),
         })
+        clearImportUploadWarning()
+        void refreshUploadSessions().catch(() => undefined)
         createdItems.push(created.item)
         updateJob(jobId, (job) => ({
           ...job,
@@ -3238,8 +3445,9 @@ function BatchImportPanel({
           progress: null,
           operations: job.operations.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'SUCCEEDED', completedAt: new Date().toISOString() } : item),
         }))
-        onImported()
       } catch (err) {
+        clearImportUploadWarning()
+        void refreshUploadSessions().catch(() => undefined)
         const message = err instanceof Error ? err.message : '导入失败'
         skipped += 1
         addSkippedBatch(batch, ['搭配服装代码已存在', '搭配服装货号已存在'].includes(message) ? '货号已存在，已跳过' : message)
@@ -3291,6 +3499,7 @@ function BatchImportPanel({
       updateJob(jobId, (job) => ({ ...job, status: 'FAILED' }))
     } finally {
       onImported()
+      void refreshUploadSessions().catch(() => undefined)
     }
   }
 
@@ -3318,6 +3527,7 @@ function BatchImportPanel({
         </div>
       </div>
       {localError && <span className="inline-error">{localError}</span>}
+      <UploadSessionRecoveryList sessions={uploadSessions} emptyLabel="暂无搭配服装上传任务" onAbandon={(id) => api.abandonUploadSession(id).then(() => refreshUploadSessions())} />
       {batches.length > 0 && (
         <div className="batch-list">
           {batches.map((batch) => (

@@ -316,12 +316,27 @@ export type UploadProgressSnapshot = {
   currentFile?: string
 }
 
-type UploadSession = {
+export type UploadSession = {
   id: string
   status: string
+  scope?: string
   totalCount: number
   uploadedCount: number
+  targetType?: string | null
+  targetId?: number | null
   errorMessage?: string | null
+  createdAt?: string
+  updatedAt?: string
+  items?: {
+    id: number
+    objectKey: string
+    filename: string
+    mimeType: string
+    sizeBytes?: number | null
+    status: string
+    mediaAssetId?: number | null
+    errorMessage?: string | null
+  }[]
 }
 
 type UploadedMedia = {
@@ -569,6 +584,10 @@ async function uploadFilesViaSession(
     }
     if (!response.ok) throw new ApiError(`${file.name} 上传失败，请重新上传该图片。`, response.status)
     completed += 1
+    await request<{ session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(created.session.id)}/complete-items`, {
+      method: 'POST',
+      body: JSON.stringify({ objectKeys: [item.objectKey] }),
+    })
     onProgress?.({ phase: 'uploading', completed, total: files.length })
   })
   onProgress?.({ phase: 'saving', completed, total: files.length })
@@ -616,6 +635,12 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+  listUploadSessions: (options?: { scope?: string; status?: string; limit?: number; includeAbandoned?: boolean }) =>
+    request<{ items: UploadSession[] }>(params('/api/upload-sessions', options ?? {})),
+  getUploadSession: (id: string) =>
+    request<{ session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(id)}`),
+  abandonUploadSession: (id: string) =>
+    request<{ session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(id)}/abandon`, { method: 'POST' }),
   listStylingGarments: (options?: {
     limit?: number
     offset?: number

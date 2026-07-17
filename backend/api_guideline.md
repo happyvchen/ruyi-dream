@@ -12,7 +12,7 @@
 
 ## 任务接口
 
-- `POST /api/generation-tasks`：上传主推款并创建草稿任务。
+- `POST /api/generation-tasks`：兼容旧表单上传路径；新上传体验应优先使用 `upload_sessions -> finalize-generation-task`，以便刷新 / 切页后恢复状态。
 - `POST /api/generation-tasks/from-uploads`：基于已上传对象创建任务。
 - `PATCH /api/generation-tasks/{task_id}`：保存任务名和各阶段用户补充要求草稿。
 - `POST /api/generation-tasks/{task_id}/styling`：运行 AI 智能选搭，输出当前 `StylingPlan`。
@@ -27,6 +27,41 @@
 `CANCELLED` 是可恢复的中断态，不是归档或终止态。再次调用单任务 `auto-run-final` 或批次 `auto-run-final` 时，应把任务恢复到最近被取消的阶段并继续；已成功的阶段和成片槽位保持不变。
 
 批次 `auto-run-final` 只负责把批次内任务标记为一键成片队列；实际并发由后端 ToAPIs 全局闸门控制。运行参数统一使用 `TOAPIS_MAX_CONCURRENCY`，默认 `5`，不再提供批次级独立并发参数。
+
+## 上传任务接口
+
+主推款上传和搭配服装导入复用 `upload_sessions` 轻量任务契约。后端职责是让前端在刷新或切换页面后恢复最近上传状态，而不是提供复杂断点续传队列。
+
+- `POST /api/upload-sessions`：创建上传任务和对象存储直传地址。
+- `GET /api/upload-sessions`：按 `scope`、`status`、`limit` 查询最近上传任务；默认返回未完成和最近完成 / 失败的任务，用于页面恢复。
+- `GET /api/upload-sessions/{session_id}`：查询单个上传任务和条目。
+- `POST /api/upload-sessions/{session_id}/complete-items`：浏览器 PUT 成功后批量确认条目已上传；用于刷新后恢复真实上传进度。
+- `POST /api/upload-sessions/{session_id}/finalize-generation-task`：把已上传对象保存为 `GenerationTask` 草稿。
+- `POST /api/upload-sessions/{session_id}/finalize-styling-garment`：把已上传对象保存为 `StylingGarment` 草稿。
+- `POST /api/upload-sessions/{session_id}/abandon`：用户放弃未完成上传任务；后端标记废弃并尽力清理尚未入库的直传对象。
+
+上传任务状态：
+
+```text
+PENDING
+UPLOADING
+UPLOADED
+FINALIZING
+FINALIZED
+FAILED
+ABANDONED
+```
+
+`uploaded_count` 表示已确认上传到对象存储的条目数量。`FINALIZED` 表示业务记录已创建，`target_type` 和 `target_id` 指向对应 `generation_task` 或 `styling_garment`。搭配服装的 AI 识别是 `StylingGarment` 创建后的独立阶段，不把识别失败写成上传失败。
+
+批量导入的失败以 session 或业务对象为单位呈现。已经 `FINALIZED` 的 session 再次 finalize 应幂等返回目标对象；失败 session 可由前端重新上传该货号或删除已创建对象后重来。默认恢复查询不返回 `ABANDONED` session，除非调试场景显式查询。
+
+上传会话只负责“文件是否被系统接住”。搭配服装 AI 识别继续使用服装资源接口：
+
+- `POST /api/styling-garments/{id}/save-and-tag`：保存当前搭配服装并触发 / 重新触发 AI 识别；用于单货号局部重试。
+- 批量导入场景中，前端应先等待本批所有可上传项完成 `finalize-styling-garment`，再对成功创建的 `StylingGarment` 并发调用 `save-and-tag`。识别失败只改变 `StylingGarment.status` 和 attempt，不改变 upload session 的 `FINALIZED` 结果。
+
+未 `FINALIZED` 的 upload session 属于临时上传任务。用户显式放弃或后台 TTL 清理时，只能清理未登记为 `MediaAsset` 的直传对象；已经保存为业务对象的图片走对应业务对象的归档 / 删除 / 媒体引用计数规则。
 
 ## 状态
 
