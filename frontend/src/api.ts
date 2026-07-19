@@ -320,6 +320,8 @@ export type UploadSession = {
   id: string
   status: string
   scope?: string
+  businessCode?: string | null
+  sourceTitle?: string | null
   totalCount: number
   uploadedCount: number
   targetType?: string | null
@@ -555,12 +557,15 @@ async function uploadFilesViaSession(
   scope: string,
   files: File[],
   onProgress?: (progress: UploadProgressSnapshot) => void,
+  metadata?: { businessCode?: string; sourceTitle?: string },
 ): Promise<{ session: UploadSession; items: DirectUploadItem[] }> {
   onProgress?.({ phase: 'preparing', completed: 0, total: files.length })
   const created = await request<{ session: UploadSession; items: DirectUploadItem[] }>('/api/upload-sessions', {
     method: 'POST',
     body: JSON.stringify({
       scope,
+      businessCode: metadata?.businessCode,
+      sourceTitle: metadata?.sourceTitle,
       files: files.map((file) => ({
         filename: file.name,
         mimeType: file.type,
@@ -664,9 +669,9 @@ export const api = {
   createStylingGarment: async (
     code: string,
     files: File[],
-    options?: { onProgress?: (progress: UploadProgressSnapshot) => void },
+    options?: { onProgress?: (progress: UploadProgressSnapshot) => void; sourceTitle?: string },
   ) => {
-    const upload = await uploadFilesViaSession('styling_garment', files, options?.onProgress)
+    const upload = await uploadFilesViaSession('styling_garment', files, options?.onProgress, { businessCode: code, sourceTitle: options?.sourceTitle || code })
     return request<{ item: StylingGarment; session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(upload.session.id)}/finalize-styling-garment`, {
       method: 'POST',
       body: JSON.stringify({ code }),
@@ -737,7 +742,7 @@ export const api = {
     batchName?: string,
     options?: { onProgress?: (progress: UploadProgressSnapshot) => void },
   ) => {
-    const upload = await uploadFilesViaSession('generation_task', files, options?.onProgress)
+    const upload = await uploadFilesViaSession('generation_task', files, options?.onProgress, { sourceTitle: name })
     return request<{ item: GenerationTask; session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(upload.session.id)}/finalize-generation-task`, {
       method: 'POST',
       body: JSON.stringify({ name, batchId, batchName, userRequirement }),

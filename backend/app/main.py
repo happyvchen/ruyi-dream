@@ -334,7 +334,8 @@ class DirectUploadRequest(BaseModel):
 
 
 class UploadSessionCreateRequest(DirectUploadRequest):
-    pass
+    businessCode: str | None = None
+    sourceTitle: str | None = None
 
 
 class UploadSessionCompleteItemsRequest(BaseModel):
@@ -700,13 +701,16 @@ def create_upload_session(payload: UploadSessionCreateRequest) -> dict[str, Any]
     session_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
     items = build_direct_upload_items(payload.scope, session_files, session_id=session_id)
     timestamp = now_iso()
+    business_code = sanitize_name(payload.businessCode) if payload.businessCode else None
+    source_title = sanitize_name(payload.sourceTitle) if payload.sourceTitle else None
     with get_db() as db:
         db.execute(
             """
-            INSERT INTO upload_sessions (id, scope, status, total_count, uploaded_count, created_at, updated_at)
-            VALUES (?, ?, 'PENDING', ?, 0, ?, ?)
+            INSERT INTO upload_sessions
+              (id, scope, status, business_code, source_title, total_count, uploaded_count, created_at, updated_at)
+            VALUES (?, ?, 'PENDING', ?, ?, ?, 0, ?, ?)
             """,
-            (session_id, scope_prefix, len(items), timestamp, timestamp),
+            (session_id, scope_prefix, business_code, source_title, len(items), timestamp, timestamp),
         )
         for index, item in enumerate(items):
             requested_file = session_files[index] if index < len(session_files) else None
@@ -898,6 +902,8 @@ def serialize_upload_session(row: Any, items: list[Any]) -> dict[str, Any]:
         "id": row["id"],
         "scope": row["scope"],
         "status": row["status"],
+        "businessCode": row_value(row, "business_code"),
+        "sourceTitle": row_value(row, "source_title"),
         "totalCount": int(row["total_count"] or 0),
         "uploadedCount": int(row["uploaded_count"] or 0),
         "targetType": row_value(row, "target_type"),
@@ -919,6 +925,47 @@ def serialize_upload_session(row: Any, items: list[Any]) -> dict[str, Any]:
             for item in items
         ],
     }
+
+
+def mark_upload_session_failed(session_id: str, message: str, *, uploaded_count: int | None = None, db: sqlite3.Connection | None = None) -> None:
+    timestamp = now_iso()
+    def apply(connection: sqlite3.Connection) -> None:
+        nonlocal uploaded_count
+        if uploaded_count is None:
+            uploaded_count = int(connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM upload_session_items
+                WHERE session_id = ? AND status IN ('UPLOADED', 'READY')
+                """,
+                (session_id,),
+            ).fetchone()["count"] or 0)
+        connection.execute(
+            """
+            UPDATE upload_sessions
+            SET status = 'FAILED', uploaded_count = ?, error_message = ?, updated_at = ?
+            WHERE id = ? AND status IN ('UPLOADED', 'FINALIZING', 'FAILED')
+            """,
+            (uploaded_count, message, timestamp, session_id),
+        )
+        connection.execute(
+            """
+            UPDATE upload_session_items
+            SET status = 'FAILED', error_message = ?, updated_at = ?
+            WHERE session_id = ?
+              AND status <> 'READY'
+              AND EXISTS (
+                SELECT 1 FROM upload_sessions
+                WHERE id = ? AND status IN ('UPLOADED', 'FINALIZING', 'FAILED')
+              )
+            """,
+            (message, timestamp, session_id, session_id),
+        )
+    if db is not None:
+        apply(db)
+        return
+    with get_db() as connection:
+        apply(connection)
 
 
 def ensure_upload_session_items_uploaded(rows: list[Any]) -> None:
@@ -1585,9 +1632,16 @@ async def finalize_styling_garment_upload_session(
             raise HTTPException(status_code=400, detail="上传批次用途不匹配")
         if session["status"] == "FINALIZED" and session["target_id"]:
             return {"item": get_styling_garment_by_id(int(session["target_id"])), "session": get_upload_session(session_id)}
-        duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
-        if duplicate:
-            raise HTTPException(status_code=409, detail="搭配服装货号已存在")
+        db.execute(
+            """
+            UPDATE upload_sessions
+            SET business_code = COALESCE(business_code, ?), source_title = COALESCE(source_title, ?), updated_at = ?
+            WHERE id = ?
+            """,
+            (clean_code, clean_code, timestamp, session_id),
+        )
+        if session["status"] == "ABANDONED":
+            raise HTTPException(status_code=409, detail="上传批次已放弃，请重新上传")
         if session["status"] == "FINALIZING":
             raise HTTPException(status_code=409, detail="上传批次正在保存，请稍后")
         rows = db.execute(
@@ -1599,6 +1653,11 @@ async def finalize_styling_garment_upload_session(
         if len(rows) > MAX_GARMENT_IMAGE_INPUTS:
             raise HTTPException(status_code=400, detail=f"每个搭配服装最多上传 {MAX_GARMENT_IMAGE_INPUTS} 张图片")
         ensure_upload_session_items_uploaded(rows)
+        duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
+        if duplicate:
+            mark_upload_session_failed(session_id, "搭配服装货号已存在", db=db)
+            db.commit()
+            raise HTTPException(status_code=409, detail="搭配服装货号已存在")
         claimed = db.execute(
             """
             UPDATE upload_sessions
@@ -1677,24 +1736,8 @@ async def finalize_styling_garment_upload_session(
         if assets:
             cleanup_created_media_assets(assets, preserve_originals=True)
         with suppress(Exception):
-            error_message = str(exc)
-            with get_db() as db:
-                db.execute(
-                    """
-                    UPDATE upload_sessions
-                    SET status = 'FAILED', uploaded_count = 0, error_message = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (error_message, now_iso(), session_id),
-                )
-                db.execute(
-                    """
-                    UPDATE upload_session_items
-                    SET status = 'FAILED', error_message = ?, updated_at = ?
-                    WHERE session_id = ? AND status <> 'READY'
-                    """,
-                    (error_message, now_iso(), session_id),
-                )
+            error_message = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            mark_upload_session_failed(session_id, str(error_message))
         raise
     if garment_id is None:
         raise HTTPException(status_code=500, detail="上传批次保存失败")
@@ -4290,7 +4333,7 @@ def list_new_generation_records(
     status_values = split_filter_values(status)
     created_from_dt = parse_filter_datetime(created_from, end_of_day=False)
     created_to_dt = parse_filter_datetime(created_to, end_of_day=True)
-    where_clauses = ["gt.deleted_at IS NULL", "(? OR gt.archived_at IS NULL)"]
+    where_clauses = ["gt.deleted_at IS NULL", "(gt.batch_id IS NULL OR TRIM(gt.batch_id) = '')", "(? OR gt.archived_at IS NULL)"]
     query_params: list[Any] = [include_archived]
     keyword_terms = split_keyword_terms(keyword)
     if keyword_terms:
@@ -4345,7 +4388,9 @@ def list_new_generation_records(
             """
             SELECT gt.status
             FROM generation_tasks gt
-            WHERE gt.deleted_at IS NULL AND (? OR gt.archived_at IS NULL)
+            WHERE gt.deleted_at IS NULL
+              AND (gt.batch_id IS NULL OR TRIM(gt.batch_id) = '')
+              AND (? OR gt.archived_at IS NULL)
             """,
             (include_archived,),
         ).fetchall()

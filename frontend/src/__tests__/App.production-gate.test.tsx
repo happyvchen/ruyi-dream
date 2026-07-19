@@ -70,7 +70,7 @@ const emptyPage = {
 const defaultModel = {
   id: 1,
   modelId: 'Face-01',
-  name: '默认数字模特',
+  name: '默认模特',
   profile: { headReferenceEntries: [] },
   isDefault: true,
   thumbUrl: null,
@@ -198,16 +198,16 @@ describe('production gate app shell and page controls', () => {
     render(<App />)
 
     expect(await screen.findByRole('button', { name: '搭配服装库' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '数字模特' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '模特与背景' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '生成记录' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Prompt 维护' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /provider|Image-2|Gemini|任务包/i })).not.toBeInTheDocument()
 
     await userEvent.click(screen.getByRole('button', { name: '搭配服装库' }))
-    expect(await screen.findByRole('button', { name: '导入搭配服装' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: '上传搭配服装' })).toBeInTheDocument()
 
-    await userEvent.click(screen.getByRole('button', { name: '数字模特' }))
-    expect(await screen.findByText('默认数字模特')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '模特与背景' }))
+    expect(await screen.findByText('默认模特')).toBeInTheDocument()
 
     await userEvent.click(screen.getByRole('button', { name: '生成记录' }))
     expect(await screen.findByText('全部记录')).toBeInTheDocument()
@@ -245,11 +245,11 @@ describe('production gate app shell and page controls', () => {
     render(<App />)
     await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
 
-    expect(screen.getByRole('button', { name: '导入搭配服装' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '上传搭配服装' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /批量管理/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /查看已归档/ })).toBeInTheDocument()
 
-    await userEvent.click(screen.getByRole('button', { name: '导入搭配服装' }))
+    await userEvent.click(screen.getByRole('button', { name: '上传搭配服装' }))
     expect(await screen.findByText('拖入图片或文件夹')).toBeInTheDocument()
     expect(screen.getByText('选择图片')).toBeInTheDocument()
     expect(screen.getByText('选择文件夹')).toBeInTheDocument()

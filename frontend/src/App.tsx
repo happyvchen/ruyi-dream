@@ -84,7 +84,7 @@ const steps = [
 const adminPages = new Set<Page>(['prompt-maintenance'])
 
 const defaultPageSizeOptions = [20, 50, 100] as const
-const densePageSizeOptions = [12, 50, 100] as const
+const densePageSizeOptions = [50, 100] as const
 const recentTaskRowHeight = 62
 const recentTaskMaxPageSize = 60
 const authSeenStorageKey = 'ruyi-auth-seen'
@@ -315,8 +315,8 @@ export function App() {
     }
   }
 
-  async function refreshUploadSessions(scope?: string) {
-    const result = await api.listUploadSessions({ scope, limit: 20 })
+  async function refreshUploadSessions(scope?: string, limit = 20) {
+    const result = await api.listUploadSessions({ scope, limit })
     setUploadSessions((current) => mergeUploadSessions(current, result.items, scope))
     return result.items
   }
@@ -417,7 +417,7 @@ export function App() {
   const nav = [
     { id: 'studio' as const, label: 'AI 摄影棚', icon: Bot },
     { id: 'library' as const, label: '搭配服装库', icon: Library },
-    { id: 'model' as const, label: '数字模特', icon: UserRound },
+    { id: 'model' as const, label: '模特与背景', icon: UserRound },
     { id: 'records' as const, label: '生成记录', icon: History },
     ...(role === 'admin' ? [
       { id: 'prompt-maintenance' as const, label: 'Prompt 维护', icon: FileText },
@@ -463,7 +463,7 @@ export function App() {
         {error && <div className="toast">{error.length > 300 ? `${error.slice(0, 300)}…` : error}</div>}
         {busy && <BusyPill label={busy} />}
         {page === 'studio' && <StudioPage task={task} setTask={setTask} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} uploadSessions={uploadSessions.filter((item) => item.scope === 'generation-task')} refreshUploadSessions={() => refreshUploadSessions('generation_task')} markBrowserUploading={markBrowserUploading} />}
-        {page === 'library' && <LibraryPage garments={garments} run={run} role={role} onDeleteResult={noteDeleteOperationResult} uploadSessions={uploadSessions.filter((item) => item.scope === 'styling-garment')} refreshUploadSessions={() => refreshUploadSessions('styling_garment')} markBrowserUploading={markBrowserUploading} showImport={libraryImportOpen} setShowImport={setLibraryImportOpen} importJobs={libraryImportJobs} setImportJobs={setLibraryImportJobs} />}
+        {page === 'library' && <LibraryPage garments={garments} run={run} role={role} onDeleteResult={noteDeleteOperationResult} uploadSessions={uploadSessions.filter((item) => item.scope === 'styling-garment')} refreshUploadSessions={() => refreshUploadSessions('styling_garment', 100)} markBrowserUploading={markBrowserUploading} showImport={libraryImportOpen} setShowImport={setLibraryImportOpen} importJobs={libraryImportJobs} setImportJobs={setLibraryImportJobs} />}
         {page === 'model' && <ModelPage models={models} role={role} run={run} />}
         {page === 'prompt-maintenance' && role === 'admin' && <PromptMaintenancePage run={run} />}
         {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} openTaskInStudio={openTaskInStudio} run={run} onDeleteResult={noteDeleteOperationResult} />}
@@ -585,11 +585,15 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   const [step, setStep] = useState<StudioStep>(0)
   const [taskRailTab, setTaskRailTab] = useState<'summary' | 'recent'>('summary')
   const [recentTaskPageSize, setRecentTaskPageSize] = useState(() => preferredRecentTaskPageSize())
-  const [taskItems, setTaskItems] = useState<GenerationTask[]>([])
+  const [recentItems, setRecentItems] = useState<GenerationWorkspaceRecord[]>([])
   const [recentTaskTotal, setRecentTaskTotal] = useState(0)
   const [recentTaskHasMore, setRecentTaskHasMore] = useState(false)
   const [recentTaskNextOffset, setRecentTaskNextOffset] = useState<number | null>(null)
   const [recentTaskLoading, setRecentTaskLoading] = useState(false)
+  const [expandedRecentBatchIds, setExpandedRecentBatchIds] = useState<Set<string>>(() => new Set())
+  const [recentBatchTasks, setRecentBatchTasks] = useState<Record<string, GenerationTask[]>>({})
+  const [recentBatchLoading, setRecentBatchLoading] = useState<Record<string, boolean>>({})
+  const recentBatchRequestRef = useRef<Record<string, number>>({})
   const [batchItems, setBatchItems] = useState<GenerationTask[]>([])
   const [batchItemsLoading, setBatchItemsLoading] = useState(false)
   const [batchDownloadPrecheck, setBatchDownloadPrecheck] = useState<FinalImageExportPrecheck | null>(null)
@@ -606,6 +610,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   const [finalImageInstruction, setFinalImageInstruction] = useState('')
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
+  const summaryInputStep = (visibleStep > 0 ? visibleStep : currentStep) as StudioStep
   const studioView = task ? studioTaskPresentation(task) : null
   const batchContextMatches = !!task?.batchId && activeBatchIdRef.current === task.batchId
   const visibleBatchItems = batchContextMatches ? batchItems : []
@@ -613,7 +618,10 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   const isAdmin = role === 'admin'
   function applyTaskUpdate(nextTask: GenerationTask) {
     setTask(nextTask)
-    setTaskItems((current) => upsertRecentTaskItem(current, nextTask))
+    setRecentItems((current) => upsertRecentRecordItem(current, nextTask))
+    setRecentBatchTasks((current) => nextTask.batchId && current[nextTask.batchId]
+      ? { ...current, [nextTask.batchId]: upsertRecentTaskItem(current[nextTask.batchId], nextTask) }
+      : current)
   }
   function openRecentTask(item: GenerationTask) {
     setTaskRailTab('summary')
@@ -632,18 +640,49 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     const requestId = recentTaskRequestRef.current + 1
     recentTaskRequestRef.current = requestId
     setRecentTaskLoading(true)
-    void api.listRecords({ limit: recentTaskPageSize, offset }).then((result) => {
+    void api.listRecordWorkspace({ limit: recentTaskPageSize, offset }).then((result) => {
       if (recentTaskRequestRef.current !== requestId) return
       setRecentTaskTotal(result.total)
       setRecentTaskHasMore(result.hasMore)
       setRecentTaskNextOffset(result.nextOffset)
-      setTaskItems((current) => {
+      setRecentItems((current) => {
         if (!append) return result.items
-        return mergeRecentTaskItems(current, result.items)
+        return mergeRecentRecordItems(current, result.items)
       })
     }).catch(() => undefined).finally(() => {
       if (recentTaskRequestRef.current === requestId) setRecentTaskLoading(false)
     })
+  }
+  function loadRecentBatchTasks(batchId: string) {
+    const requestId = (recentBatchRequestRef.current[batchId] ?? 0) + 1
+    recentBatchRequestRef.current = { ...recentBatchRequestRef.current, [batchId]: requestId }
+    setRecentBatchLoading((current) => ({ ...current, [batchId]: true }))
+    void api.listBatchTasks(batchId)
+      .then((result) => {
+        if (recentBatchRequestRef.current[batchId] === requestId) {
+          setRecentBatchTasks((current) => ({ ...current, [batchId]: result.items }))
+        }
+      })
+      .catch(() => {
+        if (recentBatchRequestRef.current[batchId] === requestId) {
+          setRecentBatchTasks((current) => ({ ...current, [batchId]: [] }))
+        }
+      })
+      .finally(() => {
+        if (recentBatchRequestRef.current[batchId] === requestId) {
+          setRecentBatchLoading((current) => ({ ...current, [batchId]: false }))
+        }
+      })
+  }
+  function toggleRecentBatch(batch: GenerationRecordBatch) {
+    const willExpand = !expandedRecentBatchIds.has(batch.batchId)
+    setExpandedRecentBatchIds((current) => {
+      const next = new Set(current)
+      if (willExpand) next.add(batch.batchId)
+      else next.delete(batch.batchId)
+      return next
+    })
+    if (willExpand && !recentBatchTasks[batch.batchId]) loadRecentBatchTasks(batch.batchId)
   }
   function handleRecentTaskScroll(event: UIEvent<HTMLDivElement>) {
     const element = event.currentTarget
@@ -689,7 +728,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     if (!window.confirm('确定取消排队吗？任务会退出自动成片队列，已完成的步骤和结果保留，之后可随时再次一键成片。')) return
     void run('取消排队中...', () => api.cancelAutoRun(item.id), (r: { item: GenerationTask }) => {
       if (task?.id === item.id) applyTaskUpdate(r.item)
-      setTaskItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, ...r.item } : entry))
+      setRecentItems((current) => upsertRecentRecordItem(current, r.item))
     }, { refresh: 'background' })
   }
   function startOneClickFinal() {
@@ -796,13 +835,13 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     if (!task || isTaskLockedForGeneration(task)) return
     clearLocalOperationsFor(['generation_styling', 'generation_preview', 'generation_result_image'], task.id)
   }, [task?.id, task?.status, task?.autoRunTarget, task?.resultSet?.status])
-  const hasActiveRecentTasks = taskItems.some((item) => isTaskRunning(item) || isTaskQueuedForAutoRun(item))
+  const hasActiveRecentTasks = recentRecordTasks(recentItems).some((item) => isTaskRunning(item) || isTaskQueuedForAutoRun(item))
   useEffect(() => {
     if (!hasActiveRecentTasks) return
     const timer = window.setInterval(() => {
-      void api.listRecords({ limit: recentTaskPageSize, offset: 0 }).then((result) => {
+      void api.listRecordWorkspace({ limit: recentTaskPageSize, offset: 0 }).then((result) => {
         setRecentTaskTotal(result.total)
-        setTaskItems((current) => {
+        setRecentItems((current) => {
           const byId = new Map(result.items.map((item) => [item.id, item] as const))
           const known = new Set(current.map((item) => item.id))
           const merged = current.map((item) => {
@@ -866,33 +905,35 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
           </div>
         ) : undefined}
       />
-      {task?.batchId && (
-        <BatchBar
-          items={visibleBatchItems}
-          loading={batchContextLoading}
-          downloadChecking={batchDownloadChecking}
-          currentTaskId={task.id}
-          onOpenTask={openBatchTask}
-          onPrimaryAction={handleBatchPrimaryAction}
-          onDownload={startBatchDownload}
-        />
-      )}
       <div className="studio-grid">
-        <div className="panel studio-main">
-          <div className="studio-main-top">
-            <StepRail active={visibleStep} executing={studioView?.executingStage ?? null} max={currentStep} onSelect={setStep} />
-          </div>
-          <div className="studio-stage-viewport">
-            {visibleStep === 0 && <UploadHeroStep task={task} setTask={applyTaskUpdate} run={run} uploadSessions={uploadSessions} refreshUploadSessions={refreshUploadSessions} markBrowserUploading={markBrowserUploading} />}
-            {visibleStep === 1 && <StylingStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={aiStylingInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
-            {visibleStep === 2 && <PreviewStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={storyboardInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
-            {visibleStep === 3 && <FinalStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={finalImageInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+        <div className="studio-work-area">
+          {task?.batchId && (
+            <BatchBar
+              items={visibleBatchItems}
+              loading={batchContextLoading}
+              downloadChecking={batchDownloadChecking}
+              currentTaskId={task.id}
+              onOpenTask={openBatchTask}
+              onPrimaryAction={handleBatchPrimaryAction}
+              onDownload={startBatchDownload}
+            />
+          )}
+          <div className="panel studio-main">
+            <div className="studio-main-top">
+              <StepRail active={visibleStep} executing={studioView?.executingStage ?? null} max={currentStep} onSelect={setStep} />
+            </div>
+            <div className="studio-stage-viewport">
+              {visibleStep === 0 && <UploadHeroStep task={task} setTask={applyTaskUpdate} run={run} uploadSessions={uploadSessions} refreshUploadSessions={refreshUploadSessions} markBrowserUploading={markBrowserUploading} />}
+              {visibleStep === 1 && <StylingStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={aiStylingInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+              {visibleStep === 2 && <PreviewStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={storyboardInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+              {visibleStep === 3 && <FinalStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={finalImageInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+            </div>
           </div>
         </div>
         <aside className="panel task-rail">
           <div className="task-rail-tabs" role="tablist" aria-label="任务侧栏">
             <button id="task-rail-summary-tab" role="tab" aria-selected={taskRailTab === 'summary'} aria-controls="task-summary-panel" tabIndex={taskRailTab === 'summary' ? 0 : -1} className={taskRailTab === 'summary' ? 'active' : ''} onClick={() => setTaskRailTab('summary')} onKeyDown={handleTaskRailTabKeyDown}>任务摘要</button>
-            <button id="task-rail-recent-tab" role="tab" aria-selected={taskRailTab === 'recent'} aria-controls="recent-tasks-panel" tabIndex={taskRailTab === 'recent' ? 0 : -1} className={taskRailTab === 'recent' ? 'active' : ''} onClick={() => setTaskRailTab('recent')} onKeyDown={handleTaskRailTabKeyDown}>最近任务 <span>{recentTaskTotal}</span></button>
+            <button id="task-rail-recent-tab" role="tab" aria-selected={taskRailTab === 'recent'} aria-controls="recent-tasks-panel" tabIndex={taskRailTab === 'recent' ? 0 : -1} className={taskRailTab === 'recent' ? 'active' : ''} onClick={() => setTaskRailTab('recent')} onKeyDown={handleTaskRailTabKeyDown}>最近任务</button>
           </div>
           <div id="task-summary-panel" role="tabpanel" aria-labelledby="task-rail-summary-tab" className="task-rail-panel task-summary-panel" hidden={taskRailTab !== 'summary'}>
             {task ? (
@@ -907,14 +948,14 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
                   <Meta label="最终成片" value={`${task.resultSet?.images?.filter((i) => i.status === 'SUCCEEDED').length ?? 0}/5`} />
                   {!!task.styling?.selectedMaterials?.length && <Meta label="搭配服装" value={`${task.styling.selectedMaterials.length} 件`} />}
                 </div>
-                {visibleStep > 0 && (
+                {summaryInputStep > 0 && (
                   <StageUserInputModule
-                    step={visibleStep}
+                    step={summaryInputStep}
                     task={task}
-                    value={stageInputValue(visibleStep, { aiStylingInstruction, storyboardInstruction, finalImageInstruction })}
-                    savedValue={savedStageInputValue(visibleStep, task)}
-                    onChange={(value) => updateStageInput(visibleStep, value, { setAiStylingInstruction, setStoryboardInstruction, setFinalImageInstruction })}
-                    onSave={() => void run(`${stageInputSaveLabel(visibleStep)}中...`, () => api.updateTask(task.id, stageInputSavePayload(visibleStep, stageInputValue(visibleStep, { aiStylingInstruction, storyboardInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => applyTaskUpdate(r.item), { refresh: 'background' })}
+                    value={stageInputValue(summaryInputStep, { aiStylingInstruction, storyboardInstruction, finalImageInstruction })}
+                    savedValue={savedStageInputValue(summaryInputStep, task)}
+                    onChange={(value) => updateStageInput(summaryInputStep, value, { setAiStylingInstruction, setStoryboardInstruction, setFinalImageInstruction })}
+                    onSave={() => void run(`${stageInputSaveLabel(summaryInputStep)}中...`, () => api.updateTask(task.id, stageInputSavePayload(summaryInputStep, stageInputValue(summaryInputStep, { aiStylingInstruction, storyboardInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => applyTaskUpdate(r.item), { refresh: 'background' })}
                     disabled={isTaskRunning(task) || !!task.autoRunTarget}
                   />
                 )}
@@ -934,18 +975,25 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
           </div>
           <div id="recent-tasks-panel" role="tabpanel" aria-labelledby="task-rail-recent-tab" className="task-rail-panel recent-tasks-panel" hidden={taskRailTab !== 'recent'}>
             <div className="mini-list recent-task-list" onScroll={handleRecentTaskScroll}>
-              {taskItems.map((item) => (
-                <div key={item.id} className={`mini-row view-only ${task?.id === item.id ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
-                  <button onClick={() => openRecentTask(item)} title="恢复拍摄任务">
-                    <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
-                    <span className="recent-task-copy"><strong>{item.name}</strong><span className="recent-task-meta"><em>{item.archivedAt ? archiveStateText(item.archiveReason) : taskListStatusLabel(item)}</em><time dateTime={item.createdAt}>{dateText(item.createdAt)}</time></span></span>
-                  </button>
-                </div>
+              {recentItems.map((entry) => entry.kind === 'batch' ? (
+                <RecentBatchTaskRow
+                  key={entry.id}
+                  item={entry.batch}
+                  activeTaskId={task?.id ?? null}
+                  activeBatchId={task?.batchId ?? null}
+                  expanded={expandedRecentBatchIds.has(entry.batch.batchId)}
+                  tasks={recentBatchTasks[entry.batch.batchId] ?? []}
+                  loading={!!recentBatchLoading[entry.batch.batchId]}
+                  onToggle={toggleRecentBatch}
+                  onOpenTask={openBatchTask}
+                />
+              ) : (
+                <RecentSingleTaskRow key={entry.id} item={entry.task} active={task?.id === entry.task.id} onOpen={openRecentTask} />
               ))}
-              {!taskItems.length && <EmptyState title="暂无任务" text="创建拍摄任务后会出现在这里。" />}
-              {!!taskItems.length && (
+              {!recentItems.length && <EmptyState title="暂无任务" text="创建拍摄任务后会出现在这里。" />}
+              {!!recentItems.length && (
                 <div className="recent-task-footer" role="status" aria-live="polite">
-                  <span>{recentTaskLoading ? '正在加载更多...' : recentTaskHasMore ? `已显示 ${taskItems.length} / 共 ${recentTaskTotal} 条` : `已触底，共 ${recentTaskTotal} 条`}</span>
+                  <span>{recentTaskLoading ? '正在加载更多...' : recentTaskHasMore ? `已显示 ${recentItems.length} / 共 ${recentTaskTotal} 条` : `已触底，共 ${recentTaskTotal} 条`}</span>
                 </div>
               )}
             </div>
@@ -1008,8 +1056,51 @@ function upsertRecentTaskItem(items: GenerationTask[], task: GenerationTask) {
   return [task, ...next]
 }
 
-function mergeRecentTaskItems(current: GenerationTask[], incoming: GenerationTask[]) {
-  const seen = new Set<number>()
+function recentRecordTasks(items: GenerationWorkspaceRecord[]) {
+  return items.flatMap((item) => item.kind === 'task' ? [item.task] : item.batch.coverTasks)
+}
+
+function upsertRecentRecordItem(items: GenerationWorkspaceRecord[], task: GenerationTask) {
+  let touched = false
+  const next = items.map((item) => {
+    if (item.kind === 'task' && item.task.id === task.id) {
+      touched = true
+      return {
+        ...item,
+        status: task.status,
+        name: task.name,
+        updatedAt: task.updatedAt,
+        task: { ...item.task, ...task },
+      }
+    }
+    if (item.kind === 'batch' && task.batchId === item.batch.batchId) {
+      touched = true
+      return {
+        ...item,
+        updatedAt: task.updatedAt,
+        batch: {
+          ...item.batch,
+          updatedAt: task.updatedAt,
+          coverTasks: upsertRecentTaskItem(item.batch.coverTasks, task).slice(0, 4),
+        },
+      }
+    }
+    return item
+  })
+  if (touched) return next
+  return [{
+    kind: 'task' as const,
+    id: `task-${task.id}`,
+    status: task.status,
+    name: task.name,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    task,
+  }, ...next]
+}
+
+function mergeRecentRecordItems(current: GenerationWorkspaceRecord[], incoming: GenerationWorkspaceRecord[]) {
+  const seen = new Set<string>()
   return [...current, ...incoming].filter((item) => {
     if (seen.has(item.id)) return false
     seen.add(item.id)
@@ -1019,6 +1110,85 @@ function mergeRecentTaskItems(current: GenerationTask[], incoming: GenerationTas
 
 function taskCoverAsset(task: GenerationTask) {
   return task.summary?.cover ?? task.images?.[0]?.asset ?? null
+}
+
+function RecentSingleTaskRow({ item, active, onOpen, showKind = true }: { item: GenerationTask; active: boolean; onOpen: (item: GenerationTask) => void; showKind?: boolean }) {
+  const statusLabel = item.archivedAt ? archiveStateText(item.archiveReason) : taskListStatusLabel(item)
+  const dateLabel = dateText(item.createdAt)
+  const tooltip = `${item.name} · ${statusLabel} · ${dateLabel}`
+  return (
+    <div className={`mini-row view-only recent-task-row is-single ${active ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
+      <button onClick={() => onOpen(item)} title={tooltip} aria-label={tooltip}>
+        <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
+        <span className="recent-task-copy">
+          <span className="recent-task-title-line">
+            <strong title={item.name}>{item.name}</strong>
+            {showKind && <em className="recent-kind-chip">单次</em>}
+          </span>
+          <span className="recent-task-meta">
+            <em title={statusLabel}>{statusLabel}</em>
+            <time dateTime={item.createdAt}>{dateLabel}</time>
+          </span>
+        </span>
+      </button>
+    </div>
+  )
+}
+
+function RecentBatchTaskRow({ item, activeTaskId, activeBatchId, expanded, tasks, loading, onToggle, onOpenTask }: {
+  item: GenerationRecordBatch
+  activeTaskId: number | null
+  activeBatchId: string | null
+  expanded: boolean
+  tasks: GenerationTask[]
+  loading: boolean
+  onToggle: (item: GenerationRecordBatch) => void
+  onOpenTask: (item: GenerationTask) => void
+}) {
+  const visibleTasks = tasks.slice(0, 5)
+  const hasMore = item.taskCount > visibleTasks.length
+  const active = activeBatchId === item.batchId
+  const statusLabel = `${recordStatusText(item.status)} · ${item.taskCount} 项`
+  const dateLabel = dateText(item.updatedAt)
+  const tooltip = `${item.name} · ${statusLabel} · ${dateLabel}`
+  return (
+    <div className={`recent-batch-shell ${expanded ? 'is-expanded' : ''}`}>
+      <div className={`mini-row view-only recent-task-row is-batch ${active ? 'active' : ''} ${item.status === 'ARCHIVED' ? 'is-archived' : ''}`}>
+        <button aria-expanded={expanded} onClick={() => onToggle(item)} title={tooltip} aria-label={tooltip}>
+          <div className="recent-batch-cover-stack" aria-hidden="true">
+            {item.coverTasks.slice(0, 4).map((task) => <AssetThumb key={task.id} asset={taskCoverAsset(task)} interactive={false} />)}
+            {!item.coverTasks.length && <AssetThumb asset={null} interactive={false} />}
+          </div>
+          <span className="recent-task-copy">
+            <span className="recent-task-title-line">
+              <strong title={item.name}>{item.name}</strong>
+              <em className="recent-kind-chip is-batch">批次</em>
+            </span>
+            <span className="recent-task-meta">
+              <em title={statusLabel}>{statusLabel}</em>
+              <time dateTime={item.updatedAt}>{dateLabel}</time>
+            </span>
+          </span>
+        </button>
+      </div>
+      {expanded && (
+        <div className="recent-batch-children">
+          {loading && <span className="recent-batch-loading"><Loader2 className="spin" size={14} />读取批次任务...</span>}
+          {!loading && visibleTasks.map((task) => (
+            <RecentSingleTaskRow
+              key={task.id}
+              item={task}
+              active={activeTaskId === task.id}
+              onOpen={onOpenTask}
+              showKind={false}
+            />
+          ))}
+          {!loading && hasMore && <span className="recent-batch-more">还有 {item.taskCount - visibleTasks.length} 个任务，可在生成记录中查看全部</span>}
+          {!loading && !visibleTasks.length && <span className="recent-batch-more">暂无可显示的批次任务</span>}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function TaskResumeActionContent({ task }: { task: GenerationTask }) {
@@ -1054,16 +1224,24 @@ function BatchBar({ items, loading, downloadChecking, currentTaskId, onOpenTask,
   onPrimaryAction: (action: BatchPrimaryAction) => void
   onDownload: () => void
 }) {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement | null>(null)
+  useOutsideClose(menuOpen, wrapRef, () => setMenuOpen(false))
+  const visibleItems = items.slice(0, 4)
+  const openTask = (item: GenerationTask) => {
+    onOpenTask(item)
+    setMenuOpen(false)
+  }
   return (
-    <div className="panel batch-bar">
+    <div className={`panel batch-bar ${menuOpen ? 'is-menu-open' : ''}`} ref={wrapRef}>
       <div className="batch-bar-main">
-        <span className="batch-bar-title">{loading ? '正在读取批次...' : `本批次 ${items.length} 个任务`}</span>
+        <span className="recent-kind-chip is-batch">{loading ? '读取中' : '批次'}</span>
         <div className="batch-bar-chips">
-          {items.map((item) => (
+          {visibleItems.map((item) => (
             <button
               key={item.id}
               className={`batch-chip ${batchChipTone(item)} ${item.id === currentTaskId ? 'active' : ''}`}
-              onClick={() => onOpenTask(item)}
+              onClick={() => openTask(item)}
               title={`切换到 ${item.name}`}
             >
               <strong>{item.name}</strong>
@@ -1071,6 +1249,33 @@ function BatchBar({ items, loading, downloadChecking, currentTaskId, onOpenTask,
             </button>
           ))}
         </div>
+        {items.length > 1 && (
+          <div className="batch-task-select">
+            <button className="batch-expand-button" type="button" onClick={() => setMenuOpen((value) => !value)} title={menuOpen ? '收起批次任务' : '查看全部批次任务'} aria-label={menuOpen ? '收起批次任务' : '查看全部批次任务'} aria-expanded={menuOpen} aria-haspopup="menu" aria-controls="batch-task-popover">
+              <ChevronDown size={16} />
+            </button>
+            {menuOpen && (
+              <div id="batch-task-popover" className="filter-popover sort-popover batch-task-popover" role="menu">
+                {items.map((item, index) => (
+                  <button
+                    className={item.id === currentTaskId ? 'is-selected' : ''}
+                    type="button"
+                    role="menuitem"
+                    key={item.id}
+                    onClick={() => openTask(item)}
+                    title={`切换到 ${item.name}`}
+                  >
+                    <span>
+                      <strong>{item.name}</strong>
+                      <small>第 {index + 1}/{items.length} 个任务 · {batchChipStatus(item)}</small>
+                    </span>
+                    {item.id === currentTaskId && <Check size={15} />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
       <BatchTaskSummary currentTaskId={currentTaskId} items={items} loading={loading} downloadChecking={downloadChecking} onPrimaryAction={onPrimaryAction} onDownload={onDownload} />
     </div>
@@ -1111,7 +1316,7 @@ function BatchTaskSummary({ currentTaskId, items, loading, downloadChecking, onP
   return (
     <section className="task-batch-summary" aria-label="批次操作">
       <span className="task-batch-label">
-        所属批次 · {loading ? '读取中' : currentIndex >= 0 ? `第 ${currentIndex + 1}/${items.length} 个任务` : `共 ${items.length} 个任务`}
+        {loading ? '读取中' : currentIndex >= 0 ? `第 ${currentIndex + 1}/${items.length} 个任务` : `共 ${items.length} 个任务`}
       </span>
       <div className="task-batch-actions" aria-live="polite">
         <button className={actionPresentation.className} type="button" disabled={loading || primaryAction === 'none'} onClick={() => onPrimaryAction(primaryAction)}><ActionIcon size={14} />{actionPresentation.label}</button>
@@ -1351,7 +1556,7 @@ function UploadHeroStep({ task, setTask, run, uploadSessions, refreshUploadSessi
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><h2>上传主推款</h2><p>支持多张图片、一个货号文件夹或一个上级文件夹。每套最多 15 张进入候选池，AI 智能选搭后保留挑选排序好的 8 张主推款参考图。</p></div>
+        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="支持多张图片、一个货号文件夹或一个上级文件夹。每套最多 15 张进入候选池，AI 智能选搭后保留挑选排序好的 8 张主推款参考图。">上传主推款</HeadingWithTooltip></div>
         {!task && uploadSessions.length > 0 && <UploadSessionRecoveryList sessions={uploadSessions} emptyLabel="暂无主推款上传任务" onAbandon={(id) => api.abandonUploadSession(id).then(() => refreshUploadSessions())} />}
         {task?.status === 'DRAFT' && <HeroDraftEditor task={task} setTask={setTask} run={run} />}
         {!task && (
@@ -1893,7 +2098,7 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><h2>AI 智能选搭</h2><p>理解主推款与商品卖点，评估多套造型方向，并选择最能突出主推款的搭配方案。</p></div>
+        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="理解主推款与商品卖点，评估多套造型方向，并选择最能突出主推款的搭配方案。">AI 智能选搭</HeadingWithTooltip></div>
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_styling" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`AI 智能选搭 · Attempt #${operation.id}`, ['generation_styling'], operation.id) : undefined} /></div>
         ) : (
@@ -2124,7 +2329,7 @@ function diagnosisItems(value: Record<string, unknown>): string[] {
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><h2>生成分镜预览</h2><p>按主推款类型与选搭方案生成 3:2 六格分镜；前 5 格用于生成成片，第 6 格仅作备用参考。</p></div>
+        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="按主推款类型与选搭方案生成 3:2 六格分镜；前 5 格用于生成成片，第 6 格仅作备用参考。">生成分镜预览</HeadingWithTooltip></div>
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_preview" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成分镜预览 · Attempt #${operation.id}`, ['generation_preview'], operation.id) : undefined} /></div>
         ) : (
@@ -2172,7 +2377,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><h2>生成成片</h2><p>并发生成分镜前 5 个镜头；可逐张检查、下载或重新生成，也可打包下载全部成片。</p></div>
+        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="并发生成分镜前 5 个镜头；可逐张检查、下载或重新生成，也可打包下载全部成片。">生成成片</HeadingWithTooltip></div>
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status">
             <AIOperationList operations={finalHistoryOperations} taskId={task?.id} ownerType="generation_result_image" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成成片 · Attempt #${operation.id}`, ['generation_result_image'], operation.id) : undefined} />
@@ -2266,7 +2471,10 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   const [uploadedTo, setUploadedTo] = useState('')
   const [sortBy, setSortBy] = useState('createdAt')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
-  const [openFilter, setOpenFilter] = useState<'category' | 'date' | 'sort' | 'status' | null>(null)
+  const [openFilter, setOpenFilter] = useState<'category' | 'date' | 'sort' | 'status' | 'importJob' | null>(null)
+  const [importJobFilter, setImportJobFilter] = useState('')
+  const [focusedGarmentCode, setFocusedGarmentCode] = useState('')
+  const [focusedGarmentId, setFocusedGarmentId] = useState<number | null>(null)
   const [pageSizeMode, setPageSizeMode] = useState<'auto' | 'fixed'>('auto')
   const [pageSize, setPageSize] = useState(() => estimateAutoGarmentPageSize())
   const [searching, setSearching] = useState(true)
@@ -2277,11 +2485,36 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   const [deleteGarmentDialog, setDeleteGarmentDialog] = useState<StylingGarment[] | null>(null)
   const [deleteGarmentImpact, setDeleteGarmentImpact] = useState<DeleteImpact | null>(null)
   const [deleteGarmentImpactLoading, setDeleteGarmentImpactLoading] = useState(false)
+  const refreshUploadSessionsRef = useRef(refreshUploadSessions)
   const selectableGarmentIds = items.filter((item) => item.status !== 'TAGGING_RUNNING').map((item) => item.id)
   const selectedVisibleGarments = items.filter((item) => selectedGarmentIds.has(item.id) && selectableGarmentIds.includes(item.id))
   const selectedArchivedGarments = selectedVisibleGarments.filter((item) => item.archivedAt)
   const selectedActiveGarments = selectedVisibleGarments.filter((item) => !item.archivedAt)
   const allVisibleGarmentsSelected = selectableGarmentIds.length > 0 && selectableGarmentIds.every((id) => selectedGarmentIds.has(id))
+  const importBatchOptions = useMemo(() => importJobs
+    .map((job) => {
+      const codes = Array.from(new Set(job.items.map((item) => item.code).filter(Boolean)))
+      return {
+        value: job.id,
+        label: importJobDisplayTitle(job, []),
+        count: codes.length,
+        codes,
+        updatedAt: job.updatedAt ?? job.createdAt,
+      }
+    })
+    .filter((option) => option.codes.length > 0)
+    .sort((a, b) => new Date(parseRuyiTime(b.updatedAt)).getTime() - new Date(parseRuyiTime(a.updatedAt)).getTime()), [importJobs])
+  const selectedImportBatch = importBatchOptions.find((option) => option.value === importJobFilter)
+  const selectedImportCodes = useMemo(() => new Set(selectedImportBatch?.codes ?? []), [selectedImportBatch])
+
+  useEffect(() => {
+    refreshUploadSessionsRef.current = refreshUploadSessions
+  }, [refreshUploadSessions])
+
+  useEffect(() => {
+    if (!showImport) return
+    void refreshUploadSessionsRef.current().catch(() => undefined)
+  }, [showImport])
 
   async function openDetail(item: StylingGarment) {
     const result = await api.getStylingGarment(item.id)
@@ -2291,10 +2524,12 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
 
   function libraryQueryOptions(targetOffset = offset) {
     const keyword = query.trim()
+    const importKeyword = selectedImportBatch?.codes.join(' ')
+    const exactCodeKeyword = focusedGarmentCode.trim()
     return {
-      limit: pageSize,
-      offset: targetOffset,
-      keyword: keyword || undefined,
+      limit: selectedImportBatch ? Math.max(100, selectedImportBatch.codes.length, pageSize) : focusedGarmentCode ? Math.max(100, pageSize) : pageSize,
+      offset: selectedImportBatch || focusedGarmentCode || focusedGarmentId ? 0 : targetOffset,
+      keyword: selectedImportBatch ? importKeyword : exactCodeKeyword || keyword || undefined,
       includeArchived,
       status: statusFilter ? [statusFilter] : undefined,
       primaryCategory: primaryCategoryFilter.length ? primaryCategoryFilter : undefined,
@@ -2308,19 +2543,32 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
 
   function refreshLibraryPage(targetOffset = offset) {
     return api.listStylingGarments(libraryQueryOptions(targetOffset)).then((result) => {
-      if (!result.items.length && result.total > 0 && targetOffset > 0) {
+      if (!selectedImportBatch && !focusedGarmentCode && !focusedGarmentId && !result.items.length && result.total > 0 && targetOffset > 0) {
         const fallbackOffset = Math.max(0, Math.floor((result.total - 1) / pageSize) * pageSize)
         setOffset(fallbackOffset)
-        return api.listStylingGarments(libraryQueryOptions(fallbackOffset)).then(applyLibraryResult)
+        return api.listStylingGarments(libraryQueryOptions(fallbackOffset)).then((nextResult) => applyLibraryResult(nextResult, fallbackOffset))
       }
-      applyLibraryResult(result)
+      applyLibraryResult(result, targetOffset)
     })
   }
 
-  function applyLibraryResult(result: StylingGarmentListResponse) {
-    setItems(result.items)
-    setTotal(result.total)
-    setTotalPages(result.totalPages)
+  function applyLibraryResult(result: StylingGarmentListResponse, targetOffset = offset) {
+    if (selectedImportBatch) {
+      const queryTerms = splitSearchTerms(query).map((term) => term.toLocaleLowerCase())
+      const filtered = result.items.filter((item) => selectedImportCodes.has(item.code) && garmentMatchesLibraryQuery(item, queryTerms))
+      setItems(filtered.slice(targetOffset, targetOffset + pageSize))
+      setTotal(filtered.length)
+      setTotalPages(filtered.length ? Math.ceil(filtered.length / pageSize) : 0)
+    } else if (focusedGarmentCode) {
+      const filtered = result.items.filter((item) => item.code === focusedGarmentCode)
+      setItems(filtered.slice(targetOffset, targetOffset + pageSize))
+      setTotal(filtered.length)
+      setTotalPages(filtered.length ? Math.ceil(filtered.length / pageSize) : 0)
+    } else {
+      setItems(result.items)
+      setTotal(result.total)
+      setTotalPages(result.totalPages)
+    }
     setFacets(result.facets ?? {})
     setStableFacets(result.stableFacets ?? result.facets ?? {})
   }
@@ -2332,7 +2580,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
 
   useEffect(() => {
     setOffset(0)
-  }, [query, includeArchived, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir])
+  }, [query, includeArchived, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, importJobFilter, focusedGarmentCode, focusedGarmentId])
 
   useEffect(() => {
     if (pageSizeMode !== 'auto' || pageSize === autoPageSize) return
@@ -2353,13 +2601,39 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
     let cancelled = false
     setSearching(true)
     const timer = window.setTimeout(() => {
+      if (focusedGarmentId) {
+        void api.getStylingGarment(focusedGarmentId).then((result) => {
+          if (!cancelled) {
+            setItems([result.item])
+            setTotal(1)
+            setTotalPages(1)
+          }
+        }).catch(() => api.listStylingGarments({
+          ...libraryQueryOptions(0),
+          limit: Math.max(100, pageSize),
+          offset: 0,
+          keyword: focusedGarmentCode || query.trim() || undefined,
+          includeArchived: true,
+        }).then((result) => {
+          if (cancelled) return
+          const filtered = focusedGarmentCode ? result.items.filter((item) => item.code === focusedGarmentCode) : result.items
+          setItems(filtered.slice(0, pageSize))
+          setTotal(filtered.length)
+          setTotalPages(filtered.length ? Math.ceil(filtered.length / pageSize) : 0)
+        })).catch(() => {
+          if (!cancelled) {
+            setItems([])
+            setTotal(0)
+            setTotalPages(0)
+          }
+        }).finally(() => {
+          if (!cancelled) setSearching(false)
+        })
+        return
+      }
       void api.listStylingGarments(libraryQueryOptions(offset)).then((result) => {
         if (!cancelled) {
-          setItems(result.items)
-          setTotal(result.total)
-          setTotalPages(result.totalPages)
-          setFacets(result.facets ?? {})
-          setStableFacets(result.stableFacets ?? result.facets ?? {})
+          applyLibraryResult(result, offset)
         }
       }).catch(() => undefined).finally(() => {
         if (!cancelled) setSearching(false)
@@ -2369,13 +2643,13 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [offset, query, includeArchived, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize])
+  }, [offset, query, includeArchived, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize, importJobFilter, selectedImportBatch, focusedGarmentCode, focusedGarmentId])
 
   useEffect(() => {
     setItems((current) => current.map((item) => garments.find((latest) => latest.id === item.id) ?? item))
   }, [garments])
 
-  useEffect(() => setSelectedGarmentIds(new Set()), [offset, includeArchived, query, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize])
+  useEffect(() => setSelectedGarmentIds(new Set()), [offset, includeArchived, query, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize, importJobFilter, focusedGarmentCode, focusedGarmentId])
 
   useEffect(() => {
     if (!detail) return
@@ -2454,10 +2728,49 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
     setSortBy('createdAt')
     setSortDir('desc')
     setIncludeArchived(false)
+    setImportJobFilter('')
+    setFocusedGarmentCode('')
+    setFocusedGarmentId(null)
+  }
+
+  function showGarmentFromImport(code: string, garmentId?: number) {
+    setQuery(code)
+    setStatusFilter('')
+    setPrimaryCategoryFilter([])
+    setSecondaryCategoryFilter([])
+    setUploadedFrom('')
+    setUploadedTo('')
+    setSortBy('createdAt')
+    setSortDir('desc')
+    setIncludeArchived(true)
+    setImportJobFilter('')
+    setFocusedGarmentCode(code)
+    setFocusedGarmentId(garmentId ?? null)
+    setOffset(0)
+    setDetail(null)
+    setShowImport(false)
+  }
+
+  function showImportJobInLibrary(jobId: string) {
+    setQuery('')
+    setStatusFilter('')
+    setPrimaryCategoryFilter([])
+    setSecondaryCategoryFilter([])
+    setUploadedFrom('')
+    setUploadedTo('')
+    setSortBy('createdAt')
+    setSortDir('desc')
+    setIncludeArchived(true)
+    setImportJobFilter(jobId)
+    setFocusedGarmentCode('')
+    setFocusedGarmentId(null)
+    setOffset(0)
+    setDetail(null)
+    setShowImport(false)
   }
 
   const categoryFilterCount = primaryCategoryFilter.length + secondaryCategoryFilter.length
-  const hasActiveFilters = Boolean(query.trim() || statusFilter || categoryFilterCount || uploadedFrom || uploadedTo || includeArchived || sortBy !== 'createdAt' || sortDir !== 'desc')
+  const hasActiveFilters = Boolean(query.trim() || statusFilter || categoryFilterCount || uploadedFrom || uploadedTo || includeArchived || sortBy !== 'createdAt' || sortDir !== 'desc' || importJobFilter)
   const stableCategoryTree = stableFacets.categoryTree ?? facets.categoryTree ?? []
   const importGarments = useMemo(() => {
     const byId = new Map<number, StylingGarment>()
@@ -2476,11 +2789,11 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
         <button
           className="management-action"
           disabled={showImport && importBusy}
-          title={showImport && importBusy ? '导入任务完成后可返回服装库' : undefined}
+          title={showImport && importBusy ? '上传任务完成后可返回服装库' : undefined}
           onClick={() => setShowImport((value) => !value)}
         >
           {showImport ? <ChevronLeft size={16} /> : <ImagePlus size={16} />}
-          {showImport ? '返回服装库' : '导入搭配服装'}
+          {showImport ? '返回服装库' : '上传搭配服装'}
         </button>
       </div>
       <div className={`library-content-scroll ${showImport ? 'is-import' : 'is-list'}`}>
@@ -2495,13 +2808,19 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
             garments={importGarments}
             importJobs={importJobs}
             setImportJobs={setImportJobs}
+            onFindGarment={showGarmentFromImport}
+            onFindJob={showImportJobInLibrary}
           />
         ) : (
         <div className="panel library-panel">
           <div className="library-commandbar">
             <SearchBox
               value={query}
-              onChange={setQuery}
+              onChange={(value) => {
+                setQuery(value)
+                setFocusedGarmentCode('')
+                setFocusedGarmentId(null)
+              }}
               placeholder="搜索货号 / 标签，支持粘贴多个"
               panelPlaceholder="每行一个货号，或用空格、逗号、句号、顿号分隔"
               busy={showSearchBusy}
@@ -2516,6 +2835,17 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
                 onPrimary={setPrimaryCategoryFilter}
                 onSecondary={setSecondaryCategoryFilter}
               />
+              <ImportBatchFilter
+                open={openFilter === 'importJob'}
+                onOpen={(open) => setOpenFilter(open ? 'importJob' : null)}
+                value={importJobFilter}
+                options={importBatchOptions}
+                onChange={(value) => {
+                  setImportJobFilter(value)
+                  setFocusedGarmentCode('')
+                  setFocusedGarmentId(null)
+                }}
+              />
               <DateRangeFilter
                 open={openFilter === 'date'}
                 onOpen={(open) => setOpenFilter(open ? 'date' : null)}
@@ -2529,6 +2859,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
                 onOpen={(open) => setOpenFilter(open ? 'sort' : null)}
                 sortBy={sortBy}
                 sortDir={sortDir}
+                options={librarySortOptions}
                 onChange={(nextSortBy, nextSortDir) => {
                   setSortBy(nextSortBy)
                   setSortDir(nextSortDir)
@@ -2571,7 +2902,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
                   onRestore={() => restoreGarments([item])}
                 />
               ))}</div>
-            ) : searching ? null : <EmptyState title={hasActiveFilters ? '没有匹配的搭配服装' : '暂无搭配服装'} text={hasActiveFilters ? '减少筛选条件，或粘贴多个货号、标签再试。' : '点击右上角导入搭配服装。'} />}
+            ) : searching ? null : <EmptyState title={hasActiveFilters ? '没有匹配的搭配服装' : '暂无搭配服装'} text={hasActiveFilters ? '减少筛选条件，或粘贴多个货号、标签再试。' : '点击右上角上传搭配服装。'} />}
           </div>
           <div className="library-pagination-stick">
             <PaginationControls
@@ -2807,8 +3138,8 @@ function DateRangeFilter({ open, onOpen, label: emptyLabel = '上传时间', fro
   const [calendarMonth, setCalendarMonth] = useState(() => monthStart(from ? parseDateInput(from) ?? new Date() : new Date()))
   const [draftFrom, setDraftFrom] = useState('')
   const [draftTo, setDraftTo] = useState('')
-  const pendingRange = draftFrom && !draftTo ? `${draftFrom} 至 ...` : ''
-  const label = from && to ? `${from} 至 ${to}` : emptyLabel
+  const pendingRange = draftFrom && !draftTo ? `${formatDateLabel(draftFrom)} 至 ...` : ''
+  const label = dateRangeLabel(emptyLabel, from, to)
   useOutsideClose(open, wrapRef, () => onOpen(false))
 
   useEffect(() => {
@@ -2833,13 +3164,28 @@ function DateRangeFilter({ open, onOpen, label: emptyLabel = '上传时间', fro
     onOpen(false)
   }
 
-  function applyQuickRange(days: number) {
-    const today = new Date()
-    const nextFrom = new Date(today)
-    nextFrom.setDate(today.getDate() - Math.max(days - 1, 0))
+  function applyRange(nextFrom: Date, nextTo = new Date()) {
     onFrom(dateInputValue(nextFrom))
-    onTo(dateInputValue(today))
+    onTo(dateInputValue(nextTo))
     onOpen(false)
+  }
+
+  function applyWeekRange() {
+    const today = new Date()
+    const mondayOffset = (today.getDay() + 6) % 7
+    const nextFrom = new Date(today)
+    nextFrom.setDate(today.getDate() - mondayOffset)
+    applyRange(nextFrom, today)
+  }
+
+  function applyMonthRange() {
+    const today = new Date()
+    applyRange(new Date(today.getFullYear(), today.getMonth(), 1), today)
+  }
+
+  function applyYearRange() {
+    const today = new Date()
+    applyRange(new Date(today.getFullYear(), 0, 1), today)
   }
 
   function toggleOpen() {
@@ -2854,14 +3200,15 @@ function DateRangeFilter({ open, onOpen, label: emptyLabel = '上传时间', fro
 
   return (
     <div className="filter-popover-wrap" ref={wrapRef}>
-      <button className={`filter-pill ${from && to ? 'is-active' : ''}`} type="button" onClick={toggleOpen}>
+      <button className={`filter-pill date-filter-pill ${from || to ? 'is-active' : ''}`} type="button" onClick={toggleOpen}>
         <span>{pendingRange || label}</span>
         <ChevronDown size={15} />
       </button>
       {open && (
         <div className="filter-popover date-popover">
-          <button type="button" onClick={() => applyQuickRange(7)}>近 7 天</button>
-          <button type="button" onClick={() => applyQuickRange(30)}>近 30 天</button>
+          <button type="button" onClick={applyWeekRange}>本周</button>
+          <button type="button" onClick={applyMonthRange}>本月</button>
+          <button type="button" onClick={applyYearRange}>本年</button>
           <CalendarRangePicker month={calendarMonth} from={draftFrom} to={draftTo} onMonth={setCalendarMonth} onSelect={selectDate} />
         </div>
       )}
@@ -2869,7 +3216,7 @@ function DateRangeFilter({ open, onOpen, label: emptyLabel = '上传时间', fro
   )
 }
 
-function SortFilter({ open, onOpen, sortBy, sortDir, options = sortOptions, onChange }: {
+function SortFilter({ open, onOpen, sortBy, sortDir, options = librarySortOptions, onChange }: {
   open: boolean
   onOpen: (open: boolean) => void
   sortBy: string
@@ -2905,7 +3252,7 @@ function SortFilter({ open, onOpen, sortBy, sortDir, options = sortOptions, onCh
   )
 }
 
-const sortOptions = [
+const librarySortOptions = [
   { value: 'createdAt:desc', label: '最新上传' },
   { value: 'createdAt:asc', label: '最早上传' },
   { value: 'updatedAt:desc', label: '最近更新' },
@@ -3014,6 +3361,44 @@ function StatusFilter({ open, onOpen, value, options, showCounts = true, formatL
   )
 }
 
+function ImportBatchFilter({ open, onOpen, value, options, onChange }: {
+  open: boolean
+  onOpen: (open: boolean) => void
+  value: string
+  options: ImportBatchFilterOption[]
+  onChange: (value: string) => void
+}) {
+  const wrapRef = useRef<HTMLDivElement | null>(null)
+  const selected = options.find((option) => option.value === value)
+  useOutsideClose(open, wrapRef, () => onOpen(false))
+  return (
+    <div className="filter-popover-wrap" ref={wrapRef}>
+      <button className={`filter-pill import-batch-filter-pill ${value ? 'is-active' : ''}`} type="button" onClick={() => onOpen(!open)}>
+        <span>{selected ? selected.label : '全部上传批次'}</span>
+        <ChevronDown size={15} />
+      </button>
+      {open && (
+        <div className="filter-popover sort-popover import-batch-popover">
+          <button className={!value ? 'is-selected' : ''} type="button" onClick={() => { onChange(''); onOpen(false) }}>
+            全部上传批次
+            {!value && <Check size={15} />}
+          </button>
+          {options.map((option) => (
+            <button className={option.value === value ? 'is-selected' : ''} type="button" key={option.value} onClick={() => {
+              onChange(option.value)
+              onOpen(false)
+            }}>
+              <span>{option.label}</span>
+              <small>{option.count} 个货号</small>
+              {option.value === value && <Check size={15} />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function CalendarRangePicker({ month, from, to, onMonth, onSelect }: {
   month: Date
   from: string
@@ -3024,11 +3409,20 @@ function CalendarRangePicker({ month, from, to, onMonth, onSelect }: {
   const days = calendarDays(month)
   const todayValue = dateInputValue(new Date())
   const monthLabel = `${month.getFullYear()} 年 ${month.getMonth() + 1} 月`
+  const year = month.getFullYear()
+  const years = Array.from({ length: 13 }, (_, index) => year - 6 + index)
   return (
     <div className="calendar-range">
       <div className="calendar-head">
         <button type="button" onClick={() => onMonth(addMonths(month, -1))}><ChevronLeft size={15} /></button>
-        <strong>{monthLabel}</strong>
+        <div className="calendar-month-selects" aria-label={monthLabel}>
+          <select value={month.getFullYear()} onChange={(event) => onMonth(new Date(Number(event.target.value), month.getMonth(), 1))}>
+            {years.map((item) => <option value={item} key={item}>{item} 年</option>)}
+          </select>
+          <select value={month.getMonth()} onChange={(event) => onMonth(new Date(month.getFullYear(), Number(event.target.value), 1))}>
+            {Array.from({ length: 12 }, (_, index) => <option value={index} key={index}>{index + 1} 月</option>)}
+          </select>
+        </div>
         <button type="button" onClick={() => onMonth(addMonths(month, 1))}><ChevronRight size={15} /></button>
       </div>
       <div className="calendar-weekdays">{['一', '二', '三', '四', '五', '六', '日'].map((item) => <span key={item}>{item}</span>)}</div>
@@ -3139,6 +3533,18 @@ function parseDateInput(value: string) {
   const [year, month, day] = value.split('-').map(Number)
   if (!year || !month || !day) return null
   return new Date(year, month - 1, day)
+}
+
+function formatDateLabel(value: string) {
+  if (!value) return ''
+  return value.replace(/-/g, '.')
+}
+
+function dateRangeLabel(emptyLabel: string, from: string, to: string) {
+  if (from && to) return from === to ? formatDateLabel(from) : `${formatDateLabel(from)} - ${formatDateLabel(to)}`
+  if (from) return `${formatDateLabel(from)} 起`
+  if (to) return `截至 ${formatDateLabel(to)}`
+  return emptyLabel
 }
 
 function monthStart(value: Date) {
@@ -3270,6 +3676,18 @@ function useAutoRecordPageSize(listRef: { current: HTMLDivElement | null }) {
 
 type StylingImportBatch = ImportBatch & { error?: string }
 
+function inferredImportJobTitle(files: File[], batches: StylingImportBatch[] = []) {
+  const folderNames = files
+    .map((file) => importPath(file).split('/').filter(Boolean)[0])
+    .filter(Boolean)
+  const uniqueFolders = Array.from(new Set(folderNames))
+  if (uniqueFolders.length === 1) return uniqueFolders[0].slice(0, BATCH_NAME_MAX_CHARS)
+  if (uniqueFolders.length > 1) return `${uniqueFolders[0]} 等 ${uniqueFolders.length} 个文件夹`.slice(0, BATCH_NAME_MAX_CHARS)
+  if (batches.length === 1) return sanitizeClientName(batches[0]?.code ?? '') || timestampName()
+  if (batches.length > 1) return `${batches[0]?.code ?? '搭配服装'} 等 ${batches.length} 个货号`.slice(0, BATCH_NAME_MAX_CHARS)
+  return timestampName()
+}
+
 type ImportJobItem = {
   id: string
   code: string
@@ -3278,6 +3696,7 @@ type ImportJobItem = {
   status: 'WAITING' | 'UPLOADING' | 'SAVING' | 'SAVED' | 'TAGGING' | 'SUCCEEDED' | 'FAILED'
   sessionId?: string
   garmentId?: number
+  previewUrl?: string
   error?: string
 }
 
@@ -3308,12 +3727,13 @@ function importJobItemStatusLabel(status: ImportJobItem['status']) {
 }
 
 function importJobItemProgress(item: ImportJobItem) {
+  const uploadTargetCount = Math.min(Math.max(item.imageCount, item.uploadedCount, 1), STYLING_GARMENT_MAX_IMAGES)
   if (item.status === 'SUCCEEDED') return 100
   if (item.status === 'TAGGING') return 92
   if (item.status === 'SAVED') return 82
   if (item.status === 'SAVING') return 72
-  if (item.status === 'FAILED') return item.uploadedCount > 0 ? Math.max(12, Math.round((item.uploadedCount / Math.max(1, item.imageCount)) * 70)) : 0
-  return Math.round((item.uploadedCount / Math.max(1, item.imageCount)) * 70)
+  if (item.status === 'FAILED') return item.uploadedCount > 0 ? Math.max(12, Math.round((item.uploadedCount / uploadTargetCount) * 70)) : 0
+  return Math.round((item.uploadedCount / uploadTargetCount) * 70)
 }
 
 function storedLibraryImportJobs(): ImportJob[] {
@@ -3325,7 +3745,7 @@ function storedLibraryImportJobs(): ImportJob[] {
       ...job,
       status: job.status === 'RUNNING' ? 'FAILED' : job.status,
       items: (job.items ?? []).map((item) => item.status === 'UPLOADING' || item.status === 'SAVING' || item.status === 'TAGGING'
-        ? { ...item, status: 'FAILED', error: item.error ?? '页面刷新后请查看最近上传状态，必要时重新导入该货号。' }
+        ? { ...item, status: 'FAILED', error: item.error ?? '页面刷新后请查看最近上传状态，必要时重新上传该货号。' }
         : item),
     }))
   } catch {
@@ -3333,8 +3753,15 @@ function storedLibraryImportJobs(): ImportJob[] {
   }
 }
 
-type ImportTaskFilter = 'all' | 'running' | 'attention' | 'saved'
-type ImportTaskSort = 'updated-desc' | 'updated-asc'
+type ImportTaskFilter = 'all' | 'running' | 'pending' | 'attention' | 'saved'
+
+type ImportBatchFilterOption = {
+  value: string
+  label: string
+  count: number
+  codes: string[]
+  updatedAt?: string
+}
 
 type ImportTaskRow = {
   id: string
@@ -3349,32 +3776,51 @@ type ImportTaskRow = {
   status: string
   statusLabel: string
   statusTone: 'running' | 'success' | 'warning' | 'danger' | 'muted'
+  previewUrl?: string | null
   createdAt?: string
   updatedAt?: string
   error?: string | null
 }
 
 function importTaskStatusTone(status: string): ImportTaskRow['statusTone'] {
-  if (['WAITING', 'UPLOADING', 'SAVING', 'TAGGING', 'PENDING', 'UPLOADED', 'FINALIZING'].includes(status)) return 'running'
-  if (['SAVED', 'SUCCEEDED', 'FINALIZED'].includes(status)) return 'success'
+  if (['WAITING', 'UPLOADING', 'SAVING', 'PENDING', 'FINALIZING'].includes(status)) return 'running'
+  if (['SAVED', 'SUCCEEDED', 'UPLOADED', 'TAGGING'].includes(status)) return 'warning'
+  if (status === 'FINALIZED') return 'success'
   if (status === 'FAILED') return 'danger'
   if (status === 'ABANDONED') return 'muted'
   return 'warning'
 }
 
 function isImportTaskRunning(status: string) {
-  return ['WAITING', 'UPLOADING', 'SAVING', 'TAGGING', 'RUNNING', 'PENDING', 'UPLOADED', 'FINALIZING'].includes(status)
+  return ['WAITING', 'UPLOADING', 'SAVING', 'RUNNING', 'PENDING', 'FINALIZING'].includes(status)
 }
 
 function isImportTaskAttention(status: string) {
-  return ['FAILED', 'UPLOADED'].includes(status)
+  return status === 'FAILED'
+}
+
+function isImportTaskDone(status: string) {
+  return status === 'FINALIZED'
+}
+
+function isImportTaskPendingRecognition(status: string) {
+  return ['SAVED', 'SUCCEEDED', 'UPLOADED', 'TAGGING'].includes(status)
+}
+
+function uploadSessionDrivesImportItem(status: ImportJobItem['status']) {
+  return ['WAITING', 'UPLOADING', 'SAVING'].includes(status)
 }
 
 function importSessionCode(session: UploadSession, garment?: StylingGarment) {
+  if (session.businessCode) return session.businessCode
   if (garment?.code) return garment.code
   const filename = session.items?.[0]?.filename
   if (filename) return filename.replace(/\.[^.]+$/, '')
-  return `上传会话 ${session.id.slice(0, 8)}`
+  return `上传任务 ${session.id.slice(0, 8)}`
+}
+
+function importSessionTitle(session: UploadSession, row: ImportTaskRow) {
+  return session.sourceTitle || row.code
 }
 
 function retainedImageCount(garment?: StylingGarment) {
@@ -3388,6 +3834,17 @@ function imageCountText(imported: number, uploaded: number, retained: number | n
   return `${imported} / ${uploaded} / ${retained === null ? '-' : retained}`
 }
 
+function importImageCountText(imported: number, uploaded: number, retained: number | null) {
+  return `已选 ${imported} / 已上传 ${uploaded} / 已入库 ${retained === null ? '-' : retained}`
+}
+
+function importTaskMetaText(row: ImportTaskRow) {
+  if (row.error) return row.error
+  if (row.garmentId) return `服装记录 #${row.garmentId}`
+  if (row.source === 'session' && row.sessionId) return `上传批次 ${row.sessionId.slice(0, 8)}`
+  return '本次上传'
+}
+
 function importTaskProgress(row: ImportTaskRow) {
   if (['SUCCEEDED', 'SAVED', 'FINALIZED'].includes(row.status)) return 100
   if (row.status === 'TAGGING') return 92
@@ -3395,6 +3852,29 @@ function importTaskProgress(row: ImportTaskRow) {
   if (row.status === 'SAVING' || row.status === 'UPLOADED') return 78
   if (row.status === 'FAILED') return row.uploadedCount > 0 ? Math.max(12, Math.round((row.uploadedCount / Math.max(1, row.importedCount)) * 70)) : 0
   return Math.round((row.uploadedCount / Math.max(1, row.importedCount)) * 70)
+}
+
+function importJobDisplayTitle(job: ImportJob, rows: ImportTaskRow[]) {
+  const cleanTitle = job.title?.trim()
+  if (cleanTitle && !/^\d+\s*套搭配服装$/.test(cleanTitle)) return cleanTitle
+  const firstCode = rows.find((row) => row.code)?.code
+  if (firstCode && job.total > 1) return `${firstCode} 等 ${job.total} 个货号`
+  if (firstCode) return firstCode
+  return cleanTitle || `${job.total} 个货号`
+}
+
+function garmentMatchesLibraryQuery(item: StylingGarment, queryTerms: string[]) {
+  if (!queryTerms.length) return true
+  const searchableText = [
+    item.code,
+    item.status,
+    garmentStatus(item.status),
+    JSON.stringify(item.aiTags ?? {}),
+    JSON.stringify(item.manualTags ?? {}),
+    JSON.stringify(item.officialTitleTags ?? {}),
+    JSON.stringify(item.effectiveTags ?? {}),
+  ].join(' ').toLocaleLowerCase()
+  return queryTerms.some((term) => searchableText.includes(term))
 }
 
 function BatchImportPanel({
@@ -3407,6 +3887,8 @@ function BatchImportPanel({
   garments,
   importJobs,
   setImportJobs,
+  onFindGarment,
+  onFindJob,
 }: {
   onClose: () => void
   onImported: () => void
@@ -3417,8 +3899,11 @@ function BatchImportPanel({
   garments: StylingGarment[]
   importJobs: ImportJob[]
   setImportJobs: Dispatch<SetStateAction<ImportJob[]>>
+  onFindGarment: (code: string, garmentId?: number) => void
+  onFindJob: (jobId: string) => void
 }) {
   const [batches, setBatches] = useState<StylingImportBatch[]>([])
+  const [importSourceTitle, setImportSourceTitle] = useState('')
   const [localError, setLocalError] = useState('')
   const hasRunningImportJobs = importJobs.some((job) => job.status === 'RUNNING')
   const uploadWarningActiveRef = useRef(false)
@@ -3446,6 +3931,7 @@ function BatchImportPanel({
         }),
       ]
     })
+    setImportSourceTitle((current) => current || inferredImportJobTitle(files, next))
   }
 
   function trackImportProgress(jobId: string, code: string, progress: UploadProgressSnapshot) {
@@ -3489,37 +3975,55 @@ function BatchImportPanel({
   }
 
   function removeBatch(id: string) {
-    setBatches((items) => items.filter((item) => item.id !== id))
+    let shouldClearTitle = false
+    setBatches((items) => {
+      const next = items.filter((item) => item.id !== id)
+      shouldClearTitle = !next.length
+      return next
+    })
+    if (shouldClearTitle) setImportSourceTitle('')
   }
 
   function saveDrafts() {
     const seen = new Set<string>()
     const ready: StylingImportBatch[] = []
-    const blocked: StylingImportBatch[] = []
+    const editBlocked: StylingImportBatch[] = []
+    const recordBlocked: StylingImportBatch[] = []
     batches.forEach((batch) => {
       const code = sanitizeClientName(batch.code)
       if (!code) {
-        blocked.push({ ...batch, error: '每套搭配服装都需要一个有效货号' })
+        editBlocked.push({ ...batch, error: '每套搭配服装都需要一个有效货号' })
         return
       }
       if (!batch.files.length) {
-        blocked.push({ ...batch, code, error: '没有可用图片' })
+        editBlocked.push({ ...batch, code, error: '没有可用图片' })
         return
       }
       if (seen.has(code)) {
-        blocked.push({ ...batch, code, error: '本批次货号重复，已跳过' })
+        recordBlocked.push({ ...batch, code, error: '本批次货号重复，本次未重复上传' })
         return
       }
       seen.add(code)
       ready.push({ ...batch, code, error: undefined })
     })
-    setBatches(blocked)
-    if (!ready.length) {
-      setLocalError(blocked.length ? '没有可导入的新服装，请先处理标红项' : '请先选择图片或文件夹')
+    if (editBlocked.length) {
+      setBatches(batches.map((batch) => {
+        const blocked = editBlocked.find((item) => item.id === batch.id)
+        const duplicated = recordBlocked.find((item) => item.id === batch.id)
+        return blocked ?? duplicated ?? { ...batch, code: sanitizeClientName(batch.code), error: undefined }
+      }))
+      setLocalError('请先处理空货号或无图片的服装，再开始上传')
       return
     }
-    setLocalError(blocked.length ? '已开始导入非重复项，标红项处理后可再次导入' : '')
-    startImportJob(ready)
+    if (!ready.length) {
+      setBatches(recordBlocked)
+      setLocalError(recordBlocked.length ? '没有可上传的新服装，请先处理标红项' : '请先选择图片或文件夹')
+      return
+    }
+    setBatches([])
+    setLocalError('')
+    startImportJob(ready, recordBlocked, importSourceTitle || inferredImportJobTitle([], [...ready, ...recordBlocked]))
+    setImportSourceTitle('')
   }
 
   function updateJob(jobId: string, updater: (job: ImportJob) => ImportJob) {
@@ -3533,51 +4037,47 @@ function BatchImportPanel({
     }))
   }
 
-  function addSkippedBatch(batch: StylingImportBatch, error: string) {
-    setBatches((items) => {
-      if (items.some((item) => item.id === batch.id)) return items
-      return [...items, { ...batch, error }]
-    })
-  }
-
-  function startImportJob(jobBatches: StylingImportBatch[]) {
+  function startImportJob(jobBatches: StylingImportBatch[], initiallyFailedBatches: StylingImportBatch[] = [], sourceTitle = '') {
     const jobId = `import-${Date.now()}-${Math.random().toString(36).slice(2)}`
     const startedAt = new Date().toISOString()
-    const initialOperations: AIOperation[] = jobBatches.map((batch, index) => ({
+    const allJobBatches = [...jobBatches, ...initiallyFailedBatches]
+    const initialOperations: AIOperation[] = allJobBatches.map((batch, index) => ({
       id: -(index + 1),
       ownerType: 'styling_garment_upload',
       ownerId: index + 1,
       provider: 'browser',
-      status: 'SUBMITTED',
+      status: initiallyFailedBatches.some((item) => item.id === batch.id) ? 'FAILED' : 'SUBMITTED',
       startedAt,
       providerRequestId: batch.code,
+      errorMessage: batch.error,
     }))
     const nextJob: ImportJob = {
       id: jobId,
-      title: `${jobBatches.length} 套搭配服装`,
+      title: sourceTitle || `${allJobBatches.length} 套搭配服装`,
       status: 'RUNNING',
       createdAt: startedAt,
       updatedAt: startedAt,
-      total: jobBatches.length,
+      total: allJobBatches.length,
       uploaded: 0,
-      skipped: 0,
+      skipped: initiallyFailedBatches.length,
       progress: null,
       operations: initialOperations,
-      items: jobBatches.map((batch) => ({
+      items: allJobBatches.map((batch) => ({
         id: batch.id,
         code: batch.code,
-        imageCount: Math.min(batch.files.length, STYLING_GARMENT_MAX_IMAGES),
+        imageCount: batch.files.length,
         uploadedCount: 0,
-        status: 'WAITING',
+        status: batch.error ? 'FAILED' : 'WAITING',
+        previewUrl: batch.files[0] ? URL.createObjectURL(batch.files[0]) : undefined,
+        error: batch.error,
       })),
     }
     setImportJobs((jobs) => [nextJob, ...jobs].slice(0, 5))
-    void runImportJob(jobId, jobBatches)
+    void runImportJob(jobId, jobBatches, nextJob.title)
   }
 
-  async function runImportJob(jobId: string, jobBatches: StylingImportBatch[]) {
+  async function runImportJob(jobId: string, jobBatches: StylingImportBatch[], sourceTitle: string) {
     const createdItems: StylingGarment[] = []
-    let skipped = 0
     for (const batch of jobBatches) {
       updateJob(jobId, (job) => ({
         ...job,
@@ -3588,6 +4088,7 @@ function BatchImportPanel({
         const uploadFiles = formalAssetFiles(batch.files, STYLING_GARMENT_MAX_IMAGES)
         const created = await api.createStylingGarment(batch.code, uploadFiles, {
           onProgress: (progress) => trackImportProgress(jobId, batch.code, progress),
+          sourceTitle,
         })
         clearImportUploadWarning()
         void refreshUploadSessions().catch(() => undefined)
@@ -3609,16 +4110,15 @@ function BatchImportPanel({
       } catch (err) {
         clearImportUploadWarning()
         void refreshUploadSessions().catch(() => undefined)
-        const message = err instanceof Error ? err.message : '导入失败'
-        skipped += 1
-        addSkippedBatch(batch, ['搭配服装代码已存在', '搭配服装货号已存在'].includes(message) ? '货号已存在，已跳过' : message)
+        const message = err instanceof Error ? err.message : '上传失败'
+        const displayMessage = ['搭配服装代码已存在', '搭配服装货号已存在'].includes(message) ? '货号已存在，本次未重复上传' : message
         updateJob(jobId, (job) => ({
           ...job,
-          skipped,
+          skipped: job.skipped + 1,
           currentCode: undefined,
           progress: null,
-          items: job.items.map((item) => item.code === batch.code ? { ...item, status: 'FAILED', error: message } : item),
-          operations: job.operations.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'FAILED', failedAt: new Date().toISOString(), errorMessage: message } : item),
+          items: job.items.map((item) => item.code === batch.code ? { ...item, status: 'FAILED', error: displayMessage } : item),
+          operations: job.operations.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'FAILED', failedAt: new Date().toISOString(), errorMessage: displayMessage } : item),
         }))
       }
     }
@@ -3676,60 +4176,67 @@ function BatchImportPanel({
   }
 
   return (
-    <div className="panel import-panel">
-      <div className="import-head">
-        <div>
-          <h3>导入搭配服装</h3>
-          <p>{`散图会合并为一套；单货号文件夹是一套；上级文件夹会递归识别最底层图片目录。最多 ${STYLING_GARMENT_MAX_IMAGES} 张进入候选池，AI 识别后只保留挑选排序好的 ${STYLING_GARMENT_SELECTED_IMAGES} 张纯服装参考图。`}</p>
+    <div className="import-page-stack">
+      <div className={`panel import-panel ${batches.length > 0 ? 'has-batches' : ''}`}>
+        <div className="import-head">
+          <div>
+            <HeadingWithTooltip as="h3" tooltip={`散图会合并为一套；单货号文件夹是一套；上级文件夹会递归识别最底层图片目录。最多 ${STYLING_GARMENT_MAX_IMAGES} 张进入候选池，AI 识别后只保留挑选排序好的 ${STYLING_GARMENT_SELECTED_IMAGES} 张纯服装参考图。`}>上传搭配服装</HeadingWithTooltip>
+          </div>
         </div>
+        <div className="import-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
+          <Images size={22} />
+          <strong>拖入图片或文件夹</strong>
+          <span>支持多张图片、一个货号文件夹、一个上级文件夹，或拖入多个货号文件夹</span>
+          <div className="import-actions">
+            <label className="management-action">
+              <ImagePlus size={16} /> 选择图片
+              <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
+            </label>
+            <label className="management-action">
+              <FolderOpen size={16} /> 选择文件夹
+              <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
+            </label>
+          </div>
+        </div>
+        {localError && <span className="inline-error">{localError}</span>}
+        {batches.length > 0 && (
+          <div className="batch-list">
+            {batches.map((batch) => (
+              <ImportBatchCard
+                key={batch.id}
+                batch={batch}
+                onCode={(code) => updateCode(batch.id, code)}
+                onFiles={(files) => updateFiles(batch.id, files)}
+                onRemove={() => removeBatch(batch.id)}
+              />
+            ))}
+          </div>
+        )}
+        {batches.length > 0 && (
+          <div className="import-footer-actions">
+            <button
+              className="management-action"
+              type="button"
+              disabled={hasRunningImportJobs}
+              title={hasRunningImportJobs ? '上传任务完成后可返回服装库' : undefined}
+              onClick={onClose}
+            >
+              <ChevronLeft size={16} />返回服装库
+            </button>
+            <button className="management-action" type="button" onClick={saveDrafts}><Upload size={16} />上传</button>
+          </div>
+        )}
       </div>
-      <div className="import-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
-        <Images size={22} />
-        <strong>拖入图片或文件夹</strong>
-        <span>支持多张图片、一个货号文件夹、一个上级文件夹，或拖入多个货号文件夹</span>
-        <div className="import-actions">
-          <label className="management-action">
-            <ImagePlus size={16} /> 选择图片
-            <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
-          </label>
-          <label className="management-action">
-            <FolderOpen size={16} /> 选择文件夹
-            <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
-          </label>
-        </div>
-      </div>
-      {localError && <span className="inline-error">{localError}</span>}
-      {batches.length > 0 && (
-        <div className="batch-list">
-          {batches.map((batch) => (
-            <ImportBatchCard
-              key={batch.id}
-              batch={batch}
-              onCode={(code) => updateCode(batch.id, code)}
-              onFiles={(files) => updateFiles(batch.id, files)}
-              onRemove={() => removeBatch(batch.id)}
-            />
-          ))}
-        </div>
+      {batches.length === 0 && (
+        <ImportTaskWorkbench
+          jobs={importJobs}
+          sessions={uploadSessions}
+          garments={garments}
+          onAbandon={(id) => api.abandonUploadSession(id).then(() => refreshUploadSessions())}
+          onFindGarment={onFindGarment}
+          onFindJob={onFindJob}
+        />
       )}
-      <ImportTaskWorkbench
-        jobs={importJobs}
-        sessions={uploadSessions}
-        garments={garments}
-        onAbandon={(id) => api.abandonUploadSession(id).then(() => refreshUploadSessions())}
-      />
-      <div className="import-footer-actions">
-        <button
-          className="management-action"
-          type="button"
-          disabled={hasRunningImportJobs}
-          title={hasRunningImportJobs ? '导入任务完成后可返回服装库' : undefined}
-          onClick={onClose}
-        >
-          <ChevronLeft size={16} />返回服装库
-        </button>
-        <button className="management-action" type="button" disabled={!batches.length} onClick={saveDrafts}><Upload size={16} />导入</button>
-      </div>
     </div>
   )
 }
@@ -3739,16 +4246,25 @@ function ImportTaskWorkbench({
   sessions,
   garments,
   onAbandon,
+  onFindGarment,
+  onFindJob,
 }: {
   jobs: ImportJob[]
   sessions: UploadSession[]
   garments: StylingGarment[]
   onAbandon: (id: string) => Promise<unknown>
+  onFindGarment: (code: string, garmentId?: number) => void
+  onFindJob: (jobId: string) => void
 }) {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<ImportTaskFilter>('all')
-  const [sort, setSort] = useState<ImportTaskSort>('updated-desc')
+  const [uploadedFrom, setUploadedFrom] = useState('')
+  const [uploadedTo, setUploadedTo] = useState('')
+  const [openFilter, setOpenFilter] = useState<'date' | 'status' | null>(null)
   const [abandoningId, setAbandoningId] = useState<string | null>(null)
+  const [expandedTasks, setExpandedTasks] = useState<Set<string>>(() => new Set())
+  const [offset, setOffset] = useState(0)
+  const [pageSize, setPageSize] = useState(8)
   const garmentsById = useMemo(() => new Map(garments.map((item) => [item.id, item])), [garments])
   const garmentsByCode = useMemo(() => new Map(garments.map((item) => [item.code, item])), [garments])
   const sessionsById = useMemo(() => new Map(sessions.map((item) => [item.id, item])), [sessions])
@@ -3765,7 +4281,8 @@ function ImportTaskWorkbench({
       const session = item.sessionId ? sessionsById.get(item.sessionId) : undefined
       const targetId = session?.targetId ?? item.garmentId
       const garment = targetId ? garmentsById.get(targetId) : garmentsByCode.get(item.code)
-      const status = session?.status ?? item.status
+      const sessionDrivesStatus = Boolean(session && uploadSessionDrivesImportItem(item.status))
+      const status = sessionDrivesStatus && session ? session.status : item.status
       return {
         id: `job-${job.id}-${item.id}`,
         source: 'job',
@@ -3773,15 +4290,16 @@ function ImportTaskWorkbench({
         sessionId: item.sessionId,
         garmentId: targetId ?? undefined,
         code: item.code,
-        importedCount: session?.totalCount ?? item.imageCount,
+        importedCount: item.imageCount,
         uploadedCount: session?.uploadedCount ?? item.uploadedCount,
         retainedCount: retainedImageCount(garment),
         status,
-        statusLabel: session ? uploadSessionStatusLabel(session.status) : importJobItemStatusLabel(item.status),
+        statusLabel: sessionDrivesStatus && session ? uploadSessionStatusLabel(session.status) : importJobItemStatusLabel(item.status),
         statusTone: importTaskStatusTone(status),
+        previewUrl: garment?.coverUrl ?? item.previewUrl ?? null,
         createdAt,
-        updatedAt: session?.updatedAt ?? updatedAt,
-        error: session?.errorMessage ?? item.error,
+        updatedAt: sessionDrivesStatus ? session?.updatedAt ?? updatedAt : updatedAt,
+        error: sessionDrivesStatus ? session?.errorMessage ?? item.error : item.error,
       }
     })
   }), [garmentsByCode, garmentsById, jobs, sessionsById])
@@ -3802,6 +4320,7 @@ function ImportTaskWorkbench({
         status: session.status,
         statusLabel: uploadSessionStatusLabel(session.status),
         statusTone: importTaskStatusTone(session.status),
+        previewUrl: garment?.coverUrl ?? null,
         createdAt: session.createdAt,
         updatedAt: session.updatedAt ?? session.createdAt,
         error: session.errorMessage,
@@ -3809,18 +4328,44 @@ function ImportTaskWorkbench({
     }), [garmentsById, jobSessionIds, sessions])
 
   const allRows = useMemo(() => [...jobRows, ...sessionRows], [jobRows, sessionRows])
+  const queryTerms = splitSearchTerms(query).map((term) => term.toLocaleLowerCase())
+  const titleMatchedJobIds = new Set(jobs
+    .filter((job) => {
+      if (!queryTerms.length) return false
+      const rows = jobRows.filter((row) => row.batchId === job.id)
+      const title = importJobDisplayTitle(job, rows).toLocaleLowerCase()
+      return queryTerms.some((term) => title.includes(term))
+    })
+    .map((job) => job.id))
   const sortedRows = useMemo(() => [...allRows].sort((a, b) => {
-    const av = new Date(parseRuyiTime(a.updatedAt ?? a.createdAt)).getTime()
-    const bv = new Date(parseRuyiTime(b.updatedAt ?? b.createdAt)).getTime()
-    return sort === 'updated-desc' ? bv - av : av - bv
-  }), [allRows, sort])
+    const av = new Date(parseRuyiTime(a.createdAt ?? a.updatedAt)).getTime()
+    const bv = new Date(parseRuyiTime(b.createdAt ?? b.updatedAt)).getTime()
+    return bv - av
+  }), [allRows])
   const filteredRows = sortedRows.filter((row) => {
-    const keyword = query.trim().toLocaleLowerCase()
-    const matchesKeyword = !keyword || row.code.toLocaleLowerCase().includes(keyword) || row.sessionId?.toLocaleLowerCase().includes(keyword)
+    const searchableText = [
+      row.code,
+      row.sessionId,
+      row.statusLabel,
+      row.error,
+    ].filter(Boolean).join(' ').toLocaleLowerCase()
+    const matchesKeyword = !queryTerms.length
+      || queryTerms.some((term) => searchableText.includes(term))
+      || (row.batchId ? titleMatchedJobIds.has(row.batchId) : false)
     if (!matchesKeyword) return false
+    const uploadedAt = new Date(parseRuyiTime(row.createdAt ?? row.updatedAt)).getTime()
+    if (uploadedFrom) {
+      const from = new Date(`${uploadedFrom}T00:00:00`).getTime()
+      if (uploadedAt < from) return false
+    }
+    if (uploadedTo) {
+      const to = new Date(`${uploadedTo}T23:59:59`).getTime()
+      if (uploadedAt > to) return false
+    }
     if (filter === 'running') return isImportTaskRunning(row.status)
+    if (filter === 'pending') return isImportTaskPendingRecognition(row.status)
     if (filter === 'attention') return isImportTaskAttention(row.status)
-    if (filter === 'saved') return ['SAVED', 'SUCCEEDED', 'FINALIZED'].includes(row.status)
+    if (filter === 'saved') return isImportTaskDone(row.status)
     return true
   })
   const filteredRowIds = new Set(filteredRows.map((row) => row.id))
@@ -3832,11 +4377,85 @@ function ImportTaskWorkbench({
     rowsByBatch.set(row.batchId, list)
   })
   const visibleSessionRows = sessionRows.filter((row) => filteredRowIds.has(row.id))
-  const totalImported = allRows.reduce((sum, row) => sum + row.importedCount, 0)
-  const totalUploaded = allRows.reduce((sum, row) => sum + row.uploadedCount, 0)
-  const totalRetained = allRows.reduce((sum, row) => sum + (row.retainedCount ?? 0), 0)
   const runningCount = allRows.filter((row) => isImportTaskRunning(row.status)).length
+  const pendingCount = allRows.filter((row) => isImportTaskPendingRecognition(row.status)).length
   const attentionCount = allRows.filter((row) => isImportTaskAttention(row.status)).length
+  const statusOptions = [
+    { value: 'running', label: '进行中', count: runningCount },
+    { value: 'pending', label: '待识别', count: pendingCount },
+    { value: 'attention', label: '需处理', count: attentionCount },
+    { value: 'saved', label: '已完成', count: allRows.filter((row) => isImportTaskDone(row.status)).length },
+  ]
+  const hasActiveFilters = Boolean(query.trim() || filter !== 'all' || uploadedFrom || uploadedTo)
+  const visibleJobs = [...jobs].sort((a, b) => {
+    const av = new Date(parseRuyiTime(a.createdAt ?? a.updatedAt)).getTime()
+    const bv = new Date(parseRuyiTime(b.createdAt ?? b.updatedAt)).getTime()
+    return bv - av
+  })
+  const visibleJobIds = new Set(visibleJobs
+    .filter((job) => jobRows.some((row) => row.batchId === job.id && filteredRowIds.has(row.id)))
+    .map((job) => job.id))
+  const recoveredRecords = visibleSessionRows.map((row) => ({
+    kind: 'session' as const,
+    id: row.id,
+    row,
+  }))
+  const importRecords = [
+    ...visibleJobs.filter((job) => visibleJobIds.has(job.id)).map((job) => ({ kind: 'job' as const, id: job.id, job })),
+    ...recoveredRecords,
+  ].sort((a, b) => {
+    const aTime = a.kind === 'job' ? a.job.updatedAt ?? a.job.createdAt : a.row.updatedAt ?? a.row.createdAt
+    const bTime = b.kind === 'job' ? b.job.updatedAt ?? b.job.createdAt : b.row.updatedAt ?? b.row.createdAt
+    return new Date(parseRuyiTime(bTime)).getTime() - new Date(parseRuyiTime(aTime)).getTime()
+  })
+  const totalRecords = importRecords.length
+  const totalPages = totalRecords > 0 ? Math.ceil(totalRecords / pageSize) : 0
+  const pagedRecords = importRecords.slice(offset, offset + pageSize)
+
+  useEffect(() => {
+    setOffset(0)
+  }, [query, filter, uploadedFrom, uploadedTo])
+
+  useEffect(() => {
+    if (offset < totalRecords || offset === 0) return
+    setOffset(Math.max(0, (Math.max(1, totalPages) - 1) * pageSize))
+  }, [offset, pageSize, totalPages, totalRecords])
+
+  function toggleTask(id: string) {
+    setExpandedTasks((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function summarizeRows(rows: ImportTaskRow[]) {
+    const imported = rows.reduce((sum, row) => sum + row.importedCount, 0)
+    const uploaded = rows.reduce((sum, row) => sum + row.uploadedCount, 0)
+    const retainedValues = rows.map((row) => row.retainedCount).filter((value): value is number => typeof value === 'number')
+    const retained = retainedValues.length ? retainedValues.reduce((sum, value) => sum + value, 0) : null
+    const failed = rows.filter((row) => row.statusTone === 'danger').length
+    const uploading = rows.filter((row) => ['WAITING', 'UPLOADING', 'PENDING'].includes(row.status)).length
+    const organizing = rows.filter((row) => ['SAVING', 'SAVED', 'UPLOADED', 'FINALIZING'].includes(row.status)).length
+    const tagging = rows.filter((row) => row.status === 'TAGGING').length
+    const running = rows.filter((row) => isImportTaskRunning(row.status)).length
+    const submitted = rows.filter((row) => row.status === 'SUCCEEDED').length
+    const finalized = rows.filter((row) => isImportTaskDone(row.status)).length
+    const saved = submitted + finalized
+    const tone: ImportTaskRow['statusTone'] = failed ? 'danger' : uploading || tagging || running ? 'running' : finalized === rows.length ? 'success' : 'warning'
+    const label = failed ? '部分失败' : uploading ? '上传中' : tagging ? 'AI 打标中' : organizing ? '整理入库中' : finalized === rows.length ? '已完成' : submitted ? '已提交识别' : '需处理'
+    const updatedAt = rows.map((row) => row.updatedAt ?? row.createdAt).filter(Boolean).sort().at(-1)
+    return { imported, uploaded, retained, failed, running, uploading, organizing, tagging, saved, tone, label, updatedAt }
+  }
+
+  function clearImportFilters() {
+    setQuery('')
+    setFilter('all')
+    setUploadedFrom('')
+    setUploadedTo('')
+    setOpenFilter(null)
+  }
 
   async function abandon(sessionId: string) {
     if (abandoningId) return
@@ -3850,10 +4469,10 @@ function ImportTaskWorkbench({
 
   if (!jobs.length && !sessions.length) {
     return (
-      <div className="import-workbench is-empty">
+      <div className="panel import-workbench is-empty">
         <div className="import-empty-state">
           <Clock3 size={18} />
-          <strong>暂无导入记录</strong>
+          <strong>暂无上传记录</strong>
           <span>选择图片或文件夹后，这里会按批次展示每个货号的上传、保存和识别状态。</span>
         </div>
       </div>
@@ -3861,107 +4480,209 @@ function ImportTaskWorkbench({
   }
 
   return (
-    <div className="import-workbench">
-      <div className="import-commandbar">
-        <label className="import-search" aria-label="搜索导入货号">
-          <Search size={15} />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索货号 / 上传会话" />
-        </label>
-        <div className="import-filter-pills" role="group" aria-label="导入状态筛选">
-          {([
-            ['all', `全部 ${allRows.length}`],
-            ['running', `进行中 ${runningCount}`],
-            ['attention', `需处理 ${attentionCount}`],
-            ['saved', '已保存'],
-          ] as const).map(([value, label]) => (
-            <button className={`filter-pill import-filter-pill ${filter === value ? 'is-active' : ''}`} type="button" key={value} onClick={() => setFilter(value)}>
-              <span>{label}</span>
-            </button>
-          ))}
+    <div className="panel import-workbench">
+      <div className="import-workbench-head">
+        <div>
+          <strong>上传记录</strong>
         </div>
-        <select className="management-action import-sort" value={sort} onChange={(event) => setSort(event.target.value as ImportTaskSort)} aria-label="导入记录排序">
-          <option value="updated-desc">最近更新</option>
-          <option value="updated-asc">最早更新</option>
-        </select>
+      </div>
+      <div className="import-commandbar">
+        <SearchBox
+          value={query}
+          onChange={setQuery}
+          placeholder="搜索货号 / 上传任务"
+          panelPlaceholder="每行一个货号、上传任务名、状态或任务编号，也可用空格、逗号、句号、顿号分隔"
+        />
+        <div className="import-filter-pills">
+          <DateRangeFilter
+            open={openFilter === 'date'}
+            onOpen={(open) => setOpenFilter(open ? 'date' : null)}
+            label="上传时间"
+            from={uploadedFrom}
+            to={uploadedTo}
+            onFrom={setUploadedFrom}
+            onTo={setUploadedTo}
+          />
+          <StatusFilter
+            open={openFilter === 'status'}
+            onOpen={(open) => setOpenFilter(open ? 'status' : null)}
+            value={filter === 'all' ? '' : filter}
+            options={statusOptions}
+            formatLabel={(value) => statusOptions.find((item) => item.value === value)?.label ?? value}
+            onChange={(value) => setFilter((value || 'all') as ImportTaskFilter)}
+          />
+          {hasActiveFilters && <button className="filter-pill reset-filter-pill" type="button" onClick={clearImportFilters}><span>清空筛选</span></button>}
+        </div>
       </div>
 
-      <div className="import-metrics" aria-label="导入汇总">
-        <div className="import-metric"><span>导入批次</span><strong>{jobs.length}</strong></div>
-        <div className="import-metric"><span>货号任务</span><strong>{allRows.length}</strong></div>
-        <div className="import-metric"><span>图片 导入/上传/保留</span><strong>{imageCountText(totalImported, totalUploaded, totalRetained)}</strong></div>
-        <div className="import-metric"><span>需要处理</span><strong>{attentionCount}</strong></div>
-      </div>
-
-      <div className="import-section-list">
-        {jobs.map((job, index) => {
+      <div className="record-list-body import-record-list-body">
+        {pagedRecords.map((record) => {
+          if (record.kind === 'session') {
+            const row = record.row
+            const session = row.sessionId ? sessionsById.get(row.sessionId) : undefined
+            const expanded = expandedTasks.has(row.id)
+            const summary = summarizeRows([row])
+            const title = session ? importSessionTitle(session, row) : row.code
+            return (
+              <section className={`batch-record-shell import-record-shell ${expanded ? 'is-expanded' : ''}`} key={row.id}>
+                <div
+                  className="record-row batch-record-row import-record-row"
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={expanded}
+                  title={expanded ? '点击收起上传任务' : '点击展开上传任务'}
+                  onClick={() => toggleTask(row.id)}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return
+                    event.preventDefault()
+                    toggleTask(row.id)
+                  }}
+                >
+                  <div className="import-record-main">
+                    <ImportThumbStack rows={[row]} />
+                    <div>
+                      <strong>{title}</strong>
+                      <span>{summary.label} · 1 个货号 · 上传 {dateText(row.createdAt)} · 更新 {dateText(row.updatedAt)}</span>
+                    </div>
+                  </div>
+                  <div className="batch-progress-strip import-progress-strip">
+                    <span>{summary.saved}/1 已整理</span>
+                    {summary.uploading > 0 && <span>{summary.uploading} 上传中</span>}
+                    {summary.organizing > 0 && <span>{summary.organizing} 整理中</span>}
+                    {summary.tagging > 0 && <span>{summary.tagging} AI 打标中</span>}
+                    {summary.failed > 0 && <span>{summary.failed} 需处理</span>}
+                    <span>{importImageCountText(summary.imported, summary.uploaded, summary.retained)} 张</span>
+                  </div>
+                  <span className={`import-status-badge is-${summary.tone}`}>{summary.label}</span>
+                  <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起上传任务' : '展开上传任务'} onClick={(event) => {
+                    event.stopPropagation()
+                    toggleTask(row.id)
+                  }}>
+                    <ChevronDown size={14} className={expanded ? 'is-rotated' : ''} />{expanded ? '收起' : '展开'}
+                  </button>
+                </div>
+                {expanded && (
+                  <div className="batch-expanded-list import-expanded-list">
+                    <ImportTaskRows rows={[row]} abandoningId={abandoningId} onAbandon={(id) => void abandon(id)} onFindGarment={onFindGarment} />
+                  </div>
+                )}
+              </section>
+            )
+          }
+          const job = record.job
           const rows = rowsByBatch.get(job.id) ?? []
           if (!rows.length) return null
           const allJobRows = jobRows.filter((row) => row.batchId === job.id)
-          const batchImported = allJobRows.reduce((sum, row) => sum + row.importedCount, 0)
-          const batchUploaded = allJobRows.reduce((sum, row) => sum + row.uploadedCount, 0)
-          const batchRetained = allJobRows.reduce((sum, row) => sum + (row.retainedCount ?? 0), 0)
+          const summary = summarizeRows(allJobRows)
+          const expanded = expandedTasks.has(job.id)
+          const title = importJobDisplayTitle(job, allJobRows)
           return (
-            <section className="import-task-card" key={job.id}>
-              <div className="import-task-card-head">
-                <div>
-                  <strong>{`第 ${jobs.length - index} 次导入`}</strong>
-                  <span>{dateText(job.createdAt)} 创建 · {dateText(job.updatedAt ?? job.createdAt)} 更新</span>
+            <section className={`batch-record-shell import-record-shell ${expanded ? 'is-expanded' : ''}`} key={job.id}>
+              <div
+                className="record-row batch-record-row import-record-row"
+                role="button"
+                tabIndex={0}
+                aria-expanded={expanded}
+                title={expanded ? '点击收起上传任务' : '点击展开上传任务'}
+                onClick={() => toggleTask(job.id)}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') return
+                  event.preventDefault()
+                  toggleTask(job.id)
+                }}
+              >
+                <div className="import-record-main">
+                  <ImportThumbStack rows={allJobRows} />
+                  <div>
+                    <strong>{title}</strong>
+                    <span>{summary.label} · {job.total} 个货号 · 上传 {dateText(job.createdAt)} · 更新 {dateText(summary.updatedAt)}</span>
+                  </div>
                 </div>
-                <div className="import-task-card-meta">
-                  <span>{job.total} 个货号</span>
-                  <span>{imageCountText(batchImported, batchUploaded, batchRetained)} 张</span>
-                  <em className={`import-status-badge is-${importTaskStatusTone(job.status)}`}>{job.status === 'RUNNING' ? '进行中' : job.status === 'SUCCEEDED' ? '已完成' : '需处理'}</em>
+                <div className="batch-progress-strip import-progress-strip">
+                  <span>{summary.saved}/{job.total} 已整理</span>
+                  {summary.uploading > 0 && <span>{summary.uploading} 上传中</span>}
+                  {summary.organizing > 0 && <span>{summary.organizing} 整理中</span>}
+                  {summary.tagging > 0 && <span>{summary.tagging} AI 打标中</span>}
+                  {summary.failed > 0 && <span>{summary.failed} 需处理</span>}
+                  <span>{importImageCountText(summary.imported, summary.uploaded, summary.retained)} 张</span>
                 </div>
+                <span className={`import-status-badge is-${summary.tone}`}>{summary.label}</span>
+                <button className="management-action compact-control import-batch-view-button" type="button" title="回到服装库查看本次上传的服装" onClick={(event) => {
+                  event.stopPropagation()
+                  onFindJob(job.id)
+                }}>
+                  查看本批次
+                </button>
+                <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起上传任务' : '展开上传任务'} onClick={(event) => {
+                  event.stopPropagation()
+                  toggleTask(job.id)
+                }}>
+                  <ChevronDown size={14} className={expanded ? 'is-rotated' : ''} />{expanded ? '收起' : '展开'}
+                </button>
               </div>
-              <ImportTaskRows rows={rows} abandoningId={abandoningId} onAbandon={(id) => void abandon(id)} />
+              {expanded && (
+                <div className="batch-expanded-list import-expanded-list">
+                  <ImportTaskRows rows={rows} abandoningId={abandoningId} onAbandon={(id) => void abandon(id)} onFindGarment={onFindGarment} />
+                </div>
+              )}
             </section>
           )
         })}
-        {visibleSessionRows.length > 0 && (
-          <section className="import-task-card">
-            <div className="import-task-card-head">
-              <div>
-                <strong>后端上传会话</strong>
-                <span>刷新或切页后仍可从后端恢复的上传状态</span>
-              </div>
-              <div className="import-task-card-meta">
-                <span>{visibleSessionRows.length} 个任务</span>
-              </div>
-            </div>
-            <ImportTaskRows rows={visibleSessionRows} abandoningId={abandoningId} onAbandon={(id) => void abandon(id)} />
-          </section>
-        )}
         {!filteredRows.length && (
           <div className="import-empty-state">
             <Search size={18} />
-            <strong>没有匹配的导入记录</strong>
+            <strong>没有匹配的上传记录</strong>
             <span>换一个货号关键词或状态筛选再试。</span>
           </div>
         )}
+      </div>
+      <div className="record-pagination-stick import-pagination-stick">
+        <PaginationControls
+          offset={offset}
+          pageSize={pageSize}
+          pageSizeOptions={[8, 16, 32]}
+          pageSizeUnit="行"
+          total={totalRecords}
+          totalPages={totalPages}
+          onOffsetChange={setOffset}
+          onPageSizeChange={(value) => {
+            setPageSize(value)
+            setOffset(0)
+          }}
+        />
       </div>
     </div>
   )
 }
 
-function ImportTaskRows({ rows, abandoningId, onAbandon }: { rows: ImportTaskRow[]; abandoningId: string | null; onAbandon: (sessionId: string) => void }) {
+function ImportTaskRows({ rows, abandoningId, onAbandon, onFindGarment }: {
+  rows: ImportTaskRow[]
+  abandoningId: string | null
+  onAbandon: (sessionId: string) => void
+  onFindGarment: (code: string, garmentId?: number) => void
+}) {
   return (
     <div className="import-task-table">
-      <div className="import-task-table-head">
+      <div className="import-task-table-head" aria-hidden="true">
         <span>货号</span>
-        <span>导入/上传/保留</span>
+        <span>已选 / 已上传 / 已入库</span>
         <span>状态</span>
         <span>更新时间</span>
         <span>操作</span>
       </div>
       {rows.map((row) => {
-        const canAbandon = row.source === 'session' && row.sessionId && !['FINALIZED', 'FINALIZING', 'ABANDONED'].includes(row.status)
+        const canAbandon = row.sessionId && isImportTaskRunning(row.status) && !['FINALIZED', 'FINALIZING', 'ABANDONED'].includes(row.status)
+        const isDuplicateFailure = row.statusTone === 'danger' && /已存在|重复/.test(row.error ?? '')
+        const needsManualReimport = row.statusTone === 'danger' && !isDuplicateFailure
+        const canOpenGarment = Boolean(row.garmentId) && !needsManualReimport
         return (
-          <div className={`import-task-row is-${row.statusTone}`} key={row.id}>
+          <div className={`record-row import-task-row is-${row.statusTone}`} key={row.id}>
             <div className="import-task-code">
+              <ImportPreviewThumb src={row.previewUrl} />
               <strong>{row.code}</strong>
-              {row.sessionId && <span>{row.sessionId.slice(0, 8)}</span>}
+              <span>{importTaskMetaText(row)}</span>
             </div>
-            <span className="import-task-counts">{imageCountText(row.importedCount, row.uploadedCount, row.retainedCount)}</span>
+            <span className="import-task-counts">{importImageCountText(row.importedCount, row.uploadedCount, row.retainedCount)} 张</span>
             <span className={`import-status-badge is-${row.statusTone}`}>{row.statusLabel}</span>
             <span className="import-task-time">{dateText(row.updatedAt ?? row.createdAt)}</span>
             <div className="import-task-actions">
@@ -3969,14 +4690,45 @@ function ImportTaskRows({ rows, abandoningId, onAbandon }: { rows: ImportTaskRow
                 <button className="management-action compact-control" type="button" disabled={abandoningId === row.sessionId} onClick={() => row.sessionId && onAbandon(row.sessionId)}>
                   {abandoningId === row.sessionId ? '处理中' : '放弃'}
                 </button>
-              ) : <span>无</span>}
+              ) : isDuplicateFailure ? (
+                <button className="management-action compact-control" type="button" title="回到服装库查看已存在的货号" onClick={() => onFindGarment(row.code, row.garmentId)}>
+                  查看已有
+                </button>
+              ) : canOpenGarment ? (
+                <button className="management-action compact-control" type="button" title="回到服装库查看这件服装" onClick={() => onFindGarment(row.code, row.garmentId)}>
+                  查看服装
+                </button>
+              ) : needsManualReimport ? (
+                <span className="import-action-hint is-danger" title="当前页面已无法自动恢复原始本地文件，请重新选择图片或文件夹上传该货号">重新上传</span>
+              ) : row.status === 'ABANDONED' ? <span>已放弃</span> : <span>无需操作</span>}
             </div>
-            {row.error && <p className="import-task-error">{row.error}</p>}
             <div className="upload-progress-bar import-task-progress" aria-hidden="true"><span style={{ width: `${importTaskProgress(row)}%` }} /></div>
           </div>
         )
       })}
     </div>
+  )
+}
+
+function ImportThumbStack({ rows }: { rows: ImportTaskRow[] }) {
+  const previewRows = rows.filter((row) => row.previewUrl).slice(0, 4)
+  const fallbackCount = Math.max(0, Math.min(4, rows.length) - previewRows.length)
+  return (
+    <div className="batch-cover-stack import-cover-stack" aria-hidden="true">
+      {previewRows.map((row) => <ImportPreviewThumb key={row.id} src={row.previewUrl} />)}
+      {Array.from({ length: fallbackCount }).map((_, index) => <ImportPreviewThumb key={`empty-${index}`} />)}
+    </div>
+  )
+}
+
+function ImportPreviewThumb({ src }: { src?: string | null }) {
+  const [failed, setFailed] = useState(false)
+  useEffect(() => setFailed(false), [src])
+  const resolvedSrc = src ? mediaUrl(src) : ''
+  return (
+    <span className="import-preview-thumb">
+      {resolvedSrc && !failed ? <img src={resolvedSrc} alt="" loading="lazy" onError={() => setFailed(true)} /> : <Images size={14} />}
+    </span>
   )
 }
 
@@ -4125,13 +4877,13 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
   return (
     <section className="page workbench-page model-shell-page">
       <PageTitle
-        title="数字模特"
-        subtitle="维护全局数字模特身份和拍摄空间参考，保证每次成片稳定一致。"
+        title="模特与背景"
+        subtitle="维护全局模特身份和拍摄空间参考，保证每次成片稳定一致。"
       />
       <div className="panel model-page">
         <div className="model-meta">
           <div className="model-cover">
-            {coverThumb ? <img src={mediaUrl(coverThumb)} loading="lazy" alt={model?.name ?? '数字模特'} /> : <div className="image-placeholder"><UserRound size={40} /></div>}
+            {coverThumb ? <img src={mediaUrl(coverThumb)} loading="lazy" alt={model?.name ?? '模特与背景'} /> : <div className="image-placeholder"><UserRound size={40} /></div>}
           </div>
           <div className="model-meta-head">
             <h2>{model?.name ?? 'Face-01 默认模特'}</h2>
@@ -4145,7 +4897,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
         <div className="model-main">
           <section className="model-block">
             <div className="section-head">
-              <strong>数字模特头部参考图</strong>
+              <strong>模特头部参考图</strong>
               {editable && (
                 <label className="management-action">
                   <ImagePlus size={16} /> 追加图片
@@ -4363,8 +5115,7 @@ function PromptMaintenancePage({ run }: { run: any }) {
               <div className="prompt-editor-head">
                 <div>
                   <span className="chip">{activeItem.groupType === 'segment' ? '分段 Prompt' : '组装 Prompt'}</span>
-                  <h2>{activeItem.title}</h2>
-                  <p>{activeItem.description}</p>
+                  <HeadingWithTooltip as="h2" tooltip={activeItem.description}>{activeItem.title}</HeadingWithTooltip>
                 </div>
                 <div className="prompt-status">
                   <span className={dirty ? 'status-badge warning' : 'status-badge ok'}>{dirty ? '未保存' : '已保存'}</span>
@@ -5133,8 +5884,9 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
               disabled={loading}
               offset={offset}
               pageSize={pageSize}
-              pageSizeOptions={[{ value: autoPageSize, label: `${autoPageSize} 条`, key: 'auto' }, ...densePageSizeOptions]}
+              pageSizeOptions={[{ value: autoPageSize, label: `${autoPageSize} 行`, key: 'auto' }, ...densePageSizeOptions]}
               pageSizeOptionKey={pageSizeMode === 'auto' ? 'auto' : String(pageSize)}
+              pageSizeUnit="行"
               total={total}
               totalPages={totalPages}
               onOffsetChange={setOffset}
@@ -5613,8 +6365,8 @@ function PaginationControls({ offset, pageSize, pageSizeOptions = defaultPageSiz
         <button className="management-action" disabled={!canNext} onClick={() => onOffsetChange(lastOffset)}>尾页</button>
       </div>
       <div className="pagination-meta">
-        <span>共 {total} 条</span>
-        <span>{total > 0 ? `${firstItem}-${lastItem} 条` : '当前 0 条'}</span>
+        <span>共 {total} {pageSizeUnit}</span>
+        <span>{total > 0 ? `${firstItem}-${lastItem} ${pageSizeUnit}` : `当前 0 ${pageSizeUnit}`}</span>
         <label>每页
           <select
             value={selectedPageSizeKey}
@@ -5661,6 +6413,23 @@ function PageTitle({ title, subtitle, actions }: { title: string; subtitle?: str
         </div>
       </div>
       {actions}
+    </div>
+  )
+}
+
+function HeadingWithTooltip({ as: Tag = 'h3', children, tooltip }: { as?: 'h2' | 'h3'; children: ReactNode; tooltip?: string }) {
+  const tooltipId = useId()
+  if (!tooltip) return <Tag>{children}</Tag>
+  return (
+    <div className="heading-tooltip-wrap">
+      <Tag
+        className="has-heading-tooltip"
+        tabIndex={0}
+        aria-describedby={tooltipId}
+      >
+        {children}
+      </Tag>
+      <span id={tooltipId} className="heading-tooltip" role="tooltip">{tooltip}</span>
     </div>
   )
 }
@@ -5828,7 +6597,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
           <div className="section-head">
             <strong>图片</strong>
           </div>
-          <p className="edit-hint">此次修改会影响标签识别。排序第一张会作为封面和主要参考图；如需补充图片，请重新导入一套素材。</p>
+          <p className="edit-hint">此次修改会影响标签识别。排序第一张会作为封面和主要参考图；如需补充图片，请重新上传一套素材。</p>
           {tagging && <p className="edit-hint">正在识别标签，完成后可继续修改或删除。</p>}
           <div className="saved-image-grid">
             {working.map((image, index) => {
@@ -6136,8 +6905,7 @@ function AICallLogDialog({ dialog, onClose }: {
       <section ref={dialogRef} className="confirm-modal ai-log-modal" role="dialog" aria-modal="true" aria-label={dialog.title} onKeyDown={trapDialogFocus} onClick={(event) => event.stopPropagation()}>
         <div className="confirm-head">
           <div>
-            <h2>{dialog.title}</h2>
-            <p>展示本次调用真实发生的请求、响应、解析和时间事实；不用于重放任务。</p>
+            <HeadingWithTooltip as="h2" tooltip="展示本次调用真实发生的请求、响应、解析和时间事实；不用于重放任务。">{dialog.title}</HeadingWithTooltip>
           </div>
           <button ref={closeButtonRef} className="ghost-icon" type="button" onClick={onClose} title="关闭"><X size={18} /></button>
         </div>

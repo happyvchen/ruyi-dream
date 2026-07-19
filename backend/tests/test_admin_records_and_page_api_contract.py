@@ -70,7 +70,7 @@ def test_generation_record_workspace_supports_all_batch_and_single_task_views(cl
     assert any(item["kind"] == "task" and item["task"]["id"] == single for item in workspace_items)
 
     assert {item["batchId"] for item in batch_records.json()["items"]} == {"batch-a", "batch-b"}
-    assert {item["id"] for item in task_records.json()["items"]} >= {*batch_a, *batch_b, single}
+    assert {item["id"] for item in task_records.json()["items"]} == {single}
 
 
 def test_generation_record_filters_handle_many_keywords_without_advanced_query_syntax(client) -> None:

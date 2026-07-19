@@ -14,6 +14,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("050", "finalize_direct_prompt_generation_workflow", "migration_finalize_direct_prompt_generation_workflow"),
     ("051", "remove_hero_product_info", "migration_remove_hero_product_info"),
     ("052", "upload_sessions", "migration_upload_sessions"),
+    ("053", "upload_session_business_metadata", "migration_upload_session_business_metadata"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -311,6 +312,8 @@ def init_db() -> None:
               id TEXT PRIMARY KEY,
               scope TEXT NOT NULL,
               status TEXT NOT NULL,
+              business_code TEXT,
+              source_title TEXT,
               total_count INTEGER NOT NULL DEFAULT 0,
               uploaded_count INTEGER NOT NULL DEFAULT 0,
               target_type TEXT,
@@ -373,6 +376,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_finalize_direct_prompt_generation_workflow": migration_finalize_direct_prompt_generation_workflow,
         "migration_remove_hero_product_info": migration_remove_hero_product_info,
         "migration_upload_sessions": migration_upload_sessions,
+        "migration_upload_session_business_metadata": migration_upload_session_business_metadata,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -444,6 +448,8 @@ def migration_upload_sessions(db: sqlite3.Connection) -> None:
           id TEXT PRIMARY KEY,
           scope TEXT NOT NULL,
           status TEXT NOT NULL,
+          business_code TEXT,
+          source_title TEXT,
           total_count INTEGER NOT NULL DEFAULT 0,
           uploaded_count INTEGER NOT NULL DEFAULT 0,
           target_type TEXT,
@@ -469,6 +475,13 @@ def migration_upload_sessions(db: sqlite3.Connection) -> None:
         );
         """
     )
+
+
+def migration_upload_session_business_metadata(db: sqlite3.Connection) -> None:
+    if not table_has_column(db, "upload_sessions", "business_code"):
+        db.execute("ALTER TABLE upload_sessions ADD COLUMN business_code TEXT")
+    if not table_has_column(db, "upload_sessions", "source_title"):
+        db.execute("ALTER TABLE upload_sessions ADD COLUMN source_title TEXT")
 
 
 def scrub_prompt_config_hero_product_info(db: sqlite3.Connection) -> None:
