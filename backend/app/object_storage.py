@@ -290,6 +290,7 @@ def object_head(key: str | Path | None) -> dict[str, object] | None:
         "contentLength": int(response.get("ContentLength") or 0),
         "contentType": response.get("ContentType"),
         "eTag": response.get("ETag"),
+        "metadata": response.get("Metadata") or {},
     }
 
 
@@ -318,13 +319,15 @@ def presigned_get_url(
     )
 
 
-def presigned_put_url(key: str | Path | None, content_type: str | None = None) -> str | None:
+def presigned_put_url(key: str | Path | None, content_type: str | None = None, metadata: dict[str, str] | None = None) -> str | None:
     if not key:
         return None
     settings = get_settings()
     params = {"Bucket": settings.s3_bucket, "Key": clean_key(key)}
     if content_type:
         params["ContentType"] = content_type
+    if metadata:
+        params["Metadata"] = metadata
     return presign_s3_client().generate_presigned_url(
         "put_object",
         Params=params,

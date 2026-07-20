@@ -300,6 +300,10 @@ class StylingGarmentBatchManualTagsRequest(BaseModel):
     manualTags: dict[str, Any]
 
 
+class StylingGarmentBatchTagRequest(BaseModel):
+    ids: list[int]
+
+
 class StylingGarmentDeleteRequest(BaseModel):
     ids: list[int] | None = None
     purge: bool = False
@@ -326,6 +330,9 @@ class DirectUploadFileRequest(BaseModel):
     filename: str
     mimeType: str | None = None
     sizeBytes: int | None = None
+    relativePath: str | None = None
+    lastModified: int | None = None
+    checksumSha256: str | None = None
 
 
 class DirectUploadRequest(BaseModel):
@@ -336,10 +343,30 @@ class DirectUploadRequest(BaseModel):
 class UploadSessionCreateRequest(DirectUploadRequest):
     businessCode: str | None = None
     sourceTitle: str | None = None
+    batchId: str | None = None
+    executorId: str | None = None
+
+
+class StylingImportSessionRequest(BaseModel):
+    businessCode: str
+    files: list[DirectUploadFileRequest] = Field(default_factory=list)
+
+
+class StylingImportBatchCreateRequest(BaseModel):
+    sourceTitle: str | None = None
+    batchId: str | None = None
+    items: list[StylingImportSessionRequest] = Field(default_factory=list)
+    executorId: str | None = None
+
+
+class UploadSessionResumeRequest(BaseModel):
+    files: list[DirectUploadFileRequest] = Field(default_factory=list)
+    executorId: str | None = None
 
 
 class UploadSessionCompleteItemsRequest(BaseModel):
     objectKeys: list[str] = Field(default_factory=list)
+    executorId: str | None = None
 
 
 class UploadedMediaRequest(BaseModel):
@@ -366,6 +393,11 @@ class UploadSessionFinalizeGenerationTaskRequest(BaseModel):
 
 class UploadSessionFinalizeStylingGarmentRequest(BaseModel):
     code: str
+    executorId: str | None = None
+
+
+class UploadSessionLeaseRequest(BaseModel):
+    executorId: str | None = None
 
 
 class GenerationStylingRequest(BaseModel):
@@ -671,8 +703,9 @@ def build_direct_upload_items(scope: str, files: list[DirectUploadFileRequest], 
             max_mb = settings.max_upload_image_bytes / (1024 * 1024)
             raise HTTPException(status_code=400, detail=f"{filename} 超过 {max_mb:.0f}MB 大小限制")
         content_type = direct_upload_content_type(item.mimeType, filename)
+        checksum_sha256 = normalized_upload_checksum(item.checksumSha256)
         object_key = join_key("direct-uploads", scope_prefix, batch, f"{index:03d}-{filename}")
-        upload_url = presigned_put_url(object_key, content_type)
+        upload_url = presigned_put_url(object_key, content_type, {"sha256": checksum_sha256} if checksum_sha256 else None)
         if not upload_url:
             raise HTTPException(status_code=500, detail="无法创建上传地址")
         items.append(
@@ -680,65 +713,217 @@ def build_direct_upload_items(scope: str, files: list[DirectUploadFileRequest], 
                 "objectKey": object_key,
                 "uploadUrl": upload_url,
                 "method": "PUT",
-                "headers": {"Content-Type": content_type},
+                "headers": {
+                    "Content-Type": content_type,
+                    **({"x-amz-meta-sha256": checksum_sha256} if checksum_sha256 else {}),
+                },
                 "expiresIn": settings.s3_presign_expires_seconds,
                 "filename": filename,
                 "mimeType": content_type,
+                "relativePath": normalized_upload_relative_path(item.relativePath, filename),
+                "lastModified": item.lastModified,
+                "checksumSha256": checksum_sha256,
                 "maxSizeBytes": settings.max_upload_image_bytes,
             }
         )
     return items
 
 
-@app.post("/api/upload-sessions")
-def create_upload_session(payload: UploadSessionCreateRequest) -> dict[str, Any]:
-    scope_prefix = direct_upload_scope_prefix(payload.scope)
-    if scope_prefix == "generation-task" and len(payload.files) > MAX_HERO_IMAGE_INPUTS:
+def normalized_upload_relative_path(value: str | None, fallback: str) -> str:
+    raw = (value or fallback).replace("\\", "/").strip().lstrip("/")
+    parts = [part for part in raw.split("/") if part and part != "."]
+    if not parts or any(part == ".." for part in parts):
+        raise HTTPException(status_code=400, detail="图片相对路径不合法")
+    normalized = "/".join(parts)
+    if len(normalized) > 500:
+        raise HTTPException(status_code=400, detail="图片相对路径过长")
+    return normalized
+
+
+def normalized_upload_executor_id(value: str | None) -> str | None:
+    if not value:
+        return None
+    clean = re.sub(r"[^A-Za-z0-9._-]+", "", value.strip())[:100]
+    if not clean:
+        raise HTTPException(status_code=400, detail="上传执行端标识不合法")
+    return clean
+
+
+def normalized_upload_checksum(value: str | None) -> str | None:
+    if not value:
+        return None
+    clean = value.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", clean):
+        raise HTTPException(status_code=400, detail="图片 SHA-256 校验值不合法")
+    return clean
+
+
+def upload_lease_expiry() -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=90)).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def claim_upload_session_lease(db: sqlite3.Connection, session: Any, executor_id: str | None) -> None:
+    owner = normalized_upload_executor_id(executor_id)
+    batch_id = row_value(session, "batch_id")
+    if not owner:
+        if batch_id:
+            raise HTTPException(status_code=409, detail="缺少上传执行凭证，请刷新页面后重试")
+        return
+    now = now_iso()
+    expires = upload_lease_expiry()
+    if batch_id:
+        claimed = db.execute(
+            """
+            UPDATE upload_sessions
+            SET lease_owner = ?, lease_expires_at = ?
+            WHERE batch_id = ?
+              AND NOT EXISTS (
+                SELECT 1 FROM upload_sessions active
+                WHERE active.batch_id = ?
+                  AND active.lease_owner IS NOT NULL
+                  AND active.lease_owner <> ?
+                  AND active.lease_expires_at > ?
+              )
+            """,
+            (owner, expires, batch_id, batch_id, owner, now),
+        )
+    else:
+        claimed = db.execute(
+            """
+            UPDATE upload_sessions
+            SET lease_owner = ?, lease_expires_at = ?
+            WHERE id = ?
+              AND (lease_owner IS NULL OR lease_owner = ? OR lease_expires_at <= ?)
+            """,
+            (owner, expires, session["id"], owner, now),
+        )
+    if claimed.rowcount == 0:
+        raise HTTPException(status_code=409, detail="该上传任务正在另一页面或电脑继续，请稍后再试")
+
+
+def insert_upload_session(
+    db: sqlite3.Connection,
+    *,
+    scope: str,
+    files: list[DirectUploadFileRequest],
+    business_code: str | None = None,
+    source_title: str | None = None,
+    batch_id: str | None = None,
+    executor_id: str | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    scope_prefix = direct_upload_scope_prefix(scope)
+    if scope_prefix == "generation-task" and len(files) > MAX_HERO_IMAGE_INPUTS:
         raise HTTPException(status_code=400, detail=f"每个拍摄任务最多上传 {MAX_HERO_IMAGE_INPUTS} 张主推款图片")
-    session_files = payload.files
-    if scope_prefix == "styling-garment":
-        session_files = payload.files[:MAX_GARMENT_IMAGE_INPUTS]
+    session_files = files[:MAX_GARMENT_IMAGE_INPUTS] if scope_prefix == "styling-garment" else files
     session_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
-    items = build_direct_upload_items(payload.scope, session_files, session_id=session_id)
+    items = build_direct_upload_items(scope, session_files, session_id=session_id)
     timestamp = now_iso()
-    business_code = sanitize_name(payload.businessCode) if payload.businessCode else None
-    source_title = sanitize_name(payload.sourceTitle) if payload.sourceTitle else None
-    with get_db() as db:
+    db.execute(
+        """
+        INSERT INTO upload_sessions
+          (id, scope, status, business_code, source_title, batch_id, lease_owner, lease_expires_at, total_count, uploaded_count, created_at, updated_at)
+        VALUES (?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, 0, ?, ?)
+        """,
+        (session_id, scope_prefix, business_code, source_title, batch_id, normalized_upload_executor_id(executor_id), upload_lease_expiry() if executor_id else None, len(items), timestamp, timestamp),
+    )
+    for index, item in enumerate(items):
+        requested_file = session_files[index]
         db.execute(
             """
-            INSERT INTO upload_sessions
-              (id, scope, status, business_code, source_title, total_count, uploaded_count, created_at, updated_at)
-            VALUES (?, ?, 'PENDING', ?, ?, ?, 0, ?, ?)
+            INSERT INTO upload_session_items
+              (session_id, sort_order, object_key, filename, mime_type, size_bytes, relative_path, last_modified, checksum_sha256, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
             """,
-            (session_id, scope_prefix, business_code, source_title, len(items), timestamp, timestamp),
+            (
+                session_id,
+                index,
+                item["objectKey"],
+                item["filename"],
+                item["mimeType"],
+                requested_file.sizeBytes,
+                item["relativePath"],
+                requested_file.lastModified,
+                item["checksumSha256"],
+                timestamp,
+                timestamp,
+            ),
         )
-        for index, item in enumerate(items):
-            requested_file = session_files[index] if index < len(session_files) else None
-            db.execute(
-                """
-                INSERT INTO upload_session_items
-                  (session_id, sort_order, object_key, filename, mime_type, size_bytes, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
-                """,
-                (
-                    session_id,
-                    index,
-                    item["objectKey"],
-                    item["filename"],
-                    item["mimeType"],
-                    requested_file.sizeBytes if requested_file else None,
-                    timestamp,
-                    timestamp,
-                ),
-            )
+    return session_id, items
+
+
+@app.post("/api/upload-sessions")
+def create_upload_session(payload: UploadSessionCreateRequest) -> dict[str, Any]:
+    business_code = sanitize_name(payload.businessCode) if payload.businessCode else None
+    source_title = sanitize_name(payload.sourceTitle) if payload.sourceTitle else None
+    batch_id = sanitize_name(payload.batchId) if payload.batchId else None
+    with get_db() as db:
+        session_id, items = insert_upload_session(
+            db,
+            scope=payload.scope,
+            files=payload.files,
+            business_code=business_code,
+            source_title=source_title,
+            batch_id=batch_id,
+            executor_id=payload.executorId,
+        )
     return {"session": get_upload_session(session_id), "items": items}
+
+
+@app.post("/api/upload-sessions/styling-import-batch")
+def create_styling_import_batch(payload: StylingImportBatchCreateRequest) -> dict[str, Any]:
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="至少选择一个货号")
+    if len(payload.items) > 500:
+        raise HTTPException(status_code=400, detail="单次最多上传 500 个货号")
+    source_title = sanitize_name(payload.sourceTitle) if payload.sourceTitle else None
+    batch_id = sanitize_name(payload.batchId) if payload.batchId else f"import-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    codes = [sanitize_name(item.businessCode) for item in payload.items]
+    if any(not code for code in codes):
+        raise HTTPException(status_code=400, detail="每个上传项都需要有效货号")
+    if len(set(codes)) != len(codes):
+        raise HTTPException(status_code=400, detail="同一上传任务中货号不能重复")
+    created: list[tuple[str, list[dict[str, Any]]]] = []
+    with get_db() as db:
+        for item, clean_code in zip(payload.items, codes, strict=True):
+            created.append(insert_upload_session(
+                db,
+                scope="styling_garment",
+                files=item.files,
+                business_code=clean_code,
+                source_title=source_title or clean_code,
+                batch_id=batch_id,
+                executor_id=payload.executorId,
+            ))
+    return {
+        "batchId": batch_id,
+        "items": [
+            {"session": get_upload_session(session_id), "items": upload_items}
+            for session_id, upload_items in created
+        ],
+    }
+
+
+def upload_session_object_matches(row: Any) -> bool:
+    head = object_head(row["object_key"])
+    if not head or int(head.get("contentLength") or 0) <= 0:
+        return False
+    expected_size = row["size_bytes"]
+    if expected_size is not None and int(head.get("contentLength") or 0) != expected_size:
+        return False
+    expected_checksum = row_value(row, "checksum_sha256")
+    if expected_checksum:
+        metadata = head.get("metadata") if isinstance(head.get("metadata"), dict) else {}
+        if str(metadata.get("sha256") or "").lower() != expected_checksum:
+            return False
+    return True
 
 
 @app.get("/api/upload-sessions")
 def list_upload_sessions(
     scope: str | None = None,
     status: str | None = None,
-    limit: int = Query(20, ge=1, le=100),
+    batchId: str | None = None,
+    limit: int = Query(20, ge=1, le=500),
     includeAbandoned: bool = False,
 ) -> dict[str, Any]:
     filters: list[str] = []
@@ -746,6 +931,9 @@ def list_upload_sessions(
     if scope:
         filters.append("scope = ?")
         values.append(direct_upload_scope_prefix(scope))
+    if batchId:
+        filters.append("batch_id = ?")
+        values.append(sanitize_name(batchId))
     if status:
         requested_statuses = [item.strip().upper() for item in status.split(",") if item.strip()]
         if requested_statuses:
@@ -772,6 +960,7 @@ def list_upload_sessions(
         ).fetchall()
         session_ids = [row["id"] for row in rows]
         items_by_session: dict[str, list[Any]] = {session_id: [] for session_id in session_ids}
+        garment_statuses: dict[int, str] = {}
         if session_ids:
             placeholders = ", ".join("?" for _ in session_ids)
             item_rows = db.execute(
@@ -784,12 +973,167 @@ def list_upload_sessions(
             ).fetchall()
             for item in item_rows:
                 items_by_session.setdefault(item["session_id"], []).append(item)
-    return {"items": [serialize_upload_session(row, items_by_session.get(row["id"], [])) for row in rows]}
+            garment_ids = [int(row["target_id"]) for row in rows if row_value(row, "target_type") == "styling_garment" and row_value(row, "target_id")]
+            if garment_ids:
+                garment_placeholders = ", ".join("?" for _ in garment_ids)
+                garment_rows = db.execute(
+                    f"SELECT id, status FROM styling_garments WHERE id IN ({garment_placeholders})",
+                    garment_ids,
+                ).fetchall()
+                garment_statuses = {int(row["id"]): str(row["status"]) for row in garment_rows}
+    return {
+        "items": [
+            serialize_upload_session(
+                row,
+                items_by_session.get(row["id"], []),
+                target_status=garment_statuses.get(int(row["target_id"])) if row_value(row, "target_id") else None,
+            )
+            for row in rows
+        ]
+    }
 
 
 @app.get("/api/upload-sessions/{session_id}")
 def get_upload_session_endpoint(session_id: str) -> dict[str, Any]:
     return {"session": get_upload_session(session_id.strip())}
+
+
+@app.post("/api/upload-sessions/{session_id}/lease")
+def renew_upload_session_lease(session_id: str, payload: UploadSessionLeaseRequest) -> dict[str, Any]:
+    session_id = session_id.strip()
+    with get_db() as db:
+        session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not session:
+            raise HTTPException(status_code=404, detail="上传批次不存在")
+        if session["status"] in {"FINALIZED", "ABANDONED"}:
+            return {"session": get_upload_session(session_id)}
+        claim_upload_session_lease(db, session, payload.executorId)
+    return {"session": get_upload_session(session_id)}
+
+
+@app.post("/api/upload-sessions/{session_id}/resume")
+def resume_upload_session(session_id: str, payload: UploadSessionResumeRequest) -> dict[str, Any]:
+    session_id = session_id.strip()
+    timestamp = now_iso()
+    with get_db() as db:
+        session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not session:
+            raise HTTPException(status_code=404, detail="上传批次不存在")
+        if session["status"] in {"FINALIZED", "ABANDONED"}:
+            return {"session": get_upload_session(session_id), "items": []}
+        claim_upload_session_lease(db, session, payload.executorId)
+        if session["status"] == "FINALIZING":
+            try:
+                updated_at = datetime.fromisoformat(str(session["updated_at"]).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                updated_at = datetime.now(timezone.utc)
+            if datetime.now(timezone.utc) - updated_at <= timedelta(minutes=5):
+                return {"session": get_upload_session(session_id), "items": []}
+            db.execute(
+                """
+                UPDATE upload_sessions
+                SET status = 'UPLOADED', error_message = ?, updated_at = ?
+                WHERE id = ? AND status = 'FINALIZING' AND target_id IS NULL
+                """,
+                ("上次保存中断，已恢复到可继续状态", timestamp, session_id),
+            )
+            session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
+        rows = db.execute(
+            "SELECT * FROM upload_session_items WHERE session_id = ? ORDER BY sort_order, id",
+            (session_id,),
+        ).fetchall()
+        supplied = {
+            normalized_upload_relative_path(item.relativePath, item.filename): item
+            for item in payload.files
+        }
+        expected_paths = [row_value(row, "relative_path") or row["filename"] for row in rows]
+        if set(supplied) != set(expected_paths):
+            missing = [path for path in expected_paths if path not in supplied]
+            extra = [path for path in supplied if path not in expected_paths]
+            detail = []
+            if missing:
+                detail.append(f"缺少 {len(missing)} 张")
+            if extra:
+                detail.append(f"多出 {len(extra)} 张")
+            raise HTTPException(status_code=409, detail=f"所选目录与原上传任务不一致（{'，'.join(detail)}）")
+        mismatched: list[str] = []
+        checksum_bindings: list[tuple[str, int]] = []
+        for row in rows:
+            path = row_value(row, "relative_path") or row["filename"]
+            item = supplied[path]
+            expected_size = row["size_bytes"]
+            expected_modified = row_value(row, "last_modified")
+            expected_checksum = row_value(row, "checksum_sha256")
+            if expected_size is not None and item.sizeBytes != expected_size:
+                mismatched.append(path)
+                continue
+            if expected_modified is not None and item.lastModified != expected_modified:
+                mismatched.append(path)
+                continue
+            supplied_checksum = normalized_upload_checksum(item.checksumSha256)
+            if row_value(session, "batch_id") and not supplied_checksum:
+                raise HTTPException(status_code=400, detail="断点续传需要图片 SHA-256 校验值")
+            if expected_checksum and supplied_checksum != expected_checksum:
+                mismatched.append(path)
+            elif not expected_checksum and supplied_checksum:
+                checksum_bindings.append((supplied_checksum, int(row["id"])))
+        if mismatched:
+            raise HTTPException(status_code=409, detail=f"所选目录中有 {len(mismatched)} 张图片已发生变化，已拒绝断点继续")
+        if checksum_bindings:
+            db.executemany(
+                "UPDATE upload_session_items SET checksum_sha256 = ?, updated_at = ? WHERE id = ? AND checksum_sha256 IS NULL",
+                [(checksum, timestamp, item_id) for checksum, item_id in checksum_bindings],
+            )
+
+        recovered_keys: list[str] = []
+        for row in rows:
+            if row["status"] in {"UPLOADED", "READY"}:
+                continue
+            if upload_session_object_matches(row):
+                recovered_keys.append(row["object_key"])
+        if recovered_keys:
+            placeholders = ", ".join("?" for _ in recovered_keys)
+            db.execute(
+                f"UPDATE upload_session_items SET status = 'UPLOADED', error_message = NULL, updated_at = ? WHERE session_id = ? AND object_key IN ({placeholders})",
+                (timestamp, session_id, *recovered_keys),
+            )
+
+        current_rows = db.execute(
+            "SELECT * FROM upload_session_items WHERE session_id = ? ORDER BY sort_order, id",
+            (session_id,),
+        ).fetchall()
+        uploaded_count = sum(1 for row in current_rows if row["status"] in {"UPLOADED", "READY"})
+        next_status = "UPLOADED" if uploaded_count == len(current_rows) else "UPLOADING"
+        db.execute(
+            "UPDATE upload_sessions SET status = ?, uploaded_count = ?, error_message = NULL, updated_at = ? WHERE id = ?",
+            (next_status, uploaded_count, timestamp, session_id),
+        )
+
+        pending_items: list[dict[str, Any]] = []
+        for row in current_rows:
+            if row["status"] in {"UPLOADED", "READY"}:
+                continue
+            checksum_sha256 = row_value(row, "checksum_sha256")
+            upload_url = presigned_put_url(row["object_key"], row["mime_type"], {"sha256": checksum_sha256} if checksum_sha256 else None)
+            if not upload_url:
+                raise HTTPException(status_code=500, detail="无法刷新上传地址")
+            pending_items.append({
+                "objectKey": row["object_key"],
+                "uploadUrl": upload_url,
+                "method": "PUT",
+                "headers": {
+                    "Content-Type": row["mime_type"],
+                    **({"x-amz-meta-sha256": checksum_sha256} if checksum_sha256 else {}),
+                },
+                "expiresIn": settings.s3_presign_expires_seconds,
+                "filename": row["filename"],
+                "mimeType": row["mime_type"],
+                "relativePath": row_value(row, "relative_path") or row["filename"],
+                "lastModified": row_value(row, "last_modified"),
+                "checksumSha256": checksum_sha256,
+                "maxSizeBytes": settings.max_upload_image_bytes,
+            })
+    return {"session": get_upload_session(session_id), "items": pending_items}
 
 
 @app.post("/api/upload-sessions/{session_id}/complete-items")
@@ -805,6 +1149,7 @@ def complete_upload_session_items(session_id: str, payload: UploadSessionComplet
             raise HTTPException(status_code=404, detail="上传批次不存在")
         if session["status"] in {"FINALIZING", "FINALIZED", "ABANDONED"}:
             return {"session": get_upload_session(session_id)}
+        claim_upload_session_lease(db, session, payload.executorId)
         rows = db.execute(
             "SELECT * FROM upload_session_items WHERE session_id = ?",
             (session_id,),
@@ -813,6 +1158,10 @@ def complete_upload_session_items(session_id: str, payload: UploadSessionComplet
         unknown_keys = [key for key in keys if key not in known_keys]
         if unknown_keys:
             raise HTTPException(status_code=400, detail="上传确认包含不属于该批次的图片")
+        rows_by_key = {row["object_key"]: row for row in rows}
+        invalid_keys = [key for key in keys if not upload_session_object_matches(rows_by_key[key])]
+        if invalid_keys:
+            raise HTTPException(status_code=409, detail="对象存储中的图片缺失或完整性校验失败")
         placeholders = ", ".join("?" for _ in keys)
         db.execute(
             f"""
@@ -844,7 +1193,7 @@ def complete_upload_session_items(session_id: str, payload: UploadSessionComplet
 
 
 @app.post("/api/upload-sessions/{session_id}/abandon")
-def abandon_upload_session(session_id: str) -> dict[str, Any]:
+def abandon_upload_session(session_id: str, payload: UploadSessionLeaseRequest | None = None) -> dict[str, Any]:
     session_id = session_id.strip()
     timestamp = now_iso()
     cleanup_keys: list[str] = []
@@ -852,6 +1201,7 @@ def abandon_upload_session(session_id: str) -> dict[str, Any]:
         session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
         if not session:
             raise HTTPException(status_code=404, detail="上传批次不存在")
+        claim_upload_session_lease(db, session, payload.executorId if payload else None)
         if session["status"] == "FINALIZED" and session["target_id"]:
             raise HTTPException(status_code=409, detail="上传批次已保存，请在对应业务记录中处理")
         if session["status"] == "FINALIZING":
@@ -897,17 +1247,19 @@ def get_upload_session(session_id: str) -> dict[str, Any]:
     return serialize_upload_session(row, items)
 
 
-def serialize_upload_session(row: Any, items: list[Any]) -> dict[str, Any]:
+def serialize_upload_session(row: Any, items: list[Any], *, target_status: str | None = None) -> dict[str, Any]:
     return {
         "id": row["id"],
         "scope": row["scope"],
         "status": row["status"],
         "businessCode": row_value(row, "business_code"),
         "sourceTitle": row_value(row, "source_title"),
+        "batchId": row_value(row, "batch_id"),
         "totalCount": int(row["total_count"] or 0),
         "uploadedCount": int(row["uploaded_count"] or 0),
         "targetType": row_value(row, "target_type"),
         "targetId": row_value(row, "target_id"),
+        "targetStatus": target_status,
         "errorMessage": row_value(row, "error_message"),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
@@ -918,6 +1270,9 @@ def serialize_upload_session(row: Any, items: list[Any]) -> dict[str, Any]:
                 "filename": item["filename"],
                 "mimeType": item["mime_type"],
                 "sizeBytes": item["size_bytes"],
+                "relativePath": row_value(item, "relative_path") or item["filename"],
+                "lastModified": row_value(item, "last_modified"),
+                "checksumSha256": row_value(item, "checksum_sha256"),
                 "status": item["status"],
                 "mediaAssetId": item["media_asset_id"],
                 "errorMessage": item["error_message"],
@@ -1632,6 +1987,7 @@ async def finalize_styling_garment_upload_session(
             raise HTTPException(status_code=400, detail="上传批次用途不匹配")
         if session["status"] == "FINALIZED" and session["target_id"]:
             return {"item": get_styling_garment_by_id(int(session["target_id"])), "session": get_upload_session(session_id)}
+        claim_upload_session_lease(db, session, payload.executorId)
         db.execute(
             """
             UPDATE upload_sessions
@@ -1825,6 +2181,50 @@ async def save_and_tag_styling_garment(garment_id: int, background_tasks: Backgr
         db.execute("UPDATE styling_garments SET status = 'TAGGING_RUNNING', tag_error = NULL, updated_at = ? WHERE id = ?", (timestamp, garment_id))
     background_tasks.add_task(run_styling_garment_tagging, garment_id)
     return {"item": get_styling_garment_by_id(garment_id)}
+
+
+@app.post("/api/styling-garments/batch-save-and-tag")
+async def save_and_tag_styling_garments_batch(payload: StylingGarmentBatchTagRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    garment_ids = normalized_styling_garment_ids(payload.ids or [])
+    timestamp = now_iso()
+    taggable_statuses = {"DRAFT", "TAGGING_READY", "TAGGING_FAILED", "READY"}
+    started_ids: list[int] = []
+    skipped: list[dict[str, Any]] = []
+    with get_db() as db:
+        rows = get_styling_garment_rows_for_mutation(db, garment_ids)
+        rows_by_id = {int(row["id"]): row for row in rows}
+        for garment_id in garment_ids:
+            row = rows_by_id[garment_id]
+            status = row["status"]
+            if row["archived_at"] is not None:
+                skipped.append({"id": garment_id, "code": row["code"], "status": status, "reason": "已归档"})
+                continue
+            if status == "TAGGING_RUNNING":
+                skipped.append({"id": garment_id, "code": row["code"], "status": status, "reason": "正在识别"})
+                continue
+            if status not in taggable_statuses:
+                skipped.append({"id": garment_id, "code": row["code"], "status": status, "reason": "当前状态无需识别"})
+                continue
+            started_ids.append(garment_id)
+        if started_ids:
+            placeholders = ", ".join("?" for _ in started_ids)
+            db.execute(
+                f"""
+                UPDATE styling_garments
+                SET status = 'TAGGING_RUNNING', tag_error = NULL, updated_at = ?
+                WHERE id IN ({placeholders})
+                """,
+                (timestamp, *started_ids),
+            )
+            for garment_id in started_ids:
+                log_event(db, "styling_garment", garment_id, "tagging_started", {"batch": True})
+    for garment_id in started_ids:
+        background_tasks.add_task(run_styling_garment_tagging, garment_id)
+    return {
+        "items": [get_styling_garment_by_id(garment_id) for garment_id in started_ids],
+        "startedIds": started_ids,
+        "skipped": skipped,
+    }
 
 
 _tagging_semaphore: asyncio.Semaphore | None = None

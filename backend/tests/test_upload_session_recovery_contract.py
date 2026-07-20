@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sqlite3
+
+from app.db import run_migrations
 from conftest import insert_styling_garment
 
 
@@ -186,3 +189,256 @@ def test_abandon_upload_session_excludes_default_recovery_and_cleans_unfinalized
     debug = client.get("/api/upload-sessions", params={"includeAbandoned": "true", "status": "ABANDONED"})
     assert debug.status_code == 200
     assert debug.json()["items"][0]["id"] == session_id
+
+
+def test_styling_import_batch_persists_every_item_before_upload(client) -> None:
+    response = client.post(
+        "/api/upload-sessions/styling-import-batch",
+        json={
+            "batchId": "import-task-001",
+            "sourceTitle": "7.20回图",
+            "items": [
+                {
+                    "businessCode": "LOOK-001",
+                    "files": [{"filename": "front.jpg", "mimeType": "image/jpeg", "sizeBytes": 128, "relativePath": "7.20回图/LOOK-001/front.jpg", "lastModified": 1000}],
+                },
+                {
+                    "businessCode": "LOOK-002",
+                    "files": [{"filename": "back.jpg", "mimeType": "image/jpeg", "sizeBytes": 256, "relativePath": "7.20回图/LOOK-002/back.jpg", "lastModified": 2000}],
+                },
+            ],
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["batchId"] == "import-task-001"
+    assert len(payload["items"]) == 2
+    assert {entry["session"]["businessCode"] for entry in payload["items"]} == {"LOOK-001", "LOOK-002"}
+    assert all(entry["session"]["batchId"] == "import-task-001" for entry in payload["items"])
+    assert payload["items"][0]["session"]["items"][0]["relativePath"] == "7.20回图/LOOK-001/front.jpg"
+
+
+def test_resume_rejects_a_different_directory_before_upload(client) -> None:
+    created = client.post(
+        "/api/upload-sessions",
+        json={
+            "scope": "styling_garment",
+            "businessCode": "LOOK-RESUME",
+            "files": [{"filename": "front.jpg", "mimeType": "image/jpeg", "sizeBytes": 128, "relativePath": "original/LOOK-RESUME/front.jpg", "lastModified": 1000}],
+        },
+    ).json()
+    response = client.post(
+        f"/api/upload-sessions/{created['session']['id']}/resume",
+        json={"files": [{"filename": "front.jpg", "mimeType": "image/jpeg", "sizeBytes": 128, "relativePath": "wrong/LOOK-RESUME/front.jpg", "lastModified": 1000}]},
+    )
+    assert response.status_code == 409
+    assert "原上传任务不一致" in response.json()["detail"]
+
+    changed = client.post(
+        f"/api/upload-sessions/{created['session']['id']}/resume",
+        json={"files": [{"filename": "front.jpg", "mimeType": "image/jpeg", "sizeBytes": 128, "relativePath": "original/LOOK-RESUME/front.jpg", "lastModified": 2000}]},
+    )
+    assert changed.status_code == 409
+    assert "图片已发生变化" in changed.json()["detail"]
+
+
+def test_resume_skips_confirmed_files_and_refreshes_only_pending_uploads(client) -> None:
+    created = client.post(
+        "/api/upload-sessions",
+        json={
+            "scope": "styling_garment",
+            "businessCode": "LOOK-PARTIAL",
+            "files": [
+                {"filename": "front.jpg", "mimeType": "image/jpeg", "sizeBytes": 128, "relativePath": "root/LOOK-PARTIAL/front.jpg", "lastModified": 1000},
+                {"filename": "back.jpg", "mimeType": "image/jpeg", "sizeBytes": 256, "relativePath": "root/LOOK-PARTIAL/back.jpg", "lastModified": 2000},
+            ],
+        },
+    ).json()
+    first_key = created["items"][0]["objectKey"]
+    client.post(f"/api/upload-sessions/{created['session']['id']}/complete-items", json={"objectKeys": [first_key]})
+    response = client.post(
+        f"/api/upload-sessions/{created['session']['id']}/resume",
+        json={"files": [
+            {"filename": "front.jpg", "mimeType": "image/jpeg", "sizeBytes": 128, "relativePath": "root/LOOK-PARTIAL/front.jpg", "lastModified": 1000},
+            {"filename": "back.jpg", "mimeType": "image/jpeg", "sizeBytes": 256, "relativePath": "root/LOOK-PARTIAL/back.jpg", "lastModified": 2000},
+        ]},
+    )
+    assert response.status_code == 200
+    assert response.json()["session"]["uploadedCount"] == 1
+    assert [item["relativePath"] for item in response.json()["items"]] == ["root/LOOK-PARTIAL/back.jpg"]
+
+
+def test_active_upload_lease_prevents_a_second_computer_from_taking_over(client) -> None:
+    created = client.post(
+        "/api/upload-sessions",
+        json={
+            "scope": "styling_garment",
+            "businessCode": "LOOK-LEASE",
+            "batchId": "lease-batch-1",
+            "executorId": "computer-a-tab-1",
+            "files": [{"filename": "front.jpg", "mimeType": "image/jpeg", "sizeBytes": 128, "relativePath": "root/LOOK-LEASE/front.jpg", "lastModified": 1000}],
+        },
+    ).json()
+    response = client.post(
+        f"/api/upload-sessions/{created['session']['id']}/resume",
+        json={
+            "executorId": "computer-b-tab-1",
+            "files": [{"filename": "front.jpg", "mimeType": "image/jpeg", "sizeBytes": 128, "relativePath": "root/LOOK-LEASE/front.jpg", "lastModified": 1000}],
+        },
+    )
+    assert response.status_code == 409
+    assert "另一页面或电脑" in response.json()["detail"]
+
+
+def test_batch_resume_requires_an_executor_credential(client) -> None:
+    created = client.post(
+        "/api/upload-sessions/styling-import-batch",
+        json={
+            "batchId": "credential-batch-1",
+            "items": [{
+                "businessCode": "LOOK-CREDENTIAL",
+                "files": [{"filename": "front.jpg", "mimeType": "image/jpeg", "sizeBytes": 128}],
+            }],
+        },
+    ).json()["items"][0]
+    response = client.post(
+        f"/api/upload-sessions/{created['session']['id']}/resume",
+        json={"files": [{"filename": "front.jpg", "mimeType": "image/jpeg", "sizeBytes": 128}]},
+    )
+    assert response.status_code == 409
+    assert "执行凭证" in response.json()["detail"]
+
+
+def test_batch_is_persisted_before_hashing_and_binds_checksum_on_first_resume(client, monkeypatch) -> None:
+    from app import main as app_main
+
+    monkeypatch.setattr(app_main, "object_head", lambda key: None)
+    checksum = "c" * 64
+    created = client.post(
+        "/api/upload-sessions/styling-import-batch",
+        json={
+            "batchId": "checksum-bind-batch",
+            "items": [{
+                "businessCode": "LOOK-BIND",
+                "files": [{"filename": "front.jpg", "mimeType": "image/jpeg", "sizeBytes": 128, "lastModified": 1000}],
+            }],
+        },
+    ).json()["items"][0]
+    assert created["session"]["items"][0]["checksumSha256"] is None
+
+    resumed = client.post(
+        f"/api/upload-sessions/{created['session']['id']}/resume",
+        json={
+            "executorId": "computer-a-tab-1",
+            "files": [{
+                "filename": "front.jpg",
+                "mimeType": "image/jpeg",
+                "sizeBytes": 128,
+                "lastModified": 1000,
+                "checksumSha256": checksum,
+            }],
+        },
+    )
+    assert resumed.status_code == 200
+    assert resumed.json()["session"]["items"][0]["checksumSha256"] == checksum
+    assert resumed.json()["items"][0]["headers"]["x-amz-meta-sha256"] == checksum
+
+
+def test_resume_rejects_same_path_and_metadata_when_checksum_changed(client) -> None:
+    checksum_a = "a" * 64
+    checksum_b = "b" * 64
+    created = client.post(
+        "/api/upload-sessions",
+        json={
+            "scope": "styling_garment",
+            "businessCode": "LOOK-CHECKSUM",
+            "files": [{
+                "filename": "front.jpg",
+                "mimeType": "image/jpeg",
+                "sizeBytes": 128,
+                "relativePath": "root/LOOK-CHECKSUM/front.jpg",
+                "lastModified": 1000,
+                "checksumSha256": checksum_a,
+            }],
+        },
+    ).json()
+    response = client.post(
+        f"/api/upload-sessions/{created['session']['id']}/resume",
+        json={"files": [{
+            "filename": "front.jpg",
+            "mimeType": "image/jpeg",
+            "sizeBytes": 128,
+            "relativePath": "root/LOOK-CHECKSUM/front.jpg",
+            "lastModified": 1000,
+            "checksumSha256": checksum_b,
+        }]},
+    )
+    assert response.status_code == 409
+    assert "图片已发生变化" in response.json()["detail"]
+
+
+def test_complete_items_rejects_an_object_missing_from_storage(client, monkeypatch) -> None:
+    from app import main as app_main
+
+    created = create_session(client, filenames=["front.jpg"])
+    monkeypatch.setattr(app_main, "object_head", lambda key: None)
+    response = client.post(
+        f"/api/upload-sessions/{created['session']['id']}/complete-items",
+        json={"objectKeys": [created["items"][0]["objectKey"]]},
+    )
+    assert response.status_code == 409
+    assert "完整性校验失败" in response.json()["detail"]
+
+
+def test_resume_recovers_an_object_uploaded_before_browser_refresh(client, monkeypatch) -> None:
+    from app import main as app_main
+
+    created = client.post(
+        "/api/upload-sessions",
+        json={
+            "scope": "styling_garment",
+            "businessCode": "LOOK-ORPHAN-PUT",
+            "files": [{"filename": "front.jpg", "mimeType": "image/jpeg", "sizeBytes": 128, "relativePath": "root/LOOK-ORPHAN-PUT/front.jpg", "lastModified": 1000}],
+        },
+    ).json()
+    monkeypatch.setattr(app_main, "object_head", lambda key: {"contentLength": 128, "contentType": "image/jpeg", "eTag": "etag"})
+    response = client.post(
+        f"/api/upload-sessions/{created['session']['id']}/resume",
+        json={"files": [{"filename": "front.jpg", "mimeType": "image/jpeg", "sizeBytes": 128, "relativePath": "root/LOOK-ORPHAN-PUT/front.jpg", "lastModified": 1000}]},
+    )
+    assert response.status_code == 200
+    assert response.json()["session"]["status"] == "UPLOADED"
+    assert response.json()["session"]["uploadedCount"] == 1
+    assert response.json()["items"] == []
+
+
+def test_upgrade_after_054_adds_lease_and_checksum_columns() -> None:
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)")
+    db.executemany(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, '2026-07-20T00:00:00Z')",
+        [(version, name) for version, name in [
+            ("050", "old"), ("051", "old"), ("052", "old"), ("053", "old"), ("054", "old"),
+        ]],
+    )
+    db.execute("""
+        CREATE TABLE upload_sessions (
+          id TEXT PRIMARY KEY, scope TEXT NOT NULL, status TEXT NOT NULL, batch_id TEXT,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        )
+    """)
+    db.execute("""
+        CREATE TABLE upload_session_items (
+          id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, relative_path TEXT, last_modified INTEGER
+        )
+    """)
+
+    run_migrations(db)
+
+    session_columns = {row["name"] for row in db.execute("PRAGMA table_info(upload_sessions)")}
+    item_columns = {row["name"] for row in db.execute("PRAGMA table_info(upload_session_items)")}
+    versions = {row["version"] for row in db.execute("SELECT version FROM schema_migrations")}
+    assert {"lease_owner", "lease_expires_at"} <= session_columns
+    assert "checksum_sha256" in item_columns
+    assert {"055", "056"} <= versions

@@ -19,6 +19,7 @@ const apiMock = vi.hoisted(() => ({
   listRecordWorkspace: vi.fn(),
   listRecordBatches: vi.fn(),
   getRecord: vi.fn(),
+  getTaskDeleteImpact: vi.fn(),
   getTask: vi.fn(),
   updateTask: vi.fn(),
   createTask: vi.fn(),
@@ -35,8 +36,12 @@ const apiMock = vi.hoisted(() => ({
   getStylingGarmentDeleteImpact: vi.fn(),
   deleteStylingGarment: vi.fn(),
   deleteStylingGarments: vi.fn(),
+  archiveTasks: vi.fn(),
+  deleteTask: vi.fn(),
+  deleteTasks: vi.fn(),
   restoreStylingGarment: vi.fn(),
   restoreStylingGarments: vi.fn(),
+  restoreTasks: vi.fn(),
   getShootEnvironment: vi.fn(),
   addModelHeadReferences: vi.fn(),
   replaceModelHeadReference: vi.fn(),
@@ -137,6 +142,22 @@ const task = {
   storyboardPreview: null,
   resultSet: null,
   aiOperations: [],
+}
+
+const garment = {
+  id: 1,
+  code: 'CODX-UI-0718-B-8',
+  status: 'READY',
+  aiTags: {},
+  manualTags: {},
+  archivedAt: null,
+  archiveReason: null,
+  imageCount: 1,
+  coverUrl: null,
+  coverAsset: null,
+  images: [],
+  createdAt: '2026-07-17T00:00:00Z',
+  updatedAt: '2026-07-17T00:00:00Z',
 }
 
 function configureApi(role: 'admin' | 'user' = 'admin') {
@@ -241,6 +262,78 @@ describe('production gate app shell and page controls', () => {
     expect(await screen.findByText('创建拍摄任务后会出现在这里。')).toBeInTheDocument()
   })
 
+  it('renders every task chip in a batch instead of truncating the batch navigation', async () => {
+    const batchTask = { ...task, batchId: 'batch-13' }
+    const batchTasks = Array.from({ length: 13 }, (_, index) => ({
+      ...batchTask,
+      id: index + 1,
+      name: `LOOK-${String(index + 1).padStart(3, '0')}`,
+    }))
+    apiMock.getTask.mockResolvedValue({ item: batchTask })
+    apiMock.listBatchTasks.mockResolvedValue({ items: batchTasks })
+    window.history.replaceState(null, '', '/studio?task=1')
+
+    render(<App />)
+
+    expect(await screen.findByRole('button', { name: /LOOK-013/ })).toBeInTheDocument()
+    expect(document.querySelectorAll('.batch-bar-chips .batch-chip')).toHaveLength(13)
+  })
+
+  it('shows every task when a recent batch is expanded', async () => {
+    const batchTask = { ...task, batchId: 'batch-13' }
+    const batchTasks = Array.from({ length: 13 }, (_, index) => ({
+      ...batchTask,
+      id: index + 1,
+      name: `LOOK-${String(index + 1).padStart(3, '0')}`,
+    }))
+    const batchRecord = {
+      id: 'batch-13',
+      batchId: 'batch-13',
+      name: '五月回图',
+      status: 'RUNNING',
+      taskCount: 13,
+      activeTaskCount: 13,
+      archivedTaskCount: 0,
+      completedTaskCount: 0,
+      failedTaskCount: 0,
+      cancelledTaskCount: 0,
+      runningTaskCount: 13,
+      queuedTaskCount: 0,
+      downloadableTaskCount: 0,
+      statusCounts: { READY_FOR_STYLING: 13 },
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt,
+      coverTasks: batchTasks.slice(0, 4),
+      sampleTaskNames: batchTasks.slice(0, 3).map((item) => item.name),
+      firstTaskId: 1,
+    }
+    apiMock.getTask.mockResolvedValue({ item: batchTask })
+    apiMock.listBatchTasks.mockResolvedValue({ items: batchTasks })
+    apiMock.listRecordWorkspace.mockResolvedValue({
+      ...emptyPage,
+      items: [{
+        kind: 'batch',
+        id: 'batch:batch-13',
+        status: 'RUNNING',
+        name: batchRecord.name,
+        createdAt: batchRecord.createdAt,
+        updatedAt: batchRecord.updatedAt,
+        batch: batchRecord,
+      }],
+      total: 1,
+    })
+    window.history.replaceState(null, '', '/studio?task=1')
+
+    render(<App />)
+
+    await userEvent.click(await screen.findByRole('tab', { name: /最近任务/ }))
+    const recentPanel = screen.getByRole('tabpanel', { name: /最近任务/ })
+    await userEvent.click(await within(recentPanel).findByRole('button', { name: /五月回图.*13 项/ }))
+
+    expect(await within(recentPanel).findByRole('button', { name: /LOOK-013/ })).toBeInTheDocument()
+    expect(within(recentPanel).queryByText(/还有 8 个任务/)).not.toBeInTheDocument()
+  })
+
   it('library import and bulk controls are visible without hiding core filters', async () => {
     render(<App />)
     await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
@@ -254,5 +347,92 @@ describe('production gate app shell and page controls', () => {
     expect(screen.getByText('选择图片')).toBeInTheDocument()
     expect(screen.getByText('选择文件夹')).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: '返回服装库' }).length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('keeps purge checked when delete impact refreshes the archive dialog', async () => {
+    let resolveImpact: (value: unknown) => void = () => undefined
+    apiMock.listStylingGarments.mockResolvedValue({
+      ...emptyPage,
+      items: [garment],
+      total: 1,
+      facets: {},
+      stableFacets: {},
+    })
+    apiMock.getStylingGarmentDeleteImpact.mockReturnValue(new Promise((resolve) => {
+      resolveImpact = resolve
+    }))
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
+    expect(await screen.findByText('CODX-UI-0718-B-8')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /^归档$/ }))
+
+    const purgeCheckbox = await screen.findByRole('checkbox', { name: /同时彻底删除关联记录和文件/ })
+    await userEvent.click(purgeCheckbox)
+    expect(purgeCheckbox).toBeChecked()
+
+    resolveImpact({
+      impact: {
+        garmentCount: 1,
+        garmentImageCount: 1,
+        dependentTaskCount: 0,
+        taskCount: 0,
+        resultImageCount: 0,
+        mediaAssetCount: 1,
+        estimatedBytes: 1024,
+      },
+    })
+
+    await waitFor(() => expect(screen.getByText(/彻底删除将移除/)).toBeInTheDocument())
+    expect(screen.getByRole('checkbox', { name: /同时彻底删除关联记录和文件/ })).toBeChecked()
+    expect(screen.getByPlaceholderText('CODX-UI-0718-B-8')).toBeInTheDocument()
+  })
+
+  it('keeps purge checked when record delete impact refreshes the archive dialog', async () => {
+    const recordTask = { ...task, id: 21, name: 'LOOK-021', status: 'COMPLETED' }
+    let resolveImpact: (value: unknown) => void = () => undefined
+    apiMock.listRecordWorkspace.mockResolvedValue({
+      ...emptyPage,
+      items: [{
+        kind: 'task',
+        id: 'task-21',
+        status: recordTask.status,
+        name: recordTask.name,
+        createdAt: recordTask.createdAt,
+        updatedAt: recordTask.updatedAt,
+        task: recordTask,
+      }],
+      total: 1,
+      facets: {},
+      stableFacets: {},
+    })
+    apiMock.getTaskDeleteImpact.mockReturnValue(new Promise((resolve) => {
+      resolveImpact = resolve
+    }))
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '生成记录' }))
+    expect(await screen.findByText('LOOK-021')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /^归档$/ }))
+
+    const purgeCheckbox = await screen.findByRole('checkbox', { name: /同时彻底删除关联记录和文件/ })
+    await userEvent.click(purgeCheckbox)
+    expect(purgeCheckbox).toBeChecked()
+
+    resolveImpact({
+      impact: {
+        garmentCount: 0,
+        garmentImageCount: 0,
+        dependentTaskCount: 0,
+        taskCount: 1,
+        resultImageCount: 5,
+        mediaAssetCount: 6,
+        estimatedBytes: 2048,
+      },
+    })
+
+    await waitFor(() => expect(screen.getByText(/彻底删除将移除/)).toBeInTheDocument())
+    expect(screen.getByRole('checkbox', { name: /同时彻底删除关联记录和文件/ })).toBeChecked()
+    expect(screen.getByPlaceholderText('LOOK-021')).toBeInTheDocument()
   })
 })

@@ -54,11 +54,13 @@ GenerationTask
 - `scope`：`generation-task` 或 `styling-garment`。
 - `status`：`PENDING`、`UPLOADING`、`UPLOADED`、`FINALIZING`、`FINALIZED`、`FAILED`、`ABANDONED`。
 - `business_code` / `source_title`：上传记录恢复用的业务货号和来源 / 批次名；用于前端显示、搜索和跳转定位。
+- `batch_id`：一次批量上传任务的稳定 ID；同批货号按该字段聚合，不再依赖标题和时间窗口猜测。
+- `lease_owner` / `lease_expires_at`：短期批次执行租约，防止两个标签页或两台电脑同时续传同一任务。
 - `total_count` / `uploaded_count`：用户可见上传进度。浏览器每张 PUT 成功后通过 API 回写条目状态，后端据此计算已上传数量。
 - `target_type` / `target_id`：上传完成并保存为业务对象后的引用。
 - `error_message`：业务可读失败摘要。保存为业务对象前的失败（例如货号重复、对象缺失、保存异常）必须写回这里，刷新后仍能在上传记录中提示用户处理。
 
-`upload_session_items.object_key` 是对象存储直传 key；`status` 表示该条目是否已确认上传或已保存为 `MediaAsset`。搭配服装 AI 识别失败不回写为 upload session 失败，因为图片入库和 AI 识别是两个阶段。未 `FINALIZED` 的 session 可以由用户放弃或后台 TTL 清理；清理只处理未登记为 `MediaAsset` 的直传对象，已经创建业务对象后的文件释放继续走对应业务对象的归档 / 删除 / 媒体引用计数规则。
+`upload_session_items.object_key` 是稳定的对象存储直传 key；`relative_path`、`size_bytes`、`last_modified` 和 `checksum_sha256` 用于恢复时拒绝错误目录或已变化的文件。对象存储中的 `sha256` 用户元数据与长度必须同时匹配，条目才会被确认上传。`status` 表示该条目是否已确认上传或已保存为 `MediaAsset`。搭配服装 AI 识别失败不回写为 upload session 失败，因为图片入库和 AI 识别是两个阶段。未 `FINALIZED` 的 session 可以由用户放弃或后台 TTL 清理；清理只处理未登记为 `MediaAsset` 的直传对象。
 
 ## 数据清理
 

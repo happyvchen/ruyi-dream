@@ -300,13 +300,16 @@ export type GenerationTask = {
   attempts?: unknown[]
 }
 
-type DirectUploadItem = {
+export type DirectUploadItem = {
   objectKey: string
   uploadUrl: string
   method: 'PUT'
   headers?: Record<string, string>
   filename: string
   mimeType: string
+  relativePath?: string
+  lastModified?: number | null
+  checksumSha256?: string | null
 }
 
 export type UploadProgressSnapshot = {
@@ -322,10 +325,12 @@ export type UploadSession = {
   scope?: string
   businessCode?: string | null
   sourceTitle?: string | null
+  batchId?: string | null
   totalCount: number
   uploadedCount: number
   targetType?: string | null
   targetId?: number | null
+  targetStatus?: string | null
   errorMessage?: string | null
   createdAt?: string
   updatedAt?: string
@@ -335,6 +340,9 @@ export type UploadSession = {
     filename: string
     mimeType: string
     sizeBytes?: number | null
+    relativePath?: string | null
+    lastModified?: number | null
+    checksumSha256?: string | null
     status: string
     mediaAssetId?: number | null
     errorMessage?: string | null
@@ -346,6 +354,56 @@ type UploadedMedia = {
   filename: string
   mimeType: string
   sizeBytes: number
+}
+
+const uploadExecutorStorageKey = 'ruyi-upload-executor-id'
+let cachedUploadExecutorId = ''
+
+function uploadExecutorId() {
+  if (cachedUploadExecutorId) return cachedUploadExecutorId
+  try {
+    const existing = window.sessionStorage.getItem(uploadExecutorStorageKey)
+    const navigation = window.performance?.getEntriesByType?.('navigation')?.[0] as PerformanceNavigationTiming | undefined
+    if (existing && navigation?.type === 'reload') {
+      cachedUploadExecutorId = existing
+      return existing
+    }
+    const created = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    window.sessionStorage.setItem(uploadExecutorStorageKey, created)
+    cachedUploadExecutorId = created
+    return created
+  } catch {
+    cachedUploadExecutorId = `ephemeral-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    return cachedUploadExecutorId
+  }
+}
+
+function uploadRelativePath(file: File) {
+  return ((file as File & { webkitRelativePath?: string; relativePath?: string }).webkitRelativePath
+    || (file as File & { relativePath?: string }).relativePath
+    || file.name).replace(/^\/+/, '')
+}
+
+function uploadFileDescriptor(file: File) {
+  return {
+    filename: file.name,
+    mimeType: file.type,
+    sizeBytes: file.size,
+    relativePath: uploadRelativePath(file),
+    lastModified: file.lastModified,
+  }
+}
+
+async function uploadFileDescriptorWithChecksum(file: File) {
+  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
+  const checksumSha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+  return { ...uploadFileDescriptor(file), checksumSha256 }
+}
+
+async function uploadFileDescriptorsWithChecksums(files: File[]) {
+  const descriptors: ReturnType<typeof uploadFileDescriptorWithChecksum> extends Promise<infer T> ? T[] : never = []
+  for (const file of files) descriptors.push(await uploadFileDescriptorWithChecksum(file))
+  return descriptors
 }
 
 export type DeleteImpact = {
@@ -541,16 +599,25 @@ async function uploadFilesDirect(scope: string, files: File[]): Promise<Uploaded
   }))
 }
 
-async function runWithConcurrency<T>(items: T[], limit: number, worker: (item: T, index: number) => Promise<void>) {
+async function runWithConcurrency<T>(items: T[], limit: number, worker: (item: T, index: number) => Promise<void>, onFailure?: () => void) {
   let cursor = 0
+  let firstError: unknown = null
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (cursor < items.length) {
+    while (cursor < items.length && !firstError) {
       const index = cursor
       cursor += 1
-      await worker(items[index]!, index)
+      try {
+        await worker(items[index]!, index)
+      } catch (error) {
+        if (!firstError) {
+          firstError = error
+          onFailure?.()
+        }
+      }
     }
   })
   await Promise.all(workers)
+  if (firstError) throw firstError
 }
 
 async function uploadFilesViaSession(
@@ -566,15 +633,15 @@ async function uploadFilesViaSession(
       scope,
       businessCode: metadata?.businessCode,
       sourceTitle: metadata?.sourceTitle,
+      executorId: uploadExecutorId(),
       files: files.map((file) => ({
-        filename: file.name,
-        mimeType: file.type,
-        sizeBytes: file.size,
+        ...uploadFileDescriptor(file),
       })),
     }),
   })
   if (created.items.length !== files.length) throw new ApiError('上传任务准备失败，请重新选择图片后再试。', 500)
   let completed = 0
+  const controller = new AbortController()
   await runWithConcurrency(created.items, 4, async (item, index) => {
     const file = files[index]!
     let response: Response
@@ -583,6 +650,7 @@ async function uploadFilesViaSession(
         method: item.method,
         headers: item.headers ?? { 'Content-Type': item.mimeType || file.type },
         body: file,
+        signal: controller.signal,
       })
     } catch {
       throw new ApiError('图片上传失败，请检查网络后重试。', 0)
@@ -591,12 +659,58 @@ async function uploadFilesViaSession(
     completed += 1
     await request<{ session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(created.session.id)}/complete-items`, {
       method: 'POST',
-      body: JSON.stringify({ objectKeys: [item.objectKey] }),
+      body: JSON.stringify({ objectKeys: [item.objectKey], executorId: uploadExecutorId() }),
     })
     onProgress?.({ phase: 'uploading', completed, total: files.length })
-  })
+  }, () => controller.abort())
   onProgress?.({ phase: 'saving', completed, total: files.length })
   return created
+}
+
+async function uploadPreparedSession(
+  session: UploadSession,
+  items: DirectUploadItem[],
+  files: File[],
+  onProgress?: (progress: UploadProgressSnapshot) => void,
+) {
+  const filesByPath = new Map(files.map((file) => [uploadRelativePath(file), file]))
+  let completed = session.uploadedCount
+  const controller = new AbortController()
+  const executorId = uploadExecutorId()
+  const heartbeat = window.setInterval(() => {
+    void request(`/api/upload-sessions/${encodeURIComponent(session.id)}/lease`, {
+      method: 'POST',
+      body: JSON.stringify({ executorId }),
+    }).catch(() => undefined)
+  }, 30_000)
+  onProgress?.({ phase: 'preparing', completed, total: session.totalCount })
+  try {
+    await runWithConcurrency(items, 4, async (item) => {
+      const file = filesByPath.get(item.relativePath || item.filename)
+      if (!file) throw new ApiError(`缺少原任务图片：${item.relativePath || item.filename}`, 409)
+      let response: Response
+      try {
+        response = await fetch(item.uploadUrl, {
+          method: item.method,
+          headers: item.headers ?? { 'Content-Type': item.mimeType || file.type },
+          body: file,
+          signal: controller.signal,
+        })
+      } catch {
+        throw new ApiError('图片上传失败，请检查网络后重试。', 0)
+      }
+      if (!response.ok) throw new ApiError(`${file.name} 上传失败，请稍后继续此任务。`, response.status)
+      await request<{ session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(session.id)}/complete-items`, {
+        method: 'POST',
+        body: JSON.stringify({ objectKeys: [item.objectKey], executorId }),
+      })
+      completed += 1
+      onProgress?.({ phase: 'uploading', completed, total: session.totalCount, currentFile: file.name })
+    }, () => controller.abort())
+    onProgress?.({ phase: 'saving', completed, total: session.totalCount })
+  } finally {
+    window.clearInterval(heartbeat)
+  }
 }
 
 function params(path: string, values: Record<string, string | number | boolean | string[] | undefined | null>) {
@@ -640,12 +754,37 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
-  listUploadSessions: (options?: { scope?: string; status?: string; limit?: number; includeAbandoned?: boolean }) =>
+  listUploadSessions: (options?: { scope?: string; status?: string; batchId?: string; limit?: number; includeAbandoned?: boolean }) =>
     request<{ items: UploadSession[] }>(params('/api/upload-sessions', options ?? {})),
   getUploadSession: (id: string) =>
     request<{ session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(id)}`),
   abandonUploadSession: (id: string) =>
-    request<{ session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(id)}/abandon`, { method: 'POST' }),
+    request<{ session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(id)}/abandon`, {
+      method: 'POST',
+      body: JSON.stringify({ executorId: uploadExecutorId() }),
+    }),
+  createStylingImportSessions: async (sourceTitle: string, batches: { code: string; files: File[] }[], batchId?: string) => {
+    const items = batches.map((batch) => ({ businessCode: batch.code, files: batch.files.map(uploadFileDescriptor) }))
+    return request<{ batchId: string; items: { session: UploadSession; items: DirectUploadItem[] }[] }>('/api/upload-sessions/styling-import-batch', {
+      method: 'POST',
+      body: JSON.stringify({
+        sourceTitle,
+        batchId,
+        items,
+      }),
+    })
+  },
+  resumeUploadSession: async (id: string, files: File[]) =>
+    request<{ session: UploadSession; items: DirectUploadItem[] }>(`/api/upload-sessions/${encodeURIComponent(id)}/resume`, {
+      method: 'POST',
+      body: JSON.stringify({ files: await uploadFileDescriptorsWithChecksums(files), executorId: uploadExecutorId() }),
+    }),
+  uploadPreparedSession,
+  finalizeStylingGarmentSession: (sessionId: string, code: string) =>
+    request<{ item: StylingGarment; session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(sessionId)}/finalize-styling-garment`, {
+      method: 'POST',
+      body: JSON.stringify({ code, executorId: uploadExecutorId() }),
+    }),
   listStylingGarments: (options?: {
     limit?: number
     offset?: number
@@ -679,6 +818,11 @@ export const api = {
   },
   tagStylingGarment: (id: number) =>
     request<{ item: StylingGarment }>(`/api/styling-garments/${id}/save-and-tag`, { method: 'POST' }),
+  tagStylingGarments: (ids: number[]) =>
+    request<{ items: StylingGarment[]; startedIds: number[]; skipped: { id: number; code?: string; status?: string; reason?: string }[] }>(
+      '/api/styling-garments/batch-save-and-tag',
+      { method: 'POST', body: JSON.stringify({ ids }) },
+    ),
   updateStylingGarment: (id: number, payload: { code?: string; manualTags?: Record<string, unknown> }) =>
     request<{ item: StylingGarment }>(`/api/styling-garments/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   getStylingGarment: (id: number) =>

@@ -40,9 +40,11 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { ApiError, api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl } from './api'
-import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot, UploadSession } from './api'
+import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, DirectUploadItem, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot, UploadSession } from './api'
 import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
+import { chooseDirectory, filesFromDirectory, getDirectoryHandle, storeDirectoryHandle, supportsDirectoryAccess } from './lib/directoryAccess'
+import type { RuyiFileSystemDirectoryHandle } from './lib/directoryAccess'
 import { friendlyErrorText } from './lib/errorMessages'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
@@ -100,9 +102,15 @@ const HERO_PRODUCT_SELECTED_IMAGES = 8
 const PRODUCT_CODE_MAX_CHARS = 20
 const BATCH_NAME_MAX_CHARS = 80
 const GARMENT_AUTO_CARD_WIDTH = 292
-const GARMENT_AUTO_CARD_HEIGHT = 172
+const GARMENT_AUTO_CARD_HEIGHT = 236
 const GARMENT_AUTO_GRID_GAP = 12
+const RECORD_AUTO_ROW_HEIGHT = 62
+const RECORD_AUTO_ROW_GAP = 5
 const BULK_SEARCH_THRESHOLD = 5
+const IMPORT_SESSION_GROUP_WINDOW_MS = 10 * 60 * 1000
+const TAGGABLE_GARMENT_STATUSES = new Set(['DRAFT', 'TAGGING_FAILED', 'TAGGING_READY'])
+const RETAGGABLE_GARMENT_STATUSES = new Set(['READY'])
+const ANY_TAGGABLE_GARMENT_STATUSES = new Set([...TAGGABLE_GARMENT_STATUSES, ...RETAGGABLE_GARMENT_STATUSES])
 
 function splitSearchTerms(value: string) {
   const seen = new Set<string>()
@@ -166,6 +174,7 @@ export function App() {
   const [localOperations, setLocalOperations] = useState<AIOperation[]>([])
   const [uploadSessions, setUploadSessions] = useState<UploadSession[]>([])
   const [browserUploadingCount, setBrowserUploadingCount] = useState(0)
+  const suppressStudioAutoRestoreRef = useRef(false)
   const [libraryImportOpen, setLibraryImportOpen] = useState(() => {
     if (typeof window === 'undefined') return false
     return window.localStorage.getItem(libraryImportOpenStorageKey) === '1'
@@ -248,7 +257,7 @@ export function App() {
     if (browserUploadingCount <= 0) return
     const warnUploading = (event: BeforeUnloadEvent) => {
       event.preventDefault()
-      event.returnValue = '图片还在上传，离开会导致本次上传中断。'
+      event.returnValue = '图片正在上传；刷新或关闭会暂停任务，之后可从断点继续。'
     }
     window.addEventListener('beforeunload', warnUploading)
     return () => window.removeEventListener('beforeunload', warnUploading)
@@ -308,6 +317,13 @@ export function App() {
     if (requestedTaskId && (!task || task.id !== requestedTaskId)) {
       const detail = await api.getTask(requestedTaskId, role === 'admin').then((r) => r.item).catch(() => null)
       if (detail) setTask(detail)
+    } else if (route.page === 'studio' && !requestedTaskId && !task && !suppressStudioAutoRestoreRef.current) {
+      const latestTask = recordResult.items[0] ?? taskResult.items[0] ?? null
+      if (latestTask) {
+        setTask(latestTask)
+        window.history.replaceState(null, '', routeToUrl({ page: 'studio', taskId: latestTask.id }))
+        void api.getTask(latestTask.id, role === 'admin').then((r) => setTask(r.item)).catch(() => undefined)
+      }
     }
     if (route.page === 'records' && route.recordId && !recordDetail) {
       const detail = await api.getRecord(route.recordId, false).then((r) => r.item).catch(() => null)
@@ -323,8 +339,15 @@ export function App() {
 
   function navigate(next: Page) {
     if (next !== page && document.body.dataset.promptDirty === 'true' && !window.confirm('Prompt 有未保存修改，确定离开并放弃这些修改吗？')) return
+    suppressStudioAutoRestoreRef.current = false
     setPage(next)
-    if (next === 'studio') setTask(null)
+    if (next === 'studio') {
+      const latestTask = records[0] ?? tasks[0] ?? null
+      setTask(latestTask)
+      window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: latestTask?.id }))
+      if (latestTask) void api.getTask(latestTask.id, role === 'admin').then((result) => setTask(result.item)).catch(() => undefined)
+      return
+    }
     if (next === 'records') setRecordDetail(null)
     window.history.pushState(null, '', routeToUrl({ page: next }))
   }
@@ -462,7 +485,7 @@ export function App() {
       <main className="workspace">
         {error && <div className="toast">{error.length > 300 ? `${error.slice(0, 300)}…` : error}</div>}
         {busy && <BusyPill label={busy} />}
-        {page === 'studio' && <StudioPage task={task} setTask={setTask} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} uploadSessions={uploadSessions.filter((item) => item.scope === 'generation-task')} refreshUploadSessions={() => refreshUploadSessions('generation_task')} markBrowserUploading={markBrowserUploading} />}
+        {page === 'studio' && <StudioPage task={task} setTask={setTask} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} uploadSessions={uploadSessions.filter((item) => item.scope === 'generation-task')} refreshUploadSessions={() => refreshUploadSessions('generation_task')} markBrowserUploading={markBrowserUploading} onStartNewTask={() => { suppressStudioAutoRestoreRef.current = true }} />}
         {page === 'library' && <LibraryPage garments={garments} run={run} role={role} onDeleteResult={noteDeleteOperationResult} uploadSessions={uploadSessions.filter((item) => item.scope === 'styling-garment')} refreshUploadSessions={() => refreshUploadSessions('styling_garment', 100)} markBrowserUploading={markBrowserUploading} showImport={libraryImportOpen} setShowImport={setLibraryImportOpen} importJobs={libraryImportJobs} setImportJobs={setLibraryImportJobs} />}
         {page === 'model' && <ModelPage models={models} role={role} run={run} />}
         {page === 'prompt-maintenance' && role === 'admin' && <PromptMaintenancePage run={run} />}
@@ -553,12 +576,6 @@ function mergeUploadSessions(current: UploadSession[], incoming: UploadSession[]
   return Array.from(byId.values()).sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')))
 }
 
-function uploadSessionScopeLabel(scope?: string | null) {
-  if (scope === 'styling-garment') return '搭配服装'
-  if (scope === 'generation-task') return '主推款'
-  return '上传'
-}
-
 function uploadSessionStatusLabel(status: string) {
   if (status === 'PENDING') return '等待上传'
   if (status === 'UPLOADING') return '上传图片中'
@@ -570,7 +587,7 @@ function uploadSessionStatusLabel(status: string) {
   return status
 }
 
-function StudioPage({ task, setTask, role, run, localOperations, startLocalOperation, clearLocalOperationsFor, uploadSessions, refreshUploadSessions, markBrowserUploading }: {
+function StudioPage({ task, setTask, role, run, localOperations, startLocalOperation, clearLocalOperationsFor, uploadSessions, refreshUploadSessions, markBrowserUploading, onStartNewTask }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask | null) => void
   role: SessionRole | null
@@ -581,6 +598,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   uploadSessions: UploadSession[]
   refreshUploadSessions: () => Promise<UploadSession[]>
   markBrowserUploading: (delta: 1 | -1) => void
+  onStartNewTask: () => void
 }) {
   const [step, setStep] = useState<StudioStep>(0)
   const [taskRailTab, setTaskRailTab] = useState<'summary' | 'recent'>('summary')
@@ -713,6 +731,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   }
   function startNewTask() {
     setTaskRailTab('summary')
+    onStartNewTask()
     setTask(null)
     window.history.pushState(null, '', routeToUrl({ page: 'studio' }))
   }
@@ -940,7 +959,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
               <>
                 <div className="task-summary-identity">
                   <AssetThumb asset={taskCoverAsset(task)} interactive={false} />
-                  <div><strong>{task.name}</strong><span>{studioView?.statusLabel ?? statusText(task.status)}</span><em>主推款 {task.images?.length ?? 0} 张</em></div>
+                  <div><TruncatedText as="strong" text={task.name} /><span>{studioView?.statusLabel ?? statusText(task.status)}</span><em>主推款 {task.images?.length ?? 0} 张</em></div>
                 </div>
                 <div className="task-summary-progress">
                   <Meta label="当前步骤" value={studioView?.currentStageLabel ?? '上传主推款'} />
@@ -1122,11 +1141,11 @@ function RecentSingleTaskRow({ item, active, onOpen, showKind = true }: { item: 
         <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
         <span className="recent-task-copy">
           <span className="recent-task-title-line">
-            <strong title={item.name}>{item.name}</strong>
+            <TruncatedText as="strong" text={item.name} />
             {showKind && <em className="recent-kind-chip">单次</em>}
           </span>
           <span className="recent-task-meta">
-            <em title={statusLabel}>{statusLabel}</em>
+            <TruncatedText as="em" text={statusLabel} />
             <time dateTime={item.createdAt}>{dateLabel}</time>
           </span>
         </span>
@@ -1145,8 +1164,6 @@ function RecentBatchTaskRow({ item, activeTaskId, activeBatchId, expanded, tasks
   onToggle: (item: GenerationRecordBatch) => void
   onOpenTask: (item: GenerationTask) => void
 }) {
-  const visibleTasks = tasks.slice(0, 5)
-  const hasMore = item.taskCount > visibleTasks.length
   const active = activeBatchId === item.batchId
   const statusLabel = `${recordStatusText(item.status)} · ${item.taskCount} 项`
   const dateLabel = dateText(item.updatedAt)
@@ -1161,11 +1178,11 @@ function RecentBatchTaskRow({ item, activeTaskId, activeBatchId, expanded, tasks
           </div>
           <span className="recent-task-copy">
             <span className="recent-task-title-line">
-              <strong title={item.name}>{item.name}</strong>
+              <TruncatedText as="strong" text={item.name} />
               <em className="recent-kind-chip is-batch">批次</em>
             </span>
             <span className="recent-task-meta">
-              <em title={statusLabel}>{statusLabel}</em>
+              <TruncatedText as="em" text={statusLabel} />
               <time dateTime={item.updatedAt}>{dateLabel}</time>
             </span>
           </span>
@@ -1174,7 +1191,7 @@ function RecentBatchTaskRow({ item, activeTaskId, activeBatchId, expanded, tasks
       {expanded && (
         <div className="recent-batch-children">
           {loading && <span className="recent-batch-loading"><Loader2 className="spin" size={14} />读取批次任务...</span>}
-          {!loading && visibleTasks.map((task) => (
+          {!loading && tasks.map((task) => (
             <RecentSingleTaskRow
               key={task.id}
               item={task}
@@ -1183,8 +1200,7 @@ function RecentBatchTaskRow({ item, activeTaskId, activeBatchId, expanded, tasks
               showKind={false}
             />
           ))}
-          {!loading && hasMore && <span className="recent-batch-more">还有 {item.taskCount - visibleTasks.length} 个任务，可在生成记录中查看全部</span>}
-          {!loading && !visibleTasks.length && <span className="recent-batch-more">暂无可显示的批次任务</span>}
+          {!loading && !tasks.length && <span className="recent-batch-more">暂无可显示的批次任务</span>}
         </div>
       )}
     </div>
@@ -1227,7 +1243,6 @@ function BatchBar({ items, loading, downloadChecking, currentTaskId, onOpenTask,
   const [menuOpen, setMenuOpen] = useState(false)
   const wrapRef = useRef<HTMLDivElement | null>(null)
   useOutsideClose(menuOpen, wrapRef, () => setMenuOpen(false))
-  const visibleItems = items.slice(0, 4)
   const openTask = (item: GenerationTask) => {
     onOpenTask(item)
     setMenuOpen(false)
@@ -1237,14 +1252,14 @@ function BatchBar({ items, loading, downloadChecking, currentTaskId, onOpenTask,
       <div className="batch-bar-main">
         <span className="recent-kind-chip is-batch">{loading ? '读取中' : '批次'}</span>
         <div className="batch-bar-chips">
-          {visibleItems.map((item) => (
+          {items.map((item) => (
             <button
               key={item.id}
               className={`batch-chip ${batchChipTone(item)} ${item.id === currentTaskId ? 'active' : ''}`}
               onClick={() => openTask(item)}
               title={`切换到 ${item.name}`}
             >
-              <strong>{item.name}</strong>
+              <TruncatedText as="strong" text={item.name} />
               <span>{batchChipStatus(item)}</span>
             </button>
           ))}
@@ -1266,8 +1281,8 @@ function BatchBar({ items, loading, downloadChecking, currentTaskId, onOpenTask,
                     title={`切换到 ${item.name}`}
                   >
                     <span>
-                      <strong>{item.name}</strong>
-                      <small>第 {index + 1}/{items.length} 个任务 · {batchChipStatus(item)}</small>
+                      <TruncatedText as="strong" text={item.name} />
+                      <TruncatedText as="small" text={`第 ${index + 1}/${items.length} 个任务 · ${batchChipStatus(item)}`} />
                     </span>
                     {item.id === currentTaskId && <Check size={15} />}
                   </button>
@@ -1557,7 +1572,6 @@ function UploadHeroStep({ task, setTask, run, uploadSessions, refreshUploadSessi
     <div className="step-panel">
       <div className="step-scroll-content">
         <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="支持多张图片、一个货号文件夹或一个上级文件夹。每套最多 15 张进入候选池，AI 智能选搭后保留挑选排序好的 8 张主推款参考图。">上传主推款</HeadingWithTooltip></div>
-        {!task && uploadSessions.length > 0 && <UploadSessionRecoveryList sessions={uploadSessions} emptyLabel="暂无主推款上传任务" onAbandon={(id) => api.abandonUploadSession(id).then(() => refreshUploadSessions())} />}
         {task?.status === 'DRAFT' && <HeroDraftEditor task={task} setTask={setTask} run={run} />}
         {!task && (
           <>
@@ -1656,18 +1670,20 @@ function UploadHeroStep({ task, setTask, run, uploadSessions, refreshUploadSessi
                       )
                     })}
                   </div>
-                  {batchError && <span className="inline-error">{batchError}</span>}
-                  {uploadProgress && <UploadProgressPanel progress={uploadProgress} prefix={batchCreating ? `第 ${batchCreating.current}/${batchCreating.total} 个任务` : undefined} />}
-                  {batchCreating ? (
-                    <p className="edit-hint">正在创建第 {batchCreating.current}/{batchCreating.total} 个任务，请勿刷新或离开页面...</p>
-                  ) : (
-                    <div className="inline-form">
-	                    <button className="management-action" disabled={!!uploadProgress} onClick={() => void createBatchTasks()}>
-                        <ImagePlus size={16} /> 批量创建 {batchGroups.length} 个任务
-                      </button>
-	                      <button className="management-action" disabled={!!uploadProgress} onClick={() => { setBatchGroups([]); setBatchName('') }}>取消</button>
-                    </div>
-                  )}
+                  <div className="studio-upload-sticky-actions">
+                    {batchError && <span className="inline-error">{batchError}</span>}
+                    {uploadProgress && <UploadProgressPanel progress={uploadProgress} prefix={batchCreating ? `第 ${batchCreating.current}/${batchCreating.total} 个任务` : undefined} />}
+                    {batchCreating ? (
+                      <p className="edit-hint">正在创建第 {batchCreating.current}/{batchCreating.total} 个任务，请勿刷新或离开页面...</p>
+                    ) : (
+                      <div className="inline-form sticky-action-buttons">
+                        <button className="management-action" disabled={!!uploadProgress} onClick={() => void createBatchTasks()}>
+                          <ImagePlus size={16} /> 批量创建 {batchGroups.length} 个任务
+                        </button>
+                        <button className="management-action" disabled={!!uploadProgress} onClick={() => { setBatchGroups([]); setBatchName('') }}>取消</button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )
             })()}
@@ -1741,49 +1757,6 @@ function UploadProgressPanel({ progress, prefix, savingLabel = '保存任务', s
       </div>
       <div className="upload-progress-bar" aria-hidden="true"><span style={{ width: `${percent}%` }} /></div>
       <p>{detail}</p>
-    </div>
-  )
-}
-
-function UploadSessionRecoveryList({ sessions, emptyLabel, onAbandon }: { sessions: UploadSession[]; emptyLabel: string; onAbandon?: (id: string) => Promise<unknown> }) {
-  const [abandoningId, setAbandoningId] = useState<string | null>(null)
-  if (!sessions.length) return null
-  async function abandon(session: UploadSession) {
-    if (!onAbandon || abandoningId) return
-    setAbandoningId(session.id)
-    try {
-      await onAbandon(session.id)
-    } finally {
-      setAbandoningId(null)
-    }
-  }
-  return (
-    <div className="upload-recovery-list" aria-label="上传任务状态">
-      <div className="upload-recovery-head">
-        <strong>最近上传状态</strong>
-        <span>{sessions.length ? `${sessions.length} 个任务` : emptyLabel}</span>
-      </div>
-      {sessions.slice(0, 5).map((session) => {
-        const percent = session.totalCount > 0 ? Math.round((session.uploadedCount / session.totalCount) * 100) : 0
-        return (
-          <div className={`upload-recovery-item ${session.status === 'FAILED' ? 'has-error' : ''}`} key={session.id}>
-            <div className="upload-recovery-row">
-              <strong>{uploadSessionScopeLabel(session.scope)}</strong>
-              <span>{uploadSessionStatusLabel(session.status)}</span>
-            </div>
-            <div className="upload-progress-bar" aria-hidden="true"><span style={{ width: `${percent}%` }} /></div>
-            <p>
-              {session.status === 'FINALIZED' && session.targetId ? `已保存为${uploadSessionScopeLabel(session.scope)}记录` : `已上传 ${session.uploadedCount}/${session.totalCount} 张`}
-              {session.errorMessage ? `；${session.errorMessage}` : ''}
-            </p>
-            {onAbandon && !['FINALIZED', 'FINALIZING', 'ABANDONED'].includes(session.status) && (
-              <button className="management-action compact-control" type="button" disabled={abandoningId === session.id} onClick={() => void abandon(session)}>
-                {abandoningId === session.id ? '处理中...' : '放弃本次上传'}
-              </button>
-            )}
-          </div>
-        )
-      })}
     </div>
   )
 }
@@ -1966,7 +1939,9 @@ function HeroDraftImageCard({ image, draggable, canRemove, onOpen, onDragStart, 
         />
       </button>
       {image.replacement && <em className="thumb-pending-badge">待替换</em>}
-      <span>{filename}<small>{meta}</small></span>
+      <TruncatedText text={filename}>
+        {filename}<TruncatedText as="small" text={meta} />
+      </TruncatedText>
       <div className="thumb-actions">
         <label title="替换图片">
           <RefreshCw size={14} />
@@ -2092,7 +2067,8 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
   onOpenAICallLogs: (title: string, ownerTypes: string[], attemptId: number) => void
 }) {
   const locked = !!task && (isTaskRunning(task) || !!task.autoRunTarget)
-  const canSelect = !!task && !locked && ['READY_FOR_STYLING', 'STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task.status)
+  const hasHeroImages = (task?.images?.length ?? 0) > 0
+  const canSelect = !!task && !locked && (['READY_FOR_STYLING', 'STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task.status) || (task.status === 'DRAFT' && hasHeroImages))
   const hasStyling = !!task?.styling
   const operations = task ? operationFallbacks(task, localOperations, 'generation_styling') : []
   return (
@@ -2410,7 +2386,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
                   })()}
                 </div>
               )}
-              <div><span><b>#{index + 1}</b>{image?.shotRole || '镜头'}</span>{image?.asset && <a className="management-icon-action" href={mediaDownloadUrl(assetOriginalSrc(image.asset))} aria-label={`下载镜头 ${index + 1}`}><Download size={15} /></a>}{image?.status === 'FAILED' && image.activeAttempt?.errorCode === 'DELIVERY_FAILED' && <button className="management-icon-action" disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('重新回传成片中...', () => api.redeliverResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新回传（图已生成，仅重新拉取，不消耗生成额度）" aria-label={`重新回传镜头 ${index + 1}`}><RefreshCw size={14} /></button>}{image && !['QUEUED', 'RUNNING'].includes(image.status) && <button className="task-icon-action" disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id, userInstruction), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成" aria-label={`重新生成镜头 ${index + 1}`}><RotateCcw size={14} /></button>}</div>
+              <div><TruncatedText text={`#${index + 1} ${image?.shotRole || '镜头'}`}><b>#{index + 1}</b>{image?.shotRole || '镜头'}</TruncatedText>{image?.asset && <a className="management-icon-action" href={mediaDownloadUrl(assetOriginalSrc(image.asset))} aria-label={`下载镜头 ${index + 1}`}><Download size={15} /></a>}{image?.status === 'FAILED' && image.activeAttempt?.errorCode === 'DELIVERY_FAILED' && <button className="management-icon-action" disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('重新回传成片中...', () => api.redeliverResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新回传（图已生成，仅重新拉取，不消耗生成额度）" aria-label={`重新回传镜头 ${index + 1}`}><RefreshCw size={14} /></button>}{image && !['QUEUED', 'RUNNING'].includes(image.status) && <button className="task-icon-action" disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id, userInstruction), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成" aria-label={`重新生成镜头 ${index + 1}`}><RotateCcw size={14} /></button>}</div>
             </div>
           ))}
           </div></div>
@@ -2454,7 +2430,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   setImportJobs: Dispatch<SetStateAction<ImportJob[]>>
 }) {
   const [libraryResultsElement, setLibraryResultsElement] = useState<HTMLDivElement | null>(null)
-  const autoPageSize = useAutoGarmentPageSize(libraryResultsElement)
+  const { pageSize: autoPageSize, ready: autoPageSizeReady } = useAutoGarmentPageSize(libraryResultsElement)
   const [query, setQuery] = useState('')
   const [detail, setDetail] = useState<StylingGarment | null>(null)
   const [items, setItems] = useState<StylingGarment[]>([])
@@ -2486,10 +2462,13 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   const [deleteGarmentImpact, setDeleteGarmentImpact] = useState<DeleteImpact | null>(null)
   const [deleteGarmentImpactLoading, setDeleteGarmentImpactLoading] = useState(false)
   const refreshUploadSessionsRef = useRef(refreshUploadSessions)
+  const pageSizeSettled = pageSizeMode !== 'auto' || (autoPageSizeReady && pageSize === autoPageSize)
   const selectableGarmentIds = items.filter((item) => item.status !== 'TAGGING_RUNNING').map((item) => item.id)
   const selectedVisibleGarments = items.filter((item) => selectedGarmentIds.has(item.id) && selectableGarmentIds.includes(item.id))
   const selectedArchivedGarments = selectedVisibleGarments.filter((item) => item.archivedAt)
   const selectedActiveGarments = selectedVisibleGarments.filter((item) => !item.archivedAt)
+  const selectedTaggableGarments = selectedActiveGarments.filter((item) => TAGGABLE_GARMENT_STATUSES.has(item.status))
+  const selectedRetaggableGarments = selectedActiveGarments.filter((item) => RETAGGABLE_GARMENT_STATUSES.has(item.status))
   const allVisibleGarmentsSelected = selectableGarmentIds.length > 0 && selectableGarmentIds.every((id) => selectedGarmentIds.has(id))
   const importBatchOptions = useMemo(() => importJobs
     .map((job) => {
@@ -2583,10 +2562,10 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   }, [query, includeArchived, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, importJobFilter, focusedGarmentCode, focusedGarmentId])
 
   useEffect(() => {
-    if (pageSizeMode !== 'auto' || pageSize === autoPageSize) return
+    if (pageSizeMode !== 'auto' || !autoPageSizeReady || pageSize === autoPageSize) return
     setPageSize(autoPageSize)
     setOffset(0)
-  }, [autoPageSize, pageSize, pageSizeMode])
+  }, [autoPageSize, autoPageSizeReady, pageSize, pageSizeMode])
 
   useEffect(() => {
     if (!searching) {
@@ -2598,6 +2577,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   }, [searching])
 
   useEffect(() => {
+    if (!pageSizeSettled) return
     let cancelled = false
     setSearching(true)
     const timer = window.setTimeout(() => {
@@ -2643,7 +2623,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [offset, query, includeArchived, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize, importJobFilter, selectedImportBatch, focusedGarmentCode, focusedGarmentId])
+  }, [offset, query, includeArchived, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize, importJobFilter, selectedImportBatch, focusedGarmentCode, focusedGarmentId, pageSizeSettled])
 
   useEffect(() => {
     setItems((current) => current.map((item) => garments.find((latest) => latest.id === item.id) ?? item))
@@ -2699,6 +2679,16 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
       setDetail((current) => current && ids.includes(current.id) ? { ...current, archivedAt: null, archiveReason: null } : current)
       setSelectedGarmentIds(new Set())
       void refreshLibraryPage().catch(() => undefined)
+    }, { refresh: 'background' })
+  }
+
+  function tagGarments(targets: StylingGarment[], action: 'tag' | 'retag' = 'tag') {
+    const ids = targets.map((item) => item.id)
+    if (!ids.length) return
+    const label = action === 'retag' ? '重新识别' : '识别'
+    void run(ids.length === 1 ? `提交${label}中...` : `提交 ${ids.length} 套搭配服装${label}中...`, () => api.tagStylingGarments(ids), (result: { items: StylingGarment[] }) => {
+      result.items.forEach(updateGarmentInView)
+      setSelectedGarmentIds(new Set())
     }, { refresh: 'background' })
   }
 
@@ -2884,6 +2874,28 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
                   ? <button className="management-action" onClick={() => restoreGarments(selectedArchivedGarments)}>恢复 {selectedArchivedGarments.length} 项</button>
                   : <button className="management-action" disabled={selectedArchivedGarments.length > 0} title={selectedArchivedGarments.length ? '请分别选择已归档和未归档服装' : undefined} onClick={() => openGarmentDeleteDialog(selectedActiveGarments)}>归档 {selectedActiveGarments.length} 项</button>
               )}
+              {bulkMode && selectedVisibleGarments.length > 0 && (
+                <>
+                  {selectedTaggableGarments.length > 0 && (
+                    <button
+                      className="management-action"
+                      title="提交待识别、待复核或识别失败的服装进行 AI 识别"
+                      onClick={() => tagGarments(selectedTaggableGarments, 'tag')}
+                    >
+                      <WandSparkles size={15} /> 识别 {selectedTaggableGarments.length} 项
+                    </button>
+                  )}
+                  {selectedRetaggableGarments.length > 0 && (
+                    <button
+                      className="management-action"
+                      title="对已可用服装重新进行 AI 识别"
+                      onClick={() => tagGarments(selectedRetaggableGarments, 'retag')}
+                    >
+                      <RotateCcw size={15} /> 重新识别 {selectedRetaggableGarments.length} 项
+                    </button>
+                  )}
+                </>
+              )}
               {bulkMode && <button className={`management-action management-check-action ${allVisibleGarmentsSelected ? 'is-active' : ''}`} disabled={!selectableGarmentIds.length} onClick={() => toggleVisibleGarmentSelection(!allVisibleGarmentsSelected)}><Check size={15} /> 全选本页</button>}
               <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
             </div>
@@ -2895,7 +2907,8 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
                   key={item.id}
                   item={item}
                   onOpen={() => void openDetail(item)}
-                  onTag={['DRAFT', 'TAGGING_FAILED', 'TAGGING_READY'].includes(item.status) ? () => void run('重新识别标签中...', () => api.tagStylingGarment(item.id), (r: { item: StylingGarment }) => updateGarmentInView(r.item), { refresh: 'background' }) : undefined}
+                  onTag={ANY_TAGGABLE_GARMENT_STATUSES.has(item.status) ? () => void run(item.status === 'READY' ? '重新识别标签中...' : '识别标签中...', () => api.tagStylingGarment(item.id), (r: { item: StylingGarment }) => updateGarmentInView(r.item), { refresh: 'background' }) : undefined}
+                  tagLabel={item.status === 'READY' ? '重新识别' : '识别标签'}
                   selected={bulkMode && selectedGarmentIds.has(item.id)}
                   onSelect={bulkMode ? (checked) => toggleGarmentSelection(item.id, checked) : undefined}
                   onDelete={() => openGarmentDeleteDialog([item])}
@@ -3051,7 +3064,7 @@ function CategoryTreeFilter({ open, onOpen, options, selectedPrimary, selectedSe
   return (
     <div className="filter-popover-wrap" ref={wrapRef}>
       <button className={`filter-pill ${selectedCount ? 'is-active' : ''}`} type="button" onClick={() => onOpen(!open)}>
-        <span>{selectedLabel}</span>
+        <TruncatedText text={selectedLabel} />
         <ChevronDown size={15} />
       </button>
       {open && (
@@ -3080,7 +3093,7 @@ function CategoryTreeFilter({ open, onOpen, options, selectedPrimary, selectedSe
                   }}>
                     <CascadeCheckbox checked={optionState(option).checked} indeterminate={optionState(option).indeterminate} />
                   </button>
-                  <span title={option.label}>{option.label}</span>
+                  <TruncatedText text={option.label} />
                   <ChevronRight size={15} />
                 </div>
               )) : <span className="facet-empty">没有匹配品类</span>}
@@ -3093,7 +3106,7 @@ function CategoryTreeFilter({ open, onOpen, options, selectedPrimary, selectedSe
               {primary?.children?.length ? primary.children.map((child) => (
                 <button className="tree-option" type="button" key={child.value} onClick={() => toggleSecondary(child.value, !(selectedPrimary.includes(primary.value) || selectedSecondary.includes(child.value)))}>
                   <CascadeCheckbox checked={selectedPrimary.includes(primary.value) || selectedSecondary.includes(child.value)} />
-                  <span title={child.label}>{child.label}</span>
+                  <TruncatedText text={child.label} />
                 </button>
               )) : <span className="facet-empty">暂无二级品类</span>}
             </div>
@@ -3201,7 +3214,7 @@ function DateRangeFilter({ open, onOpen, label: emptyLabel = '上传时间', fro
   return (
     <div className="filter-popover-wrap" ref={wrapRef}>
       <button className={`filter-pill date-filter-pill ${from || to ? 'is-active' : ''}`} type="button" onClick={toggleOpen}>
-        <span>{pendingRange || label}</span>
+        <TruncatedText text={pendingRange || label} />
         <ChevronDown size={15} />
       </button>
       {open && (
@@ -3231,7 +3244,7 @@ function SortFilter({ open, onOpen, sortBy, sortDir, options = librarySortOption
   return (
     <div className="filter-popover-wrap" ref={wrapRef}>
       <button className={`filter-pill ${current !== 'createdAt:desc' ? 'is-active' : ''}`} type="button" onClick={() => onOpen(!open)}>
-        <span>{currentLabel}</span>
+        <TruncatedText text={currentLabel} />
         <ChevronDown size={15} />
       </button>
       {open && (
@@ -3336,7 +3349,7 @@ function StatusFilter({ open, onOpen, value, options, showCounts = true, formatL
   return (
     <div className="filter-popover-wrap" ref={wrapRef}>
       <button className={`filter-pill ${value ? 'is-active' : ''}`} type="button" onClick={() => onOpen(!open)}>
-        <span>{value ? formatLabel(value) : '全部状态'}</span>
+        <TruncatedText text={value ? formatLabel(value) : '全部状态'} />
         <ChevronDown size={15} />
       </button>
       {open && (
@@ -3374,7 +3387,7 @@ function ImportBatchFilter({ open, onOpen, value, options, onChange }: {
   return (
     <div className="filter-popover-wrap" ref={wrapRef}>
       <button className={`filter-pill import-batch-filter-pill ${value ? 'is-active' : ''}`} type="button" onClick={() => onOpen(!open)}>
-        <span>{selected ? selected.label : '全部上传批次'}</span>
+        <TruncatedText text={selected ? selected.label : '全部上传批次'} />
         <ChevronDown size={15} />
       </button>
       {open && (
@@ -3388,7 +3401,7 @@ function ImportBatchFilter({ open, onOpen, value, options, onChange }: {
               onChange(option.value)
               onOpen(false)
             }}>
-              <span>{option.label}</span>
+              <TruncatedText text={option.label} />
               <small>{option.count} 个货号</small>
               {option.value === value && <Check size={15} />}
             </button>
@@ -3595,15 +3608,19 @@ function calculateAutoGarmentPageSize(width: number, height: number, cardHeight 
   return Math.max(1, Math.min(100, columns * rows))
 }
 
-function calculateAutoRecordPageSize(height: number, rowHeight = 48, gap = 5) {
+function calculateAutoRecordPageSize(height: number, rowHeight = RECORD_AUTO_ROW_HEIGHT, gap = RECORD_AUTO_ROW_GAP) {
   return Math.max(5, Math.min(100, Math.floor((Math.max(height, rowHeight) + gap) / (rowHeight + gap))))
 }
 
 function useAutoGarmentPageSize(results: HTMLDivElement | null) {
   const [pageSize, setPageSize] = useState(() => estimateAutoGarmentPageSize())
+  const [ready, setReady] = useState(false)
 
   useEffect(() => {
-    if (!results) return
+    if (!results) {
+      setReady(false)
+      return
+    }
 
     let frame = 0
     const measure = () => {
@@ -3620,6 +3637,7 @@ function useAutoGarmentPageSize(results: HTMLDivElement | null) {
         const cardHeight = measuredCardHeight > 120 ? measuredCardHeight : GARMENT_AUTO_CARD_HEIGHT
         const nextPageSize = calculateAutoGarmentPageSize(width, height, cardHeight, GARMENT_AUTO_CARD_WIDTH, Math.max(columnGap, rowGap))
         setPageSize((current) => current === nextPageSize ? current : nextPageSize)
+        setReady(true)
       })
     }
 
@@ -3637,11 +3655,12 @@ function useAutoGarmentPageSize(results: HTMLDivElement | null) {
     }
   }, [results])
 
-  return pageSize
+  return { pageSize, ready }
 }
 
 function useAutoRecordPageSize(listRef: { current: HTMLDivElement | null }) {
   const [pageSize, setPageSize] = useState(() => estimateAutoRecordPageSize())
+  const [ready, setReady] = useState(false)
 
   useEffect(() => {
     let frame = 0
@@ -3651,10 +3670,11 @@ function useAutoRecordPageSize(listRef: { current: HTMLDivElement | null }) {
         const list = listRef.current
         const row = list?.querySelector<HTMLElement>('.record-row') ?? null
         const listStyle = list ? window.getComputedStyle(list) : null
-        const gap = listStyle ? Number.parseFloat(listStyle.rowGap) || 5 : 5
+        const gap = listStyle ? Number.parseFloat(listStyle.rowGap) || RECORD_AUTO_ROW_GAP : RECORD_AUTO_ROW_GAP
         const height = list?.clientHeight || Math.max(360, window.innerHeight - 260)
         const rowHeight = row?.getBoundingClientRect().height ?? 0
-        setPageSize(calculateAutoRecordPageSize(height, rowHeight > 40 ? rowHeight : 48, gap))
+        setPageSize(calculateAutoRecordPageSize(height, rowHeight > 40 ? rowHeight : RECORD_AUTO_ROW_HEIGHT, gap))
+        setReady(Boolean(list))
       })
     }
     measure()
@@ -3671,7 +3691,7 @@ function useAutoRecordPageSize(listRef: { current: HTMLDivElement | null }) {
     }
   }, [listRef])
 
-  return pageSize
+  return { pageSize, ready }
 }
 
 type StylingImportBatch = ImportBatch & { error?: string }
@@ -3693,7 +3713,7 @@ type ImportJobItem = {
   code: string
   imageCount: number
   uploadedCount: number
-  status: 'WAITING' | 'UPLOADING' | 'SAVING' | 'SAVED' | 'TAGGING' | 'SUCCEEDED' | 'FAILED'
+  status: 'WAITING' | 'UPLOADING' | 'SAVING' | 'SAVED' | 'TAGGING' | 'SUCCEEDED' | 'INTERRUPTED' | 'FAILED'
   sessionId?: string
   garmentId?: number
   previewUrl?: string
@@ -3703,7 +3723,7 @@ type ImportJobItem = {
 type ImportJob = {
   id: string
   title: string
-  status: 'RUNNING' | 'SUCCEEDED' | 'FAILED'
+  status: 'RUNNING' | 'INTERRUPTED' | 'SUCCEEDED' | 'FAILED'
   createdAt?: string
   updatedAt?: string
   total: number
@@ -3722,6 +3742,7 @@ function importJobItemStatusLabel(status: ImportJobItem['status']) {
   if (status === 'SAVED') return '已保存，等待识别'
   if (status === 'TAGGING') return 'AI 识别中'
   if (status === 'SUCCEEDED') return '已提交识别'
+  if (status === 'INTERRUPTED') return '上传已暂停'
   if (status === 'FAILED') return '需要处理'
   return status
 }
@@ -3743,9 +3764,9 @@ function storedLibraryImportJobs(): ImportJob[] {
     if (!Array.isArray(parsed)) return []
     return parsed.slice(0, 5).map((job) => ({
       ...job,
-      status: job.status === 'RUNNING' ? 'FAILED' : job.status,
+      status: job.status === 'RUNNING' ? 'INTERRUPTED' : job.status,
       items: (job.items ?? []).map((item) => item.status === 'UPLOADING' || item.status === 'SAVING' || item.status === 'TAGGING'
-        ? { ...item, status: 'FAILED', error: item.error ?? '页面刷新后请查看最近上传状态，必要时重新上传该货号。' }
+        ? { ...item, status: 'INTERRUPTED', error: item.error ?? '页面刷新后上传已暂停，可从已完成位置继续。' }
         : item),
     }))
   } catch {
@@ -3767,8 +3788,11 @@ type ImportTaskRow = {
   id: string
   source: 'job' | 'session'
   batchId?: string
+  serverBatchId?: string | null
   sessionId?: string
   garmentId?: number
+  scope?: string | null
+  sourceTitle?: string | null
   code: string
   importedCount: number
   uploadedCount: number
@@ -3782,33 +3806,42 @@ type ImportTaskRow = {
   error?: string | null
 }
 
+type RecoveredImportSessionGroup = {
+  id: string
+  title: string
+  rows: ImportTaskRow[]
+  total: number
+  createdAt?: string
+  updatedAt?: string
+}
+
 function importTaskStatusTone(status: string): ImportTaskRow['statusTone'] {
-  if (['WAITING', 'UPLOADING', 'SAVING', 'PENDING', 'FINALIZING'].includes(status)) return 'running'
-  if (['SAVED', 'SUCCEEDED', 'UPLOADED', 'TAGGING'].includes(status)) return 'warning'
-  if (status === 'FINALIZED') return 'success'
-  if (status === 'FAILED') return 'danger'
+  if (['WAITING', 'UPLOADING', 'SAVING', 'PENDING', 'FINALIZING', 'TAGGING', 'TAGGING_RUNNING'].includes(status)) return 'running'
+  if (['SAVED', 'SUCCEEDED', 'UPLOADED', 'DRAFT', 'TAGGING_READY', 'INTERRUPTED'].includes(status)) return 'warning'
+  if (['FINALIZED', 'READY'].includes(status)) return 'success'
+  if (['FAILED', 'TAGGING_FAILED'].includes(status)) return 'danger'
   if (status === 'ABANDONED') return 'muted'
   return 'warning'
 }
 
 function isImportTaskRunning(status: string) {
-  return ['WAITING', 'UPLOADING', 'SAVING', 'RUNNING', 'PENDING', 'FINALIZING'].includes(status)
+  return ['WAITING', 'UPLOADING', 'SAVING', 'RUNNING', 'PENDING', 'FINALIZING', 'TAGGING', 'TAGGING_RUNNING'].includes(status)
 }
 
 function isImportTaskAttention(status: string) {
-  return status === 'FAILED'
+  return ['FAILED', 'TAGGING_FAILED', 'INTERRUPTED'].includes(status)
 }
 
 function isImportTaskDone(status: string) {
-  return status === 'FINALIZED'
+  return ['FINALIZED', 'READY'].includes(status)
 }
 
 function isImportTaskPendingRecognition(status: string) {
-  return ['SAVED', 'SUCCEEDED', 'UPLOADED', 'TAGGING'].includes(status)
+  return ['SAVED', 'SUCCEEDED', 'DRAFT', 'TAGGING_READY'].includes(status)
 }
 
 function uploadSessionDrivesImportItem(status: ImportJobItem['status']) {
-  return ['WAITING', 'UPLOADING', 'SAVING'].includes(status)
+  return ['WAITING', 'UPLOADING', 'SAVING', 'INTERRUPTED'].includes(status)
 }
 
 function importSessionCode(session: UploadSession, garment?: StylingGarment) {
@@ -3821,6 +3854,101 @@ function importSessionCode(session: UploadSession, garment?: StylingGarment) {
 
 function importSessionTitle(session: UploadSession, row: ImportTaskRow) {
   return session.sourceTitle || row.code
+}
+
+function importTaskStatusLabel(status: string) {
+  if (status === 'TAGGING') return 'AI 识别中'
+  if (['PENDING', 'UPLOADING', 'UPLOADED', 'FINALIZING', 'FINALIZED', 'FAILED', 'ABANDONED'].includes(status)) return uploadSessionStatusLabel(status)
+  if (['WAITING', 'SAVING', 'SAVED', 'SUCCEEDED', 'INTERRUPTED'].includes(status)) return importJobItemStatusLabel(status as ImportJobItem['status'])
+  return garmentStatus(status)
+}
+
+function importRowBusinessStatus(session: UploadSession | undefined, garment: StylingGarment | undefined, fallbackStatus: string) {
+  if (garment?.status) return garment.status
+  return session?.status ?? fallbackStatus
+}
+
+function importSessionGroupTitle(rows: ImportTaskRow[], sessionsById: Map<string, UploadSession>) {
+  const first = rows[0]
+  if (!first) return '上传任务'
+  const session = first.sessionId ? sessionsById.get(first.sessionId) : undefined
+  if (session) return importSessionTitle(session, first)
+  return first.sourceTitle || first.code
+}
+
+function importRowTime(row: ImportTaskRow) {
+  return new Date(parseRuyiTime(row.createdAt ?? row.updatedAt)).getTime()
+}
+
+function importRowsLatestTime(rows: ImportTaskRow[]) {
+  return rows
+    .map((row) => row.updatedAt ?? row.createdAt)
+    .filter(Boolean)
+    .sort()
+    .at(-1)
+}
+
+function importRowsEarliestTime(rows: ImportTaskRow[]) {
+  return rows
+    .map((row) => row.createdAt ?? row.updatedAt)
+    .filter(Boolean)
+    .sort()
+    .at(0)
+}
+
+function recoveredImportSessionGroups(rows: ImportTaskRow[], sessionsById: Map<string, UploadSession>): RecoveredImportSessionGroup[] {
+  const groups: RecoveredImportSessionGroup[] = []
+  const buckets = new Map<string, ImportTaskRow[]>()
+
+  rows.forEach((row) => {
+    const session = row.sessionId ? sessionsById.get(row.sessionId) : undefined
+    const title = session?.sourceTitle?.trim() || row.sourceTitle?.trim()
+    if (!title) {
+      groups.push({
+        id: row.id,
+        title: session ? importSessionTitle(session, row) : row.code,
+        rows: [row],
+        total: 1,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt ?? row.createdAt,
+      })
+      return
+    }
+    const key = session?.batchId || row.serverBatchId || `${session?.scope ?? row.scope ?? 'upload'}::${title}`
+    buckets.set(key, [...(buckets.get(key) ?? []), row])
+  })
+
+  buckets.forEach((bucket, key) => {
+    const sorted = [...bucket].sort((a, b) => importRowTime(a) - importRowTime(b))
+    let cluster: ImportTaskRow[] = []
+    let previousTime = 0
+    const pushCluster = () => {
+      if (!cluster.length) return
+      const rowsByLatest = [...cluster].sort((a, b) => importRowTime(b) - importRowTime(a))
+      const title = importSessionGroupTitle(rowsByLatest, sessionsById)
+      const createdAt = importRowsEarliestTime(rowsByLatest)
+      groups.push({
+        id: rowsByLatest.length === 1 ? rowsByLatest[0]!.id : `session-group-${key}-${createdAt ?? rowsByLatest[0]!.id}`,
+        title,
+        rows: rowsByLatest,
+        total: rowsByLatest.length,
+        createdAt,
+        updatedAt: importRowsLatestTime(rowsByLatest) ?? createdAt,
+      })
+    }
+    sorted.forEach((row) => {
+      const time = importRowTime(row)
+      if (cluster.length && Number.isFinite(time) && Number.isFinite(previousTime) && time - previousTime > IMPORT_SESSION_GROUP_WINDOW_MS) {
+        pushCluster()
+        cluster = []
+      }
+      cluster.push(row)
+      previousTime = time
+    })
+    pushCluster()
+  })
+
+  return groups
 }
 
 function retainedImageCount(garment?: StylingGarment) {
@@ -3850,7 +3978,7 @@ function importTaskProgress(row: ImportTaskRow) {
   if (row.status === 'TAGGING') return 92
   if (row.status === 'FINALIZING') return 88
   if (row.status === 'SAVING' || row.status === 'UPLOADED') return 78
-  if (row.status === 'FAILED') return row.uploadedCount > 0 ? Math.max(12, Math.round((row.uploadedCount / Math.max(1, row.importedCount)) * 70)) : 0
+  if (['FAILED', 'INTERRUPTED'].includes(row.status)) return row.uploadedCount > 0 ? Math.max(12, Math.round((row.uploadedCount / Math.max(1, row.importedCount)) * 70)) : 0
   return Math.round((row.uploadedCount / Math.max(1, row.importedCount)) * 70)
 }
 
@@ -3905,13 +4033,61 @@ function BatchImportPanel({
   const [batches, setBatches] = useState<StylingImportBatch[]>([])
   const [importSourceTitle, setImportSourceTitle] = useState('')
   const [localError, setLocalError] = useState('')
-  const hasRunningImportJobs = importJobs.some((job) => job.status === 'RUNNING')
+  const [selectedDirectoryHandle, setSelectedDirectoryHandle] = useState<RuyiFileSystemDirectoryHandle | null>(null)
+  const [resumingJobId, setResumingJobId] = useState<string | null>(null)
+  const runningImportJobCount = importJobs.filter((job) => job.status === 'RUNNING').length
+  const hasRunningImportJobs = runningImportJobCount > 0
   const uploadWarningActiveRef = useRef(false)
+  const autoResumeAttemptedRef = useRef(new Set<string>())
 
   useEffect(() => {
     onBusyChange(hasRunningImportJobs)
     return () => onBusyChange(false)
   }, [hasRunningImportJobs, onBusyChange])
+
+  useEffect(() => {
+    const grouped = new Map<string, UploadSession[]>()
+    uploadSessions.forEach((session) => {
+      if (session.scope !== 'styling-garment' || !session.batchId) return
+      grouped.set(session.batchId, [...(grouped.get(session.batchId) ?? []), session])
+    })
+    if (!grouped.size) return
+    setImportJobs((current) => {
+      const existingIds = new Set(current.map((job) => job.id))
+      const recovered = [...grouped.entries()].filter(([batchId]) => !existingIds.has(batchId)).map(([batchId, sessions]) => {
+        const allFinalized = sessions.every((session) => session.status === 'FINALIZED')
+        const needsRecognition = sessions.some((session) => session.status === 'FINALIZED' && ['DRAFT', 'TAGGING_FAILED'].includes(session.targetStatus || ''))
+        const hasUploadFailure = sessions.some((session) => session.status === 'FAILED' && session.uploadedCount < session.totalCount)
+        const createdAt = sessions.map((session) => session.createdAt).filter(Boolean).sort().at(0)
+        const updatedAt = sessions.map((session) => session.updatedAt).filter(Boolean).sort().at(-1)
+        return {
+          id: batchId,
+          title: sessions[0]?.sourceTitle || `${sessions.length} 个货号`,
+          status: allFinalized && !needsRecognition ? 'SUCCEEDED' as const : hasUploadFailure ? 'FAILED' as const : 'INTERRUPTED' as const,
+          createdAt,
+          updatedAt,
+          total: sessions.length,
+          uploaded: sessions.filter((session) => session.status === 'FINALIZED').length,
+          skipped: sessions.filter((session) => session.status === 'FAILED').length,
+          progress: null,
+          operations: [],
+          items: sessions.map((session) => ({
+            id: session.id,
+            code: session.businessCode || `上传任务 ${session.id.slice(0, 8)}`,
+            imageCount: session.totalCount,
+            uploadedCount: session.uploadedCount,
+            status: session.status === 'FINALIZED' ? 'SAVED' as const
+              : session.status === 'UPLOADED' || session.status === 'FINALIZING' ? 'SAVING' as const
+                : session.status === 'FAILED' ? 'FAILED' as const : 'INTERRUPTED' as const,
+            sessionId: session.id,
+            garmentId: session.targetId ?? undefined,
+            error: session.errorMessage ?? undefined,
+          })),
+        }
+      })
+      return recovered.length ? [...recovered, ...current] : current
+    })
+  }, [setImportJobs, uploadSessions])
 
   function addFiles(files: File[]) {
     const next = groupImportFiles(files).batches
@@ -3934,12 +4110,20 @@ function BatchImportPanel({
     setImportSourceTitle((current) => current || inferredImportJobTitle(files, next))
   }
 
-  function trackImportProgress(jobId: string, code: string, progress: UploadProgressSnapshot) {
-    const shouldWarn = progress.phase === 'preparing' || progress.phase === 'uploading'
-    if (shouldWarn !== uploadWarningActiveRef.current) {
-      markBrowserUploading(shouldWarn ? 1 : -1)
-      uploadWarningActiveRef.current = shouldWarn
+  async function selectDirectory() {
+    try {
+      const handle = await chooseDirectory()
+      if (!handle) return
+      const files = await filesFromDirectory(handle)
+      setSelectedDirectoryHandle(handle)
+      addFiles(files)
+    } catch (err) {
+      if ((err as DOMException)?.name === 'AbortError') return
+      setLocalError(err instanceof Error ? err.message : '无法读取所选文件夹')
     }
+  }
+
+  function trackImportProgress(jobId: string, code: string, progress: UploadProgressSnapshot) {
     updateJob(jobId, (job) => ({
       ...job,
       currentCode: code,
@@ -3957,8 +4141,6 @@ function BatchImportPanel({
     markBrowserUploading(-1)
     uploadWarningActiveRef.current = false
   }
-
-  useEffect(() => () => clearImportUploadWarning(), [])
 
   async function handleDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault()
@@ -4022,8 +4204,9 @@ function BatchImportPanel({
     }
     setBatches([])
     setLocalError('')
-    startImportJob(ready, recordBlocked, importSourceTitle || inferredImportJobTitle([], [...ready, ...recordBlocked]))
+    void startImportJob(ready, recordBlocked, importSourceTitle || inferredImportJobTitle([], [...ready, ...recordBlocked]), selectedDirectoryHandle)
     setImportSourceTitle('')
+    setSelectedDirectoryHandle(null)
   }
 
   function updateJob(jobId: string, updater: (job: ImportJob) => ImportJob) {
@@ -4037,7 +4220,7 @@ function BatchImportPanel({
     }))
   }
 
-  function startImportJob(jobBatches: StylingImportBatch[], initiallyFailedBatches: StylingImportBatch[] = [], sourceTitle = '') {
+  async function startImportJob(jobBatches: StylingImportBatch[], initiallyFailedBatches: StylingImportBatch[] = [], sourceTitle = '', directoryHandle: RuyiFileSystemDirectoryHandle | null = null) {
     const jobId = `import-${Date.now()}-${Math.random().toString(36).slice(2)}`
     const startedAt = new Date().toISOString()
     const allJobBatches = [...jobBatches, ...initiallyFailedBatches]
@@ -4073,11 +4256,49 @@ function BatchImportPanel({
       })),
     }
     setImportJobs((jobs) => [nextJob, ...jobs].slice(0, 5))
-    void runImportJob(jobId, jobBatches, nextJob.title)
+    if (!uploadWarningActiveRef.current) {
+      markBrowserUploading(1)
+      uploadWarningActiveRef.current = true
+    }
+    try {
+      const prepared = await api.createStylingImportSessions(nextJob.title, jobBatches.map((batch) => ({
+        code: batch.code,
+        files: formalAssetFiles(batch.files, STYLING_GARMENT_MAX_IMAGES),
+      })), jobId)
+      const preparedByCode = new Map(prepared.items.map((entry) => [entry.session.businessCode, entry]))
+      updateJob(jobId, (job) => ({
+        ...job,
+        items: job.items.map((item) => {
+          const entry = preparedByCode.get(item.code)
+          return entry ? { ...item, sessionId: entry.session.id } : item
+        }),
+      }))
+      if (directoryHandle) void storeDirectoryHandle(jobId, directoryHandle).catch(() => undefined)
+      await runImportJob(jobId, jobBatches, nextJob.title, preparedByCode)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '上传任务创建失败'
+      updateJob(jobId, (job) => ({
+        ...job,
+        status: 'FAILED',
+        items: job.items.map((item) => item.status === 'WAITING' ? { ...item, status: 'FAILED', error: message } : item),
+      }))
+      clearImportUploadWarning()
+    }
   }
 
-  async function runImportJob(jobId: string, jobBatches: StylingImportBatch[], sourceTitle: string) {
+  async function runImportJob(
+    jobId: string,
+    jobBatches: StylingImportBatch[],
+    sourceTitle: string,
+    preparedByCode?: Map<string | null | undefined, { session: UploadSession; items: DirectUploadItem[] }>,
+  ) {
     const createdItems: StylingGarment[] = []
+    let interruptedCount = 0
+    if (!uploadWarningActiveRef.current) {
+      markBrowserUploading(1)
+      uploadWarningActiveRef.current = true
+    }
+    updateJob(jobId, (job) => ({ ...job, status: 'RUNNING' }))
     for (const batch of jobBatches) {
       updateJob(jobId, (job) => ({
         ...job,
@@ -4086,11 +4307,31 @@ function BatchImportPanel({
       }))
       try {
         const uploadFiles = formalAssetFiles(batch.files, STYLING_GARMENT_MAX_IMAGES)
-        const created = await api.createStylingGarment(batch.code, uploadFiles, {
-          onProgress: (progress) => trackImportProgress(jobId, batch.code, progress),
-          sourceTitle,
-        })
-        clearImportUploadWarning()
+        let prepared = preparedByCode?.get(batch.code)
+        if (prepared) {
+          prepared = await api.resumeUploadSession(prepared.session.id, uploadFiles)
+        } else {
+          const item = importJobs.find((job) => job.id === jobId)?.items.find((candidate) => candidate.code === batch.code)
+          if (!item?.sessionId) throw new Error(`${batch.code} 缺少可恢复的上传记录`)
+          prepared = await api.resumeUploadSession(item.sessionId, uploadFiles)
+        }
+        let created: { item: StylingGarment; session: UploadSession }
+        if (prepared.session.status === 'FINALIZED' && prepared.session.targetId) {
+          created = { item: (await api.getStylingGarment(prepared.session.targetId)).item, session: prepared.session }
+        } else if (prepared.session.status === 'FINALIZING') {
+          let persisted = prepared.session
+          for (let attempt = 0; attempt < 60 && persisted.status === 'FINALIZING'; attempt += 1) {
+            await new Promise((resolve) => window.setTimeout(resolve, 1_000))
+            persisted = (await api.getUploadSession(prepared.session.id)).session
+          }
+          if (persisted.status !== 'FINALIZED' || !persisted.targetId) {
+            throw new Error(`${batch.code} 仍在保存中，请稍后继续任务，系统不会重复上传图片。`)
+          }
+          created = { item: (await api.getStylingGarment(persisted.targetId)).item, session: persisted }
+        } else {
+          await api.uploadPreparedSession(prepared.session, prepared.items, uploadFiles, (progress) => trackImportProgress(jobId, batch.code, progress))
+          created = await api.finalizeStylingGarmentSession(prepared.session.id, batch.code)
+        }
         void refreshUploadSessions().catch(() => undefined)
         createdItems.push(created.item)
         updateJob(jobId, (job) => ({
@@ -4108,29 +4349,42 @@ function BatchImportPanel({
           operations: job.operations.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'SUCCEEDED', completedAt: new Date().toISOString() } : item),
         }))
       } catch (err) {
-        clearImportUploadWarning()
         void refreshUploadSessions().catch(() => undefined)
         const message = err instanceof Error ? err.message : '上传失败'
         const displayMessage = ['搭配服装代码已存在', '搭配服装货号已存在'].includes(message) ? '货号已存在，本次未重复上传' : message
+        const interrupted = !/已存在|重复/.test(displayMessage)
+        if (interrupted) interruptedCount += 1
         updateJob(jobId, (job) => ({
           ...job,
           skipped: job.skipped + 1,
           currentCode: undefined,
           progress: null,
-          items: job.items.map((item) => item.code === batch.code ? { ...item, status: 'FAILED', error: displayMessage } : item),
+          items: job.items.map((item) => item.code === batch.code ? { ...item, status: interrupted ? 'INTERRUPTED' : 'FAILED', error: displayMessage } : item),
           operations: job.operations.map((item) => item.providerRequestId === batch.code ? { ...item, status: 'FAILED', failedAt: new Date().toISOString(), errorMessage: displayMessage } : item),
         }))
       }
     }
-    if (!createdItems.length) {
-      updateJob(jobId, (job) => ({ ...job, status: 'FAILED' }))
+    clearImportUploadWarning()
+    const batchSessions = (await api.listUploadSessions({ scope: 'styling_garment', batchId: jobId, limit: 500 })).items
+    const finalizedSessions = batchSessions.filter((session) => session.status === 'FINALIZED' && session.targetId)
+    const batchGarments = await Promise.all(finalizedSessions.map((session) => api.getStylingGarment(session.targetId!).then((result) => result.item)))
+    const tagTargets = batchGarments.filter((item) => ['DRAFT', 'TAGGING_FAILED'].includes(item.status))
+    if (!batchGarments.length) {
+      updateJob(jobId, (job) => ({ ...job, status: interruptedCount ? 'INTERRUPTED' : 'FAILED' }))
+      return
+    }
+    updateJob(jobId, (job) => ({ ...job, uploaded: finalizedSessions.length }))
+    if (!tagTargets.length) {
+      updateJob(jobId, (job) => ({ ...job, status: interruptedCount ? 'INTERRUPTED' : job.skipped ? 'FAILED' : 'SUCCEEDED' }))
+      onImported()
+      void refreshUploadSessions().catch(() => undefined)
       return
     }
     updateJob(jobId, (job) => ({
       ...job,
-      items: job.items.map((item) => item.garmentId ? { ...item, status: 'TAGGING' } : item),
+      items: job.items.map((item) => tagTargets.some((target) => target.code === item.code) ? { ...item, status: 'TAGGING' } : item),
       operations: [
-        ...createdItems.map((item, index) => ({
+        ...batchGarments.map((item, index) => ({
           id: -(index + 1 + job.total),
           ownerType: 'styling_garment_upload',
           ownerId: item.id,
@@ -4139,8 +4393,8 @@ function BatchImportPanel({
           completedAt: new Date().toISOString(),
           providerRequestId: item.code,
         })),
-        ...createdItems.map((item, index) => ({
-          id: -(index + 1 + job.total + createdItems.length),
+        ...tagTargets.map((item, index) => ({
+          id: -(index + 1 + job.total + batchGarments.length),
           ownerType: 'styling_garment_tagging',
           ownerId: item.id,
           provider: 'gemini',
@@ -4152,19 +4406,14 @@ function BatchImportPanel({
       ],
     }))
     try {
-      await Promise.all(createdItems.map(async (item) => {
-        try {
-          await api.tagStylingGarment(item.id)
-          updateJobItem(jobId, item.code, { status: 'SUCCEEDED' })
-        } catch (err) {
-          const message = err instanceof Error ? err.message : '识别失败'
-          updateJobItem(jobId, item.code, { status: 'FAILED', error: message })
-          throw err
-        }
-      }))
+      const tagging = await api.tagStylingGarments(tagTargets.map((item) => item.id))
+      const started = new Set(tagging.startedIds)
+      tagTargets.forEach((item) => updateJobItem(jobId, item.code, started.has(item.id)
+        ? { status: 'SUCCEEDED', error: undefined }
+        : { status: 'FAILED', error: tagging.skipped.find((entry) => entry.id === item.id)?.reason || '未能提交识别' }))
       updateJob(jobId, (job) => ({
         ...job,
-        status: job.skipped ? 'FAILED' : 'SUCCEEDED',
+        status: interruptedCount ? 'INTERRUPTED' : job.skipped || tagging.skipped.length ? 'FAILED' : 'SUCCEEDED',
         operations: job.operations.map((operation) => operation.ownerType === 'styling_garment_tagging' ? { ...operation, status: 'SUBMITTED' } : operation),
       }))
     } catch {
@@ -4174,6 +4423,73 @@ function BatchImportPanel({
       void refreshUploadSessions().catch(() => undefined)
     }
   }
+
+  async function resumeImportJob(jobId: string, selectedFiles: File[]) {
+    if (resumingJobId) return
+    const job = importJobs.find((item) => item.id === jobId)
+    if (!job) return
+    setResumingJobId(jobId)
+    setLocalError('')
+    try {
+      const sessions = await Promise.all(job.items
+        .filter((item) => item.sessionId)
+        .map(async (item) => uploadSessions.find((session) => session.id === item.sessionId) ?? (await api.getUploadSession(item.sessionId!)).session))
+      const sessionsById = new Map(sessions.map((session) => [session.id, session]))
+      const expectedPaths = new Set(sessions.flatMap((session) => session.items?.map((item) => item.relativePath || item.filename) ?? []))
+      const supportedFiles = selectedFiles.filter(isSupportedImageFile)
+      const selectedByPath = new Map(supportedFiles.map((file) => [importPath(file), file]))
+      const missing = [...expectedPaths].filter((path) => !selectedByPath.has(path))
+      if (missing.length) {
+        throw new Error(`所选文件夹与原上传任务不一致（缺少 ${missing.length} 张），已拒绝断点继续。`)
+      }
+
+      const resumableItems = job.items.filter((item) => {
+        const session = item.sessionId ? sessionsById.get(item.sessionId) : undefined
+        return session && !['FINALIZED', 'ABANDONED'].includes(session.status)
+      })
+      if (!resumableItems.length) {
+        await runImportJob(jobId, [], job.title)
+        return
+      }
+      const resumeBatches: StylingImportBatch[] = []
+      const preparedByCode = new Map<string, { session: UploadSession; items: DirectUploadItem[] }>()
+      for (const item of resumableItems) {
+        const session = sessionsById.get(item.sessionId!)!
+        const files = (session.items ?? []).map((sessionItem) => selectedByPath.get(sessionItem.relativePath || sessionItem.filename)).filter((file): file is File => Boolean(file))
+        const prepared = await api.resumeUploadSession(session.id, files)
+        preparedByCode.set(item.code, prepared)
+        resumeBatches.push({ id: item.id, code: item.code, files })
+      }
+      await runImportJob(jobId, resumeBatches, job.title, preparedByCode)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '无法继续上传'
+      setLocalError(message)
+      updateJob(jobId, (job) => ({ ...job, status: 'INTERRUPTED' }))
+    } finally {
+      setResumingJobId(null)
+    }
+  }
+
+  async function resumeFromSavedDirectory(jobId: string, requestPermission = false) {
+    try {
+      const handle = await getDirectoryHandle(jobId)
+      if (!handle) throw new Error('未找到原文件夹授权，请重新选择原文件夹。')
+      let permission = await handle.queryPermission({ mode: 'read' })
+      if (permission === 'prompt' && requestPermission) permission = await handle.requestPermission({ mode: 'read' })
+      if (permission !== 'granted') throw new Error('需要重新授权原文件夹后才能继续上传。')
+      await resumeImportJob(jobId, await filesFromDirectory(handle))
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : '无法读取原文件夹')
+    }
+  }
+
+  useEffect(() => {
+    if (!uploadSessions.length || resumingJobId) return
+    const interrupted = importJobs.find((job) => job.status === 'INTERRUPTED' && !autoResumeAttemptedRef.current.has(job.id))
+    if (!interrupted) return
+    autoResumeAttemptedRef.current.add(interrupted.id)
+    void resumeFromSavedDirectory(interrupted.id, false)
+  }, [importJobs, resumingJobId, uploadSessions])
 
   return (
     <div className="import-page-stack">
@@ -4192,10 +4508,14 @@ function BatchImportPanel({
               <ImagePlus size={16} /> 选择图片
               <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
             </label>
-            <label className="management-action">
-              <FolderOpen size={16} /> 选择文件夹
-              <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
-            </label>
+            {supportsDirectoryAccess() ? (
+              <button className="management-action" type="button" onClick={() => void selectDirectory()}><FolderOpen size={16} /> 选择文件夹</button>
+            ) : (
+              <label className="management-action">
+                <FolderOpen size={16} /> 选择文件夹
+                <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
+              </label>
+            )}
           </div>
         </div>
         {localError && <span className="inline-error">{localError}</span>}
@@ -4227,6 +4547,16 @@ function BatchImportPanel({
           </div>
         )}
       </div>
+      {hasRunningImportJobs && (
+        <div className="import-upload-notice" role="status">
+          <span className="import-upload-notice-icon" aria-hidden="true"><Loader2 className="spin" size={14} /></span>
+          <span className="import-upload-notice-copy">
+            <strong>上传任务正在进行</strong>
+            <span>可以切换站内页面或浏览器 Tab；刷新或关闭页面会暂停任务，返回后可从断点继续。</span>
+          </span>
+          <span className="import-upload-notice-badge">{runningImportJobCount} 个进行中</span>
+        </div>
+      )}
       {batches.length === 0 && (
         <ImportTaskWorkbench
           jobs={importJobs}
@@ -4235,6 +4565,9 @@ function BatchImportPanel({
           onAbandon={(id) => api.abandonUploadSession(id).then(() => refreshUploadSessions())}
           onFindGarment={onFindGarment}
           onFindJob={onFindJob}
+          resumingJobId={resumingJobId}
+          onResumeSaved={(jobId) => void resumeFromSavedDirectory(jobId, true)}
+          onResumeFiles={(jobId, files) => void resumeImportJob(jobId, files)}
         />
       )}
     </div>
@@ -4248,6 +4581,9 @@ function ImportTaskWorkbench({
   onAbandon,
   onFindGarment,
   onFindJob,
+  resumingJobId,
+  onResumeSaved,
+  onResumeFiles,
 }: {
   jobs: ImportJob[]
   sessions: UploadSession[]
@@ -4255,6 +4591,9 @@ function ImportTaskWorkbench({
   onAbandon: (id: string) => Promise<unknown>
   onFindGarment: (code: string, garmentId?: number) => void
   onFindJob: (jobId: string) => void
+  resumingJobId: string | null
+  onResumeSaved: (jobId: string) => void
+  onResumeFiles: (jobId: string, files: File[]) => void
 }) {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<ImportTaskFilter>('all')
@@ -4282,47 +4621,55 @@ function ImportTaskWorkbench({
       const targetId = session?.targetId ?? item.garmentId
       const garment = targetId ? garmentsById.get(targetId) : garmentsByCode.get(item.code)
       const sessionDrivesStatus = Boolean(session && uploadSessionDrivesImportItem(item.status))
-      const status = sessionDrivesStatus && session ? session.status : item.status
+      const uploadStatus = sessionDrivesStatus && session ? session.status : item.status
+      const status = importRowBusinessStatus(session, garment, uploadStatus)
       return {
         id: `job-${job.id}-${item.id}`,
         source: 'job',
         batchId: job.id,
+        serverBatchId: session?.batchId,
         sessionId: item.sessionId,
         garmentId: targetId ?? undefined,
+        scope: session?.scope ?? 'styling-garment',
+        sourceTitle: session?.sourceTitle ?? job.title,
         code: item.code,
         importedCount: item.imageCount,
         uploadedCount: session?.uploadedCount ?? item.uploadedCount,
         retainedCount: retainedImageCount(garment),
         status,
-        statusLabel: sessionDrivesStatus && session ? uploadSessionStatusLabel(session.status) : importJobItemStatusLabel(item.status),
+        statusLabel: importTaskStatusLabel(status),
         statusTone: importTaskStatusTone(status),
         previewUrl: garment?.coverUrl ?? item.previewUrl ?? null,
         createdAt,
-        updatedAt: sessionDrivesStatus ? session?.updatedAt ?? updatedAt : updatedAt,
+        updatedAt: garment?.updatedAt ?? (sessionDrivesStatus ? session?.updatedAt ?? updatedAt : updatedAt),
         error: sessionDrivesStatus ? session?.errorMessage ?? item.error : item.error,
       }
     })
   }), [garmentsByCode, garmentsById, jobs, sessionsById])
 
   const sessionRows = useMemo<ImportTaskRow[]>(() => sessions
-    .filter((session) => !jobSessionIds.has(session.id))
+    .filter((session) => session.scope === 'styling-garment' && !jobSessionIds.has(session.id))
     .map((session) => {
       const garment = session.targetId ? garmentsById.get(session.targetId) : undefined
+      const status = importRowBusinessStatus(session, garment, session.status)
       return {
         id: `session-${session.id}`,
         source: 'session',
         sessionId: session.id,
+        serverBatchId: session.batchId,
         garmentId: session.targetId ?? undefined,
+        scope: session.scope,
+        sourceTitle: session.sourceTitle,
         code: importSessionCode(session, garment),
         importedCount: session.totalCount,
         uploadedCount: session.uploadedCount,
         retainedCount: retainedImageCount(garment),
-        status: session.status,
-        statusLabel: uploadSessionStatusLabel(session.status),
-        statusTone: importTaskStatusTone(session.status),
+        status,
+        statusLabel: importTaskStatusLabel(status),
+        statusTone: importTaskStatusTone(status),
         previewUrl: garment?.coverUrl ?? null,
         createdAt: session.createdAt,
-        updatedAt: session.updatedAt ?? session.createdAt,
+        updatedAt: garment?.updatedAt ?? session.updatedAt ?? session.createdAt,
         error: session.errorMessage,
       }
     }), [garmentsById, jobSessionIds, sessions])
@@ -4377,6 +4724,7 @@ function ImportTaskWorkbench({
     rowsByBatch.set(row.batchId, list)
   })
   const visibleSessionRows = sessionRows.filter((row) => filteredRowIds.has(row.id))
+  const visibleSessionGroups = recoveredImportSessionGroups(visibleSessionRows, sessionsById)
   const runningCount = allRows.filter((row) => isImportTaskRunning(row.status)).length
   const pendingCount = allRows.filter((row) => isImportTaskPendingRecognition(row.status)).length
   const attentionCount = allRows.filter((row) => isImportTaskAttention(row.status)).length
@@ -4384,7 +4732,7 @@ function ImportTaskWorkbench({
     { value: 'running', label: '进行中', count: runningCount },
     { value: 'pending', label: '待识别', count: pendingCount },
     { value: 'attention', label: '需处理', count: attentionCount },
-    { value: 'saved', label: '已完成', count: allRows.filter((row) => isImportTaskDone(row.status)).length },
+    { value: 'saved', label: '可用', count: allRows.filter((row) => isImportTaskDone(row.status)).length },
   ]
   const hasActiveFilters = Boolean(query.trim() || filter !== 'all' || uploadedFrom || uploadedTo)
   const visibleJobs = [...jobs].sort((a, b) => {
@@ -4395,17 +4743,17 @@ function ImportTaskWorkbench({
   const visibleJobIds = new Set(visibleJobs
     .filter((job) => jobRows.some((row) => row.batchId === job.id && filteredRowIds.has(row.id)))
     .map((job) => job.id))
-  const recoveredRecords = visibleSessionRows.map((row) => ({
+  const recoveredRecords = visibleSessionGroups.map((group) => ({
     kind: 'session' as const,
-    id: row.id,
-    row,
+    id: group.id,
+    group,
   }))
   const importRecords = [
     ...visibleJobs.filter((job) => visibleJobIds.has(job.id)).map((job) => ({ kind: 'job' as const, id: job.id, job })),
     ...recoveredRecords,
   ].sort((a, b) => {
-    const aTime = a.kind === 'job' ? a.job.updatedAt ?? a.job.createdAt : a.row.updatedAt ?? a.row.createdAt
-    const bTime = b.kind === 'job' ? b.job.updatedAt ?? b.job.createdAt : b.row.updatedAt ?? b.row.createdAt
+    const aTime = a.kind === 'job' ? a.job.updatedAt ?? a.job.createdAt : a.group.updatedAt ?? a.group.createdAt
+    const bTime = b.kind === 'job' ? b.job.updatedAt ?? b.job.createdAt : b.group.updatedAt ?? b.group.createdAt
     return new Date(parseRuyiTime(bTime)).getTime() - new Date(parseRuyiTime(aTime)).getTime()
   })
   const totalRecords = importRecords.length
@@ -4437,14 +4785,16 @@ function ImportTaskWorkbench({
     const retained = retainedValues.length ? retainedValues.reduce((sum, value) => sum + value, 0) : null
     const failed = rows.filter((row) => row.statusTone === 'danger').length
     const uploading = rows.filter((row) => ['WAITING', 'UPLOADING', 'PENDING'].includes(row.status)).length
-    const organizing = rows.filter((row) => ['SAVING', 'SAVED', 'UPLOADED', 'FINALIZING'].includes(row.status)).length
-    const tagging = rows.filter((row) => row.status === 'TAGGING').length
+    const organizing = rows.filter((row) => ['SAVING', 'UPLOADED', 'FINALIZING'].includes(row.status)).length
+    const tagging = rows.filter((row) => ['TAGGING', 'TAGGING_RUNNING'].includes(row.status)).length
     const running = rows.filter((row) => isImportTaskRunning(row.status)).length
-    const submitted = rows.filter((row) => row.status === 'SUCCEEDED').length
-    const finalized = rows.filter((row) => isImportTaskDone(row.status)).length
-    const saved = submitted + finalized
-    const tone: ImportTaskRow['statusTone'] = failed ? 'danger' : uploading || tagging || running ? 'running' : finalized === rows.length ? 'success' : 'warning'
-    const label = failed ? '部分失败' : uploading ? '上传中' : tagging ? 'AI 打标中' : organizing ? '整理入库中' : finalized === rows.length ? '已完成' : submitted ? '已提交识别' : '需处理'
+    const review = rows.filter((row) => row.status === 'TAGGING_READY').length
+    const pendingRecognition = rows.filter((row) => isImportTaskPendingRecognition(row.status)).length
+    const ready = rows.filter((row) => row.status === 'READY').length
+    const finalized = rows.filter((row) => row.garmentId || isImportTaskDone(row.status) || ['DRAFT', 'TAGGING_RUNNING', 'TAGGING_READY', 'TAGGING_FAILED'].includes(row.status)).length
+    const saved = finalized
+    const tone: ImportTaskRow['statusTone'] = failed ? 'danger' : uploading || tagging || running ? 'running' : ready === rows.length ? 'success' : pendingRecognition || review ? 'warning' : 'warning'
+    const label = failed ? '部分失败' : uploading ? '上传中' : tagging ? 'AI 打标中' : organizing ? '整理入库中' : ready === rows.length ? '可用' : review ? '待复核' : pendingRecognition ? '待识别' : saved === rows.length ? '已入库' : '需处理'
     const updatedAt = rows.map((row) => row.updatedAt ?? row.createdAt).filter(Boolean).sort().at(-1)
     return { imported, uploaded, retained, failed, running, uploading, organizing, tagging, saved, tone, label, updatedAt }
   }
@@ -4518,35 +4868,34 @@ function ImportTaskWorkbench({
       <div className="record-list-body import-record-list-body">
         {pagedRecords.map((record) => {
           if (record.kind === 'session') {
-            const row = record.row
-            const session = row.sessionId ? sessionsById.get(row.sessionId) : undefined
-            const expanded = expandedTasks.has(row.id)
-            const summary = summarizeRows([row])
-            const title = session ? importSessionTitle(session, row) : row.code
+            const group = record.group
+            const expanded = expandedTasks.has(group.id)
+            const summary = summarizeRows(group.rows)
+            const title = group.title
             return (
-              <section className={`batch-record-shell import-record-shell ${expanded ? 'is-expanded' : ''}`} key={row.id}>
+              <section className={`batch-record-shell import-record-shell ${expanded ? 'is-expanded' : ''}`} key={group.id}>
                 <div
                   className="record-row batch-record-row import-record-row"
                   role="button"
                   tabIndex={0}
                   aria-expanded={expanded}
                   title={expanded ? '点击收起上传任务' : '点击展开上传任务'}
-                  onClick={() => toggleTask(row.id)}
+                  onClick={() => toggleTask(group.id)}
                   onKeyDown={(event) => {
                     if (event.key !== 'Enter' && event.key !== ' ') return
                     event.preventDefault()
-                    toggleTask(row.id)
+                    toggleTask(group.id)
                   }}
                 >
                   <div className="import-record-main">
-                    <ImportThumbStack rows={[row]} />
+                    <ImportThumbStack rows={group.rows} />
                     <div>
-                      <strong>{title}</strong>
-                      <span>{summary.label} · 1 个货号 · 上传 {dateText(row.createdAt)} · 更新 {dateText(row.updatedAt)}</span>
+                      <TruncatedText as="strong" text={title} />
+                      <TruncatedText text={`${summary.label} · ${group.total} 个货号 · 上传 ${dateText(group.createdAt)} · 更新 ${dateText(summary.updatedAt)}`} />
                     </div>
                   </div>
                   <div className="batch-progress-strip import-progress-strip">
-                    <span>{summary.saved}/1 已整理</span>
+                    <span>{summary.saved}/{group.total} 已整理</span>
                     {summary.uploading > 0 && <span>{summary.uploading} 上传中</span>}
                     {summary.organizing > 0 && <span>{summary.organizing} 整理中</span>}
                     {summary.tagging > 0 && <span>{summary.tagging} AI 打标中</span>}
@@ -4556,14 +4905,14 @@ function ImportTaskWorkbench({
                   <span className={`import-status-badge is-${summary.tone}`}>{summary.label}</span>
                   <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起上传任务' : '展开上传任务'} onClick={(event) => {
                     event.stopPropagation()
-                    toggleTask(row.id)
+                    toggleTask(group.id)
                   }}>
                     <ChevronDown size={14} className={expanded ? 'is-rotated' : ''} />{expanded ? '收起' : '展开'}
                   </button>
                 </div>
                 {expanded && (
                   <div className="batch-expanded-list import-expanded-list">
-                    <ImportTaskRows rows={[row]} abandoningId={abandoningId} onAbandon={(id) => void abandon(id)} onFindGarment={onFindGarment} />
+                    <ImportTaskRows rows={group.rows} abandoningId={abandoningId} onAbandon={(id) => void abandon(id)} onFindGarment={onFindGarment} />
                   </div>
                 )}
               </section>
@@ -4576,6 +4925,7 @@ function ImportTaskWorkbench({
           const summary = summarizeRows(allJobRows)
           const expanded = expandedTasks.has(job.id)
           const title = importJobDisplayTitle(job, allJobRows)
+          const canResume = job.status === 'INTERRUPTED'
           return (
             <section className={`batch-record-shell import-record-shell ${expanded ? 'is-expanded' : ''}`} key={job.id}>
               <div
@@ -4594,8 +4944,8 @@ function ImportTaskWorkbench({
                 <div className="import-record-main">
                   <ImportThumbStack rows={allJobRows} />
                   <div>
-                    <strong>{title}</strong>
-                    <span>{summary.label} · {job.total} 个货号 · 上传 {dateText(job.createdAt)} · 更新 {dateText(summary.updatedAt)}</span>
+                    <TruncatedText as="strong" text={title} />
+                    <TruncatedText text={`${summary.label} · ${job.total} 个货号 · 上传 ${dateText(job.createdAt)} · 更新 ${dateText(summary.updatedAt)}`} />
                   </div>
                 </div>
                 <div className="batch-progress-strip import-progress-strip">
@@ -4607,12 +4957,27 @@ function ImportTaskWorkbench({
                   <span>{importImageCountText(summary.imported, summary.uploaded, summary.retained)} 张</span>
                 </div>
                 <span className={`import-status-badge is-${summary.tone}`}>{summary.label}</span>
-                <button className="management-action compact-control import-batch-view-button" type="button" title="回到服装库查看本次上传的服装" onClick={(event) => {
+                {canResume && (
+                  <div className="import-resume-actions" onClick={(event) => event.stopPropagation()}>
+                    <button className="management-action compact-control" type="button" disabled={resumingJobId === job.id} onClick={() => onResumeSaved(job.id)}>
+                      <RefreshCw size={14} />{resumingJobId === job.id ? '恢复中' : '继续上传'}
+                    </button>
+                    <label className="management-action compact-control" title="重新选择原任务文件夹；系统会严格核对后从断点继续">
+                      <FolderOpen size={14} />重新选择原目录
+                      <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} disabled={resumingJobId === job.id} onChange={(event) => {
+                        const files = Array.from(event.target.files ?? [])
+                        event.target.value = ''
+                        if (files.length) onResumeFiles(job.id, files)
+                      }} />
+                    </label>
+                  </div>
+                )}
+                {!canResume && <button className="management-action compact-control import-batch-view-button" type="button" title="回到服装库查看本次上传的服装" onClick={(event) => {
                   event.stopPropagation()
                   onFindJob(job.id)
                 }}>
                   查看本批次
-                </button>
+                </button>}
                 <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起上传任务' : '展开上传任务'} onClick={(event) => {
                   event.stopPropagation()
                   toggleTask(job.id)
@@ -4673,14 +5038,14 @@ function ImportTaskRows({ rows, abandoningId, onAbandon, onFindGarment }: {
       {rows.map((row) => {
         const canAbandon = row.sessionId && isImportTaskRunning(row.status) && !['FINALIZED', 'FINALIZING', 'ABANDONED'].includes(row.status)
         const isDuplicateFailure = row.statusTone === 'danger' && /已存在|重复/.test(row.error ?? '')
-        const needsManualReimport = row.statusTone === 'danger' && !isDuplicateFailure
+        const needsManualReimport = row.status === 'FAILED' && !isDuplicateFailure && !row.garmentId
         const canOpenGarment = Boolean(row.garmentId) && !needsManualReimport
         return (
           <div className={`record-row import-task-row is-${row.statusTone}`} key={row.id}>
             <div className="import-task-code">
               <ImportPreviewThumb src={row.previewUrl} />
-              <strong>{row.code}</strong>
-              <span>{importTaskMetaText(row)}</span>
+              <TruncatedText as="strong" text={row.code} />
+              <TruncatedText text={importTaskMetaText(row)} />
             </div>
             <span className="import-task-counts">{importImageCountText(row.importedCount, row.uploadedCount, row.retainedCount)} 张</span>
             <span className={`import-status-badge is-${row.statusTone}`}>{row.statusLabel}</span>
@@ -4803,7 +5168,9 @@ function FileThumbList({ files, onChange, limit, disabled = false }: { files: Fi
               onDimensions={(value) => setDimensions((current) => ({ ...current, [fileKey(file)]: value }))}
               onOpen={(image) => setViewer(image)}
             />
-            <span>{file.name}<small>{fileMeta(file, dimensions[fileKey(file)])}</small></span>
+            <TruncatedText text={file.name}>
+              {file.name}<TruncatedText as="small" text={fileMeta(file, dimensions[fileKey(file)])} />
+            </TruncatedText>
             <div className="thumb-actions">
               <label title="替换图片">
                 <RefreshCw size={14} />
@@ -4927,7 +5294,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
                   >
                     {thumb ? <img src={mediaUrl(thumb)} loading="lazy" alt={angleLabel(ref.angle ?? ref.id)} /> : <div className="image-placeholder"><UserRound size={28} /></div>}
                     {editable ? (
-                      <span className="has-angle">
+                      <span className="has-angle" title={angleLabel(ref.angle ?? ref.id)}>
                         <select className="angle-select" value={ref.angle ?? ''} onChange={(event) => {
                           const angle = event.target.value
                           if (model) void run('设置模特图片角度中...', () => api.setModelHeadReferenceAngle(model.id, ref.id, angle), undefined, { refresh: 'background' })
@@ -4940,7 +5307,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
                         <small>{`第 ${index + 1} 张`}</small>
                       </span>
                     ) : (
-                      <span>{angleLabel(ref.angle ?? ref.id)}</span>
+                      <TruncatedText text={angleLabel(ref.angle ?? ref.id)} />
                     )}
                     {editable && (
                       <div className="thumb-actions">
@@ -4982,7 +5349,9 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
               <div className="saved-image-grid">
                 <div className="saved-image-card">
                   <img src={mediaUrl(assetPreviewSrc(env))} loading="lazy" alt="拍摄背景参考图" />
-                  <span>拍摄背景参考图<small>{assetMeta(env)}</small></span>
+                  <TruncatedText text="拍摄背景参考图">
+                    拍摄背景参考图<TruncatedText as="small" text={assetMeta(env)} />
+                  </TruncatedText>
                   {isAdmin && (
                     <div className="thumb-actions">
                       <label title="更换图片">
@@ -5168,7 +5537,7 @@ function PromptNavGroup({ title, items, activeKey, onSelect }: { title: string; 
       <h3>{title}</h3>
       {items.map((item) => (
         <button key={item.key} className={activeKey === item.key ? 'active' : ''} onClick={() => onSelect(item.key)}>
-          <strong>{item.title}</strong>
+          <TruncatedText as="strong" text={item.title} />
           <span>{item.missingPlaceholders.length ? `缺失 ${item.missingPlaceholders.length}` : '已保存'}</span>
         </button>
       ))}
@@ -5187,7 +5556,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   onDeleteResult: (result: DeleteOperationResult) => void
 }) {
   const recordListBodyRef = useRef<HTMLDivElement | null>(null)
-  const autoPageSize = useAutoRecordPageSize(recordListBodyRef)
+  const { pageSize: autoPageSize, ready: autoPageSizeReady } = useAutoRecordPageSize(recordListBodyRef)
   const [viewMode, setViewMode] = useState<RecordViewMode>('all')
   const [workspaceItems, setWorkspaceItems] = useState<GenerationWorkspaceRecord[]>([])
   const [batchRecords, setBatchRecords] = useState<GenerationRecordBatch[]>([])
@@ -5226,6 +5595,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   const [pageSize, setPageSize] = useState(() => estimateAutoRecordPageSize())
   const [bulkMode, setBulkMode] = useState(false)
   const [batchBulkLoading, setBatchBulkLoading] = useState(false)
+  const pageSizeSettled = pageSizeMode !== 'auto' || (autoPageSizeReady && pageSize === autoPageSize)
   const taskListItems = viewMode === 'tasks'
     ? items
     : viewMode === 'all'
@@ -5315,6 +5685,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   }
 
   useEffect(() => {
+    if (!pageSizeSettled) return
     let cancelled = false
     setLoading(true)
     const timer = window.setTimeout(() => {
@@ -5337,17 +5708,17 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [records, viewMode, offset, query, includeArchived, statusFilter, createdFrom, createdTo, sortBy, sortDir, pageSize])
+  }, [records, viewMode, offset, query, includeArchived, statusFilter, createdFrom, createdTo, sortBy, sortDir, pageSize, pageSizeSettled])
 
   useEffect(() => {
     setOffset(0)
   }, [viewMode, query, includeArchived, statusFilter, createdFrom, createdTo, sortBy, sortDir])
 
   useEffect(() => {
-    if (pageSizeMode !== 'auto' || pageSize === autoPageSize) return
+    if (pageSizeMode !== 'auto' || !autoPageSizeReady || pageSize === autoPageSize) return
     setPageSize(autoPageSize)
     setOffset(0)
-  }, [autoPageSize, pageSize, pageSizeMode])
+  }, [autoPageSize, autoPageSizeReady, pageSize, pageSizeMode])
 
   useEffect(() => {
     batchBulkRequestRef.current += 1
@@ -5977,7 +6348,7 @@ function TaskRecordRow({ item, active, bulkMode, selected, onSelect, onOpen, onO
       {bulkMode && <BulkCheckbox checked={selected} disabled={isTaskRunning(item)} label={`选择 ${item.name}`} onChange={(checked) => onSelect(item.id, checked)} />}
       <button className="record-open" aria-current={active ? 'true' : undefined} title="查看记录详情" onClick={() => onOpen(item)}>
         <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
-        <div><strong>{item.name}</strong><span>{item.archivedAt ? archiveStateText(item.archiveReason) : statusText(item.status)} · {dateText(item.createdAt)}</span></div>
+        <div><TruncatedText as="strong" text={item.name} /><TruncatedText text={`${item.archivedAt ? archiveStateText(item.archiveReason) : statusText(item.status)} · ${dateText(item.createdAt)}`} /></div>
         <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
       </button>
       <button className="task-action record-action-button" onClick={() => onOpenStudio(item)} title="回到 AI 摄影棚恢复该任务">
@@ -6023,8 +6394,8 @@ function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, 
             {item.coverTasks.slice(0, 4).map((task) => <AssetThumb key={task.id} asset={taskCoverAsset(task)} interactive={false} />)}
           </div>
           <div>
-            <strong>{item.name}</strong>
-            <span>{recordStatusText(item.status)} · {item.taskCount} 个任务 · {dateText(item.createdAt)}</span>
+            <TruncatedText as="strong" text={item.name} />
+            <TruncatedText text={`${recordStatusText(item.status)} · ${item.taskCount} 个任务 · ${dateText(item.createdAt)}`} />
           </div>
           <div className="batch-progress-strip">
             <span>{item.completedTaskCount} 完成</span>
@@ -6185,7 +6556,7 @@ function FinalImageDownloadDialog({ precheck, onClose, onDownload }: {
         <div className="confirm-items download-issue-list">
           {incompleteItems.map((item) => (
             <div key={item.taskId} className="download-issue-item">
-              <strong>{item.taskName}</strong>
+              <TruncatedText as="strong" text={item.taskName} />
               {!item.hasResultSet && <span>尚未生成成片</span>}
               {item.hasResultSet && item.downloadableCount === 0 && !item.issues.length && <span>没有可下载的成片</span>}
               {item.issues.map((issue) => (
@@ -6234,13 +6605,14 @@ function DeleteConfirmDialog({ title, items, onClose, onConfirm, impact = null, 
   const [confirmText, setConfirmText] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const expectedText = items.length === 1 ? items[0].name : '全部删除'
+  const itemResetKey = JSON.stringify(items.map((item) => [item.id, item.name, item.batchId ?? null]))
   const canConfirm = !submitting && (!purge || confirmText === expectedText)
 
   useEffect(() => {
     setPurge(false)
     setConfirmText('')
     setSubmitting(false)
-  }, [items])
+  }, [itemResetKey])
 
   function submit(event: FormEvent) {
     event.preventDefault()
@@ -6445,9 +6817,10 @@ function UploadBox({ files, setFiles, max, compact = false }: { files: File[]; s
   )
 }
 
-function GarmentCard({ item, onTag, onOpen, onDelete, onRestore, selected, onSelect }: {
+function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDelete, onRestore, selected, onSelect }: {
   item: StylingGarment
   onTag?: () => void
+  tagLabel?: string
   onOpen?: () => void
   onDelete?: () => void
   onRestore?: () => void
@@ -6463,7 +6836,6 @@ function GarmentCard({ item, onTag, onOpen, onDelete, onRestore, selected, onSel
   const failed = item.status === 'TAGGING_FAILED'
   const showTagResult = !tagging && !failed
   const chips = garmentTagChips(item)
-  const runningTagAttempt = latestRunningTagAttempt(item)
   const failedTagAttempt = failed ? latestFailedTagAttempt(item) : null
   const taggingIssue = failed ? garmentTaggingIssue(item, failedTagAttempt) : null
   return (
@@ -6478,18 +6850,19 @@ function GarmentCard({ item, onTag, onOpen, onDelete, onRestore, selected, onSel
         {tagging && <span className="cover-badge">识别中</span>}
         {item.archivedAt && <span className="cover-badge">{archiveStateText(item.archiveReason)}</span>}
       </div>
-      <div className="garment-card-head"><strong title={item.code}>{item.code}</strong><span className={`status ${item.status.toLowerCase()}`}>{taggingIssue?.badge ?? garmentStatus(item.status)}</span></div>
-      {taggingIssue && <span className="inline-error">{taggingIssue.title}</span>}
-      <p>{tagging ? '正在识别服装信息，完成后可进入智能选搭。' : taggingIssue ? taggingIssue.description : brief || '待识别搭配信息'}</p>
-      {tagging && runningTagAttempt && <AIOperationList operations={[runningTagAttempt]} compact />}
-      <div className="tag-summary">
-        {showTagResult && chips.map((chip) => <span key={chip}>{chip}</span>)}
-        {(!showTagResult || !chips.length) && <span>{tagging ? '识别中' : failed ? '待重新识别' : '待识别'}</span>}
+      <div className="garment-card-body">
+        <div className="garment-card-head"><TruncatedText as="strong" text={item.code} /><span className={`status ${item.status.toLowerCase()}`}>{taggingIssue?.badge ?? garmentStatus(item.status)}</span></div>
+        {taggingIssue && <span className="inline-error">{taggingIssue.title}</span>}
+        <p className="garment-card-brief" title={tagging ? '正在识别服装信息，完成后可进入智能选搭。' : taggingIssue ? taggingIssue.description : brief || '待识别搭配信息'}>{tagging ? '正在识别服装信息，完成后可进入智能选搭。' : taggingIssue ? taggingIssue.description : brief || '待识别搭配信息'}</p>
+        <div className="tag-summary">
+          {showTagResult && chips.map((chip) => <TruncatedText key={chip} text={chip} />)}
+          {(!showTagResult || !chips.length) && <span>{tagging ? '识别中' : failed ? '待重新识别' : '待识别'}</span>}
+        </div>
       </div>
       <div className="card-actions">
         {onOpen && <button className="management-action" onClick={onOpen}><Eye size={16} /> 详情</button>}
         {item.archivedAt ? onRestore && <button className="management-action" disabled={tagging || item.archiveReason === 'deletion_pending'} onClick={onRestore}><RefreshCw size={16} /> {archivedRestoreText(item.archiveReason)}</button> : onDelete && <button className="management-action" disabled={tagging} onClick={onDelete}><Trash2 size={16} /> 归档</button>}
-        {onTag && <button className="management-action" disabled={tagging} onClick={onTag}><RotateCcw size={16} /> 识别标签</button>}
+        {onTag && <button className="management-action" disabled={tagging} onClick={onTag}><RotateCcw size={16} /> {tagLabel}</button>}
       </div>
     </div>
   )
@@ -6626,7 +6999,9 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
                       <img src={mediaUrl(assetThumbSrc(image.asset))} alt={image.asset.filename} loading="lazy" />
                     </button>
                   )}
-                  <span>{replacement?.name ?? image.asset.filename}<small>{replacement ? fileMeta(replacement, replacementDimensions[image.id]) : assetMeta(image.asset)}</small></span>
+                  <TruncatedText text={replacement?.name ?? image.asset.filename}>
+                    {replacement?.name ?? image.asset.filename}<TruncatedText as="small" text={replacement ? fileMeta(replacement, replacementDimensions[image.id]) : assetMeta(image.asset)} />
+                  </TruncatedText>
                   <div className="thumb-actions">
                     <label className={tagging ? 'is-disabled' : ''} title="替换图片">
                       <RefreshCw size={14} />
@@ -6919,7 +7294,7 @@ function AICallLogDialog({ dialog, onClose }: {
               <details className="ai-log-entry" key={record.id} open>
                 <summary>
                   <div>
-                    <strong>{operationLabel(record, index)}</strong>
+                    <TruncatedText as="strong" text={operationLabel(record, index)} />
                     <span>{statusText(record.status)}</span>
                   </div>
                 </summary>
@@ -6988,7 +7363,7 @@ function renderTagValue(value: unknown): ReactNode {
           {value.map((item, index) => (
             <div key={index}>
               <b>{index + 1}</b>
-              <span>{typeof item === 'object' && item ? JSON.stringify(item, null, 0) : formatTagPrimitive(item)}</span>
+              <TruncatedText text={typeof item === 'object' && item ? JSON.stringify(item, null, 0) : formatTagPrimitive(item)} />
             </div>
           ))}
         </div>
@@ -7000,7 +7375,7 @@ function renderTagValue(value: unknown): ReactNode {
     return (
       <div className="nested-tags">
         {Object.entries(value as Record<string, unknown>).map(([key, nested]) => (
-          <div key={key}><b>{key}</b><span>{formatTagPrimitive(nested)}</span></div>
+          <div key={key}><b title={key}>{key}</b><TruncatedText text={formatTagPrimitive(nested)} /></div>
         ))}
       </div>
     )
@@ -7110,10 +7485,10 @@ function AIOperationCard({ operation, now, compact, index, onOpenTechnicalDetail
     <div className={`ai-operation-card ${running ? 'is-running' : ''} ${compact ? 'compact' : ''}`}>
       <div className="ai-operation-icon">{running ? <Loader2 size={15} className="spin" /> : <Clock3 size={15} />}</div>
       <div className="ai-operation-copy">
-        <strong>{operationUserLabel(operation)}</strong>
+        <TruncatedText as="strong" text={operationUserLabel(operation)} />
         {phase && <span>{attemptPhaseText(phase, operation)}</span>}
-        {failureNote && <span className="operation-failure">{failureNote}</span>}
-        {!compact && breakdown && <span className="operation-breakdown">{breakdown}</span>}
+        {failureNote && <TruncatedText className="operation-failure" text={failureNote} />}
+        {!compact && breakdown && <TruncatedText className="operation-breakdown" text={breakdown} />}
       </div>
       <div className="ai-operation-meta">
         <span className={`operation-status status-${operation.status.toLowerCase()}`}>{attemptStatusText(operation)}</span>
@@ -7543,7 +7918,7 @@ function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () =
       <div className="lightbox-chrome" onClick={(event) => event.stopPropagation()}>
         <div className="lightbox-head">
           <div className="inspector-title">
-            <strong>{current.title}</strong>
+            <TruncatedText as="strong" text={current.title} />
             <span>{index + 1} / {items.length}{current.meta ? ` · ${current.meta}` : ''}</span>
           </div>
           <div className="lightbox-actions">
@@ -7599,6 +7974,14 @@ function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () =
     </div>,
     document.body,
   )
+}
+
+function TruncatedText({ as = 'span', text, className, children }: { as?: 'span' | 'strong' | 'small' | 'em'; text: string; className?: string; children?: ReactNode }) {
+  const title = text || undefined
+  if (as === 'strong') return <strong className={className} title={title}>{children ?? text}</strong>
+  if (as === 'small') return <small className={className} title={title}>{children ?? text}</small>
+  if (as === 'em') return <em className={className} title={title}>{children ?? text}</em>
+  return <span className={className} title={title}>{children ?? text}</span>
 }
 
 function Meta({ label, value }: { label: string; value: ReactNode }) {
@@ -7698,7 +8081,9 @@ function SearchBox({
       {isBulk ? (
         <button className="search-summary" type="button" onClick={() => setOpen(true)} title="编辑批量搜索" aria-haspopup="dialog" aria-expanded={open}>
           <span>批量搜索：{terms.length} 个关键词</span>
-          <small>{previewTerms.join(' / ')}{terms.length > previewTerms.length ? ` / +${terms.length - previewTerms.length}` : ''}</small>
+          <TruncatedText as="small" text={terms.join(' / ')}>
+            {previewTerms.join(' / ')}{terms.length > previewTerms.length ? ` / +${terms.length - previewTerms.length}` : ''}
+          </TruncatedText>
         </button>
       ) : (
         <input
@@ -7745,7 +8130,7 @@ function SearchBox({
             <span>已识别 {draftTerms.length} 个关键词</span>
             {draftTerms.length > 0 && (
               <div className="search-term-preview">
-                {draftTerms.slice(0, 6).map((term) => <b key={term}>{term}</b>)}
+                {draftTerms.slice(0, 6).map((term) => <b key={term} title={term}>{term}</b>)}
                 {draftTerms.length > 6 && <b>+{draftTerms.length - 6}</b>}
               </div>
             )}
@@ -7924,7 +8309,7 @@ function recordStatusText(status: string) {
 }
 
 function garmentStatus(status: string) {
-  if (status === 'DRAFT') return '草稿'
+  if (status === 'DRAFT') return '待识别'
   return statusText(status)
 }
 

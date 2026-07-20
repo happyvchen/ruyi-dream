@@ -15,6 +15,9 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("051", "remove_hero_product_info", "migration_remove_hero_product_info"),
     ("052", "upload_sessions", "migration_upload_sessions"),
     ("053", "upload_session_business_metadata", "migration_upload_session_business_metadata"),
+    ("054", "resumable_styling_imports", "migration_resumable_styling_imports"),
+    ("055", "upload_session_execution_lease", "migration_upload_session_execution_lease"),
+    ("056", "upload_session_content_checksum", "migration_upload_session_content_checksum"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -170,6 +173,8 @@ def init_db() -> None:
               auto_run_target TEXT,
               auto_run_requested_at TEXT,
               batch_id TEXT,
+              lease_owner TEXT,
+              lease_expires_at TEXT,
               archived_at TEXT,
               archive_reason TEXT,
               created_at TEXT NOT NULL,
@@ -314,6 +319,9 @@ def init_db() -> None:
               status TEXT NOT NULL,
               business_code TEXT,
               source_title TEXT,
+              batch_id TEXT,
+              lease_owner TEXT,
+              lease_expires_at TEXT,
               total_count INTEGER NOT NULL DEFAULT 0,
               uploaded_count INTEGER NOT NULL DEFAULT 0,
               target_type TEXT,
@@ -331,6 +339,9 @@ def init_db() -> None:
               filename TEXT NOT NULL,
               mime_type TEXT NOT NULL,
               size_bytes INTEGER,
+              relative_path TEXT,
+              last_modified INTEGER,
+              checksum_sha256 TEXT,
               status TEXT NOT NULL DEFAULT 'PENDING',
               media_asset_id INTEGER REFERENCES media_assets(id),
               error_message TEXT,
@@ -377,6 +388,9 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_remove_hero_product_info": migration_remove_hero_product_info,
         "migration_upload_sessions": migration_upload_sessions,
         "migration_upload_session_business_metadata": migration_upload_session_business_metadata,
+        "migration_resumable_styling_imports": migration_resumable_styling_imports,
+        "migration_upload_session_execution_lease": migration_upload_session_execution_lease,
+        "migration_upload_session_content_checksum": migration_upload_session_content_checksum,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -482,6 +496,28 @@ def migration_upload_session_business_metadata(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE upload_sessions ADD COLUMN business_code TEXT")
     if not table_has_column(db, "upload_sessions", "source_title"):
         db.execute("ALTER TABLE upload_sessions ADD COLUMN source_title TEXT")
+
+
+def migration_resumable_styling_imports(db: sqlite3.Connection) -> None:
+    if not table_has_column(db, "upload_sessions", "batch_id"):
+        db.execute("ALTER TABLE upload_sessions ADD COLUMN batch_id TEXT")
+    if not table_has_column(db, "upload_session_items", "relative_path"):
+        db.execute("ALTER TABLE upload_session_items ADD COLUMN relative_path TEXT")
+    if not table_has_column(db, "upload_session_items", "last_modified"):
+        db.execute("ALTER TABLE upload_session_items ADD COLUMN last_modified INTEGER")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_upload_sessions_batch_id ON upload_sessions(batch_id)")
+
+
+def migration_upload_session_execution_lease(db: sqlite3.Connection) -> None:
+    if not table_has_column(db, "upload_sessions", "lease_owner"):
+        db.execute("ALTER TABLE upload_sessions ADD COLUMN lease_owner TEXT")
+    if not table_has_column(db, "upload_sessions", "lease_expires_at"):
+        db.execute("ALTER TABLE upload_sessions ADD COLUMN lease_expires_at TEXT")
+
+
+def migration_upload_session_content_checksum(db: sqlite3.Connection) -> None:
+    if not table_has_column(db, "upload_session_items", "checksum_sha256"):
+        db.execute("ALTER TABLE upload_session_items ADD COLUMN checksum_sha256 TEXT")
 
 
 def scrub_prompt_config_hero_product_info(db: sqlite3.Connection) -> None:
