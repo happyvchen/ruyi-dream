@@ -2632,15 +2632,15 @@ a.button-link { text-decoration: none; cursor: pointer; }
 }
 .garment-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(224px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(172px, 1fr));
   align-items: stretch;
-  gap: 14px;
-  margin-top: 14px;
+  gap: 10px;
+  margin-top: 10px;
 }
 .garment-card {
   display: flex;
   min-width: 0;
-  min-height: 304px;
+  min-height: 246px;
   flex-direction: column;
   overflow: hidden;
   border: 1px solid rgba(203, 213, 225, .78);
@@ -2651,7 +2651,7 @@ a.button-link { text-decoration: none; cursor: pointer; }
 }
 .garment-card:hover {
   border-color: rgba(15, 124, 255, .26);
-  box-shadow: var(--shadow-md);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, .08);
   transform: translateY(-1px);
 }
 .compact-control { height: 32px; padding: 0 10px; font-size: 12px; }
@@ -2660,9 +2660,9 @@ a.button-link { text-decoration: none; cursor: pointer; }
   flex: 0 0 auto;
   overflow: hidden;
   aspect-ratio: 1 / 1;
-  margin: 10px 10px 0;
+  margin: 6px 6px 0;
   border: 1px solid rgba(216, 224, 234, .7);
-  border-radius: 7px;
+  border-radius: 6px;
   background: #f8fafc;
 }
 .garment-cover .asset-thumb.large {
@@ -2670,7 +2670,7 @@ a.button-link { text-decoration: none; cursor: pointer; }
   height: 100%;
   aspect-ratio: auto;
   border: 0;
-  border-radius: 7px;
+  border-radius: 6px;
   background: transparent;
 }
 .garment-cover .asset-thumb img { object-fit: contain; padding: 0; }
@@ -2684,16 +2684,16 @@ a.button-link { text-decoration: none; cursor: pointer; }
 }
 .cover-badge {
   position: absolute;
-  right: 10px;
-  top: 10px;
+  right: 7px;
+  top: 7px;
   z-index: 1;
-  height: 24px;
-  padding: 4px 8px;
+  height: 20px;
+  padding: 3px 7px;
   border-radius: 999px;
   background: rgba(7, 17, 31, .72);
   backdrop-filter: blur(10px);
   color: #fff;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
 }
 .garment-card-body {
@@ -2701,22 +2701,22 @@ a.button-link { text-decoration: none; cursor: pointer; }
   min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px 8px;
+  gap: 5px;
+  padding: 7px 8px 6px;
 }
 .garment-card-head {
   display: flex;
-  min-height: 24px;
-  align-items: flex-start;
+  min-height: 20px;
+  align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 .garment-card-head strong {
   min-width: 0;
   overflow: hidden;
   color: #07111f;
-  font-size: 13.5px;
+  font-size: 12px;
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2724,11 +2724,11 @@ a.button-link { text-decoration: none; cursor: pointer; }
 .garment-card-brief {
   display: -webkit-box;
   overflow: hidden;
-  min-height: 34px;
+  min-height: 32px;
   margin: 0;
   color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.42;
+  font-size: 11px;
+  line-height: 1.45;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
@@ -2742,20 +2742,20 @@ a.button-link { text-decoration: none; cursor: pointer; }
 .tag-summary {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  min-height: 44px;
-  max-height: 44px;
+  gap: 3px;
+  min-height: 18px;
+  max-height: 18px;
   overflow: hidden;
 }
 .tag-summary span {
   max-width: 100%;
-  height: 20px;
-  padding: 2px 6px;
+  height: 18px;
+  padding: 1px 5px;
   border: 1px solid rgba(216, 224, 234, .82);
   border-radius: 999px;
   background: var(--panel-muted);
   color: #475569;
-  font-size: 10.5px;
+  font-size: 10px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3448,38 +3448,43 @@ a.button-link { text-decoration: none; cursor: pointer; }
 }
 .card-select {
   position: absolute;
-  top: 16px;
-  left: 16px;
+  top: 10px;
+  left: 10px;
   z-index: 1;
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   border: 1px solid #d8e0ea;
   border-radius: 8px;
   background: rgba(255, 255, 255, .92);
 }
 .card-select input {
-  width: 16px;
-  height: 16px;
-  min-width: 16px;
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
   padding: 0;
   accent-color: #0f7cff;
 }
 .card-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
+  gap: 5px;
   margin-top: auto;
-  padding: 0 12px 12px;
+  padding: 0 8px 8px;
 }
 .card-actions .management-action {
   min-width: 0;
-  height: 32px;
-  padding: 0 8px;
-  font-size: 12px;
+  height: 26px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 11px;
   justify-content: center;
   white-space: nowrap;
+}
+.card-actions .management-action svg {
+  width: 14px;
+  height: 14px;
 }
 .card-actions .management-action:last-child:nth-child(odd),
 .garment-card.is-failed .card-actions .management-action:nth-child(3) {
@@ -3716,9 +3721,9 @@ a.button-link { text-decoration: none; cursor: pointer; }
   white-space: nowrap;
 }
 .garment-card-head .status {
-  height: 20px;
-  padding: 0 6px;
-  font-size: 11px;
+  height: 18px;
+  padding: 0 5px;
+  font-size: 10px;
 }
 .status.tagging_failed { background: #fff1f2; color: #be123c; }
 .status.tagging_running { background: #eef6ff; color: #2563eb; }

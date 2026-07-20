@@ -101,9 +101,9 @@ const STYLING_GARMENT_SELECTED_IMAGES = 6
 const HERO_PRODUCT_SELECTED_IMAGES = 8
 const PRODUCT_CODE_MAX_CHARS = 20
 const BATCH_NAME_MAX_CHARS = 80
-const GARMENT_AUTO_CARD_WIDTH = 292
-const GARMENT_AUTO_CARD_HEIGHT = 236
-const GARMENT_AUTO_GRID_GAP = 12
+const GARMENT_AUTO_CARD_WIDTH = 172
+const GARMENT_AUTO_CARD_HEIGHT = 246
+const GARMENT_AUTO_GRID_GAP = 10
 const RECORD_AUTO_ROW_HEIGHT = 62
 const RECORD_AUTO_ROW_GAP = 5
 const BULK_SEARCH_THRESHOLD = 5
@@ -6838,6 +6838,9 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDelete,
   const chips = garmentTagChips(item)
   const failedTagAttempt = failed ? latestFailedTagAttempt(item) : null
   const taggingIssue = failed ? garmentTaggingIssue(item, failedTagAttempt) : null
+  const cardBrief = tagging ? '正在识别服装信息，完成后可进入智能选搭。' : failed ? '识别未完成，可重新识别。' : brief || '待识别搭配信息'
+  const failureHint = taggingIssue ? `${taggingIssue.title}：${taggingIssue.description}` : undefined
+  const statusLabel = taggingIssue?.badge ?? garmentStatus(item.status)
   return (
     <div className={`garment-card ${tagging ? 'is-tagging' : ''} ${failed ? 'is-failed' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
       {onSelect && (
@@ -6851,11 +6854,10 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDelete,
         {item.archivedAt && <span className="cover-badge">{archiveStateText(item.archiveReason)}</span>}
       </div>
       <div className="garment-card-body">
-        <div className="garment-card-head"><TruncatedText as="strong" text={item.code} /><span className={`status ${item.status.toLowerCase()}`}>{taggingIssue?.badge ?? garmentStatus(item.status)}</span></div>
-        {taggingIssue && <span className="inline-error">{taggingIssue.title}</span>}
-        <p className="garment-card-brief" title={tagging ? '正在识别服装信息，完成后可进入智能选搭。' : taggingIssue ? taggingIssue.description : brief || '待识别搭配信息'}>{tagging ? '正在识别服装信息，完成后可进入智能选搭。' : taggingIssue ? taggingIssue.description : brief || '待识别搭配信息'}</p>
+        <div className="garment-card-head"><TruncatedText as="strong" text={item.code} /><span className={`status ${item.status.toLowerCase()}`} title={failureHint ?? statusLabel}>{statusLabel}</span></div>
+        <p className="garment-card-brief" title={failed ? failureHint : cardBrief}>{cardBrief}</p>
         <div className="tag-summary">
-          {showTagResult && chips.map((chip) => <TruncatedText key={chip} text={chip} />)}
+          {showTagResult && chips.slice(0, 3).map((chip) => <TruncatedText key={chip} text={chip} />)}
           {(!showTagResult || !chips.length) && <span>{tagging ? '识别中' : failed ? '待重新识别' : '待识别'}</span>}
         </div>
       </div>
