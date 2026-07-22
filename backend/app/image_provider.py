@@ -529,6 +529,8 @@ def build_toapis_request_snapshot(task_package: dict[str, Any], image_urls: list
     prompt = str(task_package.get("prompt") or "").strip()
     if not prompt:
         raise RuntimeError("图片生成缺少 Prompt 维护渲染出的 prompt。")
+    if len(image_urls) > TOAPIS_MAX_REFERENCE_IMAGES:
+        raise RuntimeError(f"参考图最多支持 {TOAPIS_MAX_REFERENCE_IMAGES} 张")
     image_inputs = task_package.get("imageInputs") if isinstance(task_package.get("imageInputs"), list) else []
     request = {
         "model": settings.gpt_image2_model_id,
@@ -558,7 +560,28 @@ def build_provider_reference_image_manifest(image_inputs: list[dict[str, Any]], 
                 "objectKey": item.get("objectKey"),
                 "filename": item.get("filename"),
                 "angle": item.get("angle"),
+                "collageRule": item.get("collageRule"),
+                "collageSources": build_collage_source_manifest(item),
                 "url": url,
+            }
+        )
+    return manifest
+
+
+def build_collage_source_manifest(item: dict[str, Any]) -> list[dict[str, Any]]:
+    sources = item.get("collageItems") if isinstance(item.get("collageItems"), list) else []
+    manifest: list[dict[str, Any]] = []
+    for source_index, source in enumerate(sources, start=1):
+        if not isinstance(source, dict):
+            continue
+        manifest.append(
+            {
+                "source_index": source_index,
+                "role": str(source.get("role") or ""),
+                "assetId": source.get("assetId"),
+                "objectKey": source.get("objectKey"),
+                "filename": source.get("filename"),
+                "angle": source.get("angle"),
             }
         )
     return manifest
@@ -580,6 +603,11 @@ def upload_image_inputs(
         next_item = dict(item)
         if source_url and is_fal_cdn_url(str(source_url)):
             next_item["providerUrl"] = source_url
+            uploaded.append(next_item)
+            continue
+        if item.get("collageItems"):
+            content, filename, content_type = build_reference_collage_bytes(item)
+            next_item["providerUrl"] = upload_bytes_to_fal(content, filename, content_type)
             uploaded.append(next_item)
             continue
         if object_key and object_exists(str(object_key)):
@@ -638,6 +666,8 @@ def prepare_toapis_image_inputs(
     image_inputs: list[dict[str, Any]],
     on_progress: UploadProgressCallback | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
+    if len(image_inputs) > TOAPIS_MAX_REFERENCE_IMAGES:
+        raise RuntimeError(f"参考图最多支持 {TOAPIS_MAX_REFERENCE_IMAGES} 张")
     uploaded_inputs = upload_toapis_image_inputs(image_inputs, on_progress)
     missing_roles = [
         str(item.get("role") or item.get("filename") or index)
@@ -670,6 +700,11 @@ def upload_toapis_image_inputs(
             next_item["providerUrl"] = source_url
             uploaded.append(next_item)
             continue
+        if item.get("collageItems"):
+            content, filename, content_type = build_reference_collage_bytes(item)
+            next_item["providerUrl"] = upload_bytes_to_toapis(content, filename, content_type)
+            uploaded.append(next_item)
+            continue
         if object_key and object_exists(str(object_key)):
             source_key = normalized_or_original_key(str(object_key))
             next_item["sourceObjectKey"] = source_key
@@ -689,6 +724,89 @@ def upload_toapis_image_inputs(
     if on_progress:
         on_progress(total, total)
     return uploaded
+
+
+def build_reference_collage_bytes(item: dict[str, Any]) -> tuple[bytes, str, str]:
+    sources = item.get("collageItems") if isinstance(item.get("collageItems"), list) else []
+    images = []
+    try:
+        from PIL import Image, ImageOps
+    except ImportError as exc:
+        raise RuntimeError("Pillow 未安装，无法拼接 Image-2 参考图") from exc
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        content, _content_type = reference_source_bytes(source)
+        try:
+            with Image.open(BytesIO(content)) as image:
+                image = ImageOps.exif_transpose(image)
+                if image.mode in {"RGBA", "LA", "P"}:
+                    base = image.convert("RGBA")
+                    flattened = Image.new("RGB", base.size, (255, 255, 255))
+                    flattened.paste(base, mask=base.getchannel("A") if "A" in base.getbands() else None)
+                    image = flattened
+                elif image.mode != "RGB":
+                    image = image.convert("RGB")
+                images.append(image.copy())
+        except OSError as exc:
+            label = str(source.get("filename") or source.get("objectKey") or "reference-image")
+            raise RuntimeError(f"参考图无法解码，不能拼接：{label}") from exc
+    if not images:
+        raise RuntimeError("参考图拼接缺少可用来源图片")
+
+    if len(images) == 1:
+        output = BytesIO()
+        images[0].save(output, "JPEG", quality=95, optimize=True)
+        stem = os.path.splitext(str(item.get("filename") or "reference-sheet.jpg"))[0] or "reference-sheet"
+        return output.getvalue(), f"{stem}.jpg", "image/jpeg"
+
+    columns, rows = reference_collage_grid(len(images))
+    tile_size = REFERENCE_COLLAGE_TILE_SIZE
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError("Pillow 未安装，无法拼接 Image-2 参考图") from exc
+    canvas = Image.new("RGB", (columns * tile_size, rows * tile_size), (255, 255, 255))
+    for index, image in enumerate(images[:columns * rows]):
+        fitted = contain_on_white(image, tile_size, tile_size)
+        col = index % columns
+        row = index // columns
+        canvas.paste(fitted, (col * tile_size, row * tile_size))
+    output = BytesIO()
+    canvas.save(output, "JPEG", quality=95, optimize=True)
+    stem = os.path.splitext(str(item.get("filename") or "reference-sheet.jpg"))[0] or "reference-sheet"
+    return output.getvalue(), f"{stem}.jpg", "image/jpeg"
+
+
+def reference_collage_grid(count: int) -> tuple[int, int]:
+    if count <= 2:
+        return max(1, count), 1
+    if count == 3:
+        return 3, 1
+    return 2, 2
+
+
+def contain_on_white(image: Any, width: int, height: int) -> Any:
+    from PIL import Image
+
+    copy = image.copy()
+    copy.thumbnail((width, height), Image.Resampling.LANCZOS)
+    tile = Image.new("RGB", (width, height), (255, 255, 255))
+    left = (width - copy.width) // 2
+    top = (height - copy.height) // 2
+    tile.paste(copy, (left, top))
+    return tile
+
+
+def reference_source_bytes(source: dict[str, Any]) -> tuple[bytes, str | None]:
+    object_key = source.get("objectKey")
+    source_url = source.get("providerUrl") or source.get("url")
+    if object_key and object_exists(str(object_key)):
+        source_key = normalized_or_original_key(str(object_key))
+        return get_bytes(source_key), mimetypes.guess_type(str(source.get("filename") or source_key))[0]
+    if source_url and str(source_url).startswith(("http://", "https://")):
+        return download_bytes(str(source_url))
+    raise RuntimeError(f"参考图拼接来源不可用：{source.get('filename') or source.get('objectKey') or source.get('url')}")
 
 
 def is_fal_cdn_url(url: str) -> bool:
@@ -741,9 +859,11 @@ def upload_bytes_to_fal(content: bytes, filename: str, content_type: str | None 
 # toapis 单文件上传上限 10MB；留出安全余量，只压超限大图，小图原样上传。
 TOAPIS_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 TOAPIS_TARGET_UPLOAD_BYTES = TOAPIS_MAX_UPLOAD_BYTES - 512 * 1024
+TOAPIS_MAX_REFERENCE_IMAGES = 6
 FIT_QUALITY_STEPS = (95, 92, 88, 85)
 FIT_SCALE_STEP = 0.85
 FIT_MIN_EDGE = 768
+REFERENCE_COLLAGE_TILE_SIZE = 1400
 
 
 def fit_image_bytes_under_limit(

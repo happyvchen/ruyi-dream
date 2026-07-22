@@ -127,6 +127,12 @@ MAX_GARMENT_IMAGE_INPUTS = 15
 MAX_HERO_IMAGE_INPUTS = 15
 MAX_GARMENT_SELECTED_IMAGES = 6
 MAX_HERO_SELECTED_IMAGES = 8
+IMAGE2_MAX_REFERENCE_IMAGES = 6
+IMAGE2_MODEL_SHEET_SOURCE_LIMIT = 4
+IMAGE2_HERO_SHEET_SOURCE_LIMIT = 6
+IMAGE2_HERO_SHEET_CHUNK_SIZE = 3
+IMAGE2_STYLING_GARMENT_LIMIT = 2
+IMAGE2_STYLING_SHEET_SOURCE_LIMIT = 4
 STORYBOARD_PROMPT_CONFIG_KEYS = {
     "top": "assembly.storyboard_preview_top",
     "bottom": "assembly.storyboard_preview_bottom",
@@ -8852,8 +8858,6 @@ def build_new_image_inputs(
     environment_asset_id: int | None = None,
 ) -> list[dict[str, Any]]:
     inputs: list[dict[str, Any]] = []
-    # 环境参考图（验证阶段，仅分镜预览）固定放在参考图最后一格，需预留 1 个额度。
-    reserve_env = 1 if environment_asset_id else 0
     with get_db() as db:
         styling = db.execute(
             "SELECT selected_material_snapshot_json, input_version_id FROM generation_stylings WHERE id = ?",
@@ -8865,28 +8869,98 @@ def build_new_image_inputs(
             (effective_input_version_id,),
         ).fetchone() if effective_input_version_id is not None else None
     model_snapshot = loads(input_version["model_snapshot_json"], {}) if input_version else {}
-    model_inputs = resolve_model_snapshot_image_inputs(model_snapshot, limit=2)
-    inputs.extend({**item, "role": "model_identity"} for item in model_inputs[:2] if isinstance(item, dict))
+    model_inputs = resolve_model_snapshot_image_inputs(model_snapshot, limit=IMAGE2_MODEL_SHEET_SOURCE_LIMIT)
+    model_sheet = reference_sheet_image_input(
+        "model_identity",
+        model_inputs,
+        filename="model-identity-sheet.jpg",
+        max_items=IMAGE2_MODEL_SHEET_SOURCE_LIMIT,
+    )
+    if model_sheet:
+        inputs.append(model_sheet)
+
+    hero_snapshot = loads(input_version["image_snapshot_json"], []) if input_version else []
+    hero_inputs = [
+        image_input_from_asset(item.get("asset"), "hero_garment")
+        for item in hero_snapshot[:IMAGE2_HERO_SHEET_SOURCE_LIMIT]
+        if isinstance(item, dict)
+    ]
+    for index, chunk in enumerate(chunked(hero_inputs, IMAGE2_HERO_SHEET_CHUNK_SIZE), start=1):
+        hero_sheet = reference_sheet_image_input(
+            "hero_garment",
+            chunk,
+            filename=f"hero-garment-sheet-{index}.jpg",
+            max_items=IMAGE2_HERO_SHEET_CHUNK_SIZE,
+        )
+        if hero_sheet:
+            inputs.append(hero_sheet)
+
+    selected_materials = loads(styling["selected_material_snapshot_json"], []) if styling else []
+    for garment in selected_materials[:IMAGE2_STYLING_GARMENT_LIMIT]:
+        images = garment.get("images", []) if isinstance(garment, dict) else []
+        garment_inputs = [
+            image_input_from_asset(image.get("asset"), "styling_garment")
+            for image in images[:IMAGE2_STYLING_SHEET_SOURCE_LIMIT]
+            if isinstance(image, dict)
+        ]
+        garment_code = str(garment.get("code") or garment.get("sku") or "styling-garment") if isinstance(garment, dict) else "styling-garment"
+        styling_sheet = reference_sheet_image_input(
+            "styling_garment",
+            garment_inputs,
+            filename=f"{safe_reference_filename(garment_code)}-sheet.jpg",
+            max_items=IMAGE2_STYLING_SHEET_SOURCE_LIMIT,
+        )
+        if styling_sheet:
+            inputs.append(styling_sheet)
+
     if include_preview and preview_asset_id:
         asset = get_media_asset_by_id(preview_asset_id)
         if asset:
             inputs.append(preview_grid_cell_image_input(asset, preview_grid_cell))
-    hero_snapshot = loads(input_version["image_snapshot_json"], []) if input_version else []
-    inputs.extend(image_input_from_asset(item.get("asset"), "hero_garment") for item in hero_snapshot[:3])
-    selected_materials = loads(styling["selected_material_snapshot_json"], []) if styling else []
-    remaining = max(0, 10 - len(inputs) - reserve_env)
-    for garment in selected_materials:
-        if remaining <= 0:
-            break
-        images = garment.get("images", [])
-        if images:
-            inputs.append(image_input_from_asset(images[0]["asset"], "styling_garment"))
-            remaining -= 1
-    if environment_asset_id:
+    elif environment_asset_id:
         env_asset = get_media_asset_by_id(environment_asset_id)
         if env_asset:
             inputs.append(image_input_from_asset(env_asset, "shoot_environment"))
-    return inputs[:10]
+    if len(inputs) > IMAGE2_MAX_REFERENCE_IMAGES:
+        raise RuntimeError(f"Image-2 参考图组装超过 {IMAGE2_MAX_REFERENCE_IMAGES} 张：{len(inputs)}")
+    return inputs
+
+
+def chunked(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
+    return [items[index:index + size] for index in range(0, len(items), size) if items[index:index + size]]
+
+
+def reference_sheet_image_input(
+    role: str,
+    source_inputs: list[dict[str, Any]],
+    filename: str,
+    max_items: int,
+) -> dict[str, Any] | None:
+    sources = [
+        item
+        for item in source_inputs[:max_items]
+        if isinstance(item, dict) and (item.get("objectKey") or item.get("url") or item.get("providerUrl"))
+    ]
+    if not sources:
+        return None
+    if len(sources) == 1:
+        return {**sources[0], "role": role}
+    return {
+        "role": role,
+        "filename": filename,
+        "collageItems": [{**item, "role": role} for item in sources],
+        "collageRule": {
+            "kind": "runtime_reference_sheet",
+            "maxSourceImages": max_items,
+            "sourceCount": len(sources),
+            "notPersisted": True,
+        },
+    }
+
+
+def safe_reference_filename(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "").strip()).strip(".-")
+    return slug or "reference"
 
 
 def image_input_from_asset(asset: dict[str, Any] | None, role: str) -> dict[str, Any]:
