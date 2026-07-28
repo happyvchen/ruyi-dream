@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from io import BytesIO
+from zipfile import ZipFile
+
 from app.db import dumps, get_db, now_iso
 from conftest import insert_ready_generation_task_with_preview, insert_styling_garment
 
@@ -116,6 +119,52 @@ def test_export_precheck_deduplicates_ids_and_enforces_selection(client) -> None
     assert deduped.status_code == 200
     assert len(deduped.json()["items"]) == 1
     assert empty.status_code == 400
+
+
+def test_styling_garment_export_downloads_only_original_images_in_code_folders(client) -> None:
+    first = insert_styling_garment(code="LOOK-001", status="TAGGING_RUNNING", image_count=2)
+    second = insert_styling_garment(code="LOOK-002", status="READY", image_count=1)
+    with get_db() as db:
+        first_images = db.execute(
+            """
+            SELECT ma.id FROM styling_garment_images sgi
+            JOIN media_assets ma ON ma.id = sgi.media_asset_id
+            WHERE sgi.styling_garment_id = ? ORDER BY sgi.sort_order
+            """,
+            (first,),
+        ).fetchall()
+        db.execute("UPDATE media_assets SET original_filename = 'front.jpg' WHERE id IN (?, ?)", (first_images[0]["id"], first_images[1]["id"]))
+
+    response = client.get("/api/styling-garment-exports/archive", params={"ids": f"{first},{second}"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    with ZipFile(BytesIO(response.content)) as archive:
+        assert archive.namelist() == [
+            "LOOK-001/front.jpg",
+            "LOOK-001/front(2).jpg",
+            "LOOK-002/LOOK-002-1.jpg",
+        ]
+        assert all(archive.read(name) == b"test-image-bytes" for name in archive.namelist())
+        assert all(not name.endswith((".json", ".txt")) for name in archive.namelist())
+
+
+def test_styling_garment_export_validates_selection_and_formal_images(client, monkeypatch) -> None:
+    garment_id = insert_styling_garment(code="EMPTY-LOOK", image_count=0)
+    broken_id = insert_styling_garment(code="BROKEN-LOOK", image_count=1)
+
+    empty_selection = client.get("/api/styling-garment-exports/archive", params={"ids": ""})
+    empty_garment = client.get("/api/styling-garment-exports/archive", params={"ids": str(garment_id)})
+    missing = client.get("/api/styling-garment-exports/archive", params={"ids": "999999"})
+    monkeypatch.setattr("app.main.get_bytes", lambda _key: (_ for _ in ()).throw(OSError("object unavailable")))
+    unreadable = client.get("/api/styling-garment-exports/archive", params={"ids": str(broken_id)})
+
+    assert empty_selection.status_code == 400
+    assert empty_garment.status_code == 400
+    assert "没有可下载的图片" in empty_garment.json()["detail"]
+    assert missing.status_code == 404
+    assert unreadable.status_code == 502
+    assert "读取搭配服装原图失败" in unreadable.json()["detail"]
 
 
 def test_redeliver_failed_image_reuses_provider_request_without_new_generation_submission(client) -> None:

@@ -59,6 +59,7 @@ vi.mock('../api', async () => {
     mediaUrl: (url?: string | null) => url ?? '',
     mediaDownloadUrl: (url?: string | null) => url ?? '',
     finalImageArchiveUrl: (ids: number[]) => `/archive?ids=${ids.join(',')}`,
+    stylingGarmentArchiveUrl: (ids: number[]) => `/garment-archive?ids=${ids.join(',')}`,
   }
 })
 
@@ -347,6 +348,59 @@ describe('production gate app shell and page controls', () => {
     expect(screen.getByText('选择图片')).toBeInTheDocument()
     expect(screen.getByText('选择文件夹')).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: '返回服装库' }).length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('downloads garment images from each card and from bulk selection', async () => {
+    apiMock.listStylingGarments.mockResolvedValue({
+      ...emptyPage,
+      items: [garment, { ...garment, id: 2, code: 'TAGGING-LOOK', status: 'TAGGING_RUNNING' }],
+      total: 2,
+      facets: {},
+      stableFacets: {},
+    })
+    const clickedUrls: string[] = []
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      clickedUrls.push(this.getAttribute('href') ?? '')
+    })
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
+
+    const firstCard = (await screen.findByText('CODX-UI-0718-B-8')).closest('.garment-card') as HTMLElement
+    const actions = within(firstCard).getAllByRole('button').map((button) => button.textContent?.trim())
+    expect(actions).toEqual(['详情', '归档', '下载', '重新识别'])
+    await userEvent.click(within(firstCard).getByRole('button', { name: '下载' }))
+    expect(clickedUrls).toEqual(['/garment-archive?ids=1'])
+
+    await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
+    const checkboxes = screen.getAllByRole('checkbox', { name: '选择' })
+    expect(checkboxes[1]).toBeEnabled()
+    await userEvent.click(checkboxes[0])
+    await userEvent.click(checkboxes[1])
+    await userEvent.click(screen.getByRole('button', { name: '下载 2 项' }))
+    expect(clickedUrls).toEqual(['/garment-archive?ids=1', '/garment-archive?ids=1,2'])
+  })
+
+  it('does not silently skip selected garments without images during bulk download', async () => {
+    apiMock.listStylingGarments.mockResolvedValue({
+      ...emptyPage,
+      items: [garment, { ...garment, id: 2, code: 'EMPTY-LOOK', imageCount: 0 }],
+      total: 2,
+      facets: {},
+      stableFacets: {},
+    })
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => undefined)
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
+    expect(await screen.findByText('EMPTY-LOOK')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
+    for (const checkbox of screen.getAllByRole('checkbox', { name: '选择' })) await userEvent.click(checkbox)
+    await userEvent.click(screen.getByRole('button', { name: '下载 2 项' }))
+
+    expect(alertSpy).toHaveBeenCalledWith('以下货号没有可下载的图片：EMPTY-LOOK')
+    expect(clickSpy).not.toHaveBeenCalled()
   })
 
   it('uses stable 24, 48, and 96 item page sizes in the garment library', async () => {

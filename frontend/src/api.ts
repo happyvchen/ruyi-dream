@@ -747,6 +747,10 @@ export function finalImageArchiveUrl(ids: number[]) {
   return `${API_BASE}/api/generation-task-exports/archive?ids=${ids.join(',')}`
 }
 
+export function stylingGarmentArchiveUrl(ids: number[]) {
+  return `${API_BASE}/api/styling-garment-exports/archive?ids=${ids.join(',')}`
+}
+
 export const api = {
   session: () => request<AuthSession>('/api/auth/session'),
   login: (username: string, password: string) =>

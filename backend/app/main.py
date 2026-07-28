@@ -14,6 +14,7 @@ from io import BytesIO
 from pathlib import Path
 import secrets
 import sqlite3
+import tempfile
 import time
 import zipfile
 from uuid import uuid4
@@ -5101,6 +5102,7 @@ FINAL_IMAGE_EXPORT_EXTENSIONS = {
     "image/png": ".png",
     "image/webp": ".webp",
 }
+STYLING_GARMENT_EXPORT_MAX_ITEMS = 50
 FINAL_IMAGE_EXPORT_STATUS_TEXT = {
     "FAILED": "生成失败",
     "RUNNING": "生成中",
@@ -5245,6 +5247,21 @@ def final_image_export_safe_component(value: str | None) -> str:
     return cleaned.rstrip(" .")
 
 
+def unique_export_filename(value: str | None, fallback: str, used: set[str]) -> str:
+    """生成 ZIP 目录内安全且不重复的文件名，同时尽量保留用户上传时的原文件名。"""
+    safe_name = final_image_export_safe_component(Path(str(value or "")).name) or fallback
+    path = Path(safe_name)
+    stem = path.stem or Path(fallback).stem or "image"
+    suffix = path.suffix
+    candidate = safe_name
+    serial = 1
+    while candidate.casefold() in used:
+        serial += 1
+        candidate = f"{stem}({serial}){suffix}"
+    used.add(candidate.casefold())
+    return candidate
+
+
 def assign_final_image_export_folders(tasks: list[dict[str, Any]]) -> None:
     """文件夹名与任务名保持一致；同名任务全部保留，从第二个起追加 (2)、(3) 序号。"""
     used: set[str] = {"清单.txt"}
@@ -5351,6 +5368,115 @@ def download_final_image_archive(ids: str = Query(...)) -> StreamingResponse:
         iter_final_image_export_zip(tasks, exported_at),
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def normalize_styling_garment_export_ids(raw_ids: list[int]) -> list[int]:
+    garment_ids: list[int] = []
+    for value in raw_ids:
+        garment_id = int(value)
+        if garment_id > 0 and garment_id not in garment_ids:
+            garment_ids.append(garment_id)
+    if not garment_ids:
+        raise HTTPException(status_code=400, detail="请先选择要下载的搭配服装")
+    if len(garment_ids) > STYLING_GARMENT_EXPORT_MAX_ITEMS:
+        raise HTTPException(status_code=400, detail=f"单次最多下载 {STYLING_GARMENT_EXPORT_MAX_ITEMS} 个货号")
+    return garment_ids
+
+
+def collect_styling_garment_export_items(garment_ids: list[int]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    with get_db() as db:
+        for garment_id in garment_ids:
+            garment = db.execute(
+                "SELECT id, code FROM styling_garments WHERE id = ? AND deleted_at IS NULL",
+                (garment_id,),
+            ).fetchone()
+            if not garment:
+                raise HTTPException(status_code=404, detail=f"搭配服装 {garment_id} 不存在")
+            images = db.execute(
+                """
+                SELECT sgi.sort_order, ma.object_key, ma.original_filename, ma.mime_type
+                FROM styling_garment_images sgi
+                JOIN media_assets ma ON ma.id = sgi.media_asset_id
+                WHERE sgi.styling_garment_id = ?
+                  AND sgi.deleted_at IS NULL
+                  AND ma.deleted_at IS NULL
+                ORDER BY sgi.sort_order, sgi.id
+                """,
+                (garment_id,),
+            ).fetchall()
+            if not images:
+                raise HTTPException(status_code=400, detail=f"货号 {garment['code']} 没有可下载的图片")
+            items.append(
+                {
+                    "garmentId": int(garment["id"]),
+                    "code": str(garment["code"]),
+                    "folder": final_image_export_safe_component(garment["code"]) or f"货号{garment_id}",
+                    "images": [dict(image) for image in images],
+                }
+            )
+    return items
+
+
+def build_styling_garment_export_zip(items: list[dict[str, Any]]) -> Any:
+    """在响应前完整构建 ZIP，避免对象读取失败被伪装成成功下载。"""
+    handle = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode="w+b")
+    date_time = datetime.now().timetuple()[:6]
+    try:
+        with zipfile.ZipFile(handle, "w", zipfile.ZIP_STORED) as archive:
+            for item in items:
+                used_names: set[str] = set()
+                for index, image in enumerate(item["images"], start=1):
+                    content = get_bytes(image["object_key"])
+                    fallback = f"image-{index}{final_image_export_extension(image['mime_type'], image['original_filename'])}"
+                    filename = unique_export_filename(image["original_filename"], fallback, used_names)
+                    info = zipfile.ZipInfo(f"{item['folder']}/{filename}", date_time=date_time)
+                    archive.writestr(info, content)
+        handle.seek(0)
+        return handle
+    except Exception as error:  # noqa: BLE001 - 转为用户可读的下载失败，并确保临时文件释放
+        handle.close()
+        logger.exception("构建搭配服装下载包失败")
+        raise HTTPException(status_code=502, detail="读取搭配服装原图失败，请稍后重试") from error
+
+
+def iter_temporary_export_file(handle: Any) -> Any:
+    try:
+        while chunk := handle.read(1024 * 1024):
+            yield chunk
+    finally:
+        handle.close()
+
+
+@app.get("/api/styling-garment-exports/archive")
+def download_styling_garment_archive(ids: str = Query(...)) -> StreamingResponse:
+    raw_ids: list[int] = []
+    for part in ids.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            raw_ids.append(int(part))
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="搭配服装 ID 格式不正确") from error
+    garment_ids = normalize_styling_garment_export_ids(raw_ids)
+    items = collect_styling_garment_export_items(garment_ids)
+    image_count = sum(len(item["images"]) for item in items)
+    archive = build_styling_garment_export_zip(items)
+    with get_db() as db:
+        log_event(
+            db,
+            "styling_garment_export",
+            None,
+            "styling_garment_images_exported",
+            {"garmentIds": garment_ids, "imageCount": image_count},
+        )
+    timestamp = now_iso()[:19].replace("-", "").replace(":", "").replace("T", "-")
+    return StreamingResponse(
+        iter_temporary_export_file(archive),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="styling-garments-{timestamp}.zip"'},
     )
 
 

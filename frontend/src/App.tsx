@@ -39,7 +39,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react'
-import { ApiError, api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl } from './api'
+import { ApiError, api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl, stylingGarmentArchiveUrl } from './api'
 import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, DirectUploadItem, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot, UploadSession } from './api'
 import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
@@ -102,6 +102,7 @@ const STYLING_GARMENT_SELECTED_IMAGES = 6
 const HERO_PRODUCT_SELECTED_IMAGES = 8
 const PRODUCT_CODE_MAX_CHARS = 20
 const BATCH_NAME_MAX_CHARS = 80
+const STYLING_GARMENT_EXPORT_MAX_ITEMS = 50
 const BULK_SEARCH_THRESHOLD = 5
 const IMPORT_SESSION_GROUP_WINDOW_MS = 10 * 60 * 1000
 const uploadSessionScopeRefreshes = [
@@ -2470,10 +2471,11 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   const [deleteGarmentImpact, setDeleteGarmentImpact] = useState<DeleteImpact | null>(null)
   const [deleteGarmentImpactLoading, setDeleteGarmentImpactLoading] = useState(false)
   const refreshUploadSessionsRef = useRef(refreshUploadSessions)
-  const selectableGarmentIds = items.filter((item) => item.status !== 'TAGGING_RUNNING').map((item) => item.id)
+  const selectableGarmentIds = items.map((item) => item.id)
   const selectedVisibleGarments = items.filter((item) => selectedGarmentIds.has(item.id) && selectableGarmentIds.includes(item.id))
   const selectedArchivedGarments = selectedVisibleGarments.filter((item) => item.archivedAt)
   const selectedActiveGarments = selectedVisibleGarments.filter((item) => !item.archivedAt)
+  const selectedTaggingGarments = selectedActiveGarments.filter((item) => item.status === 'TAGGING_RUNNING')
   const selectedTaggableGarments = selectedActiveGarments.filter((item) => TAGGABLE_GARMENT_STATUSES.has(item.status))
   const selectedRetaggableGarments = selectedActiveGarments.filter((item) => RETAGGABLE_GARMENT_STATUSES.has(item.status))
   const allVisibleGarmentsSelected = selectableGarmentIds.length > 0 && selectableGarmentIds.every((id) => selectedGarmentIds.has(id))
@@ -2692,6 +2694,25 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
     }, { refresh: 'background' })
   }
 
+  function downloadGarments(targets: StylingGarment[]) {
+    const unavailable = targets.filter((item) => Number(item.imageCount ?? 0) < 1)
+    if (unavailable.length) {
+      window.alert(`以下货号没有可下载的图片：${unavailable.map((item) => item.code).join('、')}`)
+      return
+    }
+    const ids = targets.map((item) => item.id)
+    if (ids.length > STYLING_GARMENT_EXPORT_MAX_ITEMS) {
+      window.alert(`单次最多下载 ${STYLING_GARMENT_EXPORT_MAX_ITEMS} 个货号，请减少选择后重试。`)
+      return
+    }
+    const anchor = document.createElement('a')
+    anchor.href = stylingGarmentArchiveUrl(ids)
+    anchor.rel = 'noreferrer'
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+  }
+
   function updateGarmentInView(next: StylingGarment) {
     setItems((current) => current.map((item) => item.id === next.id ? next : item))
     if (detail?.id === next.id) setDetail(next)
@@ -2872,10 +2893,17 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
               {selectedVisibleGarments.length > 0 && (
                 selectedArchivedGarments.length === selectedVisibleGarments.length
                   ? <button className="management-action" onClick={() => restoreGarments(selectedArchivedGarments)}>恢复 {selectedArchivedGarments.length} 项</button>
-                  : <button className="management-action" disabled={selectedArchivedGarments.length > 0} title={selectedArchivedGarments.length ? '请分别选择已归档和未归档服装' : undefined} onClick={() => openGarmentDeleteDialog(selectedActiveGarments)}>归档 {selectedActiveGarments.length} 项</button>
+                  : <button className="management-action" disabled={selectedArchivedGarments.length > 0 || selectedTaggingGarments.length > 0} title={selectedArchivedGarments.length ? '请分别选择已归档和未归档服装' : selectedTaggingGarments.length ? '识别中的服装可以下载，但不能归档' : undefined} onClick={() => openGarmentDeleteDialog(selectedActiveGarments)}>归档 {selectedActiveGarments.length} 项</button>
               )}
               {bulkMode && selectedVisibleGarments.length > 0 && (
                 <>
+                  <button
+                    className="management-action"
+                    disabled={!selectedVisibleGarments.some((item) => Number(item.imageCount ?? 0) > 0)}
+                    onClick={() => downloadGarments(selectedVisibleGarments)}
+                  >
+                    <Download size={15} /> 下载 {selectedVisibleGarments.length} 项
+                  </button>
                   {selectedTaggableGarments.length > 0 && (
                     <button
                       className="management-action"
@@ -2907,6 +2935,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
                   key={item.id}
                   item={item}
                   onOpen={() => void openDetail(item)}
+                  onDownload={() => downloadGarments([item])}
                   onTag={ANY_TAGGABLE_GARMENT_STATUSES.has(item.status) ? () => void run(item.status === 'READY' ? '重新识别标签中...' : '识别标签中...', () => api.tagStylingGarment(item.id), (r: { item: StylingGarment }) => updateGarmentInView(r.item), { refresh: 'background' }) : undefined}
                   tagLabel={item.status === 'READY' ? '重新识别' : '识别标签'}
                   selected={bulkMode && selectedGarmentIds.has(item.id)}
@@ -6703,11 +6732,12 @@ function UploadBox({ files, setFiles, max, compact = false }: { files: File[]; s
   )
 }
 
-function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDelete, onRestore, selected, onSelect }: {
+function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownload, onDelete, onRestore, selected, onSelect }: {
   item: StylingGarment
   onTag?: () => void
   tagLabel?: string
   onOpen?: () => void
+  onDownload?: () => void
   onDelete?: () => void
   onRestore?: () => void
   selected?: boolean
@@ -6731,7 +6761,7 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDelete,
     <div className={`garment-card ${tagging ? 'is-tagging' : ''} ${failed ? 'is-failed' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
       {onSelect && (
         <label className="card-select" title="选择">
-          <input type="checkbox" checked={!!selected} disabled={tagging} onChange={(event) => onSelect(event.target.checked)} />
+          <input type="checkbox" aria-label="选择" checked={!!selected} onChange={(event) => onSelect(event.target.checked)} />
         </label>
       )}
       <div className="garment-cover">
@@ -6750,6 +6780,7 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDelete,
       <div className="card-actions">
         {onOpen && <button className="management-action" onClick={onOpen}><Eye size={16} /> 详情</button>}
         {item.archivedAt ? onRestore && <button className="management-action" disabled={tagging || item.archiveReason === 'deletion_pending'} onClick={onRestore}><RefreshCw size={16} /> {archivedRestoreText(item.archiveReason)}</button> : onDelete && <button className="management-action" disabled={tagging} onClick={onDelete}><Trash2 size={16} /> 归档</button>}
+        {onDownload && <button className="management-action" disabled={Number(item.imageCount ?? 0) < 1} onClick={onDownload}><Download size={16} /> 下载</button>}
         {onTag && <button className="management-action" disabled={tagging} onClick={onTag}><RotateCcw size={16} /> {tagLabel}</button>}
       </div>
     </div>
