@@ -108,6 +108,10 @@ const RECORD_AUTO_ROW_HEIGHT = 62
 const RECORD_AUTO_ROW_GAP = 5
 const BULK_SEARCH_THRESHOLD = 5
 const IMPORT_SESSION_GROUP_WINDOW_MS = 10 * 60 * 1000
+const uploadSessionScopeRefreshes = [
+  { scope: 'generation_task', limit: 20 },
+  { scope: 'styling_garment', limit: 100 },
+] as const
 const TAGGABLE_GARMENT_STATUSES = new Set(['DRAFT', 'TAGGING_FAILED', 'TAGGING_READY'])
 const RETAGGABLE_GARMENT_STATUSES = new Set(['READY'])
 const ANY_TAGGABLE_GARMENT_STATUSES = new Set([...TAGGABLE_GARMENT_STATUSES, ...RETAGGABLE_GARMENT_STATUSES])
@@ -226,7 +230,7 @@ export function App() {
 
   useEffect(() => {
     if (!authenticated) return
-    void refreshUploadSessions().catch(() => undefined)
+    void refreshUploadSessionScopes().catch(() => undefined)
   }, [authenticated])
 
   useEffect(() => {
@@ -246,9 +250,10 @@ export function App() {
   }, [libraryImportOpen])
 
   useEffect(() => {
-    if (!authenticated || !pollingUploadSessions(uploadSessions).length) return
+    const pollingSessions = pollingUploadSessions(uploadSessions)
+    if (!authenticated || !pollingSessions.length) return
     const timer = window.setInterval(() => {
-      void refreshUploadSessions().catch(() => undefined)
+      void refreshUploadSessionScopes(pollingSessions).catch(() => undefined)
     }, 3000)
     return () => window.clearInterval(timer)
   }, [authenticated, uploadSessions])
@@ -331,10 +336,14 @@ export function App() {
     }
   }
 
-  async function refreshUploadSessions(scope?: string, limit = 20) {
+  async function refreshUploadSessions(scope: string, limit = 20) {
     const result = await api.listUploadSessions({ scope, limit })
     setUploadSessions((current) => mergeUploadSessions(current, result.items, scope))
     return result.items
+  }
+
+  async function refreshUploadSessionScopes(items?: UploadSession[]) {
+    await Promise.all(uploadSessionRefreshTargets(items).map(({ scope, limit }) => refreshUploadSessions(scope, limit)))
   }
 
   function navigate(next: Page) {
@@ -567,9 +576,15 @@ function pollingUploadSessions(items: UploadSession[]) {
   return items.filter((item) => ['PENDING', 'UPLOADING', 'UPLOADED', 'FINALIZING'].includes(item.status))
 }
 
-function mergeUploadSessions(current: UploadSession[], incoming: UploadSession[], refreshedScope?: string) {
-  const normalizedScope = refreshedScope?.replaceAll('_', '-')
-  const retained = normalizedScope ? current.filter((item) => item.scope !== normalizedScope) : []
+export function uploadSessionRefreshTargets(items?: UploadSession[]) {
+  if (!items) return [...uploadSessionScopeRefreshes]
+  const activeScopes = new Set(items.map((item) => item.scope))
+  return uploadSessionScopeRefreshes.filter(({ scope }) => activeScopes.has(scope.replaceAll('_', '-')))
+}
+
+export function mergeUploadSessions(current: UploadSession[], incoming: UploadSession[], refreshedScope: string) {
+  const normalizedScope = refreshedScope.replaceAll('_', '-')
+  const retained = current.filter((item) => item.scope !== normalizedScope)
   const byId = new Map<string, UploadSession>()
   retained.forEach((item) => byId.set(item.id, item))
   incoming.forEach((item) => byId.set(item.id, item))
