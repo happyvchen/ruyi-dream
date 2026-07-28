@@ -1,3 +1,5 @@
+import { sha256File } from './lib/fileChecksum'
+
 export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'
 
 export type SessionRole = 'user' | 'admin'
@@ -394,15 +396,14 @@ function uploadFileDescriptor(file: File) {
   }
 }
 
-async function uploadFileDescriptorWithChecksum(file: File) {
-  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
-  const checksumSha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+async function uploadFileDescriptorWithChecksum(file: File, onCompatibilityMode?: () => void) {
+  const checksumSha256 = await sha256File(file, { onCompatibilityMode })
   return { ...uploadFileDescriptor(file), checksumSha256 }
 }
 
-async function uploadFileDescriptorsWithChecksums(files: File[]) {
+async function uploadFileDescriptorsWithChecksums(files: File[], onCompatibilityMode?: () => void) {
   const descriptors: ReturnType<typeof uploadFileDescriptorWithChecksum> extends Promise<infer T> ? T[] : never = []
-  for (const file of files) descriptors.push(await uploadFileDescriptorWithChecksum(file))
+  for (const file of files) descriptors.push(await uploadFileDescriptorWithChecksum(file, onCompatibilityMode))
   return descriptors
 }
 
@@ -774,10 +775,10 @@ export const api = {
       }),
     })
   },
-  resumeUploadSession: async (id: string, files: File[]) =>
+  resumeUploadSession: async (id: string, files: File[], options?: { onChecksumCompatibilityMode?: () => void }) =>
     request<{ session: UploadSession; items: DirectUploadItem[] }>(`/api/upload-sessions/${encodeURIComponent(id)}/resume`, {
       method: 'POST',
-      body: JSON.stringify({ files: await uploadFileDescriptorsWithChecksums(files), executorId: uploadExecutorId() }),
+      body: JSON.stringify({ files: await uploadFileDescriptorsWithChecksums(files, options?.onChecksumCompatibilityMode), executorId: uploadExecutorId() }),
     }),
   uploadPreparedSession,
   finalizeStylingGarmentSession: (sessionId: string, code: string) =>

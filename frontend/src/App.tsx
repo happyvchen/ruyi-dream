@@ -46,6 +46,7 @@ import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { chooseDirectory, filesFromDirectory, getDirectoryHandle, storeDirectoryHandle, supportsDirectoryAccess } from './lib/directoryAccess'
 import type { RuyiFileSystemDirectoryHandle } from './lib/directoryAccess'
 import { friendlyErrorText } from './lib/errorMessages'
+import { CHECKSUM_COMPATIBILITY_NOTICE } from './lib/fileChecksum'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 
@@ -4050,6 +4051,7 @@ function BatchImportPanel({
   const [localError, setLocalError] = useState('')
   const [selectedDirectoryHandle, setSelectedDirectoryHandle] = useState<RuyiFileSystemDirectoryHandle | null>(null)
   const [resumingJobId, setResumingJobId] = useState<string | null>(null)
+  const [checksumCompatibilityMode, setChecksumCompatibilityMode] = useState(false)
   const runningImportJobCount = importJobs.filter((job) => job.status === 'RUNNING').length
   const hasRunningImportJobs = runningImportJobCount > 0
   const uploadWarningActiveRef = useRef(false)
@@ -4324,11 +4326,15 @@ function BatchImportPanel({
         const uploadFiles = formalAssetFiles(batch.files, STYLING_GARMENT_MAX_IMAGES)
         let prepared = preparedByCode?.get(batch.code)
         if (prepared) {
-          prepared = await api.resumeUploadSession(prepared.session.id, uploadFiles)
+          prepared = await api.resumeUploadSession(prepared.session.id, uploadFiles, {
+            onChecksumCompatibilityMode: () => setChecksumCompatibilityMode(true),
+          })
         } else {
           const item = importJobs.find((job) => job.id === jobId)?.items.find((candidate) => candidate.code === batch.code)
           if (!item?.sessionId) throw new Error(`${batch.code} 缺少可恢复的上传记录`)
-          prepared = await api.resumeUploadSession(item.sessionId, uploadFiles)
+          prepared = await api.resumeUploadSession(item.sessionId, uploadFiles, {
+            onChecksumCompatibilityMode: () => setChecksumCompatibilityMode(true),
+          })
         }
         let created: { item: StylingGarment; session: UploadSession }
         if (prepared.session.status === 'FINALIZED' && prepared.session.targetId) {
@@ -4471,7 +4477,9 @@ function BatchImportPanel({
       for (const item of resumableItems) {
         const session = sessionsById.get(item.sessionId!)!
         const files = (session.items ?? []).map((sessionItem) => selectedByPath.get(sessionItem.relativePath || sessionItem.filename)).filter((file): file is File => Boolean(file))
-        const prepared = await api.resumeUploadSession(session.id, files)
+        const prepared = await api.resumeUploadSession(session.id, files, {
+          onChecksumCompatibilityMode: () => setChecksumCompatibilityMode(true),
+        })
         preparedByCode.set(item.code, prepared)
         resumeBatches.push({ id: item.id, code: item.code, files })
       }
@@ -4534,6 +4542,7 @@ function BatchImportPanel({
           </div>
         </div>
         {localError && <span className="inline-error">{localError}</span>}
+        {checksumCompatibilityMode && <div className="import-notice is-warning" role="status">{CHECKSUM_COMPATIBILITY_NOTICE}</div>}
         {batches.length > 0 && (
           <div className="batch-list">
             {batches.map((batch) => (
