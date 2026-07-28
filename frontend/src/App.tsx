@@ -87,7 +87,7 @@ const steps = [
 const adminPages = new Set<Page>(['prompt-maintenance'])
 
 const defaultPageSizeOptions = [20, 50, 100] as const
-const densePageSizeOptions = [50, 100] as const
+const libraryPageSizeOptions = [24, 48, 96] as const
 const recentTaskRowHeight = 62
 const recentTaskMaxPageSize = 60
 const authSeenStorageKey = 'ruyi-auth-seen'
@@ -102,11 +102,6 @@ const STYLING_GARMENT_SELECTED_IMAGES = 6
 const HERO_PRODUCT_SELECTED_IMAGES = 8
 const PRODUCT_CODE_MAX_CHARS = 20
 const BATCH_NAME_MAX_CHARS = 80
-const GARMENT_AUTO_CARD_WIDTH = 172
-const GARMENT_AUTO_CARD_HEIGHT = 246
-const GARMENT_AUTO_GRID_GAP = 10
-const RECORD_AUTO_ROW_HEIGHT = 62
-const RECORD_AUTO_ROW_GAP = 5
 const BULK_SEARCH_THRESHOLD = 5
 const IMPORT_SESSION_GROUP_WINDOW_MS = 10 * 60 * 1000
 const uploadSessionScopeRefreshes = [
@@ -2445,8 +2440,6 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   importJobs: ImportJob[]
   setImportJobs: Dispatch<SetStateAction<ImportJob[]>>
 }) {
-  const [libraryResultsElement, setLibraryResultsElement] = useState<HTMLDivElement | null>(null)
-  const { pageSize: autoPageSize, ready: autoPageSizeReady } = useAutoGarmentPageSize(libraryResultsElement)
   const [query, setQuery] = useState('')
   const [detail, setDetail] = useState<StylingGarment | null>(null)
   const [items, setItems] = useState<StylingGarment[]>([])
@@ -2467,8 +2460,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   const [importJobFilter, setImportJobFilter] = useState('')
   const [focusedGarmentCode, setFocusedGarmentCode] = useState('')
   const [focusedGarmentId, setFocusedGarmentId] = useState<number | null>(null)
-  const [pageSizeMode, setPageSizeMode] = useState<'auto' | 'fixed'>('auto')
-  const [pageSize, setPageSize] = useState(() => estimateAutoGarmentPageSize())
+  const [pageSize, setPageSize] = useState<number>(libraryPageSizeOptions[0])
   const [searching, setSearching] = useState(true)
   const [showSearchBusy, setShowSearchBusy] = useState(false)
   const [includeArchived, setIncludeArchived] = useState(false)
@@ -2478,7 +2470,6 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   const [deleteGarmentImpact, setDeleteGarmentImpact] = useState<DeleteImpact | null>(null)
   const [deleteGarmentImpactLoading, setDeleteGarmentImpactLoading] = useState(false)
   const refreshUploadSessionsRef = useRef(refreshUploadSessions)
-  const pageSizeSettled = pageSizeMode !== 'auto' || (autoPageSizeReady && pageSize === autoPageSize)
   const selectableGarmentIds = items.filter((item) => item.status !== 'TAGGING_RUNNING').map((item) => item.id)
   const selectedVisibleGarments = items.filter((item) => selectedGarmentIds.has(item.id) && selectableGarmentIds.includes(item.id))
   const selectedArchivedGarments = selectedVisibleGarments.filter((item) => item.archivedAt)
@@ -2578,12 +2569,6 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   }, [query, includeArchived, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, importJobFilter, focusedGarmentCode, focusedGarmentId])
 
   useEffect(() => {
-    if (pageSizeMode !== 'auto' || !autoPageSizeReady || pageSize === autoPageSize) return
-    setPageSize(autoPageSize)
-    setOffset(0)
-  }, [autoPageSize, autoPageSizeReady, pageSize, pageSizeMode])
-
-  useEffect(() => {
     if (!searching) {
       setShowSearchBusy(false)
       return
@@ -2593,7 +2578,6 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   }, [searching])
 
   useEffect(() => {
-    if (!pageSizeSettled) return
     let cancelled = false
     setSearching(true)
     const timer = window.setTimeout(() => {
@@ -2639,7 +2623,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [offset, query, includeArchived, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize, importJobFilter, selectedImportBatch, focusedGarmentCode, focusedGarmentId, pageSizeSettled])
+  }, [offset, query, includeArchived, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize, importJobFilter, selectedImportBatch, focusedGarmentCode, focusedGarmentId])
 
   useEffect(() => {
     setItems((current) => current.map((item) => garments.find((latest) => latest.id === item.id) ?? item))
@@ -2916,7 +2900,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
               <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
             </div>
           </div>
-          <div ref={setLibraryResultsElement} className={`library-results ${showSearchBusy ? 'is-loading' : ''}`}>
+          <div className={`library-results ${showSearchBusy ? 'is-loading' : ''}`}>
             {items.length ? (
               <div className="garment-grid">{items.map((item) => (
                 <GarmentCard
@@ -2938,14 +2922,12 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
               disabled={searching}
               offset={offset}
               pageSize={pageSize}
-              pageSizeOptions={[{ value: autoPageSize, label: `${autoPageSize} 套`, key: 'auto' }, 50, 100]}
-              pageSizeOptionKey={pageSizeMode === 'auto' ? 'auto' : String(pageSize)}
+              pageSizeOptions={libraryPageSizeOptions}
               pageSizeUnit="套"
               total={total}
               totalPages={totalPages}
               onOffsetChange={setOffset}
-              onPageSizeChange={(value, optionKey) => {
-                setPageSizeMode(optionKey === 'auto' ? 'auto' : 'fixed')
+              onPageSizeChange={(value) => {
                 setPageSize(value)
                 setOffset(0)
               }}
@@ -3601,113 +3583,6 @@ function dateInputValue(value: Date) {
   const month = String(value.getMonth() + 1).padStart(2, '0')
   const day = String(value.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
-}
-
-function estimateAutoGarmentPageSize() {
-  if (typeof window === 'undefined') return 12
-  const sidebarWidth = window.innerWidth > 900 ? 248 : 0
-  const horizontalChrome = window.innerWidth > 900 ? 80 : 24
-  const availableWidth = Math.max(320, window.innerWidth - sidebarWidth - horizontalChrome)
-  const availableHeight = Math.max(360, window.innerHeight - (window.innerWidth > 900 ? 260 : 280))
-  return calculateAutoGarmentPageSize(availableWidth, availableHeight)
-}
-
-function estimateAutoRecordPageSize() {
-  if (typeof window === 'undefined') return 12
-  const availableHeight = Math.max(360, window.innerHeight - 260)
-  return calculateAutoRecordPageSize(availableHeight)
-}
-
-function calculateAutoGarmentPageSize(width: number, height: number, cardHeight = GARMENT_AUTO_CARD_HEIGHT, columnWidth = GARMENT_AUTO_CARD_WIDTH, gap = GARMENT_AUTO_GRID_GAP) {
-  const columns = Math.max(1, Math.floor((Math.max(width, columnWidth) + gap) / (columnWidth + gap)))
-  const rows = Math.max(1, Math.floor((Math.max(height, cardHeight) + gap) / (cardHeight + gap)))
-  return Math.max(1, Math.min(100, columns * rows))
-}
-
-function calculateAutoRecordPageSize(height: number, rowHeight = RECORD_AUTO_ROW_HEIGHT, gap = RECORD_AUTO_ROW_GAP) {
-  return Math.max(5, Math.min(100, Math.floor((Math.max(height, rowHeight) + gap) / (rowHeight + gap))))
-}
-
-function useAutoGarmentPageSize(results: HTMLDivElement | null) {
-  const [pageSize, setPageSize] = useState(() => estimateAutoGarmentPageSize())
-  const [ready, setReady] = useState(false)
-
-  useEffect(() => {
-    if (!results) {
-      setReady(false)
-      return
-    }
-
-    let frame = 0
-    const measure = () => {
-      window.cancelAnimationFrame(frame)
-      frame = window.requestAnimationFrame(() => {
-        const grid = results?.querySelector<HTMLElement>('.garment-grid') ?? null
-        const card = results?.querySelector<HTMLElement>('.garment-card') ?? null
-        const gridStyle = grid ? window.getComputedStyle(grid) : null
-        const columnGap = gridStyle ? Number.parseFloat(gridStyle.columnGap) || GARMENT_AUTO_GRID_GAP : GARMENT_AUTO_GRID_GAP
-        const rowGap = gridStyle ? Number.parseFloat(gridStyle.rowGap) || columnGap : columnGap
-        const width = grid?.clientWidth || results?.clientWidth || Math.max(320, window.innerWidth - 328)
-        const height = results?.clientHeight || Math.max(360, window.innerHeight - 260)
-        const measuredCardHeight = card?.getBoundingClientRect().height ?? 0
-        const cardHeight = measuredCardHeight > 120 ? measuredCardHeight : GARMENT_AUTO_CARD_HEIGHT
-        const nextPageSize = calculateAutoGarmentPageSize(width, height, cardHeight, GARMENT_AUTO_CARD_WIDTH, Math.max(columnGap, rowGap))
-        setPageSize((current) => current === nextPageSize ? current : nextPageSize)
-        setReady(true)
-      })
-    }
-
-    measure()
-    window.addEventListener('resize', measure)
-    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null
-    const mutationObserver = typeof MutationObserver !== 'undefined' ? new MutationObserver(measure) : null
-    observer?.observe(results)
-    mutationObserver?.observe(results, { childList: true, subtree: true })
-    return () => {
-      window.cancelAnimationFrame(frame)
-      window.removeEventListener('resize', measure)
-      observer?.disconnect()
-      mutationObserver?.disconnect()
-    }
-  }, [results])
-
-  return { pageSize, ready }
-}
-
-function useAutoRecordPageSize(listRef: { current: HTMLDivElement | null }) {
-  const [pageSize, setPageSize] = useState(() => estimateAutoRecordPageSize())
-  const [ready, setReady] = useState(false)
-
-  useEffect(() => {
-    let frame = 0
-    const measure = () => {
-      window.cancelAnimationFrame(frame)
-      frame = window.requestAnimationFrame(() => {
-        const list = listRef.current
-        const row = list?.querySelector<HTMLElement>('.record-row') ?? null
-        const listStyle = list ? window.getComputedStyle(list) : null
-        const gap = listStyle ? Number.parseFloat(listStyle.rowGap) || RECORD_AUTO_ROW_GAP : RECORD_AUTO_ROW_GAP
-        const height = list?.clientHeight || Math.max(360, window.innerHeight - 260)
-        const rowHeight = row?.getBoundingClientRect().height ?? 0
-        setPageSize(calculateAutoRecordPageSize(height, rowHeight > 40 ? rowHeight : RECORD_AUTO_ROW_HEIGHT, gap))
-        setReady(Boolean(list))
-      })
-    }
-    measure()
-    window.addEventListener('resize', measure)
-    const observer = typeof ResizeObserver !== 'undefined' && listRef.current ? new ResizeObserver(measure) : null
-    const mutationObserver = typeof MutationObserver !== 'undefined' && listRef.current ? new MutationObserver(measure) : null
-    if (listRef.current) observer?.observe(listRef.current)
-    if (listRef.current) mutationObserver?.observe(listRef.current, { childList: true, subtree: true })
-    return () => {
-      window.cancelAnimationFrame(frame)
-      window.removeEventListener('resize', measure)
-      observer?.disconnect()
-      mutationObserver?.disconnect()
-    }
-  }, [listRef])
-
-  return { pageSize, ready }
 }
 
 type StylingImportBatch = ImportBatch & { error?: string }
@@ -5579,8 +5454,6 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   run: any
   onDeleteResult: (result: DeleteOperationResult) => void
 }) {
-  const recordListBodyRef = useRef<HTMLDivElement | null>(null)
-  const { pageSize: autoPageSize, ready: autoPageSizeReady } = useAutoRecordPageSize(recordListBodyRef)
   const [viewMode, setViewMode] = useState<RecordViewMode>('all')
   const [workspaceItems, setWorkspaceItems] = useState<GenerationWorkspaceRecord[]>([])
   const [batchRecords, setBatchRecords] = useState<GenerationRecordBatch[]>([])
@@ -5615,11 +5488,9 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   const [deleteRecordImpactLoading, setDeleteRecordImpactLoading] = useState(false)
   const [downloadPrecheck, setDownloadPrecheck] = useState<FinalImageExportPrecheck | null>(null)
   const [downloadChecking, setDownloadChecking] = useState(false)
-  const [pageSizeMode, setPageSizeMode] = useState<'auto' | 'fixed'>('auto')
-  const [pageSize, setPageSize] = useState(() => estimateAutoRecordPageSize())
+  const [pageSize, setPageSize] = useState<number>(defaultPageSizeOptions[0])
   const [bulkMode, setBulkMode] = useState(false)
   const [batchBulkLoading, setBatchBulkLoading] = useState(false)
-  const pageSizeSettled = pageSizeMode !== 'auto' || (autoPageSizeReady && pageSize === autoPageSize)
   const taskListItems = viewMode === 'tasks'
     ? items
     : viewMode === 'all'
@@ -5709,7 +5580,6 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   }
 
   useEffect(() => {
-    if (!pageSizeSettled) return
     let cancelled = false
     setLoading(true)
     const timer = window.setTimeout(() => {
@@ -5732,17 +5602,11 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [records, viewMode, offset, query, includeArchived, statusFilter, createdFrom, createdTo, sortBy, sortDir, pageSize, pageSizeSettled])
+  }, [records, viewMode, offset, query, includeArchived, statusFilter, createdFrom, createdTo, sortBy, sortDir, pageSize])
 
   useEffect(() => {
     setOffset(0)
   }, [viewMode, query, includeArchived, statusFilter, createdFrom, createdTo, sortBy, sortDir])
-
-  useEffect(() => {
-    if (pageSizeMode !== 'auto' || !autoPageSizeReady || pageSize === autoPageSize) return
-    setPageSize(autoPageSize)
-    setOffset(0)
-  }, [autoPageSize, autoPageSizeReady, pageSize, pageSizeMode])
 
   useEffect(() => {
     batchBulkRequestRef.current += 1
@@ -6192,7 +6056,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
               <button className="management-action compact-control" disabled={batchBulkLoading} onClick={() => { setBulkMode((value) => !value); setSelectedRecordIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
             </div>
           </div>
-          <div className="record-list-body" ref={recordListBodyRef}>
+          <div className="record-list-body">
             {viewMode === 'all' && workspaceItems.map((entry) => entry.kind === 'batch' ? (
               (() => {
                 const selection = batchSelectionState(entry.batch)
@@ -6279,14 +6143,12 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
               disabled={loading}
               offset={offset}
               pageSize={pageSize}
-              pageSizeOptions={[{ value: autoPageSize, label: `${autoPageSize} 行`, key: 'auto' }, ...densePageSizeOptions]}
-              pageSizeOptionKey={pageSizeMode === 'auto' ? 'auto' : String(pageSize)}
+              pageSizeOptions={defaultPageSizeOptions}
               pageSizeUnit="行"
               total={total}
               totalPages={totalPages}
               onOffsetChange={setOffset}
-              onPageSizeChange={(value, optionKey) => {
-                setPageSizeMode(optionKey === 'auto' ? 'auto' : 'fixed')
+              onPageSizeChange={(value) => {
                 setPageSize(value)
                 setOffset(0)
                 setSelectedRecordIds(new Set())

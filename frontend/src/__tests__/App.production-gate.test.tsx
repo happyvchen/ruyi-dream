@@ -349,6 +349,30 @@ describe('production gate app shell and page controls', () => {
     expect(screen.getAllByRole('button', { name: '返回服装库' }).length).toBeGreaterThanOrEqual(1)
   })
 
+  it('uses stable 24, 48, and 96 item page sizes in the garment library', async () => {
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
+
+    await waitFor(() => expect(apiMock.listStylingGarments).toHaveBeenCalledWith(expect.objectContaining({ limit: 24 })))
+    const pageSizeSelect = screen.getByRole('combobox', { name: '每页' })
+    expect(Array.from((pageSizeSelect as HTMLSelectElement).options).map((option) => option.textContent)).toEqual(['24 套', '48 套', '96 套'])
+
+    await userEvent.selectOptions(pageSizeSelect, '48')
+    await waitFor(() => expect(apiMock.listStylingGarments).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 48, offset: 0 })))
+  })
+
+  it('uses stable 20, 50, and 100 row page sizes in generation records', async () => {
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '生成记录' }))
+
+    await waitFor(() => expect(apiMock.listRecordWorkspace).toHaveBeenCalledWith(expect.objectContaining({ limit: 20 })))
+    const pageSizeSelect = screen.getByRole('combobox', { name: '每页' })
+    expect(Array.from((pageSizeSelect as HTMLSelectElement).options).map((option) => option.textContent)).toEqual(['20 行', '50 行', '100 行'])
+
+    await userEvent.selectOptions(pageSizeSelect, '50')
+    await waitFor(() => expect(apiMock.listRecordWorkspace).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 50, offset: 0 })))
+  })
+
   it('keeps purge checked when delete impact refreshes the archive dialog', async () => {
     let resolveImpact: (value: unknown) => void = () => undefined
     apiMock.listStylingGarments.mockResolvedValue({
