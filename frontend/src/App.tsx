@@ -3688,7 +3688,7 @@ function storedLibraryImportJobs(): ImportJob[] {
     return parsed.slice(0, 5).map((job) => ({
       ...job,
       status: job.status === 'RUNNING' ? 'INTERRUPTED' : job.status,
-      items: (job.items ?? []).map((item) => item.status === 'UPLOADING' || item.status === 'SAVING' || item.status === 'TAGGING'
+      items: (job.items ?? []).map((item) => item.status === 'WAITING' || item.status === 'UPLOADING'
         ? { ...item, status: 'INTERRUPTED', error: item.error ?? '页面刷新后上传已暂停，可从已完成位置继续。' }
         : item),
     }))
@@ -3764,7 +3764,7 @@ function isImportTaskPendingRecognition(status: string) {
 }
 
 function uploadSessionDrivesImportItem(status: ImportJobItem['status']) {
-  return ['WAITING', 'UPLOADING', 'SAVING', 'INTERRUPTED'].includes(status)
+  return ['WAITING', 'UPLOADING', 'SAVING'].includes(status)
 }
 
 function importSessionCode(session: UploadSession, garment?: StylingGarment) {
@@ -4543,8 +4543,7 @@ function ImportTaskWorkbench({
       const targetId = session?.targetId ?? item.garmentId
       const garment = targetId ? garmentsById.get(targetId) : garmentsByCode.get(item.code)
       const sessionDrivesStatus = Boolean(session && uploadSessionDrivesImportItem(item.status))
-      const uploadStatus = sessionDrivesStatus && session ? session.status : item.status
-      const status = importRowBusinessStatus(session, garment, uploadStatus)
+      const status = garment?.status ?? (sessionDrivesStatus && session ? session.status : item.status)
       return {
         id: `job-${job.id}-${item.id}`,
         source: 'job',
@@ -4706,6 +4705,7 @@ function ImportTaskWorkbench({
     const retainedValues = rows.map((row) => row.retainedCount).filter((value): value is number => typeof value === 'number')
     const retained = retainedValues.length ? retainedValues.reduce((sum, value) => sum + value, 0) : null
     const failed = rows.filter((row) => row.statusTone === 'danger').length
+    const interrupted = rows.filter((row) => row.status === 'INTERRUPTED').length
     const uploading = rows.filter((row) => ['WAITING', 'UPLOADING', 'PENDING'].includes(row.status)).length
     const organizing = rows.filter((row) => ['SAVING', 'UPLOADED', 'FINALIZING'].includes(row.status)).length
     const tagging = rows.filter((row) => ['TAGGING', 'TAGGING_RUNNING'].includes(row.status)).length
@@ -4715,10 +4715,11 @@ function ImportTaskWorkbench({
     const ready = rows.filter((row) => row.status === 'READY').length
     const finalized = rows.filter((row) => row.garmentId || isImportTaskDone(row.status) || ['DRAFT', 'TAGGING_RUNNING', 'TAGGING_READY', 'TAGGING_FAILED'].includes(row.status)).length
     const saved = finalized
-    const tone: ImportTaskRow['statusTone'] = failed ? 'danger' : uploading || tagging || running ? 'running' : ready === rows.length ? 'success' : pendingRecognition || review ? 'warning' : 'warning'
-    const label = failed ? '部分失败' : uploading ? '上传中' : tagging ? 'AI 打标中' : organizing ? '整理入库中' : ready === rows.length ? '可用' : review ? '待复核' : pendingRecognition ? '待识别' : saved === rows.length ? '已入库' : '需处理'
+    const hasActiveWork = uploading > 0 || organizing > 0 || tagging > 0 || running > 0
+    const tone: ImportTaskRow['statusTone'] = failed ? 'danger' : interrupted ? 'warning' : uploading || tagging || running ? 'running' : ready === rows.length ? 'success' : pendingRecognition || review ? 'warning' : 'warning'
+    const label = failed ? '部分失败' : interrupted && hasActiveWork ? '部分上传已暂停' : interrupted ? '上传已暂停' : uploading ? '上传中' : tagging ? 'AI 打标中' : organizing ? '整理入库中' : ready === rows.length ? '可用' : review ? '待复核' : pendingRecognition ? '待识别' : saved === rows.length ? '已入库' : '需处理'
     const updatedAt = rows.map((row) => row.updatedAt ?? row.createdAt).filter(Boolean).sort().at(-1)
-    return { imported, uploaded, retained, failed, running, uploading, organizing, tagging, saved, tone, label, updatedAt }
+    return { imported, uploaded, retained, failed, interrupted, running, uploading, organizing, tagging, saved, tone, label, updatedAt }
   }
 
   function clearImportFilters() {
@@ -4818,6 +4819,7 @@ function ImportTaskWorkbench({
                   </div>
                   <div className="batch-progress-strip import-progress-strip">
                     <span>{summary.saved}/{group.total} 已整理</span>
+                    {summary.interrupted > 0 && <span>{summary.interrupted} 已暂停</span>}
                     {summary.uploading > 0 && <span>{summary.uploading} 上传中</span>}
                     {summary.organizing > 0 && <span>{summary.organizing} 整理中</span>}
                     {summary.tagging > 0 && <span>{summary.tagging} AI 打标中</span>}
@@ -4872,6 +4874,7 @@ function ImportTaskWorkbench({
                 </div>
                 <div className="batch-progress-strip import-progress-strip">
                   <span>{summary.saved}/{job.total} 已整理</span>
+                  {summary.interrupted > 0 && <span>{summary.interrupted} 已暂停</span>}
                   {summary.uploading > 0 && <span>{summary.uploading} 上传中</span>}
                   {summary.organizing > 0 && <span>{summary.organizing} 整理中</span>}
                   {summary.tagging > 0 && <span>{summary.tagging} AI 打标中</span>}

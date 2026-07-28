@@ -432,6 +432,99 @@ describe('production gate app shell and page controls', () => {
     expect(await screen.findByRole('button', { name: /批量管理/ })).toBeInTheDocument()
   })
 
+  it('shows a refreshed browser upload as paused even while the server session remains uploading', async () => {
+    const session = {
+      id: 'upload-session-refresh',
+      scope: 'styling-garment',
+      status: 'UPLOADING',
+      businessCode: 'LOOK-REFRESH',
+      sourceTitle: '刷新恢复批次',
+      batchId: 'import-refresh',
+      totalCount: 3,
+      uploadedCount: 1,
+      items: [],
+      createdAt: '2026-07-28T08:00:00Z',
+      updatedAt: '2026-07-28T08:01:00Z',
+    }
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    window.localStorage.setItem('ruyi-library-import-jobs', JSON.stringify([{
+      id: 'import-refresh',
+      title: '刷新恢复批次',
+      status: 'RUNNING',
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      total: 1,
+      uploaded: 0,
+      skipped: 0,
+      progress: null,
+      operations: [],
+      items: [{
+        id: 'refresh-item',
+        code: 'LOOK-REFRESH',
+        imageCount: 3,
+        uploadedCount: 1,
+        status: 'UPLOADING',
+        sessionId: session.id,
+      }],
+    }]))
+    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string }) => ({
+      items: options.scope === 'styling_garment' ? [session] : [],
+    }))
+    window.history.replaceState(null, '', '/library')
+
+    render(<App />)
+
+    expect(await screen.findByText('上传已暂停')).toBeInTheDocument()
+    expect(screen.queryByText('上传中')).not.toBeInTheDocument()
+  })
+
+  it('keeps server-side saving and tagging visible beside a paused browser upload', async () => {
+    const createdAt = '2026-07-28T08:00:00Z'
+    const sessions = [
+      { id: 'session-uploading', status: 'UPLOADING', businessCode: 'LOOK-UPLOAD', uploadedCount: 1 },
+      { id: 'session-saving', status: 'FINALIZING', businessCode: 'LOOK-SAVE', uploadedCount: 3 },
+      { id: 'session-tagging', status: 'FINALIZED', businessCode: 'LOOK-TAG', uploadedCount: 3, targetId: 99, targetStatus: 'TAGGING_RUNNING' },
+    ].map((session) => ({
+      scope: 'styling-garment',
+      sourceTitle: '混合恢复批次',
+      batchId: 'import-mixed-refresh',
+      totalCount: 3,
+      items: [],
+      createdAt,
+      updatedAt: createdAt,
+      ...session,
+    }))
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    window.localStorage.setItem('ruyi-library-import-jobs', JSON.stringify([{
+      id: 'import-mixed-refresh',
+      title: '混合恢复批次',
+      status: 'RUNNING',
+      createdAt,
+      updatedAt: createdAt,
+      total: 3,
+      uploaded: 0,
+      skipped: 0,
+      progress: null,
+      operations: [],
+      items: [
+        { id: 'uploading', code: 'LOOK-UPLOAD', imageCount: 3, uploadedCount: 1, status: 'UPLOADING', sessionId: 'session-uploading' },
+        { id: 'saving', code: 'LOOK-SAVE', imageCount: 3, uploadedCount: 3, status: 'SAVING', sessionId: 'session-saving' },
+        { id: 'tagging', code: 'LOOK-TAG', imageCount: 3, uploadedCount: 3, status: 'TAGGING', sessionId: 'session-tagging' },
+      ],
+    }]))
+    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string }) => ({
+      items: options.scope === 'styling_garment' ? sessions : [],
+    }))
+    window.history.replaceState(null, '', '/library')
+
+    render(<App />)
+
+    expect(await screen.findByText('部分上传已暂停')).toBeInTheDocument()
+    expect(screen.getByText('1 已暂停')).toBeInTheDocument()
+    expect(screen.getByText('1 整理中')).toBeInTheDocument()
+    expect(screen.getByText('1 AI 打标中')).toBeInTheDocument()
+  })
+
   it('downloads garment images from each card and from bulk selection', async () => {
     apiMock.listStylingGarments.mockResolvedValue({
       ...emptyPage,
