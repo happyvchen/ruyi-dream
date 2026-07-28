@@ -2444,7 +2444,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   const [query, setQuery] = useState('')
   const [detail, setDetail] = useState<StylingGarment | null>(null)
   const [items, setItems] = useState<StylingGarment[]>([])
-  const [importBusy, setImportBusy] = useState(false)
+  const [importPanelMounted, setImportPanelMounted] = useState(showImport)
   const [offset, setOffset] = useState(0)
   const [total, setTotal] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
@@ -2799,30 +2799,33 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
         />
         <button
           className="management-action"
-          disabled={showImport && importBusy}
-          title={showImport && importBusy ? '上传任务完成后可返回服装库' : undefined}
-          onClick={() => setShowImport((value) => !value)}
+          onClick={() => {
+            if (!showImport) setImportPanelMounted(true)
+            setShowImport((value) => !value)
+          }}
         >
           {showImport ? <ChevronLeft size={16} /> : <ImagePlus size={16} />}
           {showImport ? '返回服装库' : '上传搭配服装'}
         </button>
       </div>
       <div className={`library-content-scroll ${showImport ? 'is-import' : 'is-list'}`}>
-        {showImport ? (
-          <BatchImportPanel
-            onClose={() => setShowImport(false)}
-            onImported={() => void refreshFirstLibraryPage().catch(() => undefined)}
-            onBusyChange={setImportBusy}
-            uploadSessions={uploadSessions}
-            refreshUploadSessions={refreshUploadSessions}
-            markBrowserUploading={markBrowserUploading}
-            garments={importGarments}
-            importJobs={importJobs}
-            setImportJobs={setImportJobs}
-            onFindGarment={showGarmentFromImport}
-            onFindJob={showImportJobInLibrary}
-          />
-        ) : (
+        {importPanelMounted && (
+          <div hidden={!showImport}>
+            <BatchImportPanel
+              onClose={() => setShowImport(false)}
+              onImported={() => void refreshFirstLibraryPage().catch(() => undefined)}
+              uploadSessions={uploadSessions}
+              refreshUploadSessions={refreshUploadSessions}
+              markBrowserUploading={markBrowserUploading}
+              garments={importGarments}
+              importJobs={importJobs}
+              setImportJobs={setImportJobs}
+              onFindGarment={showGarmentFromImport}
+              onFindJob={showImportJobInLibrary}
+            />
+          </div>
+        )}
+        {!showImport && (
         <div className="panel library-panel">
           <div className="library-commandbar">
             <SearchBox
@@ -3928,7 +3931,6 @@ function garmentMatchesLibraryQuery(item: StylingGarment, queryTerms: string[]) 
 function BatchImportPanel({
   onClose,
   onImported,
-  onBusyChange,
   uploadSessions,
   refreshUploadSessions,
   markBrowserUploading,
@@ -3940,7 +3942,6 @@ function BatchImportPanel({
 }: {
   onClose: () => void
   onImported: () => void
-  onBusyChange: (busy: boolean) => void
   uploadSessions: UploadSession[]
   refreshUploadSessions: () => Promise<UploadSession[]>
   markBrowserUploading: (delta: 1 | -1) => void
@@ -3960,11 +3961,6 @@ function BatchImportPanel({
   const hasRunningImportJobs = runningImportJobCount > 0
   const uploadWarningActiveRef = useRef(false)
   const autoResumeAttemptedRef = useRef(new Set<string>())
-
-  useEffect(() => {
-    onBusyChange(hasRunningImportJobs)
-    return () => onBusyChange(false)
-  }, [hasRunningImportJobs, onBusyChange])
 
   useEffect(() => {
     const grouped = new Map<string, UploadSession[]>()
@@ -4465,8 +4461,6 @@ function BatchImportPanel({
             <button
               className="management-action"
               type="button"
-              disabled={hasRunningImportJobs}
-              title={hasRunningImportJobs ? '上传任务完成后可返回服装库' : undefined}
               onClick={onClose}
             >
               <ChevronLeft size={16} />返回服装库

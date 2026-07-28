@@ -48,6 +48,12 @@ const apiMock = vi.hoisted(() => ({
   deleteModelHeadReference: vi.fn(),
   reorderModelHeadReference: vi.fn(),
   setModelHeadReferenceAngle: vi.fn(),
+  createStylingImportSessions: vi.fn(),
+  resumeUploadSession: vi.fn(),
+  uploadPreparedSession: vi.fn(),
+  finalizeStylingGarmentSession: vi.fn(),
+  listUploadSessions: vi.fn(),
+  tagStylingGarments: vi.fn(),
 }))
 
 vi.mock('../api', async () => {
@@ -161,6 +167,43 @@ const garment = {
   updatedAt: '2026-07-17T00:00:00Z',
 }
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+function configurePendingStylingUpload() {
+  const upload = deferred<void>()
+  apiMock.createStylingImportSessions.mockImplementation(async (_title: string, batches: { code: string }[], batchId: string) => {
+    const session = {
+      id: 'upload-session-1',
+      scope: 'styling-garment',
+      status: 'PENDING',
+      businessCode: batches[0]!.code,
+      batchId,
+      totalCount: 1,
+      uploadedCount: 0,
+      items: [],
+    }
+    const prepared = { session, items: [] }
+    apiMock.resumeUploadSession.mockResolvedValue(prepared)
+    apiMock.finalizeStylingGarmentSession.mockResolvedValue({
+      item: { ...garment, code: batches[0]!.code, status: 'DRAFT' },
+      session: { ...session, status: 'FINALIZED', uploadedCount: 1, targetId: garment.id },
+    })
+    return { batchId, items: [prepared] }
+  })
+  apiMock.uploadPreparedSession.mockImplementation(() => upload.promise)
+  apiMock.listUploadSessions.mockResolvedValue({ items: [] })
+  apiMock.tagStylingGarments.mockResolvedValue({ items: [], startedIds: [], skipped: [] })
+  return upload
+}
+
 function configureApi(role: 'admin' | 'user' = 'admin') {
   apiMock.session.mockResolvedValue({ authRequired: true, authenticated: true, role })
   apiMock.login.mockResolvedValue({ authRequired: true, authenticated: true, role })
@@ -178,6 +221,7 @@ function configureApi(role: 'admin' | 'user' = 'admin') {
   apiMock.listRecordBatches.mockResolvedValue({ ...emptyPage, facets: {}, stableFacets: {} })
   apiMock.precheckFinalImageExport.mockResolvedValue({ items: [], downloadableTaskIds: [], completeTaskIds: [], totalImages: 0, totalBytes: 0 })
   apiMock.getShootEnvironment.mockResolvedValue({ asset: null })
+  apiMock.listUploadSessions.mockResolvedValue({ items: [] })
 }
 
 beforeEach(() => {
@@ -348,6 +392,44 @@ describe('production gate app shell and page controls', () => {
     expect(screen.getByText('选择图片')).toBeInTheDocument()
     expect(screen.getByText('选择文件夹')).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: '返回服装库' }).length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('allows returning to the garment library while an upload is still running', async () => {
+    const upload = configurePendingStylingUpload()
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
+    await userEvent.click(screen.getByRole('button', { name: '上传搭配服装' }))
+
+    const imagePicker = screen.getByText('选择图片').querySelector('input[type="file"]') as HTMLInputElement
+    await userEvent.upload(imagePicker, new File(['image'], 'LOOK-RETURN.jpg', { type: 'image/jpeg' }))
+    await userEvent.click(await screen.findByRole('button', { name: '上传' }))
+
+    expect(await screen.findByText('上传任务正在进行')).toBeInTheDocument()
+    await waitFor(() => expect(apiMock.uploadPreparedSession).toHaveBeenCalledTimes(1))
+    await userEvent.click(screen.getByRole('button', { name: '返回服装库' }))
+    expect(await screen.findByRole('button', { name: /批量管理/ })).toBeInTheDocument()
+
+    upload.resolve()
+    await waitFor(() => expect(apiMock.finalizeStylingGarmentSession).toHaveBeenCalledWith('upload-session-1', expect.any(String)))
+  })
+
+  it('allows using the import panel return action while another upload is running', async () => {
+    configurePendingStylingUpload()
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
+    await userEvent.click(screen.getByRole('button', { name: '上传搭配服装' }))
+
+    const imagePicker = screen.getByText('选择图片').querySelector('input[type="file"]') as HTMLInputElement
+    await userEvent.upload(imagePicker, new File(['first'], 'LOOK-RETURN.jpg', { type: 'image/jpeg' }))
+    await userEvent.click(await screen.findByRole('button', { name: '上传' }))
+    await waitFor(() => expect(apiMock.uploadPreparedSession).toHaveBeenCalledTimes(1))
+
+    await userEvent.upload(imagePicker, new File(['second'], 'LOOK-NEXT.jpg', { type: 'image/jpeg' }))
+    const returnButtons = await screen.findAllByRole('button', { name: '返回服装库' })
+    expect(returnButtons).toHaveLength(2)
+    await userEvent.click(returnButtons[1]!)
+
+    expect(await screen.findByRole('button', { name: /批量管理/ })).toBeInTheDocument()
   })
 
   it('downloads garment images from each card and from bulk selection', async () => {
