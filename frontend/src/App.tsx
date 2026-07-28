@@ -3956,11 +3956,29 @@ function BatchImportPanel({
   const [localError, setLocalError] = useState('')
   const [selectedDirectoryHandle, setSelectedDirectoryHandle] = useState<RuyiFileSystemDirectoryHandle | null>(null)
   const [resumingJobId, setResumingJobId] = useState<string | null>(null)
+  const [savedDirectoryJobIds, setSavedDirectoryJobIds] = useState<Set<string>>(() => new Set())
   const [checksumCompatibilityMode, setChecksumCompatibilityMode] = useState(false)
   const runningImportJobCount = importJobs.filter((job) => job.status === 'RUNNING').length
   const hasRunningImportJobs = runningImportJobCount > 0
   const uploadWarningActiveRef = useRef(false)
   const autoResumeAttemptedRef = useRef(new Set<string>())
+  const interruptedJobIdsKey = JSON.stringify(importJobs.filter((job) => job.status === 'INTERRUPTED').map((job) => job.id).sort())
+
+  useEffect(() => {
+    let cancelled = false
+    const interruptedJobIds = JSON.parse(interruptedJobIdsKey) as string[]
+    void Promise.all(interruptedJobIds.map(async (jobId) => {
+      const handle = await getDirectoryHandle(jobId).catch(() => undefined)
+      const permission = handle ? await handle.queryPermission({ mode: 'read' }).catch(() => 'denied' as const) : 'denied' as const
+      return { jobId, available: Boolean(handle) && permission !== 'denied' }
+    })).then((entries) => {
+      if (cancelled) return
+      setSavedDirectoryJobIds(new Set(entries.filter((entry) => entry.available).map((entry) => entry.jobId)))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [interruptedJobIdsKey])
 
   useEffect(() => {
     const grouped = new Map<string, UploadSession[]>()
@@ -4190,7 +4208,9 @@ function BatchImportPanel({
           return entry ? { ...item, sessionId: entry.session.id } : item
         }),
       }))
-      if (directoryHandle) void storeDirectoryHandle(jobId, directoryHandle).catch(() => undefined)
+      if (directoryHandle) void storeDirectoryHandle(jobId, directoryHandle)
+        .then(() => setSavedDirectoryJobIds((current) => new Set(current).add(jobId)))
+        .catch(() => undefined)
       await runImportJob(jobId, jobBatches, nextJob.title, preparedByCode)
     } catch (err) {
       const message = err instanceof Error ? err.message : '上传任务创建失败'
@@ -4488,6 +4508,7 @@ function BatchImportPanel({
           onFindGarment={onFindGarment}
           onFindJob={onFindJob}
           resumingJobId={resumingJobId}
+          savedDirectoryJobIds={savedDirectoryJobIds}
           onResumeSaved={(jobId) => void resumeFromSavedDirectory(jobId, true)}
           onResumeFiles={(jobId, files) => void resumeImportJob(jobId, files)}
         />
@@ -4504,6 +4525,7 @@ function ImportTaskWorkbench({
   onFindGarment,
   onFindJob,
   resumingJobId,
+  savedDirectoryJobIds,
   onResumeSaved,
   onResumeFiles,
 }: {
@@ -4514,6 +4536,7 @@ function ImportTaskWorkbench({
   onFindGarment: (code: string, garmentId?: number) => void
   onFindJob: (jobId: string) => void
   resumingJobId: string | null
+  savedDirectoryJobIds: ReadonlySet<string>
   onResumeSaved: (jobId: string) => void
   onResumeFiles: (jobId: string, files: File[]) => void
 }) {
@@ -4850,6 +4873,7 @@ function ImportTaskWorkbench({
           const expanded = expandedTasks.has(job.id)
           const title = importJobDisplayTitle(job, allJobRows)
           const canResume = job.status === 'INTERRUPTED'
+          const canResumeSavedDirectory = canResume && savedDirectoryJobIds.has(job.id)
           return (
             <section className={`batch-record-shell import-record-shell ${expanded ? 'is-expanded' : ''}`} key={job.id}>
               <div
@@ -4884,9 +4908,11 @@ function ImportTaskWorkbench({
                 <span className={`import-status-badge is-${summary.tone}`}>{summary.label}</span>
                 {canResume && (
                   <div className="import-resume-actions" onClick={(event) => event.stopPropagation()}>
-                    <button className="management-action compact-control" type="button" disabled={resumingJobId === job.id} onClick={() => onResumeSaved(job.id)}>
-                      <RefreshCw size={14} />{resumingJobId === job.id ? '恢复中' : '继续上传'}
-                    </button>
+                    {canResumeSavedDirectory && (
+                      <button className="management-action compact-control" type="button" disabled={resumingJobId === job.id} onClick={() => onResumeSaved(job.id)}>
+                        <RefreshCw size={14} />{resumingJobId === job.id ? '恢复中' : '继续上传'}
+                      </button>
+                    )}
                     <label className="management-action compact-control" title="重新选择原任务文件夹；系统会严格核对后从断点继续">
                       <FolderOpen size={14} />重新选择原目录
                       <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} disabled={resumingJobId === job.id} onChange={(event) => {

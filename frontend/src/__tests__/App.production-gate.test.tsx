@@ -56,6 +56,10 @@ const apiMock = vi.hoisted(() => ({
   tagStylingGarments: vi.fn(),
 }))
 
+const directoryAccessMock = vi.hoisted(() => ({
+  getDirectoryHandle: vi.fn(),
+}))
+
 vi.mock('../api', async () => {
   const actual = await vi.importActual<typeof import('../api')>('../api')
   return {
@@ -66,6 +70,14 @@ vi.mock('../api', async () => {
     mediaDownloadUrl: (url?: string | null) => url ?? '',
     finalImageArchiveUrl: (ids: number[]) => `/archive?ids=${ids.join(',')}`,
     stylingGarmentArchiveUrl: (ids: number[]) => `/garment-archive?ids=${ids.join(',')}`,
+  }
+})
+
+vi.mock('../lib/directoryAccess', async () => {
+  const actual = await vi.importActual<typeof import('../lib/directoryAccess')>('../lib/directoryAccess')
+  return {
+    ...actual,
+    getDirectoryHandle: directoryAccessMock.getDirectoryHandle,
   }
 })
 
@@ -252,6 +264,7 @@ beforeEach(() => {
     })),
   })
   configureApi()
+  directoryAccessMock.getDirectoryHandle.mockResolvedValue(undefined)
 })
 
 afterEach(() => {
@@ -523,6 +536,110 @@ describe('production gate app shell and page controls', () => {
     expect(screen.getByText('1 已暂停')).toBeInTheDocument()
     expect(screen.getByText('1 整理中')).toBeInTheDocument()
     expect(screen.getByText('1 AI 打标中')).toBeInTheDocument()
+  })
+
+  it('only offers directory reselection when a paused upload has no saved directory permission', async () => {
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    window.localStorage.setItem('ruyi-library-import-jobs', JSON.stringify([{
+      id: 'import-without-handle',
+      title: '无目录授权批次',
+      status: 'INTERRUPTED',
+      total: 1,
+      uploaded: 0,
+      skipped: 0,
+      progress: null,
+      operations: [],
+      items: [{ id: 'item-1', code: 'LOOK-NO-HANDLE', imageCount: 3, uploadedCount: 1, status: 'INTERRUPTED', sessionId: 'session-no-handle' }],
+    }]))
+    window.history.replaceState(null, '', '/library')
+
+    render(<App />)
+
+    expect(await screen.findByText('重新选择原目录')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '继续上传' })).not.toBeInTheDocument()
+  })
+
+  it('offers one-click continuation when a paused upload has a saved directory handle', async () => {
+    directoryAccessMock.getDirectoryHandle.mockResolvedValue({
+      kind: 'directory',
+      name: '原任务目录',
+      values: async function* () {},
+      queryPermission: vi.fn().mockResolvedValue('granted'),
+      requestPermission: vi.fn().mockResolvedValue('granted'),
+    })
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    window.localStorage.setItem('ruyi-library-import-jobs', JSON.stringify([{
+      id: 'import-with-handle',
+      title: '已授权批次',
+      status: 'INTERRUPTED',
+      total: 1,
+      uploaded: 0,
+      skipped: 0,
+      progress: null,
+      operations: [],
+      items: [{ id: 'item-1', code: 'LOOK-HANDLE', imageCount: 3, uploadedCount: 1, status: 'INTERRUPTED', sessionId: 'session-handle' }],
+    }]))
+    window.history.replaceState(null, '', '/library')
+
+    render(<App />)
+
+    expect(await screen.findByRole('button', { name: '继续上传' })).toBeInTheDocument()
+    expect(screen.getByText('重新选择原目录')).toBeInTheDocument()
+  })
+
+  it('does not offer one-click continuation when the saved directory permission is denied', async () => {
+    directoryAccessMock.getDirectoryHandle.mockResolvedValue({
+      kind: 'directory',
+      name: '已拒绝目录',
+      values: async function* () {},
+      queryPermission: vi.fn().mockResolvedValue('denied'),
+      requestPermission: vi.fn().mockResolvedValue('denied'),
+    })
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    window.localStorage.setItem('ruyi-library-import-jobs', JSON.stringify([{
+      id: 'import-denied-handle',
+      title: '拒绝授权批次',
+      status: 'INTERRUPTED',
+      total: 1,
+      uploaded: 0,
+      skipped: 0,
+      progress: null,
+      operations: [],
+      items: [{ id: 'item-1', code: 'LOOK-DENIED', imageCount: 3, uploadedCount: 1, status: 'INTERRUPTED', sessionId: 'session-denied' }],
+    }]))
+    window.history.replaceState(null, '', '/library')
+
+    render(<App />)
+
+    expect(await screen.findByText('重新选择原目录')).toBeInTheDocument()
+    await waitFor(() => expect(directoryAccessMock.getDirectoryHandle).toHaveBeenCalledWith('import-denied-handle'))
+    expect(screen.queryByRole('button', { name: '继续上传' })).not.toBeInTheDocument()
+  })
+
+  it('does not recheck paused directory handles for unrelated upload progress', async () => {
+    apiMock.createStylingImportSessions.mockImplementation(() => new Promise(() => undefined))
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    window.localStorage.setItem('ruyi-library-import-jobs', JSON.stringify([{
+      id: 'stable-paused-job',
+      title: '稳定暂停批次',
+      status: 'INTERRUPTED',
+      total: 1,
+      uploaded: 0,
+      skipped: 0,
+      progress: null,
+      operations: [],
+      items: [{ id: 'paused-item', code: 'LOOK-PAUSED', imageCount: 3, uploadedCount: 1, status: 'INTERRUPTED', sessionId: 'paused-session' }],
+    }]))
+    window.history.replaceState(null, '', '/library')
+    render(<App />)
+    await waitFor(() => expect(directoryAccessMock.getDirectoryHandle).toHaveBeenCalledTimes(1))
+
+    const imagePicker = screen.getByText('选择图片').querySelector('input[type="file"]') as HTMLInputElement
+    await userEvent.upload(imagePicker, new File(['new'], 'LOOK-NEW.jpg', { type: 'image/jpeg' }))
+    await userEvent.click(await screen.findByRole('button', { name: '上传' }))
+    await waitFor(() => expect(apiMock.createStylingImportSessions).toHaveBeenCalledTimes(1))
+
+    expect(directoryAccessMock.getDirectoryHandle).toHaveBeenCalledTimes(1)
   })
 
   it('downloads garment images from each card and from bulk selection', async () => {
