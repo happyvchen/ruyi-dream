@@ -2,6 +2,7 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from '../App'
 
@@ -640,6 +641,82 @@ describe('production gate app shell and page controls', () => {
     await waitFor(() => expect(apiMock.createStylingImportSessions).toHaveBeenCalledTimes(1))
 
     expect(directoryAccessMock.getDirectoryHandle).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a newly opened tab passive until the user explicitly resumes an upload', async () => {
+    const session = {
+      id: 'passive-session',
+      scope: 'styling-garment',
+      status: 'UPLOADING',
+      businessCode: 'LOOK-PASSIVE',
+      sourceTitle: '被动查看批次',
+      batchId: 'passive-job',
+      totalCount: 2,
+      uploadedCount: 1,
+      items: [],
+    }
+    directoryAccessMock.getDirectoryHandle.mockResolvedValue({
+      kind: 'directory',
+      name: '原任务目录',
+      values: async function* () {},
+      queryPermission: vi.fn().mockResolvedValue('granted'),
+      requestPermission: vi.fn().mockResolvedValue('granted'),
+    })
+    apiMock.resumeUploadSession.mockResolvedValue({ session, items: [] })
+    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string }) => ({
+      items: options.scope === 'styling_garment' ? [session] : [],
+    }))
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    window.localStorage.setItem('ruyi-library-import-jobs', JSON.stringify([{
+      id: 'passive-job',
+      title: '被动查看批次',
+      status: 'RUNNING',
+      total: 1,
+      uploaded: 0,
+      skipped: 0,
+      progress: null,
+      operations: [],
+      items: [{ id: 'passive-item', code: 'LOOK-PASSIVE', imageCount: 2, uploadedCount: 1, status: 'UPLOADING', sessionId: session.id }],
+    }]))
+    vi.mocked(window.localStorage.setItem).mockClear()
+    window.history.replaceState(null, '', '/library')
+
+    render(<StrictMode><App /></StrictMode>)
+
+    expect(await screen.findByRole('button', { name: '继续上传' })).toBeInTheDocument()
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    expect(apiMock.resumeUploadSession).not.toHaveBeenCalled()
+    expect(window.localStorage.setItem).not.toHaveBeenCalledWith('ruyi-library-import-jobs', expect.any(String))
+
+    await userEvent.click(screen.getByRole('button', { name: '继续上传' }))
+    await waitFor(() => expect(apiMock.resumeUploadSession).toHaveBeenCalled())
+    await waitFor(() => expect(window.localStorage.setItem).toHaveBeenCalledWith('ruyi-library-import-jobs', expect.any(String)))
+  })
+
+  it('does not persist batches discovered by passive server recovery', async () => {
+    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string }) => ({
+      items: options.scope === 'styling_garment' ? [{
+        id: 'server-only-session',
+        scope: 'styling-garment',
+        status: 'UPLOADING',
+        businessCode: 'LOOK-SERVER-ONLY',
+        sourceTitle: '服务端恢复批次',
+        batchId: 'server-only-batch',
+        totalCount: 2,
+        uploadedCount: 1,
+        items: [],
+        createdAt: '2026-07-28T08:00:00Z',
+        updatedAt: '2026-07-28T08:01:00Z',
+      }] : [],
+    }))
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    vi.mocked(window.localStorage.setItem).mockClear()
+    window.history.replaceState(null, '', '/library')
+
+    render(<StrictMode><App /></StrictMode>)
+
+    await waitFor(() => expect(directoryAccessMock.getDirectoryHandle).toHaveBeenCalledWith('server-only-batch'))
+    expect(window.localStorage.setItem).not.toHaveBeenCalledWith('ruyi-library-import-jobs', expect.any(String))
   })
 
   it('downloads garment images from each card and from bulk selection', async () => {

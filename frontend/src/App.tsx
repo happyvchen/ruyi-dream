@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, Dispatch, DragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode, SetStateAction, UIEvent } from 'react'
 import {
@@ -181,6 +181,17 @@ export function App() {
     return window.localStorage.getItem(libraryImportOpenStorageKey) === '1'
   })
   const [libraryImportJobs, setLibraryImportJobs] = useState<ImportJob[]>(() => storedLibraryImportJobs())
+  const persistLibraryImportJobs = useCallback<Dispatch<SetStateAction<ImportJob[]>>>((action) => {
+    setLibraryImportJobs((current) => {
+      const next = typeof action === 'function' ? action(current) : action
+      try {
+        window.localStorage.setItem(libraryImportJobsStorageKey, JSON.stringify(next.slice(0, 5)))
+      } catch {
+        // Keep upload execution usable when local persistence is unavailable.
+      }
+      return next
+    })
+  }, [])
 
   useEffect(() => {
     void api.session()
@@ -229,14 +240,6 @@ export function App() {
     if (!authenticated) return
     void refreshUploadSessionScopes().catch(() => undefined)
   }, [authenticated])
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(libraryImportJobsStorageKey, JSON.stringify(libraryImportJobs.slice(0, 5)))
-    } catch {
-      // Import progress remains visible in memory even if local storage is unavailable.
-    }
-  }, [libraryImportJobs])
 
   useEffect(() => {
     try {
@@ -492,7 +495,7 @@ export function App() {
         {error && <div className="toast">{error.length > 300 ? `${error.slice(0, 300)}…` : error}</div>}
         {busy && <BusyPill label={busy} />}
         {page === 'studio' && <StudioPage task={task} setTask={setTask} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} uploadSessions={uploadSessions.filter((item) => item.scope === 'generation-task')} refreshUploadSessions={() => refreshUploadSessions('generation_task')} markBrowserUploading={markBrowserUploading} onStartNewTask={() => { suppressStudioAutoRestoreRef.current = true }} />}
-        {page === 'library' && <LibraryPage garments={garments} run={run} role={role} onDeleteResult={noteDeleteOperationResult} uploadSessions={uploadSessions.filter((item) => item.scope === 'styling-garment')} refreshUploadSessions={() => refreshUploadSessions('styling_garment', 100)} markBrowserUploading={markBrowserUploading} showImport={libraryImportOpen} setShowImport={setLibraryImportOpen} importJobs={libraryImportJobs} setImportJobs={setLibraryImportJobs} />}
+        {page === 'library' && <LibraryPage garments={garments} run={run} role={role} onDeleteResult={noteDeleteOperationResult} uploadSessions={uploadSessions.filter((item) => item.scope === 'styling-garment')} refreshUploadSessions={() => refreshUploadSessions('styling_garment', 100)} markBrowserUploading={markBrowserUploading} showImport={libraryImportOpen} setShowImport={setLibraryImportOpen} importJobs={libraryImportJobs} setImportJobs={persistLibraryImportJobs} syncImportJobs={setLibraryImportJobs} />}
         {page === 'model' && <ModelPage models={models} role={role} run={run} />}
         {page === 'prompt-maintenance' && role === 'admin' && <PromptMaintenancePage run={run} />}
         {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} openTaskInStudio={openTaskInStudio} run={run} onDeleteResult={noteDeleteOperationResult} />}
@@ -2428,7 +2431,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   )
 }
 
-function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refreshUploadSessions, markBrowserUploading, showImport, setShowImport, importJobs, setImportJobs }: {
+function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refreshUploadSessions, markBrowserUploading, showImport, setShowImport, importJobs, setImportJobs, syncImportJobs }: {
   garments: StylingGarment[]
   run: any
   role: SessionRole | null
@@ -2440,6 +2443,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   setShowImport: Dispatch<SetStateAction<boolean>>
   importJobs: ImportJob[]
   setImportJobs: Dispatch<SetStateAction<ImportJob[]>>
+  syncImportJobs: Dispatch<SetStateAction<ImportJob[]>>
 }) {
   const [query, setQuery] = useState('')
   const [detail, setDetail] = useState<StylingGarment | null>(null)
@@ -2820,6 +2824,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
               garments={importGarments}
               importJobs={importJobs}
               setImportJobs={setImportJobs}
+              syncImportJobs={syncImportJobs}
               onFindGarment={showGarmentFromImport}
               onFindJob={showImportJobInLibrary}
             />
@@ -3937,6 +3942,7 @@ function BatchImportPanel({
   garments,
   importJobs,
   setImportJobs,
+  syncImportJobs,
   onFindGarment,
   onFindJob,
 }: {
@@ -3948,6 +3954,7 @@ function BatchImportPanel({
   garments: StylingGarment[]
   importJobs: ImportJob[]
   setImportJobs: Dispatch<SetStateAction<ImportJob[]>>
+  syncImportJobs: Dispatch<SetStateAction<ImportJob[]>>
   onFindGarment: (code: string, garmentId?: number) => void
   onFindJob: (jobId: string) => void
 }) {
@@ -3961,7 +3968,6 @@ function BatchImportPanel({
   const runningImportJobCount = importJobs.filter((job) => job.status === 'RUNNING').length
   const hasRunningImportJobs = runningImportJobCount > 0
   const uploadWarningActiveRef = useRef(false)
-  const autoResumeAttemptedRef = useRef(new Set<string>())
   const interruptedJobIdsKey = JSON.stringify(importJobs.filter((job) => job.status === 'INTERRUPTED').map((job) => job.id).sort())
 
   useEffect(() => {
@@ -3987,7 +3993,7 @@ function BatchImportPanel({
       grouped.set(session.batchId, [...(grouped.get(session.batchId) ?? []), session])
     })
     if (!grouped.size) return
-    setImportJobs((current) => {
+    syncImportJobs((current) => {
       const existingIds = new Set(current.map((job) => job.id))
       const recovered = [...grouped.entries()].filter(([batchId]) => !existingIds.has(batchId)).map(([batchId, sessions]) => {
         const allFinalized = sessions.every((session) => session.status === 'FINALIZED')
@@ -4022,7 +4028,7 @@ function BatchImportPanel({
       })
       return recovered.length ? [...recovered, ...current] : current
     })
-  }, [setImportJobs, uploadSessions])
+  }, [syncImportJobs, uploadSessions])
 
   function addFiles(files: File[]) {
     const next = groupImportFiles(files).batches
@@ -4413,26 +4419,18 @@ function BatchImportPanel({
     }
   }
 
-  async function resumeFromSavedDirectory(jobId: string, requestPermission = false) {
+  async function resumeFromSavedDirectory(jobId: string) {
     try {
       const handle = await getDirectoryHandle(jobId)
       if (!handle) throw new Error('未找到原文件夹授权，请重新选择原文件夹。')
       let permission = await handle.queryPermission({ mode: 'read' })
-      if (permission === 'prompt' && requestPermission) permission = await handle.requestPermission({ mode: 'read' })
+      if (permission === 'prompt') permission = await handle.requestPermission({ mode: 'read' })
       if (permission !== 'granted') throw new Error('需要重新授权原文件夹后才能继续上传。')
       await resumeImportJob(jobId, await filesFromDirectory(handle))
     } catch (err) {
       setLocalError(err instanceof Error ? err.message : '无法读取原文件夹')
     }
   }
-
-  useEffect(() => {
-    if (!uploadSessions.length || resumingJobId) return
-    const interrupted = importJobs.find((job) => job.status === 'INTERRUPTED' && !autoResumeAttemptedRef.current.has(job.id))
-    if (!interrupted) return
-    autoResumeAttemptedRef.current.add(interrupted.id)
-    void resumeFromSavedDirectory(interrupted.id, false)
-  }, [importJobs, resumingJobId, uploadSessions])
 
   return (
     <div className="import-page-stack">
@@ -4509,7 +4507,7 @@ function BatchImportPanel({
           onFindJob={onFindJob}
           resumingJobId={resumingJobId}
           savedDirectoryJobIds={savedDirectoryJobIds}
-          onResumeSaved={(jobId) => void resumeFromSavedDirectory(jobId, true)}
+          onResumeSaved={(jobId) => void resumeFromSavedDirectory(jobId)}
           onResumeFiles={(jobId, files) => void resumeImportJob(jobId, files)}
         />
       )}
