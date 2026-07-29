@@ -49,8 +49,8 @@ ERROR_SYSTEM_ERROR = "SYSTEM_ERROR"
 
 # ToAPIs 报错分类（方案 A–G）。这些 error_code 稳定落到 generation_attempts.error_code，
 # 前端据此给不同文案与动作；重试策略由 is_retryable_error / is_zero_output_transient 决定。
-ERROR_GATEWAY_5XX = "GATEWAY_5XX"                    # 502/503/504/520-524、上游网关错误 → 可安全重试
-ERROR_CONN_RESET = "CONN_RESET"                      # 连接关闭/重置/SSL EOF/write timeout → 可安全重试
+ERROR_GATEWAY_5XX = "GATEWAY_5XX"                    # 502/503/504/520-524、上游网关错误 → 按阶段决策
+ERROR_CONN_RESET = "CONN_RESET"                      # 连接关闭/重置/SSL EOF/write timeout → 按阶段决策
 ERROR_RATE_LIMITED = "RATE_LIMITED"                  # 429 → 退避重试（尊重 Retry-After）
 ERROR_INSUFFICIENT_BALANCE = "INSUFFICIENT_BALANCE"  # 余额不足/剩余额度负 → 不重试、硬停
 ERROR_AUTH_FAILED = "AUTH_FAILED"                    # 401/403/不支持指定渠道 → 不重试
@@ -61,10 +61,11 @@ ERROR_CONTENT_POLICY = "CONTENT_POLICY_VIOLATION"    # 内容安全策略拒绝 
 ERROR_TASK_NOT_FOUND = "TASK_NOT_FOUND"              # provider 任务不存在/已失效 → 重新创建任务
 ERROR_PROVIDER_INTERNAL = "PROVIDER_INTERNAL_ERROR"  # provider 内部错误 → 有限重试
 ERROR_MALFORMED_OUTPUT = "MALFORMED_OUTPUT"          # 非法 JSON/Extra data/控制字符/finish_reason=length 截断 → 上层修复+重问一次
+ERROR_UPLOAD_REQUIREMENT_NOT_MET = "UPLOAD_REQUIREMENT_NOT_MET"  # 未选出可入库的商品图 → 用户更换图片后重试
 ERROR_POLL_TIMEOUT = "POLL_TIMEOUT"                  # 打标/长任务轮询预算耗尽 → 自动排队重试
 ERROR_BUSINESS_REJECT = "BUSINESS_REJECT"            # 我方业务/穿法校验否决（非 provider 错误）→ 不重试
 
-# 连接类关键字（网络层异常文案）：命中即归 CONN_RESET，可安全重试。
+# 连接类关键字（网络层异常文案）：命中即归 CONN_RESET，是否重试由调用阶段决策。
 _CONN_RESET_KEYWORDS = (
     "max retries exceeded",
     "response ended prematurely",
@@ -210,7 +211,7 @@ def normalize_toapis_error(
         internal_code = ERROR_TASK_NOT_FOUND
     elif codes & {"unauthorized"} or status_code == 401:
         internal_code = ERROR_AUTH_FAILED
-    elif codes & {"rate_limit_exceeded"} or status_code == 429:
+    elif codes & {"rate_limit_exceeded"} or status_code == 429 or "rate_limit_check_failed" in combined.lower():
         internal_code = ERROR_RATE_LIMITED
     elif codes & {"internal_error"} or status_code == 500:
         internal_code = ERROR_PROVIDER_INTERNAL
@@ -242,8 +243,8 @@ def provider_error_presentation(error_code: str | None, reason: str | None = Non
         ERROR_INSUFFICIENT_BALANCE: ("AI 服务额度不足", "请联系管理员充值后重试。", "联系管理员", False),
         ERROR_AUTH_FAILED: ("AI 服务配置异常", "请联系管理员检查服务密钥或渠道权限。", "联系管理员", False),
         ERROR_RATE_LIMITED: ("AI 服务请求过于频繁", "系统已按策略退避；仍失败时请稍后重试。", "稍后重试", True),
-        ERROR_GATEWAY_5XX: ("AI 服务暂时不可用", "系统已自动重试；仍失败时请稍后再试。", "稍后重试", True),
-        ERROR_CONN_RESET: ("AI 服务连接中断", "系统已自动重试；仍失败时请稍后再试。", "稍后重试", True),
+        ERROR_GATEWAY_5XX: ("AI 服务暂时不可用", "请稍后再试。", "稍后重试", True),
+        ERROR_CONN_RESET: ("AI 服务连接中断", "请稍后再试。", "稍后重试", True),
         ERROR_PROVIDER_INTERNAL: ("AI 服务内部异常", "系统已自动重试；仍失败时可再次生成。", "再次生成", True),
         ERROR_PROVIDER_GENERATION_FAILED: ("图片生成服务处理失败", "系统已自动重试；仍失败时可再次生成。", "再次生成", True),
         ERROR_TASK_NOT_FOUND: ("生成任务已失效", "系统无法继续查询原任务，请重新生成。", "重新生成", True),
@@ -341,10 +342,9 @@ _RETRYABLE_CODES = frozenset(
     }
 )
 
-# 聊天类（Gemini）"零 token 产出"时可安全重发整个请求、绝不重复计费的 error_code。
-# 关键：只有在请求"产生任何输出前"就失败（502/连接错/限流）才在这个集合里；
-# MALFORMED_OUTPUT / 截断 一定已产出并计费，绝不放进来。
-_ZERO_OUTPUT_TRANSIENT_CODES = frozenset({ERROR_GATEWAY_5XX, ERROR_CONN_RESET, ERROR_RATE_LIMITED})
+# 聊天类（Gemini）只有明确的前置限流拒绝能证明没有进入生成，可安全重发整个请求。
+# 连接中断和网关错误的执行结果可能未知，不能仅凭未收到正文断言 provider 未生成或未计费。
+_ZERO_OUTPUT_TRANSIENT_CODES = frozenset({ERROR_RATE_LIMITED})
 
 
 def is_retryable_error(error_code: str | None) -> bool:

@@ -66,9 +66,11 @@ ABANDONED
 - `POST /api/styling-garments/{id}/save-and-tag`：保存当前搭配服装并触发 / 重新触发 AI 识别；用于单货号局部重试。
 - `POST /api/styling-garments/batch-save-and-tag`：批量提交 `DRAFT`、`TAGGING_READY`、`TAGGING_FAILED` 搭配服装进入 AI 识别，也支持对 `READY` 搭配服装重新识别；已归档、正在识别或无需识别的项会跳过并返回 `skipped`。
 - `GET /api/styling-garment-exports/archive?ids={id1,id2}`：下载一个或多个货号的正式原图 ZIP；每个货号一个文件夹，只包含图片，单次最多 50 个货号。下载不受识别状态或归档状态限制，也不触发 AI 识别。
-- 批量上传场景中，前端应先等待本批所有可上传项完成 `finalize-styling-garment`，再对成功创建的 `StylingGarment` 调用批量识别接口。识别失败只改变 `StylingGarment.status` 和 attempt，不改变 upload session 的 `FINALIZED` 结果。
+- 批量上传场景中，前端应先等待本批所有可上传项完成 `finalize-styling-garment`，再对成功创建的 `StylingGarment` 调用批量识别接口。识别失败只改变 `StylingGarment` 的当前识别状态、错误码及已创建的 attempt，不改变 upload session 的 `FINALIZED` 结果。
 
 未 `FINALIZED` 的 upload session 属于临时上传任务。用户显式放弃或后台 TTL 清理时，只能清理未登记为 `MediaAsset` 的直传对象；已经保存为业务对象的图片走对应业务对象的归档 / 删除 / 媒体引用计数规则。
+
+搭配服装列表与详情在 `TAGGING_FAILED` 时返回本轮任务的安全稳定字段 `taggingErrorCode`：`RATE_LIMITED` 表示限流恢复耗尽，`UPLOAD_REQUIREMENT_NOT_MET` 表示模型未选出可入库商品图，其余错误使用对应技术分类；新一轮开始及识别成功时会清空该字段。普通响应中的 `tagError` 为 `null`，且不返回 attempt、provider 原文或请求/响应快照；admin 技术详情仍通过 `tagError` 和 `tagAttempts` 查看完整事实。
 
 ## 状态
 
@@ -111,7 +113,7 @@ ABANDONED
 
 `error` 是普通用户契约，前端不得自行解析 provider 原始字符串。admin-only attempt 技术详情额外返回 `technicalMessage`、`requestFacts`、`responseFacts`；其中可包含 ToAPIs 顶层错误、内嵌上游错误和 providerRequestId，但不得进入普通任务列表。
 
-重试必须按错误类别和阶段决策：参数、鉴权、余额、内容策略与业务拒绝不重试；提交结果未知先按 `client_business_id` 对账；状态查询只容忍网络/网关/限流类瞬时错误并受 `GENERATION_STATUS_RETRY_LIMIT` 约束；明确的 provider 内部生成失败按 `GENERATION_SUBMIT_RETRY_LIMIT` 有限重建；回传失败只重新下载，不重新生成。
+重试必须按错误类别和阶段决策：参数、鉴权、余额、内容策略与业务拒绝不重试；Gemini 只有明确的前置限流拒绝在 provider 层指数退避，`HTTP 500 + rate_limit_check_failed` 按限流处理，连接中断和网关错误因执行结果未知不自动重发；AI 打标业务层不再叠加整条调用重试。Image-2 提交结果未知先按 `client_business_id` 对账；状态查询只容忍网络/网关/限流类瞬时错误并受 `GENERATION_STATUS_RETRY_LIMIT` 约束；明确的 provider 内部生成失败按 `GENERATION_SUBMIT_RETRY_LIMIT` 有限重建；回传失败只重新下载，不重新生成。
 
 ## Prompt 维护槽位
 

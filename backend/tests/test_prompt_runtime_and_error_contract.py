@@ -95,6 +95,11 @@ def test_final_runtime_marks_exactly_one_current_shot_and_limits_to_five_slots()
         (402, {"error": {"code": "insufficient_quota", "message": "no balance"}}, ERROR_INSUFFICIENT_BALANCE),
         (422, {"error": {"code": "content_policy_violation", "message": "blocked"}}, ERROR_CONTENT_POLICY),
         (429, {"error": {"code": "rate_limit_exceeded", "message": "slow down"}}, ERROR_RATE_LIMITED),
+        (
+            500,
+            {"error": {"code": "", "message": "rate_limit_check_failed (request id: test-request)", "type": "new_api_error"}},
+            ERROR_RATE_LIMITED,
+        ),
         (200, {"error": {"code": "generation_failed", "message": "failed"}}, ERROR_PROVIDER_GENERATION_FAILED),
     ],
 )

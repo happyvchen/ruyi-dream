@@ -750,6 +750,64 @@ describe('production gate app shell and page controls', () => {
     expect(clickedUrls).toEqual(['/garment-archive?ids=1', '/garment-archive?ids=1,2'])
   })
 
+  it('reassures users that a running garment recognition recovers in the background', async () => {
+    apiMock.listStylingGarments.mockResolvedValue({
+      ...emptyPage,
+      items: [{ ...garment, id: 2, code: 'TAGGING-LOOK', status: 'TAGGING_RUNNING' }],
+      total: 1,
+      facets: {},
+      stableFacets: {},
+    })
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
+
+    expect(await screen.findByText('正在识别服装信息；服务繁忙时系统会自动恢复，可以离开当前页面。')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('识别中')
+  })
+
+  it('only claims automatic recovery for a rate limit failure that exhausted retries', async () => {
+    apiMock.listStylingGarments.mockResolvedValue({
+      ...emptyPage,
+      items: [
+        {
+          ...garment,
+          id: 2,
+          code: 'RATE-LIMITED-LOOK',
+          status: 'TAGGING_FAILED',
+          taggingErrorCode: 'RATE_LIMITED',
+        },
+        {
+          ...garment,
+          id: 3,
+          code: 'GENERIC-FAILED-LOOK',
+          status: 'TAGGING_FAILED',
+          taggingErrorCode: 'MALFORMED_OUTPUT',
+        },
+        {
+          ...garment,
+          id: 4,
+          code: 'UPLOAD-REJECTED-LOOK',
+          status: 'TAGGING_FAILED',
+          taggingErrorCode: 'UPLOAD_REQUIREMENT_NOT_MET',
+        },
+      ],
+      total: 3,
+      facets: {},
+      stableFacets: {},
+    })
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
+
+    const rateLimitedCard = (await screen.findByText('RATE-LIMITED-LOOK')).closest('.garment-card') as HTMLElement
+    const genericFailureCard = screen.getByText('GENERIC-FAILED-LOOK').closest('.garment-card') as HTMLElement
+    const uploadRejectedCard = screen.getByText('UPLOAD-REJECTED-LOOK').closest('.garment-card') as HTMLElement
+    expect(within(rateLimitedCard).getByText('识别失败')).toHaveAttribute('title', expect.stringContaining('系统已在安全范围内多次自动尝试'))
+    expect(within(genericFailureCard).getByText('识别失败')).toHaveAttribute('title', expect.not.stringContaining('自动尝试'))
+    expect(within(uploadRejectedCard).getByText('未通过上传要求')).toHaveAttribute('title', expect.stringContaining('未识别到符合上传要求的服装图'))
+  })
+
   it('does not silently skip selected garments without images during bulk download', async () => {
     apiMock.listStylingGarments.mockResolvedValue({
       ...emptyPage,

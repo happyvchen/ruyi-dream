@@ -18,6 +18,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("054", "resumable_styling_imports", "migration_resumable_styling_imports"),
     ("055", "upload_session_execution_lease", "migration_upload_session_execution_lease"),
     ("056", "upload_session_content_checksum", "migration_upload_session_content_checksum"),
+    ("057", "styling_garment_tag_error_code", "migration_styling_garment_tag_error_code"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -139,6 +140,7 @@ def init_db() -> None:
               tag_schema_version TEXT,
               tag_completed_at TEXT,
               tag_error TEXT,
+              tag_error_code TEXT,
               archived_at TEXT,
               archive_reason TEXT,
               created_at TEXT NOT NULL,
@@ -391,6 +393,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_resumable_styling_imports": migration_resumable_styling_imports,
         "migration_upload_session_execution_lease": migration_upload_session_execution_lease,
         "migration_upload_session_content_checksum": migration_upload_session_content_checksum,
+        "migration_styling_garment_tag_error_code": migration_styling_garment_tag_error_code,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -518,6 +521,11 @@ def migration_upload_session_execution_lease(db: sqlite3.Connection) -> None:
 def migration_upload_session_content_checksum(db: sqlite3.Connection) -> None:
     if not table_has_column(db, "upload_session_items", "checksum_sha256"):
         db.execute("ALTER TABLE upload_session_items ADD COLUMN checksum_sha256 TEXT")
+
+
+def migration_styling_garment_tag_error_code(db: sqlite3.Connection) -> None:
+    if table_exists(db, "styling_garments") and not table_has_column(db, "styling_garments", "tag_error_code"):
+        db.execute("ALTER TABLE styling_garments ADD COLUMN tag_error_code TEXT")
 
 
 def scrub_prompt_config_hero_product_info(db: sqlite3.Connection) -> None:

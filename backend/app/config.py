@@ -81,11 +81,12 @@ class Settings:
     # 请求体含 base64 图片可达数 MB,部署环境上行慢时过小的值会触发
     # "The write operation timed out",且请求未到达 ToAPIs、不计费。
     gemini_toapis_connect_timeout_seconds = int(os.getenv("GEMINI_TOAPIS_CONNECT_TIMEOUT_SECONDS") or "60")
-    # Gemini 聊天通道"零产出瞬时错误"安全重试参数：只在 502/连接错/429 等零计费失败时
-    # 重发整个请求，指数退避 + 抖动。重试次数为 0 表示禁用重试。
-    gemini_retry_limit = int(os.getenv("GEMINI_RETRY_LIMIT") or "3")
-    gemini_retry_backoff_base_seconds = float(os.getenv("GEMINI_RETRY_BACKOFF_BASE_SECONDS") or "2")
-    gemini_retry_backoff_cap_seconds = float(os.getenv("GEMINI_RETRY_BACKOFF_CAP_SECONDS") or "30")
+    # Gemini 聊天通道只对明确的前置限流拒绝重发整个请求，采用指数退避 + 抖动。
+    # 连接中断/网关错误执行结果未知，不自动重发。重试次数为 0 表示禁用重试。
+    gemini_retry_limit = int(os.getenv("GEMINI_RETRY_LIMIT") or "6")
+    gemini_retry_backoff_base_seconds = float(os.getenv("GEMINI_RETRY_BACKOFF_BASE_SECONDS") or "5")
+    gemini_retry_backoff_cap_seconds = float(os.getenv("GEMINI_RETRY_BACKOFF_CAP_SECONDS") or "60")
+    gemini_retry_time_budget_seconds = float(os.getenv("GEMINI_RETRY_TIME_BUDGET_SECONDS") or "300")
     # WAF(Cloudflare 1010)熔断前的有限重试次数。
     gemini_waf_retry_limit = int(os.getenv("GEMINI_WAF_RETRY_LIMIT") or "2")
     # 上层 JSON 解析失败(MALFORMED_OUTPUT)时自动重问 Gemini 的次数(0=不重问)。
@@ -93,9 +94,8 @@ class Settings:
     # AI Stylist 已产出但不符合 selected_files + styling_plan 契约时的用户无感重试。
     ai_stylist_contract_retry_limit = int(os.getenv("AI_STYLIST_CONTRACT_RETRY_LIMIT", "3"))
     ai_stylist_contract_retry_delay_seconds = float(os.getenv("AI_STYLIST_CONTRACT_RETRY_DELAY_SECONDS", "15"))
-    # 打标并发闸门与瞬时错误自动重试次数。
+    # 打标并发闸门。provider 瞬时错误统一由 Gemini 通道重试，业务层不再叠加整条重试。
     tagging_max_concurrency = int(os.getenv("TAGGING_MAX_CONCURRENCY") or "3")
-    tagging_auto_retry_limit = int(os.getenv("TAGGING_AUTO_RETRY_LIMIT") or "1")
     image_provider = os.getenv("GPT_IMAGE2_PROVIDER", "toapis").lower()
     gpt_image2_model_id = os.getenv("GPT_IMAGE2_MODEL_ID", "gpt-image-2")
     gpt_image2_api_base_url = os.getenv("GPT_IMAGE2_API_BASE_URL", "https://fal.run/openai/gpt-image-2/edit")
@@ -202,6 +202,8 @@ class Settings:
             raise RuntimeError("GEMINI_RETRY_BACKOFF_BASE_SECONDS must be greater than 0.")
         if self.gemini_retry_backoff_cap_seconds <= 0:
             raise RuntimeError("GEMINI_RETRY_BACKOFF_CAP_SECONDS must be greater than 0.")
+        if self.gemini_retry_time_budget_seconds <= 0:
+            raise RuntimeError("GEMINI_RETRY_TIME_BUDGET_SECONDS must be greater than 0.")
         if self.gemini_waf_retry_limit < 0:
             raise RuntimeError("GEMINI_WAF_RETRY_LIMIT must be greater than or equal to 0.")
         if self.gemini_malformed_reask_limit < 0:
@@ -212,8 +214,6 @@ class Settings:
             raise RuntimeError("AI_STYLIST_CONTRACT_RETRY_DELAY_SECONDS must be greater than or equal to 0.")
         if self.tagging_max_concurrency <= 0:
             raise RuntimeError("TAGGING_MAX_CONCURRENCY must be greater than 0.")
-        if self.tagging_auto_retry_limit < 0:
-            raise RuntimeError("TAGGING_AUTO_RETRY_LIMIT must be greater than or equal to 0.")
 
         if self.app_env in {"prod", "production"}:
             self._validate_production_credential("access key", self.s3_access_key_id)

@@ -15,6 +15,7 @@ from pathlib import Path
 import secrets
 import sqlite3
 import tempfile
+import threading
 import time
 import zipfile
 from uuid import uuid4
@@ -70,6 +71,7 @@ from .generation_progress import (
     ERROR_SUBMISSION_UNKNOWN,
     ERROR_SYSTEM_ERROR,
     ERROR_TASK_NOT_FOUND,
+    ERROR_UPLOAD_REQUIREMENT_NOT_MET,
     PHASE_DELIVER,
     PHASE_GENERATE,
     PHASE_PREPARE,
@@ -84,13 +86,11 @@ from .generation_progress import (
     classify_provider_error,
     is_balance_error,
     is_generation_retryable_error,
-    is_retryable_error,
     is_status_check_retryable_error,
     normalize_toapis_error,
     provider_error_presentation,
 )
 from .image_provider import ImageProviderError, get_image_provider
-from .toapis_concurrency import async_toapis_concurrency_slot
 from .object_storage import (
     clean_key,
     delete_object,
@@ -1905,6 +1905,9 @@ def expire_stale_styling_garment_tagging() -> None:
             """,
             (timeout_before,),
         ).fetchall()
+        with _active_tagging_jobs_lock:
+            active_ids = set(_active_styling_garment_tagging_ids)
+        rows = [row for row in rows if int(row["id"]) not in active_ids]
         if not rows:
             return
         ids = [int(row["id"]) for row in rows]
@@ -1913,10 +1916,10 @@ def expire_stale_styling_garment_tagging() -> None:
         db.execute(
             f"""
             UPDATE styling_garments
-            SET status = 'TAGGING_FAILED', tag_error = ?, updated_at = ?
+            SET status = 'TAGGING_FAILED', tag_error = ?, tag_error_code = ?, updated_at = ?
             WHERE id IN ({placeholders})
             """,
-            (message, timestamp, *ids),
+            (message, ERROR_POLL_TIMEOUT, timestamp, *ids),
         )
         db.execute(
             f"""
@@ -2185,7 +2188,10 @@ async def save_and_tag_styling_garment(garment_id: int, background_tasks: Backgr
             raise HTTPException(status_code=404, detail="搭配服装不存在")
         ensure_styling_garment_not_tagging(row)
         timestamp = now_iso()
-        db.execute("UPDATE styling_garments SET status = 'TAGGING_RUNNING', tag_error = NULL, updated_at = ? WHERE id = ?", (timestamp, garment_id))
+        db.execute(
+            "UPDATE styling_garments SET status = 'TAGGING_RUNNING', tag_error = NULL, tag_error_code = NULL, updated_at = ? WHERE id = ?",
+            (timestamp, garment_id),
+        )
     background_tasks.add_task(run_styling_garment_tagging, garment_id)
     return {"item": get_styling_garment_by_id(garment_id)}
 
@@ -2218,15 +2224,15 @@ async def save_and_tag_styling_garments_batch(payload: StylingGarmentBatchTagReq
             db.execute(
                 f"""
                 UPDATE styling_garments
-                SET status = 'TAGGING_RUNNING', tag_error = NULL, updated_at = ?
+                SET status = 'TAGGING_RUNNING', tag_error = NULL, tag_error_code = NULL, updated_at = ?
                 WHERE id IN ({placeholders})
                 """,
                 (timestamp, *started_ids),
             )
             for garment_id in started_ids:
                 log_event(db, "styling_garment", garment_id, "tagging_started", {"batch": True})
-    for garment_id in started_ids:
-        background_tasks.add_task(run_styling_garment_tagging, garment_id)
+    if started_ids:
+        background_tasks.add_task(run_styling_garment_tagging_batch, started_ids)
     return {
         "items": [get_styling_garment_by_id(garment_id) for garment_id in started_ids],
         "startedIds": started_ids,
@@ -2235,6 +2241,8 @@ async def save_and_tag_styling_garments_batch(payload: StylingGarmentBatchTagReq
 
 
 _tagging_semaphore: asyncio.Semaphore | None = None
+_active_tagging_jobs_lock = threading.Lock()
+_active_styling_garment_tagging_ids: set[int] = set()
 
 
 def _get_tagging_semaphore() -> asyncio.Semaphore:
@@ -2249,33 +2257,42 @@ def _get_tagging_semaphore() -> asyncio.Semaphore:
 
 
 async def run_styling_garment_tagging(garment_id: int) -> None:
-    async with _get_tagging_semaphore():
-        await _run_styling_garment_tagging_guarded(garment_id)
+    with _active_tagging_jobs_lock:
+        _active_styling_garment_tagging_ids.add(garment_id)
+    try:
+        async with _get_tagging_semaphore():
+            with get_db() as db:
+                row = db.execute("SELECT status FROM styling_garments WHERE id = ?", (garment_id,)).fetchone()
+                if not row or row["status"] != "TAGGING_RUNNING":
+                    return
+                db.execute("UPDATE styling_garments SET updated_at = ? WHERE id = ?", (now_iso(), garment_id))
+            await _run_styling_garment_tagging_guarded(garment_id)
+    finally:
+        with _active_tagging_jobs_lock:
+            _active_styling_garment_tagging_ids.discard(garment_id)
+
+
+async def run_styling_garment_tagging_batch(garment_ids: list[int]) -> None:
+    await asyncio.gather(*(run_styling_garment_tagging(garment_id) for garment_id in garment_ids))
 
 
 async def _run_styling_garment_tagging_guarded(garment_id: int) -> None:
-    # 瞬时错误（网关/连接/限流）自动整条重试；重复打标幂等覆盖同一 garment。
-    retry_limit = max(0, settings.tagging_auto_retry_limit)
-    attempt = 0
-    while True:
-        try:
-            tagging_result = await tag_styling_garment_with_gemini(garment_id)
-            break
-        except Exception as exc:
-            error_code = classify_attempt_error(exc)
-            if is_retryable_error(error_code) and attempt < retry_limit:
-                attempt += 1
-                logger.warning("打标瞬时错误(%s)，自动整条重试第 %d 次：garment=%s", error_code, attempt, garment_id)
-                continue
-            with get_db() as db:
-                db.execute(
-                    "UPDATE styling_garments SET status = 'TAGGING_FAILED', tag_error = ?, updated_at = ? WHERE id = ?",
-                    (str(exc), now_iso(), garment_id),
-                )
-            return
+    # provider 瞬时错误已在 Gemini 通道内按零产出安全边界退避重试；
+    # 此处不再叠加整条任务重试，避免请求次数相乘和无等待突发。
+    try:
+        tagging_result = await tag_styling_garment_with_gemini(garment_id)
+    except Exception as exc:
+        error_code = classify_attempt_error(exc) or ERROR_SYSTEM_ERROR
+        with get_db() as db:
+            db.execute(
+                "UPDATE styling_garments SET status = 'TAGGING_FAILED', tag_error = ?, tag_error_code = ?, updated_at = ? WHERE id = ?",
+                (str(exc), error_code, now_iso(), garment_id),
+            )
+        return
     try:
         persist_styling_garment_tagging_result(garment_id, tagging_result)
     except Exception as exc:
+        error_code = classify_attempt_error(exc) or ERROR_SYSTEM_ERROR
         attempt_id = tagging_result.get("attempt_id")
         if attempt_id:
             finish_attempt(
@@ -2283,12 +2300,12 @@ async def _run_styling_garment_tagging_guarded(garment_id: int) -> None:
                 "FAILED",
                 response_snapshot={**tagging_result, "error": str(exc)},
                 error_message=str(exc),
-                error_code=classify_attempt_error(exc) or ERROR_SYSTEM_ERROR,
+                error_code=error_code,
             )
         with get_db() as db:
             db.execute(
-                "UPDATE styling_garments SET status = 'TAGGING_FAILED', tag_error = ?, updated_at = ? WHERE id = ?",
-                (str(exc), now_iso(), garment_id),
+                "UPDATE styling_garments SET status = 'TAGGING_FAILED', tag_error = ?, tag_error_code = ?, updated_at = ? WHERE id = ?",
+                (str(exc), error_code, now_iso(), garment_id),
             )
 
 
@@ -2321,6 +2338,7 @@ def persist_styling_garment_tagging_result(garment_id: int, tagging_result: dict
                 tag_schema_version = ?,
                 tag_completed_at = ?,
                 tag_error = NULL,
+                tag_error_code = NULL,
                 updated_at = ?
             WHERE id = ?
             """,
@@ -6419,9 +6437,10 @@ def serialize_styling_garment(row: Any, include_images: bool = True, include_deb
         "effectiveTags": effective_tags,
         "tagMeta": loads(row["tag_meta_json"], {}) if "tag_meta_json" in row.keys() else {},
         "tagAttempts": get_styling_garment_tag_attempts(row["id"]) if include_images and include_debug else [],
+        "taggingErrorCode": row["tag_error_code"] if row["status"] == "TAGGING_FAILED" and "tag_error_code" in row.keys() else None,
         "tagSchemaVersion": row["tag_schema_version"],
         "tagCompletedAt": row["tag_completed_at"],
-        "tagError": row["tag_error"],
+        "tagError": row["tag_error"] if include_debug else None,
         "archivedAt": row["archived_at"] if "archived_at" in row.keys() else None,
         "archiveReason": row["archive_reason"] if "archive_reason" in row.keys() else None,
         "imageCount": row["image_count"] if "image_count" in row.keys() else None,
@@ -6556,14 +6575,15 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
     try:
         tagging_result = normalize_prompt_tagging_result(raw, garment)
     except Exception as exc:
+        error_code = classify_attempt_error(exc) or ERROR_MALFORMED_OUTPUT
         finish_attempt(
             attempt_id,
             "FAILED",
             {"raw_text": text, "raw_json": raw},
             error_message=f"Gemini 打标结果不符合契约：{exc}",
-            error_code=ERROR_MALFORMED_OUTPUT,
+            error_code=error_code,
         )
-        raise GeminiProviderError(f"Gemini 打标结果不符合契约：{exc}", ERROR_MALFORMED_OUTPUT) from exc
+        raise GeminiProviderError(f"Gemini 打标结果不符合契约：{exc}", error_code) from exc
     finish_attempt(attempt_id, "SUCCEEDED", {"raw_text": text, "raw_json": raw})
     return {**tagging_result, "attempt_id": attempt_id}
 
@@ -6652,6 +6672,12 @@ def image_selection_prompt_files(images: list[dict[str, Any]], limit: int) -> li
 
 class AIStylistContractError(ValueError, RuntimeError):
     """Gemini AI Stylist returned JSON that does not match the production contract."""
+
+
+class UploadRequirementNotMetError(AIStylistContractError):
+    """打标结果没有选出可作为搭配服装入库的商品图。"""
+
+    error_code = ERROR_UPLOAD_REQUIREMENT_NOT_MET
 
 
 def is_ai_stylist_contract_retryable(exc: BaseException) -> bool:
@@ -6832,6 +6858,8 @@ def normalize_prompt_tagging_result(
     if not isinstance(raw, dict):
         raise ValueError("Gemini 打标结果必须是 JSON 对象")
     selected_files = raw.get("selected_files")
+    if isinstance(selected_files, list) and not selected_files:
+        raise UploadRequirementNotMetError("selected_files 必须是非空数组")
     selected_image_ids = selected_image_ids_from_files(selected_files, garment.get("images") or [], MAX_GARMENT_IMAGE_INPUTS)[:MAX_GARMENT_SELECTED_IMAGES]
     ai_tags = raw.get("ai_tags")
     if not isinstance(ai_tags, dict):
@@ -9865,9 +9893,6 @@ async def generate_image_asset(
     output_key: str,
     attempt_id: int | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    if settings.image_provider == "toapis":
-        async with async_toapis_concurrency_slot():
-            return await _generate_image_asset_unlocked(task_package, output_key, attempt_id)
     return await _generate_image_asset_unlocked(task_package, output_key, attempt_id)
 
 
@@ -10245,16 +10270,6 @@ async def generate_single_final_image(
     trigger: str = "manual_step",
     balance_stop: asyncio.Event | None = None,
 ) -> int:
-    if settings.image_provider == "toapis":
-        async with async_toapis_concurrency_slot():
-            return await _generate_single_final_image_unlocked(
-                task_id,
-                result_set_id,
-                image_id,
-                attempt_id=attempt_id,
-                trigger=trigger,
-                balance_stop=balance_stop,
-            )
     return await _generate_single_final_image_unlocked(
         task_id,
         result_set_id,

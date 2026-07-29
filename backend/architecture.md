@@ -45,6 +45,7 @@ ToAPIs 图片任务是异步协议：创建接口返回任务 ID，状态接口�
 | `task_not_found` / HTTP 404 | `TASK_NOT_FOUND` | 重新创建任务 | 不重复查询；仅用于提交未知对账后补提 |
 | `content_policy_violation` / HTTP 422 | `CONTENT_POLICY_VIOLATION` | 调整素材或文字要求 | 不重试 |
 | `rate_limit_exceeded` / HTTP 429 | `RATE_LIMITED` | 等待 | 尊重 `Retry-After`，有限退避 |
+| HTTP 500 + `rate_limit_check_failed` | `RATE_LIMITED` | 等待 | 按零产出瞬时错误指数退避 |
 | `internal_error` / HTTP 500 | `PROVIDER_INTERNAL_ERROR` | 稍后再试 | 按 `GENERATION_SUBMIT_RETRY_LIMIT` 有限重建 |
 | 异步 `generation_failed`，且无更深层不可重试原因 | `PROVIDER_GENERATION_FAILED` | 再次生成 | 按 `GENERATION_SUBMIT_RETRY_LIMIT` 有限重建 |
 
@@ -54,7 +55,11 @@ API 摘要返回稳定 `error={code,title,message,action,retryable}`；普通用
 
 ## ToAPIs 并发闸门
 
-ToAPIs 相关调用统一使用 `TOAPIS_MAX_CONCURRENCY` 控制最大并发，默认 `5`。该闸门覆盖 Gemini(ToAPIs) chat、Image-2(ToAPIs) 参考图上传、任务创建和状态查询；批次一键成片不再有独立并发参数，而是按同一 ToAPIs 预算推进排队任务。
+ToAPIs 相关调用统一使用 `TOAPIS_MAX_CONCURRENCY` 控制最大并发，默认 `5`。该闸门覆盖 Gemini(ToAPIs) chat、Image-2(ToAPIs) 参考图上传、任务创建和状态查询；只在真实 HTTP 请求期间占用槽位，provider 生成等待、轮询间隔和重试退避期间释放槽位。批次一键成片不再有独立并发参数，而是按同一 ToAPIs 预算推进排队任务。
+
+Gemini 只有明确的前置限流拒绝（HTTP 429 或 `rate_limit_check_failed`）在 provider 层指数退避并加入随机抖动，默认最多重试 `6` 次且总预算 `300` 秒。连接中断、read timeout 和网关错误的执行结果未知，不自动重发整个聊天请求，避免重复计费。AI 打标业务层不再叠加整条任务重试，避免重试次数相乘和无等待突发。
+
+批量 AI 打标在一个后台任务内并发调度，并受 `TAGGING_MAX_CONCURRENCY` 与 ToAPIs 全局请求闸门双重约束。仍在当前进程排队或执行的服装不会被 stale 清理误判；真正获得打标槽位时刷新活动时间，进程重启后遗留的无主运行态仍按超时规则回收。
 
 旧环境变量 `GENERATION_AUTO_RUN_MAX_CONCURRENCY` 仅作为过渡 fallback：未设置 `TOAPIS_MAX_CONCURRENCY` 时才读取。新部署和文档统一使用 `TOAPIS_MAX_CONCURRENCY`。
 

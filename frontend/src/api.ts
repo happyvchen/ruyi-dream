@@ -162,6 +162,7 @@ export type StylingGarment = {
   tagSchemaVersion?: string | null
   tagCompletedAt?: string | null
   tagError?: string | null
+  taggingErrorCode?: string | null
   archivedAt?: string | null
   archiveReason?: string | null
   imageCount?: number | null

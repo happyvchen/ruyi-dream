@@ -6775,7 +6775,7 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
   const chips = garmentTagChips(item)
   const failedTagAttempt = failed ? latestFailedTagAttempt(item) : null
   const taggingIssue = failed ? garmentTaggingIssue(item, failedTagAttempt) : null
-  const cardBrief = tagging ? '正在识别服装信息，完成后可进入智能选搭。' : failed ? '识别未完成，可重新识别。' : brief || '待识别搭配信息'
+  const cardBrief = tagging ? '正在识别服装信息；服务繁忙时系统会自动恢复，可以离开当前页面。' : failed ? '识别未完成，可重新识别。' : brief || '待识别搭配信息'
   const failureHint = taggingIssue ? `${taggingIssue.title}：${taggingIssue.description}` : undefined
   const statusLabel = taggingIssue?.badge ?? garmentStatus(item.status)
   return (
@@ -6791,7 +6791,7 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
         {item.archivedAt && <span className="cover-badge">{archiveStateText(item.archiveReason)}</span>}
       </div>
       <div className="garment-card-body">
-        <div className="garment-card-head"><TruncatedText as="strong" text={item.code} /><span className={`status ${item.status.toLowerCase()}`} title={failureHint ?? statusLabel}>{statusLabel}</span></div>
+        <div className="garment-card-head"><TruncatedText as="strong" text={item.code} /><span className={`status ${item.status.toLowerCase()}`} title={failureHint ?? statusLabel} role={tagging ? 'status' : undefined} aria-live={tagging ? 'polite' : undefined}>{statusLabel}</span></div>
         <p className="garment-card-brief" title={failed ? failureHint : cardBrief}>{cardBrief}</p>
         <div className="tag-summary">
           {showTagResult && chips.slice(0, 3).map((chip) => <TruncatedText key={chip} text={chip} />)}
@@ -6911,7 +6911,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
             <strong>图片</strong>
           </div>
           <p className="edit-hint">此次修改会影响标签识别。排序第一张会作为封面和主要参考图；如需补充图片，请重新上传一套素材。</p>
-          {tagging && <p className="edit-hint">正在识别标签，完成后可继续修改或删除。</p>}
+          {tagging && <p className="edit-hint" role="status" aria-live="polite">正在识别标签；服务繁忙时系统会自动恢复，可以离开当前页面。</p>}
           <div className="saved-image-grid">
             {working.map((image, index) => {
               const replacement = replacementFiles[image.id]
@@ -7122,6 +7122,7 @@ function rawTaggingErrorText(item: StylingGarment, attempt: NonNullable<StylingG
 }
 
 function isUploadRequirementMiss(item: StylingGarment, attempt: NonNullable<StylingGarment['tagAttempts']>[number] | null) {
+  if (item.taggingErrorCode === 'UPLOAD_REQUIREMENT_NOT_MET' || attempt?.errorCode === 'UPLOAD_REQUIREMENT_NOT_MET') return true
   const text = rawTaggingErrorText(item, attempt).toLowerCase()
   return text.includes('selected_files') && (
     text.includes('非空') ||
@@ -7142,12 +7143,21 @@ function garmentTaggingIssue(item: StylingGarment, attempt: NonNullable<StylingG
       action: '请更换为清晰、同一件服装、以商品为主体的图片后重新识别。',
     }
   }
+  if (item.taggingErrorCode === 'RATE_LIMITED' || attempt?.errorCode === 'RATE_LIMITED') {
+    return {
+      badge: '识别失败',
+      panelTitle: '识别状态',
+      title: 'AI 服务暂时繁忙',
+      description: '系统已在安全范围内多次自动尝试，但本次仍未完成识别。',
+      action: '请稍后点击“识别标签”重试。',
+    }
+  }
   return {
     badge: '识别失败',
     panelTitle: '识别状态',
-    title: '识别失败，请尝试重新识别或联系开发人员',
-    description: '识别未完成，可尝试重新识别；多次失败请联系开发人员处理。',
-    action: '可点击“识别标签”重试，或联系开发人员查看技术详情。',
+    title: '识别暂时未完成',
+    description: '识别调用或返回处理未完成。',
+    action: '请重新识别；多次失败请联系开发人员。',
   }
 }
 

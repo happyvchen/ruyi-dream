@@ -26,6 +26,7 @@ GenerationTask
 | `generation_result_sets` | 一组成片结果，固定关联一个分镜预览 |
 | `generation_result_images_new` | 单张最终成片，固定 5 条槽位 |
 | `generation_attempts` | provider 调用快照、进度、结果和错误分类 |
+| `styling_garments` | 搭配服装及其当前 AI 打标状态、业务标签和本轮安全错误码 |
 | `upload_sessions` | 浏览器直传到对象存储的轻量上传任务，用于刷新 / 切页后恢复上传状态 |
 | `upload_session_items` | 上传任务内的图片条目，记录对象 key、文件信息、上传确认和业务媒体引用 |
 | `prompt_configs` | Prompt 维护配置槽 |
@@ -61,6 +62,11 @@ GenerationTask
 - `error_message`：业务可读失败摘要。保存为业务对象前的失败（例如货号重复、对象缺失、保存异常）必须写回这里，刷新后仍能在上传记录中提示用户处理。
 
 `upload_session_items.object_key` 是稳定的对象存储直传 key；`relative_path`、`size_bytes`、`last_modified` 和 `checksum_sha256` 用于恢复时拒绝错误目录或已变化的文件。对象存储中的 `sha256` 用户元数据与长度必须同时匹配，条目才会被确认上传。`status` 表示该条目是否已确认上传或已保存为 `MediaAsset`。搭配服装 AI 识别失败不回写为 upload session 失败，因为图片入库和 AI 识别是两个阶段。未 `FINALIZED` 的 session 可以由用户放弃或后台 TTL 清理；清理只处理未登记为 `MediaAsset` 的直传对象。
+
+## StylingGarment 打标错误字段
+
+- `tag_error_code`：只记录当前一轮打标的稳定错误分类；包含 `UPLOAD_REQUIREMENT_NOT_MET` 等可直接驱动用户操作的安全业务码，开始重试和成功完成时清空，避免历史 attempt 的错误码串到新任务。
+- `tag_error`：保留当前一轮原始诊断文本，仅供 admin 技术详情使用；普通列表与详情响应不返回该文本。
 
 ## 数据清理
 
