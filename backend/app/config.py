@@ -44,6 +44,7 @@ class Settings:
     s3_force_path_style = os.getenv("APP_S3_FORCE_PATH_STYLE", "true").lower() in {"1", "true", "yes", "on"}
     s3_presign_expires_seconds = int(os.getenv("APP_S3_PRESIGN_EXPIRES_SECONDS", "900"))
     upload_session_ttl_hours = int(os.getenv("APP_UPLOAD_SESSION_TTL_HOURS", "168"))
+    upload_session_cleanup_batch_size = int(os.getenv("APP_UPLOAD_SESSION_CLEANUP_BATCH_SIZE", "20"))
     media_presign_expires_seconds = int(os.getenv("APP_MEDIA_PRESIGN_EXPIRES_SECONDS", "3600"))
     media_thumb_cache_seconds = int(os.getenv("APP_MEDIA_THUMB_CACHE_SECONDS", "2400"))
     media_preview_cache_seconds = int(os.getenv("APP_MEDIA_PREVIEW_CACHE_SECONDS", "1800"))
@@ -162,6 +163,8 @@ class Settings:
             raise RuntimeError("APP_SESSION_TTL_SECONDS must be greater than 0.")
         if self.upload_session_ttl_hours <= 0:
             raise RuntimeError("APP_UPLOAD_SESSION_TTL_HOURS must be greater than 0.")
+        if self.upload_session_cleanup_batch_size <= 0:
+            raise RuntimeError("APP_UPLOAD_SESSION_CLEANUP_BATCH_SIZE must be greater than 0.")
         if self.generation_lock_ttl_seconds <= 0:
             raise RuntimeError("GENERATION_LOCK_TTL_SECONDS must be greater than 0.")
         if self.generation_image_timeout_seconds <= 0:

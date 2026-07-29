@@ -94,7 +94,7 @@ media/<media-uuid>/_derived/final-cells/original-shot<1..6>.png
 - 数字模特目前仍是聚合对象，使用 `model-profiles/<model-id>/...`，文件名清单由 model profile JSON 管理；删除只允许落到具体 model ID 目录。这是 0.1.0 唯一运行时例外，后续若模型素材需要跨对象复用，再迁为 `MediaAsset`，不能新增第三套媒体机制。
 - 研究脚本只允许写入 `experiments/research/...`，不得作为生产业务素材来源。
 
-未完成上传会话默认保留 168 小时（`APP_UPLOAD_SESSION_TTL_HOURS`），过期且无有效 lease 时标记 `ABANDONED`，并按该会话登记的每个对象精确清理；任何已绑定 `media_asset_id` 或已登记到 `media_assets.object_key` 的对象均排除，RustFS 暂时不可用时保留待重试状态。`GET /api/admin/storage-diagnostics` 使用 `limit + offset` 分页完成全量巡检；未确认上传的 `PENDING` 项不是“丢失文件”，只有 `UPLOADED/READY` 对象不可读才告警。
+未完成上传会话默认保留 168 小时（`APP_UPLOAD_SESSION_TTL_HOURS`），过期且无有效 lease 时标记 `ABANDONED`，并按该会话登记的每个对象精确清理；每小时最多处理 20 个会话（`APP_UPLOAD_SESSION_CLEANUP_BATCH_SIZE`），避免历史积压阻塞 generation poller。任何已绑定 `media_asset_id` 或已登记到 `media_assets.object_key` 的对象均排除，RustFS 暂时不可用时保留待重试状态。`GET /api/admin/storage-diagnostics` 使用 `limit + offset` 分页完成全量巡检；未确认上传的 `PENDING` 项不是“丢失文件”，只有 `UPLOADED/READY` 对象不可读才告警。
 
 ## 图片事实源
 

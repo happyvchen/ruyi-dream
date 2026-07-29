@@ -6199,8 +6199,10 @@ def cleanup_stale_upload_sessions() -> int:
                 JOIN media_assets ma ON ma.object_key = linked.object_key AND ma.deleted_at IS NULL
                 WHERE linked.session_id = upload_sessions.id
               )
+            ORDER BY CASE WHEN status = 'ABANDONED' THEN 0 ELSE 1 END, updated_at, id
+            LIMIT ?
             """,
-            (stale_before, timestamp, retry_message),
+            (stale_before, timestamp, retry_message, settings.upload_session_cleanup_batch_size),
         ).fetchall()
         session_ids = [str(row["id"]) for row in sessions]
         if not session_ids:

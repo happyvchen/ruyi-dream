@@ -142,6 +142,28 @@ def test_stale_upload_cleanup_never_deletes_an_item_bound_to_media_asset(client,
     assert deleted_keys == []
 
 
+def test_stale_upload_cleanup_is_bounded_per_poller_run(client, monkeypatch) -> None:
+    from app import main as app_main
+
+    session_ids = [create_session(client, filenames=[f"{index}.jpg"])["session"]["id"] for index in range(21)]
+    stale_at = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat(timespec="seconds").replace("+00:00", "Z")
+    with get_db() as db:
+        placeholders = ", ".join("?" for _ in session_ids)
+        db.execute(
+            f"UPDATE upload_sessions SET updated_at = ? WHERE id IN ({placeholders})",
+            (stale_at, *session_ids),
+        )
+    monkeypatch.setattr(app_main, "delete_object", lambda key: None)
+
+    assert app_main.cleanup_stale_upload_sessions() == 20
+    with get_db() as db:
+        remaining = db.execute(
+            f"SELECT COUNT(*) AS count FROM upload_sessions WHERE id IN ({placeholders}) AND status = 'PENDING'",
+            session_ids,
+        ).fetchone()["count"]
+    assert remaining == 1
+
+
 def test_upload_session_tracks_completed_items_and_is_recoverable(client) -> None:
     created = create_session(client)
     session = created["session"]
