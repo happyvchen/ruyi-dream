@@ -335,6 +335,8 @@ export type UploadSession = {
   targetId?: number | null
   targetStatus?: string | null
   errorMessage?: string | null
+  archivedAt?: string | null
+  archiveReason?: string | null
   createdAt?: string
   updatedAt?: string
   items?: {
@@ -416,11 +418,16 @@ export type DeleteImpact = {
   mediaAssetCount?: number
   estimatedBytes?: number
   dependentTaskImpact?: DeleteImpact
+  uploadSessionCount?: number
+  uploadItemCount?: number
+  temporaryObjectCount?: number
+  linkedBusinessCount?: number
 }
 
 export type ObjectCleanupError = {
   prefix?: string
   key?: string
+  objectKey?: string
   error: string
 }
 
@@ -718,7 +725,7 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
-  listUploadSessions: (options?: { scope?: string; status?: string; batchId?: string; limit?: number; includeAbandoned?: boolean }) =>
+  listUploadSessions: (options?: { scope?: string; status?: string; batchId?: string; limit?: number; includeAbandoned?: boolean; includeArchived?: boolean }) =>
     request<{ items: UploadSession[] }>(params('/api/upload-sessions', options ?? {})),
   getUploadSession: (id: string) =>
     request<{ session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(id)}`),
@@ -726,6 +733,26 @@ export const api = {
     request<{ session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(id)}/abandon`, {
       method: 'POST',
       body: JSON.stringify({ executorId: uploadExecutorId() }),
+    }),
+  getUploadSessionDeleteImpact: (ids: string[]) =>
+    request<{ impact: DeleteImpact }>('/api/upload-sessions/delete-impact', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }),
+  archiveUploadSessions: (ids: string[]) =>
+    request<{ archivedIds: string[] }>('/api/upload-sessions/archive', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }),
+  restoreUploadSessions: (ids: string[]) =>
+    request<{ restoredIds: string[] }>('/api/upload-sessions/restore', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }),
+  deleteUploadSessions: (ids: string[], confirmation: { confirmName?: string; confirmPhrase?: string }) =>
+    request<{ deletedIds: string[]; deferredIds: string[]; objectCleanupErrors: ObjectCleanupError[] }>('/api/upload-sessions', {
+      method: 'DELETE',
+      body: JSON.stringify({ ids, ...confirmation }),
     }),
   createStylingImportSessions: async (sourceTitle: string, batches: { code: string; files: File[] }[], batchId?: string) => {
     const items = batches.map((batch) => ({ businessCode: batch.code, files: batch.files.map(uploadFileDescriptor) }))

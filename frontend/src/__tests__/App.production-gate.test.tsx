@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 import '@testing-library/jest-dom/vitest'
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -54,6 +54,11 @@ const apiMock = vi.hoisted(() => ({
   uploadPreparedSession: vi.fn(),
   finalizeStylingGarmentSession: vi.fn(),
   listUploadSessions: vi.fn(),
+  abandonUploadSession: vi.fn(),
+  getUploadSessionDeleteImpact: vi.fn(),
+  archiveUploadSessions: vi.fn(),
+  restoreUploadSessions: vi.fn(),
+  deleteUploadSessions: vi.fn(),
   tagStylingGarments: vi.fn(),
 }))
 
@@ -235,6 +240,16 @@ function configureApi(role: 'admin' | 'user' = 'admin') {
   apiMock.precheckFinalImageExport.mockResolvedValue({ items: [], downloadableTaskIds: [], completeTaskIds: [], totalImages: 0, totalBytes: 0 })
   apiMock.getShootEnvironment.mockResolvedValue({ asset: null })
   apiMock.listUploadSessions.mockResolvedValue({ items: [] })
+  apiMock.abandonUploadSession.mockResolvedValue({ session: { id: 'abandoned', status: 'ABANDONED' } })
+  apiMock.getUploadSessionDeleteImpact.mockResolvedValue({ impact: {
+    uploadSessionCount: 1,
+    uploadItemCount: 0,
+    temporaryObjectCount: 0,
+    linkedBusinessCount: 0,
+  } })
+  apiMock.archiveUploadSessions.mockResolvedValue({ archivedIds: [] })
+  apiMock.restoreUploadSessions.mockResolvedValue({ restoredIds: [] })
+  apiMock.deleteUploadSessions.mockResolvedValue({ deletedIds: [], deferredIds: [], objectCleanupErrors: [] })
 }
 
 beforeEach(() => {
@@ -560,6 +575,116 @@ describe('production gate app shell and page controls', () => {
     expect(screen.queryByRole('button', { name: '继续上传' })).not.toBeInTheDocument()
   })
 
+  it('offers archive and deletion management for upload records in every status', async () => {
+    const failedSession = {
+      id: 'failed-upload-session',
+      scope: 'styling-garment',
+      status: 'FAILED',
+      businessCode: 'LOOK-FAILED',
+      sourceTitle: '失败上传批次',
+      batchId: 'failed-upload-batch',
+      totalCount: 3,
+      uploadedCount: 1,
+      items: [],
+      errorMessage: '上传连接已中断',
+      createdAt: '2026-07-28T08:00:00Z',
+      updatedAt: '2026-07-28T08:01:00Z',
+    }
+    const finalizedSession = {
+      ...failedSession,
+      id: 'finalized-upload-session',
+      status: 'FINALIZED',
+      businessCode: 'LOOK-FINALIZED',
+      sourceTitle: '已入库上传批次',
+      batchId: 'finalized-upload-batch',
+      uploadedCount: 3,
+      targetId: 101,
+      errorMessage: null,
+      updatedAt: '2026-07-28T09:01:00Z',
+    }
+    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string }) => ({
+      items: options.scope === 'styling_garment' ? [failedSession, finalizedSession] : [],
+    }))
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    window.history.replaceState(null, '', '/library')
+
+    render(<App />)
+
+    await waitFor(() => expect(apiMock.listUploadSessions).toHaveBeenCalledWith(expect.objectContaining({ includeArchived: true })))
+    const manageButtons = await screen.findAllByRole('button', { name: '归档/删除' })
+    expect(manageButtons).toHaveLength(2)
+    manageButtons.forEach((button) => expect(button).toBeEnabled())
+
+    const failedRecord = screen.getByText('失败上传批次').closest('section')
+    expect(failedRecord).not.toBeNull()
+    await userEvent.click(within(failedRecord!).getByRole('button', { name: '归档/删除' }))
+    expect(await screen.findByRole('dialog', { name: '归档或删除上传记录' })).toBeInTheDocument()
+    await waitFor(() => expect(apiMock.getUploadSessionDeleteImpact).toHaveBeenCalled())
+    await userEvent.type(screen.getByPlaceholderText('失败上传批次'), '失败上传批次')
+    const purgeButton = screen.getByRole('button', { name: '彻底删除' })
+    expect(purgeButton).toBeEnabled()
+    apiMock.deleteUploadSessions.mockResolvedValue({ deletedIds: [], deferredIds: ['failed-upload-session'], objectCleanupErrors: [] })
+    await userEvent.click(purgeButton)
+    expect(await screen.findByText('上传已停止；相关临时文件将在上传地址安全失效后自动清理。')).toBeInTheDocument()
+  })
+
+  it('keeps archived abandoned upload records recoverable and directly deletable', async () => {
+    const archivedSession = {
+      id: 'archived-abandoned-session',
+      scope: 'styling-garment',
+      status: 'ABANDONED',
+      businessCode: 'LOOK-ARCHIVED',
+      sourceTitle: '已归档放弃批次',
+      batchId: 'archived-abandoned-batch',
+      totalCount: 1,
+      uploadedCount: 0,
+      items: [],
+      archivedAt: '2026-07-28T10:00:00Z',
+      archiveReason: 'user_archived',
+      createdAt: '2026-07-28T08:00:00Z',
+      updatedAt: '2026-07-28T10:00:00Z',
+    }
+    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string; includeArchived?: boolean }) => ({
+      items: options.scope === 'styling_garment' && options.includeArchived ? [archivedSession] : [],
+    }))
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    window.history.replaceState(null, '', '/library')
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '查看已归档' }))
+
+    expect(await screen.findByText('已归档放弃批次')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '恢复' })).toBeEnabled()
+    await userEvent.click(screen.getByRole('button', { name: '删除' }))
+    expect(await screen.findByRole('dialog', { name: '归档或删除上传记录' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '归档' })).not.toBeInTheDocument()
+  })
+
+  it('blocks permanent upload-record deletion when impact precheck fails', async () => {
+    const session = {
+      id: 'precheck-failed-session', scope: 'styling-garment', status: 'FAILED', businessCode: 'LOOK-PRECHECK',
+      sourceTitle: '预检失败批次', batchId: null, totalCount: 1, uploadedCount: 0, items: [],
+      createdAt: '2026-07-28T08:00:00Z', updatedAt: '2026-07-28T08:01:00Z',
+    }
+    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string; includeArchived?: boolean }) => ({
+      items: options.scope === 'styling_garment' && !options.includeArchived ? [session] : [],
+    }))
+    apiMock.getUploadSessionDeleteImpact.mockRejectedValue(new Error('precheck unavailable'))
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    window.history.replaceState(null, '', '/library')
+
+    render(<App />)
+    await waitFor(() => expect(apiMock.listUploadSessions).toHaveBeenCalledWith(expect.objectContaining({ includeArchived: true })))
+    const record = (await screen.findByText('预检失败批次')).closest('section')
+    expect(record).not.toBeNull()
+    await userEvent.click(within(record!).getByRole('button', { name: '归档/删除' }))
+    expect(await screen.findByRole('dialog', { name: '归档或删除上传记录' })).toBeInTheDocument()
+    await waitFor(() => expect(apiMock.getUploadSessionDeleteImpact).toHaveBeenCalledWith(['precheck-failed-session']))
+    expect(await screen.findByText('删除影响预检失败，暂时不能彻底删除。')).toBeInTheDocument()
+    await userEvent.type(screen.getByPlaceholderText('预检失败批次'), '预检失败批次')
+    expect(screen.getByRole('button', { name: '彻底删除' })).toBeDisabled()
+  })
+
   it('offers one-click continuation when a paused upload has a saved directory handle', async () => {
     directoryAccessMock.getDirectoryHandle.mockResolvedValue({
       kind: 'directory',
@@ -745,9 +870,36 @@ describe('production gate app shell and page controls', () => {
     const checkboxes = screen.getAllByRole('checkbox', { name: '选择' })
     expect(checkboxes[1]).toBeEnabled()
     await userEvent.click(checkboxes[0])
+    await userEvent.keyboard('{Shift>}')
     await userEvent.click(checkboxes[1])
+    await userEvent.keyboard('{/Shift}')
     await userEvent.click(screen.getByRole('button', { name: '下载 2 项' }))
     expect(clickedUrls).toEqual(['/garment-archive?ids=1', '/garment-archive?ids=1,2'])
+  })
+
+  it('selects multiple garment cards with a drag marquee', async () => {
+    apiMock.listStylingGarments.mockResolvedValue({
+      ...emptyPage,
+      items: [garment, { ...garment, id: 2, code: 'MARQUEE-LOOK-2' }],
+      total: 2,
+      facets: {},
+      stableFacets: {},
+    })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
+    expect(await screen.findByText('MARQUEE-LOOK-2')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
+    const surface = document.querySelector('.library-results.marquee-selection-surface') as HTMLElement
+    const cards = Array.from(surface.querySelectorAll<HTMLElement>('.garment-card'))
+    surface.getBoundingClientRect = () => ({ left: 0, top: 0, right: 500, bottom: 500, width: 500, height: 500, x: 0, y: 0, toJSON: () => ({}) })
+    cards[0].getBoundingClientRect = () => ({ left: 10, top: 10, right: 100, bottom: 120, width: 90, height: 110, x: 10, y: 10, toJSON: () => ({}) })
+    cards[1].getBoundingClientRect = () => ({ left: 110, top: 10, right: 200, bottom: 120, width: 90, height: 110, x: 110, y: 10, toJSON: () => ({}) })
+
+    fireEvent.pointerDown(surface, { button: 0, pointerType: 'mouse', clientX: 5, clientY: 5 })
+    fireEvent.pointerMove(window, { pointerType: 'mouse', clientX: 205, clientY: 125 })
+    fireEvent.pointerUp(window, { pointerType: 'mouse', clientX: 205, clientY: 125 })
+
+    expect(await screen.findByRole('button', { name: '下载 2 项' })).toBeEnabled()
   })
 
   it('keeps all four failed-garment actions in a two-column grid', async () => {

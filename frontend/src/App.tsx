@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { CSSProperties, Dispatch, DragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode, SetStateAction, UIEvent } from 'react'
+import type { CSSProperties, Dispatch, DragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode, SetStateAction, UIEvent } from 'react'
 import {
   Bot,
   Check,
@@ -40,7 +40,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { ApiError, api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl, stylingGarmentArchiveUrl } from './api'
-import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, DirectUploadItem, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot, UploadSession } from './api'
+import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, DirectUploadItem, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, ObjectCleanupError, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot, UploadSession } from './api'
 import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { chooseDirectory, filesFromDirectory, getDirectoryHandle, storeDirectoryHandle, supportsDirectoryAccess } from './lib/directoryAccess'
@@ -112,6 +112,96 @@ const uploadSessionScopeRefreshes = [
 const TAGGABLE_GARMENT_STATUSES = new Set(['DRAFT', 'TAGGING_FAILED', 'TAGGING_READY'])
 const RETAGGABLE_GARMENT_STATUSES = new Set(['READY'])
 const ANY_TAGGABLE_GARMENT_STATUSES = new Set([...TAGGABLE_GARMENT_STATUSES, ...RETAGGABLE_GARMENT_STATUSES])
+
+type SelectableId = string | number
+type MarqueeBox = { left: number; top: number; width: number; height: number } | null
+
+function useMarqueeSelection<T extends SelectableId>({ enabled, selected, onChange }: {
+  enabled: boolean
+  selected: ReadonlySet<T>
+  onChange: (ids: Set<T>) => void
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const [box, setBox] = useState<MarqueeBox>(null)
+  const selectedRef = useRef(selected)
+  const suppressClickRef = useRef(false)
+  const cleanupRef = useRef<(() => void) | null>(null)
+
+  useEffect(() => {
+    selectedRef.current = selected
+  }, [selected])
+
+  useEffect(() => () => cleanupRef.current?.(), [])
+
+  function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!enabled || event.button !== 0 || event.pointerType === 'touch') return
+    const target = event.target as HTMLElement
+    if (target.closest('a, input, label, button:not(.record-open), [data-no-marquee]')) return
+    const container = containerRef.current
+    if (!container) return
+    const start = { x: event.clientX, y: event.clientY }
+    const additive = event.metaKey || event.ctrlKey || event.shiftKey
+    const base = additive ? new Set(selectedRef.current) : new Set<T>()
+    let dragging = false
+
+    const move = (pointerEvent: PointerEvent) => {
+      const distance = Math.hypot(pointerEvent.clientX - start.x, pointerEvent.clientY - start.y)
+      if (!dragging && distance < 5) return
+      dragging = true
+      suppressClickRef.current = true
+      document.body.classList.add('is-marquee-selecting')
+      const bounds = container.getBoundingClientRect()
+      const left = Math.min(start.x, pointerEvent.clientX)
+      const top = Math.min(start.y, pointerEvent.clientY)
+      const right = Math.max(start.x, pointerEvent.clientX)
+      const bottom = Math.max(start.y, pointerEvent.clientY)
+      setBox({
+        left: left - bounds.left + container.scrollLeft,
+        top: top - bounds.top + container.scrollTop,
+        width: right - left,
+        height: bottom - top,
+      })
+      const next = new Set(base)
+      container.querySelectorAll<HTMLElement>('[data-select-id]').forEach((item) => {
+        if (item.dataset.selectDisabled === 'true') return
+        const rect = item.getBoundingClientRect()
+        const intersects = rect.left < right && rect.right > left && rect.top < bottom && rect.bottom > top
+        const rawId = item.dataset.selectId
+        if (!intersects || rawId === undefined) return
+        const id = (item.dataset.selectType === 'number' ? Number(rawId) : rawId) as T
+        next.add(id)
+      })
+      onChange(next)
+    }
+    const finish = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', finish)
+      window.removeEventListener('pointercancel', finish)
+      document.body.classList.remove('is-marquee-selecting')
+      setBox(null)
+      cleanupRef.current = null
+      if (dragging) window.setTimeout(() => { suppressClickRef.current = false }, 0)
+    }
+    cleanupRef.current?.()
+    cleanupRef.current = finish
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', finish)
+    window.addEventListener('pointercancel', finish)
+  }
+
+  function onClickCapture(event: ReactMouseEvent<HTMLDivElement>) {
+    if (!suppressClickRef.current) return
+    event.preventDefault()
+    event.stopPropagation()
+  }
+
+  return { containerRef, box, onPointerDown, onClickCapture }
+}
+
+function MarqueeSelectionBox({ box }: { box: MarqueeBox }) {
+  if (!box) return null
+  return <span className="marquee-selection-box" style={box} aria-hidden="true" />
+}
 
 function splitSearchTerms(value: string) {
   const seen = new Set<string>()
@@ -2483,6 +2573,12 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   const selectedTaggableGarments = selectedActiveGarments.filter((item) => TAGGABLE_GARMENT_STATUSES.has(item.status))
   const selectedRetaggableGarments = selectedActiveGarments.filter((item) => RETAGGABLE_GARMENT_STATUSES.has(item.status))
   const allVisibleGarmentsSelected = selectableGarmentIds.length > 0 && selectableGarmentIds.every((id) => selectedGarmentIds.has(id))
+  const garmentMarquee = useMarqueeSelection<number>({
+    enabled: bulkMode,
+    selected: selectedGarmentIds,
+    onChange: setSelectedGarmentIds,
+  })
+  const lastSelectedGarmentIdRef = useRef<number | null>(null)
   const importBatchOptions = useMemo(() => importJobs
     .map((job) => {
       const codes = Array.from(new Set(job.items.map((item) => item.code).filter(Boolean)))
@@ -2643,11 +2739,24 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
     if (latest && (latest.status !== detail.status || latest.code !== detail.code || latest.updatedAt !== detail.updatedAt)) void openDetail(latest)
   }, [garments, detail?.id, detail?.status, detail?.code, detail?.updatedAt])
 
-  function toggleGarmentSelection(id: number, checked: boolean) {
+  function toggleGarmentSelection(id: number, checked: boolean, extend = false) {
     setSelectedGarmentIds((current) => {
       const next = new Set(current)
+      if (extend && lastSelectedGarmentIdRef.current !== null) {
+        const start = selectableGarmentIds.indexOf(lastSelectedGarmentIdRef.current)
+        const end = selectableGarmentIds.indexOf(id)
+        if (start >= 0 && end >= 0) {
+          selectableGarmentIds.slice(Math.min(start, end), Math.max(start, end) + 1).forEach((rangeId) => {
+            if (checked) next.add(rangeId)
+            else next.delete(rangeId)
+          })
+          lastSelectedGarmentIdRef.current = id
+          return next
+        }
+      }
       if (checked) next.add(id)
       else next.delete(id)
+      lastSelectedGarmentIdRef.current = id
       return next
     })
   }
@@ -2933,10 +3042,17 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
                 </>
               )}
               {bulkMode && <button className={`management-action management-check-action ${allVisibleGarmentsSelected ? 'is-active' : ''}`} disabled={!selectableGarmentIds.length} onClick={() => toggleVisibleGarmentSelection(!allVisibleGarmentsSelected)}><Check size={15} /> 全选本页</button>}
+              {bulkMode && <span className="bulk-selection-hint">拖动框选 · Shift 连选</span>}
               <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
             </div>
           </div>
-          <div className={`library-results ${showSearchBusy ? 'is-loading' : ''}`}>
+          <div
+            ref={garmentMarquee.containerRef}
+            className={`library-results marquee-selection-surface ${bulkMode ? 'is-bulk-selecting' : ''} ${showSearchBusy ? 'is-loading' : ''}`}
+            onPointerDown={garmentMarquee.onPointerDown}
+            onClickCapture={garmentMarquee.onClickCapture}
+          >
+            <MarqueeSelectionBox box={garmentMarquee.box} />
             {items.length ? (
               <div className="garment-grid">{items.map((item) => (
                 <GarmentCard
@@ -2947,7 +3063,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
                   onTag={ANY_TAGGABLE_GARMENT_STATUSES.has(item.status) ? () => void run(item.status === 'READY' ? '重新识别标签中...' : '识别标签中...', () => api.tagStylingGarment(item.id), (r: { item: StylingGarment }) => updateGarmentInView(r.item), { refresh: 'background' }) : undefined}
                   tagLabel={item.status === 'READY' ? '重新识别' : '识别标签'}
                   selected={bulkMode && selectedGarmentIds.has(item.id)}
-                  onSelect={bulkMode ? (checked) => toggleGarmentSelection(item.id, checked) : undefined}
+                  onSelect={bulkMode ? (checked, extend) => toggleGarmentSelection(item.id, checked, extend) : undefined}
                   onDelete={() => openGarmentDeleteDialog([item])}
                   onRestore={() => restoreGarments([item])}
                 />
@@ -3654,6 +3770,8 @@ type ImportJob = {
   status: 'RUNNING' | 'INTERRUPTED' | 'SUCCEEDED' | 'FAILED'
   createdAt?: string
   updatedAt?: string
+  archivedAt?: string | null
+  archiveReason?: string | null
   total: number
   uploaded: number
   skipped: number
@@ -3732,6 +3850,8 @@ type ImportTaskRow = {
   createdAt?: string
   updatedAt?: string
   error?: string | null
+  archivedAt?: string | null
+  archiveReason?: string | null
 }
 
 type RecoveredImportSessionGroup = {
@@ -3741,6 +3861,14 @@ type RecoveredImportSessionGroup = {
   total: number
   createdAt?: string
   updatedAt?: string
+}
+
+type UploadRecordTarget = {
+  id: string
+  title: string
+  rows: ImportTaskRow[]
+  jobId?: string
+  archived?: boolean
 }
 
 function importTaskStatusTone(status: string): ImportTaskRow['statusTone'] {
@@ -4503,6 +4631,13 @@ function BatchImportPanel({
           sessions={uploadSessions}
           garments={garments}
           onAbandon={(id) => api.abandonUploadSession(id).then(() => refreshUploadSessions())}
+          onRemoveJob={(jobId) => setImportJobs((current) => current.filter((job) => job.id !== jobId))}
+          onSetJobArchived={(jobId, archived) => setImportJobs((current) => current.map((job) => job.id === jobId ? {
+            ...job,
+            archivedAt: archived ? new Date().toISOString() : null,
+            archiveReason: archived ? 'user_archived' : null,
+          } : job))}
+          onRefresh={refreshUploadSessions}
           onFindGarment={onFindGarment}
           onFindJob={onFindJob}
           resumingJobId={resumingJobId}
@@ -4520,6 +4655,9 @@ function ImportTaskWorkbench({
   sessions,
   garments,
   onAbandon,
+  onRemoveJob,
+  onSetJobArchived,
+  onRefresh,
   onFindGarment,
   onFindJob,
   resumingJobId,
@@ -4531,6 +4669,9 @@ function ImportTaskWorkbench({
   sessions: UploadSession[]
   garments: StylingGarment[]
   onAbandon: (id: string) => Promise<unknown>
+  onRemoveJob: (jobId: string) => void
+  onSetJobArchived: (jobId: string, archived: boolean) => void
+  onRefresh: () => Promise<UploadSession[]>
   onFindGarment: (code: string, garmentId?: number) => void
   onFindJob: (jobId: string) => void
   resumingJobId: string | null
@@ -4544,15 +4685,46 @@ function ImportTaskWorkbench({
   const [uploadedTo, setUploadedTo] = useState('')
   const [openFilter, setOpenFilter] = useState<'date' | 'status' | null>(null)
   const [abandoningId, setAbandoningId] = useState<string | null>(null)
+  const [dismissedUploadSessionIds, setDismissedUploadSessionIds] = useState<Set<string>>(() => new Set())
+  const [includeArchived, setIncludeArchived] = useState(false)
+  const [archivedSessionSnapshot, setArchivedSessionSnapshot] = useState<UploadSession[]>([])
+  const [loadingArchived, setLoadingArchived] = useState(false)
+  const [manageRecord, setManageRecord] = useState<UploadRecordTarget | null>(null)
+  const [manageImpact, setManageImpact] = useState<DeleteImpact | null>(null)
+  const [manageImpactLoading, setManageImpactLoading] = useState(false)
+  const [manageImpactError, setManageImpactError] = useState<string | null>(null)
+  const [uploadRecordOperationId, setUploadRecordOperationId] = useState<string | null>(null)
+  const [uploadRecordError, setUploadRecordError] = useState<string | null>(null)
+  const manageImpactRequestRef = useRef(0)
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(() => new Set())
   const [offset, setOffset] = useState(0)
   const [pageSize, setPageSize] = useState(8)
   const garmentsById = useMemo(() => new Map(garments.map((item) => [item.id, item])), [garments])
   const garmentsByCode = useMemo(() => new Map(garments.map((item) => [item.code, item])), [garments])
-  const sessionsById = useMemo(() => new Map(sessions.map((item) => [item.id, item])), [sessions])
+  const mergedUploadSessions = useMemo(() => {
+    const merged = new Map(archivedSessionSnapshot.map((item) => [item.id, item]))
+    sessions.forEach((session) => {
+      const snapshot = merged.get(session.id)
+      merged.set(session.id, snapshot?.archivedAt
+        ? { ...snapshot, ...session, archivedAt: snapshot.archivedAt, archiveReason: snapshot.archiveReason }
+        : session)
+    })
+    return Array.from(merged.values())
+  }, [archivedSessionSnapshot, sessions])
+  const displayedSessions = useMemo(() => mergedUploadSessions
+    .filter((item) => includeArchived || !item.archivedAt), [includeArchived, mergedUploadSessions])
+  const sessionsById = useMemo(() => new Map(displayedSessions.map((item) => [item.id, item])), [displayedSessions])
+  const allSessionsById = useMemo(() => new Map(mergedUploadSessions.map((item) => [item.id, item])), [mergedUploadSessions])
   const jobSessionIds = useMemo(() => new Set(jobs.flatMap((job) => job.items.map((item) => item.sessionId).filter(Boolean) as string[])), [jobs])
 
-  const jobRows = useMemo<ImportTaskRow[]>(() => jobs.flatMap((job) => {
+  const reconciledJobs = useMemo(() => jobs.map((job) => {
+    const linked = job.items.map((item) => item.sessionId ? allSessionsById.get(item.sessionId) : undefined).filter(Boolean) as UploadSession[]
+    if (!linked.length) return job
+    const archivedAt = linked.every((session) => session.archivedAt) ? linked.find((session) => session.archivedAt)?.archivedAt ?? job.archivedAt : null
+    return { ...job, archivedAt, archiveReason: archivedAt ? linked.find((session) => session.archiveReason)?.archiveReason ?? 'user_archived' : null }
+  }), [allSessionsById, jobs])
+  const displayedJobs = useMemo(() => reconciledJobs.filter((job) => includeArchived || !job.archivedAt), [includeArchived, reconciledJobs])
+  const jobRows = useMemo<ImportTaskRow[]>(() => displayedJobs.flatMap((job) => {
     const createdAt = job.createdAt ?? job.operations.find((item) => item.startedAt)?.startedAt ?? job.operations.find((item) => item.completedAt)?.completedAt ?? undefined
     const updatedAt = job.updatedAt ?? [...job.operations]
       .map((item) => item.completedAt ?? item.failedAt ?? item.startedAt)
@@ -4585,12 +4757,14 @@ function ImportTaskWorkbench({
         createdAt,
         updatedAt: garment?.updatedAt ?? (sessionDrivesStatus ? session?.updatedAt ?? updatedAt : updatedAt),
         error: sessionDrivesStatus ? session?.errorMessage ?? item.error : item.error,
+        archivedAt: session?.archivedAt ?? job.archivedAt,
+        archiveReason: session?.archiveReason ?? job.archiveReason,
       }
     })
-  }), [garmentsByCode, garmentsById, jobs, sessionsById])
+  }), [displayedJobs, garmentsByCode, garmentsById, sessionsById])
 
-  const sessionRows = useMemo<ImportTaskRow[]>(() => sessions
-    .filter((session) => session.scope === 'styling-garment' && !jobSessionIds.has(session.id))
+  const sessionRows = useMemo<ImportTaskRow[]>(() => displayedSessions
+    .filter((session) => session.scope === 'styling-garment' && !jobSessionIds.has(session.id) && !dismissedUploadSessionIds.has(session.id))
     .map((session) => {
       const garment = session.targetId ? garmentsById.get(session.targetId) : undefined
       const status = importRowBusinessStatus(session, garment, session.status)
@@ -4613,12 +4787,14 @@ function ImportTaskWorkbench({
         createdAt: session.createdAt,
         updatedAt: garment?.updatedAt ?? session.updatedAt ?? session.createdAt,
         error: session.errorMessage,
+        archivedAt: session.archivedAt,
+        archiveReason: session.archiveReason,
       }
-    }), [garmentsById, jobSessionIds, sessions])
+    }), [dismissedUploadSessionIds, displayedSessions, garmentsById, jobSessionIds])
 
   const allRows = useMemo(() => [...jobRows, ...sessionRows], [jobRows, sessionRows])
   const queryTerms = splitSearchTerms(query).map((term) => term.toLocaleLowerCase())
-  const titleMatchedJobIds = new Set(jobs
+  const titleMatchedJobIds = new Set(displayedJobs
     .filter((job) => {
       if (!queryTerms.length) return false
       const rows = jobRows.filter((row) => row.batchId === job.id)
@@ -4677,7 +4853,7 @@ function ImportTaskWorkbench({
     { value: 'saved', label: '可用', count: allRows.filter((row) => isImportTaskDone(row.status)).length },
   ]
   const hasActiveFilters = Boolean(query.trim() || filter !== 'all' || uploadedFrom || uploadedTo)
-  const visibleJobs = [...jobs].sort((a, b) => {
+  const visibleJobs = [...displayedJobs].sort((a, b) => {
     const av = new Date(parseRuyiTime(a.createdAt ?? a.updatedAt)).getTime()
     const bv = new Date(parseRuyiTime(b.createdAt ?? b.updatedAt)).getTime()
     return bv - av
@@ -4761,16 +4937,133 @@ function ImportTaskWorkbench({
     }
   }
 
-  if (!jobs.length && !sessions.length) {
-    return (
-      <div className="panel import-workbench is-empty">
-        <div className="import-empty-state">
-          <Clock3 size={18} />
-          <strong>暂无上传记录</strong>
-          <span>选择图片或文件夹后，这里会按批次展示每个货号的上传、保存和识别状态。</span>
-        </div>
-      </div>
-    )
+  function uploadRecordSessionIds(rows: ImportTaskRow[]) {
+    return Array.from(new Set(rows.map((row) => row.sessionId).filter(Boolean) as string[]))
+  }
+
+  async function loadArchivedSessions() {
+    setLoadingArchived(true)
+    try {
+      const result = await api.listUploadSessions({ scope: 'styling_garment', includeArchived: true, includeAbandoned: true, limit: 500 })
+      setArchivedSessionSnapshot(result.items)
+      setUploadRecordError(null)
+    } finally {
+      setLoadingArchived(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadArchivedSessions().catch((error) => setUploadRecordError(error instanceof Error ? error.message : '无法读取上传记录'))
+  }, [])
+
+  useEffect(() => {
+    if (loadingArchived || uploadRecordOperationId) return
+    reconciledJobs.forEach((job) => {
+      const original = jobs.find((item) => item.id === job.id)
+      if (original && Boolean(original.archivedAt) !== Boolean(job.archivedAt)) onSetJobArchived(job.id, Boolean(job.archivedAt))
+    })
+  }, [jobs, loadingArchived, reconciledJobs, uploadRecordOperationId])
+
+  function openUploadRecordManage(target: UploadRecordTarget) {
+    setManageRecord(target)
+    setManageImpact(null)
+    setManageImpactError(null)
+    const sessionIds = uploadRecordSessionIds(target.rows)
+    if (!sessionIds.length) {
+      setManageImpact({ uploadSessionCount: 0, uploadItemCount: 0, temporaryObjectCount: 0, linkedBusinessCount: 0, estimatedBytes: 0 })
+      setManageImpactLoading(false)
+      return
+    }
+    const requestId = ++manageImpactRequestRef.current
+    setManageImpactLoading(true)
+    void api.getUploadSessionDeleteImpact(sessionIds)
+      .then((result) => {
+        if (manageImpactRequestRef.current === requestId) setManageImpact(result.impact)
+      })
+      .catch((error) => {
+        if (manageImpactRequestRef.current !== requestId) return
+        setManageImpact(null)
+        setManageImpactError(error instanceof Error ? error.message : '影响预检失败')
+      })
+      .finally(() => {
+        if (manageImpactRequestRef.current === requestId) setManageImpactLoading(false)
+      })
+  }
+
+  function closeUploadRecordManage() {
+    if (uploadRecordOperationId) return
+    manageImpactRequestRef.current += 1
+    setManageRecord(null)
+  }
+
+  async function refreshManagedUploadRecords() {
+    await onRefresh().catch(() => [])
+    await loadArchivedSessions().catch(() => undefined)
+  }
+
+  async function archiveUploadRecord(target: UploadRecordTarget) {
+    setUploadRecordOperationId(target.id)
+    setUploadRecordError(null)
+    const sessionIds = uploadRecordSessionIds(target.rows)
+    try {
+      if (sessionIds.length) await api.archiveUploadSessions(sessionIds)
+      const archivedAt = new Date().toISOString()
+      setArchivedSessionSnapshot((current) => current.map((session) => sessionIds.includes(session.id) ? { ...session, archivedAt, archiveReason: 'user_archived' } : session))
+      if (target.jobId) onSetJobArchived(target.jobId, true)
+      if (!includeArchived) setDismissedUploadSessionIds((current) => new Set([...current, ...sessionIds]))
+      setManageRecord(null)
+      await refreshManagedUploadRecords()
+    } finally {
+      setUploadRecordOperationId(null)
+    }
+  }
+
+  async function restoreUploadRecord(target: UploadRecordTarget) {
+    if (uploadRecordOperationId) return
+    setUploadRecordOperationId(target.id)
+    setUploadRecordError(null)
+    const sessionIds = uploadRecordSessionIds(target.rows)
+    try {
+      if (sessionIds.length) await api.restoreUploadSessions(sessionIds)
+      setArchivedSessionSnapshot((current) => current.map((session) => sessionIds.includes(session.id) ? { ...session, archivedAt: null, archiveReason: null } : session))
+      if (target.jobId) onSetJobArchived(target.jobId, false)
+      setDismissedUploadSessionIds((current) => {
+        const next = new Set(current)
+        sessionIds.forEach((id) => next.delete(id))
+        return next
+      })
+      await refreshManagedUploadRecords()
+    } catch (error) {
+      setUploadRecordError(error instanceof Error ? error.message : '恢复上传记录失败')
+    } finally {
+      setUploadRecordOperationId(null)
+    }
+  }
+
+  async function purgeUploadRecord(target: UploadRecordTarget, confirmText: string) {
+    setUploadRecordOperationId(target.id)
+    setUploadRecordError(null)
+    try {
+      const sessionIds = uploadRecordSessionIds(target.rows)
+      let cleanupErrors: ObjectCleanupError[] = []
+      let deferredIds: string[] = []
+      if (sessionIds.length) {
+        const result = await api.deleteUploadSessions(sessionIds, sessionIds.length === 1 ? { confirmName: confirmText } : { confirmPhrase: confirmText })
+        cleanupErrors = result.objectCleanupErrors
+        deferredIds = result.deferredIds
+      }
+      setArchivedSessionSnapshot((current) => current
+        .filter((session) => !sessionIds.includes(session.id) || deferredIds.includes(session.id))
+        .map((session) => deferredIds.includes(session.id) ? { ...session, archivedAt: new Date().toISOString(), archiveReason: 'deletion_pending' } : session))
+      setDismissedUploadSessionIds((current) => new Set([...current, ...sessionIds]))
+      if (target.jobId) onRemoveJob(target.jobId)
+      await refreshManagedUploadRecords()
+      setManageRecord(null)
+      if (cleanupErrors.length) setUploadRecordError(`上传记录已删除，但有 ${cleanupErrors.length} 个临时文件清理失败，系统已记录并会自动重试。`)
+      else if (deferredIds.length) setUploadRecordError('上传已停止；相关临时文件将在上传地址安全失效后自动清理。')
+    } finally {
+      setUploadRecordOperationId(null)
+    }
   }
 
   return (
@@ -4805,9 +5098,17 @@ function ImportTaskWorkbench({
             formatLabel={(value) => statusOptions.find((item) => item.value === value)?.label ?? value}
             onChange={(value) => setFilter((value || 'all') as ImportTaskFilter)}
           />
+          <button className={`filter-pill checkbox-pill ${includeArchived ? 'is-active' : ''}`} type="button" disabled={loadingArchived} onClick={() => {
+            const next = !includeArchived
+            setIncludeArchived(next)
+            if (next) void loadArchivedSessions().catch((error) => setUploadRecordError(error instanceof Error ? error.message : '无法读取已归档记录'))
+          }}>
+            <Check size={15} /><span>{loadingArchived ? '读取中' : '查看已归档'}</span>
+          </button>
           {hasActiveFilters && <button className="filter-pill reset-filter-pill" type="button" onClick={clearImportFilters}><span>清空筛选</span></button>}
         </div>
       </div>
+      {uploadRecordError && <div className="inline-error" role="alert">{uploadRecordError}</div>}
 
       <div className="record-list-body import-record-list-body">
         {pagedRecords.map((record) => {
@@ -4816,6 +5117,9 @@ function ImportTaskWorkbench({
             const expanded = expandedTasks.has(group.id)
             const summary = summarizeRows(group.rows)
             const title = group.title
+            const archived = group.rows.every((row) => row.archivedAt)
+            const deleting = group.rows.some((row) => row.archiveReason === 'deletion_pending')
+            const manageTarget = { id: group.id, title, rows: group.rows, archived }
             return (
               <section className={`batch-record-shell import-record-shell ${expanded ? 'is-expanded' : ''}`} key={group.id}>
                 <div
@@ -4848,6 +5152,12 @@ function ImportTaskWorkbench({
                     <span>{importImageCountText(summary.imported, summary.uploaded, summary.retained)} 张</span>
                   </div>
                   <span className={`import-status-badge is-${summary.tone}`}>{summary.label}</span>
+                  <div className="import-record-actions" onClick={(event) => event.stopPropagation()}>
+                    {deleting
+                      ? <button className="management-action compact-control" type="button" disabled><Loader2 className="spin" size={14} />等待清理</button>
+                      : <>{archived && <button className="management-action compact-control" type="button" disabled={uploadRecordOperationId === group.id} onClick={() => void restoreUploadRecord(manageTarget)}><RefreshCw size={14} />恢复</button>}
+                        <button className="management-action compact-control" type="button" disabled={uploadRecordOperationId === group.id} onClick={() => openUploadRecordManage(manageTarget)}><Trash2 size={14} />{archived ? '删除' : '归档/删除'}</button></>}
+                  </div>
                   <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起上传任务' : '展开上传任务'} onClick={(event) => {
                     event.stopPropagation()
                     toggleTask(group.id)
@@ -4870,7 +5180,10 @@ function ImportTaskWorkbench({
           const summary = summarizeRows(allJobRows)
           const expanded = expandedTasks.has(job.id)
           const title = importJobDisplayTitle(job, allJobRows)
-          const canResume = job.status === 'INTERRUPTED'
+          const archived = Boolean(job.archivedAt || allJobRows.every((row) => row.archivedAt))
+          const deleting = allJobRows.some((row) => row.archiveReason === 'deletion_pending')
+          const manageTarget = { id: job.id, title, rows: allJobRows, jobId: job.id, archived }
+          const canResume = !archived && job.status === 'INTERRUPTED'
           const canResumeSavedDirectory = canResume && savedDirectoryJobIds.has(job.id)
           return (
             <section className={`batch-record-shell import-record-shell ${expanded ? 'is-expanded' : ''}`} key={job.id}>
@@ -4904,29 +5217,32 @@ function ImportTaskWorkbench({
                   <span>{importImageCountText(summary.imported, summary.uploaded, summary.retained)} 张</span>
                 </div>
                 <span className={`import-status-badge is-${summary.tone}`}>{summary.label}</span>
-                {canResume && (
-                  <div className="import-resume-actions" onClick={(event) => event.stopPropagation()}>
-                    {canResumeSavedDirectory && (
-                      <button className="management-action compact-control" type="button" disabled={resumingJobId === job.id} onClick={() => onResumeSaved(job.id)}>
-                        <RefreshCw size={14} />{resumingJobId === job.id ? '恢复中' : '继续上传'}
-                      </button>
-                    )}
-                    <label className="management-action compact-control" title="重新选择原任务文件夹；系统会严格核对后从断点继续">
-                      <FolderOpen size={14} />重新选择原目录
-                      <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} disabled={resumingJobId === job.id} onChange={(event) => {
-                        const files = Array.from(event.target.files ?? [])
-                        event.target.value = ''
-                        if (files.length) onResumeFiles(job.id, files)
-                      }} />
-                    </label>
-                  </div>
-                )}
-                {!canResume && <button className="management-action compact-control import-batch-view-button" type="button" title="回到服装库查看本次上传的服装" onClick={(event) => {
-                  event.stopPropagation()
-                  onFindJob(job.id)
-                }}>
-                  查看本批次
-                </button>}
+                <div className="import-record-actions" onClick={(event) => event.stopPropagation()}>
+                  {canResume && (
+                    <div className="import-resume-actions">
+                      {canResumeSavedDirectory && (
+                        <button className="management-action compact-control" type="button" disabled={resumingJobId === job.id} onClick={() => onResumeSaved(job.id)}>
+                          <RefreshCw size={14} />{resumingJobId === job.id ? '恢复中' : '继续上传'}
+                        </button>
+                      )}
+                      <label className="management-action compact-control" title="重新选择原任务文件夹；系统会严格核对后从断点继续">
+                        <FolderOpen size={14} />重新选择原目录
+                        <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} disabled={resumingJobId === job.id} onChange={(event) => {
+                          const files = Array.from(event.target.files ?? [])
+                          event.target.value = ''
+                          if (files.length) onResumeFiles(job.id, files)
+                        }} />
+                      </label>
+                    </div>
+                  )}
+                  {!canResume && !archived && <button className="management-action compact-control import-batch-view-button" type="button" title="回到服装库查看本次上传的服装" onClick={() => onFindJob(job.id)}>
+                    查看本批次
+                  </button>}
+                  {deleting
+                    ? <button className="management-action compact-control" type="button" disabled><Loader2 className="spin" size={14} />等待清理</button>
+                    : <>{archived && <button className="management-action compact-control" type="button" disabled={uploadRecordOperationId === job.id} onClick={() => void restoreUploadRecord(manageTarget)}><RefreshCw size={14} />恢复</button>}
+                      <button className="management-action compact-control" type="button" disabled={uploadRecordOperationId === job.id} onClick={() => openUploadRecordManage(manageTarget)}><Trash2 size={14} />{archived ? '删除' : '归档/删除'}</button></>}
+                </div>
                 <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起上传任务' : '展开上传任务'} onClick={(event) => {
                   event.stopPropagation()
                   toggleTask(job.id)
@@ -4965,6 +5281,17 @@ function ImportTaskWorkbench({
           }}
         />
       </div>
+      {manageRecord && <UploadRecordManageDialog
+        target={manageRecord}
+        impact={manageImpact}
+        impactLoading={manageImpactLoading}
+        impactError={manageImpactError}
+        operationBusy={uploadRecordOperationId === manageRecord.id}
+        onRetryImpact={() => openUploadRecordManage(manageRecord)}
+        onClose={closeUploadRecordManage}
+        onArchive={() => archiveUploadRecord(manageRecord)}
+        onPurge={(confirmText) => purgeUploadRecord(manageRecord, confirmText)}
+      />}
     </div>
   )
 }
@@ -5022,6 +5349,90 @@ function ImportTaskRows({ rows, abandoningId, onAbandon, onFindGarment }: {
       })}
     </div>
   )
+}
+
+function UploadRecordManageDialog({ target, impact, impactLoading, impactError, operationBusy, onClose, onRetryImpact, onArchive, onPurge }: {
+  target: UploadRecordTarget
+  impact: DeleteImpact | null
+  impactLoading: boolean
+  impactError: string | null
+  operationBusy: boolean
+  onClose: () => void
+  onRetryImpact: () => void
+  onArchive: () => Promise<void>
+  onPurge: (confirmText: string) => Promise<void>
+}) {
+  const sessionCount = uploadRecordSessionCount(target.rows)
+  const expectedText = sessionCount <= 1 ? target.title : '全部删除'
+  const [confirmText, setConfirmText] = useState('')
+  const [submitting, setSubmitting] = useState<'archive' | 'purge' | null>(null)
+  const confirmInputRef = useRef<HTMLInputElement | null>(null)
+  const running = target.rows.some((row) => isImportTaskRunning(row.status))
+
+  useEffect(() => {
+    confirmInputRef.current?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !submitting && !operationBusy) onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose, operationBusy, submitting])
+
+  async function submit(action: 'archive' | 'purge') {
+    if (submitting || operationBusy || (action === 'purge' && (confirmText !== expectedText || !impact))) return
+    setSubmitting(action)
+    try {
+      if (action === 'archive') await onArchive()
+      else await onPurge(confirmText)
+    } catch (error) {
+      window.alert(error instanceof ApiError
+        ? friendlyErrorText(error.errorCode, error.errorMessage || error.message)
+        : error instanceof Error
+          ? friendlyErrorText(undefined, error.message)
+          : '操作失败')
+      setSubmitting(null)
+    }
+  }
+
+  return createPortal(
+    <div className="modal-backdrop" role="presentation" onClick={() => { if (!submitting && !operationBusy) onClose() }}>
+      <div className="confirm-modal" role="dialog" aria-modal="true" aria-label="归档或删除上传记录" onClick={(event) => event.stopPropagation()}>
+        <div className="confirm-head">
+          <h2>归档或删除上传记录</h2>
+          <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
+        </div>
+        <p className="confirm-copy">归档后仅从日常上传记录中隐藏，可通过“查看已归档”恢复；不会中断任务，也不会影响已入库服装。</p>
+        {running && <p className="confirm-warning" role="alert">该任务仍在进行。归档不会中断上传；彻底删除会立即阻止继续确认和入库，并在上传地址失效后清理临时文件。</p>}
+        <div className="confirm-items"><span>{target.title}</span></div>
+        <div className="confirm-copy">
+          {impactLoading ? '正在计算删除影响范围...' : impactError ? <><span>删除影响预检失败，暂时不能彻底删除。</span> <button type="button" className="text-button" onClick={onRetryImpact}>重试</button></> : uploadRecordDeleteImpactText(impact, sessionCount)}
+        </div>
+        <label className="confirm-field">
+          <span>{sessionCount <= 1 ? '输入完整任务名确认彻底删除' : '输入“全部删除”确认彻底删除'}</span>
+          <input ref={confirmInputRef} value={confirmText} onChange={(event) => setConfirmText(event.target.value)} placeholder={expectedText} />
+        </label>
+        <div className="confirm-actions upload-record-confirm-actions">
+          <button type="button" className="management-action" disabled={!!submitting || operationBusy} onClick={onClose}>取消</button>
+          {!target.archived && <button type="button" className="management-action" disabled={!!submitting || operationBusy} onClick={() => void submit('archive')}>{submitting === 'archive' ? '归档中...' : '归档'}</button>}
+          <button type="button" className="danger-action" disabled={!!submitting || operationBusy || impactLoading || !impact || !!impactError || confirmText !== expectedText} onClick={() => void submit('purge')}>{submitting === 'purge' ? '删除中...' : '彻底删除'}</button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+function uploadRecordSessionCount(rows: ImportTaskRow[]) {
+  return new Set(rows.map((row) => row.sessionId).filter(Boolean)).size
+}
+
+function uploadRecordDeleteImpactText(impact: DeleteImpact | null, fallbackSessionCount: number) {
+  if (!impact) return '彻底删除会移除上传记录元数据和未入库的临时文件；已经入库的服装与媒体保留。该操作不可恢复。'
+  const sessionCount = impact.uploadSessionCount ?? fallbackSessionCount
+  const temporaryCount = impact.temporaryObjectCount ?? 0
+  const linkedCount = impact.linkedBusinessCount ?? 0
+  const linkedText = linkedCount ? `；${linkedCount} 个已入库业务对象及其媒体会保留` : ''
+  return `彻底删除将移除 ${sessionCount || 1} 条上传会话记录${temporaryCount ? `和 ${temporaryCount} 个未入库临时文件（约 ${formatBytes(impact.estimatedBytes)}）` : ''}${linkedText}。该操作不可恢复。`
 }
 
 function ImportThumbStack({ rows }: { rows: ImportTaskRow[] }) {
@@ -5541,6 +5952,12 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   const [pageSize, setPageSize] = useState<number>(defaultPageSizeOptions[0])
   const [bulkMode, setBulkMode] = useState(false)
   const [batchBulkLoading, setBatchBulkLoading] = useState(false)
+  const recordMarquee = useMarqueeSelection<number>({
+    enabled: bulkMode && !batchBulkLoading && viewMode !== 'batches',
+    selected: selectedRecordIds,
+    onChange: setSelectedRecordIds,
+  })
+  const lastSelectedRecordIdRef = useRef<number | null>(null)
   const taskListItems = viewMode === 'tasks'
     ? items
     : viewMode === 'all'
@@ -5807,11 +6224,27 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     }, { refresh: 'background' })
   }
 
-  function toggleRecordSelection(id: number, checked: boolean) {
+  function toggleRecordSelection(id: number, checked: boolean, extend = false) {
     setSelectedRecordIds((current) => {
       const next = new Set(current)
+      if (extend && lastSelectedRecordIdRef.current !== null && recordMarquee.containerRef.current) {
+        const orderedIds = Array.from(recordMarquee.containerRef.current.querySelectorAll<HTMLElement>('[data-select-id][data-select-type="number"]'))
+          .filter((item) => item.dataset.selectDisabled !== 'true')
+          .map((item) => Number(item.dataset.selectId))
+        const start = orderedIds.indexOf(lastSelectedRecordIdRef.current)
+        const end = orderedIds.indexOf(id)
+        if (start >= 0 && end >= 0) {
+          orderedIds.slice(Math.min(start, end), Math.max(start, end) + 1).forEach((rangeId) => {
+            if (checked) next.add(rangeId)
+            else next.delete(rangeId)
+          })
+          lastSelectedRecordIdRef.current = id
+          return next
+        }
+      }
       if (checked) next.add(id)
       else next.delete(id)
+      lastSelectedRecordIdRef.current = id
       return next
     })
   }
@@ -6103,10 +6536,17 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
                   : <button className="management-action" disabled={selectedArchivedRecords.length > 0} title={selectedArchivedRecords.length ? '请分别选择已归档和未归档记录' : undefined} onClick={runRecordBatchAction}>归档 {selectedActiveRecords.length} 项</button>
               )}
               {bulkMode && <button className={`management-action management-check-action ${allVisibleRecordsSelected ? 'is-active' : ''}`} disabled={batchBulkLoading || (!selectableRecordIds.length && !batchListItems.length)} onClick={() => void toggleVisibleRecordSelection(!allVisibleRecordsSelected)}><Check size={15} /> {batchBulkLoading ? '解析中...' : '全选本页'}</button>}
+              {bulkMode && viewMode !== 'batches' && <span className="bulk-selection-hint">拖动框选单条记录 · Shift 连选</span>}
               <button className="management-action compact-control" disabled={batchBulkLoading} onClick={() => { setBulkMode((value) => !value); setSelectedRecordIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
             </div>
           </div>
-          <div className="record-list-body">
+          <div
+            ref={recordMarquee.containerRef}
+            className={`record-list-body marquee-selection-surface ${bulkMode && viewMode !== 'batches' ? 'is-bulk-selecting' : ''}`}
+            onPointerDown={recordMarquee.onPointerDown}
+            onClickCapture={recordMarquee.onClickCapture}
+          >
+            <MarqueeSelectionBox box={recordMarquee.box} />
             {viewMode === 'all' && workspaceItems.map((entry) => entry.kind === 'batch' ? (
               (() => {
                 const selection = batchSelectionState(entry.batch)
@@ -6249,7 +6689,7 @@ function BulkCheckbox({ checked, indeterminate = false, disabled = false, label,
   indeterminate?: boolean
   disabled?: boolean
   label: string
-  onChange: (checked: boolean) => void
+  onChange: (checked: boolean, extend: boolean) => void
 }) {
   const ref = useRef<HTMLInputElement | null>(null)
   useEffect(() => {
@@ -6263,7 +6703,7 @@ function BulkCheckbox({ checked, indeterminate = false, disabled = false, label,
       checked={checked}
       disabled={disabled}
       aria-checked={indeterminate ? 'mixed' : checked}
-      onChange={(event) => onChange(event.target.checked)}
+      onChange={(event) => onChange(event.target.checked, event.nativeEvent instanceof MouseEvent && event.nativeEvent.shiftKey)}
       aria-label={label}
     />
   )
@@ -6274,14 +6714,19 @@ function TaskRecordRow({ item, active, bulkMode, selected, onSelect, onOpen, onO
   active: boolean
   bulkMode: boolean
   selected: boolean
-  onSelect: (id: number, checked: boolean) => void
+  onSelect: (id: number, checked: boolean, extend?: boolean) => void
   onOpen: (item: GenerationTask) => void
   onOpenStudio: (task: GenerationTask) => void
   onManage: (item: GenerationTask) => void
 }) {
   return (
-    <div className={`record-row ${active ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
-      {bulkMode && <BulkCheckbox checked={selected} disabled={isTaskRunning(item)} label={`选择 ${item.name}`} onChange={(checked) => onSelect(item.id, checked)} />}
+    <div
+      className={`record-row ${selected ? 'is-selected' : ''} ${active ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}
+      data-select-id={bulkMode ? item.id : undefined}
+      data-select-type={bulkMode ? 'number' : undefined}
+      data-select-disabled={bulkMode && isTaskRunning(item) ? 'true' : undefined}
+    >
+      {bulkMode && <BulkCheckbox checked={selected} disabled={isTaskRunning(item)} label={`选择 ${item.name}`} onChange={(checked, extend) => onSelect(item.id, checked, extend)} />}
       <button className="record-open" aria-current={active ? 'true' : undefined} title="查看记录详情" onClick={() => onOpen(item)}>
         <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
         <div><TruncatedText as="strong" text={item.name} /><TruncatedText text={`${item.archivedAt ? archiveStateText(item.archiveReason) : statusText(item.status)} · ${dateText(item.createdAt)}`} /></div>
@@ -6762,7 +7207,7 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
   onDelete?: () => void
   onRestore?: () => void
   selected?: boolean
-  onSelect?: (checked: boolean) => void
+  onSelect?: (checked: boolean, extend: boolean) => void
 }) {
   const tags = item.aiTags ?? {}
   const effective = item.effectiveTags ?? {}
@@ -6780,10 +7225,14 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
   const statusLabel = taggingIssue?.badge ?? garmentStatus(item.status)
   const actionCount = [onOpen, item.archivedAt ? onRestore : onDelete, onDownload, onTag].filter(Boolean).length
   return (
-    <div className={`garment-card ${tagging ? 'is-tagging' : ''} ${failed ? 'is-failed' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
+    <div
+      className={`garment-card ${selected ? 'is-selected' : ''} ${tagging ? 'is-tagging' : ''} ${failed ? 'is-failed' : ''} ${item.archivedAt ? 'is-archived' : ''}`}
+      data-select-id={onSelect ? item.id : undefined}
+      data-select-type={onSelect ? 'number' : undefined}
+    >
       {onSelect && (
         <label className="card-select" title="选择">
-          <input type="checkbox" aria-label="选择" checked={!!selected} onChange={(event) => onSelect(event.target.checked)} />
+          <input type="checkbox" aria-label="选择" checked={!!selected} onChange={(event) => onSelect(event.target.checked, event.nativeEvent instanceof MouseEvent && event.nativeEvent.shiftKey)} />
         </label>
       )}
       <div className="garment-cover">

@@ -2654,6 +2654,44 @@ a.button-link { text-decoration: none; cursor: pointer; }
   box-shadow: 0 8px 20px rgba(15, 23, 42, .08);
   transform: translateY(-1px);
 }
+.garment-card.is-selected,
+.record-row.is-selected {
+  border-color: rgba(15, 124, 255, .68);
+  background: #f0f7ff;
+  box-shadow: 0 0 0 2px rgba(15, 124, 255, .12), var(--shadow-sm);
+}
+.marquee-selection-surface {
+  position: relative;
+}
+.marquee-selection-surface.is-bulk-selecting {
+  cursor: crosshair;
+}
+.marquee-selection-box {
+  position: absolute;
+  z-index: 20;
+  pointer-events: none;
+  border: 1px solid rgba(15, 124, 255, .72);
+  border-radius: 4px;
+  background: rgba(15, 124, 255, .12);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .65) inset;
+}
+body.is-marquee-selecting {
+  user-select: none;
+  cursor: crosshair;
+}
+.management-action.is-danger {
+  color: #b42318;
+}
+.management-action.is-danger:hover:not(:disabled) {
+  border-color: rgba(220, 38, 38, .28);
+  background: #fff5f5;
+}
+.bulk-selection-hint {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
 .compact-control { height: 32px; padding: 0 10px; font-size: 12px; }
 .garment-cover {
   position: relative;
@@ -4372,6 +4410,12 @@ a.button-link { text-decoration: none; cursor: pointer; }
   gap: 10px;
   min-height: 62px;
   padding: 7px 10px;
+}
+.import-record-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
 }
 .batch-record-row.import-record-row .import-record-main {
   grid-template-columns: 48px minmax(0, 1fr);
