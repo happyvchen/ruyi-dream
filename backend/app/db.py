@@ -19,6 +19,9 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("055", "upload_session_execution_lease", "migration_upload_session_execution_lease"),
     ("056", "upload_session_content_checksum", "migration_upload_session_content_checksum"),
     ("057", "styling_garment_tag_error_code", "migration_styling_garment_tag_error_code"),
+    ("058", "upload_session_archiving", "migration_upload_session_archiving"),
+    ("059", "upload_object_cleanup_retry", "migration_upload_object_cleanup_retry"),
+    ("060", "upload_object_cleanup_claim", "migration_upload_object_cleanup_claim"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -329,6 +332,8 @@ def init_db() -> None:
               target_type TEXT,
               target_id INTEGER,
               error_message TEXT,
+              archived_at TEXT,
+              archive_reason TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
@@ -394,6 +399,9 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_upload_session_execution_lease": migration_upload_session_execution_lease,
         "migration_upload_session_content_checksum": migration_upload_session_content_checksum,
         "migration_styling_garment_tag_error_code": migration_styling_garment_tag_error_code,
+        "migration_upload_session_archiving": migration_upload_session_archiving,
+        "migration_upload_object_cleanup_retry": migration_upload_object_cleanup_retry,
+        "migration_upload_object_cleanup_claim": migration_upload_object_cleanup_claim,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -526,6 +534,58 @@ def migration_upload_session_content_checksum(db: sqlite3.Connection) -> None:
 def migration_styling_garment_tag_error_code(db: sqlite3.Connection) -> None:
     if table_exists(db, "styling_garments") and not table_has_column(db, "styling_garments", "tag_error_code"):
         db.execute("ALTER TABLE styling_garments ADD COLUMN tag_error_code TEXT")
+
+
+def migration_upload_session_archiving(db: sqlite3.Connection) -> None:
+    if not table_has_column(db, "upload_sessions", "archived_at"):
+        db.execute("ALTER TABLE upload_sessions ADD COLUMN archived_at TEXT")
+    if not table_has_column(db, "upload_sessions", "archive_reason"):
+        db.execute("ALTER TABLE upload_sessions ADD COLUMN archive_reason TEXT")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_upload_sessions_archived_at ON upload_sessions(archived_at)")
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS upload_object_cleanup_queue (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          object_key TEXT NOT NULL UNIQUE,
+          source_session_id TEXT,
+          error_message TEXT,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          claim_token TEXT,
+          claimed_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS idx_upload_object_cleanup_queue_updated_at ON upload_object_cleanup_queue(updated_at)")
+
+
+def migration_upload_object_cleanup_retry(db: sqlite3.Connection) -> None:
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS upload_object_cleanup_queue (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          object_key TEXT NOT NULL UNIQUE,
+          source_session_id TEXT,
+          error_message TEXT,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          claim_token TEXT,
+          claimed_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    if not table_has_column(db, "upload_object_cleanup_queue", "attempt_count"):
+        db.execute("ALTER TABLE upload_object_cleanup_queue ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_upload_object_cleanup_queue_updated_at ON upload_object_cleanup_queue(updated_at)")
+
+
+def migration_upload_object_cleanup_claim(db: sqlite3.Connection) -> None:
+    if not table_has_column(db, "upload_object_cleanup_queue", "claim_token"):
+        db.execute("ALTER TABLE upload_object_cleanup_queue ADD COLUMN claim_token TEXT")
+    if not table_has_column(db, "upload_object_cleanup_queue", "claimed_at"):
+        db.execute("ALTER TABLE upload_object_cleanup_queue ADD COLUMN claimed_at TEXT")
 
 
 def scrub_prompt_config_hero_product_info(db: sqlite3.Connection) -> None:

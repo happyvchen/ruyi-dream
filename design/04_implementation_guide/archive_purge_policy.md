@@ -27,6 +27,7 @@
 
 | 对象 | 默认操作 | 归档行为 | 彻底删除范围 | OSS 清理 |
 |---|---|---|---|---|
+| `UploadSession` 上传记录 | 归档 | 任意任务状态均可归档；仅从默认上传记录隐藏，不改变上传状态，不停止任务，不影响已入库业务对象 | 所有状态均接受删除；运行中先进入 `deletion_pending` 并阻断后续写入，直传签名失效后再删除会话及条目元数据；已关联业务对象保留 | 只删除未登记为 `MediaAsset` 的临时直传对象；精确 key 进入持久重试队列 |
 | `StylingGarment` 搭配服装 | 归档 | 默认列表隐藏，不进入智能选搭，保留标签和历史快照 | 删除服饰、图片关系、标签、依赖该服饰的生成任务和 attempts | 服饰图、依赖任务输入、预览、结果和 attempt 输出 |
 | `StylingGarmentImage` 搭配服装单图 | 移除图片 | 不使用归档；从当前服饰图包移除 | 删除图片关系；若媒体无其它引用则释放 `MediaAsset` | 无引用时删除原图、thumb、preview |
 | `GenerationTask` / 生成记录 | 归档 | AI 摄影棚最近任务和生成记录默认隐藏，历史数据保留 | 删除任务、输入版本、主推款图片关系、StylingPlan、预览、结果集、结果图、attempts | 主推款图、预览图、最终图、attempt 输出 |
@@ -39,6 +40,9 @@
 
 - `POST /api/styling-garments/delete-impact`，body: `{ "ids": [1, 2] }`
 - `POST /api/generation-tasks/delete-impact`，body: `{ "ids": [1, 2] }`
+- `POST /api/upload-sessions/delete-impact`，body: `{ "ids": ["session-id"] }`
+
+上传记录使用 `POST /api/upload-sessions/archive`、`POST /api/upload-sessions/restore` 和 `DELETE /api/upload-sessions` 管理。所有上传状态均开放这些入口；其归档/删除语义只作用于上传记录层，不能级联改变已入库业务对象。
 
 响应字段使用前端可直接展示的驼峰命名，包括：
 
@@ -54,9 +58,9 @@
 
 ## 实现备注
 
-当前 0.1.0 不引入独立后台删除队列，但彻底删除必须遵循持久状态与顺序边界：
+当前 0.1.0 不引入独立业务删除 job；上传记录仅使用轻量持久对象清理队列保存精确 key 和重试错误。彻底删除必须遵循持久状态与顺序边界：
 
-1. 校验运行状态、确认文本和影响范围；
+1. 校验目标存在性、确认文本和影响范围；运行中上传记录不得拒绝删除请求，而应进入延迟安全清理协议；
 2. 写入 `deletion_pending` 并提交，使刷新后的默认列表立即隐藏；
 3. 在数据库事务中删除业务记录、解除上传会话等弱引用并删除 `MediaAsset` 元数据；
 4. 数据库事务提交后再清理对象存储；

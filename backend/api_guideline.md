@@ -35,7 +35,7 @@
 - `POST /api/uploads/presign`：已停用（410）；禁止创建没有 UploadSession 所有权的直传对象。
 - `POST /api/upload-sessions`：创建上传任务和对象存储直传地址。
 - `POST /api/upload-sessions/styling-import-batch`：原子创建一次搭配服装导入中的全部货号会话；返回共同的 `batchId`，保证用户开始任务后、读取和上传图片前整批记录立即可查。每个货号首次 `resume` 时绑定图片 SHA-256。
-- `GET /api/upload-sessions`：按 `scope`、`status`、`batchId`、`limit` 查询上传任务；`batchId` 用于完整恢复同一次批量任务，单批最多返回 500 个货号。
+- `GET /api/upload-sessions`：按 `scope`、`status`、`batchId`、`limit` 查询上传任务；默认排除已归档记录，`includeArchived=true` 时一并返回且包含已归档的 `ABANDONED` 记录；`batchId` 用于完整恢复同一次批量任务，单批最多返回 500 个货号。
 - `GET /api/upload-sessions/{session_id}`：查询单个上传任务和条目。
 - `POST /api/upload-sessions/{session_id}/resume`：严格校验重新选择的相对路径、大小、修改时间和 SHA-256；认领对象存储中已存在且完整性一致的对象，并只为缺失条目重新签发上传地址。
 - `POST /api/upload-sessions/{session_id}/lease`：上传期间续租当前批次的执行权。
@@ -43,6 +43,10 @@
 - `POST /api/upload-sessions/{session_id}/finalize-generation-task`：把已上传对象保存为 `GenerationTask` 草稿。
 - `POST /api/upload-sessions/{session_id}/finalize-styling-garment`：把已上传对象保存为 `StylingGarment` 草稿。
 - `POST /api/upload-sessions/{session_id}/abandon`：用户放弃未完成上传任务；后端标记废弃并尽力清理尚未入库的直传对象。
+- `POST /api/upload-sessions/delete-impact`：预检一个或多个上传记录的会话、条目、临时对象和已关联业务对象数量；不限制上传任务状态。
+- `POST /api/upload-sessions/archive`：归档任意状态的上传记录；只写归档字段并从默认列表隐藏，不改变上传状态、不停止上传，也不影响已入库业务对象和媒体。
+- `POST /api/upload-sessions/restore`：恢复已归档上传记录的可见性；不改变上传状态。
+- `DELETE /api/upload-sessions`：彻底删除任意状态的上传会话元数据；单条输入完整任务名、批量输入 `全部删除`。只清理既未通过条目外键登记、也不存在同 `object_key` 活跃 `MediaAsset` 的临时直传对象，已入库的服装、生成任务和正式媒体不随上传记录删除。未完成会话先返回 `deferredIds` 并进入 `deletion_pending`，立即阻断续传确认和入库，待已签发直传地址安全失效后再物理删除。
 - `businessCode` / `sourceTitle` / `batchId`：创建上传任务时记录业务货号、用户选择的文件夹 / 批次名和本次批量任务 ID；如果旧客户端未传货号，搭配服装保存接口会用最终 `code` 兜底写入。
 - `executorId`：浏览器标签页执行标识。继续上传和确认条目会续租 90 秒批次执行权；其他页面或电脑只能查看，不能并发接管仍有有效租约的批次。
 
@@ -69,7 +73,7 @@ ABANDONED
 - `GET /api/styling-garment-exports/archive?ids={id1,id2}`：下载一个或多个货号的正式原图 ZIP；每个货号一个文件夹，只包含图片，单次最多 50 个货号。下载不受识别状态或归档状态限制，也不触发 AI 识别。
 - 批量上传场景中，前端应先等待本批所有可上传项完成 `finalize-styling-garment`，再对成功创建的 `StylingGarment` 调用批量识别接口。识别失败只改变 `StylingGarment` 的当前识别状态、错误码及已创建的 attempt，不改变 upload session 的 `FINALIZED` 结果。
 
-未 `FINALIZED` 的 upload session 属于临时上传任务。用户显式放弃或后台 TTL 清理时，只能清理未登记为 `MediaAsset` 的直传对象；已经保存为业务对象的图片走对应业务对象的归档 / 删除 / 媒体引用计数规则。
+未 `FINALIZED` 的 upload session 属于临时上传任务。用户显式放弃、彻底删除上传记录或后台 TTL 清理时，只能清理未登记为 `MediaAsset` 的直传对象；已经保存为业务对象的图片走对应业务对象的归档 / 删除 / 媒体引用计数规则。上传记录归档与业务对象归档相互独立。彻底删除的对象 key 在删除会话前写入持久清理队列；对象存储失败时保留错误和 key，由后台轮询幂等重试。
 
 搭配服装列表与详情在 `TAGGING_FAILED` 时返回本轮任务的安全稳定字段 `taggingErrorCode`：`RATE_LIMITED` 表示限流恢复耗尽，`UPLOAD_REQUIREMENT_NOT_MET` 表示模型未选出可入库商品图，其余错误使用对应技术分类；新一轮开始及识别成功时会清空该字段。普通响应中的 `tagError` 为 `null`，且不返回 attempt、provider 原文或请求/响应快照；admin 技术详情仍通过 `tagError` 和 `tagAttempts` 查看完整事实。
 

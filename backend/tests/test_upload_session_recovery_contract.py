@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import re
 import sqlite3
 
-from app.db import get_db, run_migrations
+from app.db import get_db, now_iso, run_migrations
 from conftest import insert_styling_garment
 
 
@@ -28,6 +28,168 @@ def test_new_upload_objects_use_one_media_uuid_namespace_per_file(client) -> Non
     assert len(set(keys)) == 2
     assert re.fullmatch(r"media/[0-9a-f]{32}/original\.jpg", keys[0])
     assert re.fullmatch(r"media/[0-9a-f]{32}/original\.png", keys[1])
+
+
+def test_all_upload_session_states_can_be_archived_restored_and_deleted_without_deleting_business_objects(client, monkeypatch) -> None:
+    from app import main as app_main
+    from conftest import insert_media_asset
+
+    state_names = ["PENDING", "UPLOADING", "UPLOADED", "FINALIZING", "FAILED", "ABANDONED"]
+    unfinished_sessions = [
+        create_session(client, scope="styling_garment", filenames=[f"{status.lower()}.jpg"])
+        for status in state_names
+    ]
+    finalized = create_session(client, scope="styling_garment", filenames=["finalized.jpg"])
+    unfinished_ids = [item["session"]["id"] for item in unfinished_sessions]
+    unfinished_keys = [item["items"][0]["objectKey"] for item in unfinished_sessions]
+    finalized_id = finalized["session"]["id"]
+    finalized_key = finalized["items"][0]["objectKey"]
+    garment_id = insert_styling_garment(code="ARCHIVE-UPLOAD-LOOK")
+    media_asset_id = insert_media_asset("finalized.jpg", finalized_key)
+    with get_db() as db:
+        for session_id, status in zip(unfinished_ids, state_names, strict=True):
+            db.execute("UPDATE upload_sessions SET status = ? WHERE id = ?", (status, session_id))
+        db.execute(
+            "UPDATE upload_sessions SET status = 'FINALIZED', target_type = 'styling_garment', target_id = ? WHERE id = ?",
+            (garment_id, finalized_id),
+        )
+        # Simulate the finalize window where MediaAsset exists but the upload item weak link
+        # has not been written yet. Delete protection must also check object_key.
+        db.execute("UPDATE upload_session_items SET status = 'READY' WHERE session_id = ?", (finalized_id,))
+
+    all_ids = [*unfinished_ids, finalized_id]
+    archived = client.post("/api/upload-sessions/archive", json={"ids": all_ids})
+    assert archived.status_code == 200
+    assert set(archived.json()["archivedIds"]) == set(all_ids)
+    assert client.get("/api/upload-sessions", params={"scope": "styling_garment"}).json()["items"] == []
+    archived_items = client.get(
+        "/api/upload-sessions",
+        params={"scope": "styling_garment", "includeArchived": "true"},
+    ).json()["items"]
+    assert {item["id"] for item in archived_items} == set(all_ids)
+    assert all(item["archivedAt"] for item in archived_items)
+
+    restored = client.post("/api/upload-sessions/restore", json={"ids": all_ids})
+    assert restored.status_code == 200
+    assert len(client.get("/api/upload-sessions", params={"scope": "styling_garment", "includeAbandoned": "true"}).json()["items"]) == 7
+
+    impact = client.post("/api/upload-sessions/delete-impact", json={"ids": all_ids}).json()["impact"]
+    assert impact["uploadSessionCount"] == 7
+    assert impact["temporaryObjectCount"] == 6
+    assert impact["linkedBusinessCount"] == 1
+
+    deleted_keys: list[str] = []
+
+    def delete_without_holding_the_database_write_lock(key: str) -> None:
+        with get_db() as db:
+            db.execute(
+                "UPDATE upload_object_cleanup_queue SET error_message = 'write-during-object-delete' WHERE object_key = ?",
+                (key,),
+            )
+        deleted_keys.append(key)
+
+    monkeypatch.setattr(app_main, "delete_object", delete_without_holding_the_database_write_lock)
+    deleted = client.request(
+        "DELETE",
+        "/api/upload-sessions",
+        json={"ids": all_ids, "confirmPhrase": "全部删除"},
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["objectCleanupErrors"] == []
+    assert deleted.json()["deletedIds"] == [finalized_id]
+    assert set(deleted.json()["deferredIds"]) == set(unfinished_ids)
+    blocked_finalize = client.post(
+        f"/api/upload-sessions/{unfinished_ids[2]}/finalize-styling-garment",
+        json={"code": "DELETION-MUST-BLOCK-FINALIZE"},
+    )
+    assert blocked_finalize.status_code == 409
+    assert "正在彻底删除" in blocked_finalize.json()["detail"]
+    assert not set(unfinished_keys) & set(deleted_keys)
+    assert finalized_key not in deleted_keys
+    with get_db() as db:
+        assert db.execute("SELECT COUNT(*) AS count FROM upload_sessions").fetchone()["count"] == 6
+        db.execute("UPDATE upload_sessions SET updated_at = '2000-01-01T00:00:00Z' WHERE archive_reason = 'deletion_pending'")
+        assert db.execute("SELECT id FROM styling_garments WHERE id = ?", (garment_id,)).fetchone() is not None
+        assert db.execute("SELECT id FROM media_assets WHERE id = ?", (media_asset_id,)).fetchone() is not None
+    assert app_main.cleanup_deleted_upload_sessions() == 6
+    assert set(unfinished_keys) <= set(deleted_keys)
+    with get_db() as db:
+        assert db.execute("SELECT COUNT(*) AS count FROM upload_sessions").fetchone()["count"] == 0
+
+
+def test_upload_record_object_cleanup_failure_keeps_a_retryable_queue_entry(client, monkeypatch) -> None:
+    from app import main as app_main
+
+    created = create_session(client, filenames=["retry.jpg"])
+    session_id = created["session"]["id"]
+    key = created["items"][0]["objectKey"]
+    with get_db() as db:
+        db.execute("UPDATE upload_sessions SET status = 'FINALIZED' WHERE id = ?", (session_id,))
+    monkeypatch.setattr(app_main, "delete_object", lambda _key: (_ for _ in ()).throw(RuntimeError("rustfs unavailable")))
+
+    response = client.request(
+        "DELETE",
+        "/api/upload-sessions",
+        json={"ids": [session_id], "confirmName": created["session"]["sourceTitle"] or session_id},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["objectCleanupErrors"] == [{"objectKey": key, "error": "rustfs unavailable"}]
+    with get_db() as db:
+        queued = db.execute("SELECT object_key, error_message FROM upload_object_cleanup_queue").fetchone()
+        assert queued["object_key"] == key
+        assert queued["error_message"] == "rustfs unavailable"
+    monkeypatch.setattr(app_main, "delete_object", lambda _key: None)
+    assert app_main.process_upload_object_cleanup_queue() == []
+    with get_db() as db:
+        assert db.execute("SELECT COUNT(*) AS count FROM upload_object_cleanup_queue").fetchone()["count"] == 0
+
+
+def test_upload_cleanup_queue_rechecks_media_protection_and_rotates_deferred_keys(client, monkeypatch) -> None:
+    from app import main as app_main
+    from conftest import insert_media_asset
+
+    protected_key = "media/11111111111111111111111111111111/original.jpg"
+    ordinary_key = "media/22222222222222222222222222222222/original.jpg"
+    media_asset_id = insert_media_asset("protected.jpg", protected_key)
+    with get_db() as db:
+        for source_id, key in (("protected-session", protected_key), ("ordinary-session", ordinary_key)):
+            db.execute(
+                """
+                INSERT INTO upload_object_cleanup_queue
+                  (object_key, source_session_id, error_message, attempt_count, created_at, updated_at)
+                VALUES (?, ?, NULL, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+                """,
+                (key, source_id),
+            )
+    deleted_keys: list[str] = []
+    monkeypatch.setattr(app_main, "delete_object", deleted_keys.append)
+
+    assert app_main.process_upload_object_cleanup_queue(limit=1) == []
+    assert deleted_keys == []
+    assert app_main.process_upload_object_cleanup_queue(limit=1) == []
+    assert deleted_keys == [ordinary_key]
+    with get_db() as db:
+        db.execute("DELETE FROM media_assets WHERE id = ?", (media_asset_id,))
+    assert app_main.process_upload_object_cleanup_queue(limit=1) == []
+    assert deleted_keys == [ordinary_key, protected_key]
+
+
+def test_deletion_failed_still_waits_for_presigned_upload_urls_to_expire(client) -> None:
+    from app import main as app_main
+
+    created = create_session(client, filenames=["still-signed.jpg"])
+    session_id = created["session"]["id"]
+    with get_db() as db:
+        db.execute(
+            "UPDATE upload_sessions SET archived_at = ?, archive_reason = 'deletion_failed', updated_at = ? WHERE id = ?",
+            (now_iso(), now_iso(), session_id),
+        )
+    assert app_main.cleanup_deleted_upload_sessions() == 0
+    with get_db() as db:
+        assert db.execute("SELECT id FROM upload_sessions WHERE id = ?", (session_id,)).fetchone() is not None
+        db.execute("UPDATE upload_sessions SET updated_at = '2000-01-01T00:00:00Z' WHERE id = ?", (session_id,))
+    assert app_main.cleanup_deleted_upload_sessions() == 1
 
 
 def test_legacy_standalone_presign_and_finalize_routes_are_retired(client) -> None:

@@ -441,6 +441,12 @@ class DeleteImpactRequest(BaseModel):
     ids: list[int]
 
 
+class UploadSessionMutationRequest(BaseModel):
+    ids: list[str]
+    confirmName: str | None = None
+    confirmPhrase: str | None = None
+
+
 class ModelProfileUpsertRequest(BaseModel):
     modelId: str | None = None
     name: str | None = None
@@ -781,6 +787,7 @@ def upload_lease_expiry() -> str:
 
 
 def claim_upload_session_lease(db: sqlite3.Connection, session: Any, executor_id: str | None) -> None:
+    ensure_upload_session_not_deleting(session)
     owner = normalized_upload_executor_id(executor_id)
     batch_id = row_value(session, "batch_id")
     if not owner:
@@ -943,6 +950,7 @@ def list_upload_sessions(
     batchId: str | None = None,
     limit: int = Query(20, ge=1, le=500),
     includeAbandoned: bool = False,
+    includeArchived: bool = False,
 ) -> dict[str, Any]:
     filters: list[str] = []
     values: list[Any] = []
@@ -960,11 +968,15 @@ def list_upload_sessions(
             values.extend(requested_statuses)
     else:
         default_statuses = ["PENDING", "UPLOADING", "UPLOADED", "FINALIZING", "FAILED", "FINALIZED"]
+        if includeAbandoned or includeArchived:
+            default_statuses.append("ABANDONED")
         placeholders = ", ".join("?" for _ in default_statuses)
         filters.append(f"status IN ({placeholders})")
         values.extend(default_statuses)
-    if not includeAbandoned:
+    if not includeAbandoned and not includeArchived:
         filters.append("status <> 'ABANDONED'")
+    if not includeArchived:
+        filters.append("archived_at IS NULL")
     where = f"WHERE {' AND '.join(filters)}" if filters else ""
     with get_db() as db:
         rows = db.execute(
@@ -1008,6 +1020,255 @@ def list_upload_sessions(
             )
             for row in rows
         ]
+    }
+
+
+def normalized_upload_session_ids(ids: list[str]) -> list[str]:
+    cleaned = list(dict.fromkeys(str(item).strip() for item in ids if str(item).strip()))
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="至少选择一条上传记录")
+    if len(cleaned) > 500:
+        raise HTTPException(status_code=400, detail="单次最多处理 500 条上传记录")
+    return cleaned
+
+
+def upload_session_rows_for_mutation(db: Any, session_ids: list[str]) -> list[Any]:
+    placeholders = ", ".join("?" for _ in session_ids)
+    rows = db.execute(
+        f"SELECT * FROM upload_sessions WHERE id IN ({placeholders})",
+        session_ids,
+    ).fetchall()
+    if len(rows) != len(session_ids):
+        raise HTTPException(status_code=404, detail="部分上传记录不存在或已删除")
+    return rows
+
+
+def upload_session_delete_impact(db: Any, session_ids: list[str]) -> dict[str, Any]:
+    session_ids = normalized_upload_session_ids(session_ids)
+    rows = upload_session_rows_for_mutation(db, session_ids)
+    placeholders = ", ".join("?" for _ in session_ids)
+    item_rows = db.execute(
+        f"""
+        SELECT item.size_bytes, item.media_asset_id,
+               EXISTS (
+                 SELECT 1 FROM media_assets active_media
+                 WHERE active_media.object_key = item.object_key AND active_media.deleted_at IS NULL
+               ) AS has_active_media
+        FROM upload_session_items item
+        WHERE item.session_id IN ({placeholders})
+        """,
+        session_ids,
+    ).fetchall()
+    temporary_rows = [row for row in item_rows if row["media_asset_id"] is None and not row["has_active_media"]]
+    linked_business_count = sum(1 for row in rows if row_value(row, "target_id"))
+    return {
+        "uploadSessionCount": len(rows),
+        "uploadItemCount": len(item_rows),
+        "temporaryObjectCount": len(temporary_rows),
+        "linkedBusinessCount": linked_business_count,
+        "estimatedBytes": sum(int(row["size_bytes"] or 0) for row in temporary_rows),
+    }
+
+
+@app.post("/api/upload-sessions/delete-impact")
+def get_upload_sessions_delete_impact(payload: UploadSessionMutationRequest) -> dict[str, Any]:
+    with get_db() as db:
+        return {"impact": upload_session_delete_impact(db, payload.ids)}
+
+
+@app.post("/api/upload-sessions/archive")
+def archive_upload_sessions(payload: UploadSessionMutationRequest) -> dict[str, Any]:
+    session_ids = normalized_upload_session_ids(payload.ids)
+    timestamp = now_iso()
+    placeholders = ", ".join("?" for _ in session_ids)
+    with get_db() as db:
+        upload_session_rows_for_mutation(db, session_ids)
+        db.execute(
+            f"""
+            UPDATE upload_sessions
+            SET archived_at = COALESCE(archived_at, ?),
+                archive_reason = COALESCE(archive_reason, 'user_archived'),
+                updated_at = ?
+            WHERE id IN ({placeholders})
+            """,
+            (timestamp, timestamp, *session_ids),
+        )
+    return {"archivedIds": session_ids}
+
+
+@app.post("/api/upload-sessions/restore")
+def restore_upload_sessions(payload: UploadSessionMutationRequest) -> dict[str, Any]:
+    session_ids = normalized_upload_session_ids(payload.ids)
+    placeholders = ", ".join("?" for _ in session_ids)
+    with get_db() as db:
+        rows = upload_session_rows_for_mutation(db, session_ids)
+        if any(row_value(row, "archive_reason") == "deletion_pending" for row in rows):
+            raise HTTPException(status_code=409, detail="上传记录正在彻底删除，无法恢复")
+        db.execute(
+            f"UPDATE upload_sessions SET archived_at = NULL, archive_reason = NULL, updated_at = ? WHERE id IN ({placeholders})",
+            (now_iso(), *session_ids),
+        )
+    return {"restoredIds": session_ids}
+
+
+def ensure_upload_session_not_deleting(session: Any) -> None:
+    if row_value(session, "archive_reason") in {"deletion_pending", "deletion_failed"}:
+        raise HTTPException(status_code=409, detail="上传记录正在彻底删除，不能继续上传或入库")
+
+
+def enqueue_upload_session_cleanup_and_delete(db: Any, session_ids: list[str], *, include_protected_keys: bool = False) -> list[str]:
+    if not session_ids:
+        return []
+    placeholders = ", ".join("?" for _ in session_ids)
+    timestamp = now_iso()
+    media_protection_filter = "" if include_protected_keys else """
+          AND NOT EXISTS (
+            SELECT 1 FROM media_assets active_media
+            WHERE active_media.object_key = item.object_key AND active_media.deleted_at IS NULL
+          )
+    """
+    safe_rows = db.execute(
+        f"""
+        SELECT item.session_id, item.object_key
+        FROM upload_session_items item
+        WHERE item.session_id IN ({placeholders})
+          AND item.media_asset_id IS NULL
+          {media_protection_filter}
+        """,
+        session_ids,
+    ).fetchall()
+    for row in safe_rows:
+        db.execute(
+            """
+            INSERT INTO upload_object_cleanup_queue
+              (object_key, source_session_id, error_message, attempt_count, created_at, updated_at)
+            VALUES (?, ?, NULL, 0, ?, ?)
+            ON CONFLICT(object_key) DO UPDATE SET
+              source_session_id = excluded.source_session_id,
+              updated_at = excluded.updated_at
+            """,
+            (row["object_key"], row["session_id"], timestamp, timestamp),
+        )
+    db.execute(f"DELETE FROM upload_sessions WHERE id IN ({placeholders})", session_ids)
+    return [str(row["object_key"]) for row in safe_rows]
+
+
+def process_upload_object_cleanup_queue(*, source_session_ids: list[str] | None = None, limit: int = 100) -> list[dict[str, str]]:
+    if source_session_ids is not None and not source_session_ids:
+        return []
+    filters = ""
+    values: list[Any] = []
+    if source_session_ids:
+        placeholders = ", ".join("?" for _ in source_session_ids)
+        filters = f"WHERE source_session_id IN ({placeholders})"
+        values.extend(source_session_ids)
+    claim_stale_before = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(timespec="seconds").replace("+00:00", "Z")
+    claim_filter = "(claim_token IS NULL OR claimed_at <= ?)"
+    filters = f"{filters} {'AND' if filters else 'WHERE'} {claim_filter}"
+    values.append(claim_stale_before)
+    with get_db() as db:
+        rows = db.execute(
+            f"SELECT id, object_key FROM upload_object_cleanup_queue {filters} ORDER BY attempt_count, updated_at, id LIMIT ?",
+            (*values, limit),
+        ).fetchall()
+    errors: list[dict[str, str]] = []
+    for row in rows:
+        claim_token = uuid4().hex
+        with get_db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute(
+                """
+                SELECT id, object_key
+                FROM upload_object_cleanup_queue
+                WHERE id = ? AND (claim_token IS NULL OR claimed_at <= ?)
+                """,
+                (row["id"], claim_stale_before),
+            ).fetchone()
+            if not current:
+                continue
+            protected = db.execute(
+                "SELECT 1 FROM media_assets WHERE object_key = ? AND deleted_at IS NULL LIMIT 1",
+                (current["object_key"],),
+            ).fetchone()
+            if protected:
+                db.execute(
+                    """
+                    UPDATE upload_object_cleanup_queue
+                    SET error_message = '对象当前受正式媒体保护，已暂缓清理',
+                        attempt_count = attempt_count + 1, claim_token = NULL, claimed_at = NULL, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now_iso(), row["id"]),
+                )
+                continue
+            db.execute(
+                "UPDATE upload_object_cleanup_queue SET claim_token = ?, claimed_at = ?, updated_at = ? WHERE id = ?",
+                (claim_token, now_iso(), now_iso(), row["id"]),
+            )
+        try:
+            delete_object(row["object_key"])
+        except Exception as exc:
+            message = str(exc)
+            errors.append({"objectKey": row["object_key"], "error": message})
+            with get_db() as db:
+                db.execute(
+                    """
+                    UPDATE upload_object_cleanup_queue
+                    SET error_message = ?, attempt_count = attempt_count + 1,
+                        claim_token = NULL, claimed_at = NULL, updated_at = ?
+                    WHERE id = ? AND claim_token = ?
+                    """,
+                    (message, now_iso(), row["id"], claim_token),
+                )
+        else:
+            with get_db() as db:
+                db.execute("DELETE FROM upload_object_cleanup_queue WHERE id = ? AND claim_token = ?", (row["id"], claim_token))
+    return errors
+
+
+@app.delete("/api/upload-sessions")
+def delete_upload_sessions(payload: UploadSessionMutationRequest) -> dict[str, Any]:
+    session_ids = normalized_upload_session_ids(payload.ids)
+    timestamp = now_iso()
+    with get_db() as db:
+        rows = upload_session_rows_for_mutation(db, session_ids)
+        expected_name = str(row_value(rows[0], "source_title") or row_value(rows[0], "business_code") or rows[0]["id"])
+        if len(rows) == 1:
+            if payload.confirmName != expected_name:
+                raise HTTPException(status_code=400, detail=f"请输入完整名称“{expected_name}”确认彻底删除")
+        elif payload.confirmPhrase != "全部删除":
+            raise HTTPException(status_code=400, detail="批量彻底删除请输入“全部删除”")
+        placeholders = ", ".join("?" for _ in session_ids)
+        db.execute(
+            f"""
+            UPDATE upload_sessions
+            SET archived_at = COALESCE(archived_at, ?), archive_reason = 'deletion_pending',
+                lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+            WHERE id IN ({placeholders})
+            """,
+            (timestamp, timestamp, *session_ids),
+        )
+    deleted_ids: list[str] = []
+    deferred_ids: list[str] = []
+    try:
+        with get_db() as db:
+            rows = upload_session_rows_for_mutation(db, session_ids)
+            deleted_ids = [str(row["id"]) for row in rows if row["status"] == "FINALIZED"]
+            deferred_ids = [str(row["id"]) for row in rows if row["status"] != "FINALIZED"]
+            enqueue_upload_session_cleanup_and_delete(db, deleted_ids)
+    except Exception:
+        with get_db() as db:
+            placeholders = ", ".join("?" for _ in session_ids)
+            db.execute(
+                f"UPDATE upload_sessions SET archive_reason = 'deletion_failed', updated_at = ? WHERE id IN ({placeholders})",
+                (now_iso(), *session_ids),
+            )
+        raise
+    cleanup_errors = process_upload_object_cleanup_queue(source_session_ids=deleted_ids)
+    return {
+        "deletedIds": deleted_ids,
+        "deferredIds": deferred_ids,
+        "objectCleanupErrors": cleanup_errors,
     }
 
 
@@ -1279,6 +1540,8 @@ def serialize_upload_session(row: Any, items: list[Any], *, target_status: str |
         "targetId": row_value(row, "target_id"),
         "targetStatus": target_status,
         "errorMessage": row_value(row, "error_message"),
+        "archivedAt": row_value(row, "archived_at"),
+        "archiveReason": row_value(row, "archive_reason"),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
         "items": [
@@ -2038,6 +2301,10 @@ async def finalize_styling_garment_upload_session(
     try:
         assets = await save_uploaded_objects_as_media_assets(uploads, preserve_originals_on_failure=True)
         with get_db() as db:
+            current_session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
+            if not current_session:
+                raise HTTPException(status_code=409, detail="上传记录已删除，已终止入库")
+            ensure_upload_session_not_deleting(current_session)
             duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
             if duplicate:
                 raise HTTPException(status_code=409, detail="搭配服装货号已存在")
@@ -2890,6 +3157,7 @@ async def finalize_generation_task_upload_session(
         session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
         if not session:
             raise HTTPException(status_code=404, detail="上传批次不存在")
+        ensure_upload_session_not_deleting(session)
         if session["scope"] != "generation-task":
             raise HTTPException(status_code=400, detail="上传批次用途不匹配")
         if session["status"] == "FINALIZED" and session["target_id"]:
@@ -2931,6 +3199,10 @@ async def finalize_generation_task_upload_session(
         assets = await save_uploaded_objects_as_media_assets(uploads, preserve_originals_on_failure=True)
         task_name = (payload.name or datetime.now().strftime("%Y%m%d%H%M%S")).strip()
         with get_db() as db:
+            current_session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
+            if not current_session:
+                raise HTTPException(status_code=409, detail="上传记录已删除，已终止入库")
+            ensure_upload_session_not_deleting(current_session)
             batch_id = (payload.batchId or "").strip()[:64] or None
             if batch_id:
                 ensure_generation_batch(db, batch_id, payload.batchName, timestamp)
@@ -6162,11 +6434,39 @@ async def generation_poller_loop() -> None:
         try:
             refresh_pending_new_generation_jobs()
             if time.monotonic() - last_upload_cleanup_at >= 3600:
+                cleanup_deleted_upload_sessions()
                 cleanup_stale_upload_sessions()
                 last_upload_cleanup_at = time.monotonic()
         except Exception as exc:  # pragma: no cover - background safety net
             with get_db() as db:
                 log_event(db, "generation_poller", None, "failed", {"error": str(exc)})
+
+
+def cleanup_deleted_upload_sessions() -> int:
+    """Finalize user-requested deletion after every issued direct-upload URL is safely expired."""
+    safe_before = (
+        datetime.now(timezone.utc) - timedelta(seconds=settings.s3_presign_expires_seconds + 60)
+    ).isoformat(timespec="seconds").replace("+00:00", "Z")
+    with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        rows = db.execute(
+            """
+            SELECT id, status
+            FROM upload_sessions
+            WHERE archive_reason IN ('deletion_pending', 'deletion_failed')
+              AND updated_at <= ?
+            ORDER BY updated_at, id
+            LIMIT ?
+            """,
+            (safe_before, settings.upload_session_cleanup_batch_size),
+        ).fetchall()
+        session_ids = [str(row["id"]) for row in rows]
+        finalized_ids = [str(row["id"]) for row in rows if row["status"] == "FINALIZED"]
+        deferred_ids = [str(row["id"]) for row in rows if row["status"] != "FINALIZED"]
+        enqueue_upload_session_cleanup_and_delete(db, finalized_ids)
+        enqueue_upload_session_cleanup_and_delete(db, deferred_ids, include_protected_keys=True)
+    process_upload_object_cleanup_queue(limit=settings.upload_session_cleanup_batch_size * 20)
+    return len(session_ids)
 
 
 def cleanup_stale_upload_sessions() -> int:
@@ -6282,6 +6582,13 @@ def stable_media_url(key: str | Path | None, variant: str = "original") -> str |
 def insert_media_asset_record(asset: dict[str, Any], timestamp: str | None = None) -> int:
     timestamp = timestamp or now_iso()
     with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        pending_cleanup = db.execute(
+            "SELECT 1 FROM upload_object_cleanup_queue WHERE object_key = ? LIMIT 1",
+            (asset["objectKey"],),
+        ).fetchone()
+        if pending_cleanup:
+            raise HTTPException(status_code=409, detail="上传记录正在彻底删除，不能登记为正式媒体")
         cursor = db.execute(
             """
             INSERT INTO media_assets
