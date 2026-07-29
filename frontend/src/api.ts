@@ -352,13 +352,6 @@ export type UploadSession = {
   }[]
 }
 
-type UploadedMedia = {
-  objectKey: string
-  filename: string
-  mimeType: string
-  sizeBytes: number
-}
-
 const uploadExecutorStorageKey = 'ruyi-upload-executor-id'
 let cachedUploadExecutorId = ''
 
@@ -564,41 +557,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     })
   }
   return response.json() as Promise<T>
-}
-
-async function uploadFilesDirect(scope: string, files: File[]): Promise<UploadedMedia[]> {
-  const presigned = await request<{ items: DirectUploadItem[] }>('/api/uploads/presign', {
-    method: 'POST',
-    body: JSON.stringify({
-      scope,
-      files: files.map((file) => ({
-        filename: file.name,
-        mimeType: file.type,
-        sizeBytes: file.size,
-      })),
-    }),
-  })
-  if (presigned.items.length !== files.length) throw new ApiError('上传地址数量不匹配', 500)
-  await Promise.all(presigned.items.map(async (item, index) => {
-    const file = files[index]!
-    let response: Response
-    try {
-      response = await fetch(item.uploadUrl, {
-        method: item.method,
-        headers: item.headers ?? { 'Content-Type': item.mimeType || file.type },
-        body: file,
-      })
-    } catch {
-      throw new ApiError('浏览器直传对象存储失败，请检查对象存储 CORS 是否允许当前前端域名。', 0)
-    }
-    if (!response.ok) throw new ApiError(`${file.name} 上传失败`, response.status)
-  }))
-  return presigned.items.map((item, index) => ({
-    objectKey: item.objectKey,
-    filename: files[index]!.name,
-    mimeType: item.mimeType || files[index]!.type,
-    sizeBytes: files[index]!.size,
-  }))
 }
 
 async function runWithConcurrency<T>(items: T[], limit: number, worker: (item: T, index: number) => Promise<void>, onFailure?: () => void) {

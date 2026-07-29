@@ -246,9 +246,13 @@ def delete_object(key: str | Path | None) -> None:
 def delete_prefix(prefix: str | Path | None) -> None:
     if not prefix:
         return
+    cleaned_prefix = clean_key(prefix).rstrip("/")
+    parts = cleaned_prefix.split("/")
+    if len(parts) != 2 or parts[0] != "model-profiles" or not parts[1]:
+        raise ValueError(f"拒绝删除共享对象前缀: {cleaned_prefix}")
     settings = get_settings()
     client = s3_client()
-    prefix = clean_key(prefix).rstrip("/") + "/"
+    prefix = cleaned_prefix + "/"
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=settings.s3_bucket, Prefix=prefix):
         objects = [{"Key": item["Key"]} for item in page.get("Contents", [])]

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+import re
 import sqlite3
 
-from app.db import run_migrations
+from app.db import get_db, run_migrations
 from conftest import insert_styling_garment
 
 
@@ -17,6 +19,127 @@ def create_session(client, *, scope: str = "generation_task", filenames: list[st
     )
     assert response.status_code == 200
     return response.json()
+
+
+def test_new_upload_objects_use_one_media_uuid_namespace_per_file(client) -> None:
+    created = create_session(client, filenames=["front.jpg", "detail.png"])
+    keys = [item["objectKey"] for item in created["items"]]
+
+    assert len(set(keys)) == 2
+    assert re.fullmatch(r"media/[0-9a-f]{32}/original\.jpg", keys[0])
+    assert re.fullmatch(r"media/[0-9a-f]{32}/original\.png", keys[1])
+
+
+def test_legacy_standalone_presign_and_finalize_routes_are_retired(client) -> None:
+    presign = client.post(
+        "/api/uploads/presign",
+        json={"scope": "generation_task", "files": [{"filename": "front.jpg", "mimeType": "image/jpeg"}]},
+    )
+    finalize = client.post(
+        "/api/generation-tasks/from-uploads",
+        json={"name": "LEGACY", "uploads": [{"objectKey": "media/deadbeefdeadbeefdeadbeefdeadbeef/original.jpg"}]},
+    )
+
+    assert presign.status_code == 410
+    assert finalize.status_code == 410
+
+
+def test_storage_diagnostics_only_reports_confirmed_upload_objects_as_unavailable(client, monkeypatch) -> None:
+    from app import main as app_main
+
+    created = create_session(client, filenames=["front.jpg"])
+    key = created["items"][0]["objectKey"]
+    monkeypatch.setattr(app_main, "object_exists", lambda _key: False)
+
+    pending = client.get("/api/admin/storage-diagnostics", params={"minAgeMinutes": 0})
+
+    assert pending.status_code == 200
+    assert pending.json()["summary"]["checkedUploadItems"] == 0
+
+    completed = client.post(
+        f"/api/upload-sessions/{created['session']['id']}/complete-items",
+        json={"objectKeys": [key]},
+    )
+    assert completed.status_code == 200
+    confirmed = client.get("/api/admin/storage-diagnostics", params={"minAgeMinutes": 0})
+
+    assert confirmed.json()["summary"]["checkedUploadItems"] == 1
+    assert confirmed.json()["unavailableUploadItems"][0]["objectKey"] == key
+
+
+def test_stale_unfinalized_upload_sessions_are_abandoned_and_cleaned_exactly(client, monkeypatch) -> None:
+    from app import main as app_main
+
+    created = create_session(client, filenames=["front.jpg"])
+    session_id = created["session"]["id"]
+    key = created["items"][0]["objectKey"]
+    stale_at = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat(timespec="seconds").replace("+00:00", "Z")
+    with get_db() as db:
+        db.execute("UPDATE upload_sessions SET updated_at = ? WHERE id = ?", (stale_at, session_id))
+        db.execute("UPDATE upload_session_items SET updated_at = ? WHERE session_id = ?", (stale_at, session_id))
+    deleted_keys: list[str] = []
+    monkeypatch.setattr(app_main, "delete_object", deleted_keys.append)
+
+    cleaned = app_main.cleanup_stale_upload_sessions()
+
+    assert cleaned == 1
+    assert key in deleted_keys
+    assert all(item.startswith(key.rsplit("/", 1)[0] + "/") for item in deleted_keys)
+    recovered = client.get(
+        "/api/upload-sessions",
+        params={"includeAbandoned": "true", "status": "ABANDONED"},
+    ).json()["items"]
+    assert recovered[0]["id"] == session_id
+
+
+def test_stale_upload_cleanup_retries_when_rustfs_is_unavailable(client, monkeypatch) -> None:
+    from app import main as app_main
+
+    created = create_session(client, filenames=["front.jpg"])
+    session_id = created["session"]["id"]
+    stale_at = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat(timespec="seconds").replace("+00:00", "Z")
+    with get_db() as db:
+        db.execute("UPDATE upload_sessions SET updated_at = ? WHERE id = ?", (stale_at, session_id))
+    monkeypatch.setattr(app_main, "delete_object", lambda key: (_ for _ in ()).throw(RuntimeError("rustfs unavailable")))
+
+    cleaned = app_main.cleanup_stale_upload_sessions()
+
+    assert cleaned == 0
+    with get_db() as db:
+        row = db.execute("SELECT status, error_message FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
+    assert row["status"] == "ABANDONED"
+    assert row["error_message"] == "上传批次已过期，文件清理待重试"
+
+    monkeypatch.setattr(app_main, "delete_object", lambda key: None)
+    assert app_main.cleanup_stale_upload_sessions() == 1
+
+
+def test_stale_upload_cleanup_never_deletes_an_item_bound_to_media_asset(client, monkeypatch) -> None:
+    from app import main as app_main
+
+    created = create_session(client, filenames=["front.jpg"])
+    session_id = created["session"]["id"]
+    key = created["items"][0]["objectKey"]
+    stale_at = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat(timespec="seconds").replace("+00:00", "Z")
+    with get_db() as db:
+        cursor = db.execute(
+            """
+            INSERT INTO media_assets
+              (object_key, original_filename, mime_type, size_bytes, created_at, updated_at)
+            VALUES (?, 'front.jpg', 'image/jpeg', 128, ?, ?)
+            """,
+            (key, stale_at, stale_at),
+        )
+        db.execute(
+            "UPDATE upload_session_items SET media_asset_id = ?, updated_at = ? WHERE session_id = ?",
+            (int(cursor.lastrowid), stale_at, session_id),
+        )
+        db.execute("UPDATE upload_sessions SET updated_at = ? WHERE id = ?", (stale_at, session_id))
+    deleted_keys: list[str] = []
+    monkeypatch.setattr(app_main, "delete_object", deleted_keys.append)
+
+    assert app_main.cleanup_stale_upload_sessions() == 0
+    assert deleted_keys == []
 
 
 def test_upload_session_tracks_completed_items_and_is_recoverable(client) -> None:

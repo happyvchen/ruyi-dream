@@ -28,7 +28,7 @@ async def main() -> None:
     package["prompt"] = args.prompt_file.read_text(encoding="utf-8").strip()
 
     if args.preview_file:
-        preview_key = f"research/task-{args.task_id}/{args.name}-preview.png"
+        preview_key = f"experiments/research/task-{args.task_id}/{args.name}-preview.png"
         put_bytes(preview_key, args.preview_file.read_bytes(), "image/png")
         for item in package["imageInputs"]:
             if item.get("role") == "preview_grid":
@@ -43,7 +43,7 @@ async def main() -> None:
             }
         )
 
-    output_key = f"research/task-{args.task_id}/{args.name}.png"
+    output_key = f"experiments/research/task-{args.task_id}/{args.name}.png"
     result = await get_image_provider().generate(package, output_key)
 
     args.artifact_dir.mkdir(parents=True, exist_ok=True)

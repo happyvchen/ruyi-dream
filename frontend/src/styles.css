@@ -3486,8 +3486,8 @@ a.button-link { text-decoration: none; cursor: pointer; }
   width: 14px;
   height: 14px;
 }
-.card-actions .management-action:last-child:nth-child(odd),
-.garment-card.is-failed .card-actions .management-action:nth-child(3) {
+.card-actions[data-action-count="1"] .management-action:last-child,
+.card-actions[data-action-count="3"] .management-action:last-child {
   grid-column: 1 / -1;
 }
 .drawer-backdrop {

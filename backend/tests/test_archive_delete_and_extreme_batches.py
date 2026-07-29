@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from app import main as app_main
 from app.db import get_db
 from conftest import insert_generation_task, insert_styling_garment
+
+
+REAL_CLEANUP_DELETED_MEDIA_OBJECTS = app_main.cleanup_deleted_media_objects
 
 
 def test_batch_archive_handles_one_hundred_tasks_and_hides_them_by_default(client) -> None:
@@ -97,6 +101,62 @@ def test_styling_garment_archive_restore_and_batch_purge_use_business_confirmati
     )
     assert purged.status_code == 200
     assert purged.json()["deletedGarmentIds"] == garment_ids
+
+
+def test_purging_one_direct_uploaded_garment_never_deletes_a_shared_upload_prefix(client, monkeypatch) -> None:
+    first_id = insert_styling_garment(code="SESSION-A")
+    second_id = insert_styling_garment(code="SESSION-B")
+    first_key = "direct-uploads/styling-garment/session-a/001-first.jpg"
+    second_key = "direct-uploads/styling-garment/session-b/001-second.jpg"
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE media_assets SET object_key = ?
+            WHERE id = (SELECT media_asset_id FROM styling_garment_images WHERE styling_garment_id = ?)
+            """,
+            (first_key, first_id),
+        )
+        db.execute(
+            """
+            UPDATE media_assets SET object_key = ?
+            WHERE id = (SELECT media_asset_id FROM styling_garment_images WHERE styling_garment_id = ?)
+            """,
+            (second_key, second_id),
+        )
+
+    deleted_keys: list[str] = []
+    deleted_prefixes: list[str] = []
+    monkeypatch.setattr(app_main, "cleanup_deleted_media_objects", REAL_CLEANUP_DELETED_MEDIA_OBJECTS)
+    monkeypatch.setattr(app_main, "delete_object", deleted_keys.append)
+    monkeypatch.setattr(app_main, "delete_prefix", deleted_prefixes.append)
+
+    response = client.delete(
+        f"/api/styling-garments/{first_id}",
+        params={"purge": "true", "confirmCode": "SESSION-A"},
+    )
+
+    assert response.status_code == 200
+    assert first_key in deleted_keys
+    assert "direct-uploads/styling-garment/session-a/_derived/final-cells/001-first-shot1.png" in deleted_keys
+    assert all("session-b" not in key for key in deleted_keys)
+    assert deleted_prefixes == []
+
+
+def test_purge_reports_exact_object_cleanup_failures(client, monkeypatch) -> None:
+    garment_id = insert_styling_garment(code="CLEANUP-FAIL")
+    monkeypatch.setattr(app_main, "cleanup_deleted_media_objects", REAL_CLEANUP_DELETED_MEDIA_OBJECTS)
+    monkeypatch.setattr(app_main, "delete_object", lambda key: (_ for _ in ()).throw(RuntimeError("rustfs unavailable")))
+
+    response = client.delete(
+        f"/api/styling-garments/{garment_id}",
+        params={"purge": "true", "confirmCode": "CLEANUP-FAIL"},
+    )
+
+    assert response.status_code == 200
+    errors = response.json()["objectCleanupErrors"]
+    assert errors
+    assert errors[0]["objectKey"].startswith("styling-garments/")
+    assert errors[0]["error"] == "rustfs unavailable"
 
 
 def test_running_tasks_cannot_be_archived_or_purged_during_refresh_sensitive_operations(client) -> None:

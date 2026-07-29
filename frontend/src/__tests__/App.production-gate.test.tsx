@@ -750,6 +750,25 @@ describe('production gate app shell and page controls', () => {
     expect(clickedUrls).toEqual(['/garment-archive?ids=1', '/garment-archive?ids=1,2'])
   })
 
+  it('keeps all four failed-garment actions in a two-column grid', async () => {
+    apiMock.listStylingGarments.mockResolvedValue({
+      ...emptyPage,
+      items: [{ ...garment, status: 'TAGGING_FAILED', tagError: '识别失败' }],
+      total: 1,
+      facets: {},
+      stableFacets: {},
+    })
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
+
+    const card = (await screen.findByText('CODX-UI-0718-B-8')).closest('.garment-card') as HTMLElement
+    const actions = card.querySelector('.card-actions') as HTMLElement
+    expect(actions).toHaveAttribute('data-action-count', '4')
+    expect(within(actions).getAllByRole('button').map((button) => button.textContent?.trim()))
+      .toEqual(['详情', '归档', '下载', '识别标签'])
+  })
+
   it('reassures users that a running garment recognition recovers in the background', async () => {
     apiMock.listStylingGarments.mockResolvedValue({
       ...emptyPage,

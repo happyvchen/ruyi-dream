@@ -71,8 +71,30 @@ Gemini 只有明确的前置限流拒绝（HTTP 429 或 `rate_limit_check_failed
 | `app/db.py` | 最终 schema、Prompt 配置槽登记、清理迁移 |
 | `app/prompt_render.py` | 动态占位文本和参考图图号区间渲染 |
 | `app/image_provider.py` | ToApis / fal 请求快照和图片生成适配 |
+| `app/media_storage.py` | 媒体对象键、兼容读取边界和单资产精确清理清单 |
 | `app/toapis_concurrency.py` | ToAPIs 全局并发闸门 |
 | `app/generation_progress.py` | attempt 阶段进度和错误分类 |
+
+## RustFS 对象布局与所有权
+
+运行时只有一个媒体事实源：SQLite `media_assets` 保存元数据和引用关系，RustFS 保存二进制。所有新建的搭配服装图、主推款图、拍摄环境图、分镜预览和最终成片统一使用独立媒体命名空间：
+
+```text
+media/<media-uuid>/original.<ext>
+media/<media-uuid>/_derived/normalized/original.{jpg|png}
+media/<media-uuid>/_derived/thumb/original.webp
+media/<media-uuid>/_derived/preview/original.webp
+media/<media-uuid>/_derived/final-cells/original-shot<1..6>.png
+```
+
+- 一张 `MediaAsset` 独占一个 `<media-uuid>`，业务归属只保存在数据库关系中，不编码进对象键。
+- 直传申请直接写入上述 durable key；上传会话只是传输与恢复状态，不再成为永久目录。
+- provider 生成对象按 `generation_attempt` 派生稳定的 opaque UUID：同一 attempt 崩溃恢复写回同一键，`MediaAsset` 按 `object_key + hash` 幂等登记；新的重试 attempt 使用新键，保证历史媒体不可变。
+- `direct-uploads/...`、`styling-garments/...`、`generation-tasks/...`、`shoot-environment/...` 是历史键，只保持兼容读取和精确删除，不再产生新对象。
+- 数字模特目前仍是聚合对象，使用 `model-profiles/<model-id>/...`，文件名清单由 model profile JSON 管理；删除只允许落到具体 model ID 目录。这是 0.1.0 唯一运行时例外，后续若模型素材需要跨对象复用，再迁为 `MediaAsset`，不能新增第三套媒体机制。
+- 研究脚本只允许写入 `experiments/research/...`，不得作为生产业务素材来源。
+
+未完成上传会话默认保留 168 小时（`APP_UPLOAD_SESSION_TTL_HOURS`），过期且无有效 lease 时标记 `ABANDONED`，并按该会话登记的每个对象精确清理；任何已绑定 `media_asset_id` 或已登记到 `media_assets.object_key` 的对象均排除，RustFS 暂时不可用时保留待重试状态。`GET /api/admin/storage-diagnostics` 使用 `limit + offset` 分页完成全量巡检；未确认上传的 `PENDING` 项不是“丢失文件”，只有 `UPLOADED/READY` 对象不可读才告警。
 
 ## 图片事实源
 

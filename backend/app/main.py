@@ -55,7 +55,6 @@ from .image_ingestion import (
     declared_upload_content_type,
     inspect_image,
     normalize_image,
-    normalized_image_candidates,
     normalized_image_key,
 )
 from .generation_progress import (
@@ -91,6 +90,12 @@ from .generation_progress import (
     provider_error_presentation,
 )
 from .image_provider import ImageProviderError, get_image_provider
+from .media_storage import (
+    is_accepted_upload_key,
+    media_original_key_for_owner,
+    new_media_original_key,
+    owned_media_object_keys,
+)
 from .object_storage import (
     clean_key,
     delete_object,
@@ -552,6 +557,7 @@ def health() -> dict[str, Any]:
 def storage_diagnostics(
     request: Request,
     limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     min_age_minutes: int = Query(30, ge=0, le=1440, alias="minAgeMinutes"),
 ) -> dict[str, Any]:
     require_admin(request)
@@ -565,7 +571,9 @@ def storage_diagnostics(
             SELECT COUNT(*) AS count
             FROM upload_session_items usi
             JOIN upload_sessions us ON us.id = usi.session_id
-            WHERE us.status IN ('PENDING', 'FAILED', 'FINALIZING') AND us.created_at <= ?
+            WHERE usi.status IN ('UPLOADED', 'READY')
+              AND us.status <> 'FINALIZED'
+              AND usi.updated_at <= ?
             """,
             (stale_before,),
         ).fetchone()["count"])
@@ -575,20 +583,22 @@ def storage_diagnostics(
             FROM media_assets
             WHERE deleted_at IS NULL
             ORDER BY id DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (limit,),
+            (limit, offset),
         ).fetchall()
         session_rows = db.execute(
             """
             SELECT usi.id, usi.session_id, usi.object_key, usi.filename, usi.status, us.created_at
             FROM upload_session_items usi
             JOIN upload_sessions us ON us.id = usi.session_id
-            WHERE us.status IN ('PENDING', 'FAILED', 'FINALIZING') AND us.created_at <= ?
-            ORDER BY us.created_at DESC, usi.sort_order, usi.id
-            LIMIT ?
+            WHERE usi.status IN ('UPLOADED', 'READY')
+              AND us.status <> 'FINALIZED'
+              AND usi.updated_at <= ?
+            ORDER BY usi.updated_at DESC, usi.sort_order, usi.id
+            LIMIT ? OFFSET ?
             """,
-            (stale_before, limit),
+            (stale_before, limit, offset),
         ).fetchall()
     missing_media = [
         {
@@ -616,15 +626,17 @@ def storage_diagnostics(
         "summary": {
             "checkedMediaAssets": len(media_rows),
             "totalMediaCandidates": total_media_candidates,
-            "mediaAssetsTruncated": total_media_candidates > len(media_rows),
+            "mediaAssetsTruncated": total_media_candidates > offset + len(media_rows),
             "missingMediaAssets": len(missing_media),
             "checkedUploadItems": len(session_rows),
             "totalUploadItemCandidates": total_upload_candidates,
-            "uploadItemsTruncated": total_upload_candidates > len(session_rows),
+            "uploadItemsTruncated": total_upload_candidates > offset + len(session_rows),
             "unavailableUploadItems": len(unavailable_upload_items),
             "minAgeMinutes": min_age_minutes,
             "staleBefore": stale_before,
             "limit": limit,
+            "offset": offset,
+            "nextOffset": offset + limit,
         },
         "missingMediaAssets": missing_media,
         "unavailableUploadItems": unavailable_upload_items,
@@ -692,17 +704,16 @@ def logout() -> JSONResponse:
 
 @app.post("/api/uploads/presign")
 def create_direct_uploads(payload: DirectUploadRequest) -> dict[str, Any]:
-    return {"items": build_direct_upload_items(payload.scope, payload.files)}
+    raise HTTPException(status_code=410, detail="独立直传已停用，请使用上传会话接口")
 
 
-def build_direct_upload_items(scope: str, files: list[DirectUploadFileRequest], session_id: str | None = None) -> list[dict[str, Any]]:
+def build_direct_upload_items(scope: str, files: list[DirectUploadFileRequest]) -> list[dict[str, Any]]:
     if not files:
         raise HTTPException(status_code=400, detail="至少选择一张图片")
     if len(files) > 20:
         raise HTTPException(status_code=400, detail="单次最多申请 20 张图片上传")
     ensure_direct_upload_cors()
-    scope_prefix = direct_upload_scope_prefix(scope)
-    batch = session_id or f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    direct_upload_scope_prefix(scope)
     items: list[dict[str, Any]] = []
     for index, item in enumerate(files, start=1):
         filename = sanitize_filename(item.filename or f"image-{index}")
@@ -711,7 +722,7 @@ def build_direct_upload_items(scope: str, files: list[DirectUploadFileRequest], 
             raise HTTPException(status_code=400, detail=f"{filename} 超过 {max_mb:.0f}MB 大小限制")
         content_type = direct_upload_content_type(item.mimeType, filename)
         checksum_sha256 = normalized_upload_checksum(item.checksumSha256)
-        object_key = join_key("direct-uploads", scope_prefix, batch, f"{index:03d}-{filename}")
+        object_key = new_media_original_key(filename)
         upload_url = presigned_put_url(object_key, content_type, {"sha256": checksum_sha256} if checksum_sha256 else None)
         if not upload_url:
             raise HTTPException(status_code=500, detail="无法创建上传地址")
@@ -823,7 +834,7 @@ def insert_upload_session(
         raise HTTPException(status_code=400, detail=f"每个拍摄任务最多上传 {MAX_HERO_IMAGE_INPUTS} 张主推款图片")
     session_files = files[:MAX_GARMENT_IMAGE_INPUTS] if scope_prefix == "styling-garment" else files
     session_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
-    items = build_direct_upload_items(scope, session_files, session_id=session_id)
+    items = build_direct_upload_items(scope, session_files)
     timestamp = now_iso()
     db.execute(
         """
@@ -1375,7 +1386,7 @@ def direct_upload_scope_prefix(scope: str) -> str:
 
 def ensure_direct_upload_key(object_key: str) -> str:
     key = clean_key(object_key)
-    if not key.startswith("direct-uploads/"):
+    if not is_accepted_upload_key(key):
         raise HTTPException(status_code=400, detail="上传对象不属于本次直传路径")
     return key
 
@@ -1389,11 +1400,7 @@ def cleanup_objects(keys: list[str]) -> None:
 def image_object_keys(original_key: str | Path | None) -> list[str]:
     if not original_key:
         return []
-    return [
-        clean_key(original_key),
-        *(key for key in [derivative_key(original_key, "thumb"), derivative_key(original_key, "preview")] if key),
-        *normalized_image_candidates(original_key),
-    ]
+    return owned_media_object_keys(str(original_key))
 
 
 def create_normalized_image_derivatives(original_key: str, content: bytes) -> tuple[str, dict[str, Any]]:
@@ -1421,25 +1428,6 @@ def gemini_vision_input(object_key: str | None, fallback_mime: str | None = None
     if key and key != clean_key(object_key):
         return {"data": get_bytes(key), "mime_type": DERIVATIVE_CONTENT_TYPE}
     return {"data": get_bytes(object_key), "mime_type": fallback_mime or "image/png"}
-
-
-def cleanup_prefixes(prefixes: list[str]) -> list[dict[str, str]]:
-    errors: list[dict[str, str]] = []
-    for prefix in dict.fromkeys(prefix for prefix in prefixes if prefix):
-        try:
-            delete_prefix(prefix)
-        except Exception as exc:
-            errors.append({"prefix": prefix, "error": str(exc)})
-    return errors
-
-
-def media_cleanup_prefixes(object_keys: list[str]) -> list[str]:
-    prefixes: list[str] = []
-    for object_key in object_keys:
-        parts = clean_key(object_key).split("/")
-        if len(parts) >= 2 and parts[0] in {"generation-tasks", "styling-garments", "uploads", "direct-uploads", "outputs"}:
-            prefixes.append("/".join(parts[:2]))
-    return list(dict.fromkeys(prefixes))
 
 
 def media_asset_snapshot_reference_count(db: Any, object_key: str) -> int:
@@ -1951,8 +1939,7 @@ async def create_styling_garment(
         if duplicate:
             raise HTTPException(status_code=409, detail="搭配服装货号已存在")
     timestamp = now_iso()
-    prefix = join_key("styling-garments", f"{clean_code}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}")
-    assets = await save_uploads_as_media_assets(files, prefix)
+    assets = await save_uploads_as_media_assets(files)
     with get_db() as db:
         duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
         if duplicate:
@@ -2383,8 +2370,7 @@ async def replace_styling_garment_image(image_id: int, file: UploadFile = File(.
     if not row or row["garment_deleted_at"] is not None:
         raise HTTPException(status_code=404, detail="搭配服装图片不存在")
     ensure_styling_garment_not_tagging({"status": row["garment_status"]})
-    prefix = join_key("styling-garments", f"{sanitize_name(row['code'])}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}")
-    assets = await save_uploads_as_media_assets([file], prefix)
+    assets = await save_uploads_as_media_assets([file])
     replacement = assets[0]
     garment_id = int(row["styling_garment_id"])
     timestamp = now_iso()
@@ -2766,8 +2752,18 @@ def mark_generation_tasks_deletion_state(db: Any, task_ids: list[int], reason: s
 
 
 def cleanup_deleted_media_objects(object_keys: list[str]) -> list[dict[str, str]]:
-    cleanup_objects([key for object_key in object_keys for key in image_object_keys(object_key)])
-    return cleanup_prefixes(media_cleanup_prefixes(object_keys))
+    errors: list[dict[str, str]] = []
+    exact_keys = dict.fromkeys(
+        key
+        for object_key in object_keys
+        for key in image_object_keys(object_key)
+    )
+    for key in exact_keys:
+        try:
+            delete_object(key)
+        except Exception as exc:
+            errors.append({"objectKey": key, "error": str(exc)})
+    return errors
 
 
 def purge_styling_garment(db: Any, garment_id: int, code: str) -> tuple[list[int], list[str]]:
@@ -2858,8 +2854,7 @@ async def create_generation_task(
         raise HTTPException(status_code=400, detail="至少上传一张主推款图片")
     files = files[:MAX_HERO_IMAGE_INPUTS]
     task_name = (name or datetime.now().strftime("%Y%m%d%H%M%S")).strip()
-    prefix = join_key("generation-tasks", f"{sanitize_name(task_name) or 'task'}-{uuid4().hex[:8]}")
-    assets = await save_uploads_as_media_assets(files, prefix)
+    assets = await save_uploads_as_media_assets(files)
     timestamp = now_iso()
     with get_db() as db:
         cursor = db.execute(
@@ -2881,35 +2876,7 @@ async def create_generation_task(
 
 @app.post("/api/generation-tasks/from-uploads")
 async def create_generation_task_from_uploads(payload: GenerationTaskFromUploadsRequest) -> dict[str, Any]:
-    if not payload.uploads:
-        raise HTTPException(status_code=400, detail="至少上传一张主推款图片")
-    uploads = payload.uploads[:MAX_HERO_IMAGE_INPUTS]
-    task_name = (payload.name or datetime.now().strftime("%Y%m%d%H%M%S")).strip()
-    assets = await save_uploaded_objects_as_media_assets(uploads)
-    timestamp = now_iso()
-    try:
-        with get_db() as db:
-            batch_id = (payload.batchId or "").strip()[:64] or None
-            if batch_id:
-                ensure_generation_batch(db, batch_id, payload.batchName, timestamp)
-            cursor = db.execute(
-                "INSERT INTO generation_tasks (name, user_requirement_text, batch_id, status, created_at, updated_at) VALUES (?, ?, ?, 'DRAFT', ?, ?)",
-                (task_name, normalize_user_requirement_text(payload.userRequirement), batch_id, timestamp, timestamp),
-            )
-            task_id = int(cursor.lastrowid)
-            for index, asset in enumerate(assets):
-                db.execute(
-                    """
-                    INSERT INTO generation_task_images (task_id, media_asset_id, sort_order, status, created_at, updated_at)
-                    VALUES (?, ?, ?, 'READY', ?, ?)
-                    """,
-                    (task_id, asset["id"], index, timestamp, timestamp),
-                )
-            log_event(db, "generation_task", task_id, "created", {"name": task_name, "fileCount": len(assets), "uploadMode": "direct"})
-    except Exception:
-        cleanup_created_media_assets(assets)
-        raise
-    return {"item": get_generation_task_by_id(task_id)}
+    raise HTTPException(status_code=410, detail="独立直传已停用，请使用上传会话接口")
 
 
 @app.post("/api/upload-sessions/{session_id}/finalize-generation-task")
@@ -3730,8 +3697,7 @@ async def replace_generation_task_image(image_id: int, file: UploadFile = File(.
     if not row:
         raise HTTPException(status_code=404, detail="主推款图片不存在")
     ensure_generation_task_editable(row)
-    prefix = join_key("generation-tasks", f"{sanitize_name(row['name']) or 'task'}-{uuid4().hex[:8]}")
-    asset = (await save_uploads_as_media_assets([file], prefix))[0]
+    asset = (await save_uploads_as_media_assets([file]))[0]
     with get_db() as db:
         timestamp = now_iso()
         db.execute(
@@ -4051,7 +4017,7 @@ async def run_preview_generation(
             update_attempt_request_snapshot(attempt_id, task_package)
         asset_id, provider_response = await generate_image_asset(
             task_package,
-            join_key("generation-tasks", str(task_id), "preview", f"preview-{preview_id}.png"),
+            media_original_key_for_owner("generation_attempt", attempt_id, "preview.png"),
             attempt_id=attempt_id,
         )
     except Exception as exc:
@@ -5987,7 +5953,7 @@ def get_shoot_environment() -> dict[str, Any]:
 @app.post("/api/shoot-environment")
 async def set_shoot_environment(request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
     require_admin(request)
-    assets = await save_uploads_as_media_assets([file], join_key("shoot-environment", uuid4().hex[:8]))
+    assets = await save_uploads_as_media_assets([file])
     if not assets:
         raise HTTPException(status_code=400, detail="拍摄环境参考图上传失败")
     new_asset_id = int(assets[0]["id"])
@@ -6190,13 +6156,101 @@ def build_user_requirement_context(task: Any) -> dict[str, Any]:
 
 
 async def generation_poller_loop() -> None:
+    last_upload_cleanup_at = 0.0
     while True:
         await asyncio.sleep(settings.generation_poll_interval_seconds)
         try:
             refresh_pending_new_generation_jobs()
+            if time.monotonic() - last_upload_cleanup_at >= 3600:
+                cleanup_stale_upload_sessions()
+                last_upload_cleanup_at = time.monotonic()
         except Exception as exc:  # pragma: no cover - background safety net
             with get_db() as db:
                 log_event(db, "generation_poller", None, "failed", {"error": str(exc)})
+
+
+def cleanup_stale_upload_sessions() -> int:
+    """Abandon expired, unfinalized upload sessions and delete only their exact objects."""
+    timestamp = now_iso()
+    retry_message = "上传批次已过期，文件清理待重试"
+    stale_before = (
+        datetime.now(timezone.utc) - timedelta(hours=settings.upload_session_ttl_hours)
+    ).isoformat(timespec="seconds").replace("+00:00", "Z")
+    with get_db() as db:
+        sessions = db.execute(
+            """
+            SELECT id
+            FROM upload_sessions
+            WHERE (
+                (
+                  status IN ('PENDING', 'UPLOADING', 'UPLOADED', 'FAILED')
+                  AND updated_at <= ?
+                  AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+                ) OR (status = 'ABANDONED' AND error_message = ?)
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM upload_session_items linked
+                WHERE linked.session_id = upload_sessions.id
+                  AND linked.media_asset_id IS NOT NULL
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM upload_session_items linked
+                JOIN media_assets ma ON ma.object_key = linked.object_key AND ma.deleted_at IS NULL
+                WHERE linked.session_id = upload_sessions.id
+              )
+            """,
+            (stale_before, timestamp, retry_message),
+        ).fetchall()
+        session_ids = [str(row["id"]) for row in sessions]
+        if not session_ids:
+            return 0
+        placeholders = ", ".join("?" for _ in session_ids)
+        object_rows = db.execute(
+            f"SELECT session_id, object_key FROM upload_session_items WHERE session_id IN ({placeholders})",
+            session_ids,
+        ).fetchall()
+        db.execute(
+            f"""
+            UPDATE upload_session_items
+            SET status = 'ABANDONED', error_message = '上传批次已过期', updated_at = ?
+            WHERE session_id IN ({placeholders})
+            """,
+            (timestamp, *session_ids),
+        )
+        db.execute(
+            f"""
+            UPDATE upload_sessions
+            SET status = 'ABANDONED', error_message = '上传批次已过期',
+                lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+            WHERE id IN ({placeholders})
+            """,
+            (timestamp, *session_ids),
+        )
+    keys_by_session: dict[str, list[str]] = {session_id: [] for session_id in session_ids}
+    for row in object_rows:
+        keys_by_session[str(row["session_id"])].extend(image_object_keys(str(row["object_key"])))
+    cleaned_ids: list[str] = []
+    failed_ids: list[str] = []
+    for session_id in session_ids:
+        failed = False
+        for key in dict.fromkeys(keys_by_session[session_id]):
+            try:
+                delete_object(key)
+            except Exception:
+                failed = True
+        (failed_ids if failed else cleaned_ids).append(session_id)
+    with get_db() as db:
+        if failed_ids:
+            failed_placeholders = ", ".join("?" for _ in failed_ids)
+            db.execute(
+                f"UPDATE upload_sessions SET error_message = ?, updated_at = ? WHERE id IN ({failed_placeholders})",
+                (retry_message, timestamp, *failed_ids),
+            )
+            log_event(db, "upload_session_cleanup", None, "cleanup_failed", {"sessionIds": failed_ids})
+        if cleaned_ids:
+            log_event(db, "upload_session_cleanup", None, "expired", {"sessionIds": cleaned_ids})
+    return len(cleaned_ids)
 
 
 def get_model_profile_by_id(model_profile_id: int) -> dict[str, Any]:
@@ -6295,16 +6349,16 @@ def process_uploaded_object_as_media_asset(upload: UploadedMediaRequest, timesta
     return process_uploaded_content_as_media_asset(content, content_type, filename, object_key, timestamp)
 
 
-async def save_uploads_as_media_assets(files: list[UploadFile], prefix: str) -> list[dict[str, Any]]:
+async def save_uploads_as_media_assets(files: list[UploadFile]) -> list[dict[str, Any]]:
     timestamp = now_iso()
     saved: list[dict[str, Any]] = []
     saved_object_keys: list[str] = []
     saved_asset_ids: list[int] = []
     try:
-        for index, upload in enumerate(files):
+        for upload in files:
             content, content_type = await validate_upload_image(upload)
             filename = sanitize_filename(upload.filename or "image")
-            key = unique_key(join_key(prefix, f"{index + 1:03d}-{filename}"))
+            key = new_media_original_key(filename)
             await asyncio.to_thread(put_fileobj, key, BytesIO(content), content_type)
             saved_object_keys.append(key)
             asset = await asyncio.to_thread(process_uploaded_content_as_media_asset, content, content_type, upload.filename or filename, key, timestamp)
@@ -6355,11 +6409,33 @@ async def save_uploaded_objects_as_media_assets(uploads: list[UploadedMediaReque
 
 def insert_generated_media_asset(object_key: str, filename: str, content: bytes, content_type: str, derivative: dict[str, Any]) -> int:
     timestamp = now_iso()
+    content_hash = hashlib.sha256(content).hexdigest()
     width = height = None
     with suppress(Exception):
         with Image.open(BytesIO(content)) as image:
             width, height = image.size
     with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        existing = db.execute(
+            """
+            SELECT id, hash
+            FROM media_assets
+            WHERE object_key = ? AND deleted_at IS NULL
+            ORDER BY id
+            LIMIT 1
+            """,
+            (object_key,),
+        ).fetchone()
+        if existing:
+            existing_hash = str(existing["hash"] or "")
+            if existing_hash and existing_hash != content_hash:
+                raise RuntimeError(f"生成媒体对象键内容哈希冲突: {object_key}")
+            if not existing_hash:
+                db.execute(
+                    "UPDATE media_assets SET hash = ?, updated_at = ? WHERE id = ?",
+                    (content_hash, timestamp, int(existing["id"])),
+                )
+            return int(existing["id"])
         cursor = db.execute(
             """
             INSERT INTO media_assets
@@ -6378,7 +6454,7 @@ def insert_generated_media_asset(object_key: str, filename: str, content: bytes,
                 len(content),
                 derivative.get("thumbSize"),
                 derivative.get("previewSize"),
-                hashlib.sha256(content).hexdigest(),
+                content_hash,
                 timestamp,
                 timestamp,
             ),
@@ -10329,9 +10405,7 @@ async def _generate_single_final_image_unlocked(
         task_package["invocation"] = {"mode": trigger, "target": "final_image"}
         if not attempt_has_provider_request_id(attempt_id):
             update_attempt_request_snapshot(attempt_id, task_package)
-        with get_db() as db:
-            sort_order = db.execute("SELECT sort_order FROM generation_result_images_new WHERE id = ?", (image_id,)).fetchone()["sort_order"]
-        output_key = join_key("generation-tasks", str(task_id), "final", f"{result_set_id}-{sort_order}.png")
+        output_key = media_original_key_for_owner("generation_attempt", attempt_id, "final.png")
         asset_id, provider_response = await generate_image_asset(
             task_package,
             output_key,

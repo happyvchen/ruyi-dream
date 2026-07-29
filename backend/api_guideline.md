@@ -13,7 +13,7 @@
 ## 任务接口
 
 - `POST /api/generation-tasks`：兼容旧表单上传路径；新上传体验应优先使用 `upload_sessions -> finalize-generation-task`，以便刷新 / 切页后恢复状态。
-- `POST /api/generation-tasks/from-uploads`：基于已上传对象创建任务。
+- `POST /api/generation-tasks/from-uploads`：已停用（410）；统一使用上传会话创建任务，避免无主对象无法回收。
 - `PATCH /api/generation-tasks/{task_id}`：保存任务名和各阶段用户补充要求草稿。
 - `POST /api/generation-tasks/{task_id}/styling`：运行 AI 智能选搭，输出当前 `StylingPlan`。
 - `POST /api/generation-tasks/{task_id}/preview`：按拍摄图位族选择三类固定分镜 Prompt，调用 Image-2 生成 3:2 六格分镜预览。
@@ -32,6 +32,7 @@
 
 主推款上传和搭配服装上传复用 `upload_sessions` 轻量任务契约。搭配服装批量上传采用文件级断点续传：先持久化整批全部货号和图片清单，再逐文件直传；刷新后只重新上传对象存储中缺失的图片。
 
+- `POST /api/uploads/presign`：已停用（410）；禁止创建没有 UploadSession 所有权的直传对象。
 - `POST /api/upload-sessions`：创建上传任务和对象存储直传地址。
 - `POST /api/upload-sessions/styling-import-batch`：原子创建一次搭配服装导入中的全部货号会话；返回共同的 `batchId`，保证用户开始任务后、读取和上传图片前整批记录立即可查。每个货号首次 `resume` 时绑定图片 SHA-256。
 - `GET /api/upload-sessions`：按 `scope`、`status`、`batchId`、`limit` 查询上传任务；`batchId` 用于完整恢复同一次批量任务，单批最多返回 500 个货号。

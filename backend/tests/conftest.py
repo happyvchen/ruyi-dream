@@ -41,7 +41,8 @@ def isolated_database(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(app_main, "ensure_direct_upload_cors", lambda: None)
     monkeypatch.setattr(app_main, "object_head", lambda key: {"contentLength": 128})
     monkeypatch.setattr(app_main, "get_bytes", lambda key: b"test-image-bytes")
-    monkeypatch.setattr(app_main, "cleanup_deleted_media_objects", lambda keys: [])
+    monkeypatch.setattr(app_main, "delete_object", lambda key: None)
+    monkeypatch.setattr(app_main, "delete_prefix", lambda prefix: None)
     monkeypatch.setattr(app_main, "pump_auto_run_queue", lambda: None)
     monkeypatch.setattr(app_main, "schedule_background_generation", _discard_background_job)
     yield

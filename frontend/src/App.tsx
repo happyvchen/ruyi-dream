@@ -6778,6 +6778,7 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
   const cardBrief = tagging ? '正在识别服装信息；服务繁忙时系统会自动恢复，可以离开当前页面。' : failed ? '识别未完成，可重新识别。' : brief || '待识别搭配信息'
   const failureHint = taggingIssue ? `${taggingIssue.title}：${taggingIssue.description}` : undefined
   const statusLabel = taggingIssue?.badge ?? garmentStatus(item.status)
+  const actionCount = [onOpen, item.archivedAt ? onRestore : onDelete, onDownload, onTag].filter(Boolean).length
   return (
     <div className={`garment-card ${tagging ? 'is-tagging' : ''} ${failed ? 'is-failed' : ''} ${item.archivedAt ? 'is-archived' : ''}`}>
       {onSelect && (
@@ -6798,7 +6799,7 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
           {(!showTagResult || !chips.length) && <span>{tagging ? '识别中' : failed ? '待重新识别' : '待识别'}</span>}
         </div>
       </div>
-      <div className="card-actions">
+      <div className="card-actions" data-action-count={actionCount}>
         {onOpen && <button className="management-action" onClick={onOpen}><Eye size={16} /> 详情</button>}
         {item.archivedAt ? onRestore && <button className="management-action" disabled={tagging || item.archiveReason === 'deletion_pending'} onClick={onRestore}><RefreshCw size={16} /> {archivedRestoreText(item.archiveReason)}</button> : onDelete && <button className="management-action" disabled={tagging} onClick={onDelete}><Trash2 size={16} /> 归档</button>}
         {onDownload && <button className="management-action" disabled={Number(item.imageCount ?? 0) < 1} onClick={onDownload}><Download size={16} /> 下载</button>}

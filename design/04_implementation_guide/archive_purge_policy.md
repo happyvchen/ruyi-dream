@@ -17,7 +17,7 @@
 4. 彻底删除必须二次确认：单条输入完整名称，批量输入 `全部删除`。
 5. 彻底删除确认后先写入持久删除状态：`archive_reason = deletion_pending`，默认列表立即隐藏；刷新页面后不应回到日常列表。
 6. 数据库删除必须先于对象存储清理提交成功。若数据库删除失败，记录保留在已归档视图并写入 `archive_reason = deletion_failed`，媒体文件不得提前丢失。
-7. 对象存储清理以数据库登记的 `media_assets.object_key`、`thumb_key`、`preview_key` 为主，prefix 清理只作为兜底。
+7. 对象存储清理以数据库登记的 `media_assets.object_key` 为根，枚举原图、normalized、thumb、preview 和 storyboard cells 的确定键逐个删除；业务媒体禁止使用 prefix 清理兜底。
 8. 对象存储清理是数据库删除后的最终清理步骤；对象清理失败不恢复已删除业务记录，但必须返回 `objectCleanupErrors` 并允许运维后续重试。
 9. 删除或替换单张图片时，只有该 `MediaAsset` 不再被其它关系或历史快照引用，才能删除 DB 元数据和 OSS 文件。
 10. 已进入 AI 阶段的主推款输入不能单独改图；只能归档任务或彻底删除整条任务。
@@ -50,7 +50,7 @@
 - `mediaAssetCount`
 - `estimatedBytes`
 
-彻底删除接口必须返回 `objectCleanupErrors`。对象清理失败不应伪装成功无事发生；前端或运维应能看到失败 prefix。
+彻底删除接口必须返回 `objectCleanupErrors`。对象清理失败不应伪装成功无事发生；前端或运维应能看到失败对象键。
 
 ## 实现备注
 
@@ -63,4 +63,4 @@
 5. 数据库阶段失败时写入 `deletion_failed`，用户可在已归档视图恢复后重试；
 6. 对象清理失败时返回 `objectCleanupErrors`，业务记录保持已删除，后续由运维补清理。
 
-对象清理通过幂等 `delete_object` / `delete_prefix` 容忍对象已不存在。后续如果删除量变大，可把第 3-6 步升级为后台 job，但用户可见语义保持不变。
+业务媒体清理只通过幂等 `delete_object` 容忍对象已不存在。`delete_prefix` 仅保留给明确独占目录的非 `MediaAsset` 聚合对象（当前只有具体 `model-profiles/<model-id>`），对象存储适配层必须拒绝共享根和 `direct-uploads/<scope>` 级前缀。后续如果删除量变大，可把第 3-6 步升级为后台 job，但用户可见语义保持不变。
