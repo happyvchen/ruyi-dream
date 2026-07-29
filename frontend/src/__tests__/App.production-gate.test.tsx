@@ -611,13 +611,13 @@ describe('production gate app shell and page controls', () => {
     render(<App />)
 
     await waitFor(() => expect(apiMock.listUploadSessions).toHaveBeenCalledWith(expect.objectContaining({ includeArchived: true })))
-    const manageButtons = await screen.findAllByRole('button', { name: '归档/删除' })
+    const manageButtons = await screen.findAllByRole('button', { name: '归档' })
     expect(manageButtons).toHaveLength(2)
     manageButtons.forEach((button) => expect(button).toBeEnabled())
 
     const failedRecord = screen.getByText('失败上传批次').closest('section')
     expect(failedRecord).not.toBeNull()
-    await userEvent.click(within(failedRecord!).getByRole('button', { name: '归档/删除' }))
+    await userEvent.click(within(failedRecord!).getByRole('button', { name: '归档' }))
     expect(await screen.findByRole('dialog', { name: '归档或删除上传记录' })).toBeInTheDocument()
     await waitFor(() => expect(apiMock.getUploadSessionDeleteImpact).toHaveBeenCalled())
     await userEvent.type(screen.getByPlaceholderText('失败上传批次'), '失败上传批次')
@@ -626,6 +626,102 @@ describe('production gate app shell and page controls', () => {
     apiMock.deleteUploadSessions.mockResolvedValue({ deletedIds: [], deferredIds: ['failed-upload-session'], objectCleanupErrors: [] })
     await userEvent.click(purgeButton)
     expect(await screen.findByText('上传已停止；相关临时文件将在上传地址安全失效后自动清理。')).toBeInTheDocument()
+  })
+
+  it('supports selecting multiple active upload records and only exposes batch archive', async () => {
+    const archiveRequest = deferred<{ archivedIds: string[] }>()
+    const sessions = [
+      { id: 'batch-archive-session-1', businessCode: 'LOOK-BULK-1', sourceTitle: '批量归档一' },
+      { id: 'batch-archive-session-2', businessCode: 'LOOK-BULK-2', sourceTitle: '批量归档二' },
+    ].map((session, index) => ({
+      scope: 'styling-garment',
+      status: 'FAILED',
+      batchId: null,
+      totalCount: 1,
+      uploadedCount: 0,
+      items: [],
+      createdAt: `2026-07-28T0${8 + index}:00:00Z`,
+      updatedAt: `2026-07-28T0${8 + index}:01:00Z`,
+      ...session,
+    }))
+    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string }) => ({
+      items: options.scope === 'styling_garment' ? sessions : [],
+    }))
+    apiMock.archiveUploadSessions.mockImplementation(() => archiveRequest.promise)
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    window.history.replaceState(null, '', '/library')
+
+    render(<App />)
+
+    const workbench = (await screen.findByText('上传记录')).closest('.import-workbench') as HTMLElement
+    expect(workbench).not.toBeNull()
+    await userEvent.click(await within(workbench).findByRole('button', { name: '批量管理' }))
+    const surface = workbench.querySelector('.import-record-list-body.marquee-selection-surface') as HTMLElement
+    const selectableRecords = Array.from(surface.querySelectorAll<HTMLElement>('[data-select-id]'))
+    surface.getBoundingClientRect = () => ({ left: 0, top: 0, right: 500, bottom: 500, width: 500, height: 500, x: 0, y: 0, toJSON: () => ({}) })
+    selectableRecords[0]!.getBoundingClientRect = () => ({ left: 10, top: 10, right: 490, bottom: 80, width: 480, height: 70, x: 10, y: 10, toJSON: () => ({}) })
+    selectableRecords[1]!.getBoundingClientRect = () => ({ left: 10, top: 90, right: 490, bottom: 160, width: 480, height: 70, x: 10, y: 90, toJSON: () => ({}) })
+    fireEvent.pointerDown(surface, { button: 0, pointerType: 'mouse', clientX: 5, clientY: 5 })
+    fireEvent.pointerMove(window, { pointerType: 'mouse', clientX: 495, clientY: 165 })
+    fireEvent.pointerUp(window, { pointerType: 'mouse', clientX: 495, clientY: 165 })
+    expect(await within(workbench).findByRole('button', { name: '归档 2 项' })).toBeEnabled()
+    await userEvent.click(within(workbench).getByRole('button', { name: '全选本页' }))
+
+    const firstRecord = within(workbench).getByText('批量归档一').closest('.import-record-row') as HTMLElement
+    const firstExpandButton = within(firstRecord).getByRole('button', { name: '展开' })
+    expect(firstExpandButton).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.click(within(workbench).getByRole('checkbox', { name: '选择 批量归档一' }))
+    expect(firstExpandButton).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.keyboard('{Shift>}')
+    await userEvent.click(within(workbench).getByRole('checkbox', { name: '选择 批量归档二' }))
+    await userEvent.keyboard('{/Shift}')
+
+    expect(within(workbench).getByRole('button', { name: '归档 2 项' })).toBeEnabled()
+    expect(within(workbench).queryByRole('button', { name: /删除 2 项/ })).not.toBeInTheDocument()
+    await userEvent.click(within(workbench).getByRole('button', { name: '归档 2 项' }))
+
+    await waitFor(() => expect(apiMock.archiveUploadSessions).toHaveBeenCalledWith(expect.arrayContaining([
+      'batch-archive-session-1',
+      'batch-archive-session-2',
+    ])))
+    expect(within(workbench).getByRole('checkbox', { name: '选择 批量归档一' })).toBeDisabled()
+    within(workbench).getAllByRole('button', { name: '归档' }).forEach((button) => expect(button).toBeDisabled())
+    expect(apiMock.deleteUploadSessions).not.toHaveBeenCalled()
+    archiveRequest.resolve({ archivedIds: sessions.map((item) => item.id) })
+    await waitFor(() => expect(within(workbench).queryByRole('button', { name: '正在归档 2 项...' })).not.toBeInTheDocument())
+  })
+
+  it('chunks batch upload-record archive requests at the API limit', async () => {
+    const sessions = Array.from({ length: 501 }, (_, index) => ({
+      id: `large-batch-session-${index}`,
+      scope: 'styling-garment',
+      status: 'FAILED',
+      businessCode: `LOOK-LARGE-${index}`,
+      sourceTitle: '超大上传批次',
+      batchId: 'large-upload-batch',
+      totalCount: 1,
+      uploadedCount: 0,
+      items: [],
+      createdAt: '2026-07-28T08:00:00Z',
+      updatedAt: '2026-07-28T08:01:00Z',
+    }))
+    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string }) => ({
+      items: options.scope === 'styling_garment' ? sessions : [],
+    }))
+    apiMock.archiveUploadSessions.mockImplementation(async (ids: string[]) => ({ archivedIds: ids }))
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    window.history.replaceState(null, '', '/library')
+
+    render(<App />)
+
+    const workbench = (await screen.findByText('上传记录')).closest('.import-workbench') as HTMLElement
+    await userEvent.click(within(workbench).getByRole('button', { name: '批量管理' }))
+    await userEvent.click(within(workbench).getByRole('checkbox', { name: '选择 超大上传批次' }))
+    await userEvent.click(within(workbench).getByRole('button', { name: '归档 1 项' }))
+
+    await waitFor(() => expect(apiMock.archiveUploadSessions).toHaveBeenCalledTimes(2))
+    expect(apiMock.archiveUploadSessions.mock.calls[0]?.[0]).toHaveLength(500)
+    expect(apiMock.archiveUploadSessions.mock.calls[1]?.[0]).toHaveLength(1)
   })
 
   it('keeps archived abandoned upload records recoverable and directly deletable', async () => {
@@ -644,8 +740,17 @@ describe('production gate app shell and page controls', () => {
       createdAt: '2026-07-28T08:00:00Z',
       updatedAt: '2026-07-28T10:00:00Z',
     }
+    const deletionPendingSession = {
+      ...archivedSession,
+      id: 'deletion-pending-session',
+      businessCode: 'LOOK-DELETION-PENDING',
+      sourceTitle: '等待清理批次',
+      batchId: 'deletion-pending-batch',
+      archiveReason: 'deletion_pending',
+      updatedAt: '2026-07-28T11:00:00Z',
+    }
     apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string; includeArchived?: boolean }) => ({
-      items: options.scope === 'styling_garment' && options.includeArchived ? [archivedSession] : [],
+      items: options.scope === 'styling_garment' && options.includeArchived ? [archivedSession, deletionPendingSession] : [],
     }))
     window.localStorage.setItem('ruyi-library-import-open', '1')
     window.history.replaceState(null, '', '/library')
@@ -655,6 +760,10 @@ describe('production gate app shell and page controls', () => {
 
     expect(await screen.findByText('已归档放弃批次')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '恢复' })).toBeEnabled()
+    const workbench = screen.getByText('上传记录').closest('.import-workbench') as HTMLElement
+    await userEvent.click(within(workbench).getByRole('button', { name: '批量管理' }))
+    expect(within(workbench).getByRole('checkbox', { name: '选择 已归档放弃批次' })).toBeDisabled()
+    expect(within(workbench).getByRole('checkbox', { name: '选择 等待清理批次' })).toBeDisabled()
     await userEvent.click(screen.getByRole('button', { name: '删除' }))
     expect(await screen.findByRole('dialog', { name: '归档或删除上传记录' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '归档' })).not.toBeInTheDocument()
@@ -677,7 +786,7 @@ describe('production gate app shell and page controls', () => {
     await waitFor(() => expect(apiMock.listUploadSessions).toHaveBeenCalledWith(expect.objectContaining({ includeArchived: true })))
     const record = (await screen.findByText('预检失败批次')).closest('section')
     expect(record).not.toBeNull()
-    await userEvent.click(within(record!).getByRole('button', { name: '归档/删除' }))
+    await userEvent.click(within(record!).getByRole('button', { name: '归档' }))
     expect(await screen.findByRole('dialog', { name: '归档或删除上传记录' })).toBeInTheDocument()
     await waitFor(() => expect(apiMock.getUploadSessionDeleteImpact).toHaveBeenCalledWith(['precheck-failed-session']))
     expect(await screen.findByText('删除影响预检失败，暂时不能彻底删除。')).toBeInTheDocument()

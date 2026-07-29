@@ -105,6 +105,7 @@ const BATCH_NAME_MAX_CHARS = 80
 const STYLING_GARMENT_EXPORT_MAX_ITEMS = 50
 const BULK_SEARCH_THRESHOLD = 5
 const IMPORT_SESSION_GROUP_WINDOW_MS = 10 * 60 * 1000
+const UPLOAD_SESSION_ARCHIVE_BATCH_SIZE = 500
 const uploadSessionScopeRefreshes = [
   { scope: 'generation_task', limit: 20 },
   { scope: 'styling_garment', limit: 100 },
@@ -4695,6 +4696,11 @@ function ImportTaskWorkbench({
   const [manageImpactError, setManageImpactError] = useState<string | null>(null)
   const [uploadRecordOperationId, setUploadRecordOperationId] = useState<string | null>(null)
   const [uploadRecordError, setUploadRecordError] = useState<string | null>(null)
+  const [bulkMode, setBulkMode] = useState(false)
+  const [selectedUploadRecordIds, setSelectedUploadRecordIds] = useState<Set<string>>(() => new Set())
+  const [batchArchiving, setBatchArchiving] = useState(false)
+  const [batchArchiveCount, setBatchArchiveCount] = useState(0)
+  const lastSelectedUploadRecordIdRef = useRef<string | null>(null)
   const manageImpactRequestRef = useRef(0)
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(() => new Set())
   const [offset, setOffset] = useState(0)
@@ -4877,10 +4883,24 @@ function ImportTaskWorkbench({
   const totalRecords = importRecords.length
   const totalPages = totalRecords > 0 ? Math.ceil(totalRecords / pageSize) : 0
   const pagedRecords = importRecords.slice(offset, offset + pageSize)
+  const selectableUploadRecords = pagedRecords.filter((record) => isUploadRecordSelectable(uploadRecordTarget(record)))
+  const selectableUploadRecordIds = selectableUploadRecords.map(uploadRecordSelectionId)
+  const selectedUploadRecords = selectableUploadRecords.filter((record) => selectedUploadRecordIds.has(uploadRecordSelectionId(record)))
+  const allVisibleUploadRecordsSelected = selectableUploadRecordIds.length > 0 && selectableUploadRecordIds.every((id) => selectedUploadRecordIds.has(id))
+  const uploadRecordMarquee = useMarqueeSelection<string>({
+    enabled: bulkMode && !batchArchiving,
+    selected: selectedUploadRecordIds,
+    onChange: setSelectedUploadRecordIds,
+  })
 
   useEffect(() => {
     setOffset(0)
   }, [query, filter, uploadedFrom, uploadedTo])
+
+  useEffect(() => {
+    setSelectedUploadRecordIds(new Set())
+    lastSelectedUploadRecordIdRef.current = null
+  }, [offset, pageSize, query, filter, uploadedFrom, uploadedTo, includeArchived])
 
   useEffect(() => {
     if (offset < totalRecords || offset === 0) return
@@ -4941,6 +4961,66 @@ function ImportTaskWorkbench({
     return Array.from(new Set(rows.map((row) => row.sessionId).filter(Boolean) as string[]))
   }
 
+  function uploadRecordSelectionId(record: (typeof importRecords)[number]) {
+    return `${record.kind}:${record.id}`
+  }
+
+  function uploadRecordTarget(record: (typeof importRecords)[number]): UploadRecordTarget {
+    if (record.kind === 'session') {
+      return {
+        id: record.group.id,
+        title: record.group.title,
+        rows: record.group.rows,
+        archived: record.group.rows.every((row) => Boolean(row.archivedAt)),
+      }
+    }
+    const rows = jobRows.filter((row) => row.batchId === record.job.id)
+    return {
+      id: record.job.id,
+      title: importJobDisplayTitle(record.job, rows),
+      rows,
+      jobId: record.job.id,
+      archived: Boolean(record.job.archivedAt || rows.every((row) => row.archivedAt)),
+    }
+  }
+
+  function isUploadRecordSelectable(target: UploadRecordTarget) {
+    return !target.archived && !target.rows.some((row) => row.archiveReason === 'deletion_pending')
+  }
+
+  function toggleUploadRecordSelection(id: string, checked: boolean, extend = false) {
+    setSelectedUploadRecordIds((current) => {
+      const next = new Set(current)
+      if (extend && lastSelectedUploadRecordIdRef.current !== null) {
+        const start = selectableUploadRecordIds.indexOf(lastSelectedUploadRecordIdRef.current)
+        const end = selectableUploadRecordIds.indexOf(id)
+        if (start >= 0 && end >= 0) {
+          selectableUploadRecordIds.slice(Math.min(start, end), Math.max(start, end) + 1).forEach((rangeId) => {
+            if (checked) next.add(rangeId)
+            else next.delete(rangeId)
+          })
+          lastSelectedUploadRecordIdRef.current = id
+          return next
+        }
+      }
+      if (checked) next.add(id)
+      else next.delete(id)
+      lastSelectedUploadRecordIdRef.current = id
+      return next
+    })
+  }
+
+  function toggleVisibleUploadRecordSelection(checked: boolean) {
+    setSelectedUploadRecordIds((current) => {
+      const next = new Set(current)
+      selectableUploadRecordIds.forEach((id) => {
+        if (checked) next.add(id)
+        else next.delete(id)
+      })
+      return next
+    })
+  }
+
   async function loadArchivedSessions() {
     setLoadingArchived(true)
     try {
@@ -4957,14 +5037,15 @@ function ImportTaskWorkbench({
   }, [])
 
   useEffect(() => {
-    if (loadingArchived || uploadRecordOperationId) return
+    if (loadingArchived || uploadRecordOperationId || batchArchiving) return
     reconciledJobs.forEach((job) => {
       const original = jobs.find((item) => item.id === job.id)
       if (original && Boolean(original.archivedAt) !== Boolean(job.archivedAt)) onSetJobArchived(job.id, Boolean(job.archivedAt))
     })
-  }, [jobs, loadingArchived, reconciledJobs, uploadRecordOperationId])
+  }, [batchArchiving, jobs, loadingArchived, reconciledJobs, uploadRecordOperationId])
 
   function openUploadRecordManage(target: UploadRecordTarget) {
+    if (batchArchiving) return
     setManageRecord(target)
     setManageImpact(null)
     setManageImpactError(null)
@@ -5002,24 +5083,59 @@ function ImportTaskWorkbench({
   }
 
   async function archiveUploadRecord(target: UploadRecordTarget) {
+    if (batchArchiving || uploadRecordOperationId) return
     setUploadRecordOperationId(target.id)
     setUploadRecordError(null)
     const sessionIds = uploadRecordSessionIds(target.rows)
     try {
-      if (sessionIds.length) await api.archiveUploadSessions(sessionIds)
+      for (let index = 0; index < sessionIds.length; index += UPLOAD_SESSION_ARCHIVE_BATCH_SIZE) {
+        await api.archiveUploadSessions(sessionIds.slice(index, index + UPLOAD_SESSION_ARCHIVE_BATCH_SIZE))
+      }
       const archivedAt = new Date().toISOString()
       setArchivedSessionSnapshot((current) => current.map((session) => sessionIds.includes(session.id) ? { ...session, archivedAt, archiveReason: 'user_archived' } : session))
       if (target.jobId) onSetJobArchived(target.jobId, true)
       if (!includeArchived) setDismissedUploadSessionIds((current) => new Set([...current, ...sessionIds]))
       setManageRecord(null)
       await refreshManagedUploadRecords()
+    } catch (error) {
+      await refreshManagedUploadRecords()
+      throw error
     } finally {
       setUploadRecordOperationId(null)
     }
   }
 
+  async function archiveSelectedUploadRecords() {
+    if (batchArchiving || !selectedUploadRecords.length) return
+    const targets = selectedUploadRecords.map(uploadRecordTarget)
+    const sessionIds = Array.from(new Set(targets.flatMap((target) => uploadRecordSessionIds(target.rows))))
+    setBatchArchiving(true)
+    setBatchArchiveCount(targets.length)
+    setUploadRecordError(null)
+    try {
+      for (let index = 0; index < sessionIds.length; index += UPLOAD_SESSION_ARCHIVE_BATCH_SIZE) {
+        await api.archiveUploadSessions(sessionIds.slice(index, index + UPLOAD_SESSION_ARCHIVE_BATCH_SIZE))
+      }
+      const archivedAt = new Date().toISOString()
+      setArchivedSessionSnapshot((current) => current.map((session) => sessionIds.includes(session.id) ? { ...session, archivedAt, archiveReason: 'user_archived' } : session))
+      targets.forEach((target) => {
+        if (target.jobId) onSetJobArchived(target.jobId, true)
+      })
+      if (!includeArchived) setDismissedUploadSessionIds((current) => new Set([...current, ...sessionIds]))
+      setSelectedUploadRecordIds(new Set())
+      lastSelectedUploadRecordIdRef.current = null
+      await refreshManagedUploadRecords()
+    } catch (error) {
+      await refreshManagedUploadRecords()
+      setUploadRecordError(error instanceof Error ? error.message : '批量归档上传记录失败')
+    } finally {
+      setBatchArchiving(false)
+      setBatchArchiveCount(0)
+    }
+  }
+
   async function restoreUploadRecord(target: UploadRecordTarget) {
-    if (uploadRecordOperationId) return
+    if (batchArchiving || uploadRecordOperationId) return
     setUploadRecordOperationId(target.id)
     setUploadRecordError(null)
     const sessionIds = uploadRecordSessionIds(target.rows)
@@ -5041,6 +5157,7 @@ function ImportTaskWorkbench({
   }
 
   async function purgeUploadRecord(target: UploadRecordTarget, confirmText: string) {
+    if (batchArchiving || uploadRecordOperationId) return
     setUploadRecordOperationId(target.id)
     setUploadRecordError(null)
     try {
@@ -5107,11 +5224,34 @@ function ImportTaskWorkbench({
           </button>
           {hasActiveFilters && <button className="filter-pill reset-filter-pill" type="button" onClick={clearImportFilters}><span>清空筛选</span></button>}
         </div>
+        <div className="library-management-tools import-management-tools">
+          {bulkMode && (selectedUploadRecords.length > 0 || batchArchiving) && (
+            <button className="management-action" type="button" disabled={batchArchiving} onClick={() => void archiveSelectedUploadRecords()}>
+              <Trash2 size={15} />{batchArchiving ? `正在归档 ${batchArchiveCount} 项...` : `归档 ${selectedUploadRecords.length} 项`}
+            </button>
+          )}
+          {bulkMode && <button className={`management-action management-check-action ${allVisibleUploadRecordsSelected ? 'is-active' : ''}`} type="button" disabled={batchArchiving || !selectableUploadRecordIds.length} onClick={() => toggleVisibleUploadRecordSelection(!allVisibleUploadRecordsSelected)}><Check size={15} /> 全选本页</button>}
+          {bulkMode && <span className="bulk-selection-hint">拖动框选 · Shift 连选</span>}
+          <button className="management-action compact-control" type="button" disabled={batchArchiving} onClick={() => {
+            setBulkMode((value) => !value)
+            setSelectedUploadRecordIds(new Set())
+            lastSelectedUploadRecordIdRef.current = null
+          }}>{bulkMode ? '退出批量' : '批量管理'}</button>
+        </div>
       </div>
       {uploadRecordError && <div className="inline-error" role="alert">{uploadRecordError}</div>}
 
-      <div className="record-list-body import-record-list-body">
+      <div
+        ref={uploadRecordMarquee.containerRef}
+        className={`record-list-body import-record-list-body marquee-selection-surface ${bulkMode ? 'is-bulk-selecting' : ''}`}
+        onPointerDown={uploadRecordMarquee.onPointerDown}
+        onClickCapture={uploadRecordMarquee.onClickCapture}
+      >
+        <MarqueeSelectionBox box={uploadRecordMarquee.box} />
         {pagedRecords.map((record) => {
+          const selectionId = uploadRecordSelectionId(record)
+          const selectable = isUploadRecordSelectable(uploadRecordTarget(record))
+          const selected = selectedUploadRecordIds.has(selectionId)
           if (record.kind === 'session') {
             const group = record.group
             const expanded = expandedTasks.has(group.id)
@@ -5121,20 +5261,23 @@ function ImportTaskWorkbench({
             const deleting = group.rows.some((row) => row.archiveReason === 'deletion_pending')
             const manageTarget = { id: group.id, title, rows: group.rows, archived }
             return (
-              <section className={`batch-record-shell import-record-shell ${expanded ? 'is-expanded' : ''}`} key={group.id}>
+              <section
+                className={`batch-record-shell import-record-shell ${expanded ? 'is-expanded' : ''}`}
+                key={group.id}
+                data-select-id={bulkMode && selectable ? selectionId : undefined}
+                data-select-disabled={bulkMode && !selectable ? 'true' : undefined}
+              >
                 <div
-                  className="record-row batch-record-row import-record-row"
-                  role="button"
-                  tabIndex={0}
-                  aria-expanded={expanded}
+                  className={`record-row batch-record-row import-record-row ${bulkMode ? 'has-selection' : ''} ${selected ? 'is-selected' : ''}`}
+                  role="group"
+                  aria-label={title}
                   title={expanded ? '点击收起上传任务' : '点击展开上传任务'}
-                  onClick={() => toggleTask(group.id)}
-                  onKeyDown={(event) => {
-                    if (event.key !== 'Enter' && event.key !== ' ') return
-                    event.preventDefault()
+                  onClick={(event) => {
+                    if ((event.target as HTMLElement).closest('input, button, label, a')) return
                     toggleTask(group.id)
                   }}
                 >
+                  {bulkMode && <BulkCheckbox checked={selected} disabled={batchArchiving || !selectable} label={`选择 ${title}`} onChange={(checked, extend) => toggleUploadRecordSelection(selectionId, checked, extend)} />}
                   <div className="import-record-main">
                     <ImportThumbStack rows={group.rows} />
                     <div>
@@ -5155,8 +5298,8 @@ function ImportTaskWorkbench({
                   <div className="import-record-actions" onClick={(event) => event.stopPropagation()}>
                     {deleting
                       ? <button className="management-action compact-control" type="button" disabled><Loader2 className="spin" size={14} />等待清理</button>
-                      : <>{archived && <button className="management-action compact-control" type="button" disabled={uploadRecordOperationId === group.id} onClick={() => void restoreUploadRecord(manageTarget)}><RefreshCw size={14} />恢复</button>}
-                        <button className="management-action compact-control" type="button" disabled={uploadRecordOperationId === group.id} onClick={() => openUploadRecordManage(manageTarget)}><Trash2 size={14} />{archived ? '删除' : '归档/删除'}</button></>}
+                      : <>{archived && <button className="management-action compact-control" type="button" disabled={batchArchiving || uploadRecordOperationId === group.id} onClick={() => void restoreUploadRecord(manageTarget)}><RefreshCw size={14} />恢复</button>}
+                        <button className="management-action compact-control" type="button" disabled={batchArchiving || uploadRecordOperationId === group.id} onClick={() => openUploadRecordManage(manageTarget)}><Trash2 size={14} />{archived ? '删除' : '归档'}</button></>}
                   </div>
                   <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起上传任务' : '展开上传任务'} onClick={(event) => {
                     event.stopPropagation()
@@ -5186,20 +5329,23 @@ function ImportTaskWorkbench({
           const canResume = !archived && job.status === 'INTERRUPTED'
           const canResumeSavedDirectory = canResume && savedDirectoryJobIds.has(job.id)
           return (
-            <section className={`batch-record-shell import-record-shell ${expanded ? 'is-expanded' : ''}`} key={job.id}>
+            <section
+              className={`batch-record-shell import-record-shell ${expanded ? 'is-expanded' : ''}`}
+              key={job.id}
+              data-select-id={bulkMode && selectable ? selectionId : undefined}
+              data-select-disabled={bulkMode && !selectable ? 'true' : undefined}
+            >
               <div
-                className="record-row batch-record-row import-record-row"
-                role="button"
-                tabIndex={0}
-                aria-expanded={expanded}
+                className={`record-row batch-record-row import-record-row ${bulkMode ? 'has-selection' : ''} ${selected ? 'is-selected' : ''}`}
+                role="group"
+                aria-label={title}
                 title={expanded ? '点击收起上传任务' : '点击展开上传任务'}
-                onClick={() => toggleTask(job.id)}
-                onKeyDown={(event) => {
-                  if (event.key !== 'Enter' && event.key !== ' ') return
-                  event.preventDefault()
+                onClick={(event) => {
+                  if ((event.target as HTMLElement).closest('input, button, label, a')) return
                   toggleTask(job.id)
                 }}
               >
+                {bulkMode && <BulkCheckbox checked={selected} disabled={batchArchiving || !selectable} label={`选择 ${title}`} onChange={(checked, extend) => toggleUploadRecordSelection(selectionId, checked, extend)} />}
                 <div className="import-record-main">
                   <ImportThumbStack rows={allJobRows} />
                   <div>
@@ -5221,13 +5367,13 @@ function ImportTaskWorkbench({
                   {canResume && (
                     <div className="import-resume-actions">
                       {canResumeSavedDirectory && (
-                        <button className="management-action compact-control" type="button" disabled={resumingJobId === job.id} onClick={() => onResumeSaved(job.id)}>
+                        <button className="management-action compact-control" type="button" disabled={batchArchiving || resumingJobId === job.id} onClick={() => onResumeSaved(job.id)}>
                           <RefreshCw size={14} />{resumingJobId === job.id ? '恢复中' : '继续上传'}
                         </button>
                       )}
-                      <label className="management-action compact-control" title="重新选择原任务文件夹；系统会严格核对后从断点继续">
+                      <label className={`management-action compact-control ${batchArchiving ? 'is-disabled' : ''}`} aria-disabled={batchArchiving} title="重新选择原任务文件夹；系统会严格核对后从断点继续">
                         <FolderOpen size={14} />重新选择原目录
-                        <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} disabled={resumingJobId === job.id} onChange={(event) => {
+                        <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} disabled={batchArchiving || resumingJobId === job.id} onChange={(event) => {
                           const files = Array.from(event.target.files ?? [])
                           event.target.value = ''
                           if (files.length) onResumeFiles(job.id, files)
@@ -5240,8 +5386,8 @@ function ImportTaskWorkbench({
                   </button>}
                   {deleting
                     ? <button className="management-action compact-control" type="button" disabled><Loader2 className="spin" size={14} />等待清理</button>
-                    : <>{archived && <button className="management-action compact-control" type="button" disabled={uploadRecordOperationId === job.id} onClick={() => void restoreUploadRecord(manageTarget)}><RefreshCw size={14} />恢复</button>}
-                      <button className="management-action compact-control" type="button" disabled={uploadRecordOperationId === job.id} onClick={() => openUploadRecordManage(manageTarget)}><Trash2 size={14} />{archived ? '删除' : '归档/删除'}</button></>}
+                    : <>{archived && <button className="management-action compact-control" type="button" disabled={batchArchiving || uploadRecordOperationId === job.id} onClick={() => void restoreUploadRecord(manageTarget)}><RefreshCw size={14} />恢复</button>}
+                      <button className="management-action compact-control" type="button" disabled={batchArchiving || uploadRecordOperationId === job.id} onClick={() => openUploadRecordManage(manageTarget)}><Trash2 size={14} />{archived ? '删除' : '归档'}</button></>}
                 </div>
                 <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起上传任务' : '展开上传任务'} onClick={(event) => {
                   event.stopPropagation()

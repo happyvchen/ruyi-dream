@@ -1856,11 +1856,18 @@ a.button-link { text-decoration: none; cursor: pointer; }
 }
 .import-commandbar {
   display: grid;
-  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr) auto;
+  grid-template-areas: "search filters actions";
   align-items: center;
   gap: 8px;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--line);
+}
+.import-commandbar > .search { grid-area: search; }
+.import-commandbar > .import-filter-pills { grid-area: filters; }
+.import-management-tools {
+  grid-area: actions;
+  justify-content: flex-end;
 }
 .import-search {
   display: flex;
@@ -4411,6 +4418,9 @@ body.is-marquee-selecting {
   min-height: 62px;
   padding: 7px 10px;
 }
+.batch-record-row.import-record-row.has-selection {
+  grid-template-columns: 18px minmax(260px, 1fr) max-content max-content max-content max-content;
+}
 .import-record-actions {
   display: flex;
   align-items: center;
@@ -4716,6 +4726,9 @@ body.is-marquee-selecting {
   }
   .import-commandbar {
     grid-template-columns: minmax(220px, 360px) minmax(0, 1fr);
+    grid-template-areas:
+      "search actions"
+      "filters filters";
   }
   .import-filter-pills {
     grid-column: auto;
@@ -4782,6 +4795,10 @@ body.is-marquee-selecting {
   }
   .import-commandbar {
     grid-template-columns: 1fr;
+    grid-template-areas:
+      "search"
+      "filters"
+      "actions";
   }
   .import-filter-pills {
     justify-content: flex-start;
@@ -4798,10 +4815,17 @@ body.is-marquee-selecting {
     grid-template-columns: minmax(0, 1fr) max-content;
     gap: 8px;
   }
+  .batch-record-row.import-record-row.has-selection {
+    grid-template-columns: 18px minmax(0, 1fr) max-content;
+  }
   .import-progress-strip {
     grid-column: 1 / -1;
     justify-content: flex-start;
     flex-wrap: wrap;
+  }
+  .batch-record-row.import-record-row.has-selection .import-record-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
   }
   .import-record-row > .import-status-badge {
     display: none;
