@@ -4336,6 +4336,12 @@ body.is-marquee-selecting {
 .record-row:has(> input) {
   grid-template-columns: 18px minmax(0, 1fr) max-content max-content;
 }
+.record-row:has(> .record-purge-button) {
+  grid-template-columns: minmax(0, 1fr) max-content max-content max-content;
+}
+.record-row:has(> input):has(> .record-purge-button) {
+  grid-template-columns: 18px minmax(0, 1fr) max-content max-content max-content;
+}
 .batch-record-shell {
   display: grid;
   gap: 0;
@@ -4450,6 +4456,12 @@ body.is-marquee-selecting {
 }
 .batch-child-record .record-row:has(> input) {
   grid-template-columns: 18px minmax(0, 1fr) max-content max-content;
+}
+.batch-child-record .record-row:has(> .record-purge-button) {
+  grid-template-columns: minmax(0, 1fr) max-content max-content max-content;
+}
+.batch-child-record .record-row:has(> input):has(> .record-purge-button) {
+  grid-template-columns: 18px minmax(0, 1fr) max-content max-content max-content;
 }
 .record-action-button .is-rotated {
   transform: rotate(180deg);

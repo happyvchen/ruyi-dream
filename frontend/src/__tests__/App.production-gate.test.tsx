@@ -1552,7 +1552,7 @@ describe('production gate app shell and page controls', () => {
     await waitFor(() => expect(apiMock.listRecordWorkspace).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 50, offset: 0 })))
   })
 
-  it('keeps active, archived, and running generation records selectable with state-specific archive actions', async () => {
+  it('keeps active and archived generation records selectable together and offers unified permanent deletion', async () => {
     const activeRecord = { ...task, id: 31, name: 'ACTIVE-RECORD', status: 'COMPLETED' }
     const archivedRecord = { ...task, id: 32, name: 'ARCHIVED-RECORD', status: 'COMPLETED', archivedAt: '2026-07-29T08:00:00Z', archiveReason: 'user_archived' }
     const runningRecord = { ...task, id: 33, name: 'RUNNING-RECORD', status: 'FINAL_RUNNING' }
@@ -1574,6 +1574,9 @@ describe('production gate app shell and page controls', () => {
       facets: {},
       stableFacets: {},
     }))
+    apiMock.getTaskDeleteImpact.mockResolvedValue({ impact: { taskCount: 2, resultImageCount: 10, mediaAssetCount: 12, estimatedBytes: 2048 } })
+    const deletion = deferred<any>()
+    apiMock.deleteTasks.mockReturnValue(deletion.promise)
 
     render(<App />)
     await userEvent.click(await screen.findByRole('button', { name: '生成记录' }))
@@ -1584,12 +1587,129 @@ describe('production gate app shell and page controls', () => {
 
     expect(await screen.findByRole('button', { name: '归档 1 项' })).toBeEnabled()
     expect(screen.getByRole('button', { name: '取消归档 1 项' })).toBeEnabled()
-    expect(screen.getByText('1 项生成中，暂不可归档')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '彻底删除 2 项' })).toBeEnabled()
+    expect(screen.getByText('1 项生成中，暂不可归档或彻底删除')).toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: '选择 RUNNING-RECORD' })).toBeChecked()
     expect(screen.getByRole('status')).toHaveTextContent('已选 3 个任务')
 
-    await userEvent.click(screen.getByRole('button', { name: '取消归档 1 项' }))
-    await waitFor(() => expect(apiMock.restoreTasks).toHaveBeenCalledWith([32]))
+    const archivedRow = screen.getByText('ARCHIVED-RECORD').closest('.record-row')!
+    expect(within(archivedRow as HTMLElement).getByRole('button', { name: '删除' })).toBeEnabled()
+
+    await userEvent.click(screen.getByRole('button', { name: '彻底删除 2 项' }))
+    const dialog = await screen.findByRole('dialog', { name: '彻底删除 2 条生成记录' })
+    expect(within(dialog).queryByRole('checkbox', { name: /同时彻底删除关联记录和文件/ })).not.toBeInTheDocument()
+    await userEvent.type(within(dialog).getByPlaceholderText('全部删除'), '全部删除')
+    await userEvent.click(within(dialog).getByRole('button', { name: '彻底删除' }))
+    expect(apiMock.deleteTasks).toHaveBeenCalledWith([31, 32], '全部删除')
+    expect(within(dialog).getByRole('button', { name: '处理中...' })).toBeDisabled()
+    await userEvent.click(within(dialog).getByRole('button', { name: '取消' }))
+    expect(screen.getByRole('dialog', { name: '彻底删除 2 条生成记录' })).toBeInTheDocument()
+
+    deletion.resolve({ ok: true, purged: true, ids: [31, 32], objectCleanupErrors: [] })
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '彻底删除 2 条生成记录' })).not.toBeInTheDocument())
+  })
+
+  it('chunks more than 100 generation records for impact precheck and permanent deletion without a singleton tail', async () => {
+    const records = Array.from({ length: 101 }, (_, index) => ({
+      ...task,
+      id: index + 1000,
+      name: `RECORD-${index + 1}`,
+      status: 'COMPLETED',
+    }))
+    const workspaceEntry = (recordTask: any) => ({
+      kind: 'task', id: `task-${recordTask.id}`, status: recordTask.status, name: recordTask.name,
+      createdAt: recordTask.createdAt, updatedAt: recordTask.updatedAt, task: recordTask,
+    })
+    apiMock.listRecordWorkspace.mockResolvedValue({
+      ...emptyPage, items: records.map(workspaceEntry), total: 101, facets: {}, stableFacets: {},
+    })
+    apiMock.getTaskDeleteImpact.mockResolvedValue({ impact: { taskCount: 1, mediaAssetCount: 1, estimatedBytes: 1024 } })
+    apiMock.deleteTasks.mockResolvedValue({ ok: true, purged: true, ids: [], objectCleanupErrors: [] })
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '生成记录' }))
+    expect(await screen.findByText('RECORD-101')).toBeInTheDocument()
+    await userEvent.click(await screen.findByRole('button', { name: '批量管理' }))
+    await userEvent.click(screen.getByRole('button', { name: '全选本页' }))
+    await userEvent.click(await screen.findByRole('button', { name: '彻底删除 101 项' }))
+
+    const dialog = await screen.findByRole('dialog', { name: '彻底删除 101 条生成记录' })
+    await waitFor(() => expect(apiMock.getTaskDeleteImpact).toHaveBeenCalledTimes(2))
+    expect(apiMock.getTaskDeleteImpact.mock.calls.map(([ids]) => ids.length)).toEqual([99, 2])
+    await userEvent.type(within(dialog).getByPlaceholderText('全部删除'), '全部删除')
+    await userEvent.click(within(dialog).getByRole('button', { name: '彻底删除' }))
+    await waitFor(() => expect(apiMock.deleteTasks).toHaveBeenCalledTimes(2))
+    expect(apiMock.deleteTasks.mock.calls.map(([ids]) => ids.length)).toEqual([99, 2])
+    expect(apiMock.deleteTasks).toHaveBeenNthCalledWith(1, records.slice(0, 99).map((item) => item.id), '全部删除')
+    expect(apiMock.deleteTasks).toHaveBeenNthCalledWith(2, records.slice(99).map((item) => item.id), '全部删除')
+  })
+
+  it('keeps an archived generation record deletion dialog retryable when the request fails', async () => {
+    const archivedRecord = { ...task, id: 41, name: 'ARCHIVED-RETRY', status: 'COMPLETED', archivedAt: '2026-07-29T08:00:00Z', archiveReason: 'user_archived' }
+    apiMock.listRecordWorkspace.mockImplementation(async (options: { includeArchived?: boolean }) => ({
+      ...emptyPage,
+      items: options.includeArchived ? [{
+        kind: 'task', id: 'task-41', status: archivedRecord.status, name: archivedRecord.name,
+        createdAt: archivedRecord.createdAt, updatedAt: archivedRecord.updatedAt, task: archivedRecord,
+      }] : [],
+      total: options.includeArchived ? 1 : 0,
+      facets: {}, stableFacets: {},
+    }))
+    apiMock.getTaskDeleteImpact.mockResolvedValue({ impact: { taskCount: 1, mediaAssetCount: 1, estimatedBytes: 1024 } })
+    apiMock.deleteTask.mockRejectedValueOnce(new Error('temporary failure'))
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '生成记录' }))
+    await userEvent.click(await screen.findByRole('button', { name: '查看已归档' }))
+    const archivedRow = (await screen.findByText('ARCHIVED-RETRY')).closest('.record-row')!
+    await userEvent.click(within(archivedRow as HTMLElement).getByRole('button', { name: '删除' }))
+
+    const dialog = await screen.findByRole('dialog', { name: '彻底删除生成记录' })
+    await userEvent.type(within(dialog).getByPlaceholderText('ARCHIVED-RETRY'), 'ARCHIVED-RETRY')
+    await userEvent.click(within(dialog).getByRole('button', { name: '彻底删除' }))
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: '彻底删除' })).toBeEnabled())
+    expect(apiMock.deleteTask).toHaveBeenCalledWith(41, 'ARCHIVED-RETRY')
+    expect(screen.getByRole('dialog', { name: '彻底删除生成记录' })).toBeInTheDocument()
+  })
+
+  it('refreshes selection cache and preserves an unfinished record detail after a partial chunk deletion', async () => {
+    const records = Array.from({ length: 101 }, (_, index) => ({
+      ...task, id: index + 2000, name: `PARTIAL-${index + 1}`, status: 'COMPLETED',
+    }))
+    const workspaceEntry = (recordTask: any) => ({
+      kind: 'task', id: `task-${recordTask.id}`, status: recordTask.status, name: recordTask.name,
+      createdAt: recordTask.createdAt, updatedAt: recordTask.updatedAt, task: recordTask,
+    })
+    let firstChunkDeleted = false
+    apiMock.listRecordWorkspace.mockImplementation(async () => {
+      const visible = firstChunkDeleted ? records.slice(99) : records
+      return { ...emptyPage, items: visible.map(workspaceEntry), total: visible.length, facets: {}, stableFacets: {} }
+    })
+    apiMock.getRecord.mockResolvedValue({ item: records[100] })
+    apiMock.getTaskDeleteImpact.mockResolvedValue({ impact: { taskCount: 1, mediaAssetCount: 1, estimatedBytes: 1024 } })
+    apiMock.deleteTasks
+      .mockImplementationOnce(async () => {
+        firstChunkDeleted = true
+        return { ok: true, purged: true, ids: records.slice(0, 99).map((item) => item.id), objectCleanupErrors: [] }
+      })
+      .mockRejectedValueOnce(new Error('second chunk failed'))
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '生成记录' }))
+    const lastRecord = await screen.findByText('PARTIAL-101')
+    await userEvent.click(lastRecord.closest('.record-open') as HTMLElement)
+    await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
+    await userEvent.click(screen.getByRole('button', { name: '全选本页' }))
+    await userEvent.click(await screen.findByRole('button', { name: '彻底删除 101 项' }))
+    const dialog = await screen.findByRole('dialog', { name: '彻底删除 101 条生成记录' })
+    await userEvent.type(within(dialog).getByPlaceholderText('全部删除'), '全部删除')
+    await userEvent.click(within(dialog).getByRole('button', { name: '彻底删除' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('部分生成记录已完成彻底删除')
+    expect(screen.queryByRole('dialog', { name: '彻底删除 101 条生成记录' })).not.toBeInTheDocument()
+    expect(within(document.querySelector('.record-detail') as HTMLElement).getByRole('heading', { name: 'PARTIAL-101' })).toBeInTheDocument()
+    await userEvent.click(await screen.findByRole('checkbox', { name: '选择 PARTIAL-100' }))
+    expect(await screen.findByRole('button', { name: '彻底删除 1 项' })).toBeEnabled()
   })
 
   it('keeps purge checked when delete impact refreshes the archive dialog', async () => {

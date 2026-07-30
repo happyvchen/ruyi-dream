@@ -126,6 +126,18 @@ function uploadSessionMutationChunks(ids: string[]) {
 function mergeDeleteImpacts(impacts: DeleteImpact[]) {
   const sum = (key: keyof DeleteImpact) => impacts.reduce((total, impact) => total + (typeof impact[key] === 'number' ? impact[key] : 0), 0)
   return {
+    garmentCount: sum('garmentCount'),
+    garmentImageCount: sum('garmentImageCount'),
+    dependentTaskIds: Array.from(new Set(impacts.flatMap((impact) => impact.dependentTaskIds ?? []))),
+    dependentTaskCount: sum('dependentTaskCount'),
+    taskCount: sum('taskCount'),
+    taskImageCount: sum('taskImageCount'),
+    inputVersionCount: sum('inputVersionCount'),
+    stylingCount: sum('stylingCount'),
+    previewCount: sum('previewCount'),
+    resultSetCount: sum('resultSetCount'),
+    resultImageCount: sum('resultImageCount'),
+    mediaAssetCount: sum('mediaAssetCount'),
     uploadSessionCount: sum('uploadSessionCount'),
     uploadItemCount: sum('uploadItemCount'),
     temporaryObjectCount: sum('temporaryObjectCount'),
@@ -134,6 +146,19 @@ function mergeDeleteImpacts(impacts: DeleteImpact[]) {
   } satisfies DeleteImpact
 }
 const GENERATION_TASK_MUTATION_BATCH_SIZE = 100
+
+function generationTaskMutationChunks(ids: number[]) {
+  const chunks: number[][] = []
+  for (let index = 0; index < ids.length;) {
+    const remaining = ids.length - index
+    const size = remaining === GENERATION_TASK_MUTATION_BATCH_SIZE + 1
+      ? GENERATION_TASK_MUTATION_BATCH_SIZE - 1
+      : Math.min(GENERATION_TASK_MUTATION_BATCH_SIZE, remaining)
+    chunks.push(ids.slice(index, index + size))
+    index += size
+  }
+  return chunks
+}
 const uploadSessionScopeRefreshes = [
   { scope: 'generation_task', limit: 20 },
   { scope: 'styling_garment', limit: 100 },
@@ -6126,6 +6151,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   const [selectedRecordIds, setSelectedRecordIds] = useState<Set<number>>(() => new Set())
   const [selectedRecordCache, setSelectedRecordCache] = useState<Record<number, GenerationTask>>({})
   const [deleteRecordDialog, setDeleteRecordDialog] = useState<GenerationTask[] | null>(null)
+  const [deleteRecordPurgeOnly, setDeleteRecordPurgeOnly] = useState(false)
   const [deleteRecordImpact, setDeleteRecordImpact] = useState<DeleteImpact | null>(null)
   const [deleteRecordImpactLoading, setDeleteRecordImpactLoading] = useState(false)
   const [deleteRecordImpactError, setDeleteRecordImpactError] = useState(false)
@@ -6161,6 +6187,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     .filter((item): item is GenerationTask => !!item && item.archiveReason !== 'deletion_pending')
   const selectedRestorableRecords = selectedVisibleRecords.filter((item) => item.archivedAt)
   const selectedArchivableRecords = selectedVisibleRecords.filter((item) => !item.archivedAt && !isTaskRunning(item))
+  const selectedPurgeableRecords = selectedVisibleRecords.filter((item) => !isTaskRunning(item))
   const selectedRunningRecords = selectedVisibleRecords.filter((item) => !item.archivedAt && isTaskRunning(item))
   const allVisibleBatchesResolved = batchListItems.every((batch) => expandedBatchTasks[batch.batchId] !== undefined)
   const allVisibleRecordsSelected = allVisibleBatchesResolved
@@ -6559,20 +6586,17 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     openRecordDeleteDialogForItems(selectedArchivableRecords)
   }
 
-  function openRecordDeleteDialogForItems(targets: GenerationTask[]) {
+  function openRecordDeleteDialogForItems(targets: GenerationTask[], purgeOnly = false) {
     const ids = targets.map((item) => item.id)
     setDeleteRecordDialog(targets)
+    setDeleteRecordPurgeOnly(purgeOnly)
     setDeleteRecordImpact(null)
     setDeleteRecordImpactError(false)
     const requestId = ++deleteRecordImpactRequestRef.current
-    if (ids.length > GENERATION_TASK_MUTATION_BATCH_SIZE) {
-      setDeleteRecordImpactLoading(false)
-      return
-    }
     setDeleteRecordImpactLoading(true)
-    void api.getTaskDeleteImpact(ids)
-      .then((response) => {
-        if (deleteRecordImpactRequestRef.current === requestId) setDeleteRecordImpact(response.impact)
+    void Promise.all(generationTaskMutationChunks(ids).map((chunk) => api.getTaskDeleteImpact(chunk)))
+      .then((responses) => {
+        if (deleteRecordImpactRequestRef.current === requestId) setDeleteRecordImpact(mergeDeleteImpacts(responses.map((response) => response.impact)))
       })
       .catch(() => {
         if (deleteRecordImpactRequestRef.current !== requestId) return
@@ -6587,37 +6611,65 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   function closeRecordDeleteDialog() {
     deleteRecordImpactRequestRef.current += 1
     setDeleteRecordDialog(null)
+    setDeleteRecordPurgeOnly(false)
   }
 
-  function confirmRecordDelete(items: DeleteDialogTarget[], purge: boolean, confirmText: string) {
+  async function confirmRecordDelete(items: DeleteDialogTarget[], purge: boolean, confirmText: string) {
     const ids = items.map((item) => item.id)
-    const action = purge
-      ? () => ids.length === 1 ? api.deleteTask(ids[0], confirmText) : api.deleteTasks(ids, confirmText)
-      : async () => {
-          try {
-            let result: DeleteOperationResult = { ok: true, archived: true, ids: [] }
-            for (let index = 0; index < ids.length; index += GENERATION_TASK_MUTATION_BATCH_SIZE) {
-              result = await api.archiveTasks(ids.slice(index, index + GENERATION_TASK_MUTATION_BATCH_SIZE))
-            }
-            return result
-          } catch (error) {
-            clearRecordSelection()
-            setSelectedRecordCache({})
-            refreshAffectedBatchViews(items)
-            await refreshRecordPage().catch(() => undefined)
-            throw error
-          }
-        }
-    closeRecordDeleteDialog()
-    setDeleteRecordImpact(null)
-    setItems((current) => current.filter((item) => !ids.includes(item.id)))
-    void run(purge ? '彻底删除记录中...' : '归档记录中...', action, (result: DeleteOperationResult) => {
-      onDeleteResult(result)
-      clearRecordDetailIfAffected(ids)
-      clearRecordSelection()
+    let completedChunks = 0
+    const completedIds: number[] = []
+    let completedResult: DeleteOperationResult = { ok: true, archived: !purge, purged: purge, ids: [] }
+    const mergeCompletedResult = (result: DeleteOperationResult) => {
+      completedResult = {
+        ...completedResult,
+        ...result,
+        ids: [...(completedResult.ids ?? []), ...(result.ids ?? [])],
+        deletedTaskIds: [...(completedResult.deletedTaskIds ?? []), ...(result.deletedTaskIds ?? [])],
+        objectCleanupErrors: [...(completedResult.objectCleanupErrors ?? []), ...(result.objectCleanupErrors ?? [])],
+      }
+      return completedResult
+    }
+    const action = async () => {
+      if (purge && ids.length === 1) {
+        const result = await api.deleteTask(ids[0], confirmText)
+        completedChunks = 1
+        completedIds.push(ids[0])
+        return mergeCompletedResult(result)
+      }
+      for (const chunk of generationTaskMutationChunks(ids)) {
+        const result = purge ? await api.deleteTasks(chunk, confirmText) : await api.archiveTasks(chunk)
+        mergeCompletedResult(result)
+        completedChunks += 1
+        completedIds.push(...chunk)
+      }
+      return completedResult
+    }
+    try {
+      await run(purge ? '彻底删除记录中...' : '归档记录中...', action, (result: DeleteOperationResult) => {
+        onDeleteResult(result)
+        clearRecordDetailIfAffected(ids)
+        clearRecordSelection()
+        setSelectedRecordCache({})
+        refreshAffectedBatchViews(items)
+        void refreshRecordPage().catch(() => undefined)
+      }, { refresh: 'background' })
+      closeRecordDeleteDialog()
+    } catch (error) {
+      if (completedChunks > 0) {
+        onDeleteResult(completedResult)
+        clearRecordDetailIfAffected(completedIds)
+        clearRecordSelection()
+        setSelectedRecordCache({})
+        refreshAffectedBatchViews(items)
+        await refreshRecordPage().catch(() => undefined)
+        closeRecordDeleteDialog()
+        setBatchBulkError(`部分生成记录已完成${purge ? '彻底删除' : '归档'}，其余记录处理失败。列表已刷新，请重新选择剩余记录后重试。`)
+        return
+      }
       refreshAffectedBatchViews(items)
-      void refreshRecordPage().catch(() => undefined)
-    }, { refresh: 'background' })
+      await refreshRecordPage().catch(() => undefined)
+      throw error
+    }
   }
 
   function restoreRecords(targets: GenerationTask[]) {
@@ -6808,7 +6860,8 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
               )}
               {!batchBulkLoading && selectedArchivableRecords.length > 0 && <button className="management-action" onClick={runRecordBatchAction}>归档 {selectedArchivableRecords.length} 项</button>}
               {!batchBulkLoading && selectedRestorableRecords.length > 0 && <button className="management-action" onClick={() => restoreRecords(selectedRestorableRecords)}>取消归档 {selectedRestorableRecords.length} 项</button>}
-              {bulkMode && !batchBulkLoading && selectedRunningRecords.length > 0 && <span className="bulk-selection-hint">{selectedRunningRecords.length} 项生成中，暂不可归档</span>}
+              {!batchBulkLoading && selectedPurgeableRecords.length > 0 && <button className="management-action is-danger" onClick={() => openRecordDeleteDialogForItems(selectedPurgeableRecords, true)}>彻底删除 {selectedPurgeableRecords.length} 项</button>}
+              {bulkMode && !batchBulkLoading && selectedRunningRecords.length > 0 && <span className="bulk-selection-hint">{selectedRunningRecords.length} 项生成中，暂不可归档或彻底删除</span>}
               {bulkMode && <BulkSelectAllButton
                 active={allVisibleRecordsSelected}
                 disabled={batchBulkLoading || !hasSelectableRecordRows}
@@ -6851,6 +6904,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
                     onOpenTask={openRecord}
                     onOpenStudio={openTaskInStudio}
                     onManageTask={(item) => isTaskRunning(item) ? cancelRecordTask(item) : item.archivedAt ? restoreRecords([item]) : openRecordDeleteDialog(item)}
+                    onPurgeTask={(item) => openRecordDeleteDialogForItems([item], true)}
                     activeTaskId={detail?.id ?? null}
                   />
                 )
@@ -6867,6 +6921,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
                 onOpen={openRecord}
                 onOpenStudio={openTaskInStudio}
                 onManage={(item) => isTaskRunning(item) ? cancelRecordTask(item) : item.archivedAt ? restoreRecords([item]) : openRecordDeleteDialog(item)}
+                onPurge={(item) => openRecordDeleteDialogForItems([item], true)}
               />
             ))}
             {viewMode === 'batches' && batchRecords.map((item) => {
@@ -6893,6 +6948,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
                   onOpenTask={openRecord}
                   onOpenStudio={openTaskInStudio}
                   onManageTask={(item) => isTaskRunning(item) ? cancelRecordTask(item) : item.archivedAt ? restoreRecords([item]) : openRecordDeleteDialog(item)}
+                  onPurgeTask={(item) => openRecordDeleteDialogForItems([item], true)}
                   activeTaskId={detail?.id ?? null}
                 />
               )
@@ -6909,6 +6965,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
                 onOpen={openRecord}
                 onOpenStudio={openTaskInStudio}
                 onManage={(item) => isTaskRunning(item) ? cancelRecordTask(item) : item.archivedAt ? restoreRecords([item]) : openRecordDeleteDialog(item)}
+                onPurge={(item) => openRecordDeleteDialogForItems([item], true)}
               />
             ))}
             {((viewMode === 'all' && !workspaceItems.length) || (viewMode === 'batches' && !batchRecords.length) || (viewMode === 'tasks' && !items.length)) && <EmptyState title="暂无生成记录" text="创建拍摄任务后会出现在这里。" />}
@@ -6945,6 +7002,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
                 <Download size={14} /> {downloadChecking ? '检查成片中...' : '下载成片'}
               </button>
               {detail.archivedAt && <button className="management-action" disabled={detail.archiveReason === 'deletion_pending'} onClick={() => restoreRecords([detail])}>{archivedRestoreText(detail.archiveReason)}</button>}
+              {detail.archivedAt && <button className="management-action is-danger" disabled={detail.archiveReason === 'deletion_pending'} onClick={() => openRecordDeleteDialogForItems([detail], true)}>彻底删除</button>}
             </>
           ) : <EmptyState title="选择一条记录" text="查看分镜预览、搭配服装和最终成片。" />}
         </div>
@@ -6952,15 +7010,21 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
       {batchBulkError && <div className="inline-error" role="alert">{batchBulkError}</div>}
       {deleteRecordDialog && (
         <DeleteConfirmDialog
-          title={deleteRecordDialog.length === 1 ? '归档记录' : `归档 ${deleteRecordDialog.length} 条记录`}
+          title={deleteRecordPurgeOnly
+            ? deleteRecordDialog.length === 1 ? '彻底删除生成记录' : `彻底删除 ${deleteRecordDialog.length} 条生成记录`
+            : deleteRecordDialog.length === 1 ? '归档记录' : `归档 ${deleteRecordDialog.length} 条记录`}
           items={deleteRecordDialog}
           onClose={closeRecordDeleteDialog}
           onConfirm={confirmRecordDelete}
           impact={deleteRecordImpact}
           impactLoading={deleteRecordImpactLoading}
           impactError={deleteRecordImpactError}
-          onRetryImpact={() => openRecordDeleteDialogForItems(deleteRecordDialog)}
-          allowPurge={deleteRecordDialog.length <= GENERATION_TASK_MUTATION_BATCH_SIZE}
+          onRetryImpact={() => openRecordDeleteDialogForItems(deleteRecordDialog, deleteRecordPurgeOnly)}
+          archiveAvailable={!deleteRecordPurgeOnly}
+          initialPurge={deleteRecordPurgeOnly}
+          description={(purge) => purge
+            ? '彻底删除会移除生成记录、过程数据和关联文件，操作不可恢复。'
+            : '确认后会归档并从日常列表移除，可通过“查看已归档”找回。'}
         />
       )}
       {downloadPrecheck && (
@@ -6974,7 +7038,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   )
 }
 
-function TaskRecordRow({ item, active, bulkMode, selected, selectionDisabled = false, onSelect, onOpen, onOpenStudio, onManage }: {
+function TaskRecordRow({ item, active, bulkMode, selected, selectionDisabled = false, onSelect, onOpen, onOpenStudio, onManage, onPurge }: {
   item: GenerationTask
   active: boolean
   bulkMode: boolean
@@ -6984,6 +7048,7 @@ function TaskRecordRow({ item, active, bulkMode, selected, selectionDisabled = f
   onOpen: (item: GenerationTask) => void
   onOpenStudio: (task: GenerationTask) => void
   onManage: (item: GenerationTask) => void
+  onPurge: (item: GenerationTask) => void
 }) {
   return (
     <div
@@ -7003,11 +7068,12 @@ function TaskRecordRow({ item, active, bulkMode, selected, selectionDisabled = f
       <button className="management-action record-action-button" disabled={item.archiveReason === 'deletion_pending'} onClick={() => onManage(item)}>
         {isTaskRunning(item) ? '取消生成' : item.archivedAt ? archivedRestoreText(item.archiveReason) : '归档'}
       </button>
+      {item.archivedAt && <button className="management-action is-danger record-action-button record-purge-button" disabled={item.archiveReason === 'deletion_pending'} onClick={() => onPurge(item)}>删除</button>}
     </div>
   )
 }
 
-function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, bulkMode = false, selected = false, indeterminate = false, selectable = true, interactionDisabled = false, selectedTaskIds, selectedTargetKeys, onSelect, onTaskSelect, onOpen, onToggle, onOpenTask, onOpenStudio, onManageTask }: {
+function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, bulkMode = false, selected = false, indeterminate = false, selectable = true, interactionDisabled = false, selectedTaskIds, selectedTargetKeys, onSelect, onTaskSelect, onOpen, onToggle, onOpenTask, onOpenStudio, onManageTask, onPurgeTask }: {
   item: GenerationRecordBatch
   active: boolean
   expanded: boolean
@@ -7028,6 +7094,7 @@ function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, 
   onOpenTask: (item: GenerationTask) => void
   onOpenStudio: (task: GenerationTask) => void
   onManageTask: (item: GenerationTask) => void
+  onPurgeTask: (item: GenerationTask) => void
 }) {
   const panelId = `batch-record-${item.batchId}-tasks`
   return (
@@ -7077,6 +7144,7 @@ function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, 
                 onOpen={onOpenTask}
                 onOpenStudio={onOpenStudio}
                 onManage={onManageTask}
+                onPurge={onPurgeTask}
               />
             </div>
           ))}
@@ -9048,7 +9116,7 @@ function deleteImpactText(impact?: DeleteImpact | null) {
   const parts: string[] = []
   if (impact.garmentCount) parts.push(`${impact.garmentCount} 套搭配服装`)
   if (impact.garmentImageCount) parts.push(`${impact.garmentImageCount} 张服装图`)
-  const taskCount = impact.dependentTaskCount ?? impact.taskCount ?? 0
+  const taskCount = impact.dependentTaskCount || impact.taskCount || 0
   if (taskCount) parts.push(`${taskCount} 条生成记录`)
   if (impact.resultImageCount) parts.push(`${impact.resultImageCount} 张结果图记录`)
   if (impact.mediaAssetCount) parts.push(`${impact.mediaAssetCount} 个存储文件`)
