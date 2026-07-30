@@ -106,6 +106,7 @@ const STYLING_GARMENT_EXPORT_MAX_ITEMS = 50
 const BULK_SEARCH_THRESHOLD = 5
 const IMPORT_SESSION_GROUP_WINDOW_MS = 10 * 60 * 1000
 const UPLOAD_SESSION_ARCHIVE_BATCH_SIZE = 500
+const GENERATION_TASK_MUTATION_BATCH_SIZE = 100
 const uploadSessionScopeRefreshes = [
   { scope: 'generation_task', limit: 20 },
   { scope: 'styling_garment', limit: 100 },
@@ -2566,11 +2567,12 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   const [deleteGarmentImpact, setDeleteGarmentImpact] = useState<DeleteImpact | null>(null)
   const [deleteGarmentImpactLoading, setDeleteGarmentImpactLoading] = useState(false)
   const refreshUploadSessionsRef = useRef(refreshUploadSessions)
-  const selectableGarmentIds = items.map((item) => item.id)
+  const selectableGarmentIds = items.filter((item) => item.archiveReason !== 'deletion_pending').map((item) => item.id)
   const selectedVisibleGarments = items.filter((item) => selectedGarmentIds.has(item.id) && selectableGarmentIds.includes(item.id))
-  const selectedArchivedGarments = selectedVisibleGarments.filter((item) => item.archivedAt)
+  const selectedRestorableGarments = selectedVisibleGarments.filter((item) => item.archivedAt && item.archiveReason !== 'deletion_pending')
   const selectedActiveGarments = selectedVisibleGarments.filter((item) => !item.archivedAt)
   const selectedTaggingGarments = selectedActiveGarments.filter((item) => item.status === 'TAGGING_RUNNING')
+  const selectedArchivableGarments = selectedActiveGarments.filter((item) => item.status !== 'TAGGING_RUNNING')
   const selectedTaggableGarments = selectedActiveGarments.filter((item) => TAGGABLE_GARMENT_STATUSES.has(item.status))
   const selectedRetaggableGarments = selectedActiveGarments.filter((item) => RETAGGABLE_GARMENT_STATUSES.has(item.status))
   const allVisibleGarmentsSelected = selectableGarmentIds.length > 0 && selectableGarmentIds.every((id) => selectedGarmentIds.has(id))
@@ -2791,7 +2793,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
 
   function restoreGarments(targets: StylingGarment[]) {
     const ids = targets.map((item) => item.id)
-    void run(ids.length === 1 ? '恢复搭配服装中...' : `恢复 ${ids.length} 套搭配服装中...`, () => api.restoreStylingGarments(ids), () => {
+    void run(ids.length === 1 ? '取消归档搭配服装中...' : `取消归档 ${ids.length} 套搭配服装中...`, () => api.restoreStylingGarments(ids), () => {
       setDetail((current) => current && ids.includes(current.id) ? { ...current, archivedAt: null, archiveReason: null } : current)
       setSelectedGarmentIds(new Set())
       void refreshLibraryPage().catch(() => undefined)
@@ -3008,11 +3010,8 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
               {hasActiveFilters && <button className="filter-pill reset-filter-pill" type="button" onClick={clearLibraryFilters}><span>清空筛选</span></button>}
             </div>
             <div className="library-management-tools">
-              {selectedVisibleGarments.length > 0 && (
-                selectedArchivedGarments.length === selectedVisibleGarments.length
-                  ? <button className="management-action" onClick={() => restoreGarments(selectedArchivedGarments)}>恢复 {selectedArchivedGarments.length} 项</button>
-                  : <button className="management-action" disabled={selectedArchivedGarments.length > 0 || selectedTaggingGarments.length > 0} title={selectedArchivedGarments.length ? '请分别选择已归档和未归档服装' : selectedTaggingGarments.length ? '识别中的服装可以下载，但不能归档' : undefined} onClick={() => openGarmentDeleteDialog(selectedActiveGarments)}>归档 {selectedActiveGarments.length} 项</button>
-              )}
+              {selectedArchivableGarments.length > 0 && <button className="management-action" onClick={() => openGarmentDeleteDialog(selectedArchivableGarments)}>归档 {selectedArchivableGarments.length} 项</button>}
+              {selectedRestorableGarments.length > 0 && <button className="management-action" onClick={() => restoreGarments(selectedRestorableGarments)}>取消归档 {selectedRestorableGarments.length} 项</button>}
               {bulkMode && selectedVisibleGarments.length > 0 && (
                 <>
                   <button
@@ -3042,6 +3041,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
                   )}
                 </>
               )}
+              {bulkMode && selectedTaggingGarments.length > 0 && <span className="bulk-selection-hint">{selectedTaggingGarments.length} 项识别中，暂不可归档</span>}
               {bulkMode && <button className={`management-action management-check-action ${allVisibleGarmentsSelected ? 'is-active' : ''}`} disabled={!selectableGarmentIds.length} onClick={() => toggleVisibleGarmentSelection(!allVisibleGarmentsSelected)}><Check size={15} /> 全选本页</button>}
               {bulkMode && <span className="bulk-selection-hint">拖动框选 · Shift 连选</span>}
               <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
@@ -3065,6 +3065,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
                   tagLabel={item.status === 'READY' ? '重新识别' : '识别标签'}
                   selected={bulkMode && selectedGarmentIds.has(item.id)}
                   onSelect={bulkMode ? (checked, extend) => toggleGarmentSelection(item.id, checked, extend) : undefined}
+                  selectionDisabled={item.archiveReason === 'deletion_pending'}
                   onDelete={() => openGarmentDeleteDialog([item])}
                   onRestore={() => restoreGarments([item])}
                 />
@@ -4700,6 +4701,9 @@ function ImportTaskWorkbench({
   const [selectedUploadRecordIds, setSelectedUploadRecordIds] = useState<Set<string>>(() => new Set())
   const [batchArchiving, setBatchArchiving] = useState(false)
   const [batchArchiveCount, setBatchArchiveCount] = useState(0)
+  const [batchRestoring, setBatchRestoring] = useState(false)
+  const [batchRestoreCount, setBatchRestoreCount] = useState(0)
+  const batchUploadRecordBusy = batchArchiving || batchRestoring
   const lastSelectedUploadRecordIdRef = useRef<string | null>(null)
   const manageImpactRequestRef = useRef(0)
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(() => new Set())
@@ -4886,9 +4890,12 @@ function ImportTaskWorkbench({
   const selectableUploadRecords = pagedRecords.filter((record) => isUploadRecordSelectable(uploadRecordTarget(record)))
   const selectableUploadRecordIds = selectableUploadRecords.map(uploadRecordSelectionId)
   const selectedUploadRecords = selectableUploadRecords.filter((record) => selectedUploadRecordIds.has(uploadRecordSelectionId(record)))
+  const selectedUploadRecordTargets = selectedUploadRecords.map(uploadRecordTarget)
+  const selectedArchivableUploadRecords = selectedUploadRecordTargets.filter(uploadRecordHasActiveRows)
+  const selectedRestorableUploadRecords = selectedUploadRecordTargets.filter(uploadRecordHasArchivedRows)
   const allVisibleUploadRecordsSelected = selectableUploadRecordIds.length > 0 && selectableUploadRecordIds.every((id) => selectedUploadRecordIds.has(id))
   const uploadRecordMarquee = useMarqueeSelection<string>({
-    enabled: bulkMode && !batchArchiving,
+    enabled: bulkMode && !batchUploadRecordBusy,
     selected: selectedUploadRecordIds,
     onChange: setSelectedUploadRecordIds,
   })
@@ -4961,6 +4968,34 @@ function ImportTaskWorkbench({
     return Array.from(new Set(rows.map((row) => row.sessionId).filter(Boolean) as string[]))
   }
 
+  async function resolveUploadRecordSessions(target: UploadRecordTarget) {
+    const resolved = new Map<string, UploadSession>()
+    uploadRecordSessionIds(target.rows).forEach((id) => {
+      const session = allSessionsById.get(id)
+      if (session) resolved.set(id, session)
+    })
+    const batchIds = Array.from(new Set([
+      ...(target.jobId ? [target.jobId] : []),
+      ...(target.rows.map((row) => row.serverBatchId).filter(Boolean) as string[]),
+    ]))
+    const batches = await Promise.all(batchIds.map((batchId) => api.listUploadSessions({
+      scope: 'styling_garment',
+      batchId,
+      includeArchived: true,
+      includeAbandoned: true,
+      limit: 500,
+    })))
+    batches.flatMap((result) => result.items).forEach((session) => resolved.set(session.id, session))
+    return Array.from(resolved.values())
+  }
+
+  async function resolveUploadRecordSessionIds(target: UploadRecordTarget, archived?: boolean) {
+    const sessions = await resolveUploadRecordSessions(target)
+    return sessions
+      .filter((session) => archived === undefined || Boolean(session.archivedAt) === archived)
+      .map((session) => session.id)
+  }
+
   function uploadRecordSelectionId(record: (typeof importRecords)[number]) {
     return `${record.kind}:${record.id}`
   }
@@ -4985,7 +5020,15 @@ function ImportTaskWorkbench({
   }
 
   function isUploadRecordSelectable(target: UploadRecordTarget) {
-    return !target.archived && !target.rows.some((row) => row.archiveReason === 'deletion_pending')
+    return !target.rows.some((row) => row.archiveReason === 'deletion_pending')
+  }
+
+  function uploadRecordHasActiveRows(target: UploadRecordTarget) {
+    return target.rows.some((row) => !row.archivedAt)
+  }
+
+  function uploadRecordHasArchivedRows(target: UploadRecordTarget) {
+    return target.rows.some((row) => Boolean(row.archivedAt))
   }
 
   function toggleUploadRecordSelection(id: string, checked: boolean, extend = false) {
@@ -5025,7 +5068,11 @@ function ImportTaskWorkbench({
     setLoadingArchived(true)
     try {
       const result = await api.listUploadSessions({ scope: 'styling_garment', includeArchived: true, includeAbandoned: true, limit: 500 })
-      setArchivedSessionSnapshot(result.items)
+      setArchivedSessionSnapshot((current) => {
+        const merged = new Map(current.map((item) => [item.id, item]))
+        result.items.forEach((item) => merged.set(item.id, item))
+        return Array.from(merged.values())
+      })
       setUploadRecordError(null)
     } finally {
       setLoadingArchived(false)
@@ -5037,27 +5084,24 @@ function ImportTaskWorkbench({
   }, [])
 
   useEffect(() => {
-    if (loadingArchived || uploadRecordOperationId || batchArchiving) return
+    if (loadingArchived || uploadRecordOperationId || batchUploadRecordBusy) return
     reconciledJobs.forEach((job) => {
       const original = jobs.find((item) => item.id === job.id)
       if (original && Boolean(original.archivedAt) !== Boolean(job.archivedAt)) onSetJobArchived(job.id, Boolean(job.archivedAt))
     })
-  }, [batchArchiving, jobs, loadingArchived, reconciledJobs, uploadRecordOperationId])
+  }, [batchUploadRecordBusy, jobs, loadingArchived, reconciledJobs, uploadRecordOperationId])
 
   function openUploadRecordManage(target: UploadRecordTarget) {
-    if (batchArchiving) return
+    if (batchUploadRecordBusy) return
     setManageRecord(target)
     setManageImpact(null)
     setManageImpactError(null)
-    const sessionIds = uploadRecordSessionIds(target.rows)
-    if (!sessionIds.length) {
-      setManageImpact({ uploadSessionCount: 0, uploadItemCount: 0, temporaryObjectCount: 0, linkedBusinessCount: 0, estimatedBytes: 0 })
-      setManageImpactLoading(false)
-      return
-    }
     const requestId = ++manageImpactRequestRef.current
     setManageImpactLoading(true)
-    void api.getUploadSessionDeleteImpact(sessionIds)
+    void resolveUploadRecordSessionIds(target)
+      .then((sessionIds) => sessionIds.length
+        ? api.getUploadSessionDeleteImpact(sessionIds)
+        : { impact: { uploadSessionCount: 0, uploadItemCount: 0, temporaryObjectCount: 0, linkedBusinessCount: 0, estimatedBytes: 0 } })
       .then((result) => {
         if (manageImpactRequestRef.current === requestId) setManageImpact(result.impact)
       })
@@ -5083,11 +5127,11 @@ function ImportTaskWorkbench({
   }
 
   async function archiveUploadRecord(target: UploadRecordTarget) {
-    if (batchArchiving || uploadRecordOperationId) return
+    if (batchUploadRecordBusy || uploadRecordOperationId) return
     setUploadRecordOperationId(target.id)
     setUploadRecordError(null)
-    const sessionIds = uploadRecordSessionIds(target.rows)
     try {
+      const sessionIds = await resolveUploadRecordSessionIds(target, false)
       for (let index = 0; index < sessionIds.length; index += UPLOAD_SESSION_ARCHIVE_BATCH_SIZE) {
         await api.archiveUploadSessions(sessionIds.slice(index, index + UPLOAD_SESSION_ARCHIVE_BATCH_SIZE))
       }
@@ -5106,13 +5150,13 @@ function ImportTaskWorkbench({
   }
 
   async function archiveSelectedUploadRecords() {
-    if (batchArchiving || !selectedUploadRecords.length) return
-    const targets = selectedUploadRecords.map(uploadRecordTarget)
-    const sessionIds = Array.from(new Set(targets.flatMap((target) => uploadRecordSessionIds(target.rows))))
+    if (batchUploadRecordBusy || !selectedArchivableUploadRecords.length) return
+    const targets = selectedArchivableUploadRecords
     setBatchArchiving(true)
     setBatchArchiveCount(targets.length)
     setUploadRecordError(null)
     try {
+      const sessionIds = Array.from(new Set((await Promise.all(targets.map((target) => resolveUploadRecordSessionIds(target, false)))).flat()))
       for (let index = 0; index < sessionIds.length; index += UPLOAD_SESSION_ARCHIVE_BATCH_SIZE) {
         await api.archiveUploadSessions(sessionIds.slice(index, index + UPLOAD_SESSION_ARCHIVE_BATCH_SIZE))
       }
@@ -5134,13 +5178,47 @@ function ImportTaskWorkbench({
     }
   }
 
+  async function restoreSelectedUploadRecords() {
+    if (batchUploadRecordBusy || !selectedRestorableUploadRecords.length) return
+    const targets = selectedRestorableUploadRecords
+    setBatchRestoring(true)
+    setBatchRestoreCount(targets.length)
+    setUploadRecordError(null)
+    try {
+      const sessionIds = Array.from(new Set((await Promise.all(targets.map((target) => resolveUploadRecordSessionIds(target, true)))).flat()))
+      for (let index = 0; index < sessionIds.length; index += UPLOAD_SESSION_ARCHIVE_BATCH_SIZE) {
+        await api.restoreUploadSessions(sessionIds.slice(index, index + UPLOAD_SESSION_ARCHIVE_BATCH_SIZE))
+      }
+      setArchivedSessionSnapshot((current) => current.map((session) => sessionIds.includes(session.id) ? { ...session, archivedAt: null, archiveReason: null } : session))
+      targets.forEach((target) => {
+        if (target.jobId) onSetJobArchived(target.jobId, false)
+      })
+      setDismissedUploadSessionIds((current) => {
+        const next = new Set(current)
+        sessionIds.forEach((id) => next.delete(id))
+        return next
+      })
+      setSelectedUploadRecordIds(new Set())
+      lastSelectedUploadRecordIdRef.current = null
+      await refreshManagedUploadRecords()
+    } catch (error) {
+      await refreshManagedUploadRecords()
+      setUploadRecordError(error instanceof Error ? error.message : '批量取消归档上传记录失败')
+    } finally {
+      setBatchRestoring(false)
+      setBatchRestoreCount(0)
+    }
+  }
+
   async function restoreUploadRecord(target: UploadRecordTarget) {
-    if (batchArchiving || uploadRecordOperationId) return
+    if (batchUploadRecordBusy || uploadRecordOperationId) return
     setUploadRecordOperationId(target.id)
     setUploadRecordError(null)
-    const sessionIds = uploadRecordSessionIds(target.rows)
     try {
-      if (sessionIds.length) await api.restoreUploadSessions(sessionIds)
+      const sessionIds = await resolveUploadRecordSessionIds(target, true)
+      for (let index = 0; index < sessionIds.length; index += UPLOAD_SESSION_ARCHIVE_BATCH_SIZE) {
+        await api.restoreUploadSessions(sessionIds.slice(index, index + UPLOAD_SESSION_ARCHIVE_BATCH_SIZE))
+      }
       setArchivedSessionSnapshot((current) => current.map((session) => sessionIds.includes(session.id) ? { ...session, archivedAt: null, archiveReason: null } : session))
       if (target.jobId) onSetJobArchived(target.jobId, false)
       setDismissedUploadSessionIds((current) => {
@@ -5150,18 +5228,19 @@ function ImportTaskWorkbench({
       })
       await refreshManagedUploadRecords()
     } catch (error) {
-      setUploadRecordError(error instanceof Error ? error.message : '恢复上传记录失败')
+      await refreshManagedUploadRecords()
+      setUploadRecordError(error instanceof Error ? error.message : '取消归档上传记录失败')
     } finally {
       setUploadRecordOperationId(null)
     }
   }
 
   async function purgeUploadRecord(target: UploadRecordTarget, confirmText: string) {
-    if (batchArchiving || uploadRecordOperationId) return
+    if (batchUploadRecordBusy || uploadRecordOperationId) return
     setUploadRecordOperationId(target.id)
     setUploadRecordError(null)
     try {
-      const sessionIds = uploadRecordSessionIds(target.rows)
+      const sessionIds = await resolveUploadRecordSessionIds(target)
       let cleanupErrors: ObjectCleanupError[] = []
       let deferredIds: string[] = []
       if (sessionIds.length) {
@@ -5225,14 +5304,19 @@ function ImportTaskWorkbench({
           {hasActiveFilters && <button className="filter-pill reset-filter-pill" type="button" onClick={clearImportFilters}><span>清空筛选</span></button>}
         </div>
         <div className="library-management-tools import-management-tools">
-          {bulkMode && (selectedUploadRecords.length > 0 || batchArchiving) && (
-            <button className="management-action" type="button" disabled={batchArchiving} onClick={() => void archiveSelectedUploadRecords()}>
-              <Trash2 size={15} />{batchArchiving ? `正在归档 ${batchArchiveCount} 项...` : `归档 ${selectedUploadRecords.length} 项`}
+          {bulkMode && (selectedArchivableUploadRecords.length > 0 || batchArchiving) && (
+            <button className="management-action" type="button" disabled={batchUploadRecordBusy} onClick={() => void archiveSelectedUploadRecords()}>
+              <Trash2 size={15} />{batchArchiving ? `正在归档 ${batchArchiveCount} 项...` : `归档 ${selectedArchivableUploadRecords.length} 项`}
             </button>
           )}
-          {bulkMode && <button className={`management-action management-check-action ${allVisibleUploadRecordsSelected ? 'is-active' : ''}`} type="button" disabled={batchArchiving || !selectableUploadRecordIds.length} onClick={() => toggleVisibleUploadRecordSelection(!allVisibleUploadRecordsSelected)}><Check size={15} /> 全选本页</button>}
+          {bulkMode && (selectedRestorableUploadRecords.length > 0 || batchRestoring) && (
+            <button className="management-action" type="button" disabled={batchUploadRecordBusy} onClick={() => void restoreSelectedUploadRecords()}>
+              <RefreshCw size={15} />{batchRestoring ? `正在取消归档 ${batchRestoreCount} 项...` : `取消归档 ${selectedRestorableUploadRecords.length} 项`}
+            </button>
+          )}
+          {bulkMode && <button className={`management-action management-check-action ${allVisibleUploadRecordsSelected ? 'is-active' : ''}`} type="button" disabled={batchUploadRecordBusy || !selectableUploadRecordIds.length} onClick={() => toggleVisibleUploadRecordSelection(!allVisibleUploadRecordsSelected)}><Check size={15} /> 全选本页</button>}
           {bulkMode && <span className="bulk-selection-hint">拖动框选 · Shift 连选</span>}
-          <button className="management-action compact-control" type="button" disabled={batchArchiving} onClick={() => {
+          <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy} onClick={() => {
             setBulkMode((value) => !value)
             setSelectedUploadRecordIds(new Set())
             lastSelectedUploadRecordIdRef.current = null
@@ -5258,6 +5342,8 @@ function ImportTaskWorkbench({
             const summary = summarizeRows(group.rows)
             const title = group.title
             const archived = group.rows.every((row) => row.archivedAt)
+            const hasArchivedRows = group.rows.some((row) => row.archivedAt)
+            const partiallyArchived = hasArchivedRows && !archived
             const deleting = group.rows.some((row) => row.archiveReason === 'deletion_pending')
             const manageTarget = { id: group.id, title, rows: group.rows, archived }
             return (
@@ -5277,7 +5363,7 @@ function ImportTaskWorkbench({
                     toggleTask(group.id)
                   }}
                 >
-                  {bulkMode && <BulkCheckbox checked={selected} disabled={batchArchiving || !selectable} label={`选择 ${title}`} onChange={(checked, extend) => toggleUploadRecordSelection(selectionId, checked, extend)} />}
+                  {bulkMode && <BulkCheckbox checked={selected} disabled={batchUploadRecordBusy || !selectable} label={`选择 ${title}`} onChange={(checked, extend) => toggleUploadRecordSelection(selectionId, checked, extend)} />}
                   <div className="import-record-main">
                     <ImportThumbStack rows={group.rows} />
                     <div>
@@ -5292,14 +5378,17 @@ function ImportTaskWorkbench({
                     {summary.organizing > 0 && <span>{summary.organizing} 整理中</span>}
                     {summary.tagging > 0 && <span>{summary.tagging} AI 打标中</span>}
                     {summary.failed > 0 && <span>{summary.failed} 需处理</span>}
+                    {partiallyArchived && <span>部分归档</span>}
+                    {archived && <span>已归档</span>}
                     <span>{importImageCountText(summary.imported, summary.uploaded, summary.retained)} 张</span>
                   </div>
                   <span className={`import-status-badge is-${summary.tone}`}>{summary.label}</span>
                   <div className="import-record-actions" onClick={(event) => event.stopPropagation()}>
                     {deleting
                       ? <button className="management-action compact-control" type="button" disabled><Loader2 className="spin" size={14} />等待清理</button>
-                      : <>{archived && <button className="management-action compact-control" type="button" disabled={batchArchiving || uploadRecordOperationId === group.id} onClick={() => void restoreUploadRecord(manageTarget)}><RefreshCw size={14} />恢复</button>}
-                        <button className="management-action compact-control" type="button" disabled={batchArchiving || uploadRecordOperationId === group.id} onClick={() => openUploadRecordManage(manageTarget)}><Trash2 size={14} />{archived ? '删除' : '归档'}</button></>}
+                      : <>{hasArchivedRows && <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === group.id} onClick={() => void restoreUploadRecord(manageTarget)}><RefreshCw size={14} />取消归档</button>}
+                        {!archived && <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === group.id} onClick={() => openUploadRecordManage(manageTarget)}><Trash2 size={14} />归档</button>}
+                        {archived && <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === group.id} onClick={() => openUploadRecordManage(manageTarget)}><Trash2 size={14} />删除</button>}</>}
                   </div>
                   <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起上传任务' : '展开上传任务'} onClick={(event) => {
                     event.stopPropagation()
@@ -5324,6 +5413,8 @@ function ImportTaskWorkbench({
           const expanded = expandedTasks.has(job.id)
           const title = importJobDisplayTitle(job, allJobRows)
           const archived = Boolean(job.archivedAt || allJobRows.every((row) => row.archivedAt))
+          const hasArchivedRows = allJobRows.some((row) => row.archivedAt)
+          const partiallyArchived = hasArchivedRows && !archived
           const deleting = allJobRows.some((row) => row.archiveReason === 'deletion_pending')
           const manageTarget = { id: job.id, title, rows: allJobRows, jobId: job.id, archived }
           const canResume = !archived && job.status === 'INTERRUPTED'
@@ -5345,7 +5436,7 @@ function ImportTaskWorkbench({
                   toggleTask(job.id)
                 }}
               >
-                {bulkMode && <BulkCheckbox checked={selected} disabled={batchArchiving || !selectable} label={`选择 ${title}`} onChange={(checked, extend) => toggleUploadRecordSelection(selectionId, checked, extend)} />}
+                {bulkMode && <BulkCheckbox checked={selected} disabled={batchUploadRecordBusy || !selectable} label={`选择 ${title}`} onChange={(checked, extend) => toggleUploadRecordSelection(selectionId, checked, extend)} />}
                 <div className="import-record-main">
                   <ImportThumbStack rows={allJobRows} />
                   <div>
@@ -5360,6 +5451,8 @@ function ImportTaskWorkbench({
                   {summary.organizing > 0 && <span>{summary.organizing} 整理中</span>}
                   {summary.tagging > 0 && <span>{summary.tagging} AI 打标中</span>}
                   {summary.failed > 0 && <span>{summary.failed} 需处理</span>}
+                  {partiallyArchived && <span>部分归档</span>}
+                  {archived && <span>已归档</span>}
                   <span>{importImageCountText(summary.imported, summary.uploaded, summary.retained)} 张</span>
                 </div>
                 <span className={`import-status-badge is-${summary.tone}`}>{summary.label}</span>
@@ -5367,13 +5460,13 @@ function ImportTaskWorkbench({
                   {canResume && (
                     <div className="import-resume-actions">
                       {canResumeSavedDirectory && (
-                        <button className="management-action compact-control" type="button" disabled={batchArchiving || resumingJobId === job.id} onClick={() => onResumeSaved(job.id)}>
+                        <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || resumingJobId === job.id} onClick={() => onResumeSaved(job.id)}>
                           <RefreshCw size={14} />{resumingJobId === job.id ? '恢复中' : '继续上传'}
                         </button>
                       )}
-                      <label className={`management-action compact-control ${batchArchiving ? 'is-disabled' : ''}`} aria-disabled={batchArchiving} title="重新选择原任务文件夹；系统会严格核对后从断点继续">
+                      <label className={`management-action compact-control ${batchUploadRecordBusy ? 'is-disabled' : ''}`} aria-disabled={batchUploadRecordBusy} title="重新选择原任务文件夹；系统会严格核对后从断点继续">
                         <FolderOpen size={14} />重新选择原目录
-                        <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} disabled={batchArchiving || resumingJobId === job.id} onChange={(event) => {
+                        <input type="file" multiple {...{ webkitdirectory: '', directory: '' }} disabled={batchUploadRecordBusy || resumingJobId === job.id} onChange={(event) => {
                           const files = Array.from(event.target.files ?? [])
                           event.target.value = ''
                           if (files.length) onResumeFiles(job.id, files)
@@ -5386,8 +5479,9 @@ function ImportTaskWorkbench({
                   </button>}
                   {deleting
                     ? <button className="management-action compact-control" type="button" disabled><Loader2 className="spin" size={14} />等待清理</button>
-                    : <>{archived && <button className="management-action compact-control" type="button" disabled={batchArchiving || uploadRecordOperationId === job.id} onClick={() => void restoreUploadRecord(manageTarget)}><RefreshCw size={14} />恢复</button>}
-                      <button className="management-action compact-control" type="button" disabled={batchArchiving || uploadRecordOperationId === job.id} onClick={() => openUploadRecordManage(manageTarget)}><Trash2 size={14} />{archived ? '删除' : '归档'}</button></>}
+                    : <>{hasArchivedRows && <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === job.id} onClick={() => void restoreUploadRecord(manageTarget)}><RefreshCw size={14} />取消归档</button>}
+                      {!archived && <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === job.id} onClick={() => openUploadRecordManage(manageTarget)}><Trash2 size={14} />归档</button>}
+                      {archived && <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === job.id} onClick={() => openUploadRecordManage(manageTarget)}><Trash2 size={14} />删除</button>}</>}
                 </div>
                 <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起上传任务' : '展开上传任务'} onClick={(event) => {
                   event.stopPropagation()
@@ -6098,6 +6192,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   const [pageSize, setPageSize] = useState<number>(defaultPageSizeOptions[0])
   const [bulkMode, setBulkMode] = useState(false)
   const [batchBulkLoading, setBatchBulkLoading] = useState(false)
+  const [batchBulkError, setBatchBulkError] = useState<string | null>(null)
   const recordMarquee = useMarqueeSelection<number>({
     enabled: bulkMode && !batchBulkLoading && viewMode !== 'batches',
     selected: selectedRecordIds,
@@ -6116,13 +6211,23 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
       : []
   const cachedVisibleBatchTasks = batchListItems.flatMap((batch) => expandedBatchTasks[batch.batchId] ?? [])
   const visibleTaskItems = [...taskListItems, ...cachedVisibleBatchTasks]
-  const selectableRecordIds = visibleTaskItems.filter((item) => !isTaskRunning(item)).map((item) => item.id)
+  const selectableRecordIds = visibleTaskItems.filter((item) => item.archiveReason !== 'deletion_pending').map((item) => item.id)
   const selectedVisibleRecords = Array.from(selectedRecordIds)
     .map((id) => selectedRecordCache[id])
-    .filter((item): item is GenerationTask => !!item && !isTaskRunning(item))
-  const selectedArchivedRecords = selectedVisibleRecords.filter((item) => item.archivedAt)
-  const selectedActiveRecords = selectedVisibleRecords.filter((item) => !item.archivedAt)
-  const allVisibleRecordsSelected = selectableRecordIds.length > 0 && selectableRecordIds.every((id) => selectedRecordIds.has(id))
+    .filter((item): item is GenerationTask => !!item && item.archiveReason !== 'deletion_pending')
+  const selectedRestorableRecords = selectedVisibleRecords.filter((item) => item.archivedAt)
+  const selectedArchivableRecords = selectedVisibleRecords.filter((item) => !item.archivedAt && !isTaskRunning(item))
+  const selectedRunningRecords = selectedVisibleRecords.filter((item) => !item.archivedAt && isTaskRunning(item))
+  const allVisibleBatchesResolved = batchListItems.every((batch) => expandedBatchTasks[batch.batchId] !== undefined)
+  const allVisibleRecordsSelected = allVisibleBatchesResolved
+    && selectableRecordIds.length > 0
+    && selectableRecordIds.every((id) => selectedRecordIds.has(id))
+  const hasSelectableRecordRows = selectableRecordIds.length > 0 || batchListItems.some((batch) => {
+    const resolvedTasks = expandedBatchTasks[batch.batchId]
+    return resolvedTasks
+      ? resolvedTasks.some((item) => item.archiveReason !== 'deletion_pending')
+      : batch.taskCount > 0
+  })
 
   function recordQueryOptions(targetOffset = offset) {
     const keyword = query.trim()
@@ -6409,10 +6514,11 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     const requestId = batchBulkRequestRef.current + 1
     batchBulkRequestRef.current = requestId
     setBatchBulkLoading(true)
+    setBatchBulkError(null)
     try {
       const tasks = await loadBatchTasksForSelection(batch.batchId)
       if (batchBulkRequestRef.current !== requestId) return
-      const selectableIds = tasks.filter((item) => !isTaskRunning(item)).map((item) => item.id)
+      const selectableIds = tasks.filter((item) => item.archiveReason !== 'deletion_pending').map((item) => item.id)
       setSelectedRecordIds((current) => {
         const next = new Set(current)
         selectableIds.forEach((id) => {
@@ -6421,6 +6527,10 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
         })
         return next
       })
+    } catch (error) {
+      if (batchBulkRequestRef.current === requestId) {
+        setBatchBulkError(error instanceof Error ? error.message : '批次任务读取失败，请重试')
+      }
     } finally {
       if (batchBulkRequestRef.current === requestId) setBatchBulkLoading(false)
     }
@@ -6431,12 +6541,13 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     const requestId = batchBulkRequestRef.current + 1
     batchBulkRequestRef.current = requestId
     setBatchBulkLoading(true)
+    setBatchBulkError(null)
     try {
-      const batchTasks = await Promise.all(batchListItems.map((batch) => loadBatchTasksForSelection(batch.batchId).catch(() => [])))
+      const batchTasks = await Promise.all(batchListItems.map((batch) => loadBatchTasksForSelection(batch.batchId)))
       if (batchBulkRequestRef.current !== requestId) return
       const pageTasks = [...taskListItems, ...batchTasks.flat()]
       cacheSelectedRecords(pageTasks)
-      const ids = pageTasks.filter((item) => !isTaskRunning(item)).map((item) => item.id)
+      const ids = pageTasks.filter((item) => item.archiveReason !== 'deletion_pending').map((item) => item.id)
       setSelectedRecordIds((current) => {
         const next = new Set(current)
         ids.forEach((id) => {
@@ -6445,19 +6556,24 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
         })
         return next
       })
+    } catch (error) {
+      if (batchBulkRequestRef.current === requestId) {
+        setBatchBulkError(error instanceof Error ? error.message : '部分批次读取失败，未执行全选')
+      }
     } finally {
       if (batchBulkRequestRef.current === requestId) setBatchBulkLoading(false)
     }
   }
 
   function batchSelectionState(batch: GenerationRecordBatch) {
-    const tasks = expandedBatchTasks[batch.batchId] ?? batch.coverTasks
-    const selectableTasks = tasks.filter((item) => !isTaskRunning(item))
+    const resolvedTasks = expandedBatchTasks[batch.batchId]
+    const tasks = resolvedTasks ?? batch.coverTasks
+    const selectableTasks = tasks.filter((item) => item.archiveReason !== 'deletion_pending')
     const selectedCount = selectableTasks.filter((item) => selectedRecordIds.has(item.id)).length
     return {
       selected: selectableTasks.length > 0 && selectedCount === selectableTasks.length,
       indeterminate: selectedCount > 0 && selectedCount < selectableTasks.length,
-      selectable: batch.taskCount > 0,
+      selectable: resolvedTasks ? selectableTasks.length > 0 : batch.taskCount > 0,
     }
   }
 
@@ -6473,14 +6589,18 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   }
 
   function runRecordBatchAction() {
-    if (!selectedVisibleRecords.length) return
-    openRecordDeleteDialogForItems(selectedVisibleRecords)
+    if (!selectedArchivableRecords.length) return
+    openRecordDeleteDialogForItems(selectedArchivableRecords)
   }
 
   function openRecordDeleteDialogForItems(targets: GenerationTask[]) {
     const ids = targets.map((item) => item.id)
     setDeleteRecordDialog(targets)
     setDeleteRecordImpact(null)
+    if (ids.length > GENERATION_TASK_MUTATION_BATCH_SIZE) {
+      setDeleteRecordImpactLoading(false)
+      return
+    }
     setDeleteRecordImpactLoading(true)
     void api.getTaskDeleteImpact(ids)
       .then((response) => setDeleteRecordImpact(response.impact))
@@ -6492,7 +6612,22 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     const ids = items.map((item) => item.id)
     const action = purge
       ? () => ids.length === 1 ? api.deleteTask(ids[0], confirmText) : api.deleteTasks(ids, confirmText)
-      : () => api.archiveTasks(ids)
+      : async () => {
+          try {
+            let result: DeleteOperationResult = { ok: true, archived: true, ids: [] }
+            for (let index = 0; index < ids.length; index += GENERATION_TASK_MUTATION_BATCH_SIZE) {
+              result = await api.archiveTasks(ids.slice(index, index + GENERATION_TASK_MUTATION_BATCH_SIZE))
+            }
+            return result
+          } catch (error) {
+            setSelectedRecordIds(new Set())
+            setSelectedRecordCache({})
+            lastSelectedRecordIdRef.current = null
+            refreshAffectedBatchViews(items)
+            await refreshRecordPage().catch(() => undefined)
+            throw error
+          }
+        }
     setDeleteRecordDialog(null)
     setDeleteRecordImpact(null)
     setItems((current) => current.filter((item) => !ids.includes(item.id)))
@@ -6507,7 +6642,23 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
 
   function restoreRecords(targets: GenerationTask[]) {
     const ids = targets.map((item) => item.id)
-    void run(ids.length === 1 ? '恢复生成记录中...' : `恢复 ${ids.length} 条生成记录中...`, () => api.restoreTasks(ids), () => {
+    const action = async () => {
+      try {
+        let result: { ok: boolean; restored: boolean; ids: number[] } = { ok: true, restored: true, ids: [] }
+        for (let index = 0; index < ids.length; index += GENERATION_TASK_MUTATION_BATCH_SIZE) {
+          result = await api.restoreTasks(ids.slice(index, index + GENERATION_TASK_MUTATION_BATCH_SIZE))
+        }
+        return result
+      } catch (error) {
+        setSelectedRecordIds(new Set())
+        setSelectedRecordCache({})
+        lastSelectedRecordIdRef.current = null
+        refreshAffectedBatchViews(targets)
+        await refreshRecordPage().catch(() => undefined)
+        throw error
+      }
+    }
+    void run(ids.length === 1 ? '取消归档生成记录中...' : `取消归档 ${ids.length} 条生成记录中...`, action, () => {
       setDetail((current) => current && ids.includes(current.id) ? { ...current, archivedAt: null, archiveReason: null } : current)
       setSelectedRecordIds(new Set())
       refreshAffectedBatchViews(targets)
@@ -6676,12 +6827,10 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
                   <Download size={14} /> {downloadChecking ? '检查成片中...' : `下载成片 ${selectedVisibleRecords.length} 项`}
                 </button>
               )}
-              {selectedVisibleRecords.length > 0 && (
-                selectedArchivedRecords.length === selectedVisibleRecords.length
-                  ? <button className="management-action" onClick={() => restoreRecords(selectedArchivedRecords)}>恢复 {selectedArchivedRecords.length} 项</button>
-                  : <button className="management-action" disabled={selectedArchivedRecords.length > 0} title={selectedArchivedRecords.length ? '请分别选择已归档和未归档记录' : undefined} onClick={runRecordBatchAction}>归档 {selectedActiveRecords.length} 项</button>
-              )}
-              {bulkMode && <button className={`management-action management-check-action ${allVisibleRecordsSelected ? 'is-active' : ''}`} disabled={batchBulkLoading || (!selectableRecordIds.length && !batchListItems.length)} onClick={() => void toggleVisibleRecordSelection(!allVisibleRecordsSelected)}><Check size={15} /> {batchBulkLoading ? '解析中...' : '全选本页'}</button>}
+              {selectedArchivableRecords.length > 0 && <button className="management-action" onClick={runRecordBatchAction}>归档 {selectedArchivableRecords.length} 项</button>}
+              {selectedRestorableRecords.length > 0 && <button className="management-action" onClick={() => restoreRecords(selectedRestorableRecords)}>取消归档 {selectedRestorableRecords.length} 项</button>}
+              {bulkMode && selectedRunningRecords.length > 0 && <span className="bulk-selection-hint">{selectedRunningRecords.length} 项生成中，暂不可归档</span>}
+              {bulkMode && <button className={`management-action management-check-action ${allVisibleRecordsSelected ? 'is-active' : ''}`} disabled={batchBulkLoading || !hasSelectableRecordRows} onClick={() => void toggleVisibleRecordSelection(!allVisibleRecordsSelected)}><Check size={15} /> {batchBulkLoading ? '解析中...' : '全选本页'}</button>}
               {bulkMode && viewMode !== 'batches' && <span className="bulk-selection-hint">拖动框选单条记录 · Shift 连选</span>}
               <button className="management-action compact-control" disabled={batchBulkLoading} onClick={() => { setBulkMode((value) => !value); setSelectedRecordIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
             </div>
@@ -6809,6 +6958,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
           ) : <EmptyState title="选择一条记录" text="查看分镜预览、搭配服装和最终成片。" />}
         </div>
       </div>
+      {batchBulkError && <div className="inline-error" role="alert">{batchBulkError}</div>}
       {deleteRecordDialog && (
         <DeleteConfirmDialog
           title={deleteRecordDialog.length === 1 ? '归档记录' : `归档 ${deleteRecordDialog.length} 条记录`}
@@ -6817,6 +6967,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
           onConfirm={confirmRecordDelete}
           impact={deleteRecordImpact}
           impactLoading={deleteRecordImpactLoading}
+          allowPurge={deleteRecordDialog.length <= GENERATION_TASK_MUTATION_BATCH_SIZE}
         />
       )}
       {downloadPrecheck && (
@@ -6870,9 +7021,9 @@ function TaskRecordRow({ item, active, bulkMode, selected, onSelect, onOpen, onO
       className={`record-row ${selected ? 'is-selected' : ''} ${active ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}
       data-select-id={bulkMode ? item.id : undefined}
       data-select-type={bulkMode ? 'number' : undefined}
-      data-select-disabled={bulkMode && isTaskRunning(item) ? 'true' : undefined}
+      data-select-disabled={bulkMode && item.archiveReason === 'deletion_pending' ? 'true' : undefined}
     >
-      {bulkMode && <BulkCheckbox checked={selected} disabled={isTaskRunning(item)} label={`选择 ${item.name}`} onChange={(checked, extend) => onSelect(item.id, checked, extend)} />}
+      {bulkMode && <BulkCheckbox checked={selected} disabled={item.archiveReason === 'deletion_pending'} label={`选择 ${item.name}`} onChange={(checked, extend) => onSelect(item.id, checked, extend)} />}
       <button className="record-open" aria-current={active ? 'true' : undefined} title="查看记录详情" onClick={() => onOpen(item)}>
         <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
         <div><TruncatedText as="strong" text={item.name} /><TruncatedText text={`${item.archivedAt ? archiveStateText(item.archiveReason) : statusText(item.status)} · ${dateText(item.createdAt)}`} /></div>
@@ -7120,13 +7271,14 @@ function FinalImageDownloadDialog({ precheck, onClose, onDownload }: {
   )
 }
 
-function DeleteConfirmDialog({ title, items, onClose, onConfirm, impact = null, impactLoading = false }: {
+function DeleteConfirmDialog({ title, items, onClose, onConfirm, impact = null, impactLoading = false, allowPurge = true }: {
   title: string
   items: DeleteDialogTarget[]
   onClose: () => void
   onConfirm: (items: DeleteDialogTarget[], purge: boolean, confirmText: string) => void
   impact?: DeleteImpact | null
   impactLoading?: boolean
+  allowPurge?: boolean
 }) {
   const [purge, setPurge] = useState(false)
   const [confirmText, setConfirmText] = useState('')
@@ -7162,13 +7314,14 @@ function DeleteConfirmDialog({ title, items, onClose, onConfirm, impact = null, 
           {items.slice(0, 4).map((item) => <span key={item.id}>{item.name}</span>)}
           {items.length > 4 && <span>另 {items.length - 4} 项</span>}
         </div>
-        <label className="danger-check">
-          <input type="checkbox" checked={purge} onChange={(event) => {
+        <label className={`danger-check ${allowPurge ? '' : 'is-disabled'}`}>
+          <input type="checkbox" checked={purge} disabled={!allowPurge} onChange={(event) => {
             setPurge(event.target.checked)
             setConfirmText('')
           }} />
           同时彻底删除关联记录和文件
         </label>
+        {!allowPurge && <p className="confirm-copy">一次最多彻底删除 {GENERATION_TASK_MUTATION_BATCH_SIZE} 条记录；当前可先归档，再缩小选择范围后删除。</p>}
         {purge && (
           <>
             <div className="confirm-copy">
@@ -7344,7 +7497,7 @@ function UploadBox({ files, setFiles, max, compact = false }: { files: File[]; s
   )
 }
 
-function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownload, onDelete, onRestore, selected, onSelect }: {
+function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownload, onDelete, onRestore, selected, onSelect, selectionDisabled = false }: {
   item: StylingGarment
   onTag?: () => void
   tagLabel?: string
@@ -7354,6 +7507,7 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
   onRestore?: () => void
   selected?: boolean
   onSelect?: (checked: boolean, extend: boolean) => void
+  selectionDisabled?: boolean
 }) {
   const tags = item.aiTags ?? {}
   const effective = item.effectiveTags ?? {}
@@ -7375,10 +7529,11 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
       className={`garment-card ${selected ? 'is-selected' : ''} ${tagging ? 'is-tagging' : ''} ${failed ? 'is-failed' : ''} ${item.archivedAt ? 'is-archived' : ''}`}
       data-select-id={onSelect ? item.id : undefined}
       data-select-type={onSelect ? 'number' : undefined}
+      data-select-disabled={onSelect && selectionDisabled ? 'true' : undefined}
     >
       {onSelect && (
         <label className="card-select" title="选择">
-          <input type="checkbox" aria-label="选择" checked={!!selected} onChange={(event) => onSelect(event.target.checked, event.nativeEvent instanceof MouseEvent && event.nativeEvent.shiftKey)} />
+          <input type="checkbox" aria-label={`选择 ${item.code}`} checked={!!selected} disabled={selectionDisabled} onChange={(event) => onSelect(event.target.checked, event.nativeEvent instanceof MouseEvent && event.nativeEvent.shiftKey)} />
         </label>
       )}
       <div className="garment-cover">
@@ -8837,8 +8992,8 @@ function archiveStateText(reason?: string | null) {
 }
 
 function archivedRestoreText(reason?: string | null) {
-  if (reason === 'deletion_failed') return '恢复后重试'
-  return '恢复归档'
+  if (reason === 'deletion_failed') return '取消归档后重试'
+  return '取消归档'
 }
 
 function recordStatusText(status: string) {

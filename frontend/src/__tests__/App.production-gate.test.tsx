@@ -250,6 +250,10 @@ function configureApi(role: 'admin' | 'user' = 'admin') {
   apiMock.archiveUploadSessions.mockResolvedValue({ archivedIds: [] })
   apiMock.restoreUploadSessions.mockResolvedValue({ restoredIds: [] })
   apiMock.deleteUploadSessions.mockResolvedValue({ deletedIds: [], deferredIds: [], objectCleanupErrors: [] })
+  apiMock.deleteStylingGarments.mockResolvedValue({ archivedIds: [], objectCleanupErrors: [] })
+  apiMock.restoreStylingGarments.mockResolvedValue({ restoredIds: [] })
+  apiMock.archiveTasks.mockResolvedValue({ archivedIds: [], objectCleanupErrors: [] })
+  apiMock.restoreTasks.mockResolvedValue({ restoredIds: [] })
 }
 
 beforeEach(() => {
@@ -749,24 +753,110 @@ describe('production gate app shell and page controls', () => {
       archiveReason: 'deletion_pending',
       updatedAt: '2026-07-28T11:00:00Z',
     }
+    const activeSession = {
+      ...archivedSession,
+      id: 'active-upload-session',
+      status: 'FAILED',
+      businessCode: 'LOOK-ACTIVE',
+      sourceTitle: '未归档批次',
+      batchId: 'active-upload-batch',
+      archivedAt: null,
+      archiveReason: null,
+      updatedAt: '2026-07-28T09:00:00Z',
+    }
     apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string; includeArchived?: boolean }) => ({
-      items: options.scope === 'styling_garment' && options.includeArchived ? [archivedSession, deletionPendingSession] : [],
+      items: options.scope === 'styling_garment'
+        ? options.includeArchived ? [activeSession, archivedSession, deletionPendingSession] : [activeSession]
+        : [],
     }))
     window.localStorage.setItem('ruyi-library-import-open', '1')
     window.history.replaceState(null, '', '/library')
 
     render(<App />)
-    await userEvent.click(await screen.findByRole('button', { name: '查看已归档' }))
+    const archivedToggle = await screen.findByRole('button', { name: '查看已归档' })
+    await waitFor(() => expect(archivedToggle).toBeEnabled())
+    await userEvent.click(archivedToggle)
 
     expect(await screen.findByText('已归档放弃批次')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '恢复' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '取消归档' })).toBeEnabled()
     const workbench = screen.getByText('上传记录').closest('.import-workbench') as HTMLElement
     await userEvent.click(within(workbench).getByRole('button', { name: '批量管理' }))
-    expect(within(workbench).getByRole('checkbox', { name: '选择 已归档放弃批次' })).toBeDisabled()
+    await userEvent.click(within(workbench).getByRole('button', { name: '全选本页' }))
+    expect(within(workbench).getByRole('checkbox', { name: '选择 未归档批次' })).toBeChecked()
+    expect(within(workbench).getByRole('checkbox', { name: '选择 已归档放弃批次' })).toBeChecked()
     expect(within(workbench).getByRole('checkbox', { name: '选择 等待清理批次' })).toBeDisabled()
+    expect(within(workbench).getByRole('button', { name: '归档 1 项' })).toBeEnabled()
+    expect(within(workbench).getByRole('button', { name: '取消归档 1 项' })).toBeEnabled()
     await userEvent.click(screen.getByRole('button', { name: '删除' }))
-    expect(await screen.findByRole('dialog', { name: '归档或删除上传记录' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '归档' })).not.toBeInTheDocument()
+    const dialog = await screen.findByRole('dialog', { name: '归档或删除上传记录' })
+    expect(within(dialog).queryByRole('button', { name: '归档' })).not.toBeInTheDocument()
+  })
+
+  it('offers both archive directions for one partially archived upload batch', async () => {
+    const baseSession = {
+      scope: 'styling-garment',
+      status: 'FAILED',
+      sourceTitle: '部分归档批次',
+      batchId: 'partially-archived-batch',
+      totalCount: 1,
+      uploadedCount: 0,
+      items: [],
+      createdAt: '2026-07-28T08:00:00Z',
+      updatedAt: '2026-07-28T08:01:00Z',
+    }
+    const activeSession = { ...baseSession, id: 'partial-active-session', businessCode: 'LOOK-PARTIAL-A' }
+    const archivedSession = {
+      ...baseSession,
+      id: 'partial-archived-session',
+      businessCode: 'LOOK-PARTIAL-B',
+      archivedAt: '2026-07-29T08:00:00Z',
+      archiveReason: 'user_archived',
+    }
+    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string; includeArchived?: boolean }) => ({
+      items: options.scope === 'styling_garment'
+        ? options.includeArchived ? [activeSession, archivedSession] : [activeSession]
+        : [],
+    }))
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    window.localStorage.setItem('ruyi-library-import-jobs', JSON.stringify([{
+      id: 'partially-archived-batch',
+      title: '部分归档批次',
+      status: 'FAILED',
+      total: 2,
+      uploaded: 0,
+      skipped: 0,
+      progress: null,
+      operations: [],
+      createdAt: baseSession.createdAt,
+      updatedAt: baseSession.updatedAt,
+      items: [
+        { id: 'partial-active-item', code: activeSession.businessCode, imageCount: 1, uploadedCount: 0, status: 'FAILED', sessionId: activeSession.id },
+        { id: 'partial-archived-item', code: archivedSession.businessCode, imageCount: 1, uploadedCount: 0, status: 'FAILED', sessionId: archivedSession.id },
+      ],
+    }]))
+    window.history.replaceState(null, '', '/library')
+
+    render(<App />)
+    const archivedToggle = await screen.findByRole('button', { name: '查看已归档' })
+    await waitFor(() => expect(archivedToggle).toBeEnabled())
+    await userEvent.click(archivedToggle)
+    await waitFor(() => expect(apiMock.listUploadSessions).toHaveBeenCalledWith(expect.objectContaining({ includeArchived: true })))
+    const partialChip = await screen.findByText('部分归档')
+    const record = partialChip.closest('.import-record-row') as HTMLElement
+    expect(within(record).getByText('部分归档')).toBeInTheDocument()
+    expect(within(record).getByRole('button', { name: '归档' })).toBeEnabled()
+    expect(within(record).getByRole('button', { name: '取消归档' })).toBeEnabled()
+
+    const workbench = screen.getByText('上传记录').closest('.import-workbench') as HTMLElement
+    await userEvent.click(within(workbench).getByRole('button', { name: '批量管理' }))
+    await userEvent.click(within(workbench).getByRole('checkbox', { name: '选择 部分归档批次' }))
+    expect(within(workbench).getByRole('button', { name: '归档 1 项' })).toBeEnabled()
+    expect(within(workbench).getByRole('button', { name: '取消归档 1 项' })).toBeEnabled()
+
+    await userEvent.click(within(workbench).getByRole('button', { name: '取消归档 1 项' }))
+    await waitFor(() => expect(apiMock.listUploadSessions).toHaveBeenCalledWith(expect.objectContaining({ batchId: 'partially-archived-batch', includeArchived: true })))
+    await waitFor(() => expect(apiMock.restoreUploadSessions).toHaveBeenCalledWith(['partial-archived-session']))
+    expect(apiMock.archiveUploadSessions).not.toHaveBeenCalled()
   })
 
   it('blocks permanent upload-record deletion when impact precheck fails', async () => {
@@ -976,7 +1066,7 @@ describe('production gate app shell and page controls', () => {
     expect(clickedUrls).toEqual(['/garment-archive?ids=1'])
 
     await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
-    const checkboxes = screen.getAllByRole('checkbox', { name: '选择' })
+    const checkboxes = screen.getAllByRole('checkbox', { name: /^选择 / })
     expect(checkboxes[1]).toBeEnabled()
     await userEvent.click(checkboxes[0])
     await userEvent.keyboard('{Shift>}')
@@ -1009,6 +1099,34 @@ describe('production gate app shell and page controls', () => {
     fireEvent.pointerUp(window, { pointerType: 'mouse', clientX: 205, clientY: 125 })
 
     expect(await screen.findByRole('button', { name: '下载 2 项' })).toBeEnabled()
+  })
+
+  it('keeps active and archived garments selectable together and splits archive actions by state', async () => {
+    const activeGarment = { ...garment, id: 1, code: 'ACTIVE-LOOK' }
+    const archivedGarment = { ...garment, id: 2, code: 'ARCHIVED-LOOK', archivedAt: '2026-07-29T08:00:00Z', archiveReason: 'user_archived' }
+    const taggingGarment = { ...garment, id: 3, code: 'TAGGING-LOOK', status: 'TAGGING_RUNNING' }
+    apiMock.listStylingGarments.mockImplementation(async (options: { includeArchived?: boolean }) => ({
+      ...emptyPage,
+      items: options.includeArchived ? [activeGarment, archivedGarment, taggingGarment] : [activeGarment, taggingGarment],
+      total: options.includeArchived ? 3 : 2,
+      facets: {},
+      stableFacets: {},
+    }))
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
+    await userEvent.click(await screen.findByRole('button', { name: '查看已归档' }))
+    expect(await screen.findByText('ARCHIVED-LOOK')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
+    await userEvent.click(screen.getByRole('button', { name: '全选本页' }))
+
+    expect(screen.getByRole('button', { name: '归档 1 项' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '取消归档 1 项' })).toBeEnabled()
+    expect(screen.getByText('1 项识别中，暂不可归档')).toBeInTheDocument()
+    screen.getAllByRole('checkbox', { name: /^选择 / }).forEach((checkbox) => expect(checkbox).toBeChecked())
+
+    await userEvent.click(screen.getByRole('button', { name: '取消归档 1 项' }))
+    await waitFor(() => expect(apiMock.restoreStylingGarments).toHaveBeenCalledWith([2]))
   })
 
   it('keeps all four failed-garment actions in a two-column grid', async () => {
@@ -1103,7 +1221,7 @@ describe('production gate app shell and page controls', () => {
     await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
     expect(await screen.findByText('EMPTY-LOOK')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
-    for (const checkbox of screen.getAllByRole('checkbox', { name: '选择' })) await userEvent.click(checkbox)
+    for (const checkbox of screen.getAllByRole('checkbox', { name: /^选择 / })) await userEvent.click(checkbox)
     await userEvent.click(screen.getByRole('button', { name: '下载 2 项' }))
 
     expect(alertSpy).toHaveBeenCalledWith('以下货号没有可下载的图片：EMPTY-LOOK')
@@ -1132,6 +1250,45 @@ describe('production gate app shell and page controls', () => {
 
     await userEvent.selectOptions(pageSizeSelect, '50')
     await waitFor(() => expect(apiMock.listRecordWorkspace).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 50, offset: 0 })))
+  })
+
+  it('keeps active, archived, and running generation records selectable with state-specific archive actions', async () => {
+    const activeRecord = { ...task, id: 31, name: 'ACTIVE-RECORD', status: 'COMPLETED' }
+    const archivedRecord = { ...task, id: 32, name: 'ARCHIVED-RECORD', status: 'COMPLETED', archivedAt: '2026-07-29T08:00:00Z', archiveReason: 'user_archived' }
+    const runningRecord = { ...task, id: 33, name: 'RUNNING-RECORD', status: 'FINAL_RUNNING' }
+    const workspaceEntry = (recordTask: any) => ({
+      kind: 'task',
+      id: `task-${recordTask.id}`,
+      status: recordTask.status,
+      name: recordTask.name,
+      createdAt: recordTask.createdAt,
+      updatedAt: recordTask.updatedAt,
+      task: recordTask,
+    })
+    apiMock.listRecordWorkspace.mockImplementation(async (options: { includeArchived?: boolean }) => ({
+      ...emptyPage,
+      items: options.includeArchived
+        ? [workspaceEntry(activeRecord), workspaceEntry(archivedRecord), workspaceEntry(runningRecord)]
+        : [workspaceEntry(activeRecord), workspaceEntry(runningRecord)],
+      total: options.includeArchived ? 3 : 2,
+      facets: {},
+      stableFacets: {},
+    }))
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '生成记录' }))
+    await userEvent.click(await screen.findByRole('button', { name: '查看已归档' }))
+    expect(await screen.findByText('ARCHIVED-RECORD')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
+    await userEvent.click(screen.getByRole('button', { name: '全选本页' }))
+
+    expect(await screen.findByRole('button', { name: '归档 1 项' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '取消归档 1 项' })).toBeEnabled()
+    expect(screen.getByText('1 项生成中，暂不可归档')).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: '选择 RUNNING-RECORD' })).toBeChecked()
+
+    await userEvent.click(screen.getByRole('button', { name: '取消归档 1 项' }))
+    await waitFor(() => expect(apiMock.restoreTasks).toHaveBeenCalledWith([32]))
   })
 
   it('keeps purge checked when delete impact refreshes the archive dialog', async () => {
