@@ -3573,7 +3573,8 @@ body.is-marquee-selecting {
   height: 14px;
 }
 .card-actions[data-action-count="1"] .management-action:last-child,
-.card-actions[data-action-count="3"] .management-action:last-child {
+.card-actions[data-action-count="3"] .management-action:last-child,
+.card-actions[data-action-count="5"] .management-action:last-child {
   grid-column: 1 / -1;
 }
 .drawer-backdrop {

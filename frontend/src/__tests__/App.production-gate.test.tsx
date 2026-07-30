@@ -1340,7 +1340,8 @@ describe('production gate app shell and page controls', () => {
     expect(screen.getByRole('status')).toHaveTextContent('已选 2 套')
   })
 
-  it('keeps active and archived garments selectable together and splits archive actions by state', async () => {
+  it('keeps active and archived garments selectable together and offers unified permanent deletion', async () => {
+    const deleteRequest = deferred<{ ok: boolean; purged: boolean; ids: number[]; objectCleanupErrors: [] }>()
     const activeGarment = { ...garment, id: 1, code: 'ACTIVE-LOOK' }
     const archivedGarment = { ...garment, id: 2, code: 'ARCHIVED-LOOK', archivedAt: '2026-07-29T08:00:00Z', archiveReason: 'user_archived' }
     const taggingGarment = { ...garment, id: 3, code: 'TAGGING-LOOK', status: 'TAGGING_RUNNING' }
@@ -1351,6 +1352,11 @@ describe('production gate app shell and page controls', () => {
       facets: {},
       stableFacets: {},
     }))
+    apiMock.getStylingGarmentDeleteImpact.mockResolvedValue({ impact: {
+      garmentCount: 2, garmentImageCount: 2, dependentTaskCount: 0, taskCount: 0,
+      resultImageCount: 0, mediaAssetCount: 2, estimatedBytes: 2048,
+    } })
+    apiMock.deleteStylingGarments.mockImplementation(() => deleteRequest.promise)
 
     render(<App />)
     await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
@@ -1361,11 +1367,66 @@ describe('production gate app shell and page controls', () => {
 
     expect(screen.getByRole('button', { name: '归档 1 项' })).toBeEnabled()
     expect(screen.getByRole('button', { name: '取消归档 1 项' })).toBeEnabled()
-    expect(screen.getByText('1 项识别中，暂不可归档')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '彻底删除 2 项' })).toBeEnabled()
+    expect(screen.getByText('1 项识别中，暂不可归档或彻底删除')).toBeInTheDocument()
     screen.getAllByRole('checkbox', { name: /^选择 / }).forEach((checkbox) => expect(checkbox).toBeChecked())
+    const archivedCard = screen.getByText('ARCHIVED-LOOK').closest('.garment-card') as HTMLElement
+    expect(within(archivedCard).getByRole('button', { name: '删除' })).toBeEnabled()
 
-    await userEvent.click(screen.getByRole('button', { name: '取消归档 1 项' }))
-    await waitFor(() => expect(apiMock.restoreStylingGarments).toHaveBeenCalledWith([2]))
+    await userEvent.click(screen.getByRole('button', { name: '彻底删除 2 项' }))
+    const dialog = await screen.findByRole('dialog', { name: '彻底删除 2 套搭配服装' })
+    expect(within(dialog).queryByRole('checkbox', { name: /同时彻底删除关联记录和文件/ })).not.toBeInTheDocument()
+    expect(within(dialog).getByText('彻底删除会移除搭配服装、关联图片及依赖记录，操作不可恢复。')).toBeInTheDocument()
+    await userEvent.type(within(dialog).getByPlaceholderText('全部删除'), '全部删除')
+    await userEvent.click(within(dialog).getByRole('button', { name: '彻底删除' }))
+    await waitFor(() => expect(apiMock.deleteStylingGarments).toHaveBeenCalledWith([1, 2], { purge: true, confirmPhrase: '全部删除' }))
+    expect(within(dialog).getByRole('button', { name: '处理中...' })).toBeDisabled()
+    expect(within(dialog).getByRole('button', { name: '关闭' })).toBeDisabled()
+    fireEvent.click(within(dialog).getByRole('button', { name: '处理中...' }))
+    expect(apiMock.deleteStylingGarments).toHaveBeenCalledTimes(1)
+    deleteRequest.resolve({ ok: true, purged: true, ids: [1, 2], objectCleanupErrors: [] })
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '彻底删除 2 套搭配服装' })).not.toBeInTheDocument())
+  })
+
+  it('keeps a garment visible and retryable when archive fails', async () => {
+    apiMock.listStylingGarments.mockResolvedValue({ ...emptyPage, items: [garment], total: 1, facets: {}, stableFacets: {} })
+    apiMock.getStylingGarmentDeleteImpact.mockResolvedValue({ impact: { garmentCount: 1, estimatedBytes: 0 } })
+    apiMock.deleteStylingGarments.mockRejectedValue(new Error('archive unavailable'))
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
+    expect(await screen.findByText('CODX-UI-0718-B-8')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /^归档$/ }))
+    await userEvent.click(within(await screen.findByRole('dialog', { name: '归档搭配服装' })).getByRole('button', { name: '确认' }))
+
+    await waitFor(() => expect(apiMock.deleteStylingGarments).toHaveBeenCalledWith([garment.id]))
+    const card = document.querySelector('.garment-card strong[title="CODX-UI-0718-B-8"]')?.closest('.garment-card') as HTMLElement
+    expect(card).not.toBeNull()
+    expect(within(card).getByRole('button', { name: '归档' })).toBeEnabled()
+    expect(screen.getByRole('dialog', { name: '归档搭配服装' })).toBeInTheDocument()
+  })
+
+  it('ignores stale garment delete-impact responses after switching targets', async () => {
+    const secondGarment = { ...garment, id: 2, code: 'SECOND-LOOK' }
+    const firstImpact = deferred<{ impact: any }>()
+    const secondImpact = deferred<{ impact: any }>()
+    apiMock.listStylingGarments.mockResolvedValue({ ...emptyPage, items: [garment, secondGarment], total: 2, facets: {}, stableFacets: {} })
+    apiMock.getStylingGarmentDeleteImpact.mockImplementation((ids: number[]) => ids[0] === garment.id ? firstImpact.promise : secondImpact.promise)
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
+    const firstCard = (await screen.findByText('CODX-UI-0718-B-8')).closest('.garment-card') as HTMLElement
+    await userEvent.click(within(firstCard).getByRole('button', { name: '归档' }))
+    await userEvent.click(within(await screen.findByRole('dialog', { name: '归档搭配服装' })).getByRole('button', { name: '取消' }))
+    const secondCard = screen.getByText('SECOND-LOOK').closest('.garment-card') as HTMLElement
+    await userEvent.click(within(secondCard).getByRole('button', { name: '归档' }))
+    const dialog = await screen.findByRole('dialog', { name: '归档搭配服装' })
+    await userEvent.click(within(dialog).getByRole('checkbox', { name: /同时彻底删除关联记录和文件/ }))
+    secondImpact.resolve({ impact: { garmentCount: 1, garmentImageCount: 2, mediaAssetCount: 2, estimatedBytes: 2048 } })
+    expect(await within(dialog).findByText(/2 张服装图/)).toBeInTheDocument()
+    firstImpact.resolve({ impact: { garmentCount: 1, garmentImageCount: 99, mediaAssetCount: 99, estimatedBytes: 99999 } })
+    await waitFor(() => expect(within(dialog).queryByText(/99 张服装图/)).not.toBeInTheDocument())
+    expect(within(dialog).getByText(/2 张服装图/)).toBeInTheDocument()
   })
 
   it('keeps all four failed-garment actions in a two-column grid', async () => {
@@ -1616,5 +1677,26 @@ describe('production gate app shell and page controls', () => {
     await waitFor(() => expect(screen.getByText(/彻底删除将移除/)).toBeInTheDocument())
     expect(screen.getByRole('checkbox', { name: /同时彻底删除关联记录和文件/ })).toBeChecked()
     expect(screen.getByPlaceholderText('LOOK-021')).toBeInTheDocument()
+  })
+
+  it('explains and retries a generation-record delete-impact failure', async () => {
+    const recordTask = { ...task, id: 22, name: 'LOOK-022', status: 'COMPLETED' }
+    apiMock.listRecordWorkspace.mockResolvedValue({
+      ...emptyPage,
+      items: [{ kind: 'task', id: 'task-22', status: recordTask.status, name: recordTask.name, createdAt: recordTask.createdAt, updatedAt: recordTask.updatedAt, task: recordTask }],
+      total: 1, facets: {}, stableFacets: {},
+    })
+    apiMock.getTaskDeleteImpact.mockRejectedValue(new Error('precheck unavailable'))
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '生成记录' }))
+    expect(await screen.findByText('LOOK-022')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /^归档$/ }))
+    const dialog = await screen.findByRole('dialog', { name: '归档记录' })
+    await userEvent.click(within(dialog).getByRole('checkbox', { name: /同时彻底删除关联记录和文件/ }))
+    expect(await within(dialog).findByText('删除影响预检失败，暂时不能彻底删除。')).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: '彻底删除' })).toBeDisabled()
+    await userEvent.click(within(dialog).getByRole('button', { name: '重试' }))
+    await waitFor(() => expect(apiMock.getTaskDeleteImpact).toHaveBeenCalledTimes(2))
   })
 })

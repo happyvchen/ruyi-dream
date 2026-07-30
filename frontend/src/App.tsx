@@ -2509,8 +2509,11 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   const [bulkMode, setBulkMode] = useState(false)
   const [selectedGarmentIds, setSelectedGarmentIds] = useState<Set<number>>(() => new Set())
   const [deleteGarmentDialog, setDeleteGarmentDialog] = useState<StylingGarment[] | null>(null)
+  const [deleteGarmentPurgeOnly, setDeleteGarmentPurgeOnly] = useState(false)
   const [deleteGarmentImpact, setDeleteGarmentImpact] = useState<DeleteImpact | null>(null)
   const [deleteGarmentImpactLoading, setDeleteGarmentImpactLoading] = useState(false)
+  const [deleteGarmentImpactError, setDeleteGarmentImpactError] = useState(false)
+  const deleteGarmentImpactRequestRef = useRef(0)
   const refreshUploadSessionsRef = useRef(refreshUploadSessions)
   const selectableGarmentIds = items.filter((item) => item.archiveReason !== 'deletion_pending').map((item) => item.id)
   const selectedVisibleGarments = items.filter((item) => selectedGarmentIds.has(item.id) && selectableGarmentIds.includes(item.id))
@@ -2518,6 +2521,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   const selectedActiveGarments = selectedVisibleGarments.filter((item) => !item.archivedAt)
   const selectedTaggingGarments = selectedActiveGarments.filter((item) => item.status === 'TAGGING_RUNNING')
   const selectedArchivableGarments = selectedActiveGarments.filter((item) => item.status !== 'TAGGING_RUNNING')
+  const selectedPurgeableGarments = selectedVisibleGarments.filter((item) => item.status !== 'TAGGING_RUNNING')
   const selectedTaggableGarments = selectedActiveGarments.filter((item) => TAGGABLE_GARMENT_STATUSES.has(item.status))
   const selectedRetaggableGarments = selectedActiveGarments.filter((item) => RETAGGABLE_GARMENT_STATUSES.has(item.status))
   const allVisibleGarmentsSelected = selectableGarmentIds.length > 0 && selectableGarmentIds.every((id) => selectedGarmentIds.has(id))
@@ -2706,20 +2710,23 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
     })
   }
 
-  function confirmGarmentDelete(targets: DeleteDialogTarget[], purge: boolean, confirmText: string) {
+  async function confirmGarmentDelete(targets: DeleteDialogTarget[], purge: boolean, confirmText: string) {
     const ids = targets.map((item) => item.id)
     const action = purge
       ? () => ids.length === 1 ? api.deleteStylingGarment(ids[0], { purge: true, confirmCode: confirmText }) : api.deleteStylingGarments(ids, { purge: true, confirmPhrase: confirmText })
       : () => api.deleteStylingGarments(ids)
-    setDeleteGarmentDialog(null)
-    setDeleteGarmentImpact(null)
-    setItems((current) => current.filter((item) => !ids.includes(item.id)))
-    void run(purge ? '彻底删除搭配服装中...' : '归档搭配服装中...', action, (result: DeleteOperationResult) => {
-      onDeleteResult(result)
-      if (detail && ids.includes(detail.id)) setDetail(null)
-      setSelectedGarmentIds(new Set())
-      void refreshLibraryPage().catch(() => undefined)
-    }, { refresh: 'background' })
+    try {
+      await run(purge ? '彻底删除搭配服装中...' : '归档搭配服装中...', action, (result: DeleteOperationResult) => {
+        onDeleteResult(result)
+        if (detail && ids.includes(detail.id)) setDetail(null)
+        setSelectedGarmentIds(new Set())
+        void refreshLibraryPage().catch(() => undefined)
+      }, { refresh: 'background' })
+      closeGarmentDeleteDialog()
+    } catch (error) {
+      await refreshLibraryPage().catch(() => undefined)
+      throw error
+    }
   }
 
   function restoreGarments(targets: StylingGarment[]) {
@@ -2765,15 +2772,32 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
     if (detail?.id === next.id) setDetail(next)
   }
 
-  function openGarmentDeleteDialog(targets: StylingGarment[]) {
+  function openGarmentDeleteDialog(targets: StylingGarment[], purgeOnly = false) {
     const ids = targets.map((item) => item.id)
     setDeleteGarmentDialog(targets)
+    setDeleteGarmentPurgeOnly(purgeOnly)
     setDeleteGarmentImpact(null)
+    setDeleteGarmentImpactError(false)
     setDeleteGarmentImpactLoading(true)
+    const requestId = ++deleteGarmentImpactRequestRef.current
     void api.getStylingGarmentDeleteImpact(ids)
-      .then((response) => setDeleteGarmentImpact(response.impact))
-      .catch(() => setDeleteGarmentImpact(null))
-      .finally(() => setDeleteGarmentImpactLoading(false))
+      .then((response) => {
+        if (deleteGarmentImpactRequestRef.current === requestId) setDeleteGarmentImpact(response.impact)
+      })
+      .catch(() => {
+        if (deleteGarmentImpactRequestRef.current !== requestId) return
+        setDeleteGarmentImpact(null)
+        setDeleteGarmentImpactError(true)
+      })
+      .finally(() => {
+        if (deleteGarmentImpactRequestRef.current === requestId) setDeleteGarmentImpactLoading(false)
+      })
+  }
+
+  function closeGarmentDeleteDialog() {
+    deleteGarmentImpactRequestRef.current += 1
+    setDeleteGarmentDialog(null)
+    setDeleteGarmentPurgeOnly(false)
   }
 
   function clearLibraryFilters() {
@@ -2943,6 +2967,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
             <div className="library-management-tools">
               {selectedArchivableGarments.length > 0 && <button className="management-action" onClick={() => openGarmentDeleteDialog(selectedArchivableGarments)}>归档 {selectedArchivableGarments.length} 项</button>}
               {selectedRestorableGarments.length > 0 && <button className="management-action" onClick={() => restoreGarments(selectedRestorableGarments)}>取消归档 {selectedRestorableGarments.length} 项</button>}
+              {bulkMode && selectedPurgeableGarments.length > 0 && <button className="danger-action" onClick={() => openGarmentDeleteDialog(selectedPurgeableGarments, true)}><Trash2 size={15} />彻底删除 {selectedPurgeableGarments.length} 项</button>}
               {bulkMode && selectedVisibleGarments.length > 0 && (
                 <>
                   <button
@@ -2972,7 +2997,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
                   )}
                 </>
               )}
-              {bulkMode && selectedTaggingGarments.length > 0 && <span className="bulk-selection-hint">{selectedTaggingGarments.length} 项识别中，暂不可归档</span>}
+              {bulkMode && selectedTaggingGarments.length > 0 && <span className="bulk-selection-hint">{selectedTaggingGarments.length} 项识别中，暂不可归档或彻底删除</span>}
               {bulkMode && <BulkSelectAllButton active={allVisibleGarmentsSelected} disabled={!selectableGarmentIds.length} helpText="拖动框选 · Shift 连选" onClick={() => toggleVisibleGarmentSelection(!allVisibleGarmentsSelected)}><Check size={15} /> 全选本页</BulkSelectAllButton>}
               <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
             </div>
@@ -2998,6 +3023,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
                   selectionDisabled={item.archiveReason === 'deletion_pending'}
                   onDelete={() => openGarmentDeleteDialog([item])}
                   onRestore={() => restoreGarments([item])}
+                  onPurge={() => openGarmentDeleteDialog([item], true)}
                 />
               ))}</div>
             ) : searching ? null : <EmptyState title={hasActiveFilters ? '没有匹配的搭配服装' : '暂无搭配服装'} text={hasActiveFilters ? '减少筛选条件，或粘贴多个货号、标签再试。' : '点击右上角上传搭配服装。'} />}
@@ -3022,15 +3048,24 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
         </div>
         )}
       </div>
-      {detail && <GarmentDetailDrawer item={detail} run={run} isAdmin={role === 'admin'} onClose={() => setDetail(null)} onChange={updateGarmentInView} onDelete={() => openGarmentDeleteDialog([detail])} onRestore={() => restoreGarments([detail])} />}
+      {detail && <GarmentDetailDrawer item={detail} run={run} isAdmin={role === 'admin'} onClose={() => setDetail(null)} onChange={updateGarmentInView} onDelete={() => openGarmentDeleteDialog([detail])} onRestore={() => restoreGarments([detail])} onPurge={() => openGarmentDeleteDialog([detail], true)} />}
       {deleteGarmentDialog && (
         <DeleteConfirmDialog
-          title={deleteGarmentDialog.length === 1 ? '归档搭配服装' : `归档 ${deleteGarmentDialog.length} 套搭配服装`}
+          title={deleteGarmentPurgeOnly
+            ? deleteGarmentDialog.length === 1 ? '彻底删除搭配服装' : `彻底删除 ${deleteGarmentDialog.length} 套搭配服装`
+            : deleteGarmentDialog.length === 1 ? '归档搭配服装' : `归档 ${deleteGarmentDialog.length} 套搭配服装`}
           items={deleteGarmentDialog.map((item) => ({ id: item.id, name: item.code }))}
-          onClose={() => setDeleteGarmentDialog(null)}
+          onClose={closeGarmentDeleteDialog}
           onConfirm={confirmGarmentDelete}
           impact={deleteGarmentImpact}
           impactLoading={deleteGarmentImpactLoading}
+          impactError={deleteGarmentImpactError}
+          onRetryImpact={() => openGarmentDeleteDialog(deleteGarmentDialog, deleteGarmentPurgeOnly)}
+          archiveAvailable={!deleteGarmentPurgeOnly}
+          initialPurge={deleteGarmentPurgeOnly}
+          description={(purge) => purge
+            ? '彻底删除会移除搭配服装、关联图片及依赖记录，操作不可恢复。'
+            : '确认后会归档并从日常列表移除，可通过“查看已归档”找回。'}
         />
       )}
     </section>
@@ -6093,6 +6128,8 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   const [deleteRecordDialog, setDeleteRecordDialog] = useState<GenerationTask[] | null>(null)
   const [deleteRecordImpact, setDeleteRecordImpact] = useState<DeleteImpact | null>(null)
   const [deleteRecordImpactLoading, setDeleteRecordImpactLoading] = useState(false)
+  const [deleteRecordImpactError, setDeleteRecordImpactError] = useState(false)
+  const deleteRecordImpactRequestRef = useRef(0)
   const [downloadPrecheck, setDownloadPrecheck] = useState<FinalImageExportPrecheck | null>(null)
   const [downloadChecking, setDownloadChecking] = useState(false)
   const [pageSize, setPageSize] = useState<number>(defaultPageSizeOptions[0])
@@ -6526,15 +6563,30 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     const ids = targets.map((item) => item.id)
     setDeleteRecordDialog(targets)
     setDeleteRecordImpact(null)
+    setDeleteRecordImpactError(false)
+    const requestId = ++deleteRecordImpactRequestRef.current
     if (ids.length > GENERATION_TASK_MUTATION_BATCH_SIZE) {
       setDeleteRecordImpactLoading(false)
       return
     }
     setDeleteRecordImpactLoading(true)
     void api.getTaskDeleteImpact(ids)
-      .then((response) => setDeleteRecordImpact(response.impact))
-      .catch(() => setDeleteRecordImpact(null))
-      .finally(() => setDeleteRecordImpactLoading(false))
+      .then((response) => {
+        if (deleteRecordImpactRequestRef.current === requestId) setDeleteRecordImpact(response.impact)
+      })
+      .catch(() => {
+        if (deleteRecordImpactRequestRef.current !== requestId) return
+        setDeleteRecordImpact(null)
+        setDeleteRecordImpactError(true)
+      })
+      .finally(() => {
+        if (deleteRecordImpactRequestRef.current === requestId) setDeleteRecordImpactLoading(false)
+      })
+  }
+
+  function closeRecordDeleteDialog() {
+    deleteRecordImpactRequestRef.current += 1
+    setDeleteRecordDialog(null)
   }
 
   function confirmRecordDelete(items: DeleteDialogTarget[], purge: boolean, confirmText: string) {
@@ -6556,7 +6608,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
             throw error
           }
         }
-    setDeleteRecordDialog(null)
+    closeRecordDeleteDialog()
     setDeleteRecordImpact(null)
     setItems((current) => current.filter((item) => !ids.includes(item.id)))
     void run(purge ? '彻底删除记录中...' : '归档记录中...', action, (result: DeleteOperationResult) => {
@@ -6902,10 +6954,12 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
         <DeleteConfirmDialog
           title={deleteRecordDialog.length === 1 ? '归档记录' : `归档 ${deleteRecordDialog.length} 条记录`}
           items={deleteRecordDialog}
-          onClose={() => setDeleteRecordDialog(null)}
+          onClose={closeRecordDeleteDialog}
           onConfirm={confirmRecordDelete}
           impact={deleteRecordImpact}
           impactLoading={deleteRecordImpactLoading}
+          impactError={deleteRecordImpactError}
+          onRetryImpact={() => openRecordDeleteDialogForItems(deleteRecordDialog)}
           allowPurge={deleteRecordDialog.length <= GENERATION_TASK_MUTATION_BATCH_SIZE}
         />
       )}
@@ -7192,82 +7246,39 @@ function FinalImageDownloadDialog({ precheck, onClose, onDownload }: {
   )
 }
 
-function DeleteConfirmDialog({ title, items, onClose, onConfirm, impact = null, impactLoading = false, allowPurge = true }: {
+function DeleteConfirmDialog({ title, items, onClose, onConfirm, impact = null, impactLoading = false, impactError = false, onRetryImpact, allowPurge = true, archiveAvailable = true, initialPurge = false, description }: {
   title: string
   items: DeleteDialogTarget[]
   onClose: () => void
-  onConfirm: (items: DeleteDialogTarget[], purge: boolean, confirmText: string) => void
+  onConfirm: (items: DeleteDialogTarget[], purge: boolean, confirmText: string) => void | Promise<void>
   impact?: DeleteImpact | null
   impactLoading?: boolean
+  impactError?: boolean
+  onRetryImpact?: () => void
   allowPurge?: boolean
+  archiveAvailable?: boolean
+  initialPurge?: boolean
+  description?: ReactNode | ((purge: boolean) => ReactNode)
 }) {
-  const [purge, setPurge] = useState(false)
-  const [confirmText, setConfirmText] = useState('')
-  const [submitting, setSubmitting] = useState(false)
-  const expectedText = items.length === 1 ? items[0].name : '全部删除'
-  const itemResetKey = JSON.stringify(items.map((item) => [item.id, item.name, item.batchId ?? null]))
-  const canConfirm = !submitting && (!purge || confirmText === expectedText)
-
-  useEffect(() => {
-    setPurge(false)
-    setConfirmText('')
-    setSubmitting(false)
-  }, [itemResetKey])
-
-  function submit(event: FormEvent) {
-    event.preventDefault()
-    if (!canConfirm) return
-    setSubmitting(true)
-    onConfirm(items, purge, confirmText)
-  }
-
-  return createPortal(
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <form className="confirm-modal" role="dialog" aria-modal="true" aria-label={title} onSubmit={submit} onClick={(event) => event.stopPropagation()}>
-        <div className="confirm-head">
-          <h2>{title}</h2>
-          <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
-        </div>
-        <p className="confirm-copy">
-          确认后会归档并从日常列表移除，可通过“查看已归档”找回。
-        </p>
-        <div className="confirm-items">
-          {items.slice(0, 4).map((item) => <span key={item.id}>{item.name}</span>)}
-          {items.length > 4 && <span>另 {items.length - 4} 项</span>}
-        </div>
-        <label className={`danger-check ${allowPurge ? '' : 'is-disabled'}`}>
-          <input type="checkbox" checked={purge} disabled={!allowPurge} onChange={(event) => {
-            setPurge(event.target.checked)
-            setConfirmText('')
-          }} />
-          同时彻底删除关联记录和文件
-        </label>
-        {!allowPurge && <p className="confirm-copy">一次最多彻底删除 {GENERATION_TASK_MUTATION_BATCH_SIZE} 条记录；当前可先归档，再缩小选择范围后删除。</p>}
-        {purge && (
-          <>
-            <div className="confirm-copy">
-              {impactLoading ? '正在计算影响范围...' : deleteImpactText(impact)}
-            </div>
-            <label className="confirm-field">
-              <span>{items.length === 1 ? '输入完整名称确认彻底删除' : '输入“全部删除”确认彻底删除'}</span>
-              <input
-                autoFocus
-                value={confirmText}
-                onChange={(event) => setConfirmText(event.target.value)}
-                placeholder={expectedText}
-              />
-            </label>
-          </>
-        )}
-        <div className="confirm-actions">
-          <button type="button" className="management-action" onClick={onClose}>取消</button>
-          <button className={purge ? 'danger-action' : 'management-action'} disabled={!canConfirm}>
-            {submitting ? '处理中...' : '确认'}
-          </button>
-        </div>
-      </form>
-    </div>,
-    document.body,
+  return (
+    <ArchiveManageDialog
+      title={title}
+      items={items}
+      description={description ?? ((purge) => purge
+        ? '彻底删除会移除关联记录和文件，操作不可恢复。'
+        : '确认后会归档并从日常列表移除，可通过“查看已归档”找回。')}
+      impact={deleteImpactText(impact)}
+      impactLoading={impactLoading}
+      impactError={impactError ? '删除影响预检失败，暂时不能彻底删除。' : undefined}
+      onRetryImpact={onRetryImpact}
+      purgeReady={!!impact}
+      allowPurge={allowPurge}
+      archiveAvailable={archiveAvailable}
+      initialPurge={initialPurge}
+      unavailablePurgeText={`一次最多彻底删除 ${GENERATION_TASK_MUTATION_BATCH_SIZE} 条记录；当前可先归档，再缩小选择范围后删除。`}
+      onClose={onClose}
+      onConfirm={(purge, confirmText) => onConfirm(items, purge, confirmText)}
+    />
   )
 }
 
@@ -7420,7 +7431,7 @@ function UploadBox({ files, setFiles, max, compact = false }: { files: File[]; s
   )
 }
 
-function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownload, onDelete, onRestore, selected, onSelect, selectionDisabled = false }: {
+function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownload, onDelete, onRestore, onPurge, selected, onSelect, selectionDisabled = false }: {
   item: StylingGarment
   onTag?: () => void
   tagLabel?: string
@@ -7428,6 +7439,7 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
   onDownload?: () => void
   onDelete?: () => void
   onRestore?: () => void
+  onPurge?: () => void
   selected?: boolean
   onSelect?: (checked: boolean, extend: boolean) => void
   selectionDisabled?: boolean
@@ -7446,7 +7458,7 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
   const cardBrief = tagging ? '正在识别服装信息；服务繁忙时系统会自动恢复，可以离开当前页面。' : failed ? '识别未完成，可重新识别。' : brief || '待识别搭配信息'
   const failureHint = taggingIssue ? `${taggingIssue.title}：${taggingIssue.description}` : undefined
   const statusLabel = taggingIssue?.badge ?? garmentStatus(item.status)
-  const actionCount = [onOpen, item.archivedAt ? onRestore : onDelete, onDownload, onTag].filter(Boolean).length
+  const actionCount = [onOpen, ...(item.archivedAt ? [onRestore, onPurge] : [onDelete]), onDownload, onTag].filter(Boolean).length
   return (
     <div
       className={`garment-card ${selected ? 'is-selected' : ''} ${tagging ? 'is-tagging' : ''} ${failed ? 'is-failed' : ''} ${item.archivedAt ? 'is-archived' : ''}`}
@@ -7474,7 +7486,9 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
       </div>
       <div className="card-actions" data-action-count={actionCount}>
         {onOpen && <button className="management-action" onClick={onOpen}><Eye size={16} /> 详情</button>}
-        {item.archivedAt ? onRestore && <button className="management-action" disabled={tagging || item.archiveReason === 'deletion_pending'} onClick={onRestore}><RefreshCw size={16} /> {archivedRestoreText(item.archiveReason)}</button> : onDelete && <button className="management-action" disabled={tagging} onClick={onDelete}><Trash2 size={16} /> 归档</button>}
+        {item.archivedAt
+          ? <>{onRestore && <button className="management-action" disabled={tagging || item.archiveReason === 'deletion_pending'} onClick={onRestore}><RefreshCw size={16} /> {archivedRestoreText(item.archiveReason)}</button>}{onPurge && <button className="management-action is-danger" disabled={tagging || item.archiveReason === 'deletion_pending'} onClick={onPurge}><Trash2 size={16} /> 删除</button>}</>
+          : onDelete && <button className="management-action" disabled={tagging} onClick={onDelete}><Trash2 size={16} /> 归档</button>}
         {onDownload && <button className="management-action" disabled={Number(item.imageCount ?? 0) < 1} onClick={onDownload}><Download size={16} /> 下载</button>}
         {onTag && <button className="management-action" disabled={tagging} onClick={onTag}><RotateCcw size={16} /> {tagLabel}</button>}
       </div>
@@ -7482,7 +7496,7 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
   )
 }
 
-function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, onRestore }: {
+function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, onRestore, onPurge }: {
   item: StylingGarment
   run: any
   isAdmin: boolean
@@ -7490,6 +7504,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
   onChange: (item: StylingGarment) => void
   onDelete: () => void
   onRestore: () => void
+  onPurge: () => void
 }) {
   const [working, setWorking] = useState(item.images ?? [])
   const [replacementFiles, setReplacementFiles] = useState<Record<number, File>>({})
@@ -7666,7 +7681,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
           <button className="management-action" disabled={tagging || !dirty || !working.length} onClick={() => void save(true)}>保存并重新识别标签</button>
         </div>
         <div className="danger-zone">
-          <strong>{item.archivedAt ? archivedRestoreText(item.archiveReason) : '归档'}</strong>
+          <strong>{item.archivedAt ? '归档管理' : '归档'}</strong>
           <button className="management-action" disabled={tagging || item.archiveReason === 'deletion_pending'} onClick={() => {
             if (item.archivedAt) {
               onRestore()
@@ -7675,6 +7690,10 @@ function GarmentDetailDrawer({ item, run, isAdmin, onClose, onChange, onDelete, 
               onClose()
             }
           }}>{item.archivedAt ? archivedRestoreText(item.archiveReason) : '归档'}</button>
+          {item.archivedAt && <button className="management-action is-danger" disabled={tagging || item.archiveReason === 'deletion_pending'} onClick={() => {
+            onPurge()
+            onClose()
+          }}>彻底删除</button>}
         </div>
       </aside>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
