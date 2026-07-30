@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { CSSProperties, Dispatch, DragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode, SetStateAction, UIEvent } from 'react'
+import type { CSSProperties, Dispatch, DragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode, SetStateAction, UIEvent } from 'react'
 import {
   Bot,
   Check,
@@ -49,6 +49,7 @@ import { friendlyErrorText } from './lib/errorMessages'
 import { CHECKSUM_COMPATIBILITY_NOTICE } from './lib/fileChecksum'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
+import { BulkCheckbox, MarqueeSelectionBox, selectableIdsInDom, updateSelectionWithRange, useMarqueeSelection } from './components/BulkSelection'
 
 type StudioStep = 0 | 1 | 2 | 3
 type FileSystemEntry = {
@@ -77,6 +78,7 @@ type LightboxImageItem = Omit<LightboxImage, 'items' | 'initialIndex'>
 type DeleteDialogTarget = Pick<GenerationTask, 'id' | 'name'> & { batchId?: string | null }
 type RunOptions = { refresh?: boolean | 'background' }
 type PageSizeOption = number | { value: number; label: string; key?: string }
+type RecordSelectionKey = `task:${number}` | `batch:${string}`
 
 const steps = [
   { title: '上传主推款', icon: Upload },
@@ -115,94 +117,12 @@ const TAGGABLE_GARMENT_STATUSES = new Set(['DRAFT', 'TAGGING_FAILED', 'TAGGING_R
 const RETAGGABLE_GARMENT_STATUSES = new Set(['READY'])
 const ANY_TAGGABLE_GARMENT_STATUSES = new Set([...TAGGABLE_GARMENT_STATUSES, ...RETAGGABLE_GARMENT_STATUSES])
 
-type SelectableId = string | number
-type MarqueeBox = { left: number; top: number; width: number; height: number } | null
-
-function useMarqueeSelection<T extends SelectableId>({ enabled, selected, onChange }: {
-  enabled: boolean
-  selected: ReadonlySet<T>
-  onChange: (ids: Set<T>) => void
-}) {
-  const containerRef = useRef<HTMLDivElement | null>(null)
-  const [box, setBox] = useState<MarqueeBox>(null)
-  const selectedRef = useRef(selected)
-  const suppressClickRef = useRef(false)
-  const cleanupRef = useRef<(() => void) | null>(null)
-
-  useEffect(() => {
-    selectedRef.current = selected
-  }, [selected])
-
-  useEffect(() => () => cleanupRef.current?.(), [])
-
-  function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!enabled || event.button !== 0 || event.pointerType === 'touch') return
-    const target = event.target as HTMLElement
-    if (target.closest('a, input, label, button:not(.record-open), [data-no-marquee]')) return
-    const container = containerRef.current
-    if (!container) return
-    const start = { x: event.clientX, y: event.clientY }
-    const additive = event.metaKey || event.ctrlKey || event.shiftKey
-    const base = additive ? new Set(selectedRef.current) : new Set<T>()
-    let dragging = false
-
-    const move = (pointerEvent: PointerEvent) => {
-      const distance = Math.hypot(pointerEvent.clientX - start.x, pointerEvent.clientY - start.y)
-      if (!dragging && distance < 5) return
-      dragging = true
-      suppressClickRef.current = true
-      document.body.classList.add('is-marquee-selecting')
-      const bounds = container.getBoundingClientRect()
-      const left = Math.min(start.x, pointerEvent.clientX)
-      const top = Math.min(start.y, pointerEvent.clientY)
-      const right = Math.max(start.x, pointerEvent.clientX)
-      const bottom = Math.max(start.y, pointerEvent.clientY)
-      setBox({
-        left: left - bounds.left + container.scrollLeft,
-        top: top - bounds.top + container.scrollTop,
-        width: right - left,
-        height: bottom - top,
-      })
-      const next = new Set(base)
-      container.querySelectorAll<HTMLElement>('[data-select-id]').forEach((item) => {
-        if (item.dataset.selectDisabled === 'true') return
-        const rect = item.getBoundingClientRect()
-        const intersects = rect.left < right && rect.right > left && rect.top < bottom && rect.bottom > top
-        const rawId = item.dataset.selectId
-        if (!intersects || rawId === undefined) return
-        const id = (item.dataset.selectType === 'number' ? Number(rawId) : rawId) as T
-        next.add(id)
-      })
-      onChange(next)
-    }
-    const finish = () => {
-      window.removeEventListener('pointermove', move)
-      window.removeEventListener('pointerup', finish)
-      window.removeEventListener('pointercancel', finish)
-      document.body.classList.remove('is-marquee-selecting')
-      setBox(null)
-      cleanupRef.current = null
-      if (dragging) window.setTimeout(() => { suppressClickRef.current = false }, 0)
-    }
-    cleanupRef.current?.()
-    cleanupRef.current = finish
-    window.addEventListener('pointermove', move)
-    window.addEventListener('pointerup', finish)
-    window.addEventListener('pointercancel', finish)
-  }
-
-  function onClickCapture(event: ReactMouseEvent<HTMLDivElement>) {
-    if (!suppressClickRef.current) return
-    event.preventDefault()
-    event.stopPropagation()
-  }
-
-  return { containerRef, box, onPointerDown, onClickCapture }
+function taskSelectionKey(id: number): RecordSelectionKey {
+  return `task:${id}`
 }
 
-function MarqueeSelectionBox({ box }: { box: MarqueeBox }) {
-  if (!box) return null
-  return <span className="marquee-selection-box" style={box} aria-hidden="true" />
+function batchSelectionKey(id: string): RecordSelectionKey {
+  return `batch:${id}`
 }
 
 function splitSearchTerms(value: string) {
@@ -2744,21 +2664,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
 
   function toggleGarmentSelection(id: number, checked: boolean, extend = false) {
     setSelectedGarmentIds((current) => {
-      const next = new Set(current)
-      if (extend && lastSelectedGarmentIdRef.current !== null) {
-        const start = selectableGarmentIds.indexOf(lastSelectedGarmentIdRef.current)
-        const end = selectableGarmentIds.indexOf(id)
-        if (start >= 0 && end >= 0) {
-          selectableGarmentIds.slice(Math.min(start, end), Math.max(start, end) + 1).forEach((rangeId) => {
-            if (checked) next.add(rangeId)
-            else next.delete(rangeId)
-          })
-          lastSelectedGarmentIdRef.current = id
-          return next
-        }
-      }
-      if (checked) next.add(id)
-      else next.delete(id)
+      const next = updateSelectionWithRange({ current, orderedIds: selectableGarmentIds, id, checked, extend, anchor: lastSelectedGarmentIdRef.current })
       lastSelectedGarmentIdRef.current = id
       return next
     })
@@ -5033,21 +4939,7 @@ function ImportTaskWorkbench({
 
   function toggleUploadRecordSelection(id: string, checked: boolean, extend = false) {
     setSelectedUploadRecordIds((current) => {
-      const next = new Set(current)
-      if (extend && lastSelectedUploadRecordIdRef.current !== null) {
-        const start = selectableUploadRecordIds.indexOf(lastSelectedUploadRecordIdRef.current)
-        const end = selectableUploadRecordIds.indexOf(id)
-        if (start >= 0 && end >= 0) {
-          selectableUploadRecordIds.slice(Math.min(start, end), Math.max(start, end) + 1).forEach((rangeId) => {
-            if (checked) next.add(rangeId)
-            else next.delete(rangeId)
-          })
-          lastSelectedUploadRecordIdRef.current = id
-          return next
-        }
-      }
-      if (checked) next.add(id)
-      else next.delete(id)
+      const next = updateSelectionWithRange({ current, orderedIds: selectableUploadRecordIds, id, checked, extend, anchor: lastSelectedUploadRecordIdRef.current })
       lastSelectedUploadRecordIdRef.current = id
       return next
     })
@@ -6166,6 +6058,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   const [expandedBatchTasks, setExpandedBatchTasks] = useState<Record<string, GenerationTask[]>>({})
   const [expandedBatchLoading, setExpandedBatchLoading] = useState<Record<string, boolean>>({})
   const expandedBatchRequestRef = useRef<Record<string, number>>({})
+  const batchTasksPromiseRef = useRef<Record<string, Promise<GenerationTask[]>>>({})
   const batchBulkRequestRef = useRef(0)
   const [items, setItems] = useState<GenerationTask[]>(records)
   const [query, setQuery] = useState('')
@@ -6182,6 +6075,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   const [sortBy, setSortBy] = useState('createdAt')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
   const [openFilter, setOpenFilter] = useState<'status' | 'date' | 'sort' | null>(null)
+  const [selectedRecordTargets, setSelectedRecordTargets] = useState<Set<RecordSelectionKey>>(() => new Set())
   const [selectedRecordIds, setSelectedRecordIds] = useState<Set<number>>(() => new Set())
   const [selectedRecordCache, setSelectedRecordCache] = useState<Record<number, GenerationTask>>({})
   const [deleteRecordDialog, setDeleteRecordDialog] = useState<GenerationTask[] | null>(null)
@@ -6193,12 +6087,13 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   const [bulkMode, setBulkMode] = useState(false)
   const [batchBulkLoading, setBatchBulkLoading] = useState(false)
   const [batchBulkError, setBatchBulkError] = useState<string | null>(null)
-  const recordMarquee = useMarqueeSelection<number>({
-    enabled: bulkMode && !batchBulkLoading && viewMode !== 'batches',
-    selected: selectedRecordIds,
-    onChange: setSelectedRecordIds,
+  const recordMarquee = useMarqueeSelection<RecordSelectionKey>({
+    enabled: bulkMode && !batchBulkLoading,
+    selected: selectedRecordTargets,
+    onChange: (targets) => { void applyRecordTargetSelection(targets) },
+    deferUntilPointerUp: true,
   })
-  const lastSelectedRecordIdRef = useRef<number | null>(null)
+  const lastSelectedRecordTargetRef = useRef<RecordSelectionKey | null>(null)
   const taskListItems = viewMode === 'tasks'
     ? items
     : viewMode === 'all'
@@ -6253,6 +6148,13 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
       })
       return next
     })
+  }
+
+  function clearRecordSelection() {
+    batchBulkRequestRef.current += 1
+    setSelectedRecordTargets(new Set())
+    setSelectedRecordIds(new Set())
+    lastSelectedRecordTargetRef.current = null
   }
 
   function applyRecordListResult(result: { items: GenerationTask[]; total: number; totalPages: number; facets?: GenerationRecordFacets; stableFacets?: GenerationRecordFacets }, targetOffset: number) {
@@ -6328,6 +6230,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
 
   useEffect(() => {
     batchBulkRequestRef.current += 1
+    setSelectedRecordTargets(new Set())
     setSelectedRecordIds(new Set())
     setBatchBulkLoading(false)
   }, [viewMode, offset, includeArchived, query, statusFilter, createdFrom, createdTo, sortBy, sortDir])
@@ -6352,11 +6255,10 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     setBatchDetail(item)
     setBatchDetailTasks([])
     setBatchDetailLoading(true)
-    void api.listBatchTasks(item.batchId)
-      .then((result) => {
+    void readBatchTasks(item.batchId)
+      .then((tasks) => {
         if (batchDetailRequestRef.current === item.batchId) {
-          setBatchDetailTasks(result.items)
-          cacheSelectedRecords(result.items)
+          setBatchDetailTasks(tasks)
         }
       })
       .catch(() => {
@@ -6367,16 +6269,35 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
       })
   }
 
+  function readBatchTasks(batchId: string) {
+    const inFlight = batchTasksPromiseRef.current[batchId]
+    if (inFlight) return inFlight
+    const request = api.listBatchTasks(batchId)
+      .then((result) => {
+        setExpandedBatchTasks((current) => ({ ...current, [batchId]: result.items }))
+        cacheSelectedRecords(result.items)
+        return result.items
+      })
+      .finally(() => {
+        if (batchTasksPromiseRef.current[batchId] === request) {
+          const next = { ...batchTasksPromiseRef.current }
+          delete next[batchId]
+          batchTasksPromiseRef.current = next
+        }
+      })
+    batchTasksPromiseRef.current = { ...batchTasksPromiseRef.current, [batchId]: request }
+    return request
+  }
+
   function loadExpandedBatchTasks(batchId: string) {
     const requestId = (expandedBatchRequestRef.current[batchId] ?? 0) + 1
     expandedBatchRequestRef.current = { ...expandedBatchRequestRef.current, [batchId]: requestId }
     setExpandedBatchLoading((current) => ({ ...current, [batchId]: true }))
-    void api.listBatchTasks(batchId)
-      .then((result) => {
+    void readBatchTasks(batchId)
+      .then((tasks) => {
         if (expandedBatchRequestRef.current[batchId] === requestId) {
-          if (result.items.length) {
-            setExpandedBatchTasks((current) => ({ ...current, [batchId]: result.items }))
-            cacheSelectedRecords(result.items)
+          if (tasks.length) {
+            setExpandedBatchTasks((current) => ({ ...current, [batchId]: tasks }))
           } else {
             setExpandedBatchIds((current) => {
               const next = new Set(current)
@@ -6393,7 +6314,11 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
       })
       .catch(() => {
         if (expandedBatchRequestRef.current[batchId] === requestId) {
-          setExpandedBatchTasks((current) => ({ ...current, [batchId]: [] }))
+          setExpandedBatchTasks((current) => {
+            const next = { ...current }
+            delete next[batchId]
+            return next
+          })
         }
       })
       .finally(() => {
@@ -6476,97 +6401,89 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   }
 
   function toggleRecordSelection(id: number, checked: boolean, extend = false) {
-    setSelectedRecordIds((current) => {
-      const next = new Set(current)
-      if (extend && lastSelectedRecordIdRef.current !== null && recordMarquee.containerRef.current) {
-        const orderedIds = Array.from(recordMarquee.containerRef.current.querySelectorAll<HTMLElement>('[data-select-id][data-select-type="number"]'))
-          .filter((item) => item.dataset.selectDisabled !== 'true')
-          .map((item) => Number(item.dataset.selectId))
-        const start = orderedIds.indexOf(lastSelectedRecordIdRef.current)
-        const end = orderedIds.indexOf(id)
-        if (start >= 0 && end >= 0) {
-          orderedIds.slice(Math.min(start, end), Math.max(start, end) + 1).forEach((rangeId) => {
-            if (checked) next.add(rangeId)
-            else next.delete(rangeId)
-          })
-          lastSelectedRecordIdRef.current = id
-          return next
-        }
-      }
-      if (checked) next.add(id)
-      else next.delete(id)
-      lastSelectedRecordIdRef.current = id
-      return next
+    const key = taskSelectionKey(id)
+    const parentBatchId = selectedRecordCache[id]?.batchId
+    const currentTargets = new Set(selectedRecordTargets)
+    if (parentBatchId && currentTargets.delete(batchSelectionKey(parentBatchId))) {
+      Object.values(selectedRecordCache)
+        .filter((item) => item.batchId === parentBatchId && selectedRecordIds.has(item.id))
+        .forEach((item) => currentTargets.add(taskSelectionKey(item.id)))
+    }
+    const orderedIds = selectableIdsInDom<RecordSelectionKey>(recordMarquee.containerRef.current)
+    const next = updateSelectionWithRange({
+      current: currentTargets,
+      orderedIds,
+      id: key,
+      checked,
+      extend,
+      anchor: lastSelectedRecordTargetRef.current,
     })
+    lastSelectedRecordTargetRef.current = key
+    void applyRecordTargetSelection(next)
   }
 
   async function loadBatchTasksForSelection(batchId: string) {
-    const cached = expandedBatchTasks[batchId]
-    if (cached) return cached
-    const result = await api.listBatchTasks(batchId)
-    setExpandedBatchTasks((current) => ({ ...current, [batchId]: result.items }))
-    cacheSelectedRecords(result.items)
-    return result.items
+    return readBatchTasks(batchId)
   }
 
-  async function toggleBatchTaskSelection(batch: GenerationRecordBatch, checked: boolean) {
+  async function applyRecordTargetSelection(targets: Set<RecordSelectionKey>) {
     if (batchBulkLoading) return
+    const previousTargets = selectedRecordTargets
     const requestId = batchBulkRequestRef.current + 1
     batchBulkRequestRef.current = requestId
+    setSelectedRecordTargets(new Set(targets))
     setBatchBulkLoading(true)
     setBatchBulkError(null)
     try {
-      const tasks = await loadBatchTasksForSelection(batch.batchId)
+      const resolved = await Promise.all(Array.from(targets).map(async (key) => {
+        if (key.startsWith('task:')) return { key, ids: [Number(key.slice(5))] }
+        const tasks = await loadBatchTasksForSelection(key.slice(6))
+        return { key, ids: tasks.filter((item) => item.archiveReason !== 'deletion_pending').map((item) => item.id) }
+      }))
       if (batchBulkRequestRef.current !== requestId) return
-      const selectableIds = tasks.filter((item) => item.archiveReason !== 'deletion_pending').map((item) => item.id)
-      setSelectedRecordIds((current) => {
-        const next = new Set(current)
-        selectableIds.forEach((id) => {
-          if (checked) next.add(id)
-          else next.delete(id)
-        })
-        return next
-      })
+      setSelectedRecordTargets(new Set(resolved.filter((item) => item.ids.length > 0).map((item) => item.key)))
+      setSelectedRecordIds(new Set(resolved.flatMap((item) => item.ids)))
     } catch (error) {
       if (batchBulkRequestRef.current === requestId) {
-        setBatchBulkError(error instanceof Error ? error.message : '批次任务读取失败，请重试')
+        setSelectedRecordTargets(previousTargets)
+        setBatchBulkError(error instanceof Error ? error.message : '部分批次读取失败，本次选择未生效')
       }
     } finally {
       if (batchBulkRequestRef.current === requestId) setBatchBulkLoading(false)
     }
+  }
+
+  function toggleBatchTaskSelection(batch: GenerationRecordBatch, checked: boolean, extend = false) {
+    const key = batchSelectionKey(batch.batchId)
+    const currentTargets = new Set(selectedRecordTargets)
+    const knownTasks = expandedBatchTasks[batch.batchId] ?? Object.values(selectedRecordCache).filter((item) => item.batchId === batch.batchId)
+    knownTasks.forEach((item) => currentTargets.delete(taskSelectionKey(item.id)))
+    const orderedIds = selectableIdsInDom<RecordSelectionKey>(recordMarquee.containerRef.current)
+    const next = updateSelectionWithRange({
+      current: currentTargets,
+      orderedIds,
+      id: key,
+      checked,
+      extend,
+      anchor: lastSelectedRecordTargetRef.current,
+    })
+    lastSelectedRecordTargetRef.current = key
+    void applyRecordTargetSelection(next)
   }
 
   async function toggleVisibleRecordSelection(checked: boolean) {
-    if (batchBulkLoading) return
-    const requestId = batchBulkRequestRef.current + 1
-    batchBulkRequestRef.current = requestId
-    setBatchBulkLoading(true)
-    setBatchBulkError(null)
-    try {
-      const batchTasks = await Promise.all(batchListItems.map((batch) => loadBatchTasksForSelection(batch.batchId)))
-      if (batchBulkRequestRef.current !== requestId) return
-      const pageTasks = [...taskListItems, ...batchTasks.flat()]
-      cacheSelectedRecords(pageTasks)
-      const ids = pageTasks.filter((item) => item.archiveReason !== 'deletion_pending').map((item) => item.id)
-      setSelectedRecordIds((current) => {
-        const next = new Set(current)
-        ids.forEach((id) => {
-          if (checked) next.add(id)
-          else next.delete(id)
-        })
-        return next
-      })
-    } catch (error) {
-      if (batchBulkRequestRef.current === requestId) {
-        setBatchBulkError(error instanceof Error ? error.message : '部分批次读取失败，未执行全选')
-      }
-    } finally {
-      if (batchBulkRequestRef.current === requestId) setBatchBulkLoading(false)
-    }
+    const visibleTargets = new Set<RecordSelectionKey>([
+      ...taskListItems.filter((item) => item.archiveReason !== 'deletion_pending').map((item) => taskSelectionKey(item.id)),
+      ...batchListItems.filter((batch) => batch.taskCount > 0).map((batch) => batchSelectionKey(batch.batchId)),
+    ])
+    void applyRecordTargetSelection(checked ? visibleTargets : new Set())
   }
 
   function batchSelectionState(batch: GenerationRecordBatch) {
     const resolvedTasks = expandedBatchTasks[batch.batchId]
+    if (!resolvedTasks && recordMarquee.selectedForDisplay.has(batchSelectionKey(batch.batchId))) {
+      return { selected: true, indeterminate: false, selectable: batch.taskCount > 0 }
+    }
     const tasks = resolvedTasks ?? batch.coverTasks
     const selectableTasks = tasks.filter((item) => item.archiveReason !== 'deletion_pending')
     const selectedCount = selectableTasks.filter((item) => selectedRecordIds.has(item.id)).length
@@ -6620,9 +6537,8 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
             }
             return result
           } catch (error) {
-            setSelectedRecordIds(new Set())
+            clearRecordSelection()
             setSelectedRecordCache({})
-            lastSelectedRecordIdRef.current = null
             refreshAffectedBatchViews(items)
             await refreshRecordPage().catch(() => undefined)
             throw error
@@ -6634,7 +6550,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     void run(purge ? '彻底删除记录中...' : '归档记录中...', action, (result: DeleteOperationResult) => {
       onDeleteResult(result)
       clearRecordDetailIfAffected(ids)
-      setSelectedRecordIds(new Set())
+      clearRecordSelection()
       refreshAffectedBatchViews(items)
       void refreshRecordPage().catch(() => undefined)
     }, { refresh: 'background' })
@@ -6650,9 +6566,8 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
         }
         return result
       } catch (error) {
-        setSelectedRecordIds(new Set())
+        clearRecordSelection()
         setSelectedRecordCache({})
-        lastSelectedRecordIdRef.current = null
         refreshAffectedBatchViews(targets)
         await refreshRecordPage().catch(() => undefined)
         throw error
@@ -6660,7 +6575,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     }
     void run(ids.length === 1 ? '取消归档生成记录中...' : `取消归档 ${ids.length} 条生成记录中...`, action, () => {
       setDetail((current) => current && ids.includes(current.id) ? { ...current, archivedAt: null, archiveReason: null } : current)
-      setSelectedRecordIds(new Set())
+      clearRecordSelection()
       refreshAffectedBatchViews(targets)
       void refreshRecordPage().catch(() => undefined)
     }, { refresh: 'background' })
@@ -6675,7 +6590,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     anchor.click()
     anchor.remove()
     setDownloadPrecheck(null)
-    setSelectedRecordIds(new Set())
+    clearRecordSelection()
   }
 
   function startBatchDownload() {
@@ -6817,27 +6732,32 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
               <button className={`filter-pill checkbox-pill ${includeArchived ? 'is-active' : ''}`} type="button" onClick={() => {
                 setOffset(0)
                 setIncludeArchived(!includeArchived)
-                setSelectedRecordIds(new Set())
+                clearRecordSelection()
               }}><Check size={15} /><span>查看已归档</span></button>
               {hasActiveFilters && <button className="filter-pill reset-filter-pill" type="button" onClick={clearRecordFilters}><span>清空筛选</span></button>}
             </div>
             <div className="record-list-meta">
-              {selectedVisibleRecords.length > 0 && (
+              {!batchBulkLoading && selectedVisibleRecords.length > 0 && (
                 <button className="management-action" disabled={downloadChecking} onClick={startBatchDownload} title="打包下载所选任务的最终成片，按任务名分文件夹">
                   <Download size={14} /> {downloadChecking ? '检查成片中...' : `下载成片 ${selectedVisibleRecords.length} 项`}
                 </button>
               )}
-              {selectedArchivableRecords.length > 0 && <button className="management-action" onClick={runRecordBatchAction}>归档 {selectedArchivableRecords.length} 项</button>}
-              {selectedRestorableRecords.length > 0 && <button className="management-action" onClick={() => restoreRecords(selectedRestorableRecords)}>取消归档 {selectedRestorableRecords.length} 项</button>}
-              {bulkMode && selectedRunningRecords.length > 0 && <span className="bulk-selection-hint">{selectedRunningRecords.length} 项生成中，暂不可归档</span>}
+              {!batchBulkLoading && selectedArchivableRecords.length > 0 && <button className="management-action" onClick={runRecordBatchAction}>归档 {selectedArchivableRecords.length} 项</button>}
+              {!batchBulkLoading && selectedRestorableRecords.length > 0 && <button className="management-action" onClick={() => restoreRecords(selectedRestorableRecords)}>取消归档 {selectedRestorableRecords.length} 项</button>}
+              {bulkMode && batchBulkLoading && <span className="bulk-selection-hint" role="status">正在解析选中项…</span>}
+              {bulkMode && !batchBulkLoading && selectedRecordTargets.size > 0 && Array.from(selectedRecordTargets).some((key) => key.startsWith('batch:')) && (
+                <span className="bulk-selection-hint">已选 {selectedRecordTargets.size} 行，涉及 {selectedVisibleRecords.length} 个任务</span>
+              )}
+              {bulkMode && !batchBulkLoading && selectedRunningRecords.length > 0 && <span className="bulk-selection-hint">{selectedRunningRecords.length} 项生成中，暂不可归档</span>}
               {bulkMode && <button className={`management-action management-check-action ${allVisibleRecordsSelected ? 'is-active' : ''}`} disabled={batchBulkLoading || !hasSelectableRecordRows} onClick={() => void toggleVisibleRecordSelection(!allVisibleRecordsSelected)}><Check size={15} /> {batchBulkLoading ? '解析中...' : '全选本页'}</button>}
-              {bulkMode && viewMode !== 'batches' && <span className="bulk-selection-hint">拖动框选单条记录 · Shift 连选</span>}
-              <button className="management-action compact-control" disabled={batchBulkLoading} onClick={() => { setBulkMode((value) => !value); setSelectedRecordIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
+              {bulkMode && <span className="bulk-selection-hint">拖动框选 · Shift 连选</span>}
+              <button className="management-action compact-control" disabled={batchBulkLoading} onClick={() => { setBulkMode((value) => !value); clearRecordSelection() }}>{bulkMode ? '退出批量' : '批量管理'}</button>
             </div>
           </div>
           <div
             ref={recordMarquee.containerRef}
-            className={`record-list-body marquee-selection-surface ${bulkMode && viewMode !== 'batches' ? 'is-bulk-selecting' : ''}`}
+            className={`record-list-body marquee-selection-surface ${bulkMode ? 'is-bulk-selecting' : ''}`}
+            aria-busy={batchBulkLoading}
             onPointerDown={recordMarquee.onPointerDown}
             onClickCapture={recordMarquee.onClickCapture}
           >
@@ -6857,8 +6777,10 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
                     selected={selection.selected}
                     indeterminate={selection.indeterminate}
                     selectable={selection.selectable && !batchBulkLoading}
-                    onSelect={(batchId, checked) => void toggleBatchTaskSelection(entry.batch, checked)}
+                    interactionDisabled={batchBulkLoading}
+                    onSelect={(_batchId, checked, extend) => toggleBatchTaskSelection(entry.batch, checked, extend)}
                     selectedTaskIds={selectedRecordIds}
+                    selectedTargetKeys={recordMarquee.selectedForDisplay}
                     onTaskSelect={toggleRecordSelection}
                     onOpen={openBatchRecord}
                     onToggle={toggleBatchExpansion}
@@ -6875,7 +6797,8 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
                 item={entry.task}
                 active={detail?.id === entry.task.id}
                 bulkMode={bulkMode}
-                selected={selectedRecordIds.has(entry.task.id)}
+                selected={recordMarquee.selectedForDisplay.has(taskSelectionKey(entry.task.id)) || selectedRecordIds.has(entry.task.id)}
+                selectionDisabled={batchBulkLoading}
                 onSelect={toggleRecordSelection}
                 onOpen={openRecord}
                 onOpenStudio={openTaskInStudio}
@@ -6896,8 +6819,10 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
                   selected={selection.selected}
                   indeterminate={selection.indeterminate}
                   selectable={selection.selectable && !batchBulkLoading}
-                  onSelect={(batchId, checked) => void toggleBatchTaskSelection(item, checked)}
+                  interactionDisabled={batchBulkLoading}
+                  onSelect={(_batchId, checked, extend) => toggleBatchTaskSelection(item, checked, extend)}
                   selectedTaskIds={selectedRecordIds}
+                  selectedTargetKeys={recordMarquee.selectedForDisplay}
                   onTaskSelect={toggleRecordSelection}
                   onOpen={openBatchRecord}
                   onToggle={toggleBatchExpansion}
@@ -6914,7 +6839,8 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
                 item={item}
                 active={detail?.id === item.id}
                 bulkMode={bulkMode}
-                selected={selectedRecordIds.has(item.id)}
+                selected={recordMarquee.selectedForDisplay.has(taskSelectionKey(item.id)) || selectedRecordIds.has(item.id)}
+                selectionDisabled={batchBulkLoading}
                 onSelect={toggleRecordSelection}
                 onOpen={openRecord}
                 onOpenStudio={openTaskInStudio}
@@ -6936,7 +6862,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
               onPageSizeChange={(value) => {
                 setPageSize(value)
                 setOffset(0)
-                setSelectedRecordIds(new Set())
+                clearRecordSelection()
               }}
             />
           </div>
@@ -6981,36 +6907,12 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   )
 }
 
-function BulkCheckbox({ checked, indeterminate = false, disabled = false, label, onChange }: {
-  checked: boolean
-  indeterminate?: boolean
-  disabled?: boolean
-  label: string
-  onChange: (checked: boolean, extend: boolean) => void
-}) {
-  const ref = useRef<HTMLInputElement | null>(null)
-  useEffect(() => {
-    if (ref.current) ref.current.indeterminate = indeterminate
-  }, [indeterminate])
-
-  return (
-    <input
-      ref={ref}
-      type="checkbox"
-      checked={checked}
-      disabled={disabled}
-      aria-checked={indeterminate ? 'mixed' : checked}
-      onChange={(event) => onChange(event.target.checked, event.nativeEvent instanceof MouseEvent && event.nativeEvent.shiftKey)}
-      aria-label={label}
-    />
-  )
-}
-
-function TaskRecordRow({ item, active, bulkMode, selected, onSelect, onOpen, onOpenStudio, onManage }: {
+function TaskRecordRow({ item, active, bulkMode, selected, selectionDisabled = false, onSelect, onOpen, onOpenStudio, onManage }: {
   item: GenerationTask
   active: boolean
   bulkMode: boolean
   selected: boolean
+  selectionDisabled?: boolean
   onSelect: (id: number, checked: boolean, extend?: boolean) => void
   onOpen: (item: GenerationTask) => void
   onOpenStudio: (task: GenerationTask) => void
@@ -7019,11 +6921,10 @@ function TaskRecordRow({ item, active, bulkMode, selected, onSelect, onOpen, onO
   return (
     <div
       className={`record-row ${selected ? 'is-selected' : ''} ${active ? 'active' : ''} ${item.archivedAt ? 'is-archived' : ''}`}
-      data-select-id={bulkMode ? item.id : undefined}
-      data-select-type={bulkMode ? 'number' : undefined}
-      data-select-disabled={bulkMode && item.archiveReason === 'deletion_pending' ? 'true' : undefined}
+      data-select-id={bulkMode ? taskSelectionKey(item.id) : undefined}
+      data-select-disabled={bulkMode && (selectionDisabled || item.archiveReason === 'deletion_pending') ? 'true' : undefined}
     >
-      {bulkMode && <BulkCheckbox checked={selected} disabled={item.archiveReason === 'deletion_pending'} label={`选择 ${item.name}`} onChange={(checked, extend) => onSelect(item.id, checked, extend)} />}
+      {bulkMode && <BulkCheckbox checked={selected} disabled={selectionDisabled || item.archiveReason === 'deletion_pending'} label={`选择 ${item.name}`} onChange={(checked, extend) => onSelect(item.id, checked, extend)} />}
       <button className="record-open" aria-current={active ? 'true' : undefined} title="查看记录详情" onClick={() => onOpen(item)}>
         <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
         <div><TruncatedText as="strong" text={item.name} /><TruncatedText text={`${item.archivedAt ? archiveStateText(item.archiveReason) : statusText(item.status)} · ${dateText(item.createdAt)}`} /></div>
@@ -7039,7 +6940,7 @@ function TaskRecordRow({ item, active, bulkMode, selected, onSelect, onOpen, onO
   )
 }
 
-function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, bulkMode = false, selected = false, indeterminate = false, selectable = true, selectedTaskIds, onSelect, onTaskSelect, onOpen, onToggle, onOpenTask, onOpenStudio, onManageTask }: {
+function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, bulkMode = false, selected = false, indeterminate = false, selectable = true, interactionDisabled = false, selectedTaskIds, selectedTargetKeys, onSelect, onTaskSelect, onOpen, onToggle, onOpenTask, onOpenStudio, onManageTask }: {
   item: GenerationRecordBatch
   active: boolean
   expanded: boolean
@@ -7050,8 +6951,10 @@ function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, 
   selected?: boolean
   indeterminate?: boolean
   selectable?: boolean
+  interactionDisabled?: boolean
   selectedTaskIds?: Set<number>
-  onSelect?: (batchId: string, checked: boolean) => void
+  selectedTargetKeys?: ReadonlySet<RecordSelectionKey>
+  onSelect?: (batchId: string, checked: boolean, extend: boolean) => void
   onTaskSelect?: (id: number, checked: boolean) => void
   onOpen: (item: GenerationRecordBatch) => void
   onToggle: (item: GenerationRecordBatch) => void
@@ -7062,9 +6965,13 @@ function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, 
   const panelId = `batch-record-${item.batchId}-tasks`
   return (
     <div className={`batch-record-shell ${expanded ? 'is-expanded' : ''}`}>
-      <div className={`record-row batch-record-row ${bulkMode ? 'has-selection' : ''} ${active ? 'active' : ''} ${item.status === 'ARCHIVED' ? 'is-archived' : ''}`}>
-        {bulkMode && <BulkCheckbox checked={selected} indeterminate={indeterminate} disabled={!selectable} label={`选择 ${item.name}`} onChange={(checked) => onSelect?.(item.batchId, checked)} />}
-        <button className="record-open batch-record-open" aria-current={active ? 'true' : undefined} aria-expanded={expanded} aria-controls={panelId} title={expanded ? '查看并收起批次' : '查看并展开批次'} onClick={() => {
+      <div
+        className={`record-row batch-record-row ${bulkMode ? 'has-selection' : ''} ${selected || indeterminate ? 'is-selected' : ''} ${active ? 'active' : ''} ${item.status === 'ARCHIVED' ? 'is-archived' : ''}`}
+        data-select-id={bulkMode ? batchSelectionKey(item.batchId) : undefined}
+        data-select-disabled={bulkMode && !selectable ? 'true' : undefined}
+      >
+        {bulkMode && <BulkCheckbox checked={selected} indeterminate={indeterminate} disabled={!selectable} label={`选择 ${item.name}`} onChange={(checked, extend) => onSelect?.(item.batchId, checked, extend)} />}
+        <button className="record-open batch-record-open" disabled={interactionDisabled} aria-current={active ? 'true' : undefined} aria-expanded={expanded} aria-controls={panelId} title={expanded ? '查看并收起批次' : '查看并展开批次'} onClick={() => {
           onOpen(item)
           onToggle(item)
         }}>
@@ -7082,7 +6989,7 @@ function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, 
             {item.downloadableTaskCount > 0 && <span>{item.downloadableTaskCount} 可下载</span>}
           </div>
         </button>
-        <button className="management-action record-action-button" aria-expanded={expanded} aria-controls={panelId} onClick={() => {
+        <button className="management-action record-action-button" disabled={interactionDisabled} aria-expanded={expanded} aria-controls={panelId} onClick={() => {
           onOpen(item)
           onToggle(item)
         }}><ChevronDown size={14} className={expanded ? 'is-rotated' : ''} />{expanded ? '收起' : '展开'}</button>
@@ -7097,7 +7004,8 @@ function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, 
                 item={task}
                 active={activeTaskId === task.id}
                 bulkMode={bulkMode}
-                selected={!!selectedTaskIds?.has(task.id)}
+                selected={!!selectedTaskIds?.has(task.id) || !!selectedTargetKeys?.has(taskSelectionKey(task.id))}
+                selectionDisabled={!selectable}
                 onSelect={onTaskSelect ?? (() => undefined)}
                 onOpen={onOpenTask}
                 onOpenStudio={onOpenStudio}
@@ -7533,7 +7441,7 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
     >
       {onSelect && (
         <label className="card-select" title="选择">
-          <input type="checkbox" aria-label={`选择 ${item.code}`} checked={!!selected} disabled={selectionDisabled} onChange={(event) => onSelect(event.target.checked, event.nativeEvent instanceof MouseEvent && event.nativeEvent.shiftKey)} />
+          <BulkCheckbox checked={!!selected} disabled={selectionDisabled} label={`选择 ${item.code}`} onChange={onSelect} />
         </label>
       )}
       <div className="garment-cover">

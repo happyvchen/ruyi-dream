@@ -412,6 +412,104 @@ describe('production gate app shell and page controls', () => {
     expect(within(recentPanel).queryByText(/还有 8 个任务/)).not.toBeInTheDocument()
   })
 
+  it('marquee-selects generation batch rows and resolves them to all child tasks', async () => {
+    const standalone = { ...task, id: 31, name: '单条记录', status: 'COMPLETED' }
+    const batchTasks = [
+      { ...task, id: 32, name: '批次任务一', status: 'COMPLETED', batchId: 'batch-marquee' },
+      { ...task, id: 33, name: '批次任务二', status: 'COMPLETED', batchId: 'batch-marquee' },
+    ]
+    const batchRecord = {
+      id: 'batch-marquee', batchId: 'batch-marquee', name: '框选批次', status: 'COMPLETED',
+      taskCount: 2, activeTaskCount: 2, archivedTaskCount: 0, completedTaskCount: 2,
+      failedTaskCount: 0, cancelledTaskCount: 0, runningTaskCount: 0, queuedTaskCount: 0,
+      downloadableTaskCount: 2, statusCounts: { COMPLETED: 2 }, createdAt: task.createdAt,
+      updatedAt: task.updatedAt, coverTasks: batchTasks.slice(0, 1), sampleTaskNames: batchTasks.map((item) => item.name), firstTaskId: 32,
+    }
+    const batchRequest = deferred<{ items: typeof batchTasks }>()
+    apiMock.listBatchTasks.mockReturnValue(batchRequest.promise)
+    apiMock.listRecordWorkspace.mockResolvedValue({
+      ...emptyPage,
+      items: [
+        { kind: 'batch', id: 'batch:batch-marquee', status: batchRecord.status, name: batchRecord.name, createdAt: batchRecord.createdAt, updatedAt: batchRecord.updatedAt, batch: batchRecord },
+        { kind: 'task', id: 'task:31', status: standalone.status, name: standalone.name, createdAt: standalone.createdAt, updatedAt: standalone.updatedAt, task: standalone },
+      ],
+      total: 2,
+    })
+    window.history.replaceState(null, '', '/records')
+
+    render(<App />)
+
+    expect(await screen.findByText('框选批次')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
+    const surface = document.querySelector('.record-list-body.marquee-selection-surface') as HTMLElement
+    const batchRow = surface.querySelector<HTMLElement>('[data-select-id="batch:batch-marquee"]')!
+    const taskRow = surface.querySelector<HTMLElement>('[data-select-id="task:31"]')!
+    surface.getBoundingClientRect = () => ({ left: 0, top: 0, right: 600, bottom: 500, width: 600, height: 500, x: 0, y: 0, toJSON: () => ({}) })
+    batchRow.getBoundingClientRect = () => ({ left: 10, top: 10, right: 590, bottom: 80, width: 580, height: 70, x: 10, y: 10, toJSON: () => ({}) })
+    taskRow.getBoundingClientRect = () => ({ left: 10, top: 90, right: 590, bottom: 160, width: 580, height: 70, x: 10, y: 90, toJSON: () => ({}) })
+
+    fireEvent.pointerDown(surface, { button: 0, pointerType: 'mouse', clientX: 5, clientY: 5 })
+    fireEvent.pointerMove(window, { pointerType: 'mouse', clientX: 595, clientY: 165 })
+    expect(batchRow).toHaveClass('is-selected')
+    expect(taskRow).toHaveClass('is-selected')
+    fireEvent.pointerUp(window, { pointerType: 'mouse', clientX: 595, clientY: 165 })
+
+    await waitFor(() => expect(apiMock.listBatchTasks).toHaveBeenCalledWith('batch-marquee'))
+    expect(surface).toHaveAttribute('aria-busy', 'true')
+    expect(screen.getByRole('status')).toHaveTextContent('正在解析选中项')
+    expect(screen.queryByRole('button', { name: /下载成片/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: '选择 单条记录' })).toBeDisabled()
+    batchRequest.resolve({ items: batchTasks })
+    expect(await screen.findByRole('button', { name: '下载成片 3 项' })).toBeEnabled()
+    expect(screen.getByText('已选 2 行，涉及 3 个任务')).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: '选择 框选批次' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: '选择 单条记录' })).toBeChecked()
+
+    await userEvent.click(screen.getByRole('button', { name: '展开' }))
+    await userEvent.click(await screen.findByRole('checkbox', { name: '选择 批次任务一' }))
+    expect(screen.getByRole('checkbox', { name: '选择 框选批次' })).toHaveAttribute('aria-checked', 'mixed')
+    expect(screen.getByRole('checkbox', { name: '选择 批次任务一' })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: '选择 批次任务二' })).toBeChecked()
+    expect(screen.getByRole('button', { name: '下载成片 2 项' })).toBeEnabled()
+  })
+
+  it('rolls back a failed generation batch selection without losing the previous selection', async () => {
+    const standalone = { ...task, id: 41, name: '保留的单条记录', status: 'COMPLETED' }
+    const batchRecord = {
+      id: 'batch-failed', batchId: 'batch-failed', name: '读取失败批次', status: 'FAILED',
+      taskCount: 2, activeTaskCount: 2, archivedTaskCount: 0, completedTaskCount: 0,
+      failedTaskCount: 2, cancelledTaskCount: 0, runningTaskCount: 0, queuedTaskCount: 0,
+      downloadableTaskCount: 0, statusCounts: { FAILED: 2 }, createdAt: task.createdAt,
+      updatedAt: task.updatedAt, coverTasks: [], sampleTaskNames: [], firstTaskId: 42,
+    }
+    apiMock.listBatchTasks.mockRejectedValue(new Error('批次读取失败'))
+    apiMock.listRecordWorkspace.mockResolvedValue({
+      ...emptyPage,
+      items: [
+        { kind: 'batch', id: 'batch:batch-failed', status: batchRecord.status, name: batchRecord.name, createdAt: batchRecord.createdAt, updatedAt: batchRecord.updatedAt, batch: batchRecord },
+        { kind: 'task', id: 'task:41', status: standalone.status, name: standalone.name, createdAt: standalone.createdAt, updatedAt: standalone.updatedAt, task: standalone },
+      ],
+      total: 2,
+    })
+    window.history.replaceState(null, '', '/records')
+
+    render(<App />)
+
+    expect(await screen.findByText('读取失败批次')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
+    await userEvent.click(screen.getByRole('button', { name: '展开' }))
+    await waitFor(() => expect(apiMock.listBatchTasks).toHaveBeenCalledTimes(1))
+    await userEvent.click(screen.getByRole('checkbox', { name: '选择 保留的单条记录' }))
+    expect(await screen.findByRole('button', { name: '下载成片 1 项' })).toBeEnabled()
+    await userEvent.click(screen.getByRole('checkbox', { name: '选择 读取失败批次' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('批次读取失败')
+    expect(apiMock.listBatchTasks).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('checkbox', { name: '选择 保留的单条记录' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: '选择 读取失败批次' })).not.toBeChecked()
+    expect(screen.getByRole('button', { name: '下载成片 1 项' })).toBeEnabled()
+  })
+
   it('library import and bulk controls are visible without hiding core filters', async () => {
     render(<App />)
     await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
