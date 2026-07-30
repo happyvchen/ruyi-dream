@@ -1101,6 +1101,7 @@ def restore_upload_sessions(payload: UploadSessionMutationRequest) -> dict[str, 
     session_ids = normalized_upload_session_ids(payload.ids)
     placeholders = ", ".join("?" for _ in session_ids)
     with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
         rows = upload_session_rows_for_mutation(db, session_ids)
         if any(row_value(row, "archive_reason") == "deletion_pending" for row in rows):
             raise HTTPException(status_code=409, detail="上传记录正在彻底删除，无法恢复")
@@ -2811,8 +2812,10 @@ def delete_styling_garments(payload: StylingGarmentDeleteRequest) -> dict[str, A
 @app.post("/api/styling-garments/{garment_id}/restore")
 def restore_styling_garment(garment_id: int) -> dict[str, Any]:
     with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
         rows = get_styling_garment_rows_for_mutation(db, [garment_id])
         row = rows[0]
+        ensure_rows_not_pending_deletion(rows)
         restore_styling_garments(db, [garment_id])
         if row["archived_at"] is not None:
             log_event(db, "styling_garment", garment_id, "restored", {"code": row["code"]})
@@ -2823,7 +2826,9 @@ def restore_styling_garment(garment_id: int) -> dict[str, Any]:
 def restore_styling_garment_batch(payload: StylingGarmentDeleteRequest) -> dict[str, Any]:
     garment_ids = normalized_styling_garment_ids(payload.ids or [])
     with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
         rows = get_styling_garment_rows_for_mutation(db, garment_ids)
+        ensure_rows_not_pending_deletion(rows)
         restore_styling_garments(db, garment_ids)
         for row in rows:
             if row["archived_at"] is not None:
@@ -2849,6 +2854,11 @@ def get_styling_garment_rows_for_mutation(db: Any, garment_ids: list[int]) -> li
     if len(rows) != len(garment_ids):
         raise HTTPException(status_code=404, detail="部分搭配服装不存在")
     return rows
+
+
+def ensure_rows_not_pending_deletion(rows: list[Any]) -> None:
+    if any(row["archive_reason"] == "deletion_pending" for row in rows):
+        raise HTTPException(status_code=409, detail="记录正在彻底删除，暂时不能取消归档")
 
 
 def dependent_task_ids_for_styling_garments(db: Any, garment_ids: list[int]) -> list[int]:
@@ -3389,8 +3399,10 @@ def archive_generation_tasks(payload: GenerationTaskDeleteRequest) -> dict[str, 
 @app.post("/api/generation-tasks/{task_id}/restore")
 def restore_generation_task(task_id: int) -> dict[str, Any]:
     with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
         rows = get_generation_task_rows_for_mutation(db, [task_id])
         row = rows[0]
+        ensure_rows_not_pending_deletion(rows)
         timestamp = now_iso()
         db.execute(
             "UPDATE generation_tasks SET archived_at = NULL, archive_reason = NULL, updated_at = ? WHERE id = ?",
@@ -3405,7 +3417,9 @@ def restore_generation_task(task_id: int) -> dict[str, Any]:
 def restore_generation_tasks(payload: GenerationTaskDeleteRequest) -> dict[str, Any]:
     task_ids = normalized_task_ids(payload.ids or [])
     with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
         rows = get_generation_task_rows_for_mutation(db, task_ids)
+        ensure_rows_not_pending_deletion(rows)
         timestamp = now_iso()
         placeholders = ", ".join("?" for _ in task_ids)
         db.execute(

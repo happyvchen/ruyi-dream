@@ -103,6 +103,45 @@ def test_styling_garment_archive_restore_and_batch_purge_use_business_confirmati
     assert purged.json()["deletedGarmentIds"] == garment_ids
 
 
+def test_restore_rejects_records_that_are_pending_permanent_deletion(client) -> None:
+    garment_ids = [insert_styling_garment(code=f"RESTORE-GUARD-{index}") for index in range(2)]
+    task_ids = [insert_generation_task(name=f"RESTORE-GUARD-{index}", status="DRAFT") for index in range(2)]
+    with get_db() as db:
+        db.execute(
+            "UPDATE styling_garments SET archived_at = '2026-07-30T00:00:00Z', archive_reason = 'user_archived' WHERE id = ?",
+            (garment_ids[0],),
+        )
+        db.execute(
+            "UPDATE styling_garments SET archived_at = '2026-07-30T00:00:00Z', archive_reason = 'deletion_pending' WHERE id = ?",
+            (garment_ids[1],),
+        )
+        db.execute(
+            "UPDATE generation_tasks SET archived_at = '2026-07-30T00:00:00Z', archive_reason = 'user_archived' WHERE id = ?",
+            (task_ids[0],),
+        )
+        db.execute(
+            "UPDATE generation_tasks SET archived_at = '2026-07-30T00:00:00Z', archive_reason = 'deletion_pending' WHERE id = ?",
+            (task_ids[1],),
+        )
+
+    assert client.post(f"/api/styling-garments/{garment_ids[1]}/restore").status_code == 409
+    assert client.post("/api/styling-garments/batch-restore", json={"ids": garment_ids}).status_code == 409
+    assert client.post(f"/api/generation-tasks/{task_ids[1]}/restore").status_code == 409
+    assert client.post("/api/generation-tasks/batch-restore", json={"ids": task_ids}).status_code == 409
+
+    with get_db() as db:
+        garment_rows = db.execute(
+            "SELECT archive_reason FROM styling_garments WHERE id IN (?, ?) ORDER BY id",
+            garment_ids,
+        ).fetchall()
+        task_rows = db.execute(
+            "SELECT archive_reason FROM generation_tasks WHERE id IN (?, ?) ORDER BY id",
+            task_ids,
+        ).fetchall()
+    assert [row["archive_reason"] for row in garment_rows] == ["user_archived", "deletion_pending"]
+    assert [row["archive_reason"] for row in task_rows] == ["user_archived", "deletion_pending"]
+
+
 def test_purging_one_direct_uploaded_garment_never_deletes_a_shared_upload_prefix(client, monkeypatch) -> None:
     first_id = insert_styling_garment(code="SESSION-A")
     second_id = insert_styling_garment(code="SESSION-B")
