@@ -52,6 +52,7 @@ import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 import { BulkCheckbox, BulkSelectAllButton, MarqueeSelectionBox, selectableIdsInDom, updateSelectionWithRange, useMarqueeSelection } from './components/BulkSelection'
 import { ArchiveManageDialog } from './components/ArchiveManageDialog'
+import type { ArchiveManageAction, ArchiveManageOption } from './components/ArchiveManageDialog'
 
 type StudioStep = 0 | 1 | 2 | 3
 type FileSystemEntry = {
@@ -2535,7 +2536,6 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   const [bulkMode, setBulkMode] = useState(false)
   const [selectedGarmentIds, setSelectedGarmentIds] = useState<Set<number>>(() => new Set())
   const [deleteGarmentDialog, setDeleteGarmentDialog] = useState<StylingGarment[] | null>(null)
-  const [deleteGarmentPurgeOnly, setDeleteGarmentPurgeOnly] = useState(false)
   const [deleteGarmentImpact, setDeleteGarmentImpact] = useState<DeleteImpact | null>(null)
   const [deleteGarmentImpactLoading, setDeleteGarmentImpactLoading] = useState(false)
   const [deleteGarmentImpactError, setDeleteGarmentImpactError] = useState(false)
@@ -2545,10 +2545,8 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   const refreshUploadSessionsRef = useRef(refreshUploadSessions)
   const selectableGarmentIds = items.filter((item) => item.archiveReason !== 'deletion_pending').map((item) => item.id)
   const selectedVisibleGarments = items.filter((item) => selectedGarmentIds.has(item.id) && selectableGarmentIds.includes(item.id))
-  const selectedRestorableGarments = selectedVisibleGarments.filter((item) => item.archivedAt && item.archiveReason !== 'deletion_pending')
   const selectedActiveGarments = selectedVisibleGarments.filter((item) => !item.archivedAt)
   const selectedTaggingGarments = selectedActiveGarments.filter((item) => item.status === 'TAGGING_RUNNING')
-  const selectedArchivableGarments = selectedActiveGarments.filter((item) => item.status !== 'TAGGING_RUNNING')
   const selectedPurgeableGarments = selectedVisibleGarments.filter((item) => item.status !== 'TAGGING_RUNNING')
   const selectedTaggableGarments = selectedActiveGarments.filter((item) => TAGGABLE_GARMENT_STATUSES.has(item.status))
   const selectedRetaggableGarments = selectedActiveGarments.filter((item) => RETAGGABLE_GARMENT_STATUSES.has(item.status))
@@ -2738,18 +2736,25 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
     })
   }
 
-  async function confirmGarmentDelete(targets: DeleteDialogTarget[], purge: boolean, confirmText: string) {
+  async function confirmGarmentManage(targets: DeleteDialogTarget[], action: ArchiveManageAction, confirmText: string) {
     if (garmentArchiveMutationRef.current) throw new Error('归档管理操作正在进行，请稍候。')
     garmentArchiveMutationRef.current = true
     setGarmentArchiveMutationBusy(true)
-    const ids = targets.map((item) => item.id)
-    const action = purge
+    const sourceItems = deleteGarmentDialog ?? []
+    const matchingItems = sourceItems.filter((item) => action === 'archive' ? !item.archivedAt : action === 'restore' ? !!item.archivedAt : true)
+    const ids = matchingItems.map((item) => item.id)
+    const request = action === 'purge'
       ? () => ids.length === 1 ? api.deleteStylingGarment(ids[0], { purge: true, confirmCode: confirmText }) : api.deleteStylingGarments(ids, { purge: true, confirmPhrase: confirmText })
-      : () => api.deleteStylingGarments(ids)
+      : action === 'restore'
+        ? () => api.restoreStylingGarments(ids)
+        : () => api.deleteStylingGarments(ids)
     try {
-      await run(purge ? '彻底删除搭配服装中...' : '归档搭配服装中...', action, (result: DeleteOperationResult) => {
-        onDeleteResult(result)
-        if (detail && ids.includes(detail.id)) setDetail(null)
+      await run(action === 'purge' ? '彻底删除搭配服装中...' : action === 'restore' ? '取消归档搭配服装中...' : '归档搭配服装中...', request, (result: DeleteOperationResult) => {
+        if (action !== 'restore') onDeleteResult(result)
+        if (detail && ids.includes(detail.id)) {
+          if (action === 'restore') setDetail((current) => current ? { ...current, archivedAt: null, archiveReason: null } : current)
+          else setDetail(null)
+        }
         setSelectedGarmentIds(new Set())
         void refreshLibraryPage().catch(() => undefined)
       }, { refresh: 'background' })
@@ -2757,25 +2762,6 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
     } catch (error) {
       await refreshLibraryPage().catch(() => undefined)
       throw error
-    } finally {
-      garmentArchiveMutationRef.current = false
-      setGarmentArchiveMutationBusy(false)
-    }
-  }
-
-  async function restoreGarments(targets: StylingGarment[]) {
-    if (garmentArchiveMutationRef.current) return
-    garmentArchiveMutationRef.current = true
-    setGarmentArchiveMutationBusy(true)
-    const ids = targets.map((item) => item.id)
-    try {
-      await run(ids.length === 1 ? '取消归档搭配服装中...' : `取消归档 ${ids.length} 套搭配服装中...`, () => api.restoreStylingGarments(ids), () => {
-        setDetail((current) => current && ids.includes(current.id) ? { ...current, archivedAt: null, archiveReason: null } : current)
-        setSelectedGarmentIds(new Set())
-        void refreshLibraryPage().catch(() => undefined)
-      }, { refresh: 'background' })
-    } catch {
-      await refreshLibraryPage().catch(() => undefined)
     } finally {
       garmentArchiveMutationRef.current = false
       setGarmentArchiveMutationBusy(false)
@@ -2816,11 +2802,10 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
     if (detail?.id === next.id) setDetail(next)
   }
 
-  function openGarmentDeleteDialog(targets: StylingGarment[], purgeOnly = false) {
+  function openGarmentDeleteDialog(targets: StylingGarment[]) {
     if (garmentArchiveMutationRef.current) return
     const ids = targets.map((item) => item.id)
     setDeleteGarmentDialog(targets)
-    setDeleteGarmentPurgeOnly(purgeOnly)
     setDeleteGarmentImpact(null)
     setDeleteGarmentImpactError(false)
     setDeleteGarmentImpactLoading(true)
@@ -2842,7 +2827,6 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   function closeGarmentDeleteDialog() {
     deleteGarmentImpactRequestRef.current += 1
     setDeleteGarmentDialog(null)
-    setDeleteGarmentPurgeOnly(false)
   }
 
   function clearLibraryFilters() {
@@ -3010,9 +2994,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
               {hasActiveFilters && <button className="filter-pill reset-filter-pill" type="button" onClick={clearLibraryFilters}><span>清空筛选</span></button>}
             </div>
             <div className="library-management-tools">
-              {selectedArchivableGarments.length > 0 && <button className="management-action" disabled={garmentArchiveMutationBusy} onClick={() => openGarmentDeleteDialog(selectedArchivableGarments)}>归档 {selectedArchivableGarments.length} 项</button>}
-              {selectedRestorableGarments.length > 0 && <button className="management-action" disabled={garmentArchiveMutationBusy} onClick={() => void restoreGarments(selectedRestorableGarments)}>{garmentArchiveMutationBusy ? '取消归档中...' : `取消归档 ${selectedRestorableGarments.length} 项`}</button>}
-              {bulkMode && selectedPurgeableGarments.length > 0 && <button className="management-action is-danger" disabled={garmentArchiveMutationBusy} onClick={() => openGarmentDeleteDialog(selectedPurgeableGarments, true)}><Trash2 size={15} />彻底删除 {selectedPurgeableGarments.length} 项</button>}
+              {bulkMode && selectedPurgeableGarments.length > 0 && <button className="management-action" disabled={garmentArchiveMutationBusy} onClick={() => openGarmentDeleteDialog(selectedPurgeableGarments)}><Archive size={15} />归档管理 {selectedPurgeableGarments.length} 项</button>}
               {bulkMode && selectedVisibleGarments.length > 0 && (
                 <>
                   <button
@@ -3042,7 +3024,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
                   )}
                 </>
               )}
-              {bulkMode && selectedTaggingGarments.length > 0 && <span className="bulk-selection-hint">{selectedTaggingGarments.length} 项识别中，暂不可归档或彻底删除</span>}
+              {bulkMode && selectedTaggingGarments.length > 0 && <span className="bulk-selection-hint">{selectedTaggingGarments.length} 项识别中，暂不可归档管理</span>}
               {bulkMode && <BulkSelectAllButton active={allVisibleGarmentsSelected} disabled={!selectableGarmentIds.length} helpText="拖动框选 · Shift 连选" onClick={() => toggleVisibleGarmentSelection(!allVisibleGarmentsSelected)}><Check size={15} /> 全选本页</BulkSelectAllButton>}
               <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
             </div>
@@ -3066,10 +3048,8 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
                   selected={bulkMode && selectedGarmentIds.has(item.id)}
                   onSelect={bulkMode ? (checked, extend) => toggleGarmentSelection(item.id, checked, extend) : undefined}
                   selectionDisabled={item.archiveReason === 'deletion_pending'}
-                  onDelete={() => openGarmentDeleteDialog([item])}
-                  onRestore={() => void restoreGarments([item])}
+                  onManage={() => openGarmentDeleteDialog([item])}
                   archiveMutationBusy={garmentArchiveMutationBusy}
-                  onPurge={() => openGarmentDeleteDialog([item], true)}
                 />
               ))}</div>
             ) : searching ? null : <EmptyState title={hasActiveFilters ? '没有匹配的搭配服装' : '暂无搭配服装'} text={hasActiveFilters ? '减少筛选条件，或粘贴多个货号、标签再试。' : '点击右上角上传搭配服装。'} />}
@@ -3094,24 +3074,28 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
         </div>
         )}
       </div>
-      {detail && <GarmentDetailDrawer item={detail} run={run} isAdmin={role === 'admin'} archiveMutationBusy={garmentArchiveMutationBusy} onClose={() => setDetail(null)} onChange={updateGarmentInView} onDelete={() => openGarmentDeleteDialog([detail])} onRestore={() => void restoreGarments([detail])} onPurge={() => openGarmentDeleteDialog([detail], true)} />}
+      {detail && <GarmentDetailDrawer item={detail} run={run} isAdmin={role === 'admin'} archiveMutationBusy={garmentArchiveMutationBusy} onClose={() => setDetail(null)} onChange={updateGarmentInView} onManage={() => openGarmentDeleteDialog([detail])} />}
       {deleteGarmentDialog && (
         <DeleteConfirmDialog
-          title={deleteGarmentPurgeOnly
-            ? deleteGarmentDialog.length === 1 ? '彻底删除搭配服装' : `彻底删除 ${deleteGarmentDialog.length} 套搭配服装`
-            : deleteGarmentDialog.length === 1 ? '归档搭配服装' : `归档 ${deleteGarmentDialog.length} 套搭配服装`}
+          title={deleteGarmentDialog.length === 1
+            ? deleteGarmentDialog[0].archivedAt ? '归档管理搭配服装' : '归档搭配服装'
+            : `归档管理 ${deleteGarmentDialog.length} 套搭配服装`}
           items={deleteGarmentDialog.map((item) => ({ id: item.id, name: item.code }))}
           onClose={closeGarmentDeleteDialog}
-          onConfirm={confirmGarmentDelete}
+          onConfirmAction={confirmGarmentManage}
+          actions={([
+            selectedActionOption('archive', '归档', deleteGarmentDialog.filter((item) => !item.archivedAt).length),
+            selectedActionOption('restore', '取消归档', deleteGarmentDialog.filter((item) => !!item.archivedAt).length),
+            selectedActionOption('purge', '彻底删除', deleteGarmentDialog.length),
+          ].filter(Boolean) as ArchiveManageOption[])}
+          initialAction={deleteGarmentDialog.some((item) => !item.archivedAt) ? 'archive' : 'restore'}
           impact={deleteGarmentImpact}
           impactLoading={deleteGarmentImpactLoading}
           impactError={deleteGarmentImpactError}
-          onRetryImpact={() => openGarmentDeleteDialog(deleteGarmentDialog, deleteGarmentPurgeOnly)}
-          archiveAvailable={!deleteGarmentPurgeOnly}
-          initialPurge={deleteGarmentPurgeOnly}
+          onRetryImpact={() => openGarmentDeleteDialog(deleteGarmentDialog)}
           description={(purge) => purge
             ? '彻底删除会移除搭配服装、关联图片及依赖记录，操作不可恢复。'
-            : '确认后会归档并从日常列表移除，可通过“查看已归档”找回。'}
+            : '可在此归档日常项目、取消已有归档，或选择彻底删除。'}
         />
       )}
     </section>
@@ -3885,7 +3869,7 @@ type UploadRecordTarget = {
   archived?: boolean
   memberJobIds?: string[]
   displayItems?: { id: string; name: string }[]
-  purgeOnly?: boolean
+  actionItems?: { archivable: boolean; restorable: boolean }[]
 }
 
 function importTaskStatusTone(status: string): ImportTaskRow['statusTone'] {
@@ -4908,8 +4892,6 @@ function ImportTaskWorkbench({
   const selectableUploadRecordIds = selectableUploadRecords.map(uploadRecordSelectionId)
   const selectedUploadRecords = selectableUploadRecords.filter((record) => selectedUploadRecordIds.has(uploadRecordSelectionId(record)))
   const selectedUploadRecordTargets = selectedUploadRecords.map(uploadRecordTarget)
-  const selectedArchivableUploadRecords = selectedUploadRecordTargets.filter(uploadRecordHasActiveRows)
-  const selectedRestorableUploadRecords = selectedUploadRecordTargets.filter(uploadRecordHasArchivedRows)
   const selectedPurgeableUploadRecords = selectedUploadRecordTargets
   const allVisibleUploadRecordsSelected = selectableUploadRecordIds.length > 0 && selectableUploadRecordIds.every((id) => selectedUploadRecordIds.has(id))
   const uploadRecordMarquee = useMarqueeSelection<string>({
@@ -5121,7 +5103,7 @@ function ImportTaskWorkbench({
       })
   }
 
-  function combinedUploadRecordTarget(targets: UploadRecordTarget[], purgeOnly = false) {
+  function combinedUploadRecordTarget(targets: UploadRecordTarget[]) {
     return {
       id: `bulk:${targets.map((target) => target.id).join(',')}`,
       title: `${targets.length} 条上传记录`,
@@ -5129,7 +5111,7 @@ function ImportTaskWorkbench({
       archived: targets.every((target) => target.archived),
       memberJobIds: targets.flatMap((target) => target.jobId ? [target.jobId] : target.memberJobIds ?? []),
       displayItems: targets.map((target) => ({ id: target.id, name: target.title })),
-      purgeOnly,
+      actionItems: targets.map((target) => ({ archivable: uploadRecordHasActiveRows(target), restorable: uploadRecordHasArchivedRows(target) })),
     }
   }
 
@@ -5181,40 +5163,13 @@ function ImportTaskWorkbench({
     }
   }
 
-  async function restoreSelectedUploadRecords() {
-    if (batchUploadRecordBusy || !selectedRestorableUploadRecords.length) return
-    const targets = selectedRestorableUploadRecords
-    setBatchRestoring(true)
-    setBatchRestoreCount(targets.length)
-    setUploadRecordError(null)
-    try {
-      const sessionIds = Array.from(new Set((await Promise.all(targets.map((target) => resolveUploadRecordSessionIds(target, true)))).flat()))
-      for (let index = 0; index < sessionIds.length; index += UPLOAD_SESSION_ARCHIVE_BATCH_SIZE) {
-        await api.restoreUploadSessions(sessionIds.slice(index, index + UPLOAD_SESSION_ARCHIVE_BATCH_SIZE))
-      }
-      setArchivedSessionSnapshot((current) => current.map((session) => sessionIds.includes(session.id) ? { ...session, archivedAt: null, archiveReason: null } : session))
-      targets.forEach((target) => {
-        if (target.jobId) onSetJobArchived(target.jobId, false)
-      })
-      setDismissedUploadSessionIds((current) => {
-        const next = new Set(current)
-        sessionIds.forEach((id) => next.delete(id))
-        return next
-      })
-      setSelectedUploadRecordIds(new Set())
-      lastSelectedUploadRecordIdRef.current = null
-      await refreshManagedUploadRecords()
-    } catch (error) {
-      await refreshManagedUploadRecords()
-      setUploadRecordError(error instanceof Error ? error.message : '批量取消归档上传记录失败')
-    } finally {
-      setBatchRestoring(false)
-      setBatchRestoreCount(0)
-    }
-  }
-
   async function restoreUploadRecord(target: UploadRecordTarget) {
     if (batchUploadRecordBusy || uploadRecordOperationId) return
+    const isBatch = Boolean(target.displayItems)
+    if (isBatch) {
+      setBatchRestoring(true)
+      setBatchRestoreCount(target.displayItems?.length ?? 0)
+    }
     setUploadRecordOperationId(target.id)
     setUploadRecordError(null)
     try {
@@ -5224,17 +5179,27 @@ function ImportTaskWorkbench({
       }
       setArchivedSessionSnapshot((current) => current.map((session) => sessionIds.includes(session.id) ? { ...session, archivedAt: null, archiveReason: null } : session))
       if (target.jobId) onSetJobArchived(target.jobId, false)
+      target.memberJobIds?.forEach((jobId) => onSetJobArchived(jobId, false))
       setDismissedUploadSessionIds((current) => {
         const next = new Set(current)
         sessionIds.forEach((id) => next.delete(id))
         return next
       })
+      if (isBatch) {
+        setSelectedUploadRecordIds(new Set())
+        lastSelectedUploadRecordIdRef.current = null
+      }
+      setManageRecord(null)
       await refreshManagedUploadRecords()
     } catch (error) {
       await refreshManagedUploadRecords()
-      setUploadRecordError(error instanceof Error ? error.message : '取消归档上传记录失败')
+      throw error
     } finally {
       setUploadRecordOperationId(null)
+      if (isBatch) {
+        setBatchRestoring(false)
+        setBatchRestoreCount(0)
+      }
     }
   }
 
@@ -5335,19 +5300,9 @@ function ImportTaskWorkbench({
           {hasActiveFilters && <button className="filter-pill reset-filter-pill" type="button" onClick={clearImportFilters}><span>清空筛选</span></button>}
         </div>
         <div className="library-management-tools import-management-tools">
-          {bulkMode && (selectedArchivableUploadRecords.length > 0 || batchArchiving) && (
-            <button className="management-action" type="button" disabled={batchUploadRecordBusy} onClick={() => openUploadRecordManage(combinedUploadRecordTarget(selectedArchivableUploadRecords))}>
-              <Archive size={15} />{batchArchiving ? `正在归档 ${batchArchiveCount} 项...` : `归档 ${selectedArchivableUploadRecords.length} 项`}
-            </button>
-          )}
-          {bulkMode && (selectedRestorableUploadRecords.length > 0 || batchRestoring) && (
-            <button className="management-action" type="button" disabled={batchUploadRecordBusy} onClick={() => void restoreSelectedUploadRecords()}>
-              <RefreshCw size={15} />{batchRestoring ? `正在取消归档 ${batchRestoreCount} 项...` : `取消归档 ${selectedRestorableUploadRecords.length} 项`}
-            </button>
-          )}
-          {bulkMode && (selectedPurgeableUploadRecords.length > 0 || batchPurging) && (
-            <button className="management-action is-danger" type="button" disabled={batchUploadRecordBusy} onClick={() => openUploadRecordManage(combinedUploadRecordTarget(selectedPurgeableUploadRecords, true))}>
-              <Trash2 size={15} />{batchPurging ? `正在彻底删除 ${batchPurgeCount} 项...` : `彻底删除 ${selectedPurgeableUploadRecords.length} 项`}
+          {bulkMode && (selectedPurgeableUploadRecords.length > 0 || batchUploadRecordBusy) && (
+            <button className="management-action" type="button" disabled={batchUploadRecordBusy} onClick={() => openUploadRecordManage(combinedUploadRecordTarget(selectedPurgeableUploadRecords))}>
+              <Archive size={15} />{batchArchiving ? `正在归档 ${batchArchiveCount} 项...` : batchRestoring ? `正在取消归档 ${batchRestoreCount} 项...` : batchPurging ? `正在彻底删除 ${batchPurgeCount} 项...` : `归档管理 ${selectedPurgeableUploadRecords.length} 项`}
             </button>
           )}
           {bulkMode && <BulkSelectAllButton active={allVisibleUploadRecordsSelected} disabled={batchUploadRecordBusy || !selectableUploadRecordIds.length} helpText="拖动框选 · Shift 连选" onClick={() => toggleVisibleUploadRecordSelection(!allVisibleUploadRecordsSelected)}><Check size={15} /> 全选本页</BulkSelectAllButton>}
@@ -5421,9 +5376,7 @@ function ImportTaskWorkbench({
                   <div className="import-record-actions" onClick={(event) => event.stopPropagation()}>
                     {deleting
                       ? <button className="management-action compact-control" type="button" disabled><Loader2 className="spin" size={14} />等待清理</button>
-                      : <>{hasArchivedRows && <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === group.id} onClick={() => void restoreUploadRecord(manageTarget)}><RefreshCw size={14} />取消归档</button>}
-                        {!archived && <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === group.id} onClick={() => openUploadRecordManage(manageTarget)}><Archive size={14} />归档</button>}
-                        {archived && <button className="management-action is-danger compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === group.id} onClick={() => openUploadRecordManage(manageTarget)}><Trash2 size={14} />删除</button>}</>}
+                      : <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === group.id} onClick={() => openUploadRecordManage(manageTarget)}><Archive size={14} />{hasArchivedRows ? '归档管理' : '归档'}</button>}
                   </div>
                   <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起上传任务' : '展开上传任务'} onClick={(event) => {
                     event.stopPropagation()
@@ -5514,9 +5467,7 @@ function ImportTaskWorkbench({
                   </button>}
                   {deleting
                     ? <button className="management-action compact-control" type="button" disabled><Loader2 className="spin" size={14} />等待清理</button>
-                    : <>{hasArchivedRows && <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === job.id} onClick={() => void restoreUploadRecord(manageTarget)}><RefreshCw size={14} />取消归档</button>}
-                      {!archived && <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === job.id} onClick={() => openUploadRecordManage(manageTarget)}><Archive size={14} />归档</button>}
-                      {archived && <button className="management-action is-danger compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === job.id} onClick={() => openUploadRecordManage(manageTarget)}><Trash2 size={14} />删除</button>}</>}
+                    : <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === job.id} onClick={() => openUploadRecordManage(manageTarget)}><Archive size={14} />{hasArchivedRows ? '归档管理' : '归档'}</button>}
                 </div>
                 <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起上传任务' : '展开上传任务'} onClick={(event) => {
                   event.stopPropagation()
@@ -5558,17 +5509,13 @@ function ImportTaskWorkbench({
         />
       </div>
       {manageRecord && <ArchiveManageDialog
-        title={manageRecord.archived || manageRecord.purgeOnly
-          ? manageRecord.displayItems && manageRecord.displayItems.length > 1
-            ? `彻底删除 ${manageRecord.displayItems.length} 条上传记录`
-            : '彻底删除上传记录'
-          : manageRecord.displayItems && manageRecord.displayItems.length > 1
-            ? `归档 ${manageRecord.displayItems.length} 条上传记录`
-            : '归档上传记录'}
+        title={manageRecord.displayItems && manageRecord.displayItems.length > 1
+          ? `归档管理 ${manageRecord.displayItems.length} 条上传记录`
+          : uploadRecordHasArchivedRows(manageRecord) ? '归档管理上传记录' : '归档上传记录'}
         items={manageRecord.displayItems ?? [{ id: manageRecord.id, name: manageRecord.title }]}
         description={(purge) => purge
           ? '彻底删除会移除上传记录和未入库临时文件，操作不可恢复；已经入库的服装与正式媒体仍会保留。'
-          : '确认后会归档并从日常列表移除，可通过“查看已归档”找回；不会中断任务，也不会影响已入库服装。'}
+          : '可在此归档日常记录、取消已有归档，或选择彻底删除；归档不会中断任务，也不会影响已入库服装。'}
         warning={manageRecord.rows.some((row) => isImportTaskRunning(row.status))
           ? '该任务仍在进行。归档不会中断上传；彻底删除会立即阻止继续确认和入库，并在上传地址失效后清理临时文件。'
           : undefined}
@@ -5577,11 +5524,15 @@ function ImportTaskWorkbench({
         impactError={manageImpactError ? '删除影响预检失败，暂时不能彻底删除。' : undefined}
         onRetryImpact={() => openUploadRecordManage(manageRecord)}
         purgeReady={!!manageImpact}
-        archiveAvailable={!manageRecord.archived && !manageRecord.purgeOnly}
-        initialPurge={!!manageRecord.archived || !!manageRecord.purgeOnly}
+        actions={([
+          selectedActionOption('archive', '归档', manageRecord.actionItems?.filter((item) => item.archivable).length ?? (uploadRecordHasActiveRows(manageRecord) ? 1 : 0)),
+          selectedActionOption('restore', '取消归档', manageRecord.actionItems?.filter((item) => item.restorable).length ?? (uploadRecordHasArchivedRows(manageRecord) ? 1 : 0)),
+          selectedActionOption('purge', '彻底删除', manageRecord.displayItems?.length ?? 1),
+        ].filter(Boolean) as ArchiveManageOption[])}
+        initialAction={uploadRecordHasActiveRows(manageRecord) ? 'archive' : 'restore'}
         expectedText={(manageImpact?.uploadSessionCount ?? uploadRecordSessionCount(manageRecord.rows)) <= 1 && (manageRecord.displayItems?.length ?? 1) <= 1 ? manageRecord.title : '全部删除'}
         onClose={closeUploadRecordManage}
-        onConfirm={(purge, confirmText) => purge ? purgeUploadRecord(manageRecord, confirmText) : archiveUploadRecord(manageRecord)}
+        onConfirmAction={(action, confirmText) => action === 'purge' ? purgeUploadRecord(manageRecord, confirmText) : action === 'restore' ? restoreUploadRecord(manageRecord) : archiveUploadRecord(manageRecord)}
         onError={(error) => window.alert(error instanceof ApiError
           ? friendlyErrorText(error.errorCode, error.errorMessage || error.message)
           : error instanceof Error
@@ -6172,7 +6123,6 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   const [selectedRecordIds, setSelectedRecordIds] = useState<Set<number>>(() => new Set())
   const [selectedRecordCache, setSelectedRecordCache] = useState<Record<number, GenerationTask>>({})
   const [deleteRecordDialog, setDeleteRecordDialog] = useState<GenerationTask[] | null>(null)
-  const [deleteRecordPurgeOnly, setDeleteRecordPurgeOnly] = useState(false)
   const [deleteRecordImpact, setDeleteRecordImpact] = useState<DeleteImpact | null>(null)
   const [deleteRecordImpactLoading, setDeleteRecordImpactLoading] = useState(false)
   const [deleteRecordImpactError, setDeleteRecordImpactError] = useState(false)
@@ -6208,8 +6158,6 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   const selectedVisibleRecords = Array.from(selectedRecordIds)
     .map((id) => selectedRecordCache[id])
     .filter((item): item is GenerationTask => !!item && item.archiveReason !== 'deletion_pending')
-  const selectedRestorableRecords = selectedVisibleRecords.filter((item) => item.archivedAt)
-  const selectedArchivableRecords = selectedVisibleRecords.filter((item) => !item.archivedAt && !isTaskRunning(item))
   const selectedPurgeableRecords = selectedVisibleRecords.filter((item) => !isTaskRunning(item))
   const selectedRunningRecords = selectedVisibleRecords.filter((item) => !item.archivedAt && isTaskRunning(item))
   const allVisibleBatchesResolved = batchListItems.every((batch) => expandedBatchTasks[batch.batchId] !== undefined)
@@ -6604,16 +6552,10 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     openRecordDeleteDialogForItems([item])
   }
 
-  function runRecordBatchAction() {
-    if (!selectedArchivableRecords.length) return
-    openRecordDeleteDialogForItems(selectedArchivableRecords)
-  }
-
-  function openRecordDeleteDialogForItems(targets: GenerationTask[], purgeOnly = false) {
+  function openRecordDeleteDialogForItems(targets: GenerationTask[]) {
     if (recordArchiveMutationRef.current) return
     const ids = targets.map((item) => item.id)
     setDeleteRecordDialog(targets)
-    setDeleteRecordPurgeOnly(purgeOnly)
     setDeleteRecordImpact(null)
     setDeleteRecordImpactError(false)
     const requestId = ++deleteRecordImpactRequestRef.current
@@ -6635,14 +6577,16 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   function closeRecordDeleteDialog() {
     deleteRecordImpactRequestRef.current += 1
     setDeleteRecordDialog(null)
-    setDeleteRecordPurgeOnly(false)
   }
 
-  async function confirmRecordDelete(items: DeleteDialogTarget[], purge: boolean, confirmText: string) {
+  async function confirmRecordManage(items: DeleteDialogTarget[], manageAction: ArchiveManageAction, confirmText: string) {
     if (recordArchiveMutationRef.current) throw new Error('归档管理操作正在进行，请稍候。')
     recordArchiveMutationRef.current = true
     setRecordArchiveMutationBusy(true)
-    const ids = items.map((item) => item.id)
+    const sourceItems = deleteRecordDialog ?? []
+    const targets = sourceItems.filter((item) => manageAction === 'archive' ? !item.archivedAt : manageAction === 'restore' ? !!item.archivedAt : true)
+    const ids = targets.map((item) => item.id)
+    const purge = manageAction === 'purge'
     let completedChunks = 0
     const completedIds: number[] = []
     let completedResult: DeleteOperationResult = { ok: true, archived: !purge, purged: purge, ids: [] }
@@ -6657,6 +6601,14 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
       return completedResult
     }
     const action = async () => {
+      if (manageAction === 'restore') {
+        for (const chunk of generationTaskMutationChunks(ids)) {
+          const result = await api.restoreTasks(chunk)
+          completedChunks += 1
+          completedIds.push(...result.ids)
+        }
+        return completedResult
+      }
       if (purge && ids.length === 1) {
         const result = await api.deleteTask(ids[0], confirmText)
         completedChunks = 1
@@ -6672,65 +6624,37 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
       return completedResult
     }
     try {
-      await run(purge ? '彻底删除记录中...' : '归档记录中...', action, (result: DeleteOperationResult) => {
-        onDeleteResult(result)
-        clearRecordDetailIfAffected(ids)
+      await run(purge ? '彻底删除记录中...' : manageAction === 'restore' ? '取消归档生成记录中...' : '归档记录中...', action, (result: DeleteOperationResult) => {
+        if (manageAction !== 'restore') onDeleteResult(result)
+        if (manageAction === 'restore') setDetail((current) => current && ids.includes(current.id) ? { ...current, archivedAt: null, archiveReason: null } : current)
+        else clearRecordDetailIfAffected(ids)
         clearRecordSelection()
         setSelectedRecordCache({})
-        refreshAffectedBatchViews(items)
+        refreshAffectedBatchViews(targets)
         void refreshRecordPage().catch(() => undefined)
       }, { refresh: 'background' })
       closeRecordDeleteDialog()
     } catch (error) {
       if (completedChunks > 0) {
-        onDeleteResult(completedResult)
-        clearRecordDetailIfAffected(completedIds)
+        if (manageAction === 'restore') {
+          setDetail((current) => current && completedIds.includes(current.id)
+            ? { ...current, archivedAt: null, archiveReason: null }
+            : current)
+        } else {
+          onDeleteResult(completedResult)
+          clearRecordDetailIfAffected(completedIds)
+        }
         clearRecordSelection()
         setSelectedRecordCache({})
-        refreshAffectedBatchViews(items)
+        refreshAffectedBatchViews(targets)
         await refreshRecordPage().catch(() => undefined)
         closeRecordDeleteDialog()
-        setBatchBulkError(`部分生成记录已完成${purge ? '彻底删除' : '归档'}，其余记录处理失败。列表已刷新，请重新选择剩余记录后重试。`)
+        setBatchBulkError(`部分生成记录已完成${purge ? '彻底删除' : manageAction === 'restore' ? '取消归档' : '归档'}，其余记录处理失败。列表已刷新，请重新选择剩余记录后重试。`)
         return
       }
-      refreshAffectedBatchViews(items)
+      refreshAffectedBatchViews(targets)
       await refreshRecordPage().catch(() => undefined)
       throw error
-    } finally {
-      recordArchiveMutationRef.current = false
-      setRecordArchiveMutationBusy(false)
-    }
-  }
-
-  async function restoreRecords(targets: GenerationTask[]) {
-    if (recordArchiveMutationRef.current) return
-    recordArchiveMutationRef.current = true
-    setRecordArchiveMutationBusy(true)
-    const ids = targets.map((item) => item.id)
-    const action = async () => {
-      try {
-        let result: { ok: boolean; restored: boolean; ids: number[] } = { ok: true, restored: true, ids: [] }
-        for (let index = 0; index < ids.length; index += GENERATION_TASK_MUTATION_BATCH_SIZE) {
-          result = await api.restoreTasks(ids.slice(index, index + GENERATION_TASK_MUTATION_BATCH_SIZE))
-        }
-        return result
-      } catch (error) {
-        clearRecordSelection()
-        setSelectedRecordCache({})
-        refreshAffectedBatchViews(targets)
-        await refreshRecordPage().catch(() => undefined)
-        throw error
-      }
-    }
-    try {
-      await run(ids.length === 1 ? '取消归档生成记录中...' : `取消归档 ${ids.length} 条生成记录中...`, action, () => {
-        setDetail((current) => current && ids.includes(current.id) ? { ...current, archivedAt: null, archiveReason: null } : current)
-        clearRecordSelection()
-        refreshAffectedBatchViews(targets)
-        void refreshRecordPage().catch(() => undefined)
-      }, { refresh: 'background' })
-    } catch {
-      await refreshRecordPage().catch(() => undefined)
     } finally {
       recordArchiveMutationRef.current = false
       setRecordArchiveMutationBusy(false)
@@ -6898,10 +6822,8 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
                   <Download size={14} /> {downloadChecking ? '检查成片中...' : `下载成片 ${selectedVisibleRecords.length} 项`}
                 </button>
               )}
-              {!batchBulkLoading && selectedArchivableRecords.length > 0 && <button className="management-action" disabled={recordArchiveMutationBusy} onClick={runRecordBatchAction}>归档 {selectedArchivableRecords.length} 项</button>}
-              {!batchBulkLoading && selectedRestorableRecords.length > 0 && <button className="management-action" disabled={recordArchiveMutationBusy} onClick={() => void restoreRecords(selectedRestorableRecords)}>{recordArchiveMutationBusy ? '取消归档中...' : `取消归档 ${selectedRestorableRecords.length} 项`}</button>}
-              {!batchBulkLoading && selectedPurgeableRecords.length > 0 && <button className="management-action is-danger" disabled={recordArchiveMutationBusy} onClick={() => openRecordDeleteDialogForItems(selectedPurgeableRecords, true)}><Trash2 size={14} />彻底删除 {selectedPurgeableRecords.length} 项</button>}
-              {bulkMode && !batchBulkLoading && selectedRunningRecords.length > 0 && <span className="bulk-selection-hint">{selectedRunningRecords.length} 项生成中，暂不可归档或彻底删除</span>}
+              {!batchBulkLoading && selectedPurgeableRecords.length > 0 && <button className="management-action" disabled={recordArchiveMutationBusy} onClick={() => openRecordDeleteDialogForItems(selectedPurgeableRecords)}><Archive size={14} />归档管理 {selectedPurgeableRecords.length} 项</button>}
+              {bulkMode && !batchBulkLoading && selectedRunningRecords.length > 0 && <span className="bulk-selection-hint">{selectedRunningRecords.length} 项生成中，暂不可归档管理</span>}
               {bulkMode && <BulkSelectAllButton
                 active={allVisibleRecordsSelected}
                 disabled={batchBulkLoading || !hasSelectableRecordRows}
@@ -6943,8 +6865,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
                     onToggle={toggleBatchExpansion}
                     onOpenTask={openRecord}
                     onOpenStudio={openTaskInStudio}
-                    onManageTask={(item) => isTaskRunning(item) ? cancelRecordTask(item) : item.archivedAt ? restoreRecords([item]) : openRecordDeleteDialog(item)}
-                    onPurgeTask={(item) => openRecordDeleteDialogForItems([item], true)}
+                    onManageTask={(item) => isTaskRunning(item) ? cancelRecordTask(item) : openRecordDeleteDialog(item)}
                     archiveMutationBusy={recordArchiveMutationBusy}
                     activeTaskId={detail?.id ?? null}
                   />
@@ -6961,8 +6882,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
                 onSelect={toggleRecordSelection}
                 onOpen={openRecord}
                 onOpenStudio={openTaskInStudio}
-                onManage={(item) => isTaskRunning(item) ? cancelRecordTask(item) : item.archivedAt ? restoreRecords([item]) : openRecordDeleteDialog(item)}
-                onPurge={(item) => openRecordDeleteDialogForItems([item], true)}
+                onManage={(item) => isTaskRunning(item) ? cancelRecordTask(item) : openRecordDeleteDialog(item)}
                 archiveMutationBusy={recordArchiveMutationBusy}
               />
             ))}
@@ -6989,8 +6909,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
                   onToggle={toggleBatchExpansion}
                   onOpenTask={openRecord}
                   onOpenStudio={openTaskInStudio}
-                  onManageTask={(item) => isTaskRunning(item) ? cancelRecordTask(item) : item.archivedAt ? restoreRecords([item]) : openRecordDeleteDialog(item)}
-                  onPurgeTask={(item) => openRecordDeleteDialogForItems([item], true)}
+                  onManageTask={(item) => isTaskRunning(item) ? cancelRecordTask(item) : openRecordDeleteDialog(item)}
                   archiveMutationBusy={recordArchiveMutationBusy}
                   activeTaskId={detail?.id ?? null}
                 />
@@ -7007,8 +6926,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
                 onSelect={toggleRecordSelection}
                 onOpen={openRecord}
                 onOpenStudio={openTaskInStudio}
-                onManage={(item) => isTaskRunning(item) ? cancelRecordTask(item) : item.archivedAt ? restoreRecords([item]) : openRecordDeleteDialog(item)}
-                onPurge={(item) => openRecordDeleteDialogForItems([item], true)}
+                onManage={(item) => isTaskRunning(item) ? cancelRecordTask(item) : openRecordDeleteDialog(item)}
                 archiveMutationBusy={recordArchiveMutationBusy}
               />
             ))}
@@ -7045,8 +6963,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
               <button className="management-action" type="button" disabled={downloadChecking} onClick={() => startSingleRecordDownload(detail)}>
                 <Download size={14} /> {downloadChecking ? '检查成片中...' : '下载成片'}
               </button>
-              {detail.archivedAt && <button className="management-action" disabled={recordArchiveMutationBusy || detail.archiveReason === 'deletion_pending'} onClick={() => void restoreRecords([detail])}>{recordArchiveMutationBusy ? '取消归档中...' : archivedRestoreText(detail.archiveReason)}</button>}
-              {detail.archivedAt && <button className="management-action is-danger" disabled={recordArchiveMutationBusy || detail.archiveReason === 'deletion_pending'} onClick={() => openRecordDeleteDialogForItems([detail], true)}>彻底删除</button>}
+              <button className="management-action" disabled={recordArchiveMutationBusy || isTaskRunning(detail) || detail.archiveReason === 'deletion_pending'} onClick={() => openRecordDeleteDialogForItems([detail])}>{detail.archivedAt ? '归档管理' : '归档'}</button>
             </>
           ) : <EmptyState title="选择一条记录" text="查看分镜预览、搭配服装和最终成片。" />}
         </div>
@@ -7054,21 +6971,25 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
       {batchBulkError && <div className="inline-error" role="alert">{batchBulkError}</div>}
       {deleteRecordDialog && (
         <DeleteConfirmDialog
-          title={deleteRecordPurgeOnly
-            ? deleteRecordDialog.length === 1 ? '彻底删除生成记录' : `彻底删除 ${deleteRecordDialog.length} 条生成记录`
-            : deleteRecordDialog.length === 1 ? '归档记录' : `归档 ${deleteRecordDialog.length} 条记录`}
+          title={deleteRecordDialog.length === 1
+            ? deleteRecordDialog[0].archivedAt ? '归档管理生成记录' : '归档记录'
+            : `归档管理 ${deleteRecordDialog.length} 条生成记录`}
           items={deleteRecordDialog}
           onClose={closeRecordDeleteDialog}
-          onConfirm={confirmRecordDelete}
+          onConfirmAction={confirmRecordManage}
+          actions={([
+            selectedActionOption('archive', '归档', deleteRecordDialog.filter((item) => !item.archivedAt).length),
+            selectedActionOption('restore', '取消归档', deleteRecordDialog.filter((item) => !!item.archivedAt).length),
+            selectedActionOption('purge', '彻底删除', deleteRecordDialog.length),
+          ].filter(Boolean) as ArchiveManageOption[])}
+          initialAction={deleteRecordDialog.some((item) => !item.archivedAt) ? 'archive' : 'restore'}
           impact={deleteRecordImpact}
           impactLoading={deleteRecordImpactLoading}
           impactError={deleteRecordImpactError}
-          onRetryImpact={() => openRecordDeleteDialogForItems(deleteRecordDialog, deleteRecordPurgeOnly)}
-          archiveAvailable={!deleteRecordPurgeOnly}
-          initialPurge={deleteRecordPurgeOnly}
+          onRetryImpact={() => openRecordDeleteDialogForItems(deleteRecordDialog)}
           description={(purge) => purge
             ? '彻底删除会移除生成记录、过程数据和关联文件，操作不可恢复。'
-            : '确认后会归档并从日常列表移除，可通过“查看已归档”找回。'}
+            : '可在此归档日常记录、取消已有归档，或选择彻底删除。'}
         />
       )}
       {downloadPrecheck && (
@@ -7082,7 +7003,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   )
 }
 
-function TaskRecordRow({ item, active, bulkMode, selected, selectionDisabled = false, archiveMutationBusy = false, onSelect, onOpen, onOpenStudio, onManage, onPurge }: {
+function TaskRecordRow({ item, active, bulkMode, selected, selectionDisabled = false, archiveMutationBusy = false, onSelect, onOpen, onOpenStudio, onManage }: {
   item: GenerationTask
   active: boolean
   bulkMode: boolean
@@ -7093,7 +7014,6 @@ function TaskRecordRow({ item, active, bulkMode, selected, selectionDisabled = f
   onOpen: (item: GenerationTask) => void
   onOpenStudio: (task: GenerationTask) => void
   onManage: (item: GenerationTask) => void
-  onPurge: (item: GenerationTask) => void
 }) {
   return (
     <div
@@ -7111,14 +7031,13 @@ function TaskRecordRow({ item, active, bulkMode, selected, selectionDisabled = f
         <TaskResumeActionContent task={item} />
       </button>
       <button className="management-action record-action-button" disabled={(archiveMutationBusy && !isTaskRunning(item)) || item.archiveReason === 'deletion_pending'} onClick={() => onManage(item)}>
-        {archiveMutationBusy && item.archivedAt ? '取消归档中...' : isTaskRunning(item) ? '取消生成' : item.archivedAt ? archivedRestoreText(item.archiveReason) : '归档'}
+        {isTaskRunning(item) ? '取消生成' : item.archivedAt ? '归档管理' : '归档'}
       </button>
-      {item.archivedAt && <button className="management-action is-danger record-action-button record-purge-button" disabled={archiveMutationBusy || item.archiveReason === 'deletion_pending'} onClick={() => onPurge(item)}>删除</button>}
     </div>
   )
 }
 
-function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, bulkMode = false, selected = false, indeterminate = false, selectable = true, interactionDisabled = false, archiveMutationBusy = false, selectedTaskIds, selectedTargetKeys, onSelect, onTaskSelect, onOpen, onToggle, onOpenTask, onOpenStudio, onManageTask, onPurgeTask }: {
+function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, bulkMode = false, selected = false, indeterminate = false, selectable = true, interactionDisabled = false, archiveMutationBusy = false, selectedTaskIds, selectedTargetKeys, onSelect, onTaskSelect, onOpen, onToggle, onOpenTask, onOpenStudio, onManageTask }: {
   item: GenerationRecordBatch
   active: boolean
   expanded: boolean
@@ -7140,7 +7059,6 @@ function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, 
   onOpenTask: (item: GenerationTask) => void
   onOpenStudio: (task: GenerationTask) => void
   onManageTask: (item: GenerationTask) => void
-  onPurgeTask: (item: GenerationTask) => void
 }) {
   const panelId = `batch-record-${item.batchId}-tasks`
   return (
@@ -7190,7 +7108,6 @@ function BatchRecordRow({ item, active, expanded, tasks, loading, activeTaskId, 
                 onOpen={onOpenTask}
                 onOpenStudio={onOpenStudio}
                 onManage={onManageTask}
-                onPurge={onPurgeTask}
                 archiveMutationBusy={archiveMutationBusy}
               />
             </div>
@@ -7361,11 +7278,14 @@ function FinalImageDownloadDialog({ precheck, onClose, onDownload }: {
   )
 }
 
-function DeleteConfirmDialog({ title, items, onClose, onConfirm, impact = null, impactLoading = false, impactError = false, onRetryImpact, allowPurge = true, archiveAvailable = true, initialPurge = false, description }: {
+function DeleteConfirmDialog({ title, items, onClose, onConfirm, onConfirmAction, actions, initialAction, impact = null, impactLoading = false, impactError = false, onRetryImpact, allowPurge = true, archiveAvailable = true, initialPurge = false, description }: {
   title: string
   items: DeleteDialogTarget[]
   onClose: () => void
-  onConfirm: (items: DeleteDialogTarget[], purge: boolean, confirmText: string) => void | Promise<void>
+  onConfirm?: (items: DeleteDialogTarget[], purge: boolean, confirmText: string) => void | Promise<void>
+  onConfirmAction?: (items: DeleteDialogTarget[], action: ArchiveManageAction, confirmText: string) => void | Promise<void>
+  actions?: ArchiveManageOption[]
+  initialAction?: ArchiveManageAction
   impact?: DeleteImpact | null
   impactLoading?: boolean
   impactError?: boolean
@@ -7390,11 +7310,18 @@ function DeleteConfirmDialog({ title, items, onClose, onConfirm, impact = null, 
       allowPurge={allowPurge}
       archiveAvailable={archiveAvailable}
       initialPurge={initialPurge}
+      actions={actions}
+      initialAction={initialAction}
       unavailablePurgeText={`一次最多彻底删除 ${GENERATION_TASK_MUTATION_BATCH_SIZE} 条记录；当前可先归档，再缩小选择范围后删除。`}
       onClose={onClose}
-      onConfirm={(purge, confirmText) => onConfirm(items, purge, confirmText)}
+      onConfirm={(purge, confirmText) => onConfirm?.(items, purge, confirmText)}
+      onConfirmAction={(action, confirmText) => onConfirmAction?.(items, action, confirmText)}
     />
   )
+}
+
+function selectedActionOption(value: ArchiveManageAction, label: string, count: number): ArchiveManageOption | null {
+  return count > 0 ? { value, label: `${label} ${count} 项` } : null
 }
 
 function PaginationControls({ offset, pageSize, pageSizeOptions = defaultPageSizeOptions, pageSizeOptionKey, pageSizeUnit = '行', total, totalPages, selectionStatus, disabled, compact = false, onOffsetChange, onPageSizeChange }: {
@@ -7546,15 +7473,13 @@ function UploadBox({ files, setFiles, max, compact = false }: { files: File[]; s
   )
 }
 
-function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownload, onDelete, onRestore, onPurge, selected, onSelect, selectionDisabled = false, archiveMutationBusy = false }: {
+function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownload, onManage, selected, onSelect, selectionDisabled = false, archiveMutationBusy = false }: {
   item: StylingGarment
   onTag?: () => void
   tagLabel?: string
   onOpen?: () => void
   onDownload?: () => void
-  onDelete?: () => void
-  onRestore?: () => void
-  onPurge?: () => void
+  onManage?: () => void
   selected?: boolean
   onSelect?: (checked: boolean, extend: boolean) => void
   selectionDisabled?: boolean
@@ -7574,7 +7499,7 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
   const cardBrief = tagging ? '正在识别服装信息；服务繁忙时系统会自动恢复，可以离开当前页面。' : failed ? '识别未完成，可重新识别。' : brief || '待识别搭配信息'
   const failureHint = taggingIssue ? `${taggingIssue.title}：${taggingIssue.description}` : undefined
   const statusLabel = taggingIssue?.badge ?? garmentStatus(item.status)
-  const actionCount = [onOpen, ...(item.archivedAt ? [onRestore, onPurge] : [onDelete]), onDownload, onTag].filter(Boolean).length
+  const actionCount = [onOpen, onManage, onDownload, onTag].filter(Boolean).length
   return (
     <div
       className={`garment-card ${selected ? 'is-selected' : ''} ${tagging ? 'is-tagging' : ''} ${failed ? 'is-failed' : ''} ${item.archivedAt ? 'is-archived' : ''}`}
@@ -7602,9 +7527,7 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
       </div>
       <div className="card-actions" data-action-count={actionCount}>
         {onOpen && <button className="management-action" onClick={onOpen}><Eye size={16} /> 详情</button>}
-        {item.archivedAt
-          ? <>{onRestore && <button className="management-action" disabled={archiveMutationBusy || tagging || item.archiveReason === 'deletion_pending'} onClick={onRestore}><RefreshCw size={16} /> {archiveMutationBusy ? '取消归档中...' : archivedRestoreText(item.archiveReason)}</button>}{onPurge && <button className="management-action is-danger" disabled={archiveMutationBusy || tagging || item.archiveReason === 'deletion_pending'} onClick={onPurge}><Trash2 size={16} /> 删除</button>}</>
-          : onDelete && <button className="management-action" disabled={archiveMutationBusy || tagging} onClick={onDelete}><Archive size={16} /> 归档</button>}
+        {onManage && <button className="management-action" disabled={archiveMutationBusy || tagging || item.archiveReason === 'deletion_pending'} onClick={onManage}><Archive size={16} /> {item.archivedAt ? '归档管理' : '归档'}</button>}
         {onDownload && <button className="management-action" disabled={Number(item.imageCount ?? 0) < 1} onClick={onDownload}><Download size={16} /> 下载</button>}
         {onTag && <button className="management-action" disabled={tagging} onClick={onTag}><RotateCcw size={16} /> {tagLabel}</button>}
       </div>
@@ -7612,16 +7535,14 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
   )
 }
 
-function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose, onChange, onDelete, onRestore, onPurge }: {
+function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose, onChange, onManage }: {
   item: StylingGarment
   run: any
   isAdmin: boolean
   archiveMutationBusy: boolean
   onClose: () => void
   onChange: (item: StylingGarment) => void
-  onDelete: () => void
-  onRestore: () => void
-  onPurge: () => void
+  onManage: () => void
 }) {
   const [working, setWorking] = useState(item.images ?? [])
   const [replacementFiles, setReplacementFiles] = useState<Record<number, File>>({})
@@ -7655,7 +7576,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !viewer) onClose()
+      if (event.key === 'Escape' && !viewer && !document.querySelector('[role="dialog"][aria-modal="true"]')) onClose()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
@@ -7799,18 +7720,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
         </div>
         <div className="danger-zone">
           <strong>{item.archivedAt ? '归档管理' : '归档'}</strong>
-          <button className="management-action" disabled={archiveMutationBusy || tagging || item.archiveReason === 'deletion_pending'} onClick={() => {
-            if (item.archivedAt) {
-              onRestore()
-            } else {
-              onDelete()
-              onClose()
-            }
-          }}>{item.archivedAt ? archiveMutationBusy ? '取消归档中...' : archivedRestoreText(item.archiveReason) : '归档'}</button>
-          {item.archivedAt && <button className="management-action is-danger" disabled={archiveMutationBusy || tagging || item.archiveReason === 'deletion_pending'} onClick={() => {
-            onPurge()
-            onClose()
-          }}>彻底删除</button>}
+          <button className="management-action" disabled={archiveMutationBusy || tagging || item.archiveReason === 'deletion_pending'} onClick={onManage}>{item.archivedAt ? '归档管理' : '归档'}</button>
         </div>
       </aside>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
@@ -9048,11 +8958,6 @@ function archiveStateText(reason?: string | null) {
   if (reason === 'deletion_pending') return '删除中'
   if (reason === 'deletion_failed') return '删除失败'
   return '已归档'
-}
-
-function archivedRestoreText(reason?: string | null) {
-  if (reason === 'deletion_failed') return '取消归档后重试'
-  return '取消归档'
 }
 
 function recordStatusText(status: string) {

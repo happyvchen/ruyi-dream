@@ -8,6 +8,13 @@ export type ArchiveDialogItem = {
   name: string
 }
 
+export type ArchiveManageAction = 'archive' | 'restore' | 'purge'
+
+export type ArchiveManageOption = {
+  value: ArchiveManageAction
+  label: string
+}
+
 export type ArchiveManageDialogProps = {
   title: string
   items: ArchiveDialogItem[]
@@ -21,10 +28,13 @@ export type ArchiveManageDialogProps = {
   allowPurge?: boolean
   archiveAvailable?: boolean
   initialPurge?: boolean
+  actions?: ArchiveManageOption[]
+  initialAction?: ArchiveManageAction
   unavailablePurgeText?: ReactNode
   expectedText?: string
   onClose: () => void
-  onConfirm: (purge: boolean, confirmText: string) => void | Promise<void>
+  onConfirm?: (purge: boolean, confirmText: string) => void | Promise<void>
+  onConfirmAction?: (action: ArchiveManageAction, confirmText: string) => void | Promise<void>
   onError?: (error: unknown) => void
 }
 
@@ -41,13 +51,18 @@ export function ArchiveManageDialog({
   allowPurge = true,
   archiveAvailable = true,
   initialPurge = false,
+  actions,
+  initialAction,
   unavailablePurgeText,
   expectedText = items.length === 1 ? items[0]?.name ?? '' : '全部删除',
   onClose,
   onConfirm,
+  onConfirmAction,
   onError,
 }: ArchiveManageDialogProps) {
-  const [purge, setPurge] = useState(initialPurge || !archiveAvailable)
+  const defaultAction = initialAction ?? (initialPurge || !archiveAvailable ? 'purge' : 'archive')
+  const [action, setAction] = useState<ArchiveManageAction>(defaultAction)
+  const purge = action === 'purge'
   const [confirmText, setConfirmText] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const confirmInputRef = useRef<HTMLInputElement | null>(null)
@@ -55,7 +70,8 @@ export function ArchiveManageDialog({
   const returnFocusRef = useRef<HTMLElement | null>(null)
   const itemResetKey = JSON.stringify(items.map((item) => [item.id, item.name]))
   const canConfirm = !submitting
-    && (archiveAvailable || purge)
+    && (actions?.length ? !!onConfirmAction : !!onConfirm)
+    && (actions?.length ? actions.some((option) => option.value === action) : archiveAvailable || purge)
     && (!purge || (allowPurge && purgeReady && !impactLoading && !impactError && confirmText === expectedText))
 
   useEffect(() => {
@@ -64,10 +80,10 @@ export function ArchiveManageDialog({
   }, [])
 
   useEffect(() => {
-    setPurge(initialPurge || !archiveAvailable)
+    setAction(initialAction ?? (initialPurge || !archiveAvailable ? 'purge' : 'archive'))
     setConfirmText('')
     setSubmitting(false)
-  }, [archiveAvailable, initialPurge, itemResetKey])
+  }, [archiveAvailable, initialAction, initialPurge, itemResetKey])
 
   useEffect(() => {
     if (purge) confirmInputRef.current?.focus()
@@ -108,7 +124,8 @@ export function ArchiveManageDialog({
     if (!canConfirm) return
     setSubmitting(true)
     try {
-      await onConfirm(purge, confirmText)
+      if (actions && onConfirmAction) await onConfirmAction(action, confirmText)
+      else if (onConfirm) await onConfirm(purge, confirmText)
     } catch (error) {
       setSubmitting(false)
       onError?.(error)
@@ -128,10 +145,29 @@ export function ArchiveManageDialog({
           {items.slice(0, 4).map((item) => <span key={item.id}>{item.name}</span>)}
           {items.length > 4 && <span>另 {items.length - 4} 项</span>}
         </div>
-        {archiveAvailable && (
+        {actions?.length ? (
+          <fieldset className="archive-action-options" disabled={submitting}>
+            <legend>选择操作</legend>
+            {actions.map((option) => (
+              <label key={option.value} className={option.value === 'purge' ? 'is-danger' : ''}>
+                <input
+                  type="radio"
+                  name="archive-action"
+                  value={option.value}
+                  checked={action === option.value}
+                  onChange={() => {
+                    setAction(option.value)
+                    setConfirmText('')
+                  }}
+                />
+                <span>{option.label}</span>
+              </label>
+            ))}
+          </fieldset>
+        ) : archiveAvailable && (
           <label className={`danger-check ${allowPurge ? '' : 'is-disabled'}`}>
             <input type="checkbox" checked={purge} disabled={!allowPurge || submitting} onChange={(event) => {
-              setPurge(event.target.checked)
+              setAction(event.target.checked ? 'purge' : 'archive')
               setConfirmText('')
             }} />
             同时彻底删除关联记录和文件
@@ -156,7 +192,7 @@ export function ArchiveManageDialog({
         <div className="confirm-actions">
           <button type="button" className="management-action" disabled={submitting} onClick={onClose}>取消</button>
           <button className={purge ? 'danger-action' : 'management-action'} disabled={!canConfirm}>
-            {submitting ? '处理中...' : purge ? '彻底删除' : '确认'}
+            {submitting ? '处理中...' : purge ? '彻底删除' : action === 'restore' ? '确认取消归档' : '确认归档'}
           </button>
         </div>
       </form>
