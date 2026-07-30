@@ -2699,6 +2699,35 @@ body.is-marquee-selecting {
   font-weight: 600;
   white-space: nowrap;
 }
+.bulk-select-all-control {
+  position: relative;
+  display: inline-flex;
+}
+.bulk-select-all-tooltip {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% + 8px);
+  right: 0;
+  width: max-content;
+  max-width: min(280px, calc(100vw - 32px));
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: #0f172a;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, .18);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity .18s ease, transform .18s ease;
+}
+.bulk-select-all-control:hover .bulk-select-all-tooltip,
+.bulk-select-all-control:focus-within .bulk-select-all-tooltip {
+  opacity: 1;
+  transform: translateY(0);
+}
 .compact-control { height: 32px; padding: 0 10px; font-size: 12px; }
 .garment-cover {
   position: relative;
@@ -3265,6 +3294,18 @@ body.is-marquee-selecting {
 }
 .pagination-meta {
   justify-content: flex-end;
+}
+.pagination-bar .pagination-selection-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 3px 9px;
+  border: 1px solid rgba(15, 124, 255, .22);
+  border-radius: 999px;
+  background: #f0f7ff;
+  color: #075ea8;
+  font-weight: 700;
+  white-space: nowrap;
 }
 .pagination-bar span,
 .pagination-bar label {
@@ -4755,6 +4796,10 @@ body.is-marquee-selecting {
 }
 
 @container (max-width: 680px) {
+  .bulk-select-all-tooltip {
+    right: auto;
+    left: 0;
+  }
   .library-commandbar,
   .record-list-head {
     grid-template-columns: 1fr;

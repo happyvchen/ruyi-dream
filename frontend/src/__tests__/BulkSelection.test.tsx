@@ -3,7 +3,7 @@ import '@testing-library/jest-dom/vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useState } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
-import { MarqueeSelectionBox, useMarqueeSelection } from '../components/BulkSelection'
+import { BulkSelectAllButton, MarqueeSelectionBox, useMarqueeSelection } from '../components/BulkSelection'
 
 afterEach(cleanup)
 
@@ -32,6 +32,26 @@ function setSelectionRects() {
 }
 
 describe('shared bulk marquee selection', () => {
+  it('keeps select-all help keyboard-accessible when the button is disabled', () => {
+    const { rerender } = render(
+      <BulkSelectAllButton active={false} disabled helpText="拖动框选 · Shift 连选" onClick={() => undefined}>全选本页</BulkSelectAllButton>,
+    )
+    const disabledButton = screen.getByRole('button', { name: '全选本页' })
+    const disabledTrigger = disabledButton.parentElement as HTMLElement
+    expect(disabledTrigger).toHaveAttribute('tabindex', '0')
+    expect(disabledTrigger).toHaveAttribute('aria-describedby', disabledButton.getAttribute('aria-describedby'))
+    disabledTrigger.focus()
+    expect(disabledTrigger).toHaveFocus()
+
+    rerender(
+      <BulkSelectAllButton active={false} helpText="拖动框选 · Shift 连选" onClick={() => undefined}>全选本页</BulkSelectAllButton>,
+    )
+    const enabledButton = screen.getByRole('button', { name: '全选本页' })
+    expect(enabledButton.parentElement).not.toHaveAttribute('tabindex')
+    enabledButton.focus()
+    expect(enabledButton).toHaveFocus()
+  })
+
   it('does not commit a deferred marquee when the pointer is cancelled', () => {
     render(<SelectionHarness deferred />)
     const surface = setSelectionRects()

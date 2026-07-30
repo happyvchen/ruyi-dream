@@ -49,7 +49,7 @@ import { friendlyErrorText } from './lib/errorMessages'
 import { CHECKSUM_COMPATIBILITY_NOTICE } from './lib/fileChecksum'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
-import { BulkCheckbox, MarqueeSelectionBox, selectableIdsInDom, updateSelectionWithRange, useMarqueeSelection } from './components/BulkSelection'
+import { BulkCheckbox, BulkSelectAllButton, MarqueeSelectionBox, selectableIdsInDom, updateSelectionWithRange, useMarqueeSelection } from './components/BulkSelection'
 
 type StudioStep = 0 | 1 | 2 | 3
 type FileSystemEntry = {
@@ -2948,8 +2948,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
                 </>
               )}
               {bulkMode && selectedTaggingGarments.length > 0 && <span className="bulk-selection-hint">{selectedTaggingGarments.length} 项识别中，暂不可归档</span>}
-              {bulkMode && <button className={`management-action management-check-action ${allVisibleGarmentsSelected ? 'is-active' : ''}`} disabled={!selectableGarmentIds.length} onClick={() => toggleVisibleGarmentSelection(!allVisibleGarmentsSelected)}><Check size={15} /> 全选本页</button>}
-              {bulkMode && <span className="bulk-selection-hint">拖动框选 · Shift 连选</span>}
+              {bulkMode && <BulkSelectAllButton active={allVisibleGarmentsSelected} disabled={!selectableGarmentIds.length} helpText="拖动框选 · Shift 连选" onClick={() => toggleVisibleGarmentSelection(!allVisibleGarmentsSelected)}><Check size={15} /> 全选本页</BulkSelectAllButton>}
               <button className="management-action compact-control" onClick={() => { setBulkMode((value) => !value); setSelectedGarmentIds(new Set()) }}>{bulkMode ? '退出批量' : '批量管理'}</button>
             </div>
           </div>
@@ -2987,6 +2986,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
               pageSizeUnit="套"
               total={total}
               totalPages={totalPages}
+              selectionStatus={bulkMode ? `已选 ${selectedVisibleGarments.length} 套` : undefined}
               onOffsetChange={setOffset}
               onPageSizeChange={(value) => {
                 setPageSize(value)
@@ -5206,8 +5206,7 @@ function ImportTaskWorkbench({
               <RefreshCw size={15} />{batchRestoring ? `正在取消归档 ${batchRestoreCount} 项...` : `取消归档 ${selectedRestorableUploadRecords.length} 项`}
             </button>
           )}
-          {bulkMode && <button className={`management-action management-check-action ${allVisibleUploadRecordsSelected ? 'is-active' : ''}`} type="button" disabled={batchUploadRecordBusy || !selectableUploadRecordIds.length} onClick={() => toggleVisibleUploadRecordSelection(!allVisibleUploadRecordsSelected)}><Check size={15} /> 全选本页</button>}
-          {bulkMode && <span className="bulk-selection-hint">拖动框选 · Shift 连选</span>}
+          {bulkMode && <BulkSelectAllButton active={allVisibleUploadRecordsSelected} disabled={batchUploadRecordBusy || !selectableUploadRecordIds.length} helpText="拖动框选 · Shift 连选" onClick={() => toggleVisibleUploadRecordSelection(!allVisibleUploadRecordsSelected)}><Check size={15} /> 全选本页</BulkSelectAllButton>}
           <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy} onClick={() => {
             setBulkMode((value) => !value)
             setSelectedUploadRecordIds(new Set())
@@ -5406,6 +5405,7 @@ function ImportTaskWorkbench({
           pageSizeUnit="行"
           total={totalRecords}
           totalPages={totalPages}
+          selectionStatus={bulkMode ? `已选 ${selectedUploadRecords.length} 条` : undefined}
           onOffsetChange={setOffset}
           onPageSizeChange={(value) => {
             setPageSize(value)
@@ -6744,13 +6744,13 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
               )}
               {!batchBulkLoading && selectedArchivableRecords.length > 0 && <button className="management-action" onClick={runRecordBatchAction}>归档 {selectedArchivableRecords.length} 项</button>}
               {!batchBulkLoading && selectedRestorableRecords.length > 0 && <button className="management-action" onClick={() => restoreRecords(selectedRestorableRecords)}>取消归档 {selectedRestorableRecords.length} 项</button>}
-              {bulkMode && batchBulkLoading && <span className="bulk-selection-hint" role="status">正在解析选中项…</span>}
-              {bulkMode && !batchBulkLoading && selectedRecordTargets.size > 0 && Array.from(selectedRecordTargets).some((key) => key.startsWith('batch:')) && (
-                <span className="bulk-selection-hint">已选 {selectedRecordTargets.size} 行，涉及 {selectedVisibleRecords.length} 个任务</span>
-              )}
               {bulkMode && !batchBulkLoading && selectedRunningRecords.length > 0 && <span className="bulk-selection-hint">{selectedRunningRecords.length} 项生成中，暂不可归档</span>}
-              {bulkMode && <button className={`management-action management-check-action ${allVisibleRecordsSelected ? 'is-active' : ''}`} disabled={batchBulkLoading || !hasSelectableRecordRows} onClick={() => void toggleVisibleRecordSelection(!allVisibleRecordsSelected)}><Check size={15} /> {batchBulkLoading ? '解析中...' : '全选本页'}</button>}
-              {bulkMode && <span className="bulk-selection-hint">拖动框选 · Shift 连选</span>}
+              {bulkMode && <BulkSelectAllButton
+                active={allVisibleRecordsSelected}
+                disabled={batchBulkLoading || !hasSelectableRecordRows}
+                helpText={viewMode === 'tasks' ? '拖动框选单条记录 · Shift 连选' : viewMode === 'batches' ? '拖动框选批次记录 · Shift 连选' : '拖动框选记录或批次 · Shift 连选'}
+                onClick={() => void toggleVisibleRecordSelection(!allVisibleRecordsSelected)}
+              ><Check size={15} /> {batchBulkLoading ? '解析中...' : '全选本页'}</BulkSelectAllButton>}
               <button className="management-action compact-control" disabled={batchBulkLoading} onClick={() => { setBulkMode((value) => !value); clearRecordSelection() }}>{bulkMode ? '退出批量' : '批量管理'}</button>
             </div>
           </div>
@@ -6858,6 +6858,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
               pageSizeUnit="行"
               total={total}
               totalPages={totalPages}
+              selectionStatus={bulkMode ? batchBulkLoading ? '正在统计已选任务…' : `已选 ${selectedVisibleRecords.length} 个任务` : undefined}
               onOffsetChange={setOffset}
               onPageSizeChange={(value) => {
                 setPageSize(value)
@@ -7258,7 +7259,7 @@ function DeleteConfirmDialog({ title, items, onClose, onConfirm, impact = null, 
   )
 }
 
-function PaginationControls({ offset, pageSize, pageSizeOptions = defaultPageSizeOptions, pageSizeOptionKey, pageSizeUnit = '行', total, totalPages, disabled, compact = false, onOffsetChange, onPageSizeChange }: {
+function PaginationControls({ offset, pageSize, pageSizeOptions = defaultPageSizeOptions, pageSizeOptionKey, pageSizeUnit = '行', total, totalPages, selectionStatus, disabled, compact = false, onOffsetChange, onPageSizeChange }: {
   offset: number
   pageSize: number
   pageSizeOptions?: readonly PageSizeOption[]
@@ -7266,6 +7267,7 @@ function PaginationControls({ offset, pageSize, pageSizeOptions = defaultPageSiz
   pageSizeUnit?: string
   total: number
   totalPages: number
+  selectionStatus?: string
   disabled?: boolean
   compact?: boolean
   onOffsetChange: (offset: number) => void
@@ -7325,6 +7327,7 @@ function PaginationControls({ offset, pageSize, pageSizeOptions = defaultPageSiz
         <button className="management-action" disabled={!canNext} onClick={() => onOffsetChange(lastOffset)}>尾页</button>
       </div>
       <div className="pagination-meta">
+        {selectionStatus !== undefined && <span className="pagination-selection-status" role="status" aria-live="polite">{selectionStatus}</span>}
         <span>共 {total} {pageSizeUnit}</span>
         <span>{total > 0 ? `${firstItem}-${lastItem} ${pageSizeUnit}` : `当前 0 ${pageSizeUnit}`}</span>
         <label>每页

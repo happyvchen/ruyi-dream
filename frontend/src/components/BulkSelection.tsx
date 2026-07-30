@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 
 export type SelectableId = string | number
 export type MarqueeBox = { left: number; top: number; width: number; height: number } | null
@@ -168,5 +168,33 @@ export function BulkCheckbox({ checked, indeterminate = false, disabled = false,
       onChange={(event) => onChange(event.target.checked, event.nativeEvent instanceof MouseEvent && event.nativeEvent.shiftKey)}
       aria-label={label}
     />
+  )
+}
+
+export function BulkSelectAllButton({ active, disabled = false, helpText, label = '全选本页', onClick, children }: {
+  active: boolean
+  disabled?: boolean
+  helpText: string
+  label?: string
+  onClick: () => void
+  children: ReactNode
+}) {
+  const tooltipId = useId()
+  return (
+    <span
+      className="bulk-select-all-control"
+      tabIndex={disabled ? 0 : undefined}
+      aria-label={disabled ? label : undefined}
+      aria-describedby={disabled ? tooltipId : undefined}
+    >
+      <button
+        className={`management-action management-check-action ${active ? 'is-active' : ''}`}
+        type="button"
+        disabled={disabled}
+        aria-describedby={tooltipId}
+        onClick={onClick}
+      >{children}</button>
+      <span id={tooltipId} className="bulk-select-all-tooltip" role="tooltip">{helpText}</span>
+    </span>
   )
 }

@@ -441,6 +441,11 @@ describe('production gate app shell and page controls', () => {
 
     expect(await screen.findByText('框选批次')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
+    const selectAllButton = screen.getByRole('button', { name: '全选本页' })
+    const selectAllTooltipId = selectAllButton.getAttribute('aria-describedby')
+    expect(selectAllTooltipId).toBeTruthy()
+    expect(document.getElementById(selectAllTooltipId!)).toHaveTextContent('拖动框选记录或批次 · Shift 连选')
+    expect(screen.getByRole('status')).toHaveTextContent('已选 0 个任务')
     const surface = document.querySelector('.record-list-body.marquee-selection-surface') as HTMLElement
     const batchRow = surface.querySelector<HTMLElement>('[data-select-id="batch:batch-marquee"]')!
     const taskRow = surface.querySelector<HTMLElement>('[data-select-id="task:31"]')!
@@ -456,12 +461,12 @@ describe('production gate app shell and page controls', () => {
 
     await waitFor(() => expect(apiMock.listBatchTasks).toHaveBeenCalledWith('batch-marquee'))
     expect(surface).toHaveAttribute('aria-busy', 'true')
-    expect(screen.getByRole('status')).toHaveTextContent('正在解析选中项')
+    expect(screen.getByRole('status')).toHaveTextContent('正在统计已选任务')
     expect(screen.queryByRole('button', { name: /下载成片/ })).not.toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: '选择 单条记录' })).toBeDisabled()
     batchRequest.resolve({ items: batchTasks })
     expect(await screen.findByRole('button', { name: '下载成片 3 项' })).toBeEnabled()
-    expect(screen.getByText('已选 2 行，涉及 3 个任务')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('已选 3 个任务')
     expect(screen.getByRole('checkbox', { name: '选择 框选批次' })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: '选择 单条记录' })).toBeChecked()
 
@@ -508,6 +513,27 @@ describe('production gate app shell and page controls', () => {
     expect(screen.getByRole('checkbox', { name: '选择 保留的单条记录' })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: '选择 读取失败批次' })).not.toBeChecked()
     expect(screen.getByRole('button', { name: '下载成片 1 项' })).toBeEnabled()
+  })
+
+  it('describes the selectable target for each generation-record view', async () => {
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '生成记录' }))
+
+    await userEvent.click(await screen.findByRole('button', { name: '批量管理' }))
+    let selectAllButton = screen.getByRole('button', { name: '全选本页' })
+    expect(document.getElementById(selectAllButton.getAttribute('aria-describedby')!)).toHaveTextContent('拖动框选记录或批次 · Shift 连选')
+
+    await userEvent.click(screen.getByRole('button', { name: '批次任务' }))
+    await waitFor(() => expect(apiMock.listRecordBatches).toHaveBeenCalled())
+    await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
+    selectAllButton = screen.getByRole('button', { name: '全选本页' })
+    expect(document.getElementById(selectAllButton.getAttribute('aria-describedby')!)).toHaveTextContent('拖动框选批次记录 · Shift 连选')
+
+    await userEvent.click(screen.getByRole('button', { name: '单次任务' }))
+    await waitFor(() => expect(apiMock.listRecords).toHaveBeenCalled())
+    await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
+    selectAllButton = screen.getByRole('button', { name: '全选本页' })
+    expect(document.getElementById(selectAllButton.getAttribute('aria-describedby')!)).toHaveTextContent('拖动框选单条记录 · Shift 连选')
   })
 
   it('library import and bulk controls are visible without hiding core filters', async () => {
@@ -758,6 +784,11 @@ describe('production gate app shell and page controls', () => {
     const workbench = (await screen.findByText('上传记录')).closest('.import-workbench') as HTMLElement
     expect(workbench).not.toBeNull()
     await userEvent.click(await within(workbench).findByRole('button', { name: '批量管理' }))
+    const selectAllButton = within(workbench).getByRole('button', { name: '全选本页' })
+    const selectAllTooltipId = selectAllButton.getAttribute('aria-describedby')
+    expect(selectAllTooltipId).toBeTruthy()
+    expect(document.getElementById(selectAllTooltipId!)).toHaveTextContent('拖动框选 · Shift 连选')
+    expect(within(workbench).getByRole('status')).toHaveTextContent('已选 0 条')
     const surface = workbench.querySelector('.import-record-list-body.marquee-selection-surface') as HTMLElement
     const selectableRecords = Array.from(surface.querySelectorAll<HTMLElement>('[data-select-id]'))
     surface.getBoundingClientRect = () => ({ left: 0, top: 0, right: 500, bottom: 500, width: 500, height: 500, x: 0, y: 0, toJSON: () => ({}) })
@@ -767,6 +798,7 @@ describe('production gate app shell and page controls', () => {
     fireEvent.pointerMove(window, { pointerType: 'mouse', clientX: 495, clientY: 165 })
     fireEvent.pointerUp(window, { pointerType: 'mouse', clientX: 495, clientY: 165 })
     expect(await within(workbench).findByRole('button', { name: '归档 2 项' })).toBeEnabled()
+    expect(within(workbench).getByRole('status')).toHaveTextContent('已选 2 条')
     await userEvent.click(within(workbench).getByRole('button', { name: '全选本页' }))
 
     const firstRecord = within(workbench).getByText('批量归档一').closest('.import-record-row') as HTMLElement
@@ -1186,6 +1218,11 @@ describe('production gate app shell and page controls', () => {
     await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
     expect(await screen.findByText('MARQUEE-LOOK-2')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
+    const selectAllButton = screen.getByRole('button', { name: '全选本页' })
+    const selectAllTooltipId = selectAllButton.getAttribute('aria-describedby')
+    expect(selectAllTooltipId).toBeTruthy()
+    expect(document.getElementById(selectAllTooltipId!)).toHaveTextContent('拖动框选 · Shift 连选')
+    expect(screen.getByRole('status')).toHaveTextContent('已选 0 套')
     const surface = document.querySelector('.library-results.marquee-selection-surface') as HTMLElement
     const cards = Array.from(surface.querySelectorAll<HTMLElement>('.garment-card'))
     surface.getBoundingClientRect = () => ({ left: 0, top: 0, right: 500, bottom: 500, width: 500, height: 500, x: 0, y: 0, toJSON: () => ({}) })
@@ -1197,6 +1234,7 @@ describe('production gate app shell and page controls', () => {
     fireEvent.pointerUp(window, { pointerType: 'mouse', clientX: 205, clientY: 125 })
 
     expect(await screen.findByRole('button', { name: '下载 2 项' })).toBeEnabled()
+    expect(screen.getByRole('status')).toHaveTextContent('已选 2 套')
   })
 
   it('keeps active and archived garments selectable together and splits archive actions by state', async () => {
@@ -1384,6 +1422,7 @@ describe('production gate app shell and page controls', () => {
     expect(screen.getByRole('button', { name: '取消归档 1 项' })).toBeEnabled()
     expect(screen.getByText('1 项生成中，暂不可归档')).toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: '选择 RUNNING-RECORD' })).toBeChecked()
+    expect(screen.getByRole('status')).toHaveTextContent('已选 3 个任务')
 
     await userEvent.click(screen.getByRole('button', { name: '取消归档 1 项' }))
     await waitFor(() => expect(apiMock.restoreTasks).toHaveBeenCalledWith([32]))
