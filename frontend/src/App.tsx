@@ -50,6 +50,7 @@ import { CHECKSUM_COMPATIBILITY_NOTICE } from './lib/fileChecksum'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 import { BulkCheckbox, BulkSelectAllButton, MarqueeSelectionBox, selectableIdsInDom, updateSelectionWithRange, useMarqueeSelection } from './components/BulkSelection'
+import { ArchiveManageDialog } from './components/ArchiveManageDialog'
 
 type StudioStep = 0 | 1 | 2 | 3
 type FileSystemEntry = {
@@ -108,6 +109,30 @@ const STYLING_GARMENT_EXPORT_MAX_ITEMS = 50
 const BULK_SEARCH_THRESHOLD = 5
 const IMPORT_SESSION_GROUP_WINDOW_MS = 10 * 60 * 1000
 const UPLOAD_SESSION_ARCHIVE_BATCH_SIZE = 500
+
+function uploadSessionMutationChunks(ids: string[]) {
+  const chunks: string[][] = []
+  for (let index = 0; index < ids.length;) {
+    const remaining = ids.length - index
+    const size = remaining === UPLOAD_SESSION_ARCHIVE_BATCH_SIZE + 1
+      ? UPLOAD_SESSION_ARCHIVE_BATCH_SIZE - 1
+      : Math.min(UPLOAD_SESSION_ARCHIVE_BATCH_SIZE, remaining)
+    chunks.push(ids.slice(index, index + size))
+    index += size
+  }
+  return chunks
+}
+
+function mergeDeleteImpacts(impacts: DeleteImpact[]) {
+  const sum = (key: keyof DeleteImpact) => impacts.reduce((total, impact) => total + (typeof impact[key] === 'number' ? impact[key] : 0), 0)
+  return {
+    uploadSessionCount: sum('uploadSessionCount'),
+    uploadItemCount: sum('uploadItemCount'),
+    temporaryObjectCount: sum('temporaryObjectCount'),
+    linkedBusinessCount: sum('linkedBusinessCount'),
+    estimatedBytes: sum('estimatedBytes'),
+  } satisfies DeleteImpact
+}
 const GENERATION_TASK_MUTATION_BATCH_SIZE = 100
 const uploadSessionScopeRefreshes = [
   { scope: 'generation_task', limit: 20 },
@@ -3777,6 +3802,9 @@ type UploadRecordTarget = {
   rows: ImportTaskRow[]
   jobId?: string
   archived?: boolean
+  memberJobIds?: string[]
+  displayItems?: { id: string; name: string }[]
+  purgeOnly?: boolean
 }
 
 function importTaskStatusTone(status: string): ImportTaskRow['statusTone'] {
@@ -4609,7 +4637,9 @@ function ImportTaskWorkbench({
   const [batchArchiveCount, setBatchArchiveCount] = useState(0)
   const [batchRestoring, setBatchRestoring] = useState(false)
   const [batchRestoreCount, setBatchRestoreCount] = useState(0)
-  const batchUploadRecordBusy = batchArchiving || batchRestoring
+  const [batchPurging, setBatchPurging] = useState(false)
+  const [batchPurgeCount, setBatchPurgeCount] = useState(0)
+  const batchUploadRecordBusy = batchArchiving || batchRestoring || batchPurging
   const lastSelectedUploadRecordIdRef = useRef<string | null>(null)
   const manageImpactRequestRef = useRef(0)
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(() => new Set())
@@ -4799,6 +4829,7 @@ function ImportTaskWorkbench({
   const selectedUploadRecordTargets = selectedUploadRecords.map(uploadRecordTarget)
   const selectedArchivableUploadRecords = selectedUploadRecordTargets.filter(uploadRecordHasActiveRows)
   const selectedRestorableUploadRecords = selectedUploadRecordTargets.filter(uploadRecordHasArchivedRows)
+  const selectedPurgeableUploadRecords = selectedUploadRecordTargets
   const allVisibleUploadRecordsSelected = selectableUploadRecordIds.length > 0 && selectableUploadRecordIds.every((id) => selectedUploadRecordIds.has(id))
   const uploadRecordMarquee = useMarqueeSelection<string>({
     enabled: bulkMode && !batchUploadRecordBusy,
@@ -4882,6 +4913,7 @@ function ImportTaskWorkbench({
     })
     const batchIds = Array.from(new Set([
       ...(target.jobId ? [target.jobId] : []),
+      ...(target.memberJobIds ?? []),
       ...(target.rows.map((row) => row.serverBatchId).filter(Boolean) as string[]),
     ]))
     const batches = await Promise.all(batchIds.map((batchId) => api.listUploadSessions({
@@ -4992,7 +5024,8 @@ function ImportTaskWorkbench({
     setManageImpactLoading(true)
     void resolveUploadRecordSessionIds(target)
       .then((sessionIds) => sessionIds.length
-        ? api.getUploadSessionDeleteImpact(sessionIds)
+        ? Promise.all(uploadSessionMutationChunks(sessionIds).map((ids) => api.getUploadSessionDeleteImpact(ids)))
+          .then((results) => ({ impact: mergeDeleteImpacts(results.map((result) => result.impact)) }))
         : { impact: { uploadSessionCount: 0, uploadItemCount: 0, temporaryObjectCount: 0, linkedBusinessCount: 0, estimatedBytes: 0 } })
       .then((result) => {
         if (manageImpactRequestRef.current === requestId) setManageImpact(result.impact)
@@ -5005,6 +5038,18 @@ function ImportTaskWorkbench({
       .finally(() => {
         if (manageImpactRequestRef.current === requestId) setManageImpactLoading(false)
       })
+  }
+
+  function combinedUploadRecordTarget(targets: UploadRecordTarget[], purgeOnly = false) {
+    return {
+      id: `bulk:${targets.map((target) => target.id).join(',')}`,
+      title: `${targets.length} 条上传记录`,
+      rows: targets.flatMap((target) => target.rows),
+      archived: targets.every((target) => target.archived),
+      memberJobIds: targets.flatMap((target) => target.jobId ? [target.jobId] : target.memberJobIds ?? []),
+      displayItems: targets.map((target) => ({ id: target.id, name: target.title })),
+      purgeOnly,
+    }
   }
 
   function closeUploadRecordManage() {
@@ -5020,6 +5065,11 @@ function ImportTaskWorkbench({
 
   async function archiveUploadRecord(target: UploadRecordTarget) {
     if (batchUploadRecordBusy || uploadRecordOperationId) return
+    const isBatch = Boolean(target.displayItems)
+    if (isBatch) {
+      setBatchArchiving(true)
+      setBatchArchiveCount(target.displayItems?.length ?? 0)
+    }
     setUploadRecordOperationId(target.id)
     setUploadRecordError(null)
     try {
@@ -5030,7 +5080,12 @@ function ImportTaskWorkbench({
       const archivedAt = new Date().toISOString()
       setArchivedSessionSnapshot((current) => current.map((session) => sessionIds.includes(session.id) ? { ...session, archivedAt, archiveReason: 'user_archived' } : session))
       if (target.jobId) onSetJobArchived(target.jobId, true)
+      target.memberJobIds?.forEach((jobId) => onSetJobArchived(jobId, true))
       if (!includeArchived) setDismissedUploadSessionIds((current) => new Set([...current, ...sessionIds]))
+      if (isBatch) {
+        setSelectedUploadRecordIds(new Set())
+        lastSelectedUploadRecordIdRef.current = null
+      }
       setManageRecord(null)
       await refreshManagedUploadRecords()
     } catch (error) {
@@ -5038,35 +5093,10 @@ function ImportTaskWorkbench({
       throw error
     } finally {
       setUploadRecordOperationId(null)
-    }
-  }
-
-  async function archiveSelectedUploadRecords() {
-    if (batchUploadRecordBusy || !selectedArchivableUploadRecords.length) return
-    const targets = selectedArchivableUploadRecords
-    setBatchArchiving(true)
-    setBatchArchiveCount(targets.length)
-    setUploadRecordError(null)
-    try {
-      const sessionIds = Array.from(new Set((await Promise.all(targets.map((target) => resolveUploadRecordSessionIds(target, false)))).flat()))
-      for (let index = 0; index < sessionIds.length; index += UPLOAD_SESSION_ARCHIVE_BATCH_SIZE) {
-        await api.archiveUploadSessions(sessionIds.slice(index, index + UPLOAD_SESSION_ARCHIVE_BATCH_SIZE))
+      if (isBatch) {
+        setBatchArchiving(false)
+        setBatchArchiveCount(0)
       }
-      const archivedAt = new Date().toISOString()
-      setArchivedSessionSnapshot((current) => current.map((session) => sessionIds.includes(session.id) ? { ...session, archivedAt, archiveReason: 'user_archived' } : session))
-      targets.forEach((target) => {
-        if (target.jobId) onSetJobArchived(target.jobId, true)
-      })
-      if (!includeArchived) setDismissedUploadSessionIds((current) => new Set([...current, ...sessionIds]))
-      setSelectedUploadRecordIds(new Set())
-      lastSelectedUploadRecordIdRef.current = null
-      await refreshManagedUploadRecords()
-    } catch (error) {
-      await refreshManagedUploadRecords()
-      setUploadRecordError(error instanceof Error ? error.message : '批量归档上传记录失败')
-    } finally {
-      setBatchArchiving(false)
-      setBatchArchiveCount(0)
     }
   }
 
@@ -5129,28 +5159,56 @@ function ImportTaskWorkbench({
 
   async function purgeUploadRecord(target: UploadRecordTarget, confirmText: string) {
     if (batchUploadRecordBusy || uploadRecordOperationId) return
+    const isBatch = Boolean(target.displayItems)
+    if (isBatch) {
+      setBatchPurging(true)
+      setBatchPurgeCount(target.displayItems?.length ?? 0)
+    }
     setUploadRecordOperationId(target.id)
     setUploadRecordError(null)
+    let completedChunks = 0
     try {
       const sessionIds = await resolveUploadRecordSessionIds(target)
       let cleanupErrors: ObjectCleanupError[] = []
       let deferredIds: string[] = []
       if (sessionIds.length) {
-        const result = await api.deleteUploadSessions(sessionIds, sessionIds.length === 1 ? { confirmName: confirmText } : { confirmPhrase: confirmText })
-        cleanupErrors = result.objectCleanupErrors
-        deferredIds = result.deferredIds
+        for (const ids of uploadSessionMutationChunks(sessionIds)) {
+          const result = await api.deleteUploadSessions(ids, sessionIds.length === 1 ? { confirmName: confirmText } : { confirmPhrase: confirmText })
+          cleanupErrors = cleanupErrors.concat(result.objectCleanupErrors)
+          deferredIds = deferredIds.concat(result.deferredIds)
+          completedChunks += 1
+        }
       }
       setArchivedSessionSnapshot((current) => current
         .filter((session) => !sessionIds.includes(session.id) || deferredIds.includes(session.id))
         .map((session) => deferredIds.includes(session.id) ? { ...session, archivedAt: new Date().toISOString(), archiveReason: 'deletion_pending' } : session))
       setDismissedUploadSessionIds((current) => new Set([...current, ...sessionIds]))
       if (target.jobId) onRemoveJob(target.jobId)
+      target.memberJobIds?.forEach(onRemoveJob)
+      if (isBatch) {
+        setSelectedUploadRecordIds(new Set())
+        lastSelectedUploadRecordIdRef.current = null
+      }
       await refreshManagedUploadRecords()
       setManageRecord(null)
       if (cleanupErrors.length) setUploadRecordError(`上传记录已删除，但有 ${cleanupErrors.length} 个临时文件清理失败，系统已记录并会自动重试。`)
       else if (deferredIds.length) setUploadRecordError('上传已停止；相关临时文件将在上传地址安全失效后自动清理。')
+    } catch (error) {
+      await refreshManagedUploadRecords()
+      if (completedChunks > 0) {
+        setManageRecord(null)
+        setSelectedUploadRecordIds(new Set())
+        lastSelectedUploadRecordIdRef.current = null
+        setUploadRecordError('部分上传记录已完成删除，其余记录处理失败。列表已刷新，请重新选择剩余记录后重试。')
+        return
+      }
+      throw error
     } finally {
       setUploadRecordOperationId(null)
+      if (isBatch) {
+        setBatchPurging(false)
+        setBatchPurgeCount(0)
+      }
     }
   }
 
@@ -5197,13 +5255,18 @@ function ImportTaskWorkbench({
         </div>
         <div className="library-management-tools import-management-tools">
           {bulkMode && (selectedArchivableUploadRecords.length > 0 || batchArchiving) && (
-            <button className="management-action" type="button" disabled={batchUploadRecordBusy} onClick={() => void archiveSelectedUploadRecords()}>
+            <button className="management-action" type="button" disabled={batchUploadRecordBusy} onClick={() => openUploadRecordManage(combinedUploadRecordTarget(selectedArchivableUploadRecords))}>
               <Trash2 size={15} />{batchArchiving ? `正在归档 ${batchArchiveCount} 项...` : `归档 ${selectedArchivableUploadRecords.length} 项`}
             </button>
           )}
           {bulkMode && (selectedRestorableUploadRecords.length > 0 || batchRestoring) && (
             <button className="management-action" type="button" disabled={batchUploadRecordBusy} onClick={() => void restoreSelectedUploadRecords()}>
               <RefreshCw size={15} />{batchRestoring ? `正在取消归档 ${batchRestoreCount} 项...` : `取消归档 ${selectedRestorableUploadRecords.length} 项`}
+            </button>
+          )}
+          {bulkMode && (selectedPurgeableUploadRecords.length > 0 || batchPurging) && (
+            <button className="danger-action" type="button" disabled={batchUploadRecordBusy} onClick={() => openUploadRecordManage(combinedUploadRecordTarget(selectedPurgeableUploadRecords, true))}>
+              <Trash2 size={15} />{batchPurging ? `正在彻底删除 ${batchPurgeCount} 项...` : `彻底删除 ${selectedPurgeableUploadRecords.length} 项`}
             </button>
           )}
           {bulkMode && <BulkSelectAllButton active={allVisibleUploadRecordsSelected} disabled={batchUploadRecordBusy || !selectableUploadRecordIds.length} helpText="拖动框选 · Shift 连选" onClick={() => toggleVisibleUploadRecordSelection(!allVisibleUploadRecordsSelected)}><Check size={15} /> 全选本页</BulkSelectAllButton>}
@@ -5413,16 +5476,36 @@ function ImportTaskWorkbench({
           }}
         />
       </div>
-      {manageRecord && <UploadRecordManageDialog
-        target={manageRecord}
-        impact={manageImpact}
+      {manageRecord && <ArchiveManageDialog
+        title={manageRecord.archived || manageRecord.purgeOnly
+          ? manageRecord.displayItems && manageRecord.displayItems.length > 1
+            ? `彻底删除 ${manageRecord.displayItems.length} 条上传记录`
+            : '彻底删除上传记录'
+          : manageRecord.displayItems && manageRecord.displayItems.length > 1
+            ? `归档 ${manageRecord.displayItems.length} 条上传记录`
+            : '归档上传记录'}
+        items={manageRecord.displayItems ?? [{ id: manageRecord.id, name: manageRecord.title }]}
+        description={(purge) => purge
+          ? '彻底删除会移除上传记录和未入库临时文件，操作不可恢复；已经入库的服装与正式媒体仍会保留。'
+          : '确认后会归档并从日常列表移除，可通过“查看已归档”找回；不会中断任务，也不会影响已入库服装。'}
+        warning={manageRecord.rows.some((row) => isImportTaskRunning(row.status))
+          ? '该任务仍在进行。归档不会中断上传；彻底删除会立即阻止继续确认和入库，并在上传地址失效后清理临时文件。'
+          : undefined}
+        impact={uploadRecordDeleteImpactText(manageImpact, uploadRecordSessionCount(manageRecord.rows))}
         impactLoading={manageImpactLoading}
-        impactError={manageImpactError}
-        operationBusy={uploadRecordOperationId === manageRecord.id}
+        impactError={manageImpactError ? '删除影响预检失败，暂时不能彻底删除。' : undefined}
         onRetryImpact={() => openUploadRecordManage(manageRecord)}
+        purgeReady={!!manageImpact}
+        archiveAvailable={!manageRecord.archived && !manageRecord.purgeOnly}
+        initialPurge={!!manageRecord.archived || !!manageRecord.purgeOnly}
+        expectedText={(manageImpact?.uploadSessionCount ?? uploadRecordSessionCount(manageRecord.rows)) <= 1 && (manageRecord.displayItems?.length ?? 1) <= 1 ? manageRecord.title : '全部删除'}
         onClose={closeUploadRecordManage}
-        onArchive={() => archiveUploadRecord(manageRecord)}
-        onPurge={(confirmText) => purgeUploadRecord(manageRecord, confirmText)}
+        onConfirm={(purge, confirmText) => purge ? purgeUploadRecord(manageRecord, confirmText) : archiveUploadRecord(manageRecord)}
+        onError={(error) => window.alert(error instanceof ApiError
+          ? friendlyErrorText(error.errorCode, error.errorMessage || error.message)
+          : error instanceof Error
+            ? friendlyErrorText(undefined, error.message)
+            : '操作失败')}
       />}
     </div>
   )
@@ -5480,77 +5563,6 @@ function ImportTaskRows({ rows, abandoningId, onAbandon, onFindGarment }: {
         )
       })}
     </div>
-  )
-}
-
-function UploadRecordManageDialog({ target, impact, impactLoading, impactError, operationBusy, onClose, onRetryImpact, onArchive, onPurge }: {
-  target: UploadRecordTarget
-  impact: DeleteImpact | null
-  impactLoading: boolean
-  impactError: string | null
-  operationBusy: boolean
-  onClose: () => void
-  onRetryImpact: () => void
-  onArchive: () => Promise<void>
-  onPurge: (confirmText: string) => Promise<void>
-}) {
-  const sessionCount = uploadRecordSessionCount(target.rows)
-  const expectedText = sessionCount <= 1 ? target.title : '全部删除'
-  const [confirmText, setConfirmText] = useState('')
-  const [submitting, setSubmitting] = useState<'archive' | 'purge' | null>(null)
-  const confirmInputRef = useRef<HTMLInputElement | null>(null)
-  const running = target.rows.some((row) => isImportTaskRunning(row.status))
-
-  useEffect(() => {
-    confirmInputRef.current?.focus()
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !submitting && !operationBusy) onClose()
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [onClose, operationBusy, submitting])
-
-  async function submit(action: 'archive' | 'purge') {
-    if (submitting || operationBusy || (action === 'purge' && (confirmText !== expectedText || !impact))) return
-    setSubmitting(action)
-    try {
-      if (action === 'archive') await onArchive()
-      else await onPurge(confirmText)
-    } catch (error) {
-      window.alert(error instanceof ApiError
-        ? friendlyErrorText(error.errorCode, error.errorMessage || error.message)
-        : error instanceof Error
-          ? friendlyErrorText(undefined, error.message)
-          : '操作失败')
-      setSubmitting(null)
-    }
-  }
-
-  return createPortal(
-    <div className="modal-backdrop" role="presentation" onClick={() => { if (!submitting && !operationBusy) onClose() }}>
-      <div className="confirm-modal" role="dialog" aria-modal="true" aria-label="归档或删除上传记录" onClick={(event) => event.stopPropagation()}>
-        <div className="confirm-head">
-          <h2>归档或删除上传记录</h2>
-          <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
-        </div>
-        <p className="confirm-copy">归档后仅从日常上传记录中隐藏，可通过“查看已归档”恢复；不会中断任务，也不会影响已入库服装。</p>
-        {running && <p className="confirm-warning" role="alert">该任务仍在进行。归档不会中断上传；彻底删除会立即阻止继续确认和入库，并在上传地址失效后清理临时文件。</p>}
-        <div className="confirm-items"><span>{target.title}</span></div>
-        <div className="confirm-copy">
-          {impactLoading ? '正在计算删除影响范围...' : impactError ? <><span>删除影响预检失败，暂时不能彻底删除。</span> <button type="button" className="text-button" onClick={onRetryImpact}>重试</button></> : uploadRecordDeleteImpactText(impact, sessionCount)}
-        </div>
-        <label className="confirm-field">
-          <span>{sessionCount <= 1 ? '输入完整任务名确认彻底删除' : '输入“全部删除”确认彻底删除'}</span>
-          <input ref={confirmInputRef} value={confirmText} onChange={(event) => setConfirmText(event.target.value)} placeholder={expectedText} />
-        </label>
-        <div className="confirm-actions upload-record-confirm-actions">
-          <button type="button" className="management-action" disabled={!!submitting || operationBusy} onClick={onClose}>取消</button>
-          {!target.archived && <button type="button" className="management-action" disabled={!!submitting || operationBusy} onClick={() => void submit('archive')}>{submitting === 'archive' ? '归档中...' : '归档'}</button>}
-          <button type="button" className="danger-action" disabled={!!submitting || operationBusy || impactLoading || !impact || !!impactError || confirmText !== expectedText} onClick={() => void submit('purge')}>{submitting === 'purge' ? '删除中...' : '彻底删除'}</button>
-        </div>
-      </div>
-    </div>,
-    document.body,
   )
 }
 

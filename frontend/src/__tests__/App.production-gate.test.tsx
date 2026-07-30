@@ -746,8 +746,17 @@ describe('production gate app shell and page controls', () => {
     const failedRecord = screen.getByText('失败上传批次').closest('section')
     expect(failedRecord).not.toBeNull()
     await userEvent.click(within(failedRecord!).getByRole('button', { name: '归档' }))
-    expect(await screen.findByRole('dialog', { name: '归档或删除上传记录' })).toBeInTheDocument()
+    const dialog = await screen.findByRole('dialog', { name: '归档上传记录' })
+    expect(dialog).toBeInTheDocument()
+    expect(dialog).toHaveFocus()
+    await userEvent.tab()
+    expect(within(dialog).getByRole('button', { name: '关闭' })).toHaveFocus()
+    await userEvent.tab({ shift: true })
+    expect(within(dialog).getByRole('button', { name: '确认' })).toHaveFocus()
+    await userEvent.tab()
+    expect(within(dialog).getByRole('button', { name: '关闭' })).toHaveFocus()
     await waitFor(() => expect(apiMock.getUploadSessionDeleteImpact).toHaveBeenCalled())
+    await userEvent.click(within(dialog).getByRole('checkbox', { name: '同时彻底删除关联记录和文件' }))
     await userEvent.type(screen.getByPlaceholderText('失败上传批次'), '失败上传批次')
     const purgeButton = screen.getByRole('button', { name: '彻底删除' })
     expect(purgeButton).toBeEnabled()
@@ -756,7 +765,7 @@ describe('production gate app shell and page controls', () => {
     expect(await screen.findByText('上传已停止；相关临时文件将在上传地址安全失效后自动清理。')).toBeInTheDocument()
   })
 
-  it('supports selecting multiple active upload records and only exposes batch archive', async () => {
+  it('supports selecting multiple active upload records and exposes the unified archive dialog', async () => {
     const archiveRequest = deferred<{ archivedIds: string[] }>()
     const sessions = [
       { id: 'batch-archive-session-1', businessCode: 'LOOK-BULK-1', sourceTitle: '批量归档一' },
@@ -811,8 +820,11 @@ describe('production gate app shell and page controls', () => {
     await userEvent.keyboard('{/Shift}')
 
     expect(within(workbench).getByRole('button', { name: '归档 2 项' })).toBeEnabled()
-    expect(within(workbench).queryByRole('button', { name: /删除 2 项/ })).not.toBeInTheDocument()
     await userEvent.click(within(workbench).getByRole('button', { name: '归档 2 项' }))
+
+    const dialog = await screen.findByRole('dialog', { name: '归档 2 条上传记录' })
+    expect(within(dialog).getByRole('checkbox', { name: '同时彻底删除关联记录和文件' })).toBeEnabled()
+    await userEvent.click(within(dialog).getByRole('button', { name: '确认' }))
 
     await waitFor(() => expect(apiMock.archiveUploadSessions).toHaveBeenCalledWith(expect.arrayContaining([
       'batch-archive-session-1',
@@ -826,6 +838,7 @@ describe('production gate app shell and page controls', () => {
   })
 
   it('chunks batch upload-record archive requests at the API limit', async () => {
+    const firstArchiveChunk = deferred<{ archivedIds: string[] }>()
     const sessions = Array.from({ length: 501 }, (_, index) => ({
       id: `large-batch-session-${index}`,
       scope: 'styling-garment',
@@ -842,7 +855,7 @@ describe('production gate app shell and page controls', () => {
     apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string }) => ({
       items: options.scope === 'styling_garment' ? sessions : [],
     }))
-    apiMock.archiveUploadSessions.mockImplementation(async (ids: string[]) => ({ archivedIds: ids }))
+    apiMock.archiveUploadSessions.mockImplementation(async (ids: string[]) => ids.length === 500 ? firstArchiveChunk.promise : { archivedIds: ids })
     window.localStorage.setItem('ruyi-library-import-open', '1')
     window.history.replaceState(null, '', '/library')
 
@@ -852,10 +865,84 @@ describe('production gate app shell and page controls', () => {
     await userEvent.click(within(workbench).getByRole('button', { name: '批量管理' }))
     await userEvent.click(within(workbench).getByRole('checkbox', { name: '选择 超大上传批次' }))
     await userEvent.click(within(workbench).getByRole('button', { name: '归档 1 项' }))
+    await userEvent.click(within(await screen.findByRole('dialog', { name: '归档上传记录' })).getByRole('button', { name: '确认' }))
 
+    await waitFor(() => expect(apiMock.archiveUploadSessions).toHaveBeenCalledTimes(1))
+    expect(within(workbench).getByRole('checkbox', { name: '选择 超大上传批次' })).toBeDisabled()
+    expect(within(workbench).getByRole('button', { name: '正在归档 1 项...' })).toBeDisabled()
+    firstArchiveChunk.resolve({ archivedIds: sessions.slice(0, 500).map((item) => item.id) })
     await waitFor(() => expect(apiMock.archiveUploadSessions).toHaveBeenCalledTimes(2))
     expect(apiMock.archiveUploadSessions.mock.calls[0]?.[0]).toHaveLength(500)
     expect(apiMock.archiveUploadSessions.mock.calls[1]?.[0]).toHaveLength(1)
+  })
+
+  it('prechecks and deletes oversized upload-record batches without a singleton confirmation chunk', async () => {
+    const sessions = Array.from({ length: 501 }, (_, index) => ({
+      id: `large-delete-session-${index}`,
+      scope: 'styling-garment',
+      status: 'FAILED',
+      businessCode: `LOOK-DELETE-${index}`,
+      sourceTitle: '超大删除批次',
+      batchId: 'large-delete-batch',
+      totalCount: 1,
+      uploadedCount: 0,
+      items: [],
+      createdAt: '2026-07-28T08:00:00Z',
+      updatedAt: '2026-07-28T08:01:00Z',
+    }))
+    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string }) => ({
+      items: options.scope === 'styling_garment' ? sessions : [],
+    }))
+    apiMock.deleteUploadSessions.mockImplementation(async (ids: string[]) => ({ deletedIds: [], deferredIds: ids, objectCleanupErrors: [] }))
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    window.history.replaceState(null, '', '/library')
+
+    render(<App />)
+
+    const workbench = (await screen.findByText('上传记录')).closest('.import-workbench') as HTMLElement
+    await userEvent.click(within(workbench).getByRole('button', { name: '批量管理' }))
+    await userEvent.click(within(workbench).getByRole('checkbox', { name: '选择 超大删除批次' }))
+    await userEvent.click(within(workbench).getByRole('button', { name: '归档 1 项' }))
+    const dialog = await screen.findByRole('dialog', { name: '归档上传记录' })
+    await waitFor(() => expect(apiMock.getUploadSessionDeleteImpact).toHaveBeenCalledTimes(2))
+    await userEvent.click(within(dialog).getByRole('checkbox', { name: '同时彻底删除关联记录和文件' }))
+    await userEvent.type(within(dialog).getByPlaceholderText('全部删除'), '全部删除')
+    await userEvent.click(within(dialog).getByRole('button', { name: '彻底删除' }))
+
+    await waitFor(() => expect(apiMock.deleteUploadSessions).toHaveBeenCalledTimes(2))
+    expect(apiMock.deleteUploadSessions.mock.calls[0]?.[0]).toHaveLength(499)
+    expect(apiMock.deleteUploadSessions.mock.calls[1]?.[0]).toHaveLength(2)
+    apiMock.deleteUploadSessions.mock.calls.forEach(([, confirmation]) => expect(confirmation).toEqual({ confirmPhrase: '全部删除' }))
+  })
+
+  it('refreshes and clears batch selection when a later upload-record delete chunk fails', async () => {
+    const sessions = Array.from({ length: 501 }, (_, index) => ({
+      id: `partial-delete-session-${index}`,
+      scope: 'styling-garment', status: 'FAILED', businessCode: `LOOK-PARTIAL-${index}`,
+      sourceTitle: '部分删除批次', batchId: 'partial-delete-batch', totalCount: 1, uploadedCount: 0, items: [],
+      createdAt: '2026-07-28T08:00:00Z', updatedAt: '2026-07-28T08:01:00Z',
+    }))
+    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string }) => ({ items: options.scope === 'styling_garment' ? sessions : [] }))
+    apiMock.deleteUploadSessions
+      .mockResolvedValueOnce({ deletedIds: [], deferredIds: sessions.slice(0, 499).map((item) => item.id), objectCleanupErrors: [] })
+      .mockRejectedValueOnce(new Error('second chunk failed'))
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    window.history.replaceState(null, '', '/library')
+
+    render(<App />)
+
+    const workbench = (await screen.findByText('上传记录')).closest('.import-workbench') as HTMLElement
+    await userEvent.click(within(workbench).getByRole('button', { name: '批量管理' }))
+    await userEvent.click(within(workbench).getByRole('checkbox', { name: '选择 部分删除批次' }))
+    await userEvent.click(within(workbench).getByRole('button', { name: '彻底删除 1 项' }))
+    const dialog = await screen.findByRole('dialog', { name: '彻底删除上传记录' })
+    await waitFor(() => expect(apiMock.getUploadSessionDeleteImpact).toHaveBeenCalledTimes(2))
+    await userEvent.type(within(dialog).getByPlaceholderText('全部删除'), '全部删除')
+    await userEvent.click(within(dialog).getByRole('button', { name: '彻底删除' }))
+
+    expect(await within(workbench).findByRole('alert')).toHaveTextContent('部分上传记录已完成删除，其余记录处理失败。列表已刷新，请重新选择剩余记录后重试。')
+    expect(screen.queryByRole('dialog', { name: '彻底删除上传记录' })).not.toBeInTheDocument()
+    expect(within(workbench).getByRole('status')).toHaveTextContent('已选 0 条')
   })
 
   it('keeps archived abandoned upload records recoverable and directly deletable', async () => {
@@ -917,9 +1004,23 @@ describe('production gate app shell and page controls', () => {
     expect(within(workbench).getByRole('checkbox', { name: '选择 等待清理批次' })).toBeDisabled()
     expect(within(workbench).getByRole('button', { name: '归档 1 项' })).toBeEnabled()
     expect(within(workbench).getByRole('button', { name: '取消归档 1 项' })).toBeEnabled()
+    expect(within(workbench).getByRole('button', { name: '彻底删除 2 项' })).toBeEnabled()
     await userEvent.click(screen.getByRole('button', { name: '删除' }))
-    const dialog = await screen.findByRole('dialog', { name: '归档或删除上传记录' })
-    expect(within(dialog).queryByRole('button', { name: '归档' })).not.toBeInTheDocument()
+    const dialog = await screen.findByRole('dialog', { name: '彻底删除上传记录' })
+    expect(within(dialog).queryByRole('checkbox', { name: '同时彻底删除关联记录和文件' })).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: '彻底删除' })).toBeDisabled()
+    await userEvent.click(within(dialog).getByRole('button', { name: '取消' }))
+    await userEvent.click(within(workbench).getByRole('button', { name: '彻底删除 2 项' }))
+    const batchDialog = await screen.findByRole('dialog', { name: '彻底删除 2 条上传记录' })
+    expect(within(batchDialog).queryByRole('checkbox', { name: '同时彻底删除关联记录和文件' })).not.toBeInTheDocument()
+    expect(within(batchDialog).getByPlaceholderText('全部删除')).toBeInTheDocument()
+    expect(within(batchDialog).getByText('彻底删除会移除上传记录和未入库临时文件，操作不可恢复；已经入库的服装与正式媒体仍会保留。')).toBeInTheDocument()
+    await userEvent.type(within(batchDialog).getByPlaceholderText('全部删除'), '全部删除')
+    await userEvent.click(within(batchDialog).getByRole('button', { name: '彻底删除' }))
+    await waitFor(() => expect(apiMock.deleteUploadSessions).toHaveBeenCalledWith(
+      expect.arrayContaining(['active-upload-session', 'archived-abandoned-session']),
+      { confirmPhrase: '全部删除' },
+    ))
   })
 
   it('offers both archive directions for one partially archived upload batch', async () => {
@@ -1007,8 +1108,10 @@ describe('production gate app shell and page controls', () => {
     const record = (await screen.findByText('预检失败批次')).closest('section')
     expect(record).not.toBeNull()
     await userEvent.click(within(record!).getByRole('button', { name: '归档' }))
-    expect(await screen.findByRole('dialog', { name: '归档或删除上传记录' })).toBeInTheDocument()
+    const dialog = await screen.findByRole('dialog', { name: '归档上传记录' })
+    expect(dialog).toBeInTheDocument()
     await waitFor(() => expect(apiMock.getUploadSessionDeleteImpact).toHaveBeenCalledWith(['precheck-failed-session']))
+    await userEvent.click(within(dialog).getByRole('checkbox', { name: '同时彻底删除关联记录和文件' }))
     expect(await screen.findByText('删除影响预检失败，暂时不能彻底删除。')).toBeInTheDocument()
     await userEvent.type(screen.getByPlaceholderText('预检失败批次'), '预检失败批次')
     expect(screen.getByRole('button', { name: '彻底删除' })).toBeDisabled()
