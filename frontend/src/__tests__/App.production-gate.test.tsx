@@ -806,7 +806,7 @@ describe('production gate app shell and page controls', () => {
     fireEvent.pointerDown(surface, { button: 0, pointerType: 'mouse', clientX: 5, clientY: 5 })
     fireEvent.pointerMove(window, { pointerType: 'mouse', clientX: 495, clientY: 165 })
     fireEvent.pointerUp(window, { pointerType: 'mouse', clientX: 495, clientY: 165 })
-    expect(await within(workbench).findByRole('button', { name: '归档管理 2 项' })).toBeEnabled()
+    expect(await within(workbench).findByRole('button', { name: '归档 2 项' })).toBeEnabled()
     expect(within(workbench).getByRole('status')).toHaveTextContent('已选 2 条')
     await userEvent.click(within(workbench).getByRole('button', { name: '全选本页' }))
 
@@ -819,10 +819,10 @@ describe('production gate app shell and page controls', () => {
     await userEvent.click(within(workbench).getByRole('checkbox', { name: '选择 批量归档二' }))
     await userEvent.keyboard('{/Shift}')
 
-    expect(within(workbench).getByRole('button', { name: '归档管理 2 项' })).toBeEnabled()
-    await userEvent.click(within(workbench).getByRole('button', { name: '归档管理 2 项' }))
+    expect(within(workbench).getByRole('button', { name: '归档 2 项' })).toBeEnabled()
+    await userEvent.click(within(workbench).getByRole('button', { name: '归档 2 项' }))
 
-    const dialog = await screen.findByRole('dialog', { name: '归档管理 2 条上传记录' })
+    const dialog = await screen.findByRole('dialog', { name: '归档 2 条上传记录' })
     expect(within(dialog).getByRole('radio', { name: '彻底删除 2 项' })).toBeEnabled()
     await userEvent.click(within(dialog).getByRole('button', { name: '确认归档' }))
 
@@ -864,7 +864,7 @@ describe('production gate app shell and page controls', () => {
     const workbench = (await screen.findByText('上传记录')).closest('.import-workbench') as HTMLElement
     await userEvent.click(within(workbench).getByRole('button', { name: '批量管理' }))
     await userEvent.click(within(workbench).getByRole('checkbox', { name: '选择 超大上传批次' }))
-    await userEvent.click(within(workbench).getByRole('button', { name: '归档管理 1 项' }))
+    await userEvent.click(within(workbench).getByRole('button', { name: '归档 1 项' }))
     await userEvent.click(within(await screen.findByRole('dialog', { name: '归档上传记录' })).getByRole('button', { name: '确认归档' }))
 
     await waitFor(() => expect(apiMock.archiveUploadSessions).toHaveBeenCalledTimes(1))
@@ -902,7 +902,7 @@ describe('production gate app shell and page controls', () => {
     const workbench = (await screen.findByText('上传记录')).closest('.import-workbench') as HTMLElement
     await userEvent.click(within(workbench).getByRole('button', { name: '批量管理' }))
     await userEvent.click(within(workbench).getByRole('checkbox', { name: '选择 超大删除批次' }))
-    await userEvent.click(within(workbench).getByRole('button', { name: '归档管理 1 项' }))
+    await userEvent.click(within(workbench).getByRole('button', { name: '归档 1 项' }))
     const dialog = await screen.findByRole('dialog', { name: '归档上传记录' })
     await waitFor(() => expect(apiMock.getUploadSessionDeleteImpact).toHaveBeenCalledTimes(2))
     await userEvent.click(within(dialog).getByRole('radio', { name: '彻底删除 1 项' }))
@@ -934,7 +934,7 @@ describe('production gate app shell and page controls', () => {
     const workbench = (await screen.findByText('上传记录')).closest('.import-workbench') as HTMLElement
     await userEvent.click(within(workbench).getByRole('button', { name: '批量管理' }))
     await userEvent.click(within(workbench).getByRole('checkbox', { name: '选择 部分删除批次' }))
-    await userEvent.click(within(workbench).getByRole('button', { name: '归档管理 1 项' }))
+    await userEvent.click(within(workbench).getByRole('button', { name: '归档 1 项' }))
     const dialog = await screen.findByRole('dialog', { name: '归档上传记录' })
     await waitFor(() => expect(apiMock.getUploadSessionDeleteImpact).toHaveBeenCalledTimes(2))
     await userEvent.click(within(dialog).getByRole('radio', { name: '彻底删除 1 项' }))
@@ -995,25 +995,25 @@ describe('production gate app shell and page controls', () => {
     await waitFor(() => expect(archivedToggle).toBeEnabled())
     await userEvent.click(archivedToggle)
 
-    expect(await screen.findByText('已归档放弃批次')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '归档管理' })).toBeEnabled()
+    const archivedRecord = (await screen.findByText('已归档放弃批次')).closest('.import-record-row') as HTMLElement
+    expect(within(archivedRecord).getByRole('button', { name: '归档' })).toBeEnabled()
     const workbench = screen.getByText('上传记录').closest('.import-workbench') as HTMLElement
     await userEvent.click(within(workbench).getByRole('button', { name: '批量管理' }))
     await userEvent.click(within(workbench).getByRole('button', { name: '全选本页' }))
     expect(within(workbench).getByRole('checkbox', { name: '选择 未归档批次' })).toBeChecked()
     expect(within(workbench).getByRole('checkbox', { name: '选择 已归档放弃批次' })).toBeChecked()
     expect(within(workbench).getByRole('checkbox', { name: '选择 等待清理批次' })).toBeDisabled()
-    expect(within(workbench).getByRole('button', { name: '归档管理 2 项' })).toBeEnabled()
+    expect(within(workbench).getByRole('button', { name: '归档 2 项' })).toBeEnabled()
     expect(within(workbench).queryByRole('button', { name: '取消归档 1 项' })).not.toBeInTheDocument()
     expect(within(workbench).queryByRole('button', { name: '彻底删除 2 项' })).not.toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: '归档管理' }))
-    const dialog = await screen.findByRole('dialog', { name: '归档管理上传记录' })
+    await userEvent.click(within(archivedRecord).getByRole('button', { name: '归档' }))
+    const dialog = await screen.findByRole('dialog', { name: '归档上传记录' })
     expect(within(dialog).getByRole('radio', { name: '取消归档 1 项' })).toBeChecked()
     await userEvent.click(within(dialog).getByRole('radio', { name: '彻底删除 1 项' }))
     expect(within(dialog).getByRole('button', { name: '彻底删除' })).toBeDisabled()
     await userEvent.click(within(dialog).getByRole('button', { name: '取消' }))
-    await userEvent.click(within(workbench).getByRole('button', { name: '归档管理 2 项' }))
-    const batchDialog = await screen.findByRole('dialog', { name: '归档管理 2 条上传记录' })
+    await userEvent.click(within(workbench).getByRole('button', { name: '归档 2 项' }))
+    const batchDialog = await screen.findByRole('dialog', { name: '归档 2 条上传记录' })
     await userEvent.click(within(batchDialog).getByRole('radio', { name: '彻底删除 2 项' }))
     expect(within(batchDialog).getByPlaceholderText('全部删除')).toBeInTheDocument()
     expect(within(batchDialog).getByText('彻底删除会移除上传记录和未入库临时文件，操作不可恢复；已经入库的服装与正式媒体仍会保留。')).toBeInTheDocument()
@@ -1077,16 +1077,16 @@ describe('production gate app shell and page controls', () => {
     const partialChip = await screen.findByText('部分归档')
     const record = partialChip.closest('.import-record-row') as HTMLElement
     expect(within(record).getByText('部分归档')).toBeInTheDocument()
-    expect(within(record).getByRole('button', { name: '归档管理' })).toBeEnabled()
+    expect(within(record).getByRole('button', { name: '归档' })).toBeEnabled()
     expect(within(record).queryByRole('button', { name: '取消归档' })).not.toBeInTheDocument()
 
     const workbench = screen.getByText('上传记录').closest('.import-workbench') as HTMLElement
     await userEvent.click(within(workbench).getByRole('button', { name: '批量管理' }))
     await userEvent.click(within(workbench).getByRole('checkbox', { name: '选择 部分归档批次' }))
-    expect(within(workbench).getByRole('button', { name: '归档管理 1 项' })).toBeEnabled()
+    expect(within(workbench).getByRole('button', { name: '归档 1 项' })).toBeEnabled()
 
-    await userEvent.click(within(workbench).getByRole('button', { name: '归档管理 1 项' }))
-    const dialog = await screen.findByRole('dialog', { name: '归档管理上传记录' })
+    await userEvent.click(within(workbench).getByRole('button', { name: '归档 1 项' }))
+    const dialog = await screen.findByRole('dialog', { name: '归档上传记录' })
     await userEvent.click(within(dialog).getByRole('radio', { name: '取消归档 1 项' }))
     await userEvent.click(within(dialog).getByRole('button', { name: '确认取消归档' }))
     await waitFor(() => expect(apiMock.listUploadSessions).toHaveBeenCalledWith(expect.objectContaining({ batchId: 'partially-archived-batch', includeArchived: true })))
@@ -1369,18 +1369,18 @@ describe('production gate app shell and page controls', () => {
     await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
     await userEvent.click(screen.getByRole('button', { name: '全选本页' }))
 
-    expect(screen.getByRole('button', { name: '归档管理 2 项' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '归档 2 项' })).toBeEnabled()
     expect(screen.queryByRole('button', { name: '取消归档 1 项' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '彻底删除 2 项' })).not.toBeInTheDocument()
-    expect(screen.getByText('1 项识别中，暂不可归档管理')).toBeInTheDocument()
+    expect(screen.getByText('1 项识别中，暂不可归档')).toBeInTheDocument()
     screen.getAllByRole('checkbox', { name: /^选择 / }).forEach((checkbox) => expect(checkbox).toBeChecked())
     const archivedCard = screen.getByText('ARCHIVED-LOOK').closest('.garment-card') as HTMLElement
-    expect(within(archivedCard).getByRole('button', { name: '归档管理' })).toBeEnabled()
+    expect(within(archivedCard).getByRole('button', { name: '归档' })).toBeEnabled()
     expect(within(archivedCard).queryByRole('button', { name: '删除' })).not.toBeInTheDocument()
     expect(within(archivedCard).queryByRole('button', { name: '取消归档' })).not.toBeInTheDocument()
 
-    await userEvent.click(screen.getByRole('button', { name: '归档管理 2 项' }))
-    const dialog = await screen.findByRole('dialog', { name: '归档管理 2 套搭配服装' })
+    await userEvent.click(screen.getByRole('button', { name: '归档 2 项' }))
+    const dialog = await screen.findByRole('dialog', { name: '归档 2 套搭配服装' })
     expect(within(dialog).getByRole('radio', { name: '归档 1 项' })).toBeChecked()
     expect(within(dialog).getByRole('radio', { name: '取消归档 1 项' })).toBeEnabled()
     await userEvent.click(within(dialog).getByRole('radio', { name: '彻底删除 2 项' }))
@@ -1393,7 +1393,7 @@ describe('production gate app shell and page controls', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: '处理中...' }))
     expect(apiMock.deleteStylingGarments).toHaveBeenCalledTimes(1)
     deleteRequest.resolve({ ok: true, purged: true, ids: [1, 2], objectCleanupErrors: [] })
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: '归档管理 2 套搭配服装' })).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '归档 2 套搭配服装' })).not.toBeInTheDocument())
   })
 
   it('locks garment restore against duplicate requests and recovers cleanly after failure', async () => {
@@ -1409,8 +1409,8 @@ describe('production gate app shell and page controls', () => {
     await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
     await userEvent.click(await screen.findByRole('button', { name: '查看已归档' }))
     const card = (await screen.findByText('RESTORE-GARMENT')).closest('.garment-card') as HTMLElement
-    await userEvent.click(within(card).getByRole('button', { name: '归档管理' }))
-    const dialog = await screen.findByRole('dialog', { name: '归档管理搭配服装' })
+    await userEvent.click(within(card).getByRole('button', { name: '归档' }))
+    const dialog = await screen.findByRole('dialog', { name: '归档搭配服装' })
     expect(within(dialog).getByRole('radio', { name: '取消归档 1 项' })).toBeChecked()
     const restoreButton = within(dialog).getByRole('button', { name: '确认取消归档' })
     fireEvent.click(restoreButton)
@@ -1668,29 +1668,29 @@ describe('production gate app shell and page controls', () => {
     await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
     await userEvent.click(screen.getByRole('button', { name: '全选本页' }))
 
-    expect(await screen.findByRole('button', { name: '归档管理 2 项' })).toBeEnabled()
+    expect(await screen.findByRole('button', { name: '归档 2 项' })).toBeEnabled()
     expect(screen.queryByRole('button', { name: '取消归档 1 项' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '彻底删除 2 项' })).not.toBeInTheDocument()
-    expect(screen.getByText('1 项生成中，暂不可归档管理')).toBeInTheDocument()
+    expect(screen.getByText('1 项生成中，暂不可归档')).toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: '选择 RUNNING-RECORD' })).toBeChecked()
     expect(screen.getByRole('status')).toHaveTextContent('已选 3 个任务')
 
     const archivedRow = screen.getByText('ARCHIVED-RECORD').closest('.record-row')!
-    expect(within(archivedRow as HTMLElement).getByRole('button', { name: '归档管理' })).toBeEnabled()
+    expect(within(archivedRow as HTMLElement).getByRole('button', { name: '归档' })).toBeEnabled()
     expect(within(archivedRow as HTMLElement).queryByRole('button', { name: '删除' })).not.toBeInTheDocument()
 
-    await userEvent.click(screen.getByRole('button', { name: '归档管理 2 项' }))
-    const dialog = await screen.findByRole('dialog', { name: '归档管理 2 条生成记录' })
+    await userEvent.click(screen.getByRole('button', { name: '归档 2 项' }))
+    const dialog = await screen.findByRole('dialog', { name: '归档 2 条生成记录' })
     await userEvent.click(within(dialog).getByRole('radio', { name: '彻底删除 2 项' }))
     await userEvent.type(within(dialog).getByPlaceholderText('全部删除'), '全部删除')
     await userEvent.click(within(dialog).getByRole('button', { name: '彻底删除' }))
     expect(apiMock.deleteTasks).toHaveBeenCalledWith([31, 32], '全部删除')
     expect(within(dialog).getByRole('button', { name: '处理中...' })).toBeDisabled()
     await userEvent.click(within(dialog).getByRole('button', { name: '取消' }))
-    expect(screen.getByRole('dialog', { name: '归档管理 2 条生成记录' })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: '归档 2 条生成记录' })).toBeInTheDocument()
 
     deletion.resolve({ ok: true, purged: true, ids: [31, 32], objectCleanupErrors: [] })
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: '归档管理 2 条生成记录' })).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '归档 2 条生成记录' })).not.toBeInTheDocument())
   })
 
   it('locks generation record restore against duplicate requests and recovers cleanly after failure', async () => {
@@ -1706,8 +1706,8 @@ describe('production gate app shell and page controls', () => {
     await userEvent.click(await screen.findByRole('button', { name: '生成记录' }))
     await userEvent.click(await screen.findByRole('button', { name: '查看已归档' }))
     const row = (await screen.findByText('RESTORE-RECORD')).closest('.record-row') as HTMLElement
-    await userEvent.click(within(row).getByRole('button', { name: '归档管理' }))
-    const dialog = await screen.findByRole('dialog', { name: '归档管理生成记录' })
+    await userEvent.click(within(row).getByRole('button', { name: '归档' }))
+    const dialog = await screen.findByRole('dialog', { name: '归档生成记录' })
     const restoreButton = within(dialog).getByRole('button', { name: '确认取消归档' })
     fireEvent.click(restoreButton)
     fireEvent.click(restoreButton)
@@ -1747,11 +1747,11 @@ describe('production gate app shell and page controls', () => {
     const firstRecord = await screen.findByText('ARCHIVED-PARTIAL-RESTORE-1')
     await userEvent.click(firstRecord.closest('.record-open') as HTMLElement)
     const detailPanel = document.querySelector('.record-detail') as HTMLElement
-    expect(within(detailPanel).getByRole('button', { name: '归档管理' })).toBeEnabled()
+    expect(within(detailPanel).getByRole('button', { name: '归档' })).toBeEnabled()
     await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
     await userEvent.click(screen.getByRole('button', { name: '全选本页' }))
-    await userEvent.click(await screen.findByRole('button', { name: '归档管理 101 项' }))
-    const dialog = await screen.findByRole('dialog', { name: '归档管理 101 条生成记录' })
+    await userEvent.click(await screen.findByRole('button', { name: '归档 101 项' }))
+    const dialog = await screen.findByRole('dialog', { name: '归档 101 条生成记录' })
     await userEvent.click(within(dialog).getByRole('button', { name: '确认取消归档' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('部分生成记录已完成取消归档')
@@ -1780,9 +1780,9 @@ describe('production gate app shell and page controls', () => {
     expect(await screen.findByText('RECORD-101')).toBeInTheDocument()
     await userEvent.click(await screen.findByRole('button', { name: '批量管理' }))
     await userEvent.click(screen.getByRole('button', { name: '全选本页' }))
-    await userEvent.click(await screen.findByRole('button', { name: '归档管理 101 项' }))
+    await userEvent.click(await screen.findByRole('button', { name: '归档 101 项' }))
 
-    const dialog = await screen.findByRole('dialog', { name: '归档管理 101 条生成记录' })
+    const dialog = await screen.findByRole('dialog', { name: '归档 101 条生成记录' })
     await userEvent.click(within(dialog).getByRole('radio', { name: '彻底删除 101 项' }))
     await waitFor(() => expect(apiMock.getTaskDeleteImpact).toHaveBeenCalledTimes(2))
     expect(apiMock.getTaskDeleteImpact.mock.calls.map(([ids]) => ids.length)).toEqual([99, 2])
@@ -1812,15 +1812,15 @@ describe('production gate app shell and page controls', () => {
     await userEvent.click(await screen.findByRole('button', { name: '生成记录' }))
     await userEvent.click(await screen.findByRole('button', { name: '查看已归档' }))
     const archivedRow = (await screen.findByText('ARCHIVED-RETRY')).closest('.record-row')!
-    await userEvent.click(within(archivedRow as HTMLElement).getByRole('button', { name: '归档管理' }))
+    await userEvent.click(within(archivedRow as HTMLElement).getByRole('button', { name: '归档' }))
 
-    const dialog = await screen.findByRole('dialog', { name: '归档管理生成记录' })
+    const dialog = await screen.findByRole('dialog', { name: '归档生成记录' })
     await userEvent.click(within(dialog).getByRole('radio', { name: '彻底删除 1 项' }))
     await userEvent.type(within(dialog).getByPlaceholderText('ARCHIVED-RETRY'), 'ARCHIVED-RETRY')
     await userEvent.click(within(dialog).getByRole('button', { name: '彻底删除' }))
     await waitFor(() => expect(within(dialog).getByRole('button', { name: '彻底删除' })).toBeEnabled())
     expect(apiMock.deleteTask).toHaveBeenCalledWith(41, 'ARCHIVED-RETRY')
-    expect(screen.getByRole('dialog', { name: '归档管理生成记录' })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: '归档生成记录' })).toBeInTheDocument()
   })
 
   it('refreshes selection cache and preserves an unfinished record detail after a partial chunk deletion', async () => {
@@ -1851,17 +1851,17 @@ describe('production gate app shell and page controls', () => {
     await userEvent.click(lastRecord.closest('.record-open') as HTMLElement)
     await userEvent.click(screen.getByRole('button', { name: '批量管理' }))
     await userEvent.click(screen.getByRole('button', { name: '全选本页' }))
-    await userEvent.click(await screen.findByRole('button', { name: '归档管理 101 项' }))
-    const dialog = await screen.findByRole('dialog', { name: '归档管理 101 条生成记录' })
+    await userEvent.click(await screen.findByRole('button', { name: '归档 101 项' }))
+    const dialog = await screen.findByRole('dialog', { name: '归档 101 条生成记录' })
     await userEvent.click(within(dialog).getByRole('radio', { name: '彻底删除 101 项' }))
     await userEvent.type(within(dialog).getByPlaceholderText('全部删除'), '全部删除')
     await userEvent.click(within(dialog).getByRole('button', { name: '彻底删除' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('部分生成记录已完成彻底删除')
-    expect(screen.queryByRole('dialog', { name: '归档管理 101 条生成记录' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: '归档 101 条生成记录' })).not.toBeInTheDocument()
     expect(within(document.querySelector('.record-detail') as HTMLElement).getByRole('heading', { name: 'PARTIAL-101' })).toBeInTheDocument()
     await userEvent.click(await screen.findByRole('checkbox', { name: '选择 PARTIAL-100' }))
-    expect(await screen.findByRole('button', { name: '归档管理 1 项' })).toBeEnabled()
+    expect(await screen.findByRole('button', { name: '归档 1 项' })).toBeEnabled()
   })
 
   it('keeps purge checked when delete impact refreshes the archive dialog', async () => {
