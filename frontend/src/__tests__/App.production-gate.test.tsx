@@ -1388,6 +1388,32 @@ describe('production gate app shell and page controls', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: '彻底删除 2 套搭配服装' })).not.toBeInTheDocument())
   })
 
+  it('locks garment restore against duplicate requests and recovers cleanly after failure', async () => {
+    const archivedGarment = { ...garment, id: 52, code: 'RESTORE-GARMENT', archivedAt: '2026-07-29T08:00:00Z', archiveReason: 'user_archived' }
+    const restoreRequest = deferred<any>()
+    apiMock.listStylingGarments.mockImplementation(async (options: { includeArchived?: boolean }) => ({
+      ...emptyPage, items: options.includeArchived ? [archivedGarment] : [], total: options.includeArchived ? 1 : 0, facets: {}, stableFacets: {},
+    }))
+    apiMock.restoreStylingGarments.mockReturnValue(restoreRequest.promise)
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
+    await userEvent.click(await screen.findByRole('button', { name: '查看已归档' }))
+    const card = (await screen.findByText('RESTORE-GARMENT')).closest('.garment-card') as HTMLElement
+    const restoreButton = within(card).getByRole('button', { name: '取消归档' })
+    fireEvent.click(restoreButton)
+    fireEvent.click(restoreButton)
+    expect(apiMock.restoreStylingGarments).toHaveBeenCalledTimes(1)
+    expect(await within(card).findByRole('button', { name: '取消归档中...' })).toBeDisabled()
+    const deleteButton = within(card).getByRole('button', { name: '删除' })
+    expect(deleteButton).toBeDisabled()
+    fireEvent.click(deleteButton)
+    expect(screen.queryByRole('dialog', { name: '彻底删除搭配服装' })).not.toBeInTheDocument()
+
+    restoreRequest.reject(new Error('restore unavailable'))
+    await waitFor(() => expect(within(card).getByRole('button', { name: '取消归档' })).toBeEnabled())
+  })
+
   it('keeps a garment visible and retryable when archive fails', async () => {
     apiMock.listStylingGarments.mockResolvedValue({ ...emptyPage, items: [garment], total: 1, facets: {}, stableFacets: {} })
     apiMock.getStylingGarmentDeleteImpact.mockResolvedValue({ impact: { garmentCount: 1, estimatedBytes: 0 } })
@@ -1607,6 +1633,33 @@ describe('production gate app shell and page controls', () => {
 
     deletion.resolve({ ok: true, purged: true, ids: [31, 32], objectCleanupErrors: [] })
     await waitFor(() => expect(screen.queryByRole('dialog', { name: '彻底删除 2 条生成记录' })).not.toBeInTheDocument())
+  })
+
+  it('locks generation record restore against duplicate requests and recovers cleanly after failure', async () => {
+    const archivedRecord = { ...task, id: 61, name: 'RESTORE-RECORD', status: 'COMPLETED', archivedAt: '2026-07-29T08:00:00Z', archiveReason: 'user_archived' }
+    const workspaceEntry = { kind: 'task', id: 'task-61', status: archivedRecord.status, name: archivedRecord.name, createdAt: archivedRecord.createdAt, updatedAt: archivedRecord.updatedAt, task: archivedRecord }
+    const restoreRequest = deferred<any>()
+    apiMock.listRecordWorkspace.mockImplementation(async (options: { includeArchived?: boolean }) => ({
+      ...emptyPage, items: options.includeArchived ? [workspaceEntry] : [], total: options.includeArchived ? 1 : 0, facets: {}, stableFacets: {},
+    }))
+    apiMock.restoreTasks.mockReturnValue(restoreRequest.promise)
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '生成记录' }))
+    await userEvent.click(await screen.findByRole('button', { name: '查看已归档' }))
+    const row = (await screen.findByText('RESTORE-RECORD')).closest('.record-row') as HTMLElement
+    const restoreButton = within(row).getByRole('button', { name: '取消归档' })
+    fireEvent.click(restoreButton)
+    fireEvent.click(restoreButton)
+    expect(apiMock.restoreTasks).toHaveBeenCalledTimes(1)
+    expect(await within(row).findByRole('button', { name: '取消归档中...' })).toBeDisabled()
+    const deleteButton = within(row).getByRole('button', { name: '删除' })
+    expect(deleteButton).toBeDisabled()
+    fireEvent.click(deleteButton)
+    expect(screen.queryByRole('dialog', { name: '彻底删除生成记录' })).not.toBeInTheDocument()
+
+    restoreRequest.reject(new Error('restore unavailable'))
+    await waitFor(() => expect(within(row).getByRole('button', { name: '取消归档' })).toBeEnabled())
   })
 
   it('chunks more than 100 generation records for impact precheck and permanent deletion without a singleton tail', async () => {
