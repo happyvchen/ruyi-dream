@@ -71,6 +71,8 @@ ABANDONED
 
 - `POST /api/styling-garments/{id}/save-and-tag`：保存当前搭配服装并触发 / 重新触发 AI 识别；用于单货号局部重试。
 - `POST /api/styling-garments/batch-save-and-tag`：批量提交 `DRAFT`、`TAGGING_READY`、`TAGGING_FAILED` 搭配服装进入 AI 识别，也支持对 `READY` 搭配服装重新识别；已归档、正在识别或无需识别的项会跳过并返回 `skipped`。
+- `POST /api/styling-garments/delete-impact`：预检待删除服装、服装图片和历史引用数量。`referencingTaskCount` 只表示会保留并显示来源已删除的生成记录，不计入删除的 `taskCount`、结果图或媒体统计。
+- `DELETE /api/styling-garments/{id}?purge=true` / `POST /api/styling-garments/batch-delete`：彻底删除只清理搭配服装聚合及其图片关系、标签和打标 attempts；媒体仅在没有其它直接引用或历史快照引用时释放。不得删除引用它的生成任务、分镜、成片或生成 attempts。响应 `deletedTaskIds` 固定为空，`referencingTaskIds` 返回仍保留的历史任务。
 - `GET /api/styling-garment-exports/archive?ids={id1,id2}`：下载一个或多个货号的正式原图 ZIP；每个货号一个文件夹，只包含图片，单次最多 50 个货号。下载不受识别状态或归档状态限制，也不触发 AI 识别。
 - 批量上传场景中，前端应先等待本批所有可上传项完成 `finalize-styling-garment`，再对成功创建的 `StylingGarment` 调用批量识别接口。识别失败只改变 `StylingGarment` 的当前识别状态、错误码及已创建的 attempt，不改变 upload session 的 `FINALIZED` 结果。
 

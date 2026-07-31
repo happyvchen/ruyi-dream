@@ -1372,6 +1372,24 @@ a.button-link { text-decoration: none; cursor: pointer; }
   gap: 14px;
 }
 .selected-strip { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+
+.deleted-garment-placeholder {
+  min-height: 118px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 18px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 14px;
+  color: var(--text-muted);
+  text-align: center;
+  background: var(--panel-muted);
+}
+
+.deleted-garment-placeholder strong { color: var(--text); }
+.deleted-garment-placeholder span { font-size: 12px; line-height: 1.5; }
 .preview-board {
   width: 100%;
   aspect-ratio: 3 / 2;

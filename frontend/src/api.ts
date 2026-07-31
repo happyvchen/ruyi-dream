@@ -142,6 +142,7 @@ export type StylingGarment = {
   id: number
   code: string
   status: string
+  sourceAvailable?: boolean
   aiTags: Record<string, unknown>
   manualTags: Record<string, unknown>
   officialTitleTags?: Record<string, unknown>
@@ -408,6 +409,8 @@ export type DeleteImpact = {
   garmentImageCount?: number
   dependentTaskIds?: number[]
   dependentTaskCount?: number
+  referencingTaskIds?: number[]
+  referencingTaskCount?: number
   taskCount?: number
   taskImageCount?: number
   inputVersionCount?: number
@@ -438,6 +441,7 @@ export type DeleteOperationResult = {
   ids?: number[]
   deletedGarmentIds?: number[]
   deletedTaskIds?: number[]
+  referencingTaskIds?: number[]
   objectCleanupErrors?: ObjectCleanupError[]
 }
 

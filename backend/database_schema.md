@@ -75,3 +75,5 @@ GenerationTask
 ## 数据清理
 
 彻底删除任务时，后端删除该任务的主推款图引用、输入版本、选搭、分镜、结果集、结果图、attempt 和对应媒体资产。归档只隐藏任务，不删除媒体。
+
+彻底删除搭配服装时，只删除 `StylingGarment` 聚合、图片关系、标签和 `styling_garment_tagging` attempts。`generation_stylings.selected_material_ids_json` 与历史快照是跨聚合弱引用，不反向级联删除 `GenerationTask`；快照引用的媒体元数据和对象文件继续保留。读取历史选搭时，如果来源服装已不存在，API 返回 `sourceAvailable = false` 的删除占位并脱敏原货号，主推款、分镜和成片保持可读。

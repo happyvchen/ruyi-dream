@@ -127,11 +127,14 @@ function uploadSessionMutationChunks(ids: string[]) {
 
 function mergeDeleteImpacts(impacts: DeleteImpact[]) {
   const sum = (key: keyof DeleteImpact) => impacts.reduce((total, impact) => total + (typeof impact[key] === 'number' ? impact[key] : 0), 0)
+  const referencingTaskIds = Array.from(new Set(impacts.flatMap((impact) => impact.referencingTaskIds ?? [])))
   return {
     garmentCount: sum('garmentCount'),
     garmentImageCount: sum('garmentImageCount'),
     dependentTaskIds: Array.from(new Set(impacts.flatMap((impact) => impact.dependentTaskIds ?? []))),
     dependentTaskCount: sum('dependentTaskCount'),
+    referencingTaskIds,
+    referencingTaskCount: referencingTaskIds.length || sum('referencingTaskCount'),
     taskCount: sum('taskCount'),
     taskImageCount: sum('taskImageCount'),
     inputVersionCount: sum('inputVersionCount'),
@@ -2276,7 +2279,9 @@ function StylingPlanSummary({ task }: { task: GenerationTask }) {
       </div>
       <p>{styling.reasonSummary || stringValue(planValue(plan, 'reason_summary'))}</p>
       <div className="selected-strip">
-        {styling.selectedMaterials.length ? styling.selectedMaterials.map((item) => <GarmentCard key={item.id} item={item} />) : <EmptyState title="无需库内搭配服装" text="智能选搭判断本次以主推款单穿或生成配饰辅助更合适。" />}
+        {styling.selectedMaterials.length ? styling.selectedMaterials.map((item) => item.sourceAvailable === false
+          ? <div className="deleted-garment-placeholder" key={item.id} role="status"><Archive size={18} /><strong>搭配服装已删除</strong><span>历史生成内容已保留，原搭配服装不再提供详情。</span></div>
+          : <GarmentCard key={item.id} item={item} />) : <EmptyState title="无需库内搭配服装" text="智能选搭判断本次以主推款单穿或生成配饰辅助更合适。" />}
       </div>
       {requirementText && (
         <div className="requirement-summary">
@@ -3140,7 +3145,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
           impactError={deleteGarmentImpactError}
           onRetryImpact={() => openGarmentDeleteDialog(deleteGarmentDialog)}
           description={(purge) => purge
-            ? '彻底删除会移除搭配服装、关联图片及依赖记录，操作不可恢复。'
+            ? '彻底删除只会移除服装库中的服装和图片；历史生成记录及其所需素材不会删除。操作不可恢复。'
             : '可在此归档日常项目、取消已有归档，或选择彻底删除。'}
         />
       )}
@@ -9151,13 +9156,21 @@ function deleteImpactText(impact?: DeleteImpact | null) {
   if (!impact) return '影响范围暂时无法计算。彻底删除会移除关联表单数据和已登记的存储文件，且不可恢复。'
   const parts: string[] = []
   if (impact.garmentCount) parts.push(`${impact.garmentCount} 套搭配服装`)
-  if (impact.garmentImageCount) parts.push(`${impact.garmentImageCount} 张服装图`)
-  const taskCount = impact.dependentTaskCount || impact.taskCount || 0
+  if (impact.garmentImageCount) parts.push(`${impact.garmentImageCount} 张库内服装图片记录`)
+  const isGarmentDeletion = Boolean(impact.garmentCount)
+  const taskCount = isGarmentDeletion ? 0 : impact.taskCount || 0
   if (taskCount) parts.push(`${taskCount} 条生成记录`)
-  if (impact.resultImageCount) parts.push(`${impact.resultImageCount} 张结果图记录`)
+  if (!isGarmentDeletion && impact.resultImageCount) parts.push(`${impact.resultImageCount} 张结果图记录`)
   if (impact.mediaAssetCount) parts.push(`${impact.mediaAssetCount} 个存储文件`)
   const scope = parts.length ? parts.join('、') : '当前选中项'
-  return `彻底删除将移除 ${scope}，预计原始文件 ${formatBytes(impact.estimatedBytes)}。该操作不可恢复。`
+  const referenceCount = impact.referencingTaskCount ?? impact.dependentTaskCount ?? 0
+  const referenceNotice = isGarmentDeletion && referenceCount
+    ? `${referenceCount} 条历史生成记录会保留，其中该搭配服装将显示为已删除。`
+    : ''
+  const storageNotice = isGarmentDeletion
+    ? `预计释放存储 ${formatBytes(impact.estimatedBytes)}`
+    : `预计原始文件 ${formatBytes(impact.estimatedBytes)}`
+  return `彻底删除将移除 ${scope}，${storageNotice}。该操作不可恢复。${referenceNotice ? ` ${referenceNotice}` : ''}`
 }
 
 function dimensionText(dimensions?: { width?: number | null; height?: number | null }) {

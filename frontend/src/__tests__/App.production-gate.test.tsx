@@ -357,6 +357,41 @@ describe('production gate app shell and page controls', () => {
     expect(await screen.findByText('创建拍摄任务后会出现在这里。')).toBeInTheDocument()
   })
 
+  it('shows a tombstone instead of stale garment details in preserved generation history', async () => {
+    const preservedTask = {
+      ...task,
+      status: 'STYLING_READY',
+      styling: {
+        id: 71,
+        selectedMaterialIds: [91],
+        selectedMaterials: [{
+          ...garment,
+          id: 91,
+          code: 'DELETED-SOURCE-CODE',
+          status: 'DELETED',
+          sourceAvailable: false,
+        }],
+        stylingPlan: {},
+        heroUnderstanding: {},
+        outfitCandidates: [],
+        criticScores: {},
+        rejectedCandidates: [],
+        qualitySignals: [],
+        reasonSummary: '历史方案仍可复盘',
+        warnings: [],
+      },
+    }
+    apiMock.getTask.mockResolvedValue({ item: preservedTask })
+    window.history.replaceState(null, '', '/studio?task=1')
+
+    render(<App />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'AI 智能选搭' }))
+    expect(await screen.findByText('搭配服装已删除')).toBeInTheDocument()
+    expect(screen.getByText('历史生成内容已保留，原搭配服装不再提供详情。')).toBeInTheDocument()
+    expect(screen.queryByText('DELETED-SOURCE-CODE')).not.toBeInTheDocument()
+  })
+
   it('restores the newest task across standalone and batch tasks by creation time', async () => {
     const batchFirstTask = { ...task, id: 11, name: '批次首项', batchId: 'batch-cross-time', createdAt: '2026-07-20T10:00:00Z' }
     const newestStandaloneTask = { ...task, id: 12, name: '顶层最新单次任务', createdAt: '2026-07-20T10:01:00Z' }
@@ -1504,7 +1539,7 @@ describe('production gate app shell and page controls', () => {
       stableFacets: {},
     }))
     apiMock.getStylingGarmentDeleteImpact.mockResolvedValue({ impact: {
-      garmentCount: 2, garmentImageCount: 2, dependentTaskCount: 0, taskCount: 0,
+      garmentCount: 2, garmentImageCount: 2, dependentTaskCount: 1, referencingTaskCount: 1, taskCount: 0,
       resultImageCount: 0, mediaAssetCount: 2, estimatedBytes: 2048,
     } })
     apiMock.deleteStylingGarments.mockImplementation(() => deleteRequest.promise)
@@ -1531,7 +1566,9 @@ describe('production gate app shell and page controls', () => {
     expect(within(dialog).getByRole('radio', { name: '归档 1 项' })).toBeChecked()
     expect(within(dialog).getByRole('radio', { name: '取消归档 1 项' })).toBeEnabled()
     await userEvent.click(within(dialog).getByRole('radio', { name: '彻底删除 2 项' }))
-    expect(within(dialog).getByText('彻底删除会移除搭配服装、关联图片及依赖记录，操作不可恢复。')).toBeInTheDocument()
+    expect(within(dialog).getByText('彻底删除只会移除服装库中的服装和图片；历史生成记录及其所需素材不会删除。操作不可恢复。')).toBeInTheDocument()
+    expect(dialog).toHaveTextContent('1 条历史生成记录会保留，其中该搭配服装将显示为已删除。')
+    expect(dialog).not.toHaveTextContent('1 条生成记录、')
     await userEvent.type(within(dialog).getByPlaceholderText('全部删除'), '全部删除')
     await userEvent.click(within(dialog).getByRole('button', { name: '彻底删除' }))
     await waitFor(() => expect(apiMock.deleteStylingGarments).toHaveBeenCalledWith([1, 2], { purge: true, confirmPhrase: '全部删除' }))
@@ -1653,10 +1690,10 @@ describe('production gate app shell and page controls', () => {
     const dialog = await screen.findByRole('dialog', { name: '归档搭配服装' })
     await userEvent.click(within(dialog).getByRole('radio', { name: '彻底删除 1 项' }))
     secondImpact.resolve({ impact: { garmentCount: 1, garmentImageCount: 2, mediaAssetCount: 2, estimatedBytes: 2048 } })
-    expect(await within(dialog).findByText(/2 张服装图/)).toBeInTheDocument()
+    expect(await within(dialog).findByText(/2 张库内服装图片记录/)).toBeInTheDocument()
     firstImpact.resolve({ impact: { garmentCount: 1, garmentImageCount: 99, mediaAssetCount: 99, estimatedBytes: 99999 } })
-    await waitFor(() => expect(within(dialog).queryByText(/99 张服装图/)).not.toBeInTheDocument())
-    expect(within(dialog).getByText(/2 张服装图/)).toBeInTheDocument()
+    await waitFor(() => expect(within(dialog).queryByText(/99 张库内服装图片记录/)).not.toBeInTheDocument())
+    expect(within(dialog).getByText(/2 张库内服装图片记录/)).toBeInTheDocument()
   })
 
   it('keeps all four failed-garment actions in a two-column grid', async () => {

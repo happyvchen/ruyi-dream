@@ -1729,6 +1729,31 @@ def media_asset_snapshot_reference_count(db: Any, object_key: str) -> int:
     return int(row["count"] or 0)
 
 
+def media_asset_snapshot_reference_count_after_styling_garment_purge(
+    db: Any,
+    object_key: str,
+    garment_ids: list[int],
+) -> int:
+    """Count snapshot refs that survive removal of target garment tagging attempts."""
+    garment_ids = list(dict.fromkeys(int(garment_id) for garment_id in garment_ids))
+    if not garment_ids:
+        return media_asset_snapshot_reference_count(db, object_key)
+    pattern = f"%{object_key}%"
+    placeholders = ", ".join("?" for _ in garment_ids)
+    row = db.execute(
+        f"""
+        SELECT
+          (SELECT COUNT(*) FROM generation_task_input_versions WHERE image_snapshot_json LIKE ?) +
+          (SELECT COUNT(*) FROM generation_stylings WHERE selected_material_snapshot_json LIKE ?) +
+          (SELECT COUNT(*) FROM generation_attempts
+           WHERE (request_snapshot_json LIKE ? OR response_snapshot_json LIKE ?)
+             AND NOT (owner_type = 'styling_garment_tagging' AND owner_id IN ({placeholders}))) AS count
+        """,
+        (pattern, pattern, pattern, pattern, *garment_ids),
+    ).fetchone()
+    return int(row["count"] or 0)
+
+
 def media_asset_direct_reference_count(db: Any, asset_id: int) -> int:
     row = db.execute(
         """
@@ -2760,24 +2785,25 @@ def delete_styling_garment(
         if purge and confirm_code != row["code"]:
             raise HTTPException(status_code=400, detail="请输入完整 code 以确认删除关联记录和文件")
         if purge:
-            dependent_task_ids = dependent_task_ids_for_styling_garments(db, [garment_id])
             mark_styling_garments_deletion_state(db, [garment_id], "deletion_pending")
-            if dependent_task_ids:
-                mark_generation_tasks_deletion_state(db, dependent_task_ids, "deletion_pending")
     if purge:
         try:
             with get_db() as db:
-                deleted_task_ids, object_keys = purge_styling_garment(db, garment_id, row["code"])
-                log_event(db, "styling_garment", garment_id, "purged", {"code": row["code"], "deletedTaskIds": deleted_task_ids})
+                referencing_task_ids, object_keys = purge_styling_garment(db, garment_id, row["code"])
+                log_event(db, "styling_garment", garment_id, "purged", {"code": row["code"], "referencingTaskIds": referencing_task_ids})
         except Exception as exc:
             with suppress(Exception):
                 with get_db() as db:
                     mark_styling_garments_deletion_state(db, [garment_id], "deletion_failed")
-                    if dependent_task_ids:
-                        mark_generation_tasks_deletion_state(db, dependent_task_ids, "deletion_failed")
             raise HTTPException(status_code=409, detail="彻底删除未完成，记录已保留在已归档，可恢复后重试") from exc
         cleanup_errors = cleanup_deleted_media_objects(object_keys)
-        return {"ok": True, "purged": True, "deletedTaskIds": deleted_task_ids, "objectCleanupErrors": cleanup_errors}
+        return {
+            "ok": True,
+            "purged": True,
+            "deletedTaskIds": [],
+            "referencingTaskIds": referencing_task_ids,
+            "objectCleanupErrors": cleanup_errors,
+        }
     with get_db() as db:
         archive_styling_garments(db, [garment_id], "user_archived")
         log_event(db, "styling_garment", garment_id, "archived", {"code": row["code"]})
@@ -2794,33 +2820,29 @@ def delete_styling_garments(payload: StylingGarmentDeleteRequest) -> dict[str, A
         if payload.purge:
             if payload.confirmPhrase != "全部删除":
                 raise HTTPException(status_code=400, detail="请输入“全部删除”以确认批量删除")
-            dependent_task_ids = dependent_task_ids_for_styling_garments(db, garment_ids)
             mark_styling_garments_deletion_state(db, garment_ids, "deletion_pending")
-            if dependent_task_ids:
-                mark_generation_tasks_deletion_state(db, dependent_task_ids, "deletion_pending")
     if payload.purge:
         try:
-            deleted_task_ids: list[int] = []
+            referencing_task_ids: list[int] = []
             object_keys: list[str] = []
             with get_db() as db:
                 for row in rows:
                     task_ids, keys = purge_styling_garment(db, int(row["id"]), row["code"])
-                    deleted_task_ids.extend(task_ids)
+                    referencing_task_ids.extend(task_ids)
                     object_keys.extend(keys)
-                    log_event(db, "styling_garment", int(row["id"]), "purged", {"code": row["code"], "batch": True, "deletedTaskIds": task_ids})
+                    log_event(db, "styling_garment", int(row["id"]), "purged", {"code": row["code"], "batch": True, "referencingTaskIds": task_ids})
         except Exception as exc:
             with suppress(Exception):
                 with get_db() as db:
                     mark_styling_garments_deletion_state(db, garment_ids, "deletion_failed")
-                    if dependent_task_ids:
-                        mark_generation_tasks_deletion_state(db, dependent_task_ids, "deletion_failed")
             raise HTTPException(status_code=409, detail="彻底删除未完成，记录已保留在已归档，可恢复后重试") from exc
         cleanup_errors = cleanup_deleted_media_objects(object_keys)
         return {
             "ok": True,
             "purged": True,
             "deletedGarmentIds": garment_ids,
-            "deletedTaskIds": list(dict.fromkeys(deleted_task_ids)),
+            "deletedTaskIds": [],
+            "referencingTaskIds": list(dict.fromkeys(referencing_task_ids)),
             "objectCleanupErrors": cleanup_errors,
         }
     with get_db() as db:
@@ -2884,12 +2906,89 @@ def ensure_rows_not_pending_deletion(rows: list[Any]) -> None:
 
 def dependent_task_ids_for_styling_garments(db: Any, garment_ids: list[int]) -> list[int]:
     target_ids = {int(garment_id) for garment_id in garment_ids}
-    styling_rows = db.execute("SELECT task_id, selected_material_ids_json FROM generation_stylings").fetchall()
-    return list(dict.fromkeys(
-        int(styling["task_id"])
-        for styling in styling_rows
-        if target_ids.intersection({int(item) for item in loads(styling["selected_material_ids_json"], [])})
-    ))
+    styling_rows = db.execute(
+        "SELECT task_id, selected_material_ids_json, selected_material_snapshot_json FROM generation_stylings"
+    ).fetchall()
+    referencing_task_ids: list[int] = []
+    for styling in styling_rows:
+        referenced_ids = {int(item) for item in loads(styling["selected_material_ids_json"], [])}
+        referenced_ids.update(
+            int(snapshot["id"])
+            for snapshot in loads(styling["selected_material_snapshot_json"], [])
+            if isinstance(snapshot, dict) and snapshot.get("id") is not None
+        )
+        if target_ids.intersection(referenced_ids):
+            referencing_task_ids.append(int(styling["task_id"]))
+    return list(dict.fromkeys(referencing_task_ids))
+
+
+def styling_garment_owned_media_rows(db: Any, garment_ids: list[int]) -> list[Any]:
+    """Return unique media candidates owned by the target garment aggregates."""
+    garment_ids = list(dict.fromkeys(int(garment_id) for garment_id in garment_ids))
+    if not garment_ids:
+        return []
+    placeholders = ", ".join("?" for _ in garment_ids)
+    return db.execute(
+        f"""
+        SELECT DISTINCT ma.id, ma.object_key, ma.size_bytes
+        FROM media_assets ma
+        WHERE ma.id IN (
+          SELECT media_asset_id
+          FROM styling_garment_images
+          WHERE styling_garment_id IN ({placeholders})
+          UNION
+          SELECT output_asset_id
+          FROM generation_attempts
+          WHERE owner_type = 'styling_garment_tagging'
+            AND owner_id IN ({placeholders})
+            AND output_asset_id IS NOT NULL
+        )
+        """,
+        (*garment_ids, *garment_ids),
+    ).fetchall()
+
+
+def styling_garment_owned_media_reference_counts(db: Any, garment_ids: list[int]) -> dict[int, int]:
+    """Count direct references removed when the target garments are purged."""
+    garment_ids = list(dict.fromkeys(int(garment_id) for garment_id in garment_ids))
+    if not garment_ids:
+        return {}
+    placeholders = ", ".join("?" for _ in garment_ids)
+    rows = db.execute(
+        f"""
+        SELECT asset_id, COUNT(*) AS count
+        FROM (
+          SELECT media_asset_id AS asset_id
+          FROM styling_garment_images
+          WHERE styling_garment_id IN ({placeholders})
+          UNION ALL
+          SELECT output_asset_id AS asset_id
+          FROM generation_attempts
+          WHERE owner_type = 'styling_garment_tagging'
+            AND owner_id IN ({placeholders})
+            AND output_asset_id IS NOT NULL
+        ) owned_references
+        GROUP BY asset_id
+        """,
+        (*garment_ids, *garment_ids),
+    ).fetchall()
+    return {int(row["asset_id"]): int(row["count"] or 0) for row in rows}
+
+
+def releasable_styling_garment_media_rows(db: Any, garment_ids: list[int]) -> list[Any]:
+    """Preview assets that become fully unreferenced after a garment purge."""
+    media_rows = styling_garment_owned_media_rows(db, garment_ids)
+    owned_counts = styling_garment_owned_media_reference_counts(db, garment_ids)
+    return [
+        media
+        for media in media_rows
+        if media_asset_direct_reference_count(db, int(media["id"])) <= owned_counts.get(int(media["id"]), 0)
+        and media_asset_snapshot_reference_count_after_styling_garment_purge(
+            db,
+            clean_key(media["object_key"]),
+            garment_ids,
+        ) == 0
+    ]
 
 
 def generation_task_delete_impact(db: Any, task_ids: list[int]) -> dict[str, Any]:
@@ -2962,8 +3061,18 @@ def styling_garment_delete_impact(db: Any, garment_ids: list[int]) -> dict[str, 
         """,
         garment_ids,
     ).fetchall()
-    dependent_task_ids = dependent_task_ids_for_styling_garments(db, garment_ids)
-    task_impact = generation_task_delete_impact(db, dependent_task_ids) if dependent_task_ids else {
+    releasable_media_rows = releasable_styling_garment_media_rows(db, garment_ids)
+    referencing_task_ids = dependent_task_ids_for_styling_garments(db, garment_ids)
+    total_bytes = sum(int(row["size_bytes"] or 0) for row in releasable_media_rows)
+    return {
+        "garmentCount": len(garment_ids),
+        "garmentImageCount": len(image_rows),
+        # Keep the old names during the 0.1.0 transition, but they now describe
+        # historical references that are preserved rather than deleted.
+        "dependentTaskIds": referencing_task_ids,
+        "dependentTaskCount": len(referencing_task_ids),
+        "referencingTaskIds": referencing_task_ids,
+        "referencingTaskCount": len(referencing_task_ids),
         "taskCount": 0,
         "taskImageCount": 0,
         "inputVersionCount": 0,
@@ -2971,18 +3080,8 @@ def styling_garment_delete_impact(db: Any, garment_ids: list[int]) -> dict[str, 
         "previewCount": 0,
         "resultSetCount": 0,
         "resultImageCount": 0,
-        "mediaAssetCount": 0,
-        "estimatedBytes": 0,
-    }
-    total_bytes = sum(int(row["size_bytes"] or 0) for row in image_rows) + int(task_impact["estimatedBytes"] or 0)
-    return {
-        "garmentCount": len(garment_ids),
-        "garmentImageCount": len(image_rows),
-        "dependentTaskIds": dependent_task_ids,
-        "dependentTaskCount": len(dependent_task_ids),
-        "mediaAssetCount": len(image_rows) + int(task_impact["mediaAssetCount"] or 0),
+        "mediaAssetCount": len(releasable_media_rows),
         "estimatedBytes": total_bytes,
-        "dependentTaskImpact": task_impact,
     }
 
 
@@ -3073,73 +3172,36 @@ def purge_styling_garment(db: Any, garment_id: int, code: str) -> tuple[list[int
         """,
         (garment_id,),
     ).fetchall()
-    dependent_task_ids = dependent_task_ids_for_styling_garments(db, [garment_id])
-    dependent_asset_ids: list[int] = []
-    if dependent_task_ids:
-        placeholders = ", ".join("?" for _ in dependent_task_ids)
-        dependent_assets = db.execute(
-            f"""
-            SELECT media_asset_id AS asset_id FROM generation_task_images WHERE task_id IN ({placeholders})
-            UNION
-            SELECT preview_asset_id AS asset_id FROM generation_previews WHERE task_id IN ({placeholders}) AND preview_asset_id IS NOT NULL
-            UNION
-            SELECT gri.current_asset_id AS asset_id FROM generation_result_images_new gri
-            JOIN generation_result_sets grs ON grs.id = gri.result_set_id
-            WHERE grs.task_id IN ({placeholders}) AND gri.current_asset_id IS NOT NULL
-            UNION
-            SELECT ga.output_asset_id AS asset_id FROM generation_attempts ga
-            WHERE ga.output_asset_id IS NOT NULL AND (
-                 (ga.owner_type = 'generation_styling' AND ga.owner_id IN ({placeholders}))
-                 OR (ga.owner_type = 'generation_preview' AND ga.owner_id IN (
-                      SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
-                    ))
-                 OR (ga.owner_type = 'generation_result_image' AND ga.owner_id IN (
-                      SELECT gri.id FROM generation_result_images_new gri
-                      JOIN generation_result_sets grs ON grs.id = gri.result_set_id
-                      WHERE grs.task_id IN ({placeholders})
-                    ))
-            )
-            """,
-            (
-                *dependent_task_ids, *dependent_task_ids, *dependent_task_ids,
-                *dependent_task_ids, *dependent_task_ids, *dependent_task_ids,
-            ),
-        ).fetchall()
-        dependent_asset_ids = [int(asset["asset_id"]) for asset in dependent_assets]
-        db.execute(
-            f"""
-            DELETE FROM generation_attempts
-            WHERE (owner_type = 'generation_preview' AND owner_id IN (
-                    SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
-                  ))
-               OR (owner_type = 'generation_result_image' AND owner_id IN (
-                    SELECT gri.id FROM generation_result_images_new gri
-                    JOIN generation_result_sets grs ON grs.id = gri.result_set_id
-                    WHERE grs.task_id IN ({placeholders})
-                  ))
-            """,
-            (*dependent_task_ids, *dependent_task_ids),
-        )
-        db.execute(
-            f"DELETE FROM generation_attempts WHERE owner_type = 'generation_styling' AND owner_id IN ({placeholders})",
-            dependent_task_ids,
-        )
-        if dependent_asset_ids:
-            asset_placeholders = ", ".join("?" for _ in dependent_asset_ids)
-            db.execute(
-                f"DELETE FROM generation_attempts WHERE output_asset_id IN ({asset_placeholders})",
-                dependent_asset_ids,
-            )
-        db.execute(f"DELETE FROM generation_tasks WHERE id IN ({placeholders})", dependent_task_ids)
-    asset_ids = [int(image["id"]) for image in image_rows] + dependent_asset_ids
-    dependent_media_rows = media_asset_rows_for_ids(db, dependent_asset_ids)
-    object_keys = [media["object_key"] for media in [*image_rows, *dependent_media_rows]]
+    referencing_task_ids = dependent_task_ids_for_styling_garments(db, [garment_id])
+    tagging_attempt_assets = db.execute(
+        """
+        SELECT output_asset_id AS asset_id
+        FROM generation_attempts
+        WHERE owner_type = 'styling_garment_tagging' AND owner_id = ? AND output_asset_id IS NOT NULL
+        """,
+        (garment_id,),
+    ).fetchall()
+    tagging_asset_ids = [int(asset["asset_id"]) for asset in tagging_attempt_assets]
+    db.execute(
+        "DELETE FROM generation_attempts WHERE owner_type = 'styling_garment_tagging' AND owner_id = ?",
+        (garment_id,),
+    )
+    candidate_asset_ids = list(dict.fromkeys([int(image["id"]) for image in image_rows] + tagging_asset_ids))
+    media_rows = media_asset_rows_for_ids(db, candidate_asset_ids)
     db.execute("DELETE FROM styling_garments WHERE id = ?", (garment_id,))
+    asset_ids = [
+        int(media["id"])
+        for media in media_rows
+        if media_asset_direct_reference_count(db, int(media["id"])) == 0
+        and media_asset_snapshot_reference_count(db, clean_key(media["object_key"])) == 0
+    ]
+    deletable_asset_ids = set(asset_ids)
+    object_keys = [media["object_key"] for media in media_rows if int(media["id"]) in deletable_asset_ids]
     if asset_ids:
         placeholders = ", ".join("?" for _ in asset_ids)
         detach_upload_session_media_assets(db, asset_ids)
         db.execute(f"DELETE FROM media_assets WHERE id IN ({placeholders})", asset_ids)
-    return dependent_task_ids, object_keys
+    return referencing_task_ids, object_keys
 
 
 @app.post("/api/generation-tasks")
@@ -8741,6 +8803,31 @@ def strip_debug_response_fields(value: Any) -> Any:
     return value
 
 
+def redact_deleted_material_codes(value: Any, deleted_codes: set[str]) -> Any:
+    """Redact deleted product identifiers from public historical responses.
+
+    Stored snapshots remain immutable for audit and generation recovery; only the
+    serialized API view is redacted.
+    """
+    codes = {code.strip() for code in deleted_codes if code and code.strip()}
+    if not codes:
+        return value
+    if isinstance(value, str):
+        redacted = value
+        for code in sorted(codes, key=len, reverse=True):
+            redacted = re.sub(
+                rf"(?<![A-Za-z0-9_-]){re.escape(code)}(?![A-Za-z0-9_-])",
+                "已删除搭配服装",
+                redacted,
+            )
+        return redacted
+    if isinstance(value, list):
+        return [redact_deleted_material_codes(item, codes) for item in value]
+    if isinstance(value, dict):
+        return {key: redact_deleted_material_codes(item, codes) for key, item in value.items()}
+    return value
+
+
 def styling_result_for_prompt(styling_plan: dict[str, Any], selected_material_snapshot: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     plan = styling_plan if isinstance(styling_plan, dict) else {}
     selected = selected_outfit_from_plan(plan)
@@ -10958,14 +11045,58 @@ def get_generation_styling(styling_id: int | None, include_debug: bool = False) 
     styling_plan = loads(row["styling_plan_json"], {}) if "styling_plan_json" in row.keys() else {}
     if not include_debug:
         styling_plan = strip_debug_response_fields(styling_plan)
+    selected_material_ids = [int(item) for item in loads(row["selected_material_ids_json"], [])]
+    selected_material_snapshots = [
+        item for item in loads(row["selected_material_snapshot_json"], [])
+        if isinstance(item, dict)
+    ]
+    snapshot_material_ids = [
+        int(snapshot["id"])
+        for snapshot in selected_material_snapshots
+        if snapshot.get("id") is not None
+    ]
+    referenced_material_ids = selected_material_ids or snapshot_material_ids
+    live_material_ids: set[int] = set()
+    if referenced_material_ids:
+        placeholders = ", ".join("?" for _ in referenced_material_ids)
+        with get_db() as db:
+            live_material_ids = {
+                int(material["id"])
+                for material in db.execute(
+                    f"SELECT id FROM styling_garments WHERE id IN ({placeholders}) AND deleted_at IS NULL",
+                    referenced_material_ids,
+                ).fetchall()
+            }
+    snapshots_by_id = {
+        int(snapshot["id"]): snapshot
+        for snapshot in selected_material_snapshots
+        if snapshot.get("id") is not None
+    }
+    deleted_material_codes = {
+        str(snapshots_by_id.get(material_id, {}).get("code") or "")
+        for material_id in referenced_material_ids
+        if material_id not in live_material_ids
+    }
+    selected_materials: list[dict[str, Any]] = selected_material_snapshots if not referenced_material_ids else []
+    for material_id in referenced_material_ids:
+        snapshot = snapshots_by_id.get(material_id, {})
+        if material_id in live_material_ids:
+            selected_materials.append(snapshot or {"id": material_id})
+            continue
+        selected_materials.append({
+            "id": material_id,
+            "code": "",
+            "status": "DELETED",
+            "sourceAvailable": False,
+        })
     item = {
         "id": row["id"],
         "taskId": row["task_id"],
         "inputVersionId": row["input_version_id"],
         "sourceMaterialIds": loads(row["source_material_ids_json"], []),
         "candidateMaterialIds": loads(row["candidate_material_ids_json"], []) if "candidate_material_ids_json" in row.keys() else [],
-        "selectedMaterialIds": loads(row["selected_material_ids_json"], []),
-        "selectedMaterials": loads(row["selected_material_snapshot_json"], []),
+        "selectedMaterialIds": referenced_material_ids,
+        "selectedMaterials": selected_materials,
         "userInstruction": loads(row_value(row, "user_instruction_json"), {}),
         "userRequirement": loads(row_value(row, "user_requirement_json"), {}),
         "stylingPlan": styling_plan,
@@ -10985,7 +11116,7 @@ def get_generation_styling(styling_id: int | None, include_debug: bool = False) 
         item["candidateRetrievalSnapshot"] = loads(row["candidate_retrieval_snapshot_json"], {}) if "candidate_retrieval_snapshot_json" in row.keys() else {}
     else:
         item = strip_debug_response_fields(item)
-    return item
+    return redact_deleted_material_codes(item, deleted_material_codes)
 
 
 def get_generation_preview(preview_id: int | None) -> dict[str, Any] | None:
