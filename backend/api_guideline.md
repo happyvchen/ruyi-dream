@@ -35,7 +35,7 @@
 - `POST /api/uploads/presign`：已停用（410）；禁止创建没有 UploadSession 所有权的直传对象。
 - `POST /api/upload-sessions`：创建上传任务和对象存储直传地址。
 - `POST /api/upload-sessions/styling-import-batch`：原子创建一次搭配服装导入中的全部货号会话；返回共同的 `batchId`，保证用户开始任务后、读取和上传图片前整批记录立即可查。每个货号首次 `resume` 时绑定图片 SHA-256。
-- `GET /api/upload-sessions`：按 `scope`、`status`、`batchId`、`limit` 查询上传任务；默认排除已归档记录，`includeArchived=true` 时一并返回且包含已归档的 `ABANDONED` 记录；`batchId` 用于完整恢复同一次批量任务，单批最多返回 500 个货号。`includeArchived=true` 返回的 `deletion_pending` 仅供客户端对账并移除本地残留任务，不得渲染为用户记录。
+- `GET /api/upload-sessions`：按 `scope`、`status`、`batchId`、`limit` 查询上传任务，默认按首次创建时间倒序、同时间按 ID 倒序；默认排除已归档记录，`includeArchived=true` 时一并返回且包含已归档的 `ABANDONED` 记录；`batchId` 用于完整恢复同一次批量任务，单批最多返回 500 个货号。`includeArchived=true` 返回的 `deletion_pending` 仅供客户端对账并移除本地残留任务，不得渲染为用户记录。
 - `GET /api/upload-sessions/{session_id}`：查询单个上传任务和条目。
 - `POST /api/upload-sessions/{session_id}/resume`：严格校验重新选择的相对路径、大小、修改时间和 SHA-256；认领对象存储中已存在且完整性一致的对象，并只为缺失条目重新签发上传地址。
 - `POST /api/upload-sessions/{session_id}/lease`：上传期间续租当前批次的执行权。

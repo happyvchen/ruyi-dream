@@ -30,6 +30,30 @@ def test_new_upload_objects_use_one_media_uuid_namespace_per_file(client) -> Non
     assert re.fullmatch(r"media/[0-9a-f]{32}/original\.png", keys[1])
 
 
+def test_upload_session_limit_is_applied_after_created_time_descending_order(client) -> None:
+    newest = create_session(client, scope="styling_garment", filenames=["newest.jpg"])["session"]["id"]
+    middle = create_session(client, scope="styling_garment", filenames=["middle.jpg"])["session"]["id"]
+    oldest_but_recently_updated = create_session(client, scope="styling_garment", filenames=["oldest.jpg"])["session"]["id"]
+    with get_db() as db:
+        db.execute(
+            "UPDATE upload_sessions SET created_at = ?, updated_at = ? WHERE id = ?",
+            ("2026-07-03T10:00:00Z", "2026-07-03T10:00:00Z", newest),
+        )
+        db.execute(
+            "UPDATE upload_sessions SET created_at = ?, updated_at = ? WHERE id = ?",
+            ("2026-07-02T10:00:00Z", "2026-07-02T10:00:00Z", middle),
+        )
+        db.execute(
+            "UPDATE upload_sessions SET created_at = ?, updated_at = ? WHERE id = ?",
+            ("2026-07-01T10:00:00Z", "2026-07-04T10:00:00Z", oldest_but_recently_updated),
+        )
+
+    response = client.get("/api/upload-sessions", params={"scope": "styling_garment", "limit": 2})
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["items"]] == [newest, middle]
+
+
 def test_all_upload_session_states_can_be_archived_restored_and_deleted_without_deleting_business_objects(client, monkeypatch) -> None:
     from app import main as app_main
     from conftest import insert_media_asset

@@ -73,6 +73,21 @@ def test_generation_record_workspace_supports_all_batch_and_single_task_views(cl
     assert {item["id"] for item in task_records.json()["items"]} == {single}
 
 
+def test_generation_record_workspace_uses_numeric_task_id_as_equal_time_tie_breaker(client) -> None:
+    first = insert_generation_task(name="SAME-TIME-1", status="DRAFT")
+    second = insert_generation_task(name="SAME-TIME-2", status="DRAFT")
+    with get_db() as db:
+        db.execute(
+            "UPDATE generation_tasks SET created_at = '2026-07-01T10:00:00Z' WHERE id IN (?, ?)",
+            (first, second),
+        )
+
+    response = client.get("/api/generation-record-workspace", params={"limit": 2})
+
+    assert response.status_code == 200
+    assert [item["task"]["id"] for item in response.json()["items"]] == [second, first]
+
+
 def test_generation_record_filters_handle_many_keywords_without_advanced_query_syntax(client) -> None:
     task_ids = [insert_generation_task(name=f"SKU-{index:03d}", status="READY_FOR_STYLING") for index in range(20)]
     insert_generation_task(name="OTHER-001", status="DRAFT")

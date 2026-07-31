@@ -983,7 +983,7 @@ def list_upload_sessions(
             f"""
             SELECT * FROM upload_sessions
             {where}
-            ORDER BY updated_at DESC, created_at DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT ?
             """,
             [*values, limit],
@@ -5367,7 +5367,13 @@ def list_generation_record_workspace(
         "status": lambda item: BATCH_RECORD_STATUS_ORDER.index(item["status"]) if item["status"] in BATCH_RECORD_STATUS_ORDER else len(BATCH_RECORD_STATUS_ORDER),
     }.get(sort_by, lambda item: str(item["createdAt"]))
     reverse = sort_dir != "asc"
-    items = sorted(items, key=lambda item: (sort_key(item), str(item["id"])), reverse=reverse)
+
+    def tie_breaker(item: dict[str, Any]) -> str:
+        if item["kind"] == "task":
+            return f"task:{int(item['task']['id']):020d}"
+        return f"batch:{item['batch']['batchId']}"
+
+    items = sorted(items, key=lambda item: (sort_key(item), tie_breaker(item)), reverse=reverse)
     total = len(items)
     page_items = items[offset:offset + limit]
     return {

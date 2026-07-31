@@ -233,6 +233,7 @@ export function App() {
   const [task, setTask] = useState<GenerationTask | null>(null)
   const [tasks, setTasks] = useState<GenerationTask[]>([])
   const [records, setRecords] = useState<GenerationTask[]>([])
+  const [latestWorkspaceTask, setLatestWorkspaceTask] = useState<GenerationTask | null>(null)
   const [garments, setGarments] = useState<StylingGarment[]>([])
   const [models, setModels] = useState<ModelProfile[]>([])
   const [recordDetail, setRecordDetail] = useState<GenerationTask | null>(null)
@@ -317,7 +318,7 @@ export function App() {
     const pollingSessions = pollingUploadSessions(uploadSessions)
     if (!authenticated || !pollingSessions.length) return
     const timer = window.setInterval(() => {
-      void refreshUploadSessionScopes(pollingSessions).catch(() => undefined)
+      void refreshActiveUploadSessions(pollingSessions).catch(() => undefined)
     }, 3000)
     return () => window.clearInterval(timer)
   }, [authenticated, uploadSessions])
@@ -371,15 +372,18 @@ export function App() {
   }, [authenticated, hasRunningTagging, runningTaggingKey])
 
   async function refreshAll() {
-    const [garmentResult, taskResult, recordResult, modelResult] = await Promise.all([
+    const [garmentResult, taskResult, recordResult, workspaceResult, modelResult] = await Promise.all([
       api.listStylingGarments({ limit: 80 }),
       api.listTasks({ limit: 30 }),
       api.listRecords({ limit: 30 }),
+      api.listRecordWorkspace({ limit: 1, offset: 0, sortBy: 'createdAt', sortDir: 'desc' }),
       api.listModels(),
     ])
     setGarments(garmentResult.items)
     setTasks(taskResult.items)
     setRecords(recordResult.items)
+    const newestWorkspaceTask = defaultTaskForWorkspaceRecord(workspaceResult.items[0])
+    setLatestWorkspaceTask(newestWorkspaceTask)
     setModels(modelResult.items)
     const route = parseRoute()
     const requestedTaskId = route.page === 'studio' ? route.taskId : undefined
@@ -387,7 +391,7 @@ export function App() {
       const detail = await api.getTask(requestedTaskId, role === 'admin').then((r) => r.item).catch(() => null)
       if (detail) setTask(detail)
     } else if (route.page === 'studio' && !requestedTaskId && !task && !suppressStudioAutoRestoreRef.current) {
-      const latestTask = recordResult.items[0] ?? taskResult.items[0] ?? null
+      const latestTask = newestWorkspaceTask ?? taskResult.items[0] ?? recordResult.items[0] ?? null
       if (latestTask) {
         setTask(latestTask)
         window.history.replaceState(null, '', routeToUrl({ page: 'studio', taskId: latestTask.id }))
@@ -401,13 +405,25 @@ export function App() {
   }
 
   async function refreshUploadSessions(scope: string, limit = 20) {
-    const result = await api.listUploadSessions({ scope, limit })
-    setUploadSessions((current) => mergeUploadSessions(current, result.items, scope))
-    return result.items
+    const [historyResult, activeResult] = await Promise.all([
+      api.listUploadSessions({ scope, limit }),
+      api.listUploadSessions({ scope, status: pollingUploadSessionStatusQuery, limit: 500 }),
+    ])
+    const items = mergeUploadSessionUpdates(historyResult.items, activeResult.items)
+    setUploadSessions((current) => mergeUploadSessions(current, items, scope))
+    return items
   }
 
   async function refreshUploadSessionScopes(items?: UploadSession[]) {
     await Promise.all(uploadSessionRefreshTargets(items).map(({ scope, limit }) => refreshUploadSessions(scope, limit)))
+  }
+
+  async function refreshActiveUploadSessions(items: UploadSession[]) {
+    const refreshed = await Promise.all(items.map((item) => api.getUploadSession(item.id)
+      .then((result) => result.session)
+      .catch(() => null)))
+    const successful = refreshed.filter((item): item is UploadSession => !!item)
+    if (successful.length) setUploadSessions((current) => mergeUploadSessionUpdates(current, successful))
   }
 
   function navigate(next: Page) {
@@ -415,7 +431,7 @@ export function App() {
     suppressStudioAutoRestoreRef.current = false
     setPage(next)
     if (next === 'studio') {
-      const latestTask = records[0] ?? tasks[0] ?? null
+      const latestTask = latestWorkspaceTask ?? tasks[0] ?? records[0] ?? null
       setTask(latestTask)
       window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: latestTask?.id }))
       if (latestTask) void api.getTask(latestTask.id, role === 'admin').then((result) => setTask(result.item)).catch(() => undefined)
@@ -558,7 +574,7 @@ export function App() {
       <main className="workspace">
         {error && <div className="toast">{error.length > 300 ? `${error.slice(0, 300)}…` : error}</div>}
         {busy && <BusyPill label={busy} />}
-        {page === 'studio' && <StudioPage task={task} setTask={setTask} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} uploadSessions={uploadSessions.filter((item) => item.scope === 'generation-task')} refreshUploadSessions={() => refreshUploadSessions('generation_task')} markBrowserUploading={markBrowserUploading} onStartNewTask={() => { suppressStudioAutoRestoreRef.current = true }} />}
+        {page === 'studio' && <StudioPage task={task} setTask={setTask} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} uploadSessions={uploadSessions.filter((item) => item.scope === 'generation-task')} refreshUploadSessions={() => refreshUploadSessions('generation_task')} markBrowserUploading={markBrowserUploading} onStartNewTask={() => { suppressStudioAutoRestoreRef.current = true }} onLatestTaskCreated={setLatestWorkspaceTask} />}
         {page === 'library' && <LibraryPage garments={garments} run={run} role={role} onDeleteResult={noteDeleteOperationResult} uploadSessions={uploadSessions.filter((item) => item.scope === 'styling-garment')} refreshUploadSessions={() => refreshUploadSessions('styling_garment', 100)} markBrowserUploading={markBrowserUploading} showImport={libraryImportOpen} setShowImport={setLibraryImportOpen} importJobs={libraryImportJobs} setImportJobs={persistLibraryImportJobs} syncImportJobs={setLibraryImportJobs} />}
         {page === 'model' && <ModelPage models={models} role={role} run={run} />}
         {page === 'prompt-maintenance' && role === 'admin' && <PromptMaintenancePage run={run} />}
@@ -637,8 +653,11 @@ function BusyPill({ label }: { label: string }) {
 }
 
 function pollingUploadSessions(items: UploadSession[]) {
-  return items.filter((item) => ['PENDING', 'UPLOADING', 'UPLOADED', 'FINALIZING'].includes(item.status))
+  return items.filter((item) => pollingUploadSessionStatuses.includes(item.status))
 }
+
+const pollingUploadSessionStatuses = ['PENDING', 'UPLOADING', 'UPLOADED', 'FINALIZING']
+const pollingUploadSessionStatusQuery = pollingUploadSessionStatuses.join(',')
 
 export function uploadSessionRefreshTargets(items?: UploadSession[]) {
   if (!items) return [...uploadSessionScopeRefreshes]
@@ -655,6 +674,24 @@ export function mergeUploadSessions(current: UploadSession[], incoming: UploadSe
   return Array.from(byId.values()).sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')))
 }
 
+export function mergeUploadSessionUpdates(current: UploadSession[], incoming: UploadSession[]) {
+  const byId = new Map(current.map((item) => [item.id, item]))
+  incoming.forEach((item) => byId.set(item.id, item))
+  return Array.from(byId.values()).sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')))
+}
+
+export function compareCreatedAtDesc(
+  left: { id: string | number; createdAt?: string | null; updatedAt?: string | null },
+  right: { id: string | number; createdAt?: string | null; updatedAt?: string | null },
+) {
+  const leftTime = new Date(parseRuyiTime(left.createdAt ?? left.updatedAt)).getTime()
+  const rightTime = new Date(parseRuyiTime(right.createdAt ?? right.updatedAt)).getTime()
+  const safeLeftTime = Number.isFinite(leftTime) ? leftTime : 0
+  const safeRightTime = Number.isFinite(rightTime) ? rightTime : 0
+  if (safeLeftTime !== safeRightTime) return safeRightTime - safeLeftTime
+  return String(right.id).localeCompare(String(left.id), 'zh-CN', { numeric: true })
+}
+
 function uploadSessionStatusLabel(status: string) {
   if (status === 'PENDING') return '等待上传'
   if (status === 'UPLOADING') return '上传图片中'
@@ -666,7 +703,7 @@ function uploadSessionStatusLabel(status: string) {
   return status
 }
 
-function StudioPage({ task, setTask, role, run, localOperations, startLocalOperation, clearLocalOperationsFor, uploadSessions, refreshUploadSessions, markBrowserUploading, onStartNewTask }: {
+function StudioPage({ task, setTask, role, run, localOperations, startLocalOperation, clearLocalOperationsFor, uploadSessions, refreshUploadSessions, markBrowserUploading, onStartNewTask, onLatestTaskCreated }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask | null) => void
   role: SessionRole | null
@@ -678,6 +715,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   refreshUploadSessions: () => Promise<UploadSession[]>
   markBrowserUploading: (delta: 1 | -1) => void
   onStartNewTask: () => void
+  onLatestTaskCreated: (task: GenerationTask) => void
 }) {
   const [step, setStep] = useState<StudioStep>(0)
   const [taskRailTab, setTaskRailTab] = useState<'summary' | 'recent'>('summary')
@@ -737,7 +775,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     const requestId = recentTaskRequestRef.current + 1
     recentTaskRequestRef.current = requestId
     setRecentTaskLoading(true)
-    void api.listRecordWorkspace({ limit: recentTaskPageSize, offset }).then((result) => {
+    void api.listRecordWorkspace({ limit: recentTaskPageSize, offset, sortBy: 'createdAt', sortDir: 'desc' }).then((result) => {
       if (recentTaskRequestRef.current !== requestId) return
       setRecentTaskTotal(result.total)
       setRecentTaskHasMore(result.hasMore)
@@ -937,7 +975,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   useEffect(() => {
     if (!hasActiveRecentTasks) return
     const timer = window.setInterval(() => {
-      void api.listRecordWorkspace({ limit: recentTaskPageSize, offset: 0 }).then((result) => {
+      void api.listRecordWorkspace({ limit: recentTaskPageSize, offset: 0, sortBy: 'createdAt', sortDir: 'desc' }).then((result) => {
         setRecentTaskTotal(result.total)
         setRecentItems((current) => {
           const byId = new Map(result.items.map((item) => [item.id, item] as const))
@@ -1021,7 +1059,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
               <StepRail active={visibleStep} executing={studioView?.executingStage ?? null} max={currentStep} onSelect={setStep} />
             </div>
             <div className="studio-stage-viewport">
-              {visibleStep === 0 && <UploadHeroStep task={task} setTask={applyTaskUpdate} run={run} uploadSessions={uploadSessions} refreshUploadSessions={refreshUploadSessions} markBrowserUploading={markBrowserUploading} />}
+              {visibleStep === 0 && <UploadHeroStep task={task} setTask={applyTaskUpdate} run={run} uploadSessions={uploadSessions} refreshUploadSessions={refreshUploadSessions} markBrowserUploading={markBrowserUploading} onLatestTaskCreated={onLatestTaskCreated} />}
               {visibleStep === 1 && <StylingStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={aiStylingInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
               {visibleStep === 2 && <PreviewStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={storyboardInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
               {visibleStep === 3 && <FinalStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={finalImageInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
@@ -1208,6 +1246,12 @@ function mergeRecentRecordItems(current: GenerationWorkspaceRecord[], incoming: 
 
 function taskCoverAsset(task: GenerationTask) {
   return task.summary?.cover ?? task.images?.[0]?.asset ?? null
+}
+
+function defaultTaskForWorkspaceRecord(entry?: GenerationWorkspaceRecord) {
+  if (!entry) return null
+  if (entry.kind === 'task') return entry.task
+  return entry.batch.coverTasks.find((task) => task.id === entry.batch.firstTaskId) ?? entry.batch.coverTasks[0] ?? null
 }
 
 function RecentSingleTaskRow({ item, active, onOpen, showKind = true }: { item: GenerationTask; active: boolean; onOpen: (item: GenerationTask) => void; showKind?: boolean }) {
@@ -1429,13 +1473,14 @@ type PendingBatchGroup = {
   error?: string
 }
 
-function UploadHeroStep({ task, setTask, run, uploadSessions, refreshUploadSessions, markBrowserUploading }: {
+function UploadHeroStep({ task, setTask, run, uploadSessions, refreshUploadSessions, markBrowserUploading, onLatestTaskCreated }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask) => void
   run: any
   uploadSessions: UploadSession[]
   refreshUploadSessions: () => Promise<UploadSession[]>
   markBrowserUploading: (delta: 1 | -1) => void
+  onLatestTaskCreated: (task: GenerationTask) => void
 }) {
   const [files, setFiles] = useState<File[]>([])
   const [name, setName] = useState('')
@@ -1625,6 +1670,8 @@ function UploadHeroStep({ task, setTask, run, uploadSessions, refreshUploadSessi
     }
     setBatchCreating(null)
     setUploadProgress(null)
+    const firstTask = firstCreatedTaskRef.current
+    if (firstTask) onLatestTaskCreated(firstTask)
     if (blocked.length || failedCount) {
       const parts = []
       if (created.length) parts.push(`已创建 ${created.length} 个任务`)
@@ -1633,7 +1680,6 @@ function UploadHeroStep({ task, setTask, run, uploadSessions, refreshUploadSessi
       setBatchError(parts.join('；'))
       return
     }
-    const firstTask = firstCreatedTaskRef.current
     if (firstTask) {
       setTask(firstTask)
       window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: firstTask.id }))
@@ -4907,11 +4953,10 @@ function ImportTaskWorkbench({
   const importRecords = [
     ...visibleJobs.filter((job) => visibleJobIds.has(job.id)).map((job) => ({ kind: 'job' as const, id: job.id, job })),
     ...recoveredRecords,
-  ].sort((a, b) => {
-    const aTime = a.kind === 'job' ? a.job.updatedAt ?? a.job.createdAt : a.group.updatedAt ?? a.group.createdAt
-    const bTime = b.kind === 'job' ? b.job.updatedAt ?? b.job.createdAt : b.group.updatedAt ?? b.group.createdAt
-    return new Date(parseRuyiTime(bTime)).getTime() - new Date(parseRuyiTime(aTime)).getTime()
-  })
+  ].sort((a, b) => compareCreatedAtDesc(
+    { id: a.id, createdAt: a.kind === 'job' ? a.job.createdAt : a.group.createdAt, updatedAt: a.kind === 'job' ? a.job.updatedAt : a.group.updatedAt },
+    { id: b.id, createdAt: b.kind === 'job' ? b.job.createdAt : b.group.createdAt, updatedAt: b.kind === 'job' ? b.job.updatedAt : b.group.updatedAt },
+  ))
   const totalRecords = importRecords.length
   const totalPages = totalRecords > 0 ? Math.ceil(totalRecords / pageSize) : 0
   const pagedRecords = importRecords.slice(offset, offset + pageSize)

@@ -295,6 +295,21 @@ afterEach(() => {
 })
 
 describe('production gate app shell and page controls', () => {
+  it('loads active upload sessions separately from the creation-time history window', async () => {
+    render(<App />)
+
+    await waitFor(() => expect(apiMock.listUploadSessions).toHaveBeenCalledWith({
+      scope: 'generation_task',
+      status: 'PENDING,UPLOADING,UPLOADED,FINALIZING',
+      limit: 500,
+    }))
+    expect(apiMock.listUploadSessions).toHaveBeenCalledWith({
+      scope: 'styling_garment',
+      status: 'PENDING,UPLOADING,UPLOADED,FINALIZING',
+      limit: 500,
+    })
+  })
+
   it('admin can reach every 0.1.0 page without exposing provider console as a top-level page', async () => {
     render(<App />)
 
@@ -340,6 +355,38 @@ describe('production gate app shell and page controls', () => {
 
     await userEvent.click(screen.getByRole('tab', { name: /最近任务/ }))
     expect(await screen.findByText('创建拍摄任务后会出现在这里。')).toBeInTheDocument()
+  })
+
+  it('restores the newest task across standalone and batch tasks by creation time', async () => {
+    const batchFirstTask = { ...task, id: 11, name: '批次首项', batchId: 'batch-cross-time', createdAt: '2026-07-20T10:00:00Z' }
+    const newestStandaloneTask = { ...task, id: 12, name: '顶层最新单次任务', createdAt: '2026-07-20T10:01:00Z' }
+    const batchLastTask = { ...task, id: 13, name: '批次末项', batchId: 'batch-cross-time', createdAt: '2026-07-20T10:02:00Z' }
+    const batchRecord = {
+      id: 'batch-cross-time', batchId: 'batch-cross-time', name: '跨时批次', status: 'PENDING',
+      taskCount: 2, activeTaskCount: 2, archivedTaskCount: 0, completedTaskCount: 0,
+      failedTaskCount: 0, cancelledTaskCount: 0, runningTaskCount: 0, queuedTaskCount: 0,
+      downloadableTaskCount: 0, statusCounts: { DRAFT: 2 }, createdAt: batchFirstTask.createdAt,
+      updatedAt: batchLastTask.updatedAt, coverTasks: [batchFirstTask, batchLastTask],
+      sampleTaskNames: [batchFirstTask.name, batchLastTask.name], firstTaskId: batchFirstTask.id,
+    }
+    const workspaceItems = [
+      { kind: 'task' as const, id: 'task:12', status: newestStandaloneTask.status, name: newestStandaloneTask.name, createdAt: newestStandaloneTask.createdAt, updatedAt: newestStandaloneTask.updatedAt, task: newestStandaloneTask },
+      { kind: 'batch' as const, id: 'batch:batch-cross-time', status: batchRecord.status, name: batchRecord.name, createdAt: batchRecord.createdAt, updatedAt: batchRecord.updatedAt, batch: batchRecord },
+    ]
+    apiMock.listRecords.mockResolvedValue({ ...emptyPage, items: [newestStandaloneTask], total: 1 })
+    apiMock.listTasks.mockResolvedValue({ ...emptyPage, items: [batchLastTask, newestStandaloneTask, batchFirstTask], total: 3 })
+    apiMock.listRecordWorkspace.mockResolvedValue({ ...emptyPage, items: workspaceItems, total: 2, facets: {}, stableFacets: {} })
+    apiMock.getTask.mockImplementation(async (id: number) => ({ item: [batchFirstTask, newestStandaloneTask, batchLastTask].find((item) => item.id === id)! }))
+
+    render(<App />)
+
+    expect((await screen.findAllByText('顶层最新单次任务')).length).toBeGreaterThan(0)
+    await waitFor(() => expect(window.location.search).toBe('?task=12'))
+    expect(apiMock.getTask).toHaveBeenCalledWith(12, true)
+
+    await userEvent.click(screen.getByRole('button', { name: '搭配服装库' }))
+    await userEvent.click(screen.getByRole('button', { name: 'AI 摄影棚' }))
+    await waitFor(() => expect(window.location.search).toBe('?task=12'))
   })
 
   it('renders every task chip in a batch instead of truncating the batch navigation', async () => {
