@@ -98,6 +98,10 @@ def test_all_upload_session_states_can_be_archived_restored_and_deleted_without_
     assert deleted.json()["objectCleanupErrors"] == []
     assert deleted.json()["deletedIds"] == [finalized_id]
     assert set(deleted.json()["deferredIds"]) == set(unfinished_ids)
+    reconciled = client.post("/api/upload-sessions/reconcile", json={"ids": all_ids})
+    assert reconciled.status_code == 200
+    assert set(reconciled.json()["existingIds"]) == set(unfinished_ids)
+    assert set(reconciled.json()["deletionPendingIds"]) == set(unfinished_ids)
     blocked_finalize = client.post(
         f"/api/upload-sessions/{unfinished_ids[2]}/finalize-styling-garment",
         json={"code": "DELETION-MUST-BLOCK-FINALIZE"},
@@ -113,6 +117,10 @@ def test_all_upload_session_states_can_be_archived_restored_and_deleted_without_
         assert db.execute("SELECT id FROM media_assets WHERE id = ?", (media_asset_id,)).fetchone() is not None
     assert app_main.cleanup_deleted_upload_sessions() == 6
     assert set(unfinished_keys) <= set(deleted_keys)
+    assert client.post("/api/upload-sessions/reconcile", json={"ids": all_ids}).json() == {
+        "existingIds": [],
+        "deletionPendingIds": [],
+    }
     with get_db() as db:
         assert db.execute("SELECT COUNT(*) AS count FROM upload_sessions").fetchone()["count"] == 0
 

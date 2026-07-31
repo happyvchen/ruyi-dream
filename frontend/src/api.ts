@@ -739,6 +739,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ ids }),
     }),
+  reconcileUploadSessions: (ids: string[]) =>
+    request<{ existingIds: string[]; deletionPendingIds: string[] }>('/api/upload-sessions/reconcile', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }),
   archiveUploadSessions: (ids: string[]) =>
     request<{ archivedIds: string[] }>('/api/upload-sessions/archive', {
       method: 'POST',

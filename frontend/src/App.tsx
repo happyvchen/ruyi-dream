@@ -4633,6 +4633,17 @@ function BatchImportPanel({
           garments={garments}
           onAbandon={(id) => api.abandonUploadSession(id).then(() => refreshUploadSessions())}
           onRemoveJob={(jobId) => setImportJobs((current) => current.filter((job) => job.id !== jobId))}
+          onRemoveSessionsFromJobs={(sessionIds) => setImportJobs((current) => {
+            const removing = new Set(sessionIds)
+            let changed = false
+            const next = current.flatMap((job) => {
+              const items = job.items.filter((item) => !item.sessionId || !removing.has(item.sessionId))
+              if (items.length === job.items.length) return [job]
+              changed = true
+              return items.length ? [{ ...job, items, total: items.length }] : []
+            })
+            return changed ? next : current
+          })}
           onSetJobArchived={(jobId, archived) => setImportJobs((current) => current.map((job) => job.id === jobId ? {
             ...job,
             archivedAt: archived ? new Date().toISOString() : null,
@@ -4657,6 +4668,7 @@ function ImportTaskWorkbench({
   garments,
   onAbandon,
   onRemoveJob,
+  onRemoveSessionsFromJobs,
   onSetJobArchived,
   onRefresh,
   onFindGarment,
@@ -4671,6 +4683,7 @@ function ImportTaskWorkbench({
   garments: StylingGarment[]
   onAbandon: (id: string) => Promise<unknown>
   onRemoveJob: (jobId: string) => void
+  onRemoveSessionsFromJobs: (sessionIds: string[]) => void
   onSetJobArchived: (jobId: string, archived: boolean) => void
   onRefresh: () => Promise<UploadSession[]>
   onFindGarment: (code: string, garmentId?: number) => void
@@ -4722,7 +4735,11 @@ function ImportTaskWorkbench({
     })
     return Array.from(merged.values())
   }, [archivedSessionSnapshot, sessions])
+  const deletionPendingSessionIds = useMemo(() => new Set(mergedUploadSessions
+    .filter((item) => item.archiveReason === 'deletion_pending')
+    .map((item) => item.id)), [mergedUploadSessions])
   const displayedSessions = useMemo(() => mergedUploadSessions
+    .filter((item) => item.archiveReason !== 'deletion_pending')
     .filter((item) => includeArchived || !item.archivedAt), [includeArchived, mergedUploadSessions])
   const sessionsById = useMemo(() => new Map(displayedSessions.map((item) => [item.id, item])), [displayedSessions])
   const allSessionsById = useMemo(() => new Map(mergedUploadSessions.map((item) => [item.id, item])), [mergedUploadSessions])
@@ -4734,7 +4751,8 @@ function ImportTaskWorkbench({
     const archivedAt = linked.every((session) => session.archivedAt) ? linked.find((session) => session.archivedAt)?.archivedAt ?? job.archivedAt : null
     return { ...job, archivedAt, archiveReason: archivedAt ? linked.find((session) => session.archiveReason)?.archiveReason ?? 'user_archived' : null }
   }), [allSessionsById, jobs])
-  const displayedJobs = useMemo(() => reconciledJobs.filter((job) => includeArchived || !job.archivedAt), [includeArchived, reconciledJobs])
+  const displayedJobs = useMemo(() => reconciledJobs
+    .filter((job) => includeArchived || !job.archivedAt), [includeArchived, reconciledJobs])
   const jobRows = useMemo<ImportTaskRow[]>(() => displayedJobs.flatMap((job) => {
     const createdAt = job.createdAt ?? job.operations.find((item) => item.startedAt)?.startedAt ?? job.operations.find((item) => item.completedAt)?.completedAt ?? undefined
     const updatedAt = job.updatedAt ?? [...job.operations]
@@ -4742,7 +4760,9 @@ function ImportTaskWorkbench({
       .filter(Boolean)
       .sort()
       .at(-1) ?? createdAt ?? undefined
-    return job.items.map((item) => {
+    return job.items
+      .filter((item) => !item.sessionId || (!deletionPendingSessionIds.has(item.sessionId) && !dismissedUploadSessionIds.has(item.sessionId)))
+      .map((item) => {
       const session = item.sessionId ? sessionsById.get(item.sessionId) : undefined
       const targetId = session?.targetId ?? item.garmentId
       const garment = targetId ? garmentsById.get(targetId) : garmentsByCode.get(item.code)
@@ -4771,8 +4791,15 @@ function ImportTaskWorkbench({
         archivedAt: session?.archivedAt ?? job.archivedAt,
         archiveReason: session?.archiveReason ?? job.archiveReason,
       }
-    })
-  }), [displayedJobs, garmentsByCode, garmentsById, sessionsById])
+      })
+  }), [deletionPendingSessionIds, dismissedUploadSessionIds, displayedJobs, garmentsByCode, garmentsById, sessionsById])
+
+  useEffect(() => {
+    if (!deletionPendingSessionIds.size) return
+    const sessionIds = Array.from(deletionPendingSessionIds)
+    setDismissedUploadSessionIds((current) => new Set([...current, ...sessionIds]))
+    onRemoveSessionsFromJobs(sessionIds)
+  }, [deletionPendingSessionIds])
 
   const sessionRows = useMemo<ImportTaskRow[]>(() => displayedSessions
     .filter((session) => session.scope === 'styling-garment' && !jobSessionIds.has(session.id) && !dismissedUploadSessionIds.has(session.id))
@@ -4993,6 +5020,7 @@ function ImportTaskWorkbench({
   async function resolveUploadRecordSessionIds(target: UploadRecordTarget, archived?: boolean) {
     const sessions = await resolveUploadRecordSessions(target)
     return sessions
+      .filter((session) => session.archiveReason !== 'deletion_pending')
       .filter((session) => archived === undefined || Boolean(session.archivedAt) === archived)
       .map((session) => session.id)
   }
@@ -5054,11 +5082,25 @@ function ImportTaskWorkbench({
   async function loadArchivedSessions() {
     setLoadingArchived(true)
     try {
-      const result = await api.listUploadSessions({ scope: 'styling_garment', includeArchived: true, includeAbandoned: true, limit: 500 })
+      const jobsWithServerSessions = jobs.filter((job) => job.items.some((item) => Boolean(item.sessionId)))
+      const knownSessionIds = Array.from(new Set(jobsWithServerSessions.flatMap((job) => job.items.flatMap((item) => item.sessionId ? [item.sessionId] : []))))
+      const [result, ...reconciliationResults] = await Promise.all([
+        api.listUploadSessions({ scope: 'styling_garment', includeArchived: true, includeAbandoned: true, limit: 500 }),
+        ...uploadSessionMutationChunks(knownSessionIds).map((ids) => api.reconcileUploadSessions(ids)),
+      ])
       setArchivedSessionSnapshot((current) => {
         const merged = new Map(current.map((item) => [item.id, item]))
         result.items.forEach((item) => merged.set(item.id, item))
         return Array.from(merged.values())
+      })
+      const existingSessionIds = new Set(reconciliationResults.flatMap((reconciliation) => reconciliation.existingIds))
+      const pendingSessionIds = new Set(reconciliationResults.flatMap((reconciliation) => reconciliation.deletionPendingIds))
+      jobsWithServerSessions.forEach((job) => {
+        const jobSessionIds = job.items.flatMap((item) => item.sessionId ? [item.sessionId] : [])
+        const staleSessionIds = jobSessionIds.filter((id) => !existingSessionIds.has(id) || pendingSessionIds.has(id))
+        if (!staleSessionIds.length) return
+        if (staleSessionIds.length === jobSessionIds.length) onRemoveJob(job.id)
+        else onRemoveSessionsFromJobs(staleSessionIds)
       })
       setUploadRecordError(null)
     } finally {
@@ -5213,22 +5255,21 @@ function ImportTaskWorkbench({
     setUploadRecordOperationId(target.id)
     setUploadRecordError(null)
     let completedChunks = 0
+    const completedSessionIds: string[] = []
     try {
       const sessionIds = await resolveUploadRecordSessionIds(target)
       let cleanupErrors: ObjectCleanupError[] = []
-      let deferredIds: string[] = []
       if (sessionIds.length) {
         for (const ids of uploadSessionMutationChunks(sessionIds)) {
           const result = await api.deleteUploadSessions(ids, sessionIds.length === 1 ? { confirmName: confirmText } : { confirmPhrase: confirmText })
           cleanupErrors = cleanupErrors.concat(result.objectCleanupErrors)
-          deferredIds = deferredIds.concat(result.deferredIds)
           completedChunks += 1
+          completedSessionIds.push(...ids)
+          setArchivedSessionSnapshot((current) => current.filter((session) => !ids.includes(session.id)))
+          setDismissedUploadSessionIds((current) => new Set([...current, ...ids]))
+          onRemoveSessionsFromJobs(ids)
         }
       }
-      setArchivedSessionSnapshot((current) => current
-        .filter((session) => !sessionIds.includes(session.id) || deferredIds.includes(session.id))
-        .map((session) => deferredIds.includes(session.id) ? { ...session, archivedAt: new Date().toISOString(), archiveReason: 'deletion_pending' } : session))
-      setDismissedUploadSessionIds((current) => new Set([...current, ...sessionIds]))
       if (target.jobId) onRemoveJob(target.jobId)
       target.memberJobIds?.forEach(onRemoveJob)
       if (isBatch) {
@@ -5238,10 +5279,12 @@ function ImportTaskWorkbench({
       await refreshManagedUploadRecords()
       setManageRecord(null)
       if (cleanupErrors.length) setUploadRecordError(`上传记录已删除，但有 ${cleanupErrors.length} 个临时文件清理失败，系统已记录并会自动重试。`)
-      else if (deferredIds.length) setUploadRecordError('上传已停止；相关临时文件将在上传地址安全失效后自动清理。')
     } catch (error) {
       await refreshManagedUploadRecords()
       if (completedChunks > 0) {
+        setArchivedSessionSnapshot((current) => current.filter((session) => !completedSessionIds.includes(session.id)))
+        setDismissedUploadSessionIds((current) => new Set([...current, ...completedSessionIds]))
+        onRemoveSessionsFromJobs(completedSessionIds)
         setManageRecord(null)
         setSelectedUploadRecordIds(new Set())
         lastSelectedUploadRecordIdRef.current = null
@@ -5334,7 +5377,6 @@ function ImportTaskWorkbench({
             const archived = group.rows.every((row) => row.archivedAt)
             const hasArchivedRows = group.rows.some((row) => row.archivedAt)
             const partiallyArchived = hasArchivedRows && !archived
-            const deleting = group.rows.some((row) => row.archiveReason === 'deletion_pending')
             const manageTarget = { id: group.id, title, rows: group.rows, archived }
             return (
               <section
@@ -5374,9 +5416,7 @@ function ImportTaskWorkbench({
                   </div>
                   <span className={`import-status-badge is-${summary.tone}`}>{summary.label}</span>
                   <div className="import-record-actions" onClick={(event) => event.stopPropagation()}>
-                    {deleting
-                      ? <button className="management-action compact-control" type="button" disabled><Loader2 className="spin" size={14} />等待清理</button>
-                      : <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === group.id} onClick={() => openUploadRecordManage(manageTarget)}><Archive size={14} />归档</button>}
+                    <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === group.id} onClick={() => openUploadRecordManage(manageTarget)}><Archive size={14} />归档</button>
                   </div>
                   <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起上传任务' : '展开上传任务'} onClick={(event) => {
                     event.stopPropagation()
@@ -5403,7 +5443,6 @@ function ImportTaskWorkbench({
           const archived = Boolean(job.archivedAt || allJobRows.every((row) => row.archivedAt))
           const hasArchivedRows = allJobRows.some((row) => row.archivedAt)
           const partiallyArchived = hasArchivedRows && !archived
-          const deleting = allJobRows.some((row) => row.archiveReason === 'deletion_pending')
           const manageTarget = { id: job.id, title, rows: allJobRows, jobId: job.id, archived }
           const canResume = !archived && job.status === 'INTERRUPTED'
           const canResumeSavedDirectory = canResume && savedDirectoryJobIds.has(job.id)
@@ -5465,9 +5504,7 @@ function ImportTaskWorkbench({
                   {!canResume && !archived && <button className="management-action compact-control import-batch-view-button" type="button" title="回到服装库查看本次上传的服装" onClick={() => onFindJob(job.id)}>
                     查看本批次
                   </button>}
-                  {deleting
-                    ? <button className="management-action compact-control" type="button" disabled><Loader2 className="spin" size={14} />等待清理</button>
-                    : <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === job.id} onClick={() => openUploadRecordManage(manageTarget)}><Archive size={14} />归档</button>}
+                  <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === job.id} onClick={() => openUploadRecordManage(manageTarget)}><Archive size={14} />归档</button>
                 </div>
                 <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起上传任务' : '展开上传任务'} onClick={(event) => {
                   event.stopPropagation()

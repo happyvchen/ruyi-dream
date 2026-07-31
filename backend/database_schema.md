@@ -65,7 +65,7 @@ GenerationTask
 
 `upload_session_items.object_key` 是稳定的对象存储直传 key；`relative_path`、`size_bytes`、`last_modified` 和 `checksum_sha256` 用于恢复时拒绝错误目录或已变化的文件。对象存储中的 `sha256` 用户元数据与长度必须同时匹配，条目才会被确认上传。`status` 表示该条目是否已确认上传或已保存为 `MediaAsset`。搭配服装 AI 识别失败不回写为 upload session 失败，因为图片入库和 AI 识别是两个阶段。任意状态的 session 都可单独归档、恢复或彻底删除记录；彻底删除只清理未登记为 `MediaAsset` 的直传对象，已关联业务对象和正式媒体保留。未 `FINALIZED` 的 session 也可以由用户放弃或后台 TTL 清理。
 
-运行中会话收到彻底删除请求后使用 `archive_reason = deletion_pending` 阻断 lease、resume、complete 和 finalize。待直传签名失效后，事务内把安全临时 key 写入 `upload_object_cleanup_queue` 并删除会话；数据库提交后才删除对象，失败时队列保留以便重试。
+运行中会话收到彻底删除请求后使用内部墓碑 `archive_reason = deletion_pending` 阻断 lease、resume、complete 和 finalize；该状态不进入默认或已归档的用户列表。待直传签名失效后，事务内把安全临时 key 写入 `upload_object_cleanup_queue` 并删除会话；数据库提交后才删除对象，失败时队列保留以便重试。
 
 ## StylingGarment 打标错误字段
 

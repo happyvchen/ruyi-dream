@@ -1032,6 +1032,27 @@ def normalized_upload_session_ids(ids: list[str]) -> list[str]:
     return cleaned
 
 
+@app.post("/api/upload-sessions/reconcile")
+def reconcile_upload_sessions(payload: UploadSessionMutationRequest) -> dict[str, list[str]]:
+    """Authoritatively reconcile browser-persisted upload session references."""
+    session_ids = normalized_upload_session_ids(payload.ids)
+    placeholders = ", ".join("?" for _ in session_ids)
+    with get_db() as db:
+        rows = db.execute(
+            f"SELECT id, archive_reason FROM upload_sessions WHERE id IN ({placeholders})",
+            session_ids,
+        ).fetchall()
+    by_id = {str(row["id"]): row for row in rows}
+    return {
+        "existingIds": [session_id for session_id in session_ids if session_id in by_id],
+        "deletionPendingIds": [
+            session_id
+            for session_id in session_ids
+            if session_id in by_id and row_value(by_id[session_id], "archive_reason") == "deletion_pending"
+        ],
+    }
+
+
 def upload_session_rows_for_mutation(db: Any, session_ids: list[str]) -> list[Any]:
     placeholders = ", ".join("?" for _ in session_ids)
     rows = db.execute(

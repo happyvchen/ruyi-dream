@@ -56,6 +56,7 @@ const apiMock = vi.hoisted(() => ({
   listUploadSessions: vi.fn(),
   abandonUploadSession: vi.fn(),
   getUploadSessionDeleteImpact: vi.fn(),
+  reconcileUploadSessions: vi.fn(),
   archiveUploadSessions: vi.fn(),
   restoreUploadSessions: vi.fn(),
   deleteUploadSessions: vi.fn(),
@@ -247,6 +248,7 @@ function configureApi(role: 'admin' | 'user' = 'admin') {
     temporaryObjectCount: 0,
     linkedBusinessCount: 0,
   } })
+  apiMock.reconcileUploadSessions.mockImplementation(async (ids: string[]) => ({ existingIds: ids, deletionPendingIds: [] }))
   apiMock.archiveUploadSessions.mockResolvedValue({ archivedIds: [] })
   apiMock.restoreUploadSessions.mockResolvedValue({ restoredIds: [] })
   apiMock.deleteUploadSessions.mockResolvedValue({ deletedIds: [], deferredIds: [], objectCleanupErrors: [] })
@@ -695,6 +697,13 @@ describe('production gate app shell and page controls', () => {
       operations: [],
       items: [{ id: 'item-1', code: 'LOOK-NO-HANDLE', imageCount: 3, uploadedCount: 1, status: 'INTERRUPTED', sessionId: 'session-no-handle' }],
     }]))
+    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string }) => ({
+      items: options.scope === 'styling_garment' ? [{
+        id: 'session-no-handle', scope: 'styling-garment', status: 'UPLOADING', businessCode: 'LOOK-NO-HANDLE',
+        sourceTitle: '无目录授权批次', batchId: 'import-without-handle', totalCount: 3, uploadedCount: 1, items: [],
+        createdAt: '2026-07-28T08:00:00Z', updatedAt: '2026-07-28T08:01:00Z',
+      }] : [],
+    }))
     window.history.replaceState(null, '', '/library')
 
     render(<App />)
@@ -762,7 +771,8 @@ describe('production gate app shell and page controls', () => {
     expect(purgeButton).toBeEnabled()
     apiMock.deleteUploadSessions.mockResolvedValue({ deletedIds: [], deferredIds: ['failed-upload-session'], objectCleanupErrors: [] })
     await userEvent.click(purgeButton)
-    expect(await screen.findByText('上传已停止；相关临时文件将在上传地址安全失效后自动清理。')).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByText('失败上传批次')).not.toBeInTheDocument())
+    expect(screen.queryByText('等待清理')).not.toBeInTheDocument()
   })
 
   it('supports selecting multiple active upload records and exposes the unified archive dialog', async () => {
@@ -922,10 +932,27 @@ describe('production gate app shell and page controls', () => {
       sourceTitle: '部分删除批次', batchId: 'partial-delete-batch', totalCount: 1, uploadedCount: 0, items: [],
       createdAt: '2026-07-28T08:00:00Z', updatedAt: '2026-07-28T08:01:00Z',
     }))
-    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string }) => ({ items: options.scope === 'styling_garment' ? sessions : [] }))
+    const deletionPendingIds = new Set<string>()
+    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string }) => ({
+      items: options.scope === 'styling_garment'
+        ? sessions.map((session) => deletionPendingIds.has(session.id)
+          ? { ...session, archivedAt: '2026-07-28T09:00:00Z', archiveReason: 'deletion_pending' }
+          : session)
+        : [],
+    }))
+    apiMock.getUploadSessionDeleteImpact.mockImplementation(async (ids: string[]) => ({ impact: {
+      uploadSessionCount: ids.length,
+      uploadItemCount: ids.length,
+      temporaryObjectCount: ids.length,
+      linkedBusinessCount: 0,
+    } }))
     apiMock.deleteUploadSessions
-      .mockResolvedValueOnce({ deletedIds: [], deferredIds: sessions.slice(0, 499).map((item) => item.id), objectCleanupErrors: [] })
+      .mockImplementationOnce(async (ids: string[]) => {
+        ids.forEach((id) => deletionPendingIds.add(id))
+        return { deletedIds: [], deferredIds: ids, objectCleanupErrors: [] }
+      })
       .mockRejectedValueOnce(new Error('second chunk failed'))
+      .mockImplementationOnce(async (ids: string[]) => ({ deletedIds: [], deferredIds: ids, objectCleanupErrors: [] }))
     window.localStorage.setItem('ruyi-library-import-open', '1')
     window.history.replaceState(null, '', '/library')
 
@@ -944,9 +971,18 @@ describe('production gate app shell and page controls', () => {
     expect(await within(workbench).findByRole('alert')).toHaveTextContent('部分上传记录已完成删除，其余记录处理失败。列表已刷新，请重新选择剩余记录后重试。')
     expect(screen.queryByRole('dialog', { name: '归档上传记录' })).not.toBeInTheDocument()
     expect(within(workbench).getByRole('status')).toHaveTextContent('已选 0 条')
+    const remainingRecord = within(workbench).getByText('部分删除批次').closest('.import-record-row') as HTMLElement
+    expect(within(remainingRecord).getByText(/2 个货号/)).toBeInTheDocument()
+    await userEvent.click(within(remainingRecord).getByRole('button', { name: '归档' }))
+    const retryDialog = await screen.findByRole('dialog', { name: '归档上传记录' })
+    await userEvent.click(within(retryDialog).getByRole('radio', { name: '彻底删除 1 项' }))
+    await userEvent.type(within(retryDialog).getByPlaceholderText('全部删除'), '全部删除')
+    await userEvent.click(within(retryDialog).getByRole('button', { name: '彻底删除' }))
+    await waitFor(() => expect(apiMock.deleteUploadSessions).toHaveBeenCalledTimes(3))
+    expect(apiMock.deleteUploadSessions.mock.calls[2]?.[0]).toEqual(sessions.slice(499).map((item) => item.id))
   })
 
-  it('keeps archived abandoned upload records recoverable through one archive management entry', async () => {
+  it('keeps archived abandoned records recoverable while hiding internal deletion tombstones', async () => {
     const archivedSession = {
       id: 'archived-abandoned-session',
       scope: 'styling-garment',
@@ -1002,7 +1038,7 @@ describe('production gate app shell and page controls', () => {
     await userEvent.click(within(workbench).getByRole('button', { name: '全选本页' }))
     expect(within(workbench).getByRole('checkbox', { name: '选择 未归档批次' })).toBeChecked()
     expect(within(workbench).getByRole('checkbox', { name: '选择 已归档放弃批次' })).toBeChecked()
-    expect(within(workbench).getByRole('checkbox', { name: '选择 等待清理批次' })).toBeDisabled()
+    expect(within(workbench).queryByText('等待清理批次')).not.toBeInTheDocument()
     expect(within(workbench).getByRole('button', { name: '归档 2 项' })).toBeEnabled()
     expect(within(workbench).queryByRole('button', { name: '取消归档 1 项' })).not.toBeInTheDocument()
     expect(within(workbench).queryByRole('button', { name: '彻底删除 2 项' })).not.toBeInTheDocument()
@@ -1023,6 +1059,56 @@ describe('production gate app shell and page controls', () => {
       expect.arrayContaining(['active-upload-session', 'archived-abandoned-session']),
       { confirmPhrase: '全部删除' },
     ))
+  })
+
+  it('removes a persisted local import job after its server batch has already been physically deleted', async () => {
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    window.localStorage.setItem('ruyi-library-import-jobs', JSON.stringify([{
+      id: 'physically-deleted-batch',
+      title: '不应复活的上传记录',
+      status: 'FAILED',
+      total: 2,
+      uploaded: 0,
+      skipped: 1,
+      progress: null,
+      operations: [],
+      items: [
+        { id: 'server-item', code: 'LOOK-DELETED', imageCount: 2, uploadedCount: 1, status: 'FAILED', sessionId: 'physically-deleted-session' },
+        { id: 'local-failure', code: 'LOOK-LOCAL-FAILURE', imageCount: 0, uploadedCount: 0, status: 'FAILED', error: '本地清单错误' },
+      ],
+    }]))
+    apiMock.listUploadSessions.mockResolvedValue({ items: [] })
+    apiMock.reconcileUploadSessions.mockResolvedValue({ existingIds: [], deletionPendingIds: [] })
+    window.history.replaceState(null, '', '/library')
+
+    render(<App />)
+
+    await waitFor(() => expect(screen.queryByText('不应复活的上传记录')).not.toBeInTheDocument())
+    await waitFor(() => expect(window.localStorage.setItem).toHaveBeenCalledWith('ruyi-library-import-jobs', '[]'))
+  })
+
+  it('keeps a legacy local import job when its known session still exists under a different server batch id', async () => {
+    const session = {
+      id: 'legacy-known-session', scope: 'styling-garment', status: 'FAILED', businessCode: 'LOOK-LEGACY',
+      sourceTitle: '历史上传记录', batchId: null, totalCount: 2, uploadedCount: 1, items: [],
+      createdAt: '2026-07-28T08:00:00Z', updatedAt: '2026-07-28T08:01:00Z',
+    }
+    window.localStorage.setItem('ruyi-library-import-open', '1')
+    window.localStorage.setItem('ruyi-library-import-jobs', JSON.stringify([{
+      id: 'legacy-local-job-id', title: '历史上传记录', status: 'FAILED', total: 1, uploaded: 0, skipped: 0,
+      progress: null, operations: [],
+      items: [{ id: 'legacy-item', code: 'LOOK-LEGACY', imageCount: 2, uploadedCount: 1, status: 'FAILED', sessionId: session.id }],
+    }]))
+    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string }) => ({
+      items: options.scope === 'styling_garment' ? [session] : [],
+    }))
+    window.history.replaceState(null, '', '/library')
+
+    render(<App />)
+
+    expect(await screen.findByText('历史上传记录')).toBeInTheDocument()
+    await waitFor(() => expect(apiMock.reconcileUploadSessions).toHaveBeenCalledWith(['legacy-known-session']))
+    expect(window.localStorage.setItem).not.toHaveBeenCalledWith('ruyi-library-import-jobs', '[]')
   })
 
   it('offers both archive directions for one partially archived upload batch', async () => {
@@ -1141,6 +1227,13 @@ describe('production gate app shell and page controls', () => {
       operations: [],
       items: [{ id: 'item-1', code: 'LOOK-HANDLE', imageCount: 3, uploadedCount: 1, status: 'INTERRUPTED', sessionId: 'session-handle' }],
     }]))
+    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string }) => ({
+      items: options.scope === 'styling_garment' ? [{
+        id: 'session-handle', scope: 'styling-garment', status: 'UPLOADING', businessCode: 'LOOK-HANDLE',
+        sourceTitle: '已授权批次', batchId: 'import-with-handle', totalCount: 3, uploadedCount: 1, items: [],
+        createdAt: '2026-07-28T08:00:00Z', updatedAt: '2026-07-28T08:01:00Z',
+      }] : [],
+    }))
     window.history.replaceState(null, '', '/library')
 
     render(<App />)
@@ -1169,6 +1262,13 @@ describe('production gate app shell and page controls', () => {
       operations: [],
       items: [{ id: 'item-1', code: 'LOOK-DENIED', imageCount: 3, uploadedCount: 1, status: 'INTERRUPTED', sessionId: 'session-denied' }],
     }]))
+    apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string }) => ({
+      items: options.scope === 'styling_garment' ? [{
+        id: 'session-denied', scope: 'styling-garment', status: 'UPLOADING', businessCode: 'LOOK-DENIED',
+        sourceTitle: '拒绝授权批次', batchId: 'import-denied-handle', totalCount: 3, uploadedCount: 1, items: [],
+        createdAt: '2026-07-28T08:00:00Z', updatedAt: '2026-07-28T08:01:00Z',
+      }] : [],
+    }))
     window.history.replaceState(null, '', '/library')
 
     render(<App />)

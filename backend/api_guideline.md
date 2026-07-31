@@ -35,7 +35,7 @@
 - `POST /api/uploads/presign`：已停用（410）；禁止创建没有 UploadSession 所有权的直传对象。
 - `POST /api/upload-sessions`：创建上传任务和对象存储直传地址。
 - `POST /api/upload-sessions/styling-import-batch`：原子创建一次搭配服装导入中的全部货号会话；返回共同的 `batchId`，保证用户开始任务后、读取和上传图片前整批记录立即可查。每个货号首次 `resume` 时绑定图片 SHA-256。
-- `GET /api/upload-sessions`：按 `scope`、`status`、`batchId`、`limit` 查询上传任务；默认排除已归档记录，`includeArchived=true` 时一并返回且包含已归档的 `ABANDONED` 记录；`batchId` 用于完整恢复同一次批量任务，单批最多返回 500 个货号。
+- `GET /api/upload-sessions`：按 `scope`、`status`、`batchId`、`limit` 查询上传任务；默认排除已归档记录，`includeArchived=true` 时一并返回且包含已归档的 `ABANDONED` 记录；`batchId` 用于完整恢复同一次批量任务，单批最多返回 500 个货号。`includeArchived=true` 返回的 `deletion_pending` 仅供客户端对账并移除本地残留任务，不得渲染为用户记录。
 - `GET /api/upload-sessions/{session_id}`：查询单个上传任务和条目。
 - `POST /api/upload-sessions/{session_id}/resume`：严格校验重新选择的相对路径、大小、修改时间和 SHA-256；认领对象存储中已存在且完整性一致的对象，并只为缺失条目重新签发上传地址。
 - `POST /api/upload-sessions/{session_id}/lease`：上传期间续租当前批次的执行权。
@@ -44,9 +44,10 @@
 - `POST /api/upload-sessions/{session_id}/finalize-styling-garment`：把已上传对象保存为 `StylingGarment` 草稿。
 - `POST /api/upload-sessions/{session_id}/abandon`：用户放弃未完成上传任务；后端标记废弃并尽力清理尚未入库的直传对象。
 - `POST /api/upload-sessions/delete-impact`：预检一个或多个上传记录的会话、条目、临时对象和已关联业务对象数量；不限制上传任务状态。
+- `POST /api/upload-sessions/reconcile`：按最多 500 个已知 session ID 只读返回仍存在的 `existingIds` 和其中属于内部删除墓碑的 `deletionPendingIds`；用于浏览器持久上传任务与服务端权威状态对账，不修改业务数据或清理进度。
 - `POST /api/upload-sessions/archive`：归档任意状态的上传记录；只写归档字段并从默认列表隐藏，不改变上传状态、不停止上传，也不影响已入库业务对象和媒体。
 - `POST /api/upload-sessions/restore`：恢复已归档上传记录的可见性；不改变上传状态。
-- `DELETE /api/upload-sessions`：彻底删除任意状态的上传会话元数据；单条输入完整任务名、批量输入 `全部删除`。只清理既未通过条目外键登记、也不存在同 `object_key` 活跃 `MediaAsset` 的临时直传对象，已入库的服装、生成任务和正式媒体不随上传记录删除。未完成会话先返回 `deferredIds` 并进入 `deletion_pending`，立即阻断续传确认和入库，待已签发直传地址安全失效后再物理删除。
+- `DELETE /api/upload-sessions`：彻底删除任意状态的上传会话元数据；单条输入完整任务名、批量输入 `全部删除`。只清理既未通过条目外键登记、也不存在同 `object_key` 活跃 `MediaAsset` 的临时直传对象，已入库的服装、生成任务和正式媒体不随上传记录删除。未完成会话先返回 `deferredIds` 并进入内部 `deletion_pending` 墓碑，立即阻断续传确认和入库，待已签发直传地址安全失效后再物理删除；该内部状态不返回到任何用户上传记录列表，用户确认删除后记录立即消失。
 - `businessCode` / `sourceTitle` / `batchId`：创建上传任务时记录业务货号、用户选择的文件夹 / 批次名和本次批量任务 ID；如果旧客户端未传货号，搭配服装保存接口会用最终 `code` 兜底写入。
 - `executorId`：浏览器标签页执行标识。继续上传和确认条目会续租 90 秒批次执行权；其他页面或电脑只能查看，不能并发接管仍有有效租约的批次。
 
