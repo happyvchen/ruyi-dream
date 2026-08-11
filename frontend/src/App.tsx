@@ -1401,6 +1401,7 @@ function TaskResumeActionContent({ task }: { task: GenerationTask }) {
 function batchChipStatus(item: GenerationTask) {
   if (item.status === 'COMPLETED') return '完成'
   if (item.status === 'FINAL_RUNNING') return `成片 ${item.summary?.finalImages?.length ?? 0}/5`
+  if (isTaskWaitingForAutoRetry(item)) return autoRetryStatusLabel(item)
   if (isTaskQueuedForAutoRun(item)) {
     return item.autoRunQueuePosition && item.autoRunQueuePosition > 0 ? `排队第 ${item.autoRunQueuePosition} 位` : '排队中'
   }
@@ -1411,7 +1412,7 @@ function batchChipTone(item: GenerationTask) {
   if (item.status === 'COMPLETED') return 'is-done'
   if (item.status === 'FAILED') return 'is-failed'
   if (isTaskRunning(item)) return 'is-running'
-  if (isTaskQueuedForAutoRun(item)) return 'is-queued'
+  if (isTaskWaitingForAutoRetry(item) || isTaskQueuedForAutoRun(item)) return 'is-queued'
   return ''
 }
 
@@ -9031,6 +9032,7 @@ function canRestartOneClickFinal(task: GenerationTask) {
 }
 
 function oneClickFinalLabel(task: GenerationTask) {
+  if (isTaskWaitingForAutoRetry(task)) return '自动恢复中'
   if (isTaskQueuedForAutoRun(task)) return '排队中'
   if (task.autoRunTarget === 'FINAL' || isTaskRunning(task)) return '自动生成中'
   if (task.status === 'COMPLETED') return '重新一键成片'
@@ -9091,7 +9093,23 @@ function isTaskQueuedForAutoRun(task: GenerationTask) {
   return task.autoRunTarget === 'FINAL' && !isTaskRunning(task) && !['CANCELLED', 'ABANDONED', 'COMPLETED'].includes(task.status)
 }
 
+function isTaskWaitingForAutoRetry(task: GenerationTask) {
+  if (task.autoRunTarget !== 'FINAL' || !task.autoRunRetryAt) return false
+  const retryAt = new Date(task.autoRunRetryAt).getTime()
+  return Number.isFinite(retryAt) && retryAt > Date.now()
+}
+
+function autoRetryStatusLabel(task: GenerationTask) {
+  const retryAt = task.autoRunRetryAt ? new Date(task.autoRunRetryAt).getTime() : Number.NaN
+  const seconds = Number.isFinite(retryAt) ? Math.max(0, Math.ceil((retryAt - Date.now()) / 1000)) : 0
+  const wait = seconds >= 60 ? `${Math.ceil(seconds / 60)} 分钟后` : `${Math.max(seconds, 1)} 秒后`
+  const retryLimit = task.autoRunRetryLimit ?? 10
+  const retryCount = task.autoRunRetryCount && task.autoRunRetryCount > 0 ? ` · 第 ${task.autoRunRetryCount}/${retryLimit} 次` : ''
+  return `自动恢复中${retryCount} · ${wait}重试`
+}
+
 function taskListStatusLabel(task: GenerationTask) {
+  if (isTaskWaitingForAutoRetry(task)) return autoRetryStatusLabel(task)
   if (isTaskQueuedForAutoRun(task)) {
     return task.autoRunQueuePosition && task.autoRunQueuePosition > 0 ? `排队中 · 第 ${task.autoRunQueuePosition} 位` : '排队中'
   }

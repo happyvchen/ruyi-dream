@@ -83,19 +83,19 @@ class Settings:
     # 请求体含 base64 图片可达数 MB,部署环境上行慢时过小的值会触发
     # "The write operation timed out",且请求未到达 ToAPIs、不计费。
     gemini_toapis_connect_timeout_seconds = int(os.getenv("GEMINI_TOAPIS_CONNECT_TIMEOUT_SECONDS") or "60")
-    # Gemini 聊天通道只对明确的前置限流拒绝重发整个请求，采用指数退避 + 抖动。
-    # 连接中断/网关错误执行结果未知，不自动重发。重试次数为 0 表示禁用重试。
-    gemini_retry_limit = int(os.getenv("GEMINI_RETRY_LIMIT") or "6")
-    gemini_retry_backoff_base_seconds = float(os.getenv("GEMINI_RETRY_BACKOFF_BASE_SECONDS") or "5")
-    gemini_retry_backoff_cap_seconds = float(os.getenv("GEMINI_RETRY_BACKOFF_CAP_SECONDS") or "60")
-    gemini_retry_time_budget_seconds = float(os.getenv("GEMINI_RETRY_TIME_BUDGET_SECONDS") or "300")
+    # Gemini 限流、连接中断与超时按 30/60/120/240 秒封顶退避，默认最多重试 10 次。
+    # 重试次数为 0 表示禁用重试；总预算覆盖 10 次请求超时与退避等待。
+    gemini_retry_limit = int(os.getenv("GEMINI_RETRY_LIMIT") or "10")
+    gemini_retry_backoff_base_seconds = float(os.getenv("GEMINI_RETRY_BACKOFF_BASE_SECONDS") or "30")
+    gemini_retry_backoff_cap_seconds = float(os.getenv("GEMINI_RETRY_BACKOFF_CAP_SECONDS") or "240")
+    gemini_retry_time_budget_seconds = float(os.getenv("GEMINI_RETRY_TIME_BUDGET_SECONDS") or "5400")
     # WAF(Cloudflare 1010)熔断前的有限重试次数。
-    gemini_waf_retry_limit = int(os.getenv("GEMINI_WAF_RETRY_LIMIT") or "2")
+    gemini_waf_retry_limit = int(os.getenv("GEMINI_WAF_RETRY_LIMIT") or "10")
     # 上层 JSON 解析失败(MALFORMED_OUTPUT)时自动重问 Gemini 的次数(0=不重问)。
-    gemini_malformed_reask_limit = int(os.getenv("GEMINI_MALFORMED_REASK_LIMIT") or "1")
+    gemini_malformed_reask_limit = int(os.getenv("GEMINI_MALFORMED_REASK_LIMIT") or "10")
     # AI Stylist 已产出但不符合 selected_files + styling_plan 契约时的用户无感重试。
-    ai_stylist_contract_retry_limit = int(os.getenv("AI_STYLIST_CONTRACT_RETRY_LIMIT", "3"))
-    ai_stylist_contract_retry_delay_seconds = float(os.getenv("AI_STYLIST_CONTRACT_RETRY_DELAY_SECONDS", "15"))
+    ai_stylist_contract_retry_limit = int(os.getenv("AI_STYLIST_CONTRACT_RETRY_LIMIT", "10"))
+    ai_stylist_contract_retry_delay_seconds = float(os.getenv("AI_STYLIST_CONTRACT_RETRY_DELAY_SECONDS", "30"))
     # 打标并发闸门。provider 瞬时错误统一由 Gemini 通道重试，业务层不再叠加整条重试。
     tagging_max_concurrency = int(os.getenv("TAGGING_MAX_CONCURRENCY") or "3")
     image_provider = os.getenv("GPT_IMAGE2_PROVIDER", "toapis").lower()
@@ -115,8 +115,8 @@ class Settings:
     # Image-2 创建任务单次请求超时；独立于生成轮询总预算。
     toapis_image_submit_timeout_seconds = int(os.getenv("TOAPIS_IMAGE_SUBMIT_TIMEOUT_SECONDS", "180"))
     # 创建请求响应未知时的用户无感自动恢复：单镜头重试次数和退避。
-    generation_unknown_submission_retry_limit = int(os.getenv("GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT", "3"))
-    generation_unknown_submission_retry_delay_seconds = float(os.getenv("GENERATION_UNKNOWN_SUBMISSION_RETRY_DELAY_SECONDS", "15"))
+    generation_unknown_submission_retry_limit = int(os.getenv("GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT", "10"))
+    generation_unknown_submission_retry_delay_seconds = float(os.getenv("GENERATION_UNKNOWN_SUBMISSION_RETRY_DELAY_SECONDS", "30"))
     gpt_image2_quality = os.getenv("GPT_IMAGE2_QUALITY", "high")
     gpt_image2_output_format = os.getenv("GPT_IMAGE2_OUTPUT_FORMAT", "png")
     gpt_image2_size = os.getenv("GPT_IMAGE2_SIZE", "1:1")
@@ -129,14 +129,19 @@ class Settings:
     generation_lock_ttl_seconds = int(os.getenv("GENERATION_LOCK_TTL_SECONDS", "120"))
     generation_image_timeout_seconds = int(os.getenv("GENERATION_IMAGE_TIMEOUT_SECONDS", str(30 * 60)))
     # Image-2 任务提交/重建重试次数；0 表示只尝试原始提交，不自动重试。
-    generation_submit_retry_limit = int(os.getenv("GENERATION_SUBMIT_RETRY_LIMIT", "3"))
+    generation_submit_retry_limit = int(os.getenv("GENERATION_SUBMIT_RETRY_LIMIT", "10"))
     # 一键成片（auto-run）使用 TOAPIS_MAX_CONCURRENCY 作为外部模型并发预算，不再单独配置。
     # 状态查询连续瞬时失败重试次数；0 表示首次状态查询失败即停止。
-    generation_status_retry_limit = int(os.getenv("GENERATION_STATUS_RETRY_LIMIT", "15"))
+    generation_status_retry_limit = int(os.getenv("GENERATION_STATUS_RETRY_LIMIT", "10"))
+    # 一键成片跨 attempt 的持久化技术续跑；复用现有 poller，不新增任务队列。
+    generation_auto_run_retry_limit = int(os.getenv("GENERATION_AUTO_RUN_RETRY_LIMIT", "10"))
+    generation_retry_backoff_base_seconds = float(os.getenv("GENERATION_RETRY_BACKOFF_BASE_SECONDS", "30"))
+    generation_retry_backoff_cap_seconds = float(os.getenv("GENERATION_RETRY_BACKOFF_CAP_SECONDS", "240"))
     # 参考图上传阶段总预算（不含单文件请求自身的超时）。
     generation_upload_timeout_seconds = int(os.getenv("GENERATION_UPLOAD_TIMEOUT_SECONDS", str(5 * 60)))
     # 成片回传（下载+入库+缩略图）阶段总预算；provider 已成功，此阶段内自动退避重试。
     generation_delivery_timeout_seconds = int(os.getenv("GENERATION_DELIVERY_TIMEOUT_SECONDS", str(15 * 60)))
+    generation_delivery_retry_limit = int(os.getenv("GENERATION_DELIVERY_RETRY_LIMIT", "10"))
     # 成片单次下载请求超时。低带宽环境下宁可"较短超时+多次重试"，避免单次 300s 挂死。
     generation_download_request_timeout_seconds = int(os.getenv("GENERATION_DOWNLOAD_REQUEST_TIMEOUT_SECONDS", "120"))
     # 参考图 provider 上传缓存 TTL：同一 objectKey 在 TTL 内复用已上传 URL。
@@ -179,12 +184,18 @@ class Settings:
             raise RuntimeError("GENERATION_SUBMIT_RETRY_LIMIT must be greater than or equal to 0.")
         if self.generation_status_retry_limit < 0:
             raise RuntimeError("GENERATION_STATUS_RETRY_LIMIT must be greater than or equal to 0.")
+        if self.generation_auto_run_retry_limit < 0:
+            raise RuntimeError("GENERATION_AUTO_RUN_RETRY_LIMIT must be greater than or equal to 0.")
+        if self.generation_retry_backoff_base_seconds <= 0 or self.generation_retry_backoff_cap_seconds <= 0:
+            raise RuntimeError("GENERATION_RETRY_BACKOFF_BASE_SECONDS and CAP_SECONDS must be greater than 0.")
         if self.toapis_max_concurrency <= 0:
             raise RuntimeError("TOAPIS_MAX_CONCURRENCY must be greater than 0.")
         if self.generation_upload_timeout_seconds <= 0:
             raise RuntimeError("GENERATION_UPLOAD_TIMEOUT_SECONDS must be greater than 0.")
         if self.generation_delivery_timeout_seconds <= 0:
             raise RuntimeError("GENERATION_DELIVERY_TIMEOUT_SECONDS must be greater than 0.")
+        if self.generation_delivery_retry_limit < 0:
+            raise RuntimeError("GENERATION_DELIVERY_RETRY_LIMIT must be greater than or equal to 0.")
         if self.generation_download_request_timeout_seconds <= 0:
             raise RuntimeError("GENERATION_DOWNLOAD_REQUEST_TIMEOUT_SECONDS must be greater than 0.")
         if self.provider_upload_cache_ttl_seconds <= 0:

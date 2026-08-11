@@ -25,7 +25,7 @@
 ## Image-2 分阶段恢复
 
 - 参考图上传失败只重试失败上传，已成功上传的 provider URL 通过缓存或 attempt 快照复用。
-- 每个图片 attempt / 生成重试轮次向 ToAPIs 传稳定 `client_business_id`。创建任务遇到连接中断、`ReadTimeout` 或 TLS EOF 时标记为 `SUBMISSION_UNKNOWN`，默认等待 15 秒后先按该业务 ID 查询原任务；查到即继续，明确 `task_not_found` 才补提，查询仍不确定时停止，避免重复任务和重复计费。
+- 每个图片 attempt / 生成重试轮次向 ToAPIs 传稳定 `client_business_id`。创建任务遇到连接中断、`ReadTimeout` 或 TLS EOF 时标记为 `SUBMISSION_UNKNOWN`，按统一退避先以该业务 ID 查询原任务；查到即继续，明确 `task_not_found` 才补提，避免重复任务和重复计费。
 - 提交结果未知按每张图自己的 `GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT` 预算恢复，不再设置同批提交未知熔断器。
 - 已取得 provider task ID 后只恢复状态查询；provider 明确瞬时生成失败时仅按 `GENERATION_SUBMIT_RETRY_LIMIT` 重建生成任务。
 - provider 成功后的下载失败只重试下载；本地对象存储、数据或代码错误标记为 `SYSTEM_ERROR`，不自动重试。
@@ -57,7 +57,11 @@ API 摘要返回稳定 `error={code,title,message,action,retryable}`；普通用
 
 ToAPIs 相关调用统一使用 `TOAPIS_MAX_CONCURRENCY` 控制最大并发，默认 `5`。该闸门覆盖 Gemini(ToAPIs) chat、Image-2(ToAPIs) 参考图上传、任务创建和状态查询；只在真实 HTTP 请求期间占用槽位，provider 生成等待、轮询间隔和重试退避期间释放槽位。批次一键成片不再有独立并发参数，而是按同一 ToAPIs 预算推进排队任务。
 
-Gemini 只有明确的前置限流拒绝（HTTP 429 或 `rate_limit_check_failed`）在 provider 层指数退避并加入随机抖动，默认最多重试 `6` 次且总预算 `300` 秒。连接中断、read timeout 和网关错误的执行结果未知，不自动重发整个聊天请求，避免重复计费。AI 打标业务层不再叠加整条任务重试，避免重试次数相乘和无等待突发。
+Gemini 对明确限流（HTTP 429 或 `rate_limit_check_failed`）、连接失败和读取超时在 provider 层自动重发。所有技术恢复默认最多重试 `10` 次，采用 `30/60/120/240` 秒封顶退避并受总预算约束。AI 打标业务层不再叠加整条任务重试，避免重试次数相乘。
+
+`一键成片` 的跨阶段恢复由 `auto_run_target`、`auto_run_retry_at` 和 `auto_run_retry_count` 持久化；后台 poller 到期后继续推进，成功产物保持不变。参数、鉴权、余额、内容策略和业务契约错误不进入该恢复队列。
+
+每类错误只有一个重试所有者，禁止 `10×10` 叠加：Gemini 连接、Image-2 提交/状态查询/明确生成失败和回传由各自阶段完成最多 10 次；跨 attempt 的持久 auto-run 只接管单次上传失败与进程中断。状态查询或回传耗尽后保留原 attempt 与 providerRequestId，不通过 auto-run 重新提交生成。
 
 批量 AI 打标在一个后台任务内并发调度，并受 `TAGGING_MAX_CONCURRENCY` 与 ToAPIs 全局请求闸门双重约束。仍在当前进程排队或执行的服装不会被 stale 清理误判；真正获得打标槽位时刷新活动时间，进程重启后遗留的无主运行态仍按超时规则回收。
 

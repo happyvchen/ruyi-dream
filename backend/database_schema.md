@@ -44,6 +44,8 @@ GenerationTask
 - `active_result_set_id`
 - `auto_run_target`
 - `auto_run_requested_at`
+- `auto_run_retry_at`：跨阶段自动恢复的下一次执行时间；后台 poller 到期继续。
+- `auto_run_retry_count`：当前一键成片连续自动恢复轮次，成功或人工取消后清零。
 
 不存在 `shoot_script_user_instruction_text` 或 `active_shoot_script_id`。
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
 import os
@@ -120,7 +121,7 @@ def post_generation_task_with_confirmed_failure_retries(
     auth_scheme: str,
     error_label: str,
     timeout_seconds: int = 180,
-    max_attempts: int = 2,
+    max_attempts: int = 11,
 ) -> dict[str, Any]:
     """创建 provider 任务。
 
@@ -144,7 +145,7 @@ def post_generation_task_with_confirmed_failure_retries(
                 raise ProviderSubmissionUnknownError(f"{error_label}，提交结果未知: {exc}") from exc
             if not is_retryable_error(exc.error_code) or index >= max_attempts - 1:
                 raise
-            time.sleep(1 + index)
+            time.sleep(min(30 * (2 ** index), 240))
     raise RuntimeError(f"{error_label}: 创建任务重试流程异常结束")
 
 
@@ -485,6 +486,16 @@ def upload_object_with_cache(provider: str, object_key: str, uploader: Callable[
         return provider_url
 
 
+def upload_bytes_with_cache(
+    provider: str,
+    content: bytes,
+    uploader: Callable[[], str],
+) -> str:
+    """运行时拼图使用内容哈希复用现有 provider_upload_cache。"""
+    cache_key = f"collage:{hashlib.sha256(content).hexdigest()}"
+    return upload_object_with_cache(provider, cache_key, uploader)
+
+
 def _fal_preview_image_size(settings: Any) -> Any:
     """分镜预览在 fal 路径的画布尺寸。
 
@@ -606,8 +617,12 @@ def upload_image_inputs(
             uploaded.append(next_item)
             continue
         if item.get("collageItems"):
-            content, filename, content_type = build_reference_collage_bytes(item)
-            next_item["providerUrl"] = upload_bytes_to_fal(content, filename, content_type)
+            content, filename, content_type = build_reference_collage_bytes(item, deadline)
+            next_item["providerUrl"] = upload_bytes_with_cache(
+                "fal",
+                content,
+                lambda: upload_bytes_to_fal(content, filename, content_type),
+            )
             uploaded.append(next_item)
             continue
         if object_key and object_exists(str(object_key)):
@@ -638,6 +653,16 @@ def ensure_upload_deadline(deadline: float, item: dict[str, Any]) -> None:
             f"参考图上传超出总预算（{get_settings().generation_upload_timeout_seconds}s），未完成：{label}",
             ERROR_UPLOAD_FAILED,
         )
+
+
+def remaining_upload_timeout(deadline: float | None) -> int:
+    """把单次网络超时裁剪到参考图上传阶段的剩余总预算。"""
+    if deadline is None:
+        return 300
+    remaining = deadline - time.time()
+    if remaining <= 0:
+        raise GenerationPhaseError("参考图上传超出总预算", ERROR_UPLOAD_FAILED)
+    return max(1, min(300, int(remaining)))
 
 
 def prepare_fal_image_inputs(
@@ -701,8 +726,12 @@ def upload_toapis_image_inputs(
             uploaded.append(next_item)
             continue
         if item.get("collageItems"):
-            content, filename, content_type = build_reference_collage_bytes(item)
-            next_item["providerUrl"] = upload_bytes_to_toapis(content, filename, content_type)
+            content, filename, content_type = build_reference_collage_bytes(item, deadline)
+            next_item["providerUrl"] = upload_bytes_with_cache(
+                "toapis",
+                content,
+                lambda: upload_bytes_to_toapis(content, filename, content_type, deadline=deadline),
+            )
             uploaded.append(next_item)
             continue
         if object_key and object_exists(str(object_key)):
@@ -711,13 +740,15 @@ def upload_toapis_image_inputs(
             next_item["providerUrl"] = upload_object_with_cache(
                 "toapis",
                 source_key,
-                lambda key=source_key: upload_object_to_toapis(key, os.path.basename(key)),
+                lambda key=source_key: upload_object_to_toapis(key, os.path.basename(key), deadline=deadline),
             )
             uploaded.append(next_item)
             continue
         if source_url and str(source_url).startswith(("http://", "https://")):
             next_item["sourceUrl"] = source_url
-            next_item["providerUrl"] = upload_url_to_toapis(str(source_url), str(item.get("filename") or "reference-image"))
+            next_item["providerUrl"] = upload_url_to_toapis(
+                str(source_url), str(item.get("filename") or "reference-image"), deadline=deadline
+            )
             uploaded.append(next_item)
             continue
         uploaded.append(next_item)
@@ -726,7 +757,7 @@ def upload_toapis_image_inputs(
     return uploaded
 
 
-def build_reference_collage_bytes(item: dict[str, Any]) -> tuple[bytes, str, str]:
+def build_reference_collage_bytes(item: dict[str, Any], deadline: float | None = None) -> tuple[bytes, str, str]:
     sources = item.get("collageItems") if isinstance(item.get("collageItems"), list) else []
     images = []
     try:
@@ -736,7 +767,7 @@ def build_reference_collage_bytes(item: dict[str, Any]) -> tuple[bytes, str, str
     for source in sources:
         if not isinstance(source, dict):
             continue
-        content, _content_type = reference_source_bytes(source)
+        content, _content_type = reference_source_bytes(source, deadline)
         try:
             with Image.open(BytesIO(content)) as image:
                 image = ImageOps.exif_transpose(image)
@@ -798,14 +829,14 @@ def contain_on_white(image: Any, width: int, height: int) -> Any:
     return tile
 
 
-def reference_source_bytes(source: dict[str, Any]) -> tuple[bytes, str | None]:
+def reference_source_bytes(source: dict[str, Any], deadline: float | None = None) -> tuple[bytes, str | None]:
     object_key = source.get("objectKey")
     source_url = source.get("providerUrl") or source.get("url")
     if object_key and object_exists(str(object_key)):
         source_key = normalized_or_original_key(str(object_key))
         return get_bytes(source_key), mimetypes.guess_type(str(source.get("filename") or source_key))[0]
     if source_url and str(source_url).startswith(("http://", "https://")):
-        return download_bytes(str(source_url))
+        return download_bytes(str(source_url), timeout=remaining_upload_timeout(deadline), attempts=1)
     raise RuntimeError(f"参考图拼接来源不可用：{source.get('filename') or source.get('objectKey') or source.get('url')}")
 
 
@@ -829,14 +860,14 @@ def upload_url_to_fal(url: str, filename: str) -> str:
     return upload_bytes_to_fal(content, filename, content_type)
 
 
-def upload_object_to_toapis(object_key: str, filename: str) -> str:
+def upload_object_to_toapis(object_key: str, filename: str, deadline: float | None = None) -> str:
     content = get_bytes(object_key)
-    return upload_bytes_to_toapis(content, filename)
+    return upload_bytes_to_toapis(content, filename, deadline=deadline)
 
 
-def upload_url_to_toapis(url: str, filename: str) -> str:
-    content, content_type = download_bytes(url)
-    return upload_bytes_to_toapis(content, filename, content_type)
+def upload_url_to_toapis(url: str, filename: str, deadline: float | None = None) -> str:
+    content, content_type = download_bytes(url, timeout=remaining_upload_timeout(deadline), attempts=1)
+    return upload_bytes_to_toapis(content, filename, content_type, deadline=deadline)
 
 
 def upload_bytes_to_fal(content: bytes, filename: str, content_type: str | None = None) -> str:
@@ -921,7 +952,13 @@ def fit_image_bytes_under_limit(
     return content, filename, content_type
 
 
-def upload_bytes_to_toapis(content: bytes, filename: str, content_type: str | None = None) -> str:
+def upload_bytes_to_toapis(
+    content: bytes,
+    filename: str,
+    content_type: str | None = None,
+    *,
+    deadline: float | None = None,
+) -> str:
     settings = get_settings()
     if not settings.toapis_api_key:
         raise RuntimeError("TOAPIS_API_KEY 未配置，无法上传参考图到 toapis")
@@ -934,6 +971,8 @@ def upload_bytes_to_toapis(content: bytes, filename: str, content_type: str | No
             content,
             content_type or mimetypes.guess_type(filename)[0] or "image/png",
             settings.toapis_api_key,
+            timeout=remaining_upload_timeout(deadline),
+            attempts=1,
         )
     data = upload_response.get("data") if isinstance(upload_response, dict) else None
     uploaded_url = data.get("url") if isinstance(data, dict) else None
@@ -957,7 +996,7 @@ def post_json(
     timeout: int | None = 300,
     auth_scheme: str = "Key",
     error_label: str = "GPT Image-2 fal 请求失败",
-    attempts: int = 3,
+    attempts: int = 11,
 ) -> dict[str, Any]:
     if auth_scheme == "Bearer":
         return request_json("POST", url, api_key, timeout, auth_scheme, error_label, payload, attempts=attempts)
@@ -988,7 +1027,8 @@ def get_json(
     error_label: str = "GPT Image-2 fal 状态查询失败",
 ) -> dict[str, Any]:
     if auth_scheme == "Bearer":
-        return request_json("GET", url, api_key, timeout, auth_scheme, error_label)
+        # 状态查询的连续错误预算由上层 poller 统一管理，避免 10×10 的嵌套重试。
+        return request_json("GET", url, api_key, timeout, auth_scheme, error_label, attempts=1)
 
     request = Request(
         url,
@@ -1011,7 +1051,7 @@ def request_json(
     auth_scheme: str,
     error_label: str,
     payload: dict[str, Any] | None = None,
-    attempts: int = 3,
+    attempts: int = 11,
 ) -> dict[str, Any]:
     try:
         import requests
@@ -1061,7 +1101,7 @@ def request_json(
     return response_payload
 
 
-def requests_call_with_retries(call: Any, *args: Any, attempts: int = 3, **kwargs: Any) -> Any:
+def requests_call_with_retries(call: Any, *args: Any, attempts: int = 11, **kwargs: Any) -> Any:
     try:
         import requests
     except ImportError as exc:
@@ -1074,7 +1114,7 @@ def requests_call_with_retries(call: Any, *args: Any, attempts: int = 3, **kwarg
         except requests.RequestException as exc:
             last_error = exc
             if index < attempts - 1:
-                time.sleep(1 + index)
+                time.sleep(min(30 * (2 ** index), 240))
     if last_error:
         raise last_error
     raise RuntimeError("requests 调用失败")
@@ -1088,6 +1128,7 @@ def post_multipart_file(
     content_type: str,
     api_key: str,
     timeout: int | None = 300,
+    attempts: int = 1,
 ) -> dict[str, Any]:
     try:
         import requests
@@ -1104,6 +1145,7 @@ def post_multipart_file(
             headers={"Authorization": f"Bearer {api_key}"},
             files=files,
             timeout=timeout,
+            attempts=attempts,
         )
     except requests.RequestException as exc:
         raise GenerationPhaseError(
@@ -1135,7 +1177,7 @@ def post_multipart_file(
     return payload
 
 
-def download_bytes(url: str, timeout: int = 300, attempts: int = 3) -> tuple[bytes, str | None]:
+def download_bytes(url: str, timeout: int = 300, attempts: int = 11) -> tuple[bytes, str | None]:
     if url.startswith(("http://", "https://")):
         try:
             import requests
@@ -1151,7 +1193,7 @@ def download_bytes(url: str, timeout: int = 300, attempts: int = 3) -> tuple[byt
                 except requests.RequestException as exc:
                     last_error = exc
                     if index < attempts - 1:
-                        time.sleep(1 + index)
+                        time.sleep(min(30 * (2 ** index), 240))
             if last_error:
                 raise last_error
     request = Request(url, method="GET")

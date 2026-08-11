@@ -70,6 +70,7 @@ from .generation_progress import (
     ERROR_SUBMISSION_UNKNOWN,
     ERROR_SYSTEM_ERROR,
     ERROR_TASK_NOT_FOUND,
+    ERROR_UPLOAD_FAILED,
     ERROR_UPLOAD_REQUIREMENT_NOT_MET,
     PHASE_DELIVER,
     PHASE_GENERATE,
@@ -3646,7 +3647,8 @@ def cancel_generation_task(task_id: int) -> dict[str, Any]:
             db.execute(
                 """
                 UPDATE generation_tasks
-                SET auto_run_target = NULL, auto_run_requested_at = NULL, updated_at = ?
+                SET auto_run_target = NULL, auto_run_requested_at = NULL,
+                    auto_run_retry_at = NULL, auto_run_retry_count = 0, updated_at = ?
                 WHERE id = ?
                 """,
                 (timestamp, task_id),
@@ -3658,6 +3660,8 @@ def cancel_generation_task(task_id: int) -> dict[str, Any]:
                 SET status = 'CANCELLED',
                     auto_run_target = NULL,
                     auto_run_requested_at = NULL,
+                    auto_run_retry_at = NULL,
+                    auto_run_retry_count = 0,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -3819,6 +3823,8 @@ def mark_generation_task_input_changed(db: Any, task_id: int, timestamp: str, re
             active_result_set_id = NULL,
             auto_run_target = NULL,
             auto_run_requested_at = NULL,
+            auto_run_retry_at = NULL,
+            auto_run_retry_count = 0,
             updated_at = ?
         WHERE id = ?
         """,
@@ -3857,6 +3863,8 @@ def reset_generation_task_for_rerun(db: Any, task_id: int, timestamp: str) -> No
             active_result_set_id = NULL,
             auto_run_target = NULL,
             auto_run_requested_at = NULL,
+            auto_run_retry_at = NULL,
+            auto_run_retry_count = 0,
             updated_at = ?
         WHERE id = ?
         """,
@@ -4304,14 +4312,13 @@ async def run_select_generation_styling(
             db.execute(
                 """
                 UPDATE generation_tasks
-                SET status = 'FAILED',
-                    auto_run_target = NULL,
-                    auto_run_requested_at = NULL,
-                    updated_at = ?
+                SET status = 'FAILED', updated_at = ?
                 WHERE id = ?
                 """,
                 (now_iso(), task_id),
             )
+        if trigger != "auto_run" or not schedule_auto_run_retry(task_id, [error_code]):
+            clear_task_auto_run(task_id)
         raise HTTPException(status_code=502, detail=user_facing_provider_error_detail("智能选搭失败", exc, error_code)) from exc
 
     try:
@@ -4497,12 +4504,13 @@ async def run_preview_generation(
                 finish_attempt(attempt_id, "CANCELLED", response_snapshot=provider_response, error_message=str(exc))
                 persist_attempt_provider_request_id(attempt_id, provider_response)
                 return
+        final_error_code = classify_generation_attempt_error(exc)
         finish_attempt(
             attempt_id,
             "FAILED",
             response_snapshot=provider_response,
             error_message=str(exc),
-            error_code=classify_generation_attempt_error(exc),
+            error_code=final_error_code,
         )
         persist_attempt_provider_request_id(attempt_id, provider_response)
         with get_db() as db:
@@ -4516,14 +4524,8 @@ async def run_preview_generation(
                 (attempt_id, timestamp, preview_id),
             )
             db.execute("UPDATE generation_tasks SET status = 'FAILED', updated_at = ? WHERE id = ?", (timestamp, task_id))
-            db.execute(
-                """
-                UPDATE generation_tasks
-                SET auto_run_target = NULL, auto_run_requested_at = NULL, updated_at = ?
-                WHERE id = ?
-                """,
-                (timestamp, task_id),
-            )
+        if trigger != "auto_run" or not schedule_auto_run_retry(task_id, [final_error_code]):
+            clear_task_auto_run(task_id)
         return
     with get_db() as db:
         current = db.execute(
@@ -4611,6 +4613,8 @@ async def auto_run_final_images(task_id: int, request: Request, payload: AutoRun
             UPDATE generation_tasks
             SET auto_run_target = ?,
                 auto_run_requested_at = ?,
+                auto_run_retry_at = NULL,
+                auto_run_retry_count = 0,
                 updated_at = ?
             WHERE id = ?
             """,
@@ -4729,7 +4733,8 @@ async def auto_run_generation_batch(batch_id: str, payload: AutoRunFinalRequest 
             db.execute(
                 """
                 UPDATE generation_tasks
-                SET auto_run_target = ?, auto_run_requested_at = ?, updated_at = ?
+                SET auto_run_target = ?, auto_run_requested_at = ?,
+                    auto_run_retry_at = NULL, auto_run_retry_count = 0, updated_at = ?
                 WHERE id = ?
                 """,
                 (AUTO_RUN_TARGET_FINAL, timestamp, timestamp, int(row["id"])),
@@ -4801,8 +4806,24 @@ async def run_generate_final_images(
         )
         if image_ids is not None:
             if image_ids:
+                with get_db() as db:
+                    resume_rows = db.execute(
+                        f"SELECT id, active_attempt_id FROM generation_result_images_new WHERE id IN ({', '.join('?' for _ in image_ids)})",
+                        image_ids,
+                    ).fetchall()
+                resume_attempts = {
+                    int(row["id"]): int(row["active_attempt_id"])
+                    for row in resume_rows
+                    if row["active_attempt_id"]
+                }
                 schedule_background_generation(
-                    run_final_generation(task_id, int(task["active_result_set_id"]), image_ids, trigger=trigger),
+                    run_final_generation(
+                        task_id,
+                        int(task["active_result_set_id"]),
+                        image_ids,
+                        resume_attempts_by_image_id=resume_attempts,
+                        trigger=trigger,
+                    ),
                     job_key=final_set_job_key(int(task["active_result_set_id"])),
                 )
             return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
@@ -4852,6 +4873,11 @@ def continue_active_final_result_set(
 ) -> list[int] | None:
     timestamp = now_iso()
     with get_db() as db:
+        retry_task = db.execute(
+            "SELECT auto_run_retry_count FROM generation_tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        automatic_retry = bool(retry_task and int(row_value(retry_task, "auto_run_retry_count", 0) or 0) > 0)
         result_set = db.execute(
             """
             SELECT * FROM generation_result_sets
@@ -4878,19 +4904,40 @@ def continue_active_final_result_set(
             if existing and existing["status"] in {"QUEUED", "RUNNING"}:
                 raise HTTPException(status_code=409, detail="成片已在生成中，请勿重复提交")
             if existing:
+                attempt = db.execute(
+                    "SELECT error_code, provider_request_id FROM generation_attempts WHERE id = ?",
+                    (row_value(existing, "active_attempt_id"),),
+                ).fetchone()
+                if automatic_retry and existing["status"] == "FAILED":
+                    if not attempt or not is_auto_run_retryable_error(attempt["error_code"]):
+                        continue
+                preserve_provider_attempt = bool(
+                    attempt
+                    and attempt["provider_request_id"]
+                    and (
+                        attempt["error_code"] == ERROR_DELIVERY_FAILED
+                        or is_status_check_retryable_error(attempt["error_code"])
+                    )
+                )
                 db.execute(
                     """
                     UPDATE generation_result_images_new
                     SET status = 'QUEUED',
                         shot_role = ?,
-                        active_attempt_id = NULL,
+                        active_attempt_id = ?,
                         locked_by = NULL,
                         locked_until = NULL,
                         user_instruction_json = ?,
                         updated_at = ?
                     WHERE id = ?
                     """,
-                    (shot_role, dumps(user_instruction_context or {}), timestamp, int(existing["id"])),
+                    (
+                        shot_role,
+                        row_value(existing, "active_attempt_id") if preserve_provider_attempt else None,
+                        dumps(user_instruction_context or {}),
+                        timestamp,
+                        int(existing["id"]),
+                    ),
                 )
                 image_ids.append(int(existing["id"]))
                 continue
@@ -4942,17 +4989,36 @@ async def run_final_generation(
         ),
         return_exceptions=True,
     )
+    retry_error_codes: list[str | None] = []
     with get_db() as db:
         _, task_status = reconcile_final_result_set(db, result_set_id, task_id)
-        if task_status in {"COMPLETED", "FINAL_PARTIAL", "FAILED", "CANCELLED"}:
+        if task_status == "FINAL_PARTIAL":
+            retry_error_codes = [
+                row["error_code"]
+                for row in db.execute(
+                    """
+                    SELECT ga.error_code
+                    FROM generation_result_images_new gri
+                    LEFT JOIN generation_attempts ga ON ga.id = gri.active_attempt_id
+                    WHERE gri.result_set_id = ? AND gri.status = 'FAILED'
+                    """,
+                    (result_set_id,),
+                ).fetchall()
+            ]
+        if task_status in {"COMPLETED", "FAILED", "CANCELLED"}:
             db.execute(
                 """
                 UPDATE generation_tasks
-                SET auto_run_target = NULL, auto_run_requested_at = NULL, updated_at = ?
+                SET auto_run_target = NULL, auto_run_requested_at = NULL,
+                    auto_run_retry_at = NULL, auto_run_retry_count = 0, updated_at = ?
                 WHERE id = ?
                 """,
                 (now_iso(), task_id),
             )
+    if task_status == "FINAL_PARTIAL":
+        scheduled = trigger == "auto_run" and schedule_auto_run_retry(task_id, retry_error_codes)
+        if not scheduled:
+            clear_task_auto_run(task_id)
     maybe_schedule_auto_run_for_task(task_id)
 
 
@@ -8269,6 +8335,8 @@ def stale_attempt_error(attempt_id: int | None) -> tuple[str, str]:
     current = progress.get("current") if isinstance(progress, dict) else None
     if current == PHASE_SUBMIT:
         return ERROR_SUBMISSION_UNKNOWN, "创建 provider 任务时执行中断，无法确认是否已经创建；已停止自动重提。"
+    if current in {PHASE_PREPARE, PHASE_UPLOAD, None}:
+        return ERROR_UPLOAD_FAILED, f"本地生成任务在 {current or 'prepare'} 阶段执行中断，可安全重新上传并继续。"
     return ERROR_SYSTEM_ERROR, f"本地生成任务在 {current or 'unknown'} 阶段执行中断；已停止自动重试。"
 
 
@@ -8391,11 +8459,15 @@ async def select_styling_with_gemini(
             if contract_retries >= retry_limit:
                 raise wrap_gemini_call_error("Gemini AI Stylist 调用失败", exc) from exc
             contract_retries += 1
+            current_retry_delay = min(
+                retry_delay * (2 ** max(0, contract_retries - 1)),
+                float(settings.generation_retry_backoff_cap_seconds),
+            )
             retry_snapshot = {
                 **(latest_response or exception_process_facts(exc)),
                 "status": "STYLING_CONTRACT_RETRY_WAIT",
                 "contractRetries": contract_retries,
-                "retryDelaySeconds": retry_delay,
+                "retryDelaySeconds": current_retry_delay,
                 "error": str(exc)[:500],
             }
             if attempt_id:
@@ -8404,16 +8476,16 @@ async def select_styling_with_gemini(
                 progress.begin(
                     "styling_contract_retry_wait",
                     contractRetry=contract_retries,
-                    retryDelaySeconds=retry_delay,
+                    retryDelaySeconds=current_retry_delay,
                 )
             logger.warning(
                 "Gemini AI Stylist 契约输出异常，自动重试第 %d 次，退避 %.1fs：%s",
                 contract_retries,
-                retry_delay,
+                current_retry_delay,
                 str(exc)[:200],
             )
-            if retry_delay > 0:
-                await asyncio.sleep(retry_delay)
+            if current_retry_delay > 0:
+                await asyncio.sleep(current_retry_delay)
 
 
 def normalize_ai_stylist_result(raw: Any, input_row: Any, candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -10134,6 +10206,81 @@ AUTO_RUN_JOB_KEY_PREFIX = "generation_auto_run:"
 AUTO_RUN_TERMINAL_TASK_STATUSES = {"ABANDONED"}
 
 
+def generation_retry_backoff_seconds(retry_number: int, base_seconds: float | None = None) -> float:
+    """30/60/120/240 秒封顶的持久化 auto-run 退避。retry_number 从 1 开始。"""
+    base = max(0.0, float(settings.generation_retry_backoff_base_seconds if base_seconds is None else base_seconds))
+    cap = max(base, float(settings.generation_retry_backoff_cap_seconds))
+    return min(base * (2 ** max(0, retry_number - 1)), cap)
+
+
+def is_auto_run_retryable_error(error_code: str | None) -> bool:
+    """跨 attempt 只接管没有内层重试的上传失败；其它阶段各自拥有唯一的 10 次预算。"""
+    return error_code == ERROR_UPLOAD_FAILED
+
+
+def schedule_auto_run_retry(task_id: int, error_codes: list[str | None], *, process_interrupted: bool = False) -> bool:
+    """把一键成片任务放回现有 SQLite poller；达到 10 次或没有可重试错误时返回 False。"""
+    retryable_codes = [
+        str(code)
+        for code in error_codes
+        if process_interrupted or is_auto_run_retryable_error(code)
+    ]
+    if not retryable_codes:
+        return False
+    with get_db() as db:
+        task = db.execute("SELECT * FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
+        if not task or task["status"] in {"CANCELLED", "ABANDONED", "COMPLETED"}:
+            return False
+        retry_count = int(row_value(task, "auto_run_retry_count", 0) or 0)
+        if retry_count >= settings.generation_auto_run_retry_limit:
+            return False
+        if task["status"] == "FAILED":
+            resume_failed_generation_task(db, task_id, now_iso())
+        retry_number = retry_count + 1
+        delay = generation_retry_backoff_seconds(retry_number)
+        retry_at = (
+            datetime.now(timezone.utc) + timedelta(seconds=delay)
+        ).isoformat(timespec="seconds").replace("+00:00", "Z")
+        timestamp = now_iso()
+        db.execute(
+            """
+            UPDATE generation_tasks
+            SET auto_run_target = ?, auto_run_retry_at = ?, auto_run_retry_count = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (AUTO_RUN_TARGET_FINAL, retry_at, retry_number, timestamp, task_id),
+        )
+        log_event(
+            db,
+            "generation_task",
+            task_id,
+            "auto_run_retry_scheduled",
+            {"retryNumber": retry_number, "retryAt": retry_at, "errorCodes": sorted(set(retryable_codes))},
+        )
+    return True
+
+
+def task_auto_run_retry_waiting(task: Any) -> bool:
+    retry_at = row_value(task, "auto_run_retry_at")
+    return bool(retry_at and str(retry_at) > now_iso())
+
+
+def consume_due_auto_run_retry(task_id: int) -> bool:
+    """原子消费已到期的重试时间；保留累计次数，供本轮失败继续递增。"""
+    timestamp = now_iso()
+    with get_db() as db:
+        cursor = db.execute(
+            """
+            UPDATE generation_tasks
+            SET auto_run_retry_at = NULL, updated_at = ?
+            WHERE id = ? AND auto_run_target = ?
+              AND auto_run_retry_at IS NOT NULL AND auto_run_retry_at <= ?
+            """,
+            (timestamp, task_id, AUTO_RUN_TARGET_FINAL, timestamp),
+        )
+    return bool(cursor.rowcount)
+
+
 def auto_run_active_task_ids() -> set[int]:
     """当前占用 auto-run 并发额度的任务：状态运行中，或后台正在推进其 auto-run 协程。"""
     with get_db() as db:
@@ -10167,9 +10314,10 @@ def pump_auto_run_queue() -> None:
             WHERE deleted_at IS NULL
               AND auto_run_target = ?
               AND status NOT IN ('STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'ABANDONED')
+              AND (auto_run_retry_at IS NULL OR auto_run_retry_at <= ?)
             ORDER BY COALESCE(auto_run_requested_at, updated_at), id
             """,
-            (AUTO_RUN_TARGET_FINAL,),
+            (AUTO_RUN_TARGET_FINAL, now_iso()),
         ).fetchall()
     for row in rows:
         if slots <= 0:
@@ -10190,13 +10338,14 @@ def auto_run_queue_position(task_id: int, requested_at: str | None) -> int | Non
             WHERE deleted_at IS NULL
               AND auto_run_target = ?
               AND status NOT IN ('STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'ABANDONED')
+              AND (auto_run_retry_at IS NULL OR auto_run_retry_at <= ?)
               AND id != ?
               AND (
                 COALESCE(auto_run_requested_at, updated_at) < COALESCE(?, '')
                 OR (COALESCE(auto_run_requested_at, updated_at) = COALESCE(?, '') AND id < ?)
               )
             """,
-            (AUTO_RUN_TARGET_FINAL, task_id, requested_at, requested_at, task_id),
+            (AUTO_RUN_TARGET_FINAL, now_iso(), task_id, requested_at, requested_at, task_id),
         ).fetchone()
     return int(row["ahead"]) + 1 if row else None
 
@@ -10210,7 +10359,8 @@ def clear_task_auto_run(task_id: int) -> None:
         db.execute(
             """
             UPDATE generation_tasks
-            SET auto_run_target = NULL, auto_run_requested_at = NULL, updated_at = ?
+            SET auto_run_target = NULL, auto_run_requested_at = NULL,
+                auto_run_retry_at = NULL, auto_run_retry_count = 0, updated_at = ?
             WHERE id = ?
             """,
             (now_iso(), task_id),
@@ -10223,6 +10373,11 @@ async def run_auto_final_generation(task_id: int) -> None:
             task = get_generation_task_row(task_id)
             if row_value(task, "auto_run_target") != AUTO_RUN_TARGET_FINAL:
                 return
+            if task_auto_run_retry_waiting(task):
+                return
+            if row_value(task, "auto_run_retry_at"):
+                consume_due_auto_run_retry(task_id)
+                task = get_generation_task_row(task_id)
             if task["status"] in RUNNING_GENERATION_TASK_STATUSES:
                 return
             if task["status"] == "ABANDONED":
@@ -10246,9 +10401,15 @@ async def run_auto_final_generation(task_id: int) -> None:
                 return
             return
     except HTTPException:
+        task = get_generation_task_row(task_id)
+        if task_auto_run_retry_waiting(task):
+            return
         clear_task_auto_run(task_id)
         raise
     except Exception:
+        task = get_generation_task_row(task_id)
+        if task_auto_run_retry_waiting(task):
+            return
         clear_task_auto_run(task_id)
         raise
 
@@ -10322,9 +10483,24 @@ def lease_generation_result_image(image_id: int, attempt_id: int) -> None:
 def refresh_pending_new_generation_jobs() -> None:
     timestamp = now_iso()
     with get_db() as db:
+        styling_rows = db.execute(
+            """
+            SELECT gt.id AS task_id,
+                   (SELECT ga.id FROM generation_attempts ga
+                    WHERE ga.owner_type = 'generation_styling' AND ga.owner_id = gt.id AND ga.status = 'RUNNING'
+                    ORDER BY ga.id DESC LIMIT 1) AS attempt_id
+            FROM generation_tasks gt
+            WHERE gt.deleted_at IS NULL AND gt.status = 'STYLING_RUNNING' AND gt.auto_run_target = ?
+            ORDER BY gt.updated_at, gt.id
+            LIMIT 3
+            """,
+            (AUTO_RUN_TARGET_FINAL,),
+        ).fetchall()
         preview_rows = db.execute(
             """
-            SELECT gp.* FROM generation_previews gp
+            SELECT gp.*, gt.auto_run_target AS task_auto_run_target
+            FROM generation_previews gp
+            JOIN generation_tasks gt ON gt.id = gp.task_id
             LEFT JOIN generation_attempts ga ON ga.id = gp.active_attempt_id
             WHERE gp.status IN ('QUEUED', 'RUNNING')
               AND (
@@ -10338,7 +10514,7 @@ def refresh_pending_new_generation_jobs() -> None:
         ).fetchall()
         result_sets = db.execute(
             """
-            SELECT DISTINCT grs.id, grs.task_id
+            SELECT DISTINCT grs.id, grs.task_id, gt.auto_run_target AS task_auto_run_target
             FROM generation_result_sets grs
             JOIN generation_tasks gt ON gt.active_result_set_id = grs.id
             JOIN generation_result_images_new gri ON gri.result_set_id = grs.id
@@ -10356,7 +10532,7 @@ def refresh_pending_new_generation_jobs() -> None:
         ).fetchall()
         terminal_result_sets = db.execute(
             """
-            SELECT grs.id, grs.task_id
+            SELECT grs.id, grs.task_id, gt.auto_run_target AS task_auto_run_target
             FROM generation_result_sets grs
             JOIN generation_tasks gt ON gt.active_result_set_id = grs.id
             WHERE (
@@ -10372,6 +10548,18 @@ def refresh_pending_new_generation_jobs() -> None:
             LIMIT 10
             """
         ).fetchall()
+
+    for row in styling_rows:
+        task_id = int(row["task_id"])
+        if auto_run_job_key(task_id) in active_background_generation_jobs:
+            continue
+        attempt_id = int(row["attempt_id"]) if row["attempt_id"] else None
+        message = "AI 智能选搭执行进程已中断，系统将从选搭阶段自动恢复。"
+        fail_stale_attempt(attempt_id, message, ERROR_PROVIDER_TIMEOUT)
+        with get_db() as db:
+            db.execute("UPDATE generation_tasks SET status = 'FAILED', updated_at = ? WHERE id = ?", (now_iso(), task_id))
+        if not schedule_auto_run_retry(task_id, [ERROR_PROVIDER_TIMEOUT], process_interrupted=True):
+            clear_task_auto_run(task_id)
 
     for row in preview_rows:
         key = preview_job_key(int(row["id"]))
@@ -10393,15 +10581,19 @@ def refresh_pending_new_generation_jobs() -> None:
                     (now_iso(), int(row["id"])),
                 )
                 db.execute(
-                    "UPDATE generation_tasks SET status = 'FAILED', auto_run_target = NULL, updated_at = ? WHERE id = ?",
+                    "UPDATE generation_tasks SET status = 'FAILED', updated_at = ? WHERE id = ?",
                     (now_iso(), int(row["task_id"])),
                 )
+            if row["task_auto_run_target"] == AUTO_RUN_TARGET_FINAL and schedule_auto_run_retry(int(row["task_id"]), [error_code]):
+                continue
+            clear_task_auto_run(int(row["task_id"]))
             continue
         else:
             attempt_id = create_attempt("generation_preview", int(row["id"]), "image-2")
         lease_generation_preview(int(row["id"]), attempt_id)
+        trigger = "auto_run" if row["task_auto_run_target"] == AUTO_RUN_TARGET_FINAL else "manual_step"
         schedule_background_generation(
-            run_preview_generation(int(row["task_id"]), int(row["styling_id"]), int(row["id"]), attempt_id),
+            run_preview_generation(int(row["task_id"]), int(row["styling_id"]), int(row["id"]), attempt_id, trigger=trigger),
             job_key=key,
         )
 
@@ -10450,17 +10642,31 @@ def refresh_pending_new_generation_jobs() -> None:
                 else:
                     image_ids.append(int(image["id"]))
             if image_ids:
+                trigger = "auto_run" if row["task_auto_run_target"] == AUTO_RUN_TARGET_FINAL else "manual_step"
                 schedule_background_generation(
-                    run_final_generation(int(row["task_id"]), int(row["id"]), image_ids, resume_attempts_by_image_id=resume_attempts_by_image_id),
+                    run_final_generation(
+                        int(row["task_id"]), int(row["id"]), image_ids,
+                        resume_attempts_by_image_id=resume_attempts_by_image_id,
+                        trigger=trigger,
+                    ),
                     job_key=key,
                 )
             else:
-                with get_db() as db:
-                    reconcile_final_result_set(db, int(row["id"]), int(row["task_id"]))
+                trigger = "auto_run" if row["task_auto_run_target"] == AUTO_RUN_TARGET_FINAL else "manual_step"
+                schedule_background_generation(
+                    run_final_generation(int(row["task_id"]), int(row["id"]), [], trigger=trigger),
+                    job_key=key,
+                )
 
     for row in terminal_result_sets:
-        with get_db() as db:
-            reconcile_final_result_set(db, int(row["id"]), int(row["task_id"]))
+        key = final_set_job_key(int(row["id"]))
+        if key in active_background_generation_jobs:
+            continue
+        trigger = "auto_run" if row["task_auto_run_target"] == AUTO_RUN_TARGET_FINAL else "manual_step"
+        schedule_background_generation(
+            run_final_generation(int(row["task_id"]), int(row["id"]), [], trigger=trigger),
+            job_key=key,
+        )
     pump_auto_run_queue()
 
 
@@ -10486,12 +10692,6 @@ def schedule_background_generation(coro: Any, job_key: str | None = None) -> Non
 
     task.add_done_callback(report_failure)
 
-
-# 成片回传的退避重试间隔（秒）；总时长由 GENERATION_DELIVERY_TIMEOUT_SECONDS 限定。
-DELIVERY_RETRY_BACKOFF_SECONDS: tuple[int, ...] = (5, 15, 30, 60, 120, 300)
-
-# 状态查询连续失败时的退避上限（秒）：实际连续失败次数由 GENERATION_STATUS_RETRY_LIMIT 控制。
-STATUS_CHECK_ERROR_BACKOFF_CAP_SECONDS = 30
 
 async def generate_image_asset(
     task_package: dict[str, Any],
@@ -10568,6 +10768,10 @@ async def _generate_image_asset_unlocked(
                     exc.provider_response = snapshot
                     raise
                 unknown_submission_retries += 1
+                retry_delay = generation_retry_backoff_seconds(
+                    unknown_submission_retries,
+                    settings.generation_unknown_submission_retry_delay_seconds,
+                )
                 snapshot.update(
                     {
                         "status": "SUBMISSION_RETRY_WAIT",
@@ -10577,10 +10781,10 @@ async def _generate_image_asset_unlocked(
                 progress.begin(
                     PHASE_SUBMIT,
                     unknownSubmissionRetry=unknown_submission_retries,
-                    retryDelaySeconds=settings.generation_unknown_submission_retry_delay_seconds,
+                    retryDelaySeconds=retry_delay,
                 )
                 prepare_attempt_provider_resubmission(attempt_id, snapshot)
-                await asyncio.sleep(settings.generation_unknown_submission_retry_delay_seconds)
+                await asyncio.sleep(retry_delay)
                 # 官方支持用 client_business_id 走同一个状态接口查询。先确认原任务，
                 # 只有明确 404 才补提；查询本身仍不确定时停止，避免重复任务/重复计费。
                 lookup_snapshot = {
@@ -10636,9 +10840,11 @@ async def _generate_image_asset_unlocked(
             if isinstance(uploaded_inputs, list) and uploaded_inputs:
                 submit_task_package = {**task_package, "imageInputs": uploaded_inputs}
             generation_retries += 1
+            retry_delay = generation_retry_backoff_seconds(generation_retries)
             progress.begin(
                 PHASE_SUBMIT,
                 generationRetry=generation_retries,
+                retryDelaySeconds=retry_delay,
                 previousProviderRequestIds=provider_request_history,
                 previousError=terminal_error[:500],
             )
@@ -10650,6 +10856,7 @@ async def _generate_image_asset_unlocked(
                     "generationRetries": generation_retries,
                 },
             )
+            await asyncio.sleep(retry_delay)
             payload = None
             continue
         raise ImageProviderError(
@@ -10710,7 +10917,7 @@ async def poll_provider_until_terminal(
     while time.time() < deadline:
         poll_interval = max(0.1, float(settings.generation_poll_interval_seconds))
         await asyncio.sleep(
-            min(poll_interval * (2 ** min(consecutive_errors, 4)), STATUS_CHECK_ERROR_BACKOFF_CAP_SECONDS)
+            generation_retry_backoff_seconds(consecutive_errors)
             if consecutive_errors
             else poll_interval
         )
@@ -10816,11 +11023,14 @@ async def deliver_with_retries(
                     getattr(exc, "provider_response", None) or payload,
                     error_code=delivery_error_code,
                 ) from exc
-            wait = DELIVERY_RETRY_BACKOFF_SECONDS[min(retries, len(DELIVERY_RETRY_BACKOFF_SECONDS) - 1)]
-            retries += 1
-            progress.update(PHASE_DELIVER, retries=retries, lastError=str(exc)[:500])
+            next_retry = retries + 1
+            if next_retry > settings.generation_delivery_retry_limit:
+                break
+            wait = generation_retry_backoff_seconds(next_retry)
             if time.time() + wait > deadline:
                 break
+            retries = next_retry
+            progress.update(PHASE_DELIVER, retries=retries, lastError=str(exc)[:500])
             await asyncio.sleep(wait)
     raise ImageProviderError(
         f"成片生成已在 provider 侧完成，但回传失败（已重试 {retries} 次），"
@@ -11049,6 +11259,9 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
         "batchId": row_value(row, "batch_id"),
         "autoRunTarget": row_value(row, "auto_run_target"),
         "autoRunRequestedAt": row_value(row, "auto_run_requested_at"),
+        "autoRunRetryAt": row_value(row, "auto_run_retry_at"),
+        "autoRunRetryCount": int(row_value(row, "auto_run_retry_count", 0) or 0),
+        "autoRunRetryLimit": settings.generation_auto_run_retry_limit,
         "autoRunQueued": False,
         "autoRunQueuePosition": None,
         "archivedAt": row["archived_at"] if "archived_at" in row.keys() else None,

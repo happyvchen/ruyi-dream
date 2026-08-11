@@ -23,6 +23,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("059", "upload_object_cleanup_retry", "migration_upload_object_cleanup_retry"),
     ("060", "upload_object_cleanup_claim", "migration_upload_object_cleanup_claim"),
     ("061", "upload_session_batch_queries", "migration_upload_session_batch_queries"),
+    ("062", "generation_auto_run_retry", "migration_generation_auto_run_retry"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -178,6 +179,8 @@ def init_db() -> None:
               active_result_set_id INTEGER,
               auto_run_target TEXT,
               auto_run_requested_at TEXT,
+              auto_run_retry_at TEXT,
+              auto_run_retry_count INTEGER NOT NULL DEFAULT 0,
               batch_id TEXT,
               lease_owner TEXT,
               lease_expires_at TEXT,
@@ -404,6 +407,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_upload_object_cleanup_retry": migration_upload_object_cleanup_retry,
         "migration_upload_object_cleanup_claim": migration_upload_object_cleanup_claim,
         "migration_upload_session_batch_queries": migration_upload_session_batch_queries,
+        "migration_generation_auto_run_retry": migration_generation_auto_run_retry,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -605,6 +609,19 @@ def migration_upload_object_cleanup_claim(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE upload_object_cleanup_queue ADD COLUMN claim_token TEXT")
     if not table_has_column(db, "upload_object_cleanup_queue", "claimed_at"):
         db.execute("ALTER TABLE upload_object_cleanup_queue ADD COLUMN claimed_at TEXT")
+
+
+def migration_generation_auto_run_retry(db: sqlite3.Connection) -> None:
+    if not table_exists(db, "generation_tasks"):
+        return
+    if not table_has_column(db, "generation_tasks", "auto_run_retry_at"):
+        db.execute("ALTER TABLE generation_tasks ADD COLUMN auto_run_retry_at TEXT")
+    if not table_has_column(db, "generation_tasks", "auto_run_retry_count"):
+        db.execute("ALTER TABLE generation_tasks ADD COLUMN auto_run_retry_count INTEGER NOT NULL DEFAULT 0")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_generation_tasks_auto_run_retry_at "
+        "ON generation_tasks(auto_run_target, auto_run_retry_at)"
+    )
 
 
 def scrub_prompt_config_hero_product_info(db: sqlite3.Connection) -> None:

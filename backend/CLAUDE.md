@@ -16,7 +16,7 @@ ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 �
 | API | FastAPI + Uvicorn |
 | Storage | S3 兼容对象存储，私有化默认 RustFS |
 | Metadata | SQLite：`backend/data/app.sqlite3` |
-| AI Stylist | Gemini（`app/gemini_provider.py`，`GEMINI_PROVIDER` 切换：`toapis` 走 ToAPIs OpenAI 兼容中转，`direct` 走 google-genai 直连；代码缺省 `direct` 兼容存量部署，`.env.example` 和本项目部署配置为 `toapis`）；失败直接返回错误并记录事件日志 |
+| AI Stylist | Gemini（`app/gemini_provider.py`，`GEMINI_PROVIDER` 切换：`toapis` 走 ToAPIs OpenAI 兼容中转，`direct` 走 google-genai 直连；代码缺省 `direct` 兼容存量部署，`.env.example` 和本项目部署配置为 `toapis`）；瞬时技术失败有限自动恢复，终态错误记录事件日志 |
 | Image Provider | `app/image_provider.py`，GPT Image-2 provider 适配；默认 toapis，保留 fal queue 提交、状态查询、结果下载 |
 
 生产直接依赖见 `requirements.txt`，测试依赖入口见 `requirements-dev.txt`，传递依赖约束见 `requirements.constraints.txt`。不要预先引入复杂 SaaS 权限、多租户、计费、队列集群。

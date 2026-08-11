@@ -342,8 +342,8 @@ _RETRYABLE_CODES = frozenset(
     }
 )
 
-# 聊天类（Gemini）只有明确的前置限流拒绝能证明没有进入生成，可安全重发整个请求。
-# 连接中断和网关错误的执行结果可能未知，不能仅凭未收到正文断言 provider 未生成或未计费。
+# 聊天类（Gemini）的零产出集合仍只包含明确限流；连接中断由 Gemini provider
+# 根据产品要求另行纳入有次数与总时间预算的自动重发，不能把它误称为确定零计费。
 _ZERO_OUTPUT_TRANSIENT_CODES = frozenset({ERROR_RATE_LIMITED})
 
 

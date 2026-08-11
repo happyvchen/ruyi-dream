@@ -244,6 +244,9 @@ export type GenerationTask = {
   batchId?: string | null
   autoRunTarget?: string | null
   autoRunRequestedAt?: string | null
+  autoRunRetryAt?: string | null
+  autoRunRetryCount?: number
+  autoRunRetryLimit?: number
   autoRunQueued?: boolean
   autoRunQueuePosition?: number | null
   archivedAt?: string | null

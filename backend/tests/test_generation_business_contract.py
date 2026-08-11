@@ -3,8 +3,9 @@ from __future__ import annotations
 import pytest
 
 from app import main as app_main
-from app.db import PROMPT_CONFIG_CATALOG
-from conftest import insert_ready_generation_task_with_preview
+from app.db import PROMPT_CONFIG_CATALOG, get_db, now_iso
+from app.generation_progress import ERROR_AUTH_FAILED, ERROR_CONN_RESET, ERROR_DELIVERY_FAILED, ERROR_UPLOAD_FAILED
+from conftest import insert_generation_task, insert_ready_generation_task_with_preview
 
 
 def styling_plan(family: str | None = "top") -> dict[str, object]:
@@ -149,4 +150,177 @@ def test_continue_generation_keeps_succeeded_slots_and_requeues_only_failed_or_m
         (3, "QUEUED"),
         (4, "QUEUED"),
         (5, "QUEUED"),
+    ]
+
+
+def test_continue_delivery_failure_preserves_provider_attempt_for_redelivery(client) -> None:
+    ids = insert_ready_generation_task_with_preview(family="top")
+    first = client.post(f"/api/generation-tasks/{ids['task_id']}/generate-final")
+    item = first.json()["item"]
+    result_set_id = item["activeResultSetId"]
+    image_rows = item["resultSet"]["images"]
+    failed_image_id = image_rows[0]["id"]
+    timestamp = now_iso()
+    with get_db() as db:
+        cursor = db.execute(
+            """
+            INSERT INTO generation_attempts
+              (owner_type, owner_id, provider, provider_request_id, status, error_code,
+               started_at, failed_at, created_at, updated_at)
+            VALUES ('generation_result_image', ?, 'image-2', 'provider-task-1', 'FAILED', ?, ?, ?, ?, ?)
+            """,
+            (failed_image_id, ERROR_DELIVERY_FAILED, timestamp, timestamp, timestamp, timestamp),
+        )
+        attempt_id = int(cursor.lastrowid)
+        db.execute("UPDATE generation_tasks SET status = 'FINAL_PARTIAL' WHERE id = ?", (ids["task_id"],))
+        db.execute("UPDATE generation_result_sets SET status = 'PARTIAL' WHERE id = ?", (result_set_id,))
+        db.execute(
+            "UPDATE generation_result_images_new SET status = 'SUCCEEDED' WHERE result_set_id = ? AND id != ?",
+            (result_set_id, failed_image_id),
+        )
+        db.execute(
+            "UPDATE generation_result_images_new SET status = 'FAILED', active_attempt_id = ? WHERE id = ?",
+            (attempt_id, failed_image_id),
+        )
+
+    continued = app_main.continue_active_final_result_set(
+        ids["task_id"], result_set_id, ids["styling_id"], ids["preview_id"], {"stage": "final_image"}
+    )
+
+    assert continued == [failed_image_id]
+    with get_db() as db:
+        image = db.execute(
+            "SELECT status, active_attempt_id FROM generation_result_images_new WHERE id = ?",
+            (failed_image_id,),
+        ).fetchone()
+    assert image["status"] == "QUEUED"
+    assert image["active_attempt_id"] == attempt_id
+
+
+def test_upload_failure_is_persisted_for_poller_and_restores_stage(client) -> None:
+    task_id = insert_generation_task(status="FAILED")
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute(
+            "UPDATE generation_tasks SET auto_run_target = 'FINAL', auto_run_requested_at = ? WHERE id = ?",
+            (timestamp, task_id),
+        )
+        db.execute(
+            """
+            INSERT INTO generation_attempts
+              (owner_type, owner_id, provider, status, error_code, started_at, failed_at, created_at, updated_at)
+            VALUES ('generation_styling', ?, 'gemini', 'FAILED', ?, ?, ?, ?, ?)
+            """,
+            (task_id, ERROR_UPLOAD_FAILED, timestamp, timestamp, timestamp, timestamp),
+        )
+
+    assert app_main.schedule_auto_run_retry(task_id, [ERROR_UPLOAD_FAILED]) is True
+
+    response = client.get(f"/api/generation-tasks/{task_id}")
+    assert response.status_code == 200
+    item = response.json()["item"]
+    assert item["status"] == "READY_FOR_STYLING"
+    assert item["autoRunTarget"] == "FINAL"
+    assert item["autoRunRetryCount"] == 1
+    assert item["autoRunRetryLimit"] == 10
+    assert item["autoRunRetryAt"] is not None
+
+
+def test_hard_auto_run_failure_is_not_scheduled() -> None:
+    task_id = insert_generation_task(status="FAILED")
+
+    assert app_main.schedule_auto_run_retry(task_id, [ERROR_AUTH_FAILED]) is False
+
+    with get_db() as db:
+        task = db.execute("SELECT auto_run_retry_at, auto_run_retry_count FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
+    assert task["auto_run_retry_at"] is None
+    assert task["auto_run_retry_count"] == 0
+
+
+def test_provider_retry_budget_is_not_multiplied_by_auto_run() -> None:
+    task_id = insert_generation_task(status="FAILED")
+
+    assert app_main.schedule_auto_run_retry(task_id, [ERROR_CONN_RESET]) is False
+
+
+def test_auto_run_stops_after_ten_scheduled_retries() -> None:
+    task_id = insert_generation_task(status="FAILED")
+    with get_db() as db:
+        db.execute(
+            "UPDATE generation_tasks SET auto_run_target = 'FINAL', auto_run_retry_count = 10 WHERE id = ?",
+            (task_id,),
+        )
+
+    assert app_main.schedule_auto_run_retry(task_id, [ERROR_UPLOAD_FAILED]) is False
+
+    with get_db() as db:
+        task = db.execute("SELECT auto_run_retry_at, auto_run_retry_count FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
+    assert task["auto_run_retry_at"] is None
+    assert task["auto_run_retry_count"] == 10
+
+
+def test_due_auto_run_retry_is_consumed_without_resetting_count() -> None:
+    task_id = insert_generation_task(status="READY_FOR_STYLING")
+    with get_db() as db:
+        db.execute(
+            """
+            UPDATE generation_tasks
+            SET auto_run_target = 'FINAL', auto_run_retry_at = '2000-01-01T00:00:00Z', auto_run_retry_count = 3
+            WHERE id = ?
+            """,
+            (task_id,),
+        )
+
+    assert app_main.consume_due_auto_run_retry(task_id) is True
+
+    with get_db() as db:
+        task = db.execute("SELECT auto_run_retry_at, auto_run_retry_count FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
+    assert task["auto_run_retry_at"] is None
+    assert task["auto_run_retry_count"] == 3
+
+
+def test_poller_recovers_interrupted_auto_run_styling_after_process_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_id = insert_generation_task(status="STYLING_RUNNING")
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute(
+            "UPDATE generation_tasks SET auto_run_target = 'FINAL', auto_run_requested_at = ? WHERE id = ?",
+            (timestamp, task_id),
+        )
+        cursor = db.execute(
+            """
+            INSERT INTO generation_attempts
+              (owner_type, owner_id, provider, status, started_at, created_at, updated_at)
+            VALUES ('generation_styling', ?, 'gemini', 'RUNNING', ?, ?, ?)
+            """,
+            (task_id, timestamp, timestamp, timestamp),
+        )
+        attempt_id = int(cursor.lastrowid)
+    monkeypatch.setattr(app_main, "pump_auto_run_queue", lambda: None)
+
+    app_main.refresh_pending_new_generation_jobs()
+
+    with get_db() as db:
+        task = db.execute(
+            "SELECT status, auto_run_target, auto_run_retry_at, auto_run_retry_count FROM generation_tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        attempt = db.execute("SELECT status FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
+    assert task["status"] == "READY_FOR_STYLING"
+    assert task["auto_run_target"] == "FINAL"
+    assert task["auto_run_retry_at"] is not None
+    assert task["auto_run_retry_count"] == 1
+    assert attempt["status"] == "FAILED"
+
+
+def test_generation_retry_backoff_caps_at_four_minutes() -> None:
+    assert [app_main.generation_retry_backoff_seconds(index) for index in range(1, 7)] == [
+        30,
+        60,
+        120,
+        240,
+        240,
+        240,
     ]

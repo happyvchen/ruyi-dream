@@ -8,7 +8,7 @@
 - 分镜六镜头规则集中在 `assembly.storyboard_preview_top`、`assembly.storyboard_preview_bottom`、`assembly.storyboard_preview_one_piece`。
 - 成片逐格兑现规则集中在 `assembly.final_image_top`、`assembly.final_image_bottom`、`assembly.final_image_one_piece`。
 - 代码只注入动态事实：用户补充要求、参考图图号、品类族、选中造型摘要、当前格号和条件段。
-- 系统不引入自动评分、自动验收、自动切格或自动重试作为默认链路。
+- 系统不引入自动评分、自动验收、自动切格或因视觉质量判断触发的自动重生；瞬时技术失败由任务编排有限恢复。
 
 ## 当前权威实现
 

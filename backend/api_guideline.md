@@ -123,7 +123,9 @@ ABANDONED
 
 `error` 是普通用户契约，前端不得自行解析 provider 原始字符串。admin-only attempt 技术详情额外返回 `technicalMessage`、`requestFacts`、`responseFacts`；其中可包含 ToAPIs 顶层错误、内嵌上游错误和 providerRequestId，但不得进入普通任务列表。
 
-重试必须按错误类别和阶段决策：参数、鉴权、余额、内容策略与业务拒绝不重试；Gemini 只有明确的前置限流拒绝在 provider 层指数退避，`HTTP 500 + rate_limit_check_failed` 按限流处理，连接中断和网关错误因执行结果未知不自动重发；AI 打标业务层不再叠加整条调用重试。Image-2 提交结果未知先按 `client_business_id` 对账；状态查询只容忍网络/网关/限流类瞬时错误并受 `GENERATION_STATUS_RETRY_LIMIT` 约束；明确的 provider 内部生成失败按 `GENERATION_SUBMIT_RETRY_LIMIT` 有限重建；回传失败只重新下载，不重新生成。
+重试必须按错误类别和阶段决策：参数、鉴权、余额、内容策略与业务拒绝不重试；Gemini 的明确限流、连接失败和读取超时在 provider 层自动重发。Image-2 提交结果未知先按 `client_business_id` 对账；状态查询只容忍网络/网关/限流类瞬时错误；明确的 provider 内部生成失败有限重建；回传失败只重新下载，不重新生成。各类默认最多重试 10 次，按 30/60/120/240 秒封顶退避并受阶段总预算约束。
+
+任务响应中的 `autoRunRetryAt`、`autoRunRetryCount` 与 `autoRunRetryLimit` 表示已持久化的下一次跨阶段自动恢复时间、当前轮次和配置上限；字段存在时前端显示 `自动恢复中`，不得提前呈现终态失败。
 
 ## Prompt 维护槽位
 
