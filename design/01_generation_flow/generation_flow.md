@@ -3,7 +3,7 @@
 ## 1. 四步链路
 
 ```text
-上传主推款
+导入主推款
 → AI 智能选搭 / StylingPlan
 → Image-2 分镜预览（按拍摄图位族选择固定 Prompt）
 → Image-2 最终成片（分镜前 5 格）
@@ -58,7 +58,7 @@ AI 摄影棚主推款最多取 15 张图片作为候选输入。点击 `AI 智�
 - `PREVIEW_RUNNING` → `PREVIEW_READY`
 - `FINAL_RUNNING` → `COMPLETED` / `FINAL_PARTIAL`
 
-重新上传主推款会使选搭、分镜和成片失效；重新选搭使分镜和成片失效；重新生成分镜使成片失效。旧的 `SCRIPT_RUNNING` / `SCRIPT_READY` 不属于当前流程。
+重新导入主推款会使选搭、分镜和成片失效；重新选搭使分镜和成片失效；重新生成分镜使成片失效。旧的 `SCRIPT_RUNNING` / `SCRIPT_READY` 不属于当前流程。
 
 ## 6. 第一阶段范围
 

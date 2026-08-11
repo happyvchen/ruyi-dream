@@ -712,14 +712,14 @@ def logout() -> JSONResponse:
 
 @app.post("/api/uploads/presign")
 def create_direct_uploads(payload: DirectUploadRequest) -> dict[str, Any]:
-    raise HTTPException(status_code=410, detail="独立直传已停用，请使用上传会话接口")
+    raise HTTPException(status_code=410, detail="独立直传已停用，请使用导入会话接口")
 
 
 def build_direct_upload_items(scope: str, files: list[DirectUploadFileRequest]) -> list[dict[str, Any]]:
     if not files:
         raise HTTPException(status_code=400, detail="至少选择一张图片")
     if len(files) > 20:
-        raise HTTPException(status_code=400, detail="单次最多申请 20 张图片上传")
+        raise HTTPException(status_code=400, detail="单次最多申请 20 张图片导入")
     ensure_direct_upload_cors()
     direct_upload_scope_prefix(scope)
     items: list[dict[str, Any]] = []
@@ -733,7 +733,7 @@ def build_direct_upload_items(scope: str, files: list[DirectUploadFileRequest]) 
         object_key = new_media_original_key(filename)
         upload_url = presigned_put_url(object_key, content_type, {"sha256": checksum_sha256} if checksum_sha256 else None)
         if not upload_url:
-            raise HTTPException(status_code=500, detail="无法创建上传地址")
+            raise HTTPException(status_code=500, detail="无法创建导入地址")
         items.append(
             {
                 "objectKey": object_key,
@@ -771,7 +771,7 @@ def normalized_upload_executor_id(value: str | None) -> str | None:
         return None
     clean = re.sub(r"[^A-Za-z0-9._-]+", "", value.strip())[:100]
     if not clean:
-        raise HTTPException(status_code=400, detail="上传执行端标识不合法")
+        raise HTTPException(status_code=400, detail="导入执行端标识不合法")
     return clean
 
 
@@ -794,7 +794,7 @@ def claim_upload_session_lease(db: sqlite3.Connection, session: Any, executor_id
     batch_id = row_value(session, "batch_id")
     if not owner:
         if batch_id:
-            raise HTTPException(status_code=409, detail="缺少上传执行凭证，请刷新页面后重试")
+            raise HTTPException(status_code=409, detail="缺少导入执行凭证，请刷新页面后重试")
         return
     now = now_iso()
     expires = upload_lease_expiry()
@@ -825,7 +825,7 @@ def claim_upload_session_lease(db: sqlite3.Connection, session: Any, executor_id
             (owner, expires, session["id"], owner, now),
         )
     if claimed.rowcount == 0:
-        raise HTTPException(status_code=409, detail="该上传任务正在另一页面或电脑继续，请稍后再试")
+        raise HTTPException(status_code=409, detail="该导入任务正在另一页面或电脑继续，请稍后再试")
 
 
 def insert_upload_session(
@@ -840,7 +840,7 @@ def insert_upload_session(
 ) -> tuple[str, list[dict[str, Any]]]:
     scope_prefix = direct_upload_scope_prefix(scope)
     if scope_prefix == "generation-task" and len(files) > MAX_HERO_IMAGE_INPUTS:
-        raise HTTPException(status_code=400, detail=f"每个拍摄任务最多上传 {MAX_HERO_IMAGE_INPUTS} 张主推款图片")
+        raise HTTPException(status_code=400, detail=f"每个拍摄任务最多导入 {MAX_HERO_IMAGE_INPUTS} 张主推款图片")
     session_files = files[:MAX_GARMENT_IMAGE_INPUTS] if scope_prefix == "styling-garment" else files
     session_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
     items = build_direct_upload_items(scope, session_files)
@@ -901,14 +901,14 @@ def create_styling_import_batch(payload: StylingImportBatchCreateRequest) -> dic
     if not payload.items:
         raise HTTPException(status_code=400, detail="至少选择一个货号")
     if len(payload.items) > 500:
-        raise HTTPException(status_code=400, detail="单次最多上传 500 个货号")
+        raise HTTPException(status_code=400, detail="单次最多导入 500 个货号")
     source_title = sanitize_name(payload.sourceTitle) if payload.sourceTitle else None
     batch_id = sanitize_name(payload.batchId) if payload.batchId else f"import-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
     codes = [sanitize_name(item.businessCode) for item in payload.items]
     if any(not code for code in codes):
-        raise HTTPException(status_code=400, detail="每个上传项都需要有效货号")
+        raise HTTPException(status_code=400, detail="每个导入项都需要有效货号")
     if len(set(codes)) != len(codes):
-        raise HTTPException(status_code=400, detail="同一上传任务中货号不能重复")
+        raise HTTPException(status_code=400, detail="同一导入任务中货号不能重复")
     created: list[tuple[str, list[dict[str, Any]]]] = []
     with get_db() as db:
         for item, clean_code in zip(payload.items, codes, strict=True):
@@ -992,7 +992,7 @@ def list_upload_sessions(
         ).fetchall()
         session_ids = [row["id"] for row in rows]
         items_by_session: dict[str, list[Any]] = {session_id: [] for session_id in session_ids}
-        garment_statuses: dict[int, str] = {}
+        target_contexts: dict[int, dict[str, Any]] = {}
         if session_ids:
             placeholders = ", ".join("?" for _ in session_ids)
             item_rows = db.execute(
@@ -1005,20 +1005,13 @@ def list_upload_sessions(
             ).fetchall()
             for item in item_rows:
                 items_by_session.setdefault(item["session_id"], []).append(item)
-            garment_ids = [int(row["target_id"]) for row in rows if row_value(row, "target_type") == "styling_garment" and row_value(row, "target_id")]
-            if garment_ids:
-                garment_placeholders = ", ".join("?" for _ in garment_ids)
-                garment_rows = db.execute(
-                    f"SELECT id, status FROM styling_garments WHERE id IN ({garment_placeholders})",
-                    garment_ids,
-                ).fetchall()
-                garment_statuses = {int(row["id"]): str(row["status"]) for row in garment_rows}
+            target_contexts = load_upload_target_contexts(db, rows)
     return {
         "items": [
             serialize_upload_session(
                 row,
                 items_by_session.get(row["id"], []),
-                target_status=garment_statuses.get(int(row["target_id"])) if row_value(row, "target_id") else None,
+                target_context=target_contexts.get(int(row["target_id"])) if row_value(row, "target_id") else None,
             )
             for row in rows
         ]
@@ -1045,15 +1038,14 @@ def list_upload_session_batches(
     with get_db() as db:
         rows = db.execute(
             f"""
-            SELECT us.*, sg.status AS target_status
+            SELECT us.*
             FROM upload_sessions us
-            LEFT JOIN styling_garments sg
-              ON us.target_type = 'styling_garment' AND sg.id = us.target_id
             WHERE {' AND '.join(filters)}
             ORDER BY us.created_at DESC, us.id DESC
             """,
             values,
         ).fetchall()
+        target_contexts = load_upload_target_contexts(db, rows)
 
     grouped: dict[str, list[Any]] = {}
     for row in rows:
@@ -1063,7 +1055,7 @@ def list_upload_session_batches(
     for key, members in grouped.items():
         members_by_created = sorted(members, key=lambda item: (str(item["created_at"]), str(item["id"])))
         first = members_by_created[0]
-        title = str(row_value(first, "source_title") or row_value(first, "business_code") or "上传任务")
+        title = str(row_value(first, "source_title") or row_value(first, "business_code") or "导入任务")
         status_counts: dict[str, int] = {}
         for member in members:
             status = str(member["status"])
@@ -1080,7 +1072,7 @@ def list_upload_session_batches(
                 serialize_upload_session(
                     member,
                     [],
-                    target_status=row_value(member, "target_status"),
+                    target_context=target_contexts.get(int(member["target_id"])) if row_value(member, "target_id") else None,
                 )
                 for member in members_by_created
             ],
@@ -1102,9 +1094,9 @@ def list_upload_session_batches(
 def normalized_upload_session_ids(ids: list[str]) -> list[str]:
     cleaned = list(dict.fromkeys(str(item).strip() for item in ids if str(item).strip()))
     if not cleaned:
-        raise HTTPException(status_code=400, detail="至少选择一条上传记录")
+        raise HTTPException(status_code=400, detail="至少选择一条导入记录")
     if len(cleaned) > 500:
-        raise HTTPException(status_code=400, detail="单次最多处理 500 条上传记录")
+        raise HTTPException(status_code=400, detail="单次最多处理 500 条导入记录")
     return cleaned
 
 
@@ -1136,7 +1128,7 @@ def upload_session_rows_for_mutation(db: Any, session_ids: list[str]) -> list[An
         session_ids,
     ).fetchall()
     if len(rows) != len(session_ids):
-        raise HTTPException(status_code=404, detail="部分上传记录不存在或已删除")
+        raise HTTPException(status_code=404, detail="部分导入记录不存在或已删除")
     return rows
 
 
@@ -1201,7 +1193,7 @@ def restore_upload_sessions(payload: UploadSessionMutationRequest) -> dict[str, 
         db.execute("BEGIN IMMEDIATE")
         rows = upload_session_rows_for_mutation(db, session_ids)
         if any(row_value(row, "archive_reason") == "deletion_pending" for row in rows):
-            raise HTTPException(status_code=409, detail="上传记录正在彻底删除，无法恢复")
+            raise HTTPException(status_code=409, detail="导入记录正在彻底删除，无法恢复")
         db.execute(
             f"UPDATE upload_sessions SET archived_at = NULL, archive_reason = NULL, updated_at = ? WHERE id IN ({placeholders})",
             (now_iso(), *session_ids),
@@ -1211,7 +1203,7 @@ def restore_upload_sessions(payload: UploadSessionMutationRequest) -> dict[str, 
 
 def ensure_upload_session_not_deleting(session: Any) -> None:
     if row_value(session, "archive_reason") in {"deletion_pending", "deletion_failed"}:
-        raise HTTPException(status_code=409, detail="上传记录正在彻底删除，不能继续上传或入库")
+        raise HTTPException(status_code=409, detail="导入记录正在彻底删除，不能继续导入或入库")
 
 
 def enqueue_upload_session_cleanup_and_delete(db: Any, session_ids: list[str], *, include_protected_keys: bool = False) -> list[str]:
@@ -1381,7 +1373,7 @@ def renew_upload_session_lease(session_id: str, payload: UploadSessionLeaseReque
     with get_db() as db:
         session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
         if not session:
-            raise HTTPException(status_code=404, detail="上传批次不存在")
+            raise HTTPException(status_code=404, detail="导入批次不存在")
         if session["status"] in {"FINALIZED", "ABANDONED"}:
             return {"session": get_upload_session(session_id)}
         claim_upload_session_lease(db, session, payload.executorId)
@@ -1395,7 +1387,7 @@ def resume_upload_session(session_id: str, payload: UploadSessionResumeRequest) 
     with get_db() as db:
         session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
         if not session:
-            raise HTTPException(status_code=404, detail="上传批次不存在")
+            raise HTTPException(status_code=404, detail="导入批次不存在")
         if session["status"] in {"FINALIZED", "ABANDONED"}:
             return {"session": get_upload_session(session_id), "items": []}
         claim_upload_session_lease(db, session, payload.executorId)
@@ -1432,7 +1424,7 @@ def resume_upload_session(session_id: str, payload: UploadSessionResumeRequest) 
                 detail.append(f"缺少 {len(missing)} 张")
             if extra:
                 detail.append(f"多出 {len(extra)} 张")
-            raise HTTPException(status_code=409, detail=f"所选目录与原上传任务不一致（{'，'.join(detail)}）")
+            raise HTTPException(status_code=409, detail=f"所选目录与原导入任务不一致（{'，'.join(detail)}）")
         mismatched: list[str] = []
         checksum_bindings: list[tuple[str, int]] = []
         for row in rows:
@@ -1493,7 +1485,7 @@ def resume_upload_session(session_id: str, payload: UploadSessionResumeRequest) 
             checksum_sha256 = row_value(row, "checksum_sha256")
             upload_url = presigned_put_url(row["object_key"], row["mime_type"], {"sha256": checksum_sha256} if checksum_sha256 else None)
             if not upload_url:
-                raise HTTPException(status_code=500, detail="无法刷新上传地址")
+                raise HTTPException(status_code=500, detail="无法刷新导入地址")
             pending_items.append({
                 "objectKey": row["object_key"],
                 "uploadUrl": upload_url,
@@ -1518,12 +1510,12 @@ def complete_upload_session_items(session_id: str, payload: UploadSessionComplet
     session_id = session_id.strip()
     keys = list(dict.fromkeys(ensure_direct_upload_key(key) for key in payload.objectKeys if key.strip()))
     if not keys:
-        raise HTTPException(status_code=400, detail="至少确认一张已上传图片")
+        raise HTTPException(status_code=400, detail="至少确认一张已导入图片")
     timestamp = now_iso()
     with get_db() as db:
         session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
         if not session:
-            raise HTTPException(status_code=404, detail="上传批次不存在")
+            raise HTTPException(status_code=404, detail="导入批次不存在")
         if session["status"] in {"FINALIZING", "FINALIZED", "ABANDONED"}:
             return {"session": get_upload_session(session_id)}
         claim_upload_session_lease(db, session, payload.executorId)
@@ -1534,7 +1526,7 @@ def complete_upload_session_items(session_id: str, payload: UploadSessionComplet
         known_keys = {row["object_key"] for row in rows}
         unknown_keys = [key for key in keys if key not in known_keys]
         if unknown_keys:
-            raise HTTPException(status_code=400, detail="上传确认包含不属于该批次的图片")
+            raise HTTPException(status_code=400, detail="导入确认包含不属于该批次的图片")
         rows_by_key = {row["object_key"]: row for row in rows}
         invalid_keys = [key for key in keys if not upload_session_object_matches(rows_by_key[key])]
         if invalid_keys:
@@ -1577,12 +1569,12 @@ def abandon_upload_session(session_id: str, payload: UploadSessionLeaseRequest |
     with get_db() as db:
         session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
         if not session:
-            raise HTTPException(status_code=404, detail="上传批次不存在")
+            raise HTTPException(status_code=404, detail="导入批次不存在")
         claim_upload_session_lease(db, session, payload.executorId if payload else None)
         if session["status"] == "FINALIZED" and session["target_id"]:
-            raise HTTPException(status_code=409, detail="上传批次已保存，请在对应业务记录中处理")
+            raise HTTPException(status_code=409, detail="导入批次已保存，请在对应业务记录中处理")
         if session["status"] == "FINALIZING":
-            raise HTTPException(status_code=409, detail="上传批次正在保存，请稍后")
+            raise HTTPException(status_code=409, detail="导入批次正在保存，请稍后")
         rows = db.execute(
             """
             SELECT object_key
@@ -1616,15 +1608,134 @@ def get_upload_session(session_id: str) -> dict[str, Any]:
     with get_db() as db:
         row = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail="上传批次不存在")
+            raise HTTPException(status_code=404, detail="导入批次不存在")
         items = db.execute(
             "SELECT * FROM upload_session_items WHERE session_id = ? ORDER BY sort_order, id",
             (session_id,),
         ).fetchall()
-    return serialize_upload_session(row, items)
+        target_contexts = load_upload_target_contexts(db, [row])
+    target_id = int(row["target_id"]) if row_value(row, "target_id") else None
+    return serialize_upload_session(row, items, target_context=target_contexts.get(target_id) if target_id else None)
 
 
-def serialize_upload_session(row: Any, items: list[Any], *, target_status: str | None = None) -> dict[str, Any]:
+def load_upload_target_contexts(db: sqlite3.Connection, session_rows: list[Any]) -> dict[int, dict[str, Any]]:
+    garment_ids = list(dict.fromkeys(
+        int(row["target_id"])
+        for row in session_rows
+        if row_value(row, "target_type") == "styling_garment" and row_value(row, "target_id")
+    ))
+    if not garment_ids:
+        return {}
+    placeholders = ", ".join("?" for _ in garment_ids)
+    garment_rows = db.execute(
+        f"""
+        SELECT sg.id, sg.code, sg.status, sg.updated_at, sg.archived_at,
+               COUNT(sgi.id) AS image_count,
+               (
+                 SELECT ma.object_key
+                 FROM styling_garment_images cover_link
+                 JOIN media_assets ma ON ma.id = cover_link.media_asset_id
+                 WHERE cover_link.styling_garment_id = sg.id
+                   AND cover_link.deleted_at IS NULL
+                   AND ma.deleted_at IS NULL
+                 ORDER BY cover_link.sort_order, cover_link.id
+                 LIMIT 1
+               ) AS cover_key
+        FROM styling_garments sg
+        LEFT JOIN styling_garment_images sgi
+          ON sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL
+        WHERE sg.id IN ({placeholders}) AND sg.deleted_at IS NULL
+        GROUP BY sg.id
+        """,
+        garment_ids,
+    ).fetchall()
+    attempt_rows = db.execute(
+        f"""
+        SELECT owner_id,
+               MAX(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS had_failure,
+               MAX(CASE WHEN status = 'FAILED' THEN COALESCE(failed_at, updated_at) END) AS latest_failure_at,
+               MAX(CASE WHEN status = 'SUCCEEDED' THEN COALESCE(completed_at, updated_at) END) AS latest_success_at
+        FROM generation_attempts
+        WHERE owner_type = 'styling_garment_tagging' AND owner_id IN ({placeholders})
+        GROUP BY owner_id
+        """,
+        garment_ids,
+    ).fetchall()
+    attempts_by_id = {int(item["owner_id"]): item for item in attempt_rows}
+    contexts: dict[int, dict[str, Any]] = {}
+    for garment in garment_rows:
+        garment_id = int(garment["id"])
+        attempt = attempts_by_id.get(garment_id)
+        had_failure = bool(attempt and int(attempt["had_failure"] or 0))
+        status = str(garment["status"])
+        contexts[garment_id] = {
+            "summary": {
+                "id": garment_id,
+                "code": str(garment["code"]),
+                "exists": True,
+                "status": status,
+                "coverUrl": stable_media_url(garment["cover_key"], "thumb") if garment["cover_key"] else None,
+                "imageCount": int(garment["image_count"] or 0),
+                "updatedAt": garment["updated_at"],
+                "archivedAt": garment["archived_at"],
+            },
+            "history": {
+                "hadTaggingFailure": had_failure,
+                "latestFailureAt": attempt["latest_failure_at"] if attempt else None,
+                "recoveredAt": attempt["latest_success_at"] if had_failure and status == "READY" and attempt else None,
+            },
+        }
+    return contexts
+
+
+def import_outcome_for_upload_session(row: Any, target_context: dict[str, Any] | None) -> str:
+    status = str(row["status"])
+    if status == "ABANDONED":
+        return "ABANDONED"
+    if status == "FAILED":
+        return "NEEDS_ACTION"
+    if status in {"PENDING", "UPLOADING"}:
+        return "IMPORTING"
+    if status in {"UPLOADED", "FINALIZING"}:
+        return "ORGANIZING"
+    if status != "FINALIZED":
+        return "NEEDS_ACTION"
+    if row_value(row, "target_type") != "styling_garment":
+        return "SUCCEEDED"
+    if not target_context:
+        return "TARGET_MISSING"
+    target_status = str(target_context["summary"]["status"])
+    had_failure = bool(target_context["history"]["hadTaggingFailure"])
+    if target_status == "READY":
+        return "RECOVERED" if had_failure else "SUCCEEDED"
+    if target_status == "TAGGING_RUNNING":
+        return "RECOVERING" if had_failure else "PROCESSING"
+    if target_status == "TAGGING_FAILED":
+        return "NEEDS_ACTION"
+    if target_status == "DRAFT":
+        return "PENDING_RECOGNITION"
+    if target_status == "TAGGING_READY":
+        return "REVIEW_REQUIRED"
+    return "SUCCEEDED"
+
+
+def serialize_upload_session(row: Any, items: list[Any], *, target_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    target_id = int(row["target_id"]) if row_value(row, "target_id") else None
+    target_summary = target_context["summary"] if target_context else ({
+        "id": target_id,
+        "code": row_value(row, "business_code"),
+        "exists": False,
+        "status": None,
+        "coverUrl": None,
+        "imageCount": 0,
+        "updatedAt": None,
+        "archivedAt": None,
+    } if target_id and row_value(row, "target_type") == "styling_garment" else None)
+    history_summary = target_context["history"] if target_context else {
+        "hadTaggingFailure": False,
+        "latestFailureAt": None,
+        "recoveredAt": None,
+    }
     return {
         "id": row["id"],
         "scope": row["scope"],
@@ -1636,7 +1747,10 @@ def serialize_upload_session(row: Any, items: list[Any], *, target_status: str |
         "uploadedCount": int(row["uploaded_count"] or 0),
         "targetType": row_value(row, "target_type"),
         "targetId": row_value(row, "target_id"),
-        "targetStatus": target_status,
+        "targetStatus": target_summary["status"] if target_summary else None,
+        "targetSummary": target_summary,
+        "importOutcome": import_outcome_for_upload_session(row, target_context),
+        "historySummary": history_summary,
         "errorMessage": row_value(row, "error_message"),
         "archivedAt": row_value(row, "archived_at"),
         "archiveReason": row_value(row, "archive_reason"),
@@ -1705,7 +1819,7 @@ def mark_upload_session_failed(session_id: str, message: str, *, uploaded_count:
 def ensure_upload_session_items_uploaded(rows: list[Any]) -> None:
     pending = [row["filename"] for row in rows if row["status"] not in {"UPLOADED", "READY"}]
     if pending:
-        raise HTTPException(status_code=409, detail=f"还有 {len(pending)} 张图片未上传完成")
+        raise HTTPException(status_code=409, detail=f"还有 {len(pending)} 张图片未导入完成")
 
 
 async def validate_upload_image(upload: UploadFile) -> tuple[bytes, str]:
@@ -1741,14 +1855,14 @@ def direct_upload_content_type(mime_type: str | None, filename: str) -> str:
 def direct_upload_scope_prefix(scope: str) -> str:
     normalized = scope.strip().replace("-", "_")
     if normalized not in {"generation_task", "styling_garment", "model_profile"}:
-        raise HTTPException(status_code=400, detail="上传用途不合法")
+        raise HTTPException(status_code=400, detail="导入用途不合法")
     return normalized.replace("_", "-")
 
 
 def ensure_direct_upload_key(object_key: str) -> str:
     key = clean_key(object_key)
     if not is_accepted_upload_key(key):
-        raise HTTPException(status_code=400, detail="上传对象不属于本次直传路径")
+        raise HTTPException(status_code=400, detail="导入对象不属于本次直传路径")
     return key
 
 
@@ -2371,7 +2485,7 @@ async def create_styling_garment(
     if not clean_code:
         raise HTTPException(status_code=400, detail="搭配服装货号不能为空")
     if not files:
-        raise HTTPException(status_code=400, detail="至少上传一张图片")
+        raise HTTPException(status_code=400, detail="至少导入一张图片")
     files = files[:MAX_GARMENT_IMAGE_INPUTS]
     with get_db() as db:
         duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
@@ -2418,9 +2532,9 @@ async def finalize_styling_garment_upload_session(
     with get_db() as db:
         session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
         if not session:
-            raise HTTPException(status_code=404, detail="上传批次不存在")
+            raise HTTPException(status_code=404, detail="导入批次不存在")
         if session["scope"] != "styling-garment":
-            raise HTTPException(status_code=400, detail="上传批次用途不匹配")
+            raise HTTPException(status_code=400, detail="导入批次用途不匹配")
         if session["status"] == "FINALIZED" and session["target_id"]:
             return {"item": get_styling_garment_by_id(int(session["target_id"])), "session": get_upload_session(session_id)}
         claim_upload_session_lease(db, session, payload.executorId)
@@ -2433,17 +2547,17 @@ async def finalize_styling_garment_upload_session(
             (clean_code, clean_code, timestamp, session_id),
         )
         if session["status"] == "ABANDONED":
-            raise HTTPException(status_code=409, detail="上传批次已放弃，请重新上传")
+            raise HTTPException(status_code=409, detail="导入批次已放弃，请重新导入")
         if session["status"] == "FINALIZING":
-            raise HTTPException(status_code=409, detail="上传批次正在保存，请稍后")
+            raise HTTPException(status_code=409, detail="导入批次正在保存，请稍后")
         rows = db.execute(
             "SELECT * FROM upload_session_items WHERE session_id = ? ORDER BY sort_order, id",
             (session_id,),
         ).fetchall()
         if not rows:
-            raise HTTPException(status_code=400, detail="上传批次没有图片")
+            raise HTTPException(status_code=400, detail="导入批次没有图片")
         if len(rows) > MAX_GARMENT_IMAGE_INPUTS:
-            raise HTTPException(status_code=400, detail=f"每个搭配服装最多上传 {MAX_GARMENT_IMAGE_INPUTS} 张图片")
+            raise HTTPException(status_code=400, detail=f"每个搭配服装最多导入 {MAX_GARMENT_IMAGE_INPUTS} 张图片")
         ensure_upload_session_items_uploaded(rows)
         duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
         if duplicate:
@@ -2462,7 +2576,7 @@ async def finalize_styling_garment_upload_session(
             current = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
             if current and current["status"] == "FINALIZED" and current["target_id"]:
                 return {"item": get_styling_garment_by_id(int(current["target_id"])), "session": get_upload_session(session_id)}
-            raise HTTPException(status_code=409, detail="上传批次正在保存，请稍后")
+            raise HTTPException(status_code=409, detail="导入批次正在保存，请稍后")
     uploads = [
         UploadedMediaRequest(
             objectKey=row["object_key"],
@@ -2479,7 +2593,7 @@ async def finalize_styling_garment_upload_session(
         with get_db() as db:
             current_session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
             if not current_session:
-                raise HTTPException(status_code=409, detail="上传记录已删除，已终止入库")
+                raise HTTPException(status_code=409, detail="导入记录已删除，已终止入库")
             ensure_upload_session_not_deleting(current_session)
             duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
             if duplicate:
@@ -2536,7 +2650,7 @@ async def finalize_styling_garment_upload_session(
             mark_upload_session_failed(session_id, str(error_message))
         raise
     if garment_id is None:
-        raise HTTPException(status_code=500, detail="上传批次保存失败")
+        raise HTTPException(status_code=500, detail="导入批次保存失败")
     return {"item": get_styling_garment_by_id(garment_id), "session": get_upload_session(session_id)}
 
 
@@ -3406,7 +3520,7 @@ async def create_generation_task(
     files: list[UploadFile] = File(...),
 ) -> dict[str, Any]:
     if not files:
-        raise HTTPException(status_code=400, detail="至少上传一张主推款图片")
+        raise HTTPException(status_code=400, detail="至少导入一张主推款图片")
     files = files[:MAX_HERO_IMAGE_INPUTS]
     task_name = (name or datetime.now().strftime("%Y%m%d%H%M%S")).strip()
     assets = await save_uploads_as_media_assets(files)
@@ -3431,7 +3545,7 @@ async def create_generation_task(
 
 @app.post("/api/generation-tasks/from-uploads")
 async def create_generation_task_from_uploads(payload: GenerationTaskFromUploadsRequest) -> dict[str, Any]:
-    raise HTTPException(status_code=410, detail="独立直传已停用，请使用上传会话接口")
+    raise HTTPException(status_code=410, detail="独立直传已停用，请使用导入会话接口")
 
 
 @app.post("/api/upload-sessions/{session_id}/finalize-generation-task")
@@ -3444,20 +3558,20 @@ async def finalize_generation_task_upload_session(
     with get_db() as db:
         session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
         if not session:
-            raise HTTPException(status_code=404, detail="上传批次不存在")
+            raise HTTPException(status_code=404, detail="导入批次不存在")
         ensure_upload_session_not_deleting(session)
         if session["scope"] != "generation-task":
-            raise HTTPException(status_code=400, detail="上传批次用途不匹配")
+            raise HTTPException(status_code=400, detail="导入批次用途不匹配")
         if session["status"] == "FINALIZED" and session["target_id"]:
             return {"item": get_generation_task_by_id(int(session["target_id"])), "session": get_upload_session(session_id)}
         if session["status"] == "FINALIZING":
-            raise HTTPException(status_code=409, detail="上传批次正在保存，请稍后")
+            raise HTTPException(status_code=409, detail="导入批次正在保存，请稍后")
         rows = db.execute(
             "SELECT * FROM upload_session_items WHERE session_id = ? ORDER BY sort_order, id",
             (session_id,),
         ).fetchall()
         if not rows:
-            raise HTTPException(status_code=400, detail="上传批次没有图片")
+            raise HTTPException(status_code=400, detail="导入批次没有图片")
         ensure_upload_session_items_uploaded(rows)
         claimed = db.execute(
             """
@@ -3471,7 +3585,7 @@ async def finalize_generation_task_upload_session(
             current = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
             if current and current["status"] == "FINALIZED" and current["target_id"]:
                 return {"item": get_generation_task_by_id(int(current["target_id"])), "session": get_upload_session(session_id)}
-            raise HTTPException(status_code=409, detail="上传批次正在保存，请稍后")
+            raise HTTPException(status_code=409, detail="导入批次正在保存，请稍后")
     uploads = [
         UploadedMediaRequest(
             objectKey=row["object_key"],
@@ -3489,7 +3603,7 @@ async def finalize_generation_task_upload_session(
         with get_db() as db:
             current_session = db.execute("SELECT * FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
             if not current_session:
-                raise HTTPException(status_code=409, detail="上传记录已删除，已终止入库")
+                raise HTTPException(status_code=409, detail="导入记录已删除，已终止入库")
             ensure_upload_session_not_deleting(current_session)
             batch_id = (payload.batchId or "").strip()[:64] or None
             if batch_id:
@@ -3554,7 +3668,7 @@ async def finalize_generation_task_upload_session(
                 )
         raise
     if task_id is None:
-        raise HTTPException(status_code=500, detail="上传批次保存失败")
+        raise HTTPException(status_code=500, detail="导入批次保存失败")
     return {"item": get_generation_task_by_id(task_id), "session": get_upload_session(session_id)}
 
 
@@ -4350,7 +4464,7 @@ def ready_generation_task(task_id: int) -> dict[str, Any]:
             (task_id,),
         ).fetchone()["count"])
         if count < 1:
-            raise HTTPException(status_code=400, detail="请先上传主推款图片")
+            raise HTTPException(status_code=400, detail="请先导入主推款图片")
         db.execute("UPDATE generation_tasks SET status = 'READY_FOR_STYLING', updated_at = ? WHERE id = ?", (now_iso(), task_id))
     return {"item": get_generation_task_by_id(task_id)}
 
@@ -4373,7 +4487,7 @@ async def run_select_generation_styling(
 ) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     if task["status"] == "DRAFT":
-        # 上传即草稿；首次选搭时自动进入待选搭，用户无需单独“确认”步骤。
+        # 导入即草稿；首次选搭时自动进入待选搭，用户无需单独“确认”步骤。
         ready_generation_task(task_id)
         task = get_generation_task_row(task_id)
     if task["status"] not in {
@@ -5867,7 +5981,7 @@ def final_image_export_safe_component(value: str | None) -> str:
 
 
 def unique_export_filename(value: str | None, fallback: str, used: set[str]) -> str:
-    """生成 ZIP 目录内安全且不重复的文件名，同时尽量保留用户上传时的原文件名。"""
+    """生成 ZIP 目录内安全且不重复的文件名，同时尽量保留用户导入时的原文件名。"""
     safe_name = final_image_export_safe_component(Path(str(value or "")).name) or fallback
     path = Path(safe_name)
     stem = path.stem or Path(fallback).stem or "image"
@@ -6347,12 +6461,12 @@ async def add_model_head_reference(
     require_admin(request)
     uploads = files or ([file] if file else [])
     if not uploads:
-        raise HTTPException(status_code=400, detail="至少上传一张头像")
+        raise HTTPException(status_code=400, detail="至少导入一张头像")
     clean_angle = sanitize_reference_key(angle or "") if angle else None
     if clean_angle and clean_angle not in HEAD_REFERENCE_ANGLES:
         raise HTTPException(status_code=400, detail="头像角度不合法")
     if clean_angle and len(uploads) > 1:
-        raise HTTPException(status_code=400, detail="指定角度时只能上传一张头像")
+        raise HTTPException(status_code=400, detail="指定角度时只能导入一张头像")
     validated_uploads: list[tuple[UploadFile, bytes, str]] = []
     for upload in uploads:
         content, content_type = await validate_upload_image(upload)
@@ -6590,7 +6704,7 @@ async def set_shoot_environment(request: Request, file: UploadFile = File(...)) 
     require_admin(request)
     assets = await save_uploads_as_media_assets([file])
     if not assets:
-        raise HTTPException(status_code=400, detail="拍摄环境参考图上传失败")
+        raise HTTPException(status_code=400, detail="拍摄环境参考图导入失败")
     new_asset_id = int(assets[0]["id"])
     timestamp = now_iso()
     with get_db() as db:
@@ -6874,7 +6988,7 @@ def cleanup_deleted_upload_sessions() -> int:
 def cleanup_stale_upload_sessions() -> int:
     """Abandon expired, unfinalized upload sessions and delete only their exact objects."""
     timestamp = now_iso()
-    retry_message = "上传批次已过期，文件清理待重试"
+    retry_message = "导入批次已过期，文件清理待重试"
     stale_before = (
         datetime.now(timezone.utc) - timedelta(hours=settings.upload_session_ttl_hours)
     ).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -6917,7 +7031,7 @@ def cleanup_stale_upload_sessions() -> int:
         db.execute(
             f"""
             UPDATE upload_session_items
-            SET status = 'ABANDONED', error_message = '上传批次已过期', updated_at = ?
+            SET status = 'ABANDONED', error_message = '导入批次已过期', updated_at = ?
             WHERE session_id IN ({placeholders})
             """,
             (timestamp, *session_ids),
@@ -6925,7 +7039,7 @@ def cleanup_stale_upload_sessions() -> int:
         db.execute(
             f"""
             UPDATE upload_sessions
-            SET status = 'ABANDONED', error_message = '上传批次已过期',
+            SET status = 'ABANDONED', error_message = '导入批次已过期',
                 lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
             WHERE id IN ({placeholders})
             """,
@@ -6990,7 +7104,7 @@ def insert_media_asset_record(asset: dict[str, Any], timestamp: str | None = Non
             (asset["objectKey"],),
         ).fetchone()
         if pending_cleanup:
-            raise HTTPException(status_code=409, detail="上传记录正在彻底删除，不能登记为正式媒体")
+            raise HTTPException(status_code=409, detail="导入记录正在彻底删除，不能登记为正式媒体")
         cursor = db.execute(
             """
             INSERT INTO media_assets
@@ -7048,7 +7162,7 @@ def process_uploaded_object_as_media_asset(upload: UploadedMediaRequest, timesta
     filename = sanitize_filename(upload.filename or Path(object_key).name or "image")
     head = object_head(object_key)
     if not head:
-        raise HTTPException(status_code=400, detail=f"{filename} 尚未上传完成")
+        raise HTTPException(status_code=400, detail=f"{filename} 尚未导入完成")
     object_size_bytes = int(head.get("contentLength") or 0)
     if object_size_bytes <= 0:
         raise HTTPException(status_code=400, detail=f"{filename} 是空文件")
@@ -7438,11 +7552,11 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
                 attempt_id,
                 "FAILED",
                 {"raw_text": text, "raw_json": raw},
-                error_message=f"Gemini 打标结果未通过上传要求：{exc}",
+                error_message=f"Gemini 打标结果未通过导入要求：{exc}",
                 error_code=ERROR_UPLOAD_REQUIREMENT_NOT_MET,
             )
             raise GeminiProviderError(
-                f"Gemini 打标结果未通过上传要求：{exc}",
+                f"Gemini 打标结果未通过导入要求：{exc}",
                 ERROR_UPLOAD_REQUIREMENT_NOT_MET,
             ) from exc
         except Exception as exc:
@@ -8488,7 +8602,7 @@ def create_generation_input_version(task_id: int) -> int:
             (task_id,),
         ).fetchall()
         if not image_rows:
-            raise HTTPException(status_code=400, detail="请先上传主推款图片")
+            raise HTTPException(status_code=400, detail="请先导入主推款图片")
         assert_media_assets_available(image_rows, label="主推款图片")
         version_number = int(db.execute(
             "SELECT COALESCE(MAX(version_number), 0) + 1 AS next_version FROM generation_task_input_versions WHERE task_id = ?",
@@ -8546,7 +8660,7 @@ def assert_media_assets_available(rows: list[Any], label: str = "图片") -> Non
         if len(broken) > 3:
             preview += f"；另有 {len(broken) - 3} 张"
         raise GenerationPhaseError(
-            f"{label}不可用：{preview}。请重新上传这些图片后再生成。",
+            f"{label}不可用：{preview}。请重新导入这些图片后再生成。",
             ERROR_MEDIA_UNAVAILABLE,
             provider_response={"mediaHealth": {"label": label, "broken": broken}},
         )
@@ -8746,7 +8860,7 @@ def stale_attempt_error(attempt_id: int | None) -> tuple[str, str]:
     if current == PHASE_SUBMIT:
         return ERROR_SUBMISSION_UNKNOWN, "创建 provider 任务时执行中断，无法确认是否已经创建；已停止自动重提。"
     if current in {PHASE_PREPARE, PHASE_UPLOAD, None}:
-        return ERROR_UPLOAD_FAILED, f"本地生成任务在 {current or 'prepare'} 阶段执行中断，可安全重新上传并继续。"
+        return ERROR_UPLOAD_FAILED, f"本地生成任务在 {current or 'prepare'} 阶段执行中断，可安全重新导入并继续。"
     return ERROR_SYSTEM_ERROR, f"本地生成任务在 {current or 'unknown'} 阶段执行中断；已停止自动重试。"
 
 
@@ -10579,7 +10693,7 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.styling_garment", "scope": "runtime", "description": "AI 打标使用的当前搭配服装 code 和图片输入摘要"},
         {"name": "runtime.hero_image_files", "scope": "runtime", "description": "主推款图片挑选/排序使用的文件标识与候选顺序"},
         {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服装库 READY 服饰的全量 AI 标签事实卡"},
-        {"name": "runtime.user_requirement", "scope": "runtime", "description": "任务级服装信息，来自 AI 摄影棚上传主推款时维护的服装信息"},
+        {"name": "runtime.user_requirement", "scope": "runtime", "description": "任务级服装信息，来自 AI 摄影棚导入主推款时维护的服装信息"},
         {"name": "runtime.ai_styling_user_instruction", "scope": "runtime", "description": "AI 智能选搭本次执行的用户介入要求"},
         {"name": "runtime.storyboard_preview_user_instruction", "scope": "runtime", "description": "分镜预览本次执行的用户介入要求"},
         {"name": "runtime.final_image_user_instruction", "scope": "runtime", "description": "最终成片或单张重生本次执行的用户介入要求"},
@@ -10635,7 +10749,7 @@ def generation_retry_backoff_seconds(retry_number: int, base_seconds: float | No
 
 
 def is_auto_run_retryable_error(error_code: str | None) -> bool:
-    """跨 attempt 只接管没有内层重试的上传失败；其它阶段各自拥有唯一的 10 次预算。"""
+    """跨 attempt 只接管没有内层重试的导入失败；其它阶段各自拥有唯一的 10 次预算。"""
     return error_code == ERROR_UPLOAD_FAILED
 
 
@@ -11127,14 +11241,14 @@ async def _generate_image_asset_unlocked(
     output_key: str,
     attempt_id: int | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    """完整生成一张图：上传参考图 → 提交 → 轮询 → 成片回传。
+    """完整生成一张图：导入参考图 → 提交 → 轮询 → 成片回传。
 
     健壮性契约（成功 > 慢 > 失败）：
 
     - 状态查询瞬时失败按配置退避重试；超过连续失败预算才判定本张图失败。
     - provider 成功后进入回传阶段；回传失败在回传预算内自动退避重试，
       耗尽后以 DELIVERY_FAILED 落败——providerRequestId 保留，可零成本重新回传。
-    - 阶段进度（上传张数、排队、生成、回传重试次数）持久化在 attempt 上，
+    - 阶段进度（导入张数、排队、生成、回传重试次数）持久化在 attempt 上，
       前端轮询任务详情即可看到实时阶段和分段耗时。
     """
     if not settings.is_image_provider_configured():

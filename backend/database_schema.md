@@ -27,9 +27,9 @@ GenerationTask
 | `generation_result_images_new` | 单张最终成片，固定 5 条槽位 |
 | `generation_attempts` | provider 调用快照、进度、结果和错误分类 |
 | `styling_garments` | 搭配服装及其当前 AI 打标状态、业务标签和本轮安全错误码 |
-| `upload_sessions` | 浏览器直传到对象存储的轻量上传任务，用于刷新 / 切页后恢复上传状态 |
-| `upload_session_items` | 上传任务内的图片条目，记录对象 key、文件信息、上传确认和业务媒体引用 |
-| `upload_object_cleanup_queue` | 上传记录彻底删除后的持久对象清理队列；保存精确 key、来源会话和最近错误，供 RustFS/S3 失败后重试 |
+| `upload_sessions` | 浏览器直传到对象存储的轻量导入任务，用于刷新 / 切页后恢复导入状态 |
+| `upload_session_items` | 导入任务内的图片条目，记录对象 key、文件信息、导入确认和业务媒体引用 |
+| `upload_object_cleanup_queue` | 导入记录彻底删除后的持久对象清理队列；保存精确 key、来源会话和最近错误，供 RustFS/S3 失败后重试 |
 | `prompt_configs` | Prompt 维护配置槽 |
 
 ## GenerationTask 关键字段
@@ -57,17 +57,21 @@ GenerationTask
 
 - `scope`：`generation-task` 或 `styling-garment`。
 - `status`：`PENDING`、`UPLOADING`、`UPLOADED`、`FINALIZING`、`FINALIZED`、`FAILED`、`ABANDONED`。
-- `business_code` / `source_title`：上传记录恢复用的业务货号和来源 / 批次名；用于前端显示、搜索和跳转定位。
-- `batch_id`：一次批量上传任务的稳定 ID；同批货号按该字段聚合，不再依赖标题和时间窗口猜测。
+- `business_code` / `source_title`：导入记录恢复用的业务货号和来源 / 批次名；用于前端显示、搜索和跳转定位。
+- `batch_id`：一次批量导入任务的稳定 ID；同批货号按该字段聚合，不再依赖标题和时间窗口猜测。
 - `lease_owner` / `lease_expires_at`：短期批次执行租约，防止两个标签页或两台电脑同时续传同一任务。
-- `total_count` / `uploaded_count`：用户可见上传进度。浏览器每张 PUT 成功后通过 API 回写条目状态，后端据此计算已上传数量。
-- `target_type` / `target_id`：上传完成并保存为业务对象后的引用。
-- `archived_at` / `archive_reason`：上传记录自身的归档时间和原因；仅控制记录默认可见性，不改变 `status`，也不级联归档或删除 `target_type` / `target_id` 指向的业务对象。
-- `error_message`：业务可读失败摘要。保存为业务对象前的失败（例如货号重复、对象缺失、保存异常）必须写回这里，刷新后仍能在上传记录中提示用户处理。
+- `total_count` / `uploaded_count`：用户可见导入进度。浏览器每张 PUT 成功后通过 API 回写条目状态，后端据此计算已导入数量。
+- `target_type` / `target_id`：导入完成并保存为业务对象后的引用。
+- `archived_at` / `archive_reason`：导入记录自身的归档时间和原因；仅控制记录默认可见性，不改变 `status`，也不级联归档或删除 `target_type` / `target_id` 指向的业务对象。
+- `error_message`：业务可读失败摘要。保存为业务对象前的失败（例如货号重复、对象缺失、保存异常）必须写回这里，刷新后仍能在导入记录中提示用户处理。
 
-上传记录和搭配服装库的 `上传批次` 筛选统一由 `upload_sessions` 聚合：有 `batch_id` 时使用 `batch:{batch_id}`，历史空 `batch_id` 会话使用 `session:{id}`。默认聚合排除 `archived_at IS NOT NULL` 和 `archive_reason = deletion_pending`，不排除失败、暂停、未入库或 `ABANDONED` 等其它业务状态；批次时间取成员最早 `created_at`，货号数取当前可见会话数。`idx_upload_sessions_batch_visibility` 服务可见批次聚合；`idx_upload_sessions_styling_target(scope, target_type, target_id, archived_at, created_at)` 服务搭配服装列表中的上传批次关联和可见性查询。
+导入记录和搭配服装库的 `导入批次` 筛选统一由 `upload_sessions` 聚合：有 `batch_id` 时使用 `batch:{batch_id}`，历史空 `batch_id` 会话使用 `session:{id}`。默认聚合排除 `archived_at IS NOT NULL` 和 `archive_reason = deletion_pending`，不排除失败、暂停、未入库或 `ABANDONED` 等其它业务状态；批次时间取成员最早 `created_at`，货号数取当前可见会话数。`idx_upload_sessions_batch_visibility` 服务可见批次聚合；`idx_upload_sessions_styling_target(scope, target_type, target_id, archived_at, created_at)` 服务搭配服装列表中的导入批次关联和可见性查询。
 
-`upload_session_items.object_key` 是稳定的对象存储直传 key；`relative_path`、`size_bytes`、`last_modified` 和 `checksum_sha256` 用于恢复时拒绝错误目录或已变化的文件。对象存储中的 `sha256` 用户元数据与长度必须同时匹配，条目才会被确认上传。`status` 表示该条目是否已确认上传或已保存为 `MediaAsset`。搭配服装 AI 识别失败不回写为 upload session 失败，因为图片入库和 AI 识别是两个阶段。任意状态的 session 都可单独归档、恢复或彻底删除记录；彻底删除只清理未登记为 `MediaAsset` 的直传对象，已关联业务对象和正式媒体保留。未 `FINALIZED` 的 session 也可以由用户放弃或后台 TTL 清理。
+导入记录的用户状态不新增持久字段：查询时由 `upload_sessions` 的导入事实、`styling_garments` 的当前状态和 `generation_attempts` 的识别历史派生 `importOutcome`、`targetSummary`、`historySummary`。这样重新识别成功后会立即得到 `已恢复 + 当前可选搭`，同时保留失败审计；不会出现 session 已完成、服装已可用、前端却仍显示失败的第三套状态。
+
+`idx_generation_attempts_owner_status(owner_type, owner_id, status)` 服务导入记录按关联服装批量汇总识别失败与成功历史，避免导入记录分页读取随 attempts 增长退化为全表扫描。
+
+`upload_session_items.object_key` 是稳定的对象存储直传 key；`relative_path`、`size_bytes`、`last_modified` 和 `checksum_sha256` 用于恢复时拒绝错误目录或已变化的文件。对象存储中的 `sha256` 用户元数据与长度必须同时匹配，条目才会被确认导入。`status` 表示该条目是否已确认导入或已保存为 `MediaAsset`。搭配服装 AI 识别失败不回写为 upload session 失败，因为图片入库和 AI 识别是两个阶段。任意状态的 session 都可单独归档、恢复或彻底删除记录；彻底删除只清理未登记为 `MediaAsset` 的直传对象，已关联业务对象和正式媒体保留。未 `FINALIZED` 的 session 也可以由用户放弃或后台 TTL 清理。
 
 运行中会话收到彻底删除请求后使用内部墓碑 `archive_reason = deletion_pending` 阻断 lease、resume、complete 和 finalize；该状态不进入默认或已归档的用户列表。待直传签名失效后，事务内把安全临时 key 写入 `upload_object_cleanup_queue` 并删除会话；数据库提交后才删除对象，失败时队列保留以便重试。
 

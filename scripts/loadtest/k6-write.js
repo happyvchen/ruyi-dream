@@ -1,4 +1,4 @@
-// 写并发压测:并发创建搭配服装(multipart 上传小图),暴露 SQLite 单写锁 +
+// 写并发压测:并发创建搭配服装(multipart 导入小图),暴露 SQLite 单写锁 +
 // 衍生图生成(Pillow CPU)+ RustFS 写入的瓶颈。
 //
 // 运行(服务器上):

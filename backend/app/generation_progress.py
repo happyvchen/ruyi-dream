@@ -252,8 +252,8 @@ def provider_error_presentation(error_code: str | None, reason: str | None = Non
         ERROR_POLL_TIMEOUT: ("AI 任务等待超时", "可稍后重试。", "重试", True),
         ERROR_SUBMISSION_UNKNOWN: ("未能确认生成任务是否提交成功", "系统已停止继续提交，避免重复计费。", "稍后重试", False),
         ERROR_DELIVERY_FAILED: ("图片已生成，但回传失败", "可重新回传，不会再次消耗生成额度。", "重新回传", True),
-        ERROR_UPLOAD_FAILED: ("参考图上传失败", "请检查网络后重试。", "重试", True),
-        ERROR_MEDIA_UNAVAILABLE: ("主推款图片不可用", reason or "请重新上传不可用的主推款图片后再生成。", "重新上传后重试", False),
+        ERROR_UPLOAD_FAILED: ("参考图导入失败", "请检查网络后重试。", "重试", True),
+        ERROR_MEDIA_UNAVAILABLE: ("主推款图片不可用", reason or "请重新导入不可用的主推款图片后再生成。", "重新导入后重试", False),
         ERROR_MALFORMED_OUTPUT: ("AI 返回结果不完整", "请重新生成。", "重新生成", False),
         ERROR_BUSINESS_REJECT: (reason or "当前方案不成立", "请调整要求后重试。", "调整后重试", False),
         ERROR_SYSTEM_ERROR: ("系统处理异常", "错误已记录，请稍后重试。", "稍后重试", False),
@@ -477,7 +477,7 @@ class AttemptProgressRecorder:
             self._persist()
 
     def update(self, phase: str, **detail: Any) -> None:
-        """更新当前阶段 detail（上传张数、重试次数等）；阶段不存在时等价于 begin。"""
+        """更新当前阶段 detail（导入张数、重试次数等）；阶段不存在时等价于 begin。"""
         with self._lock:
             entry = self._find(phase)
             if entry is None or entry.get("endedAt"):

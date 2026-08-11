@@ -137,14 +137,14 @@ class Settings:
     generation_auto_run_retry_limit = int(os.getenv("GENERATION_AUTO_RUN_RETRY_LIMIT", "10"))
     generation_retry_backoff_base_seconds = float(os.getenv("GENERATION_RETRY_BACKOFF_BASE_SECONDS", "30"))
     generation_retry_backoff_cap_seconds = float(os.getenv("GENERATION_RETRY_BACKOFF_CAP_SECONDS", "240"))
-    # 参考图上传阶段总预算（不含单文件请求自身的超时）。
+    # 参考图导入阶段总预算（不含单文件请求自身的超时）。
     generation_upload_timeout_seconds = int(os.getenv("GENERATION_UPLOAD_TIMEOUT_SECONDS", str(5 * 60)))
     # 成片回传（下载+入库+缩略图）阶段总预算；provider 已成功，此阶段内自动退避重试。
     generation_delivery_timeout_seconds = int(os.getenv("GENERATION_DELIVERY_TIMEOUT_SECONDS", str(15 * 60)))
     generation_delivery_retry_limit = int(os.getenv("GENERATION_DELIVERY_RETRY_LIMIT", "10"))
     # 成片单次下载请求超时。低带宽环境下宁可"较短超时+多次重试"，避免单次 300s 挂死。
     generation_download_request_timeout_seconds = int(os.getenv("GENERATION_DOWNLOAD_REQUEST_TIMEOUT_SECONDS", "120"))
-    # 参考图 provider 上传缓存 TTL：同一 objectKey 在 TTL 内复用已上传 URL。
+    # 参考图 provider 导入缓存 TTL：同一 objectKey 在 TTL 内复用已导入 URL。
     provider_upload_cache_ttl_seconds = int(os.getenv("PROVIDER_UPLOAD_CACHE_TTL_SECONDS", str(6 * 60 * 60)))
     cors_origins = [
         origin.strip()

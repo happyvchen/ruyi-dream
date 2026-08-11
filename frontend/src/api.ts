@@ -330,6 +330,23 @@ export type UploadProgressSnapshot = {
   currentFile?: string
 }
 
+export type ImportTargetSummary = {
+  id: number
+  code?: string | null
+  exists: boolean
+  status?: string | null
+  coverUrl?: string | null
+  imageCount: number
+  updatedAt?: string | null
+  archivedAt?: string | null
+}
+
+export type ImportHistorySummary = {
+  hadTaggingFailure: boolean
+  latestFailureAt?: string | null
+  recoveredAt?: string | null
+}
+
 export type UploadSession = {
   id: string
   status: string
@@ -342,6 +359,9 @@ export type UploadSession = {
   targetType?: string | null
   targetId?: number | null
   targetStatus?: string | null
+  targetSummary?: ImportTargetSummary | null
+  importOutcome?: string | null
+  historySummary?: ImportHistorySummary | null
   errorMessage?: string | null
   archivedAt?: string | null
   archiveReason?: string | null
@@ -630,7 +650,7 @@ async function uploadFilesViaSession(
       })),
     }),
   })
-  if (created.items.length !== files.length) throw new ApiError('上传任务准备失败，请重新选择图片后再试。', 500)
+  if (created.items.length !== files.length) throw new ApiError('导入任务准备失败，请重新选择图片后再试。', 500)
   let completed = 0
   const controller = new AbortController()
   await runWithConcurrency(created.items, 4, async (item, index) => {
@@ -644,9 +664,9 @@ async function uploadFilesViaSession(
         signal: controller.signal,
       })
     } catch {
-      throw new ApiError('图片上传失败，请检查网络后重试。', 0)
+      throw new ApiError('图片导入失败，请检查网络后重试。', 0)
     }
-    if (!response.ok) throw new ApiError(`${file.name} 上传失败，请重新上传该图片。`, response.status)
+    if (!response.ok) throw new ApiError(`${file.name} 导入失败，请重新导入该图片。`, response.status)
     completed += 1
     await request<{ session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(created.session.id)}/complete-items`, {
       method: 'POST',
@@ -688,9 +708,9 @@ async function uploadPreparedSession(
           signal: controller.signal,
         })
       } catch {
-        throw new ApiError('图片上传失败，请检查网络后重试。', 0)
+        throw new ApiError('图片导入失败，请检查网络后重试。', 0)
       }
-      if (!response.ok) throw new ApiError(`${file.name} 上传失败，请稍后继续此任务。`, response.status)
+      if (!response.ok) throw new ApiError(`${file.name} 导入失败，请稍后继续此任务。`, response.status)
       await request<{ session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(session.id)}/complete-items`, {
         method: 'POST',
         body: JSON.stringify({ objectKeys: [item.objectKey], executorId }),

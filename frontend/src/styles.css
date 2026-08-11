@@ -2230,6 +2230,19 @@ a.button-link { text-decoration: none; cursor: pointer; }
   background: #f1f5f9;
   color: #64748b;
 }
+.import-task-status-stack {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  justify-self: end;
+}
+.import-task-status-stack > span:last-child:not(.import-status-badge) {
+  color: #64748b;
+  font-size: 10.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
 .import-task-actions {
   display: flex;
   align-self: center;

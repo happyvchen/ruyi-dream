@@ -87,7 +87,7 @@ k6 run -e BASE_URL=http://127.0.0.1:8000 -e USERNAME=user -e PASSWORD=<密码> \
   scripts/loadtest/k6-write.js
 ```
 
-并发 5 → 15 上传小图,覆盖"校验 → RustFS 写 → 衍生图生成 → SQLite 事务"全链路。关注 `garment_create_latency` p95 和 `write_conflicts` 计数(SQLite 锁冲突)。
+并发 5 → 15 导入小图,覆盖"校验 → RustFS 写 → 衍生图生成 → SQLite 事务"全链路。关注 `garment_create_latency` p95 和 `write_conflicts` 计数(SQLite 锁冲突)。
 
 **数据卫生**:所有测试数据 code 以 `LOADTEST-` 开头,脚本 teardown 自动清理。中途 Ctrl+C 导致残留时手动兜底:在页面按关键字 `LOADTEST` 检索删除,或调 API 逐个 `DELETE /api/styling-garments/{id}`。**对生产库运行前先备份 SQLite**(见 deployment.md 备份章节)。
 
@@ -101,7 +101,7 @@ k6 run -e BASE_URL=http://127.0.0.1:8000 -e USERNAME=user -e PASSWORD=<密码> \
 
 若生成期间浏览 p95 明显劣化,常见原因依次为:后端事件循环被同步调用阻塞、CPU 被衍生图/图片下载占满、磁盘写挤占读。结合 `docker stats` / `iostat` 定位。
 
-**不要用脚本批量触发 AI 生成来压测**——按额度计费,且违反仓库"禁止无谓消耗 provider 额度"规则。AI 链路的耗时评估用单次真实任务的分段计时(上传参考图 / 生成 / 下载落盘)即可。
+**不要用脚本批量触发 AI 生成来压测**——按额度计费,且违反仓库"禁止无谓消耗 provider 额度"规则。AI 链路的耗时评估用单次真实任务的分段计时(导入参考图 / 生成 / 下载落盘)即可。
 
 ## 6. 端到端体验(用户侧,经 VPN)
 
@@ -115,6 +115,6 @@ k6 run -e BASE_URL=http://127.0.0.1:8000 -e USERNAME=user -e PASSWORD=<密码> \
 
 1. SQLite 单写锁 + 同步 DB 调用:写并发的天花板,读多写少场景影响有限。
 2. 图片分档私有缓存 + 每图两跳(后端 redirect + RustFS):首次加载、缓存过期和强制刷新仍是浏览类 QPS 放大器;TTL 抖动用于降低同一批图片同时过期的尖峰。
-3. 衍生图生成(Pillow)是上传时同步 CPU 开销。
+3. 衍生图生成(Pillow)是导入时同步 CPU 开销。
 4. GPT-Image-2 生成几十秒 + 5s 轮询:体验主导项,与服务器性能无关。
-5. 公网上行影响打标/选搭(base64 图片上行)与参考图上传;公网下行影响生成图回落。
+5. 公网上行影响打标/选搭(base64 图片上行)与参考图导入;公网下行影响生成图回落。

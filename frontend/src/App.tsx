@@ -84,7 +84,7 @@ type PageSizeOption = number | { value: number; label: string; key?: string }
 type RecordSelectionKey = `task:${number}` | `batch:${string}`
 
 const steps = [
-  { title: '上传主推款', icon: Upload },
+  { title: '导入主推款', icon: Upload },
   { title: 'AI 智能选搭', icon: WandSparkles },
   { title: '生成分镜预览', icon: GalleryVerticalEnd },
   { title: '生成成片', icon: Sparkles },
@@ -332,7 +332,7 @@ export function App() {
     if (browserUploadingCount <= 0) return
     const warnUploading = (event: BeforeUnloadEvent) => {
       event.preventDefault()
-      event.returnValue = '图片正在上传；刷新或关闭会暂停任务，之后可从断点继续。'
+      event.returnValue = '图片正在导入；刷新或关闭会暂停任务，之后可从断点继续。'
     }
     window.addEventListener('beforeunload', warnUploading)
     return () => window.removeEventListener('beforeunload', warnUploading)
@@ -731,7 +731,7 @@ export function uploadSessionBatchesFromSessions(sessions: UploadSession[]): Upl
     return {
       key,
       batchId: first.batchId,
-      name: first.sourceTitle || first.businessCode || '上传任务',
+      name: first.sourceTitle || first.businessCode || '导入任务',
       codeCount: sorted.length,
       createdAt: sorted.map((session) => session.createdAt ?? '').filter(Boolean).sort()[0] ?? '',
       updatedAt: sorted.map((session) => session.updatedAt ?? session.createdAt ?? '').filter(Boolean).sort().at(-1) ?? '',
@@ -754,8 +754,8 @@ export function compareCreatedAtDesc(
 }
 
 function uploadSessionStatusLabel(status: string) {
-  if (status === 'PENDING') return '等待上传'
-  if (status === 'UPLOADING') return '上传图片中'
+  if (status === 'PENDING') return '等待导入'
+  if (status === 'UPLOADING') return '导入图片中'
   if (status === 'UPLOADED') return '等待保存'
   if (status === 'FINALIZING') return '保存中'
   if (status === 'FINALIZED') return '已保存'
@@ -1095,7 +1095,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     <section className="page studio-page">
       <PageTitle
         title="AI 摄影棚"
-        subtitle="上传主推款，让系统完成智能选搭、分镜预览并生成电商棚拍成片。"
+        subtitle="导入主推款，让系统完成智能选搭、分镜预览并生成电商棚拍成片。"
         actions={task ? (
           <div className="studio-title-actions">
             <button className="management-action" onClick={startNewTask}><ImagePlus size={16} />新建拍摄任务</button>
@@ -1140,7 +1140,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
                   <div><TruncatedText as="strong" text={task.name} /><span>{studioView?.statusLabel ?? statusText(task.status)}</span><em>主推款 {task.images?.length ?? 0} 张</em></div>
                 </div>
                 <div className="task-summary-progress">
-                  <Meta label="当前步骤" value={studioView?.currentStageLabel ?? '上传主推款'} />
+                  <Meta label="当前步骤" value={studioView?.currentStageLabel ?? '导入主推款'} />
                   <Meta label="总体进度" value={studioView?.progressLabel ?? '等待开始'} />
                   <Meta label="最终成片" value={`${task.resultSet?.images?.filter((i) => i.status === 'SUCCEEDED').length ?? 0}/5`} />
                   {!!task.styling?.selectedMaterials?.length && <Meta label="搭配服装" value={`${task.styling.selectedMaterials.length} 件`} />}
@@ -1167,7 +1167,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
                 </div>
               </>
             ) : (
-              <EmptyState title="暂无任务" text="上传主推款后会在这里形成拍摄任务。" />
+              <EmptyState title="暂无任务" text="导入主推款后会在这里形成拍摄任务。" />
             )}
           </div>
           <div id="recent-tasks-panel" role="tabpanel" aria-labelledby="task-rail-recent-tab" className="task-rail-panel recent-tasks-panel" hidden={taskRailTab !== 'recent'}>
@@ -1758,7 +1758,7 @@ function UploadHeroStep({ task, setTask, run, uploadSessions, refreshUploadSessi
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="支持多张图片、一个货号文件夹或一个上级文件夹。每套最多 15 张进入候选池，AI 智能选搭后保留挑选排序好的 8 张主推款参考图。">上传主推款</HeadingWithTooltip></div>
+        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="支持多张图片、一个货号文件夹或一个上级文件夹。每套最多 15 张进入候选池，AI 智能选搭后保留挑选排序好的 8 张主推款参考图。">导入主推款</HeadingWithTooltip></div>
         {task?.status === 'DRAFT' && <HeroDraftEditor task={task} setTask={setTask} run={run} />}
         {!task && (
           <>
@@ -1930,11 +1930,11 @@ function UploadProgressPanel({ progress, prefix, savingLabel = '保存任务', s
   savingDetail?: string
 }) {
   const percent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0
-  const phaseLabel = progress.phase === 'preparing' ? '准备上传' : progress.phase === 'saving' ? savingLabel : '上传图片'
+  const phaseLabel = progress.phase === 'preparing' ? '准备导入' : progress.phase === 'saving' ? savingLabel : '导入图片'
   const detail = progress.phase === 'saving'
     ? savingDetail
     : progress.phase === 'uploading'
-      ? `已上传 ${progress.completed}/${progress.total} 张`
+      ? `已导入 ${progress.completed}/${progress.total} 张`
       : `${progress.completed}/${progress.total} 张`
   return (
     <div className="upload-progress-panel" role="status" aria-live="polite">
@@ -3010,7 +3010,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
           }}
         >
           {showImport ? <ChevronLeft size={16} /> : <ImagePlus size={16} />}
-          {showImport ? '返回服装库' : '上传搭配服装'}
+          {showImport ? '返回服装库' : '导入搭配服装'}
         </button>
       </div>
       <div className={`library-content-scroll ${showImport ? 'is-import' : 'is-list'}`}>
@@ -3159,8 +3159,8 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
                 />
               ))}</div>
             ) : searching ? null : <EmptyState
-              title={selectedImportBatch ? '该上传批次暂未产生已入库服装' : hasActiveFilters ? '没有匹配的搭配服装' : '暂无搭配服装'}
-              text={selectedImportBatch ? '可以清除上传批次筛选，或稍后等待该批次完成入库。' : hasActiveFilters ? '减少筛选条件，或粘贴多个货号、标签再试。' : '点击右上角上传搭配服装。'}
+              title={selectedImportBatch ? '该导入批次暂未产生已入库服装' : hasActiveFilters ? '没有匹配的搭配服装' : '暂无搭配服装'}
+              text={selectedImportBatch ? '可以清除导入批次筛选，或稍后等待该批次完成入库。' : hasActiveFilters ? '减少筛选条件，或粘贴多个货号、标签再试。' : '点击右上角导入搭配服装。'}
             />}
           </div>
           <div className="library-pagination-stick">
@@ -3396,7 +3396,7 @@ function categorySelectionLabels(options: CategoryTreeOption[], selectedPrimary:
   return Array.from(new Set(labels))
 }
 
-function DateRangeFilter({ open, onOpen, label: emptyLabel = '上传时间', from, to, onFrom, onTo }: {
+function DateRangeFilter({ open, onOpen, label: emptyLabel = '导入时间', from, to, onFrom, onTo }: {
   open: boolean
   onOpen: (open: boolean) => void
   label?: string
@@ -3524,8 +3524,8 @@ function SortFilter({ open, onOpen, sortBy, sortDir, options = librarySortOption
 }
 
 const librarySortOptions = [
-  { value: 'createdAt:desc', label: '最新上传' },
-  { value: 'createdAt:asc', label: '最早上传' },
+  { value: 'createdAt:desc', label: '最新导入' },
+  { value: 'createdAt:asc', label: '最早导入' },
   { value: 'updatedAt:desc', label: '最近更新' },
   { value: 'updatedAt:asc', label: '最早更新' },
   { value: 'code:asc', label: '货号 A-Z' },
@@ -3645,13 +3645,13 @@ function ImportBatchFilter({ open, onOpen, value, options, onChange }: {
   return (
     <div className="filter-popover-wrap" ref={wrapRef}>
       <button className={`filter-pill import-batch-filter-pill ${value ? 'is-active' : ''}`} type="button" onClick={() => onOpen(!open)}>
-        <TruncatedText text={selected ? selected.label : '全部上传批次'} />
+        <TruncatedText text={selected ? selected.label : '全部导入批次'} />
         <ChevronDown size={15} />
       </button>
       {open && (
         <div className="filter-popover sort-popover import-batch-popover">
           <button className={!value ? 'is-selected' : ''} type="button" onClick={() => { onChange(''); onOpen(false) }}>
-            全部上传批次
+            全部导入批次
             {!value && <Check size={15} />}
           </button>
           {options.map((option) => (
@@ -3889,13 +3889,13 @@ type ImportJob = {
 }
 
 function importJobItemStatusLabel(status: ImportJobItem['status']) {
-  if (status === 'WAITING') return '等待上传'
-  if (status === 'UPLOADING') return '上传图片'
+  if (status === 'WAITING') return '等待导入'
+  if (status === 'UPLOADING') return '导入图片'
   if (status === 'SAVING') return '保存服装'
   if (status === 'SAVED') return '已保存，等待识别'
   if (status === 'TAGGING') return 'AI 识别中'
   if (status === 'SUCCEEDED') return '已提交识别'
-  if (status === 'INTERRUPTED') return '上传已暂停'
+  if (status === 'INTERRUPTED') return '导入已暂停'
   if (status === 'FAILED') return '需要处理'
   return status
 }
@@ -3919,7 +3919,7 @@ function storedLibraryImportJobs(): ImportJob[] {
       ...job,
       status: job.status === 'RUNNING' ? 'INTERRUPTED' : job.status,
       items: (job.items ?? []).map((item) => item.status === 'WAITING' || item.status === 'UPLOADING'
-        ? { ...item, status: 'INTERRUPTED', error: item.error ?? '页面刷新后上传已暂停，可从已完成位置继续。' }
+        ? { ...item, status: 'INTERRUPTED', error: item.error ?? '页面刷新后导入已暂停，可从已完成位置继续。' }
         : item),
     }))
   } catch {
@@ -3927,7 +3927,7 @@ function storedLibraryImportJobs(): ImportJob[] {
   }
 }
 
-type ImportTaskFilter = 'all' | 'running' | 'pending' | 'attention' | 'saved'
+type ImportTaskFilter = 'all' | 'running' | 'pending' | 'review' | 'attention' | 'saved'
 
 type ImportBatchFilterOption = {
   value: string
@@ -3952,6 +3952,9 @@ type ImportTaskRow = {
   status: string
   statusLabel: string
   statusTone: 'running' | 'success' | 'warning' | 'danger' | 'muted'
+  currentStatusLabel?: string | null
+  targetExists?: boolean
+  targetStatus?: string | null
   previewUrl?: string | null
   createdAt?: string
   updatedAt?: string
@@ -3981,28 +3984,32 @@ type UploadRecordTarget = {
 }
 
 function importTaskStatusTone(status: string): ImportTaskRow['statusTone'] {
-  if (['WAITING', 'UPLOADING', 'SAVING', 'PENDING', 'FINALIZING', 'TAGGING', 'TAGGING_RUNNING'].includes(status)) return 'running'
-  if (['SAVED', 'SUCCEEDED', 'UPLOADED', 'DRAFT', 'TAGGING_READY', 'INTERRUPTED'].includes(status)) return 'warning'
-  if (['FINALIZED', 'READY'].includes(status)) return 'success'
-  if (['FAILED', 'TAGGING_FAILED'].includes(status)) return 'danger'
+  if (['WAITING', 'UPLOADING', 'SAVING', 'PENDING', 'FINALIZING', 'TAGGING', 'TAGGING_RUNNING', 'IMPORTING', 'ORGANIZING', 'PROCESSING', 'RECOVERING'].includes(status)) return 'running'
+  if (['SAVED', 'UPLOADED', 'DRAFT', 'TAGGING_READY', 'INTERRUPTED', 'PENDING_RECOGNITION', 'REVIEW_REQUIRED'].includes(status)) return 'warning'
+  if (['FINALIZED', 'READY', 'SUCCEEDED', 'RECOVERED'].includes(status)) return 'success'
+  if (['FAILED', 'TAGGING_FAILED', 'NEEDS_ACTION', 'TARGET_MISSING'].includes(status)) return 'danger'
   if (status === 'ABANDONED') return 'muted'
   return 'warning'
 }
 
 function isImportTaskRunning(status: string) {
-  return ['WAITING', 'UPLOADING', 'SAVING', 'RUNNING', 'PENDING', 'FINALIZING', 'TAGGING', 'TAGGING_RUNNING'].includes(status)
+  return ['WAITING', 'UPLOADING', 'SAVING', 'RUNNING', 'PENDING', 'FINALIZING', 'TAGGING', 'TAGGING_RUNNING', 'IMPORTING', 'ORGANIZING', 'PROCESSING', 'RECOVERING'].includes(status)
 }
 
 function isImportTaskAttention(status: string) {
-  return ['FAILED', 'TAGGING_FAILED', 'INTERRUPTED'].includes(status)
+  return ['FAILED', 'TAGGING_FAILED', 'INTERRUPTED', 'NEEDS_ACTION', 'TARGET_MISSING'].includes(status)
 }
 
 function isImportTaskDone(status: string) {
-  return ['FINALIZED', 'READY'].includes(status)
+  return ['FINALIZED', 'READY', 'SUCCEEDED', 'RECOVERED'].includes(status)
 }
 
 function isImportTaskPendingRecognition(status: string) {
-  return ['SAVED', 'SUCCEEDED', 'DRAFT', 'TAGGING_READY'].includes(status)
+  return ['SAVED', 'DRAFT', 'PENDING_RECOGNITION'].includes(status)
+}
+
+function isImportTaskReviewRequired(status: string) {
+  return ['TAGGING_READY', 'REVIEW_REQUIRED'].includes(status)
 }
 
 function uploadSessionDrivesImportItem(status: ImportJobItem['status']) {
@@ -4010,11 +4017,12 @@ function uploadSessionDrivesImportItem(status: ImportJobItem['status']) {
 }
 
 function importSessionCode(session: UploadSession, garment?: StylingGarment) {
+  if (session.targetSummary?.code) return session.targetSummary.code
   if (session.businessCode) return session.businessCode
   if (garment?.code) return garment.code
   const filename = session.items?.[0]?.filename
   if (filename) return filename.replace(/\.[^.]+$/, '')
-  return `上传任务 ${session.id.slice(0, 8)}`
+  return `导入任务 ${session.id.slice(0, 8)}`
 }
 
 function importSessionTitle(session: UploadSession, row: ImportTaskRow) {
@@ -4022,6 +4030,16 @@ function importSessionTitle(session: UploadSession, row: ImportTaskRow) {
 }
 
 function importTaskStatusLabel(status: string) {
+  if (status === 'IMPORTING') return '导入中'
+  if (status === 'ORGANIZING') return '整理入库中'
+  if (status === 'PROCESSING') return '识别中'
+  if (status === 'RECOVERING') return '恢复处理中'
+  if (status === 'RECOVERED') return '已恢复'
+  if (status === 'SUCCEEDED') return '导入成功'
+  if (status === 'PENDING_RECOGNITION') return '待识别'
+  if (status === 'REVIEW_REQUIRED') return '待复核'
+  if (status === 'NEEDS_ACTION') return '需要处理'
+  if (status === 'TARGET_MISSING') return '关联服装已删除'
   if (status === 'TAGGING') return 'AI 识别中'
   if (['PENDING', 'UPLOADING', 'UPLOADED', 'FINALIZING', 'FINALIZED', 'FAILED', 'ABANDONED'].includes(status)) return uploadSessionStatusLabel(status)
   if (['WAITING', 'SAVING', 'SAVED', 'SUCCEEDED', 'INTERRUPTED'].includes(status)) return importJobItemStatusLabel(status as ImportJobItem['status'])
@@ -4029,13 +4047,29 @@ function importTaskStatusLabel(status: string) {
 }
 
 function importRowBusinessStatus(session: UploadSession | undefined, garment: StylingGarment | undefined, fallbackStatus: string) {
+  if (fallbackStatus === 'INTERRUPTED' && !session?.targetId && session?.importOutcome === 'IMPORTING') return fallbackStatus
+  if (session?.importOutcome) return session.importOutcome
   if (garment?.status) return garment.status
-  return session?.status ?? fallbackStatus
+  if (session?.targetStatus) return session.targetStatus
+  return fallbackStatus
+}
+
+function importTargetCurrentStatusLabel(session?: UploadSession, garment?: StylingGarment) {
+  const target = session?.targetSummary
+  if (target && !target.exists) return '关联服装已删除'
+  if (target?.archivedAt ?? garment?.archivedAt) return '当前已归档'
+  const status = target?.status ?? garment?.status ?? session?.targetStatus
+  if (status === 'READY') return '当前可选搭'
+  if (status === 'TAGGING_RUNNING') return '当前识别中'
+  if (status === 'TAGGING_FAILED') return '当前识别失败'
+  if (status === 'TAGGING_READY') return '当前待复核'
+  if (status === 'DRAFT') return '当前待识别'
+  return null
 }
 
 function importSessionGroupTitle(rows: ImportTaskRow[], sessionsById: Map<string, UploadSession>) {
   const first = rows[0]
-  if (!first) return '上传任务'
+  if (!first) return '导入任务'
   const session = first.sessionId ? sessionsById.get(first.sessionId) : undefined
   if (session) return importSessionTitle(session, first)
   return first.sourceTitle || first.code
@@ -4129,22 +4163,22 @@ function imageCountText(imported: number, uploaded: number, retained: number | n
 }
 
 function importImageCountText(imported: number, uploaded: number, retained: number | null) {
-  return `已选 ${imported} / 已上传 ${uploaded} / 已入库 ${retained === null ? '-' : retained}`
+  return `已选 ${imported} / 已导入 ${uploaded} / 正式图片 ${retained === null ? '-' : retained}`
 }
 
 function importTaskMetaText(row: ImportTaskRow) {
   if (row.error) return row.error
-  if (row.garmentId) return `服装记录 #${row.garmentId}`
-  if (row.source === 'session' && row.sessionId) return `上传批次 ${row.sessionId.slice(0, 8)}`
-  return '本次上传'
+  if (row.garmentId) return '已生成服装资产'
+  if (row.source === 'session' && row.sessionId) return `导入任务 ${row.sessionId.slice(0, 8)}`
+  return '本次导入'
 }
 
 function importTaskProgress(row: ImportTaskRow) {
-  if (['SUCCEEDED', 'SAVED', 'FINALIZED'].includes(row.status)) return 100
-  if (row.status === 'TAGGING') return 92
+  if (['SUCCEEDED', 'SAVED', 'FINALIZED', 'RECOVERED'].includes(row.status)) return 100
+  if (['TAGGING', 'PROCESSING', 'RECOVERING'].includes(row.status)) return 92
   if (row.status === 'FINALIZING') return 88
-  if (row.status === 'SAVING' || row.status === 'UPLOADED') return 78
-  if (['FAILED', 'INTERRUPTED'].includes(row.status)) return row.uploadedCount > 0 ? Math.max(12, Math.round((row.uploadedCount / Math.max(1, row.importedCount)) * 70)) : 0
+  if (['SAVING', 'UPLOADED', 'ORGANIZING'].includes(row.status)) return 78
+  if (['FAILED', 'INTERRUPTED', 'NEEDS_ACTION', 'TARGET_MISSING'].includes(row.status)) return row.uploadedCount > 0 ? Math.max(12, Math.round((row.uploadedCount / Math.max(1, row.importedCount)) * 70)) : 0
   return Math.round((row.uploadedCount / Math.max(1, row.importedCount)) * 70)
 }
 
@@ -4254,7 +4288,7 @@ function BatchImportPanel({
           operations: [],
           items: sessions.map((session) => ({
             id: session.id,
-            code: session.businessCode || `上传任务 ${session.id.slice(0, 8)}`,
+            code: session.businessCode || `导入任务 ${session.id.slice(0, 8)}`,
             imageCount: session.totalCount,
             uploadedCount: session.uploadedCount,
             status: session.status === 'FINALIZED' ? 'SAVED' as const
@@ -4363,7 +4397,7 @@ function BatchImportPanel({
         return
       }
       if (seen.has(code)) {
-        recordBlocked.push({ ...batch, code, error: '本批次货号重复，本次未重复上传' })
+        recordBlocked.push({ ...batch, code, error: '本批次货号重复，本次未重复导入' })
         return
       }
       seen.add(code)
@@ -4375,12 +4409,12 @@ function BatchImportPanel({
         const duplicated = recordBlocked.find((item) => item.id === batch.id)
         return blocked ?? duplicated ?? { ...batch, code: sanitizeClientName(batch.code), error: undefined }
       }))
-      setLocalError('请先处理空货号或无图片的服装，再开始上传')
+      setLocalError('请先处理空货号或无图片的服装，再开始导入')
       return
     }
     if (!ready.length) {
       setBatches(recordBlocked)
-      setLocalError(recordBlocked.length ? '没有可上传的新服装，请先处理标红项' : '请先选择图片或文件夹')
+      setLocalError(recordBlocked.length ? '没有可导入的新服装，请先处理标红项' : '请先选择图片或文件夹')
       return
     }
     setBatches([])
@@ -4459,7 +4493,7 @@ function BatchImportPanel({
         .catch(() => undefined)
       await runImportJob(jobId, jobBatches, nextJob.title, preparedByCode)
     } catch (err) {
-      const message = err instanceof Error ? err.message : '上传任务创建失败'
+      const message = err instanceof Error ? err.message : '导入任务创建失败'
       updateJob(jobId, (job) => ({
         ...job,
         status: 'FAILED',
@@ -4497,7 +4531,7 @@ function BatchImportPanel({
           })
         } else {
           const item = importJobs.find((job) => job.id === jobId)?.items.find((candidate) => candidate.code === batch.code)
-          if (!item?.sessionId) throw new Error(`${batch.code} 缺少可恢复的上传记录`)
+          if (!item?.sessionId) throw new Error(`${batch.code} 缺少可恢复的导入记录`)
           prepared = await api.resumeUploadSession(item.sessionId, uploadFiles, {
             onChecksumCompatibilityMode: () => setChecksumCompatibilityMode(true),
           })
@@ -4512,7 +4546,7 @@ function BatchImportPanel({
             persisted = (await api.getUploadSession(prepared.session.id)).session
           }
           if (persisted.status !== 'FINALIZED' || !persisted.targetId) {
-            throw new Error(`${batch.code} 仍在保存中，请稍后继续任务，系统不会重复上传图片。`)
+            throw new Error(`${batch.code} 仍在保存中，请稍后继续任务，系统不会重复导入图片。`)
           }
           created = { item: (await api.getStylingGarment(persisted.targetId)).item, session: persisted }
         } else {
@@ -4537,8 +4571,8 @@ function BatchImportPanel({
         }))
       } catch (err) {
         void refreshUploadSessions().catch(() => undefined)
-        const message = err instanceof Error ? err.message : '上传失败'
-        const displayMessage = ['搭配服装代码已存在', '搭配服装货号已存在'].includes(message) ? '货号已存在，本次未重复上传' : message
+        const message = err instanceof Error ? err.message : '导入失败'
+        const displayMessage = ['搭配服装代码已存在', '搭配服装货号已存在'].includes(message) ? '货号已存在，本次未重复导入' : message
         const interrupted = !/已存在|重复/.test(displayMessage)
         if (interrupted) interruptedCount += 1
         updateJob(jobId, (job) => ({
@@ -4627,7 +4661,7 @@ function BatchImportPanel({
       const selectedByPath = new Map(supportedFiles.map((file) => [importPath(file), file]))
       const missing = [...expectedPaths].filter((path) => !selectedByPath.has(path))
       if (missing.length) {
-        throw new Error(`所选文件夹与原上传任务不一致（缺少 ${missing.length} 张），已拒绝断点继续。`)
+        throw new Error(`所选文件夹与原导入任务不一致（缺少 ${missing.length} 张），已拒绝断点继续。`)
       }
 
       const resumableItems = job.items.filter((item) => {
@@ -4651,7 +4685,7 @@ function BatchImportPanel({
       }
       await runImportJob(jobId, resumeBatches, job.title, preparedByCode)
     } catch (err) {
-      const message = err instanceof Error ? err.message : '无法继续上传'
+      const message = err instanceof Error ? err.message : '无法继续导入'
       setLocalError(message)
       updateJob(jobId, (job) => ({ ...job, status: 'INTERRUPTED' }))
     } finally {
@@ -4665,7 +4699,7 @@ function BatchImportPanel({
       if (!handle) throw new Error('未找到原文件夹授权，请重新选择原文件夹。')
       let permission = await handle.queryPermission({ mode: 'read' })
       if (permission === 'prompt') permission = await handle.requestPermission({ mode: 'read' })
-      if (permission !== 'granted') throw new Error('需要重新授权原文件夹后才能继续上传。')
+      if (permission !== 'granted') throw new Error('需要重新授权原文件夹后才能继续导入。')
       await resumeImportJob(jobId, await filesFromDirectory(handle))
     } catch (err) {
       setLocalError(err instanceof Error ? err.message : '无法读取原文件夹')
@@ -4677,7 +4711,7 @@ function BatchImportPanel({
       <div className={`panel import-panel ${batches.length > 0 ? 'has-batches' : ''}`}>
         <div className="import-head">
           <div>
-            <HeadingWithTooltip as="h3" tooltip={`散图会合并为一套；单货号文件夹是一套；上级文件夹会递归识别最底层图片目录。最多 ${STYLING_GARMENT_MAX_IMAGES} 张进入候选池，AI 识别后只保留挑选排序好的 ${STYLING_GARMENT_SELECTED_IMAGES} 张纯服装参考图。`}>上传搭配服装</HeadingWithTooltip>
+            <HeadingWithTooltip as="h3" tooltip={`散图会合并为一套；单货号文件夹是一套；上级文件夹会递归识别最底层图片目录。最多 ${STYLING_GARMENT_MAX_IMAGES} 张进入候选池，AI 识别后只保留挑选排序好的 ${STYLING_GARMENT_SELECTED_IMAGES} 张纯服装参考图。`}>导入搭配服装</HeadingWithTooltip>
           </div>
         </div>
         <div className="import-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => void handleDrop(event)}>
@@ -4723,7 +4757,7 @@ function BatchImportPanel({
             >
               <ChevronLeft size={16} />返回服装库
             </button>
-            <button className="management-action" type="button" onClick={saveDrafts}><Upload size={16} />上传</button>
+            <button className="management-action" type="button" onClick={saveDrafts}><Upload size={16} />导入</button>
           </div>
         )}
       </div>
@@ -4731,7 +4765,7 @@ function BatchImportPanel({
         <div className="import-upload-notice" role="status">
           <span className="import-upload-notice-icon" aria-hidden="true"><Loader2 className="spin" size={14} /></span>
           <span className="import-upload-notice-copy">
-            <strong>上传任务正在进行</strong>
+            <strong>导入任务正在进行</strong>
             <span>可以切换站内页面或浏览器 Tab；刷新或关闭页面会暂停任务，返回后可从断点继续。</span>
           </span>
           <span className="import-upload-notice-badge">{runningImportJobCount} 个进行中</span>
@@ -4893,7 +4927,8 @@ function ImportTaskWorkbench({
       const targetId = session?.targetId ?? item.garmentId
       const garment = targetId ? garmentsById.get(targetId) : garmentsByCode.get(item.code)
       const sessionDrivesStatus = Boolean(session && uploadSessionDrivesImportItem(item.status))
-      const status = garment?.status ?? (sessionDrivesStatus && session ? session.status : item.status)
+      const status = importRowBusinessStatus(session, garment, sessionDrivesStatus && session ? session.status : item.status)
+      const targetSummary = session?.targetSummary
       return {
         id: `job-${job.id}-${item.id}`,
         source: 'job',
@@ -4903,16 +4938,19 @@ function ImportTaskWorkbench({
         garmentId: targetId ?? undefined,
         scope: session?.scope ?? 'styling-garment',
         sourceTitle: session?.sourceTitle ?? job.title,
-        code: item.code,
+        code: targetSummary?.code ?? item.code,
         importedCount: item.imageCount,
         uploadedCount: session?.uploadedCount ?? item.uploadedCount,
-        retainedCount: retainedImageCount(garment),
+        retainedCount: typeof targetSummary?.imageCount === 'number' ? targetSummary.imageCount : retainedImageCount(garment),
         status,
         statusLabel: importTaskStatusLabel(status),
         statusTone: importTaskStatusTone(status),
-        previewUrl: garment?.coverUrl ?? item.previewUrl ?? null,
+        currentStatusLabel: importTargetCurrentStatusLabel(session, garment),
+        targetExists: targetSummary?.exists,
+        targetStatus: targetSummary?.status ?? garment?.status ?? session?.targetStatus,
+        previewUrl: targetSummary?.coverUrl ?? garment?.coverUrl ?? (session?.status === 'FINALIZED' ? null : item.previewUrl) ?? null,
         createdAt,
-        updatedAt: garment?.updatedAt ?? (sessionDrivesStatus ? session?.updatedAt ?? updatedAt : updatedAt),
+        updatedAt: targetSummary?.updatedAt ?? garment?.updatedAt ?? (sessionDrivesStatus ? session?.updatedAt ?? updatedAt : updatedAt),
         error: sessionDrivesStatus ? session?.errorMessage ?? item.error : item.error,
         archivedAt: session?.archivedAt ?? job.archivedAt,
         archiveReason: session?.archiveReason ?? job.archiveReason,
@@ -4932,6 +4970,7 @@ function ImportTaskWorkbench({
     .map((session) => {
       const garment = session.targetId ? garmentsById.get(session.targetId) : undefined
       const status = importRowBusinessStatus(session, garment, session.status)
+      const targetSummary = session.targetSummary
       return {
         id: `session-${session.id}`,
         source: 'session',
@@ -4943,13 +4982,16 @@ function ImportTaskWorkbench({
         code: importSessionCode(session, garment),
         importedCount: session.totalCount,
         uploadedCount: session.uploadedCount,
-        retainedCount: retainedImageCount(garment),
+        retainedCount: typeof targetSummary?.imageCount === 'number' ? targetSummary.imageCount : retainedImageCount(garment),
         status,
         statusLabel: importTaskStatusLabel(status),
         statusTone: importTaskStatusTone(status),
-        previewUrl: garment?.coverUrl ?? null,
+        currentStatusLabel: importTargetCurrentStatusLabel(session, garment),
+        targetExists: targetSummary?.exists,
+        targetStatus: targetSummary?.status ?? garment?.status ?? session.targetStatus,
+        previewUrl: targetSummary?.coverUrl ?? garment?.coverUrl ?? null,
         createdAt: session.createdAt,
-        updatedAt: garment?.updatedAt ?? session.updatedAt ?? session.createdAt,
+        updatedAt: targetSummary?.updatedAt ?? garment?.updatedAt ?? session.updatedAt ?? session.createdAt,
         error: session.errorMessage,
         archivedAt: session.archivedAt,
         archiveReason: session.archiveReason,
@@ -4993,6 +5035,7 @@ function ImportTaskWorkbench({
     }
     if (filter === 'running') return isImportTaskRunning(row.status)
     if (filter === 'pending') return isImportTaskPendingRecognition(row.status)
+    if (filter === 'review') return isImportTaskReviewRequired(row.status)
     if (filter === 'attention') return isImportTaskAttention(row.status)
     if (filter === 'saved') return isImportTaskDone(row.status)
     return true
@@ -5009,12 +5052,14 @@ function ImportTaskWorkbench({
   const visibleSessionGroups = recoveredImportSessionGroups(visibleSessionRows, sessionsById)
   const runningCount = allRows.filter((row) => isImportTaskRunning(row.status)).length
   const pendingCount = allRows.filter((row) => isImportTaskPendingRecognition(row.status)).length
+  const reviewCount = allRows.filter((row) => isImportTaskReviewRequired(row.status)).length
   const attentionCount = allRows.filter((row) => isImportTaskAttention(row.status)).length
   const statusOptions = [
     { value: 'running', label: '进行中', count: runningCount },
     { value: 'pending', label: '待识别', count: pendingCount },
+    { value: 'review', label: '待复核', count: reviewCount },
     { value: 'attention', label: '需处理', count: attentionCount },
-    { value: 'saved', label: '可用', count: allRows.filter((row) => isImportTaskDone(row.status)).length },
+    { value: 'saved', label: '已完成', count: allRows.filter((row) => isImportTaskDone(row.status)).length },
   ]
   const hasActiveFilters = Boolean(query.trim() || filter !== 'all' || uploadedFrom || uploadedTo)
   const visibleJobs = [...displayedJobs].sort((a, b) => {
@@ -5097,18 +5142,18 @@ function ImportTaskWorkbench({
     const retained = retainedValues.length ? retainedValues.reduce((sum, value) => sum + value, 0) : null
     const failed = rows.filter((row) => row.statusTone === 'danger').length
     const interrupted = rows.filter((row) => row.status === 'INTERRUPTED').length
-    const uploading = rows.filter((row) => ['WAITING', 'UPLOADING', 'PENDING'].includes(row.status)).length
-    const organizing = rows.filter((row) => ['SAVING', 'UPLOADED', 'FINALIZING'].includes(row.status)).length
-    const tagging = rows.filter((row) => ['TAGGING', 'TAGGING_RUNNING'].includes(row.status)).length
+    const uploading = rows.filter((row) => ['WAITING', 'UPLOADING', 'PENDING', 'IMPORTING'].includes(row.status)).length
+    const organizing = rows.filter((row) => ['SAVING', 'UPLOADED', 'FINALIZING', 'ORGANIZING'].includes(row.status)).length
+    const tagging = rows.filter((row) => ['TAGGING', 'TAGGING_RUNNING', 'PROCESSING', 'RECOVERING'].includes(row.status)).length
     const running = rows.filter((row) => isImportTaskRunning(row.status)).length
-    const review = rows.filter((row) => row.status === 'TAGGING_READY').length
+    const review = rows.filter((row) => isImportTaskReviewRequired(row.status)).length
     const pendingRecognition = rows.filter((row) => isImportTaskPendingRecognition(row.status)).length
-    const ready = rows.filter((row) => row.status === 'READY').length
-    const finalized = rows.filter((row) => row.garmentId || isImportTaskDone(row.status) || ['DRAFT', 'TAGGING_RUNNING', 'TAGGING_READY', 'TAGGING_FAILED'].includes(row.status)).length
+    const ready = rows.filter((row) => ['READY', 'SUCCEEDED', 'RECOVERED'].includes(row.status)).length
+    const finalized = rows.filter((row) => row.garmentId || isImportTaskDone(row.status) || ['DRAFT', 'TAGGING_RUNNING', 'TAGGING_READY', 'TAGGING_FAILED', 'PENDING_RECOGNITION', 'REVIEW_REQUIRED'].includes(row.status)).length
     const saved = finalized
     const hasActiveWork = uploading > 0 || organizing > 0 || tagging > 0 || running > 0
     const tone: ImportTaskRow['statusTone'] = failed ? 'danger' : interrupted ? 'warning' : uploading || tagging || running ? 'running' : ready === rows.length ? 'success' : pendingRecognition || review ? 'warning' : 'warning'
-    const label = failed ? '部分失败' : interrupted && hasActiveWork ? '部分上传已暂停' : interrupted ? '上传已暂停' : uploading ? '上传中' : tagging ? 'AI 打标中' : organizing ? '整理入库中' : ready === rows.length ? '可用' : review ? '待复核' : pendingRecognition ? '待识别' : saved === rows.length ? '已入库' : '需处理'
+    const label = failed ? '部分失败' : interrupted && hasActiveWork ? '部分导入已暂停' : interrupted ? '导入已暂停' : uploading ? '导入中' : tagging ? 'AI 打标中' : organizing ? '整理入库中' : ready === rows.length ? '全部完成' : review ? '待复核' : pendingRecognition ? '待识别' : saved === rows.length ? '全部完成' : '需处理'
     const updatedAt = rows.map((row) => row.updatedAt ?? row.createdAt).filter(Boolean).sort().at(-1)
     return { imported, uploaded, retained, failed, interrupted, running, uploading, organizing, tagging, saved, tone, label, updatedAt }
   }
@@ -5249,7 +5294,7 @@ function ImportTaskWorkbench({
   }
 
   useEffect(() => {
-    void loadArchivedSessions().catch((error) => setUploadRecordError(error instanceof Error ? error.message : '无法读取上传记录'))
+    void loadArchivedSessions().catch((error) => setUploadRecordError(error instanceof Error ? error.message : '无法读取导入记录'))
   }, [])
 
   useEffect(() => {
@@ -5288,7 +5333,7 @@ function ImportTaskWorkbench({
   function combinedUploadRecordTarget(targets: UploadRecordTarget[]) {
     return {
       id: `bulk:${targets.map((target) => target.id).join(',')}`,
-      title: `${targets.length} 条上传记录`,
+      title: `${targets.length} 条导入记录`,
       rows: targets.flatMap((target) => target.rows),
       archived: targets.every((target) => target.archived),
       memberJobIds: targets.flatMap((target) => target.jobId ? [target.jobId] : target.memberJobIds ?? []),
@@ -5418,7 +5463,7 @@ function ImportTaskWorkbench({
       }
       await refreshManagedUploadRecords()
       setManageRecord(null)
-      if (cleanupErrors.length) setUploadRecordError(`上传记录已删除，但有 ${cleanupErrors.length} 个临时文件清理失败，系统已记录并会自动重试。`)
+      if (cleanupErrors.length) setUploadRecordError(`导入记录已删除，但有 ${cleanupErrors.length} 个临时文件清理失败，系统已记录并会自动重试。`)
     } catch (error) {
       await refreshManagedUploadRecords()
       if (completedChunks > 0) {
@@ -5428,7 +5473,7 @@ function ImportTaskWorkbench({
         setManageRecord(null)
         setSelectedUploadRecordIds(new Set())
         lastSelectedUploadRecordIdRef.current = null
-        setUploadRecordError('部分上传记录已完成删除，其余记录处理失败。列表已刷新，请重新选择剩余记录后重试。')
+        setUploadRecordError('部分导入记录已完成删除，其余记录处理失败。列表已刷新，请重新选择剩余记录后重试。')
         return
       }
       throw error
@@ -5445,21 +5490,21 @@ function ImportTaskWorkbench({
     <div className="panel import-workbench">
       <div className="import-workbench-head">
         <div>
-          <strong>上传记录</strong>
+          <strong>导入记录</strong>
         </div>
       </div>
       <div className="import-commandbar">
         <SearchBox
           value={query}
           onChange={setQuery}
-          placeholder="搜索货号 / 上传任务"
-          panelPlaceholder="每行一个货号、上传任务名、状态或任务编号，也可用空格、逗号、句号、顿号分隔"
+          placeholder="搜索货号 / 导入任务"
+          panelPlaceholder="每行一个货号、导入任务名、状态或任务编号，也可用空格、逗号、句号、顿号分隔"
         />
         <div className="import-filter-pills">
           <DateRangeFilter
             open={openFilter === 'date'}
             onOpen={(open) => setOpenFilter(open ? 'date' : null)}
-            label="上传时间"
+            label="导入时间"
             from={uploadedFrom}
             to={uploadedTo}
             onFrom={setUploadedFrom}
@@ -5529,7 +5574,7 @@ function ImportTaskWorkbench({
                   className={`record-row batch-record-row import-record-row ${bulkMode ? 'has-selection' : ''} ${selected ? 'is-selected' : ''}`}
                   role="group"
                   aria-label={title}
-                  title={expanded ? '点击收起上传任务' : '点击展开上传任务'}
+                  title={expanded ? '点击收起导入任务' : '点击展开导入任务'}
                   onClick={(event) => {
                     if ((event.target as HTMLElement).closest('input, button, label, a')) return
                     toggleTask(group.id)
@@ -5540,13 +5585,13 @@ function ImportTaskWorkbench({
                     <ImportThumbStack rows={group.rows} />
                     <div>
                       <TruncatedText as="strong" text={title} />
-                      <TruncatedText text={`${summary.label} · ${group.total} 个货号 · 上传 ${dateText(group.createdAt)} · 更新 ${dateText(summary.updatedAt)}`} />
+                      <TruncatedText text={`${summary.label} · ${group.total} 个货号 · 导入 ${dateText(group.createdAt)} · 更新 ${dateText(summary.updatedAt)}`} />
                     </div>
                   </div>
                   <div className="batch-progress-strip import-progress-strip">
                     <span>{summary.saved}/{group.total} 已整理</span>
                     {summary.interrupted > 0 && <span>{summary.interrupted} 已暂停</span>}
-                    {summary.uploading > 0 && <span>{summary.uploading} 上传中</span>}
+                    {summary.uploading > 0 && <span>{summary.uploading} 导入中</span>}
                     {summary.organizing > 0 && <span>{summary.organizing} 整理中</span>}
                     {summary.tagging > 0 && <span>{summary.tagging} AI 打标中</span>}
                     {summary.failed > 0 && <span>{summary.failed} 需处理</span>}
@@ -5558,7 +5603,7 @@ function ImportTaskWorkbench({
                   <div className="import-record-actions" onClick={(event) => event.stopPropagation()}>
                     <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === group.id} onClick={() => openUploadRecordManage(manageTarget)}><Archive size={14} />归档</button>
                   </div>
-                  <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起上传任务' : '展开上传任务'} onClick={(event) => {
+                  <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起导入任务' : '展开导入任务'} onClick={(event) => {
                     event.stopPropagation()
                     toggleTask(group.id)
                   }}>
@@ -5597,7 +5642,7 @@ function ImportTaskWorkbench({
                 className={`record-row batch-record-row import-record-row ${bulkMode ? 'has-selection' : ''} ${selected ? 'is-selected' : ''}`}
                 role="group"
                 aria-label={title}
-                title={expanded ? '点击收起上传任务' : '点击展开上传任务'}
+                title={expanded ? '点击收起导入任务' : '点击展开导入任务'}
                 onClick={(event) => {
                   if ((event.target as HTMLElement).closest('input, button, label, a')) return
                   toggleTask(job.id)
@@ -5608,13 +5653,13 @@ function ImportTaskWorkbench({
                   <ImportThumbStack rows={allJobRows} />
                   <div>
                     <TruncatedText as="strong" text={title} />
-                      <TruncatedText text={`${summary.label} · ${allJobRows.length} 个货号 · 上传 ${dateText(job.createdAt)} · 更新 ${dateText(summary.updatedAt)}`} />
+                      <TruncatedText text={`${summary.label} · ${allJobRows.length} 个货号 · 导入 ${dateText(job.createdAt)} · 更新 ${dateText(summary.updatedAt)}`} />
                   </div>
                 </div>
                 <div className="batch-progress-strip import-progress-strip">
                   <span>{summary.saved}/{allJobRows.length} 已整理</span>
                   {summary.interrupted > 0 && <span>{summary.interrupted} 已暂停</span>}
-                  {summary.uploading > 0 && <span>{summary.uploading} 上传中</span>}
+                  {summary.uploading > 0 && <span>{summary.uploading} 导入中</span>}
                   {summary.organizing > 0 && <span>{summary.organizing} 整理中</span>}
                   {summary.tagging > 0 && <span>{summary.tagging} AI 打标中</span>}
                   {summary.failed > 0 && <span>{summary.failed} 需处理</span>}
@@ -5628,7 +5673,7 @@ function ImportTaskWorkbench({
                     <div className="import-resume-actions">
                       {canResumeSavedDirectory && (
                         <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || resumingJobId === job.id} onClick={() => onResumeSaved(job.id)}>
-                          <RefreshCw size={14} />{resumingJobId === job.id ? '恢复中' : '继续上传'}
+                          <RefreshCw size={14} />{resumingJobId === job.id ? '恢复中' : '继续导入'}
                         </button>
                       )}
                       <label className={`management-action compact-control ${batchUploadRecordBusy ? 'is-disabled' : ''}`} aria-disabled={batchUploadRecordBusy} title="重新选择原任务文件夹；系统会严格核对后从断点继续">
@@ -5641,12 +5686,12 @@ function ImportTaskWorkbench({
                       </label>
                     </div>
                   )}
-                  {!canResume && !archived && <button className="management-action compact-control import-batch-view-button" type="button" title="回到服装库查看本次上传的服装" onClick={() => onFindJob(job.id)}>
+                  {!canResume && !archived && <button className="management-action compact-control import-batch-view-button" type="button" title="回到服装库查看本次导入的服装" onClick={() => onFindJob(job.id)}>
                     查看本批次
                   </button>}
                   <button className="management-action compact-control" type="button" disabled={batchUploadRecordBusy || uploadRecordOperationId === job.id} onClick={() => openUploadRecordManage(manageTarget)}><Archive size={14} />归档</button>
                 </div>
-                <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起上传任务' : '展开上传任务'} onClick={(event) => {
+                <button className="management-action record-action-button" aria-expanded={expanded} title={expanded ? '收起导入任务' : '展开导入任务'} onClick={(event) => {
                   event.stopPropagation()
                   toggleTask(job.id)
                 }}>
@@ -5664,7 +5709,7 @@ function ImportTaskWorkbench({
         {!filteredRows.length && (
           <div className="import-empty-state">
             <Search size={18} />
-            <strong>没有匹配的上传记录</strong>
+            <strong>没有匹配的导入记录</strong>
             <span>换一个货号关键词或状态筛选再试。</span>
           </div>
         )}
@@ -5687,14 +5732,14 @@ function ImportTaskWorkbench({
       </div>
       {manageRecord && <ArchiveManageDialog
         title={manageRecord.displayItems && manageRecord.displayItems.length > 1
-          ? `归档 ${manageRecord.displayItems.length} 条上传记录`
-          : '归档上传记录'}
+          ? `归档 ${manageRecord.displayItems.length} 条导入记录`
+          : '归档导入记录'}
         items={manageRecord.displayItems ?? [{ id: manageRecord.id, name: manageRecord.title }]}
         description={(purge) => purge
-          ? '彻底删除会移除上传记录和未入库临时文件，操作不可恢复；已经入库的服装与正式媒体仍会保留。'
+          ? '彻底删除会移除导入记录和未入库临时文件，操作不可恢复；已经入库的服装与正式媒体仍会保留。'
           : '可在此归档日常记录、取消已有归档，或选择彻底删除；归档不会中断任务，也不会影响已入库服装。'}
         warning={manageRecord.rows.some((row) => isImportTaskRunning(row.status))
-          ? '该任务仍在进行。归档不会中断上传；彻底删除会立即阻止继续确认和入库，并在上传地址失效后清理临时文件。'
+          ? '该任务仍在进行。归档不会中断导入；彻底删除会立即阻止继续确认和入库，并在导入地址失效后清理临时文件。'
           : undefined}
         impact={uploadRecordDeleteImpactText(manageImpact, uploadRecordSessionCount(manageRecord.rows))}
         impactLoading={manageImpactLoading}
@@ -5730,16 +5775,17 @@ function ImportTaskRows({ rows, abandoningId, onAbandon, onFindGarment }: {
     <div className="import-task-table">
       <div className="import-task-table-head" aria-hidden="true">
         <span>货号</span>
-        <span>已选 / 已上传 / 已入库</span>
+        <span>已选 / 已导入 / 正式图片</span>
         <span>状态</span>
         <span>更新时间</span>
         <span>操作</span>
       </div>
       {rows.map((row) => {
-        const canAbandon = row.sessionId && isImportTaskRunning(row.status) && !['FINALIZED', 'FINALIZING', 'ABANDONED'].includes(row.status)
+        const canAbandon = row.sessionId && !row.garmentId && isImportTaskRunning(row.status) && !['FINALIZED', 'FINALIZING', 'ABANDONED'].includes(row.status)
         const isDuplicateFailure = row.statusTone === 'danger' && /已存在|重复/.test(row.error ?? '')
-        const needsManualReimport = row.status === 'FAILED' && !isDuplicateFailure && !row.garmentId
-        const canOpenGarment = Boolean(row.garmentId) && !needsManualReimport
+        const needsManualReimport = ['FAILED', 'NEEDS_ACTION'].includes(row.status) && !isDuplicateFailure && !row.garmentId
+        const canOpenGarment = Boolean(row.garmentId) && row.targetExists !== false && !needsManualReimport
+        const needsRecognitionRetry = canOpenGarment && row.targetStatus === 'TAGGING_FAILED'
         return (
           <div className={`record-row import-task-row is-${row.statusTone}`} key={row.id}>
             <div className="import-task-code">
@@ -5748,7 +5794,10 @@ function ImportTaskRows({ rows, abandoningId, onAbandon, onFindGarment }: {
               <TruncatedText text={importTaskMetaText(row)} />
             </div>
             <span className="import-task-counts">{importImageCountText(row.importedCount, row.uploadedCount, row.retainedCount)} 张</span>
-            <span className={`import-status-badge is-${row.statusTone}`}>{row.statusLabel}</span>
+            <span className="import-task-status-stack">
+              <span className={`import-status-badge is-${row.statusTone}`}>{row.statusLabel}</span>
+              {row.currentStatusLabel && <span>{row.currentStatusLabel}</span>}
+            </span>
             <span className="import-task-time">{dateText(row.updatedAt ?? row.createdAt)}</span>
             <div className="import-task-actions">
               {canAbandon ? (
@@ -5759,12 +5808,16 @@ function ImportTaskRows({ rows, abandoningId, onAbandon, onFindGarment }: {
                 <button className="management-action compact-control" type="button" title="回到服装库查看已存在的货号" onClick={() => onFindGarment(row.code, row.garmentId)}>
                   查看已有
                 </button>
+              ) : needsRecognitionRetry ? (
+                <button className="management-action compact-control" type="button" title="前往服装库重新识别这件服装" onClick={() => onFindGarment(row.code, row.garmentId)}>
+                  前往重新识别
+                </button>
               ) : canOpenGarment ? (
                 <button className="management-action compact-control" type="button" title="回到服装库查看这件服装" onClick={() => onFindGarment(row.code, row.garmentId)}>
                   查看服装
                 </button>
-              ) : needsManualReimport ? (
-                <span className="import-action-hint is-danger" title="当前页面已无法自动恢复原始本地文件，请重新选择图片或文件夹上传该货号">重新上传</span>
+              ) : row.targetExists === false ? <span>服装已删除</span> : needsManualReimport ? (
+                <span className="import-action-hint is-danger" title="当前页面已无法自动恢复原始本地文件，请重新选择图片或文件夹导入该货号">重新导入</span>
               ) : row.status === 'ABANDONED' ? <span>已放弃</span> : <span>无需操作</span>}
             </div>
             <div className="upload-progress-bar import-task-progress" aria-hidden="true"><span style={{ width: `${importTaskProgress(row)}%` }} /></div>
@@ -5780,12 +5833,12 @@ function uploadRecordSessionCount(rows: ImportTaskRow[]) {
 }
 
 function uploadRecordDeleteImpactText(impact: DeleteImpact | null, fallbackSessionCount: number) {
-  if (!impact) return '彻底删除会移除上传记录元数据和未入库的临时文件；已经入库的服装与媒体保留。该操作不可恢复。'
+  if (!impact) return '彻底删除会移除导入记录元数据和未入库的临时文件；已经入库的服装与媒体保留。该操作不可恢复。'
   const sessionCount = impact.uploadSessionCount ?? fallbackSessionCount
   const temporaryCount = impact.temporaryObjectCount ?? 0
   const linkedCount = impact.linkedBusinessCount ?? 0
   const linkedText = linkedCount ? `；${linkedCount} 个已入库业务对象及其媒体会保留` : ''
-  return `彻底删除将移除 ${sessionCount || 1} 条上传会话记录${temporaryCount ? `和 ${temporaryCount} 个未入库临时文件（约 ${formatBytes(impact.estimatedBytes)}）` : ''}${linkedText}。该操作不可恢复。`
+  return `彻底删除将移除 ${sessionCount || 1} 条导入会话记录${temporaryCount ? `和 ${temporaryCount} 个未入库临时文件（约 ${formatBytes(impact.estimatedBytes)}）` : ''}${linkedText}。该操作不可恢复。`
 }
 
 function ImportThumbStack({ rows }: { rows: ImportTaskRow[] }) {
@@ -6046,11 +6099,11 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
               <strong>拍摄背景参考图</strong>
               {isAdmin && (
                 <label className="management-action">
-                  <ImagePlus size={16} /> {env ? '更换' : '上传'}
+                  <ImagePlus size={16} /> {env ? '更换' : '导入'}
                   <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
                     const file = event.target.files?.[0]
                     event.currentTarget.value = ''
-                    if (file) void run('上传拍摄背景参考图中...', () => api.setShootEnvironment(file), (r: { asset: MediaAsset | null }) => setEnv(r.asset), { refresh: false })
+                    if (file) void run('导入拍摄背景参考图中...', () => api.setShootEnvironment(file), (r: { asset: MediaAsset | null }) => setEnv(r.asset), { refresh: false })
                   }} />
                 </label>
               )}
@@ -6081,7 +6134,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
                 </div>
               </div>
             ) : (
-              <div className="model-empty">尚未设置拍摄背景参考图{isAdmin ? '，点击上方「上传」添加一张。' : '。'}</div>
+              <div className="model-empty">尚未设置拍摄背景参考图{isAdmin ? '，点击上方「导入」添加一张。' : '。'}</div>
             )}
           </section>
         </div>
@@ -7644,7 +7697,7 @@ function UploadBox({ files, setFiles, max, compact = false }: { files: File[]; s
     <label className={`upload-box ${compact ? 'compact' : ''}`}>
       <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(e) => setFiles(Array.from(e.target.files ?? []).filter(isSupportedImageFile).slice(0, max))} />
       <Upload size={22} />
-      <strong>上传图片</strong>
+      <strong>导入图片</strong>
       <span>已选择 {files.length}/{max} 张</span>
     </label>
   )
@@ -7799,7 +7852,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
         </div>
         <div className="drawer-section">
           <div className="section-head"><strong>基础信息</strong></div>
-          <Meta label="上传时间" value={dateText(item.createdAt)} />
+          <Meta label="导入时间" value={dateText(item.createdAt)} />
           <Meta label="更新时间" value={dateText(item.updatedAt)} />
           <Meta label="识别时间" value={dateText(item.tagCompletedAt)} />
           <Meta label="选搭状态" value={selectableText} />
@@ -7818,7 +7871,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
           <div className="section-head">
             <strong>图片</strong>
           </div>
-          <p className="edit-hint">此次修改会影响标签识别。排序第一张会作为封面和主要参考图；如需补充图片，请重新上传一套素材。</p>
+          <p className="edit-hint">此次修改会影响标签识别。排序第一张会作为封面和主要参考图；如需补充图片，请重新导入一套素材。</p>
           {tagging && <p className="edit-hint" role="status" aria-live="polite">正在识别标签；服务繁忙时系统会自动恢复，可以离开当前页面。</p>}
           <div className="saved-image-grid">
             {working.map((image, index) => {
@@ -8053,9 +8106,9 @@ function isUploadRequirementMiss(item: StylingGarment, attempt: NonNullable<Styl
 function garmentTaggingIssue(item: StylingGarment, attempt: NonNullable<StylingGarment['tagAttempts']>[number] | null): GarmentTaggingIssue {
   if (isUploadRequirementMiss(item, attempt)) {
     return {
-      badge: '未通过上传要求',
-      panelTitle: '上传要求检查',
-      title: '未识别到符合上传要求的服装图',
+      badge: '未通过导入要求',
+      panelTitle: '导入要求检查',
+      title: '未识别到符合导入要求的服装图',
       description: '这组图片已完成识别，但没有适合作为搭配服装入库的纯服装参考图。',
       action: '请更换为清晰、同一件服装、以商品为主体的图片后重新识别。',
     }
@@ -8369,7 +8422,7 @@ function AIOperationCard({ operation, now, compact, index, onOpenTechnicalDetail
 
 const ATTEMPT_PHASE_LABELS: Record<string, string> = {
   prepare: '准备',
-  upload: '上传',
+  upload: '导入',
   submit: '提交',
   queue: '排队',
   generate: '生成',
@@ -8571,7 +8624,7 @@ function isAttemptRunning(operation: AIOperation) {
 }
 
 function operationLabel(operation: AIOperation, index = 0) {
-  if (operation.ownerType === 'styling_garment_upload') return '搭配服装上传'
+  if (operation.ownerType === 'styling_garment_upload') return '搭配服装导入'
   if (operation.ownerType === 'styling_garment_tagging') return '服装标签识别'
   if (operation.ownerType === 'generation_styling') return '智能选搭'
   if (operation.ownerType === 'generation_preview') return '分镜预览'
@@ -9155,7 +9208,7 @@ function statusText(status: string) {
     CANCELLED: '已取消',
     ABANDONED: '已废弃',
     SUPERSEDED: '已失效',
-    READY: '可用',
+    READY: '可选搭',
     TAGGING_READY: '待复核',
     TAGGING_RUNNING: '识别中',
     TAGGING_FAILED: '识别失败',

@@ -30,7 +30,7 @@ from .image_derivatives import generate_image_derivatives
 from .image_ingestion import normalized_image_candidates
 from .object_storage import get_bytes, object_exists, put_bytes
 
-# 上传进度回调：on_progress(completed, total)
+# 导入进度回调：on_progress(completed, total)
 UploadProgressCallback = Callable[[int, int], None]
 
 
@@ -47,7 +47,7 @@ class ImageGenerationProvider:
 
     生命周期被拆成三个独立步骤，失败语义各不相同：
 
-    - ``submit``：上传参考图并创建 provider 任务（失败=UPLOAD/PROVIDER 问题）。
+    - ``submit``：导入参考图并创建 provider 任务（失败=UPLOAD/PROVIDER 问题）。
     - ``check``：只查询任务状态，绝不下载结果（失败=瞬时网络问题，可无限容忍到超时）。
     - ``deliver``：把已成功的结果图下载回对象存储并生成缩略图
       （失败=回传问题，provider 已成功且已计费，必须可零成本重试）。
@@ -425,10 +425,10 @@ def store_delivered_image(output_key: str, output_url: str, provider_response: d
     }
 
 
-# -- provider 参考图上传缓存 -------------------------------------------------
+# -- provider 参考图导入缓存 -------------------------------------------------
 #
 # 同一 objectKey 的参考图（主推款、搭配服装、模特参考图、分镜预览）在 5 张成片
-# 并发生成时会被重复上传 5 次。缓存 + 进程内按 key 加锁：第一个上传，其余复用。
+# 并发生成时会被重复导入 5 次。缓存 + 进程内按 key 加锁：第一个导入，其余复用。
 
 _upload_key_locks: dict[tuple[str, str], threading.Lock] = {}
 _upload_key_locks_guard = threading.Lock()
@@ -650,18 +650,18 @@ def ensure_upload_deadline(deadline: float, item: dict[str, Any]) -> None:
     if time.time() > deadline:
         label = str(item.get("role") or item.get("filename") or item.get("objectKey") or "reference-image")
         raise GenerationPhaseError(
-            f"参考图上传超出总预算（{get_settings().generation_upload_timeout_seconds}s），未完成：{label}",
+            f"参考图导入超出总预算（{get_settings().generation_upload_timeout_seconds}s），未完成：{label}",
             ERROR_UPLOAD_FAILED,
         )
 
 
 def remaining_upload_timeout(deadline: float | None) -> int:
-    """把单次网络超时裁剪到参考图上传阶段的剩余总预算。"""
+    """把单次网络超时裁剪到参考图导入阶段的剩余总预算。"""
     if deadline is None:
         return 300
     remaining = deadline - time.time()
     if remaining <= 0:
-        raise GenerationPhaseError("参考图上传超出总预算", ERROR_UPLOAD_FAILED)
+        raise GenerationPhaseError("参考图导入超出总预算", ERROR_UPLOAD_FAILED)
     return max(1, min(300, int(remaining)))
 
 
@@ -676,7 +676,7 @@ def prepare_fal_image_inputs(
         if not item.get("providerUrl")
     ]
     if missing_roles:
-        raise RuntimeError(f"参考图上传到 fal 失败，以下输入没有 fal Image URL：{', '.join(missing_roles)}")
+        raise RuntimeError(f"参考图导入到 fal 失败，以下输入没有 fal Image URL：{', '.join(missing_roles)}")
 
     image_urls = [str(item["providerUrl"]) for item in uploaded_inputs]
     non_fal_urls = [url for url in image_urls if not is_fal_cdn_url(url)]
@@ -700,7 +700,7 @@ def prepare_toapis_image_inputs(
         if not item.get("providerUrl")
     ]
     if missing_roles:
-        raise RuntimeError(f"参考图上传到 toapis 失败，以下输入没有 toapis Image URL：{', '.join(missing_roles)}")
+        raise RuntimeError(f"参考图导入到 toapis 失败，以下输入没有 toapis Image URL：{', '.join(missing_roles)}")
     image_urls = [str(item["providerUrl"]) for item in uploaded_inputs]
     if not image_urls:
         raise RuntimeError("没有可传给 GPT Image-2 的 reference_images")
@@ -873,11 +873,11 @@ def upload_url_to_toapis(url: str, filename: str, deadline: float | None = None)
 def upload_bytes_to_fal(content: bytes, filename: str, content_type: str | None = None) -> str:
     settings = get_settings()
     if not settings.fal_key:
-        raise RuntimeError("FAL_KEY 未配置，无法上传参考图到 fal")
+        raise RuntimeError("FAL_KEY 未配置，无法导入参考图到 fal")
     try:
         import fal_client
     except ImportError as exc:
-        raise RuntimeError("fal-client 导入失败，无法上传参考图到 fal：请安装 fal-client") from exc
+        raise RuntimeError("fal-client 导入失败，无法导入参考图到 fal：请安装 fal-client") from exc
 
     os.environ["FAL_KEY"] = settings.fal_key
     suffix = filename_suffix(filename, content_type)
@@ -887,7 +887,7 @@ def upload_bytes_to_fal(content: bytes, filename: str, content_type: str | None 
         return fal_client.upload_file(handle.name)
 
 
-# toapis 单文件上传上限 10MB；留出安全余量，只压超限大图，小图原样上传。
+# toapis 单文件导入上限 10MB；留出安全余量，只压超限大图，小图原样导入。
 TOAPIS_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 TOAPIS_TARGET_UPLOAD_BYTES = TOAPIS_MAX_UPLOAD_BYTES - 512 * 1024
 TOAPIS_MAX_REFERENCE_IMAGES = 6
@@ -961,7 +961,7 @@ def upload_bytes_to_toapis(
 ) -> str:
     settings = get_settings()
     if not settings.toapis_api_key:
-        raise RuntimeError("TOAPIS_API_KEY 未配置，无法上传参考图到 toapis")
+        raise RuntimeError("TOAPIS_API_KEY 未配置，无法导入参考图到 toapis")
     content, filename, content_type = fit_image_bytes_under_limit(content, filename, content_type)
     with toapis_concurrency_slot():
         upload_response = post_multipart_file(
@@ -977,7 +977,7 @@ def upload_bytes_to_toapis(
     data = upload_response.get("data") if isinstance(upload_response, dict) else None
     uploaded_url = data.get("url") if isinstance(data, dict) else None
     if not uploaded_url:
-        raise RuntimeError(f"toapis 上传图片响应缺少 URL: {upload_response}")
+        raise RuntimeError(f"toapis 导入图片响应缺少 URL: {upload_response}")
     return str(uploaded_url)
 
 
@@ -1133,7 +1133,7 @@ def post_multipart_file(
     try:
         import requests
     except ImportError as exc:
-        raise RuntimeError("requests 导入失败，无法按 toapis 官方方式上传参考图：请安装 requests") from exc
+        raise RuntimeError("requests 导入失败，无法按 toapis 官方方式导入参考图：请安装 requests") from exc
 
     upload_name = os.path.basename(filename) or "image.png"
     file_label = f"{upload_name}, {len(content) / 1048576:.2f}MB"
@@ -1149,7 +1149,7 @@ def post_multipart_file(
         )
     except requests.RequestException as exc:
         raise GenerationPhaseError(
-            f"toapis 图片上传失败({file_label}): {exc}",
+            f"toapis 图片导入失败({file_label}): {exc}",
             ERROR_UPLOAD_FAILED,
         ) from exc
     try:
@@ -1166,7 +1166,7 @@ def post_multipart_file(
             fallback_message=str(message),
         )
         raise GenerationPhaseError(
-            f"toapis 图片上传失败({file_label}): HTTP {response.status_code} {message}",
+            f"toapis 图片导入失败({file_label}): HTTP {response.status_code} {message}",
             str(provider_error["code"]),
             provider_response={
                 "httpStatus": response.status_code,

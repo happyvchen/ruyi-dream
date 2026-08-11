@@ -25,6 +25,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("061", "upload_session_batch_queries", "migration_upload_session_batch_queries"),
     ("062", "generation_auto_run_retry", "migration_generation_auto_run_retry"),
     ("063", "styling_garment_tag_retry", "migration_styling_garment_tag_retry"),
+    ("064", "generation_attempt_owner_status_index", "migration_generation_attempt_owner_status_index"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -414,6 +415,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_upload_session_batch_queries": migration_upload_session_batch_queries,
         "migration_generation_auto_run_retry": migration_generation_auto_run_retry,
         "migration_styling_garment_tag_retry": migration_styling_garment_tag_retry,
+        "migration_generation_attempt_owner_status_index": migration_generation_attempt_owner_status_index,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -433,7 +435,7 @@ def migration_finalize_direct_prompt_generation_workflow(db: sqlite3.Connection)
 
     本迁移不兼容旧运行态：旧的拍摄剧本、镜头计划、相关 attempt 以及依赖旧结构的
     成片结果会被清理。当前权威链路是：
-    上传主推款 -> AI 智能选搭 -> 三类固定 Prompt 生成分镜预览 -> 前 5 格生成成片。
+    导入主推款 -> AI 智能选搭 -> 三类固定 Prompt 生成分镜预览 -> 前 5 格生成成片。
     """
     if table_exists(db, "generation_attempts"):
         db.execute("DELETE FROM generation_attempts WHERE owner_type = 'generation_shoot_script'")
@@ -472,7 +474,7 @@ def migration_finalize_direct_prompt_generation_workflow(db: sqlite3.Connection)
 
 
 def migration_remove_hero_product_info(db: sqlite3.Connection) -> None:
-    """移除上传阶段历史补充文本字段和输入版本冻结字段。"""
+    """移除导入阶段历史补充文本字段和输入版本冻结字段。"""
     rebuild_generation_tasks_final(db)
     rebuild_generation_task_input_versions_without_hero_info(db)
     scrub_prompt_config_hero_product_info(db)
@@ -644,6 +646,15 @@ def migration_styling_garment_tag_retry(db: sqlite3.Connection) -> None:
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_styling_garments_tag_retry_at "
         "ON styling_garments(status, tag_retry_at)"
+    )
+
+
+def migration_generation_attempt_owner_status_index(db: sqlite3.Connection) -> None:
+    if not table_exists(db, "generation_attempts"):
+        return
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_generation_attempts_owner_status "
+        "ON generation_attempts(owner_type, owner_id, status)"
     )
 
 

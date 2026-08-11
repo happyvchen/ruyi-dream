@@ -67,12 +67,12 @@ APP_MEDIA_PRESIGN_SAFETY_MARGIN_SECONDS=120
 # AI 通道
 GEMINI_PROVIDER=toapis                 # 国内无需 VPN;direct 需 GEMINI_API_KEY 且能访问 googleapis.com
 GEMINI_TOAPIS_TIMEOUT_SECONDS=300      # Gemini(ToAPIs) 读取响应超时;慢请求可适当放大
-GEMINI_TOAPIS_CONNECT_TIMEOUT_SECONDS=60 # Gemini(ToAPIs) 连接/上传请求体超时;base64 图片上行慢时重点调它
+GEMINI_TOAPIS_CONNECT_TIMEOUT_SECONDS=60 # Gemini(ToAPIs) 连接/导入请求体超时;base64 图片上行慢时重点调它
 AI_STYLIST_CONTRACT_RETRY_LIMIT=3      # AI Stylist 结果缺契约字段时的自动重问次数
 AI_STYLIST_CONTRACT_RETRY_DELAY_SECONDS=15 # AI Stylist 契约重试前等待秒数
 GPT_IMAGE2_PROVIDER=toapis
 TOAPIS_API_KEY=sk-...
-TOAPIS_MAX_CONCURRENCY=5              # ToAPIs 全局并发:Gemini/Image-2/API 上传与状态查询共享
+TOAPIS_MAX_CONCURRENCY=5              # ToAPIs 全局并发:Gemini/Image-2/API 导入与状态查询共享
 TOAPIS_IMAGE_SUBMIT_TIMEOUT_SECONDS=180 # Image-2 创建任务单次提交请求超时
 GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT=3  # 提交结果未知时，每张图最多对账/补提次数
 GENERATION_UNKNOWN_SUBMISSION_RETRY_DELAY_SECONDS=15 # 提交结果未知重试前等待秒数
@@ -119,7 +119,7 @@ curl http://127.0.0.1:8000/api/health
 #        "geminiProvider":"toapis","imageProviderConfigured":true}
 ```
 
-浏览器打开 `http://<服务器IP>:5173`,登录后上传一张测试图,确认列表和图片预览正常(预览失败几乎都是 `PUBLIC_S3_URL` 不可达)。
+浏览器打开 `http://<服务器IP>:5173`,登录后导入一张测试图,确认列表和图片预览正常(预览失败几乎都是 `PUBLIC_S3_URL` 不可达)。
 
 ### 2.4 使用外部 S3 兼容存储(可选)
 
@@ -272,7 +272,7 @@ docker compose up -d && curl http://127.0.0.1:8000/api/health
 - UI 可对失败的单张成片重试;任务卡住时后端重启后 poller 会按租约(`GENERATION_IMAGE_TIMEOUT_SECONDS`)自动恢复。
 - 升级排障时保留:任务 id、失败图 id、backend 最后 300 行日志。
 
-### 上传失败
+### 导入失败
 
 限制:仅 JPG/PNG/WebP;单图 ≤15MB(`APP_MAX_UPLOAD_IMAGE_BYTES`)、≤2500 万像素;单套搭配 ≤20 图。调整限额改 `.env` 后重启 backend。
 

@@ -14,7 +14,7 @@
 ## 当前生成链路
 
 ```text
-上传主推款
+导入主推款
 -> AI 智能选搭
 -> 三类固定 Prompt 生成分镜预览
 -> 分镜前 5 格生成成片
@@ -24,7 +24,7 @@
 
 ## Image-2 分阶段恢复
 
-- 参考图上传失败只重试失败上传，已成功上传的 provider URL 通过缓存或 attempt 快照复用。
+- 参考图导入失败只重试失败导入，已成功导入的 provider URL 通过缓存或 attempt 快照复用。
 - 每个图片 attempt / 生成重试轮次向 ToAPIs 传稳定 `client_business_id`。创建任务遇到连接中断、`ReadTimeout` 或 TLS EOF 时标记为 `SUBMISSION_UNKNOWN`，按统一退避先以该业务 ID 查询原任务；查到即继续，明确 `task_not_found` 才补提，避免重复任务和重复计费。
 - 提交结果未知按每张图自己的 `GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT` 预算恢复，不再设置同批提交未知熔断器。
 - 已取得 provider task ID 后只恢复状态查询；provider 明确瞬时生成失败时仅按 `GENERATION_SUBMIT_RETRY_LIMIT` 重建生成任务。
@@ -55,13 +55,13 @@ API 摘要返回稳定 `error={code,title,message,action,retryable}`；普通用
 
 ## ToAPIs 并发闸门
 
-ToAPIs 相关调用统一使用 `TOAPIS_MAX_CONCURRENCY` 控制最大并发，默认 `5`。该闸门覆盖 Gemini(ToAPIs) chat、Image-2(ToAPIs) 参考图上传、任务创建和状态查询；只在真实 HTTP 请求期间占用槽位，provider 生成等待、轮询间隔和重试退避期间释放槽位。批次一键成片不再有独立并发参数，而是按同一 ToAPIs 预算推进排队任务。
+ToAPIs 相关调用统一使用 `TOAPIS_MAX_CONCURRENCY` 控制最大并发，默认 `5`。该闸门覆盖 Gemini(ToAPIs) chat、Image-2(ToAPIs) 参考图导入、任务创建和状态查询；只在真实 HTTP 请求期间占用槽位，provider 生成等待、轮询间隔和重试退避期间释放槽位。批次一键成片不再有独立并发参数，而是按同一 ToAPIs 预算推进排队任务。
 
 Gemini 对明确限流（HTTP 429 或 `rate_limit_check_failed`）、连接失败、读取超时、网关和 provider 瞬时异常在 provider 层自动重发。搭配服装打标把 provider 给出的下一次退避持久化到 `tag_retry_at/tag_retry_state_json`，释放当前 worker 和并发槽位，由现有 generation poller 到期恢复；进程重启后复用 `tag_active_attempt_id` 和累计次数继续，不能重置 10 次预算。JSON 不可解析、缺少 `selected_files` / `ai_tags` / `styling_plan` 等模型契约异常由对应编排层追加协议纠错事实后重问。两类技术恢复默认分别最多重试 `10` 次，采用 `30/60/120/240` 秒封顶退避并受总预算约束；同一种错误只有一个重试所有者，禁止业务层再次处理 provider 已耗尽的传输错误。
 
 `一键成片` 的跨阶段恢复由 `auto_run_target`、`auto_run_retry_at` 和 `auto_run_retry_count` 持久化；后台 poller 到期后继续推进，成功产物保持不变。参数、鉴权、余额、内容策略、输入不合格和业务判断拒绝不进入该恢复队列；模型输出格式/必需字段契约异常由当前 Gemini 编排层纠错，不交给跨阶段 auto-run 重复处理。
 
-每类错误只有一个重试所有者，禁止 `10×10` 叠加：Gemini 连接、Image-2 提交/状态查询/明确生成失败和回传由各自阶段完成最多 10 次；跨 attempt 的持久 auto-run 只接管单次上传失败与进程中断。状态查询或回传耗尽后保留原 attempt 与 providerRequestId，不通过 auto-run 重新提交生成。
+每类错误只有一个重试所有者，禁止 `10×10` 叠加：Gemini 连接、Image-2 提交/状态查询/明确生成失败和回传由各自阶段完成最多 10 次；跨 attempt 的持久 auto-run 只接管单次导入失败与进程中断。状态查询或回传耗尽后保留原 attempt 与 providerRequestId，不通过 auto-run 重新提交生成。
 
 批量 AI 打标在一个后台任务内并发调度，并受 `TAGGING_MAX_CONCURRENCY` 与 ToAPIs 全局请求闸门双重约束。退避等待不占用这两个并发槽位；仍在当前进程排队、执行或持久等待恢复的服装不会被 stale 清理误判。进程重启后，有 `tag_retry_at` 的任务由 poller 续跑；首次调用或成功落库前中断而尚无 `tag_retry_at` 的无主运行态，按 `PROCESS_INTERRUPTED` 纳入同一 10 次进程恢复预算并复用当前 attempt，不能直接转为失败。预算耗尽后保留安全的累计次数、最后错误分类和 attempt 快照，供用户提示与管理员追溯。
 
@@ -92,13 +92,13 @@ media/<media-uuid>/_derived/final-cells/original-shot<1..6>.png
 ```
 
 - 一张 `MediaAsset` 独占一个 `<media-uuid>`，业务归属只保存在数据库关系中，不编码进对象键。
-- 直传申请直接写入上述 durable key；上传会话只是传输与恢复状态，不再成为永久目录。
+- 直传申请直接写入上述 durable key；导入会话只是传输与恢复状态，不再成为永久目录。
 - provider 生成对象按 `generation_attempt` 派生稳定的 opaque UUID：同一 attempt 崩溃恢复写回同一键，`MediaAsset` 按 `object_key + hash` 幂等登记；新的重试 attempt 使用新键，保证历史媒体不可变。
 - `direct-uploads/...`、`styling-garments/...`、`generation-tasks/...`、`shoot-environment/...` 是历史键，只保持兼容读取和精确删除，不再产生新对象。
 - 数字模特目前仍是聚合对象，使用 `model-profiles/<model-id>/...`，文件名清单由 model profile JSON 管理；删除只允许落到具体 model ID 目录。这是 0.1.0 唯一运行时例外，后续若模型素材需要跨对象复用，再迁为 `MediaAsset`，不能新增第三套媒体机制。
 - 研究脚本只允许写入 `experiments/research/...`，不得作为生产业务素材来源。
 
-未完成上传会话默认保留 168 小时（`APP_UPLOAD_SESSION_TTL_HOURS`），过期且无有效 lease 时标记 `ABANDONED`，并按该会话登记的每个对象精确清理；每小时最多处理 20 个会话（`APP_UPLOAD_SESSION_CLEANUP_BATCH_SIZE`），避免历史积压阻塞 generation poller。任何已绑定 `media_asset_id` 或已登记到 `media_assets.object_key` 的对象均排除，RustFS 暂时不可用时保留待重试状态。`GET /api/admin/storage-diagnostics` 使用 `limit + offset` 分页完成全量巡检；未确认上传的 `PENDING` 项不是“丢失文件”，只有 `UPLOADED/READY` 对象不可读才告警。
+未完成导入会话默认保留 168 小时（`APP_UPLOAD_SESSION_TTL_HOURS`），过期且无有效 lease 时标记 `ABANDONED`，并按该会话登记的每个对象精确清理；每小时最多处理 20 个会话（`APP_UPLOAD_SESSION_CLEANUP_BATCH_SIZE`），避免历史积压阻塞 generation poller。任何已绑定 `media_asset_id` 或已登记到 `media_assets.object_key` 的对象均排除，RustFS 暂时不可用时保留待重试状态。`GET /api/admin/storage-diagnostics` 使用 `limit + offset` 分页完成全量巡检；未确认导入的 `PENDING` 项不是“丢失文件”，只有 `UPLOADED/READY` 对象不可读才告警。
 
 ## 图片事实源
 

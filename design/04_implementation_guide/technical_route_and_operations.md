@@ -5,7 +5,7 @@
 0.1.0 采用 FastAPI + SQLite + React/Vite + S3 兼容对象存储。生成链路固定为：
 
 ```text
-上传主推款
+导入主推款
 → AI 智能选搭
 → 三类固定 Prompt 生成分镜预览
 → 三类固定 Prompt 生成前 5 张成片
@@ -15,14 +15,14 @@
 
 ## 媒体缓存方案
 
-目标是在不引入 CDN、Service Worker、IndexedDB 图片缓存或新的前端缓存系统的前提下，减少重复图片下载、降低后端 `/api/media`、SQLite、对象 HEAD、presign 和 RustFS 下行压力，同时不干扰上传、生成、替换、下载和历史复盘。
+目标是在不引入 CDN、Service Worker、IndexedDB 图片缓存或新的前端缓存系统的前提下，减少重复图片下载、降低后端 `/api/media`、SQLite、对象 HEAD、presign 和 RustFS 下行压力，同时不干扰导入、生成、替换、下载和历史复盘。
 
 ### 设计结论
 
 - 主缓存机制使用浏览器原生 HTTP cache。
 - `/api/media?key=...&variant=...` 继续作为稳定媒体入口，后端校验媒体登记与对象存在后返回 302 到 RustFS/S3 presigned URL。
 - 不使用 CDN；不把图片 Blob 存入 IndexedDB、Cache Storage 或 OPFS；这些浏览器本地数据库只可作为未来业务状态缓存候选，不作为当前图片缓存主方案。
-- 图片对象 key 必须按不可变资源处理：上传、生成、替换、重生和衍生图生成都应产生新 key 或保持已存在 key 的内容不变，不允许用同一 key 覆盖不同图片内容。
+- 图片对象 key 必须按不可变资源处理：导入、生成、替换、重生和衍生图生成都应产生新 key 或保持已存在 key 的内容不变，不允许用同一 key 覆盖不同图片内容。
 - 前端必须按展示尺寸使用 `thumbUrl` / `previewUrl` / `originalUrl`，并在 object key 未变化时保持 `<img src>` 稳定。
 
 ### 缓存分层
@@ -137,7 +137,7 @@ Prompt 配置槽：
 
 代码负责：
 
-- 对搭配服装和主推款图片执行 Gemini 候选池最多 15 张的确定性预处理；上传暂存阶段允许超过 15 张，前台标红提示，正式保存前先保留当前排序前 15 张进入候选池；Gemini 挑选/排序后，搭配服装正式保留最多 6 张纯服装图，主推款输入版本保留最多 8 张参考图；
+- 对搭配服装和主推款图片执行 Gemini 候选池最多 15 张的确定性预处理；导入暂存阶段允许超过 15 张，前台标红提示，正式保存前先保留当前排序前 15 张进入候选池；Gemini 挑选/排序后，搭配服装正式保留最多 6 张纯服装图，主推款输入版本保留最多 8 张参考图；
 - 校验 Gemini 返回的 `selected_files` 是否存在且可唯一映射；
 - 从 `styling_plan.hero_understanding.shot_category_family` 路由拍摄图位族；缺失、非法或无法映射时直接失败，不由商品 `category` / `sub_category` fallback；
 - 按顺序组装数字模特图、商品图、分镜图、环境图；

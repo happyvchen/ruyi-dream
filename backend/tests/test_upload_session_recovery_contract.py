@@ -54,6 +54,86 @@ def test_upload_session_limit_is_applied_after_created_time_descending_order(cli
     assert [item["id"] for item in response.json()["items"]] == [newest, middle]
 
 
+def test_finalized_import_record_returns_authoritative_garment_summary_and_recovery_outcome(client) -> None:
+    created = create_session(client, scope="styling_garment", filenames=["front.jpg", "detail.jpg"])
+    session_id = created["session"]["id"]
+    garment_id = insert_styling_garment(code="LOOK-RECOVERED", status="READY", image_count=2)
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute(
+            """UPDATE upload_sessions
+               SET status = 'FINALIZED', business_code = 'LOOK-RECOVERED',
+                   target_type = 'styling_garment', target_id = ?, uploaded_count = 2
+               WHERE id = ?""",
+            (garment_id, session_id),
+        )
+        db.execute(
+            """INSERT INTO generation_attempts
+               (owner_type, owner_id, provider, status, started_at, failed_at, error_message, created_at, updated_at)
+               VALUES ('styling_garment_tagging', ?, 'test', 'FAILED', ?, ?, 'temporary failure', ?, ?)""",
+            (garment_id, timestamp, timestamp, timestamp, timestamp),
+        )
+        db.execute(
+            """INSERT INTO generation_attempts
+               (owner_type, owner_id, provider, status, started_at, completed_at, created_at, updated_at)
+               VALUES ('styling_garment_tagging', ?, 'test', 'SUCCEEDED', ?, ?, ?, ?)""",
+            (garment_id, timestamp, timestamp, timestamp, timestamp),
+        )
+
+    response = client.get("/api/upload-sessions", params={"scope": "styling_garment", "limit": 500})
+
+    assert response.status_code == 200
+    item = next(entry for entry in response.json()["items"] if entry["id"] == session_id)
+    assert item["importOutcome"] == "RECOVERED"
+    assert item["historySummary"]["hadTaggingFailure"] is True
+    assert item["targetSummary"] == {
+        "id": garment_id,
+        "code": "LOOK-RECOVERED",
+        "exists": True,
+        "status": "READY",
+        "coverUrl": item["targetSummary"]["coverUrl"],
+        "imageCount": 2,
+        "updatedAt": item["targetSummary"]["updatedAt"],
+        "archivedAt": None,
+    }
+    assert item["targetSummary"]["coverUrl"].startswith("/api/media?")
+
+
+def test_import_record_distinguishes_pending_recognition_from_review_required(client) -> None:
+    expected = {"DRAFT": "PENDING_RECOGNITION", "TAGGING_READY": "REVIEW_REQUIRED"}
+    created_rows: list[tuple[str, int, str]] = []
+    for status, outcome in expected.items():
+        garment_id = insert_styling_garment(code=f"LOOK-{status}", status=status)
+        session_id = create_session(
+            client,
+            scope="styling_garment",
+            filenames=[f"{status.lower()}.jpg"],
+        )["session"]["id"]
+        created_rows.append((session_id, garment_id, outcome))
+    with get_db() as db:
+        for session_id, garment_id, _outcome in created_rows:
+            db.execute(
+                "UPDATE upload_sessions SET status = 'FINALIZED', target_type = 'styling_garment', target_id = ? WHERE id = ?",
+                (garment_id, session_id),
+            )
+
+    items = client.get("/api/upload-sessions", params={"scope": "styling_garment"}).json()["items"]
+    outcomes_by_id = {item["id"]: item["importOutcome"] for item in items}
+    for session_id, _garment_id, outcome in created_rows:
+        assert outcomes_by_id[session_id] == outcome
+
+
+def test_generation_attempt_history_lookup_has_owner_status_index(client) -> None:
+    with get_db() as db:
+        indexes = {row["name"] for row in db.execute("PRAGMA index_list('generation_attempts')").fetchall()}
+        columns = [
+            row["name"]
+            for row in db.execute("PRAGMA index_info('idx_generation_attempts_owner_status')").fetchall()
+        ]
+    assert "idx_generation_attempts_owner_status" in indexes
+    assert columns == ["owner_type", "owner_id", "status"]
+
+
 def test_all_upload_session_states_can_be_archived_restored_and_deleted_without_deleting_business_objects(client, monkeypatch) -> None:
     from app import main as app_main
     from conftest import insert_media_asset
@@ -302,7 +382,7 @@ def test_stale_upload_cleanup_retries_when_rustfs_is_unavailable(client, monkeyp
     with get_db() as db:
         row = db.execute("SELECT status, error_message FROM upload_sessions WHERE id = ?", (session_id,)).fetchone()
     assert row["status"] == "ABANDONED"
-    assert row["error_message"] == "上传批次已过期，文件清理待重试"
+    assert row["error_message"] == "导入批次已过期，文件清理待重试"
 
     monkeypatch.setattr(app_main, "delete_object", lambda key: None)
     assert app_main.cleanup_stale_upload_sessions() == 1
@@ -409,7 +489,7 @@ def test_finalize_requires_all_items_confirmed_uploaded(client) -> None:
         json={"name": "LOOK-001"},
     )
     assert finalize.status_code == 409
-    assert "未上传完成" in finalize.json()["detail"]
+    assert "未导入完成" in finalize.json()["detail"]
 
 
 def test_duplicate_styling_garment_finalize_marks_session_failed_for_recovery(client) -> None:
@@ -459,7 +539,7 @@ def test_unfinished_duplicate_styling_finalize_does_not_mark_session_failed(clie
         json={"code": "PARTIAL-DUPLICATE"},
     )
     assert finalize.status_code == 409
-    assert "未上传完成" in finalize.json()["detail"]
+    assert "未导入完成" in finalize.json()["detail"]
 
     recovered = client.get("/api/upload-sessions", params={"scope": "styling_garment"})
     assert recovered.status_code == 200
@@ -576,7 +656,7 @@ def test_upload_session_batches_match_visible_upload_records_and_sort_by_created
         assert response.status_code == 200
         return [entry["session"]["id"] for entry in response.json()["items"]]
 
-    older_ids = create_batch("batch-older", "较早上传批次", ["OLD-1", "OLD-2"])
+    older_ids = create_batch("batch-older", "较早导入批次", ["OLD-1", "OLD-2"])
     newer_ids = create_batch("batch-newer", "较新失败批次", ["NEW-1"])
     deleted = create_session(client, scope="styling_garment", filenames=["deleted.jpg"])["session"]["id"]
     with get_db() as db:
@@ -658,7 +738,7 @@ def test_resume_rejects_a_different_directory_before_upload(client) -> None:
         json={"files": [{"filename": "front.jpg", "mimeType": "image/jpeg", "sizeBytes": 128, "relativePath": "wrong/LOOK-RESUME/front.jpg", "lastModified": 1000}]},
     )
     assert response.status_code == 409
-    assert "原上传任务不一致" in response.json()["detail"]
+    assert "原导入任务不一致" in response.json()["detail"]
 
     changed = client.post(
         f"/api/upload-sessions/{created['session']['id']}/resume",

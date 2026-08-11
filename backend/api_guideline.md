@@ -5,15 +5,15 @@
 0.1.0 当前 AI 摄影棚链路固定为：
 
 ```text
-上传主推款 -> AI 智能选搭 -> 生成分镜预览 -> 生成成片
+导入主推款 -> AI 智能选搭 -> 生成分镜预览 -> 生成成片
 ```
 
 后端不提供“生成拍摄剧本”API，不保存动态剧本或镜头计划。前端和测试不得调用或伪造旧的剧本步骤。
 
 ## 任务接口
 
-- `POST /api/generation-tasks`：兼容旧表单上传路径；新上传体验应优先使用 `upload_sessions -> finalize-generation-task`，以便刷新 / 切页后恢复状态。
-- `POST /api/generation-tasks/from-uploads`：已停用（410）；统一使用上传会话创建任务，避免无主对象无法回收。
+- `POST /api/generation-tasks`：兼容旧表单导入路径；新导入体验应优先使用 `upload_sessions -> finalize-generation-task`，以便刷新 / 切页后恢复状态。
+- `POST /api/generation-tasks/from-uploads`：已停用（410）；统一使用导入会话创建任务，避免无主对象无法回收。
 - `PATCH /api/generation-tasks/{task_id}`：保存任务名和各阶段用户补充要求草稿。
 - `POST /api/generation-tasks/{task_id}/styling`：运行 AI 智能选搭，输出当前 `StylingPlan`。
 - `POST /api/generation-tasks/{task_id}/preview`：按拍摄图位族选择三类固定分镜 Prompt，调用 Image-2 生成 3:2 六格分镜预览。
@@ -28,32 +28,32 @@
 
 批次 `auto-run-final` 只负责把批次内任务标记为一键成片队列；实际并发由后端 ToAPIs 全局闸门控制。运行参数统一使用 `TOAPIS_MAX_CONCURRENCY`，默认 `5`，不再提供批次级独立并发参数。
 
-## 上传任务接口
+## 导入任务接口
 
-主推款上传和搭配服装上传复用 `upload_sessions` 轻量任务契约。搭配服装批量上传采用文件级断点续传：先持久化整批全部货号和图片清单，再逐文件直传；刷新后只重新上传对象存储中缺失的图片。
+主推款导入和搭配服装导入复用 `upload_sessions` 轻量任务契约。搭配服装批量导入采用文件级断点续传：先持久化整批全部货号和图片清单，再逐文件直传；刷新后只重新导入对象存储中缺失的图片。
 
 - `POST /api/uploads/presign`：已停用（410）；禁止创建没有 UploadSession 所有权的直传对象。
-- `POST /api/upload-sessions`：创建上传任务和对象存储直传地址。
-- `POST /api/upload-sessions/styling-import-batch`：原子创建一次搭配服装导入中的全部货号会话；返回共同的 `batchId`，保证用户开始任务后、读取和上传图片前整批记录立即可查。每个货号首次 `resume` 时绑定图片 SHA-256。
-- `GET /api/upload-sessions`：按 `scope`、`status`、`batchId`、`limit` 查询上传任务，默认按首次创建时间倒序、同时间按 ID 倒序；默认排除已归档记录，`includeArchived=true` 时一并返回且包含已归档的 `ABANDONED` 记录；`batchId` 用于完整恢复同一次批量任务，单批最多返回 500 个货号。`includeArchived=true` 返回的 `deletion_pending` 仅供客户端对账并移除本地残留任务，不得渲染为用户记录。
-- `GET /api/upload-session-batches`：按稳定上传批次聚合上传会话，供上传记录和搭配服装库的 `上传批次` 筛选共同使用。默认排除已归档和内部 `deletion_pending`，不按上传状态或是否产出服装过滤；批次按最早 `createdAt` 倒序，`codeCount` 为当前可见上传会话数。无 `batch_id` 的历史会话以 `session:{session_id}` 作为稳定单条批次键。
-- `GET /api/upload-sessions/{session_id}`：查询单个上传任务和条目。
-- `POST /api/upload-sessions/{session_id}/resume`：严格校验重新选择的相对路径、大小、修改时间和 SHA-256；认领对象存储中已存在且完整性一致的对象，并只为缺失条目重新签发上传地址。
-- `POST /api/upload-sessions/{session_id}/lease`：上传期间续租当前批次的执行权。
-- `POST /api/upload-sessions/{session_id}/complete-items`：浏览器 PUT 成功后批量确认条目已上传；用于刷新后恢复真实上传进度。
-- `POST /api/upload-sessions/{session_id}/finalize-generation-task`：把已上传对象保存为 `GenerationTask` 草稿。
-- `POST /api/upload-sessions/{session_id}/finalize-styling-garment`：把已上传对象保存为 `StylingGarment` 草稿。
-- `POST /api/upload-sessions/{session_id}/abandon`：用户放弃未完成上传任务；后端标记废弃并尽力清理尚未入库的直传对象。
-- `POST /api/upload-sessions/delete-impact`：预检一个或多个上传记录的会话、条目、临时对象和已关联业务对象数量；不限制上传任务状态。
-- `POST /api/upload-sessions/reconcile`：按最多 500 个已知 session ID 只读返回仍存在的 `existingIds` 和其中属于内部删除墓碑的 `deletionPendingIds`；用于浏览器持久上传任务与服务端权威状态对账，不修改业务数据或清理进度。
-- `POST /api/upload-sessions/archive`：归档任意状态的上传记录；只写归档字段并从默认列表隐藏，不改变上传状态、不停止上传，也不影响已入库业务对象和媒体。
-- `POST /api/upload-sessions/restore`：恢复已归档上传记录的可见性；不改变上传状态。
-- `DELETE /api/upload-sessions`：彻底删除任意状态的上传会话元数据；单条输入完整任务名、批量输入 `全部删除`。只清理既未通过条目外键登记、也不存在同 `object_key` 活跃 `MediaAsset` 的临时直传对象，已入库的服装、生成任务和正式媒体不随上传记录删除。未完成会话先返回 `deferredIds` 并进入内部 `deletion_pending` 墓碑，立即阻断续传确认和入库，待已签发直传地址安全失效后再物理删除；该内部状态不返回到任何用户上传记录列表，用户确认删除后记录立即消失。
-- `businessCode` / `sourceTitle` / `batchId`：创建上传任务时记录业务货号、用户选择的文件夹 / 批次名和本次批量任务 ID；如果旧客户端未传货号，搭配服装保存接口会用最终 `code` 兜底写入。
-- `GET /api/styling-garments` 支持 `uploadBatchKey` 精确筛选服装与当前可见上传会话的关联；普通批次使用 `batch:{batch_id}`，无批次 ID 的历史单条会话使用 `session:{session_id}`。筛选不再把批次货号拼接为关键词；批次没有产出服装时正常返回空分页。
-- `executorId`：浏览器标签页执行标识。继续上传和确认条目会续租 90 秒批次执行权；其他页面或电脑只能查看，不能并发接管仍有有效租约的批次。
+- `POST /api/upload-sessions`：创建导入任务和对象存储直传地址。
+- `POST /api/upload-sessions/styling-import-batch`：原子创建一次搭配服装导入中的全部货号会话；返回共同的 `batchId`，保证用户开始任务后、读取和导入图片前整批记录立即可查。每个货号首次 `resume` 时绑定图片 SHA-256。
+- `GET /api/upload-sessions`：按 `scope`、`status`、`batchId`、`limit` 查询导入任务，默认按首次创建时间倒序、同时间按 ID 倒序；默认排除已归档记录，`includeArchived=true` 时一并返回且包含已归档的 `ABANDONED` 记录；`batchId` 用于完整恢复同一次批量任务，单批最多返回 500 个货号。`includeArchived=true` 返回的 `deletion_pending` 仅供客户端对账并移除本地残留任务，不得渲染为用户记录。搭配服装会话同时返回由当前业务对象派生的 `targetSummary`、面向用户的 `importOutcome` 和历史恢复摘要 `historySummary`；前端不得依赖当前服装库分页结果二次拼接这些字段。
+- `GET /api/upload-session-batches`：按稳定导入批次聚合导入会话，供导入记录和搭配服装库的 `导入批次` 筛选共同使用。默认排除已归档和内部 `deletion_pending`，不按导入状态或是否产出服装过滤；批次按最早 `createdAt` 倒序，`codeCount` 为当前可见导入会话数。无 `batch_id` 的历史会话以 `session:{session_id}` 作为稳定单条批次键。
+- `GET /api/upload-sessions/{session_id}`：查询单个导入任务和条目。
+- `POST /api/upload-sessions/{session_id}/resume`：严格校验重新选择的相对路径、大小、修改时间和 SHA-256；认领对象存储中已存在且完整性一致的对象，并只为缺失条目重新签发导入地址。
+- `POST /api/upload-sessions/{session_id}/lease`：导入期间续租当前批次的执行权。
+- `POST /api/upload-sessions/{session_id}/complete-items`：浏览器 PUT 成功后批量确认条目已导入；用于刷新后恢复真实导入进度。
+- `POST /api/upload-sessions/{session_id}/finalize-generation-task`：把已导入对象保存为 `GenerationTask` 草稿。
+- `POST /api/upload-sessions/{session_id}/finalize-styling-garment`：把已导入对象保存为 `StylingGarment` 草稿。
+- `POST /api/upload-sessions/{session_id}/abandon`：用户放弃未完成导入任务；后端标记废弃并尽力清理尚未入库的直传对象。
+- `POST /api/upload-sessions/delete-impact`：预检一个或多个导入记录的会话、条目、临时对象和已关联业务对象数量；不限制导入任务状态。
+- `POST /api/upload-sessions/reconcile`：按最多 500 个已知 session ID 只读返回仍存在的 `existingIds` 和其中属于内部删除墓碑的 `deletionPendingIds`；用于浏览器持久导入任务与服务端权威状态对账，不修改业务数据或清理进度。
+- `POST /api/upload-sessions/archive`：归档任意状态的导入记录；只写归档字段并从默认列表隐藏，不改变导入状态、不停止导入，也不影响已入库业务对象和媒体。
+- `POST /api/upload-sessions/restore`：恢复已归档导入记录的可见性；不改变导入状态。
+- `DELETE /api/upload-sessions`：彻底删除任意状态的导入会话元数据；单条输入完整任务名、批量输入 `全部删除`。只清理既未通过条目外键登记、也不存在同 `object_key` 活跃 `MediaAsset` 的临时直传对象，已入库的服装、生成任务和正式媒体不随导入记录删除。未完成会话先返回 `deferredIds` 并进入内部 `deletion_pending` 墓碑，立即阻断续传确认和入库，待已签发直传地址安全失效后再物理删除；该内部状态不返回到任何用户导入记录列表，用户确认删除后记录立即消失。
+- `businessCode` / `sourceTitle` / `batchId`：创建导入任务时记录业务货号、用户选择的文件夹 / 批次名和本次批量任务 ID；如果旧客户端未传货号，搭配服装保存接口会用最终 `code` 兜底写入。
+- `GET /api/styling-garments` 支持 `uploadBatchKey` 精确筛选服装与当前可见导入会话的关联；普通批次使用 `batch:{batch_id}`，无批次 ID 的历史单条会话使用 `session:{session_id}`。筛选不再把批次货号拼接为关键词；批次没有产出服装时正常返回空分页。
+- `executorId`：浏览器标签页执行标识。继续导入和确认条目会续租 90 秒批次执行权；其他页面或电脑只能查看，不能并发接管仍有有效租约的批次。
 
-上传任务状态：
+导入任务状态：
 
 ```text
 PENDING
@@ -65,20 +65,28 @@ FAILED
 ABANDONED
 ```
 
-`uploaded_count` 表示已确认上传到对象存储的条目数量。相对路径、大小、修改时间和 SHA-256 构成恢复清单；SHA-256 同时写入 S3 用户元数据。S3 PUT 成功但浏览器尚未确认就刷新时，`resume` 会通过对象 HEAD 校验自动补认领。超过 5 分钟仍停在 `FINALIZING` 且没有目标业务对象的会话会恢复为 `UPLOADED`，允许幂等重试保存。`FINALIZED` 表示业务记录已创建，`target_type` 和 `target_id` 指向对应业务对象。搭配服装的 AI 识别是 `StylingGarment` 创建后的独立阶段，不把识别失败写成上传失败。
+`uploaded_count` 表示已确认导入到对象存储的条目数量。相对路径、大小、修改时间和 SHA-256 构成恢复清单；SHA-256 同时写入 S3 用户元数据。S3 PUT 成功但浏览器尚未确认就刷新时，`resume` 会通过对象 HEAD 校验自动补认领。超过 5 分钟仍停在 `FINALIZING` 且没有目标业务对象的会话会恢复为 `UPLOADED`，允许幂等重试保存。`FINALIZED` 表示业务记录已创建，`target_type` 和 `target_id` 指向对应业务对象。搭配服装的 AI 识别是 `StylingGarment` 创建后的独立阶段，不把识别失败写成导入失败。
 
-批量上传的失败以 session 或业务对象为单位呈现。已经 `FINALIZED` 的 session 再次 finalize 应幂等返回目标对象；失败 session 可由前端重新上传该货号或删除已创建对象后重来。默认恢复查询不返回 `ABANDONED` session，除非调试场景显式查询。
+搭配服装导入记录采用“导入结果 + 当前服装状态”的双状态读模型：
 
-上传会话只负责“文件是否被系统接住”。搭配服装 AI 识别继续使用服装资源接口：
+- `importOutcome` 是导入记录的主状态：`IMPORTING`、`ORGANIZING`、`PENDING_RECOGNITION`、`PROCESSING`、`RECOVERING`、`REVIEW_REQUIRED`、`NEEDS_ACTION`、`SUCCEEDED`、`RECOVERED`、`TARGET_MISSING`、`ABANDONED`。它由 upload session、当前 `StylingGarment` 和识别 attempts 共同派生，不新增一套可漂移的持久状态；待识别和待复核不得伪装成后台运行态。
+- `targetSummary` 是关联服装的权威当前摘要，包含 `id`、`code`、`exists`、`status`、正式 `coverUrl`、正式 `imageCount`、`updatedAt` 和 `archivedAt`。即使该服装不在当前服装库分页中，导入记录也能显示正确封面、正式图片数和当前状态。
+- `historySummary` 只保留恢复语义所需的历史事实：是否发生过识别失败、最近失败时间和恢复成功时间。历史失败不覆盖当前事实。
+- 识别失败时主状态为 `NEEDS_ACTION`；用户从服装库重新识别成功后，主状态自动变为 `RECOVERED`，副状态显示 `当前可选搭`。失败历史仍可审计，但不继续计入当前失败数量。
+- 关联服装被删除时使用 `TARGET_MISSING`，不得继续展示缓存图片、虚构内部记录名或把它误报为成功。
+
+批量导入的失败以 session 或业务对象为单位呈现。已经 `FINALIZED` 的 session 再次 finalize 应幂等返回目标对象；文件未接收或业务对象未创建的失败项提供 `重新导入`，已创建服装但识别失败的项提供 `重新识别`。默认恢复查询不返回 `ABANDONED` session，除非调试场景显式查询。
+
+导入会话只负责“文件是否被系统接住”。搭配服装 AI 识别继续使用服装资源接口：
 
 - `POST /api/styling-garments/{id}/save-and-tag`：保存当前搭配服装并触发 / 重新触发 AI 识别；用于单货号局部重试。
 - `POST /api/styling-garments/batch-save-and-tag`：批量提交 `DRAFT`、`TAGGING_READY`、`TAGGING_FAILED` 搭配服装进入 AI 识别，也支持对 `READY` 搭配服装重新识别；已归档、正在识别或无需识别的项会跳过并返回 `skipped`。
 - `POST /api/styling-garments/delete-impact`：预检待删除服装、服装图片和历史引用数量。`referencingTaskCount` 只表示会保留并显示来源已删除的生成记录，不计入删除的 `taskCount`、结果图或媒体统计。
 - `DELETE /api/styling-garments/{id}?purge=true` / `POST /api/styling-garments/batch-delete`：彻底删除只清理搭配服装聚合及其图片关系、标签和打标 attempts；媒体仅在没有其它直接引用或历史快照引用时释放。不得删除引用它的生成任务、分镜、成片或生成 attempts。响应 `deletedTaskIds` 固定为空，`referencingTaskIds` 返回仍保留的历史任务。
 - `GET /api/styling-garment-exports/archive?ids={id1,id2}`：下载一个或多个货号的正式原图 ZIP；每个货号一个文件夹，只包含图片，单次最多 50 个货号。下载不受识别状态或归档状态限制，也不触发 AI 识别。
-- 批量上传场景中，前端应先等待本批所有可上传项完成 `finalize-styling-garment`，再对成功创建的 `StylingGarment` 调用批量识别接口。识别失败只改变 `StylingGarment` 的当前识别状态、错误码及已创建的 attempt，不改变 upload session 的 `FINALIZED` 结果。
+- 批量导入场景中，前端应先等待本批所有可导入项完成 `finalize-styling-garment`，再对成功创建的 `StylingGarment` 调用批量识别接口。识别失败只改变 `StylingGarment` 的当前识别状态、错误码及已创建的 attempt，不改变 upload session 的 `FINALIZED` 结果。
 
-未 `FINALIZED` 的 upload session 属于临时上传任务。用户显式放弃、彻底删除上传记录或后台 TTL 清理时，只能清理未登记为 `MediaAsset` 的直传对象；已经保存为业务对象的图片走对应业务对象的归档 / 删除 / 媒体引用计数规则。上传记录归档与业务对象归档相互独立。彻底删除的对象 key 在删除会话前写入持久清理队列；对象存储失败时保留错误和 key，由后台轮询幂等重试。
+未 `FINALIZED` 的 upload session 属于临时导入任务。用户显式放弃、彻底删除导入记录或后台 TTL 清理时，只能清理未登记为 `MediaAsset` 的直传对象；已经保存为业务对象的图片走对应业务对象的归档 / 删除 / 媒体引用计数规则。导入记录归档与业务对象归档相互独立。彻底删除的对象 key 在删除会话前写入持久清理队列；对象存储失败时保留错误和 key，由后台轮询幂等重试。
 
 搭配服装列表与详情在 `TAGGING_FAILED` 时返回本轮任务的安全稳定字段 `taggingErrorCode`：`RATE_LIMITED` 表示限流恢复耗尽，`UPLOAD_REQUIREMENT_NOT_MET` 表示模型未选出可入库商品图，其余错误使用对应技术分类；新一轮开始及识别成功时会清空该字段。普通响应中的 `tagError` 为 `null`，且不返回 attempt、provider 原文或请求/响应快照；admin 技术详情仍通过 `tagError` 和 `tagAttempts` 查看完整事实。
 
