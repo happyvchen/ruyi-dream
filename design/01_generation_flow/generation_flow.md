@@ -26,7 +26,7 @@ AI 摄影棚主推款最多取 15 张图片作为候选输入。点击 `AI 智�
 }
 ```
 
-`selected_files` 按推荐参考图顺序排列，后端取前 8 张用于冻结本次 `generation_task_input_versions` 的主推款参考图顺序；`styling_plan` 保存为 `StylingPlan`。Gemini 调用失败、JSON 不可解析、缺少 `selected_files` / `styling_plan` 或引用不存在文件时，本次 AI 智能选搭失败，不做本地挑图 fallback。
+`selected_files` 按推荐参考图顺序排列，后端取前 8 张用于冻结本次 `generation_task_input_versions` 的主推款参考图顺序；`styling_plan` 保存为 `StylingPlan`。Gemini 的非确定性传输错误由 provider 层自动重发，JSON 不可解析、缺少 `selected_files` / `styling_plan` 或引用不存在文件由 AI Stylist 编排层追加协议纠错事实后自动重问；默认最多 10 次并采用 `30/60/120/240` 秒封顶退避，耗尽后本次 AI 智能选搭才失败，始终不做本地挑图 fallback。
 
 `styling_plan.hero_understanding` 必须区分商品真实品类与拍摄图位族：
 

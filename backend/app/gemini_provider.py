@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextlib import suppress
 import json
 import logging
 import re
@@ -22,10 +23,11 @@ from . import config
 from .generation_progress import (
     ERROR_CONN_RESET,
     ERROR_MALFORMED_OUTPUT,
+    ERROR_PROVIDER_TIMEOUT,
     ERROR_RATE_LIMITED,
     ERROR_WAF_BLOCK,
     classify_provider_error,
-    is_zero_output_transient,
+    is_gemini_transport_retryable_error,
     normalize_toapis_error,
 )
 from .toapis_concurrency import toapis_concurrency_slot
@@ -58,6 +60,14 @@ class GeminiProviderError(RuntimeError):
         self.error_code = error_code
         self.retry_after = retry_after
         self.provider_response = provider_response or {}
+
+
+class GeminiRetryDeferred(RuntimeError):
+    """本次调用已把下一次恢复持久化，调用方应结束当前执行并等待 poller。"""
+
+    def __init__(self, snapshot: dict[str, Any]):
+        super().__init__("Gemini retry deferred to persistent scheduler")
+        self.snapshot = snapshot
 
 
 def get_settings() -> config.Settings:
@@ -100,6 +110,9 @@ async def generate_gemini_json_text(
     prompt: str,
     images: list[dict[str, Any]] | None = None,
     system_instruction: str | None = None,
+    on_retry: Callable[[dict[str, Any]], None] | None = None,
+    initial_retry_count: int = 0,
+    defer_retry: bool = False,
 ) -> str:
     """调用 Gemini 生成 JSON 文本（返回原始文本，由调用方解析）。
 
@@ -109,9 +122,116 @@ async def generate_gemini_json_text(
         raise RuntimeError(gemini_not_configured_message())
     if gemini_channel() == "toapis":
         return await asyncio.to_thread(
-            _generate_via_toapis, prompt, images or [], system_instruction
+            _generate_via_toapis,
+            prompt,
+            images or [],
+            system_instruction,
+            on_retry,
+            initial_retry_count,
+            defer_retry,
         )
-    return await _generate_via_google(prompt, images or [], system_instruction)
+    return await _generate_via_google_with_retry(
+        prompt,
+        images or [],
+        system_instruction,
+        on_retry,
+        initial_retry_count,
+        defer_retry,
+    )
+
+
+async def _generate_via_google_with_retry(
+    prompt: str,
+    images: list[dict[str, Any]],
+    system_instruction: str | None,
+    on_retry: Callable[[dict[str, Any]], None] | None = None,
+    initial_retry_count: int = 0,
+    defer_retry: bool = False,
+) -> str:
+    """直连 Gemini 与 ToAPIs 通道遵守相同的 10 次、30/60/120/240 恢复口径。"""
+    settings = get_settings()
+    retry_limit = max(0, settings.gemini_retry_limit)
+    base = max(0.0, float(settings.gemini_retry_backoff_base_seconds))
+    cap = max(0.0, float(settings.gemini_retry_backoff_cap_seconds))
+    time_budget = max(0.1, float(getattr(settings, "gemini_retry_time_budget_seconds", 5400)))
+    deadline = time.monotonic() + time_budget
+    retries = max(0, int(initial_retry_count))
+    while True:
+        if time.monotonic() >= deadline:
+            raise GeminiProviderError(
+                "Gemini(直连通道)重试已超过总时间预算",
+                ERROR_PROVIDER_TIMEOUT,
+                provider_response={"channel": "direct", "transportRetries": retries},
+            )
+        try:
+            return await _generate_via_google(prompt, images, system_instruction)
+        except Exception as exc:
+            error_code = getattr(exc, "error_code", None) or classify_provider_error(
+                status_code=_exception_status_code(exc),
+                message=str(exc),
+            )
+            if not is_gemini_transport_retryable_error(error_code) or retries >= retry_limit:
+                if isinstance(exc, GeminiProviderError):
+                    raise
+                raise GeminiProviderError(
+                    str(exc),
+                    error_code,
+                    retry_after=getattr(exc, "retry_after", None),
+                    provider_response={
+                        "channel": "direct",
+                        "httpStatus": _exception_status_code(exc),
+                        "exceptionType": type(exc).__name__,
+                    },
+                ) from exc
+            retries += 1
+            wait = _retry_backoff_seconds(retries, base, cap)
+            retry_after = getattr(exc, "retry_after", None)
+            if error_code == ERROR_RATE_LIMITED and retry_after is not None:
+                wait = max(wait, float(retry_after))
+            if time.monotonic() + wait >= deadline:
+                raise GeminiProviderError(
+                    "Gemini(直连通道)重试已超过总时间预算",
+                    ERROR_PROVIDER_TIMEOUT,
+                    provider_response={"channel": "direct", "transportRetries": retries},
+                ) from exc
+            logger.warning(
+                "Gemini(直连通道)瞬时错误(%s),第 %d 次重试,退避 %.1fs: %s",
+                error_code,
+                retries,
+                wait,
+                str(exc)[:200],
+            )
+            snapshot = {
+                "status": "GEMINI_TRANSPORT_RETRY_WAIT",
+                "transportRetries": retries,
+                "retryLimit": retry_limit,
+                "retryDelaySeconds": wait,
+                "errorCode": error_code,
+                "error": str(exc)[:500],
+            }
+            if on_retry:
+                on_retry(snapshot)
+            if defer_retry:
+                raise GeminiRetryDeferred(snapshot) from exc
+            if wait > 0:
+                await asyncio.sleep(wait)
+
+
+def _exception_status_code(exc: BaseException) -> int | None:
+    """兼容 google SDK/httpx 常见异常上的 status_code/code 形态。"""
+    for name in ("status_code", "code"):
+        raw = getattr(exc, name, None)
+        if callable(raw):
+            with suppress(Exception):
+                raw = raw()
+        raw = getattr(raw, "value", raw)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if 100 <= value <= 599:
+            return value
+    return None
 
 
 async def _generate_via_google(
@@ -159,14 +279,25 @@ def _generate_via_toapis(
     prompt: str,
     images: list[dict[str, Any]],
     system_instruction: str | None,
+    on_retry: Callable[[dict[str, Any]], None] | None = None,
+    initial_retry_count: int = 0,
+    defer_retry: bool = False,
 ) -> str:
     payload = build_toapis_chat_payload(prompt, images, system_instruction)
-    return _post_toapis_chat_with_retry(payload)
+    return _post_toapis_chat_with_retry(
+        payload,
+        on_retry=on_retry,
+        initial_retry_count=initial_retry_count,
+        defer_retry=defer_retry,
+    )
 
 
 def _post_toapis_chat_with_retry(
     payload: dict[str, Any],
     should_cancel: Callable[[], bool] | None = None,
+    on_retry: Callable[[dict[str, Any]], None] | None = None,
+    initial_retry_count: int = 0,
+    defer_retry: bool = False,
 ) -> str:
     """对限流和连接类瞬时错误有限重发整个 chat completions 请求。
 
@@ -191,8 +322,7 @@ def _post_toapis_chat_with_retry(
     deadline: float | None = None
     waf_limit = max(0, settings.gemini_waf_retry_limit)
 
-    attempt = 0
-    waf_attempts = 0
+    attempt = max(0, int(initial_retry_count))
     while True:
         try:
             with toapis_concurrency_slot():
@@ -205,22 +335,17 @@ def _post_toapis_chat_with_retry(
                 return _post_toapis_chat(payload, read_timeout_seconds=min(remaining, single_request_timeout))
         except GeminiProviderError as exc:
             error_code = exc.error_code
-            # WAF 熔断:有限重试后放弃(1010 是指纹封禁,盲目重发没用但短暂退避偶尔能过)。
-            if error_code == ERROR_WAF_BLOCK:
-                if waf_attempts >= waf_limit:
-                    raise
-                waf_attempts += 1
-            elif is_zero_output_transient(error_code) or error_code == ERROR_CONN_RESET:
-                if attempt >= retry_limit:
-                    raise
-                attempt += 1
-            else:
+            if not is_gemini_transport_retryable_error(error_code):
                 # AUTH/BALANCE/MALFORMED 等:重发无用或会重复计费,直接抛出。
                 raise
+            current_limit = waf_limit if error_code == ERROR_WAF_BLOCK else retry_limit
+            if attempt >= current_limit:
+                raise
+            attempt += 1
 
             if should_cancel is not None and should_cancel():
                 raise
-            wait = _retry_backoff_seconds(attempt + waf_attempts, base, cap)
+            wait = _retry_backoff_seconds(attempt, base, cap)
             if error_code == ERROR_RATE_LIMITED and exc.retry_after is not None:
                 wait = max(wait, exc.retry_after)
             if deadline is not None and time.monotonic() + wait >= deadline:
@@ -228,10 +353,22 @@ def _post_toapis_chat_with_retry(
             logger.warning(
                 "Gemini(ToAPIs 通道) 瞬时错误(%s),第 %d 次重试,退避 %.1fs: %s",
                 error_code,
-                attempt + waf_attempts,
+                attempt,
                 wait,
                 str(exc)[:200],
             )
+            snapshot = {
+                "status": "GEMINI_TRANSPORT_RETRY_WAIT",
+                "transportRetries": attempt,
+                "retryLimit": current_limit,
+                "retryDelaySeconds": wait,
+                "errorCode": error_code,
+                "error": str(exc)[:500],
+            }
+            if on_retry:
+                on_retry(snapshot)
+            if defer_retry:
+                raise GeminiRetryDeferred(snapshot) from exc
             if wait > 0:
                 time.sleep(wait)
 

@@ -57,13 +57,13 @@ API 摘要返回稳定 `error={code,title,message,action,retryable}`；普通用
 
 ToAPIs 相关调用统一使用 `TOAPIS_MAX_CONCURRENCY` 控制最大并发，默认 `5`。该闸门覆盖 Gemini(ToAPIs) chat、Image-2(ToAPIs) 参考图上传、任务创建和状态查询；只在真实 HTTP 请求期间占用槽位，provider 生成等待、轮询间隔和重试退避期间释放槽位。批次一键成片不再有独立并发参数，而是按同一 ToAPIs 预算推进排队任务。
 
-Gemini 对明确限流（HTTP 429 或 `rate_limit_check_failed`）、连接失败和读取超时在 provider 层自动重发。所有技术恢复默认最多重试 `10` 次，采用 `30/60/120/240` 秒封顶退避并受总预算约束。AI 打标业务层不再叠加整条任务重试，避免重试次数相乘。
+Gemini 对明确限流（HTTP 429 或 `rate_limit_check_failed`）、连接失败、读取超时、网关和 provider 瞬时异常在 provider 层自动重发。搭配服装打标把 provider 给出的下一次退避持久化到 `tag_retry_at/tag_retry_state_json`，释放当前 worker 和并发槽位，由现有 generation poller 到期恢复；进程重启后复用 `tag_active_attempt_id` 和累计次数继续，不能重置 10 次预算。JSON 不可解析、缺少 `selected_files` / `ai_tags` / `styling_plan` 等模型契约异常由对应编排层追加协议纠错事实后重问。两类技术恢复默认分别最多重试 `10` 次，采用 `30/60/120/240` 秒封顶退避并受总预算约束；同一种错误只有一个重试所有者，禁止业务层再次处理 provider 已耗尽的传输错误。
 
-`一键成片` 的跨阶段恢复由 `auto_run_target`、`auto_run_retry_at` 和 `auto_run_retry_count` 持久化；后台 poller 到期后继续推进，成功产物保持不变。参数、鉴权、余额、内容策略和业务契约错误不进入该恢复队列。
+`一键成片` 的跨阶段恢复由 `auto_run_target`、`auto_run_retry_at` 和 `auto_run_retry_count` 持久化；后台 poller 到期后继续推进，成功产物保持不变。参数、鉴权、余额、内容策略、输入不合格和业务判断拒绝不进入该恢复队列；模型输出格式/必需字段契约异常由当前 Gemini 编排层纠错，不交给跨阶段 auto-run 重复处理。
 
 每类错误只有一个重试所有者，禁止 `10×10` 叠加：Gemini 连接、Image-2 提交/状态查询/明确生成失败和回传由各自阶段完成最多 10 次；跨 attempt 的持久 auto-run 只接管单次上传失败与进程中断。状态查询或回传耗尽后保留原 attempt 与 providerRequestId，不通过 auto-run 重新提交生成。
 
-批量 AI 打标在一个后台任务内并发调度，并受 `TAGGING_MAX_CONCURRENCY` 与 ToAPIs 全局请求闸门双重约束。仍在当前进程排队或执行的服装不会被 stale 清理误判；真正获得打标槽位时刷新活动时间，进程重启后遗留的无主运行态仍按超时规则回收。
+批量 AI 打标在一个后台任务内并发调度，并受 `TAGGING_MAX_CONCURRENCY` 与 ToAPIs 全局请求闸门双重约束。退避等待不占用这两个并发槽位；仍在当前进程排队、执行或持久等待恢复的服装不会被 stale 清理误判。进程重启后，有 `tag_retry_at` 的任务由 poller 续跑；首次调用或成功落库前中断而尚无 `tag_retry_at` 的无主运行态，按 `PROCESS_INTERRUPTED` 纳入同一 10 次进程恢复预算并复用当前 attempt，不能直接转为失败。预算耗尽后保留安全的累计次数、最后错误分类和 attempt 快照，供用户提示与管理员追溯。
 
 旧环境变量 `GENERATION_AUTO_RUN_MAX_CONCURRENCY` 仅作为过渡 fallback：未设置 `TOAPIS_MAX_CONCURRENCY` 时才读取。新部署和文档统一使用 `TOAPIS_MAX_CONCURRENCY`。
 

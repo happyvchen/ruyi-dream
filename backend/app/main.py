@@ -37,6 +37,7 @@ from .prompt_render import (
 )
 from .gemini_provider import (
     GeminiProviderError,
+    GeminiRetryDeferred,
     effective_gemini_model,
     generate_gemini_json_text,
     gemini_channel,
@@ -2289,41 +2290,76 @@ def expire_stale_styling_garment_tagging() -> None:
     with get_db() as db:
         rows = db.execute(
             """
-            SELECT id FROM styling_garments
+            SELECT id, tag_active_attempt_id, tag_retry_state_json FROM styling_garments
             WHERE status = 'TAGGING_RUNNING'
               AND updated_at < ?
+              AND tag_retry_at IS NULL
               AND deleted_at IS NULL
             """,
             (timeout_before,),
         ).fetchall()
-        with _active_tagging_jobs_lock:
-            active_ids = set(_active_styling_garment_tagging_ids)
-        rows = [row for row in rows if int(row["id"]) not in active_ids]
-        if not rows:
-            return
-        ids = [int(row["id"]) for row in rows]
-        placeholders = ",".join("?" for _ in ids)
-        message = "识别任务长时间未完成，已自动停止轮询，可手动重新识别。"
-        db.execute(
-            f"""
-            UPDATE styling_garments
-            SET status = 'TAGGING_FAILED', tag_error = ?, tag_error_code = ?, updated_at = ?
-            WHERE id IN ({placeholders})
-            """,
-            (message, ERROR_POLL_TIMEOUT, timestamp, *ids),
-        )
-        db.execute(
-            f"""
-            UPDATE generation_attempts
-            SET status = 'FAILED', failed_at = ?, error_code = ?, error_message = ?, updated_at = ?
-            WHERE owner_type = 'styling_garment_tagging'
-              AND owner_id IN ({placeholders})
-              AND status = 'RUNNING'
-            """,
-            (timestamp, ERROR_POLL_TIMEOUT, message, timestamp, *ids),
-        )
-        for garment_id in ids:
-            log_event(db, "styling_garment", garment_id, "tagging_timed_out", {"timeoutAt": timestamp})
+    with _active_tagging_jobs_lock:
+        active_ids = set(_active_styling_garment_tagging_ids)
+    rows = [row for row in rows if int(row["id"]) not in active_ids]
+    retry_limit = max(0, settings.gemini_retry_limit)
+    for row in rows:
+        garment_id = int(row["id"])
+        state = loads(row["tag_retry_state_json"], {})
+        if not isinstance(state, dict):
+            state = {}
+        process_retries = int(state.get("processRetries") or 0)
+        if process_retries < retry_limit:
+            process_retries += 1
+            retry_delay = generation_retry_backoff_seconds(process_retries)
+            schedule_styling_garment_tag_retry(
+                garment_id,
+                int(row["tag_active_attempt_id"]) if row["tag_active_attempt_id"] else None,
+                state,
+                {
+                    "status": "TAGGING_PROCESS_RETRY_WAIT",
+                    "processRetries": process_retries,
+                    "retryLimit": retry_limit,
+                    "retryDelaySeconds": retry_delay,
+                    "errorCode": ERROR_POLL_TIMEOUT,
+                    "error": "识别进程中断，系统将自动恢复。",
+                },
+                kind="process",
+                require_stale_before=timeout_before,
+            )
+            continue
+        message = f"识别进程连续中断，系统已自动恢复 {process_retries} 次。"
+        terminal_state = {
+            **state,
+            "status": "TAGGING_RETRY_EXHAUSTED",
+            "kind": "process",
+            "retryAt": None,
+            "retryLimit": retry_limit,
+            "errorCode": ERROR_POLL_TIMEOUT,
+            "lastError": message,
+        }
+        with get_db() as db:
+            cursor = db.execute(
+                """UPDATE styling_garments
+                   SET status = 'TAGGING_FAILED', tag_error = ?, tag_error_code = ?,
+                       tag_retry_at = NULL, tag_retry_state_json = ?, tag_active_attempt_id = NULL,
+                       tag_retry_lease_until = NULL, updated_at = ?
+                   WHERE id = ? AND status = 'TAGGING_RUNNING'
+                     AND tag_retry_at IS NULL AND updated_at < ?""",
+                (message, ERROR_POLL_TIMEOUT, dumps(terminal_state), timestamp, garment_id, timeout_before),
+            )
+            if cursor.rowcount:
+                log_event(db, "styling_garment", garment_id, "tagging_retry_exhausted", terminal_state)
+        if not cursor.rowcount:
+            continue
+        if row["tag_active_attempt_id"]:
+            attempt_id = int(row["tag_active_attempt_id"])
+            finish_attempt(
+                attempt_id,
+                "FAILED",
+                response_snapshot={**get_attempt_response_snapshot(attempt_id), **terminal_state},
+                error_message=message,
+                error_code=ERROR_POLL_TIMEOUT,
+            )
 
 
 @app.post("/api/styling-garments")
@@ -2583,7 +2619,11 @@ async def save_and_tag_styling_garment(garment_id: int, background_tasks: Backgr
         ensure_styling_garment_not_tagging(row)
         timestamp = now_iso()
         db.execute(
-            "UPDATE styling_garments SET status = 'TAGGING_RUNNING', tag_error = NULL, tag_error_code = NULL, updated_at = ? WHERE id = ?",
+            """UPDATE styling_garments
+                   SET status = 'TAGGING_RUNNING', tag_error = NULL, tag_error_code = NULL,
+                   tag_retry_at = NULL, tag_retry_state_json = NULL, tag_active_attempt_id = NULL,
+                   tag_retry_lease_until = NULL,
+                   updated_at = ? WHERE id = ?""",
             (timestamp, garment_id),
         )
     background_tasks.add_task(run_styling_garment_tagging, garment_id)
@@ -2618,7 +2658,10 @@ async def save_and_tag_styling_garments_batch(payload: StylingGarmentBatchTagReq
             db.execute(
                 f"""
                 UPDATE styling_garments
-                SET status = 'TAGGING_RUNNING', tag_error = NULL, tag_error_code = NULL, updated_at = ?
+                SET status = 'TAGGING_RUNNING', tag_error = NULL, tag_error_code = NULL,
+                    tag_retry_at = NULL, tag_retry_state_json = NULL, tag_active_attempt_id = NULL,
+                    tag_retry_lease_until = NULL,
+                    updated_at = ?
                 WHERE id IN ({placeholders})
                 """,
                 (timestamp, *started_ids),
@@ -2671,16 +2714,51 @@ async def run_styling_garment_tagging_batch(garment_ids: list[int]) -> None:
 
 
 async def _run_styling_garment_tagging_guarded(garment_id: int) -> None:
-    # provider 瞬时错误已在 Gemini 通道内按零产出安全边界退避重试；
-    # 此处不再叠加整条任务重试，避免请求次数相乘和无等待突发。
+    # provider 传输错误与模型契约错误分别由唯一所有者累计预算并持久退避；
+    # 此处不再叠加整条任务重试，避免同一种错误形成 10x10 放大。
     try:
         tagging_result = await tag_styling_garment_with_gemini(garment_id)
+    except GeminiRetryDeferred:
+        # 下一次执行时间和累计次数已经持久化；释放当前并发槽位，交给 poller 续跑。
+        return
     except Exception as exc:
         error_code = classify_attempt_error(exc) or ERROR_SYSTEM_ERROR
         with get_db() as db:
+            row = db.execute(
+                "SELECT tag_active_attempt_id, tag_retry_state_json FROM styling_garments WHERE id = ?",
+                (garment_id,),
+            ).fetchone()
+            attempt_id = int(row["tag_active_attempt_id"]) if row and row["tag_active_attempt_id"] else None
+            retry_state = loads(row["tag_retry_state_json"], {}) if row else {}
+            if not isinstance(retry_state, dict):
+                retry_state = {}
+            terminal_state = {
+                **retry_state,
+                "status": "TAGGING_FAILED",
+                "retryAt": None,
+                "retryLimit": int(retry_state.get("retryLimit") or settings.gemini_retry_limit),
+                "errorCode": error_code,
+                "lastError": str(exc)[:500],
+            }
             db.execute(
-                "UPDATE styling_garments SET status = 'TAGGING_FAILED', tag_error = ?, tag_error_code = ?, updated_at = ? WHERE id = ?",
-                (str(exc), error_code, now_iso(), garment_id),
+                """UPDATE styling_garments
+                   SET status = 'TAGGING_FAILED', tag_error = ?, tag_error_code = ?,
+                       tag_retry_at = NULL, tag_retry_state_json = ?, tag_active_attempt_id = NULL,
+                       tag_retry_lease_until = NULL,
+                   updated_at = ? WHERE id = ?""",
+                (str(exc), error_code, dumps(terminal_state), now_iso(), garment_id),
+            )
+        if attempt_id:
+            finish_attempt(
+                attempt_id,
+                "FAILED",
+                response_snapshot={
+                    **get_attempt_response_snapshot(attempt_id),
+                    **terminal_state,
+                    **exception_process_facts(exc),
+                },
+                error_message=str(exc),
+                error_code=error_code,
             )
         return
     try:
@@ -2698,7 +2776,11 @@ async def _run_styling_garment_tagging_guarded(garment_id: int) -> None:
             )
         with get_db() as db:
             db.execute(
-                "UPDATE styling_garments SET status = 'TAGGING_FAILED', tag_error = ?, tag_error_code = ?, updated_at = ? WHERE id = ?",
+                """UPDATE styling_garments
+                   SET status = 'TAGGING_FAILED', tag_error = ?, tag_error_code = ?,
+                       tag_retry_at = NULL, tag_active_attempt_id = NULL,
+                       tag_retry_lease_until = NULL,
+                       updated_at = ? WHERE id = ?""",
                 (str(exc), error_code, now_iso(), garment_id),
             )
 
@@ -2706,6 +2788,8 @@ async def _run_styling_garment_tagging_guarded(garment_id: int) -> None:
 def persist_styling_garment_tagging_result(garment_id: int, tagging_result: dict[str, Any]) -> None:
     with get_db() as db:
         timestamp = now_iso()
+        attempt_id = int(tagging_result["attempt_id"]) if tagging_result.get("attempt_id") else None
+        attempt_response = tagging_result.get("_attempt_response_snapshot")
         row = db.execute("SELECT manual_tags_json FROM styling_garments WHERE id = ?", (garment_id,)).fetchone()
         manual_tags = loads(row["manual_tags_json"], {}) if row else {}
         apply_styling_garment_selected_image_order(
@@ -2733,6 +2817,10 @@ def persist_styling_garment_tagging_result(garment_id: int, tagging_result: dict
                 tag_completed_at = ?,
                 tag_error = NULL,
                 tag_error_code = NULL,
+                tag_retry_at = NULL,
+                tag_retry_state_json = NULL,
+                tag_active_attempt_id = NULL,
+                tag_retry_lease_until = NULL,
                 updated_at = ?
             WHERE id = ?
             """,
@@ -2748,7 +2836,21 @@ def persist_styling_garment_tagging_result(garment_id: int, tagging_result: dict
                 garment_id,
             ),
         )
-        log_event(db, "styling_garment", garment_id, "tagged", tagging_result)
+        if attempt_id:
+            db.execute(
+                """UPDATE generation_attempts
+                   SET status = 'SUCCEEDED', completed_at = ?, failed_at = NULL, cancelled_at = NULL,
+                       response_snapshot_json = ?, error_code = NULL, error_message = NULL, updated_at = ?
+                   WHERE id = ? AND status = 'RUNNING'""",
+                (
+                    timestamp,
+                    dumps(attempt_response) if isinstance(attempt_response, dict) else None,
+                    timestamp,
+                    attempt_id,
+                ),
+            )
+        event_payload = {key: value for key, value in tagging_result.items() if not key.startswith("_")}
+        log_event(db, "styling_garment", garment_id, "tagged", event_payload)
 
 
 @app.post("/api/styling-garments/{garment_id}/images")
@@ -6693,6 +6795,8 @@ async def generation_poller_loop() -> None:
     while True:
         await asyncio.sleep(settings.generation_poll_interval_seconds)
         try:
+            expire_stale_styling_garment_tagging()
+            resume_due_styling_garment_tagging_retries()
             refresh_pending_new_generation_jobs()
             if time.monotonic() - last_upload_cleanup_at >= 3600:
                 cleanup_deleted_upload_sessions()
@@ -6701,6 +6805,43 @@ async def generation_poller_loop() -> None:
         except Exception as exc:  # pragma: no cover - background safety net
             with get_db() as db:
                 log_event(db, "generation_poller", None, "failed", {"error": str(exc)})
+
+
+def resume_due_styling_garment_tagging_retries() -> None:
+    """领取到期打标并切到执行态；再次崩溃后由 stale 检测累计进程恢复次数。"""
+    timestamp = now_iso()
+    lease_until = (
+        datetime.now(timezone.utc) + timedelta(seconds=settings.generation_image_timeout_seconds)
+    ).isoformat(timespec="seconds").replace("+00:00", "Z")
+    with get_db() as db:
+        rows = db.execute(
+            """SELECT id FROM styling_garments
+               WHERE status = 'TAGGING_RUNNING' AND deleted_at IS NULL
+                 AND archived_at IS NULL AND tag_retry_at IS NOT NULL AND tag_retry_at <= ?
+                 AND (tag_retry_lease_until IS NULL OR tag_retry_lease_until <= ?)
+               ORDER BY tag_retry_at, id
+               LIMIT ?""",
+            (timestamp, timestamp, max(1, settings.tagging_max_concurrency)),
+        ).fetchall()
+    for row in rows:
+        garment_id = int(row["id"])
+        with _active_tagging_jobs_lock:
+            if garment_id in _active_styling_garment_tagging_ids:
+                continue
+        with get_db() as db:
+            cursor = db.execute(
+                """UPDATE styling_garments
+                   SET tag_retry_at = NULL, tag_retry_lease_until = ?, updated_at = ?
+                   WHERE id = ? AND status = 'TAGGING_RUNNING'
+                     AND tag_retry_at IS NOT NULL AND tag_retry_at <= ?
+                     AND (tag_retry_lease_until IS NULL OR tag_retry_lease_until <= ?)""",
+                (lease_until, timestamp, garment_id, timestamp, timestamp),
+            )
+        if not cursor.rowcount:
+            continue
+        with _active_tagging_jobs_lock:
+            _active_styling_garment_tagging_ids.add(garment_id)
+        asyncio.create_task(run_styling_garment_tagging(garment_id))
 
 
 def cleanup_deleted_upload_sessions() -> int:
@@ -7073,6 +7214,16 @@ def serialize_styling_garment(row: Any, include_images: bool = True, include_deb
     effective_tags = loads(row["effective_tags_json"], {}) if "effective_tags_json" in row.keys() else {}
     if not effective_tags:
         effective_tags = build_effective_tags(ai_tags, official_title_tags, manual_tags)
+    tag_retry_state = loads(row["tag_retry_state_json"], {}) if "tag_retry_state_json" in row.keys() else {}
+    if not isinstance(tag_retry_state, dict):
+        tag_retry_state = {}
+    tag_retry_kind = str(tag_retry_state.get("kind") or "") or None
+    retry_count_key = {
+        "contract": "contractRetries",
+        "process": "processRetries",
+        "transport": "transportRetries",
+    }.get(tag_retry_kind or "", "transportRetries")
+    tag_retry_count = int(tag_retry_state.get(retry_count_key) or 0)
     item = {
         "id": row["id"],
         "code": row["code"],
@@ -7084,6 +7235,10 @@ def serialize_styling_garment(row: Any, include_images: bool = True, include_deb
         "tagMeta": loads(row["tag_meta_json"], {}) if "tag_meta_json" in row.keys() else {},
         "tagAttempts": get_styling_garment_tag_attempts(row["id"]) if include_images and include_debug else [],
         "taggingErrorCode": row["tag_error_code"] if row["status"] == "TAGGING_FAILED" and "tag_error_code" in row.keys() else None,
+        "tagRetryAt": row["tag_retry_at"] if "tag_retry_at" in row.keys() else None,
+        "tagRetryCount": tag_retry_count,
+        "tagRetryLimit": int(tag_retry_state.get("retryLimit") or settings.gemini_retry_limit),
+        "tagRetryKind": tag_retry_kind,
         "tagSchemaVersion": row["tag_schema_version"],
         "tagCompletedAt": row["tag_completed_at"],
         "tagError": row["tag_error"] if include_debug else None,
@@ -7195,43 +7350,264 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
         attempt_id = create_attempt("styling_garment_tagging", garment_id, "gemini", request_snapshot)
         finish_attempt(attempt_id, "FAILED", {"error": "gemini_not_configured"}, error_message=message)
         raise RuntimeError(message)
-    attempt_id = create_attempt("styling_garment_tagging", garment_id, "gemini", request_snapshot)
+    attempt_id, retry_state = ensure_styling_garment_tagging_attempt(garment_id, request_snapshot)
+    resume_snapshot = get_attempt_response_snapshot(attempt_id)
+    cached_result = resume_snapshot.get("taggingResult")
+    if resume_snapshot.get("providerSucceeded") is True and isinstance(cached_result, dict):
+        return {
+            **cached_result,
+            "attempt_id": attempt_id,
+            "_attempt_response_snapshot": resume_snapshot,
+        }
     images: list[dict[str, Any]] = []
     for image in garment.get("images", [])[:MAX_GARMENT_IMAGE_INPUTS]:
         asset = image.get("asset") or {}
         image_input = gemini_vision_input(asset.get("objectKey"), asset.get("mimeType"))
         if image_input:
             images.append(image_input)
-    try:
-        text = await generate_gemini_json_text(prompt, images)
-    except Exception as exc:
-        finish_attempt(attempt_id, "FAILED", response_snapshot=exception_process_facts(exc), error_message=str(exc), error_code=classify_attempt_error(exc))
-        raise
-    try:
-        raw = parse_lily_tagging_json(text)
-    except Exception as exc:
-        finish_attempt(
-            attempt_id,
-            "FAILED",
-            {"raw_text": text},
-            error_message=f"Gemini 返回内容不是合法 JSON：{exc}",
-            error_code=ERROR_MALFORMED_OUTPUT,
+    retry_limit = max(0, settings.gemini_malformed_reask_limit)
+    contract_retries = int(retry_state.get("contractRetries") or 0)
+    transport_retries = int(retry_state.get("transportRetries") or 0)
+    current_prompt = (
+        build_gemini_contract_correction_prompt(prompt, str(retry_state.get("lastError") or "上一次契约校验失败"))
+        if contract_retries > 0
+        else prompt
+    )
+    while True:
+        try:
+            text = await generate_gemini_json_text(
+                current_prompt,
+                images,
+                on_retry=lambda snapshot: schedule_styling_garment_tag_retry(
+                    garment_id,
+                    attempt_id,
+                    retry_state,
+                    snapshot,
+                    kind="transport",
+                ),
+                initial_retry_count=transport_retries,
+                defer_retry=True,
+            )
+        except GeminiRetryDeferred:
+            raise
+        except Exception as exc:
+            if classify_attempt_error(exc) == ERROR_MALFORMED_OUTPUT and contract_retries < retry_limit:
+                contract_retries += 1
+                retry_delay = generation_retry_backoff_seconds(contract_retries)
+                snapshot = {
+                    **exception_process_facts(exc),
+                    "status": "TAGGING_CONTRACT_RETRY_WAIT",
+                    "contractRetries": contract_retries,
+                    "retryLimit": retry_limit,
+                    "retryDelaySeconds": retry_delay,
+                    "contractError": str(exc)[:500],
+                }
+                schedule_styling_garment_tag_retry(
+                    garment_id,
+                    attempt_id,
+                    retry_state,
+                    snapshot,
+                    kind="contract",
+                )
+                logger.warning(
+                    "Gemini 打标输出截断/畸形，自动纠错重试第 %d 次，退避 %.1fs：%s",
+                    contract_retries,
+                    retry_delay,
+                    str(exc)[:200],
+                )
+                raise GeminiRetryDeferred(snapshot) from exc
+            finish_attempt(
+                attempt_id,
+                "FAILED",
+                response_snapshot={
+                    **get_attempt_response_snapshot(attempt_id),
+                    **exception_process_facts(exc),
+                    "transportRetries": transport_retries,
+                    "retryLimit": settings.gemini_retry_limit,
+                },
+                error_message=str(exc),
+                error_code=classify_attempt_error(exc),
+            )
+            raise
+        raw: dict[str, Any] | None = None
+        try:
+            raw = parse_lily_tagging_json(text)
+            tagging_result = normalize_prompt_tagging_result(raw, garment)
+        except UploadRequirementNotMetError as exc:
+            finish_attempt(
+                attempt_id,
+                "FAILED",
+                {"raw_text": text, "raw_json": raw},
+                error_message=f"Gemini 打标结果未通过上传要求：{exc}",
+                error_code=ERROR_UPLOAD_REQUIREMENT_NOT_MET,
+            )
+            raise GeminiProviderError(
+                f"Gemini 打标结果未通过上传要求：{exc}",
+                ERROR_UPLOAD_REQUIREMENT_NOT_MET,
+            ) from exc
+        except Exception as exc:
+            if contract_retries >= retry_limit:
+                finish_attempt(
+                    attempt_id,
+                    "FAILED",
+                    {
+                        "raw_text": text,
+                        "raw_json": raw,
+                        "contractRetries": contract_retries,
+                    },
+                    error_message=f"Gemini 打标结果连续不符合契约：{exc}",
+                    error_code=ERROR_MALFORMED_OUTPUT,
+                )
+                raise GeminiProviderError(
+                    f"Gemini 打标结果连续不符合契约（已自动重试 {contract_retries} 次）：{exc}",
+                    ERROR_MALFORMED_OUTPUT,
+                ) from exc
+            contract_retries += 1
+            retry_delay = generation_retry_backoff_seconds(contract_retries)
+            retry_snapshot = {
+                "status": "TAGGING_CONTRACT_RETRY_WAIT",
+                "raw_text": text,
+                "raw_json": raw,
+                "contractRetries": contract_retries,
+                "retryDelaySeconds": retry_delay,
+                "contractError": str(exc)[:500],
+            }
+            schedule_styling_garment_tag_retry(
+                garment_id,
+                attempt_id,
+                retry_state,
+                retry_snapshot,
+                kind="contract",
+            )
+            logger.warning(
+                "Gemini 打标契约输出异常，自动纠错重试第 %d 次，退避 %.1fs：%s",
+                contract_retries,
+                retry_delay,
+                str(exc)[:200],
+            )
+            raise GeminiRetryDeferred(retry_snapshot) from exc
+        success_snapshot = {
+            "status": "TAGGING_PROVIDER_SUCCEEDED",
+            "providerSucceeded": True,
+            "raw_text": text,
+            "raw_json": raw,
+            "contractRetries": contract_retries,
+            "transportRetries": transport_retries,
+            "taggingResult": tagging_result,
+        }
+        persist_attempt_provider_progress(attempt_id, success_snapshot)
+        return {
+            **tagging_result,
+            "attempt_id": attempt_id,
+            "_attempt_response_snapshot": success_snapshot,
+        }
+
+
+def ensure_styling_garment_tagging_attempt(
+    garment_id: int,
+    request_snapshot: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    with get_db() as db:
+        row = db.execute(
+            """SELECT sg.tag_active_attempt_id, sg.tag_retry_state_json, ga.status AS attempt_status
+               FROM styling_garments sg
+               LEFT JOIN generation_attempts ga ON ga.id = sg.tag_active_attempt_id
+               WHERE sg.id = ?""",
+            (garment_id,),
+        ).fetchone()
+    retry_state = loads(row["tag_retry_state_json"], {}) if row else {}
+    if not isinstance(retry_state, dict):
+        retry_state = {}
+    if row and row["tag_active_attempt_id"] and row["attempt_status"] == "RUNNING":
+        return int(row["tag_active_attempt_id"]), retry_state
+    attempt_id = create_attempt("styling_garment_tagging", garment_id, "gemini", request_snapshot)
+    with get_db() as db:
+        db.execute(
+            "UPDATE styling_garments SET tag_active_attempt_id = ?, updated_at = ? WHERE id = ?",
+            (attempt_id, now_iso(), garment_id),
         )
-        raise GeminiProviderError(f"Gemini 返回内容不是合法 JSON：{exc}", ERROR_MALFORMED_OUTPUT) from exc
-    try:
-        tagging_result = normalize_prompt_tagging_result(raw, garment)
-    except Exception as exc:
-        error_code = classify_attempt_error(exc) or ERROR_MALFORMED_OUTPUT
-        finish_attempt(
-            attempt_id,
-            "FAILED",
-            {"raw_text": text, "raw_json": raw},
-            error_message=f"Gemini 打标结果不符合契约：{exc}",
-            error_code=error_code,
+    return attempt_id, retry_state
+
+
+def schedule_styling_garment_tag_retry(
+    garment_id: int,
+    attempt_id: int | None,
+    previous_state: dict[str, Any],
+    snapshot: dict[str, Any],
+    *,
+    kind: str,
+    require_stale_before: str | None = None,
+) -> None:
+    delay = max(0.0, float(snapshot.get("retryDelaySeconds") or 0))
+    retry_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=delay)
+    ).isoformat(timespec="seconds").replace("+00:00", "Z")
+    # 服装行只保存调度所需的紧凑状态；原始模型输出继续只进入 attempt 快照。
+    state = {
+        "transportRetries": int(previous_state.get("transportRetries") or 0),
+        "contractRetries": int(previous_state.get("contractRetries") or 0),
+        "processRetries": int(previous_state.get("processRetries") or 0),
+        "status": snapshot.get("status"),
+        "kind": kind,
+        "retryAt": retry_at,
+        "retryLimit": int(snapshot.get("retryLimit") or settings.gemini_retry_limit),
+        "retryDelaySeconds": delay,
+        "errorCode": snapshot.get("errorCode"),
+        "lastError": snapshot.get("contractError") or snapshot.get("error"),
+    }
+    if kind == "transport":
+        state["transportRetries"] = int(snapshot.get("transportRetries") or 0)
+    elif kind == "contract":
+        state["contractRetries"] = int(snapshot.get("contractRetries") or 0)
+    elif kind == "process":
+        state["processRetries"] = int(snapshot.get("processRetries") or 0)
+    with get_db() as db:
+        cursor = db.execute(
+            """UPDATE styling_garments
+               SET status = 'TAGGING_RUNNING', tag_retry_at = ?, tag_retry_state_json = ?,
+                   tag_active_attempt_id = ?, tag_retry_lease_until = NULL, updated_at = ?
+               WHERE id = ? AND status = 'TAGGING_RUNNING'
+                 AND (? IS NULL OR (tag_retry_at IS NULL AND updated_at < ?))""",
+            (
+                retry_at,
+                dumps(state),
+                attempt_id,
+                now_iso(),
+                garment_id,
+                require_stale_before,
+                require_stale_before,
+            ),
         )
-        raise GeminiProviderError(f"Gemini 打标结果不符合契约：{exc}", error_code) from exc
-    finish_attempt(attempt_id, "SUCCEEDED", {"raw_text": text, "raw_json": raw})
-    return {**tagging_result, "attempt_id": attempt_id}
+        if not cursor.rowcount:
+            return
+        log_event(
+            db,
+            "styling_garment",
+            garment_id,
+            "tagging_retry_scheduled",
+            {"kind": kind, "retryAt": retry_at, "retryCount": state.get(f"{kind}Retries")},
+        )
+    persist_attempt_provider_progress(
+        attempt_id,
+        {
+            **get_attempt_response_snapshot(attempt_id),
+            **snapshot,
+            "kind": kind,
+            "retryAt": retry_at,
+        },
+    )
+
+
+def build_gemini_contract_correction_prompt(prompt: str, error: str) -> str:
+    """在不改变业务 Prompt 的前提下追加协议纠错事实。"""
+    reason = re.sub(r"\s+", " ", str(error)).strip()[:500]
+    return (
+        f"{prompt.rstrip()}\n\n"
+        "【上一次返回的协议纠错】\n"
+        f"上一次返回未通过系统契约校验：{reason}\n"
+        "请重新检查全部必需顶层字段及字段类型，只输出符合当前 Prompt 约定的严格 JSON；"
+        "不要输出 Markdown、解释文字或额外包裹。\n"
+    )
 
 
 def build_prompt_tagging_request_snapshot(garment: dict[str, Any], prompt: str) -> dict[str, Any]:
@@ -7853,15 +8229,15 @@ async def generate_gemini_json_object_with_reask(
     images: list[dict[str, Any]] | None = None,
     system_instruction: str | None = None,
 ) -> dict[str, Any]:
-    """调用 Gemini 取 JSON，解析失败(MALFORMED_OUTPUT)时自动重问一次。
+    """调用 Gemini 取 JSON，解析失败时按统一 10 次预算纠错重问。
 
     分层的容错策略（避免重复扣费）：
     1. generate_gemini_json_text 内部已对"零产出瞬时错误"(502/连接错/429)做安全重发；
        此层不感知那些，只处理"已拿到文本但解析不出合法 JSON"和截断。
     2. parse_gemini_json_object 已尽力做容错解析（剥控制字符、提取首个完整 JSON、
        宽松解析、pythonish 兜底）。仍失败才走重问。
-    3. 重问：重新发起一次 Gemini 调用（追加"仅输出合法 JSON"约束），最多
-       gemini_malformed_reask_limit 次。模型随机性使二次多半成功。截断
+    3. 重问：重新发起 Gemini 调用并追加协议纠错事实，最多
+       gemini_malformed_reask_limit 次，使用 30/60/120/240 秒封顶退避。截断
        (finish_reason=length) 同样归 MALFORMED_OUTPUT，一并走重问。
     4. 重问仍失败 → 抛 GeminiProviderError(MALFORMED_OUTPUT)，由上层判死。
 
@@ -7869,25 +8245,46 @@ async def generate_gemini_json_object_with_reask(
     """
     reask_limit = max(0, settings.gemini_malformed_reask_limit)
     attempt = 0
+    transport_retries = 0
     reask_prompt = prompt
+
+    def remember_transport_retry(snapshot: dict[str, Any]) -> None:
+        nonlocal transport_retries
+        transport_retries = max(transport_retries, int(snapshot.get("transportRetries") or 0))
+
     while True:
-        text = await generate_gemini_json_text(reask_prompt, images, system_instruction=system_instruction)
+        parse_error: BaseException
         try:
+            text = await generate_gemini_json_text(
+                reask_prompt,
+                images,
+                system_instruction=system_instruction,
+                on_retry=remember_transport_retry,
+                initial_retry_count=transport_retries,
+            )
             return parse_gemini_json_object(text)
-        except GeminiProviderError:
-            # 已带 error_code（如流式截断 MALFORMED_OUTPUT）——按下方统一重问逻辑处理。
-            raise
-        except Exception as parse_error:
-            if attempt >= reask_limit:
-                raise GeminiProviderError(
-                    f"Gemini 返回内容不是合法 JSON（已重问 {attempt} 次）：{parse_error}",
-                    ERROR_MALFORMED_OUTPUT,
-                ) from parse_error
-            attempt += 1
-            # JSON 输出纪律与重问约束已写入各 stage 的 Prompt 维护正文（每次都随 prompt 下发），
-            # 故重问直接重发原 prompt；模型随机性使二次多半成功。
-            reask_prompt = prompt
-            logger.warning("Gemini 返回 JSON 解析失败，自动重问第 %d 次：%s", attempt, str(parse_error)[:200])
+        except GeminiProviderError as provider_error:
+            if provider_error.error_code != ERROR_MALFORMED_OUTPUT:
+                raise
+            parse_error = provider_error
+        except Exception as error:
+            parse_error = error
+        if attempt >= reask_limit:
+            raise GeminiProviderError(
+                f"Gemini 返回内容不是合法 JSON（已重问 {attempt} 次）：{parse_error}",
+                ERROR_MALFORMED_OUTPUT,
+            ) from parse_error
+        attempt += 1
+        reask_prompt = build_gemini_contract_correction_prompt(prompt, str(parse_error))
+        retry_delay = generation_retry_backoff_seconds(attempt)
+        logger.warning(
+            "Gemini 返回 JSON 解析失败，自动纠错重问第 %d 次，退避 %.1fs：%s",
+            attempt,
+            retry_delay,
+            str(parse_error)[:200],
+        )
+        if retry_delay > 0:
+            await asyncio.sleep(retry_delay)
 
 
 # 我方业务/穿法校验否决的关键词。命中 → BUSINESS_REJECT（非 provider 错误，不重试）。
@@ -8305,6 +8702,19 @@ def get_attempt_provider_resume_snapshot(attempt_id: int | None) -> dict[str, An
     return snapshot
 
 
+def get_attempt_response_snapshot(attempt_id: int | None) -> dict[str, Any]:
+    """读取 attempt 已持久化的事实，用于终态合并，避免覆盖重试计数。"""
+    if not attempt_id:
+        return {}
+    with get_db() as db:
+        row = db.execute(
+            "SELECT response_snapshot_json FROM generation_attempts WHERE id = ?",
+            (attempt_id,),
+        ).fetchone()
+    snapshot = loads(row["response_snapshot_json"], {}) if row else {}
+    return snapshot if isinstance(snapshot, dict) else {}
+
+
 def fail_stale_attempt(
     attempt_id: int | None,
     message: str,
@@ -8388,7 +8798,8 @@ async def select_styling_with_gemini(
         request_snapshot = attach_ai_stylist_prompt_snapshot(request_snapshot, candidate_snapshot)
     if attempt_id:
         update_attempt_request_snapshot(attempt_id, request_snapshot)
-    prompt = str(request_snapshot.get("prompt") or "")
+    base_prompt = str(request_snapshot.get("prompt") or "")
+    prompt = base_prompt
     images: list[dict[str, Any]] = []
     for item in loads(input_row["image_snapshot_json"], [])[:MAX_HERO_IMAGE_INPUTS]:
         asset = (item.get("asset") or {})
@@ -8398,7 +8809,14 @@ async def select_styling_with_gemini(
     retry_limit = max(0, settings.ai_stylist_contract_retry_limit)
     retry_delay = max(0.0, float(settings.ai_stylist_contract_retry_delay_seconds))
     contract_retries = 0
+    transport_retries = 0
     latest_response: dict[str, Any] | None = None
+
+    def record_transport_retry(snapshot: dict[str, Any]) -> None:
+        nonlocal transport_retries
+        transport_retries = max(transport_retries, int(snapshot.get("transportRetries") or 0))
+        persist_attempt_provider_progress(attempt_id, snapshot)
+
     while True:
         try:
             if progress:
@@ -8413,6 +8831,8 @@ async def select_styling_with_gemini(
                 images,
                 # 系统指令已并入 AI 选搭 Prompt 正文（prompt 内），不再单独下发 system_instruction。
                 system_instruction=request_snapshot.get("systemInstruction"),
+                on_retry=record_transport_retry,
+                initial_retry_count=transport_retries,
             )
             latest_response = ai_stylist_response_diagnostic(raw_text=text, contract_retries=contract_retries)
             persist_attempt_provider_progress(attempt_id, latest_response)
@@ -8484,6 +8904,7 @@ async def select_styling_with_gemini(
                 current_retry_delay,
                 str(exc)[:200],
             )
+            prompt = build_gemini_contract_correction_prompt(base_prompt, str(exc))
             if current_retry_delay > 0:
                 await asyncio.sleep(current_retry_delay)
 

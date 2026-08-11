@@ -164,6 +164,10 @@ export type StylingGarment = {
   tagCompletedAt?: string | null
   tagError?: string | null
   taggingErrorCode?: string | null
+  tagRetryAt?: string | null
+  tagRetryCount?: number
+  tagRetryLimit?: number
+  tagRetryKind?: 'transport' | 'contract' | 'process' | null
   archivedAt?: string | null
   archiveReason?: string | null
   imageCount?: number | null

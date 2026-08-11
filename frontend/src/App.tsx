@@ -7673,7 +7673,11 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
   const chips = garmentTagChips(item)
   const failedTagAttempt = failed ? latestFailedTagAttempt(item) : null
   const taggingIssue = failed ? garmentTaggingIssue(item, failedTagAttempt) : null
-  const cardBrief = tagging ? '正在识别服装信息；服务繁忙时系统会自动恢复，可以离开当前页面。' : failed ? '识别未完成，可重新识别。' : brief || '待识别搭配信息'
+  const recoveryLabel = garmentTagRecoveryLabel(item)
+  const failedBrief = item.tagRetryCount && item.tagRetryCount > 0
+    ? `系统已自动尝试 ${item.tagRetryCount} 次，识别仍未完成，可重新识别。`
+    : '识别未完成，可重新识别。'
+  const cardBrief = tagging ? recoveryLabel || '正在识别服装信息；服务繁忙时系统会自动恢复，可以离开当前页面。' : failed ? failedBrief : brief || '待识别搭配信息'
   const failureHint = taggingIssue ? `${taggingIssue.title}：${taggingIssue.description}` : undefined
   const statusLabel = taggingIssue?.badge ?? garmentStatus(item.status)
   const actionCount = [onOpen, onManage, onDownload, onTag].filter(Boolean).length
@@ -7695,7 +7699,7 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
         {item.archivedAt && <span className="cover-badge">{archiveStateText(item.archiveReason)}</span>}
       </div>
       <div className="garment-card-body">
-        <div className="garment-card-head"><TruncatedText as="strong" text={item.code} /><span className={`status ${item.status.toLowerCase()}`} title={failureHint ?? statusLabel} role={tagging ? 'status' : undefined} aria-live={tagging ? 'polite' : undefined}>{statusLabel}</span></div>
+        <div className="garment-card-head"><TruncatedText as="strong" text={item.code} /><span className={`status ${item.status.toLowerCase()}`} title={failureHint ?? recoveryLabel ?? statusLabel} role={tagging ? 'status' : undefined} aria-live={tagging ? 'polite' : undefined}>{recoveryLabel ? '自动恢复中' : statusLabel}</span></div>
         <p className="garment-card-brief" title={failed ? failureHint : cardBrief}>{cardBrief}</p>
         <div className="tag-summary">
           {showTagResult && chips.slice(0, 3).map((chip) => <TruncatedText key={chip} text={chip} />)}
@@ -8012,6 +8016,22 @@ type GarmentTaggingIssue = {
   title: string
   description: string
   action: string
+}
+
+function garmentTagRecoveryLabel(item: StylingGarment) {
+  if (item.status !== 'TAGGING_RUNNING' || !item.tagRetryAt) return ''
+  const retryAt = new Date(item.tagRetryAt).getTime()
+  const seconds = Number.isFinite(retryAt) ? Math.max(0, Math.ceil((retryAt - Date.now()) / 1000)) : 0
+  const wait = seconds <= 0 ? '正在继续处理' : seconds >= 60 ? `${Math.ceil(seconds / 60)} 分钟后自动重试` : `${seconds} 秒后自动重试`
+  const count = item.tagRetryCount && item.tagRetryCount > 0
+    ? `第 ${item.tagRetryCount}/${item.tagRetryLimit ?? 10} 次`
+    : ''
+  const kind = item.tagRetryKind === 'contract'
+    ? '正在修复识别结果'
+    : item.tagRetryKind === 'process'
+      ? '任务已自动恢复'
+      : '服务暂时波动'
+  return `${kind}${count ? ` · ${count}` : ''} · ${wait}，可以离开当前页面。`
 }
 
 function rawTaggingErrorText(item: StylingGarment, attempt: NonNullable<StylingGarment['tagAttempts']>[number] | null) {

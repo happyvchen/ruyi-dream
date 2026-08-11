@@ -24,6 +24,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("060", "upload_object_cleanup_claim", "migration_upload_object_cleanup_claim"),
     ("061", "upload_session_batch_queries", "migration_upload_session_batch_queries"),
     ("062", "generation_auto_run_retry", "migration_generation_auto_run_retry"),
+    ("063", "styling_garment_tag_retry", "migration_styling_garment_tag_retry"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -146,6 +147,10 @@ def init_db() -> None:
               tag_completed_at TEXT,
               tag_error TEXT,
               tag_error_code TEXT,
+              tag_retry_at TEXT,
+              tag_retry_state_json TEXT,
+              tag_active_attempt_id INTEGER REFERENCES generation_attempts(id),
+              tag_retry_lease_until TEXT,
               archived_at TEXT,
               archive_reason TEXT,
               created_at TEXT NOT NULL,
@@ -408,6 +413,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_upload_object_cleanup_claim": migration_upload_object_cleanup_claim,
         "migration_upload_session_batch_queries": migration_upload_session_batch_queries,
         "migration_generation_auto_run_retry": migration_generation_auto_run_retry,
+        "migration_styling_garment_tag_retry": migration_styling_garment_tag_retry,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -621,6 +627,23 @@ def migration_generation_auto_run_retry(db: sqlite3.Connection) -> None:
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_generation_tasks_auto_run_retry_at "
         "ON generation_tasks(auto_run_target, auto_run_retry_at)"
+    )
+
+
+def migration_styling_garment_tag_retry(db: sqlite3.Connection) -> None:
+    if not table_exists(db, "styling_garments"):
+        return
+    if not table_has_column(db, "styling_garments", "tag_retry_at"):
+        db.execute("ALTER TABLE styling_garments ADD COLUMN tag_retry_at TEXT")
+    if not table_has_column(db, "styling_garments", "tag_retry_state_json"):
+        db.execute("ALTER TABLE styling_garments ADD COLUMN tag_retry_state_json TEXT")
+    if not table_has_column(db, "styling_garments", "tag_active_attempt_id"):
+        db.execute("ALTER TABLE styling_garments ADD COLUMN tag_active_attempt_id INTEGER REFERENCES generation_attempts(id)")
+    if not table_has_column(db, "styling_garments", "tag_retry_lease_until"):
+        db.execute("ALTER TABLE styling_garments ADD COLUMN tag_retry_lease_until TEXT")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_styling_garments_tag_retry_at "
+        "ON styling_garments(status, tag_retry_at)"
     )
 
 

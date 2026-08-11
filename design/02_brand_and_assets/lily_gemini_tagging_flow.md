@@ -123,14 +123,14 @@ Gemini 必须返回严格 JSON。顶层只要求两个字段：
 }
 ```
 
-如果 provider 返回数组、字符串、缺少 `selected_files` 或缺少 `ai_tags`，本次打标失败，不做 fallback 包装。
+如果 provider 返回数组、字符串、缺少 `selected_files` 或缺少 `ai_tags`，不得做 fallback 包装；这属于非确定性的模型契约输出异常，后端按统一技术恢复策略自动纠错重问，最多重试 10 次，耗尽后本次打标才失败。
 
 ## 6. 后端处理
 
 后端收到 Gemini 响应后执行：
 
-- 解析 JSON；不可解析属于不可恢复失败，进入 `TAGGING_FAILED`。
-- 校验顶层 `selected_files` 与 `ai_tags`；缺失、类型错误或引用不存在文件属于不可恢复失败，进入 `TAGGING_FAILED`。
+- 解析 JSON；不可解析时追加协议纠错事实，按 `30/60/120/240` 秒封顶退避自动重问，最多 10 次。
+- 校验顶层 `selected_files` 与 `ai_tags`；缺失、类型错误或引用不存在文件同样进入契约纠错重问，不启用本地默认值。
 - 按 `selected_files` 更新 `styling_garment_images` 的推荐顺序和主视图候选。
 - 原样保存 `ai_tags` 到 `ai_tags_json`；前端详情完整展示。
 - 生成系统 `tag_meta_json`，记录 provider、model、result_format、overall_confidence、needs_review、review_reasons、source_image_ids 和 warnings。
@@ -138,14 +138,14 @@ Gemini 必须返回严格 JSON。顶层只要求两个字段：
 - 置信度支持 0-1 或 0-100；低于阈值进入复核。
 - 后端不强制固定标签枚举；分类口径以当前 `AI 打标` Prompt 为准。
 
-provider 调用失败或返回内容无法解析为 JSON 时：
+provider 调用或契约纠错的 10 次自动恢复预算耗尽时：
 
 ```text
 status = TAGGING_FAILED
 tag_error = 错误原因
 ```
 
-JSON 可解析但 `selected_files` 或 `ai_tags` 不符合契约时同样进入 `TAGGING_FAILED`，不启用本地默认挑图或 fallback 标签。其中 `selected_files` 为空表示模型已识别但未找到符合上传要求、可作为纯服装参考图入库的图片；业务界面应呈现为 `未通过上传要求`，而不是把 Gemini、`selected_files` 或内部契约错误直接展示给业务用户。
+JSON 可解析但 `selected_files` 或 `ai_tags` 不符合契约时先自动纠错重问，只有 10 次预算耗尽后才进入 `TAGGING_FAILED`，始终不启用本地默认挑图或 fallback 标签。其中 `selected_files` 为空表示模型已识别但未找到符合上传要求、可作为纯服装参考图入库的图片；这是确定性的业务阻断，不重试，业务界面应呈现为 `未通过上传要求`，而不是把 Gemini、`selected_files` 或内部契约错误直接展示给业务用户。
 
 JSON 可解析但存在系统可识别风险时：
 
@@ -240,7 +240,9 @@ ai_tags_json 原始返回
 搭配服装库的列表卡片和详情基础信息只展示业务可读失败原因和下一步动作：
 
 - `selected_files` 为空或无合格纯服装参考图：展示 `未通过上传要求`，提示更换清晰、同一件服装、以商品为主体的图片后重新识别。
-- 明确的前置限流拒绝、连接中断和读取超时：保持 `识别中`，后台按 30/60/120/240 秒封顶退避，默认最多自动重试 10 次，并提示用户可离开当前页面。
+- 明确限流、连接中断、读取超时、网关和 provider 瞬时异常：保持 `识别中`，provider 层按 30/60/120/240 秒封顶退避，默认最多自动重试 10 次；下一次恢复时间和累计次数写入服装与当前 attempt，释放并发槽位后由现有 poller 到期续跑，服务重启不重置预算，并提示用户可离开当前页面。
+- JSON 不可解析或缺少 `selected_files` / `ai_tags` 等模型契约异常：保持 `识别中`，编排层追加协议纠错事实并沿用同一套持久退避机制和 10 次预算；不与传输错误的重试所有者重复计算同一种错误。
+- 首次 provider 调用、执行中或成功落库前发生进程中断：无主运行态按进程恢复预算自动排期，复用当前 attempt 与既有累计次数；默认最多 10 次，不能因尚无 `tag_retry_at` 直接变为 `识别失败`。
 - 自动恢复预算耗尽或其它识别调用/返回处理异常：展示 `识别暂时未完成`，提供稍后重新识别入口；多次失败时提示联系开发人员。
 
 底层模型名称、`selected_files`、错误码、provider 原始返回、请求/响应快照和失败 attempt 只进入 admin 技术详情或日志。历史失败 attempt 不改变当前成功入库服装的 `READY` 展示状态。

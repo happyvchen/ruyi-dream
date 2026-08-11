@@ -311,7 +311,9 @@ def classify_provider_error(
         return ERROR_RATE_LIMITED
 
     # 5. 网关 5xx。
-    if status_code in {502, 503, 504, 520, 521, 522, 523, 524}:
+    if status_code == 500 or "internal_error" in text or "internal error" in text:
+        return ERROR_PROVIDER_INTERNAL
+    if status_code in {408, 502, 503, 504, 520, 521, 522, 523, 524}:
         return ERROR_GATEWAY_5XX
     if any(keyword in text for keyword in _GATEWAY_KEYWORDS):
         return ERROR_GATEWAY_5XX
@@ -353,6 +355,22 @@ def is_retryable_error(error_code: str | None) -> bool:
     AUTH_FAILED / INSUFFICIENT_BALANCE / BUSINESS_REJECT / MALFORMED_OUTPUT 不可重试。
     """
     return bool(error_code) and error_code in _RETRYABLE_CODES
+
+
+def is_gemini_transport_retryable_error(error_code: str | None) -> bool:
+    """Gemini 文本请求可自动重发的非确定性传输/provider 错误。
+
+    JSON/契约错误已经取得模型输出，由调用方负责纠错重问；鉴权、余额、参数、
+    内容策略和业务拒绝是确定性阻断，不进入传输重试。
+    """
+    return error_code in {
+        ERROR_GATEWAY_5XX,
+        ERROR_CONN_RESET,
+        ERROR_RATE_LIMITED,
+        ERROR_WAF_BLOCK,
+        ERROR_PROVIDER_INTERNAL,
+        ERROR_PROVIDER_TIMEOUT,
+    }
 
 
 def is_generation_retryable_error(error_code: str | None) -> bool:

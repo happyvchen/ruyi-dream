@@ -75,6 +75,9 @@ GenerationTask
 
 - `tag_error_code`：只记录当前一轮打标的稳定错误分类；包含 `UPLOAD_REQUIREMENT_NOT_MET` 等可直接驱动用户操作的安全业务码，开始重试和成功完成时清空，避免历史 attempt 的错误码串到新任务。
 - `tag_error`：保留当前一轮原始诊断文本，仅供 admin 技术详情使用；普通列表与详情响应不返回该文本。
+- `tag_retry_at` / `tag_retry_state_json`：打标传输、契约纠错或进程中断的下一次恢复时间、分类与累计次数；由现有 generation poller 到期续跑。终态清空 `tag_retry_at`，但保留安全的累计摘要用于解释已执行的自动恢复。
+- `tag_active_attempt_id`：当前逻辑打标 attempt；进程重启恢复时复用，避免把一次自动恢复拆成多条相互覆盖的 attempt。
+- `tag_retry_lease_until`：poller 恢复 claim 的短租约；避免多 worker 重复恢复，进程中断后租约过期可再次领取。
 
 ## 数据清理
 
