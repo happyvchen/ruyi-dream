@@ -1023,6 +1023,80 @@ def list_upload_sessions(
     }
 
 
+def upload_session_batch_key(row: Any) -> str:
+    batch_id = str(row_value(row, "batch_id") or "").strip()
+    return f"batch:{batch_id}" if batch_id else f"session:{row['id']}"
+
+
+@app.get("/api/upload-session-batches")
+def list_upload_session_batches(
+    scope: str = Query("styling_garment"),
+    include_archived: bool = Query(False, alias="includeArchived"),
+    limit: int = Query(500, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    normalized_scope = direct_upload_scope_prefix(scope)
+    filters = ["us.scope = ?", "COALESCE(us.archive_reason, '') <> 'deletion_pending'"]
+    values: list[Any] = [normalized_scope]
+    if not include_archived:
+        filters.append("us.archived_at IS NULL")
+    with get_db() as db:
+        rows = db.execute(
+            f"""
+            SELECT us.*, sg.status AS target_status
+            FROM upload_sessions us
+            LEFT JOIN styling_garments sg
+              ON us.target_type = 'styling_garment' AND sg.id = us.target_id
+            WHERE {' AND '.join(filters)}
+            ORDER BY us.created_at DESC, us.id DESC
+            """,
+            values,
+        ).fetchall()
+
+    grouped: dict[str, list[Any]] = {}
+    for row in rows:
+        grouped.setdefault(upload_session_batch_key(row), []).append(row)
+
+    batches: list[dict[str, Any]] = []
+    for key, members in grouped.items():
+        members_by_created = sorted(members, key=lambda item: (str(item["created_at"]), str(item["id"])))
+        first = members_by_created[0]
+        title = str(row_value(first, "source_title") or row_value(first, "business_code") or "上传任务")
+        status_counts: dict[str, int] = {}
+        for member in members:
+            status = str(member["status"])
+            status_counts[status] = status_counts.get(status, 0) + 1
+        batches.append({
+            "key": key,
+            "batchId": row_value(first, "batch_id"),
+            "name": title,
+            "codeCount": len(members),
+            "createdAt": min(str(member["created_at"]) for member in members),
+            "updatedAt": max(str(member["updated_at"] or member["created_at"]) for member in members),
+            "statusCounts": status_counts,
+            "sessions": [
+                serialize_upload_session(
+                    member,
+                    [],
+                    target_status=row_value(member, "target_status"),
+                )
+                for member in members_by_created
+            ],
+        })
+    batches.sort(key=lambda item: (str(item["createdAt"]), str(item["key"])), reverse=True)
+    total = len(batches)
+    page = batches[offset:offset + limit]
+    return {
+        "items": page,
+        "limit": limit,
+        "offset": offset,
+        "nextOffset": offset + limit if offset + limit < total else None,
+        "hasMore": offset + limit < total,
+        "total": total,
+        "totalPages": (total + limit - 1) // limit if total else 0,
+    }
+
+
 def normalized_upload_session_ids(ids: list[str]) -> list[str]:
     cleaned = list(dict.fromkeys(str(item).strip() for item in ids if str(item).strip()))
     if not cleaned:
@@ -1837,6 +1911,7 @@ def list_styling_garments(
     review_status: list[str] | None = Query(None, alias="reviewStatus"),
     uploaded_from: str | None = Query(None, alias="uploadedFrom"),
     uploaded_to: str | None = Query(None, alias="uploadedTo"),
+    upload_batch_key: str | None = Query(None, alias="uploadBatchKey"),
     sort_by: str = Query("createdAt", alias="sortBy"),
     sort_dir: str = Query("desc", alias="sortDir"),
 ) -> dict[str, Any]:
@@ -1877,6 +1952,18 @@ def list_styling_garments(
         rows = db.execute(
             f"""
             SELECT sg.*,
+              (SELECT CASE
+                 WHEN NULLIF(TRIM(us.batch_id), '') IS NOT NULL THEN 'batch:' || us.batch_id
+                 ELSE 'session:' || us.id
+               END
+               FROM upload_sessions us
+               WHERE us.scope = 'styling-garment'
+                 AND us.target_type = 'styling_garment'
+                 AND us.target_id = sg.id
+                 AND us.archived_at IS NULL
+                 AND COALESCE(us.archive_reason, '') <> 'deletion_pending'
+               ORDER BY us.created_at, us.id
+               LIMIT 1) AS upload_batch_key,
               (SELECT ma.id FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
                WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_asset_id,
               (SELECT ma.object_key FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
@@ -1922,6 +2009,7 @@ def list_styling_garments(
             "reviewStatus": split_filter_values(review_status),
             "uploadedFrom": uploaded_from,
             "uploadedTo": uploaded_to,
+            "uploadBatchKey": upload_batch_key,
         }
         filtered = [context for context in contexts if styling_garment_matches_filters(context, filters)]
         facets = styling_garment_facets(filtered)
@@ -2012,6 +2100,7 @@ def styling_garment_filter_context(row: Any) -> dict[str, Any]:
         "facts": facts,
         "reviewStatus": review_status,
         "keywordBlob": keyword_blob,
+        "uploadBatchKey": row_value(row, "upload_batch_key"),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
         "tagCompletedAt": row["tag_completed_at"],
@@ -2128,6 +2217,9 @@ def styling_garment_matches_filters(context: dict[str, Any], filters: dict[str, 
         return False
     review_statuses = filters.get("reviewStatus") or set()
     if review_statuses and context["reviewStatus"].casefold() not in review_statuses:
+        return False
+    upload_batch_key = str(filters.get("uploadBatchKey") or "").strip()
+    if upload_batch_key and context.get("uploadBatchKey") != upload_batch_key:
         return False
     uploaded_from = parse_filter_datetime(filters.get("uploadedFrom"), end_of_day=False)
     uploaded_to = parse_filter_datetime(filters.get("uploadedTo"), end_of_day=True)

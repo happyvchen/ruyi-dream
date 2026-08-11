@@ -22,6 +22,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("058", "upload_session_archiving", "migration_upload_session_archiving"),
     ("059", "upload_object_cleanup_retry", "migration_upload_object_cleanup_retry"),
     ("060", "upload_object_cleanup_claim", "migration_upload_object_cleanup_claim"),
+    ("061", "upload_session_batch_queries", "migration_upload_session_batch_queries"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -402,6 +403,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_upload_session_archiving": migration_upload_session_archiving,
         "migration_upload_object_cleanup_retry": migration_upload_object_cleanup_retry,
         "migration_upload_object_cleanup_claim": migration_upload_object_cleanup_claim,
+        "migration_upload_session_batch_queries": migration_upload_session_batch_queries,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -558,6 +560,23 @@ def migration_upload_session_archiving(db: sqlite3.Connection) -> None:
         """
     )
     db.execute("CREATE INDEX IF NOT EXISTS idx_upload_object_cleanup_queue_updated_at ON upload_object_cleanup_queue(updated_at)")
+
+
+def migration_upload_session_batch_queries(db: sqlite3.Connection) -> None:
+    db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_upload_sessions_batch_visibility
+        ON upload_sessions(scope, archived_at, archive_reason, created_at)
+        """
+    )
+    if {"scope", "target_type", "target_id", "archived_at", "created_at"}.issubset(table_columns(db, "upload_sessions")):
+        db.execute("DROP INDEX IF EXISTS idx_upload_sessions_styling_target")
+        db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_upload_sessions_styling_target
+            ON upload_sessions(scope, target_type, target_id, archived_at, created_at)
+            """
+        )
 
 
 def migration_upload_object_cleanup_retry(db: sqlite3.Connection) -> None:

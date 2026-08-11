@@ -355,6 +355,19 @@ export type UploadSession = {
   }[]
 }
 
+export type UploadSessionBatch = {
+  key: string
+  batchId?: string | null
+  name: string
+  codeCount: number
+  createdAt: string
+  updatedAt: string
+  statusCounts: Record<string, number>
+  sessions: UploadSession[]
+}
+
+export type UploadSessionBatchListResponse = Paginated<UploadSessionBatch>
+
 const uploadExecutorStorageKey = 'ruyi-upload-executor-id'
 let cachedUploadExecutorId = ''
 
@@ -731,6 +744,8 @@ export const api = {
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
   listUploadSessions: (options?: { scope?: string; status?: string; batchId?: string; limit?: number; includeAbandoned?: boolean; includeArchived?: boolean }) =>
     request<{ items: UploadSession[] }>(params('/api/upload-sessions', options ?? {})),
+  listUploadSessionBatches: (options?: { scope?: string; limit?: number; offset?: number; includeArchived?: boolean }) =>
+    request<UploadSessionBatchListResponse>(params('/api/upload-session-batches', options ?? {})),
   getUploadSession: (id: string) =>
     request<{ session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(id)}`),
   abandonUploadSession: (id: string) =>
@@ -801,6 +816,7 @@ export const api = {
     reviewStatus?: string[]
     uploadedFrom?: string
     uploadedTo?: string
+    uploadBatchKey?: string
     sortBy?: string
     sortDir?: string
   }) =>

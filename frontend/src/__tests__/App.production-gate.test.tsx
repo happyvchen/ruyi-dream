@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import userEvent from '@testing-library/user-event'
 import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { App } from '../App'
+import { App, mergeUploadSessionUpdates } from '../App'
 
 const apiMock = vi.hoisted(() => ({
   session: vi.fn(),
@@ -54,6 +54,7 @@ const apiMock = vi.hoisted(() => ({
   uploadPreparedSession: vi.fn(),
   finalizeStylingGarmentSession: vi.fn(),
   listUploadSessions: vi.fn(),
+  listUploadSessionBatches: vi.fn(),
   abandonUploadSession: vi.fn(),
   getUploadSessionDeleteImpact: vi.fn(),
   reconcileUploadSessions: vi.fn(),
@@ -196,6 +197,27 @@ function deferred<T = void>() {
   return { promise, resolve, reject }
 }
 
+describe('upload session merging', () => {
+  it('keeps full upload items when a newer batch summary omits them', () => {
+    const full = {
+      id: 'session-1',
+      scope: 'styling-garment',
+      status: 'UPLOADING',
+      totalCount: 1,
+      uploadedCount: 0,
+      createdAt: '2026-08-11T10:00:00Z',
+      updatedAt: '2026-08-11T10:00:00Z',
+      items: [{ id: 1, objectKey: 'uploads/front.jpg', filename: 'front.jpg', mimeType: 'image/jpeg', relativePath: 'SKU-1/front.jpg', status: 'PENDING' }],
+    }
+    const summary = { ...full, status: 'FAILED', updatedAt: '2026-08-11T10:01:00Z', items: [] }
+
+    const [merged] = mergeUploadSessionUpdates([full], [summary])
+
+    expect(merged.status).toBe('FAILED')
+    expect(merged.items).toEqual(full.items)
+  })
+})
+
 function configurePendingStylingUpload() {
   const upload = deferred<void>()
   apiMock.createStylingImportSessions.mockImplementation(async (_title: string, batches: { code: string }[], batchId: string) => {
@@ -219,6 +241,7 @@ function configurePendingStylingUpload() {
   })
   apiMock.uploadPreparedSession.mockImplementation(() => upload.promise)
   apiMock.listUploadSessions.mockResolvedValue({ items: [] })
+  apiMock.listUploadSessionBatches.mockResolvedValue({ ...emptyPage, items: [] })
   apiMock.tagStylingGarments.mockResolvedValue({ items: [], startedIds: [], skipped: [] })
   return upload
 }
@@ -241,6 +264,7 @@ function configureApi(role: 'admin' | 'user' = 'admin') {
   apiMock.precheckFinalImageExport.mockResolvedValue({ items: [], downloadableTaskIds: [], completeTaskIds: [], totalImages: 0, totalBytes: 0 })
   apiMock.getShootEnvironment.mockResolvedValue({ asset: null })
   apiMock.listUploadSessions.mockResolvedValue({ items: [] })
+  apiMock.listUploadSessionBatches.mockResolvedValue({ ...emptyPage, items: [] })
   apiMock.abandonUploadSession.mockResolvedValue({ session: { id: 'abandoned', status: 'ABANDONED' } })
   apiMock.getUploadSessionDeleteImpact.mockResolvedValue({ impact: {
     uploadSessionCount: 1,
@@ -308,6 +332,61 @@ describe('production gate app shell and page controls', () => {
       status: 'PENDING,UPLOADING,UPLOADED,FINALIZING',
       limit: 500,
     })
+    expect(apiMock.listUploadSessionBatches).toHaveBeenCalledWith({
+      scope: 'styling_garment',
+      limit: 500,
+      offset: 0,
+    })
+  })
+
+  it('uses the server upload-record batches for the upload batch filter and exact garment query', async () => {
+    const olderSession = {
+      id: 'older-session', scope: 'styling-garment', status: 'FINALIZED', businessCode: 'OLDER-LOOK',
+      sourceTitle: '较早上传批次', batchId: 'older-batch', totalCount: 2, uploadedCount: 2, items: [],
+      createdAt: '2026-08-01T08:00:00Z', updatedAt: '2026-08-05T08:00:00Z',
+    }
+    const newerFailedSession = {
+      id: 'newer-session', scope: 'styling-garment', status: 'FAILED', businessCode: 'FAILED-LOOK',
+      sourceTitle: '较新失败批次', batchId: 'newer-batch', totalCount: 1, uploadedCount: 0, items: [],
+      createdAt: '2026-08-03T08:00:00Z', updatedAt: '2026-08-03T08:01:00Z',
+    }
+    apiMock.listUploadSessionBatches.mockResolvedValue({
+      ...emptyPage,
+      total: 2,
+      totalPages: 1,
+      items: [
+        { key: 'batch:newer-batch', batchId: 'newer-batch', name: '较新失败批次', codeCount: 1, createdAt: newerFailedSession.createdAt, updatedAt: newerFailedSession.updatedAt, statusCounts: { FAILED: 1 }, sessions: [newerFailedSession] },
+        { key: 'batch:older-batch', batchId: 'older-batch', name: '较早上传批次', codeCount: 2, createdAt: olderSession.createdAt, updatedAt: olderSession.updatedAt, statusCounts: { FINALIZED: 2 }, sessions: [olderSession] },
+      ],
+    })
+    window.localStorage.setItem('ruyi-library-import-jobs', JSON.stringify([{
+      id: 'stale-local-batch', title: '本地残留批次', status: 'FAILED', total: 1, uploaded: 0, skipped: 1, progress: null, operations: [],
+      items: [{ id: 'stale-item', code: 'STALE', imageCount: 1, uploadedCount: 0, status: 'FAILED' }],
+    }]))
+    apiMock.listStylingGarments.mockImplementation(async (options?: { uploadBatchKey?: string }) => ({
+      ...emptyPage,
+      items: [],
+      total: 0,
+      facets: {},
+      stableFacets: {},
+      selectedBatch: options?.uploadBatchKey,
+    }))
+    window.history.replaceState(null, '', '/library')
+
+    render(<App />)
+
+    const filterButton = await screen.findByRole('button', { name: /全部上传批次/ })
+    await userEvent.click(filterButton)
+    const newerOption = await screen.findByRole('button', { name: /较新失败批次.*1 个货号/ })
+    const olderOption = screen.getByRole('button', { name: /较早上传批次.*2 个货号/ })
+    expect(newerOption.compareDocumentPosition(olderOption) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByText('本地残留批次')).not.toBeInTheDocument()
+
+    await userEvent.click(newerOption)
+    await waitFor(() => expect(apiMock.listStylingGarments).toHaveBeenCalledWith(expect.objectContaining({
+      uploadBatchKey: 'batch:newer-batch',
+    })))
+    expect(await screen.findByText('该上传批次暂未产生已入库服装')).toBeInTheDocument()
   })
 
   it('admin can reach every 0.1.0 page without exposing provider console as a top-level page', async () => {

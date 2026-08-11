@@ -36,6 +36,7 @@
 - `POST /api/upload-sessions`：创建上传任务和对象存储直传地址。
 - `POST /api/upload-sessions/styling-import-batch`：原子创建一次搭配服装导入中的全部货号会话；返回共同的 `batchId`，保证用户开始任务后、读取和上传图片前整批记录立即可查。每个货号首次 `resume` 时绑定图片 SHA-256。
 - `GET /api/upload-sessions`：按 `scope`、`status`、`batchId`、`limit` 查询上传任务，默认按首次创建时间倒序、同时间按 ID 倒序；默认排除已归档记录，`includeArchived=true` 时一并返回且包含已归档的 `ABANDONED` 记录；`batchId` 用于完整恢复同一次批量任务，单批最多返回 500 个货号。`includeArchived=true` 返回的 `deletion_pending` 仅供客户端对账并移除本地残留任务，不得渲染为用户记录。
+- `GET /api/upload-session-batches`：按稳定上传批次聚合上传会话，供上传记录和搭配服装库的 `上传批次` 筛选共同使用。默认排除已归档和内部 `deletion_pending`，不按上传状态或是否产出服装过滤；批次按最早 `createdAt` 倒序，`codeCount` 为当前可见上传会话数。无 `batch_id` 的历史会话以 `session:{session_id}` 作为稳定单条批次键。
 - `GET /api/upload-sessions/{session_id}`：查询单个上传任务和条目。
 - `POST /api/upload-sessions/{session_id}/resume`：严格校验重新选择的相对路径、大小、修改时间和 SHA-256；认领对象存储中已存在且完整性一致的对象，并只为缺失条目重新签发上传地址。
 - `POST /api/upload-sessions/{session_id}/lease`：上传期间续租当前批次的执行权。
@@ -49,6 +50,7 @@
 - `POST /api/upload-sessions/restore`：恢复已归档上传记录的可见性；不改变上传状态。
 - `DELETE /api/upload-sessions`：彻底删除任意状态的上传会话元数据；单条输入完整任务名、批量输入 `全部删除`。只清理既未通过条目外键登记、也不存在同 `object_key` 活跃 `MediaAsset` 的临时直传对象，已入库的服装、生成任务和正式媒体不随上传记录删除。未完成会话先返回 `deferredIds` 并进入内部 `deletion_pending` 墓碑，立即阻断续传确认和入库，待已签发直传地址安全失效后再物理删除；该内部状态不返回到任何用户上传记录列表，用户确认删除后记录立即消失。
 - `businessCode` / `sourceTitle` / `batchId`：创建上传任务时记录业务货号、用户选择的文件夹 / 批次名和本次批量任务 ID；如果旧客户端未传货号，搭配服装保存接口会用最终 `code` 兜底写入。
+- `GET /api/styling-garments` 支持 `uploadBatchKey` 精确筛选服装与当前可见上传会话的关联；普通批次使用 `batch:{batch_id}`，无批次 ID 的历史单条会话使用 `session:{session_id}`。筛选不再把批次货号拼接为关键词；批次没有产出服装时正常返回空分页。
 - `executorId`：浏览器标签页执行标识。继续上传和确认条目会续租 90 秒批次执行权；其他页面或电脑只能查看，不能并发接管仍有有效租约的批次。
 
 上传任务状态：

@@ -41,7 +41,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { ApiError, api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl, stylingGarmentArchiveUrl } from './api'
-import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, DirectUploadItem, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, ObjectCleanupError, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot, UploadSession } from './api'
+import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, DirectUploadItem, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, ObjectCleanupError, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot, UploadSession, UploadSessionBatch } from './api'
 import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { chooseDirectory, filesFromDirectory, getDirectoryHandle, storeDirectoryHandle, supportsDirectoryAccess } from './lib/directoryAccess'
@@ -242,6 +242,8 @@ export function App() {
   const [recordDetail, setRecordDetail] = useState<GenerationTask | null>(null)
   const [localOperations, setLocalOperations] = useState<AIOperation[]>([])
   const [uploadSessions, setUploadSessions] = useState<UploadSession[]>([])
+  const [stylingUploadBatches, setStylingUploadBatches] = useState<UploadSessionBatch[]>([])
+  const [stylingUploadBatchesLoaded, setStylingUploadBatchesLoaded] = useState(false)
   const [browserUploadingCount, setBrowserUploadingCount] = useState(0)
   const suppressStudioAutoRestoreRef = useRef(false)
   const [libraryImportOpen, setLibraryImportOpen] = useState(() => {
@@ -408,13 +410,33 @@ export function App() {
   }
 
   async function refreshUploadSessions(scope: string, limit = 20) {
-    const [historyResult, activeResult] = await Promise.all([
+    const normalizedScope = scope.replaceAll('-', '_')
+    const [historyResult, activeResult, batchResult] = await Promise.all([
       api.listUploadSessions({ scope, limit }),
       api.listUploadSessions({ scope, status: pollingUploadSessionStatusQuery, limit: 500 }),
+      normalizedScope === 'styling_garment'
+        ? listAllStylingUploadBatches().catch(() => null)
+        : Promise.resolve(null),
     ])
-    const items = mergeUploadSessionUpdates(historyResult.items, activeResult.items)
+    const batchSessions = batchResult?.items.flatMap((batch) => batch.sessions) ?? []
+    const items = mergeUploadSessionUpdates(mergeUploadSessionUpdates(historyResult.items, activeResult.items), batchSessions)
+    if (normalizedScope === 'styling_garment') {
+      setStylingUploadBatches(batchResult?.items.length ? batchResult.items : uploadSessionBatchesFromSessions(items))
+      setStylingUploadBatchesLoaded(true)
+    }
     setUploadSessions((current) => mergeUploadSessions(current, items, scope))
     return items
+  }
+
+  async function listAllStylingUploadBatches() {
+    const items: UploadSessionBatch[] = []
+    let offset = 0
+    while (true) {
+      const page = await api.listUploadSessionBatches({ scope: 'styling_garment', limit: 500, offset })
+      items.push(...page.items)
+      if (!page.hasMore || page.nextOffset == null || page.nextOffset <= offset) return { ...page, items, offset: 0 }
+      offset = page.nextOffset
+    }
   }
 
   async function refreshUploadSessionScopes(items?: UploadSession[]) {
@@ -578,7 +600,7 @@ export function App() {
         {error && <div className="toast">{error.length > 300 ? `${error.slice(0, 300)}…` : error}</div>}
         {busy && <BusyPill label={busy} />}
         {page === 'studio' && <StudioPage task={task} setTask={setTask} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} uploadSessions={uploadSessions.filter((item) => item.scope === 'generation-task')} refreshUploadSessions={() => refreshUploadSessions('generation_task')} markBrowserUploading={markBrowserUploading} onStartNewTask={() => { suppressStudioAutoRestoreRef.current = true }} onLatestTaskCreated={setLatestWorkspaceTask} />}
-        {page === 'library' && <LibraryPage garments={garments} run={run} role={role} onDeleteResult={noteDeleteOperationResult} uploadSessions={uploadSessions.filter((item) => item.scope === 'styling-garment')} refreshUploadSessions={() => refreshUploadSessions('styling_garment', 100)} markBrowserUploading={markBrowserUploading} showImport={libraryImportOpen} setShowImport={setLibraryImportOpen} importJobs={libraryImportJobs} setImportJobs={persistLibraryImportJobs} syncImportJobs={setLibraryImportJobs} />}
+        {page === 'library' && <LibraryPage garments={garments} run={run} role={role} onDeleteResult={noteDeleteOperationResult} uploadSessions={uploadSessions.filter((item) => item.scope === 'styling-garment')} uploadBatches={stylingUploadBatches} uploadBatchesLoaded={stylingUploadBatchesLoaded} refreshUploadSessions={() => refreshUploadSessions('styling_garment', 100)} markBrowserUploading={markBrowserUploading} showImport={libraryImportOpen} setShowImport={setLibraryImportOpen} importJobs={libraryImportJobs} setImportJobs={persistLibraryImportJobs} syncImportJobs={setLibraryImportJobs} />}
         {page === 'model' && <ModelPage models={models} role={role} run={run} />}
         {page === 'prompt-maintenance' && role === 'admin' && <PromptMaintenancePage run={run} />}
         {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} openTaskInStudio={openTaskInStudio} run={run} onDeleteResult={noteDeleteOperationResult} />}
@@ -671,16 +693,52 @@ export function uploadSessionRefreshTargets(items?: UploadSession[]) {
 export function mergeUploadSessions(current: UploadSession[], incoming: UploadSession[], refreshedScope: string) {
   const normalizedScope = refreshedScope.replaceAll('_', '-')
   const retained = current.filter((item) => item.scope !== normalizedScope)
+  const currentById = new Map(current.map((item) => [item.id, item]))
   const byId = new Map<string, UploadSession>()
   retained.forEach((item) => byId.set(item.id, item))
-  incoming.forEach((item) => byId.set(item.id, item))
+  incoming.forEach((item) => byId.set(item.id, mergeUploadSessionDetail(currentById.get(item.id), item)))
   return Array.from(byId.values()).sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')))
 }
 
 export function mergeUploadSessionUpdates(current: UploadSession[], incoming: UploadSession[]) {
   const byId = new Map(current.map((item) => [item.id, item]))
-  incoming.forEach((item) => byId.set(item.id, item))
+  incoming.forEach((item) => byId.set(item.id, mergeUploadSessionDetail(byId.get(item.id), item)))
   return Array.from(byId.values()).sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')))
+}
+
+function mergeUploadSessionDetail(existing: UploadSession | undefined, incoming: UploadSession): UploadSession {
+  const incomingItems = incoming.items ?? []
+  const existingItems = existing?.items ?? []
+  if (!existing || incomingItems.length > 0 || existingItems.length === 0) return incoming
+  return { ...incoming, items: existingItems }
+}
+
+export function uploadSessionBatchesFromSessions(sessions: UploadSession[]): UploadSessionBatch[] {
+  const grouped = new Map<string, UploadSession[]>()
+  sessions
+    .filter((session) => !session.archivedAt && session.archiveReason !== 'deletion_pending')
+    .forEach((session) => {
+      const key = session.batchId ? `batch:${session.batchId}` : `session:${session.id}`
+      grouped.set(key, [...(grouped.get(key) ?? []), session])
+    })
+  return Array.from(grouped.entries()).map(([key, members]) => {
+    const sorted = [...members].sort((a, b) => String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')) || a.id.localeCompare(b.id))
+    const first = sorted[0]!
+    const statusCounts = sorted.reduce<Record<string, number>>((counts, session) => {
+      counts[session.status] = (counts[session.status] ?? 0) + 1
+      return counts
+    }, {})
+    return {
+      key,
+      batchId: first.batchId,
+      name: first.sourceTitle || first.businessCode || '上传任务',
+      codeCount: sorted.length,
+      createdAt: sorted.map((session) => session.createdAt ?? '').filter(Boolean).sort()[0] ?? '',
+      updatedAt: sorted.map((session) => session.updatedAt ?? session.createdAt ?? '').filter(Boolean).sort().at(-1) ?? '',
+      statusCounts,
+      sessions: sorted,
+    }
+  }).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)) || b.key.localeCompare(a.key, 'zh-CN', { numeric: true }))
 }
 
 export function compareCreatedAtDesc(
@@ -2546,12 +2604,14 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   )
 }
 
-function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refreshUploadSessions, markBrowserUploading, showImport, setShowImport, importJobs, setImportJobs, syncImportJobs }: {
+function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uploadBatches, uploadBatchesLoaded, refreshUploadSessions, markBrowserUploading, showImport, setShowImport, importJobs, setImportJobs, syncImportJobs }: {
   garments: StylingGarment[]
   run: any
   role: SessionRole | null
   onDeleteResult: (result: DeleteOperationResult) => void
   uploadSessions: UploadSession[]
+  uploadBatches: UploadSessionBatch[]
+  uploadBatchesLoaded: boolean
   refreshUploadSessions: () => Promise<UploadSession[]>
   markBrowserUploading: (delta: 1 | -1) => void
   showImport: boolean
@@ -2608,21 +2668,13 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
     onChange: setSelectedGarmentIds,
   })
   const lastSelectedGarmentIdRef = useRef<number | null>(null)
-  const importBatchOptions = useMemo(() => importJobs
-    .map((job) => {
-      const codes = Array.from(new Set(job.items.map((item) => item.code).filter(Boolean)))
-      return {
-        value: job.id,
-        label: importJobDisplayTitle(job, []),
-        count: codes.length,
-        codes,
-        updatedAt: job.updatedAt ?? job.createdAt,
-      }
-    })
-    .filter((option) => option.codes.length > 0)
-    .sort((a, b) => new Date(parseRuyiTime(b.updatedAt)).getTime() - new Date(parseRuyiTime(a.updatedAt)).getTime()), [importJobs])
+  const importBatchOptions = useMemo(() => uploadBatches.map((batch) => ({
+    value: batch.key,
+    label: batch.name,
+    count: batch.codeCount,
+    createdAt: batch.createdAt,
+  })), [uploadBatches])
   const selectedImportBatch = importBatchOptions.find((option) => option.value === importJobFilter)
-  const selectedImportCodes = useMemo(() => new Set(selectedImportBatch?.codes ?? []), [selectedImportBatch])
 
   useEffect(() => {
     refreshUploadSessionsRef.current = refreshUploadSessions
@@ -2641,18 +2693,18 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
 
   function libraryQueryOptions(targetOffset = offset) {
     const keyword = query.trim()
-    const importKeyword = selectedImportBatch?.codes.join(' ')
     const exactCodeKeyword = focusedGarmentCode.trim()
     return {
-      limit: selectedImportBatch ? Math.max(100, selectedImportBatch.codes.length, pageSize) : focusedGarmentCode ? Math.max(100, pageSize) : pageSize,
-      offset: selectedImportBatch || focusedGarmentCode || focusedGarmentId ? 0 : targetOffset,
-      keyword: selectedImportBatch ? importKeyword : exactCodeKeyword || keyword || undefined,
+      limit: focusedGarmentCode ? Math.max(100, pageSize) : pageSize,
+      offset: focusedGarmentCode || focusedGarmentId ? 0 : targetOffset,
+      keyword: exactCodeKeyword || keyword || undefined,
       includeArchived,
       status: statusFilter ? [statusFilter] : undefined,
       primaryCategory: primaryCategoryFilter.length ? primaryCategoryFilter : undefined,
       secondaryCategory: secondaryCategoryFilter.length ? secondaryCategoryFilter : undefined,
       uploadedFrom: uploadedFrom || undefined,
       uploadedTo: uploadedTo || undefined,
+      uploadBatchKey: selectedImportBatch?.value,
       sortBy,
       sortDir,
     }
@@ -2670,13 +2722,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   }
 
   function applyLibraryResult(result: StylingGarmentListResponse, targetOffset = offset) {
-    if (selectedImportBatch) {
-      const queryTerms = splitSearchTerms(query).map((term) => term.toLocaleLowerCase())
-      const filtered = result.items.filter((item) => selectedImportCodes.has(item.code) && garmentMatchesLibraryQuery(item, queryTerms))
-      setItems(filtered.slice(targetOffset, targetOffset + pageSize))
-      setTotal(filtered.length)
-      setTotalPages(filtered.length ? Math.ceil(filtered.length / pageSize) : 0)
-    } else if (focusedGarmentCode) {
+    if (focusedGarmentCode) {
       const filtered = result.items.filter((item) => item.code === focusedGarmentCode)
       setItems(filtered.slice(targetOffset, targetOffset + pageSize))
       setTotal(filtered.length)
@@ -2698,6 +2744,13 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
   useEffect(() => {
     setOffset(0)
   }, [query, includeArchived, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, importJobFilter, focusedGarmentCode, focusedGarmentId])
+
+  useEffect(() => {
+    if (!uploadBatchesLoaded || !importJobFilter) return
+    if (importBatchOptions.some((option) => option.value === importJobFilter)) return
+    setImportJobFilter('')
+    setOffset(0)
+  }, [importBatchOptions, importJobFilter, uploadBatchesLoaded])
 
   useEffect(() => {
     if (!searching) {
@@ -2966,6 +3019,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
               onClose={() => setShowImport(false)}
               onImported={() => void refreshFirstLibraryPage().catch(() => undefined)}
               uploadSessions={uploadSessions}
+              uploadBatches={uploadBatches}
               refreshUploadSessions={refreshUploadSessions}
               markBrowserUploading={markBrowserUploading}
               garments={importGarments}
@@ -3103,7 +3157,10 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, refr
                   archiveMutationBusy={garmentArchiveMutationBusy}
                 />
               ))}</div>
-            ) : searching ? null : <EmptyState title={hasActiveFilters ? '没有匹配的搭配服装' : '暂无搭配服装'} text={hasActiveFilters ? '减少筛选条件，或粘贴多个货号、标签再试。' : '点击右上角上传搭配服装。'} />}
+            ) : searching ? null : <EmptyState
+              title={selectedImportBatch ? '该上传批次暂未产生已入库服装' : hasActiveFilters ? '没有匹配的搭配服装' : '暂无搭配服装'}
+              text={selectedImportBatch ? '可以清除上传批次筛选，或稍后等待该批次完成入库。' : hasActiveFilters ? '减少筛选条件，或粘贴多个货号、标签再试。' : '点击右上角上传搭配服装。'}
+            />}
           </div>
           <div className="library-pagination-stick">
             <PaginationControls
@@ -3875,8 +3932,7 @@ type ImportBatchFilterOption = {
   value: string
   label: string
   count: number
-  codes: string[]
-  updatedAt?: string
+  createdAt?: string
 }
 
 type ImportTaskRow = {
@@ -4011,10 +4067,11 @@ function recoveredImportSessionGroups(rows: ImportTaskRow[], sessionsById: Map<s
   rows.forEach((row) => {
     const session = row.sessionId ? sessionsById.get(row.sessionId) : undefined
     const title = session?.sourceTitle?.trim() || row.sourceTitle?.trim()
-    if (!title) {
+    const stableBatchId = session?.batchId || row.serverBatchId
+    if (!stableBatchId) {
       groups.push({
         id: row.id,
-        title: session ? importSessionTitle(session, row) : row.code,
+        title: title || (session ? importSessionTitle(session, row) : row.code),
         rows: [row],
         total: 1,
         createdAt: row.createdAt,
@@ -4022,7 +4079,7 @@ function recoveredImportSessionGroups(rows: ImportTaskRow[], sessionsById: Map<s
       })
       return
     }
-    const key = session?.batchId || row.serverBatchId || `${session?.scope ?? row.scope ?? 'upload'}::${title}`
+    const key = stableBatchId
     buckets.set(key, [...(buckets.get(key) ?? []), row])
   })
 
@@ -4117,6 +4174,7 @@ function BatchImportPanel({
   onClose,
   onImported,
   uploadSessions,
+  uploadBatches,
   refreshUploadSessions,
   markBrowserUploading,
   garments,
@@ -4129,6 +4187,7 @@ function BatchImportPanel({
   onClose: () => void
   onImported: () => void
   uploadSessions: UploadSession[]
+  uploadBatches: UploadSessionBatch[]
   refreshUploadSessions: () => Promise<UploadSession[]>
   markBrowserUploading: (delta: 1 | -1) => void
   garments: StylingGarment[]
@@ -4681,6 +4740,7 @@ function BatchImportPanel({
         <ImportTaskWorkbench
           jobs={importJobs}
           sessions={uploadSessions}
+          uploadBatches={uploadBatches}
           garments={garments}
           onAbandon={(id) => api.abandonUploadSession(id).then(() => refreshUploadSessions())}
           onRemoveJob={(jobId) => setImportJobs((current) => current.filter((job) => job.id !== jobId))}
@@ -4716,6 +4776,7 @@ function BatchImportPanel({
 function ImportTaskWorkbench({
   jobs,
   sessions,
+  uploadBatches,
   garments,
   onAbandon,
   onRemoveJob,
@@ -4731,6 +4792,7 @@ function ImportTaskWorkbench({
 }: {
   jobs: ImportJob[]
   sessions: UploadSession[]
+  uploadBatches: UploadSessionBatch[]
   garments: StylingGarment[]
   onAbandon: (id: string) => Promise<unknown>
   onRemoveJob: (jobId: string) => void
@@ -4776,6 +4838,8 @@ function ImportTaskWorkbench({
   const [pageSize, setPageSize] = useState(8)
   const garmentsById = useMemo(() => new Map(garments.map((item) => [item.id, item])), [garments])
   const garmentsByCode = useMemo(() => new Map(garments.map((item) => [item.code, item])), [garments])
+  const activeUploadBatchOrder = useMemo(() => new Map(uploadBatches.map((batch, index) => [batch.key, index])), [uploadBatches])
+  const activeUploadSessionIds = useMemo(() => new Set(uploadBatches.flatMap((batch) => batch.sessions.map((session) => session.id))), [uploadBatches])
   const mergedUploadSessions = useMemo(() => {
     const merged = new Map(archivedSessionSnapshot.map((item) => [item.id, item]))
     sessions.forEach((session) => {
@@ -4795,6 +4859,14 @@ function ImportTaskWorkbench({
   const sessionsById = useMemo(() => new Map(displayedSessions.map((item) => [item.id, item])), [displayedSessions])
   const allSessionsById = useMemo(() => new Map(mergedUploadSessions.map((item) => [item.id, item])), [mergedUploadSessions])
   const jobSessionIds = useMemo(() => new Set(jobs.flatMap((job) => job.items.map((item) => item.sessionId).filter(Boolean) as string[])), [jobs])
+  const jobUploadBatchKey = (job: ImportJob) => {
+    const session = job.items
+      .map((item) => item.sessionId ? allSessionsById.get(item.sessionId) : undefined)
+      .find(Boolean)
+    if (session?.batchId) return `batch:${session.batchId}`
+    if (session?.id) return `session:${session.id}`
+    return `batch:${job.id}`
+  }
 
   const reconciledJobs = useMemo(() => jobs.map((job) => {
     const linked = job.items.map((item) => item.sessionId ? allSessionsById.get(item.sessionId) : undefined).filter(Boolean) as UploadSession[]
@@ -4803,7 +4875,7 @@ function ImportTaskWorkbench({
     return { ...job, archivedAt, archiveReason: archivedAt ? linked.find((session) => session.archiveReason)?.archiveReason ?? 'user_archived' : null }
   }), [allSessionsById, jobs])
   const displayedJobs = useMemo(() => reconciledJobs
-    .filter((job) => includeArchived || !job.archivedAt), [includeArchived, reconciledJobs])
+    .filter((job) => includeArchived || (!job.archivedAt && activeUploadBatchOrder.has(jobUploadBatchKey(job)))), [activeUploadBatchOrder, allSessionsById, includeArchived, reconciledJobs])
   const jobRows = useMemo<ImportTaskRow[]>(() => displayedJobs.flatMap((job) => {
     const createdAt = job.createdAt ?? job.operations.find((item) => item.startedAt)?.startedAt ?? job.operations.find((item) => item.completedAt)?.completedAt ?? undefined
     const updatedAt = job.updatedAt ?? [...job.operations]
@@ -4812,7 +4884,9 @@ function ImportTaskWorkbench({
       .sort()
       .at(-1) ?? createdAt ?? undefined
     return job.items
-      .filter((item) => !item.sessionId || (!deletionPendingSessionIds.has(item.sessionId) && !dismissedUploadSessionIds.has(item.sessionId)))
+      .filter((item) => includeArchived
+        ? !item.sessionId || (!deletionPendingSessionIds.has(item.sessionId) && !dismissedUploadSessionIds.has(item.sessionId))
+        : Boolean(item.sessionId && activeUploadSessionIds.has(item.sessionId) && !dismissedUploadSessionIds.has(item.sessionId)))
       .map((item) => {
       const session = item.sessionId ? sessionsById.get(item.sessionId) : undefined
       const targetId = session?.targetId ?? item.garmentId
@@ -4843,7 +4917,7 @@ function ImportTaskWorkbench({
         archiveReason: session?.archiveReason ?? job.archiveReason,
       }
       })
-  }), [deletionPendingSessionIds, dismissedUploadSessionIds, displayedJobs, garmentsByCode, garmentsById, sessionsById])
+  }), [activeUploadSessionIds, deletionPendingSessionIds, dismissedUploadSessionIds, displayedJobs, garmentsByCode, garmentsById, includeArchived, sessionsById])
 
   useEffect(() => {
     if (!deletionPendingSessionIds.size) return
@@ -4955,13 +5029,28 @@ function ImportTaskWorkbench({
     id: group.id,
     group,
   }))
-  const importRecords = [
+  const candidateImportRecords = [
     ...visibleJobs.filter((job) => visibleJobIds.has(job.id)).map((job) => ({ kind: 'job' as const, id: job.id, job })),
     ...recoveredRecords,
-  ].sort((a, b) => compareCreatedAtDesc(
+  ]
+  const importRecordBatchKey = (record: (typeof candidateImportRecords)[number]) => {
+    if (record.kind === 'job') return jobUploadBatchKey(record.job)
+    const row = record.group.rows[0]
+    return row?.serverBatchId ? `batch:${row.serverBatchId}` : row?.sessionId ? `session:${row.sessionId}` : ''
+  }
+  const importRecords = candidateImportRecords
+    .filter((record) => includeArchived || activeUploadBatchOrder.has(importRecordBatchKey(record)))
+    .sort((a, b) => {
+      if (!includeArchived) {
+        const ai = activeUploadBatchOrder.get(importRecordBatchKey(a)) ?? Number.MAX_SAFE_INTEGER
+        const bi = activeUploadBatchOrder.get(importRecordBatchKey(b)) ?? Number.MAX_SAFE_INTEGER
+        if (ai !== bi) return ai - bi
+      }
+      return compareCreatedAtDesc(
     { id: a.id, createdAt: a.kind === 'job' ? a.job.createdAt : a.group.createdAt, updatedAt: a.kind === 'job' ? a.job.updatedAt : a.group.updatedAt },
     { id: b.id, createdAt: b.kind === 'job' ? b.job.createdAt : b.group.createdAt, updatedAt: b.kind === 'job' ? b.job.updatedAt : b.group.updatedAt },
-  ))
+      )
+    })
   const totalRecords = importRecords.length
   const totalPages = totalRecords > 0 ? Math.ceil(totalRecords / pageSize) : 0
   const pagedRecords = importRecords.slice(offset, offset + pageSize)
@@ -5518,11 +5607,11 @@ function ImportTaskWorkbench({
                   <ImportThumbStack rows={allJobRows} />
                   <div>
                     <TruncatedText as="strong" text={title} />
-                    <TruncatedText text={`${summary.label} · ${job.total} 个货号 · 上传 ${dateText(job.createdAt)} · 更新 ${dateText(summary.updatedAt)}`} />
+                      <TruncatedText text={`${summary.label} · ${allJobRows.length} 个货号 · 上传 ${dateText(job.createdAt)} · 更新 ${dateText(summary.updatedAt)}`} />
                   </div>
                 </div>
                 <div className="batch-progress-strip import-progress-strip">
-                  <span>{summary.saved}/{job.total} 已整理</span>
+                  <span>{summary.saved}/{allJobRows.length} 已整理</span>
                   {summary.interrupted > 0 && <span>{summary.interrupted} 已暂停</span>}
                   {summary.uploading > 0 && <span>{summary.uploading} 上传中</span>}
                   {summary.organizing > 0 && <span>{summary.organizing} 整理中</span>}

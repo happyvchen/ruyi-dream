@@ -557,6 +557,93 @@ def test_styling_import_batch_persists_every_item_before_upload(client) -> None:
     assert payload["items"][0]["session"]["items"][0]["relativePath"] == "7.20回图/LOOK-001/front.jpg"
 
 
+def test_upload_session_batches_match_visible_upload_records_and_sort_by_created_time(client) -> None:
+    def create_batch(batch_id: str, title: str, codes: list[str]) -> list[str]:
+        response = client.post(
+            "/api/upload-sessions/styling-import-batch",
+            json={
+                "batchId": batch_id,
+                "sourceTitle": title,
+                "items": [
+                    {
+                        "businessCode": code,
+                        "files": [{"filename": "front.jpg", "mimeType": "image/jpeg", "sizeBytes": 128}],
+                    }
+                    for code in codes
+                ],
+            },
+        )
+        assert response.status_code == 200
+        return [entry["session"]["id"] for entry in response.json()["items"]]
+
+    older_ids = create_batch("batch-older", "较早上传批次", ["OLD-1", "OLD-2"])
+    newer_ids = create_batch("batch-newer", "较新失败批次", ["NEW-1"])
+    deleted = create_session(client, scope="styling_garment", filenames=["deleted.jpg"])["session"]["id"]
+    with get_db() as db:
+        db.execute(
+            "UPDATE upload_sessions SET created_at = '2026-08-01T08:00:00Z', updated_at = '2026-08-04T08:00:00Z' WHERE id IN (?, ?)",
+            older_ids,
+        )
+        db.execute(
+            "UPDATE upload_sessions SET status = 'FAILED', created_at = '2026-08-03T08:00:00Z', updated_at = '2026-08-03T08:01:00Z' WHERE id = ?",
+            (newer_ids[0],),
+        )
+        db.execute("UPDATE upload_sessions SET archived_at = '2026-08-05T08:00:00Z' WHERE id = ?", (older_ids[1],))
+        db.execute("UPDATE upload_sessions SET archive_reason = 'deletion_pending' WHERE id = ?", (deleted,))
+
+    response = client.get("/api/upload-session-batches", params={"scope": "styling_garment"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["key"] for item in payload["items"]] == ["batch:batch-newer", "batch:batch-older"]
+    assert payload["items"][0]["codeCount"] == 1
+    assert payload["items"][0]["statusCounts"] == {"FAILED": 1}
+    assert payload["items"][1]["codeCount"] == 1
+    assert [session["businessCode"] for session in payload["items"][1]["sessions"]] == ["OLD-1"]
+
+
+def test_styling_garment_upload_batch_filter_is_exact_and_requires_a_visible_upload_record(client) -> None:
+    first_garment_id = insert_styling_garment(code="BATCH-LOOK-1")
+    second_garment_id = insert_styling_garment(code="BATCH-LOOK-2")
+    response = client.post(
+        "/api/upload-sessions/styling-import-batch",
+        json={
+            "batchId": "filter-batch",
+            "sourceTitle": "精确筛选批次",
+            "items": [
+                {"businessCode": "BATCH-LOOK-1", "files": [{"filename": "one.jpg", "mimeType": "image/jpeg", "sizeBytes": 128}]},
+                {"businessCode": "FAILED-NO-GARMENT", "files": [{"filename": "failed.jpg", "mimeType": "image/jpeg", "sizeBytes": 128}]},
+            ],
+        },
+    )
+    sessions = [entry["session"] for entry in response.json()["items"]]
+    linked_session_id = next(item["id"] for item in sessions if item["businessCode"] == "BATCH-LOOK-1")
+    failed_session_id = next(item["id"] for item in sessions if item["businessCode"] == "FAILED-NO-GARMENT")
+    other_session_id = create_session(client, scope="styling_garment", filenames=["other.jpg"])["session"]["id"]
+    with get_db() as db:
+        db.execute(
+            "UPDATE upload_sessions SET status = 'FINALIZED', target_type = 'styling_garment', target_id = ? WHERE id = ?",
+            (first_garment_id, linked_session_id),
+        )
+        db.execute("UPDATE upload_sessions SET status = 'FAILED' WHERE id = ?", (failed_session_id,))
+        db.execute(
+            "UPDATE upload_sessions SET status = 'FINALIZED', target_type = 'styling_garment', target_id = ? WHERE id = ?",
+            (second_garment_id, other_session_id),
+        )
+
+    selected = client.get("/api/styling-garments", params={"uploadBatchKey": "batch:filter-batch"})
+    empty_failed_batch = client.get("/api/styling-garments", params={"uploadBatchKey": "batch:missing-batch"})
+
+    assert selected.status_code == 200
+    assert [item["code"] for item in selected.json()["items"]] == ["BATCH-LOOK-1"]
+    assert empty_failed_batch.json()["total"] == 0
+
+    with get_db() as db:
+        db.execute("UPDATE upload_sessions SET archived_at = '2026-08-06T08:00:00Z' WHERE id = ?", (linked_session_id,))
+    archived = client.get("/api/styling-garments", params={"uploadBatchKey": "batch:filter-batch"})
+    assert archived.json()["total"] == 0
+
+
 def test_resume_rejects_a_different_directory_before_upload(client) -> None:
     created = client.post(
         "/api/upload-sessions",
@@ -780,4 +867,4 @@ def test_upgrade_after_054_adds_lease_and_checksum_columns() -> None:
     versions = {row["version"] for row in db.execute("SELECT version FROM schema_migrations")}
     assert {"lease_owner", "lease_expires_at"} <= session_columns
     assert "checksum_sha256" in item_columns
-    assert {"055", "056"} <= versions
+    assert {"055", "056", "061"} <= versions
