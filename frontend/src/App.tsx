@@ -86,8 +86,8 @@ type RecordSelectionKey = `task:${number}` | `batch:${string}`
 const steps = [
   { title: '导入主推款', icon: Upload },
   { title: 'AI 智能选搭', icon: WandSparkles },
-  { title: '生成分镜预览', icon: GalleryVerticalEnd },
-  { title: '生成成片', icon: Sparkles },
+  { title: '分镜预览', icon: GalleryVerticalEnd },
+  { title: '最终成片', icon: Sparkles },
 ] as const
 const adminPages = new Set<Page>(['prompt-maintenance'])
 
@@ -2494,7 +2494,7 @@ function diagnosisItems(value: Record<string, unknown>): string[] {
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="按主推款类型与选搭方案生成 3:2 六格分镜；前 5 格用于生成成片，第 6 格仅作备用参考。">生成分镜预览</HeadingWithTooltip></div>
+        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="按主推款类型与选搭方案生成 3:2 六格分镜；前 5 格用于生成成片，第 6 格仅作备用参考。">分镜预览</HeadingWithTooltip></div>
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_preview" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成分镜预览 · Attempt #${operation.id}`, ['generation_preview'], operation.id) : undefined} /></div>
         ) : (
@@ -2542,7 +2542,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="并发生成分镜前 5 个镜头；可逐张检查、下载或重新生成，也可打包下载全部成片。">生成成片</HeadingWithTooltip></div>
+        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="并发生成分镜前 5 个镜头；可逐张检查、下载或重新生成，也可打包下载全部成片。">最终成片</HeadingWithTooltip></div>
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status">
             <AIOperationList operations={finalHistoryOperations} taskId={task?.id} ownerType="generation_result_image" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成成片 · Attempt #${operation.id}`, ['generation_result_image'], operation.id) : undefined} />
@@ -3987,8 +3987,8 @@ function importTaskStatusTone(status: string): ImportTaskRow['statusTone'] {
   if (['WAITING', 'UPLOADING', 'SAVING', 'PENDING', 'FINALIZING', 'TAGGING', 'TAGGING_RUNNING', 'IMPORTING', 'ORGANIZING', 'PROCESSING', 'RECOVERING'].includes(status)) return 'running'
   if (['SAVED', 'UPLOADED', 'DRAFT', 'TAGGING_READY', 'INTERRUPTED', 'PENDING_RECOGNITION', 'REVIEW_REQUIRED'].includes(status)) return 'warning'
   if (['FINALIZED', 'READY', 'SUCCEEDED', 'RECOVERED'].includes(status)) return 'success'
-  if (['FAILED', 'TAGGING_FAILED', 'NEEDS_ACTION', 'TARGET_MISSING'].includes(status)) return 'danger'
-  if (status === 'ABANDONED') return 'muted'
+  if (['FAILED', 'TAGGING_FAILED', 'NEEDS_ACTION'].includes(status)) return 'danger'
+  if (['ABANDONED', 'TARGET_MISSING'].includes(status)) return 'muted'
   return 'warning'
 }
 
@@ -3997,7 +3997,7 @@ function isImportTaskRunning(status: string) {
 }
 
 function isImportTaskAttention(status: string) {
-  return ['FAILED', 'TAGGING_FAILED', 'INTERRUPTED', 'NEEDS_ACTION', 'TARGET_MISSING'].includes(status)
+  return ['FAILED', 'TAGGING_FAILED', 'INTERRUPTED', 'NEEDS_ACTION'].includes(status)
 }
 
 function isImportTaskDone(status: string) {
@@ -4056,7 +4056,7 @@ function importRowBusinessStatus(session: UploadSession | undefined, garment: St
 
 function importTargetCurrentStatusLabel(session?: UploadSession, garment?: StylingGarment) {
   const target = session?.targetSummary
-  if (target && !target.exists) return '关联服装已删除'
+  if (target && !target.exists) return null
   if (target?.archivedAt ?? garment?.archivedAt) return '当前已归档'
   const status = target?.status ?? garment?.status ?? session?.targetStatus
   if (status === 'READY') return '当前可选搭'
@@ -4941,7 +4941,11 @@ function ImportTaskWorkbench({
         code: targetSummary?.code ?? item.code,
         importedCount: item.imageCount,
         uploadedCount: session?.uploadedCount ?? item.uploadedCount,
-        retainedCount: typeof targetSummary?.imageCount === 'number' ? targetSummary.imageCount : retainedImageCount(garment),
+        retainedCount: targetSummary?.exists === false
+          ? null
+          : typeof targetSummary?.imageCount === 'number'
+            ? targetSummary.imageCount
+            : retainedImageCount(garment),
         status,
         statusLabel: importTaskStatusLabel(status),
         statusTone: importTaskStatusTone(status),
@@ -4982,7 +4986,11 @@ function ImportTaskWorkbench({
         code: importSessionCode(session, garment),
         importedCount: session.totalCount,
         uploadedCount: session.uploadedCount,
-        retainedCount: typeof targetSummary?.imageCount === 'number' ? targetSummary.imageCount : retainedImageCount(garment),
+        retainedCount: targetSummary?.exists === false
+          ? null
+          : typeof targetSummary?.imageCount === 'number'
+            ? targetSummary.imageCount
+            : retainedImageCount(garment),
         status,
         statusLabel: importTaskStatusLabel(status),
         statusTone: importTaskStatusTone(status),
@@ -5149,11 +5157,15 @@ function ImportTaskWorkbench({
     const review = rows.filter((row) => isImportTaskReviewRequired(row.status)).length
     const pendingRecognition = rows.filter((row) => isImportTaskPendingRecognition(row.status)).length
     const ready = rows.filter((row) => ['READY', 'SUCCEEDED', 'RECOVERED'].includes(row.status)).length
+    const abandoned = rows.filter((row) => row.status === 'ABANDONED').length
+    const missing = rows.filter((row) => row.status === 'TARGET_MISSING').length
     const finalized = rows.filter((row) => row.garmentId || isImportTaskDone(row.status) || ['DRAFT', 'TAGGING_RUNNING', 'TAGGING_READY', 'TAGGING_FAILED', 'PENDING_RECOGNITION', 'REVIEW_REQUIRED'].includes(row.status)).length
     const saved = finalized
     const hasActiveWork = uploading > 0 || organizing > 0 || tagging > 0 || running > 0
-    const tone: ImportTaskRow['statusTone'] = failed ? 'danger' : interrupted ? 'warning' : uploading || tagging || running ? 'running' : ready === rows.length ? 'success' : pendingRecognition || review ? 'warning' : 'warning'
-    const label = failed ? '部分失败' : interrupted && hasActiveWork ? '部分导入已暂停' : interrupted ? '导入已暂停' : uploading ? '导入中' : tagging ? 'AI 打标中' : organizing ? '整理入库中' : ready === rows.length ? '全部完成' : review ? '待复核' : pendingRecognition ? '待识别' : saved === rows.length ? '全部完成' : '需处理'
+    const allAbandoned = rows.length > 0 && abandoned === rows.length
+    const allMissing = rows.length > 0 && missing === rows.length
+    const tone: ImportTaskRow['statusTone'] = allAbandoned || allMissing ? 'muted' : failed ? 'danger' : interrupted ? 'warning' : uploading || tagging || running ? 'running' : ready === rows.length ? 'success' : pendingRecognition || review ? 'warning' : 'warning'
+    const label = allAbandoned ? '已放弃' : failed ? '部分失败' : interrupted && hasActiveWork ? '部分导入已暂停' : interrupted ? '导入已暂停' : uploading ? '导入中' : tagging ? 'AI 打标中' : organizing ? '整理入库中' : allMissing ? '关联服装已删除' : ready === rows.length ? '全部完成' : missing ? '部分服装已删除' : review ? '待复核' : pendingRecognition ? '待识别' : saved === rows.length ? '全部完成' : '需处理'
     const updatedAt = rows.map((row) => row.updatedAt ?? row.createdAt).filter(Boolean).sort().at(-1)
     return { imported, uploaded, retained, failed, interrupted, running, uploading, organizing, tagging, saved, tone, label, updatedAt }
   }
@@ -5804,7 +5816,7 @@ function ImportTaskRows({ rows, abandoningId, onAbandon, onFindGarment }: {
                 <button className="management-action compact-control" type="button" disabled={abandoningId === row.sessionId} onClick={() => row.sessionId && onAbandon(row.sessionId)}>
                   {abandoningId === row.sessionId ? '处理中' : '放弃'}
                 </button>
-              ) : isDuplicateFailure ? (
+              ) : row.targetExists === false ? <span>服装已删除</span> : isDuplicateFailure ? (
                 <button className="management-action compact-control" type="button" title="回到服装库查看已存在的货号" onClick={() => onFindGarment(row.code, row.garmentId)}>
                   查看已有
                 </button>
@@ -5816,7 +5828,7 @@ function ImportTaskRows({ rows, abandoningId, onAbandon, onFindGarment }: {
                 <button className="management-action compact-control" type="button" title="回到服装库查看这件服装" onClick={() => onFindGarment(row.code, row.garmentId)}>
                   查看服装
                 </button>
-              ) : row.targetExists === false ? <span>服装已删除</span> : needsManualReimport ? (
+              ) : needsManualReimport ? (
                 <span className="import-action-hint is-danger" title="当前页面已无法自动恢复原始本地文件，请重新选择图片或文件夹导入该货号">重新导入</span>
               ) : row.status === 'ABANDONED' ? <span>已放弃</span> : <span>无需操作</span>}
             </div>
@@ -8626,7 +8638,7 @@ function isAttemptRunning(operation: AIOperation) {
 function operationLabel(operation: AIOperation, index = 0) {
   if (operation.ownerType === 'styling_garment_upload') return '搭配服装导入'
   if (operation.ownerType === 'styling_garment_tagging') return '服装标签识别'
-  if (operation.ownerType === 'generation_styling') return '智能选搭'
+  if (operation.ownerType === 'generation_styling') return 'AI 智能选搭'
   if (operation.ownerType === 'generation_preview') return '分镜预览'
   if (operation.ownerType === 'generation_result_image') {
     const shot = operation.shotSortOrder ?? (operation.id < 0 && operation.ownerId > 0 ? operation.ownerId : null)

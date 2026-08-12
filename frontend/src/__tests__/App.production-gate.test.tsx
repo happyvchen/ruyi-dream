@@ -319,6 +319,17 @@ afterEach(() => {
 })
 
 describe('production gate app shell and page controls', () => {
+  it('uses nouns for the four studio stages while keeping generation actions explicit', async () => {
+    render(<App />)
+
+    expect(await screen.findByRole('button', { name: '导入主推款' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'AI 智能选搭' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '分镜预览' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '最终成片' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '生成分镜预览' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '生成成片' })).not.toBeInTheDocument()
+  })
+
   it('loads active upload sessions separately from the creation-time history window', async () => {
     render(<App />)
 
@@ -899,7 +910,16 @@ describe('production gate app shell and page controls', () => {
     window.localStorage.setItem('ruyi-library-import-open', '1')
     window.localStorage.setItem('ruyi-library-import-jobs', JSON.stringify([{
       id: 'state-boundaries', title: '状态边界批次', status: 'FAILED', total: 4, uploaded: 4, skipped: 0, operations: [],
-      items: sessions.map((session) => ({ id: session.id, code: session.businessCode, imageCount: 1, uploadedCount: 1, status: 'SAVED', sessionId: session.id, garmentId: session.targetId })),
+      items: sessions.map((session) => ({
+        id: session.id,
+        code: session.businessCode,
+        imageCount: 1,
+        uploadedCount: 1,
+        status: 'SAVED',
+        sessionId: session.id,
+        garmentId: session.targetId,
+        error: session.id === 'state-504' ? '搭配服装货号已存在' : undefined,
+      })),
     }]))
     apiMock.listUploadSessions.mockImplementation(async (options: { scope?: string }) => ({
       items: options.scope === 'styling_garment' ? sessions : [],
@@ -916,8 +936,14 @@ describe('production gate app shell and page controls', () => {
     const failedRow = screen.getByText('LOOK-FAILED').closest('.import-task-row') as HTMLElement
     expect(within(failedRow).getByRole('button', { name: '前往重新识别' })).toBeInTheDocument()
     const deletedRow = screen.getByText('LOOK-DELETED').closest('.import-task-row') as HTMLElement
+    expect(within(deletedRow).getAllByText('关联服装已删除')).toHaveLength(1)
+    expect(within(deletedRow).getByText('已选 1 / 已导入 1 / 正式图片 - 张')).toBeInTheDocument()
     expect(within(deletedRow).getByText('服装已删除')).toBeInTheDocument()
+    expect(within(deletedRow).queryByRole('button', { name: '查看已有' })).not.toBeInTheDocument()
     expect(within(deletedRow).queryByRole('button', { name: '查看服装' })).not.toBeInTheDocument()
+    const workbench = screen.getByText('导入记录').closest('.import-workbench') as HTMLElement
+    await userEvent.click(within(workbench).getByRole('button', { name: '全部状态' }))
+    expect(within(workbench).getByRole('button', { name: /需处理\s*1/ })).toBeInTheDocument()
   })
 
   it('only offers directory reselection when a paused upload has no saved directory permission', async () => {
@@ -1269,6 +1295,8 @@ describe('production gate app shell and page controls', () => {
     await userEvent.click(archivedToggle)
 
     const archivedRecord = (await screen.findByText('已归档放弃批次')).closest('.import-record-row') as HTMLElement
+    expect(within(archivedRecord).getByText('已放弃')).toBeInTheDocument()
+    expect(within(archivedRecord).queryByText('需处理')).not.toBeInTheDocument()
     expect(within(archivedRecord).getByRole('button', { name: '归档' })).toBeEnabled()
     const workbench = screen.getByText('导入记录').closest('.import-workbench') as HTMLElement
     await userEvent.click(within(workbench).getByRole('button', { name: '批量管理' }))

@@ -992,7 +992,7 @@ def list_upload_sessions(
         ).fetchall()
         session_ids = [row["id"] for row in rows]
         items_by_session: dict[str, list[Any]] = {session_id: [] for session_id in session_ids}
-        target_contexts: dict[int, dict[str, Any]] = {}
+        target_contexts: dict[str, dict[str, Any]] = {}
         if session_ids:
             placeholders = ", ".join("?" for _ in session_ids)
             item_rows = db.execute(
@@ -1011,7 +1011,7 @@ def list_upload_sessions(
             serialize_upload_session(
                 row,
                 items_by_session.get(row["id"], []),
-                target_context=target_contexts.get(int(row["target_id"])) if row_value(row, "target_id") else None,
+                target_context=target_contexts.get(str(row["id"])),
             )
             for row in rows
         ]
@@ -1072,7 +1072,7 @@ def list_upload_session_batches(
                 serialize_upload_session(
                     member,
                     [],
-                    target_context=target_contexts.get(int(member["target_id"])) if row_value(member, "target_id") else None,
+                    target_context=target_contexts.get(str(member["id"])),
                 )
                 for member in members_by_created
             ],
@@ -1614,16 +1614,54 @@ def get_upload_session(session_id: str) -> dict[str, Any]:
             (session_id,),
         ).fetchall()
         target_contexts = load_upload_target_contexts(db, [row])
-    target_id = int(row["target_id"]) if row_value(row, "target_id") else None
-    return serialize_upload_session(row, items, target_context=target_contexts.get(target_id) if target_id else None)
+    return serialize_upload_session(row, items, target_context=target_contexts.get(str(row["id"])))
 
 
-def load_upload_target_contexts(db: sqlite3.Connection, session_rows: list[Any]) -> dict[int, dict[str, Any]]:
-    garment_ids = list(dict.fromkeys(
-        int(row["target_id"])
+def load_upload_target_contexts(db: sqlite3.Connection, session_rows: list[Any]) -> dict[str, dict[str, Any]]:
+    resolved_target_ids = {
+        str(row["id"]): int(row["target_id"])
         for row in session_rows
         if row_value(row, "target_type") == "styling_garment" and row_value(row, "target_id")
-    ))
+    }
+    legacy_duplicate_rows = [
+        row
+        for row in session_rows
+        if str(row_value(row, "scope") or "") == "styling-garment"
+        and not row_value(row, "target_id")
+        and str(row_value(row, "error_message") or "") in {"搭配服装代码已存在", "搭配服装货号已存在"}
+        and str(row_value(row, "business_code") or "").strip()
+    ]
+    if legacy_duplicate_rows:
+        legacy_session_ids = [str(row["id"]) for row in legacy_duplicate_rows]
+        placeholders = ", ".join("?" for _ in legacy_session_ids)
+        failure_rows = db.execute(
+            f"""
+            SELECT session_id, MAX(updated_at) AS failed_at
+            FROM upload_session_items
+            WHERE session_id IN ({placeholders}) AND status = 'FAILED'
+            GROUP BY session_id
+            """,
+            legacy_session_ids,
+        ).fetchall()
+        failure_times = {
+            str(failure_row["session_id"]): str(failure_row["failed_at"])
+            for failure_row in failure_rows
+            if failure_row["failed_at"]
+        }
+        for row in legacy_duplicate_rows:
+            duplicate_at = failure_times.get(str(row["id"]))
+            if not duplicate_at:
+                continue
+            existing = db.execute(
+                """SELECT id FROM styling_garments
+                   WHERE code = ? AND deleted_at IS NULL AND created_at <= ?
+                   ORDER BY created_at DESC, id DESC
+                   LIMIT 1""",
+                (str(row["business_code"]).strip(), duplicate_at),
+            ).fetchone()
+            if existing:
+                resolved_target_ids[str(row["id"])] = int(existing["id"])
+    garment_ids = list(dict.fromkeys(resolved_target_ids.values()))
     if not garment_ids:
         return {}
     placeholders = ", ".join("?" for _ in garment_ids)
@@ -1662,13 +1700,13 @@ def load_upload_target_contexts(db: sqlite3.Connection, session_rows: list[Any])
         garment_ids,
     ).fetchall()
     attempts_by_id = {int(item["owner_id"]): item for item in attempt_rows}
-    contexts: dict[int, dict[str, Any]] = {}
+    contexts_by_garment_id: dict[int, dict[str, Any]] = {}
     for garment in garment_rows:
         garment_id = int(garment["id"])
         attempt = attempts_by_id.get(garment_id)
         had_failure = bool(attempt and int(attempt["had_failure"] or 0))
         status = str(garment["status"])
-        contexts[garment_id] = {
+        contexts_by_garment_id[garment_id] = {
             "summary": {
                 "id": garment_id,
                 "code": str(garment["code"]),
@@ -1685,13 +1723,19 @@ def load_upload_target_contexts(db: sqlite3.Connection, session_rows: list[Any])
                 "recoveredAt": attempt["latest_success_at"] if had_failure and status == "READY" and attempt else None,
             },
         }
-    return contexts
+    return {
+        session_id: contexts_by_garment_id[garment_id]
+        for session_id, garment_id in resolved_target_ids.items()
+        if garment_id in contexts_by_garment_id
+    }
 
 
 def import_outcome_for_upload_session(row: Any, target_context: dict[str, Any] | None) -> str:
     status = str(row["status"])
     if status == "ABANDONED":
         return "ABANDONED"
+    if row_value(row, "target_type") == "styling_garment" and row_value(row, "target_id") and not target_context:
+        return "TARGET_MISSING"
     if status == "FAILED":
         return "NEEDS_ACTION"
     if status in {"PENDING", "UPLOADING"}:
@@ -1720,9 +1764,9 @@ def import_outcome_for_upload_session(row: Any, target_context: dict[str, Any] |
 
 
 def serialize_upload_session(row: Any, items: list[Any], *, target_context: dict[str, Any] | None = None) -> dict[str, Any]:
-    target_id = int(row["target_id"]) if row_value(row, "target_id") else None
+    stored_target_id = int(row["target_id"]) if row_value(row, "target_id") else None
     target_summary = target_context["summary"] if target_context else ({
-        "id": target_id,
+        "id": stored_target_id,
         "code": row_value(row, "business_code"),
         "exists": False,
         "status": None,
@@ -1730,7 +1774,9 @@ def serialize_upload_session(row: Any, items: list[Any], *, target_context: dict
         "imageCount": 0,
         "updatedAt": None,
         "archivedAt": None,
-    } if target_id and row_value(row, "target_type") == "styling_garment" else None)
+    } if stored_target_id and row_value(row, "target_type") == "styling_garment" else None)
+    target_id = int(target_summary["id"]) if target_summary and target_summary.get("exists") else stored_target_id
+    target_type = row_value(row, "target_type") or ("styling_garment" if target_context else None)
     history_summary = target_context["history"] if target_context else {
         "hadTaggingFailure": False,
         "latestFailureAt": None,
@@ -1745,8 +1791,8 @@ def serialize_upload_session(row: Any, items: list[Any], *, target_context: dict
         "batchId": row_value(row, "batch_id"),
         "totalCount": int(row["total_count"] or 0),
         "uploadedCount": int(row["uploaded_count"] or 0),
-        "targetType": row_value(row, "target_type"),
-        "targetId": row_value(row, "target_id"),
+        "targetType": target_type,
+        "targetId": target_id,
         "targetStatus": target_summary["status"] if target_summary else None,
         "targetSummary": target_summary,
         "importOutcome": import_outcome_for_upload_session(row, target_context),
@@ -1775,7 +1821,15 @@ def serialize_upload_session(row: Any, items: list[Any], *, target_context: dict
     }
 
 
-def mark_upload_session_failed(session_id: str, message: str, *, uploaded_count: int | None = None, db: sqlite3.Connection | None = None) -> None:
+def mark_upload_session_failed(
+    session_id: str,
+    message: str,
+    *,
+    uploaded_count: int | None = None,
+    target_type: str | None = None,
+    target_id: int | None = None,
+    db: sqlite3.Connection | None = None,
+) -> None:
     timestamp = now_iso()
     def apply(connection: sqlite3.Connection) -> None:
         nonlocal uploaded_count
@@ -1809,6 +1863,15 @@ def mark_upload_session_failed(session_id: str, message: str, *, uploaded_count:
             """,
             (message, timestamp, session_id, session_id),
         )
+        if target_type and target_id:
+            connection.execute(
+                """
+                UPDATE upload_sessions
+                SET target_type = ?, target_id = ?, updated_at = ?
+                WHERE id = ? AND status = 'FAILED'
+                """,
+                (target_type, target_id, timestamp, session_id),
+            )
     if db is not None:
         apply(db)
         return
@@ -2074,6 +2137,7 @@ def list_styling_garments(
                END
                FROM upload_sessions us
                WHERE us.scope = 'styling-garment'
+                 AND us.status = 'FINALIZED'
                  AND us.target_type = 'styling_garment'
                  AND us.target_id = sg.id
                  AND us.archived_at IS NULL
@@ -2561,7 +2625,13 @@ async def finalize_styling_garment_upload_session(
         ensure_upload_session_items_uploaded(rows)
         duplicate = db.execute("SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL", (clean_code,)).fetchone()
         if duplicate:
-            mark_upload_session_failed(session_id, "搭配服装货号已存在", db=db)
+            mark_upload_session_failed(
+                session_id,
+                "搭配服装货号已存在",
+                target_type="styling_garment",
+                target_id=int(duplicate["id"]),
+                db=db,
+            )
             db.commit()
             raise HTTPException(status_code=409, detail="搭配服装货号已存在")
         claimed = db.execute(
@@ -2647,7 +2717,20 @@ async def finalize_styling_garment_upload_session(
             cleanup_created_media_assets(assets, preserve_originals=True)
         with suppress(Exception):
             error_message = exc.detail if isinstance(exc, HTTPException) else str(exc)
-            mark_upload_session_failed(session_id, str(error_message))
+            duplicate_target_id = None
+            if str(error_message) == "搭配服装货号已存在":
+                with get_db() as db:
+                    duplicate = db.execute(
+                        "SELECT id FROM styling_garments WHERE code = ? AND deleted_at IS NULL",
+                        (clean_code,),
+                    ).fetchone()
+                    duplicate_target_id = int(duplicate["id"]) if duplicate else None
+            mark_upload_session_failed(
+                session_id,
+                str(error_message),
+                target_type="styling_garment" if duplicate_target_id else None,
+                target_id=duplicate_target_id,
+            )
         raise
     if garment_id is None:
         raise HTTPException(status_code=500, detail="导入批次保存失败")

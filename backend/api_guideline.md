@@ -5,7 +5,7 @@
 0.1.0 当前 AI 摄影棚链路固定为：
 
 ```text
-导入主推款 -> AI 智能选搭 -> 生成分镜预览 -> 生成成片
+导入主推款 -> AI 智能选搭 -> 分镜预览 -> 最终成片
 ```
 
 后端不提供“生成拍摄剧本”API，不保存动态剧本或镜头计划。前端和测试不得调用或伪造旧的剧本步骤。
@@ -71,6 +71,9 @@ ABANDONED
 
 - `importOutcome` 是导入记录的主状态：`IMPORTING`、`ORGANIZING`、`PENDING_RECOGNITION`、`PROCESSING`、`RECOVERING`、`REVIEW_REQUIRED`、`NEEDS_ACTION`、`SUCCEEDED`、`RECOVERED`、`TARGET_MISSING`、`ABANDONED`。它由 upload session、当前 `StylingGarment` 和识别 attempts 共同派生，不新增一套可漂移的持久状态；待识别和待复核不得伪装成后台运行态。
 - `targetSummary` 是关联服装的权威当前摘要，包含 `id`、`code`、`exists`、`status`、正式 `coverUrl`、正式 `imageCount`、`updatedAt` 和 `archivedAt`。即使该服装不在当前服装库分页中，导入记录也能显示正确封面、正式图片数和当前状态。
+- 重复货号导入不会重复创建服装，但导入会话必须关联已经存在的服装；历史重复记录缺少持久化关联时，读取接口仅依据导入明细保留的失败时间，在同货号服装早于该次失败存在时恢复当前摘要；若缺少可靠失败时间则不做推断，避免误关联后来重建的同货号服装，也不复制媒体文件。
+- 失败会话关联已有服装只用于展示和跳转，不代表该批次创建了这件服装；服装库的导入来源只认 `FINALIZED` 会话。
+- 重复记录关联的服装被删除后，当前状态优先为 `TARGET_MISSING`，不再提供“查看已有”操作。
 - `historySummary` 只保留恢复语义所需的历史事实：是否发生过识别失败、最近失败时间和恢复成功时间。历史失败不覆盖当前事实。
 - 识别失败时主状态为 `NEEDS_ACTION`；用户从服装库重新识别成功后，主状态自动变为 `RECOVERED`，副状态显示 `当前可选搭`。失败历史仍可审计，但不继续计入当前失败数量。
 - 关联服装被删除时使用 `TARGET_MISSING`，不得继续展示缓存图片、虚构内部记录名或把它误报为成功。

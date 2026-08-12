@@ -493,7 +493,7 @@ def test_finalize_requires_all_items_confirmed_uploaded(client) -> None:
 
 
 def test_duplicate_styling_garment_finalize_marks_session_failed_for_recovery(client) -> None:
-    insert_styling_garment(code="DUPLICATE-LOOK")
+    existing_garment_id = insert_styling_garment(code="DUPLICATE-LOOK", image_count=2)
     created = create_session(client, scope="styling_garment", filenames=["front.jpg", "detail.jpg"])
     session_id = created["session"]["id"]
     keys = [item["objectKey"] for item in created["items"]]
@@ -520,6 +520,154 @@ def test_duplicate_styling_garment_finalize_marks_session_failed_for_recovery(cl
     assert failed["uploadedCount"] == 2
     assert failed["errorMessage"] == "搭配服装货号已存在"
     assert failed["businessCode"] == "DUPLICATE-LOOK"
+    assert failed["targetId"] == existing_garment_id
+    assert failed["targetSummary"]["id"] == existing_garment_id
+    assert failed["targetSummary"]["exists"] is True
+    assert failed["targetSummary"]["code"] == "DUPLICATE-LOOK"
+    assert failed["targetSummary"]["imageCount"] == 2
+    assert failed["targetSummary"]["coverUrl"].startswith("/api/media?")
+
+
+def test_legacy_duplicate_import_record_resolves_existing_garment_without_a_stored_target(client) -> None:
+    existing_garment_id = insert_styling_garment(code="LEGACY-DUPLICATE", image_count=2)
+    created = create_session(client, scope="styling_garment", filenames=["front.jpg"])
+    session_id = created["session"]["id"]
+    with get_db() as db:
+        db.execute(
+            """UPDATE upload_sessions
+               SET status = 'FAILED', business_code = 'LEGACY-DUPLICATE', uploaded_count = 1,
+                   target_type = NULL, target_id = NULL, error_message = '搭配服装货号已存在'
+               WHERE id = ?""",
+            (session_id,),
+        )
+        db.execute(
+            "UPDATE upload_session_items SET status = 'FAILED', updated_at = '2026-08-11T08:01:00Z' WHERE session_id = ?",
+            (session_id,),
+        )
+        db.execute(
+            "UPDATE styling_garments SET created_at = '2026-08-11T08:00:00Z', updated_at = '2026-08-11T08:00:00Z' WHERE id = ?",
+            (existing_garment_id,),
+        )
+
+    response = client.get("/api/upload-sessions", params={"scope": "styling_garment"})
+
+    assert response.status_code == 200
+    item = next(entry for entry in response.json()["items"] if entry["id"] == session_id)
+    assert item["status"] == "FAILED"
+    assert item["targetType"] == "styling_garment"
+    assert item["targetId"] == existing_garment_id
+    assert item["targetSummary"]["exists"] is True
+    assert item["targetSummary"]["code"] == "LEGACY-DUPLICATE"
+    assert item["targetSummary"]["imageCount"] == 2
+    assert item["targetSummary"]["coverUrl"].startswith("/api/media?")
+
+
+def test_legacy_duplicate_import_record_does_not_link_a_later_recreated_garment(client) -> None:
+    created = create_session(client, scope="styling_garment", filenames=["front.jpg"])
+    session_id = created["session"]["id"]
+    with get_db() as db:
+        db.execute(
+            """UPDATE upload_sessions
+               SET status = 'FAILED', business_code = 'RECREATED-LOOK', uploaded_count = 1,
+                   target_type = NULL, target_id = NULL, error_message = '搭配服装货号已存在',
+                   created_at = '2026-08-10T08:00:00Z', updated_at = '2026-08-12T08:00:00Z',
+                   archived_at = '2026-08-12T08:00:00Z', archive_reason = 'user_archived'
+               WHERE id = ?""",
+            (session_id,),
+        )
+        db.execute(
+            "UPDATE upload_session_items SET status = 'FAILED', updated_at = '2026-08-10T08:01:00Z' WHERE session_id = ?",
+            (session_id,),
+        )
+    insert_styling_garment(code="RECREATED-LOOK", image_count=2)
+    with get_db() as db:
+        db.execute(
+            "UPDATE styling_garments SET created_at = '2026-08-11T08:00:00Z', updated_at = '2026-08-11T08:00:00Z' WHERE code = 'RECREATED-LOOK'"
+        )
+
+    item = client.get(f"/api/upload-sessions/{session_id}").json()["session"]
+
+    assert item["targetType"] is None
+    assert item["targetId"] is None
+    assert item["targetSummary"] is None
+
+
+def test_duplicate_import_record_reports_missing_after_its_linked_garment_is_deleted(client) -> None:
+    garment_id = insert_styling_garment(code="DELETED-DUPLICATE", image_count=2)
+    created = create_session(client, scope="styling_garment", filenames=["front.jpg"])
+    session_id = created["session"]["id"]
+    with get_db() as db:
+        db.execute(
+            """UPDATE upload_sessions
+               SET status = 'FAILED', business_code = 'DELETED-DUPLICATE', uploaded_count = 1,
+                   target_type = 'styling_garment', target_id = ?, error_message = '搭配服装货号已存在'
+               WHERE id = ?""",
+            (garment_id, session_id),
+        )
+        db.execute("UPDATE styling_garments SET deleted_at = ?, updated_at = ? WHERE id = ?", (now_iso(), now_iso(), garment_id))
+
+    item = client.get(f"/api/upload-sessions/{session_id}").json()["session"]
+
+    assert item["importOutcome"] == "TARGET_MISSING"
+    assert item["targetId"] == garment_id
+    assert item["targetSummary"]["exists"] is False
+    assert item["targetSummary"]["coverUrl"] is None
+    assert item["targetSummary"]["imageCount"] == 0
+
+
+def test_duplicate_created_during_finalize_is_still_linked_to_the_import_record(client, monkeypatch) -> None:
+    from app import main as app_main
+    from conftest import insert_media_asset
+
+    created = create_session(client, scope="styling_garment", filenames=["front.jpg"])
+    session_id = created["session"]["id"]
+    key = created["items"][0]["objectKey"]
+    completed = client.post(
+        f"/api/upload-sessions/{session_id}/complete-items",
+        json={"objectKeys": [key]},
+    )
+    assert completed.status_code == 200
+    existing_garment_id: int | None = None
+    temporary_asset_id: int | None = None
+    cleaned_object_keys: list[str] = []
+
+    async def save_after_concurrent_duplicate(uploads, *, preserve_originals_on_failure=False):
+        nonlocal existing_garment_id, temporary_asset_id
+        asset_id = insert_media_asset("front.jpg", uploads[0].objectKey)
+        temporary_asset_id = asset_id
+        existing_garment_id = insert_styling_garment(code="RACE-DUPLICATE", image_count=2)
+        return [{
+            "id": asset_id,
+            "objectKey": uploads[0].objectKey,
+            "thumbKey": "temporary/thumb.webp",
+            "previewKey": "temporary/preview.webp",
+        }]
+
+    monkeypatch.setattr(app_main, "save_uploaded_objects_as_media_assets", save_after_concurrent_duplicate)
+    monkeypatch.setattr(app_main, "cleanup_objects", lambda keys: cleaned_object_keys.extend(keys))
+
+    finalize = client.post(
+        f"/api/upload-sessions/{session_id}/finalize-styling-garment",
+        json={"code": "RACE-DUPLICATE"},
+    )
+
+    assert finalize.status_code == 409
+    item = client.get(f"/api/upload-sessions/{session_id}").json()["session"]
+    assert existing_garment_id is not None
+    assert item["targetId"] == existing_garment_id
+    assert item["targetSummary"]["code"] == "RACE-DUPLICATE"
+    assert item["targetSummary"]["imageCount"] == 2
+    assert item["targetSummary"]["coverUrl"].startswith("/api/media?")
+    assert temporary_asset_id is not None
+    with get_db() as db:
+        assert db.execute("SELECT 1 FROM media_assets WHERE id = ?", (temporary_asset_id,)).fetchone() is None
+        upload_item = db.execute(
+            "SELECT object_key, media_asset_id FROM upload_session_items WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    assert upload_item["media_asset_id"] is None
+    assert upload_item["object_key"] not in cleaned_object_keys
+    assert set(cleaned_object_keys) == {"temporary/thumb.webp", "temporary/preview.webp"}
 
 
 def test_unfinished_duplicate_styling_finalize_does_not_mark_session_failed(client) -> None:
@@ -685,6 +833,7 @@ def test_upload_session_batches_match_visible_upload_records_and_sort_by_created
 def test_styling_garment_upload_batch_filter_is_exact_and_requires_a_visible_upload_record(client) -> None:
     first_garment_id = insert_styling_garment(code="BATCH-LOOK-1")
     second_garment_id = insert_styling_garment(code="BATCH-LOOK-2")
+    preexisting_garment_id = insert_styling_garment(code="PREEXISTING-LOOK")
     response = client.post(
         "/api/upload-sessions/styling-import-batch",
         json={
@@ -700,6 +849,7 @@ def test_styling_garment_upload_batch_filter_is_exact_and_requires_a_visible_upl
     linked_session_id = next(item["id"] for item in sessions if item["businessCode"] == "BATCH-LOOK-1")
     failed_session_id = next(item["id"] for item in sessions if item["businessCode"] == "FAILED-NO-GARMENT")
     other_session_id = create_session(client, scope="styling_garment", filenames=["other.jpg"])["session"]["id"]
+    duplicate_session_id = create_session(client, scope="styling_garment", filenames=["duplicate.jpg"])["session"]["id"]
     with get_db() as db:
         db.execute(
             "UPDATE upload_sessions SET status = 'FINALIZED', target_type = 'styling_garment', target_id = ? WHERE id = ?",
@@ -710,13 +860,22 @@ def test_styling_garment_upload_batch_filter_is_exact_and_requires_a_visible_upl
             "UPDATE upload_sessions SET status = 'FINALIZED', target_type = 'styling_garment', target_id = ? WHERE id = ?",
             (second_garment_id, other_session_id),
         )
+        db.execute(
+            """UPDATE upload_sessions
+               SET status = 'FAILED', batch_id = 'duplicate-batch', business_code = 'PREEXISTING-LOOK',
+                   target_type = 'styling_garment', target_id = ?, error_message = '搭配服装货号已存在'
+               WHERE id = ?""",
+            (preexisting_garment_id, duplicate_session_id),
+        )
 
     selected = client.get("/api/styling-garments", params={"uploadBatchKey": "batch:filter-batch"})
     empty_failed_batch = client.get("/api/styling-garments", params={"uploadBatchKey": "batch:missing-batch"})
+    duplicate_batch = client.get("/api/styling-garments", params={"uploadBatchKey": "batch:duplicate-batch"})
 
     assert selected.status_code == 200
     assert [item["code"] for item in selected.json()["items"]] == ["BATCH-LOOK-1"]
     assert empty_failed_batch.json()["total"] == 0
+    assert duplicate_batch.json()["total"] == 0
 
     with get_db() as db:
         db.execute("UPDATE upload_sessions SET archived_at = '2026-08-06T08:00:00Z' WHERE id = ?", (linked_session_id,))
