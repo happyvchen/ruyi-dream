@@ -26,6 +26,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("062", "generation_auto_run_retry", "migration_generation_auto_run_retry"),
     ("063", "styling_garment_tag_retry", "migration_styling_garment_tag_retry"),
     ("064", "generation_attempt_owner_status_index", "migration_generation_attempt_owner_status_index"),
+    ("065", "repair_styling_garment_tag_retry_lease", "migration_repair_styling_garment_tag_retry_lease"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -416,6 +417,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_generation_auto_run_retry": migration_generation_auto_run_retry,
         "migration_styling_garment_tag_retry": migration_styling_garment_tag_retry,
         "migration_generation_attempt_owner_status_index": migration_generation_attempt_owner_status_index,
+        "migration_repair_styling_garment_tag_retry_lease": migration_repair_styling_garment_tag_retry_lease,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -656,6 +658,14 @@ def migration_generation_attempt_owner_status_index(db: sqlite3.Connection) -> N
         "CREATE INDEX IF NOT EXISTS idx_generation_attempts_owner_status "
         "ON generation_attempts(owner_type, owner_id, status)"
     )
+
+
+def migration_repair_styling_garment_tag_retry_lease(db: sqlite3.Connection) -> None:
+    """修复开发期 063 已登记、但租约字段尚未落库的历史数据库。"""
+    if not table_exists(db, "styling_garments"):
+        return
+    if not table_has_column(db, "styling_garments", "tag_retry_lease_until"):
+        db.execute("ALTER TABLE styling_garments ADD COLUMN tag_retry_lease_until TEXT")
 
 
 def scrub_prompt_config_hero_product_info(db: sqlite3.Connection) -> None:

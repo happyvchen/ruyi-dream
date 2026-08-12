@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import sqlite3
 
 import pytest
 
 from app import main as app_main
 from app.db import get_db
+from app.db import run_migrations
 from app.gemini_provider import GeminiProviderError
 from app.generation_progress import (
     ERROR_RATE_LIMITED,
@@ -15,6 +17,37 @@ from app.generation_progress import (
     classify_attempt_error,
 )
 from conftest import insert_styling_garment
+
+
+def test_migration_065_repairs_database_where_063_was_already_recorded() -> None:
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute(
+        "CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
+    )
+    db.executemany(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, '2026-08-11T00:00:00Z')",
+        [(version, "already_applied") for version in [
+            "050", "051", "052", "053", "054", "055", "056", "057",
+            "058", "059", "060", "061", "062", "063", "064",
+        ]],
+    )
+    db.execute(
+        """CREATE TABLE styling_garments (
+               id INTEGER PRIMARY KEY,
+               status TEXT NOT NULL,
+               tag_retry_at TEXT,
+               tag_retry_state_json TEXT,
+               tag_active_attempt_id INTEGER
+           )"""
+    )
+
+    run_migrations(db)
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(styling_garments)")}
+    versions = {row["version"] for row in db.execute("SELECT version FROM schema_migrations")}
+
+    assert "tag_retry_lease_until" in columns
+    assert "065" in versions
 
 
 def test_user_garment_contract_exposes_current_safe_error_code_without_provider_details(
