@@ -45,7 +45,7 @@ import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, s
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { chooseDirectory, filesFromDirectory, getDirectoryHandle, storeDirectoryHandle, supportsDirectoryAccess } from './lib/directoryAccess'
 import type { RuyiFileSystemDirectoryHandle } from './lib/directoryAccess'
-import { friendlyErrorText } from './lib/errorMessages'
+import { friendlyAttemptErrorText, friendlyErrorText } from './lib/errorMessages'
 import { CHECKSUM_COMPATIBILITY_NOTICE } from './lib/fileChecksum'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
@@ -2509,7 +2509,10 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
                     </small>
                   )}
                   {image?.activeAttempt && !isAttemptRunning(image.activeAttempt) && (() => {
-                    const note = attemptFriendlyFailure(image.activeAttempt)
+                    const note = attemptFriendlyFailure(
+                      image.activeAttempt,
+                      task?.status === 'FINAL_RUNNING' && task.autoRunTarget === 'FINAL',
+                    )
                     return note ? <small className="image-placeholder-failure">{note}</small> : null
                   })()}
                 </div>
@@ -8467,14 +8470,17 @@ function attemptStatusText(operation: AIOperation) {
 }
 
 // 失败 attempt 的一行友好文案（按 error_code 归类），技术码仍保留在“调用记录”里。
-function attemptFriendlyFailure(operation: AIOperation): string | null {
+function attemptFriendlyFailure(operation: AIOperation, taskStillRunning = false): string | null {
   if (operation.status !== 'FAILED') return null
+  if (taskStillRunning && operation.errorCode === 'UPLOAD_FAILED') {
+    return friendlyAttemptErrorText(operation.errorCode, operation.errorMessage, true)
+  }
   if (operation.error) {
     return operation.error.message && operation.error.message !== operation.error.title
       ? `${operation.error.title}：${operation.error.message}`
       : operation.error.title
   }
-  return friendlyErrorText(operation.errorCode, operation.errorMessage)
+  return friendlyAttemptErrorText(operation.errorCode, operation.errorMessage, taskStillRunning)
 }
 
 function attemptPhaseText(entry: AttemptPhase, operation?: AIOperation) {

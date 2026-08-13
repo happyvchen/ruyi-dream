@@ -9,8 +9,10 @@ from app.generation_progress import (
     ERROR_INSUFFICIENT_BALANCE,
     ERROR_INVALID_REQUEST,
     ERROR_PROVIDER_GENERATION_FAILED,
+    ERROR_PROVIDER_TRANSIENT_UNKNOWN,
     ERROR_RATE_LIMITED,
     ERROR_SUBMISSION_UNKNOWN,
+    ERROR_WAF_BLOCK,
     normalize_toapis_error,
     provider_error_presentation,
 )
@@ -134,6 +136,93 @@ def test_final_runtime_marks_exactly_one_current_shot_and_limits_to_five_slots()
 )
 def test_toapis_error_normalization_returns_stable_codes(status_code: int, payload: dict[str, object], expected: str) -> None:
     assert normalize_toapis_error(payload, status_code=status_code)["code"] == expected
+
+
+def test_toapis_unknown_provider_route_is_treated_as_transient_instead_of_invalid_input() -> None:
+    payload = {
+        "error": {
+            "code": "model_not_found",
+            "type": "invalid_request_error",
+            "param": "model",
+            "message": "unknown provider for model gemini-3.5-flash-low",
+        }
+    }
+
+    normalized = normalize_toapis_error(payload, status_code=400)
+
+    assert normalized["code"] == ERROR_PROVIDER_TRANSIENT_UNKNOWN
+    assert normalized["upstreamCode"] == "model_not_found"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"type": "invalid_request_error", "message": "unknown provider for model gemini-3.5-flash-low"},
+        {"code": "invalid_request", "message": "unknown provider for model gemini-3.5-flash-low"},
+    ],
+)
+def test_toapis_unknown_provider_route_retries_even_without_model_not_found_code(
+    error: dict[str, str],
+) -> None:
+    normalized = normalize_toapis_error({"error": error}, status_code=400)
+
+    assert normalized["code"] == ERROR_PROVIDER_TRANSIENT_UNKNOWN
+
+
+def test_toapis_real_model_not_found_remains_a_non_retryable_invalid_request() -> None:
+    payload = {
+        "error": {
+            "code": "model_not_found",
+            "type": "invalid_request_error",
+            "param": "model",
+            "message": "model does not exist",
+        }
+    }
+
+    assert normalize_toapis_error(payload, status_code=400)["code"] == ERROR_INVALID_REQUEST
+
+
+def test_unclassified_zero_output_toapis_http_error_defaults_to_transient() -> None:
+    payload = {"error": {"code": "edge_route_unavailable", "message": "temporary route failure"}}
+
+    assert normalize_toapis_error(payload, status_code=418)["code"] == ERROR_PROVIDER_TRANSIENT_UNKNOWN
+
+
+def test_transient_unknown_terminal_presentation_does_not_claim_retry_is_still_running() -> None:
+    presentation = provider_error_presentation(ERROR_PROVIDER_TRANSIENT_UNKNOWN)
+
+    assert "已自动重试" in presentation["message"]
+    assert "正在" not in presentation["message"]
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected"),
+    [
+        (401, ERROR_AUTH_FAILED),
+        (403, ERROR_AUTH_FAILED),
+        (422, ERROR_CONTENT_POLICY),
+    ],
+)
+def test_unknown_provider_words_never_override_hard_stop_http_statuses(status_code: int, expected: str) -> None:
+    payload = {
+        "error": {
+            "code": "model_not_found",
+            "message": "unknown provider for model gemini-test-low",
+        }
+    }
+
+    assert normalize_toapis_error(payload, status_code=status_code)["code"] == expected
+
+
+def test_cloudflare_1010_waf_fingerprint_remains_retryable_before_generic_403_auth() -> None:
+    payload = {
+        "error": {
+            "code": "access_denied",
+            "message": "Cloudflare error code 1010",
+        }
+    }
+
+    assert normalize_toapis_error(payload, status_code=403)["code"] == ERROR_WAF_BLOCK
 
 
 def test_embedded_upstream_json_is_extracted_for_user_recoverable_input_errors() -> None:
