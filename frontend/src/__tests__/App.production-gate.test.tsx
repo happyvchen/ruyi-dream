@@ -44,6 +44,9 @@ const apiMock = vi.hoisted(() => ({
   restoreStylingGarments: vi.fn(),
   restoreTasks: vi.fn(),
   getShootEnvironment: vi.fn(),
+  getShotPresets: vi.fn(),
+  setShotPresetSlot: vi.fn(),
+  publishShotPresetFamily: vi.fn(),
   addModelHeadReferences: vi.fn(),
   replaceModelHeadReference: vi.fn(),
   deleteModelHeadReference: vi.fn(),
@@ -263,6 +266,23 @@ function configureApi(role: 'admin' | 'user' = 'admin') {
   apiMock.listRecordBatches.mockResolvedValue({ ...emptyPage, facets: {}, stableFacets: {} })
   apiMock.precheckFinalImageExport.mockResolvedValue({ items: [], downloadableTaskIds: [], completeTaskIds: [], totalImages: 0, totalBytes: 0 })
   apiMock.getShootEnvironment.mockResolvedValue({ asset: null })
+  apiMock.getShotPresets.mockResolvedValue({
+    draftVersion: null,
+    editingVersion: null,
+    families: {
+      top: { publishedVersion: null, publishReady: false, validationErrors: ['上装的 5 个镜头尚未配置'] },
+      bottom: { publishedVersion: null, publishReady: false, validationErrors: ['下装的 5 个镜头尚未配置'] },
+      one_piece: { publishedVersion: null, publishReady: false, validationErrors: ['套装的 5 个镜头尚未配置'] },
+    },
+    slots: Array.from({ length: 15 }, (_, index) => ({
+      categoryFamily: (['top', 'bottom', 'one_piece'] as const)[Math.floor(index / 5)],
+      shotIndex: (index % 5) + 1,
+      background: null,
+      mask: null,
+      pose: null,
+      complete: false,
+    })),
+  })
   apiMock.listUploadSessions.mockResolvedValue({ items: [] })
   apiMock.listUploadSessionBatches.mockResolvedValue({ ...emptyPage, items: [] })
   apiMock.abandonUploadSession.mockResolvedValue({ session: { id: 'abandoned', status: 'ABANDONED' } })
@@ -319,12 +339,12 @@ afterEach(() => {
 })
 
 describe('production gate app shell and page controls', () => {
-  it('uses nouns for the four studio stages while keeping generation actions explicit', async () => {
+  it('uses nouns for the three studio stages while keeping generation actions explicit', async () => {
     render(<App />)
 
     expect(await screen.findByRole('button', { name: '导入主推款' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'AI 智能选搭' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '分镜预览' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '分镜预览' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '最终成片' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '生成分镜预览' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '生成成片' })).not.toBeInTheDocument()

@@ -138,6 +138,35 @@ export type MediaAsset = {
   originalUrl?: string | null
 }
 
+export type ShotPresetVersion = {
+  id: number
+  versionNumber: number
+  status: 'DRAFT' | 'PUBLISHED' | 'SUPERSEDED'
+  publishedAt?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export type ShotPresetSlot = {
+  categoryFamily: 'top' | 'bottom' | 'one_piece'
+  shotIndex: number
+  background: MediaAsset | null
+  mask: MediaAsset | null
+  pose: MediaAsset | null
+  complete: boolean
+}
+
+export type ShotPresetMatrix = {
+  draftVersion: ShotPresetVersion | null
+  editingVersion: ShotPresetVersion | null
+  families: Record<ShotPresetSlot['categoryFamily'], {
+    publishedVersion: ShotPresetVersion | null
+    publishReady: boolean
+    validationErrors: string[]
+  }>
+  slots: ShotPresetSlot[]
+}
+
 export type StylingGarment = {
   id: number
   code: string
@@ -962,8 +991,6 @@ export const api = {
     request<{ item: GenerationTask }>(`/api/generation-task-images/${id}`, { method: 'DELETE' }),
   selectStyling: (id: number, userInstruction?: string) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/select-styling`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
-  previewTask: (id: number, userInstruction?: string) =>
-    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/preview`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
   generateFinal: (id: number, userInstruction?: string) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/generate-final`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
   autoRunFinal: (id: number, restart = false) =>
@@ -1047,4 +1074,14 @@ export const api = {
     return request<{ asset: MediaAsset | null }>('/api/shoot-environment', { method: 'POST', body: form })
   },
   clearShootEnvironment: () => request<{ asset: MediaAsset | null }>('/api/shoot-environment', { method: 'DELETE' }),
+  getShotPresets: () => request<ShotPresetMatrix>('/api/shot-presets'),
+  setShotPresetSlot: (categoryFamily: ShotPresetSlot['categoryFamily'], shotIndex: number, background: File, mask: File, pose: File) => {
+    const form = new FormData()
+    form.append('background', background)
+    form.append('mask', mask)
+    form.append('pose', pose)
+    return request<ShotPresetMatrix>(`/api/shot-presets/${categoryFamily}/${shotIndex}`, { method: 'POST', body: form })
+  },
+  publishShotPresetFamily: (categoryFamily: ShotPresetSlot['categoryFamily']) =>
+    request<ShotPresetMatrix>(`/api/shot-preset-families/${categoryFamily}/publish`, { method: 'POST' }),
 }

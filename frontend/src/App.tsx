@@ -15,7 +15,6 @@ import {
   FileImage,
   FileText,
   FolderOpen,
-  GalleryVerticalEnd,
   History,
   ImagePlus,
   Images,
@@ -41,7 +40,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { ApiError, api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl, stylingGarmentArchiveUrl } from './api'
-import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, DirectUploadItem, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, ObjectCleanupError, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot, UploadSession, UploadSessionBatch } from './api'
+import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, DirectUploadItem, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, ObjectCleanupError, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, ShotPresetMatrix, ShotPresetSlot, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot, UploadSession, UploadSessionBatch } from './api'
 import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { chooseDirectory, filesFromDirectory, getDirectoryHandle, storeDirectoryHandle, supportsDirectoryAccess } from './lib/directoryAccess'
@@ -54,7 +53,7 @@ import { BulkCheckbox, BulkSelectAllButton, MarqueeSelectionBox, selectableIdsIn
 import { ArchiveManageDialog } from './components/ArchiveManageDialog'
 import type { ArchiveManageAction, ArchiveManageOption } from './components/ArchiveManageDialog'
 
-type StudioStep = 0 | 1 | 2 | 3
+type StudioStep = 0 | 1 | 2
 type FileSystemEntry = {
   name: string
   isFile: boolean
@@ -86,7 +85,6 @@ type RecordSelectionKey = `task:${number}` | `batch:${string}`
 const steps = [
   { title: '导入主推款', icon: Upload },
   { title: 'AI 智能选搭', icon: WandSparkles },
-  { title: '分镜预览', icon: GalleryVerticalEnd },
   { title: '最终成片', icon: Sparkles },
 ] as const
 const adminPages = new Set<Page>(['prompt-maintenance'])
@@ -802,7 +800,6 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   const recentTaskRequestRef = useRef(0)
   const [aiLogDialog, setAiLogDialog] = useState<{ title: string; ownerTypes: string[]; attemptId: number; records: AICallRecord[]; loading: boolean; error?: string } | null>(null)
   const [aiStylingInstruction, setAiStylingInstruction] = useState('')
-  const [storyboardInstruction, setStoryboardInstruction] = useState('')
   const [finalImageInstruction, setFinalImageInstruction] = useState('')
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
@@ -917,7 +914,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     if (!task || !isTaskRunning(task)) return
     if (!window.confirm('确定取消本次生成吗？已提交给生成服务的图片可能仍会完成并产生费用；系统会停止后续生成，并保留已完成结果。')) return
     void run('取消生成中...', () => api.cancelTask(task.id), (r: { item: GenerationTask }) => {
-      clearLocalOperationsFor(['generation_styling', 'generation_preview', 'generation_result_image'], task.id)
+      clearLocalOperationsFor(['generation_styling', 'generation_result_image'], task.id)
       applyTaskUpdate(r.item)
     }, { refresh: 'background' })
   }
@@ -933,8 +930,8 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     const restart = canRestartOneClickFinal(task)
     if (!restart && !canStartOneClickFinal(task)) return
     const confirmText = restart
-      ? '将重新走完整流程：重新智能选搭、分镜预览和成片，产出一套全新方案。已有成片会保留在历史记录里可追溯。确定重新一键成片吗？'
-      : '将自动完成后续步骤，并复用已有选搭和分镜预览。生成过程可能产生多次 AI 调用。'
+      ? '将重新走完整流程：重新智能选搭并生成五张成片。已有成片会保留在历史记录里可追溯。确定重新一键成片吗？'
+      : '将自动完成后续步骤，并复用已有选搭。生成过程可能产生多次 AI 调用。'
     if (!window.confirm(confirmText)) return
     void run(restart ? '重新一键成片启动中...' : '启动一键成片中...', () => api.autoRunFinal(task.id, restart), (r: { item: GenerationTask }) => {
       applyTaskUpdate(r.item)
@@ -948,7 +945,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
       : batchItems.filter((item) => canStartOneClickFinal(item)).length
     if (!eligibleCount) return
     const confirmText = restart
-      ? `将为本批次 ${eligibleCount} 个已完成任务重新执行智能选搭、分镜预览和成片；已有成果保留在历史记录中。确定重新生成吗？`
+      ? `将为本批次 ${eligibleCount} 个已完成任务重新执行智能选搭和成片；已有成果保留在历史记录中。确定重新生成吗？`
       : `将为 ${eligibleCount} 个任务自动完成后续步骤；已成功成果保持不变，同时只有少量任务并发生成，其余排队等待。确定开始吗？`
     if (!window.confirm(confirmText)) return
     const requestId = batchAutoRunRequestRef.current + 1
@@ -968,7 +965,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     void run('取消批量成片中...', () => api.cancelBatch(batchId), (result: { cancelledTaskIds: number[]; items: GenerationTask[] }) => {
       if (activeBatchIdRef.current !== batchId || batchAutoRunRequestRef.current !== requestId) return
       setBatchItems(result.items)
-      result.cancelledTaskIds.forEach((taskId) => clearLocalOperationsFor(['generation_styling', 'generation_preview', 'generation_result_image'], taskId))
+      result.cancelledTaskIds.forEach((taskId) => clearLocalOperationsFor(['generation_styling', 'generation_result_image'], taskId))
     }, { refresh: 'background' })
   }
   function handleBatchPrimaryAction(action: BatchPrimaryAction) {
@@ -1016,7 +1013,6 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     setAiLogDialog(null)
   }, [task?.id])
   useEffect(() => setAiStylingInstruction(task?.stageUserInputs?.aiStyling ?? stageInstructionText(task?.styling?.userInstruction)), [task?.id, task?.stageUserInputs?.aiStyling, task?.styling?.id])
-  useEffect(() => setStoryboardInstruction(task?.stageUserInputs?.storyboardPreview ?? stageInstructionText((task?.storyboardPreview ?? task?.preview)?.userInstruction)), [task?.id, task?.stageUserInputs?.storyboardPreview, (task?.storyboardPreview ?? task?.preview)?.id])
   useEffect(() => setFinalImageInstruction(task?.stageUserInputs?.finalImage ?? stageInstructionText(task?.resultSet?.userInstruction)), [task?.id, task?.stageUserInputs?.finalImage, task?.resultSet?.id])
   useEffect(() => {
     loadRecentTasks(0)
@@ -1030,7 +1026,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   }, [task?.id, task?.status, task?.autoRunTarget, setTask])
   useEffect(() => {
     if (!task || isTaskLockedForGeneration(task)) return
-    clearLocalOperationsFor(['generation_styling', 'generation_preview', 'generation_result_image'], task.id)
+      clearLocalOperationsFor(['generation_styling', 'generation_result_image'], task.id)
   }, [task?.id, task?.status, task?.autoRunTarget, task?.resultSet?.status])
   const hasActiveRecentTasks = recentRecordTasks(recentItems).some((item) => isTaskRunning(item) || isTaskQueuedForAutoRun(item))
   useEffect(() => {
@@ -1095,7 +1091,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     <section className="page studio-page">
       <PageTitle
         title="AI 摄影棚"
-        subtitle="导入主推款，让系统完成智能选搭、分镜预览并生成电商棚拍成片。"
+        subtitle="导入主推款，让系统完成智能选搭并直接生成五张电商棚拍成片。"
         actions={task ? (
           <div className="studio-title-actions">
             <button className="management-action" onClick={startNewTask}><ImagePlus size={16} />新建拍摄任务</button>
@@ -1122,8 +1118,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
             <div className="studio-stage-viewport">
               {visibleStep === 0 && <UploadHeroStep task={task} setTask={applyTaskUpdate} run={run} uploadSessions={uploadSessions} refreshUploadSessions={refreshUploadSessions} markBrowserUploading={markBrowserUploading} onLatestTaskCreated={onLatestTaskCreated} />}
               {visibleStep === 1 && <StylingStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={aiStylingInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
-              {visibleStep === 2 && <PreviewStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={storyboardInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
-              {visibleStep === 3 && <FinalStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={finalImageInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+              {visibleStep === 2 && <FinalStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={finalImageInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
             </div>
           </div>
         </div>
@@ -1149,10 +1144,10 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
                   <StageUserInputModule
                     step={summaryInputStep}
                     task={task}
-                    value={stageInputValue(summaryInputStep, { aiStylingInstruction, storyboardInstruction, finalImageInstruction })}
+                    value={stageInputValue(summaryInputStep, { aiStylingInstruction, finalImageInstruction })}
                     savedValue={savedStageInputValue(summaryInputStep, task)}
-                    onChange={(value) => updateStageInput(summaryInputStep, value, { setAiStylingInstruction, setStoryboardInstruction, setFinalImageInstruction })}
-                    onSave={() => void run(`${stageInputSaveLabel(summaryInputStep)}中...`, () => api.updateTask(task.id, stageInputSavePayload(summaryInputStep, stageInputValue(summaryInputStep, { aiStylingInstruction, storyboardInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => applyTaskUpdate(r.item), { refresh: 'background' })}
+                    onChange={(value) => updateStageInput(summaryInputStep, value, { setAiStylingInstruction, setFinalImageInstruction })}
+                    onSave={() => void run(`${stageInputSaveLabel(summaryInputStep)}中...`, () => api.updateTask(task.id, stageInputSavePayload(summaryInputStep, stageInputValue(summaryInputStep, { aiStylingInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => applyTaskUpdate(r.item), { refresh: 'background' })}
                     disabled={isTaskRunning(task) || !!task.autoRunTarget}
                   />
                 )}
@@ -1999,7 +1994,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
   async function confirmDraftChanges() {
     if (!hasPendingDraft) return
     if (draftImages.length < 1) return
-    if (task.status !== 'DRAFT' && !window.confirm('确认修改主推款输入吗？确认后当前选搭、分镜预览和成片会失效，但历史记录会保留。')) return
+    if (task.status !== 'DRAFT' && !window.confirm('确认修改主推款输入吗？确认后当前选搭和成片会失效，但历史记录会保留。')) return
     await run(task.status === 'DRAFT' ? '保存主推款修改中...' : '确认主推款修改中...', async () => {
       let result: { item: GenerationTask } = { item: task }
       if (hasInfoDraftChange) {
@@ -2061,7 +2056,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
           />
         ))}
       </div>
-      <p className="edit-hint">{task.status === 'DRAFT' ? `最多 ${HERO_PRODUCT_MAX_IMAGES} 张进入候选池；AI 智能选搭后保留 ${HERO_PRODUCT_SELECTED_IMAGES} 张主推款参考图。` : hasPendingDraft ? '修改尚未生效；确认前不会影响当前选搭、分镜预览和成片。' : `当前展示 AI 选搭后保留的主推款参考图，最多 ${HERO_PRODUCT_SELECTED_IMAGES} 张。`}</p>
+      <p className="edit-hint">{task.status === 'DRAFT' ? `最多 ${HERO_PRODUCT_MAX_IMAGES} 张进入候选池；AI 智能选搭后保留 ${HERO_PRODUCT_SELECTED_IMAGES} 张主推款参考图。` : hasPendingDraft ? '修改尚未生效；确认前不会影响当前选搭和成片。' : `当前展示 AI 选搭后保留的主推款参考图，最多 ${HERO_PRODUCT_SELECTED_IMAGES} 张。`}</p>
       <div className="inline-form">
         <button className="management-action" disabled={!hasPendingDraft || draftImages.length < 1} onClick={() => void confirmDraftChanges()}><Check size={16} />确认修改</button>
         <button className="management-action" disabled={!hasPendingDraft} onClick={() => resetDraft()}><RotateCcw size={16} />放弃修改</button>
@@ -2165,44 +2160,37 @@ function RequirementEditor({ value, onChange, title, placeholder }: { value: str
 
 type StudioStageInputState = {
   aiStylingInstruction: string
-  storyboardInstruction: string
   finalImageInstruction: string
 }
 
 type StudioStageInputSetters = {
   setAiStylingInstruction: (value: string) => void
-  setStoryboardInstruction: (value: string) => void
   setFinalImageInstruction: (value: string) => void
 }
 
 function stageInputValue(step: StudioStep, state: StudioStageInputState) {
   if (step === 1) return state.aiStylingInstruction
-  if (step === 2) return state.storyboardInstruction
   return state.finalImageInstruction
 }
 
 function updateStageInput(step: StudioStep, value: string, setters: StudioStageInputSetters) {
   if (step === 1) setters.setAiStylingInstruction(value)
-  else if (step === 2) setters.setStoryboardInstruction(value)
   else setters.setFinalImageInstruction(value)
 }
 
 function savedStageInputValue(step: StudioStep, task: GenerationTask | null) {
   if (!task) return ''
   if (step === 1) return task.stageUserInputs?.aiStyling ?? ''
-  if (step === 2) return task.stageUserInputs?.storyboardPreview ?? ''
   return task.stageUserInputs?.finalImage ?? ''
 }
 
 function stageInputSavePayload(step: StudioStep, value: string) {
   if (step === 1) return { aiStylingUserInstruction: value }
-  if (step === 2) return { storyboardPreviewUserInstruction: value }
   return { finalImageUserInstruction: value }
 }
 
 function stageInputSaveLabel(step: StudioStep) {
   if (step === 1) return '保存选搭要求'
-  if (step === 2) return '保存分镜预览要求'
   return '保存成片要求'
 }
 
@@ -2222,7 +2210,6 @@ function StageUserInputModule({ step, task, value, savedValue = '', onChange, on
   const labels = [
     { title: '', placeholder: '' },
     { title: '智能选搭要求', placeholder: '例如：不要厚重外套，改成更轻盈的通勤搭配。' },
-    { title: '分镜预览要求', placeholder: '例如：分镜姿态更舒展，背景保持简洁。' },
     { title: '成片要求', placeholder: '例如：整体更干净，减少配饰存在感，保持棚拍电商质感。' },
   ][step]
   const saveDisabled = disabled || !task || value.trim() === savedValue.trim()
@@ -2473,53 +2460,6 @@ function diagnosisItems(value: Record<string, unknown>): string[] {
   }).filter(Boolean)
 }
 
- function PreviewStep({ task, setTask, run, userInstruction, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
-  task: GenerationTask | null
-  setTask: (task: GenerationTask) => void
-  run: any
-  userInstruction: string
-  localOperations: AIOperation[]
-  startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
-  clearLocalOperationsFor: (ownerTypes: string[], taskId?: number | null) => void
-  isAdmin: boolean
-  onOpenAICallLogs: (title: string, ownerTypes: string[], attemptId: number) => void
-}) {
-  const [viewer, setViewer] = useState<LightboxImage | null>(null)
-  const preview = task?.storyboardPreview ?? task?.preview ?? null
-  const canPreview = (
-    !!task?.styling && !isTaskLockedForGeneration(task) && ['STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'CANCELLED'].includes(task?.status ?? '')
-  ) || (!!task && !isTaskLockedForGeneration(task) && task.status === 'FAILED' && !!task.styling && !preview?.asset)
-  const hasPreview = !!preview?.asset
-  const operations = task ? operationFallbacks(task, localOperations, 'generation_preview') : []
-  return (
-    <div className="step-panel">
-      <div className="step-scroll-content">
-        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="按主推款类型与选搭方案生成 3:2 六格分镜；前 5 格用于生成成片，第 6 格仅作备用参考。">分镜预览</HeadingWithTooltip></div>
-        <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
-          <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_preview" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成分镜预览 · Attempt #${operation.id}`, ['generation_preview'], operation.id) : undefined} /></div>
-        ) : (
-          <div className="stage-business-result" key="result">{preview?.asset ? (
-            <div className="storyboard-review"><button className="preview-board-open" onClick={() => preview.asset && setViewer(assetLightboxImage(preview.asset))} title="放大查看"><img className="preview-board" src={mediaUrl(assetPreviewSrc(preview.asset))} loading="lazy" alt="分镜预览" /></button><div className="storyboard-legend"><span><strong>1–5</strong>生成成片</span><span><strong>6</strong>备用参考，不生成</span><em>点击图片放大检查姿势、构图与光线</em></div></div>
-          ) : <EmptyState title="尚未生成分镜预览" text="点击生成分镜预览后，系统会根据主推款品类与选搭方案输出一张 3:2 横版分镜预览图。" />}</div>
-        ))}</div>
-      </div>
-      <div className="stage-action-bar">
-        <button className="task-action" disabled={!canPreview} onClick={() => task && void run(hasPreview ? '重新生成分镜预览中...' : '生成分镜预览中...', () => {
-          startLocalOperation({ taskId: task.id, ownerType: 'generation_preview', ownerId: task.id, provider: 'image-2' })
-          setTask({ ...task, status: 'PREVIEW_RUNNING', resultSet: null, activeResultSetId: null })
-          return api.previewTask(task.id, userInstruction)
-        }, (r: { item: GenerationTask }) => {
-          clearLocalOperationsFor(['generation_preview'], task.id)
-          setTask(r.item)
-        }, { refresh: false })}>
-          <GalleryVerticalEnd size={16} /> {hasPreview ? '重新生成分镜预览' : '生成分镜预览'}
-        </button>
-      </div>
-      {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
-    </div>
-  )
-}
-
 function FinalStep({ task, setTask, run, userInstruction, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask) => void
@@ -2534,15 +2474,14 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const images = task?.resultSet?.images ?? []
   const finalAssets = images.map((image) => image.asset).filter((asset): asset is MediaAsset => !!asset)
-  const preview = task?.storyboardPreview ?? task?.preview ?? null
-  const canGenerate = !!preview?.asset && !!task && !isTaskLockedForGeneration(task) && ['PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'CANCELLED'].includes(task?.status ?? '')
+  const canGenerate = !!task?.styling && !isTaskLockedForGeneration(task) && ['STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task?.status ?? '')
   const hasFinalImages = images.some((image) => !!image.asset)
   const finalHistoryOperations = task ? operationFallbacks(task, localOperations, 'generation_result_image') : []
   const finalSlots = Array.from({ length: 5 }, (_, index) => images.find((image) => image.sortOrder === index + 1) ?? null)
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="并发生成分镜前 5 个镜头；可逐张检查、下载或重新生成，也可打包下载全部成片。">最终成片</HeadingWithTooltip></div>
+        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="按当前服装类型选用 5 个已发布拍摄预设并发生成；可逐张检查、下载或重新生成。">最终成片</HeadingWithTooltip></div>
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status">
             <AIOperationList operations={finalHistoryOperations} taskId={task?.id} ownerType="generation_result_image" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成成片 · Attempt #${operation.id}`, ['generation_result_image'], operation.id) : undefined} />
@@ -6012,18 +5951,18 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
   const coverThumb = refs.find((ref) => ref.angle === 'front')?.previewUrl ?? refs[0]?.previewUrl ?? null
   const displayRefs = refs.length || editable ? refs : fallbackHeadRefs()
   const takenAngles = new Set(refs.map((ref) => ref.angle).filter((angle): angle is string => !!angle))
-  const [env, setEnv] = useState<MediaAsset | null | undefined>(undefined)
+  const [shotPresets, setShotPresets] = useState<ShotPresetMatrix | null>(null)
   const [dragIndex, setDragIndex] = useState<number | null>(null)
 
   useEffect(() => {
-    void api.getShootEnvironment().then((r) => setEnv(r.asset)).catch(() => setEnv(null))
-  }, [])
+    if (isAdmin) void api.getShotPresets().then(setShotPresets).catch(() => setShotPresets(null))
+  }, [isAdmin])
 
   return (
     <section className="page workbench-page model-shell-page">
       <PageTitle
         title="模特与背景"
-        subtitle="维护全局模特身份和拍摄空间参考，保证每次成片稳定一致。"
+        subtitle="维护模特身份和 15 个固定镜头拍摄预设，保证整组成片稳定一致。"
       />
       <div className="panel model-page">
         <div className="model-meta">
@@ -6108,50 +6047,128 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
 
           <section className="model-block">
             <div className="section-head">
-              <strong>拍摄背景参考图</strong>
-              {isAdmin && (
-                <label className="management-action">
-                  <ImagePlus size={16} /> {env ? '更换' : '导入'}
-                  <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
-                    const file = event.target.files?.[0]
-                    event.currentTarget.value = ''
-                    if (file) void run('导入拍摄背景参考图中...', () => api.setShootEnvironment(file), (r: { asset: MediaAsset | null }) => setEnv(r.asset), { refresh: false })
-                  }} />
-                </label>
-              )}
+              <strong>拍摄预设</strong>
+              {isAdmin && shotPresets?.editingVersion && <span className="chip">编辑版本 v{shotPresets.editingVersion.versionNumber}</span>}
             </div>
-            <p className="edit-hint">全局只保留 0 或 1 张。生成分镜预览时只参考它的背景、空间与光线；模特和服装以各自参考图为准，为空则不引用背景参考图。</p>
-            {env === undefined ? (
-              <div className="model-empty">加载中…</div>
-            ) : env ? (
-              <div className="saved-image-grid">
-                <div className="saved-image-card">
-                  <img src={mediaUrl(assetPreviewSrc(env))} loading="lazy" alt="拍摄背景参考图" />
-                  <TruncatedText text="拍摄背景参考图">
-                    拍摄背景参考图<TruncatedText as="small" text={assetMeta(env)} />
-                  </TruncatedText>
-                  {isAdmin && (
-                    <div className="thumb-actions">
-                      <label title="更换图片">
-                        <RefreshCw size={14} />
-                        <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
-                          const file = event.target.files?.[0]
-                          event.currentTarget.value = ''
-                          if (file) void run('更换拍摄背景参考图中...', () => api.setShootEnvironment(file), (r: { asset: MediaAsset | null }) => setEnv(r.asset), { refresh: false })
-                        }} />
-                      </label>
-                      <button onClick={() => void run('移除拍摄背景参考图中...', () => api.clearShootEnvironment(), (r: { asset: MediaAsset | null }) => setEnv(r.asset), { refresh: false })} title="移除图片"><Trash2 size={14} /></button>
-                    </div>
-                  )}
-                </div>
-              </div>
+            <p className="edit-hint">上装、下装、套装各 5 个镜头。每个槽位必须同时维护背景图、同尺寸 Alpha PNG 遮罩和风格/姿势参考图；只有完整版本可以发布并用于新任务。</p>
+            {isAdmin ? (
+              shotPresets ? <ShotPresetManager matrix={shotPresets} setMatrix={setShotPresets} run={run} /> : <div className="model-empty">加载中…</div>
             ) : (
-              <div className="model-empty">尚未设置拍摄背景参考图{isAdmin ? '，点击上方「导入」添加一张。' : '。'}</div>
+              <div className="model-empty">拍摄预设由开发者统一维护，普通用户无需设置。</div>
             )}
           </section>
         </div>
       </div>
     </section>
+  )
+}
+
+const SHOT_PRESET_FAMILY_LABELS: Record<ShotPresetSlot['categoryFamily'], string> = {
+  top: '上装',
+  bottom: '下装',
+  one_piece: '套装',
+}
+
+function ShotPresetManager({ matrix, setMatrix, run }: {
+  matrix: ShotPresetMatrix
+  setMatrix: (matrix: ShotPresetMatrix) => void
+  run: any
+}) {
+  const completeCount = matrix.slots.filter((slot) => slot.complete).length
+  return (
+    <div className="shot-preset-manager">
+      <div className="shot-preset-summary">
+        <span><strong>{completeCount}/15</strong> 个槽位完整</span>
+        <span>三个服装类型分别发布，可以先完成并测试其中一种。</span>
+      </div>
+      {(['top', 'bottom', 'one_piece'] as const).map((family) => {
+        const state = matrix.families[family]
+        return (
+          <section className="shot-preset-family" key={family}>
+            <header>
+              <strong>{SHOT_PRESET_FAMILY_LABELS[family]}</strong>
+              <span>5 个固定镜头 · {state.publishedVersion ? `已发布 v${state.publishedVersion.versionNumber}` : '尚未发布'}</span>
+              <button
+                type="button"
+                className="task-action"
+                disabled={!state.publishReady || !matrix.draftVersion}
+                onClick={() => void run(`发布${SHOT_PRESET_FAMILY_LABELS[family]}拍摄预设中...`, () => api.publishShotPresetFamily(family), setMatrix, { refresh: false })}
+              ><Check size={15} />发布{SHOT_PRESET_FAMILY_LABELS[family]}</button>
+            </header>
+            {!state.publishReady && state.validationErrors.length > 0 && (
+              <p className="shot-preset-warning">发布前还需完成：{state.validationErrors.slice(0, 2).join('；')}{state.validationErrors.length > 2 ? `；另有 ${state.validationErrors.length - 2} 项` : ''}</p>
+            )}
+            <div className="shot-preset-grid">
+              {matrix.slots.filter((slot) => slot.categoryFamily === family).map((slot) => (
+                <ShotPresetSlotEditor key={`${family}-${slot.shotIndex}`} slot={slot} setMatrix={setMatrix} run={run} />
+              ))}
+            </div>
+          </section>
+        )
+      })}
+    </div>
+  )
+}
+
+function ShotPresetSlotEditor({ slot, setMatrix, run }: {
+  slot: ShotPresetSlot
+  setMatrix: (matrix: ShotPresetMatrix) => void
+  run: any
+}) {
+  const [background, setBackground] = useState<File | null>(null)
+  const [mask, setMask] = useState<File | null>(null)
+  const [pose, setPose] = useState<File | null>(null)
+  const ready = !!background && !!mask && !!pose
+  const upload = () => {
+    if (!background || !mask || !pose) return
+    void run(
+      `保存${SHOT_PRESET_FAMILY_LABELS[slot.categoryFamily]}镜头 ${slot.shotIndex} 中...`,
+      () => api.setShotPresetSlot(slot.categoryFamily, slot.shotIndex, background, mask, pose),
+      (next: ShotPresetMatrix) => {
+        setMatrix(next)
+        setBackground(null)
+        setMask(null)
+        setPose(null)
+      },
+      { refresh: false },
+    )
+  }
+  return (
+    <article className={`shot-preset-card ${slot.complete ? 'complete' : ''}`}>
+      <header><strong>镜头 {slot.shotIndex}</strong><span>{slot.complete ? '已配置' : '待配置'}</span></header>
+      <div className="shot-preset-thumbs">
+        <ShotPresetThumb label="背景" asset={slot.background} />
+        <ShotPresetThumb label="遮罩" asset={slot.mask} />
+        <ShotPresetThumb label="姿势" asset={slot.pose} />
+      </div>
+      <div className="shot-preset-inputs">
+        <PresetFileInput label={background?.name ?? '选择背景图'} accept={SUPPORTED_IMAGE_ACCEPT} onChange={setBackground} />
+        <PresetFileInput label={mask?.name ?? '选择遮罩 PNG'} accept="image/png,.png" onChange={setMask} />
+        <PresetFileInput label={pose?.name ?? '选择姿势图'} accept={SUPPORTED_IMAGE_ACCEPT} onChange={setPose} />
+      </div>
+      <button type="button" className="management-action" disabled={!ready} onClick={upload}><Save size={14} />保存三张图片</button>
+    </article>
+  )
+}
+
+function ShotPresetThumb({ label, asset }: { label: string; asset: MediaAsset | null }) {
+  return (
+    <div className="shot-preset-thumb">
+      {asset ? <img src={mediaUrl(assetPreviewSrc(asset))} loading="lazy" alt={`${label}参考图`} /> : <div className="image-placeholder"><FileImage size={18} /></div>}
+      <span>{label}</span>
+    </div>
+  )
+}
+
+function PresetFileInput({ label, accept, onChange }: { label: string; accept: string; onChange: (file: File | null) => void }) {
+  return (
+    <label className="shot-preset-file" title={label}>
+      <Upload size={13} /><span>{label}</span>
+      <input type="file" accept={accept} onChange={(event) => {
+        onChange(event.target.files?.[0] ?? null)
+        event.currentTarget.value = ''
+      }} />
+    </label>
   )
 }
 
@@ -6989,7 +7006,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     <section className="page workbench-page records-page">
       <PageTitle
         title="生成记录"
-        subtitle="按批次或单次任务复盘拍摄流程、分镜预览和最终成片。"
+        subtitle="按批次或单次任务复盘拍摄输入、智能选搭和最终成片。"
       />
       <div className="records-layout">
         <div className="panel record-list">
@@ -7207,7 +7224,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
               </button>
               <button className="management-action" disabled={recordArchiveMutationBusy || isTaskRunning(detail) || detail.archiveReason === 'deletion_pending'} onClick={() => openRecordDeleteDialogForItems([detail])}>归档</button>
             </>
-          ) : <EmptyState title="选择一条记录" text="查看分镜预览、搭配服装和最终成片。" />}
+          ) : <EmptyState title="选择一条记录" text="查看拍摄输入、搭配服装和最终成片。" />}
         </div>
       </div>
       {batchBulkError && <div className="inline-error" role="alert">{batchBulkError}</div>}
@@ -9082,20 +9099,17 @@ function SearchBox({
 function getTaskStep(task: GenerationTask | null): StudioStep {
   if (!task) return 0
   if (task.status === 'CANCELLED') {
-    if (task.resultSet?.images?.length) return 3
-    if ((task.storyboardPreview ?? task.preview)?.asset) return 3
+    if (task.resultSet?.images?.length) return 2
     if (task.styling) return 2
     return 1
   }
   if (task.status === 'FAILED') {
-    if (task.resultSet?.images?.length) return 3
-    if ((task.storyboardPreview ?? task.preview)?.asset) return 3
+    if (task.resultSet?.images?.length) return 2
     if (task.styling) return 2
     return 1
   }
   if (['DRAFT', 'READY_FOR_STYLING', 'STYLING_RUNNING'].includes(task.status)) return 1
-  if (['STYLING_READY', 'PREVIEW_RUNNING'].includes(task.status)) return 2
-  if (['PREVIEW_READY', 'FINAL_RUNNING', 'FINAL_PARTIAL', 'COMPLETED'].includes(task.status)) return 3
+  if (['STYLING_READY', 'PREVIEW_RUNNING', 'PREVIEW_READY', 'FINAL_RUNNING', 'FINAL_PARTIAL', 'COMPLETED'].includes(task.status)) return 2
   return 0
 }
 
@@ -9143,7 +9157,7 @@ function studioTaskPresentation(task: GenerationTask): StudioTaskPresentation {
   return {
     statusLabel: taskListStatusLabel(task),
     currentStageLabel,
-    progressLabel: `已完成 ${completedStageCount}/4 步`,
+    progressLabel: `已完成 ${completedStageCount}/3 步`,
     executingStage: runningStage,
   }
 }
@@ -9152,7 +9166,7 @@ function runningStudioStage(task: GenerationTask): StudioStep | null {
   const map: Record<string, StudioStep> = {
     STYLING_RUNNING: 1,
     PREVIEW_RUNNING: 2,
-    FINAL_RUNNING: 3,
+    FINAL_RUNNING: 2,
   }
   return map[task.status] ?? null
 }
@@ -9160,7 +9174,6 @@ function runningStudioStage(task: GenerationTask): StudioStep | null {
 function completedStudioStageCount(task: GenerationTask) {
   let count = taskHasHeroImage(task) ? 1 : 0
   if (task.activeStylingId || task.styling) count += 1
-  if ((task.storyboardPreview ?? task.preview)?.asset) count += 1
   if (finalSucceededCount(task) >= 5) count += 1
   return count
 }
