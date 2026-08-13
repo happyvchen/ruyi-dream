@@ -131,8 +131,8 @@ PROMPT_SECTION_PATTERN = re.compile(
 AI_STYLING_PROMPT_CONFIG_KEY = "assembly.ai_styling"
 GARMENT_IMAGE_SELECTION_PROMPT_CONFIG_KEY = "assembly.garment_image_selection"
 HERO_IMAGE_SELECTION_PROMPT_CONFIG_KEY = "assembly.hero_image_selection"
-MAX_GARMENT_IMAGE_INPUTS = 15
-MAX_HERO_IMAGE_INPUTS = 15
+MAX_GARMENT_IMAGE_INPUTS = 6
+MAX_HERO_IMAGE_INPUTS = 8
 MAX_GARMENT_SELECTED_IMAGES = 6
 MAX_HERO_SELECTED_IMAGES = 8
 IMAGE2_MAX_REFERENCE_IMAGES = 6
@@ -2023,9 +2023,14 @@ def media_asset_direct_reference_count(db: Any, asset_id: int) -> int:
           (SELECT COUNT(*) FROM generation_attempts WHERE output_asset_id = ?) +
           (SELECT COUNT(*) FROM shot_presets WHERE background_asset_id = ?) +
           (SELECT COUNT(*) FROM shot_presets WHERE mask_asset_id = ?) +
-          (SELECT COUNT(*) FROM shot_presets WHERE pose_asset_id = ?) AS count
+          (SELECT COUNT(*) FROM shot_presets WHERE pose_asset_id = ?) +
+          (SELECT COUNT(*) FROM shot_preset_slots WHERE background_asset_id = ?) +
+          (SELECT COUNT(*) FROM shot_preset_slots WHERE pose_asset_id = ?) +
+          (SELECT COUNT(*) FROM generation_result_set_shot_presets WHERE background_asset_id = ?) +
+          (SELECT COUNT(*) FROM generation_result_set_shot_presets WHERE pose_asset_id = ?) AS count
         """,
-        (asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id),
+        (asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id,
+         asset_id, asset_id, asset_id, asset_id),
     ).fetchone()
     return int(row["count"] or 0)
 
@@ -3062,7 +3067,52 @@ async def add_styling_garment_images(
     garment_id: int,
     files: list[UploadFile] = File(...),
 ) -> dict[str, Any]:
-    raise HTTPException(status_code=410, detail="创建后不支持继续添加图片，请重新导入一套素材")
+    if not files:
+        raise HTTPException(status_code=400, detail="至少选择一张图片")
+    with get_db() as db:
+        row = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="搭配服装不存在")
+        ensure_styling_garment_not_tagging(row)
+        count = int(db.execute(
+            "SELECT COUNT(*) AS count FROM styling_garment_images WHERE styling_garment_id = ? AND deleted_at IS NULL",
+            (garment_id,),
+        ).fetchone()["count"])
+    if count + len(files) > MAX_GARMENT_SELECTED_IMAGES:
+        raise HTTPException(status_code=400, detail=f"搭配服装最多保留 {MAX_GARMENT_SELECTED_IMAGES} 张图片")
+    assets = await save_uploads_as_media_assets(files)
+    timestamp = now_iso()
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT * FROM styling_garments WHERE id = ? AND deleted_at IS NULL", (garment_id,)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="搭配服装不存在")
+            ensure_styling_garment_not_tagging(row)
+            current_count = int(db.execute(
+                "SELECT COUNT(*) AS count FROM styling_garment_images WHERE styling_garment_id = ? AND deleted_at IS NULL",
+                (garment_id,),
+            ).fetchone()["count"])
+            if current_count + len(assets) > MAX_GARMENT_SELECTED_IMAGES:
+                raise HTTPException(status_code=409, detail=f"搭配服装最多保留 {MAX_GARMENT_SELECTED_IMAGES} 张图片")
+            next_order = int(db.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM styling_garment_images WHERE styling_garment_id = ? AND deleted_at IS NULL",
+                (garment_id,),
+            ).fetchone()["next_order"])
+            for offset, asset in enumerate(assets):
+                db.execute(
+                    """
+                    INSERT INTO styling_garment_images
+                      (styling_garment_id, media_asset_id, sort_order, status, created_at, updated_at)
+                    VALUES (?, ?, ?, 'READY', ?, ?)
+                    """,
+                    (garment_id, asset["id"], next_order + offset, timestamp, timestamp),
+                )
+            db.execute("UPDATE styling_garments SET updated_at = ? WHERE id = ?", (timestamp, garment_id))
+            log_event(db, "styling_garment", garment_id, "images_added", {"count": len(assets)})
+    except Exception:
+        cleanup_created_media_assets(assets)
+        raise
+    return {"item": get_styling_garment_by_id(garment_id)}
 
 
 @app.post("/api/styling-garment-images/{image_id}/replace")
@@ -4450,7 +4500,54 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[st
 
 @app.post("/api/generation-tasks/{task_id}/images")
 async def add_generation_task_images(task_id: int, files: list[UploadFile] = File(...)) -> dict[str, Any]:
-    raise HTTPException(status_code=410, detail="创建后不支持继续添加主推款图片，请重新创建拍摄任务")
+    if not files:
+        raise HTTPException(status_code=400, detail="至少选择一张主推款图片")
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_tasks WHERE id = ? AND deleted_at IS NULL", (task_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="生成任务不存在")
+        ensure_generation_task_editable(row)
+        count = int(db.execute(
+            "SELECT COUNT(*) AS count FROM generation_task_images WHERE task_id = ? AND deleted_at IS NULL",
+            (task_id,),
+        ).fetchone()["count"])
+    if count + len(files) > MAX_HERO_SELECTED_IMAGES:
+        raise HTTPException(status_code=400, detail=f"主推款最多保留 {MAX_HERO_SELECTED_IMAGES} 张图片")
+    assets = await save_uploads_as_media_assets(files)
+    timestamp = now_iso()
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT * FROM generation_tasks WHERE id = ? AND deleted_at IS NULL", (task_id,)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="生成任务不存在")
+            ensure_generation_task_editable(row)
+            current_count = int(db.execute(
+                "SELECT COUNT(*) AS count FROM generation_task_images WHERE task_id = ? AND deleted_at IS NULL",
+                (task_id,),
+            ).fetchone()["count"])
+            if current_count + len(assets) > MAX_HERO_SELECTED_IMAGES:
+                raise HTTPException(status_code=409, detail=f"主推款最多保留 {MAX_HERO_SELECTED_IMAGES} 张图片")
+            next_order = int(db.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM generation_task_images WHERE task_id = ? AND deleted_at IS NULL",
+                (task_id,),
+            ).fetchone()["next_order"])
+            for offset, asset in enumerate(assets):
+                db.execute(
+                    """
+                    INSERT INTO generation_task_images
+                      (task_id, media_asset_id, sort_order, status, created_at, updated_at)
+                    VALUES (?, ?, ?, 'READY', ?, ?)
+                    """,
+                    (task_id, asset["id"], next_order + offset, timestamp, timestamp),
+                )
+            db.execute("UPDATE generation_tasks SET updated_at = ? WHERE id = ?", (timestamp, task_id))
+            if row["status"] != "DRAFT":
+                mark_generation_task_input_changed(db, task_id, timestamp, "hero_product_images_added")
+            log_event(db, "generation_task", task_id, "images_added", {"count": len(assets)})
+    except Exception:
+        cleanup_created_media_assets(assets)
+        raise
+    return {"item": get_generation_task_by_id(task_id)}
 
 
 @app.post("/api/generation-tasks/{task_id}/images/from-uploads")
@@ -5089,10 +5186,20 @@ async def run_generate_final_images(
     styling_id = int(task["active_styling_id"])
     category_family = storyboard_category_family(get_styling_plan_by_id(styling_id))
     with get_db() as db:
-        preset_version = get_published_shot_preset_version_for_family(db, category_family)
-    if not preset_version:
+        preset_rows = db.execute(
+            """
+            SELECT slots.*
+            FROM shot_preset_slots slots
+            JOIN media_assets background ON background.id = slots.background_asset_id AND background.deleted_at IS NULL
+            JOIN media_assets pose ON pose.id = slots.pose_asset_id AND pose.deleted_at IS NULL
+            WHERE slots.category_family = ?
+            ORDER BY slots.shot_index
+            """,
+            (category_family,),
+        ).fetchall()
+    if len(preset_rows) != 5:
         family_label = {"top": "上装", "bottom": "下装", "one_piece": "套装"}[category_family]
-        raise HTTPException(status_code=409, detail=f"{family_label}拍摄预设尚未发布，请联系管理员完成该类型的 5 个镜头预设")
+        raise HTTPException(status_code=409, detail=f"{family_label}拍摄预设尚未完整，请联系管理员补齐该类型的 5 个镜头图片")
     effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "final_image")
     user_instruction_context = build_stage_user_instruction_context("final_image", effective_user_instruction)
     if continue_existing and task["active_result_set_id"]:
@@ -5138,9 +5245,27 @@ async def run_generate_final_images(
               (task_id, input_version_id, styling_id, preview_id, shot_preset_version_id, user_instruction_json, status, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, 'RUNNING', ?, ?)
             """,
-            (task_id, input_version_id, styling_id, preview_id, int(preset_version["id"]), dumps(user_instruction_context), timestamp, timestamp),
+            (task_id, input_version_id, styling_id, preview_id, None, dumps(user_instruction_context), timestamp, timestamp),
         )
         result_set_id = int(cursor.lastrowid)
+        db.executemany(
+            """
+            INSERT INTO generation_result_set_shot_presets
+              (result_set_id, category_family, shot_index, background_asset_id, pose_asset_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    result_set_id,
+                    category_family,
+                    int(preset["shot_index"]),
+                    int(preset["background_asset_id"]),
+                    int(preset["pose_asset_id"]),
+                    timestamp,
+                )
+                for preset in preset_rows
+            ],
+        )
         supersede_generation_result_sets(db, task_id, timestamp, keep_result_set_id=result_set_id)
         db.execute(
             "UPDATE generation_tasks SET current_input_version_id = ?, active_result_set_id = ?, updated_at = ? WHERE id = ?",
@@ -5187,7 +5312,7 @@ def continue_active_final_result_set(
         ).fetchone()
         if not result_set or result_set["status"] == "RUNNING":
             raise HTTPException(status_code=409, detail="成片已在生成中，请勿重复提交")
-        # 直接成片结果集只由当前选搭与冻结拍摄预设版本决定；历史结果集继续兼容 preview_id。
+        # 直接成片结果集只由当前选搭与结果集冻结的拍摄预设图片决定；历史结果集继续兼容 preview_id / 旧版本。
         if int(result_set["styling_id"]) != styling_id:
             return None
         if result_set["preview_id"] is not None and int(result_set["preview_id"]) != preview_id:
@@ -6778,77 +6903,14 @@ SHOT_PRESET_FAMILIES = ("top", "bottom", "one_piece")
 SHOT_PRESET_INDICES = tuple(range(1, 6))
 
 
-def get_shot_preset_version_row(db: Any, status: str) -> Any:
-    return db.execute(
-        "SELECT * FROM shot_preset_versions WHERE status = ? ORDER BY version_number DESC LIMIT 1",
-        (status,),
-    ).fetchone()
-
-
-def get_published_shot_preset_version_for_family(db: Any, category_family: str) -> Any:
-    return db.execute(
-        """
-        SELECT spv.*
-        FROM shot_preset_family_publications publication
-        JOIN shot_preset_versions spv ON spv.id = publication.version_id
-        WHERE publication.category_family = ?
-        """,
-        (category_family,),
-    ).fetchone()
-
-
-def ensure_draft_shot_preset_version(db: Any) -> Any:
-    draft = get_shot_preset_version_row(db, "DRAFT")
-    if draft:
-        return draft
-    next_number = int(
-        db.execute("SELECT COALESCE(MAX(version_number), 0) + 1 AS next_number FROM shot_preset_versions").fetchone()["next_number"]
-    )
-    timestamp = now_iso()
-    version_id = int(
-        db.execute(
-            "INSERT INTO shot_preset_versions (version_number, status, created_at, updated_at) VALUES (?, 'DRAFT', ?, ?)",
-            (next_number, timestamp, timestamp),
-        ).lastrowid
-    )
-    for family in SHOT_PRESET_FAMILIES:
-        published = get_published_shot_preset_version_for_family(db, family)
-        if published:
-            db.execute(
-                """
-                INSERT INTO shot_presets
-                  (version_id, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, created_at, updated_at)
-                SELECT ?, category_family, shot_index, background_asset_id, NULL, pose_asset_id, ?, ?
-                FROM shot_presets WHERE version_id = ? AND category_family = ?
-                """,
-                (version_id, timestamp, timestamp, int(published["id"]), family),
-            )
-    return db.execute("SELECT * FROM shot_preset_versions WHERE id = ?", (version_id,)).fetchone()
-
-
-def serialize_shot_preset_version(row: Any) -> dict[str, Any] | None:
-    if not row:
-        return None
-    return {
-        "id": int(row["id"]),
-        "versionNumber": int(row["version_number"]),
-        "status": str(row["status"]),
-        "publishedAt": row["published_at"],
-        "createdAt": row["created_at"],
-        "updatedAt": row["updated_at"],
-    }
-
-
-def shot_preset_validation_errors(db: Any, version_id: int, category_family: str | None = None) -> list[str]:
+def shot_preset_validation_errors(db: Any, category_family: str | None = None) -> list[str]:
     rows = db.execute(
         """
         SELECT sp.*
-        FROM shot_presets sp
+        FROM shot_preset_slots sp
         JOIN media_assets bg ON bg.id = sp.background_asset_id AND bg.deleted_at IS NULL
         JOIN media_assets pose ON pose.id = sp.pose_asset_id AND pose.deleted_at IS NULL
-        WHERE sp.version_id = ?
-        """,
-        (version_id,),
+        """
     ).fetchall()
     by_slot = {(str(row["category_family"]), int(row["shot_index"])): row for row in rows}
     errors: list[str] = []
@@ -6862,25 +6924,11 @@ def shot_preset_validation_errors(db: Any, version_id: int, category_family: str
 
 def serialize_shot_presets() -> dict[str, Any]:
     with get_db() as db:
-        draft = get_shot_preset_version_row(db, "DRAFT")
         rows = db.execute(
-            "SELECT * FROM shot_presets WHERE version_id = ? ORDER BY category_family, shot_index",
-            (int(draft["id"]),),
-        ).fetchall() if draft else []
-        published_by_family = {
-            family: get_published_shot_preset_version_for_family(db, family)
-            for family in SHOT_PRESET_FAMILIES
-        }
-        if not draft:
-            rows = []
-            for family, version in published_by_family.items():
-                if version:
-                    rows.extend(db.execute(
-                        "SELECT * FROM shot_presets WHERE version_id = ? AND category_family = ? ORDER BY shot_index",
-                        (int(version["id"]), family),
-                    ).fetchall())
+            "SELECT * FROM shot_preset_slots ORDER BY category_family, shot_index"
+        ).fetchall()
         family_errors = {
-            family: shot_preset_validation_errors(db, int(draft["id"]), family) if draft else [f"{family} 的 5 个镜头尚未配置"]
+            family: shot_preset_validation_errors(db, family)
             for family in SHOT_PRESET_FAMILIES
         }
         available_asset_ids = {
@@ -6892,27 +6940,26 @@ def serialize_shot_presets() -> dict[str, Any]:
     for family in SHOT_PRESET_FAMILIES:
         for shot_index in SHOT_PRESET_INDICES:
             row = by_slot.get((family, shot_index))
+            background_asset_id = int(row["background_asset_id"]) if row and row["background_asset_id"] else None
+            pose_asset_id = int(row["pose_asset_id"]) if row and row["pose_asset_id"] else None
             slots.append(
                 {
                     "categoryFamily": family,
                     "shotIndex": shot_index,
-                    "background": get_media_asset_by_id(int(row["background_asset_id"])) if row else None,
-                    "pose": get_media_asset_by_id(int(row["pose_asset_id"])) if row else None,
+                    "background": get_media_asset_by_id(background_asset_id) if background_asset_id else None,
+                    "pose": get_media_asset_by_id(pose_asset_id) if pose_asset_id else None,
                     "complete": bool(
-                        row
-                        and int(row["background_asset_id"]) in available_asset_ids
-                        and int(row["pose_asset_id"]) in available_asset_ids
+                        background_asset_id in available_asset_ids
+                        and pose_asset_id in available_asset_ids
                     ),
                 }
             )
     return {
-        "draftVersion": serialize_shot_preset_version(draft),
-        "editingVersion": serialize_shot_preset_version(draft),
         "families": {
             family: {
-                "publishReady": not family_errors[family],
+                "complete": not family_errors[family],
+                "configuredCount": 5 - len(family_errors[family]),
                 "validationErrors": family_errors[family],
-                "publishedVersion": serialize_shot_preset_version(published_by_family[family]),
             }
             for family in SHOT_PRESET_FAMILIES
         },
@@ -6945,97 +6992,84 @@ async def set_shot_preset_slot(
     background: UploadFile = File(...),
     pose: UploadFile = File(...),
 ) -> dict[str, Any]:
+    raise HTTPException(status_code=410, detail="拍摄预设改为单张图片更换后立即生效")
+
+
+def normalize_shot_preset_asset_role(value: str) -> tuple[str, str]:
+    normalized = value.strip().lower()
+    if normalized in {"background", "master"}:
+        return "background", "background_asset_id"
+    if normalized == "pose":
+        return "pose", "pose_asset_id"
+    raise HTTPException(status_code=400, detail="拍摄预设图片类型不合法")
+
+
+@app.post("/api/shot-presets/{category_family}/{shot_index}/{asset_role}")
+async def replace_shot_preset_asset(
+    category_family: str,
+    shot_index: int,
+    asset_role: str,
+    request: Request,
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
     require_admin(request)
     family = normalize_shot_category_family(category_family)
     if family not in SHOT_PRESET_FAMILIES or shot_index not in SHOT_PRESET_INDICES:
         raise HTTPException(status_code=400, detail="拍摄预设槽位不合法")
-    await inspect_shot_preset_upload(background)
-    await inspect_shot_preset_upload(pose)
-    assets = await save_uploads_as_media_assets([background, pose])
+    _, column = normalize_shot_preset_asset_role(asset_role)
+    await inspect_shot_preset_upload(file)
+    asset = (await save_uploads_as_media_assets([file]))[0]
     timestamp = now_iso()
     with get_db() as db:
         db.execute("BEGIN IMMEDIATE")
-        draft = ensure_draft_shot_preset_version(db)
         previous = db.execute(
-            "SELECT * FROM shot_presets WHERE version_id = ? AND category_family = ? AND shot_index = ?",
-            (int(draft["id"]), family, shot_index),
+            "SELECT * FROM shot_preset_slots WHERE category_family = ? AND shot_index = ?",
+            (family, shot_index),
         ).fetchone()
         db.execute(
-            """
-            INSERT INTO shot_presets
-              (version_id, category_family, shot_index, background_asset_id, pose_asset_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(version_id, category_family, shot_index) DO UPDATE SET
-              background_asset_id = excluded.background_asset_id,
-              mask_asset_id = NULL,
-              pose_asset_id = excluded.pose_asset_id,
-              updated_at = excluded.updated_at
+            f"""
+            INSERT INTO shot_preset_slots
+              (category_family, shot_index, {column}, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(category_family, shot_index) DO UPDATE SET
+              {column} = excluded.{column}, updated_at = excluded.updated_at
             """,
-            (int(draft["id"]), family, shot_index, int(assets[0]["id"]), int(assets[1]["id"]), timestamp, timestamp),
+            (family, shot_index, int(asset["id"]), timestamp, timestamp),
         )
-        db.execute("UPDATE shot_preset_versions SET updated_at = ? WHERE id = ?", (timestamp, int(draft["id"])))
-        if previous:
-            previous_asset_ids = [int(previous[key]) for key in ("background_asset_id", "pose_asset_id")]
-            if previous["mask_asset_id"]:
-                previous_asset_ids.append(int(previous["mask_asset_id"]))
-            for asset_id in previous_asset_ids:
-                release_media_asset_if_unreferenced(db, asset_id)
+        previous_asset_id = int(previous[column]) if previous and previous[column] else None
+        if previous_asset_id:
+            release_media_asset_if_unreferenced(db, previous_asset_id)
+    return serialize_shot_presets()
+
+
+@app.delete("/api/shot-presets/{category_family}/{shot_index}/{asset_role}")
+def delete_shot_preset_asset(category_family: str, shot_index: int, asset_role: str, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    family = normalize_shot_category_family(category_family)
+    if family not in SHOT_PRESET_FAMILIES or shot_index not in SHOT_PRESET_INDICES:
+        raise HTTPException(status_code=400, detail="拍摄预设槽位不合法")
+    _, column = normalize_shot_preset_asset_role(asset_role)
+    with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute(
+            "SELECT * FROM shot_preset_slots WHERE category_family = ? AND shot_index = ?",
+            (family, shot_index),
+        ).fetchone()
+        if not row or not row[column]:
+            raise HTTPException(status_code=404, detail="拍摄预设图片不存在")
+        asset_id = int(row[column])
+        db.execute(
+            f"UPDATE shot_preset_slots SET {column} = NULL, updated_at = ? WHERE id = ?",
+            (now_iso(), int(row["id"])),
+        )
+        release_media_asset_if_unreferenced(db, asset_id)
     return serialize_shot_presets()
 
 
 @app.post("/api/shot-preset-families/{category_family}/publish")
 def publish_shot_presets(category_family: str, request: Request) -> dict[str, Any]:
     require_admin(request)
-    family = normalize_shot_category_family(category_family)
-    if family not in SHOT_PRESET_FAMILIES:
-        raise HTTPException(status_code=400, detail="拍摄预设类型不合法")
-    family_label = {"top": "上装", "bottom": "下装", "one_piece": "套装"}[family]
-    timestamp = now_iso()
-    with get_db() as db:
-        db.execute("BEGIN IMMEDIATE")
-        draft = get_shot_preset_version_row(db, "DRAFT")
-        if not draft:
-            raise HTTPException(status_code=409, detail=f"需要先配置完整的{family_label} 5 个镜头预设")
-        errors = shot_preset_validation_errors(db, int(draft["id"]), family)
-        if errors:
-            raise HTTPException(status_code=409, detail=f"{family_label}拍摄预设尚未完整：{'；'.join(errors[:3])}")
-        previous = get_published_shot_preset_version_for_family(db, family)
-        next_number = int(db.execute(
-            "SELECT COALESCE(MAX(version_number), 0) + 1 AS next_number FROM shot_preset_versions"
-        ).fetchone()["next_number"])
-        snapshot_id = int(db.execute(
-            """
-            INSERT INTO shot_preset_versions (version_number, status, published_at, created_at, updated_at)
-            VALUES (?, 'PUBLISHED', ?, ?, ?)
-            """,
-            (next_number, timestamp, timestamp, timestamp),
-        ).lastrowid)
-        db.execute(
-            """
-            INSERT INTO shot_presets
-              (version_id, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, created_at, updated_at)
-            SELECT ?, category_family, shot_index, background_asset_id, NULL, pose_asset_id, ?, ?
-            FROM shot_presets WHERE version_id = ? AND category_family = ?
-            """,
-            (snapshot_id, timestamp, timestamp, int(draft["id"]), family),
-        )
-        db.execute(
-            """
-            INSERT INTO shot_preset_family_publications (category_family, version_id, published_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(category_family) DO UPDATE SET version_id = excluded.version_id, published_at = excluded.published_at
-            """,
-            (family, snapshot_id, timestamp),
-        )
-        if previous and not db.execute(
-            "SELECT 1 FROM shot_preset_family_publications WHERE version_id = ? LIMIT 1",
-            (int(previous["id"]),),
-        ).fetchone():
-            db.execute(
-                "UPDATE shot_preset_versions SET status = 'SUPERSEDED', updated_at = ? WHERE id = ?",
-                (timestamp, int(previous["id"])),
-            )
-    return serialize_shot_presets()
+    raise HTTPException(status_code=410, detail="拍摄预设图片更换后立即生效，无需发布")
 
 
 def serialize_shoot_environment() -> dict[str, Any]:
@@ -10484,8 +10518,19 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
     if not row:
         raise RuntimeError("成片槽位不存在")
     styling_plan = get_styling_plan_by_id(int(row["styling_id"]))
-    preset = None
-    if row["shot_preset_version_id"]:
+    with get_db() as db:
+        preset = db.execute(
+            """
+            SELECT * FROM generation_result_set_shot_presets
+            WHERE result_set_id = ? AND category_family = ? AND shot_index = ?
+            """,
+            (
+                int(row["result_set_id"]),
+                storyboard_category_family(styling_plan),
+                int(row["sort_order"]),
+            ),
+        ).fetchone()
+    if not preset and row["shot_preset_version_id"]:
         with get_db() as db:
             preset = db.execute(
                 """
@@ -10498,15 +10543,13 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
                     int(row["sort_order"]),
                 ),
             ).fetchone()
-        if not preset:
-            raise RuntimeError("当前成片冻结的拍摄预设不完整")
-        image_inputs = build_direct_final_image_inputs(
-            int(row["styling_id"]),
-            int(row["input_version_id"]),
-            preset,
-        )
-    else:
-        raise RuntimeError("历史分镜成片仅支持只读复盘；请重新一键成片以使用当前拍摄母版流程")
+    if not preset:
+        raise RuntimeError("当前成片冻结的拍摄预设不完整")
+    image_inputs = build_direct_final_image_inputs(
+        int(row["styling_id"]),
+        int(row["input_version_id"]),
+        preset,
+    )
     final_image_user_instruction = loads(
         row_value(row, "user_instruction_json"),
         loads(row_value(row, "result_set_user_instruction_json"), build_stage_user_instruction_context("final_image")),
@@ -10528,6 +10571,7 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         **prompt_execution_facts(prompt_config_key, prompt, prompt_runtime),
         "imageInputs": image_inputs,
         "shotPresetVersionId": row["shot_preset_version_id"],
+        "shotPresetSnapshotId": int(preset["id"]),
         "finalImageUserInstruction": final_image_user_instruction,
         "stylingPlan": styling_plan,
         "shotRole": row["shot_role"],

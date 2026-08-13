@@ -35,6 +35,8 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("069", "no_mask_master_shot_presets", "migration_no_mask_master_shot_presets"),
     ("070", "final_prompt_master_shot_contract", "migration_final_prompt_master_shot_contract"),
     ("071", "refresh_legacy_top_final_prompt", "migration_refresh_legacy_top_final_prompt"),
+    ("072", "live_shot_preset_slots", "migration_live_shot_preset_slots"),
+    ("073", "refresh_legacy_bottom_and_one_piece_final_prompts", "migration_refresh_legacy_bottom_and_one_piece_final_prompts"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -153,6 +155,19 @@ def init_db() -> None:
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_shot_preset_versions_single_draft
               ON shot_preset_versions(status) WHERE status = 'DRAFT';
+
+            CREATE TABLE IF NOT EXISTS shot_preset_slots (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              category_family TEXT NOT NULL,
+              shot_index INTEGER NOT NULL,
+              background_asset_id INTEGER REFERENCES media_assets(id),
+              pose_asset_id INTEGER REFERENCES media_assets(id),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(category_family, shot_index),
+              CHECK(category_family IN ('top', 'bottom', 'one_piece')),
+              CHECK(shot_index BETWEEN 1 AND 5)
+            );
 
             CREATE TABLE IF NOT EXISTS event_logs (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -346,6 +361,19 @@ def init_db() -> None:
               updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS generation_result_set_shot_presets (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              result_set_id INTEGER NOT NULL REFERENCES generation_result_sets(id) ON DELETE CASCADE,
+              category_family TEXT NOT NULL,
+              shot_index INTEGER NOT NULL,
+              background_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+              pose_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+              created_at TEXT NOT NULL,
+              UNIQUE(result_set_id, shot_index),
+              CHECK(category_family IN ('top', 'bottom', 'one_piece')),
+              CHECK(shot_index BETWEEN 1 AND 5)
+            );
+
             CREATE TABLE IF NOT EXISTS generation_attempts (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               owner_type TEXT NOT NULL,
@@ -471,6 +499,8 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_no_mask_master_shot_presets": migration_no_mask_master_shot_presets,
         "migration_final_prompt_master_shot_contract": migration_final_prompt_master_shot_contract,
         "migration_refresh_legacy_top_final_prompt": migration_refresh_legacy_top_final_prompt,
+        "migration_live_shot_preset_slots": migration_live_shot_preset_slots,
+        "migration_refresh_legacy_bottom_and_one_piece_final_prompts": migration_refresh_legacy_bottom_and_one_piece_final_prompts,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -915,6 +945,111 @@ def migration_refresh_legacy_top_final_prompt(db: sqlite3.Connection) -> None:
         "UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = 'assembly.final_image_top'",
         (canonical_top_final_prompt(), now_iso()),
     )
+
+
+# 仅升级由 070 写入、且从未被管理员修改过的下装/套装系统 Prompt。
+# 摘要不匹配时保留原文，避免覆盖任何管理员自定义内容。
+LEGACY_BOTTOM_AND_ONE_PIECE_FINAL_PROMPT_SHA256: dict[str, str] = {
+    "assembly.final_image_bottom": "2ecde92070900fd3d86f5378b05d523c0dbe530854aa630eebf45a95f6f37100",
+    "assembly.final_image_one_piece": "586e32581a3a4758335659617fb4c61d3ffdcf43ffebe3b403d9a4b00b937a64",
+}
+
+
+def canonical_bottom_or_one_piece_final_prompt(key: str) -> str:
+    filenames = {
+        "assembly.final_image_bottom": "final_image_bottom.txt",
+        "assembly.final_image_one_piece": "final_image_one_piece.txt",
+    }
+    filename = filenames[key]
+    return (Path(__file__).resolve().parents[1] / "prompt_templates" / filename).read_text(encoding="utf-8").strip() + "\n"
+
+
+def migration_refresh_legacy_bottom_and_one_piece_final_prompts(db: sqlite3.Connection) -> None:
+    """将可精确识别的旧下装、套装系统 Prompt 升级为当前母版直出版本。"""
+    if not table_exists(db, "prompt_configs"):
+        return
+    for key, expected_digest in LEGACY_BOTTOM_AND_ONE_PIECE_FINAL_PROMPT_SHA256.items():
+        row = db.execute("SELECT content FROM prompt_configs WHERE key = ?", (key,)).fetchone()
+        if not row:
+            continue
+        content = str(row["content"] or "")
+        digest = hashlib.sha256(content.strip().encode("utf-8")).hexdigest()
+        if digest != expected_digest:
+            continue
+        db.execute(
+            "UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?",
+            (canonical_bottom_or_one_piece_final_prompt(key), now_iso(), key),
+        )
+
+
+def migration_live_shot_preset_slots(db: sqlite3.Connection) -> None:
+    """Replace admin draft/publish maintenance with live slots and per-result-set snapshots.
+
+    Legacy version tables remain read-only so historical result sets can still be replayed.
+    """
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS shot_preset_slots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          category_family TEXT NOT NULL,
+          shot_index INTEGER NOT NULL,
+          background_asset_id INTEGER REFERENCES media_assets(id),
+          pose_asset_id INTEGER REFERENCES media_assets(id),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(category_family, shot_index),
+          CHECK(category_family IN ('top', 'bottom', 'one_piece')),
+          CHECK(shot_index BETWEEN 1 AND 5)
+        );
+        CREATE TABLE IF NOT EXISTS generation_result_set_shot_presets (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          result_set_id INTEGER NOT NULL REFERENCES generation_result_sets(id) ON DELETE CASCADE,
+          category_family TEXT NOT NULL,
+          shot_index INTEGER NOT NULL,
+          background_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+          pose_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+          created_at TEXT NOT NULL,
+          UNIQUE(result_set_id, shot_index),
+          CHECK(category_family IN ('top', 'bottom', 'one_piece')),
+          CHECK(shot_index BETWEEN 1 AND 5)
+        );
+        CREATE INDEX IF NOT EXISTS idx_result_set_shot_presets_result
+          ON generation_result_set_shot_presets(result_set_id, shot_index);
+        """
+    )
+    if not table_exists(db, "shot_presets") or not table_exists(db, "shot_preset_versions"):
+        return
+    draft = db.execute(
+        "SELECT id FROM shot_preset_versions WHERE status = 'DRAFT' ORDER BY version_number DESC LIMIT 1"
+    ).fetchone()
+    timestamp = now_iso()
+    for family in ("top", "bottom", "one_piece"):
+        published = db.execute(
+            "SELECT version_id FROM shot_preset_family_publications WHERE category_family = ?",
+            (family,),
+        ).fetchone() if table_exists(db, "shot_preset_family_publications") else None
+        for shot_index in range(1, 6):
+            row = None
+            if draft:
+                row = db.execute(
+                    "SELECT background_asset_id, pose_asset_id FROM shot_presets WHERE version_id = ? AND category_family = ? AND shot_index = ?",
+                    (int(draft["id"]), family, shot_index),
+                ).fetchone()
+            if not row and published:
+                row = db.execute(
+                    "SELECT background_asset_id, pose_asset_id FROM shot_presets WHERE version_id = ? AND category_family = ? AND shot_index = ?",
+                    (int(published["version_id"]), family, shot_index),
+                ).fetchone()
+            if row:
+                db.execute(
+                    """
+                    INSERT INTO shot_preset_slots
+                      (category_family, shot_index, background_asset_id, pose_asset_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(category_family, shot_index) DO NOTHING
+                    """,
+                    (family, shot_index, row["background_asset_id"], row["pose_asset_id"], timestamp, timestamp),
+                )
 
 
 def rebuild_generation_result_sets_direct_edits(db: sqlite3.Connection) -> None:

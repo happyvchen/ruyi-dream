@@ -120,8 +120,9 @@ def test_final_runtime_marks_exactly_one_current_shot_and_limits_to_five_slots()
     assert "is_shot_6" not in runtime
 
 
-def test_top_final_prompt_template_separates_master_pose_and_artifact_controls() -> None:
-    template = (Path(__file__).resolve().parents[1] / "prompt_templates" / "final_image_top.txt").read_text(encoding="utf-8")
+@pytest.mark.parametrize("filename", ["final_image_top.txt", "final_image_bottom.txt", "final_image_one_piece.txt"])
+def test_final_prompt_templates_separate_master_pose_and_artifact_controls(filename: str) -> None:
+    template = (Path(__file__).resolve().parents[1] / "prompt_templates" / filename).read_text(encoding="utf-8")
 
     assert "唯一的拍摄母版" in template
     assert "身体朝向、重心、肩线、手位、视线和头部朝向" in template
@@ -132,12 +133,22 @@ def test_top_final_prompt_template_separates_master_pose_and_artifact_controls()
     assert "避免可见噪点、颗粒、云斑、色斑、波纹、摩尔纹" in template
 
 
-def test_top_final_prompt_template_renders_shot_five_without_legacy_coordinates(monkeypatch) -> None:
-    template = (Path(__file__).resolve().parents[1] / "prompt_templates" / "final_image_top.txt").read_text(encoding="utf-8")
+@pytest.mark.parametrize(
+    ("prompt_key", "filename", "family"),
+    [
+        ("assembly.final_image_top", "final_image_top.txt", "top"),
+        ("assembly.final_image_bottom", "final_image_bottom.txt", "bottom"),
+        ("assembly.final_image_one_piece", "final_image_one_piece.txt", "one_piece"),
+    ],
+)
+def test_final_prompt_templates_render_shot_five_without_legacy_coordinates(
+    monkeypatch, prompt_key: str, filename: str, family: str
+) -> None:
+    template = (Path(__file__).resolve().parents[1] / "prompt_templates" / filename).read_text(encoding="utf-8")
     runtime = app_main.build_final_prompt_runtime(
         5,
         "top_shot_5",
-        {"hero_understanding": {"shot_category_family": "top"}},
+        {"hero_understanding": {"shot_category_family": family}},
         [
             {"role": "shot_background"},
             {"role": "shot_pose"},
@@ -147,9 +158,9 @@ def test_top_final_prompt_template_renders_shot_five_without_legacy_coordinates(
         {},
         {},
     )
-    monkeypatch.setattr(app_main, "prompt_config_content", lambda key, rows=None: template if key == "assembly.final_image_top" else None)
+    monkeypatch.setattr(app_main, "prompt_config_content", lambda key, rows=None: template if key == prompt_key else None)
 
-    rendered = app_main.render_prompt_template("assembly.final_image_top", runtime)
+    rendered = app_main.render_prompt_template(prompt_key, runtime)
 
     assert "中央 3:4 竖向裁切安全区" in rendered
     assert "中央 2:3" not in rendered

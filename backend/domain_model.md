@@ -8,16 +8,16 @@
 
 ## 拍摄预设
 
-`ShotPresetVersion` 表示一套版本化预设，状态为 `DRAFT`、`PUBLISHED` 或 `SUPERSEDED`。同一时刻最多一个草稿和一个已发布版本。
+`ShotPresetSlot` 由 `category_family`（`top` / `bottom` / `one_piece`）与 `shot_index`（1–5）唯一定位，并关联当前生效的拍摄母版和姿势两个 `MediaAsset`。单张替换或删除立即生效，不存在维护草稿、发布或用户可见版本。拍摄母版带原人物、原服装和目标构图，生成时整图替换原人物和原服装；某类型五个槽位不完整时不能开始该类型成片。
 
-`ShotPreset` 由 `category_family`（`top` / `bottom` / `one_piece`）与 `shot_index`（1–5）唯一定位，并关联拍摄母版和姿势两个 `MediaAsset`。拍摄母版带原人物、原服装和目标构图，生成时整图替换原人物和原服装。上装、下装、套装分别发布：对应类型的 5 个槽位完整即可发布，不要求另外两个类型同时完成。数据库保留可空的 `mask_asset_id` 仅用于历史版本复盘，不参与新预设或新请求。
+`GenerationResultSetShotPreset` 是结果集创建时复制的五条关系快照，保证维护端随后换图不会影响继续生成、单张重生和历史复盘。旧 `ShotPresetVersion` / `ShotPreset` 只用于迁移已有配置和读取旧结果集。
 
 ## 最终成片
 
-`GenerationResultSet` 固定包含五个 `GenerationResultImage`，创建时冻结输入版本、StylingPlan 和 `shot_preset_version_id`；`preview_id` 对新结果为空。每张成片使用对应预设、模特图、主推款图、搭配款图和同一 StylingPlan 组装 edits 请求。
+`GenerationResultSet` 固定包含五个 `GenerationResultImage`，创建时冻结输入版本、StylingPlan 和五条 `GenerationResultSetShotPreset`；`preview_id` 与 `shot_preset_version_id` 对新结果为空。每张成片使用对应冻结预设、模特图、主推款图、搭配款图和同一 StylingPlan 组装 edits 请求。
 
 `GenerationAttempt` 保存 provider 请求快照、状态、结果、错误和恢复信息。新成片 owner type 为 `generation_result_image`；`generation_preview` 只可能出现在历史数据中。
 
 ## 媒体
 
-所有业务图片统一登记为 `MediaAsset`，二进制写入 S3 兼容对象存储。拍摄预设引用参与媒体引用计数；更新草稿槽位不会删除仍被其他版本或历史任务引用的资产。
+所有业务图片统一登记为 `MediaAsset`，二进制写入 S3 兼容对象存储。当前拍摄预设和结果集冻结快照都参与媒体引用计数；更换当前槽位不会删除仍被历史结果集引用的资产。

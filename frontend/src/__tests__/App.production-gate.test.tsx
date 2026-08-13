@@ -23,6 +23,7 @@ const apiMock = vi.hoisted(() => ({
   getTaskDeleteImpact: vi.fn(),
   getTask: vi.fn(),
   updateTask: vi.fn(),
+  addTaskImages: vi.fn(),
   createTask: vi.fn(),
   autoRunFinal: vi.fn(),
   cancelTask: vi.fn(),
@@ -45,9 +46,10 @@ const apiMock = vi.hoisted(() => ({
   restoreTasks: vi.fn(),
   getShootEnvironment: vi.fn(),
   getShotPresets: vi.fn(),
-  setShotPresetSlot: vi.fn(),
-  publishShotPresetFamily: vi.fn(),
+  replaceShotPresetAsset: vi.fn(),
+  deleteShotPresetAsset: vi.fn(),
   addModelHeadReferences: vi.fn(),
+  addStylingGarmentImages: vi.fn(),
   replaceModelHeadReference: vi.fn(),
   deleteModelHeadReference: vi.fn(),
   reorderModelHeadReference: vi.fn(),
@@ -267,12 +269,10 @@ function configureApi(role: 'admin' | 'user' = 'admin') {
   apiMock.precheckFinalImageExport.mockResolvedValue({ items: [], downloadableTaskIds: [], completeTaskIds: [], totalImages: 0, totalBytes: 0 })
   apiMock.getShootEnvironment.mockResolvedValue({ asset: null })
   apiMock.getShotPresets.mockResolvedValue({
-    draftVersion: null,
-    editingVersion: null,
     families: {
-      top: { publishedVersion: null, publishReady: false, validationErrors: ['上装的 5 个镜头尚未配置'] },
-      bottom: { publishedVersion: null, publishReady: false, validationErrors: ['下装的 5 个镜头尚未配置'] },
-      one_piece: { publishedVersion: null, publishReady: false, validationErrors: ['套装的 5 个镜头尚未配置'] },
+      top: { complete: false, configuredCount: 0, validationErrors: ['上装的 5 个镜头尚未配置'] },
+      bottom: { complete: false, configuredCount: 0, validationErrors: ['下装的 5 个镜头尚未配置'] },
+      one_piece: { complete: false, configuredCount: 0, validationErrors: ['套装的 5 个镜头尚未配置'] },
     },
     slots: Array.from({ length: 15 }, (_, index) => ({
       categoryFamily: (['top', 'bottom', 'one_piece'] as const)[Math.floor(index / 5)],
@@ -441,30 +441,39 @@ describe('production gate app shell and page controls', () => {
     await waitFor(() => expect(screen.getAllByText('AI 选搭').length).toBeGreaterThanOrEqual(1))
   })
 
-  it('admin saves a preset with a master shot and pose only', async () => {
-    apiMock.setShotPresetSlot.mockResolvedValue({
-      draftVersion: null,
-      editingVersion: null,
+  it('admin replaces each preset image and it takes effect immediately', async () => {
+    apiMock.replaceShotPresetAsset.mockResolvedValue({
       families: {
-        top: { publishedVersion: null, publishReady: false, validationErrors: [] },
-        bottom: { publishedVersion: null, publishReady: false, validationErrors: [] },
-        one_piece: { publishedVersion: null, publishReady: false, validationErrors: [] },
+        top: { complete: false, configuredCount: 1, validationErrors: [] },
+        bottom: { complete: false, configuredCount: 0, validationErrors: [] },
+        one_piece: { complete: false, configuredCount: 0, validationErrors: [] },
       },
-      slots: [],
+      slots: Array.from({ length: 15 }, (_, index) => ({
+        categoryFamily: (['top', 'bottom', 'one_piece'] as const)[Math.floor(index / 5)],
+        shotIndex: (index % 5) + 1,
+        background: null,
+        pose: null,
+        complete: false,
+      })),
     })
-    render(<App />)
+    const { container } = render(<App />)
 
     await userEvent.click(await screen.findByRole('button', { name: '模特与背景' }))
-    const masterInput = (await screen.findAllByLabelText('选择拍摄母版图'))[0]
-    const poseInput = screen.getAllByLabelText('选择风格/姿势图')[0]
+    expect(await screen.findByLabelText('添加模特参考图')).toBeInTheDocument()
+    expect(screen.queryByText('追加图片')).not.toBeInTheDocument()
+    expect(screen.queryByText(/上装、下装、套装各 5 个镜头/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/图片更换后立即生效；缺图的服装类型/)).not.toBeInTheDocument()
+    expect(container.querySelector('.shot-preset-card .image-asset-card .thumb-actions')).not.toBeNull()
+    expect(screen.queryByText(/拖拽卡片调整顺序，靠前的图片优先用于生成/)).not.toBeInTheDocument()
+    const masterInput = (await screen.findAllByLabelText('替换 选择拍摄母版图'))[0]
     const master = new File(['master'], 'master.jpg', { type: 'image/jpeg' })
     const pose = new File(['pose'], 'pose.jpg', { type: 'image/jpeg' })
     await userEvent.upload(masterInput, master)
+    await waitFor(() => expect(apiMock.replaceShotPresetAsset).toHaveBeenNthCalledWith(1, 'top', 1, 'background', master))
+    const poseInput = screen.getAllByLabelText('替换 选择风格/姿势图')[0]
     await userEvent.upload(poseInput, pose)
-
-    await userEvent.click(screen.getAllByRole('button', { name: '保存拍摄预设' })[0])
-    await waitFor(() => expect(apiMock.setShotPresetSlot).toHaveBeenCalledWith('top', 1, master, pose))
-    expect(screen.queryByText(/遮罩|Alpha PNG|保存三张图片/)).not.toBeInTheDocument()
+    await waitFor(() => expect(apiMock.replaceShotPresetAsset).toHaveBeenNthCalledWith(2, 'top', 1, 'pose', pose))
+    expect(screen.queryByText(/发布上装|保存拍摄预设|编辑版本/)).not.toBeInTheDocument()
   })
 
   it('ordinary user keeps the shooting workflow but cannot open Prompt maintenance', async () => {

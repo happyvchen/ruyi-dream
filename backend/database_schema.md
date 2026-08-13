@@ -7,7 +7,8 @@
 ```text
 GenerationTask
 -> GenerationStyling / StylingPlan
--> ShotPresetVersion / ShotPreset
+-> ShotPresetSlot
+-> GenerationResultSetShotPreset
 -> GenerationResultSet / GenerationResultImage
 ```
 
@@ -23,10 +24,10 @@ GenerationTask
 | `generation_task_input_versions` | 进入 AI 阶段时冻结的输入版本：任务名、主推款图、数字模特快照 |
 | `generation_stylings` | AI 智能选搭结果，保存 `StylingPlan`、候选、选中搭配和 attempt |
 | `generation_previews` | 只读历史兼容表；当前链路不再新增记录 |
-| `shot_preset_versions` | 拍摄预设草稿、发布和被替代版本 |
-| `shot_presets` | 15 个品类/镜头槽位的拍摄母版和姿势资产关系；`mask_asset_id` 仅为历史版本兼容 |
-| `shot_preset_family_publications` | 上装、下装、套装当前各自指向的已发布快照版本 |
-| `generation_result_sets` | 一组成片结果；`preview_id` 可空并冻结 `shot_preset_version_id` |
+| `shot_preset_slots` | 15 个当前生效的品类/镜头槽位；拍摄母版和姿势可单张立即替换/删除 |
+| `generation_result_set_shot_presets` | 结果集创建时冻结的五组拍摄母版/姿势关系 |
+| `shot_preset_versions` / `shot_presets` / `shot_preset_family_publications` | 旧维护模型，只用于迁移已有配置与读取历史结果集 |
+| `generation_result_sets` | 一组成片结果；新结果 `preview_id`、`shot_preset_version_id` 为空，预设由关系快照冻结 |
 | `generation_result_images_new` | 单张最终成片，固定 5 条槽位 |
 | `generation_attempts` | provider 调用快照、进度、结果和错误分类 |
 | `styling_garments` | 搭配服装及其当前 AI 打标状态、业务标签和本轮安全错误码 |
@@ -55,7 +56,7 @@ GenerationTask
 
 ## Prompt 配置
 
-`prompt_configs` 只保留当前七个槽位：品牌信息、AI 打标、主推款图片挑选、AI 选搭和三类成片。迁移 `066_direct_final_edits_workflow` 先把三个分镜 Prompt 正文备份到 `retired_prompt_configs`，再从运行目录移除，并建立版本化拍摄预设。迁移 `068_repair_direct_final_result_set_schema` 专门修复曾提前记录 066、但 `generation_result_sets` 尚未获得 `shot_preset_version_id` 的开发数据库，且保留已有结果集数据。
+`prompt_configs` 只保留当前七个槽位：品牌信息、AI 打标、主推款图片挑选、AI 选搭和三类成片。迁移 `066_direct_final_edits_workflow` 先把三个分镜 Prompt 正文备份到 `retired_prompt_configs`，再从运行目录移除。迁移 `072_live_shot_preset_slots` 把旧草稿或已发布配置复制为当前槽位，并建立结果集级冻结关系；旧版本表保留只读兼容。
 
 ## UploadSession 关键字段
 

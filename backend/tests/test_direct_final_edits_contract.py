@@ -16,7 +16,8 @@ def test_admin_sees_all_fifteen_shot_preset_slots_before_assets_are_configured(c
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["families"]["top"]["publishReady"] is False
+    assert payload["families"]["top"]["complete"] is False
+    assert payload["families"]["top"]["configuredCount"] == 0
     assert len(payload["slots"]) == 15
     assert {(slot["categoryFamily"], slot["shotIndex"]) for slot in payload["slots"]} == {
         (family, shot_index)
@@ -25,11 +26,88 @@ def test_admin_sees_all_fifteen_shot_preset_slots_before_assets_are_configured(c
     }
 
 
-def test_incomplete_family_cannot_be_published(client) -> None:
+def test_publish_endpoint_is_retired_because_each_image_is_live(client) -> None:
     response = client.post("/api/shot-preset-families/top/publish")
 
-    assert response.status_code == 409
-    assert "上装" in response.json()["detail"]
+    assert response.status_code == 410
+    assert "立即生效" in response.json()["detail"]
+
+
+def test_replacing_only_one_side_of_an_empty_preset_slot_returns_partial_slot(client, monkeypatch) -> None:
+    async def fake_inspect(_upload):
+        return (1200, 1600), False
+
+    async def fake_save(_uploads):
+        timestamp = now_iso()
+        with get_db() as db:
+            asset_id = int(
+                db.execute(
+                    """
+                    INSERT INTO media_assets
+                      (object_key, original_filename, mime_type, width, height, size_bytes, created_at, updated_at)
+                    VALUES ('tests/partial-master.jpg', 'partial-master.jpg', 'image/jpeg', 1200, 1600, 128, ?, ?)
+                    """,
+                    (timestamp, timestamp),
+                ).lastrowid
+            )
+        return [{"id": asset_id}]
+
+    monkeypatch.setattr(app_main, "inspect_shot_preset_upload", fake_inspect)
+    monkeypatch.setattr(app_main, "save_uploads_as_media_assets", fake_save)
+
+    response = client.post(
+        "/api/shot-presets/bottom/1/background",
+        files={"file": ("partial-master.jpg", b"image", "image/jpeg")},
+    )
+
+    assert response.status_code == 200
+    slot = next(
+        item
+        for item in response.json()["slots"]
+        if item["categoryFamily"] == "bottom" and item["shotIndex"] == 1
+    )
+    assert slot["background"]["originalFilename"] == "partial-master.jpg"
+    assert slot["pose"] is None
+    assert slot["complete"] is False
+
+
+def test_deleting_one_side_of_a_complete_preset_slot_returns_partial_slot(client) -> None:
+    timestamp = now_iso()
+    with get_db() as db:
+        asset_ids = []
+        for role in ("background", "pose"):
+            asset_ids.append(
+                int(
+                    db.execute(
+                        """
+                        INSERT INTO media_assets
+                          (object_key, original_filename, mime_type, width, height, size_bytes, created_at, updated_at)
+                        VALUES (?, ?, 'image/jpeg', 1200, 1600, 128, ?, ?)
+                        """,
+                        (f"tests/delete-{role}.jpg", f"delete-{role}.jpg", timestamp, timestamp),
+                    ).lastrowid
+                )
+            )
+        db.execute(
+            """
+            INSERT INTO shot_preset_slots
+              (category_family, shot_index, background_asset_id, pose_asset_id, created_at, updated_at)
+            VALUES ('bottom', 1, ?, ?, ?, ?)
+            """,
+            (*asset_ids, timestamp, timestamp),
+        )
+
+    response = client.delete("/api/shot-presets/bottom/1/background")
+
+    assert response.status_code == 200
+    slot = next(
+        item
+        for item in response.json()["slots"]
+        if item["categoryFamily"] == "bottom" and item["shotIndex"] == 1
+    )
+    assert slot["background"] is None
+    assert slot["pose"]["originalFilename"] == "delete-pose.jpg"
+    assert slot["complete"] is False
 
 
 def test_retired_storyboard_prompt_content_is_backed_up_before_removal() -> None:
@@ -199,7 +277,38 @@ def test_known_legacy_top_prompt_is_replaced_but_custom_prompt_is_not(monkeypatc
     assert preserved == "管理员自定义上装 Prompt"
 
 
-def test_complete_top_family_can_be_published_without_bottom_or_one_piece(client) -> None:
+def test_known_legacy_bottom_and_one_piece_prompts_are_replaced_but_custom_prompt_is_not(monkeypatch) -> None:
+    from app import db as app_db
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE prompt_configs (key TEXT PRIMARY KEY, content TEXT NOT NULL, updated_at TEXT)")
+    legacy_by_key = {
+        "assembly.final_image_bottom": "可精确识别的旧下装系统 Prompt",
+        "assembly.final_image_one_piece": "可精确识别的旧套装系统 Prompt",
+    }
+    for key, legacy in legacy_by_key.items():
+        db.execute("INSERT INTO prompt_configs (key, content) VALUES (?, ?)", (key, legacy))
+    monkeypatch.setattr(
+        app_db,
+        "LEGACY_BOTTOM_AND_ONE_PIECE_FINAL_PROMPT_SHA256",
+        {key: hashlib.sha256(legacy.encode("utf-8")).hexdigest() for key, legacy in legacy_by_key.items()},
+    )
+
+    app_db.migration_refresh_legacy_bottom_and_one_piece_final_prompts(db)
+
+    for key in legacy_by_key:
+        refreshed = db.execute("SELECT content FROM prompt_configs WHERE key = ?", (key,)).fetchone()["content"]
+        assert refreshed == app_db.canonical_bottom_or_one_piece_final_prompt(key)
+        assert "中央 3:4 竖向裁切安全区" in refreshed
+
+    db.execute("UPDATE prompt_configs SET content = '管理员自定义下装 Prompt' WHERE key = 'assembly.final_image_bottom'")
+    app_db.migration_refresh_legacy_bottom_and_one_piece_final_prompts(db)
+    preserved = db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.final_image_bottom'").fetchone()["content"]
+    assert preserved == "管理员自定义下装 Prompt"
+
+
+def test_complete_top_family_is_live_without_publishing(client) -> None:
     timestamp = now_iso()
     with get_db() as db:
         version_id = int(
@@ -226,21 +335,21 @@ def test_complete_top_family_can_be_published_without_bottom_or_one_piece(client
                 )
             db.execute(
                 """
-                INSERT INTO shot_presets
-                  (version_id, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO shot_preset_slots
+                  (category_family, shot_index, background_asset_id, pose_asset_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (version_id, family, shot_index, *asset_ids, timestamp, timestamp),
+                (family, shot_index, asset_ids[0], asset_ids[2], timestamp, timestamp),
             )
 
-    response = client.post("/api/shot-preset-families/top/publish")
+    response = client.get("/api/shot-presets")
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["families"]["top"]["publishedVersion"]["status"] == "PUBLISHED"
-    assert payload["families"]["top"]["publishReady"] is True
-    assert payload["families"]["bottom"]["publishedVersion"] is None
-    assert payload["families"]["one_piece"]["publishedVersion"] is None
+    assert payload["families"]["top"]["complete"] is True
+    assert payload["families"]["top"]["configuredCount"] == 5
+    assert payload["families"]["bottom"]["complete"] is False
+    assert payload["families"]["one_piece"]["complete"] is False
 
 
 def test_preset_serialization_does_not_mark_deleted_assets_complete(client) -> None:
@@ -259,8 +368,8 @@ def test_preset_serialization_does_not_mark_deleted_assets_complete(client) -> N
             (timestamp, timestamp),
         ).lastrowid)
         db.execute(
-            "INSERT INTO shot_presets (version_id, category_family, shot_index, background_asset_id, pose_asset_id, created_at, updated_at) VALUES (?, 'top', 1, ?, ?, ?, ?)",
-            (version_id, background_id, pose_id, timestamp, timestamp),
+            "INSERT INTO shot_preset_slots (category_family, shot_index, background_asset_id, pose_asset_id, created_at, updated_at) VALUES ('top', 1, ?, ?, ?, ?)",
+            (background_id, pose_id, timestamp, timestamp),
         )
 
     payload = app_main.serialize_shot_presets()
@@ -389,7 +498,13 @@ def test_styling_ready_task_creates_direct_final_set_without_preview(client) -> 
     with get_db() as db:
         result_set = db.execute("SELECT * FROM generation_result_sets WHERE id = ?", (item["activeResultSetId"],)).fetchone()
     assert result_set["preview_id"] is None
-    assert result_set["shot_preset_version_id"] is not None
+    assert result_set["shot_preset_version_id"] is None
+    with get_db() as db:
+        frozen = db.execute(
+            "SELECT * FROM generation_result_set_shot_presets WHERE result_set_id = ? ORDER BY shot_index",
+            (item["activeResultSetId"],),
+        ).fetchall()
+    assert len(frozen) == 5
     assert [image["shotRole"] for image in item["resultSet"]["images"]] == [
         "one_piece_shot_1",
         "one_piece_shot_2",
@@ -399,7 +514,7 @@ def test_styling_ready_task_creates_direct_final_set_without_preview(client) -> 
     ]
 
 
-def test_publishing_top_unblocks_top_but_not_bottom_generation(client) -> None:
+def test_complete_live_top_presets_unblock_top_but_not_bottom_generation(client) -> None:
     top_ids = insert_ready_generation_task_with_preview(family="top", ensure_presets=False)
     bottom_ids = insert_ready_generation_task_with_preview(family="bottom", ensure_presets=False)
     insert_published_shot_presets(families=("top",))
@@ -419,7 +534,7 @@ def test_publishing_top_unblocks_top_but_not_bottom_generation(client) -> None:
     assert top_response.status_code == 200
     assert top_response.json()["item"]["status"] == "FINAL_RUNNING"
     assert bottom_response.status_code == 409
-    assert "下装拍摄预设尚未发布" in bottom_response.json()["detail"]
+    assert "下装拍摄预设尚未完整" in bottom_response.json()["detail"]
 
 
 def test_preview_endpoint_is_retired_for_new_workflow(client) -> None:

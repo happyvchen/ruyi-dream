@@ -16,7 +16,7 @@
 | 拍摄图位族路由 | `styling_plan.hero_understanding.shot_category_family` + 后端确定性校验 | 本地品类 fallback |
 | 动态业务事实 | 后端渲染为短自然语言 | 复制完整 StylingPlan JSON |
 | 最终成片 | GPT Image-2 edits，五镜头逐张生成 | 读取旧分镜、使用第六格 |
-| 业务状态与追溯 | 数据库、拍摄预设版本和任务状态机 | Image-2 |
+| 业务状态与追溯 | 数据库、结果集冻结的拍摄预设图片和任务状态机 | Image-2 |
 
 ## Prompt 与代码边界
 

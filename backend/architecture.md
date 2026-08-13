@@ -7,7 +7,7 @@
 - 素材与媒体资产管理；
 - Gemini 打标和 AI 智能选搭；
 - Prompt 维护槽位读取与 runtime 占位渲染；
-- 版本化拍摄预设和 Image-2 edits 最终成片任务包组装；
+- 当前生效拍摄预设、结果集级冻结快照和 Image-2 edits 最终成片任务包组装；
 - provider attempt 快照、进度、错误分类和轮询恢复；
 - 生成记录、归档、删除和导出。
 
@@ -16,11 +16,11 @@
 ```text
 导入主推款
 -> AI 智能选搭
--> 按品类选择已发布的五镜头拍摄预设
+-> 按品类选择当前生效的五镜头拍摄预设并冻结到结果集
 -> 三类固定 Prompt + Image-2 edits 并发生成五张成片
 ```
 
-后端不再包含动态剧本或当前分镜服务。`app/main.py` 中的新生成链路围绕 `StylingPlan`、`ShotPresetVersion` 和 `GenerationResultImage` 编排；旧预览数据只读兼容。
+后端不再包含动态剧本或当前分镜服务。`app/main.py` 中的新生成链路围绕 `StylingPlan`、`ShotPresetSlot`、`GenerationResultSetShotPreset` 和 `GenerationResultImage` 编排；旧预览与旧拍摄预设版本数据只读兼容。
 
 ## Image-2 分阶段恢复
 

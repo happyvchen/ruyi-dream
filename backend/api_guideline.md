@@ -14,10 +14,11 @@
 
 - `POST /api/generation-tasks`：兼容旧表单导入路径；新导入体验应优先使用 `upload_sessions -> finalize-generation-task`，以便刷新 / 切页后恢复状态。
 - `POST /api/generation-tasks/from-uploads`：已停用（410）；统一使用导入会话创建任务，避免无主对象无法回收。
+- `POST /api/generation-tasks/{task_id}/images`：为现有任务追加主推款图片，任务最多维护 8 张；非草稿任务追加后按输入变更规则使既有选搭和成片失效，等待用户重新确认执行。
 - `PATCH /api/generation-tasks/{task_id}`：保存任务名和各阶段用户补充要求草稿。
 - `POST /api/generation-tasks/{task_id}/styling`：运行 AI 智能选搭，输出当前 `StylingPlan`。
 - `POST /api/generation-tasks/{task_id}/preview`：已停用（410）；不再生成新的分镜预览。
-- `POST /api/generation-tasks/{task_id}/generate-final`：从 `STYLING_READY` 直接按五个已发布拍摄预设并发生成最终成片。
+- `POST /api/generation-tasks/{task_id}/generate-final`：从 `STYLING_READY` 读取当前五个完整拍摄预设、冻结到结果集后并发生成最终成片。
 - `POST /api/generation-tasks/{task_id}/auto-run-final`：从当前第一个未完成阶段自动推进到成片。
 - `POST /api/generation-tasks/{task_id}/cancel`：取消当前运行中的选搭或成片。
 - `PATCH /api/generation-batches/{batch_id}`：保存批次名；批次任务归属仍由 `GenerationTask.batch_id` 决定。
@@ -82,6 +83,7 @@ ABANDONED
 
 导入会话只负责“文件是否被系统接住”。搭配服装 AI 识别继续使用服装资源接口：
 
+- `POST /api/styling-garments/{id}/images`：为现有搭配服装追加图片，单件服装最多维护 6 张；识别进行中禁止修改，追加本身不触发外部 AI 识别。
 - `POST /api/styling-garments/{id}/save-and-tag`：保存当前搭配服装并触发 / 重新触发 AI 识别；用于单货号局部重试。
 - `POST /api/styling-garments/batch-save-and-tag`：批量提交 `DRAFT`、`TAGGING_READY`、`TAGGING_FAILED` 搭配服装进入 AI 识别，也支持对 `READY` 搭配服装重新识别；已归档、正在识别或无需识别的项会跳过并返回 `skipped`。
 - `POST /api/styling-garments/delete-impact`：预检待删除服装、服装图片和历史引用数量。`referencingTaskCount` 只表示会保留并显示来源已删除的生成记录，不计入删除的 `taskCount`、结果图或媒体统计。
@@ -180,11 +182,12 @@ AI 选搭动态事实：
 
 ## 拍摄预设接口
 
-- `GET /api/shot-presets`：admin 读取 15 个槽位，以及三个服装类型各自的发布版本、发布就绪状态和校验错误。
-- `POST /api/shot-presets/{category_family}/{shot_index}`：同时上传带原人物的拍摄母版图和姿势图。
-- `POST /api/shot-preset-families/{category_family}/publish`：对应类型的 5 个槽位完整时独立发布快照，不受另外两个类型完成度影响。
+- `GET /api/shot-presets`：admin 读取 15 个当前槽位，以及三个服装类型各自的完整槽位数和校验错误。
+- `POST /api/shot-presets/{category_family}/{shot_index}/{asset_role}`：单张替换 `background` 或 `pose`，成功后立即成为当前生效图片。
+- `DELETE /api/shot-presets/{category_family}/{shot_index}/{asset_role}`：删除当前单张图片并立即生效；该类型不完整期间不能开始新成片。
+- 旧整槽保存和发布接口返回 `410 Gone`。
 
-最终请求固定 `image_urls <= 6`，拍摄母版排第一，不传 `mask_url`，使用 `1:1 / 2k / high`；模特与商品多图先确定性合成角色参考板，结果集冻结 `shot_preset_version_id`。
+最终请求固定 `image_urls <= 6`，拍摄母版排第一，不传 `mask_url`，使用 `1:1 / 2k / high`；模特与商品多图先确定性合成角色参考板，结果集通过 `generation_result_set_shot_presets` 冻结当次五组图片。
 
 ## 导出
 

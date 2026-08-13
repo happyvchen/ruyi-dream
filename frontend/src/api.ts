@@ -138,15 +138,6 @@ export type MediaAsset = {
   originalUrl?: string | null
 }
 
-export type ShotPresetVersion = {
-  id: number
-  versionNumber: number
-  status: 'DRAFT' | 'PUBLISHED' | 'SUPERSEDED'
-  publishedAt?: string | null
-  createdAt: string
-  updatedAt: string
-}
-
 export type ShotPresetSlot = {
   categoryFamily: 'top' | 'bottom' | 'one_piece'
   shotIndex: number
@@ -156,11 +147,9 @@ export type ShotPresetSlot = {
 }
 
 export type ShotPresetMatrix = {
-  draftVersion: ShotPresetVersion | null
-  editingVersion: ShotPresetVersion | null
   families: Record<ShotPresetSlot['categoryFamily'], {
-    publishedVersion: ShotPresetVersion | null
-    publishReady: boolean
+    complete: boolean
+    configuredCount: number
     validationErrors: string[]
   }>
   slots: ShotPresetSlot[]
@@ -984,6 +973,11 @@ export const api = {
     form.append('file', file)
     return request<{ item: GenerationTask }>(`/api/generation-task-images/${id}/replace`, { method: 'POST', body: form })
   },
+  addTaskImages: (id: number, files: File[]) => {
+    const form = new FormData()
+    files.forEach((file) => form.append('files', file))
+    return request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/images`, { method: 'POST', body: form })
+  },
   updateTaskImage: (id: number, sortOrder: number) =>
     request<{ item: GenerationTask }>(`/api/generation-task-images/${id}`, { method: 'PATCH', body: JSON.stringify({ sortOrder }) }),
   deleteTaskImage: (id: number) =>
@@ -1055,6 +1049,11 @@ export const api = {
     files.forEach((file) => form.append('files', file))
     return request<{ item: ModelProfile }>(`/api/model-profiles/${modelId}/head-references`, { method: 'POST', body: form })
   },
+  addStylingGarmentImages: (garmentId: number, files: File[]) => {
+    const form = new FormData()
+    files.forEach((file) => form.append('files', file))
+    return request<{ item: StylingGarment }>(`/api/styling-garments/${garmentId}/images`, { method: 'POST', body: form })
+  },
   replaceModelHeadReference: (modelId: number, referenceId: string, file: File) => {
     const form = new FormData()
     form.append('file', file)
@@ -1074,12 +1073,11 @@ export const api = {
   },
   clearShootEnvironment: () => request<{ asset: MediaAsset | null }>('/api/shoot-environment', { method: 'DELETE' }),
   getShotPresets: () => request<ShotPresetMatrix>('/api/shot-presets'),
-  setShotPresetSlot: (categoryFamily: ShotPresetSlot['categoryFamily'], shotIndex: number, background: File, pose: File) => {
+  replaceShotPresetAsset: (categoryFamily: ShotPresetSlot['categoryFamily'], shotIndex: number, role: 'background' | 'pose', file: File) => {
     const form = new FormData()
-    form.append('background', background)
-    form.append('pose', pose)
-    return request<ShotPresetMatrix>(`/api/shot-presets/${categoryFamily}/${shotIndex}`, { method: 'POST', body: form })
+    form.append('file', file)
+    return request<ShotPresetMatrix>(`/api/shot-presets/${categoryFamily}/${shotIndex}/${role}`, { method: 'POST', body: form })
   },
-  publishShotPresetFamily: (categoryFamily: ShotPresetSlot['categoryFamily']) =>
-    request<ShotPresetMatrix>(`/api/shot-preset-families/${categoryFamily}/publish`, { method: 'POST' }),
+  deleteShotPresetAsset: (categoryFamily: ShotPresetSlot['categoryFamily'], shotIndex: number, role: 'background' | 'pose') =>
+    request<ShotPresetMatrix>(`/api/shot-presets/${categoryFamily}/${shotIndex}/${role}`, { method: 'DELETE' }),
 }

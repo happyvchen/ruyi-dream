@@ -204,6 +204,18 @@ def insert_published_shot_presets(*, families: tuple[str, ...] = ("top", "bottom
                     """,
                     (version_id, category_family, shot_index, *asset_ids, timestamp, timestamp),
                 )
+                db.execute(
+                    """
+                    INSERT INTO shot_preset_slots
+                      (category_family, shot_index, background_asset_id, pose_asset_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(category_family, shot_index) DO UPDATE SET
+                      background_asset_id = excluded.background_asset_id,
+                      pose_asset_id = excluded.pose_asset_id,
+                      updated_at = excluded.updated_at
+                    """,
+                    (category_family, shot_index, asset_ids[0], asset_ids[2], timestamp, timestamp),
+                )
             db.execute(
                 """
                 INSERT INTO shot_preset_family_publications (category_family, version_id, published_at)
