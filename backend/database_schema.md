@@ -24,7 +24,7 @@ GenerationTask
 | `generation_stylings` | AI 智能选搭结果，保存 `StylingPlan`、候选、选中搭配和 attempt |
 | `generation_previews` | 只读历史兼容表；当前链路不再新增记录 |
 | `shot_preset_versions` | 拍摄预设草稿、发布和被替代版本 |
-| `shot_presets` | 15 个品类/镜头槽位的背景、遮罩和姿势资产关系 |
+| `shot_presets` | 15 个品类/镜头槽位的拍摄母版和姿势资产关系；`mask_asset_id` 仅为历史版本兼容 |
 | `shot_preset_family_publications` | 上装、下装、套装当前各自指向的已发布快照版本 |
 | `generation_result_sets` | 一组成片结果；`preview_id` 可空并冻结 `shot_preset_version_id` |
 | `generation_result_images_new` | 单张最终成片，固定 5 条槽位 |

@@ -295,18 +295,7 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
             raise RuntimeError("TOAPIS_API_KEY 未配置，无法调用 GPT Image-2 toapis 接口")
 
         uploaded_inputs, image_urls = prepare_toapis_image_inputs(task_package.get("imageInputs", []), on_progress)
-        mask_input = task_package.get("maskInput") if isinstance(task_package.get("maskInput"), dict) else None
-        uploaded_mask: dict[str, Any] | None = None
-        if mask_input:
-            uploaded_masks = upload_toapis_image_inputs([mask_input], on_progress)
-            uploaded_mask = uploaded_masks[0] if uploaded_masks else None
-            if not uploaded_mask or not uploaded_mask.get("providerUrl"):
-                raise RuntimeError("遮罩图导入到 toapis 失败")
-        request_package = {
-            **task_package,
-            "maskProviderUrl": str(uploaded_mask["providerUrl"]) if uploaded_mask else task_package.get("maskProviderUrl"),
-        }
-        provider_request = build_toapis_request_snapshot(request_package, image_urls)
+        provider_request = build_toapis_request_snapshot(task_package, image_urls)
         try:
             submit_response = post_generation_task_with_confirmed_failure_retries(
                 toapis_url("/v1/images/generations"),
@@ -344,7 +333,6 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
             "providerRequestId": task_id,
             "providerUrls": {"statusUrl": toapis_url(f"/v1/images/generations/{task_id}") if task_id else None},
             "imageInputs": uploaded_inputs,
-            "maskInput": uploaded_mask,
             "providerRequest": provider_request,
             "providerResponse": submit_response,
             "providerStatusResponse": submit_response,
@@ -566,9 +554,6 @@ def build_toapis_request_snapshot(task_package: dict[str, Any], image_urls: list
         "output_format": settings.gpt_image2_output_format,
         "response_format": "url",
     }
-    mask_url = str(task_package.get("maskProviderUrl") or "").strip()
-    if mask_url:
-        request["mask_url"] = mask_url
     client_business_id = str(task_package.get("clientBusinessId") or "").strip()
     if client_business_id:
         request["client_business_id"] = client_business_id

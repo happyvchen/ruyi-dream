@@ -10,7 +10,7 @@
 
 `ShotPresetVersion` 表示一套版本化预设，状态为 `DRAFT`、`PUBLISHED` 或 `SUPERSEDED`。同一时刻最多一个草稿和一个已发布版本。
 
-`ShotPreset` 由 `category_family`（`top` / `bottom` / `one_piece`）与 `shot_index`（1–5）唯一定位，并关联背景、遮罩、姿势三个 `MediaAsset`。上装、下装、套装分别发布：对应类型的 5 个槽位完整、遮罩是带 Alpha 的 PNG、背景与遮罩尺寸一致即可发布，不要求另外两个类型同时完成。
+`ShotPreset` 由 `category_family`（`top` / `bottom` / `one_piece`）与 `shot_index`（1–5）唯一定位，并关联拍摄母版和姿势两个 `MediaAsset`。拍摄母版带原人物、原服装和目标构图，生成时整图替换原人物和原服装。上装、下装、套装分别发布：对应类型的 5 个槽位完整即可发布，不要求另外两个类型同时完成。数据库保留可空的 `mask_asset_id` 仅用于历史版本复盘，不参与新预设或新请求。
 
 ## 最终成片
 

@@ -4299,7 +4299,7 @@ body.is-marquee-selecting {
 .shot-preset-card > header { display: flex; align-items: center; justify-content: space-between; }
 .shot-preset-card > header span { color: var(--muted); font-size: 11px; }
 .shot-preset-card.complete > header span { color: var(--success); }
-.shot-preset-thumbs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+.shot-preset-thumbs { display: grid; grid-template-columns: repeat(2, 1fr); gap: 5px; }
 .shot-preset-thumb { position: relative; overflow: hidden; border: 1px solid var(--line); border-radius: 5px; background: var(--panel-muted); }
 .shot-preset-thumb img, .shot-preset-thumb .image-placeholder { width: 100%; aspect-ratio: 1; display: grid; place-items: center; object-fit: cover; color: var(--muted-soft); }
 .shot-preset-thumb span { position: absolute; inset: auto 0 0; padding: 2px 3px; background: rgba(15,23,42,.7); color: #fff; font-size: 9px; text-align: center; }

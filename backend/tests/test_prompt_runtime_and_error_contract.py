@@ -64,6 +64,8 @@ def test_direct_final_runtime_labels_background_pose_model_and_garments() -> Non
     assert runtime["ref_model_identity"] == "图3"
     assert runtime["ref_garment"] == "图4-5"
     assert runtime["shot_index"] == "3"
+    assert "ref_preview_grid" not in runtime
+    assert "ref_shoot_environment" not in runtime
 
 
 def test_user_visible_instruction_lines_are_business_text_not_prompt_json() -> None:
@@ -99,15 +101,17 @@ def test_final_runtime_marks_exactly_one_current_shot_and_limits_to_five_slots()
         4,
         "top_grid_4",
         {"hero_understanding": {"shot_category_family": "top"}},
-        [{"role": "preview_grid"}, {"role": "model_identity"}, {"role": "hero_garment"}],
+        [{"role": "shot_background"}, {"role": "shot_pose"}, {"role": "model_identity"}, {"role": "hero_garment"}],
         {"instruction": "背景更干净"},
         {"upload_requirement": "保留衣长比例"},
     )
 
-    assert runtime["preview_grid_cell"] == "4"
-    assert runtime["ref_preview_grid"] == "图1"
-    assert runtime["ref_model_identity"] == "图2"
-    assert runtime["ref_garment"] == "图3"
+    assert runtime["ref_shot_background"] == "图1"
+    assert runtime["ref_shot_pose"] == "图2"
+    assert runtime["ref_model_identity"] == "图3"
+    assert runtime["ref_garment"] == "图4"
+    assert "preview_grid_cell" not in runtime
+    assert "ref_preview_grid" not in runtime
     assert [runtime[f"is_shot_{index}"] for index in range(1, 6)] == ["", "", "", "1", ""]
     assert "is_shot_6" not in runtime
 

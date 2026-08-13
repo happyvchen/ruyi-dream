@@ -40,12 +40,12 @@ ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 �
 ## 核心后端职责
 
 - 保存和管理主推款任务图片、搭配服装库图片和媒体资产
-- 维护数字模特档案，以及上装/下装/套装各五个背景、遮罩、姿势拍摄预设；每个服装类型的 5 个镜头完整后独立原子发布
+- 维护数字模特档案，以及上装/下装/套装各五个拍摄母版、姿势拍摄预设；每个服装类型的 5 个镜头完整后独立原子发布
 - 维护 admin-only Prompt 配置；系统初始化可创建空正文的可维护 Prompt 槽位，品牌边界通过 `segment.brand_info` Prompt 分段承载，AI 选搭原则、品类策略、质量信号、配饰边界和空库内搭配取舍直接写入 `AI 选搭` Prompt 正文，后端不解释其中业务规则，也不内置或 fallback 任何 Prompt 默认正文
 - 管理 AI 摄影棚主推款任务、输入版本和状态机
 - 对未归档 READY 搭配服装生成全量标签事实卡；Prompt 只接收业务 `code` 和 `ai_tags` 等必要事实，不接收内部 ID、图片快照或后端排序/评分结果
 - 调用 AI Stylist 生成带 Aesthetic Critic 诊断的 `StylingPlan`，保存完整 request/response 快照
-- 基于 `StylingPlan.hero_understanding.shot_category_family` 确定性选择三类成片 Prompt 和已发布拍摄预设；缺失时由商品品类/子类 fallback，并组装 Image-2 edits 任务包
+- 基于 `StylingPlan.hero_understanding.shot_category_family` 确定性选择三类成片 Prompt 和已发布拍摄预设；缺失时由商品品类/子类 fallback，并组装 Image-2 多参考图编辑任务包
 - 管理生成任务状态、单张重试、结果下载和记录复盘
 - 保存实验/生产结果、紧凑候选快照、完整 StylingPlan 和 provider attempts 元数据
 

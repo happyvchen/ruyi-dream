@@ -6818,7 +6818,7 @@ def ensure_draft_shot_preset_version(db: Any) -> Any:
                 """
                 INSERT INTO shot_presets
                   (version_id, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, created_at, updated_at)
-                SELECT ?, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, ?, ?
+                SELECT ?, category_family, shot_index, background_asset_id, NULL, pose_asset_id, ?, ?
                 FROM shot_presets WHERE version_id = ? AND category_family = ?
                 """,
                 (version_id, timestamp, timestamp, int(published["id"]), family),
@@ -6842,11 +6842,9 @@ def serialize_shot_preset_version(row: Any) -> dict[str, Any] | None:
 def shot_preset_validation_errors(db: Any, version_id: int, category_family: str | None = None) -> list[str]:
     rows = db.execute(
         """
-        SELECT sp.*, bg.width AS bg_width, bg.height AS bg_height,
-               mask.width AS mask_width, mask.height AS mask_height, mask.mime_type AS mask_mime
+        SELECT sp.*
         FROM shot_presets sp
         JOIN media_assets bg ON bg.id = sp.background_asset_id AND bg.deleted_at IS NULL
-        JOIN media_assets mask ON mask.id = sp.mask_asset_id AND mask.deleted_at IS NULL
         JOIN media_assets pose ON pose.id = sp.pose_asset_id AND pose.deleted_at IS NULL
         WHERE sp.version_id = ?
         """,
@@ -6858,12 +6856,7 @@ def shot_preset_validation_errors(db: Any, version_id: int, category_family: str
         for shot_index in SHOT_PRESET_INDICES:
             row = by_slot.get((family, shot_index))
             if not row:
-                errors.append(f"{family} 镜头 {shot_index} 缺少背景、遮罩或姿势图")
-                continue
-            if str(row["mask_mime"]).lower() != "image/png":
-                errors.append(f"{family} 镜头 {shot_index} 的遮罩必须为 PNG")
-            if (row["bg_width"], row["bg_height"]) != (row["mask_width"], row["mask_height"]):
-                errors.append(f"{family} 镜头 {shot_index} 的背景与遮罩尺寸不一致")
+                errors.append(f"{family} 镜头 {shot_index} 缺少拍摄母版或姿势图")
     return errors
 
 
@@ -6890,6 +6883,10 @@ def serialize_shot_presets() -> dict[str, Any]:
             family: shot_preset_validation_errors(db, int(draft["id"]), family) if draft else [f"{family} 的 5 个镜头尚未配置"]
             for family in SHOT_PRESET_FAMILIES
         }
+        available_asset_ids = {
+            int(row["id"])
+            for row in db.execute("SELECT id FROM media_assets WHERE deleted_at IS NULL").fetchall()
+        }
     by_slot = {(str(row["category_family"]), int(row["shot_index"])): row for row in rows}
     slots: list[dict[str, Any]] = []
     for family in SHOT_PRESET_FAMILIES:
@@ -6900,9 +6897,12 @@ def serialize_shot_presets() -> dict[str, Any]:
                     "categoryFamily": family,
                     "shotIndex": shot_index,
                     "background": get_media_asset_by_id(int(row["background_asset_id"])) if row else None,
-                    "mask": get_media_asset_by_id(int(row["mask_asset_id"])) if row else None,
                     "pose": get_media_asset_by_id(int(row["pose_asset_id"])) if row else None,
-                    "complete": bool(row),
+                    "complete": bool(
+                        row
+                        and int(row["background_asset_id"]) in available_asset_ids
+                        and int(row["pose_asset_id"]) in available_asset_ids
+                    ),
                 }
             )
     return {
@@ -6943,21 +6943,15 @@ async def set_shot_preset_slot(
     shot_index: int,
     request: Request,
     background: UploadFile = File(...),
-    mask: UploadFile = File(...),
     pose: UploadFile = File(...),
 ) -> dict[str, Any]:
     require_admin(request)
     family = normalize_shot_category_family(category_family)
     if family not in SHOT_PRESET_FAMILIES or shot_index not in SHOT_PRESET_INDICES:
         raise HTTPException(status_code=400, detail="拍摄预设槽位不合法")
-    background_size, _ = await inspect_shot_preset_upload(background)
-    mask_size, mask_has_alpha = await inspect_shot_preset_upload(mask)
+    await inspect_shot_preset_upload(background)
     await inspect_shot_preset_upload(pose)
-    if str(mask.content_type or "").lower() != "image/png" or not mask_has_alpha:
-        raise HTTPException(status_code=400, detail="遮罩必须是带 Alpha 通道的 PNG")
-    if background_size != mask_size:
-        raise HTTPException(status_code=400, detail="背景与遮罩尺寸必须完全一致")
-    assets = await save_uploads_as_media_assets([background, mask, pose])
+    assets = await save_uploads_as_media_assets([background, pose])
     timestamp = now_iso()
     with get_db() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -6969,20 +6963,23 @@ async def set_shot_preset_slot(
         db.execute(
             """
             INSERT INTO shot_presets
-              (version_id, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              (version_id, category_family, shot_index, background_asset_id, pose_asset_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(version_id, category_family, shot_index) DO UPDATE SET
               background_asset_id = excluded.background_asset_id,
-              mask_asset_id = excluded.mask_asset_id,
+              mask_asset_id = NULL,
               pose_asset_id = excluded.pose_asset_id,
               updated_at = excluded.updated_at
             """,
-            (int(draft["id"]), family, shot_index, int(assets[0]["id"]), int(assets[1]["id"]), int(assets[2]["id"]), timestamp, timestamp),
+            (int(draft["id"]), family, shot_index, int(assets[0]["id"]), int(assets[1]["id"]), timestamp, timestamp),
         )
         db.execute("UPDATE shot_preset_versions SET updated_at = ? WHERE id = ?", (timestamp, int(draft["id"])))
         if previous:
-            for key in ("background_asset_id", "mask_asset_id", "pose_asset_id"):
-                release_media_asset_if_unreferenced(db, int(previous[key]))
+            previous_asset_ids = [int(previous[key]) for key in ("background_asset_id", "pose_asset_id")]
+            if previous["mask_asset_id"]:
+                previous_asset_ids.append(int(previous["mask_asset_id"]))
+            for asset_id in previous_asset_ids:
+                release_media_asset_if_unreferenced(db, asset_id)
     return serialize_shot_presets()
 
 
@@ -7017,7 +7014,7 @@ def publish_shot_presets(category_family: str, request: Request) -> dict[str, An
             """
             INSERT INTO shot_presets
               (version_id, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, created_at, updated_at)
-            SELECT ?, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, ?, ?
+            SELECT ?, category_family, shot_index, background_asset_id, NULL, pose_asset_id, ?, ?
             FROM shot_presets WHERE version_id = ? AND category_family = ?
             """,
             (snapshot_id, timestamp, timestamp, int(draft["id"]), family),
@@ -10503,23 +10500,13 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
             ).fetchone()
         if not preset:
             raise RuntimeError("当前成片冻结的拍摄预设不完整")
-        image_inputs, mask_input = build_direct_final_image_inputs(
+        image_inputs = build_direct_final_image_inputs(
             int(row["styling_id"]),
             int(row["input_version_id"]),
             preset,
         )
     else:
-        # 只读兼容历史分镜结果集的单张重生。
-        image_inputs = build_new_image_inputs(
-            task_id,
-            int(row["styling_id"]),
-            include_preview=True,
-            preview_asset_id=row["preview_asset_id"],
-            preview_grid_cell=int(row["sort_order"]),
-            input_version_id=int(row["input_version_id"]),
-            environment_asset_id=row["environment_asset_id"],
-        )
-        mask_input = None
+        raise RuntimeError("历史分镜成片仅支持只读复盘；请重新一键成片以使用当前拍摄母版流程")
     final_image_user_instruction = loads(
         row_value(row, "user_instruction_json"),
         loads(row_value(row, "result_set_user_instruction_json"), build_stage_user_instruction_context("final_image")),
@@ -10540,7 +10527,6 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         "categoryFamily": storyboard_category_family(styling_plan),
         **prompt_execution_facts(prompt_config_key, prompt, prompt_runtime),
         "imageInputs": image_inputs,
-        "maskInput": mask_input,
         "shotPresetVersionId": row["shot_preset_version_id"],
         "finalImageUserInstruction": final_image_user_instruction,
         "stylingPlan": styling_plan,
@@ -10572,15 +10558,12 @@ def build_final_prompt_runtime(
     spans = render_image_reference_spans(image_inputs or [])
     runtime = {
         "shot_index": str(shot_index),
-        "preview_grid_cell": str(shot_index),  # 历史 Prompt 占位兼容；新模板使用 shot_index。
         "user_requirement": render_user_requirement_line(user_requirement or {}),
         "shot_styling": build_shot_styling_line(styling_plan),
-        "shot_global_directing": "只在遮罩透明区域生成当前镜头的人物、服装和接地阴影；保持遮罩外背景像素不变。",
+        "shot_global_directing": "完整替换拍摄母版中的原人物、原服装及其身份特征；保留母版的场景、机位、景别、裁切、人物尺度、站位与光线。",
         "shot_current": f"当前为第 {shot_index} 个成片镜头，镜头角色 {shot_role}。",
         "ref_model_identity": spans["model_identity"],
-        "ref_preview_grid": spans["preview_grid"],
         "ref_garment": spans["garment"],
-        "ref_shoot_environment": spans["shoot_environment"],
         "ref_shot_background": spans["shot_background"],
         "ref_shot_pose": spans["shot_pose"],
         "final_image_user_instruction": render_user_instruction_line(final_image_user_instruction or {}),
@@ -10594,12 +10577,11 @@ def build_direct_final_image_inputs(
     styling_id: int,
     input_version_id: int,
     preset: Any,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+) -> list[dict[str, Any]]:
     background = get_media_asset_by_id(int(preset["background_asset_id"]))
-    mask = get_media_asset_by_id(int(preset["mask_asset_id"]))
     pose = get_media_asset_by_id(int(preset["pose_asset_id"]))
-    if not background or not mask or not pose:
-        raise RuntimeError("拍摄预设引用的背景、遮罩或姿势图不可用")
+    if not background or not pose:
+        raise RuntimeError("拍摄预设引用的拍摄母版或姿势图不可用")
     inputs: list[dict[str, Any]] = [
         image_input_from_asset(background, "shot_background"),
         image_input_from_asset(pose, "shot_pose"),
@@ -10674,7 +10656,7 @@ def build_direct_final_image_inputs(
         raise RuntimeError(f"Image-2 参考图组装超过 {IMAGE2_MAX_REFERENCE_IMAGES} 张：{len(inputs)}")
     if not inputs or inputs[0].get("role") != "shot_background":
         raise RuntimeError("编辑模式第一张参考图必须是当前镜头背景")
-    return inputs, image_input_from_asset(mask, "shot_mask")
+    return inputs
 
 
 def balanced_reference_groups(items: list[dict[str, Any]], max_groups: int) -> list[list[dict[str, Any]]]:
@@ -11210,7 +11192,7 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         # 参考图各职能图号区间：只出会变的图号，职能描述在模板正文托管
         {"name": "runtime.ref_model_identity", "scope": "runtime", "description": "模特身份参考板图号，直出链路通常为「图3」；无则空"},
         {"name": "runtime.ref_garment", "scope": "runtime", "description": "主推款概览/细节板与搭配服装参考板的总图号区间，直出链路通常为「图4-6」；无则空"},
-        {"name": "runtime.ref_shot_background", "scope": "runtime", "description": "当前镜头背景底图图号，固定为图1"},
+        {"name": "runtime.ref_shot_background", "scope": "runtime", "description": "当前镜头拍摄母版图号，固定为图1"},
         {"name": "runtime.ref_shot_pose", "scope": "runtime", "description": "当前镜头姿势参考图图号，固定为图2"},
     ]
 

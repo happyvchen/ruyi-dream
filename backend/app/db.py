@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import sqlite3
 from typing import Any, Iterator
 
@@ -30,6 +31,8 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("066", "direct_final_edits_workflow", "migration_direct_final_edits_workflow"),
     ("067", "shot_preset_family_publication", "migration_shot_preset_family_publication"),
     ("068", "repair_direct_final_result_set_schema", "migration_repair_direct_final_result_set_schema"),
+    ("069", "no_mask_master_shot_presets", "migration_no_mask_master_shot_presets"),
+    ("070", "final_prompt_master_shot_contract", "migration_final_prompt_master_shot_contract"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -463,6 +466,8 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_direct_final_edits_workflow": migration_direct_final_edits_workflow,
         "migration_shot_preset_family_publication": migration_shot_preset_family_publication,
         "migration_repair_direct_final_result_set_schema": migration_repair_direct_final_result_set_schema,
+        "migration_no_mask_master_shot_presets": migration_no_mask_master_shot_presets,
+        "migration_final_prompt_master_shot_contract": migration_final_prompt_master_shot_contract,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -811,6 +816,75 @@ def migration_shot_preset_family_publication(db: sqlite3.Connection) -> None:
 def migration_repair_direct_final_result_set_schema(db: sqlite3.Connection) -> None:
     """Repair databases that recorded 066 before its result-set rebuild was added."""
     rebuild_generation_result_sets_direct_edits(db)
+
+
+def migration_no_mask_master_shot_presets(db: sqlite3.Connection) -> None:
+    """Allow new master-shot presets without a mask while preserving historical rows."""
+    if not table_exists(db, "shot_presets") or "mask_asset_id" not in table_columns(db, "shot_presets"):
+        return
+    db.executescript(
+        """
+        CREATE TABLE shot_presets_no_mask (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          version_id INTEGER NOT NULL REFERENCES shot_preset_versions(id) ON DELETE CASCADE,
+          category_family TEXT NOT NULL,
+          shot_index INTEGER NOT NULL,
+          background_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+          mask_asset_id INTEGER REFERENCES media_assets(id),
+          pose_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(version_id, category_family, shot_index),
+          CHECK(category_family IN ('top', 'bottom', 'one_piece')),
+          CHECK(shot_index BETWEEN 1 AND 5)
+        );
+        INSERT INTO shot_presets_no_mask
+          (id, version_id, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, created_at, updated_at)
+        SELECT id, version_id, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, created_at, updated_at
+        FROM shot_presets;
+        DROP TABLE shot_presets;
+        ALTER TABLE shot_presets_no_mask RENAME TO shot_presets;
+        CREATE INDEX IF NOT EXISTS idx_shot_presets_version_slot
+          ON shot_presets(version_id, category_family, shot_index);
+        """
+    )
+
+
+MASTER_SHOT_PROMPT_CONTRACT = """【拍摄母版替换规则】
+- {{runtime.ref_shot_background}} 是当前镜头的拍摄母版。完整移除并替换母版中的原人物、原服装及其身份特征；不得混入原人物的脸、发型、肤色、服装、配饰或 logo。
+- 继承拍摄母版的场景、机位、景别、裁切、人物尺度、站位与光线；{{runtime.ref_shot_pose}} 仅补充姿势、身位、角度与手位，不提供人物身份或服装事实。
+- {{runtime.ref_model_identity}} 是唯一模特身份事实源；{{runtime.ref_garment}} 是唯一商品事实源。优先级：商品和人物身份 > 当前镜头构图契约 > 母版场景与光线 > 姿势参考 > 商业画质提升。
+
+"""
+
+LEGACY_FINAL_PROMPT_PATTERNS = (
+    re.compile(r"(?:-\s*)?\{\{runtime\.ref_preview_grid\}\}[^\n]*(?:\n|$)"),
+    re.compile(r"(?:-\s*)?\{\{#runtime\.ref_shoot_environment\}\}[^\n]*(?:\n|$)"),
+    re.compile(r"(?:-\s*)?\{\{runtime\.ref_shoot_environment\}\}[^\n]*(?:\n|$)"),
+    re.compile(r"(?:仅|只)?在(?:遮罩)?(?:透明|可编辑)区域(?:内)?(?:生成|编辑)[^。；\n]*[。；]?"),
+    re.compile(r"(?:遮罩(?:非透明)?区(?:域)?|背景(?:其余|遮罩外)?区域)[^。；\n]*(?:原样|原像素|保持不变|不变)[^。；\n]*[。；]?"),
+    re.compile(r"沿人物轮廓(?:进行)?编辑[^。；\n]*[。；]?"),
+)
+
+
+def migration_final_prompt_master_shot_contract(db: sqlite3.Connection) -> None:
+    """Prepend the no-mask master-shot rule without replacing admin Prompt content."""
+    if not table_exists(db, "prompt_configs"):
+        return
+    keys = ("assembly.final_image_top", "assembly.final_image_bottom", "assembly.final_image_one_piece")
+    rows = db.execute(
+        f"SELECT key, content FROM prompt_configs WHERE key IN ({','.join('?' for _ in keys)})",
+        keys,
+    ).fetchall()
+    for row in rows:
+        content = str(row["content"] or "")
+        if MASTER_SHOT_PROMPT_CONTRACT not in content:
+            content = MASTER_SHOT_PROMPT_CONTRACT + content
+        for pattern in LEGACY_FINAL_PROMPT_PATTERNS:
+            content = pattern.sub("", content)
+        content = re.sub(r"[ \t]{2,}", " ", content)
+        content = re.sub(r"\n{3,}", "\n\n", content).strip() + "\n"
+        db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?", (content, now_iso(), row["key"]))
 
 
 def rebuild_generation_result_sets_direct_edits(db: sqlite3.Connection) -> None:

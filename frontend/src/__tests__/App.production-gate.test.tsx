@@ -278,7 +278,6 @@ function configureApi(role: 'admin' | 'user' = 'admin') {
       categoryFamily: (['top', 'bottom', 'one_piece'] as const)[Math.floor(index / 5)],
       shotIndex: (index % 5) + 1,
       background: null,
-      mask: null,
       pose: null,
       complete: false,
     })),
@@ -440,6 +439,32 @@ describe('production gate app shell and page controls', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Prompt 维护' }))
     await waitFor(() => expect(screen.getAllByText('AI 选搭').length).toBeGreaterThanOrEqual(1))
+  })
+
+  it('admin saves a preset with a master shot and pose only', async () => {
+    apiMock.setShotPresetSlot.mockResolvedValue({
+      draftVersion: null,
+      editingVersion: null,
+      families: {
+        top: { publishedVersion: null, publishReady: false, validationErrors: [] },
+        bottom: { publishedVersion: null, publishReady: false, validationErrors: [] },
+        one_piece: { publishedVersion: null, publishReady: false, validationErrors: [] },
+      },
+      slots: [],
+    })
+    render(<App />)
+
+    await userEvent.click(await screen.findByRole('button', { name: '模特与背景' }))
+    const masterInput = (await screen.findAllByLabelText('选择拍摄母版图'))[0]
+    const poseInput = screen.getAllByLabelText('选择风格/姿势图')[0]
+    const master = new File(['master'], 'master.jpg', { type: 'image/jpeg' })
+    const pose = new File(['pose'], 'pose.jpg', { type: 'image/jpeg' })
+    await userEvent.upload(masterInput, master)
+    await userEvent.upload(poseInput, pose)
+
+    await userEvent.click(screen.getAllByRole('button', { name: '保存拍摄预设' })[0])
+    await waitFor(() => expect(apiMock.setShotPresetSlot).toHaveBeenCalledWith('top', 1, master, pose))
+    expect(screen.queryByText(/遮罩|Alpha PNG|保存三张图片/)).not.toBeInTheDocument()
   })
 
   it('ordinary user keeps the shooting workflow but cannot open Prompt maintenance', async () => {

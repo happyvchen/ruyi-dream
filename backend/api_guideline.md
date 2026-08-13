@@ -179,10 +179,10 @@ AI 选搭动态事实：
 ## 拍摄预设接口
 
 - `GET /api/shot-presets`：admin 读取 15 个槽位，以及三个服装类型各自的发布版本、发布就绪状态和校验错误。
-- `POST /api/shot-presets/{category_family}/{shot_index}`：同时上传背景、Alpha PNG 遮罩和姿势图；背景与遮罩像素尺寸必须一致。
+- `POST /api/shot-presets/{category_family}/{shot_index}`：同时上传带原人物的拍摄母版图和姿势图。
 - `POST /api/shot-preset-families/{category_family}/publish`：对应类型的 5 个槽位完整时独立发布快照，不受另外两个类型完成度影响。
 
-最终请求固定 `image_urls <= 6`，背景排第一，`mask_url` 独立传入，使用 `1:1 / 2k / high`；模特与商品多图先确定性合成角色参考板，结果集冻结 `shot_preset_version_id`。
+最终请求固定 `image_urls <= 6`，拍摄母版排第一，不传 `mask_url`，使用 `1:1 / 2k / high`；模特与商品多图先确定性合成角色参考板，结果集冻结 `shot_preset_version_id`。
 
 ## 导出
 

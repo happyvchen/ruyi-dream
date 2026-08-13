@@ -151,7 +151,6 @@ export type ShotPresetSlot = {
   categoryFamily: 'top' | 'bottom' | 'one_piece'
   shotIndex: number
   background: MediaAsset | null
-  mask: MediaAsset | null
   pose: MediaAsset | null
   complete: boolean
 }
@@ -1075,10 +1074,9 @@ export const api = {
   },
   clearShootEnvironment: () => request<{ asset: MediaAsset | null }>('/api/shoot-environment', { method: 'DELETE' }),
   getShotPresets: () => request<ShotPresetMatrix>('/api/shot-presets'),
-  setShotPresetSlot: (categoryFamily: ShotPresetSlot['categoryFamily'], shotIndex: number, background: File, mask: File, pose: File) => {
+  setShotPresetSlot: (categoryFamily: ShotPresetSlot['categoryFamily'], shotIndex: number, background: File, pose: File) => {
     const form = new FormData()
     form.append('background', background)
-    form.append('mask', mask)
     form.append('pose', pose)
     return request<ShotPresetMatrix>(`/api/shot-presets/${categoryFamily}/${shotIndex}`, { method: 'POST', body: form })
   },

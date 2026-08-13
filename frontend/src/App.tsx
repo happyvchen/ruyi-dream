@@ -6050,7 +6050,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
               <strong>拍摄预设</strong>
               {isAdmin && shotPresets?.editingVersion && <span className="chip">编辑版本 v{shotPresets.editingVersion.versionNumber}</span>}
             </div>
-            <p className="edit-hint">上装、下装、套装各 5 个镜头。每个槽位必须同时维护背景图、同尺寸 Alpha PNG 遮罩和风格/姿势参考图；只有完整版本可以发布并用于新任务。</p>
+            <p className="edit-hint">上装、下装、套装各 5 个镜头。每个槽位维护带原人物与目标构图的拍摄母版图，以及风格/姿势参考图；生成时会换人换装。只有完整版本可以发布并用于新任务。</p>
             {isAdmin ? (
               shotPresets ? <ShotPresetManager matrix={shotPresets} setMatrix={setShotPresets} run={run} /> : <div className="model-empty">加载中…</div>
             ) : (
@@ -6116,18 +6116,16 @@ function ShotPresetSlotEditor({ slot, setMatrix, run }: {
   run: any
 }) {
   const [background, setBackground] = useState<File | null>(null)
-  const [mask, setMask] = useState<File | null>(null)
   const [pose, setPose] = useState<File | null>(null)
-  const ready = !!background && !!mask && !!pose
+  const ready = !!background && !!pose
   const upload = () => {
-    if (!background || !mask || !pose) return
+    if (!background || !pose) return
     void run(
       `保存${SHOT_PRESET_FAMILY_LABELS[slot.categoryFamily]}镜头 ${slot.shotIndex} 中...`,
-      () => api.setShotPresetSlot(slot.categoryFamily, slot.shotIndex, background, mask, pose),
+      () => api.setShotPresetSlot(slot.categoryFamily, slot.shotIndex, background, pose),
       (next: ShotPresetMatrix) => {
         setMatrix(next)
         setBackground(null)
-        setMask(null)
         setPose(null)
       },
       { refresh: false },
@@ -6137,16 +6135,14 @@ function ShotPresetSlotEditor({ slot, setMatrix, run }: {
     <article className={`shot-preset-card ${slot.complete ? 'complete' : ''}`}>
       <header><strong>镜头 {slot.shotIndex}</strong><span>{slot.complete ? '已配置' : '待配置'}</span></header>
       <div className="shot-preset-thumbs">
-        <ShotPresetThumb label="背景" asset={slot.background} />
-        <ShotPresetThumb label="遮罩" asset={slot.mask} />
-        <ShotPresetThumb label="姿势" asset={slot.pose} />
+        <ShotPresetThumb label="拍摄母版" asset={slot.background} />
+        <ShotPresetThumb label="风格/姿势" asset={slot.pose} />
       </div>
       <div className="shot-preset-inputs">
-        <PresetFileInput label={background?.name ?? '选择背景图'} accept={SUPPORTED_IMAGE_ACCEPT} onChange={setBackground} />
-        <PresetFileInput label={mask?.name ?? '选择遮罩 PNG'} accept="image/png,.png" onChange={setMask} />
-        <PresetFileInput label={pose?.name ?? '选择姿势图'} accept={SUPPORTED_IMAGE_ACCEPT} onChange={setPose} />
+        <PresetFileInput label={background?.name ?? '选择拍摄母版图'} accept={SUPPORTED_IMAGE_ACCEPT} onChange={setBackground} />
+        <PresetFileInput label={pose?.name ?? '选择风格/姿势图'} accept={SUPPORTED_IMAGE_ACCEPT} onChange={setPose} />
       </div>
-      <button type="button" className="management-action" disabled={!ready} onClick={upload}><Save size={14} />保存三张图片</button>
+      <button type="button" className="management-action" disabled={!ready} onClick={upload}><Save size={14} />保存拍摄预设</button>
     </article>
   )
 }
