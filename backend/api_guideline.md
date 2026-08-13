@@ -182,9 +182,9 @@ AI 选搭动态事实：
 
 ## 拍摄预设接口
 
-- `GET /api/shot-presets`：admin 读取 15 个当前槽位，以及三个服装类型各自的完整槽位数和校验错误。
-- `POST /api/shot-presets/{category_family}/{shot_index}/{asset_role}`：单张替换 `background` 或 `pose`，成功后立即成为当前生效图片。
-- `DELETE /api/shot-presets/{category_family}/{shot_index}/{asset_role}`：删除当前单张图片并立即生效；该类型不完整期间不能开始新成片。
+- `GET /api/shot-presets`：所有已登录角色读取 15 个当前槽位，以及三个服装类型各自的完整槽位数和校验错误。
+- `POST /api/shot-presets/{category_family}/{shot_index}/{asset_role}`：仅 admin 单张替换 `background` 或 `pose`，成功后立即成为当前生效图片。
+- `DELETE /api/shot-presets/{category_family}/{shot_index}/{asset_role}`：仅 admin 删除当前单张图片并立即生效；该类型不完整期间不能开始新成片。
 - 旧整槽保存和发布接口返回 `410 Gone`。
 
 最终请求固定 `image_urls <= 6`，拍摄母版排第一，不传 `mask_url`，使用 `1:1 / 2k / high`；模特与商品多图先确定性合成角色参考板，结果集通过 `generation_result_set_shot_presets` 冻结当次五组图片。

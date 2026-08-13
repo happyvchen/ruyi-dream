@@ -5954,12 +5954,22 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
   const displayRefs = refs.length || editable ? refs : fallbackHeadRefs()
   const takenAngles = new Set(refs.map((ref) => ref.angle).filter((angle): angle is string => !!angle))
   const [shotPresets, setShotPresets] = useState<ShotPresetMatrix | null>(null)
+  const [shotPresetLoadState, setShotPresetLoadState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
 
+  const loadShotPresets = useCallback(() => {
+    setShotPresetLoadState('loading')
+    setShotPresets(null)
+    void api.getShotPresets().then((matrix) => {
+      setShotPresets(matrix)
+      setShotPresetLoadState('ready')
+    }).catch(() => setShotPresetLoadState('error'))
+  }, [])
+
   useEffect(() => {
-    if (isAdmin) void api.getShotPresets().then(setShotPresets).catch(() => setShotPresets(null))
-  }, [isAdmin])
+    if (role) loadShotPresets()
+  }, [loadShotPresets, role])
 
   const openModelRef = (index: number) => {
     const items = displayRefs.map((item) => ({
@@ -5977,7 +5987,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
     <section className="page workbench-page model-shell-page">
       <PageTitle
         title="模特与背景"
-        subtitle="维护模特身份和 15 个固定镜头拍摄预设，保证整组成片稳定一致。"
+        subtitle="当前拍摄任务默认使用以下模特身份与拍摄预设，保证整组成片稳定一致。"
       />
       <div className="panel model-page">
         <div className="model-meta">
@@ -6050,10 +6060,15 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
             <div className="section-head">
               <strong>拍摄预设</strong>
             </div>
-            {isAdmin ? (
-              shotPresets ? <ShotPresetManager matrix={shotPresets} setMatrix={setShotPresets} run={run} onOpen={setViewer} /> : <div className="model-empty">加载中…</div>
+            {shotPresetLoadState === 'error' ? (
+              <div className="model-empty model-empty-action">
+                <span>拍摄预设暂时无法加载。</span>
+                <button type="button" className="management-action" onClick={loadShotPresets}>重试加载</button>
+              </div>
+            ) : shotPresets ? (
+              <ShotPresetManager matrix={shotPresets} setMatrix={setShotPresets} run={run} onOpen={setViewer} editable={isAdmin} />
             ) : (
-              <div className="model-empty">拍摄预设由开发者统一维护，普通用户无需设置。</div>
+              <div className="model-empty">加载中…</div>
             )}
           </section>
         </div>
@@ -6069,11 +6084,12 @@ const SHOT_PRESET_FAMILY_LABELS: Record<ShotPresetSlot['categoryFamily'], string
   one_piece: '套装',
 }
 
-function ShotPresetManager({ matrix, setMatrix, run, onOpen }: {
+function ShotPresetManager({ matrix, setMatrix, run, onOpen, editable }: {
   matrix: ShotPresetMatrix
   setMatrix: (matrix: ShotPresetMatrix) => void
   run: any
   onOpen: (image: LightboxImage) => void
+  editable: boolean
 }) {
   return (
     <div className="shot-preset-manager">
@@ -6086,11 +6102,11 @@ function ShotPresetManager({ matrix, setMatrix, run, onOpen }: {
               <span>{state.configuredCount}/5 个镜头完整</span>
             </header>
             {!state.complete && state.validationErrors.length > 0 && (
-              <p className="shot-preset-warning">还需完成：{state.validationErrors.slice(0, 2).join('；')}{state.validationErrors.length > 2 ? `；另有 ${state.validationErrors.length - 2} 项` : ''}</p>
+              <p className="shot-preset-warning">{editable ? '还需完成' : '当前预设不完整'}：{state.validationErrors.slice(0, 2).join('；')}{state.validationErrors.length > 2 ? `；另有 ${state.validationErrors.length - 2} 项` : ''}</p>
             )}
             <div className="shot-preset-grid">
               {matrix.slots.filter((slot) => slot.categoryFamily === family).map((slot) => (
-                <ShotPresetSlotEditor key={`${family}-${slot.shotIndex}`} slot={slot} setMatrix={setMatrix} run={run} onOpen={onOpen} />
+                <ShotPresetSlotEditor key={`${family}-${slot.shotIndex}`} slot={slot} setMatrix={setMatrix} run={run} onOpen={onOpen} editable={editable} />
               ))}
             </div>
           </section>
@@ -6100,11 +6116,12 @@ function ShotPresetManager({ matrix, setMatrix, run, onOpen }: {
   )
 }
 
-function ShotPresetSlotEditor({ slot, setMatrix, run, onOpen }: {
+function ShotPresetSlotEditor({ slot, setMatrix, run, onOpen, editable }: {
   slot: ShotPresetSlot
   setMatrix: (matrix: ShotPresetMatrix) => void
   run: any
   onOpen: (image: LightboxImage) => void
+  editable: boolean
 }) {
   const assets = [slot.background, slot.pose].filter((asset): asset is MediaAsset => Boolean(asset))
   const update = (role: 'background' | 'pose', file: File) => {
@@ -6125,22 +6142,22 @@ function ShotPresetSlotEditor({ slot, setMatrix, run, onOpen }: {
     <article className={`shot-preset-card ${slot.complete ? 'complete' : ''}`}>
       <header><strong>镜头 {slot.shotIndex}</strong><span>{slot.complete ? '已配置' : '待配置'}</span></header>
       <div className="shot-preset-thumbs">
-        <ShotPresetAssetCard label="拍摄母版" asset={slot.background} group={assets} onOpen={onOpen} onReplace={(file) => update('background', file)} onDelete={() => remove('background')} />
-        <ShotPresetAssetCard label="风格/姿势" asset={slot.pose} group={assets} onOpen={onOpen} onReplace={(file) => update('pose', file)} onDelete={() => remove('pose')} />
+        <ShotPresetAssetCard label="拍摄母版" asset={slot.background} group={assets} onOpen={onOpen} editable={editable} onReplace={(file) => update('background', file)} onDelete={() => remove('background')} />
+        <ShotPresetAssetCard label="风格/姿势" asset={slot.pose} group={assets} onOpen={onOpen} editable={editable} onReplace={(file) => update('pose', file)} onDelete={() => remove('pose')} />
       </div>
     </article>
   )
 }
 
-function ShotPresetAssetCard({ label, asset, group, onOpen, onReplace, onDelete }: { label: string; asset: MediaAsset | null; group: MediaAsset[]; onOpen: (image: LightboxImage) => void; onReplace: (file: File) => void; onDelete: () => void }) {
+function ShotPresetAssetCard({ label, asset, group, onOpen, editable, onReplace, onDelete }: { label: string; asset: MediaAsset | null; group: MediaAsset[]; onOpen: (image: LightboxImage) => void; editable: boolean; onReplace: (file: File) => void; onDelete: () => void }) {
   return <ImageAssetCard
     thumbnailSrc={asset ? mediaUrl(assetThumbSrc(asset)) : null}
-    title={asset?.originalFilename ?? asset?.filename ?? `选择${label}图`}
+    title={asset?.originalFilename ?? asset?.filename ?? (editable ? `选择${label}图` : `${label}未配置`)}
     meta={asset ? `${label} · ${assetMeta(asset)}` : `${label} · 尚未配置`}
     onOpen={asset ? () => onOpen(assetLightboxImage(asset, group)) : undefined}
-    accept={SUPPORTED_IMAGE_ACCEPT}
-    onReplace={onReplace}
-    onDelete={asset ? onDelete : undefined}
+    accept={editable ? SUPPORTED_IMAGE_ACCEPT : undefined}
+    onReplace={editable ? onReplace : undefined}
+    onDelete={editable && asset ? onDelete : undefined}
   />
 }
 

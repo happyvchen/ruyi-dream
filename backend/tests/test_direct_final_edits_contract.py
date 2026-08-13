@@ -26,6 +26,27 @@ def test_admin_sees_all_fifteen_shot_preset_slots_before_assets_are_configured(c
     }
 
 
+def test_only_authenticated_users_can_read_shot_presets_and_only_admin_can_change_them(client, monkeypatch) -> None:
+    monkeypatch.setattr(app_main.settings, "user_password", "test-user-password")
+
+    anonymous_response = client.get("/api/shot-presets")
+
+    client.cookies.set("ruyi_session", app_main.create_session_cookie("user"))
+
+    read_response = client.get("/api/shot-presets")
+    replace_response = client.post(
+        "/api/shot-presets/top/1/background",
+        files={"file": ("master.jpg", b"image", "image/jpeg")},
+    )
+    delete_response = client.delete("/api/shot-presets/top/1/background")
+
+    assert anonymous_response.status_code == 401
+    assert read_response.status_code == 200
+    assert len(read_response.json()["slots"]) == 15
+    assert replace_response.status_code == 403
+    assert delete_response.status_code == 403
+
+
 def test_publish_endpoint_is_retired_because_each_image_is_live(client) -> None:
     response = client.post("/api/shot-preset-families/top/publish")
 

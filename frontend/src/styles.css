@@ -4360,6 +4360,13 @@ body.is-marquee-selecting {
   font-size: 13px;
   text-align: center;
 }
+.model-empty-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
 
 .record-list {
   min-height: 0;

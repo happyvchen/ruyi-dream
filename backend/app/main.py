@@ -6969,7 +6969,6 @@ def serialize_shot_presets() -> dict[str, Any]:
 
 @app.get("/api/shot-presets")
 def get_shot_presets(request: Request) -> dict[str, Any]:
-    require_admin(request)
     return serialize_shot_presets()
 
 

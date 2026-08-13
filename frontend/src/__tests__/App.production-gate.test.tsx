@@ -487,6 +487,52 @@ describe('production gate app shell and page controls', () => {
     await waitFor(() => expect(window.location.pathname).toBe('/studio'))
   })
 
+  it('ordinary user can inspect every shot preset without seeing maintenance controls', async () => {
+    configureApi('user')
+    apiMock.getShotPresets.mockResolvedValue({
+      families: {
+        top: { complete: false, configuredCount: 0, validationErrors: ['top 镜头 1 缺少姿势图'] },
+        bottom: { complete: false, configuredCount: 0, validationErrors: ['bottom 镜头 1 缺少拍摄母版或姿势图'] },
+        one_piece: { complete: false, configuredCount: 0, validationErrors: ['one_piece 镜头 1 缺少拍摄母版或姿势图'] },
+      },
+      slots: Array.from({ length: 15 }, (_, index) => ({
+        categoryFamily: (['top', 'bottom', 'one_piece'] as const)[Math.floor(index / 5)],
+        shotIndex: (index % 5) + 1,
+        background: index === 0 ? {
+          id: 201,
+          objectKey: 'presets/top-1-master.jpg',
+          filename: 'top-1-master.jpg',
+          originalFilename: 'top-1-master.jpg',
+          mimeType: 'image/jpeg',
+          width: 2048,
+          height: 2048,
+          sizeBytes: 1024,
+          thumbUrl: '/preset-thumb.jpg',
+          previewUrl: '/preset-preview.jpg',
+          originalUrl: '/preset-original.jpg',
+        } : null,
+        pose: null,
+        complete: false,
+      })),
+    })
+
+    const { container } = render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '模特与背景' }))
+
+    await waitFor(() => expect(apiMock.getShotPresets).toHaveBeenCalledTimes(1))
+    expect(await screen.findByText('上装')).toBeInTheDocument()
+    expect(screen.getByText('下装')).toBeInTheDocument()
+    expect(screen.getByText('套装')).toBeInTheDocument()
+    expect(container.querySelectorAll('.shot-preset-card')).toHaveLength(15)
+    expect(screen.getByText(/当前预设不完整：top 镜头 1 缺少姿势图/)).toBeInTheDocument()
+    expect(container.querySelector('.shot-preset-card .thumb-actions')).toBeNull()
+    expect(screen.queryByLabelText(/替换 .*拍摄母版/)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/删除 .*拍摄母版/)).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'top-1-master.jpg' }))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+  })
+
   it('studio summary exposes always-open business requirement modules and one-click final action', async () => {
     window.history.replaceState(null, '', '/studio?task=1')
     render(<App />)
