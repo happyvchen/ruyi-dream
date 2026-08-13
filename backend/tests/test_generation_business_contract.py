@@ -24,9 +24,6 @@ def test_prompt_catalog_contains_current_workflow_slots_only() -> None:
         "assembly.ai_tagging",
         "assembly.hero_image_selection",
         "assembly.ai_styling",
-        "assembly.storyboard_preview_top",
-        "assembly.storyboard_preview_bottom",
-        "assembly.storyboard_preview_one_piece",
         "assembly.final_image_top",
         "assembly.final_image_bottom",
         "assembly.final_image_one_piece",
@@ -34,6 +31,7 @@ def test_prompt_catalog_contains_current_workflow_slots_only() -> None:
 
     assert "assembly.shoot_script" not in keys
     assert "assembly.storyboard_preview" not in keys
+    assert "assembly.storyboard_preview_top" not in keys
     assert "assembly.final_image" not in keys
 
 
@@ -63,28 +61,27 @@ def test_invalid_shot_category_family_fails_instead_of_guessing_from_sub_categor
 
 
 @pytest.mark.parametrize(
-    ("family", "storyboard_key", "final_key"),
+    ("family", "final_key"),
     [
-        ("top", "assembly.storyboard_preview_top", "assembly.final_image_top"),
-        ("bottom", "assembly.storyboard_preview_bottom", "assembly.final_image_bottom"),
-        ("one_piece", "assembly.storyboard_preview_one_piece", "assembly.final_image_one_piece"),
+        ("top", "assembly.final_image_top"),
+        ("bottom", "assembly.final_image_bottom"),
+        ("one_piece", "assembly.final_image_one_piece"),
     ],
 )
-def test_prompt_key_routing_uses_styling_plan_family(family: str, storyboard_key: str, final_key: str) -> None:
+def test_prompt_key_routing_uses_styling_plan_family(family: str, final_key: str) -> None:
     plan = styling_plan(family)
 
-    assert app_main.storyboard_prompt_config_key(plan) == storyboard_key
     assert app_main.final_image_prompt_config_key(plan) == final_key
 
 
 @pytest.mark.parametrize("family", ["top", "bottom", "one_piece"])
-def test_final_image_slots_are_fixed_to_first_five_storyboard_cells(family: str) -> None:
+def test_final_image_slots_are_fixed_to_five_direct_shots(family: str) -> None:
     assert app_main.final_image_slot_roles(styling_plan(family)) == [
-        f"{family}_grid_1",
-        f"{family}_grid_2",
-        f"{family}_grid_3",
-        f"{family}_grid_4",
-        f"{family}_grid_5",
+        f"{family}_shot_1",
+        f"{family}_shot_2",
+        f"{family}_shot_3",
+        f"{family}_shot_4",
+        f"{family}_shot_5",
     ]
 
 
@@ -99,11 +96,11 @@ def test_generate_final_creates_five_queued_images_and_never_a_sixth(client) -> 
     result_images = item["resultSet"]["images"]
     assert [image["sortOrder"] for image in result_images] == [1, 2, 3, 4, 5]
     assert [image["shotRole"] for image in result_images] == [
-        "bottom_grid_1",
-        "bottom_grid_2",
-        "bottom_grid_3",
-        "bottom_grid_4",
-        "bottom_grid_5",
+        "bottom_shot_1",
+        "bottom_shot_2",
+        "bottom_shot_3",
+        "bottom_shot_4",
+        "bottom_shot_5",
     ]
     assert all(image["status"] == "QUEUED" for image in result_images)
 

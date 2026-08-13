@@ -124,7 +124,7 @@ class Settings:
     # toapis 路径直接用比例串；fal 路径没有 3:2 枚举，使用显式宽高（见 gpt_image2_preview_fal_image_size）。
     gpt_image2_preview_size = os.getenv("GPT_IMAGE2_PREVIEW_SIZE", "3:2")
     gpt_image2_preview_fal_image_size = os.getenv("GPT_IMAGE2_PREVIEW_FAL_IMAGE_SIZE", "1536x1024")
-    gpt_image2_resolution = os.getenv("GPT_IMAGE2_RESOLUTION", "1K")
+    gpt_image2_resolution = os.getenv("GPT_IMAGE2_RESOLUTION", "2k")
     generation_poll_interval_seconds = float(os.getenv("GENERATION_POLL_INTERVAL_SECONDS", "5"))
     generation_lock_ttl_seconds = int(os.getenv("GENERATION_LOCK_TTL_SECONDS", "120"))
     generation_image_timeout_seconds = int(os.getenv("GENERATION_IMAGE_TIMEOUT_SECONDS", str(30 * 60)))

@@ -27,6 +27,9 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("063", "styling_garment_tag_retry", "migration_styling_garment_tag_retry"),
     ("064", "generation_attempt_owner_status_index", "migration_generation_attempt_owner_status_index"),
     ("065", "repair_styling_garment_tag_retry_lease", "migration_repair_styling_garment_tag_retry_lease"),
+    ("066", "direct_final_edits_workflow", "migration_direct_final_edits_workflow"),
+    ("067", "shot_preset_family_publication", "migration_shot_preset_family_publication"),
+    ("068", "repair_direct_final_result_set_schema", "migration_repair_direct_final_result_set_schema"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -37,9 +40,6 @@ PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
     ("assembly.ai_tagging", "assembly", "AI 打标", "搭配服装入库后的图片理解和标签识别 Prompt；运行时与图片挑选/排序合并调用。", 100),
     ("assembly.hero_image_selection", "assembly", "主推款图片挑选/排序", "AI 摄影棚主推款图片挑选和排序 Prompt；运行时与 AI 选搭合并调用。", 105),
     ("assembly.ai_styling", "assembly", "AI 选搭", "AI Stylist 选搭 Prompt，含主推款理解、搭配选择和质量判断；运行时与主推款图片挑选/排序合并调用。", 110),
-    ("assembly.storyboard_preview_top", "assembly", "分镜预览 · 上装/针织/外套", "Image-2 上装类固定六镜头分镜 Prompt。", 120),
-    ("assembly.storyboard_preview_bottom", "assembly", "分镜预览 · 裤装/半身裙", "Image-2 下装类固定六镜头分镜 Prompt。", 130),
-    ("assembly.storyboard_preview_one_piece", "assembly", "分镜预览 · 连衣裙/连体/套装", "Image-2 连衣裙/连体/套装固定六镜头分镜 Prompt。", 140),
     ("assembly.final_image_top", "assembly", "生成成片 · 上装/针织/外套", "Image-2 上装类固定五镜头成片 Prompt。", 150),
     ("assembly.final_image_bottom", "assembly", "生成成片 · 裤装/半身裙", "Image-2 下装类固定五镜头成片 Prompt。", 160),
     ("assembly.final_image_one_piece", "assembly", "生成成片 · 连衣裙/连体/套装", "Image-2 连衣裙/连体/套装固定五镜头成片 Prompt。", 170),
@@ -55,6 +55,9 @@ REMOVED_PROMPT_CONFIG_KEYS: tuple[str, ...] = (
     "segment.image_reference_constraint",
     "segment.image_reference_preview_note",
     "assembly.ai_styling_system",
+    "assembly.storyboard_preview_top",
+    "assembly.storyboard_preview_bottom",
+    "assembly.storyboard_preview_one_piece",
 )
 
 
@@ -107,6 +110,44 @@ def init_db() -> None:
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS shot_preset_versions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              version_number INTEGER NOT NULL UNIQUE,
+              status TEXT NOT NULL DEFAULT 'DRAFT',
+              published_at TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS shot_presets (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              version_id INTEGER NOT NULL REFERENCES shot_preset_versions(id) ON DELETE CASCADE,
+              category_family TEXT NOT NULL,
+              shot_index INTEGER NOT NULL,
+              background_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+              mask_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+              pose_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(version_id, category_family, shot_index),
+              CHECK(category_family IN ('top', 'bottom', 'one_piece')),
+              CHECK(shot_index BETWEEN 1 AND 5)
+            );
+
+            CREATE TABLE IF NOT EXISTS retired_prompt_configs (
+              key TEXT PRIMARY KEY,
+              content TEXT NOT NULL,
+              retired_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS shot_preset_family_publications (
+              category_family TEXT PRIMARY KEY,
+              version_id INTEGER NOT NULL REFERENCES shot_preset_versions(id),
+              published_at TEXT NOT NULL,
+              CHECK(category_family IN ('top', 'bottom', 'one_piece'))
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_shot_preset_versions_single_draft
+              ON shot_preset_versions(status) WHERE status = 'DRAFT';
 
             CREATE TABLE IF NOT EXISTS event_logs (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -276,7 +317,8 @@ def init_db() -> None:
               task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
               input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
               styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
-              preview_id INTEGER NOT NULL REFERENCES generation_previews(id),
+              preview_id INTEGER REFERENCES generation_previews(id),
+              shot_preset_version_id INTEGER REFERENCES shot_preset_versions(id),
               user_instruction_json TEXT,
               status TEXT NOT NULL DEFAULT 'RUNNING',
               created_at TEXT NOT NULL,
@@ -418,6 +460,9 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_styling_garment_tag_retry": migration_styling_garment_tag_retry,
         "migration_generation_attempt_owner_status_index": migration_generation_attempt_owner_status_index,
         "migration_repair_styling_garment_tag_retry_lease": migration_repair_styling_garment_tag_retry_lease,
+        "migration_direct_final_edits_workflow": migration_direct_final_edits_workflow,
+        "migration_shot_preset_family_publication": migration_shot_preset_family_publication,
+        "migration_repair_direct_final_result_set_schema": migration_repair_direct_final_result_set_schema,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -666,6 +711,149 @@ def migration_repair_styling_garment_tag_retry_lease(db: sqlite3.Connection) -> 
         return
     if not table_has_column(db, "styling_garments", "tag_retry_lease_until"):
         db.execute("ALTER TABLE styling_garments ADD COLUMN tag_retry_lease_until TEXT")
+
+
+def migration_direct_final_edits_workflow(db: sqlite3.Connection) -> None:
+    """Add versioned 3×5 shot presets and retire preview Prompt slots."""
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS shot_preset_versions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          version_number INTEGER NOT NULL UNIQUE,
+          status TEXT NOT NULL DEFAULT 'DRAFT',
+          published_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS shot_presets (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          version_id INTEGER NOT NULL REFERENCES shot_preset_versions(id) ON DELETE CASCADE,
+          category_family TEXT NOT NULL,
+          shot_index INTEGER NOT NULL,
+          background_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+          mask_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+          pose_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(version_id, category_family, shot_index),
+          CHECK(category_family IN ('top', 'bottom', 'one_piece')),
+          CHECK(shot_index BETWEEN 1 AND 5)
+        );
+        CREATE INDEX IF NOT EXISTS idx_shot_preset_versions_status
+          ON shot_preset_versions(status, version_number DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_shot_preset_versions_single_draft
+          ON shot_preset_versions(status) WHERE status = 'DRAFT';
+        CREATE INDEX IF NOT EXISTS idx_shot_presets_version_slot
+          ON shot_presets(version_id, category_family, shot_index);
+        CREATE TABLE IF NOT EXISTS retired_prompt_configs (
+          key TEXT PRIMARY KEY,
+          content TEXT NOT NULL,
+          retired_at TEXT NOT NULL
+        );
+        """
+    )
+    if table_exists(db, "prompt_configs"):
+        keys = (
+            "assembly.storyboard_preview_top",
+            "assembly.storyboard_preview_bottom",
+            "assembly.storyboard_preview_one_piece",
+        )
+        timestamp = now_iso()
+        db.execute(
+            f"""
+            INSERT INTO retired_prompt_configs (key, content, retired_at)
+            SELECT key, content, ? FROM prompt_configs WHERE key IN ({','.join('?' for _ in keys)})
+            ON CONFLICT(key) DO UPDATE SET content = excluded.content, retired_at = excluded.retired_at
+            """,
+            (timestamp, *keys),
+        )
+        db.execute(
+            f"DELETE FROM prompt_configs WHERE key IN ({','.join('?' for _ in keys)})",
+            keys,
+        )
+    rebuild_generation_result_sets_direct_edits(db)
+
+
+def migration_shot_preset_family_publication(db: sqlite3.Connection) -> None:
+    """Make published shot-preset snapshots independently addressable per family."""
+    db.execute("DROP INDEX IF EXISTS idx_shot_preset_versions_single_published")
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS shot_preset_family_publications (
+          category_family TEXT PRIMARY KEY,
+          version_id INTEGER NOT NULL REFERENCES shot_preset_versions(id),
+          published_at TEXT NOT NULL,
+          CHECK(category_family IN ('top', 'bottom', 'one_piece'))
+        );
+        """
+    )
+    published_rows = db.execute(
+        "SELECT id, published_at, updated_at FROM shot_preset_versions WHERE status = 'PUBLISHED' ORDER BY version_number"
+    ).fetchall()
+    for version in published_rows:
+        families = db.execute(
+            "SELECT DISTINCT category_family FROM shot_presets WHERE version_id = ?",
+            (int(version["id"]),),
+        ).fetchall()
+        for family in families:
+            db.execute(
+                """
+                INSERT INTO shot_preset_family_publications (category_family, version_id, published_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(category_family) DO UPDATE SET
+                  version_id = excluded.version_id,
+                  published_at = excluded.published_at
+                """,
+                (str(family["category_family"]), int(version["id"]), version["published_at"] or version["updated_at"]),
+            )
+
+
+def migration_repair_direct_final_result_set_schema(db: sqlite3.Connection) -> None:
+    """Repair databases that recorded 066 before its result-set rebuild was added."""
+    rebuild_generation_result_sets_direct_edits(db)
+
+
+def rebuild_generation_result_sets_direct_edits(db: sqlite3.Connection) -> None:
+    if not table_exists(db, "generation_result_sets"):
+        return
+    columns = table_columns(db, "generation_result_sets")
+    info = {str(row["name"]): row for row in db.execute("PRAGMA table_info(generation_result_sets)").fetchall()}
+    if "shot_preset_version_id" in columns and not int(info.get("preview_id", {"notnull": 0})["notnull"] or 0):
+        return
+
+    def rebuild() -> None:
+        db.executescript(
+            """
+            CREATE TABLE generation_result_sets_direct (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+              input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
+              styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
+              preview_id INTEGER REFERENCES generation_previews(id),
+              shot_preset_version_id INTEGER REFERENCES shot_preset_versions(id),
+              user_instruction_json TEXT,
+              status TEXT NOT NULL DEFAULT 'RUNNING',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            """
+        )
+        source_columns = [
+            "id", "task_id", "input_version_id", "styling_id", "preview_id",
+            "shot_preset_version_id", "user_instruction_json", "status", "created_at", "updated_at",
+        ]
+        select_exprs = [column if column in columns else "NULL" if column == "shot_preset_version_id" else default_sql_for_result_set_column(column) for column in source_columns]
+        db.execute(
+            f"INSERT INTO generation_result_sets_direct ({', '.join(source_columns)}) SELECT {', '.join(select_exprs)} FROM generation_result_sets"
+        )
+        db.executescript(
+            """
+            DROP TABLE generation_result_sets;
+            ALTER TABLE generation_result_sets_direct RENAME TO generation_result_sets;
+            """
+        )
+
+    run_schema_rebuild_with_foreign_keys_disabled(db, rebuild)
 
 
 def scrub_prompt_config_hero_product_info(db: sqlite3.Connection) -> None:

@@ -38,7 +38,32 @@ def test_runtime_image_reference_spans_follow_input_order_and_roles() -> None:
         "garment": "图2-6",
         "preview_grid": "图4",
         "shoot_environment": "图5",
+        "shot_background": "",
+        "shot_pose": "",
     }
+
+
+def test_direct_final_runtime_labels_background_pose_model_and_garments() -> None:
+    runtime = app_main.build_final_prompt_runtime(
+        3,
+        "top_shot_3",
+        {"hero_understanding": {"shot_category_family": "top"}},
+        [
+            {"role": "shot_background"},
+            {"role": "shot_pose"},
+            {"role": "model_identity"},
+            {"role": "hero_garment"},
+            {"role": "styling_garment"},
+        ],
+        {"instruction": "减少配饰"},
+        {"upload_requirement": "保留后片结构"},
+    )
+
+    assert runtime["ref_shot_background"] == "图1"
+    assert runtime["ref_shot_pose"] == "图2"
+    assert runtime["ref_model_identity"] == "图3"
+    assert runtime["ref_garment"] == "图4-5"
+    assert runtime["shot_index"] == "3"
 
 
 def test_user_visible_instruction_lines_are_business_text_not_prompt_json() -> None:

@@ -136,6 +136,10 @@ MAX_HERO_IMAGE_INPUTS = 15
 MAX_GARMENT_SELECTED_IMAGES = 6
 MAX_HERO_SELECTED_IMAGES = 8
 IMAGE2_MAX_REFERENCE_IMAGES = 6
+IMAGE2_DIRECT_MODEL_SOURCE_LIMIT = 2
+IMAGE2_DIRECT_HERO_SOURCE_LIMIT = 8
+IMAGE2_DIRECT_HERO_SHEET_LIMIT = 2
+IMAGE2_DIRECT_STYLING_SOURCE_LIMIT = 6
 IMAGE2_MODEL_SHEET_SOURCE_LIMIT = 4
 IMAGE2_HERO_SHEET_SOURCE_LIMIT = 6
 IMAGE2_HERO_SHEET_CHUNK_SIZE = 3
@@ -2016,9 +2020,12 @@ def media_asset_direct_reference_count(db: Any, asset_id: int) -> int:
           (SELECT COUNT(*) FROM generation_previews WHERE preview_asset_id = ?) +
           (SELECT COUNT(*) FROM generation_previews WHERE environment_asset_id = ?) +
           (SELECT COUNT(*) FROM generation_result_images_new WHERE current_asset_id = ?) +
-          (SELECT COUNT(*) FROM generation_attempts WHERE output_asset_id = ?) AS count
+          (SELECT COUNT(*) FROM generation_attempts WHERE output_asset_id = ?) +
+          (SELECT COUNT(*) FROM shot_presets WHERE background_asset_id = ?) +
+          (SELECT COUNT(*) FROM shot_presets WHERE mask_asset_id = ?) +
+          (SELECT COUNT(*) FROM shot_presets WHERE pose_asset_id = ?) AS count
         """,
-        (asset_id, asset_id, asset_id, asset_id, asset_id, asset_id),
+        (asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id),
     ).fetchone()
     return int(row["count"] or 0)
 
@@ -4724,12 +4731,7 @@ async def run_select_generation_styling(
 
 @app.post("/api/generation-tasks/{task_id}/preview")
 async def create_generation_preview(task_id: int, request: Request, payload: GenerationStageInstructionRequest | None = None) -> dict[str, Any]:
-    return await run_create_generation_preview(
-        task_id,
-        include_debug=admin_debug_for_request(request),
-        trigger="manual_step",
-        user_instruction=payload.userInstruction if payload else None,
-    )
+    raise HTTPException(status_code=410, detail="分镜预览已退出当前工作流，请直接生成最终成片")
 
 
 async def run_create_generation_preview(task_id: int, include_debug: bool = False, trigger: str = "manual_step", user_instruction: str | None = None) -> dict[str, Any]:
@@ -5079,20 +5081,18 @@ async def run_generate_final_images(
 ) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     if (
-        task["status"] not in {"PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
-        or not task["active_storyboard_preview_id"]
+        task["status"] not in {"STYLING_READY", "PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
         or not task["active_styling_id"]
     ):
-        raise HTTPException(status_code=409, detail="请先生成分镜预览")
-    preview_id = int(task["active_storyboard_preview_id"])
+        raise HTTPException(status_code=409, detail="请先完成 AI 智能选搭")
+    preview_id = int(task["active_storyboard_preview_id"]) if row_value(task, "active_storyboard_preview_id") else None
     styling_id = int(task["active_styling_id"])
+    category_family = storyboard_category_family(get_styling_plan_by_id(styling_id))
     with get_db() as db:
-        preview_row = db.execute(
-            "SELECT id FROM generation_previews WHERE id = ? AND task_id = ?",
-            (preview_id, task_id),
-        ).fetchone()
-    if not preview_row:
-        raise HTTPException(status_code=409, detail="请先生成分镜预览")
+        preset_version = get_published_shot_preset_version_for_family(db, category_family)
+    if not preset_version:
+        family_label = {"top": "上装", "bottom": "下装", "one_piece": "套装"}[category_family]
+        raise HTTPException(status_code=409, detail=f"{family_label}拍摄预设尚未发布，请联系管理员完成该类型的 5 个镜头预设")
     effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "final_image")
     user_instruction_context = build_stage_user_instruction_context("final_image", effective_user_instruction)
     if continue_existing and task["active_result_set_id"]:
@@ -5134,10 +5134,11 @@ async def run_generate_final_images(
         db.execute("UPDATE generation_tasks SET status = 'FINAL_RUNNING', updated_at = ? WHERE id = ?", (timestamp, task_id))
         cursor = db.execute(
             """
-            INSERT INTO generation_result_sets (task_id, input_version_id, styling_id, preview_id, user_instruction_json, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'RUNNING', ?, ?)
+            INSERT INTO generation_result_sets
+              (task_id, input_version_id, styling_id, preview_id, shot_preset_version_id, user_instruction_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'RUNNING', ?, ?)
             """,
-            (task_id, input_version_id, styling_id, preview_id, dumps(user_instruction_context), timestamp, timestamp),
+            (task_id, input_version_id, styling_id, preview_id, int(preset_version["id"]), dumps(user_instruction_context), timestamp, timestamp),
         )
         result_set_id = int(cursor.lastrowid)
         supersede_generation_result_sets(db, task_id, timestamp, keep_result_set_id=result_set_id)
@@ -5167,7 +5168,7 @@ def continue_active_final_result_set(
     task_id: int,
     result_set_id: int,
     styling_id: int,
-    preview_id: int,
+    preview_id: int | None,
     user_instruction_context: dict[str, Any] | None = None,
 ) -> list[int] | None:
     timestamp = now_iso()
@@ -5186,9 +5187,10 @@ def continue_active_final_result_set(
         ).fetchone()
         if not result_set or result_set["status"] == "RUNNING":
             raise HTTPException(status_code=409, detail="成片已在生成中，请勿重复提交")
-        # 结果集自己的 input_version_id 是成片阶段快照，本来就不会等于分镜阶段快照。
-        # 是否可续跑只由当前选搭和分镜身份决定；匹配后复用原结果集并跳过成功槽位。
-        if int(result_set["styling_id"]) != styling_id or int(result_set["preview_id"]) != preview_id:
+        # 直接成片结果集只由当前选搭与冻结拍摄预设版本决定；历史结果集继续兼容 preview_id。
+        if int(result_set["styling_id"]) != styling_id:
+            return None
+        if result_set["preview_id"] is not None and int(result_set["preview_id"]) != preview_id:
             return None
         existing_rows = db.execute(
             "SELECT * FROM generation_result_images_new WHERE result_set_id = ? ORDER BY sort_order",
@@ -6770,6 +6772,273 @@ def get_current_shoot_environment_asset_id() -> int | None:
             "SELECT media_asset_id FROM shoot_environment_references ORDER BY id DESC LIMIT 1"
         ).fetchone()
     return int(row["media_asset_id"]) if row else None
+
+
+SHOT_PRESET_FAMILIES = ("top", "bottom", "one_piece")
+SHOT_PRESET_INDICES = tuple(range(1, 6))
+
+
+def get_shot_preset_version_row(db: Any, status: str) -> Any:
+    return db.execute(
+        "SELECT * FROM shot_preset_versions WHERE status = ? ORDER BY version_number DESC LIMIT 1",
+        (status,),
+    ).fetchone()
+
+
+def get_published_shot_preset_version_for_family(db: Any, category_family: str) -> Any:
+    return db.execute(
+        """
+        SELECT spv.*
+        FROM shot_preset_family_publications publication
+        JOIN shot_preset_versions spv ON spv.id = publication.version_id
+        WHERE publication.category_family = ?
+        """,
+        (category_family,),
+    ).fetchone()
+
+
+def ensure_draft_shot_preset_version(db: Any) -> Any:
+    draft = get_shot_preset_version_row(db, "DRAFT")
+    if draft:
+        return draft
+    next_number = int(
+        db.execute("SELECT COALESCE(MAX(version_number), 0) + 1 AS next_number FROM shot_preset_versions").fetchone()["next_number"]
+    )
+    timestamp = now_iso()
+    version_id = int(
+        db.execute(
+            "INSERT INTO shot_preset_versions (version_number, status, created_at, updated_at) VALUES (?, 'DRAFT', ?, ?)",
+            (next_number, timestamp, timestamp),
+        ).lastrowid
+    )
+    for family in SHOT_PRESET_FAMILIES:
+        published = get_published_shot_preset_version_for_family(db, family)
+        if published:
+            db.execute(
+                """
+                INSERT INTO shot_presets
+                  (version_id, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, created_at, updated_at)
+                SELECT ?, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, ?, ?
+                FROM shot_presets WHERE version_id = ? AND category_family = ?
+                """,
+                (version_id, timestamp, timestamp, int(published["id"]), family),
+            )
+    return db.execute("SELECT * FROM shot_preset_versions WHERE id = ?", (version_id,)).fetchone()
+
+
+def serialize_shot_preset_version(row: Any) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {
+        "id": int(row["id"]),
+        "versionNumber": int(row["version_number"]),
+        "status": str(row["status"]),
+        "publishedAt": row["published_at"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def shot_preset_validation_errors(db: Any, version_id: int, category_family: str | None = None) -> list[str]:
+    rows = db.execute(
+        """
+        SELECT sp.*, bg.width AS bg_width, bg.height AS bg_height,
+               mask.width AS mask_width, mask.height AS mask_height, mask.mime_type AS mask_mime
+        FROM shot_presets sp
+        JOIN media_assets bg ON bg.id = sp.background_asset_id AND bg.deleted_at IS NULL
+        JOIN media_assets mask ON mask.id = sp.mask_asset_id AND mask.deleted_at IS NULL
+        JOIN media_assets pose ON pose.id = sp.pose_asset_id AND pose.deleted_at IS NULL
+        WHERE sp.version_id = ?
+        """,
+        (version_id,),
+    ).fetchall()
+    by_slot = {(str(row["category_family"]), int(row["shot_index"])): row for row in rows}
+    errors: list[str] = []
+    for family in (category_family,) if category_family else SHOT_PRESET_FAMILIES:
+        for shot_index in SHOT_PRESET_INDICES:
+            row = by_slot.get((family, shot_index))
+            if not row:
+                errors.append(f"{family} 镜头 {shot_index} 缺少背景、遮罩或姿势图")
+                continue
+            if str(row["mask_mime"]).lower() != "image/png":
+                errors.append(f"{family} 镜头 {shot_index} 的遮罩必须为 PNG")
+            if (row["bg_width"], row["bg_height"]) != (row["mask_width"], row["mask_height"]):
+                errors.append(f"{family} 镜头 {shot_index} 的背景与遮罩尺寸不一致")
+    return errors
+
+
+def serialize_shot_presets() -> dict[str, Any]:
+    with get_db() as db:
+        draft = get_shot_preset_version_row(db, "DRAFT")
+        rows = db.execute(
+            "SELECT * FROM shot_presets WHERE version_id = ? ORDER BY category_family, shot_index",
+            (int(draft["id"]),),
+        ).fetchall() if draft else []
+        published_by_family = {
+            family: get_published_shot_preset_version_for_family(db, family)
+            for family in SHOT_PRESET_FAMILIES
+        }
+        if not draft:
+            rows = []
+            for family, version in published_by_family.items():
+                if version:
+                    rows.extend(db.execute(
+                        "SELECT * FROM shot_presets WHERE version_id = ? AND category_family = ? ORDER BY shot_index",
+                        (int(version["id"]), family),
+                    ).fetchall())
+        family_errors = {
+            family: shot_preset_validation_errors(db, int(draft["id"]), family) if draft else [f"{family} 的 5 个镜头尚未配置"]
+            for family in SHOT_PRESET_FAMILIES
+        }
+    by_slot = {(str(row["category_family"]), int(row["shot_index"])): row for row in rows}
+    slots: list[dict[str, Any]] = []
+    for family in SHOT_PRESET_FAMILIES:
+        for shot_index in SHOT_PRESET_INDICES:
+            row = by_slot.get((family, shot_index))
+            slots.append(
+                {
+                    "categoryFamily": family,
+                    "shotIndex": shot_index,
+                    "background": get_media_asset_by_id(int(row["background_asset_id"])) if row else None,
+                    "mask": get_media_asset_by_id(int(row["mask_asset_id"])) if row else None,
+                    "pose": get_media_asset_by_id(int(row["pose_asset_id"])) if row else None,
+                    "complete": bool(row),
+                }
+            )
+    return {
+        "draftVersion": serialize_shot_preset_version(draft),
+        "editingVersion": serialize_shot_preset_version(draft),
+        "families": {
+            family: {
+                "publishReady": not family_errors[family],
+                "validationErrors": family_errors[family],
+                "publishedVersion": serialize_shot_preset_version(published_by_family[family]),
+            }
+            for family in SHOT_PRESET_FAMILIES
+        },
+        "slots": slots,
+    }
+
+
+@app.get("/api/shot-presets")
+def get_shot_presets(request: Request) -> dict[str, Any]:
+    require_admin(request)
+    return serialize_shot_presets()
+
+
+async def inspect_shot_preset_upload(upload: UploadFile) -> tuple[tuple[int, int], bool]:
+    content = await upload.read()
+    await upload.seek(0)
+    try:
+        with Image.open(BytesIO(content)) as image:
+            image.load()
+            return image.size, "A" in image.getbands()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"{upload.filename or '图片'} 无法识别") from exc
+
+
+@app.post("/api/shot-presets/{category_family}/{shot_index}")
+async def set_shot_preset_slot(
+    category_family: str,
+    shot_index: int,
+    request: Request,
+    background: UploadFile = File(...),
+    mask: UploadFile = File(...),
+    pose: UploadFile = File(...),
+) -> dict[str, Any]:
+    require_admin(request)
+    family = normalize_shot_category_family(category_family)
+    if family not in SHOT_PRESET_FAMILIES or shot_index not in SHOT_PRESET_INDICES:
+        raise HTTPException(status_code=400, detail="拍摄预设槽位不合法")
+    background_size, _ = await inspect_shot_preset_upload(background)
+    mask_size, mask_has_alpha = await inspect_shot_preset_upload(mask)
+    await inspect_shot_preset_upload(pose)
+    if str(mask.content_type or "").lower() != "image/png" or not mask_has_alpha:
+        raise HTTPException(status_code=400, detail="遮罩必须是带 Alpha 通道的 PNG")
+    if background_size != mask_size:
+        raise HTTPException(status_code=400, detail="背景与遮罩尺寸必须完全一致")
+    assets = await save_uploads_as_media_assets([background, mask, pose])
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        draft = ensure_draft_shot_preset_version(db)
+        previous = db.execute(
+            "SELECT * FROM shot_presets WHERE version_id = ? AND category_family = ? AND shot_index = ?",
+            (int(draft["id"]), family, shot_index),
+        ).fetchone()
+        db.execute(
+            """
+            INSERT INTO shot_presets
+              (version_id, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(version_id, category_family, shot_index) DO UPDATE SET
+              background_asset_id = excluded.background_asset_id,
+              mask_asset_id = excluded.mask_asset_id,
+              pose_asset_id = excluded.pose_asset_id,
+              updated_at = excluded.updated_at
+            """,
+            (int(draft["id"]), family, shot_index, int(assets[0]["id"]), int(assets[1]["id"]), int(assets[2]["id"]), timestamp, timestamp),
+        )
+        db.execute("UPDATE shot_preset_versions SET updated_at = ? WHERE id = ?", (timestamp, int(draft["id"])))
+        if previous:
+            for key in ("background_asset_id", "mask_asset_id", "pose_asset_id"):
+                release_media_asset_if_unreferenced(db, int(previous[key]))
+    return serialize_shot_presets()
+
+
+@app.post("/api/shot-preset-families/{category_family}/publish")
+def publish_shot_presets(category_family: str, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    family = normalize_shot_category_family(category_family)
+    if family not in SHOT_PRESET_FAMILIES:
+        raise HTTPException(status_code=400, detail="拍摄预设类型不合法")
+    family_label = {"top": "上装", "bottom": "下装", "one_piece": "套装"}[family]
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        draft = get_shot_preset_version_row(db, "DRAFT")
+        if not draft:
+            raise HTTPException(status_code=409, detail=f"需要先配置完整的{family_label} 5 个镜头预设")
+        errors = shot_preset_validation_errors(db, int(draft["id"]), family)
+        if errors:
+            raise HTTPException(status_code=409, detail=f"{family_label}拍摄预设尚未完整：{'；'.join(errors[:3])}")
+        previous = get_published_shot_preset_version_for_family(db, family)
+        next_number = int(db.execute(
+            "SELECT COALESCE(MAX(version_number), 0) + 1 AS next_number FROM shot_preset_versions"
+        ).fetchone()["next_number"])
+        snapshot_id = int(db.execute(
+            """
+            INSERT INTO shot_preset_versions (version_number, status, published_at, created_at, updated_at)
+            VALUES (?, 'PUBLISHED', ?, ?, ?)
+            """,
+            (next_number, timestamp, timestamp, timestamp),
+        ).lastrowid)
+        db.execute(
+            """
+            INSERT INTO shot_presets
+              (version_id, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, created_at, updated_at)
+            SELECT ?, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, ?, ?
+            FROM shot_presets WHERE version_id = ? AND category_family = ?
+            """,
+            (snapshot_id, timestamp, timestamp, int(draft["id"]), family),
+        )
+        db.execute(
+            """
+            INSERT INTO shot_preset_family_publications (category_family, version_id, published_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(category_family) DO UPDATE SET version_id = excluded.version_id, published_at = excluded.published_at
+            """,
+            (family, snapshot_id, timestamp),
+        )
+        if previous and not db.execute(
+            "SELECT 1 FROM shot_preset_family_publications WHERE version_id = ? LIMIT 1",
+            (int(previous["id"]),),
+        ).fetchone():
+            db.execute(
+                "UPDATE shot_preset_versions SET status = 'SUPERSEDED', updated_at = ? WHERE id = ?",
+                (timestamp, int(previous["id"])),
+            )
+    return serialize_shot_presets()
 
 
 def serialize_shoot_environment() -> dict[str, Any]:
@@ -10025,7 +10294,7 @@ def final_image_prompt_config_key(styling_plan: dict[str, Any]) -> str:
 
 def final_image_slot_roles(styling_plan: dict[str, Any]) -> list[str]:
     family = storyboard_category_family(styling_plan)
-    return [f"{family}_grid_{index}" for index in range(1, 6)]
+    return [f"{family}_shot_{index}" for index in range(1, 6)]
 
 
 def build_builtin_category_shot_template(hero_category: str) -> list[tuple[str, str, str, str, str]]:
@@ -10204,25 +10473,53 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
     with get_db() as db:
         row = db.execute(
             """
-            SELECT gri.*, gp.preview_asset_id, gp.environment_asset_id, grs.styling_id,
-                   grs.input_version_id, grs.user_instruction_json AS result_set_user_instruction_json
+            SELECT gri.*, grs.styling_id, grs.input_version_id, grs.preview_id,
+                   grs.shot_preset_version_id,
+                   grs.user_instruction_json AS result_set_user_instruction_json,
+                   gp.preview_asset_id, gp.environment_asset_id
             FROM generation_result_images_new gri
             JOIN generation_result_sets grs ON grs.id = gri.result_set_id
-            JOIN generation_previews gp ON gp.id = grs.preview_id
+            LEFT JOIN generation_previews gp ON gp.id = grs.preview_id
             WHERE gri.id = ?
             """,
             (result_image_id,),
         ).fetchone()
+    if not row:
+        raise RuntimeError("成片槽位不存在")
     styling_plan = get_styling_plan_by_id(int(row["styling_id"]))
-    image_inputs = build_new_image_inputs(
-        task_id,
-        int(row["styling_id"]),
-        include_preview=True,
-        preview_asset_id=row["preview_asset_id"],
-        preview_grid_cell=int(row["sort_order"]),
-        input_version_id=int(row["input_version_id"]),
-        environment_asset_id=row["environment_asset_id"],
-    )
+    preset = None
+    if row["shot_preset_version_id"]:
+        with get_db() as db:
+            preset = db.execute(
+                """
+                SELECT * FROM shot_presets
+                WHERE version_id = ? AND category_family = ? AND shot_index = ?
+                """,
+                (
+                    int(row["shot_preset_version_id"]),
+                    storyboard_category_family(styling_plan),
+                    int(row["sort_order"]),
+                ),
+            ).fetchone()
+        if not preset:
+            raise RuntimeError("当前成片冻结的拍摄预设不完整")
+        image_inputs, mask_input = build_direct_final_image_inputs(
+            int(row["styling_id"]),
+            int(row["input_version_id"]),
+            preset,
+        )
+    else:
+        # 只读兼容历史分镜结果集的单张重生。
+        image_inputs = build_new_image_inputs(
+            task_id,
+            int(row["styling_id"]),
+            include_preview=True,
+            preview_asset_id=row["preview_asset_id"],
+            preview_grid_cell=int(row["sort_order"]),
+            input_version_id=int(row["input_version_id"]),
+            environment_asset_id=row["environment_asset_id"],
+        )
+        mask_input = None
     final_image_user_instruction = loads(
         row_value(row, "user_instruction_json"),
         loads(row_value(row, "result_set_user_instruction_json"), build_stage_user_instruction_context("final_image")),
@@ -10243,6 +10540,8 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         "categoryFamily": storyboard_category_family(styling_plan),
         **prompt_execution_facts(prompt_config_key, prompt, prompt_runtime),
         "imageInputs": image_inputs,
+        "maskInput": mask_input,
+        "shotPresetVersionId": row["shot_preset_version_id"],
         "finalImageUserInstruction": final_image_user_instruction,
         "stylingPlan": styling_plan,
         "shotRole": row["shot_role"],
@@ -10257,8 +10556,7 @@ def build_new_final_prompt(
     final_image_user_instruction: dict[str, Any] | None = None,
     user_requirement: dict[str, Any] | None = None,
 ) -> str:
-    # 渲染层只输出「可变数据」：当前镜头各分段正文、分镜预览格号、参考图各职能图号区间、
-    # 用户要求。表头、分镜参考话术与事实源约束由 Prompt 维护模板正文托管。
+    # 渲染层只输出当前镜头、参考图职能区间、造型事实和用户要求。
     runtime = build_final_prompt_runtime(shot_index, shot_role, styling_plan, image_inputs or [], final_image_user_instruction or {}, user_requirement or {})
     return render_prompt_template(final_image_prompt_config_key(styling_plan), runtime)
 
@@ -10273,20 +10571,133 @@ def build_final_prompt_runtime(
 ) -> dict[str, Any]:
     spans = render_image_reference_spans(image_inputs or [])
     runtime = {
-        "preview_grid_cell": str(shot_index),
+        "shot_index": str(shot_index),
+        "preview_grid_cell": str(shot_index),  # 历史 Prompt 占位兼容；新模板使用 shot_index。
         "user_requirement": render_user_requirement_line(user_requirement or {}),
         "shot_styling": build_shot_styling_line(styling_plan),
-        "shot_global_directing": "严格复现对应分镜格的构图、角度、裁切与姿势，并保持商品和人物一致。",
-        "shot_current": f"分镜第 {shot_index} 格，镜头角色 {shot_role}。",
+        "shot_global_directing": "只在遮罩透明区域生成当前镜头的人物、服装和接地阴影；保持遮罩外背景像素不变。",
+        "shot_current": f"当前为第 {shot_index} 个成片镜头，镜头角色 {shot_role}。",
         "ref_model_identity": spans["model_identity"],
         "ref_preview_grid": spans["preview_grid"],
         "ref_garment": spans["garment"],
         "ref_shoot_environment": spans["shoot_environment"],
+        "ref_shot_background": spans["shot_background"],
+        "ref_shot_pose": spans["shot_pose"],
         "final_image_user_instruction": render_user_instruction_line(final_image_user_instruction or {}),
     }
     for index in range(1, 6):
         runtime[f"is_shot_{index}"] = "1" if int(shot_index) == index else ""
     return runtime
+
+
+def build_direct_final_image_inputs(
+    styling_id: int,
+    input_version_id: int,
+    preset: Any,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    background = get_media_asset_by_id(int(preset["background_asset_id"]))
+    mask = get_media_asset_by_id(int(preset["mask_asset_id"]))
+    pose = get_media_asset_by_id(int(preset["pose_asset_id"]))
+    if not background or not mask or not pose:
+        raise RuntimeError("拍摄预设引用的背景、遮罩或姿势图不可用")
+    inputs: list[dict[str, Any]] = [
+        image_input_from_asset(background, "shot_background"),
+        image_input_from_asset(pose, "shot_pose"),
+    ]
+    with get_db() as db:
+        styling = db.execute(
+            "SELECT selected_material_snapshot_json FROM generation_stylings WHERE id = ?",
+            (styling_id,),
+        ).fetchone()
+        input_version = db.execute(
+            "SELECT image_snapshot_json, model_snapshot_json FROM generation_task_input_versions WHERE id = ?",
+            (input_version_id,),
+        ).fetchone()
+    if not input_version:
+        raise RuntimeError("成片输入版本不存在")
+
+    model_snapshot = loads(input_version["model_snapshot_json"], {})
+    model_sources = resolve_model_snapshot_image_inputs(model_snapshot, limit=IMAGE2_DIRECT_MODEL_SOURCE_LIMIT)
+    model_sheet = reference_sheet_image_input(
+        "model_identity",
+        model_sources,
+        filename="model-identity-sheet.jpg",
+        max_items=IMAGE2_DIRECT_MODEL_SOURCE_LIMIT,
+        board_kind="model_identity",
+    )
+    if model_sheet:
+        inputs.append(model_sheet)
+
+    hero_sources = [
+        image_input_from_asset(item.get("asset"), "hero_garment")
+        for item in loads(input_version["image_snapshot_json"], [])[:IMAGE2_DIRECT_HERO_SOURCE_LIMIT]
+        if isinstance(item, dict)
+    ]
+    hero_sources = [item for item in hero_sources if reference_image_input_available(item)]
+    for index, group in enumerate(balanced_reference_groups(hero_sources, IMAGE2_DIRECT_HERO_SHEET_LIMIT), start=1):
+        hero_sheet = reference_sheet_image_input(
+            "hero_garment",
+            group,
+            filename=f"hero-garment-{'overview' if index == 1 else 'detail'}-sheet.jpg",
+            max_items=len(group),
+            board_kind="hero_overview" if index == 1 else "hero_detail",
+        )
+        if hero_sheet:
+            inputs.append(hero_sheet)
+
+    styling_sources: list[dict[str, Any]] = []
+    for garment in loads(row_value(styling, "selected_material_snapshot_json"), []):
+        if not isinstance(garment, dict):
+            continue
+        for image in garment.get("images", []):
+            if len(styling_sources) >= IMAGE2_DIRECT_STYLING_SOURCE_LIMIT:
+                break
+            if isinstance(image, dict):
+                source = image_input_from_asset(image.get("asset"), "styling_garment")
+                source["materialCode"] = garment.get("code") or garment.get("sku")
+                if reference_image_input_available(source):
+                    styling_sources.append(source)
+        if len(styling_sources) >= IMAGE2_DIRECT_STYLING_SOURCE_LIMIT:
+            break
+    styling_sheet = reference_sheet_image_input(
+        "styling_garment",
+        styling_sources,
+        filename="styling-garments-sheet.jpg",
+        max_items=IMAGE2_DIRECT_STYLING_SOURCE_LIMIT,
+        board_kind="styling_garments",
+    )
+    if styling_sheet:
+        inputs.append(styling_sheet)
+
+    inputs = [item for item in inputs if reference_image_input_available(item)]
+    if len(inputs) > IMAGE2_MAX_REFERENCE_IMAGES:
+        raise RuntimeError(f"Image-2 参考图组装超过 {IMAGE2_MAX_REFERENCE_IMAGES} 张：{len(inputs)}")
+    if not inputs or inputs[0].get("role") != "shot_background":
+        raise RuntimeError("编辑模式第一张参考图必须是当前镜头背景")
+    return inputs, image_input_from_asset(mask, "shot_mask")
+
+
+def balanced_reference_groups(items: list[dict[str, Any]], max_groups: int) -> list[list[dict[str, Any]]]:
+    """Split ordered fact sources into at most two similarly sized boards.
+
+    The source order remains authoritative. For six hero photos this yields 3+3,
+    avoiding a dense four-tile overview board followed by a low-value two-tile board.
+    """
+    if not items or max_groups < 1:
+        return []
+    group_count = min(max_groups, len(items))
+    base_size, remainder = divmod(len(items), group_count)
+    groups: list[list[dict[str, Any]]] = []
+    cursor = 0
+    for group_index in range(group_count):
+        size = base_size + (1 if group_index < remainder else 0)
+        groups.append(items[cursor:cursor + size])
+        cursor += size
+    return groups
+
+
+def reference_image_input_available(item: dict[str, Any]) -> bool:
+    return bool(item.get("objectKey") or item.get("url") or item.get("providerUrl") or item.get("collageItems"))
 
 
 def get_styling_plan_by_id(styling_id: int) -> dict[str, Any]:
@@ -10384,6 +10795,7 @@ def reference_sheet_image_input(
     source_inputs: list[dict[str, Any]],
     filename: str,
     max_items: int,
+    board_kind: str | None = None,
 ) -> dict[str, Any] | None:
     sources = [
         item
@@ -10393,10 +10805,15 @@ def reference_sheet_image_input(
     if not sources:
         return None
     if len(sources) == 1:
-        return {**sources[0], "role": role}
+        return {
+            **sources[0],
+            "role": role,
+            "referenceBoardKind": board_kind,
+        }
     return {
         "role": role,
         "filename": filename,
+        "referenceBoardKind": board_kind,
         "collageItems": [{**item, "role": role} for item in sources],
         "collageRule": {
             "kind": "runtime_reference_sheet",
@@ -10747,12 +11164,11 @@ def sample_prompt_runtime() -> dict[str, Any]:
         # 各阶段用户要求（已渲染为一句话）
         "user_requirement": "重点展示腰线，避免厚重外套。",
         "ai_styling_user_instruction": "不要厚重外套，优先轻盈通勤。",
-        "storyboard_preview_user_instruction": "分镜姿态更舒展。",
         "final_image_user_instruction": "成片整体更干净，减少配饰存在感。",
         # 固定品类分镜 Prompt 的少量动态事实（自然语言，不传中间剧本 JSON）
         "category_family": "bottom",
         # 当前成片各分段（成片用；无表头）
-        "preview_grid_cell": "1",
+        "shot_index": "1",
         "shot_styling": "选中搭配服装：LOOK-A；穿法：单穿吊带裙；生成类配饰：极简金色小耳圈；仅保留分镜中已有的低存在感配饰，不新增遮挡商品的配饰",
         "shot_global_directing": "配饰边界：生成配饰低存在感",
         "shot_current": "格1（全身主视觉·全景）：\n  核心：主推款整体比例",
@@ -10762,10 +11178,10 @@ def sample_prompt_runtime() -> dict[str, Any]:
         "is_shot_4": "",
         "is_shot_5": "",
         # 参考图各职能图号区间（只出会变的图号）
-        "ref_model_identity": "图1-2",
-        "ref_preview_grid": "图3",
+        "ref_shot_background": "图1",
+        "ref_shot_pose": "图2",
+        "ref_model_identity": "图3",
         "ref_garment": "图4-6",
-        "ref_shoot_environment": "图7",
     }
 
 
@@ -10778,12 +11194,11 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.candidate_retrieval", "scope": "runtime", "description": "搭配服装库 READY 服饰的全量 AI 标签事实卡"},
         {"name": "runtime.user_requirement", "scope": "runtime", "description": "任务级服装信息，来自 AI 摄影棚导入主推款时维护的服装信息"},
         {"name": "runtime.ai_styling_user_instruction", "scope": "runtime", "description": "AI 智能选搭本次执行的用户介入要求"},
-        {"name": "runtime.storyboard_preview_user_instruction", "scope": "runtime", "description": "分镜预览本次执行的用户介入要求"},
         {"name": "runtime.final_image_user_instruction", "scope": "runtime", "description": "最终成片或单张重生本次执行的用户介入要求"},
         {"name": "runtime.styling_result", "scope": "runtime", "description": "AI 选搭导演上下文，使用搭配服装 code 标识"},
         {"name": "runtime.category_family", "scope": "runtime", "description": "代码判定的拍摄图位族：top / bottom / one_piece"},
         # 成片：当前镜头各分段
-        {"name": "runtime.preview_grid_cell", "scope": "runtime", "description": "当前成片对应分镜预览的格号（纯数字）"},
+        {"name": "runtime.shot_index", "scope": "runtime", "description": "当前成片固定镜头号（1-5）"},
         {"name": "runtime.shot_styling", "scope": "runtime", "description": "配饰与造型正文，合并选中搭配、穿法和低存在感配饰边界，用中文分号连接为单行"},
         {"name": "runtime.shot_global_directing", "scope": "runtime", "description": "当前成片全局导演正文，无表头"},
         {"name": "runtime.shot_current", "scope": "runtime", "description": "当前成片单镜头正文，无表头"},
@@ -10793,10 +11208,10 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.is_shot_4", "scope": "runtime", "description": "当前成片为镜头 4 时有值，用于条件段"},
         {"name": "runtime.is_shot_5", "scope": "runtime", "description": "当前成片为镜头 5 时有值，用于条件段"},
         # 参考图各职能图号区间：只出会变的图号，职能描述在模板正文托管
-        {"name": "runtime.ref_model_identity", "scope": "runtime", "description": "模特身份参考图图号区间，如「图1-2」；无则空"},
-        {"name": "runtime.ref_preview_grid", "scope": "runtime", "description": "分镜预览参考图图号（仅成片阶段），如「图3」；无则空"},
-        {"name": "runtime.ref_garment", "scope": "runtime", "description": "主推款与搭配服装参考图的总图号区间，如「图4-6」；无则空"},
-        {"name": "runtime.ref_shoot_environment", "scope": "runtime", "description": "拍摄环境参考图图号；无则空"},
+        {"name": "runtime.ref_model_identity", "scope": "runtime", "description": "模特身份参考板图号，直出链路通常为「图3」；无则空"},
+        {"name": "runtime.ref_garment", "scope": "runtime", "description": "主推款概览/细节板与搭配服装参考板的总图号区间，直出链路通常为「图4-6」；无则空"},
+        {"name": "runtime.ref_shot_background", "scope": "runtime", "description": "当前镜头背景底图图号，固定为图1"},
+        {"name": "runtime.ref_shot_pose", "scope": "runtime", "description": "当前镜头姿势参考图图号，固定为图2"},
     ]
 
 
@@ -11011,9 +11426,6 @@ async def run_auto_final_generation(task_id: int) -> None:
             if step == "styling":
                 await run_select_generation_styling(task_id, trigger="auto_run")
                 continue
-            if step == "preview":
-                await run_create_generation_preview(task_id, trigger="auto_run")
-                return
             if step == "final":
                 await run_generate_final_images(task_id, trigger="auto_run", continue_existing=True)
                 return
@@ -11038,16 +11450,13 @@ def next_auto_final_step(task: Any) -> str:
     if task["status"] == "READY_FOR_STYLING":
         return "styling"
     if task["status"] == "STYLING_READY":
-        return "preview"
+        return "final"
     if task["status"] in {"PREVIEW_READY", "FINAL_PARTIAL"}:
         return "final"
     if task["status"] == "COMPLETED":
         return "complete"
     if not task["active_styling_id"]:
         return "styling"
-    preview_id = row_value(task, "active_storyboard_preview_id") or row_value(task, "active_preview_id")
-    if not preview_id or not generation_preview_has_asset(int(preview_id)):
-        return "preview"
     result_set_id = row_value(task, "active_result_set_id")
     if result_set_id and generation_result_set_is_complete(int(result_set_id)):
         return "complete"

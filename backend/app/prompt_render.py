@@ -1,7 +1,7 @@
 """当前 Prompt 渲染层。
 
 职责边界很窄：把代码侧动态事实渲染为 Prompt 维护模板中的占位符文本。
-固定摄影规则、六镜头策略、成片兑现规则、事实源约束都写在 Prompt 维护页的模板正文里。
+固定摄影规则、五镜头策略、成片规则和事实源约束都写在 Prompt 维护页的模板正文里。
 """
 
 from __future__ import annotations
@@ -50,6 +50,8 @@ def render_image_reference_spans(image_inputs: list[dict[str, Any]] | None) -> d
         "preview_grid": [],
         "garment": [],
         "shoot_environment": [],
+        "shot_background": [],
+        "shot_pose": [],
     }
     for index, item in enumerate(image_inputs or [], start=1):
         role = str(_as_dict(item).get("role") or "")
@@ -61,6 +63,10 @@ def render_image_reference_spans(image_inputs: list[dict[str, Any]] | None) -> d
             spans["garment"].append(index)
         elif role == "shoot_environment":
             spans["shoot_environment"].append(index)
+        elif role == "shot_background":
+            spans["shot_background"].append(index)
+        elif role == "shot_pose":
+            spans["shot_pose"].append(index)
     return {
         key: _span_text(values[0], values[-1]) if values else ""
         for key, values in spans.items()

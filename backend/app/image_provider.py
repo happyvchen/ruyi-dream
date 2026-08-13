@@ -295,7 +295,18 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
             raise RuntimeError("TOAPIS_API_KEY 未配置，无法调用 GPT Image-2 toapis 接口")
 
         uploaded_inputs, image_urls = prepare_toapis_image_inputs(task_package.get("imageInputs", []), on_progress)
-        provider_request = build_toapis_request_snapshot(task_package, image_urls)
+        mask_input = task_package.get("maskInput") if isinstance(task_package.get("maskInput"), dict) else None
+        uploaded_mask: dict[str, Any] | None = None
+        if mask_input:
+            uploaded_masks = upload_toapis_image_inputs([mask_input], on_progress)
+            uploaded_mask = uploaded_masks[0] if uploaded_masks else None
+            if not uploaded_mask or not uploaded_mask.get("providerUrl"):
+                raise RuntimeError("遮罩图导入到 toapis 失败")
+        request_package = {
+            **task_package,
+            "maskProviderUrl": str(uploaded_mask["providerUrl"]) if uploaded_mask else task_package.get("maskProviderUrl"),
+        }
+        provider_request = build_toapis_request_snapshot(request_package, image_urls)
         try:
             submit_response = post_generation_task_with_confirmed_failure_retries(
                 toapis_url("/v1/images/generations"),
@@ -333,6 +344,7 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
             "providerRequestId": task_id,
             "providerUrls": {"statusUrl": toapis_url(f"/v1/images/generations/{task_id}") if task_id else None},
             "imageInputs": uploaded_inputs,
+            "maskInput": uploaded_mask,
             "providerRequest": provider_request,
             "providerResponse": submit_response,
             "providerStatusResponse": submit_response,
@@ -546,13 +558,17 @@ def build_toapis_request_snapshot(task_package: dict[str, Any], image_urls: list
     request = {
         "model": settings.gpt_image2_model_id,
         "prompt": prompt,
-        "reference_images": image_urls,
-        "reference_image_manifest": build_provider_reference_image_manifest(image_inputs, image_urls),
+        "image_urls": image_urls,
         "n": 1,
-        "size": settings.gpt_image2_preview_size if stage == "preview_grid" else settings.gpt_image2_size,
-        "resolution": settings.gpt_image2_resolution,
+        "size": settings.gpt_image2_preview_size if stage == "preview_grid" else "1:1",
+        "resolution": "2k" if stage == "final_image" else str(settings.gpt_image2_resolution).lower(),
+        "quality": "high" if stage == "final_image" else settings.gpt_image2_quality,
+        "output_format": settings.gpt_image2_output_format,
         "response_format": "url",
     }
+    mask_url = str(task_package.get("maskProviderUrl") or "").strip()
+    if mask_url:
+        request["mask_url"] = mask_url
     client_business_id = str(task_package.get("clientBusinessId") or "").strip()
     if client_business_id:
         request["client_business_id"] = client_business_id
@@ -571,6 +587,7 @@ def build_provider_reference_image_manifest(image_inputs: list[dict[str, Any]], 
                 "objectKey": item.get("objectKey"),
                 "filename": item.get("filename"),
                 "angle": item.get("angle"),
+                "referenceBoardKind": item.get("referenceBoardKind"),
                 "collageRule": item.get("collageRule"),
                 "collageSources": build_collage_source_manifest(item),
                 "url": url,
@@ -593,6 +610,7 @@ def build_collage_source_manifest(item: dict[str, Any]) -> list[dict[str, Any]]:
                 "objectKey": source.get("objectKey"),
                 "filename": source.get("filename"),
                 "angle": source.get("angle"),
+                "materialCode": source.get("materialCode"),
             }
         )
     return manifest
@@ -703,7 +721,7 @@ def prepare_toapis_image_inputs(
         raise RuntimeError(f"参考图导入到 toapis 失败，以下输入没有 toapis Image URL：{', '.join(missing_roles)}")
     image_urls = [str(item["providerUrl"]) for item in uploaded_inputs]
     if not image_urls:
-        raise RuntimeError("没有可传给 GPT Image-2 的 reference_images")
+        raise RuntimeError("没有可传给 GPT Image-2 的 image_urls")
     return uploaded_inputs, image_urls
 
 
@@ -812,9 +830,11 @@ def build_reference_collage_bytes(item: dict[str, Any], deadline: float | None =
 def reference_collage_grid(count: int) -> tuple[int, int]:
     if count <= 2:
         return max(1, count), 1
-    if count == 3:
-        return 3, 1
-    return 2, 2
+    if count <= 4:
+        return 2, 2
+    if count <= 6:
+        return 3, 2
+    return 4, 2
 
 
 def contain_on_white(image: Any, width: int, height: int) -> Any:
