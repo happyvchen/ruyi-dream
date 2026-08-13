@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 
 import pytest
@@ -175,6 +176,27 @@ def test_final_prompt_migration_preserves_admin_content_and_removes_old_preview_
     assert "裙摆长度必须准确" in bottom
     assert "拍摄母版替换规则" in top
     assert "保留管理员自定义上装规则" in top
+
+
+def test_known_legacy_top_prompt_is_replaced_but_custom_prompt_is_not(monkeypatch) -> None:
+    from app import db as app_db
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE prompt_configs (key TEXT PRIMARY KEY, content TEXT NOT NULL, updated_at TEXT)")
+    legacy = "可精确识别的旧上装系统 Prompt"
+    db.execute("INSERT INTO prompt_configs (key, content) VALUES ('assembly.final_image_top', ?)", (legacy,))
+    monkeypatch.setattr(app_db, "LEGACY_TOP_FINAL_PROMPT_SHA256", hashlib.sha256(legacy.encode("utf-8")).hexdigest())
+
+    app_db.migration_refresh_legacy_top_final_prompt(db)
+    refreshed = db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.final_image_top'").fetchone()["content"]
+    assert refreshed == app_db.canonical_top_final_prompt()
+    assert "中央 3:4 竖向裁切安全区" in refreshed
+
+    db.execute("UPDATE prompt_configs SET content = '管理员自定义上装 Prompt' WHERE key = 'assembly.final_image_top'")
+    app_db.migration_refresh_legacy_top_final_prompt(db)
+    preserved = db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.final_image_top'").fetchone()["content"]
+    assert preserved == "管理员自定义上装 Prompt"
 
 
 def test_complete_top_family_can_be_published_without_bottom_or_one_piece(client) -> None:

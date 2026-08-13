@@ -10560,7 +10560,7 @@ def build_final_prompt_runtime(
         "shot_index": str(shot_index),
         "user_requirement": render_user_requirement_line(user_requirement or {}),
         "shot_styling": build_shot_styling_line(styling_plan),
-        "shot_global_directing": "完整替换拍摄母版中的原人物、原服装及其身份特征；保留母版的场景、机位、景别、裁切、人物尺度、站位与光线。",
+        "shot_global_directing": "完整替换拍摄母版中的原人物、原服装及其身份特征；保留母版的场景、机位、景别、裁切、人物尺度、站位与光线。姿势参考仅补充身体朝向、重心、肩线、手位、视线与头部朝向，不改变脸、发型或母版构图。",
         "shot_current": f"当前为第 {shot_index} 个成片镜头，镜头角色 {shot_role}。",
         "ref_model_identity": spans["model_identity"],
         "ref_garment": spans["garment"],

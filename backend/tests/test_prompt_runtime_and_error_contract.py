@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app import main as app_main
@@ -116,6 +118,43 @@ def test_final_runtime_marks_exactly_one_current_shot_and_limits_to_five_slots()
     assert "ref_preview_grid" not in runtime
     assert [runtime[f"is_shot_{index}"] for index in range(1, 6)] == ["", "", "", "1", ""]
     assert "is_shot_6" not in runtime
+
+
+def test_top_final_prompt_template_separates_master_pose_and_artifact_controls() -> None:
+    template = (Path(__file__).resolve().parents[1] / "prompt_templates" / "final_image_top.txt").read_text(encoding="utf-8")
+
+    assert "唯一的拍摄母版" in template
+    assert "身体朝向、重心、肩线、手位、视线和头部朝向" in template
+    assert "不改变模特身份、脸、发型、景别、裁切、站位或人物尺度" in template
+    assert "中央 3:4 竖向裁切安全区" in template
+    assert "中央 2:3" not in template
+    assert "不要使用电影化调色、胶片颗粒、做旧、纹理化、磨砂或画布效果" in template
+    assert "避免可见噪点、颗粒、云斑、色斑、波纹、摩尔纹" in template
+
+
+def test_top_final_prompt_template_renders_shot_five_without_legacy_coordinates(monkeypatch) -> None:
+    template = (Path(__file__).resolve().parents[1] / "prompt_templates" / "final_image_top.txt").read_text(encoding="utf-8")
+    runtime = app_main.build_final_prompt_runtime(
+        5,
+        "top_shot_5",
+        {"hero_understanding": {"shot_category_family": "top"}},
+        [
+            {"role": "shot_background"},
+            {"role": "shot_pose"},
+            {"role": "model_identity"},
+            {"role": "hero_garment"},
+        ],
+        {},
+        {},
+    )
+    monkeypatch.setattr(app_main, "prompt_config_content", lambda key, rows=None: template if key == "assembly.final_image_top" else None)
+
+    rendered = app_main.render_prompt_template("assembly.final_image_top", runtime)
+
+    assert "中央 3:4 竖向裁切安全区" in rendered
+    assert "中央 2:3" not in rendered
+    assert "16.7%" not in rendered
+    assert "镜头 1｜" not in rendered
 
 
 @pytest.mark.parametrize(

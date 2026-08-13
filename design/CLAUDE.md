@@ -15,7 +15,7 @@
 | `01_generation_flow/CLAUDE.md` | 生成主流程、Image-2 输入策略、生成要素职责拆分 | 设计生成链路、任务包、prompt 策略时 |
 | `01_generation_flow/current_generation_workflow.md` | 当前三步直出工作流：15 个拍摄预设、三类固定成片 Prompt、状态机和版本冻结 | 设计或实现成片、重生和状态恢复时 |
 | `01_generation_flow/storyboard_preview_business_intent.md` | 历史分镜业务意图；其中五镜头商品表达要求可供拍摄预设设计参考 | 复盘旧流程或设计五镜头预设时 |
-| `01_generation_flow/final_image_business_intent.md` | 历史成片业务意图；商品保真、组图一致性和业务验收仍可参考 | 评审成片质量时 |
+| `01_generation_flow/final_image_business_intent.md` | 历史成片业务意图；商品保真、组图一致性和业务验收可参考，镜头 5 安全区以现行品类图位规则为准 | 评审成片质量时 |
 | `01_generation_flow/final_image_prompt_research_task_1457.md` | 最终成片 Prompt 研究结论：失败归因、有效/无效规则、黄金链路和系统采纳建议 | 复盘成片调研或决定成片系统改造时 |
 | `01_generation_flow/storyboard_prompt_research_task_1440.md` | 分镜预览 Prompt 研究结论：有效/无效规则、镜头 5 修正口径和系统采纳建议 | 复盘分镜 Prompt 实验或决定后续生成手段时 |
 | `01_generation_flow/storyboard_workflow_simplification_proposal.md` | 历史决策记录：删除动态剧本步骤、三类固定分镜 Prompt、代码注入动态事实、直接生图 | 复盘工作流简化决策时 |
@@ -36,7 +36,7 @@
 - **Image-2 输入策略源头**：`01_generation_flow/image2_input_strategy.md`
 - **生成职责拆分源头**：`01_generation_flow/generation_responsibility_matrix.md`
 - **历史分镜业务意图**：`01_generation_flow/storyboard_preview_business_intent.md`（不再描述当前运行链路）
-- **生成成片业务意图源头**：`01_generation_flow/final_image_business_intent.md`
+- **成片商品保真与组图验收参考**：`01_generation_flow/final_image_business_intent.md`；镜头 5 当前安全区以 `02_brand_and_assets/category_shot_rules.md` 为准
 - **素材/标签/媒体源头**：`02_brand_and_assets/assets_and_parameters.md`
 - **品类图位规则**：`02_brand_and_assets/category_shot_rules.md`
 - **品牌调性参考**：`02_brand_and_assets/brand_style_templates.md`

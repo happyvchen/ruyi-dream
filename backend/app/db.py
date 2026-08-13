@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -33,6 +34,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("068", "repair_direct_final_result_set_schema", "migration_repair_direct_final_result_set_schema"),
     ("069", "no_mask_master_shot_presets", "migration_no_mask_master_shot_presets"),
     ("070", "final_prompt_master_shot_contract", "migration_final_prompt_master_shot_contract"),
+    ("071", "refresh_legacy_top_final_prompt", "migration_refresh_legacy_top_final_prompt"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -468,6 +470,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_repair_direct_final_result_set_schema": migration_repair_direct_final_result_set_schema,
         "migration_no_mask_master_shot_presets": migration_no_mask_master_shot_presets,
         "migration_final_prompt_master_shot_contract": migration_final_prompt_master_shot_contract,
+        "migration_refresh_legacy_top_final_prompt": migration_refresh_legacy_top_final_prompt,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -852,8 +855,9 @@ def migration_no_mask_master_shot_presets(db: sqlite3.Connection) -> None:
 
 MASTER_SHOT_PROMPT_CONTRACT = """【拍摄母版替换规则】
 - {{runtime.ref_shot_background}} 是当前镜头的拍摄母版。完整移除并替换母版中的原人物、原服装及其身份特征；不得混入原人物的脸、发型、肤色、服装、配饰或 logo。
-- 继承拍摄母版的场景、机位、景别、裁切、人物尺度、站位与光线；{{runtime.ref_shot_pose}} 仅补充姿势、身位、角度与手位，不提供人物身份或服装事实。
+- 继承拍摄母版的场景、机位、景别、裁切、人物尺度、站位与光线；{{runtime.ref_shot_pose}} 仅补充身体朝向、重心、肩线、手位、视线与头部朝向，不提供人物身份或服装事实，也不得改变脸、发型或母版构图。
 - {{runtime.ref_model_identity}} 是唯一模特身份事实源；{{runtime.ref_garment}} 是唯一商品事实源。优先级：商品和人物身份 > 当前镜头构图契约 > 母版场景与光线 > 姿势参考 > 商业画质提升。
+- 使用真实、干净、连续、均匀的商业棚拍成像；不要使用电影化调色、胶片颗粒、做旧、纹理化、磨砂或画布效果，避免噪点、云斑、色斑、波纹、摩尔纹、局部色漂与不真实纹理覆盖。
 
 """
 
@@ -885,6 +889,32 @@ def migration_final_prompt_master_shot_contract(db: sqlite3.Connection) -> None:
         content = re.sub(r"[ \t]{2,}", " ", content)
         content = re.sub(r"\n{3,}", "\n\n", content).strip() + "\n"
         db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?", (content, now_iso(), row["key"]))
+
+
+# 该摘要只匹配已由 070 写入、且从未被管理员修改过的旧上装系统 Prompt。
+# 不匹配时一律保留原文，避免把管理员的局部规则误当作可覆盖的系统默认值。
+LEGACY_TOP_FINAL_PROMPT_SHA256 = "71426fe538930755006687cf96a4f8b955294a1a812beec80254fd0412e3b855"
+
+
+def canonical_top_final_prompt() -> str:
+    return (Path(__file__).resolve().parents[1] / "prompt_templates" / "final_image_top.txt").read_text(encoding="utf-8").strip() + "\n"
+
+
+def migration_refresh_legacy_top_final_prompt(db: sqlite3.Connection) -> None:
+    """将可精确识别的旧上装系统 Prompt 升级为当前母版直出版本。"""
+    if not table_exists(db, "prompt_configs"):
+        return
+    row = db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.final_image_top'").fetchone()
+    if not row:
+        return
+    content = str(row["content"] or "")
+    digest = hashlib.sha256(content.strip().encode("utf-8")).hexdigest()
+    if digest != LEGACY_TOP_FINAL_PROMPT_SHA256:
+        return
+    db.execute(
+        "UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = 'assembly.final_image_top'",
+        (canonical_top_final_prompt(), now_iso()),
+    )
 
 
 def rebuild_generation_result_sets_direct_edits(db: sqlite3.Connection) -> None:
