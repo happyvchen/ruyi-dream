@@ -5,7 +5,7 @@
 0.1.0 当前 AI 摄影棚链路固定为：
 
 ```text
-导入主推款 -> AI 智能选搭 -> 分镜预览 -> 最终成片
+导入主推款 -> AI 智能选搭 -> 最终成片
 ```
 
 后端不提供“生成拍摄剧本”API，不保存动态剧本或镜头计划。前端和测试不得调用或伪造旧的剧本步骤。
@@ -16,10 +16,10 @@
 - `POST /api/generation-tasks/from-uploads`：已停用（410）；统一使用导入会话创建任务，避免无主对象无法回收。
 - `PATCH /api/generation-tasks/{task_id}`：保存任务名和各阶段用户补充要求草稿。
 - `POST /api/generation-tasks/{task_id}/styling`：运行 AI 智能选搭，输出当前 `StylingPlan`。
-- `POST /api/generation-tasks/{task_id}/preview`：按拍摄图位族选择三类固定分镜 Prompt，调用 Image-2 生成 3:2 六格分镜预览。
-- `POST /api/generation-tasks/{task_id}/generate-final`：按分镜前 5 格并发生成最终成片。
+- `POST /api/generation-tasks/{task_id}/preview`：已停用（410）；不再生成新的分镜预览。
+- `POST /api/generation-tasks/{task_id}/generate-final`：从 `STYLING_READY` 直接按五个已发布拍摄预设并发生成最终成片。
 - `POST /api/generation-tasks/{task_id}/auto-run-final`：从当前第一个未完成阶段自动推进到成片。
-- `POST /api/generation-tasks/{task_id}/cancel`：取消当前运行中的选搭、分镜或成片。
+- `POST /api/generation-tasks/{task_id}/cancel`：取消当前运行中的选搭或成片。
 - `PATCH /api/generation-batches/{batch_id}`：保存批次名；批次任务归属仍由 `GenerationTask.batch_id` 决定。
 - `POST /api/generation-batches/{batch_id}/auto-run-final`：批次开始/继续一键成片；整批完成后可传 `restart=true` 重新生成。
 - `POST /api/generation-batches/{batch_id}/cancel`：取消批次内所有生成中或排队中的任务，保留已完成成果。
@@ -95,7 +95,7 @@ ABANDONED
 
 ## 状态
 
-任务状态只包含当前四步链路：
+新任务只使用三步链路；`PREVIEW_RUNNING` / `PREVIEW_READY` 仅为历史记录兼容状态，不再由当前接口创建：
 
 ```text
 DRAFT
@@ -144,10 +144,8 @@ ABANDONED
 
 - `segment.brand_info`
 - `assembly.ai_tagging`
+- `assembly.hero_image_selection`
 - `assembly.ai_styling`
-- `assembly.storyboard_preview_top`
-- `assembly.storyboard_preview_bottom`
-- `assembly.storyboard_preview_one_piece`
 - `assembly.final_image_top`
 - `assembly.final_image_bottom`
 - `assembly.final_image_one_piece`
@@ -163,29 +161,28 @@ AI 选搭动态事实：
 - `runtime.hero_image_files`
 - `runtime.candidate_retrieval`
 
-分镜预览动态事实：
-
-- `runtime.user_requirement`
-- `runtime.shot_styling`
-- `runtime.ref_model_identity`
-- `runtime.ref_garment`
-- `runtime.ref_shoot_environment`
-- `runtime.storyboard_preview_user_instruction`
-- `runtime.category_family`
-
 成片动态事实：
 
-- `runtime.preview_grid_cell`
+- `runtime.category_family`
+- `runtime.shot_index`
 - `runtime.user_requirement`
 - `runtime.ref_model_identity`
-- `runtime.ref_preview_grid`
+- `runtime.ref_shot_background`
+- `runtime.ref_shot_pose`
 - `runtime.ref_garment`
-- `runtime.ref_shoot_environment`
 - `runtime.final_image_user_instruction`
 - `runtime.shot_styling`（配饰与造型，单行，使用 `；` 分隔）
 - `runtime.shot_global_directing`
 - `runtime.shot_current`
 - `runtime.is_shot_1` 到 `runtime.is_shot_5`
+
+## 拍摄预设接口
+
+- `GET /api/shot-presets`：admin 读取 15 个槽位，以及三个服装类型各自的发布版本、发布就绪状态和校验错误。
+- `POST /api/shot-presets/{category_family}/{shot_index}`：同时上传背景、Alpha PNG 遮罩和姿势图；背景与遮罩像素尺寸必须一致。
+- `POST /api/shot-preset-families/{category_family}/publish`：对应类型的 5 个槽位完整时独立发布快照，不受另外两个类型完成度影响。
+
+最终请求固定 `image_urls <= 6`，背景排第一，`mask_url` 独立传入，使用 `1:1 / 2k / high`；模特与商品多图先确定性合成角色参考板，结果集冻结 `shot_preset_version_id`。
 
 ## 导出
 

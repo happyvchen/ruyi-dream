@@ -4,7 +4,7 @@
 
 本目录存放 ruyi-dream 0.1.0 的权威设计文档：产品范围、生成流程、搭配服装与媒体规则、UX、技术生产路线。
 
-0.1.0 形态是 B2B AI 数字化摄影棚：用户导入主推款，系统通过 AI Stylist 工作流理解主推款、探索多套造型方案、用 Aesthetic Critic 判断搭配是否真正好看、符合品牌并服务主推款，再从搭配服装库选择真实可见的配角服饰或判断无需库内配角；随后按拍摄图位族选用 Prompt 维护中的三类固定 Prompt 直接生成 3:2 分镜预览，并按前 5 格生成电商棚拍成片。旧“单货号默认组图方案”和动态拍摄剧本不是 0.1.0 当前主流程。
+0.1.0 形态是 B2B AI 数字化摄影棚：用户导入主推款，系统通过 AI Stylist 工作流理解主推款、探索并批判多套造型方案，再从搭配服装库选择真实可见的配角服饰或判断无需库内配角；随后按拍摄图位族和五个固定镜头选择已发布的背景/遮罩/姿势预设，通过三类固定成片 Prompt 与 GPT Image-2 edits 并发生成五张电商棚拍成片。分镜预览、旧“单货号默认组图方案”和动态拍摄剧本不属于当前主流程。
 
 ## 文档索引 (Index)
 
@@ -13,9 +13,9 @@
 | `domain.md` | 0.1.0 领域模型设计：模块边界、核心术语、对象定义、状态流转、职责约束和当前实现映射 | 设计领域对象、API、数据库、状态机、Prompt DTO 或跨模块流程前 |
 | `00_product_overview/CLAUDE.md` | 产品定位、0.1.0 范围、产品需求 | **任何**产品/功能设计前 |
 | `01_generation_flow/CLAUDE.md` | 生成主流程、Image-2 输入策略、生成要素职责拆分 | 设计生成链路、任务包、prompt 策略时 |
-| `01_generation_flow/current_generation_workflow.md` | 当前四步工作流：三类固定分镜 Prompt、成片槽位、状态机和失效规则 | 设计或实现分镜预览、成片重生和状态恢复时 |
-| `01_generation_flow/storyboard_preview_business_intent.md` | 分镜预览原始业务意图：时尚高级姿态、按品类六镜头、镜头 5 中央 2:3 安全裁切和业务验收 | 设计或评审分镜 Prompt、姿态、图位和裁切策略时 |
-| `01_generation_flow/final_image_business_intent.md` | 生成成片原始业务意图：前 5 格逐格兑现、事实源边界、组图一致性和业务验收 | 设计、研究或评审成片 Prompt、参考图策略和成片质量时 |
+| `01_generation_flow/current_generation_workflow.md` | 当前三步直出工作流：15 个拍摄预设、三类固定成片 Prompt、状态机和版本冻结 | 设计或实现成片、重生和状态恢复时 |
+| `01_generation_flow/storyboard_preview_business_intent.md` | 历史分镜业务意图；其中五镜头商品表达要求可供拍摄预设设计参考 | 复盘旧流程或设计五镜头预设时 |
+| `01_generation_flow/final_image_business_intent.md` | 历史成片业务意图；商品保真、组图一致性和业务验收仍可参考 | 评审成片质量时 |
 | `01_generation_flow/final_image_prompt_research_task_1457.md` | 最终成片 Prompt 研究结论：失败归因、有效/无效规则、黄金链路和系统采纳建议 | 复盘成片调研或决定成片系统改造时 |
 | `01_generation_flow/storyboard_prompt_research_task_1440.md` | 分镜预览 Prompt 研究结论：有效/无效规则、镜头 5 修正口径和系统采纳建议 | 复盘分镜 Prompt 实验或决定后续生成手段时 |
 | `01_generation_flow/storyboard_workflow_simplification_proposal.md` | 历史决策记录：删除动态剧本步骤、三类固定分镜 Prompt、代码注入动态事实、直接生图 | 复盘工作流简化决策时 |
@@ -35,7 +35,7 @@
 - **生成主流程源头**：`01_generation_flow/generation_flow.md`
 - **Image-2 输入策略源头**：`01_generation_flow/image2_input_strategy.md`
 - **生成职责拆分源头**：`01_generation_flow/generation_responsibility_matrix.md`
-- **分镜预览业务意图源头**：`01_generation_flow/storyboard_preview_business_intent.md`
+- **历史分镜业务意图**：`01_generation_flow/storyboard_preview_business_intent.md`（不再描述当前运行链路）
 - **生成成片业务意图源头**：`01_generation_flow/final_image_business_intent.md`
 - **素材/标签/媒体源头**：`02_brand_and_assets/assets_and_parameters.md`
 - **品类图位规则**：`02_brand_and_assets/category_shot_rules.md`
@@ -48,8 +48,8 @@
 
 1. **任何设计前先读领域、产品范围和职责拆分**：至少阅读 `domain.md`、`00_product_overview/product_overview.md` 与 `01_generation_flow/generation_responsibility_matrix.md`。
 2. **先判断职责，再写 prompt**：任何生成问题先判断属于主推款事实、候选召回、AI Stylist、StylingPlan、搭配服装事实、数字模特、三类固定分镜 Prompt、生成配饰、媒体输入预算还是导出规格。
-3. **Image-2 只做视觉生成**：智能选搭、拍摄图位族路由、标签体系、历史快照和状态机由前置服务负责；六镜头稳定规则集中在 Prompt 维护。
-4. **前台 UI 不展示系统复杂性**：普通用户默认只看到主推款、搭配服装、分镜预览、最终结果和生成记录；prompt、provider 请求、快照 JSON 只在技术详情出现。
+3. **Image-2 只做视觉生成**：智能选搭、拍摄图位族路由、五镜头预设、标签体系、历史快照和状态机由产品服务负责。
+4. **前台 UI 不展示系统复杂性**：普通用户默认只看到主推款、搭配服装、最终结果和生成记录；prompt、provider 请求、遮罩和快照 JSON 只在管理或技术视图出现。
 5. **实验结论要升格后才能成为规范**：外部文档、临时验证和历史讨论的发现，只有同步进对应权威文档后，才可作为正式实现依据。
 6. **新增/移动/删除 md 文件时必须更新本文件及对应子目录 `CLAUDE.md` 索引**。
 

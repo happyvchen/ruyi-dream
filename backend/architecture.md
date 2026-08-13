@@ -7,7 +7,7 @@
 - 素材与媒体资产管理；
 - Gemini 打标和 AI 智能选搭；
 - Prompt 维护槽位读取与 runtime 占位渲染；
-- Image-2 分镜预览和最终成片任务包组装；
+- 版本化拍摄预设和 Image-2 edits 最终成片任务包组装；
 - provider attempt 快照、进度、错误分类和轮询恢复；
 - 生成记录、归档、删除和导出。
 
@@ -16,11 +16,11 @@
 ```text
 导入主推款
 -> AI 智能选搭
--> 三类固定 Prompt 生成分镜预览
--> 分镜前 5 格生成成片
+-> 按品类选择已发布的五镜头拍摄预设
+-> 三类固定 Prompt + Image-2 edits 并发生成五张成片
 ```
 
-后端不再包含动态剧本服务。`app/main.py` 中的生成相关代码只围绕 `StylingPlan`、`GenerationPreview` 和 `GenerationResultImage` 编排。
+后端不再包含动态剧本或当前分镜服务。`app/main.py` 中的新生成链路围绕 `StylingPlan`、`ShotPresetVersion` 和 `GenerationResultImage` 编排；旧预览数据只读兼容。
 
 ## Image-2 分阶段恢复
 
@@ -71,7 +71,7 @@ Gemini 对明确限流（HTTP 429 或 `rate_limit_check_failed`）、连接失�
 
 | 文件 | 职责 |
 |---|---|
-| `app/main.py` | API 路由、AI Stylist、分镜预览、最终图和后台 poller 编排 |
+| `app/main.py` | API 路由、AI Stylist、拍摄预设、最终图和后台 poller 编排 |
 | `app/db.py` | 最终 schema、Prompt 配置槽登记、清理迁移 |
 | `app/prompt_render.py` | 动态占位文本和参考图图号区间渲染 |
 | `app/image_provider.py` | ToApis / fal 请求快照和图片生成适配 |
@@ -104,5 +104,5 @@ media/<media-uuid>/_derived/final-cells/original-shot<1..6>.png
 
 - 数字模特参考图负责人物身份事实。
 - 主推款和搭配服装图片负责商品事实。
-- 分镜预览只负责构图、姿态、裁切、背景和组图一致性。
-- 最终成片必须回看商品图和模特图，不能只复刻分镜预览。
+- 拍摄预设负责当前镜头的背景、遮罩和姿势参考；三类固定成片 Prompt 负责五镜头构图与禁止项。
+- 最终成片必须同时参考商品图、模特图和当前镜头预设；不使用同组连续性锚点。

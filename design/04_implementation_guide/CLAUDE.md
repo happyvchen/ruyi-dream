@@ -8,7 +8,7 @@
 
 | 文件 | 内容 | 何时需要读 |
 |---|---|---|
-| `technical_route_and_operations.md` | MediaAsset、StylingGarment、GenerationTask、Preview、ResultSet、Attempt 和 Prompt 槽位实现路线 | 工程实现、接口设计、数据库拆分时 |
+| `technical_route_and_operations.md` | MediaAsset、StylingGarment、GenerationTask、ShotPreset、ResultSet、Attempt 和 Prompt 槽位实现路线 | 工程实现、接口设计、数据库拆分时 |
 | `archive_purge_policy.md` | 归档、彻底删除、媒体引用计数、影响预检和 OSS 清理策略 | 设计或修改删除、归档、批量清理、媒体替换时 |
 
 ## 本地规则 (Local Rules)
