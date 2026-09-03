@@ -36,10 +36,10 @@ iostat -x 2                  # 磁盘利用率(%util 接近 100 = 磁盘瓶颈)
 **公网出口(服务器 → ToAPIs,影响 AI 调用与生成图下载):**
 
 ```bash
-curl -o /dev/null -s -w 'connect=%{time_connect}s ttfb=%{time_starttransfer}s speed_down=%{speed_download}B/s\n' https://toapis.xyz
+curl -o /dev/null -s -w 'connect=%{time_connect}s ttfb=%{time_starttransfer}s speed_down=%{speed_download}B/s\n' https://toapis.cn
 # 上行粗测(打标/选搭会 POST 几 MB base64 图片):
 dd if=/dev/urandom of=/tmp/up5m bs=1M count=5
-curl -o /dev/null -s -w 'speed_up=%{speed_upload}B/s\n' -X POST --data-binary @/tmp/up5m https://toapis.xyz
+curl -o /dev/null -s -w 'speed_up=%{speed_upload}B/s\n' -X POST --data-binary @/tmp/up5m https://toapis.cn
 ```
 
 **用户路径(你的电脑 → 服务器,经 VPN):**

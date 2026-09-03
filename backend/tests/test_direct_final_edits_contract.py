@@ -414,10 +414,10 @@ def test_toapis_final_edits_request_uses_master_shot_first_without_mask_and_prod
     request = image_provider.build_toapis_request_snapshot(
         task_package,
         [
-            "https://files.toapis.com/background.png",
-            "https://files.toapis.com/pose.jpg",
-            "https://files.toapis.com/model.jpg",
-            "https://files.toapis.com/hero.jpg",
+            "https://files.toapis.cn/background.png",
+            "https://files.toapis.cn/pose.jpg",
+            "https://files.toapis.cn/model.jpg",
+            "https://files.toapis.cn/hero.jpg",
         ],
     )
 
@@ -438,7 +438,7 @@ def test_toapis_rejects_more_than_six_reference_urls_before_submission() -> None
     with pytest.raises(RuntimeError, match="最多支持 6 张"):
         image_provider.build_toapis_request_snapshot(
             task_package,
-            [f"https://files.toapis.com/reference-{index}.jpg" for index in range(7)],
+            [f"https://files.toapis.cn/reference-{index}.jpg" for index in range(7)],
         )
 
 

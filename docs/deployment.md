@@ -22,7 +22,7 @@
 | 9000 | RustFS S3(presigned 图片) | 必须对用户浏览器可达 |
 | 9001 | RustFS Console | 不建议对外开放 |
 
-后端需要出站 HTTPS 访问 `toapis.xyz`（中国大陆默认通道；`direct` 通道则需访问 `googleapis.com`）。
+后端需要出站 HTTPS 访问 `toapis.cn`（中国大陆默认通道；`direct` 通道则需访问 `googleapis.com`）。
 
 ## 2. 首次部署
 
@@ -73,7 +73,7 @@ AI_STYLIST_CONTRACT_RETRY_LIMIT=3      # AI Stylist 结果缺契约字段时的�
 AI_STYLIST_CONTRACT_RETRY_DELAY_SECONDS=15 # AI Stylist 契约重试前等待秒数
 GPT_IMAGE2_PROVIDER=toapis
 TOAPIS_API_KEY=sk-...
-TOAPIS_BASE_URL=https://toapis.xyz     # 只填写 origin，不要追加 /v1
+TOAPIS_BASE_URL=https://toapis.cn      # 只填写 origin，不要追加 /v1
 TOAPIS_MAX_CONCURRENCY=5              # ToAPIs 全局并发:Gemini/Image-2/API 导入与状态查询共享
 TOAPIS_IMAGE_SUBMIT_TIMEOUT_SECONDS=180 # Image-2 创建任务单次提交请求超时
 GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT=3  # 提交结果未知时，每张图最多对账/补提次数

@@ -11,7 +11,7 @@
 | 10 | generation_result_image（成片） | image-2 | 图片导入/请求失败：HTTP 403 error code: 1010 |
 | 7 | 成片 / 预览 | image-2 | toapis 生成未成功（异步 status=failed，内含 429/503/quota） |
 | 4 | 成片 | image-2 | 导入失败：Max retries exceeded / Remote end closed / SSL UNEXPECTED_EOF |
-| 3 | generation_styling（选搭） | gemini | HTTP 502 上游网关错误（toapis.com \| 502: Bad gateway） |
+| 3 | generation_styling（选搭） | gemini | HTTP 502 上游网关错误（toapis.cn \| 502: Bad gateway） |
 | 3 | 打标 / 选搭 / 剧本 | gemini | 返回内容不是合法 JSON / Extra data / 控制字符 / 截断(length) |
 | 1 | 选搭 | gemini | AI Stylist 方案使用了不支持的塞腰/半塞穿法（**业务校验，非 provider 错误**） |
 | 1 | 预览 | image-2 | HTTP 403 普通用户不支持指定渠道 |

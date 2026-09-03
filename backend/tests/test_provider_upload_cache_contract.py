@@ -129,12 +129,12 @@ def test_toapis_content_hash_cache_namespace_does_not_reuse_legacy_url(
     monkeypatch.setattr(image_provider, "upload_object_with_cache", fake_upload_object_with_cache)
 
     legacy = image_provider.upload_bytes_with_cache(
-        "toapis", b"same-image", lambda: "https://files.toapis.com/legacy.jpg"
+        "toapis", b"same-image", lambda: "https://files.toapis.cn/legacy.jpg"
     )
     current = image_provider.upload_bytes_with_cache(
         "toapis",
         b"same-image",
-        lambda: "https://files.toapis.com/v2.jpg",
+        lambda: "https://files.toapis.cn/v2.jpg",
         cache_namespace="input-v2",
     )
 
@@ -155,15 +155,15 @@ def test_toapis_old_provider_url_without_policy_is_reprocessed(
     monkeypatch.setattr(
         image_provider,
         "upload_url_to_toapis",
-        lambda url, filename, deadline=None: calls.append(url) or "https://files.toapis.com/v2.jpg",
+        lambda url, filename, deadline=None: calls.append(url) or "https://files.toapis.cn/v2.jpg",
     )
 
     result = image_provider.upload_toapis_image_inputs(
-        [{"providerUrl": "https://files.toapis.com/legacy.jpg", "filename": "master.jpg"}]
+        [{"providerUrl": "https://files.toapis.cn/legacy.jpg", "filename": "master.jpg"}]
     )
 
-    assert calls == ["https://files.toapis.com/legacy.jpg"]
-    assert result[0]["providerUrl"] == "https://files.toapis.com/v2.jpg"
+    assert calls == ["https://files.toapis.cn/legacy.jpg"]
+    assert result[0]["providerUrl"] == "https://files.toapis.cn/v2.jpg"
     assert result[0]["providerInputPolicyVersion"] == "toapis-input-v2"
 
 
@@ -184,30 +184,28 @@ def test_toapis_current_policy_provider_url_is_reused(
     result = image_provider.upload_toapis_image_inputs(
         [
             {
-                "providerUrl": "https://files.toapis.com/v2.jpg",
+                "providerUrl": "https://files.toapis.cn/v2.jpg",
                 "providerInputPolicyVersion": "toapis-input-v2",
             }
         ]
     )
 
-    assert result[0]["providerUrl"] == "https://files.toapis.com/v2.jpg"
+    assert result[0]["providerUrl"] == "https://files.toapis.cn/v2.jpg"
 
 
 @pytest.mark.parametrize(
     "url",
     [
-        "https://files.toapis.com/uploads/reference.jpg",
-        "https://files.toapis.xyz/uploads/reference.jpg",
-        "https://cdn.toapis.com/uploads/reference.jpg",
-        "https://cdn.toapis.xyz/uploads/reference.jpg",
+        "https://files.toapis.cn/uploads/reference.jpg",
+        "https://cdn.toapis.cn/uploads/reference.jpg",
     ],
 )
-def test_toapis_file_url_accepts_official_primary_and_mainland_domains(url: str) -> None:
+def test_toapis_file_url_accepts_official_cn_domains(url: str) -> None:
     assert image_provider.is_toapis_file_url(url)
 
 
 def test_toapis_file_url_rejects_lookalike_domain() -> None:
-    assert not image_provider.is_toapis_file_url("https://files.toapis.xyz.example/reference.jpg")
+    assert not image_provider.is_toapis_file_url("https://files.toapis.cn.example/reference.jpg")
 
 
 def test_toapis_url_appends_versioned_path_to_configured_origin(
@@ -216,18 +214,18 @@ def test_toapis_url_appends_versioned_path_to_configured_origin(
     monkeypatch.setattr(
         image_provider,
         "get_settings",
-        lambda: SimpleNamespace(toapis_base_url="https://toapis.xyz/"),
+        lambda: SimpleNamespace(toapis_base_url="https://toapis.cn/"),
     )
 
     assert image_provider.toapis_url("/v1/images/generations") == (
-        "https://toapis.xyz/v1/images/generations"
+        "https://toapis.cn/v1/images/generations"
     )
 
 
 def test_provider_reference_manifest_records_input_policy_version() -> None:
     manifest = image_provider.build_provider_reference_image_manifest(
         [{"role": "shooting_master", "providerInputPolicyVersion": "toapis-input-v2"}],
-        ["https://files.toapis.com/v2.jpg"],
+        ["https://files.toapis.cn/v2.jpg"],
     )
 
     assert manifest[0]["providerInputPolicyVersion"] == "toapis-input-v2"
@@ -284,7 +282,7 @@ def test_toapis_submit_snapshot_contains_live_reference_manifest(
         {
             "role": "shooting_master",
             "objectKey": "media/master.jpg",
-            "providerUrl": "https://files.toapis.com/v2.jpg",
+            "providerUrl": "https://files.toapis.cn/v2.jpg",
             "providerInputPolicyVersion": "toapis-input-v2",
         }
     ]
@@ -305,7 +303,7 @@ def test_toapis_submit_snapshot_contains_live_reference_manifest(
     result = asyncio.run(image_provider.GPTImage2ToapisProvider().submit({"imageInputs": [{}]}, "output.png"))
 
     assert result["providerReferenceImageManifest"][0]["providerInputPolicyVersion"] == "toapis-input-v2"
-    assert result["providerReferenceImageManifest"][0]["url"] == "https://files.toapis.com/v2.jpg"
+    assert result["providerReferenceImageManifest"][0]["url"] == "https://files.toapis.cn/v2.jpg"
 
 
 def test_upload_request_timeout_is_clipped_to_stage_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
