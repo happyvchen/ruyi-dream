@@ -23,6 +23,7 @@ const apiMock = vi.hoisted(() => ({
   getTaskDeleteImpact: vi.fn(),
   getTask: vi.fn(),
   updateTask: vi.fn(),
+  addTaskImages: vi.fn(),
   createTask: vi.fn(),
   autoRunFinal: vi.fn(),
   cancelTask: vi.fn(),
@@ -44,7 +45,11 @@ const apiMock = vi.hoisted(() => ({
   restoreStylingGarments: vi.fn(),
   restoreTasks: vi.fn(),
   getShootEnvironment: vi.fn(),
+  getShotPresets: vi.fn(),
+  replaceShotPresetAsset: vi.fn(),
+  deleteShotPresetAsset: vi.fn(),
   addModelHeadReferences: vi.fn(),
+  addStylingGarmentImages: vi.fn(),
   replaceModelHeadReference: vi.fn(),
   deleteModelHeadReference: vi.fn(),
   reorderModelHeadReference: vi.fn(),
@@ -263,6 +268,20 @@ function configureApi(role: 'admin' | 'user' = 'admin') {
   apiMock.listRecordBatches.mockResolvedValue({ ...emptyPage, facets: {}, stableFacets: {} })
   apiMock.precheckFinalImageExport.mockResolvedValue({ items: [], downloadableTaskIds: [], completeTaskIds: [], totalImages: 0, totalBytes: 0 })
   apiMock.getShootEnvironment.mockResolvedValue({ asset: null })
+  apiMock.getShotPresets.mockResolvedValue({
+    families: {
+      top: { complete: false, configuredCount: 0, validationErrors: ['上装的 5 个镜头尚未配置'] },
+      bottom: { complete: false, configuredCount: 0, validationErrors: ['下装的 5 个镜头尚未配置'] },
+      one_piece: { complete: false, configuredCount: 0, validationErrors: ['套装的 5 个镜头尚未配置'] },
+    },
+    slots: Array.from({ length: 15 }, (_, index) => ({
+      categoryFamily: (['top', 'bottom', 'one_piece'] as const)[Math.floor(index / 5)],
+      shotIndex: (index % 5) + 1,
+      background: null,
+      pose: null,
+      complete: false,
+    })),
+  })
   apiMock.listUploadSessions.mockResolvedValue({ items: [] })
   apiMock.listUploadSessionBatches.mockResolvedValue({ ...emptyPage, items: [] })
   apiMock.abandonUploadSession.mockResolvedValue({ session: { id: 'abandoned', status: 'ABANDONED' } })
@@ -319,12 +338,12 @@ afterEach(() => {
 })
 
 describe('production gate app shell and page controls', () => {
-  it('uses nouns for the four studio stages while keeping generation actions explicit', async () => {
+  it('uses nouns for the three studio stages while keeping generation actions explicit', async () => {
     render(<App />)
 
     expect(await screen.findByRole('button', { name: '导入主推款' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'AI 智能选搭' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '分镜预览' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '分镜预览' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '最终成片' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '生成分镜预览' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '生成成片' })).not.toBeInTheDocument()
@@ -422,6 +441,41 @@ describe('production gate app shell and page controls', () => {
     await waitFor(() => expect(screen.getAllByText('AI 选搭').length).toBeGreaterThanOrEqual(1))
   })
 
+  it('admin replaces each preset image and it takes effect immediately', async () => {
+    apiMock.replaceShotPresetAsset.mockResolvedValue({
+      families: {
+        top: { complete: false, configuredCount: 1, validationErrors: [] },
+        bottom: { complete: false, configuredCount: 0, validationErrors: [] },
+        one_piece: { complete: false, configuredCount: 0, validationErrors: [] },
+      },
+      slots: Array.from({ length: 15 }, (_, index) => ({
+        categoryFamily: (['top', 'bottom', 'one_piece'] as const)[Math.floor(index / 5)],
+        shotIndex: (index % 5) + 1,
+        background: null,
+        pose: null,
+        complete: false,
+      })),
+    })
+    const { container } = render(<App />)
+
+    await userEvent.click(await screen.findByRole('button', { name: '模特与背景' }))
+    expect(await screen.findByLabelText('添加模特参考图')).toBeInTheDocument()
+    expect(screen.queryByText('追加图片')).not.toBeInTheDocument()
+    expect(screen.queryByText(/上装、下装、套装各 5 个镜头/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/图片更换后立即生效；缺图的服装类型/)).not.toBeInTheDocument()
+    expect(container.querySelector('.shot-preset-card .image-asset-card .thumb-actions')).not.toBeNull()
+    expect(screen.queryByText(/拖拽卡片调整顺序，靠前的图片优先用于生成/)).not.toBeInTheDocument()
+    const masterInput = (await screen.findAllByLabelText('替换 选择拍摄母版图'))[0]
+    const master = new File(['master'], 'master.jpg', { type: 'image/jpeg' })
+    const pose = new File(['pose'], 'pose.jpg', { type: 'image/jpeg' })
+    await userEvent.upload(masterInput, master)
+    await waitFor(() => expect(apiMock.replaceShotPresetAsset).toHaveBeenNthCalledWith(1, 'top', 1, 'background', master))
+    const poseInput = screen.getAllByLabelText('替换 选择风格/姿势图')[0]
+    await userEvent.upload(poseInput, pose)
+    await waitFor(() => expect(apiMock.replaceShotPresetAsset).toHaveBeenNthCalledWith(2, 'top', 1, 'pose', pose))
+    expect(screen.queryByText(/发布上装|保存拍摄预设|编辑版本/)).not.toBeInTheDocument()
+  })
+
   it('ordinary user keeps the shooting workflow but cannot open Prompt maintenance', async () => {
     configureApi('user')
     window.history.replaceState(null, '', '/prompt-maintenance')
@@ -431,6 +485,52 @@ describe('production gate app shell and page controls', () => {
     expect(await screen.findByRole('button', { name: '搭配服装库' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Prompt 维护' })).not.toBeInTheDocument()
     await waitFor(() => expect(window.location.pathname).toBe('/studio'))
+  })
+
+  it('ordinary user can inspect every shot preset without seeing maintenance controls', async () => {
+    configureApi('user')
+    apiMock.getShotPresets.mockResolvedValue({
+      families: {
+        top: { complete: false, configuredCount: 0, validationErrors: ['top 镜头 1 缺少姿势图'] },
+        bottom: { complete: false, configuredCount: 0, validationErrors: ['bottom 镜头 1 缺少拍摄母版或姿势图'] },
+        one_piece: { complete: false, configuredCount: 0, validationErrors: ['one_piece 镜头 1 缺少拍摄母版或姿势图'] },
+      },
+      slots: Array.from({ length: 15 }, (_, index) => ({
+        categoryFamily: (['top', 'bottom', 'one_piece'] as const)[Math.floor(index / 5)],
+        shotIndex: (index % 5) + 1,
+        background: index === 0 ? {
+          id: 201,
+          objectKey: 'presets/top-1-master.jpg',
+          filename: 'top-1-master.jpg',
+          originalFilename: 'top-1-master.jpg',
+          mimeType: 'image/jpeg',
+          width: 2048,
+          height: 2048,
+          sizeBytes: 1024,
+          thumbUrl: '/preset-thumb.jpg',
+          previewUrl: '/preset-preview.jpg',
+          originalUrl: '/preset-original.jpg',
+        } : null,
+        pose: null,
+        complete: false,
+      })),
+    })
+
+    const { container } = render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '模特与背景' }))
+
+    await waitFor(() => expect(apiMock.getShotPresets).toHaveBeenCalledTimes(1))
+    expect(await screen.findByText('上装')).toBeInTheDocument()
+    expect(screen.getByText('下装')).toBeInTheDocument()
+    expect(screen.getByText('套装')).toBeInTheDocument()
+    expect(container.querySelectorAll('.shot-preset-card')).toHaveLength(15)
+    expect(screen.getByText(/当前预设不完整：top 镜头 1 缺少姿势图/)).toBeInTheDocument()
+    expect(container.querySelector('.shot-preset-card .thumb-actions')).toBeNull()
+    expect(screen.queryByLabelText(/替换 .*拍摄母版/)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/删除 .*拍摄母版/)).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'top-1-master.jpg' }))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
   })
 
   it('studio summary exposes always-open business requirement modules and one-click final action', async () => {

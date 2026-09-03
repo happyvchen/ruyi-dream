@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 from zipfile import ZipFile
 
+from app import main as app_main
 from app.db import dumps, get_db, now_iso
 from conftest import insert_ready_generation_task_with_preview, insert_styling_garment
 
@@ -83,6 +84,61 @@ def test_created_generation_task_rejects_append_images_so_top_entry_starts_new_p
 
     assert response.status_code == 410
     assert "不支持继续添加主推款图片" in response.json()["detail"]
+
+
+def test_created_generation_task_accepts_inline_append_up_to_eight_images(client, monkeypatch) -> None:
+    ids = insert_ready_generation_task_with_preview(family="top")
+
+    async def fake_save(_uploads):
+        timestamp = now_iso()
+        with get_db() as db:
+            asset_id = int(db.execute(
+                """
+                INSERT INTO media_assets
+                  (object_key, original_filename, mime_type, width, height, size_bytes, created_at, updated_at)
+                VALUES ('tests/hero-added.jpg', 'hero-added.jpg', 'image/jpeg', 1200, 1600, 128, ?, ?)
+                """,
+                (timestamp, timestamp),
+            ).lastrowid)
+        return [{"id": asset_id, "objectKey": "tests/hero-added.jpg"}]
+
+    monkeypatch.setattr(app_main, "save_uploads_as_media_assets", fake_save)
+    response = client.post(
+        f"/api/generation-tasks/{ids['task_id']}/images",
+        files={"files": ("hero-added.jpg", b"image", "image/jpeg")},
+    )
+
+    assert response.status_code == 200
+    item = response.json()["item"]
+    assert len(item["images"]) == 3
+    assert item["images"][-1]["asset"]["originalFilename"] == "hero-added.jpg"
+    assert item["status"] == "READY_FOR_STYLING"
+
+
+def test_styling_garment_accepts_inline_append_up_to_six_images(client, monkeypatch) -> None:
+    garment_id = insert_styling_garment(code="ADD-IMAGE", image_count=1)
+
+    async def fake_save(_uploads):
+        timestamp = now_iso()
+        with get_db() as db:
+            asset_id = int(db.execute(
+                """
+                INSERT INTO media_assets
+                  (object_key, original_filename, mime_type, width, height, size_bytes, created_at, updated_at)
+                VALUES ('tests/garment-added.jpg', 'garment-added.jpg', 'image/jpeg', 1200, 1600, 128, ?, ?)
+                """,
+                (timestamp, timestamp),
+            ).lastrowid)
+        return [{"id": asset_id, "objectKey": "tests/garment-added.jpg"}]
+
+    monkeypatch.setattr(app_main, "save_uploads_as_media_assets", fake_save)
+    response = client.post(
+        f"/api/styling-garments/{garment_id}/images",
+        files={"files": ("garment-added.jpg", b"image", "image/jpeg")},
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["item"]["images"]) == 2
 
 
 def test_export_precheck_reports_complete_partial_and_missing_final_images(client) -> None:

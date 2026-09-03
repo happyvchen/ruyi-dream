@@ -1,57 +1,29 @@
-# ruyi-dream 0.1.0 领域模型
+# 领域模型
 
-## 当前主链路
+## 当前边界
 
-```text
-GenerationTask
-→ GenerationTaskInputVersion
-→ GenerationStyling / StylingPlan
-→ GenerationStoryboardPreview
-→ GenerationResultSet / GenerationResultImage x 5
-```
+0.1.0 主流程是“导入主推款 → AI 智能选搭 → 最终成片”。系统不创建分镜预览、动态拍摄剧本或镜头计划。五镜头规则由当前生效拍摄预设和三类固定成片 Prompt 承载。
 
-0.1.0 当前主流程不包含动态拍摄剧本或镜头计划中间层。分镜六镜头和最终五镜头的稳定规则由 Prompt 维护中的三类固定分镜 Prompt 与三类固定成片 Prompt 承载；代码只负责拍摄图位族路由、参考图顺序、当前格号、选中造型摘要和用户补充要求等动态事实注入。
+## 核心对象
 
-## 核心术语
+- `GenerationTask`：一次主推款拍摄任务及状态。
+- `GenerationTaskInputVersion`：冻结的主推款、模特、服装事实和用户要求。
+- `GenerationStyling` / `StylingPlan`：AI Stylist 的商品理解、候选比较、审美批判和最终选搭。
+- `ShotPresetSlot`：一个品类图位族、一个镜头当前生效的拍摄母版/姿势资产对；单图更换后立即生效，拍摄母版中的原人物和原服装在生成时被替换。
+- `GenerationResultSetShotPreset`：结果集创建时从当前槽位冻结的五组拍摄母版/姿势资产。
+- `GenerationResultSet`：冻结输入版本、StylingPlan 和五组拍摄预设图片的一组五张成片。
+- `GenerationResultImage`：单个镜头的状态、输出和 active attempt。
+- `GenerationAttempt`：provider 请求、响应、错误和恢复审计记录。
 
-- **主推款**：用户本次导入并希望重点表现的真实商品。
-- **搭配服装**：搭配库中真实可见的配角服装，必须服务主推款。
-- **AI 智能选搭 / StylingPlan**：AI Stylist 输出的造型方案，包含主推款理解、候选搭配、审美批判、选中搭配、穿法和风险。
-- **分镜预览**：Image-2 生成的 3:2 六格预览图，用于固定整组构图、姿态、裁切、背景和组图语言。
-- **成片**：Image-2 按分镜前 5 格逐张生成的最终电商棚拍图。
+## 责任边界
 
-## 职责边界
+| 要素 | 权威来源 |
+|---|---|
+| 主推款和搭配款商品事实 | 商品原图与 StylingPlan |
+| 人物身份 | 数字模特参考图 |
+| 场景、构图、人物尺度、原人物替换位置、姿势 | 当前生效 ShotPresetSlot；生成后使用结果集冻结副本 |
+| 五镜头构图与禁止项 | 三类固定成片 Prompt |
+| 参考图顺序、数量和请求参数 | 产品组装代码 |
+| 视觉生成 | GPT Image-2 edits |
 
-| 要素 | 负责方 | 不负责 |
-|---|---|---|
-| 商品事实 | 主推款图、搭配服装图 | 分镜图凭空决定商品款式 |
-| 人物身份 | 数字模特参考图 | Prompt 或 provider 默认审美改脸/改发型 |
-| 造型判断 | AI Stylist / StylingPlan | Image-2 临场选搭 |
-| 六镜头规则 | 三类固定分镜 Prompt | Gemini 动态生成镜头剧本 |
-| 五张成片规则 | 三类固定成片 Prompt | 自动评分、自动切格、因视觉质量判断自动重生 |
-| 状态与历史 | GenerationTask / attempts | provider 自己维护业务状态 |
-
-技术恢复属于任务编排而非成片规则：系统对连接超时、限流、网关、导入、状态查询、明确瞬时生成失败、结果回传以及模型 JSON/必需字段契约异常自动重试；默认最多 10 次并采用 `30/60/120/240` 秒封顶退避。参数、鉴权、余额、内容策略、输入不合格和业务判断拒绝等确定性错误立即停止并给出明确动作。这里的契约纠错不等于基于视觉质量的自动评分或自动重生。
-
-## 状态机
-
-```text
-DRAFT
-→ READY_FOR_STYLING
-→ STYLING_RUNNING
-→ STYLING_READY
-→ PREVIEW_RUNNING
-→ PREVIEW_READY
-→ FINAL_RUNNING
-→ FINAL_PARTIAL / COMPLETED
-```
-
-失败进入 `FAILED`，取消进入 `CANCELLED`，归档进入 `ABANDONED` 或设置归档字段。当前状态机没有剧本相关状态。
-
-## 失效规则
-
-- 修改主推款图片、排序或服装信息：当前选搭、分镜、成片失效，任务回到待选搭。
-- 修改主推款图片、排序或服装信息：不立即清空当前结果；用户确认修改后才让新输入生效，下一次执行选搭、分镜或成片时冻结最新主推款事实。
-- 重新选搭：旧分镜和旧成片失效但保留历史。
-- 重新生成分镜：旧成片失效但保留历史。
-- 重新生成成片：只影响当前结果集，不反向改变选搭或分镜。
+旧 `GenerationPreview` 数据只用于历史记录兼容，不再创建；旧 preview endpoint 固定返回 `410 Gone`。

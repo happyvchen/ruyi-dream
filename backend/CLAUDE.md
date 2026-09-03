@@ -2,7 +2,7 @@
 
 ## 职责 (Scope)
 
-ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 兼容对象存储的 AI 摄影棚实现，覆盖搭配服装打标、主推款任务流、AI Stylist / StylingPlan、三类固定 Prompt 路由、Image-2 分镜预览/成片生成和结果复盘。
+ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 兼容对象存储的 AI 摄影棚实现，覆盖搭配服装打标、主推款任务流、AI Stylist / StylingPlan、当前生效拍摄预设与结果集冻结快照、三类固定成片 Prompt 路由、Image-2 edits 成片生成和结果复盘。
 
 设计层面的产品范围、生成职责和技术路线在 `../design/`，本目录只管“代码怎么写”和“后端契约怎么落地”。
 
@@ -40,12 +40,12 @@ ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 �
 ## 核心后端职责
 
 - 保存和管理主推款任务图片、搭配服装库图片和媒体资产
-- 维护数字模特档案和素材引用
+- 维护数字模特档案，以及上装/下装/套装各五个当前生效的拍摄母版、姿势拍摄预设；单图更换立即生效，结果集创建时冻结当次五组资产
 - 维护 admin-only Prompt 配置；系统初始化可创建空正文的可维护 Prompt 槽位，品牌边界通过 `segment.brand_info` Prompt 分段承载，AI 选搭原则、品类策略、质量信号、配饰边界和空库内搭配取舍直接写入 `AI 选搭` Prompt 正文，后端不解释其中业务规则，也不内置或 fallback 任何 Prompt 默认正文
 - 管理 AI 摄影棚主推款任务、输入版本和状态机
 - 对未归档 READY 搭配服装生成全量标签事实卡；Prompt 只接收业务 `code` 和 `ai_tags` 等必要事实，不接收内部 ID、图片快照或后端排序/评分结果
 - 调用 AI Stylist 生成带 Aesthetic Critic 诊断的 `StylingPlan`，保存完整 request/response 快照
-- 基于 `StylingPlan.hero_understanding.shot_category_family` 确定性选择三类分镜 Prompt；缺失时由商品品类/子类 fallback，并组装 Image-2 任务包
+- 基于 `StylingPlan.hero_understanding.shot_category_family` 确定性选择三类成片 Prompt 和当前生效拍摄预设；当前类型不完整时拒绝开始成片，并组装 Image-2 多参考图编辑任务包
 - 管理生成任务状态、单张重试、结果下载和记录复盘
 - 保存实验/生产结果、紧凑候选快照、完整 StylingPlan 和 provider attempts 元数据
 

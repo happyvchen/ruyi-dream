@@ -25,6 +25,11 @@ const ERROR_MESSAGE_MAP: Record<string, FriendlyError> = {
   RATE_LIMITED: BUSY_RETRY,
   PROVIDER_TIMEOUT: BUSY_RETRY,
   PROVIDER_INTERNAL_ERROR: BUSY_RETRY,
+  PROVIDER_TRANSIENT_UNKNOWN: {
+    title: 'AI 服务暂时不可用，自动重试后仍未恢复',
+    hint: '请稍后再试。',
+    tone: 'warning',
+  },
   PROVIDER_GENERATION_FAILED: {
     title: '图片生成服务处理失败',
     hint: '系统已自动重试，仍失败时可再次生成。',
@@ -137,4 +142,16 @@ export function friendlyError(errorCode?: string | null, fallback?: string | nul
 export function friendlyErrorText(errorCode?: string | null, fallback?: string | null): string {
   const { title, hint } = friendlyError(errorCode, fallback)
   return hint ? `${title}，${hint}` : title
+}
+
+/** 并发成片仍在运行时，单镜头上传失败不是最终失败；本轮收敛后由任务级重试接管。 */
+export function friendlyAttemptErrorText(
+  errorCode?: string | null,
+  fallback?: string | null,
+  taskStillRunning = false,
+): string {
+  if (taskStillRunning && errorCode === 'UPLOAD_FAILED') {
+    return '参考图导入中断，等待本轮其他镜头完成后自动恢复'
+  }
+  return friendlyErrorText(errorCode, fallback)
 }

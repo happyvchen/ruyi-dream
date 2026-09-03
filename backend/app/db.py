@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 from typing import Any, Iterator
 
@@ -27,6 +29,14 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("063", "styling_garment_tag_retry", "migration_styling_garment_tag_retry"),
     ("064", "generation_attempt_owner_status_index", "migration_generation_attempt_owner_status_index"),
     ("065", "repair_styling_garment_tag_retry_lease", "migration_repair_styling_garment_tag_retry_lease"),
+    ("066", "direct_final_edits_workflow", "migration_direct_final_edits_workflow"),
+    ("067", "shot_preset_family_publication", "migration_shot_preset_family_publication"),
+    ("068", "repair_direct_final_result_set_schema", "migration_repair_direct_final_result_set_schema"),
+    ("069", "no_mask_master_shot_presets", "migration_no_mask_master_shot_presets"),
+    ("070", "final_prompt_master_shot_contract", "migration_final_prompt_master_shot_contract"),
+    ("071", "refresh_legacy_top_final_prompt", "migration_refresh_legacy_top_final_prompt"),
+    ("072", "live_shot_preset_slots", "migration_live_shot_preset_slots"),
+    ("073", "refresh_legacy_bottom_and_one_piece_final_prompts", "migration_refresh_legacy_bottom_and_one_piece_final_prompts"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -37,9 +47,6 @@ PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
     ("assembly.ai_tagging", "assembly", "AI 打标", "搭配服装入库后的图片理解和标签识别 Prompt；运行时与图片挑选/排序合并调用。", 100),
     ("assembly.hero_image_selection", "assembly", "主推款图片挑选/排序", "AI 摄影棚主推款图片挑选和排序 Prompt；运行时与 AI 选搭合并调用。", 105),
     ("assembly.ai_styling", "assembly", "AI 选搭", "AI Stylist 选搭 Prompt，含主推款理解、搭配选择和质量判断；运行时与主推款图片挑选/排序合并调用。", 110),
-    ("assembly.storyboard_preview_top", "assembly", "分镜预览 · 上装/针织/外套", "Image-2 上装类固定六镜头分镜 Prompt。", 120),
-    ("assembly.storyboard_preview_bottom", "assembly", "分镜预览 · 裤装/半身裙", "Image-2 下装类固定六镜头分镜 Prompt。", 130),
-    ("assembly.storyboard_preview_one_piece", "assembly", "分镜预览 · 连衣裙/连体/套装", "Image-2 连衣裙/连体/套装固定六镜头分镜 Prompt。", 140),
     ("assembly.final_image_top", "assembly", "生成成片 · 上装/针织/外套", "Image-2 上装类固定五镜头成片 Prompt。", 150),
     ("assembly.final_image_bottom", "assembly", "生成成片 · 裤装/半身裙", "Image-2 下装类固定五镜头成片 Prompt。", 160),
     ("assembly.final_image_one_piece", "assembly", "生成成片 · 连衣裙/连体/套装", "Image-2 连衣裙/连体/套装固定五镜头成片 Prompt。", 170),
@@ -55,6 +62,9 @@ REMOVED_PROMPT_CONFIG_KEYS: tuple[str, ...] = (
     "segment.image_reference_constraint",
     "segment.image_reference_preview_note",
     "assembly.ai_styling_system",
+    "assembly.storyboard_preview_top",
+    "assembly.storyboard_preview_bottom",
+    "assembly.storyboard_preview_one_piece",
 )
 
 
@@ -106,6 +116,57 @@ def init_db() -> None:
               media_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS shot_preset_versions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              version_number INTEGER NOT NULL UNIQUE,
+              status TEXT NOT NULL DEFAULT 'DRAFT',
+              published_at TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS shot_presets (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              version_id INTEGER NOT NULL REFERENCES shot_preset_versions(id) ON DELETE CASCADE,
+              category_family TEXT NOT NULL,
+              shot_index INTEGER NOT NULL,
+              background_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+              mask_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+              pose_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(version_id, category_family, shot_index),
+              CHECK(category_family IN ('top', 'bottom', 'one_piece')),
+              CHECK(shot_index BETWEEN 1 AND 5)
+            );
+
+            CREATE TABLE IF NOT EXISTS retired_prompt_configs (
+              key TEXT PRIMARY KEY,
+              content TEXT NOT NULL,
+              retired_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS shot_preset_family_publications (
+              category_family TEXT PRIMARY KEY,
+              version_id INTEGER NOT NULL REFERENCES shot_preset_versions(id),
+              published_at TEXT NOT NULL,
+              CHECK(category_family IN ('top', 'bottom', 'one_piece'))
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_shot_preset_versions_single_draft
+              ON shot_preset_versions(status) WHERE status = 'DRAFT';
+
+            CREATE TABLE IF NOT EXISTS shot_preset_slots (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              category_family TEXT NOT NULL,
+              shot_index INTEGER NOT NULL,
+              background_asset_id INTEGER REFERENCES media_assets(id),
+              pose_asset_id INTEGER REFERENCES media_assets(id),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(category_family, shot_index),
+              CHECK(category_family IN ('top', 'bottom', 'one_piece')),
+              CHECK(shot_index BETWEEN 1 AND 5)
             );
 
             CREATE TABLE IF NOT EXISTS event_logs (
@@ -276,7 +337,8 @@ def init_db() -> None:
               task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
               input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
               styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
-              preview_id INTEGER NOT NULL REFERENCES generation_previews(id),
+              preview_id INTEGER REFERENCES generation_previews(id),
+              shot_preset_version_id INTEGER REFERENCES shot_preset_versions(id),
               user_instruction_json TEXT,
               status TEXT NOT NULL DEFAULT 'RUNNING',
               created_at TEXT NOT NULL,
@@ -297,6 +359,19 @@ def init_db() -> None:
               run_attempts INTEGER NOT NULL DEFAULT 0,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS generation_result_set_shot_presets (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              result_set_id INTEGER NOT NULL REFERENCES generation_result_sets(id) ON DELETE CASCADE,
+              category_family TEXT NOT NULL,
+              shot_index INTEGER NOT NULL,
+              background_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+              pose_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+              created_at TEXT NOT NULL,
+              UNIQUE(result_set_id, shot_index),
+              CHECK(category_family IN ('top', 'bottom', 'one_piece')),
+              CHECK(shot_index BETWEEN 1 AND 5)
             );
 
             CREATE TABLE IF NOT EXISTS generation_attempts (
@@ -418,6 +493,14 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_styling_garment_tag_retry": migration_styling_garment_tag_retry,
         "migration_generation_attempt_owner_status_index": migration_generation_attempt_owner_status_index,
         "migration_repair_styling_garment_tag_retry_lease": migration_repair_styling_garment_tag_retry_lease,
+        "migration_direct_final_edits_workflow": migration_direct_final_edits_workflow,
+        "migration_shot_preset_family_publication": migration_shot_preset_family_publication,
+        "migration_repair_direct_final_result_set_schema": migration_repair_direct_final_result_set_schema,
+        "migration_no_mask_master_shot_presets": migration_no_mask_master_shot_presets,
+        "migration_final_prompt_master_shot_contract": migration_final_prompt_master_shot_contract,
+        "migration_refresh_legacy_top_final_prompt": migration_refresh_legacy_top_final_prompt,
+        "migration_live_shot_preset_slots": migration_live_shot_preset_slots,
+        "migration_refresh_legacy_bottom_and_one_piece_final_prompts": migration_refresh_legacy_bottom_and_one_piece_final_prompts,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -666,6 +749,350 @@ def migration_repair_styling_garment_tag_retry_lease(db: sqlite3.Connection) -> 
         return
     if not table_has_column(db, "styling_garments", "tag_retry_lease_until"):
         db.execute("ALTER TABLE styling_garments ADD COLUMN tag_retry_lease_until TEXT")
+
+
+def migration_direct_final_edits_workflow(db: sqlite3.Connection) -> None:
+    """Add versioned 3×5 shot presets and retire preview Prompt slots."""
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS shot_preset_versions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          version_number INTEGER NOT NULL UNIQUE,
+          status TEXT NOT NULL DEFAULT 'DRAFT',
+          published_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS shot_presets (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          version_id INTEGER NOT NULL REFERENCES shot_preset_versions(id) ON DELETE CASCADE,
+          category_family TEXT NOT NULL,
+          shot_index INTEGER NOT NULL,
+          background_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+          mask_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+          pose_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(version_id, category_family, shot_index),
+          CHECK(category_family IN ('top', 'bottom', 'one_piece')),
+          CHECK(shot_index BETWEEN 1 AND 5)
+        );
+        CREATE INDEX IF NOT EXISTS idx_shot_preset_versions_status
+          ON shot_preset_versions(status, version_number DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_shot_preset_versions_single_draft
+          ON shot_preset_versions(status) WHERE status = 'DRAFT';
+        CREATE INDEX IF NOT EXISTS idx_shot_presets_version_slot
+          ON shot_presets(version_id, category_family, shot_index);
+        CREATE TABLE IF NOT EXISTS retired_prompt_configs (
+          key TEXT PRIMARY KEY,
+          content TEXT NOT NULL,
+          retired_at TEXT NOT NULL
+        );
+        """
+    )
+    if table_exists(db, "prompt_configs"):
+        keys = (
+            "assembly.storyboard_preview_top",
+            "assembly.storyboard_preview_bottom",
+            "assembly.storyboard_preview_one_piece",
+        )
+        timestamp = now_iso()
+        db.execute(
+            f"""
+            INSERT INTO retired_prompt_configs (key, content, retired_at)
+            SELECT key, content, ? FROM prompt_configs WHERE key IN ({','.join('?' for _ in keys)})
+            ON CONFLICT(key) DO UPDATE SET content = excluded.content, retired_at = excluded.retired_at
+            """,
+            (timestamp, *keys),
+        )
+        db.execute(
+            f"DELETE FROM prompt_configs WHERE key IN ({','.join('?' for _ in keys)})",
+            keys,
+        )
+    rebuild_generation_result_sets_direct_edits(db)
+
+
+def migration_shot_preset_family_publication(db: sqlite3.Connection) -> None:
+    """Make published shot-preset snapshots independently addressable per family."""
+    db.execute("DROP INDEX IF EXISTS idx_shot_preset_versions_single_published")
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS shot_preset_family_publications (
+          category_family TEXT PRIMARY KEY,
+          version_id INTEGER NOT NULL REFERENCES shot_preset_versions(id),
+          published_at TEXT NOT NULL,
+          CHECK(category_family IN ('top', 'bottom', 'one_piece'))
+        );
+        """
+    )
+    published_rows = db.execute(
+        "SELECT id, published_at, updated_at FROM shot_preset_versions WHERE status = 'PUBLISHED' ORDER BY version_number"
+    ).fetchall()
+    for version in published_rows:
+        families = db.execute(
+            "SELECT DISTINCT category_family FROM shot_presets WHERE version_id = ?",
+            (int(version["id"]),),
+        ).fetchall()
+        for family in families:
+            db.execute(
+                """
+                INSERT INTO shot_preset_family_publications (category_family, version_id, published_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(category_family) DO UPDATE SET
+                  version_id = excluded.version_id,
+                  published_at = excluded.published_at
+                """,
+                (str(family["category_family"]), int(version["id"]), version["published_at"] or version["updated_at"]),
+            )
+
+
+def migration_repair_direct_final_result_set_schema(db: sqlite3.Connection) -> None:
+    """Repair databases that recorded 066 before its result-set rebuild was added."""
+    rebuild_generation_result_sets_direct_edits(db)
+
+
+def migration_no_mask_master_shot_presets(db: sqlite3.Connection) -> None:
+    """Allow new master-shot presets without a mask while preserving historical rows."""
+    if not table_exists(db, "shot_presets") or "mask_asset_id" not in table_columns(db, "shot_presets"):
+        return
+    db.executescript(
+        """
+        CREATE TABLE shot_presets_no_mask (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          version_id INTEGER NOT NULL REFERENCES shot_preset_versions(id) ON DELETE CASCADE,
+          category_family TEXT NOT NULL,
+          shot_index INTEGER NOT NULL,
+          background_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+          mask_asset_id INTEGER REFERENCES media_assets(id),
+          pose_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(version_id, category_family, shot_index),
+          CHECK(category_family IN ('top', 'bottom', 'one_piece')),
+          CHECK(shot_index BETWEEN 1 AND 5)
+        );
+        INSERT INTO shot_presets_no_mask
+          (id, version_id, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, created_at, updated_at)
+        SELECT id, version_id, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, created_at, updated_at
+        FROM shot_presets;
+        DROP TABLE shot_presets;
+        ALTER TABLE shot_presets_no_mask RENAME TO shot_presets;
+        CREATE INDEX IF NOT EXISTS idx_shot_presets_version_slot
+          ON shot_presets(version_id, category_family, shot_index);
+        """
+    )
+
+
+MASTER_SHOT_PROMPT_CONTRACT = """【拍摄母版替换规则】
+- {{runtime.ref_shot_background}} 是当前镜头的拍摄母版。完整移除并替换母版中的原人物、原服装及其身份特征；不得混入原人物的脸、发型、肤色、服装、配饰或 logo。
+- 继承拍摄母版的场景、机位、景别、裁切、人物尺度、站位与光线；{{runtime.ref_shot_pose}} 仅补充身体朝向、重心、肩线、手位、视线与头部朝向，不提供人物身份或服装事实，也不得改变脸、发型或母版构图。
+- {{runtime.ref_model_identity}} 是唯一模特身份事实源；{{runtime.ref_garment}} 是唯一商品事实源。优先级：商品和人物身份 > 当前镜头构图契约 > 母版场景与光线 > 姿势参考 > 商业画质提升。
+- 使用真实、干净、连续、均匀的商业棚拍成像；不要使用电影化调色、胶片颗粒、做旧、纹理化、磨砂或画布效果，避免噪点、云斑、色斑、波纹、摩尔纹、局部色漂与不真实纹理覆盖。
+
+"""
+
+LEGACY_FINAL_PROMPT_PATTERNS = (
+    re.compile(r"(?:-\s*)?\{\{runtime\.ref_preview_grid\}\}[^\n]*(?:\n|$)"),
+    re.compile(r"(?:-\s*)?\{\{#runtime\.ref_shoot_environment\}\}[^\n]*(?:\n|$)"),
+    re.compile(r"(?:-\s*)?\{\{runtime\.ref_shoot_environment\}\}[^\n]*(?:\n|$)"),
+    re.compile(r"(?:仅|只)?在(?:遮罩)?(?:透明|可编辑)区域(?:内)?(?:生成|编辑)[^。；\n]*[。；]?"),
+    re.compile(r"(?:遮罩(?:非透明)?区(?:域)?|背景(?:其余|遮罩外)?区域)[^。；\n]*(?:原样|原像素|保持不变|不变)[^。；\n]*[。；]?"),
+    re.compile(r"沿人物轮廓(?:进行)?编辑[^。；\n]*[。；]?"),
+)
+
+
+def migration_final_prompt_master_shot_contract(db: sqlite3.Connection) -> None:
+    """Prepend the no-mask master-shot rule without replacing admin Prompt content."""
+    if not table_exists(db, "prompt_configs"):
+        return
+    keys = ("assembly.final_image_top", "assembly.final_image_bottom", "assembly.final_image_one_piece")
+    rows = db.execute(
+        f"SELECT key, content FROM prompt_configs WHERE key IN ({','.join('?' for _ in keys)})",
+        keys,
+    ).fetchall()
+    for row in rows:
+        content = str(row["content"] or "")
+        if MASTER_SHOT_PROMPT_CONTRACT not in content:
+            content = MASTER_SHOT_PROMPT_CONTRACT + content
+        for pattern in LEGACY_FINAL_PROMPT_PATTERNS:
+            content = pattern.sub("", content)
+        content = re.sub(r"[ \t]{2,}", " ", content)
+        content = re.sub(r"\n{3,}", "\n\n", content).strip() + "\n"
+        db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?", (content, now_iso(), row["key"]))
+
+
+# 该摘要只匹配已由 070 写入、且从未被管理员修改过的旧上装系统 Prompt。
+# 不匹配时一律保留原文，避免把管理员的局部规则误当作可覆盖的系统默认值。
+LEGACY_TOP_FINAL_PROMPT_SHA256 = "71426fe538930755006687cf96a4f8b955294a1a812beec80254fd0412e3b855"
+
+
+def canonical_top_final_prompt() -> str:
+    return (Path(__file__).resolve().parents[1] / "prompt_templates" / "final_image_top.txt").read_text(encoding="utf-8").strip() + "\n"
+
+
+def migration_refresh_legacy_top_final_prompt(db: sqlite3.Connection) -> None:
+    """将可精确识别的旧上装系统 Prompt 升级为当前母版直出版本。"""
+    if not table_exists(db, "prompt_configs"):
+        return
+    row = db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.final_image_top'").fetchone()
+    if not row:
+        return
+    content = str(row["content"] or "")
+    digest = hashlib.sha256(content.strip().encode("utf-8")).hexdigest()
+    if digest != LEGACY_TOP_FINAL_PROMPT_SHA256:
+        return
+    db.execute(
+        "UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = 'assembly.final_image_top'",
+        (canonical_top_final_prompt(), now_iso()),
+    )
+
+
+# 仅升级由 070 写入、且从未被管理员修改过的下装/套装系统 Prompt。
+# 摘要不匹配时保留原文，避免覆盖任何管理员自定义内容。
+LEGACY_BOTTOM_AND_ONE_PIECE_FINAL_PROMPT_SHA256: dict[str, str] = {
+    "assembly.final_image_bottom": "2ecde92070900fd3d86f5378b05d523c0dbe530854aa630eebf45a95f6f37100",
+    "assembly.final_image_one_piece": "586e32581a3a4758335659617fb4c61d3ffdcf43ffebe3b403d9a4b00b937a64",
+}
+
+
+def canonical_bottom_or_one_piece_final_prompt(key: str) -> str:
+    filenames = {
+        "assembly.final_image_bottom": "final_image_bottom.txt",
+        "assembly.final_image_one_piece": "final_image_one_piece.txt",
+    }
+    filename = filenames[key]
+    return (Path(__file__).resolve().parents[1] / "prompt_templates" / filename).read_text(encoding="utf-8").strip() + "\n"
+
+
+def migration_refresh_legacy_bottom_and_one_piece_final_prompts(db: sqlite3.Connection) -> None:
+    """将可精确识别的旧下装、套装系统 Prompt 升级为当前母版直出版本。"""
+    if not table_exists(db, "prompt_configs"):
+        return
+    for key, expected_digest in LEGACY_BOTTOM_AND_ONE_PIECE_FINAL_PROMPT_SHA256.items():
+        row = db.execute("SELECT content FROM prompt_configs WHERE key = ?", (key,)).fetchone()
+        if not row:
+            continue
+        content = str(row["content"] or "")
+        digest = hashlib.sha256(content.strip().encode("utf-8")).hexdigest()
+        if digest != expected_digest:
+            continue
+        db.execute(
+            "UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?",
+            (canonical_bottom_or_one_piece_final_prompt(key), now_iso(), key),
+        )
+
+
+def migration_live_shot_preset_slots(db: sqlite3.Connection) -> None:
+    """Replace admin draft/publish maintenance with live slots and per-result-set snapshots.
+
+    Legacy version tables remain read-only so historical result sets can still be replayed.
+    """
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS shot_preset_slots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          category_family TEXT NOT NULL,
+          shot_index INTEGER NOT NULL,
+          background_asset_id INTEGER REFERENCES media_assets(id),
+          pose_asset_id INTEGER REFERENCES media_assets(id),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(category_family, shot_index),
+          CHECK(category_family IN ('top', 'bottom', 'one_piece')),
+          CHECK(shot_index BETWEEN 1 AND 5)
+        );
+        CREATE TABLE IF NOT EXISTS generation_result_set_shot_presets (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          result_set_id INTEGER NOT NULL REFERENCES generation_result_sets(id) ON DELETE CASCADE,
+          category_family TEXT NOT NULL,
+          shot_index INTEGER NOT NULL,
+          background_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+          pose_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+          created_at TEXT NOT NULL,
+          UNIQUE(result_set_id, shot_index),
+          CHECK(category_family IN ('top', 'bottom', 'one_piece')),
+          CHECK(shot_index BETWEEN 1 AND 5)
+        );
+        CREATE INDEX IF NOT EXISTS idx_result_set_shot_presets_result
+          ON generation_result_set_shot_presets(result_set_id, shot_index);
+        """
+    )
+    if not table_exists(db, "shot_presets") or not table_exists(db, "shot_preset_versions"):
+        return
+    draft = db.execute(
+        "SELECT id FROM shot_preset_versions WHERE status = 'DRAFT' ORDER BY version_number DESC LIMIT 1"
+    ).fetchone()
+    timestamp = now_iso()
+    for family in ("top", "bottom", "one_piece"):
+        published = db.execute(
+            "SELECT version_id FROM shot_preset_family_publications WHERE category_family = ?",
+            (family,),
+        ).fetchone() if table_exists(db, "shot_preset_family_publications") else None
+        for shot_index in range(1, 6):
+            row = None
+            if draft:
+                row = db.execute(
+                    "SELECT background_asset_id, pose_asset_id FROM shot_presets WHERE version_id = ? AND category_family = ? AND shot_index = ?",
+                    (int(draft["id"]), family, shot_index),
+                ).fetchone()
+            if not row and published:
+                row = db.execute(
+                    "SELECT background_asset_id, pose_asset_id FROM shot_presets WHERE version_id = ? AND category_family = ? AND shot_index = ?",
+                    (int(published["version_id"]), family, shot_index),
+                ).fetchone()
+            if row:
+                db.execute(
+                    """
+                    INSERT INTO shot_preset_slots
+                      (category_family, shot_index, background_asset_id, pose_asset_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(category_family, shot_index) DO NOTHING
+                    """,
+                    (family, shot_index, row["background_asset_id"], row["pose_asset_id"], timestamp, timestamp),
+                )
+
+
+def rebuild_generation_result_sets_direct_edits(db: sqlite3.Connection) -> None:
+    if not table_exists(db, "generation_result_sets"):
+        return
+    columns = table_columns(db, "generation_result_sets")
+    info = {str(row["name"]): row for row in db.execute("PRAGMA table_info(generation_result_sets)").fetchall()}
+    if "shot_preset_version_id" in columns and not int(info.get("preview_id", {"notnull": 0})["notnull"] or 0):
+        return
+
+    def rebuild() -> None:
+        db.executescript(
+            """
+            CREATE TABLE generation_result_sets_direct (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+              input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
+              styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
+              preview_id INTEGER REFERENCES generation_previews(id),
+              shot_preset_version_id INTEGER REFERENCES shot_preset_versions(id),
+              user_instruction_json TEXT,
+              status TEXT NOT NULL DEFAULT 'RUNNING',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            """
+        )
+        source_columns = [
+            "id", "task_id", "input_version_id", "styling_id", "preview_id",
+            "shot_preset_version_id", "user_instruction_json", "status", "created_at", "updated_at",
+        ]
+        select_exprs = [column if column in columns else "NULL" if column == "shot_preset_version_id" else default_sql_for_result_set_column(column) for column in source_columns]
+        db.execute(
+            f"INSERT INTO generation_result_sets_direct ({', '.join(source_columns)}) SELECT {', '.join(select_exprs)} FROM generation_result_sets"
+        )
+        db.executescript(
+            """
+            DROP TABLE generation_result_sets;
+            ALTER TABLE generation_result_sets_direct RENAME TO generation_result_sets;
+            """
+        )
+
+    run_schema_rebuild_with_foreign_keys_disabled(db, rebuild)
 
 
 def scrub_prompt_config_hero_product_info(db: sqlite3.Connection) -> None:

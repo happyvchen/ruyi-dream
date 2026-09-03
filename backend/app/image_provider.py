@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import mimetypes
 import os
 import tempfile
@@ -17,6 +18,7 @@ from . import config
 from .db import get_db, now_iso
 from .generation_progress import (
     ERROR_DELIVERY_FAILED,
+    ERROR_INVALID_REQUEST,
     ERROR_SUBMISSION_UNKNOWN,
     ERROR_SYSTEM_ERROR,
     ERROR_UPLOAD_FAILED,
@@ -296,6 +298,7 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
 
         uploaded_inputs, image_urls = prepare_toapis_image_inputs(task_package.get("imageInputs", []), on_progress)
         provider_request = build_toapis_request_snapshot(task_package, image_urls)
+        provider_reference_manifest = build_provider_reference_image_manifest(uploaded_inputs, image_urls)
         try:
             submit_response = post_generation_task_with_confirmed_failure_retries(
                 toapis_url("/v1/images/generations"),
@@ -315,6 +318,7 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
                 "providerStatus": "submission_unknown",
                 "providerRequestId": None,
                 "imageInputs": uploaded_inputs,
+                "providerReferenceImageManifest": provider_reference_manifest,
                 "providerRequest": provider_request,
             }
             raise
@@ -333,6 +337,7 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
             "providerRequestId": task_id,
             "providerUrls": {"statusUrl": toapis_url(f"/v1/images/generations/{task_id}") if task_id else None},
             "imageInputs": uploaded_inputs,
+            "providerReferenceImageManifest": provider_reference_manifest,
             "providerRequest": provider_request,
             "providerResponse": submit_response,
             "providerStatusResponse": submit_response,
@@ -490,9 +495,11 @@ def upload_bytes_with_cache(
     provider: str,
     content: bytes,
     uploader: Callable[[], str],
+    *,
+    cache_namespace: str = "collage",
 ) -> str:
     """运行时拼图使用内容哈希复用现有 provider_upload_cache。"""
-    cache_key = f"collage:{hashlib.sha256(content).hexdigest()}"
+    cache_key = f"{cache_namespace}:{hashlib.sha256(content).hexdigest()}"
     return upload_object_with_cache(provider, cache_key, uploader)
 
 
@@ -546,11 +553,12 @@ def build_toapis_request_snapshot(task_package: dict[str, Any], image_urls: list
     request = {
         "model": settings.gpt_image2_model_id,
         "prompt": prompt,
-        "reference_images": image_urls,
-        "reference_image_manifest": build_provider_reference_image_manifest(image_inputs, image_urls),
+        "image_urls": image_urls,
         "n": 1,
-        "size": settings.gpt_image2_preview_size if stage == "preview_grid" else settings.gpt_image2_size,
-        "resolution": settings.gpt_image2_resolution,
+        "size": settings.gpt_image2_preview_size if stage == "preview_grid" else "1:1",
+        "resolution": "2k" if stage == "final_image" else str(settings.gpt_image2_resolution).lower(),
+        "quality": "high" if stage == "final_image" else settings.gpt_image2_quality,
+        "output_format": settings.gpt_image2_output_format,
         "response_format": "url",
     }
     client_business_id = str(task_package.get("clientBusinessId") or "").strip()
@@ -571,7 +579,9 @@ def build_provider_reference_image_manifest(image_inputs: list[dict[str, Any]], 
                 "objectKey": item.get("objectKey"),
                 "filename": item.get("filename"),
                 "angle": item.get("angle"),
+                "referenceBoardKind": item.get("referenceBoardKind"),
                 "collageRule": item.get("collageRule"),
+                "providerInputPolicyVersion": item.get("providerInputPolicyVersion"),
                 "collageSources": build_collage_source_manifest(item),
                 "url": url,
             }
@@ -593,6 +603,7 @@ def build_collage_source_manifest(item: dict[str, Any]) -> list[dict[str, Any]]:
                 "objectKey": source.get("objectKey"),
                 "filename": source.get("filename"),
                 "angle": source.get("angle"),
+                "materialCode": source.get("materialCode"),
             }
         )
     return manifest
@@ -703,7 +714,7 @@ def prepare_toapis_image_inputs(
         raise RuntimeError(f"参考图导入到 toapis 失败，以下输入没有 toapis Image URL：{', '.join(missing_roles)}")
     image_urls = [str(item["providerUrl"]) for item in uploaded_inputs]
     if not image_urls:
-        raise RuntimeError("没有可传给 GPT Image-2 的 reference_images")
+        raise RuntimeError("没有可传给 GPT Image-2 的 image_urls")
     return uploaded_inputs, image_urls
 
 
@@ -721,7 +732,13 @@ def upload_toapis_image_inputs(
         object_key = item.get("objectKey")
         source_url = item.get("providerUrl") or item.get("url")
         next_item = dict(item)
-        if source_url and is_toapis_file_url(str(source_url)):
+        existing_policy_version = str(item.get("providerInputPolicyVersion") or "")
+        next_item["providerInputPolicyVersion"] = f"toapis-input-{TOAPIS_INPUT_POLICY_VERSION}"
+        if (
+            source_url
+            and is_toapis_file_url(str(source_url))
+            and existing_policy_version == f"toapis-input-{TOAPIS_INPUT_POLICY_VERSION}"
+        ):
             next_item["providerUrl"] = source_url
             uploaded.append(next_item)
             continue
@@ -731,6 +748,7 @@ def upload_toapis_image_inputs(
                 "toapis",
                 content,
                 lambda: upload_bytes_to_toapis(content, filename, content_type, deadline=deadline),
+                cache_namespace=f"input-{TOAPIS_INPUT_POLICY_VERSION}",
             )
             uploaded.append(next_item)
             continue
@@ -739,7 +757,7 @@ def upload_toapis_image_inputs(
             next_item["sourceObjectKey"] = source_key
             next_item["providerUrl"] = upload_object_with_cache(
                 "toapis",
-                source_key,
+                toapis_upload_cache_key(source_key),
                 lambda key=source_key: upload_object_to_toapis(key, os.path.basename(key), deadline=deadline),
             )
             uploaded.append(next_item)
@@ -812,9 +830,11 @@ def build_reference_collage_bytes(item: dict[str, Any], deadline: float | None =
 def reference_collage_grid(count: int) -> tuple[int, int]:
     if count <= 2:
         return max(1, count), 1
-    if count == 3:
-        return 3, 1
-    return 2, 2
+    if count <= 4:
+        return 2, 2
+    if count <= 6:
+        return 3, 2
+    return 4, 2
 
 
 def contain_on_white(image: Any, width: int, height: int) -> Any:
@@ -847,7 +867,9 @@ def is_fal_cdn_url(url: str) -> bool:
 
 def is_toapis_file_url(url: str) -> bool:
     host = urlparse(url).netloc.lower()
-    return host == "files.toapis.com" or host.endswith(".toapis.com")
+    return host in {"files.toapis.com", "files.toapis.xyz"} or host.endswith(
+        (".toapis.com", ".toapis.xyz")
+    )
 
 
 def upload_object_to_fal(object_key: str, filename: str) -> str:
@@ -867,7 +889,12 @@ def upload_object_to_toapis(object_key: str, filename: str, deadline: float | No
 
 def upload_url_to_toapis(url: str, filename: str, deadline: float | None = None) -> str:
     content, content_type = download_bytes(url, timeout=remaining_upload_timeout(deadline), attempts=1)
-    return upload_bytes_to_toapis(content, filename, content_type, deadline=deadline)
+    return upload_bytes_with_cache(
+        "toapis",
+        content,
+        lambda: upload_bytes_to_toapis(content, filename, content_type, deadline=deadline),
+        cache_namespace=f"input-{TOAPIS_INPUT_POLICY_VERSION}",
+    )
 
 
 def upload_bytes_to_fal(content: bytes, filename: str, content_type: str | None = None) -> str:
@@ -891,10 +918,34 @@ def upload_bytes_to_fal(content: bytes, filename: str, content_type: str | None 
 TOAPIS_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 TOAPIS_TARGET_UPLOAD_BYTES = TOAPIS_MAX_UPLOAD_BYTES - 512 * 1024
 TOAPIS_MAX_REFERENCE_IMAGES = 6
+TOAPIS_MAX_INPUT_LONG_EDGE = 8192
+TOAPIS_MAX_INPUT_PIXELS = 40_000_000
+TOAPIS_TARGET_INPUT_LONG_EDGE = 8000
+TOAPIS_TARGET_INPUT_PIXELS = 36_000_000
+TOAPIS_INPUT_POLICY_VERSION = "v2"
 FIT_QUALITY_STEPS = (95, 92, 88, 85)
 FIT_SCALE_STEP = 0.85
-FIT_MIN_EDGE = 768
 REFERENCE_COLLAGE_TILE_SIZE = 1400
+
+
+def toapis_input_target_size(width: int, height: int) -> tuple[int, int]:
+    """返回 ToAPIs 传输副本尺寸；合规图片保持原尺寸，超限时等比缩小并留安全余量。"""
+    width = max(1, int(width))
+    height = max(1, int(height))
+    scale = 1.0
+    if max(width, height) > TOAPIS_TARGET_INPUT_LONG_EDGE:
+        scale = min(scale, TOAPIS_TARGET_INPUT_LONG_EDGE / max(width, height))
+    pixels = width * height
+    if pixels > TOAPIS_TARGET_INPUT_PIXELS:
+        scale = min(scale, math.sqrt(TOAPIS_TARGET_INPUT_PIXELS / pixels))
+    if scale >= 1.0:
+        return width, height
+    return max(1, math.floor(width * scale)), max(1, math.floor(height * scale))
+
+
+def toapis_upload_cache_key(object_key: str) -> str:
+    """预处理策略升级时自然失效旧 provider URL，不清空共享缓存表。"""
+    return f"input-{TOAPIS_INPUT_POLICY_VERSION}:{object_key}"
 
 
 def fit_image_bytes_under_limit(
@@ -903,20 +954,25 @@ def fit_image_bytes_under_limit(
     content_type: str | None,
     target_bytes: int = TOAPIS_TARGET_UPLOAD_BYTES,
 ) -> tuple[bytes, str, str | None]:
-    """超过 target_bytes 的图片压到刚好过线为止；未超限的原样返回。
+    """把图片规范成 ToAPIs 支持的传输副本；原始媒体内容不做任何写回。
 
-    压缩策略：优先保留原分辨率、只降编码质量；仍超限才逐档缩小边长。
+    同时约束长边、总像素和编码字节。尺寸合规时优先保留原分辨率、只降
+    编码质量；仍超限才逐档缩小边长。
     目标是"压得越少越好"，保证参考图清晰度，避免把大图压得远小于其他输入图。
     """
-    if len(content) <= target_bytes:
-        return content, filename, content_type
     try:
         from PIL import Image, ImageOps
-    except ImportError:
-        return content, filename, content_type
+    except ImportError as exc:
+        raise GenerationPhaseError("图片处理组件不可用，无法校验参考图", ERROR_SYSTEM_ERROR) from exc
     try:
         with Image.open(BytesIO(content)) as image:
             image = ImageOps.exif_transpose(image)
+            image.load()
+            target_width, target_height = toapis_input_target_size(image.width, image.height)
+            dimensions_compliant = (target_width, target_height) == image.size
+            has_alpha = image.mode in {"RGBA", "LA"} or (image.mode == "P" and "transparency" in image.info)
+            if dimensions_compliant and len(content) <= target_bytes and not has_alpha:
+                return content, filename, content_type
             if image.mode in {"RGBA", "LA", "P"}:
                 base = image.convert("RGBA")
                 flattened = Image.new("RGB", base.size, (255, 255, 255))
@@ -925,31 +981,37 @@ def fit_image_bytes_under_limit(
             elif image.mode != "RGB":
                 image = image.convert("RGB")
 
-            best: bytes | None = None
-            scale = 1.0
+            width, height = target_width, target_height
             while True:
-                if scale >= 1.0:
+                if (width, height) == image.size:
                     resized = image
                 else:
-                    width = max(1, round(image.width * scale))
-                    height = max(1, round(image.height * scale))
                     resized = image.resize((width, height), Image.Resampling.LANCZOS)
                 for quality in FIT_QUALITY_STEPS:
                     output = BytesIO()
                     resized.save(output, "JPEG", quality=quality, optimize=True)
-                    best = output.getvalue()
-                    if len(best) <= target_bytes:
+                    candidate = output.getvalue()
+                    if len(candidate) <= target_bytes:
                         stem = os.path.splitext(filename)[0] or "reference-image"
-                        return best, f"{stem}.jpg", "image/jpeg"
-                if min(resized.width, resized.height) <= FIT_MIN_EDGE:
+                        return candidate, f"{stem}.jpg", "image/jpeg"
+                if width == 1 and height == 1:
                     break
-                scale *= FIT_SCALE_STEP
-    except OSError:
-        return content, filename, content_type
-    if best is not None:
-        stem = os.path.splitext(filename)[0] or "reference-image"
-        return best, f"{stem}.jpg", "image/jpeg"
-    return content, filename, content_type
+                next_width = max(1, math.floor(width * FIT_SCALE_STEP))
+                next_height = max(1, math.floor(height * FIT_SCALE_STEP))
+                if next_width == width and width > 1:
+                    next_width -= 1
+                if next_height == height and height > 1:
+                    next_height -= 1
+                width, height = next_width, next_height
+    except (OSError, ValueError) as exc:
+        raise GenerationPhaseError(
+            f"参考图无法解码或转换：{filename}",
+            ERROR_INVALID_REQUEST,
+        ) from exc
+    raise GenerationPhaseError(
+        f"参考图转换后仍超过导入大小限制：{filename}",
+        ERROR_INVALID_REQUEST,
+    )
 
 
 def upload_bytes_to_toapis(

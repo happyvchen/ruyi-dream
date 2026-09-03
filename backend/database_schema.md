@@ -2,12 +2,13 @@
 
 ## 当前原则
 
-数据库以当前四步生成链路为准：
+数据库以当前三步生成链路为准：
 
 ```text
 GenerationTask
 -> GenerationStyling / StylingPlan
--> GenerationPreview
+-> ShotPresetSlot
+-> GenerationResultSetShotPreset
 -> GenerationResultSet / GenerationResultImage
 ```
 
@@ -22,8 +23,11 @@ GenerationTask
 | `generation_task_images` | 当前任务主推款图片 |
 | `generation_task_input_versions` | 进入 AI 阶段时冻结的输入版本：任务名、主推款图、数字模特快照 |
 | `generation_stylings` | AI 智能选搭结果，保存 `StylingPlan`、候选、选中搭配和 attempt |
-| `generation_previews` | 分镜预览记录，保存预览图、环境参考图、用户要求和 attempt |
-| `generation_result_sets` | 一组成片结果，固定关联一个分镜预览 |
+| `generation_previews` | 只读历史兼容表；当前链路不再新增记录 |
+| `shot_preset_slots` | 15 个当前生效的品类/镜头槽位；拍摄母版和姿势可单张立即替换/删除 |
+| `generation_result_set_shot_presets` | 结果集创建时冻结的五组拍摄母版/姿势关系 |
+| `shot_preset_versions` / `shot_presets` / `shot_preset_family_publications` | 旧维护模型，只用于迁移已有配置与读取历史结果集 |
+| `generation_result_sets` | 一组成片结果；新结果 `preview_id`、`shot_preset_version_id` 为空，预设由关系快照冻结 |
 | `generation_result_images_new` | 单张最终成片，固定 5 条槽位 |
 | `generation_attempts` | provider 调用快照、进度、结果和错误分类 |
 | `styling_garments` | 搭配服装及其当前 AI 打标状态、业务标签和本轮安全错误码 |
@@ -31,16 +35,17 @@ GenerationTask
 | `upload_session_items` | 导入任务内的图片条目，记录对象 key、文件信息、导入确认和业务媒体引用 |
 | `upload_object_cleanup_queue` | 导入记录彻底删除后的持久对象清理队列；保存精确 key、来源会话和最近错误，供 RustFS/S3 失败后重试 |
 | `prompt_configs` | Prompt 维护配置槽 |
+| `retired_prompt_configs` | 退出运行链路的 Prompt 正文备份；不在维护页展示，仅供回滚审计 |
 
 ## GenerationTask 关键字段
 
 - `batch_id`
 - `ai_styling_user_instruction_text`
-- `storyboard_preview_user_instruction_text`
+- `storyboard_preview_user_instruction_text`（历史兼容）
 - `final_image_user_instruction_text`
 - `current_input_version_id`
 - `active_styling_id`
-- `active_preview_id` / `active_storyboard_preview_id`
+- `active_preview_id` / `active_storyboard_preview_id`（历史兼容）
 - `active_result_set_id`
 - `auto_run_target`
 - `auto_run_requested_at`
@@ -51,7 +56,7 @@ GenerationTask
 
 ## Prompt 配置
 
-`prompt_configs` 只保留当前九个槽位：品牌信息、AI 打标、AI 选搭、三类分镜预览、三类成片。旧的动态剧本 Prompt 与旧通用分镜/成片 Prompt 会被迁移删除。
+`prompt_configs` 只保留当前七个槽位：品牌信息、AI 打标、主推款图片挑选、AI 选搭和三类成片。迁移 `066_direct_final_edits_workflow` 先把三个分镜 Prompt 正文备份到 `retired_prompt_configs`，再从运行目录移除。迁移 `072_live_shot_preset_slots` 把旧草稿或已发布配置复制为当前槽位，并建立结果集级冻结关系；旧版本表保留只读兼容。
 
 ## UploadSession 关键字段
 

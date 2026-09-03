@@ -138,6 +138,23 @@ export type MediaAsset = {
   originalUrl?: string | null
 }
 
+export type ShotPresetSlot = {
+  categoryFamily: 'top' | 'bottom' | 'one_piece'
+  shotIndex: number
+  background: MediaAsset | null
+  pose: MediaAsset | null
+  complete: boolean
+}
+
+export type ShotPresetMatrix = {
+  families: Record<ShotPresetSlot['categoryFamily'], {
+    complete: boolean
+    configuredCount: number
+    validationErrors: string[]
+  }>
+  slots: ShotPresetSlot[]
+}
+
 export type StylingGarment = {
   id: number
   code: string
@@ -956,14 +973,17 @@ export const api = {
     form.append('file', file)
     return request<{ item: GenerationTask }>(`/api/generation-task-images/${id}/replace`, { method: 'POST', body: form })
   },
+  addTaskImages: (id: number, files: File[]) => {
+    const form = new FormData()
+    files.forEach((file) => form.append('files', file))
+    return request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/images`, { method: 'POST', body: form })
+  },
   updateTaskImage: (id: number, sortOrder: number) =>
     request<{ item: GenerationTask }>(`/api/generation-task-images/${id}`, { method: 'PATCH', body: JSON.stringify({ sortOrder }) }),
   deleteTaskImage: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-task-images/${id}`, { method: 'DELETE' }),
   selectStyling: (id: number, userInstruction?: string) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/select-styling`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
-  previewTask: (id: number, userInstruction?: string) =>
-    request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/preview`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
   generateFinal: (id: number, userInstruction?: string) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/generate-final`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
   autoRunFinal: (id: number, restart = false) =>
@@ -1029,6 +1049,11 @@ export const api = {
     files.forEach((file) => form.append('files', file))
     return request<{ item: ModelProfile }>(`/api/model-profiles/${modelId}/head-references`, { method: 'POST', body: form })
   },
+  addStylingGarmentImages: (garmentId: number, files: File[]) => {
+    const form = new FormData()
+    files.forEach((file) => form.append('files', file))
+    return request<{ item: StylingGarment }>(`/api/styling-garments/${garmentId}/images`, { method: 'POST', body: form })
+  },
   replaceModelHeadReference: (modelId: number, referenceId: string, file: File) => {
     const form = new FormData()
     form.append('file', file)
@@ -1047,4 +1072,12 @@ export const api = {
     return request<{ asset: MediaAsset | null }>('/api/shoot-environment', { method: 'POST', body: form })
   },
   clearShootEnvironment: () => request<{ asset: MediaAsset | null }>('/api/shoot-environment', { method: 'DELETE' }),
+  getShotPresets: () => request<ShotPresetMatrix>('/api/shot-presets'),
+  replaceShotPresetAsset: (categoryFamily: ShotPresetSlot['categoryFamily'], shotIndex: number, role: 'background' | 'pose', file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<ShotPresetMatrix>(`/api/shot-presets/${categoryFamily}/${shotIndex}/${role}`, { method: 'POST', body: form })
+  },
+  deleteShotPresetAsset: (categoryFamily: ShotPresetSlot['categoryFamily'], shotIndex: number, role: 'background' | 'pose') =>
+    request<ShotPresetMatrix>(`/api/shot-presets/${categoryFamily}/${shotIndex}/${role}`, { method: 'DELETE' }),
 }

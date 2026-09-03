@@ -1,43 +1,23 @@
 # Backend Domain Model
 
-## 当前生成领域模型
+## 当前生成对象
 
-```text
-GenerationTask
-  -> GenerationTaskInputVersion
-  -> GenerationStyling / StylingPlan
-  -> GenerationPreview
-  -> GenerationResultSet
-  -> GenerationResultImage x 5
-```
+`GenerationTask` 是拍摄任务根节点，冻结 `GenerationTaskInputVersion` 后运行 AI Stylist，得到带商品理解、候选比较和 Aesthetic Critic 结果的 `GenerationStyling / StylingPlan`。
 
-当前后端不创建动态拍摄剧本对象，也不创建镜头计划对象。分镜六镜头和成片五镜头规则由三类固定 Prompt 表达，运行时只保存最终预览图和五张成片。
+当前后端不创建分镜预览、动态拍摄剧本或镜头计划。旧 `GenerationPreview` 表和序列化字段仅用于历史记录兼容；preview endpoint 固定返回 410。
 
-## StylingPlan
+## 拍摄预设
 
-`StylingPlan` 是 AI Stylist 的输出，负责：
+`ShotPresetSlot` 由 `category_family`（`top` / `bottom` / `one_piece`）与 `shot_index`（1–5）唯一定位，并关联当前生效的拍摄母版和姿势两个 `MediaAsset`。单张替换或删除立即生效，不存在维护草稿、发布或用户可见版本。拍摄母版带原人物、原服装和目标构图，生成时整图替换原人物和原服装；某类型五个槽位不完整时不能开始该类型成片。
 
-- 理解主推款品类、卖点和不可遮挡区域；
-- 探索多套 outfit；
-- 用 Aesthetic Critic 判断审美、品牌和商品表达是否成立；
-- 选择真实可见的搭配服装或判断无需库内配角；
-- 输出成片阶段需要的穿着关系、配饰边界和风险提示。
-
-## 分镜预览
-
-`GenerationPreview` 是 Image-2 生成的一张 3:2 六格预览图。它不是商品事实源；商品事实仍来自主推款图和搭配服装图。预览用于固定本组构图、姿态、裁切、背景和组图方向。
+`GenerationResultSetShotPreset` 是结果集创建时复制的五条关系快照，保证维护端随后换图不会影响继续生成、单张重生和历史复盘。旧 `ShotPresetVersion` / `ShotPreset` 只用于迁移已有配置和读取旧结果集。
 
 ## 最终成片
 
-`GenerationResultSet` 固定包含 5 张 `GenerationResultImage`，对应分镜预览前 5 格。每张成片使用当前分镜单格、商品图、模特图、环境图和同一 `StylingPlan` 动态事实。
+`GenerationResultSet` 固定包含五个 `GenerationResultImage`，创建时冻结输入版本、StylingPlan 和五条 `GenerationResultSetShotPreset`；`preview_id` 与 `shot_preset_version_id` 对新结果为空。每张成片使用对应冻结预设、模特图、主推款图、搭配款图和同一 StylingPlan 组装 edits 请求。
 
-## Attempt
+`GenerationAttempt` 保存 provider 请求快照、状态、结果、错误和恢复信息。新成片 owner type 为 `generation_result_image`；`generation_preview` 只可能出现在历史数据中。
 
-`generation_attempts.owner_type` 当前包括：
+## 媒体
 
-- `styling_garment_tagging`
-- `generation_styling`
-- `generation_preview`
-- `generation_result_image`
-
-历史旧 owner type 由最终迁移清理，不作为当前运行依赖。
+所有业务图片统一登记为 `MediaAsset`，二进制写入 S3 兼容对象存储。当前拍摄预设和结果集冻结快照都参与媒体引用计数；更换当前槽位不会删除仍被历史结果集引用的资产。

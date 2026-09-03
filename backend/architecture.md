@@ -7,7 +7,7 @@
 - 素材与媒体资产管理；
 - Gemini 打标和 AI 智能选搭；
 - Prompt 维护槽位读取与 runtime 占位渲染；
-- Image-2 分镜预览和最终成片任务包组装；
+- 当前生效拍摄预设、结果集级冻结快照和 Image-2 edits 最终成片任务包组装；
 - provider attempt 快照、进度、错误分类和轮询恢复；
 - 生成记录、归档、删除和导出。
 
@@ -16,15 +16,16 @@
 ```text
 导入主推款
 -> AI 智能选搭
--> 三类固定 Prompt 生成分镜预览
--> 分镜前 5 格生成成片
+-> 按品类选择当前生效的五镜头拍摄预设并冻结到结果集
+-> 三类固定 Prompt + Image-2 edits 并发生成五张成片
 ```
 
-后端不再包含动态剧本服务。`app/main.py` 中的生成相关代码只围绕 `StylingPlan`、`GenerationPreview` 和 `GenerationResultImage` 编排。
+后端不再包含动态剧本或当前分镜服务。`app/main.py` 中的新生成链路围绕 `StylingPlan`、`ShotPresetSlot`、`GenerationResultSetShotPreset` 和 `GenerationResultImage` 编排；旧预览与旧拍摄预设版本数据只读兼容。
 
 ## Image-2 分阶段恢复
 
-- 参考图导入失败只重试失败导入，已成功导入的 provider URL 通过缓存或 attempt 快照复用。
+- 参考图导入失败只重试失败导入，已成功且标记为当前输入策略版本的 provider URL 通过缓存或 attempt 快照复用。
+- ToAPIs 只接收运行时传输副本：官方长边/总像素上限按 `8192 / 4000 万` 校验，生产目标收紧为 `8000 / 3600 万`，同时压到 9.5 MiB 以内；始终等比缩放、透明底转白底，不写回或覆盖 S3 原始素材。缓存键携带 `input-v2`，升级策略后旧 URL 不会误复用。
 - 每个图片 attempt / 生成重试轮次向 ToAPIs 传稳定 `client_business_id`。创建任务遇到连接中断、`ReadTimeout` 或 TLS EOF 时标记为 `SUBMISSION_UNKNOWN`，按统一退避先以该业务 ID 查询原任务；查到即继续，明确 `task_not_found` 才补提，避免重复任务和重复计费。
 - 提交结果未知按每张图自己的 `GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT` 预算恢复，不再设置同批提交未知熔断器。
 - 已取得 provider task ID 后只恢复状态查询；provider 明确瞬时生成失败时仅按 `GENERATION_SUBMIT_RETRY_LIMIT` 重建生成任务。
@@ -47,11 +48,12 @@ ToAPIs 图片任务是异步协议：创建接口返回任务 ID，状态接口�
 | `rate_limit_exceeded` / HTTP 429 | `RATE_LIMITED` | 等待 | 尊重 `Retry-After`，有限退避 |
 | HTTP 500 + `rate_limit_check_failed` | `RATE_LIMITED` | 等待 | 按零产出瞬时错误指数退避 |
 | `internal_error` / HTTP 500 | `PROVIDER_INTERNAL_ERROR` | 稍后再试 | 按 `GENERATION_SUBMIT_RETRY_LIMIT` 有限重建 |
+| 精确 `unknown provider for model` 或真正零输出且未分类的 provider 错误 | `PROVIDER_TRANSIENT_UNKNOWN` | 等待自动恢复 | 安全边界内有限重试；已有正文、reasoning、usage 或 finish reason 时不盲目重发 |
 | 异步 `generation_failed`，且无更深层不可重试原因 | `PROVIDER_GENERATION_FAILED` | 再次生成 | 按 `GENERATION_SUBMIT_RETRY_LIMIT` 有限重建 |
 
-API 摘要返回稳定 `error={code,title,message,action,retryable}`；普通用户只看可读标题、具体原因和下一步。数据库与 admin 技术详情保留原始 `technicalMessage`、provider 快照、顶层/上游错误码和 providerRequestId。
+API 摘要返回稳定 `error={code,title,message,action,retryable}`；普通用户只看可读标题、具体原因和下一步。数据库与 admin 技术详情保留原始 `technicalMessage`、provider 快照、顶层/上游错误码、providerRequestId 及 `providerReferenceImageManifest.providerInputPolicyVersion`。
 
-官方依据：`https://docs.toapis.com/docs/cn/api-reference/tasks/image-status`、`https://docs.toapis.com/docs/cn/api-reference/images/gpt-image-2/official`、`https://docs.toapis.com/docs/cn/api-reference/uploads/images`。
+官方依据：`https://dashlyai.mintlify.app/docs/cn/api-reference/tasks/image-status`、`https://dashlyai.mintlify.app/docs/cn/api-reference/images/gpt-image-2/official`、`https://dashlyai.mintlify.app/docs/cn/api-reference/uploads/images`。
 
 ## ToAPIs 并发闸门
 
@@ -71,7 +73,7 @@ Gemini 对明确限流（HTTP 429 或 `rate_limit_check_failed`）、连接失�
 
 | 文件 | 职责 |
 |---|---|
-| `app/main.py` | API 路由、AI Stylist、分镜预览、最终图和后台 poller 编排 |
+| `app/main.py` | API 路由、AI Stylist、拍摄预设、最终图和后台 poller 编排 |
 | `app/db.py` | 最终 schema、Prompt 配置槽登记、清理迁移 |
 | `app/prompt_render.py` | 动态占位文本和参考图图号区间渲染 |
 | `app/image_provider.py` | ToApis / fal 请求快照和图片生成适配 |
@@ -104,5 +106,5 @@ media/<media-uuid>/_derived/final-cells/original-shot<1..6>.png
 
 - 数字模特参考图负责人物身份事实。
 - 主推款和搭配服装图片负责商品事实。
-- 分镜预览只负责构图、姿态、裁切、背景和组图一致性。
-- 最终成片必须回看商品图和模特图，不能只复刻分镜预览。
+- 拍摄预设负责当前镜头的拍摄母版和姿势参考；母版提供场景、构图并在整图编辑中替换原人物和原服装；三类固定成片 Prompt 负责五镜头构图与禁止项。
+- 最终成片必须同时参考商品图、模特图和当前镜头预设；不使用同组连续性锚点。

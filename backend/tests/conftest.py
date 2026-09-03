@@ -101,7 +101,9 @@ def insert_generation_task(
     return task_id
 
 
-def insert_ready_generation_task_with_preview(*, family: str = "top", status: str = "PREVIEW_READY") -> dict[str, int]:
+def insert_ready_generation_task_with_preview(*, family: str = "top", status: str = "PREVIEW_READY", ensure_presets: bool = True) -> dict[str, int]:
+    if ensure_presets:
+        insert_published_shot_presets()
     task_id = insert_generation_task(name="READY-LOOK", status=status, image_count=2)
     preview_asset_id = insert_media_asset("preview.png", f"generation-tasks/{task_id}/preview.png")
     timestamp = now_iso()
@@ -155,6 +157,73 @@ def insert_ready_generation_task_with_preview(*, family: str = "top", status: st
             (status, input_version_id, styling_id, preview_id, preview_id, timestamp, task_id),
         )
     return {"task_id": task_id, "styling_id": styling_id, "preview_id": preview_id}
+
+
+def insert_published_shot_presets(*, families: tuple[str, ...] = ("top", "bottom", "one_piece")) -> int:
+    timestamp = now_iso()
+    with get_db() as db:
+        existing = db.execute("SELECT id FROM shot_preset_versions WHERE status = 'PUBLISHED' LIMIT 1").fetchone()
+        if existing:
+            return int(existing["id"])
+        version_id = int(
+            db.execute(
+                """
+                INSERT INTO shot_preset_versions (version_number, status, published_at, created_at, updated_at)
+                VALUES (1, 'PUBLISHED', ?, ?, ?)
+                """,
+                (timestamp, timestamp, timestamp),
+            ).lastrowid
+        )
+        for category_family in families:
+            for shot_index in range(1, 6):
+                asset_ids: list[int] = []
+                for role, mime_type in (("background", "image/png"), ("mask", "image/png"), ("pose", "image/jpeg")):
+                    asset_ids.append(
+                        int(
+                            db.execute(
+                                """
+                                INSERT INTO media_assets
+                                  (object_key, original_filename, mime_type, width, height, size_bytes, created_at, updated_at)
+                                VALUES (?, ?, ?, 2048, 2048, 128, ?, ?)
+                                """,
+                                (
+                                    f"tests/presets/{category_family}-{shot_index}-{role}",
+                                    f"{category_family}-{shot_index}-{role}.png",
+                                    mime_type,
+                                    timestamp,
+                                    timestamp,
+                                ),
+                            ).lastrowid
+                        )
+                    )
+                db.execute(
+                    """
+                    INSERT INTO shot_presets
+                      (version_id, category_family, shot_index, background_asset_id, mask_asset_id, pose_asset_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (version_id, category_family, shot_index, *asset_ids, timestamp, timestamp),
+                )
+                db.execute(
+                    """
+                    INSERT INTO shot_preset_slots
+                      (category_family, shot_index, background_asset_id, pose_asset_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(category_family, shot_index) DO UPDATE SET
+                      background_asset_id = excluded.background_asset_id,
+                      pose_asset_id = excluded.pose_asset_id,
+                      updated_at = excluded.updated_at
+                    """,
+                    (category_family, shot_index, asset_ids[0], asset_ids[2], timestamp, timestamp),
+                )
+            db.execute(
+                """
+                INSERT INTO shot_preset_family_publications (category_family, version_id, published_at)
+                VALUES (?, ?, ?)
+                """,
+                (category_family, version_id, timestamp),
+            )
+    return version_id
 
 
 def insert_styling_garment(*, code: str, status: str = "READY", image_count: int = 1) -> int:

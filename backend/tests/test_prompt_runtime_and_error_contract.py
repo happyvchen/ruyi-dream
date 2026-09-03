@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app import main as app_main
@@ -9,8 +11,10 @@ from app.generation_progress import (
     ERROR_INSUFFICIENT_BALANCE,
     ERROR_INVALID_REQUEST,
     ERROR_PROVIDER_GENERATION_FAILED,
+    ERROR_PROVIDER_TRANSIENT_UNKNOWN,
     ERROR_RATE_LIMITED,
     ERROR_SUBMISSION_UNKNOWN,
+    ERROR_WAF_BLOCK,
     normalize_toapis_error,
     provider_error_presentation,
 )
@@ -38,7 +42,34 @@ def test_runtime_image_reference_spans_follow_input_order_and_roles() -> None:
         "garment": "图2-6",
         "preview_grid": "图4",
         "shoot_environment": "图5",
+        "shot_background": "",
+        "shot_pose": "",
     }
+
+
+def test_direct_final_runtime_labels_background_pose_model_and_garments() -> None:
+    runtime = app_main.build_final_prompt_runtime(
+        3,
+        "top_shot_3",
+        {"hero_understanding": {"shot_category_family": "top"}},
+        [
+            {"role": "shot_background"},
+            {"role": "shot_pose"},
+            {"role": "model_identity"},
+            {"role": "hero_garment"},
+            {"role": "styling_garment"},
+        ],
+        {"instruction": "减少配饰"},
+        {"upload_requirement": "保留后片结构"},
+    )
+
+    assert runtime["ref_shot_background"] == "图1"
+    assert runtime["ref_shot_pose"] == "图2"
+    assert runtime["ref_model_identity"] == "图3"
+    assert runtime["ref_garment"] == "图4-5"
+    assert runtime["shot_index"] == "3"
+    assert "ref_preview_grid" not in runtime
+    assert "ref_shoot_environment" not in runtime
 
 
 def test_user_visible_instruction_lines_are_business_text_not_prompt_json() -> None:
@@ -74,17 +105,67 @@ def test_final_runtime_marks_exactly_one_current_shot_and_limits_to_five_slots()
         4,
         "top_grid_4",
         {"hero_understanding": {"shot_category_family": "top"}},
-        [{"role": "preview_grid"}, {"role": "model_identity"}, {"role": "hero_garment"}],
+        [{"role": "shot_background"}, {"role": "shot_pose"}, {"role": "model_identity"}, {"role": "hero_garment"}],
         {"instruction": "背景更干净"},
         {"upload_requirement": "保留衣长比例"},
     )
 
-    assert runtime["preview_grid_cell"] == "4"
-    assert runtime["ref_preview_grid"] == "图1"
-    assert runtime["ref_model_identity"] == "图2"
-    assert runtime["ref_garment"] == "图3"
+    assert runtime["ref_shot_background"] == "图1"
+    assert runtime["ref_shot_pose"] == "图2"
+    assert runtime["ref_model_identity"] == "图3"
+    assert runtime["ref_garment"] == "图4"
+    assert "preview_grid_cell" not in runtime
+    assert "ref_preview_grid" not in runtime
     assert [runtime[f"is_shot_{index}"] for index in range(1, 6)] == ["", "", "", "1", ""]
     assert "is_shot_6" not in runtime
+
+
+@pytest.mark.parametrize("filename", ["final_image_top.txt", "final_image_bottom.txt", "final_image_one_piece.txt"])
+def test_final_prompt_templates_separate_master_pose_and_artifact_controls(filename: str) -> None:
+    template = (Path(__file__).resolve().parents[1] / "prompt_templates" / filename).read_text(encoding="utf-8")
+
+    assert "唯一的拍摄母版" in template
+    assert "身体朝向、重心、肩线、手位、视线和头部朝向" in template
+    assert "不改变模特身份、脸、发型、景别、裁切、站位或人物尺度" in template
+    assert "中央 3:4 竖向裁切安全区" in template
+    assert "中央 2:3" not in template
+    assert "不要使用电影化调色、胶片颗粒、做旧、纹理化、磨砂或画布效果" in template
+    assert "避免可见噪点、颗粒、云斑、色斑、波纹、摩尔纹" in template
+
+
+@pytest.mark.parametrize(
+    ("prompt_key", "filename", "family"),
+    [
+        ("assembly.final_image_top", "final_image_top.txt", "top"),
+        ("assembly.final_image_bottom", "final_image_bottom.txt", "bottom"),
+        ("assembly.final_image_one_piece", "final_image_one_piece.txt", "one_piece"),
+    ],
+)
+def test_final_prompt_templates_render_shot_five_without_legacy_coordinates(
+    monkeypatch, prompt_key: str, filename: str, family: str
+) -> None:
+    template = (Path(__file__).resolve().parents[1] / "prompt_templates" / filename).read_text(encoding="utf-8")
+    runtime = app_main.build_final_prompt_runtime(
+        5,
+        "top_shot_5",
+        {"hero_understanding": {"shot_category_family": family}},
+        [
+            {"role": "shot_background"},
+            {"role": "shot_pose"},
+            {"role": "model_identity"},
+            {"role": "hero_garment"},
+        ],
+        {},
+        {},
+    )
+    monkeypatch.setattr(app_main, "prompt_config_content", lambda key, rows=None: template if key == prompt_key else None)
+
+    rendered = app_main.render_prompt_template(prompt_key, runtime)
+
+    assert "中央 3:4 竖向裁切安全区" in rendered
+    assert "中央 2:3" not in rendered
+    assert "16.7%" not in rendered
+    assert "镜头 1｜" not in rendered
 
 
 @pytest.mark.parametrize(
@@ -105,6 +186,93 @@ def test_final_runtime_marks_exactly_one_current_shot_and_limits_to_five_slots()
 )
 def test_toapis_error_normalization_returns_stable_codes(status_code: int, payload: dict[str, object], expected: str) -> None:
     assert normalize_toapis_error(payload, status_code=status_code)["code"] == expected
+
+
+def test_toapis_unknown_provider_route_is_treated_as_transient_instead_of_invalid_input() -> None:
+    payload = {
+        "error": {
+            "code": "model_not_found",
+            "type": "invalid_request_error",
+            "param": "model",
+            "message": "unknown provider for model gemini-3.5-flash-low",
+        }
+    }
+
+    normalized = normalize_toapis_error(payload, status_code=400)
+
+    assert normalized["code"] == ERROR_PROVIDER_TRANSIENT_UNKNOWN
+    assert normalized["upstreamCode"] == "model_not_found"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"type": "invalid_request_error", "message": "unknown provider for model gemini-3.5-flash-low"},
+        {"code": "invalid_request", "message": "unknown provider for model gemini-3.5-flash-low"},
+    ],
+)
+def test_toapis_unknown_provider_route_retries_even_without_model_not_found_code(
+    error: dict[str, str],
+) -> None:
+    normalized = normalize_toapis_error({"error": error}, status_code=400)
+
+    assert normalized["code"] == ERROR_PROVIDER_TRANSIENT_UNKNOWN
+
+
+def test_toapis_real_model_not_found_remains_a_non_retryable_invalid_request() -> None:
+    payload = {
+        "error": {
+            "code": "model_not_found",
+            "type": "invalid_request_error",
+            "param": "model",
+            "message": "model does not exist",
+        }
+    }
+
+    assert normalize_toapis_error(payload, status_code=400)["code"] == ERROR_INVALID_REQUEST
+
+
+def test_unclassified_zero_output_toapis_http_error_defaults_to_transient() -> None:
+    payload = {"error": {"code": "edge_route_unavailable", "message": "temporary route failure"}}
+
+    assert normalize_toapis_error(payload, status_code=418)["code"] == ERROR_PROVIDER_TRANSIENT_UNKNOWN
+
+
+def test_transient_unknown_terminal_presentation_does_not_claim_retry_is_still_running() -> None:
+    presentation = provider_error_presentation(ERROR_PROVIDER_TRANSIENT_UNKNOWN)
+
+    assert "已自动重试" in presentation["message"]
+    assert "正在" not in presentation["message"]
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected"),
+    [
+        (401, ERROR_AUTH_FAILED),
+        (403, ERROR_AUTH_FAILED),
+        (422, ERROR_CONTENT_POLICY),
+    ],
+)
+def test_unknown_provider_words_never_override_hard_stop_http_statuses(status_code: int, expected: str) -> None:
+    payload = {
+        "error": {
+            "code": "model_not_found",
+            "message": "unknown provider for model gemini-test-low",
+        }
+    }
+
+    assert normalize_toapis_error(payload, status_code=status_code)["code"] == expected
+
+
+def test_cloudflare_1010_waf_fingerprint_remains_retryable_before_generic_403_auth() -> None:
+    payload = {
+        "error": {
+            "code": "access_denied",
+            "message": "Cloudflare error code 1010",
+        }
+    }
+
+    assert normalize_toapis_error(payload, status_code=403)["code"] == ERROR_WAF_BLOCK
 
 
 def test_embedded_upstream_json_is_extracted_for_user_recoverable_input_errors() -> None:

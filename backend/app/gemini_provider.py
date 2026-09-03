@@ -24,6 +24,7 @@ from .generation_progress import (
     ERROR_CONN_RESET,
     ERROR_MALFORMED_OUTPUT,
     ERROR_PROVIDER_TIMEOUT,
+    ERROR_PROVIDER_TRANSIENT_UNKNOWN,
     ERROR_RATE_LIMITED,
     ERROR_WAF_BLOCK,
     classify_provider_error,
@@ -422,8 +423,8 @@ def _post_toapis_chat(payload: dict[str, Any], *, read_timeout_seconds: float | 
 
     失败一律抛 GeminiProviderError(error_code=...)（由 classify_provider_error 判定）：
     - HTTP 非 ok → 按状态码 + 错误体分类（502→GATEWAY_5XX、429→RATE_LIMITED、
-      401/403→AUTH_FAILED、余额→INSUFFICIENT_BALANCE 等）。这些都是"请求未产出
-      任何正文"的失败,天然零计费,可安全重发。
+      401/403→AUTH_FAILED、余额→INSUFFICIENT_BALANCE 等）；错误体若带非零输出
+      usage，则按已产出处理，绝不盲目重发。
     - 连接异常(requests.RequestException) → CONN_RESET；上层按产品配置有限自动重发。
     - 流截断/腐蚀 → MALFORMED_OUTPUT(由 assemble_toapis_stream_text 抛出,已产出并
       计费,绝不重发)。
@@ -476,9 +477,14 @@ def _post_toapis_chat(payload: dict[str, Any], *, read_timeout_seconds: float | 
                 status_code=response.status_code,
                 fallback_message=raw_body,
             )
+            error_code = (
+                ERROR_MALFORMED_OUTPUT
+                if _usage_has_generated_output(response_payload.get("usage"))
+                else str(provider_error["code"])
+            )
             raise GeminiProviderError(
                 f"Gemini(ToAPIs 通道) 请求失败: {summarize_upstream_http_error(response.status_code, raw_body)}",
-                str(provider_error["code"]),
+                error_code,
                 retry_after=retry_after,
                 provider_response={
                     "httpStatus": response.status_code,
@@ -593,16 +599,24 @@ def assemble_toapis_stream_text(lines: Any) -> str:
             continue
         if not isinstance(chunk, dict):
             continue
-        if chunk.get("error"):
-            error_body = json.dumps(chunk["error"], ensure_ascii=False)[:500]
-            # 流内 error 块可能携带余额/限流/鉴权语义,按文案分类而不是一律当畸形。
-            # 已收到过正文与否不影响这类"provider 明确报错"的定性。
-            raise GeminiProviderError(
-                f"Gemini(ToAPIs 通道) 流式响应错误: {error_body}",
-                classify_provider_error(body=error_body),
-            )
         if isinstance(chunk.get("usage"), dict):
             usage = chunk["usage"]
+        if chunk.get("error"):
+            error_body = json.dumps(chunk["error"], ensure_ascii=False)[:500]
+            # 尚无正文/思考时，流内 error 是零输出 provider 错误，可按稳定分类
+            # 有限恢复；一旦收到过任何输出，再重发整个请求可能重复计费，必须
+            # 作为已产出但不完整处理。
+            if parts or reasoning_chars or dropped_data_lines or finish_reason or _usage_has_generated_output(usage):
+                raise GeminiProviderError(
+                    f"Gemini(ToAPIs 通道) 已收到部分输出后流式响应错误: {error_body}",
+                    ERROR_MALFORMED_OUTPUT,
+                )
+            provider_error = normalize_toapis_error({"error": chunk["error"]})
+            raise GeminiProviderError(
+                f"Gemini(ToAPIs 通道) 流式响应错误: {error_body}",
+                str(provider_error["code"]),
+                provider_response={"providerError": provider_error},
+            )
         choices = chunk.get("choices")
         if not isinstance(choices, list) or not choices:
             continue
@@ -632,22 +646,47 @@ def assemble_toapis_stream_text(lines: Any) -> str:
             ERROR_MALFORMED_OUTPUT,
         )
     if not text.strip():
-        # 流已建立但没组装出正文:可能被腐蚀(dropped_data_lines>0)或只有思考。
-        # 归 MALFORMED_OUTPUT——流已开始产出、不能盲目重发。
+        # 没有正文、思考和腐蚀事实时属于确定零输出，可有限恢复；已有思考 token
+        # 或流腐蚀则可能已经产出并计费，不能盲目重发。
+        error_code = (
+            ERROR_MALFORMED_OUTPUT
+            if reasoning_chars or dropped_data_lines or _usage_has_generated_output(usage) or finish_reason
+            else ERROR_PROVIDER_TRANSIENT_UNKNOWN
+        )
         raise GeminiProviderError(
             "Gemini(ToAPIs 通道) 流式响应未包含文本内容"
             f"(finish_reason={finish_reason or '?'}, 思考约 {reasoning_chars} 字符, "
             f"丢弃非法 data 行 {dropped_data_lines} 条)。",
-            ERROR_MALFORMED_OUTPUT,
+            error_code,
         )
     return text
 
 
 def extract_toapis_chat_text(response_payload: dict[str, Any]) -> str:
+    if response_payload.get("error"):
+        if _usage_has_generated_output(response_payload.get("usage")):
+            raise GeminiProviderError(
+                "Gemini(ToAPIs 通道) 已产生输出用量后返回错误信封: "
+                f"{json.dumps(response_payload['error'], ensure_ascii=False)[:500]}",
+                ERROR_MALFORMED_OUTPUT,
+            )
+        provider_error = normalize_toapis_error({"error": response_payload["error"]})
+        raise GeminiProviderError(
+            "Gemini(ToAPIs 通道) 响应返回错误信封: "
+            f"{json.dumps(response_payload['error'], ensure_ascii=False)[:500]}",
+            str(provider_error["code"]),
+            provider_response={"providerError": provider_error},
+        )
     choices = response_payload.get("choices")
     if not isinstance(choices, list) or not choices:
-        raise RuntimeError(
-            f"Gemini(ToAPIs 通道) 响应缺少 choices: {json.dumps(response_payload, ensure_ascii=False)[:500]}"
+        error_code = (
+            ERROR_MALFORMED_OUTPUT
+            if _usage_has_generated_output(response_payload.get("usage"))
+            else ERROR_PROVIDER_TRANSIENT_UNKNOWN
+        )
+        raise GeminiProviderError(
+            f"Gemini(ToAPIs 通道) 响应缺少 choices: {json.dumps(response_payload, ensure_ascii=False)[:500]}",
+            error_code,
         )
     message = choices[0].get("message") if isinstance(choices[0], dict) else None
     content = message.get("content") if isinstance(message, dict) else None
@@ -659,7 +698,28 @@ def extract_toapis_chat_text(response_payload: dict[str, Any]) -> str:
             if isinstance(block, dict) and block.get("type") == "text"
         )
     if not isinstance(content, str) or not content.strip():
-        raise RuntimeError(
-            f"Gemini(ToAPIs 通道) 响应缺少文本内容: {json.dumps(response_payload, ensure_ascii=False)[:500]}"
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        reasoning = message.get("reasoning_content") if isinstance(message, dict) else None
+        has_output_facts = bool(
+            _usage_has_generated_output(response_payload.get("usage"))
+            or first.get("finish_reason")
+            or (isinstance(reasoning, str) and reasoning.strip())
+        )
+        raise GeminiProviderError(
+            f"Gemini(ToAPIs 通道) 响应缺少文本内容: {json.dumps(response_payload, ensure_ascii=False)[:500]}",
+            ERROR_MALFORMED_OUTPUT if has_output_facts else ERROR_PROVIDER_TRANSIENT_UNKNOWN,
         )
     return content
+
+
+def _usage_has_generated_output(usage: Any) -> bool:
+    """Provider usage 显示已有输出 token 时，禁止把整次请求当作零输出重发。"""
+    if not isinstance(usage, dict):
+        return False
+    for key in ("completion_tokens", "output_tokens"):
+        try:
+            if int(usage.get(key) or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False

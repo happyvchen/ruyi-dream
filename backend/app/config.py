@@ -104,7 +104,8 @@ class Settings:
     gpt_image2_queue_url = os.getenv("GPT_IMAGE2_QUEUE_URL", "https://queue.fal.run/openai/gpt-image-2/edit")
     fal_key = os.getenv("FAL_KEY", "")
     toapis_api_key = os.getenv("TOAPIS_API_KEY", "")
-    toapis_base_url = os.getenv("TOAPIS_BASE_URL", "https://toapis.com")
+    # 中国大陆网络使用 ToAPIs 官方备用域名；这里只配置 origin，调用方统一追加 /v1。
+    toapis_base_url = os.getenv("TOAPIS_BASE_URL", "https://toapis.xyz")
     # ToApis 全局模型 API 并发闸门：Gemini(ToApis)、Image-2(ToApis) 和后续 ToApis
     # 模型调用共享同一上限；批次 auto-run 队列也按这个上限推进。
     toapis_max_concurrency = int(
@@ -124,7 +125,7 @@ class Settings:
     # toapis 路径直接用比例串；fal 路径没有 3:2 枚举，使用显式宽高（见 gpt_image2_preview_fal_image_size）。
     gpt_image2_preview_size = os.getenv("GPT_IMAGE2_PREVIEW_SIZE", "3:2")
     gpt_image2_preview_fal_image_size = os.getenv("GPT_IMAGE2_PREVIEW_FAL_IMAGE_SIZE", "1536x1024")
-    gpt_image2_resolution = os.getenv("GPT_IMAGE2_RESOLUTION", "1K")
+    gpt_image2_resolution = os.getenv("GPT_IMAGE2_RESOLUTION", "2k")
     generation_poll_interval_seconds = float(os.getenv("GENERATION_POLL_INTERVAL_SECONDS", "5"))
     generation_lock_ttl_seconds = int(os.getenv("GENERATION_LOCK_TTL_SECONDS", "120"))
     generation_image_timeout_seconds = int(os.getenv("GENERATION_IMAGE_TIMEOUT_SECONDS", str(30 * 60)))

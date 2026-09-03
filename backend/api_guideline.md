@@ -5,7 +5,7 @@
 0.1.0 当前 AI 摄影棚链路固定为：
 
 ```text
-导入主推款 -> AI 智能选搭 -> 分镜预览 -> 最终成片
+导入主推款 -> AI 智能选搭 -> 最终成片
 ```
 
 后端不提供“生成拍摄剧本”API，不保存动态剧本或镜头计划。前端和测试不得调用或伪造旧的剧本步骤。
@@ -14,12 +14,13 @@
 
 - `POST /api/generation-tasks`：兼容旧表单导入路径；新导入体验应优先使用 `upload_sessions -> finalize-generation-task`，以便刷新 / 切页后恢复状态。
 - `POST /api/generation-tasks/from-uploads`：已停用（410）；统一使用导入会话创建任务，避免无主对象无法回收。
+- `POST /api/generation-tasks/{task_id}/images`：为现有任务追加主推款图片，任务最多维护 8 张；非草稿任务追加后按输入变更规则使既有选搭和成片失效，等待用户重新确认执行。
 - `PATCH /api/generation-tasks/{task_id}`：保存任务名和各阶段用户补充要求草稿。
 - `POST /api/generation-tasks/{task_id}/styling`：运行 AI 智能选搭，输出当前 `StylingPlan`。
-- `POST /api/generation-tasks/{task_id}/preview`：按拍摄图位族选择三类固定分镜 Prompt，调用 Image-2 生成 3:2 六格分镜预览。
-- `POST /api/generation-tasks/{task_id}/generate-final`：按分镜前 5 格并发生成最终成片。
+- `POST /api/generation-tasks/{task_id}/preview`：已停用（410）；不再生成新的分镜预览。
+- `POST /api/generation-tasks/{task_id}/generate-final`：从 `STYLING_READY` 读取当前五个完整拍摄预设、冻结到结果集后并发生成最终成片。
 - `POST /api/generation-tasks/{task_id}/auto-run-final`：从当前第一个未完成阶段自动推进到成片。
-- `POST /api/generation-tasks/{task_id}/cancel`：取消当前运行中的选搭、分镜或成片。
+- `POST /api/generation-tasks/{task_id}/cancel`：取消当前运行中的选搭或成片。
 - `PATCH /api/generation-batches/{batch_id}`：保存批次名；批次任务归属仍由 `GenerationTask.batch_id` 决定。
 - `POST /api/generation-batches/{batch_id}/auto-run-final`：批次开始/继续一键成片；整批完成后可传 `restart=true` 重新生成。
 - `POST /api/generation-batches/{batch_id}/cancel`：取消批次内所有生成中或排队中的任务，保留已完成成果。
@@ -82,6 +83,7 @@ ABANDONED
 
 导入会话只负责“文件是否被系统接住”。搭配服装 AI 识别继续使用服装资源接口：
 
+- `POST /api/styling-garments/{id}/images`：为现有搭配服装追加图片，单件服装最多维护 6 张；识别进行中禁止修改，追加本身不触发外部 AI 识别。
 - `POST /api/styling-garments/{id}/save-and-tag`：保存当前搭配服装并触发 / 重新触发 AI 识别；用于单货号局部重试。
 - `POST /api/styling-garments/batch-save-and-tag`：批量提交 `DRAFT`、`TAGGING_READY`、`TAGGING_FAILED` 搭配服装进入 AI 识别，也支持对 `READY` 搭配服装重新识别；已归档、正在识别或无需识别的项会跳过并返回 `skipped`。
 - `POST /api/styling-garments/delete-impact`：预检待删除服装、服装图片和历史引用数量。`referencingTaskCount` 只表示会保留并显示来源已删除的生成记录，不计入删除的 `taskCount`、结果图或媒体统计。
@@ -95,7 +97,7 @@ ABANDONED
 
 ## 状态
 
-任务状态只包含当前四步链路：
+新任务只使用三步链路；`PREVIEW_RUNNING` / `PREVIEW_READY` 仅为历史记录兼容状态，不再由当前接口创建：
 
 ```text
 DRAFT
@@ -134,9 +136,11 @@ ABANDONED
 
 `error` 是普通用户契约，前端不得自行解析 provider 原始字符串。admin-only attempt 技术详情额外返回 `technicalMessage`、`requestFacts`、`responseFacts`；其中可包含 ToAPIs 顶层错误、内嵌上游错误和 providerRequestId，但不得进入普通任务列表。
 
-重试必须按错误类别和阶段决策：参数、鉴权、余额、内容策略、输入不合格与业务拒绝不重试；Gemini 的明确限流、连接失败、读取超时、网关和 provider 瞬时异常在 provider 层自动重发，JSON/必需字段契约异常由打标或 AI Stylist 编排层追加协议纠错事实后重问。Image-2 提交结果未知先按 `client_business_id` 对账；状态查询只容忍网络/网关/限流类瞬时错误；明确的 provider 内部生成失败有限重建；回传失败只重新下载，不重新生成。各类默认最多重试 10 次，按 30/60/120/240 秒封顶退避并受阶段总预算约束；同一种错误只有一个重试所有者。
+重试必须按错误类别和阶段决策：参数、鉴权、余额、内容策略、输入不合格与业务拒绝不重试；Gemini 的明确限流、连接失败、读取超时、网关、精确 `unknown provider for model` 和安全判定为零输出的未知 provider 异常在 provider 层自动重发，已有正文、reasoning、非零 usage 或 finish reason 的响应不允许盲目重发。JSON/必需字段契约异常由打标或 AI Stylist 编排层追加协议纠错事实后重问。Image-2 提交结果未知先按 `client_business_id` 对账；状态查询只容忍网络/网关/限流类瞬时错误；明确的 provider 内部生成失败有限重建；回传失败只重新下载，不重新生成。各类默认最多重试 10 次，按 30/60/120/240 秒封顶退避并受阶段总预算约束；同一种错误只有一个重试所有者。
 
-任务响应中的 `autoRunRetryAt`、`autoRunRetryCount` 与 `autoRunRetryLimit` 表示已持久化的下一次跨阶段自动恢复时间、当前轮次和配置上限；字段存在时前端显示 `自动恢复中`，不得提前呈现终态失败。
+ToAPIs 图片参考输入在上传前生成只读传输副本：官方限制为长边不超过 8192、总像素不超过 4000 万，系统使用 8000、3600 万和 9.5 MiB 安全目标。副本等比缩放、透明底转白底，原始 `MediaAsset` / S3 对象不变；`input-v2` 缓存版本与 `providerReferenceImageManifest` 用于避免旧 URL 复用并支持 admin 追溯。无法解码或转换后仍不合规则返回 `INVALID_REQUEST`，不消耗 10 次自动重试。
+
+任务响应中的 `autoRunRetryAt`、`autoRunRetryCount` 与 `autoRunRetryLimit` 表示已持久化的下一次跨阶段自动恢复时间、当前轮次和配置上限；`autoRunRetryAt` 非空且为未来时间时前端显示 `自动恢复中`，不得提前呈现终态失败。
 
 ## Prompt 维护槽位
 
@@ -144,10 +148,8 @@ ABANDONED
 
 - `segment.brand_info`
 - `assembly.ai_tagging`
+- `assembly.hero_image_selection`
 - `assembly.ai_styling`
-- `assembly.storyboard_preview_top`
-- `assembly.storyboard_preview_bottom`
-- `assembly.storyboard_preview_one_piece`
 - `assembly.final_image_top`
 - `assembly.final_image_bottom`
 - `assembly.final_image_one_piece`
@@ -163,29 +165,29 @@ AI 选搭动态事实：
 - `runtime.hero_image_files`
 - `runtime.candidate_retrieval`
 
-分镜预览动态事实：
-
-- `runtime.user_requirement`
-- `runtime.shot_styling`
-- `runtime.ref_model_identity`
-- `runtime.ref_garment`
-- `runtime.ref_shoot_environment`
-- `runtime.storyboard_preview_user_instruction`
-- `runtime.category_family`
-
 成片动态事实：
 
-- `runtime.preview_grid_cell`
+- `runtime.category_family`
+- `runtime.shot_index`
 - `runtime.user_requirement`
 - `runtime.ref_model_identity`
-- `runtime.ref_preview_grid`
+- `runtime.ref_shot_background`
+- `runtime.ref_shot_pose`
 - `runtime.ref_garment`
-- `runtime.ref_shoot_environment`
 - `runtime.final_image_user_instruction`
 - `runtime.shot_styling`（配饰与造型，单行，使用 `；` 分隔）
 - `runtime.shot_global_directing`
 - `runtime.shot_current`
 - `runtime.is_shot_1` 到 `runtime.is_shot_5`
+
+## 拍摄预设接口
+
+- `GET /api/shot-presets`：所有已登录角色读取 15 个当前槽位，以及三个服装类型各自的完整槽位数和校验错误。
+- `POST /api/shot-presets/{category_family}/{shot_index}/{asset_role}`：仅 admin 单张替换 `background` 或 `pose`，成功后立即成为当前生效图片。
+- `DELETE /api/shot-presets/{category_family}/{shot_index}/{asset_role}`：仅 admin 删除当前单张图片并立即生效；该类型不完整期间不能开始新成片。
+- 旧整槽保存和发布接口返回 `410 Gone`。
+
+最终请求固定 `image_urls <= 6`，拍摄母版排第一，不传 `mask_url`，使用 `1:1 / 2k / high`；模特与商品多图先确定性合成角色参考板，结果集通过 `generation_result_set_shot_presets` 冻结当次五组图片。
 
 ## 导出
 

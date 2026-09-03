@@ -60,6 +60,7 @@ ERROR_INVALID_REQUEST = "INVALID_REQUEST"            # 请求参数/参考图不
 ERROR_CONTENT_POLICY = "CONTENT_POLICY_VIOLATION"    # 内容安全策略拒绝 → 调整素材或要求
 ERROR_TASK_NOT_FOUND = "TASK_NOT_FOUND"              # provider 任务不存在/已失效 → 重新创建任务
 ERROR_PROVIDER_INTERNAL = "PROVIDER_INTERNAL_ERROR"  # provider 内部错误 → 有限重试
+ERROR_PROVIDER_TRANSIENT_UNKNOWN = "PROVIDER_TRANSIENT_UNKNOWN"  # provider 零输出未知错误/临时路由异常 → 有限重试
 ERROR_MALFORMED_OUTPUT = "MALFORMED_OUTPUT"          # 非法 JSON/Extra data/控制字符/finish_reason=length 截断 → 上层修复+重问一次
 ERROR_UPLOAD_REQUIREMENT_NOT_MET = "UPLOAD_REQUIREMENT_NOT_MET"  # 未选出可入库的商品图 → 用户更换图片后重试
 ERROR_POLL_TIMEOUT = "POLL_TIMEOUT"                  # 打标/长任务轮询预算耗尽 → 自动排队重试
@@ -200,17 +201,28 @@ def normalize_toapis_error(
     combined = " ".join(item for item in messages if item)
     codes = {str(layer.get("code") or "").lower() for layer in layers}
     types = {str(layer.get("type") or "").lower() for layer in layers}
+    combined_lower = combined.lower()
 
     if codes & {"insufficient_quota", "insufficient_user_quota", "quota_not_enough"} or status_code == 402:
         internal_code = ERROR_INSUFFICIENT_BALANCE
-    elif codes & {"invalid_request"} or types & {"invalid_request", "invalid_request_error"} or status_code == 400:
-        internal_code = ERROR_INVALID_REQUEST
+    elif status_code == 403 and "1010" in combined_lower and "cloudflare" in combined_lower:
+        internal_code = ERROR_WAF_BLOCK
+    elif codes & {"unauthorized"} or status_code in {401, 403}:
+        internal_code = ERROR_AUTH_FAILED
     elif codes & {"content_policy_violation"} or status_code == 422:
         internal_code = ERROR_CONTENT_POLICY
+    elif (
+        status_code in {None, 400}
+        and "unknown provider for model" in combined_lower
+    ):
+        # ToAPIs 可能把内部路由池暂不可用包装成 model_not_found、invalid_request
+        # 或仅 invalid_request_error + HTTP 400。精确消息是稳定锚点；余额、鉴权、
+        # 内容安全等硬停已在此前判定，不会被本分支覆盖。
+        internal_code = ERROR_PROVIDER_TRANSIENT_UNKNOWN
+    elif codes & {"invalid_request", "model_not_found"} or types & {"invalid_request", "invalid_request_error"}:
+        internal_code = ERROR_INVALID_REQUEST
     elif codes & {"task_not_found"} or status_code == 404:
         internal_code = ERROR_TASK_NOT_FOUND
-    elif codes & {"unauthorized"} or status_code == 401:
-        internal_code = ERROR_AUTH_FAILED
     elif codes & {"rate_limit_exceeded"} or status_code == 429 or "rate_limit_check_failed" in combined.lower():
         internal_code = ERROR_RATE_LIMITED
     elif codes & {"internal_error"} or status_code == 500:
@@ -219,6 +231,10 @@ def normalize_toapis_error(
         internal_code = ERROR_PROVIDER_GENERATION_FAILED
     else:
         internal_code = classify_provider_error(status_code=status_code, message=combined)
+        if internal_code == ERROR_PROVIDER_FAILED:
+            # 本函数只处理已到达 ToAPIs 且没有取得有效输出的错误信封；无法识别的
+            # provider 错误按产品约定默认有限重试。本地异常不会经过此分支。
+            internal_code = ERROR_PROVIDER_TRANSIENT_UNKNOWN
 
     return {
         "code": internal_code,
@@ -246,6 +262,7 @@ def provider_error_presentation(error_code: str | None, reason: str | None = Non
         ERROR_GATEWAY_5XX: ("AI 服务暂时不可用", "请稍后再试。", "稍后重试", True),
         ERROR_CONN_RESET: ("AI 服务连接中断", "请稍后再试。", "稍后重试", True),
         ERROR_PROVIDER_INTERNAL: ("AI 服务内部异常", "系统已自动重试；仍失败时可再次生成。", "再次生成", True),
+        ERROR_PROVIDER_TRANSIENT_UNKNOWN: ("AI 服务暂时不可用", "系统已自动重试；仍未恢复时请稍后再试。", "稍后重试", True),
         ERROR_PROVIDER_GENERATION_FAILED: ("图片生成服务处理失败", "系统已自动重试；仍失败时可再次生成。", "再次生成", True),
         ERROR_TASK_NOT_FOUND: ("生成任务已失效", "系统无法继续查询原任务，请重新生成。", "重新生成", True),
         ERROR_PROVIDER_TIMEOUT: ("图片生成等待超时", "可稍后继续生成，系统会保留已有进度。", "继续生成", True),
@@ -338,6 +355,7 @@ _RETRYABLE_CODES = frozenset(
         ERROR_WAF_BLOCK,
         ERROR_PROVIDER_GENERATION_FAILED,
         ERROR_PROVIDER_INTERNAL,
+        ERROR_PROVIDER_TRANSIENT_UNKNOWN,
         ERROR_TASK_NOT_FOUND,
         ERROR_PROVIDER_TIMEOUT,
         ERROR_POLL_TIMEOUT,
@@ -370,6 +388,7 @@ def is_gemini_transport_retryable_error(error_code: str | None) -> bool:
         ERROR_WAF_BLOCK,
         ERROR_PROVIDER_INTERNAL,
         ERROR_PROVIDER_TIMEOUT,
+        ERROR_PROVIDER_TRANSIENT_UNKNOWN,
     }
 
 
@@ -382,12 +401,19 @@ def is_generation_retryable_error(error_code: str | None) -> bool:
         ERROR_CONN_RESET,
         ERROR_RATE_LIMITED,
         ERROR_PROVIDER_TIMEOUT,
+        ERROR_PROVIDER_TRANSIENT_UNKNOWN,
     }
 
 
 def is_status_check_retryable_error(error_code: str | None) -> bool:
     """状态查询本身的瞬时失败；参数/鉴权/任务不存在不能靠重复查询恢复。"""
-    return error_code in {ERROR_GATEWAY_5XX, ERROR_CONN_RESET, ERROR_RATE_LIMITED, ERROR_WAF_BLOCK}
+    return error_code in {
+        ERROR_GATEWAY_5XX,
+        ERROR_CONN_RESET,
+        ERROR_RATE_LIMITED,
+        ERROR_WAF_BLOCK,
+        ERROR_PROVIDER_TRANSIENT_UNKNOWN,
+    }
 
 
 def is_zero_output_transient(error_code: str | None) -> bool:

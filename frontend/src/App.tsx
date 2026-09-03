@@ -15,7 +15,6 @@ import {
   FileImage,
   FileText,
   FolderOpen,
-  GalleryVerticalEnd,
   History,
   ImagePlus,
   Images,
@@ -41,20 +40,21 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { ApiError, api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl, stylingGarmentArchiveUrl } from './api'
-import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, DirectUploadItem, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, ObjectCleanupError, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot, UploadSession, UploadSessionBatch } from './api'
+import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, DirectUploadItem, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, ObjectCleanupError, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, ShotPresetMatrix, ShotPresetSlot, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot, UploadSession, UploadSessionBatch } from './api'
 import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { chooseDirectory, filesFromDirectory, getDirectoryHandle, storeDirectoryHandle, supportsDirectoryAccess } from './lib/directoryAccess'
 import type { RuyiFileSystemDirectoryHandle } from './lib/directoryAccess'
-import { friendlyErrorText } from './lib/errorMessages'
+import { friendlyAttemptErrorText, friendlyErrorText } from './lib/errorMessages'
 import { CHECKSUM_COMPATIBILITY_NOTICE } from './lib/fileChecksum'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
 import { BulkCheckbox, BulkSelectAllButton, MarqueeSelectionBox, selectableIdsInDom, updateSelectionWithRange, useMarqueeSelection } from './components/BulkSelection'
 import { ArchiveManageDialog } from './components/ArchiveManageDialog'
 import type { ArchiveManageAction, ArchiveManageOption } from './components/ArchiveManageDialog'
+import { ImageAssetCard, ImageUploadPlaceholder } from './components/ImageAssetCard'
 
-type StudioStep = 0 | 1 | 2 | 3
+type StudioStep = 0 | 1 | 2
 type FileSystemEntry = {
   name: string
   isFile: boolean
@@ -86,7 +86,6 @@ type RecordSelectionKey = `task:${number}` | `batch:${string}`
 const steps = [
   { title: '导入主推款', icon: Upload },
   { title: 'AI 智能选搭', icon: WandSparkles },
-  { title: '分镜预览', icon: GalleryVerticalEnd },
   { title: '最终成片', icon: Sparkles },
 ] as const
 const adminPages = new Set<Page>(['prompt-maintenance'])
@@ -101,10 +100,11 @@ const libraryImportOpenStorageKey = 'ruyi-library-import-open'
 const libraryImportJobsStorageKey = 'ruyi-library-import-jobs'
 const sidebarCompactQuery = '(max-width: 900px)'
 const authExpiredMessage = '登录状态已过期，请重新登录后继续。'
-const STYLING_GARMENT_MAX_IMAGES = 15
-const HERO_PRODUCT_MAX_IMAGES = 15
+const STYLING_GARMENT_MAX_IMAGES = 6
+const HERO_PRODUCT_MAX_IMAGES = 8
 const STYLING_GARMENT_SELECTED_IMAGES = 6
 const HERO_PRODUCT_SELECTED_IMAGES = 8
+const MODEL_HEAD_REFERENCE_MAX_IMAGES = 20
 const PRODUCT_CODE_MAX_CHARS = 20
 const BATCH_NAME_MAX_CHARS = 80
 const STYLING_GARMENT_EXPORT_MAX_ITEMS = 50
@@ -802,7 +802,6 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   const recentTaskRequestRef = useRef(0)
   const [aiLogDialog, setAiLogDialog] = useState<{ title: string; ownerTypes: string[]; attemptId: number; records: AICallRecord[]; loading: boolean; error?: string } | null>(null)
   const [aiStylingInstruction, setAiStylingInstruction] = useState('')
-  const [storyboardInstruction, setStoryboardInstruction] = useState('')
   const [finalImageInstruction, setFinalImageInstruction] = useState('')
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
@@ -917,7 +916,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     if (!task || !isTaskRunning(task)) return
     if (!window.confirm('确定取消本次生成吗？已提交给生成服务的图片可能仍会完成并产生费用；系统会停止后续生成，并保留已完成结果。')) return
     void run('取消生成中...', () => api.cancelTask(task.id), (r: { item: GenerationTask }) => {
-      clearLocalOperationsFor(['generation_styling', 'generation_preview', 'generation_result_image'], task.id)
+      clearLocalOperationsFor(['generation_styling', 'generation_result_image'], task.id)
       applyTaskUpdate(r.item)
     }, { refresh: 'background' })
   }
@@ -933,8 +932,8 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     const restart = canRestartOneClickFinal(task)
     if (!restart && !canStartOneClickFinal(task)) return
     const confirmText = restart
-      ? '将重新走完整流程：重新智能选搭、分镜预览和成片，产出一套全新方案。已有成片会保留在历史记录里可追溯。确定重新一键成片吗？'
-      : '将自动完成后续步骤，并复用已有选搭和分镜预览。生成过程可能产生多次 AI 调用。'
+      ? '将重新走完整流程：重新智能选搭并生成五张成片。已有成片会保留在历史记录里可追溯。确定重新一键成片吗？'
+      : '将自动完成后续步骤，并复用已有选搭。生成过程可能产生多次 AI 调用。'
     if (!window.confirm(confirmText)) return
     void run(restart ? '重新一键成片启动中...' : '启动一键成片中...', () => api.autoRunFinal(task.id, restart), (r: { item: GenerationTask }) => {
       applyTaskUpdate(r.item)
@@ -948,7 +947,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
       : batchItems.filter((item) => canStartOneClickFinal(item)).length
     if (!eligibleCount) return
     const confirmText = restart
-      ? `将为本批次 ${eligibleCount} 个已完成任务重新执行智能选搭、分镜预览和成片；已有成果保留在历史记录中。确定重新生成吗？`
+      ? `将为本批次 ${eligibleCount} 个已完成任务重新执行智能选搭和成片；已有成果保留在历史记录中。确定重新生成吗？`
       : `将为 ${eligibleCount} 个任务自动完成后续步骤；已成功成果保持不变，同时只有少量任务并发生成，其余排队等待。确定开始吗？`
     if (!window.confirm(confirmText)) return
     const requestId = batchAutoRunRequestRef.current + 1
@@ -968,7 +967,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     void run('取消批量成片中...', () => api.cancelBatch(batchId), (result: { cancelledTaskIds: number[]; items: GenerationTask[] }) => {
       if (activeBatchIdRef.current !== batchId || batchAutoRunRequestRef.current !== requestId) return
       setBatchItems(result.items)
-      result.cancelledTaskIds.forEach((taskId) => clearLocalOperationsFor(['generation_styling', 'generation_preview', 'generation_result_image'], taskId))
+      result.cancelledTaskIds.forEach((taskId) => clearLocalOperationsFor(['generation_styling', 'generation_result_image'], taskId))
     }, { refresh: 'background' })
   }
   function handleBatchPrimaryAction(action: BatchPrimaryAction) {
@@ -1016,7 +1015,6 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     setAiLogDialog(null)
   }, [task?.id])
   useEffect(() => setAiStylingInstruction(task?.stageUserInputs?.aiStyling ?? stageInstructionText(task?.styling?.userInstruction)), [task?.id, task?.stageUserInputs?.aiStyling, task?.styling?.id])
-  useEffect(() => setStoryboardInstruction(task?.stageUserInputs?.storyboardPreview ?? stageInstructionText((task?.storyboardPreview ?? task?.preview)?.userInstruction)), [task?.id, task?.stageUserInputs?.storyboardPreview, (task?.storyboardPreview ?? task?.preview)?.id])
   useEffect(() => setFinalImageInstruction(task?.stageUserInputs?.finalImage ?? stageInstructionText(task?.resultSet?.userInstruction)), [task?.id, task?.stageUserInputs?.finalImage, task?.resultSet?.id])
   useEffect(() => {
     loadRecentTasks(0)
@@ -1030,7 +1028,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   }, [task?.id, task?.status, task?.autoRunTarget, setTask])
   useEffect(() => {
     if (!task || isTaskLockedForGeneration(task)) return
-    clearLocalOperationsFor(['generation_styling', 'generation_preview', 'generation_result_image'], task.id)
+      clearLocalOperationsFor(['generation_styling', 'generation_result_image'], task.id)
   }, [task?.id, task?.status, task?.autoRunTarget, task?.resultSet?.status])
   const hasActiveRecentTasks = recentRecordTasks(recentItems).some((item) => isTaskRunning(item) || isTaskQueuedForAutoRun(item))
   useEffect(() => {
@@ -1095,7 +1093,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     <section className="page studio-page">
       <PageTitle
         title="AI 摄影棚"
-        subtitle="导入主推款，让系统完成智能选搭、分镜预览并生成电商棚拍成片。"
+        subtitle="导入主推款，让系统完成智能选搭并直接生成五张电商棚拍成片。"
         actions={task ? (
           <div className="studio-title-actions">
             <button className="management-action" onClick={startNewTask}><ImagePlus size={16} />新建拍摄任务</button>
@@ -1122,8 +1120,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
             <div className="studio-stage-viewport">
               {visibleStep === 0 && <UploadHeroStep task={task} setTask={applyTaskUpdate} run={run} uploadSessions={uploadSessions} refreshUploadSessions={refreshUploadSessions} markBrowserUploading={markBrowserUploading} onLatestTaskCreated={onLatestTaskCreated} />}
               {visibleStep === 1 && <StylingStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={aiStylingInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
-              {visibleStep === 2 && <PreviewStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={storyboardInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
-              {visibleStep === 3 && <FinalStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={finalImageInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+              {visibleStep === 2 && <FinalStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={finalImageInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
             </div>
           </div>
         </div>
@@ -1149,10 +1146,10 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
                   <StageUserInputModule
                     step={summaryInputStep}
                     task={task}
-                    value={stageInputValue(summaryInputStep, { aiStylingInstruction, storyboardInstruction, finalImageInstruction })}
+                    value={stageInputValue(summaryInputStep, { aiStylingInstruction, finalImageInstruction })}
                     savedValue={savedStageInputValue(summaryInputStep, task)}
-                    onChange={(value) => updateStageInput(summaryInputStep, value, { setAiStylingInstruction, setStoryboardInstruction, setFinalImageInstruction })}
-                    onSave={() => void run(`${stageInputSaveLabel(summaryInputStep)}中...`, () => api.updateTask(task.id, stageInputSavePayload(summaryInputStep, stageInputValue(summaryInputStep, { aiStylingInstruction, storyboardInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => applyTaskUpdate(r.item), { refresh: 'background' })}
+                    onChange={(value) => updateStageInput(summaryInputStep, value, { setAiStylingInstruction, setFinalImageInstruction })}
+                    onSave={() => void run(`${stageInputSaveLabel(summaryInputStep)}中...`, () => api.updateTask(task.id, stageInputSavePayload(summaryInputStep, stageInputValue(summaryInputStep, { aiStylingInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => applyTaskUpdate(r.item), { refresh: 'background' })}
                     disabled={isTaskRunning(task) || !!task.autoRunTarget}
                   />
                 )}
@@ -1758,7 +1755,7 @@ function UploadHeroStep({ task, setTask, run, uploadSessions, refreshUploadSessi
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="支持多张图片、一个货号文件夹或一个上级文件夹。每套最多 15 张进入候选池，AI 智能选搭后保留挑选排序好的 8 张主推款参考图。">导入主推款</HeadingWithTooltip></div>
+        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="支持多张图片、一个货号文件夹或一个上级文件夹。每套主推款最多维护 8 张参考图。">导入主推款</HeadingWithTooltip></div>
         {task?.status === 'DRAFT' && <HeroDraftEditor task={task} setTask={setTask} run={run} />}
         {!task && (
           <>
@@ -1958,14 +1955,16 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
   const [name, setName] = useState(task.name)
   const [userRequirement, setUserRequirement] = useState(task.userRequirement ?? '')
   const [draftImages, setDraftImages] = useState<HeroDraftImage[]>(() => (task.images ?? []).map((image) => ({ id: image.id, asset: image.asset })))
+  const [pendingFiles, setPendingFiles] = useState<File[]>([])
+  const [pendingDimensions, setPendingDimensions] = useState<Record<string, { width: number; height: number }>>({})
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const [dragIndex, setDragIndex] = useState<number | null>(null)
-  const imageCount = draftImages.length
+  const imageCount = draftImages.length + pendingFiles.length
   const imageLimit = task.status === 'DRAFT' ? HERO_PRODUCT_MAX_IMAGES : HERO_PRODUCT_SELECTED_IMAGES
   const originalImages = task.images ?? []
   const draftIds = draftImages.map((image) => image.id).join(',')
   const originalIds = originalImages.map((image) => image.id).join(',')
-  const hasImageDraftChange = draftIds !== originalIds || draftImages.some((image) => image.replacement)
+  const hasImageDraftChange = draftIds !== originalIds || draftImages.some((image) => image.replacement) || pendingFiles.length > 0
   const hasInfoDraftChange = userRequirement.trim() !== (task.userRequirement ?? '').trim()
   const hasPendingDraft = hasImageDraftChange || hasInfoDraftChange
 
@@ -1973,11 +1972,15 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
     setName(task.name)
     setUserRequirement(task.userRequirement ?? '')
     setDraftImages((task.images ?? []).map((image) => ({ id: image.id, asset: image.asset })))
+    setPendingFiles([])
+    setPendingDimensions({})
   }, [task.id])
 
   function resetDraft(nextTask = task) {
     setUserRequirement(nextTask.userRequirement ?? '')
     setDraftImages((nextTask.images ?? []).map((image) => ({ id: image.id, asset: image.asset })))
+    setPendingFiles([])
+    setPendingDimensions({})
   }
 
   function moveTo(from: number, to: number) {
@@ -1998,8 +2001,8 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
 
   async function confirmDraftChanges() {
     if (!hasPendingDraft) return
-    if (draftImages.length < 1) return
-    if (task.status !== 'DRAFT' && !window.confirm('确认修改主推款输入吗？确认后当前选搭、分镜预览和成片会失效，但历史记录会保留。')) return
+    if (imageCount < 1) return
+    if (task.status !== 'DRAFT' && !window.confirm('确认修改主推款输入吗？确认后当前选搭和成片会失效，但历史记录会保留。')) return
     await run(task.status === 'DRAFT' ? '保存主推款修改中...' : '确认主推款修改中...', async () => {
       let result: { item: GenerationTask } = { item: task }
       if (hasInfoDraftChange) {
@@ -2019,6 +2022,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
           result = await api.updateTaskImage(image.id, index)
         }
       }
+      if (pendingFiles.length) result = await api.addTaskImages(task.id, pendingFiles)
       return result
     }, (result: { item: GenerationTask }) => {
       setTask(result.item)
@@ -2060,10 +2064,30 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
             onRemove={() => removeDraftImage(image.id)}
           />
         ))}
+        {pendingFiles.map((file, index) => (
+          <LocalFileImageCard
+            key={`${fileKey(file)}-${index}`}
+            file={file}
+            dimensions={pendingDimensions[fileKey(file)]}
+            onDimensions={(value) => setPendingDimensions((current) => ({ ...current, [fileKey(file)]: value }))}
+            onOpen={setViewer}
+            badge="待新增"
+            onReplace={(replacement) => setPendingFiles((current) => current.map((item, itemIndex) => itemIndex === index ? replacement : item))}
+            onDelete={() => setPendingFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+          />
+        ))}
+        {imageCount < imageLimit && (
+          <ImageUploadPlaceholder
+            accept={SUPPORTED_IMAGE_ACCEPT}
+            remaining={imageLimit - imageCount}
+            label="添加主推款图片"
+            onFiles={(files) => setPendingFiles((current) => [...current, ...files])}
+          />
+        )}
       </div>
-      <p className="edit-hint">{task.status === 'DRAFT' ? `最多 ${HERO_PRODUCT_MAX_IMAGES} 张进入候选池；AI 智能选搭后保留 ${HERO_PRODUCT_SELECTED_IMAGES} 张主推款参考图。` : hasPendingDraft ? '修改尚未生效；确认前不会影响当前选搭、分镜预览和成片。' : `当前展示 AI 选搭后保留的主推款参考图，最多 ${HERO_PRODUCT_SELECTED_IMAGES} 张。`}</p>
+      <p className="edit-hint">{task.status === 'DRAFT' ? `最多 ${HERO_PRODUCT_MAX_IMAGES} 张进入候选池；AI 智能选搭后保留 ${HERO_PRODUCT_SELECTED_IMAGES} 张主推款参考图。` : hasPendingDraft ? '修改尚未生效；确认前不会影响当前选搭和成片。' : `当前展示 AI 选搭后保留的主推款参考图，最多 ${HERO_PRODUCT_SELECTED_IMAGES} 张。`}</p>
       <div className="inline-form">
-        <button className="management-action" disabled={!hasPendingDraft || draftImages.length < 1} onClick={() => void confirmDraftChanges()}><Check size={16} />确认修改</button>
+        <button className="management-action" disabled={!hasPendingDraft || imageCount < 1} onClick={() => void confirmDraftChanges()}><Check size={16} />确认修改</button>
         <button className="management-action" disabled={!hasPendingDraft} onClick={() => resetDraft()}><RotateCcw size={16} />放弃修改</button>
       </div>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
@@ -2083,7 +2107,6 @@ function HeroDraftImageCard({ image, draggable, canRemove, onOpen, onDragStart, 
   onRemove: () => void
 }) {
   const [replacementUrl, setReplacementUrl] = useState('')
-  const [assetSrcIndex, setAssetSrcIndex] = useState(0)
   useEffect(() => {
     if (!image.replacement) {
       setReplacementUrl('')
@@ -2093,9 +2116,7 @@ function HeroDraftImageCard({ image, draggable, canRemove, onOpen, onDragStart, 
     setReplacementUrl(nextUrl)
     return () => URL.revokeObjectURL(nextUrl)
   }, [image.replacement])
-  const assetSources = assetDisplaySources(image.asset, 'thumb')
-  const assetSrc = assetSources[assetSrcIndex] ?? ''
-  useEffect(() => setAssetSrcIndex(0), [image.asset.id, assetSources.join('|')])
+  const assetSrc = assetThumbSrc(image.asset)
   const filename = image.replacement?.name ?? image.asset.filename
   const meta = image.replacement ? fileMeta(image.replacement) : assetMeta(image.asset)
   const openImage = () => {
@@ -2105,42 +2126,21 @@ function HeroDraftImageCard({ image, draggable, canRemove, onOpen, onDragStart, 
     }
     onOpen(assetLightboxImage(image.asset))
   }
-  return (
-    <div
-      className={`saved-image-card ${image.replacement ? 'is-pending' : ''}`}
-      draggable={draggable}
-      onDragStart={onDragStart}
-      onDragOver={onDragOver}
-      onDrop={onDrop}
-    >
-      <button className="image-open" onClick={openImage} title="放大查看">
-        <img
-          src={replacementUrl || mediaUrl(assetSrc)}
-          alt={filename}
-          loading="lazy"
-          onError={() => {
-            if (!replacementUrl && assetSrcIndex + 1 < assetSources.length) {
-              setAssetSrcIndex((index) => index + 1)
-            }
-          }}
-        />
-      </button>
-      {image.replacement && <em className="thumb-pending-badge">待替换</em>}
-      <TruncatedText text={filename}>
-        {filename}<TruncatedText as="small" text={meta} />
-      </TruncatedText>
-      <div className="thumb-actions">
-        <label title="替换图片">
-          <RefreshCw size={14} />
-          <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} aria-label="替换主推款图片" onChange={(event) => {
-            const replacement = event.target.files?.[0]
-            if (replacement) onReplace(replacement)
-          }} />
-        </label>
-        <button disabled={!canRemove} onClick={onRemove} title="移除图片"><Trash2 size={14} /></button>
-      </div>
-    </div>
-  )
+  return <ImageAssetCard
+    thumbnailSrc={replacementUrl || mediaUrl(assetSrc)}
+    title={filename}
+    meta={meta}
+    badge={image.replacement ? '待替换' : undefined}
+    onOpen={openImage}
+    accept={SUPPORTED_IMAGE_ACCEPT}
+    onReplace={onReplace}
+    onDelete={onRemove}
+    canDelete={canRemove}
+    draggable={draggable}
+    onDragStart={onDragStart}
+    onDragOver={onDragOver}
+    onDrop={onDrop}
+  />
 }
 
 function RequirementEditor({ value, onChange, title, placeholder }: { value: string; onChange: (value: string) => void; title: string; placeholder: string }) {
@@ -2165,44 +2165,37 @@ function RequirementEditor({ value, onChange, title, placeholder }: { value: str
 
 type StudioStageInputState = {
   aiStylingInstruction: string
-  storyboardInstruction: string
   finalImageInstruction: string
 }
 
 type StudioStageInputSetters = {
   setAiStylingInstruction: (value: string) => void
-  setStoryboardInstruction: (value: string) => void
   setFinalImageInstruction: (value: string) => void
 }
 
 function stageInputValue(step: StudioStep, state: StudioStageInputState) {
   if (step === 1) return state.aiStylingInstruction
-  if (step === 2) return state.storyboardInstruction
   return state.finalImageInstruction
 }
 
 function updateStageInput(step: StudioStep, value: string, setters: StudioStageInputSetters) {
   if (step === 1) setters.setAiStylingInstruction(value)
-  else if (step === 2) setters.setStoryboardInstruction(value)
   else setters.setFinalImageInstruction(value)
 }
 
 function savedStageInputValue(step: StudioStep, task: GenerationTask | null) {
   if (!task) return ''
   if (step === 1) return task.stageUserInputs?.aiStyling ?? ''
-  if (step === 2) return task.stageUserInputs?.storyboardPreview ?? ''
   return task.stageUserInputs?.finalImage ?? ''
 }
 
 function stageInputSavePayload(step: StudioStep, value: string) {
   if (step === 1) return { aiStylingUserInstruction: value }
-  if (step === 2) return { storyboardPreviewUserInstruction: value }
   return { finalImageUserInstruction: value }
 }
 
 function stageInputSaveLabel(step: StudioStep) {
   if (step === 1) return '保存选搭要求'
-  if (step === 2) return '保存分镜预览要求'
   return '保存成片要求'
 }
 
@@ -2222,7 +2215,6 @@ function StageUserInputModule({ step, task, value, savedValue = '', onChange, on
   const labels = [
     { title: '', placeholder: '' },
     { title: '智能选搭要求', placeholder: '例如：不要厚重外套，改成更轻盈的通勤搭配。' },
-    { title: '分镜预览要求', placeholder: '例如：分镜姿态更舒展，背景保持简洁。' },
     { title: '成片要求', placeholder: '例如：整体更干净，减少配饰存在感，保持棚拍电商质感。' },
   ][step]
   const saveDisabled = disabled || !task || value.trim() === savedValue.trim()
@@ -2473,53 +2465,6 @@ function diagnosisItems(value: Record<string, unknown>): string[] {
   }).filter(Boolean)
 }
 
- function PreviewStep({ task, setTask, run, userInstruction, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
-  task: GenerationTask | null
-  setTask: (task: GenerationTask) => void
-  run: any
-  userInstruction: string
-  localOperations: AIOperation[]
-  startLocalOperation: (operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) => AIOperation
-  clearLocalOperationsFor: (ownerTypes: string[], taskId?: number | null) => void
-  isAdmin: boolean
-  onOpenAICallLogs: (title: string, ownerTypes: string[], attemptId: number) => void
-}) {
-  const [viewer, setViewer] = useState<LightboxImage | null>(null)
-  const preview = task?.storyboardPreview ?? task?.preview ?? null
-  const canPreview = (
-    !!task?.styling && !isTaskLockedForGeneration(task) && ['STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'CANCELLED'].includes(task?.status ?? '')
-  ) || (!!task && !isTaskLockedForGeneration(task) && task.status === 'FAILED' && !!task.styling && !preview?.asset)
-  const hasPreview = !!preview?.asset
-  const operations = task ? operationFallbacks(task, localOperations, 'generation_preview') : []
-  return (
-    <div className="step-panel">
-      <div className="step-scroll-content">
-        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="按主推款类型与选搭方案生成 3:2 六格分镜；前 5 格用于生成成片，第 6 格仅作备用参考。">分镜预览</HeadingWithTooltip></div>
-        <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
-          <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_preview" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成分镜预览 · Attempt #${operation.id}`, ['generation_preview'], operation.id) : undefined} /></div>
-        ) : (
-          <div className="stage-business-result" key="result">{preview?.asset ? (
-            <div className="storyboard-review"><button className="preview-board-open" onClick={() => preview.asset && setViewer(assetLightboxImage(preview.asset))} title="放大查看"><img className="preview-board" src={mediaUrl(assetPreviewSrc(preview.asset))} loading="lazy" alt="分镜预览" /></button><div className="storyboard-legend"><span><strong>1–5</strong>生成成片</span><span><strong>6</strong>备用参考，不生成</span><em>点击图片放大检查姿势、构图与光线</em></div></div>
-          ) : <EmptyState title="尚未生成分镜预览" text="点击生成分镜预览后，系统会根据主推款品类与选搭方案输出一张 3:2 横版分镜预览图。" />}</div>
-        ))}</div>
-      </div>
-      <div className="stage-action-bar">
-        <button className="task-action" disabled={!canPreview} onClick={() => task && void run(hasPreview ? '重新生成分镜预览中...' : '生成分镜预览中...', () => {
-          startLocalOperation({ taskId: task.id, ownerType: 'generation_preview', ownerId: task.id, provider: 'image-2' })
-          setTask({ ...task, status: 'PREVIEW_RUNNING', resultSet: null, activeResultSetId: null })
-          return api.previewTask(task.id, userInstruction)
-        }, (r: { item: GenerationTask }) => {
-          clearLocalOperationsFor(['generation_preview'], task.id)
-          setTask(r.item)
-        }, { refresh: false })}>
-          <GalleryVerticalEnd size={16} /> {hasPreview ? '重新生成分镜预览' : '生成分镜预览'}
-        </button>
-      </div>
-      {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
-    </div>
-  )
-}
-
 function FinalStep({ task, setTask, run, userInstruction, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask) => void
@@ -2534,15 +2479,14 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const images = task?.resultSet?.images ?? []
   const finalAssets = images.map((image) => image.asset).filter((asset): asset is MediaAsset => !!asset)
-  const preview = task?.storyboardPreview ?? task?.preview ?? null
-  const canGenerate = !!preview?.asset && !!task && !isTaskLockedForGeneration(task) && ['PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'CANCELLED'].includes(task?.status ?? '')
+  const canGenerate = !!task?.styling && !isTaskLockedForGeneration(task) && ['STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task?.status ?? '')
   const hasFinalImages = images.some((image) => !!image.asset)
   const finalHistoryOperations = task ? operationFallbacks(task, localOperations, 'generation_result_image') : []
   const finalSlots = Array.from({ length: 5 }, (_, index) => images.find((image) => image.sortOrder === index + 1) ?? null)
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="并发生成分镜前 5 个镜头；可逐张检查、下载或重新生成，也可打包下载全部成片。">最终成片</HeadingWithTooltip></div>
+        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="按当前服装类型冻结 5 个当前生效拍摄预设并发生成；可逐张检查、下载或重新生成。">最终成片</HeadingWithTooltip></div>
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status">
             <AIOperationList operations={finalHistoryOperations} taskId={task?.id} ownerType="generation_result_image" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成成片 · Attempt #${operation.id}`, ['generation_result_image'], operation.id) : undefined} />
@@ -2570,7 +2514,10 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
                     </small>
                   )}
                   {image?.activeAttempt && !isAttemptRunning(image.activeAttempt) && (() => {
-                    const note = attemptFriendlyFailure(image.activeAttempt)
+                    const note = attemptFriendlyFailure(
+                      image.activeAttempt,
+                      task?.status === 'FINAL_RUNNING' && task.autoRunTarget === 'FINAL',
+                    )
                     return note ? <small className="image-placeholder-failure">{note}</small> : null
                   })()}
                 </div>
@@ -5927,9 +5874,14 @@ function FileThumbList({ files, onChange, limit, disabled = false }: { files: Fi
       {files.map((file, index) => {
         const overLimit = typeof limit === 'number' && index >= limit
         return (
-          <div
-            className={`file-thumb ${overLimit ? 'is-over-limit' : ''}`}
+          <LocalFileImageCard
             key={`${file.name}-${file.size}-${index}`}
+            file={file}
+            dimensions={dimensions[fileKey(file)]}
+            onDimensions={(value) => setDimensions((current) => ({ ...current, [fileKey(file)]: value }))}
+            onOpen={setViewer}
+            badge={overLimit ? '超出' : undefined}
+            disabled={disabled}
             draggable={!disabled}
             onDragStart={() => { if (!disabled) setDragIndex(index) }}
             onDragOver={(event) => event.preventDefault()}
@@ -5938,70 +5890,59 @@ function FileThumbList({ files, onChange, limit, disabled = false }: { files: Fi
               if (dragIndex !== null) move(dragIndex, index)
               setDragIndex(null)
             }}
-          >
-            {overLimit && <em className="thumb-overflow-badge">超出</em>}
-            <FilePreviewButton
-              file={file}
-              dimensions={dimensions[fileKey(file)]}
-              onDimensions={(value) => setDimensions((current) => ({ ...current, [fileKey(file)]: value }))}
-              onOpen={(image) => setViewer(image)}
-            />
-            <TruncatedText text={file.name}>
-              {file.name}<TruncatedText as="small" text={fileMeta(file, dimensions[fileKey(file)])} />
-            </TruncatedText>
-            <div className="thumb-actions">
-              <label title="替换图片">
-                <RefreshCw size={14} />
-                <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} disabled={disabled} onChange={(event) => {
-                  const replacement = event.target.files?.[0]
-                  if (!replacement || disabled) return
-                  const next = [...files]
-                  next[index] = replacement
-                  onChange(next)
-                }} />
-              </label>
-              <button disabled={disabled} onClick={() => onChange(files.filter((_, itemIndex) => itemIndex !== index))} title="删除图片"><X size={14} /></button>
-            </div>
-          </div>
+            onReplace={(replacement) => {
+              const next = [...files]
+              next[index] = replacement
+              onChange(next)
+            }}
+            onDelete={() => onChange(files.filter((_, itemIndex) => itemIndex !== index))}
+          />
         )
       })}
-      <label className="file-thumb file-thumb-add" title="新增图片">
-        <div className="add-icon-wrapper">
-          <ImagePlus size={24} />
-        </div>
-        <span>新增图片</span>
-        <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple disabled={disabled} onChange={(event) => {
-          const added = Array.from(event.target.files ?? [])
-          if (added.length && !disabled) {
-            onChange([...files, ...added])
-          }
-          event.target.value = ''
-        }} />
-      </label>
+      {(typeof limit !== 'number' || files.length < limit) && (
+        <ImageUploadPlaceholder
+          accept={SUPPORTED_IMAGE_ACCEPT}
+          disabled={disabled}
+          remaining={typeof limit === 'number' ? limit - files.length : undefined}
+          onFiles={(added) => onChange([...files, ...added])}
+        />
+      )}
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </div>
   )
 }
 
-function FilePreviewButton({ file, dimensions, onDimensions, onOpen }: {
+function LocalFileImageCard({ file, dimensions, onDimensions, onOpen, badge, disabled, draggable, onDragStart, onDragOver, onDrop, onReplace, onDelete }: {
   file: File
   dimensions?: { width: number; height: number }
   onDimensions: (dimensions: { width: number; height: number }) => void
   onOpen: (image: LightboxImage) => void
+  badge?: string
+  disabled?: boolean
+  draggable?: boolean
+  onDragStart?: () => void
+  onDragOver?: (event: DragEvent<HTMLDivElement>) => void
+  onDrop?: () => void
+  onReplace?: (file: File) => void
+  onDelete?: () => void
 }) {
   const url = useObjectUrl(file)
-  return (
-    <button className="image-open" onClick={() => onOpen(fileLightboxImage(file, url, dimensions))} title="放大查看">
-      <img
-        src={url}
-        alt={file.name}
-        onLoad={(event) => onDimensions({
-          width: event.currentTarget.naturalWidth,
-          height: event.currentTarget.naturalHeight,
-        })}
-      />
-    </button>
-  )
+  return <ImageAssetCard
+    thumbnailSrc={url}
+    title={file.name}
+    meta={fileMeta(file, dimensions)}
+    badge={badge}
+    onOpen={() => onOpen(fileLightboxImage(file, url, dimensions))}
+    onImageLoad={onDimensions}
+    accept={SUPPORTED_IMAGE_ACCEPT}
+    disabled={disabled}
+    draggable={draggable}
+    onDragStart={onDragStart}
+    onDragOver={onDragOver}
+    onDrop={onDrop}
+    onReplace={onReplace}
+    onDelete={onDelete}
+  />
 }
 
 function ModelPage({ models, role, run }: { models: ModelProfile[]; role: SessionRole | null; run: any }) {
@@ -6012,23 +5953,46 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
   const coverThumb = refs.find((ref) => ref.angle === 'front')?.previewUrl ?? refs[0]?.previewUrl ?? null
   const displayRefs = refs.length || editable ? refs : fallbackHeadRefs()
   const takenAngles = new Set(refs.map((ref) => ref.angle).filter((angle): angle is string => !!angle))
-  const [env, setEnv] = useState<MediaAsset | null | undefined>(undefined)
+  const [shotPresets, setShotPresets] = useState<ShotPresetMatrix | null>(null)
+  const [shotPresetLoadState, setShotPresetLoadState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [dragIndex, setDragIndex] = useState<number | null>(null)
+  const [viewer, setViewer] = useState<LightboxImage | null>(null)
+
+  const loadShotPresets = useCallback(() => {
+    setShotPresetLoadState('loading')
+    setShotPresets(null)
+    void api.getShotPresets().then((matrix) => {
+      setShotPresets(matrix)
+      setShotPresetLoadState('ready')
+    }).catch(() => setShotPresetLoadState('error'))
+  }, [])
 
   useEffect(() => {
-    void api.getShootEnvironment().then((r) => setEnv(r.asset)).catch(() => setEnv(null))
-  }, [])
+    if (role) loadShotPresets()
+  }, [loadShotPresets, role])
+
+  const openModelRef = (index: number) => {
+    const items = displayRefs.map((item) => ({
+      src: mediaUrl(item.originalUrl ?? item.previewUrl ?? item.thumbUrl ?? ''),
+      thumbSrc: mediaUrl(item.thumbUrl ?? item.previewUrl ?? ''),
+      title: item.filename,
+      meta: angleLabel(item.angle ?? item.id),
+      details: { 文件名: item.filename, 角度: angleLabel(item.angle ?? item.id) },
+    }))
+    setViewer({ ...items[index], items, initialIndex: index })
+  }
+  const coverRefIndex = Math.max(0, displayRefs.findIndex((ref) => ref.angle === 'front'))
 
   return (
     <section className="page workbench-page model-shell-page">
       <PageTitle
         title="模特与背景"
-        subtitle="维护全局模特身份和拍摄空间参考，保证每次成片稳定一致。"
+        subtitle="当前拍摄任务默认使用以下模特身份与拍摄预设，保证整组成片稳定一致。"
       />
       <div className="panel model-page">
         <div className="model-meta">
           <div className="model-cover">
-            {coverThumb ? <img src={mediaUrl(coverThumb)} loading="lazy" alt={model?.name ?? '模特与背景'} /> : <div className="image-placeholder"><UserRound size={40} /></div>}
+            {coverThumb ? <button className="image-open" type="button" onClick={() => openModelRef(coverRefIndex)} title="放大查看"><img src={mediaUrl(coverThumb)} loading="lazy" alt={model?.name ?? '模特与背景'} /></button> : <div className="image-placeholder"><UserRound size={40} /></div>}
           </div>
           <div className="model-meta-head">
             <h2>{model?.name ?? 'Face-01 默认模特'}</h2>
@@ -6043,25 +6007,17 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
           <section className="model-block">
             <div className="section-head">
               <strong>模特头部参考图</strong>
-              {editable && (
-                <label className="management-action">
-                  <ImagePlus size={16} /> 追加图片
-                  <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple onChange={(event) => {
-                    const next = Array.from(event.target.files ?? [])
-                    event.currentTarget.value = ''
-                    if (next.length) void run('追加模特图片中...', () => api.addModelHeadReferences(model.id, next), undefined, { refresh: 'background' })
-                  }} />
-                </label>
-              )}
             </div>
-            <p className="edit-hint">{editable ? '拖拽卡片调整顺序，靠前的图片优先用于生成（当前取前 2 张）。身份以这些图为准，表情与角度可变。' : '多角度头部参考图，身份以这些图为准。'}</p>
             <div className="saved-image-grid">
               {displayRefs.map((ref, index) => {
                 const thumb = ('thumbUrl' in ref ? ref.thumbUrl : null) ?? ref.previewUrl ?? null
                 return (
-                  <div
-                    className="saved-image-card"
+                  <ImageAssetCard
                     key={ref.id}
+                    thumbnailSrc={thumb ? mediaUrl(thumb) : null}
+                    title={ref.filename}
+                    meta={`${angleLabel(ref.angle ?? ref.id)} · 第 ${index + 1} 张`}
+                    onOpen={() => openModelRef(index)}
                     draggable={editable && refs.length > 1}
                     onDragStart={editable ? () => setDragIndex(index) : undefined}
                     onDragOver={editable ? (event) => event.preventDefault() : undefined}
@@ -6069,10 +6025,12 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
                       if (dragIndex !== null && dragIndex !== index) void run('调整模特图片顺序中...', () => api.reorderModelHeadReference(model.id, refs[dragIndex].id, index), undefined, { refresh: 'background' })
                       setDragIndex(null)
                     } : undefined}
-                  >
-                    {thumb ? <img src={mediaUrl(thumb)} loading="lazy" alt={angleLabel(ref.angle ?? ref.id)} /> : <div className="image-placeholder"><UserRound size={28} /></div>}
-                    {editable ? (
-                      <span className="has-angle" title={angleLabel(ref.angle ?? ref.id)}>
+                    accept={SUPPORTED_IMAGE_ACCEPT}
+                    onReplace={editable ? (replacement) => void run('替换模特图片中...', () => api.replaceModelHeadReference(model.id, ref.id, replacement), undefined, { refresh: 'background' }) : undefined}
+                    onDelete={editable ? () => void run('删除模特图片中...', () => api.deleteModelHeadReference(model.id, ref.id), undefined, { refresh: 'background' }) : undefined}
+                    canDelete={refs.length > 1}
+                    footer={editable ? (
+                      <div className="image-card-footer" title={angleLabel(ref.angle ?? ref.id)}>
                         <select className="angle-select" value={ref.angle ?? ''} onChange={(event) => {
                           const angle = event.target.value
                           if (model) void run('设置模特图片角度中...', () => api.setModelHeadReferenceAngle(model.id, ref.id, angle), undefined, { refresh: 'background' })
@@ -6082,77 +6040,125 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
                             <option key={option.value} value={option.value} disabled={takenAngles.has(option.value) && option.value !== ref.angle}>{option.label}</option>
                           ))}
                         </select>
-                        <small>{`第 ${index + 1} 张`}</small>
-                      </span>
-                    ) : (
-                      <TruncatedText text={angleLabel(ref.angle ?? ref.id)} />
-                    )}
-                    {editable && (
-                      <div className="thumb-actions">
-                        <label title="替换图片">
-                          <RefreshCw size={14} />
-                          <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
-                            const replacement = event.target.files?.[0]
-                            event.currentTarget.value = ''
-                            if (replacement) void run('替换模特图片中...', () => api.replaceModelHeadReference(model.id, ref.id, replacement), undefined, { refresh: 'background' })
-                          }} />
-                        </label>
-                        <button disabled={refs.length <= 1} onClick={() => void run('删除模特图片中...', () => api.deleteModelHeadReference(model.id, ref.id), undefined, { refresh: 'background' })} title="删除图片"><Trash2 size={14} /></button>
                       </div>
-                    )}
-                  </div>
+                    ) : undefined}
+                  />
                 )
               })}
+              {editable && refs.length < MODEL_HEAD_REFERENCE_MAX_IMAGES && (
+                <ImageUploadPlaceholder
+                  accept={SUPPORTED_IMAGE_ACCEPT}
+                  remaining={MODEL_HEAD_REFERENCE_MAX_IMAGES - refs.length}
+                  label="添加模特参考图"
+                  onFiles={(files) => void run('追加模特图片中...', () => api.addModelHeadReferences(model.id, files), undefined, { refresh: 'background' })}
+                />
+              )}
             </div>
           </section>
 
           <section className="model-block">
             <div className="section-head">
-              <strong>拍摄背景参考图</strong>
-              {isAdmin && (
-                <label className="management-action">
-                  <ImagePlus size={16} /> {env ? '更换' : '导入'}
-                  <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
-                    const file = event.target.files?.[0]
-                    event.currentTarget.value = ''
-                    if (file) void run('导入拍摄背景参考图中...', () => api.setShootEnvironment(file), (r: { asset: MediaAsset | null }) => setEnv(r.asset), { refresh: false })
-                  }} />
-                </label>
-              )}
+              <strong>拍摄预设</strong>
             </div>
-            <p className="edit-hint">全局只保留 0 或 1 张。生成分镜预览时只参考它的背景、空间与光线；模特和服装以各自参考图为准，为空则不引用背景参考图。</p>
-            {env === undefined ? (
-              <div className="model-empty">加载中…</div>
-            ) : env ? (
-              <div className="saved-image-grid">
-                <div className="saved-image-card">
-                  <img src={mediaUrl(assetPreviewSrc(env))} loading="lazy" alt="拍摄背景参考图" />
-                  <TruncatedText text="拍摄背景参考图">
-                    拍摄背景参考图<TruncatedText as="small" text={assetMeta(env)} />
-                  </TruncatedText>
-                  {isAdmin && (
-                    <div className="thumb-actions">
-                      <label title="更换图片">
-                        <RefreshCw size={14} />
-                        <input type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
-                          const file = event.target.files?.[0]
-                          event.currentTarget.value = ''
-                          if (file) void run('更换拍摄背景参考图中...', () => api.setShootEnvironment(file), (r: { asset: MediaAsset | null }) => setEnv(r.asset), { refresh: false })
-                        }} />
-                      </label>
-                      <button onClick={() => void run('移除拍摄背景参考图中...', () => api.clearShootEnvironment(), (r: { asset: MediaAsset | null }) => setEnv(r.asset), { refresh: false })} title="移除图片"><Trash2 size={14} /></button>
-                    </div>
-                  )}
-                </div>
+            {shotPresetLoadState === 'error' ? (
+              <div className="model-empty model-empty-action">
+                <span>拍摄预设暂时无法加载。</span>
+                <button type="button" className="management-action" onClick={loadShotPresets}>重试加载</button>
               </div>
+            ) : shotPresets ? (
+              <ShotPresetManager matrix={shotPresets} setMatrix={setShotPresets} run={run} onOpen={setViewer} editable={isAdmin} />
             ) : (
-              <div className="model-empty">尚未设置拍摄背景参考图{isAdmin ? '，点击上方「导入」添加一张。' : '。'}</div>
+              <div className="model-empty">加载中…</div>
             )}
           </section>
         </div>
       </div>
+      {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </section>
   )
+}
+
+const SHOT_PRESET_FAMILY_LABELS: Record<ShotPresetSlot['categoryFamily'], string> = {
+  top: '上装',
+  bottom: '下装',
+  one_piece: '套装',
+}
+
+function ShotPresetManager({ matrix, setMatrix, run, onOpen, editable }: {
+  matrix: ShotPresetMatrix
+  setMatrix: (matrix: ShotPresetMatrix) => void
+  run: any
+  onOpen: (image: LightboxImage) => void
+  editable: boolean
+}) {
+  return (
+    <div className="shot-preset-manager">
+      {(['top', 'bottom', 'one_piece'] as const).map((family) => {
+        const state = matrix.families[family]
+        return (
+          <section className="shot-preset-family" key={family}>
+            <header>
+              <strong>{SHOT_PRESET_FAMILY_LABELS[family]}</strong>
+              <span>{state.configuredCount}/5 个镜头完整</span>
+            </header>
+            {!state.complete && state.validationErrors.length > 0 && (
+              <p className="shot-preset-warning">{editable ? '还需完成' : '当前预设不完整'}：{state.validationErrors.slice(0, 2).join('；')}{state.validationErrors.length > 2 ? `；另有 ${state.validationErrors.length - 2} 项` : ''}</p>
+            )}
+            <div className="shot-preset-grid">
+              {matrix.slots.filter((slot) => slot.categoryFamily === family).map((slot) => (
+                <ShotPresetSlotEditor key={`${family}-${slot.shotIndex}`} slot={slot} setMatrix={setMatrix} run={run} onOpen={onOpen} editable={editable} />
+              ))}
+            </div>
+          </section>
+        )
+      })}
+    </div>
+  )
+}
+
+function ShotPresetSlotEditor({ slot, setMatrix, run, onOpen, editable }: {
+  slot: ShotPresetSlot
+  setMatrix: (matrix: ShotPresetMatrix) => void
+  run: any
+  onOpen: (image: LightboxImage) => void
+  editable: boolean
+}) {
+  const assets = [slot.background, slot.pose].filter((asset): asset is MediaAsset => Boolean(asset))
+  const update = (role: 'background' | 'pose', file: File) => {
+    void run(
+      `更换${SHOT_PRESET_FAMILY_LABELS[slot.categoryFamily]}镜头 ${slot.shotIndex} 图片中...`,
+      () => api.replaceShotPresetAsset(slot.categoryFamily, slot.shotIndex, role, file),
+      setMatrix,
+      { refresh: false },
+    )
+  }
+  const remove = (role: 'background' | 'pose') => void run(
+    `删除${SHOT_PRESET_FAMILY_LABELS[slot.categoryFamily]}镜头 ${slot.shotIndex} 图片中...`,
+    () => api.deleteShotPresetAsset(slot.categoryFamily, slot.shotIndex, role),
+    setMatrix,
+    { refresh: false },
+  )
+  return (
+    <article className={`shot-preset-card ${slot.complete ? 'complete' : ''}`}>
+      <header><strong>镜头 {slot.shotIndex}</strong><span>{slot.complete ? '已配置' : '待配置'}</span></header>
+      <div className="shot-preset-thumbs">
+        <ShotPresetAssetCard label="拍摄母版" asset={slot.background} group={assets} onOpen={onOpen} editable={editable} onReplace={(file) => update('background', file)} onDelete={() => remove('background')} />
+        <ShotPresetAssetCard label="风格/姿势" asset={slot.pose} group={assets} onOpen={onOpen} editable={editable} onReplace={(file) => update('pose', file)} onDelete={() => remove('pose')} />
+      </div>
+    </article>
+  )
+}
+
+function ShotPresetAssetCard({ label, asset, group, onOpen, editable, onReplace, onDelete }: { label: string; asset: MediaAsset | null; group: MediaAsset[]; onOpen: (image: LightboxImage) => void; editable: boolean; onReplace: (file: File) => void; onDelete: () => void }) {
+  return <ImageAssetCard
+    thumbnailSrc={asset ? mediaUrl(assetThumbSrc(asset)) : null}
+    title={asset?.originalFilename ?? asset?.filename ?? (editable ? `选择${label}图` : `${label}未配置`)}
+    meta={asset ? `${label} · ${assetMeta(asset)}` : `${label} · 尚未配置`}
+    onOpen={asset ? () => onOpen(assetLightboxImage(asset, group)) : undefined}
+    accept={editable ? SUPPORTED_IMAGE_ACCEPT : undefined}
+    onReplace={editable ? onReplace : undefined}
+    onDelete={editable && asset ? onDelete : undefined}
+  />
 }
 
 function PromptMaintenancePage({ run }: { run: any }) {
@@ -6989,7 +6995,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     <section className="page workbench-page records-page">
       <PageTitle
         title="生成记录"
-        subtitle="按批次或单次任务复盘拍摄流程、分镜预览和最终成片。"
+        subtitle="按批次或单次任务复盘拍摄输入、智能选搭和最终成片。"
       />
       <div className="records-layout">
         <div className="panel record-list">
@@ -7207,7 +7213,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
               </button>
               <button className="management-action" disabled={recordArchiveMutationBusy || isTaskRunning(detail) || detail.archiveReason === 'deletion_pending'} onClick={() => openRecordDeleteDialogForItems([detail])}>归档</button>
             </>
-          ) : <EmptyState title="选择一条记录" text="查看分镜预览、搭配服装和最终成片。" />}
+          ) : <EmptyState title="选择一条记录" text="查看拍摄输入、搭配服装和最终成片。" />}
         </div>
       </div>
       {batchBulkError && <div className="inline-error" role="alert">{batchBulkError}</div>}
@@ -7792,6 +7798,8 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
 }) {
   const [working, setWorking] = useState(item.images ?? [])
   const [replacementFiles, setReplacementFiles] = useState<Record<number, File>>({})
+  const [pendingFiles, setPendingFiles] = useState<File[]>([])
+  const [pendingDimensions, setPendingDimensions] = useState<Record<string, { width: number; height: number }>>({})
   const [removedIds, setRemovedIds] = useState<number[]>([])
   const [dirty, setDirty] = useState(false)
   const [dragIndex, setDragIndex] = useState<number | null>(null)
@@ -7803,11 +7811,14 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
   const hasCurrentTaggingFailure = item.status === 'TAGGING_FAILED' || Boolean(item.tagError)
   const taggingIssue = hasCurrentTaggingFailure ? garmentTaggingIssue(item, failedTagAttempt) : null
   const selectableText = item.status === 'READY' && !item.archivedAt ? '可进入智能选搭' : '不进入智能选搭'
+  const totalImageCount = working.length + pendingFiles.length
 
   useEffect(() => {
     setWorking(item.images ?? [])
     setReplacementFiles({})
     setReplacementDimensions({})
+    setPendingFiles([])
+    setPendingDimensions({})
     setRemovedIds([])
     setDirty(false)
   }, [item.id, item.updatedAt])
@@ -7838,11 +7849,12 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
   }
 
   async function save(retag: boolean) {
-    if (!working.length) throw new Error('搭配服装至少需要保留一张图片')
+    if (!totalImageCount) throw new Error('搭配服装至少需要保留一张图片')
     await run(retag ? '保存并重新识别标签中...' : '保存搭配服装中...', async () => {
       await Promise.all(Object.entries(replacementFiles).map(([id, file]) => api.replaceStylingGarmentImage(Number(id), file)))
       await Promise.all(removedIds.map((id) => api.deleteStylingGarmentImage(id)))
       await Promise.all(working.map((image, index) => api.updateStylingGarmentImage(image.id, { sortOrder: index })))
+      if (pendingFiles.length) await api.addStylingGarmentImages(item.id, pendingFiles)
       return retag ? (await api.tagStylingGarment(item.id)).item : (await api.getStylingGarment(item.id)).item
     }, (latest: StylingGarment) => onChange(latest), { refresh: 'background' })
   }
@@ -7868,7 +7880,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
           <Meta label="更新时间" value={dateText(item.updatedAt)} />
           <Meta label="识别时间" value={dateText(item.tagCompletedAt)} />
           <Meta label="选搭状态" value={selectableText} />
-          <Meta label="图片" value={`${working.length}/${STYLING_GARMENT_MAX_IMAGES} 张`} />
+          <Meta label="图片" value={`${totalImageCount}/${STYLING_GARMENT_SELECTED_IMAGES} 张`} />
           {taggingIssue && (
             <TagObjectPanel
               title={taggingIssue.panelTitle}
@@ -7883,59 +7895,81 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
           <div className="section-head">
             <strong>图片</strong>
           </div>
-          <p className="edit-hint">此次修改会影响标签识别。排序第一张会作为封面和主要参考图；如需补充图片，请重新导入一套素材。</p>
+          <p className="edit-hint">此次修改会影响标签识别。排序第一张会作为封面和主要参考图。</p>
           {tagging && <p className="edit-hint" role="status" aria-live="polite">正在识别标签；服务繁忙时系统会自动恢复，可以离开当前页面。</p>}
           <div className="saved-image-grid">
             {working.map((image, index) => {
               const replacement = replacementFiles[image.id]
-              return (
-                <div
-                  className="saved-image-card"
+              const sharedProps = {
+                disabled: tagging,
+                draggable: !tagging,
+                onDragStart: () => setDragIndex(index),
+                onDragOver: (event: DragEvent<HTMLDivElement>) => event.preventDefault(),
+                onDrop: () => {
+                  if (dragIndex !== null) move(dragIndex, index)
+                  setDragIndex(null)
+                },
+                onReplace: (nextReplacement: File) => {
+                  setReplacementFiles((current) => ({ ...current, [image.id]: nextReplacement }))
+                  setDirty(true)
+                },
+                onDelete: () => {
+                  setWorking((current) => current.filter((itemImage) => itemImage.id !== image.id))
+                  setRemovedIds((current) => [...current, image.id])
+                  setDirty(true)
+                },
+              }
+              return replacement ? (
+                <LocalFileImageCard
                   key={image.id}
-                  draggable={!tagging}
-                  onDragStart={() => setDragIndex(index)}
-                  onDragOver={(event) => event.preventDefault()}
-                  onDrop={() => {
-                    if (dragIndex !== null) move(dragIndex, index)
-                    setDragIndex(null)
-                  }}
-                >
-                  {replacement ? (
-                    <FilePreviewButton
-                      file={replacement}
-                      dimensions={replacementDimensions[image.id]}
-                      onDimensions={(value) => setReplacementDimensions((current) => ({ ...current, [image.id]: value }))}
-                      onOpen={(nextImage) => setViewer(nextImage)}
-                    />
-                  ) : (
-                    <button className="image-open" onClick={() => setViewer(assetLightboxImage(image.asset, working.map((itemImage) => itemImage.asset)))} title="放大查看">
-                      <img src={mediaUrl(assetThumbSrc(image.asset))} alt={image.asset.filename} loading="lazy" />
-                    </button>
-                  )}
-                  <TruncatedText text={replacement?.name ?? image.asset.filename}>
-                    {replacement?.name ?? image.asset.filename}<TruncatedText as="small" text={replacement ? fileMeta(replacement, replacementDimensions[image.id]) : assetMeta(image.asset)} />
-                  </TruncatedText>
-                  <div className="thumb-actions">
-                    <label className={tagging ? 'is-disabled' : ''} title="替换图片">
-                      <RefreshCw size={14} />
-                      <input disabled={tagging} type="file" accept={SUPPORTED_IMAGE_ACCEPT} onChange={(event) => {
-                        const nextReplacement = event.target.files?.[0]
-                        if (!nextReplacement) return
-                        setReplacementFiles((current) => ({ ...current, [image.id]: nextReplacement }))
-                        setDirty(true)
-                      }} />
-                    </label>
-                    <button disabled={tagging} onClick={() => {
-                      setWorking((current) => current.filter((itemImage) => itemImage.id !== image.id))
-                      setRemovedIds((current) => [...current, image.id])
-                      setDirty(true)
-                    }} title="删除图片"><Trash2 size={14} /></button>
-                  </div>
-                </div>
+                  file={replacement}
+                  dimensions={replacementDimensions[image.id]}
+                  onDimensions={(value) => setReplacementDimensions((current) => ({ ...current, [image.id]: value }))}
+                  onOpen={setViewer}
+                  badge="待替换"
+                  {...sharedProps}
+                />
+              ) : (
+                <ImageAssetCard
+                  key={image.id}
+                  thumbnailSrc={mediaUrl(assetThumbSrc(image.asset))}
+                  title={image.asset.originalFilename ?? image.asset.filename}
+                  meta={assetMeta(image.asset)}
+                  onOpen={() => setViewer(assetLightboxImage(image.asset, working.map((itemImage) => itemImage.asset)))}
+                  accept={SUPPORTED_IMAGE_ACCEPT}
+                  {...sharedProps}
+                />
               )
             })}
+            {pendingFiles.map((file, index) => (
+              <LocalFileImageCard
+                key={`${fileKey(file)}-${index}`}
+                file={file}
+                dimensions={pendingDimensions[fileKey(file)]}
+                onDimensions={(value) => setPendingDimensions((current) => ({ ...current, [fileKey(file)]: value }))}
+                onOpen={setViewer}
+                badge="待新增"
+                disabled={tagging}
+                onReplace={(replacement) => setPendingFiles((current) => current.map((itemFile, itemIndex) => itemIndex === index ? replacement : itemFile))}
+                onDelete={() => {
+                  setPendingFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))
+                  setDirty(true)
+                }}
+              />
+            ))}
+            {!tagging && totalImageCount < STYLING_GARMENT_SELECTED_IMAGES && (
+              <ImageUploadPlaceholder
+                accept={SUPPORTED_IMAGE_ACCEPT}
+                remaining={STYLING_GARMENT_SELECTED_IMAGES - totalImageCount}
+                label="添加搭配服装图片"
+                onFiles={(files) => {
+                  setPendingFiles((current) => [...current, ...files])
+                  setDirty(true)
+                }}
+              />
+            )}
           </div>
-          {!working.length && <span className="inline-error">搭配服装至少需要保留一张图片</span>}
+          {!totalImageCount && <span className="inline-error">搭配服装至少需要保留一张图片</span>}
         </div>
         <div className="drawer-section">
           <div className="section-head"><strong>AI 识别标签</strong></div>
@@ -7961,8 +7995,8 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
         )}
         <div className="drawer-actions">
           <button className="management-action" disabled={tagging} onClick={retag}>重新识别</button>
-          <button className="management-action" disabled={tagging || !dirty || !working.length} onClick={() => void save(false)}>仅保存</button>
-          <button className="management-action" disabled={tagging || !dirty || !working.length} onClick={() => void save(true)}>保存并重新识别标签</button>
+          <button className="management-action" disabled={tagging || !dirty || !totalImageCount} onClick={() => void save(false)}>仅保存</button>
+          <button className="management-action" disabled={tagging || !dirty || !totalImageCount} onClick={() => void save(true)}>保存并重新识别标签</button>
         </div>
         <div className="danger-zone">
           <strong>归档</strong>
@@ -8454,14 +8488,17 @@ function attemptStatusText(operation: AIOperation) {
 }
 
 // 失败 attempt 的一行友好文案（按 error_code 归类），技术码仍保留在“调用记录”里。
-function attemptFriendlyFailure(operation: AIOperation): string | null {
+function attemptFriendlyFailure(operation: AIOperation, taskStillRunning = false): string | null {
   if (operation.status !== 'FAILED') return null
+  if (taskStillRunning && operation.errorCode === 'UPLOAD_FAILED') {
+    return friendlyAttemptErrorText(operation.errorCode, operation.errorMessage, true)
+  }
   if (operation.error) {
     return operation.error.message && operation.error.message !== operation.error.title
       ? `${operation.error.title}：${operation.error.message}`
       : operation.error.title
   }
-  return friendlyErrorText(operation.errorCode, operation.errorMessage)
+  return friendlyAttemptErrorText(operation.errorCode, operation.errorMessage, taskStillRunning)
 }
 
 function attemptPhaseText(entry: AttemptPhase, operation?: AIOperation) {
@@ -9082,20 +9119,17 @@ function SearchBox({
 function getTaskStep(task: GenerationTask | null): StudioStep {
   if (!task) return 0
   if (task.status === 'CANCELLED') {
-    if (task.resultSet?.images?.length) return 3
-    if ((task.storyboardPreview ?? task.preview)?.asset) return 3
+    if (task.resultSet?.images?.length) return 2
     if (task.styling) return 2
     return 1
   }
   if (task.status === 'FAILED') {
-    if (task.resultSet?.images?.length) return 3
-    if ((task.storyboardPreview ?? task.preview)?.asset) return 3
+    if (task.resultSet?.images?.length) return 2
     if (task.styling) return 2
     return 1
   }
   if (['DRAFT', 'READY_FOR_STYLING', 'STYLING_RUNNING'].includes(task.status)) return 1
-  if (['STYLING_READY', 'PREVIEW_RUNNING'].includes(task.status)) return 2
-  if (['PREVIEW_READY', 'FINAL_RUNNING', 'FINAL_PARTIAL', 'COMPLETED'].includes(task.status)) return 3
+  if (['STYLING_READY', 'PREVIEW_RUNNING', 'PREVIEW_READY', 'FINAL_RUNNING', 'FINAL_PARTIAL', 'COMPLETED'].includes(task.status)) return 2
   return 0
 }
 
@@ -9143,7 +9177,7 @@ function studioTaskPresentation(task: GenerationTask): StudioTaskPresentation {
   return {
     statusLabel: taskListStatusLabel(task),
     currentStageLabel,
-    progressLabel: `已完成 ${completedStageCount}/4 步`,
+    progressLabel: `已完成 ${completedStageCount}/3 步`,
     executingStage: runningStage,
   }
 }
@@ -9152,7 +9186,7 @@ function runningStudioStage(task: GenerationTask): StudioStep | null {
   const map: Record<string, StudioStep> = {
     STYLING_RUNNING: 1,
     PREVIEW_RUNNING: 2,
-    FINAL_RUNNING: 3,
+    FINAL_RUNNING: 2,
   }
   return map[task.status] ?? null
 }
@@ -9160,7 +9194,6 @@ function runningStudioStage(task: GenerationTask): StudioStep | null {
 function completedStudioStageCount(task: GenerationTask) {
   let count = taskHasHeroImage(task) ? 1 : 0
   if (task.activeStylingId || task.styling) count += 1
-  if ((task.storyboardPreview ?? task.preview)?.asset) count += 1
   if (finalSucceededCount(task) >= 5) count += 1
   return count
 }
@@ -9503,7 +9536,9 @@ function fallbackHeadRefs() {
     id,
     angle: id,
     filename: id,
+    thumbUrl: null as string | null,
     previewUrl: null as string | null,
+    originalUrl: null as string | null,
   }))
 }
 

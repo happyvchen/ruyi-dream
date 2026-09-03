@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,10 @@ from app.generation_progress import (
     ERROR_AUTH_FAILED,
     ERROR_CONN_RESET,
     ERROR_GATEWAY_5XX,
+    ERROR_MALFORMED_OUTPUT,
+    ERROR_CONTENT_POLICY,
+    ERROR_INSUFFICIENT_BALANCE,
+    ERROR_PROVIDER_TRANSIENT_UNKNOWN,
     ERROR_RATE_LIMITED,
     classify_provider_error,
 )
@@ -149,6 +154,222 @@ def test_gemini_gateway_failure_uses_unified_retry_and_reports_progress(
             "error": "HTTP 503",
         }
     ]
+
+
+def test_gemini_unknown_zero_output_provider_error_retries_and_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = SimpleNamespace(
+        gemini_provider="toapis",
+        gemini_toapis_model="gemini-test",
+        gemini_model="gemini-test",
+        toapis_api_key="configured",
+        gemini_toapis_timeout_seconds=300,
+        gemini_retry_limit=10,
+        gemini_retry_backoff_base_seconds=30,
+        gemini_retry_backoff_cap_seconds=240,
+        gemini_retry_time_budget_seconds=5400,
+        gemini_waf_retry_limit=10,
+    )
+    calls = 0
+    waits: list[float] = []
+
+    def post(_payload: dict[str, object], *, read_timeout_seconds: float | None = None) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise gemini_provider.GeminiProviderError(
+                "unknown provider for model gemini-test-low",
+                ERROR_PROVIDER_TRANSIENT_UNKNOWN,
+            )
+        return '{}'
+
+    monkeypatch.setattr(gemini_provider, "get_settings", lambda: settings)
+    monkeypatch.setattr(gemini_provider, "_post_toapis_chat", post)
+    monkeypatch.setattr(gemini_provider.time, "sleep", waits.append)
+
+    assert asyncio.run(gemini_provider.generate_gemini_json_text("retry route")) == '{}'
+    assert calls == 2
+    assert waits == [30]
+
+
+def test_toapis_stream_unknown_error_before_text_is_retryable() -> None:
+    lines = [
+        'data: {"error":{"code":"edge_route_unavailable","message":"temporary route failure"}}',
+        "data: [DONE]",
+    ]
+
+    with pytest.raises(gemini_provider.GeminiProviderError) as caught:
+        gemini_provider.assemble_toapis_stream_text(lines)
+
+    assert caught.value.error_code == ERROR_PROVIDER_TRANSIENT_UNKNOWN
+
+
+def test_toapis_stream_unknown_provider_route_without_http_status_is_retryable() -> None:
+    lines = [
+        'data: {"error":{"code":"model_not_found","message":"unknown provider for model gemini-test-low"}}',
+        "data: [DONE]",
+    ]
+
+    with pytest.raises(gemini_provider.GeminiProviderError) as caught:
+        gemini_provider.assemble_toapis_stream_text(lines)
+
+    assert caught.value.error_code == ERROR_PROVIDER_TRANSIENT_UNKNOWN
+
+
+def test_toapis_stream_error_after_text_is_never_blindly_retried() -> None:
+    lines = [
+        'data: {"choices":[{"delta":{"content":"{\\"partial\\":"}}]}',
+        'data: {"error":{"code":"edge_route_unavailable","message":"temporary route failure"}}',
+        "data: [DONE]",
+    ]
+
+    with pytest.raises(gemini_provider.GeminiProviderError) as caught:
+        gemini_provider.assemble_toapis_stream_text(lines)
+
+    assert caught.value.error_code == ERROR_MALFORMED_OUTPUT
+
+
+def test_toapis_stream_error_with_nonzero_usage_in_same_chunk_is_never_blindly_retried() -> None:
+    lines = [
+        'data: {"error":{"code":"edge_route_unavailable","message":"temporary route failure"},"usage":{"completion_tokens":2}}',
+        "data: [DONE]",
+    ]
+
+    with pytest.raises(gemini_provider.GeminiProviderError) as caught:
+        gemini_provider.assemble_toapis_stream_text(lines)
+
+    assert caught.value.error_code == ERROR_MALFORMED_OUTPUT
+
+
+def test_toapis_non_ok_error_with_nonzero_usage_is_never_blindly_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import requests
+
+    payload = {
+        "error": {"code": "edge_route_unavailable", "message": "temporary route failure"},
+        "usage": {"completion_tokens": 2},
+    }
+
+    class FakeResponse:
+        ok = False
+        status_code = 503
+        text = json.dumps(payload)
+        headers = {"Content-Type": "application/json"}
+
+        def json(self):
+            return payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(
+        gemini_provider,
+        "get_settings",
+        lambda: SimpleNamespace(
+            gemini_toapis_timeout_seconds=300,
+            gemini_toapis_connect_timeout_seconds=60,
+            toapis_api_key="test-key",
+            toapis_base_url="https://toapis.example",
+        ),
+    )
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: FakeResponse())
+
+    with pytest.raises(gemini_provider.GeminiProviderError) as caught:
+        gemini_provider._post_toapis_chat({"model": "gemini-test"})
+
+    assert caught.value.error_code == ERROR_MALFORMED_OUTPUT
+
+
+def test_toapis_stream_error_after_finish_reason_is_never_blindly_retried() -> None:
+    lines = [
+        'data: {"choices":[{"finish_reason":"stop","delta":{}}]}',
+        'data: {"error":{"code":"edge_route_unavailable","message":"temporary route failure"}}',
+        "data: [DONE]",
+    ]
+
+    with pytest.raises(gemini_provider.GeminiProviderError) as caught:
+        gemini_provider.assemble_toapis_stream_text(lines)
+
+    assert caught.value.error_code == ERROR_MALFORMED_OUTPUT
+
+
+def test_toapis_http_200_without_text_is_zero_output_transient() -> None:
+    with pytest.raises(gemini_provider.GeminiProviderError) as caught:
+        gemini_provider.extract_toapis_chat_text({"object": "chat.completion"})
+
+    assert caught.value.error_code == ERROR_PROVIDER_TRANSIENT_UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("provider_code", "expected"),
+    [
+        ("unauthorized", ERROR_AUTH_FAILED),
+        ("insufficient_quota", ERROR_INSUFFICIENT_BALANCE),
+        ("content_policy_violation", ERROR_CONTENT_POLICY),
+    ],
+)
+def test_toapis_http_200_error_envelope_preserves_hard_stop(provider_code: str, expected: str) -> None:
+    with pytest.raises(gemini_provider.GeminiProviderError) as caught:
+        gemini_provider.extract_toapis_chat_text(
+            {"error": {"code": provider_code, "message": "provider rejected request"}}
+        )
+
+    assert caught.value.error_code == expected
+
+
+def test_toapis_http_200_unknown_provider_route_is_retryable() -> None:
+    payload = {
+        "error": {
+            "code": "model_not_found",
+            "message": "unknown provider for model gemini-test-low",
+        }
+    }
+
+    with pytest.raises(gemini_provider.GeminiProviderError) as caught:
+        gemini_provider.extract_toapis_chat_text(payload)
+
+    assert caught.value.error_code == ERROR_PROVIDER_TRANSIENT_UNKNOWN
+
+
+def test_toapis_http_200_error_with_nonzero_usage_is_never_blindly_retried() -> None:
+    payload = {
+        "error": {"code": "edge_route_unavailable", "message": "temporary route failure"},
+        "usage": {"completion_tokens": 3},
+    }
+
+    with pytest.raises(gemini_provider.GeminiProviderError) as caught:
+        gemini_provider.extract_toapis_chat_text(payload)
+
+    assert caught.value.error_code == ERROR_MALFORMED_OUTPUT
+
+
+def test_toapis_stream_nonzero_usage_without_text_is_not_blindly_retried() -> None:
+    lines = [
+        'data: {"usage":{"completion_tokens":12},"choices":[]}',
+        "data: [DONE]",
+    ]
+
+    with pytest.raises(gemini_provider.GeminiProviderError) as caught:
+        gemini_provider.assemble_toapis_stream_text(lines)
+
+    assert caught.value.error_code == ERROR_MALFORMED_OUTPUT
+
+
+def test_toapis_non_stream_nonzero_usage_without_text_is_not_blindly_retried() -> None:
+    payload = {
+        "choices": [{"finish_reason": "stop", "message": {"content": ""}}],
+        "usage": {"completion_tokens": 8},
+    }
+
+    with pytest.raises(gemini_provider.GeminiProviderError) as caught:
+        gemini_provider.extract_toapis_chat_text(payload)
+
+    assert caught.value.error_code == ERROR_MALFORMED_OUTPUT
 
 
 def test_gemini_deferred_retry_returns_control_without_sleeping(
