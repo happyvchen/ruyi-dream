@@ -867,7 +867,9 @@ def is_fal_cdn_url(url: str) -> bool:
 
 def is_toapis_file_url(url: str) -> bool:
     host = urlparse(url).netloc.lower()
-    return host == "files.toapis.com" or host.endswith(".toapis.com")
+    return host in {"files.toapis.com", "files.toapis.xyz"} or host.endswith(
+        (".toapis.com", ".toapis.xyz")
+    )
 
 
 def upload_object_to_fal(object_key: str, filename: str) -> str:

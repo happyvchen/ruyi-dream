@@ -53,7 +53,7 @@ ToAPIs 图片任务是异步协议：创建接口返回任务 ID，状态接口�
 
 API 摘要返回稳定 `error={code,title,message,action,retryable}`；普通用户只看可读标题、具体原因和下一步。数据库与 admin 技术详情保留原始 `technicalMessage`、provider 快照、顶层/上游错误码、providerRequestId 及 `providerReferenceImageManifest.providerInputPolicyVersion`。
 
-官方依据：`https://docs.toapis.com/docs/cn/api-reference/tasks/image-status`、`https://docs.toapis.com/docs/cn/api-reference/images/gpt-image-2/official`、`https://docs.toapis.com/docs/cn/api-reference/uploads/images`。
+官方依据：`https://dashlyai.mintlify.app/docs/cn/api-reference/tasks/image-status`、`https://dashlyai.mintlify.app/docs/cn/api-reference/images/gpt-image-2/official`、`https://dashlyai.mintlify.app/docs/cn/api-reference/uploads/images`。
 
 ## ToAPIs 并发闸门
 

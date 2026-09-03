@@ -193,6 +193,37 @@ def test_toapis_current_policy_provider_url_is_reused(
     assert result[0]["providerUrl"] == "https://files.toapis.com/v2.jpg"
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://files.toapis.com/uploads/reference.jpg",
+        "https://files.toapis.xyz/uploads/reference.jpg",
+        "https://cdn.toapis.com/uploads/reference.jpg",
+        "https://cdn.toapis.xyz/uploads/reference.jpg",
+    ],
+)
+def test_toapis_file_url_accepts_official_primary_and_mainland_domains(url: str) -> None:
+    assert image_provider.is_toapis_file_url(url)
+
+
+def test_toapis_file_url_rejects_lookalike_domain() -> None:
+    assert not image_provider.is_toapis_file_url("https://files.toapis.xyz.example/reference.jpg")
+
+
+def test_toapis_url_appends_versioned_path_to_configured_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        image_provider,
+        "get_settings",
+        lambda: SimpleNamespace(toapis_base_url="https://toapis.xyz/"),
+    )
+
+    assert image_provider.toapis_url("/v1/images/generations") == (
+        "https://toapis.xyz/v1/images/generations"
+    )
+
+
 def test_provider_reference_manifest_records_input_policy_version() -> None:
     manifest = image_provider.build_provider_reference_image_manifest(
         [{"role": "shooting_master", "providerInputPolicyVersion": "toapis-input-v2"}],
