@@ -71,6 +71,7 @@ BACKEND_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 ```env
 GEMINI_PROVIDER=toapis
 GEMINI_API_KEY=
+GEMINI_TOAPIS_MODEL=gemini-3.8-flash
 GPT_IMAGE2_PROVIDER=toapis
 TOAPIS_API_KEY=
 TOAPIS_BASE_URL=https://toapis.xyz

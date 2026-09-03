@@ -66,6 +66,7 @@ APP_MEDIA_PRESIGN_SAFETY_MARGIN_SECONDS=120
 
 # AI 通道
 GEMINI_PROVIDER=toapis                 # 国内无需 VPN;direct 需 GEMINI_API_KEY 且能访问 googleapis.com
+GEMINI_TOAPIS_MODEL=gemini-3.8-flash  # ToAPIs 当前生产 Gemini Flash 路由
 GEMINI_TOAPIS_TIMEOUT_SECONDS=300      # Gemini(ToAPIs) 读取响应超时;慢请求可适当放大
 GEMINI_TOAPIS_CONNECT_TIMEOUT_SECONDS=60 # Gemini(ToAPIs) 连接/导入请求体超时;base64 图片上行慢时重点调它
 AI_STYLIST_CONTRACT_RETRY_LIMIT=3      # AI Stylist 结果缺契约字段时的自动重问次数

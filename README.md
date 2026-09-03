@@ -79,6 +79,7 @@ cp .env.example .env
 GEMINI_PROVIDER=toapis
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-3-flash-preview
+GEMINI_TOAPIS_MODEL=gemini-3.8-flash
 
 APP_S3_ENDPOINT_URL=http://127.0.0.1:9000
 APP_S3_PUBLIC_ENDPOINT_URL=http://127.0.0.1:9000
