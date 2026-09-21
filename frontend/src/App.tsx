@@ -1,5 +1,5 @@
 import { pollVisible } from './lib/polling'
-import { MediaImage, resetMediaBudget } from './components/MediaImage'
+import { MediaImage } from './components/MediaImage'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, Dispatch, DragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode, SetStateAction, UIEvent } from 'react'
@@ -286,9 +286,6 @@ export function App() {
       .catch(() => setChecked(true))
   }, [])
 
-  useEffect(() => {
-    resetMediaBudget()
-  }, [page])
   useEffect(() => () => cancelPageReads(), [])
 
   useEffect(() => {
@@ -466,7 +463,6 @@ export function App() {
   function navigate(next: Page) {
     if (next !== page && document.body.dataset.promptDirty === 'true' && !window.confirm('Prompt 有未保存修改，确定离开并放弃这些修改吗？')) return
     cancelPageReads()
-    resetMediaBudget()
     suppressStudioAutoRestoreRef.current = false
     setPage(next)
     if (next === 'studio') {
@@ -486,7 +482,6 @@ export function App() {
 
   function openTaskInStudio(item: GenerationTask) {
     cancelPageReads()
-    resetMediaBudget()
     setPage('studio')
     setTask(item)
     window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
@@ -839,7 +834,6 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   }
   function openRecentTask(item: GenerationTask) {
     cancelPageReads()
-    resetMediaBudget()
     setTaskRailTab('summary')
     applyTaskUpdate(item)
     window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
@@ -847,7 +841,6 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   }
   function openBatchTask(item: GenerationTask) {
     cancelPageReads()
-    resetMediaBudget()
     setTaskRailTab('summary')
     applyTaskUpdate(item)
     window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
@@ -935,7 +928,6 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   }
   function startNewTask() {
     cancelPageReads()
-    resetMediaBudget()
     setTaskRailTab('summary')
     onStartNewTask()
     setTask(null)
@@ -2808,7 +2800,6 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
     let cancelled = false
     const read = beginResourceRead(libraryReadRef.current)
     const controller = read.controller
-    resetMediaBudget()
     setSearching(true)
     const timer = window.setTimeout(() => {
       if (focusedGarmentId) {
@@ -6602,7 +6593,6 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     let cancelled = false
     const read = beginResourceRead(recordReadRef.current)
     const controller = read.controller
-    resetMediaBudget()
     setLoading(true)
     const timer = window.setTimeout(() => {
       const request = viewMode === 'all'
@@ -6644,7 +6634,6 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
 
   function openRecord(item: GenerationTask) {
     cancelPageReads()
-    resetMediaBudget()
     batchDetailRequestRef.current = ''
     setBatchDetail(null)
     setDetail(item)
@@ -8918,7 +8907,6 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
   const [items] = useState<LightboxImageItem[]>(() => image.items?.length ? image.items : [image])
   const [index, setIndex] = useState(() => image.initialIndex ?? 0)
   const [original, setOriginal] = useState(false)
-  useEffect(() => { resetMediaBudget(); return resetMediaBudget }, [])
   const [zoom, setZoom] = useState<'fit' | number>('fit')
   const [imageFailed, setImageFailed] = useState(false)
   const [naturalSizes, setNaturalSizes] = useState<Record<string, { width: number; height: number }>>({})

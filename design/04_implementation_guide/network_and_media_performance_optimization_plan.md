@@ -173,11 +173,11 @@ GET /api/generation-tasks/{task_id}/status
 
 - 非首屏图片使用 `loading="lazy"` 和 `decoding="async"`。
 - 首屏最多 1–2 张关键图使用高优先级；普通缩略图保持 auto/low。
-- 首屏媒体请求建议不超过 12；硬性预算通过分批渲染或 IntersectionObserver 实现，不假设浏览器原生 lazy 一定会限制请求数。
+- 通过 IntersectionObserver 只加载可视区图片；12 张仅作为典型首屏测量样本，不是累计加载上限。大屏可见图片超过 12 张时仍必须自动全部加载，不得依赖点击、滚动重置配额。
 - 图片检查器只加载当前 preview；可选预取相邻 1 张 preview，不预取 original。
 - 现有列表已分页，P0 不引入虚拟列表；只有浏览器 Performance trace 证明最大页容量下 DOM、布局或内存是主要瓶颈时，才作为 P1 引入。
 
-验收：冷启首屏媒体请求不超过 12；滚动前不加载远离可视区的图片；打开检查器时只加载当前 preview 和至多相邻 1 张 preview；original 请求为 0。
+验收：冷启 24/30 张可见图片无需点击或滚动即可全部显示；滚动前不加载远离可视区的图片；打开检查器时只加载当前 preview 和至多相邻 1 张 preview；original 请求为 0。
 
 ### 条件基础设施项：工作守恒 QoS/AQM
 

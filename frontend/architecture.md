@@ -133,7 +133,7 @@ docker compose up -d --build frontend
 - `src/lib/polling.ts`：单个调用完成后才安排下一次；默认 2 秒，无变化 30/60/90 秒后改为 5/10/15 秒，加 0–20% 抖动。比较时忽略 `updatedAt` 等心跳时间；隐藏标签页暂停并取消在途 GET，回到前台立即刷新。任务、导入和打标复用该规则。最近任务只在对应 Tab 可见时加载/轮询。
 - `src/api.ts`：GET 接受 `AbortSignal`；页面离开只取消页面级只读请求，解析 JSON 后再次检查取消状态和 URL。应用级初始化跨页面继续，各项独立写回；退出登录、角色变化或卸载时由应用 signal 取消。初始化发起后若已切页，不再执行旧路由恢复。列表筛选与详情选择还有资源 token，阻止旧响应覆盖。写接口、PUT 和上传确认不随页面取消。
 - `src/lib/uploadQueue.ts`：全标签页共享 PUT 队列，默认 2 路；相同 object key 合并在途 PUT，相同上传 session 合并执行；网络/429/5xx 最多重试 2 次，1/2 秒退避并加抖动。UI 区分等待上传、上传中、保存处理及业务终态。
-- `src/components/MediaImage.tsx`：IntersectionObserver 零预取边距，lazy + async + low priority。首次自动加载最多 12 个不同远程 src；滚动或用户操作打开下一批，已加载图片不重复占用新批预算。检查器主图单独加载当前 preview，没有 original 预取。
+- `src/components/MediaImage.tsx`：IntersectionObserver 零预取边距，lazy + async + low priority。所有可见图片自动加载，不设置依赖点击/滚动恢复的累计配额；离屏图片保持本地透明占位，进入可视区后加载且不因再次离屏清空 src。换图独立重置可见性与失败状态。检查器主图单独加载当前 preview，没有 original 预取。
 - 列表和卡片统一 thumb；检查器先 preview，“1:1 原图”显式更换 src。换图恢复 preview；派生图缺失显示“预览暂不可用”，仍允许用户显式打开原图。下载始终指向 original/download。
 - 任务列表 summary 仅有 cover thumb；五图进度使用 `progress.completed/total`，打开任务再获取成片详情。
 - 主推款单次/批量导入完成仅在原导入组件仍挂载、导航代次与 URL 均未变化时切换当前任务；离开后继续保存，不能覆盖当前页面或 URL。
