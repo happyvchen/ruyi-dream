@@ -2568,9 +2568,9 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
           {finalSlots.map((image, index) => (
             <div className="result-card" key={image?.id ?? `slot-${index + 1}`}>
               {image?.asset ? (
-                <button className="result-image-open" onClick={() => image.asset && setViewer(assetLightboxImage(image.asset, finalAssets))} title="放大查看">
-                  <MediaImage src={mediaUrl(assetThumbSrc(image.asset))} loading="lazy" alt={`最终成片 ${image.sortOrder}`} />
-                </button>
+                <div className="result-image-open">
+                  <MediaImage src={mediaUrl(assetThumbSrc(image.asset))} alt={`最终成片 ${image.sortOrder}`} onOpen={() => image.asset && setViewer(assetLightboxImage(image.asset, finalAssets))} />
+                </div>
               ) : (
                 <div className="image-placeholder">
                   {image ? (image.activeAttempt ? attemptStatusText(image.activeAttempt) : statusText(image.status)) : '等待生成'}
@@ -2662,6 +2662,8 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
   const [focusedGarmentId, setFocusedGarmentId] = useState<number | null>(null)
   const [pageSize, setPageSize] = useState<number>(libraryPageSizeOptions[0])
   const [searching, setSearching] = useState(true)
+  const [listError, setListError] = useState(false)
+  const [listRetry, setListRetry] = useState(0)
   const [showSearchBusy, setShowSearchBusy] = useState(false)
   const [includeArchived, setIncludeArchived] = useState(false)
   const [bulkMode, setBulkMode] = useState(false)
@@ -2745,6 +2747,8 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
   useEffect(() => () => libraryReadRef.current.controller?.abort(), [])
   function refreshLibraryPage(targetOffset = offset) {
     const read = beginResourceRead(libraryReadRef.current)
+    setSearching(true)
+    setListError(false)
     return api.listStylingGarments(libraryQueryOptions(targetOffset), read.controller.signal).then((result) => {
       if (!read.isCurrent()) return
       if (!selectedImportBatch && !focusedGarmentCode && !focusedGarmentId && !result.items.length && result.total > 0 && targetOffset > 0) {
@@ -2753,7 +2757,10 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
         return api.listStylingGarments(libraryQueryOptions(fallbackOffset), read.controller.signal).then((nextResult) => { if (read.isCurrent()) applyLibraryResult(nextResult, fallbackOffset) })
       }
       applyLibraryResult(result, targetOffset)
-    })
+    }).catch((error) => {
+      if (read.isCurrent()) setListError(true)
+      throw error
+    }).finally(() => { if (read.isCurrent()) setSearching(false) })
   }
 
   function applyLibraryResult(result: StylingGarmentListResponse, targetOffset = offset) {
@@ -2797,14 +2804,14 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
   }, [searching])
 
   useEffect(() => {
-    let cancelled = false
     const read = beginResourceRead(libraryReadRef.current)
     const controller = read.controller
     setSearching(true)
+    setListError(false)
     const timer = window.setTimeout(() => {
       if (focusedGarmentId) {
         void api.getStylingGarment(focusedGarmentId, controller.signal).then((result) => {
-          if (!cancelled) {
+          if (read.isCurrent()) {
             setItems([result.item])
             setTotal(1)
             setTotalPages(1)
@@ -2816,36 +2823,31 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
           keyword: focusedGarmentCode || query.trim() || undefined,
           includeArchived: true,
         }, controller.signal).then((result) => {
-          if (cancelled) return
+          if (!read.isCurrent()) return
           const filtered = focusedGarmentCode ? result.items.filter((item) => item.code === focusedGarmentCode) : result.items
           setItems(filtered.slice(0, pageSize))
           setTotal(filtered.length)
           setTotalPages(filtered.length ? Math.ceil(filtered.length / pageSize) : 0)
         }) }).catch(() => {
-          if (!cancelled) {
-            setItems([])
-            setTotal(0)
-            setTotalPages(0)
-          }
+          if (read.isCurrent()) setListError(true)
         }).finally(() => {
-          if (!cancelled) setSearching(false)
+          if (read.isCurrent()) setSearching(false)
         })
         return
       }
       void api.listStylingGarments(libraryQueryOptions(offset), controller.signal).then((result) => {
-        if (!cancelled) {
+        if (read.isCurrent()) {
           applyLibraryResult(result, offset)
         }
-      }).catch(() => undefined).finally(() => {
-        if (!cancelled) setSearching(false)
+      }).catch(() => { if (read.isCurrent()) setListError(true) }).finally(() => {
+        if (read.isCurrent()) setSearching(false)
       })
     }, 250)
     return () => {
-      cancelled = true
       controller.abort()
       window.clearTimeout(timer)
     }
-  }, [offset, query, includeArchived, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize, importJobFilter, selectedImportBatch, focusedGarmentCode, focusedGarmentId])
+  }, [listRetry, offset, query, includeArchived, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize, importJobFilter, selectedImportBatch, focusedGarmentCode, focusedGarmentId])
 
   useEffect(() => {
     setItems((current) => current.map((item) => garments.find((latest) => latest.id === item.id) ?? item))
@@ -3175,10 +3177,13 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
           <div
             ref={garmentMarquee.containerRef}
             className={`library-results marquee-selection-surface ${bulkMode ? 'is-bulk-selecting' : ''} ${showSearchBusy ? 'is-loading' : ''}`}
+            aria-busy={searching}
             onPointerDown={garmentMarquee.onPointerDown}
             onClickCapture={garmentMarquee.onClickCapture}
           >
             <MarqueeSelectionBox box={garmentMarquee.box} />
+            <ListLoadFeedback loading={searching} failed={listError} hasItems={items.length > 0} onRetry={() => setListRetry((value) => value + 1)} />
+            {searching && !items.length && <ListSkeleton layout="cards" />}
             {items.length ? (
               <div className="garment-grid">{items.map((item) => (
                 <GarmentCard
@@ -3195,7 +3200,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
                   archiveMutationBusy={garmentArchiveMutationBusy}
                 />
               ))}</div>
-            ) : searching ? null : <EmptyState
+            ) : searching || listError ? null : <EmptyState
               title={selectedImportBatch ? '该导入批次暂未产生已入库服装' : hasActiveFilters ? '没有匹配的搭配服装' : '暂无搭配服装'}
               text={selectedImportBatch ? '可以清除导入批次筛选，或稍后等待该批次完成入库。' : hasActiveFilters ? '减少筛选条件，或粘贴多个货号、标签再试。' : '点击右上角导入搭配服装。'}
             />}
@@ -5902,12 +5907,10 @@ function ImportThumbStack({ rows }: { rows: ImportTaskRow[] }) {
 }
 
 function ImportPreviewThumb({ src }: { src?: string | null }) {
-  const [failed, setFailed] = useState(false)
-  useEffect(() => setFailed(false), [src])
   const resolvedSrc = src ? mediaUrl(src) : ''
   return (
     <span className="import-preview-thumb">
-      {resolvedSrc && !failed ? <MediaImage src={resolvedSrc} alt="" loading="lazy" onError={() => setFailed(true)} /> : <Images size={14} />}
+      {resolvedSrc ? <MediaImage src={resolvedSrc} alt="" retryable={false} /> : <Images size={14} />}
     </span>
   )
 }
@@ -6084,7 +6087,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
       <div className="panel model-page">
         <div className="model-meta">
           <div className="model-cover">
-            {coverThumb ? <button className="image-open" type="button" onClick={() => openModelRef(coverRefIndex)} title="放大查看"><MediaImage src={mediaUrl(coverThumb)} loading="lazy" alt={model?.name ?? '模特与背景'} /></button> : <div className="image-placeholder"><UserRound size={40} /></div>}
+            {coverThumb ? <div className="image-open"><MediaImage src={mediaUrl(coverThumb)} onOpen={() => openModelRef(coverRefIndex)} alt={model?.name ?? '模特与背景'} /></div> : <div className="image-placeholder"><UserRound size={40} /></div>}
           </div>
           <div className="model-meta-head">
             <h2>{model?.name ?? 'Face-01 默认模特'}</h2>
@@ -6451,7 +6454,9 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   const [totalPages, setTotalPages] = useState(0)
   const [facets, setFacets] = useState<GenerationRecordFacets>({})
   const [stableFacets, setStableFacets] = useState<GenerationRecordFacets>({})
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [listError, setListError] = useState(false)
+  const [listRetry, setListRetry] = useState(0)
   const [includeArchived, setIncludeArchived] = useState(false)
   const [statusFilter, setStatusFilter] = useState('')
   const [createdFrom, setCreatedFrom] = useState('')
@@ -6580,42 +6585,50 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     if (!result.items.length && targetOffset > 0) setOffset(Math.max(0, targetOffset - pageSize))
   }
 
+  const hasListItems = viewMode === 'all' ? workspaceItems.length > 0 : viewMode === 'batches' ? batchRecords.length > 0 : items.length > 0
   const recordReadRef = useRef<{ token: number; controller?: AbortController }>({ token: 0 })
   useEffect(() => () => recordReadRef.current.controller?.abort(), [])
   function refreshRecordPage(targetOffset = offset) {
     const read = beginResourceRead(recordReadRef.current)
-    if (viewMode === 'all') return api.listRecordWorkspace(recordQueryOptions(targetOffset), read.controller.signal).then((result) => { if (read.isCurrent()) applyWorkspaceResult(result, targetOffset) })
-    if (viewMode === 'batches') return api.listRecordBatches(recordQueryOptions(targetOffset), read.controller.signal).then((result) => { if (read.isCurrent()) applyBatchListResult(result, targetOffset) })
-    return api.listRecords(recordQueryOptions(targetOffset), read.controller.signal).then((result) => { if (read.isCurrent()) applyRecordListResult(result, targetOffset) })
+    setLoading(true)
+    setListError(false)
+    const request = viewMode === 'all'
+      ? api.listRecordWorkspace(recordQueryOptions(targetOffset), read.controller.signal).then((result) => { if (read.isCurrent()) applyWorkspaceResult(result, targetOffset) })
+      : viewMode === 'batches'
+        ? api.listRecordBatches(recordQueryOptions(targetOffset), read.controller.signal).then((result) => { if (read.isCurrent()) applyBatchListResult(result, targetOffset) })
+        : api.listRecords(recordQueryOptions(targetOffset), read.controller.signal).then((result) => { if (read.isCurrent()) applyRecordListResult(result, targetOffset) })
+    return request.catch((error) => {
+      if (read.isCurrent()) setListError(true)
+      throw error
+    }).finally(() => { if (read.isCurrent()) setLoading(false) })
   }
 
   useEffect(() => {
-    let cancelled = false
     const read = beginResourceRead(recordReadRef.current)
     const controller = read.controller
     setLoading(true)
+    setListError(false)
     const timer = window.setTimeout(() => {
       const request = viewMode === 'all'
         ? api.listRecordWorkspace(recordQueryOptions(offset), controller.signal).then((result) => {
-          if (!cancelled) applyWorkspaceResult(result, offset)
+          if (read.isCurrent()) applyWorkspaceResult(result, offset)
         })
         : viewMode === 'batches'
           ? api.listRecordBatches(recordQueryOptions(offset), controller.signal).then((result) => {
-            if (!cancelled) applyBatchListResult(result, offset)
+            if (read.isCurrent()) applyBatchListResult(result, offset)
           })
           : api.listRecords(recordQueryOptions(offset), controller.signal).then((result) => {
-            if (!cancelled) applyRecordListResult(result, offset)
+            if (read.isCurrent()) applyRecordListResult(result, offset)
           })
-      void request.catch(() => undefined).finally(() => {
-        if (!cancelled) setLoading(false)
+      void request.catch(() => { if (read.isCurrent()) setListError(true) }).finally(() => {
+        if (read.isCurrent()) setLoading(false)
       })
     }, 250)
     return () => {
-      cancelled = true
       controller.abort()
       window.clearTimeout(timer)
     }
-  }, [records, viewMode, offset, query, includeArchived, statusFilter, createdFrom, createdTo, sortBy, sortDir, pageSize])
+  }, [listRetry, records, viewMode, offset, query, includeArchived, statusFilter, createdFrom, createdTo, sortBy, sortDir, pageSize])
 
   useEffect(() => {
     setOffset(0)
@@ -7183,11 +7196,13 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
           <div
             ref={recordMarquee.containerRef}
             className={`record-list-body marquee-selection-surface ${bulkMode ? 'is-bulk-selecting' : ''}`}
-            aria-busy={batchBulkLoading}
+            aria-busy={batchBulkLoading || loading}
             onPointerDown={recordMarquee.onPointerDown}
             onClickCapture={recordMarquee.onClickCapture}
           >
             <MarqueeSelectionBox box={recordMarquee.box} />
+            <ListLoadFeedback loading={loading} failed={listError} hasItems={hasListItems} onRetry={() => setListRetry((value) => value + 1)} />
+            {loading && !hasListItems && <ListSkeleton layout="rows" />}
             {viewMode === 'all' && workspaceItems.map((entry) => entry.kind === 'batch' ? (
               (() => {
                 const selection = batchSelectionState(entry.batch)
@@ -7277,7 +7292,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
                 archiveMutationBusy={recordArchiveMutationBusy}
               />
             ))}
-            {((viewMode === 'all' && !workspaceItems.length) || (viewMode === 'batches' && !batchRecords.length) || (viewMode === 'tasks' && !items.length)) && <EmptyState title="暂无生成记录" text="创建拍摄任务后会出现在这里。" />}
+            {!loading && !listError && !hasListItems && <EmptyState title="暂无生成记录" text="创建拍摄任务后会出现在这里。" />}
           </div>
           <div className="record-pagination-stick">
             <PaginationControls
@@ -8824,38 +8839,12 @@ function ThumbGrid({ assets, compact = false }: { assets: MediaAsset[]; compact?
 
 function AssetThumb({ asset, large = false, interactive = true }: { asset?: MediaAsset | null; large?: boolean; interactive?: boolean }) {
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
-  const [failed, setFailed] = useState(false)
-  const [srcIndex, setSrcIndex] = useState(0)
-  const sources = asset ? assetDisplaySources(asset, 'thumb') : []
-  const src = sources[srcIndex] ?? ''
-  useEffect(() => {
-    setFailed(false)
-    setSrcIndex(0)
-  }, [asset?.id, sources.join('|')])
-  const image = asset && src && !failed ? (
-    <MediaImage
-      src={mediaUrl(src)}
-      alt={asset.filename}
-      loading="lazy"
-      onError={() => {
-        if (srcIndex + 1 < sources.length) {
-          setSrcIndex((index) => index + 1)
-          return
-        }
-        setFailed(true)
-      }}
-    />
-  ) : null
+  const src = asset ? assetThumbSrc(asset) : ''
   return (
     <>
-      <div className={`asset-thumb ${large ? 'large' : ''} ${failed ? 'is-broken' : ''}`}>
-        {image && asset ? (
-          interactive ? (
-            <button className="asset-open" onClick={() => setViewer(assetLightboxImage(asset))} title="放大查看">
-              {image}
-            </button>
-          ) : image
-        ) : asset && interactive ? <button className="asset-open asset-fallback" onClick={() => setViewer(assetLightboxImage(asset))} title="放大查看"><FileImage size={20} /><span>预览暂不可用</span></button> : <div className="asset-fallback"><FileImage size={20} /><span>预览暂不可用</span></div>}
+      <div className={`asset-thumb ${large ? 'large' : ''}`}>
+        <MediaImage src={src ? mediaUrl(src) : undefined} alt={asset?.filename ?? '图片'} retryable={interactive}
+          onOpen={asset && interactive ? () => setViewer(assetLightboxImage(asset)) : undefined} />
       </div>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </>
@@ -8885,16 +8874,16 @@ function RecordImagePreview({ task }: { task: GenerationTask }) {
   return (
     <div className="record-image-preview">
       {previewAsset && (
-        <button className="detail-preview-open" onClick={() => openAsset(previewAsset)} title="放大查看分镜预览">
-          <MediaImage className="detail-preview" src={mediaUrl(assetThumbSrc(previewAsset))} loading="lazy" alt="分镜预览" />
-        </button>
+        <div className="detail-preview-open">
+          <MediaImage className="detail-preview" src={mediaUrl(assetThumbSrc(previewAsset))} alt="分镜预览" onOpen={() => openAsset(previewAsset)} openLabel="放大查看分镜预览" />
+        </div>
       )}
       {!!finalAssets.length && (
         <div className="final-strip">
           {finalAssets.map((asset) => (
-            <button className="asset-thumb record-thumb" key={asset.id} onClick={() => openAsset(asset)} title="放大查看成片">
-              <MediaImage src={mediaUrl(assetThumbSrc(asset))} alt={asset.filename} loading="lazy" />
-            </button>
+            <div className="asset-thumb record-thumb" key={asset.id}>
+              <MediaImage src={mediaUrl(assetThumbSrc(asset))} alt={asset.filename} onOpen={() => openAsset(asset)} openLabel="放大查看成片" />
+            </div>
           ))}
         </div>
       )}
@@ -8908,7 +8897,6 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
   const [index, setIndex] = useState(() => image.initialIndex ?? 0)
   const [original, setOriginal] = useState(false)
   const [zoom, setZoom] = useState<'fit' | number>('fit')
-  const [imageFailed, setImageFailed] = useState(false)
   const [naturalSizes, setNaturalSizes] = useState<Record<string, { width: number; height: number }>>({})
   const remoteSizes: Record<string, number> = {}
   const current = items[index] ?? items[0]
@@ -8941,13 +8929,6 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
       return Math.min(4, Math.max(0.5, base + direction * 0.25))
     })
   }
-  const handleImageError = () => {
-    setImageFailed(true)
-
-  }
-  useEffect(() => {
-    setImageFailed(false)
-  }, [displaySrc])
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
@@ -8992,25 +8973,10 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
         </div>
       </div>
       <div className="lightbox-stage" onClick={(event) => event.stopPropagation()}>
-        {imageFailed || !displaySrc ? (
-          <div className="lightbox-error">
-            <FileImage size={28} />
-            <strong>预览暂不可用</strong>
-            <span>可以点击“1:1 原图”查看，或下载原图。</span>
-          </div>
-        ) : (
-          <img decoding="async" fetchPriority="high"
-            src={displaySrc}
-            alt={current.title}
-            className={zoom === 'fit' ? 'is-fit' : 'is-zoomed'}
-            style={zoomedStyle}
-            onError={handleImageError}
-            onLoad={(event) => {
-              const img = event.currentTarget
-              setNaturalSizes((value) => ({ ...value, [displaySrc]: { width: img.naturalWidth, height: img.naturalHeight } }))
-            }}
-          />
-        )}
+        <LightboxPicture key={`${index}:${current.src}:${current.originalSrc}`}
+          src={displaySrc} previewSrc={current.src} thumbSrc={current.thumbSrc} original={original}
+          title={current.title} zoom={zoom} zoomedStyle={zoomedStyle}
+          onDimensions={(width, height) => setNaturalSizes((value) => ({ ...value, [displaySrc]: { width, height } }))} />
       </div>
       <div className="lightbox-meta" onClick={(event) => event.stopPropagation()}>
         {Object.entries(details).map(([label, value]) => (
@@ -9025,7 +8991,7 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
                 setOriginal(false)
     setZoom('fit')
               }} title={item.title}>
-                <MediaImage src={item.thumbSrc || undefined} alt={item.title} loading="lazy" />
+                <MediaImage src={item.thumbSrc || undefined} alt={item.title} retryable={false} />
               </button>
             ))}
           </div>
@@ -9033,6 +8999,59 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
     </div>,
     document.body,
   )
+}
+
+function LightboxPicture({ src, previewSrc, thumbSrc, original, title, zoom, zoomedStyle, onDimensions }: {
+  src: string; previewSrc: string; thumbSrc?: string; original: boolean; title: string
+  zoom: 'fit' | number; zoomedStyle?: CSSProperties; onDimensions: (width: number, height: number) => void
+}) {
+  const [attempt, setAttempt] = useState(0)
+  const [ready, setReady] = useState('')
+  const [failed, setFailed] = useState('')
+  const [previewLoaded, setPreviewLoaded] = useState(false)
+  const [failedFallback, setFailedFallback] = useState('')
+  const requestKey = `${src}:${attempt}`
+  const loaded = !!src && ready === requestKey
+  const unavailable = !src || failed === requestKey
+  const fallback = original && previewLoaded ? previewSrc : thumbSrc
+  return <div className="lightbox-picture" aria-busy={!loaded && !unavailable}>
+    {src && <img key={requestKey} data-lightbox-main decoding="async" fetchPriority="high"
+      src={src} alt={title} className={zoom === 'fit' ? 'is-fit' : 'is-zoomed'}
+      style={{ ...zoomedStyle, ...(!loaded ? { position: 'absolute', visibility: 'hidden' } as CSSProperties : {}) }}
+      onError={() => setFailed(requestKey)}
+      onLoad={(event) => {
+        setReady(requestKey)
+        setFailed('')
+        if (src === previewSrc) setPreviewLoaded(true)
+        onDimensions(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)
+      }} />}
+    {!loaded && fallback && fallback !== src && failedFallback !== fallback && <img className="is-fit lightbox-fallback"
+      src={fallback} alt="" aria-hidden="true" decoding="async" onError={() => setFailedFallback(fallback)} />}
+    {!loaded && <div className={unavailable ? 'lightbox-error' : 'lightbox-loading'} role={unavailable ? 'alert' : 'status'}>
+      {unavailable ? <>
+        <strong>{original ? '原图暂不可用' : '预览暂不可用'}</strong>
+        <span>{original ? '请重试，或使用下载原图。' : '请重试，或点击“1:1 原图”查看。'}</span>
+        {src && <button className="management-action" type="button" onClick={() => setAttempt((value) => value + 1)}>重新加载图片</button>}
+      </> : original ? '原图加载中…' : '预览加载中…'}
+    </div>}
+  </div>
+}
+
+function ListLoadFeedback({ loading, failed, hasItems, onRetry }: { loading: boolean; failed: boolean; hasItems: boolean; onRetry: () => void }) {
+  if (failed) return <div className="list-load-feedback is-error" role="alert">
+    <span>{hasItems ? '更新失败，暂显示上次结果。' : '列表读取失败，请重试。'}</span>
+    <button className="management-action" type="button" onClick={onRetry}>重新加载列表</button>
+  </div>
+  if (loading) return <div className="list-load-feedback" role="status">{hasItems ? '更新中，暂显示上次结果…' : '正在读取列表…'}</div>
+  return null
+}
+
+function ListSkeleton({ layout }: { layout: 'cards' | 'rows' }) {
+  return <div className={layout === 'cards' ? 'garment-grid list-skeleton' : 'list-skeleton'} aria-hidden="true">
+    {Array.from({ length: 6 }, (_, index) => <div key={index} className={`list-skeleton-${layout}`}>
+      <div className="skeleton-image" /><div className="skeleton-copy"><div /><div /></div>
+    </div>)}
+  </div>
 }
 
 function TruncatedText({ as = 'span', text, className, children }: { as?: 'span' | 'strong' | 'small' | 'em'; text: string; className?: string; children?: ReactNode }) {
@@ -9557,11 +9576,6 @@ function assetOriginalSrc(asset: MediaAsset) {
   const direct = asset.originalUrl ?? asset.url ?? asset.previewUrl ?? asset.thumbUrl
   if (!direct) return ''
   return direct.replace(/([?&]variant=)(thumb|preview)(?=&|$)/, '$1original')
-}
-
-function assetDisplaySources(asset: MediaAsset, preferred: 'thumb' | 'preview' | 'original') {
-  const src = preferred === 'original' ? assetOriginalSrc(asset) : preferred === 'preview' ? assetPreviewSrc(asset) : assetThumbSrc(asset)
-  return src ? [src] : []
 }
 
 async function filesFromDataTransfer(dataTransfer: DataTransfer): Promise<File[]> {

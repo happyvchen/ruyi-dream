@@ -58,3 +58,41 @@ it('uses a valid pending image and does not report its load as an asset load', (
   fireEvent.load(img)
   expect(onLoad).not.toHaveBeenCalled()
 })
+
+it('keeps loading feedback until the actual image loads and retries only that source', () => {
+  vi.stubGlobal('IntersectionObserver', undefined)
+  const onOpen = vi.fn()
+  const { container, getByRole } = render(<MediaImage src="/thumb" alt="服装" onOpen={onOpen} />)
+  const first = container.querySelector('img')!
+  expect(container.querySelector('[aria-busy="true"]')).not.toBeNull()
+  fireEvent.error(first)
+  fireEvent.click(getByRole('button', { name: '重新加载图片：服装' }))
+  expect(onOpen).not.toHaveBeenCalled()
+  const retry = container.querySelector('img')!
+  expect(retry).not.toBe(first)
+  expect(retry.getAttribute('src')).toBe('/thumb')
+  fireEvent.load(retry)
+  expect(container.querySelector('[aria-busy="true"]')).toBeNull()
+  expect(retry.style.visibility).toBe('visible')
+  fireEvent.click(getByRole('button', { name: '放大查看' }))
+  expect(onOpen).toHaveBeenCalledTimes(1)
+})
+
+it('does not add a retry button inside a decorative navigation thumbnail', () => {
+  vi.stubGlobal('IntersectionObserver', undefined)
+  const { container } = render(<button><MediaImage src="/thumb" retryable={false} /></button>)
+  fireEvent.error(container.querySelector('img')!)
+  expect(container.querySelector('button button')).toBeNull()
+})
+
+it('resets loaded feedback on source change and never substitutes an original for missing thumbnails', () => {
+  vi.stubGlobal('IntersectionObserver', undefined)
+  const { container, rerender } = render(<MediaImage src="/one" />)
+  fireEvent.load(container.querySelector('img')!)
+  rerender(<MediaImage src="/two" />)
+  expect(container.querySelector('[aria-busy="true"]')).not.toBeNull()
+  expect(container.querySelector('img')!.style.visibility).toBe('hidden')
+  rerender(<MediaImage />)
+  expect(container.querySelector('img')).toBeNull()
+  expect(container.querySelector('button')).toBeNull()
+})

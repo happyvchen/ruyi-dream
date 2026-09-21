@@ -138,3 +138,11 @@ docker compose up -d --build frontend
 - 任务列表 summary 仅有 cover thumb；五图进度使用 `progress.completed/total`，打开任务再获取成片详情。
 - 主推款单次/批量导入完成仅在原导入组件仍挂载、导航代次与 URL 均未变化时切换当前任务；离开后继续保存，不能覆盖当前页面或 URL。
 - 上传配置 `UPLOAD_CONCURRENCY=1..3`（默认 2）经 Vite/镜像构建注入；修改后需重建前端。不要再增加调用点自己的 PUT 并发池。
+
+## 渐进加载体验补齐
+
+- `MediaImage` 在原有可视区加载策略内维护每个 source 的加载/成功/失败状态，统一稳定图框、占位与同 URL 手动重试。`onOpen` 提供独立的查看覆盖按钮，重试按钮与其同级，避免按钮嵌套；导航按钮内的装饰缩略图设置 `retryable={false}`。
+- `ImageAssetCard`、`AssetThumb`、成片网格、记录图片与模特封面复用该状态，不再在父组件用失败标记卸载图片，保证重试入口持续可用。加载/失败状态只影响图片展示，不改变业务状态。
+- `LibraryPage`、生成记录页复用 `ListLoadFeedback` / `ListSkeleton`，首次显示静态骨架，刷新保留旧内容；失败提示按是否仍有可见条目区分。手动重试沿用现有 GET、取消 signal 和资源 token，不引入新请求缓存。
+- `ImageLightbox` 内的 `LightboxPicture` 按当前图片身份隔离状态。预览加载时用本图 thumb 过渡，原图加载时保留本图已成功加载的 preview，切换图片后重置；资源重试通过重新挂载同 URL 的 img 完成。
+- 此轮不调整首屏优先级、零预取边距、初始化恢复时序或轮询策略，不新增依赖；具体体验与验收以 `../design/03_ux_guide/user_uiux.md` 第 10 节为准。

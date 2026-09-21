@@ -1,7 +1,6 @@
 import { MediaImage } from './MediaImage'
-import { useEffect, useState } from 'react'
 import type { DragEvent, ReactNode } from 'react'
-import { FileImage, ImagePlus, RefreshCw, Trash2 } from 'lucide-react'
+import { ImagePlus, RefreshCw, Trash2 } from 'lucide-react'
 
 export type ImageAssetCardProps = {
   thumbnailSrc?: string | null
@@ -42,8 +41,6 @@ export function ImageAssetCard({
   onDragOver,
   onDrop,
 }: ImageAssetCardProps) {
-  const [failed, setFailed] = useState(false)
-  useEffect(() => setFailed(false), [thumbnailSrc])
 
   return (
     <div
@@ -53,17 +50,10 @@ export function ImageAssetCard({
       onDragOver={draggable && !disabled ? onDragOver : undefined}
       onDrop={draggable && !disabled ? onDrop : undefined}
     >
-      {onOpen ? (
-        <button className="image-open" type="button" onClick={onOpen} title="放大查看" >
-          {thumbnailSrc && !failed
-            ? <MediaImage src={thumbnailSrc} alt={alt ?? title} loading="lazy" onError={() => setFailed(true)} onLoad={(event) => onImageLoad?.({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />
-            : <span className="image-card-placeholder"><FileImage size={24} />预览暂不可用</span>}
-        </button>
-      ) : thumbnailSrc && !failed ? (
-        <MediaImage src={thumbnailSrc} alt={alt ?? title} loading="lazy" onError={() => setFailed(true)} onLoad={(event) => onImageLoad?.({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />
-      ) : (
-        <span className="image-card-placeholder"><FileImage size={24} />预览暂不可用</span>
-      )}
+      <div className="image-open">
+        <MediaImage src={thumbnailSrc || undefined} alt={alt ?? title} onOpen={onOpen} openLabel={alt ?? title}
+          onLoad={(event) => onImageLoad?.({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />
+      </div>
       {badge && <em className="thumb-pending-badge">{badge}</em>}
       <span title={title}>{title}{meta && <small title={meta}>{meta}</small>}</span>
       {footer}

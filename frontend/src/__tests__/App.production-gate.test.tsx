@@ -442,7 +442,8 @@ describe('preview-first inspector', () => {
     const asset = { ...task.images[0].asset, previewStatus: 'MISSING' as const, previewUrl: null }
     render(<ImageLightbox image={assetLightboxImage(asset)} onClose={() => undefined} />)
     expect(screen.getByText('预览暂不可用')).toBeInTheDocument()
-    expect(document.querySelector('.lightbox-stage img')).toBeNull()
+    expect(document.querySelector('[data-lightbox-main]')).toBeNull()
+    expect(document.querySelector('img[src="/original.jpg"]')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '1:1 原图' }))
     expect(document.querySelector('.lightbox-stage img')).toHaveAttribute('src', '/original.jpg')
   })
@@ -2549,4 +2550,89 @@ describe('production gate app shell and page controls', () => {
     await userEvent.click(within(dialog).getByRole('button', { name: '重试' }))
     await waitFor(() => expect(apiMock.getTaskDeleteImpact).toHaveBeenCalledTimes(2))
   })
+})
+
+
+describe('progressive loading feedback', () => {
+  it('keeps the current preview while loading the original and resets the fallback on navigation', () => {
+    const asset = task.images[0].asset
+    const second = { ...asset, id: 102, thumbUrl: '/second-thumb.jpg', previewUrl: '/second-preview.jpg', originalUrl: '/second-original.jpg' }
+    render(<ImageLightbox image={assetLightboxImage(asset, [asset, second])} onClose={() => undefined} />)
+    expect(screen.getByText('预览加载中…')).toBeInTheDocument()
+    expect(document.querySelector('.lightbox-fallback')).toHaveAttribute('src', '/thumb.jpg')
+    fireEvent.load(document.querySelector('[data-lightbox-main]')!)
+    fireEvent.click(screen.getByRole('button', { name: '1:1 原图' }))
+    expect(screen.getByText('原图加载中…')).toBeInTheDocument()
+    expect(document.querySelector('.lightbox-fallback')).toHaveAttribute('src', '/preview.jpg')
+    const failed = document.querySelector('[data-lightbox-main]')!
+    fireEvent.error(failed)
+    expect(document.querySelector('.lightbox-fallback')).toHaveAttribute('src', '/preview.jpg')
+    fireEvent.click(screen.getByRole('button', { name: '重新加载图片' }))
+    expect(document.querySelector('[data-lightbox-main]')).not.toBe(failed)
+    expect(document.querySelector('[data-lightbox-main]')).toHaveAttribute('src', '/original.jpg')
+    fireEvent.click(screen.getByTitle('下一张'))
+    expect(document.querySelector('.lightbox-fallback')).toHaveAttribute('src', '/second-thumb.jpg')
+    expect(document.querySelector('.lightbox-stage img[src="/preview.jpg"]')).toBeNull()
+    expect(document.querySelector('img[src="/second-original.jpg"]')).toBeNull()
+  })
+
+  it.each(['library', 'records'] as const)('shows a skeleton, preserves content on refresh failure and retries the %s list', async (page) => {
+    const pending = deferred<any>()
+    let response: () => Promise<any> = () => pending.promise
+    const list = page === 'library' ? apiMock.listStylingGarments : apiMock.listRecordWorkspace
+    list.mockImplementation((options: { limit?: number }) => options.limit === (page === 'library' ? 24 : 20)
+      ? response() : Promise.resolve({ ...emptyPage, facets: {}, stableFacets: {} }))
+    window.history.replaceState(null, '', `/${page}`)
+    render(<App />)
+    expect(await screen.findByText('正在读取列表…')).toBeInTheDocument()
+    expect(document.querySelector('.list-skeleton')).not.toBeNull()
+    expect(screen.queryByText(page === 'library' ? '暂无搭配服装' : '暂无生成记录')).toBeNull()
+    const entry = page === 'library' ? garment : { kind: 'task', id: String(task.id), task, status: task.status, name: task.name, createdAt: task.createdAt, updatedAt: task.updatedAt }
+    const result = { ...emptyPage, items: [entry], total: 1, facets: {}, stableFacets: {} }
+    await act(async () => pending.resolve(result))
+    const label = page === 'library' ? garment.code : task.name
+    expect(await screen.findByText(label)).toBeInTheDocument()
+    expect(document.querySelector('.list-skeleton')).toBeNull()
+    response = () => Promise.reject(new Error('offline'))
+    await userEvent.click(screen.getByRole('button', { name: '查看已归档' }))
+    expect(await screen.findByText('更新失败，暂显示上次结果。')).toBeInTheDocument()
+    expect(screen.getByText(label)).toBeInTheDocument()
+    response = () => Promise.resolve({ ...emptyPage, facets: {}, stableFacets: {} })
+    await userEvent.click(screen.getByRole('button', { name: '重新加载列表' }))
+    await waitFor(() => expect(screen.queryByText('更新失败，暂显示上次结果。')).toBeNull())
+    await waitFor(() => expect(screen.queryByText(label)).toBeNull())
+  })
+
+  it.each(['library', 'records'] as const)('does not report a failed initial %s request as an empty list', async (page) => {
+    const list = page === 'library' ? apiMock.listStylingGarments : apiMock.listRecordWorkspace
+    list.mockImplementation((options: { limit?: number }) => options.limit === (page === 'library' ? 24 : 20)
+      ? Promise.reject(new Error('offline')) : Promise.resolve({ ...emptyPage, facets: {}, stableFacets: {} }))
+    window.history.replaceState(null, '', `/${page}`)
+    render(<App />)
+    expect(await screen.findByText('列表读取失败，请重试。', {}, { timeout: 3000 })).toBeInTheDocument()
+    expect(screen.queryByText(page === 'library' ? '暂无搭配服装' : '暂无生成记录')).toBeNull()
+    expect(document.querySelector('.list-skeleton')).toBeNull()
+  })
+})
+
+
+it.each(['library', 'records'] as const)('ignores a cancelled %s failure while a newer list is loading', async (page) => {
+  const oldRead = deferred<any>()
+  const newRead = deferred<any>()
+  const list = page === 'library' ? apiMock.listStylingGarments : apiMock.listRecordWorkspace
+  list.mockImplementation((options: { limit?: number; includeArchived?: boolean }) => options.limit === (page === 'library' ? 24 : 20)
+    ? options.includeArchived ? newRead.promise : oldRead.promise
+    : Promise.resolve({ ...emptyPage, facets: {}, stableFacets: {} }))
+  window.history.replaceState(null, '', `/${page}`)
+  render(<App />)
+  await waitFor(() => expect(list).toHaveBeenCalledWith(expect.objectContaining({ limit: page === 'library' ? 24 : 20, includeArchived: false }), expect.any(AbortSignal)))
+  const oldSignal = list.mock.calls.find(([options]: any[]) => options.limit === (page === 'library' ? 24 : 20))![1] as AbortSignal
+  await userEvent.click(screen.getByRole('button', { name: '查看已归档' }))
+  expect(oldSignal.aborted).toBe(true)
+  await act(async () => oldRead.reject(new Error('old failure')))
+  expect(screen.queryByText('列表读取失败，请重试。')).toBeNull()
+  expect(screen.getByText('正在读取列表…')).toBeInTheDocument()
+  await act(async () => newRead.resolve({ ...emptyPage, facets: {}, stableFacets: {} }))
+  await waitFor(() => expect(document.querySelector('.list-skeleton')).toBeNull())
+  expect(screen.queryByText('列表读取失败，请重试。')).toBeNull()
 })
