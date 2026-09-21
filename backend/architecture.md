@@ -7,7 +7,7 @@
 - 素材与媒体资产管理；
 - Gemini 打标和 AI 智能选搭；
 - Prompt 维护槽位读取与 runtime 占位渲染；
-- 当前生效拍摄预设、结果集级冻结快照和 Image-2 edits 最终成片任务包组装；
+- 当前生效拍摄预设、结果集级冻结快照和 GPT Image-2.5 Sunburst edits 最终成片任务包组装；
 - provider attempt 快照、进度、错误分类和轮询恢复；
 - 生成记录、归档、删除和导出。
 
@@ -17,7 +17,7 @@
 导入主推款
 -> AI 智能选搭
 -> 按品类选择当前生效的五镜头拍摄预设并冻结到结果集
--> 三类固定 Prompt + Image-2 edits 并发生成五张成片
+-> 三类固定 Prompt + GPT Image-2.5 Sunburst edits 并发生成五张成片
 ```
 
 后端不再包含动态剧本或当前分镜服务。`app/main.py` 中的新生成链路围绕 `StylingPlan`、`ShotPresetSlot`、`GenerationResultSetShotPreset` 和 `GenerationResultImage` 编排；旧预览与旧拍摄预设版本数据只读兼容。
@@ -53,7 +53,7 @@ ToAPIs 图片任务是异步协议：创建接口返回任务 ID，状态接口�
 
 API 摘要返回稳定 `error={code,title,message,action,retryable}`；普通用户只看可读标题、具体原因和下一步。数据库与 admin 技术详情保留原始 `technicalMessage`、provider 快照、顶层/上游错误码、providerRequestId 及 `providerReferenceImageManifest.providerInputPolicyVersion`。
 
-官方依据：`https://dashlyai.mintlify.app/docs/cn/api-reference/tasks/image-status`、`https://dashlyai.mintlify.app/docs/cn/api-reference/images/gpt-image-2/official`、`https://dashlyai.mintlify.app/docs/cn/api-reference/uploads/images`。
+官方依据：`https://docs.toapis.cn/docs/cn/api-reference/tasks/image-status`、`https://docs.toapis.cn/docs/cn/api-reference/images/gpt-image-2.5-sunburst/generation`、`https://docs.toapis.cn/docs/cn/api-reference/uploads/images`。
 
 ## ToAPIs 并发闸门
 

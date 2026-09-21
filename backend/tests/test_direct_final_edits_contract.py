@@ -398,8 +398,11 @@ def test_preset_serialization_does_not_mark_deleted_assets_complete(client) -> N
     assert slot["complete"] is False
 
 
-def test_toapis_final_edits_request_uses_master_shot_first_without_mask_and_production_quality(monkeypatch) -> None:
+@pytest.mark.parametrize("resolution, expected_resolution", [("2k", "2k"), ("4K", "4k")])
+def test_toapis_final_edits_request_uses_master_shot_first_without_mask_and_production_quality(monkeypatch, resolution, expected_resolution) -> None:
     monkeypatch.setattr(image_provider, "TOAPIS_MAX_REFERENCE_IMAGES", 6)
+    monkeypatch.setattr(image_provider.get_settings(), "gpt_image2_model_id", "gpt-image-2.5-sunburst")
+    monkeypatch.setattr(image_provider.get_settings(), "gpt_image2_resolution", resolution)
     task_package = {
         "generation": {"stage": "final_image"},
         "prompt": "将拍摄母版中的原人物和原服装替换为当前商品与模特。",
@@ -421,11 +424,14 @@ def test_toapis_final_edits_request_uses_master_shot_first_without_mask_and_prod
         ],
     )
 
+    assert request["model"] == "gpt-image-2.5-sunburst"
     assert request["image_urls"][0].endswith("background.png")
     assert "mask_url" not in request
     assert request["size"] == "1:1"
-    assert request["resolution"] == "2k"
+    assert request["resolution"] == expected_resolution
     assert request["quality"] == "high"
+    assert request["n"] == 1
+    assert request["response_format"] == "url"
     assert "reference_images" not in request
 
 

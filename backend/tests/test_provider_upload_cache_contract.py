@@ -294,16 +294,63 @@ def test_toapis_submit_snapshot_contains_live_reference_manifest(
             toapis_base_url="https://toapis.example",
             toapis_image_submit_timeout_seconds=30,
             generation_submit_retry_limit=10,
+            gpt_image2_model_id="gpt-image-2.5-sunburst",
+            gpt_image2_resolution="4K",
+            gpt_image2_output_format="png",
         ),
     )
     monkeypatch.setattr(image_provider, "prepare_toapis_image_inputs", lambda inputs, progress=None: (uploaded, [uploaded[0]["providerUrl"]]))
-    monkeypatch.setattr(image_provider, "build_toapis_request_snapshot", lambda task, urls: {"model": "gpt-image-2", "image_urls": urls})
-    monkeypatch.setattr(image_provider, "post_generation_task_with_confirmed_failure_retries", lambda *args, **kwargs: {"id": "task-1", "status": "submitted"})
+    submitted_requests = []
 
-    result = asyncio.run(image_provider.GPTImage2ToapisProvider().submit({"imageInputs": [{}]}, "output.png"))
+    def submit(url, payload, *args, **kwargs):
+        assert url == "https://toapis.example/v1/images/generations"
+        submitted_requests.append(payload)
+        return {"id": "task-1", "status": "pending"}
 
+    monkeypatch.setattr(image_provider, "post_generation_task_with_confirmed_failure_retries", submit)
+
+    task_package = {"imageInputs": [{}], "generation": {"stage": "final_image"}, "prompt": "保留母版构图，更换模特与商品。"}
+    result = asyncio.run(image_provider.GPTImage2ToapisProvider().submit(task_package, "output.png"))
+
+    assert submitted_requests == [result["providerRequest"]]
+    assert result["model"] == result["providerRequest"]["model"] == "gpt-image-2.5-sunburst"
+    assert result["providerRequest"]["resolution"] == "4k"
+    assert result["providerRequestId"] == "task-1"
+    assert result["providerStatus"] == "pending"
     assert result["providerReferenceImageManifest"][0]["providerInputPolicyVersion"] == "toapis-input-v2"
     assert result["providerReferenceImageManifest"][0]["url"] == "https://files.toapis.cn/v2.jpg"
+
+
+@pytest.mark.parametrize(
+    ("queue_url", "configured_model", "expected_model"),
+    [
+        ("https://queue.fal.run/openai/gpt-image-2/edit", "gpt-image-2.5-sunburst", "gpt-image-2"),
+        ("https://queue.fal.run/openai/gpt-image-2/edit/", "gpt-image-2.5-sunburst", "gpt-image-2"),
+        ("https://fal.example/custom/edit", "custom-model", "custom-model"),
+    ],
+)
+def test_fal_submit_model_snapshot_matches_its_queue_route(
+    monkeypatch: pytest.MonkeyPatch, queue_url: str, configured_model: str, expected_model: str,
+) -> None:
+    monkeypatch.setattr(
+        image_provider,
+        "get_settings",
+        lambda: SimpleNamespace(fal_key="test-key", gpt_image2_queue_url=queue_url, gpt_image2_model_id=configured_model),
+    )
+    monkeypatch.setattr(image_provider, "prepare_fal_image_inputs", lambda inputs, progress=None: ([], ["https://fal.example/master.jpg"]))
+    monkeypatch.setattr(image_provider, "build_fal_request_snapshot", lambda task, urls: {"image_urls": urls})
+
+    def submit(url, payload, *args, **kwargs):
+        assert url == queue_url
+        return {"request_id": "fal-task-1"}
+
+    monkeypatch.setattr(image_provider, "post_json", submit)
+
+    result = asyncio.run(image_provider.GPTImage2FalProvider().submit({}, "output.png"))
+
+    assert result["provider"] == "fal"
+    assert result["providerRequestId"] == "fal-task-1"
+    assert result["model"] == expected_model
 
 
 def test_upload_request_timeout_is_clipped_to_stage_deadline(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -23,7 +23,7 @@ README 面向人类快速了解项目；agent 的权威入口始终是 `AGENTS.m
 - 主生产入口：`AI 摄影棚`
 - 素材准备入口：`搭配服装库`、`模特与背景`
 - 输出目标：每个主推款任务直接生成 5 个固定镜头的最终棚拍成片
-- 默认视觉生成器：`Image-2`，当前默认 provider 为 `toapis`，支持 `fal` provider 配置
+- 默认视觉生成器：ToAPIs `GPT Image-2.5 Sunburst`，同时保留 `fal` 的 Image-2 provider 配置
 - 对象存储：统一使用 S3 兼容对象存储；私有化默认 RustFS
 - 暂不包含：复杂多租户权限、计费、自动质量检测、视频生成、鞋包饰品商品级入库
 
@@ -39,7 +39,7 @@ README 面向人类快速了解项目；agent 的权威入口始终是 `AGENTS.m
 -> 输出可追溯 StylingPlan
 -> 按主推款品类路由固定分镜 Prompt，注入商品、选搭、模特和环境事实
 -> 按品类读取已发布的拍摄母版/姿势拍摄预设
--> 使用 GPT Image-2 多参考图编辑并发生成 5 张最终电商棚拍成片
+-> 使用 GPT Image-2.5 Sunburst 多参考图编辑并发生成 5 张最终电商棚拍成片
 -> 生成记录复盘任务、最终图、attempt 和 provider 调试信息
 ```
 

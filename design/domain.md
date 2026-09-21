@@ -24,6 +24,6 @@
 | 场景、构图、人物尺度、原人物替换位置、姿势 | 当前生效 ShotPresetSlot；生成后使用结果集冻结副本 |
 | 五镜头构图与禁止项 | 三类固定成片 Prompt |
 | 参考图顺序、数量和请求参数 | 产品组装代码 |
-| 视觉生成 | GPT Image-2 edits |
+| 视觉生成 | GPT Image-2.5 Sunburst edits |
 
 旧 `GenerationPreview` 数据只用于历史记录兼容，不再创建；旧 preview endpoint 固定返回 `410 Gone`。

@@ -6,7 +6,7 @@
 导入主推款并冻结输入版本
 → AI Stylist 理解商品、探索造型并输出 StylingPlan
 → 按品类图位族选择当前生效的五镜头拍摄预设
-→ GPT Image-2 edits 并发生成五张 1:1 最终成片
+→ GPT Image-2.5 Sunburst edits 并发生成五张 1:1 最终成片
 ```
 
 系统不生成分镜预览，不创建动态拍摄剧本或镜头计划。五镜头导演意图由拍摄预设与三类固定成片 Prompt 共同承担。
@@ -26,7 +26,7 @@ AI Stylist 必须先理解主推款，再比较多套候选造型，用 Aestheti
 
 ## 4. 最终成片
 
-最终阶段按图位族读取 `assembly.final_image_top`、`assembly.final_image_bottom` 或 `assembly.final_image_one_piece`。五个槽位分别调用 Image-2 edits，固定 `size=1:1`、`resolution=2k`、`quality=high`。
+最终阶段按图位族读取 `assembly.final_image_top`、`assembly.final_image_bottom` 或 `assembly.final_image_one_piece`。五个槽位分别调用 GPT Image-2.5 Sunburst edits，默认 `size=1:1`、`resolution=2k`、`quality=high`。
 
 每张最多 6 个 `image_urls`，顺序为拍摄母版、姿势、模特身份参考板、主推款概览参考板、主推款补充细节参考板、搭配服装参考板；不足时留空，不使用同组连续性锚点。拍摄母版必须排第一：模型将其原人物和原服装替换为指定模特和商品，同时继承其场景、机位、景别、裁切、站位、人物尺度与光线。参考板内部来源保留在 attempt 快照。不传 `mask_url`。
 

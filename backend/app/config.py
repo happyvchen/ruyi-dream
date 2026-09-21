@@ -99,7 +99,7 @@ class Settings:
     # 打标并发闸门。provider 瞬时错误统一由 Gemini 通道重试，业务层不再叠加整条重试。
     tagging_max_concurrency = int(os.getenv("TAGGING_MAX_CONCURRENCY") or "3")
     image_provider = os.getenv("GPT_IMAGE2_PROVIDER", "toapis").lower()
-    gpt_image2_model_id = os.getenv("GPT_IMAGE2_MODEL_ID", "gpt-image-2")
+    gpt_image2_model_id = os.getenv("GPT_IMAGE2_MODEL_ID", "gpt-image-2.5-sunburst")
     gpt_image2_api_base_url = os.getenv("GPT_IMAGE2_API_BASE_URL", "https://fal.run/openai/gpt-image-2/edit")
     gpt_image2_queue_url = os.getenv("GPT_IMAGE2_QUEUE_URL", "https://queue.fal.run/openai/gpt-image-2/edit")
     fal_key = os.getenv("FAL_KEY", "")

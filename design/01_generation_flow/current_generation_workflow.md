@@ -5,7 +5,7 @@
 ```text
 导入主推款
 → AI 智能选搭（Gemini，输出 selected_files + styling_plan）
-→ 最终成片（GPT Image-2 edits，按五个固定镜头并发生成）
+→ 最终成片（GPT Image-2.5 Sunburst edits，按五个固定镜头并发生成）
 ```
 
 0.1.0 的生产候选链路不再生成分镜预览，也不存在动态拍摄剧本、`ShootScript` 或 `ShotPlan` 运行 artifact。导演约束由“拍摄预设 + 三类固定成片 Prompt 的五个镜头块”共同承担；代码只负责拍摄图位族路由、当前镜头、参考图顺序、选中造型摘要和用户补充要求等动态事实。
@@ -40,7 +40,7 @@
 
 ## 单镜头输入预算
 
-ToAPIs 文档标称 GPT Image-2 edits 的 `image_urls` 最多 16 张，但当前实际 W8X 上游只接受 6 张。生产链路以实际能力为准，把多张事实图确定性合成角色参考板；这只是输入组装，不调用额外 AI。
+成片继续采用现有 6 个参考图 URL 的输入预算，不因模型升级扩大图数。ToAPIs Sunburst 文档兼容 `image_urls`，Playground 最多选择 6 张参考图；多张事实图仍由后端确定性合成角色参考板，不调用额外 AI。
 
 每个镜头按以下顺序组装，不使用同组成片连续性锚点：
 
@@ -58,14 +58,14 @@ ToAPIs 文档标称 GPT Image-2 edits 的 `image_urls` 最多 16 张，但当前
 最终五张均固定使用：
 
 ```text
-model: gpt-image-2
+model: gpt-image-2.5-sunburst
 size: 1:1
 resolution: 2k
 quality: high
 n: 1
 ```
 
-请求使用 `/v1/images/generations`；存在 `image_urls` 时进入多参考图编辑模式，不传 `mask_url`。
+请求使用 `/v1/images/generations`；存在 `image_urls` 时进入多参考图编辑模式，不传 `mask_url`。Sunburst 普通版兼容现有小写 `2k`、`image_urls` 和异步任务查询协议，继续使用 URL 返回方式。参数依据：[ToAPIs Sunburst 文档](https://docs.toapis.cn/docs/cn/api-reference/images/gpt-image-2.5-sunburst/generation)。
 
 ## 成像质量约束
 

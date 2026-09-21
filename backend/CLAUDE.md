@@ -2,7 +2,7 @@
 
 ## 职责 (Scope)
 
-ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 兼容对象存储的 AI 摄影棚实现，覆盖搭配服装打标、主推款任务流、AI Stylist / StylingPlan、当前生效拍摄预设与结果集冻结快照、三类固定成片 Prompt 路由、Image-2 edits 成片生成和结果复盘。
+ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 兼容对象存储的 AI 摄影棚实现，覆盖搭配服装打标、主推款任务流、AI Stylist / StylingPlan、当前生效拍摄预设与结果集冻结快照、三类固定成片 Prompt 路由、GPT Image-2.5 Sunburst edits 成片生成和结果复盘。
 
 设计层面的产品范围、生成职责和技术路线在 `../design/`，本目录只管“代码怎么写”和“后端契约怎么落地”。
 
@@ -17,7 +17,7 @@ ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 �
 | Storage | S3 兼容对象存储，私有化默认 RustFS |
 | Metadata | SQLite：`backend/data/app.sqlite3` |
 | AI Stylist | Gemini（`app/gemini_provider.py`，`GEMINI_PROVIDER` 切换：`toapis` 走 ToAPIs OpenAI 兼容中转，`direct` 走 google-genai 直连；代码缺省 `direct` 兼容存量部署，`.env.example` 和本项目部署配置为 `toapis`）；瞬时技术失败有限自动恢复，终态错误记录事件日志 |
-| Image Provider | `app/image_provider.py`，GPT Image-2 provider 适配；默认 toapis，保留 fal queue 提交、状态查询、结果下载 |
+| Image Provider | `app/image_provider.py`，默认 ToAPIs GPT Image-2.5 Sunburst；保留 fal Image-2 queue 提交、状态查询、结果下载 |
 
 生产直接依赖见 `requirements.txt`，测试依赖入口见 `requirements-dev.txt`，传递依赖约束见 `requirements.constraints.txt`。不要预先引入复杂 SaaS 权限、多租户、计费、队列集群。
 

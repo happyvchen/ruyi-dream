@@ -11,7 +11,7 @@
        ─→ backend  (FastAPI, :8000) ─→ SQLite (deployment/app-data/backend/app.sqlite3)
        │                            ─→ 对象存储 (S3 兼容, 默认本机 RustFS http://rustfs:9000)
        │                            ─→ Gemini (GEMINI_PROVIDER: toapis 中转 / direct 直连)
-       │                            ─→ GPT-Image-2 (GPT_IMAGE2_PROVIDER: toapis / fal)
+       │                            ─→ 成片模型 (toapis: Image-2.5 Sunburst / fal: Image-2)
        └─→ 图片 presigned URL 直连对象存储 (:9000, 必须浏览器可达)
 ```
 
@@ -72,6 +72,7 @@ GEMINI_TOAPIS_CONNECT_TIMEOUT_SECONDS=60 # Gemini(ToAPIs) 连接/导入请求体
 AI_STYLIST_CONTRACT_RETRY_LIMIT=3      # AI Stylist 结果缺契约字段时的自动重问次数
 AI_STYLIST_CONTRACT_RETRY_DELAY_SECONDS=15 # AI Stylist 契约重试前等待秒数
 GPT_IMAGE2_PROVIDER=toapis
+GPT_IMAGE2_MODEL_ID=gpt-image-2.5-sunburst
 TOAPIS_API_KEY=sk-...
 TOAPIS_BASE_URL=https://toapis.cn      # 只填写 origin，不要追加 /v1
 TOAPIS_MAX_CONCURRENCY=5              # ToAPIs 全局并发:Gemini/Image-2/API 导入与状态查询共享
@@ -84,6 +85,8 @@ GENERATION_STATUS_RETRY_LIMIT=15      # 状态查询连续瞬时失败重试次�
 ```
 
 要点:
+
+- 成片默认使用 ToAPIs `gpt-image-2.5-sunburst` 普通版，保留 `GPT_IMAGE2_*` 配置名。升级已有环境时同步修改实际 `.env` 的 `GPT_IMAGE2_MODEL_ID`，再重建后端容器。模型在提交时读取当前配置，切换应安排在生成空闲时；已提交任务继续按原 ID 查询，历史结果和快照不改写。
 
 - 根目录 `.env` 是唯一配置源,不要另建 `backend/.env`。
 - `PUBLIC_BACKEND_URL` 会构建进前端静态包,改动后必须重建 frontend 镜像。

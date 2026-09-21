@@ -207,7 +207,12 @@ class GPTImage2FalProvider(ImageGenerationProvider):
         # 编排层依赖"payload 是否有 outputPath"判断是否还需要执行回传阶段。
         return {
             "provider": "fal",
-            "model": settings.gpt_image2_model_id,
+            # fal 的实际模型由队列路由决定，不能沿用 ToAPIs 的 Sunburst 默认标识。
+            "model": (
+                "gpt-image-2"
+                if urlparse(settings.gpt_image2_queue_url).path.rstrip("/") == "/openai/gpt-image-2/edit"
+                else settings.gpt_image2_model_id
+            ),
             "submissionMode": "queued",
             "status": "SUBMITTED",
             "providerStatus": "SUBMITTED",
@@ -556,7 +561,7 @@ def build_toapis_request_snapshot(task_package: dict[str, Any], image_urls: list
         "image_urls": image_urls,
         "n": 1,
         "size": settings.gpt_image2_preview_size if stage == "preview_grid" else "1:1",
-        "resolution": "2k" if stage == "final_image" else str(settings.gpt_image2_resolution).lower(),
+        "resolution": str(settings.gpt_image2_resolution).lower(),
         "quality": "high" if stage == "final_image" else settings.gpt_image2_quality,
         "output_format": settings.gpt_image2_output_format,
         "response_format": "url",

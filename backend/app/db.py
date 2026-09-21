@@ -47,9 +47,9 @@ PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
     ("assembly.ai_tagging", "assembly", "AI 打标", "搭配服装入库后的图片理解和标签识别 Prompt；运行时与图片挑选/排序合并调用。", 100),
     ("assembly.hero_image_selection", "assembly", "主推款图片挑选/排序", "AI 摄影棚主推款图片挑选和排序 Prompt；运行时与 AI 选搭合并调用。", 105),
     ("assembly.ai_styling", "assembly", "AI 选搭", "AI Stylist 选搭 Prompt，含主推款理解、搭配选择和质量判断；运行时与主推款图片挑选/排序合并调用。", 110),
-    ("assembly.final_image_top", "assembly", "生成成片 · 上装/针织/外套", "Image-2 上装类固定五镜头成片 Prompt。", 150),
-    ("assembly.final_image_bottom", "assembly", "生成成片 · 裤装/半身裙", "Image-2 下装类固定五镜头成片 Prompt。", 160),
-    ("assembly.final_image_one_piece", "assembly", "生成成片 · 连衣裙/连体/套装", "Image-2 连衣裙/连体/套装固定五镜头成片 Prompt。", 170),
+    ("assembly.final_image_top", "assembly", "生成成片 · 上装/针织/外套", "Image-2.5 Sunburst 上装类固定五镜头成片 Prompt。", 150),
+    ("assembly.final_image_bottom", "assembly", "生成成片 · 裤装/半身裙", "Image-2.5 Sunburst 下装类固定五镜头成片 Prompt。", 160),
+    ("assembly.final_image_one_piece", "assembly", "生成成片 · 连衣裙/连体/套装", "Image-2.5 Sunburst 连衣裙/连体/套装固定五镜头成片 Prompt。", 170),
 )
 
 REMOVED_PROMPT_CONFIG_KEYS: tuple[str, ...] = (

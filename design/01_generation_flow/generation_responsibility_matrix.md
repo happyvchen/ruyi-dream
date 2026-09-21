@@ -15,7 +15,7 @@
 | 场景、机位、景别、裁切、站位、人物尺度、光线、镜头 5 安全区 | 当前拍摄预设的拍摄母版图 | Prompt 或姿势图重新导演；保留母版原人物身份/服装 |
 | 拍摄图位族路由 | `styling_plan.hero_understanding.shot_category_family` + 后端确定性校验 | 本地品类 fallback |
 | 动态业务事实 | 后端渲染为短自然语言 | 复制完整 StylingPlan JSON |
-| 最终成片 | GPT Image-2 edits，五镜头逐张生成 | 读取旧分镜、使用第六格 |
+| 最终成片 | GPT Image-2.5 Sunburst edits，五镜头逐张生成 | 读取旧分镜、使用第六格 |
 | 业务状态与追溯 | 数据库、结果集冻结的拍摄预设图片和任务状态机 | Image-2 |
 
 ## Prompt 与代码边界
