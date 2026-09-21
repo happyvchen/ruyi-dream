@@ -44,3 +44,9 @@ RUN_K6_LOADTESTS=1 RUN_K6_WRITE_LOADTEST=1 BASE_URL=http://127.0.0.1:8000 USERNA
 - 对象存储、网络、GPU/provider 出口和真实账号权限配置。
 
 自动门禁的目标是把可重复、可本地验证、不会消耗额度的风险前移；真实环境和视觉质量仍需要上线前检查。
+
+## P0 性能契约回归
+
+后端 `test_network_performance_contract.py` 与 `test_media_repair_batch.py` 覆盖轻列表查询上限、gzip/status 字节预算、无原图回退、下载缓存、修订号内容/心跳/回滚边界和有界修复。前端 `networkPerformance.test.ts`、`MediaImage.test.tsx` 与生产页面门禁覆盖五分钟轮询预算、隐藏恢复、共享 PUT、重试退避、GET 取消、写操作保留、首屏图片预算与检查器资源切换。测试仅使用隔离数据库/mock fetch，不触发 AI。
+
+同数据旧/新序列化测量是开发期辅助测试：Git HEAD 已包含 P0 时跳过旧基线对比，稳定预算测试仍执行。结果与生产验收边界记录在 `loadtest.md`。

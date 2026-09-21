@@ -135,7 +135,18 @@ def normalize_image(content: bytes, max_edge: int) -> NormalizedImage:
         else:
             if image.mode != "RGB":
                 image = image.convert("RGB")
-            image.save(output, "JPEG", quality=95, subsampling=0, optimize=True)
+            try:
+                image.save(output, "JPEG", quality=95, subsampling=0, optimize=True)
+            except OSError:
+                # High-entropy images can exhaust the optimized JPEG encoder buffer.
+                # A fresh buffer discards partial output without changing image quality.
+                output = BytesIO()
+                try:
+                    image.save(output, "JPEG", quality=95, subsampling=0, optimize=False)
+                except OSError as exc:
+                    raise ImageIngestionError(
+                        "ENCODE_FAILED", "图片转码失败，请重新导出图片后再试"
+                    ) from exc
             content_type, suffix = "image/jpeg", ".jpg"
         return NormalizedImage(output.getvalue(), content_type, suffix, image.width, image.height)
 

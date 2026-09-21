@@ -1,3 +1,5 @@
+import { pollVisible } from './lib/polling'
+import { MediaImage, resetMediaBudget } from './components/MediaImage'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, Dispatch, DragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode, SetStateAction, UIEvent } from 'react'
@@ -39,7 +41,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react'
-import { ApiError, api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl, stylingGarmentArchiveUrl } from './api'
+import { ApiError, cancelPageReads, getPageReadGeneration, api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl, stylingGarmentArchiveUrl } from './api'
 import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, DirectUploadItem, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, ObjectCleanupError, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, ShotPresetMatrix, ShotPresetSlot, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot, UploadSession, UploadSessionBatch } from './api'
 import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
@@ -68,6 +70,7 @@ type FileSystemDirectoryEntry = FileSystemEntry & {
 }
 type LightboxImage = {
   src: string
+  originalSrc?: string
   thumbSrc?: string
   title: string
   meta?: string
@@ -245,6 +248,7 @@ export function App() {
   const [stylingUploadBatches, setStylingUploadBatches] = useState<UploadSessionBatch[]>([])
   const [stylingUploadBatchesLoaded, setStylingUploadBatchesLoaded] = useState(false)
   const [browserUploadingCount, setBrowserUploadingCount] = useState(0)
+  const applicationReadsRef = useRef(new AbortController())
   const suppressStudioAutoRestoreRef = useRef(false)
   const [libraryImportOpen, setLibraryImportOpen] = useState(() => {
     if (typeof window === 'undefined') return false
@@ -283,6 +287,11 @@ export function App() {
   }, [])
 
   useEffect(() => {
+    resetMediaBudget()
+  }, [page])
+  useEffect(() => () => cancelPageReads(), [])
+
+  useEffect(() => {
     const handleAuthExpired = () => {
       markAuthExpired()
     }
@@ -301,9 +310,11 @@ export function App() {
 
   useEffect(() => {
     if (!authenticated) return
-    void refreshAll().catch((err) => {
+    applicationReadsRef.current = new AbortController()
+    void refreshAll(true).catch((err) => {
       if (isAuthExpiredError(err)) markAuthExpired()
     })
+    return () => applicationReadsRef.current.abort()
   }, [authenticated, role])
 
   useEffect(() => {
@@ -319,14 +330,18 @@ export function App() {
     }
   }, [libraryImportOpen])
 
+  const visibleUploadSessions = pollingUploadSessions(uploadSessions).filter((item) =>
+    (page === 'library' && libraryImportOpen && item.scope?.replaceAll('-', '_') === 'styling_garment') ||
+    (page === 'studio' && item.scope?.replaceAll('-', '_') !== 'styling_garment'))
+  const visibleUploadKey = visibleUploadSessions.map((item) => item.id).sort().join(',')
   useEffect(() => {
-    const pollingSessions = pollingUploadSessions(uploadSessions)
-    if (!authenticated || !pollingSessions.length) return
-    const timer = window.setInterval(() => {
-      void refreshActiveUploadSessions(pollingSessions).catch(() => undefined)
-    }, 3000)
-    return () => window.clearInterval(timer)
-  }, [authenticated, uploadSessions])
+    if (!authenticated || !visibleUploadKey) return
+    return pollVisible(async (signal) => {
+      const refreshed = await Promise.all(visibleUploadKey.split(',').map((id) => api.getUploadSession(id, signal).then((r) => r.session)))
+      if (!signal.aborted) setUploadSessions((current) => mergeUploadSessionUpdates(current, refreshed))
+      return refreshed
+    })
+  }, [authenticated, visibleUploadKey])
 
   useEffect(() => {
     if (browserUploadingCount <= 0) return
@@ -369,34 +384,37 @@ export function App() {
   const runningTaggingKey = runningTaggingIds.join(',')
   const hasRunningTagging = runningTaggingIds.length > 0
   useEffect(() => {
-    if (!authenticated || !hasRunningTagging) return
-    const timer = window.setInterval(() => {
-      void api.listStylingGarments({ limit: 80 }).then((response) => setGarments(response.items)).catch(() => undefined)
-    }, 3000)
-    return () => window.clearInterval(timer)
-  }, [authenticated, hasRunningTagging, runningTaggingKey])
+    if (!authenticated || !hasRunningTagging || page !== 'library' || libraryImportOpen) return
+    return pollVisible(async (signal) => {
+      const response = await api.listStylingGarments({ limit: 80 }, signal)
+      if (!signal.aborted) setGarments(response.items)
+      return response.items
+    })
+  }, [authenticated, hasRunningTagging, runningTaggingKey, page, libraryImportOpen])
 
-  async function refreshAll() {
-    const [garmentResult, taskResult, recordResult, workspaceResult, modelResult] = await Promise.all([
-      api.listStylingGarments({ limit: 80 }),
-      api.listTasks({ limit: 30 }),
-      api.listRecords({ limit: 30 }),
-      api.listRecordWorkspace({ limit: 1, offset: 0, sortBy: 'createdAt', sortDir: 'desc' }),
-      api.listModels(),
+  async function refreshAll(restoreRoute = false) {
+    const signal = applicationReadsRef.current.signal
+    const generation = getPageReadGeneration()
+    const results = await Promise.allSettled([
+      api.listStylingGarments({ limit: 80 }, signal, 'application').then((r) => { if (!signal.aborted) setGarments(r.items); return r }),
+      api.listTasks({ limit: 30 }, signal, 'application').then((r) => { if (!signal.aborted) setTasks(r.items); return r }),
+      api.listRecords({ limit: 30 }, signal, 'application').then((r) => { if (!signal.aborted) setRecords(r.items); return r }),
+      api.listRecordWorkspace({ limit: 1, offset: 0, sortBy: 'createdAt', sortDir: 'desc' }, signal, 'application').then((r) => {
+        if (!signal.aborted) setLatestWorkspaceTask(defaultTaskForWorkspaceRecord(r.items[0]))
+        return r
+      }),
+      api.listModels(signal, 'application').then((r) => { if (!signal.aborted) setModels(r.items); return r }),
     ])
-    setGarments(garmentResult.items)
-    setTasks(taskResult.items)
-    setRecords(recordResult.items)
-    const newestWorkspaceTask = defaultTaskForWorkspaceRecord(workspaceResult.items[0])
-    setLatestWorkspaceTask(newestWorkspaceTask)
-    setModels(modelResult.items)
+    if (!restoreRoute || signal.aborted || generation !== getPageReadGeneration()) return
+    const [, taskResult, recordResult, workspaceResult] = results
+    const newestWorkspaceTask = workspaceResult.status === 'fulfilled' ? defaultTaskForWorkspaceRecord(workspaceResult.value.items[0]) : null
     const route = parseRoute()
     const requestedTaskId = route.page === 'studio' ? route.taskId : undefined
     if (requestedTaskId && (!task || task.id !== requestedTaskId)) {
       const detail = await api.getTask(requestedTaskId, role === 'admin').then((r) => r.item).catch(() => null)
       if (detail) setTask(detail)
     } else if (route.page === 'studio' && !requestedTaskId && !task && !suppressStudioAutoRestoreRef.current) {
-      const latestTask = newestWorkspaceTask ?? taskResult.items[0] ?? recordResult.items[0] ?? null
+      const latestTask = newestWorkspaceTask ?? (taskResult.status === 'fulfilled' ? taskResult.value.items[0] : null) ?? (recordResult.status === 'fulfilled' ? recordResult.value.items[0] : null)
       if (latestTask) {
         setTask(latestTask)
         window.history.replaceState(null, '', routeToUrl({ page: 'studio', taskId: latestTask.id }))
@@ -443,16 +461,12 @@ export function App() {
     await Promise.all(uploadSessionRefreshTargets(items).map(({ scope, limit }) => refreshUploadSessions(scope, limit)))
   }
 
-  async function refreshActiveUploadSessions(items: UploadSession[]) {
-    const refreshed = await Promise.all(items.map((item) => api.getUploadSession(item.id)
-      .then((result) => result.session)
-      .catch(() => null)))
-    const successful = refreshed.filter((item): item is UploadSession => !!item)
-    if (successful.length) setUploadSessions((current) => mergeUploadSessionUpdates(current, successful))
-  }
+
 
   function navigate(next: Page) {
     if (next !== page && document.body.dataset.promptDirty === 'true' && !window.confirm('Prompt 有未保存修改，确定离开并放弃这些修改吗？')) return
+    cancelPageReads()
+    resetMediaBudget()
     suppressStudioAutoRestoreRef.current = false
     setPage(next)
     if (next === 'studio') {
@@ -471,6 +485,8 @@ export function App() {
   }
 
   function openTaskInStudio(item: GenerationTask) {
+    cancelPageReads()
+    resetMediaBudget()
     setPage('studio')
     setTask(item)
     window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
@@ -799,6 +815,8 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   const batchDownloadRequestRef = useRef(0)
   const technicalDetailTriggerRef = useRef<HTMLElement | null>(null)
   const technicalDetailRequestRef = useRef(0)
+  const technicalDetailControllerRef = useRef<AbortController | null>(null)
+  useEffect(() => () => technicalDetailControllerRef.current?.abort(), [])
   const recentTaskRequestRef = useRef(0)
   const [aiLogDialog, setAiLogDialog] = useState<{ title: string; ownerTypes: string[]; attemptId: number; records: AICallRecord[]; loading: boolean; error?: string } | null>(null)
   const [aiStylingInstruction, setAiStylingInstruction] = useState('')
@@ -812,6 +830,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   const batchContextLoading = !!task?.batchId && (!batchContextMatches || batchItemsLoading)
   const isAdmin = role === 'admin'
   function applyTaskUpdate(nextTask: GenerationTask) {
+    pollingTaskRef.current = nextTask
     setTask(nextTask)
     setRecentItems((current) => upsertRecentRecordItem(current, nextTask))
     setRecentBatchTasks((current) => nextTask.batchId && current[nextTask.batchId]
@@ -819,12 +838,16 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
       : current)
   }
   function openRecentTask(item: GenerationTask) {
+    cancelPageReads()
+    resetMediaBudget()
     setTaskRailTab('summary')
     applyTaskUpdate(item)
     window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
     void api.getRecord(item.id, isAdmin).then((r) => applyTaskUpdate(r.item)).catch(() => undefined)
   }
   function openBatchTask(item: GenerationTask) {
+    cancelPageReads()
+    resetMediaBudget()
     setTaskRailTab('summary')
     applyTaskUpdate(item)
     window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: item.id }))
@@ -889,11 +912,14 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   function openAICallLogs(title: string, ownerTypes: string[], attemptId: number) {
     if (!task || !isAdmin) return
     const taskId = task.id
+    technicalDetailControllerRef.current?.abort()
+    const controller = new AbortController()
+    technicalDetailControllerRef.current = controller
     const requestId = technicalDetailRequestRef.current + 1
     technicalDetailRequestRef.current = requestId
     technicalDetailTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     setAiLogDialog({ title, ownerTypes, attemptId, records: [], loading: true })
-    void api.getTaskAiInvocation(taskId, attemptId)
+    void api.getTaskAiInvocation(taskId, attemptId, controller.signal)
       .then((result) => {
         if (technicalDetailRequestRef.current === requestId && task?.id === taskId) setAiLogDialog({ title, ownerTypes, attemptId, records: [result.item], loading: false })
       })
@@ -902,11 +928,14 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
       })
   }
   function closeAICallLogs() {
+    technicalDetailControllerRef.current?.abort()
     technicalDetailRequestRef.current += 1
     setAiLogDialog(null)
     window.setTimeout(() => technicalDetailTriggerRef.current?.focus(), 0)
   }
   function startNewTask() {
+    cancelPageReads()
+    resetMediaBudget()
     setTaskRailTab('summary')
     onStartNewTask()
     setTask(null)
@@ -1017,24 +1046,63 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   useEffect(() => setAiStylingInstruction(task?.stageUserInputs?.aiStyling ?? stageInstructionText(task?.styling?.userInstruction)), [task?.id, task?.stageUserInputs?.aiStyling, task?.styling?.id])
   useEffect(() => setFinalImageInstruction(task?.stageUserInputs?.finalImage ?? stageInstructionText(task?.resultSet?.userInstruction)), [task?.id, task?.stageUserInputs?.finalImage, task?.resultSet?.id])
   useEffect(() => {
-    loadRecentTasks(0)
-  }, [recentTaskPageSize])
+    if (taskRailTab === 'recent') loadRecentTasks(0)
+  }, [recentTaskPageSize, taskRailTab])
+  const pollingTaskRef = useRef(task)
+  pollingTaskRef.current = task
+  const pollingBatchRef = useRef(batchItems)
+  pollingBatchRef.current = batchItems
+  const shouldPollTasks = !!task && (isTaskLockedForGeneration(task) || batchItems.some(isTaskLockedForGeneration))
   useEffect(() => {
-    if (!task || (!['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status) && !task.autoRunTarget)) return
-    const timer = window.setInterval(() => {
-      void api.getTask(task.id, isAdmin).then((result) => applyTaskUpdate(result.item)).catch(() => undefined)
-    }, 1500)
-    return () => window.clearInterval(timer)
-  }, [task?.id, task?.status, task?.autoRunTarget, setTask])
+    if (!task || !shouldPollTasks) return
+    const taskId = task.id
+    let lastStatus = task.status
+    return pollVisible(async (signal) => {
+      const status = await api.getTaskStatus(taskId, signal)
+      if (signal.aborted || pollingTaskRef.current?.id !== taskId) return status
+      const current = pollingTaskRef.current
+      const terminal = !['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(status.status) && !status.autoRunTarget
+      if (status.detailRevision !== current.detailRevision || (terminal && lastStatus !== status.status)) {
+        const response = await api.getTask(taskId, isAdmin, signal)
+        if (!signal.aborted && pollingTaskRef.current?.id === taskId) applyTaskUpdate(response.item)
+      } else {
+        const mergeOperation = (operation: AIOperation): AIOperation => {
+          const update = status.operations?.find((item) => item.id === operation.id)
+          if (!update) return operation
+          const phases = (operation.progress?.phases ?? []).map((phase) => phase.phase === update.phase
+            ? { ...phase, startedAt: update.startedAt, detail: update.detail }
+            : !phase.endedAt && update.startedAt ? { ...phase, endedAt: update.startedAt } : phase)
+          return { ...operation, status: update.status, progress: { ...operation.progress, current: update.phase,
+            phases: update.phase && !phases.some((phase) => phase.phase === update.phase)
+              ? [...phases, { phase: update.phase, startedAt: update.startedAt, detail: update.detail }] : phases } }
+        }
+        applyTaskUpdate({ ...current, status: status.status, progress: status.progress,
+          aiOperations: current.aiOperations?.map(mergeOperation),
+          resultSet: current.resultSet ? { ...current.resultSet, images: current.resultSet.images.map((image) => ({ ...image,
+            activeAttempt: image.activeAttempt ? mergeOperation(image.activeAttempt) : image.activeAttempt })) } : current.resultSet,
+          updatedAt: status.updatedAt, autoRunTarget: status.autoRunTarget,
+          autoRunRetryAt: status.autoRunRetryAt, autoRunRetryCount: status.autoRunRetryCount })
+      }
+      lastStatus = status.status
+      const others = pollingBatchRef.current.filter((item) => item.id !== taskId && isTaskLockedForGeneration(item))
+      const updates = await Promise.all(others.map((item) => api.getTaskStatus(item.id, signal)))
+      if (!signal.aborted) setBatchItems((items) => items.map((item) => {
+        const next = item.id === taskId ? status : updates.find((update) => update.taskId === item.id)
+        return next ? { ...item, ...next, id: item.id } : item
+      }))
+      return [status, updates]
+    })
+  }, [task?.id, shouldPollTasks, isAdmin])
   useEffect(() => {
     if (!task || isTaskLockedForGeneration(task)) return
       clearLocalOperationsFor(['generation_styling', 'generation_result_image'], task.id)
   }, [task?.id, task?.status, task?.autoRunTarget, task?.resultSet?.status])
   const hasActiveRecentTasks = recentRecordTasks(recentItems).some((item) => isTaskRunning(item) || isTaskQueuedForAutoRun(item))
   useEffect(() => {
-    if (!hasActiveRecentTasks) return
-    const timer = window.setInterval(() => {
-      void api.listRecordWorkspace({ limit: recentTaskPageSize, offset: 0, sortBy: 'createdAt', sortDir: 'desc' }).then((result) => {
+    if (!hasActiveRecentTasks || taskRailTab !== 'recent') return
+    return pollVisible(async (signal) => {
+      return api.listRecordWorkspace({ limit: recentTaskPageSize, offset: 0, sortBy: 'createdAt', sortDir: 'desc' }, signal).then((result) => {
+        if (signal.aborted) return
         setRecentTaskTotal(result.total)
         setRecentItems((current) => {
           const byId = new Map(result.items.map((item) => [item.id, item] as const))
@@ -1046,10 +1114,10 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
           const fresh = result.items.filter((item) => !known.has(item.id))
           return fresh.length ? [...fresh, ...merged] : merged
         })
-      }).catch(() => undefined)
-    }, 4000)
-    return () => window.clearInterval(timer)
-  }, [hasActiveRecentTasks, recentTaskPageSize])
+        return result.items
+      })
+    })
+  }, [hasActiveRecentTasks, recentTaskPageSize, taskRailTab])
   useEffect(() => {
     const batchId = task?.batchId
     activeBatchIdRef.current = batchId ?? null
@@ -1072,10 +1140,8 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
       })
     }
     refresh()
-    const timer = window.setInterval(refresh, 4000)
     return () => {
       cancelled = true
-      window.clearInterval(timer)
     }
   }, [task?.batchId])
   const handleTaskRailTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
@@ -1397,7 +1463,7 @@ function TaskResumeActionContent({ task }: { task: GenerationTask }) {
 
 function batchChipStatus(item: GenerationTask) {
   if (item.status === 'COMPLETED') return '完成'
-  if (item.status === 'FINAL_RUNNING') return `成片 ${item.summary?.finalImages?.length ?? 0}/5`
+  if (item.status === 'FINAL_RUNNING') return `成片 ${item.progress?.completed ?? 0}/5`
   if (isTaskWaitingForAutoRetry(item)) return autoRetryStatusLabel(item)
   if (isTaskQueuedForAutoRun(item)) {
     return item.autoRunQueuePosition && item.autoRunQueuePosition > 0 ? `排队第 ${item.autoRunQueuePosition} 位` : '排队中'
@@ -1541,6 +1607,16 @@ function UploadHeroStep({ task, setTask, run, uploadSessions, refreshUploadSessi
   markBrowserUploading: (delta: 1 | -1) => void
   onLatestTaskCreated: (task: GenerationTask) => void
 }) {
+  const mountedRef = useRef(false)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+  function captureImportContext() {
+    const generation = getPageReadGeneration()
+    const url = window.location.href
+    return () => mountedRef.current && generation === getPageReadGeneration() && url === window.location.href
+  }
   const [files, setFiles] = useState<File[]>([])
   const [name, setName] = useState('')
   const [userRequirement, setUserRequirement] = useState('')
@@ -1556,7 +1632,7 @@ function UploadHeroStep({ task, setTask, run, uploadSessions, refreshUploadSessi
   const uploadWarningActiveRef = useRef(false)
 
   function trackUploadProgress(progress: UploadProgressSnapshot) {
-    const shouldWarn = progress.phase === 'preparing' || progress.phase === 'uploading'
+    const shouldWarn = progress.phase === 'preparing' || progress.phase === 'waiting' || progress.phase === 'uploading'
     if (shouldWarn !== uploadWarningActiveRef.current) {
       markBrowserUploading(shouldWarn ? 1 : -1)
       uploadWarningActiveRef.current = shouldWarn
@@ -1676,6 +1752,7 @@ function UploadHeroStep({ task, setTask, run, uploadSessions, refreshUploadSessi
 
   async function createBatchTasks() {
     if (!batchGroups.length || batchCreating) return
+    const isCurrentImport = captureImportContext()
     const seen = new Set<string>()
     const ready: PendingBatchGroup[] = []
     const blocked: PendingBatchGroup[] = []
@@ -1739,7 +1816,7 @@ function UploadHeroStep({ task, setTask, run, uploadSessions, refreshUploadSessi
       setBatchError(parts.join('；'))
       return
     }
-    if (firstTask) {
+    if (firstTask && isCurrentImport()) {
       setTask(firstTask)
       window.history.pushState(null, '', routeToUrl({ page: 'studio', taskId: firstTask.id }))
     }
@@ -1893,7 +1970,10 @@ function UploadHeroStep({ task, setTask, run, uploadSessions, refreshUploadSessi
                 <FileThumbList files={files} onChange={setFiles} limit={HERO_PRODUCT_MAX_IMAGES} disabled={!!uploadProgress} />
                 <div className="inline-form">
                     <button className="management-action" disabled={!files.length || !sanitizeClientName(name) || !!uploadProgress} onClick={() => {
+                      const isCurrentImport = captureImportContext()
                       void run('创建拍摄任务中...', () => api.createTask(name, formalAssetFiles(files, HERO_PRODUCT_MAX_IMAGES), undefined, userRequirement, undefined, { onProgress: trackUploadProgress }), (r: { item: GenerationTask }) => {
+                    onLatestTaskCreated(r.item)
+                    if (!isCurrentImport()) return
                     setTask(r.item)
                     setFiles([])
                     setName('')
@@ -1927,7 +2007,7 @@ function UploadProgressPanel({ progress, prefix, savingLabel = '保存任务', s
   savingDetail?: string
 }) {
   const percent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0
-  const phaseLabel = progress.phase === 'preparing' ? '准备导入' : progress.phase === 'saving' ? savingLabel : '导入图片'
+  const phaseLabel = progress.phase === 'waiting' ? '等待上传' : progress.phase === 'preparing' ? '准备导入' : progress.phase === 'saving' ? savingLabel : '导入图片'
   const detail = progress.phase === 'saving'
     ? savingDetail
     : progress.phase === 'uploading'
@@ -2497,7 +2577,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
             <div className="result-card" key={image?.id ?? `slot-${index + 1}`}>
               {image?.asset ? (
                 <button className="result-image-open" onClick={() => image.asset && setViewer(assetLightboxImage(image.asset, finalAssets))} title="放大查看">
-                  <img src={mediaUrl(assetPreviewSrc(image.asset))} loading="lazy" alt={`最终成片 ${image.sortOrder}`} />
+                  <MediaImage src={mediaUrl(assetThumbSrc(image.asset))} loading="lazy" alt={`最终成片 ${image.sortOrder}`} />
                 </button>
               ) : (
                 <div className="image-placeholder">
@@ -2633,10 +2713,21 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
     void refreshUploadSessionsRef.current().catch(() => undefined)
   }, [showImport])
 
+  const detailReadRef = useRef<{ token: number; controller?: AbortController }>({ token: 0 })
+  useEffect(() => () => detailReadRef.current.controller?.abort(), [])
   async function openDetail(item: StylingGarment) {
-    const result = await api.getStylingGarment(item.id)
-    updateGarmentInView(result.item)
-    setDetail(result.item)
+    detailReadRef.current.controller?.abort()
+    const controller = new AbortController()
+    const token = ++detailReadRef.current.token
+    detailReadRef.current.controller = controller
+    try {
+      const result = await api.getStylingGarment(item.id, controller.signal)
+      if (controller.signal.aborted || token !== detailReadRef.current.token) return
+      updateGarmentInView(result.item)
+      setDetail(result.item)
+    } catch (error) {
+      if (!controller.signal.aborted) throw error
+    }
   }
 
   function libraryQueryOptions(targetOffset = offset) {
@@ -2658,12 +2749,16 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
     }
   }
 
+  const libraryReadRef = useRef<{ token: number; controller?: AbortController }>({ token: 0 })
+  useEffect(() => () => libraryReadRef.current.controller?.abort(), [])
   function refreshLibraryPage(targetOffset = offset) {
-    return api.listStylingGarments(libraryQueryOptions(targetOffset)).then((result) => {
+    const read = beginResourceRead(libraryReadRef.current)
+    return api.listStylingGarments(libraryQueryOptions(targetOffset), read.controller.signal).then((result) => {
+      if (!read.isCurrent()) return
       if (!selectedImportBatch && !focusedGarmentCode && !focusedGarmentId && !result.items.length && result.total > 0 && targetOffset > 0) {
         const fallbackOffset = Math.max(0, Math.floor((result.total - 1) / pageSize) * pageSize)
         setOffset(fallbackOffset)
-        return api.listStylingGarments(libraryQueryOptions(fallbackOffset)).then((nextResult) => applyLibraryResult(nextResult, fallbackOffset))
+        return api.listStylingGarments(libraryQueryOptions(fallbackOffset), read.controller.signal).then((nextResult) => { if (read.isCurrent()) applyLibraryResult(nextResult, fallbackOffset) })
       }
       applyLibraryResult(result, targetOffset)
     })
@@ -2711,28 +2806,31 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
 
   useEffect(() => {
     let cancelled = false
+    const read = beginResourceRead(libraryReadRef.current)
+    const controller = read.controller
+    resetMediaBudget()
     setSearching(true)
     const timer = window.setTimeout(() => {
       if (focusedGarmentId) {
-        void api.getStylingGarment(focusedGarmentId).then((result) => {
+        void api.getStylingGarment(focusedGarmentId, controller.signal).then((result) => {
           if (!cancelled) {
             setItems([result.item])
             setTotal(1)
             setTotalPages(1)
           }
-        }).catch(() => api.listStylingGarments({
+        }).catch((error) => { if (controller.signal.aborted) throw error; return api.listStylingGarments({
           ...libraryQueryOptions(0),
           limit: Math.max(100, pageSize),
           offset: 0,
           keyword: focusedGarmentCode || query.trim() || undefined,
           includeArchived: true,
-        }).then((result) => {
+        }, controller.signal).then((result) => {
           if (cancelled) return
           const filtered = focusedGarmentCode ? result.items.filter((item) => item.code === focusedGarmentCode) : result.items
           setItems(filtered.slice(0, pageSize))
           setTotal(filtered.length)
           setTotalPages(filtered.length ? Math.ceil(filtered.length / pageSize) : 0)
-        })).catch(() => {
+        }) }).catch(() => {
           if (!cancelled) {
             setItems([])
             setTotal(0)
@@ -2743,7 +2841,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
         })
         return
       }
-      void api.listStylingGarments(libraryQueryOptions(offset)).then((result) => {
+      void api.listStylingGarments(libraryQueryOptions(offset), controller.signal).then((result) => {
         if (!cancelled) {
           applyLibraryResult(result, offset)
         }
@@ -2753,6 +2851,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
     }, 250)
     return () => {
       cancelled = true
+      controller.abort()
       window.clearTimeout(timer)
     }
   }, [offset, query, includeArchived, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize, importJobFilter, selectedImportBatch, focusedGarmentCode, focusedGarmentId])
@@ -4292,7 +4391,7 @@ function BatchImportPanel({
       progress,
       items: job.items.map((item) => item.code === code ? {
         ...item,
-        status: progress.phase === 'saving' ? 'SAVING' : 'UPLOADING',
+        status: progress.phase === 'saving' ? 'SAVING' : progress.phase === 'waiting' ? 'WAITING' : 'UPLOADING',
         uploadedCount: progress.completed,
       } : item),
     }))
@@ -5817,7 +5916,7 @@ function ImportPreviewThumb({ src }: { src?: string | null }) {
   const resolvedSrc = src ? mediaUrl(src) : ''
   return (
     <span className="import-preview-thumb">
-      {resolvedSrc && !failed ? <img src={resolvedSrc} alt="" loading="lazy" onError={() => setFailed(true)} /> : <Images size={14} />}
+      {resolvedSrc && !failed ? <MediaImage src={resolvedSrc} alt="" loading="lazy" onError={() => setFailed(true)} /> : <Images size={14} />}
     </span>
   )
 }
@@ -5950,7 +6049,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
   const model = models.find((item) => item.isDefault) ?? models[0]
   const editable = isAdmin && !!model
   const refs = model?.profile?.headReferenceEntries ?? []
-  const coverThumb = refs.find((ref) => ref.angle === 'front')?.previewUrl ?? refs[0]?.previewUrl ?? null
+  const coverThumb = refs.find((ref) => ref.angle === 'front')?.thumbUrl ?? refs[0]?.thumbUrl ?? null
   const displayRefs = refs.length || editable ? refs : fallbackHeadRefs()
   const takenAngles = new Set(refs.map((ref) => ref.angle).filter((angle): angle is string => !!angle))
   const [shotPresets, setShotPresets] = useState<ShotPresetMatrix | null>(null)
@@ -5973,8 +6072,10 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
 
   const openModelRef = (index: number) => {
     const items = displayRefs.map((item) => ({
-      src: mediaUrl(item.originalUrl ?? item.previewUrl ?? item.thumbUrl ?? ''),
-      thumbSrc: mediaUrl(item.thumbUrl ?? item.previewUrl ?? ''),
+      src: mediaUrl(item.previewUrl ?? ''),
+      originalSrc: mediaUrl(item.originalUrl ?? ''),
+      downloadUrl: mediaDownloadUrl(item.originalUrl),
+      thumbSrc: mediaUrl(item.thumbUrl ?? ''),
       title: item.filename,
       meta: angleLabel(item.angle ?? item.id),
       details: { 文件名: item.filename, 角度: angleLabel(item.angle ?? item.id) },
@@ -5992,7 +6093,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
       <div className="panel model-page">
         <div className="model-meta">
           <div className="model-cover">
-            {coverThumb ? <button className="image-open" type="button" onClick={() => openModelRef(coverRefIndex)} title="放大查看"><img src={mediaUrl(coverThumb)} loading="lazy" alt={model?.name ?? '模特与背景'} /></button> : <div className="image-placeholder"><UserRound size={40} /></div>}
+            {coverThumb ? <button className="image-open" type="button" onClick={() => openModelRef(coverRefIndex)} title="放大查看"><MediaImage src={mediaUrl(coverThumb)} loading="lazy" alt={model?.name ?? '模特与背景'} /></button> : <div className="image-placeholder"><UserRound size={40} /></div>}
           </div>
           <div className="model-meta-head">
             <h2>{model?.name ?? 'Face-01 默认模特'}</h2>
@@ -6010,7 +6111,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
             </div>
             <div className="saved-image-grid">
               {displayRefs.map((ref, index) => {
-                const thumb = ('thumbUrl' in ref ? ref.thumbUrl : null) ?? ref.previewUrl ?? null
+                const thumb = ('thumbUrl' in ref ? ref.thumbUrl : null) ?? null
                 return (
                   <ImageAssetCard
                     key={ref.id}
@@ -6488,25 +6589,31 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     if (!result.items.length && targetOffset > 0) setOffset(Math.max(0, targetOffset - pageSize))
   }
 
+  const recordReadRef = useRef<{ token: number; controller?: AbortController }>({ token: 0 })
+  useEffect(() => () => recordReadRef.current.controller?.abort(), [])
   function refreshRecordPage(targetOffset = offset) {
-    if (viewMode === 'all') return api.listRecordWorkspace(recordQueryOptions(targetOffset)).then((result) => applyWorkspaceResult(result, targetOffset))
-    if (viewMode === 'batches') return api.listRecordBatches(recordQueryOptions(targetOffset)).then((result) => applyBatchListResult(result, targetOffset))
-    return api.listRecords(recordQueryOptions(targetOffset)).then((result) => applyRecordListResult(result, targetOffset))
+    const read = beginResourceRead(recordReadRef.current)
+    if (viewMode === 'all') return api.listRecordWorkspace(recordQueryOptions(targetOffset), read.controller.signal).then((result) => { if (read.isCurrent()) applyWorkspaceResult(result, targetOffset) })
+    if (viewMode === 'batches') return api.listRecordBatches(recordQueryOptions(targetOffset), read.controller.signal).then((result) => { if (read.isCurrent()) applyBatchListResult(result, targetOffset) })
+    return api.listRecords(recordQueryOptions(targetOffset), read.controller.signal).then((result) => { if (read.isCurrent()) applyRecordListResult(result, targetOffset) })
   }
 
   useEffect(() => {
     let cancelled = false
+    const read = beginResourceRead(recordReadRef.current)
+    const controller = read.controller
+    resetMediaBudget()
     setLoading(true)
     const timer = window.setTimeout(() => {
       const request = viewMode === 'all'
-        ? api.listRecordWorkspace(recordQueryOptions(offset)).then((result) => {
+        ? api.listRecordWorkspace(recordQueryOptions(offset), controller.signal).then((result) => {
           if (!cancelled) applyWorkspaceResult(result, offset)
         })
         : viewMode === 'batches'
-          ? api.listRecordBatches(recordQueryOptions(offset)).then((result) => {
+          ? api.listRecordBatches(recordQueryOptions(offset), controller.signal).then((result) => {
             if (!cancelled) applyBatchListResult(result, offset)
           })
-          : api.listRecords(recordQueryOptions(offset)).then((result) => {
+          : api.listRecords(recordQueryOptions(offset), controller.signal).then((result) => {
             if (!cancelled) applyRecordListResult(result, offset)
           })
       void request.catch(() => undefined).finally(() => {
@@ -6515,6 +6622,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
     }, 250)
     return () => {
       cancelled = true
+      controller.abort()
       window.clearTimeout(timer)
     }
   }, [records, viewMode, offset, query, includeArchived, statusFilter, createdFrom, createdTo, sortBy, sortDir, pageSize])
@@ -6535,6 +6643,8 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   }, [viewMode])
 
   function openRecord(item: GenerationTask) {
+    cancelPageReads()
+    resetMediaBudget()
     batchDetailRequestRef.current = ''
     setBatchDetail(null)
     setDetail(item)
@@ -7273,7 +7383,7 @@ function TaskRecordRow({ item, active, bulkMode, selected, selectionDisabled = f
       <button className="record-open" aria-current={active ? 'true' : undefined} title="查看记录详情" onClick={() => onOpen(item)}>
         <AssetThumb asset={taskCoverAsset(item)} interactive={false} />
         <div><TruncatedText as="strong" text={item.name} /><TruncatedText text={`${item.archivedAt ? archiveStateText(item.archiveReason) : statusText(item.status)} · ${dateText(item.createdAt)}`} /></div>
-        <div className="strip">{(item.summary?.finalImages ?? []).slice(0, 5).map((asset) => <AssetThumb key={asset.id} asset={asset} interactive={false} />)}</div>
+        <div className="strip">{item.progress ? `${item.progress.completed}/${item.progress.total} 张成片` : null}</div>
       </button>
       <button className="task-action record-action-button" onClick={() => onOpenStudio(item)} title="回到 AI 摄影棚恢复该任务">
         <TaskResumeActionContent task={item} />
@@ -7823,13 +7933,16 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
     setDirty(false)
   }, [item.id, item.updatedAt])
 
+  const taggingChangeRef = useRef(onChange)
+  taggingChangeRef.current = onChange
   useEffect(() => {
     if (item.status !== 'TAGGING_RUNNING') return
-    const timer = window.setInterval(() => {
-      void api.getStylingGarment(item.id).then((result) => onChange(result.item)).catch(() => undefined)
-    }, 2000)
-    return () => window.clearInterval(timer)
-  }, [item.id, item.status, onChange])
+    return pollVisible(async (signal) => {
+      const result = await api.getStylingGarment(item.id, signal)
+      if (!signal.aborted) taggingChangeRef.current(result.item)
+      return result.item
+    })
+  }, [item.id, item.status])
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -8731,7 +8844,7 @@ function AssetThumb({ asset, large = false, interactive = true }: { asset?: Medi
     setSrcIndex(0)
   }, [asset?.id, sources.join('|')])
   const image = asset && src && !failed ? (
-    <img
+    <MediaImage
       src={mediaUrl(src)}
       alt={asset.filename}
       loading="lazy"
@@ -8753,7 +8866,7 @@ function AssetThumb({ asset, large = false, interactive = true }: { asset?: Medi
               {image}
             </button>
           ) : image
-        ) : <div className="asset-fallback"><FileImage size={20} /><span>图片不可用</span></div>}
+        ) : asset && interactive ? <button className="asset-open asset-fallback" onClick={() => setViewer(assetLightboxImage(asset))} title="放大查看"><FileImage size={20} /><span>预览暂不可用</span></button> : <div className="asset-fallback"><FileImage size={20} /><span>预览暂不可用</span></div>}
       </div>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </>
@@ -8784,14 +8897,14 @@ function RecordImagePreview({ task }: { task: GenerationTask }) {
     <div className="record-image-preview">
       {previewAsset && (
         <button className="detail-preview-open" onClick={() => openAsset(previewAsset)} title="放大查看分镜预览">
-          <img className="detail-preview" src={mediaUrl(assetPreviewSrc(previewAsset))} loading="lazy" alt="分镜预览" />
+          <MediaImage className="detail-preview" src={mediaUrl(assetThumbSrc(previewAsset))} loading="lazy" alt="分镜预览" />
         </button>
       )}
       {!!finalAssets.length && (
         <div className="final-strip">
           {finalAssets.map((asset) => (
             <button className="asset-thumb record-thumb" key={asset.id} onClick={() => openAsset(asset)} title="放大查看成片">
-              <img src={mediaUrl(assetThumbSrc(asset))} alt={asset.filename} loading="lazy" />
+              <MediaImage src={mediaUrl(assetThumbSrc(asset))} alt={asset.filename} loading="lazy" />
             </button>
           ))}
         </div>
@@ -8801,18 +8914,21 @@ function RecordImagePreview({ task }: { task: GenerationTask }) {
   )
 }
 
-function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () => void }) {
+export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () => void }) {
   const [items] = useState<LightboxImageItem[]>(() => image.items?.length ? image.items : [image])
   const [index, setIndex] = useState(() => image.initialIndex ?? 0)
+  const [original, setOriginal] = useState(false)
+  useEffect(() => { resetMediaBudget(); return resetMediaBudget }, [])
   const [zoom, setZoom] = useState<'fit' | number>('fit')
   const [imageFailed, setImageFailed] = useState(false)
   const [naturalSizes, setNaturalSizes] = useState<Record<string, { width: number; height: number }>>({})
-  const [remoteSizes, setRemoteSizes] = useState<Record<string, number>>({})
+  const remoteSizes: Record<string, number> = {}
   const current = items[index] ?? items[0]
+  const displaySrc = original ? current.originalSrc ?? current.src : current.src
   const zoomLabel = zoom === 'fit' ? '适应' : `${Math.round(zoom * 100)}%`
   const canStep = items.length > 1
-  const naturalSize = naturalSizes[current.src]
-  const remoteSize = remoteSizes[current.src]
+  const naturalSize = naturalSizes[displaySrc]
+  const remoteSize = remoteSizes[displaySrc]
   const zoomedStyle = zoom === 'fit' ? undefined : { width: naturalSize ? `${naturalSize.width * zoom}px` : 'auto' }
   const details = {
     ...(current.details ?? {}),
@@ -8822,11 +8938,13 @@ function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () =
   const setNext = () => {
     if (!canStep) return
     setIndex((value) => (value + 1) % items.length)
+    setOriginal(false)
     setZoom('fit')
   }
   const setPrev = () => {
     if (!canStep) return
     setIndex((value) => (value - 1 + items.length) % items.length)
+    setOriginal(false)
     setZoom('fit')
   }
   const adjustZoom = (direction: 1 | -1) => {
@@ -8837,15 +8955,11 @@ function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () =
   }
   const handleImageError = () => {
     setImageFailed(true)
-    void fetch(current.src, { method: 'HEAD', credentials: 'include' })
-      .then((response) => {
-        if (response.status === 401) window.dispatchEvent(new CustomEvent('ruyi-auth-expired'))
-      })
-      .catch(() => {})
+
   }
   useEffect(() => {
     setImageFailed(false)
-  }, [current.src])
+  }, [displaySrc])
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
@@ -8867,20 +8981,7 @@ function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () =
     }
   }, [])
 
-  useEffect(() => {
-    if (current.details?.大小 && current.details.大小 !== '未知大小') return
-    if (remoteSizes[current.src]) return
-    let cancelled = false
-    fetch(current.src, { method: 'HEAD', credentials: 'include' })
-      .then((response) => Number(response.headers.get('content-length')))
-      .then((size) => {
-        if (!cancelled && Number.isFinite(size) && size > 0) setRemoteSizes((value) => ({ ...value, [current.src]: size }))
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [current.details, current.src, remoteSizes])
+
 
   return createPortal(
     <div className="lightbox" role="dialog" aria-modal="true" aria-label="图片检查器" onClick={onClose}>
@@ -8895,7 +8996,7 @@ function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () =
             <button onClick={() => adjustZoom(-1)} title="缩小"><ZoomOut size={16} /></button>
             <button className="text-action" onClick={() => setZoom('fit')} title="适应窗口">{zoomLabel}</button>
             <button onClick={() => adjustZoom(1)} title="放大"><ZoomIn size={16} /></button>
-            <button onClick={() => setZoom(1)} title="原始尺寸">1:1</button>
+            <button onClick={() => { setOriginal(true); setZoom(1) }} title="加载原图并以原始尺寸查看">1:1 原图</button>
             {current.downloadUrl && <a href={current.downloadUrl} title="下载原图"><Download size={16} /></a>}
             <button onClick={() => setNext()} disabled={!canStep} title="下一张"><ChevronRight size={16} /></button>
             <button onClick={onClose} title="关闭"><X size={16} /></button>
@@ -8903,22 +9004,22 @@ function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () =
         </div>
       </div>
       <div className="lightbox-stage" onClick={(event) => event.stopPropagation()}>
-        {imageFailed ? (
+        {imageFailed || !displaySrc ? (
           <div className="lightbox-error">
             <FileImage size={28} />
-            <strong>图片加载失败</strong>
-            <span>登录状态可能已经过期，请重新登录后再查看原图。</span>
+            <strong>预览暂不可用</strong>
+            <span>可以点击“1:1 原图”查看，或下载原图。</span>
           </div>
         ) : (
-          <img
-            src={current.src}
+          <img decoding="async" fetchPriority="high"
+            src={displaySrc}
             alt={current.title}
             className={zoom === 'fit' ? 'is-fit' : 'is-zoomed'}
             style={zoomedStyle}
             onError={handleImageError}
             onLoad={(event) => {
               const img = event.currentTarget
-              setNaturalSizes((value) => ({ ...value, [current.src]: { width: img.naturalWidth, height: img.naturalHeight } }))
+              setNaturalSizes((value) => ({ ...value, [displaySrc]: { width: img.naturalWidth, height: img.naturalHeight } }))
             }}
           />
         )}
@@ -8933,9 +9034,10 @@ function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () =
             {items.map((item, itemIndex) => (
               <button className={itemIndex === index ? 'active' : ''} key={`${item.title}-${itemIndex}`} onClick={() => {
                 setIndex(itemIndex)
-                setZoom('fit')
+                setOriginal(false)
+    setZoom('fit')
               }} title={item.title}>
-                <img src={item.thumbSrc ?? item.src} alt={item.title} loading="lazy" />
+                <MediaImage src={item.thumbSrc || undefined} alt={item.title} loading="lazy" />
               </button>
             ))}
           </div>
@@ -9235,7 +9337,7 @@ function taskListStatusLabel(task: GenerationTask) {
 }
 
 function finalSucceededCount(task: GenerationTask) {
-  return task.resultSet?.images?.filter((image) => image.status === 'SUCCEEDED').length ?? 0
+  return task.resultSet?.images?.filter((image) => image.status === 'SUCCEEDED').length ?? task.progress?.completed ?? 0
 }
 
 function statusText(status: string) {
@@ -9425,9 +9527,9 @@ function fileLightboxImage(file: File, src: string, dimensions?: { width: number
   }
 }
 
-function assetLightboxImage(asset: MediaAsset, group?: MediaAsset[]): LightboxImage {
+export function assetLightboxImage(asset: MediaAsset, group?: MediaAsset[]): LightboxImage {
   const items = group?.map((item) => assetLightboxItem(item))
-  const src = mediaUrl(assetOriginalSrc(asset))
+  const src = mediaUrl(assetPreviewSrc(asset))
   return {
     ...assetLightboxItem(asset),
     src,
@@ -9438,9 +9540,10 @@ function assetLightboxImage(asset: MediaAsset, group?: MediaAsset[]): LightboxIm
 }
 
 function assetLightboxItem(asset: MediaAsset): LightboxImageItem {
-  const src = mediaUrl(assetOriginalSrc(asset))
+  const src = mediaUrl(assetPreviewSrc(asset))
   return {
     src,
+    originalSrc: mediaUrl(assetOriginalSrc(asset)),
     thumbSrc: mediaUrl(assetThumbSrc(asset)),
     title: asset.originalFilename ?? asset.filename,
     meta: assetMeta(asset),
@@ -9455,11 +9558,11 @@ function assetLightboxItem(asset: MediaAsset): LightboxImageItem {
 }
 
 function assetThumbSrc(asset: MediaAsset) {
-  return asset.thumbUrl ?? asset.previewUrl ?? asset.url ?? asset.originalUrl ?? ''
+  return asset.thumbStatus === 'MISSING' ? '' : asset.thumbUrl ?? ''
 }
 
 function assetPreviewSrc(asset: MediaAsset) {
-  return asset.previewUrl ?? asset.thumbUrl ?? asset.url ?? asset.originalUrl ?? ''
+  return asset.previewStatus === 'MISSING' ? '' : asset.previewUrl ?? ''
 }
 
 function assetOriginalSrc(asset: MediaAsset) {
@@ -9469,12 +9572,8 @@ function assetOriginalSrc(asset: MediaAsset) {
 }
 
 function assetDisplaySources(asset: MediaAsset, preferred: 'thumb' | 'preview' | 'original') {
-  const ordered = preferred === 'preview'
-    ? [assetPreviewSrc(asset), assetThumbSrc(asset), assetOriginalSrc(asset)]
-    : preferred === 'original'
-      ? [assetOriginalSrc(asset), assetPreviewSrc(asset), assetThumbSrc(asset)]
-      : [assetThumbSrc(asset), assetPreviewSrc(asset), assetOriginalSrc(asset)]
-  return Array.from(new Set(ordered.filter(Boolean)))
+  const src = preferred === 'original' ? assetOriginalSrc(asset) : preferred === 'preview' ? assetPreviewSrc(asset) : assetThumbSrc(asset)
+  return src ? [src] : []
 }
 
 async function filesFromDataTransfer(dataTransfer: DataTransfer): Promise<File[]> {
@@ -9552,4 +9651,13 @@ function fullDateTimeText(value?: string | null) {
   return new Date(parseRuyiTime(value)).toLocaleString('zh-CN', {
     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
   })
+}
+
+
+function beginResourceRead(scope: { token: number; controller?: AbortController }) {
+  scope.controller?.abort()
+  const controller = new AbortController()
+  const token = ++scope.token
+  scope.controller = controller
+  return { controller, isCurrent: () => !controller.signal.aborted && scope.token === token }
 }

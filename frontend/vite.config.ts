@@ -9,6 +9,7 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     define: {
       'import.meta.env.VITE_API_BASE_URL': JSON.stringify(apiBaseUrl),
+      'import.meta.env.VITE_UPLOAD_CONCURRENCY': JSON.stringify(process.env.VITE_UPLOAD_CONCURRENCY || rootEnv.UPLOAD_CONCURRENCY || '2'),
     },
     server: {
       port: 5173,

@@ -1,10 +1,10 @@
 /* @vitest-environment jsdom */
 import '@testing-library/jest-dom/vitest'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { App, mergeUploadSessionUpdates } from '../App'
+import { App, ImageLightbox, assetLightboxImage, mergeUploadSessionUpdates } from '../App'
 
 const apiMock = vi.hoisted(() => ({
   session: vi.fn(),
@@ -22,6 +22,7 @@ const apiMock = vi.hoisted(() => ({
   getRecord: vi.fn(),
   getTaskDeleteImpact: vi.fn(),
   getTask: vi.fn(),
+  getTaskStatus: vi.fn(),
   updateTask: vi.fn(),
   addTaskImages: vi.fn(),
   createTask: vi.fn(),
@@ -259,6 +260,7 @@ function configureApi(role: 'admin' | 'user' = 'admin') {
   apiMock.listTasks.mockResolvedValue(emptyPage)
   apiMock.listRecords.mockResolvedValue(emptyPage)
   apiMock.listModels.mockResolvedValue({ ...emptyPage, items: [defaultModel] })
+  apiMock.getTaskStatus.mockResolvedValue({ taskId: task.id, status: task.status, detailRevision: 0, updatedAt: task.updatedAt, progress: { completed: 0, total: 5 } })
   apiMock.getTask.mockResolvedValue({ item: task })
   apiMock.updateTask.mockResolvedValue({ item: task })
   apiMock.listPromptConfigs.mockResolvedValue(promptList)
@@ -335,6 +337,115 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+})
+
+describe('acceptance navigation regressions', () => {
+  it('finishes real application GETs after switching pages even when another initialization fails', async () => {
+    const actual = await vi.importActual<typeof import('../api')>('../api')
+    const pending = deferred<Response>()
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(() => pending.promise)
+    apiMock.listModels.mockImplementation(actual.api.listModels)
+    apiMock.listTasks.mockRejectedValue(new Error('temporary unavailable'))
+    window.history.replaceState(null, '', '/library')
+    render(<App />)
+    await waitFor(() => expect(fetcher).toHaveBeenCalled())
+    await userEvent.click(await screen.findByRole('button', { name: '模特与背景' }))
+    await act(async () => pending.resolve(Response.json({ ...emptyPage, items: [{ ...defaultModel, name: '恢复后的模特' }] })))
+    expect(await screen.findByText('恢复后的模特')).toBeInTheDocument()
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
+  it('continues every batch import after leaving without changing the library URL', async () => {
+    const upload = deferred<{ item: typeof task }>()
+    apiMock.createTask.mockImplementationOnce(() => upload.promise).mockResolvedValue({ item: { ...task, id: 998, status: 'DRAFT' } })
+    render(<App />)
+    const picker = (await screen.findByText('选择文件夹')).querySelector('input[type="file"]') as HTMLInputElement
+    const files = ['LOOK-A', 'LOOK-B'].map((name) => {
+      const file = new File(['image'], name + '.jpg', { type: 'image/jpeg' })
+      Object.defineProperty(file, 'webkitRelativePath', { value: name + '/front.jpg' })
+      return file
+    })
+    await userEvent.upload(picker, files)
+    await userEvent.click(await screen.findByRole('button', { name: /批量创建 2 个任务/ }))
+    await waitFor(() => expect(apiMock.createTask).toHaveBeenCalledTimes(1))
+    await userEvent.click(screen.getByRole('button', { name: '搭配服装库' }))
+    const url = window.location.href
+    apiMock.listTasks.mockResolvedValue({ ...emptyPage, items: [{ ...task, id: 999, status: 'DRAFT' }] })
+    await act(async () => upload.resolve({ item: { ...task, id: 999, status: 'DRAFT' } }))
+    await waitFor(() => expect(apiMock.createTask).toHaveBeenCalledTimes(2))
+    expect(window.location.href).toBe(url)
+    expect(screen.getByRole('button', { name: '导入搭配服装' })).toBeInTheDocument()
+  })
+
+  it.each([false, true])('keeps single import completion from hijacking navigation (return=%s)', async (returnToStudio) => {
+    const upload = deferred<{ item: typeof task }>()
+    apiMock.createTask.mockImplementation(() => upload.promise)
+    render(<App />)
+    const picker = (await screen.findByText('选择图片')).querySelector('input[type="file"]') as HTMLInputElement
+    await userEvent.upload(picker, new File(['image'], 'IMPORT.jpg', { type: 'image/jpeg' }))
+    await userEvent.click(screen.getByRole('button', { name: '创建任务' }))
+    await waitFor(() => expect(apiMock.createTask).toHaveBeenCalledTimes(1))
+    await userEvent.click(screen.getByRole('button', { name: '搭配服装库' }))
+    if (returnToStudio) await userEvent.click(screen.getByRole('button', { name: 'AI 摄影棚' }))
+    const url = window.location.href
+    apiMock.listTasks.mockResolvedValue({ ...emptyPage, items: [{ ...task, id: 999, status: 'DRAFT' }] })
+    await act(async () => upload.resolve({ item: { ...task, id: 999, status: 'DRAFT' } }))
+    expect(window.location.href).toBe(url)
+    expect(window.location.search).not.toContain('999')
+  })
+})
+
+describe('task status coordination', () => {
+  it('keeps unchanged tasks on status and refreshes detail once on revision and terminal changes', async () => {
+    vi.useFakeTimers()
+    try {
+      const running = { ...task, status: 'STYLING_RUNNING', detailRevision: 1 }
+      window.history.replaceState(null, '', '/studio?task=1')
+      apiMock.getTask.mockResolvedValue({ item: running })
+      apiMock.getTaskStatus.mockResolvedValue({ taskId: 1, status: running.status, detailRevision: 1, updatedAt: task.updatedAt, progress: { completed: 0, total: 5 } })
+      await act(async () => { render(<App />) })
+      const initialReads = apiMock.getTask.mock.calls.length
+      expect(initialReads).toBeGreaterThan(0)
+      await act(async () => { await vi.advanceTimersByTimeAsync(300000) })
+      expect(apiMock.getTask.mock.calls.length).toBe(initialReads)
+      expect(apiMock.getTaskStatus.mock.calls.length).toBeLessThanOrEqual(50)
+      expect(apiMock.getTaskStatus.mock.calls.length).toBeGreaterThan(20)
+      apiMock.getTaskStatus.mockResolvedValue({ taskId: 1, status: running.status, detailRevision: 2, updatedAt: task.updatedAt, progress: { completed: 0, total: 5 } })
+      apiMock.getTask.mockResolvedValue({ item: { ...running, detailRevision: 2 } })
+      await act(async () => { await vi.advanceTimersByTimeAsync(18000) })
+      expect(apiMock.getTask.mock.calls.length).toBe(initialReads + 1)
+      apiMock.getTaskStatus.mockResolvedValue({ taskId: 1, status: 'FAILED', detailRevision: 2, updatedAt: task.updatedAt, progress: { completed: 0, total: 5 } })
+      apiMock.getTask.mockResolvedValue({ item: { ...running, status: 'FAILED', detailRevision: 2 } })
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+      expect(apiMock.getTask.mock.calls.length).toBe(initialReads + 2)
+    } finally { cleanup(); vi.useRealTimers() }
+  })
+})
+
+describe('preview-first inspector', () => {
+  it('loads only the current preview and switches resource on explicit original view', () => {
+    const asset = task.images[0].asset
+    const second = { ...asset, id: 102, previewUrl: '/second-preview.jpg', originalUrl: '/second-original.jpg' }
+    render(<ImageLightbox image={assetLightboxImage(asset, [asset, second])} onClose={() => undefined} />)
+    const dialog = screen.getByRole('dialog', { name: '图片检查器' })
+    expect(dialog.querySelector('.lightbox-stage img')).toHaveAttribute('src', '/preview.jpg')
+    expect(document.querySelector('img[src="/original.jpg"]')).toBeNull()
+    expect(document.querySelector('img[src="/second-preview.jpg"]')).toBeNull()
+    fireEvent.click(within(dialog).getByRole('button', { name: '1:1 原图' }))
+    expect(dialog.querySelector('.lightbox-stage img')).toHaveAttribute('src', '/original.jpg')
+    fireEvent.click(within(dialog).getByTitle('下一张'))
+    expect(dialog.querySelector('.lightbox-stage img')).toHaveAttribute('src', '/second-preview.jpg')
+    expect(document.querySelector('img[src="/second-original.jpg"]')).toBeNull()
+  })
+
+  it('shows a missing preview without downloading the original', () => {
+    const asset = { ...task.images[0].asset, previewStatus: 'MISSING' as const, previewUrl: null }
+    render(<ImageLightbox image={assetLightboxImage(asset)} onClose={() => undefined} />)
+    expect(screen.getByText('预览暂不可用')).toBeInTheDocument()
+    expect(document.querySelector('.lightbox-stage img')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '1:1 原图' }))
+    expect(document.querySelector('.lightbox-stage img')).toHaveAttribute('src', '/original.jpg')
+  })
 })
 
 describe('production gate app shell and page controls', () => {
@@ -415,7 +526,7 @@ describe('production gate app shell and page controls', () => {
     await userEvent.click(newerOption)
     await waitFor(() => expect(apiMock.listStylingGarments).toHaveBeenCalledWith(expect.objectContaining({
       uploadBatchKey: 'batch:newer-batch',
-    })))
+    }), expect.any(AbortSignal)))
     expect(await screen.findByText('该导入批次暂未产生已入库服装')).toBeInTheDocument()
   })
 
@@ -2082,24 +2193,24 @@ describe('production gate app shell and page controls', () => {
     render(<App />)
     await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
 
-    await waitFor(() => expect(apiMock.listStylingGarments).toHaveBeenCalledWith(expect.objectContaining({ limit: 24 })))
+    await waitFor(() => expect(apiMock.listStylingGarments).toHaveBeenCalledWith(expect.objectContaining({ limit: 24 }), expect.any(AbortSignal)))
     const pageSizeSelect = screen.getByRole('combobox', { name: '每页' })
     expect(Array.from((pageSizeSelect as HTMLSelectElement).options).map((option) => option.textContent)).toEqual(['24 套', '48 套', '96 套'])
 
     await userEvent.selectOptions(pageSizeSelect, '48')
-    await waitFor(() => expect(apiMock.listStylingGarments).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 48, offset: 0 })))
+    await waitFor(() => expect(apiMock.listStylingGarments).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 48, offset: 0 }), expect.any(AbortSignal)))
   })
 
   it('uses stable 20, 50, and 100 row page sizes in generation records', async () => {
     render(<App />)
     await userEvent.click(await screen.findByRole('button', { name: '生成记录' }))
 
-    await waitFor(() => expect(apiMock.listRecordWorkspace).toHaveBeenCalledWith(expect.objectContaining({ limit: 20 })))
+    await waitFor(() => expect(apiMock.listRecordWorkspace).toHaveBeenCalledWith(expect.objectContaining({ limit: 20 }), expect.any(AbortSignal)))
     const pageSizeSelect = screen.getByRole('combobox', { name: '每页' })
     expect(Array.from((pageSizeSelect as HTMLSelectElement).options).map((option) => option.textContent)).toEqual(['20 行', '50 行', '100 行'])
 
     await userEvent.selectOptions(pageSizeSelect, '50')
-    await waitFor(() => expect(apiMock.listRecordWorkspace).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 50, offset: 0 })))
+    await waitFor(() => expect(apiMock.listRecordWorkspace).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 50, offset: 0 }), expect.any(AbortSignal)))
   })
 
   it('keeps active and archived generation records selectable together and offers unified permanent deletion', async () => {

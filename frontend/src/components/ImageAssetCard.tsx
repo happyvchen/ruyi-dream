@@ -1,3 +1,4 @@
+import { MediaImage } from './MediaImage'
 import { useEffect, useState } from 'react'
 import type { DragEvent, ReactNode } from 'react'
 import { FileImage, ImagePlus, RefreshCw, Trash2 } from 'lucide-react'
@@ -53,15 +54,15 @@ export function ImageAssetCard({
       onDrop={draggable && !disabled ? onDrop : undefined}
     >
       {onOpen ? (
-        <button className="image-open" type="button" onClick={onOpen} title="放大查看" disabled={!thumbnailSrc || failed}>
+        <button className="image-open" type="button" onClick={onOpen} title="放大查看" >
           {thumbnailSrc && !failed
-            ? <img src={thumbnailSrc} alt={alt ?? title} loading="lazy" onError={() => setFailed(true)} onLoad={(event) => onImageLoad?.({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />
-            : <span className="image-card-placeholder"><FileImage size={24} />图片不可用</span>}
+            ? <MediaImage src={thumbnailSrc} alt={alt ?? title} loading="lazy" onError={() => setFailed(true)} onLoad={(event) => onImageLoad?.({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />
+            : <span className="image-card-placeholder"><FileImage size={24} />预览暂不可用</span>}
         </button>
       ) : thumbnailSrc && !failed ? (
-        <img src={thumbnailSrc} alt={alt ?? title} loading="lazy" onError={() => setFailed(true)} onLoad={(event) => onImageLoad?.({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />
+        <MediaImage src={thumbnailSrc} alt={alt ?? title} loading="lazy" onError={() => setFailed(true)} onLoad={(event) => onImageLoad?.({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />
       ) : (
-        <span className="image-card-placeholder"><FileImage size={24} />图片不可用</span>
+        <span className="image-card-placeholder"><FileImage size={24} />预览暂不可用</span>
       )}
       {badge && <em className="thumb-pending-badge">{badge}</em>}
       <span title={title}>{title}{meta && <small title={meta}>{meta}</small>}</span>

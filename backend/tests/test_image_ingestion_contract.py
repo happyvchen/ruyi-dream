@@ -70,3 +70,52 @@ def test_normalize_image_preserves_alpha_as_png_and_downscales_large_edges() -> 
     assert normalized.suffix == ".png"
     assert normalized.width == 64
     assert normalized.height == 16
+
+
+def test_high_entropy_png_normalizes_to_decodable_full_size_jpeg() -> None:
+    import random
+
+    size = (2880, 2880)
+    source = Image.frombytes("RGB", size, random.Random(42).randbytes(size[0] * size[1] * 3))
+    original = BytesIO()
+    source.save(original, "PNG", compress_level=0)
+    normalized = normalize_image(original.getvalue(), max_edge=4096)
+    assert normalized.content_type == "image/jpeg"
+    assert normalized.suffix == ".jpg"
+    with Image.open(BytesIO(normalized.content)) as decoded:
+        decoded.load()
+        assert decoded.size == size
+        assert decoded.mode == "RGB"
+
+
+def test_jpeg_retry_discards_partial_output_and_preserves_quality(monkeypatch) -> None:
+    original_save = Image.Image.save
+    attempts = []
+
+    def save(image, output, fmt, **kwargs):
+        attempts.append(kwargs)
+        if kwargs.get("optimize"):
+            output.write(b"partial-invalid-output")
+            raise OSError("broken data stream when writing image file")
+        return original_save(image, output, fmt, **kwargs)
+
+    content = image_bytes()
+    monkeypatch.setattr(Image.Image, "save", save)
+    normalized = normalize_image(content, max_edge=64)
+    assert attempts == [
+        {"quality": 95, "subsampling": 0, "optimize": True},
+        {"quality": 95, "subsampling": 0, "optimize": False},
+    ]
+    with Image.open(BytesIO(normalized.content)) as decoded:
+        decoded.load()
+        assert decoded.size == (32, 24)
+
+
+def test_jpeg_encoder_failure_has_business_error(monkeypatch) -> None:
+    content = image_bytes()
+    def fail(*args, **kwargs):
+        raise OSError("encoder unavailable")
+    monkeypatch.setattr(Image.Image, "save", fail)
+    with pytest.raises(ImageIngestionError, match="图片转码失败") as error:
+        normalize_image(content, max_edge=64)
+    assert error.value.code == "ENCODE_FAILED"

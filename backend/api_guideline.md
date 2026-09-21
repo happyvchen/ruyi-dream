@@ -192,3 +192,13 @@ AI 选搭动态事实：
 ## 导出
 
 成片批量下载 zip 内结构为 `任务名/序号_图位.扩展名`。图位名称来自最终结果图的 `shot_role`，不是旧镜头计划。
+
+## 网络与媒体 P0 契约
+
+`GET /api/generation-tasks/{task_id}/status` 返回轻量对象（不套 `item`）：`taskId/status/stage/progress/operations/activeOperation/detailRevision/updatedAt/autoRunTarget/autoRunRetryAt/autoRunRetryCount/retryAt/error`。`operations` 只有当前 attempt 的 ID、状态、当前阶段和阶段起点，不含请求/响应快照；用于合并已有详情里的进度。原始响应预算 <2 KB。旧详情 GET 保留。
+
+任务、记录、批次和工作区列表通过批量 SQL 读取摘要，不调用完整任务装配。摘要保留名称、状态、创建/更新时间、批次、归档/自动运行操作状态、`detailRevision`、`progress` 和 `summary.cover`（仅 ID、文件名、thumbUrl、thumbStatus）。不再返回 summary 的 finalImages/selectedGarments/preview，不返回 input version、StylingPlan、attempt 和用户要求。详情仍按原接口读取。
+
+`MediaAsset` 和服装封面返回 `thumbStatus/previewStatus = AVAILABLE | MISSING`，以派生元数据为准；MISSING 的 URL 为 null。`/api/media?variant=thumb|preview` 会检查实际对象，缺失返回 404 和 `private, no-store`，不在 GET 中生成派生图，也不回退原图。对象在 302 之后变为缺失时由浏览器显示占位，不声称后端能够观测 RustFS 的最终响应。原图下载与导出保持 `private, no-store`。
+
+仅 FastAPI 的 `HttpPerformanceMiddleware` 压缩 JSON/Text：阈值 1024 字节、gzip level 5、`Vary: Accept-Encoding`；图片、归档和 SSE 不压缩。网关不再重复 gzip API。访问日志只记录路由模板、方法、状态码、耗时、实际响应 body 字节、媒体档位与下载布尔值，不记录 query、Cookie、Authorization 或业务正文。302 字节仅是控制响应，RustFS 的媒体字节需通过 HAR/对象存储侧统计。

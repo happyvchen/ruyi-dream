@@ -7,7 +7,7 @@
 //   k6 run -e STAGE_VUS=50 ... (默认 5 → 20 → 50)
 //
 // 说明:
-// - 图片链路是 GET /api/media?key=..&variant=thumb → 后端查库+HEAD 对象+presign → 307 → RustFS。
+// - 图片链路是 GET /api/media?key=..&variant=thumb → 后端查库+HEAD 对象+presign → 302 → RustFS。
 //   k6 默认跟随重定向,因此单次"拉缩略图"完整覆盖 后端+RustFS 两跳。
 // - 只读,不产生任何业务数据。
 

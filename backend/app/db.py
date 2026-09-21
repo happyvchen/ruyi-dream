@@ -37,6 +37,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("071", "refresh_legacy_top_final_prompt", "migration_refresh_legacy_top_final_prompt"),
     ("072", "live_shot_preset_slots", "migration_live_shot_preset_slots"),
     ("073", "refresh_legacy_bottom_and_one_piece_final_prompts", "migration_refresh_legacy_bottom_and_one_piece_final_prompts"),
+    ("074", "generation_detail_revision", "migration_generation_detail_revision"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -477,6 +478,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         for row in db.execute("SELECT version FROM schema_migrations").fetchall()
     }
     migration_functions = {
+        "migration_generation_detail_revision": migration_generation_detail_revision,
         "migration_finalize_direct_prompt_generation_workflow": migration_finalize_direct_prompt_generation_workflow,
         "migration_remove_hero_product_info": migration_remove_hero_product_info,
         "migration_upload_sessions": migration_upload_sessions,
@@ -1579,3 +1581,73 @@ def log_event(
             )
             + "\n"
         )
+
+
+def install_detail_revision_triggers(db: sqlite3.Connection, table: str, task_ids: str, excluded: set[str]) -> None:
+    """One revision contract for every SQL writer, including maintenance scripts.
+
+    Triggers run in the writer's transaction; no-op writes and operational heartbeats
+    do not invalidate content. New columns are content unless explicitly excluded.
+    """
+    columns = [row[1] for row in db.execute(f"PRAGMA table_info({table})") if row[1] not in excluded]
+    if not columns:
+        return
+    for event, ref in (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")):
+        if table == "generation_tasks" and event != "UPDATE":
+            continue
+        condition = " OR ".join(f'OLD."{c}" IS NOT NEW."{c}"' for c in columns)
+        when = f"WHEN {condition}" if event == "UPDATE" else ""
+        ids = task_ids.replace("ROW.", f"{ref}.").strip()
+        if not ids.upper().startswith("SELECT"):
+            ids = f"SELECT {ids}"
+        if event == "UPDATE":
+            previous_ids = task_ids.replace("ROW.", "OLD.").strip()
+            if not previous_ids.upper().startswith("SELECT"):
+                previous_ids = f"SELECT {previous_ids}"
+            ids += f" UNION {previous_ids}"
+        db.execute(f"""CREATE TRIGGER IF NOT EXISTS revision_{table}_{event.lower()}
+            AFTER {event} ON {table} {when} BEGIN
+              UPDATE generation_tasks SET detail_revision = detail_revision + 1 WHERE id IN ({ids});
+            END""")
+
+
+def migration_generation_detail_revision(db: sqlite3.Connection) -> None:
+    if not db.execute("PRAGMA table_info(generation_tasks)").fetchall():
+        return
+    if "detail_revision" not in {row[1] for row in db.execute("PRAGMA table_info(generation_tasks)")}:
+        db.execute("ALTER TABLE generation_tasks ADD COLUMN detail_revision INTEGER NOT NULL DEFAULT 0")
+    operational = {"updated_at", "locked_by", "locked_until", "lease_owner", "lease_expires_at", "run_attempts"}
+    install_detail_revision_triggers(db, "generation_tasks", "ROW.id", operational | {
+        "detail_revision", "auto_run_retry_at", "auto_run_retry_count", "auto_run_requested_at", "auto_run_target"})
+    for table in ("generation_task_images", "generation_task_input_versions", "generation_stylings", "generation_previews", "generation_result_sets"):
+        install_detail_revision_triggers(db, table, "ROW.task_id", operational)
+    for table in ("generation_result_images_new", "generation_result_set_shot_presets"):
+        install_detail_revision_triggers(db, table, "SELECT task_id FROM generation_result_sets WHERE id = ROW.result_set_id", operational)
+    install_detail_revision_triggers(db, "generation_attempts", """
+        SELECT ROW.owner_id WHERE ROW.owner_type = 'generation_styling'
+        UNION SELECT task_id FROM generation_previews WHERE id = ROW.owner_id AND ROW.owner_type = 'generation_preview'
+        UNION SELECT rs.task_id FROM generation_result_sets rs JOIN generation_result_images_new ri ON ri.result_set_id = rs.id
+          WHERE ri.id = ROW.owner_id AND ROW.owner_type = 'generation_result_image'
+    """, operational | {"progress_json", "request_snapshot_json", "response_snapshot_json", "provider_request_id"})
+    db.execute("""CREATE TRIGGER IF NOT EXISTS revision_attempt_terminal_response
+        AFTER UPDATE OF response_snapshot_json ON generation_attempts
+        WHEN NEW.status IN ('FAILED', 'SUCCEEDED', 'CANCELLED') AND OLD.response_snapshot_json IS NOT NEW.response_snapshot_json
+        BEGIN
+          UPDATE generation_tasks SET detail_revision = detail_revision + 1 WHERE id IN (
+            SELECT NEW.owner_id WHERE NEW.owner_type = 'generation_styling'
+            UNION SELECT rs.task_id FROM generation_result_sets rs JOIN generation_result_images_new ri ON ri.result_set_id = rs.id
+              WHERE ri.id = NEW.owner_id AND NEW.owner_type = 'generation_result_image'
+          );
+        END""")
+    install_detail_revision_triggers(db, "media_assets", """
+        SELECT task_id FROM generation_task_images WHERE media_asset_id = ROW.id
+        UNION SELECT task_id FROM generation_previews WHERE preview_asset_id = ROW.id OR environment_asset_id = ROW.id
+        UNION SELECT rs.task_id FROM generation_result_sets rs JOIN generation_result_images_new ri ON ri.result_set_id = rs.id WHERE ri.current_asset_id = ROW.id
+        UNION SELECT rs.task_id FROM generation_result_sets rs JOIN generation_result_set_shot_presets sp ON sp.result_set_id = rs.id WHERE sp.background_asset_id = ROW.id OR sp.pose_asset_id = ROW.id
+    """, operational)
+    install_detail_revision_triggers(db, "styling_garments", """
+        SELECT gs.task_id FROM generation_stylings gs, json_each(gs.selected_material_ids_json) selected
+        WHERE selected.value = ROW.id
+    """, operational | {"tag_retry_at", "tag_retry_lease_until", "tag_retry_state_json"})
+    db.execute("CREATE INDEX IF NOT EXISTS idx_task_cover ON generation_task_images(task_id, deleted_at, sort_order, id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_result_progress ON generation_result_images_new(result_set_id, status)")

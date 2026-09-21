@@ -118,3 +118,31 @@ k6 run -e BASE_URL=http://127.0.0.1:8000 -e USERNAME=user -e PASSWORD=<密码> \
 3. 衍生图生成(Pillow)是导入时同步 CPU 开销。
 4. GPT-Image-2 生成几十秒 + 5s 轮询:体验主导项,与服务器性能无关。
 5. 公网上行影响打标/选搭(base64 图片上行)与参考图导入;公网下行影响生成图回落。
+
+## P0：同口径五分钟采样
+
+浏览器开启 Preserve log，记录完整 5 分钟窗口，包含 API 302 和 RustFS 最终响应；冷缓存时清理站点 HTTP cache，热缓存时保持缓存开启。按“30 图列表→查看 10 张 preview→显式原图→8×25 MB 上传→下载→观察任务”分别导出 HAR，不把不同操作混成单个平均值。HAR 本身可能包含凭据，保留在受控目录，不提交仓库。
+
+```bash
+python3 scripts/loadtest/summarize-har.py /受控目录/before.har > /受控目录/before-summary.json
+python3 scripts/loadtest/summarize-har.py /受控目录/after.har > /受控目录/after-summary.json
+```
+
+汇总工具仅输出 API、媒体控制响应、thumb、preview、original、上传、下载等分类的请求数、字节、失败数、重复 PUT 与峰值 PUT 并发，不输出 URL/请求头/正文。优先用 HAR transferSize，缺失时用 bodySize；未知字节计为 0，必须核对采样是否完整，不能把缺失值解释成零流量。302 日志字节不代表 RustFS 最终传输字节。
+
+同时保存：主机规格、`docker stats`（CPU/RSS）、`iostat -xz 1`（磁盘）、`sar -n DEV,TCP,ETCP 1`（网卡/TCP 重传），客户端到服务器的 `ping` RTT/丢包及已获准测试端点的 `iperf3` 上下行有效吞吐。逐秒时间戳与 HAR 窗口对齐；不要在承载业务的链路直接开无界满载测试。日志仅使用脱敏路由模板，不记录签名 URL、Cookie、Authorization、Prompt 或 provider 正文。
+
+标准门槛：status <2 KB；五分钟无变化 ≤50 次（2/5/10/15 秒退避）；20 浏览器观察总流量 ≤15 MB；默认列表/检查器 original=0；30 图列表 <2 MB；冷首屏最多 12 个媒体 src；全标签页 PUT 峰值默认 ≤2。切页与搜索测试需人为延迟 A/B/C 响应并乱序返回，验证 Abort 与 request token。只使用 mock provider 和隔离数据库/对象前缀。
+
+### 2026-09-21 本地实现验证样本
+
+同一临时 SQLite 数据集：30 个草稿任务，每个 2 张登记图片，无 attempt；旧版取本轮开始时的 Git HEAD 序列化函数，新版取工作区实现。未访问生产数据库、对象存储或外部 provider。
+
+| 指标 | 旧版 | P0 |
+|---|---:|---:|
+| 30 任务摘要 JSON | 40,412 B | 15,468 B |
+| 同一摘要 gzip level 5 | 1,711 B | 839 B |
+| 摘要装配 SELECT 次数 | 330 | 3 |
+| 单任务 status JSON（含空 operations） | 无 | 297 B |
+
+该样本用于验证查询和 DTO 收敛，不代表生产任务复杂度，也不是百兆网络测速。旧方案中 56.7 KB 详情、761.9 KB 列表等抽样来自另一组数据，不能与本表混算改善比例。前端使用虚拟时钟验证五分钟退避、隐藏暂停、原图显式切换、首屏请求预算和全局 PUT 并发；实际 WAN 吞吐、RTT、丢包、SSH 回显、冷/热媒体字节及存量派生图补齐尚需部署环境验收，不宣称已达到生产时延目标。

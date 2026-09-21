@@ -26,6 +26,7 @@
 | `03_ux_guide/CLAUDE.md` | 普通用户视角 UI/UX、页面信息层级、交互边界 | 设计或实现前端页面时 |
 | `03_ux_guide/ui_ux_unification_plan.md` | UI/UX 统一优化方案：简约克制科技感、视觉系统、控件层级、PC 桌面页面改造和验收清单 | 做全局 UI/UX 统一、视觉系统或生产级体验优化时 |
 | `04_implementation_guide/CLAUDE.md` | 技术路线、生产实操、模型分工、任务包落地方式 | 工程实现、技术拆分、生产流程设计时 |
+| `04_implementation_guide/network_and_media_performance_optimization_plan.md` | 百兆带宽场景的低成本性能设计：应用 P0、量化触发 P1、条件 QoS/AQM、单人/多人容量与验收 | 排查或优化生产网络、Web/SSH 卡顿、大图片和多人并发体验时 |
 | `04_implementation_guide/archive_purge_policy.md` | 归档、彻底删除、媒体引用计数、影响预检和 OSS 清理策略 | 设计或修改删除、归档、批量清理、媒体替换时 |
 
 ## 权威边界 (Authority)
@@ -42,6 +43,7 @@
 - **品牌调性参考**：`02_brand_and_assets/brand_style_templates.md`
 - **前台 UI/UX 源头**：`03_ux_guide/user_uiux.md`
 - **技术生产路线源头**：`04_implementation_guide/technical_route_and_operations.md`
+- **网络与媒体性能优化设计**：`04_implementation_guide/network_and_media_performance_optimization_plan.md`
 - **归档/删除策略源头**：`04_implementation_guide/archive_purge_policy.md`
 
 ## 本地规则 (Local Rules)

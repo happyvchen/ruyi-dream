@@ -296,3 +296,21 @@ integrity_check 不为 `ok` 时,从最近备份点整体恢复并上报工程。
 - 生产必须启用登录门禁或由 HTTPS 反向代理做访问控制;RustFS Console(9001)不对公网开放。
 - `.env`、SQLite、对象数据目录永不提交 Git;人员变更时轮换对象存储凭证和 `APP_SESSION_SECRET`。
 - 公网部署放在 HTTPS 反向代理之后,并保持各 PUBLIC URL 与浏览器实际访问地址一致。
+
+## 百兆带宽 P0 发布
+
+1. 在当前版本先采集 5 分钟 HAR 和主机/链路指标，保存脱敏汇总（见 `loadtest.md`）。
+2. 在维护窗口先运行带 074 迁移和修复脚本的后端镜像，补齐活跃派生图，再更新前端。修复可重入；命令每次处理一个有界批次：
+
+```bash
+docker compose exec backend python scripts/repair_media_metadata.py --limit 50 --after-id 0 --verify
+```
+
+按输出 `next_after_id` 重复执行直到 `scanned=0`；失败 ID 单独复查。再加 `--include-archived` 处理长尾。该脚本实际访问对象存储并新增/补齐派生文件，应在发布期间执行；开发自动测试只使用临时数据库和 mock。本轮开发不自动修改当前业务素材。
+
+3. `.env` 设置 `UPLOAD_CONCURRENCY=2`，合法范围 1–3，修改后 `docker compose up -d --build frontend`。本地 Vite 同样读取该配置。
+4. API gzip 只启用后端一层（JSON/Text ≥1 KB，level 5）。上游网关对 API 关闭重复压缩；不压缩图片和 zip。后端镜像关闭 Uvicorn 原始 access log，使用 `uvicorn.error.performance` 脱敏计量日志。手动启动同样加 `--no-access-log`，日志级别保持 INFO。
+5. 验证普通列表/默认检查器无 original、显式原图和下载正常、缺 preview 的占位可操作、302 与 RustFS 最终响应缓存头一致。下载必须 `private, no-store`。
+6. 按 Runbook 重做同一 5 分钟窗口。应用回滚保留 074 字段与触发器、保留旧详情 GET；媒体回滚仍保持占位和显式原图，不恢复静默原图兜底。
+
+QoS/AQM、CDN、multipart、公平队列均未作为本轮应用 P0 实施；需要生产数据和真实排队点控制权后再单独执行。

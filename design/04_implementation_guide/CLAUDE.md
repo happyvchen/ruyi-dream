@@ -9,6 +9,7 @@
 | 文件 | 内容 | 何时需要读 |
 |---|---|---|
 | `technical_route_and_operations.md` | MediaAsset、StylingGarment、GenerationTask、ShotPreset、ResultSet、Attempt 和 Prompt 槽位实现路线 | 工程实现、接口设计、数据库拆分时 |
+| `network_and_media_performance_optimization_plan.md` | 百兆带宽场景的低成本性能方案：应用 P0、量化触发 P1、条件 QoS/AQM、单人/多人容量与验收 | 优化生产环境带宽、Web/SSH 卡顿、大图上传、媒体浏览或多人并发时 |
 | `archive_purge_policy.md` | 归档、彻底删除、媒体引用计数、影响预检和 OSS 清理策略 | 设计或修改删除、归档、批量清理、媒体替换时 |
 
 ## 本地规则 (Local Rules)

@@ -112,7 +112,7 @@ AI 摄影棚右侧“最近任务”也支持批量下载：标题旁 `批量下
 
 图片缓存使用浏览器原生 HTTP cache，由后端通过 `/api/media` 的 302 响应和对象存储响应头控制。前端不实现 IndexedDB、Service Worker、Cache Storage 或 OPFS 图片缓存；这些机制会增加权限隔离、容量清理、Blob 生命周期和登出残留复杂度，不作为当前图片体验优化路径。前端不得为绕过缓存给图片 URL 添加时间戳、随机数或轮询版本参数；只有 object key 或 variant 变化时才更新 `src`。
 
-AI 摄影棚在 `STYLING_RUNNING`、`PREVIEW_RUNNING`、`FINAL_RUNNING` 状态定时刷新当前 `GenerationTask`，从而展示阶段推进和逐张结果。若任务带有 `autoRunTarget`，即使短暂处于非运行中状态也继续刷新，等待后端自动推进下一步。
+AI 摄影棚首次打开获取完整详情；运行或自动排队期间轮询 `/api/generation-tasks/{id}/status`，合并状态、五图进度和当前阶段。只有 `detailRevision` 变化或进入终态才重新读取详情。批次成员状态由同一协调器更新，不再用独立列表定时器。
 
 前端可用本地临时 `AIOperation` 补足用户刚点击后的即时反馈，但本地 operation 必须带当前 `taskId`，只能渲染到所属任务。任务从后端刷新到非运行中且无 `autoRunTarget` 后，应清理该任务的本地 operation。任务详情只携带各步骤最新一条摘要；展开时通过步骤分页接口按实际 attempt 数量和时间倒序读取历史，不按 owner 合并重试调用。每条 admin 技术详情入口通过 taskId + attemptId 精确读取对应 attempt，并在关闭弹窗后恢复触发按钮焦点。被替代链路的历史终态可以复盘，但其遗留运行态不得冒充当前任务仍在执行。
 
@@ -127,3 +127,14 @@ docker compose up -d --build frontend
 ```
 
 前端容器只提供静态资源，不代理 API；浏览器直接访问 `PUBLIC_BACKEND_URL`。
+
+## 百兆带宽 P0 实现
+
+- `src/lib/polling.ts`：单个调用完成后才安排下一次；默认 2 秒，无变化 30/60/90 秒后改为 5/10/15 秒，加 0–20% 抖动。比较时忽略 `updatedAt` 等心跳时间；隐藏标签页暂停并取消在途 GET，回到前台立即刷新。任务、导入和打标复用该规则。最近任务只在对应 Tab 可见时加载/轮询。
+- `src/api.ts`：GET 接受 `AbortSignal`；页面离开只取消页面级只读请求，解析 JSON 后再次检查取消状态和 URL。应用级初始化跨页面继续，各项独立写回；退出登录、角色变化或卸载时由应用 signal 取消。初始化发起后若已切页，不再执行旧路由恢复。列表筛选与详情选择还有资源 token，阻止旧响应覆盖。写接口、PUT 和上传确认不随页面取消。
+- `src/lib/uploadQueue.ts`：全标签页共享 PUT 队列，默认 2 路；相同 object key 合并在途 PUT，相同上传 session 合并执行；网络/429/5xx 最多重试 2 次，1/2 秒退避并加抖动。UI 区分等待上传、上传中、保存处理及业务终态。
+- `src/components/MediaImage.tsx`：IntersectionObserver 零预取边距，lazy + async + low priority。首次自动加载最多 12 个不同远程 src；滚动或用户操作打开下一批，已加载图片不重复占用新批预算。检查器主图单独加载当前 preview，没有 original 预取。
+- 列表和卡片统一 thumb；检查器先 preview，“1:1 原图”显式更换 src。换图恢复 preview；派生图缺失显示“预览暂不可用”，仍允许用户显式打开原图。下载始终指向 original/download。
+- 任务列表 summary 仅有 cover thumb；五图进度使用 `progress.completed/total`，打开任务再获取成片详情。
+- 主推款单次/批量导入完成仅在原导入组件仍挂载、导航代次与 URL 均未变化时切换当前任务；离开后继续保存，不能覆盖当前页面或 URL。
+- 上传配置 `UPLOAD_CONCURRENCY=1..3`（默认 2）经 Vite/镜像构建注入；修改后需重建前端。不要再增加调用点自己的 PUT 并发池。

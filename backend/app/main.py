@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
 
+from .http_performance import HttpPerformanceMiddleware
 from .config import get_settings
 from .db import dumps, get_db, init_db, loads, log_event, now_iso
 from .prompt_render import (
@@ -553,6 +554,8 @@ async def require_api_session(request: Request, call_next: Any) -> Any:
         return JSONResponse(status_code=401, content={"detail": "请先登录"})
     return await call_next(request)
 
+
+app.add_middleware(HttpPerformanceMiddleware)
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
@@ -2160,6 +2163,10 @@ def list_styling_garments(
                WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_asset_id,
               (SELECT ma.object_key FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
                WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_key,
+              (SELECT ma.thumb_key FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_thumb_key,
+              (SELECT ma.preview_key FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_preview_key,
               (SELECT ma.original_filename FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
                WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_filename,
               (SELECT ma.mime_type FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
@@ -3839,7 +3846,7 @@ def list_generation_tasks(
         ).fetchone()["total"])
         items = rows[:limit]
         return {
-            "items": [serialize_generation_task(row, include_detail=False) for row in items],
+            "items": generation_task_summaries(items),
             "limit": limit,
             "offset": offset,
             "nextOffset": offset + limit if offset + limit < total else None,
@@ -3852,6 +3859,43 @@ def list_generation_tasks(
 @app.get("/api/generation-tasks/{task_id}")
 def get_generation_task(task_id: int, request: Request, include_debug: bool = Query(False, alias="includeDebug")) -> dict[str, Any]:
     return {"item": get_generation_task_by_id(task_id, include_debug=require_admin_debug(request, include_debug))}
+
+
+@app.get("/api/generation-tasks/{task_id}/status")
+def get_generation_task_status(task_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_tasks WHERE id = ? AND deleted_at IS NULL", (task_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "拍摄任务不存在")
+        images = db.execute("SELECT status, COUNT(*) AS n FROM generation_result_images_new WHERE result_set_id = ? GROUP BY status", (row["active_result_set_id"],)).fetchall()
+        attempt = db.execute("""SELECT ga.status, ga.error_code FROM generation_attempts ga
+            WHERE (ga.owner_type = 'generation_styling' AND ga.owner_id = ?)
+            OR (ga.owner_type = 'generation_result_image' AND ga.owner_id IN
+                (SELECT id FROM generation_result_images_new WHERE result_set_id = ?))
+            ORDER BY ga.id DESC LIMIT 1""", (task_id, row["active_result_set_id"])).fetchone()
+        operations = db.execute("""SELECT ga.id, ga.status,
+            json_extract(ga.progress_json, '$.current') AS phase,
+            (SELECT json_extract(value, '$.startedAt') FROM json_each(ga.progress_json, '$.phases')
+             WHERE json_extract(value, '$.phase') = json_extract(ga.progress_json, '$.current') LIMIT 1) AS phase_started_at,
+            (SELECT json_extract(value, '$.detail') FROM json_each(ga.progress_json, '$.phases')
+             WHERE json_extract(value, '$.phase') = json_extract(ga.progress_json, '$.current') LIMIT 1) AS phase_detail
+            FROM generation_attempts ga WHERE ga.id IN (
+                SELECT active_attempt_id FROM generation_result_images_new WHERE result_set_id = ?
+                UNION SELECT id FROM (SELECT id FROM generation_attempts WHERE owner_type = 'generation_styling' AND owner_id = ? ORDER BY id DESC LIMIT 1)
+            ) ORDER BY ga.id DESC LIMIT 6""", (row["active_result_set_id"], task_id)).fetchall()
+    counts = {item["status"]: item["n"] for item in images}
+    stage = "FINAL_IMAGE" if row["active_result_set_id"] else "AI_STYLING" if row["status"] != "DRAFT" else "IMPORT"
+    return {"taskId": task_id, "status": row["status"], "stage": stage,
+        "operations": [{"id": op["id"], "status": op["status"], "phase": op["phase"], "startedAt": op["phase_started_at"],
+            "detail": {key: value for key, value in (loads(op["phase_detail"], {}) or {}).items()
+                if key in {"completed", "total", "retries", "statusCheckErrors", "contractRetry"} and isinstance(value, (int, float))}
+        } for op in operations],
+        "progress": {"completed": counts.get("SUCCEEDED", 0), "total": 5},
+        "activeOperation": {"type": stage, "status": row["status"]} if row["status"] in RUNNING_GENERATION_TASK_STATUSES else None,
+        "detailRevision": row["detail_revision"], "updatedAt": row["updated_at"],
+        "autoRunTarget": row["auto_run_target"], "autoRunRetryAt": row["auto_run_retry_at"],
+        "autoRunRetryCount": row["auto_run_retry_count"], "retryAt": row["auto_run_retry_at"],
+        "error": provider_error_presentation(attempt["error_code"]) if attempt and attempt["status"] == "FAILED" else None}
 
 
 @app.get("/api/generation-tasks/{task_id}/ai-invocations")
@@ -5083,7 +5127,7 @@ def generation_batch_metadata(batch_id: str) -> dict[str, str | None]:
 @app.get("/api/generation-batches/{batch_id}/tasks")
 def list_generation_batch_tasks(batch_id: str) -> dict[str, Any]:
     rows = get_batch_task_rows(batch_id)
-    return {"items": [serialize_generation_task(row, include_detail=False) for row in rows]}
+    return {"items": generation_task_summaries(rows)}
 
 
 @app.patch("/api/generation-batches/{batch_id}")
@@ -5142,7 +5186,7 @@ async def auto_run_generation_batch(batch_id: str, payload: AutoRunFinalRequest 
     refreshed = get_batch_task_rows(batch_id)
     return {
         "startedTaskIds": started_ids,
-        "items": [serialize_generation_task(row, include_detail=False) for row in refreshed],
+        "items": generation_task_summaries(refreshed),
     }
 
 
@@ -5165,7 +5209,7 @@ def cancel_generation_batch(batch_id: str) -> dict[str, Any]:
     refreshed = get_batch_task_rows(batch_id)
     return {
         "cancelledTaskIds": cancelled_ids,
-        "items": [serialize_generation_task(row, include_detail=False) for row in refreshed],
+        "items": generation_task_summaries(refreshed),
     }
 
 
@@ -5740,7 +5784,7 @@ def list_new_generation_records(
         ).fetchall()
         items = rows[:limit]
         return {
-            "items": [serialize_generation_task(row, include_detail=False) for row in items],
+            "items": generation_task_summaries(items),
             "limit": limit,
             "offset": offset,
             "nextOffset": offset + limit if offset + limit < total else None,
@@ -5781,7 +5825,7 @@ def generation_batch_record_status(rows: list[Any]) -> str:
     return "PENDING"
 
 
-def serialize_generation_batch_record(batch_id: str, rows: list[Any]) -> dict[str, Any]:
+def serialize_generation_batch_record(batch_id: str, rows: list[Any], context: tuple[dict[int, Any], dict[str, Any]] | None = None) -> dict[str, Any]:
     sorted_rows = sorted(rows, key=lambda row: (str(row["created_at"]), int(row["id"])))
     status_counts: dict[str, int] = {}
     archived_count = 0
@@ -5809,7 +5853,7 @@ def serialize_generation_batch_record(batch_id: str, rows: list[Any]) -> dict[st
         if status in {"COMPLETED", "FINAL_PARTIAL"}:
             downloadable_count += 1
     created_values = [str(row["created_at"]) for row in sorted_rows]
-    metadata = generation_batch_metadata(batch_id)
+    metadata = context[1].get(batch_id, {"name": fallback_generation_batch_title(batch_id), "updatedAt": None}) if context else generation_batch_metadata(batch_id)
     updated_values = [str(row["updated_at"]) for row in sorted_rows]
     if metadata["updatedAt"]:
         updated_values.append(str(metadata["updatedAt"]))
@@ -5831,7 +5875,7 @@ def serialize_generation_batch_record(batch_id: str, rows: list[Any]) -> dict[st
         "statusCounts": status_counts,
         "createdAt": min(created_values),
         "updatedAt": max(updated_values),
-        "coverTasks": [serialize_generation_task(row, include_detail=False) for row in sorted_rows[:4]],
+        "coverTasks": [context[0][row["id"]] for row in sorted_rows[:4]] if context else generation_task_summaries(sorted_rows[:4]),
         "sampleTaskNames": [str(row["name"]) for row in sorted_rows[:3]],
         "firstTaskId": int(first_row["id"]),
     }
@@ -5867,12 +5911,13 @@ def list_generation_record_batches(
             ORDER BY batch_id, created_at, id
             """
         ).fetchall()
+    context = generation_list_context(rows)
     grouped: dict[str, list[Any]] = {}
     for row in rows:
         grouped.setdefault(str(row["batch_id"]), []).append(row)
     batches: list[dict[str, Any]] = []
     for batch_id, batch_rows in grouped.items():
-        batch = serialize_generation_batch_record(batch_id, batch_rows)
+        batch = serialize_generation_batch_record(batch_id, batch_rows, context)
         if not include_archived and batch["status"] == "ARCHIVED":
             continue
         created_at = parse_filter_datetime(str(batch["createdAt"]), end_of_day=False)
@@ -5899,7 +5944,7 @@ def list_generation_record_batches(
     items = batches[offset:offset + limit]
     stable_batches = []
     for batch_id, batch_rows in grouped.items():
-        batch = serialize_generation_batch_record(batch_id, batch_rows)
+        batch = serialize_generation_batch_record(batch_id, batch_rows, context)
         if include_archived or batch["status"] != "ARCHIVED":
             stable_batches.append(batch)
     return {
@@ -5939,6 +5984,7 @@ def list_generation_record_workspace(
             ORDER BY created_at, id
             """
         ).fetchall()
+    context = generation_list_context(rows)
     grouped: dict[str, list[Any]] = {}
     unbatched_rows = []
     for row in rows:
@@ -5949,7 +5995,7 @@ def list_generation_record_workspace(
             unbatched_rows.append(row)
     stable_statuses: list[str] = []
     for batch_id, batch_rows in grouped.items():
-        batch = serialize_generation_batch_record(batch_id, batch_rows)
+        batch = serialize_generation_batch_record(batch_id, batch_rows, context)
         if include_archived or batch["status"] != "ARCHIVED":
             stable_statuses.append(str(batch["status"]))
     for row in unbatched_rows:
@@ -5958,7 +6004,7 @@ def list_generation_record_workspace(
             stable_statuses.append(str(row["status"]))
     items: list[dict[str, Any]] = []
     for batch_id, batch_rows in grouped.items():
-        batch = serialize_generation_batch_record(batch_id, batch_rows)
+        batch = serialize_generation_batch_record(batch_id, batch_rows, context)
         if not include_archived and batch["status"] == "ARCHIVED":
             continue
         created_at = parse_filter_datetime(str(batch["createdAt"]), end_of_day=False)
@@ -5996,7 +6042,7 @@ def list_generation_record_workspace(
                 continue
         if status_values and str(row["status"]).casefold() not in status_values:
             continue
-        task = serialize_generation_task(row, include_detail=False)
+        task = context[0][row["id"]]
         items.append({
             "kind": "task",
             "id": f"task:{row['id']}",
@@ -7128,7 +7174,7 @@ def get_media(key: str = Query(...), variant: str = Query("original"), download:
         if registered_variant_key and object_exists(registered_variant_key):
             target_key = registered_variant_key
         else:
-            target_key = existing_derivative_or_original(object_key, variant) or object_key
+            raise HTTPException(status_code=404, detail="预览暂不可用", headers={"Cache-Control": "private, no-store"})
     if not object_exists(target_key):
         raise HTTPException(status_code=404, detail="图片不存在")
     cache_control = media_cache_control(object_key, variant, download)
@@ -7688,8 +7734,10 @@ def serialize_media_asset(row: Any | None) -> dict[str, Any] | None:
         "thumbSizeBytes": row["thumb_size_bytes"] if "thumb_size_bytes" in row.keys() else None,
         "previewSizeBytes": row["preview_size_bytes"] if "preview_size_bytes" in row.keys() else None,
         "url": stable_media_url(row["object_key"], "preview"),
-        "thumbUrl": stable_media_url(row["object_key"], "thumb"),
-        "previewUrl": stable_media_url(row["object_key"], "preview"),
+        "thumbStatus": "AVAILABLE" if row_value(row, "thumb_key") else "MISSING",
+        "previewStatus": "AVAILABLE" if row_value(row, "preview_key") else "MISSING",
+        "thumbUrl": stable_media_url(row["object_key"], "thumb") if row_value(row, "thumb_key") else None,
+        "previewUrl": stable_media_url(row["object_key"], "preview") if row_value(row, "preview_key") else None,
         "originalUrl": stable_media_url(row["object_key"], "original"),
         "createdAt": row["created_at"],
     }
@@ -7741,7 +7789,7 @@ def serialize_styling_garment(row: Any, include_images: bool = True, include_deb
         "archivedAt": row["archived_at"] if "archived_at" in row.keys() else None,
         "archiveReason": row["archive_reason"] if "archive_reason" in row.keys() else None,
         "imageCount": row["image_count"] if "image_count" in row.keys() else None,
-        "coverUrl": stable_media_url(row["cover_key"], "thumb") if "cover_key" in row.keys() else None,
+        "coverUrl": stable_media_url(row["cover_key"], "thumb") if row_value(row, "cover_thumb_key") else None,
         "coverAsset": serialize_cover_asset(row),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
@@ -7785,8 +7833,10 @@ def serialize_cover_asset(row: Any) -> dict[str, Any] | None:
         "originalHeight": row["cover_height"] if "cover_height" in row.keys() else None,
         "originalSizeBytes": row["cover_size_bytes"] if "cover_size_bytes" in row.keys() else None,
         "url": stable_media_url(row["cover_key"], "preview"),
-        "thumbUrl": stable_media_url(row["cover_key"], "thumb"),
-        "previewUrl": stable_media_url(row["cover_key"], "preview"),
+        "thumbStatus": "AVAILABLE" if row_value(row, "cover_thumb_key") else "MISSING",
+        "previewStatus": "AVAILABLE" if row_value(row, "cover_preview_key") else "MISSING",
+        "thumbUrl": stable_media_url(row["cover_key"], "thumb") if row_value(row, "cover_thumb_key") else None,
+        "previewUrl": stable_media_url(row["cover_key"], "preview") if row_value(row, "cover_preview_key") else None,
         "originalUrl": stable_media_url(row["cover_key"], "original"),
     }
 
@@ -7826,6 +7876,10 @@ def get_styling_garment_by_id(garment_id: int, include_debug: bool = False) -> d
             SELECT sg.*,
               (SELECT ma.object_key FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
                WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_key,
+              (SELECT ma.thumb_key FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_thumb_key,
+              (SELECT ma.preview_key FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_preview_key,
               (SELECT COUNT(*) FROM styling_garment_images sgi WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL) AS image_count
             FROM styling_garments sg
             WHERE sg.id = ? AND sg.deleted_at IS NULL
@@ -9257,6 +9311,10 @@ def build_ai_stylist_context(input_version_id: int) -> tuple[Any, dict[str, Any]
                WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_asset_id,
               (SELECT ma.object_key FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
                WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_key,
+              (SELECT ma.thumb_key FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_thumb_key,
+              (SELECT ma.preview_key FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
+               WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_preview_key,
               (SELECT ma.original_filename FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
                WHERE sgi.styling_garment_id = sg.id AND sgi.deleted_at IS NULL ORDER BY sgi.sort_order, sgi.id LIMIT 1) AS cover_filename,
               (SELECT ma.mime_type FROM styling_garment_images sgi JOIN media_assets ma ON ma.id = sgi.media_asset_id
@@ -12293,7 +12351,10 @@ def final_image_generation_cancelled(row: Any, result_set_id: int) -> bool:
 
 
 def serialize_generation_task(row: Any, include_detail: bool = True, include_debug: bool = False) -> dict[str, Any]:
+    if not include_detail:
+        return generation_task_summaries([row])[0]
     item = {
+        "detailRevision": row_value(row, "detail_revision", 0),
         "id": row["id"],
         "name": row["name"],
         "status": row["status"],
@@ -12329,9 +12390,6 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
     ):
         item["autoRunQueued"] = True
         item["autoRunQueuePosition"] = auto_run_queue_position(int(row["id"]), row_value(row, "auto_run_requested_at"))
-    if not include_detail:
-        item["summary"] = get_generation_task_summary(row["id"])
-        return item
     with get_db() as db:
         image_rows = db.execute(
             """
@@ -12360,16 +12418,52 @@ def get_generation_task_by_id(task_id: int, include_debug: bool = False) -> dict
     return serialize_generation_task(row, include_detail=True, include_debug=include_debug)
 
 
+def generation_list_context(rows: list[Any]) -> tuple[dict[int, Any], dict[str, Any]]:
+    summaries = {item["id"]: item for item in generation_task_summaries(rows)}
+    with get_db() as db:
+        batches = db.execute("SELECT id, name, updated_at FROM generation_batches").fetchall()
+    return summaries, {row["id"]: {"name": row["name"], "updatedAt": row["updated_at"]} for row in batches}
+
+
+def generation_task_summaries(rows: list[Any]) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    ids = [int(row["id"]) for row in rows]
+    with get_db() as db:
+        covers = db.execute("""
+            SELECT gt.id AS task_id, ma.*,
+              (SELECT COUNT(*) FROM generation_result_images_new ri WHERE ri.result_set_id = gt.active_result_set_id AND ri.status = 'SUCCEEDED') AS completed
+            FROM generation_tasks gt LEFT JOIN media_assets ma ON ma.id = (
+              SELECT media_asset_id FROM generation_task_images WHERE task_id = gt.id AND deleted_at IS NULL ORDER BY sort_order, id LIMIT 1
+            ) WHERE gt.id IN (SELECT value FROM json_each(?))
+        """, (dumps(ids),)).fetchall()
+        queue = db.execute("SELECT id FROM generation_tasks WHERE auto_run_target IS NOT NULL AND deleted_at IS NULL AND archived_at IS NULL ORDER BY auto_run_requested_at, id").fetchall()
+    by_id = {row["task_id"]: row for row in covers}
+    active = auto_run_active_task_ids()
+    positions = {row["id"]: i + 1 for i, row in enumerate(row for row in queue if row["id"] not in active)}
+    result = []
+    for row in rows:
+        cover = by_id[row["id"]]
+        queued = bool(row_value(row, "auto_run_target") and row["status"] not in RUNNING_GENERATION_TASK_STATUSES and row["status"] not in AUTO_RUN_TERMINAL_TASK_STATUSES and row["id"] not in active)
+        result.append({
+            "id": row["id"], "name": row["name"], "status": row["status"],
+            "detailRevision": row_value(row, "detail_revision", 0),
+            "createdAt": row["created_at"], "updatedAt": row["updated_at"],
+            "batchId": row_value(row, "batch_id"), "archivedAt": row_value(row, "archived_at"), "archiveReason": row_value(row, "archive_reason"),
+            "autoRunTarget": row_value(row, "auto_run_target"), "autoRunQueued": queued,
+            "autoRunQueuePosition": positions.get(row["id"]) if queued else None,
+            "autoRunRetryAt": row_value(row, "auto_run_retry_at"),
+            "autoRunRetryCount": row_value(row, "auto_run_retry_count", 0), "autoRunRetryLimit": settings.generation_auto_run_retry_limit,
+            "progress": {"completed": cover["completed"], "total": 5},
+            "summary": {"cover": {"id": cover["id"], "filename": cover["original_filename"],
+                "thumbUrl": stable_media_url(cover["object_key"], "thumb") if cover["thumb_key"] else None,
+                "thumbStatus": "AVAILABLE" if cover["thumb_key"] else "MISSING"} if cover["id"] else None},
+        })
+    return result
+
+
 def get_generation_task_summary(task_id: int) -> dict[str, Any]:
-    task = get_generation_task_by_id(task_id, include_debug=False)
-    images = task.get("images", [])
-    result_images = ((task.get("resultSet") or {}).get("images") or [])
-    return {
-        "cover": images[0]["asset"] if images else None,
-        "preview": (task.get("preview") or {}).get("asset"),
-        "finalImages": [image.get("asset") for image in result_images if image.get("asset")],
-        "selectedGarments": ((task.get("styling") or {}).get("selectedMaterials") or []),
-    }
+    return generation_task_summaries([get_generation_task_row(task_id)])[0]["summary"]
 
 
 def get_input_version(input_version_id: int | None) -> dict[str, Any] | None:

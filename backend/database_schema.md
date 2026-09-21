@@ -93,3 +93,13 @@ GenerationTask
 彻底删除任务时，后端删除该任务的主推款图引用、输入版本、选搭、分镜、结果集、结果图、attempt 和对应媒体资产。归档只隐藏任务，不删除媒体。
 
 彻底删除搭配服装时，只删除 `StylingGarment` 聚合、图片关系、标签和 `styling_garment_tagging` attempts。`generation_stylings.selected_material_ids_json` 与历史快照是跨聚合弱引用，不反向级联删除 `GenerationTask`；快照引用的媒体元数据和对象文件继续保留。读取历史选搭时，如果来源服装已不存在，API 返回 `sourceAvailable = false` 的删除占位并脱敏原货号，主推款、分镜和成片保持可读。
+
+## 074：详情修订号
+
+向前兼容新增 `generation_tasks.detail_revision INTEGER NOT NULL DEFAULT 0`。回滚应用保留字段与触发器。
+
+`install_detail_revision_triggers` 集中声明同事务内容失效规则：主任务内容/状态、图片关系、输入版本、选搭、历史分镜、成片结果、冻结预设、媒体元数据及引用的服装变化递增。attempt 的插入、终态/错误/输出变化也递增；终态 response snapshot 变化单独覆盖用户可见错误变化。触发器拦截直接 SQL 写路径，事务回滚时修订号也回滚。
+
+心跳 `updated_at`、锁/租约、运行次数、自动恢复时间/计数及 attempt 的阶段进度不递增，运行进度由 status 直接提供；运行中的 provider 原始请求/响应快照不触发详情刷新，技术详情按需读取。同值 UPDATE 不递增。`detailRevision` 不等于事务数，一笔事务改动多个子对象时可以增加多次，只保证单调变化。
+
+新增详情写表或字段时需在后续迁移中重建对应 revision 触发器并添加契约测试，不得只更新 `updated_at`。`idx_task_cover`、`idx_result_progress` 支持封面和进度查询。

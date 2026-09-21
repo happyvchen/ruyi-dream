@@ -1,3 +1,4 @@
+import { queuedUpload, uploadConcurrency } from './lib/uploadQueue'
 import { sha256File } from './lib/fileChecksum'
 
 export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'
@@ -131,6 +132,8 @@ export type MediaAsset = {
   originalHeight?: number | null
   originalSizeBytes?: number | null
   thumbSizeBytes?: number | null
+  thumbStatus?: 'AVAILABLE' | 'MISSING'
+  previewStatus?: 'AVAILABLE' | 'MISSING'
   previewSizeBytes?: number | null
   url?: string | null
   thumbUrl?: string | null
@@ -247,7 +250,24 @@ export type AICallRecord = AIOperation & {
   modelOutput?: Record<string, unknown>
 }
 
+export type TaskStatus = {
+  taskId: number
+  operations?: { id: number; status: string; phase: string | null; startedAt: string | null; detail?: Record<string, number> }[]
+  status: string
+  stage: string
+  detailRevision: number
+  updatedAt: string
+  progress: { completed: number; total: number }
+  autoRunTarget?: string | null
+  autoRunRetryAt?: string | null
+  autoRunRetryCount?: number
+  retryAt?: string | null
+  error?: unknown
+}
+
 export type GenerationTask = {
+  detailRevision?: number
+  progress?: { completed: number; total: number }
   id: number
   name: string
   status: string
@@ -341,7 +361,7 @@ export type DirectUploadItem = {
 }
 
 export type UploadProgressSnapshot = {
-  phase: 'preparing' | 'uploading' | 'saving'
+  phase: 'preparing' | 'waiting' | 'uploading' | 'saving'
   completed: number
   total: number
   currentFile?: string
@@ -599,32 +619,56 @@ function headers(init?: RequestInit) {
   return h
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    credentials: 'include',
-    headers: headers(init),
-  })
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({ detail: response.statusText }))
-    const detail = payload?.detail
-    const structured = detail && typeof detail === 'object' && !Array.isArray(detail) ? detail as Record<string, unknown> : null
-    const title = typeof structured?.title === 'string' ? structured.title : null
-    const messageText = typeof structured?.message === 'string' ? structured.message : null
-    const detailText = typeof structured?.detail === 'string' ? structured.detail : null
-    const message = detailText || (title && messageText ? `${title}：${messageText}` : title || (typeof detail === 'string' ? detail : '请求失败'))
-    if (typeof window !== 'undefined' && response.status === 401 && !path.startsWith('/api/auth/login') && !path.startsWith('/api/auth/session')) {
-      window.dispatchEvent(new CustomEvent('ruyi-auth-expired', { detail: { message } }))
-    }
-    throw new ApiError(message, response.status, {
-      errorCode: typeof structured?.code === 'string' ? structured.code : null,
-      errorTitle: title,
-      errorMessage: messageText,
-      action: typeof structured?.action === 'string' ? structured.action : null,
-      retryable: typeof structured?.retryable === 'boolean' ? structured.retryable : null,
+export type ReadScope = 'page' | 'application'
+let pageReadGeneration = 0
+export const getPageReadGeneration = () => pageReadGeneration
+const pendingReads = new Set<AbortController>()
+export function cancelPageReads() {
+  pageReadGeneration += 1
+  pendingReads.forEach((controller) => controller.abort())
+  pendingReads.clear()
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('popstate', cancelPageReads)
+}
+
+export async function request<T>(path: string, init?: RequestInit, scope: ReadScope = 'page'): Promise<T> {
+  const read = !init?.method || init.method === 'GET'
+  const route = window.location.href
+  const pageRead = read && scope === 'page'
+  const controller = new AbortController()
+  if (pageRead) pendingReads.add(controller)
+  const signal = init?.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      credentials: 'include',
+      signal: read ? signal : init?.signal,
+      headers: headers(init),
     })
-  }
-  return response.json() as Promise<T>
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({ detail: response.statusText }))
+      const detail = payload?.detail
+      const structured = detail && typeof detail === 'object' && !Array.isArray(detail) ? detail as Record<string, unknown> : null
+      const title = typeof structured?.title === 'string' ? structured.title : null
+      const messageText = typeof structured?.message === 'string' ? structured.message : null
+      const detailText = typeof structured?.detail === 'string' ? structured.detail : null
+      const message = detailText || (title && messageText ? `${title}：${messageText}` : title || (typeof detail === 'string' ? detail : '请求失败'))
+      if (typeof window !== 'undefined' && response.status === 401 && !path.startsWith('/api/auth/login') && !path.startsWith('/api/auth/session')) {
+        window.dispatchEvent(new CustomEvent('ruyi-auth-expired', { detail: { message } }))
+      }
+      throw new ApiError(message, response.status, {
+        errorCode: typeof structured?.code === 'string' ? structured.code : null,
+        errorTitle: title,
+        errorMessage: messageText,
+        action: typeof structured?.action === 'string' ? structured.action : null,
+        retryable: typeof structured?.retryable === 'boolean' ? structured.retryable : null,
+      })
+    }
+    const result = await response.json() as T
+    if (read && (signal.aborted || (pageRead && route !== window.location.href))) throw new DOMException('Request superseded', 'AbortError')
+    return result
+  } finally { pendingReads.delete(controller) }
 }
 
 async function runWithConcurrency<T>(items: T[], limit: number, worker: (item: T, index: number) => Promise<void>, onFailure?: () => void) {
@@ -670,16 +714,17 @@ async function uploadFilesViaSession(
   if (created.items.length !== files.length) throw new ApiError('导入任务准备失败，请重新选择图片后再试。', 500)
   let completed = 0
   const controller = new AbortController()
-  await runWithConcurrency(created.items, 4, async (item, index) => {
+  await runWithConcurrency(created.items, uploadConcurrency, async (item, index) => {
     const file = files[index]!
     let response: Response
+    onProgress?.({ phase: 'waiting', completed, total: files.length })
     try {
-      response = await fetch(item.uploadUrl, {
+      response = await queuedUpload(item.objectKey, item.uploadUrl, {
         method: item.method,
         headers: item.headers ?? { 'Content-Type': item.mimeType || file.type },
         body: file,
         signal: controller.signal,
-      })
+      }, () => onProgress?.({ phase: 'uploading', completed, total: files.length, currentFile: file.name }))
     } catch {
       throw new ApiError('图片导入失败，请检查网络后重试。', 0)
     }
@@ -695,7 +740,16 @@ async function uploadFilesViaSession(
   return created
 }
 
-async function uploadPreparedSession(
+const sessionUploads = new Map<string, Promise<void>>()
+function uploadPreparedSession(session: UploadSession, items: DirectUploadItem[], files: File[], onProgress?: (progress: UploadProgressSnapshot) => void) {
+  const existing = sessionUploads.get(session.id)
+  if (existing) return existing
+  const pending = executePreparedSession(session, items, files, onProgress).finally(() => sessionUploads.delete(session.id))
+  sessionUploads.set(session.id, pending)
+  return pending
+}
+
+async function executePreparedSession(
   session: UploadSession,
   items: DirectUploadItem[],
   files: File[],
@@ -713,17 +767,18 @@ async function uploadPreparedSession(
   }, 30_000)
   onProgress?.({ phase: 'preparing', completed, total: session.totalCount })
   try {
-    await runWithConcurrency(items, 4, async (item) => {
+    await runWithConcurrency(items, uploadConcurrency, async (item) => {
       const file = filesByPath.get(item.relativePath || item.filename)
       if (!file) throw new ApiError(`缺少原任务图片：${item.relativePath || item.filename}`, 409)
       let response: Response
+      onProgress?.({ phase: 'waiting', completed, total: session.totalCount })
       try {
-        response = await fetch(item.uploadUrl, {
+        response = await queuedUpload(item.objectKey, item.uploadUrl, {
           method: item.method,
           headers: item.headers ?? { 'Content-Type': item.mimeType || file.type },
           body: file,
           signal: controller.signal,
-        })
+        }, () => onProgress?.({ phase: 'uploading', completed, total: session.totalCount, currentFile: file.name }))
       } catch {
         throw new ApiError('图片导入失败，请检查网络后重试。', 0)
       }
@@ -790,8 +845,8 @@ export const api = {
     request<{ items: UploadSession[] }>(params('/api/upload-sessions', options ?? {})),
   listUploadSessionBatches: (options?: { scope?: string; limit?: number; offset?: number; includeArchived?: boolean }) =>
     request<UploadSessionBatchListResponse>(params('/api/upload-session-batches', options ?? {})),
-  getUploadSession: (id: string) =>
-    request<{ session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(id)}`),
+  getUploadSession: (id: string, signal?: AbortSignal) =>
+    request<{ session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(id)}`, { signal }),
   abandonUploadSession: (id: string) =>
     request<{ session: UploadSession }>(`/api/upload-sessions/${encodeURIComponent(id)}/abandon`, {
       method: 'POST',
@@ -863,8 +918,8 @@ export const api = {
     uploadBatchKey?: string
     sortBy?: string
     sortDir?: string
-  }) =>
-    request<StylingGarmentListResponse>(params('/api/styling-garments', options ?? {})),
+  }, signal?: AbortSignal, scope: ReadScope = 'page') =>
+    request<StylingGarmentListResponse>(params('/api/styling-garments', options ?? {}), { signal }, scope),
   createStylingGarment: async (
     code: string,
     files: File[],
@@ -885,8 +940,8 @@ export const api = {
     ),
   updateStylingGarment: (id: number, payload: { code?: string; manualTags?: Record<string, unknown> }) =>
     request<{ item: StylingGarment }>(`/api/styling-garments/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
-  getStylingGarment: (id: number) =>
-    request<{ item: StylingGarment }>(`/api/styling-garments/${id}`),
+  getStylingGarment: (id: number, signal?: AbortSignal) =>
+    request<{ item: StylingGarment }>(`/api/styling-garments/${id}`, { signal }),
   replaceStylingGarmentImage: (id: number, file: File) => {
     const form = new FormData()
     form.append('file', file)
@@ -912,16 +967,18 @@ export const api = {
     request<{ ok: boolean; restored: boolean; ids: number[] }>('/api/styling-garments/batch-restore', { method: 'POST', body: JSON.stringify({ ids }) }),
   getStylingGarmentDeleteImpact: (ids: number[]) =>
     request<{ impact: DeleteImpact }>('/api/styling-garments/delete-impact', { method: 'POST', body: JSON.stringify({ ids }) }),
-  listTasks: (options?: { limit?: number; offset?: number; includeArchived?: boolean }) =>
-    request<Paginated<GenerationTask>>(params('/api/generation-tasks', options ?? {})),
-  getTask: (id: number, includeDebug = false) =>
-    request<{ item: GenerationTask }>(params(`/api/generation-tasks/${id}`, { includeDebug })),
+  listTasks: (options?: { limit?: number; offset?: number; includeArchived?: boolean }, signal?: AbortSignal, scope: ReadScope = 'page') =>
+    request<Paginated<GenerationTask>>(params('/api/generation-tasks', options ?? {}), { signal }, scope),
+  getTask: (id: number, includeDebug = false, signal?: AbortSignal) =>
+    request<{ item: GenerationTask }>(params(`/api/generation-tasks/${id}`, { includeDebug }), { signal }),
+  getTaskStatus: (id: number, signal?: AbortSignal) =>
+    request<TaskStatus>(`/api/generation-tasks/${id}/status`, { signal }),
   listTaskAttempts: (id: number, ownerType: string, options?: { limit?: number; beforeCreatedAt?: string; beforeId?: number }) =>
     request<{ items: AIOperation[]; total: number; limit: number; hasMore: boolean; nextCursor: { beforeCreatedAt: string; beforeId: number } | null }>(
       params(`/api/generation-tasks/${id}/attempts`, { ownerType, ...(options ?? {}) }),
     ),
-  getTaskAiInvocation: (id: number, attemptId: number) =>
-    request<{ item: AICallRecord }>(`/api/generation-tasks/${id}/ai-invocations/${attemptId}`),
+  getTaskAiInvocation: (id: number, attemptId: number, signal?: AbortSignal) =>
+    request<{ item: AICallRecord }>(`/api/generation-tasks/${id}/ai-invocations/${attemptId}`, { signal }),
   archiveTask: (id: number) =>
     request<{ ok: boolean; archived: boolean; item: GenerationTask }>(`/api/generation-tasks/${id}/archive`, { method: 'POST' }),
   archiveTasks: (ids: number[]) =>
@@ -1006,8 +1063,8 @@ export const api = {
     createdTo?: string
     sortBy?: string
     sortDir?: string
-  }) =>
-    request<GenerationRecordListResponse>(params('/api/generation-records', options ?? {})),
+  }, signal?: AbortSignal, scope: ReadScope = 'page') =>
+    request<GenerationRecordListResponse>(params('/api/generation-records', options ?? {}), { signal }, scope),
   listRecordBatches: (options?: {
     limit?: number
     offset?: number
@@ -1018,8 +1075,8 @@ export const api = {
     createdTo?: string
     sortBy?: string
     sortDir?: string
-  }) =>
-    request<GenerationRecordBatchListResponse>(params('/api/generation-record-batches', options ?? {})),
+  }, signal?: AbortSignal) =>
+    request<GenerationRecordBatchListResponse>(params('/api/generation-record-batches', options ?? {}), { signal }),
   listRecordWorkspace: (options?: {
     limit?: number
     offset?: number
@@ -1030,11 +1087,11 @@ export const api = {
     createdTo?: string
     sortBy?: string
     sortDir?: string
-  }) =>
-    request<GenerationRecordWorkspaceResponse>(params('/api/generation-record-workspace', options ?? {})),
-  getRecord: (id: number, includeDebug = false) =>
-    request<{ item: GenerationTask }>(params(`/api/generation-records/${id}`, { includeDebug })),
-  listModels: () => request<Paginated<ModelProfile>>('/api/model-profiles?limit=30'),
+  }, signal?: AbortSignal, scope: ReadScope = 'page') =>
+    request<GenerationRecordWorkspaceResponse>(params('/api/generation-record-workspace', options ?? {}), { signal }, scope),
+  getRecord: (id: number, includeDebug = false, signal?: AbortSignal) =>
+    request<{ item: GenerationTask }>(params(`/api/generation-records/${id}`, { includeDebug }), { signal }),
+  listModels: (signal?: AbortSignal, scope: ReadScope = 'page') => request<Paginated<ModelProfile>>('/api/model-profiles?limit=30', { signal }, scope),
   listPromptConfigs: () => request<PromptConfigList>('/api/prompt-configs'),
   updatePromptConfig: (key: string, content: string) =>
     request<{ item: PromptConfig; preview: PromptConfigPreview }>(`/api/prompt-configs/${encodeURIComponent(key)}`, { method: 'PATCH', body: JSON.stringify({ content }) }),

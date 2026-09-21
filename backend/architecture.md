@@ -108,3 +108,9 @@ media/<media-uuid>/_derived/final-cells/original-shot<1..6>.png
 - 主推款和搭配服装图片负责商品事实。
 - 拍摄预设负责当前镜头的拍摄母版和姿势参考；母版提供场景、构图并在整图编辑中替换原人物和原服装；三类固定成片 Prompt 负责五镜头构图与禁止项。
 - 最终成片必须同时参考商品图、模特图和当前镜头预设；不使用同组连续性锚点。
+
+## 媒体与查询性能
+
+列表走 `generation_task_summaries` / `generation_list_context`，批次列表统一复用摘要和批次元数据，查询次数不随任务数逐条增加。status 不装配媒体、选搭或历史快照；详情变化通过数据库 revision 触发器统一通知。`app/http_performance.py` 提供单层 gzip 和脱敏访问计量。
+
+维护脚本 `scripts/repair_media_metadata.py` 默认按 ID 有界处理 50 条，优先未归档任务、常用搭配服装和当前预设；`--after-id` 续跑，`--verify` 同时核对已有元数据的对象，`--include-archived` 渐进补齐长尾。每条对象处理结束才短事务写回，不在网络/图片处理期间持有 SQLite 写锁。不会调用外部 AI/provider。

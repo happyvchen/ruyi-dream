@@ -1107,3 +1107,40 @@ def test_upgrade_after_054_adds_lease_and_checksum_columns() -> None:
     assert {"lease_owner", "lease_expires_at"} <= session_columns
     assert "checksum_sha256" in item_columns
     assert {"055", "056", "061"} <= versions
+
+
+def test_high_entropy_png_upload_finalizes_without_changing_original(client, monkeypatch) -> None:
+    from io import BytesIO
+    import random
+    from PIL import Image
+    from app import main as app_main, image_derivatives
+
+    source = Image.frombytes("RGB", (2880, 2880), random.Random(42).randbytes(2880 * 2880 * 3))
+    buffer = BytesIO()
+    source.save(buffer, "PNG", compress_level=0)
+    content = buffer.getvalue()
+    objects = {}
+    monkeypatch.setattr(app_main, "object_head", lambda key: {"contentLength": len(content), "contentType": "image/png"})
+    monkeypatch.setattr(app_main, "get_bytes", lambda key: objects[key])
+    monkeypatch.setattr(app_main, "put_bytes", lambda key, data, mime: objects.__setitem__(key, data))
+    monkeypatch.setattr(image_derivatives, "put_bytes", lambda key, data, mime: objects.__setitem__(key, data))
+
+    created = client.post("/api/upload-sessions", json={
+        "scope": "generation_task",
+        "files": [{"filename": "noise.png", "mimeType": "image/png", "sizeBytes": len(content)}],
+    })
+    assert created.status_code == 200
+    session_id = created.json()["session"]["id"]
+    key = created.json()["items"][0]["objectKey"]
+    objects[key] = content
+    completed = client.post(f"/api/upload-sessions/{session_id}/complete-items", json={"objectKeys": [key]})
+    assert completed.status_code == 200
+    response = client.post(f"/api/upload-sessions/{session_id}/finalize-generation-task", json={"name": "NOISE"})
+    assert response.status_code == 200, response.text
+    assert response.json()["session"]["status"] == "FINALIZED"
+    assert response.json()["item"]["status"] == "DRAFT"
+    assert objects[key] == content
+    normalized_key = next(k for k in objects if "/normalized/" in k)
+    with Image.open(BytesIO(objects[normalized_key])) as image:
+        image.load()
+        assert image.size == (2880, 2880)
