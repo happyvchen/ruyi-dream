@@ -364,6 +364,51 @@ def test_generation_poller_resumes_due_persisted_tagging_retry(
             app_main._active_styling_garment_tagging_ids.discard(garment_id)
 
 
+def test_user_can_stop_waiting_tag_retry_and_poller_cannot_claim_it(client) -> None:
+    garment_id = insert_styling_garment(code="STOP-WAITING-LOOK", status="TAGGING_RUNNING")
+    attempt_id = app_main.create_attempt("styling_garment_tagging", garment_id, "gemini", {})
+    with get_db() as db:
+        db.execute(
+            "UPDATE styling_garments SET tag_retry_at = ?, tag_retry_state_json = ?, tag_active_attempt_id = ? WHERE id = ?",
+            ("2000-01-01T00:00:00Z", app_main.dumps({"kind": "transport", "transportRetries": 1}), attempt_id, garment_id),
+        )
+    response = client.post(f"/api/styling-garments/{garment_id}/stop-tagging")
+    assert response.status_code == 200
+    assert response.json()["item"]["status"] == "TAGGING_FAILED"
+    assert response.json()["item"]["taggingErrorCode"] == "USER_CANCELLED"
+    assert response.json()["item"]["tagRetryAt"] is None
+    assert client.post(f"/api/styling-garments/{garment_id}/stop-tagging").status_code == 409
+    with get_db() as db:
+        assert db.execute("SELECT tag_retry_at FROM styling_garments WHERE id = ?", (garment_id,)).fetchone()[0] is None
+        assert db.execute("SELECT status FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()[0] == "CANCELLED"
+
+
+def test_tagging_recovery_still_resumes_when_stale_check_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    original_sleep = app_main.asyncio.sleep
+
+    async def one_tick(_seconds: float) -> None:
+        if calls:
+            raise asyncio.CancelledError
+
+    def broken_expiry() -> None:
+        calls.append("expiry")
+        raise RuntimeError("stale check failed")
+
+    def resume() -> None:
+        calls.append("resume")
+
+    monkeypatch.setattr(app_main.asyncio, "sleep", one_tick)
+    monkeypatch.setattr(app_main, "expire_stale_styling_garment_tagging", broken_expiry)
+    monkeypatch.setattr(app_main, "resume_due_styling_garment_tagging_retries", resume)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(app_main.tagging_recovery_loop())
+    finally:
+        monkeypatch.setattr(app_main.asyncio, "sleep", original_sleep)
+    assert calls == ["expiry", "resume"]
+
+
 def test_recovery_execution_crash_enters_the_next_process_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     garment_id = insert_styling_garment(code="RECOVERY-CRASH-AGAIN", status="TAGGING_RUNNING")
     state = {

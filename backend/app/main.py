@@ -509,14 +509,16 @@ async def lifespan(app: FastAPI) -> Any:
     ensure_direct_upload_cors()
     init_db()
     app.state.generation_poller = asyncio.create_task(generation_poller_loop())
+    app.state.tagging_recovery_poller = asyncio.create_task(tagging_recovery_loop())
     try:
         yield
     finally:
-        task = getattr(app.state, "generation_poller", None)
-        if task:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+        for name in ("generation_poller", "tagging_recovery_poller"):
+            task = getattr(app.state, name, None)
+            if task:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
@@ -2843,6 +2845,40 @@ async def save_and_tag_styling_garment(garment_id: int, background_tasks: Backgr
             (timestamp, garment_id),
         )
     background_tasks.add_task(run_styling_garment_tagging, garment_id)
+    return {"item": get_styling_garment_by_id(garment_id)}
+
+
+@app.post("/api/styling-garments/{garment_id}/stop-tagging")
+def stop_styling_garment_tagging(garment_id: int) -> dict[str, Any]:
+    """Stop a scheduled retry before the recovery worker claims it."""
+    timestamp = now_iso()
+    with get_db() as db:
+        row = db.execute(
+            "SELECT status, tag_retry_at, tag_active_attempt_id FROM styling_garments WHERE id = ? AND deleted_at IS NULL",
+            (garment_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="搭配服装不存在")
+        if row["status"] != "TAGGING_RUNNING" or row["tag_retry_at"] is None:
+            raise HTTPException(status_code=409, detail="当前识别不在自动恢复等待中")
+        cursor = db.execute(
+            """UPDATE styling_garments
+               SET status = 'TAGGING_FAILED', tag_retry_at = NULL, tag_retry_state_json = NULL,
+                   tag_active_attempt_id = NULL, tag_retry_lease_until = NULL,
+                   tag_error = '用户停止识别', tag_error_code = 'USER_CANCELLED', updated_at = ?
+               WHERE id = ? AND status = 'TAGGING_RUNNING' AND tag_retry_at IS NOT NULL""",
+            (timestamp, garment_id),
+        )
+        if not cursor.rowcount:
+            raise HTTPException(status_code=409, detail="识别已恢复，请刷新状态")
+        if row["tag_active_attempt_id"]:
+            db.execute(
+                """UPDATE generation_attempts
+                   SET status = 'CANCELLED', cancelled_at = ?, updated_at = ?
+                   WHERE id = ? AND status = 'RUNNING'""",
+                (timestamp, timestamp, row["tag_active_attempt_id"]),
+            )
+        log_event(db, "styling_garment", garment_id, "tagging_stopped", {"reason": "user_requested"})
     return {"item": get_styling_garment_by_id(garment_id)}
 
 
@@ -7337,16 +7373,29 @@ async def generation_poller_loop() -> None:
     while True:
         await asyncio.sleep(settings.generation_poll_interval_seconds)
         try:
-            expire_stale_styling_garment_tagging()
-            resume_due_styling_garment_tagging_retries()
             refresh_pending_new_generation_jobs()
             if time.monotonic() - last_upload_cleanup_at >= 3600:
-                cleanup_deleted_upload_sessions()
-                cleanup_stale_upload_sessions()
+                await asyncio.to_thread(cleanup_deleted_upload_sessions)
+                await asyncio.to_thread(cleanup_stale_upload_sessions)
                 last_upload_cleanup_at = time.monotonic()
         except Exception as exc:  # pragma: no cover - background safety net
-            with get_db() as db:
-                log_event(db, "generation_poller", None, "failed", {"error": str(exc)})
+            logger.exception("Generation poller failed")
+            try:
+                with get_db() as db:
+                    log_event(db, "generation_poller", None, "failed", {"error": str(exc)})
+            except Exception:
+                logger.exception("Could not persist generation poller failure")
+
+
+async def tagging_recovery_loop() -> None:
+    """Keep tag retries independent of generation polling and its cleanup work."""
+    while True:
+        await asyncio.sleep(settings.generation_poll_interval_seconds)
+        for operation in (expire_stale_styling_garment_tagging, resume_due_styling_garment_tagging_retries):
+            try:
+                operation()
+            except Exception:
+                logger.exception("Tagging recovery operation failed: %s", operation.__name__)
 
 
 def resume_due_styling_garment_tagging_retries() -> None:

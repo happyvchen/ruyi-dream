@@ -3192,6 +3192,7 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
                   onOpen={() => void openDetail(item)}
                   onDownload={() => downloadGarments([item])}
                   onTag={ANY_TAGGABLE_GARMENT_STATUSES.has(item.status) ? () => void run(item.status === 'READY' ? '重新识别标签中...' : '识别标签中...', () => api.tagStylingGarment(item.id), (r: { item: StylingGarment }) => updateGarmentInView(r.item), { refresh: 'background' }) : undefined}
+                  onStop={item.status === 'TAGGING_RUNNING' && item.tagRetryAt ? () => void run('停止识别中...', () => api.stopStylingGarmentTagging(item.id), (r: { item: StylingGarment }) => updateGarmentInView(r.item), { refresh: 'background' }) : undefined}
                   tagLabel={item.status === 'READY' ? '重新识别' : '识别标签'}
                   selected={bulkMode && selectedGarmentIds.has(item.id)}
                   onSelect={bulkMode ? (checked, extend) => toggleGarmentSelection(item.id, checked, extend) : undefined}
@@ -7835,9 +7836,10 @@ function UploadBox({ files, setFiles, max, compact = false }: { files: File[]; s
   )
 }
 
-function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownload, onManage, selected, onSelect, selectionDisabled = false, archiveMutationBusy = false }: {
+function GarmentCard({ item, onTag, onStop, tagLabel = '识别标签', onOpen, onDownload, onManage, selected, onSelect, selectionDisabled = false, archiveMutationBusy = false }: {
   item: StylingGarment
   onTag?: () => void
+  onStop?: () => void
   tagLabel?: string
   onOpen?: () => void
   onDownload?: () => void
@@ -7862,10 +7864,10 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
   const failedBrief = item.tagRetryCount && item.tagRetryCount > 0
     ? `系统已自动尝试 ${item.tagRetryCount} 次，识别仍未完成，可重新识别。`
     : '识别未完成，可重新识别。'
-  const cardBrief = tagging ? recoveryLabel || '正在识别服装信息；服务繁忙时系统会自动恢复，可以离开当前页面。' : failed ? failedBrief : brief || '待识别搭配信息'
+  const cardBrief = tagging ? recoveryLabel || '正在识别服装信息；服务繁忙时系统会自动恢复，可以离开当前页面。' : failed ? item.taggingErrorCode === 'USER_CANCELLED' ? '已停止识别，可重新识别。' : failedBrief : brief || '待识别搭配信息'
   const failureHint = taggingIssue ? `${taggingIssue.title}：${taggingIssue.description}` : undefined
   const statusLabel = taggingIssue?.badge ?? garmentStatus(item.status)
-  const actionCount = [onOpen, onManage, onDownload, onTag].filter(Boolean).length
+  const actionCount = [onOpen, onManage, onDownload, onTag, onStop].filter(Boolean).length
   return (
     <div
       className={`garment-card ${selected ? 'is-selected' : ''} ${tagging ? 'is-tagging' : ''} ${failed ? 'is-failed' : ''} ${item.archivedAt ? 'is-archived' : ''}`}
@@ -7884,7 +7886,7 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
         {item.archivedAt && <span className="cover-badge">{archiveStateText(item.archiveReason)}</span>}
       </div>
       <div className="garment-card-body">
-        <div className="garment-card-head"><TruncatedText as="strong" text={item.code} /><span className={`status ${item.status.toLowerCase()}`} title={failureHint ?? recoveryLabel ?? statusLabel} role={tagging ? 'status' : undefined} aria-live={tagging ? 'polite' : undefined}>{recoveryLabel ? '自动恢复中' : statusLabel}</span></div>
+        <div className="garment-card-head"><TruncatedText as="strong" text={item.code} /><span className={`status ${item.status.toLowerCase()}`} title={failureHint ?? recoveryLabel ?? statusLabel} role={tagging ? 'status' : undefined} aria-live={tagging ? 'polite' : undefined}>{recoveryLabel ? recoveryLabel.startsWith('自动恢复已逾期') ? '恢复异常' : '自动恢复中' : statusLabel}</span></div>
         <p className="garment-card-brief" title={failed ? failureHint : cardBrief}>{cardBrief}</p>
         <div className="tag-summary">
           {showTagResult && chips.slice(0, 3).map((chip) => <TruncatedText key={chip} text={chip} />)}
@@ -7896,6 +7898,7 @@ function GarmentCard({ item, onTag, tagLabel = '识别标签', onOpen, onDownloa
         {onManage && <button className="management-action" disabled={archiveMutationBusy || tagging || item.archiveReason === 'deletion_pending'} onClick={onManage}><Archive size={16} /> 归档</button>}
         {onDownload && <button className="management-action" disabled={Number(item.imageCount ?? 0) < 1} onClick={onDownload}><Download size={16} /> 下载</button>}
         {onTag && <button className="management-action" disabled={tagging} onClick={onTag}><RotateCcw size={16} /> {tagLabel}</button>}
+        {onStop && <button className="management-action" onClick={onStop}>停止识别</button>}
       </div>
     </div>
   )
@@ -8237,6 +8240,9 @@ type GarmentTaggingIssue = {
 function garmentTagRecoveryLabel(item: StylingGarment) {
   if (item.status !== 'TAGGING_RUNNING' || !item.tagRetryAt) return ''
   const retryAt = new Date(item.tagRetryAt).getTime()
+  if (Number.isFinite(retryAt) && Date.now() - retryAt > 2 * 60 * 1000) {
+    return '自动恢复已逾期，识别可能中断。可停止识别后重新识别。'
+  }
   const seconds = Number.isFinite(retryAt) ? Math.max(0, Math.ceil((retryAt - Date.now()) / 1000)) : 0
   const wait = seconds <= 0 ? '正在继续处理' : seconds >= 60 ? `${Math.ceil(seconds / 60)} 分钟后自动重试` : `${seconds} 秒后自动重试`
   const count = item.tagRetryCount && item.tagRetryCount > 0
@@ -8267,6 +8273,15 @@ function isUploadRequirementMiss(item: StylingGarment, attempt: NonNullable<Styl
 }
 
 function garmentTaggingIssue(item: StylingGarment, attempt: NonNullable<StylingGarment['tagAttempts']>[number] | null): GarmentTaggingIssue {
+  if (item.taggingErrorCode === 'USER_CANCELLED') {
+    return {
+      badge: '已停止识别',
+      panelTitle: '识别状态',
+      title: '已停止识别',
+      description: '自动恢复已停止。',
+      action: '需要时可重新识别。',
+    }
+  }
   if (isUploadRequirementMiss(item, attempt)) {
     return {
       badge: '未通过导入要求',

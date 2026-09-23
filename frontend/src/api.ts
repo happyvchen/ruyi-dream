@@ -933,6 +933,8 @@ export const api = {
   },
   tagStylingGarment: (id: number) =>
     request<{ item: StylingGarment }>(`/api/styling-garments/${id}/save-and-tag`, { method: 'POST' }),
+  stopStylingGarmentTagging: (id: number) =>
+    request<{ item: StylingGarment }>(`/api/styling-garments/${id}/stop-tagging`, { method: 'POST' }),
   tagStylingGarments: (ids: number[]) =>
     request<{ items: StylingGarment[]; startedIds: number[]; skipped: { id: number; code?: string; status?: string; reason?: string }[] }>(
       '/api/styling-garments/batch-save-and-tag',

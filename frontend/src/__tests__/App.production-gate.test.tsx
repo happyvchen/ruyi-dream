@@ -68,6 +68,7 @@ const apiMock = vi.hoisted(() => ({
   restoreUploadSessions: vi.fn(),
   deleteUploadSessions: vi.fn(),
   tagStylingGarments: vi.fn(),
+  stopStylingGarmentTagging: vi.fn(),
 }))
 
 const directoryAccessMock = vi.hoisted(() => ({
@@ -2124,6 +2125,19 @@ describe('production gate app shell and page controls', () => {
 
     expect(await screen.findByText('正在识别服装信息；服务繁忙时系统会自动恢复，可以离开当前页面。')).toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent('识别中')
+  })
+
+  it('lets users stop a delayed automatic tagging retry from its card', async () => {
+    const waiting = { ...garment, id: 2, code: 'WAITING-LOOK', status: 'TAGGING_RUNNING', tagRetryAt: '2000-01-01T00:00:00Z', tagRetryCount: 1 }
+    apiMock.listStylingGarments.mockResolvedValue({ ...emptyPage, items: [waiting], total: 1, facets: {}, stableFacets: {} })
+    apiMock.stopStylingGarmentTagging.mockResolvedValue({ item: { ...waiting, status: 'TAGGING_FAILED', tagRetryAt: null, taggingErrorCode: 'USER_CANCELLED' } })
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '搭配服装库' }))
+    const card = (await screen.findByText('WAITING-LOOK')).closest('.garment-card') as HTMLElement
+    expect(within(card).getByText('恢复异常')).toBeInTheDocument()
+    await userEvent.click(within(card).getByRole('button', { name: '停止识别' }))
+    await waitFor(() => expect(apiMock.stopStylingGarmentTagging).toHaveBeenCalledWith(2))
   })
 
   it('only claims automatic recovery for a rate limit failure that exhausted retries', async () => {
