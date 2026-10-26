@@ -21,3 +21,7 @@
 ## 媒体
 
 所有业务图片统一登记为 `MediaAsset`，二进制写入 S3 兼容对象存储。当前拍摄预设和结果集冻结快照都参与媒体引用计数；更换当前槽位不会删除仍被历史结果集引用的资产。
+
+## 成片提示词准备
+
+结果集 `prompt_preparation_json` 存配置快照、direct/optimized 模式、准备状态和按图片 ID 关联的冻结任务包。文本优化 attempt 的 owner_type 为 `generation_result_set`，与任务一并取消、追溯和清理；测试调用通过 invocation.mode 区分。单张重生不再刷新整组 input_version_id。

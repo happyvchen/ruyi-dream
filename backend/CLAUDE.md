@@ -33,6 +33,7 @@ ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 �
 | `database_schema.md` | 当前 SQLite 表结构、字段说明、关系图、后续候选表 | 修改数据库、写迁移或排查数据问题前 |
 | `../design/04_implementation_guide/archive_purge_policy.md` | 归档、彻底删除、媒体引用计数和 OSS 清理策略 | 修改删除、归档、批量清理、媒体替换时 |
 | `requirements.txt` / `requirements-dev.txt` / `requirements.constraints.txt` | Python 生产直接依赖、测试依赖入口与传递依赖约束 | 安装、升级依赖时 |
+| `app/prompt_optimization.py` | 成片提示词整理的锁定文本、输入输出校验 | 修改提示词优化契约时 |
 | `app/` | FastAPI 后端源码 | 修改后端实现时 |
 | `scripts/` | 一次性维护脚本，如媒体衍生图元数据补齐 | 修复历史数据或运维补数时 |
 | `tests/` | 后端 smoke tests | 修改鉴权、迁移、任务状态时 |

@@ -323,6 +323,7 @@ export type GenerationTask = {
   resultSet?: {
     id: number
     status: string
+    preparation?: { status: string; error?: string | null; attemptId?: number | null }
     previewId?: number | null
     userInstruction?: Record<string, unknown>
     images: {
@@ -591,6 +592,8 @@ export type PromptConfig = {
   title: string
   description: string
   content: string
+  enabled?: boolean
+  suggestedContent?: string | null
   contentHash: string
   sortOrder: number
   updatedAt?: string | null
@@ -609,6 +612,11 @@ export type PromptConfigPreview = {
   rendered: string
   historicalPrompt?: string | null
   diagnostics: PromptConfigDiagnostics
+}
+
+export type PromptOptimizationTest = {
+  attemptId: number
+  items: { shotId: string; originalPrompt: string; optimizedText: string; lockedConstraints: string; prompt: string; changeSummary: string }[]
 }
 
 export type PromptInvocationOption = { id: number; ownerType: string; provider: string; status: string; createdAt?: string | null }
@@ -1095,8 +1103,10 @@ export const api = {
     request<{ item: GenerationTask }>(params(`/api/generation-records/${id}`, { includeDebug }), { signal }),
   listModels: (signal?: AbortSignal, scope: ReadScope = 'page') => request<Paginated<ModelProfile>>('/api/model-profiles?limit=30', { signal }, scope),
   listPromptConfigs: () => request<PromptConfigList>('/api/prompt-configs'),
-  updatePromptConfig: (key: string, content: string) =>
-    request<{ item: PromptConfig; preview: PromptConfigPreview }>(`/api/prompt-configs/${encodeURIComponent(key)}`, { method: 'PATCH', body: JSON.stringify({ content }) }),
+  updatePromptConfig: (key: string, content: string, enabled?: boolean) =>
+    request<{ item: PromptConfig; preview: PromptConfigPreview }>(`/api/prompt-configs/${encodeURIComponent(key)}`, { method: 'PATCH', body: JSON.stringify({ content, enabled }) }),
+  testPromptOptimization: (key: string, content: string, attemptId: number) =>
+    request<PromptOptimizationTest>(`/api/prompt-configs/${encodeURIComponent(key)}/test-optimization`, { method: 'POST', body: JSON.stringify({ content, attemptId }) }),
   previewPromptConfig: (key: string, content?: string, attemptId?: number) =>
     content === undefined
       ? request<PromptConfigPreview>(`/api/prompt-configs/${encodeURIComponent(key)}/preview`)

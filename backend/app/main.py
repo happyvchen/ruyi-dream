@@ -36,6 +36,7 @@ from .prompt_render import (
     render_user_instruction_line,
     render_user_requirement_line,
 )
+from .prompt_optimization import OPTIMIZER_KEY, locked_constraints, optimizer_input, text_hash, validate_optimized_prompts
 from .gemini_provider import (
     GeminiProviderError,
     GeminiRetryDeferred,
@@ -464,11 +465,17 @@ class ModelProfileUpsertRequest(BaseModel):
 
 class PromptConfigUpdateRequest(BaseModel):
     content: str
+    enabled: bool | None = None
 
 
 class PromptConfigPreviewRequest(BaseModel):
     content: str
     attemptId: int | None = None
+
+
+class PromptOptimizationTestRequest(BaseModel):
+    content: str
+    attemptId: int
 
 
 class HeadReferenceUpdateRequest(BaseModel):
@@ -4324,6 +4331,7 @@ def interrupted_generation_resume_status(db: Any, task_id: int, terminal_status:
         WHERE status = ?
           AND (
             (owner_type = 'generation_styling' AND owner_id = ?)
+            OR (owner_type = 'generation_result_set' AND owner_id IN (SELECT id FROM generation_result_sets WHERE task_id = ?))
             OR (owner_type = 'generation_preview' AND owner_id IN (
               SELECT id FROM generation_previews WHERE task_id = ?
             ))
@@ -4337,10 +4345,10 @@ def interrupted_generation_resume_status(db: Any, task_id: int, terminal_status:
         ORDER BY COALESCE(failed_at, cancelled_at, updated_at, created_at) DESC, id DESC
         LIMIT 1
         """,
-        (terminal_status, task_id, task_id, task_id),
+        (terminal_status, task_id, task_id, task_id, task_id),
     ).fetchone()
     owner_type = attempt["owner_type"] if attempt else None
-    if owner_type == "generation_result_image":
+    if owner_type in {"generation_result_image", "generation_result_set"}:
         return "PREVIEW_READY"
     if owner_type == "generation_preview":
         return "STYLING_READY"
@@ -4429,6 +4437,7 @@ def cancel_running_task_attempts(db: Any, task_id: int, timestamp: str) -> None:
         WHERE status = 'RUNNING'
           AND (
             (owner_type = 'generation_styling' AND owner_id = ?)
+            OR (owner_type = 'generation_result_set' AND owner_id IN (SELECT id FROM generation_result_sets WHERE task_id = ?))
             OR (owner_type = 'generation_preview' AND owner_id IN (
               SELECT id FROM generation_previews WHERE task_id = ?
             ))
@@ -4440,7 +4449,7 @@ def cancel_running_task_attempts(db: Any, task_id: int, timestamp: str) -> None:
             ))
           )
         """,
-        (timestamp, timestamp, task_id, task_id, task_id),
+        (timestamp, timestamp, task_id, task_id, task_id, task_id),
     )
 
 
@@ -4462,6 +4471,10 @@ def supersede_generation_result_sets(db: Any, task_id: int, timestamp: str, keep
         """,
         params,
     )
+    db.execute("""UPDATE generation_attempts SET status = 'CANCELLED', cancelled_at = ?, updated_at = ?
+        WHERE owner_type = 'generation_result_set' AND status = 'RUNNING'
+        AND owner_id IN (SELECT id FROM generation_result_sets WHERE task_id = ? AND status = 'SUPERSEDED')""",
+        (timestamp, timestamp, task_id))
     image_params: list[Any] = [timestamp, task_id]
     if keep_result_set_id is not None:
         image_params.append(keep_result_set_id)
@@ -4567,6 +4580,7 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[st
         """,
         (*task_ids, *task_ids, *task_ids),
     )
+    db.execute(f"DELETE FROM generation_attempts WHERE owner_type = 'generation_result_set' AND owner_id IN (SELECT id FROM generation_result_sets WHERE task_id IN ({placeholders}))", task_ids)
     rows = get_generation_task_rows_for_mutation(db, task_ids)
     db.execute(f"DELETE FROM generation_tasks WHERE id IN ({placeholders})", task_ids)
     if asset_ids:
@@ -5277,9 +5291,6 @@ async def run_generate_final_images(
             """,
             (category_family,),
         ).fetchall()
-    if len(preset_rows) != 5:
-        family_label = {"top": "上装", "bottom": "下装", "one_piece": "套装"}[category_family]
-        raise HTTPException(status_code=409, detail=f"{family_label}拍摄预设尚未完整，请联系管理员补齐该类型的 5 个镜头图片")
     effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "final_image")
     user_instruction_context = build_stage_user_instruction_context("final_image", effective_user_instruction)
     if continue_existing and task["active_result_set_id"]:
@@ -5313,6 +5324,10 @@ async def run_generate_final_images(
                     job_key=final_set_job_key(int(task["active_result_set_id"])),
                 )
             return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
+    if len(preset_rows) != 5:
+        family_label = {"top": "上装", "bottom": "下装", "one_piece": "套装"}[category_family]
+        raise HTTPException(status_code=409, detail=f"{family_label}拍摄预设尚未完整，请联系管理员补齐该类型的 5 个镜头图片")
+    preparation = freeze_final_prompt_configuration()
     input_version_id = create_generation_input_version(task_id)
     timestamp = now_iso()
     with get_db() as db:
@@ -5328,6 +5343,7 @@ async def run_generate_final_images(
             (task_id, input_version_id, styling_id, preview_id, None, dumps(user_instruction_context), timestamp, timestamp),
         )
         result_set_id = int(cursor.lastrowid)
+        db.execute("UPDATE generation_result_sets SET prompt_preparation_json = ? WHERE id = ?", (dumps(preparation), result_set_id))
         db.executemany(
             """
             INSERT INTO generation_result_set_shot_presets
@@ -5440,7 +5456,7 @@ def continue_active_final_result_set(
                     (
                         shot_role,
                         row_value(existing, "active_attempt_id") if preserve_provider_attempt else None,
-                        dumps(user_instruction_context or {}),
+                        existing["user_instruction_json"],
                         timestamp,
                         int(existing["id"]),
                     ),
@@ -5453,13 +5469,13 @@ def continue_active_final_result_set(
                   (result_set_id, shot_role, sort_order, user_instruction_json, status, created_at, updated_at)
                 VALUES (?, ?, ?, ?, 'QUEUED', ?, ?)
                 """,
-                (result_set_id, shot_role, sort_order, dumps(user_instruction_context or {}), timestamp, timestamp),
+                (result_set_id, shot_role, sort_order, result_set["user_instruction_json"] or "{}", timestamp, timestamp),
             )
             image_ids.append(int(cursor.lastrowid))
         if image_ids:
             db.execute(
-                "UPDATE generation_result_sets SET status = 'RUNNING', user_instruction_json = ?, updated_at = ? WHERE id = ?",
-                (dumps(user_instruction_context or {}), timestamp, result_set_id),
+                "UPDATE generation_result_sets SET status = 'RUNNING', updated_at = ? WHERE id = ?",
+                (timestamp, result_set_id),
             )
             db.execute(
                 "UPDATE generation_tasks SET status = 'FINAL_RUNNING', active_result_set_id = ?, updated_at = ? WHERE id = ?",
@@ -5470,6 +5486,112 @@ def continue_active_final_result_set(
     return image_ids
 
 
+def freeze_final_prompt_configuration() -> dict[str, Any]:
+    rows = get_prompt_config_rows()
+    optimizer = rows.get(OPTIMIZER_KEY)
+    enabled = bool(optimizer and row_value(optimizer, "enabled", 0))
+    if enabled and not str(optimizer["content"] or "").strip():
+        raise HTTPException(409, "请先在 Prompt 维护中保存成片提示词优化规则")
+    return {
+        "mode": "optimized" if enabled else "direct", "status": "PENDING" if enabled else "DIRECT",
+        "configRows": {key: {"content": row["content"], "group_type": row["group_type"]}
+                       for key, row in rows.items() if key.startswith("segment.") or key.startswith("assembly.final_")},
+        "packages": {},
+    }
+
+
+def read_final_preparation(result_set_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        row = db.execute("SELECT prompt_preparation_json FROM generation_result_sets WHERE id = ?", (result_set_id,)).fetchone()
+    return loads(row["prompt_preparation_json"], {}) if row else {}
+
+
+def save_final_preparation(result_set_id: int, preparation: dict[str, Any]) -> None:
+    with get_db() as db:
+        db.execute("UPDATE generation_result_sets SET prompt_preparation_json = ?, updated_at = ? WHERE id = ?",
+                   (dumps(preparation), now_iso(), result_set_id))
+
+
+def final_preparation_cancelled(task_id: int, result_set_id: int) -> bool:
+    with get_db() as db:
+        row = db.execute("SELECT status, active_result_set_id FROM generation_tasks WHERE id = ? AND deleted_at IS NULL", (task_id,)).fetchone()
+    return not row or row["status"] != "FINAL_RUNNING" or row["active_result_set_id"] != result_set_id
+
+
+async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: list[int]) -> bool:
+    preparation = read_final_preparation(result_set_id)
+    if preparation.get("mode") != "optimized" or not image_ids:
+        return True
+    if final_preparation_cancelled(task_id, result_set_id):
+        return False
+    packages = preparation.setdefault("packages", {})
+    pending: dict[str, Any] = {}
+    for image_id in image_ids:
+        with get_db() as db:
+            image = db.execute("SELECT user_instruction_json, active_attempt_id FROM generation_result_images_new WHERE id = ?", (image_id,)).fetchone()
+        if image["active_attempt_id"] and attempt_has_provider_request_id(image["active_attempt_id"]):
+            continue
+        cached = packages.get(str(image_id))
+        instruction = loads(image["user_instruction_json"], {})
+        if cached and cached.get("finalImageUserInstruction") == instruction:
+            continue
+        pending[str(image_id)] = None
+    if not pending:
+        return True
+    # 重启时结束未完成的旧调用，不把它当作已完成结果，也不重置图像 provider 任务。
+    old_attempt = preparation.get("attemptId")
+    if preparation.get("status") == "RUNNING" and old_attempt:
+        finish_attempt(old_attempt, "FAILED", error_message="拍摄准备执行中断", error_code="PROCESS_INTERRUPTED")
+    attempt_id = create_attempt("generation_result_set", result_set_id, "gemini")
+    preparation.update(status="RUNNING", attemptId=attempt_id, error=None)
+    save_final_preparation(result_set_id, preparation)
+    raw_text = ""
+    try:
+        pending = {key: build_new_final_task_package(task_id, int(key)) for key in pending}
+        system_prompt = preparation["configRows"][OPTIMIZER_KEY]["content"]
+        inputs = optimizer_input(pending)
+        request_snapshot = {"promptConfigKey": OPTIMIZER_KEY, "promptContentHash": text_hash(system_prompt),
+                            "systemInstruction": system_prompt, "prompt": dumps(inputs), "sourcePackages": pending,
+                            "model": effective_gemini_model(), "invocation": {"mode": "final_prompt_optimization"}}
+        update_attempt_request_snapshot(attempt_id, request_snapshot)
+        if final_preparation_cancelled(task_id, result_set_id):
+            finish_attempt(attempt_id, "CANCELLED")
+            preparation["status"] = "CANCELLED"
+            save_final_preparation(result_set_id, preparation)
+            return False
+        raw_text = await generate_gemini_json_text(dumps(inputs), system_instruction=system_prompt)
+        optimized = validate_optimized_prompts(parse_gemini_json_object(raw_text), pending)
+        for key, output in optimized.items():
+            source = pending[key]
+            packages[key] = {**source, "originalPrompt": source["prompt"], "prompt": output["prompt"],
+                             "renderedPromptHash": text_hash(output["prompt"]),
+                             "promptOptimization": {"attemptId": attempt_id, "systemPromptHash": text_hash(system_prompt), **output}}
+        cancelled = final_preparation_cancelled(task_id, result_set_id) or generation_task_or_attempt_cancelled(task_id, attempt_id)
+        preparation.update(status="SUCCEEDED", error=None)
+        save_final_preparation(result_set_id, preparation)
+        finish_attempt(attempt_id, "CANCELLED" if cancelled else "SUCCEEDED",
+                       response_snapshot={"raw_text": raw_text, "shots": optimized})
+        return not cancelled
+    except Exception as exc:
+        cancelled = final_preparation_cancelled(task_id, result_set_id) or generation_task_or_attempt_cancelled(task_id, attempt_id)
+        preparation.update(status="CANCELLED" if cancelled else "FAILED",
+                           error="拍摄准备未完成，本轮尚未开始生成图片。请重试或联系管理员检查拍摄要求。")
+        save_final_preparation(result_set_id, preparation)
+        finish_attempt(attempt_id, "CANCELLED" if cancelled else "FAILED", response_snapshot={"raw_text": raw_text},
+                       error_message=str(exc), error_code=ERROR_MALFORMED_OUTPUT if isinstance(exc, ValueError) else classify_generation_attempt_error(exc))
+        if not cancelled:
+            with get_db() as db:
+                for image_id in image_ids:
+                    db.execute("""UPDATE generation_attempts SET status = 'FAILED', failed_at = ?, updated_at = ?,
+                        error_code = 'PROMPT_PREPARATION_FAILED', error_message = '拍摄准备未完成，尚未提交图片生成'
+                        WHERE id = (SELECT active_attempt_id FROM generation_result_images_new WHERE id = ?)
+                        AND status = 'RUNNING' AND provider_request_id IS NULL""", (now_iso(), now_iso(), image_id))
+                    db.execute("""UPDATE generation_result_images_new SET status = 'FAILED', updated_at = ?
+                        WHERE id = ? AND status IN ('QUEUED', 'RUNNING') AND NOT EXISTS (
+                        SELECT 1 FROM generation_attempts WHERE id = active_attempt_id AND provider_request_id IS NOT NULL)""", (now_iso(), image_id))
+        return False
+
+
 async def run_final_generation(
     task_id: int,
     result_set_id: int,
@@ -5478,6 +5600,7 @@ async def run_final_generation(
     trigger: str = "manual_step",
 ) -> None:
     resume_attempts_by_image_id = resume_attempts_by_image_id or {}
+    prepared = await prepare_final_prompts(task_id, result_set_id, image_ids)
     # 余额硬停：任一并发成片检测到 INSUFFICIENT_BALANCE 时置位，尚未提交的兄弟图
     # 直接跳过 provider 提交（余额不足重试/继续提交只会继续报错、浪费轮询预算）。
     balance_stop = asyncio.Event()
@@ -5491,7 +5614,7 @@ async def run_final_generation(
                 trigger=trigger,
                 balance_stop=balance_stop,
             )
-            for image_id in image_ids
+            for image_id in (image_ids if prepared else [item for item in image_ids if attempt_has_provider_request_id(resume_attempts_by_image_id.get(item))])
         ),
         return_exceptions=True,
     )
@@ -5596,7 +5719,6 @@ async def retry_new_result_image(image_id: int, request: Request, payload: Gener
         previous_attempt_id = int(row["active_attempt_id"]) if row["active_attempt_id"] else None
     task_id = int(row["task_id"])
     result_set_id = int(row["result_set_id"])
-    input_version_id = create_generation_input_version(task_id)
     timestamp = now_iso()
     user_instruction_context = build_stage_user_instruction_context("final_image", effective_user_instruction)
     attempt_id = create_attempt(
@@ -5625,12 +5747,12 @@ async def retry_new_result_image(image_id: int, request: Request, payload: Gener
             (attempt_id, dumps(user_instruction_context), timestamp, image_id),
         )
         db.execute(
-            "UPDATE generation_result_sets SET status = 'RUNNING', input_version_id = ?, user_instruction_json = ?, updated_at = ? WHERE id = ?",
-            (input_version_id, dumps(user_instruction_context), timestamp, result_set_id),
+            "UPDATE generation_result_sets SET status = 'RUNNING', updated_at = ? WHERE id = ?",
+            (timestamp, result_set_id),
         )
         db.execute(
-            "UPDATE generation_tasks SET status = 'FINAL_RUNNING', current_input_version_id = ?, active_result_set_id = ?, updated_at = ? WHERE id = ?",
-            (input_version_id, result_set_id, timestamp, task_id),
+            "UPDATE generation_tasks SET status = 'FINAL_RUNNING', active_result_set_id = ?, updated_at = ? WHERE id = ?",
+            (result_set_id, timestamp, task_id),
         )
     schedule_background_generation(
         run_final_generation(
@@ -6540,11 +6662,12 @@ def preview_prompt_config_draft(config_key: str, payload: PromptConfigPreviewReq
             raise HTTPException(status_code=404, detail="调用记录不存在")
         facts = loads(attempt["request_snapshot_json"], {})
         prompt_keys = facts.get("promptConfigKeys") if isinstance(facts.get("promptConfigKeys"), list) else []
-        if facts.get("promptConfigKey") != key and key not in prompt_keys:
+        optimizer_history = key == OPTIMIZER_KEY and facts.get("promptRuntime") and facts.get("generation", {}).get("stage") == "final_image"
+        if facts.get("promptConfigKey") != key and key not in prompt_keys and not optimizer_history:
             raise HTTPException(status_code=400, detail="调用记录与 Prompt 配置不匹配")
         if isinstance(facts.get("promptRuntime"), dict):
             runtime = facts["promptRuntime"]
-        historical_prompt = facts.get("prompt")
+        historical_prompt = facts.get("systemInstruction") if key == OPTIMIZER_KEY else facts.get("prompt")
     rendered, diagnostics = render_prompt_config(
         key,
         runtime,
@@ -6559,8 +6682,12 @@ def list_prompt_config_invocations(config_key: str, request: Request) -> dict[st
     key = normalize_prompt_config_key(config_key)
     with get_db() as db:
         rows = db.execute(
-            "SELECT id, owner_type, provider, status, created_at FROM generation_attempts WHERE request_snapshot_json LIKE ? ORDER BY created_at DESC LIMIT 30",
-            (f'%"{key}"%',),
+            """SELECT id, owner_type, provider, status, created_at FROM generation_attempts
+            WHERE json_extract(request_snapshot_json, '$.promptConfigKey') = ?
+            OR EXISTS (SELECT 1 FROM json_each(request_snapshot_json, '$.promptConfigKeys') WHERE value = ?)
+            OR (? AND owner_type = 'generation_result_image' AND request_snapshot_json LIKE '%promptRuntime%')
+            ORDER BY created_at DESC, id DESC LIMIT 30""",
+            (key, key, key == OPTIMIZER_KEY),
         ).fetchall()
     return {"items": [{"id": row["id"], "ownerType": row["owner_type"], "provider": row["provider"], "status": row["status"], "createdAt": row["created_at"]} for row in rows]}
 
@@ -6570,6 +6697,8 @@ def update_prompt_config(config_key: str, payload: PromptConfigUpdateRequest, re
     require_admin(request)
     key = normalize_prompt_config_key(config_key)
     content = payload.content[:120000]
+    if key == OPTIMIZER_KEY and payload.enabled and not content.strip():
+        raise HTTPException(400, "启用前请保存成片提示词优化规则")
     timestamp = now_iso()
     with get_db() as db:
         existing = db.execute("SELECT key FROM prompt_configs WHERE key = ?", (key,)).fetchone()
@@ -6583,8 +6712,62 @@ def update_prompt_config(config_key: str, payload: PromptConfigUpdateRequest, re
             """,
             (content, timestamp, key),
         )
+        if key == OPTIMIZER_KEY and payload.enabled is not None:
+            db.execute("UPDATE prompt_configs SET enabled = ? WHERE key = ?", (int(payload.enabled), key))
         log_event(db, "prompt_config", None, "updated", {"key": key})
     return {"item": get_prompt_config(key), "preview": preview_prompt_config(key, request)}
+
+
+@app.post("/api/prompt-configs/{config_key}/test-optimization")
+async def test_prompt_optimization(config_key: str, payload: PromptOptimizationTestRequest, request: Request) -> dict[str, Any]:
+    require_admin(request)
+    if config_key not in {OPTIMIZER_KEY, *FINAL_IMAGE_PROMPT_CONFIG_KEYS.values()}:
+        raise HTTPException(400, "仅成片 Prompt 支持优化测试")
+    with get_db() as db:
+        attempt = db.execute("SELECT * FROM generation_attempts WHERE id = ?", (payload.attemptId,)).fetchone()
+        if not attempt:
+            raise HTTPException(404, "调用记录不存在")
+        facts = loads(attempt["request_snapshot_json"], {})
+        if attempt["owner_type"] == "generation_result_image":
+            image = db.execute("SELECT result_set_id FROM generation_result_images_new WHERE id = ?", (attempt["owner_id"],)).fetchone()
+            result_set_id = image["result_set_id"] if image else None
+            source = {**facts, "prompt": facts.get("originalPrompt") or facts.get("prompt", "")}
+            packages = {str(attempt["owner_id"]): source}
+        elif attempt["owner_type"] == "generation_result_set":
+            result_set_id = attempt["owner_id"]
+            packages = facts.get("sourcePackages", {})
+        else:
+            raise HTTPException(400, "请选择成片调用记录")
+    if not result_set_id or not packages or any(not item.get("promptRuntime") for item in packages.values()):
+        raise HTTPException(400, "该历史记录缺少成片上下文，请选择其他记录")
+    system_prompt = payload.content[:120000] if config_key == OPTIMIZER_KEY else prompt_config_content(OPTIMIZER_KEY) or ""
+    if not system_prompt.strip():
+        raise HTTPException(400, "请先保存成片提示词优化规则")
+    if config_key != OPTIMIZER_KEY:
+        for package in packages.values():
+            if package.get("promptConfigKey") != config_key:
+                raise HTTPException(400, "调用记录与 Prompt 配置不匹配")
+            rendered, diagnostics = render_prompt_config(config_key, package["promptRuntime"], content_overrides={config_key: payload.content[:120000]})
+            if diagnostics["missingPlaceholders"]:
+                raise HTTPException(400, "草稿缺少必要占位符")
+            package["prompt"] = rendered
+    try:
+        inputs = optimizer_input(packages)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    snapshot = {"promptConfigKey": OPTIMIZER_KEY, "systemInstruction": system_prompt, "prompt": dumps(inputs),
+                "promptContentHash": text_hash(system_prompt), "sourcePackages": packages,
+                "model": effective_gemini_model(), "invocation": {"mode": "optimization_test", "sourceAttemptId": payload.attemptId}}
+    attempt_id = create_attempt("generation_result_set", result_set_id, "gemini", request_snapshot=snapshot)
+    raw_text = ""
+    try:
+        raw_text = await generate_gemini_json_text(dumps(inputs), system_instruction=system_prompt)
+        results = validate_optimized_prompts(parse_gemini_json_object(raw_text), packages)
+        finish_attempt(attempt_id, "SUCCEEDED", response_snapshot={"raw_text": raw_text, "shots": results})
+    except Exception as exc:
+        finish_attempt(attempt_id, "FAILED", response_snapshot={"raw_text": raw_text}, error_message=str(exc), error_code=ERROR_MALFORMED_OUTPUT if isinstance(exc, ValueError) else classify_generation_attempt_error(exc))
+        raise HTTPException(422, f"优化测试失败，记录 #{attempt_id}：{str(exc)[:500]}") from exc
+    return {"attemptId": attempt_id, "items": [{"shotId": key, "originalPrompt": packages[key]["prompt"], **value} for key, value in results.items()]}
 
 
 @app.get("/api/model-profiles")
@@ -10611,7 +10794,7 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         row = db.execute(
             """
             SELECT gri.*, grs.styling_id, grs.input_version_id, grs.preview_id,
-                   grs.shot_preset_version_id,
+                   grs.shot_preset_version_id, grs.prompt_preparation_json,
                    grs.user_instruction_json AS result_set_user_instruction_json,
                    gp.preview_asset_id, gp.environment_asset_id
             FROM generation_result_images_new gri
@@ -10669,12 +10852,22 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         ).fetchone()
     user_requirement = loads(row_value(input_row, "user_requirement_json"), build_user_requirement_context({}))
     prompt_runtime = build_final_prompt_runtime(int(row["sort_order"]), str(row["shot_role"]), styling_plan, image_inputs, final_image_user_instruction, user_requirement)
-    prompt = render_prompt_template(prompt_config_key, prompt_runtime)
+    preparation = loads(row_value(row, "prompt_preparation_json"), {})
+    frozen_rows = preparation.get("configRows")
+    if frozen_rows:
+        prompt, diagnostics = render_prompt_config(prompt_config_key, prompt_runtime, rows=frozen_rows)
+        if diagnostics["missingPlaceholders"]:
+            raise RuntimeError(f"冻结的成片配置缺失：{diagnostics['missingPlaceholders']}")
+    else:
+        prompt = render_prompt_template(prompt_config_key, prompt_runtime)
+    config_content = prompt_config_content(prompt_config_key, frozen_rows) or ""
     return {
         "generation": {"stage": "final_image"},
         "prompt": prompt,
         "categoryFamily": storyboard_category_family(styling_plan),
-        **prompt_execution_facts(prompt_config_key, prompt, prompt_runtime),
+        "promptConfigKey": prompt_config_key, "promptContentHash": text_hash(config_content),
+        "promptConfigContent": config_content, "promptRuntime": prompt_runtime, "renderedPromptHash": text_hash(prompt),
+        "promptConfigSnapshot": frozen_rows,
         "imageInputs": image_inputs,
         "shotPresetVersionId": row["shot_preset_version_id"],
         "shotPresetSnapshotId": int(preset["id"]),
@@ -11133,6 +11326,8 @@ def serialize_prompt_config_row(row: Any, rows: dict[str, Any]) -> dict[str, Any
         "title": str(row["title"] or row["key"]),
         "description": str(row["description"] or ""),
         "content": content,
+        "enabled": bool(row_value(row, "enabled", 0)),
+        "suggestedContent": (Path(__file__).resolve().parents[1] / "prompt_templates" / "final_prompt_optimizer.txt").read_text(encoding="utf-8") if str(row["key"]) == OPTIMIZER_KEY else None,
         "contentHash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
         "sortOrder": int(row["sort_order"] or 0),
         "updatedAt": row["updated_at"],
@@ -12298,7 +12493,21 @@ async def _generate_single_final_image_unlocked(
             (attempt_id, now_iso(), image_id),
         )
     try:
-        task_package = build_new_final_task_package(task_id, image_id)
+        preparation = read_final_preparation(result_set_id)
+        task_package = None
+        if attempt_has_provider_request_id(attempt_id):
+            with get_db() as db:
+                saved = db.execute("SELECT request_snapshot_json FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
+            previous = loads(saved["request_snapshot_json"], {}) if saved else {}
+            if previous.get("prompt") and previous.get("imageInputs"):
+                task_package = previous
+        if task_package is None:
+            task_package = preparation.get("packages", {}).get(str(image_id))
+        if task_package is None:
+            if preparation.get("mode") == "optimized":
+                raise RuntimeError("拍摄要求尚未准备完成，不能提交成片生成")
+            task_package = build_new_final_task_package(task_id, image_id)
+        task_package = dict(task_package)
         trigger = preserved_attempt_invocation_mode(attempt_id) or trigger
         task_package["invocation"] = {"mode": trigger, "target": "final_image"}
         if not attempt_has_provider_request_id(attempt_id):
@@ -12647,11 +12856,14 @@ def get_generation_result_set(result_set_id: int | None) -> dict[str, Any] | Non
         ).fetchall()
     if not row:
         return None
+    preparation = loads(row_value(row, "prompt_preparation_json"), {})
     return {
         "id": row["id"],
         "status": row["status"],
         "previewId": row["preview_id"] if "preview_id" in row.keys() else None,
         "userInstruction": loads(row_value(row, "user_instruction_json"), {}),
+        "preparation": {"status": preparation.get("status", "DIRECT"), "error": preparation.get("error"),
+                        "attemptId": preparation.get("attemptId")},
         "images": [
             {
                 "id": image["id"],
@@ -12676,6 +12888,8 @@ def actual_model_input_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]
     if not isinstance(snapshot, dict):
         return {}
     result: dict[str, Any] = {}
+    if snapshot.get("systemInstruction"):
+        result["systemInstruction"] = snapshot["systemInstruction"]
     prompt = snapshot.get("prompt")
     if prompt is not None:
         result["prompt"] = prompt
@@ -12721,6 +12935,7 @@ GENERATION_ATTEMPT_OWNER_TYPES = (
     "generation_styling",
     "generation_preview",
     "generation_result_image",
+    "generation_result_set",
 )
 
 
@@ -12769,6 +12984,7 @@ def get_task_attempts(task_id: int) -> list[dict[str, Any]]:
             """
             SELECT ga.* FROM generation_attempts ga
             WHERE (ga.owner_type = 'generation_styling' AND ga.owner_id = ?)
+               OR (ga.owner_type = 'generation_result_set' AND ga.owner_id IN (SELECT id FROM generation_result_sets WHERE task_id = ?))
                OR (ga.owner_type = 'generation_preview' AND ga.owner_id IN (
                     SELECT id FROM generation_previews WHERE task_id = ?
                   ))
@@ -12779,7 +12995,7 @@ def get_task_attempts(task_id: int) -> list[dict[str, Any]]:
                   ))
             ORDER BY ga.created_at DESC
             """,
-            (task_id, task_id, task_id),
+            (task_id, task_id, task_id, task_id),
         ).fetchall()
     return [serialize_attempt_detail(row) for row in rows]
 
@@ -12860,6 +13076,8 @@ def attempt_retry_index(row: Any) -> int | None:
 def task_attempt_scope(task: Any, owner_type: str) -> tuple[str, tuple[Any, ...]]:
     active_statuses = "('QUEUED', 'RUNNING', 'SUBMITTED', 'IN_QUEUE', 'IN_PROGRESS')"
     task_id = int(task["id"])
+    if owner_type == "generation_result_set":
+        return ("ga.owner_type = 'generation_result_set' AND ga.owner_id IN (SELECT id FROM generation_result_sets WHERE task_id = ?)", (task_id,))
     if owner_type == "generation_styling":
         return "ga.owner_type = 'generation_styling' AND ga.owner_id = ?", (task_id,)
     if owner_type == "generation_preview":

@@ -9,7 +9,7 @@
 | 文件 | 内容 | 何时需要读 |
 |---|---|---|
 | `generation_flow.md` | 主推款输入版本 -> AI Stylist / StylingPlan -> 拍摄预设 -> 五张最终图 | 实现或调整生成主流程时 |
-| `current_generation_workflow.md` | 当前三步工作流、三类 Prompt 路由、拍摄预设和成片槽位 | 设计或实现成片时 |
+| `current_generation_workflow.md` | 当前三步工作流、三类 Prompt 路由、可选提示词优化、拍摄预设和恢复 | 设计或实现成片时 |
 | `storyboard_preview_business_intent.md` | 历史分镜业务意图；五镜头和商品表达要求可供预设设计参考 | 复盘旧流程时 |
 | `final_image_business_intent.md` | 生成成片原始业务意图：逐格兑现分镜导演意图、人物/商品事实源、五张组图与失败判定 | 设计、研究或评审成片 Prompt、参考图策略和成片质量时 |
 | `final_image_prompt_research_task_1457.md` | 最终成片 Prompt 研究结论：失败归因、有效/无效规则、黄金链路和系统采纳建议 | 复盘或实现成片 Prompt、单格输入和三类固定成片模板时 |

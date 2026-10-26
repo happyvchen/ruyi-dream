@@ -16,6 +16,8 @@ const apiMock = vi.hoisted(() => ({
   listModels: vi.fn(),
   listPromptConfigs: vi.fn(),
   previewPromptConfig: vi.fn(),
+  updatePromptConfig: vi.fn(),
+  testPromptOptimization: vi.fn(),
   listPromptInvocations: vi.fn(),
   listRecordWorkspace: vi.fn(),
   listRecordBatches: vi.fn(),
@@ -554,6 +556,48 @@ describe('production gate app shell and page controls', () => {
     await waitFor(() => expect(screen.getAllByText('AI 选搭').length).toBeGreaterThanOrEqual(1))
   })
 
+  it('prompt optimization only invokes the LLM after an explicit test action', async () => {
+    const optimizer = { ...promptList.items[0], key: 'assembly.final_prompt_optimizer', title: '成片提示词优化规则', content: '', enabled: false, suggestedContent: '建议系统规则' }
+    apiMock.listPromptConfigs.mockResolvedValue({ ...promptList, items: [optimizer] })
+    apiMock.listPromptInvocations.mockResolvedValue({ items: [{ id: 41, ownerType: 'generation_result_image', createdAt: '2026-10-26' }] })
+    apiMock.updatePromptConfig.mockImplementation(async (_key, content, enabled) => {
+      const item = { ...optimizer, content, enabled }
+      apiMock.listPromptConfigs.mockResolvedValue({ ...promptList, items: [item] })
+      return { item, preview: { rendered: content, diagnostics: { missingPlaceholders: [], usedSegments: [] } } }
+    })
+    apiMock.testPromptOptimization.mockResolvedValue({ attemptId: 42, items: [{ shotId: '1', originalPrompt: '历史原始提示词', optimizedText: '整理后的正文', lockedConstraints: '商品不变', prompt: '整理后的正文，加锁定约束', changeSummary: '合并重复说明' }] })
+    window.history.replaceState(null, '', '/prompts')
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Prompt 维护' }))
+    await userEvent.click(await screen.findByRole('button', { name: '填入 imagegen 原文摘录' }))
+    expect(screen.getByRole('textbox', { name: '成片提示词优化规则正文' })).toHaveValue('建议系统规则')
+    expect(screen.queryByRole('heading', { name: '占位符' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '校验' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('checkbox', { name: /启用成片提示词优化/ }))
+    await userEvent.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(apiMock.updatePromptConfig).toHaveBeenCalledWith('assembly.final_prompt_optimizer', '建议系统规则', true))
+    expect(screen.queryByRole('button', { name: '刷新预览' })).not.toBeInTheDocument()
+    expect(apiMock.testPromptOptimization).not.toHaveBeenCalled()
+    await userEvent.selectOptions(screen.getByRole('combobox'), '41')
+    await userEvent.click(screen.getByRole('button', { name: '测试优化（仅 LLM）' }))
+    expect(await screen.findByText('历史原始提示词')).toBeInTheDocument()
+    expect(screen.getByText('整理后的正文，加锁定约束')).toBeInTheDocument()
+    expect(apiMock.testPromptOptimization).toHaveBeenCalledTimes(1)
+  })
+
+  it('can replace existing optimizer rules with source excerpts without saving or invoking a model', async () => {
+    const optimizer = { ...promptList.items[0], key: 'assembly.final_prompt_optimizer', title: '成片提示词优化规则', content: '旧规则', enabled: false, suggestedContent: '原文摘录' }
+    apiMock.listPromptConfigs.mockResolvedValue({ ...promptList, items: [optimizer] })
+    window.history.replaceState(null, '', '/prompt-maintenance')
+    render(<App />)
+    expect(await screen.findByRole('textbox', { name: '成片提示词优化规则正文' })).toHaveValue('旧规则')
+    await userEvent.click(screen.getByRole('button', { name: '填入 imagegen 原文摘录' }))
+    expect(screen.getByRole('textbox', { name: '成片提示词优化规则正文' })).toHaveValue('原文摘录')
+    expect(screen.getByRole('button', { name: '保存' })).toBeEnabled()
+    expect(apiMock.updatePromptConfig).not.toHaveBeenCalled()
+    expect(apiMock.testPromptOptimization).not.toHaveBeenCalled()
+  })
+
   it('admin replaces each preset image and it takes effect immediately', async () => {
     apiMock.replaceShotPresetAsset.mockResolvedValue({
       families: {
@@ -658,6 +702,36 @@ describe('production gate app shell and page controls', () => {
 
     await userEvent.click(screen.getByRole('tab', { name: /最近任务/ }))
     expect(await screen.findByText('创建拍摄任务后会出现在这里。')).toBeInTheDocument()
+  })
+
+  it('shows business preparation progress without exposing optimizer controls to users', async () => {
+    configureApi('user')
+    const preparingTask = { ...task, status: 'FINAL_RUNNING', activeResultSetId: 9, resultSet: {
+      id: 9, status: 'RUNNING', preparation: { status: 'RUNNING', attemptId: 42 },
+      images: Array.from({ length: 5 }, (_, index) => ({ id: index + 1, sortOrder: index + 1, status: 'QUEUED', shotRole: `top_shot_${index + 1}` })),
+    } }
+    apiMock.getTask.mockResolvedValue({ item: preparingTask })
+    apiMock.getTaskStatus.mockResolvedValue({ taskId: 1, status: 'FINAL_RUNNING', detailRevision: 0, operations: [], progress: { completed: 0, total: 5 } })
+    window.history.replaceState(null, '', '/studio?task=1')
+    render(<App />)
+    expect(await screen.findByText('正在准备拍摄要求…')).toBeInTheDocument()
+    expect(screen.getAllByText('待拍摄')).toHaveLength(5)
+    expect(screen.queryByRole('button', { name: '查看提示词优化记录' })).not.toBeInTheDocument()
+    expect(apiMock.testPromptOptimization).not.toHaveBeenCalled()
+  })
+
+  it('admin can inspect optimized image prompts from generation records', async () => {
+    const operation = { id: 41, ownerType: 'generation_result_image', ownerId: 1, provider: 'image-2', status: 'SUCCEEDED', createdAt: '2026-10-26T00:00:00Z' }
+    apiMock.getRecord.mockResolvedValue({ item: { ...task, status: 'COMPLETED', aiOperations: [operation] } })
+    apiMock.getTaskAiInvocation.mockResolvedValue({ item: { ...operation, requestFacts: { originalPrompt: '历史原文', prompt: '优化后的实际发送文本' }, modelInput: { prompt: '优化后的实际发送文本' } } })
+    window.history.replaceState(null, '', '/records?task=1')
+    render(<App />)
+    await userEvent.click(await screen.findByText('提示词与生成调用记录'))
+    await userEvent.click(await screen.findByRole('button', { name: '技术详情' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(await within(dialog).findByText('历史原文')).toBeInTheDocument()
+    expect(within(dialog).getByText('优化后的实际发送文本')).toBeInTheDocument()
+    expect(apiMock.getTaskAiInvocation).toHaveBeenCalledWith(1, 41, expect.any(AbortSignal))
   })
 
   it('shows a tombstone instead of stale garment details in preserved generation history', async () => {

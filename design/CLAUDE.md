@@ -13,7 +13,7 @@
 | `domain.md` | 0.1.0 领域模型设计：模块边界、核心术语、对象定义、状态流转、职责约束和当前实现映射 | 设计领域对象、API、数据库、状态机、Prompt DTO 或跨模块流程前 |
 | `00_product_overview/CLAUDE.md` | 产品定位、0.1.0 范围、产品需求 | **任何**产品/功能设计前 |
 | `01_generation_flow/CLAUDE.md` | 生成主流程、Image-2 输入策略、生成要素职责拆分 | 设计生成链路、任务包、prompt 策略时 |
-| `01_generation_flow/current_generation_workflow.md` | 当前三步直出工作流：15 个拍摄预设、三类固定成片 Prompt、状态机和版本冻结 | 设计或实现成片、重生和状态恢复时 |
+| `01_generation_flow/current_generation_workflow.md` | 当前三步工作流：拍摄预设、三类成片 Prompt、可选提示词优化与恢复冻结 | 设计或实现成片、重生和状态恢复时 |
 | `01_generation_flow/storyboard_preview_business_intent.md` | 历史分镜业务意图；其中五镜头商品表达要求可供拍摄预设设计参考 | 复盘旧流程或设计五镜头预设时 |
 | `01_generation_flow/final_image_business_intent.md` | 历史成片业务意图；商品保真、组图一致性和业务验收可参考，镜头 5 安全区以现行品类图位规则为准 | 评审成片质量时 |
 | `01_generation_flow/final_image_prompt_research_task_1457.md` | 最终成片 Prompt 研究结论：失败归因、有效/无效规则、黄金链路和系统采纳建议 | 复盘成片调研或决定成片系统改造时 |

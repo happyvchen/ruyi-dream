@@ -38,6 +38,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("072", "live_shot_preset_slots", "migration_live_shot_preset_slots"),
     ("073", "refresh_legacy_bottom_and_one_piece_final_prompts", "migration_refresh_legacy_bottom_and_one_piece_final_prompts"),
     ("074", "generation_detail_revision", "migration_generation_detail_revision"),
+    ("075", "final_prompt_optimization", "migration_final_prompt_optimization"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -51,6 +52,7 @@ PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
     ("assembly.final_image_top", "assembly", "生成成片 · 上装/针织/外套", "Image-2.5 Sunburst 上装类固定五镜头成片 Prompt。", 150),
     ("assembly.final_image_bottom", "assembly", "生成成片 · 裤装/半身裙", "Image-2.5 Sunburst 下装类固定五镜头成片 Prompt。", 160),
     ("assembly.final_image_one_piece", "assembly", "生成成片 · 连衣裙/连体/套装", "Image-2.5 Sunburst 连衣裙/连体/套装固定五镜头成片 Prompt。", 170),
+    ("assembly.final_prompt_optimizer", "assembly", "成片提示词优化规则", "整理五镜头成片提示词的系统规则；启用后仅影响新结果集。", 180),
 )
 
 REMOVED_PROMPT_CONFIG_KEYS: tuple[str, ...] = (
@@ -478,6 +480,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         for row in db.execute("SELECT version FROM schema_migrations").fetchall()
     }
     migration_functions = {
+        "migration_final_prompt_optimization": migration_final_prompt_optimization,
         "migration_generation_detail_revision": migration_generation_detail_revision,
         "migration_finalize_direct_prompt_generation_workflow": migration_finalize_direct_prompt_generation_workflow,
         "migration_remove_hero_product_info": migration_remove_hero_product_info,
@@ -1611,6 +1614,23 @@ def install_detail_revision_triggers(db: sqlite3.Connection, table: str, task_id
             END""")
 
 
+def migration_final_prompt_optimization(db: sqlite3.Connection) -> None:
+    for table, column, definition in (
+        ("prompt_configs", "enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("generation_result_sets", "prompt_preparation_json", "TEXT"),
+    ):
+        if not table_exists(db, table):
+            continue
+        if column not in {row[1] for row in db.execute(f"PRAGMA table_info({table})")}:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    # 新增字段也参与详情版本更新；旧结果集 NULL 表示历史直出链路。
+    for table in ("generation_result_sets", "generation_attempts"):
+        for event in ("insert", "update", "delete"):
+            db.execute(f"DROP TRIGGER IF EXISTS revision_{table}_{event}")
+    db.execute("DROP TRIGGER IF EXISTS revision_attempt_terminal_response")
+    migration_generation_detail_revision(db)
+
+
 def migration_generation_detail_revision(db: sqlite3.Connection) -> None:
     if not db.execute("PRAGMA table_info(generation_tasks)").fetchall():
         return
@@ -1626,6 +1646,7 @@ def migration_generation_detail_revision(db: sqlite3.Connection) -> None:
     install_detail_revision_triggers(db, "generation_attempts", """
         SELECT ROW.owner_id WHERE ROW.owner_type = 'generation_styling'
         UNION SELECT task_id FROM generation_previews WHERE id = ROW.owner_id AND ROW.owner_type = 'generation_preview'
+        UNION SELECT task_id FROM generation_result_sets WHERE id = ROW.owner_id AND ROW.owner_type = 'generation_result_set'
         UNION SELECT rs.task_id FROM generation_result_sets rs JOIN generation_result_images_new ri ON ri.result_set_id = rs.id
           WHERE ri.id = ROW.owner_id AND ROW.owner_type = 'generation_result_image'
     """, operational | {"progress_json", "request_snapshot_json", "response_snapshot_json", "provider_request_id"})
@@ -1635,6 +1656,7 @@ def migration_generation_detail_revision(db: sqlite3.Connection) -> None:
         BEGIN
           UPDATE generation_tasks SET detail_revision = detail_revision + 1 WHERE id IN (
             SELECT NEW.owner_id WHERE NEW.owner_type = 'generation_styling'
+            UNION SELECT task_id FROM generation_result_sets WHERE id = NEW.owner_id AND NEW.owner_type = 'generation_result_set'
             UNION SELECT rs.task_id FROM generation_result_sets rs JOIN generation_result_images_new ri ON ri.result_set_id = rs.id
               WHERE ri.id = NEW.owner_id AND NEW.owner_type = 'generation_result_image'
           );

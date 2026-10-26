@@ -42,7 +42,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { ApiError, cancelPageReads, getPageReadGeneration, api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl, stylingGarmentArchiveUrl } from './api'
-import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, DirectUploadItem, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, ObjectCleanupError, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, ShotPresetMatrix, ShotPresetSlot, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot, UploadSession, UploadSessionBatch } from './api'
+import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, DirectUploadItem, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, ObjectCleanupError, PromptOptimizationTest, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, ShotPresetMatrix, ShotPresetSlot, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot, UploadSession, UploadSessionBatch } from './api'
 import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { chooseDirectory, filesFromDirectory, getDirectoryHandle, storeDirectoryHandle, supportsDirectoryAccess } from './lib/directoryAccess'
@@ -614,7 +614,7 @@ export function App() {
         {page === 'library' && <LibraryPage garments={garments} run={run} role={role} onDeleteResult={noteDeleteOperationResult} uploadSessions={uploadSessions.filter((item) => item.scope === 'styling-garment')} uploadBatches={stylingUploadBatches} uploadBatchesLoaded={stylingUploadBatchesLoaded} refreshUploadSessions={() => refreshUploadSessions('styling_garment', 100)} markBrowserUploading={markBrowserUploading} showImport={libraryImportOpen} setShowImport={setLibraryImportOpen} importJobs={libraryImportJobs} setImportJobs={persistLibraryImportJobs} syncImportJobs={setLibraryImportJobs} />}
         {page === 'model' && <ModelPage models={models} role={role} run={run} />}
         {page === 'prompt-maintenance' && role === 'admin' && <PromptMaintenancePage run={run} />}
-        {page === 'records' && <RecordsPage records={records} detail={recordDetail} setDetail={setRecordDetail} openTaskInStudio={openTaskInStudio} run={run} onDeleteResult={noteDeleteOperationResult} />}
+        {page === 'records' && <RecordsPage isAdmin={role === 'admin'} records={records} detail={recordDetail} setDetail={setRecordDetail} openTaskInStudio={openTaskInStudio} run={run} onDeleteResult={noteDeleteOperationResult} />}
       </main>
     </div>
   )
@@ -2555,10 +2555,15 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   const hasFinalImages = images.some((image) => !!image.asset)
   const finalHistoryOperations = task ? operationFallbacks(task, localOperations, 'generation_result_image') : []
   const finalSlots = Array.from({ length: 5 }, (_, index) => images.find((image) => image.sortOrder === index + 1) ?? null)
+  const preparation = task?.resultSet?.preparation
+  const preparing = task?.status === 'FINAL_RUNNING' && ['PENDING', 'RUNNING'].includes(preparation?.status ?? '')
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
         <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="按当前服装类型冻结 5 个当前生效拍摄预设并发生成；可逐张检查、下载或重新生成。">最终成片</HeadingWithTooltip></div>
+        {preparing && <p role="status" className="edit-hint">正在准备拍摄要求…</p>}
+        {preparation?.status === 'FAILED' && <p role="alert" className="inline-error">{preparation.error}</p>}
+        {isAdmin && preparation?.attemptId && <button className="management-action" onClick={() => onOpenAICallLogs('成片提示词优化', ['generation_result_set'], preparation.attemptId!)}>查看提示词优化记录</button>}
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status">
             <AIOperationList operations={finalHistoryOperations} taskId={task?.id} ownerType="generation_result_image" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成成片 · Attempt #${operation.id}`, ['generation_result_image'], operation.id) : undefined} />
@@ -2573,7 +2578,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
                 </div>
               ) : (
                 <div className="image-placeholder">
-                  {image ? (image.activeAttempt ? attemptStatusText(image.activeAttempt) : statusText(image.status)) : '等待生成'}
+                  {preparing ? '待拍摄' : image ? (image.activeAttempt ? attemptStatusText(image.activeAttempt) : statusText(image.status)) : '等待生成'}
                   {image?.activeAttempt && isAttemptRunning(image.activeAttempt) && (
                     <small>
                       {(() => {
@@ -6262,6 +6267,9 @@ function PromptMaintenancePage({ run }: { run: any }) {
   const [placeholders, setPlaceholders] = useState<PromptPlaceholder[]>([])
   const [activeKey, setActiveKey] = useState('')
   const [draft, setDraft] = useState('')
+  const [enabled, setEnabled] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<{ context: string; result: PromptOptimizationTest } | null>(null)
   const [rendered, setRendered] = useState('')
   const [missing, setMissing] = useState<string[]>([])
   const [usedSegments, setUsedSegments] = useState<string[]>([])
@@ -6277,6 +6285,7 @@ function PromptMaintenancePage({ run }: { run: any }) {
       const nextItem = result.items.find((item) => item.key === nextKey) || result.items[0]
       setActiveKey(nextItem?.key ?? '')
       setDraft(nextItem?.content ?? '')
+      setEnabled(nextItem?.enabled ?? false)
       setRendered(nextItem?.renderedPreview ?? '')
       setMissing(nextItem?.missingPlaceholders ?? [])
       setUsedSegments(nextItem?.usedSegments ?? [])
@@ -6293,7 +6302,11 @@ function PromptMaintenancePage({ run }: { run: any }) {
   }, [activeKey])
 
   const activeItem = items.find((item) => item.key === activeKey) || items[0]
-  const dirty = Boolean(activeItem && draft !== activeItem.content)
+  const isOptimizer = activeKey === 'assembly.final_prompt_optimizer'
+  const canTestOptimization = isOptimizer || activeKey.startsWith('assembly.final_image_')
+  const testContext = JSON.stringify([activeKey, draft, attemptId])
+  const currentTest = testResult?.context === testContext ? testResult.result : null
+  const dirty = Boolean(activeItem && (draft !== activeItem.content || (isOptimizer && enabled !== !!activeItem.enabled)))
   const segments = items.filter((item) => item.groupType === 'segment')
   const assemblies = items.filter((item) => item.groupType === 'assembly')
 
@@ -6314,6 +6327,8 @@ function PromptMaintenancePage({ run }: { run: any }) {
     if (dirty && !window.confirm('当前 Prompt 有未保存修改，确定切换并放弃这些修改吗？')) return
     setActiveKey(key)
     setDraft(next.content)
+    setEnabled(next.enabled ?? false)
+    setTestResult(null)
     setRendered(next.renderedPreview)
     setMissing(next.missingPlaceholders)
     setUsedSegments(next.usedSegments)
@@ -6334,12 +6349,23 @@ function PromptMaintenancePage({ run }: { run: any }) {
 
   function save() {
     if (!activeItem) return
-    void run('保存 Prompt 配置中...', () => api.updatePromptConfig(activeItem.key, draft), (result: { item: PromptConfig; preview: { rendered: string; diagnostics: { missingPlaceholders: string[]; usedSegments: string[] } } }) => {
+    void run('保存 Prompt 配置中...', () => api.updatePromptConfig(activeItem.key, draft, isOptimizer ? enabled : undefined), (result: { item: PromptConfig; preview: { rendered: string; diagnostics: { missingPlaceholders: string[]; usedSegments: string[] } } }) => {
       setRendered(result.preview.rendered)
       setMissing(result.preview.diagnostics.missingPlaceholders)
       setUsedSegments(result.preview.diagnostics.usedSegments)
       void loadConfigs(result.item.key)
     }, { refresh: false })
+  }
+
+  function testOptimization() {
+    if (!activeItem || !attemptId || testing) return
+    const context = testContext
+    setTestResult(null)
+    void run('测试提示词优化中（不生图）...', async () => {
+      setTesting(true)
+      try { return await api.testPromptOptimization(activeItem.key, draft, attemptId) }
+      finally { setTesting(false) }
+    }, (result: PromptOptimizationTest) => setTestResult({ context, result }), { refresh: false })
   }
 
   function insertPlaceholder(name: string) {
@@ -6350,8 +6376,8 @@ function PromptMaintenancePage({ run }: { run: any }) {
     <section className="page workbench-page prompt-page">
       <PageTitle
         title="Prompt 维护"
-        subtitle="维护固定分镜和组装模板，普通用户无需接触这些底层配置。"
-        actions={<div className="toolbar"><span className="chip">Admin</span><button className="management-action" onClick={refreshPreview} disabled={!activeItem}><RefreshCw size={16} />刷新预览</button><button className="management-action" onClick={save} disabled={!activeItem || !dirty}><Save size={16} />保存</button></div>}
+        subtitle="维护拍摄要求和提示词优化规则，普通用户无需接触这些底层配置。"
+        actions={<div className="toolbar"><span className="chip">Admin</span>{!isOptimizer && <button className="management-action" onClick={refreshPreview} disabled={!activeItem}><RefreshCw size={16} />刷新预览</button>}<button className="management-action" onClick={save} disabled={!activeItem || !dirty}><Save size={16} />保存</button></div>}
       />
       <div className="prompt-maintenance-layout">
         <aside className="panel prompt-nav-panel">
@@ -6372,29 +6398,53 @@ function PromptMaintenancePage({ run }: { run: any }) {
                   <small>版本 {activeItem.contentHash.slice(0, 12)}</small>
                 </div>
               </div>
-              <textarea className="prompt-editor-textarea" value={draft} onChange={(event) => setDraft(event.target.value)} spellCheck={false} />
+              {isOptimizer && <div className="prompt-optimizer-settings">
+                <label className="prompt-optimizer-toggle"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /> 启用成片提示词优化</label>
+                <p className="edit-hint">默认关闭。保存后对新结果集生效；保存规则不会调用模型。</p>
+              </div>}
+              {canTestOptimization && !isOptimizer && <p className="edit-hint">优化时原样保留【参考图职责与优先级】【当前镜头的商品表达】【反伪影成像要求】三段；自定义模板可使用【锁定约束】段落。其余表达交由 LLM 整理。</p>}
+              <textarea className="prompt-editor-textarea" aria-label={isOptimizer ? '成片提示词优化规则正文' : 'Prompt 正文'} value={draft} onChange={(event) => setDraft(event.target.value)} spellCheck={false} />
             </>
           ) : <EmptyState title="暂无 Prompt 配置" text="后端还没有返回可维护的 Prompt 配置。" />}
         </section>
         <aside className="panel prompt-preview-panel">
+          {isOptimizer && <div className="prompt-side-section">
+            <h3>规则来源</h3>
+            <p className="edit-hint">摘录自 imagegen 的 SKILL.md、references/prompting.md、references/sample-prompts.md，以及 cli.md 中的两条提示词写法。按来源保留英文原文与完整示例，末尾单独列出本应用输入输出协议。</p>
+            {activeItem?.suggestedContent && <button className="management-action" disabled={draft === activeItem.suggestedContent} onClick={() => setDraft(activeItem.suggestedContent ?? '')}>填入 imagegen 原文摘录</button>}
+            <p className="edit-hint">填入会替换当前编辑草稿，点击保存后才生效。</p>
+          </div>}
           <div className="prompt-side-section">
-            <h3>历史调用上下文</h3>
-            <select value={attemptId ?? ''} onChange={(event) => setAttemptId(event.target.value ? Number(event.target.value) : undefined)}>
-              <option value="">样例数据</option>
+            <h3>{isOptimizer ? '测试上下文' : '历史调用上下文'}</h3>
+            <select aria-label="历史调用上下文" value={attemptId ?? ''} onChange={(event) => setAttemptId(event.target.value ? Number(event.target.value) : undefined)}>
+              <option value="">{isOptimizer ? '请选择历史成片调用' : '样例数据'}</option>
               {invocations.map((item) => <option key={item.id} value={item.id}>#{item.id} · {item.ownerType} · {dateText(item.createdAt)}</option>)}
             </select>
           </div>
-          <div className="prompt-side-section">
+          {!isOptimizer && <div className="prompt-side-section">
             <h3>{attemptId ? '当前草稿按历史事实重新渲染' : '预览'}</h3>
             <div className="prompt-rendered-section"><pre>{rendered}</pre></div>
-          </div>
+          </div>}
           {historicalPrompt && <div className="prompt-side-section"><h3>当时实际发送</h3><div className="prompt-rendered-section"><pre>{historicalPrompt}</pre></div></div>}
-          <div className="prompt-side-section">
+          {canTestOptimization && <div className="prompt-side-section">
+            <h3>优化测试</h3>
+            <p className="edit-hint">选择历史成片调用作为上下文。测试会调用 LLM 并记录结果，不生成图片、不修改原任务成片。</p>
+            <button className="management-action" disabled={!attemptId || !draft.trim() || testing} onClick={testOptimization}>{testing ? '优化测试中…' : '测试优化（仅 LLM）'}</button>
+            {currentTest && <div role="status"><p>测试记录 #{currentTest.attemptId} · 结构校验通过，锁定约束已原样保留；仍需人工检查语义。</p>
+              {currentTest.items.map((item) => <details key={item.shotId} open={currentTest.items.length === 1}>
+                <summary>镜头记录 {item.shotId} · {item.changeSummary}</summary>
+                <h4>原始渲染结果</h4><pre className="prompt-comparison-text">{item.originalPrompt}</pre>
+                <h4>优化正文</h4><pre className="prompt-comparison-text">{item.optimizedText}</pre>
+                <h4>最终发送文本（含锁定约束）</h4><pre className="prompt-comparison-text">{item.prompt}</pre>
+              </details>)}
+            </div>}
+          </div>}
+          {!isOptimizer && <div className="prompt-side-section">
             <h3>校验</h3>
             <Meta label="引用分段" value={usedSegments.length ? usedSegments.join('、') : '无'} />
             <Meta label="缺失占位符" value={missing.length ? missing.join('、') : '无'} />
-          </div>
-          <div className="prompt-side-section">
+          </div>}
+          {!isOptimizer && <div className="prompt-side-section">
             <h3>占位符</h3>
             <div className="prompt-placeholder-list">
               {placeholders.map((placeholder) => (
@@ -6404,7 +6454,7 @@ function PromptMaintenancePage({ run }: { run: any }) {
                 </button>
               ))}
             </div>
-          </div>
+          </div>}
         </aside>
       </div>
     </section>
@@ -6427,7 +6477,8 @@ function PromptNavGroup({ title, items, activeKey, onSelect }: { title: string; 
 
 type RecordViewMode = 'all' | 'batches' | 'tasks'
 
-function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDeleteResult }: {
+function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDeleteResult, isAdmin }: {
+  isAdmin: boolean
   records: GenerationTask[]
   detail: GenerationTask | null
   setDetail: Dispatch<SetStateAction<GenerationTask | null>>
@@ -7323,6 +7374,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
               <Meta label="状态" value={statusText(detail.status)} />
               <Meta label="选中搭配" value={`${detail.styling?.selectedMaterials?.length ?? 0} 件`} />
               <RecordImagePreview task={detail} />
+              {isAdmin && <RecordPromptHistory key={detail.id} task={detail} />}
               <button className="management-action" type="button" disabled={downloadChecking} onClick={() => startSingleRecordDownload(detail)}>
                 <Download size={14} /> {downloadChecking ? '检查成片中...' : '下载成片'}
               </button>
@@ -7364,6 +7416,28 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
       )}
     </section>
   )
+}
+
+function RecordPromptHistory({ task }: { task: GenerationTask }) {
+  const [selected, setSelected] = useState<AIOperation | null>(null)
+  const [record, setRecord] = useState<AICallRecord | null>(null)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    if (!selected) return
+    const controller = new AbortController()
+    setRecord(null)
+    setError('')
+    void api.getTaskAiInvocation(task.id, selected.id, controller.signal)
+      .then((result) => { if (!controller.signal.aborted) setRecord(result.item) })
+      .catch((cause) => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : '读取失败') })
+    return () => controller.abort()
+  }, [task.id, selected])
+  return <details>
+    <summary>提示词与生成调用记录</summary>
+    <AIOperationList operations={(task.aiOperations ?? []).filter((item) => item.ownerType === 'generation_result_set')} taskId={task.id} ownerType="generation_result_set" onOpenTechnicalDetails={setSelected} />
+    <AIOperationList operations={(task.aiOperations ?? []).filter((item) => item.ownerType === 'generation_result_image')} taskId={task.id} ownerType="generation_result_image" onOpenTechnicalDetails={setSelected} />
+    {selected && <AICallLogDialog dialog={{ title: operationLabel(selected), ownerTypes: [selected.ownerType], attemptId: selected.id, records: record ? [record] : [], loading: !record && !error, error }} onClose={() => setSelected(null)} />}
+  </details>
 }
 
 function TaskRecordRow({ item, active, bulkMode, selected, selectionDisabled = false, archiveMutationBusy = false, onSelect, onOpen, onOpenStudio, onManage }: {
@@ -8405,6 +8479,11 @@ function AICallLogDialog({ dialog, onClose }: {
                   {(record.completedAt || record.failedAt) && <span>结束: {dateText(record.completedAt ?? record.failedAt)}</span>}
                 </div>
                 {(record.technicalMessage || record.errorMessage) && <div className="inline-error">{record.technicalMessage || record.errorMessage}</div>}
+                {typeof record.requestFacts?.originalPrompt === 'string' && <details open>
+                  <summary>成片提示词优化前后</summary>
+                  <h4>原始渲染结果</h4><pre className="prompt-comparison-text">{record.requestFacts.originalPrompt}</pre>
+                  <h4>实际发送文本</h4><pre className="prompt-comparison-text">{String(record.requestFacts.prompt ?? '')}</pre>
+                </details>}
                 <div className="ai-log-json-grid">
                   <div>
                     <span>实际模型输入</span>
@@ -8805,6 +8884,7 @@ function isAttemptRunning(operation: AIOperation) {
 }
 
 function operationLabel(operation: AIOperation, index = 0) {
+  if (operation.ownerType === 'generation_result_set') return '拍摄准备'
   if (operation.ownerType === 'styling_garment_upload') return '搭配服装导入'
   if (operation.ownerType === 'styling_garment_tagging') return '服装标签识别'
   if (operation.ownerType === 'generation_styling') return 'AI 智能选搭'

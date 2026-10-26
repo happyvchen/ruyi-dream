@@ -27,3 +27,7 @@
 | 视觉生成 | GPT Image-2.5 Sunburst edits |
 
 旧 `GenerationPreview` 数据只用于历史记录兼容，不再创建；旧 preview endpoint 固定返回 `410 Gone`。
+
+## 成片准备快照
+
+GenerationResultSet 的 `prompt_preparation_json` 冻结配置、优化模式、准备状态及可复用的五镜头提示词；不增加新领域对象或前台步骤。文本优化调用复用 GenerationAttempt，owner_type 为 `generation_result_set`。普通用户只读准备状态，原始文本和模型调用详情仅管理员可见。

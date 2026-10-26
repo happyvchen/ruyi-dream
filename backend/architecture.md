@@ -114,3 +114,7 @@ media/<media-uuid>/_derived/final-cells/original-shot<1..6>.png
 列表走 `generation_task_summaries` / `generation_list_context`，批次列表统一复用摘要和批次元数据，查询次数不随任务数逐条增加。status 不装配媒体、选搭或历史快照；详情变化通过数据库 revision 触发器统一通知。`app/http_performance.py` 提供单层 gzip 和脱敏访问计量。
 
 维护脚本 `scripts/repair_media_metadata.py` 默认按 ID 有界处理 50 条，优先未归档任务、常用搭配服装和当前预设；`--after-id` 续跑，`--verify` 同时核对已有元数据的对象，`--include-archived` 渐进补齐长尾。每条对象处理结束才短事务写回，不在网络/图片处理期间持有 SQLite 写锁。不会调用外部 AI/provider。
+
+## 成片提示词优化
+
+`app/prompt_optimization.py` 只做文本分段、输入契约和输出结构校验；`main.py` 复用现有 Gemini 通道与后台任务，先准备整组文本再并发生图。配置和结果保存在结果集 JSON，调用审计复用 attempts。默认关闭；不增加服务、队列、LLM 识图或自动视觉验收。约束以 [当前工作流](../design/01_generation_flow/current_generation_workflow.md#成片提示词优化) 为准。

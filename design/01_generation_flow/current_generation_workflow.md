@@ -5,7 +5,7 @@
 ```text
 导入主推款
 → AI 智能选搭（Gemini，输出 selected_files + styling_plan）
-→ 最终成片（GPT Image-2.5 Sunburst edits，按五个固定镜头并发生成）
+→ 最终成片（可选 LLM 提示词整理 → GPT Image-2.5 Sunburst edits，按五个固定镜头并发生成）
 ```
 
 0.1.0 的生产候选链路不再生成分镜预览，也不存在动态拍摄剧本、`ShootScript` 或 `ShotPlan` 运行 artifact。导演约束由“拍摄预设 + 三类固定成片 Prompt 的五个镜头块”共同承担；代码只负责拍摄图位族路由、当前镜头、参考图顺序、选中造型摘要和用户补充要求等动态事实。
@@ -98,7 +98,7 @@ DRAFT
 - 不提供分镜预览步骤或 API；
 - 不保存新的分镜预览表记录；
 - 不提供动态拍摄剧本或镜头计划；
-- 不让 Gemini 动态生成成片 Prompt；
+- 不让 LLM 重新导演；仅允许按下述规则整理已渲染的成片提示词；
 - 不传同组成片作为连续性锚点；
 - 不引入自动视觉评分、自动验收或因质量判断触发的自动重生。
 
@@ -107,3 +107,21 @@ DRAFT
 - 商品、人物和背景事实来源边界见 [generation_responsibility_matrix.md](generation_responsibility_matrix.md)；
 - 五类镜头的商业职责见 [final_image_business_intent.md](final_image_business_intent.md)；
 - 三类五镜头规则见 [../02_brand_and_assets/category_shot_rules.md](../02_brand_and_assets/category_shot_rules.md)。
+
+## 成片提示词优化
+
+管理员在 Prompt 维护的 `assembly.final_prompt_optimizer` 配置系统规则与启用开关；默认关闭。槽位初始化为空，“填入 imagegen 原文摘录”只替换编辑草稿，保存后才生效。建议规则直接摘录 imagegen 的 `SKILL.md`、`references/prompting.md`、`references/sample-prompts.md`，以及 `references/cli.md` 中关于图片编号/角色和重复不变量的两条写法；按来源分组，保留英文原文、各来源内部顺序及所选完整示例，不翻译、不改写、不合并重写条目。覆盖结构、具体程度、合理补充范围、构图、锁定要求、图中文字、多图引用、迭代、商品摄影和换装/局部编辑/合成示例。API 参数、网络配置和无关资产类型不进入优化规则。本应用输入输出协议在末尾单独标明，限定示例仅供写法参考、不得覆盖已确认要求，不与 Skill 原文混写。不随外部 Skill 自动更新。首版复用当前 Gemini 通道，不增加独立模型设置页。
+
+新结果集创建时冻结启用模式、三类模板及引用分段、优化规则。启用后，后端先渲染五个镜头，再一次文本 LLM 调用输出五份独立正文；不再次识图或选搭。模板中【参考图职责与优先级】【当前镜头的商品表达】【反伪影成像要求】三段原样保留；自定义模板可用【锁定约束】段落明确需原样保留的部分。标题是文本分段契约，摄影规则本身仍由管理员维护。
+
+LLM 返回每个镜头的 shotId、optimizedText、changeSummary、conflicts。后端检查数量、唯一编号、正文、占位符和参考图编号，不通过时不提交新图片生成，也不自动退回直出；锁定约束由后端直接附加，摘要与检查数据不发送给 Image-2.5。结构校验不能代替语义审查或成片验收。可用性提升必须通过同输入、同参数、多样本的人工对照验证。
+
+优化的 sourcePackages、系统规则全文、模型、原始返回和错误保存到现有 GenerationAttempt，owner_type 为 generation_result_set；结果集 prompt_preparation_json 保存配置和可复用的最终提示词。图片 attempt 保留原始渲染与实际发送文本，历史 NULL 快照表示原直出链路。
+
+- 普通用户仍为三步，内部显示“正在准备拍摄要求”；管理员可查看优化记录。
+- 优化失败可继续重试；生图失败只复用冻结提示词，成功镜头保持不变。
+- 单张重生无新增要求时复用；有新增要求时仅重新整理目标镜头，继续使用结果集冻结的商品、模特、模板和预设。
+- 已有 provider task ID 的请求优先恢复原请求，不重新优化。
+- 取消后不提交新图片请求；若在途文本调用返回了合法结果，可保存供后续继续复用。
+- 运行中的配置修改不影响原结果集；重新一键成片才读取当前配置。
+- “测试优化”由 admin 显式触发，只调用 LLM，保存独立调用记录，不替换任务结果。可选历史图片调用测试单镜头，或历史整组优化调用测试整组。保存、读取、刷新渲染预览均不调用 AI。

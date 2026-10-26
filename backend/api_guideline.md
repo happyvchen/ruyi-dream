@@ -202,3 +202,10 @@ AI 选搭动态事实：
 `MediaAsset` 和服装封面返回 `thumbStatus/previewStatus = AVAILABLE | MISSING`，以派生元数据为准；MISSING 的 URL 为 null。`/api/media?variant=thumb|preview` 会检查实际对象，缺失返回 404 和 `private, no-store`，不在 GET 中生成派生图，也不回退原图。对象在 302 之后变为缺失时由浏览器显示占位，不声称后端能够观测 RustFS 的最终响应。原图下载与导出保持 `private, no-store`。
 
 仅 FastAPI 的 `HttpPerformanceMiddleware` 压缩 JSON/Text：阈值 1024 字节、gzip level 5、`Vary: Accept-Encoding`；图片、归档和 SSE 不压缩。网关不再重复 gzip API。访问日志只记录路由模板、方法、状态码、耗时、实际响应 body 字节、媒体档位与下载布尔值，不记录 query、Cookie、Authorization 或业务正文。302 字节仅是控制响应，RustFS 的媒体字节需通过 HAR/对象存储侧统计。
+
+## 成片提示词优化接口
+
+- Prompt 配置响应新增 `enabled`；优化规则槽位提供 `suggestedContent`，仅供管理员显式填入编辑器，运行时不作 fallback。
+- `PATCH /api/prompt-configs/{key}`：优化规则可同时保存 `content`、`enabled`；保存不调用模型。
+- `POST /api/prompt-configs/{key}/test-optimization`：仅 admin，输入 `content`、`attemptId`；支持优化规则或三类成片模板的历史上下文测试。返回测试 attemptId 与原始、优化、最终文本；失败保留审计记录。不改成片、不调用图像 provider。
+- 任务结果集新增 `preparation={status,error,attemptId}`，不返回配置和提示词正文；admin 使用现有 ai-invocations 接口查看详情。attempts 的 ownerType 支持 `generation_result_set`。

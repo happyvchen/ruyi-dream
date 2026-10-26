@@ -103,3 +103,10 @@ GenerationTask
 心跳 `updated_at`、锁/租约、运行次数、自动恢复时间/计数及 attempt 的阶段进度不递增，运行进度由 status 直接提供；运行中的 provider 原始请求/响应快照不触发详情刷新，技术详情按需读取。同值 UPDATE 不递增。`detailRevision` 不等于事务数，一笔事务改动多个子对象时可以增加多次，只保证单调变化。
 
 新增详情写表或字段时需在后续迁移中重建对应 revision 触发器并添加契约测试，不得只更新 `updated_at`。`idx_task_cover`、`idx_result_progress` 支持封面和进度查询。
+
+## Migration 075：成片提示词优化
+
+- `prompt_configs.enabled INTEGER NOT NULL DEFAULT 0`：仅 `assembly.final_prompt_optimizer` 使用；新槽位正文仍为空，不注入或回退默认规则。
+- `generation_result_sets.prompt_preparation_json TEXT`：冻结模式、configRows、准备状态、attemptId、错误和最终 packages；旧行 NULL 沿用直出兼容路径。
+- `generation_attempts.owner_type = generation_result_set`：复用原表保存整组/单镜头优化与测试，删除和取消纳入原生命周期。
+- 重建相关 detail_revision 触发器，准备状态变化可被轻量轮询发现。
