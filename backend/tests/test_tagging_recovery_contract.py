@@ -19,6 +19,17 @@ from app.generation_progress import (
 from conftest import insert_styling_garment
 
 
+def test_tagging_source_uses_configured_model_instead_of_model_generated_identity(monkeypatch):
+    monkeypatch.setattr(app_main.settings, "gemini_provider", "toapis")
+    monkeypatch.setattr(app_main.settings, "gemini_toapis_model", "deepseek-v4.1-flash")
+    ai_tags = {"category": "上装", "tag_meta": {
+        "tagger_provider": "gemini", "tagger_model": "gemini-3.8-flash"}}
+    meta = app_main.build_prompt_tag_meta(ai_tags, {"images": []}, provider=app_main.effective_text_provider())
+    assert meta["tagger_provider"] == "deepseek"
+    assert meta["tagger_model"] == "deepseek-v4.1-flash"
+    assert ai_tags["tag_meta"]["tagger_provider"] == "gemini"  # 原始响应仍保留，来源事实单独记录。
+
+
 def test_migration_065_repairs_database_where_063_was_already_recorded() -> None:
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
@@ -364,7 +375,7 @@ def test_generation_poller_resumes_due_persisted_tagging_retry(
             app_main._active_styling_garment_tagging_ids.discard(garment_id)
 
 
-def test_user_can_stop_waiting_tag_retry_and_poller_cannot_claim_it(client) -> None:
+def test_user_can_stop_waiting_tag_retry_and_poller_cannot_claim_it(client, monkeypatch) -> None:
     garment_id = insert_styling_garment(code="STOP-WAITING-LOOK", status="TAGGING_RUNNING")
     attempt_id = app_main.create_attempt("styling_garment_tagging", garment_id, "gemini", {})
     with get_db() as db:
@@ -378,6 +389,12 @@ def test_user_can_stop_waiting_tag_retry_and_poller_cannot_claim_it(client) -> N
     assert response.json()["item"]["taggingErrorCode"] == "USER_CANCELLED"
     assert response.json()["item"]["tagRetryAt"] is None
     assert client.post(f"/api/styling-garments/{garment_id}/stop-tagging").status_code == 409
+    def forbidden_schedule(job):
+        job.close()
+        pytest.fail("stopped tagging retry was scheduled")
+
+    monkeypatch.setattr(app_main.asyncio, "create_task", forbidden_schedule)
+    app_main.resume_due_styling_garment_tagging_retries()
     with get_db() as db:
         assert db.execute("SELECT tag_retry_at FROM styling_garments WHERE id = ?", (garment_id,)).fetchone()[0] is None
         assert db.execute("SELECT status FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()[0] == "CANCELLED"

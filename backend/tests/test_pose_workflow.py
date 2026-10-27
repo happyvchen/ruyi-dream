@@ -93,6 +93,8 @@ def test_pose_upload_and_read_do_not_call_ai(client, monkeypatch):
 
 @pytest.mark.parametrize("status", ["DRAFT", "READY"])
 def test_pose_recognition_is_explicit_and_saves_name_and_tags(client, monkeypatch, status):
+    monkeypatch.setattr(app_main.settings, "gemini_provider", "toapis")
+    monkeypatch.setattr(app_main.settings, "gemini_toapis_model", "deepseek-v4.1-flash")
     pose_id, _, code = seed_pose(name="原始文件名", status=status)
     prepare_task()
     monkeypatch.setattr(app_main, "gemini_vision_input", lambda *_: {"image": "pose"})
@@ -105,6 +107,8 @@ def test_pose_recognition_is_explicit_and_saves_name_and_tags(client, monkeypatc
     with get_db() as db:
         attempt = db.execute("SELECT * FROM generation_attempts WHERE owner_type = 'pose_tagging'").fetchone()
     snapshot = json.loads(attempt["request_snapshot_json"])
+    assert attempt["provider"] == snapshot["provider"] == "deepseek"
+    assert snapshot["model"] == "deepseek-v4.1-flash" and snapshot["channel"] == "toapis"
     asyncio.run(app_main.run_pose_recognition(pose_id, attempt["id"], snapshot["pose"], snapshot["prompt"]))
     item = client.get(f'/api/poses/{pose_id}').json()["item"]
     assert item["name"] == "正面插兜站姿" and item["code"] == code
@@ -119,12 +123,19 @@ def test_pose_recognition_is_explicit_and_saves_name_and_tags(client, monkeypatc
 
 
 def test_pose_selection_views_only_products_background_and_freezes_five_shots(client, monkeypatch):
+    monkeypatch.setattr(app_main.settings, "gemini_provider", "toapis")
+    monkeypatch.setattr(app_main.settings, "gemini_toapis_model", "deepseek-v4.1-flash")
     ids = prepare_task()
     pose_id, asset_id, code = seed_pose()
     calls = mock_selection(monkeypatch, code, asset_id)
     before = app_main.get_generation_task_by_id(ids["task_id"])["detailRevision"]
     task = run_selection(ids["task_id"])["item"]
     assert task["status"] == "POSE_SELECTION_READY"
+    with get_db() as db:
+        attempt = db.execute("SELECT * FROM generation_attempts WHERE owner_type = 'generation_pose_selection'").fetchone()
+    snapshot = json.loads(attempt["request_snapshot_json"])
+    assert attempt["provider"] == snapshot["provider"] == "deepseek"
+    assert snapshot["model"] == "deepseek-v4.1-flash" and snapshot["channel"] == "toapis"
     assert len(calls) == 1 and len(calls[0][1]) == 2  # hero + shared background, no pose originals
     assert len(task["poseSelection"]["shots"]) == 5
     assert task["detailRevision"] > before
@@ -168,6 +179,29 @@ def test_cancel_after_shortlist_never_calls_visual_or_creates_selection(monkeypa
     calls = mock_selection(monkeypatch, code, asset_id, after_shortlist=lambda: app_main.cancel_generation_task(ids["task_id"]))
     task = run_selection(ids["task_id"])["item"]
     assert task["status"] == "CANCELLED" and task["poseSelection"] is None and len(calls) == 1
+
+
+def test_pose_cancel_during_transport_backoff_stops_next_request(monkeypatch):
+    from app import gemini_provider
+    from app.generation_progress import ERROR_RATE_LIMITED
+
+    ids = prepare_task()
+    for index in range(5):
+        seed_pose(f"cancel-pose-{index}")
+    monkeypatch.setattr(app_main.settings, "gemini_provider", "toapis")
+    monkeypatch.setattr(app_main.settings, "toapis_api_key", "fake")
+    monkeypatch.setattr(app_main, "vision_reference_input", lambda item: {"data": b"test", "mime_type": "image/png"})
+    calls = []
+
+    def post(*args, **kwargs):
+        calls.append(1)
+        raise gemini_provider.GeminiProviderError("429", ERROR_RATE_LIMITED)
+
+    monkeypatch.setattr(gemini_provider, "_post_toapis_chat", post)
+    monkeypatch.setattr(gemini_provider.time, "sleep", lambda seconds: app_main.cancel_generation_task(ids["task_id"]))
+    task = run_selection(ids["task_id"])["item"]
+    assert len(calls) == 1
+    assert task["status"] == "CANCELLED" and task["poseSelection"] is None
 
 
 def test_archival_during_selection_is_rejected(monkeypatch):

@@ -44,6 +44,7 @@ from .gemini_provider import (
     GeminiProviderError,
     GeminiRetryDeferred,
     effective_gemini_model,
+    effective_text_provider,
     generate_gemini_json_text,
     gemini_channel,
     gemini_not_configured_message,
@@ -2959,7 +2960,7 @@ _active_styling_garment_tagging_ids: set[int] = set()
 
 
 def _get_tagging_semaphore() -> asyncio.Semaphore:
-    """打标并发闸门：限制同时调用 Gemini 打标的数量，超出的排队等待。
+    """打标并发闸门：限制同时调用 AI 打标的数量，超出的排队等待。
 
     懒初始化到当前事件循环，避免在导入期（无 loop）创建。
     """
@@ -4843,7 +4844,7 @@ async def run_select_generation_styling(
         if user_instruction is not None:
             persist_generation_task_stage_instruction(db, task_id, "ai_styling", effective_user_instruction, timestamp)
         db.execute("UPDATE generation_tasks SET status = 'STYLING_RUNNING', updated_at = ? WHERE id = ?", (timestamp, task_id))
-    attempt_id = create_attempt("generation_styling", task_id, "gemini")
+    attempt_id = create_attempt("generation_styling", task_id, effective_text_provider())
     progress = AttemptProgressRecorder(attempt_id)
     styling_plan: dict[str, Any] | None = None
 
@@ -4851,7 +4852,7 @@ async def run_select_generation_styling(
         progress.finish()
         with get_db() as db:
             current = db.execute("SELECT status FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
-            if not current or current["status"] == "CANCELLED":
+            if not current or current["status"] == "CANCELLED" or generation_attempt_cancelled(attempt_id):
                 if attempt_id:
                     finish_attempt(attempt_id, "CANCELLED", error_message=str(exc))
                 return {"item": get_generation_task_by_id(task_id)}
@@ -4894,7 +4895,7 @@ async def run_select_generation_styling(
     try:
         with get_db() as db:
             current = db.execute("SELECT status FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
-            if current and current["status"] == "CANCELLED":
+            if not current or current["status"] == "CANCELLED" or generation_attempt_cancelled(attempt_id):
                 if attempt_id:
                     progress.finish()
                     finish_attempt(attempt_id, "CANCELLED", response_snapshot=styling_plan)
@@ -5651,7 +5652,7 @@ async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: lis
     old_attempt = preparation.get("attemptId")
     if preparation.get("status") == "RUNNING" and old_attempt:
         finish_attempt(old_attempt, "FAILED", error_message="拍摄准备执行中断", error_code="PROCESS_INTERRUPTED")
-    attempt_id = create_attempt("generation_result_set", result_set_id, "gemini")
+    attempt_id = create_attempt("generation_result_set", result_set_id, effective_text_provider())
     preparation.update(status="RUNNING", attemptId=attempt_id, error=None)
     save_final_preparation(result_set_id, preparation)
     raw_text = ""
@@ -5661,7 +5662,7 @@ async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: lis
         system_prompt = preparation["configRows"][OPTIMIZER_KEY]["content"]
         request_snapshot = {"promptConfigKey": OPTIMIZER_KEY, "promptContentHash": text_hash(system_prompt),
                             "systemInstruction": system_prompt, "sourcePackages": pending,
-                            "model": effective_gemini_model(),
+                            **gemini_request_meta(),
                             "invocation": {"mode": "final_prompt_optimization", "providerCallStarted": False}}
         # 模型调用前保存源文本与系统提示词，供调用记录追溯。
         update_attempt_request_snapshot(attempt_id, request_snapshot)
@@ -5676,7 +5677,11 @@ async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: lis
         request_snapshot["invocation"]["providerCallStarted"] = True
         update_attempt_request_snapshot(attempt_id, request_snapshot)
         provider_call_started = True
-        raw_text = await generate_gemini_json_text(dumps(inputs), images=images, system_instruction=system_prompt)
+        raw_text = await generate_gemini_json_text(
+            dumps(inputs), images=images, system_instruction=system_prompt,
+            should_cancel=lambda: final_preparation_cancelled(task_id, result_set_id)
+            or generation_task_or_attempt_cancelled(task_id, attempt_id),
+        )
         optimized = parse_optimized_prompts(parse_gemini_json_object(raw_text), pending)
         for key, output in optimized.items():
             source = pending[key]
@@ -6873,8 +6878,8 @@ async def test_prompt_optimization(config_key: str, payload: PromptOptimizationT
     inputs = optimizer_input(packages)
     snapshot = {"promptConfigKey": OPTIMIZER_KEY, "systemInstruction": system_prompt, "prompt": dumps(inputs),
                 "promptContentHash": text_hash(system_prompt), "sourcePackages": packages,
-                "model": effective_gemini_model(), "invocation": {"mode": "optimization_test", "sourceAttemptId": payload.attemptId}}
-    attempt_id = create_attempt("generation_result_set", result_set_id, "gemini", request_snapshot=snapshot)
+                **gemini_request_meta(), "invocation": {"mode": "optimization_test", "sourceAttemptId": payload.attemptId}}
+    attempt_id = create_attempt("generation_result_set", result_set_id, effective_text_provider(), request_snapshot=snapshot)
     raw_text = ""
     try:
         images = optimizer_visual_inputs(packages, inputs)
@@ -8248,7 +8253,7 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
     request_snapshot = build_prompt_tagging_request_snapshot(garment, prompt)
     if not is_gemini_configured():
         message = f"{gemini_not_configured_message()}AI 识别不能生成替代标签。"
-        attempt_id = create_attempt("styling_garment_tagging", garment_id, "gemini", request_snapshot)
+        attempt_id = create_attempt("styling_garment_tagging", garment_id, effective_text_provider(), request_snapshot)
         finish_attempt(attempt_id, "FAILED", {"error": "gemini_not_configured"}, error_message=message)
         raise RuntimeError(message)
     attempt_id, retry_state = ensure_styling_garment_tagging_attempt(garment_id, request_snapshot)
@@ -8311,7 +8316,7 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
                     kind="contract",
                 )
                 logger.warning(
-                    "Gemini 打标输出截断/畸形，自动纠错重试第 %d 次，退避 %.1fs：%s",
+                    "AI 打标输出截断/畸形，自动纠错重试第 %d 次，退避 %.1fs：%s",
                     contract_retries,
                     retry_delay,
                     str(exc)[:200],
@@ -8339,11 +8344,11 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
                 attempt_id,
                 "FAILED",
                 {"raw_text": text, "raw_json": raw},
-                error_message=f"Gemini 打标结果未通过导入要求：{exc}",
+                error_message=f"AI 打标结果未通过导入要求：{exc}",
                 error_code=ERROR_UPLOAD_REQUIREMENT_NOT_MET,
             )
             raise GeminiProviderError(
-                f"Gemini 打标结果未通过导入要求：{exc}",
+                f"AI 打标结果未通过导入要求：{exc}",
                 ERROR_UPLOAD_REQUIREMENT_NOT_MET,
             ) from exc
         except Exception as exc:
@@ -8356,11 +8361,11 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
                         "raw_json": raw,
                         "contractRetries": contract_retries,
                     },
-                    error_message=f"Gemini 打标结果连续不符合契约：{exc}",
+                    error_message=f"AI 打标结果连续不符合契约：{exc}",
                     error_code=ERROR_MALFORMED_OUTPUT,
                 )
                 raise GeminiProviderError(
-                    f"Gemini 打标结果连续不符合契约（已自动重试 {contract_retries} 次）：{exc}",
+                    f"AI 打标结果连续不符合契约（已自动重试 {contract_retries} 次）：{exc}",
                     ERROR_MALFORMED_OUTPUT,
                 ) from exc
             contract_retries += 1
@@ -8381,7 +8386,7 @@ async def tag_styling_garment_with_gemini(garment_id: int) -> dict[str, Any]:
                 kind="contract",
             )
             logger.warning(
-                "Gemini 打标契约输出异常，自动纠错重试第 %d 次，退避 %.1fs：%s",
+                "AI 打标契约输出异常，自动纠错重试第 %d 次，退避 %.1fs：%s",
                 contract_retries,
                 retry_delay,
                 str(exc)[:200],
@@ -8421,7 +8426,7 @@ def ensure_styling_garment_tagging_attempt(
         retry_state = {}
     if row and row["tag_active_attempt_id"] and row["attempt_status"] == "RUNNING":
         return int(row["tag_active_attempt_id"]), retry_state
-    attempt_id = create_attempt("styling_garment_tagging", garment_id, "gemini", request_snapshot)
+    attempt_id = create_attempt("styling_garment_tagging", garment_id, effective_text_provider(), request_snapshot)
     with get_db() as db:
         db.execute(
             "UPDATE styling_garments SET tag_active_attempt_id = ?, updated_at = ? WHERE id = ?",
@@ -8594,7 +8599,7 @@ def image_selection_prompt_files(images: list[dict[str, Any]], limit: int) -> li
 
 
 class AIStylistContractError(ValueError, RuntimeError):
-    """Gemini AI Stylist returned JSON that does not match the production contract."""
+    """AI Stylist returned JSON that does not match the production contract."""
 
 
 class UploadRequirementNotMetError(AIStylistContractError):
@@ -8774,20 +8779,20 @@ def normalize_prompt_tagging_result(
     raw: Any,
     garment: dict[str, Any],
     *,
-    provider: str = "gemini",
+    provider: str | None = None,
     warnings: list[str] | None = None,
     review_reasons: list[str] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(raw, dict):
-        raise ValueError("Gemini 打标结果必须是 JSON 对象")
+        raise ValueError("AI 打标结果必须是 JSON 对象")
     selected_files = raw.get("selected_files")
     if isinstance(selected_files, list) and not selected_files:
         raise UploadRequirementNotMetError("selected_files 必须是非空数组")
     selected_image_ids = selected_image_ids_from_files(selected_files, garment.get("images") or [], MAX_GARMENT_IMAGE_INPUTS)[:MAX_GARMENT_SELECTED_IMAGES]
     ai_tags = raw.get("ai_tags")
     if not isinstance(ai_tags, dict):
-        raise ValueError("Gemini 打标结果缺少 ai_tags 对象")
-    tag_meta = build_prompt_tag_meta(ai_tags, garment, provider=provider, warnings=warnings, review_reasons=review_reasons)
+        raise ValueError("AI 打标结果缺少 ai_tags 对象")
+    tag_meta = build_prompt_tag_meta(ai_tags, garment, provider=provider or effective_text_provider(), warnings=warnings, review_reasons=review_reasons)
     return {
         "schema_version": str(ai_tags.get("schema_version") or ai_tags.get("schemaVersion") or PROMPT_TAGGING_RESULT_VERSION),
         "selected_files": selected_files,
@@ -8815,8 +8820,8 @@ def build_prompt_tag_meta(
         reasons.append("low_confidence")
     reasons = list(dict.fromkeys(reasons))
     return {
-        "tagger_provider": str(source_meta.get("tagger_provider") or provider),
-        "tagger_model": str(source_meta.get("tagger_model") or effective_gemini_model()),
+        "tagger_provider": provider,
+        "tagger_model": effective_gemini_model(),
         "result_format": str(source_meta.get("result_format") or "prompt_configured_json"),
         "overall_confidence": confidence if confidence is not None else 0.5,
         "needs_review": bool(reasons),
@@ -9172,14 +9177,14 @@ async def generate_gemini_json_object_with_reask(
             parse_error = error
         if attempt >= reask_limit:
             raise GeminiProviderError(
-                f"Gemini 返回内容不是合法 JSON（已重问 {attempt} 次）：{parse_error}",
+                f"模型返回内容不是合法 JSON（已重问 {attempt} 次）：{parse_error}",
                 ERROR_MALFORMED_OUTPUT,
             ) from parse_error
         attempt += 1
         reask_prompt = build_gemini_contract_correction_prompt(prompt, str(parse_error))
         retry_delay = generation_retry_backoff_seconds(attempt)
         logger.warning(
-            "Gemini 返回 JSON 解析失败，自动纠错重问第 %d 次，退避 %.1fs：%s",
+            "模型返回 JSON 解析失败，自动纠错重问第 %d 次，退避 %.1fs：%s",
             attempt,
             retry_delay,
             str(parse_error)[:200],
@@ -9491,6 +9496,14 @@ def generation_task_or_attempt_cancelled(task_id: int, attempt_id: int) -> bool:
     return not row or row["task_status"] == "CANCELLED" or row["attempt_status"] == "CANCELLED"
 
 
+def generation_attempt_cancelled(attempt_id: int | None) -> bool:
+    if attempt_id is None:
+        return False
+    with get_db() as db:
+        row = db.execute("SELECT status FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
+    return not row or row["status"] == "CANCELLED"
+
+
 def finish_attempt(
     attempt_id: int,
     status: str,
@@ -9699,6 +9712,11 @@ async def select_styling_with_gemini(
     attempt_id: int | None = None,
     progress: AttemptProgressRecorder | None = None,
 ) -> dict[str, Any]:
+    def ensure_styling_active() -> None:
+        if attempt_id and generation_task_or_attempt_cancelled(int(input_row["task_id"]), attempt_id):
+            raise RuntimeError("智能选搭已取消，停止后续模型调用")
+
+    ensure_styling_active()
     if not is_gemini_configured():
         raise RuntimeError(f"{gemini_not_configured_message()}AI Stylist 不能进入生产选搭。")
     if not request_snapshot.get("prompt"):
@@ -9721,10 +9739,12 @@ async def select_styling_with_gemini(
 
     def record_transport_retry(snapshot: dict[str, Any]) -> None:
         nonlocal transport_retries
+        ensure_styling_active()
         transport_retries = max(transport_retries, int(snapshot.get("transportRetries") or 0))
         persist_attempt_provider_progress(attempt_id, snapshot)
 
     while True:
+        ensure_styling_active()
         try:
             if progress:
                 progress.begin(
@@ -9739,8 +9759,10 @@ async def select_styling_with_gemini(
                 # 系统指令已并入 AI 选搭 Prompt 正文（prompt 内），不再单独下发 system_instruction。
                 system_instruction=request_snapshot.get("systemInstruction"),
                 on_retry=record_transport_retry,
+                should_cancel=lambda: bool(attempt_id) and generation_task_or_attempt_cancelled(int(input_row["task_id"]), attempt_id),
                 initial_retry_count=transport_retries,
             )
+            ensure_styling_active()
             latest_response = ai_stylist_response_diagnostic(raw_text=text, contract_retries=contract_retries)
             persist_attempt_provider_progress(attempt_id, latest_response)
             try:
@@ -9753,7 +9775,7 @@ async def select_styling_with_gemini(
                 )
                 persist_attempt_provider_progress(attempt_id, latest_response)
                 raise GeminiProviderError(
-                    f"Gemini 返回内容不是合法 JSON：{parse_error}",
+                    f"模型返回内容不是合法 JSON：{parse_error}",
                     ERROR_MALFORMED_OUTPUT,
                     provider_response=latest_response,
                 ) from parse_error
@@ -9776,15 +9798,16 @@ async def select_styling_with_gemini(
                 )
                 persist_attempt_provider_progress(attempt_id, latest_response)
                 raise GeminiProviderError(
-                    f"Gemini AI Stylist 结果不符合契约：{contract_error}",
+                    f"AI Stylist 结果不符合契约：{contract_error}",
                     ERROR_MALFORMED_OUTPUT,
                     provider_response=latest_response,
                 ) from contract_error
         except Exception as exc:
+            ensure_styling_active()
             if not is_ai_stylist_contract_retryable(exc):
-                raise wrap_gemini_call_error("Gemini AI Stylist 调用失败", exc) from exc
+                raise wrap_gemini_call_error("AI Stylist 调用失败", exc) from exc
             if contract_retries >= retry_limit:
-                raise wrap_gemini_call_error("Gemini AI Stylist 调用失败", exc) from exc
+                raise wrap_gemini_call_error("AI Stylist 调用失败", exc) from exc
             contract_retries += 1
             current_retry_delay = min(
                 retry_delay * (2 ** max(0, contract_retries - 1)),
@@ -9806,7 +9829,7 @@ async def select_styling_with_gemini(
                     retryDelaySeconds=current_retry_delay,
                 )
             logger.warning(
-                "Gemini AI Stylist 契约输出异常，自动重试第 %d 次，退避 %.1fs：%s",
+                "AI Stylist 契约输出异常，自动重试第 %d 次，退避 %.1fs：%s",
                 contract_retries,
                 current_retry_delay,
                 str(exc)[:200],
@@ -9818,7 +9841,7 @@ async def select_styling_with_gemini(
 
 def normalize_ai_stylist_result(raw: Any, input_row: Any, candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw, dict):
-        raise AIStylistContractError("Gemini AI Stylist 结果必须是 JSON 对象")
+        raise AIStylistContractError("AI Stylist 结果必须是 JSON 对象")
     selected_image_ids = selected_image_ids_from_files(
         raw.get("selected_files"),
         loads(input_row["image_snapshot_json"], []),
@@ -9826,7 +9849,7 @@ def normalize_ai_stylist_result(raw: Any, input_row: Any, candidate_snapshot: di
     )[:MAX_HERO_SELECTED_IMAGES]
     plan_source = raw.get("styling_plan")
     if not isinstance(plan_source, dict):
-        raise AIStylistContractError("Gemini AI Stylist 结果缺少 styling_plan 对象")
+        raise AIStylistContractError("AI Stylist 结果缺少 styling_plan 对象")
     styling_plan = normalize_styling_plan(plan_source, candidate_snapshot)
     styling_plan["selected_hero_image_ids"] = selected_image_ids
     styling_plan["model_raw_output"] = raw
@@ -9919,7 +9942,8 @@ def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[s
 
 def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, Any], plan_source_mode: str = "production") -> dict[str, Any]:
     source = raw if isinstance(raw, dict) else {}
-    if source.get("schema_version") == "styling-plan-v2":
+    # 当前模型只返回最终方案业务字段，不承担版本标记。旧多候选格式仅保留读取兼容。
+    if "outfit_candidates" not in source or source.get("schema_version") == "styling-plan-v2":
         source = adapt_final_styling_plan(source, candidate_snapshot)
     hero = source.get("hero_understanding") if isinstance(source.get("hero_understanding"), dict) else {}
     intents = source.get("styling_intents") if isinstance(source.get("styling_intents"), list) else []
@@ -9996,14 +10020,15 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
 
 def adapt_final_styling_plan(source: dict[str, Any], candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
     """Validate the compact LLM contract, then adapt only its chosen outfit for legacy consumers."""
-    required = {"schema_version", "hero_understanding", "selected_materials", "empty_reason",
+    required = {"hero_understanding", "selected_materials", "empty_reason",
                 "generated_accessories", "wearing_notes", "reason_summary"}
-    if set(source) != required:
-        raise AIStylistContractError("styling-plan-v2 字段缺失或包含额外字段")
+    # 兼容旧 Prompt 已返回的版本元信息，但不要求模型生成它。
+    if set(source) - {"schema_version"} != required:
+        raise AIStylistContractError("最终造型方案业务字段缺失或包含额外字段")
     hero = source["hero_understanding"]
     hero_keys = {"category", "shot_category_family", "hero_visual_summary", "hero_selling_points"}
     if not isinstance(hero, dict) or set(hero) != hero_keys:
-        raise AIStylistContractError("hero_understanding 字段不符合 v2 契约")
+        raise AIStylistContractError("hero_understanding 商品理解字段缺失或包含额外字段")
     for key in ("category", "hero_visual_summary"):
         if not isinstance(hero[key], str) or not hero[key].strip():
             raise AIStylistContractError(f"hero_understanding.{key} 必须为非空字符串")
@@ -10038,6 +10063,7 @@ def adapt_final_styling_plan(source: dict[str, Any], candidate_snapshot: dict[st
     # Keep existing snapshot/UI/pose/final-image readers working without invented critiques or scores.
     return {
         **source,
+        "schema_version": "styling-plan-v2",  # 内部存储兼容标记，不属于模型输出契约。
         "selected_outfit_key": "selected_final",
         "outfit_candidates": [{
             "outfit_key": "selected_final",
@@ -10541,7 +10567,7 @@ def get_styling_source_and_selected_snapshots(selected_ids: list[int]) -> tuple[
     selected_set = set(selected_ids)
     invalid = selected_set - set(source_ids)
     if invalid:
-        raise RuntimeError(f"Gemini 返回了非法搭配服装 ID：{sorted(invalid)}")
+        raise RuntimeError(f"模型返回了非法搭配服装 ID：{sorted(invalid)}")
     return source_ids, [get_styling_garment_by_id(item_id) for item_id in selected_ids]
 
 
@@ -12288,19 +12314,28 @@ async def _generate_image_asset_unlocked(
         provider_request_history.append(str(payload["providerRequestId"]))
     submit_task_package = dict(task_package)
 
+    def ensure_active() -> None:
+        if generation_attempt_cancelled(attempt_id):
+            raise RuntimeError("图片生成已取消，停止后续提交")
+
     def report_upload(completed: int, total: int) -> None:
+        ensure_active()
         progress.update(PHASE_UPLOAD, completed=completed, total=total)
         if completed >= total:
             progress.begin(PHASE_SUBMIT, generationRetry=generation_retries)
 
     while True:
         if payload is None:
+            ensure_active()
             client_business_id = f"ruyi_img_a{attempt_id or 0}_r{generation_retries}"
             submit_task_package = {**submit_task_package, "clientBusinessId": client_business_id}
             progress.begin(PHASE_PREPARE)
             progress.begin(PHASE_UPLOAD, completed=0, total=image_input_total, generationRetry=generation_retries)
             try:
-                payload = await asyncio.to_thread(run_image_provider_submit, submit_task_package, output_key, report_upload)
+                payload = await asyncio.to_thread(
+                    run_image_provider_submit, submit_task_package, output_key, report_upload,
+                    lambda: generation_attempt_cancelled(attempt_id),
+                )
             except ImageProviderError as exc:
                 if classify_attempt_error(exc) != ERROR_SUBMISSION_UNKNOWN:
                     raise
@@ -12391,6 +12426,7 @@ async def _generate_image_asset_unlocked(
             and is_generation_retryable_error(error_code)
             and generation_retries < settings.generation_submit_retry_limit
         ):
+            ensure_active()
             uploaded_inputs = payload.get("imageInputs")
             if isinstance(uploaded_inputs, list) and uploaded_inputs:
                 submit_task_package = {**task_package, "imageInputs": uploaded_inputs}
@@ -12595,8 +12631,9 @@ async def deliver_with_retries(
     )
 
 
-def run_image_provider_submit(task_package: dict[str, Any], output_key: str, on_progress: Any = None) -> dict[str, Any]:
-    return asyncio.run(get_image_provider().submit(task_package, output_key, on_progress))
+def run_image_provider_submit(task_package: dict[str, Any], output_key: str, on_progress: Any = None,
+                              should_cancel: Any = None) -> dict[str, Any]:
+    return asyncio.run(get_image_provider().submit(task_package, output_key, on_progress, should_cancel))
 
 
 def run_image_provider_check(provider_response: dict[str, Any], output_key: str) -> dict[str, Any]:
@@ -12679,6 +12716,8 @@ async def _generate_single_final_image_unlocked(
         return 0
     if attempt_id is None:
         attempt_id = create_attempt("generation_result_image", image_id, "image-2")
+    if generation_attempt_cancelled(attempt_id):
+        return 0
     lease_generation_result_image(image_id, attempt_id)
     with get_db() as db:
         row = get_final_image_generation_state(db, image_id)
@@ -12726,7 +12765,7 @@ async def _generate_single_final_image_unlocked(
                 final_image_generation_state_sql(),
                 (image_id,),
             ).fetchone()
-            if final_image_generation_cancelled(current, result_set_id):
+            if final_image_generation_cancelled(current, result_set_id) or generation_attempt_cancelled(attempt_id):
                 finish_attempt(attempt_id, "CANCELLED", response_snapshot=provider_response, error_message=str(exc))
                 persist_attempt_provider_request_id(attempt_id, provider_response)
                 return 0
@@ -12750,7 +12789,7 @@ async def _generate_single_final_image_unlocked(
             final_image_generation_state_sql(),
             (image_id,),
         ).fetchone()
-        if final_image_generation_cancelled(current, result_set_id):
+        if final_image_generation_cancelled(current, result_set_id) or generation_attempt_cancelled(attempt_id):
             finish_attempt(attempt_id, "CANCELLED", response_snapshot=provider_response, output_asset_id=asset_id)
             persist_attempt_provider_request_id(attempt_id, provider_response)
             return asset_id
@@ -13812,14 +13851,14 @@ async def recognize_pose(pose_id: int) -> dict[str, Any]:
         prompt = render_prompt_template("assembly.pose_tagging", runtime)
     except RuntimeError as exc:
         raise HTTPException(409, "请联系管理员在 Prompt 维护中配置姿势识别规则") from exc
-    snapshot = {"prompt": prompt, **prompt_execution_facts("assembly.pose_tagging", prompt, runtime), "pose": pose}
+    snapshot = {**gemini_request_meta(), "prompt": prompt, **prompt_execution_facts("assembly.pose_tagging", prompt, runtime), "pose": pose}
     with get_db() as db:
         db.execute("BEGIN IMMEDIATE")
         current = pose_row(db, pose_id)
         ensure_pose_editable(current)
         if current["updated_at"] != pose["updatedAt"]:
             raise HTTPException(409, "姿势已变化，请刷新后重新识别")
-        attempt_id = create_attempt("pose_tagging", pose_id, "gemini", snapshot, db=db)
+        attempt_id = create_attempt("pose_tagging", pose_id, effective_text_provider(), snapshot, db=db)
         db.execute("UPDATE poses SET status = 'TAGGING_RUNNING', tag_error_code = NULL, tag_attempt_id = ?, updated_at = ? WHERE id = ?", (attempt_id, now_iso(), pose_id))
     schedule_background_generation(run_pose_recognition(pose_id, attempt_id, pose, prompt), job_key=f"pose_tagging:{pose_id}")
     return get_pose(pose_id)
@@ -13927,7 +13966,7 @@ def claim_pose_selection(task_id: int, user_instruction: str | None, trigger: st
     prompt, diagnostics = render_prompt_config("assembly.pose_selection", runtime, rows=config)
     if diagnostics["missingPlaceholders"]:
         raise HTTPException(409, "请联系管理员在 Prompt 维护中配置姿势选搭规则与品牌信息")
-    snapshot = {"promptConfigKey": "assembly.pose_selection", "prompt": prompt, "promptConfigSnapshot": config,
+    snapshot = {**gemini_request_meta(), "promptConfigKey": "assembly.pose_selection", "prompt": prompt, "promptConfigSnapshot": config,
         "workflow": "shared_background_v1", "runtime": runtime, "poses": library, "references": [{**dict(row), "backgroundAsset": get_media_asset_by_id(row["background_asset_id"])} for row in references],
         "stylingId": styling["id"], "inputVersionId": styling["input_version_id"], "invocation": {"mode": trigger, "target": "pose_selection"}}
     with get_db() as db:
@@ -13937,7 +13976,7 @@ def claim_pose_selection(task_id: int, user_instruction: str | None, trigger: st
                 or current["active_styling_id"] != styling["id"] or current["current_input_version_id"] != styling["input_version_id"]
                 or (current["auto_run_target"] and trigger != "auto_run")):
             raise HTTPException(409, "任务已变化，请刷新后重新选姿势")
-        attempt_id = create_attempt("generation_pose_selection", task_id, "gemini", snapshot, db=db)
+        attempt_id = create_attempt("generation_pose_selection", task_id, effective_text_provider(), snapshot, db=db)
         db.execute("UPDATE generation_tasks SET status = 'POSE_SELECTION_RUNNING', pose_workflow_enabled = 1, pose_selection_user_instruction = ?, updated_at = ? WHERE id = ?", (instruction, now_iso(), task_id))
     return attempt_id, runtime, library, [dict(row) for row in references], styling, config, snapshot
 
@@ -13980,7 +14019,10 @@ async def execute_pose_selection(task_id: int, attempt_id: int, runtime: dict[st
         update_attempt_request_snapshot(attempt_id, snapshot)
         if generation_task_or_attempt_cancelled(task_id, attempt_id):
             return
-        raw_text = await generate_gemini_json_text(prompt, [vision_reference_input(item) for item in packed])
+        raw_text = await generate_gemini_json_text(
+            prompt, [vision_reference_input(item) for item in packed],
+            should_cancel=lambda: generation_task_or_attempt_cancelled(task_id, attempt_id),
+        )
         raw = parse_gemini_json_object(raw_text)
         persist_attempt_provider_progress(attempt_id, {"shortlist": raw})
         if generation_task_or_attempt_cancelled(task_id, attempt_id):

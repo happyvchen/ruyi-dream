@@ -27,7 +27,6 @@
 
 【唯一输出契约】
 仅输出严格 JSON，不加 Markdown。顶层仅 selected_files 与 styling_plan。styling_plan 字段如下，全部必填；不添加候选、评分或重复商品列表。
-- schema_version：固定 "styling-plan-v2"。
 - hero_understanding：包含 category（真实中文品类）、shot_category_family（上装为 "top"，裤/半裙为 "bottom"，连衣裙/连体服/完整套装为 "one_piece"；西装马甲为 "top"）、hero_visual_summary（简短商品描述）、hero_selling_points（最多 8 项可见卖点的字符串数组）。
 - selected_materials：数组，每项仅 material_code（原样复制库内 code）与 wearing_method（1–120 字的穿法）；可为 []，不重复，最多 4 件。
 - empty_reason：有搭配时为 ""；空搭配时为 "complete_look"（本身完整）、"no_suitable_match"（无合适商品）或 "user_requested"（用户明确不搭配）。

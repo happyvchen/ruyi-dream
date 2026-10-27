@@ -74,7 +74,7 @@ class Settings:
     trust_reverse_proxy_auth = os.getenv("APP_TRUST_REVERSE_PROXY_AUTH", "false").lower() in {"1", "true", "yes", "on"}
     gemini_api_key = os.getenv("GEMINI_API_KEY", "")
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
-    # Gemini 调用通道：direct=google-genai 直连；toapis=ToAPIs OpenAI 兼容中转。
+    # 兼容保留 GEMINI_* 名称：direct=Gemini 直连；toapis=OpenAI 兼容文本/视觉通道。
     gemini_provider = (os.getenv("GEMINI_PROVIDER") or "direct").strip().lower() or "direct"
     # ToAPIs 通道使用的模型 ID；留空则复用 GEMINI_MODEL。
     gemini_toapis_model = (os.getenv("GEMINI_TOAPIS_MODEL") or "").strip()

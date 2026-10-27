@@ -10,7 +10,7 @@
 浏览器 ─→ frontend (Nginx SPA, :5173)
        ─→ backend  (FastAPI, :8000) ─→ SQLite (deployment/app-data/backend/app.sqlite3)
        │                            ─→ 对象存储 (S3 兼容, 默认本机 RustFS http://rustfs:9000)
-       │                            ─→ Gemini (GEMINI_PROVIDER: toapis 中转 / direct 直连)
+       │                            ─→ 文本/视觉理解 (toapis: DeepSeek V4.1 Flash / direct: Gemini)
        │                            ─→ 成片模型 (toapis: Image-2.5 Sunburst / fal: Image-2)
        └─→ 图片 presigned URL 直连对象存储 (:9000, 必须浏览器可达)
 ```
@@ -66,16 +66,16 @@ APP_MEDIA_PRESIGN_SAFETY_MARGIN_SECONDS=120
 
 # AI 通道
 GEMINI_PROVIDER=toapis                 # 国内无需 VPN;direct 需 GEMINI_API_KEY 且能访问 googleapis.com
-GEMINI_TOAPIS_MODEL=gemini-3.8-flash  # ToAPIs 当前生产 Gemini Flash 路由
-GEMINI_TOAPIS_TIMEOUT_SECONDS=300      # Gemini(ToAPIs) 读取响应超时;慢请求可适当放大
-GEMINI_TOAPIS_CONNECT_TIMEOUT_SECONDS=60 # Gemini(ToAPIs) 连接/导入请求体超时;base64 图片上行慢时重点调它
+GEMINI_TOAPIS_MODEL=deepseek-v4.1-flash # ToAPIs 模型 ID，保留兼容变量名
+GEMINI_TOAPIS_TIMEOUT_SECONDS=300      # 文本模型(ToAPIs) 读取响应超时;慢请求可适当放大
+GEMINI_TOAPIS_CONNECT_TIMEOUT_SECONDS=60 # 文本模型(ToAPIs) 连接/导入请求体超时;base64 图片上行慢时重点调它
 AI_STYLIST_CONTRACT_RETRY_LIMIT=3      # AI Stylist 结果缺契约字段时的自动重问次数
 AI_STYLIST_CONTRACT_RETRY_DELAY_SECONDS=15 # AI Stylist 契约重试前等待秒数
 GPT_IMAGE2_PROVIDER=toapis
 GPT_IMAGE2_MODEL_ID=gpt-image-2.5-sunburst
 TOAPIS_API_KEY=sk-...
 TOAPIS_BASE_URL=https://toapis.cn      # 只填写 origin，不要追加 /v1
-TOAPIS_MAX_CONCURRENCY=5              # ToAPIs 全局并发:Gemini/Image-2/API 导入与状态查询共享
+TOAPIS_MAX_CONCURRENCY=5              # ToAPIs 全局并发:文本模型/Image-2/API 导入与状态查询共享
 TOAPIS_IMAGE_SUBMIT_TIMEOUT_SECONDS=180 # Image-2 创建任务单次提交请求超时
 GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT=3  # 提交结果未知时，每张图最多对账/补提次数
 GENERATION_UNKNOWN_SUBMISSION_RETRY_DELAY_SECONDS=15 # 提交结果未知重试前等待秒数
@@ -85,6 +85,8 @@ GENERATION_STATUS_RETRY_LIMIT=15      # 状态查询连续瞬时失败重试次�
 ```
 
 要点:
+
+- 文本/视觉理解模型统一由 `GEMINI_TOAPIS_MODEL` 配置，覆盖服装挑图打标、AI 选搭、姿势识别/选择及可选提示词整理。切换前等待在途任务和持久重试结束，再更新实际使用的 env 文件并重建后端容器；裸跑后端需重启进程。保留现有 Prompt、历史标签与成片，不触发批量重跑。需回滚时将模型改回 `gemini-3.8-flash`。此次仅核实模型目录与公开协议，未进行付费推理验收；思考模式和输出预算沿用模型默认值，不假定 DeepSeek 直连接口的可选参数被 ToAPIs 完整转发。
 
 - 成片默认使用 ToAPIs `gpt-image-2.5-sunburst` 普通版，保留 `GPT_IMAGE2_*` 配置名。升级已有环境时同步修改实际 `.env` 的 `GPT_IMAGE2_MODEL_ID`，再重建后端容器。模型在提交时读取当前配置，切换应安排在生成空闲时；已提交任务继续按原 ID 查询，历史结果和快照不改写。
 
@@ -274,7 +276,7 @@ docker compose start backend
 
 - 打标/选搭/拍摄剧本失败或 `geminiConfigured:false`:`toapis` 通道查 `TOAPIS_API_KEY`,`direct` 通道查 `GEMINI_API_KEY` 与 googleapis.com 连通性;报"额度不足"时到 ToAPIs 控制台看余额(多图请求预扣费较高)。
 - 生图失败或 `imageProviderConfigured:false`:查 `GPT_IMAGE2_PROVIDER` 对应的 key(toapis→`TOAPIS_API_KEY`,fal→`FAL_KEY`)与出站网络。
-- 多任务批量生成遇到 429/超时:先降低 `TOAPIS_MAX_CONCURRENCY`;它同时影响 Gemini(ToAPIs)、Image-2(ToAPIs) 和批次一键成片推进。
+- 多任务批量生成遇到 429/超时:先降低 `TOAPIS_MAX_CONCURRENCY`;它同时影响 文本模型(ToAPIs)、Image-2(ToAPIs) 和批次一键成片推进。
 - UI 可对失败的单张成片重试;任务卡住时后端重启后 poller 会按租约(`GENERATION_IMAGE_TIMEOUT_SECONDS`)自动恢复。
 - 升级排障时保留:任务 id、失败图 id、backend 最后 300 行日志。
 

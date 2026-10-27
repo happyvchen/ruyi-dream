@@ -2333,7 +2333,7 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
       </div>
       <div className="stage-action-bar">
         <button className="task-action" disabled={!canSelect} onClick={() => task && void run(hasStyling ? '重新选搭中...' : '智能选搭中...', () => {
-          startLocalOperation({ taskId: task.id, ownerType: 'generation_styling', ownerId: task.id, provider: 'gemini' })
+          startLocalOperation({ taskId: task.id, ownerType: 'generation_styling', ownerId: task.id, provider: 'llm' })
           const previousTask = task
           setTask({
             ...task,
@@ -4675,7 +4675,7 @@ function BatchImportPanel({
           id: -(index + 1 + job.total + batchGarments.length),
           ownerType: 'styling_garment_tagging',
           ownerId: item.id,
-          provider: 'gemini',
+          provider: 'llm',
           status: 'RUNNING',
           startedAt: new Date().toISOString(),
           providerRequestId: item.code,
@@ -8129,7 +8129,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
             <div className="section-head"><strong>技术详情</strong></div>
             <TagObjectPanel title="标签元信息" data={item.tagMeta ?? {}} />
             {(item.tagAttempts ?? []).length > 0 && (
-              <JsonOutputPanel title="Gemini 调用过程事实" data={item.tagAttempts} />
+              <JsonOutputPanel title="AI 调用过程事实" data={item.tagAttempts} />
             )}
           </div>
         )}
@@ -8749,7 +8749,7 @@ function operationFallbacks(task: GenerationTask, localOperations: AIOperation[]
   if (remote.length) return remote.sort((left, right) => operationTime(right) - operationTime(left))
   if (local.length) return local
   if (ownerType === 'generation_styling' && task.status === 'STYLING_RUNNING') {
-    return [syntheticOperation(ownerType, task.id, 'gemini', task.updatedAt)]
+    return [syntheticOperation(ownerType, task.id, 'llm', task.updatedAt)]
   }
   if (ownerType === 'generation_preview' && task.status === 'PREVIEW_RUNNING') {
     return [syntheticOperation(ownerType, task.activeStoryboardPreviewId ?? task.activePreviewId ?? task.id, 'image-2', task.storyboardPreview?.createdAt || task.preview?.createdAt || task.updatedAt)]
@@ -8772,7 +8772,7 @@ function latestRunningTagAttempt(item: StylingGarment): AIOperation | null {
       errorMessage: attempt.errorMessage,
     }
   }
-  if (item.status === 'TAGGING_RUNNING') return syntheticOperation('styling_garment_tagging', item.id, 'gemini', item.updatedAt)
+  if (item.status === 'TAGGING_RUNNING') return syntheticOperation('styling_garment_tagging', item.id, 'llm', item.updatedAt)
   return null
 }
 
@@ -8793,13 +8793,15 @@ function mergeOperations(operations: AIOperation[]) {
 }
 
 function operationKey(operation: AIOperation) {
+  // 临时操作尚不知道实际模型；与后端返回的 Gemini / DeepSeek 记录合并。
+  const provider = ['llm', 'gemini', 'deepseek'].includes(operation.provider) ? 'llm' : operation.provider
   if (operation.ownerType === 'generation_result_image') {
     return `${operation.ownerType}:${operation.ownerId || operation.id}`
   }
   if (isStageOperation(operation.ownerType) && isAttemptRunning(operation)) {
-    return `${operation.ownerType}:${operation.provider}:active`
+    return `${operation.ownerType}:${provider}:active`
   }
-  return `${operation.ownerType}:${operation.provider}:${operation.ownerId > 0 ? operation.ownerId : 'current'}`
+  return `${operation.ownerType}:${provider}:${operation.ownerId > 0 ? operation.ownerId : 'current'}`
 }
 
 function isStageOperation(ownerType: string) {

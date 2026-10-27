@@ -20,6 +20,54 @@ from app.generation_progress import (
 )
 
 
+@pytest.mark.parametrize("channel,model,expected", [
+    ("toapis", "deepseek-v4.1-flash", "deepseek"),
+    ("toapis", "gemini-3.8-flash", "gemini"),
+    ("direct", "deepseek-v4.1-flash", "gemini"),
+])
+def test_text_model_dispatch_and_attribution(monkeypatch, channel, model, expected):
+    settings = SimpleNamespace(gemini_provider=channel, gemini_toapis_model=model,
+                               gemini_model="gemini-direct", toapis_api_key="test", gemini_api_key="test")
+    monkeypatch.setattr(gemini_provider, "get_settings", lambda: settings)
+    requests = []
+    monkeypatch.setattr(gemini_provider, "_post_toapis_chat_with_retry",
+                        lambda payload, **kwargs: requests.append(payload) or '{"ok":true}')
+
+    async def direct(*args):
+        return '{"direct":true}'
+    monkeypatch.setattr(gemini_provider, "_generate_via_google_with_retry", direct)
+    result = asyncio.run(gemini_provider.generate_gemini_json_text(
+        "Return JSON", [{"data": b"fixture", "mime_type": "image/webp"}], "Keep the schema"))
+    meta = gemini_provider.gemini_request_meta()
+    assert meta["provider"] == expected
+    assert meta["channel"] == meta["gemini_provider"] == channel
+    if channel == "toapis":
+        assert meta["model"] == model
+        assert json.loads(result) == {"ok": True}
+        payload = requests[0]
+        assert payload["model"] == model
+        assert payload["messages"][0] == {"role": "system", "content": "Keep the schema"}
+        assert payload["messages"][1]["content"][1] == {
+            "type": "image_url", "image_url": {"url": "data:image/webp;base64,Zml4dHVyZQ=="}}
+        assert payload["stream"] is True
+        assert payload["stream_options"] == {"include_usage": True}
+    else:
+        assert meta["model"] == "gemini-direct"
+        assert json.loads(result) == {"direct": True}
+        assert requests == []
+
+
+def test_deepseek_stream_keeps_json_separate_from_reasoning():
+    chunks = [
+        {"choices": [{"delta": {"reasoning_content": "analysis, not JSON"}}]},
+        {"choices": [{"delta": {"content": '{"ok":'}}]},
+        {"choices": [{"delta": {"content": 'true}'}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {"completion_tokens": 12}},
+    ]
+    lines = ["data: " + json.dumps(chunk) for chunk in chunks] + ["data: [DONE]"]
+    assert json.loads(gemini_provider.assemble_toapis_stream_text(lines)) == {"ok": True}
+
+
 def test_gemini_rate_limit_failure_waits_and_recovers_without_business_level_resubmit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

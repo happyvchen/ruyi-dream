@@ -1,11 +1,12 @@
-"""Gemini 文本/多模态调用通道。
+"""文本/多模态调用通道，保留 Gemini 模块名与配置名兼容已有部署。
 
 支持两种通道，通过 GEMINI_PROVIDER 切换：
 - direct: google-genai SDK 直连 Google（需要能访问 googleapis.com）。
 - toapis: 走 ToAPIs 的 OpenAI 兼容 chat completions 中转（国内可直连），
   复用 TOAPIS_API_KEY / TOAPIS_BASE_URL，模型 ID 可用 GEMINI_TOAPIS_MODEL 单独指定。
 
-本模块只负责“把 prompt + 图片输入送到 Gemini 并拿回文本”，不承担业务
+ToAPIs 当前使用 DeepSeek V4.1 Flash，也可通过原模型配置切回 Gemini。
+本模块只负责“把 prompt + 图片输入送到模型并拿回文本”，不承担业务
 schema 校验、attempt 记录和 JSON 解析，这些仍由调用方负责。
 """
 from __future__ import annotations
@@ -88,6 +89,11 @@ def effective_gemini_model() -> str:
     return settings.gemini_model
 
 
+def effective_text_provider() -> str:
+    """调用来源按实际模型记录；存量 Gemini 记录与 direct 通道保持兼容。"""
+    return "deepseek" if effective_gemini_model().lower().startswith("deepseek-") else "gemini"
+
+
 def is_gemini_configured() -> bool:
     settings = get_settings()
     if settings.gemini_provider == "toapis":
@@ -97,13 +103,16 @@ def is_gemini_configured() -> bool:
 
 def gemini_not_configured_message() -> str:
     if gemini_channel() == "toapis":
-        return "TOAPIS_API_KEY 未配置，Gemini(ToAPIs 通道) 不可用。"
+        return "TOAPIS_API_KEY 未配置，文本模型(ToAPIs 通道) 不可用。"
     return "GEMINI_API_KEY 未配置，Gemini(直连通道) 不可用。"
 
 
 def gemini_request_meta() -> dict[str, Any]:
     """写入 attempt request snapshot 的通道元信息，保证历史可追溯。"""
     return {
+        "provider": effective_text_provider(),
+        "channel": gemini_channel(),
+        # 保留历史快照键，避免已有管理工具读取失败。
         "gemini_provider": gemini_channel(),
         "model": effective_gemini_model(),
     }
@@ -116,6 +125,7 @@ async def generate_gemini_json_text(
     on_retry: Callable[[dict[str, Any]], None] | None = None,
     initial_retry_count: int = 0,
     defer_retry: bool = False,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> str:
     """调用 Gemini 生成 JSON 文本（返回原始文本，由调用方解析）。
 
@@ -132,6 +142,7 @@ async def generate_gemini_json_text(
             on_retry,
             initial_retry_count,
             defer_retry,
+            should_cancel,
         )
     return await _generate_via_google_with_retry(
         prompt,
@@ -140,6 +151,7 @@ async def generate_gemini_json_text(
         on_retry,
         initial_retry_count,
         defer_retry,
+        should_cancel,
     )
 
 
@@ -150,6 +162,7 @@ async def _generate_via_google_with_retry(
     on_retry: Callable[[dict[str, Any]], None] | None = None,
     initial_retry_count: int = 0,
     defer_retry: bool = False,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> str:
     """直连 Gemini 与 ToAPIs 通道遵守相同的 10 次、30/60/120/240 恢复口径。"""
     settings = get_settings()
@@ -160,6 +173,8 @@ async def _generate_via_google_with_retry(
     deadline = time.monotonic() + time_budget
     retries = max(0, int(initial_retry_count))
     while True:
+        if should_cancel and should_cancel():
+            raise RuntimeError("模型调用已取消")
         if time.monotonic() >= deadline:
             raise GeminiProviderError(
                 "Gemini(直连通道)重试已超过总时间预算",
@@ -169,6 +184,8 @@ async def _generate_via_google_with_retry(
         try:
             return await _generate_via_google(prompt, images, system_instruction)
         except Exception as exc:
+            if should_cancel and should_cancel():
+                raise RuntimeError("模型调用已取消") from exc
             error_code = getattr(exc, "error_code", None) or classify_provider_error(
                 status_code=_exception_status_code(exc),
                 message=str(exc),
@@ -285,6 +302,7 @@ def _generate_via_toapis(
     on_retry: Callable[[dict[str, Any]], None] | None = None,
     initial_retry_count: int = 0,
     defer_retry: bool = False,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> str:
     payload = build_toapis_chat_payload(prompt, images, system_instruction)
     return _post_toapis_chat_with_retry(
@@ -292,6 +310,7 @@ def _generate_via_toapis(
         on_retry=on_retry,
         initial_retry_count=initial_retry_count,
         defer_retry=defer_retry,
+        should_cancel=should_cancel,
     )
 
 
@@ -315,7 +334,7 @@ def _post_toapis_chat_with_retry(
 
     退避按 base * 2^(n-1) 增长并在 cap 封顶；默认 30/60/120/240 秒，
     之后保持 240 秒。429 若带 Retry-After 则尊重之。
-    should_cancel 若提供,退避期间命中即中断重试并抛出最后一次错误。
+    should_cancel 在每次请求前（包括取得并发槽位后）检查，取消后不再发送新请求。
     """
     settings = get_settings()
     retry_limit = max(0, settings.gemini_retry_limit)
@@ -327,13 +346,17 @@ def _post_toapis_chat_with_retry(
 
     attempt = max(0, int(initial_retry_count))
     while True:
+        if should_cancel and should_cancel():
+            raise RuntimeError("模型调用已取消")
         try:
             with toapis_concurrency_slot():
+                if should_cancel and should_cancel():
+                    raise RuntimeError("模型调用已取消")
                 if deadline is None:
                     deadline = time.monotonic() + time_budget
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise GeminiProviderError("Gemini(ToAPIs 通道) 限流重试已超过总时间预算", ERROR_RATE_LIMITED)
+                    raise GeminiProviderError("文本模型(ToAPIs 通道) 限流重试已超过总时间预算", ERROR_RATE_LIMITED)
                 single_request_timeout = max(0.1, float(settings.gemini_toapis_timeout_seconds))
                 return _post_toapis_chat(payload, read_timeout_seconds=min(remaining, single_request_timeout))
         except GeminiProviderError as exc:
@@ -354,7 +377,7 @@ def _post_toapis_chat_with_retry(
             if deadline is not None and time.monotonic() + wait >= deadline:
                 raise
             logger.warning(
-                "Gemini(ToAPIs 通道) 瞬时错误(%s),第 %d 次重试,退避 %.1fs: %s",
+                "文本模型(ToAPIs 通道) 瞬时错误(%s),第 %d 次重试,退避 %.1fs: %s",
                 error_code,
                 attempt,
                 wait,
@@ -412,7 +435,8 @@ def build_toapis_chat_payload(
     # ~100s 被 CF 以 HTTP 524 掐断,而服务端仍完成生成并计费。
     # stream_options.include_usage: 让最后一个数据块携带 usage(含
     # reasoning_tokens 明细),用于截断检测和失败诊断(2026-07-03 实测可用;
-    # 注意 max_tokens/response_format 实测被 ToAPIs 忽略,不要依赖)。
+    # 旧 Gemini 路由曾忽略 max_tokens/response_format，不能推广到其他模型。
+    # 此处保留共同协议；未核实的模型专用参数不发送，使用模型默认值。
     return {
         "model": effective_gemini_model(),
         "messages": messages,
@@ -467,7 +491,7 @@ def _post_toapis_chat(payload: dict[str, Any], *, read_timeout_seconds: float | 
         )
     except requests.RequestException as exc:
         # 连接/写/读超时统一归 CONN_RESET，由上层按有限预算自动重发。
-        message = f"Gemini(ToAPIs 通道) 请求失败: {exc}"
+        message = f"文本模型(ToAPIs 通道) 请求失败: {exc}"
         raise GeminiProviderError(message, classify_provider_error(message=str(exc))) from exc
     with response:
         if not response.ok:
@@ -490,7 +514,7 @@ def _post_toapis_chat(payload: dict[str, Any], *, read_timeout_seconds: float | 
                 else str(provider_error["code"])
             )
             raise GeminiProviderError(
-                f"Gemini(ToAPIs 通道) 请求失败: {summarize_upstream_http_error(response.status_code, raw_body)}",
+                f"文本模型(ToAPIs 通道) 请求失败: {summarize_upstream_http_error(response.status_code, raw_body)}",
                 error_code,
                 retry_after=retry_after,
                 provider_response={
@@ -509,7 +533,7 @@ def _post_toapis_chat(payload: dict[str, Any], *, read_timeout_seconds: float | 
                 return extract_toapis_chat_text(response.json())
             except ValueError as exc:
                 raise GeminiProviderError(
-                    f"Gemini(ToAPIs 通道) 响应不是合法 JSON: {(response.text or '')[:500]}",
+                    f"文本模型(ToAPIs 通道) 响应不是合法 JSON: {(response.text or '')[:500]}",
                     ERROR_MALFORMED_OUTPUT,
                 ) from exc
         return assemble_toapis_stream_text(iter_sse_lines(response))
@@ -615,12 +639,12 @@ def assemble_toapis_stream_text(lines: Any) -> str:
             # 作为已产出但不完整处理。
             if parts or reasoning_chars or dropped_data_lines or finish_reason or _usage_has_generated_output(usage):
                 raise GeminiProviderError(
-                    f"Gemini(ToAPIs 通道) 已收到部分输出后流式响应错误: {error_body}",
+                    f"文本模型(ToAPIs 通道) 已收到部分输出后流式响应错误: {error_body}",
                     ERROR_MALFORMED_OUTPUT,
                 )
             provider_error = normalize_toapis_error({"error": chunk["error"]})
             raise GeminiProviderError(
-                f"Gemini(ToAPIs 通道) 流式响应错误: {error_body}",
+                f"文本模型(ToAPIs 通道) 流式响应错误: {error_body}",
                 str(provider_error["code"]),
                 provider_response={"providerError": provider_error},
             )
@@ -640,14 +664,14 @@ def assemble_toapis_stream_text(lines: Any) -> str:
     text = "".join(parts)
     if dropped_data_lines:
         logger.warning(
-            "Gemini(ToAPIs 通道) 流中有 %d 条 data 行不是合法 JSON 被丢弃(可能存在流腐蚀)",
+            "文本模型(ToAPIs 通道) 流中有 %d 条 data 行不是合法 JSON 被丢弃(可能存在流腐蚀)",
             dropped_data_lines,
         )
     if finish_reason == "length":
         # 截断=正文已产出并计费,任何 JSON 修复都救不了。归 MALFORMED_OUTPUT:
         # 绝不在 provider 层重发(会重复计费),交由上层"修复+重问一次"处理。
         raise GeminiProviderError(
-            "Gemini(ToAPIs 通道) 输出被截断(finish_reason=length): "
+            "文本模型(ToAPIs 通道) 输出被截断(finish_reason=length): "
             f"completion_tokens={usage.get('completion_tokens', '?')}, "
             f"已收到正文 {len(text)} 字符(思考约 {reasoning_chars} 字符)。",
             ERROR_MALFORMED_OUTPUT,
@@ -661,7 +685,7 @@ def assemble_toapis_stream_text(lines: Any) -> str:
             else ERROR_PROVIDER_TRANSIENT_UNKNOWN
         )
         raise GeminiProviderError(
-            "Gemini(ToAPIs 通道) 流式响应未包含文本内容"
+            "文本模型(ToAPIs 通道) 流式响应未包含文本内容"
             f"(finish_reason={finish_reason or '?'}, 思考约 {reasoning_chars} 字符, "
             f"丢弃非法 data 行 {dropped_data_lines} 条)。",
             error_code,
@@ -673,13 +697,13 @@ def extract_toapis_chat_text(response_payload: dict[str, Any]) -> str:
     if response_payload.get("error"):
         if _usage_has_generated_output(response_payload.get("usage")):
             raise GeminiProviderError(
-                "Gemini(ToAPIs 通道) 已产生输出用量后返回错误信封: "
+                "文本模型(ToAPIs 通道) 已产生输出用量后返回错误信封: "
                 f"{json.dumps(response_payload['error'], ensure_ascii=False)[:500]}",
                 ERROR_MALFORMED_OUTPUT,
             )
         provider_error = normalize_toapis_error({"error": response_payload["error"]})
         raise GeminiProviderError(
-            "Gemini(ToAPIs 通道) 响应返回错误信封: "
+            "文本模型(ToAPIs 通道) 响应返回错误信封: "
             f"{json.dumps(response_payload['error'], ensure_ascii=False)[:500]}",
             str(provider_error["code"]),
             provider_response={"providerError": provider_error},
@@ -692,7 +716,7 @@ def extract_toapis_chat_text(response_payload: dict[str, Any]) -> str:
             else ERROR_PROVIDER_TRANSIENT_UNKNOWN
         )
         raise GeminiProviderError(
-            f"Gemini(ToAPIs 通道) 响应缺少 choices: {json.dumps(response_payload, ensure_ascii=False)[:500]}",
+            f"文本模型(ToAPIs 通道) 响应缺少 choices: {json.dumps(response_payload, ensure_ascii=False)[:500]}",
             error_code,
         )
     message = choices[0].get("message") if isinstance(choices[0], dict) else None
@@ -713,7 +737,7 @@ def extract_toapis_chat_text(response_payload: dict[str, Any]) -> str:
             or (isinstance(reasoning, str) and reasoning.strip())
         )
         raise GeminiProviderError(
-            f"Gemini(ToAPIs 通道) 响应缺少文本内容: {json.dumps(response_payload, ensure_ascii=False)[:500]}",
+            f"文本模型(ToAPIs 通道) 响应缺少文本内容: {json.dumps(response_payload, ensure_ascii=False)[:500]}",
             ERROR_MALFORMED_OUTPUT if has_output_facts else ERROR_PROVIDER_TRANSIENT_UNKNOWN,
         )
     return content

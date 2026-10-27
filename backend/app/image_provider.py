@@ -69,7 +69,10 @@ class ImageGenerationProvider:
         task_package: dict[str, Any],
         output_path: str,
         on_progress: UploadProgressCallback | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
+        if should_cancel and should_cancel():
+            raise RuntimeError("图片生成已取消")
         response = await self.generate(task_package, output_path)
         return {
             **response,
@@ -124,6 +127,7 @@ def post_generation_task_with_confirmed_failure_retries(
     error_label: str,
     timeout_seconds: int = 180,
     max_attempts: int = 11,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """创建 provider 任务。
 
@@ -131,8 +135,12 @@ def post_generation_task_with_confirmed_failure_retries(
     结果未知，必须停止，避免创建重复计费任务。
     """
     for index in range(max_attempts):
+        if should_cancel and should_cancel():
+            raise RuntimeError("图片生成已取消")
         try:
             with toapis_concurrency_slot():
+                if should_cancel and should_cancel():
+                    raise RuntimeError("图片生成已取消")
                 return post_json(
                     url,
                     payload,
@@ -187,6 +195,7 @@ class GPTImage2FalProvider(ImageGenerationProvider):
         task_package: dict[str, Any],
         output_path: str,
         on_progress: UploadProgressCallback | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         settings = get_settings()
         if not settings.fal_key:
@@ -195,6 +204,8 @@ class GPTImage2FalProvider(ImageGenerationProvider):
         uploaded_inputs, image_urls = prepare_fal_image_inputs(task_package.get("imageInputs", []), on_progress)
 
         provider_request = build_fal_request_snapshot(task_package, image_urls)
+        if should_cancel and should_cancel():
+            raise RuntimeError("图片生成已取消")
         submit_response = post_json(settings.gpt_image2_queue_url, provider_request, settings.fal_key, timeout=60)
         request_id = submit_response.get("request_id") or submit_response.get("requestId")
         provider_urls = {
@@ -296,6 +307,7 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
         task_package: dict[str, Any],
         output_path: str,
         on_progress: UploadProgressCallback | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         settings = get_settings()
         if not settings.toapis_api_key:
@@ -313,6 +325,7 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
                 error_label="GPT Image-2 toapis 请求失败",
                 timeout_seconds=settings.toapis_image_submit_timeout_seconds,
                 max_attempts=settings.generation_submit_retry_limit + 1,
+                should_cancel=should_cancel,
             )
         except ProviderSubmissionUnknownError as exc:
             exc.provider_response = {

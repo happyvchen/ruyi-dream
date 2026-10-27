@@ -157,6 +157,56 @@ def test_disabled_mode_does_not_call_optimizer(client, monkeypatch):
     assert "promptOptimization" not in images[0]
 
 
+@pytest.mark.parametrize("old_result", ["success", "failure"])
+def test_cancelled_image_attempt_cannot_replace_restarted_image(client, monkeypatch, old_result):
+    ids, result_set, image_ids = create_run(client, enabled=False)
+    image_id = image_ids[0]
+    restarted = []
+    old_asset = insert_media_asset("late-old-result.png")
+
+    async def generate(*args, **kwargs):
+        main.cancel_generation_task(ids["task_id"])
+        main.continue_active_final_result_set(ids["task_id"], result_set, ids["styling_id"], ids["preview_id"])
+        new_attempt = main.create_attempt("generation_result_image", image_id, "image-2")
+        main.lease_generation_result_image(image_id, new_attempt)
+        restarted.append(new_attempt)
+        if old_result == "failure":
+            raise RuntimeError("old provider failed after restart")
+        return old_asset, {"providerRequestId": "old-provider-task"}
+
+    monkeypatch.setattr(main, "generate_image_asset", generate)
+    asyncio.run(main.generate_single_final_image(ids["task_id"], result_set, image_id))
+    with get_db() as db:
+        row = db.execute("SELECT status, active_attempt_id, current_asset_id FROM generation_result_images_new WHERE id = ?", (image_id,)).fetchone()
+        old = db.execute("SELECT status, output_asset_id FROM generation_attempts WHERE owner_type = 'generation_result_image' AND owner_id = ? ORDER BY id LIMIT 1", (image_id,)).fetchone()
+    assert row["status"] == "RUNNING" and row["active_attempt_id"] == restarted[0]
+    assert row["current_asset_id"] is None
+    assert old["status"] == "CANCELLED"
+    if old_result == "success":
+        assert old["output_asset_id"] == old_asset
+
+
+def test_cancel_optimization_during_transport_backoff_sends_no_more_requests(client, monkeypatch):
+    from app import gemini_provider
+    from app.generation_progress import ERROR_RATE_LIMITED
+
+    ids, result_set, image_ids = create_run(client)
+    calls = []
+    monkeypatch.setattr(main.settings, "gemini_provider", "toapis")
+    monkeypatch.setattr(main.settings, "toapis_api_key", "fake")
+    monkeypatch.setattr(main, "generate_gemini_json_text", gemini_provider.generate_gemini_json_text)
+
+    def post(*args, **kwargs):
+        calls.append(1)
+        raise gemini_provider.GeminiProviderError("429", ERROR_RATE_LIMITED)
+
+    monkeypatch.setattr(gemini_provider, "_post_toapis_chat", post)
+    monkeypatch.setattr(gemini_provider.time, "sleep", lambda seconds: main.cancel_generation_task(ids["task_id"]))
+    asyncio.run(main.run_final_generation(ids["task_id"], result_set, image_ids))
+    assert len(calls) == 1
+    assert main.get_generation_task_row(ids["task_id"])["status"] == "CANCELLED"
+
+
 @pytest.mark.parametrize("raw", [None, {}, {"shots": []}, {"shots": [{"shotId": "1", "optimizedText": " "}]}])
 def test_unreadable_or_missing_text_remains_a_call_failure(raw):
     with pytest.raises(ValueError):
