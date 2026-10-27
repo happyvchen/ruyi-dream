@@ -8,8 +8,8 @@
 
 | 文件 | 内容 | 何时需要读 |
 |---|---|---|
-| `generation_flow.md` | 主推款输入版本 -> AI Stylist / StylingPlan -> 拍摄预设 -> 五张最终图 | 实现或调整生成主流程时 |
-| `current_generation_workflow.md` | 当前三步工作流、三类 Prompt 路由、可选提示词优化、拍摄预设和恢复 | 设计或实现成片时 |
+| `generation_flow.md` | 主推款输入版本 -> AI Stylist / StylingPlan -> 独立姿势与共享背景 -> 五张最终图 | 实现或调整生成主流程时 |
+| `current_generation_workflow.md` | 当前四步工作流、三类 Prompt 路由、可选多模态提示词优化、统一背景和恢复 | 设计或实现成片时 |
 | `storyboard_preview_business_intent.md` | 历史分镜业务意图；五镜头和商品表达要求可供预设设计参考 | 复盘旧流程时 |
 | `final_image_business_intent.md` | 生成成片原始业务意图：逐格兑现分镜导演意图、人物/商品事实源、五张组图与失败判定 | 设计、研究或评审成片 Prompt、参考图策略和成片质量时 |
 | `final_image_prompt_research_task_1457.md` | 最终成片 Prompt 研究结论：失败归因、有效/无效规则、黄金链路和系统采纳建议 | 复盘或实现成片 Prompt、单格输入和三类固定成片模板时 |
@@ -22,14 +22,16 @@
 | `prompt_rendering_refactor.md` | Prompt 渲染层重构设计：快照模型与 prompt 视图解耦、生图阶段去 JSON 治理元数据、参考图自然语言化、迁移阶段与本地渲染对比验收 | 修正 prompt 组装偏离 spec、去除 schema_version/priority_policy 噪音、实现 renderer 层时 |
 | `generation_responsibility_matrix.md` | 商品、模特、StylingPlan、三类固定 Prompt、动态事实、生成配饰和导出等要素由谁负责 | 分析生成问题归因和修复方案时 |
 
+- 姿势库与独立选搭：`pose_library_workflow.md`，涵盖初筛直接定选、四步状态机和历史兼容。
+
 ## 本地规则 (Local Rules)
 
-- AI Stylist 负责主推款理解、造型方向探索、多套 outfit 候选、Aesthetic Critic 质量判断和 `StylingPlan` 输出，不是一次性 ID 分类器。
+- AI Stylist 依据主推款、品牌信息和库内标签输出最终服装、穿法、文字配饰、空搭配原因和简短理由；不强制输出多候选、审美诊断或评分。完整穿着无需额外搭配，无合适商品可空搭配。
 - 0.1.0 阶段不做后端预筛选/排序/评分/质量判断；Prompt + 大模型读取未归档 READY 搭配服装库的全量 AI 标签事实卡并全权选搭，`ai_tags_json` 是 AI Stylist 的业务输入。
 - 选搭质量必须同时满足审美成立、Lily 品牌成立、主推款商品表达成立；只露出主推款但造型难看仍视为失败。
-- 五镜头的拍摄母版和姿势由 15 个当前生效拍摄预设槽位提供；单图更换立即生效，结果集创建时冻结当次五组资产；母版提供场景与构图并在整图编辑中替换原人物和原服装；商品表达规则由三类固定成片 Prompt 负责。
+- 背景与光线由同一张共享背景提供，姿势由独立姿势库选搭；一次初筛查看商品图、全库标签与镜头要求，直接定选，不再调用原图复核；冻结商品/模特版本、背景、五个不同姿势与成片规则。景别、构图和商品表达由三类固定成片 Prompt 负责。
 - GPT Image-2.5 Sunburst edits 负责最终单图生成，不负责选择商品、维护预设、导演决策或业务状态。
-- 最终图固定并发生成 5 个镜头；每张最多 6 个参考图 URL，拍摄母版必须排第一，不传遮罩；模特、主推款和搭配款多图按角色合成参考板。
+- 最终图固定并发生成 5 个镜头；每张最多 6 个参考图 URL，共享背景排第一，不传遮罩；模特、主推款和搭配款多图按角色合成参考板。
 
 ## 相关 (See Also)
 

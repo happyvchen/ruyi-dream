@@ -4,7 +4,7 @@
 
 本目录存放 ruyi-dream 0.1.0 的权威设计文档：产品范围、生成流程、搭配服装与媒体规则、UX、技术生产路线。
 
-0.1.0 形态是 B2B AI 数字化摄影棚：用户导入主推款，系统通过 AI Stylist 工作流理解主推款、探索并批判多套造型方案，再从搭配服装库选择真实可见的配角服饰或判断无需库内配角；随后按拍摄图位族和五个固定镜头选择当前生效的拍摄母版/姿势预设，通过三类固定成片 Prompt 与 GPT Image-2.5 Sunburst 多参考图编辑并发生成五张电商棚拍成片。分镜预览、旧“单货号默认组图方案”和动态拍摄剧本不属于当前主流程。
+0.1.0 形态是 B2B AI 数字化摄影棚：用户导入主推款，系统通过 AI Stylist 工作流理解主推款并按 Lily 品牌风格确定最终造型，再从搭配服装库选择真实可见的配角服饰或判断无需库内配角；随后按五镜头要求独立选择五个姿势，共用统一背景和光线，通过三类固定成片 Prompt 与 GPT Image-2.5 Sunburst 多参考图编辑并发生成五张电商棚拍成片。分镜预览、旧“单货号默认组图方案”和动态拍摄剧本不属于当前主流程。
 
 ## 文档索引 (Index)
 
@@ -13,7 +13,7 @@
 | `domain.md` | 0.1.0 领域模型设计：模块边界、核心术语、对象定义、状态流转、职责约束和当前实现映射 | 设计领域对象、API、数据库、状态机、Prompt DTO 或跨模块流程前 |
 | `00_product_overview/CLAUDE.md` | 产品定位、0.1.0 范围、产品需求 | **任何**产品/功能设计前 |
 | `01_generation_flow/CLAUDE.md` | 生成主流程、Image-2 输入策略、生成要素职责拆分 | 设计生成链路、任务包、prompt 策略时 |
-| `01_generation_flow/current_generation_workflow.md` | 当前三步工作流：拍摄预设、三类成片 Prompt、可选提示词优化与恢复冻结 | 设计或实现成片、重生和状态恢复时 |
+| `01_generation_flow/current_generation_workflow.md` | 当前四步工作流：统一背景和独立姿势、三类成片 Prompt、可选提示词优化与恢复冻结 | 设计或实现成片、重生和状态恢复时 |
 | `01_generation_flow/storyboard_preview_business_intent.md` | 历史分镜业务意图；其中五镜头商品表达要求可供拍摄预设设计参考 | 复盘旧流程或设计五镜头预设时 |
 | `01_generation_flow/final_image_business_intent.md` | 历史成片业务意图；商品保真、组图一致性和业务验收可参考，镜头 5 安全区以现行品类图位规则为准 | 评审成片质量时 |
 | `01_generation_flow/final_image_prompt_research_task_1457.md` | 最终成片 Prompt 研究结论：失败归因、有效/无效规则、黄金链路和系统采纳建议 | 复盘成片调研或决定成片系统改造时 |
@@ -45,6 +45,8 @@
 - **技术生产路线源头**：`04_implementation_guide/technical_route_and_operations.md`
 - **网络与媒体性能优化设计**：`04_implementation_guide/network_and_media_performance_optimization_plan.md`
 - **归档/删除策略源头**：`04_implementation_guide/archive_purge_policy.md`
+
+- 姿势库与独立选搭：`01_generation_flow/pose_library_workflow.md`，涵盖初筛直接定选、四步状态机和历史兼容。
 
 ## 本地规则 (Local Rules)
 

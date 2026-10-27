@@ -11,7 +11,7 @@
 | AI 选搭 | 主推款事实、可选搭配服装、品牌信息、用户选搭要求 | 输出可追溯 StylingPlan |
 | 最终成片 | `category_family`、`shot_index`、`shot_current`、`shot_styling`、`ref_shot_background`、`ref_shot_pose`、`ref_model_identity`、`ref_garment`、`final_image_user_instruction` | 描述当前镜头事实和参考图身份 |
 
-稳定的五镜头构图、商品展示重点、禁止项以及母版替换规则写在三类固定成片 Prompt 正文；代码不动态创作镜头。拍摄母版和姿势本身由当前生效拍摄预设提供，并在结果集创建时冻结。
+稳定的五镜头构图、商品展示重点、禁止项以及统一背景与姿势职责写在三类固定成片 Prompt 正文；代码不动态创作镜头。背景来自模特与背景，姿势来自独立姿势库；在选姿势时冻结，并由结果集复用。
 
 ## 3. 用户补充要求
 
@@ -19,8 +19,16 @@
 
 ## 4. 审计
 
-每次请求快照必须保留渲染后的最终 Prompt、实际使用的动态段、缺失占位符、参考图角色和顺序、冻结拍摄预设资产以及固定画质参数。
+每次请求快照必须保留渲染后的最终 Prompt、实际使用的动态段、缺失占位符、参考图角色和顺序、冻结背景与姿势资产以及固定画质参数。
 
 ## 5. 成片提示词优化边界
 
-新增 `assembly.final_prompt_optimizer` 系统规则槽位，默认关闭。输入为五份已渲染文本及实际参考图角色，不传完整业务 JSON 或重新识图；规则和模板在结果集创建时冻结。锁定段原样附加，优化结果与原文均可追溯。详细运行和恢复规则见 [current_generation_workflow.md](current_generation_workflow.md#成片提示词优化)。
+新增 `assembly.final_prompt_optimizer` 系统规则槽位，默认关闭。输入为五份已渲染文本与实际背景、姿势、模特及商品参考图；共享图片去重，references.index 保持最终请求局部编号，visionImageIndex 指向优化请求全局图片。成片模板及分段在选姿势时冻结，优化规则与开关在结果集创建时冻结。返回正文直接用于生图，不再拼接锁定段；优化结果与原文均可追溯。多模态整理保留各镜头的摄影要求与允许变化项，不根据镜头编号、角色名或配饰推断景别。`shot_styling` 只提供已选服装、穿法和生成配饰事实，配饰边界由维护中的成片 Prompt 表达，不注入旧分镜规则。详细运行和恢复规则见 [current_generation_workflow.md](current_generation_workflow.md#成片提示词优化)。
+
+## 6. 精简 AI 选搭契约
+
+主推款挑图与服装选搭仍合并为一次调用。挑图 Prompt 仅描述 `selected_files` 及商品图筛选，完整 `styling-plan-v2` 字段契约唯一维护在 AI 选搭 Prompt 尾部。输入顺序为任务与业务约束、品牌与用户资料、全量标签事实、输出契约与短核对项。商品事实及契约优先；用户要求在此边界内优先于品牌默认偏好。
+
+模型只输出主推款理解、图位族、已选商品与穿法、配饰、空搭配原因、整体穿法和简短理由。不要求分析过程、多候选、自评分、落选清单或动态摄影要求。`complete_look` / `no_suitable_match` / `user_requested` 保留空搭配语义。完整穿着不加库内服装；未找到匹配时不强凑，也不把缺失的基础服装伪装成配饰。主观造型质量由用户审核，代码只做契约与身份校验。
+
+参考正文位于 `backend/prompt_templates/hero_image_selection.txt` 与 `ai_styling.txt`；仅显式保存至数据库后生效。更新两个槽位时一起备份、一起应用；不覆盖历史请求快照和生成结果。
