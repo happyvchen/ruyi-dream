@@ -201,36 +201,37 @@ docker compose restart backend          # 重启
 docker compose down                     # 停止并移除容器,不删数据
 ```
 
-升级发布(升级前先做一次备份):
+### LILY 生产发布与后续升级（固定流程）
 
-```bash
-git pull
-docker compose up -d --build            # 只改后端: --build backend
-# 改了前端代码或 PUBLIC_BACKEND_URL:必须重建 frontend
-docker compose up -d --build frontend
-```
+生产代码目录 `/home/lilyroot/ruyi-dream` 是发布包，不是 Git 仓库；生产数据位于独立的 `DATA_ROOT=/data/ruyi-dream`。每次发布都从已确定的 Git 提交制作版本化发布包和 backend/frontend 镜像，记录提交号、镜像 ID、配置变动与验收结果；构建时传入 `GIT_COMMIT=<完整提交号>`，以 `/api/version` 校验。禁止直接用 `git pull` 或浮动的 `latest` 充当版本标识。保留上一版镜像，RustFS 单独管理，本应用发布不重建或清理 RustFS。
 
-数据库结构迁移由后端启动时自动完成;旧库跑新代码可以,反向降级不行。
+1. 发布前在隔离环境运行本地测试、前端构建与 SQLite 迁移预演；不调用外部 AI/provider。检查当前容器、磁盘、`/api/health`、数据库 `PRAGMA integrity_check`、已应用迁移和生成/导入在途任务。等在途任务结束，通知使用者进入短维护窗口并停写。
+2. 停止 backend 后，在 `/data/ruyi-dream/release-backups/<发布标识>/` 保存**实际** `/data/ruyi-dream/app-data/backend/`、生产 `.env`、旧发布包版本和镜像 ID。备份必须包括 SQLite 主文件及 WAL/SHM 等同目录文件；校验归档可读取、SQLite 完整性和恢复路径。发布期间 RustFS 镜像、数据目录及凭证保持不变；RustFS 对象数据有独立的定期备份与恢复演练，不能被发布备份清理逻辑触碰。
+3. 先部署 backend，确认迁移与健康状态，再按本手册“百兆带宽 P0 发布”执行有界媒体修复。然后部署 frontend，检查登录、任务与搭配列表、历史结果、图片预览和下载、上传入口及浏览器控制台。验收只用现有数据和非 AI 路径，不向生产写入测试数据或触发付费生成。
+4. 记录新版本与镜像 ID，观察日志和关键业务信号。验收通过后，**发布备份只保留最近一次已验证的发版前备份**，再删除更早的发布备份；清理目标严格限定为 `release-backups/`，绝不包含 RustFS 独立定期备份。若验收失败，停止发布与清理，保留全部证据和备份。
+
+LILY 使用 `/home/lilyroot/ruyi-releases/<发布标识>/` 保存发布包，用原生产 `.env` 加两份发布包内 Compose 文件分别执行 `build backend frontend`、`up -d --no-deps backend` 和 `up -d --no-deps frontend`。每次构建通过 `GIT_COMMIT=<完整提交号>` 注入版本；切换前为旧镜像打 `pre-<发布标识>` 标签。生产 `.env` 只在备份后按发布说明修改。不要对 RustFS 执行本次应用的 `up --build`。
+
+独立定期备份使用 `scripts/backup-production-data.sh`，在同一停写窗口复制 SQLite 数据目录、RustFS 对象目录及 `.env`，写入 `periodic-data-backups/<UTC时间>/COMPLETE` 才算完成。LILY 服务器为 XFS，脚本使用 reflink 降低对象备份耗时；它仍位于同一块数据盘，不能替代异机或离线备份。定期备份**不受发布备份的保留一份规则约束**，不得按发版清理脚本删除。定期检查容量，并把已验证副本另存到独立故障域。
+
+恢复定期备份时，先在隔离路径验证 `COMPLETE`、SQLite 完整性和对象目录，再停写并整体恢复；RustFS 数据恢复到 `/data/ruyi-dream/rustfs/data` 后须恢复容器可写的 UID 10001 权限，后端数据目录须恢复镜像 `app` 用户的实际 UID/GID。不要直接把备份目录改作容器挂载并启动。
+
+LILY 已在 `lilyroot` crontab 安排每周一 03:30（北京时间，服务器为 UTC）运行稳定路径 `/home/lilyroot/ruyi-maintenance/backup-production-data.sh`，日志写入 `/data/ruyi-dream/periodic-data-backups/backup.log`。脚本检查在途 AI attempt 和上传，存在时跳过并在日志注明，维护人员须补跑并确认新 `COMPLETE`。每周检查 `crontab -l`、日志、最新 `COMPLETE` 和数据盘空间；更换脚本时同步更新仓库与稳定路径。
+
+数据库结构迁移由后端启动时自动完成，旧库可升新代码；不能假定新库可直接运行旧代码。应用故障优先修复后重发；需要整体回退时，停写并用同一发布备份恢复旧版本镜像、SQLite 数据目录和 `.env`。若新版本写入过对象或业务数据，先评估差异，避免用旧库覆盖新业务数据。
 
 ## 5. 备份与恢复
 
-SQLite 和对象数据**必须同点位一起备份**,只备一半无法完整恢复。停机冷备最可靠:
+SQLite 和对象数据在迁机、灾难恢复时**必须同点位一起备份**，只备一半无法完整恢复。日常应用发布沿用上一节的发布备份，并依赖独立的 RustFS 定期备份；本节是完整灾难恢复备份示例。生产有 `DATA_ROOT` 时必须使用实际路径。停机冷备最可靠:
 
 ```bash
 docker compose stop backend
-tar -czf backup-app-data-$(date +%Y%m%d-%H%M%S).tgz deployment/app-data/backend
-tar -czf backup-rustfs-data-$(date +%Y%m%d-%H%M%S).tgz deployment/rustfs/data
+tar -czf backup-app-data-$(date +%Y%m%d-%H%M%S).tgz -C /data/ruyi-dream app-data/backend
+tar -czf backup-rustfs-data-$(date +%Y%m%d-%H%M%S).tgz -C /data/ruyi-dream rustfs/data
 docker compose start backend
 ```
 
-恢复:
-
-```bash
-docker compose down
-rm -rf deployment/app-data/backend/* deployment/rustfs/data/*
-tar -xzf backup-app-data-*.tgz && tar -xzf backup-rustfs-data-*.tgz
-docker compose up -d && curl http://127.0.0.1:8000/api/health
-```
+恢复时先停止写入，在隔离目录解包并校验归档、SQLite `integrity_check` 与对象数量；确认备份时间点和目标路径后，再将两部分**同一时间点**的数据一并恢复到实际 `DATA_ROOT`。先保留当前数据的副本，避免覆盖后无法复查。启动后检查 `/api/health`、登录、历史任务及图片读取。
 
 外部 S3 存储则按云厂商的 bucket 备份/版本控制/跨区域复制执行。
 
@@ -300,10 +301,10 @@ integrity_check 不为 `ok` 时,从最近备份点整体恢复并上报工程。
 ## 百兆带宽 P0 发布
 
 1. 在当前版本先采集 5 分钟 HAR 和主机/链路指标，保存脱敏汇总（见 `loadtest.md`）。
-2. 在维护窗口先运行带 074 迁移和修复脚本的后端镜像，补齐活跃派生图，再更新前端。修复可重入；命令每次处理一个有界批次：
+2. 在维护窗口先运行带 074 迁移和修复脚本的后端镜像。先查询活跃媒体缺少缩略图、预览图或大小元数据的数量；有缺项再用下述命令按批修复。元数据齐全时只抽样使用 `--verify` 检查对象可读性，避免无谓遍历全部媒体。修复可重入；命令每次处理一个有界批次：
 
 ```bash
-docker compose exec backend python scripts/repair_media_metadata.py --limit 50 --after-id 0 --verify
+docker compose exec backend python scripts/repair_media_metadata.py --limit 50 --after-id 0
 ```
 
 按输出 `next_after_id` 重复执行直到 `scanned=0`；失败 ID 单独复查。再加 `--include-archived` 处理长尾。该脚本实际访问对象存储并新增/补齐派生文件，应在发布期间执行；开发自动测试只使用临时数据库和 mock。本轮开发不自动修改当前业务素材。
