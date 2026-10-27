@@ -41,6 +41,8 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("075", "final_prompt_optimization", "migration_final_prompt_optimization"),
     ("076", "pose_library_and_selection", "migration_pose_library_and_selection"),
     ("077", "single_image_poses", "migration_single_image_poses"),
+    ("078", "photographic_final_prompts", "migration_photographic_final_prompts"),
+    ("079", "disable_final_prompt_optimizer", "migration_disable_final_prompt_optimizer"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -512,6 +514,8 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_refresh_legacy_top_final_prompt": migration_refresh_legacy_top_final_prompt,
         "migration_live_shot_preset_slots": migration_live_shot_preset_slots,
         "migration_refresh_legacy_bottom_and_one_piece_final_prompts": migration_refresh_legacy_bottom_and_one_piece_final_prompts,
+        "migration_photographic_final_prompts": migration_photographic_final_prompts,
+        "migration_disable_final_prompt_optimizer": migration_disable_final_prompt_optimizer,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -1730,6 +1734,75 @@ def migration_single_image_poses(db: sqlite3.Connection) -> None:
         db.execute("""UPDATE poses SET status = 'DRAFT', ai_tags_json = NULL, tag_error_code = NULL,
             tag_attempt_id = NULL, updated_at = ? WHERE id = ?""", (timestamp, pose["id"]))
     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pose_single_image ON pose_images(pose_id)")
+
+
+# 本次成片质量升级只升级"从未被管理员改过"的系统 Prompt：摘要不匹配时保留原文。
+LEGACY_PHOTOGRAPHIC_FINAL_PROMPT_SHA256: dict[str, str] = {
+    "assembly.final_image_top": "57fab5f665a16a9c369a22dde233bb0075296ee315c5ca25010ed5700f66bc09",
+    "assembly.final_image_bottom": "3e680aea8661843156b1cfce2f7f7ae02b68dddcf3fb6bd909fec1896f489c0d",
+    "assembly.final_image_one_piece": "57d01156023a81cf23bdde17dbc820466cf5babca2186df8e08a22b20b15d154",
+}
+LEGACY_FINAL_PROMPT_OPTIMIZER_SHA256 = "2f920dd2be704d7472e24ba70e29fe71a02fbaff0e26b477968d894b545d2a49"
+
+
+def migration_photographic_final_prompts(db: sqlite3.Connection) -> None:
+    """把三类成片 Prompt 升级为"真实摄影质感 + 商品保真"版本。
+
+    - 反伪影措辞（均匀、连续、不要颗粒/磨砂/纹理化）在成片里表现为塑料感和平涂，
+      改为正向的摄影光线、皮肤、面料质感要求，只保留结构性负向约束；
+    - 补充商品保真、交叠关系、鞋与裤脚一致性、无标签文字等可观察约束；
+    - 五个镜头块改用可量化的景别与裁切线，并声明姿势参考不提供取景与裁切。
+
+    只升级摘要完全匹配的系统默认正文，管理员自定义过的内容一律保留。
+    """
+    if not table_exists(db, "prompt_configs"):
+        return
+    filenames = {
+        "assembly.final_image_top": "final_image_top.txt",
+        "assembly.final_image_bottom": "final_image_bottom.txt",
+        "assembly.final_image_one_piece": "final_image_one_piece.txt",
+    }
+    for key, expected_digest in LEGACY_PHOTOGRAPHIC_FINAL_PROMPT_SHA256.items():
+        row = db.execute("SELECT content FROM prompt_configs WHERE key = ?", (key,)).fetchone()
+        if not row:
+            continue
+        content = str(row["content"] or "")
+        if hashlib.sha256(content.strip().encode("utf-8")).hexdigest() != expected_digest:
+            continue
+        canonical = (Path(__file__).resolve().parents[1] / "prompt_templates" / filenames[key]).read_text(encoding="utf-8").strip() + "\n"
+        db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?", (canonical, now_iso(), key))
+
+
+def migration_disable_final_prompt_optimizer(db: sqlite3.Connection) -> None:
+    """关闭成片提示词整理，直接使用固定成片 Prompt。
+
+    实测整理后的五镜头提示词会引入 "shadowless / even lighting / no noise / no grain /
+    product-mockup" 这类抹除摄影质感的措辞，并把"七分身"译成 three-quarter 造成景别失控。
+    摘要不匹配（管理员改过规则）时只保留原状，不改开关。
+    """
+    if not table_exists(db, "prompt_configs"):
+        return
+    row = db.execute("SELECT content, enabled FROM prompt_configs WHERE key = 'assembly.final_prompt_optimizer'").fetchone()
+    if not row or not int(row["enabled"] or 0):
+        return
+    content = str(row["content"] or "")
+    if hashlib.sha256(content.strip().encode("utf-8")).hexdigest() != LEGACY_FINAL_PROMPT_OPTIMIZER_SHA256:
+        return
+    db.execute(
+        "UPDATE prompt_configs SET enabled = 0, updated_at = ? WHERE key = 'assembly.final_prompt_optimizer'",
+        (now_iso(),),
+    )
+    if table_exists(db, "event_logs"):
+        db.execute(
+            "INSERT INTO event_logs (entity_type, entity_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (
+                "prompt_config",
+                None,
+                "final_prompt_optimizer_disabled",
+                dumps({"key": "assembly.final_prompt_optimizer", "reason": "optimizer-flattens-photographic-quality"}),
+                now_iso(),
+            ),
+        )
 
 
 def migration_generation_detail_revision(db: sqlite3.Connection) -> None:

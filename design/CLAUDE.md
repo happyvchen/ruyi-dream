@@ -17,6 +17,7 @@
 | `01_generation_flow/storyboard_preview_business_intent.md` | 历史分镜业务意图；其中五镜头商品表达要求可供拍摄预设设计参考 | 复盘旧流程或设计五镜头预设时 |
 | `01_generation_flow/final_image_business_intent.md` | 历史成片业务意图；商品保真、组图一致性和业务验收可参考，镜头 5 安全区以现行品类图位规则为准 | 评审成片质量时 |
 | `01_generation_flow/final_image_prompt_research_task_1457.md` | 最终成片 Prompt 研究结论：失败归因、有效/无效规则、黄金链路和系统采纳建议 | 复盘成片调研或决定成片系统改造时 |
+| `01_generation_flow/final_image_quality_research_task_1479.md` | 任务 1479 质感对照研究：通道差异、提示词偏移、25 次实验与五镜头残余问题 | 排查真实感、商品保真或评估通道与参考图改造时 |
 | `01_generation_flow/storyboard_prompt_research_task_1440.md` | 分镜预览 Prompt 研究结论：有效/无效规则、镜头 5 修正口径和系统采纳建议 | 复盘分镜 Prompt 实验或决定后续生成手段时 |
 | `01_generation_flow/storyboard_workflow_simplification_proposal.md` | 历史决策记录：删除动态剧本步骤、三类固定分镜 Prompt、代码注入动态事实、直接生图 | 复盘工作流简化决策时 |
 | `01_generation_flow/brand_style_retrieval_workflow.md` | Lily 品牌风格证据、全量标签直投、Prompt 选搭质量、穿法质量信号和受控配饰 | 设计搭配库选搭、品牌风格证据、穿法/配饰边界时 |

@@ -314,7 +314,9 @@ def test_final_prompt_receives_selected_direction_without_legacy_pose_slots(clie
     _, asset_id, code = seed_pose()
     with get_db() as db:
         db.execute("UPDATE shot_preset_slots SET pose_asset_id = NULL")
-        db.execute("UPDATE prompt_configs SET content = '{{runtime.shot_styling}}' WHERE key = 'assembly.final_image_top'")
+        db.execute(
+            "UPDATE prompt_configs SET content = '{{runtime.shot_styling}}{{runtime.shot_pose}}' WHERE key = 'assembly.final_image_top'"
+        )
     mock_selection(monkeypatch, code, asset_id)
     run_selection(ids['task_id'])
     response = client.post(f'/api/generation-tasks/{ids["task_id"]}/generate-final')
@@ -624,3 +626,31 @@ def test_legacy_shortlist_does_not_substitute_duplicate_first_choices():
     plan = pose_plan_from_shortlist(raw, library)
     with pytest.raises(ValueError, match="五个不同姿势"):
         validate_pose_plan(plan, {p["code"]: {p["images"][0]["asset"]["id"]} for p in library})
+
+
+def test_pose_direction_renders_action_facts_without_selection_meta() -> None:
+    from app.prompt_render import render_pose_direction
+
+    direction = json.dumps(
+        {
+            "姿势描述": "模特正对镜头平视直立站立",
+            "核心动作": ["正面站立", "单手插侧袋"],
+            "头部视线": ["视线平视正前方"],
+            "展示优势": ["全面平整展示服装正面版型"],
+            "适配加分规则": ["目标服装含侧插袋设计时加分"],
+            "适配排除规则": ["服装完全无口袋时排除"],
+            "存疑信息": ["小腿下段不可见"],
+        },
+        ensure_ascii=False,
+    )
+
+    rendered = render_pose_direction(direction)
+
+    assert "模特正对镜头平视直立站立" in rendered
+    assert "核心动作：正面站立、单手插侧袋" in rendered
+    assert "适配排除规则" not in rendered
+    assert "展示优势" not in rendered
+    assert "存疑信息" not in rendered
+    # 历史非 JSON 快照原样返回。
+    assert render_pose_direction("保持原图肩胸支撑") == "保持原图肩胸支撑"
+    assert render_pose_direction("") == ""

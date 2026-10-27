@@ -124,15 +124,25 @@ def test_final_runtime_marks_exactly_one_current_shot_and_limits_to_five_slots()
 def test_final_prompt_templates_separate_background_pose_and_shot_controls(filename: str) -> None:
     template = (Path(__file__).resolve().parents[1] / "prompt_templates" / filename).read_text(encoding="utf-8")
 
-    assert "整组共用的背景和光线参考" in template
-    assert "不得继承其人物位置、人物大小、机位、景别或裁切" in template
-    assert "不能复制姿势图的脸、发型、身材、服装、背景或光线" in template
-    assert "忠实执行可辨的身体朝向、重心、肩线、手位" in template
+    assert "整组共用的背景与光线参考" in template
+    assert "不取图中人物、服装、道具、机位、景别和构图" in template
+    assert "不取它的脸、发型、身材、服装、背景、光线" in template
+    assert "也不取它的取景、机位和裁切" in template
+    assert "执行可辨的身体朝向、重心、肩线、手位" in template
     assert "唯一的拍摄母版" not in template
     assert "中央 3:4 竖向裁切安全区" in template
     assert "中央 2:3" not in template
-    assert "不要电影化调色、胶片颗粒、做旧、磨砂或画布效果" in template
-    assert "避免噪点、云斑、色斑、波纹、摩尔纹" in template
+    # 真实摄影质感要求：正向措辞必须存在，抹平质感的反伪影措辞必须消失。
+    assert "这是真实拍摄的商业棚拍照片" in template
+    assert "人物脚下有真实的落地阴影" in template
+    assert "保留毛孔、细纹、细小绒毛" in template
+    assert "不要磨皮、不要匀肤、不要塑料或蜡质感" in template
+    assert "均匀的商业棚拍成像" not in template
+    assert "材质纹理只来自真实服装本身" not in template
+    # 商品保真与瑕疵约束。
+    assert "大小比例" in template and "商品图" in template
+    assert "不得出现任何文字、字母、logo" in template
+    assert "两只鞋不同款或鞋跟高度不一致" in template
 
 
 @pytest.mark.parametrize(

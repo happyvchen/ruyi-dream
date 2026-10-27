@@ -586,6 +586,7 @@ def build_provider_reference_image_manifest(image_inputs: list[dict[str, Any]], 
                 "angle": item.get("angle"),
                 "referenceBoardKind": item.get("referenceBoardKind"),
                 "collageRule": item.get("collageRule"),
+                "providerCrop": item.get("providerCrop"),
                 "providerInputPolicyVersion": item.get("providerInputPolicyVersion"),
                 "collageSources": build_collage_source_manifest(item),
                 "url": url,
@@ -760,6 +761,23 @@ def upload_toapis_image_inputs(
         if object_key and object_exists(str(object_key)):
             source_key = normalized_or_original_key(str(object_key))
             next_item["sourceObjectKey"] = source_key
+            crop = item.get("providerCrop") if isinstance(item.get("providerCrop"), dict) else {}
+            if crop:
+                # 按镜头预裁切的参考图（目前只用于姿势图）：不修改原素材，
+                # 只生成一份运行时传输副本，并按内容哈希复用上传缓存。
+                cropped = crop_provider_input_bytes(get_bytes(source_key), crop)
+                next_item["providerCropApplied"] = {
+                    "kind": str(crop.get("kind") or ""),
+                    "ratio": crop.get("ratio"),
+                }
+                next_item["providerUrl"] = upload_bytes_with_cache(
+                    "toapis",
+                    cropped,
+                    lambda: upload_bytes_to_toapis(cropped, "reference-crop.jpg", "image/jpeg", deadline=deadline),
+                    cache_namespace=f"input-{TOAPIS_INPUT_POLICY_VERSION}",
+                )
+                uploaded.append(next_item)
+                continue
             next_item["providerUrl"] = upload_object_with_cache(
                 "toapis",
                 toapis_upload_cache_key(source_key),
@@ -778,6 +796,44 @@ def upload_toapis_image_inputs(
     if on_progress:
         on_progress(total, total)
     return uploaded
+
+
+def crop_provider_input_bytes(content: bytes, crop: dict[str, Any]) -> bytes:
+    """按输入策略裁切参考图的运行时传输副本。
+
+    当前只支持 ``keep_top_ratio``：保留图片上部，用于把全身姿势图裁成当前镜头的取景，
+    让 provider 不会把每个镜头都拉回全身构图。原始素材不做任何写回。
+    """
+    kind = str(crop.get("kind") or "")
+    if kind != "keep_top_ratio":
+        raise RuntimeError(f"未知的参考图裁切策略：{kind or '(empty)'}")
+    try:
+        ratio = float(crop.get("ratio") or 0)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"参考图裁切比例无效：{crop.get('ratio')}") from exc
+    if not 0 < ratio < 1:
+        raise RuntimeError(f"参考图裁切比例必须在 0 和 1 之间：{ratio}")
+    try:
+        from PIL import Image, ImageOps
+    except ImportError as exc:
+        raise GenerationPhaseError("图片处理组件不可用，无法裁切参考图", ERROR_SYSTEM_ERROR) from exc
+    try:
+        with Image.open(BytesIO(content)) as image:
+            image = ImageOps.exif_transpose(image)
+            if image.mode in {"RGBA", "LA", "P"}:
+                base = image.convert("RGBA")
+                flattened = Image.new("RGB", base.size, (255, 255, 255))
+                flattened.paste(base, mask=base.getchannel("A"))
+                image = flattened
+            elif image.mode != "RGB":
+                image = image.convert("RGB")
+            height = max(1, int(round(image.height * ratio)))
+            cropped = image.crop((0, 0, image.width, height))
+            output = BytesIO()
+            cropped.save(output, "JPEG", quality=95, optimize=True)
+            return output.getvalue()
+    except (OSError, ValueError) as exc:
+        raise GenerationPhaseError("参考图无法解码或裁切", ERROR_INVALID_REQUEST) from exc
 
 
 def build_reference_collage_bytes(item: dict[str, Any], deadline: float | None = None) -> tuple[bytes, str, str]:

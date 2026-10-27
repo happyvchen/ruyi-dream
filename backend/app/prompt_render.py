@@ -6,13 +6,60 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 __all__ = [
     "render_user_instruction_line",
     "render_user_requirement_line",
     "render_image_reference_spans",
+    "render_pose_direction",
 ]
+
+# 姿势事实里真正描述"怎么摆"的字段。选搭元信息（展示优势、遮挡风险、
+# 适配加分/排除规则、存疑信息）属于姿势选搭阶段的判断依据，不是拍摄事实，
+# 注入成片 Prompt 只会稀释商品与构图要求。
+POSE_DIRECTION_FACT_KEYS: tuple[str, ...] = (
+    "姿势描述",
+    "姿势类别",
+    "身体朝向",
+    "头部视线",
+    "模特右手",
+    "模特左手",
+    "双腿与重心",
+    "核心动作",
+    "可调整动作",
+)
+
+
+def _join_pose_value(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        return "、".join(_clean_text(item) for item in value if _clean_text(item))
+    return _clean_text(value)
+
+
+def render_pose_direction(direction: Any) -> str:
+    """把冻结的姿势动作渲染为可执行的拍摄动作说明。
+
+    非 JSON 的历史快照原样返回；JSON 快照只保留动作事实字段。
+    """
+    text = str(direction or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        return text
+    if not isinstance(parsed, dict):
+        return text
+    parts = []
+    for key in POSE_DIRECTION_FACT_KEYS:
+        if key not in parsed:
+            continue
+        value = _join_pose_value(parsed.get(key))
+        if value:
+            parts.append(value if key == "姿势描述" else f"{key}：{value}")
+    return "；".join(parts) if parts else text
 
 
 def _clean_text(value: Any) -> str:

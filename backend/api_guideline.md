@@ -197,7 +197,7 @@ AI 选搭动态事实：
 - `DELETE /api/shot-presets/{category_family}/{shot_index}/{asset_role}`：仅 admin 删除当前单张图片并立即生效；该类型不完整期间不能开始新成片。
 - 旧整槽保存和发布接口返回 `410 Gone`。
 
-最终请求固定 `image_urls <= 6`，共享背景排第一，不传 `mask_url`，使用 `1:1 / 2k / high`；模特与商品多图先确定性合成角色参考板，结果集通过 `generation_result_set_shot_presets` 保存共享背景与五个姿势；姿势选择阶段已冻结这些引用。
+最终请求固定 `image_urls <= 6`，共享背景排第一，不传 `mask_url`，使用 `1:1 / 2k / high`；模特、主推款、搭配款每个角色只送一张事实图，姿势图按镜头景别预裁切后作为运行时传输副本上传；结果集通过 `generation_result_set_shot_presets` 保存共享背景与五个姿势；姿势选择阶段已冻结这些引用。
 
 ## 导出
 

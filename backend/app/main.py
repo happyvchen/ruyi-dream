@@ -34,6 +34,7 @@ from .config import get_settings
 from .db import dumps, get_db, init_db, loads, log_event, now_iso
 from .prompt_render import (
     render_image_reference_spans,
+    render_pose_direction,
     render_user_instruction_line,
     render_user_requirement_line,
 )
@@ -140,10 +141,20 @@ MAX_HERO_IMAGE_INPUTS = 8
 MAX_GARMENT_SELECTED_IMAGES = 6
 MAX_HERO_SELECTED_IMAGES = 8
 IMAGE2_MAX_REFERENCE_IMAGES = 6
-IMAGE2_DIRECT_MODEL_SOURCE_LIMIT = 2
-IMAGE2_DIRECT_HERO_SOURCE_LIMIT = 8
-IMAGE2_DIRECT_HERO_SHEET_LIMIT = 2
-IMAGE2_DIRECT_STYLING_SOURCE_LIMIT = 6
+# 成片 6 张参考图预算按“少而大”分配：角色图不再拼版，单张事实图独占一个
+# provider 输入位，避免多格拼版被上游缩放后损失身份、面料与图案细节。
+IMAGE2_DIRECT_MODEL_SOURCE_LIMIT = 1
+IMAGE2_DIRECT_HERO_SOURCE_LIMIT = 2
+IMAGE2_DIRECT_STYLING_SOURCE_LIMIT = 1
+# 姿势参考按镜头预裁切：provider 只收到与当前景别相符的动作参考，
+# 避免全身姿势图把每个镜头都拉回全身构图。值为保留图片上部的比例。
+IMAGE2_DIRECT_POSE_CROP: dict[tuple[str, int], float] = {
+    ("top", 2): 0.45,
+    ("top", 1): 0.78,
+    ("top", 3): 0.40,
+    ("bottom", 2): 0.45,
+    ("one_piece", 2): 0.45,
+}
 IMAGE2_MODEL_SHEET_SOURCE_LIMIT = 4
 IMAGE2_HERO_SHEET_SOURCE_LIMIT = 6
 IMAGE2_HERO_SHEET_CHUNK_SIZE = 3
@@ -11030,8 +11041,9 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
             raise RuntimeError("冻结的姿势选搭缺少当前镜头")
         if selection.get("workflow") == "shared_background_v1":
             prompt_runtime["shot_global_directing"] = SHARED_BACKGROUND_DIRECTING
-        prompt_runtime["shot_pose"] = shot["direction"]
-        prompt_runtime["shot_styling"] = str(prompt_runtime.get("shot_styling") or "") + "；已选姿势：" + shot["direction"]
+        # 姿势动作只注入一次：模板已有独立的“已选姿势”行，重复拼接会把
+        # 姿势标签 JSON 塞进配饰与造型描述，稀释商品与造型事实。
+        prompt_runtime["shot_pose"] = render_pose_direction(shot["direction"])
     preparation = loads(row_value(row, "prompt_preparation_json"), {})
     frozen_rows = preparation.get("configRows")
     if frozen_rows:
@@ -11102,13 +11114,19 @@ def build_direct_final_image_inputs(
     input_version_id: int,
     preset: Any,
 ) -> list[dict[str, Any]]:
+    category_family = str(preset["category_family"] or "")
+    shot_index = int(preset["shot_index"] or 0)
     background = get_media_asset_by_id(int(preset["background_asset_id"]))
     pose = get_media_asset_by_id(int(preset["pose_asset_id"]))
     if not background or not pose:
         raise RuntimeError("冻结的拍摄背景或姿势图不可用")
+    pose_input = image_input_from_asset(pose, "shot_pose")
+    pose_crop_ratio = IMAGE2_DIRECT_POSE_CROP.get((category_family, shot_index))
+    if pose_crop_ratio:
+        pose_input["providerCrop"] = {"kind": "keep_top_ratio", "ratio": pose_crop_ratio}
     inputs: list[dict[str, Any]] = [
         image_input_from_asset(background, "shot_background"),
-        image_input_from_asset(pose, "shot_pose"),
+        pose_input,
     ]
     with get_db() as db:
         styling = db.execute(
@@ -11129,27 +11147,27 @@ def build_direct_final_image_inputs(
         model_sources,
         filename="model-identity-sheet.jpg",
         max_items=IMAGE2_DIRECT_MODEL_SOURCE_LIMIT,
-        board_kind="model_identity",
     )
     if model_sheet:
         inputs.append(model_sheet)
 
-    hero_sources = [
-        image_input_from_asset(item.get("asset"), "hero_garment")
-        for item in loads(input_version["image_snapshot_json"], [])[:IMAGE2_DIRECT_HERO_SOURCE_LIMIT]
-        if isinstance(item, dict)
-    ]
+    hero_snapshot = [item for item in loads(input_version["image_snapshot_json"], []) if isinstance(item, dict)]
+    hero_sources = [image_input_from_asset(item.get("asset"), "hero_garment") for item in hero_snapshot]
     hero_sources = [item for item in hero_sources if reference_image_input_available(item)]
-    for index, group in enumerate(balanced_reference_groups(hero_sources, IMAGE2_DIRECT_HERO_SHEET_LIMIT), start=1):
-        hero_sheet = reference_sheet_image_input(
+    # 正面镜头用封面图 + 细节图，背面镜头用封面图 + 背面图；每张独占一个输入位。
+    hero_pick = (0, 2) if shot_index in {1, 2} else (0, 1)
+    hero_selected = [hero_sources[index] for index in hero_pick if index < len(hero_sources)]
+    if not hero_selected and hero_sources:
+        hero_selected = hero_sources[:IMAGE2_DIRECT_HERO_SOURCE_LIMIT]
+    for source in hero_selected[:IMAGE2_DIRECT_HERO_SOURCE_LIMIT]:
+        hero_input = reference_sheet_image_input(
             "hero_garment",
-            group,
-            filename=f"hero-garment-{'overview' if index == 1 else 'detail'}-sheet.jpg",
-            max_items=len(group),
-            board_kind="hero_overview" if index == 1 else "hero_detail",
+            [source],
+            filename="hero-garment.jpg",
+            max_items=1,
         )
-        if hero_sheet:
-            inputs.append(hero_sheet)
+        if hero_input:
+            inputs.append(hero_input)
 
     styling_sources: list[dict[str, Any]] = []
     for garment in loads(row_value(styling, "selected_material_snapshot_json"), []):
@@ -11169,8 +11187,7 @@ def build_direct_final_image_inputs(
         "styling_garment",
         styling_sources,
         filename="styling-garments-sheet.jpg",
-        max_items=IMAGE2_DIRECT_STYLING_SOURCE_LIMIT,
-        board_kind="styling_garments",
+        max_items=1,
     )
     if styling_sheet:
         inputs.append(styling_sheet)
@@ -11181,25 +11198,6 @@ def build_direct_final_image_inputs(
     if not inputs or inputs[0].get("role") != "shot_background":
         raise RuntimeError("编辑模式第一张参考图必须是当前镜头背景")
     return inputs
-
-
-def balanced_reference_groups(items: list[dict[str, Any]], max_groups: int) -> list[list[dict[str, Any]]]:
-    """Split ordered fact sources into at most two similarly sized boards.
-
-    The source order remains authoritative. For six hero photos this yields 3+3,
-    avoiding a dense four-tile overview board followed by a low-value two-tile board.
-    """
-    if not items or max_groups < 1:
-        return []
-    group_count = min(max_groups, len(items))
-    base_size, remainder = divmod(len(items), group_count)
-    groups: list[list[dict[str, Any]]] = []
-    cursor = 0
-    for group_index in range(group_count):
-        size = base_size + (1 if group_index < remainder else 0)
-        groups.append(items[cursor:cursor + size])
-        cursor += size
-    return groups
 
 
 def reference_image_input_available(item: dict[str, Any]) -> bool:

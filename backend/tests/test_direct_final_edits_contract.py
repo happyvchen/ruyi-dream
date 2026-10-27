@@ -489,15 +489,18 @@ def test_direct_final_inputs_compose_six_provider_slots_without_losing_sources(m
         "hero_garment",
         "styling_garment",
     ]
-    assert [item.get("referenceBoardKind") for item in inputs[2:]] == [
-        "model_identity",
-        "hero_overview",
-        "hero_detail",
-        "styling_garments",
+    # 6 张预算按“少而大”分配：角色图不再拼版，每张事实图独占一个输入位。
+    assert all(item.get("collageItems") is None for item in inputs[2:])
+    assert all(item.get("referenceBoardKind") is None for item in inputs[2:])
+    assert [item.get("objectKey") for item in inputs[2:]] == [
+        "models/model-0.jpg",
+        "hero/0.jpg",
+        "hero/2.jpg",
+        "styling/0.jpg",
     ]
-    assert [len(item.get("collageItems", [])) for item in inputs[2:]] == [2, 3, 3, 6]
-    assert sum(len(item.get("collageItems", [])) for item in inputs[2:]) == 14
     assert inputs[0]["role"] == "shot_background"
+    # 镜头上半身近景的姿势参考按镜头预裁切，避免全身姿势图拉回全身构图。
+    assert inputs[1]["providerCrop"] == {"kind": "keep_top_ratio", "ratio": 0.78}
 
 
 def test_six_source_reference_board_uses_all_tiles() -> None:
@@ -568,3 +571,106 @@ def test_preview_endpoint_is_retired_for_new_workflow(client) -> None:
     response = client.post("/api/generation-tasks/999/preview")
 
     assert response.status_code == 410
+
+
+def test_photographic_final_prompt_migration_only_replaces_known_system_content(monkeypatch) -> None:
+    from app import db as app_db
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE prompt_configs (key TEXT PRIMARY KEY, content TEXT NOT NULL, updated_at TEXT)")
+    db.execute("CREATE TABLE event_logs (id INTEGER PRIMARY KEY, entity_type TEXT, entity_id INTEGER, event_type TEXT, payload_json TEXT, created_at TEXT)")
+    legacy_top = "旧版反伪影上装 Prompt"
+    custom_bottom = "管理员自定义下装 Prompt"
+    db.execute("INSERT INTO prompt_configs VALUES ('assembly.final_image_top', ?, 'now')", (legacy_top,))
+    db.execute("INSERT INTO prompt_configs VALUES ('assembly.final_image_bottom', ?, 'now')", (custom_bottom,))
+    monkeypatch.setattr(
+        app_db,
+        "LEGACY_PHOTOGRAPHIC_FINAL_PROMPT_SHA256",
+        {"assembly.final_image_top": hashlib.sha256(legacy_top.encode("utf-8")).hexdigest()},
+    )
+
+    app_db.migration_photographic_final_prompts(db)
+
+    refreshed = db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.final_image_top'").fetchone()["content"]
+    canonical = (app_db.Path(__file__).resolve().parents[1] / "prompt_templates" / "final_image_top.txt").read_text(encoding="utf-8").strip() + "\n"
+    assert refreshed == canonical
+    assert "这是真实拍摄的商业棚拍照片" in refreshed
+    assert db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.final_image_bottom'").fetchone()["content"] == custom_bottom
+
+
+def test_final_prompt_optimizer_is_disabled_only_for_known_system_rules(monkeypatch) -> None:
+    from app import db as app_db
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE prompt_configs (key TEXT PRIMARY KEY, content TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, updated_at TEXT)")
+    db.execute("CREATE TABLE event_logs (id INTEGER PRIMARY KEY, entity_type TEXT, entity_id INTEGER, event_type TEXT, payload_json TEXT, created_at TEXT)")
+    system_rules = "系统 imagegen 摘录"
+    db.execute("INSERT INTO prompt_configs VALUES ('assembly.final_prompt_optimizer', ?, 1, 'now')", (system_rules,))
+    monkeypatch.setattr(
+        app_db,
+        "LEGACY_FINAL_PROMPT_OPTIMIZER_SHA256",
+        hashlib.sha256(system_rules.encode("utf-8")).hexdigest(),
+    )
+
+    app_db.migration_disable_final_prompt_optimizer(db)
+
+    assert db.execute("SELECT enabled FROM prompt_configs WHERE key = 'assembly.final_prompt_optimizer'").fetchone()["enabled"] == 0
+    events = db.execute("SELECT event_type FROM event_logs").fetchall()
+    assert [row["event_type"] for row in events] == ["final_prompt_optimizer_disabled"]
+
+    db.execute("UPDATE prompt_configs SET content = '管理员自定义优化规则', enabled = 1 WHERE key = 'assembly.final_prompt_optimizer'")
+    app_db.migration_disable_final_prompt_optimizer(db)
+    row = db.execute("SELECT enabled FROM prompt_configs WHERE key = 'assembly.final_prompt_optimizer'").fetchone()
+    assert row["enabled"] == 1
+
+
+def test_pose_crop_builds_cropped_runtime_copy() -> None:
+    from io import BytesIO
+
+    from PIL import Image
+
+    source = BytesIO()
+    Image.new("RGB", (120, 200), (12, 24, 36)).save(source, "PNG")
+    raw = source.getvalue()
+
+    cropped = image_provider.crop_provider_input_bytes(raw, {"kind": "keep_top_ratio", "ratio": 0.5})
+
+    assert Image.open(BytesIO(cropped)).size == (120, 100)
+    with pytest.raises(RuntimeError, match="未知的参考图裁切策略"):
+        image_provider.crop_provider_input_bytes(raw, {"kind": "nope"})
+    with pytest.raises(RuntimeError, match="必须在 0 和 1 之间"):
+        image_provider.crop_provider_input_bytes(raw, {"kind": "keep_top_ratio", "ratio": 1.5})
+
+
+def test_pose_crop_uploads_cropped_copy_and_records_applied_policy(monkeypatch) -> None:
+    from io import BytesIO
+
+    from PIL import Image
+
+    source = BytesIO()
+    Image.new("RGB", (100, 200), (30, 40, 50)).save(source, "PNG")
+    raw = source.getvalue()
+    uploaded: list[tuple[int, str | None]] = []
+
+    monkeypatch.setattr(image_provider, "object_exists", lambda _key: True)
+    monkeypatch.setattr(image_provider, "normalized_or_original_key", lambda key: key)
+    monkeypatch.setattr(image_provider, "get_bytes", lambda _key: raw)
+    monkeypatch.setattr(image_provider, "get_cached_provider_upload_url", lambda _p, _k: None)
+    monkeypatch.setattr(image_provider, "store_provider_upload_url", lambda _p, _k, _u: None)
+
+    def fake_upload(content: bytes, filename: str, content_type: str | None = None, deadline: float | None = None) -> str:
+        uploaded.append((len(content), content_type))
+        return "https://files.toapis.cn/cropped.jpg"
+
+    monkeypatch.setattr(image_provider, "upload_bytes_to_toapis", fake_upload)
+
+    inputs = image_provider.upload_toapis_image_inputs(
+        [{"role": "shot_pose", "objectKey": "pose.jpg", "providerCrop": {"kind": "keep_top_ratio", "ratio": 0.5}}]
+    )
+
+    assert uploaded and uploaded[0][1] == "image/jpeg"
+    assert inputs[0]["providerUrl"] == "https://files.toapis.cn/cropped.jpg"
+    assert inputs[0]["providerCropApplied"] == {"kind": "keep_top_ratio", "ratio": 0.5}
+    assert inputs[0]["providerInputPolicyVersion"].startswith("toapis-input-")
