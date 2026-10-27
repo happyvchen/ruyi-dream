@@ -1,5 +1,6 @@
 import { pollVisible } from './lib/polling'
 import { MediaImage } from './components/MediaImage'
+import { TransientNotice } from './components/TransientNotice'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, Dispatch, DragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode, SetStateAction, UIEvent } from 'react'
@@ -36,13 +37,14 @@ import {
   Upload,
   User,
   UserRound,
+  PersonStanding,
   X,
   WandSparkles,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react'
 import { ApiError, cancelPageReads, getPageReadGeneration, api, finalImageArchiveUrl, isAuthExpiredError, mediaDownloadUrl, mediaUrl, stylingGarmentArchiveUrl } from './api'
-import type { AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, DirectUploadItem, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, ObjectCleanupError, PromptOptimizationTest, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, ShotPresetMatrix, ShotPresetSlot, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot, UploadSession, UploadSessionBatch } from './api'
+import type { Pose, PoseSelection, AICallRecord, AIOperation, AttemptPhase, CategoryTreeOption, DeleteImpact, DeleteOperationResult, DirectUploadItem, FacetOption, FinalImageExportPrecheck, GenerationRecordBatch, GenerationRecordFacets, GenerationWorkspaceRecord, GenerationTask, MediaAsset, ModelProfile, ObjectCleanupError, PromptOptimizationTest, PromptConfig, PromptInvocationOption, PromptPlaceholder, SessionRole, StylingGarment, StylingGarmentFacets, StylingGarmentListResponse, UploadProgressSnapshot, UploadSession, UploadSessionBatch } from './api'
 import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, sanitizeClientName, SUPPORTED_IMAGE_ACCEPT, timestampName } from './lib/importGrouping'
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { chooseDirectory, filesFromDirectory, getDirectoryHandle, storeDirectoryHandle, supportsDirectoryAccess } from './lib/directoryAccess'
@@ -56,7 +58,7 @@ import { ArchiveManageDialog } from './components/ArchiveManageDialog'
 import type { ArchiveManageAction, ArchiveManageOption } from './components/ArchiveManageDialog'
 import { ImageAssetCard, ImageUploadPlaceholder } from './components/ImageAssetCard'
 
-type StudioStep = 0 | 1 | 2
+type StudioStep = 0 | 1 | 2 | 3
 type FileSystemEntry = {
   name: string
   isFile: boolean
@@ -89,6 +91,7 @@ type RecordSelectionKey = `task:${number}` | `batch:${string}`
 const steps = [
   { title: '导入主推款', icon: Upload },
   { title: 'AI 智能选搭', icon: WandSparkles },
+  { title: '姿势选搭', icon: PersonStanding },
   { title: '最终成片', icon: Sparkles },
 ] as const
 const adminPages = new Set<Page>(['prompt-maintenance'])
@@ -233,8 +236,9 @@ export function App() {
   const [page, setPage] = useState<Page>(() => parseRoute().page)
   const [collapsed, setCollapsed] = useState(() => storedSidebarCollapsed() ?? defaultSidebarCollapsed())
   const [sidebarPreferenceSet, setSidebarPreferenceSet] = useState(() => storedSidebarCollapsed() !== null)
-  const [busy, setBusy] = useState('')
-  const [error, setError] = useState('')
+  const [busy, setBusy] = useState<{ id: number; message: string } | null>(null)
+  const [error, setError] = useState<{ id: number; message: string } | null>(null)
+  const noticeSequence = useRef(0)
   const [loginNotice, setLoginNotice] = useState('')
   const [task, setTask] = useState<GenerationTask | null>(null)
   const [tasks, setTasks] = useState<GenerationTask[]>([])
@@ -497,9 +501,14 @@ export function App() {
     setSidebarPreferenceSet(true)
   }
 
+  function showError(message: string) {
+    setError({ id: ++noticeSequence.current, message })
+  }
+
   async function run<T>(label: string, action: () => Promise<T>, after?: (value: T) => void, options: RunOptions = {}) {
-    setBusy(label)
-    setError('')
+    const operationId = ++noticeSequence.current
+    setBusy({ id: operationId, message: label })
+    setError(null)
     try {
       const value = await action()
       after?.(value)
@@ -514,17 +523,17 @@ export function App() {
       }
       if (options.refresh === 'background') void refreshAll().catch(() => undefined)
       else if (options.refresh !== false) await refreshAll().catch(() => undefined)
-      setError(err instanceof ApiError ? friendlyErrorText(err.errorCode, err.errorMessage || err.message) : err instanceof Error ? friendlyErrorText(undefined, err.message) : '操作失败')
+      showError(err instanceof ApiError ? friendlyErrorText(err.errorCode, err.errorMessage || err.message) : err instanceof Error ? friendlyErrorText(undefined, err.message) : '操作失败')
       throw err
     } finally {
-      setBusy('')
+      setBusy(current => current?.id === operationId ? null : current)
     }
   }
 
   function noteDeleteOperationResult(result: DeleteOperationResult) {
     const cleanupErrors = result.objectCleanupErrors ?? []
     if (!cleanupErrors.length) return
-    setError(`记录已删除，但有 ${cleanupErrors.length} 处对象存储文件未清理完成。请稍后重试清理或交由管理员处理。`)
+    showError(`记录已删除，但有 ${cleanupErrors.length} 处对象存储文件未清理完成。请稍后重试清理或交由管理员处理。`)
   }
 
   function markAuthExpired() {
@@ -532,8 +541,8 @@ export function App() {
     setLoginNotice(authExpiredMessage)
     setAuthenticated(false)
     setRole(null)
-    setBusy('')
-    setError('')
+    setBusy(null)
+    setError(null)
   }
 
   function startLocalOperation(operation: Omit<AIOperation, 'id' | 'status' | 'startedAt'> & { status?: string; startedAt?: string | null }) {
@@ -565,6 +574,7 @@ export function App() {
   const nav = [
     { id: 'studio' as const, label: 'AI 摄影棚', icon: Bot },
     { id: 'library' as const, label: '搭配服装库', icon: Library },
+    { id: 'poses' as const, label: '姿势库', icon: PersonStanding },
     { id: 'model' as const, label: '模特与背景', icon: UserRound },
     { id: 'records' as const, label: '生成记录', icon: History },
     ...(role === 'admin' ? [
@@ -608,10 +618,13 @@ export function App() {
         </div>
       </aside>
       <main className="workspace">
-        {error && <div className="toast">{error.length > 300 ? `${error.slice(0, 300)}…` : error}</div>}
-        {busy && <BusyPill label={busy} />}
+        <div className="notice-stack">
+          {error && <TransientNotice key={error.id} message={error.message} tone="warning" />}
+          {busy && <TransientNotice key={busy.id} message={busy.message} tone="info" />}
+        </div>
         {page === 'studio' && <StudioPage task={task} setTask={setTask} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} uploadSessions={uploadSessions.filter((item) => item.scope === 'generation-task')} refreshUploadSessions={() => refreshUploadSessions('generation_task')} markBrowserUploading={markBrowserUploading} onStartNewTask={() => { suppressStudioAutoRestoreRef.current = true }} onLatestTaskCreated={setLatestWorkspaceTask} />}
         {page === 'library' && <LibraryPage garments={garments} run={run} role={role} onDeleteResult={noteDeleteOperationResult} uploadSessions={uploadSessions.filter((item) => item.scope === 'styling-garment')} uploadBatches={stylingUploadBatches} uploadBatchesLoaded={stylingUploadBatchesLoaded} refreshUploadSessions={() => refreshUploadSessions('styling_garment', 100)} markBrowserUploading={markBrowserUploading} showImport={libraryImportOpen} setShowImport={setLibraryImportOpen} importJobs={libraryImportJobs} setImportJobs={persistLibraryImportJobs} syncImportJobs={setLibraryImportJobs} />}
+        <PoseLibraryPage active={page === 'poses'} />
         {page === 'model' && <ModelPage models={models} role={role} run={run} />}
         {page === 'prompt-maintenance' && role === 'admin' && <PromptMaintenancePage run={run} />}
         {page === 'records' && <RecordsPage isAdmin={role === 'admin'} records={records} detail={recordDetail} setDetail={setRecordDetail} openTaskInStudio={openTaskInStudio} run={run} onDeleteResult={noteDeleteOperationResult} />}
@@ -657,33 +670,6 @@ function LoginPage({ notice, onAuthed }: { notice?: string; onAuthed: (session: 
         {error && <div className="form-error">{error}</div>}
         <button className="task-action wide" disabled={busy}>{busy ? <Loader2 className="spin" size={16} /> : <Shield size={16} />} 登录</button>
       </form>
-    </div>
-  )
-}
-
-const LONG_AI_OPERATION_PATTERN = /选搭|智能选择|打标|分镜|成片|预览/
-
-function formatElapsedSeconds(totalSeconds: number): string {
-  if (totalSeconds < 60) return `${totalSeconds} 秒`
-  return `${Math.floor(totalSeconds / 60)} 分 ${totalSeconds % 60} 秒`
-}
-
-function BusyPill({ label }: { label: string }) {
-  const [elapsed, setElapsed] = useState(0)
-  useEffect(() => {
-    setElapsed(0)
-    const timer = window.setInterval(() => setElapsed((value) => value + 1), 1000)
-    return () => window.clearInterval(timer)
-  }, [label])
-  const isLongAIOperation = LONG_AI_OPERATION_PATTERN.test(label)
-  return (
-    <div className="busy">
-      <Loader2 size={16} className="spin" />
-      <span>
-        {label}
-        {elapsed >= 3 ? `(已等待 ${formatElapsedSeconds(elapsed)})` : ''}
-      </span>
-      {isLongAIOperation && elapsed >= 5 && <span className="busy-hint">AI 生成通常需要 1-3 分钟,请保持页面打开</span>}
     </div>
   )
 }
@@ -815,6 +801,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   const recentTaskRequestRef = useRef(0)
   const [aiLogDialog, setAiLogDialog] = useState<{ title: string; ownerTypes: string[]; attemptId: number; records: AICallRecord[]; loading: boolean; error?: string } | null>(null)
   const [aiStylingInstruction, setAiStylingInstruction] = useState('')
+  const [poseInstruction, setPoseInstruction] = useState('')
   const [finalImageInstruction, setFinalImageInstruction] = useState('')
   const currentStep = getTaskStep(task)
   const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
@@ -1036,6 +1023,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     setAiLogDialog(null)
   }, [task?.id])
   useEffect(() => setAiStylingInstruction(task?.stageUserInputs?.aiStyling ?? stageInstructionText(task?.styling?.userInstruction)), [task?.id, task?.stageUserInputs?.aiStyling, task?.styling?.id])
+  useEffect(() => setPoseInstruction(task?.stageUserInputs?.poseSelection ?? ''), [task?.id, task?.stageUserInputs?.poseSelection])
   useEffect(() => setFinalImageInstruction(task?.stageUserInputs?.finalImage ?? stageInstructionText(task?.resultSet?.userInstruction)), [task?.id, task?.stageUserInputs?.finalImage, task?.resultSet?.id])
   useEffect(() => {
     if (taskRailTab === 'recent') loadRecentTasks(0)
@@ -1053,7 +1041,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
       const status = await api.getTaskStatus(taskId, signal)
       if (signal.aborted || pollingTaskRef.current?.id !== taskId) return status
       const current = pollingTaskRef.current
-      const terminal = !['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(status.status) && !status.autoRunTarget
+      const terminal = !['STYLING_RUNNING', 'POSE_SELECTION_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(status.status) && !status.autoRunTarget
       if (status.detailRevision !== current.detailRevision || (terminal && lastStatus !== status.status)) {
         const response = await api.getTask(taskId, isAdmin, signal)
         if (!signal.aborted && pollingTaskRef.current?.id === taskId) applyTaskUpdate(response.item)
@@ -1151,7 +1139,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     <section className="page studio-page">
       <PageTitle
         title="AI 摄影棚"
-        subtitle="导入主推款，让系统完成智能选搭并直接生成五张电商棚拍成片。"
+        subtitle="导入主推款，完成服装与姿势选搭，生成五张电商棚拍成片。"
         actions={task ? (
           <div className="studio-title-actions">
             <button className="management-action" onClick={startNewTask}><ImagePlus size={16} />新建拍摄任务</button>
@@ -1178,7 +1166,8 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
             <div className="studio-stage-viewport">
               {visibleStep === 0 && <UploadHeroStep task={task} setTask={applyTaskUpdate} run={run} uploadSessions={uploadSessions} refreshUploadSessions={refreshUploadSessions} markBrowserUploading={markBrowserUploading} onLatestTaskCreated={onLatestTaskCreated} />}
               {visibleStep === 1 && <StylingStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={aiStylingInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
-              {visibleStep === 2 && <FinalStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={finalImageInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+              {visibleStep === 2 && <PoseSelectionStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={poseInstruction} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+              {visibleStep === 3 && <FinalStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={finalImageInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
             </div>
           </div>
         </div>
@@ -1204,10 +1193,10 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
                   <StageUserInputModule
                     step={summaryInputStep}
                     task={task}
-                    value={stageInputValue(summaryInputStep, { aiStylingInstruction, finalImageInstruction })}
+                    value={stageInputValue(summaryInputStep, { aiStylingInstruction, poseInstruction, finalImageInstruction })}
                     savedValue={savedStageInputValue(summaryInputStep, task)}
-                    onChange={(value) => updateStageInput(summaryInputStep, value, { setAiStylingInstruction, setFinalImageInstruction })}
-                    onSave={() => void run(`${stageInputSaveLabel(summaryInputStep)}中...`, () => api.updateTask(task.id, stageInputSavePayload(summaryInputStep, stageInputValue(summaryInputStep, { aiStylingInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => applyTaskUpdate(r.item), { refresh: 'background' })}
+                    onChange={(value) => updateStageInput(summaryInputStep, value, { setAiStylingInstruction, setPoseInstruction, setFinalImageInstruction })}
+                    onSave={() => void run(`${stageInputSaveLabel(summaryInputStep)}中...`, () => api.updateTask(task.id, stageInputSavePayload(summaryInputStep, stageInputValue(summaryInputStep, { aiStylingInstruction, poseInstruction, finalImageInstruction }))), (r: { item: GenerationTask }) => applyTaskUpdate(r.item), { refresh: 'background' })}
                     disabled={isTaskRunning(task) || !!task.autoRunTarget}
                   />
                 )}
@@ -1915,7 +1904,7 @@ function UploadHeroStep({ task, setTask, run, uploadSessions, refreshUploadSessi
                             <div className="batch-note">
                               <span>推荐 3-5 张，排序越靠前越重要。{existsHint ? ' 与已有任务重名，将共存（任务名不要求唯一）。' : ''}</span>
                               {hasBlockingError && <strong>{group.error ?? (!group.files.length ? '没有可用图片' : '本批次任务名重复')}</strong>}
-                              {overLimit && <strong>{`超出 ${HERO_PRODUCT_MAX_IMAGES} 张，红框图片不会进入后续识别`}</strong>}
+                              {overLimit && <strong>{`超出 ${HERO_PRODUCT_MAX_IMAGES} 张，超过部分不会进入后续识别`}</strong>}
                               {group.issues?.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
                           </div>
                           <FileThumbList files={group.files} onChange={(nextFiles) => updateBatchGroup(group.id, { files: nextFiles })} limit={HERO_PRODUCT_MAX_IMAGES} disabled={!!uploadProgress} />
@@ -1956,7 +1945,7 @@ function UploadHeroStep({ task, setTask, run, uploadSessions, refreshUploadSessi
                 </div>
                   <div className="batch-note">
                     <span>{`最多 ${HERO_PRODUCT_MAX_IMAGES} 张进入候选池，AI 智能选搭后保留 ${HERO_PRODUCT_SELECTED_IMAGES} 张参考图。`}</span>
-                    {files.length > HERO_PRODUCT_MAX_IMAGES && <strong>{`当前超过 ${HERO_PRODUCT_MAX_IMAGES} 张，红框图片不会进入后续识别`}</strong>}
+                    {files.length > HERO_PRODUCT_MAX_IMAGES && <strong>{`当前超过 ${HERO_PRODUCT_MAX_IMAGES} 张，超过部分不会进入后续识别`}</strong>}
                     {singleIssues.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
                   </div>
                 <FileThumbList files={files} onChange={setFiles} limit={HERO_PRODUCT_MAX_IMAGES} disabled={!!uploadProgress} />
@@ -2237,36 +2226,43 @@ function RequirementEditor({ value, onChange, title, placeholder }: { value: str
 
 type StudioStageInputState = {
   aiStylingInstruction: string
+  poseInstruction: string
   finalImageInstruction: string
 }
 
 type StudioStageInputSetters = {
   setAiStylingInstruction: (value: string) => void
+  setPoseInstruction: (value: string) => void
   setFinalImageInstruction: (value: string) => void
 }
 
 function stageInputValue(step: StudioStep, state: StudioStageInputState) {
+  if (step === 2) return state.poseInstruction
   if (step === 1) return state.aiStylingInstruction
   return state.finalImageInstruction
 }
 
 function updateStageInput(step: StudioStep, value: string, setters: StudioStageInputSetters) {
   if (step === 1) setters.setAiStylingInstruction(value)
+  else if (step === 2) setters.setPoseInstruction(value)
   else setters.setFinalImageInstruction(value)
 }
 
 function savedStageInputValue(step: StudioStep, task: GenerationTask | null) {
   if (!task) return ''
+  if (step === 2) return task.stageUserInputs?.poseSelection ?? ''
   if (step === 1) return task.stageUserInputs?.aiStyling ?? ''
   return task.stageUserInputs?.finalImage ?? ''
 }
 
 function stageInputSavePayload(step: StudioStep, value: string) {
+  if (step === 2) return { poseSelectionUserInstruction: value }
   if (step === 1) return { aiStylingUserInstruction: value }
   return { finalImageUserInstruction: value }
 }
 
 function stageInputSaveLabel(step: StudioStep) {
+  if (step === 2) return '保存姿势要求'
   if (step === 1) return '保存选搭要求'
   return '保存成片要求'
 }
@@ -2287,6 +2283,7 @@ function StageUserInputModule({ step, task, value, savedValue = '', onChange, on
   const labels = [
     { title: '', placeholder: '' },
     { title: '智能选搭要求', placeholder: '例如：不要厚重外套，改成更轻盈的通勤搭配。' },
+    { title: '姿势要求', placeholder: '例如：动作自然，避免手臂遮住胸前细节。' },
     { title: '成片要求', placeholder: '例如：整体更干净，减少配饰存在感，保持棚拍电商质感。' },
   ][step]
   const saveDisabled = disabled || !task || value.trim() === savedValue.trim()
@@ -2319,13 +2316,13 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
 }) {
   const locked = !!task && (isTaskRunning(task) || !!task.autoRunTarget)
   const hasHeroImages = (task?.images?.length ?? 0) > 0
-  const canSelect = !!task && !locked && (['READY_FOR_STYLING', 'STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task.status) || (task.status === 'DRAFT' && hasHeroImages))
+  const canSelect = !!task && !locked && (['READY_FOR_STYLING', 'POSE_SELECTION_READY', 'STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task.status) || (task.status === 'DRAFT' && hasHeroImages))
   const hasStyling = !!task?.styling
   const operations = task ? operationFallbacks(task, localOperations, 'generation_styling') : []
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="理解主推款与商品卖点，评估多套造型方向，并选择最能突出主推款的搭配方案。">AI 智能选搭</HeadingWithTooltip></div>
+        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="依据主推款与 Lily 品牌风格选择合适服装，并给出穿法和配饰建议；成套或没有合适商品时可以不搭配。">AI 智能选搭</HeadingWithTooltip></div>
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_styling" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`AI 智能选搭 · Attempt #${operation.id}`, ['generation_styling'], operation.id) : undefined} /></div>
         ) : (
@@ -2341,6 +2338,8 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
           setTask({
             ...task,
             status: 'STYLING_RUNNING',
+            poseSelection: null,
+            activePoseSelectionId: null,
             preview: null,
             storyboardPreview: null,
             resultSet: null,
@@ -2373,6 +2372,11 @@ function StylingPlanSummary({ task }: { task: GenerationTask }) {
   const selected = candidates.find((item) => (stringValue(item.outfit_key) || stringValue(item.id)) === selectedOutfitKey) ?? candidates[0]
   const scores = (styling.criticScores && Object.keys(styling.criticScores).length ? styling.criticScores : planValue<Record<string, unknown>>(selected ?? {}, 'scores') ?? {}) as Record<string, unknown>
   const generatedAccessories = stringList(planValue(selected ?? {}, 'generated_accessories'))
+  const emptyReason = stringValue(planValue(plan, 'empty_reason'))
+  const wearingNotes = [
+    ...((planValue<Record<string, unknown>[]>(plan, 'selected_materials') ?? []).map((item) => [stringValue(item.material_code), stringValue(item.wearing_method)].filter(Boolean).join('：'))),
+    stringValue(planValue(selected ?? {}, 'wearing_notes')),
+  ].filter(Boolean)
   const heroFocus = stringList(planValue(selected ?? {}, 'hero_focus'))
   const aestheticDiagnosis = diagnosisItems(planValue<Record<string, unknown>>(selected ?? {}, 'aesthetic_diagnosis') ?? {})
   const rejected = styling.rejectedCandidates?.length ? styling.rejectedCandidates : planValue<Record<string, unknown>[]>(plan, 'rejected_candidates') ?? []
@@ -2393,18 +2397,20 @@ function StylingPlanSummary({ task }: { task: GenerationTask }) {
           <span className="result-verdict"><Check size={14} />推荐造型方案</span>
           <h3>{stringValue(planValue(selected ?? {}, 'title')) || stringValue(planValue(selected ?? {}, 'mode')) || '主推款优先'}</h3>
         </div>
-        <div className="score-strip">
+        {Object.keys(scores).length > 0 && <div className="score-strip">
           <ScorePill label="审美" value={scores.aesthetic_score} />
           <ScorePill label="品牌" value={scores.brand_fit_score} />
           <ScorePill label="主推可见" value={scores.hero_visibility_score} />
           <ScorePill label="商业可用" value={scores.commercial_readiness_score} />
-        </div>
+        </div>}
       </div>
       <p>{styling.reasonSummary || stringValue(planValue(plan, 'reason_summary'))}</p>
       <div className="selected-strip">
         {styling.selectedMaterials.length ? styling.selectedMaterials.map((item) => item.sourceAvailable === false
           ? <div className="deleted-garment-placeholder" key={item.id} role="status"><Archive size={18} /><strong>搭配服装已删除</strong><span>历史生成内容已保留，原搭配服装不再提供详情。</span></div>
-          : <GarmentCard key={item.id} item={item} />) : <EmptyState title="无需库内搭配服装" text="智能选搭判断本次以主推款单穿或生成配饰辅助更合适。" />}
+          : <GarmentCard key={item.id} item={item} />) : <EmptyState
+            title={emptyReason === 'no_suitable_match' ? '未找到合适的搭配服装' : emptyReason === 'user_requested' ? '按要求不搭配库内服装' : '无需库内搭配服装'}
+            text={emptyReason === 'no_suitable_match' ? '本次未选库内服装，请结合方案说明确认穿着是否完整。' : emptyReason === 'user_requested' ? '保留主推款，并按方案说明处理穿法与配饰。' : '以主推款自身完成造型，配饰按需补充。'} />}
       </div>
       {requirementText && (
         <div className="requirement-summary">
@@ -2419,10 +2425,11 @@ function StylingPlanSummary({ task }: { task: GenerationTask }) {
         <InfoBlock title="风险提示" items={[...stringList(hero.hero_visibility_risks), ...(styling.warnings ?? [])].filter(Boolean)} empty="暂无明显风险" />
       </div>
       <details className="result-details">
-        <summary>查看审美诊断、生成配饰与未采用方案</summary>
+        <summary>{aestheticDiagnosis.length || rejected.length ? '查看穿法、配饰与历史方案诊断' : '查看穿法与配饰建议'}</summary>
         <div className="styling-plan-grid secondary-review-grid">
-          <InfoBlock title="审美诊断" items={aestheticDiagnosis} empty="暂无审美诊断" />
-          <InfoBlock title="生成配饰" items={generatedAccessories.length ? generatedAccessories : ['低存在感鞋包饰品']} />
+          <InfoBlock title="穿法建议" items={wearingNotes} empty="无额外穿法要求" />
+          {aestheticDiagnosis.length > 0 && <InfoBlock title="审美诊断" items={aestheticDiagnosis} />}
+          <InfoBlock title="配饰建议" items={generatedAccessories} empty="不添加配饰" />
         </div>
         {rejected.length > 0 && <div className="rejected-list"><strong>未采用方案</strong>{rejected.slice(0, 3).map((item, index) => {
           const reason = userFacingMaterialText(stringValue(item.reason), materialCodesById)
@@ -2551,7 +2558,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const images = task?.resultSet?.images ?? []
   const finalAssets = images.map((image) => image.asset).filter((asset): asset is MediaAsset => !!asset)
-  const canGenerate = !!task?.styling && !isTaskLockedForGeneration(task) && ['STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task?.status ?? '')
+  const canGenerate = !!task?.styling && (!task.poseWorkflowEnabled || !!task.poseSelection) && !isTaskLockedForGeneration(task) && ['POSE_SELECTION_READY', 'STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task?.status ?? '')
   const hasFinalImages = images.some((image) => !!image.asset)
   const finalHistoryOperations = task ? operationFallbacks(task, localOperations, 'generation_result_image') : []
   const finalSlots = Array.from({ length: 5 }, (_, index) => images.find((image) => image.sortOrder === index + 1) ?? null)
@@ -2560,7 +2567,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="按当前服装类型冻结 5 个当前生效拍摄预设并发生成；可逐张检查、下载或重新生成。">最终成片</HeadingWithTooltip></div>
+        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="按已确认的背景、姿势和镜头要求并发生成五张成片；可逐张检查、下载或重新生成。">最终成片</HeadingWithTooltip></div>
         {preparing && <p role="status" className="edit-hint">正在准备拍摄要求…</p>}
         {preparation?.status === 'FAILED' && <p role="alert" className="inline-error">{preparation.error}</p>}
         {isAdmin && preparation?.attemptId && <button className="management-action" onClick={() => onOpenAICallLogs('成片提示词优化', ['generation_result_set'], preparation.attemptId!)}>查看提示词优化记录</button>}
@@ -3606,6 +3613,8 @@ const generationRecordStatuses = [
   'READY_FOR_STYLING',
   'STYLING_RUNNING',
   'STYLING_READY',
+  'POSE_SELECTION_RUNNING',
+  'POSE_SELECTION_READY',
   'PREVIEW_RUNNING',
   'PREVIEW_READY',
   'FINAL_RUNNING',
@@ -5948,7 +5957,7 @@ function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
         <span>推荐 3-5 张，排序越靠前越重要。</span>
         {batch.error && <strong>{batch.error}</strong>}
         {!batch.files.length && !batch.error && <strong>没有可用图片</strong>}
-        {batch.files.length > STYLING_GARMENT_MAX_IMAGES && <strong>{`超出 ${STYLING_GARMENT_MAX_IMAGES} 张，红框图片不会进入后续识别`}</strong>}
+        {batch.files.length > STYLING_GARMENT_MAX_IMAGES && <strong>{`超出 ${STYLING_GARMENT_MAX_IMAGES} 张，超过部分不会进入后续识别`}</strong>}
         {batch.issues?.map((issue) => <strong key={`${issue.code}-${issue.path ?? issue.count ?? issue.message}`}>{issue.message}</strong>)}
       </div>
       <FileThumbList files={batch.files} onChange={onFiles} limit={STYLING_GARMENT_MAX_IMAGES} />
@@ -6052,23 +6061,23 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
   const coverThumb = refs.find((ref) => ref.angle === 'front')?.thumbUrl ?? refs[0]?.thumbUrl ?? null
   const displayRefs = refs.length || editable ? refs : fallbackHeadRefs()
   const takenAngles = new Set(refs.map((ref) => ref.angle).filter((angle): angle is string => !!angle))
-  const [shotPresets, setShotPresets] = useState<ShotPresetMatrix | null>(null)
-  const [shotPresetLoadState, setShotPresetLoadState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
+  const [environment, setEnvironment] = useState<MediaAsset | null>(null)
+  const [environmentLoadState, setEnvironmentLoadState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
 
-  const loadShotPresets = useCallback(() => {
-    setShotPresetLoadState('loading')
-    setShotPresets(null)
-    void api.getShotPresets().then((matrix) => {
-      setShotPresets(matrix)
-      setShotPresetLoadState('ready')
-    }).catch(() => setShotPresetLoadState('error'))
+  const loadEnvironment = useCallback(() => {
+    setEnvironmentLoadState('loading')
+    setEnvironment(null)
+    void api.getShootEnvironment().then(({ asset }) => {
+      setEnvironment(asset)
+      setEnvironmentLoadState('ready')
+    }).catch(() => setEnvironmentLoadState('error'))
   }, [])
 
   useEffect(() => {
-    if (role) loadShotPresets()
-  }, [loadShotPresets, role])
+    if (role) loadEnvironment()
+  }, [loadEnvironment, role])
 
   const openModelRef = (index: number) => {
     const items = displayRefs.map((item) => ({
@@ -6088,7 +6097,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
     <section className="page workbench-page model-shell-page">
       <PageTitle
         title="模特与背景"
-        subtitle="当前拍摄任务默认使用以下模特身份与拍摄预设，保证整组成片稳定一致。"
+        subtitle="五个镜头使用同一模特、背景与光线，分别呈现不同姿势和景别。"
       />
       <div className="panel model-page">
         <div className="model-meta">
@@ -6159,15 +6168,22 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
 
           <section className="model-block">
             <div className="section-head">
-              <strong>拍摄预设</strong>
+              <strong>统一拍摄背景</strong>
             </div>
-            {shotPresetLoadState === 'error' ? (
+            {environmentLoadState === 'error' ? (
               <div className="model-empty model-empty-action">
-                <span>拍摄预设暂时无法加载。</span>
-                <button type="button" className="management-action" onClick={loadShotPresets}>重试加载</button>
+                <span>拍摄背景暂时无法加载。</span>
+                <button type="button" className="management-action" onClick={loadEnvironment}>重试加载</button>
               </div>
-            ) : shotPresets ? (
-              <ShotPresetManager matrix={shotPresets} setMatrix={setShotPresets} run={run} onOpen={setViewer} editable={isAdmin} />
+            ) : environmentLoadState === 'ready' ? (
+              <>
+                <p className="edit-hint">五个镜头共用这张背景的空间与光线，各自的景别和构图由拍摄要求决定。更换背景用于下次姿势选搭，已选姿势和历史成片保留原背景。</p>
+                <div className="saved-image-grid">
+                  <ShootingReferenceCard label="统一背景" asset={environment} group={environment ? [environment] : []} onOpen={setViewer} editable={isAdmin}
+                    onReplace={(file) => void run('更换拍摄背景中...', () => api.setShootEnvironment(file), (result: { asset: MediaAsset | null }) => setEnvironment(result.asset), { refresh: false })}
+                    onDelete={() => void run('删除拍摄背景中...', () => api.clearShootEnvironment(), () => setEnvironment(null), { refresh: false })} />
+                </div>
+              </>
             ) : (
               <div className="model-empty">加载中…</div>
             )}
@@ -6179,78 +6195,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
   )
 }
 
-const SHOT_PRESET_FAMILY_LABELS: Record<ShotPresetSlot['categoryFamily'], string> = {
-  top: '上装',
-  bottom: '下装',
-  one_piece: '套装',
-}
-
-function ShotPresetManager({ matrix, setMatrix, run, onOpen, editable }: {
-  matrix: ShotPresetMatrix
-  setMatrix: (matrix: ShotPresetMatrix) => void
-  run: any
-  onOpen: (image: LightboxImage) => void
-  editable: boolean
-}) {
-  return (
-    <div className="shot-preset-manager">
-      {(['top', 'bottom', 'one_piece'] as const).map((family) => {
-        const state = matrix.families[family]
-        return (
-          <section className="shot-preset-family" key={family}>
-            <header>
-              <strong>{SHOT_PRESET_FAMILY_LABELS[family]}</strong>
-              <span>{state.configuredCount}/5 个镜头完整</span>
-            </header>
-            {!state.complete && state.validationErrors.length > 0 && (
-              <p className="shot-preset-warning">{editable ? '还需完成' : '当前预设不完整'}：{state.validationErrors.slice(0, 2).join('；')}{state.validationErrors.length > 2 ? `；另有 ${state.validationErrors.length - 2} 项` : ''}</p>
-            )}
-            <div className="shot-preset-grid">
-              {matrix.slots.filter((slot) => slot.categoryFamily === family).map((slot) => (
-                <ShotPresetSlotEditor key={`${family}-${slot.shotIndex}`} slot={slot} setMatrix={setMatrix} run={run} onOpen={onOpen} editable={editable} />
-              ))}
-            </div>
-          </section>
-        )
-      })}
-    </div>
-  )
-}
-
-function ShotPresetSlotEditor({ slot, setMatrix, run, onOpen, editable }: {
-  slot: ShotPresetSlot
-  setMatrix: (matrix: ShotPresetMatrix) => void
-  run: any
-  onOpen: (image: LightboxImage) => void
-  editable: boolean
-}) {
-  const assets = [slot.background, slot.pose].filter((asset): asset is MediaAsset => Boolean(asset))
-  const update = (role: 'background' | 'pose', file: File) => {
-    void run(
-      `更换${SHOT_PRESET_FAMILY_LABELS[slot.categoryFamily]}镜头 ${slot.shotIndex} 图片中...`,
-      () => api.replaceShotPresetAsset(slot.categoryFamily, slot.shotIndex, role, file),
-      setMatrix,
-      { refresh: false },
-    )
-  }
-  const remove = (role: 'background' | 'pose') => void run(
-    `删除${SHOT_PRESET_FAMILY_LABELS[slot.categoryFamily]}镜头 ${slot.shotIndex} 图片中...`,
-    () => api.deleteShotPresetAsset(slot.categoryFamily, slot.shotIndex, role),
-    setMatrix,
-    { refresh: false },
-  )
-  return (
-    <article className={`shot-preset-card ${slot.complete ? 'complete' : ''}`}>
-      <header><strong>镜头 {slot.shotIndex}</strong><span>{slot.complete ? '已配置' : '待配置'}</span></header>
-      <div className="shot-preset-thumbs">
-        <ShotPresetAssetCard label="拍摄母版" asset={slot.background} group={assets} onOpen={onOpen} editable={editable} onReplace={(file) => update('background', file)} onDelete={() => remove('background')} />
-        <ShotPresetAssetCard label="风格/姿势" asset={slot.pose} group={assets} onOpen={onOpen} editable={editable} onReplace={(file) => update('pose', file)} onDelete={() => remove('pose')} />
-      </div>
-    </article>
-  )
-}
-
-function ShotPresetAssetCard({ label, asset, group, onOpen, editable, onReplace, onDelete }: { label: string; asset: MediaAsset | null; group: MediaAsset[]; onOpen: (image: LightboxImage) => void; editable: boolean; onReplace: (file: File) => void; onDelete: () => void }) {
+function ShootingReferenceCard({ label, asset, group, onOpen, editable, onReplace, onDelete }: { label: string; asset: MediaAsset | null; group: MediaAsset[]; onOpen: (image: LightboxImage) => void; editable: boolean; onReplace: (file: File) => void; onDelete: () => void }) {
   return <ImageAssetCard
     thumbnailSrc={asset ? mediaUrl(assetThumbSrc(asset)) : null}
     title={asset?.originalFilename ?? asset?.filename ?? (editable ? `选择${label}图` : `${label}未配置`)}
@@ -6402,7 +6347,8 @@ function PromptMaintenancePage({ run }: { run: any }) {
                 <label className="prompt-optimizer-toggle"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /> 启用成片提示词优化</label>
                 <p className="edit-hint">默认关闭。保存后对新结果集生效；保存规则不会调用模型。</p>
               </div>}
-              {canTestOptimization && !isOptimizer && <p className="edit-hint">优化时原样保留【参考图职责与优先级】【当前镜头的商品表达】【反伪影成像要求】三段；自定义模板可使用【锁定约束】段落。其余表达交由 LLM 整理。</p>}
+              {['assembly.pose_tagging', 'assembly.pose_selection'].includes(activeKey) && <div className="prompt-optimizer-settings"><button className="management-action" onClick={() => void run('读取姿势参考规则...', () => api.posePromptDraft(activeKey === 'assembly.pose_tagging' ? 'tagging' : 'selection'), (result: { content: string }) => setDraft(result.content), { refresh: false })}>填入姿势参考规则</button><p className="edit-hint">参考 lily 的识别与选姿势方法，填入后可编辑，保存才生效。</p></div>}
+              {canTestOptimization && !isOptimizer && <p className="edit-hint">启用优化后，完整提示词交由 LLM 优化，返回正文直接用于生图。</p>}
               <textarea className="prompt-editor-textarea" aria-label={isOptimizer ? '成片提示词优化规则正文' : 'Prompt 正文'} value={draft} onChange={(event) => setDraft(event.target.value)} spellCheck={false} />
             </>
           ) : <EmptyState title="暂无 Prompt 配置" text="后端还没有返回可维护的 Prompt 配置。" />}
@@ -6430,12 +6376,11 @@ function PromptMaintenancePage({ run }: { run: any }) {
             <h3>优化测试</h3>
             <p className="edit-hint">选择历史成片调用作为上下文。测试会调用 LLM 并记录结果，不生成图片、不修改原任务成片。</p>
             <button className="management-action" disabled={!attemptId || !draft.trim() || testing} onClick={testOptimization}>{testing ? '优化测试中…' : '测试优化（仅 LLM）'}</button>
-            {currentTest && <div role="status"><p>测试记录 #{currentTest.attemptId} · 结构校验通过，锁定约束已原样保留；仍需人工检查语义。</p>
+            {currentTest && <div role="status"><p>测试记录 #{currentTest.attemptId} · 优化完成，以下正文将直接用于生图。</p>
               {currentTest.items.map((item) => <details key={item.shotId} open={currentTest.items.length === 1}>
-                <summary>镜头记录 {item.shotId} · {item.changeSummary}</summary>
+                <summary>镜头记录 {item.shotId}</summary>
                 <h4>原始渲染结果</h4><pre className="prompt-comparison-text">{item.originalPrompt}</pre>
-                <h4>优化正文</h4><pre className="prompt-comparison-text">{item.optimizedText}</pre>
-                <h4>最终发送文本（含锁定约束）</h4><pre className="prompt-comparison-text">{item.prompt}</pre>
+                <h4>最终发送文本</h4><pre className="prompt-comparison-text">{item.prompt}</pre>
               </details>)}
             </div>}
           </div>}
@@ -7374,6 +7319,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
               <Meta label="状态" value={statusText(detail.status)} />
               <Meta label="选中搭配" value={`${detail.styling?.selectedMaterials?.length ?? 0} 件`} />
               <RecordImagePreview task={detail} />
+              {detail.poseSelection && <details className="result-details"><summary>查看拍摄姿势</summary><PoseSelectionSummary selection={detail.poseSelection} /></details>}
               {isAdmin && <RecordPromptHistory key={detail.id} task={detail} />}
               <button className="management-action" type="button" disabled={downloadChecking} onClick={() => startSingleRecordDownload(detail)}>
                 <Download size={14} /> {downloadChecking ? '检查成片中...' : '下载成片'}
@@ -8857,7 +8803,7 @@ function operationKey(operation: AIOperation) {
 }
 
 function isStageOperation(ownerType: string) {
-  return ['generation_styling', 'generation_preview'].includes(ownerType)
+  return ['generation_styling', 'generation_pose_selection', 'generation_preview'].includes(ownerType)
 }
 
 function operationRank(operation: AIOperation) {
@@ -8888,6 +8834,8 @@ function operationLabel(operation: AIOperation, index = 0) {
   if (operation.ownerType === 'styling_garment_upload') return '搭配服装导入'
   if (operation.ownerType === 'styling_garment_tagging') return '服装标签识别'
   if (operation.ownerType === 'generation_styling') return 'AI 智能选搭'
+  if (operation.ownerType === 'generation_pose_selection') return '姿势选搭'
+  if (operation.ownerType === 'pose_tagging') return '姿势识别'
   if (operation.ownerType === 'generation_preview') return '分镜预览'
   if (operation.ownerType === 'generation_result_image') {
     const shot = operation.shotSortOrder ?? (operation.id < 0 && operation.ownerId > 0 ? operation.ownerId : null)
@@ -9322,19 +9270,13 @@ function SearchBox({
 
 function getTaskStep(task: GenerationTask | null): StudioStep {
   if (!task) return 0
-  if (task.status === 'CANCELLED') {
-    if (task.resultSet?.images?.length) return 2
-    if (task.styling) return 2
-    return 1
-  }
-  if (task.status === 'FAILED') {
-    if (task.resultSet?.images?.length) return 2
-    if (task.styling) return 2
-    return 1
-  }
   if (['DRAFT', 'READY_FOR_STYLING', 'STYLING_RUNNING'].includes(task.status)) return 1
-  if (['STYLING_READY', 'PREVIEW_RUNNING', 'PREVIEW_READY', 'FINAL_RUNNING', 'FINAL_PARTIAL', 'COMPLETED'].includes(task.status)) return 2
-  return 0
+  if (task.status === 'POSE_SELECTION_RUNNING') return 2
+  if (['FAILED', 'CANCELLED'].includes(task.status) && [...(task.aiOperations ?? [])].sort((a, b) => b.id - a.id)[0]?.ownerType === 'generation_pose_selection') return 2
+  if (task.status === 'POSE_SELECTION_READY' || task.poseSelection || task.activePoseSelectionId) return 3
+  if (task.resultSet?.images?.length || ['FINAL_RUNNING', 'FINAL_PARTIAL', 'COMPLETED'].includes(task.status)) return 3
+  if (task.styling || task.activeStylingId || task.status === 'STYLING_READY') return task.poseWorkflowEnabled ? 2 : 3
+  return 1
 }
 
 function taskHasHeroImage(task: GenerationTask) {
@@ -9381,7 +9323,7 @@ function studioTaskPresentation(task: GenerationTask): StudioTaskPresentation {
   return {
     statusLabel: taskListStatusLabel(task),
     currentStageLabel,
-    progressLabel: `已完成 ${completedStageCount}/3 步`,
+    progressLabel: `已完成 ${completedStageCount}/4 步`,
     executingStage: runningStage,
   }
 }
@@ -9390,7 +9332,8 @@ function runningStudioStage(task: GenerationTask): StudioStep | null {
   const map: Record<string, StudioStep> = {
     STYLING_RUNNING: 1,
     PREVIEW_RUNNING: 2,
-    FINAL_RUNNING: 2,
+    FINAL_RUNNING: 3,
+    POSE_SELECTION_RUNNING: 2,
   }
   return map[task.status] ?? null
 }
@@ -9398,12 +9341,13 @@ function runningStudioStage(task: GenerationTask): StudioStep | null {
 function completedStudioStageCount(task: GenerationTask) {
   let count = taskHasHeroImage(task) ? 1 : 0
   if (task.activeStylingId || task.styling) count += 1
+  if (task.poseSelection || task.activePoseSelectionId || (!task.poseWorkflowEnabled && (task.styling || task.activeStylingId))) count += 1
   if (finalSucceededCount(task) >= 5) count += 1
   return count
 }
 
 function isTaskRunning(task: GenerationTask) {
-  return ['STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)
+  return ['STYLING_RUNNING', 'POSE_SELECTION_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING'].includes(task.status)
 }
 
 function isTaskLockedForGeneration(task: GenerationTask) {
@@ -9448,6 +9392,8 @@ function statusText(status: string) {
     READY_FOR_STYLING: '待选搭',
     STYLING_RUNNING: '选搭中',
     STYLING_READY: '已选搭',
+    POSE_SELECTION_RUNNING: '姿势选搭中',
+    POSE_SELECTION_READY: '姿势已选定',
     PREVIEW_RUNNING: '分镜预览中',
     PREVIEW_READY: '分镜预览完成',
     FINAL_RUNNING: '生成中',
@@ -9757,4 +9703,305 @@ function beginResourceRead(scope: { token: number; controller?: AbortController 
   const token = ++scope.token
   scope.controller = controller
   return { controller, isCurrent: () => !controller.signal.aborted && scope.token === token }
+}
+
+function PoseSelectionSummary({ selection }: { selection: PoseSelection }) {
+  const [viewer, setViewer] = useState<LightboxImage | null>(null)
+  return <div className="pose-selection-results">
+    {selection.summary && <p className="edit-hint">{selection.summary}</p>}
+    <div className="pose-shot-grid">{selection.shots.map((shot) => <article className="panel pose-shot-card" key={shot.shotIndex}>
+      <header><strong>镜头 {shot.shotIndex}</strong><span>{shot.sourceAvailable ? shot.name : '来源姿势已删除'}</span></header>
+      <div className="shot-preset-thumbs">
+        {[{ title: selection.workflow === 'shared_background_v1' ? '统一背景' : '历史拍摄母版', asset: shot.background }, { title: '选定姿势', asset: shot.pose }].map(({ title, asset }) => <ImageAssetCard key={title} title={title} thumbnailSrc={asset ? mediaUrl(assetThumbSrc(asset)) : null} onOpen={asset ? () => setViewer(assetLightboxImage(asset, [shot.background, shot.pose].filter((item): item is MediaAsset => !!item))) : undefined} />)}
+      </div>
+      <p>{shot.reason}</p><details><summary>动作说明</summary><p>{shot.direction}</p></details>
+    </article>)}</div>
+    {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
+  </div>
+}
+
+function PoseSelectionStep({ task, setTask, run, userInstruction, isAdmin, onOpenAICallLogs }: {
+  task: GenerationTask | null; setTask: (task: GenerationTask) => void; run: any; userInstruction: string;
+  isAdmin: boolean; onOpenAICallLogs: (title: string, ownerTypes: string[], attemptId: number) => void
+}) {
+  const [submitting, setSubmitting] = useState(false)
+  const operations = task?.aiOperations?.filter((operation) => operation.ownerType === 'generation_pose_selection') ?? []
+  const locked = submitting || !!task && isTaskLockedForGeneration(task)
+  const legacy = !!task?.styling && !task.poseWorkflowEnabled && !task.poseSelection
+  async function select() {
+    if (!task || locked) return
+    setSubmitting(true)
+    try {
+      await run('正在选择拍摄姿势...', () => api.selectPoses(task.id, userInstruction), (result: { item: GenerationTask }) => setTask(result.item), { refresh: false })
+    } catch {
+      // The shared runner displays the failure; keep this step ready for retry.
+    } finally { setSubmitting(false) }
+  }
+  return <section className="step-panel pose-selection-step">
+    <div className="step-scroll-content">
+      <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="结合商品图片、已选造型与五个镜头要求筛选候选，再查看姿势原图，选择五个不同动作，共用统一背景与光线。">姿势选搭</HeadingWithTooltip></div>
+      {task?.poseSelection ? <PoseSelectionSummary selection={task.poseSelection} /> : <EmptyState title={legacy ? '历史任务沿用原拍摄姿势' : '为这套造型选择拍摄姿势'} text={legacy ? '可以继续原成片流程，也可以从姿势库重新选择。新姿势选定后，旧成片保留在历史记录中。' : task?.styling ? '从姿势库挑选适合商品与五个镜头的动作。选定后可查看参考图和选择理由。' : '请先完成 AI 智能选搭。'} />}
+      <AIOperationList operations={operations} taskId={task?.id} ownerType="generation_pose_selection" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`姿势选搭 · Attempt #${operation.id}`, ['generation_pose_selection'], operation.id) : undefined} />
+    </div>
+    <div className="stage-action-bar"><button className="task-action" disabled={!task?.styling || locked} onClick={() => void select()}>{locked ? <Loader2 className="spin" size={16} /> : <PersonStanding size={16} />}{task?.poseSelection ? '重新选姿势' : 'AI 选姿势'}</button></div>
+  </section>
+}
+
+function poseErrorText(error: unknown) {
+  return error instanceof ApiError ? friendlyErrorText(error.errorCode, error.errorMessage || error.message)
+    : friendlyErrorText(undefined, error instanceof Error ? error.message : String(error))
+}
+
+type PoseImportItem = ImportBatch & { savedId?: number; state?: string; error?: string }
+
+function PoseLibraryPage({ active }: { active: boolean }) {
+  const [items, setItems] = useState<Pose[]>([])
+  const [query, setQuery] = useState('')
+  const [status, setStatus] = useState('')
+  const [statusOpen, setStatusOpen] = useState(false)
+  const [includeArchived, setIncludeArchived] = useState(false)
+  const [pageSize, setPageSize] = useState(24)
+  const [offset, setOffset] = useState(0)
+  const [total, setTotal] = useState(0)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [reload, setReload] = useState(0)
+  const [bulk, setBulk] = useState(false)
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const anchor = useRef<number | null>(null)
+  const [detail, setDetail] = useState<Pose | null>(null)
+  const [viewer, setViewer] = useState<LightboxImage | null>(null)
+  const [showImport, setShowImport] = useState(false)
+  const [drafts, setDrafts] = useState<PoseImportItem[]>([])
+  const [busy, setBusy] = useState(false)
+  const [manage, setManage] = useState<Pose[]>([])
+  const [impact, setImpact] = useState<Awaited<ReturnType<typeof api.poseDeleteImpact>> | null>(null)
+  const [impactError, setImpactError] = useState('')
+  const [impactLoading, setImpactLoading] = useState(false)
+  const marquee = useMarqueeSelection<number>({ enabled: bulk, selected, onChange: setSelected })
+  const refresh = () => setReload((value) => value + 1)
+  useEffect(() => { setSelected(new Set()); anchor.current = null }, [query, status, includeArchived, pageSize, offset])
+  useEffect(() => {
+    if (!active) return
+    let current = true
+    setLoading(true)
+    const timer = window.setTimeout(() => {
+      void api.listPoses({ q: query, status, includeArchived, limit: pageSize, offset }).then((result) => {
+        if (!current) return
+        setItems(result.items); setTotal(result.total); setError('')
+        if (offset && offset >= result.total) setOffset(Math.max(0, Math.ceil(result.total / pageSize) - 1) * pageSize)
+        setDetail((current) => current ? result.items.find((item) => item.id === current.id) ?? current : null)
+      }).catch((err) => { if (current) setError(poseErrorText(err)) }).finally(() => { if (current) setLoading(false) })
+    }, 180)
+    return () => { current = false; window.clearTimeout(timer) }
+  }, [query, status, includeArchived, pageSize, offset, reload, active])
+  const recognizing = items.some((item) => item.status === 'TAGGING_RUNNING') || detail?.status === 'TAGGING_RUNNING'
+  useEffect(() => {
+    if (!active || !recognizing) return
+    const timer = window.setInterval(() => {
+      if (document.hidden) return
+      refresh()
+      if (detail?.status === 'TAGGING_RUNNING') void api.getPose(detail.id).then((result) => setDetail((current) => current?.id === result.item.id ? result.item : current)).catch(() => undefined)
+    }, 2500)
+    return () => window.clearInterval(timer)
+  }, [active, recognizing, detail?.id, detail?.status])
+  useEffect(() => {
+    if (!busy) return
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault()
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [busy])
+  useEffect(() => {
+    if (!manage.length) return
+    let active = true
+    setImpact(null); setImpactError(''); setImpactLoading(true)
+    void api.poseDeleteImpact(manage.map((item) => item.id)).then((value) => { if (active) setImpact(value) }).catch((err) => { if (active) setImpactError(poseErrorText(err)) }).finally(() => { if (active) setImpactLoading(false) })
+    return () => { active = false }
+  }, [manage])
+  async function action<T>(callback: () => Promise<T>, after?: (value: T) => void) {
+    if (busy) return
+    setBusy(true); setError('')
+    try { const result = await callback(); after?.(result); refresh() }
+    catch (err) { setError(poseErrorText(err)) }
+    finally { setBusy(false) }
+  }
+  function addFiles(files: File[]) {
+    const images = files.filter(isSupportedImageFile)
+    setError(images.length < files.length ? `已忽略 ${files.length - images.length} 个不支持的文件。` : '')
+    const batchId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    setDrafts((current) => [...current, ...images.map((file, index) => ({
+      id: `${batchId}-${index}`, code: file.name.replace(/\.[^.]+$/, '').trim().slice(0, 80) || '未命名姿势', files: [file],
+    }))])
+  }
+
+  function updateDraft(id: string, patch: Partial<PoseImportItem>) { setDrafts((current) => current.map((item) => item.id === id ? { ...item, ...patch } : item)) }
+  async function importPoses() {
+    if (busy) return
+    setBusy(true); setError('')
+    const saved: { id: number; draftId: string }[] = []
+    try {
+      for (const item of drafts) {
+        if (item.state === '已提交识别') continue
+        if (!item.code.trim() || item.files.length !== 1) continue
+        if (item.savedId) { saved.push({ id: item.savedId, draftId: item.id }); continue }
+        updateDraft(item.id, { state: '导入中', error: undefined })
+        try {
+          const result = await api.createPose(item.code, item.files)
+          updateDraft(item.id, { savedId: result.item.id, state: '已入库，待识别' })
+          saved.push({ id: result.item.id, draftId: item.id })
+        } catch (err) { updateDraft(item.id, { state: '导入失败', error: poseErrorText(err) }) }
+      }
+      for (const item of saved) {
+        try { await api.recognizePose(item.id); updateDraft(item.draftId, { state: '已提交识别', error: undefined }) }
+        catch (err) { updateDraft(item.draftId, { state: '已入库，识别未启动', error: poseErrorText(err) }) }
+      }
+    } finally { setBusy(false); refresh() }
+  }
+  function toggle(item: Pose, extend = false) {
+    setSelected((current) => updateSelectionWithRange({ current, orderedIds: items.map((p) => p.id), id: item.id, checked: !current.has(item.id), extend, anchor: anchor.current }))
+    anchor.current = item.id
+  }
+  const selectedItems = items.filter((item) => selected.has(item.id))
+  const manageable = selectedItems.filter((item) => item.status !== 'TAGGING_RUNNING')
+  if (!active) return null
+  return <section className="page workbench-page library-page pose-library-page">
+    <div className="library-title-row">
+      <PageTitle title="姿势库" subtitle="每张图片独立保存为一个姿势，为每次拍摄选择合适动作。" />
+      <button className="management-action" disabled={busy} onClick={() => setShowImport(!showImport)}>{showImport ? <ChevronLeft size={16} /> : <ImagePlus size={16} />}{showImport ? '返回姿势库' : '导入姿势'}</button>
+    </div>
+    {error && <div className="pose-error" role="alert">{error}</div>}
+    <div className={`library-content-scroll ${showImport ? 'is-import' : 'is-list'}`}>
+    {showImport ? <div className="import-page-stack"><section className={`panel import-panel ${drafts.length ? 'has-batches' : ''}`}>
+      <div className="import-head"><HeadingWithTooltip as="h3" tooltip="一张图片对应一个姿势。文件夹仅用于批量选择，文件夹内的每张图片都会独立入库。">导入姿势</HeadingWithTooltip></div>
+      <div className="import-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (!busy) void filesFromDataTransfer(event.dataTransfer).then(addFiles).catch((err) => setError(poseErrorText(err))) }}>
+        <Images size={22} /><strong>拖入图片或文件夹</strong><span>每张图片独立成为一个姿势，支持批量选择图片或文件夹</span>
+        <div className="import-actions"><label className="management-action"><ImagePlus size={16} />选择图片<input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple disabled={busy} onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.target.value = '' }} /></label><label className="management-action"><FolderOpen size={16} />选择文件夹<input type="file" {...{ webkitdirectory: '' }} multiple disabled={busy} onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.target.value = '' }} /></label></div>
+      </div>
+      {!!drafts.length && <div className="batch-list">{drafts.map((item) => <PoseImportDraft key={item.id} item={item} disabled={busy || !!item.savedId} removable={!busy} onChange={(patch) => updateDraft(item.id, patch)} onRemove={() => setDrafts((current) => current.filter((draft) => draft.id !== item.id))} />)}</div>}
+      {!!drafts.length && <div className="import-footer-actions"><button className="management-action" disabled={busy} onClick={() => setShowImport(false)}><ChevronLeft size={16} />返回姿势库</button><button className="management-action" disabled={busy || !drafts.some((item) => item.state !== '已提交识别' && item.code.trim() && item.files.length === 1)} onClick={() => void importPoses()}>{busy ? <Loader2 className="spin" size={16} /> : <Upload size={16} />}导入并识别</button></div>}
+    </section></div> : <section className="panel library-panel">
+      <div className="library-commandbar">
+        <SearchBox value={query} onChange={(value) => { setQuery(value); setOffset(0) }} placeholder="搜索名称 / 动作 / 标签，支持粘贴多个" panelPlaceholder="每行一个名称或标签，或用空格、逗号、句号、顿号分隔" busy={loading && !!query} />
+        <div className="library-filter-pills">
+          <StatusFilter open={statusOpen} onOpen={setStatusOpen} value={status} options={['READY', 'DRAFT', 'TAGGING_RUNNING', 'TAGGING_FAILED'].map((value) => ({ value, label: poseStatusText(value), count: 0 }))} showCounts={false} formatLabel={poseStatusText} onChange={(value) => { setStatus(value); setOffset(0) }} />
+          <button className={`filter-pill checkbox-pill ${includeArchived ? 'is-active' : ''}`} onClick={() => { setIncludeArchived(!includeArchived); setOffset(0) }}><Check size={15} /><span>查看已归档</span></button>
+          {(query || status || includeArchived) && <button className="filter-pill reset-filter-pill" onClick={() => { setQuery(''); setStatus(''); setIncludeArchived(false); setOffset(0) }}>清空筛选</button>}
+        </div>
+        <div className="library-management-tools">
+          {bulk && <>
+            {!!manageable.length && <button className="management-action" disabled={busy} onClick={() => setManage(manageable)}><Archive size={15} />归档 {manageable.length} 项</button>}
+            {!!selectedItems.length && <button className="management-action" disabled={busy || !selectedItems.some((item) => !item.archivedAt && item.status !== 'TAGGING_RUNNING' && item.images.length === 1)} onClick={() => void action(async () => {
+              const failures: string[] = []
+              for (const item of selectedItems.filter((item) => !item.archivedAt && item.status !== 'TAGGING_RUNNING' && item.images.length === 1)) {
+                try { await api.recognizePose(item.id) } catch (err) { failures.push(`${item.name}：${poseErrorText(err)}`) }
+              }
+              if (failures.length) setError(failures.join('；'))
+            })}><RotateCcw size={15} />识别 {selectedItems.length} 项</button>}
+            <BulkSelectAllButton active={!!items.length && items.every((item) => selected.has(item.id))} disabled={!items.length} helpText="拖动框选 · Shift 连选" onClick={() => setSelected(items.every((item) => selected.has(item.id)) ? new Set() : new Set(items.map((item) => item.id)))}><Check size={15} />全选本页</BulkSelectAllButton>
+          </>}
+          <button className="management-action compact-control" onClick={() => { setBulk(!bulk); setSelected(new Set()) }}>{bulk ? '退出批量' : '批量管理'}</button>
+        </div>
+      </div>
+      <div className={`library-results marquee-selection-surface ${bulk ? 'is-bulk-selecting' : ''} ${loading ? 'is-loading' : ''}`} aria-busy={loading} ref={marquee.containerRef} onPointerDown={marquee.onPointerDown} onClickCapture={marquee.onClickCapture}>
+        <MarqueeSelectionBox box={marquee.box} />
+        <ListLoadFeedback loading={loading} failed={!!error} hasItems={items.length > 0} onRetry={refresh} />
+        {loading && !items.length && <ListSkeleton layout="cards" />}
+        {!!items.length && <div className="garment-grid">{items.map((item) => <PoseCard key={item.id} item={item} busy={busy} selected={selected.has(item.id)} onSelect={bulk ? (extend) => toggle(item, extend) : undefined} onOpen={() => setDetail(item)} onManage={() => setManage([item])} onRecognize={() => void action(() => api.recognizePose(item.id))} />)}</div>}
+        {!loading && !error && !items.length && <EmptyState title={query || status ? '没有匹配的姿势' : '姿势库暂无素材'} text="导入姿势参考图，识别完成后即可参与拍摄选搭。" />}
+      </div>
+      <div className="library-pagination-stick"><PaginationControls offset={offset} pageSize={pageSize} pageSizeOptions={libraryPageSizeOptions} pageSizeUnit="个" total={total} totalPages={Math.max(1, Math.ceil(total / pageSize))} selectionStatus={bulk ? `已选 ${selected.size} 个` : undefined} onOffsetChange={setOffset} onPageSizeChange={(size) => { setPageSize(size); setOffset(0) }} disabled={loading} /></div>
+    </section>}
+    </div>
+    {detail && <PoseDetailPanel item={detail} busy={busy} onClose={() => setDetail(null)} onOpen={(asset) => setViewer(assetLightboxImage(asset, detail.images.map((image) => image.asset)))} onRename={(name) => void action(() => api.updatePose(detail.id, name), (result) => setDetail(result.item))} onReplace={(file) => void action(() => api.replacePoseImage(detail.id, file), (result) => { setDetail(result.item); if (result.objectCleanupErrors?.length) setError('图片已替换，部分旧文件清理失败，请联系管理员。') })} onRecognize={() => void action(() => api.recognizePose(detail.id), (result) => setDetail(result.item))} onManage={() => setManage([detail])} />}
+    {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
+    {active && !!manage.length && <ArchiveManageDialog title="管理姿势" items={manage} description="归档后不再参与新的姿势选搭，已有拍摄结果和冻结参考图会保留。" actions={[...(manage.some((item) => !item.archivedAt) ? [{ value: 'archive' as const, label: '归档' }] : []), ...(manage.some((item) => item.archivedAt) ? [{ value: 'restore' as const, label: '取消归档' }] : []), { value: 'purge', label: '彻底删除' }]} initialAction={manage.every((item) => item.archivedAt) ? 'restore' : 'archive'} impactLoading={impactLoading} impactError={impactError} purgeReady={!!impact} onRetryImpact={() => setManage([...manage])} impact={impact && <p>删除 {impact.poseCount} 个姿势，释放 {impact.mediaAssetCount} 个无人引用的图片文件；保留 {impact.referencingTaskCount} 条历史拍摄记录。</p>} onClose={() => setManage([])} onError={(err) => setError(poseErrorText(err))} onConfirmAction={async (manageAction, phrase) => {
+      const targets = manage.filter((item) => manageAction === 'purge' || (manageAction === 'archive' ? !item.archivedAt : !!item.archivedAt))
+      const result = await api.managePoses(targets.map((item) => item.id), manageAction, phrase)
+      setManage([]); setSelected(new Set()); setDetail(null); refresh()
+      if (result.objectCleanupErrors?.length) setError('姿势已删除，部分文件清理失败，请联系管理员。')
+    }} />}
+  </section>
+}
+
+function poseStatusText(status: string) {
+  return status === 'DRAFT' ? '待识别' : status === 'READY' ? '可选搭' : statusText(status)
+}
+
+function PoseCard({ item, busy, selected, onSelect, onOpen, onManage, onRecognize }: {
+  item: Pose; busy: boolean; selected: boolean; onSelect?: (extend: boolean) => void;
+  onOpen: () => void; onManage: () => void; onRecognize: () => void
+}) {
+  const tagging = item.status === 'TAGGING_RUNNING'
+  const failed = item.status === 'TAGGING_FAILED'
+  const tags = Object.values(item.aiTags).flat().filter((value): value is string => typeof value === 'string')
+  const asset = item.images[0]?.asset
+  return <article className={`garment-card ${selected ? 'is-selected' : ''} ${tagging ? 'is-tagging' : ''} ${failed ? 'is-failed' : ''} ${item.archivedAt ? 'is-archived' : ''}`} data-select-id={onSelect ? item.id : undefined} data-select-type={onSelect ? 'number' : undefined}>
+    {onSelect && <label className="card-select"><BulkCheckbox checked={selected} label={`选择 ${item.name}`} onChange={(_, extend) => onSelect(extend)} /></label>}
+    <div className="garment-cover"><AssetThumb asset={asset} large />{tagging && <span className="cover-badge">识别中</span>}{item.archivedAt && <span className="cover-badge">已归档</span>}</div>
+    <div className="garment-card-body">
+      <div className="garment-card-head"><TruncatedText as="strong" text={item.name} /><span className={`status ${item.status.toLowerCase()}`} role={tagging ? 'status' : undefined}>{poseStatusText(item.status)}</span></div>
+      <p className="garment-card-brief">{tagging ? '正在识别姿势信息，可以离开当前页面。' : failed ? '识别未完成，可重新识别。' : tags[0] || '待识别姿势信息'}</p>
+      <div className="tag-summary">{item.status === 'READY' && tags.length ? tags.slice(0, 3).map((tag, index) => <TruncatedText key={index} text={tag} />) : <span>{tagging ? '识别中' : failed ? '待重新识别' : '待识别'}</span>}</div>
+    </div>
+    <div className="card-actions" data-action-count={4}>
+      <button className="management-action" onClick={onOpen}><Eye size={16} />详情</button>
+      <button className="management-action" disabled={busy || tagging} onClick={onManage}><Archive size={16} />归档</button>
+      <button className="management-action" disabled={!asset} onClick={() => { if (asset) { const link = document.createElement('a'); link.href = mediaDownloadUrl(asset.originalUrl || asset.url); link.download = asset.originalFilename || asset.filename; document.body.appendChild(link); link.click(); link.remove() } }}><Download size={16} />下载</button>
+      <button className="management-action" disabled={busy || tagging || !!item.archivedAt || item.images.length !== 1} onClick={onRecognize}><RotateCcw size={16} />{item.status === 'READY' ? '重新识别' : '识别姿势'}</button>
+    </div>
+  </article>
+}
+
+function PoseImportDraft({ item, disabled, removable, onChange, onRemove }: { item: PoseImportItem; disabled: boolean; removable: boolean; onChange: (patch: Partial<PoseImportItem>) => void; onRemove: () => void }) {
+  return <article className={`batch-card ${!item.files.length || item.error ? 'has-error' : ''}`}>
+    <div className="batch-card-form">
+      <div className="batch-icon"><PersonStanding size={18} /></div>
+      <label className="batch-field batch-code-field"><span>姿势名称</span><input aria-label="姿势名称" maxLength={80} value={item.code} disabled={disabled} onChange={(event) => onChange({ code: event.target.value })} /></label>
+      <span className="batch-form-spacer" /><span className="count-pill">{formatImageCount(item.files.length, 1)}</span>
+      <button className="management-action icon-button" disabled={!removable} title={item.savedId ? '收起记录' : '移除姿势'} onClick={onRemove}><Trash2 size={16} /></button>
+    </div>
+    <div className="batch-note"><span>{item.state || '一张图片对应一个姿势，可修改名称或替换图片。'}</span>{item.error && <strong role="alert">{item.error}</strong>}</div>
+    <FileThumbList files={item.files} onChange={(files) => onChange({ files: files.slice(0, 1), error: undefined })} limit={1} disabled={disabled} />
+  </article>
+}
+
+function PoseDetailPanel({ item, busy, onClose, onOpen, onRename, onReplace, onRecognize, onManage }: {
+  item: Pose; busy: boolean; onClose: () => void; onOpen: (asset: MediaAsset) => void; onRename: (name: string) => void; onReplace: (file: File) => void; onRecognize: () => void; onManage: () => void
+}) {
+  const [name, setName] = useState(item.name)
+  const panel = useRef<HTMLElement>(null)
+  useEffect(() => setName(item.name), [item.id, item.name])
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null
+    panel.current?.focus()
+    return () => previous?.focus()
+  }, [])
+  const disabled = busy || !!item.archivedAt || item.status === 'TAGGING_RUNNING'
+  return createPortal(<div className="drawer-backdrop" onClick={(event) => { if (event.target === event.currentTarget) onClose() }}><aside className="detail-drawer" role="dialog" aria-modal="true" aria-label="姿势详情" tabIndex={-1} ref={panel} onKeyDown={(event) => {
+    if (event.key === 'Escape') { event.stopPropagation(); onClose() }
+    if (event.key !== 'Tab') return
+    const focusable = Array.from(panel.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), a[href], summary, [tabindex="0"]') ?? [])
+    const first = focusable[0], last = focusable[focusable.length - 1]
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === panel.current)) { event.preventDefault(); last?.focus() }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
+  }}>
+    <div className="drawer-head"><div><h2>{item.name}</h2><span className={`status ${item.status.toLowerCase()}`}>{item.archivedAt ? '已归档' : poseStatusText(item.status)}</span></div><button className="management-action icon-button" aria-label="关闭姿势详情" onClick={onClose}><X size={16} /></button></div>
+    <div className="drawer-section">
+      <div className="section-head"><strong>基础信息</strong></div>
+      <Meta label="姿势编号" value={item.code} /><Meta label="导入时间" value={dateText(item.createdAt)} /><Meta label="更新时间" value={dateText(item.updatedAt)} />
+      <div className="code-editor"><label htmlFor="pose-name">姿势名称</label><div><input id="pose-name" maxLength={80} value={name} disabled={disabled} onChange={(event) => setName(event.target.value)} /><button className="management-action" disabled={disabled || !name.trim() || name.trim() === item.name} onClick={() => onRename(name.trim())}>保存名称</button></div></div>
+    </div>
+    <div className="drawer-section">
+      <div className="section-head"><strong>图片</strong></div>
+      <p className="edit-hint">每个姿势只有一张图片。替换后需重新识别，已有拍摄记录继续使用原图。</p>
+      <div className="saved-image-grid">{item.images.map((image) => <ImageAssetCard key={image.id} title={image.asset.originalFilename || image.asset.filename} meta={assetMeta(image.asset)} thumbnailSrc={mediaUrl(assetThumbSrc(image.asset))} accept={SUPPORTED_IMAGE_ACCEPT} disabled={disabled} onOpen={() => onOpen(image.asset)} onReplace={!disabled ? onReplace : undefined} footer={<a className="management-action" href={mediaDownloadUrl(image.asset.originalUrl || image.asset.url)} download>下载原图</a>} />)}{!item.images.length && !disabled && <ImageUploadPlaceholder accept={SUPPORTED_IMAGE_ACCEPT} remaining={1} onFiles={(files) => { if (files[0]) onReplace(files[0]) }} />}</div>
+    </div>
+    {item.status === 'TAGGING_FAILED' && <p className="inline-error" role="alert">{item.error?.message || item.error?.title || '识别失败，请检查参考图后重新识别。'}</p>}
+    <div className="drawer-section"><div className="section-head"><strong>AI 识别标签</strong></div>
+      {item.status === 'DRAFT' && Object.keys(item.aiTags).length > 0 && <p className="edit-hint">图片已变化，下方为上次识别结果；重新识别后才能参与选搭。</p>}
+      <TagObjectPanel title="AI 识别标签" data={item.aiTags} defaultOpen />
+    </div>
+    <div className="drawer-actions"><button className="management-action" disabled={disabled || item.images.length !== 1} onClick={onRecognize}><RotateCcw size={16} />{item.status === 'READY' ? '重新识别' : '识别姿势'}</button></div>
+    <div className="danger-zone"><strong>归档</strong><button className="management-action" disabled={busy || item.status === 'TAGGING_RUNNING'} onClick={onManage}>归档</button></div>
+  </aside></div>, document.body)
 }

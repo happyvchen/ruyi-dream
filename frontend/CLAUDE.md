@@ -2,7 +2,7 @@
 
 ## 职责 (Scope)
 
-ruyi-dream 0.1.0 的前端实现目录。当前前端是 React + Vite + TypeScript 单页应用，用于承载普通用户的三步“AI 摄影棚”：导入主推款、展示带审美诊断的 AI Stylist 推荐造型方案、直接生成 5 个固定镜头成片并复盘生成记录。
+ruyi-dream 0.1.0 的前端实现目录。当前前端是 React + Vite + TypeScript 单页应用，用于承载普通用户的四步“AI 摄影棚”：导入主推款、展示 AI Stylist 最终服装、穿法、配饰与空搭配原因；旧审美诊断只读兼容、独立选择五镜头姿势、生成 5 个固定镜头成片并复盘生成记录。
 
 UX 源头在 `../design/03_ux_guide/user_uiux.md`，本目录只管“前端怎么组织代码”和“界面规则怎么落地”。
 
@@ -37,9 +37,9 @@ UX 源头在 `../design/03_ux_guide/user_uiux.md`，本目录只管“前端怎�
 
 ## 核心前端职责
 
-- `AI 摄影棚`：创建主推款 `GenerationTask`，推进 AI Stylist 造型方案和最终成片。
+- `AI 摄影棚`：创建主推款 `GenerationTask`，推进 AI Stylist 造型方案、独立姿势选搭和最终成片。
 - `搭配服装库`：导入真实配角服装 `StylingGarment`，系统默认启动打标；列表展示后端从 AI 返回中最佳努力派生的摘要，详情展示完整 AI 打标 JSON，不向普通用户展示底层模型调用快照。
-- `模特与背景`：所有登录用户查看默认模特和 15 个当前生效的拍摄母版/姿势槽位；普通 user 整页只读，admin 可维护，单张更换立即生效，缺图的服装类型不能开始成片生成。
+- `模特与背景`：所有登录用户查看默认模特和一张统一拍摄背景；普通 user 整页只读，admin 可维护；背景更换用于下次姿势选搭，已冻结选择和结果保持原图。
 - `Prompt 维护`：admin-only 页面，维护品牌分段、AI 打标、AI 选搭、三类生成成片 Prompt 和可选成片提示词优化规则，支持显式文本测试和前后对照。
 - `生成记录`：展示进入过生成阶段的 `GenerationTask`，聚焦入参、搭配和最终结果；旧分镜只作为历史兼容数据。
 - 默认不展示 prompt、Image-2 任务包、provider 请求、模型名称、调用快照等复杂细节。
@@ -50,7 +50,7 @@ UX 源头在 `../design/03_ux_guide/user_uiux.md`，本目录只管“前端怎�
 - 接口联调前先读 `../backend/api_guideline.md`、`../backend/domain_model.md`。
 - 默认不展示 prompt、Image 2 任务包、StylingPlan JSON、策划器细节、底层模型名称和调用详情。
 - 不再提供独立 `AI 策略配置` 入口；开发人员在 `Prompt 维护` 中直接编辑 `AI 选搭` Prompt。
-- 不再提供独立 `标签规则`、`导演规则`、分镜或动态剧本入口；AI 打标、AI 选搭和成片规则在 `Prompt 维护` 中维护，拍摄母版/姿势在拍摄预设中维护。
+- 不再提供独立 `标签规则`、`导演规则`、分镜或动态剧本入口；AI 打标、AI 选搭和成片规则在 `Prompt 维护` 中维护，统一背景在模特与背景中维护，姿势在姿势库中维护；旧预设姿势保留兼容历史任务。
 - 后续技术人员配置、provider 状态和调试入口只能作为 admin 的增量模块接入，不混入 user 体验，也不能替代普通拍摄工作台。
 - 生成记录主视图展示进入过 AI 阶段的 `GenerationTask`，不要退回事件日志流水账。
 - 删除入口默认呈现为“归档”；用户勾选彻底删除时必须展示后端影响预检结果，说明关联记录和文件会被不可恢复地删除。
@@ -67,3 +67,5 @@ UX 源头在 `../design/03_ux_guide/user_uiux.md`，本目录只管“前端怎�
 - 设计源头：`../design/CLAUDE.md`
 - UX 源头：`../design/03_ux_guide/CLAUDE.md`
 - 后端实现：`../backend/CLAUDE.md`
+
+- `姿势库`：复用搭配服装库交互维护一图一姿势、识别标签和归档；批量图片逐张入库，详情只替换单图；四步状态与启用要求见 `../design/01_generation_flow/pose_library_workflow.md`。

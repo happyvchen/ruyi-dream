@@ -265,6 +265,28 @@ export type TaskStatus = {
   error?: unknown
 }
 
+export type Pose = {
+  id: number
+  code: string
+  name: string
+  status: string
+  aiTags: Record<string, unknown>
+  archivedAt?: string | null
+  createdAt: string
+  updatedAt: string
+  error?: { message?: string; title?: string } | null
+  images: { id: number; asset: MediaAsset }[]
+}
+
+export type PoseSelection = {
+  workflow?: 'shared_background_v1' | 'legacy_masters'
+  id: number
+  stylingId: number
+  summary: string
+  createdAt: string
+  shots: { shotIndex: number; code: string; name: string; reason: string; direction: string; sourceAvailable: boolean; pose: MediaAsset | null; background: MediaAsset | null }[]
+}
+
 export type GenerationTask = {
   detailRevision?: number
   progress?: { completed: number; total: number }
@@ -273,11 +295,15 @@ export type GenerationTask = {
   status: string
   userRequirement?: string | null
   stageUserInputs?: {
+    poseSelection?: string | null
     aiStyling?: string | null
     storyboardPreview?: string | null
     finalImage?: string | null
   }
   currentInputVersionId?: number | null
+  poseWorkflowEnabled?: boolean
+  activePoseSelectionId?: number | null
+  poseSelection?: PoseSelection | null
   activeStylingId?: number | null
   activeStoryboardPreviewId?: number | null
   activePreviewId?: number | null
@@ -325,6 +351,7 @@ export type GenerationTask = {
     status: string
     preparation?: { status: string; error?: string | null; attemptId?: number | null }
     previewId?: number | null
+    poseSelectionId?: number | null
     userInstruction?: Record<string, unknown>
     images: {
       id: number
@@ -616,7 +643,7 @@ export type PromptConfigPreview = {
 
 export type PromptOptimizationTest = {
   attemptId: number
-  items: { shotId: string; originalPrompt: string; optimizedText: string; lockedConstraints: string; prompt: string; changeSummary: string }[]
+  items: { shotId: string; originalPrompt: string; optimizedText: string; prompt: string }[]
 }
 
 export type PromptInvocationOption = { id: number; ownerType: string; provider: string; status: string; createdAt?: string | null }
@@ -842,6 +869,26 @@ export function stylingGarmentArchiveUrl(ids: number[]) {
 }
 
 export const api = {
+  listPoses: (options: { q?: string; status?: string; includeArchived?: boolean; limit?: number; offset?: number } = {}) =>
+    request<{ items: Pose[]; total: number }>(params('/api/poses', options)),
+  getPose: (id: number) => request<{ item: Pose }>(`/api/poses/${id}`),
+  createPose: (name: string, files: File[]) => {
+    const form = new FormData()
+    form.append('name', name)
+    files.forEach((file) => form.append('files', file))
+    return request<{ item: Pose }>('/api/poses', { method: 'POST', body: form })
+  },
+  updatePose: (id: number, name: string) => request<{ item: Pose }>(`/api/poses/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  replacePoseImage: (id: number, file: File) => {
+    const form = new FormData()
+    form.append('files', file)
+    return request<{ item: Pose; objectCleanupErrors?: ObjectCleanupError[] }>(`/api/poses/${id}/image`, { method: 'PUT', body: form })
+  },
+  recognizePose: (id: number) => request<{ item: Pose }>(`/api/poses/${id}/recognize`, { method: 'POST' }),
+  poseDeleteImpact: (ids: number[]) => request<{ poseCount: number; mediaAssetCount: number; estimatedBytes: number; referencingTaskCount: number }>('/api/poses/delete-impact', { method: 'POST', body: JSON.stringify({ ids }) }),
+  managePoses: (ids: number[], action: 'archive' | 'restore' | 'purge', confirmPhrase?: string) => request<{ ok: boolean; objectCleanupErrors?: ObjectCleanupError[] }>('/api/poses/manage', { method: 'POST', body: JSON.stringify({ ids, action, confirmPhrase }) }),
+  selectPoses: (id: number, userInstruction?: string) => request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/select-poses`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
+  posePromptDraft: (kind: 'tagging' | 'selection') => request<{ content: string }>(`/api/pose-prompt-drafts/${kind}`),
   session: () => request<AuthSession>('/api/auth/session'),
   login: (username: string, password: string) =>
     request<AuthSession>('/api/auth/login', {
@@ -1030,6 +1077,7 @@ export const api = {
   updateTask: (id: number, payload: {
     name?: string
     userRequirement?: string
+    poseSelectionUserInstruction?: string
     aiStylingUserInstruction?: string
     storyboardPreviewUserInstruction?: string
     finalImageUserInstruction?: string

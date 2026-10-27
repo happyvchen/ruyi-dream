@@ -5524,21 +5524,44 @@ pre {
 .empty strong { color: #334155; }
 .empty span { max-width: 360px; font-size: 13px; }
 
-.toast, .busy {
+.notice-stack {
   position: fixed;
   right: 24px;
   top: 24px;
-  z-index: 10;
+  z-index: 10000;
+  display: grid;
+  gap: 10px;
+  width: max-content;
+  max-width: min(420px, calc(100vw - 48px));
+  pointer-events: none;
+}
+.toast, .busy {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   padding: 10px 12px;
   border-radius: 8px;
   box-shadow: 0 14px 40px rgba(15,23,42,.18);
+  pointer-events: auto;
 }
-.toast { background: #fff1f2; color: #be123c; border: 1px solid #fecdd3; max-width: 420px; word-break: break-word; }
-.busy { background: #eefbff; color: #0369a1; border: 1px solid #bae6fd; flex-wrap: wrap; max-width: 420px; }
-.busy-hint { flex-basis: 100%; font-size: 12px; color: #0284c7; opacity: .85; }
+.toast { background: #fff1f2; color: #be123c; border: 1px solid #fecdd3; }
+.busy { background: #eefbff; color: #0369a1; border: 1px solid #bae6fd; }
+.notice-copy { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.notice-countdown { display: block; margin-top: 4px; font-size: 12px; opacity: .8; }
+.notice-icon { flex-shrink: 0; margin-top: 3px; }
+.notice-close {
+  display: grid;
+  place-items: center;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: inherit;
+  background: transparent;
+}
+.notice-close:hover { background: rgba(15, 23, 42, .08); }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -5684,4 +5707,18 @@ pre {
   overflow: auto;
   font-size: 12px;
   line-height: 1.7;
+}
+
+/* Pose assets share the clothing library's cards, tools and pagination. */
+.step-rail { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.pose-error { padding: 10px 14px; border: 1px solid #f1baba; border-radius: 8px; color: #982525; background: #fff5f5; overflow-wrap: anywhere; }
+.pose-shot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); gap: 16px; }
+.pose-shot-card { padding: 16px; min-width: 0; }
+.pose-shot-card header { display: flex; gap: 12px; justify-content: space-between; margin-bottom: 12px; }
+.pose-shot-card p { line-height: 1.65; font-size: 13px; overflow-wrap: anywhere; }
+.pose-shot-card summary { cursor: pointer; }
+.pose-selection-results > .edit-hint { margin-bottom: 12px; }
+.pose-selection-step .step-heading { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+@media (max-width: 600px) {
+  .step-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

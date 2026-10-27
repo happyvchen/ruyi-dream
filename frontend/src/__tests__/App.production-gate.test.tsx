@@ -7,6 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App, ImageLightbox, assetLightboxImage, mergeUploadSessionUpdates } from '../App'
 
 const apiMock = vi.hoisted(() => ({
+  listPoses: vi.fn(),
+  getPose: vi.fn(),
+  createPose: vi.fn(),
+  recognizePose: vi.fn(),
+  replacePoseImage: vi.fn(),
+  selectPoses: vi.fn(),
   session: vi.fn(),
   login: vi.fn(),
   logout: vi.fn(),
@@ -48,6 +54,8 @@ const apiMock = vi.hoisted(() => ({
   restoreStylingGarments: vi.fn(),
   restoreTasks: vi.fn(),
   getShootEnvironment: vi.fn(),
+  setShootEnvironment: vi.fn(),
+  clearShootEnvironment: vi.fn(),
   getShotPresets: vi.fn(),
   replaceShotPresetAsset: vi.fn(),
   deleteShotPresetAsset: vi.fn(),
@@ -260,6 +268,7 @@ function configureApi(role: 'admin' | 'user' = 'admin') {
   apiMock.login.mockResolvedValue({ authRequired: true, authenticated: true, role })
   apiMock.logout.mockResolvedValue({ ok: true })
   apiMock.listStylingGarments.mockResolvedValue({ ...emptyPage, facets: {}, stableFacets: {} })
+  apiMock.listPoses.mockResolvedValue(emptyPage)
   apiMock.listTasks.mockResolvedValue(emptyPage)
   apiMock.listRecords.mockResolvedValue(emptyPage)
   apiMock.listModels.mockResolvedValue({ ...emptyPage, items: [defaultModel] })
@@ -273,6 +282,8 @@ function configureApi(role: 'admin' | 'user' = 'admin') {
   apiMock.listRecordBatches.mockResolvedValue({ ...emptyPage, facets: {}, stableFacets: {} })
   apiMock.precheckFinalImageExport.mockResolvedValue({ items: [], downloadableTaskIds: [], completeTaskIds: [], totalImages: 0, totalBytes: 0 })
   apiMock.getShootEnvironment.mockResolvedValue({ asset: null })
+  apiMock.setShootEnvironment.mockResolvedValue({ asset: null })
+  apiMock.clearShootEnvironment.mockResolvedValue({ asset: null })
   apiMock.getShotPresets.mockResolvedValue({
     families: {
       top: { complete: false, configuredCount: 0, validationErrors: ['上装的 5 个镜头尚未配置'] },
@@ -565,7 +576,7 @@ describe('production gate app shell and page controls', () => {
       apiMock.listPromptConfigs.mockResolvedValue({ ...promptList, items: [item] })
       return { item, preview: { rendered: content, diagnostics: { missingPlaceholders: [], usedSegments: [] } } }
     })
-    apiMock.testPromptOptimization.mockResolvedValue({ attemptId: 42, items: [{ shotId: '1', originalPrompt: '历史原始提示词', optimizedText: '整理后的正文', lockedConstraints: '商品不变', prompt: '整理后的正文，加锁定约束', changeSummary: '合并重复说明' }] })
+    apiMock.testPromptOptimization.mockResolvedValue({ attemptId: 42, items: [{ shotId: '1', originalPrompt: '历史原始提示词', optimizedText: '整理后的正文', prompt: '整理后的正文' }] })
     window.history.replaceState(null, '', '/prompts')
     render(<App />)
     await userEvent.click(await screen.findByRole('button', { name: 'Prompt 维护' }))
@@ -581,8 +592,27 @@ describe('production gate app shell and page controls', () => {
     await userEvent.selectOptions(screen.getByRole('combobox'), '41')
     await userEvent.click(screen.getByRole('button', { name: '测试优化（仅 LLM）' }))
     expect(await screen.findByText('历史原始提示词')).toBeInTheDocument()
-    expect(screen.getByText('整理后的正文，加锁定约束')).toBeInTheDocument()
+    expect(screen.getByText('整理后的正文')).toBeInTheDocument()
     expect(apiMock.testPromptOptimization).toHaveBeenCalledTimes(1)
+  })
+
+  it('closing an operation notice does not cancel its request and the next operation shows a new notice', async () => {
+    const pending = deferred<any>()
+    apiMock.previewPromptConfig.mockReturnValue(pending.promise)
+    window.history.replaceState(null, '', '/prompt-maintenance')
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: '刷新预览' }))
+    await userEvent.click(await screen.findByRole('button', { name: '关闭提示' }))
+    expect(screen.queryByText('渲染 Prompt 预览中...')).not.toBeInTheDocument()
+    pending.resolve({ rendered: '请求正常完成', diagnostics: { usedSegments: [], missingPlaceholders: [] } })
+    expect(await screen.findByText('请求正常完成')).toBeInTheDocument()
+    const next = deferred<any>()
+    apiMock.previewPromptConfig.mockReturnValue(next.promise)
+    await userEvent.click(screen.getByRole('button', { name: '刷新预览' }))
+    expect(await screen.findByRole('button', { name: '关闭提示' })).toBeInTheDocument()
+    expect(screen.getByText('5 秒后自动关闭')).toBeInTheDocument()
+    next.resolve({ rendered: '第二次请求完成', diagnostics: { usedSegments: [], missingPlaceholders: [] } })
+    expect(await screen.findByText('第二次请求完成')).toBeInTheDocument()
   })
 
   it('can replace existing optimizer rules with source excerpts without saving or invoking a model', async () => {
@@ -620,16 +650,12 @@ describe('production gate app shell and page controls', () => {
     expect(screen.queryByText('追加图片')).not.toBeInTheDocument()
     expect(screen.queryByText(/上装、下装、套装各 5 个镜头/)).not.toBeInTheDocument()
     expect(screen.queryByText(/图片更换后立即生效；缺图的服装类型/)).not.toBeInTheDocument()
-    expect(container.querySelector('.shot-preset-card .image-asset-card .thumb-actions')).not.toBeNull()
-    expect(screen.queryByText(/拖拽卡片调整顺序，靠前的图片优先用于生成/)).not.toBeInTheDocument()
-    const masterInput = (await screen.findAllByLabelText('替换 选择拍摄母版图'))[0]
-    const master = new File(['master'], 'master.jpg', { type: 'image/jpeg' })
-    const pose = new File(['pose'], 'pose.jpg', { type: 'image/jpeg' })
-    await userEvent.upload(masterInput, master)
-    await waitFor(() => expect(apiMock.replaceShotPresetAsset).toHaveBeenNthCalledWith(1, 'top', 1, 'background', master))
-    const poseInput = screen.getAllByLabelText('替换 选择风格/姿势图')[0]
-    await userEvent.upload(poseInput, pose)
-    await waitFor(() => expect(apiMock.replaceShotPresetAsset).toHaveBeenNthCalledWith(2, 'top', 1, 'pose', pose))
+    expect(container.querySelector('.saved-image-grid .image-asset-card .thumb-actions')).not.toBeNull()
+    const backgroundInput = await screen.findByLabelText('替换 选择统一背景图')
+    const background = new File(['background'], 'background.jpg', { type: 'image/jpeg' })
+    await userEvent.upload(backgroundInput, background)
+    await waitFor(() => expect(apiMock.setShootEnvironment).toHaveBeenCalledWith(background))
+    expect(apiMock.getShotPresets).not.toHaveBeenCalled()
     expect(screen.queryByText(/发布上装|保存拍摄预设|编辑版本/)).not.toBeInTheDocument()
   })
 
@@ -644,49 +670,22 @@ describe('production gate app shell and page controls', () => {
     await waitFor(() => expect(window.location.pathname).toBe('/studio'))
   })
 
-  it('ordinary user can inspect every shot preset without seeing maintenance controls', async () => {
+  it('ordinary user can inspect the shared background without maintenance controls', async () => {
     configureApi('user')
-    apiMock.getShotPresets.mockResolvedValue({
-      families: {
-        top: { complete: false, configuredCount: 0, validationErrors: ['top 镜头 1 缺少姿势图'] },
-        bottom: { complete: false, configuredCount: 0, validationErrors: ['bottom 镜头 1 缺少拍摄母版或姿势图'] },
-        one_piece: { complete: false, configuredCount: 0, validationErrors: ['one_piece 镜头 1 缺少拍摄母版或姿势图'] },
-      },
-      slots: Array.from({ length: 15 }, (_, index) => ({
-        categoryFamily: (['top', 'bottom', 'one_piece'] as const)[Math.floor(index / 5)],
-        shotIndex: (index % 5) + 1,
-        background: index === 0 ? {
-          id: 201,
-          objectKey: 'presets/top-1-master.jpg',
-          filename: 'top-1-master.jpg',
-          originalFilename: 'top-1-master.jpg',
-          mimeType: 'image/jpeg',
-          width: 2048,
-          height: 2048,
-          sizeBytes: 1024,
-          thumbUrl: '/preset-thumb.jpg',
-          previewUrl: '/preset-preview.jpg',
-          originalUrl: '/preset-original.jpg',
-        } : null,
-        pose: null,
-        complete: false,
-      })),
-    })
-
+    apiMock.getShootEnvironment.mockResolvedValue({ asset: {
+      id: 201, objectKey: 'background.jpg', filename: 'background.jpg', originalFilename: 'background.jpg',
+      mimeType: 'image/jpeg', width: 2048, height: 2048, sizeBytes: 1024,
+      thumbUrl: '/background-thumb.jpg', previewUrl: '/background-preview.jpg', originalUrl: '/background-original.jpg',
+    } })
     const { container } = render(<App />)
     await userEvent.click(await screen.findByRole('button', { name: '模特与背景' }))
-
-    await waitFor(() => expect(apiMock.getShotPresets).toHaveBeenCalledTimes(1))
-    expect(await screen.findByText('上装')).toBeInTheDocument()
-    expect(screen.getByText('下装')).toBeInTheDocument()
-    expect(screen.getByText('套装')).toBeInTheDocument()
-    expect(container.querySelectorAll('.shot-preset-card')).toHaveLength(15)
-    expect(screen.getByText(/当前预设不完整：top 镜头 1 缺少姿势图/)).toBeInTheDocument()
-    expect(container.querySelector('.shot-preset-card .thumb-actions')).toBeNull()
-    expect(screen.queryByLabelText(/替换 .*拍摄母版/)).not.toBeInTheDocument()
-    expect(screen.queryByLabelText(/删除 .*拍摄母版/)).not.toBeInTheDocument()
-
-    await userEvent.click(screen.getByRole('button', { name: 'top-1-master.jpg' }))
+    expect(await screen.findByText('统一拍摄背景')).toBeInTheDocument()
+    await waitFor(() => expect(apiMock.getShootEnvironment).toHaveBeenCalledTimes(1))
+    expect(apiMock.getShotPresets).not.toHaveBeenCalled()
+    expect(container.querySelectorAll('.shot-preset-card')).toHaveLength(0)
+    expect(screen.queryByLabelText(/替换 .*背景/)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/删除 .*背景/)).not.toBeInTheDocument()
+    await userEvent.click(await screen.findByRole('button', { name: 'background.jpg' }))
     expect(await screen.findByRole('dialog')).toBeInTheDocument()
   })
 
@@ -732,6 +731,29 @@ describe('production gate app shell and page controls', () => {
     expect(await within(dialog).findByText('历史原文')).toBeInTheDocument()
     expect(within(dialog).getByText('优化后的实际发送文本')).toBeInTheDocument()
     expect(apiMock.getTaskAiInvocation).toHaveBeenCalledWith(1, 41, expect.any(AbortSignal))
+  })
+
+  it.each([
+    ['complete_look', '无需库内搭配服装'],
+    ['no_suitable_match', '未找到合适的搭配服装'],
+    ['user_requested', '按要求不搭配库内服装'],
+  ])('shows compact styling empty reason %s without invented scores or accessories', async (reason, title) => {
+    apiMock.getTask.mockResolvedValue({ item: {
+      ...task, status: 'STYLING_READY', styling: {
+        id: 71, selectedMaterialIds: [], selectedMaterials: [],
+        stylingPlan: { schema_version: 'styling-plan-v2', empty_reason: reason, selected_outfit_key: 'selected_final' },
+        heroUnderstanding: {}, outfitCandidates: [{ outfit_key: 'selected_final', title: '推荐造型', generated_accessories: [], wearing_notes: '自然穿着' }],
+        criticScores: {}, rejectedCandidates: [], qualitySignals: [], reasonSummary: '本次空搭配的具体说明。', warnings: [],
+      },
+    } })
+    window.history.replaceState(null, '', '/studio?task=1')
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'AI 智能选搭' }))
+    expect(await screen.findByText(title)).toBeInTheDocument()
+    expect(screen.queryByText('审美')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByText('查看穿法与配饰建议'))
+    expect(screen.getByText('不添加配饰')).toBeInTheDocument()
+    expect(screen.getByText('自然穿着')).toBeInTheDocument()
   })
 
   it('shows a tombstone instead of stale garment details in preserved generation history', async () => {
@@ -2421,7 +2443,7 @@ describe('production gate app shell and page controls', () => {
     const dialog = await screen.findByRole('dialog', { name: '归档 101 条生成记录' })
     await userEvent.click(within(dialog).getByRole('button', { name: '确认取消归档' }))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('部分生成记录已完成取消归档')
+    expect(await screen.findByText(/部分生成记录已完成取消归档/)).toHaveAttribute('role', 'alert')
     expect(within(detailPanel).getByRole('button', { name: '归档' })).toBeEnabled()
   })
 
@@ -2524,7 +2546,7 @@ describe('production gate app shell and page controls', () => {
     await userEvent.type(within(dialog).getByPlaceholderText('全部删除'), '全部删除')
     await userEvent.click(within(dialog).getByRole('button', { name: '彻底删除' }))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('部分生成记录已完成彻底删除')
+    expect(await screen.findByText(/部分生成记录已完成彻底删除/)).toHaveAttribute('role', 'alert')
     expect(screen.queryByRole('dialog', { name: '归档 101 条生成记录' })).not.toBeInTheDocument()
     expect(within(document.querySelector('.record-detail') as HTMLElement).getByRole('heading', { name: 'PARTIAL-101' })).toBeInTheDocument()
     await userEvent.click(await screen.findByRole('checkbox', { name: '选择 PARTIAL-100' }))
@@ -2723,4 +2745,101 @@ it.each(['library', 'records'] as const)('ignores a cancelled %s failure while a
   await act(async () => newRead.resolve({ ...emptyPage, facets: {}, stableFacets: {} }))
   await waitFor(() => expect(document.querySelector('.list-skeleton')).toBeNull())
   expect(screen.queryByText('列表读取失败，请重试。')).toBeNull()
+})
+
+describe('pose library and the fourth studio stage', () => {
+  const pose = { id: 91, code: 'POSE-91', name: '自然行走', status: 'READY', aiTags: { 核心动作: ['轻步行走'] }, images: [{ id: 1, asset: task.images[0].asset }], createdAt: task.createdAt, updatedAt: task.updatedAt }
+  const styledTask = { ...task, status: 'STYLING_READY', poseWorkflowEnabled: true, activeStylingId: 71, styling: { id: 71, selectedMaterials: [], stylingPlan: {}, createdAt: task.createdAt } }
+
+  it('opens the independent pose stage after styling and submits its own instruction', async () => {
+    apiMock.getTask.mockResolvedValue({ item: styledTask })
+    apiMock.selectPoses.mockResolvedValue({ item: { ...styledTask, status: 'POSE_SELECTION_RUNNING' } })
+    window.history.replaceState(null, '', '/studio?task=1')
+    render(<App />)
+    const action = await screen.findByRole('button', { name: 'AI 选姿势' })
+    expect(action).toBeEnabled()
+    fireEvent.change(screen.getByRole('textbox', { name: '姿势要求' }), { target: { value: '避免遮住胸前细节' } })
+    fireEvent.click(action)
+    await waitFor(() => expect(apiMock.selectPoses).toHaveBeenCalledWith(1, '避免遮住胸前细节'))
+  })
+
+  it('shows library details and original-image inspection without triggering recognition', async () => {
+    apiMock.listPoses.mockResolvedValue({ ...emptyPage, items: [pose], total: 1 })
+    window.history.replaceState(null, '', '/poses')
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: '详情' }))
+    const dialog = screen.getByRole('dialog', { name: '姿势详情' })
+    expect(within(dialog).getByText('轻步行走')).toBeInTheDocument()
+    expect(apiMock.recognizePose).not.toHaveBeenCalled()
+    expect(apiMock.selectPoses).not.toHaveBeenCalled()
+  })
+
+  it('keeps uploaded drafts across navigation and retries recognition without duplicate uploads', async () => {
+    apiMock.createPose.mockResolvedValue({ item: pose })
+    apiMock.recognizePose.mockRejectedValueOnce(new Error('请配置姿势识别规则')).mockResolvedValue({ item: { ...pose, status: 'TAGGING_RUNNING' } })
+    window.history.replaceState(null, '', '/poses')
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: '导入姿势' }))
+    const input = screen.getByLabelText('选择图片')
+    fireEvent.change(input, { target: { files: [new File(['image'], 'pose.jpg', { type: 'image/jpeg' })] } })
+    fireEvent.click(screen.getByRole('button', { name: '导入并识别' }))
+    await screen.findByText('已入库，识别未启动')
+    expect(screen.getByText('请配置姿势识别规则')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'AI 摄影棚' }))
+    fireEvent.click(screen.getByRole('button', { name: '姿势库' }))
+    expect(screen.getByText('已入库，识别未启动')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: '导入并识别' }))
+    await screen.findByText('已提交识别')
+    expect(apiMock.createPose).toHaveBeenCalledTimes(1)
+    expect(apiMock.recognizePose).toHaveBeenCalledTimes(2)
+  })
+  it.each(['选择图片', '选择文件夹'])('imports each image as a separate pose using %s', async (picker) => {
+    apiMock.createPose.mockResolvedValue({ item: pose })
+    apiMock.recognizePose.mockResolvedValue({ item: { ...pose, status: 'TAGGING_RUNNING' } })
+    window.history.replaceState(null, '', '/poses')
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: '导入姿势' }))
+    const files = ['站姿.jpg', '坐姿.jpg', '回望.jpg'].map((name) => {
+      const file = new File(['image'], name, { type: 'image/jpeg' })
+      Object.defineProperty(file, 'webkitRelativePath', { value: `同一文件夹/${name}` })
+      return file
+    })
+    fireEvent.change(screen.getByLabelText(picker), { target: { files } })
+    expect(screen.getAllByRole('textbox', { name: '姿势名称' })).toHaveLength(3)
+    fireEvent.click(screen.getByRole('button', { name: '导入并识别' }))
+    await waitFor(() => expect(apiMock.recognizePose).toHaveBeenCalledTimes(3))
+    expect(apiMock.createPose.mock.calls).toEqual(files.map((file) => [file.name.replace('.jpg', ''), [file]]))
+  })
+
+  it('uses library search and filters together, and resets them', async () => {
+    apiMock.listPoses.mockResolvedValue({ ...emptyPage, items: [pose], total: 1 })
+    window.history.replaceState(null, '', '/poses')
+    render(<App />)
+    await screen.findByText(pose.name)
+    const search = screen.getByPlaceholderText('搜索名称 / 动作 / 标签，支持粘贴多个')
+    fireEvent.change(search, { target: { value: '行走' } })
+    fireEvent.click(screen.getByRole('button', { name: '全部状态' }))
+    fireEvent.click(screen.getByRole('button', { name: '待识别' }))
+    fireEvent.click(screen.getByRole('button', { name: '查看已归档' }))
+    await waitFor(() => expect(apiMock.listPoses).toHaveBeenLastCalledWith(expect.objectContaining({ q: '行走', status: 'DRAFT', includeArchived: true, offset: 0 })))
+    fireEvent.click(screen.getByRole('button', { name: '清空筛选' }))
+    await waitFor(() => expect(apiMock.listPoses).toHaveBeenLastCalledWith(expect.objectContaining({ q: '', status: '', includeArchived: false })))
+    expect(search).toHaveValue('')
+  })
+
+  it('replaces the only pose image without starting recognition', async () => {
+    apiMock.listPoses.mockResolvedValue({ ...emptyPage, items: [pose], total: 1 })
+    apiMock.replacePoseImage.mockResolvedValue({ item: { ...pose, status: 'DRAFT' } })
+    window.history.replaceState(null, '', '/poses')
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: '详情' }))
+    const dialog = screen.getByRole('dialog', { name: '姿势详情' })
+    const replacement = new File(['new'], 'new.jpg', { type: 'image/jpeg' })
+    const input = dialog.querySelector('input[type="file"]')!
+    fireEvent.change(input, { target: { files: [replacement] } })
+    await waitFor(() => expect(apiMock.replacePoseImage).toHaveBeenCalledWith(pose.id, replacement))
+    expect(apiMock.recognizePose).not.toHaveBeenCalled()
+    expect(within(dialog).queryByRole('button', { name: /删除图片/ })).not.toBeInTheDocument()
+  })
+
 })

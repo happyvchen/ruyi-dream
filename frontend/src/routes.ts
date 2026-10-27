@@ -1,4 +1,4 @@
-export type Page = 'studio' | 'library' | 'model' | 'prompt-maintenance' | 'records'
+export type Page = 'studio' | 'poses' | 'library' | 'model' | 'prompt-maintenance' | 'records'
 
 export type AppRoute = {
   page: Page
@@ -14,6 +14,7 @@ function positiveId(value: string | null) {
 export function parseRoute(): AppRoute {
   const path = window.location.pathname.replace(/\/+$/, '') || '/'
   const params = new URLSearchParams(window.location.search)
+  if (path === '/poses') return { page: 'poses' }
   if (path === '/library') return { page: 'library' }
   if (path === '/model') return { page: 'model' }
   if (path === '/prompt-maintenance') return { page: 'prompt-maintenance' }
@@ -22,6 +23,7 @@ export function parseRoute(): AppRoute {
 }
 
 export function routeToUrl(route: AppRoute) {
+  if (route.page === 'poses') return '/poses'
   if (route.page === 'library') return '/library'
   if (route.page === 'model') return '/model'
   if (route.page === 'prompt-maintenance') return '/prompt-maintenance'
