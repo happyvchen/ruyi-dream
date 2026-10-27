@@ -820,12 +820,19 @@ def build_reference_collage_bytes(item: dict[str, Any], deadline: float | None =
         from PIL import Image
     except ImportError as exc:
         raise RuntimeError("Pillow 未安装，无法拼接 Image-2 参考图") from exc
-    canvas = Image.new("RGB", (columns * tile_size, rows * tile_size), (255, 255, 255))
+    labels = item.get("tileLabels") or []
+    header = 36 if labels else 0
+    canvas = Image.new("RGB", (columns * tile_size, rows * (tile_size + header)), (255, 255, 255))
     for index, image in enumerate(images[:columns * rows]):
         fitted = contain_on_white(image, tile_size, tile_size)
         col = index % columns
         row = index // columns
-        canvas.paste(fitted, (col * tile_size, row * tile_size))
+        canvas.paste(fitted, (col * tile_size, row * (tile_size + header) + header))
+        if index < len(labels):
+            from PIL import ImageDraw
+            draw = ImageDraw.Draw(canvas)
+            left, top = col * tile_size, row * (tile_size + header)
+            draw.text((left + 8, top + 4), str(labels[index]), fill="black", font_size=24)
     output = BytesIO()
     canvas.save(output, "JPEG", quality=95, optimize=True)
     stem = os.path.splitext(str(item.get("filename") or "reference-sheet.jpg"))[0] or "reference-sheet"

@@ -121,16 +121,18 @@ def test_final_runtime_marks_exactly_one_current_shot_and_limits_to_five_slots()
 
 
 @pytest.mark.parametrize("filename", ["final_image_top.txt", "final_image_bottom.txt", "final_image_one_piece.txt"])
-def test_final_prompt_templates_separate_master_pose_and_artifact_controls(filename: str) -> None:
+def test_final_prompt_templates_separate_background_pose_and_shot_controls(filename: str) -> None:
     template = (Path(__file__).resolve().parents[1] / "prompt_templates" / filename).read_text(encoding="utf-8")
 
-    assert "唯一的拍摄母版" in template
-    assert "身体朝向、重心、肩线、手位、视线和头部朝向" in template
-    assert "不改变模特身份、脸、发型、景别、裁切、站位或人物尺度" in template
+    assert "整组共用的背景和光线参考" in template
+    assert "不得继承其人物位置、人物大小、机位、景别或裁切" in template
+    assert "不能复制姿势图的脸、发型、身材、服装、背景或光线" in template
+    assert "忠实执行可辨的身体朝向、重心、肩线、手位" in template
+    assert "唯一的拍摄母版" not in template
     assert "中央 3:4 竖向裁切安全区" in template
     assert "中央 2:3" not in template
-    assert "不要使用电影化调色、胶片颗粒、做旧、纹理化、磨砂或画布效果" in template
-    assert "避免可见噪点、颗粒、云斑、色斑、波纹、摩尔纹" in template
+    assert "不要电影化调色、胶片颗粒、做旧、磨砂或画布效果" in template
+    assert "避免噪点、云斑、色斑、波纹、摩尔纹" in template
 
 
 @pytest.mark.parametrize(

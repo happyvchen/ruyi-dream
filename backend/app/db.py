@@ -39,6 +39,8 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("073", "refresh_legacy_bottom_and_one_piece_final_prompts", "migration_refresh_legacy_bottom_and_one_piece_final_prompts"),
     ("074", "generation_detail_revision", "migration_generation_detail_revision"),
     ("075", "final_prompt_optimization", "migration_final_prompt_optimization"),
+    ("076", "pose_library_and_selection", "migration_pose_library_and_selection"),
+    ("077", "single_image_poses", "migration_single_image_poses"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -49,6 +51,8 @@ PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
     ("assembly.ai_tagging", "assembly", "AI 打标", "搭配服装入库后的图片理解和标签识别 Prompt；运行时与图片挑选/排序合并调用。", 100),
     ("assembly.hero_image_selection", "assembly", "主推款图片挑选/排序", "AI 摄影棚主推款图片挑选和排序 Prompt；运行时与 AI 选搭合并调用。", 105),
     ("assembly.ai_styling", "assembly", "AI 选搭", "AI Stylist 选搭 Prompt，含主推款理解、搭配选择和质量判断；运行时与主推款图片挑选/排序合并调用。", 110),
+    ("assembly.pose_tagging", "assembly", "姿势识别", "识别姿势动作、神态、展示影响与执行条件。", 115),
+    ("assembly.pose_selection", "assembly", "姿势选搭", "结合商品图片、姿势标签和镜头要求，一次初筛直接选定五个不同姿势。", 120),
     ("assembly.final_image_top", "assembly", "生成成片 · 上装/针织/外套", "Image-2.5 Sunburst 上装类固定五镜头成片 Prompt。", 150),
     ("assembly.final_image_bottom", "assembly", "生成成片 · 裤装/半身裙", "Image-2.5 Sunburst 下装类固定五镜头成片 Prompt。", 160),
     ("assembly.final_image_one_piece", "assembly", "生成成片 · 连衣裙/连体/套装", "Image-2.5 Sunburst 连衣裙/连体/套装固定五镜头成片 Prompt。", 170),
@@ -480,6 +484,8 @@ def run_migrations(db: sqlite3.Connection) -> None:
         for row in db.execute("SELECT version FROM schema_migrations").fetchall()
     }
     migration_functions = {
+        "migration_pose_library_and_selection": migration_pose_library_and_selection,
+        "migration_single_image_poses": migration_single_image_poses,
         "migration_final_prompt_optimization": migration_final_prompt_optimization,
         "migration_generation_detail_revision": migration_generation_detail_revision,
         "migration_finalize_direct_prompt_generation_workflow": migration_finalize_direct_prompt_generation_workflow,
@@ -1631,6 +1637,101 @@ def migration_final_prompt_optimization(db: sqlite3.Connection) -> None:
     migration_generation_detail_revision(db)
 
 
+def migration_pose_library_and_selection(db: sqlite3.Connection) -> None:
+    if not table_exists(db, "generation_tasks"):
+        return
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS poses (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          code TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'DRAFT',
+          ai_tags_json TEXT,
+          tag_error_code TEXT,
+          tag_attempt_id INTEGER,
+          archived_at TEXT,
+          archive_reason TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS pose_images (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          pose_id INTEGER NOT NULL REFERENCES poses(id) ON DELETE CASCADE,
+          media_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          UNIQUE(pose_id, media_asset_id)
+        );
+        CREATE TABLE IF NOT EXISTS generation_pose_selections (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id INTEGER NOT NULL REFERENCES generation_tasks(id) ON DELETE CASCADE,
+          input_version_id INTEGER NOT NULL REFERENCES generation_task_input_versions(id),
+          styling_id INTEGER NOT NULL REFERENCES generation_stylings(id),
+          category_family TEXT NOT NULL,
+          plan_json TEXT NOT NULL,
+          attempt_id INTEGER REFERENCES generation_attempts(id),
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS generation_pose_selection_shots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          selection_id INTEGER NOT NULL REFERENCES generation_pose_selections(id) ON DELETE CASCADE,
+          shot_index INTEGER NOT NULL CHECK(shot_index BETWEEN 1 AND 5),
+          pose_id INTEGER REFERENCES poses(id) ON DELETE SET NULL,
+          pose_snapshot_json TEXT NOT NULL,
+          background_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+          pose_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+          UNIQUE(selection_id, shot_index)
+        );
+        CREATE INDEX IF NOT EXISTS idx_pose_images_pose ON pose_images(pose_id, sort_order, id);
+        CREATE INDEX IF NOT EXISTS idx_poses_library ON poses(archived_at, status, created_at, id);
+        CREATE INDEX IF NOT EXISTS idx_pose_selections_task ON generation_pose_selections(task_id, id);
+    """)
+    for table, column, definition in (
+        ("generation_tasks", "pose_workflow_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("generation_tasks", "active_pose_selection_id", "INTEGER REFERENCES generation_pose_selections(id)"),
+        ("generation_tasks", "pose_selection_user_instruction", "TEXT"),
+        ("generation_result_sets", "pose_selection_id", "INTEGER REFERENCES generation_pose_selections(id)"),
+    ):
+        if column not in table_columns(db, table):
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    for table in ("generation_tasks", "generation_result_sets", "generation_attempts", "media_assets"):
+        for event in ("insert", "update", "delete"):
+            db.execute(f"DROP TRIGGER IF EXISTS revision_{table}_{event}")
+    db.execute("DROP TRIGGER IF EXISTS revision_attempt_terminal_response")
+    migration_generation_detail_revision(db)
+    install_detail_revision_triggers(db, "generation_pose_selections", "ROW.task_id", set())
+    install_detail_revision_triggers(db, "generation_pose_selection_shots",
+        "SELECT task_id FROM generation_pose_selections WHERE id = ROW.selection_id", set())
+
+
+def migration_single_image_poses(db: sqlite3.Connection) -> None:
+    """Split legacy aggregates without dropping media, attempts or frozen snapshots."""
+    if not table_exists(db, "pose_images"):
+        return
+    rows = db.execute("""SELECT p.* FROM poses p JOIN pose_images pi ON pi.pose_id = p.id
+        GROUP BY p.id HAVING COUNT(pi.id) > 1""").fetchall()
+    for pose in rows:
+        images = db.execute("SELECT * FROM pose_images WHERE pose_id = ? ORDER BY sort_order, id", (pose["id"],)).fetchall()
+        timestamp = now_iso()
+        for index, image in enumerate(images[1:], 2):
+            # The link id is globally unique, and the code remains stable on reruns.
+            code = f"{pose['code']}-image-{image['id']}"
+            suffix = f" · {index}"
+            new_id = db.execute("""INSERT INTO poses (code, name, status, archived_at, archive_reason, created_at, updated_at)
+                VALUES (?, ?, 'DRAFT', ?, ?, ?, ?)""", (code, pose["name"][:80-len(suffix)] + suffix,
+                pose["archived_at"], pose["archive_reason"], pose["created_at"], timestamp)).lastrowid
+            db.execute("UPDATE pose_images SET pose_id = ?, sort_order = 0 WHERE id = ?", (new_id, image["id"]))
+            db.execute("""UPDATE generation_pose_selection_shots SET pose_id = ?
+                WHERE pose_id = ? AND pose_asset_id = ?""", (new_id, pose["id"], image["media_asset_id"]))
+        db.execute("UPDATE pose_images SET sort_order = 0 WHERE pose_id = ?", (pose["id"],))
+        db.execute("""UPDATE generation_attempts SET status = 'FAILED', failed_at = ?, updated_at = ?,
+            error_code = 'SYSTEM_ERROR', error_message = '姿势已拆分为单图条目，请重新识别'
+            WHERE owner_type = 'pose_tagging' AND owner_id = ? AND status = 'RUNNING'""",
+            (timestamp, timestamp, pose["id"]))
+        db.execute("""UPDATE poses SET status = 'DRAFT', ai_tags_json = NULL, tag_error_code = NULL,
+            tag_attempt_id = NULL, updated_at = ? WHERE id = ?""", (timestamp, pose["id"]))
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pose_single_image ON pose_images(pose_id)")
+
+
 def migration_generation_detail_revision(db: sqlite3.Connection) -> None:
     if not db.execute("PRAGMA table_info(generation_tasks)").fetchall():
         return
@@ -1644,7 +1745,7 @@ def migration_generation_detail_revision(db: sqlite3.Connection) -> None:
     for table in ("generation_result_images_new", "generation_result_set_shot_presets"):
         install_detail_revision_triggers(db, table, "SELECT task_id FROM generation_result_sets WHERE id = ROW.result_set_id", operational)
     install_detail_revision_triggers(db, "generation_attempts", """
-        SELECT ROW.owner_id WHERE ROW.owner_type = 'generation_styling'
+        SELECT ROW.owner_id WHERE ROW.owner_type IN ('generation_styling', 'generation_pose_selection')
         UNION SELECT task_id FROM generation_previews WHERE id = ROW.owner_id AND ROW.owner_type = 'generation_preview'
         UNION SELECT task_id FROM generation_result_sets WHERE id = ROW.owner_id AND ROW.owner_type = 'generation_result_set'
         UNION SELECT rs.task_id FROM generation_result_sets rs JOIN generation_result_images_new ri ON ri.result_set_id = rs.id
@@ -1655,7 +1756,7 @@ def migration_generation_detail_revision(db: sqlite3.Connection) -> None:
         WHEN NEW.status IN ('FAILED', 'SUCCEEDED', 'CANCELLED') AND OLD.response_snapshot_json IS NOT NEW.response_snapshot_json
         BEGIN
           UPDATE generation_tasks SET detail_revision = detail_revision + 1 WHERE id IN (
-            SELECT NEW.owner_id WHERE NEW.owner_type = 'generation_styling'
+            SELECT NEW.owner_id WHERE NEW.owner_type IN ('generation_styling', 'generation_pose_selection')
             UNION SELECT task_id FROM generation_result_sets WHERE id = NEW.owner_id AND NEW.owner_type = 'generation_result_set'
             UNION SELECT rs.task_id FROM generation_result_sets rs JOIN generation_result_images_new ri ON ri.result_set_id = rs.id
               WHERE ri.id = NEW.owner_id AND NEW.owner_type = 'generation_result_image'
@@ -1667,6 +1768,13 @@ def migration_generation_detail_revision(db: sqlite3.Connection) -> None:
         UNION SELECT rs.task_id FROM generation_result_sets rs JOIN generation_result_images_new ri ON ri.result_set_id = rs.id WHERE ri.current_asset_id = ROW.id
         UNION SELECT rs.task_id FROM generation_result_sets rs JOIN generation_result_set_shot_presets sp ON sp.result_set_id = rs.id WHERE sp.background_asset_id = ROW.id OR sp.pose_asset_id = ROW.id
     """, operational)
+    if table_exists(db, "generation_pose_selection_shots"):
+        db.execute("""CREATE TRIGGER IF NOT EXISTS revision_pose_media_update AFTER UPDATE ON media_assets
+          WHEN OLD.deleted_at IS NOT NEW.deleted_at BEGIN
+            UPDATE generation_tasks SET detail_revision = detail_revision + 1 WHERE id IN (
+              SELECT ps.task_id FROM generation_pose_selections ps JOIN generation_pose_selection_shots shots
+              ON shots.selection_id = ps.id WHERE shots.pose_asset_id = NEW.id OR shots.background_asset_id = NEW.id
+            ); END""")
     install_detail_revision_triggers(db, "styling_garments", """
         SELECT gs.task_id FROM generation_stylings gs, json_each(gs.selected_material_ids_json) selected
         WHERE selected.value = ROW.id

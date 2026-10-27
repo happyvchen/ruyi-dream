@@ -547,3 +547,29 @@ def test_gemini_rate_limit_retries_stop_before_exceeding_time_budget(
         asyncio.run(gemini_provider.generate_gemini_json_text("tag this garment"))
 
     assert provider_calls == 1
+
+
+@pytest.mark.parametrize('count', [16, 17])
+def test_toapis_image_budget_checked_before_network(monkeypatch, count):
+    from app.generation_progress import ERROR_INVALID_REQUEST
+    calls = []
+    monkeypatch.setattr(gemini_provider, 'effective_gemini_model', lambda: 'test')
+    monkeypatch.setattr(gemini_provider, '_post_toapis_chat_with_retry', lambda *args, **kwargs: calls.append(args) or '{}')
+    images = [{'data': b'image', 'mime_type': 'image/png'}] * count
+    if count <= 16:
+        assert gemini_provider._generate_via_toapis('test', images, None) == '{}'
+        assert len(calls) == 1
+    else:
+        with pytest.raises(gemini_provider.GeminiProviderError) as error:
+            gemini_provider._generate_via_toapis('test', images, None)
+        assert error.value.error_code == ERROR_INVALID_REQUEST
+        assert not calls
+
+
+@pytest.mark.parametrize('status', [None, 400, 500])
+def test_image_count_error_is_not_retried_even_when_wrapped_as_internal_error(status):
+    from app.generation_progress import ERROR_INVALID_REQUEST, normalize_toapis_error, is_gemini_transport_retryable_error
+    error = normalize_toapis_error({'error': {'code': 'internal_error',
+        'message': 'too many images in the message, max allowed is 16'}}, status_code=status)
+    assert error['code'] == ERROR_INVALID_REQUEST
+    assert not is_gemini_transport_retryable_error(error['code'])

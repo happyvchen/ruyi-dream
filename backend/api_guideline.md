@@ -18,7 +18,7 @@
 - `PATCH /api/generation-tasks/{task_id}`：保存任务名和各阶段用户补充要求草稿。
 - `POST /api/generation-tasks/{task_id}/styling`：运行 AI 智能选搭，输出当前 `StylingPlan`。
 - `POST /api/generation-tasks/{task_id}/preview`：已停用（410）；不再生成新的分镜预览。
-- `POST /api/generation-tasks/{task_id}/generate-final`：从 `STYLING_READY` 读取当前五个完整拍摄预设、冻结到结果集后并发生成最终成片。
+- `POST /api/generation-tasks/{task_id}/generate-final`：新任务从 `POSE_SELECTION_READY` 复用冻结的背景、五个姿势、商品/模特输入版本与成片规则，并发生成最终成片；旧任务兼容原预设。
 - `POST /api/generation-tasks/{task_id}/auto-run-final`：从当前第一个未完成阶段自动推进到成片。
 - `POST /api/generation-tasks/{task_id}/cancel`：取消当前运行中的选搭或成片。
 - `PATCH /api/generation-batches/{batch_id}`：保存批次名；批次任务归属仍由 `GenerationTask.batch_id` 决定。
@@ -97,13 +97,15 @@ ABANDONED
 
 ## 状态
 
-新任务只使用三步链路；`PREVIEW_RUNNING` / `PREVIEW_READY` 仅为历史记录兼容状态，不再由当前接口创建：
+新任务只使用四步链路；`PREVIEW_RUNNING` / `PREVIEW_READY` 仅为历史记录兼容状态，不再由当前接口创建：
 
 ```text
 DRAFT
 READY_FOR_STYLING
 STYLING_RUNNING
 STYLING_READY
+POSE_SELECTION_RUNNING
+POSE_SELECTION_READY
 PREVIEW_RUNNING
 PREVIEW_READY
 FINAL_RUNNING
@@ -180,14 +182,22 @@ AI 选搭动态事实：
 - `runtime.shot_current`
 - `runtime.is_shot_1` 到 `runtime.is_shot_5`
 
-## 拍摄预设接口
+## 统一拍摄背景
+
+- `GET /api/shoot-environment`：登录用户读取当前共享背景，返回 `{asset}`。
+- `POST /api/shoot-environment`：admin 使用 multipart `file` 替换背景。
+- `DELETE /api/shoot-environment`：admin 清除当前背景；历史选姿势和结果仍引用的图片保留。
+
+新姿势选择返回 `poseSelection.workflow = shared_background_v1`，五个 shots 共享同一 background，pose 各不相同。初筛和复核均传入商品图片；复核额外传入候选姿势原图。无背景、当前品类成片 Prompt 未配置或可用姿势不足五个时，选姿势在调用 provider 前失败。历史无 workflow 的选择返回 legacy_masters。
+
+## 历史拍摄预设接口
 
 - `GET /api/shot-presets`：所有已登录角色读取 15 个当前槽位，以及三个服装类型各自的完整槽位数和校验错误。
 - `POST /api/shot-presets/{category_family}/{shot_index}/{asset_role}`：仅 admin 单张替换 `background` 或 `pose`，成功后立即成为当前生效图片。
 - `DELETE /api/shot-presets/{category_family}/{shot_index}/{asset_role}`：仅 admin 删除当前单张图片并立即生效；该类型不完整期间不能开始新成片。
 - 旧整槽保存和发布接口返回 `410 Gone`。
 
-最终请求固定 `image_urls <= 6`，拍摄母版排第一，不传 `mask_url`，使用 `1:1 / 2k / high`；模特与商品多图先确定性合成角色参考板，结果集通过 `generation_result_set_shot_presets` 冻结当次五组图片。
+最终请求固定 `image_urls <= 6`，共享背景排第一，不传 `mask_url`，使用 `1:1 / 2k / high`；模特与商品多图先确定性合成角色参考板，结果集通过 `generation_result_set_shot_presets` 保存共享背景与五个姿势；姿势选择阶段已冻结这些引用。
 
 ## 导出
 
@@ -209,3 +219,23 @@ AI 选搭动态事实：
 - `PATCH /api/prompt-configs/{key}`：优化规则可同时保存 `content`、`enabled`；保存不调用模型。
 - `POST /api/prompt-configs/{key}/test-optimization`：仅 admin，输入 `content`、`attemptId`；支持优化规则或三类成片模板的历史上下文测试。返回测试 attemptId 与原始、优化、最终文本；失败保留审计记录。不改成片、不调用图像 provider。
 - 任务结果集新增 `preparation={status,error,attemptId}`，不返回配置和提示词正文；admin 使用现有 ai-invocations 接口查看详情。attempts 的 ownerType 支持 `generation_result_set`。
+
+## 姿势库与姿势选搭
+
+所有库接口沿用登录鉴权；参考 Prompt 草稿仅 admin 可读。
+
+| 方法与路径 | 契约 |
+|---|---|
+| GET `/api/poses` | q 多关键词、status、includeArchived、limit（1–96，默认 24）、offset；返回 items/total/limit/offset |
+| POST `/api/poses` | multipart name、files（恰好 1 张）；保存 DRAFT，不调用模型 |
+| GET / PATCH `/api/poses/{id}` | 详情 / 更新名称；图片改动后需重新识别 |
+| PUT `/api/poses/{id}/image` | multipart files，恰好 1 张；替换后待识别，不改动历史冻结图片 |
+| POST `/api/poses/{id}/images` | 兼容旧入口，仅允许为无图条目补 1 张；已有图片返回 409 |
+| DELETE `/api/poses/{id}/images/{imageId}` | 禁止删除唯一图片（409），应替换图片或管理整个姿势 |
+| POST `/api/poses/{id}/recognize` | 显式启动后台识别；返回 TAGGING_RUNNING，重复或已归档返回 409。模型返回 name（1–80 字）与非空 tags 对象，成功后同时回填条目 name 和 aiTags；失败不覆盖原名称与标签 |
+| POST `/api/poses/delete-impact` | `{ids}`；返回条目、可释放媒体和引用任务数量 |
+| POST `/api/poses/manage` | `{ids,action,confirmPhrase?}`，action 为 archive/restore/purge；purge 需单条名称或“全部删除”，返回清理错误列表 |
+| POST `/api/generation-tasks/{id}/select-poses` | 可选 `{userInstruction}`，先持久化状态和 attempt，再后台执行；重复请求 409 |
+| GET `/api/pose-prompt-drafts/{tagging\|selection}` | admin 获取参考正文，仅供填入编辑器，不写数据库或调用模型 |
+
+任务增加 `poseWorkflowEnabled`、`activePoseSelectionId`、`poseSelection` 与 `stageUserInputs.poseSelection`；PATCH 支持 `poseSelectionUserInstruction`。状态增加 POSE_SELECTION_RUNNING / POSE_SELECTION_READY。结果集返回 `poseSelectionId`，成片始终读取该选择及冻结的五组图片。新任务不得跳过姿势选搭，历史任务默认兼容原流程；选搭失败、取消和中断沿用现有失败协议，晚到响应不覆盖取消。

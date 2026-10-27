@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
 
+from .pose_selection import pack_pose_references, pose_plan_from_shortlist, validate_pose_plan
 from .http_performance import HttpPerformanceMiddleware
 from .config import get_settings
 from .db import dumps, get_db, init_db, loads, log_event, now_iso
@@ -36,8 +37,9 @@ from .prompt_render import (
     render_user_instruction_line,
     render_user_requirement_line,
 )
-from .prompt_optimization import OPTIMIZER_KEY, locked_constraints, optimizer_input, text_hash, validate_optimized_prompts
+from .prompt_optimization import OPTIMIZER_KEY, optimizer_input, text_hash, parse_optimized_prompts
 from .gemini_provider import (
+    TOAPIS_MAX_MESSAGE_IMAGES,
     GeminiProviderError,
     GeminiRetryDeferred,
     effective_gemini_model,
@@ -93,7 +95,7 @@ from .generation_progress import (
     normalize_toapis_error,
     provider_error_presentation,
 )
-from .image_provider import ImageProviderError, get_image_provider
+from .image_provider import ImageProviderError, get_image_provider, build_reference_collage_bytes, reference_source_bytes
 from .media_storage import (
     is_accepted_upload_key,
     media_original_key_for_owner,
@@ -338,6 +340,7 @@ class GenerationTaskUpdateRequest(BaseModel):
     name: str | None = None
     userRequirement: str | None = None
     aiStylingUserInstruction: str | None = None
+    poseSelectionUserInstruction: str | None = None
     storyboardPreviewUserInstruction: str | None = None
     finalImageUserInstruction: str | None = None
 
@@ -500,7 +503,7 @@ UNASSIGNED_HEAD_REFERENCE_PREFIX = "__unassigned__"
 
 ACTIVE_IMAGE_STATUSES = {"QUEUED", "SUBMITTED", "IN_QUEUE", "IN_PROGRESS", "RUNNING"}
 TERMINAL_IMAGE_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
-RUNNING_GENERATION_TASK_STATUSES = {"STYLING_RUNNING", "PREVIEW_RUNNING", "FINAL_RUNNING"}
+RUNNING_GENERATION_TASK_STATUSES = {"POSE_SELECTION_RUNNING", "STYLING_RUNNING", "PREVIEW_RUNNING", "FINAL_RUNNING"}
 PLANNING_STATUSES = {"PLANNING"}
 REVIEW_STATUSES = {"candidate", "approved", "needs_regen", "needs_retouch", "delivered"}
 PROMPT_TAGGING_RESULT_VERSION = "prompt-configured-json-v1"
@@ -2027,6 +2030,9 @@ def media_asset_direct_reference_count(db: Any, asset_id: int) -> int:
     row = db.execute(
         """
         SELECT
+          (SELECT COUNT(*) FROM shoot_environment_references WHERE media_asset_id = ?) +
+          (SELECT COUNT(*) FROM pose_images WHERE media_asset_id = ?) +
+          (SELECT COUNT(*) FROM generation_pose_selection_shots WHERE pose_asset_id = ? OR background_asset_id = ?) +
           (SELECT COUNT(*) FROM styling_garment_images WHERE media_asset_id = ?) +
           (SELECT COUNT(*) FROM generation_task_images WHERE media_asset_id = ?) +
           (SELECT COUNT(*) FROM generation_previews WHERE preview_asset_id = ?) +
@@ -2041,8 +2047,8 @@ def media_asset_direct_reference_count(db: Any, asset_id: int) -> int:
           (SELECT COUNT(*) FROM generation_result_set_shot_presets WHERE background_asset_id = ?) +
           (SELECT COUNT(*) FROM generation_result_set_shot_presets WHERE pose_asset_id = ?) AS count
         """,
-        (asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id,
-         asset_id, asset_id, asset_id, asset_id),
+        (asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id,
+         asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id),
     ).fetchone()
     return int(row["count"] or 0)
 
@@ -3512,13 +3518,25 @@ def generation_task_delete_impact(db: Any, task_ids: list[int]) -> dict[str, Any
         UNION
         SELECT preview_asset_id AS asset_id FROM generation_previews WHERE task_id IN ({placeholders}) AND preview_asset_id IS NOT NULL
         UNION
+        SELECT shots.pose_asset_id FROM generation_pose_selection_shots shots
+        JOIN generation_pose_selections selections ON selections.id = shots.selection_id
+        WHERE selections.task_id IN ({placeholders})
+        UNION
+        SELECT shots.background_asset_id FROM generation_pose_selection_shots shots
+        JOIN generation_pose_selections selections ON selections.id = shots.selection_id
+        WHERE selections.task_id IN ({placeholders})
+        UNION
+        SELECT ma.id FROM media_assets ma JOIN generation_attempts attempts
+          ON attempts.request_snapshot_json LIKE '%' || ma.object_key || '%'
+        WHERE attempts.owner_type = 'generation_pose_selection' AND attempts.owner_id IN ({placeholders})
+        UNION
         SELECT gri.current_asset_id AS asset_id FROM generation_result_images_new gri
         JOIN generation_result_sets grs ON grs.id = gri.result_set_id
         WHERE grs.task_id IN ({placeholders}) AND gri.current_asset_id IS NOT NULL
         UNION
         SELECT output_asset_id AS asset_id FROM generation_attempts
         WHERE output_asset_id IS NOT NULL AND (
-             (owner_type = 'generation_styling' AND owner_id IN ({placeholders}))
+             (owner_type IN ('generation_styling', 'generation_pose_selection') AND owner_id IN ({placeholders}))
              OR (owner_type = 'generation_preview' AND owner_id IN (
                   SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
                 ))
@@ -3529,7 +3547,7 @@ def generation_task_delete_impact(db: Any, task_ids: list[int]) -> dict[str, Any
                 ))
         )
         """,
-        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
+        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
     ).fetchall()
     asset_ids = list(dict.fromkeys(int(asset["asset_id"]) for asset in asset_rows if asset["asset_id"] is not None))
     media_rows = media_asset_rows_for_ids(db, asset_ids)
@@ -3717,7 +3735,7 @@ async def create_generation_task(
     timestamp = now_iso()
     with get_db() as db:
         cursor = db.execute(
-            "INSERT INTO generation_tasks (name, user_requirement_text, status, created_at, updated_at) VALUES (?, ?, 'DRAFT', ?, ?)",
+            "INSERT INTO generation_tasks (name, user_requirement_text, pose_workflow_enabled, status, created_at, updated_at) VALUES (?, ?, 1, 'DRAFT', ?, ?)",
             (task_name, normalize_user_requirement_text(user_requirement), timestamp, timestamp),
         )
         task_id = int(cursor.lastrowid)
@@ -3799,7 +3817,7 @@ async def finalize_generation_task_upload_session(
             if batch_id:
                 ensure_generation_batch(db, batch_id, payload.batchName, timestamp)
             cursor = db.execute(
-                "INSERT INTO generation_tasks (name, user_requirement_text, batch_id, status, created_at, updated_at) VALUES (?, ?, ?, 'DRAFT', ?, ?)",
+                "INSERT INTO generation_tasks (name, user_requirement_text, batch_id, pose_workflow_enabled, status, created_at, updated_at) VALUES (?, ?, ?, 1, 'DRAFT', ?, ?)",
                 (task_name, normalize_user_requirement_text(payload.userRequirement), batch_id, timestamp, timestamp),
             )
             task_id = int(cursor.lastrowid)
@@ -3912,7 +3930,7 @@ def get_generation_task_status(task_id: int) -> dict[str, Any]:
             raise HTTPException(404, "拍摄任务不存在")
         images = db.execute("SELECT status, COUNT(*) AS n FROM generation_result_images_new WHERE result_set_id = ? GROUP BY status", (row["active_result_set_id"],)).fetchall()
         attempt = db.execute("""SELECT ga.status, ga.error_code FROM generation_attempts ga
-            WHERE (ga.owner_type = 'generation_styling' AND ga.owner_id = ?)
+            WHERE (ga.owner_type IN ('generation_styling', 'generation_pose_selection') AND ga.owner_id = ?)
             OR (ga.owner_type = 'generation_result_image' AND ga.owner_id IN
                 (SELECT id FROM generation_result_images_new WHERE result_set_id = ?))
             ORDER BY ga.id DESC LIMIT 1""", (task_id, row["active_result_set_id"])).fetchone()
@@ -3924,10 +3942,10 @@ def get_generation_task_status(task_id: int) -> dict[str, Any]:
              WHERE json_extract(value, '$.phase') = json_extract(ga.progress_json, '$.current') LIMIT 1) AS phase_detail
             FROM generation_attempts ga WHERE ga.id IN (
                 SELECT active_attempt_id FROM generation_result_images_new WHERE result_set_id = ?
-                UNION SELECT id FROM (SELECT id FROM generation_attempts WHERE owner_type = 'generation_styling' AND owner_id = ? ORDER BY id DESC LIMIT 1)
+                UNION SELECT id FROM (SELECT id FROM generation_attempts WHERE owner_type IN ('generation_styling', 'generation_pose_selection') AND owner_id = ? ORDER BY id DESC LIMIT 1)
             ) ORDER BY ga.id DESC LIMIT 6""", (row["active_result_set_id"], task_id)).fetchall()
     counts = {item["status"]: item["n"] for item in images}
-    stage = "FINAL_IMAGE" if row["active_result_set_id"] else "AI_STYLING" if row["status"] != "DRAFT" else "IMPORT"
+    stage = "POSE_SELECTION" if row["status"] in {"POSE_SELECTION_RUNNING", "POSE_SELECTION_READY"} else "FINAL_IMAGE" if row["active_result_set_id"] else "AI_STYLING" if row["status"] != "DRAFT" else "IMPORT"
     return {"taskId": task_id, "status": row["status"], "stage": stage,
         "operations": [{"id": op["id"], "status": op["status"], "phase": op["phase"], "startedAt": op["phase_started_at"],
             "detail": {key: value for key, value in (loads(op["phase_detail"], {}) or {}).items()
@@ -4184,6 +4202,7 @@ def get_generation_tasks_delete_impact(payload: DeleteImpactRequest) -> dict[str
 def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -> dict[str, Any]:
     instruction_fields = {
         "aiStylingUserInstruction": "ai_styling_user_instruction_text",
+        "poseSelectionUserInstruction": "pose_selection_user_instruction",
         "storyboardPreviewUserInstruction": "storyboard_preview_user_instruction_text",
         "finalImageUserInstruction": "final_image_user_instruction_text",
     }
@@ -4261,6 +4280,7 @@ def mark_generation_task_input_changed(db: Any, task_id: int, timestamp: str, re
         SET status = 'READY_FOR_STYLING',
             current_input_version_id = NULL,
             active_styling_id = NULL,
+            active_pose_selection_id = NULL,
             active_preview_id = NULL,
             active_storyboard_preview_id = NULL,
             active_result_set_id = NULL,
@@ -4301,6 +4321,7 @@ def reset_generation_task_for_rerun(db: Any, task_id: int, timestamp: str) -> No
         UPDATE generation_tasks
         SET status = 'READY_FOR_STYLING',
             active_styling_id = NULL,
+            active_pose_selection_id = NULL,
             active_preview_id = NULL,
             active_storyboard_preview_id = NULL,
             active_result_set_id = NULL,
@@ -4330,7 +4351,7 @@ def interrupted_generation_resume_status(db: Any, task_id: int, terminal_status:
         FROM generation_attempts
         WHERE status = ?
           AND (
-            (owner_type = 'generation_styling' AND owner_id = ?)
+            (owner_type IN ('generation_styling', 'generation_pose_selection') AND owner_id = ?)
             OR (owner_type = 'generation_result_set' AND owner_id IN (SELECT id FROM generation_result_sets WHERE task_id = ?))
             OR (owner_type = 'generation_preview' AND owner_id IN (
               SELECT id FROM generation_previews WHERE task_id = ?
@@ -4351,6 +4372,8 @@ def interrupted_generation_resume_status(db: Any, task_id: int, terminal_status:
     if owner_type in {"generation_result_image", "generation_result_set"}:
         return "PREVIEW_READY"
     if owner_type == "generation_preview":
+        return "STYLING_READY"
+    if owner_type == "generation_pose_selection":
         return "STYLING_READY"
     if owner_type == "generation_styling":
         return "READY_FOR_STYLING"
@@ -4409,6 +4432,7 @@ def resume_failed_generation_task(db: Any, task_id: int, timestamp: str) -> str:
 def generation_task_stage_instruction_column(stage: str) -> str | None:
     return {
         "ai_styling": "ai_styling_user_instruction_text",
+        "pose_selection": "pose_selection_user_instruction",
         "storyboard_preview": "storyboard_preview_user_instruction_text",
         "final_image": "final_image_user_instruction_text",
     }.get(stage)
@@ -4436,7 +4460,7 @@ def cancel_running_task_attempts(db: Any, task_id: int, timestamp: str) -> None:
         SET status = 'CANCELLED', cancelled_at = COALESCE(cancelled_at, ?), updated_at = ?
         WHERE status = 'RUNNING'
           AND (
-            (owner_type = 'generation_styling' AND owner_id = ?)
+            (owner_type IN ('generation_styling', 'generation_pose_selection') AND owner_id = ?)
             OR (owner_type = 'generation_result_set' AND owner_id IN (SELECT id FROM generation_result_sets WHERE task_id = ?))
             OR (owner_type = 'generation_preview' AND owner_id IN (
               SELECT id FROM generation_previews WHERE task_id = ?
@@ -4543,13 +4567,25 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[st
         UNION
         SELECT preview_asset_id AS asset_id FROM generation_previews WHERE task_id IN ({placeholders}) AND preview_asset_id IS NOT NULL
         UNION
+        SELECT shots.pose_asset_id FROM generation_pose_selection_shots shots
+        JOIN generation_pose_selections selections ON selections.id = shots.selection_id
+        WHERE selections.task_id IN ({placeholders})
+        UNION
+        SELECT shots.background_asset_id FROM generation_pose_selection_shots shots
+        JOIN generation_pose_selections selections ON selections.id = shots.selection_id
+        WHERE selections.task_id IN ({placeholders})
+        UNION
+        SELECT ma.id FROM media_assets ma JOIN generation_attempts attempts
+          ON attempts.request_snapshot_json LIKE '%' || ma.object_key || '%'
+        WHERE attempts.owner_type = 'generation_pose_selection' AND attempts.owner_id IN ({placeholders})
+        UNION
         SELECT gri.current_asset_id AS asset_id FROM generation_result_images_new gri
         JOIN generation_result_sets grs ON grs.id = gri.result_set_id
         WHERE grs.task_id IN ({placeholders}) AND gri.current_asset_id IS NOT NULL
         UNION
         SELECT output_asset_id AS asset_id FROM generation_attempts
         WHERE output_asset_id IS NOT NULL AND (
-             (owner_type = 'generation_styling' AND owner_id IN ({placeholders}))
+             (owner_type IN ('generation_styling', 'generation_pose_selection') AND owner_id IN ({placeholders}))
              OR (owner_type = 'generation_preview' AND owner_id IN (
                   SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
                 ))
@@ -4560,15 +4596,15 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[st
                 ))
         )
         """,
-        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
+        (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
     ).fetchall()
     asset_ids = list(dict.fromkeys(int(row["asset_id"]) for row in asset_rows if row["asset_id"] is not None))
     media_rows = media_asset_rows_for_ids(db, asset_ids)
-    object_keys = [media["object_key"] for media in media_rows]
+    db.execute(f"UPDATE generation_pose_selections SET attempt_id = NULL WHERE task_id IN ({placeholders})", task_ids)
     db.execute(
         f"""
         DELETE FROM generation_attempts
-        WHERE (owner_type = 'generation_styling' AND owner_id IN ({placeholders}))
+        WHERE (owner_type IN ('generation_styling', 'generation_pose_selection') AND owner_id IN ({placeholders}))
            OR (owner_type = 'generation_preview' AND owner_id IN (
                 SELECT id FROM generation_previews WHERE task_id IN ({placeholders})
               ))
@@ -4583,6 +4619,11 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[st
     db.execute(f"DELETE FROM generation_attempts WHERE owner_type = 'generation_result_set' AND owner_id IN (SELECT id FROM generation_result_sets WHERE task_id IN ({placeholders}))", task_ids)
     rows = get_generation_task_rows_for_mutation(db, task_ids)
     db.execute(f"DELETE FROM generation_tasks WHERE id IN ({placeholders})", task_ids)
+    media_rows = [media for media in media_rows
+                  if not media_asset_direct_reference_count(db, media["id"])
+                  and not media_asset_snapshot_reference_count(db, media["object_key"])]
+    asset_ids = [media["id"] for media in media_rows]
+    object_keys = [media["object_key"] for media in media_rows]
     if asset_ids:
         asset_placeholders = ", ".join("?" for _ in asset_ids)
         detach_upload_session_media_assets(db, asset_ids)
@@ -4774,6 +4815,7 @@ async def run_select_generation_styling(
     if task["status"] not in {
         "READY_FOR_STYLING",
         "STYLING_READY",
+        "POSE_SELECTION_READY",
         "PREVIEW_READY",
         "COMPLETED",
         "FINAL_PARTIAL",
@@ -4905,6 +4947,7 @@ async def run_select_generation_styling(
                 SET status = 'STYLING_READY',
                     current_input_version_id = ?,
                     active_styling_id = ?,
+                    active_pose_selection_id = NULL,
                     active_storyboard_preview_id = NULL,
                     active_preview_id = NULL,
                     active_result_set_id = NULL,
@@ -5272,25 +5315,27 @@ async def run_generate_final_images(
 ) -> dict[str, Any]:
     task = get_generation_task_row(task_id)
     if (
-        task["status"] not in {"STYLING_READY", "PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
+        task["status"] not in {"STYLING_READY", "POSE_SELECTION_READY", "PREVIEW_READY", "COMPLETED", "FINAL_PARTIAL", "CANCELLED"}
         or not task["active_styling_id"]
     ):
         raise HTTPException(status_code=409, detail="请先完成 AI 智能选搭")
     preview_id = int(task["active_storyboard_preview_id"]) if row_value(task, "active_storyboard_preview_id") else None
     styling_id = int(task["active_styling_id"])
     category_family = storyboard_category_family(get_styling_plan_by_id(styling_id))
-    with get_db() as db:
-        preset_rows = db.execute(
-            """
-            SELECT slots.*
-            FROM shot_preset_slots slots
-            JOIN media_assets background ON background.id = slots.background_asset_id AND background.deleted_at IS NULL
-            JOIN media_assets pose ON pose.id = slots.pose_asset_id AND pose.deleted_at IS NULL
-            WHERE slots.category_family = ?
-            ORDER BY slots.shot_index
-            """,
-            (category_family,),
-        ).fetchall()
+    preset_rows = []
+    if not row_value(task, "pose_workflow_enabled", 0):
+        with get_db() as db:
+            preset_rows = db.execute(
+                """
+                SELECT slots.*
+                FROM shot_preset_slots slots
+                JOIN media_assets background ON background.id = slots.background_asset_id AND background.deleted_at IS NULL
+                JOIN media_assets pose ON pose.id = slots.pose_asset_id AND pose.deleted_at IS NULL
+                WHERE slots.category_family = ?
+                ORDER BY slots.shot_index
+                """,
+                (category_family,),
+            ).fetchall()
     effective_user_instruction = user_instruction if user_instruction is not None else pending_generation_task_stage_instruction(task, "final_image")
     user_instruction_context = build_stage_user_instruction_context("final_image", effective_user_instruction)
     if continue_existing and task["active_result_set_id"]:
@@ -5324,11 +5369,30 @@ async def run_generate_final_images(
                     job_key=final_set_job_key(int(task["active_result_set_id"])),
                 )
             return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
+    pose_selection_id = row_value(task, "active_pose_selection_id")
+    selection = None
+    if row_value(task, "pose_workflow_enabled", 0):
+        with get_db() as db:
+            selection = db.execute("SELECT * FROM generation_pose_selections WHERE id = ? AND task_id = ? AND styling_id = ? AND input_version_id = ?",
+                (pose_selection_id, task_id, styling_id, task["current_input_version_id"])).fetchone()
+            if not selection:
+                raise HTTPException(409, "请先完成姿势选搭")
+            preset_rows = db.execute("""SELECT shots.*, ? AS category_family FROM generation_pose_selection_shots shots
+                JOIN media_assets pose ON pose.id = shots.pose_asset_id AND pose.deleted_at IS NULL
+                JOIN media_assets background ON background.id = shots.background_asset_id AND background.deleted_at IS NULL
+                WHERE selection_id = ? ORDER BY shot_index""", (category_family, pose_selection_id)).fetchall()
     if len(preset_rows) != 5:
+        if row_value(task, "pose_workflow_enabled", 0):
+            raise HTTPException(409, "冻结的背景或姿势图片不可用，请重新选择姿势")
         family_label = {"top": "上装", "bottom": "下装", "one_piece": "套装"}[category_family]
         raise HTTPException(status_code=409, detail=f"{family_label}拍摄预设尚未完整，请联系管理员补齐该类型的 5 个镜头图片")
     preparation = freeze_final_prompt_configuration()
-    input_version_id = create_generation_input_version(task_id)
+    selection_plan = loads(selection["plan_json"], {}) if selection else {}
+    if selection_plan.get("workflow") == "shared_background_v1":
+        preparation["configRows"].update(selection_plan["promptConfigSnapshot"])
+        input_version_id = int(selection["input_version_id"])
+    else:
+        input_version_id = create_generation_input_version(task_id)
     timestamp = now_iso()
     with get_db() as db:
         if user_instruction is not None:
@@ -5343,7 +5407,7 @@ async def run_generate_final_images(
             (task_id, input_version_id, styling_id, preview_id, None, dumps(user_instruction_context), timestamp, timestamp),
         )
         result_set_id = int(cursor.lastrowid)
-        db.execute("UPDATE generation_result_sets SET prompt_preparation_json = ? WHERE id = ?", (dumps(preparation), result_set_id))
+        db.execute("UPDATE generation_result_sets SET prompt_preparation_json = ?, pose_selection_id = ? WHERE id = ?", (dumps(preparation), pose_selection_id, result_set_id))
         db.executemany(
             """
             INSERT INTO generation_result_set_shot_presets
@@ -5518,6 +5582,40 @@ def final_preparation_cancelled(task_id: int, result_set_id: int) -> bool:
     return not row or row["status"] != "FINAL_RUNNING" or row["active_result_set_id"] != result_set_id
 
 
+SHARED_BACKGROUND_DIRECTING = "五个镜头共用同一背景与光线；背景图不限定机位、景别、裁切、站位或人物尺度。按当前镜头 Prompt 构图，按已选姿势参考执行动作与神态；人物身份和服装分别以模特图和商品图为准。"
+
+
+def vision_reference_input(item: dict[str, Any]) -> dict[str, Any]:
+    if item.get("collageItems"):
+        content, _, mime = build_reference_collage_bytes(item)
+    else:
+        content, mime = reference_source_bytes(item)
+    if not content:
+        raise ValueError("参考图片内容为空")
+    # Normalized originals may have a different format from their upload filename.
+    from PIL import Image
+    with Image.open(BytesIO(content)) as decoded:
+        mime = Image.MIME.get(decoded.format, mime)
+    return {"data": content, "mime_type": mime or "image/jpeg"}
+
+
+def optimizer_visual_inputs(packages: dict[str, Any], inputs: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep each final prompt's local numbering while deduplicating vision attachments."""
+    images, manifest, seen = [], [], {}
+    for shot in inputs["shots"]:
+        for reference, item in zip(shot["references"], packages[shot["shotId"]]["imageInputs"]):
+            sources = item.get("collageItems") or [item]
+            identity = dumps({"role": item["role"], "collageRule": item.get("collageRule"),
+                              "sources": [source.get("objectKey") or source.get("url") for source in sources]})
+            if identity not in seen:
+                images.append(vision_reference_input(item))
+                seen[identity] = len(images)
+                manifest.append({"visionImageIndex": len(images), "role": item["role"], "sources": sources})
+            reference["visionImageIndex"] = seen[identity]
+    inputs["imageManifest"] = manifest
+    return images
+
+
 async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: list[int]) -> bool:
     preparation = read_final_preparation(result_set_id)
     if preparation.get("mode") != "optimized" or not image_ids:
@@ -5546,21 +5644,29 @@ async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: lis
     preparation.update(status="RUNNING", attemptId=attempt_id, error=None)
     save_final_preparation(result_set_id, preparation)
     raw_text = ""
+    provider_call_started = False
     try:
         pending = {key: build_new_final_task_package(task_id, int(key)) for key in pending}
         system_prompt = preparation["configRows"][OPTIMIZER_KEY]["content"]
-        inputs = optimizer_input(pending)
         request_snapshot = {"promptConfigKey": OPTIMIZER_KEY, "promptContentHash": text_hash(system_prompt),
-                            "systemInstruction": system_prompt, "prompt": dumps(inputs), "sourcePackages": pending,
-                            "model": effective_gemini_model(), "invocation": {"mode": "final_prompt_optimization"}}
+                            "systemInstruction": system_prompt, "sourcePackages": pending,
+                            "model": effective_gemini_model(),
+                            "invocation": {"mode": "final_prompt_optimization", "providerCallStarted": False}}
+        # 模型调用前保存源文本与系统提示词，供调用记录追溯。
         update_attempt_request_snapshot(attempt_id, request_snapshot)
+        inputs = optimizer_input(pending)
+        images = optimizer_visual_inputs(pending, inputs)
         if final_preparation_cancelled(task_id, result_set_id):
             finish_attempt(attempt_id, "CANCELLED")
             preparation["status"] = "CANCELLED"
             save_final_preparation(result_set_id, preparation)
             return False
-        raw_text = await generate_gemini_json_text(dumps(inputs), system_instruction=system_prompt)
-        optimized = validate_optimized_prompts(parse_gemini_json_object(raw_text), pending)
+        request_snapshot["prompt"] = dumps(inputs)
+        request_snapshot["invocation"]["providerCallStarted"] = True
+        update_attempt_request_snapshot(attempt_id, request_snapshot)
+        provider_call_started = True
+        raw_text = await generate_gemini_json_text(dumps(inputs), images=images, system_instruction=system_prompt)
+        optimized = parse_optimized_prompts(parse_gemini_json_object(raw_text), pending)
         for key, output in optimized.items():
             source = pending[key]
             packages[key] = {**source, "originalPrompt": source["prompt"], "prompt": output["prompt"],
@@ -5577,8 +5683,10 @@ async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: lis
         preparation.update(status="CANCELLED" if cancelled else "FAILED",
                            error="拍摄准备未完成，本轮尚未开始生成图片。请重试或联系管理员检查拍摄要求。")
         save_final_preparation(result_set_id, preparation)
+        error_code = ("PROMPT_PREPARATION_FAILED" if not provider_call_started else
+                      ERROR_MALFORMED_OUTPUT if isinstance(exc, ValueError) else classify_generation_attempt_error(exc))
         finish_attempt(attempt_id, "CANCELLED" if cancelled else "FAILED", response_snapshot={"raw_text": raw_text},
-                       error_message=str(exc), error_code=ERROR_MALFORMED_OUTPUT if isinstance(exc, ValueError) else classify_generation_attempt_error(exc))
+                       error_message=str(exc), error_code=error_code)
         if not cancelled:
             with get_db() as db:
                 for image_id in image_ids:
@@ -6751,18 +6859,18 @@ async def test_prompt_optimization(config_key: str, payload: PromptOptimizationT
             if diagnostics["missingPlaceholders"]:
                 raise HTTPException(400, "草稿缺少必要占位符")
             package["prompt"] = rendered
-    try:
-        inputs = optimizer_input(packages)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    inputs = optimizer_input(packages)
     snapshot = {"promptConfigKey": OPTIMIZER_KEY, "systemInstruction": system_prompt, "prompt": dumps(inputs),
                 "promptContentHash": text_hash(system_prompt), "sourcePackages": packages,
                 "model": effective_gemini_model(), "invocation": {"mode": "optimization_test", "sourceAttemptId": payload.attemptId}}
     attempt_id = create_attempt("generation_result_set", result_set_id, "gemini", request_snapshot=snapshot)
     raw_text = ""
     try:
-        raw_text = await generate_gemini_json_text(dumps(inputs), system_instruction=system_prompt)
-        results = validate_optimized_prompts(parse_gemini_json_object(raw_text), packages)
+        images = optimizer_visual_inputs(packages, inputs)
+        snapshot["prompt"] = dumps(inputs)
+        update_attempt_request_snapshot(attempt_id, snapshot)
+        raw_text = await generate_gemini_json_text(dumps(inputs), images=images, system_instruction=system_prompt)
+        results = parse_optimized_prompts(parse_gemini_json_object(raw_text), packages)
         finish_attempt(attempt_id, "SUCCEEDED", response_snapshot={"raw_text": raw_text, "shots": results})
     except Exception as exc:
         finish_attempt(attempt_id, "FAILED", response_snapshot={"raw_text": raw_text}, error_message=str(exc), error_code=ERROR_MALFORMED_OUTPUT if isinstance(exc, ValueError) else classify_generation_attempt_error(exc))
@@ -9334,18 +9442,20 @@ def assert_media_assets_available(rows: list[Any], label: str = "图片") -> Non
         )
 
 
-def create_attempt(owner_type: str, owner_id: int, provider: str, request_snapshot: dict[str, Any] | None = None) -> int:
+def create_attempt(owner_type: str, owner_id: int, provider: str, request_snapshot: dict[str, Any] | None = None, *, db: Any = None) -> int:
+    if db is None:
+        with get_db() as connection:
+            return create_attempt(owner_type, owner_id, provider, request_snapshot, db=connection)
     timestamp = now_iso()
-    with get_db() as db:
-        cursor = db.execute(
-            """
-            INSERT INTO generation_attempts
-              (owner_type, owner_id, provider, status, started_at, request_snapshot_json, created_at, updated_at)
-            VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?)
-            """,
-            (owner_type, owner_id, provider, timestamp, dumps(request_snapshot or {}), timestamp, timestamp),
-        )
-        return int(cursor.lastrowid)
+    cursor = db.execute(
+        """
+        INSERT INTO generation_attempts
+          (owner_type, owner_id, provider, status, started_at, request_snapshot_json, created_at, updated_at)
+        VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?)
+        """,
+        (owner_type, owner_id, provider, timestamp, dumps(request_snapshot or {}), timestamp, timestamp),
+    )
+    return int(cursor.lastrowid)
 
 
 def update_attempt_request_snapshot(attempt_id: int, request_snapshot: dict[str, Any]) -> None:
@@ -9798,6 +9908,8 @@ def build_ai_stylist_request_snapshot(input_row: Any, candidate_snapshot: dict[s
 
 def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, Any], plan_source_mode: str = "production") -> dict[str, Any]:
     source = raw if isinstance(raw, dict) else {}
+    if source.get("schema_version") == "styling-plan-v2":
+        source = adapt_final_styling_plan(source, candidate_snapshot)
     hero = source.get("hero_understanding") if isinstance(source.get("hero_understanding"), dict) else {}
     intents = source.get("styling_intents") if isinstance(source.get("styling_intents"), list) else []
     candidates = source.get("outfit_candidates") if isinstance(source.get("outfit_candidates"), list) else []
@@ -9833,7 +9945,8 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
         warnings.append("selected_outfit_key_auto_normalized")
     rejected_source = source.get("rejected_candidates") if isinstance(source.get("rejected_candidates"), list) else []
     return {
-        "schema_version": "styling-plan-v1",
+        "schema_version": source.get("schema_version") or "styling-plan-v1",
+        "empty_reason": source.get("empty_reason", ""),
         "plan_source_mode": "fallback" if plan_source_mode == "fallback" else "production",
         "hero_understanding": {
             "hero_visual_summary": str(hero.get("hero_visual_summary") or source.get("hero_visual_summary") or "主推款图片已作为商品事实源。")[:120],
@@ -9867,6 +9980,62 @@ def normalize_styling_plan(raw: dict[str, Any], candidate_snapshot: dict[str, An
         "rejected_candidates": normalize_rejected_candidates(rejected_source, normalized_candidates, candidate_cards),
         "quality_signals": normalize_model_quality_signals(source.get("quality_signals")),
         "warnings": warnings[:8],
+    }
+
+
+def adapt_final_styling_plan(source: dict[str, Any], candidate_snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Validate the compact LLM contract, then adapt only its chosen outfit for legacy consumers."""
+    required = {"schema_version", "hero_understanding", "selected_materials", "empty_reason",
+                "generated_accessories", "wearing_notes", "reason_summary"}
+    if set(source) != required:
+        raise AIStylistContractError("styling-plan-v2 字段缺失或包含额外字段")
+    hero = source["hero_understanding"]
+    hero_keys = {"category", "shot_category_family", "hero_visual_summary", "hero_selling_points"}
+    if not isinstance(hero, dict) or set(hero) != hero_keys:
+        raise AIStylistContractError("hero_understanding 字段不符合 v2 契约")
+    for key in ("category", "hero_visual_summary"):
+        if not isinstance(hero[key], str) or not hero[key].strip():
+            raise AIStylistContractError(f"hero_understanding.{key} 必须为非空字符串")
+    if hero["shot_category_family"] not in ("top", "bottom", "one_piece"):
+        raise AIStylistContractError("shot_category_family 只能为 top、bottom、one_piece")
+    for key, value, maximum in (("hero_selling_points", hero["hero_selling_points"], 8),
+                                 ("generated_accessories", source["generated_accessories"], 6)):
+        if not isinstance(value, list) or len(value) > maximum or any(not isinstance(item, str) or not item.strip() for item in value):
+            raise AIStylistContractError(f"{key} 必须为字符串数组，最多 {maximum} 项")
+    for key, maximum in (("wearing_notes", 180), ("reason_summary", 180)):
+        if not isinstance(source[key], str) or len(source[key]) > maximum:
+            raise AIStylistContractError(f"{key} 必须为不超过 {maximum} 字的字符串")
+    if not source["reason_summary"].strip():
+        raise AIStylistContractError("reason_summary 不能为空")
+    materials = source["selected_materials"]
+    if not isinstance(materials, list) or len(materials) > 4:
+        raise AIStylistContractError("selected_materials 必须为数组，最多 4 件")
+    available = candidate_cards_by_code(candidate_snapshot)
+    codes: set[str] = set()
+    for item in materials:
+        if not isinstance(item, dict) or set(item) != {"material_code", "wearing_method"}:
+            raise AIStylistContractError("selected_materials 每项仅允许 material_code 与 wearing_method")
+        code = item["material_code"]
+        if not isinstance(code, str) or code not in available or code in codes:
+            raise AIStylistContractError("selected_materials 包含不存在或重复的商品 code")
+        if not isinstance(item["wearing_method"], str) or not item["wearing_method"].strip() or len(item["wearing_method"]) > 120:
+            raise AIStylistContractError("wearing_method 必须为 1–120 字的穿法说明")
+        codes.add(code)
+    reason = source["empty_reason"]
+    if (materials and reason != "") or (not materials and reason not in ("complete_look", "no_suitable_match", "user_requested")):
+        raise AIStylistContractError("empty_reason 必须与是否选择库内服装一致")
+    # Keep existing snapshot/UI/pose/final-image readers working without invented critiques or scores.
+    return {
+        **source,
+        "selected_outfit_key": "selected_final",
+        "outfit_candidates": [{
+            "outfit_key": "selected_final",
+            "title": "推荐造型",
+            "selected_materials": materials,
+            "generated_accessories": source["generated_accessories"],
+            "wearing_notes": source["wearing_notes"],
+            "hero_focus": hero["hero_selling_points"],
+        }],
     }
 
 
@@ -10345,9 +10514,11 @@ def build_shot_styling_line(styling_plan: dict[str, Any]) -> str:
     generated_accessories = ensure_string_list(selected.get("generated_accessories"))
     parts = [
         f"选中搭配服装：{'、'.join(selected_codes) if selected_codes else '无库内配角'}",
+        *[f"{item.get('material_code')}穿法：{item.get('wearing_method')}"
+          for item in styling_plan.get("selected_materials", [])
+          if isinstance(item, dict) and item.get("material_code") and item.get("wearing_method")],
         selected.get("wearing_notes"),
         f"生成类配饰：{'、'.join(generated_accessories)}" if generated_accessories else "",
-        "仅保留分镜中已有的低存在感配饰，不新增遮挡商品的配饰",
     ]
     return "；".join(part for part in (compact_prompt_runtime_text(item) for item in parts) if part)
 
@@ -10794,7 +10965,7 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         row = db.execute(
             """
             SELECT gri.*, grs.styling_id, grs.input_version_id, grs.preview_id,
-                   grs.shot_preset_version_id, grs.prompt_preparation_json,
+                   grs.shot_preset_version_id, grs.prompt_preparation_json, grs.pose_selection_id,
                    grs.user_instruction_json AS result_set_user_instruction_json,
                    gp.preview_asset_id, gp.environment_asset_id
             FROM generation_result_images_new gri
@@ -10852,6 +11023,15 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         ).fetchone()
     user_requirement = loads(row_value(input_row, "user_requirement_json"), build_user_requirement_context({}))
     prompt_runtime = build_final_prompt_runtime(int(row["sort_order"]), str(row["shot_role"]), styling_plan, image_inputs, final_image_user_instruction, user_requirement)
+    selection = get_generation_pose_selection(row_value(row, "pose_selection_id"))
+    if selection:
+        shot = next((item for item in selection["shots"] if item["shotIndex"] == int(row["sort_order"])), None)
+        if not shot:
+            raise RuntimeError("冻结的姿势选搭缺少当前镜头")
+        if selection.get("workflow") == "shared_background_v1":
+            prompt_runtime["shot_global_directing"] = SHARED_BACKGROUND_DIRECTING
+        prompt_runtime["shot_pose"] = shot["direction"]
+        prompt_runtime["shot_styling"] = str(prompt_runtime.get("shot_styling") or "") + "；已选姿势：" + shot["direction"]
     preparation = loads(row_value(row, "prompt_preparation_json"), {})
     frozen_rows = preparation.get("configRows")
     if frozen_rows:
@@ -10862,7 +11042,7 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         prompt = render_prompt_template(prompt_config_key, prompt_runtime)
     config_content = prompt_config_content(prompt_config_key, frozen_rows) or ""
     return {
-        "generation": {"stage": "final_image"},
+        "generation": {"stage": "final_image", "workflow": selection.get("workflow") if selection else "legacy_masters"},
         "prompt": prompt,
         "categoryFamily": storyboard_category_family(styling_plan),
         "promptConfigKey": prompt_config_key, "promptContentHash": text_hash(config_content),
@@ -10901,6 +11081,7 @@ def build_final_prompt_runtime(
     spans = render_image_reference_spans(image_inputs or [])
     runtime = {
         "shot_index": str(shot_index),
+        "shot_pose": "",
         "user_requirement": render_user_requirement_line(user_requirement or {}),
         "shot_styling": build_shot_styling_line(styling_plan),
         "shot_global_directing": "完整替换拍摄母版中的原人物、原服装及其身份特征；保留母版的场景、机位、景别、裁切、人物尺度、站位与光线。姿势参考仅补充身体朝向、重心、肩线、手位、视线与头部朝向，不改变脸、发型或母版构图。",
@@ -10924,7 +11105,7 @@ def build_direct_final_image_inputs(
     background = get_media_asset_by_id(int(preset["background_asset_id"]))
     pose = get_media_asset_by_id(int(preset["pose_asset_id"]))
     if not background or not pose:
-        raise RuntimeError("拍摄预设引用的拍摄母版或姿势图不可用")
+        raise RuntimeError("冻结的拍摄背景或姿势图不可用")
     inputs: list[dict[str, Any]] = [
         image_input_from_asset(background, "shot_background"),
         image_input_from_asset(pose, "shot_pose"),
@@ -11475,6 +11656,10 @@ def sample_prompt_runtime() -> dict[str, Any]:
     # 结构化业务输入（选搭/标签）保持 JSON；面向模型的文本占位给出「已渲染」的样例文本，
     # 与运行时各 render_* 函数产物同形，便于「Prompt 维护」页预览真实效果。
     return {
+        "pose_context": dumps({"code": "POSE-A", "images": [{"imageId": 101, "order": 1}]}),
+        "pose_phase": "shortlist", "pose_candidates": "[]", "pose_shortlist": "[]",
+        "pose_user_instruction": "动作自然，避免遮挡主推款细节。",
+        "pose_shots": "[]", "pose_image_manifest": "[]", "shot_pose": "",
         # AI 打标 / AI 选搭
         "styling_garment": dumps({"code": "LOOK-A", "image_count": 3, "image_roles": ["primary", "reference", "reference"]}),
         "garment_image_files": dumps([
@@ -11496,9 +11681,9 @@ def sample_prompt_runtime() -> dict[str, Any]:
         "category_family": "bottom",
         # 当前成片各分段（成片用；无表头）
         "shot_index": "1",
-        "shot_styling": "选中搭配服装：LOOK-A；穿法：单穿吊带裙；生成类配饰：极简金色小耳圈；仅保留分镜中已有的低存在感配饰，不新增遮挡商品的配饰",
-        "shot_global_directing": "配饰边界：生成配饰低存在感",
-        "shot_current": "格1（全身主视觉·全景）：\n  核心：主推款整体比例",
+        "shot_styling": "选中搭配服装：LOOK-A；穿法：单穿吊带裙；生成类配饰：极简金色小耳圈",
+        "shot_global_directing": SHARED_BACKGROUND_DIRECTING,
+        "shot_current": "当前为第1个成片镜头，镜头角色 bottom_shot_1。",
         "is_shot_1": "1",
         "is_shot_2": "",
         "is_shot_3": "",
@@ -11514,6 +11699,12 @@ def sample_prompt_runtime() -> dict[str, Any]:
 
 def available_prompt_placeholders() -> list[dict[str, str]]:
     return [
+        *[{"name": f"runtime.{name}", "scope": "runtime", "description": label} for name, label in (
+            ("pose_context", "姿势识别条目与图片清单"), ("pose_phase", "姿势选搭阶段（固定 shortlist，初筛即定选）"),
+            ("pose_candidates", "可选姿势标签和图片标识"), ("pose_shortlist", "旧配置兼容占位，固定为空列表"),
+            ("pose_user_instruction", "本次姿势要求"), ("pose_shots", "从冻结成片 Prompt 渲染的五镜头要求"),
+            ("pose_image_manifest", "初筛实际传入的商品和背景图片顺序与角色"), ("shot_pose", "当前镜头冻结的姿势动作说明"),
+        )],
         {"name": "segment.brand_info", "scope": "segment", "description": "品牌信息分段 Prompt"},
         {"name": "runtime.garment_image_files", "scope": "runtime", "description": "搭配服装图片挑选/排序使用的文件标识与候选顺序"},
         {"name": "runtime.styling_garment", "scope": "runtime", "description": "AI 打标使用的当前搭配服装 code 和图片输入摘要"},
@@ -11537,7 +11728,7 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         # 参考图各职能图号区间：只出会变的图号，职能描述在模板正文托管
         {"name": "runtime.ref_model_identity", "scope": "runtime", "description": "模特身份参考板图号，直出链路通常为「图3」；无则空"},
         {"name": "runtime.ref_garment", "scope": "runtime", "description": "主推款概览/细节板与搭配服装参考板的总图号区间，直出链路通常为「图4-6」；无则空"},
-        {"name": "runtime.ref_shot_background", "scope": "runtime", "description": "当前镜头拍摄母版图号，固定为图1"},
+        {"name": "runtime.ref_shot_background", "scope": "runtime", "description": "统一背景参考图号，固定为图1；历史结果按原快照职责使用"},
         {"name": "runtime.ref_shot_pose", "scope": "runtime", "description": "当前镜头姿势参考图图号，固定为图2"},
     ]
 
@@ -11649,7 +11840,7 @@ def auto_run_active_task_ids() -> set[int]:
             SELECT id FROM generation_tasks
             WHERE deleted_at IS NULL
               AND auto_run_target = ?
-              AND status IN ('STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING')
+              AND status IN ('POSE_SELECTION_RUNNING', 'STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING')
             """,
             (AUTO_RUN_TARGET_FINAL,),
         ).fetchall()
@@ -11673,7 +11864,7 @@ def pump_auto_run_queue() -> None:
             SELECT id FROM generation_tasks
             WHERE deleted_at IS NULL
               AND auto_run_target = ?
-              AND status NOT IN ('STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'ABANDONED')
+              AND status NOT IN ('POSE_SELECTION_RUNNING', 'STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'ABANDONED')
               AND (auto_run_retry_at IS NULL OR auto_run_retry_at <= ?)
             ORDER BY COALESCE(auto_run_requested_at, updated_at), id
             """,
@@ -11697,7 +11888,7 @@ def auto_run_queue_position(task_id: int, requested_at: str | None) -> int | Non
             SELECT COUNT(*) AS ahead FROM generation_tasks
             WHERE deleted_at IS NULL
               AND auto_run_target = ?
-              AND status NOT IN ('STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'ABANDONED')
+              AND status NOT IN ('POSE_SELECTION_RUNNING', 'STYLING_RUNNING', 'PREVIEW_RUNNING', 'FINAL_RUNNING', 'ABANDONED')
               AND (auto_run_retry_at IS NULL OR auto_run_retry_at <= ?)
               AND id != ?
               AND (
@@ -11753,6 +11944,9 @@ async def run_auto_final_generation(task_id: int) -> None:
             if step == "styling":
                 await run_select_generation_styling(task_id, trigger="auto_run")
                 continue
+            if step == "pose":
+                await run_select_generation_poses(task_id, trigger="auto_run")
+                continue
             if step == "final":
                 await run_generate_final_images(task_id, trigger="auto_run", continue_existing=True)
                 return
@@ -11772,11 +11966,17 @@ async def run_auto_final_generation(task_id: int) -> None:
 
 
 def next_auto_final_step(task: Any) -> str:
+    if task["status"] in {"FAILED", "CANCELLED"}:
+        operations = get_task_ai_operations(int(task["id"]))
+        if operations and operations[0]["ownerType"] == "generation_pose_selection":
+            return "pose"
     if task["status"] == "DRAFT":
         return "ready"
     if task["status"] == "READY_FOR_STYLING":
         return "styling"
     if task["status"] == "STYLING_READY":
+        return "pose" if row_value(task, "pose_workflow_enabled", 0) else "final"
+    if task["status"] == "POSE_SELECTION_READY":
         return "final"
     if task["status"] in {"PREVIEW_READY", "FINAL_PARTIAL"}:
         return "final"
@@ -11784,6 +11984,8 @@ def next_auto_final_step(task: Any) -> str:
         return "complete"
     if not task["active_styling_id"]:
         return "styling"
+    if row_value(task, "pose_workflow_enabled", 0) and not row_value(task, "active_pose_selection_id"):
+        return "pose"
     result_set_id = row_value(task, "active_result_set_id")
     if result_set_id and generation_result_set_is_complete(int(result_set_id)):
         return "complete"
@@ -11835,13 +12037,14 @@ def lease_generation_result_image(image_id: int, attempt_id: int) -> None:
 
 
 def refresh_pending_new_generation_jobs() -> None:
+    recover_interrupted_pose_jobs()
     timestamp = now_iso()
     with get_db() as db:
         styling_rows = db.execute(
             """
             SELECT gt.id AS task_id,
                    (SELECT ga.id FROM generation_attempts ga
-                    WHERE ga.owner_type = 'generation_styling' AND ga.owner_id = gt.id AND ga.status = 'RUNNING'
+                    WHERE ga.owner_type IN ('generation_styling', 'generation_pose_selection') AND ga.owner_id = gt.id AND ga.status = 'RUNNING'
                     ORDER BY ga.id DESC LIMIT 1) AS attempt_id
             FROM generation_tasks gt
             WHERE gt.deleted_at IS NULL AND gt.status = 'STYLING_RUNNING' AND gt.auto_run_target = ?
@@ -12619,11 +12822,14 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
         "userRequirement": row_value(row, "user_requirement_text", ""),
         "stageUserInputs": {
             "aiStyling": row_value(row, "ai_styling_user_instruction_text", ""),
+            "poseSelection": row_value(row, "pose_selection_user_instruction", ""),
             "storyboardPreview": row_value(row, "storyboard_preview_user_instruction_text", ""),
             "finalImage": row_value(row, "final_image_user_instruction_text", ""),
         },
         "currentInputVersionId": row["current_input_version_id"],
         "activeStylingId": row["active_styling_id"],
+        "poseWorkflowEnabled": bool(row_value(row, "pose_workflow_enabled", 0)),
+        "activePoseSelectionId": row_value(row, "active_pose_selection_id"),
         "activePreviewId": row["active_preview_id"],
         "activeStoryboardPreviewId": row["active_storyboard_preview_id"] if "active_storyboard_preview_id" in row.keys() else row["active_preview_id"],
         "activeResultSetId": row["active_result_set_id"],
@@ -12660,6 +12866,7 @@ def serialize_generation_task(row: Any, include_detail: bool = True, include_deb
         ).fetchall()
     item["images"] = [{"id": image["link_id"], "sortOrder": image["link_sort_order"], "asset": serialize_media_asset(image)} for image in image_rows]
     item["inputVersion"] = get_input_version(row["current_input_version_id"])
+    item["poseSelection"] = get_generation_pose_selection(row_value(row, "active_pose_selection_id"))
     item["styling"] = get_generation_styling(row["active_styling_id"], include_debug=include_debug)
     preview_id = row["active_storyboard_preview_id"] if "active_storyboard_preview_id" in row.keys() and row["active_storyboard_preview_id"] else row["active_preview_id"]
     item["preview"] = get_generation_preview(preview_id)
@@ -12705,6 +12912,9 @@ def generation_task_summaries(rows: list[Any]) -> list[dict[str, Any]]:
         queued = bool(row_value(row, "auto_run_target") and row["status"] not in RUNNING_GENERATION_TASK_STATUSES and row["status"] not in AUTO_RUN_TERMINAL_TASK_STATUSES and row["id"] not in active)
         result.append({
             "id": row["id"], "name": row["name"], "status": row["status"],
+            "poseWorkflowEnabled": bool(row_value(row, "pose_workflow_enabled", 0)),
+            "activeStylingId": row_value(row, "active_styling_id"),
+            "activePoseSelectionId": row_value(row, "active_pose_selection_id"),
             "detailRevision": row_value(row, "detail_revision", 0),
             "createdAt": row["created_at"], "updatedAt": row["updated_at"],
             "batchId": row_value(row, "batch_id"), "archivedAt": row_value(row, "archived_at"), "archiveReason": row_value(row, "archive_reason"),
@@ -12861,6 +13071,7 @@ def get_generation_result_set(result_set_id: int | None) -> dict[str, Any] | Non
         "id": row["id"],
         "status": row["status"],
         "previewId": row["preview_id"] if "preview_id" in row.keys() else None,
+        "poseSelectionId": row_value(row, "pose_selection_id"),
         "userInstruction": loads(row_value(row, "user_instruction_json"), {}),
         "preparation": {"status": preparation.get("status", "DIRECT"), "error": preparation.get("error"),
                         "attemptId": preparation.get("attemptId")},
@@ -12933,6 +13144,7 @@ def actual_model_output_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any
 
 GENERATION_ATTEMPT_OWNER_TYPES = (
     "generation_styling",
+    "generation_pose_selection",
     "generation_preview",
     "generation_result_image",
     "generation_result_set",
@@ -12983,7 +13195,7 @@ def get_task_attempts(task_id: int) -> list[dict[str, Any]]:
         rows = db.execute(
             """
             SELECT ga.* FROM generation_attempts ga
-            WHERE (ga.owner_type = 'generation_styling' AND ga.owner_id = ?)
+            WHERE (ga.owner_type IN ('generation_styling', 'generation_pose_selection') AND ga.owner_id = ?)
                OR (ga.owner_type = 'generation_result_set' AND ga.owner_id IN (SELECT id FROM generation_result_sets WHERE task_id = ?))
                OR (ga.owner_type = 'generation_preview' AND ga.owner_id IN (
                     SELECT id FROM generation_previews WHERE task_id = ?
@@ -13078,8 +13290,8 @@ def task_attempt_scope(task: Any, owner_type: str) -> tuple[str, tuple[Any, ...]
     task_id = int(task["id"])
     if owner_type == "generation_result_set":
         return ("ga.owner_type = 'generation_result_set' AND ga.owner_id IN (SELECT id FROM generation_result_sets WHERE task_id = ?)", (task_id,))
-    if owner_type == "generation_styling":
-        return "ga.owner_type = 'generation_styling' AND ga.owner_id = ?", (task_id,)
+    if owner_type in {"generation_styling", "generation_pose_selection"}:
+        return "ga.owner_type = ? AND ga.owner_id = ?", (owner_type, task_id)
     if owner_type == "generation_preview":
         return (
             f"ga.owner_type = 'generation_preview' AND ga.owner_id IN (SELECT id FROM generation_previews WHERE task_id = ?) "
@@ -13370,3 +13582,486 @@ def model_asset_dir_is_referenced(asset_dir: str) -> bool:
             (pattern, pattern),
         ).fetchone()
     return bool(attempt)
+
+
+# Pose library: assets remain independent of photography masters and generation history.
+class PoseUpdateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class PoseManageRequest(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=100)
+    action: str
+    confirmPhrase: str | None = None
+
+
+def pose_row(db: Any, pose_id: int) -> Any:
+    row = db.execute("SELECT * FROM poses WHERE id = ?", (pose_id,)).fetchone()
+    if not row or row["archive_reason"] == "deletion_pending":
+        raise HTTPException(404, "姿势不存在")
+    return row
+
+
+def ensure_pose_editable(row: Any) -> None:
+    if row["status"] == "TAGGING_RUNNING":
+        raise HTTPException(409, "姿势正在识别，请完成后再修改")
+    if row["archived_at"]:
+        raise HTTPException(409, "请先取消归档再修改姿势")
+
+
+def serialize_pose(row: Any) -> dict[str, Any]:
+    with get_db() as db:
+        images = db.execute("""SELECT ma.*, pi.id AS link_id FROM pose_images pi
+            JOIN media_assets ma ON ma.id = pi.media_asset_id WHERE pi.pose_id = ? AND ma.deleted_at IS NULL AND ma.status = 'READY'
+            ORDER BY pi.sort_order, pi.id""", (row["id"],)).fetchall()
+    return {"id": row["id"], "code": row["code"], "name": row["name"], "status": row["status"],
+        "aiTags": loads(row["ai_tags_json"], {}), "archivedAt": row["archived_at"],
+        "createdAt": row["created_at"], "updatedAt": row["updated_at"],
+        "error": provider_error_presentation(row["tag_error_code"]) if row["tag_error_code"] else None,
+        "images": [{"id": image["link_id"], "asset": serialize_media_asset(image)} for image in images]}
+
+
+@app.get("/api/poses")
+def list_poses(q: str = "", status: str = "", include_archived: bool = Query(False, alias="includeArchived"),
+               limit: int = Query(24, ge=1, le=96), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+    clauses, params = ["COALESCE(archive_reason, '') <> 'deletion_pending'"], []
+    if not include_archived:
+        clauses.append("archived_at IS NULL")
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    terms = list(dict.fromkeys(re.split(r"[\s,，.。、]+", q.strip())))[:100]
+    terms = [term for term in terms if term]
+    if terms:
+        clauses.append("(" + " OR ".join("(instr(lower(name || ' ' || code || ' ' || COALESCE(ai_tags_json, '')), lower(?)) > 0)" for _ in terms) + ")")
+        params.extend(terms)
+    where = " AND ".join(clauses)
+    with get_db() as db:
+        total = db.execute(f"SELECT COUNT(*) FROM poses WHERE {where}", params).fetchone()[0]
+        rows = db.execute(f"SELECT * FROM poses WHERE {where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
+    return {"items": [serialize_pose(row) for row in rows], "total": total, "limit": limit, "offset": offset}
+
+
+@app.post("/api/poses")
+async def create_pose(name: str = Form(...), files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    name = name.strip()
+    if not name or len(name) > 80 or len(files) != 1:
+        raise HTTPException(400, "请填写 1–80 字的姿势名称，每个姿势只能导入 1 张图片")
+    assets = await save_uploads_as_media_assets(files)
+    try:
+        with get_db() as db:
+            timestamp = now_iso()
+            pose_id = int(db.execute("""INSERT INTO poses (code, name, created_at, updated_at)
+                VALUES (?, ?, ?, ?)""", (f"P-{uuid4().hex[:12]}", name, timestamp, timestamp)).lastrowid)
+            db.executemany("INSERT INTO pose_images (pose_id, media_asset_id, sort_order) VALUES (?, ?, ?)",
+                           [(pose_id, asset["id"], index) for index, asset in enumerate(assets)])
+            row = pose_row(db, pose_id)
+    except Exception:
+        cleanup_created_media_assets(assets)
+        raise
+    return {"item": serialize_pose(row)}
+
+
+@app.post("/api/poses/delete-impact")
+def pose_delete_impact(payload: DeleteImpactRequest) -> dict[str, Any]:
+    ids = normalized_task_ids(payload.ids)
+    with get_db() as db:
+        rows = [pose_row(db, pose_id) for pose_id in ids]
+        for row in rows:
+            if row["status"] == "TAGGING_RUNNING":
+                raise HTTPException(409, "识别中的姿势暂不可归档或删除")
+        return pose_purge_impact(db, ids)
+
+
+def pose_purge_impact(db: Any, ids: list[int]) -> dict[str, Any]:
+    placeholders = ','.join('?' for _ in ids)
+    assets = db.execute(f"SELECT DISTINCT ma.* FROM media_assets ma JOIN pose_images pi ON pi.media_asset_id = ma.id WHERE pi.pose_id IN ({placeholders})", ids).fetchall()
+    releasable = []
+    for asset in assets:
+        owned = db.execute(f"SELECT COUNT(*) FROM pose_images WHERE media_asset_id = ? AND pose_id IN ({placeholders})", (asset["id"], *ids)).fetchone()[0]
+        # Ignore the recognition attempts that are part of the deleted aggregate.
+        snapshot_refs = db.execute(f"""SELECT COUNT(*) FROM generation_attempts
+            WHERE (request_snapshot_json LIKE ? OR response_snapshot_json LIKE ?)
+            AND NOT (owner_type = 'pose_tagging' AND owner_id IN ({placeholders}))""",
+            (f'%{asset["object_key"]}%', f'%{asset["object_key"]}%', *ids)).fetchone()[0]
+        if media_asset_direct_reference_count(db, asset["id"]) == owned and not snapshot_refs and not db.execute(
+            "SELECT 1 FROM generation_task_input_versions WHERE image_snapshot_json LIKE ? UNION SELECT 1 FROM generation_stylings WHERE selected_material_snapshot_json LIKE ? LIMIT 1",
+            (f'%{asset["object_key"]}%', f'%{asset["object_key"]}%')).fetchone():
+            releasable.append(asset)
+    task_ids = [row[0] for row in db.execute(f"""SELECT DISTINCT ps.task_id FROM generation_pose_selections ps
+        JOIN generation_pose_selection_shots shots ON shots.selection_id = ps.id WHERE shots.pose_id IN ({placeholders})""", ids)]
+    return {"poseCount": len(ids), "mediaAssetCount": len(releasable),
+            "estimatedBytes": sum((row["size_bytes"] or 0) + (row["thumb_size_bytes"] or 0) + (row["preview_size_bytes"] or 0) for row in releasable),
+            "referencingTaskCount": len(task_ids), "referencingTaskIds": task_ids,
+            "taskCount": 0, "resultImageCount": 0}
+
+
+@app.post("/api/poses/manage")
+def manage_poses(payload: PoseManageRequest) -> dict[str, Any]:
+    ids = normalized_task_ids(payload.ids)
+    if payload.action not in {"archive", "restore", "purge"}:
+        raise HTTPException(400, "不支持的姿势管理操作")
+    placeholders = ','.join('?' for _ in ids)
+    with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        rows = [pose_row(db, pose_id) for pose_id in ids]
+        if any(row["status"] == "TAGGING_RUNNING" for row in rows):
+            raise HTTPException(409, "识别中的姿势暂不可归档或删除")
+        if payload.action != "purge":
+            db.execute(f"UPDATE poses SET archived_at = ?, archive_reason = NULL, updated_at = ? WHERE id IN ({placeholders})",
+                       (now_iso() if payload.action == "archive" else None, now_iso(), *ids))
+            return {"ok": True}
+        phrase = rows[0]["name"] if len(ids) == 1 else "全部删除"
+        if payload.confirmPhrase != phrase:
+            raise HTTPException(400, f"请输入{phrase}以确认彻底删除")
+        db.execute(f"UPDATE poses SET archive_reason = 'deletion_pending', archived_at = ?, updated_at = ? WHERE id IN ({placeholders})", (now_iso(), now_iso(), *ids))
+    object_keys: list[str] = []
+    try:
+        with get_db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            assets = db.execute(f"SELECT DISTINCT ma.* FROM media_assets ma JOIN pose_images pi ON pi.media_asset_id = ma.id WHERE pi.pose_id IN ({placeholders})", ids).fetchall()
+            db.execute(f"DELETE FROM generation_attempts WHERE owner_type = 'pose_tagging' AND owner_id IN ({placeholders})", ids)
+            db.execute(f"DELETE FROM poses WHERE id IN ({placeholders})", ids)
+            for asset in assets:
+                if media_asset_direct_reference_count(db, asset["id"]) == 0 and media_asset_snapshot_reference_count(db, asset["object_key"]) == 0:
+                    detach_upload_session_media_assets(db, [asset["id"]])
+                    db.execute("DELETE FROM media_assets WHERE id = ?", (asset["id"],))
+                    object_keys.append(asset["object_key"])
+    except Exception:
+        with get_db() as db:
+            db.execute(f"UPDATE poses SET archive_reason = 'deletion_failed' WHERE id IN ({placeholders})", ids)
+        raise
+    return {"ok": True, "objectCleanupErrors": cleanup_deleted_media_objects(object_keys)}
+
+
+@app.get("/api/poses/{pose_id}")
+def get_pose(pose_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        row = pose_row(db, pose_id)
+    return {"item": serialize_pose(row)}
+
+
+@app.patch("/api/poses/{pose_id}")
+def update_pose(pose_id: int, payload: PoseUpdateRequest) -> dict[str, Any]:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(400, "姿势名称不能为空")
+    with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        ensure_pose_editable(pose_row(db, pose_id))
+        db.execute("UPDATE poses SET name = ?, updated_at = ? WHERE id = ?", (name, now_iso(), pose_id))
+    return get_pose(pose_id)
+
+
+@app.post("/api/poses/{pose_id}/images")
+async def add_pose_images(pose_id: int, files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    # Compatibility endpoint: only repair a legacy entry with no image.
+    return await save_pose_image(pose_id, files, replace=False)
+
+
+@app.put("/api/poses/{pose_id}/image")
+async def replace_pose_image(pose_id: int, files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    return await save_pose_image(pose_id, files, replace=True)
+
+
+async def save_pose_image(pose_id: int, files: list[UploadFile], *, replace: bool) -> dict[str, Any]:
+    if len(files) != 1:
+        raise HTTPException(400, "每个姿势只能保存 1 张图片")
+    with get_db() as db:
+        ensure_pose_editable(pose_row(db, pose_id))
+        if not replace and db.execute("SELECT 1 FROM pose_images WHERE pose_id = ?", (pose_id,)).fetchone():
+            raise HTTPException(409, "该姿势已有图片，请使用替换图片")
+    assets = await save_uploads_as_media_assets(files)
+    keys: list[str] = []
+    try:
+        with get_db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            ensure_pose_editable(pose_row(db, pose_id))
+            old = db.execute("""SELECT ma.* FROM media_assets ma JOIN pose_images pi ON pi.media_asset_id = ma.id
+                WHERE pi.pose_id = ?""", (pose_id,)).fetchall()
+            if old and not replace:
+                raise HTTPException(409, "该姿势已有图片，请使用替换图片")
+            db.execute("DELETE FROM pose_images WHERE pose_id = ?", (pose_id,))
+            db.execute("INSERT INTO pose_images (pose_id, media_asset_id) VALUES (?, ?)", (pose_id, assets[0]["id"]))
+            db.execute("UPDATE poses SET status = 'DRAFT', tag_error_code = NULL, updated_at = ? WHERE id = ?", (now_iso(), pose_id))
+            for asset in old:
+                if not media_asset_direct_reference_count(db, asset["id"]) and not media_asset_snapshot_reference_count(db, asset["object_key"]):
+                    detach_upload_session_media_assets(db, [asset["id"]])
+                    db.execute("DELETE FROM media_assets WHERE id = ?", (asset["id"],))
+                    keys.append(asset["object_key"])
+    except Exception:
+        cleanup_created_media_assets(assets)
+        raise
+    return {**get_pose(pose_id), "objectCleanupErrors": cleanup_deleted_media_objects(keys)}
+
+
+@app.delete("/api/poses/{pose_id}/images/{image_id}")
+def remove_pose_image(pose_id: int, image_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        ensure_pose_editable(pose_row(db, pose_id))
+        if not db.execute("SELECT 1 FROM pose_images WHERE pose_id = ? AND id = ?", (pose_id, image_id)).fetchone():
+            raise HTTPException(404, "姿势图片不存在")
+    raise HTTPException(409, "每个姿势需保留 1 张图片，请替换图片或归档该姿势")
+
+
+@app.post("/api/poses/{pose_id}/recognize")
+async def recognize_pose(pose_id: int) -> dict[str, Any]:
+    pose = get_pose(pose_id)["item"]
+    if len(pose["images"]) != 1:
+        raise HTTPException(409, "每个姿势需有且只有 1 张参考图")
+    runtime = {"pose_context": dumps({"code": pose["code"], "images": [{"imageId": i["asset"]["id"], "order": n + 1} for n, i in enumerate(pose["images"]) ]})}
+    try:
+        prompt = render_prompt_template("assembly.pose_tagging", runtime)
+    except RuntimeError as exc:
+        raise HTTPException(409, "请联系管理员在 Prompt 维护中配置姿势识别规则") from exc
+    snapshot = {"prompt": prompt, **prompt_execution_facts("assembly.pose_tagging", prompt, runtime), "pose": pose}
+    with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        current = pose_row(db, pose_id)
+        ensure_pose_editable(current)
+        if current["updated_at"] != pose["updatedAt"]:
+            raise HTTPException(409, "姿势已变化，请刷新后重新识别")
+        attempt_id = create_attempt("pose_tagging", pose_id, "gemini", snapshot, db=db)
+        db.execute("UPDATE poses SET status = 'TAGGING_RUNNING', tag_error_code = NULL, tag_attempt_id = ?, updated_at = ? WHERE id = ?", (attempt_id, now_iso(), pose_id))
+    schedule_background_generation(run_pose_recognition(pose_id, attempt_id, pose, prompt), job_key=f"pose_tagging:{pose_id}")
+    return get_pose(pose_id)
+
+
+async def run_pose_recognition(pose_id: int, attempt_id: int, pose: dict[str, Any], prompt: str) -> None:
+    try:
+        images = [gemini_vision_input(item["asset"]["objectKey"], item["asset"]["mimeType"]) for item in pose["images"]]
+        if not all(images):
+            raise ValueError("姿势参考图不可用")
+        text = await generate_gemini_json_text(prompt, images)
+        raw = parse_gemini_json_object(text)
+        name = raw.get("name") if isinstance(raw, dict) else None
+        if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80:
+            raise ValueError("姿势识别未返回有效 name（需为 1–80 字的名称）")
+        tags = raw.get("tags") if isinstance(raw, dict) else None
+        if not isinstance(tags, dict) or not tags:
+            raise ValueError("姿势识别未返回有效 tags（需为非空标签对象）")
+        finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=raw)
+        with get_db() as db:
+            db.execute("UPDATE poses SET name = ?, ai_tags_json = ?, status = 'READY', tag_error_code = NULL, updated_at = ? WHERE id = ? AND tag_attempt_id = ? AND status = 'TAGGING_RUNNING'", (name.strip(), dumps(tags), now_iso(), pose_id, attempt_id))
+    except Exception as exc:
+        error_code = classify_attempt_error(exc) or ERROR_MALFORMED_OUTPUT
+        finish_attempt(attempt_id, "FAILED", response_snapshot=exception_process_facts(exc), error_message=str(exc), error_code=error_code)
+        with get_db() as db:
+            db.execute("UPDATE poses SET status = 'TAGGING_FAILED', tag_error_code = ?, updated_at = ? WHERE id = ? AND tag_attempt_id = ? AND status = 'TAGGING_RUNNING'", (error_code, now_iso(), pose_id, attempt_id))
+
+
+def pose_selection_context(task: Any, user_instruction: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[Any], dict[str, Any]]:
+    with get_db() as db:
+        poses = db.execute("SELECT * FROM poses WHERE status = 'READY' AND archived_at IS NULL ORDER BY created_at DESC, id DESC").fetchall()
+        styling = db.execute("SELECT * FROM generation_stylings WHERE id = ? AND task_id = ?", (task["active_styling_id"], task["id"])).fetchone()
+        if not styling:
+            raise HTTPException(409, "请先完成 AI 智能选搭")
+        plan = loads(styling["styling_plan_json"], {})
+        family = storyboard_category_family(plan)
+    background = get_media_asset_by_id(get_current_shoot_environment_asset_id())
+    if not background:
+        raise HTTPException(409, "请联系管理员在模特与背景中配置统一拍摄背景")
+    references = [{"shot_index": index, "background_asset_id": background["id"]} for index in range(1, 6)]
+    library = [serialize_pose(row) for row in poses]
+    library = [pose for pose in library if pose["images"] and all(image["asset"] for image in pose["images"])]
+    if not library:
+        raise HTTPException(409, "姿势库暂无可选姿势，请先导入姿势并完成识别")
+    if len(library) < 5:
+        raise HTTPException(409, f"五个镜头需要不同姿势，当前仅有 {len(library)} 个可用姿势，请至少补齐五个")
+    cards = [{"code": p["code"], "name": p["name"], "ai_tags": p["aiTags"],
+              "images": [{"imageId": item["asset"]["id"]} for item in p["images"]]} for p in library]
+    runtime = {"pose_phase": "shortlist", "pose_candidates": dumps(cards), "pose_shortlist": "[]",
+        "pose_user_instruction": user_instruction, "category_family": family,
+        "styling_result": dumps(styling_result_for_prompt(plan, loads(styling["selected_material_snapshot_json"], []))),
+        "pose_shots": dumps([{"shotIndex": row["shot_index"], "shotRole": role} for row, role in zip(references, final_image_slot_roles(plan))]),
+        "pose_image_manifest": "[]"}
+    return runtime, library, references, dict(styling)
+
+
+def get_generation_pose_selection(selection_id: int | None) -> dict[str, Any] | None:
+    if not selection_id:
+        return None
+    with get_db() as db:
+        row = db.execute("SELECT * FROM generation_pose_selections WHERE id = ?", (selection_id,)).fetchone()
+        if not row:
+            return None
+        shots = db.execute("SELECT * FROM generation_pose_selection_shots WHERE selection_id = ? ORDER BY shot_index", (selection_id,)).fetchall()
+    plan = loads(row["plan_json"], {})
+    return {"id": row["id"], "stylingId": row["styling_id"], "workflow": plan.get("workflow", "legacy_masters"), "summary": str(plan.get("summary") or ""),
+        "createdAt": row["created_at"], "shots": [{"shotIndex": shot["shot_index"],
+            **loads(shot["pose_snapshot_json"], {}), "sourceAvailable": shot["pose_id"] is not None,
+            "pose": get_media_asset_by_id(shot["pose_asset_id"]), "background": get_media_asset_by_id(shot["background_asset_id"])} for shot in shots]}
+
+
+@app.post("/api/generation-tasks/{task_id}/select-poses")
+async def select_generation_poses(task_id: int, payload: GenerationStageInstructionRequest | None = None) -> dict[str, Any]:
+    # Run independently of the HTTP connection; the task/attempt are persisted before dispatch.
+    context = claim_pose_selection(task_id, payload.userInstruction if payload else None, "manual_step")
+    schedule_background_generation(execute_pose_selection(task_id, *context, trigger="manual_step"), job_key=f"pose_selection:{task_id}")
+    return {"item": get_generation_task_by_id(task_id)}
+
+
+def claim_pose_selection(task_id: int, user_instruction: str | None, trigger: str) -> tuple[Any, ...]:
+    task = get_generation_task_row(task_id)
+    if task["status"] in RUNNING_GENERATION_TASK_STATUSES or (row_value(task, "auto_run_target") and trigger != "auto_run"):
+        raise HTTPException(409, "当前任务正在执行，请等待完成或取消")
+    if not task["active_styling_id"] or task["archived_at"]:
+        raise HTTPException(409, "请先完成 AI 智能选搭，且任务不能已归档")
+    instruction = (user_instruction if user_instruction is not None else row_value(task, "pose_selection_user_instruction", "")) or ""
+    if len(instruction) > MAX_USER_INPUT_CHARS:
+        raise HTTPException(400, f"姿势要求最多 {MAX_USER_INPUT_CHARS} 字")
+    runtime, library, references, styling = pose_selection_context(task, instruction)
+    config = {key: dict(row) for key, row in get_prompt_config_rows().items()}
+    # Render the same frozen per-shot rules that will be used for final images.
+    plan = loads(styling["styling_plan_json"], {})
+    input_version = get_input_version(styling["input_version_id"]) or {}
+    requirements = []
+    for index, role in enumerate(final_image_slot_roles(plan), 1):
+        shot_runtime = build_final_prompt_runtime(index, role, plan, [], {}, input_version.get("userRequirement", {}))
+        shot_runtime.update(ref_shot_background="统一背景参考图", ref_shot_pose="当前镜头待选姿势图",
+                            ref_model_identity="数字模特身份参考图", ref_garment="主推款与搭配服装参考图",
+                            shot_global_directing=SHARED_BACKGROUND_DIRECTING)
+        requirement, check = render_prompt_config(final_image_prompt_config_key(plan), shot_runtime, rows=config)
+        if check["missingPlaceholders"] or not requirement.strip():
+            raise HTTPException(409, "请先配置当前服装类型的成片 Prompt 与镜头要求")
+        requirements.append({"shotIndex": index, "shotRole": role, "requirements": requirement})
+    runtime["pose_shots"] = dumps(requirements)
+    prompt, diagnostics = render_prompt_config("assembly.pose_selection", runtime, rows=config)
+    if diagnostics["missingPlaceholders"]:
+        raise HTTPException(409, "请联系管理员在 Prompt 维护中配置姿势选搭规则与品牌信息")
+    snapshot = {"promptConfigKey": "assembly.pose_selection", "prompt": prompt, "promptConfigSnapshot": config,
+        "workflow": "shared_background_v1", "runtime": runtime, "poses": library, "references": [{**dict(row), "backgroundAsset": get_media_asset_by_id(row["background_asset_id"])} for row in references],
+        "stylingId": styling["id"], "inputVersionId": styling["input_version_id"], "invocation": {"mode": trigger, "target": "pose_selection"}}
+    with get_db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        current = db.execute("SELECT * FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
+        if (not current or current["deleted_at"] or current["archived_at"] or current["status"] in RUNNING_GENERATION_TASK_STATUSES
+                or current["active_styling_id"] != styling["id"] or current["current_input_version_id"] != styling["input_version_id"]
+                or (current["auto_run_target"] and trigger != "auto_run")):
+            raise HTTPException(409, "任务已变化，请刷新后重新选姿势")
+        attempt_id = create_attempt("generation_pose_selection", task_id, "gemini", snapshot, db=db)
+        db.execute("UPDATE generation_tasks SET status = 'POSE_SELECTION_RUNNING', pose_workflow_enabled = 1, pose_selection_user_instruction = ?, updated_at = ? WHERE id = ?", (instruction, now_iso(), task_id))
+    return attempt_id, runtime, library, [dict(row) for row in references], styling, config, snapshot
+
+
+async def run_select_generation_poses(task_id: int, trigger: str = "auto_run") -> dict[str, Any]:
+    context = claim_pose_selection(task_id, None, trigger)
+    await execute_pose_selection(task_id, *context, trigger=trigger)
+    return {"item": get_generation_task_by_id(task_id)}
+
+
+async def execute_pose_selection(task_id: int, attempt_id: int, runtime: dict[str, Any], library: list[dict[str, Any]],
+                                 references: list[dict[str, Any]], styling: dict[str, Any], config: dict[str, Any],
+                                 snapshot: dict[str, Any], trigger: str) -> None:
+    try:
+        if generation_task_or_attempt_cancelled(task_id, attempt_id):
+            return
+        image_inputs, manifest = [], []
+
+        def add_image(asset: dict[str, Any] | None, role: str, **facts: Any) -> None:
+            if not asset:
+                raise ValueError("姿势选搭参考图片不可用")
+            image_inputs.append(image_input_from_asset(asset, role))
+            manifest.append({"order": len(image_inputs), "role": role, "imageId": asset["id"], "objectKey": asset["objectKey"], **facts})
+
+        input_version = get_input_version(styling["input_version_id"]) or {}
+        for image in input_version.get("imageSnapshot", []):
+            add_image(image.get("asset") or image, "hero")
+        for garment in loads(styling["selected_material_snapshot_json"], []):
+            for image in garment.get("images", []):
+                add_image(image.get("asset") or image, "garment", code=garment.get("code"))
+        add_image(snapshot["references"][0]["backgroundAsset"], "shared_background")
+        image_limit = TOAPIS_MAX_MESSAGE_IMAGES if gemini_channel() == "toapis" else None
+        packed, provider_manifest = pack_pose_references(image_inputs, manifest, image_limit)
+        runtime = {**runtime, "pose_image_manifest": dumps(provider_manifest)}
+        prompt, diagnostics = render_prompt_config("assembly.pose_selection", runtime, rows=config)
+        if diagnostics["missingPlaceholders"]:
+            raise ValueError("姿势选搭配置缺少运行参数")
+        snapshot = {**snapshot, "prompt": prompt, "runtime": runtime, "shortlistImageManifest": list(manifest),
+                    "shortlistProviderImageManifest": provider_manifest, "selectionMode": "shortlist_only"}
+        update_attempt_request_snapshot(attempt_id, snapshot)
+        if generation_task_or_attempt_cancelled(task_id, attempt_id):
+            return
+        raw_text = await generate_gemini_json_text(prompt, [vision_reference_input(item) for item in packed])
+        raw = parse_gemini_json_object(raw_text)
+        persist_attempt_provider_progress(attempt_id, {"shortlist": raw})
+        if generation_task_or_attempt_cancelled(task_id, attempt_id):
+            return
+        # Old saved prompts may still return candidateCodes. Use each first choice
+        # verbatim; never rerank, substitute duplicates, or call visual refinement.
+        plan = pose_plan_from_shortlist(raw, library)
+        shots = validate_pose_plan(plan, {p["code"]: {i["asset"]["id"] for i in p["images"]} for p in library})
+        plan = {**plan, "shots": shots, "selectionMode": "shortlist_only"}
+        plan = {**plan, "workflow": "shared_background_v1",
+                "shotRequirements": loads(runtime["pose_shots"], []),
+                "promptConfigSnapshot": {key: value for key, value in config.items()
+                    if key.startswith("segment.") or key == final_image_prompt_config_key(loads(styling["styling_plan_json"], {}))}}
+        if generation_task_or_attempt_cancelled(task_id, attempt_id):
+            return
+        by_code = {p["code"]: p for p in library}
+        timestamp = now_iso()
+        with get_db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            task = db.execute("SELECT * FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
+            attempt = db.execute("SELECT status FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
+            if not task or task["status"] != "POSE_SELECTION_RUNNING" or task["active_styling_id"] != styling["id"] or not attempt or attempt["status"] != "RUNNING":
+                return
+            # Archival/removal during the model call cannot silently select a retired source.
+            for shot in shots:
+                pose = by_code[shot["poseCode"]]
+                row = pose_row(db, pose["id"])
+                if row["status"] != "READY" or row["archived_at"] or not db.execute("SELECT 1 FROM pose_images WHERE pose_id = ? AND media_asset_id = ?", (pose["id"], shot["imageId"])).fetchone():
+                    raise ValueError("候选姿势在选搭期间发生变化，请重新选姿势")
+            selection_id = int(db.execute("""INSERT INTO generation_pose_selections
+                (task_id, input_version_id, styling_id, category_family, plan_json, attempt_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""", (task_id, styling["input_version_id"], styling["id"], runtime["category_family"], dumps(plan), attempt_id, timestamp)).lastrowid)
+            for shot in shots:
+                pose = by_code[shot["poseCode"]]
+                pose_snapshot = {"code": pose["code"], "name": pose["name"], "aiTags": pose["aiTags"], "reason": shot["reason"], "direction": shot["direction"]}
+                db.execute("""INSERT INTO generation_pose_selection_shots
+                    (selection_id, shot_index, pose_id, pose_snapshot_json, background_asset_id, pose_asset_id)
+                    VALUES (?, ?, ?, ?, ?, ?)""", (selection_id, shot["shotIndex"], pose["id"], dumps(pose_snapshot), references[shot["shotIndex"] - 1]["background_asset_id"], shot["imageId"]))
+            supersede_generation_result_sets(db, task_id, timestamp)
+            db.execute("UPDATE generation_tasks SET status = 'POSE_SELECTION_READY', active_pose_selection_id = ?, active_result_set_id = NULL, updated_at = ? WHERE id = ?", (selection_id, timestamp, task_id))
+        finish_attempt(attempt_id, "SUCCEEDED", response_snapshot={"shortlist": raw, "plan": plan})
+    except Exception as exc:
+        if generation_task_or_attempt_cancelled(task_id, attempt_id):
+            return
+        code = classify_attempt_error(exc) or ERROR_MALFORMED_OUTPUT
+        finish_attempt(attempt_id, "FAILED", response_snapshot=exception_process_facts(exc), error_message=str(exc), error_code=code)
+        with get_db() as db:
+            db.execute("UPDATE generation_tasks SET status = 'FAILED', updated_at = ? WHERE id = ? AND status = 'POSE_SELECTION_RUNNING'", (now_iso(), task_id))
+        if trigger != "auto_run" or not schedule_auto_run_retry(task_id, [code]):
+            clear_task_auto_run(task_id)
+
+
+def recover_interrupted_pose_jobs() -> None:
+    with get_db() as db:
+        poses = db.execute("SELECT id, tag_attempt_id FROM poses WHERE status = 'TAGGING_RUNNING'").fetchall()
+        tasks = db.execute("""SELECT gt.id, gt.auto_run_target, (SELECT id FROM generation_attempts WHERE owner_type = 'generation_pose_selection'
+            AND owner_id = gt.id AND status = 'RUNNING' ORDER BY id DESC LIMIT 1) AS attempt_id
+            FROM generation_tasks gt WHERE gt.status = 'POSE_SELECTION_RUNNING'""").fetchall()
+    for row in poses:
+        if f"pose_tagging:{row['id']}" in active_background_generation_jobs:
+            continue
+        fail_stale_attempt(row["tag_attempt_id"], "姿势识别进程已中断，请重新识别", ERROR_PROVIDER_TIMEOUT)
+        with get_db() as db:
+            db.execute("UPDATE poses SET status = 'TAGGING_FAILED', tag_error_code = ?, updated_at = ? WHERE id = ? AND status = 'TAGGING_RUNNING'", (ERROR_PROVIDER_TIMEOUT, now_iso(), row["id"]))
+    for row in tasks:
+        if f"pose_selection:{row['id']}" in active_background_generation_jobs or auto_run_job_key(row["id"]) in active_background_generation_jobs:
+            continue
+        fail_stale_attempt(row["attempt_id"], "姿势选搭进程已中断，可继续选搭", ERROR_PROVIDER_TIMEOUT)
+        with get_db() as db:
+            db.execute("UPDATE generation_tasks SET status = 'FAILED', updated_at = ? WHERE id = ? AND status = 'POSE_SELECTION_RUNNING'", (now_iso(), row["id"]))
+        if row["auto_run_target"]:
+            if not schedule_auto_run_retry(row["id"], [ERROR_PROVIDER_TIMEOUT], process_interrupted=True):
+                clear_task_auto_run(row["id"])
+
+
+@app.get("/api/pose-prompt-drafts/{kind}")
+def get_pose_prompt_draft(kind: str, request: Request) -> dict[str, str]:
+    require_admin(request)
+    if kind not in {"tagging", "selection"}:
+        raise HTTPException(404, "参考规则不存在")
+    path = Path(__file__).resolve().parent.parent / "prompt_templates" / f"pose_{kind}.txt"
+    return {"content": path.read_text(encoding="utf-8")}

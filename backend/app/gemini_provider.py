@@ -22,6 +22,7 @@ from typing import Any, Callable
 from . import config
 from .generation_progress import (
     ERROR_CONN_RESET,
+    ERROR_INVALID_REQUEST,
     ERROR_MALFORMED_OUTPUT,
     ERROR_PROVIDER_TIMEOUT,
     ERROR_PROVIDER_TRANSIENT_UNKNOWN,
@@ -38,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 VALID_GEMINI_PROVIDERS = {"direct", "toapis"}
+TOAPIS_MAX_MESSAGE_IMAGES = 16
 
 
 class GeminiProviderError(RuntimeError):
@@ -387,6 +389,11 @@ def build_toapis_chat_payload(
     images: list[dict[str, Any]],
     system_instruction: str | None,
 ) -> dict[str, Any]:
+    if len(images) > TOAPIS_MAX_MESSAGE_IMAGES:
+        raise GeminiProviderError(
+            f"ToAPIs 单次请求最多 {TOAPIS_MAX_MESSAGE_IMAGES} 张图片，当前 {len(images)} 张，请先合并参考图",
+            ERROR_INVALID_REQUEST,
+        )
     user_content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     for image in images:
         mime_type = image.get("mime_type") or "image/png"

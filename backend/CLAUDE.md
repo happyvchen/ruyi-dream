@@ -2,7 +2,7 @@
 
 ## 职责 (Scope)
 
-ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 兼容对象存储的 AI 摄影棚实现，覆盖搭配服装打标、主推款任务流、AI Stylist / StylingPlan、当前生效拍摄预设与结果集冻结快照、三类固定成片 Prompt 路由、GPT Image-2.5 Sunburst edits 成片生成和结果复盘。
+ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 兼容对象存储的 AI 摄影棚实现，覆盖搭配服装打标、主推款任务流、AI Stylist / StylingPlan、共享背景、姿势选搭与结果集冻结快照、三类固定成片 Prompt 路由、GPT Image-2.5 Sunburst edits 成片生成和结果复盘。
 
 设计层面的产品范围、生成职责和技术路线在 `../design/`，本目录只管“代码怎么写”和“后端契约怎么落地”。
 
@@ -36,17 +36,18 @@ ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 �
 | `app/prompt_optimization.py` | 成片提示词整理的锁定文本、输入输出校验 | 修改提示词优化契约时 |
 | `app/` | FastAPI 后端源码 | 修改后端实现时 |
 | `scripts/` | 一次性维护脚本，如媒体衍生图元数据补齐 | 修复历史数据或运维补数时 |
+| `prompt_templates/ai_styling.txt` / `prompt_templates/hero_image_selection.txt` | 精简选搭与挑图参考正文；显式保存到 Prompt 配置后生效，不作默认值或 fallback | 更新选搭 Prompt 时 |
 | `tests/` | 后端 smoke tests | 修改鉴权、迁移、任务状态时 |
 
 ## 核心后端职责
 
 - 保存和管理主推款任务图片、搭配服装库图片和媒体资产
-- 维护数字模特档案，以及上装/下装/套装各五个当前生效的拍摄母版、姿势拍摄预设；单图更换立即生效，结果集创建时冻结当次五组资产
+- 维护数字模特档案和一张统一背景；独立姿势选搭冻结背景、五个不同姿势、商品/模特输入版本和成片规则，结果集复用
 - 维护 admin-only Prompt 配置；系统初始化可创建空正文的可维护 Prompt 槽位，品牌边界通过 `segment.brand_info` Prompt 分段承载，AI 选搭原则、品类策略、质量信号、配饰边界和空库内搭配取舍直接写入 `AI 选搭` Prompt 正文，后端不解释其中业务规则，也不内置或 fallback 任何 Prompt 默认正文
 - 管理 AI 摄影棚主推款任务、输入版本和状态机
 - 对未归档 READY 搭配服装生成全量标签事实卡；Prompt 只接收业务 `code` 和 `ai_tags` 等必要事实，不接收内部 ID、图片快照或后端排序/评分结果
-- 调用 AI Stylist 生成带 Aesthetic Critic 诊断的 `StylingPlan`，保存完整 request/response 快照
-- 基于 `StylingPlan.hero_understanding.shot_category_family` 确定性选择三类成片 Prompt 和当前生效拍摄预设；当前类型不完整时拒绝开始成片，并组装 Image-2 多参考图编辑任务包
+- 调用 AI Stylist 生成最终选搭、穿法、配饰与空搭配原因的 `StylingPlan`，保存完整 request/response 快照
+- 基于 `StylingPlan.hero_understanding.shot_category_family` 确定性选择三类成片 Prompt；新任务未完成姿势选择时拒绝开始成片，并组装 Image-2 多参考图编辑任务包
 - 管理生成任务状态、单张重试、结果下载和记录复盘
 - 保存实验/生产结果、紧凑候选快照、完整 StylingPlan 和 provider attempts 元数据
 
@@ -55,7 +56,7 @@ ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 �
 - 后端实现前先读 `../design/CLAUDE.md`。
 - 修改业务对象前先读 `domain_model.md`；修改表结构前先读 `database_schema.md`。
 - AI 打标的规则、字段和输出结构由 `AI 打标` Prompt 自包含维护；后端必须完整保存任意可解析 JSON 返回，并最佳努力派生 `effective_tags_json`，不要重新假设固定标签枚举输出。
-- AI 智能选搭的业务内容全部进入 Prompt 维护：主推款理解、搭配选择、品类语义、质量信号、空库内搭配比较、配饰边界和品牌判断都由 Prompt + 大模型完成；Prompt 输入输出统一使用搭配服装 `code`，后端只做 READY/归档/删除数据范围、code 到内部 ID 的持久化映射、schema、状态机、快照和 provider 调用。
+- AI 智能选搭的业务内容全部进入 Prompt 维护：主推款理解、搭配选择、品类语义、质量信号、空库内搭配原因、配饰边界和品牌判断都由 Prompt + 大模型完成；Prompt 输入输出统一使用搭配服装 `code`，后端只做 READY/归档/删除数据范围、code 到内部 ID 的持久化映射、schema、状态机、快照和 provider 调用。
 - 后端只允许初始化空正文的 Prompt 槽位元数据，不得存储 Prompt 默认正文，也不得在缺少或空正文时使用代码字符串 fallback；缺配置或空正文必须作为配置错误暴露，Prompt 正文只能来自 `prompt_configs.content`。
 - 不把品牌策略、选搭权重、品类互斥/降权、质量信号阈值、配饰边界、Pose 选择、图位规划写死在不可维护的代码字符串里；这些业务口径进入 Prompt 维护，主要由对应 Prompt 正文表达，不作为 Python 执行逻辑。
 - 不擅自删除、覆盖、移动用户素材和生成结果。
@@ -70,3 +71,5 @@ ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 �
 - 父级：`../CLAUDE.md`
 - 设计源头：`../design/CLAUDE.md`
 - 前端实现：`../frontend/CLAUDE.md`
+
+- 姿势库与独立姿势选搭：见 `../design/01_generation_flow/pose_library_workflow.md`；`app/pose_selection.py` 只校验候选编号、图片归属和五镜头覆盖，不含审美评分。新增 Prompt 仍初始化空正文。

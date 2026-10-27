@@ -7,9 +7,11 @@ import pytest
 
 from app import main
 from app.db import dumps, get_db, loads, now_iso, init_db
-from app.prompt_optimization import OPTIMIZER_KEY, locked_constraints, validate_optimized_prompts
+from app.prompt_optimization import OPTIMIZER_KEY, optimizer_input, parse_optimized_prompts
 from conftest import insert_media_asset, insert_ready_generation_task_with_preview
 
+
+REAL_VISION_REFERENCE_INPUT = main.vision_reference_input
 
 TEMPLATE = """生成一张棚拍成片，{{runtime.final_image_user_instruction}}
 【参考图职责与优先级】
@@ -20,6 +22,13 @@ TEMPLATE = """生成一张棚拍成片，{{runtime.final_image_user_instruction}
 保留真实纹理，不添加颗粒。
 """
 
+FLEXIBLE_TEMPLATE = """生成当前镜头 {{runtime.shot_index}} 的成片。
+【要求】
+保留商品结构。{{runtime.final_image_user_instruction}}
+【参考图职责】
+图1 是母版，图2 是姿势，图3 是商品。
+"""
+
 
 @pytest.fixture(autouse=True)
 def no_external_calls(monkeypatch):
@@ -28,14 +37,15 @@ def no_external_calls(monkeypatch):
     monkeypatch.setattr(main, "generate_gemini_json_text", forbidden)
     monkeypatch.setattr(main, "generate_image_asset", forbidden)
     monkeypatch.setattr(main, "snapshot_default_model", lambda: {})
+    monkeypatch.setattr(main, "vision_reference_input", lambda item: {"data": item["objectKey"].encode(), "mime_type": "image/png"})
     monkeypatch.setattr(main, "build_direct_final_image_inputs", lambda *args: [
         {"role": role, "objectKey": f"tests/{role}.png"} for role in ("shot_background", "shot_pose", "hero_garment")
     ])
 
 
-def create_run(client, enabled=True):
+def create_run(client, enabled=True, template=TEMPLATE):
     with get_db() as db:
-        db.execute("UPDATE prompt_configs SET content = ? WHERE key IN (?, ?, ?)", (TEMPLATE, *main.FINAL_IMAGE_PROMPT_CONFIG_KEYS.values()))
+        db.execute("UPDATE prompt_configs SET content = ? WHERE key IN (?, ?, ?)", (template, *main.FINAL_IMAGE_PROMPT_CONFIG_KEYS.values()))
         db.execute("UPDATE prompt_configs SET content = '整理规则 v1', enabled = ? WHERE key = ?", (int(enabled), OPTIMIZER_KEY))
     ids = insert_ready_generation_task_with_preview(status="STYLING_READY")
     response = client.post(f"/api/generation-tasks/{ids['task_id']}/generate-final")
@@ -50,7 +60,7 @@ def mock_success(monkeypatch):
     async def optimize(prompt, **kwargs):
         inputs = loads(prompt)
         calls.append((inputs, kwargs))
-        return dumps({"shots": [{"shotId": shot["shotId"], "optimizedText": "输出单张商品棚拍图。", "changeSummary": "合并重复要求", "conflicts": []} for shot in inputs["shots"]]})
+        return dumps({"shots": [{"shotId": shot["shotId"], "optimizedText": "输出单张商品棚拍图。"} for shot in inputs["shots"]]})
 
     async def generate(package, output_key, **kwargs):
         images.append(copy.deepcopy(package))
@@ -70,10 +80,12 @@ def test_once_per_group_freezes_configuration_and_sends_only_final_text(client, 
     asyncio.run(main.run_final_generation(ids["task_id"], result_set, image_ids))
     assert len(calls) == 1 and len(calls[0][0]["shots"]) == 5
     assert calls[0][1]["system_instruction"] == "整理规则 v1"
+    assert len(calls[0][1]["images"]) == 3
+    assert all([r["visionImageIndex"] for r in shot["references"]] == [1, 2, 3] for shot in calls[0][0]["shots"])
     assert len(images) == 5
     for package in images:
-        assert package["prompt"].startswith("输出单张商品棚拍图。")
-        assert locked_constraints(package["originalPrompt"]) in package["prompt"]
+        assert package["prompt"] == "输出单张商品棚拍图。"
+        assert "【参考图职责与优先级】" in package["originalPrompt"]
         assert "错误的新模板" not in package["prompt"]
         assert "changeSummary" not in package["prompt"]
     assert main.get_generation_task_row(ids["task_id"])["status"] == "COMPLETED"
@@ -105,6 +117,9 @@ def test_bad_optimizer_output_blocks_all_images_and_is_retryable_by_user(client,
     monkeypatch.setattr(main, "generate_gemini_json_text", bad)
     asyncio.run(main.run_final_generation(ids["task_id"], result_set, image_ids))
     assert main.read_final_preparation(result_set)["status"] == "FAILED"
+    attempt_id = main.read_final_preparation(result_set)["attemptId"]
+    with get_db() as db:
+        assert db.execute("SELECT error_code FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()[0] == "MALFORMED_OUTPUT"
     assert main.get_generation_task_row(ids["task_id"])["status"] == "FINAL_PARTIAL"
     with get_db() as db:
         assert db.execute("SELECT COUNT(*) FROM generation_attempts WHERE owner_type = 'generation_result_image'").fetchone()[0] == 0
@@ -123,7 +138,7 @@ def test_cancel_during_optimization_preserves_valid_output_without_submitting_im
             db.execute("UPDATE generation_tasks SET status = 'CANCELLED' WHERE id = ?", (ids["task_id"],))
             db.execute("UPDATE generation_result_sets SET status = 'CANCELLED' WHERE id = ?", (result_set,))
             db.execute("UPDATE generation_result_images_new SET status = 'CANCELLED' WHERE result_set_id = ?", (result_set,))
-        return dumps({"shots": [{"shotId": shot["shotId"], "optimizedText": "输出单张棚拍图", "changeSummary": "整理", "conflicts": []} for shot in loads(prompt)["shots"]]})
+        return dumps({"shots": [{"shotId": shot["shotId"], "optimizedText": "输出单张棚拍图"} for shot in loads(prompt)["shots"]]})
     monkeypatch.setattr(main, "generate_gemini_json_text", cancel)
     asyncio.run(main.run_final_generation(ids["task_id"], result_set, image_ids))
     assert main.get_generation_task_row(ids["task_id"])["status"] == "CANCELLED"
@@ -142,18 +157,27 @@ def test_disabled_mode_does_not_call_optimizer(client, monkeypatch):
     assert "promptOptimization" not in images[0]
 
 
-@pytest.mark.parametrize("change", ["duplicate", "missing", "reference", "placeholder", "conflict", "empty"])
-def test_output_contract_rejects_invalid_results(change):
-    package = {"prompt": TEMPLATE.replace("{{runtime.shot_index}}", "1").replace("{{runtime.final_image_user_instruction}}", ""), "imageInputs": [{"role": "hero_garment"}], "promptRuntime": {"shot_index": "1"}}
-    packages = {"1": package, "2": package}
-    raw = {"shots": [{"shotId": key, "optimizedText": "棚拍图片", "changeSummary": "整理", "conflicts": []} for key in packages]}
-    if change == "duplicate": raw["shots"][1]["shotId"] = "1"
-    if change == "missing": raw["shots"].pop()
-    if change == "reference": raw["shots"][0]["optimizedText"] = "使用图1-8"
-    if change == "placeholder": raw["shots"][0]["optimizedText"] = "{{runtime.unknown}}"
-    if change == "conflict": raw["shots"][0]["conflicts"] = ["裁切冲突"]
-    if change == "empty": raw["shots"][0]["optimizedText"] = " "
-    with pytest.raises(ValueError): validate_optimized_prompts(raw, packages)
+@pytest.mark.parametrize("raw", [None, {}, {"shots": []}, {"shots": [{"shotId": "1", "optimizedText": " "}]}])
+def test_unreadable_or_missing_text_remains_a_call_failure(raw):
+    with pytest.raises(ValueError):
+        parse_optimized_prompts(raw, {"1": {}})
+
+
+def test_optimizer_output_is_forwarded_without_content_checks(client, monkeypatch):
+    ids, result_set, image_ids = create_run(client)
+    calls, images = mock_success(monkeypatch)
+    # Legacy extra fields, apparent conflicts, references and placeholders are not gates.
+    body = "  正背双视图，参考图8，{{原文表达}}。\n" + "商品要求" * 6100
+    async def optimize(prompt, **kwargs):
+        return dumps({"shots": [
+            {"shotId": shot["shotId"], "optimizedText": body, "conflicts": ["双视图与不要拼图冲突"]}
+            for shot in reversed(loads(prompt)["shots"])
+        ]})
+    monkeypatch.setattr(main, "generate_gemini_json_text", optimize)
+    asyncio.run(main.run_final_generation(ids["task_id"], result_set, image_ids))
+    assert len(images) == 5
+    assert all(image["prompt"] == body for image in images)
+    assert main.get_generation_task_row(ids["task_id"])["status"] == "COMPLETED"
 
 
 def test_migration_keeps_empty_disabled_slot_and_does_not_overwrite_saved_rules():
@@ -167,15 +191,18 @@ def test_migration_keeps_empty_disabled_slot_and_does_not_overwrite_saved_rules(
         assert row["content"] == "人工规则" and row["enabled"] == 1
 
 
-def test_admin_preview_and_save_never_call_llm_test_is_explicit_and_preserves_task(client, monkeypatch):
-    ids, result_set, image_ids = create_run(client)
+@pytest.mark.parametrize("template", [TEMPLATE, FLEXIBLE_TEMPLATE])
+def test_admin_preview_and_save_never_call_llm_test_is_explicit_and_preserves_task(client, monkeypatch, template):
+    ids, result_set, image_ids = create_run(client, template=template)
     source = main.build_new_final_task_package(ids["task_id"], image_ids[0])
     source_attempt = main.create_attempt("generation_result_image", image_ids[0], "image-2", source)
     main.finish_attempt(source_attempt, "FAILED")
     before = main.read_final_preparation(result_set)
     config = client.get("/api/prompt-configs").json()
     optimizer = next(item for item in config["items"] if item["key"] == OPTIMIZER_KEY)
-    assert "lockedConstraints" in optimizer["suggestedContent"]
+    assert "optimizedText" in optimizer["suggestedContent"]
+    assert "lockedConstraints" not in optimizer["suggestedContent"]
+    assert "conflicts" not in optimizer["suggestedContent"]
     preview = client.post(f"/api/prompt-configs/{OPTIMIZER_KEY}/preview", json={"content": "新规则", "attemptId": source_attempt})
     assert preview.status_code == 200, preview.text
     saved = client.patch(f"/api/prompt-configs/{OPTIMIZER_KEY}", json={"content": "新规则", "enabled": False})
@@ -191,6 +218,39 @@ def test_admin_preview_and_save_never_call_llm_test_is_explicit_and_preserves_ta
     monkeypatch.setattr(main, "get_request_role", lambda request: "user")
     assert client.post(f"/api/prompt-configs/{OPTIMIZER_KEY}/test-optimization", json={"content": "测试草稿", "attemptId": source_attempt}).status_code == 403
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("template", [TEMPLATE, FLEXIBLE_TEMPLATE, "【锁定约束】\n\n【要求】\n保留商品。"])
+def test_full_template_is_sent_without_extracting_sections(client, monkeypatch, template):
+    ids, result_set, image_ids = create_run(client, template=template)
+    calls, images = mock_success(monkeypatch)
+    asyncio.run(main.run_final_generation(ids["task_id"], result_set, image_ids))
+    assert len(calls) == 1 and len(images) == 5
+    sent = {shot["shotId"]: shot for shot in calls[0][0]["shots"]}
+    for key, package in main.read_final_preparation(result_set)["packages"].items():
+        assert sent[key]["sourcePrompt"] == package["originalPrompt"]
+        assert "lockedConstraints" not in sent[key]
+        assert package["prompt"] == "输出单张商品棚拍图。"
+
+
+def test_continue_old_heading_failure_uses_frozen_flexible_template(client, monkeypatch):
+    ids, result_set, image_ids = create_run(client, template=FLEXIBLE_TEMPLATE)
+    # Reproduce an old failed result set without calling a provider or rewriting its snapshot.
+    with monkeypatch.context() as old_code:
+        def reject_old_headings(_packages):
+            raise ValueError("成片模板的锁定约束标题缺失或重复")
+        old_code.setattr(main, "optimizer_input", reject_old_headings)
+        asyncio.run(main.run_final_generation(ids["task_id"], result_set, image_ids))
+    assert main.read_final_preparation(result_set)["status"] == "FAILED"
+    with get_db() as db:
+        db.execute("UPDATE prompt_configs SET content = '后续模板' WHERE key = 'assembly.final_image_top'")
+    pending = main.continue_active_final_result_set(ids["task_id"], result_set, ids["styling_id"], ids["preview_id"])
+    calls, images = mock_success(monkeypatch)
+    asyncio.run(main.run_final_generation(ids["task_id"], result_set, pending))
+    assert len(calls) == 1 and len(images) == 5
+    assert all("lockedConstraints" not in shot for shot in calls[0][0]["shots"])
+    assert all("【参考图职责】" in image["originalPrompt"] and "后续模板" not in image["originalPrompt"] for image in images)
+    assert main.get_generation_task_row(ids["task_id"])["status"] == "COMPLETED"
 
 
 def test_purge_removes_optimization_attempts_with_their_result_set(client, monkeypatch):
@@ -248,3 +308,47 @@ def test_single_retry_preparation_failure_closes_pending_image_attempt(client, m
     with get_db() as db:
         row = db.execute("SELECT status, error_code FROM generation_attempts WHERE id = ?", (attempt,)).fetchone()
     assert row["status"] == "FAILED" and row["error_code"] == "PROMPT_PREPARATION_FAILED"
+
+
+def test_visual_mapping_keeps_local_numbers_and_deduplicates_shared_boards(monkeypatch):
+    loaded = []
+    monkeypatch.setattr(main, 'vision_reference_input', lambda item: loaded.append(item) or {'data': b'image', 'mime_type': 'image/png'})
+    board = main.reference_sheet_image_input('hero_garment', [{'objectKey': 'a'}, {'objectKey': 'b'}], filename='board.jpg', max_items=2, board_kind='hero_overview')
+    packages = {str(i): {'prompt': f'shot{i}', 'promptRuntime': {'shot_index': str(i)}, 'imageInputs': [
+        {'role': 'shot_background', 'objectKey': 'background'},
+        {'role': 'shot_pose', 'objectKey': f'pose{i}'},
+        {'role': 'model_identity', 'objectKey': 'model'}, board,
+        {'role': 'styling_garment', 'objectKey': 'clothing'},
+    ]} for i in range(1, 6)}
+    inputs = optimizer_input(packages)
+    images = main.optimizer_visual_inputs(packages, inputs)
+    assert len(images) == 9  # background + five poses + model + hero board + outfit
+    assert len([item for item in loaded if item.get('collageItems')]) == 1
+    for shot in inputs['shots']:
+        assert [r['index'] for r in shot['references']] == [1, 2, 3, 4, 5]
+        for reference in shot['references']:
+            supplied = loaded[reference['visionImageIndex'] - 1]
+            assert supplied == packages[shot['shotId']]['imageInputs'][reference['index'] - 1]
+
+
+def test_optimizer_reads_actual_board_and_original_image_bytes(monkeypatch):
+    from io import BytesIO
+    from PIL import Image
+    from app import image_provider
+    # Restore the real adapter that the module's no-external-calls fixture replaces.
+    monkeypatch.setattr(main, "vision_reference_input", REAL_VISION_REFERENCE_INPUT)
+    # All image I/O is replaced below: no storage or external provider access.
+    output = BytesIO()
+    Image.new('RGB', (40, 60), (200, 100, 30)).save(output, format='PNG')
+    content = output.getvalue()
+    monkeypatch.setattr(main, 'reference_source_bytes', lambda item: (content, 'image/heic'))
+    monkeypatch.setattr(image_provider, 'reference_source_bytes', lambda item, deadline=None: (content, 'image/png'))
+    source = {'role': 'hero_garment', 'objectKey': 'original.png'}
+    assert main.vision_reference_input(source)['data'] == content
+    assert main.vision_reference_input(source)['mime_type'] == 'image/png'
+    board = main.reference_sheet_image_input('hero_garment', [source, {**source, 'objectKey': 'detail.png'}], filename='board.jpg', max_items=2, board_kind='hero_overview')
+    expected, _, mime = image_provider.build_reference_collage_bytes(board)
+    actual = main.vision_reference_input(board)
+    assert actual['data'] == expected and actual['mime_type'] == mime
+    with Image.open(BytesIO(actual['data'])) as decoded:
+        assert decoded.width > 0 and decoded.height > 0

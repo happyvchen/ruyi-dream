@@ -219,6 +219,8 @@ def normalize_toapis_error(
         # 或仅 invalid_request_error + HTTP 400。精确消息是稳定锚点；余额、鉴权、
         # 内容安全等硬停已在此前判定，不会被本分支覆盖。
         internal_code = ERROR_PROVIDER_TRANSIENT_UNKNOWN
+    elif "too many images" in combined_lower:
+        internal_code = ERROR_INVALID_REQUEST
     elif codes & {"invalid_request", "model_not_found"} or types & {"invalid_request", "invalid_request_error"}:
         internal_code = ERROR_INVALID_REQUEST
     elif codes & {"task_not_found"} or status_code == 404:

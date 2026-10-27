@@ -2,12 +2,12 @@
 
 ## 当前原则
 
-数据库以当前三步生成链路为准：
+数据库以当前四步生成链路为准：
 
 ```text
 GenerationTask
 -> GenerationStyling / StylingPlan
--> ShotPresetSlot
+-> GenerationPoseSelection（姿势库 + 共享背景 + 冻结的五镜头要求）
 -> GenerationResultSetShotPreset
 -> GenerationResultSet / GenerationResultImage
 ```
@@ -24,8 +24,8 @@ GenerationTask
 | `generation_task_input_versions` | 进入 AI 阶段时冻结的输入版本：任务名、主推款图、数字模特快照 |
 | `generation_stylings` | AI 智能选搭结果，保存 `StylingPlan`、候选、选中搭配和 attempt |
 | `generation_previews` | 只读历史兼容表；当前链路不再新增记录 |
-| `shot_preset_slots` | 15 个当前生效的品类/镜头槽位；拍摄母版和姿势可单张立即替换/删除 |
-| `generation_result_set_shot_presets` | 结果集创建时冻结的五组拍摄母版/姿势关系 |
+| `shot_preset_slots` | 15 个历史品类/镜头槽位，保留旧链路兼容 |
+| `generation_result_set_shot_presets` | 结果集复制的五组共享背景/独立姿势关系；旧记录仍为母版 |
 | `shot_preset_versions` / `shot_presets` / `shot_preset_family_publications` | 旧维护模型，只用于迁移已有配置与读取历史结果集 |
 | `generation_result_sets` | 一组成片结果；新结果 `preview_id`、`shot_preset_version_id` 为空，预设由关系快照冻结 |
 | `generation_result_images_new` | 单张最终成片，固定 5 条槽位 |
@@ -110,3 +110,17 @@ GenerationTask
 - `generation_result_sets.prompt_preparation_json TEXT`：冻结模式、configRows、准备状态、attemptId、错误和最终 packages；旧行 NULL 沿用直出兼容路径。
 - `generation_attempts.owner_type = generation_result_set`：复用原表保存整组/单镜头优化与测试，删除和取消纳入原生命周期。
 - 重建相关 detail_revision 触发器，准备状态变化可被轻量轮询发现。
+
+## 076 姿势库与姿势选搭
+
+- `poses`：唯一 code、name、status、ai_tags_json、tag_error_code、tag_attempt_id、archived_at/archive_reason 和时间戳。
+- `pose_images`：pose_id、media_asset_id、sort_order；pose_id 唯一（每个姿势至多一条图片关联），创建及识别接口要求恰好一张；删除姿势级联删除图片关联。迁移 077 无损拆分旧多图姿势，保留历史快照和原图，拆分后需重新识别。
+- `generation_pose_selections`：task_id、input_version_id、styling_id、category_family、plan_json、attempt_id、created_at；属于任务历史。
+- `generation_pose_selection_shots`：selection_id、shot_index（1..5）、pose_id、pose_snapshot_json、background_asset_id、pose_asset_id；每选择镜头唯一，来源姿势删除只将 pose_id 置空。
+- `generation_tasks` 增加 pose_workflow_enabled（旧行默认 0，新建 API 明确写 1）、active_pose_selection_id、pose_selection_user_instruction。
+- `generation_result_sets` 增加 pose_selection_id；重新使用既有 generation_result_set_shot_presets 保存成片图片引用。
+- detail_revision 覆盖姿势选择、镜头快照、相关媒体及 generation_pose_selection attempt；所有删除按引用计数保留共享媒体。
+
+### 统一背景流程的冻结数据
+
+不增加表：`shoot_environment_references` 保存当前背景，`generation_pose_selection_shots` 的五条记录引用同一个 background_asset_id 和五个不同的 pose_asset_id。`generation_pose_selections.plan_json` 增加 `workflow=shared_background_v1`、`shotRequirements` 与 `promptConfigSnapshot`（本品类成片模板及分段）。结果集复用选择的 input_version_id，不重新拍取模特快照；优化规则与开关仍在结果集创建时冻结。历史记录不回写、不删除旧母版。
