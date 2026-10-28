@@ -175,11 +175,10 @@ AI 选搭动态事实：
 - `runtime.ref_model_identity`
 - `runtime.ref_shot_background`
 - `runtime.ref_shot_pose`
-- `runtime.ref_garment`
+- `runtime.ref_hero_garment`（主推款参考图号）
+- `runtime.ref_styling_garment`（搭配款参考图号；无搭配款时为空）
 - `runtime.final_image_user_instruction`
 - `runtime.shot_styling`（配饰与造型，单行，使用 `；` 分隔）
-- `runtime.shot_global_directing`
-- `runtime.shot_current`
 - `runtime.is_shot_1` 到 `runtime.is_shot_5`
 
 ## 统一拍摄背景

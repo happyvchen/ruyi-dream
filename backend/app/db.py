@@ -10,6 +10,7 @@ import sqlite3
 from typing import Any, Iterator
 
 from .config import get_settings
+from .prompt_render import upgrade_prompt_runtime_placeholders
 
 
 MIGRATIONS: tuple[tuple[str, str, str], ...] = (
@@ -43,6 +44,9 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("077", "single_image_poses", "migration_single_image_poses"),
     ("078", "photographic_final_prompts", "migration_photographic_final_prompts"),
     ("079", "disable_final_prompt_optimizer", "migration_disable_final_prompt_optimizer"),
+    ("080", "photographic_final_prompts_v2", "migration_photographic_final_prompts_v2"),
+    ("081", "photographic_final_prompts_v3", "migration_photographic_final_prompts_v3"),
+    ("082", "split_garment_prompt_references", "migration_split_garment_prompt_references"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -516,6 +520,9 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_refresh_legacy_bottom_and_one_piece_final_prompts": migration_refresh_legacy_bottom_and_one_piece_final_prompts,
         "migration_photographic_final_prompts": migration_photographic_final_prompts,
         "migration_disable_final_prompt_optimizer": migration_disable_final_prompt_optimizer,
+        "migration_photographic_final_prompts_v2": migration_photographic_final_prompts_v2,
+        "migration_photographic_final_prompts_v3": migration_photographic_final_prompts_v3,
+        "migration_split_garment_prompt_references": migration_split_garment_prompt_references,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -1805,6 +1812,56 @@ def migration_disable_final_prompt_optimizer(db: sqlite3.Connection) -> None:
         )
 
 
+# 078 写入后的正文摘要：用于把"只差针织段"的下装模板补齐，仍然只升级系统默认内容。
+PHOTOGRAPHIC_V1_FINAL_PROMPT_SHA256: dict[str, str] = {
+    "assembly.final_image_top": "b63c968044150da80974935ff47323667db08ed8f3b36d75f3947a1df9f5272e",
+    "assembly.final_image_bottom": "7199e7124d2b19579bfd7533df6f8197360f3a17bf70f7bebb985ac28ec92ea4",
+    "assembly.final_image_one_piece": "c61cc19a01f6466f543ed61ebeead15263333c18a5583505da6a60aeffbacfa6",
+}
+
+
+def migration_photographic_final_prompts_v2(db: sqlite3.Connection) -> None:
+    """对齐三类成片 Prompt 的材质段（下装补上针织与毛呢质感要求）。
+
+    与 078 同样是"摘要校验 + 只升级系统默认正文"，管理员自定义内容保持不动。
+    """
+    _sync_final_prompt_templates(db, PHOTOGRAPHIC_V1_FINAL_PROMPT_SHA256)
+
+
+# 080 写入后的正文摘要：补齐下装的图案工艺厚度约束，保持三条模板口径一致。
+PHOTOGRAPHIC_V2_FINAL_PROMPT_SHA256: dict[str, str] = {
+    "assembly.final_image_top": "a0d653adb720348fae7311bdc98af02012772829bb2433e80f7d237aa376d3e6",
+    "assembly.final_image_bottom": "4f5d8b81f1ac32d9997ee87f64e498afc73bad22bf9e08ec0b0796ffdef6f0ad",
+    "assembly.final_image_one_piece": "386fe0929bd7f23316a3e781c7349746b6b323dfd718371ca8b989664f7454e5",
+}
+
+
+def migration_photographic_final_prompts_v3(db: sqlite3.Connection) -> None:
+    """把三条成片 Prompt 同步到当前系统正文（摘要校验，管理员自定义内容不动）。"""
+    _sync_final_prompt_templates(db, PHOTOGRAPHIC_V2_FINAL_PROMPT_SHA256)
+
+
+def _sync_final_prompt_templates(db: sqlite3.Connection, digests: dict[str, str]) -> None:
+    if not table_exists(db, "prompt_configs"):
+        return
+    filenames = {
+        "assembly.final_image_top": "final_image_top.txt",
+        "assembly.final_image_bottom": "final_image_bottom.txt",
+        "assembly.final_image_one_piece": "final_image_one_piece.txt",
+    }
+    for key, expected_digest in digests.items():
+        row = db.execute("SELECT content FROM prompt_configs WHERE key = ?", (key,)).fetchone()
+        if not row:
+            continue
+        content = str(row["content"] or "")
+        if hashlib.sha256(content.strip().encode("utf-8")).hexdigest() != expected_digest:
+            continue
+        canonical = (Path(__file__).resolve().parents[1] / "prompt_templates" / filenames[key]).read_text(encoding="utf-8").strip() + "\n"
+        if canonical.strip() == content.strip():
+            continue
+        db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?", (canonical, now_iso(), key))
+
+
 def migration_generation_detail_revision(db: sqlite3.Connection) -> None:
     if not db.execute("PRAGMA table_info(generation_tasks)").fetchall():
         return
@@ -1854,3 +1911,15 @@ def migration_generation_detail_revision(db: sqlite3.Connection) -> None:
     """, operational | {"tag_retry_at", "tag_retry_lease_until", "tag_retry_state_json"})
     db.execute("CREATE INDEX IF NOT EXISTS idx_task_cover ON generation_task_images(task_id, deleted_at, sort_order, id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_result_progress ON generation_result_images_new(result_set_id, status)")
+
+
+def migration_split_garment_prompt_references(db: sqlite3.Connection) -> None:
+    """仅升级占位符，不用系统模板覆盖管理员正文或历史生成记录。"""
+    if not table_exists(db, "prompt_configs"):
+        return
+    for row in db.execute("SELECT key, content FROM prompt_configs").fetchall():
+        original = str(row["content"] or "")
+        content = upgrade_prompt_runtime_placeholders(original)
+        if content != original:
+            db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?",
+                       (content, now_iso(), row["key"]))

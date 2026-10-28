@@ -34,6 +34,7 @@ from .config import get_settings
 from .db import dumps, get_db, init_db, loads, log_event, now_iso
 from .prompt_render import (
     render_image_reference_spans,
+    upgrade_prompt_runtime_placeholders,
     render_pose_direction,
     render_user_instruction_line,
     render_user_requirement_line,
@@ -131,7 +132,8 @@ PROMPT_PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-zA-Z0-9_.-]+)\s*}}")
 # 条件段：{{#runtime.x}}...{{/runtime.x}}（占位真值才保留）/ {{^runtime.x}}...{{/runtime.x}}（为空才保留）。
 # 让模板在"有内容才显示表头/话术"的前提下完全托管固定文本，代码只提供可变占位值。
 PROMPT_SECTION_PATTERN = re.compile(
-    r"{{\s*([#^])\s*((?:segment|runtime)\.[a-zA-Z0-9_.-]+)\s*}}(.*?){{\s*/\s*\2\s*}}",
+    r"{{\s*([#^])\s*((?:segment|runtime)\.[a-zA-Z0-9_.-]+)\s*}}"
+    r"((?:(?!{{\s*[#^]\s*(?:segment|runtime)\.).)*?){{\s*/\s*\2\s*}}",
     re.DOTALL,
 )
 AI_STYLING_PROMPT_CONFIG_KEY = "assembly.ai_styling"
@@ -5594,9 +5596,6 @@ def final_preparation_cancelled(task_id: int, result_set_id: int) -> bool:
     return not row or row["status"] != "FINAL_RUNNING" or row["active_result_set_id"] != result_set_id
 
 
-SHARED_BACKGROUND_DIRECTING = "五个镜头共用同一背景与光线；背景图不限定机位、景别、裁切、站位或人物尺度。按当前镜头 Prompt 构图，按已选姿势参考执行动作与神态；人物身份和服装分别以模特图和商品图为准。"
-
-
 def vision_reference_input(item: dict[str, Any]) -> dict[str, Any]:
     if item.get("collageItems"):
         content, _, mime = build_reference_collage_bytes(item)
@@ -10991,7 +10990,8 @@ def build_preview_prompt_runtime(
         "user_requirement": render_user_requirement_line(user_requirement or {}),
         "shot_styling": build_shot_styling_line(styling_plan),
         "ref_model_identity": spans["model_identity"],
-        "ref_garment": spans["garment"],
+        "ref_hero_garment": spans["hero_garment"],
+        "ref_styling_garment": spans["styling_garment"],
         "ref_shoot_environment": spans["shoot_environment"],
         "storyboard_preview_user_instruction": render_user_instruction_line(storyboard_preview_user_instruction or {}),
     }
@@ -11065,8 +11065,6 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         shot = next((item for item in selection["shots"] if item["shotIndex"] == int(row["sort_order"])), None)
         if not shot:
             raise RuntimeError("冻结的姿势选搭缺少当前镜头")
-        if selection.get("workflow") == "shared_background_v1":
-            prompt_runtime["shot_global_directing"] = SHARED_BACKGROUND_DIRECTING
         # 姿势动作只注入一次：模板已有独立的“已选姿势”行，重复拼接会把
         # 姿势标签 JSON 塞进配饰与造型描述，稀释商品与造型事实。
         prompt_runtime["shot_pose"] = render_pose_direction(shot["direction"])
@@ -11122,10 +11120,9 @@ def build_final_prompt_runtime(
         "shot_pose": "",
         "user_requirement": render_user_requirement_line(user_requirement or {}),
         "shot_styling": build_shot_styling_line(styling_plan),
-        "shot_global_directing": "完整替换拍摄母版中的原人物、原服装及其身份特征；保留母版的场景、机位、景别、裁切、人物尺度、站位与光线。姿势参考仅补充身体朝向、重心、肩线、手位、视线与头部朝向，不改变脸、发型或母版构图。",
-        "shot_current": f"当前为第 {shot_index} 个成片镜头，镜头角色 {shot_role}。",
         "ref_model_identity": spans["model_identity"],
-        "ref_garment": spans["garment"],
+        "ref_hero_garment": spans["hero_garment"],
+        "ref_styling_garment": spans["styling_garment"],
         "ref_shot_background": spans["shot_background"],
         "ref_shot_pose": spans["shot_pose"],
         "final_image_user_instruction": render_user_instruction_line(final_image_user_instruction or {}),
@@ -11578,6 +11575,7 @@ def render_prompt_config(
         "missingPlaceholders": [],
         "referencedPlaceholders": [],
     }
+    frozen_config = rows is not None
     rows = rows if rows is not None else get_prompt_config_rows()
     runtime = runtime or {}
     content_overrides = content_overrides or {}
@@ -11585,7 +11583,9 @@ def render_prompt_config(
     def content_for(name: str) -> str | None:
         if name in content_overrides:
             return content_overrides[name]
-        return prompt_config_content(name, rows)
+        content = prompt_config_content(name, rows)
+        # 历史冻结正文只在读取时升级占位符，不回写历史快照。
+        return upgrade_prompt_runtime_placeholders(content) if frozen_config and content is not None else content
 
     def resolve_placeholder(name: str, stack: list[str]) -> str:
         diagnostics["referencedPlaceholders"].append(name)
@@ -11706,8 +11706,6 @@ def sample_prompt_runtime() -> dict[str, Any]:
         # 当前成片各分段（成片用；无表头）
         "shot_index": "1",
         "shot_styling": "选中搭配服装：LOOK-A；穿法：单穿吊带裙；生成类配饰：极简金色小耳圈",
-        "shot_global_directing": SHARED_BACKGROUND_DIRECTING,
-        "shot_current": "当前为第1个成片镜头，镜头角色 bottom_shot_1。",
         "is_shot_1": "1",
         "is_shot_2": "",
         "is_shot_3": "",
@@ -11717,7 +11715,8 @@ def sample_prompt_runtime() -> dict[str, Any]:
         "ref_shot_background": "图1",
         "ref_shot_pose": "图2",
         "ref_model_identity": "图3",
-        "ref_garment": "图4-6",
+        "ref_hero_garment": "图4-5",
+        "ref_styling_garment": "图6",
     }
 
 
@@ -11742,8 +11741,6 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         # 成片：当前镜头各分段
         {"name": "runtime.shot_index", "scope": "runtime", "description": "当前成片固定镜头号（1-5）"},
         {"name": "runtime.shot_styling", "scope": "runtime", "description": "配饰与造型正文，合并选中搭配、穿法和低存在感配饰边界，用中文分号连接为单行"},
-        {"name": "runtime.shot_global_directing", "scope": "runtime", "description": "当前成片全局导演正文，无表头"},
-        {"name": "runtime.shot_current", "scope": "runtime", "description": "当前成片单镜头正文，无表头"},
         {"name": "runtime.is_shot_1", "scope": "runtime", "description": "当前成片为镜头 1 时有值，用于条件段"},
         {"name": "runtime.is_shot_2", "scope": "runtime", "description": "当前成片为镜头 2 时有值，用于条件段"},
         {"name": "runtime.is_shot_3", "scope": "runtime", "description": "当前成片为镜头 3 时有值，用于条件段"},
@@ -11751,7 +11748,8 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
         {"name": "runtime.is_shot_5", "scope": "runtime", "description": "当前成片为镜头 5 时有值，用于条件段"},
         # 参考图各职能图号区间：只出会变的图号，职能描述在模板正文托管
         {"name": "runtime.ref_model_identity", "scope": "runtime", "description": "模特身份参考板图号，直出链路通常为「图3」；无则空"},
-        {"name": "runtime.ref_garment", "scope": "runtime", "description": "主推款概览/细节板与搭配服装参考板的总图号区间，直出链路通常为「图4-6」；无则空"},
+        {"name": "runtime.ref_hero_garment", "scope": "runtime", "description": "主推款参考图图号，通常为「图4-5」；按实际输入编号，无则空"},
+        {"name": "runtime.ref_styling_garment", "scope": "runtime", "description": "搭配款参考图图号，通常为「图6」；按实际输入编号，无搭配款则空"},
         {"name": "runtime.ref_shot_background", "scope": "runtime", "description": "统一背景参考图号，固定为图1；历史结果按原快照职责使用"},
         {"name": "runtime.ref_shot_pose", "scope": "runtime", "description": "当前镜头姿势参考图图号，固定为图2"},
     ]
@@ -13956,8 +13954,8 @@ def claim_pose_selection(task_id: int, user_instruction: str | None, trigger: st
     for index, role in enumerate(final_image_slot_roles(plan), 1):
         shot_runtime = build_final_prompt_runtime(index, role, plan, [], {}, input_version.get("userRequirement", {}))
         shot_runtime.update(ref_shot_background="统一背景参考图", ref_shot_pose="当前镜头待选姿势图",
-                            ref_model_identity="数字模特身份参考图", ref_garment="主推款与搭配服装参考图",
-                            shot_global_directing=SHARED_BACKGROUND_DIRECTING)
+                            ref_model_identity="数字模特身份参考图", ref_hero_garment="主推款参考图",
+                            ref_styling_garment="搭配款参考图" if loads(styling["selected_material_snapshot_json"], []) else "")
         requirement, check = render_prompt_config(final_image_prompt_config_key(plan), shot_runtime, rows=config)
         if check["missingPlaceholders"] or not requirement.strip():
             raise HTTPException(409, "请先配置当前服装类型的成片 Prompt 与镜头要求")

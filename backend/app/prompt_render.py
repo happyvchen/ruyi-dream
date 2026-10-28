@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 __all__ = [
@@ -14,6 +15,7 @@ __all__ = [
     "render_user_requirement_line",
     "render_image_reference_spans",
     "render_pose_direction",
+    "upgrade_prompt_runtime_placeholders",
 ]
 
 # 姿势事实里真正描述"怎么摆"的字段。选搭元信息（展示优势、遮挡风险、
@@ -95,7 +97,8 @@ def render_image_reference_spans(image_inputs: list[dict[str, Any]] | None) -> d
     spans: dict[str, list[int]] = {
         "model_identity": [],
         "preview_grid": [],
-        "garment": [],
+        "hero_garment": [],
+        "styling_garment": [],
         "shoot_environment": [],
         "shot_background": [],
         "shot_pose": [],
@@ -106,8 +109,8 @@ def render_image_reference_spans(image_inputs: list[dict[str, Any]] | None) -> d
             spans["model_identity"].append(index)
         elif role == "preview_grid":
             spans["preview_grid"].append(index)
-        elif role in {"hero_garment", "styling_garment", "garment"}:
-            spans["garment"].append(index)
+        elif role in {"hero_garment", "styling_garment"}:
+            spans[role].append(index)
         elif role == "shoot_environment":
             spans["shoot_environment"].append(index)
         elif role == "shot_background":
@@ -115,6 +118,44 @@ def render_image_reference_spans(image_inputs: list[dict[str, Any]] | None) -> d
         elif role == "shot_pose":
             spans["shot_pose"].append(index)
     return {
-        key: _span_text(values[0], values[-1]) if values else ""
+        key: _reference_ranges(values)
         for key, values in spans.items()
     }
+
+
+def _reference_ranges(values: list[int]) -> str:
+    """只合并相邻图号，避免将其他角色的图片纳入当前事实源。"""
+    if not values:
+        return ""
+    ranges: list[str] = []
+    start = end = values[0]
+    for value in values[1:]:
+        if value == end + 1:
+            end = value
+        else:
+            ranges.append(_span_text(start, end))
+            start = end = value
+    ranges.append(_span_text(start, end))
+    return "、".join(ranges)
+
+
+def upgrade_prompt_runtime_placeholders(content: str) -> str:
+    """迁移存量配置和读取冻结配置；不再提供已删除变量的运行时值。"""
+    for name in ("shot_global_directing", "shot_current"):
+        # 原字段始终非空：保留正条件内的自定义正文，移除反条件分支。
+        section = re.compile(r"\{\{\s*([#^])runtime\." + name + r"\s*\}\}(.*?)\{\{\s*/runtime\." + name + r"\s*\}\}", re.S)
+        content = section.sub(lambda m: m[2] if m[1] == "#" else "", content)
+        content = re.sub(r"\{\{\s*runtime\." + name + r"\s*\}\}", "", content)
+    # 合并引用的条件等价于主推款或搭配款任一存在。
+    section = re.compile(r"\{\{\s*([#^])runtime\.ref_garment\s*\}\}(.*?)\{\{\s*/runtime\.ref_garment\s*\}\}", re.S)
+    def split_section(match: re.Match[str]) -> str:
+        inner = match[2]
+        if match[1] == "^":
+            return "{{^runtime.ref_hero_garment}}{{^runtime.ref_styling_garment}}" + inner + "{{/runtime.ref_styling_garment}}{{/runtime.ref_hero_garment}}"
+        return ("{{#runtime.ref_hero_garment}}" + inner + "{{/runtime.ref_hero_garment}}"
+                "{{^runtime.ref_hero_garment}}{{#runtime.ref_styling_garment}}" + inner +
+                "{{/runtime.ref_styling_garment}}{{/runtime.ref_hero_garment}}")
+    content = section.sub(split_section, content)
+    return re.sub(r"\{\{\s*runtime\.ref_garment\s*\}\}",
+        "{{#runtime.ref_hero_garment}}主推款 {{runtime.ref_hero_garment}}{{/runtime.ref_hero_garment}}"
+        "{{#runtime.ref_styling_garment}}；搭配款 {{runtime.ref_styling_garment}}{{/runtime.ref_styling_garment}}", content)

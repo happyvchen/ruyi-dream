@@ -33,13 +33,14 @@ def test_runtime_image_reference_spans_follow_input_order_and_roles() -> None:
             {"role": "styling_garment"},
             {"role": "preview_grid"},
             {"role": "shoot_environment"},
-            {"role": "garment"},
+            {"role": "hero_garment"},
         ]
     )
 
     assert spans == {
         "model_identity": "图1",
-        "garment": "图2-6",
+        "hero_garment": "图2、图6",
+        "styling_garment": "图3",
         "preview_grid": "图4",
         "shoot_environment": "图5",
         "shot_background": "",
@@ -66,7 +67,8 @@ def test_direct_final_runtime_labels_background_pose_model_and_garments() -> Non
     assert runtime["ref_shot_background"] == "图1"
     assert runtime["ref_shot_pose"] == "图2"
     assert runtime["ref_model_identity"] == "图3"
-    assert runtime["ref_garment"] == "图4-5"
+    assert runtime["ref_hero_garment"] == "图4"
+    assert runtime["ref_styling_garment"] == "图5"
     assert runtime["shot_index"] == "3"
     assert "ref_preview_grid" not in runtime
     assert "ref_shoot_environment" not in runtime
@@ -93,7 +95,8 @@ def test_preview_runtime_contains_only_dynamic_business_facts() -> None:
 
     assert runtime["category_family"] == "top"
     assert runtime["ref_model_identity"] == "图1"
-    assert runtime["ref_garment"] == "图2-3"
+    assert runtime["ref_hero_garment"] == "图2"
+    assert runtime["ref_styling_garment"] == "图3"
     assert runtime["ref_shoot_environment"] == "图4"
     assert runtime["storyboard_preview_user_instruction"] == "姿态更舒展"
     assert "six_shot" not in runtime
@@ -113,7 +116,8 @@ def test_final_runtime_marks_exactly_one_current_shot_and_limits_to_five_slots()
     assert runtime["ref_shot_background"] == "图1"
     assert runtime["ref_shot_pose"] == "图2"
     assert runtime["ref_model_identity"] == "图3"
-    assert runtime["ref_garment"] == "图4"
+    assert runtime["ref_hero_garment"] == "图4"
+    assert runtime["ref_styling_garment"] == ""
     assert "preview_grid_cell" not in runtime
     assert "ref_preview_grid" not in runtime
     assert [runtime[f"is_shot_{index}"] for index in range(1, 6)] == ["", "", "", "1", ""]
@@ -178,6 +182,8 @@ def test_final_prompt_templates_render_shot_five_without_legacy_coordinates(
     assert "中央 2:3" not in rendered
     assert "16.7%" not in rendered
     assert "镜头 1｜" not in rendered
+    assert "图4 是主推款的唯一商品事实源" in rendered
+    assert "是搭配款的唯一商品事实源" not in rendered
 
 
 @pytest.mark.parametrize(
@@ -307,3 +313,51 @@ def test_submission_unknown_copy_promises_no_duplicate_paid_generation() -> None
 
     assert presentation["retryable"] is False
     assert "避免重复计费" in presentation["message"]
+
+
+def test_removed_runtime_fields_are_not_exposed() -> None:
+    removed = {"shot_global_directing", "shot_current", "ref_garment"}
+    runtime = app_main.build_final_prompt_runtime(1, "top_shot_1", {}, [], {}, {})
+    assert removed.isdisjoint(runtime)
+    assert removed.isdisjoint(app_main.sample_prompt_runtime())
+    names = {item["name"] for item in app_main.available_prompt_placeholders()}
+    assert {f"runtime.{name}" for name in removed}.isdisjoint(names)
+    assert {"runtime.ref_hero_garment", "runtime.ref_styling_garment"} <= names
+
+
+@pytest.mark.parametrize("styling_count", [0, 1])
+def test_six_reference_roles_render_without_crossing_garment_boundaries(styling_count: int) -> None:
+    roles = ["shot_background", "shot_pose", "model_identity", "hero_garment", "hero_garment"]
+    roles += ["styling_garment"] * styling_count
+    runtime = app_main.build_final_prompt_runtime(1, "top_shot_1", {}, [{"role": role} for role in roles], {}, {})
+    assert runtime["ref_hero_garment"] == "图4-5"
+    assert runtime["ref_styling_garment"] == ("图6" if styling_count else "")
+
+
+def test_prompt_placeholder_migration_preserves_custom_content_and_is_idempotent() -> None:
+    from app.db import get_db, migration_split_garment_prompt_references
+    legacy = "自定义摄影规则\n{{ runtime.shot_global_directing }}{{runtime.shot_current}}\n{{runtime.ref_garment}} 是商品事实源。"
+    with get_db() as db:
+        db.execute("UPDATE prompt_configs SET content = ?, updated_at = 'before' WHERE key = 'assembly.final_image_top'", (legacy,))
+        migration_split_garment_prompt_references(db)
+        first = dict(db.execute("SELECT * FROM prompt_configs WHERE key = 'assembly.final_image_top'").fetchone())
+        migration_split_garment_prompt_references(db)
+        second = dict(db.execute("SELECT * FROM prompt_configs WHERE key = 'assembly.final_image_top'").fetchone())
+    assert first == second
+    assert "自定义摄影规则" in first["content"]
+    assert "{{runtime.ref_hero_garment}}" in first["content"]
+    assert "{{runtime.ref_styling_garment}}" in first["content"]
+    assert "shot_global_directing" not in first["content"]
+    assert "shot_current" not in first["content"]
+    assert "ref_garment" not in first["content"]
+
+
+@pytest.mark.parametrize("hero,styling,expected", [("图4-5", "图6", "主推款 图4-5；搭配款 图6"), ("图4", "", "主推款 图4"), ("", "", "无商品")])
+def test_frozen_prompt_upgrade_renders_split_roles_without_mutating_snapshot(hero, styling, expected) -> None:
+    key = "assembly.final_image_top"
+    content = "{{runtime.shot_current}}{{runtime.shot_global_directing}}{{#runtime.ref_garment}}{{runtime.ref_garment}}{{/runtime.ref_garment}}{{^runtime.ref_garment}}无商品{{/runtime.ref_garment}}"
+    rows = {key: {"content": content, "group_type": "assembly"}}
+    result, diagnostics = app_main.render_prompt_config(key, {"ref_hero_garment": hero, "ref_styling_garment": styling}, rows=rows)
+    assert result.strip() == expected
+    assert not diagnostics["missingPlaceholders"]
+    assert rows[key]["content"] == content

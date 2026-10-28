@@ -17,7 +17,8 @@
 
 【参考图职责】
 {{runtime.ref_model_identity}} 只决定同一位成年女模特的身份、脸、发型和气质
-{{runtime.ref_garment}} 只决定主推款与已选搭配服装的真实颜色、长度、廓形、材质和结构
+{{runtime.ref_hero_garment}} 只决定主推款的真实颜色、长度、廓形、材质和结构
+{{#runtime.ref_styling_garment}}{{runtime.ref_styling_garment}} 只决定已选搭配款的真实颜色、长度、廓形、材质和结构{{/runtime.ref_styling_garment}}
 {{runtime.ref_shoot_environment}} 只决定影棚背景、光线、墙面与地面
 
 按 `runtime.category_family` 对应的固定六镜头规则生成 3:2 横版分镜预览（3 列 × 2 行、6 个 1:1 方格）。六格规则、姿态、裁切、背景和镜头 5 安全区写在 Prompt 正文中；代码只注入参考图图号和用户补充要求。

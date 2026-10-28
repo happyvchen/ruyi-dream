@@ -9,7 +9,7 @@
 | 阶段 | 主要动态字段 | 职责 |
 |---|---|---|
 | AI 选搭 | 主推款事实、可选搭配服装、品牌信息、用户选搭要求 | 输出可追溯 StylingPlan |
-| 最终成片 | `category_family`、`shot_index`、`shot_current`、`shot_styling`、`ref_shot_background`、`ref_shot_pose`、`ref_model_identity`、`ref_garment`、`final_image_user_instruction` | 描述当前镜头事实和参考图身份 |
+| 最终成片 | `category_family`、`shot_index`、`shot_styling`、`ref_shot_background`、`ref_shot_pose`、`ref_model_identity`、`ref_hero_garment`、`ref_styling_garment`、`final_image_user_instruction` | 描述当前镜头事实和参考图身份 |
 
 稳定的五镜头构图、商品展示重点、禁止项以及统一背景与姿势职责写在三类固定成片 Prompt 正文；代码不动态创作镜头。背景来自模特与背景，姿势来自独立姿势库；在选姿势时冻结，并由结果集复用。
 
@@ -32,3 +32,5 @@
 模型只输出主推款理解、图位族、已选商品与穿法、配饰、空搭配原因、整体穿法和简短理由。不要求分析过程、多候选、自评分、落选清单或动态摄影要求。`complete_look` / `no_suitable_match` / `user_requested` 保留空搭配语义。完整穿着不加库内服装；未找到匹配时不强凑，也不把缺失的基础服装伪装成配饰。主观造型质量由用户审核，代码只做契约与身份校验。
 
 参考正文位于 `backend/prompt_templates/hero_image_selection.txt` 与 `ai_styling.txt`；仅显式保存至数据库后生效。更新两个槽位时一起备份、一起应用；不覆盖历史请求快照和生成结果。
+
+主推款与搭配款分别按实际输入角色生成图号，不合并两类商品的引用。无搭配款时，搭配款图号为空，模板用条件段省略对应说明。镜头序号与五镜头条件块保留；全局摄影规则和当前镜头正文只由模板维护。迁移 082 只升级现有配置中的相关占位符，保留管理员其他正文；历史冻结模板读取时应用相同转换，不回写历史记录。

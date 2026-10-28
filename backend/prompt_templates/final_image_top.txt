@@ -3,8 +3,10 @@
 【参考图职责】
 {{runtime.ref_shot_background}} 是整组共用的背景与光线参考：沿用它的空间、墙面与地面材质、颜色、光源方向、柔硬程度、色温和曝光；只取环境与照明，不取图中人物、服装、道具、机位、景别和构图。
 {{runtime.ref_shot_pose}} 提供当前镜头的姿势与表现：执行可辨的身体朝向、重心、肩线、手位、头部方向、视线与神态；不取它的脸、发型、身材、服装、背景、光线，也不取它的取景、机位和裁切——同一个姿势在不同镜头下按本镜头要求重新裁切。
-{{runtime.ref_model_identity}} 是唯一模特身份事实源，五个镜头保持同一张脸、同一发型、同一肤色与身体比例。{{runtime.ref_garment}} 是唯一商品事实源，保持主推款与搭配款的真实颜色、长度、版型、材质、结构、图案与穿法。
-优先级：商品与模特身份保真 > 统一背景与光线、当前镜头要求 > 已选姿势与表现 > 商业画质提升。{{runtime.shot_current}} {{runtime.shot_global_directing}}
+{{runtime.ref_model_identity}} 是唯一模特身份事实源，五个镜头保持同一张脸、同一发型、同一肤色与身体比例。
+{{runtime.ref_hero_garment}} 是主推款的唯一商品事实源，保持主推款的真实颜色、长度、版型、材质、结构、图案与穿法。
+{{#runtime.ref_styling_garment}}{{runtime.ref_styling_garment}} 是搭配款的唯一商品事实源，保持搭配款的真实颜色、长度、版型、材质、结构、图案与穿法。{{/runtime.ref_styling_garment}}
+优先级：商品与模特身份保真 > 统一背景与光线、当前镜头要求 > 已选姿势与表现 > 商业画质提升。
 
 服装信息：{{runtime.user_requirement}}
 配饰与造型：{{runtime.shot_styling}}

@@ -503,7 +503,9 @@ def test_shared_flow_needs_no_masters_and_freezes_rules_background_and_input(cli
         assert f'镜头 {i}｜' in package['prompt']
         assert all(f'镜头 {other}｜' not in package['prompt'] for other in range(1, 6) if other != i)
         assert '后续修改' not in package['prompt']
-        assert '不限定机位、景别' in package['prompt']
+        assert '不取图中人物、服装、道具、机位、景别和构图' in package['prompt']
+        assert 'shot_global_directing' not in package['promptRuntime']
+        assert 'shot_current' not in package['promptRuntime']
     with get_db() as db:
         row = db.execute('SELECT input_version_id, prompt_preparation_json FROM generation_result_sets WHERE id = ?', (result['id'],)).fetchone()
     assert row['input_version_id'] == frozen_input
