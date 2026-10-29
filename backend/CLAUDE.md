@@ -21,7 +21,7 @@ ruyi-dream 0.1.0 的后端实现目录。当前后端是 FastAPI + SQLite + S3 �
 
 生产直接依赖见 `requirements.txt`，测试依赖入口见 `requirements-dev.txt`，传递依赖约束见 `requirements.constraints.txt`。不要预先引入复杂 SaaS 权限、多租户、计费、队列集群。
 
-访问控制当前使用固定 `user` / `admin` 双账号框架，不建立用户表、权限组或租户模型。两个角色访问同一套普通拍摄工作台；admin 增量能力必须以“admin UI/UX 大于等于 user”为前提，并在后端按 session role 做权限判断。
+访问控制当前使用固定 `user` / `admin` 双账号框架，不建立用户表、权限组或租户模型。两个角色共用拍摄执行链路；user 前台三步，admin 四步；姿势库、独立姿势选搭接口、姿势要求编辑和调用记录分页仅 admin 可访问，user 通过自动成片编排内部执行选姿势；admin 增量能力必须以“admin UI/UX 大于等于 user”为前提，并在后端按 session role 做权限判断。
 
 ## 文档索引 (Index)
 

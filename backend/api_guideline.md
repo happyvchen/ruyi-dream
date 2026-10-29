@@ -19,7 +19,7 @@
 - `POST /api/generation-tasks/{task_id}/styling`：运行 AI 智能选搭，输出当前 `StylingPlan`。
 - `POST /api/generation-tasks/{task_id}/preview`：已停用（410）；不再生成新的分镜预览。
 - `POST /api/generation-tasks/{task_id}/generate-final`：新任务从 `POSE_SELECTION_READY` 复用冻结的背景、五个姿势、商品/模特输入版本与成片规则，并发生成最终成片；旧任务兼容原预设。
-- `POST /api/generation-tasks/{task_id}/auto-run-final`：从当前第一个未完成阶段自动推进到成片。
+- `POST /api/generation-tasks/{task_id}/auto-run-final`：从当前第一个未完成阶段自动推进到成片。user 的“生成成片/继续生成”使用此接口，自动完成隐藏的姿势选搭；后台拍摄准备在创建调用前因素材/配置失败时，持久化 `SHOOT_PREPARATION_FAILED`，保留造型并允许修复后继续。
 - `POST /api/generation-tasks/{task_id}/cancel`：取消当前运行中的选搭或成片。
 - `PATCH /api/generation-batches/{batch_id}`：保存批次名；批次任务归属仍由 `GenerationTask.batch_id` 决定。
 - `POST /api/generation-batches/{batch_id}/auto-run-final`：批次开始/继续一键成片；整批完成后可传 `restart=true` 重新生成。
@@ -191,7 +191,7 @@ AI 选搭动态事实：
 
 ## 历史拍摄预设接口
 
-- `GET /api/shot-presets`：所有已登录角色读取 15 个当前槽位，以及三个服装类型各自的完整槽位数和校验错误。
+- `GET /api/shot-presets`：仅 admin 读取 15 个当前槽位，以及三个服装类型各自的完整槽位数和校验错误。
 - `POST /api/shot-presets/{category_family}/{shot_index}/{asset_role}`：仅 admin 单张替换 `background` 或 `pose`，成功后立即成为当前生效图片。
 - `DELETE /api/shot-presets/{category_family}/{shot_index}/{asset_role}`：仅 admin 删除当前单张图片并立即生效；该类型不完整期间不能开始新成片。
 - 旧整槽保存和发布接口返回 `410 Gone`。
@@ -221,7 +221,7 @@ AI 选搭动态事实：
 
 ## 姿势库与姿势选搭
 
-所有库接口沿用登录鉴权；参考 Prompt 草稿仅 admin 可读。
+所有姿势库接口、独立 select-poses、姿势要求 PATCH、attempts 分页与历史 shot-presets 读取仅 admin 可访问，user 返回 403；参考 Prompt 草稿也仅 admin 可读。user 使用 auto-run-final 自动编排内部姿势选搭，内部函数不受管理接口权限限制。
 
 | 方法与路径 | 契约 |
 |---|---|
@@ -236,5 +236,7 @@ AI 选搭动态事实：
 | POST `/api/poses/manage` | `{ids,action,confirmPhrase?}`，action 为 archive/restore/purge；purge 需单条名称或“全部删除”，返回清理错误列表 |
 | POST `/api/generation-tasks/{id}/select-poses` | 可选 `{userInstruction}`，先持久化状态和 attempt，再后台执行；重复请求 409 |
 | GET `/api/pose-prompt-drafts/{tagging\|selection}` | admin 获取参考正文，仅供填入编辑器，不写数据库或调用模型 |
+
+user 的 generation 系列 JSON 响应不含 poseSelection 参考图、姿势要求、原始调用快照与 provider 标识；保留后台状态和 active 指针用于恢复。配置错误转为业务提示，admin 与数据库快照保留原始事实。
 
 任务增加 `poseWorkflowEnabled`、`activePoseSelectionId`、`poseSelection` 与 `stageUserInputs.poseSelection`；PATCH 支持 `poseSelectionUserInstruction`。状态增加 POSE_SELECTION_RUNNING / POSE_SELECTION_READY。结果集返回 `poseSelectionId`，成片始终读取该选择及冻结的五组图片。新任务不得跳过姿势选搭，历史任务默认兼容原流程；选搭失败、取消和中断沿用现有失败协议，晚到响应不覆盖取消。

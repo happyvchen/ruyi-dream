@@ -2,7 +2,7 @@
 
 ## 职责 (Scope)
 
-ruyi-dream 0.1.0 的前端实现目录。当前前端是 React + Vite + TypeScript 单页应用，用于承载普通用户的四步“AI 摄影棚”：导入主推款、展示 AI Stylist 最终服装、穿法、配饰与空搭配原因；旧审美诊断只读兼容、独立选择五镜头姿势、生成 5 个固定镜头成片并复盘生成记录。
+ruyi-dream 0.1.0 的前端实现目录。当前前端是 React + Vite + TypeScript 单页应用，用于承载普通用户三步、管理员四步的“AI 摄影棚”：导入主推款、展示 AI Stylist 最终服装、穿法、配饰与空搭配原因；旧审美诊断只读兼容、独立选择五镜头姿势、生成 5 个固定镜头成片并复盘生成记录。
 
 UX 源头在 `../design/03_ux_guide/user_uiux.md`，本目录只管“前端怎么组织代码”和“界面规则怎么落地”。
 
@@ -22,7 +22,7 @@ UX 源头在 `../design/03_ux_guide/user_uiux.md`，本目录只管“前端怎�
 
 当前未引入 Tailwind、React Query、Zustand。不要为了“规范化”提前引入复杂状态库或后台管理框架。
 
-访问身份当前由固定 `user` / `admin` 双账号区分，两个角色展示同一套普通拍摄工作台。admin 新增模块必须以“admin UI/UX 大于等于 user”为原则追加，不削减 user 已有工作流；不要引入完整后台管理框架、用户管理系统或复杂 RBAC。
+访问身份当前由固定 `user` / `admin` 双账号区分，两个角色共享拍摄工作台与后台链路；user 隐藏独立姿势选搭，在最终成片页自动执行拍摄准备，admin 保留四步。admin 新增模块必须以“admin UI/UX 大于等于 user”为原则追加，不削减 user 已有工作流；不要引入完整后台管理框架、用户管理系统或复杂 RBAC。
 
 ## 文档索引 (Index)
 
@@ -68,4 +68,4 @@ UX 源头在 `../design/03_ux_guide/user_uiux.md`，本目录只管“前端怎�
 - UX 源头：`../design/03_ux_guide/CLAUDE.md`
 - 后端实现：`../backend/CLAUDE.md`
 
-- `姿势库`：复用搭配服装库交互维护一图一姿势、识别标签和归档；批量图片逐张入库，详情只替换单图；四步状态与启用要求见 `../design/01_generation_flow/pose_library_workflow.md`。
+- `姿势库`：仅 admin 可见和访问，复用搭配服装库交互维护一图一姿势、识别标签和归档；批量图片逐张入库，详情只替换单图；四步状态与启用要求见 `../design/01_generation_flow/pose_library_workflow.md`。

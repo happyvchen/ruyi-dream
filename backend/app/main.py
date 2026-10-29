@@ -22,7 +22,7 @@ from uuid import uuid4
 from typing import Any
 from urllib.parse import quote, urlencode
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from PIL import Image, ImageOps
@@ -569,6 +569,29 @@ async def generation_phase_error_handler(request: Request, exc: GenerationPhaseE
     )
 
 
+def user_generation_response(value: Any) -> Any:
+    """Project HTTP responses only; stored snapshots and internal execution stay intact."""
+    if isinstance(value, list):
+        return [user_generation_response(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    private_keys = {
+        "poseSelection", "poseSelectionId", "attempts", "requestFacts", "responseFacts",
+        "technicalMessage", "provider", "providerRequestId", "candidateRetrievalSnapshot",
+        "model_raw_output", "promptConfigSnapshot",
+    }
+    result = {}
+    for key, item in value.items():
+        if key in private_keys:
+            continue
+        if key in {"detail", "message", "error", "errorMessage"} and isinstance(item, str) and re.search(
+            r"prompt|provider|gemini|toapis|fal\b|姿势|拍摄预设", item, re.IGNORECASE
+        ):
+            item = "拍摄暂不可用，请联系管理员处理后继续生成。"
+        result[key] = user_generation_response(item)
+    return result
+
+
 @app.middleware("http")
 async def require_api_session(request: Request, call_next: Any) -> Any:
     public_paths = {"/api/health", "/api/version", "/api/auth/login", "/api/auth/logout", "/api/auth/session"}
@@ -578,7 +601,16 @@ async def require_api_session(request: Request, call_next: Any) -> Any:
         return JSONResponse(status_code=403, content={"detail": "请求来源不被允许"})
     if request.url.path.startswith("/api/") and not is_request_authenticated(request):
         return JSONResponse(status_code=401, content={"detail": "请先登录"})
-    return await call_next(request)
+    response = await call_next(request)
+    # Keep streaming downloads/media untouched. The outer performance middleware
+    # compresses the final JSON response after this role-specific projection.
+    if (get_request_role(request) == "user"
+            and (request.url.path.startswith("/api/generation-") or response.status_code >= 400)
+            and response.headers.get("content-type", "").startswith("application/json")):
+        body = b"".join([chunk async for chunk in response.body_iterator])
+        headers = {key: value for key, value in response.headers.items() if key.lower() != "content-length"}
+        return JSONResponse(user_generation_response(json.loads(body)), status_code=response.status_code, headers=headers)
+    return response
 
 
 app.add_middleware(HttpPerformanceMiddleware)
@@ -3980,7 +4012,7 @@ def get_generation_task_ai_invocations(task_id: int, request: Request) -> dict[s
     return {"items": get_task_attempts(task_id)}
 
 
-@app.get("/api/generation-tasks/{task_id}/attempts")
+@app.get("/api/generation-tasks/{task_id}/attempts", dependencies=[Depends(require_admin)])
 def get_generation_task_attempt_summaries(
     task_id: int,
     owner_type: str = Query(..., alias="ownerType"),
@@ -4213,7 +4245,9 @@ def get_generation_tasks_delete_impact(payload: DeleteImpactRequest) -> dict[str
 
 
 @app.patch("/api/generation-tasks/{task_id}")
-def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest) -> dict[str, Any]:
+def update_generation_task(task_id: int, payload: GenerationTaskUpdateRequest, request: Request) -> dict[str, Any]:
+    if payload_has_field(payload, "poseSelectionUserInstruction"):
+        require_admin(request)
     instruction_fields = {
         "aiStylingUserInstruction": "ai_styling_user_instruction_text",
         "poseSelectionUserInstruction": "pose_selection_user_instruction",
@@ -7355,7 +7389,7 @@ def serialize_shot_presets() -> dict[str, Any]:
     }
 
 
-@app.get("/api/shot-presets")
+@app.get("/api/shot-presets", dependencies=[Depends(require_admin)])
 def get_shot_presets(request: Request) -> dict[str, Any]:
     return serialize_shot_presets()
 
@@ -13656,7 +13690,7 @@ def serialize_pose(row: Any) -> dict[str, Any]:
         "images": [{"id": image["link_id"], "asset": serialize_media_asset(image)} for image in images]}
 
 
-@app.get("/api/poses")
+@app.get("/api/poses", dependencies=[Depends(require_admin)])
 def list_poses(q: str = "", status: str = "", include_archived: bool = Query(False, alias="includeArchived"),
                limit: int = Query(24, ge=1, le=96), offset: int = Query(0, ge=0)) -> dict[str, Any]:
     clauses, params = ["COALESCE(archive_reason, '') <> 'deletion_pending'"], []
@@ -13677,7 +13711,7 @@ def list_poses(q: str = "", status: str = "", include_archived: bool = Query(Fal
     return {"items": [serialize_pose(row) for row in rows], "total": total, "limit": limit, "offset": offset}
 
 
-@app.post("/api/poses")
+@app.post("/api/poses", dependencies=[Depends(require_admin)])
 async def create_pose(name: str = Form(...), files: list[UploadFile] = File(...)) -> dict[str, Any]:
     name = name.strip()
     if not name or len(name) > 80 or len(files) != 1:
@@ -13697,7 +13731,7 @@ async def create_pose(name: str = Form(...), files: list[UploadFile] = File(...)
     return {"item": serialize_pose(row)}
 
 
-@app.post("/api/poses/delete-impact")
+@app.post("/api/poses/delete-impact", dependencies=[Depends(require_admin)])
 def pose_delete_impact(payload: DeleteImpactRequest) -> dict[str, Any]:
     ids = normalized_task_ids(payload.ids)
     with get_db() as db:
@@ -13731,7 +13765,7 @@ def pose_purge_impact(db: Any, ids: list[int]) -> dict[str, Any]:
             "taskCount": 0, "resultImageCount": 0}
 
 
-@app.post("/api/poses/manage")
+@app.post("/api/poses/manage", dependencies=[Depends(require_admin)])
 def manage_poses(payload: PoseManageRequest) -> dict[str, Any]:
     ids = normalized_task_ids(payload.ids)
     if payload.action not in {"archive", "restore", "purge"}:
@@ -13769,14 +13803,14 @@ def manage_poses(payload: PoseManageRequest) -> dict[str, Any]:
     return {"ok": True, "objectCleanupErrors": cleanup_deleted_media_objects(object_keys)}
 
 
-@app.get("/api/poses/{pose_id}")
+@app.get("/api/poses/{pose_id}", dependencies=[Depends(require_admin)])
 def get_pose(pose_id: int) -> dict[str, Any]:
     with get_db() as db:
         row = pose_row(db, pose_id)
     return {"item": serialize_pose(row)}
 
 
-@app.patch("/api/poses/{pose_id}")
+@app.patch("/api/poses/{pose_id}", dependencies=[Depends(require_admin)])
 def update_pose(pose_id: int, payload: PoseUpdateRequest) -> dict[str, Any]:
     name = payload.name.strip()
     if not name:
@@ -13788,13 +13822,13 @@ def update_pose(pose_id: int, payload: PoseUpdateRequest) -> dict[str, Any]:
     return get_pose(pose_id)
 
 
-@app.post("/api/poses/{pose_id}/images")
+@app.post("/api/poses/{pose_id}/images", dependencies=[Depends(require_admin)])
 async def add_pose_images(pose_id: int, files: list[UploadFile] = File(...)) -> dict[str, Any]:
     # Compatibility endpoint: only repair a legacy entry with no image.
     return await save_pose_image(pose_id, files, replace=False)
 
 
-@app.put("/api/poses/{pose_id}/image")
+@app.put("/api/poses/{pose_id}/image", dependencies=[Depends(require_admin)])
 async def replace_pose_image(pose_id: int, files: list[UploadFile] = File(...)) -> dict[str, Any]:
     return await save_pose_image(pose_id, files, replace=True)
 
@@ -13830,7 +13864,7 @@ async def save_pose_image(pose_id: int, files: list[UploadFile], *, replace: boo
     return {**get_pose(pose_id), "objectCleanupErrors": cleanup_deleted_media_objects(keys)}
 
 
-@app.delete("/api/poses/{pose_id}/images/{image_id}")
+@app.delete("/api/poses/{pose_id}/images/{image_id}", dependencies=[Depends(require_admin)])
 def remove_pose_image(pose_id: int, image_id: int) -> dict[str, Any]:
     with get_db() as db:
         ensure_pose_editable(pose_row(db, pose_id))
@@ -13839,7 +13873,7 @@ def remove_pose_image(pose_id: int, image_id: int) -> dict[str, Any]:
     raise HTTPException(409, "每个姿势需保留 1 张图片，请替换图片或归档该姿势")
 
 
-@app.post("/api/poses/{pose_id}/recognize")
+@app.post("/api/poses/{pose_id}/recognize", dependencies=[Depends(require_admin)])
 async def recognize_pose(pose_id: int) -> dict[str, Any]:
     pose = get_pose(pose_id)["item"]
     if len(pose["images"]) != 1:
@@ -13928,7 +13962,7 @@ def get_generation_pose_selection(selection_id: int | None) -> dict[str, Any] | 
             "pose": get_media_asset_by_id(shot["pose_asset_id"]), "background": get_media_asset_by_id(shot["background_asset_id"])} for shot in shots]}
 
 
-@app.post("/api/generation-tasks/{task_id}/select-poses")
+@app.post("/api/generation-tasks/{task_id}/select-poses", dependencies=[Depends(require_admin)])
 async def select_generation_poses(task_id: int, payload: GenerationStageInstructionRequest | None = None) -> dict[str, Any]:
     # Run independently of the HTTP connection; the task/attempt are persisted before dispatch.
     context = claim_pose_selection(task_id, payload.userInstruction if payload else None, "manual_step")
@@ -13980,7 +14014,32 @@ def claim_pose_selection(task_id: int, user_instruction: str | None, trigger: st
 
 
 async def run_select_generation_poses(task_id: int, trigger: str = "auto_run") -> dict[str, Any]:
-    context = claim_pose_selection(task_id, None, trigger)
+    before = get_generation_task_row(task_id)
+    try:
+        context = claim_pose_selection(task_id, None, trigger)
+    except HTTPException as exc:
+        if trigger != "auto_run":
+            raise
+        # A hidden preparation stage has no open HTTP request to display preflight
+        # errors. Persist the failure so polling/reload can explain and resume it.
+        with get_db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute("SELECT * FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
+            if (current and current["auto_run_target"] == AUTO_RUN_TARGET_FINAL
+                    and current["status"] == before["status"]
+                    and current["status"] not in RUNNING_GENERATION_TASK_STATUSES
+                    and not current["archived_at"] and not current["deleted_at"]
+                    and current["active_styling_id"] == before["active_styling_id"]
+                    and current["current_input_version_id"] == before["current_input_version_id"]):
+                snapshot = {"stylingId": current["active_styling_id"], "inputVersionId": current["current_input_version_id"],
+                            "invocation": {"mode": trigger, "target": "pose_selection"}, "providerCallStarted": False}
+                attempt_id = create_attempt("generation_pose_selection", task_id, effective_text_provider(), snapshot, db=db)
+                timestamp = now_iso()
+                db.execute("""UPDATE generation_attempts SET status = 'FAILED', error_code = 'SHOOT_PREPARATION_FAILED',
+                    error_message = ?, failed_at = ?, updated_at = ? WHERE id = ?""", (str(exc.detail), timestamp, timestamp, attempt_id))
+                db.execute("""UPDATE generation_tasks SET status = 'FAILED', auto_run_target = NULL,
+                    auto_run_requested_at = NULL, auto_run_retry_at = NULL, updated_at = ? WHERE id = ?""", (timestamp, task_id))
+        raise
     await execute_pose_selection(task_id, *context, trigger=trigger)
     return {"item": get_generation_task_by_id(task_id)}
 

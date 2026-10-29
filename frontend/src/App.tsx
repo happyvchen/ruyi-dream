@@ -49,7 +49,7 @@ import { formalAssetFiles, groupImportFiles, importPath, isSupportedImageFile, s
 import type { ImportBatch, ImportIssue } from './lib/importGrouping'
 import { chooseDirectory, filesFromDirectory, getDirectoryHandle, storeDirectoryHandle, supportsDirectoryAccess } from './lib/directoryAccess'
 import type { RuyiFileSystemDirectoryHandle } from './lib/directoryAccess'
-import { friendlyAttemptErrorText, friendlyErrorText } from './lib/errorMessages'
+import { userErrorText, friendlyAttemptErrorText, friendlyErrorText } from './lib/errorMessages'
 import { CHECKSUM_COMPATIBILITY_NOTICE } from './lib/fileChecksum'
 import { parseRoute, routeToUrl } from './routes'
 import type { Page } from './routes'
@@ -94,7 +94,7 @@ const steps = [
   { title: '姿势选搭', icon: PersonStanding },
   { title: '最终成片', icon: Sparkles },
 ] as const
-const adminPages = new Set<Page>(['prompt-maintenance'])
+const adminPages = new Set<Page>(['prompt-maintenance', 'poses'])
 
 const defaultPageSizeOptions = [20, 50, 100] as const
 const libraryPageSizeOptions = [24, 48, 96] as const
@@ -523,7 +523,8 @@ export function App() {
       }
       if (options.refresh === 'background') void refreshAll().catch(() => undefined)
       else if (options.refresh !== false) await refreshAll().catch(() => undefined)
-      showError(err instanceof ApiError ? friendlyErrorText(err.errorCode, err.errorMessage || err.message) : err instanceof Error ? friendlyErrorText(undefined, err.message) : '操作失败')
+      const errorText = role === 'admin' ? friendlyErrorText : userErrorText
+      showError(err instanceof ApiError ? errorText(err.errorCode, err.errorMessage || err.message) : err instanceof Error ? errorText(undefined, err.message) : '操作失败')
       throw err
     } finally {
       setBusy(current => current?.id === operationId ? null : current)
@@ -574,7 +575,7 @@ export function App() {
   const nav = [
     { id: 'studio' as const, label: 'AI 摄影棚', icon: Bot },
     { id: 'library' as const, label: '搭配服装库', icon: Library },
-    { id: 'poses' as const, label: '姿势库', icon: PersonStanding },
+    ...(role === 'admin' ? [{ id: 'poses' as const, label: '姿势库', icon: PersonStanding }] : []),
     { id: 'model' as const, label: '模特与背景', icon: UserRound },
     { id: 'records' as const, label: '生成记录', icon: History },
     ...(role === 'admin' ? [
@@ -624,7 +625,7 @@ export function App() {
         </div>
         {page === 'studio' && <StudioPage task={task} setTask={setTask} role={role} run={run} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} uploadSessions={uploadSessions.filter((item) => item.scope === 'generation-task')} refreshUploadSessions={() => refreshUploadSessions('generation_task')} markBrowserUploading={markBrowserUploading} onStartNewTask={() => { suppressStudioAutoRestoreRef.current = true }} onLatestTaskCreated={setLatestWorkspaceTask} />}
         {page === 'library' && <LibraryPage garments={garments} run={run} role={role} onDeleteResult={noteDeleteOperationResult} uploadSessions={uploadSessions.filter((item) => item.scope === 'styling-garment')} uploadBatches={stylingUploadBatches} uploadBatchesLoaded={stylingUploadBatchesLoaded} refreshUploadSessions={() => refreshUploadSessions('styling_garment', 100)} markBrowserUploading={markBrowserUploading} showImport={libraryImportOpen} setShowImport={setLibraryImportOpen} importJobs={libraryImportJobs} setImportJobs={persistLibraryImportJobs} syncImportJobs={setLibraryImportJobs} />}
-        <PoseLibraryPage active={page === 'poses'} />
+        {role === 'admin' && <PoseLibraryPage active={page === 'poses'} />}
         {page === 'model' && <ModelPage models={models} role={role} run={run} />}
         {page === 'prompt-maintenance' && role === 'admin' && <PromptMaintenancePage run={run} />}
         {page === 'records' && <RecordsPage isAdmin={role === 'admin'} records={records} detail={recordDetail} setDetail={setRecordDetail} openTaskInStudio={openTaskInStudio} run={run} onDeleteResult={noteDeleteOperationResult} />}
@@ -803,14 +804,14 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   const [aiStylingInstruction, setAiStylingInstruction] = useState('')
   const [poseInstruction, setPoseInstruction] = useState('')
   const [finalImageInstruction, setFinalImageInstruction] = useState('')
-  const currentStep = getTaskStep(task)
-  const visibleStep = Math.min(Math.max(step, 0), currentStep) as StudioStep
+  const isAdmin = role === 'admin'
+  const currentStep = visibleStudioStep(getTaskStep(task), isAdmin)
+  const visibleStep = visibleStudioStep(Math.min(Math.max(step, 0), currentStep) as StudioStep, isAdmin)
   const summaryInputStep = (visibleStep > 0 ? visibleStep : currentStep) as StudioStep
-  const studioView = task ? studioTaskPresentation(task) : null
+  const studioView = task ? studioTaskPresentation(task, isAdmin) : null
   const batchContextMatches = !!task?.batchId && activeBatchIdRef.current === task.batchId
   const visibleBatchItems = batchContextMatches ? batchItems : []
   const batchContextLoading = !!task?.batchId && (!batchContextMatches || batchItemsLoading)
-  const isAdmin = role === 'admin'
   function applyTaskUpdate(nextTask: GenerationTask) {
     pollingTaskRef.current = nextTask
     setTask(nextTask)
@@ -941,7 +942,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     if (!restart && !canStartOneClickFinal(task)) return
     const confirmText = restart
       ? '将重新走完整流程：重新智能选搭并生成五张成片。已有成片会保留在历史记录里可追溯。确定重新一键成片吗？'
-      : '将自动完成后续步骤，并复用已有选搭。生成过程可能产生多次 AI 调用。'
+      : '将自动完成后续步骤，并复用已有选搭。已完成的结果将保留。'
     if (!window.confirm(confirmText)) return
     void run(restart ? '重新一键成片启动中...' : '启动一键成片中...', () => api.autoRunFinal(task.id, restart), (r: { item: GenerationTask }) => {
       applyTaskUpdate(r.item)
@@ -1139,7 +1140,7 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
     <section className="page studio-page">
       <PageTitle
         title="AI 摄影棚"
-        subtitle="导入主推款，完成服装与姿势选搭，生成五张电商棚拍成片。"
+        subtitle={isAdmin ? "导入主推款，完成服装与姿势选搭，生成五张电商棚拍成片。" : "导入主推款，确认造型，生成五张电商棚拍成片。"}
         actions={task ? (
           <div className="studio-title-actions">
             <button className="management-action" onClick={startNewTask}><ImagePlus size={16} />新建拍摄任务</button>
@@ -1161,12 +1162,12 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
           )}
           <div className="panel studio-main">
             <div className="studio-main-top">
-              <StepRail active={visibleStep} executing={studioView?.executingStage ?? null} max={currentStep} onSelect={setStep} />
+              <StepRail isAdmin={isAdmin} active={visibleStep} executing={studioView?.executingStage ?? null} max={currentStep} onSelect={setStep} />
             </div>
             <div className="studio-stage-viewport">
               {visibleStep === 0 && <UploadHeroStep task={task} setTask={applyTaskUpdate} run={run} uploadSessions={uploadSessions} refreshUploadSessions={refreshUploadSessions} markBrowserUploading={markBrowserUploading} onLatestTaskCreated={onLatestTaskCreated} />}
               {visibleStep === 1 && <StylingStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={aiStylingInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
-              {visibleStep === 2 && <PoseSelectionStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={poseInstruction} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
+              {isAdmin && visibleStep === 2 && <PoseSelectionStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={poseInstruction} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
               {visibleStep === 3 && <FinalStep task={task} setTask={applyTaskUpdate} run={run} userInstruction={finalImageInstruction} localOperations={localOperations} startLocalOperation={startLocalOperation} clearLocalOperationsFor={clearLocalOperationsFor} isAdmin={isAdmin} onOpenAICallLogs={openAICallLogs} />}
             </div>
           </div>
@@ -1266,10 +1267,11 @@ function preferredRecentTaskPageSize() {
   return Math.min(recentTaskMaxPageSize, Math.max(12, bufferedRows))
 }
 
-function StepRail({ active, executing, max, onSelect }: { active: StudioStep; executing: StudioStep | null; max: StudioStep; onSelect: (step: StudioStep) => void }) {
+function StepRail({ active, executing, max, onSelect, isAdmin }: { isAdmin: boolean; active: StudioStep; executing: StudioStep | null; max: StudioStep; onSelect: (step: StudioStep) => void }) {
   return (
-    <div className="step-rail">
+    <div className={`step-rail ${isAdmin ? '' : 'step-rail-user'}`}>
       {steps.map((step, index) => {
+        if (!isAdmin && index === 2) return null
         const enabled = index <= max
         const isExecuting = executing === index
         const isDone = index < max
@@ -1282,7 +1284,7 @@ function StepRail({ active, executing, max, onSelect }: { active: StudioStep; ex
             aria-current={active === index ? 'step' : undefined}
             aria-label={`${step.title}${isExecuting ? '，正在执行' : ''}`}
           >
-            <strong>{isExecuting ? <Loader2 size={14} className="spin" /> : isDone ? <Check size={14} /> : index + 1}</strong>
+            <strong>{isExecuting ? <Loader2 size={14} className="spin" /> : isDone ? <Check size={14} /> : !isAdmin && index === 3 ? 3 : index + 1}</strong>
             <span>{step.title}</span>
           </button>
         )
@@ -2324,7 +2326,7 @@ function StylingStep({ task, setTask, run, userInstruction, localOperations, sta
       <div className="step-scroll-content">
         <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="依据主推款与 Lily 品牌风格选择合适服装，并给出穿法和配饰建议；成套或没有合适商品时可以不搭配。">AI 智能选搭</HeadingWithTooltip></div>
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
-          <div className="stage-operation-status" key="status"><AIOperationList operations={operations} taskId={task?.id} ownerType="generation_styling" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`AI 智能选搭 · Attempt #${operation.id}`, ['generation_styling'], operation.id) : undefined} /></div>
+          <div className="stage-operation-status" key="status">{isAdmin ? <AIOperationList operations={operations} taskId={task?.id} ownerType="generation_styling" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`AI 智能选搭 · Attempt #${operation.id}`, ['generation_styling'], operation.id) : undefined} /> : <UserGenerationStatus task={task} stage="styling" />}</div>
         ) : (
           <div className="stage-business-result" key="result">{task?.styling ? (
             <StylingPlanSummary task={task} />
@@ -2544,6 +2546,36 @@ function diagnosisItems(value: Record<string, unknown>): string[] {
   }).filter(Boolean)
 }
 
+function UserGenerationStatus({ task, stage, submitting = false }: { task: GenerationTask | null; stage: 'styling' | 'final'; submitting?: boolean }) {
+  const running = !!task && (stage === 'styling' ? task.status === 'STYLING_RUNNING' : ['POSE_SELECTION_RUNNING', 'FINAL_RUNNING'].includes(task.status))
+  const now = useTicker(running)
+  if (!task) return null
+  const operations = (task.aiOperations ?? []).filter((operation) => stage === 'styling'
+    ? operation.ownerType === 'generation_styling'
+    : ['generation_pose_selection', 'generation_result_set', 'generation_result_image'].includes(operation.ownerType))
+  const latest = [...operations].sort((a, b) => b.id - a.id)[0]
+  const retrying = isTaskWaitingForAutoRetry(task)
+  const queued = isTaskQueuedForAutoRun(task)
+  const preparing = stage === 'final' && (submitting || task.status === 'POSE_SELECTION_RUNNING'
+    || (task.status === 'FINAL_RUNNING' && ['PENDING', 'RUNNING'].includes(task.resultSet?.preparation?.status ?? '')))
+  const failed = stage === 'styling' ? latest?.status === 'FAILED' : ['FAILED', 'FINAL_PARTIAL'].includes(task.status) || task.resultSet?.preparation?.status === 'FAILED'
+  const title = retrying ? '拍摄暂时中断，正在等待重试'
+    : queued ? `等待拍摄${task.autoRunQueuePosition ? ` · 第 ${task.autoRunQueuePosition} 位` : ''}`
+    : preparing ? '正在准备拍摄…'
+    : running ? stage === 'styling' ? '正在搭配造型…' : `正在生成成片 · 已完成 ${finalSucceededCount(task)}/5 张`
+    : failed ? stage === 'styling' ? '选搭未完成，请重新选搭' : '拍摄未完成，已保留当前造型和已完成的成片'
+    : task.status === 'CANCELLED' ? '已取消，可继续生成'
+    : task.status === 'COMPLETED' ? '5 张成片已完成'
+    : stage === 'final' ? '造型已就绪，可以开始拍摄' : task.styling ? '造型已就绪' : '等待智能选搭'
+  const startedAt = latest?.startedAt || latest?.createdAt
+  return <div className="user-generation-status" role={failed && !retrying ? 'alert' : 'status'} aria-live="polite">
+    <strong>{title}</strong>
+    {(running || queued || retrying) && <p>{stage === 'final' ? '将为这套造型生成 5 张电商棚拍成片。' : ''}可离开页面，稍后查看。</p>}
+    {running && startedAt && <span>已等待 {formatDuration(elapsedSeconds(startedAt, now))}</span>}
+    {failed && !retrying && latest?.errorCode && <p>{userErrorText(latest.errorCode, latest.errorMessage)}</p>}
+  </div>
+}
+
 function FinalStep({ task, setTask, run, userInstruction, localOperations, startLocalOperation, clearLocalOperationsFor, isAdmin, onOpenAICallLogs }: {
   task: GenerationTask | null
   setTask: (task: GenerationTask) => void
@@ -2556,24 +2588,26 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
   onOpenAICallLogs: (title: string, ownerTypes: string[], attemptId: number) => void
 }) {
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
+  const [submitting, setSubmitting] = useState(false)
   const images = task?.resultSet?.images ?? []
   const finalAssets = images.map((image) => image.asset).filter((asset): asset is MediaAsset => !!asset)
-  const canGenerate = !!task?.styling && (!task.poseWorkflowEnabled || !!task.poseSelection) && !isTaskLockedForGeneration(task) && ['POSE_SELECTION_READY', 'STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task?.status ?? '')
+  const canGenerate = !!task?.styling && (!isAdmin || !task.poseWorkflowEnabled || !!task.poseSelection) && !submitting && !isTaskLockedForGeneration(task) && ['POSE_SELECTION_READY', 'STYLING_READY', 'PREVIEW_READY', 'COMPLETED', 'FINAL_PARTIAL', 'FAILED', 'CANCELLED'].includes(task?.status ?? '')
   const hasFinalImages = images.some((image) => !!image.asset)
   const finalHistoryOperations = task ? operationFallbacks(task, localOperations, 'generation_result_image') : []
   const finalSlots = Array.from({ length: 5 }, (_, index) => images.find((image) => image.sortOrder === index + 1) ?? null)
   const preparation = task?.resultSet?.preparation
-  const preparing = task?.status === 'FINAL_RUNNING' && ['PENDING', 'RUNNING'].includes(preparation?.status ?? '')
+  const preparing = task?.status === 'POSE_SELECTION_RUNNING' || (task?.status === 'FINAL_RUNNING' && ['PENDING', 'RUNNING'].includes(preparation?.status ?? ''))
   return (
     <div className="step-panel">
       <div className="step-scroll-content">
-        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip="按已确认的背景、姿势和镜头要求并发生成五张成片；可逐张检查、下载或重新生成。">最终成片</HeadingWithTooltip></div>
-        {preparing && <p role="status" className="edit-hint">正在准备拍摄要求…</p>}
-        {preparation?.status === 'FAILED' && <p role="alert" className="inline-error">{preparation.error}</p>}
+        <div className="step-copy"><HeadingWithTooltip as="h2" tooltip={isAdmin ? "按已确认的背景、姿势和镜头要求并发生成五张成片；可逐张检查、下载或重新生成。" : "为当前造型生成五张成片，可逐张检查、下载或重新生成。"}>最终成片</HeadingWithTooltip></div>
+        {!isAdmin && <UserGenerationStatus task={task} stage="final" submitting={submitting} />}
+        {isAdmin && preparing && <p role="status" className="edit-hint">正在准备拍摄要求…</p>}
+        {isAdmin && preparation?.status === 'FAILED' && <p role="alert" className="inline-error">{preparation.error}</p>}
         {isAdmin && preparation?.attemptId && <button className="management-action" onClick={() => onOpenAICallLogs('成片提示词优化', ['generation_result_set'], preparation.attemptId!)}>查看提示词优化记录</button>}
         <div className="stage-priority-content">{['result', 'status'].map((section) => section === 'status' ? (
           <div className="stage-operation-status" key="status">
-            <AIOperationList operations={finalHistoryOperations} taskId={task?.id} ownerType="generation_result_image" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成成片 · Attempt #${operation.id}`, ['generation_result_image'], operation.id) : undefined} />
+            {isAdmin && <AIOperationList operations={finalHistoryOperations} taskId={task?.id} ownerType="generation_result_image" onOpenTechnicalDetails={isAdmin ? (operation) => onOpenAICallLogs(`生成成片 · Attempt #${operation.id}`, ['generation_result_image'], operation.id) : undefined} />}
           </div>
         ) : (
           <div className="stage-business-result" key="result"><div className="result-grid">
@@ -2586,7 +2620,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
               ) : (
                 <div className="image-placeholder">
                   {preparing ? '待拍摄' : image ? (image.activeAttempt ? attemptStatusText(image.activeAttempt) : statusText(image.status)) : '等待生成'}
-                  {image?.activeAttempt && isAttemptRunning(image.activeAttempt) && (
+                  {isAdmin && image?.activeAttempt && isAttemptRunning(image.activeAttempt) && (
                     <small>
                       {(() => {
                         const phase = currentAttemptPhase(image.activeAttempt)
@@ -2598,7 +2632,11 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
                     </small>
                   )}
                   {image?.activeAttempt && !isAttemptRunning(image.activeAttempt) && (() => {
-                    const note = attemptFriendlyFailure(
+                    const note = !isAdmin && image.activeAttempt.status === 'FAILED'
+                      ? task?.status === 'FINAL_RUNNING' && image.activeAttempt.errorCode === 'UPLOAD_FAILED'
+                        ? '正在等待本轮拍摄完成后恢复'
+                        : userErrorText(image.activeAttempt.errorCode, image.activeAttempt.errorMessage)
+                      : attemptFriendlyFailure(
                       image.activeAttempt,
                       task?.status === 'FINAL_RUNNING' && task.autoRunTarget === 'FINAL',
                     )
@@ -2618,17 +2656,25 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
             <Download size={16} /> 下载全部成片
           </a>
         )}
-        <button className="task-action" disabled={!canGenerate} onClick={() => task && void run(hasFinalImages ? '重新生成最终成片中...' : '生成最终成片中...', () => {
-          for (let index = 1; index <= 5; index += 1) {
-            startLocalOperation({ taskId: task.id, ownerType: 'generation_result_image', ownerId: index, provider: 'image-2' })
-          }
-          setTask({ ...task, status: 'FINAL_RUNNING' })
-          return api.generateFinal(task.id, userInstruction)
-        }, (r: { item: GenerationTask }) => {
-          clearLocalOperationsFor(['generation_result_image'], task.id)
-          setTask(r.item)
-        }, { refresh: false })}>
-          <Sparkles size={16} /> {hasFinalImages ? '重新生成成片' : '生成成片'}
+        <button className="task-action" disabled={!canGenerate} onClick={() => {
+          if (!task || submitting) return
+          setSubmitting(true)
+          void run(hasFinalImages ? '生成成片中...' : '准备拍摄中...', async () => {
+            if (!isAdmin && task.status !== 'COMPLETED') {
+              await api.updateTask(task.id, { finalImageUserInstruction: userInstruction })
+              return api.autoRunFinal(task.id)
+            }
+            for (let index = 1; index <= 5; index += 1) {
+              startLocalOperation({ taskId: task.id, ownerType: 'generation_result_image', ownerId: index, provider: 'image-2' })
+            }
+            setTask({ ...task, status: 'FINAL_RUNNING' })
+            return api.generateFinal(task.id, userInstruction)
+          }, (r: { item: GenerationTask }) => {
+            clearLocalOperationsFor(['generation_result_image'], task.id)
+            setTask(r.item)
+          }, { refresh: false }).catch(() => undefined).finally(() => setSubmitting(false))
+        }}>
+          <Sparkles size={16} /> {submitting ? '正在启动拍摄' : !isAdmin && task && ['FAILED', 'CANCELLED', 'FINAL_PARTIAL'].includes(task.status) ? '继续生成' : hasFinalImages ? '重新生成成片' : '生成成片'}
         </button>
       </div>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
@@ -6177,7 +6223,7 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
               </div>
             ) : environmentLoadState === 'ready' ? (
               <>
-                <p className="edit-hint">五个镜头共用这张背景的空间与光线，各自的景别和构图由拍摄要求决定。更换背景用于下次姿势选搭，已选姿势和历史成片保留原背景。</p>
+                <p className="edit-hint">五个镜头共用这张背景的空间与光线，各自的景别和构图由拍摄要求决定。更换背景用于下一次拍摄准备，历史成片保留原背景。</p>
                 <div className="saved-image-grid">
                   <ShootingReferenceCard label="统一背景" asset={environment} group={environment ? [environment] : []} onOpen={setViewer} editable={isAdmin}
                     onReplace={(file) => void run('更换拍摄背景中...', () => api.setShootEnvironment(file), (result: { asset: MediaAsset | null }) => setEnvironment(result.asset), { refresh: false })}
@@ -7319,7 +7365,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
               <Meta label="状态" value={statusText(detail.status)} />
               <Meta label="选中搭配" value={`${detail.styling?.selectedMaterials?.length ?? 0} 件`} />
               <RecordImagePreview task={detail} />
-              {detail.poseSelection && <details className="result-details"><summary>查看拍摄姿势</summary><PoseSelectionSummary selection={detail.poseSelection} /></details>}
+              {isAdmin && detail.poseSelection && <details className="result-details"><summary>查看拍摄姿势</summary><PoseSelectionSummary selection={detail.poseSelection} /></details>}
               {isAdmin && <RecordPromptHistory key={detail.id} task={detail} />}
               <button className="management-action" type="button" disabled={downloadChecking} onClick={() => startSingleRecordDownload(detail)}>
                 <Download size={14} /> {downloadChecking ? '检查成片中...' : '下载成片'}
@@ -8028,7 +8074,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
               defaultOpen
             />
           )}
-          {tagging && runningTagAttempt && <AIOperationList operations={[runningTagAttempt]} />}
+          {isAdmin && tagging && runningTagAttempt && <AIOperationList operations={[runningTagAttempt]} />}
           <CodeEditor item={item} run={run} disabled={tagging} />
         </div>
         <div className="drawer-section">
@@ -9314,18 +9360,23 @@ type StudioTaskPresentation = {
   executingStage: StudioStep | null
 }
 
-function studioTaskPresentation(task: GenerationTask): StudioTaskPresentation {
+function visibleStudioStep(step: StudioStep, isAdmin: boolean): StudioStep {
+  return !isAdmin && step === 2 ? 3 : step
+}
+
+function studioTaskPresentation(task: GenerationTask, isAdmin: boolean): StudioTaskPresentation {
   const completedStageCount = completedStudioStageCount(task)
-  const runningStage = runningStudioStage(task)
+  const internalRunningStage = runningStudioStage(task)
+  const runningStage = internalRunningStage == null ? null : visibleStudioStep(internalRunningStage, isAdmin)
   const currentStageLabel = runningStage != null
     ? steps[runningStage].title
     : task.status === 'COMPLETED'
       ? '全部完成'
-      : steps[getTaskStep(task)].title
+      : steps[visibleStudioStep(getTaskStep(task), isAdmin)].title
   return {
     statusLabel: taskListStatusLabel(task),
     currentStageLabel,
-    progressLabel: `已完成 ${completedStageCount}/4 步`,
+    progressLabel: isAdmin ? `已完成 ${completedStageCount}/4 步` : `成片已完成 ${finalSucceededCount(task)}/5 张`,
     executingStage: runningStage,
   }
 }
@@ -9394,8 +9445,8 @@ function statusText(status: string) {
     READY_FOR_STYLING: '待选搭',
     STYLING_RUNNING: '选搭中',
     STYLING_READY: '已选搭',
-    POSE_SELECTION_RUNNING: '姿势选搭中',
-    POSE_SELECTION_READY: '姿势已选定',
+    POSE_SELECTION_RUNNING: '正在准备拍摄',
+    POSE_SELECTION_READY: '待生成成片',
     PREVIEW_RUNNING: '分镜预览中',
     PREVIEW_READY: '分镜预览完成',
     FINAL_RUNNING: '生成中',

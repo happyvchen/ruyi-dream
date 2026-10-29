@@ -276,6 +276,7 @@ def provider_error_presentation(error_code: str | None, reason: str | None = Non
         ERROR_MALFORMED_OUTPUT: ("AI 返回结果不完整", "请重新生成。", "重新生成", False),
         ERROR_BUSINESS_REJECT: (reason or "当前方案不成立", "请调整要求后重试。", "调整后重试", False),
         ERROR_SYSTEM_ERROR: ("系统处理异常", "错误已记录，请稍后重试。", "稍后重试", False),
+        "SHOOT_PREPARATION_FAILED": ("拍摄暂不可用", "请联系管理员处理后继续生成，当前造型已保留。", "联系管理员", False),
         "PROMPT_PREPARATION_FAILED": ("拍摄准备未完成", "本轮尚未提交图片生成，请重试或联系管理员检查拍摄要求。", "重试拍摄准备", False),
         ERROR_WAF_BLOCK: ("AI 服务访问受限", "请联系管理员检查服务访问配置。", "联系管理员", False),
         ERROR_PROVIDER_FAILED: ("图片生成未成功", "请稍后重试。", "重新生成", False),

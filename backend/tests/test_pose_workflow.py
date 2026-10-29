@@ -266,7 +266,7 @@ def test_pose_reference_drafts_are_admin_only_and_do_not_save(client, monkeypatc
     monkeypatch.setattr(app_main.settings, 'user_password', 'test-user')
     assert client.get('/api/poses').status_code == 401
     client.cookies.set('ruyi_session', app_main.create_session_cookie('user'))
-    assert client.get('/api/poses').status_code == 200
+    assert client.get('/api/poses').status_code == 403
     assert client.get('/api/pose-prompt-drafts/tagging').status_code == 403
     client.cookies.set('ruyi_session', app_main.create_session_cookie('admin'))
     assert client.get('/api/pose-prompt-drafts/tagging').status_code == 200
@@ -690,3 +690,103 @@ def test_pose_direction_renders_action_facts_without_selection_meta() -> None:
     # 历史非 JSON 快照原样返回。
     assert render_pose_direction("保持原图肩胸支撑") == "保持原图肩胸支撑"
     assert render_pose_direction("") == ""
+
+
+def login_role(client, monkeypatch, role):
+    monkeypatch.setattr(app_main.settings, 'user_password', 'test-user-password')
+    monkeypatch.setattr(app_main.settings, 'admin_password', 'test-admin-password')
+    monkeypatch.setattr(app_main.settings, 'trust_reverse_proxy_auth', False)
+    client.cookies.set('ruyi_session', app_main.create_session_cookie(role))
+
+
+@pytest.mark.parametrize('method,path', [
+    ('GET', '/api/poses'), ('POST', '/api/poses'),
+    ('GET', '/api/poses/1'), ('PATCH', '/api/poses/1'),
+    ('POST', '/api/poses/delete-impact'), ('POST', '/api/poses/manage'),
+    ('POST', '/api/poses/1/images'), ('PUT', '/api/poses/1/image'),
+    ('DELETE', '/api/poses/1/images/1'), ('POST', '/api/poses/1/recognize'),
+    ('POST', '/api/generation-tasks/1/select-poses'),
+    ('GET', '/api/generation-tasks/1/attempts?ownerType=generation_pose_selection'),
+    ('GET', '/api/shot-presets'), ('GET', '/api/pose-prompt-drafts/selection'),
+    ('GET', '/api/prompt-configs'), ('GET', '/api/generation-tasks/1/ai-invocations'),
+])
+def test_user_cannot_access_pose_or_technical_controls(client, monkeypatch, method, path):
+    login_role(client, monkeypatch, 'user')
+    assert client.request(method, path).status_code == 403
+
+
+def test_user_cannot_edit_pose_requirements_but_can_save_final_requirements(client, monkeypatch):
+    ids = prepare_task()
+    login_role(client, monkeypatch, 'user')
+    url = f'/api/generation-tasks/{ids["task_id"]}'
+    assert client.patch(url, json={'poseSelectionUserInstruction': 'test'}).status_code == 403
+    saved = client.patch(url, json={'finalImageUserInstruction': '自然光影'})
+    assert saved.status_code == 200
+    assert saved.json()['item']['stageUserInputs']['finalImage'] == '自然光影'
+
+
+def test_user_auto_run_selects_poses_then_generates_and_redacts_http_snapshots(client, monkeypatch):
+    ids = prepare_task()
+    _, asset_id, code = seed_pose()
+    calls = mock_selection(monkeypatch, code, asset_id)
+    login_role(client, monkeypatch, 'user')
+    task_id = ids['task_id']
+    submitted = client.post(f'/api/generation-tasks/{task_id}/auto-run-final')
+    assert submitted.status_code == 200
+    assert submitted.json()['item']['autoRunTarget'] == 'FINAL'
+    # The actual orchestrator runs with mocked text/image execution only.
+    generated = []
+    async def final(task_id, **kwargs):
+        internal = app_main.get_generation_task_by_id(task_id)
+        assert internal['poseSelection'] and len(internal['poseSelection']['shots']) == 5
+        generated.append((task_id, kwargs))
+    monkeypatch.setattr(app_main, 'run_generate_final_images', final)
+    asyncio.run(app_main.run_auto_final_generation(task_id))
+    assert len(calls) == 1 and len(generated) == 1
+    assert generated[0][1]['continue_existing'] is True
+    for path in [f'/api/generation-tasks/{task_id}', f'/api/generation-records/{task_id}']:
+        user_item = client.get(path).json()['item']
+        assert 'poseSelection' not in user_item
+        assert 'poseSelection' not in user_item['stageUserInputs']
+        assert 'attempts' not in user_item
+        assert all('provider' not in op for op in user_item['aiOperations'])
+    # Admin can still inspect the frozen poses; the user projection never mutates storage.
+    login_role(client, monkeypatch, 'admin')
+    admin_item = client.get(f'/api/generation-tasks/{task_id}?includeDebug=true').json()['item']
+    assert len(admin_item['poseSelection']['shots']) == 5
+    assert admin_item['attempts']
+    assert client.get('/api/poses').status_code == 200
+
+
+def test_user_generation_errors_hide_configuration_language(client, monkeypatch):
+    ids = prepare_task()
+    login_role(client, monkeypatch, 'user')
+    response = client.post(f'/api/generation-tasks/{ids["task_id"]}/generate-final')
+    assert response.status_code == 409
+    assert '管理员' in response.json()['detail']
+    assert '姿势' not in response.text and 'Prompt' not in response.text
+
+
+def test_user_hidden_preparation_failure_is_persisted_and_can_resume(client, monkeypatch):
+    ids = prepare_task()  # No poses available: fail before any external call.
+    task_id = ids['task_id']
+    login_role(client, monkeypatch, 'user')
+    assert client.post(f'/api/generation-tasks/{task_id}/auto-run-final').status_code == 200
+    with pytest.raises(app_main.HTTPException):
+        asyncio.run(app_main.run_auto_final_generation(task_id))
+    item = client.get(f'/api/generation-tasks/{task_id}').json()['item']
+    assert item['status'] == 'FAILED' and item['autoRunTarget'] is None
+    assert item['activeStylingId'] == ids['styling_id']
+    attempt = item['aiOperations'][0]
+    assert attempt['errorCode'] == 'SHOOT_PREPARATION_FAILED'
+    assert '管理员' in attempt['errorMessage'] and '姿势' not in attempt['errorMessage']
+    assert client.get(f'/api/generation-tasks/{task_id}/status').json()['error']['retryable'] is False
+    # After admin supplies the missing poses, continue reuses the same styling.
+    _, asset_id, code = seed_pose()
+    calls = mock_selection(monkeypatch, code, asset_id)
+    async def final(*args, **kwargs): pass
+    monkeypatch.setattr(app_main, 'run_generate_final_images', final)
+    assert client.post(f'/api/generation-tasks/{task_id}/auto-run-final').status_code == 200
+    asyncio.run(app_main.run_auto_final_generation(task_id))
+    assert len(calls) == 1
+    assert app_main.get_generation_task_row(task_id)['active_styling_id'] == ids['styling_id']

@@ -19,6 +19,7 @@ const BUSY_RETRY: FriendlyError = {
 }
 
 const ERROR_MESSAGE_MAP: Record<string, FriendlyError> = {
+  SHOOT_PREPARATION_FAILED: { title: '拍摄暂不可用', hint: '请联系管理员处理后继续生成，当前造型已保留。', tone: 'error' },
   // —— 网关 / 连接 / 限流 / 超时类：后端自动重试 ——
   GATEWAY_5XX: BUSY_RETRY,
   CONN_RESET: BUSY_RETRY,
@@ -152,6 +153,14 @@ export function friendlyAttemptErrorText(
 ): string {
   if (taskStillRunning && errorCode === 'UPLOAD_FAILED') {
     return '参考图导入中断，等待本轮其他镜头完成后自动恢复'
+  }
+  return friendlyErrorText(errorCode, fallback)
+}
+
+/** User surfaces never expose configuration or hidden workflow terminology. */
+export function userErrorText(errorCode?: string | null, fallback?: string | null): string {
+  if (fallback && /prompt|provider|gemini|toapis|fal\b|姿势|拍摄预设/i.test(fallback)) {
+    return '拍摄暂不可用，请联系管理员处理后继续生成。'
   }
   return friendlyErrorText(errorCode, fallback)
 }

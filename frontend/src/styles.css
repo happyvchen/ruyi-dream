@@ -5722,3 +5722,10 @@ pre {
 @media (max-width: 600px) {
   .step-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* Ordinary users see three business stages; preparation stays within final images. */
+.step-rail.step-rail-user { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.user-generation-status { display: grid; gap: 8px; padding: 16px; color: #475569; }
+.user-generation-status strong { color: #334155; }
+.user-generation-status p { margin: 0; }
+.user-generation-status span { font-size: 12px; }

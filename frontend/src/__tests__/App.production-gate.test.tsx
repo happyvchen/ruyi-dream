@@ -713,7 +713,7 @@ describe('production gate app shell and page controls', () => {
     apiMock.getTaskStatus.mockResolvedValue({ taskId: 1, status: 'FINAL_RUNNING', detailRevision: 0, operations: [], progress: { completed: 0, total: 5 } })
     window.history.replaceState(null, '', '/studio?task=1')
     render(<App />)
-    expect(await screen.findByText('正在准备拍摄要求…')).toBeInTheDocument()
+    expect(await screen.findByText('正在准备拍摄…')).toBeInTheDocument()
     expect(screen.getAllByText('待拍摄')).toHaveLength(5)
     expect(screen.queryByRole('button', { name: '查看提示词优化记录' })).not.toBeInTheDocument()
     expect(apiMock.testPromptOptimization).not.toHaveBeenCalled()
@@ -2750,6 +2750,64 @@ it.each(['library', 'records'] as const)('ignores a cancelled %s failure while a
 describe('pose library and the fourth studio stage', () => {
   const pose = { id: 91, code: 'POSE-91', name: '自然行走', status: 'READY', aiTags: { 核心动作: ['轻步行走'] }, images: [{ id: 1, asset: task.images[0].asset }], createdAt: task.createdAt, updatedAt: task.updatedAt }
   const styledTask = { ...task, status: 'STYLING_READY', poseWorkflowEnabled: true, activeStylingId: 71, styling: { id: 71, selectedMaterials: [], stylingPlan: {}, createdAt: task.createdAt } }
+
+  it('redirects user pose-library deep links without fetching its data', async () => {
+    configureApi('user')
+    window.history.replaceState(null, '', '/poses')
+    const { container } = render(<App />)
+    await screen.findByRole('button', { name: '搭配服装库' })
+    await waitFor(() => expect(window.location.pathname).toBe('/studio'))
+    expect(screen.queryByRole('button', { name: '姿势库' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Prompt 维护' })).not.toBeInTheDocument()
+    expect(container.querySelectorAll('.step-rail button')).toHaveLength(3)
+    expect(apiMock.listPoses).not.toHaveBeenCalled()
+  })
+
+  it('starts user final generation through the resumable pipeline and saves final requirements', async () => {
+    configureApi('user')
+    apiMock.getTask.mockResolvedValue({ item: styledTask })
+    apiMock.autoRunFinal.mockResolvedValue({ item: { ...styledTask, status: 'POSE_SELECTION_RUNNING', autoRunTarget: 'FINAL' } })
+    apiMock.getTaskStatus.mockResolvedValue({ taskId: 1, status: 'POSE_SELECTION_RUNNING', detailRevision: 0, progress: { completed: 0, total: 5 } })
+    window.history.replaceState(null, '', '/studio?task=1')
+    render(<App />)
+    const action = await screen.findByRole('button', { name: '生成成片' })
+    expect(action).toBeEnabled()
+    fireEvent.change(screen.getByRole('textbox', { name: '成片要求' }), { target: { value: '自然光影' } })
+    fireEvent.click(action)
+    await waitFor(() => expect(apiMock.autoRunFinal).toHaveBeenCalledWith(1))
+    expect(apiMock.updateTask).toHaveBeenCalledWith(1, { finalImageUserInstruction: '自然光影' })
+    expect(await screen.findByText('正在准备拍摄…')).toBeInTheDocument()
+    expect(screen.getAllByText('待拍摄')).toHaveLength(5)
+    expect(screen.queryByText(/姿势选搭/)).not.toBeInTheDocument()
+    expect(screen.queryByText('展开历史调用记录')).not.toBeInTheDocument()
+    expect(apiMock.selectPoses).not.toHaveBeenCalled()
+  })
+
+  it.each(['POSE_SELECTION_RUNNING', 'FAILED', 'CANCELLED'])('restores user %s into final images with no pose controls', async (status) => {
+    configureApi('user')
+    const restored = { ...styledTask, status, aiOperations: [{ id: 90, ownerType: 'generation_pose_selection', ownerId: 1, status: status === 'POSE_SELECTION_RUNNING' ? 'RUNNING' : status, createdAt: task.createdAt }] }
+    apiMock.getTask.mockResolvedValue({ item: restored })
+    apiMock.getTaskStatus.mockResolvedValue({ taskId: 1, status, detailRevision: 0, progress: { completed: 0, total: 5 } })
+    window.history.replaceState(null, '', '/studio?task=1')
+    const { container } = render(<App />)
+    await screen.findByRole('heading', { name: '最终成片' })
+    expect(container.querySelectorAll('.step-rail button')).toHaveLength(3)
+    expect(screen.queryByRole('textbox', { name: '姿势要求' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/姿势选搭/)).not.toBeInTheDocument()
+    expect(screen.queryByText('展开历史调用记录')).not.toBeInTheDocument()
+    if (status !== 'POSE_SELECTION_RUNNING') expect(screen.getByRole('button', { name: '继续生成' })).toBeEnabled()
+  })
+
+  it('hides frozen poses and technical history from user records even if supplied by stale data', async () => {
+    configureApi('user')
+    apiMock.getRecord.mockResolvedValue({ item: { ...styledTask, poseSelection: { summary: '内部姿势描述', shots: [] } } })
+    window.history.replaceState(null, '', '/records?task=1')
+    render(<App />)
+    await screen.findByRole('heading', { name: task.name })
+    expect(screen.queryByText('查看拍摄姿势')).not.toBeInTheDocument()
+    expect(screen.queryByText('提示词与生成调用记录')).not.toBeInTheDocument()
+    expect(screen.queryByText('内部姿势描述')).not.toBeInTheDocument()
+  })
 
   it('opens the independent pose stage after styling and submits its own instruction', async () => {
     apiMock.getTask.mockResolvedValue({ item: styledTask })

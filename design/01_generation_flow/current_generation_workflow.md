@@ -2,6 +2,8 @@
 
 ## 当前主流程
 
+以下是后台执行链路，admin 保留四步；user 仅显示导入主推款、AI 智能选搭、最终成片。user 点击生成成片后复用自动推进与断点继续，姿势选搭、可选提示词整理统一显示“正在准备拍摄”，无需中间确认。
+
 ```text
 导入主推款
 → AI 智能选搭（DeepSeek V4.1 Flash，经 ToAPIs，输出 selected_files + styling_plan）
@@ -140,7 +142,7 @@ LLM 只需返回每个镜头的 shotId、optimizedText。后端按镜头读取�
 
 优化的 sourcePackages、系统规则全文、模型、原始返回和错误保存到现有 GenerationAttempt，owner_type 为 generation_result_set；结果集 prompt_preparation_json 保存配置和可复用的最终提示词。图片 attempt 保留原始渲染与实际发送文本，历史 NULL 快照表示原直出链路。
 
-- 普通用户仍为四步，内部显示“正在准备拍摄要求”；管理员可查看优化记录。
+- 普通用户显示三步，在最终成片页内显示“正在准备拍摄”；管理员可查看优化记录。
 - 优化失败可继续重试；生图失败只复用冻结提示词，成功镜头保持不变。
 - 单张重生无新增要求时复用；有新增要求时仅重新整理目标镜头，继续使用结果集冻结的商品、模特、模板和图片。
 - 已有 provider task ID 的请求优先恢复原请求，不重新优化。
