@@ -15,23 +15,38 @@ __all__ = [
     "render_user_requirement_line",
     "render_image_reference_spans",
     "render_pose_direction",
+    "render_model_body_facts",
     "upgrade_prompt_runtime_placeholders",
 ]
 
 # 姿势事实里真正描述"怎么摆"的字段。选搭元信息（展示优势、遮挡风险、
-# 适配加分/排除规则、存疑信息）属于姿势选搭阶段的判断依据，不是拍摄事实，
+# 适配加分/排除规则）属于姿势选搭阶段的判断依据，不是拍摄事实，
 # 注入成片 Prompt 只会稀释商品与构图要求。
 POSE_DIRECTION_FACT_KEYS: tuple[str, ...] = (
     "姿势描述",
     "姿势类别",
     "身体朝向",
     "头部视线",
+    "面部可见性",
+    "表情神态",
     "模特右手",
     "模特左手",
     "双腿与重心",
     "核心动作",
     "可调整动作",
+    "存疑信息",
 )
+
+
+def render_model_body_facts(snapshot: dict[str, Any] | None) -> str:
+    """Only render explicitly frozen measurements; never infer from portraits."""
+    profile = (snapshot or {}).get("profile") or {}
+    if not isinstance(profile, dict):
+        return ""
+    fields = (("height", "身高"), ("weight", "体重"), ("bodyShape", "体型"),
+              ("bust", "胸围"), ("waist", "腰围"), ("hips", "臀围"))
+    return "；".join(f"{label}：{_clean_text(profile[key])}" for key, label in fields
+                    if key in profile and _clean_text(profile[key]))
 
 
 def _join_pose_value(value: Any) -> str:

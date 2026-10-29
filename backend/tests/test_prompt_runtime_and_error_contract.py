@@ -128,25 +128,20 @@ def test_final_runtime_marks_exactly_one_current_shot_and_limits_to_five_slots()
 def test_final_prompt_templates_separate_background_pose_and_shot_controls(filename: str) -> None:
     template = (Path(__file__).resolve().parents[1] / "prompt_templates" / filename).read_text(encoding="utf-8")
 
-    assert "整组共用的背景与光线参考" in template
-    assert "不取图中人物、服装、道具、机位、景别和构图" in template
-    assert "不取它的脸、发型、身材、服装、背景、光线" in template
-    assert "也不取它的取景、机位和裁切" in template
-    assert "执行可辨的身体朝向、重心、肩线、手位" in template
+    assert "背景参考是空间、墙地关系、材质、反射和照明的唯一来源" in template
+    assert "不从姿势人物借用体型" in template
+    assert "不为复刻新增口袋" in template
+    assert "不交换左右或前后腿" in template
     assert "唯一的拍摄母版" not in template
-    assert "中央 3:4 竖向裁切安全区" in template
+    assert "中央全高 3:4 裁切窗口" in template
     assert "中央 2:3" not in template
-    # 真实摄影质感要求：正向措辞必须存在，抹平质感的反伪影措辞必须消失。
-    assert "这是真实拍摄的商业棚拍照片" in template
-    assert "人物脚下有真实的落地阴影" in template
-    assert "保留毛孔、细纹、细小绒毛" in template
-    assert "不要磨皮、不要匀肤、不要塑料或蜡质感" in template
-    assert "均匀的商业棚拍成像" not in template
-    assert "材质纹理只来自真实服装本身" not in template
-    # 商品保真与瑕疵约束。
-    assert "大小比例" in template and "商品图" in template
+    assert "模特前左侧约 45 度" not in template
+    assert "商品已有的压褶、褶裥及凹凸肌理按图保留" in template
+    assert "不要求髋部、膝部或脚踝必然起褶" in template
+    assert "实际可见区域" in template or "画内可见区域" in template
     assert "不得出现任何文字、字母、logo" in template
-    assert "两只鞋不同款或鞋跟高度不一致" in template
+    assert "层数、连接方式与内外排列" in template
+
 
 
 @pytest.mark.parametrize(
@@ -178,11 +173,17 @@ def test_final_prompt_templates_render_shot_five_without_legacy_coordinates(
 
     rendered = app_main.render_prompt_template(prompt_key, runtime)
 
-    assert "中央 3:4 竖向裁切安全区" in rendered
+    assert "中央全高 3:4 裁切窗口" in rendered
     assert "中央 2:3" not in rendered
     assert "16.7%" not in rendered
+    assert "12.5% 和 87.5%" in rendered and "15%–85%" in rendered
+    assert "33%" in rendered and "67%" in rendered
+    assert "整体等比缩小" in rendered
     assert "镜头 1｜" not in rendered
-    assert "图4 是主推款的唯一商品事实源" in rendered
+    assert "图4是主推款服装图" in rendered
+    assert "#FFFFFF" in rendered and "贯穿到底端" in rendered
+    assert "单视图，不使用拼图或多格版式" not in rendered
+    assert "{{" not in rendered
     assert "是搭配款的唯一商品事实源" not in rendered
 
 
@@ -361,3 +362,19 @@ def test_frozen_prompt_upgrade_renders_split_roles_without_mutating_snapshot(her
     assert result.strip() == expected
     assert not diagnostics["missingPlaceholders"]
     assert rows[key]["content"] == content
+
+
+def test_bottom_closeup_and_expression_rules_do_not_expand_each_other(monkeypatch):
+    template = (Path(__file__).resolve().parents[1] / 'prompt_templates/final_image_bottom.txt').read_text()
+    key = 'assembly.final_image_bottom'
+    monkeypatch.setattr(app_main, 'prompt_config_content', lambda name, rows=None: template if name == key else None)
+    for index in (2, 4, 5):
+        runtime = app_main.build_final_prompt_runtime(index, '', {'hero_understanding': {'shot_category_family': 'bottom'}},
+            [{'role': role} for role in ['shot_background', 'shot_pose', 'model_identity', 'hero_garment']], {}, {})
+        text = app_main.render_prompt_template(key, runtime)
+        assert '{{' not in text
+        assert ('腰头完整入画并靠近画面上部' in text) == (index == 2)
+        assert ('## 画内头部与表情复刻' in text) == (index != 2)
+        assert ('#FFFFFF' in text) == (index == 5)
+        assert '模特前左侧约 45 度' not in text
+        assert '身高：175cm' not in text  # no sample/default body facts leak

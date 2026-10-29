@@ -37,6 +37,7 @@ from .prompt_render import (
     render_image_reference_spans,
     upgrade_prompt_runtime_placeholders,
     render_pose_direction,
+    render_model_body_facts,
     render_user_instruction_line,
     render_user_requirement_line,
 )
@@ -11237,11 +11238,12 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
     input_row = None
     with get_db() as db:
         input_row = db.execute(
-            "SELECT user_requirement_json FROM generation_task_input_versions WHERE id = ?",
+            "SELECT user_requirement_json, model_snapshot_json FROM generation_task_input_versions WHERE id = ?",
             (int(row["input_version_id"]),),
         ).fetchone()
     user_requirement = loads(row_value(input_row, "user_requirement_json"), build_user_requirement_context({}))
     prompt_runtime = build_final_prompt_runtime(int(row["sort_order"]), str(row["shot_role"]), styling_plan, image_inputs, final_image_user_instruction, user_requirement)
+    prompt_runtime["model_body_facts"] = render_model_body_facts(loads(row_value(input_row, "model_snapshot_json"), {}))
     selection = get_generation_pose_selection(row_value(row, "pose_selection_id"))
     if selection:
         shot = next((item for item in selection["shots"] if item["shotIndex"] == int(row["sort_order"])), None)
@@ -11300,6 +11302,7 @@ def build_final_prompt_runtime(
     runtime = {
         "shot_index": str(shot_index),
         "shot_pose": "",
+        "model_body_facts": "",
         "user_requirement": render_user_requirement_line(user_requirement or {}),
         "shot_styling": build_shot_styling_line(styling_plan),
         "ref_model_identity": spans["model_identity"],
@@ -11856,6 +11859,7 @@ def sample_prompt_runtime() -> dict[str, Any]:
         "pose_phase": "shortlist", "pose_candidates": "[]", "pose_shortlist": "[]",
         "pose_user_instruction": "动作自然，避免遮挡主推款细节。",
         "pose_shots": "[]", "pose_image_manifest": "[]", "shot_pose": "",
+        "model_body_facts": "身高：175cm；体型：H型",
         # AI 打标 / AI 选搭
         "styling_garment": dumps({"code": "LOOK-A", "image_count": 3, "image_roles": ["primary", "reference", "reference"]}),
         "garment_image_files": dumps([
@@ -11899,6 +11903,7 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
             ("pose_candidates", "可选姿势标签和图片标识"), ("pose_shortlist", "旧配置兼容占位，固定为空列表"),
             ("pose_user_instruction", "本次姿势要求"), ("pose_shots", "从冻结成片 Prompt 渲染的五镜头要求"),
             ("pose_image_manifest", "初筛实际传入的商品和背景图片顺序与角色"), ("shot_pose", "当前镜头冻结的姿势动作说明"),
+            ("model_body_facts", "当前输入版本冻结的模特身高、体型及围度；缺失时为空"),
         )],
         {"name": "segment.brand_info", "scope": "segment", "description": "品牌信息分段 Prompt"},
         {"name": "runtime.garment_image_files", "scope": "runtime", "description": "搭配服装图片挑选/排序使用的文件标识与候选顺序"},
@@ -14072,6 +14077,19 @@ def pose_selection_context(task: Any, user_instruction: str) -> tuple[dict[str, 
             raise HTTPException(409, "请先完成 AI 智能选搭")
         plan = loads(styling["styling_plan_json"], {})
         family = storyboard_category_family(plan)
+        # Usage is evidence for the model, never a code-side ranking or filter.
+        # Count at most one latest selection per other task in this category.
+        recent = db.execute(
+            """SELECT sh.pose_id, sh.shot_index FROM generation_pose_selection_shots sh
+               JOIN (SELECT MAX(id) AS id FROM generation_pose_selections
+                     WHERE category_family = ? AND task_id != ? GROUP BY task_id
+                     ORDER BY MAX(id) DESC LIMIT 20) recent ON recent.id = sh.selection_id""",
+            (family, task["id"]),
+        ).fetchall()
+    usage: dict[int, list[int]] = {}
+    for item in recent:
+        if item["pose_id"] is not None:
+            usage.setdefault(item["pose_id"], []).append(item["shot_index"])
     background = get_media_asset_by_id(get_current_shoot_environment_asset_id())
     if not background:
         raise HTTPException(409, "请联系管理员在模特与背景中配置统一拍摄背景")
@@ -14083,6 +14101,8 @@ def pose_selection_context(task: Any, user_instruction: str) -> tuple[dict[str, 
     if len(library) < 5:
         raise HTTPException(409, f"五个镜头需要不同姿势，当前仅有 {len(library)} 个可用姿势，请至少补齐五个")
     cards = [{"code": p["code"], "name": p["name"], "ai_tags": p["aiTags"],
+              "recentUsage": {"count": len(usage.get(p["id"], [])),
+                              "shotIndices": usage.get(p["id"], [])},
               "images": [{"imageId": item["asset"]["id"]} for item in p["images"]]} for p in library]
     runtime = {"pose_phase": "shortlist", "pose_candidates": dumps(cards), "pose_shortlist": "[]",
         "pose_user_instruction": user_instruction, "category_family": family,
@@ -14132,6 +14152,7 @@ def claim_pose_selection(task_id: int, user_instruction: str | None, trigger: st
     requirements = []
     for index, role in enumerate(final_image_slot_roles(plan), 1):
         shot_runtime = build_final_prompt_runtime(index, role, plan, [], {}, input_version.get("userRequirement", {}))
+        shot_runtime["model_body_facts"] = render_model_body_facts(input_version.get("modelSnapshot", {}))
         shot_runtime.update(ref_shot_background="统一背景参考图", ref_shot_pose="当前镜头待选姿势图",
                             ref_model_identity="数字模特身份参考图", ref_hero_garment="主推款参考图",
                             ref_styling_garment="搭配款参考图" if loads(styling["selected_material_snapshot_json"], []) else "")

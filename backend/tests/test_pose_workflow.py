@@ -480,7 +480,7 @@ def test_shared_flow_needs_no_masters_and_freezes_rules_background_and_input(cli
     selected = run_selection(ids['task_id'])['item']['poseSelection']
     assert selected['workflow'] == 'shared_background_v1'
     assert len({shot['code'] for shot in selected['shots']}) == 5
-    assert '镜头 5｜正背双视图' in calls[0][0] and '镜头 2｜' in calls[0][0]
+    assert '正背双视图目录构图' in calls[0][0] and '"shotIndex": 2' in calls[0][0]
     background = selected['shots'][0]['background']['id']
     frozen_input = app_main.get_generation_task_row(ids['task_id'])['current_input_version_id']
     replacement = insert_media_asset('new-shared-background.jpg')
@@ -500,10 +500,11 @@ def test_shared_flow_needs_no_masters_and_freezes_rules_background_and_input(cli
     assert {p['imageInputs'][0]['assetId'] for p in packages} == {background}
     assert len({p['imageInputs'][1]['assetId'] for p in packages}) == 5
     for i, package in enumerate(packages, 1):
-        assert f'镜头 {i}｜' in package['prompt']
-        assert all(f'镜头 {other}｜' not in package['prompt'] for other in range(1, 6) if other != i)
+        assert package['promptRuntime'][f'is_shot_{i}'] == '1'
+        assert ('正背双视图目录构图' in package['prompt']) == (i == 5)
+        assert '{{' not in package['prompt']
         assert '后续修改' not in package['prompt']
-        assert '不取图中人物、服装、道具、机位、景别和构图' in package['prompt']
+        assert '背景参考是空间、墙地关系、材质、反射和照明的唯一来源' in package['prompt']
         assert 'shot_global_directing' not in package['promptRuntime']
         assert 'shot_current' not in package['promptRuntime']
     with get_db() as db:
@@ -671,6 +672,8 @@ def test_pose_direction_renders_action_facts_without_selection_meta() -> None:
             "姿势描述": "模特正对镜头平视直立站立",
             "核心动作": ["正面站立", "单手插侧袋"],
             "头部视线": ["视线平视正前方"],
+            "面部可见性": "侧脸可见",
+            "表情神态": "嘴唇微张",
             "展示优势": ["全面平整展示服装正面版型"],
             "适配加分规则": ["目标服装含侧插袋设计时加分"],
             "适配排除规则": ["服装完全无口袋时排除"],
@@ -685,7 +688,9 @@ def test_pose_direction_renders_action_facts_without_selection_meta() -> None:
     assert "核心动作：正面站立、单手插侧袋" in rendered
     assert "适配排除规则" not in rendered
     assert "展示优势" not in rendered
-    assert "存疑信息" not in rendered
+    assert "存疑信息：小腿下段不可见" in rendered
+    assert "面部可见性：侧脸可见" in rendered
+    assert "表情神态：嘴唇微张" in rendered
     # 历史非 JSON 快照原样返回。
     assert render_pose_direction("保持原图肩胸支撑") == "保持原图肩胸支撑"
     assert render_pose_direction("") == ""
@@ -789,3 +794,38 @@ def test_user_hidden_preparation_failure_is_persisted_and_can_resume(client, mon
     asyncio.run(app_main.run_auto_final_generation(task_id))
     assert len(calls) == 1
     assert app_main.get_generation_task_row(task_id)['active_styling_id'] == ids['styling_id']
+
+
+def test_recent_pose_usage_keeps_full_library_and_excludes_current_task(monkeypatch):
+    first = prepare_task()
+    pose_id, asset_id, code = seed_pose()
+    mock_selection(monkeypatch, code, asset_id)
+    run_selection(first['task_id'])
+    second = prepare_task()
+    runtime, library, _, _ = app_main.pose_selection_context(app_main.get_generation_task_row(second['task_id']), '')
+    cards = json.loads(runtime['pose_candidates'])
+    assert len(cards) == len(library) == 5
+    assert next(c for c in cards if c['code'] == code)['recentUsage'] == {'count': 1, 'shotIndices': [1]}
+    own, _, _, _ = app_main.pose_selection_context(app_main.get_generation_task_row(first['task_id']), '')
+    assert all(c['recentUsage']['count'] == 0 for c in json.loads(own['pose_candidates']))
+
+
+def test_final_model_body_facts_use_frozen_input_not_current_profile(client, monkeypatch):
+    ids = prepare_task()
+    _, asset_id, code = seed_pose()
+    with get_db() as db:
+        db.execute("UPDATE generation_task_input_versions SET model_snapshot_json = ? WHERE task_id = ?",
+                   (dumps({'profile': {'height': '175cm', 'bodyShape': 'H型', 'waist': '59cm'}}), ids['task_id']))
+        db.execute("UPDATE prompt_configs SET content = '镜头{{runtime.shot_index}} {{runtime.model_body_facts}}' WHERE key LIKE 'assembly.final_image_%'")
+    mock_selection(monkeypatch, code, asset_id)
+    run_selection(ids['task_id'])
+    with get_db() as db:
+        # Live configuration has no authority over the frozen model/template.
+        db.execute("UPDATE model_profiles SET profile_json = ?", (dumps({'height': '999cm'}),))
+        db.execute("UPDATE prompt_configs SET content = '当前新模板' WHERE key LIKE 'assembly.final_image_%'")
+    response = client.post(f"/api/generation-tasks/{ids['task_id']}/generate-final")
+    assert response.status_code == 200, response.text
+    result_id = response.json()['item']['resultSet']['images'][0]['id']
+    package = app_main.build_new_final_task_package(ids['task_id'], result_id)
+    assert '175cm' in package['prompt'] and '59cm' in package['prompt']
+    assert '999cm' not in package['prompt'] and '当前新模板' not in package['prompt']

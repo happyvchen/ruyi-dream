@@ -291,7 +291,7 @@ def test_known_legacy_top_prompt_is_replaced_but_custom_prompt_is_not(monkeypatc
     app_db.migration_refresh_legacy_top_final_prompt(db)
     refreshed = db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.final_image_top'").fetchone()["content"]
     assert refreshed == app_db.canonical_top_final_prompt()
-    assert "中央 3:4 竖向裁切安全区" in refreshed
+    assert "中央全高 3:4 裁切窗口" in refreshed
 
     db.execute("UPDATE prompt_configs SET content = '管理员自定义上装 Prompt' WHERE key = 'assembly.final_image_top'")
     app_db.migration_refresh_legacy_top_final_prompt(db)
@@ -322,7 +322,7 @@ def test_known_legacy_bottom_and_one_piece_prompts_are_replaced_but_custom_promp
     for key in legacy_by_key:
         refreshed = db.execute("SELECT content FROM prompt_configs WHERE key = ?", (key,)).fetchone()["content"]
         assert refreshed == app_db.canonical_bottom_or_one_piece_final_prompt(key)
-        assert "中央 3:4 竖向裁切安全区" in refreshed
+        assert "中央全高 3:4 裁切窗口" in refreshed
 
     db.execute("UPDATE prompt_configs SET content = '管理员自定义下装 Prompt' WHERE key = 'assembly.final_image_bottom'")
     app_db.migration_refresh_legacy_bottom_and_one_piece_final_prompts(db)
@@ -600,7 +600,7 @@ def test_photographic_final_prompt_migration_only_replaces_known_system_content(
     refreshed = db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.final_image_top'").fetchone()["content"]
     canonical = (app_db.Path(__file__).resolve().parents[1] / "prompt_templates" / "final_image_top.txt").read_text(encoding="utf-8").strip() + "\n"
     assert refreshed == canonical
-    assert "这是真实拍摄的商业棚拍照片" in refreshed
+    assert "生成一张专业摄影机拍摄的时尚女装电商棚拍成片" in refreshed
     assert db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.final_image_bottom'").fetchone()["content"] == custom_bottom
 
 
