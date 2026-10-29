@@ -473,6 +473,53 @@ describe('task status coordination', () => {
 })
 
 describe('preview-first inspector', () => {
+  it('closes from empty viewing space but not from the picture or toolbar', () => {
+    const onClose = vi.fn()
+    render(<ImageLightbox image={assetLightboxImage(task.images[0].asset)} onClose={onClose} />)
+    fireEvent.click(document.querySelector('[data-lightbox-main]')!)
+    fireEvent.click(screen.getByTitle('放大'))
+    expect(onClose).not.toHaveBeenCalled()
+    fireEvent.click(document.querySelector('.lightbox-canvas')!)
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses wheel modifiers for scrolling and image zoom without browser zoom', () => {
+    render(<ImageLightbox image={assetLightboxImage(task.images[0].asset)} onClose={() => undefined} />)
+    const stage = document.querySelector<HTMLElement>('.lightbox-stage')!
+    fireEvent.wheel(stage, { deltaY: 120 })
+    expect(stage.scrollTop).toBe(120)
+    fireEvent.wheel(stage, { deltaY: 80, shiftKey: true })
+    expect(stage.scrollLeft).toBe(80)
+    expect(stage.scrollTop).toBe(120)
+    // Some browsers already translate Shift-wheel to deltaX.
+    fireEvent.wheel(stage, { deltaX: 40, shiftKey: true })
+    expect(stage.scrollLeft).toBe(120)
+    const wheel = new WheelEvent('wheel', { deltaY: -100, ctrlKey: true, bubbles: true, cancelable: true })
+    fireEvent(stage, wheel)
+    expect(wheel.defaultPrevented).toBe(true)
+    expect(screen.getByTitle('适应窗口')).toHaveTextContent('122%')
+    fireEvent.wheel(stage, { deltaY: 100, metaKey: true })
+    expect(screen.getByTitle('适应窗口')).toHaveTextContent('100%')
+    expect(document.querySelector('img[src="/original.jpg"]')).toBeNull()
+  })
+
+  it('toggles original and fit with double click and resets scroll on navigation', () => {
+    const asset = task.images[0].asset
+    render(<ImageLightbox image={assetLightboxImage(asset, [asset, { ...asset, id: 102, previewUrl: '/second-preview.jpg' }])} onClose={() => undefined} />)
+    fireEvent.doubleClick(document.querySelector('[data-lightbox-main]')!)
+    expect(document.querySelector('[data-lightbox-main]')).toHaveAttribute('src', '/original.jpg')
+    expect(screen.getByTitle('适应窗口')).toHaveTextContent('100%')
+    fireEvent.doubleClick(document.querySelector('[data-lightbox-main]')!)
+    expect(screen.getByTitle('适应窗口')).toHaveTextContent('适应')
+    const stage = document.querySelector<HTMLElement>('.lightbox-stage')!
+    stage.scrollTop = 300
+    stage.scrollLeft = 200
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'ArrowRight' })
+    expect(document.querySelector('[data-lightbox-main]')).toHaveAttribute('src', '/second-preview.jpg')
+    expect(stage.scrollTop).toBe(0)
+    expect(stage.scrollLeft).toBe(0)
+  })
+
   it('keeps keyboard focus inside the inspector and restores the trigger on close', async () => {
     const trigger = document.createElement('button')
     document.body.appendChild(trigger)

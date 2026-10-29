@@ -9119,6 +9119,11 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
   const [original, setOriginal] = useState(false)
   const [zoom, setZoom] = useState<'fit' | number>('fit')
   const [naturalSizes, setNaturalSizes] = useState<Record<string, { width: number; height: number }>>({})
+  const stageRef = useRef<HTMLDivElement>(null)
+  const anchorRef = useRef<{ x: number; y: number; screenX: number; screenY: number } | null>(null)
+  const dragRef = useRef<{ id: number; x: number; y: number; left: number; top: number; moved: boolean } | null>(null)
+  const suppressClickRef = useRef(false)
+  const [dragging, setDragging] = useState(false)
   const remoteSizes: Record<string, number> = {}
   const current = items[index] ?? items[0]
   const displaySrc = original ? current.originalSrc ?? current.src : current.src
@@ -9134,33 +9139,117 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
   }
   const setNext = () => {
     if (!canStep) return
+    anchorRef.current = null
     setIndex((value) => (value + 1) % items.length)
     setOriginal(false)
     setZoom('fit')
   }
   const setPrev = () => {
     if (!canStep) return
+    anchorRef.current = null
     setIndex((value) => (value - 1 + items.length) % items.length)
     setOriginal(false)
     setZoom('fit')
   }
-  const adjustZoom = (direction: 1 | -1) => {
-    setZoom((value) => {
-      const base = value === 'fit' ? 1 : value
-      return Math.min(4, Math.max(0.5, base + direction * 0.25))
-    })
+  const rememberAnchor = (point?: { x: number; y: number }) => {
+    const stage = stageRef.current
+    const picture = stage?.querySelector<HTMLImageElement>('[data-lightbox-main]')
+    if (!stage || !picture) return
+    const area = stage.getBoundingClientRect()
+    const rect = picture.getBoundingClientRect()
+    if (!rect.width || !rect.height) return
+    const screenX = point ? point.x - area.left : stage.clientWidth / 2
+    const screenY = point ? point.y - area.top : stage.clientHeight / 2
+    anchorRef.current = {
+      x: Math.max(0, Math.min(1, (area.left + screenX - rect.left) / rect.width)),
+      y: Math.max(0, Math.min(1, (area.top + screenY - rect.top) / rect.height)),
+      screenX, screenY,
+    }
   }
+  const fitToWindow = () => { anchorRef.current = null; setZoom('fit') }
+  const showOriginal = (point?: { x: number; y: number }) => {
+    rememberAnchor(point)
+    setOriginal(true)
+    setZoom(1)
+  }
+  const adjustZoom = (factor: number, point?: { x: number; y: number }) => {
+    rememberAnchor(point)
+    const picture = stageRef.current?.querySelector<HTMLImageElement>('[data-lightbox-main]')
+    const fitScale = picture?.naturalWidth ? picture.getBoundingClientRect().width / picture.naturalWidth : 1
+    const stage = stageRef.current
+    const minScale = stage && picture?.naturalWidth && picture.naturalHeight
+      ? Math.max(0.001, Math.min(0.1, (stage.clientWidth - 32) / picture.naturalWidth, (stage.clientHeight - 32) / picture.naturalHeight)) : 0.1
+    setZoom((value) => Math.min(4, Math.max(minScale, (value === 'fit' ? fitScale : value) * factor)))
+  }
+  useLayoutEffect(() => {
+    const stage = stageRef.current
+    if (!stage) return
+    if (zoom === 'fit') { stage.scrollLeft = 0; stage.scrollTop = 0; return }
+    const anchor = anchorRef.current
+    const picture = stage.querySelector<HTMLImageElement>('[data-lightbox-main]')
+    if (!anchor || !picture || !naturalSize || picture.closest('[aria-busy="true"]')) return
+    const area = stage.getBoundingClientRect()
+    const rect = picture.getBoundingClientRect()
+    stage.scrollLeft += rect.left - area.left + rect.width * anchor.x - anchor.screenX
+    stage.scrollTop += rect.top - area.top + rect.height * anchor.y - anchor.screenY
+    anchorRef.current = null
+  }, [zoom, index, displaySrc, naturalSize])
+
+  useLayoutEffect(() => {
+    const stage = stageRef.current
+    if (!stage) return
+    const measure = () => {
+      stage.style.setProperty('--viewer-width', `${stage.clientWidth}px`)
+      stage.style.setProperty('--viewer-height', `${stage.clientHeight}px`)
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', measure)
+      return () => window.removeEventListener('resize', measure)
+    }
+    const observer = new ResizeObserver(measure)
+    observer.observe(stage)
+    return () => observer.disconnect()
+  }, [])
+
+  // React's delegated wheel listener is passive; this listener must cancel browser zoom.
+  useEffect(() => {
+    const stage = stageRef.current
+    if (!stage) return
+    const wheel = (event: WheelEvent) => {
+      event.preventDefault()
+      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? stage.clientHeight : 1
+      const dx = event.deltaX * unit
+      const dy = event.deltaY * unit
+      if (event.ctrlKey || event.metaKey) {
+        adjustZoom(Math.exp(-Math.max(-100, Math.min(100, dy)) * 0.002), { x: event.clientX, y: event.clientY })
+      } else if (event.shiftKey) {
+        stage.scrollLeft += Math.abs(dx) > Math.abs(dy) ? dx : dy
+      } else {
+        stage.scrollLeft += dx
+        stage.scrollTop += dy
+      }
+    }
+    stage.addEventListener('wheel', wheel, { passive: false })
+    return () => stage.removeEventListener('wheel', wheel)
+  })
+
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key === '+' || event.key === '=') adjustZoom(1)
-      if (event.key === '-') adjustZoom(-1)
-      if (event.key === '0') setZoom('fit')
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return
+      if (!['+', '=', '-', '0', '1', 'ArrowRight', 'ArrowLeft'].includes(event.key)) return
+      event.preventDefault()
+      if (event.key === '+' || event.key === '=') adjustZoom(1.25)
+      if (event.key === '-') adjustZoom(1 / 1.25)
+      if (event.key === '0') fitToWindow()
+      if (event.key === '1') showOriginal()
       if (event.key === 'ArrowRight') setNext()
       if (event.key === 'ArrowLeft') setPrev()
     }
-    window.addEventListener('keydown', handleKey)
-    return () => window.removeEventListener('keydown', handleKey)
-  }, [canStep, onClose])
+    const dialog = dialogRef.current
+    dialog?.addEventListener('keydown', handleKey)
+    return () => dialog?.removeEventListener('keydown', handleKey)
+  })
 
   useEffect(() => {
     const previous = document.body.style.overflow
@@ -9169,9 +9258,6 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
       document.body.style.overflow = previous
     }
   }, [])
-
-
-
   return createPortal(
     <div ref={dialogRef} tabIndex={-1} className="lightbox" role="dialog" aria-modal="true" aria-label="图片检查器" onClick={onClose}>
       <div className="lightbox-chrome" onClick={(event) => event.stopPropagation()}>
@@ -9182,40 +9268,87 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
           </div>
           <div className="lightbox-actions">
             <button onClick={() => setPrev()} disabled={!canStep} title="上一张"><ChevronLeft size={16} /></button>
-            <button onClick={() => adjustZoom(-1)} title="缩小"><ZoomOut size={16} /></button>
-            <button className="text-action" onClick={() => setZoom('fit')} title="适应窗口">{zoomLabel}</button>
-            <button onClick={() => adjustZoom(1)} title="放大"><ZoomIn size={16} /></button>
-            <button onClick={() => { setOriginal(true); setZoom(1) }} title="加载原图并以原始尺寸查看">1:1 原图</button>
+            <button onClick={() => adjustZoom(1 / 1.25)} title="缩小"><ZoomOut size={16} /></button>
+            <button className="text-action" onClick={fitToWindow} title="适应窗口">{zoomLabel}</button>
+            <button onClick={() => adjustZoom(1.25)} title="放大"><ZoomIn size={16} /></button>
+            <button onClick={() => showOriginal()} title="加载原图并以原始尺寸查看">1:1 原图</button>
             {current.downloadUrl && <a href={current.downloadUrl} title="下载原图"><Download size={16} /></a>}
             <button onClick={() => setNext()} disabled={!canStep} title="下一张"><ChevronRight size={16} /></button>
             <button onClick={onClose} title="关闭"><X size={16} /></button>
           </div>
         </div>
       </div>
-      <div className="lightbox-stage" onClick={(event) => event.stopPropagation()}>
-        <LightboxPicture key={`${index}:${current.src}:${current.originalSrc}`}
-          src={displaySrc} previewSrc={current.src} thumbSrc={current.thumbSrc} original={original}
-          title={current.title} zoom={zoom} zoomedStyle={zoomedStyle}
-          onDimensions={(width, height) => setNaturalSizes((value) => ({ ...value, [displaySrc]: { width, height } }))} />
+      <div ref={stageRef} className={`lightbox-stage${zoom !== 'fit' ? ' is-zoomed' : ''}${dragging ? ' is-dragging' : ''}`}
+        onClick={(event) => {
+          if (suppressClickRef.current || (event.target as HTMLElement).closest('.lightbox-picture')) event.stopPropagation()
+          suppressClickRef.current = false
+        }}
+        onDoubleClick={(event) => {
+          if (!(event.target instanceof HTMLImageElement) && !(event.target === event.currentTarget && zoom !== 'fit')) return
+          event.preventDefault()
+          if (zoom === 'fit') showOriginal({ x: event.clientX, y: event.clientY })
+          else fitToWindow()
+        }}
+        onPointerDown={(event) => {
+          suppressClickRef.current = false
+          const stage = event.currentTarget
+          if (event.button !== 0 || !(event.target instanceof HTMLImageElement)
+            || (stage.scrollWidth <= stage.clientWidth && stage.scrollHeight <= stage.clientHeight)) return
+          event.preventDefault()
+          stage.setPointerCapture(event.pointerId)
+          dragRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, left: stage.scrollLeft, top: stage.scrollTop, moved: false }
+        }}
+        onPointerMove={(event) => {
+          const drag = dragRef.current
+          if (!drag || drag.id !== event.pointerId) return
+          const dx = event.clientX - drag.x
+          const dy = event.clientY - drag.y
+          if (Math.hypot(dx, dy) > 4) drag.moved = true
+          if (!drag.moved) return
+          setDragging(true)
+          event.currentTarget.scrollLeft = drag.left - dx
+          event.currentTarget.scrollTop = drag.top - dy
+        }}
+        onPointerUp={(event) => {
+          const drag = dragRef.current
+          if (!drag || drag.id !== event.pointerId) return
+          // Pointer capture retargets the following click to the stage, even without movement.
+          suppressClickRef.current = true
+          dragRef.current = null
+          setDragging(false)
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+        }}
+        onLostPointerCapture={() => { dragRef.current = null; setDragging(false) }}
+        onPointerCancel={() => { dragRef.current = null; setDragging(false) }}>
+        <div className="lightbox-canvas">
+          <LightboxPicture key={`${index}:${current.src}:${current.originalSrc}`}
+            src={displaySrc} previewSrc={current.src} thumbSrc={current.thumbSrc} original={original}
+            title={current.title} zoom={zoom} zoomedStyle={zoomedStyle}
+            onDimensions={(width, height) => setNaturalSizes((value) => ({ ...value, [displaySrc]: { width, height } }))} />
+        </div>
       </div>
-      <div className="lightbox-meta" onClick={(event) => event.stopPropagation()}>
-        {Object.entries(details).map(([label, value]) => (
-          <span key={label}><b>{label}</b>{value}</span>
-        ))}
-      </div>
+      <div className="lightbox-footer">
+        <p className="lightbox-help">滚轮上下移动 · Shift + 滚轮左右移动 · Ctrl / ⌘ + 滚轮缩放 · 拖拽查看 · 双击原图 / 适应 · ← → 切图 · + − 缩放 · 0 适应 · 1 原图 · Esc / 空白处关闭</p>
+        <div className="lightbox-meta" onClick={(event) => event.stopPropagation()}>
+          {Object.entries(details).map(([label, value]) => (
+            <span key={label}><b>{label}</b>{value}</span>
+          ))}
+        </div>
         {items.length > 1 && (
           <div className="inspector-strip" aria-label="同组图片" onClick={(event) => event.stopPropagation()}>
             {items.map((item, itemIndex) => (
               <button className={itemIndex === index ? 'active' : ''} key={`${item.title}-${itemIndex}`} onClick={() => {
+                anchorRef.current = null
                 setIndex(itemIndex)
                 setOriginal(false)
-    setZoom('fit')
-              }} title={item.title}>
+                setZoom('fit')
+              }} title={item.title} aria-label={`查看第 ${itemIndex + 1} 张：${item.title}`} aria-current={itemIndex === index ? 'true' : undefined}>
                 <MediaImage src={item.thumbSrc || undefined} alt={item.title} retryable={false} />
               </button>
             ))}
           </div>
         )}
+      </div>
     </div>,
     document.body,
   )
@@ -9235,7 +9368,7 @@ function LightboxPicture({ src, previewSrc, thumbSrc, original, title, zoom, zoo
   const unavailable = !src || failed === requestKey
   const fallback = original && previewLoaded ? previewSrc : thumbSrc
   return <div className="lightbox-picture" aria-busy={!loaded && !unavailable}>
-    {src && <img key={requestKey} data-lightbox-main decoding="async" fetchPriority="high"
+    {src && <img key={requestKey} data-lightbox-main decoding="async" fetchPriority="high" draggable={false}
       src={src} alt={title} className={zoom === 'fit' ? 'is-fit' : 'is-zoomed'}
       style={{ ...zoomedStyle, ...(!loaded ? { position: 'absolute', visibility: 'hidden' } as CSSProperties : {}) }}
       onError={() => setFailed(requestKey)}
@@ -9245,7 +9378,7 @@ function LightboxPicture({ src, previewSrc, thumbSrc, original, title, zoom, zoo
         if (src === previewSrc) setPreviewLoaded(true)
         onDimensions(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)
       }} />}
-    {!loaded && fallback && fallback !== src && failedFallback !== fallback && <img className="is-fit lightbox-fallback"
+    {!loaded && fallback && fallback !== src && failedFallback !== fallback && <img className="is-fit lightbox-fallback" draggable={false}
       src={fallback} alt="" aria-hidden="true" decoding="async" onError={() => setFailedFallback(fallback)} />}
     {!loaded && <div className={unavailable ? 'lightbox-error' : 'lightbox-loading'} role={unavailable ? 'alert' : 'status'}>
       {unavailable ? <>
