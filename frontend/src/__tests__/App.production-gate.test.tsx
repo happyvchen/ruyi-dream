@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App, ImageLightbox, assetLightboxImage, mergeUploadSessionUpdates } from '../App'
 
 const apiMock = vi.hoisted(() => ({
+  getCollectionRevision: vi.fn(),
   listPoses: vi.fn(),
   getPose: vi.fn(),
   createPose: vi.fn(),
@@ -264,6 +265,7 @@ function configurePendingStylingUpload() {
 }
 
 function configureApi(role: 'admin' | 'user' = 'admin') {
+  apiMock.getCollectionRevision.mockResolvedValue({ revision: 1 })
   apiMock.session.mockResolvedValue({ authRequired: true, authenticated: true, role })
   apiMock.login.mockResolvedValue({ authRequired: true, authenticated: true, role })
   apiMock.logout.mockResolvedValue({ ok: true })
@@ -350,10 +352,44 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
 describe('acceptance navigation regressions', () => {
+  it.each(['library', 'records'] as const)('silently refreshes %s only after a version change', async (page) => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const entry = (name: string) => ({ kind: 'task', id: 'task:1', status: task.status, name, createdAt: task.createdAt, updatedAt: task.updatedAt, task: { ...task, name } })
+    apiMock.listStylingGarments.mockResolvedValue({ ...emptyPage, items: [garment], total: 1, totalPages: 1 })
+    apiMock.listRecordWorkspace.mockResolvedValue({ ...emptyPage, items: [entry('原记录')], total: 1, totalPages: 1 })
+    window.history.replaceState(null, '', `/${page}`)
+    const { container } = render(<App />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(600) })
+    const load = page === 'library' ? apiMock.listStylingGarments : apiMock.listRecordWorkspace
+    const surface = container.querySelector(page === 'library' ? '.library-results' : '.record-list-body')!
+    expect(surface).toHaveAttribute('aria-busy', 'false')
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000) })
+    const count = load.mock.calls.length
+    await act(async () => { await vi.advanceTimersByTimeAsync(90000) })
+    expect(load).toHaveBeenCalledTimes(count)
+    apiMock.getCollectionRevision.mockResolvedValue({ revision: 2 })
+    const pending = deferred<any>()
+    load.mockReturnValueOnce(pending.promise)
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000) })
+    expect(surface).toHaveAttribute('aria-busy', 'false')
+    expect(surface).not.toHaveClass('is-loading')
+    expect(screen.queryByText(/更新中/)).not.toBeInTheDocument()
+    await act(async () => pending.resolve({ ...emptyPage, total: 1, totalPages: 1, items: page === 'library' ? [{ ...garment, code: '他人修改' }] : [entry('他人修改')] }))
+    expect(screen.getByText('他人修改')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'AI 摄影棚' }))
+    const revisions = apiMock.getCollectionRevision.mock.calls.length
+    await act(async () => { await vi.advanceTimersByTimeAsync(90000) })
+    expect(apiMock.getCollectionRevision).toHaveBeenCalledTimes(revisions)
+  })
+
+
   it('finishes real application GETs after switching pages even when another initialization fails', async () => {
     const actual = await vi.importActual<typeof import('../api')>('../api')
     const pending = deferred<Response>()
@@ -2851,6 +2887,70 @@ describe('pose library and the fourth studio stage', () => {
     expect(apiMock.selectPoses).not.toHaveBeenCalled()
   })
 
+  it('silently discovers other users poses, preserves the DOM, and pauses when hidden or away', async () => {
+    apiMock.listPoses.mockResolvedValue({ items: [pose], total: 1 })
+    window.history.replaceState(null, '', '/poses')
+    vi.useFakeTimers()
+    const { container } = render(<App />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+    expect(screen.getByRole('button', { name: '详情' })).toBeInTheDocument()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    let hidden = false
+    vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden)
+    const grid = container.querySelector('.garment-grid')!
+    const originalCard = grid.firstElementChild
+    const results = container.querySelector('.library-results')!
+    const pending = deferred<{ items: typeof pose[]; total: number }>()
+    apiMock.listPoses.mockReturnValueOnce(pending.promise)
+    await act(async () => { await vi.advanceTimersByTimeAsync(31000) })
+    expect(apiMock.getCollectionRevision).toHaveBeenCalledWith('poses', expect.any(AbortSignal))
+    expect(results).toHaveAttribute('aria-busy', 'false')
+    expect(results).not.toHaveClass('is-loading')
+    expect(screen.queryByText(/更新中/)).not.toBeInTheDocument()
+    expect(grid.firstElementChild).toBe(originalCard)
+    await act(async () => pending.resolve({ items: [pose], total: 1 }))
+    const count = apiMock.listPoses.mock.calls.length
+    await act(async () => { await vi.advanceTimersByTimeAsync(90000) })
+    expect(apiMock.listPoses).toHaveBeenCalledTimes(count)
+    expect(grid.firstElementChild).toBe(originalCard)
+    apiMock.getCollectionRevision.mockResolvedValue({ revision: 2 })
+    apiMock.listPoses.mockResolvedValue({ items: [{ ...pose, id: 92, name: '他人新上传' }, pose], total: 2 })
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000) })
+    expect(screen.getByText('他人新上传')).toBeInTheDocument()
+    expect(grid.lastElementChild).toBe(originalCard)
+    await act(async () => { hidden = true; document.dispatchEvent(new Event('visibilitychange')) })
+    const hiddenCount = apiMock.getCollectionRevision.mock.calls.length
+    await act(async () => { await vi.advanceTimersByTimeAsync(120000) })
+    expect(apiMock.getCollectionRevision).toHaveBeenCalledTimes(hiddenCount)
+    await act(async () => { hidden = false; document.dispatchEvent(new Event('visibilitychange')) })
+    expect(apiMock.getCollectionRevision).toHaveBeenCalledTimes(hiddenCount + 1)
+    fireEvent.click(screen.getByRole('button', { name: 'AI 摄影棚' }))
+    const awayCount = apiMock.getCollectionRevision.mock.calls.length
+    await act(async () => { await vi.advanceTimersByTimeAsync(60000) })
+    expect(apiMock.getCollectionRevision).toHaveBeenCalledTimes(awayCount)
+    expect(apiMock.recognizePose).not.toHaveBeenCalled()
+  })
+
+  it('keeps pose recognition updates silent during slow or failed background reads', async () => {
+    apiMock.listPoses.mockResolvedValue({ items: [{ ...pose, status: 'TAGGING_RUNNING' }], total: 1 })
+    window.history.replaceState(null, '', '/poses')
+    vi.useFakeTimers()
+    const { container } = render(<App />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+    expect(screen.getByRole('button', { name: '详情' })).toBeInTheDocument()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    apiMock.listPoses.mockRejectedValueOnce(new Error('offline'))
+    await act(async () => { await vi.advanceTimersByTimeAsync(5100) })
+    expect(screen.queryByText(/更新失败|更新中/)).not.toBeInTheDocument()
+    expect(container.querySelector('.library-results')).toHaveAttribute('aria-busy', 'false')
+    apiMock.listPoses.mockResolvedValue({ items: [pose], total: 1 })
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    expect(screen.getAllByText('可选搭').length).toBeGreaterThan(0)
+    expect(apiMock.recognizePose).not.toHaveBeenCalled()
+  })
+
   it('keeps uploaded drafts across navigation and retries recognition without duplicate uploads', async () => {
     apiMock.createPose.mockResolvedValue({ item: pose })
     apiMock.recognizePose.mockRejectedValueOnce(new Error('请配置姿势识别规则')).mockResolvedValue({ item: { ...pose, status: 'TAGGING_RUNNING' } })
@@ -2919,9 +3019,9 @@ describe('pose library and the fourth studio stage', () => {
     fireEvent.click(screen.getByRole('button', { name: '全部状态' }))
     fireEvent.click(screen.getByRole('button', { name: '待识别' }))
     fireEvent.click(screen.getByRole('button', { name: '查看已归档' }))
-    await waitFor(() => expect(apiMock.listPoses).toHaveBeenLastCalledWith(expect.objectContaining({ q: '行走', status: 'DRAFT', includeArchived: true, offset: 0 })))
+    await waitFor(() => expect(apiMock.listPoses).toHaveBeenLastCalledWith(expect.objectContaining({ q: '行走', status: 'DRAFT', includeArchived: true, offset: 0 }), expect.any(AbortSignal)))
     fireEvent.click(screen.getByRole('button', { name: '清空筛选' }))
-    await waitFor(() => expect(apiMock.listPoses).toHaveBeenLastCalledWith(expect.objectContaining({ q: '', status: '', includeArchived: false })))
+    await waitFor(() => expect(apiMock.listPoses).toHaveBeenLastCalledWith(expect.objectContaining({ q: '', status: '', includeArchived: false }), expect.any(AbortSignal)))
     expect(search).toHaveValue('')
   })
 

@@ -1,10 +1,11 @@
 /* @vitest-environment jsdom */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { pollVisible } from '../polling'
+import { pollVisible, useSilentRefresh } from '../polling'
+import { act, cleanup, renderHook } from '@testing-library/react'
 import { queuedUpload } from '../uploadQueue'
 import { cancelPageReads, request } from '../../api'
 
-afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve() }
 
 describe('network budgets', () => {
@@ -109,5 +110,59 @@ describe('network budgets', () => {
     resolvePost(Response.json({ ok: true }))
     await rejected
     expect(await post).toEqual({ ok: true })
+  })
+})
+
+
+describe('silent collection refresh', () => {
+  it('uses at most ten cheap checks and one list read in five idle minutes', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const revision = vi.fn(async () => ({ revision: 1 }))
+    const refresh = vi.fn(async () => undefined)
+    renderHook(() => useSilentRefresh({ enabled: true, resourceKey: 'poses', revision, refresh }))
+    await act(async () => { await vi.advanceTimersByTimeAsync(300000) })
+    expect(revision).toHaveBeenCalledTimes(10)
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('never overlaps slow reads, aborts on resource changes, and retries failed versions', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    let resolve!: () => void
+    const revision = vi.fn(async () => 1)
+    const refresh = vi.fn((_signal: AbortSignal) => new Promise<void>((done) => { resolve = done }))
+    const { rerender, unmount } = renderHook(({ key }) => useSilentRefresh({ enabled: true, active: true, resourceKey: key, revision, refresh }), { initialProps: { key: 'page-1' } })
+    await act(async () => { await vi.advanceTimersByTimeAsync(60000) })
+    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(revision).toHaveBeenCalledTimes(1)
+    rerender({ key: 'page-2' })
+    expect(refresh.mock.calls[0][0].aborted).toBe(true)
+    await act(async () => resolve())
+    refresh.mockRejectedValueOnce(new Error('temporary'))
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    refresh.mockResolvedValue(undefined)
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    expect(refresh).toHaveBeenCalledTimes(3)
+    unmount()
+    await vi.advanceTimersByTimeAsync(60000)
+    expect(refresh).toHaveBeenCalledTimes(3)
+  })
+
+  it('pauses offline and backs off persistent failures to two minutes', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    let online = false
+    vi.spyOn(navigator, 'onLine', 'get').mockImplementation(() => online)
+    const revision = vi.fn(async () => { throw new Error('unreachable') })
+    const refresh = vi.fn(async () => undefined)
+    renderHook(() => useSilentRefresh({ enabled: true, active: true, resourceKey: 'poses', revision, refresh }))
+    await act(async () => { await vi.advanceTimersByTimeAsync(120000) })
+    expect(revision).not.toHaveBeenCalled()
+    await act(async () => { online = true; window.dispatchEvent(new Event('online')) })
+    expect(revision).toHaveBeenCalledTimes(1)
+    await act(async () => { await vi.advanceTimersByTimeAsync(300000) })
+    expect(revision.mock.calls.length).toBeLessThanOrEqual(8)
+    expect(refresh).not.toHaveBeenCalled()
   })
 })

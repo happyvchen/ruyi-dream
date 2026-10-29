@@ -13800,6 +13800,17 @@ def serialize_pose(row: Any) -> dict[str, Any]:
         "images": [{"id": image["link_id"], "asset": serialize_media_asset(image)} for image in images]}
 
 
+@app.get("/api/collection-revisions/{scope}")
+def collection_revision(scope: str, request: Request) -> dict[str, int]:
+    if scope not in {"poses", "garments", "records", "models"}:
+        raise HTTPException(404, "未知数据范围")
+    if scope == "poses":
+        require_admin(request)
+    with get_db() as db:
+        row = db.execute("SELECT revision FROM collection_revisions WHERE scope = ?", (scope,)).fetchone()
+    return {"revision": row["revision"]}
+
+
 @app.get("/api/poses", dependencies=[Depends(require_admin)])
 def list_poses(q: str = "", status: str = "", include_archived: bool = Query(False, alias="includeArchived"),
                limit: int = Query(24, ge=1, le=96), offset: int = Query(0, ge=0)) -> dict[str, Any]:

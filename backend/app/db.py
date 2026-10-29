@@ -49,6 +49,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("082", "split_garment_prompt_references", "migration_split_garment_prompt_references"),
     ("083", "published_image_versions", "migration_published_image_versions"),
     ("084", "repair_published_image_versions", "migration_published_image_versions"),
+    ("085", "collection_revisions", "migration_collection_revisions"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -526,6 +527,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_photographic_final_prompts_v3": migration_photographic_final_prompts_v3,
         "migration_split_garment_prompt_references": migration_split_garment_prompt_references,
         "migration_published_image_versions": migration_published_image_versions,
+        "migration_collection_revisions": migration_collection_revisions,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -1952,3 +1954,34 @@ def migration_published_image_versions(db: sqlite3.Connection) -> None:
     backfill_generation_records(db)
     install_detail_revision_triggers(db, 'generation_image_versions',
         'SELECT r.task_id FROM generation_result_sets r JOIN generation_result_images_new i ON i.result_set_id = r.id WHERE i.id = ROW.image_id', set())
+
+
+def migration_collection_revisions(db: sqlite3.Connection) -> None:
+    # Transactional counters: constant-size reads, no catalogue scan on idle polls.
+    db.execute("CREATE TABLE IF NOT EXISTS collection_revisions (scope TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0)")
+    dependencies = {
+        "poses": ("poses", "pose_images"),
+        "garments": ("styling_garments", "styling_garment_images", "upload_sessions"),
+        "records": ("generation_tasks", "generation_batches"),
+        "models": ("model_profiles", "shoot_environment_references"),
+    }
+    for scope, tables in dependencies.items():
+        db.execute("INSERT OR IGNORE INTO collection_revisions(scope) VALUES (?)", (scope,))
+        for table in tables:
+            columns = [row[1] for row in db.execute(f"PRAGMA table_info({table})")
+                       if row[1] not in {"updated_at", "lease_expires_at", "lease_until"}]
+            changed = " OR ".join(f'NEW."{column}" IS NOT OLD."{column}"' for column in columns)
+            for event in ("INSERT", "UPDATE", "DELETE"):
+                condition = f" WHEN {changed}" if event == "UPDATE" else ""
+                db.execute(f"""CREATE TRIGGER IF NOT EXISTS collection_{scope}_{table}_{event.lower()}
+                    AFTER {event} ON {table}{condition} BEGIN
+                    UPDATE collection_revisions SET revision = revision + 1 WHERE scope = '{scope}';
+                    END""")
+    # Derived media readiness also changes visible cards; unrelated new assets do not.
+    for event in ("UPDATE", "DELETE"):
+        condition = " WHEN " + " OR ".join(f"NEW.{column} IS NOT OLD.{column}" for column in
+            ("thumb_key", "preview_key", "status", "deleted_at", "original_filename", "width", "height", "size_bytes")) if event == "UPDATE" else ""
+        db.execute(f"""CREATE TRIGGER IF NOT EXISTS collection_media_{event.lower()}
+            AFTER {event} ON media_assets{condition} BEGIN
+            UPDATE collection_revisions SET revision = revision + 1;
+            END""")

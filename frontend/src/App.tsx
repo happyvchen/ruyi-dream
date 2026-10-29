@@ -1,4 +1,4 @@
-import { pollVisible } from './lib/polling'
+import { pollVisible, retainEqual, useSilentRefresh } from './lib/polling'
 import { MediaImage } from './components/MediaImage'
 import { TransientNotice } from './components/TransientNotice'
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
@@ -380,18 +380,6 @@ export function App() {
   useEffect(() => {
     if (page === 'records' && recordDetail?.id) window.history.replaceState(null, '', routeToUrl({ page, recordId: recordDetail.id }))
   }, [page, recordDetail?.id])
-
-  const runningTaggingIds = useMemo(() => garments.filter((item) => item.status === 'TAGGING_RUNNING').map((item) => item.id), [garments])
-  const runningTaggingKey = runningTaggingIds.join(',')
-  const hasRunningTagging = runningTaggingIds.length > 0
-  useEffect(() => {
-    if (!authenticated || !hasRunningTagging || page !== 'library' || libraryImportOpen) return
-    return pollVisible(async (signal) => {
-      const response = await api.listStylingGarments({ limit: 80 }, signal)
-      if (!signal.aborted) setGarments(response.items)
-      return response.items
-    })
-  }, [authenticated, hasRunningTagging, runningTaggingKey, page, libraryImportOpen])
 
   async function refreshAll(restoreRoute = false) {
     const signal = applicationReadsRef.current.signal
@@ -1080,10 +1068,15 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
   }, [task?.id, task?.status, task?.autoRunTarget, task?.resultSet?.status])
   const hasActiveRecentTasks = recentRecordTasks(recentItems).some((item) => isTaskRunning(item) || isTaskQueuedForAutoRun(item))
   useEffect(() => {
-    if (!hasActiveRecentTasks || taskRailTab !== 'recent') return
+    if (taskRailTab !== 'recent') return
+    let revision: number | undefined
     return pollVisible(async (signal) => {
+      const nextRevision = await api.getCollectionRevision('records', signal)
+      if (signal.aborted || nextRevision.revision === revision) return nextRevision
+
       return api.listRecordWorkspace({ limit: recentTaskPageSize, offset: 0, sortBy: 'createdAt', sortDir: 'desc' }, signal).then((result) => {
         if (signal.aborted) return
+        revision = nextRevision.revision
         setRecentTaskTotal(result.total)
         setRecentItems((current) => {
           const byId = new Map(result.items.map((item) => [item.id, item] as const))
@@ -1093,11 +1086,11 @@ function StudioPage({ task, setTask, role, run, localOperations, startLocalOpera
             return next ? { ...item, ...next } : item
           })
           const fresh = result.items.filter((item) => !known.has(item.id))
-          return fresh.length ? [...fresh, ...merged] : merged
+          return retainEqual(current, fresh.length ? [...fresh, ...merged] : merged)
         })
         return result.items
       })
-    })
+    }, hasActiveRecentTasks ? 5000 : 30000, () => hasActiveRecentTasks ? 5000 : 30000)
   }, [hasActiveRecentTasks, recentTaskPageSize, taskRailTab])
   useEffect(() => {
     const batchId = task?.batchId
@@ -2828,12 +2821,12 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
       setTotal(filtered.length)
       setTotalPages(filtered.length ? Math.ceil(filtered.length / pageSize) : 0)
     } else {
-      setItems(result.items)
+      setItems((current) => retainEqual(current, result.items))
       setTotal(result.total)
       setTotalPages(result.totalPages)
     }
-    setFacets(result.facets ?? {})
-    setStableFacets(result.stableFacets ?? result.facets ?? {})
+    setFacets((current) => retainEqual(current, result.facets ?? {}))
+    setStableFacets((current) => retainEqual(current, result.stableFacets ?? result.facets ?? {}))
   }
 
   function refreshFirstLibraryPage() {
@@ -2906,6 +2899,24 @@ function LibraryPage({ garments, run, role, onDeleteResult, uploadSessions, uplo
       window.clearTimeout(timer)
     }
   }, [listRetry, offset, query, includeArchived, statusFilter, primaryCategoryFilter, secondaryCategoryFilter, uploadedFrom, uploadedTo, sortBy, sortDir, pageSize, importJobFilter, selectedImportBatch, focusedGarmentCode, focusedGarmentId])
+
+  useSilentRefresh({
+    enabled: !showImport && !searching && !listError,
+    resourceKey: JSON.stringify([libraryQueryOptions(), focusedGarmentId]),
+    active: items.some((item) => item.status === 'TAGGING_RUNNING'),
+    revision: (signal) => api.getCollectionRevision('garments', signal),
+    refresh: async (signal) => {
+      if (focusedGarmentId) {
+        const result = await api.getStylingGarment(focusedGarmentId, signal)
+        if (!signal.aborted) setItems((current) => retainEqual(current, [result.item]))
+        return
+      }
+      const result = await api.listStylingGarments(libraryQueryOptions(), signal)
+      if (signal.aborted) return
+      applyLibraryResult(result)
+      if (offset && !result.items.length && result.total <= offset) setOffset(Math.max(0, Math.ceil(result.total / pageSize) - 1) * pageSize)
+    },
+  })
 
   useEffect(() => {
     setItems((current) => current.map((item) => garments.find((latest) => latest.id === item.id) ?? item))
@@ -6144,7 +6155,9 @@ function LocalFileImageCard({ file, dimensions, onDimensions, onOpen, badge, dis
 
 function ModelPage({ models, role, run }: { models: ModelProfile[]; role: SessionRole | null; run: any }) {
   const isAdmin = role === 'admin'
-  const model = models.find((item) => item.isDefault) ?? models[0]
+  const [visibleModels, setVisibleModels] = useState(models)
+  useEffect(() => setVisibleModels(models), [models])
+  const model = visibleModels.find((item) => item.isDefault) ?? visibleModels[0]
   const editable = isAdmin && !!model
   const refs = model?.profile?.headReferenceEntries ?? []
   const coverThumb = refs.find((ref) => ref.angle === 'front')?.thumbUrl ?? refs[0]?.thumbUrl ?? null
@@ -6167,6 +6180,18 @@ function ModelPage({ models, role, run }: { models: ModelProfile[]; role: Sessio
   useEffect(() => {
     if (role) loadEnvironment()
   }, [loadEnvironment, role])
+
+  useSilentRefresh({
+    enabled: environmentLoadState === 'ready' && dragIndex === null,
+    resourceKey: 'models',
+    revision: (signal) => api.getCollectionRevision('models', signal),
+    refresh: async (signal) => {
+      const [models, environment] = await Promise.all([api.listModels(signal), api.getShootEnvironment(signal)])
+      if (signal.aborted) return
+      setVisibleModels((current) => retainEqual(current, models.items))
+      setEnvironment((current) => retainEqual(current, environment.asset))
+    },
+  })
 
   const openModelRef = (index: number) => {
     const items = displayRefs.map((item) => ({
@@ -6636,38 +6661,38 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
   }
 
   function applyRecordListResult(result: { items: GenerationTask[]; total: number; totalPages: number; facets?: GenerationRecordFacets; stableFacets?: GenerationRecordFacets }, targetOffset: number) {
-    setItems(result.items)
+    setItems((current) => retainEqual(current, result.items))
     cacheSelectedRecords(result.items)
     setWorkspaceItems([])
     setBatchRecords([])
     setTotal(result.total)
     setTotalPages(result.totalPages)
-    setFacets(result.facets ?? {})
-    setStableFacets(result.stableFacets ?? result.facets ?? {})
+    setFacets((current) => retainEqual(current, result.facets ?? {}))
+    setStableFacets((current) => retainEqual(current, result.stableFacets ?? result.facets ?? {}))
     if (!result.items.length && targetOffset > 0) setOffset(Math.max(0, targetOffset - pageSize))
   }
 
   function applyWorkspaceResult(result: { items: GenerationWorkspaceRecord[]; total: number; totalPages: number; facets?: GenerationRecordFacets; stableFacets?: GenerationRecordFacets }, targetOffset: number) {
-    setWorkspaceItems(result.items)
+    setWorkspaceItems((current) => retainEqual(current, result.items))
     cacheSelectedRecords(result.items.flatMap((entry) => entry.kind === 'task' ? [entry.task] : entry.batch.coverTasks))
     setItems([])
     setBatchRecords([])
     setTotal(result.total)
     setTotalPages(result.totalPages)
-    setFacets(result.facets ?? {})
-    setStableFacets(result.stableFacets ?? result.facets ?? {})
+    setFacets((current) => retainEqual(current, result.facets ?? {}))
+    setStableFacets((current) => retainEqual(current, result.stableFacets ?? result.facets ?? {}))
     if (!result.items.length && targetOffset > 0) setOffset(Math.max(0, targetOffset - pageSize))
   }
 
   function applyBatchListResult(result: { items: GenerationRecordBatch[]; total: number; totalPages: number; facets?: GenerationRecordFacets; stableFacets?: GenerationRecordFacets }, targetOffset: number) {
-    setBatchRecords(result.items)
+    setBatchRecords((current) => retainEqual(current, result.items))
     cacheSelectedRecords(result.items.flatMap((item) => item.coverTasks))
     setWorkspaceItems([])
     setItems([])
     setTotal(result.total)
     setTotalPages(result.totalPages)
-    setFacets(result.facets ?? {})
-    setStableFacets(result.stableFacets ?? result.facets ?? {})
+    setFacets((current) => retainEqual(current, result.facets ?? {}))
+    setStableFacets((current) => retainEqual(current, result.stableFacets ?? result.facets ?? {}))
     if (!result.items.length && targetOffset > 0) setOffset(Math.max(0, targetOffset - pageSize))
   }
 
@@ -6715,6 +6740,35 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
       window.clearTimeout(timer)
     }
   }, [listRetry, records, viewMode, offset, query, includeArchived, statusFilter, createdFrom, createdTo, sortBy, sortDir, pageSize])
+
+  useSilentRefresh({
+    enabled: !loading && !listError && !batchDetailLoading,
+    resourceKey: JSON.stringify([viewMode, recordQueryOptions(offset), detail?.id, batchDetail?.batchId, [...expandedBatchIds]]),
+    active: [...items, ...workspaceItems.flatMap((entry) => entry.kind === 'task' ? [entry.task] : entry.batch.coverTasks), ...batchRecords.flatMap((batch) => batch.coverTasks), ...batchDetailTasks, ...(detail ? [detail] : [])].some(isTaskLockedForGeneration),
+    revision: (signal) => api.getCollectionRevision('records', signal),
+    refresh: async (signal) => {
+      const result = viewMode === 'all' ? await api.listRecordWorkspace(recordQueryOptions(offset), signal)
+        : viewMode === 'batches' ? await api.listRecordBatches(recordQueryOptions(offset), signal)
+          : await api.listRecords(recordQueryOptions(offset), signal)
+      if (signal.aborted) return
+      const currentItems = viewMode === 'all' ? workspaceItems : viewMode === 'batches' ? batchRecords : items
+      if (JSON.stringify([currentItems, total, totalPages, facets, stableFacets]) !== JSON.stringify([result.items, result.total, result.totalPages, result.facets ?? {}, result.stableFacets ?? result.facets ?? {}])) {
+        if (viewMode === 'all') applyWorkspaceResult(result as Awaited<ReturnType<typeof api.listRecordWorkspace>>, offset)
+        else if (viewMode === 'batches') applyBatchListResult(result as Awaited<ReturnType<typeof api.listRecordBatches>>, offset)
+        else applyRecordListResult(result as Awaited<ReturnType<typeof api.listRecords>>, offset)
+      }
+      if (detail) {
+        const result = await api.getRecord(detail.id, false, signal)
+        if (!signal.aborted) setDetail((current: GenerationTask | null) => current?.id === result.item.id ? retainEqual(current, result.item) : current)
+      }
+      for (const batchId of new Set([...expandedBatchIds, ...(batchDetail ? [batchDetail.batchId] : [])])) {
+        const result = await api.listBatchTasks(batchId, signal)
+        if (signal.aborted) return
+        setExpandedBatchTasks((current) => retainEqual(current, { ...current, [batchId]: result.items }))
+        if (batchDetail?.batchId === batchId) setBatchDetailTasks((current) => retainEqual(current, result.items))
+      }
+    },
+  })
 
   useEffect(() => {
     setOffset(0)
@@ -8050,16 +8104,16 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
     setDirty(false)
   }, [item.id, item.updatedAt])
 
-  const taggingChangeRef = useRef(onChange)
-  taggingChangeRef.current = onChange
-  useEffect(() => {
-    if (item.status !== 'TAGGING_RUNNING') return
-    return pollVisible(async (signal) => {
+  useSilentRefresh({
+    enabled: !dirty,
+    resourceKey: `garment-detail:${item.id}`,
+    active: tagging,
+    revision: (signal) => api.getCollectionRevision('garments', signal),
+    refresh: async (signal) => {
       const result = await api.getStylingGarment(item.id, signal)
-      if (!signal.aborted) taggingChangeRef.current(result.item)
-      return result.item
-    })
-  }, [item.id, item.status])
+      if (!signal.aborted && retainEqual(item, result.item) !== item) onChange(result.item)
+    },
+  })
 
   const drawerRef = useModalFocus<HTMLElement>(onClose)
 
@@ -9913,27 +9967,35 @@ function PoseLibraryPage({ active }: { active: boolean }) {
   useEffect(() => {
     if (!active) return
     let current = true
+    const controller = new AbortController()
     setLoading(true)
     const timer = window.setTimeout(() => {
-      void api.listPoses({ q: query, status, includeArchived, limit: pageSize, offset }).then((result) => {
+      void api.listPoses({ q: query, status, includeArchived, limit: pageSize, offset }, controller.signal).then((result) => {
         if (!current) return
-        setItems(result.items); setTotal(result.total); setError('')
+        setItems((current) => retainEqual(current, result.items)); setTotal(result.total); setError('')
         if (offset && offset >= result.total) setOffset(Math.max(0, Math.ceil(result.total / pageSize) - 1) * pageSize)
         setDetail((current) => current ? result.items.find((item) => item.id === current.id) ?? current : null)
       }).catch((err) => { if (current) setError(poseErrorText(err)) }).finally(() => { if (current) setLoading(false) })
     }, 180)
-    return () => { current = false; window.clearTimeout(timer) }
+    return () => { current = false; controller.abort(); window.clearTimeout(timer) }
   }, [query, status, includeArchived, pageSize, offset, reload, active])
-  const recognizing = items.some((item) => item.status === 'TAGGING_RUNNING') || detail?.status === 'TAGGING_RUNNING'
-  useEffect(() => {
-    if (!active || !recognizing) return
-    const timer = window.setInterval(() => {
-      if (document.hidden) return
-      refresh()
-      if (detail?.status === 'TAGGING_RUNNING') void api.getPose(detail.id).then((result) => setDetail((current) => current?.id === result.item.id ? result.item : current)).catch(() => undefined)
-    }, 2500)
-    return () => window.clearInterval(timer)
-  }, [active, recognizing, detail?.id, detail?.status])
+  useSilentRefresh({
+    enabled: active && !showImport && !loading && !busy && !error,
+    resourceKey: JSON.stringify([query, status, includeArchived, pageSize, offset, detail?.id]),
+    active: items.some((item) => item.status === 'TAGGING_RUNNING') || detail?.status === 'TAGGING_RUNNING',
+    revision: (signal) => api.getCollectionRevision('poses', signal),
+    refresh: async (signal) => {
+      const result = await api.listPoses({ q: query, status, includeArchived, limit: pageSize, offset }, signal)
+      if (signal.aborted) return
+      setItems((current) => retainEqual(current, result.items))
+      setTotal(result.total)
+      if (offset && offset >= result.total) setOffset(Math.max(0, Math.ceil(result.total / pageSize) - 1) * pageSize)
+      if (detail) {
+        const latest = result.items.find((item) => item.id === detail.id) ?? (await api.getPose(detail.id, signal)).item
+        if (!signal.aborted) setDetail((current) => current?.id === latest.id ? retainEqual(current, latest) : current)
+      }
+    },
+  })
   useEffect(() => {
     if (!busy) return
     const warn = (event: BeforeUnloadEvent) => event.preventDefault()

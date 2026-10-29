@@ -873,9 +873,11 @@ export function stylingGarmentArchiveUrl(ids: number[]) {
 }
 
 export const api = {
-  listPoses: (options: { q?: string; status?: string; includeArchived?: boolean; limit?: number; offset?: number } = {}) =>
-    request<{ items: Pose[]; total: number }>(params('/api/poses', options)),
-  getPose: (id: number) => request<{ item: Pose }>(`/api/poses/${id}`),
+  getCollectionRevision: (scope: 'poses' | 'garments' | 'records' | 'models', signal?: AbortSignal) =>
+    request<{ revision: number }>(`/api/collection-revisions/${scope}`, { signal }),
+  listPoses: (options: { q?: string; status?: string; includeArchived?: boolean; limit?: number; offset?: number } = {}, signal?: AbortSignal) =>
+    request<{ items: Pose[]; total: number }>(params('/api/poses', options), { signal }),
+  getPose: (id: number, signal?: AbortSignal) => request<{ item: Pose }>(`/api/poses/${id}`, { signal }),
   createPose: (name: string, files: File[]) => {
     const form = new FormData()
     form.append('name', name)
@@ -1070,8 +1072,8 @@ export const api = {
       body: JSON.stringify({ name, batchId, batchName, userRequirement }),
     })
   },
-  listBatchTasks: (batchId: string) =>
-    request<{ items: GenerationTask[] }>(`/api/generation-batches/${encodeURIComponent(batchId)}/tasks`),
+  listBatchTasks: (batchId: string, signal?: AbortSignal) =>
+    request<{ items: GenerationTask[] }>(`/api/generation-batches/${encodeURIComponent(batchId)}/tasks`, { signal }),
   updateBatch: (batchId: string, name: string) =>
     request<{ item: GenerationRecordBatch }>(`/api/generation-batches/${encodeURIComponent(batchId)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   autoRunBatch: (batchId: string, restart = false) =>
@@ -1190,7 +1192,7 @@ export const api = {
     request<{ item: ModelProfile }>(`/api/model-profiles/${modelId}/head-references/${encodeURIComponent(referenceId)}`, { method: 'PATCH', body: JSON.stringify({ orderIndex }) }),
   setModelHeadReferenceAngle: (modelId: number, referenceId: string, angle: string) =>
     request<{ item: ModelProfile }>(`/api/model-profiles/${modelId}/head-references/${encodeURIComponent(referenceId)}`, { method: 'PATCH', body: JSON.stringify({ angle }) }),
-  getShootEnvironment: () => request<{ asset: MediaAsset | null }>('/api/shoot-environment'),
+  getShootEnvironment: (signal?: AbortSignal) => request<{ asset: MediaAsset | null }>('/api/shoot-environment', { signal }),
   setShootEnvironment: (file: File) => {
     const form = new FormData()
     form.append('file', file)

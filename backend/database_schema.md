@@ -130,3 +130,8 @@ GenerationTask
 `generation_image_versions` 保存 image_id、attempt_id、media_asset_id、request_snapshot_json、evidence_source、created_at，以 `(image_id, media_asset_id)` 唯一。关联 attempt 删除时置空、镜头删除时级联，媒体引用保持约束。`generation_result_images_new.execution_snapshot_json` 保存继续执行时的逐镜头事实。版本独立于当前执行状态，失败或取消不移除之前的成功图片。
 
 083/084 将成功 attempt 与当前已发布图片幂等投影到版本表；084 兼容曾运行未完整实现 083 的本地库。只有取消输出的图片不补为已发布版本。补齐已有、可证明的冻结预设，不根据后来改写的组 input_version_id 推断其余镜头的模特或图片。迁移不伪造缺失的背景、姿势或 AI 返回，不删除旧任务、结果组、服装或对象。新增按 image_id、media_asset_id、task_id 的索引以及版本变动的 detail_revision 触发器。
+
+
+## 页面集合版本（迁移 085）
+
+`collection_revisions(scope TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0)` 保存 `poses / garments / records / models` 四个集合版本。相关业务表的 INSERT/UPDATE/DELETE 触发器在原事务内递增计数；UPDATE 排除仅 `updated_at`、lease 心跳及无变化写入。媒体缩略图、预览、状态或元信息改变时使集合失效。只读版本检查为主键单行查询，不扫描素材或生成任务列表；版本不是业务数据历史或事件日志。
