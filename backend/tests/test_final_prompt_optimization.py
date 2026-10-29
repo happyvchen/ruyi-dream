@@ -92,19 +92,20 @@ def test_once_per_group_freezes_configuration_and_sends_only_final_text(client, 
     assert main.get_task_attempt_summary_page(ids["task_id"], "generation_result_set", 10)["total"] == 1
 
 
-def test_unchanged_single_retry_reuses_optimized_prompt_changed_instruction_reoptimizes_one(client, monkeypatch):
+def test_single_retry_reuses_frozen_prompt_and_changes_only_selected_instruction(client, monkeypatch):
     ids, result_set, image_ids = create_run(client)
     calls, images = mock_success(monkeypatch)
     asyncio.run(main.run_final_generation(ids["task_id"], result_set, image_ids))
     input_version = main.get_generation_task_row(ids["task_id"])["current_input_version_id"]
     first = copy.deepcopy(images[0])
-    for instruction, expected_calls in [("", 1), ("请减少配饰", 2)]:
+    for instruction, expected_calls in [("", 1), ("请减少配饰", 1)]:
         response = client.post(f"/api/generation-result-images-new/{image_ids[0]}/retry", json={"userInstruction": instruction})
         assert response.status_code == 200, response.text
         attempt_id = response.json()["item"]["resultSet"]["images"][0]["activeAttemptId"]
         asyncio.run(main.run_final_generation(ids["task_id"], result_set, [image_ids[0]], {image_ids[0]: attempt_id}))
         assert len(calls) == expected_calls
-    assert len(calls[-1][0]["shots"]) == 1
+    assert len(calls[-1][0]["shots"]) == 5
+    assert all(package['imageInputs'] == first['imageInputs'] for package in images[5:])
     assert images[5]["prompt"] == first["prompt"]
     assert images[-1]["finalImageUserInstruction"]["instruction"] == "请减少配饰"
     assert main.get_generation_task_row(ids["task_id"])["current_input_version_id"] == input_version
@@ -346,18 +347,20 @@ def test_continue_uses_frozen_presets_even_when_live_presets_are_removed(client,
     assert response["item"]["activeResultSetId"] == result_set
 
 
-def test_single_retry_preparation_failure_closes_pending_image_attempt(client, monkeypatch):
+def test_single_retry_does_not_depend_on_optimizer_availability(client, monkeypatch):
     ids, result_set, image_ids = create_run(client)
     mock_success(monkeypatch)
     asyncio.run(main.run_final_generation(ids["task_id"], result_set, image_ids))
     response = client.post(f"/api/generation-result-images-new/{image_ids[0]}/retry", json={"userInstruction": "修改要求"})
     attempt = response.json()["item"]["resultSet"]["images"][0]["activeAttemptId"]
-    async def bad(*args, **kwargs): return '{"shots": []}'
+    async def bad(*args, **kwargs): raise AssertionError('Frozen retries must not call the optimizer')
     monkeypatch.setattr(main, "generate_gemini_json_text", bad)
     asyncio.run(main.run_final_generation(ids["task_id"], result_set, [image_ids[0]], {image_ids[0]: attempt}))
     with get_db() as db:
         row = db.execute("SELECT status, error_code FROM generation_attempts WHERE id = ?", (attempt,)).fetchone()
-    assert row["status"] == "FAILED" and row["error_code"] == "PROMPT_PREPARATION_FAILED"
+    assert row["status"] == "SUCCEEDED" and row["error_code"] is None
+    with get_db() as db:
+        assert db.execute('SELECT count(*) FROM generation_image_versions WHERE image_id=?', (image_ids[0],)).fetchone()[0] == 2
 
 
 def test_visual_mapping_keeps_local_numbers_and_deduplicates_shared_boards(monkeypatch):

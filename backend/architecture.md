@@ -130,3 +130,7 @@ media/<media-uuid>/_derived/final-cells/original-shot<1..6>.png
 ## 姿势工作流扩展
 
 `main.py` 管理姿势库、显式后台识别、初筛直接定选姿势与一键成片编排；`pose_selection.py` 只校验模型输出的五镜头、候选身份及图片归属。数据库迁移 076 保存素材与选择快照。运行 Prompt 来自数据库；`prompt_templates/pose_*.txt` 仅通过 admin 参考草稿接口供编辑器填入并显式保存。新任务顺序为服装选搭 → 姿势选搭 → 最终成片；取消、恢复、失效和引用释放契约详见姿势工作流设计。
+
+## 已发布版本兼容
+
+`app/generation_records.py` 负责从真实调用证据补齐已发布版本、逐镜头重放输入与旧参考图传输适配。数据库迁移只投影事实，不调用模型或对象存储；main 的发布事务同时更新 attempt、当前图片和版本。`scripts/audit_upgrade.py` 独立于应用配置与生命周期，提供升级前后只读盘点和清理预检。

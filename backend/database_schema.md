@@ -124,3 +124,9 @@ GenerationTask
 ### 统一背景流程的冻结数据
 
 不增加表：`shoot_environment_references` 保存当前背景，`generation_pose_selection_shots` 的五条记录引用同一个 background_asset_id 和五个不同的 pose_asset_id。`generation_pose_selections.plan_json` 增加 `workflow=shared_background_v1`、`shotRequirements` 与 `promptConfigSnapshot`（本品类成片模板及分段）。结果集复用选择的 input_version_id，不重新拍取模特快照；优化规则与开关仍在结果集创建时冻结。历史记录不回写、不删除旧母版。
+
+## 已发布图片版本迁移（083 / 084）
+
+`generation_image_versions` 保存 image_id、attempt_id、media_asset_id、request_snapshot_json、evidence_source、created_at，以 `(image_id, media_asset_id)` 唯一。关联 attempt 删除时置空、镜头删除时级联，媒体引用保持约束。`generation_result_images_new.execution_snapshot_json` 保存继续执行时的逐镜头事实。版本独立于当前执行状态，失败或取消不移除之前的成功图片。
+
+083/084 将成功 attempt 与当前已发布图片幂等投影到版本表；084 兼容曾运行未完整实现 083 的本地库。只有取消输出的图片不补为已发布版本。补齐已有、可证明的冻结预设，不根据后来改写的组 input_version_id 推断其余镜头的模特或图片。迁移不伪造缺失的背景、姿势或 AI 返回，不删除旧任务、结果组、服装或对象。新增按 image_id、media_asset_id、task_id 的索引以及版本变动的 detail_revision 触发器。

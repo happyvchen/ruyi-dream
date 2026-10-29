@@ -47,6 +47,8 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("080", "photographic_final_prompts_v2", "migration_photographic_final_prompts_v2"),
     ("081", "photographic_final_prompts_v3", "migration_photographic_final_prompts_v3"),
     ("082", "split_garment_prompt_references", "migration_split_garment_prompt_references"),
+    ("083", "published_image_versions", "migration_published_image_versions"),
+    ("084", "repair_published_image_versions", "migration_published_image_versions"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -523,6 +525,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
         "migration_photographic_final_prompts_v2": migration_photographic_final_prompts_v2,
         "migration_photographic_final_prompts_v3": migration_photographic_final_prompts_v3,
         "migration_split_garment_prompt_references": migration_split_garment_prompt_references,
+        "migration_published_image_versions": migration_published_image_versions,
     }
     for version, name, function_name in MIGRATIONS:
         if version in applied_versions:
@@ -1923,3 +1926,29 @@ def migration_split_garment_prompt_references(db: sqlite3.Connection) -> None:
         if content != original:
             db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?",
                        (content, now_iso(), row["key"]))
+
+
+def migration_published_image_versions(db: sqlite3.Connection) -> None:
+    from .generation_records import backfill_generation_records
+
+    # Partial-schema repair paths must remain usable; full init creates these tables.
+    if not all(table_exists(db, name) for name in ('generation_result_images_new', 'generation_result_sets', 'generation_attempts', 'media_assets')):
+        return
+    if 'execution_snapshot_json' not in table_columns(db, 'generation_result_images_new'):
+        db.execute('ALTER TABLE generation_result_images_new ADD COLUMN execution_snapshot_json TEXT')
+    db.execute('''CREATE TABLE IF NOT EXISTS generation_image_versions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        image_id INTEGER NOT NULL REFERENCES generation_result_images_new(id) ON DELETE CASCADE,
+        attempt_id INTEGER REFERENCES generation_attempts(id) ON DELETE SET NULL,
+        media_asset_id INTEGER NOT NULL REFERENCES media_assets(id),
+        request_snapshot_json TEXT,
+        evidence_source TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(image_id, media_asset_id)
+    )''')
+    db.execute('CREATE INDEX IF NOT EXISTS idx_image_versions_image ON generation_image_versions(image_id, id)')
+    db.execute('CREATE INDEX IF NOT EXISTS idx_image_versions_asset ON generation_image_versions(media_asset_id)')
+    db.execute('CREATE INDEX IF NOT EXISTS idx_result_sets_task ON generation_result_sets(task_id, id)')
+    backfill_generation_records(db)
+    install_detail_revision_triggers(db, 'generation_image_versions',
+        'SELECT r.task_id FROM generation_result_sets r JOIN generation_result_images_new i ON i.result_set_id = r.id WHERE i.id = ROW.image_id', set())

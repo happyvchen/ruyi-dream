@@ -32,6 +32,7 @@ from .pose_selection import pack_pose_references, pose_plan_from_shortlist, vali
 from .http_performance import HttpPerformanceMiddleware
 from .config import get_settings
 from .db import dumps, get_db, init_db, loads, log_event, now_iso
+from .generation_records import capture_published_image, published_versions, replay_package, executable_package, json_object, adapt_replay_references
 from .prompt_render import (
     render_image_reference_spans,
     upgrade_prompt_runtime_placeholders,
@@ -444,6 +445,10 @@ class GenerationStylingRequest(BaseModel):
 
 class GenerationStageInstructionRequest(BaseModel):
     userInstruction: str | None = None
+
+
+class ResultImageRetryRequest(GenerationStageInstructionRequest):
+    versionId: int | None = None
 
 
 class AutoRunFinalRequest(BaseModel):
@@ -2033,6 +2038,22 @@ def gemini_vision_input(object_key: str | None, fallback_mime: str | None = None
     return {"data": get_bytes(object_key), "mime_type": fallback_mime or "image/png"}
 
 
+def retained_snapshot_reference_count(db: Any, object_key: str) -> int:
+    pattern = f'%{object_key}%'
+    count = 0
+    for table, columns in (
+        ('generation_task_input_versions', ('model_snapshot_json',)),
+        ('generation_image_versions', ('request_snapshot_json',)),
+        ('generation_result_images_new', ('execution_snapshot_json',)),
+        ('generation_result_sets', ('prompt_preparation_json',)),
+        ('generation_pose_selections', ('plan_json',)),
+        ('generation_pose_selection_shots', ('pose_snapshot_json',)),
+    ):
+        clause = ' OR '.join(f'{column} LIKE ?' for column in columns)
+        count += db.execute(f'SELECT count(*) FROM {table} WHERE {clause}', (pattern,) * len(columns)).fetchone()[0]
+    return count
+
+
 def media_asset_snapshot_reference_count(db: Any, object_key: str) -> int:
     pattern = f"%{object_key}%"
     row = db.execute(
@@ -2044,7 +2065,7 @@ def media_asset_snapshot_reference_count(db: Any, object_key: str) -> int:
         """,
         (pattern, pattern, pattern, pattern),
     ).fetchone()
-    return int(row["count"] or 0)
+    return int(row["count"] or 0) + retained_snapshot_reference_count(db, object_key)
 
 
 def media_asset_snapshot_reference_count_after_styling_garment_purge(
@@ -2069,7 +2090,7 @@ def media_asset_snapshot_reference_count_after_styling_garment_purge(
         """,
         (pattern, pattern, pattern, pattern, *garment_ids),
     ).fetchone()
-    return int(row["count"] or 0)
+    return int(row["count"] or 0) + retained_snapshot_reference_count(db, object_key)
 
 
 def media_asset_direct_reference_count(db: Any, asset_id: int) -> int:
@@ -2096,7 +2117,7 @@ def media_asset_direct_reference_count(db: Any, asset_id: int) -> int:
         (asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id,
          asset_id, asset_id, asset_id, asset_id, asset_id, asset_id, asset_id),
     ).fetchone()
-    return int(row["count"] or 0)
+    return int(row["count"] or 0) + db.execute("SELECT count(*) FROM generation_image_versions WHERE media_asset_id=?", (asset_id,)).fetchone()[0]
 
 
 def detach_upload_session_media_assets(db: Any, asset_ids: list[int]) -> None:
@@ -4367,7 +4388,7 @@ def reset_generation_task_for_rerun(db: Any, task_id: int, timestamp: str) -> No
     db.execute(
         """
         UPDATE generation_tasks
-        SET status = 'READY_FOR_STYLING',
+        SET status = 'READY_FOR_STYLING', pose_workflow_enabled = 1,
             active_styling_id = NULL,
             active_pose_selection_id = NULL,
             active_preview_id = NULL,
@@ -4647,6 +4668,10 @@ def purge_generation_tasks(db: Any, task_ids: list[int], reason: str) -> list[st
         (*task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids, *task_ids),
     ).fetchall()
     asset_ids = list(dict.fromkeys(int(row["asset_id"]) for row in asset_rows if row["asset_id"] is not None))
+    version_assets = db.execute(f'''SELECT DISTINCT v.media_asset_id FROM generation_image_versions v
+        JOIN generation_result_images_new i ON i.id=v.image_id JOIN generation_result_sets s ON s.id=i.result_set_id
+        WHERE s.task_id IN ({placeholders})''', task_ids).fetchall()
+    asset_ids = list(dict.fromkeys(asset_ids + [row[0] for row in version_assets]))
     media_rows = media_asset_rows_for_ids(db, asset_ids)
     db.execute(f"UPDATE generation_pose_selections SET attempt_id = NULL WHERE task_id IN ({placeholders})", task_ids)
     db.execute(
@@ -5354,6 +5379,68 @@ def cancel_generation_batch(batch_id: str) -> dict[str, Any]:
     }
 
 
+async def regenerate_result_group(result_set_id: int, user_instruction: str | None = None) -> dict[str, Any]:
+    with get_db() as db:
+        group = db.execute('SELECT * FROM generation_result_sets WHERE id=?', (result_set_id,)).fetchone()
+        if not group:
+            raise HTTPException(404, '成片组不存在')
+        task = dict(assert_task_can_generate(db, group['task_id']))
+        images = db.execute('SELECT * FROM generation_result_images_new WHERE result_set_id=? ORDER BY sort_order', (result_set_id,)).fetchall()
+    if len(images) != 5 or {i['sort_order'] for i in images} != set(range(1, 6)):
+        raise HTTPException(409, '这组拍摄记录不完整，请使用重新一键成片；已有图片仍然保留')
+    packages = [shot_replay_package(group['task_id'], i['id'], user_instruction=user_instruction) for i in images]
+    timestamp = now_iso()
+    with get_db() as db:
+        db.execute('BEGIN IMMEDIATE')
+        current = assert_task_can_generate(db, group['task_id'])
+        if current['detail_revision'] != task['detail_revision']:
+            raise HTTPException(409, '任务已变化，请刷新后重试')
+        new_id = int(db.execute("""INSERT INTO generation_result_sets
+            (task_id, input_version_id, styling_id, preview_id, shot_preset_version_id, user_instruction_json,
+             status, created_at, updated_at, pose_selection_id, prompt_preparation_json)
+            VALUES (?, ?, ?, ?, ?, ?, 'RUNNING', ?, ?, ?, ?)""",
+            (group['task_id'], group['input_version_id'], group['styling_id'], group['preview_id'],
+             group['shot_preset_version_id'], group['user_instruction_json'], timestamp, timestamp,
+             group['pose_selection_id'], dumps({'mode': 'direct', 'status': 'DIRECT', 'sourceResultSetId': result_set_id}))).lastrowid)
+        db.execute("""INSERT INTO generation_result_set_shot_presets
+            (result_set_id,category_family,shot_index,background_asset_id,pose_asset_id,created_at)
+            SELECT ?,category_family,shot_index,background_asset_id,pose_asset_id,? FROM generation_result_set_shot_presets WHERE result_set_id=?""",
+            (new_id, timestamp, result_set_id))
+        ids = []
+        for old, package in zip(images, packages):
+            capture_published_image(db, old['id'])
+            ids.append(int(db.execute("""INSERT INTO generation_result_images_new
+                (result_set_id,shot_role,sort_order,status,execution_snapshot_json,user_instruction_json,created_at,updated_at)
+                VALUES (?,?,?,'QUEUED',?,?,?,?)""", (new_id, old['shot_role'], old['sort_order'], dumps(package),
+                dumps(package.get('finalImageUserInstruction', {})), timestamp, timestamp)).lastrowid))
+        supersede_generation_result_sets(db, group['task_id'], timestamp, keep_result_set_id=new_id)
+        activate_result_context(db, new_id)
+        db.execute("UPDATE generation_tasks SET status='FINAL_RUNNING' WHERE id=?", (group['task_id'],))
+    schedule_background_generation(run_final_generation(group['task_id'], new_id, ids, trigger='manual_step'), job_key=final_set_job_key(new_id))
+    return {'item': get_generation_task_by_id(group['task_id'])}
+
+
+@app.post('/api/generation-result-sets/{result_set_id}/regenerate')
+async def regenerate_selected_result_set(result_set_id: int, payload: GenerationStageInstructionRequest | None = None) -> dict[str, Any]:
+    return await regenerate_result_group(result_set_id, payload.userInstruction if payload else None)
+
+
+@app.post('/api/generation-result-sets/{result_set_id}/continue')
+async def continue_selected_result_set(result_set_id: int) -> dict[str, Any]:
+    with get_db() as db:
+        group = db.execute('SELECT * FROM generation_result_sets WHERE id=?', (result_set_id,)).fetchone()
+        if not group:
+            raise HTTPException(404, '成片组不存在')
+    ids = continue_active_final_result_set(group['task_id'], result_set_id, group['styling_id'], group['preview_id'], activate=True)
+    if ids:
+        with get_db() as db:
+            attempts = {r['id']: r['active_attempt_id'] for r in db.execute(
+                'SELECT id,active_attempt_id FROM generation_result_images_new WHERE id IN (SELECT value FROM json_each(?))', (dumps(ids),)) if r['active_attempt_id']}
+        schedule_background_generation(run_final_generation(group['task_id'], result_set_id, ids,
+            resume_attempts_by_image_id=attempts, trigger='manual_step'), job_key=final_set_job_key(result_set_id))
+    return {'item': get_generation_task_by_id(group['task_id'])}
+
+
 async def run_generate_final_images(
     task_id: int,
     include_debug: bool = False,
@@ -5369,7 +5456,12 @@ async def run_generate_final_images(
         raise HTTPException(status_code=409, detail="请先完成 AI 智能选搭")
     preview_id = int(task["active_storyboard_preview_id"]) if row_value(task, "active_storyboard_preview_id") else None
     styling_id = int(task["active_styling_id"])
-    category_family = storyboard_category_family(get_styling_plan_by_id(styling_id))
+    if not continue_existing and task['active_result_set_id']:
+        with get_db() as db:
+            existing = db.execute('SELECT styling_id FROM generation_result_sets WHERE id=?', (task['active_result_set_id'],)).fetchone()
+        if existing and existing['styling_id'] == styling_id:
+            return await regenerate_result_group(task['active_result_set_id'], user_instruction)
+    category_family = '' if continue_existing and task['active_result_set_id'] else storyboard_category_family(get_styling_plan_by_id(styling_id))
     preset_rows = []
     if not row_value(task, "pose_workflow_enabled", 0):
         with get_db() as db:
@@ -5417,6 +5509,7 @@ async def run_generate_final_images(
                     job_key=final_set_job_key(int(task["active_result_set_id"])),
                 )
             return {"item": get_generation_task_by_id(task_id, include_debug=include_debug)}
+    category_family = storyboard_category_family(get_styling_plan_by_id(styling_id))
     pose_selection_id = row_value(task, "active_pose_selection_id")
     selection = None
     if row_value(task, "pose_workflow_enabled", 0):
@@ -5503,9 +5596,13 @@ def continue_active_final_result_set(
     styling_id: int,
     preview_id: int | None,
     user_instruction_context: dict[str, Any] | None = None,
+    activate: bool = False,
 ) -> list[int] | None:
     timestamp = now_iso()
     with get_db() as db:
+        db.execute('BEGIN IMMEDIATE')
+        if activate:
+            assert_task_can_generate(db, task_id)
         retry_task = db.execute(
             "SELECT auto_run_retry_count FROM generation_tasks WHERE id = ?",
             (task_id,),
@@ -5530,14 +5627,23 @@ def continue_active_final_result_set(
             (result_set_id,),
         ).fetchall()
         existing_by_sort = {int(row["sort_order"]): row for row in existing_rows}
+        if activate:
+            activate_result_context(db, result_set_id)
+            db.execute("UPDATE generation_result_sets SET status='PARTIAL' WHERE id=?", (result_set_id,))
         image_ids: list[int] = []
-        for sort_order, shot_role in enumerate(final_image_slot_roles(get_styling_plan_by_id(styling_id)), start=1):
+        roles = [existing_by_sort[n]['shot_role'] for n in range(1, 6)] if set(existing_by_sort) == set(range(1, 6)) else final_image_slot_roles(get_styling_plan_by_id(styling_id))
+        for sort_order, shot_role in enumerate(roles, start=1):
             existing = existing_by_sort.get(sort_order)
             if existing and existing["status"] == "SUCCEEDED":
                 continue
             if existing and existing["status"] in {"QUEUED", "RUNNING"}:
                 raise HTTPException(status_code=409, detail="成片已在生成中，请勿重复提交")
             if existing:
+                package = replay_package(db, existing)
+                if package:
+                    db.execute('UPDATE generation_result_images_new SET execution_snapshot_json=? WHERE id=?', (dumps(package), existing['id']))
+                elif published_versions(db, existing):
+                    raise HTTPException(409, '该镜头的拍摄输入记录不完整，请使用重新一键成片；原图仍可查看和下载')
                 attempt = db.execute(
                     "SELECT error_code, provider_request_id FROM generation_attempts WHERE id = ?",
                     (row_value(existing, "active_attempt_id"),),
@@ -5671,7 +5777,9 @@ async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: lis
     pending: dict[str, Any] = {}
     for image_id in image_ids:
         with get_db() as db:
-            image = db.execute("SELECT user_instruction_json, active_attempt_id FROM generation_result_images_new WHERE id = ?", (image_id,)).fetchone()
+            image = db.execute("SELECT user_instruction_json, active_attempt_id, execution_snapshot_json FROM generation_result_images_new WHERE id = ?", (image_id,)).fetchone()
+        if executable_package(json_object(image["execution_snapshot_json"])):
+            continue
         if image["active_attempt_id"] and attempt_has_provider_request_id(image["active_attempt_id"]):
             continue
         cached = packages.get(str(image_id))
@@ -5852,76 +5960,87 @@ def reconcile_final_result_set(db: Any, result_set_id: int, task_id: int | None 
     return result_set_status, task_status
 
 
+def assert_task_can_generate(db: Any, task_id: int) -> Any:
+    task = db.execute('SELECT * FROM generation_tasks WHERE id=?', (task_id,)).fetchone()
+    if not task or task['deleted_at']:
+        raise HTTPException(404, "任务不存在")
+    if task['archived_at'] or task['status'] == 'ABANDONED':
+        raise HTTPException(409, "请先恢复已归档任务")
+    if task['status'] in RUNNING_GENERATION_TASK_STATUSES or task['auto_run_target']:
+        raise HTTPException(409, "当前任务正在执行，请等待完成或取消")
+    return task
+
+
+def activate_result_context(db: Any, result_set_id: int) -> None:
+    row = db.execute('SELECT * FROM generation_result_sets WHERE id=?', (result_set_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "成片组不存在")
+    db.execute("""UPDATE generation_tasks SET active_result_set_id=?, active_styling_id=?,
+        current_input_version_id=?, active_pose_selection_id=?, active_preview_id=?,
+        active_storyboard_preview_id=?, pose_workflow_enabled=?, updated_at=? WHERE id=?""",
+        (row['id'], row['styling_id'], row['input_version_id'], row['pose_selection_id'], row['preview_id'],
+         row['preview_id'], int(bool(row['pose_selection_id'])), now_iso(), row['task_id']))
+
+
+def shot_replay_package(task_id: int, image_id: int, version_id: int | None = None,
+                        user_instruction: str | None = None) -> dict[str, Any]:
+    with get_db() as db:
+        image = db.execute('SELECT * FROM generation_result_images_new WHERE id=?', (image_id,)).fetchone()
+        if not image:
+            raise HTTPException(404, "镜头不存在")
+        try:
+            package = replay_package(db, image, version_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        if package is None and (version_id is not None or published_versions(db, image)):
+            raise HTTPException(409, "该图片的拍摄输入记录不完整，请使用重新一键成片；原图仍可查看和下载")
+    if package is None:
+        package = build_new_final_task_package(task_id, image_id)
+    # JSON copy also detaches nested input lists from cached preparation packages.
+    package = loads(dumps(package), {})
+    if user_instruction is not None:
+        if len(user_instruction) > MAX_USER_INPUT_CHARS:
+            raise HTTPException(400, f"成片要求最多 {MAX_USER_INPUT_CHARS} 字")
+        base = package.get('replayBasePrompt', package['prompt'])
+        package['replayBasePrompt'] = base
+        package['prompt'] = base + ("\n\n本次单张调整要求（更新原补充要求）：" + user_instruction if user_instruction else "")
+        package['finalImageUserInstruction'] = build_stage_user_instruction_context('final_image', user_instruction)
+        package['renderedPromptHash'] = text_hash(package['prompt'])
+    return package
+
+
 @app.post("/api/generation-result-images-new/{image_id}/retry")
-async def retry_new_result_image(image_id: int, request: Request, payload: GenerationStageInstructionRequest | None = None) -> dict[str, Any]:
+async def retry_new_result_image(image_id: int, request: Request, payload: ResultImageRetryRequest | None = None) -> dict[str, Any]:
     with get_db() as db:
-        row = db.execute(
-            """
-            SELECT gri.*, grs.task_id, grs.id AS result_set_id, gt.status AS task_status,
-                   gt.final_image_user_instruction_text
-            FROM generation_result_images_new gri
-            JOIN generation_result_sets grs ON grs.id = gri.result_set_id
-            JOIN generation_tasks gt ON gt.id = grs.task_id
-            WHERE gri.id = ?
-            """,
-            (image_id,),
-        ).fetchone()
+        row = db.execute("""SELECT i.*, s.task_id FROM generation_result_images_new i
+            JOIN generation_result_sets s ON s.id=i.result_set_id WHERE i.id=?""", (image_id,)).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail="结果图不存在")
-        if row["task_status"] in RUNNING_GENERATION_TASK_STATUSES:
-            raise HTTPException(status_code=409, detail="当前任务正在生成中，请先取消或等待完成")
-        if row["status"] in {"QUEUED", "RUNNING"}:
-            raise HTTPException(status_code=409, detail="当前结果图仍在生成中")
-        effective_user_instruction = payload.userInstruction if payload and payload.userInstruction is not None else pending_generation_task_stage_instruction(row, "final_image")
-        previous_attempt_id = int(row["active_attempt_id"]) if row["active_attempt_id"] else None
-    task_id = int(row["task_id"])
-    result_set_id = int(row["result_set_id"])
-    timestamp = now_iso()
-    user_instruction_context = build_stage_user_instruction_context("final_image", effective_user_instruction)
-    attempt_id = create_attempt(
-        "generation_result_image",
-        image_id,
-        "image-2",
-        request_snapshot={"invocation": {"mode": "manual_retry", "target": "final_image"}},
-    )
+            raise HTTPException(404, "结果图不存在")
+        captured_task = dict(assert_task_can_generate(db, row['task_id']))
+        if row['status'] in {'RUNNING', 'QUEUED'}:
+            raise HTTPException(409, "当前结果图仍在生成中")
+    package = shot_replay_package(row['task_id'], image_id, payload.versionId if payload else None,
+                                  payload.userInstruction if payload else None)
+    package['invocation'] = {'mode': 'manual_retry', 'target': 'final_image'}
     with get_db() as db:
-        if previous_attempt_id:
-            db.execute(
-                "UPDATE generation_attempts SET retry_of_attempt_id = ?, updated_at = ? WHERE id = ?",
-                (previous_attempt_id, timestamp, attempt_id),
-            )
-        if payload and payload.userInstruction is not None:
-            persist_generation_task_stage_instruction(db, task_id, "final_image", effective_user_instruction, timestamp)
-        db.execute(
-            """
-            UPDATE generation_result_images_new
-            SET status = 'QUEUED', active_attempt_id = ?,
-                locked_by = NULL, locked_until = NULL,
-                user_instruction_json = ?,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (attempt_id, dumps(user_instruction_context), timestamp, image_id),
-        )
-        db.execute(
-            "UPDATE generation_result_sets SET status = 'RUNNING', updated_at = ? WHERE id = ?",
-            (timestamp, result_set_id),
-        )
-        db.execute(
-            "UPDATE generation_tasks SET status = 'FINAL_RUNNING', active_result_set_id = ?, updated_at = ? WHERE id = ?",
-            (result_set_id, timestamp, task_id),
-        )
-    schedule_background_generation(
-        run_final_generation(
-            task_id,
-            result_set_id,
-            [image_id],
-            resume_attempts_by_image_id={image_id: attempt_id},
-            trigger="manual_retry",
-        ),
-        job_key=final_set_job_key(result_set_id),
-    )
-    return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
+        db.execute('BEGIN IMMEDIATE')
+        task = assert_task_can_generate(db, row['task_id'])
+        current = db.execute('SELECT * FROM generation_result_images_new WHERE id=?', (image_id,)).fetchone()
+        if (not current or current['active_attempt_id'] != row['active_attempt_id']
+                or task['detail_revision'] != captured_task['detail_revision']):
+            raise HTTPException(409, "任务已变化，请刷新后重试")
+        capture_published_image(db, image_id)
+        attempt_id = create_attempt('generation_result_image', image_id, 'image-2', request_snapshot=package, db=db)
+        db.execute('UPDATE generation_attempts SET retry_of_attempt_id=? WHERE id=?', (row['active_attempt_id'], attempt_id))
+        db.execute("""UPDATE generation_result_images_new SET status='QUEUED', active_attempt_id=?,
+            execution_snapshot_json=?, user_instruction_json=?, locked_by=NULL, locked_until=NULL, updated_at=? WHERE id=?""",
+            (attempt_id, dumps(package), dumps(package.get('finalImageUserInstruction', {})), now_iso(), image_id))
+        activate_result_context(db, row['result_set_id'])
+        db.execute("UPDATE generation_result_sets SET status='RUNNING', updated_at=? WHERE id=?", (now_iso(), row['result_set_id']))
+        db.execute("UPDATE generation_tasks SET status='FINAL_RUNNING', updated_at=? WHERE id=?", (now_iso(), row['task_id']))
+    schedule_background_generation(run_final_generation(row['task_id'], row['result_set_id'], [image_id],
+        resume_attempts_by_image_id={image_id: attempt_id}, trigger='manual_retry'), job_key=final_set_job_key(row['result_set_id']))
+    return {'item': get_generation_task_by_id(row['task_id'], include_debug=admin_debug_for_request(request))}
 
 
 @app.post("/api/generation-result-images-new/{image_id}/redeliver")
@@ -5976,14 +6095,16 @@ def queue_result_image_redelivery(image_id: int) -> tuple[int, int, int]:
         raise HTTPException(status_code=409, detail="该成片没有可回传的 provider 任务，请使用重新生成")
     task_id = int(row["task_id"])
     result_set_id = int(row["result_set_id"])
-    attempt_id = create_attempt(
-        "generation_result_image",
-        image_id,
-        str(last_attempt["provider"]),
-        request_snapshot=loads(last_attempt["request_snapshot_json"], {}),
-    )
     timestamp = now_iso()
     with get_db() as db:
+        db.execute('BEGIN IMMEDIATE')
+        assert_task_can_generate(db, task_id)
+        current = db.execute('SELECT active_attempt_id,status FROM generation_result_images_new WHERE id=?', (image_id,)).fetchone()
+        if not current or current['active_attempt_id'] != row['active_attempt_id'] or current['status'] != 'FAILED':
+            raise HTTPException(409, '镜头已变化，请刷新后重试')
+        attempt_id = create_attempt('generation_result_image', image_id, str(last_attempt['provider']),
+                                    request_snapshot=loads(last_attempt['request_snapshot_json'], {}), db=db)
+        activate_result_context(db, result_set_id)
         request_snapshot = loads(last_attempt["request_snapshot_json"], {})
         if isinstance(request_snapshot, dict):
             request_snapshot = {**request_snapshot, "invocation": {"mode": "manual_redeliver", "target": "final_image"}}
@@ -6117,7 +6238,11 @@ def list_new_generation_records(
 
 @app.get("/api/generation-records/{task_id}")
 def get_new_generation_record(task_id: int, request: Request, include_debug: bool = Query(False, alias="includeDebug")) -> dict[str, Any]:
-    return {"item": get_generation_task_by_id(task_id, include_debug=require_admin_debug(request, include_debug))}
+    item = get_generation_task_by_id(task_id, include_debug=require_admin_debug(request, include_debug))
+    with get_db() as db:
+        ids = [r[0] for r in db.execute('SELECT id FROM generation_result_sets WHERE task_id=? ORDER BY id DESC', (task_id,))]
+    item['resultSets'] = [get_generation_result_set(id) for id in ids]
+    return {"item": item}
 
 
 BATCH_RECORD_STATUS_ORDER = ["ARCHIVED", "RUNNING", "FAILED", "PARTIAL", "CANCELLED", "COMPLETED", "PENDING"]
@@ -6417,6 +6542,7 @@ FINAL_IMAGE_EXPORT_STATUS_TEXT = {
 
 
 class FinalImageExportPrecheckRequest(BaseModel):
+    resultSetId: int | None = None
     ids: list[int] = Field(default_factory=list)
 
 
@@ -6437,67 +6563,45 @@ def final_image_export_shot_label(shot_role: str | None) -> str:
     return str(shot_role or "").strip()
 
 
-def get_final_image_export_overview(db: Any, task_id: int) -> dict[str, Any] | None:
-    """收集单个任务当前 active 结果集的可下载成片和缺失/失败明细。"""
-    task = db.execute(
-        "SELECT id, name, status, active_result_set_id FROM generation_tasks WHERE id = ? AND deleted_at IS NULL",
-        (task_id,),
-    ).fetchone()
+def get_final_image_export_overview(db: Any, task_id: int, result_set_id: int | None = None) -> dict[str, Any] | None:
+    task = db.execute('SELECT id, name, status FROM generation_tasks WHERE id=? AND deleted_at IS NULL', (task_id,)).fetchone()
     if not task:
         return None
-    downloadable: list[dict[str, Any]] = []
-    issues: list[dict[str, Any]] = []
+    groups = db.execute('SELECT id FROM generation_result_sets WHERE task_id=? AND (? IS NULL OR id=?) ORDER BY id',
+                        (task_id, result_set_id, result_set_id)).fetchall()
+    if result_set_id is not None and not groups:
+        raise HTTPException(404, '成片组不属于当前任务')
+    downloadable, issues = [], []
     total_count = 0
-    if task["active_result_set_id"]:
-        rows = db.execute(
-            """
-            SELECT gri.sort_order, gri.status, gri.shot_role,
-                   ma.object_key, ma.mime_type, ma.original_filename, ma.size_bytes
-            FROM generation_result_images_new gri
-            LEFT JOIN media_assets ma ON ma.id = gri.current_asset_id AND ma.deleted_at IS NULL
-            WHERE gri.result_set_id = ?
-            ORDER BY gri.sort_order
-            """,
-            (int(task["active_result_set_id"]),),
-        ).fetchall()
-        total_count = len(rows)
-        for row in rows:
-            label = final_image_export_shot_label(row["shot_role"])
-            if row["status"] == "SUCCEEDED" and row["object_key"]:
-                downloadable.append(
-                    {
-                        "sortOrder": int(row["sort_order"]),
-                        "shotLabel": label,
-                        "objectKey": row["object_key"],
-                        "mimeType": row["mime_type"],
-                        "originalFilename": row["original_filename"],
-                        "sizeBytes": int(row["size_bytes"] or 0),
-                    }
-                )
-            else:
-                issues.append(
-                    {
-                        "sortOrder": int(row["sort_order"]),
-                        "shotLabel": label,
-                        "status": "MISSING_ASSET" if row["status"] == "SUCCEEDED" else str(row["status"]),
-                    }
-                )
-    return {
-        "taskId": int(task["id"]),
-        "taskName": task["name"],
-        "taskStatus": task["status"],
-        "hasResultSet": bool(task["active_result_set_id"]),
-        "downloadable": downloadable,
-        "issues": issues,
-        "totalCount": total_count,
-    }
+    for group in groups:
+        images = db.execute('SELECT * FROM generation_result_images_new WHERE result_set_id=? ORDER BY sort_order, id', (group['id'],)).fetchall()
+        for image in images:
+            versions = published_versions(db, image)
+            count = 0
+            for version in reversed(versions):
+                asset = db.execute('SELECT * FROM media_assets WHERE id=? AND deleted_at IS NULL', (version['media_asset_id'],)).fetchone()
+                if not asset:
+                    continue
+                count += 1
+                downloadable.append({'resultSetId': group['id'], 'versionId': version['id'], 'mediaAssetId': asset['id'],
+                    'sortOrder': image['sort_order'], 'shotLabel': final_image_export_shot_label(image['shot_role']),
+                    'objectKey': asset['object_key'], 'mimeType': asset['mime_type'],
+                    'originalFilename': asset['original_filename'], 'sizeBytes': int(asset['size_bytes'] or 0),
+                    'nested': len(groups) > 1 or len(versions) > 1})
+            total_count += max(1, count)
+            if not count or image['status'] in {'FAILED', 'CANCELLED', 'RUNNING', 'QUEUED'}:
+                issues.append({'resultSetId': group['id'], 'sortOrder': image['sort_order'],
+                    'shotLabel': final_image_export_shot_label(image['shot_role']),
+                    'status': image['status'] if image['status'] != 'SUCCEEDED' else 'MISSING_ASSET'})
+    return {'taskId': task['id'], 'taskName': task['name'], 'taskStatus': task['status'],
+            'hasResultSet': bool(groups), 'downloadable': downloadable, 'issues': issues, 'totalCount': total_count}
 
 
-def collect_final_image_export_overviews(task_ids: list[int]) -> list[dict[str, Any]]:
+def collect_final_image_export_overviews(task_ids: list[int], result_set_id: int | None = None) -> list[dict[str, Any]]:
     overviews: list[dict[str, Any]] = []
     with get_db() as db:
         for task_id in task_ids:
-            overview = get_final_image_export_overview(db, task_id)
+            overview = get_final_image_export_overview(db, task_id, result_set_id)
             if not overview:
                 raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
             overviews.append(overview)
@@ -6507,7 +6611,7 @@ def collect_final_image_export_overviews(task_ids: list[int]) -> list[dict[str, 
 @app.post("/api/generation-task-exports/precheck")
 def precheck_final_image_export(payload: FinalImageExportPrecheckRequest) -> dict[str, Any]:
     task_ids = normalize_final_image_export_ids(payload.ids)
-    overviews = collect_final_image_export_overviews(task_ids)
+    overviews = collect_final_image_export_overviews(task_ids, payload.resultSetId)
     items = [
         {
             "taskId": item["taskId"],
@@ -6622,6 +6726,8 @@ def iter_final_image_export_zip(tasks: list[dict[str, Any]], exported_at: str) -
                     notes.append(f"  - #{entry['sortOrder']} {entry['shotLabel']}：读取成片文件失败，未包含在压缩包中")
                     continue
                 filename = f"z({entry['sortOrder']}){final_image_export_extension(entry['mimeType'], entry['originalFilename'])}"
+                if entry.get('nested'):
+                    filename = f"成片组-{entry['resultSetId']}/版本-{entry['versionId'] or entry['mediaAssetId']}/{filename}"
                 info = zipfile.ZipInfo(f"{folder}/{filename}", date_time=date_time)
                 archive.writestr(info, content)
                 included += 1
@@ -6641,7 +6747,7 @@ def iter_final_image_export_zip(tasks: list[dict[str, Any]], exported_at: str) -
 
 
 @app.get("/api/generation-task-exports/archive")
-def download_final_image_archive(ids: str = Query(...)) -> StreamingResponse:
+def download_final_image_archive(ids: str = Query(...), resultSetId: int | None = None) -> StreamingResponse:
     raw_ids: list[int] = []
     for part in ids.split(","):
         part = part.strip()
@@ -6652,7 +6758,7 @@ def download_final_image_archive(ids: str = Query(...)) -> StreamingResponse:
         except ValueError as error:
             raise HTTPException(status_code=400, detail="任务 ID 格式不正确") from error
     task_ids = normalize_final_image_export_ids(raw_ids)
-    tasks = collect_final_image_export_overviews(task_ids)
+    tasks = collect_final_image_export_overviews(task_ids, resultSetId)
     total_images = sum(len(task["downloadable"]) for task in tasks)
     if not total_images:
         raise HTTPException(status_code=400, detail="所选任务没有可下载的成片")
@@ -9544,10 +9650,14 @@ def finish_attempt(
     output_asset_id: int | None = None,
     error_message: str | None = None,
     error_code: str | None = None,
+    db: Any | None = None,
 ) -> None:
     timestamp = now_iso()
-    with get_db() as db:
-        db.execute(
+    if db is None:
+        with get_db() as connection:
+            finish_attempt(attempt_id, status, response_snapshot, output_asset_id, error_message, error_code, db=connection)
+        return
+    db.execute(
             """
             UPDATE generation_attempts
             SET status = ?, completed_at = ?, failed_at = ?, cancelled_at = ?,
@@ -11048,6 +11158,10 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         ).fetchone()
     if not row:
         raise RuntimeError("成片槽位不存在")
+    with get_db() as db:
+        saved_package = replay_package(db, row)
+    if saved_package:
+        return saved_package
     styling_plan = get_styling_plan_by_id(int(row["styling_id"]))
     with get_db() as db:
         preset = db.execute(
@@ -12727,46 +12841,37 @@ async def _generate_single_final_image_unlocked(
     trigger: str = "manual_step",
     balance_stop: asyncio.Event | None = None,
 ) -> int:
-    if balance_stop is not None and balance_stop.is_set():
-        # 同批已有成片撞到余额不足，本图直接落 FAILED(INSUFFICIENT_BALANCE)，不再提交 provider。
-        stop_attempt_id = attempt_id or create_attempt("generation_result_image", image_id, "image-2")
-        finish_attempt(
-            stop_attempt_id,
-            "FAILED",
-            error_message="ToAPIs 余额不足，已跳过本张成片提交（同批已检测到余额不足）。",
-            error_code=ERROR_INSUFFICIENT_BALANCE,
-        )
-        with get_db() as db:
-            db.execute(
-                """
-                UPDATE generation_result_images_new
-                SET status = 'FAILED', active_attempt_id = ?, locked_by = NULL, locked_until = NULL, updated_at = ?
-                WHERE id = ? AND status IN ('QUEUED', 'RUNNING')
-                """,
-                (stop_attempt_id, now_iso(), image_id),
-            )
-        return 0
-    if attempt_id is None:
-        attempt_id = create_attempt("generation_result_image", image_id, "image-2")
-    if generation_attempt_cancelled(attempt_id):
-        return 0
-    lease_generation_result_image(image_id, attempt_id)
+    # Claim the current attempt atomically. A delayed worker must not replace a
+    # newer retry's active_attempt_id before the publication guard can inspect it.
     with get_db() as db:
+        db.execute('BEGIN IMMEDIATE')
         row = get_final_image_generation_state(db, image_id)
-        if final_image_generation_cancelled(row, result_set_id):
-            finish_attempt(attempt_id, "CANCELLED")
+        image = db.execute('SELECT * FROM generation_result_images_new WHERE id=?', (image_id,)).fetchone()
+        if (final_image_generation_cancelled(row, result_set_id) or not image
+                or image['status'] not in {'QUEUED', 'RUNNING'}
+                or (image['active_attempt_id'] is not None and image['active_attempt_id'] != attempt_id)):
             return 0
-        db.execute(
-            """
-            UPDATE generation_result_images_new
-            SET status = 'RUNNING', active_attempt_id = ?, updated_at = ?
-            WHERE id = ? AND status IN ('QUEUED', 'RUNNING')
-            """,
-            (attempt_id, now_iso(), image_id),
-        )
+        if attempt_id is None:
+            attempt_id = create_attempt('generation_result_image', image_id, 'image-2', db=db)
+        attempt = db.execute('SELECT * FROM generation_attempts WHERE id=?', (attempt_id,)).fetchone()
+        if (not attempt or attempt['status'] in {'CANCELLED', 'SUCCEEDED'}
+                or attempt['owner_type'] != 'generation_result_image' or attempt['owner_id'] != image_id):
+            return 0
+        db.execute("""UPDATE generation_result_images_new SET status='RUNNING', active_attempt_id=?,
+            locked_by=?, locked_until=?, run_attempts=COALESCE(run_attempts,0)+1, updated_at=? WHERE id=?""",
+            (attempt_id, f'worker-{uuid4()}', job_lease_until(), now_iso(), image_id))
+        if balance_stop is not None and balance_stop.is_set():
+            finish_attempt(attempt_id, 'FAILED', error_message='ToAPIs 余额不足，已跳过本张成片提交（同批已检测到余额不足）。',
+                           error_code=ERROR_INSUFFICIENT_BALANCE, db=db)
+            db.execute("""UPDATE generation_result_images_new SET status='FAILED', locked_by=NULL,
+                locked_until=NULL, updated_at=? WHERE id=?""", (now_iso(), image_id))
+            return 0
     try:
         preparation = read_final_preparation(result_set_id)
-        task_package = None
+        with get_db() as db:
+            frozen_image = db.execute("SELECT execution_snapshot_json FROM generation_result_images_new WHERE id=?", (image_id,)).fetchone()
+        frozen_package = json_object(frozen_image["execution_snapshot_json"]) if frozen_image else {}
+        task_package = frozen_package if executable_package(frozen_package) else None
         if attempt_has_provider_request_id(attempt_id):
             with get_db() as db:
                 saved = db.execute("SELECT request_snapshot_json FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
@@ -12780,6 +12885,8 @@ async def _generate_single_final_image_unlocked(
                 raise RuntimeError("拍摄要求尚未准备完成，不能提交成片生成")
             task_package = build_new_final_task_package(task_id, image_id)
         task_package = dict(task_package)
+        if not attempt_has_provider_request_id(attempt_id):
+            task_package = adapt_replay_references(task_package)
         trigger = preserved_attempt_invocation_mode(attempt_id) or trigger
         task_package["invocation"] = {"mode": trigger, "target": "final_image"}
         if not attempt_has_provider_request_id(attempt_id):
@@ -12811,32 +12918,28 @@ async def _generate_single_final_image_unlocked(
                 """
                 UPDATE generation_result_images_new
                 SET status = 'FAILED', active_attempt_id = ?, locked_by = NULL, locked_until = NULL, updated_at = ?
-                WHERE id = ? AND status IN ('QUEUED', 'RUNNING')
+                WHERE id = ? AND status IN ('QUEUED', 'RUNNING') AND active_attempt_id = ?
                 """,
-                (attempt_id, now_iso(), image_id),
+                (attempt_id, now_iso(), image_id, attempt_id),
             )
         raise
     with get_db() as db:
-        current = db.execute(
-            final_image_generation_state_sql(),
-            (image_id,),
-        ).fetchone()
-        if final_image_generation_cancelled(current, result_set_id) or generation_attempt_cancelled(attempt_id):
-            finish_attempt(attempt_id, "CANCELLED", response_snapshot=provider_response, output_asset_id=asset_id)
-            persist_attempt_provider_request_id(attempt_id, provider_response)
+        db.execute('BEGIN IMMEDIATE')
+        current = get_final_image_generation_state(db, image_id)
+        active = db.execute('SELECT active_attempt_id, status FROM generation_result_images_new WHERE id=?', (image_id,)).fetchone()
+        attempt = db.execute('SELECT status FROM generation_attempts WHERE id=?', (attempt_id,)).fetchone()
+        if (final_image_generation_cancelled(current, result_set_id) or not active
+                or active['active_attempt_id'] != attempt_id or active['status'] not in {'QUEUED', 'RUNNING'}
+                or not attempt or attempt['status'] == 'CANCELLED'):
+            finish_attempt(attempt_id, 'CANCELLED', response_snapshot=provider_response, output_asset_id=asset_id, db=db)
             return asset_id
-    finish_attempt(attempt_id, "SUCCEEDED", response_snapshot=provider_response, output_asset_id=asset_id)
+        capture_published_image(db, image_id)
+        finish_attempt(attempt_id, 'SUCCEEDED', response_snapshot=provider_response, output_asset_id=asset_id, db=db)
+        db.execute("""UPDATE generation_result_images_new SET status='SUCCEEDED', current_asset_id=?,
+            active_attempt_id=?, locked_by=NULL, locked_until=NULL, updated_at=? WHERE id=?""",
+            (asset_id, attempt_id, now_iso(), image_id))
+        capture_published_image(db, image_id)
     persist_attempt_provider_request_id(attempt_id, provider_response)
-    with get_db() as db:
-        db.execute(
-            """
-            UPDATE generation_result_images_new
-            SET status = 'SUCCEEDED', current_asset_id = ?, active_attempt_id = ?,
-                locked_by = NULL, locked_until = NULL, updated_at = ?
-            WHERE id = ? AND status IN ('QUEUED', 'RUNNING')
-            """,
-            (asset_id, attempt_id, now_iso(), image_id),
-        )
     return asset_id
 
 
@@ -13124,6 +13227,21 @@ def get_generation_preview(preview_id: int | None) -> dict[str, Any] | None:
     }
 
 
+def serialize_result_image(image: Any) -> dict[str, Any]:
+    with get_db() as db:
+        versions = published_versions(db, image)
+    return {
+        'id': image['id'], 'sortOrder': image['sort_order'], 'shotRole': image['shot_role'],
+        'status': image['status'], 'userInstruction': loads(row_value(image, 'user_instruction_json'), {}),
+        'asset': get_media_asset_by_id(image['current_asset_id']),
+        'activeAttemptId': image['active_attempt_id'], 'activeAttempt': get_attempt_summary(image['active_attempt_id']),
+        'createdAt': image['created_at'], 'updatedAt': image['updated_at'],
+        'versions': [{'id': v['id'], 'asset': get_media_asset_by_id(v['media_asset_id']),
+            'createdAt': v['created_at'], 'isCurrent': v['media_asset_id'] == image['current_asset_id'],
+            'canRegenerate': executable_package(json_object(v['request_snapshot_json']))} for v in versions],
+    }
+
+
 def get_generation_result_set(result_set_id: int | None) -> dict[str, Any] | None:
     if not result_set_id:
         return None
@@ -13144,21 +13262,9 @@ def get_generation_result_set(result_set_id: int | None) -> dict[str, Any] | Non
         "userInstruction": loads(row_value(row, "user_instruction_json"), {}),
         "preparation": {"status": preparation.get("status", "DIRECT"), "error": preparation.get("error"),
                         "attemptId": preparation.get("attemptId")},
-        "images": [
-            {
-                "id": image["id"],
-                "sortOrder": image["sort_order"],
-                "shotRole": image["shot_role"],
-                "status": image["status"],
-                "userInstruction": loads(row_value(image, "user_instruction_json"), {}),
-                "asset": get_media_asset_by_id(image["current_asset_id"]),
-                "activeAttemptId": image["active_attempt_id"],
-                "activeAttempt": get_attempt_summary(image["active_attempt_id"]),
-                "createdAt": image["created_at"],
-                "updatedAt": image["updated_at"],
-            }
-            for image in images
-        ],
+        "images": [serialize_result_image(image) for image in images],
+        "stylingId": row['styling_id'],
+        "selectedMaterials": (get_generation_styling(row['styling_id']) or {}).get('selectedMaterials', []),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
@@ -13605,6 +13711,8 @@ def model_asset_file_is_referenced(object_key: str) -> bool:
         return False
     pattern = f"%{clean}%"
     with get_db() as db:
+        if retained_snapshot_reference_count(db, clean):
+            return True
         input_version = db.execute(
             """
             SELECT 1 FROM generation_task_input_versions
@@ -13632,6 +13740,8 @@ def model_asset_dir_is_referenced(asset_dir: str) -> bool:
         return False
     pattern = f"%{clean}/%"
     with get_db() as db:
+        if retained_snapshot_reference_count(db, clean + '/'):
+            return True
         input_version = db.execute(
             """
             SELECT 1 FROM generation_task_input_versions
@@ -14000,12 +14110,12 @@ def claim_pose_selection(task_id: int, user_instruction: str | None, trigger: st
         raise HTTPException(409, "请联系管理员在 Prompt 维护中配置姿势选搭规则与品牌信息")
     snapshot = {**gemini_request_meta(), "promptConfigKey": "assembly.pose_selection", "prompt": prompt, "promptConfigSnapshot": config,
         "workflow": "shared_background_v1", "runtime": runtime, "poses": library, "references": [{**dict(row), "backgroundAsset": get_media_asset_by_id(row["background_asset_id"])} for row in references],
-        "stylingId": styling["id"], "inputVersionId": styling["input_version_id"], "invocation": {"mode": trigger, "target": "pose_selection"}}
+        "capturedTaskInputVersionId": task["current_input_version_id"], "stylingId": styling["id"], "inputVersionId": styling["input_version_id"], "invocation": {"mode": trigger, "target": "pose_selection"}}
     with get_db() as db:
         db.execute("BEGIN IMMEDIATE")
         current = db.execute("SELECT * FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
         if (not current or current["deleted_at"] or current["archived_at"] or current["status"] in RUNNING_GENERATION_TASK_STATUSES
-                or current["active_styling_id"] != styling["id"] or current["current_input_version_id"] != styling["input_version_id"]
+                or current["active_styling_id"] != styling["id"] or current["current_input_version_id"] != task["current_input_version_id"]
                 or (current["auto_run_target"] and trigger != "auto_run")):
             raise HTTPException(409, "任务已变化，请刷新后重新选姿势")
         attempt_id = create_attempt("generation_pose_selection", task_id, effective_text_provider(), snapshot, db=db)
@@ -14101,7 +14211,7 @@ async def execute_pose_selection(task_id: int, attempt_id: int, runtime: dict[st
             db.execute("BEGIN IMMEDIATE")
             task = db.execute("SELECT * FROM generation_tasks WHERE id = ?", (task_id,)).fetchone()
             attempt = db.execute("SELECT status FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
-            if not task or task["status"] != "POSE_SELECTION_RUNNING" or task["active_styling_id"] != styling["id"] or not attempt or attempt["status"] != "RUNNING":
+            if not task or task["status"] != "POSE_SELECTION_RUNNING" or task["active_styling_id"] != styling["id"] or task["current_input_version_id"] != snapshot["capturedTaskInputVersionId"] or not attempt or attempt["status"] != "RUNNING":
                 return
             # Archival/removal during the model call cannot silently select a retired source.
             for shot in shots:
@@ -14119,7 +14229,7 @@ async def execute_pose_selection(task_id: int, attempt_id: int, runtime: dict[st
                     (selection_id, shot_index, pose_id, pose_snapshot_json, background_asset_id, pose_asset_id)
                     VALUES (?, ?, ?, ?, ?, ?)""", (selection_id, shot["shotIndex"], pose["id"], dumps(pose_snapshot), references[shot["shotIndex"] - 1]["background_asset_id"], shot["imageId"]))
             supersede_generation_result_sets(db, task_id, timestamp)
-            db.execute("UPDATE generation_tasks SET status = 'POSE_SELECTION_READY', active_pose_selection_id = ?, active_result_set_id = NULL, updated_at = ? WHERE id = ?", (selection_id, timestamp, task_id))
+            db.execute("UPDATE generation_tasks SET status = 'POSE_SELECTION_READY', current_input_version_id = ?, active_pose_selection_id = ?, active_result_set_id = NULL, updated_at = ? WHERE id = ?", (styling["input_version_id"], selection_id, timestamp, task_id))
         finish_attempt(attempt_id, "SUCCEEDED", response_snapshot={"shortlist": raw, "plan": plan})
     except Exception as exc:
         if generation_task_or_attempt_cancelled(task_id, attempt_id):

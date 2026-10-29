@@ -5778,3 +5778,12 @@ label:has(> input[type="file"]:focus-visible) {
   outline-offset: 2px;
 }
 label:has(> input[type="file"]:disabled) { cursor: not-allowed; opacity: .5; }
+.record-result-group { border-top: 1px solid var(--border, #e2e8f0); padding: 16px 0; }
+.record-result-group h4 { margin: 0 0 6px; }
+.record-shot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 12px; margin-top: 12px; }
+.record-shot { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.record-shot .asset-thumb { width: 100%; height: auto; aspect-ratio: 1; }
+.record-shot select { width: 100%; min-width: 0; }
+.record-shot-actions, .record-group-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.record-group-actions { margin-top: 12px; }
+.record-shot small { color: var(--text-muted, #64748b); }

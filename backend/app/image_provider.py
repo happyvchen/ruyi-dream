@@ -859,7 +859,12 @@ def build_reference_collage_bytes(item: dict[str, Any], deadline: float | None =
     for source in sources:
         if not isinstance(source, dict):
             continue
-        content, _content_type = reference_source_bytes(source, deadline)
+        if source.get('collageItems'):
+            content, _, _content_type = build_reference_collage_bytes(source, deadline)
+        else:
+            content, _content_type = reference_source_bytes(source, deadline)
+            if source.get('providerCrop'):
+                content = crop_provider_input_bytes(content, source['providerCrop'])
         try:
             with Image.open(BytesIO(content)) as image:
                 image = ImageOps.exif_transpose(image)
@@ -915,7 +920,7 @@ def reference_collage_grid(count: int) -> tuple[int, int]:
         return 2, 2
     if count <= 6:
         return 3, 2
-    return 4, 2
+    return 4, (count + 3) // 4
 
 
 def contain_on_white(image: Any, width: int, height: int) -> Any:

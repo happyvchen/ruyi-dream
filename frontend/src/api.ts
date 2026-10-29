@@ -346,9 +346,12 @@ export type GenerationTask = {
   } | null
   preview?: { id: number; status: string; asset?: MediaAsset | null; userInstruction?: Record<string, unknown>; createdAt?: string; updatedAt?: string } | null
   storyboardPreview?: { id: number; status: string; asset?: MediaAsset | null; userInstruction?: Record<string, unknown>; createdAt?: string; updatedAt?: string } | null
+  resultSets?: NonNullable<GenerationTask['resultSet']>[]
   resultSet?: {
     id: number
     status: string
+    createdAt?: string
+    selectedMaterials?: StylingGarment[]
     preparation?: { status: string; error?: string | null; attemptId?: number | null }
     previewId?: number | null
     poseSelectionId?: number | null
@@ -360,6 +363,7 @@ export type GenerationTask = {
       status: string
       userInstruction?: Record<string, unknown>
       asset?: MediaAsset | null
+      versions?: { id: number | null; asset?: MediaAsset | null; createdAt?: string; isCurrent: boolean; canRegenerate: boolean }[]
       activeAttemptId?: number | null
       activeAttempt?: AIOperation | null
       createdAt?: string
@@ -860,8 +864,8 @@ export function mediaDownloadUrl(url?: string | null) {
   return downloadUrl.toString()
 }
 
-export function finalImageArchiveUrl(ids: number[]) {
-  return `${API_BASE}/api/generation-task-exports/archive?ids=${ids.join(',')}`
+export function finalImageArchiveUrl(ids: number[], resultSetId?: number) {
+  return `${API_BASE}/api/generation-task-exports/archive?ids=${ids.join(',')}${resultSetId == null ? '' : `&resultSetId=${resultSetId}`}`
 }
 
 export function stylingGarmentArchiveUrl(ids: number[]) {
@@ -1105,8 +1109,12 @@ export const api = {
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/auto-run-final`, { method: 'POST', body: JSON.stringify({ restart }) }),
   cancelAutoRun: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/cancel-auto-run`, { method: 'POST' }),
-  retryResultImage: (id: number, userInstruction?: string) =>
-    request<{ item: GenerationTask }>(`/api/generation-result-images-new/${id}/retry`, { method: 'POST', body: JSON.stringify({ userInstruction }) }),
+  retryResultImage: (id: number, userInstruction?: string, versionId?: number) =>
+    request<{ item: GenerationTask }>(`/api/generation-result-images-new/${id}/retry`, { method: 'POST', body: JSON.stringify({ userInstruction, versionId }) }),
+  regenerateResultSet: (id: number) =>
+    request<{ item: GenerationTask }>(`/api/generation-result-sets/${id}/regenerate`, { method: 'POST' }),
+  continueResultSet: (id: number) =>
+    request<{ item: GenerationTask }>(`/api/generation-result-sets/${id}/continue`, { method: 'POST' }),
   redeliverResultImage: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-result-images-new/${id}/redeliver`, { method: 'POST' }),
   precheckFinalImageExport: (ids: number[]) =>

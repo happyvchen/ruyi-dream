@@ -7407,7 +7407,7 @@ function RecordsPage({ records, detail, setDetail, openTaskInStudio, run, onDele
               <h3>{detail.name}</h3>
               <Meta label="状态" value={statusText(detail.status)} />
               <Meta label="选中搭配" value={`${detail.styling?.selectedMaterials?.length ?? 0} 件`} />
-              <RecordImagePreview task={detail} />
+              <RecordImagePreview key={detail.id} task={detail} onChange={setDetail} />
               {isAdmin && detail.poseSelection && <details className="result-details"><summary>查看拍摄姿势</summary><PoseSelectionSummary selection={detail.poseSelection} /></details>}
               {isAdmin && <RecordPromptHistory key={detail.id} task={detail} />}
               <button className="management-action" type="button" disabled={downloadChecking} onClick={() => startSingleRecordDownload(detail)}>
@@ -8984,41 +8984,78 @@ function FinalImageStrip({ images }: { images: { id: number; sortOrder: number; 
   return <div className="final-strip">{images.map((image) => <AssetThumb key={image.id} asset={image.asset} />)}</div>
 }
 
-function RecordImagePreview({ task }: { task: GenerationTask }) {
-  const [viewer, setViewer] = useState<LightboxImage | null>(null)
-  const previewAsset = (task.storyboardPreview?.asset ?? task.preview?.asset) ?? null
-  const finalAssets = (task.resultSet?.images ?? [])
-    .slice()
-    .sort((left, right) => left.sortOrder - right.sortOrder)
-    .map((image) => image.asset)
-    .filter((asset): asset is MediaAsset => Boolean(asset))
-  const galleryAssets = [previewAsset, ...finalAssets].filter((asset): asset is MediaAsset => Boolean(asset))
+type ResultShot = NonNullable<GenerationTask['resultSet']>['images'][number]
 
-  function openAsset(asset: MediaAsset) {
-    setViewer(assetLightboxImage(asset, galleryAssets))
-  }
-
-  if (!galleryAssets.length) return <FinalImageStrip images={task.resultSet?.images ?? []} />
-
-  return (
-    <div className="record-image-preview">
-      {previewAsset && (
-        <div className="detail-preview-open">
-          <MediaImage className="detail-preview" src={mediaUrl(assetThumbSrc(previewAsset))} alt="分镜预览" onOpen={() => openAsset(previewAsset)} openLabel="放大查看分镜预览" />
-        </div>
-      )}
-      {!!finalAssets.length && (
-        <div className="final-strip">
-          {finalAssets.map((asset) => (
-            <div className="asset-thumb record-thumb" key={asset.id}>
-              <MediaImage src={mediaUrl(assetThumbSrc(asset))} alt={asset.filename} onOpen={() => openAsset(asset)} openLabel="放大查看成片" />
-            </div>
-          ))}
-        </div>
-      )}
-      {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
+function RecordShot({ image, disabled, onRetry, onOpen }: {
+  image: ResultShot; disabled: boolean
+  onRetry: (versionId?: number) => void
+  onOpen: (asset: MediaAsset) => void
+}) {
+  const [selectedAsset, setSelectedAsset] = useState<number | null>(null)
+  const versions = image.versions ?? []
+  const selected = versions.find((v) => v.asset?.id === selectedAsset) ?? versions.find((v) => v.isCurrent) ?? versions[0]
+  const asset = selected?.asset ?? image.asset
+  return <div className="record-shot">
+    <b>镜头 {image.sortOrder}</b>
+    <div className="asset-thumb record-thumb">
+      {asset ? <MediaImage src={mediaUrl(assetThumbSrc(asset))} alt={`镜头 ${image.sortOrder}`} onOpen={() => onOpen(asset)} openLabel={`放大查看镜头 ${image.sortOrder}`} /> : <span>{statusText(image.status)}</span>}
     </div>
-  )
+    {versions.length > 1 && <select aria-label={`镜头 ${image.sortOrder} 图片版本`} value={selected?.asset?.id ?? ''} onChange={(event) => setSelectedAsset(Number(event.target.value))}>
+      {versions.map((version, index) => <option key={version.id ?? version.asset?.id} value={version.asset?.id}>版本 {versions.length - index}{version.createdAt ? ` · ${new Date(version.createdAt).toLocaleString('zh-CN')}` : ''}</option>)}
+    </select>}
+    <div className="record-shot-actions">
+      {asset && <a className="management-action button-link" href={mediaDownloadUrl(assetOriginalSrc(asset))}>下载</a>}
+      <button className="management-action" disabled={disabled || selected?.canRegenerate === false || ['QUEUED', 'RUNNING'].includes(image.status)} onClick={() => onRetry(selected?.id ?? undefined)}>重新生成</button>
+    </div>
+    {image.status === 'FAILED' && asset && <small>本次生成失败，已保留成功图片</small>}
+    {selected?.canRegenerate === false && <small>拍摄信息不完整，可回到摄影棚重新一键成片</small>}
+  </div>
+}
+
+export function RecordImagePreview({ task, onChange }: { task: GenerationTask; onChange?: (task: GenerationTask) => void }) {
+  const [viewer, setViewer] = useState<LightboxImage | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const groups = task.resultSets ?? (task.resultSet ? [task.resultSet] : [])
+  const previewAsset = task.storyboardPreview?.asset ?? task.preview?.asset
+  const gallery = groups.flatMap((group) => group.images.flatMap((image) => image.versions?.length ? image.versions.map((version) => version.asset) : [image.asset])).filter((asset): asset is MediaAsset => !!asset)
+  const disabled = busy || isTaskLockedForGeneration(task) || !!task.archivedAt
+  const running = isTaskLockedForGeneration(task)
+  useEffect(() => {
+    if (!running || !onChange) return
+    let stopped = false
+    const timer = window.setInterval(() => {
+      void api.getRecord(task.id).then(({ item }) => { if (!stopped) onChange(item) }).catch(() => undefined)
+    }, 3000)
+    return () => { stopped = true; window.clearInterval(timer) }
+  }, [task.id, running, onChange])
+  async function perform(action: () => Promise<unknown>) {
+    if (disabled) return
+    setBusy(true); setError('')
+    try {
+      await action()
+      const response = await api.getRecord(task.id)
+      onChange?.(response.item)
+    } catch (error) { setError(error instanceof Error ? error.message : '操作失败，请稍后重试') }
+    finally { setBusy(false) }
+  }
+  function open(asset: MediaAsset) { setViewer(assetLightboxImage(asset, gallery.length ? gallery : [asset])) }
+  return <div className="record-image-preview">
+    {groups.map((group, index) => <section className="record-result-group" key={group.id} aria-label={`第 ${groups.length - index} 次成片`}>
+      <h4>第 {groups.length - index} 次成片</h4>
+      {group.createdAt && <small>{new Date(group.createdAt).toLocaleString('zh-CN')}</small>}
+      {!!group.selectedMaterials?.length && <p className="edit-hint">搭配：{group.selectedMaterials.map((garment) => garment.code).join('、')}</p>}
+      <div className="record-shot-grid">{group.images.map((image) => <RecordShot key={image.id} image={image} disabled={disabled} onOpen={open} onRetry={(versionId) => void perform(() => api.retryResultImage(image.id, undefined, versionId))} />)}</div>
+      <div className="record-group-actions">
+        <a className="management-action button-link" href={finalImageArchiveUrl([task.id], group.id)}>下载本组成片</a>
+        <button className="management-action" disabled={disabled} onClick={() => void perform(() => api.regenerateResultSet(group.id))}>整组重新生成</button>
+        {group.images.some((image) => !['SUCCEEDED', 'RUNNING', 'QUEUED'].includes(image.status)) && <button className="management-action" disabled={disabled} onClick={() => void perform(() => api.continueResultSet(group.id))}>继续生成</button>}
+      </div>
+    </section>)}
+    {!groups.length && previewAsset && <MediaImage className="detail-preview" src={mediaUrl(assetThumbSrc(previewAsset))} alt="拍摄预览" onOpen={() => open(previewAsset)} />}
+    {error && <p className="inline-error" role="alert">{error}</p>}
+    {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
+  </div>
 }
 
 export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () => void }) {

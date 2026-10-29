@@ -240,3 +240,13 @@ AI 选搭动态事实：
 user 的 generation 系列 JSON 响应不含 poseSelection 参考图、姿势要求、原始调用快照与 provider 标识；保留后台状态和 active 指针用于恢复。配置错误转为业务提示，admin 与数据库快照保留原始事实。
 
 任务增加 `poseWorkflowEnabled`、`activePoseSelectionId`、`poseSelection` 与 `stageUserInputs.poseSelection`；PATCH 支持 `poseSelectionUserInstruction`。状态增加 POSE_SELECTION_RUNNING / POSE_SELECTION_READY。结果集返回 `poseSelectionId`，成片始终读取该选择及冻结的五组图片。新任务不得跳过姿势选搭，历史任务默认兼容原流程；选搭失败、取消和中断沿用现有失败协议，晚到响应不覆盖取消。
+
+## 完整记录与成片版本
+
+`GET /api/generation-records/{id}` 的 `resultSets` 返回该任务全部结果组（新到旧），不依赖 active_result_set_id。每个镜头的 `versions` 包含 id、asset、createdAt、isCurrent、canRegenerate；不向普通用户暴露执行快照。记录展示和下载不以当前执行状态为过滤条件。
+
+- `POST /api/generation-result-images-new/{id}/retry` 可传 `{versionId,userInstruction}`。versionId 必须属于该镜头；使用该版本真实输入，成功后增加版本，失败或取消保留之前的成功图片。
+- `POST /api/generation-result-sets/{id}/regenerate` 从指定组的单张冻结输入创建新组，保留原组、选搭和拍摄上下文。
+- `POST /api/generation-result-sets/{id}/continue` 激活指定组，仅恢复失败、取消或缺失镜头，成功镜头不变。
+- 导出预检与 archive 支持可选 resultSetId；默认导出任务所有组和已发布版本，多组/多版本使用独立子目录。归档任务可查看、下载，恢复后才能继续生成。
+- 缺失真实拍摄输入返回 409，并保留原图查看/下载；重新一键成片可从当前工作流重新拍摄，不能把当前配置冒充原图事实。
