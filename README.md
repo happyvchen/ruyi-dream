@@ -79,7 +79,10 @@ cp .env.example .env
 GEMINI_PROVIDER=toapis
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-3-flash-preview
-GEMINI_TOAPIS_MODEL=gemini-3.8-flash
+GEMINI_TOAPIS_MODEL=deepseek-v4.1-flash
+DEEPSEEK_API_KEY=
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-flash
 
 APP_S3_ENDPOINT_URL=http://127.0.0.1:9000
 APP_S3_PUBLIC_ENDPOINT_URL=http://127.0.0.1:9000
@@ -105,6 +108,10 @@ GPT_IMAGE2_OUTPUT_FORMAT=png
 GPT_IMAGE2_RESOLUTION=1K
 GENERATION_POLL_INTERVAL_SECONDS=5
 ```
+
+切换 DeepSeek 官方文本/视觉理解通道：设置 `GEMINI_PROVIDER=deepseek`，填写 `DEEPSEEK_API_KEY`，其余 `DEEPSEEK_*` 可沿用默认值。官方模型名为 `deepseek-flash`，与 ToAPIs 的模型名不同。改回 `GEMINI_PROVIDER=toapis` 即恢复原通道；`direct` 仍表示 Google Gemini 直连。切换不会修改 Image-2 通道，成片生成仍需要原来的 `TOAPIS_API_KEY`。缺少所选通道密钥时明确报错，不自动回退到其他供应商。
+
+修改 env 后重启本地后端；Docker 部署需在项目根目录执行 `docker compose up -d --build backend` 重新创建容器，单纯 `restart` 不会刷新容器环境变量。`backend/.env.local` 中的同名配置优先于根 `.env`。官方连接/读取超时与并发分别由 `DEEPSEEK_CONNECT_TIMEOUT_SECONDS`、`DEEPSEEK_TIMEOUT_SECONDS`、`DEEPSEEK_MAX_CONCURRENCY` 控制；退避和业务重问沿用现有 `GEMINI_RETRY_*` 等配置。详见 [.env.example](.env.example)。
 
 输入图片、生成结果和导出 ZIP 统一写入 S3 兼容对象存储。私有化部署默认使用 RustFS；也可以通过同一组 `APP_S3_*` 配置切换到 OSS、COS、AWS S3 或其它 S3 兼容服务。生产部署方式见 [RustFS 对象存储部署](deployment/rustfs/README.md)。
 

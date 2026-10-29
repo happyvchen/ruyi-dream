@@ -74,7 +74,7 @@ class Settings:
     trust_reverse_proxy_auth = os.getenv("APP_TRUST_REVERSE_PROXY_AUTH", "false").lower() in {"1", "true", "yes", "on"}
     gemini_api_key = os.getenv("GEMINI_API_KEY", "")
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
-    # 兼容保留 GEMINI_* 名称：direct=Gemini 直连；toapis=OpenAI 兼容文本/视觉通道。
+    # 兼容保留 GEMINI_* 名称：direct=Gemini；toapis=中转；deepseek=DeepSeek 官方。
     gemini_provider = (os.getenv("GEMINI_PROVIDER") or "direct").strip().lower() or "direct"
     # ToAPIs 通道使用的模型 ID；留空则复用 GEMINI_MODEL。
     gemini_toapis_model = (os.getenv("GEMINI_TOAPIS_MODEL") or "").strip()
@@ -83,6 +83,12 @@ class Settings:
     # 请求体含 base64 图片可达数 MB,部署环境上行慢时过小的值会触发
     # "The write operation timed out",且请求未到达 ToAPIs、不计费。
     gemini_toapis_connect_timeout_seconds = int(os.getenv("GEMINI_TOAPIS_CONNECT_TIMEOUT_SECONDS") or "60")
+    deepseek_api_key = (os.getenv("DEEPSEEK_API_KEY") or "").strip()
+    deepseek_base_url = (os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com").strip().rstrip("/")
+    deepseek_model = (os.getenv("DEEPSEEK_MODEL") or "deepseek-flash").strip()
+    deepseek_timeout_seconds = int(os.getenv("DEEPSEEK_TIMEOUT_SECONDS") or "300")
+    deepseek_connect_timeout_seconds = int(os.getenv("DEEPSEEK_CONNECT_TIMEOUT_SECONDS") or "60")
+    deepseek_max_concurrency = int(os.getenv("DEEPSEEK_MAX_CONCURRENCY") or "5")
     # Gemini 限流、连接中断与超时按 30/60/120/240 秒封顶退避，默认最多重试 10 次。
     # 重试次数为 0 表示禁用重试；总预算覆盖 10 次请求超时与退避等待。
     gemini_retry_limit = int(os.getenv("GEMINI_RETRY_LIMIT") or "10")
@@ -207,8 +213,14 @@ class Settings:
             raise RuntimeError("APP_IMAGE_DECODE_SAFETY_PIXELS must be greater than or equal to APP_MAX_UPLOAD_IMAGE_PIXELS.")
         if self.normalized_image_max_edge <= 0:
             raise RuntimeError("APP_NORMALIZED_IMAGE_MAX_EDGE must be greater than 0.")
-        if self.gemini_provider not in {"direct", "toapis"}:
-            raise RuntimeError("GEMINI_PROVIDER must be one of: direct, toapis.")
+        if self.gemini_provider not in {"direct", "toapis", "deepseek"}:
+            raise RuntimeError("GEMINI_PROVIDER must be one of: direct, toapis, deepseek.")
+        if self.deepseek_timeout_seconds <= 0:
+            raise RuntimeError("DEEPSEEK_TIMEOUT_SECONDS must be greater than 0.")
+        if self.deepseek_connect_timeout_seconds <= 0:
+            raise RuntimeError("DEEPSEEK_CONNECT_TIMEOUT_SECONDS must be greater than 0.")
+        if self.deepseek_max_concurrency <= 0:
+            raise RuntimeError("DEEPSEEK_MAX_CONCURRENCY must be greater than 0.")
         if self.gemini_toapis_timeout_seconds <= 0:
             raise RuntimeError("GEMINI_TOAPIS_TIMEOUT_SECONDS must be greater than 0.")
         if self.gemini_toapis_connect_timeout_seconds <= 0:

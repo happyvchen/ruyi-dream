@@ -5,13 +5,19 @@
 后端是 FastAPI + SQLite + S3 兼容对象存储的一体化服务，负责：
 
 - 素材与媒体资产管理；
-- DeepSeek V4.1 Flash（ToAPIs）打标和 AI 智能选搭；
+- DeepSeek（ToAPIs 或官方通道）打标和 AI 智能选搭；
 - Prompt 维护槽位读取与 runtime 占位渲染；
 - 统一背景、独立姿势选搭、结果集级冻结快照和 GPT Image-2.5 Sunburst edits 最终成片任务包组装；
 - provider attempt 快照、进度、错误分类和轮询恢复；
 - 生成记录、归档、删除和导出。
 
-文本与视觉理解继续复用 `app/gemini_provider.py` 和 `GEMINI_*` 环境变量。ToAPIs 使用 `deepseek-v4.1-flash`；direct 仍为 Gemini。新调用记录保存实际模型来源、通道和模型 ID，历史记录不改写。保留现有 Base64 图片、SSE、16 张客户端上限、JSON 解析与重试契约。成片提示词整理按参考图并集计算预算，超过 16 张时按完整镜头分批，每批成功结果立即冻结，失败或取消后继续复用；暂不发送未经 ToAPIs 该路由核实的思考或 JSON 模式参数。
+文本与视觉理解继续复用 `app/gemini_provider.py` 和 `GEMINI_PROVIDER` 开关：`toapis` 使用 `GEMINI_TOAPIS_MODEL=deepseek-v4.1-flash` 与 `TOAPIS_API_KEY`；`deepseek` 直连官方，使用独立 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL=https://api.deepseek.com`、`DEEPSEEK_MODEL=deepseek-flash`；`direct` 仍为 Gemini。代码缺省仍为 direct，示例配置仍为 toapis；不自动跨供应商回退，不改变 Image-2 配置。新调用记录保存实际模型来源、通道和模型 ID，历史记录不改写。
+
+两个 chat 通道保留现有 Base64 图片、SSE、16 张客户端上限、JSON 解析与重试契约。成片提示词整理按参考图并集计算预算，超过 16 张时按完整镜头分批，每批成功结果立即冻结，失败或取消后继续复用；姿势选搭对两个通道采用相同拼图预算。官方请求体超过 48 MiB 在发送前拒绝；不额外发送思考或 JSON 模式参数，使用模型默认值。DeepSeek 的 HTTP 400/422 按格式/参数错误硬停，401/402 不重试，429/5xx 沿用有限恢复；只有所选通道的密钥可用于请求。
+
+官方通道的连接/发送超时 `DEEPSEEK_CONNECT_TIMEOUT_SECONDS=60`、读取超时 `DEEPSEEK_TIMEOUT_SECONDS=300`、并发 `DEEPSEEK_MAX_CONCURRENCY=5` 独立配置，使用独立请求闸门；两个 chat 通道共用现有文本线程池与 `GEMINI_RETRY_*`、持久化退避和取消边界。ToAPIs 原全局闸门及图片调用保持原行为。
+
+官方协议核对（2026-10-29）：[首次调用与模型名](https://api-docs.deepseek.com/)、[图片输入与限制](https://api-docs.deepseek.com/guides/vision/)、[Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/)、[错误码](https://api-docs.deepseek.com/quick_start/error_codes/)。`deepseek-flash` 当前对应 DeepSeek-V4.1-Flash-1017，支持图片输入；此处保留客户端 16 张预算，未扩大到官方上限。
 
 AI 选搭的模型输出只含 `selected_files` 和最终方案业务字段，不要求 `schema_version` 或旧候选编号。后端按业务结构校验并补内部历史兼容标记，原始返回保留。选搭每次业务重问前及返回后检查任务/attempt 取消状态，取消后不再发起下一轮契约重问。
 

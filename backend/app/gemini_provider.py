@@ -1,9 +1,10 @@
 """文本/多模态调用通道，保留 Gemini 模块名与配置名兼容已有部署。
 
-支持两种通道，通过 GEMINI_PROVIDER 切换：
+支持三种通道，通过 GEMINI_PROVIDER 切换：
 - direct: google-genai SDK 直连 Google（需要能访问 googleapis.com）。
 - toapis: 走 ToAPIs 的 OpenAI 兼容 chat completions 中转（国内可直连），
   复用 TOAPIS_API_KEY / TOAPIS_BASE_URL，模型 ID 可用 GEMINI_TOAPIS_MODEL 单独指定。
+- deepseek: DeepSeek 官方 OpenAI 兼容接口，独立使用 DEEPSEEK_* 配置。
 
 ToAPIs 当前使用 DeepSeek V4.1 Flash，也可通过原模型配置切回 Gemini。
 本模块只负责“把 prompt + 图片输入送到模型并拿回文本”，不承担业务
@@ -14,12 +15,13 @@ from __future__ import annotations
 import asyncio
 import base64
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 import contextvars
 from functools import partial
 import json
 import logging
 import re
+import threading
 import time
 from typing import Any, Callable
 
@@ -51,7 +53,7 @@ def _get_text_executor() -> ThreadPoolExecutor:
     global _text_executor
     if _text_executor is None:
         # Match the runtime's former default-executor capacity. HTTP admission
-        # still uses the shared ToAPIs semaphore; using that smaller limit as
+        # still uses the channel semaphore; using that smaller limit as
         # worker capacity would let sleeping retries block unrelated text work.
         _text_executor = ThreadPoolExecutor(
             thread_name_prefix="ruyi-text",
@@ -59,8 +61,38 @@ def _get_text_executor() -> ThreadPoolExecutor:
     return _text_executor
 
 
-VALID_GEMINI_PROVIDERS = {"direct", "toapis"}
+VALID_GEMINI_PROVIDERS = {"direct", "toapis", "deepseek"}
+# 两个 chat 通道沿用同一客户端预算，保持姿势拼图和提示词整理分批契约。
 TOAPIS_MAX_MESSAGE_IMAGES = 16
+DEEPSEEK_MAX_REQUEST_BYTES = 48 * 1024 * 1024
+_deepseek_slot_lock = threading.Lock()
+_deepseek_slot_limit: int | None = None
+_deepseek_semaphore: threading.BoundedSemaphore | None = None
+
+
+def _is_deepseek_channel() -> bool:
+    return getattr(get_settings(), "gemini_provider", "toapis") == "deepseek"
+
+
+def _chat_label() -> str:
+    return "文本模型(DeepSeek 官方通道)" if _is_deepseek_channel() else "文本模型(ToAPIs 通道)"
+
+
+@contextmanager
+def _chat_concurrency_slot():
+    if not _is_deepseek_channel():
+        with toapis_concurrency_slot():
+            yield
+        return
+    global _deepseek_slot_limit, _deepseek_semaphore
+    limit = get_settings().deepseek_max_concurrency
+    with _deepseek_slot_lock:
+        if _deepseek_semaphore is None or _deepseek_slot_limit != limit:
+            _deepseek_slot_limit = limit
+            _deepseek_semaphore = threading.BoundedSemaphore(limit)
+        semaphore = _deepseek_semaphore
+    with semaphore:
+        yield
 
 
 class GeminiProviderError(RuntimeError):
@@ -104,6 +136,8 @@ def gemini_channel() -> str:
 
 def effective_gemini_model() -> str:
     settings = get_settings()
+    if settings.gemini_provider == "deepseek":
+        return settings.deepseek_model
     if settings.gemini_provider == "toapis" and settings.gemini_toapis_model:
         return settings.gemini_toapis_model
     return settings.gemini_model
@@ -111,17 +145,21 @@ def effective_gemini_model() -> str:
 
 def effective_text_provider() -> str:
     """调用来源按实际模型记录；存量 Gemini 记录与 direct 通道保持兼容。"""
-    return "deepseek" if effective_gemini_model().lower().startswith("deepseek-") else "gemini"
+    return "deepseek" if _is_deepseek_channel() or effective_gemini_model().lower().startswith("deepseek-") else "gemini"
 
 
 def is_gemini_configured() -> bool:
     settings = get_settings()
+    if settings.gemini_provider == "deepseek":
+        return bool(settings.deepseek_api_key)
     if settings.gemini_provider == "toapis":
         return bool(settings.toapis_api_key)
     return bool(settings.gemini_api_key)
 
 
 def gemini_not_configured_message() -> str:
+    if gemini_channel() == "deepseek":
+        return "DEEPSEEK_API_KEY 未配置，文本模型(DeepSeek 官方通道) 不可用。"
     if gemini_channel() == "toapis":
         return "TOAPIS_API_KEY 未配置，文本模型(ToAPIs 通道) 不可用。"
     return "GEMINI_API_KEY 未配置，Gemini(直连通道) 不可用。"
@@ -153,7 +191,7 @@ async def generate_gemini_json_text(
     """
     if not is_gemini_configured():
         raise RuntimeError(gemini_not_configured_message())
-    if gemini_channel() == "toapis":
+    if gemini_channel() in {"toapis", "deepseek"}:
         call = partial(
             _generate_via_toapis,
             prompt,
@@ -327,6 +365,7 @@ def _generate_via_toapis(
     defer_retry: bool = False,
     should_cancel: Callable[[], bool] | None = None,
 ) -> str:
+    # 保留历史函数名；DeepSeek 官方与 ToAPIs 共用 OpenAI chat/SSE 和恢复契约。
     payload = build_toapis_chat_payload(prompt, images, system_instruction)
     return _post_toapis_chat_with_retry(
         payload,
@@ -372,15 +411,17 @@ def _post_toapis_chat_with_retry(
         if should_cancel and should_cancel():
             raise RuntimeError("模型调用已取消")
         try:
-            with toapis_concurrency_slot():
+            with _chat_concurrency_slot():
                 if should_cancel and should_cancel():
                     raise RuntimeError("模型调用已取消")
                 if deadline is None:
                     deadline = time.monotonic() + time_budget
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise GeminiProviderError("文本模型(ToAPIs 通道) 限流重试已超过总时间预算", ERROR_RATE_LIMITED)
-                single_request_timeout = max(0.1, float(settings.gemini_toapis_timeout_seconds))
+                    raise GeminiProviderError(f"{_chat_label()} 限流重试已超过总时间预算", ERROR_RATE_LIMITED)
+                single_request_timeout = max(0.1, float(
+                    settings.deepseek_timeout_seconds if _is_deepseek_channel() else settings.gemini_toapis_timeout_seconds
+                ))
                 return _post_toapis_chat(payload, read_timeout_seconds=min(remaining, single_request_timeout))
         except GeminiProviderError as exc:
             error_code = exc.error_code
@@ -400,7 +441,7 @@ def _post_toapis_chat_with_retry(
             if deadline is not None and time.monotonic() + wait >= deadline:
                 raise
             logger.warning(
-                "文本模型(ToAPIs 通道) 瞬时错误(%s),第 %d 次重试,退避 %.1fs: %s",
+                f"{_chat_label()} 瞬时错误(%s),第 %d 次重试,退避 %.1fs: %s",
                 error_code,
                 attempt,
                 wait,
@@ -437,7 +478,7 @@ def build_toapis_chat_payload(
 ) -> dict[str, Any]:
     if len(images) > TOAPIS_MAX_MESSAGE_IMAGES:
         raise GeminiProviderError(
-            f"ToAPIs 单次请求最多 {TOAPIS_MAX_MESSAGE_IMAGES} 张图片，当前 {len(images)} 张，请先合并参考图",
+            f"{_chat_label()} 客户端单次请求最多 {TOAPIS_MAX_MESSAGE_IMAGES} 张图片，当前 {len(images)} 张，请先合并参考图",
             ERROR_INVALID_REQUEST,
         )
     user_content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
@@ -469,7 +510,7 @@ def build_toapis_chat_payload(
 
 
 def _post_toapis_chat(payload: dict[str, Any], *, read_timeout_seconds: float | None = None) -> str:
-    """流式调用 ToAPIs chat completions,返回组装后的完整文本。
+    """流式调用 ToAPIs 或 DeepSeek 官方 chat completions，保留历史函数名。
 
     单次调用不做重试;重试由上层 _post_toapis_chat_with_retry 在"零产出"前提下
     安全地重发整个请求(见其 docstring 的安全边界)。timeout 作用于相邻数据块之间的
@@ -491,36 +532,48 @@ def _post_toapis_chat(payload: dict[str, Any], *, read_timeout_seconds: float | 
     try:
         import requests
     except ImportError as exc:
-        raise RuntimeError("requests 导入失败,无法调用 ToAPIs 接口:请安装 requests") from exc
+        raise RuntimeError("requests 导入失败,无法调用文本接口:请安装 requests") from exc
 
     from .image_provider import toapis_url
 
     settings = get_settings()
+    if _is_deepseek_channel():
+        url = settings.deepseek_base_url.rstrip("/") + "/chat/completions"
+        api_key = settings.deepseek_api_key
+        configured_read_timeout = settings.deepseek_timeout_seconds
+        configured_connect_timeout = settings.deepseek_connect_timeout_seconds
+        if len(json.dumps(payload, allow_nan=False).encode("utf-8")) > DEEPSEEK_MAX_REQUEST_BYTES:
+            raise GeminiProviderError("DeepSeek 官方请求体超过 48 MiB，请减少或压缩参考图", ERROR_INVALID_REQUEST)
+    else:
+        url = toapis_url("/v1/chat/completions")
+        api_key = settings.toapis_api_key
+        configured_read_timeout = settings.gemini_toapis_timeout_seconds
+        configured_connect_timeout = settings.gemini_toapis_connect_timeout_seconds
     read_timeout = max(
         0.1,
         min(
-            float(settings.gemini_toapis_timeout_seconds),
-            float(read_timeout_seconds) if read_timeout_seconds is not None else float(settings.gemini_toapis_timeout_seconds),
+            float(configured_read_timeout),
+            float(read_timeout_seconds) if read_timeout_seconds is not None else float(configured_read_timeout),
         ),
     )
-    connect_timeout = min(float(settings.gemini_toapis_connect_timeout_seconds), read_timeout)
+    connect_timeout = min(float(configured_connect_timeout), read_timeout)
     try:
         response = requests.post(
-            toapis_url("/v1/chat/completions"),
-            headers={"Authorization": f"Bearer {settings.toapis_api_key}"},
+            url,
+            headers={"Authorization": f"Bearer {api_key}"},
             json=payload,
             stream=True,
             timeout=(connect_timeout, read_timeout),
         )
     except requests.RequestException as exc:
         # 连接/写/读超时统一归 CONN_RESET，由上层按有限预算自动重发。
-        message = f"文本模型(ToAPIs 通道) 请求失败: {exc}"
+        message = f"{_chat_label()} 请求失败: {exc}"
         raise GeminiProviderError(message, classify_provider_error(message=str(exc))) from exc
     with response:
         if not response.ok:
             raw_body = response.text or ""
             # attempt 记录只存下方摘要;原始错误体在此落日志供排查。
-            logger.warning("ToAPIs 上游错误 HTTP %s: %s", response.status_code, raw_body[:2000])
+            logger.warning("%s 上游错误 HTTP %s: %s", _chat_label(), response.status_code, redact_provider_text(raw_body)[:2000])
             retry_after = _parse_retry_after(response.headers.get("Retry-After"))
             try:
                 response_payload = response.json()
@@ -531,13 +584,16 @@ def _post_toapis_chat(payload: dict[str, Any], *, read_timeout_seconds: float | 
                 status_code=response.status_code,
                 fallback_message=raw_body,
             )
+            # DeepSeek 的 400/422 是格式/参数错误，不使用中转的未知路由恢复策略。
+            if _is_deepseek_channel() and response.status_code in {400, 422}:
+                provider_error["code"] = ERROR_INVALID_REQUEST
             error_code = (
                 ERROR_MALFORMED_OUTPUT
                 if _usage_has_generated_output(response_payload.get("usage"))
                 else str(provider_error["code"])
             )
             raise GeminiProviderError(
-                f"文本模型(ToAPIs 通道) 请求失败: {summarize_upstream_http_error(response.status_code, raw_body)}",
+                f"{_chat_label()} 请求失败: {summarize_upstream_http_error(response.status_code, raw_body)}",
                 error_code,
                 retry_after=retry_after,
                 provider_response={
@@ -556,7 +612,7 @@ def _post_toapis_chat(payload: dict[str, Any], *, read_timeout_seconds: float | 
                 return extract_toapis_chat_text(response.json())
             except ValueError as exc:
                 raise GeminiProviderError(
-                    f"文本模型(ToAPIs 通道) 响应不是合法 JSON: {(response.text or '')[:500]}",
+                    f"{_chat_label()} 响应不是合法 JSON: {(response.text or '')[:500]}",
                     ERROR_MALFORMED_OUTPUT,
                 ) from exc
         return assemble_toapis_stream_text(iter_sse_lines(response))
@@ -613,11 +669,12 @@ def summarize_upstream_http_error(status_code: int, body: str) -> str:
         snippet = re.sub(r"\s+", " ", text).strip()
     snippet = snippet[:200]
     if status_code in {502, 503, 504, 520, 521, 522, 523, 524}:
-        hint = "上游网关错误或超时,可直接重试;反复出现时请检查 ToAPIs 服务状态。"
+        hint = "上游网关错误或超时,可直接重试;反复出现时请检查当前文本通道服务状态。"
     elif status_code == 429:
-        hint = "请求被限流或额度不足,请稍后重试或检查 ToAPIs 余额。"
+        hint = "请求被限流或额度不足,请稍后重试或检查当前文本通道余额。"
     elif status_code in {401, 403}:
-        hint = "API Key 无效或无权限,请检查 TOAPIS_API_KEY 配置。"
+        key_name = "DEEPSEEK_API_KEY" if _is_deepseek_channel() else "TOAPIS_API_KEY"
+        hint = f"API Key 无效或无权限,请检查 {key_name} 配置。"
     else:
         hint = ""
     parts = [f"HTTP {status_code}", hint]
@@ -662,12 +719,12 @@ def assemble_toapis_stream_text(lines: Any) -> str:
             # 作为已产出但不完整处理。
             if parts or reasoning_chars or dropped_data_lines or finish_reason or _usage_has_generated_output(usage):
                 raise GeminiProviderError(
-                    f"文本模型(ToAPIs 通道) 已收到部分输出后流式响应错误: {error_body}",
+                    f"{_chat_label()} 已收到部分输出后流式响应错误: {error_body}",
                     ERROR_MALFORMED_OUTPUT,
                 )
             provider_error = normalize_toapis_error({"error": chunk["error"]})
             raise GeminiProviderError(
-                f"文本模型(ToAPIs 通道) 流式响应错误: {error_body}",
+                f"{_chat_label()} 流式响应错误: {error_body}",
                 str(provider_error["code"]),
                 provider_response={"providerError": provider_error},
             )
@@ -687,14 +744,14 @@ def assemble_toapis_stream_text(lines: Any) -> str:
     text = "".join(parts)
     if dropped_data_lines:
         logger.warning(
-            "文本模型(ToAPIs 通道) 流中有 %d 条 data 行不是合法 JSON 被丢弃(可能存在流腐蚀)",
+            f"{_chat_label()} 流中有 %d 条 data 行不是合法 JSON 被丢弃(可能存在流腐蚀)",
             dropped_data_lines,
         )
     if finish_reason == "length":
         # 截断=正文已产出并计费,任何 JSON 修复都救不了。归 MALFORMED_OUTPUT:
         # 绝不在 provider 层重发(会重复计费),交由上层"修复+重问一次"处理。
         raise GeminiProviderError(
-            "文本模型(ToAPIs 通道) 输出被截断(finish_reason=length): "
+            f"{_chat_label()} 输出被截断(finish_reason=length): "
             f"completion_tokens={usage.get('completion_tokens', '?')}, "
             f"已收到正文 {len(text)} 字符(思考约 {reasoning_chars} 字符)。",
             ERROR_MALFORMED_OUTPUT,
@@ -708,7 +765,7 @@ def assemble_toapis_stream_text(lines: Any) -> str:
             else ERROR_PROVIDER_TRANSIENT_UNKNOWN
         )
         raise GeminiProviderError(
-            "文本模型(ToAPIs 通道) 流式响应未包含文本内容"
+            f"{_chat_label()} 流式响应未包含文本内容"
             f"(finish_reason={finish_reason or '?'}, 思考约 {reasoning_chars} 字符, "
             f"丢弃非法 data 行 {dropped_data_lines} 条)。",
             error_code,
@@ -720,13 +777,13 @@ def extract_toapis_chat_text(response_payload: dict[str, Any]) -> str:
     if response_payload.get("error"):
         if _usage_has_generated_output(response_payload.get("usage")):
             raise GeminiProviderError(
-                "文本模型(ToAPIs 通道) 已产生输出用量后返回错误信封: "
+                f"{_chat_label()} 已产生输出用量后返回错误信封: "
                 f"{json.dumps(response_payload['error'], ensure_ascii=False)[:500]}",
                 ERROR_MALFORMED_OUTPUT,
             )
         provider_error = normalize_toapis_error({"error": response_payload["error"]})
         raise GeminiProviderError(
-            "文本模型(ToAPIs 通道) 响应返回错误信封: "
+            f"{_chat_label()} 响应返回错误信封: "
             f"{json.dumps(response_payload['error'], ensure_ascii=False)[:500]}",
             str(provider_error["code"]),
             provider_response={"providerError": provider_error},
@@ -739,7 +796,7 @@ def extract_toapis_chat_text(response_payload: dict[str, Any]) -> str:
             else ERROR_PROVIDER_TRANSIENT_UNKNOWN
         )
         raise GeminiProviderError(
-            f"文本模型(ToAPIs 通道) 响应缺少 choices: {json.dumps(response_payload, ensure_ascii=False)[:500]}",
+            f"{_chat_label()} 响应缺少 choices: {json.dumps(response_payload, ensure_ascii=False)[:500]}",
             error_code,
         )
     message = choices[0].get("message") if isinstance(choices[0], dict) else None
@@ -760,7 +817,7 @@ def extract_toapis_chat_text(response_payload: dict[str, Any]) -> str:
             or (isinstance(reasoning, str) and reasoning.strip())
         )
         raise GeminiProviderError(
-            f"文本模型(ToAPIs 通道) 响应缺少文本内容: {json.dumps(response_payload, ensure_ascii=False)[:500]}",
+            f"{_chat_label()} 响应缺少文本内容: {json.dumps(response_payload, ensure_ascii=False)[:500]}",
             ERROR_MALFORMED_OUTPUT if has_output_facts else ERROR_PROVIDER_TRANSIENT_UNKNOWN,
         )
     return content

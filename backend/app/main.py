@@ -14231,7 +14231,7 @@ async def execute_pose_selection(task_id: int, attempt_id: int, runtime: dict[st
             for image in garment.get("images", []):
                 add_image(image.get("asset") or image, "garment", code=garment.get("code"))
         add_image(snapshot["references"][0]["backgroundAsset"], "shared_background")
-        image_limit = TOAPIS_MAX_MESSAGE_IMAGES if gemini_channel() == "toapis" else None
+        image_limit = TOAPIS_MAX_MESSAGE_IMAGES if gemini_channel() in {"toapis", "deepseek"} else None
         packed, provider_manifest = pack_pose_references(image_inputs, manifest, image_limit)
         runtime = {**runtime, "pose_image_manifest": dumps(provider_manifest)}
         prompt, diagnostics = render_prompt_config("assembly.pose_selection", runtime, rows=config)
