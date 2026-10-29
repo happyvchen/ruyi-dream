@@ -17,6 +17,7 @@ def optimizer_reference_identity(item: dict[str, Any]) -> str:
     return json.dumps({
         "role": item.get("role"), "collageRule": item.get("collageRule"),
         "providerCrop": item.get("providerCrop"), "tileLabels": item.get("tileLabels"),
+        "providerCanvas": item.get("providerCanvas"),
         "sources": [optimizer_reference_identity(source) for source in item["collageItems"]]
         if item.get("collageItems") else [item.get("objectKey") or item.get("providerUrl") or item.get("url")],
     }, sort_keys=True, ensure_ascii=False)

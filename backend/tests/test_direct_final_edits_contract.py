@@ -719,3 +719,91 @@ def test_new_model_snapshot_freezes_first_four_in_user_order(monkeypatch):
     with get_db() as db:
         db.execute('UPDATE model_profiles SET profile_json=? WHERE id=?', (dumps({'headReferences': {'front': 'new.png'}}), row['id']))
     assert app_main.resolve_model_snapshot_image_inputs(snapshot, limit=4) == snapshot['imageInputs']
+
+
+@pytest.mark.parametrize('size', [(30, 40), (40, 30), (40, 40)])
+def test_square_canvas_preserves_pixels_and_adds_only_white(size):
+    from io import BytesIO
+    from PIL import Image
+    image = Image.new('RGB', size, (17, 90, 160))
+    raw = BytesIO()
+    image.save(raw, 'PNG')
+    result = Image.open(BytesIO(image_provider.square_white_reference_bytes(raw.getvalue())))
+    side = max(size)
+    left, top = (side-size[0])//2, (side-size[1])//2
+    assert result.size == (side, side)
+    assert result.crop((left, top, left+size[0], top+size[1])).tobytes() == image.tobytes()
+    if size[0] != size[1]:
+        assert result.getpixel((0, 0)) == (255, 255, 255)
+
+
+def test_square_canvas_applies_orientation_and_transparency():
+    from io import BytesIO
+    from PIL import Image
+    raw = BytesIO()
+    image = Image.new('RGBA', (20, 40), (10, 20, 30, 0))
+    image.putpixel((0, 0), (200, 100, 50, 255))
+    exif = Image.Exif()
+    exif[274] = 6
+    image.save(raw, 'PNG', exif=exif)
+    result = Image.open(BytesIO(image_provider.square_white_reference_bytes(raw.getvalue())))
+    assert result.size == (40, 40)
+    assert result.getpixel((39, 10)) == (200, 100, 50)
+    assert result.getpixel((0, 10)) == (255, 255, 255)
+
+
+def test_square_canvas_crop_precedes_padding_and_optimizer_matches_upload(monkeypatch):
+    from io import BytesIO
+    from PIL import Image
+    raw = BytesIO()
+    original = Image.new('RGB', (30, 80), 'red')
+    original.paste('blue', (0, 40, 30, 80))
+    original.save(raw, 'PNG')
+    monkeypatch.setattr(image_provider, 'reference_source_bytes', lambda *args: (raw.getvalue(), 'image/png'))
+    item = {'role': 'shot_pose', 'objectKey': 'pose.png', 'providerCanvas': image_provider.SQUARE_WHITE_CANVAS,
+            'providerCrop': {'kind': 'keep_top_ratio', 'ratio': .5},
+            'providerUrl': 'https://files.toapis.cn/old.png', 'providerInputPolicyVersion': 'toapis-input-v2'}
+    sent = []
+    monkeypatch.setattr(image_provider, 'upload_bytes_with_cache', lambda provider, data, fn, **kw: fn())
+    monkeypatch.setattr(image_provider, 'upload_bytes_to_toapis', lambda data, *args, **kw: sent.append(data) or 'https://files.toapis.cn/new.png')
+    uploaded = image_provider.upload_toapis_image_inputs([item])
+    assert len(sent) == 1
+    assert app_main.vision_reference_input(item)['data'] == sent[0]
+    result = Image.open(BytesIO(sent[0]))
+    assert result.size == (40, 40)
+    assert result.getpixel((0, 20)) == (255, 255, 255)
+    assert result.getpixel((20, 39))[0] > 240
+    assert image_provider.upload_toapis_image_inputs(uploaded) == uploaded
+    assert len(sent) == 1
+    manifest = image_provider.build_provider_reference_image_manifest(uploaded, [uploaded[0]['providerUrl']])
+    assert manifest[0]['providerCanvas'] == image_provider.SQUARE_WHITE_CANVAS
+
+
+def test_square_canvas_before_collage_and_url_input_on_fal(monkeypatch):
+    from io import BytesIO
+    from PIL import Image
+    raw = BytesIO()
+    Image.new('RGB', (20, 40), 'red').save(raw, 'PNG')
+    monkeypatch.setattr(image_provider, 'download_bytes', lambda *args, **kwargs: (raw.getvalue(), 'image/png'))
+    monkeypatch.setattr(image_provider, 'REFERENCE_COLLAGE_TILE_SIZE', 40)
+    source = {'url': 'https://example.test/portrait.png', 'providerCanvas': image_provider.SQUARE_WHITE_CANVAS}
+    board = {'collageItems': [source, source], 'providerCanvas': image_provider.SQUARE_WHITE_CANVAS}
+    content, mime = image_provider.render_reference_input_bytes(board)
+    result = Image.open(BytesIO(content))
+    assert result.size == (80, 80) and mime == 'image/png'
+    assert result.getpixel((20, 40))[0] > 240
+    assert result.getpixel((0, 0)) == (255, 255, 255)
+    sent = []
+    monkeypatch.setattr(image_provider, 'upload_bytes_with_cache', lambda provider, data, fn, **kw: fn())
+    monkeypatch.setattr(image_provider, 'upload_bytes_to_fal', lambda data, *args: sent.append(data) or 'https://fal.media/new.png')
+    uploaded = image_provider.upload_image_inputs([board])
+    assert sent == [content]
+    assert image_provider.upload_image_inputs(uploaded) == uploaded
+    assert sent == [content]
+
+
+def test_legacy_reference_without_canvas_keeps_original_bytes(monkeypatch):
+    monkeypatch.setattr(image_provider, 'reference_source_bytes', lambda *args: (b'original', 'image/png'))
+    assert image_provider.render_reference_input_bytes({'objectKey': 'old'}) == (b'original', 'image/png')
+    with pytest.raises(RuntimeError, match='未知的参考图画布策略'):
+        image_provider.render_reference_input_bytes({'objectKey': 'old', 'providerCanvas': 'unknown'})

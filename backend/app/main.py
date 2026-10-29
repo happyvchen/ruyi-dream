@@ -102,7 +102,7 @@ from .generation_progress import (
     normalize_toapis_error,
     provider_error_presentation,
 )
-from .image_provider import ImageProviderError, get_image_provider, build_reference_collage_bytes, reference_source_bytes
+from .image_provider import ImageProviderError, get_image_provider, render_reference_input_bytes, SQUARE_WHITE_CANVAS
 from .media_storage import (
     is_accepted_upload_key,
     media_original_key_for_owner,
@@ -5715,6 +5715,7 @@ def freeze_final_prompt_configuration() -> dict[str, Any]:
         raise HTTPException(409, "请先在 Prompt 维护中保存成片提示词优化规则")
     return {
         "mode": "optimized" if enabled else "direct", "status": "PENDING" if enabled else "DIRECT",
+        "referenceCanvas": SQUARE_WHITE_CANVAS,
         "configRows": {key: {"content": row["content"], "group_type": row["group_type"]}
                        for key, row in rows.items() if key.startswith("segment.") or key.startswith("assembly.final_")},
         "packages": {},
@@ -5740,13 +5741,7 @@ def final_preparation_cancelled(task_id: int, result_set_id: int) -> bool:
 
 
 def vision_reference_input(item: dict[str, Any]) -> dict[str, Any]:
-    if item.get("collageItems"):
-        content, _, mime = build_reference_collage_bytes(item)
-    else:
-        content, mime = reference_source_bytes(item)
-        if item.get("providerCrop"):
-            from .image_provider import crop_provider_input_bytes
-            content = crop_provider_input_bytes(content, item["providerCrop"])
+    content, mime = render_reference_input_bytes(item)
     if not content:
         raise ValueError("参考图片内容为空")
     # Normalized originals may have a different format from their upload filename.
@@ -11224,6 +11219,16 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         int(row["input_version_id"]),
         preset,
     )
+    preparation = loads(row_value(row, "prompt_preparation_json"), {})
+    # Freeze transport geometry with the result set. Old packages/results keep their
+    # original geometry, including when an interrupted unsent slot is reconstructed.
+    if preparation.get("referenceCanvas"):
+        def with_canvas(item: dict[str, Any]) -> dict[str, Any]:
+            result = {**item, "providerCanvas": preparation["referenceCanvas"]}
+            if item.get("collageItems"):
+                result["collageItems"] = [with_canvas(source) for source in item["collageItems"]]
+            return result
+        image_inputs = [with_canvas(item) for item in image_inputs]
     final_image_user_instruction = loads(
         row_value(row, "user_instruction_json"),
         loads(row_value(row, "result_set_user_instruction_json"), build_stage_user_instruction_context("final_image")),

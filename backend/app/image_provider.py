@@ -600,6 +600,7 @@ def build_provider_reference_image_manifest(image_inputs: list[dict[str, Any]], 
                 "referenceBoardKind": item.get("referenceBoardKind"),
                 "collageRule": item.get("collageRule"),
                 "providerCrop": item.get("providerCrop"),
+                "providerCanvas": item.get("providerCanvas"),
                 "providerInputPolicyVersion": item.get("providerInputPolicyVersion"),
                 "collageSources": build_collage_source_manifest(item),
                 "url": url,
@@ -623,6 +624,8 @@ def build_collage_source_manifest(item: dict[str, Any]) -> list[dict[str, Any]]:
                 "filename": source.get("filename"),
                 "angle": source.get("angle"),
                 "materialCode": source.get("materialCode"),
+                "providerCrop": source.get("providerCrop"),
+                "providerCanvas": source.get("providerCanvas"),
             }
         )
     return manifest
@@ -642,8 +645,20 @@ def upload_image_inputs(
         object_key = item.get("objectKey")
         source_url = item.get("providerUrl") or item.get("url")
         next_item = dict(item)
-        if source_url and is_fal_cdn_url(str(source_url)):
+        policy = reference_upload_policy(item, "fal")
+        if source_url and is_fal_cdn_url(str(source_url)) and (
+            not item.get("providerCanvas") or item.get("providerInputPolicyVersion") == policy
+        ):
             next_item["providerUrl"] = source_url
+            uploaded.append(next_item)
+            continue
+        if item.get("providerCanvas"):
+            content, content_type = render_reference_input_bytes(item, deadline)
+            next_item["providerInputPolicyVersion"] = policy
+            next_item["providerUrl"] = upload_bytes_with_cache(
+                "fal", content, lambda: upload_bytes_to_fal(content, "reference-square.png", content_type),
+                cache_namespace=policy,
+            )
             uploaded.append(next_item)
             continue
         if item.get("collageItems"):
@@ -752,13 +767,23 @@ def upload_toapis_image_inputs(
         source_url = item.get("providerUrl") or item.get("url")
         next_item = dict(item)
         existing_policy_version = str(item.get("providerInputPolicyVersion") or "")
-        next_item["providerInputPolicyVersion"] = f"toapis-input-{TOAPIS_INPUT_POLICY_VERSION}"
+        policy = reference_upload_policy(item, "toapis")
+        next_item["providerInputPolicyVersion"] = policy
         if (
             source_url
             and is_toapis_file_url(str(source_url))
-            and existing_policy_version == f"toapis-input-{TOAPIS_INPUT_POLICY_VERSION}"
+            and existing_policy_version == policy
         ):
             next_item["providerUrl"] = source_url
+            uploaded.append(next_item)
+            continue
+        if item.get("providerCanvas"):
+            content, content_type = render_reference_input_bytes(item, deadline)
+            next_item["providerUrl"] = upload_bytes_with_cache(
+                "toapis", content,
+                lambda: upload_bytes_to_toapis(content, "reference-square.png", content_type, deadline=deadline),
+                cache_namespace=policy,
+            )
             uploaded.append(next_item)
             continue
         if item.get("collageItems"):
@@ -811,6 +836,45 @@ def upload_toapis_image_inputs(
     return uploaded
 
 
+SQUARE_WHITE_CANVAS = "square_white_v1"
+
+
+def reference_upload_policy(item: dict[str, Any], provider: str) -> str:
+    base = f"{provider}-input-{TOAPIS_INPUT_POLICY_VERSION}"
+    canvas = item.get("providerCanvas")
+    if canvas and canvas != SQUARE_WHITE_CANVAS:
+        raise RuntimeError(f"未知的参考图画布策略：{canvas}")
+    return f"{base}-{canvas}" if canvas else base
+
+
+def square_white_reference_bytes(content: bytes) -> bytes:
+    """Center without stretching/cropping; keep all source pixels and add white margins."""
+    from PIL import Image, ImageOps
+    with Image.open(BytesIO(content)) as original:
+        image = ImageOps.exif_transpose(original).convert("RGBA")
+        side = max(image.size)
+        canvas = Image.new("RGB", (side, side), "white")
+        canvas.paste(image, ((side - image.width) // 2, (side - image.height) // 2), image.getchannel("A"))
+        output = BytesIO()
+        canvas.save(output, "PNG")
+        return output.getvalue()
+
+
+def render_reference_input_bytes(item: dict[str, Any], deadline: float | None = None) -> tuple[bytes, str | None]:
+    """Shared optimizer/provider path: crop source, pad source, then compose boards."""
+    if item.get("collageItems"):
+        content, _, mime = build_reference_collage_bytes(item, deadline)
+    else:
+        content, mime = reference_source_bytes(item, deadline)
+        if item.get("providerCrop"):
+            content = crop_provider_input_bytes(content, item["providerCrop"])
+            mime = "image/jpeg"
+    if item.get("providerCanvas"):
+        reference_upload_policy(item, "toapis")  # Reject unsupported frozen policies.
+        content, mime = square_white_reference_bytes(content), "image/png"
+    return content, mime
+
+
 def crop_provider_input_bytes(content: bytes, crop: dict[str, Any]) -> bytes:
     """按输入策略裁切参考图的运行时传输副本。
 
@@ -859,12 +923,7 @@ def build_reference_collage_bytes(item: dict[str, Any], deadline: float | None =
     for source in sources:
         if not isinstance(source, dict):
             continue
-        if source.get('collageItems'):
-            content, _, _content_type = build_reference_collage_bytes(source, deadline)
-        else:
-            content, _content_type = reference_source_bytes(source, deadline)
-            if source.get('providerCrop'):
-                content = crop_provider_input_bytes(content, source['providerCrop'])
+        content, _content_type = render_reference_input_bytes(source, deadline)
         try:
             with Image.open(BytesIO(content)) as image:
                 image = ImageOps.exif_transpose(image)

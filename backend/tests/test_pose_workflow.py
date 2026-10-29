@@ -579,7 +579,6 @@ def test_pose_reference_budget_preserves_all_products_in_single_call(monkeypatch
     Image.new('RGB', (40, 80), 'red').save(content, 'PNG')
     read = lambda *_args: (content.getvalue(), 'image/png')
     monkeypatch.setattr(app_main, 'gemini_channel', lambda: 'toapis')
-    monkeypatch.setattr(app_main, 'reference_source_bytes', read)
     monkeypatch.setattr(image_provider, 'reference_source_bytes', read)
     monkeypatch.setattr(image_provider, 'REFERENCE_COLLAGE_TILE_SIZE', 80)
     calls = []

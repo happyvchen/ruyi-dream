@@ -34,6 +34,7 @@ AI 选搭的模型输出只含 `selected_files` 和最终方案业务字段，�
 
 - 参考图导入失败只重试失败导入，已成功且标记为当前输入策略版本的 provider URL 通过缓存或 attempt 快照复用。
 - ToAPIs 只接收运行时传输副本：官方长边/总像素上限按 `8192 / 4000 万` 校验，生产目标收紧为 `8000 / 3600 万`，同时压到 9.5 MiB 以内；始终等比缩放、透明底转白底，不写回或覆盖 S3 原始素材。缓存键携带 `input-v2`，升级策略后旧 URL 不会误复用。
+- 新结果集在 `prompt_preparation_json.referenceCanvas` 冻结 `square_white_v1`，递归写入任务包每张参考的 `providerCanvas`。统一字节渲染路径供提示词整理与生图上传复用：EXIF方向校正、原有镜头裁切、居中补白到1:1、拼图，再对拼图补方；竖图补左右、横图补上下，不拉伸或增加裁切。ToAPIs继续执行上述体积/尺寸压缩，fal也执行补方。缓存与URL复用区分带画布策略的版本，整理附件去重也包含画布策略；历史结果集无该字段时保留原行为，不修改原素材或既有结果。
 - 每个图片 attempt / 生成重试轮次向 ToAPIs 传稳定 `client_business_id`。创建任务遇到连接中断、`ReadTimeout` 或 TLS EOF 时标记为 `SUBMISSION_UNKNOWN`，按统一退避先以该业务 ID 查询原任务；查到即继续，明确 `task_not_found` 才补提，避免重复任务和重复计费。
 - 提交结果未知按每张图自己的 `GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT` 预算恢复，不再设置同批提交未知熔断器。
 - 已取得 provider task ID 后只恢复状态查询；provider 明确瞬时生成失败时仅按 `GENERATION_SUBMIT_RETRY_LIMIT` 重建生成任务。
