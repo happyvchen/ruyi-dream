@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+import contextvars
+from functools import partial
 import json
 import logging
 import re
@@ -37,6 +40,23 @@ from .toapis_concurrency import toapis_concurrency_slot
 
 
 logger = logging.getLogger(__name__)
+
+# Blocking text requests (including HTTP-slot waits and retry backoff) must
+# never occupy asyncio's default executor used by uploads and image delivery.
+# Executor admission queues excess jobs without allocating waiting threads.
+_text_executor: ThreadPoolExecutor | None = None
+
+
+def _get_text_executor() -> ThreadPoolExecutor:
+    global _text_executor
+    if _text_executor is None:
+        # Match the runtime's former default-executor capacity. HTTP admission
+        # still uses the shared ToAPIs semaphore; using that smaller limit as
+        # worker capacity would let sleeping retries block unrelated text work.
+        _text_executor = ThreadPoolExecutor(
+            thread_name_prefix="ruyi-text",
+        )
+    return _text_executor
 
 
 VALID_GEMINI_PROVIDERS = {"direct", "toapis"}
@@ -134,7 +154,7 @@ async def generate_gemini_json_text(
     if not is_gemini_configured():
         raise RuntimeError(gemini_not_configured_message())
     if gemini_channel() == "toapis":
-        return await asyncio.to_thread(
+        call = partial(
             _generate_via_toapis,
             prompt,
             images or [],
@@ -143,6 +163,9 @@ async def generate_gemini_json_text(
             initial_retry_count,
             defer_retry,
             should_cancel,
+        )
+        return await asyncio.get_running_loop().run_in_executor(
+            _get_text_executor(), contextvars.copy_context().run, call,
         )
     return await _generate_via_google_with_retry(
         prompt,

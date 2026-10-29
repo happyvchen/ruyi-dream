@@ -63,6 +63,10 @@ API 摘要返回稳定 `error={code,title,message,action,retryable}`；普通用
 
 官方依据：`https://docs.toapis.cn/docs/cn/api-reference/tasks/image-status`、`https://docs.toapis.cn/docs/cn/api-reference/images/gpt-image-2.5-sunburst/generation`、`https://docs.toapis.cn/docs/cn/api-reference/uploads/images`。
 
+## 文本调用与上传资源隔离
+
+阻塞的 ToAPIs 文本调用使用独立、有界的线程池，worker 容量沿用 Python 原默认 executor 的有界容量，不将较小的 HTTP 并发额度用作线程数，以免退避中的请求占满所有文本 worker；超出名额的工作留在 executor 队列，不创建等待线程。该池独立于上传、媒体处理及图片回传使用的 asyncio 默认 executor。HTTP 请求仍使用下述共享 ToAPIs 闸门，保持重试、取消检查和 HTTP 并发总量语义。
+
 ## ToAPIs 并发闸门
 
 ToAPIs 相关调用统一使用 `TOAPIS_MAX_CONCURRENCY` 控制最大并发，默认 `5`。该闸门覆盖 Gemini(ToAPIs) chat、Image-2(ToAPIs) 参考图导入、任务创建和状态查询；只在真实 HTTP 请求期间占用槽位，provider 生成等待、轮询间隔和重试退避期间释放槽位。批次一键成片不再有独立并发参数，而是按同一 ToAPIs 预算推进排队任务。

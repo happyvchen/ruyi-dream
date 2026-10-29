@@ -621,3 +621,45 @@ def test_image_count_error_is_not_retried_even_when_wrapped_as_internal_error(st
         'message': 'too many images in the message, max allowed is 16'}}, status_code=status)
     assert error['code'] == ERROR_INVALID_REQUEST
     assert not is_gemini_transport_retryable_error(error['code'])
+
+
+def test_text_backlog_keeps_upload_executor_available(monkeypatch):
+    import contextvars
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    marker = contextvars.ContextVar('request_marker', default='missing')
+    release = threading.Event()
+    started = threading.Event()
+    seen = []
+    settings = SimpleNamespace(gemini_provider='toapis', toapis_api_key='test', toapis_max_concurrency=2)
+    monkeypatch.setattr(gemini_provider, 'get_settings', lambda: settings)
+
+    def blocked_request(*args):
+        seen.append(marker.get())
+        if len(seen) == 2:
+            started.set()
+        assert release.wait(3), 'mock worker was not released'
+        return '{}'
+
+    monkeypatch.setattr(gemini_provider, '_generate_via_toapis', blocked_request)
+    with ThreadPoolExecutor(max_workers=2) as text_pool:
+        monkeypatch.setattr(gemini_provider, '_text_executor', text_pool)
+
+        async def exercise():
+            asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+            marker.set('frozen-request-context')
+            tasks = [asyncio.create_task(gemini_provider.generate_gemini_json_text('JSON')) for _ in range(8)]
+            try:
+                async with asyncio.timeout(1):
+                    while not started.is_set():
+                        await asyncio.sleep(.005)
+                # Exactly two text workers, other requests wait without threads.
+                assert len(seen) == 2
+                assert await asyncio.wait_for(asyncio.to_thread(lambda: 'upload-complete'), .5) == 'upload-complete'
+            finally:
+                release.set()
+                await asyncio.gather(*tasks)
+            assert seen == ['frozen-request-context'] * 8
+
+        asyncio.run(exercise())
