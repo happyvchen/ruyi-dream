@@ -2,7 +2,7 @@
 
 ## 当前生成对象
 
-`GenerationTask` 是拍摄任务根节点，冻结 `GenerationTaskInputVersion` 后运行 AI Stylist，得到带商品理解、最终服装、穿法、配饰和空搭配原因的 `GenerationStyling / StylingPlan`。
+`GenerationTask` 是拍摄任务根节点，冻结 `GenerationTaskInputVersion`（新版本包含按页面顺序排列的前四张模特来源）后运行 AI Stylist，得到带商品理解、最终服装、穿法、配饰和空搭配原因的 `GenerationStyling / StylingPlan`。
 
 当前后端不创建分镜预览、动态拍摄剧本或镜头计划。旧 `GenerationPreview` 表和序列化字段仅用于历史记录兼容；preview endpoint 固定返回 410。
 
@@ -24,7 +24,7 @@
 
 ## 成片提示词准备
 
-结果集 `prompt_preparation_json` 存配置快照、direct/optimized 模式、准备状态和按图片 ID 关联的冻结任务包。文本优化 attempt 的 owner_type 为 `generation_result_set`，与任务一并取消、追溯和清理；测试调用通过 invocation.mode 区分。单张重生不再刷新整组 input_version_id。
+结果集 `prompt_preparation_json` 存配置快照、direct/optimized 模式、准备状态和按图片 ID 关联的冻结任务包。文本优化 attempt 的 owner_type 为 `generation_result_set`，与任务一并取消、追溯和清理；测试调用通过 invocation.mode 区分。整理请求按最多 16 张视觉附件的并集预算分批，attempt 保存 batchRequests / batchResponses；每批完成即保存对应镜头任务包，继续时不重复整理已完成镜头。单张重生不再刷新整组 input_version_id。
 
 ## 姿势资产与选搭
 

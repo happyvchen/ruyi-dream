@@ -28,7 +28,7 @@ AI Stylist 理解主推款，依据 Lily 品牌风格选择必要的库内服装
 
 最终阶段按图位族读取 `assembly.final_image_top`、`assembly.final_image_bottom` 或 `assembly.final_image_one_piece`。五个槽位分别调用 GPT Image-2.5 Sunburst edits，默认 `size=1:1`、`resolution=2k`、`quality=high`。
 
-每张最多 6 个 `image_urls`，顺序为统一背景、按镜头预裁切的姿势图、模特身份图、主推款正面图、主推款背面或细节图、搭配服装主图；不足时留空，不使用同组连续性锚点。统一背景排第一，只提供场景与光线；当前镜头 Prompt 决定景别和构图，姿势图决定动作。每张输入的原始来源与裁切策略保留在 attempt 快照。不传 `mask_url`。
+每张最多 14 个 `image_urls`，顺序为统一背景、按镜头预裁切的姿势图、模特首图、包含首图的前四张模特 2×2 宫格、主推款前六张、搭配款合计前四张；商品图独立传入，不足时不重复补足，模特宫格不足四张时留白，不使用同组连续性锚点。统一背景排第一，只提供场景与光线；当前镜头 Prompt 决定景别和构图，姿势图决定动作。每张输入的原始来源与裁切策略保留在 attempt 快照。不传 `mask_url`。
 
 ## 5. 运行边界
 

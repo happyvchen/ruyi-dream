@@ -22,31 +22,32 @@ def executable_package(value: dict[str, Any]) -> bool:
                 and isinstance(value.get("imageInputs"), list) and value["imageInputs"])
 
 
-def adapt_replay_references(package: dict[str, Any]) -> dict[str, Any]:
-    """Fit older 7–8 reference requests without dropping sources or renumbering facts.
+def adapt_replay_references(package: dict[str, Any], max_reference_images: int = 14) -> dict[str, Any]:
+    """Keep requests within the current provider budget without dropping sources.
 
-    The first five references stay independent. The remainder form a labelled board;
+    All but the last available slot stay independent. The remainder form a labelled board;
     the original request is retained alongside an explicit source-to-tile mapping.
     This is a transport adaptation, not a new styling/pose decision.
     """
     inputs = package.get('imageInputs', [])
-    if len(inputs) <= 6:
+    if len(inputs) <= max_reference_images:
         return package
     result = json.loads(json.dumps(package))
     result['originalImageInputs'] = result['imageInputs']
-    tail = result['imageInputs'][5:]
-    mapping = [{'originalIndex': index, 'referenceIndex': 6, 'tile': index - 5,
-                'role': item.get('role')} for index, item in enumerate(tail, start=6)]
+    independent_count = max_reference_images - 1
+    tail = result['imageInputs'][independent_count:]
+    mapping = [{'originalIndex': index, 'referenceIndex': max_reference_images, 'tile': index - independent_count,
+                'role': item.get('role')} for index, item in enumerate(tail, start=max_reference_images)]
     result['referenceTransportMapping'] = mapping
-    result['imageInputs'] = result['imageInputs'][:5] + [{
+    result['imageInputs'] = result['imageInputs'][:independent_count] + [{
         'role': 'retained_reference_board', 'filename': 'retained-references.jpg',
         'referenceBoardKind': 'retained_sources', 'collageItems': tail,
         'tileLabels': [f'Original image {item["originalIndex"]}' for item in mapping],
     }]
     result['originalReferencePrompt'] = result['prompt']
-    result['prompt'] += ('\n\n【参考图编号映射】前五张参考图编号不变。第六张是来源参考板，'
+    result['prompt'] += (f'\n\n【参考图编号映射】前 {independent_count} 张参考图编号不变。第 {max_reference_images} 张是来源参考板，'
                          '按从左到右、从上到下排列。上文的图号保留原含义：' +
-                         '；'.join(f'原图 {item["originalIndex"]} 对应参考图 6 的第 {item["tile"]} 格'
+                         '；'.join(f'原图 {item["originalIndex"]} 对应参考图 {max_reference_images} 的第 {item["tile"]} 格'
                                   for item in mapping) +
                          '。各格只承担原图规定的职责，成片仍为单张照片，不输出参考板或拼图。')
     return result

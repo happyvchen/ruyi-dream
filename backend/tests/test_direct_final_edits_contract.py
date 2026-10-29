@@ -436,29 +436,34 @@ def test_toapis_final_edits_request_uses_master_shot_first_without_mask_and_prod
     assert "reference_images" not in request
 
 
-def test_toapis_rejects_more_than_six_reference_urls_before_submission() -> None:
+def test_toapis_accepts_fourteen_and_rejects_fifteen_reference_urls_before_submission() -> None:
     task_package = {
         "generation": {"stage": "final_image"},
         "prompt": "将拍摄母版中的原人物和原服装替换为当前商品与模特。",
     }
 
-    with pytest.raises(RuntimeError, match="最多支持 6 张"):
+    assert len(image_provider.build_toapis_request_snapshot(
+        task_package, [f"https://files.toapis.cn/reference-{index}.jpg" for index in range(14)],
+    )["image_urls"]) == 14
+    with pytest.raises(RuntimeError, match="最多支持 14 张"):
         image_provider.build_toapis_request_snapshot(
             task_package,
-            [f"https://files.toapis.cn/reference-{index}.jpg" for index in range(7)],
+            [f"https://files.toapis.cn/reference-{index}.jpg" for index in range(15)],
         )
 
 
-def test_direct_final_inputs_compose_six_provider_slots_without_losing_sources(monkeypatch) -> None:
+@pytest.mark.parametrize("shot_index", [1, 2, 3, 4, 5])
+@pytest.mark.parametrize("model_count", [1, 2, 3, 4, 5])
+def test_direct_final_inputs_keep_order_and_fourteen_slot_budget(monkeypatch, shot_index, model_count) -> None:
     ids = insert_ready_generation_task_with_preview(family="top")
     monkeypatch.setattr(app_main, "object_exists", lambda _key: True)
     model_sources = [
         {"objectKey": f"models/model-{index}.jpg", "filename": f"model-{index}.jpg"}
-        for index in range(2)
+        for index in range(model_count)
     ]
     hero_sources = [
         {"asset": {"id": 100 + index, "objectKey": f"hero/{index}.jpg", "filename": f"hero-{index}.jpg"}}
-        for index in range(6)
+        for index in range(8)
     ]
     styling_sources = [
         {"asset": {"id": 200 + index, "objectKey": f"styling/{index}.jpg", "filename": f"styling-{index}.jpg"}}
@@ -477,31 +482,30 @@ def test_direct_final_inputs_compose_six_provider_slots_without_losing_sources(m
             (dumps([{"code": "PANTS-1", "images": styling_sources}]), ids["styling_id"]),
         )
         preset = db.execute(
-            "SELECT * FROM shot_presets WHERE category_family = 'top' AND shot_index = 1 ORDER BY version_id DESC LIMIT 1"
+            "SELECT * FROM shot_presets WHERE category_family = 'top' AND shot_index = ? ORDER BY version_id DESC LIMIT 1",
+            (shot_index,),
         ).fetchone()
 
     inputs = app_main.build_direct_final_image_inputs(ids["styling_id"], input_version_id, preset)
 
+    assert len(inputs) == 14
     assert [item["role"] for item in inputs] == [
-        "shot_background",
-        "shot_pose",
-        "model_identity",
-        "hero_garment",
-        "hero_garment",
-        "styling_garment",
+        "shot_background", "shot_pose", "model_identity", "model_identity",
+        *(["hero_garment"] * 6), *(["styling_garment"] * 4),
     ]
-    # 6 张预算按“少而大”分配：角色图不再拼版，每张事实图独占一个输入位。
-    assert all(item.get("collageItems") is None for item in inputs[2:])
-    assert all(item.get("referenceBoardKind") is None for item in inputs[2:])
-    assert [item.get("objectKey") for item in inputs[2:]] == [
-        "models/model-0.jpg",
-        "hero/0.jpg",
-        "hero/2.jpg",
-        "styling/0.jpg",
+    assert inputs[2]["objectKey"] == "models/model-0.jpg"
+    assert inputs[3]["collageRule"]["kind"] == "model_identity_grid_2x2"
+    assert [item["objectKey"] for item in inputs[3]["collageItems"]] == [
+        f"models/model-{index}.jpg" for index in range(min(4, model_count))
     ]
-    assert inputs[0]["role"] == "shot_background"
-    # 镜头上半身近景的姿势参考按镜头预裁切，避免全身姿势图拉回全身构图。
-    assert inputs[1]["providerCrop"] == {"kind": "keep_top_ratio", "ratio": 0.78}
+    assert all(not item.get("collageItems") for item in inputs[4:])
+    assert [item["objectKey"] for item in inputs[4:]] == [
+        *[f"hero/{index}.jpg" for index in range(6)],
+        *[f"styling/{index}.jpg" for index in range(4)],
+    ]
+    assert all(item["materialCode"] == "PANTS-1" for item in inputs[10:])
+    crop = app_main.IMAGE2_DIRECT_POSE_CROP.get(("top", shot_index))
+    assert inputs[1].get("providerCrop") == ({"kind": "keep_top_ratio", "ratio": crop} if crop else None)
 
 
 def test_six_source_reference_board_uses_all_tiles() -> None:
@@ -675,3 +679,43 @@ def test_pose_crop_uploads_cropped_copy_and_records_applied_policy(monkeypatch) 
     assert inputs[0]["providerUrl"] == "https://files.toapis.cn/cropped.jpg"
     assert inputs[0]["providerCropApplied"] == {"kind": "keep_top_ratio", "ratio": 0.5}
     assert inputs[0]["providerInputPolicyVersion"].startswith("toapis-input-")
+
+
+@pytest.mark.parametrize('count', [1, 2, 3, 4])
+def test_model_grid_is_two_by_two_without_cropping_or_repeating_sources(monkeypatch, count):
+    from io import BytesIO
+    from PIL import Image
+    colors = [(220, 10, 10), (10, 220, 10), (10, 10, 220), (220, 220, 10)]
+    monkeypatch.setattr(image_provider, 'REFERENCE_COLLAGE_TILE_SIZE', 80)
+    def read(source, deadline=None):
+        data = BytesIO()
+        Image.new('RGB', (40, 80), colors[source['index']]).save(data, 'PNG')
+        return data.getvalue(), 'image/png'
+    monkeypatch.setattr(image_provider, 'reference_source_bytes', read)
+    content, _, _ = image_provider.build_reference_collage_bytes({
+        'collageItems': [{'index': i} for i in range(count)],
+        'collageRule': {'kind': 'model_identity_grid_2x2'},
+    })
+    im = Image.open(BytesIO(content))
+    assert im.size == (160, 160)
+    for i in range(4):
+        pixel = im.getpixel(((i % 2) * 80 + 40, (i // 2) * 80 + 40))
+        expected = colors[i] if i < count else (255, 255, 255)
+        assert max(abs(a-b) for a, b in zip(pixel, expected)) < 5
+    # Portrait images are contained: the unused sides stay white, not cropped/stretched.
+    assert min(im.getpixel((5, 40))) > 250
+
+
+def test_new_model_snapshot_freezes_first_four_in_user_order(monkeypatch):
+    from app.db import loads
+    monkeypatch.setattr(app_main, 'object_exists', lambda key: True)
+    with get_db() as db:
+        row = db.execute('SELECT * FROM model_profiles ORDER BY is_default DESC, id LIMIT 1').fetchone()
+        refs = {f'angle{i}': f'{i}.png' for i in range(5)}
+        db.execute('UPDATE model_profiles SET profile_json=? WHERE id=?',
+                   (dumps({'headReferences': refs, 'headReferenceOrder': ['angle3', 'angle1', 'angle4', 'angle0', 'angle2']}), row['id']))
+    snapshot = app_main.snapshot_default_model()
+    assert [x['filename'] for x in snapshot['imageInputs']] == ['3.png', '1.png', '4.png', '0.png']
+    with get_db() as db:
+        db.execute('UPDATE model_profiles SET profile_json=? WHERE id=?', (dumps({'headReferences': {'front': 'new.png'}}), row['id']))
+    assert app_main.resolve_model_snapshot_image_inputs(snapshot, limit=4) == snapshot['imageInputs']

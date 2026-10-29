@@ -40,7 +40,10 @@ from .prompt_render import (
     render_user_instruction_line,
     render_user_requirement_line,
 )
-from .prompt_optimization import OPTIMIZER_KEY, optimizer_input, text_hash, parse_optimized_prompts
+from .prompt_optimization import (
+    OPTIMIZER_KEY, optimizer_input, text_hash, parse_optimized_prompts,
+    optimizer_reference_identity, optimizer_package_batches,
+)
 from .gemini_provider import (
     TOAPIS_MAX_MESSAGE_IMAGES,
     GeminiProviderError,
@@ -144,12 +147,12 @@ MAX_GARMENT_IMAGE_INPUTS = 6
 MAX_HERO_IMAGE_INPUTS = 8
 MAX_GARMENT_SELECTED_IMAGES = 6
 MAX_HERO_SELECTED_IMAGES = 8
-IMAGE2_MAX_REFERENCE_IMAGES = 6
-# 成片 6 张参考图预算按“少而大”分配：角色图不再拼版，单张事实图独占一个
-# provider 输入位，避免多格拼版被上游缩放后损失身份、面料与图案细节。
-IMAGE2_DIRECT_MODEL_SOURCE_LIMIT = 1
-IMAGE2_DIRECT_HERO_SOURCE_LIMIT = 2
-IMAGE2_DIRECT_STYLING_SOURCE_LIMIT = 1
+IMAGE2_MAX_REFERENCE_IMAGES = 14
+# 背景1 + 姿势1 + 模特首图1/前四张宫格1 + 主推款前6张 + 搭配款前4张。
+# 商品图各自独占输入位，只有模特补充视角合成为固定2×2宫格。
+IMAGE2_DIRECT_MODEL_SOURCE_LIMIT = 4
+IMAGE2_DIRECT_HERO_SOURCE_LIMIT = 6
+IMAGE2_DIRECT_STYLING_SOURCE_LIMIT = 4
 # 姿势参考按镜头预裁切：provider 只收到与当前景别相符的动作参考，
 # 避免全身姿势图把每个镜头都拉回全身构图。值为保留图片上部的比例。
 IMAGE2_DIRECT_POSE_CROP: dict[tuple[str, int], float] = {
@@ -5741,6 +5744,9 @@ def vision_reference_input(item: dict[str, Any]) -> dict[str, Any]:
         content, _, mime = build_reference_collage_bytes(item)
     else:
         content, mime = reference_source_bytes(item)
+        if item.get("providerCrop"):
+            from .image_provider import crop_provider_input_bytes
+            content = crop_provider_input_bytes(content, item["providerCrop"])
     if not content:
         raise ValueError("参考图片内容为空")
     # Normalized originals may have a different format from their upload filename.
@@ -5756,8 +5762,7 @@ def optimizer_visual_inputs(packages: dict[str, Any], inputs: dict[str, Any]) ->
     for shot in inputs["shots"]:
         for reference, item in zip(shot["references"], packages[shot["shotId"]]["imageInputs"]):
             sources = item.get("collageItems") or [item]
-            identity = dumps({"role": item["role"], "collageRule": item.get("collageRule"),
-                              "sources": [source.get("objectKey") or source.get("url") for source in sources]})
+            identity = optimizer_reference_identity(item)
             if identity not in seen:
                 images.append(vision_reference_input(item))
                 seen[identity] = len(images)
@@ -5797,6 +5802,8 @@ async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: lis
     preparation.update(status="RUNNING", attemptId=attempt_id, error=None)
     save_final_preparation(result_set_id, preparation)
     raw_text = ""
+    batch_responses: list[dict[str, Any]] = []
+    optimized: dict[str, Any] = {}
     provider_call_started = False
     try:
         pending = {key: build_new_final_task_package(task_id, int(key)) for key in pending}
@@ -5807,33 +5814,46 @@ async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: lis
                             "invocation": {"mode": "final_prompt_optimization", "providerCallStarted": False}}
         # 模型调用前保存源文本与系统提示词，供调用记录追溯。
         update_attempt_request_snapshot(attempt_id, request_snapshot)
-        inputs = optimizer_input(pending)
-        images = optimizer_visual_inputs(pending, inputs)
-        if final_preparation_cancelled(task_id, result_set_id):
-            finish_attempt(attempt_id, "CANCELLED")
-            preparation["status"] = "CANCELLED"
+        batches = optimizer_package_batches(pending, TOAPIS_MAX_MESSAGE_IMAGES)
+        request_snapshot["batchRequests"] = []
+        cancelled = False
+        for batch_index, batch in enumerate(batches, 1):
+            if final_preparation_cancelled(task_id, result_set_id) or generation_task_or_attempt_cancelled(task_id, attempt_id):
+                cancelled = True
+                break
+            provider_call_started = False
+            inputs = optimizer_input(batch)
+            images = optimizer_visual_inputs(batch, inputs)
+            if final_preparation_cancelled(task_id, result_set_id) or generation_task_or_attempt_cancelled(task_id, attempt_id):
+                cancelled = True
+                break
+            batch_prompt = dumps(inputs)
+            request_snapshot.setdefault("prompt", batch_prompt)
+            request_snapshot["batchRequests"].append({"batchIndex": batch_index, "shotIds": list(batch), "prompt": batch_prompt})
+            request_snapshot["invocation"]["providerCallStarted"] = True
+            update_attempt_request_snapshot(attempt_id, request_snapshot)
+            provider_call_started = True
+            raw_text = await generate_gemini_json_text(
+                batch_prompt, images=images, system_instruction=system_prompt,
+                should_cancel=lambda: final_preparation_cancelled(task_id, result_set_id)
+                or generation_task_or_attempt_cancelled(task_id, attempt_id),
+            )
+            batch_responses.append({"batchIndex": batch_index, "shotIds": list(batch), "raw_text": raw_text})
+            results = parse_optimized_prompts(parse_gemini_json_object(raw_text), batch)
+            optimized.update(results)
+            for key, output in results.items():
+                source = batch[key]
+                packages[key] = {**source, "originalPrompt": source["prompt"], "prompt": output["prompt"],
+                                 "renderedPromptHash": text_hash(output["prompt"]),
+                                 "promptOptimization": {"attemptId": attempt_id, "batchIndex": batch_index,
+                                                        "systemPromptHash": text_hash(system_prompt), **output}}
+            # Successful batches survive cancellation, subsequent batch failure and restart.
             save_final_preparation(result_set_id, preparation)
-            return False
-        request_snapshot["prompt"] = dumps(inputs)
-        request_snapshot["invocation"]["providerCallStarted"] = True
-        update_attempt_request_snapshot(attempt_id, request_snapshot)
-        provider_call_started = True
-        raw_text = await generate_gemini_json_text(
-            dumps(inputs), images=images, system_instruction=system_prompt,
-            should_cancel=lambda: final_preparation_cancelled(task_id, result_set_id)
-            or generation_task_or_attempt_cancelled(task_id, attempt_id),
-        )
-        optimized = parse_optimized_prompts(parse_gemini_json_object(raw_text), pending)
-        for key, output in optimized.items():
-            source = pending[key]
-            packages[key] = {**source, "originalPrompt": source["prompt"], "prompt": output["prompt"],
-                             "renderedPromptHash": text_hash(output["prompt"]),
-                             "promptOptimization": {"attemptId": attempt_id, "systemPromptHash": text_hash(system_prompt), **output}}
-        cancelled = final_preparation_cancelled(task_id, result_set_id) or generation_task_or_attempt_cancelled(task_id, attempt_id)
-        preparation.update(status="SUCCEEDED", error=None)
+        cancelled = cancelled or final_preparation_cancelled(task_id, result_set_id) or generation_task_or_attempt_cancelled(task_id, attempt_id)
+        preparation.update(status="CANCELLED" if cancelled else "SUCCEEDED", error=None)
         save_final_preparation(result_set_id, preparation)
         finish_attempt(attempt_id, "CANCELLED" if cancelled else "SUCCEEDED",
-                       response_snapshot={"raw_text": raw_text, "shots": optimized})
+                       response_snapshot={"raw_text": raw_text, "shots": optimized, "batchResponses": batch_responses})
         return not cancelled
     except Exception as exc:
         cancelled = final_preparation_cancelled(task_id, result_set_id) or generation_task_or_attempt_cancelled(task_id, attempt_id)
@@ -5842,7 +5862,7 @@ async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: lis
         save_final_preparation(result_set_id, preparation)
         error_code = ("PROMPT_PREPARATION_FAILED" if not provider_call_started else
                       ERROR_MALFORMED_OUTPUT if isinstance(exc, ValueError) else classify_generation_attempt_error(exc))
-        finish_attempt(attempt_id, "CANCELLED" if cancelled else "FAILED", response_snapshot={"raw_text": raw_text},
+        finish_attempt(attempt_id, "CANCELLED" if cancelled else "FAILED", response_snapshot={"raw_text": raw_text, "shots": optimized, "batchResponses": batch_responses},
                        error_message=str(exc), error_code=error_code)
         if not cancelled:
             with get_db() as db:
@@ -7020,15 +7040,24 @@ async def test_prompt_optimization(config_key: str, payload: PromptOptimizationT
                 **gemini_request_meta(), "invocation": {"mode": "optimization_test", "sourceAttemptId": payload.attemptId}}
     attempt_id = create_attempt("generation_result_set", result_set_id, effective_text_provider(), request_snapshot=snapshot)
     raw_text = ""
+    results: dict[str, Any] = {}
+    batch_responses: list[dict[str, Any]] = []
+    snapshot["batchRequests"] = []
     try:
-        images = optimizer_visual_inputs(packages, inputs)
-        snapshot["prompt"] = dumps(inputs)
-        update_attempt_request_snapshot(attempt_id, snapshot)
-        raw_text = await generate_gemini_json_text(dumps(inputs), images=images, system_instruction=system_prompt)
-        results = parse_optimized_prompts(parse_gemini_json_object(raw_text), packages)
-        finish_attempt(attempt_id, "SUCCEEDED", response_snapshot={"raw_text": raw_text, "shots": results})
+        for batch_index, batch in enumerate(optimizer_package_batches(packages, TOAPIS_MAX_MESSAGE_IMAGES), 1):
+            inputs = optimizer_input(batch)
+            images = optimizer_visual_inputs(batch, inputs)
+            batch_prompt = dumps(inputs)
+            if batch_index == 1:
+                snapshot["prompt"] = batch_prompt
+            snapshot["batchRequests"].append({"batchIndex": batch_index, "shotIds": list(batch), "prompt": batch_prompt})
+            update_attempt_request_snapshot(attempt_id, snapshot)
+            raw_text = await generate_gemini_json_text(batch_prompt, images=images, system_instruction=system_prompt)
+            batch_responses.append({"batchIndex": batch_index, "shotIds": list(batch), "raw_text": raw_text})
+            results.update(parse_optimized_prompts(parse_gemini_json_object(raw_text), batch))
+        finish_attempt(attempt_id, "SUCCEEDED", response_snapshot={"raw_text": raw_text, "shots": results, "batchResponses": batch_responses})
     except Exception as exc:
-        finish_attempt(attempt_id, "FAILED", response_snapshot={"raw_text": raw_text}, error_message=str(exc), error_code=ERROR_MALFORMED_OUTPUT if isinstance(exc, ValueError) else classify_generation_attempt_error(exc))
+        finish_attempt(attempt_id, "FAILED", response_snapshot={"raw_text": raw_text, "shots": results, "batchResponses": batch_responses}, error_message=str(exc), error_code=ERROR_MALFORMED_OUTPUT if isinstance(exc, ValueError) else classify_generation_attempt_error(exc))
         raise HTTPException(422, f"优化测试失败，记录 #{attempt_id}：{str(exc)[:500]}") from exc
     return {"attemptId": attempt_id, "items": [{"shotId": key, "originalPrompt": packages[key]["prompt"], **value} for key, value in results.items()]}
 
@@ -11313,24 +11342,21 @@ def build_direct_final_image_inputs(
 
     model_snapshot = loads(input_version["model_snapshot_json"], {})
     model_sources = resolve_model_snapshot_image_inputs(model_snapshot, limit=IMAGE2_DIRECT_MODEL_SOURCE_LIMIT)
-    model_sheet = reference_sheet_image_input(
-        "model_identity",
-        model_sources,
-        filename="model-identity-sheet.jpg",
-        max_items=IMAGE2_DIRECT_MODEL_SOURCE_LIMIT,
-    )
-    if model_sheet:
-        inputs.append(model_sheet)
+    if model_sources:
+        inputs.append({**model_sources[0], "role": "model_identity"})
+        inputs.append({
+            "role": "model_identity", "filename": "model-identity-grid.jpg",
+            "referenceBoardKind": "model_identity_grid",
+            "collageItems": [{**source, "role": "model_identity"} for source in model_sources],
+            "collageRule": {"kind": "model_identity_grid_2x2", "maxSourceImages": 4,
+                            "sourceCount": len(model_sources), "notPersisted": True},
+        })
 
     hero_snapshot = [item for item in loads(input_version["image_snapshot_json"], []) if isinstance(item, dict)]
     hero_sources = [image_input_from_asset(item.get("asset"), "hero_garment") for item in hero_snapshot]
     hero_sources = [item for item in hero_sources if reference_image_input_available(item)]
-    # 正面镜头用封面图 + 细节图，背面镜头用封面图 + 背面图；每张独占一个输入位。
-    hero_pick = (0, 2) if shot_index in {1, 2} else (0, 1)
-    hero_selected = [hero_sources[index] for index in hero_pick if index < len(hero_sources)]
-    if not hero_selected and hero_sources:
-        hero_selected = hero_sources[:IMAGE2_DIRECT_HERO_SOURCE_LIMIT]
-    for source in hero_selected[:IMAGE2_DIRECT_HERO_SOURCE_LIMIT]:
+    # 五镜头均按冻结的商品图顺序取前六张，不再按镜头跳选。
+    for source in hero_sources[:IMAGE2_DIRECT_HERO_SOURCE_LIMIT]:
         hero_input = reference_sheet_image_input(
             "hero_garment",
             [source],
@@ -11354,14 +11380,7 @@ def build_direct_final_image_inputs(
                     styling_sources.append(source)
         if len(styling_sources) >= IMAGE2_DIRECT_STYLING_SOURCE_LIMIT:
             break
-    styling_sheet = reference_sheet_image_input(
-        "styling_garment",
-        styling_sources,
-        filename="styling-garments-sheet.jpg",
-        max_items=1,
-    )
-    if styling_sheet:
-        inputs.append(styling_sheet)
+    inputs.extend(styling_sources)
 
     inputs = [item for item in inputs if reference_image_input_available(item)]
     if len(inputs) > IMAGE2_MAX_REFERENCE_IMAGES:
@@ -11625,7 +11644,7 @@ def snapshot_default_model() -> dict[str, Any]:
         "modelId": row["model_id"],
         "name": row["name"],
         "profile": loads(row["profile_json"], {}),
-        "imageInputs": get_default_model_image_inputs(limit=2),
+        "imageInputs": model_image_inputs_from_row(row, limit=IMAGE2_DIRECT_MODEL_SOURCE_LIMIT),
     }
 
 

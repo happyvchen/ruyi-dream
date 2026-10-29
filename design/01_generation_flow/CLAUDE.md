@@ -18,7 +18,7 @@
 | `storyboard_workflow_simplification_proposal.md` | 历史决策记录：删除动态剧本步骤、三类固定分镜 Prompt、代码注入动态事实、直接生图 | 复盘工作流简化决策时 |
 | `brand_style_retrieval_workflow.md` | Lily 品牌样本库、全量标签直投、Prompt 选搭质量、受控配饰和0.1.0 技术边界 | 设计或实现搭配库选搭、品牌风格证据、配饰边界时 |
 | `styling_quality_signals.md` | AI Stylist 质量信号与客户审核闭环：避免业务质量问题变成用户可见报错 | 设计或排查智能选搭质量问题时 |
-| `image2_input_strategy.md` | 10 图输入限制、图片角色、预览/最终 prompt 策略 | 设计任务包、prompt、图片输入优先级时 |
+| `image2_input_strategy.md` | 14 图输入预算、模特首图与四宫格、商品独立图及来源冻结 | 设计任务包、prompt、图片输入优先级时 |
 | `prompt_context_strategy.md` | 当前 Prompt runtime 占位策略：AI 选搭和最终成片的动态事实边界 | 评估 prompt 过长、调整 runtime 占位符或生成请求快照时 |
 | `prompt_rendering_refactor.md` | Prompt 渲染层重构设计：快照模型与 prompt 视图解耦、生图阶段去 JSON 治理元数据、参考图自然语言化、迁移阶段与本地渲染对比验收 | 修正 prompt 组装偏离 spec、去除 schema_version/priority_policy 噪音、实现 renderer 层时 |
 | `generation_responsibility_matrix.md` | 商品、模特、StylingPlan、三类固定 Prompt、动态事实、生成配饰和导出等要素由谁负责 | 分析生成问题归因和修复方案时 |
@@ -32,7 +32,7 @@
 - 选搭质量必须同时满足审美成立、Lily 品牌成立、主推款商品表达成立；只露出主推款但造型难看仍视为失败。
 - 背景与光线由同一张共享背景提供，姿势由独立姿势库选搭；一次初筛查看商品图、全库标签与镜头要求，直接定选，不再调用原图复核；冻结商品/模特版本、背景、五个不同姿势与成片规则。景别、构图和商品表达由三类固定成片 Prompt 负责。
 - GPT Image-2.5 Sunburst edits 负责最终单图生成，不负责选择商品、维护预设、导演决策或业务状态。
-- 最终图固定并发生成 5 个镜头；每张最多 6 个参考图 URL，共享背景排第一，不传遮罩；模特、主推款、搭配款每个角色只送一张事实图（不拼多格参考板），姿势图按镜头景别预裁切。
+- 最终图固定并发生成 5 个镜头；每张最多 14 个参考图 URL，共享背景、当前姿势各一张，模特首图和包含首图的前四张 2×2 宫格各一张，主推款前六张、搭配款合计前四张独立输入；背景排第一，不传遮罩，姿势图沿用镜头景别预裁切。
 
 ## 相关 (See Also)
 

@@ -178,16 +178,19 @@ def test_delayed_old_worker_cannot_claim_a_newer_retry(client, monkeypatch):
     assert main.get_generation_result_set(group)['images'][0] == before
 
 
-def test_reference_transport_preserves_all_sources_and_is_idempotent(monkeypatch):
+@pytest.mark.parametrize("limit", [6, 14])
+def test_reference_transport_preserves_all_sources_and_is_idempotent(monkeypatch, limit):
     from PIL import Image
     original = {'prompt': 'Use image 7 as model identity.', 'imageInputs': [
-        {'objectKey': f'original-{index}.png', 'role': 'model_identity'} for index in range(8)]}
-    package = adapt_replay_references(original)
-    assert len(original['imageInputs']) == 8 and len(package['imageInputs']) == 6
+        {'objectKey': f'original-{index}.png', 'role': 'model_identity'} for index in range(limit + 2)]}
+    package = adapt_replay_references(original, max_reference_images=limit)
+    assert len(original['imageInputs']) == limit + 2 and len(package['imageInputs']) == limit
     assert package['originalImageInputs'] == original['imageInputs']
-    assert package['imageInputs'][5]['collageItems'] == original['imageInputs'][5:]
+    assert package['imageInputs'][limit - 1]['collageItems'] == original['imageInputs'][limit - 1:]
+    assert package['referenceTransportMapping'][0] == {
+        'originalIndex': limit, 'referenceIndex': limit, 'tile': 1, 'role': 'model_identity'}
     assert adapt_replay_references(package) == package
-    assert image_provider.build_toapis_request_snapshot(package, [f'url-{i}' for i in range(6)])['prompt'] == package['prompt']
+    assert image_provider.build_toapis_request_snapshot(package, [f'url-{i}' for i in range(limit)])['prompt'] == package['prompt']
     seen = []
     def read(source, *_args):
         seen.append(source['objectKey'])
@@ -195,10 +198,10 @@ def test_reference_transport_preserves_all_sources_and_is_idempotent(monkeypatch
         Image.new('RGB', (30, 40), (255, 0, 0)).save(output, 'PNG')
         return output.getvalue(), 'image/png'
     monkeypatch.setattr(image_provider, 'reference_source_bytes', read)
-    content, _, _ = image_provider.build_reference_collage_bytes(package['imageInputs'][5])
+    content, _, _ = image_provider.build_reference_collage_bytes(package['imageInputs'][limit - 1])
     with Image.open(BytesIO(content)) as image:
         image.verify()
-    assert seen == [p['objectKey'] for p in original['imageInputs'][5:]]
+    assert seen == [p['objectKey'] for p in original['imageInputs'][limit - 1:]]
 
 
 def test_versions_and_execution_snapshots_protect_media_after_attempt_removal(client):
@@ -240,3 +243,11 @@ def test_pose_selection_accepts_old_input_mismatch_but_rejects_concurrent_change
     assert bool(task['active_pose_selection_id']) is (not concurrent_change)
     if not concurrent_change:
         assert task['current_input_version_id'] == original_input
+
+
+@pytest.mark.parametrize("count", [6, 8, 14])
+def test_sunburst_replay_keeps_individual_references_and_prompt_unchanged(count):
+    original = {"prompt": "Frozen image numbering", "imageInputs": [
+        {"objectKey": f"source-{i}.png", "role": "hero_garment"} for i in range(count)]}
+    assert adapt_replay_references(original) == original
+    assert "originalImageInputs" not in original

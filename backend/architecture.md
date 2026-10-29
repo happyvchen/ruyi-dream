@@ -11,7 +11,7 @@
 - provider attempt 快照、进度、错误分类和轮询恢复；
 - 生成记录、归档、删除和导出。
 
-文本与视觉理解继续复用 `app/gemini_provider.py` 和 `GEMINI_*` 环境变量。ToAPIs 使用 `deepseek-v4.1-flash`；direct 仍为 Gemini。新调用记录保存实际模型来源、通道和模型 ID，历史记录不改写。保留现有 Base64 图片、SSE、16 张客户端上限、JSON 解析与重试契约；暂不发送未经 ToAPIs 该路由核实的思考或 JSON 模式参数。
+文本与视觉理解继续复用 `app/gemini_provider.py` 和 `GEMINI_*` 环境变量。ToAPIs 使用 `deepseek-v4.1-flash`；direct 仍为 Gemini。新调用记录保存实际模型来源、通道和模型 ID，历史记录不改写。保留现有 Base64 图片、SSE、16 张客户端上限、JSON 解析与重试契约。成片提示词整理按参考图并集计算预算，超过 16 张时按完整镜头分批，每批成功结果立即冻结，失败或取消后继续复用；暂不发送未经 ToAPIs 该路由核实的思考或 JSON 模式参数。
 
 AI 选搭的模型输出只含 `selected_files` 和最终方案业务字段，不要求 `schema_version` 或旧候选编号。后端按业务结构校验并补内部历史兼容标记，原始返回保留。选搭每次业务重问前及返回后检查任务/attempt 取消状态，取消后不再发起下一轮契约重问。
 

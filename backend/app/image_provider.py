@@ -882,13 +882,16 @@ def build_reference_collage_bytes(item: dict[str, Any], deadline: float | None =
     if not images:
         raise RuntimeError("参考图拼接缺少可用来源图片")
 
-    if len(images) == 1:
+    fixed_model_grid = (item.get("collageRule") or {}).get("kind") == "model_identity_grid_2x2"
+    if fixed_model_grid and len(images) > 4:
+        raise RuntimeError("模特四宫格最多包含四张来源图")
+    if len(images) == 1 and not fixed_model_grid:
         output = BytesIO()
         images[0].save(output, "JPEG", quality=95, optimize=True)
         stem = os.path.splitext(str(item.get("filename") or "reference-sheet.jpg"))[0] or "reference-sheet"
         return output.getvalue(), f"{stem}.jpg", "image/jpeg"
 
-    columns, rows = reference_collage_grid(len(images))
+    columns, rows = (2, 2) if fixed_model_grid else reference_collage_grid(len(images))
     tile_size = REFERENCE_COLLAGE_TILE_SIZE
     try:
         from PIL import Image
@@ -1001,7 +1004,7 @@ def upload_bytes_to_fal(content: bytes, filename: str, content_type: str | None 
 # toapis 单文件导入上限 10MB；留出安全余量，只压超限大图，小图原样导入。
 TOAPIS_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 TOAPIS_TARGET_UPLOAD_BYTES = TOAPIS_MAX_UPLOAD_BYTES - 512 * 1024
-TOAPIS_MAX_REFERENCE_IMAGES = 6
+TOAPIS_MAX_REFERENCE_IMAGES = 14
 TOAPIS_MAX_INPUT_LONG_EDGE = 8192
 TOAPIS_MAX_INPUT_PIXELS = 40_000_000
 TOAPIS_TARGET_INPUT_LONG_EDGE = 8000

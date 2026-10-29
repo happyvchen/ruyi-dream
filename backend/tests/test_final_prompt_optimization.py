@@ -405,3 +405,83 @@ def test_optimizer_reads_actual_board_and_original_image_bytes(monkeypatch):
     assert actual['data'] == expected and actual['mime_type'] == mime
     with Image.open(BytesIO(actual['data'])) as decoded:
         assert decoded.width > 0 and decoded.height > 0
+
+
+def fourteen_inputs(_styling, _version, preset):
+    return [
+        {'role': 'shot_background', 'objectKey': 'background'},
+        {'role': 'shot_pose', 'objectKey': f'pose-{preset["shot_index"]}'},
+        *[{'role': 'model_identity', 'objectKey': f'model-{i}'} for i in range(2)],
+        *[{'role': 'hero_garment', 'objectKey': f'hero-{i}'} for i in range(6)],
+        *[{'role': 'styling_garment', 'objectKey': f'styling-{i}'} for i in range(4)],
+    ]
+
+
+def test_full_fourteen_reference_group_splits_optimizer_and_preserves_frozen_retries(client, monkeypatch):
+    monkeypatch.setattr(main, 'build_direct_final_image_inputs', fourteen_inputs)
+    ids, group, image_ids = create_run(client)
+    calls, images = mock_success(monkeypatch)
+    asyncio.run(main.run_final_generation(ids['task_id'], group, image_ids))
+    assert [len(call[0]['shots']) for call in calls] == [3, 2]
+    assert [len(call[1]['images']) for call in calls] == [16, 15]
+    assert len(images) == 5 and all(len(p['imageInputs']) == 14 for p in images)
+    for inputs, kwargs in calls:
+        for shot in inputs['shots']:
+            assert [r['index'] for r in shot['references']] == list(range(1, 15))
+            assert max(r['visionImageIndex'] for r in shot['references']) <= len(kwargs['images'])
+    attempt = main.read_final_preparation(group)['attemptId']
+    with get_db() as db:
+        row = db.execute('SELECT * FROM generation_attempts WHERE id=?', (attempt,)).fetchone()
+    assert len(loads(row['request_snapshot_json'])['batchRequests']) == 2
+    assert len(loads(row['response_snapshot_json'])['shots']) == 5
+    response = client.post(f'/api/generation-result-images-new/{image_ids[0]}/retry')
+    assert response.status_code == 200
+    active = response.json()['item']['resultSet']['images'][0]['activeAttemptId']
+    asyncio.run(main.run_final_generation(ids['task_id'], group, [image_ids[0]], {image_ids[0]: active}))
+    assert len(calls) == 2
+    assert images[-1]['imageInputs'] == images[0]['imageInputs']
+    assert images[-1]['prompt'] == images[0]['prompt']
+
+
+@pytest.mark.parametrize('interrupt', ['failure', 'cancel'])
+def test_optimizer_batch_progress_survives_failure_or_cancel(client, monkeypatch, interrupt):
+    monkeypatch.setattr(main, 'build_direct_final_image_inputs', fourteen_inputs)
+    ids, group, image_ids = create_run(client)
+    calls = []
+    async def optimize(prompt, **kwargs):
+        shots = loads(prompt)['shots']
+        calls.append(shots)
+        if interrupt == 'failure' and len(calls) == 2:
+            raise RuntimeError('second batch unavailable')
+        if interrupt == 'cancel':
+            with get_db() as db:
+                main.cancel_running_task_attempts(db, ids['task_id'], now_iso())
+                db.execute("UPDATE generation_tasks SET status='CANCELLED' WHERE id=?", (ids['task_id'],))
+                db.execute("UPDATE generation_result_sets SET status='CANCELLED' WHERE id=?", (group,))
+                db.execute("UPDATE generation_result_images_new SET status='CANCELLED' WHERE result_set_id=?", (group,))
+        return dumps({'shots': [{'shotId': shot['shotId'], 'optimizedText': 'saved first batch'} for shot in shots]})
+    monkeypatch.setattr(main, 'generate_gemini_json_text', optimize)
+    asyncio.run(main.run_final_generation(ids['task_id'], group, image_ids))
+    assert len(calls) == (2 if interrupt == 'failure' else 1)
+    assert len(main.read_final_preparation(group)['packages']) == 3
+    pending = main.continue_active_final_result_set(ids['task_id'], group, ids['styling_id'], ids['preview_id'])
+    resumed, images = mock_success(monkeypatch)
+    asyncio.run(main.run_final_generation(ids['task_id'], group, pending))
+    assert len(resumed) == 1 and len(resumed[0][0]['shots']) == 2
+    assert len(images) == 5
+    assert all(images[i]['prompt'] == 'saved first batch' for i in range(3))
+
+
+def test_optimizer_keeps_different_crops_distinct_and_reads_cropped_pixels(monkeypatch):
+    from io import BytesIO
+    from PIL import Image
+    output = BytesIO()
+    Image.new('RGB', (100, 200), 'red').save(output, 'PNG')
+    monkeypatch.setattr(main, 'reference_source_bytes', lambda item: (output.getvalue(), 'image/png'))
+    monkeypatch.setattr(main, 'vision_reference_input', REAL_VISION_REFERENCE_INPUT)
+    packages = {str(i): {'prompt': 'pose', 'promptRuntime': {'shot_index': str(i)}, 'imageInputs': [
+        {'role': 'shot_pose', 'objectKey': 'same.png', 'providerCrop': {'kind': 'keep_top_ratio', 'ratio': ratio}},
+    ]} for i, ratio in enumerate([0.45, 0.78], 1)}
+    inputs = optimizer_input(packages)
+    images = main.optimizer_visual_inputs(packages, inputs)
+    assert [Image.open(BytesIO(x['data'])).size for x in images] == [(100, 90), (100, 156)]
