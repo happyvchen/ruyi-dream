@@ -60,9 +60,10 @@ export function ImageAssetCard({
       {(onReplace || onDelete) && (
         <div className="thumb-actions">
           {onReplace && (
-            <label className={disabled ? 'is-disabled' : ''} title="替换图片" aria-label={`替换 ${title}`}>
+            <label className={disabled ? 'is-disabled' : ''} title="替换图片">
               <RefreshCw size={14} />
               <input
+                aria-label={`替换 ${title}`}
                 disabled={disabled}
                 type="file"
                 accept={accept}
@@ -101,13 +102,14 @@ export function ImageUploadPlaceholder({
   onFiles: (files: File[]) => void
 }) {
   return (
-    <label className={`saved-image-card image-upload-placeholder ${disabled ? 'is-disabled' : ''}`} aria-label={label} title={label}>
+    <label className={`saved-image-card image-upload-placeholder ${disabled ? 'is-disabled' : ''}`} title={label}>
       <span className="image-upload-placeholder-content">
         <ImagePlus size={28} />
         <strong>{label}</strong>
         {typeof remaining === 'number' && <small>还可添加 {remaining} 张</small>}
       </span>
       <input
+        aria-label={label}
         type="file"
         accept={accept}
         multiple={multiple}

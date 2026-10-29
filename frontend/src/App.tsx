@@ -1,7 +1,7 @@
 import { pollVisible } from './lib/polling'
 import { MediaImage } from './components/MediaImage'
 import { TransientNotice } from './components/TransientNotice'
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, Dispatch, DragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode, SetStateAction, UIEvent } from 'react'
 import {
@@ -3882,6 +3882,49 @@ function mergedFacetOptions(options: FacetOption[] | undefined, selected: string
   return Array.from(byValue.values())
 }
 
+function useModalFocus<T extends HTMLElement>(onClose: () => void) {
+  const ref = useRef<T>(null)
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
+  useEffect(() => {
+    const dialog = ref.current
+    if (!dialog) return
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    dialog.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      // A nested image inspector or confirmation owns focus until it closes.
+      const dialogs = document.querySelectorAll('[role="dialog"][aria-modal="true"]')
+      if (dialogs[dialogs.length - 1] !== dialog) return
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        closeRef.current()
+      }
+      if (event.key !== 'Tab') return
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])'))
+        .filter((element) => !element.closest('[hidden], [inert]') && getComputedStyle(element).display !== 'none' && getComputedStyle(element).visibility !== 'hidden')
+      const first = focusable[0]
+      const last = focusable.at(-1)
+      if (!first || !last) {
+        event.preventDefault()
+        dialog.focus()
+      } else if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === dialog)) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    dialog.addEventListener('keydown', onKeyDown)
+    return () => {
+      dialog.removeEventListener('keydown', onKeyDown)
+      if (previous?.isConnected) previous.focus()
+    }
+  }, [])
+  return ref
+}
+
 function useOutsideClose(open: boolean, ref: { current: HTMLElement | null }, onClose: () => void) {
   useEffect(() => {
     if (!open) return
@@ -7652,12 +7695,13 @@ function FinalImageDownloadDialog({ precheck, onClose, onDownload }: {
   onClose: () => void
   onDownload: (ids: number[]) => void
 }) {
+  const dialogRef = useModalFocus<HTMLDivElement>(onClose)
   const incompleteItems = precheck.items.filter((item) => item.downloadableCount === 0 || item.issues.length > 0)
   const hasDownloadable = precheck.downloadableTaskIds.length > 0
   const hasComplete = precheck.completeTaskIds.length > 0
   return createPortal(
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <div className="confirm-modal" role="dialog" aria-modal="true" aria-label="批量下载成片" onClick={(event) => event.stopPropagation()}>
+      <div ref={dialogRef} tabIndex={-1} className="confirm-modal" role="dialog" aria-modal="true" aria-label="批量下载成片" onClick={(event) => event.stopPropagation()}>
         <div className="confirm-head">
           <h2>批量下载成片</h2>
           <button type="button" className="ghost-icon" onClick={onClose} title="关闭"><X size={18} /></button>
@@ -8017,13 +8061,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
     })
   }, [item.id, item.status])
 
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !viewer && !document.querySelector('[role="dialog"][aria-modal="true"]')) onClose()
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [onClose, viewer])
+  const drawerRef = useModalFocus<HTMLElement>(onClose)
 
   function move(from: number, to: number) {
     if (to < 0 || to >= working.length) return
@@ -8052,7 +8090,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
 
   return (
     <div className="drawer-backdrop" onClick={onClose}>
-      <aside className="detail-drawer" onClick={(event) => event.stopPropagation()}>
+      <aside ref={drawerRef} tabIndex={-1} className="detail-drawer" role="dialog" aria-modal="true" aria-label="搭配服装详情" onClick={(event) => event.stopPropagation()}>
         <div className="drawer-head">
           <div>
             <h2>{item.code}</h2>
@@ -8984,6 +9022,7 @@ function RecordImagePreview({ task }: { task: GenerationTask }) {
 }
 
 export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClose: () => void }) {
+  const dialogRef = useModalFocus<HTMLDivElement>(onClose)
   const [items] = useState<LightboxImageItem[]>(() => image.items?.length ? image.items : [image])
   const [index, setIndex] = useState(() => image.initialIndex ?? 0)
   const [original, setOriginal] = useState(false)
@@ -9022,7 +9061,6 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
   }
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
       if (event.key === '+' || event.key === '=') adjustZoom(1)
       if (event.key === '-') adjustZoom(-1)
       if (event.key === '0') setZoom('fit')
@@ -9044,7 +9082,7 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
 
 
   return createPortal(
-    <div className="lightbox" role="dialog" aria-modal="true" aria-label="图片检查器" onClick={onClose}>
+    <div ref={dialogRef} tabIndex={-1} className="lightbox" role="dialog" aria-modal="true" aria-label="图片检查器" onClick={onClose}>
       <div className="lightbox-chrome" onClick={(event) => event.stopPropagation()}>
         <div className="lightbox-head">
           <div className="inspector-title">
@@ -9187,7 +9225,7 @@ function SearchBox({
     if (open) setDraft(value)
   }, [open, value])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return
     const updatePanelPosition = () => {
       const rect = rootRef.current?.getBoundingClientRect()
@@ -9198,11 +9236,11 @@ function SearchBox({
       const availableBelow = window.innerHeight - rect.bottom - 20
       const availableAbove = rect.top - 20
       const placeAbove = availableBelow < 320 && availableAbove > availableBelow
-      const maxHeight = Math.max(260, Math.min(420, (placeAbove ? availableAbove : availableBelow) - 8))
+      const maxHeight = Math.min(window.innerHeight - 24, Math.max(260, Math.min(420, (placeAbove ? availableAbove : availableBelow) - 8)))
       const top = placeAbove
         ? Math.max(12, rect.top - maxHeight - 8)
         : Math.min(rect.bottom + 8, window.innerHeight - maxHeight - 12)
-      setPanelStyle({ left, top, width, maxHeight })
+      setPanelStyle({ left, top: Math.max(12, top), width, maxHeight })
     }
     updatePanelPosition()
     window.addEventListener('resize', updatePanelPosition)
@@ -9826,6 +9864,7 @@ function PoseLibraryPage({ active }: { active: boolean }) {
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const [showImport, setShowImport] = useState(false)
   const [drafts, setDrafts] = useState<PoseImportItem[]>([])
+  const [importNotice, setImportNotice] = useState('')
   const [busy, setBusy] = useState(false)
   const [manage, setManage] = useState<Pose[]>([])
   const [impact, setImpact] = useState<Awaited<ReturnType<typeof api.poseDeleteImpact>> | null>(null)
@@ -9880,7 +9919,7 @@ function PoseLibraryPage({ active }: { active: boolean }) {
   }
   function addFiles(files: File[]) {
     const images = files.filter(isSupportedImageFile)
-    setError(images.length < files.length ? `已忽略 ${files.length - images.length} 个不支持的文件。` : '')
+    setImportNotice(images.length < files.length ? `已忽略 ${files.length - images.length} 个不支持的文件。` : '')
     const batchId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
     setDrafts((current) => [...current, ...images.map((file, index) => ({
       id: `${batchId}-${index}`, code: file.name.replace(/\.[^.]+$/, '').trim().slice(0, 80) || '未命名姿势', files: [file],
@@ -9890,7 +9929,7 @@ function PoseLibraryPage({ active }: { active: boolean }) {
   function updateDraft(id: string, patch: Partial<PoseImportItem>) { setDrafts((current) => current.map((item) => item.id === id ? { ...item, ...patch } : item)) }
   async function importPoses() {
     if (busy) return
-    setBusy(true); setError('')
+    setBusy(true); setError(''); setImportNotice('')
     const saved: { id: number; draftId: string }[] = []
     try {
       for (const item of drafts) {
@@ -9930,6 +9969,7 @@ function PoseLibraryPage({ active }: { active: boolean }) {
         <Images size={22} /><strong>拖入图片或文件夹</strong><span>每张图片独立成为一个姿势，支持批量选择图片或文件夹</span>
         <div className="import-actions"><label className="management-action"><ImagePlus size={16} />选择图片<input type="file" accept={SUPPORTED_IMAGE_ACCEPT} multiple disabled={busy} onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.target.value = '' }} /></label><label className="management-action"><FolderOpen size={16} />选择文件夹<input type="file" {...{ webkitdirectory: '' }} multiple disabled={busy} onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.target.value = '' }} /></label></div>
       </div>
+      {importNotice && <div className="import-notice is-warning" role="status">{importNotice}</div>}
       {!!drafts.length && <div className="batch-list">{drafts.map((item) => <PoseImportDraft key={item.id} item={item} disabled={busy || !!item.savedId} removable={!busy} onChange={(patch) => updateDraft(item.id, patch)} onRemove={() => setDrafts((current) => current.filter((draft) => draft.id !== item.id))} />)}</div>}
       {!!drafts.length && <div className="import-footer-actions"><button className="management-action" disabled={busy} onClick={() => setShowImport(false)}><ChevronLeft size={16} />返回姿势库</button><button className="management-action" disabled={busy || !drafts.some((item) => item.state !== '已提交识别' && item.code.trim() && item.files.length === 1)} onClick={() => void importPoses()}>{busy ? <Loader2 className="spin" size={16} /> : <Upload size={16} />}导入并识别</button></div>}
     </section></div> : <section className="panel library-panel">
@@ -10022,22 +10062,10 @@ function PoseDetailPanel({ item, busy, onClose, onOpen, onRename, onReplace, onR
   item: Pose; busy: boolean; onClose: () => void; onOpen: (asset: MediaAsset) => void; onRename: (name: string) => void; onReplace: (file: File) => void; onRecognize: () => void; onManage: () => void
 }) {
   const [name, setName] = useState(item.name)
-  const panel = useRef<HTMLElement>(null)
+  const panel = useModalFocus<HTMLElement>(onClose)
   useEffect(() => setName(item.name), [item.id, item.name])
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null
-    panel.current?.focus()
-    return () => previous?.focus()
-  }, [])
   const disabled = busy || !!item.archivedAt || item.status === 'TAGGING_RUNNING'
-  return createPortal(<div className="drawer-backdrop" onClick={(event) => { if (event.target === event.currentTarget) onClose() }}><aside className="detail-drawer" role="dialog" aria-modal="true" aria-label="姿势详情" tabIndex={-1} ref={panel} onKeyDown={(event) => {
-    if (event.key === 'Escape') { event.stopPropagation(); onClose() }
-    if (event.key !== 'Tab') return
-    const focusable = Array.from(panel.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), a[href], summary, [tabindex="0"]') ?? [])
-    const first = focusable[0], last = focusable[focusable.length - 1]
-    if (event.shiftKey && (document.activeElement === first || document.activeElement === panel.current)) { event.preventDefault(); last?.focus() }
-    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
-  }}>
+  return createPortal(<div className="drawer-backdrop" onClick={(event) => { if (event.target === event.currentTarget) onClose() }}><aside className="detail-drawer" role="dialog" aria-modal="true" aria-label="姿势详情" tabIndex={-1} ref={panel}>
     <div className="drawer-head"><div><h2>{item.name}</h2><span className={`status ${item.status.toLowerCase()}`}>{item.archivedAt ? '已归档' : poseStatusText(item.status)}</span></div><button className="management-action icon-button" aria-label="关闭姿势详情" onClick={onClose}><X size={16} /></button></div>
     <div className="drawer-section">
       <div className="section-head"><strong>基础信息</strong></div>

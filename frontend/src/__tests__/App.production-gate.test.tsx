@@ -437,6 +437,25 @@ describe('task status coordination', () => {
 })
 
 describe('preview-first inspector', () => {
+  it('keeps keyboard focus inside the inspector and restores the trigger on close', async () => {
+    const trigger = document.createElement('button')
+    document.body.appendChild(trigger)
+    trigger.focus()
+    const onClose = vi.fn()
+    const { unmount } = render(<ImageLightbox image={assetLightboxImage(task.images[0].asset)} onClose={onClose} />)
+    const dialog = screen.getByRole('dialog', { name: '图片检查器' })
+    expect(dialog).toHaveFocus()
+    await userEvent.tab({ shift: true })
+    expect(dialog.contains(document.activeElement)).toBe(true)
+    await userEvent.tab()
+    expect(within(dialog).getByTitle('缩小')).toHaveFocus()
+    await userEvent.keyboard('{Escape}')
+    expect(onClose).toHaveBeenCalledTimes(1)
+    unmount()
+    expect(trigger).toHaveFocus()
+    trigger.remove()
+  })
+
   it('loads only the current preview and switches resource on explicit original view', () => {
     const asset = task.images[0].asset
     const second = { ...asset, id: 102, previewUrl: '/second-preview.jpg', originalUrl: '/second-original.jpg' }
@@ -2851,6 +2870,27 @@ describe('pose library and the fourth studio stage', () => {
     expect(apiMock.createPose).toHaveBeenCalledTimes(1)
     expect(apiMock.recognizePose).toHaveBeenCalledTimes(2)
   })
+  it('keeps ignored-file feedback in the import panel when the pose list finishes loading', async () => {
+    const pending = deferred<typeof emptyPage>()
+    apiMock.listPoses.mockReturnValue(pending.promise)
+    window.history.replaceState(null, '', '/poses')
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: '导入姿势' }))
+    await waitFor(() => expect(apiMock.listPoses).toHaveBeenCalled())
+    fireEvent.change(screen.getByLabelText('选择图片'), { target: { files: [
+      new File(['image'], 'pose.jpg', { type: 'image/jpeg' }),
+      new File(['ignored'], '说明.txt', { type: 'text/plain' }),
+    ] } })
+    await act(async () => pending.resolve(emptyPage))
+    const notice = screen.getByText('已忽略 1 个不支持的文件。')
+    expect(notice).toHaveAttribute('role', 'status')
+    expect(notice.closest('.import-panel')).not.toBeNull()
+    expect(screen.getAllByRole('textbox', { name: '姿势名称' })).toHaveLength(1)
+    expect(screen.getByRole('button', { name: '导入并识别' })).toBeEnabled()
+    expect(apiMock.createPose).not.toHaveBeenCalled()
+    expect(apiMock.recognizePose).not.toHaveBeenCalled()
+  })
+
   it.each(['选择图片', '选择文件夹'])('imports each image as a separate pose using %s', async (picker) => {
     apiMock.createPose.mockResolvedValue({ item: pose })
     apiMock.recognizePose.mockResolvedValue({ item: { ...pose, status: 'TAGGING_RUNNING' } })
