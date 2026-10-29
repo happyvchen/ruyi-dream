@@ -1970,6 +1970,9 @@ def migration_collection_revisions(db: sqlite3.Connection) -> None:
         for table in tables:
             columns = [row[1] for row in db.execute(f"PRAGMA table_info({table})")
                        if row[1] not in {"updated_at", "lease_expires_at", "lease_until"}]
+            # Legacy repair callers may provide only a subset of business tables.
+            if not columns:
+                continue
             changed = " OR ".join(f'NEW."{column}" IS NOT OLD."{column}"' for column in columns)
             for event in ("INSERT", "UPDATE", "DELETE"):
                 condition = f" WHEN {changed}" if event == "UPDATE" else ""
@@ -1978,9 +1981,15 @@ def migration_collection_revisions(db: sqlite3.Connection) -> None:
                     UPDATE collection_revisions SET revision = revision + 1 WHERE scope = '{scope}';
                     END""")
     # Derived media readiness also changes visible cards; unrelated new assets do not.
+    media_columns = {row[1] for row in db.execute("PRAGMA table_info(media_assets)")}
+    if not media_columns:
+        return
     for event in ("UPDATE", "DELETE"):
         condition = " WHEN " + " OR ".join(f"NEW.{column} IS NOT OLD.{column}" for column in
-            ("thumb_key", "preview_key", "status", "deleted_at", "original_filename", "width", "height", "size_bytes")) if event == "UPDATE" else ""
+            ("thumb_key", "preview_key", "status", "deleted_at", "original_filename", "width", "height", "size_bytes")
+            if column in media_columns) if event == "UPDATE" else ""
+        if condition == " WHEN ":
+            continue
         db.execute(f"""CREATE TRIGGER IF NOT EXISTS collection_media_{event.lower()}
             AFTER {event} ON media_assets{condition} BEGIN
             UPDATE collection_revisions SET revision = revision + 1;
