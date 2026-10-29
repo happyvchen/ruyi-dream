@@ -102,6 +102,8 @@ GENERATION_STATUS_RETRY_LIMIT=15      # 状态查询连续瞬时失败重试次�
 
 ### 2.2 目录权限(容器均以非 root 运行,跳过必报 Permission denied)
 
+发布包在 `umask 077` 下解压后，源码可能只有所有者可读；Docker `COPY` 会保留这些权限。后端 Dockerfile 显式开放镜像内程序、Prompt 模板和维护脚本的读取/目录遍历权限，前端显式将 Nginx 配置设置为 `0644`。不要通过递归放宽生产 `.env` 或数据目录权限解决代码导入失败。上线前须以镜像默认非 root 用户验证 `from app.db import init_db` 能导入，以及前端 `nginx -t` 通过；使用 root 做数据库副本演练不能替代这些检查。
+
 ```bash
 # RustFS 官方镜像 UID 10001
 mkdir -p deployment/rustfs/{data,config,certs,logs}

@@ -25,6 +25,9 @@ RUN groupadd --system app \
   && mkdir -p /app/data/logs \
   && chown -R app:app /app/data
 
+# Release archives may be extracted with umask 077. COPY preserves those modes.
+RUN chmod -R a+rX /app/app /app/prompt_templates /app/scripts
+
 EXPOSE 8000
 
 USER app
