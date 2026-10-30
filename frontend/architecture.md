@@ -137,7 +137,7 @@ docker compose up -d --build frontend
 - `src/api.ts`：GET 接受 `AbortSignal`；页面离开只取消页面级只读请求，解析 JSON 后再次检查取消状态和 URL。应用级初始化跨页面继续，各项独立写回；退出登录、角色变化或卸载时由应用 signal 取消。初始化发起后若已切页，不再执行旧路由恢复。列表筛选与详情选择还有资源 token，阻止旧响应覆盖。写接口、PUT 和上传确认不随页面取消。
 - `src/lib/uploadQueue.ts`：全标签页共享 PUT 队列，默认 2 路；相同 object key 合并在途 PUT，相同上传 session 合并执行；网络/429/5xx 最多重试 2 次，1/2 秒退避并加抖动。UI 区分等待上传、上传中、保存处理及业务终态。
 - `src/components/MediaImage.tsx`：IntersectionObserver 零预取边距，lazy + async + low priority。所有可见图片自动加载，不设置依赖点击/滚动恢复的累计配额；离屏图片保持本地透明占位，进入可视区后加载且不因再次离屏清空 src。换图独立重置可见性与失败状态。检查器主图单独加载当前 preview，没有 original 预取。
-- 列表和卡片统一 thumb；检查器先 preview，“1:1 原图”显式更换 src。换图恢复 preview；派生图缺失显示“预览暂不可用”，仍允许用户显式打开原图。下载始终指向 original/download。
+- 列表和卡片统一 thumb；检查器先 preview，“1:1 原图”与缩放操作显式更换 src 为 original。缩放等待原图加载和真实尺寸，从当前可见大小连续调整；待加载缩放在切图或适应窗口时取消。换图恢复 preview；派生图缺失显示“预览暂不可用”，仍允许用户显式打开原图。下载始终指向 original/download。
 - 任务列表 summary 仅有 cover thumb；五图进度使用 `progress.completed/total`，打开任务再获取成片详情。
 - 主推款单次/批量导入完成仅在原导入组件仍挂载、导航代次与 URL 均未变化时切换当前任务；离开后继续保存，不能覆盖当前页面或 URL。
 - 上传配置 `UPLOAD_CONCURRENCY=1..3`（默认 2）经 Vite/镜像构建注入；修改后需重建前端。不要再增加调用点自己的 PUT 并发池。
@@ -147,7 +147,7 @@ docker compose up -d --build frontend
 - `MediaImage` 在原有可视区加载策略内维护每个 source 的加载/成功/失败状态，统一稳定图框、占位与同 URL 手动重试。`onOpen` 提供独立的查看覆盖按钮，重试按钮与其同级，避免按钮嵌套；导航按钮内的装饰缩略图设置 `retryable={false}`。
 - `ImageAssetCard`、`AssetThumb`、成片网格、记录图片与模特封面复用该状态，不再在父组件用失败标记卸载图片，保证重试入口持续可用。加载/失败状态只影响图片展示，不改变业务状态。
 - `LibraryPage`、生成记录页复用 `ListLoadFeedback` / `ListSkeleton`，首次显示静态骨架，刷新保留旧内容；失败提示按是否仍有可见条目区分。手动重试沿用现有 GET、取消 signal 和资源 token，不引入新请求缓存。
-- `ImageLightbox` 内的 `LightboxPicture` 按当前图片身份隔离状态。预览加载时用本图 thumb 过渡，原图加载时保留本图已成功加载的 preview，切换图片后重置；资源重试通过重新挂载同 URL 的 img 完成。
+- `ImageLightbox` 内的 `LightboxPicture` 按当前图片身份隔离状态。预览加载时用本图 thumb 过渡，原图加载时保留本图已成功加载的 preview，切换图片后重置；资源重试通过重新挂载同 URL 的 img 完成。主推款、搭配服装详情和本地导入清单通过 `useDraftImageViewer` 按当前顺序组合已保存素材、待替换与待新增文件；本地预览 URL 在关闭或卸载时释放。
 - 此轮不调整首屏优先级、零预取边距、初始化恢复时序或轮询策略，不新增依赖；具体体验与验收以 `../design/03_ux_guide/user_uiux.md` 第 10 节为准。
 
 姿势库采用与搭配服装库相同的搜索、筛选、列表面板、卡片、分页、导入清单和详情抽屉组件/样式。数据单元为一图一姿势，批量图片及文件夹按图片逐项入库；详情使用单图替换接口，替换不自动调用 AI。

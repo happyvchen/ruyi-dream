@@ -2014,7 +2014,8 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
   const [draftImages, setDraftImages] = useState<HeroDraftImage[]>(() => (task.images ?? []).map((image) => ({ id: image.id, asset: image.asset })))
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [pendingDimensions, setPendingDimensions] = useState<Record<string, { width: number; height: number }>>({})
-  const [viewer, setViewer] = useState<LightboxImage | null>(null)
+  const { viewer, openGallery, closeViewer } = useDraftImageViewer()
+  const gallery = [...draftImages.map((image) => image.replacement ?? image.asset), ...pendingFiles]
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const imageCount = draftImages.length + pendingFiles.length
   const imageLimit = task.status === 'DRAFT' ? HERO_PRODUCT_MAX_IMAGES : HERO_PRODUCT_SELECTED_IMAGES
@@ -2110,7 +2111,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
             image={image}
             draggable={draftImages.length > 1}
             canRemove={draftImages.length > 1}
-            onOpen={setViewer}
+            onOpen={() => openGallery(gallery, index)}
             onDragStart={() => setDragIndex(index)}
             onDragOver={(event) => event.preventDefault()}
             onDrop={() => {
@@ -2127,7 +2128,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
             file={file}
             dimensions={pendingDimensions[fileKey(file)]}
             onDimensions={(value) => setPendingDimensions((current) => ({ ...current, [fileKey(file)]: value }))}
-            onOpen={setViewer}
+            onOpen={() => openGallery(gallery, draftImages.length + index)}
             badge="待新增"
             onReplace={(replacement) => setPendingFiles((current) => current.map((item, itemIndex) => itemIndex === index ? replacement : item))}
             onDelete={() => setPendingFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))}
@@ -2147,7 +2148,7 @@ function HeroDraftEditor({ task, setTask, run }: { task: GenerationTask; setTask
         <button className="management-action" disabled={!hasPendingDraft || imageCount < 1} onClick={() => void confirmDraftChanges()}><Check size={16} />确认修改</button>
         <button className="management-action" disabled={!hasPendingDraft} onClick={() => resetDraft()}><RotateCcw size={16} />放弃修改</button>
       </div>
-      {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
+      {viewer && <ImageLightbox image={viewer} onClose={closeViewer} />}
     </div>
   )
 }
@@ -2156,7 +2157,7 @@ function HeroDraftImageCard({ image, draggable, canRemove, onOpen, onDragStart, 
   image: HeroDraftImage
   draggable: boolean
   canRemove: boolean
-  onOpen: (image: LightboxImage) => void
+  onOpen: () => void
   onDragStart: () => void
   onDragOver: (event: DragEvent<HTMLDivElement>) => void
   onDrop: () => void
@@ -2176,19 +2177,12 @@ function HeroDraftImageCard({ image, draggable, canRemove, onOpen, onDragStart, 
   const assetSrc = assetThumbSrc(image.asset)
   const filename = image.replacement?.name ?? image.asset.filename
   const meta = image.replacement ? fileMeta(image.replacement) : assetMeta(image.asset)
-  const openImage = () => {
-    if (image.replacement && replacementUrl) {
-      onOpen(fileLightboxImage(image.replacement, replacementUrl))
-      return
-    }
-    onOpen(assetLightboxImage(image.asset))
-  }
   return <ImageAssetCard
     thumbnailSrc={replacementUrl || mediaUrl(assetSrc)}
     title={filename}
     meta={meta}
     badge={image.replacement ? '待替换' : undefined}
-    onOpen={openImage}
+    onOpen={onOpen}
     accept={SUPPORTED_IMAGE_ACCEPT}
     onReplace={onReplace}
     onDelete={onRemove}
@@ -6068,7 +6062,7 @@ function ImportBatchCard({ batch, onCode, onFiles, onRemove }: {
 
 function FileThumbList({ files, onChange, limit, disabled = false }: { files: File[]; onChange: (files: File[]) => void; limit?: number; disabled?: boolean }) {
   const [dragIndex, setDragIndex] = useState<number | null>(null)
-  const [viewer, setViewer] = useState<LightboxImage | null>(null)
+  const { viewer, openGallery, closeViewer } = useDraftImageViewer()
   const [dimensions, setDimensions] = useState<Record<string, { width: number; height: number }>>({})
   function move(from: number, to: number) {
     if (disabled) return
@@ -6088,7 +6082,7 @@ function FileThumbList({ files, onChange, limit, disabled = false }: { files: Fi
             file={file}
             dimensions={dimensions[fileKey(file)]}
             onDimensions={(value) => setDimensions((current) => ({ ...current, [fileKey(file)]: value }))}
-            onOpen={setViewer}
+            onOpen={() => openGallery(files, index)}
             badge={overLimit ? '超出' : undefined}
             disabled={disabled}
             draggable={!disabled}
@@ -6116,7 +6110,7 @@ function FileThumbList({ files, onChange, limit, disabled = false }: { files: Fi
           onFiles={(added) => onChange([...files, ...added])}
         />
       )}
-      {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
+      {viewer && <ImageLightbox image={viewer} onClose={closeViewer} />}
     </div>
   )
 }
@@ -6125,7 +6119,7 @@ function LocalFileImageCard({ file, dimensions, onDimensions, onOpen, badge, dis
   file: File
   dimensions?: { width: number; height: number }
   onDimensions: (dimensions: { width: number; height: number }) => void
-  onOpen: (image: LightboxImage) => void
+  onOpen: () => void
   badge?: string
   disabled?: boolean
   draggable?: boolean
@@ -6141,7 +6135,7 @@ function LocalFileImageCard({ file, dimensions, onDimensions, onOpen, badge, dis
     title={file.name}
     meta={fileMeta(file, dimensions)}
     badge={badge}
-    onOpen={() => onOpen(fileLightboxImage(file, url, dimensions))}
+    onOpen={onOpen}
     onImageLoad={onDimensions}
     accept={SUPPORTED_IMAGE_ACCEPT}
     disabled={disabled}
@@ -8056,7 +8050,7 @@ function GarmentCard({ item, onTag, onStop, tagLabel = '识别标签', onOpen, o
         </label>
       )}
       <div className="garment-cover">
-        <AssetThumb asset={item.images?.[0]?.asset ?? item.coverAsset ?? (item.coverUrl ? { id: item.id, objectKey: '', filename: item.code, mimeType: '', thumbUrl: item.coverUrl } : null)} large />
+        <AssetThumb asset={item.images?.[0]?.asset ?? item.coverAsset ?? (item.coverUrl ? { id: item.id, objectKey: '', filename: item.code, mimeType: '', thumbUrl: item.coverUrl } : null)} group={item.images?.map((image) => image.asset)} large />
         {tagging && <span className="cover-badge">识别中</span>}
         {item.archivedAt && <span className="cover-badge">{archiveStateText(item.archiveReason)}</span>}
       </div>
@@ -8095,7 +8089,8 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
   const [removedIds, setRemovedIds] = useState<number[]>([])
   const [dirty, setDirty] = useState(false)
   const [dragIndex, setDragIndex] = useState<number | null>(null)
-  const [viewer, setViewer] = useState<LightboxImage | null>(null)
+  const { viewer, openGallery, closeViewer } = useDraftImageViewer()
+  const gallery = [...working.map((image) => replacementFiles[image.id] ?? image.asset), ...pendingFiles]
   const [replacementDimensions, setReplacementDimensions] = useState<Record<number, { width: number; height: number }>>({})
   const tagging = item.status === 'TAGGING_RUNNING'
   const runningTagAttempt = latestRunningTagAttempt(item)
@@ -8214,7 +8209,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
                   file={replacement}
                   dimensions={replacementDimensions[image.id]}
                   onDimensions={(value) => setReplacementDimensions((current) => ({ ...current, [image.id]: value }))}
-                  onOpen={setViewer}
+                  onOpen={() => openGallery(gallery, index)}
                   badge="待替换"
                   {...sharedProps}
                 />
@@ -8224,7 +8219,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
                   thumbnailSrc={mediaUrl(assetThumbSrc(image.asset))}
                   title={image.asset.originalFilename ?? image.asset.filename}
                   meta={assetMeta(image.asset)}
-                  onOpen={() => setViewer(assetLightboxImage(image.asset, working.map((itemImage) => itemImage.asset)))}
+                  onOpen={() => openGallery(gallery, index)}
                   accept={SUPPORTED_IMAGE_ACCEPT}
                   {...sharedProps}
                 />
@@ -8236,7 +8231,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
                 file={file}
                 dimensions={pendingDimensions[fileKey(file)]}
                 onDimensions={(value) => setPendingDimensions((current) => ({ ...current, [fileKey(file)]: value }))}
-                onOpen={setViewer}
+                onOpen={() => openGallery(gallery, working.length + index)}
                 badge="待新增"
                 disabled={tagging}
                 onReplace={(replacement) => setPendingFiles((current) => current.map((itemFile, itemIndex) => itemIndex === index ? replacement : itemFile))}
@@ -8292,7 +8287,7 @@ function GarmentDetailDrawer({ item, run, isAdmin, archiveMutationBusy, onClose,
           <button className="management-action" disabled={archiveMutationBusy || tagging || item.archiveReason === 'deletion_pending'} onClick={onManage}>归档</button>
         </div>
       </aside>
-      {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
+      {viewer && <ImageLightbox image={viewer} onClose={closeViewer} />}
     </div>
   )
 }
@@ -9021,17 +9016,17 @@ function CurrentTaskCard({ task }: { task: GenerationTask }) {
 }
 
 function ThumbGrid({ assets, compact = false }: { assets: MediaAsset[]; compact?: boolean }) {
-  return <div className={`thumb-grid ${compact ? 'compact' : ''}`}>{assets.slice(0, compact ? 4 : 8).map((asset) => <AssetThumb key={asset.id} asset={asset} />)}</div>
+  return <div className={`thumb-grid ${compact ? 'compact' : ''}`}>{assets.slice(0, compact ? 4 : 8).map((asset) => <AssetThumb key={asset.id} asset={asset} group={assets} />)}</div>
 }
 
-function AssetThumb({ asset, large = false, interactive = true }: { asset?: MediaAsset | null; large?: boolean; interactive?: boolean }) {
+function AssetThumb({ asset, group, large = false, interactive = true }: { asset?: MediaAsset | null; group?: MediaAsset[]; large?: boolean; interactive?: boolean }) {
   const [viewer, setViewer] = useState<LightboxImage | null>(null)
   const src = asset ? assetThumbSrc(asset) : ''
   return (
     <>
       <div className={`asset-thumb ${large ? 'large' : ''}`}>
         <MediaImage src={src ? mediaUrl(src) : undefined} alt={asset?.filename ?? '图片'} retryable={interactive}
-          onOpen={asset && interactive ? () => setViewer(assetLightboxImage(asset)) : undefined} />
+          onOpen={asset && interactive ? () => setViewer(assetLightboxImage(asset, group)) : undefined} />
       </div>
       {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
     </>
@@ -9039,7 +9034,7 @@ function AssetThumb({ asset, large = false, interactive = true }: { asset?: Medi
 }
 
 function FinalImageStrip({ images }: { images: { id: number; sortOrder: number; status: string; asset?: MediaAsset | null }[] }) {
-  return <div className="final-strip">{images.map((image) => <AssetThumb key={image.id} asset={image.asset} />)}</div>
+  return <div className="final-strip">{images.map((image) => <AssetThumb key={image.id} asset={image.asset} group={images.flatMap((item) => item.asset ? [item.asset] : [])} />)}</div>
 }
 
 type ResultShot = NonNullable<GenerationTask['resultSet']>['images'][number]
@@ -9125,12 +9120,13 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
   const [naturalSizes, setNaturalSizes] = useState<Record<string, { width: number; height: number }>>({})
   const stageRef = useRef<HTMLDivElement>(null)
   const anchorRef = useRef<{ x: number; y: number; screenX: number; screenY: number } | null>(null)
+  const pendingZoomRef = useRef<{ width: number; factor: number } | null>(null)
   const dragRef = useRef<{ id: number; x: number; y: number; left: number; top: number; moved: boolean } | null>(null)
   const suppressClickRef = useRef(false)
   const [dragging, setDragging] = useState(false)
   const remoteSizes: Record<string, number> = {}
   const current = items[index] ?? items[0]
-  const displaySrc = original ? current.originalSrc ?? current.src : current.src
+  const displaySrc = original ? current.originalSrc || current.src : current.src
   const zoomLabel = zoom === 'fit' ? '适应' : `${Math.round(zoom * 100)}%`
   const canStep = items.length > 1
   const naturalSize = naturalSizes[displaySrc]
@@ -9143,6 +9139,7 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
   }
   const setNext = () => {
     if (!canStep) return
+    pendingZoomRef.current = null
     anchorRef.current = null
     setIndex((value) => (value + 1) % items.length)
     setOriginal(false)
@@ -9150,6 +9147,7 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
   }
   const setPrev = () => {
     if (!canStep) return
+    pendingZoomRef.current = null
     anchorRef.current = null
     setIndex((value) => (value - 1 + items.length) % items.length)
     setOriginal(false)
@@ -9157,7 +9155,7 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
   }
   const rememberAnchor = (point?: { x: number; y: number }) => {
     const stage = stageRef.current
-    const picture = stage?.querySelector<HTMLImageElement>('[data-lightbox-main]')
+    const picture = stage?.querySelector<HTMLImageElement>('.lightbox-fallback') ?? stage?.querySelector<HTMLImageElement>('[data-lightbox-main]')
     if (!stage || !picture) return
     const area = stage.getBoundingClientRect()
     const rect = picture.getBoundingClientRect()
@@ -9170,20 +9168,35 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
       screenX, screenY,
     }
   }
-  const fitToWindow = () => { anchorRef.current = null; setZoom('fit') }
+  const fitToWindow = () => { pendingZoomRef.current = null; anchorRef.current = null; setZoom('fit') }
   const showOriginal = (point?: { x: number; y: number }) => {
+    pendingZoomRef.current = null
     rememberAnchor(point)
     setOriginal(true)
     setZoom(1)
   }
+  const clampZoom = (scale: number, width: number, height: number) => {
+    const stage = stageRef.current
+    const minScale = stage && width && height
+      ? Math.max(0.001, Math.min(0.1, (stage.clientWidth - 32) / width, (stage.clientHeight - 32) / height)) : 0.1
+    return Math.min(4, Math.max(minScale, scale))
+  }
   const adjustZoom = (factor: number, point?: { x: number; y: number }) => {
+    // Wait for original dimensions; multiplying preview pixels would change scale on source swap.
+    const pending = pendingZoomRef.current
+    if (pending) { pending.factor *= factor; return }
     rememberAnchor(point)
     const picture = stageRef.current?.querySelector<HTMLImageElement>('[data-lightbox-main]')
+    const originalSrc = current.originalSrc || current.src
+    if (originalSrc !== displaySrc || !naturalSize) {
+      const visible = stageRef.current?.querySelector<HTMLImageElement>('.lightbox-fallback') ?? picture
+      pendingZoomRef.current = { width: visible?.getBoundingClientRect().width ?? 0, factor }
+      setOriginal(true)
+      return
+    }
+    setOriginal(true)
     const fitScale = picture?.naturalWidth ? picture.getBoundingClientRect().width / picture.naturalWidth : 1
-    const stage = stageRef.current
-    const minScale = stage && picture?.naturalWidth && picture.naturalHeight
-      ? Math.max(0.001, Math.min(0.1, (stage.clientWidth - 32) / picture.naturalWidth, (stage.clientHeight - 32) / picture.naturalHeight)) : 0.1
-    setZoom((value) => Math.min(4, Math.max(minScale, (value === 'fit' ? fitScale : value) * factor)))
+    setZoom((value) => clampZoom((value === 'fit' ? fitScale : value) * factor, naturalSize.width, naturalSize.height))
   }
   useLayoutEffect(() => {
     const stage = stageRef.current
@@ -9328,7 +9341,16 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
           <LightboxPicture key={`${index}:${current.src}:${current.originalSrc}`}
             src={displaySrc} previewSrc={current.src} thumbSrc={current.thumbSrc} original={original}
             title={current.title} zoom={zoom} zoomedStyle={zoomedStyle}
-            onDimensions={(width, height) => setNaturalSizes((value) => ({ ...value, [displaySrc]: { width, height } }))} />
+            onDimensions={(width, height) => {
+              setNaturalSizes((value) => ({ ...value, [displaySrc]: { width, height } }))
+              const pending = pendingZoomRef.current
+              if (!pending || !original || !width || !height) return
+              pendingZoomRef.current = null
+              const stage = stageRef.current
+              const fitScale = stage && stage.clientWidth > 32 && stage.clientHeight > 32
+                ? Math.min(1, (stage.clientWidth - 32) / width, (stage.clientHeight - 32) / height) : 1
+              setZoom(clampZoom((pending.width ? pending.width / width : fitScale) * pending.factor, width, height))
+            }} />
         </div>
       </div>
       <div className="lightbox-footer">
@@ -9342,6 +9364,7 @@ export function ImageLightbox({ image, onClose }: { image: LightboxImage; onClos
           <div className="inspector-strip" aria-label="同组图片" onClick={(event) => event.stopPropagation()}>
             {items.map((item, itemIndex) => (
               <button className={itemIndex === index ? 'active' : ''} key={`${item.title}-${itemIndex}`} onClick={() => {
+                pendingZoomRef.current = null
                 anchorRef.current = null
                 setIndex(itemIndex)
                 setOriginal(false)
@@ -9839,6 +9862,23 @@ function useObjectUrl(file: File) {
   return url
 }
 
+// Keep local files alive for the entire gallery, including pending replacements/additions.
+function useDraftImageViewer() {
+  const [snapshot, setSnapshot] = useState<{ image: LightboxImage; urls: string[] } | null>(null)
+  useEffect(() => () => snapshot?.urls.forEach((url) => URL.revokeObjectURL(url)), [snapshot])
+  function openGallery(sources: (MediaAsset | File)[], initialIndex: number) {
+    const urls: string[] = []
+    const items = sources.map((source) => {
+      if (!(source instanceof File)) return assetLightboxItem(source)
+      const url = URL.createObjectURL(source)
+      urls.push(url)
+      return fileLightboxImage(source, url)
+    })
+    if (items[initialIndex]) setSnapshot({ image: { ...items[initialIndex], items, initialIndex }, urls })
+  }
+  return { viewer: snapshot?.image ?? null, openGallery, closeViewer: () => setSnapshot(null) }
+}
+
 function formatBytes(value?: number | null) {
   if (!value) return '未知大小'
   if (value < 1024) return `${value} B`
@@ -9895,14 +9935,15 @@ function fileLightboxImage(file: File, src: string, dimensions?: { width: number
 }
 
 export function assetLightboxImage(asset: MediaAsset, group?: MediaAsset[]): LightboxImage {
-  const items = group?.map((item) => assetLightboxItem(item))
+  const gallery = group?.length ? (group.some((item) => item.id === asset.id) ? group : [asset, ...group]) : [asset]
+  const items = gallery.map((item) => assetLightboxItem(item))
   const src = mediaUrl(assetPreviewSrc(asset))
   return {
     ...assetLightboxItem(asset),
     src,
     downloadUrl: mediaDownloadUrl(assetOriginalSrc(asset)),
     items,
-    initialIndex: Math.max(0, group?.findIndex((item) => item.id === asset.id) ?? 0),
+    initialIndex: gallery.findIndex((item) => item.id === asset.id),
   }
 }
 
@@ -10276,7 +10317,7 @@ function PoseCard({ item, busy, selected, onSelect, onOpen, onManage, onRecogniz
   const asset = item.images[0]?.asset
   return <article className={`garment-card ${selected ? 'is-selected' : ''} ${tagging ? 'is-tagging' : ''} ${failed ? 'is-failed' : ''} ${item.archivedAt ? 'is-archived' : ''}`} data-select-id={onSelect ? item.id : undefined} data-select-type={onSelect ? 'number' : undefined}>
     {onSelect && <label className="card-select"><BulkCheckbox checked={selected} label={`选择 ${item.name}`} onChange={(_, extend) => onSelect(extend)} /></label>}
-    <div className="garment-cover"><AssetThumb asset={asset} large />{tagging && <span className="cover-badge">识别中</span>}{item.archivedAt && <span className="cover-badge">已归档</span>}</div>
+    <div className="garment-cover"><AssetThumb asset={asset} group={item.images.map((image) => image.asset)} large />{tagging && <span className="cover-badge">识别中</span>}{item.archivedAt && <span className="cover-badge">已归档</span>}</div>
     <div className="garment-card-body">
       <div className="garment-card-head"><TruncatedText as="strong" text={item.name} /><span className={`status ${item.status.toLowerCase()}`} role={tagging ? 'status' : undefined}>{poseStatusText(item.status)}</span></div>
       <p className="garment-card-brief">{tagging ? '正在识别姿势信息，可以离开当前页面。' : failed ? '识别未完成，可重新识别。' : description || tags[0] || '待识别姿势信息'}</p>

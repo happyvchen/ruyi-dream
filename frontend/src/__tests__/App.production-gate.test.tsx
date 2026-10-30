@@ -474,6 +474,110 @@ describe('task status coordination', () => {
 })
 
 describe('preview-first inspector', () => {
+  it.each(['wheel', 'button', 'keyboard'])('loads original before %s zoom and preserves displayed size', (control) => {
+    render(<ImageLightbox image={assetLightboxImage(task.images[0].asset)} onClose={() => undefined} />)
+    const preview = document.querySelector<HTMLImageElement>('[data-lightbox-main]')!
+    Object.defineProperties(preview, { naturalWidth: { value: 1000 }, naturalHeight: { value: 1500 } })
+    preview.getBoundingClientRect = () => ({ width: 500, height: 750, left: 0, top: 0 } as DOMRect)
+    fireEvent.load(preview)
+    const zoomIn = () => {
+      if (control === 'wheel') fireEvent.wheel(document.querySelector('.lightbox-stage')!, { deltaY: -100, ctrlKey: true, clientX: 200, clientY: 300 })
+      else if (control === 'button') fireEvent.click(screen.getByTitle('放大'))
+      else fireEvent.keyDown(screen.getByRole('dialog'), { key: '+' })
+    }
+    zoomIn()
+    zoomIn() // Additional input during the original request must not be lost.
+    expect(screen.getByTitle('适应窗口')).toHaveTextContent('适应')
+    expect(document.querySelector('.lightbox-fallback')).toHaveAttribute('src', '/preview.jpg')
+    const original = document.querySelector<HTMLImageElement>('[data-lightbox-main]')!
+    expect(original).toHaveAttribute('src', '/original.jpg')
+    Object.defineProperties(original, { naturalWidth: { value: 4000 }, naturalHeight: { value: 6000 } })
+    fireEvent.load(original)
+    const factor = control === 'wheel' ? Math.exp(0.4) : 1.25 ** 2
+    expect(parseFloat(original.style.width)).toBeCloseTo(500 * factor)
+    expect(document.querySelector('.lightbox-fallback')).toBeNull()
+  })
+
+  it('retries original loading without enlarging the fallback and cancels queued zoom on navigation', () => {
+    const first = task.images[0].asset
+    const second = { ...first, id: 102, previewUrl: '/second-preview.jpg', originalUrl: '/second-original.jpg' }
+    render(<ImageLightbox image={assetLightboxImage(first, [first, second])} onClose={() => undefined} />)
+    fireEvent.load(document.querySelector('[data-lightbox-main]')!)
+    fireEvent.click(screen.getByTitle('放大'))
+    fireEvent.error(document.querySelector('[data-lightbox-main]')!)
+    expect(screen.getByText('原图暂不可用')).toBeInTheDocument()
+    expect(document.querySelector('.lightbox-fallback')).toHaveClass('is-fit')
+    fireEvent.click(screen.getByRole('button', { name: '重新加载图片' }))
+    const original = document.querySelector('[data-lightbox-main]')!
+    Object.defineProperties(original, { naturalWidth: { value: 4000 }, naturalHeight: { value: 6000 } })
+    fireEvent.load(original)
+    expect(screen.getByTitle('适应窗口')).toHaveTextContent('125%')
+    fireEvent.click(screen.getByTitle('下一张'))
+    fireEvent.click(screen.getByTitle('放大'))
+    fireEvent.click(screen.getByTitle('上一张'))
+    const preview = document.querySelector('[data-lightbox-main]')!
+    Object.defineProperties(preview, { naturalWidth: { value: 1000 }, naturalHeight: { value: 1500 } })
+    fireEvent.load(preview)
+    expect(preview).toHaveAttribute('src', '/preview.jpg')
+    expect(screen.getByTitle('适应窗口')).toHaveTextContent('适应')
+  })
+
+  it.each(['studio', 'library'])('navigates saved, replaced and added images together in %s', async (page) => {
+    let sequence = 0
+    const createUrl = vi.spyOn(URL, 'createObjectURL').mockImplementation(() => `blob:test-${++sequence}`)
+    const revokeUrl = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    const images = [task.images[0], { ...task.images[0], id: 12, asset: { ...task.images[0].asset, id: 102, filename: 'second.jpg', previewUrl: '/second-preview.jpg' } }]
+    if (page === 'studio') {
+      apiMock.getTask.mockResolvedValue({ item: { ...task, images } })
+      window.history.replaceState(null, '', '/studio?task=1')
+    } else {
+      const item = { ...garment, images }
+      apiMock.listStylingGarments.mockResolvedValue({ ...emptyPage, items: [item], total: 1 })
+      apiMock.getStylingGarment.mockResolvedValue({ item })
+      window.history.replaceState(null, '', '/library')
+    }
+    render(<App />)
+    if (page === 'library') await userEvent.click(await screen.findByRole('button', { name: '详情' }))
+    else await userEvent.click(await screen.findByRole('button', { name: '导入主推款' }))
+    await userEvent.upload(await screen.findByLabelText('替换 second.jpg'), new File(['replacement'], 'replacement.jpg', { type: 'image/jpeg' }))
+    await userEvent.upload(screen.getByLabelText(page === 'studio' ? '添加主推款图片' : '添加搭配服装图片'), new File(['added'], 'added.jpg', { type: 'image/jpeg' }))
+    const surface = document.querySelector(page === 'studio' ? '.draft-image-grid' : '.drawer .saved-image-grid') ?? document.querySelector('.saved-image-grid')!
+    await userEvent.click(within(surface as HTMLElement).getByRole('button', { name: 'hero.jpg' }))
+    const dialog = screen.getByRole('dialog', { name: '图片检查器' })
+    expect(within(dialog).getByTitle('下一张')).toBeEnabled()
+    expect(dialog.querySelector('[data-lightbox-main]')).toHaveAttribute('src', '/preview.jpg')
+    fireEvent.click(within(dialog).getByTitle('下一张'))
+    expect(dialog.querySelector('.inspector-title')).toHaveTextContent('replacement.jpg')
+    const replacementUrl = dialog.querySelector('[data-lightbox-main]')!.getAttribute('src')!
+    expect(replacementUrl).toMatch(/^blob:/)
+    fireEvent.keyDown(dialog, { key: 'ArrowRight' })
+    expect(dialog.querySelector('.inspector-title')).toHaveTextContent('added.jpg')
+    const addedUrl = dialog.querySelector('[data-lightbox-main]')!.getAttribute('src')!
+    fireEvent.keyDown(dialog, { key: 'ArrowRight' })
+    expect(dialog.querySelector('.inspector-title')).toHaveTextContent('hero.jpg')
+    fireEvent.click(within(dialog).getByTitle('上一张'))
+    expect(dialog.querySelector('.inspector-title')).toHaveTextContent('3 / 3')
+    fireEvent.click(within(dialog).getByTitle('关闭'))
+    expect(revokeUrl).toHaveBeenCalledWith(replacementUrl)
+    expect(revokeUrl).toHaveBeenCalledWith(addedUrl)
+    expect(createUrl).toHaveBeenCalled()
+  })
+
+  it.each(['studio', 'library'])('opens local import files as a gallery in %s', async (page) => {
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((file) => `blob:${(file as File).name}`)
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    window.history.replaceState(null, '', `/${page}`)
+    render(<App />)
+    if (page === 'library') await userEvent.click(await screen.findByRole('button', { name: '导入搭配服装' }))
+    const picker = (await screen.findByText('选择图片')).querySelector('input')!
+    await userEvent.upload(picker, ['first.jpg', 'second.jpg'].map((name) => new File(['local'], name, { type: 'image/jpeg' })))
+    await userEvent.click(await screen.findByRole('button', { name: 'second.jpg' }))
+    const dialog = screen.getByRole('dialog', { name: '图片检查器' })
+    expect(dialog.querySelector('.inspector-title')).toHaveTextContent('2 / 2')
+    fireEvent.click(within(dialog).getByTitle('下一张'))
+    expect(dialog.querySelector('[data-lightbox-main]')).toHaveAttribute('src', 'blob:first.jpg')
+  })
+
   it('closes from empty viewing space but not from the picture or toolbar', () => {
     const onClose = vi.fn()
     render(<ImageLightbox image={assetLightboxImage(task.images[0].asset)} onClose={onClose} />)
@@ -498,10 +602,15 @@ describe('preview-first inspector', () => {
     const wheel = new WheelEvent('wheel', { deltaY: -100, ctrlKey: true, bubbles: true, cancelable: true })
     fireEvent(stage, wheel)
     expect(wheel.defaultPrevented).toBe(true)
+    expect(screen.getByTitle('适应窗口')).toHaveTextContent('适应')
+    expect(document.querySelector('[data-lightbox-main]')).toHaveAttribute('src', '/original.jpg')
+    const original = document.querySelector('[data-lightbox-main]')!
+    Object.defineProperties(original, { naturalWidth: { value: 2000 }, naturalHeight: { value: 3000 } })
+    fireEvent.load(original)
     expect(screen.getByTitle('适应窗口')).toHaveTextContent('122%')
     fireEvent.wheel(stage, { deltaY: 100, metaKey: true })
     expect(screen.getByTitle('适应窗口')).toHaveTextContent('100%')
-    expect(document.querySelector('img[src="/original.jpg"]')).toBeNull()
+    expect(document.querySelector('[data-lightbox-main]')).toHaveAttribute('src', '/original.jpg')
   })
 
   it('toggles original and fit with double click and resets scroll on navigation', () => {
