@@ -37,7 +37,7 @@ def no_external_calls(monkeypatch):
     monkeypatch.setattr(main, "generate_gemini_json_text", forbidden)
     monkeypatch.setattr(main, "generate_image_asset", forbidden)
     monkeypatch.setattr(main, "snapshot_default_model", lambda: {})
-    monkeypatch.setattr(main, "vision_reference_input", lambda item: {"data": item["objectKey"].encode(), "mime_type": "image/png"})
+    monkeypatch.setattr(main, "vision_reference_input", lambda item: {"data": (item.get("objectKey") or item["filename"]).encode(), "mime_type": "image/png"})
     monkeypatch.setattr(main, "build_direct_final_image_inputs", lambda *args: [
         {"role": role, "objectKey": f"tests/{role}.png"} for role in ("shot_background", "shot_pose", "hero_garment")
     ])
@@ -416,13 +416,13 @@ def fourteen_inputs(_styling, _version, preset):
     ]
 
 
-def test_full_fourteen_reference_group_splits_optimizer_and_preserves_frozen_retries(client, monkeypatch):
+def test_full_fourteen_reference_group_uses_one_pose_grid_and_preserves_frozen_retries(client, monkeypatch):
     monkeypatch.setattr(main, 'build_direct_final_image_inputs', fourteen_inputs)
     ids, group, image_ids = create_run(client)
     calls, images = mock_success(monkeypatch)
     asyncio.run(main.run_final_generation(ids['task_id'], group, image_ids))
-    assert [len(call[0]['shots']) for call in calls] == [3, 2]
-    assert [len(call[1]['images']) for call in calls] == [16, 15]
+    assert [len(call[0]['shots']) for call in calls] == [5]
+    assert [len(call[1]['images']) for call in calls] == [14]
     assert len(images) == 5 and all(len(p['imageInputs']) == 14 for p in images)
     for inputs, kwargs in calls:
         for shot in inputs['shots']:
@@ -431,21 +431,24 @@ def test_full_fourteen_reference_group_splits_optimizer_and_preserves_frozen_ret
     attempt = main.read_final_preparation(group)['attemptId']
     with get_db() as db:
         row = db.execute('SELECT * FROM generation_attempts WHERE id=?', (attempt,)).fetchone()
-    assert len(loads(row['request_snapshot_json'])['batchRequests']) == 2
+    assert len(loads(row['request_snapshot_json'])['batchRequests']) == 1
     assert sum(len(loads(batch['raw_text'])['shots']) for batch in loads(row['response_snapshot_json'])['batchResponses']) == 5
     response = client.post(f'/api/generation-result-images-new/{image_ids[0]}/retry')
     assert response.status_code == 200
     active = response.json()['item']['resultSet']['images'][0]['activeAttemptId']
     asyncio.run(main.run_final_generation(ids['task_id'], group, [image_ids[0]], {image_ids[0]: active}))
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert images[-1]['imageInputs'] == images[0]['imageInputs']
     assert images[-1]['prompt'] == images[0]['prompt']
 
 
 @pytest.mark.parametrize('interrupt', ['failure', 'cancel'])
-def test_optimizer_batch_progress_survives_failure_or_cancel(client, monkeypatch, interrupt):
+def test_legacy_optimizer_batch_progress_survives_failure_or_cancel(client, monkeypatch, interrupt):
     monkeypatch.setattr(main, 'build_direct_final_image_inputs', fourteen_inputs)
     ids, group, image_ids = create_run(client)
+    preparation = main.read_final_preparation(group)
+    preparation.pop('optimizerReferenceLayout')
+    main.save_final_preparation(group, preparation)
     calls = []
     async def optimize(prompt, **kwargs):
         shots = loads(prompt)['shots']

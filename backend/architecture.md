@@ -150,7 +150,7 @@ media/<media-uuid>/_derived/final-cells/original-shot<1..6>.png
 
 模型指令只来自 Prompt 配置。`assembly.tagging_request`、`assembly.styling_request` 通过显式 `{{assembly.*}}` 引用原挑图／打标／选搭正文；渲染器处理占位符、条件和模板引用，不再在调用代码里拼接正文。原配置继续独立维护，新增请求模板展示完整发送结构。格式纠错、单张调整和旧参考板编号映射分别由 `assembly.contract_correction`、`assembly.image_retry`、`assembly.reference_transport` 托管。迁移一次性把旧代码中的结构和原有指令转入这些槽位，已有自定义正文不覆盖，运行时缺配置仍报错，不提供内置 fallback。
 
-成片优化的 system 是 `assembly.final_prompt_optimizer` 原文；user 由 `assembly.final_prompt_optimizer_input` 渲染，变量仅含镜头完整正文、图号映射和附件角色。存储键、资产 ID、URL、文件名和裁切记录留在过程事实，不进入新调用的 user 文本。图片附件仍按原顺序、去重、裁切和分批规则传入；优化正文直接用于生图，provider 不再隐式 trim 正文。
+成片优化的 system 是 `assembly.final_prompt_optimizer` 原文；user 由 `assembly.final_prompt_optimizer_input` 渲染，变量仅含镜头完整正文、图号映射和附件角色。存储键、资产 ID、URL、文件名和裁切记录留在过程事实，不进入新调用的 user 文本。图片附件按冻结的传输版本组装；新结果集使用姿势宫格整组调用，历史版本保持去重、裁切和分批规则；优化正文直接用于生图，provider 不再隐式 trim 正文。
 
 `app/call_facts.py` 对新写入及历史记录应用相同的保守瘦身：可执行镜头包不再复制配置集合和原始模板；结果集仅冻结所选模板及显式依赖，供未完成的渲染继续使用。优化批次只记录一份请求和原始响应，不再额外复制第一批 prompt、最后一批 raw_text 和可完全还原的解析结果。sourcePackages 的正文仅在与批次 sourcePrompt 完全相等时省略，读取历史测试上下文时按批次事实还原。图片来源、运行变量、未知字段、不同或无法解析的原始响应、provider 恢复状态和已发布版本保留。姿势选搭 audit 中的整库配置副本移除，实际姿势选择 plan 中供后续执行的冻结规则保留。
 
@@ -161,3 +161,11 @@ media/<media-uuid>/_derived/final-cells/original-shot<1..6>.png
 `runtime.pose_shots` 使用 `render_pose_shot_requirements`，只读取对应品类成片配置中的「## 机位&景别」。先按当前镜头展开模板条件，再定位唯一标题及其正文（到同级或更高标题结束），然后解析正文占位符。五个镜头都必须有有效条件正文；只有公共引导语、章节缺失、重复或正文占位符缺失均在发起模型调用前失败。完整成片仍使用同一冻结配置，摄影正文不会复制到选姿势输入。
 
 Prompt 列表、保存结果和草稿预览都通过相同章节校验；姿势选搭预览按当前配置与样例/历史事实重建五条要求，历史实际发送独立展示、不回写。历史尝试没有旧运行时字段时，从原选搭及输入版本恢复事实。新调用仅在已有 runtime 中保留所需动态事实，不增设重复配置副本。
+
+## 优化姿势宫格（迁移 091）
+
+新结果集冻结 `optimizerReferenceLayout=pose_grid_v1`。`optimizer_reference_plan` 同时生成实际附件和纯事实映射，预览、审计及发送复用该函数。五个姿势保留各自裁切、补方图策略后合入固定 3×2 板；每镜头最终 `references.index` 不变，`visionImageIndex` 指向姿势板，`cell` 指定镜头号。`imageManifest` 只增加格号、镜头号、布局和空格事实，不注入业务指令。来源元数据留在过程事实。
+
+背景、姿势板、身份单图、身份宫格、主推款、搭配款按首次出现顺序去重。当前满额14张；新版本超16张报错，不拆镜头。优化返回原样交生图，任务包的原始独立姿势输入不替换为参考板。恢复时只整理缺少成功输出的镜头，板中保留原格号，缺席镜头和第六格标 EMPTY。无版本标记的历史准备记录继续旧分批协议；已有成功包、单张重生和已提交 provider 请求均沿用冻结事实。
+
+迁移091仅为非空的当前优化系统规则追加可维护的「优化阶段的姿势宫格与最终图号」章节，保留自定义正文与启用状态，不改历史配置或调用。不创建额外调用、不在运行代码中拼接指令。当前草稿预览/显式测试采用新协议，历史实际发送保留原记录。

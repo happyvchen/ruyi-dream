@@ -44,8 +44,8 @@ from .prompt_render import (
 )
 from .call_facts import compact_package, compact_request, compact_response, compact_preparation, optimizer_source_packages, model_batches, referenced_configs
 from .prompt_optimization import (
-    OPTIMIZER_KEY, optimizer_input, optimizer_mapped_input, text_hash, parse_optimized_prompts,
-    optimizer_reference_identity, optimizer_package_batches,
+    OPTIMIZER_KEY, POSE_GRID_LAYOUT, optimizer_reference_plan, optimizer_input, optimizer_mapped_input, text_hash, parse_optimized_prompts,
+    optimizer_package_batches,
 )
 from .gemini_provider import (
     TOAPIS_MAX_MESSAGE_IMAGES,
@@ -5719,6 +5719,7 @@ def freeze_final_prompt_configuration(category_family: str) -> dict[str, Any]:
     return {
         "mode": "optimized" if enabled else "direct", "status": "PENDING" if enabled else "DIRECT",
         "referenceCanvas": SQUARE_WHITE_CANVAS,
+        "optimizerReferenceLayout": POSE_GRID_LAYOUT,
         "configRows": referenced_configs(rows, [FINAL_IMAGE_PROMPT_CONFIG_KEYS[category_family], OPTIMIZER_KEY, "assembly.final_prompt_optimizer_input"]),
         "packages": {},
     }
@@ -5753,21 +5754,15 @@ def vision_reference_input(item: dict[str, Any]) -> dict[str, Any]:
     return {"data": content, "mime_type": mime or "image/jpeg"}
 
 
-def optimizer_visual_inputs(packages: dict[str, Any], inputs: dict[str, Any]) -> list[dict[str, Any]]:
-    """Keep each final prompt's local numbering while deduplicating vision attachments."""
-    inputs.update(optimizer_mapped_input(packages))
-    return [vision_reference_input(item) for item in optimizer_attachments(packages)]
+def optimizer_visual_inputs(packages: dict[str, Any], inputs: dict[str, Any], layout: str | None = None) -> list[dict[str, Any]]:
+    """Use the same attachment plan for preview, audit and actual image bytes."""
+    mapped, images = optimizer_reference_plan(packages, layout)
+    inputs.update(mapped)
+    return [vision_reference_input(item) for item in images]
 
 
-def optimizer_attachments(packages: dict[str, Any]) -> list[dict[str, Any]]:
-    seen, images = set(), []
-    for package in packages.values():
-        for item in package["imageInputs"]:
-            identity = optimizer_reference_identity(item)
-            if identity not in seen:
-                images.append(item)
-                seen.add(identity)
-    return images
+def optimizer_attachments(packages: dict[str, Any], layout: str | None = None) -> list[dict[str, Any]]:
+    return optimizer_reference_plan(packages, layout)[1]
 
 
 def render_optimizer_user_message(inputs: dict[str, Any], rows: dict[str, Any] | None = None,
@@ -5788,6 +5783,7 @@ async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: lis
         return True
     if final_preparation_cancelled(task_id, result_set_id):
         return False
+    layout = preparation.get("optimizerReferenceLayout")
     packages = preparation.setdefault("packages", {})
     pending: dict[str, Any] = {}
     for image_id in image_ids:
@@ -5819,12 +5815,12 @@ async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: lis
         pending = {key: build_new_final_task_package(task_id, int(key)) for key in pending}
         system_prompt = preparation["configRows"][OPTIMIZER_KEY]["content"]
         request_snapshot = {"promptConfigKey": OPTIMIZER_KEY, "promptConfigKeys": [OPTIMIZER_KEY, "assembly.final_prompt_optimizer_input"], "promptContentHash": text_hash(system_prompt),
-                            "systemInstruction": system_prompt, "sourcePackages": pending,
+                            "systemInstruction": system_prompt, "sourcePackages": pending, "optimizerReferenceLayout": layout,
                             **gemini_request_meta(),
                             "invocation": {"mode": "final_prompt_optimization", "providerCallStarted": False}}
         # 模型调用前保存源文本与系统提示词，供调用记录追溯。
         update_attempt_request_snapshot(attempt_id, request_snapshot)
-        batches = optimizer_package_batches(pending, TOAPIS_MAX_MESSAGE_IMAGES)
+        batches = optimizer_package_batches(pending, TOAPIS_MAX_MESSAGE_IMAGES, layout)
         request_snapshot["batchRequests"] = []
         cancelled = False
         for batch_index, batch in enumerate(batches, 1):
@@ -5833,12 +5829,12 @@ async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: lis
                 break
             provider_call_started = False
             inputs = optimizer_input(batch)
-            images = optimizer_visual_inputs(batch, inputs)
+            images = optimizer_visual_inputs(batch, inputs, layout)
             if final_preparation_cancelled(task_id, result_set_id) or generation_task_or_attempt_cancelled(task_id, attempt_id):
                 cancelled = True
                 break
             batch_prompt = render_optimizer_user_message(inputs, preparation["configRows"])
-            request_snapshot["batchRequests"].append({"batchIndex": batch_index, "shotIds": list(batch), "prompt": batch_prompt, "images": optimizer_attachments(batch)})
+            request_snapshot["batchRequests"].append({"batchIndex": batch_index, "shotIds": list(batch), "prompt": batch_prompt, "images": optimizer_attachments(batch, layout)})
             request_snapshot["invocation"]["providerCallStarted"] = True
             update_attempt_request_snapshot(attempt_id, request_snapshot)
             provider_call_started = True
@@ -6980,12 +6976,12 @@ def preview_prompt_config_draft(config_key: str, payload: PromptConfigPreviewReq
             if not packages and facts.get("imageInputs"):
                 packages = {str(attempt["owner_id"]): {**facts, "prompt": facts.get("originalPrompt") or facts["prompt"]}}
             try:
-                for index, batch in enumerate(optimizer_package_batches(packages, TOAPIS_MAX_MESSAGE_IMAGES), 1):
-                    inputs = optimizer_mapped_input(batch)
+                for index, batch in enumerate(optimizer_package_batches(packages, TOAPIS_MAX_MESSAGE_IMAGES, POSE_GRID_LAYOUT), 1):
+                    inputs = optimizer_mapped_input(batch, POSE_GRID_LAYOUT)
                     batches.append({"batchIndex": index, "shotIds": list(batch),
                         "systemInstruction": payload.content if key == OPTIMIZER_KEY else prompt_config_content(OPTIMIZER_KEY),
                         "prompt": render_optimizer_user_message(inputs, content=payload.content if key != OPTIMIZER_KEY else None),
-                        "images": optimizer_attachments(batch)})
+                        "images": optimizer_attachments(batch, POSE_GRID_LAYOUT)})
             except (KeyError, TypeError, ValueError) as exc:
                 raise HTTPException(400, "该历史记录缺少可预览的镜头事实") from exc
     rendered, diagnostics = render_prompt_preview(key, runtime, content_overrides={key: payload.content[:120000]})
@@ -7072,7 +7068,7 @@ async def test_prompt_optimization(config_key: str, payload: PromptOptimizationT
                 raise HTTPException(400, "草稿缺少必要占位符")
             package["prompt"] = rendered
     snapshot = {"promptConfigKey": OPTIMIZER_KEY, "systemInstruction": system_prompt,
-                "promptContentHash": text_hash(system_prompt), "sourcePackages": packages,
+                "promptContentHash": text_hash(system_prompt), "sourcePackages": packages, "optimizerReferenceLayout": POSE_GRID_LAYOUT,
                 **gemini_request_meta(), "invocation": {"mode": "optimization_test", "sourceAttemptId": payload.attemptId}}
     attempt_id = create_attempt("generation_result_set", result_set_id, effective_text_provider(), request_snapshot=snapshot)
     raw_text = ""
@@ -7080,11 +7076,11 @@ async def test_prompt_optimization(config_key: str, payload: PromptOptimizationT
     batch_responses: list[dict[str, Any]] = []
     snapshot["batchRequests"] = []
     try:
-        for batch_index, batch in enumerate(optimizer_package_batches(packages, TOAPIS_MAX_MESSAGE_IMAGES), 1):
+        for batch_index, batch in enumerate(optimizer_package_batches(packages, TOAPIS_MAX_MESSAGE_IMAGES, POSE_GRID_LAYOUT), 1):
             inputs = optimizer_input(batch)
-            images = optimizer_visual_inputs(batch, inputs)
+            images = optimizer_visual_inputs(batch, inputs, POSE_GRID_LAYOUT)
             batch_prompt = render_optimizer_user_message(inputs)
-            snapshot["batchRequests"].append({"batchIndex": batch_index, "shotIds": list(batch), "prompt": batch_prompt, "images": optimizer_attachments(batch)})
+            snapshot["batchRequests"].append({"batchIndex": batch_index, "shotIds": list(batch), "prompt": batch_prompt, "images": optimizer_attachments(batch, POSE_GRID_LAYOUT)})
             update_attempt_request_snapshot(attempt_id, snapshot)
             raw_text = await generate_gemini_json_text(batch_prompt, images=images, system_instruction=system_prompt)
             batch_responses.append({"batchIndex": batch_index, "shotIds": list(batch), "raw_text": raw_text})

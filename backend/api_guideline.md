@@ -271,3 +271,5 @@ user 的 generation 系列 JSON 响应不含 poseSelection 参考图、姿势要
 管理员调用详情新增同形 `modelBatches`，额外含 `output`、`hasResponse`，按 batchIndex 关联真实输入输出；未记录响应的批次明确留空。`modelInput` / `modelOutput` 对多批调用返回 batches，不再用首批输入搭配末批输出。`requestFacts` / `responseFacts` 是紧凑过程记录，调用方不能依赖重复的顶层 prompt、raw_text 或 shots。未分批的旧记录继续按原方式读取。新字段仍仅 admin 可访问。
 
 姿势选搭的 Prompt 预览使用与执行一致的章节渲染：`runtime.pose_shots` 只包含对应品类成片 Prompt 中五个镜头各自的「机位&景别」，历史上下文使用当时 runtime 事实并应用当前配置。预览诊断复用 `missingPlaceholders` 返回章节缺失、重复、镜头正文缺失等配置错误；实际选姿势在创建 attempt 和调用模型之前返回 409。选择历史记录不会改写 `historicalPrompt` 或历史快照。
+
+新优化调用/草稿预览的 `modelBatches` 通常仅一项，五镜头共用一张姿势参考板。用户消息 `shots[].references[].index` 为最终生图局部图号，`visionImageIndex` 为优化附件编号，姿势引用增加 `cell`；`imageManifest` 的姿势板含 `referenceBoardKind=optimizer_pose_grid`、3列2行、cells 与 emptyCells。实际生图请求图片列表不变。历史多批记录仍完整返回；只剩部分待处理镜头时单次调用显示实际镜头数。

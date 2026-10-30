@@ -942,15 +942,19 @@ def build_reference_collage_bytes(item: dict[str, Any], deadline: float | None =
         raise RuntimeError("参考图拼接缺少可用来源图片")
 
     fixed_model_grid = (item.get("collageRule") or {}).get("kind") == "model_identity_grid_2x2"
+    pose_grid = (item.get("collageRule") or {}).get("kind") == "optimizer_pose_grid_3x2"
+    cells = (item.get("collageRule") or {}).get("cells", []) if pose_grid else list(range(1, len(images) + 1))
+    if pose_grid and (len(cells) != len(images) or len(set(cells)) != len(cells) or any(type(c) is not int or c not in range(1, 6) for c in cells)):
+        raise RuntimeError("姿势宫格位置必须为不重复的镜头 1 至 5")
     if fixed_model_grid and len(images) > 4:
         raise RuntimeError("模特四宫格最多包含四张来源图")
-    if len(images) == 1 and not fixed_model_grid:
+    if len(images) == 1 and not fixed_model_grid and not pose_grid:
         output = BytesIO()
         images[0].save(output, "JPEG", quality=95, optimize=True)
         stem = os.path.splitext(str(item.get("filename") or "reference-sheet.jpg"))[0] or "reference-sheet"
         return output.getvalue(), f"{stem}.jpg", "image/jpeg"
 
-    columns, rows = (2, 2) if fixed_model_grid else reference_collage_grid(len(images))
+    columns, rows = (3, 2) if pose_grid else (2, 2) if fixed_model_grid else reference_collage_grid(len(images))
     tile_size = REFERENCE_COLLAGE_TILE_SIZE
     try:
         from PIL import Image
@@ -961,14 +965,15 @@ def build_reference_collage_bytes(item: dict[str, Any], deadline: float | None =
     canvas = Image.new("RGB", (columns * tile_size, rows * (tile_size + header)), (255, 255, 255))
     for index, image in enumerate(images[:columns * rows]):
         fitted = contain_on_white(image, tile_size, tile_size)
-        col = index % columns
-        row = index // columns
+        cell_index = cells[index] - 1
+        col = cell_index % columns
+        row = cell_index // columns
         canvas.paste(fitted, (col * tile_size, row * (tile_size + header) + header))
-        if index < len(labels):
-            from PIL import ImageDraw
-            draw = ImageDraw.Draw(canvas)
-            left, top = col * tile_size, row * (tile_size + header)
-            draw.text((left + 8, top + 4), str(labels[index]), fill="black", font_size=24)
+    for index, label in enumerate(labels[:columns * rows]):
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(canvas)
+        left, top = (index % columns) * tile_size, (index // columns) * (tile_size + header)
+        draw.text((left + 8, top + 4), str(label), fill="black", font_size=24)
     output = BytesIO()
     canvas.save(output, "JPEG", quality=95, optimize=True)
     stem = os.path.splitext(str(item.get("filename") or "reference-sheet.jpg"))[0] or "reference-sheet"

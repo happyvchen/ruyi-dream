@@ -20,11 +20,11 @@ function PromptBody({ text }: { text: string }) {
 export function ModelCallBatches({ batches, preview = false }: { batches: ModelCallBatch[]; preview?: boolean }) {
   return <div className="model-call-batches">
     {batches[0]?.systemInstruction && <details>
-      <summary>系统消息 · 每批发送 · {batches[0].systemInstruction.length.toLocaleString()} 字符</summary>
+      <summary>系统消息{batches.length > 1 ? ' · 每批发送' : ''} · {batches[0].systemInstruction.length.toLocaleString()} 字符</summary>
       <pre className="prompt-comparison-text">{batches[0].systemInstruction}</pre>
     </details>}
     {batches.map(batch => <section className="model-call-batch" key={batch.batchIndex}>
-      <h4>第 {batch.batchIndex} 批 · {batch.shotIds.length} 个镜头</h4>
+      <h4>{batches.length === 1 ? '单次调用' : `第 ${batch.batchIndex} 批`} · {batch.shotIds.length} 个镜头</h4>
       <p className="edit-hint">用户消息 {batch.prompt.length.toLocaleString()} 字符{batch.images?.length ? ` · ${batch.images.length} 张参考图` : ''}</p>
       <h4>{preview ? '渲染后的用户消息' : '实际模型输入 · 用户消息'}</h4>
       <PromptBody text={batch.prompt} />
@@ -32,7 +32,7 @@ export function ModelCallBatches({ batches, preview = false }: { batches: ModelC
         <pre className="prompt-comparison-text">{JSON.stringify(batch.images, null, 2)}</pre>
       </details>}
       {!preview && <details open={batches.length === 1}>
-        <summary>实际模型输出 · 第 {batch.batchIndex} 批</summary>
+        <summary>实际模型输出{batches.length > 1 ? ` · 第 ${batch.batchIndex} 批` : ''}</summary>
         {batch.hasResponse ? <pre className="prompt-comparison-text">{batch.output}</pre> : <p className="edit-hint">本批未记录到模型响应。</p>}
       </details>}
     </section>)}

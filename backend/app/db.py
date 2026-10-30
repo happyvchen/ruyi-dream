@@ -55,6 +55,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("088", "reconstructable_pose_tags", "migration_reconstructable_pose_tags"),
     ("089", "transparent_prompt_calls", "migration_transparent_prompt_calls"),
     ("090", "pose_shot_sections", "migration_pose_shot_sections"),
+    ("091", "optimizer_pose_grid", "migration_optimizer_pose_grid"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -506,6 +507,7 @@ def run_migrations(db: sqlite3.Connection) -> None:
     migration_functions = {
         "migration_transparent_prompt_calls": migration_transparent_prompt_calls,
         "migration_pose_shot_sections": migration_pose_shot_sections,
+        "migration_optimizer_pose_grid": migration_optimizer_pose_grid,
         "migration_pose_frame_layout_prompts": migration_pose_frame_layout_prompts,
         "migration_objective_pose_tags": migration_objective_pose_tags,
         "migration_reconstructable_pose_tags": migration_reconstructable_pose_tags,
@@ -2149,3 +2151,18 @@ def migration_pose_shot_sections(db: sqlite3.Connection) -> None:
         content = content.replace("逐镜头重点参考成片要求中的“机位&景别”", "逐镜头依据输入的“机位&景别”")
         if content != original:
             db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = 'assembly.pose_selection'", (content, now_iso()))
+
+
+def migration_optimizer_pose_grid(db: sqlite3.Connection) -> None:
+    """Add the explicit transport instructions to editable rules, not history."""
+    from .prompt_render import extract_prompt_section
+    if not table_exists(db, "prompt_configs"):
+        return
+    title = "优化阶段的姿势宫格与最终图号"
+    row = db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.final_prompt_optimizer'").fetchone()
+    if not row or not str(row["content"] or "").strip() or f"## {title}" in row["content"]:
+        return
+    template = (Path(__file__).resolve().parents[1] / "prompt_templates" / "final_prompt_optimizer.txt").read_text(encoding="utf-8")
+    section = extract_prompt_section(template, title)
+    content = str(row["content"]) + f"\n\n## {title}\n" + section + "\n"
+    db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = 'assembly.final_prompt_optimizer'", (content, now_iso()))

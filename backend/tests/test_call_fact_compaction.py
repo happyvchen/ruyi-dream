@@ -96,17 +96,18 @@ def test_optimizer_preview_matches_actual_batches_without_image_reads(client, mo
     preview = client.post("/api/prompt-configs/assembly.final_prompt_optimizer/preview", json={"content": "整理规则 v1", "attemptId": attempt})
     assert preview.status_code == 200, preview.text
     batches = preview.json()["modelBatches"]
-    assert len(batches) == len(calls) == 2
+    assert len(batches) == len(calls) == 1
     for batch, (inputs, kwargs) in zip(batches, calls):
         assert loads(batch["prompt"]) == inputs
         assert batch["systemInstruction"] == kwargs["system_instruction"]
         assert len(batch["images"]) == len(kwargs["images"])
-        assert all(set(item) == {"visionImageIndex", "role"} for item in inputs["imageManifest"])
+        assert all(set(item) == {"visionImageIndex", "role"} for item in inputs["imageManifest"] if not item.get("referenceBoardKind"))
+        assert inputs["imageManifest"][1]["referenceBoardKind"] == "optimizer_pose_grid"
         assert "objectKey" not in batch["prompt"]
     with get_db() as db:
         row = db.execute("SELECT * FROM generation_attempts WHERE id=?", (attempt,)).fetchone()
     detail = main.serialize_attempt_detail(row)
-    assert len(detail["modelBatches"]) == 2
+    assert len(detail["modelBatches"]) == 1
     assert "prompt" not in loads(row["request_snapshot_json"])
     assert "raw_text" not in loads(row["response_snapshot_json"])
     # Slimmed old optimizer history is still a valid explicit test context.

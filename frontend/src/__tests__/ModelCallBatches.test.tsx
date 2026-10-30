@@ -24,4 +24,6 @@ it('preview never presents a generated response', () => {
   render(<ModelCallBatches preview batches={[{ batchIndex: 1, shotIds: ['1'], prompt: '维护者自定义消息' }]} />)
   expect(screen.getByText('渲染后的用户消息')).toBeInTheDocument()
   expect(screen.queryByText(/实际模型输出/)).not.toBeInTheDocument()
+  expect(screen.getByText('单次调用 · 1 个镜头')).toBeInTheDocument()
+  expect(screen.queryByText(/第 1 批/)).not.toBeInTheDocument()
 })
